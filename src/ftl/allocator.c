@@ -848,13 +848,6 @@ bool alc_closed_drop_plane(alc_t *alloc, BYTE plane, WORD block)
 
 /* ── 5. 只读统计 ── */
 
-/* 参与磨损统计的块：非 BAD 且已归属（state != NONE）。
- * NONE 的 erase_count 不随擦除累加，计入会把 erase_min 永久钉在 0。 */
-static bool alc_block_is_wear_counted(const bst_block_t *b)
-{
-    return !ftl_block_is_bad(b) && (ftl_block_state(b) != FTL_BLOCK_STATE_NONE);
-}
-
 /* 实现要点：跳过哨兵与 BAD plane；valid_count 单位是 CW。 */
 void alc_get_sb_stats(const alc_t *alloc, const super_block_t *sb, alc_sb_stats_t *out)
 {
@@ -914,7 +907,9 @@ void alc_get_erase_stats(const alc_t *alloc, alc_erase_stats_t *out)
     {
         const bst_block_t *blk = &alloc->blocks[i];
 
-        if (!alc_block_is_wear_counted(blk))
+        /* 跳过 BAD 与 NONE：NONE 的 erase_count 不随擦除累加，计入会把 erase_min
+         * 永久钉在 0。 */
+        if (ftl_block_is_bad(blk) || (ftl_block_state(blk) == FTL_BLOCK_STATE_NONE))
         {
             continue;
         }
@@ -943,8 +938,7 @@ void alc_get_erase_stats(const alc_t *alloc, alc_erase_stats_t *out)
 
 void alc_block_wear_get(const alc_t *alloc, WORD gblock, bst_wear_t *out)
 {
-    ASSERT(out != NULL);
-
+    /* out 由唯一调用者 checkpoint.c 传本地快照地址；模块内部不重复守卫。 */
     const bst_block_t *blk = &alloc->blocks[gblock];
 
     out->erase_count = blk->erase_count;
@@ -970,8 +964,7 @@ WORD alc_get_spare_at(const alc_t *alloc, BYTE plane, WORD index)
 
 void alc_block_restore_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 {
-    ASSERT(wear != NULL);
-
+    /* wear 由唯一调用者 checkpoint.c 传本地快照地址；模块内部不重复守卫。 */
     bst_block_t *blk = &alloc->blocks[gblock];
 
     blk->erase_count = wear->erase_count;

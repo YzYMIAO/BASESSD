@@ -47,8 +47,7 @@
 
 #include "assertion.h"
 #include "bbt.h"
-#include "cache_read.h"
-#include "cache_write.h"
+#include "cache_batch.h"
 #include "checkpoint.h"
 #include "completion_table.h"
 #include "fc.h"

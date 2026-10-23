@@ -6112,13 +6112,15 @@ H2testw 415/423 MB **840/885 KB/s、0 错误**（基线 843/889）；`info avg=4
 - `alc_is_bbt_format_in_progress/rebuild_required` 移到 `allocator.h` `static inline`。
 - cache 可读性：`ftl_cache_write_try` 条件拆具名 bool；`cache_read.c` 拆
   probe/complete/contiguous/build/release/submit helper，内部用 `cache_read_req_t`；
-  `cache_wb_build` 拆 alloc/cmd/pending 三步。
+  `cache_wb_build` 拆 alloc/cmd/pending 三步。读/写合并为 `cache_batch.c/.h`
+  （各自保留独立小节），删除 `cache_read.*` / `cache_write.*`；随后按“单调用纯转发”收敛，
+  cache 内部函数由 16 个降为 8 个（read 5 + write 3）。
 - 后台调度：删除 `bg_wiring.c` 重复的 `ftl_now_ms`，改用 `ftl_job_now_ms`；
   `bg_scheduler_run` 拆 must-run / budget 两 pass。
 
 **验证**：`make all` / `make release` / `make tests UT=FC` 通过，零新告警；
 `make tests UT=FTL` 仍因冻结测试源不可用（未改测试、未回退生产代码）。
-ITCM：release **61,304 B**、debug **62,592 B**；`.dtcm_data` 67,832 B、
+ITCM：release **61,352 B**、debug **62,080 B**；`.dtcm_data` 67,832 B、
 `.sram4_data` 33,760 B 不变。**未上板**；需 `format` + H2testw 回归。
 
 **介质布局**：无变化。

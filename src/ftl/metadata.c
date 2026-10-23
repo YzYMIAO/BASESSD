@@ -156,7 +156,7 @@ DWORD md_ring_addr_plane(const md_ring_t  *ring,
 
 /* 物理块在 plane_mask 的所有 plane 上都非 BAD。
  * 镜象/多 plane 擦写要求**同一物理块号**在每个 plane 上都可用，否则
- * mirror_write_prepare / multi-plane erase 会写到坏 plane 的同号块。 */
+ * ftl_async_write_page_mirror / multi-plane erase 会写到坏 plane 的同号块。 */
 static bool md_block_good_on_mask(const alc_t *alloc, WORD block, BYTE plane_mask)
 {
     const BYTE n = md_ring_plane_count(plane_mask);

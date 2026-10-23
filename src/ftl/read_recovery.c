@@ -363,16 +363,6 @@ static void rr_abort(rr_handle_t *rr)
     rr->stage  = RR_STAGE_FINISH;
 }
 
-/* 提交结果处理：FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；
- * FTL_AGAIN = 背压 ⇒ stage 不变，下轮 rr_handle 重试。 */
-static void rr_submit_result(rr_handle_t *rr, ftl_status_e st)
-{
-    if (st == FTL_ERROR)
-    {
-        rr_abort(rr);
-    }
-}
-
 /* --------------------------------------------------------------------
  * rr_step
  *   功能：推进状态机——跑纯计算 stage 直到提交出一条命令、或整个 job 收尾。
@@ -469,7 +459,12 @@ static void rr_step(rr_handle_t *rr)
                 const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(rr->page_lba);
                 const ftl_status_e    st  = rr_submit_read(rr, rr->page, cfg);
 
-                rr_submit_result(rr, st);
+                /* FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；FTL_AGAIN = 背压 ⇒
+                 * stage 不变，下轮 rr_handle 重试。 */
+                if (st == FTL_ERROR)
+                {
+                    rr_abort(rr);
+                }
                 return;
             }
 

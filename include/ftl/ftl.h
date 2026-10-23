@@ -15,7 +15,7 @@
 
 #include "allocator.h"    /* ftl_table_refs_t, super_block_t */
 #include "bg_scheduler.h" /* 时间预算后台调度器（ftl_ctx_t 含调度器） */
-#include "cache_write.h"  /* cache_wb_t（host cache program 批次） */
+#include "cache_batch.h"  /* cache_wb_t（host cache program 批次） */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_req_t */
 #include "gc.h"

@@ -678,16 +678,16 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
 /* ── 元数据镜像写：multi-plane 同页同数据 ── */
 
 /* 短页（< PAGE_MAIN_SIZE，如 BBT header 540 B）的补齐缓冲。单线程 superloop；
- * 数据在 mirror_write_prepare 返回前已拷进 FC buffer，调用者无需持有。 */
+ * 数据在 ftl_async_write_page_mirror 返回前已拷进 FC buffer，调用者无需持有。 */
 static BYTE s_mirror_page[PAGE_MAIN_SIZE];
 
 /*
- * mirror_write_prepare - 建一条 multi-plane program 命令：同一页数据写两个 plane。
+ * ftl_async_write_page_mirror - 建一条 multi-plane program 命令：同一页数据写两个 plane。
  *
  * 数据填装用 ftl_cmd_write_data_cw：链上两个 plane 的 desc 的 config.cw 都是 0..3，
  * 同一页镜像会按 CW 分别填进两个 plane（无需 2× 源缓冲）。
  */
-static ftl_status_e mirror_write_prepare(fc_command_t        **out_cmd,
+ftl_status_e ftl_async_write_page_mirror(fc_command_t        **out_cmd,
                                          DWORD                 pba,
                                          const void           *data,
                                          DWORD                 length,
@@ -740,20 +740,6 @@ static ftl_status_e mirror_write_prepare(fc_command_t        **out_cmd,
 }
 
 /* --------------------------------------------------------------------
- * ftl_async_write_page_mirror
- *   功能：把同一页数据用 multi-plane program 同时写入 PLANE_NUM 个 plane 的同 block/page。
- *   返回：FTL_OK / FTL_AGAIN（命令/desc/buffer 池空）/ FTL_ERROR。
- * -------------------------------------------------------------------- */
-ftl_status_e ftl_async_write_page_mirror(fc_command_t        **out_cmd,
-                                         DWORD                 pba,
-                                         const void           *data,
-                                         DWORD                 length,
-                                         const ftl_page_cfg_t *cfg)
-{
-    return mirror_write_prepare(out_cmd, pba, data, length, cfg);
-}
-
-/* --------------------------------------------------------------------
  * ftl_sync_write_page_mirror
  *   功能：镜像写的同步版（建链 + 提交等待 + 判错）。
  * -------------------------------------------------------------------- */
@@ -761,7 +747,7 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
 {
     fc_command_t *cmd;
 
-    if (mirror_write_prepare(&cmd, pba, data, length, cfg) != FTL_OK)
+    if (ftl_async_write_page_mirror(&cmd, pba, data, length, cfg) != FTL_OK)
     {
         return FTL_ERROR; /* 同步版把背压与硬失败都压成 FTL_ERROR */
     }

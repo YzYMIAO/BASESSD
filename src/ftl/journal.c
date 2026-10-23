@@ -362,13 +362,6 @@ static void jrn_write_header(l2p_jrn_t *journal)
     memcpy(journal->handle.page_buf + 10, &hdr_block_seq, sizeof(hdr_block_seq));
 }
 
-/* jrn_clear_page — 复位页缓冲为擦除态并清条目计数（准备下一页）。 */
-static void jrn_clear_page(l2p_jrn_t *journal)
-{
-    journal->handle.current_entry = 0U;
-    memset(journal->handle.page_buf, 0xFF, sizeof(journal->handle.page_buf));
-}
-
 /* --------------------------------------------------------------------
  * jrn_freeze
  *   功能：冻结当前页——起一条**异步**页写，并算出写成功后的写指针落点。
@@ -450,7 +443,8 @@ static bool jrn_freeze(l2p_jrn_t *journal)
 
     /* 换块与逐页 flush 都不打 INFO：JRN 是高频元数据维护，序号看 info 的 jrn=；
      * 只有真正错误（写失败/擦失败/环满）才输出。 */
-    jrn_clear_page(journal);
+    journal->handle.current_entry = 0U;
+    memset(journal->handle.page_buf, 0xFF, sizeof(journal->handle.page_buf));
     return true;
 }
 

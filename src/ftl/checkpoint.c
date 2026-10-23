@@ -890,16 +890,6 @@ static bool cp_complete_page_write(cp_handle_t *h, cp_handle_t *j, bool failed)
     return true;
 }
 
-/* Anchor record 一页写完：无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
-static void cp_complete_anchor_write(cp_handle_t *j, bool failed)
-{
-    if (failed)
-    {
-        j->anchor_ok = 0U;
-    }
-    j->anchor_chunk = (j->anchor_chunk + 1U);
-}
-
 /* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。 */
 static void cp_complete_hdr_write(cp_handle_t *h, cp_handle_t *j, bool failed)
@@ -996,7 +986,12 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
             return;
 
         case CP_ANCHOR_WRITE:
-            cp_complete_anchor_write(j, failed);
+            /* 无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
+            if (failed)
+            {
+                j->anchor_ok = 0U;
+            }
+            j->anchor_chunk = (j->anchor_chunk + 1U);
             return;
 
         case CP_HDR_ERASE:
