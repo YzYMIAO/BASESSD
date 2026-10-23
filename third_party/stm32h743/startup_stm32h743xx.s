@@ -81,6 +81,27 @@ LoopCopyDataInit:
   adds r4, r0, r3
   cmp r4, r1
   bcc CopyDataInit
+
+/* Copy explicitly marked high-speed code from FLASH to ITCM. */
+  ldr r0, =__ssd_code_high_start
+  ldr r1, =__ssd_code_high_end
+  ldr r2, =__ssd_code_high_load_start
+  movs r3, #0
+  b LoopCopyHighCode
+
+CopyHighCode:
+  ldr r4, [r2, r3]
+  str r4, [r0, r3]
+  adds r3, r3, #4
+
+LoopCopyHighCode:
+  adds r4, r0, r3
+  cmp r4, r1
+  bcc CopyHighCode
+
+  dsb sy
+  isb sy
+
 /* Zero fill the bss segment. */
   ldr r2, =_sbss
   ldr r4, =_ebss

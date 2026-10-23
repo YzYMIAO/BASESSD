@@ -180,22 +180,33 @@ static void boot_report_console(void)
  *
  * 表所有权：BST / free / op / spare / closed 五个大数组由**本文件各自独立定义**，
  *   并决定落哪个域；FTL 只收 `ftl_table_refs_t`（五个指针，见 ftl/allocator.h）。
- *   每张表一个对象 ⇒ 可以单独换内存域；内存预算由下面的 _Static_assert 单点核对。
+ *   每张表一个对象 ⇒ 可以单独换内存域。下面的 _Static_assert 只核对本文件可见的
+ *   FTL 对象；FC 命令池等跨文件 DTCM 对象的完整容量由 linker 的 `.dtcm_data` ASSERT 核对。
  *
  * SRAM 布局（阶段 C：描述符 + 内存域散列）：
- *   AXI_RAM（.bss）：g_ftl 描述符 + g_ftl_migrate / g_ftl_wbuf / g_ftl_rr_page_scratch
- *                    （Phase 1.5 挂载块）+ g_l2p_cache（共享热 cache）
- *                    + CLI 写缓冲 + 其它 .bss
+ *   DTCM（.dtcm_data）：g_ftl 描述符 + g_ftl_wbuf + g_ftl_journal
+ *                       + FC 命令池 + NAND dispatch 队列 + BCH 静态表
+ *                       （CPU-only 热数据；DMA 不可访问，故 FC buffer/
+ *                       NAND page buffer 不进来）
+ *   AXI_RAM（.bss）：g_ftl_migrate / g_ftl_rr_page_scratch（Phase 1.5 挂载块）
+ *                    + g_l2p_cache（共享热 cache）+ CLI 写缓冲 + 其它 .bss
+ *   AXI_NOCACHE（.noncacheable_buffer）：FC buffer pool / return staging /
+ *                    NAND 页缓冲（页缓冲放 DTCM 会破坏 multi-plane program，
+ *                    板端已实测）
  *   SRAM1+SRAM2（.sram12_data）：g_ftl_blocks / g_ftl_free_blocks / g_ftl_op_blocks /
  *                                g_ftl_spare_blocks / g_ftl_closed_sb_list（各自独立对象）
- *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[] + g_ftl_journal[]
- *   SRAM4（.sram4_data）：g_ftl_md[]（Metadata Directory）
+ *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[]
+ *   SRAM4（.sram4_data）：g_ftl_md 33,752 B（与 BCH 交换；TCM 之前本就在此域）
  *
- * 四个 `.sram*_data` 数组是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
- * Phase 1.5 的三个挂载块在 AXI .bss（启动清零），ftl_init 仍显式 memset（统一语义）。
- * N=2：AXI ~197KB / SRAM12 247,792B / SRAM3 21,256B / SRAM4 49,320B，均装得下。
+ * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
+ * Phase 1.5 的挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
+ * DIM=1：`.dtcm_data` 67,832B / ITCM 61,384B（release）、61,992B（debug）；
+ * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
+ * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
+ * 完整容量由 linker ASSERT 核对。栈预留按历史实测 5,448B + 余量取 20KB。
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_ctx_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（.bss） */
+/* DTCM 热数据定义在 ftl.c；链接脚本按整个目标文件放 .dtcm_data。 */
+extern ftl_ctx_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];
 
 /* 共享 L2P cache：同一 (ch,ce) 下所有 LUN 共用一份（阶段 B）。
  * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
@@ -210,13 +221,13 @@ static WORD           g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP]
 static WORD           g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
 static super_block_t  g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 static cp_handle_t    g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
-static l2p_jrn_t      g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
-static md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
+extern l2p_jrn_t      g_ftl_journal[FTL_DIM_TOTAL];
+extern md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
 
-/* Phase 1.5：三块大状态挂 storage 指针，仍落 AXI_RAM（默认 .bss）。
+/* Phase 1.5：三块大状态挂 storage 指针；wbuf 落 DTCM，migrate/rr 留 AXI。
  * 挂指针**不减少总 RAM**，只让 ftl_ctx_t 变小、放置可控、handle 形态统一。 */
 static mig_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
-static wb_handle_t  g_ftl_wbuf[FTL_DIM_TOTAL];
+extern wb_handle_t  g_ftl_wbuf[FTL_DIM_TOTAL];
 static BYTE         g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
 
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
@@ -226,26 +237,34 @@ static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl
 /* ── 编译期内存预算（各域）──
  * AXI_RAM 是硬上限（linker: __AXI_RAM_SIZE = 0x60000 = 384KB）；
  * D2/D3 SRAM 的容量与 linker 的 SRAM12/SRAM3/SRAM4 区域一一对应。 */
-#define BOARD_AXI_RAM_SIZE   (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
-#define BOARD_SRAM12_SIZE    (256U * 1024U) /* SRAM1+SRAM2 合并区域 */
-#define BOARD_SRAM3_SIZE     (32U * 1024U)
-#define BOARD_SRAM4_SIZE     (64U * 1024U)
-#define FTL_AXI_RAM_RESERVED (20U * 1024U) /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
+#define BOARD_AXI_RAM_SIZE       (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
+#define BOARD_SRAM12_SIZE        (256U * 1024U) /* SRAM1+SRAM2 合并区域 */
+#define BOARD_SRAM3_SIZE         (32U * 1024U)
+#define BOARD_SRAM4_SIZE         (64U * 1024U)
+#define BOARD_DTCM_SIZE          (128U * 1024U)
+#define BOARD_DTCM_STACK_RESERVE (20U * 1024U) /* 历史实测 5,448 B（v0.75）；当前版本待复测 */
+#define FTL_AXI_RAM_RESERVED     (20U * 1024U) /* 非 FTL 自有对象的保守 AXI .bss 预留 */
 
 /* g_wr_buf 从 .sram2_data 迁入 AXI .bss（SRAM12 留给 tables），显式计入预算。 */
 #define CLI_AXI_RAM_RESERVED (16U * 1024U)
 
-_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_migrate) + sizeof(g_ftl_wbuf) +
-                       sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) +
+_Static_assert(sizeof(g_ftl_migrate) + sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) +
                        FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <=
                    BOARD_AXI_RAM_SIZE,
-               "FTL 描述符/挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
+               "FTL 挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
+/* FTL 自有 DTCM 对象；fc.o / fc_bch_engine.o / nand_dispatch.o 的 DTCM 对象在
+ * 其它 TU，其总量不在此断言内，由 linker 的
+ * `.dtcm_data + .noinit + 20KB <= DTCM` 兜底。 */
+_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_wbuf) + sizeof(g_ftl_journal) +
+                       BOARD_DTCM_STACK_RESERVE <=
+                   BOARD_DTCM_SIZE,
+               "DTCM 热数据 + stack/heap 预留超出 DTCM");
+_Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
 _Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) +
                        sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <=
                    BOARD_SRAM12_SIZE,
                "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
-_Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "cp_handle/journal 超出 SRAM3");
-_Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
+_Static_assert(sizeof(g_ftl_checkpoint_handle) <= BOARD_SRAM3_SIZE, "cp_handle 超出 SRAM3");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
@@ -578,6 +597,7 @@ static void ssd_ftl_boot_all(void)
      *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
      *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
      *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
+    ftl_global_init();
     ct_init();
     for (ch = 0U; ch < CH_NUM; ch++)
     {

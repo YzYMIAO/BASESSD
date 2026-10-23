@@ -141,6 +141,10 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
  * 判「介质是否被写过」，抽样而非全扫以控制开机路径成本。 */
 #define BBT_USER_SAMPLE_COUNT (8U)
 
+/* 判空/抽样用的整页 raw 缓冲：单线程串行调用，放文件级 static（AXI .bss），
+ * 避免 boot/CLI 路径的 2KB 栈帧。 */
+static BYTE s_probe_raw[PAGE_SIZE];
+
 /* 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；
  * bbt_scan_factory 需要它在前面，故先声明。 */
 static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase);
@@ -193,7 +197,7 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
      * 全扫 4096 块 × 一次 NAND 读在开机路径上不可接受。残留风险：用户数据恰好
      * 全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质已丢失元数据，属于灾后场景。 */
     {
-        BYTE       raw[PAGE_SIZE];
+        BYTE      *raw   = s_probe_raw;
         const WORD start = FTL_METADATA_AREA_END;
 
         if (start < BLOCKS_PER_PLANE)

@@ -136,6 +136,10 @@ typedef struct
     WORD      block_words[FTL_BLOCK_TOTAL];             /* 8KB：CP 起点快照 + boot 加载缓冲 */
     DWORD     wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES]; /* 每页磨损快照的 CRC32（写进 Header）*/
     BYTE      wear_page_buf[PAGE_MAIN_SIZE];            /* 组一页磨损快照（2KB）*/
+    /* Header 页（2KB）常驻 handle：CP_HDR_WRITE 每次都会组一页；放栈上会让
+     * 运行期 Checkpoint 路径多背 2 KB 栈帧（DTCM 与栈共用）。类型与 cp_header_t
+     * 对齐，使用处强转。 */
+    DWORD hdr_buf[PAGE_MAIN_SIZE / sizeof(DWORD)];
 
     /* ④ Journal 截断 */
     DWORD trunc_addr; /* 待预擦块基地址（plan 回传） */

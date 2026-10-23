@@ -17,7 +17,6 @@
  */
 
 #include "assertion.h"
-#include "log.h"
 #include "nand_config.h"
 #include "nand_dispatch_internal.h"
 

@@ -96,10 +96,12 @@ $(TARGET).size: $(TARGET).elf
 	$(Q)$(SIZE) -A $< | awk 'NR <= 2 { print; next } NF == 3 { printf "%-24s %10d 0x%08x\n", $$1, $$2, $$3; next } { print }' > $@
 	@$(ECHO) "Size summary:"
 	@cat $@
+# 用段表而不是符号表：release ELF 是 stripped 的（`nm` 无符号），
+# 按符号求和会得到全 0。段表的 size/addr 在两种构建里都可用。
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 	@$(ECHO) ""
 	@$(ECHO) "SRAM usage:"
-	$(Q)$(NM) --print-size -n $< | awk 'function hex(s){return strtonum("0x" s)} BEGIN{r[1]="AXI_RAM";a[1]=hex("24000000");c[1]=384;r[2]="AXI_NOCACHE";a[2]=hex("24060000");c[2]=128;r[3]="DTCM";a[3]=hex("20000000");c[3]=128;r[4]="SRAM12";a[4]=hex("30000000");c[4]=256;r[5]="SRAM3";a[5]=hex("30040000");c[5]=32;r[6]="SRAM4";a[6]=hex("38000000");c[6]=64;n=6} NF>=4 && $$1 ~ /^[0-9a-f]+$$/ && $$2 ~ /^[0-9a-f]+$$/{sz=hex($$2);addr=hex($$1);for(i=1;i<=n;i++) if(addr>=a[i] && addr<a[i]+c[i]*1024) u[i]+=sz} END{printf "=== SRAM Usage (stm32h743) ===\n";printf "%-16s %8s %10s %7s\n","Region","Capacity","Used","%";for(i=1;i<=n;i++){printf "%-16s %6d KB %8.1f KB %6.1f%%\n",r[i],c[i],u[i]/1024,u[i]/c[i]/1024*100}totc=0;totu=0;for(i=1;i<=n;i++){totc+=c[i];totu+=u[i]}printf "%-16s %6d KB %8.1f KB %6.1f%%\n","Total",totc,totu/1024,totu/totc/1024*100}' | tee -a $@
+	$(Q)$(SIZE) -A $< | awk 'BEGIN{r[0]="ITCM";a[0]=0;c[0]=64;r[1]="AXI_RAM";a[1]=strtonum("0x24000000");c[1]=384;r[2]="AXI_NOCACHE";a[2]=strtonum("0x24060000");c[2]=128;r[3]="DTCM";a[3]=strtonum("0x20000000");c[3]=128;r[4]="SRAM12";a[4]=strtonum("0x30000000");c[4]=256;r[5]="SRAM3";a[5]=strtonum("0x30040000");c[5]=32;r[6]="SRAM4";a[6]=strtonum("0x38000000");c[6]=64;n=6} $$1 !~ /^\.(debug|comment|ARM|stab|symtab|strtab)/ && NF==3 {sz=$$2+0;addr=$$3+0;for(i=0;i<=n;i++) if(addr>=a[i] && addr<a[i]+c[i]*1024) u[i]+=sz} END{printf "=== SRAM Usage (stm32h743) ===\n";printf "%-16s %8s %10s %7s\n","Region","Capacity","Used","%";for(i=0;i<=n;i++){printf "%-16s %6d KB %8.1f KB %6.1f%%\n",r[i],c[i],u[i]/1024,u[i]/c[i]/1024*100}totc=0;totu=0;for(i=0;i<=n;i++){totc+=c[i];totu+=u[i]}printf "%-16s %6d KB %8.1f KB %6.1f%%\n","Total",totc,totu/1024,totu/totc/1024*100}' | tee -a $@
 endif
 
 # 4.6 生成反汇编列表（.lst）

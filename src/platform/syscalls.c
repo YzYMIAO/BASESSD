@@ -51,8 +51,9 @@ static DWORD syscalls_current_msp(void)
  * 为什么需要：本函数返回后，调用方（malloc 内部）以及后续业务代码还会继续用栈。
  * 只判「不越过 MSP」是不够的——放行的那一刻可能已经贴着栈顶了。留 1 KB 让本
  * 函数自身的帧 + _sbrk_r/malloc 的帧 + 少量余量都有落脚点。
- * 为什么不更大：DTCM 只有 128 KB，堆与栈共享；测试期栈峰值约 55 KB，余量给太大
- * 会把可用堆压到影响正常分配。1 KB 与 _Min_Stack_Size 量级一致。
+ * 为什么不更大：DTCM 只有 128 KB，堆与栈共享；历史实测栈峰值约 5.4 KB（v0.75，
+ * `ftl_v075_board_verify.md`），不是归档文档里写的 55 KB。1 KB 余量与
+ * _Min_Stack_Size 量级一致；堆/栈各自的真实用量用 CLI `stack` 观测。
  *
  * 本文件跨 target 共享，但余量取决于该 target 的 DTCM/堆栈布局 —— 允许目标用
  * -DSBRK_STACK_GUARD=... 覆盖；今天的 stm32h743 取默认值，行为零变化。 */
@@ -72,27 +73,38 @@ static DWORD syscalls_current_msp(void)
  *     - 失败时**不**修改 heap_end，保证后续调用看到一致的堆顶。
  *     - 用 ptrdiff_t 而非 int：与 newlib _sbrk_r 的实参类型一致（ARM 上同为 32 位）。
  * -------------------------------------------------------------------- */
+static char *s_heap_end;
+
+extern char end; /* 链接脚本 PROVIDE(end = .) —— 堆起点 */
+
 void *_sbrk(ptrdiff_t incr)
 {
-    extern char end; /* 链接脚本 PROVIDE(end = .) —— 堆起点 */
+    char *prev_heap_end;
+    char *limit;
 
-    static char *heap_end;
-    char        *prev_heap_end;
-    char        *limit;
-
-    if (heap_end == NULL)
+    if (s_heap_end == NULL)
     {
-        heap_end = &end;
+        s_heap_end = &end;
     }
 
-    prev_heap_end = heap_end;
+    prev_heap_end = s_heap_end;
     limit         = (char *)syscalls_current_msp() - SBRK_STACK_GUARD;
 
-    if ((heap_end + incr > limit) || (heap_end + incr < &end))
+    if ((s_heap_end + incr > limit) || (s_heap_end + incr < &end))
     {
         return (void *)-1;
     }
 
-    heap_end += incr;
+    s_heap_end += incr;
     return (void *)prev_heap_end;
+}
+
+/* 已用堆字节数（堆顶 − end）。供 `stack` 诊断：堆与栈共用 DTCM，必须分开看。 */
+DWORD syscalls_heap_used(void)
+{
+    if (s_heap_end == NULL)
+    {
+        return 0U;
+    }
+    return (DWORD)(s_heap_end - &end);
 }

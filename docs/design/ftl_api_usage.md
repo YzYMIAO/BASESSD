@@ -437,17 +437,18 @@ nand_init();                            // ② NAND 初始化
 nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit / submit_chain）
 
 /* 每 (ch,ce,lun) 一个 FTL 描述符（多维声明，宏改动即扩展）
- * 阶段 C：四个大数组按 FTL_DIM_TOTAL 声明并按域放置（NOLOAD），
- * 由 ftl_storage_t 绑定；描述符本身在 AXI .bss。 */
-static ftl_context_t         g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+ * 阶段 C：g_ftl / g_ftl_wbuf / g_ftl_journal 定义在 ftl.c（DTCM），
+ * g_ftl_md 定义在 metadata.c（SRAM4）；五张表落 SRAM12、cp_handle 落 SRAM3。
+ * 由 ftl_storage_t 绑定。 */
+extern ftl_ctx_t             g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* DTCM */
 static ftl_block_t   g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
 static WORD          g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
 static WORD          g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
 static WORD          g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
 static super_block_t g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 static checkpoint_handle_t              g_ftl_checkpoint_handle[FTL_DIM_TOTAL]  SRAM3_DATA;
-static l2p_journal_t         g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
-static metadata_dir_cache_t  g_ftl_md[FTL_DIM_TOTAL]      SRAM4_DATA;
+extern l2p_jrn_t             g_ftl_journal[FTL_DIM_TOTAL];   /* DTCM */
+extern md_dir_cache_t        g_ftl_md[FTL_DIM_TOTAL];        /* SRAM4 */
 static ssd_controller_t      g_ctrl;
 
 /* ④ FTL 初始化（阶段 C：拓扑 + 共享 cache + storage）

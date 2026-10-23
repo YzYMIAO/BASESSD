@@ -54,6 +54,10 @@
 
 #include <string.h>
 
+/* 块扫描用的整页 raw 缓冲：boot/format 单线程串行，放文件级 static（AXI .bss），
+ * 避免多个 2KB 局部数组在恢复调用链上叠加。 */
+static BYTE s_scan_raw[PAGE_SIZE];
+
 /* 块元数据快照恢复的前置声明（定义在文件末尾；journal replay 以端口注入）。 */
 static bool recovery_materialize_pba(void *ctx, DWORD pba);
 static void recovery_valid_add(void *ctx, DWORD pba, bool *ok);
@@ -178,12 +182,13 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
 
     for (BYTE chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        md_anchor_page_t page;
-        const DWORD      anchor_page = pba_to_page(base) + chunk;
-        const DWORD      addr        = pba_with_page(base, anchor_page);
+        /* 2KB Anchor 页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。 */
+        md_anchor_page_t *page        = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
+        const DWORD       anchor_page = pba_to_page(base) + chunk;
+        const DWORD       addr        = pba_with_page(base, anchor_page);
 
-        md_anchor_page(dir, seq, chunk, &page);
-        if (ftl_sync_write_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != FTL_OK)
+        md_anchor_page(dir, seq, chunk, page);
+        if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != FTL_OK)
         {
             ok = false;
             break;
@@ -194,11 +199,11 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
      * 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。 */
     if (ok)
     {
-        md_anchor_page_t probe;
+        md_anchor_page_t *probe = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
 
-        if ((ftl_sync_read_page(base, &probe, sizeof(probe), FTL_PAGE_CFG_META()) != FTL_OK) ||
-            (probe.magic != ANCHOR_MAGIC) || (probe.sequence != seq) ||
-            (probe.layout_version != FTL_MEDIA_LAYOUT_VERSION))
+        if ((ftl_sync_read_page(base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) ||
+            (probe->magic != ANCHOR_MAGIC) || (probe->sequence != seq) ||
+            (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
             LOGE(LOG_TAG_META "format: Anchor readback failed — fixed metadata block may be BAD\r\n");
             ok = false;
@@ -474,12 +479,12 @@ ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify)
      * 写点落错，Header 仍可能“写成功、读失败”。当场读回，避免 format 打印 done、
      * 下次开机却拒绝启动。 */
     {
-        cp_header_t probe;
-        WORD        probe_idx = UINT16_MAX;
+        cp_header_t *probe     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
+        WORD         probe_idx = UINT16_MAX;
 
-        if (cp_find_latest(ftl->cp_handle, &probe, &probe_idx) != FTL_OK)
+        if (cp_find_latest(ftl->cp_handle, probe, &probe_idx) != FTL_OK)
         {
-            LOGE(LOG_TAG_FTL "format: CP readback failed — metadata candidate pool may be exhausted\r\n");
+            LOGE(LOG_TAG_FTL "format: CP readback failed (check ECC/pool/write point)\r\n");
             return FTL_ERROR;
         }
     }
@@ -584,7 +589,7 @@ void ftl_boot_log_bad_areas(const struct ftl_context *ftl)
  *                故不调 jrn_replay（后者会修改 journal 内部状态）。三条启动路径
  *                都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
  *             ② cp_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
- *             ③ 最新页 page_seq ≤ cp.jrn_get_sequence ⇒ 干净关机；否则异常掉电。
+ *             ③ 最新页 page_seq ≤ cp->jrn_get_sequence ⇒ 干净关机；否则异常掉电。
  * -------------------------------------------------------------------- */
 ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
 {
@@ -602,10 +607,10 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     (void)jrn_scan_latest(ftl->journal, &ring, &ring_read_error);
 
     /* ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径） */
-    cp_header_t cp;
-    WORD        cp_idx = UINT16_MAX;
+    cp_header_t *cp     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
+    WORD         cp_idx = UINT16_MAX;
 
-    if (cp_find_latest(ftl->cp_handle, &cp, &cp_idx) != FTL_OK)
+    if (cp_find_latest(ftl->cp_handle, cp, &cp_idx) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。 */
         ftl->md_load_failed = 0U;
@@ -631,7 +636,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
         LOGE(LOG_TAG_BOOT "rebuild required (metadata log lost) — force full metadata rebuild\r\n");
 
         bool         blocks_restored = false;
-        ftl_status_e ret             = ftl_boot_clean_start(ftl, &cp, 0U, true, &blocks_restored, &ring);
+        ftl_status_e ret             = ftl_boot_clean_start(ftl, cp, 0U, true, &blocks_restored, &ring);
 
         if (ret == FTL_OK)
         {
@@ -640,7 +645,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
 
             ftl->md_load_failed          = 0U;
             local_result.boot_type       = BOOT_CLEAN_START;
-            local_result.cp_sequence     = cp.sequence;
+            local_result.cp_sequence     = cp->sequence;
             local_result.journal_entries = 0U;
             local_result.blocks_restored = false;
             *result                      = local_result;
@@ -653,47 +658,47 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
      * 诚实的做法是拒绝启动并保留介质，由用户决定是否格式化。 */
     if (ftl->md_load_failed != 0U)
     {
-        LOGE(LOG_TAG_META "Directory load failed but checkpoint seq=%lu exists — refuse to boot\r\n", cp.sequence);
+        LOGE(LOG_TAG_META "Directory load failed but checkpoint seq=%lu exists — refuse to boot\r\n", cp->sequence);
         return FTL_ERROR;
     }
 
     WORD      *block_words  = cp_get_block_words(ftl->cp_handle);
-    const bool blocks_valid = cp_load_block_table(ftl->cp_handle, &cp, cp_idx, block_words);
+    const bool blocks_valid = cp_load_block_table(ftl->cp_handle, cp, cp_idx, block_words);
 
     if (!blocks_valid)
     {
-        LOGW(LOG_TAG_BLK "unavailable (rec=%u seq=%lu) — block accounting via full metadata rebuild\r\n", (unsigned)cp_idx, cp.sequence);
+        LOGW(LOG_TAG_BLK "unavailable (rec=%u seq=%lu) — block accounting via full metadata rebuild\r\n", (unsigned)cp_idx, cp->sequence);
     }
 
     /* 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。 */
-    if (!cp_load_wear_table(ftl->cp_handle, &cp, cp_idx))
+    if (!cp_load_wear_table(ftl->cp_handle, cp, cp_idx))
     {
-        LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%u seq=%lu) — read pages kept, rest default\r\n", (unsigned)cp_idx, cp.sequence);
+        LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%u seq=%lu) — read pages kept, rest default\r\n", (unsigned)cp_idx, cp->sequence);
     }
 
     /* ③ 判型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
      *
      * ⚠ 判据必须是**整页**的 `page_seq + entry_count`，与 jrn_replay 的回放过滤
-     *   同口径。`cp.jrn_get_sequence` 的语义是「下一个待分配序号」（Checkpoint job
+     *   同口径。`cp->jrn_get_sequence` 的语义是「下一个待分配序号」（Checkpoint job
      *   直接取 sequence_counter，journal_truncate 的注释亦如此声明）⇒ 被 CP 覆盖的条目
-     *   是 seq < cp.jrn_get_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
-     *   全被覆盖 ⟺ page_seq + entry_count ≤ cp.jrn_get_sequence。
+     *   是 seq < cp->jrn_get_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
+     *   全被覆盖 ⟺ page_seq + entry_count ≤ cp->jrn_get_sequence。
      *
-     * ⚠ 不能只看页首（page_seq ≤ cp.jrn_get_sequence）：Checkpoint 之后写入的第一页
-     * page_seq 正好 == cp.jrn_get_sequence，只看页首会把「写→掉电」判成干净、不回放
+     * ⚠ 不能只看页首（page_seq ≤ cp->jrn_get_sequence）：Checkpoint 之后写入的第一页
+     * page_seq 正好 == cp->jrn_get_sequence，只看页首会把「写→掉电」判成干净、不回放
      * ⇒ 数据静默丢失。上板签名：`boot type=1 journal_entries=0` +
      * `[BLK] rebuild blocks=N valid_cw=0` + `rd FAIL ... got 00000000`。 */
     /* ⚠ 环内有读失败页 ⇒ 最新页与判型都不可信：不能据此判「干净关机」
      *   （否则可能少回放条目）。保守走掉电回放路径；回放也会因读失败返回
      *   FTL_ERROR，再由 ftl_boot_power_failure 回退 full metadata rebuild。 */
-    if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp.jrn_get_sequence))
+    if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp->jrn_get_sequence))
     {
         /* 干净关机 */
-        ftl_status_e ret = ftl_boot_clean_start(ftl, &cp, blocks_valid ? 1U : 0U, false, &local_result.blocks_restored, &ring);
+        ftl_status_e ret = ftl_boot_clean_start(ftl, cp, blocks_valid ? 1U : 0U, false, &local_result.blocks_restored, &ring);
         if (ret == FTL_OK)
         {
             local_result.boot_type       = BOOT_CLEAN_START;
-            local_result.cp_sequence     = cp.sequence;
+            local_result.cp_sequence     = cp->sequence;
             local_result.journal_entries = 0U;
             *result                      = local_result;
         }
@@ -702,11 +707,11 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     else
     {
         /* 异常掉电 */
-        ftl_status_e ret = ftl_boot_power_failure(ftl, &cp, blocks_valid ? 1U : 0U, &local_result);
+        ftl_status_e ret = ftl_boot_power_failure(ftl, cp, blocks_valid ? 1U : 0U, &local_result);
         if (ret == FTL_OK)
         {
             local_result.boot_type   = BOOT_POWER_FAILURE;
-            local_result.cp_sequence = cp.sequence;
+            local_result.cp_sequence = cp->sequence;
             *result                  = local_result;
         }
         return ret;
@@ -1424,7 +1429,7 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
 {
     /* 前置条件（判据 2）：唯一调用者在本文件（boot 三条路径）。 */
 
-    BYTE raw_buf[PAGE_SIZE];
+    BYTE *raw_buf = s_scan_raw;
 
     alc_t *alloc = &ftl->alloc;
 
@@ -1773,7 +1778,7 @@ static void ftl_recovery_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL
 
     rebuild_l2p_stats_reset();
 
-    BYTE raw_buf[PAGE_SIZE];
+    BYTE *raw_buf = s_scan_raw;
 
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {

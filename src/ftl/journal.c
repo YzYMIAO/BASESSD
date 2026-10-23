@@ -61,6 +61,10 @@
  * JOURNAL_BLOCK_COUNT 块，必须标坏并跳过，否则 journal 永久停在 need_erase。 */
 #define JRN_ERASE_FAIL_MAX (3U)
 
+/* 回放/扫描用的整页 raw 缓冲。放文件级 static（AXI .bss）而不是 2KB 局部数组：
+ * journal 扫描只在单线程 superloop 内串行执行，无重入。 */
+static BYTE s_raw_page[PAGE_SIZE];
+
 /* ══════════════════════════════════════════════════════════
  * 1. 页地址辅助
  * ══════════════════════════════════════════════════════════ */
@@ -873,11 +877,11 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
  * 只有非 FF 的读失败才是真正不可信的页（RISK-BOOT-08）。 */
 static bool jrn_raw_page_blank(DWORD addr)
 {
-    BYTE raw[PAGE_SIZE];
+    BYTE *raw = s_raw_page;
 
     /* raw 读只填 4 个 CW 的用户区（512B × 4，间隔 FC_BUFFER_POOL_CW_SIZE）；
-     * 尾部/间隔字节不填。先铺 FF，避免未初始化栈字节把空页误判成非空。 */
-    memset(raw, 0xFF, sizeof(raw));
+     * 尾部/间隔字节不填。先铺 FF，避免残留字节把空页误判成非空。 */
+    memset(raw, 0xFF, PAGE_SIZE);
 
     if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
     {

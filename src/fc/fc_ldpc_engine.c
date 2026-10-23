@@ -4,6 +4,7 @@
 #include "fc.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
 #include "fc_bch_engine.h"
 #include "fc_ldpc_qc_engine.h"
+#include "log.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -32,12 +33,30 @@ static fc_bch_control_t *g_bch = NULL;
 static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
-/* 惰性初始化 BCH 引擎（m=13, t=4，本工程 CW 参数） */
+/* 惰性初始化 BCH 引擎（m=13, t=4，本工程 CW 参数）。
+ * 初始化失败必须可见：旧实现返回 NOT_SUPPORTED 后编码/解码会“成功跳过”，
+ * 等于静默关闭 ECC（C8/§3.2）。静态存储后失败只可能是参数/断言错误。 */
+static BYTE s_bch_init_failed;
+static BYTE s_bch_init_logged;
+
 static BYTE fc_ecc_init_bch(void)
 {
     if (g_bch == NULL)
     {
         g_bch = fc_bch_init(13, 4, 0U, 0U);
+        if (g_bch == NULL)
+        {
+            if (s_bch_init_failed == 0U)
+            {
+                s_bch_init_failed = 1U;
+                LOGE("[FC  ] BCH init FAILED: ECC is disabled (check static storage/size)\r\n");
+            }
+        }
+        else if (s_bch_init_logged == 0U)
+        {
+            s_bch_init_logged = 1U;
+            LOGI("[FC  ] BCH ready: static tables, no heap\r\n");
+        }
     }
     return (g_bch != NULL) ? 1U : 0U;
 }

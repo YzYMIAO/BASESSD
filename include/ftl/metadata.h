@@ -781,7 +781,7 @@ typedef struct
     BYTE cp_buf[L2P_REGION_SIZE];
 } md_handle_t;
 
-/* ── 常驻 Directory Cache（约 24.6 KiB，`g_ftl_md[]` 落 SRAM4，见 src/main.c） ── */
+/* ── 常驻 Directory Cache（33,752 B，`g_ftl_md[]` 落 SRAM4，见 src/ftl/metadata.c） ── */
 typedef struct md_dir_cache
 {
     md_entry_t entries[METADATA_DIR_ENTRIES];

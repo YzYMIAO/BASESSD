@@ -55,6 +55,17 @@
 #include <stddef.h>
 #include <string.h>
 
+/* 每实例 Metadata Directory cache（CPU-only）。链接脚本按整个 metadata.o 的 .bss
+ * 放进 SRAM4（与 BCH 交换：BCH 在 DTCM）；`.sram4_data` 是 NOLOAD ⇒ ftl_init
+ * 绑定后对该实例显式 memset。 */
+md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
+
+/* 候选池重建日志节流：第 1 次立即打印，此后每 N 次一条（元数据坏块风暴不刷屏）。
+ * N=16：重建本身较贵且罕见，16 条足以覆盖一次故障风暴。
+ * ⚠ 位于 DTCM NOLOAD ⇒ 必须在 md_init 显式复位。 */
+#define MD_POOL_REBUILT_LOG_EVERY (16U)
+static DWORD s_pool_rebuilt_logged;
+
 /* ══════════════════════════════════════════════════════════════════
  * 一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
  * ══════════════════════════════════════════════════════════════════ */
@@ -938,6 +949,8 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 
     dir->alloc        = alloc;
     dir->total_writes = total_writes;
+
+    s_pool_rebuilt_logged = 0U; /* DTCM NOLOAD：文件级静态必须显式复位 */
 
     dir->anchor_sequence = 0U;
     dir->dirty           = false;
@@ -2076,11 +2089,6 @@ void md_pool_print(const md_dir_cache_t *dir)
         }
     }
 }
-
-/* 候选池重建日志节流：第 1 次立即打印，此后每 N 次一条（元数据坏块风暴不刷屏）。
- * N=16：重建本身较贵且罕见，16 条足以覆盖一次故障风暴。 */
-#define MD_POOL_REBUILT_LOG_EVERY (16U)
-static DWORD s_pool_rebuilt_logged;
 
 void md_pool_service(struct ftl_context *ftl)
 {

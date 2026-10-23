@@ -35,6 +35,9 @@
 #    include "ut_main.h"
 #endif
 
+/* 平台 syscalls.c：堆与栈共用 DTCM，`stack` 需要单独报告堆用量。 */
+extern DWORD syscalls_heap_used(void);
+
 #define USART_CLI_LINE_CAPACITY 128U
 #define UART_CLI_MAX_ARGUMENTS  10U
 #define UART_ARRAY_SIZE(array)  (sizeof(array) / sizeof((array)[0]))
@@ -939,6 +942,8 @@ static int uart_cli_stack(int argc, char *argv[])
     (void)argc;
     (void)argv;
     stack_guard_report();
+    (void)LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n",
+               (unsigned long)syscalls_heap_used());
     return FUNC_STATUS_SUCCESS;
 }
 

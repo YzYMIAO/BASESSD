@@ -262,6 +262,15 @@ typedef struct
 /* ── 接口 ── */
 
 /*
+ * ftl_global_init - 复位 FTL 文件级全局静态（只调用一次）
+ *
+ * `ftl.o` 的 `.bss` 整文件落 DTCM（NOLOAD），`s_dangling[]`、日志节流等
+ * 文件级静态不被启动代码清零；必须在**所有实例 ftl_init 之前**复位一次。
+ * 不能放在逐实例 ftl_init 里：多实例/运行期 re-init 会清掉已运行实例的共享状态。
+ */
+void ftl_global_init(void);
+
+/*
  * ftl_init - 初始化 FTL 子系统
  *
  * 描述符只持有指针；storage 数组/挂载块由调用者提供。

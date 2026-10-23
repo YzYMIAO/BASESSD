@@ -49,6 +49,44 @@ SECTIONS
   {
     . = ALIGN(4);
     __ssd_code_high_start = .;
+    /* Whole-module hot code: no per-function annotations. Selection is the host
+     * data path (FTL submit/complete, L2P, wbuf/pending, cache read/write),
+     * FC pump/BCH, and NAND dispatch/FMC.
+     *
+     * The common set below must fit the -O0 debug build (64 KB ITCM).  Release
+     * adds the modules listed after it: their object paths contain
+     * `release/obj/`, which the debug link does not, so the same script yields
+     * a larger ITCM image only in release.  This is build-type selection by
+     * input path, not a C preprocessor switch. */
+    KEEP(*ftl/ftl.o(.text .text.*))
+    KEEP(*ftl/l2p_cache.o(.text .text.*))
+    KEEP(*ftl/wbuf.o(.text .text.*))
+    KEEP(*ftl/pending.o(.text .text.*))
+    KEEP(*ftl/cache_read.o(.text .text.*))
+    KEEP(*ftl/cache_write.o(.text .text.*))
+    KEEP(*fc/fc.o(.text .text.*))
+    KEEP(*fc/fc_data_path.o(.text .text.*))
+    KEEP(*fc/fc_bch_engine.o(.text .text.*))
+    KEEP(*nand/nand_dispatch.o(.text .text.*))
+    KEEP(*nand/nand_fmc.o(.text .text.*))
+    /* Release-only additions: write/GC/background path.  Keep this block
+     * below ~62 KB total (release .ssd_code_high measured after every change);
+     * debug is unaffected because its object directory is `debug/obj/`. */
+    KEEP(*release/obj/ftl/allocator.o(.text .text.*))
+    KEEP(*release/obj/ftl/journal.o(.text .text.*))
+    KEEP(*release/obj/ftl/metadata.o(.text .text.*))
+    KEEP(*release/obj/ftl/metadata_job.o(.text .text.*))
+    KEEP(*release/obj/ftl/migrate.o(.text .text.*))
+    KEEP(*release/obj/ftl/gc.o(.text .text.*))
+    KEEP(*release/obj/ftl/wear_leveling.o(.text .text.*))
+    KEEP(*release/obj/ftl/bg_scheduler.o(.text .text.*))
+    KEEP(*release/obj/ftl/bg_wiring.o(.text .text.*))
+    KEEP(*release/obj/ftl/completion_table.o(.text .text.*))
+    KEEP(*release/obj/ftl/ftl_op.o(.text .text.*))
+    KEEP(*release/obj/fc/fc_interface.o(.text .text.*))
+    KEEP(*release/obj/fc/fc_queue.o(.text .text.*))
+    KEEP(*release/obj/fc/fc_command.o(.text .text.*))
+    KEEP(*release/obj/nand/nand_engine.o(.text .text.*))
     KEEP(*(.ssd_code_high))
     KEEP(*(.ssd_code_high.*))
     . = ALIGN(4);
@@ -101,11 +139,42 @@ SECTIONS
   {
     . = ALIGN(32);
     __NONCACHEABLEBUFFER_BEGIN = .;
+    KEEP(*(.noncacheable_buffer))
+    KEEP(*(.noncacheable_buffer.*))
     KEEP(*(noncacheable_buffer))
     KEEP(*(noncacheable_buffer.*))
     . = ALIGN(32);
     __NONCACHEABLEBUFFER_END = .;
   } > AXI_NOCACHE
+
+  /* DTCM hot data: whole-object placement (no per-variable annotations).
+   * Must be before the generic .bss pattern, which would otherwise consume
+   * these .bss.* input sections first. NOLOAD: init functions memset them. */
+  .dtcm_data (NOLOAD) :
+  {
+    . = ALIGN(8);
+    KEEP(*(.dtcm_data))
+    KEEP(*(.dtcm_data.*))
+    KEEP(*ftl/ftl.o(.bss .bss.*))
+    /* metadata.o（g_ftl_md）与 BCH 交换域：g_ftl_md 回到基线 SRAM4，
+     * BCH 只读查表放 DTCM。 */
+    KEEP(*fc/fc.o(.bss .bss.*))
+    KEEP(*nand/nand_dispatch.o(.bss .bss.*))
+    KEEP(*fc/fc_bch_engine.o(.bss .bss.*))
+    . = ALIGN(8);
+  } > DTCM
+
+  .sram4_data (NOLOAD) :
+  {
+    . = ALIGN(32);
+    KEEP(*(.sram4_data))
+    KEEP(*(.sram4_data.*))
+    /* g_ftl_md 回到基线域（TCM 之前本就在 SRAM4，843 KB/s 已验证）。
+     * 必须排在通用 `.bss` 之前，否则 metadata.o 的 `.bss` 会先被
+     * `.bss` 的 `*(.bss*)` 吞掉。 */
+    KEEP(*ftl/metadata.o(.bss .bss.*))
+    . = ALIGN(32);
+  } > SRAM4
 
   .bss (NOLOAD) :
   {
@@ -120,22 +189,8 @@ SECTIONS
     __bss_end__ = .;
   } > AXI_RAM
 
-  /* Put DMA buffers declared with section("noncacheable_buffer") here. */
-  .noncacheable_buffer (NOLOAD) :
-  {
-    . = ALIGN(32);
-    __NONCACHEABLEBUFFER_BEGIN = .;
-    KEEP(*(noncacheable_buffer))
-    KEEP(*(noncacheable_buffer.*))
-    . = ALIGN(32);
-    __NONCACHEABLEBUFFER_END = .;
-  } > AXI_NOCACHE
-
-  /* Optional explicit placement sections; NOLOAD data is not initialized. */
-  .dtcm_data (NOLOAD) : { . = ALIGN(8); KEEP(*(.dtcm_data)) KEEP(*(.dtcm_data.*)) } > DTCM
   .sram12_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram12_data)) KEEP(*(.sram12_data.*)) } > SRAM12
   .sram3_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram3_data)) KEEP(*(.sram3_data.*)) } > SRAM3
-  .sram4_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram4_data)) KEEP(*(.sram4_data.*)) } > SRAM4
   .bkpsram_data (NOLOAD) : { . = ALIGN(4); *(.bkpsram_data) *(.bkpsram_data.*) } > BKPSRAM
 
   /* NOLOAD 且不被启动代码清零 → 跨软复位（NVIC_SystemReset）保留。
@@ -168,6 +223,9 @@ SECTIONS
 
 ASSERT(__NONCACHEABLEBUFFER_END <= ORIGIN(AXI_NOCACHE) + LENGTH(AXI_NOCACHE),
        "AXI non-cacheable DMA buffer region overflow")
+ASSERT(SIZEOF(.dtcm_data) + SIZEOF(.noinit) + 0x5000 <= LENGTH(DTCM), "DTCM hot data + 20KB stack reserve overflow")
+ASSERT(SIZEOF(.ssd_code_high) <= LENGTH(ITCM), "ITCM hot code overflow")
+ASSERT((SIZEOF(.ssd_code_high) & 3) == 0, "ITCM copy loop requires 4-byte multiple size")
 ASSERT(SIZEOF(.sram12_data) <= LENGTH(SRAM12), "SRAM12 (SRAM1+SRAM2) FTL tables overflow")
 ASSERT(SIZEOF(.sram3_data) <= LENGTH(SRAM3), "SRAM3 FTL cp_job/journal overflow")
 ASSERT(SIZEOF(.sram4_data) <= LENGTH(SRAM4), "SRAM4 FTL metadata dir overflow")

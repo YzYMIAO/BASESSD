@@ -61,6 +61,13 @@
 
 #include <string.h>
 
+/* FTL 每 I/O 热数据。链接脚本按整个 ftl.o 把 .bss 放进 DTCM。
+ * 这些对象都是 CPU-only：NAND/FC 的 DMA buffer 不在这里，DMA1/2 也访问不到 DTCM。
+ * `.dtcm_data` 是 NOLOAD ⇒ ftl_init 对每个实例显式 memset。 */
+ftl_ctx_t   g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+wb_handle_t g_ftl_wbuf[FTL_DIM_TOTAL];
+l2p_jrn_t   g_ftl_journal[FTL_DIM_TOTAL];
+
 /* dangling 守卫日志：
  *   · `st=BAD` 是**预期降级**（旧块已退役，数据本不可读）⇒ 每个旧 gblock 只打一行，
  *     其余 LBA 只累计到该槽位的 lbas（一个块 256 个 LBA，逐条打必刷屏）。
@@ -956,6 +963,24 @@ static ftl_status_e ftl_confirm_handler(void *ctx, pend_req_t *pending)
  *   实现要点：本实例只持有指针，storage 数组/挂载块由 HIL 提供，
  *             位于 NOLOAD 段 ⇒ 本函数必须显式 memset。
  * -------------------------------------------------------------------- */
+void ftl_global_init(void)
+{
+    /* ftl.o 的 .bss 随整文件规则落 DTCM（NOLOAD），文件级日志/守卫静态不在
+     * `ftl` 结构体内，必须显式复位。`s_dangling_next` 虽然取模后不会越界，
+     * 但 `s_dangling[].lbas` 的随机残留会污染 dangling 日志聚合。 */
+    memset(s_dangling, 0, sizeof(s_dangling));
+    s_dangling_next       = 0U;
+    s_dangling_log_ms     = 0U;
+    s_dangling_suppressed = 0U;
+    s_flush_log_ms        = 0U;
+    s_write_retry_logged  = 0U;
+    memset(&s_flush_err_log, 0, sizeof(s_flush_err_log));
+    memset(&s_lost_log, 0, sizeof(s_lost_log));
+    memset(&s_nospace_log, 0, sizeof(s_nospace_log));
+    memset(&s_subop_fail_log, 0, sizeof(s_subop_fail_log));
+    memset(&s_cache_wb_fail_log, 0, sizeof(s_cache_wb_fail_log));
+}
+
 ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]、共享 cache、storage。 */
@@ -969,6 +994,10 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     ASSERT(storage->migrate != NULL);
     ASSERT(storage->wbuf != NULL);
     ASSERT(storage->rr_page_scratch != NULL);
+
+    /* .dtcm_data 是 NOLOAD，启动不清零；描述符本身没有逐字段覆盖所有状态，
+     * 必须在绑定前整表清零（与 storage 数组的 memset 同一纪律）。 */
+    memset(ftl, 0, sizeof(*ftl));
 
     /* ├─ PBA 字段视图自检（一次）：位域布局 implementation-defined，无法用 _Static_assert
      *    证明（见 ftl_config.h §三.2）。若本工具链的布局与 PBA_*_SHIFT 不一致，

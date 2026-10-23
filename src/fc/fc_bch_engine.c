@@ -4,14 +4,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 /*
  * fc_bch_engine.c — BCH ECC 引擎（纠错码）
  *
  * 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
- * 将内核依赖替换为标准 C（malloc/free、__builtin_clz/bswap）。
+ * 内核依赖替换为标准 C；表存储改为**编译期静态结构体**（不再 malloc/free），
+ * 因为本工程参数固定（m=13, t=4），表生命周期等于固件生命周期。
  *
  * ── 算法（BCH 码 = 有限域上的循环码）──
  *   编码：4 查找表并行 32bit 输入（生成多项式 g(x) 的 mod 查表）
@@ -122,6 +122,39 @@ struct gf_poly_deg1
     struct gf_poly poly;
     unsigned int   c[2];
 };
+
+/* ── 固定存储（本工程唯一参数：m=13, t=4）────────────────────────────
+ * BCH 表的生命周期 = 固件生命周期，大小编译期确定；用静态结构体而不是
+ * malloc/calloc。放 DTCM（链接脚本整文件规则），避免 41 KB 堆与栈共用 DTCM，
+ * 也避免“堆不足 → 初始化失败 → ECC 被静默跳过”。
+ * ⚠ 这里只支持 m=13/t=4；换参数必须重算数组尺寸并加 _Static_assert。 */
+#define FC_BCH_M          (13U)
+#define FC_BCH_T          (4U)
+#define FC_BCH_N          ((1U << FC_BCH_M) - 1U)
+#define FC_BCH_WORDS      DIV_ROUND_UP(FC_BCH_M *FC_BCH_T, 32U)
+#define FC_BCH_ECC_DWORDS (1U + (FC_BCH_M * FC_BCH_T) + 1U) /* GF_POLY_SZ(m*t) 的 DWORD 数 */
+
+typedef struct
+{
+    fc_bch_control_t    ctl;
+    WORD                a_pow[FC_BCH_N + 1U];
+    WORD                a_log[FC_BCH_N + 1U];
+    DWORD               mod8[FC_BCH_WORDS * 1024U];
+    DWORD               ecc_buf[FC_BCH_WORDS];
+    DWORD               ecc_buf2[FC_BCH_WORDS];
+    unsigned int        xi[FC_BCH_M];
+    unsigned int        syn[2U * FC_BCH_T];
+    int                 cache[2U * FC_BCH_T];
+    struct gf_poly_deg1 elp[FC_BCH_T + 1U];
+    DWORD               poly_2t[4U][1U + (2U * FC_BCH_T) + 1U];
+    DWORD               roots[(FC_BCH_N + 1U + 31U) / 32U]; /* 生成多项式根的 bitmap */
+    DWORD               genpoly[2U];
+    DWORD               g_poly[FC_BCH_ECC_DWORDS];
+} fc_bch_storage_t;
+
+static fc_bch_storage_t s_bch;
+
+_Static_assert(sizeof(fc_bch_storage_t) <= (48U * 1024U), "BCH static storage exceeds 48 KiB");
 
 /* ── 前向声明 ────────────────────────────────────────────────────── */
 
@@ -1109,34 +1142,27 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
 {
     const unsigned int m = GF_M(bch), t = GF_T(bch);
     int                n;
-    unsigned int       i, j, r, word, *roots;
-    DWORD             *genpoly;
-    struct gf_poly    *g;
+    unsigned int       i, j, r, word;
+    DWORD             *roots   = s_bch.roots;
+    DWORD             *genpoly = s_bch.genpoly;
+    struct gf_poly    *g       = (struct gf_poly *)s_bch.g_poly;
 
-    g       = (struct gf_poly *)malloc(GF_POLY_SZ(m * t));
-    roots   = (unsigned int *)calloc((bch->n + 1U), sizeof(unsigned int));
-    genpoly = calloc(DIV_ROUND_UP(m * t + 1U, 32), sizeof(DWORD));
-    if (!g || !roots || !genpoly)
-    {
-        free(g);
-        free(roots);
-        free(genpoly);
-        return NULL;
-    }
+    /* roots 用 bitmap：8192 个根只需 256 DWORD（原实现用 32 KB 数组）。 */
+    memset(roots, 0, sizeof(s_bch.roots));
 
     for (i = 0; i < t; i++)
     {
         for (j = 0, r = 2U * i + 1U; j < m; j++)
         {
-            roots[r] = 1;
-            r        = (unsigned int)mod_s(bch, 2U * r);
+            roots[r >> 5U] |= 1UL << (r & 31U);
+            r = (unsigned int)mod_s(bch, 2U * r);
         }
     }
     g->deg  = 0;
     g->c[0] = 1;
     for (i = 0; i < GF_N(bch); i++)
     {
-        if (roots[i])
+        if ((roots[i >> 5U] & (1UL << (i & 31U))) != 0U)
         {
             r                = bch->a_pow_tab[i];
             g->c[g->deg + 1] = 1;
@@ -1165,8 +1191,6 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
         n -= (int)nbits2;
     }
     bch->ecc_bits = (unsigned int)g->deg;
-    free(g);
-    free(roots);
     return genpoly;
 }
 
@@ -1177,15 +1201,15 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
  *         （0=默认查表）；swap_bits —— 是否交换数据位序。
  *   返回：引擎句柄；失败返回 NULL。
  *   实现要点：
- *     - 参数合法性校验（m/t 上限 + m·t < 2^m-1）。
- *     - 分配全部表（a_pow/a_log/mod8/ecc_buf/xi/syn/cache/elp/poly_2t）。
+ *     - 参数合法性校验（本工程固定 m=13/t=4；静态存储按该参数定尺寸）。
+ *     - 全部表来自 `s_bch` 静态结构体，无堆分配。
  *     - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
- *       任一步失败即整体释放返回 NULL。
+ *       任一步失败即清零静态存储返回 NULL。
  * -------------------------------------------------------------------- */
 fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
     bool                      err = false;
-    unsigned int              i, words;
+    unsigned int              i;
     DWORD                    *genpoly;
     fc_bch_control_t         *bch             = NULL;
     static const unsigned int prim_poly_tab[] = {
@@ -1201,7 +1225,10 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
         0x402B,
         0x8003,
     };
-    if ((m < 5) || (m > BCH_MAX_M) || (t < 1) || (t > BCH_MAX_T) || (m * t >= (1 << m) - 1))
+    /* 静态存储只覆盖本工程固定参数（m=13, t=4）。换参数时数组尺寸必须重算，
+     * 否则 ASSERT 会在这里暴露；不要靠运行时重新分配。 */
+    ASSERT((m == (int)FC_BCH_M) && (t == (int)FC_BCH_T));
+    if ((m != (int)FC_BCH_M) || (t != (int)FC_BCH_T))
     {
         return NULL;
     }
@@ -1209,41 +1236,28 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
     {
         prim_poly = prim_poly_tab[(unsigned int)(m - 5)];
     }
-    bch = (fc_bch_control_t *)calloc(1, sizeof(fc_bch_control_t));
-    if (!bch)
-    {
-        return NULL;
-    }
+    memset(&s_bch, 0, sizeof(s_bch));
+    bch = &s_bch.ctl;
+
     bch->m         = (unsigned int)m;
     bch->t         = (unsigned int)t;
     bch->n         = (unsigned int)((1 << m) - 1);
-    words          = DIV_ROUND_UP((unsigned int)(m * t), 32U);
     bch->ecc_bytes = (unsigned int)DIV_ROUND_UP((unsigned int)(m * t), 8U);
     bch->swap_bits = swap_bits;
-    bch->a_pow_tab = calloc(1 + bch->n, sizeof(WORD));
-    bch->a_log_tab = calloc(1 + bch->n, sizeof(WORD));
-    bch->mod8_tab  = calloc(words * 1024U, sizeof(DWORD));
-    bch->ecc_buf   = calloc(words, sizeof(DWORD));
-    bch->ecc_buf2  = calloc(words, sizeof(DWORD));
-    bch->xi_tab    = (unsigned int *)calloc((unsigned int)m, sizeof(unsigned int));
-    bch->syn       = (unsigned int *)calloc(2U * (unsigned int)t, sizeof(unsigned int));
-    bch->cache     = (int *)calloc(2U * (unsigned int)t, sizeof(int));
-    bch->elp       = (struct gf_poly *)calloc((unsigned int)t + 1U, sizeof(struct gf_poly_deg1));
+    bch->a_pow_tab = s_bch.a_pow;
+    bch->a_log_tab = s_bch.a_log;
+    bch->mod8_tab  = s_bch.mod8;
+    bch->ecc_buf   = s_bch.ecc_buf;
+    bch->ecc_buf2  = s_bch.ecc_buf2;
+    bch->xi_tab    = s_bch.xi;
+    bch->syn       = s_bch.syn;
+    bch->cache     = s_bch.cache;
+    bch->elp       = (struct gf_poly *)s_bch.elp;
     for (i = 0; i < 4; i++)
     {
-        bch->poly_2t[i] = (struct gf_poly *)malloc(GF_POLY_SZ(2U * (unsigned int)t));
+        bch->poly_2t[i] = (struct gf_poly *)s_bch.poly_2t[i];
     }
-    if (!bch->a_pow_tab || !bch->a_log_tab || !bch->mod8_tab || !bch->ecc_buf || !bch->ecc_buf2 || !bch->xi_tab || !bch->syn || !bch->cache || !bch->elp)
-    {
-        err = true;
-    }
-    for (i = 0; i < 4; i++)
-    {
-        if (!bch->poly_2t[i])
-        {
-            err = true;
-        }
-    }
+
     if (!err)
     {
         err = !build_gf_tables(bch, prim_poly);
@@ -1254,7 +1268,6 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
         if (genpoly)
         {
             build_mod8_tables(bch, genpoly);
-            free(genpoly);
         }
         else
         {
@@ -1273,26 +1286,17 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
     return bch;
 }
 
-/* 释放 BCH 引擎全部资源 */
+/* 释放 BCH 引擎：静态存储只清零，不归还堆。 */
 void fc_bch_free(fc_bch_control_t *bch)
 {
-    unsigned int i;
-    if (bch)
+    if (bch == NULL)
     {
-        free(bch->a_pow_tab);
-        free(bch->a_log_tab);
-        free(bch->mod8_tab);
-        free(bch->ecc_buf);
-        free(bch->ecc_buf2);
-        free(bch->xi_tab);
-        free(bch->syn);
-        free(bch->cache);
-        free(bch->elp);
-        for (i = 0; i < 4; i++)
-        {
-            free(bch->poly_2t[i]);
-        }
-        free(bch);
+        return;
+    }
+    ASSERT(bch == &s_bch.ctl);
+    if (bch == &s_bch.ctl)
+    {
+        memset(&s_bch, 0, sizeof(s_bch));
     }
 }
 

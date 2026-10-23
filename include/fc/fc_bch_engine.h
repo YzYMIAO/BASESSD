@@ -11,8 +11,7 @@
  * BCH ECC 引擎。
  *
  * 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
- * 将内核依赖替换为标准 C（malloc/free），接口简化，
- * 参数固化减少动态分配。
+ * 将内核依赖替换为标准 C；本工程参数固定，表存于静态结构体，不使用堆。
  *
  * 典型参数（CW = 520B data + 8B parity）：
  *   m=13, t=4  → ecc_bytes=7（64bit parity 够用）

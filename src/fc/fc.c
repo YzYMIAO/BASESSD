@@ -80,8 +80,10 @@
  *     这是最现实的失败点），所有走链的读者都要容忍它。
  * ══════════════════════════════════════════════════════════ */
 
-static fc_command_t        g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
-static fc_descriptor_t     g_fc_descriptor_pool[FC_DESCRIPTOR_POOL_DEPTH];
+static fc_command_t    g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
+static fc_descriptor_t g_fc_descriptor_pool[FC_DESCRIPTOR_POOL_DEPTH];
+/* DMA 可见：放 noncacheable 段，不能被整文件 .bss → DTCM 的规则带走
+ * （DMA1/2 访问不到 DTCM）。 */
 static BYTE                g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE] __attribute__((section(".noncacheable_buffer")));
 static fc_command_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
 static fc_command_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
@@ -98,7 +100,9 @@ static BYTE                g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
  * 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
  * 故这里只做提交→完成之间的中转。索引用的 command_id 是「指针 − command_pool 基址」
  * 派生出来的池内下标，恒 < FC_COMMAND_POOL_DEPTH。 */
-static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4];
+/* CONFIG_NAND_DMA=1 时是 DMA 目标（READ_META / GET_FEATURES 的 4 字节返回段），
+ * 同样放 noncacheable 段：DMA 写后 CPU 直接读到新值，且不进 DTCM。 */
+static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] __attribute__((section(".noncacheable_buffer")));
 
 /* 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见 */
 fc_t g_fc_controller;

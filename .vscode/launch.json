@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug STM32H743II release (WSL → Win JLink)",
+      "name": "Debug STM32H743II BCH-DTCM swap (WSL → Win JLink)",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -12,7 +12,7 @@
 
       "gdbTarget": "localhost:2331",
 
-      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
+      "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
 
@@ -33,7 +33,7 @@
       "armToolchainPath": "/usr/bin"
     },
     {
-      "name": "Debug STM32H743II release (WSL-only JLink)",
+      "name": "Debug STM32H743II BCH-DTCM swap (WSL-only JLink)",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -43,7 +43,7 @@
       "interface": "swd",
       "serialNumber": "602717758",
 
-      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
+      "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",

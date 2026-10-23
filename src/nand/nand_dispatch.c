@@ -49,12 +49,16 @@ static nand_dispatch_lun_queue_t g_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM]
  * 仅在 nand_dispatch_enqueue() 一处检查（submit 与 submit_chain 共用的漏斗），poll 不检查。 */
 static BYTE g_nand_dispatch_armed;
 
-/* 页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
+/* 页缓冲固定在 AXI_NOCACHE（与基线一致）。
+ * 板端实验：放到 DTCM 时 multi-plane program 的 handler 收到了正确的
+ * bitmap/data，但 NAND 读回全 FF；回到 AXI_NOCACHE 后 format 正常。
+ * DMA=1 时同样要求 noncacheable（DMA1/2 不能访问 DTCM）。
  * 按 (ch, ce, lun) 各持一块——同通道各 LUN 由 poll 轮流驱动，且 request.data
  * 指针会跨多次 poll 存活（如 program ISSUE 卡在 70h 忙轮询），共享一块会被后驱动的
  * LUN 覆盖（详见 nand_dispatch_tables.c 顶部注释）。
  * 多 plane 时拼接双页（plane stride = PAGE_SIZE），scatter 拆页依赖它。 */
-BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
+#define NAND_PAGE_BUFFER_ATTR __attribute__((section(".noncacheable_buffer")))
+BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] NAND_PAGE_BUFFER_ATTR;
 
 /* ======================================================================
  * 辅助函数
@@ -182,6 +186,9 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
 nand_result_e nand_dispatch_init(void)
 {
     memset(g_nand_dispatch_queues, 0, sizeof(g_nand_dispatch_queues));
+    /* DTCM/非缓存段都不由启动代码清零；各 builder 虽会先 memset，这里仍显式清零，
+     * 避免任何未来路径读到上电残留。 */
+    memset(g_nand_channel_page_buffer, 0, sizeof(g_nand_channel_page_buffer));
     g_nand_dispatch_armed = 0U;
     return NAND_RESULT_OK;
 }

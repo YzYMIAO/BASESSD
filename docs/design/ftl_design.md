@@ -1745,7 +1745,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 派生量：`records_per_block = PAGES_PER_BLOCK / pages_per_record`（floor）；
 `total_records = block_count × records_per_block`。
 
-**`md_dir_cache_t`（每实例，约 24.6 KiB，落 SRAM4）**
+**`md_dir_cache_t`（每实例，33,752 B，落 SRAM4）**
 
 | 字段 | 大小 | 含义 |
 |---|---:|---|
@@ -4173,7 +4173,7 @@ flowchart TB
         LC["g_l2p_cache CH CE 共享 L2P cache"]
     end
 
-    subgraph "每实例 g_ftl dim 描述符,AXI"
+    subgraph "每实例 g_ftl dim 描述符,DTCM"
         CTX["ftl_ctx_t topo cache* pending groups wbuf* table_refs alloc journal* metadata_dir* cp_handle* mig_handle* rr_handle rr_page_scratch* bg"]
         TAB["ftl_table_refs_t → blocks / free / op / spare / closed"]
         MD["md_dir_cache_t entries l2p_live job"]
@@ -4186,9 +4186,9 @@ flowchart TB
 
     subgraph "内存域 main-c 静态数组"
         D12["SRAM12 g_ftl_blocks / g_ftl_free_blocks / g_ftl_op_blocks / g_ftl_spare_blocks / g_ftl_closed_sb_list"]
-        D3["SRAM3 g_ftl_checkpoint_handle g_ftl_journal"]
-        D4["SRAM4 g_ftl_md"]
-        AX["AXI g_ftl g_ftl_migrate g_ftl_wbuf g_ftl_rr_page_scratch g_l2p_cache CLI buffer"]
+        D3["SRAM3 g_ftl_checkpoint_handle"]
+        AX["AXI g_ftl_migrate g_ftl_rr_page_scratch g_l2p_cache CLI buffer"]
+        DT["DTCM g_ftl g_ftl_wbuf g_ftl_journal FC command/desc pools + queues BCH static tables"]
     end
 
     CTX --> TAB
@@ -4218,8 +4218,8 @@ flowchart TB
   `tables` / `metadata_dir` / `journal` / `cp_handle` / `migrate` / `wbuf` /
   `rr_page_scratch`，`main.c` 决定落哪个域。
 - **Phase 1.5 挂载块**：`mig_handle_t` / `wb_handle_t` / `rr_page_scratch` 已从
-  `ftl_ctx_t` 内嵌改为 `ftl_storage_t` 指针，数组落 AXI `.bss`
-  （`g_ftl_migrate` / `g_ftl_wbuf` / `g_ftl_rr_page_scratch`）；`ftl_init` 只绑定指针并
+  `ftl_ctx_t` 内嵌改为 `ftl_storage_t` 指针：`g_ftl` / `g_ftl_wbuf` / `g_ftl_journal`
+  落 DTCM（CPU-only 热数据），`g_ftl_migrate` / `g_ftl_rr_page_scratch` 落 AXI；`ftl_init` 只绑定指针并
   显式 memset。**挂指针不减少总 RAM**，收益是 `ftl_ctx_t` 变小、放置可控、handle
   挂载形态统一。
 - `alloc` 内部指针直接绑到 `table_refs` 的五项，多数下游走 `ftl->alloc.blocks/...`，不经过 `ftl->table_refs`。
@@ -4367,7 +4367,9 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 **多 LUN 实施状态**：Phase A/B/C 已实现（默认 1×1×1 行为逐位不变；N=2 仅影子构建链接），
 实机未验。`ftl_ctx_t` 只持有描述符，五张表与共享 cache 由设备级对象持有并按内存域散列
-（AXI_RAM 384 KB 预算，明细见 `docs/archive/multi_lun_generalization.md` §5）。
+（AXI_RAM 384 KB + DTCM 128 KB + ITCM 64 KB 预算；DTCM 放 `g_ftl`/wbuf/journal/md/FC
+命令热数据，ITCM 放 host 数据路径/FC/NAND 热代码；明细见
+`docs/archive/multi_lun_generalization.md` §5 与 §8）。
 跨 LUN superblock 条带 / 跨 LUN GC/WL **未实现**（`known_iss.md` ISS-FTL-12 / ISS-ML-04）。
 
 ### 5.5 不变量清单
@@ -4554,12 +4556,12 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 |---|---|
 | 背景 | `ftl_ctx_t` 原本内嵌大数组；N=2 时约 480 KB，装不进 AXI 384 KB |
 | 选项 | 继续内嵌 / 全部放 SDRAM / 描述符 + linker 域散列 |
-| 选择 | **描述符只留指针 + 热状态；tables→SRAM12、md→SRAM4、journal/cp_handle→SRAM3** |
-| 理由 | 片内装下 N=2；表的所有权仍属 FTL；域映射由 linker 决定，代码不感知地址 |
+| 选择 | **描述符只留指针 + 热状态；tables→SRAM12、cp_handle→SRAM3；g_ftl/wbuf/journal/FC 命令热数据 + BCH 静态表→DTCM；g_ftl_md→SRAM4** |
+| 理由 | 片内装下 N=2；表的所有权仍属 FTL；DTCM 0 wait 放每 I/O 热数据，ITCM 放 host I/O/FC/NAND 热代码；域映射由 linker 决定 |
 | 主流 | 主控固件用 descriptor + 表指针，由 linker/scatter 决定落 DRAM/SRAM/TCM（OpenSSD/SPDK 同思路） |
-| 代价 | NOLOAD 段必须显式 memset；SRAM12 余量小；N=4 仍需表瘦身/SDRAM |
+| 代价 | NOLOAD 段必须显式 memset；DTCM 与 stack 共用（预留 20 KB）；DMA 不能访问 TCM；ITCM 代码需启动复制 |
 | 重估触发 | 维度继续增加；或表结构显著变大 |
-| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md) §3.5；`src/main.c` 的域数组与 `_Static_assert` |
+| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md) §3.5；`src/main.c` 的域数组与 `_Static_assert`；STM32H743 ITCM/DTCM 0-wait 平台特性（本仓平台选择，非 SSD 主控行业标准） |
 
 ### ADR-14 主机背压：三态返回，不内部排队
 
@@ -4630,6 +4632,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 文档重构 | 本文 | 文档改动不涉及固件，不需要上板；不得写成“功能已验证” |
 | v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
 | v0.94 cache program（host 16 KiB + GC/WL 批次） | **host 正常路径已上板；GC batch/负例未验** | H2testw 415/423 MB 通过，`cw=24906/99624/0 abort`；`mb=0`（GC batch 未触发）；FAILC 负例、失败注入、掉电注入仍见 `known_risks` RISK-CACHE-02..07 |
+| v0.97 DTCM/ITCM 热路径 | **正常路径已上板；压力/掉电未覆盖** | 页缓冲 AXI_NOCACHE 后 `format` + H2testw **840/885 KB/s、415/423 MB 无错误**（`.dtcm_data` 58,952 B、BCH SRAM4）。交换版：BCH 42,656 B→DTCM、`g_ftl_md`→SRAM4，`.dtcm_data`=67,832 B、free≈63 KB；release 额外 ITCM 集使 `.ssd_code_high` 29,728→61,384 B（debug 61,992 B 不变）。2026-10-23 该组合 H2testw **843/887 KB/s、415/423 MB 0 错误**，`bad=0`；相对 840/885 为噪声级，且 `mig=0/0`/`gcm=0` ⇒ 额外 ITCM 集收益未证实（RISK-TCM-05/09） |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
@@ -4872,16 +4875,21 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 对象 | 大小 | 域 |
 |---|---:|---|
-| `g_ftl`（描述符） | 2,976 B | AXI |
-| `g_ftl_migrate` | 4,268 B | AXI |
-| `g_ftl_wbuf` | 4,132 B | AXI |
+| `g_ftl`（描述符） | 8,984 B | DTCM |
+| `g_ftl_migrate` | 21,032 B | AXI |
+| `g_ftl_wbuf` | 4,132 B | DTCM |
 | `g_ftl_rr_page_scratch` | 2,048 B | AXI |
-| `g_l2p_cache` | 132,144 B | AXI |
+| `g_l2p_cache` | 133,700 B | AXI |
 | 五张表（`g_ftl_blocks` / `free` / `op` / `spare` / `closed`，合计） | 123,896 B | SRAM12（各自独立对象） |
-| `g_ftl_checkpoint_handle` | 10,680 B | SRAM3 |
-| `g_ftl_journal` | 2,108 B | SRAM3 |
-| `g_ftl_md` | 25,204 B | SRAM4 |
+| `g_ftl_checkpoint_handle` | 10,816 B | SRAM3 |
+| `g_ftl_journal` | 2,116 B | DTCM |
+| `g_ftl_md` | 33,752 B | SRAM4 |
 | CLI `g_wr_buf` | 16,384 B | AXI `.bss` |
+| FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
+| `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
+| BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,384 / 61,992 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象
 （`blocks` / `free` / `op` / `spare` / `closed` / `metadata_dir` / `journal` / `cp_handle` / `migrate` / `wbuf` / `rr_page_scratch`）。漏一个字段就是随机启动行为。

@@ -6035,6 +6035,69 @@ H2testw 仍待测。风险见 `RISK-HOST-07/08/09/10`、`RISK-L2P-06`。
 
 ---
 
+## v0.97 — DTCM/ITCM 热路径（正常路径已上板；压力/掉电未覆盖）
+
+**日期**：2026-10-23
+
+**内容**：
+
+- **DTCM P1（整目标文件放置，无逐变量修饰）**：`ftl.o` 的
+  `g_ftl`/`g_ftl_wbuf`/`g_ftl_journal`、`fc.o` 的命令池/描述符池/SQ/HSQ/CQ/簿记数组、
+  `nand_dispatch.o` 的 dispatch 队列、`fc_bch_engine.o` 的 BCH 静态表移入
+  `.dtcm_data`（交换版 release 67,832 B）；`metadata.o` 的 `g_ftl_md`（33,752 B）
+  回到 **SRAM4**（TCM 之前的基线域）。NAND 页缓冲固定 **AXI_NOCACHE**
+  （放 DTCM 会破坏 multi-plane program，见 RISK-TCM-08）；`ftl_init` 入口新增
+  `memset(ftl,0,sizeof(*ftl))`（DTCM 是 NOLOAD）。
+- **ITCM P1（整目标文件放置，无逐函数修饰）**：H743 `Reset_Handler` 新增
+  `.ssd_code_high` 从 FLASH 到 ITCM 的复制；链接脚本按目标文件收
+  `ftl.o` / `l2p_cache.o` / `wbuf.o` / `pending.o` / `cache_read.o` /
+  `cache_write.o` / `fc.o` / `fc_data_path.o` / `fc_bch_engine.o` /
+  `nand_dispatch.o` / `nand_fmc.o`（公共集：debug 61,992 B，94.6%）。
+- **release 额外 ITCM 集**：链接脚本另按对象路径 `*release/obj/...` 收
+  `allocator.o` / `journal.o` / `metadata.o` / `metadata_job.o` / `migrate.o` /
+  `gc.o` / `wear_leveling.o` / `bg_scheduler.o` / `bg_wiring.o` /
+  `completion_table.o` / `ftl_op.o` / `fc_interface.o` / `fc_queue.o` /
+  `fc_command.o` / `nand_engine.o`；debug 对象在 `debug/obj/`，不匹配。
+  release `.ssd_code_high` 61,384 B（余量 4,152 B），DTCM 布局不变。
+- linker 新增加 DTCM（预留 20 KB stack；历史实测 5,448 B，当前待复测）与 ITCM 容量 ASSERT；
+  `rules_link.mk` 的 SRAM 汇总增加 ITCM 行。
+- DMA/NAND 对象：`g_fc_buffer_pool` / `g_fc_return_staging` / `g_nand_channel_page_buffer`
+  固定留 `.noncacheable_buffer`。`g_l2p_cache`（133.7 KB）与 `g_ftl_blocks`（82 KB）暂不移动。
+- **顺带修复** `.noncacheable_buffer` 段通配：原脚本只有无点形式，
+  `nand_dispatch.o` 的页缓冲漏匹配、作为 orphan 落进 AXI_RAM（cacheable），
+  与“DMA 直访、D-Cache 关闭”的注释不符；补上带点通配（RISK-PLAT-01）。
+- **BCH 去堆**：`fc_bch_init(13,4)` 原先需要 41 KB 表 + 32 KB `roots`，TCM 版静态
+  数据后 DTCM 堆只剩约 67 KB，疑似初始化失败并静默跳过 ECC；改为 42,656 B 静态结构体
+  （roots 改 bitmap），与 `g_ftl_md` 交换域后放 **DTCM**，并打
+  `BCH ready` / `BCH init FAILED` 日志（RISK-TCM-06/09）。
+- **口径更正**：归档文档的“栈峰值 55 KB”无实测依据；唯一有串口证据的是 v0.75
+  `peak=5448 B`（`docs/archive/ftl_v075_board_verify.md:205`）。栈预留从 64 KB 改为
+  20 KB，`stack` 增加 `heap_used`（RISK-TCM-07）。
+- **页缓冲域定位（2026-10-23 板端 A/B）**：页缓冲放 DTCM 时，multi-plane program 的
+  handler 收到正确 `bitmap=0xff` 与源 buffer，但 NAND 读回全 FF，8 个 CP 候选块全失败；
+  基线（AXI_NOCACHE）`format` 成功，页缓冲放回 AXI_NOCACHE 后当前 TCM 版 `format` 也成功。
+  ⇒ 页缓冲固定 AXI_NOCACHE，不得再放 DTCM（RISK-TCM-08）。
+- **局部大对象**：`cp_step` 的 Anchor 2 KB、`cp_write_initial` 的 4 KB 栈帧、
+  `ftl_boot_recovery` 的 2 KB `cp_header_t`、`jrn_raw_page_blank` / `cp_probe_media_status` /
+  `bbt_medium_has_ftl_data` / PFR 扫描的 2 KB raw 缓冲全部移入 handle 或文件级 static。
+  实测栈帧：`cp_step` 2,128→168、`ftl_boot_recovery` 2,116→68、`cp_write_initial`
+  4,288→212、`cp_probe_media_status` 2,256→152、`bbt_medium_has_ftl_data` 2,192→80。
+
+**验证**：`make all`（零告警）/ `make release`（零告警）/ `make tests UT=FC` 通过；
+DTCM/ITCM 放置与 linker ASSERT 通过。`make tests UT=FTL` **未过，原因是冻结的测试源**
+（引用已删除的字段），未回退生产代码。**已上板（正常路径）**：页缓冲 AXI 版 `format` 通过，
+H2testw 415/423 MB **840/885 KB/s、0 错误**（基线 843/889）；`info avg=4209us`、
+`cw=24906/99624/7822/0`、`bad=0`；`stack peak=2,964 B`、`heap_used=0`、`alarm=0`。
+**BCH↔g_ftl_md 交换版 + release 额外 ITCM 集**（BCH DTCM / md SRAM4 / ITCM 61,384 B）
+同日上板：boot `BCH ready`、恢复通过，H2testw 415/423 MB **843/887 KB/s、0 错误**，
+`info avg=4171us`、`cw=24906/99624/7891/0`、`bad=0`。相对 840/885 差 +3/+2 KB/s，
+属测量抖动；本次 `mig=0/0`、`gcm=0`，未覆盖 GC/迁移路径 ⇒ 额外 ITCM 集收益未证实，
+按 RISK-TCM-05 保留（无回归）并待 GC/后台压力 A/B。压力/掉电场景仍未覆盖。
+
+**介质布局**：无变化。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

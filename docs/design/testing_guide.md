@@ -473,12 +473,47 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 
 | 方案 | 收益 | 风险/成本 | 判据 |
 |---|---|---|---|
-| EP 16 → 32 KB | 5–10% | RAM +16 KB；直方图/静态断言同步 | 分块出现 `<=32K`；无错误 |
+| EP 16 → 32 KB | 5–10%（估计） | RAM +32 KB（EP + bounce）；直方图/静态断言同步。**2026-10-23 决定暂不实施**：H2testw 受 USB FS 约束，预期收益小 | 分块出现 `<=32K`；无错误；若未来实施，按 32K→64K 的边际收益再评估 |
 | FC/NAND 子段 DWT | 定位剩余 6.6 ms | 只加观测 | 子段之和解释 6.6 ms |
 | BCH 表驱动/展开 | 编解码下降 | 需 UT 负例 | 纠错结果不变 |
 | PIO 按字 / `CONFIG_NAND_DMA` | 有限 | **FMC NAND 无专用 DMA 请求**，`nand_dma.c` 是 DMA2 mem2mem，不是外设 DMA | 与 PIO 对比；时序不退化 |
 | USB 内部 DMA | 仅 `GHWCFG2.arch==internal DMA` | 当前板 `arch=0`（slave-only） | 先看启动日志，不列优化项 |
 | USB HS 硬件 | 突破 FS 1.2 MB/s | 换板/PHY | 不在当前范围 |
+
+> **主机 FAT 分配单元 8K→32K 不是设备吞吐旋钮。** TinyUSB 仍按
+> `CFG_TUD_MSC_EP_BUFSIZE=16384` 分块（`include/tusb_config.h:39`），
+> 2026-10-23 的 `[USB ] wr chunk` 平均约 16 KB/call 已说明数据相粒度由 EP 缓冲决定；
+> 32K 簇只会减少主机 FAT 元数据，不减少设备侧 16 KB 异步完成往返。
+> 预期收益在噪声内；若未来要测吞吐，再 A/B `EP 16→32 KB`，而不是簇大小。本轮决定不实施 EP 扩展。
+>
+> **EP 不是越大越好：32 KB 是首选，64 KB 只在 32 KB A/B 有明确收益后再试。**
+> 每翻倍一次只再摊薄一次 FTL submit/complete 固定开销，32→64 KB 的增量约为
+> 16→32 KB 的一半；代价是 TinyUSB EP + bounce 共再 +64 KB AXI_RAM。主机簇大小
+> 64 KB 不需要 EP=64 KB 才正确——32 KB 会把它拆成两个数据相，语义不变。
+
+### 9.4 ITCM / DTCM（2026-10-23，正常路径已上板；压力/掉电未覆盖）
+
+| 项 | 当前值 | 判据 |
+|---|---|---|
+| `.ssd_code_high`（ITCM） | release 61,384 B / debug 61,992 B / 64 KB | VMA `0x00000000`；启动复制后 USB/NAND 正常；release 余量 4,152 B |
+| `.dtcm_data` | release 67,832 B / 128 KB | 预留 20 KB stack；交换版：BCH 进 DTCM、`g_ftl_md` 回 SRAM4 |
+| DTCM 内容 | 整对象放置：`ftl.o`（`g_ftl`/`g_ftl_wbuf`/`g_ftl_journal`）、`fc.o`（命令池+描述符池+SQ/HSQ/CQ+簿记）、`nand_dispatch.o`（dispatch queues）、`fc_bch_engine.o`（BCH 静态表） | 均为 CPU-only；**NAND 页缓冲不放 DTCM** |
+| SRAM4 内容 | `metadata.o` 的 `g_ftl_md`（33,752 B，NOLOAD，init 时 memset） | 回到 TCM 之前的基线域；基线 843/889 已验证 |
+| ITCM 内容 | 公共集（debug/release）：`ftl.o`、`l2p_cache.o`、`wbuf.o`、`pending.o`、`cache_read.o`、`cache_write.o`、`fc.o`、`fc_data_path.o`、`fc_bch_engine.o`、`nand_dispatch.o`、`nand_fmc.o`。release 额外集：`allocator.o`、`journal.o`、`metadata.o`、`metadata_job.o`、`migrate.o`、`gc.o`、`wear_leveling.o`、`bg_scheduler.o`、`bg_wiring.o`、`completion_table.o`、`ftl_op.o`、`fc_interface.o`、`fc_queue.o`、`fc_command.o`、`nand_engine.o` | 用对象路径 `*release/obj/...` 做 build-type 选择，不是 C 预处理器；debug 对象在 `debug/obj/`，不匹配额外集。超过 64 KB 或出现 relocation truncated 时按目标文件收窄 |
+| 板端 A/B | 基线 843/889 KB/s；TCM 版（release ITCM 29,728 B）840/885 KB/s；当前 release ITCM 61,384 B + BCH↔md 交换版 **843/887 KB/s**，`info avg=4171us`、`cw=24906/99624/7891/0`、`bad=0`、`mig=0/0`、`gcm=0`，H2testw 415/423 MB 无错误 | 与 840/885 差 +3/+2 KB/s，属测量抖动；本次未触发 GC/迁移，额外 ITCM 集收益未覆盖 |
+| BCH/堆 A/B | 旧实现 BCH 需 41 KB 表 + 32 KB roots 的 DTCM 堆；TCM 版只剩约 67 KB 堆，疑似初始化失败并静默跳过 ECC | 启动日志应出现 `[FC ] BCH ready: static tables, no heap`；写速恢复 ≥843 KB/s |
+| BCH↔md 交换（正常路径已上板） | BCH 42,656 B → DTCM；`g_ftl_md` 33,752 B → SRAM4；DTCM 67,832 B，free≈63 KB | 2026-10-23 boot `BCH ready` + 恢复 + H2testw 415/423 MB 0 错误（843/887 KB/s）通过；压力/掉电仍按 RISK-TCM-04 |
+| 页缓冲域 A/B | 页缓冲放 DTCM：multi-plane handler 数据正确但 NAND 读回全 FF，`format` 全候选失败；放 AXI_NOCACHE：`format` 成功且 H2testw 415/423 MB 通过（840/885 KB/s） | 页缓冲必须 AXI_NOCACHE；不得再条件放 DTCM |
+| ITCM 收益判据 | H2testw 是 USB FS（12 Mbit/s 链路，实测 843/887 KB/s 已接近可用带宽）+ NAND tPROG 约束下的顺序负载；本次 `mig=0/0`、`gcm=0`，额外 ITCM 模块基本未执行 | **不能用 H2testw 判断 ITCM 收益**；用 BCH/metadata/GC CPU-bound 微基准，或填盘后随机覆盖触发 GC 再 A/B |
+
+⚠ `DTCM_DATA` / `.dtcm_data` 是 NOLOAD：`g_ftl` 必须在 `ftl_init` 入口全量 memset；
+其余候选 handle 已有显式 memset。H743 startup 原先不复制 `.ssd_code_high`，本版已补
+`__ssd_code_high_load_start/start/end` 复制循环。
+
+⚠ DMA/NAND 页缓冲：`g_fc_buffer_pool` / `g_fc_return_staging` / `g_nand_channel_page_buffer`
+恒在 `.noncacheable_buffer`（`AXI_NOCACHE`，`0x24060000..0x24080000`）。
+**页缓冲放 DTCM 会静默破坏 multi-plane program**（NAND 读回全 FF），已由板端 A/B 证实；
+不得再按 `CONFIG_NAND_DMA` 条件把它放回 DTCM。
 
 **不建议**为了跑分提前回 CSW 或跨 BOT 命令合并写：会破坏掉电语义。
 
