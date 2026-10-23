@@ -274,7 +274,7 @@ static inline bool ftl_is_l2p_log_gblock(WORD g)
 
 /* ── 介质布局版本（NAND 上持久化格式的版本号）──
  * 任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
- * 都必须把 BASE +1。开机 cp_find_latest / anchor_page_valid 都校验它；不符
+ * 都必须把 BASE +1。开机 cp_pool_find_latest / anchor_page_valid 都校验它；不符
  * （或介质上根本没有当前版本的 Checkpoint）⇒ ftl_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
@@ -1061,7 +1061,7 @@ void md_handle(md_dir_cache_t *dir, const bg_info_t *info, md_status_t *out);
  * md_is_busy - 整理 job 是否在跑（有命令在飞或处在中间 phase）。
  *
  * 用途：让**调用者**区分"我的重试为什么没进展"与"卡死"。当前唯一读者是
- * checkpoint.c 的 cp_flush_regions：脏 region 取不到槽（FTL_AGAIN）时若 job 在推进，
+ * checkpoint.c 的 cp_regions_flush：脏 region 取不到槽（FTL_AGAIN）时若 job 在推进，
  * 就**不该**累计 CP 的 stall 计数——否则一次正常的长压缩会把 Checkpoint 打回去。
  *
  * @return true = 有 job 在跑；false = 空闲（或 dir == NULL）。

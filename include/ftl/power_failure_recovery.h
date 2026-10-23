@@ -81,7 +81,7 @@ typedef struct
 /*
  * ftl_media_check_format - 判定介质是否需要（重新）格式化（区分 I/O 错误）
  *
- * 判据来自 `cp_probe_media_status`：
+ * 判据来自 `cp_media_status_probe`：
  *   · 当前版本 CP        ⇒ 不格式化；
  *   · 空片 / 版本不符    ⇒ 需要格式化；
  *   · CP 读不通（IO_ERROR）⇒ **拒绝格式化**，返回 FTL_ERROR——一次瞬时读错不能变成
@@ -101,7 +101,7 @@ ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  * → ②（可选）`verify`：逐块「写图样 → 读回比对 → 再擦」，失败块标 BAD 并落盘。
  *    用于**出厂标记已丢失的二手片**重建可信坏块表（本仓自拟的体检实现；耗时数分钟）
  * → ③ `md_init` 复位 Directory
- * → ④ `cp_write_initial` 写当前版本标记。
+ * → ④ `cp_initial_record_write` 写当前版本标记。
  *
  * ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
  * ⚠ `verify=true` 会显著拉长 format（约数分钟），自动格式化路径固定传 false。
@@ -130,7 +130,7 @@ void ftl_boot_log_bad_areas(const struct ftl_context *ftl);
  *
  * 流程：
  *   ① 扫描 Journal（jrn_scan_latest，获取最新页/sequence）
- *   ② 扫描 Checkpoint（cp_find_latest）
+ *   ② 扫描 Checkpoint（cp_pool_find_latest）
  *   ③ 判断类型 → fresh / clean / power failure
  *   ④ 对应恢复路径
  *

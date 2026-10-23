@@ -1040,7 +1040,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
      *         free/op/spare/closed 的读者按 count 有界，逐表清零让 NOLOAD 语义确定。
      * metadata_dir：load/init 不覆盖全部字段 ⇒ 先整表清零。
      * journal：init 只重置部分 job 字段 ⇒ 先整表清零。
-     * cp_handle：active 在 cp_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
+     * cp_handle：active 在 cp_job_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
      * migrate / wbuf / rr_page_scratch：Phase 1.5 挂载块，与其余数组一致清零。
      * ⚠ 全部 memset 必须早于 md_load。 */
     memset(ftl->table_refs.blocks, 0, FTL_BLOCK_TOTAL * sizeof(*ftl->table_refs.blocks));
@@ -2112,7 +2112,7 @@ static void ftl_flush_kick_cp(ftl_ctx_t *ftl)
     trigger.jrn_get_watermark = jrn_get_watermark(ftl->journal);
     trigger.emergency         = jrn_is_emergency(ftl->journal);
     trigger.force             = true;
-    trigger.reason            = CHECKPOINT_REASON_EXPLICIT;
+    trigger.reason            = CP_REASON_EXPLICIT;
 
     cp_status_t status;
     cp_handle(ftl->cp_handle, &trigger, &status);

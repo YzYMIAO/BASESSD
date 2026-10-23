@@ -479,7 +479,7 @@ static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_er
  *     因此「必须在 bbt_init 之后调用」是承重的——出厂标记此时已在 BST 里。
  *   ⚠ ②/体检/写初始元数据任一步中途掉电：最新 BBT record 仍带
  *     FORMAT_IN_PROGRESS，下次开机会继续格式化，而不是把“有 BBT、无 CP”
- *     误判成损坏介质（cp_probe_media_status 的 IO_ERROR 分支）。
+ *     误判成损坏介质（cp_media_status_probe 的 IO_ERROR 分支）。
  * -------------------------------------------------------------------- */
 ftl_status_e bbt_format_erase(alc_t *alloc)
 {

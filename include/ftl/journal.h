@@ -88,8 +88,9 @@ typedef enum
  * jrn_truncate_step_e - jrn_truncate_plan 的结果
  *
  * ⚠ 这里的 JRN_TRUNC_NO_TRUNCATE **不是硬失败**——是「水位不满足 ⇒ 安全方向地
- *   放弃预擦」，调用者照旧收尾（预擦只是磨损优化）。故它不能与 cp_flush_step_e /
- *   md_compact_step_e 共用一套名字（那两处的 FAILED 都要求 abort）。
+ *   放弃预擦」，调用者照旧收尾（预擦只是磨损优化）。故它不能与
+ *   md_compact_step_e / Checkpoint flush 步进结果共用一套名字
+ *   （那两处的 FAILED 都要求 abort）。
  */
 typedef enum
 {

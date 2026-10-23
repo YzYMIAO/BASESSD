@@ -1033,7 +1033,7 @@ static bool l2p_flush_resources_available(void)
  *       ① 全部 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）；
  *       ③ 刚换新块且 Free Pool 吃紧，本函数只登记压缩请求、本次不发放槽位。
  *       三者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
- *       （`l2p_flush_kick_owner` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
+ *       （`l2p_flush_kick_owner` 跳过该行、`cp_regions_flush` 直接**中止 Checkpoint**）。
  *       背压让它们下轮重试即可。**绝不回退任何固定位置**（本仓没有固定的 region
  *       位置；把"未映射"写成"有映射"会让下次再写同一页即损坏）。
  *     · ⚠ 槽位在 append_slot 里就消耗掉了：若其后建链/提交失败，该槽作废（写指针
@@ -1071,7 +1071,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     if (!md_append_slot_pair(owner->metadata_dir, owner->alloc, region_addr))
     {
         /* 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
-         * ⚠ 不能报 FTL_ERROR：l2p_flush_kick_owner 会跳过本行、cp_flush_regions 会**中止
+         * ⚠ 不能报 FTL_ERROR：l2p_flush_kick_owner 会跳过本行、cp_regions_flush 会**中止
          *   Checkpoint**——一次正常的后台压缩不该把 CP 打回去。 */
         return FTL_AGAIN;
     }
@@ -1093,7 +1093,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     if (build_status != FTL_OK)
     {
         /* 命令池空是瞬态背压（FTL_AGAIN）；只有地址/建链的硬失败才是 FTL_ERROR。
-         * 混淆二者会让 cp_flush_regions 中止 Checkpoint（H38）。 */
+         * 混淆二者会让 cp_regions_flush 中止 Checkpoint（H38）。 */
         return build_status;
     }
 

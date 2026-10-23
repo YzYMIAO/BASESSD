@@ -7,7 +7,7 @@
  *   Closed SB 列表（full metadata rebuild，全 NAND 扫描）与写指针扫描。
  *
  * 与 checkpoint.c / journal.c 的分工：
- *   checkpoint.c —— Checkpoint 的写与查找（cp_find_latest）；
+ *   checkpoint.c —— Checkpoint 的写与查找（cp_pool_find_latest）；
  *   journal.c    —— Journal 的写与回放（jrn_replay）；
  *   本文件       —— 只做**编排**：把两者拼成三条启动路径，自身不解析介质格式。
  *
@@ -100,7 +100,7 @@ static void         ftl_recovery_reset_blocks(ftl_ctx_t *ftl);
  *   功能：判定介质是否需要（重新）格式化，并把“读失败”与“需要格式化”分开。
  *   参数：ftl —— FTL 实例；out_need_format —— true = 空片/版本不符，需要格式化。
  *   返回：FTL_OK 判定完成；FTL_ERROR CP 介质读不通（**拒绝格式化**，调用者应停止启动/重试）。
- *   实现要点：判据来自 cp_probe_media_status：
+ *   实现要点：判据来自 cp_media_status_probe：
  *             · CURRENT            ⇒ 不格式化；
  *             · NO_RECORD / 版本不符 ⇒ 格式化（空片多擦一次，写标记后自愈）；
  *             · IO_ERROR            ⇒ 不格式化，返回错误——一次瞬时读错不能变成整片擦除。
@@ -110,7 +110,7 @@ ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与局部 bool。 */
 
     DWORD             media_version = 0U;
-    cp_media_status_e st            = cp_probe_media_status(ftl->cp_handle, &media_version);
+    cp_media_status_e st            = cp_media_status_probe(ftl->cp_handle, &media_version);
 
     switch (st)
     {
@@ -140,7 +140,7 @@ ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  *   实现要点：① `bbt_format_erase` 两阶段：**先落 BBT**（当前坏块图 +
  *                FORMAT_IN_PROGRESS），再擦除 BBT 池之外的块（擦失败标 BAD）；
  *             ② `md_init` 把 Directory 复位为"全部未映射"；
- *             ③ `cp_write_initial` 写当前版本标记 ⇒ 下次开机版本判据命中，
+ *             ③ `cp_initial_record_write` 写当前版本标记 ⇒ 下次开机版本判据命中，
  *                格式化只发生一次；
  *             ④ **提交点**：initial CP **读回成功**后才清 FORMAT_IN_PROGRESS。
  *                中间任一步（含 format --verify 的数分钟体检）复位/掉电，
@@ -349,7 +349,7 @@ static ftl_status_e ftl_format_verify_blocks(ftl_ctx_t *ftl)
  *   格式化是跨多次 NAND 写的长事务：擦除 →（可选）全片体检 → 初始 Anchor →
  *   initial Checkpoint。FORMAT_IN_PROGRESS 从 `bbt_format_erase` 起点保持到
  *   **initial CP 读回成功**；中途复位/掉电 ⇒ 下次开机按「继续格式化」处理
- *   （cp_probe_media_status 返回 NO_RECORD），而不是把「有 BBT、无 CP」
+ *   （cp_media_status_probe 返回 NO_RECORD），而不是把「有 BBT、无 CP」
  *   判成损坏介质而拒绝启动。
  *
  *   显式失败路径**不**调用本函数：标志保持置位，下次开机重试格式化。
@@ -466,7 +466,7 @@ ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify)
     (void)ftl_boot_carve_pools(ftl);
 
     /* 完整 21 页 initial CP：块元数据 + 磨损快照 + Header（最后 commit）。 */
-    if (cp_write_initial(ftl) != FTL_OK)
+    if (cp_initial_record_write(ftl) != FTL_OK)
     {
         return FTL_ERROR;
     }
@@ -478,7 +478,7 @@ ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify)
         cp_header_t *probe     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
         WORD         probe_idx = UINT16_MAX;
 
-        if (cp_find_latest(ftl->cp_handle, probe, &probe_idx) != FTL_OK)
+        if (cp_pool_find_latest(ftl->cp_handle, probe, &probe_idx) != FTL_OK)
         {
             LOGE(LOG_TAG_FTL "format: CP readback failed (check ECC/pool/write point)\r\n");
             return FTL_ERROR;
@@ -584,7 +584,7 @@ void ftl_boot_log_bad_areas(const struct ftl_context *ftl)
  *   实现要点：① 扫 Journal 环形块池取最新页（jrn_scan_latest）——**只读不改状态**，
  *                故不调 jrn_replay（后者会修改 journal 内部状态）。三条启动路径
  *                都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
- *             ② cp_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
+ *             ② cp_pool_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
  *             ③ 最新页 page_seq ≤ cp->jrn_get_sequence ⇒ 干净关机；否则异常掉电。
  * -------------------------------------------------------------------- */
 ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
@@ -606,7 +606,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     cp_header_t *cp     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
     WORD         cp_idx = UINT16_MAX;
 
-    if (cp_find_latest(ftl->cp_handle, cp, &cp_idx) != FTL_OK)
+    if (cp_pool_find_latest(ftl->cp_handle, cp, &cp_idx) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。 */
         ftl->md_load_failed = 0U;
@@ -658,8 +658,8 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
         return FTL_ERROR;
     }
 
-    WORD      *block_words  = cp_get_block_words(ftl->cp_handle);
-    const bool blocks_valid = cp_load_block_table(ftl->cp_handle, cp, cp_idx, block_words);
+    WORD      *block_words  = cp_block_words_get(ftl->cp_handle);
+    const bool blocks_valid = cp_block_table_load(ftl->cp_handle, cp, cp_idx, block_words);
 
     if (!blocks_valid)
     {
@@ -667,7 +667,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     }
 
     /* 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。 */
-    if (!cp_load_wear_table(ftl->cp_handle, cp, cp_idx))
+    if (!cp_wear_table_load(ftl->cp_handle, cp, cp_idx))
     {
         LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%u seq=%lu) — read pages kept, rest default\r\n", (unsigned)cp_idx, cp->sequence);
     }
@@ -831,8 +831,8 @@ static ftl_status_e ftl_boot_fresh_start(struct ftl_context *ftl, const jrn_page
      *    已编程页二次编程；序号从 1 重来还会让下次开机把旧页当新页回放、复活旧映射。 */
     jrn_resume(ftl->journal, ring, 1U);
 
-    /* ⑤ 复位 Checkpoint 定时基准（本实例 cp 游标已由 cp_find_latest 置空） */
-    cp_reset_timer(ftl->cp_handle);
+    /* ⑤ 复位 Checkpoint 定时基准（本实例 cp 游标已由 cp_pool_find_latest 置空） */
+    cp_timer_reset(ftl->cp_handle);
 
     /* ⑥ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。
      *    必须在块状态重建（reset / rebuild / carve）之后。 */
@@ -866,9 +866,9 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
     /* ① 共享 cache 已由设备级 init 置空；本路径只按 CP bitmap 约束本 owner 的行
      *    （首次 miss 时按需从 NAND L2P Table 加载）。 */
     bool restored     = false;
-    /* 块元数据快照由 ftl_boot_recovery 的 cp_load_block_table 读进
+    /* 块元数据快照由 ftl_boot_recovery 的 cp_block_table_load 读进
      * cp_handle 的常驻缓冲；clean 路径直接取同一缓冲。 */
-    WORD *block_words = cp_get_block_words(ftl->cp_handle);
+    WORD *block_words = cp_block_words_get(ftl->cp_handle);
 
     if (blocks_valid != 0U)
     {
@@ -936,7 +936,7 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
     jrn_resume(ftl->journal, ring, cp->jrn_get_sequence);
 
     /* ③ Controller → Ready */
-    cp_reset_timer(ftl->cp_handle);
+    cp_timer_reset(ftl->cp_handle);
     *blocks_restored = restored;
 
     /* ④ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。 */
@@ -1043,7 +1043,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
 
     /* ② 块元数据快照恢复（若有效）：先恢复块元数据，回放时才能同步维护 valid_count。 */
     BYTE             blocks_applied = 0U;
-    WORD            *block_words    = cp_get_block_words(ftl->cp_handle);
+    WORD            *block_words    = cp_block_words_get(ftl->cp_handle);
     jrn_replay_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
 
@@ -1152,7 +1152,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
     recovery_refill_spare_pools(ftl);
 
     /* ⑥ Controller → Ready */
-    cp_reset_timer(ftl->cp_handle);
+    cp_timer_reset(ftl->cp_handle);
 
     /* ⑦ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。 */
     md_log_area_restore(ftl->metadata_dir, &ftl->alloc);

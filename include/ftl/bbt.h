@@ -159,7 +159,7 @@ void bbt_init(alc_t *alloc);
  *
  * 只读。用于两处判空：
  *   · `bbt_init`：无有效 BBT 时，只有空片才允许出厂扫描；
- *   · `cp_probe_media_status`：CP 池没有可定位 record 时，区分“空片”与
+ *   · `cp_media_status_probe`：CP 池没有可定位 record 时，区分“空片”与
  *     “有元数据但 CP 缺失/损坏”。调用者应先用 raw 读确认命令通路正常，
  *     否则“总线读死”也会返回 false。
  *

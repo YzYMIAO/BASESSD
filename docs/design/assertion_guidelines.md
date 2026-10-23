@@ -1166,7 +1166,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `bg_scheduler.c` | 3 | 2 | 任务表项判空 |
 | `ftl.c` | 3 | 3 | `ftl_init` + 本轮补的 `ftl_flush` / `ftl_trim`（C5：唯一调用点已 `ASSERT`） |
 | `gc.c` | 3 | 1 | — |
-| `checkpoint.c` | 2 | 4 | `cp_begin` / `checkpoint_journal_watermark` 转；另 2 处见三、 |
+| `checkpoint.c` | 2 | 4 | `cp_job_begin` / `checkpoint_journal_watermark` 转；另 2 处见三、 |
 | `wear_leveling.c` | 0 | 6 | **纯删**（恒真）——见三、的分叉 |
 | `wear.c` | 0 | 2 | **纯删**（恒真） |
 | `ftl_op.c` | 0 | 1 | **纯删**（同文件调用者） |

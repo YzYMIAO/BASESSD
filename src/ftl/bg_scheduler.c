@@ -190,7 +190,7 @@ static cp_trigger_t bg_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason
  *   要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死。 */
 static void bg_task_cp_join(ftl_ctx_t *ftl)
 {
-    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CHECKPOINT_REASON_ADVANCE, false);
+    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CP_REASON_ADVANCE, false);
     cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);
@@ -242,11 +242,11 @@ static void bg_task_journal_erase(ftl_ctx_t *ftl)
 }
 
 /* 表 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
- * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。cp_begin 只装配 job、
+ * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。cp_job_begin 只装配 job、
  * 单飞行（cp_handle.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。 */
 static void bg_task_cp_emergency(ftl_ctx_t *ftl)
 {
-    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CHECKPOINT_REASON_EMERGENCY, false);
+    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CP_REASON_EMERGENCY, false);
     cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);
@@ -289,10 +289,10 @@ static void bg_task_bbt(ftl_ctx_t *ftl)
 
 /* 表 11 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
  * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
- * job 装配由 cp_begin（提交即返回），成败由 [CP] 心跳判。 */
+ * job 装配由 cp_job_begin（提交即返回），成败由 [CP] 心跳判。 */
 static void bg_task_cp_trigger(ftl_ctx_t *ftl)
 {
-    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CHECKPOINT_REASON_TIMER, false);
+    const cp_trigger_t trigger = bg_cp_trigger_build(ftl, CP_REASON_TIMER, false);
     cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);

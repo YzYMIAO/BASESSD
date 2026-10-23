@@ -91,7 +91,8 @@ typedef enum
  *
  * ⚠ 这里的 RR_PLANE_WAIT **不是硬失败**——是「该 LBA 的 L2P region 还在异步加载，
  *   原地等」；调用者据此**清零** stall 计数（加载在飞是有确定完成时刻的进展）。故它不能
- *   与 md_compact_step_e / cp_flush_step_e 共用一套名字（那两处的 FAILED 都要求 abort）。
+ *   与 md_compact_step_e / Checkpoint flush 步进结果共用一套名字（那两处的 FAILED
+ *   都要求 abort）。
  */
 typedef enum
 {
