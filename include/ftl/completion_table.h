@@ -87,9 +87,9 @@ void *ct_take(WORD cmd_id);
 /*
  * ct_get_count - 当前占用（未决）的表项数（观测 / 自检口）。
  *
- * ⚠ 后台档位判定（ftl_bg_level_select）**刻意不**用它：档位要的是 host IO 忙闲，
+ * ⚠ 后台档位判定（bg_scheduler_level_select）**刻意不**用它：档位要的是 host IO 忙闲，
  *   而 host 请求不经旁表（ftl_host_io_callback 的 ctx == NULL）⇒ 旁表占用与 host 负载无关。
- *   档位判据是 pending 占用（见 ftl.c 的 ftl_bg_level_select）。
+ *   档位判据是 pending 占用（见 ftl.c 的 bg_scheduler_level_select）。
  *
  * @return 占用槽位数（0..COMPLETION_TABLE_SIZE）
  */

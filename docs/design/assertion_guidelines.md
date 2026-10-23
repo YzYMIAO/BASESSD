@@ -1174,10 +1174,10 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 
 > ⚠ **2026-10-19 补记**（§3.12 审查，见 `known_risks.md §2J`）：上表是**当轮批次记录**，
 > 不随之后改动回写。当前实际状态：
-> `bg_scheduler.c` 引擎段入口 = **3 处** `ASSERT`（`sched` / `table` 非空 +
-> `count <= BG_TASK_COUNT` **容量门**——容量门必须在拷贝循环**之前**，否则越界已经发生）；
-> 接线（`bg_a_*` 适配器 / 任务表 `s_bg_tasks` / 档位表 `g_bg_level_cfg` / Phase 3 入口）
-> 与引擎同处 `src/ftl/bg_scheduler.c`；`ftl_bg_init` / `ftl_bg_service` 的入参由
+> `bg_scheduler.c` 的任务装载 = `bg_scheduler_init`（装载内部静态表 `s_bg_tasks`，
+> **无 ASSERT**：表长是编译期常量，`_Static_assert` 已证明 == `BG_TASK_COUNT`）；
+> 接线（`bg_task_*` 适配器 / 任务表 `s_bg_tasks` / 档位表 `s_bg_level_cfg` / Phase 3 入口）
+> 与引擎同处 `src/ftl/bg_scheduler.c`；`bg_scheduler_init` / `bg_scheduler_service` 的入参由
 > `ftl_init` / `ftl_service` 调用链保证，不重复 `ASSERT`。
 
 配套：8 个头文件（`allocator.h` / `bbt.h` / `migrate.h` / `metadata.h` / `journal.h` /

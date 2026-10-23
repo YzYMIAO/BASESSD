@@ -18,7 +18,7 @@
  *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
  *   Phase 2    ct_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
  *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
- *   Phase 3    ftl_bg_service —— 时间预算后台调度（本文件只有一行调用）
+ *   Phase 3    bg_scheduler_service —— 时间预算后台调度（本文件只有一行调用）
  *
  * 文件结构（与下方分区注释一一对应）：
  *   1. 内部辅助        ftl_confirm_write / ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成
@@ -28,7 +28,7 @@
  *   4. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
  *
  * ⚠ 后台调度在 `ftl/bg_scheduler.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
- *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / Phase 3 入口 ftl_bg_service；
+ *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / Phase 3 入口 bg_scheduler_service；
  *   通用引擎也在同一文件。本文件不持有任何后台策略。
  *
  * ⚠ 页打包写缓冲在 `ftl/wbuf.c`（wbuf.h 定义 wb_handle_t），本文件只调用其接口。
@@ -1136,7 +1136,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     /* ├─ 统计 ── */
     /* ├─ 后台调度器任务表（10 项；must-run + interval/budget）──
      * 必须在所有在飞的字段就绪后装载（适配器只依赖实例字段与 kick，无额外依赖）。 */
-    ftl_bg_init(ftl);
+    bg_scheduler_init(&ftl->bg);
 
     return FTL_OK;
 }
@@ -1378,7 +1378,7 @@ void ftl_service_pump(void)
  *   返回：无。
  *   实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
  *             实例调本函数（多实例下所有实例都要推进，不能只跑 [0][0][0]）。
- *             Phase 3 收缩为一次 ftl_bg_service——档位选择 / 任务表 / 预算规模全在
+ *             Phase 3 收缩为一次 bg_scheduler_service——档位选择 / 任务表 / 预算规模全在
  *             `ftl/bg_scheduler.c`（含 bg_suspend 判定，见该处头注）。
  * -------------------------------------------------------------------- */
 void ftl_service(ftl_ctx_t *ftl)
@@ -1419,7 +1419,7 @@ void ftl_service(ftl_ctx_t *ftl)
 
     /* Phase 3: 时间预算后台调度 —— 档位选择 / 10 项任务表 / 预算规模 / bg_suspend
      * 判定全在 ftl/bg_scheduler.c（本文件不持有后台策略）。 */
-    ftl_bg_service(ftl);
+    bg_scheduler_service(ftl);
 }
 
 /* ── 子操作下发（一条 host 请求 → 多个 FC 子操作）──

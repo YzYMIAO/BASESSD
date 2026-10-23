@@ -2534,7 +2534,7 @@ Checkpoint 的作用是：
   Anchor 协调、块元数据快照编码与落盘、Journal 截断协调。
 - **不做**：不定义 Journal 记录格式（§3.7）；不定义 Anchor 页格式（§3.5）；
   不决定 L2P 写回细节（§3.6）。
-- **调用者**：后台 `bg_a_cp_trigger` / `bg_a_emergency_cp` / `bg_a_checkpoint`；
+- **调用者**：后台 `bg_task_cp_trigger` / `bg_task_cp_emergency` / `bg_task_cp_join`；
   boot 的 `cp_find_latest` / `load_block_table`。
 
 #### 3.8.3 结构与不变量
@@ -3171,29 +3171,30 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
   - Phase 2.5：`pend_confirm_service` → 遍历组 `ftl_drain_group` → `wb_handle(MAYBE_FLUSH_IDLE)`；
-  - Phase 3：`ftl_bg_service(ftl)`（`ftl.c` 里只有这一行调用）。
+  - Phase 3：`bg_scheduler_service(ftl)`（`ftl.c` 里只有这一行调用）。
 - **`bg_scheduler.c/h`**：一个模块承载两层内容——引擎（must-run pass + 预算 pass +
   interval 门 + 预算截断，函数本身零 kick 知识）与 FTL 策略段（10 个 `static` 适配器把
-  异构 kick 包成 `void(ftl_ctx_t*)` + 任务表 `s_bg_tasks` + 档位预算表 `g_bg_level_cfg` +
-  `ftl_bg_init` / `ftl_bg_level_select` / `ftl_bg_service`）。GC / WL / predict 的求值
+  异构 kick 包成 `void(ftl_ctx_t*)` + 任务表 `s_bg_tasks` + 档位预算表 `s_bg_level_cfg` +
+  `bg_scheduler_init` / `bg_scheduler_level_select` / `bg_scheduler_service`）。GC / WL / predict 的求值
   节拍在 **migrate handle 内自持**，不在策略段。
 - **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎函数不决定档位（档位是 FTL 域
   策略，归策略段）。
 
 #### 3.12.3 结构与不变量
 
-`bg_task_t`：`func` / `interval_ms` / `last_run_ms` / `budget_us` / `must_run`（`bool`）。
-`bg_sched_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
+`bg_task_t`：`func` / `mask` / `interval_ms` / `last_run_ms` / `budget_us` / `must_run`（`bool`）。
+`bg_scheduler_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
 引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，供 typed 模块
 入口构造 `bg_info_t`）。
 `bg_level_cfg_t`：每轮总预算 / L2P flush 条数上界 / 任务掩码。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
-再加一个平行数字就是第二套坐标（C9），且必然漂移。加任务 = 在 `s_bg_tasks` 里插一行 +
-同步 `g_bg_level_cfg` 的掩码位。表项数由 `_Static_assert` 挡在编译期（超 `BG_TASK_COUNT`
-即越界写 `tasks[]` 并踩掉 `task_count`，编译期无声）。
+再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
+（`BG_TASK_*`），表序不再兼职位号。加任务 = 在 `s_bg_tasks` 里插一行并给 `.mask` 新位 +
+视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`。表项数由 `_Static_assert` 在编译期
+锁死为 `BG_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
-**10 项任务**（具名任务 ID 见 `bg_task_id_t`；表序 = 执行序 = 优先级）：
+**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）：
 
 | 表序 | 任务 | 类型 | interval | 预算 | 语义 |
 |---:|---|---|---:|---:|---|
@@ -3228,7 +3229,7 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
-   判定收在 `ftl_bg_service` 首行（早于 must-run pass）。
+   判定收在 `bg_scheduler_service` 首行（早于 must-run pass）。
 
 #### 3.12.4 主循环
 
@@ -3240,9 +3241,9 @@ flowchart TB
     subgraph "ftl_service ftl 每实例"
         S1["pend_confirm_service"] --> S2["逐组 ftl_drain_group"]
         S2 --> S3["wb_handle(MAYBE_FLUSH_IDLE)"]
-        S3 --> S4{"ftl_bg_service: bg_suspend"}
+        S3 --> S4{"bg_scheduler_service: bg_suspend"}
         S4 -- "是" --> S5["return"]
-        S4 -- "否" --> S6["ftl_bg_level_select 选档"]
+        S4 -- "否" --> S6["bg_scheduler_level_select 选档"]
         S6 --> S7["bg_scheduler_run"]
         S7 --> S8["Pass 0 must-run"]
         S7 --> S9["Pass 1 interval 预算 表序"]
@@ -3280,7 +3281,7 @@ flowchart TB
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
 | `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
 | 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_scheduler.c` |
-| `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
+| `BG_MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### 3.12.8 主流对照
 
@@ -4309,7 +4310,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | **块** | NONE / FREE / OPEN / CLOSED / LOG / RETIRED / BAD | 分配 / 写满 / 搬移 / 标坏 | allocator / migrate / bbt |
 | **mig job** | IDLE → READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE | 页/plane 推进 | `mig_handle` / `ftl_migrate_callback` |
 | **RR job** | IDLE → PLANE → SF_SET → READ → … → FINISH | 读结果 / 重试耗尽 / 提交卡死 | `rr_handle` / `ftl_read_recovery_callback` |
-| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `ftl_bg_level_select` |
+| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `bg_scheduler_level_select` |
 
 **状态机的统一约定**：
 
@@ -4860,7 +4861,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `GC_LOG_INTERVAL_MS` | 1000 | `include/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
 | 档位预算 | IDLE 2000 / NORMAL 2000 / BUSY 700 µs | `src/ftl/bg_scheduler.c` |
-| `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
+| `BG_MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### FC 资源
 
@@ -4888,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,360 / 62,064 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,336 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象
@@ -4912,7 +4913,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `rr_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
 | `wb_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
 | `ftl_mod_state_e` / `ftl_mod_status_t` / `bg_info_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀 / 每轮动态信息 |
-| `bg_sched_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
+| `bg_scheduler_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
 | `bbt_header_t` / `bbt_state_t` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_t` | `include/ftl/checkpoint.h` | CP 磨损快照条目（8 B/块）|
 

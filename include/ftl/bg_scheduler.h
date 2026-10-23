@@ -7,8 +7,8 @@
  * 一个模块同时承载两层内容：
  *   · 引擎：must-run pass + 预算 pass（interval 门 / charge 计账 / 预算不足截断）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
- *     void(ftl_ctx_t*)）+ 档位→预算映射（g_bg_level_cfg）+ 档位选择
- *     （ftl_bg_level_select）+ Phase 3 入口（ftl_bg_service）。
+ *     void(ftl_ctx_t*)）+ 档位→预算映射（s_bg_level_cfg）+ 档位选择
+ *     （bg_scheduler_level_select）+ Phase 3 入口（bg_scheduler_service）。
  * 设计见 docs/design/ftl_design.md §3.12。
  *
  * 引擎函数本身不知道任何具体后台任务；FTL 任务表与档位策略集中在本文件的
@@ -21,6 +21,8 @@
  *     interval 门控、不占预算**——它们是防死锁/防 host 读挂起的动作，删了系统会挂。
  *   · interval_ms = 最小执行间隔；0 = 不设调度器级间隔（任务内部事件门管节流，如
  *     journal 的页满门）。last_run_ms == 0 作「尚未运行」哨兵 ⇒ 立即跑。
+ *   · task_mask = 本档位允许的预算任务位集合（BG_IDLE/NORMAL/BUSY_TASKS 预设）；
+ *     每个表项用 `.mask` 声明自己的位，表序只决定执行顺序。
  *   · budget_us = 单次**计账上限**（charge = MIN(elapsed, budget_us)），不是执行中断/
  *     硬钳制：任务函数跑到返回为止，超出的时间只是不被计入 charge。
  *     ⚠ kick 全部「提交即返回」⇒ elapsed 只反映 CPU 时间（平台 time_us 实测 SysTick
@@ -42,12 +44,12 @@ struct ftl_context;
 typedef struct ftl_context ftl_ctx_t;
 
 /* tasks[] 容量。装载表的项数不得超出——超出即越界写 tasks[] 并踩掉 task_count。
- * 装载点 s_bg_tasks 用 _Static_assert 在编译期挡住（那里同时看得见表与容量），
- * bg_scheduler_init 另有一条运行期 ASSERT + release 截断兜其他调用者。 */
+ * 装载点 s_bg_tasks 用 _Static_assert 在编译期挡住（那里同时看得见表与容量）；
+ * bg_scheduler_init 的装载数直接取表长，不接收运行期 count 参数。 */
 #define BG_TASK_COUNT (10U)
 
-/* ── 档位（负载 → 预算规模，见 bg_scheduler.c g_bg_level_cfg；枚举在 ftl_type.h）── */
-#define BG_LEVEL_NUM (3U) /* 值域上界：档位表数组维度 + 档位下标的边界断言 */
+/* ── 档位（负载 → 预算规模，见 bg_scheduler.c s_bg_level_cfg；枚举在 ftl_type.h）── */
+#define BG_LEVEL_NUM (3U) /* 档位表数组维度 */
 
 /* 统一任务签名：适配器包异构 kick → void(ftl_ctx_t*) */
 typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
@@ -55,6 +57,7 @@ typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
 typedef struct
 {
     bg_task_func_t func;        /* 适配器（FTL 策略段定义） */
+    DWORD          mask;        /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；budget pass 按档位 task_mask 选择 */
     DWORD          interval_ms; /* 最小执行间隔；0 = 不设调度器级间隔（内部事件门管） */
     DWORD          last_run_ms; /* 上次运行时刻；0 = 尚未运行 ⇒ 立即跑（哨兵） */
     WORD           budget_us;   /* 单次计账上限：charge = MIN(elapsed, budget_us) */
@@ -65,9 +68,10 @@ typedef struct
 typedef struct
 {
     DWORD total_budget_us; /* 每轮总预算（µs） */
-    DWORD task_mask;       /* 本档位允许的 budgeted 任务掩码（bit = 任务下标） */
+    DWORD task_mask;       /* 本档位允许的预算任务位集合（BG_TASK_*，定义见 bg_scheduler.c） */
 } bg_level_cfg_t;
 
+/* 每实例一份的后台调度器状态 */
 typedef struct
 {
     bg_task_t tasks[BG_TASK_COUNT];
@@ -79,52 +83,39 @@ typedef struct
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
      * typed 模块入口的 bg_info_t.load_level 就取这里，避免适配器各自再选一次档。 */
     bg_level_e level;
-} bg_sched_t;
+} bg_scheduler_t;
 
 /* ── 引擎接口 ── */
 
-/* 装载任务表：拷贝 table[0..count) 到 tasks[]、置 task_count、清 cfg。
- * ⚠ count > BG_TASK_COUNT 会越界写 tasks[] ⇒ 调用者先用 _Static_assert 在编译期挡住
- * （见 s_bg_tasks）。 */
-void bg_scheduler_init(bg_sched_t *sched, const bg_task_t *table, BYTE count);
-
 /* 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
- * cfg 必须与 sched 当前档位配套（本文件 ftl_bg_service 传 &g_bg_level_cfg[level]）。
+ * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
  * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。 */
-void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
+void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
 
 /* ── FTL 策略接口 ── */
 
-/*
- * ftl_bg_init - 装配实例的时间预算后台调度器
- *
- * 把 s_bg_tasks 的静态任务表（10 项：6 must-run 正确性关键集 + 4 预算任务，
- * 含 bg_a_* 适配器）装载进 ftl->bg。由 ftl_init 末尾调用一次。
- *
- * ⚠ 为什么不让 ftl.c 直接调 bg_scheduler_init：任务表是本文件的 static 数据，
- *   外部模块（ftl.c）不该看到它——本函数是这张表的**唯一装配口**（H13 三问：隐藏数组 /
- *   边界检查 / 单点读写，三者皆是）。
- */
-void ftl_bg_init(ftl_ctx_t *ftl);
+/* 装载内置任务表 s_bg_tasks：拷贝到 tasks[]、置 task_count、清 cfg。
+ * 表长是编译期常量（_Static_assert 保证 == BG_TASK_COUNT）⇒ 函数无表参数。 */
+void bg_scheduler_init(bg_scheduler_t *sched);
 
 /*
- * ftl_bg_service - Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
- *
- * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
- *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。
- *
- * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）
- */
-void ftl_bg_service(ftl_ctx_t *ftl);
-
-/*
- * ftl_bg_level_select - 负载 → 后台档位（纯函数）
+ * bg_scheduler_level_select - 负载 → 后台档位（纯函数）
  *
  * 判据：
  *   inflight = pend_get_count + pend_get_group_count
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
  * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY。
  */
-bg_level_e ftl_bg_level_select(const ftl_ctx_t *ftl);
+bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
+
+/*
+ * bg_scheduler_service - Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
+ *
+ * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
+ *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。
+ *
+ * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）
+ */
+void bg_scheduler_service(ftl_ctx_t *ftl);
 
 #endif /* FTL_BG_SCHEDULER_H */

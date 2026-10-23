@@ -177,7 +177,7 @@ typedef struct ftl_context
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
-     * 布局 ⇒ 唯一正确的后续动作是复位。置位后 ftl_bg_service 整体跳过（含 must-run
+     * 布局 ⇒ 唯一正确的后续动作是复位。置位后 bg_scheduler_service 整体跳过（含 must-run
      * 集：checkpoint / journal / 元数据目录 / bbt / GC 全在那里），杜绝把旧 RAM 状态
      * 写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
@@ -214,9 +214,9 @@ typedef struct ftl_context
     DWORD trim_wait_ms;   /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
 
     /* 时间预算后台调度器（per-instance）。
-     * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_scheduler.c` 的静态表
-     * 装载；每轮 Phase 3 由 ftl_bg_service 选档后跑 bg_scheduler_run。 */
-    bg_sched_t bg;
+     * 任务表（10 项：6 must-run + 4 预算）由 bg_scheduler_init 从 `ftl/bg_scheduler.c` 的静态表
+     * 装载；每轮 Phase 3 由 bg_scheduler_service 选档后跑 bg_scheduler_run。 */
+    bg_scheduler_t bg;
 
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
      * 观测计数（reclaimed / novictim）与求值节拍已收进 handle（mig_status_t）。
@@ -322,7 +322,7 @@ void ftl_service_pump(void);
  * ftl_service - 单个 FTL 实例的服务（对**每个**实例都要调）
  *
  * Phase 2.5: 补发本实例各组的待下发子操作（host IO 优先于后台）
- * Phase 3:   本实例的时间预算后台调度（ftl_bg_service：选档 → 任务表 → 预算）
+ * Phase 3:   本实例的时间预算后台调度（bg_scheduler_service：选档 → 任务表 → 预算）
  *
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
  *   journal / checkpoint / bbt / GC 永不推进。
