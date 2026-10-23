@@ -183,7 +183,7 @@ typedef enum
  *   ① **可读不可写**：FLUSHING 行的 entries 是有效快照，读照常命中；写会让"落盘的是
  *      旧快照、RAM 是新值"分叉（完成时无法区分该置 CLEAN 还是 DIRTY）⇒ 写一律返
  *      FTL_AGAIN 让调用者下轮重试。LOADING 行两者都不行（entries 尚未有效）。
- *   ② **同一 region 只有一行**：l2p_find 匹配 CLEAN/DIRTY/FLUSHING/LOADING
+ *   ② **同一 region 只有一行**：l2p_line_find 匹配 CLEAN/DIRTY/FLUSHING/LOADING
  *      （不再是"只匹配 CLEAN/DIRTY"）。异步后 FLUSHING 窗口真实存在，若把它当未命中
  *      就会为同一 region 再分配一行 ⇒ 两行分叉、映射静默不一致。
  *
@@ -444,12 +444,12 @@ ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
  * `lba+0..lba+7`；全部 LBA 必须落在同一 region（页对对齐 + region 大小是
  * `FTL_LBA_PER_PAIR` 的整数倍 ⇒ 编译期几何保证，见 l2p_cache.c 的 `_Static_assert`）。
  * 语义与逐条 `l2p_read`/`l2p_write` 一致：
- *   · 只处理 mask 置位的条目；每条仍调用 `l2p_note_hit`，thrashing/命中口径不变；
+ *   · 只处理 mask 置位的条目；每条仍调用 `l2p_hit_note`，thrashing/命中口径不变；
  *   · `l2p_entries_read` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
  *     返 FTL_AGAIN；当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
  *   · 行未就绪（LOADING；写还含 FLUSHING）⇒ FTL_AGAIN，且**不改任何状态**；
  *   · 写成功只置一次 `state=DIRTY` + region 脏位。
- * 用于 `ftl_confirm_write`：`l2p_find` 每页一次，而不是每 CW 一次。
+ * 用于 `ftl_confirm_write`：`l2p_line_find` 每页一次，而不是每 CW 一次。
  */
 ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[]);
 ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
@@ -463,6 +463,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
  * @return 同 l2p_read / l2p_write；自旋超预算 ⇒ FTL_ERROR。
  */
 ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
+ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
 /*
  * l2p_is_region_degraded - 该 region 是否已降级为「全未映射」（映射已丢）
@@ -476,8 +477,7 @@ ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
  * @param global_region 全局 region（lba_to_global_region(lba)）
  * @return true = 发生过加载失败降级；false = 未驻留 / 合法未映射 / 正常加载
  */
-bool         l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
-ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
+bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 
 /*
  * l2p_flush_kick - 起一行 DIRTY 的异步写回（提交即返回）

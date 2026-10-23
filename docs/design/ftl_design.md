@@ -4383,7 +4383,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | Allocator | 退役先出池再 RETIRED | `migrate.c` | 退役块被再次分配 |
 | BST | `valid_count` = CW 级真值 | 写/搬移/TRIM/擦除 | GC 选错 victim |
 | BST | `state` 与 `temp` 正交 | setter | 温度被状态转移清掉 |
-| L2P | 同一 region 只有一行 | `l2p_find` | 两行分叉、映射不一致 |
+| L2P | 同一 region 只有一行 | `l2p_line_find` | 两行分叉、映射不一致 |
 | L2P | FLUSHING 可读不可写；LOADING 不可读写 | 三态检查 | 落盘旧快照/RAM 新值分叉 |
 | L2P | 写路径先 ready 再 write | `ftl_confirm_write` | 静默丢更新 |
 | Journal | 回放判据是整页 `page_seq+entry_count` | `jrn_replay` | 跨水位条目丢失 |

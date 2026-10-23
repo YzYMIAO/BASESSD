@@ -206,7 +206,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
     DWORD oldp[FTL_LBA_PER_PAIR];
     DWORD newp[FTL_LBA_PER_PAIR];
 
-    /* 页内批量读：l2p_find 一次；只读取 mask 置位项（逐项记 hit，口径不变）。
+    /* 页内批量读：l2p_line_find 一次；只读取 mask 置位项（逐项记 hit，口径不变）。
      * 就绪前置已保证命中；非 OK 仅越界（不可能）⇒ 保守重试，尚未动账。 */
     if (l2p_entries_read(ftl->cache, pending->lba, mask, oldp) != FTL_OK)
     {
