@@ -3444,7 +3444,7 @@ flowchart TD
 #### 3.13.6 关键流程
 
 1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_should_trigger`）；`mig_begin_gc`（内部）只
-   `gc_select_victim` → `mig_start(GC, FREE)`。
+   `gc_select_victim` → `mig_start(GC)`（post 由 kind 决定）。
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
    记 `rr_record_ecc` / `read_count`（慢死预测闭环）。**读错误 ⇒ 中止**（该 plane
    源块的 `fail_count++`；累计 3 次标 BAD + 摘除 Closed plane）；只有“无错误 +

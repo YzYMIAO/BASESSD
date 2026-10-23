@@ -304,15 +304,13 @@ static inline BYTE cp_block_word_pool(WORD word)
  * @param cache        L2P cache
  * @param journal      Journal
  * @param metadata_dir Directory
- * @param alloc        allocator
- * @param topo         本实例拓扑
+ * @param alloc        allocator（ch/ce/lun 同时作为本实例拓扑来源）
  */
 void cp_init(cp_handle_t    *h,
              l2p_cache_t    *cache,
              l2p_jrn_t      *journal,
              md_dir_cache_t *metadata_dir,
-             alc_t          *alloc,
-             ftl_topo_t      topo);
+             alc_t          *alloc);
 
 /*
  * cp_pool_find_latest - 扫描 Checkpoint 池找最新有效 Header

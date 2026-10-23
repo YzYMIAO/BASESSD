@@ -326,9 +326,9 @@ static inline bool mig_is_fail_state_clean(const mig_handle_t *m)
  * mig_init - 绑定窄上下文并复位 handle。
  *
  * @param m     handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param alloc / journal / cache / total_writes / topo  窄上下文（init 绑定）
+ * @param alloc / journal / cache / total_writes  窄上下文（init 绑定；拓扑取 alloc 的 ch/ce/lun）
  */
-void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes, ftl_topo_t topo);
+void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes);
 
 /* 显式触发原因（设计 §4.4：只登记紧急/显式原因，周期评估由 handle 自持） */
 typedef enum

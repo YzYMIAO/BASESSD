@@ -173,8 +173,8 @@ typedef struct
     WORD       desc_count; /* 保留的 desc 数（compact 机制恒 0） */
 } rr_status_t;
 
-/* rr_init - 绑定窄上下文并复位 handle。 */
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, ftl_topo_t topo, BYTE *page_scratch, pend_table_t *pending);
+/* rr_init - 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。 */
+void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending);
 
 /* rr_trigger - 登记一个被托管的读子操作（不立即推进）。 */
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);

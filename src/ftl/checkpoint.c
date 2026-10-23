@@ -358,12 +358,11 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
 
 /* 填写 Checkpoint Header 的固定字段；调用者随后按需补 timestamp。
  * region_bitmap == NULL 表示无 region 快照（initial record）。 */
-static void cp_header_fill(cp_header_t *cp,
-                           DWORD        sequence,
-                           DWORD        journal_seq,
-                           const DWORD *region_bitmap,
-                           const WORD  *block_words,
-                           const DWORD *wear_page_crc)
+static void cp_header_fill(cp_header_t       *cp,
+                           const cp_handle_t *h,
+                           DWORD              sequence,
+                           DWORD              journal_seq,
+                           const DWORD       *region_bitmap)
 {
     memset(cp, 0, sizeof(*cp));
 
@@ -391,11 +390,11 @@ static void cp_header_fill(cp_header_t *cp,
     cp->block_word_count = FTL_BLOCK_TOTAL;
     cp->block_word_bytes = CP_BLOCK_WORD_BYTES;
     cp->block_page_count = CP_BLOCK_PAGES;
-    cp->block_crc32      = boot_crc32(block_words, FTL_BLOCK_TOTAL * sizeof(WORD));
+    cp->block_crc32      = boot_crc32(h->block_words, FTL_BLOCK_TOTAL * sizeof(WORD));
     cp->wear_entry_count = FTL_BLOCK_TOTAL;
     cp->wear_entry_bytes = FTL_CHECKPOINT_WEAR_ENTRY_BYTES;
     cp->wear_page_count  = FTL_CHECKPOINT_WEAR_PAGES;
-    memcpy(cp->wear_page_crc, wear_page_crc, sizeof(cp->wear_page_crc));
+    memcpy(cp->wear_page_crc, h->wear_page_crc, sizeof(cp->wear_page_crc));
     cp->record_pages = CP_RECORD_PAGES;
 }
 
@@ -911,12 +910,7 @@ static void cp_job_step(cp_handle_t *h)
                 /* 2KB Header 页常驻 handle，避免运行期 CP 路径的 2KB 栈帧。 */
                 cp_header_t *cp = (cp_header_t *)h->hdr_buf;
 
-                cp_header_fill(cp,
-                               h->hdr_seq,
-                               h->journal_seq,
-                               h->region_bitmap,
-                               h->block_words,
-                               h->wear_page_crc);
+                cp_header_fill(cp, h, h->hdr_seq, h->journal_seq, h->region_bitmap);
                 cp->timestamp = ftl_job_now_ms();
 
                 const DWORD        cp_size = sizeof(*cp);
@@ -1560,8 +1554,7 @@ void cp_init(cp_handle_t    *h,
              l2p_cache_t    *cache,
              l2p_jrn_t      *journal,
              md_dir_cache_t *metadata_dir,
-             alc_t          *alloc,
-             ftl_topo_t      topo)
+             alc_t          *alloc)
 {
     ASSERT(h != NULL);
     ASSERT(cache != NULL);
@@ -1574,7 +1567,7 @@ void cp_init(cp_handle_t    *h,
     h->journal      = journal;
     h->metadata_dir = metadata_dir;
     h->alloc        = alloc;
-    h->topo         = topo;
+    h->topo         = alc_topo(alloc);
 }
 
 /* --------------------------------------------------------------------
@@ -1663,18 +1656,17 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
     cp_ring_init(h->alloc, &ring);
 
     /* 磨损快照与 CRC 先组好；每个候选块的 wear 内容相同。 */
-    DWORD wear_crc[FTL_CHECKPOINT_WEAR_PAGES];
     BYTE *wear_page = h->wear_page_buf;
 
     for (BYTE i = 0U; i < FTL_CHECKPOINT_WEAR_PAGES; i++)
     {
         cp_wear_page_build(&ftl->alloc, i, wear_page);
-        wear_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
+        h->wear_page_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
     }
 
     cp_header_t *cp = (cp_header_t *)h->hdr_buf;
 
-    cp_header_fill(cp, 1U, 0U, NULL, words, wear_crc);
+    cp_header_fill(cp, h, 1U, 0U, NULL);
 
     /* 逐个 CP 候选块尝试：写点/坏块/单 plane 不可编程时不能只押第一块。
      * 只有全部失败才报 format 失败；失败块在找到可用块后标 BAD，避免后续 CP 再选它。 */

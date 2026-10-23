@@ -547,7 +547,7 @@ static void rr_service_step(rr_handle_t *rr)
 
 /* ── typed handle（端口装配 / 触发 / 上报） ── */
 
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, ftl_topo_t topo, BYTE *page_scratch, pend_table_t *pending)
+void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending)
 {
     ASSERT(cache != NULL);
     ASSERT(alloc != NULL);
@@ -557,7 +557,7 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, ftl_topo_t topo,
     memset(rr, 0, sizeof(*rr));
     rr->cache        = cache;
     rr->alloc        = alloc;
-    rr->topo         = topo;
+    rr->topo         = alc_topo(alloc);
     rr->page_scratch = page_scratch;
     rr->pending      = pending;
     rr->error        = (int32_t)FTL_OK;

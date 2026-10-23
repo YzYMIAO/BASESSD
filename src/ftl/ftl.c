@@ -1120,17 +1120,17 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     }
 
     /* ├─ 搬移引擎（GC / WL / 慢死预测）：窄上下文 + 自持节拍 ── */
-    mig_init(ftl->mig_handle, &ftl->alloc, ftl->journal, ftl->cache, &ftl->total_writes, ftl->topo);
+    mig_init(ftl->mig_handle, &ftl->alloc, ftl->journal, ftl->cache, &ftl->total_writes);
 
     /* ├─ Read Recovery：窄上下文（L2P / allocator / 整页暂存 / pending 表）── */
-    rr_init(&ftl->read_recovery_handle, ftl->cache, &ftl->alloc, ftl->topo, ftl->rr_page_scratch, &ftl->pending);
+    rr_init(&ftl->read_recovery_handle, ftl->cache, &ftl->alloc, ftl->rr_page_scratch, &ftl->pending);
 
     /* ├─ Wbuf：窄上下文（allocator / pending 表 / migrate handle）── */
     wb_init(ftl->wbuf, &ftl->alloc, &ftl->pending, ftl->mig_handle);
 
     /* ├─ Checkpoint：窄上下文（l2p / journal / metadata / allocator / topo）──
      * cp_init 内部整体 memset ⇒ 池游标 cursor_valid==0，首次 job 先扫池定位。 */
-    cp_init(ftl->cp_handle, ftl->cache, ftl->journal, ftl->metadata_dir, &ftl->alloc, ftl->topo);
+    cp_init(ftl->cp_handle, ftl->cache, ftl->journal, ftl->metadata_dir, &ftl->alloc);
 
     /* ├─ 统计 ── */
     /* ├─ 后台调度器任务表（10 项；must-run + interval/budget）──

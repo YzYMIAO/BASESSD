@@ -272,8 +272,9 @@ static WORD mig_dst_gblock(const mig_handle_t *m, BYTE plane)
 /* --------------------------------------------------------------------
  * mig_start
  *   功能：装配并启动一个搬移 job（SELECT 阶段）。
- *   参数：ftl —— FTL 实例；victim —— 选中的 SB（只读，内部按值拷贝）；
- *         kind —— victim 来源；post —— 收尾方式。三者都是调用者保证的前置条件。
+ *   参数：m —— migrate handle；victim —— 选中的 SB（只读，内部按值拷贝）；
+ *         kind —— victim 来源（同时决定 post / dst_high_wear）；
+ *         reason —— 观测原因；triggers —— 触发计数快照。
  *   实现要点：**快路径**——各 plane valid_count 之和 == 0 ⇒ 直接进 ERASE（省整块 NAND
  *             读；整块空洞 plane 的根因已由页打包写缓冲消除）。
  *             victim 按值拷贝：closed_sb_list 在搬移期间可能被 allocator 追加/挪动，
@@ -282,14 +283,18 @@ static WORD mig_dst_gblock(const mig_handle_t *m, BYTE plane)
 static void mig_start(mig_handle_t        *m,
                       const super_block_t *victim,
                       mig_kind_e           kind,
-                      mig_post_e           post,
-                      bool                 dst_high_wear,
                       const char          *reason,
                       DWORD                triggers)
 {
     /* 前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自持有实例与 victim；
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
     ASSERT(!m->active);
+
+    /* 收尾方式与目的块磨损档由 kind 唯一决定，避免调用者传入不一致的组合：
+     *   GC / 静态 WL → 归还 Free Pool；WL 目的块走高磨损档；
+     *   慢死预测 → 退役、不入池。 */
+    const mig_post_e post          = (kind == MIG_KIND_PREDICT) ? MIG_POST_RETIRE : MIG_POST_FREE;
+    const bool       dst_high_wear = (kind == MIG_KIND_WL);
 
     /* job 状态整体复位，但**窄上下文 / 自持节拍 / 单调计数 / 连续失败计数**必须跨 job 保留。 */
     alc_t *const       alloc            = m->alloc;
@@ -566,7 +571,7 @@ static bool mig_begin_gc(mig_handle_t         *m,
         m->gc_session_last_ms = now_ms;
     }
 
-    mig_start(m, sel.victim, MIG_KIND_GC, MIG_POST_FREE, false, mig_gc_reason_name(reason), triggers);
+    mig_start(m, sel.victim, MIG_KIND_GC, mig_gc_reason_name(reason), triggers);
     /* 不在启动时清 no-gain：job 可能先在 READ 阶段起来、随后 dest 分配失败并 abort。
      * 只有真正回收/搬移成功（mig_finish）才解除退避，见 mig_finish。 */
     return true;
@@ -615,7 +620,7 @@ static bool mig_begin_wl(mig_handle_t *m)
          total_writes);
 
     /* 静态 WL 的方向：目标取高擦除空闲块（UBI 模型）。 */
-    mig_start(m, &sb, MIG_KIND_WL, MIG_POST_FREE, true, "wl", 0U);
+    mig_start(m, &sb, MIG_KIND_WL, "wl", 0U);
     return true;
 }
 
@@ -656,7 +661,7 @@ static bool mig_begin_predict(mig_handle_t *m)
 
     mig_victim_from_planes(&sb, closed->plane_blocks, closed->next_page);
 
-    mig_start(m, &sb, MIG_KIND_PREDICT, MIG_POST_RETIRE, false, "pred", 0U);
+    mig_start(m, &sb, MIG_KIND_PREDICT, "pred", 0U);
     return true;
 }
 
@@ -1081,14 +1086,25 @@ static bool mig_batch_prepare_commit(mig_handle_t *m)
     return true;
 }
 
-/* 提交单个 plane 的映射（Journal→L2P→BST）。调用前已做就绪/容量前置。 */
-static void mig_commit_plane_meta(mig_handle_t *m,
-                                  BYTE          plane,
-                                  DWORD         bitmap,
-                                  const DWORD   cw_lba[PLANE_NUM][CW_NUM],
-                                  const DWORD   src[PLANE_NUM],
-                                  const DWORD   dst[PLANE_NUM])
+/* 单个 plane 的页级映射视图：普通路径取 m 的字段，batch 路径取 batch 页的字段。 */
+typedef struct
 {
+    BYTE  plane;
+    DWORD bitmap;
+    const DWORD (*cw_lba)[CW_NUM];
+    const DWORD *src;
+    const DWORD *dst;
+} mig_plane_meta_t;
+
+/* 提交单个 plane 的映射（Journal→L2P→BST）。调用前已做就绪/容量前置。 */
+static void mig_commit_plane_meta(mig_handle_t *m, const mig_plane_meta_t *meta)
+{
+    const BYTE  plane            = meta->plane;
+    const DWORD bitmap           = meta->bitmap;
+    const DWORD(*cw_lba)[CW_NUM] = meta->cw_lba;
+    const DWORD *src             = meta->src;
+    const DWORD *dst             = meta->dst;
+
     for (BYTE cw = 0U; cw < CW_NUM; cw++)
     {
         if ((bitmap & ftl_cw_bit(plane, cw)) == 0U)
@@ -1149,7 +1165,15 @@ static void mig_commit_page_meta(mig_handle_t *m,
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        mig_commit_plane_meta(m, p, bitmap[p], cw_lba, src, dst);
+        mig_plane_meta_t meta;
+
+        meta.plane  = p;
+        meta.bitmap = bitmap[p];
+        meta.cw_lba = cw_lba;
+        meta.src    = src;
+        meta.dst    = dst;
+
+        mig_commit_plane_meta(m, &meta);
 
         if (m->aborted)
         {
@@ -1449,7 +1473,15 @@ static bool mig_step_write_settle(mig_handle_t *m)
 
         m->wait_ms = 0U; /* L2P 与 Journal 容量均已就绪 */
 
-        mig_commit_plane_meta(m, plane, m->cw_bitmap[plane], m->cw_lba, m->src, m->dst);
+        mig_plane_meta_t meta;
+
+        meta.plane  = plane;
+        meta.bitmap = m->cw_bitmap[plane];
+        meta.cw_lba = m->cw_lba;
+        meta.src    = m->src;
+        meta.dst    = m->dst;
+
+        mig_commit_plane_meta(m, &meta);
 
         if (m->aborted)
         {
@@ -1850,8 +1882,7 @@ void mig_init(mig_handle_t *m,
               alc_t        *alloc,
               l2p_jrn_t    *journal,
               l2p_cache_t  *cache,
-              const DWORD  *total_writes,
-              ftl_topo_t    topo)
+              const DWORD  *total_writes)
 {
     ASSERT(alloc != NULL);
     ASSERT(journal != NULL);
@@ -1863,7 +1894,7 @@ void mig_init(mig_handle_t *m,
     m->journal      = journal;
     m->cache        = cache;
     m->total_writes = total_writes;
-    m->topo         = topo;
+    m->topo         = alc_topo(alloc);
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         m->fail_gblock[plane] = UINT16_MAX;
