@@ -46,6 +46,10 @@ bool ftl_ut_host_read(DWORD lba, DWORD count, void *buffer);
 bool ftl_ut_flush(void);
 bool ftl_ut_trim(DWORD lba, DWORD count);
 
+/* pure 套件的资源钩子：setup 重建测试自有 RAM 表；teardown 检查活实例归零。 */
+void *ftl_ut_pure_setup(const MunitParameter params[], void *data);
+void  ftl_ut_pure_teardown(void *fixture);
+
 /* 用例结束不变量：pending/group/op-ctx/FC 资源必须归零。 */
 void ftl_ut_assert_clean(ftl_ctx_t *ftl);
 

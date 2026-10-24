@@ -418,6 +418,14 @@
 
 ---
 
+### 归档自 2M. USB MSC / 平台
+
+| ID | 状态 | 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-PLAT-06 | 信息 / 已确认（2026-10-24） | **「munit 名字行与 `[ OK ]` 之间多一个换行」不是固件输出**，只在长操作（6 s media 用例、开机 NAND 扫描、10 s 一次的 `[STAT]`）后的静默期出现。固件侧已排除：`_write` 缓冲区标记显示名字行 55 B（首尾均非 `\\n`）、结果行 22 B（首字节非 `\\n`）；`uart_log_write` 短写标记（1/2 B）在两者之间零命中；强制关闭 TX DMA（只走 TXE 中断）症状不变。若为真输出，唯一入口 `uart_log_write` 必然留下标记 ⇒ 换行由串口工具的「接收设置 → 自动换行」（值为 200）在静默后补入（用户截图确认）。影响：仅日志观感；曾按固件缺陷排查多轮 | 无代码改动（诊断标记已移除）；串口工具侧取消「自动换行」 | 若再出现：先看串口工具「接收设置 → 自动换行」；需要硬证据时用原始字节捕获（`xxd`）确认 0x0A 是否真在线上。若 xxd 证实在线，才回到 `uart_log_write` / 硬件方向 | 板端 2026-10-24：`<w37se>…<w16sE>` 序列（`src/platform/usart.c` `_write` 临时标记）；TX DMA 关闭对照；`src/platform/usart.c` `uart_log_write` 为唯一 TX 入口；串口工具截图「接收设置：自动换行 ☑ 200」 |
+
+---
+
 ## 2026-10-24 FTL UT 上板闭合
 
 | ID | 闭合于 | 依据 / 证据 | 重开触发 |
@@ -425,4 +433,6 @@
 | RISK-MD-03 | 2026-10-24 | 旧冻结测试源已删除；新套件按 `docs/design/ftl_ut_design.md` 重建。板端 `test /ftl/pure/` 23/23、`test /ftl/media/` 5/5 全绿（media 22.5 s，含 format 10.4 s）；`make tests UT=FTL` 零告警 | 新套件再次与生产 API 漂移 |
 | RISK-BG-09 | 2026-10-24 | `bg_engine` 用例随 `/ftl/pure/host/` 上板通过 | bg 任务表/档位接口再变 |
 | RISK-PLAT-05 | 2026-10-24 | `LIB_DIR` 按配置分置后，UT 镜像上板 `test --list` 正常列出 28 条；普通镜像无 `test` 命令 | 构建目录命名再变 |
+| RISK-UT-02 | 2026-10-24 | CP 完成断言改为「job IDLE + on-media Header = 用例起点→落盘序号」；板端 `journal barrier cp 1->2`、`trim cp 2->3` 通过（21:14:42） | CP 池/sequence 语义或 `cp_pool_find_latest` 回写行为变化 |
+| RISK-UT-03 | 2026-10-24 | 测试隔离 BBT-18 改为「抬 sequence」而非擦 BBT 载体；`format_in_progress_resume` 在 21:44:05 镜像通过（8.10 s），不再有丢坏块图的失败路径 | 新用例需要隔离 BBT-18 |
 

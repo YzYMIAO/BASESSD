@@ -1181,29 +1181,29 @@ static void uart_cli_pending_poll(void)
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                                                           "help",                                                                         "show command list", 1U,  1U,    uart_cli_help},
-    { "status",                                                                                                         "status",                                                        "show UART error and queue counters", 1U,  1U,  uart_cli_status},
-    {"version",                                                                                                        "version",                                                             "show firmware console version", 1U,  1U, uart_cli_version},
-    {    "log",                                                                              "log level <error|warn|info|debug>",                                                                     "set runtime log level", 3U,  3U,     uart_cli_log},
+    {   "help",                                                                                                                                      "help",                                                                         "show command list", 1U,  1U,    uart_cli_help},
+    { "status",                                                                                                                                    "status",                                                        "show UART error and queue counters", 1U,  1U,  uart_cli_status},
+    {"version",                                                                                                                                   "version",                                                             "show firmware console version", 1U,  1U, uart_cli_version},
+    {    "log",                                                                                                         "log level <error|warn|info|debug>",                                                                     "set runtime log level", 3U,  3U,     uart_cli_log},
  /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {     "wr",                                                                                                   "wr <lba> <n>",                                                         "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
-    {     "rd",                                                                                               "rd <lba> <n> [c]",                                                         "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
-    {     "tr",                                                                                                       "tr <lba>",                                                                              "trim one lba", 2U,  2U,      uart_cli_tr},
-    {     "fl",                                                                                                             "fl",                                                         "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
-    {     "wp",                                                                                               "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
-    {   "info",                                                                                                           "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
-    {    "map",                                                                                                      "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
-    {   "addr",                                                         "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]",                                  "translate PBA/PAA/gblock address fields (read-only diag)", 3U,  6U,    uart_cli_addr},
-    {  "rdpaa",                                                                                            "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},
-    {  "crash",                                                                                                  "crash [clear]",                                                       "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
-    {  "stack",                                                                                                          "stack",                                        "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
-    {    "bbt",                                                                          "bbt [--erase | fault <plane> <block>]",       "print factory bad block map (--erase: erase each block; fault: debug BAD injection)", 1U,  4U,     uart_cli_bbt},
-    { "format",                                                                                              "format [--verify]", "ERASE all blocks + write initial metadata (destructive; --verify = full-chip erase check)", 1U,  2U,  uart_cli_format},
-    {   "pool",                                                                                                           "pool",                               "print fixed-metadata candidate block pools (read-only diag)", 1U,  1U,    uart_cli_pool},
+    {     "wr",                                                                                                                              "wr <lba> <n>",                                                         "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
+    {     "rd",                                                                                                                          "rd <lba> <n> [c]",                                                         "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
+    {     "tr",                                                                                                                                  "tr <lba>",                                                                              "trim one lba", 2U,  2U,      uart_cli_tr},
+    {     "fl",                                                                                                                                        "fl",                                                         "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {     "wp",                                                                                                                          "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
+    {   "info",                                                                                                                                      "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {    "map",                                                                                                                                 "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
+    {   "addr",                                                                                    "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]",                                  "translate PBA/PAA/gblock address fields (read-only diag)", 3U,  6U,    uart_cli_addr},
+    {  "rdpaa",                                                                                                                       "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},
+    {  "crash",                                                                                                                             "crash [clear]",                                                       "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
+    {  "stack",                                                                                                                                     "stack",                                        "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
+    {    "bbt",                                                                                                     "bbt [--erase | fault <plane> <block>]",       "print factory bad block map (--erase: erase each block; fault: debug BAD injection)", 1U,  4U,     uart_cli_bbt},
+    { "format",                                                                                                                         "format [--verify]", "ERASE all blocks + write initial metadata (destructive; --verify = full-chip erase check)", 1U,  2U,  uart_cli_format},
+    {   "pool",                                                                                                                                      "pool",                               "print fixed-metadata candidate block pools (read-only diag)", 1U,  1U,    uart_cli_pool},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */
-    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",                                                                 "run munit unit test suite", 1U, 10U,    uart_cli_test},
+    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [test_name...]",                                                                 "run munit unit test suite", 1U, 10U,    uart_cli_test},
 #endif
 };
 
@@ -1286,9 +1286,81 @@ static int uart_cli_parse_u32(const char *text, DWORD *value)
 #endif
 
 #if defined(FC_NAND_TEST_ENABLE)
+/*
+ * 跑 UT 期间的**项目日志**级别，默认整档关闭（LOG_OFF）。
+ *
+ * 与 munit 的 `--log-visible` **分开**：后者控制测试自身证据（`[EV]` summary/detail），
+ * 前者只控制 FTL/FC 内部日志。二者混在一起时，想看 `[EV]` 就必须同时被 boot/format/GC
+ * 的 `[INF]` 刷屏 ⇒ 证据反而看不见。
+ *
+ *   test /ftl/                          ⇒ 只有用例名 + 结果（项目日志静默、[EV] 隐藏）
+ *   test --log-visible info /ftl/       ⇒ 额外打印 [EV] 简单前后对比
+ *   test --log-visible debug /ftl/      ⇒ 额外打印 [EV] 完整对比
+ *   test --log-visible info --log-project info /ftl/ ⇒ 再叠加项目 INFO 日志（排障用）
+ *
+ * 跑完恢复原级别（main 的默认 INFO）。
+ */
+static log_level_e uart_cli_test_project_level(int argc, char *argv[])
+{
+    log_level_e level = LOG_OFF;
+
+    for (int i = 1; (i + 1) < argc; i++)
+    {
+        if (strcmp(argv[i], "--log-project") != 0)
+        {
+            continue;
+        }
+        if (strcmp(argv[i + 1], "debug") == 0)
+        {
+            level = LOG_DEBUG;
+        }
+        else if (strcmp(argv[i + 1], "info") == 0)
+        {
+            level = LOG_INFO;
+        }
+        else if (strcmp(argv[i + 1], "warning") == 0)
+        {
+            level = LOG_WARNING;
+        }
+        else
+        {
+            level = LOG_ERROR;
+        }
+        break;
+    }
+    return level;
+}
+
 static int uart_cli_test(int argc, char *argv[])
 {
-    return ut_run_all(argc, argv);
+    const log_level_e saved = log_get_level();
+    char             *filtered[UART_CLI_MAX_ARGUMENTS];
+    int               filtered_argc = 0;
+    int               rc;
+
+    log_set_level(uart_cli_test_project_level(argc, argv));
+
+    /* munit 不认识 --log-project（它只认自己的 --log-visible/--log-fatal 等），
+     * 直接透传会走 "unknown argument" 分支并跳过全部用例。这里在调用前把它和取值摘掉。 */
+    for (int i = 0; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--log-project") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                i++;
+            }
+            continue;
+        }
+        if (filtered_argc < (int)UART_CLI_MAX_ARGUMENTS)
+        {
+            filtered[filtered_argc++] = argv[i];
+        }
+    }
+
+    rc = ut_run_all(filtered_argc, filtered);
+    log_set_level(saved);
+    return rc;
 }
 #endif
 

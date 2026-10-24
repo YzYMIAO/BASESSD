@@ -2,6 +2,11 @@
 
 断言设施见 `include/common/assertion.h`。本文是**全工程**判据，各层（FC / NAND / FTL / controller / platform / common）共用同一套规则。FC 层最初在 `docs/design/fc_nand_design.md` §24 定稿，本轮推广到这里；§24 保留 FC 特有的例外说明并指向本文。
 
+> **测试源口径（2026-10-24）**：本文引用的 `tests/unit/test_ftl.c` / `test_ftl_bg.c` /
+> `ftl_test_common.*` 是**已删除的旧套件**。这些用例名与行号保留为当时的审计证据，不再指向
+> 现存文件；现役 FTL UT 见 `docs/design/ftl_ut_design.md`。判据 4 中「被 UT 钉住」的结论，
+> 在新套件里复核后才能继续沿用。
+
 ## 一、四条判据
 
 1. **外部输入校验保留返回码**

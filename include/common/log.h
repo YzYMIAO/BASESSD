@@ -10,6 +10,7 @@
 /* 日志等级按严重程度从高到低排列，运行时过滤比较只需一次数值比较。 */
 typedef enum
 {
+    LOG_OFF   = -1, /* 全部静默（只供测试/产测切档用；CLI `log level` 不暴露） */
     LOG_ERROR = 0,
     LOG_WARNING,
     LOG_INFO,

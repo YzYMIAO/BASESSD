@@ -154,9 +154,9 @@ bool munit_log_visible(MunitLogLevel level);   /* v1.4：只读查询可见级 *
 - 默认可见级是 **`ERROR`**（`munit.c:136`）⇒ 不加 `--log-visible` 时 INFO/DEBUG 一律不可见。
 - **过滤发生在任何输出之前**（`munit.c:140-145` 的 `if (level < visible) return;`）⇒
   判不可见时连一个字节都不产出。这是「默认档报告格式逐字不变」的根据。
-- 可见级是 **文件级 static，`munit_suite_main` 不重置**（`munit.c:136`、`:1601`）⇒
-  同一次上电内先跑 `test --log-visible info`、再光跑 `test`，**证据仍会打印**，
-  直到重启或显式 `--log-visible error` 改回。
+- 可见级是文件级 static，但 **`munit_suite_main_custom` 在每次调用开头重置为 `ERROR`**
+  ⇒ 同一次上电内先跑 `test --log-visible info`、再裸跑 `test`，**证据重新隐藏**，
+  符合「默认只打用例名 + 结果」。`--log-fatal` 同样重置为 `ERROR`。
 
 ⚠ **`--log-fatal` 不是「可见级」的同义词**：它与 `--log-visible` 共用同一套取值解析，
 而 `munit_logf_ex` 在 `level >= fatal` 时 `abort()` ⇒ `--log-fatal info` 会让**每条 INFO 日志

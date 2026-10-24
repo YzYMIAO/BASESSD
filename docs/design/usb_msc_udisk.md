@@ -339,8 +339,9 @@ make release
 make tests UT=FC
 ```
 
-> `make tests UT=FTL` 仍因**冻结的测试源**（`tests/unit/test_ftl.c` 引用已删字段/旧签名）
-> 编不过，属 `RISK-MD-03`，与 USB 改动无关（R2 / R4：不回退生产代码去迁就测试源）。
+> **2026-10-24 更新**：FTL UT 已按 `docs/design/ftl_ut_design.md` 重建，
+> `make tests UT=FTL` 编译通过并在板上 `test /ftl/` 全过（63 个用例函数 / 85 次运行）；
+> 旧冻结测试源 `RISK-MD-03` 已闭合，本节的 UT 阻塞不再存在。
 
 ### 11.2 板端
 

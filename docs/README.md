@@ -13,7 +13,7 @@
 | FC-NAND 层改动 | `design/fc_nand_design.md`（§26 行业对照 = 判据） |
 | **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.6/§25.8 → `design/ftl_design.md` ADR-15 |
 | FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
-| 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT 设计与冻结状态见 `archive/ftl_ut_munit.md` + `design/known_iss.md` ISS-UT-01；HIL UT 未实现见 `known_iss.md` §1 |
+| 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT（已重建上板）见 `design/ftl_ut_design.md`；HIL UT 未实现见 `design/known_iss.md` §1 |
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 | `design/logging_design.md`（预期/非预期 + 打印预算 + 飞行记录器）+ `design/assertion_guidelines.md` + `design/fault_capture.md` |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |

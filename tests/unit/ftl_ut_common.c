@@ -37,13 +37,9 @@ static bool s_ev_line_started = false;
 
 void ftl_ut_trace_begin(void)
 {
-    s_ev_line_started = munit_log_visible(MUNIT_LOG_INFO);
-
-    if (s_ev_line_started)
-    {
-        fputc('\n', MUNIT_OUTPUT_FILE);
-        (void)fflush(MUNIT_OUTPUT_FILE);
-    }
+    /* 只复位状态；第一条可见证据由 ftl_ut_trace_emit 负责换行。
+     * 不在这里提前写 '\n'：否则无证据的用例也会把 munit 的 [ OK ] 顶到下一行。 */
+    s_ev_line_started = false;
 }
 
 static void ftl_ut_trace_emit(MunitLogLevel level, const char *tag, const char *format, va_list ap)
@@ -230,7 +226,7 @@ void ftl_ut_reboot_from_media(void)
 
     ftl_ut_quiesce(ftl);
 
-    ftl_ut_trace_summary("reboot: quiesced (ctx=%hu cp_waiting=%d cp_phase=%d)", ftl_op_ctx_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: quiesced (ctx=%hu cp_waiting=%d cp_phase=%d)", ftl_op_ctx_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
     (void)fc_init();
@@ -270,14 +266,14 @@ void ftl_ut_reboot_from_media(void)
     munit_assert_int(ftl_init(ftl, topo, cache, &st), ==, FTL_OK);
     l2p_init(cache, topo.ch, topo.ce, owner_fn, owner_ctx);
 
-    ftl_ut_trace_summary("reboot: ftl_init ok (cp_waiting=%d cp_phase=%d)", (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: ftl_init ok (cp_waiting=%d cp_phase=%d)", (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
 
     pfr_boot_result_t result;
 
     memset(&result, 0, sizeof(result));
     munit_assert_int(pfr_boot_recovery(ftl, &result), ==, FTL_OK);
 
-    ftl_ut_trace_summary("reboot: recovered type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", result.boot_type, result.cp_sequence, result.journal_entries, (int)result.blocks_restored, (int)result.scoped);
+    ftl_ut_trace_detail("reboot: recovered type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", result.boot_type, result.cp_sequence, result.journal_entries, (int)result.blocks_restored, (int)result.scoped);
 }
 
 void ftl_ut_media_format(void)
@@ -415,6 +411,27 @@ bool ftl_ut_trim(DWORD lba, DWORD count)
             return false;
         }
     }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * §3c pure 套件资源钩子
+ * ══════════════════════════════════════════════════════════════════════ */
+
+void *ftl_ut_pure_setup(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    (void)ftl_ut_live();
+    ftl_ut_ram_init();
+    return NULL;
+}
+
+void ftl_ut_pure_teardown(void *fixture)
+{
+    (void)fixture;
+
+    ftl_ut_assert_clean(ftl_ut_live());
 }
 
 /* ══════════════════════════════════════════════════════════════════════

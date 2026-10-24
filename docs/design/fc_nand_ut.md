@@ -603,8 +603,10 @@ int ut_run_all(int argc, char *argv[])
 static int uart_cli_test(int argc, char *argv[]);
 
 /* ... 命令表中注册 test 命令 ... */
-{ "test", "test [--seed N] [--log-visible info|debug] [--list] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test },
+{ "test", "test [--seed N] [--log-visible info|debug] [--log-project info|debug] [--list] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test },
 
+/* --log-visible 由 munit 解析：控制 [EV] 证据；
+ * --log-project 只控制项目日志（默认 LOG_OFF），透传给 munit 前要摘掉。 */
 static int uart_cli_test(int argc, char *argv[])
 {
     return ut_run_all(argc, argv);
@@ -760,6 +762,10 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 
 框架侧为此加了 1 个只读访问器 `munit_log_visible()`（见 `munit_adapter.md` §2.4）。
 
+若确实需要看**项目日志**（FTL/FC 的 `[INF]/[ERR]`），用单独的 `--log-project info|debug`：
+它在 `uart_cli_test` 里设置级别、跑完恢复，且透传给 munit 前被摘掉（munit 不认识该选项）。
+`--log-visible` 只负责证据，不会顺带打开项目日志。
+
 #### 实现要点
 
 - **不走 `munit_logf`**：它会给**每一行**加 `Info:<文件>:<行号>` 前缀（`munit.c:147-178`），
@@ -776,9 +782,9 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 1. **`--log-fatal` 不是「可见级」的同义词**。它与 `--log-visible` 共用取值解析，
    而 `munit_logf_ex` 在 `level >= fatal` 时 `abort()` ⇒ `--log-fatal info` 会让每条证据行 abort。
    默认 `fatal = ERROR` 安全，别动。
-2. **可见级跨 `test` 调用残留**。`munit_log_level_visible` 是文件级 static，
-   `munit_suite_main` 不重置 ⇒ 一旦 `test --log-visible info`，之后光打 `test` 也仍出证据，
-   直到重启或 `--log-visible error`。
+2. **可见级每次 `test` 调用重置**。`munit_suite_main_custom` 在入口把
+   `munit_log_level_visible` / `munit_log_level_fatal` 置回 `ERROR` ⇒ 先跑
+   `test --log-visible info`、再裸跑 `test` 不会继续出证据，默认档只打用例名 + 结果。
 3. **UART TX 是阻塞的**（环 4096 B / 115200 波特 ≈ 11.5 KB/s，`usart.c` 的 `__WFE()` 自旋，不丢字节）
    ⇒ `--log-visible debug` 跑全套（53 case × 64 页，v1.22 前是 77）是**数十秒纯 TX**，
    **debug 档只对单条用例跑**（`test --log-visible debug /fc-nand/lifecycle/block_write_read`）。

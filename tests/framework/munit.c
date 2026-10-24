@@ -921,21 +921,26 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
     else if (report.successful > 0)
     {
         munit_test_runner_print_color(runner, MUNIT_RESULT_STRING_OK, '2');
-#if defined(MUNIT_ENABLE_TIMING)
-        fputs(" ] [ ", MUNIT_OUTPUT_FILE);
-        if (report.successful > 1)
-        {
-            munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock / report.successful);
-        }
-        else
-        {
-            munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
-        }
-#endif
-        fputs(" ]\n", MUNIT_OUTPUT_FILE);
         runner->report.successful++;
         result = MUNIT_OK;
     }
+
+    /* 闭合方括号、耗时与换行对**所有**结果标签生效（OK/SKIP/FAIL/ERROR/TODO）。
+     * 只写在 OK 分支里会让 SKIP/FAIL 少一个 " ]" 且不换行，下一条用例名会接在同一行。 */
+#if defined(MUNIT_ENABLE_TIMING)
+    fputs(" ] [ ", MUNIT_OUTPUT_FILE);
+    if (report.successful > 1)
+    {
+        munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock / report.successful);
+    }
+    else
+    {
+        munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
+    }
+    fputs(" ]\n", MUNIT_OUTPUT_FILE);
+#else
+    fputs(" ]\n", MUNIT_OUTPUT_FILE);
+#endif
 
     if (result == MUNIT_FAIL || result == MUNIT_ERROR || runner->show_stder)
     {
@@ -1355,6 +1360,14 @@ int munit_suite_main_custom(const MunitSuite   *suite,
     size_t          parameters_size = 0;   // 命令行 --param参数数量
     size_t          test_size       = 0;   // 用户指定测试名称数量
     int             arg;                   // 当前解析的argv索引
+
+    /*
+     * 每次 `test` 调用都从默认档开始：`--log-visible` / `--log-fatal` 不跨调用粘滞。
+     * 否则先跑一次 `--log-visible info`，之后再裸跑 `test` 仍会打印 [EV]，
+     * 与「默认只打用例名 + 结果」的约定不符。
+     */
+    munit_log_level_visible = MUNIT_LOG_ERROR;
+    munit_log_level_fatal   = MUNIT_LOG_ERROR;
 
     // 各参数的临时存储变量
     char                *envpter;      // strtoul 的结束指针
