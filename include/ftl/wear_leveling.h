@@ -91,8 +91,9 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim);
  */
 
 /*
- * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义；used-SB 最小值内联在
- * `wl_should_trigger`，Free Pool 最大擦除值仍走 allocator 的 `alc_free_get_max_erase`。
+ * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义；候选项过滤（Open / 坏 plane /
+ * 有效 CW 门限）收敛在 `wl_candidate_get`，Free Pool 最大擦除值走 allocator 的
+ * `alc_free_get_max_erase`。
  */
 
 #endif /* FTL_WEAR_LEVELING_H */
