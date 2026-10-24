@@ -27,10 +27,8 @@
  *
  * 【页级同步原语】
  *   ⑧ ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw /
- *      ftl_sync_erase_block / ftl_sync_erase_block_multi_plane — 原先 9 个 FTL
- *      模块各自内联一份 static 版本
- *      （共 18 份、逐字节相同，只差 crc/random/ldpc/lba 四个字段），
- *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
+ *      ftl_sync_erase_block / ftl_sync_erase_block_multi_plane / ftl_sync_read_column /
+ *      ftl_sync_write_page_mirror — 差异由 ftl_page_cfg_t（crc/random/ldpc/lba）承载。
  *
  * 【异步页级原语】（提交与完成解耦）
  *   ⑩ ftl_async_write_page / ftl_async_write_page_cw / ftl_async_erase_block /
@@ -391,11 +389,10 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  */
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us);
 
-/* ── 页级同步原语（18 份内联 → 4 份公共）──
+/* ── 页级同步原语 ──
  *
- * 9 个 FTL 模块原先各自内联一份 static sync_write_page / sync_read_page /
- * sync_read_page_raw / sync_erase_block，共 18 份、逐字节相同，只差四个字段。
- * 收敛后由配置结构承载差异；配置是编译期常量，故用复合字面量宏调用：
+ * 各原语的差异由 ftl_page_cfg_t 承载（crc / random / ldpc / lba）；
+ * 配置是编译期常量，故用复合字面量宏调用：
  *
  *   元数据页（BBT / checkpoint / journal / L2P / metadata / 擦除）：
  *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_META());
@@ -441,15 +438,6 @@ typedef struct
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
 ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
-
-/*
- * 写页（CW 级）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页（GC/WL 搬移专用）。
- *
- * page_buf 是**整页镜像**（CW c 的数据在 page_buf + c×512）；未置位的 CW 不建链、
- * 不编程，读回 0xFF。cfg->lba 必须是**本页**的页 LBA（CW 级写不改变 CW 偏移，
- * 页内 META 的 LBA 由 CW 号决定）。
- */
-ftl_status_e ftl_sync_write_page_cw(DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_t *cfg);
 
 /* 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。 */
 ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_t *cfg);
@@ -520,9 +508,9 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
 /*
  * 写页（CW 级，异步）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页，**不提交**。
  *
- * 与 ftl_async_write_page 的差别同 ftl_sync_write_page_cw 与 ftl_sync_write_page 的差别：
- * 位图来自形参而非「整段」；数据按**页内 CW 偏移**散射取（`ftl_cmd_write_data_cw`），
- * 不是按链序紧凑打包。GC/WL 搬移专用——只搬有效 CW 且必须保持原 CW 偏移。
+ * 与 ftl_async_write_page 的差别：位图来自形参而非「整段」；数据按**页内 CW 偏移**
+ * 散射取（`ftl_cmd_write_data_cw`），不是按链序紧凑打包。
+ * GC/WL 搬移专用——只搬有效 CW 且必须保持原 CW 偏移。
  *
  * ⚠ 数据在本函数内已拷进 FC buffer 池（同 ftl_async_write_page）⇒ 返回后调用者即可
  *   复用 page_buf。
@@ -596,7 +584,8 @@ ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BY
  *
  * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏块的 spare 也要拿到，
  * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
- * column + 4 越出页尾是编程错误（ASSERT）。
+ * column + 4 须落在页内：唯一调用者 bbt.c 传 PAGE_MAIN_SIZE（+4 ≤ PAGE_SIZE），
+ * 本函数不重复校验。
  */
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4]);
 

@@ -1617,7 +1617,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
     }
 
     /* 本子操作覆盖的 plane 数（决定 operation 码与 plane 段）。
-     * 值域断言在 ftl_plane_read_op 内（界 = PLANE_NUM）。 */
+     * cw_bitmap 非空由 ftl_issue_subop 的拆分子操作保证（至少 1 个 CW）。 */
     BYTE nplanes = ftl_cw_bitmap_plane_count(cw_bitmap);
 
     /* 资源次序：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
