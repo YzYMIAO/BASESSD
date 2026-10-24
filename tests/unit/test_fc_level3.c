@@ -1435,7 +1435,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
     /* 证据摘要（--log-visible info）：抽到的地址 + 页/列**掩码** + 探针数。
      * 掩码由抽到的集合就地算出 ⇒ 它的 popcount **等于**打印的个数，顺带**自证互不重复**；
      * 与下面 debug 档逐探针的 cw_bitmap 对不上（例如 plane 1 的 CW0 位算成 0x01）会立刻显形。
-     * ⚠ 页掩码是 64 位 ⇒ 拆两个 %08lX 打印 —— newlib-nano 不认 %llX（见 memory）。 */
+     * ⚠ 页掩码是 64 位 ⇒ 拆高/低两个 32 位半字分别打印。 */
     {
         uint32_t page_mask_lo = 0U;
         uint32_t page_mask_hi = 0U;

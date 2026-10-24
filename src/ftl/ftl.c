@@ -1602,7 +1602,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
                 {
                     LOGE(LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR (suppressed=%lu)\r\n",
                          internal_lba,
-                         (unsigned long)suppressed);
+                         suppressed);
                 }
                 return FTL_ERROR;
             }
@@ -1988,7 +1988,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     /* LBA 范围检查（含末 LBA）。req->lba 是 QWORD ⇒ 加法按 64 位进行，不回绕。 */
     if ((req->lba + count) > FTL_LBA_MAX)
     {
-        LOGE(LOG_TAG_FTL "%s lba out of range lba=%lu count=%lu\r\n", label, (unsigned long)req->lba, count);
+        LOGE(LOG_TAG_FTL "%s lba out of range lba=%llu count=%lu\r\n", label, req->lba, count);
         return FTL_ERROR;
     }
 

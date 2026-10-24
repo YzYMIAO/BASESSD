@@ -233,19 +233,16 @@ else
 endif
 # -T $(LINKER_SCRIPT)           指定链接脚本文件（定义内存布局、段位置）
 # -Wl,--entry=Reset_Handler     指定程序入口点为 Reset_Handler（复位向量）
-# -specs=nano.specs             使用 Newlib-nano 精简版 C 库（体积更小）
 # -specs=nosys.specs            使用无系统调用版本的 C 库（裸机环境）
-# -Wl,--undefined=_printf_float  强制将 _printf_float 标记为未定义符号，确保浮点打印代码被链接
-#                                （nano 的 %f/%g 实现在 nano-vfprintf_float.o，默认不被拉起）
+# 使用**完整 newlib**（不带 -specs=nano.specs）：支持 %llu/%hhu/%j/%z/%t 与浮点格式化。
+# 体积代价实测 ≈ +13 KB Flash / +2 KB RAM（本板 2 MiB Flash，余量充足）。
 # -nostartfiles                裸机固件不需要阻止标准 C 运行时启动文件（crt0.o、crtbegin.o）被链接
 BASE_LDFLAGS = $(CPU_FLAGS)\
                 -T $(LINKER_SCRIPT)\
                 -L$(LIB_DIR)\
                 -Wl,--entry=Reset_Handler\
-                -specs=nano.specs\
                 -specs=nosys.specs\
                 -nostartfiles\
-                -Wl,--undefined=_printf_float\
                 -Wl,--gc-sections
 
 # -lc                            链接标准 C 库（libc.a）
@@ -255,9 +252,9 @@ LDLIBS := -lc -lm -lgcc
 
 # 注意：这里刻意不再带 $(LDLIBS)。链接规则（rules_link.mk:73）已在 --start-group 内、
 # 项目对象之后追加 $(LDLIBS) —— 库必须排在引用它的对象之后被扫描。
-# 若此处再带一份，libc 会在项目对象之前先扫一遍：一旦有强制未定义符号触发 libc 成员的
-# 早期拉取（如 -Wl,--undefined=_printf_float → dtoa.o → __assert_func → assert.o → abort），
-# 就会把 libc 的 abort.o 拉进来，与 assertion.c 的强符号 abort 撞车（multiple definition）。
+# 若此处再带一份，libc 会在项目对象之前先扫一遍：一旦有强制未定义符号（-Wl,--undefined=…）
+# 触发 libc 成员的早期拉取（如 dtoa.o → __assert_func → assert.o → abort），就会把 libc 的
+# abort.o 拉进来，与 assertion.c 的强符号 abort 撞车（multiple definition）。
 LDFLAGS = $(BASE_LDFLAGS) $(TYPE_LDFLAGS)
 
 # ----------------------------------------------------------------------------

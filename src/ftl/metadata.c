@@ -2106,7 +2106,7 @@ void md_pool_print(const md_dir_cache_t *dir)
             LOGI(LOG_TAG_POOL "%-10s range=%u..%u good(plane-blocks)=%lu\r\n",
                  part->name,
                  (unsigned)L2P_LOG_BLOCK0,
-                 (unsigned)(L2P_LOG_AREA_END - 1U),
+                 (L2P_LOG_AREA_END - 1U),
                  good);
             continue;
         }
@@ -2263,8 +2263,8 @@ void md_pool_service(struct ftl_context *ftl)
     if ((s_pool_rebuilt_logged++ % MD_POOL_REBUILT_LOG_EVERY) == 0U)
     {
         LOGW(LOG_TAG_POOL "rebuilt after metadata BAD (jrn_changed=%u rebuild_required=%u count=%lu)\r\n",
-             (unsigned)(jrn_changed ? 1U : 0U),
-             (unsigned)(alloc->bbt.rebuild_required ? 1U : 0U),
+             (jrn_changed ? 1U : 0U),
+             (alloc->bbt.rebuild_required ? 1U : 0U),
              s_pool_rebuilt_logged);
     }
 }

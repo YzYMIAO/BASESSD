@@ -156,6 +156,7 @@ static void boot_report_system(void)
              (clk.pclk3_hz / 1000000U),
              (clk.pclk4_hz / 1000000U),
              (clk.fmc_hz / 1000000U),
+             (clk.qspi_hz / 1000000U),
              (clk.uart_hz / 1000000U));
     }
 }
@@ -516,10 +517,10 @@ static DWORD ssd_ftl_host_lba_max(void)
         lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
     }
 
-    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%lu (%luMiB)\r\n",
+    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n",
          cap_blocks,
-         (unsigned long)lba,
-         (unsigned long)((lba * FTL_IU_BYTES) / (1024UL * 1024UL)));
+         lba,
+         (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
 
     return (DWORD)lba;
 }
@@ -557,11 +558,11 @@ static void ssd_ftl_log_status(void)
 
                 LOGI(LOG_TAG_STAT "ch=%u t=%lus free=%u bad=%u mig=%u/%u mv=%lu nop=%lu\r\n",
                      (unsigned)ch,
-                     (unsigned long)(now / 1000U),
+                     (now / 1000U),
                      (unsigned)ftl->alloc.free_count,
                      (unsigned)ftl->alloc.bad_count,
-                     (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
-                     (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
+                     ((ftl->mig_handle->active != 0U) ? 1U : 0U),
+                     ((ftl->mig_handle->paused != 0U) ? 1U : 0U),
                      ftl->mig_handle->moved_count,
                      ftl->mig_handle->noop_count);
             }
@@ -681,13 +682,12 @@ static void ssd_ftl_boot_all(void)
 
     /* ④ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
-    /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
-    LOGI("[FTL ] controller ready, lba_max=%lu (%luMiB)\r\n",
-         (unsigned long)g_ctrl.host_lba_max,
-         (unsigned long)(((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL)));
+    LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n",
+         g_ctrl.host_lba_max,
+         ((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL));
 }
 
-/* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
+/* newlib calls this hook from __libc_init_array when no CRT provides it. */
 void _init(void)
 {
 }

@@ -43,13 +43,11 @@ extern DWORD syscalls_heap_used(void);
 #define UART_ARRAY_SIZE(array)  (sizeof(array) / sizeof((array)[0]))
 
 /*
- * CLI 打印 lba / FTL_LBA_MAX 一律用 %lu，不用 %llu：
- * 本工具链的 newlib-nano（-specs=nano.specs，newlib 3.3.0）不带 long long
- * 格式化支持，%llu 会把 "lu" 当字面量原样打出来（`lba_max=%llu` → `lba_max=lu`），
- * 而 GCC 的 -Wformat 按标准语义检查，编译期不会报。这些值都受
- * ssd_controller_lba_range_ok() 约束在 FTL_LBA_MAX 以内，装得下 32 位才安全。
+ * QWORD（host LBA）一律用 %llu；DWORD 用 %lu。完整 newlib 支持标准长度修饰符。
+ * ssd_controller_t.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
+ * 故仍用 _Static_assert 钉住 FTL_LBA_MAX 装得进 32 位。
  */
-_Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，CLI 的 %lu 打印会截断");
+_Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
 
 static char g_cli_line[USART_CLI_LINE_CAPACITY];
 static WORD g_cli_length;
@@ -285,7 +283,7 @@ static int uart_cli_wr(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)LOGI("wr submit ok lba=%lu n=%lu, waiting...\r\n", (unsigned long)lba, n);
+    (void)LOGI("wr submit ok lba=%llu n=%lu, waiting...\r\n", lba, n);
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -341,7 +339,7 @@ static int uart_cli_rd(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)LOGI("rd submit ok lba=%lu n=%lu%s, waiting...\r\n", (unsigned long)lba, n, g_cli_pending.compare ? " c" : "");
+    (void)LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, g_cli_pending.compare ? " c" : "");
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -492,8 +490,8 @@ static int uart_cli_wp(int argc, char *argv[])
         }
     }
 
-    (void)LOGI("wp submit ok lba=%lu n=%lu k=%lu (expect 1 program on flush)\r\n",
-               (unsigned long)lba,
+    (void)LOGI("wp submit ok lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n",
+               lba,
                n,
                k);
     return FUNC_STATUS_SUCCESS;
@@ -544,7 +542,7 @@ static int uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)ssd_controller_host_lba_max(&g_ctrl));
+        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -580,19 +578,19 @@ static int uart_cli_info(int argc, char *argv[])
                            ftl->total_writes);
 
                 /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
-                (void)LOGI("diag[%u][%u][%u] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%lu streak=%u gcm=%u ng=%lu\r\n",
+                (void)LOGI("diag[%u][%u][%u] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%u streak=%u gcm=%u ng=%lu\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
                            ftl->dangling_total,
                            ftl->read_recovery_handle.already_bad_reads,
-                           (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
-                           (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
+                           ((ftl->mig_handle->active != 0U) ? 1U : 0U),
+                           ((ftl->mig_handle->paused != 0U) ? 1U : 0U),
                            ftl->mig_handle->reclaimed_count,
                            ftl->mig_handle->moved_count,
                            ftl->mig_handle->noop_count,
                            ftl->mig_handle->novictim_count,
-                           ftl->mig_handle->erased,
+                           (unsigned)ftl->mig_handle->erased,
                            (unsigned)ftl->mig_handle->read_fail_streak,
                            (unsigned)ftl->mig_handle->gc_last_mode,
                            ftl->mig_handle->nogain_count);
@@ -705,14 +703,14 @@ static int uart_cli_map(int argc, char *argv[])
     }
     if (pba == NAND_PBA_INVALID)
     {
-        (void)LOGI("map lba=%lu -> INVALID (未映射)\r\n", (unsigned long)lba);
+        (void)LOGI("map lba=%llu -> INVALID (未映射)\r\n", lba);
         return FUNC_STATUS_SUCCESS;
     }
 
     g = ftl_pba_gblock(pba);
     b = &ftl->alloc.blocks[g];
-    (void)LOGI("map lba=%lu pba=%08lx paa=%08lx ch=%u ce=%u lun=%u plane=%u blk=%u pg=%u cw=%u g=%u\r\n",
-               (unsigned long)lba,
+    (void)LOGI("map lba=%llu pba=%08lx paa=%08lx ch=%u ce=%u lun=%u plane=%u blk=%u pg=%u cw=%u g=%u\r\n",
+               lba,
                pba,
                pba_to_paa(pba),
                (unsigned)pba_to_ch(pba),
@@ -943,7 +941,7 @@ static int uart_cli_stack(int argc, char *argv[])
     (void)argv;
     stack_guard_report();
     (void)LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n",
-               (unsigned long)syscalls_heap_used());
+               syscalls_heap_used());
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -1347,10 +1345,8 @@ static void uart_cli_pending_poll(void)
     switch (g_cli_pending.req.opcode)
     {
         case SSD_REQUEST_WRITE:
-            /* QWORD 必须窄化到 unsigned long 再进可变参数：newlib-nano 不支持 %llu，
-             * 直接传 QWORD 会占两个参数槽，把 n/status 整体错位（n=0、status=lba 高 32 位）。 */
-            (void)LOGI("wr done lba=%lu n=%lu status=%d\r\n",
-                       (unsigned long)g_cli_pending.lba,
+            (void)LOGI("wr done lba=%llu n=%lu status=%d\r\n",
+                       g_cli_pending.lba,
                        g_cli_pending.nblocks,
                        (int)g_cli_pending.req.completion_status);
             break;
@@ -1358,8 +1354,8 @@ static void uart_cli_pending_poll(void)
             uart_cli_rd_report();
             break;
         case SSD_REQUEST_TRIM:
-            (void)LOGI("tr done lba=%lu status=%d\r\n",
-                       (unsigned long)g_cli_pending.lba,
+            (void)LOGI("tr done lba=%llu status=%d\r\n",
+                       g_cli_pending.lba,
                        (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_FLUSH:

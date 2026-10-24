@@ -4957,7 +4957,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 坑 | 判据 |
 |---|---|
 | `HAL_RCCEx_GetPeriphCLKFreq()` 对 FMC/QSPI/USART 恒返 0 | HAL 里没有这三个 case；动 HAL 前先读源码 |
-| newlib-nano 的 vfprintf 只认 `h/l/L` | `hh/ll/j/z/t` 会静默错位可变参数 |
+| **完整 newlib**（已移除 `nano.specs`）支持 `hh/ll/j/z/t` | 若回退 nano：这些修饰符会静默错位可变参数 |
 | CMSIS 头的 `optimize("Os")` 泄漏 | 只带声明无定义也会影响整个 TU |
 | 上位机日志“折行” | CR 数 == LF 数 == 行数，折行不是丢数据 |
 

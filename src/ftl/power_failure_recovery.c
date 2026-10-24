@@ -137,7 +137,7 @@ ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_form
 
         case CP_MEDIA_NO_RECORD:
         case CP_MEDIA_VERSION_MISMATCH:
-            LOGI(LOG_TAG_BOOT "format required: media_version=%lu current=%lu\r\n", media_version, FTL_MEDIA_LAYOUT_VERSION);
+            LOGI(LOG_TAG_BOOT "format required: media_version=%lu current=%u\r\n", media_version, FTL_MEDIA_LAYOUT_VERSION);
             *out_need_format = true;
             return FTL_OK;
 
@@ -1063,7 +1063,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl,
              (unsigned)blocks_valid,
              (unsigned)blocks_applied,
              (unsigned)block_ctx.ok,
-             (unsigned)(replay_ok ? 1U : 0U));
+             (replay_ok ? 1U : 0U));
         pfr_reset_blocks(ftl);
 
         /* full metadata rebuild 用已回放的 L2P 反查；先认领写过块，carve 再只把 state==NONE 的块入池。 */

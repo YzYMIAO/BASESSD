@@ -2,7 +2,7 @@
  * assertion.c — 断言设施实现（生产断言 + 富断言集的失败后端）
  *
  * 文件结构：
- *   ① 常量与内部辅助（64 位十进制打印）
+ *   ① 常量
  *   ② assertion_report_and_terminate —— 落记录 + 日志 + 停机
  *   ③ 失败入口 assertion_fail / assertion_failf / _i64 / _u64
  *   ④ assertion_terminate —— flush → 平台上下文 → dump → 停机
@@ -28,45 +28,6 @@
 
 /* 单条断言文本的最大长度（含结尾 '\0'）。 */
 #define ASSERTION_TEXT_CAPACITY 192U
-
-/* ── ① 64 位十进制打印 ──
- * newlib-nano 不支持 "%ll"（静默打成字面量，GCC 不警告），故不走 printf 家族。 */
-
-static void assertion_u64_to_decimal(QWORD value, char *out, size_t out_size)
-{
-    char   digits[20]; /* 64 位无符号十进制最多 20 位 */
-    size_t count = 0U;
-    size_t i;
-
-    do
-    {
-        digits[count++] = (char)('0' + (int)(value % 10U));
-        value /= 10U;
-    } while ((value != 0U) && (count < sizeof(digits)));
-
-    if (count > (out_size - 1U))
-    {
-        count = out_size - 1U;
-    }
-    for (i = 0U; i < count; i++)
-    {
-        out[i] = digits[count - 1U - i];
-    }
-    out[count] = '\0';
-}
-
-static void assertion_i64_to_decimal(int64_t value, char *out, size_t out_size)
-{
-    if (value < 0)
-    {
-        /* 取模转换避免 INT64_MIN 取负的 UB。 */
-        out[0] = '-';
-        assertion_u64_to_decimal((QWORD)0 - (QWORD)value, out + 1, out_size - 1U);
-        return;
-    }
-
-    assertion_u64_to_decimal((QWORD)value, out, out_size);
-}
 
 /* ── ② 公共终端：落记录 → 日志 → 停机 ── */
 
@@ -96,35 +57,14 @@ _Noreturn void assertion_failf(const char *file, int line, const char *format, .
     assertion_report_and_terminate(buffer, file, line);
 }
 
-static _Noreturn void assertion_fail_64(const char *expression_a, const char *op, const char *expression_b, const char *a_text, const char *b_text, const char *file, int line)
-{
-    char buffer[ASSERTION_TEXT_CAPACITY];
-
-    (void)snprintf(buffer, sizeof(buffer), "%s %s %s (%s %s %s)", expression_a, op, expression_b, a_text, op, b_text);
-
-    assertion_report_and_terminate(buffer, file, line);
-}
-
 _Noreturn void assertion_fail_i64(const char *expression_a, const char *op, const char *expression_b, int64_t a, int64_t b, const char *file, int line)
 {
-    char a_text[24];
-    char b_text[24];
-
-    assertion_i64_to_decimal(a, a_text, sizeof(a_text));
-    assertion_i64_to_decimal(b, b_text, sizeof(b_text));
-
-    assertion_fail_64(expression_a, op, expression_b, a_text, b_text, file, line);
+    assertion_failf(file, line, "%s %s %s (%lld %s %lld)", expression_a, op, expression_b, a, op, b);
 }
 
 _Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *file, int line)
 {
-    char a_text[24];
-    char b_text[24];
-
-    assertion_u64_to_decimal(a, a_text, sizeof(a_text));
-    assertion_u64_to_decimal(b, b_text, sizeof(b_text));
-
-    assertion_fail_64(expression_a, op, expression_b, a_text, b_text, file, line);
+    assertion_failf(file, line, "%s %s %s (%llu %s %llu)", expression_a, op, expression_b, a, op, b);
 }
 
 /* ── ④ 终端路径 ── */

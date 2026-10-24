@@ -4,59 +4,6 @@
 #include <stdio.h>
 #include <time.h>
 
-/*
- * 64 位整数 → 十进制字符串。newlib-nano 的 vfprintf 不认 %ll，
- * 断言宏 munit_assert_wide 用这两个函数把操作数落到字符串，再以 %s 打印。
- * 与 src/common/assertion.c 的 assertion_{u,i}64_to_decimal 同形。
- */
-
-char *munit_u64_to_str(uint64_t value, char *buf, size_t size)
-{
-    char   digits[20]; /* uint64 十进制最多 20 位 */
-    size_t count = 0U;
-    size_t i;
-
-    if ((buf == NULL) || (size == 0U))
-    {
-        return buf;
-    }
-
-    do
-    {
-        digits[count++] = (char)('0' + (int)(value % 10U));
-        value /= 10U;
-    } while ((value != 0U) && (count < sizeof(digits)));
-
-    if (count > (size - 1U))
-    {
-        count = size - 1U;
-    }
-    for (i = 0U; i < count; i++)
-    {
-        buf[i] = digits[count - 1U - i];
-    }
-    buf[count] = '\0';
-    return buf;
-}
-
-char *munit_i64_to_str(int64_t value, char *buf, size_t size)
-{
-    if ((buf == NULL) || (size == 0U))
-    {
-        return buf;
-    }
-
-    if (value < 0)
-    {
-        /* 取模转换避免 INT64_MIN 取负的 UB。 */
-        buf[0] = '-';
-        (void)munit_u64_to_str((uint64_t)0 - (uint64_t)value, buf + 1, size - 1U);
-        return buf;
-    }
-
-    return munit_u64_to_str((uint64_t)value, buf, size);
-}
-
 #if defined(MUNIT_ENABLE_TIMING)
 #    include "sys.h"
 

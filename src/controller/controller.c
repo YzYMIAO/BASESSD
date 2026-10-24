@@ -153,10 +153,10 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
              *   （H44 的「刻意加宽避免溢出」例外）。 */
             if (request->buffer_size < ((size_t)request->block_count * FTL_IU_BYTES))
             {
-                LOGE(LOG_TAG_CTRL "buffer too small count=%lu need=%lu have=%lu\r\n",
+                LOGE(LOG_TAG_CTRL "buffer too small count=%lu need=%zu have=%zu\r\n",
                      request->block_count,
-                     (unsigned long)((size_t)request->block_count * FTL_IU_BYTES),
-                     (unsigned long)request->buffer_size);
+                     (size_t)request->block_count * FTL_IU_BYTES,
+                     request->buffer_size);
                 request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
                 request->complete_flag     = 1U;
                 return SSD_STATUS_INVALID_ARGUMENT;

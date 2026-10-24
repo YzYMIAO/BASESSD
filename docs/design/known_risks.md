@@ -358,6 +358,19 @@
 
 ---
 
+## 2X. 日志格式化 — 编译器格式检查收口（2026-10-24，未上板）
+
+> 触发：`log_printf` 补上 `__attribute__((format(printf, 2, 3)))`，格式串与实参不匹配从
+> 「板端才看得出乱码」变成编译期告警。同时链接改为完整 newlib（`config.mk` 去掉
+> `-specs=nano.specs`），`%llu` / `%zu` / 浮点格式化均可用。
+
+| ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-LOG-04 | 已改未上板（2026-10-24） | **日志实参与格式串错位**：`src/main.c` 的时钟分支格式串声明了 `qspi` 一项，实参却漏传 ⇒ 其后 `uart` 的值被当成 `qspi` 打印，`uart` 项读越界可变参数（栈上残留值），日志数值全错。补齐属性后才被 `-Wformat` 发现；nano 时代同类错误只能靠上板读日志发现。 | 已补传 `(clk.qspi_hz / 1000000U)`；`log_printf` 声明带 `format(printf)`，新增打印点一律编译期校验。 | 上板看 `[CLK]` 行 qspi/uart 数值与复位时钟一致；后续新日志若出现 `-Wformat` 告警必须修实参，不得改格式串迁就。 | `src/main.c` 时钟日志分支；`include/common/log.h` `log_printf` 声明；`config.mk`（完整 newlib） |
+| RISK-LOG-05 | 信息（2026-10-24） | **完整 newlib 的体积/依赖后果**：release `.text` +10080 B、`.data` +2012 B、AXI_RAM +2 KB；`malloc` 由 `mallocr.o`（dlmalloc）提供，浮点格式化经 `_dtoa_r` 依赖它。`--gc-sections` 仍丢弃未用的公共算法/数据结构代码。本板 2 MiB Flash，余量充足。 | `config.mk` 注释写明体积代价与选项；`syscalls.c` 注释同步为完整 `libc.a`。 | 若 Flash 余量收紧，重新评估 nano + 定点打印；换工具链时复核 `_vfprintf_r` 是否仍被链接。 | `config.mk`；`build/firmware/release/*.map`；`src/platform/syscalls.c` |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |

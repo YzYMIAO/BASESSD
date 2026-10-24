@@ -175,12 +175,12 @@ void usb_msc_io_stats_print(void)
     {
         const DWORD avg_us = (s_lat.calls == 0U) ? 0U : (DWORD)(s_lat.total_us / s_lat.calls);
 
-        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%lums\r\n",
+        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%llums\r\n",
              s_lat.calls,
              avg_us,
              s_lat.max_us,
              s_lat.last_us,
-             (unsigned long)(s_lat.total_us / 1000U));
+             s_lat.total_us / 1000U);
     }
 }
 

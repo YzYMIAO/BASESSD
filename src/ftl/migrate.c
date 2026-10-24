@@ -1878,7 +1878,7 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
              m->novictim_count,
              m->nogain_count,
              mig_gc_mode_name(m->gc_last_mode),
-             (unsigned)(*host_writing ? 1U : 0U),
+             (*host_writing ? 1U : 0U),
              (unsigned)m->gc_best_valid_pct);
     }
 

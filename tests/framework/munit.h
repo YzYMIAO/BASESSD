@@ -107,11 +107,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...);
     } while (0)
 
 /*
- * 格式串限制（newlib-nano）：本文件的断言格式串只允许 nano 的 vfprintf 认得的写法。
- * nano-vfprintf.c 的长度修饰符集合是 "hlL"，C99 的 hh / ll / j / z / t 一律不认——
- * 遇到时它把修饰符当普通字符打出、并错位后续可变参数（表现为二进制乱码），
- * 而 GCC 不会告警。支持的转换字符：c d i n o p s u x X（浮点转换 f/e/g/a 另在
- * nano-vfprintf_float.o，由 config.mk 的 -Wl,--undefined=_printf_float 拉起）。
+ * 格式串：本仓链接**完整 newlib**，标准长度修饰符 h/hh/l/ll/j/z/t 均可用。
  *
  * 目标平台（arm-none-eabi / stm32h743）的实际类型（已用 _Generic 实测）：
  *   char                -> 无符号（ARM EABI 默认），可变参数提升为 int
@@ -120,14 +116,9 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...);
  *   int32_t / uint32_t  -> long / unsigned long（newlib 如此定义，**不是 int**）
  *   int64_t / uint64_t  -> long long / unsigned long long
  *   size_t              -> unsigned int
- * 8/16 位提升后数值不变，故去掉 hh / h 直接用 %d/%i/%u/%x；
- * 32 位对应 long，用 %ld/%li/%lu；64 位 nano 打不了，走下面的十进制转换函数 + %s。
+ * 8/16 位提升后数值不变，按 H44 用 (unsigned)/(int) 做格式匹配；
+ * 32 位用 %ld/%li/%lu，64 位用 %lld/%llu。
  */
-
-/* 64 位整数转十进制字符串（nano 无 %ll）。buf 建议 >= MUNIT_I64_TEXT_SIZE，返回 buf。 */
-#define MUNIT_I64_TEXT_SIZE 24U
-char *munit_u64_to_str(uint64_t value, char *buf, size_t size);
-char *munit_i64_to_str(int64_t value, char *buf, size_t size);
 
 /*
  * 通用类型断言宏，用于比较两个值的大小关系
@@ -191,36 +182,13 @@ char *munit_i64_to_str(int64_t value, char *buf, size_t size);
 #define munit_assert_ulong(a, op, b) \
     munit_assert_type(unsigned long int, "lu", a, op, b)
 
-/*
- * 64 位断言：nano 无 %ll，故先把两个操作数转成十进制字符串再以 %s 打印。
- * to_str 取 munit_i64_to_str / munit_u64_to_str。
- */
-#define munit_assert_wide(T, to_str, a, op, b)                                      \
-    do                                                                              \
-    {                                                                               \
-        T munit_tmp_a_ = (a);                                                       \
-        T munit_tmp_b_ = (b);                                                       \
-        if (!(munit_tmp_a_ op munit_tmp_b_))                                        \
-        {                                                                           \
-            char munit_str_a_[MUNIT_I64_TEXT_SIZE];                                 \
-            char munit_str_b_[MUNIT_I64_TEXT_SIZE];                                 \
-            munit_errorf("assertion failed:%s %s %s(%s %s %s)",                     \
-                         #a,                                                        \
-                         #op,                                                       \
-                         #b,                                                        \
-                         to_str(munit_tmp_a_, munit_str_a_, sizeof(munit_str_a_)),  \
-                         #op,                                                       \
-                         to_str(munit_tmp_b_, munit_str_b_, sizeof(munit_str_b_))); \
-        }                                                                           \
-    } while (0)
-
 // 打印示例：assertion failed: ll == 100 (42 == 100)
 #define munit_assert_llong(a, op, b) \
-    munit_assert_wide(long long int, munit_i64_to_str, a, op, b)
+    munit_assert_type(long long int, "lld", a, op, b)
 
 // 打印示例：assertion failed: ull == 42 (100 == 42)
 #define munit_assert_ullong(a, op, b) \
-    munit_assert_wide(unsigned long long int, munit_u64_to_str, a, op, b)
+    munit_assert_type(unsigned long long int, "llu", a, op, b)
 
 // 打印示例：assertion failed: len == 10 (5 == 10)
 // 本平台 size_t 即 unsigned int。
@@ -228,8 +196,6 @@ char *munit_i64_to_str(int64_t value, char *buf, size_t size);
     munit_assert_type(size_t, "u", a, op, b)
 
 // 打印示例：assertion failed: pi == 3.14 (3.14 == 3.14159)
-// ⚠ %f/%g 的实现在 nano-vfprintf_float.o，默认不被链接；本工程靠 config.mk 的
-//   -Wl,--undefined=_printf_float 拉起。去掉该选项 ⇒ 浮点断言值打印成空串（不报错、不乱码）。
 #define munit_assert_float(a, op, b) \
     munit_assert_type(float, "f", a, op, b)
 
@@ -268,17 +234,14 @@ char *munit_i64_to_str(int64_t value, char *buf, size_t size);
 
 // 打印示例：assertion failed: i64 == 10000000000 (42 == 10000000000)
 #define munit_assert_int64(a, op, b) \
-    munit_assert_wide(int64_t, munit_i64_to_str, a, op, b)
+    munit_assert_type(int64_t, "lld", a, op, b)
 
 // 打印示例：assertion failed: u64 == 18446744073709551615 (42 == 18446744073709551615)
 #define munit_assert_uint64(a, op, b) \
-    munit_assert_wide(uint64_t, munit_u64_to_str, a, op, b)
+    munit_assert_type(uint64_t, "llu", a, op, b)
 
 /* 判断两个 double 值在给定精度内是否相等 */
 //	assertion failed: pi == expected (3.141592654 == 3.141592653)
-// ⚠ 同 munit_assert_float：%g 的实现在 nano-vfprintf_float.o，靠 config.mk 的
-//   -Wl,--undefined=_printf_float 拉起。
-
 #define munit_assert_double_equal(a, b, precision)                                                                                          \
     do                                                                                                                                      \
     {                                                                                                                                       \

@@ -7,7 +7,7 @@
  *   强符号覆盖它，补上堆/栈相撞的保护。
  *
  * 调用链：
- *   malloc/calloc/free（libc_nano.a: nano-mallocr.o / nano-freer.o）
+ *   malloc/calloc/free（完整 libc.a: mallocr.o / freer.o）
  *     → _sbrk_r（libc: reent/sbrkr.c，把返回值 -1 翻译成 errno=ENOMEM）
  *       → _sbrk（本文件）
  *   链接顺序决定覆盖：目标文件里的 _sbrk 优先于归档成员，libnosys 版本被丢弃。

@@ -73,8 +73,8 @@ bool usb_device_init(void)
                                          : "unknown";
 
     (void)LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n",
-               (unsigned long)ghwcfg2,
-               (unsigned long)arch,
+               ghwcfg2,
+               arch,
                arch_s);
 
     return ok;

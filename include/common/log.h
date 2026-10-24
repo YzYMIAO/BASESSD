@@ -25,8 +25,11 @@ typedef bool (*log_flush_sink_t)(DWORD timeout_ms);
  * 运行时日志接口。sink 由已注册的平台提供，例如 firmware 的 UART 或 host 的 stderr。
  * 业务模块只依赖本头文件，不应直接操作 UART、文件描述符或平台寄存器。
  */
-DWORD       log_write(log_level_e level, const char *message);
-DWORD       log_printf(log_level_e level, const char *format, ...);
+DWORD log_write(log_level_e level, const char *message);
+/* 格式与实参类型由编译器按 printf 语义检查（GCC -Wformat）。 */
+__attribute__((format(printf, 2, 3)))
+DWORD
+            log_printf(log_level_e level, const char *format, ...);
 DWORD       log_vprintf(log_level_e level, const char *format, va_list args);
 void        log_set_level(log_level_e level);
 log_level_e log_get_level(void);

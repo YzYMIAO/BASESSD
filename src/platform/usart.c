@@ -216,13 +216,13 @@ void usart_init(DWORD baudrate)
 }
 
 /*
- * newlib-nano 的 printf 最终会调用 _write()。把它接到软件 TX 队列后，现有 printf
+ * newlib 的 printf 最终会调用 _write()。把它接到软件 TX 队列后，现有 printf
  * 自动变成非阻塞日志。
  * ⚠ libc ABI 要求 `int _write()` 且失败返回 -1（H46 的明确例外）；项目内部的
  *   `uart_log_write()` 已改为 `DWORD` + `UART_LOG_INVALID` 哨兵，本函数只做 ABI 转换。
  *
  * 行尾归一化：裸机串口终端（PuTTY/minicom 等）要求 \r\n 才能正确换行。
- * printf/puts/fprintf 在 newlib-nano 中只输出 \n，此处扫描 buffer，
+ * printf/puts/fprintf 在 newlib 中只输出 \n，此处扫描 buffer，
  * 在裸 \n（前面不是 \r）前插入 \r，同时避免已有 \r\n 被重复加 \r。
  * 所有走 printf 的输出（LOGI/munit 测试报告等）自动受益，
  * 直接调 uart_log_write() 的不受影响。

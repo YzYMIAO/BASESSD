@@ -51,8 +51,8 @@ ASSERTION_PRINTF(3, 4)
 _Noreturn void assertion_failf(const char *file, int line, const char *format, ...);
 
 /*
- * 64 位专用入口。newlib-nano 不支持 "%ll"（静默打成字面量，GCC 不警告），
- * 因此 64 位变体不走 printf 家族，由 assertion.c 里的十进制拆解打印。
+ * 64 位专用入口：直接十进制拆解（assertion.c），不依赖库的 %ll 实现，
+ * 也便于把「a op b」两个操作数与比较符一并打出。
  */
 _Noreturn void assertion_fail_i64(const char *expression_a, const char *op, const char *expression_b, int64_t a, int64_t b, const char *file, int line);
 _Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *file, int line);
@@ -92,16 +92,15 @@ void assertion_platform_context(void);
  * ── 富断言集（重写自 munit，供测试文件使用；不随 NDEBUG 裁剪） ──
  *
  * 说明：这套宏是测试语义——断言永远生效，失败即停机并保留现场。生产代码请用
- * ASSERT/ASSUME。刻意不提供 llong/ullong（"%ll" 在本平台不可用），64 位一律走
- * ASSERT_INT64 / ASSERT_UINT64（内部调 assertion_fail_{i,u}64）。
+ * ASSERT/ASSUME。刻意不提供 llong/ullong：64 位一律走 ASSERT_INT64 /
+ * ASSERT_UINT64（内部调 assertion_fail_{i,u}64，十进制拆解打印）。
  *
- * 格式串限制（newlib-nano）：只允许长度修饰符 h/l/L 与转换字符 c d i n o p s u x X；
- * hh/ll/j/z/t 会被当普通字符打出并错位可变参数（详见 tests/framework/munit.h 顶部）。
+ * 格式串：本仓链接**完整 newlib**，标准长度修饰符 h/hh/l/ll/j/z/t 均可用。
  * 本平台 int32_t 即 long（用 %li/%lu）、size_t 即 unsigned int、char 无符号；
- * 8/16 位提升后数值不变，去掉 hh/h 直接用 %i/%u。
+ * 8/16 位/枚举提升为 int，按 H44 用 (unsigned) 做格式匹配。
  *
  * 浮点断言（ASSERT_FLOAT / ASSERT_DOUBLE / ASSERT_DOUBLE_EQUAL）依赖 printf 浮点
- * 支持：本工程已在 config.mk 用 -Wl,--undefined=_printf_float 拉起 nano-vfprintf_float.o。
+ * 支持：完整 newlib 自带，无需额外链接钩子。
  */
 
 #define ASSERT_TRUE(expression)                                                 \

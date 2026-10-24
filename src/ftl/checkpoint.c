@@ -1594,7 +1594,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
         {
             LOGW(LOG_TAG_CP "init: snapshot page=%u write failed (addr=%08lx)\r\n",
                  (unsigned)p,
-                 (unsigned long)addr);
+                 addr);
             return false;
         }
     }
@@ -1624,7 +1624,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
     {
         LOGW(LOG_TAG_CP "init: snapshot page1 readback %s (addr=%08lx r=%d)\r\n",
              (r1 != FTL_OK) ? "failed" : "blank",
-             (unsigned long)page1,
+             page1,
              (int)r1);
         return false;
     }
@@ -1633,7 +1633,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
 
     if (ftl_sync_write_page_mirror(hdr_addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != FTL_OK)
     {
-        LOGW(LOG_TAG_CP "init: header write failed (addr=%08lx)\r\n", (unsigned long)hdr_addr);
+        LOGW(LOG_TAG_CP "init: header write failed (addr=%08lx)\r\n", hdr_addr);
         return false;
     }
 
@@ -1694,7 +1694,7 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
             LOGI(LOG_TAG_CP "init candidate block=%u slot=%u ok (base=%08lx)\r\n",
                  (unsigned)ring.blocks[bi],
                  (unsigned)slot,
-                 (unsigned long)base);
+                 base);
 
             for (BYTE fi = 0U; fi < failed_count; fi++)
             {
