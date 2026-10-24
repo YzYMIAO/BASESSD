@@ -164,7 +164,7 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
 
     if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) || (type == NAND_UOP_CHECK_FAIL))
     {
-        ENG_LOGD("uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n", (unsigned)state->uop_index, (unsigned)type, (unsigned)state->request->operation, (unsigned)state->completion->nand_status, (unsigned)state->debug_polls);
+        ENG_LOGD("uop[%hu]=%hhu OK op=%hhu nand_st=0x%02hhX polls=%hu\r\n", state->uop_index, type, state->request->operation, state->completion->nand_status, state->debug_polls);
     }
 }
 

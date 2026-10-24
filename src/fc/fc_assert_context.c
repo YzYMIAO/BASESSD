@@ -21,5 +21,5 @@ void assertion_platform_context(void)
         return;
     }
 
-    LOGE(LOG_TAG_RES "cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n", (unsigned)stats.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)stats.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)stats.sq_used, (unsigned)stats.hsq_used, (unsigned)stats.cq_used);
+    LOGE(LOG_TAG_RES "cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu hsq=%hu cq=%hu\r\n", stats.command_used, FC_COMMAND_POOL_DEPTH, stats.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, stats.buffer_used, FC_BUFFER_POOL_DEPTH, stats.sq_used, stats.hsq_used, stats.cq_used);
 }

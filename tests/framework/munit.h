@@ -116,7 +116,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...);
  *   int32_t / uint32_t  -> long / unsigned long（newlib 如此定义，**不是 int**）
  *   int64_t / uint64_t  -> long long / unsigned long long
  *   size_t              -> unsigned int
- * 8/16 位提升后数值不变，按 H44 用 (unsigned)/(int) 做格式匹配；
+ * 8/16 位提升后数值不变，格式串用 %hhu/%hu 与实参匹配，不再加 (unsigned) 强转；
  * 32 位用 %ld/%li/%lu，64 位用 %lld/%llu。
  */
 

@@ -615,7 +615,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
         if (borrowed_log || ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT))) || ftl_is_l2p_log_block(block))
         {
             alloc->bbt.rebuild_required = true;
-            LOGE(LOG_TAG_BBT "metadata log block %u lost — rebuild required\r\n", (unsigned)block);
+            LOGE(LOG_TAG_BBT "metadata log block %hu lost — rebuild required\r\n", block);
         }
     }
     else if (!alloc->bbt.format_in_progress && (bbt_spare_refill(alloc, plane) != FTL_OK))
@@ -625,7 +625,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
             /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
             if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)
             {
-                LOGW(LOG_TAG_BLK "reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n", (unsigned)plane, (unsigned)alc_spare_get_count(alloc, plane), (unsigned)alc_op_get_count(alloc, plane), (unsigned)alloc->free_count, s_reserve_low_logged);
+                LOGW(LOG_TAG_BLK "reserve low plane=%hhu spare=%hu op=%hu free=%hu count=%lu\r\n", plane, alc_spare_get_count(alloc, plane), alc_op_get_count(alloc, plane), alloc->free_count, s_reserve_low_logged);
             }
         }
     }
@@ -930,7 +930,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         }
         else if (ftl_job_heartbeat(&alloc->bbt.handle.log_ms, &alloc->bbt.handle.start_ms))
         {
-            LOGI(LOG_TAG_BBT "job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n", (unsigned)alloc->bbt.handle.phase, (unsigned)alloc->bbt.handle.waiting, alloc->bbt.sequence, (unsigned)alloc->bbt.write_idx, ftl_job_age_ms(&alloc->bbt.handle.start_ms));
+            LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, ftl_job_age_ms(&alloc->bbt.handle.start_ms));
         }
 
         if (alloc->bbt.handle.waiting != 0U)
@@ -976,7 +976,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         bool  need_erase = false;
         if (md_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
         {
-            LOGE(LOG_TAG_BBT "prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
+            LOGE(LOG_TAG_BBT "prepare failed idx=%hu\r\n", alloc->bbt.write_idx);
             break;
         }
 
@@ -1077,7 +1077,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     /* 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。 */
     if (alloc->bbt.handle.waiting == 0U)
     {
-        LOGE(LOG_TAG_BBT "orphan completion phase=%u — ignored\r\n", (unsigned)alloc->bbt.handle.phase);
+        LOGE(LOG_TAG_BBT "orphan completion phase=%d — ignored\r\n", alloc->bbt.handle.phase);
         (void)fc_command_release(cmd);
         return;
     }
@@ -1093,7 +1093,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     else
     {
         /* 不该发生：一条命令对应一个 job，phase 必为 ERASE / WRITE。 */
-        LOGE(LOG_TAG_BBT "unexpected completion phase=%u\r\n", (unsigned)alloc->bbt.handle.phase);
+        LOGE(LOG_TAG_BBT "unexpected completion phase=%d\r\n", alloc->bbt.handle.phase);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = 0U;
         (void)fc_command_release(cmd);
@@ -1153,7 +1153,7 @@ void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
 
     /* 前置条件（判据 2）：唯一调用者 cli.c 已判 ftl 非空后传 &ftl->alloc。 */
 
-    LOGI("CH=%u  CE=%u  LUN=%u\r\n", (unsigned)alloc->ch, (unsigned)alloc->ce, (unsigned)alloc->lun);
+    LOGI("CH=%hhu  CE=%hhu  LUN=%hhu\r\n", alloc->ch, alloc->ce, alloc->lun);
     {
         int n = 0;
 
@@ -1167,7 +1167,7 @@ void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
             {
                 n += snprintf(&line[n], sizeof(line) - (size_t)n, "   ");
             }
-            n += snprintf(&line[n], sizeof(line) - (size_t)n, "%*sPLANE=%u%*s", pad, "", (unsigned)plane, trail, "");
+            n += snprintf(&line[n], sizeof(line) - (size_t)n, "%*sPLANE=%hhu%*s", pad, "", plane, trail, "");
         }
         LOGI("%s\r\n", line);
     }
@@ -1201,7 +1201,7 @@ void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
                     /* 坏块打**本 plane 的绝对块号**（0..BLOCKS_PER_PLANE-1），不是排内列号：
                      * 列号每排重新计数，读图的人得自己算 排号×列数+列号，且 1~2 位的数字
                      * 与 `FF` 并排极易被误读成十六进制字节值（上一版正是这么被误读的）。 */
-                    n += snprintf(&line[n], sizeof(line) - (size_t)n, "%*u", (int)BBT_MAP_ENTRY_W, (unsigned)block);
+                    n += snprintf(&line[n], sizeof(line) - (size_t)n, "%*hu", (int)BBT_MAP_ENTRY_W, block);
                 }
                 else
                 {

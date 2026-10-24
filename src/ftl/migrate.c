@@ -448,7 +448,7 @@ static void mig_gc_nogain_note(mig_handle_t *m, gc_benefit_mode_e mode, WORD bes
 
     if (first)
     {
-        LOGD(LOG_TAG_GC "no-gain mode=%s minvr=%u free=%u writes=%lu — suspend until writes/emergency\r\n", mig_gc_mode_name(mode), (unsigned)best_valid_pct, (unsigned)m->alloc->free_count, *m->total_writes);
+        LOGD(LOG_TAG_GC "no-gain mode=%s minvr=%hu free=%hu writes=%lu — suspend until writes/emergency\r\n", mig_gc_mode_name(mode), best_valid_pct, m->alloc->free_count, *m->total_writes);
     }
 }
 
@@ -524,7 +524,7 @@ static bool mig_gc_begin(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms, 
         m->gc_session_aborted   = 0U;
         /* 只在会话起点打一次触发上下文；逐 victim 的 move 行降为 DEBUG，
          * 避免同一 reason/trig/mode 在大批搬移时反复刷 INFO。 */
-        LOGI(LOG_TAG_GC "start reason=%s trig=0x%02lx mode=%s free=%u\r\n", mig_gc_reason_name(reason), triggers, mig_gc_mode_name(mode), (unsigned)m->alloc->free_count);
+        LOGI(LOG_TAG_GC "start reason=%s trig=0x%02lx mode=%s free=%hu\r\n", mig_gc_reason_name(reason), triggers, mig_gc_mode_name(mode), m->alloc->free_count);
     }
 
     if (m->gc_session_active)
@@ -573,7 +573,7 @@ static bool mig_wl_begin(mig_handle_t *m)
     alc_super_prepare_wl_destination(m->alloc);
 
     /* 静态 WL 是空闲态慢过程，每个 job 一行，便于与 GC 区分。 */
-    LOGI(LOG_TAG_WL "start free=%u writes=%lu\r\n", (unsigned)m->alloc->free_count, total_writes);
+    LOGI(LOG_TAG_WL "start free=%hu writes=%lu\r\n", m->alloc->free_count, total_writes);
 
     /* 静态 WL 的方向：目标取高擦除空闲块（UBI 模型）。 */
     mig_job_start(m, &sb, MIG_KIND_WL, "wl", 0U);
@@ -604,7 +604,7 @@ static bool mig_predict_begin(mig_handle_t *m)
      * plane_blocks 去擦块 = 静默介质破坏。 */
     if (closed_idx >= closed_count)
     {
-        LOGE(LOG_TAG_MIG "predict: stale sb_id=%u (closed=%u) — ignored\r\n", (unsigned)closed_idx, (unsigned)closed_count);
+        LOGE(LOG_TAG_MIG "predict: stale sb_id=%hu (closed=%hu) — ignored\r\n", closed_idx, closed_count);
         return false;
     }
 
@@ -669,7 +669,7 @@ static void mig_job_abort(mig_handle_t *m, const char *reason)
         const WORD g1 = (PLANE_NUM > 1U) ? mig_victim_get_gblock(m, 1U) : UINT16_MAX;
 
         (void)fc_cw_status_str(m->last_fc_status, stbuf, sizeof(stbuf));
-        LOGW(LOG_TAG_MIG "abort kind=%s g0=%u g1=%u phase=%u page=%u plane=%u — %s fc=0x%08lx(%s) supp=%lu\r\n", mig_kind_name(m->kind), (unsigned)g0, (unsigned)g1, (unsigned)m->phase, (unsigned)m->page, (unsigned)m->plane, reason, m->last_fc_status, stbuf, suppressed);
+        LOGW(LOG_TAG_MIG "abort kind=%s g0=%hu g1=%hu phase=%d page=%hhu plane=%hhu — %s fc=0x%08lx(%s) supp=%lu\r\n", mig_kind_name(m->kind), g0, g1, m->phase, m->page, m->plane, reason, m->last_fc_status, stbuf, suppressed);
     }
 
     if ((m->kind == MIG_KIND_GC) && m->gc_session_active)
@@ -763,12 +763,12 @@ static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
 
     if (command_attempted || pair_programmed)
     {
-        LOGD(LOG_TAG_MIG "dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
+        LOGD(LOG_TAG_MIG "dst failure plane=%hhu — close cold SB\r\n", m->plane);
         (void)alc_super_close(m->alloc, FTL_TEMP_COLD);
     }
     else
     {
-        LOGD(LOG_TAG_MIG "dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
+        LOGD(LOG_TAG_MIG "dst failure plane=%hhu — rewind pair\r\n", m->plane);
         alc_super_open_rewind_pair(m->alloc, FTL_TEMP_COLD);
     }
 }
@@ -837,7 +837,7 @@ static void mig_job_finish(mig_handle_t *m)
                     {
                         continue;
                     }
-                    LOGW(LOG_TAG_FTL "predictive relocate retired g=%u\r\n", (unsigned)mig_victim_get_gblock(m, p));
+                    LOGW(LOG_TAG_FTL "predictive relocate retired g=%hu\r\n", mig_victim_get_gblock(m, p));
                 }
             }
         }
@@ -887,7 +887,7 @@ static void mig_job_finish(mig_handle_t *m)
         const WORD  dst1    = (PLANE_NUM > 1U) ? mig_dst_get_gblock(m, 1U) : UINT16_MAX;
         const DWORD elapsed = (m->start_ms != 0U) ? ftl_job_age_ms(&m->start_ms) : 0U;
 
-        LOGD(LOG_TAG_MIG "move k=%s r=%s trig=0x%02lx src0=%u src1=%u dst0=%u dst1=%u v=%u mv=%lu t=%lums\r\n", mig_kind_name(m->kind), m->log_reason, m->log_triggers, (unsigned)src0, (unsigned)src1, (unsigned)dst0, (unsigned)dst1, (unsigned)m->job_valid_cw, m->migrated, elapsed);
+        LOGD(LOG_TAG_MIG "move k=%s r=%s trig=0x%02lx src0=%hu src1=%hu dst0=%hu dst1=%hu v=%hu mv=%lu t=%lums\r\n", mig_kind_name(m->kind), m->log_reason, m->log_triggers, src0, src1, dst0, dst1, m->job_valid_cw, m->migrated, elapsed);
     }
 #endif
 
@@ -1793,7 +1793,7 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
     if ((m->gc_log_last_ms == 0U) || ((now_ms - m->gc_log_last_ms) >= GC_LOG_INTERVAL_MS))
     {
         m->gc_log_last_ms = now_ms;
-        LOGD(LOG_TAG_GC "trig=0x%02lx free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%u\r\n", triggers, (unsigned)m->alloc->free_count, (unsigned)alc_op_get_count(m->alloc, 0U), (unsigned)alc_op_get_count(m->alloc, 1U), *m->total_writes, m->reclaimed_count, m->novictim_count, m->nogain_count, mig_gc_mode_name(m->gc_last_mode), (*host_writing ? 1U : 0U), (unsigned)m->gc_best_valid_pct);
+        LOGD(LOG_TAG_GC "trig=0x%02lx free=%hu op=%hu/%hu writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%hu\r\n", triggers, m->alloc->free_count, alc_op_get_count(m->alloc, 0U), alc_op_get_count(m->alloc, 1U), *m->total_writes, m->reclaimed_count, m->novictim_count, m->nogain_count, mig_gc_mode_name(m->gc_last_mode), (*host_writing ? 1U : 0U), m->gc_best_valid_pct);
     }
 
     return triggers;
@@ -1860,7 +1860,7 @@ static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
     }
 
     m->gc_session_log_ms = now_ms;
-    LOGI(LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%u\r\n", m->gc_session_jobs, m->gc_session_moved, m->gc_session_reclaimed, m->gc_session_noop, m->gc_session_aborted, (unsigned)m->alloc->free_count);
+    LOGI(LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu\r\n", m->gc_session_jobs, m->gc_session_moved, m->gc_session_reclaimed, m->gc_session_noop, m->gc_session_aborted, m->alloc->free_count);
 }
 
 /* GC 会话收尾：连续 GC_SESSION_IDLE_MS 没有 GC job 活动。 */
@@ -1904,7 +1904,7 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
          *   GC 时会变成 1 行/秒。job age ≥ SLOW_AFTER 才打；之后 helper 自动降到 5 s。 */
         if (ftl_job_heartbeat(&m->log_ms, &m->start_ms) && (ftl_job_age_ms(&m->start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS))
         {
-            LOGI(LOG_TAG_MIG "job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums\r\n", (unsigned)m->kind, (unsigned)m->phase, (unsigned)m->page, (unsigned)m->plane, (unsigned)m->aborted, ftl_job_age_ms(&m->start_ms));
+            LOGI(LOG_TAG_MIG "job kind=%d phase=%d page=%hhu plane=%hhu aborted=%d age=%lums\r\n", m->kind, m->phase, m->page, m->plane, m->aborted, ftl_job_age_ms(&m->start_ms));
         }
 
         mig_job_step(m);
@@ -2082,7 +2082,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
         {
             /* gblk 是全局块号（plane*BLOCKS_PER_PLANE+block）；与 abort 行的
              * g0/g1 同一坐标（RISK-MIG-06）。 */
-            LOGW(LOG_TAG_MIG "victim read failed gblk=%u x%u cause=%s — mark BAD\r\n", (unsigned)gsrc, (unsigned)m->fail_count[plane], cause);
+            LOGW(LOG_TAG_MIG "victim read failed gblk=%hu x%hhu cause=%s — mark BAD\r\n", gsrc, m->fail_count[plane], cause);
             (void)bbt_mark_bad(m->alloc, gsrc);
             if (alc_super_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
             {
@@ -2100,7 +2100,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
             if (!m->paused && (m->read_fail_streak >= MIG_SYSTEMIC_READ_FAIL_MAX))
             {
                 m->paused = true;
-                LOGE(LOG_TAG_MIG "systemic victim read failures (%u consecutive) — suspend GC until reboot\r\n", (unsigned)m->read_fail_streak);
+                LOGE(LOG_TAG_MIG "systemic victim read failures (%hhu consecutive) — suspend GC until reboot\r\n", m->read_fail_streak);
             }
         }
 
@@ -2229,7 +2229,7 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
         {
             /* 迁移期间被 RR/BBT 标 BAD：擦成功也不能复活或入池。 */
             m->erase_failed = true;
-            LOGW(LOG_TAG_MIG "erase ok but block %u became BAD — not freed/retired\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase ok but block %hu became BAD — not freed/retired\r\n", gsrc);
         }
         else
         {
@@ -2269,12 +2269,12 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
          *   「GC 源块擦失败」还是「host 写/读失败」。 */
         if (!ftl_block_is_bad(&m->alloc->blocks[gsrc]))
         {
-            LOGW(LOG_TAG_MIG "erase failed gblk=%u — mark BAD\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase failed gblk=%hu — mark BAD\r\n", gsrc);
             (void)bbt_mark_bad(m->alloc, gsrc);
         }
         else
         {
-            LOGW(LOG_TAG_MIG "erase failed on already-BAD block %u — not re-marked\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase failed on already-BAD block %hu — not re-marked\r\n", gsrc);
         }
     }
 
@@ -2312,7 +2312,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
      * 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。 */
     if (m == NULL)
     {
-        LOGE(LOG_TAG_MIG "late completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, (unsigned)completion->status);
+        LOGE(LOG_TAG_MIG "late completion cmd=%hu status=0x%02hx — released\r\n", completion->command_id, completion->status);
         (void)fc_command_release(cmd);
         return;
     }
@@ -2325,7 +2325,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
      * 否则迟到的完成会按新 job 的 phase 被误解释（同 read_recovery.c 的守卫）。 */
     if ((!m->active) || (!m->waiting))
     {
-        LOGW(LOG_TAG_MIG "orphan completion phase=%u active=%u waiting=%u — ignored\r\n", (unsigned)m->phase, (unsigned)m->active, (unsigned)m->waiting);
+        LOGW(LOG_TAG_MIG "orphan completion phase=%d active=%d waiting=%d — ignored\r\n", m->phase, m->active, m->waiting);
         (void)fc_command_release(cmd);
         return;
     }
@@ -2355,7 +2355,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
         case MIG_DONE:
         default:
             /* 不该发生：一条命令对应一个提交阶段（READ / WRITE / ERASE）。 */
-            LOGE(LOG_TAG_MIG "unexpected completion phase=%u\r\n", (unsigned)m->phase);
+            LOGE(LOG_TAG_MIG "unexpected completion phase=%d\r\n", m->phase);
             (void)fc_command_release(cmd);
             m->waiting = false;
             mig_job_abort(m, "unexpected completion");

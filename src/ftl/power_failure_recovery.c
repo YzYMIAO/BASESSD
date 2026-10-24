@@ -249,7 +249,7 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
 
     alloc->bad_count = kept;
 
-    LOGI(LOG_TAG_FLT "format --verify: BAD map reset for full re-scan (kept BBT-pool bad=%u)\r\n", (unsigned)kept);
+    LOGI(LOG_TAG_FLT "format --verify: BAD map reset for full re-scan (kept BBT-pool bad=%hu)\r\n", kept);
 }
 
 /* ------------------------------------------------------------------
@@ -301,13 +301,13 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
         if (!ok)
         {
             bad++;
-            LOGE(LOG_TAG_FLT "format --verify: gblock=%u (plane=%u block=%u) failed — mark BAD\r\n", (unsigned)g, (unsigned)plane, (unsigned)block);
+            LOGE(LOG_TAG_FLT "format --verify: gblock=%hu (plane=%hhu block=%hu) failed — mark BAD\r\n", g, plane, block);
             (void)bbt_mark_bad(alloc, g);
         }
 
         if ((tested % 512U) == 0U)
         {
-            LOGI(LOG_TAG_FLT "format --verify: %lu/%u blocks, bad=%lu\r\n", tested, (unsigned)FTL_BLOCK_TOTAL, bad);
+            LOGI(LOG_TAG_FLT "format --verify: %lu/%d blocks, bad=%lu\r\n", tested, FTL_BLOCK_TOTAL, bad);
         }
     }
 
@@ -580,13 +580,13 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
 
     if (!blocks_valid)
     {
-        LOGW(LOG_TAG_BLK "unavailable (rec=%u seq=%lu) — block accounting via full metadata rebuild\r\n", (unsigned)cp_idx, cp->sequence);
+        LOGW(LOG_TAG_BLK "unavailable (rec=%hu seq=%lu) — block accounting via full metadata rebuild\r\n", cp_idx, cp->sequence);
     }
 
     /* 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。 */
     if (!cp_wear_table_load(ftl->cp_handle, cp, cp_idx))
     {
-        LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%u seq=%lu) — read pages kept, rest default\r\n", (unsigned)cp_idx, cp->sequence);
+        LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%hu seq=%lu) — read pages kept, rest default\r\n", cp_idx, cp->sequence);
     }
 
     /* ③ 判型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
@@ -697,7 +697,7 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
 
         if (n < FTL_SPARE_POOL_PER_PLANE)
         {
-            LOGW(LOG_TAG_BLK "spare plane%u=%u/%u (Free pool 不足)\r\n", (unsigned)p, (unsigned)n, FTL_SPARE_POOL_PER_PLANE);
+            LOGW(LOG_TAG_BLK "spare plane%hhu=%hu/%u (Free pool 不足)\r\n", p, n, FTL_SPARE_POOL_PER_PLANE);
         }
     }
 }
@@ -856,12 +856,12 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
             if (stats.l2p_read_errors != 0U)
             {
                 /* L2P 反查失败 ⇒ valid_count 少算，快照结果不完整：回退 full metadata rebuild。 */
-                LOGW(LOG_TAG_BLK "probe: %u L2P read error(s) — fallback to full metadata rebuild\r\n", (unsigned)stats.l2p_read_errors);
+                LOGW(LOG_TAG_BLK "probe: %hu L2P read error(s) — fallback to full metadata rebuild\r\n", stats.l2p_read_errors);
             }
             else if (pfr_build_pools(ftl, block_words))
             {
                 restored = true;
-                LOGI(LOG_TAG_BLK "restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n", (unsigned)stats.closed_blocks, (unsigned)stats.log_blocks, (unsigned)ftl->alloc.free_count, (unsigned)alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM), (unsigned)alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM), (unsigned)stats.anomalies, stats.valid_cw);
+                LOGI(LOG_TAG_BLK "restore closed=%hu log=%hu free=%hu op=%hu spare=%hu anomalies=%hu valid_cw=%lu\r\n", stats.closed_blocks, stats.log_blocks, ftl->alloc.free_count, alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM), alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM), stats.anomalies, stats.valid_cw);
             }
         }
     }
@@ -978,7 +978,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
 
         if (stats.l2p_read_errors != 0U)
         {
-            LOGW(LOG_TAG_BLK "probe: %u L2P read error(s) — fallback to full metadata rebuild\r\n", (unsigned)stats.l2p_read_errors);
+            LOGW(LOG_TAG_BLK "probe: %hu L2P read error(s) — fallback to full metadata rebuild\r\n", stats.l2p_read_errors);
         }
         else
         {
@@ -987,13 +987,13 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
             if (stats.l2p_degraded_cw != 0U)
             {
                 result->scoped = true;
-                LOGW(LOG_TAG_BLK "scoped recovery: %u CW in degraded L2P region(s) — snapshot kept, mappings lost\r\n", (unsigned)stats.l2p_degraded_cw);
+                LOGW(LOG_TAG_BLK "scoped recovery: %hu CW in degraded L2P region(s) — snapshot kept, mappings lost\r\n", stats.l2p_degraded_cw);
             }
 
             if (pfr_build_pools(ftl, block_words))
             {
                 restored = 1U;
-                LOGI(LOG_TAG_BLK "restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n", (unsigned)stats.closed_blocks, (unsigned)stats.log_blocks, (unsigned)ftl->alloc.free_count, (unsigned)alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM), (unsigned)alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM), (unsigned)stats.anomalies, stats.valid_cw);
+                LOGI(LOG_TAG_BLK "restore closed=%hu log=%hu free=%hu op=%hu spare=%hu anomalies=%hu valid_cw=%lu\r\n", stats.closed_blocks, stats.log_blocks, ftl->alloc.free_count, alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM), alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM), stats.anomalies, stats.valid_cw);
             }
         }
     }
@@ -1007,7 +1007,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
         /* 诊断：把「快照是否加载 / 是否应用 / 回放是否成功」一并打出——
          * ctx_ok=false 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
          * Pass 0 拒绝）、replay_ok=false 或回放内部把 ok 清 0（降级/写失败）。 */
-        LOGW(LOG_TAG_BLK "fallback to full metadata rebuild (power failure, blocks_valid=%u applied=%u ctx_ok=%u replay_ok=%u)\r\n", (unsigned)blocks_valid, (unsigned)blocks_applied, (unsigned)block_ctx.ok, (replay_ok ? 1U : 0U));
+        LOGW(LOG_TAG_BLK "fallback to full metadata rebuild (power failure, blocks_valid=%hhu applied=%hhu ctx_ok=%d replay_ok=%u)\r\n", blocks_valid, blocks_applied, block_ctx.ok, (replay_ok ? 1U : 0U));
         pfr_reset_blocks(ftl);
 
         /* full metadata rebuild 用已回放的 L2P 反查；先认领写过块，carve 再只把 state==NONE 的块入池。 */
@@ -1088,7 +1088,7 @@ void pfr_boot_log_bad_areas(const struct ftl_context *ftl)
     }
 
     /* 只读 BST；不写介质。总量 = bad_count（BBT 与快照并集后的基线）。 */
-    LOGI(LOG_TAG_BLK "bad areas ch=%u ce=%u lun=%u: anchor=%lu cp=%lu bbt=%lu journal=%lu l2p_log=%lu spare=%lu data=%lu total=%lu\r\n", (unsigned)ftl->topo.ch, (unsigned)ftl->topo.ce, (unsigned)ftl->topo.lun, anchor, cp, bbt, journal, l2p_log, spare, data, anchor + cp + bbt + journal + l2p_log + spare + data);
+    LOGI(LOG_TAG_BLK "bad areas ch=%hhu ce=%hhu lun=%hhu: anchor=%lu cp=%lu bbt=%lu journal=%lu l2p_log=%lu spare=%lu data=%lu total=%lu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, anchor, cp, bbt, journal, l2p_log, spare, data, anchor + cp + bbt + journal + l2p_log + spare + data);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1128,7 +1128,7 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
 
     if (alc_super_closed_add(&ftl->alloc, plane_blocks, temperature) == FTL_BLOCK_NO_SB)
     {
-        LOGE(LOG_TAG_BLK "closed_sb_list full, g=%u dropped\r\n", (unsigned)g);
+        LOGE(LOG_TAG_BLK "closed_sb_list full, g=%hu dropped\r\n", g);
         return false;
     }
 
@@ -1432,7 +1432,7 @@ static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
      *   而 valid_cw == 0，则重建没认到这些 CW，下一次覆盖写该 LBA 会触发断言。 */
     if (stats != NULL)
     {
-        LOGI(LOG_TAG_BLK "rebuild blocks=%u partial=%u valid_cw=%lu\r\n", (unsigned)stats->blocks_rebuilt, (unsigned)stats->partial_blocks, stats->valid_cw);
+        LOGI(LOG_TAG_BLK "rebuild blocks=%hu partial=%hu valid_cw=%lu\r\n", stats->blocks_rebuilt, stats->partial_blocks, stats->valid_cw);
     }
 
     pfr_rebuild_l2p_stats_report();
@@ -1471,17 +1471,17 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 
         if ((valid > CP_BLOCK_WORD_MAX_VALID) || (st > FTL_BLOCK_STATE_BAD) || (temp > 1U) || (pool > CP_BLOCK_POOL_SPARE))
         {
-            LOGE(LOG_TAG_BLK "invalid word g=%u w=0x%04x\r\n", (unsigned)g, (unsigned)w);
+            LOGE(LOG_TAG_BLK "invalid word g=%hu w=0x%04hx\r\n", g, w);
             return false;
         }
         if ((pool != CP_BLOCK_POOL_NONE) && (st != FTL_BLOCK_STATE_NONE))
         {
-            LOGE(LOG_TAG_BLK "g=%u pool=%u state=%u conflict\r\n", (unsigned)g, (unsigned)pool, (unsigned)st);
+            LOGE(LOG_TAG_BLK "g=%hu pool=%hhu state=%hhu conflict\r\n", g, pool, st);
             return false;
         }
         if ((st == FTL_BLOCK_STATE_FREE) && (valid != 0U))
         {
-            LOGE(LOG_TAG_BLK "g=%u FREE with valid=%u\r\n", (unsigned)g, (unsigned)valid);
+            LOGE(LOG_TAG_BLK "g=%hu FREE with valid=%hu\r\n", g, valid);
             return false;
         }
         /* live 动态 LOG 块例外：它不属任何 allocator 池，旧版 full rebuild 留下的
@@ -1489,7 +1489,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
          * 修正为 LOG（RISK-BOOT-15 的自愈路径，不再为一处旧快照做全盘 rebuild）。 */
         if ((st == FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE) && (md_live_count_get(ftl->metadata_dir, g) == 0U))
         {
-            LOGE(LOG_TAG_BLK "g=%u NONE with no pool tag\r\n", (unsigned)g);
+            LOGE(LOG_TAG_BLK "g=%hu NONE with no pool tag\r\n", g);
             return false;
         }
     }
@@ -1531,17 +1531,17 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 
         if ((valid > CP_BLOCK_WORD_MAX_VALID) || (st > FTL_BLOCK_STATE_BAD) || (temp > 1U) || (pool > CP_BLOCK_POOL_SPARE))
         {
-            LOGE(LOG_TAG_BLK "invalid word g=%u w=0x%04x\r\n", (unsigned)g, (unsigned)w);
+            LOGE(LOG_TAG_BLK "invalid word g=%hu w=0x%04hx\r\n", g, w);
             return false;
         }
         if ((pool != CP_BLOCK_POOL_NONE) && (st != FTL_BLOCK_STATE_NONE))
         {
-            LOGE(LOG_TAG_BLK "g=%u pool=%u state=%u conflict\r\n", (unsigned)g, (unsigned)pool, (unsigned)st);
+            LOGE(LOG_TAG_BLK "g=%hu pool=%hhu state=%hhu conflict\r\n", g, pool, st);
             return false;
         }
         if ((st == FTL_BLOCK_STATE_FREE) && (valid != 0U))
         {
-            LOGE(LOG_TAG_BLK "g=%u FREE with valid=%u\r\n", (unsigned)g, (unsigned)valid);
+            LOGE(LOG_TAG_BLK "g=%hu FREE with valid=%hu\r\n", g, valid);
             return false;
         }
 
@@ -1619,7 +1619,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 
             if ((prev != FTL_BLOCK_STATE_LOG) && (prev != FTL_BLOCK_STATE_NONE))
             {
-                LOGW(LOG_TAG_BLK "g=%u state=%u but Directory says LOG — Directory wins\r\n", (unsigned)g, (unsigned)prev);
+                LOGW(LOG_TAG_BLK "g=%hu state=%hhu but Directory says LOG — Directory wins\r\n", g, prev);
             }
             ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
             ftl_block_clear_valid(b);
@@ -1857,7 +1857,7 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
         {
             if (!alc_op_push(alloc, plane, g))
             {
-                LOGE(LOG_TAG_BLK "OP pool overflow at g=%u\r\n", (unsigned)g);
+                LOGE(LOG_TAG_BLK "OP pool overflow at g=%hu\r\n", g);
                 return false;
             }
         }
@@ -1865,13 +1865,13 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
         {
             if (!alc_spare_push(alloc, plane, g))
             {
-                LOGE(LOG_TAG_BLK "Spare pool overflow at g=%u\r\n", (unsigned)g);
+                LOGE(LOG_TAG_BLK "Spare pool overflow at g=%hu\r\n", g);
                 return false;
             }
         }
         else
         {
-            LOGE(LOG_TAG_BLK "g=%u state=0x%04x not a pool block\r\n", (unsigned)g, (unsigned)w);
+            LOGE(LOG_TAG_BLK "g=%hu state=0x%04hx not a pool block\r\n", g, w);
             return false;
         }
     }

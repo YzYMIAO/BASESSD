@@ -99,7 +99,7 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     {
         /* RB# LOW → NAND busy，spin-wait 直到 ready */
         DWORD polls = 0U;
-        FMC_LOGD("WAIT_READY start op=%u\r\n", (unsigned)request->operation);
+        FMC_LOGD("WAIT_READY start op=%hhu\r\n", request->operation);
         while (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
         {
             polls++;
@@ -110,12 +110,12 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
             }
             delay_us(1U);
         }
-        FMC_LOGD("WAIT_READY done op=%u polls=%u\r\n", (unsigned)request->operation, (unsigned)polls);
+        FMC_LOGD("WAIT_READY done op=%hhu polls=%lu\r\n", request->operation, polls);
         return NAND_RESULT_OK;
     }
 
     /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
-    FMC_LOGD("WAIT_READY immediate op=%u\r\n", (unsigned)request->operation);
+    FMC_LOGD("WAIT_READY immediate op=%hhu\r\n", request->operation);
     return NAND_RESULT_OK;
 }
 

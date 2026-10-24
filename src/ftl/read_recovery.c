@@ -286,7 +286,7 @@ static void rr_settle_plane(rr_handle_t *rr)
             if ((rr->already_bad_logged[word] & bit) == 0U)
             {
                 rr->already_bad_logged[word] |= bit;
-                LOGW(LOG_TAG_RR "retired lba=%lu g=%u st=%s (data lost, count=%lu)\r\n", lba, (unsigned)gblock, stbuf, rr->already_bad_reads);
+                LOGW(LOG_TAG_RR "retired lba=%lu g=%hu st=%s (data lost, count=%lu)\r\n", lba, gblock, stbuf, rr->already_bad_reads);
             }
         }
         else
@@ -295,7 +295,7 @@ static void rr_settle_plane(rr_handle_t *rr)
 
             if (rr_unrec_log_is_due(&suppressed))
             {
-                LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n", lba, fail_pba, fail_paa, (unsigned)gblock, (unsigned)pba_to_plane(fail_pba), (unsigned)pba_to_block(fail_pba), (unsigned)pba_to_page(fail_pba), (unsigned)pba_to_cw(fail_pba), (unsigned)rr->retry_count, stbuf, suppressed);
+                LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%hu pl=%hhu bk=%hu pg=%hhu cw=%hhu retry=%hhu st=%s supp=%lu\r\n", lba, fail_pba, fail_paa, gblock, pba_to_plane(fail_pba), pba_to_block(fail_pba), pba_to_page(fail_pba), pba_to_cw(fail_pba), rr->retry_count, stbuf, suppressed);
             }
 
             /* 首次不可纠：dump 与失败 PBA/LBA 相关的最近写轨迹（判二次编程/写后读坏）。 */
@@ -543,7 +543,7 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
     }
     else if (ftl_job_heartbeat(&rr->log_ms, &rr->start_ms))
     {
-        LOGI(LOG_TAG_RR "job stage=%u plane=%u attempt=%u retry=%u stall=%lums age=%lums\r\n", (unsigned)rr->stage, (unsigned)rr->plane, (unsigned)rr->attempt, (unsigned)rr->retry_count, rr->stall_ms, ftl_job_age_ms(&rr->start_ms));
+        LOGI(LOG_TAG_RR "job stage=%d plane=%hhu attempt=%hhu retry=%hhu stall=%lums age=%lums\r\n", rr->stage, rr->plane, rr->attempt, rr->retry_count, rr->stall_ms, ftl_job_age_ms(&rr->start_ms));
     }
 
     if (!rr->waiting)

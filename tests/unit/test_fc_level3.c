@@ -282,7 +282,7 @@ static void verify_chain_paa(const fc_command_t *cmd)
 
         /* 证据明细（--log-visible debug）：逐条 desc 打出它自己声明的 plane / cw /
          * PAA——「链槽位与 CW 号解耦」这件事只有打出来才看得见。 */
-        test_trace_detail("chain[%u] plane=%u cw=%u PAA=0x%08lX USER==PAA", (unsigned)i, (unsigned)((desc->paa >> 2U) & 1U), (unsigned)(desc->paa & 3U), (unsigned long)desc->paa);
+        test_trace_detail("chain[%hhu] plane=%lu cw=%lu PAA=0x%08lX USER==PAA", i, ((desc->paa >> 2U) & 1U), (desc->paa & 3U), desc->paa);
     }
 }
 
@@ -316,7 +316,7 @@ static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap
         verify_chain_paa(cmd);
     }
 
-    test_trace_detail("read p%02u bm=0x%02X cw=%u %s", (unsigned)page, (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (erased != 0U) ? "all-0xFF" : "PAA-verified");
+    test_trace_detail("read p%02hu bm=0x%02hhX cw=%hhu %s", page, plane_bitmap, test_cw_count(cmd), (erased != 0U) ? "all-0xFF" : "PAA-verified");
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
@@ -343,7 +343,7 @@ static void read_block_verify_erased(uint16_t block, uint8_t plane_bitmap)
      * ⚠ 老实说清楚它证到了什么：判据是「读回的 USER 区全 0xFF」，而本块是**擦除后直接读**、
      *   此前并未写过 ⇒ 它证明「擦除态读得回来」，**不**证明「擦除真的清掉了旧数据」
      *   （写后擦再读才算）。把字节数打出来正是为了让这条判据的强弱一眼可见。 */
-    test_trace_summary("erased block=%u bm=0x%02X: %u pages, %lu B all 0xFF (逐 CW SUCCESS)", (unsigned)block, (unsigned)plane_bitmap, (unsigned)PAGES_PER_BLOCK, (unsigned long)PAGES_PER_BLOCK * (unsigned long)test_plane_count(plane_bitmap) * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
+    test_trace_summary("erased block=%hu bm=0x%02hhX: %d pages, %lu B all 0xFF (逐 CW SUCCESS)", block, plane_bitmap, PAGES_PER_BLOCK, (unsigned long)PAGES_PER_BLOCK * (unsigned long)test_plane_count(plane_bitmap) * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 }
 
 /**************************************************************************
@@ -371,15 +371,15 @@ static void cmd_snapshot(const fc_command_t *cmd, fc_command_t *snapshot)
  * 约定，勿在别处复用本宏。
  * checked 用来做分母，所以新增字段只要加一行 CMD_FIELD_U 即可，计数自动同步。
  */
-#    define CMD_FIELD_U(field)                                                                                          \
-        do                                                                                                              \
-        {                                                                                                               \
-            unsigned before_v = (unsigned)(before->field);                                                              \
-            unsigned after_v  = (unsigned)(after->field);                                                               \
-            uint32_t changed  = (before_v != after_v) ? 1U : 0U;                                                        \
-            diffs += changed;                                                                                           \
-            checked++;                                                                                                  \
-            LOGW("[DBG]   %-18s %-10u -> %-10u%s\r\n", #field, before_v, after_v, (changed != 0U) ? "  <== DIFF" : ""); \
+#    define CMD_FIELD_U(field)                                                                                            \
+        do                                                                                                                \
+        {                                                                                                                 \
+            DWORD    before_v = before->field;                                                                            \
+            DWORD    after_v  = after->field;                                                                             \
+            uint32_t changed  = (before_v != after_v) ? 1U : 0U;                                                          \
+            diffs += changed;                                                                                             \
+            checked++;                                                                                                    \
+            LOGW("[DBG]   %-18s %-10lu -> %-10lu%s\r\n", #field, before_v, after_v, (changed != 0U) ? "  <== DIFF" : ""); \
         } while (0)
 
 static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *after, const char *tag)
@@ -389,11 +389,11 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
     uint32_t word_front = 0U;
     uint32_t word_back  = 0U;
 
-    LOGW("[DBG] %s: cmd=%p id=%u op=%u\r\n",
+    LOGW("[DBG] %s: cmd=%p id=%hu op=%hhu\r\n",
              tag,
              (const void *)after,
-             (unsigned)after->command_id,
-             (unsigned)after->config.operation);
+             after->command_id,
+             after->config.operation);
 
     CMD_FIELD_U(command_id);
     CMD_FIELD_U(desc_id);
@@ -587,9 +587,9 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     /* 证据摘要（--log-visible info）：六条命令的**实读字节**。
      * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名 / 唯一 ID 才说明 NAND 真的答了话。
      * PARAM_PAGE 与 SIG 是**同一份签名的两条路径**（ECh 走 desc 链落 USER / 90h+20h 走 CQ param）。 */
-    test_trace_summary("RESET ok; READ_ID=%02X %02X %02X %02X %02X; PARAM_PAGE=%02X %02X %02X %02X (%c%c%c%c); GET_FEATURES(0x01) ok; SIG(90h+20h)=%02X %02X %02X %02X (%c%c%c%c)", (unsigned)id_bytes[0], (unsigned)id_bytes[1], (unsigned)id_bytes[2], (unsigned)id_bytes[3], (unsigned)id_bytes[4], (unsigned)onfi_bytes[0], (unsigned)onfi_bytes[1], (unsigned)onfi_bytes[2], (unsigned)onfi_bytes[3], (char)onfi_bytes[0], (char)onfi_bytes[1], (char)onfi_bytes[2], (char)onfi_bytes[3], (unsigned)sig_bytes[0], (unsigned)sig_bytes[1], (unsigned)sig_bytes[2], (unsigned)sig_bytes[3], (char)sig_bytes[0], (char)sig_bytes[1], (char)sig_bytes[2], (char)sig_bytes[3]);
+    test_trace_summary("RESET ok; READ_ID=%02hhX %02hhX %02hhX %02hhX %02hhX; PARAM_PAGE=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c); GET_FEATURES(0x01) ok; SIG(90h+20h)=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c)", id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3], id_bytes[4], onfi_bytes[0], onfi_bytes[1], onfi_bytes[2], onfi_bytes[3], (char)onfi_bytes[0], (char)onfi_bytes[1], (char)onfi_bytes[2], (char)onfi_bytes[3], sig_bytes[0], sig_bytes[1], sig_bytes[2], sig_bytes[3], (char)sig_bytes[0], (char)sig_bytes[1], (char)sig_bytes[2], (char)sig_bytes[3]);
 
-    test_trace_summary("UNIQUE_ID(16B)=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", (unsigned)uid_bytes[0], (unsigned)uid_bytes[1], (unsigned)uid_bytes[2], (unsigned)uid_bytes[3], (unsigned)uid_bytes[4], (unsigned)uid_bytes[5], (unsigned)uid_bytes[6], (unsigned)uid_bytes[7], (unsigned)uid_bytes[8], (unsigned)uid_bytes[9], (unsigned)uid_bytes[10], (unsigned)uid_bytes[11], (unsigned)uid_bytes[12], (unsigned)uid_bytes[13], (unsigned)uid_bytes[14], (unsigned)uid_bytes[15]);
+    test_trace_summary("UNIQUE_ID(16B)=%02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX", uid_bytes[0], uid_bytes[1], uid_bytes[2], uid_bytes[3], uid_bytes[4], uid_bytes[5], uid_bytes[6], uid_bytes[7], uid_bytes[8], uid_bytes[9], uid_bytes[10], uid_bytes[11], uid_bytes[12], uid_bytes[13], uid_bytes[14], uid_bytes[15]);
 
     return MUNIT_OK;
 }
@@ -701,7 +701,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
     for (uint8_t i = 0U; i < 4U; i++)
     {
         l3_feature_get(addrs[i], readback);
-        test_trace_summary("GET_FEATURES 0x%02X (%s) -> %02X %02X %02X %02X", (unsigned)addrs[i], names[i], (unsigned)readback[0], (unsigned)readback[1], (unsigned)readback[2], (unsigned)readback[3]);
+        test_trace_summary("GET_FEATURES 0x%02hhX (%s) -> %02hhX %02hhX %02hhX %02hhX", addrs[i], names[i], readback[0], readback[1], readback[2], readback[3]);
     }
 
     /* Phase 2：01h（Timing mode）读-改-写回环。
@@ -724,7 +724,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
     munit_assert_uint8(restored[0], ==, original[0]);
 
     /* 证据摘要（--log-visible info）：四个值一列排开，回环的每一步都可见。 */
-    test_trace_summary("0x01 回环: 原值 %02X -> SET %02X -> GET %02X -> 还原 %02X", (unsigned)original[0], (unsigned)probe[0], (unsigned)readback[0], (unsigned)restored[0]);
+    test_trace_summary("0x01 回环: 原值 %02hhX -> SET %02hhX -> GET %02hhX -> 还原 %02hhX", original[0], probe[0], readback[0], restored[0]);
 
     return MUNIT_OK;
 }
@@ -879,7 +879,7 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
     sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, (uint8_t)FC_CHAIN_END);
     l3_prio_drain();
     munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]);
-    test_trace_summary("step1 SQ 基线: set(%02X) -> get 读回 %02X", (unsigned)x[0], (unsigned)g_l3_prio_slots[sq_get].out[0]);
+    test_trace_summary("step1 SQ 基线: set(%02hhX) -> get 读回 %02hhX", x[0], g_l3_prio_slots[sq_get].out[0]);
 
     /* ── Step 2：HSQ 真会插队（set1(y) 抢在 SQ 的 set0(x) 之前落盘） ── */
     l3_prio_reset();
@@ -890,7 +890,7 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
     munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]); /* y 先落、被 x 覆盖 ⇒ 读回 x */
     l3_feature_get(L3_FEATURE_TIMING_MODE, final);
     munit_assert_uint8(final[0], ==, x[0]);
-    test_trace_summary("step2 HSQ 插队: get 读回 %02X（set1(%02X) 先落盘后被 set0(%02X) 覆盖）", (unsigned)g_l3_prio_slots[sq_get].out[0], (unsigned)y[0], (unsigned)x[0]);
+    test_trace_summary("step2 HSQ 插队: get 读回 %02hhX（set1(%02hhX) 先落盘后被 set0(%02hhX) 覆盖）", g_l3_prio_slots[sq_get].out[0], y[0], x[0]);
 
     /* ── Step 3：★ 链锁 —— 8 命令 SQ 链（前 7 条 MORE、末条 END），HSQ 插不进 ── */
     l3_prio_reset();
@@ -928,7 +928,7 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
     munit_assert_uint8(final[0], ==, y[0]); /* ★ 判据：链没被插入 ⇒ 终值是 y 不是 x */
     munit_assert_uint8(restored[0], ==, original[0]);
 
-    test_trace_summary("step3 链锁: HSQ get 读回 %02X、终值 %02X（无锁时终值会是 %02X=x）", (unsigned)g_l3_prio_slots[hsq_get].out[0], (unsigned) final[0], (unsigned)x[0]);
+    test_trace_summary("step3 链锁: HSQ get 读回 %02hhX、终值 %02hhX（无锁时终值会是 %02hhX=x）", g_l3_prio_slots[hsq_get].out[0], final[0], x[0]);
 
     return MUNIT_OK;
 }
@@ -971,7 +971,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
 
         /* 证据摘要（--log-visible info）：打出状态字的实际值。
          * op_idx = 项目 op 表下标，onfi = 真正发到线上的命令字节（0x70 / 0x78）。 */
-        test_trace_summary("READ_STATUS op_idx=%u onfi=0x%02X -> completion.status=0x%X", (unsigned)status_ops[i], (unsigned)status_cmds[i], (unsigned)completion.status);
+        test_trace_summary("READ_STATUS op_idx=%hhu onfi=0x%02hhX -> completion.status=0x%hX", status_ops[i], status_cmds[i], completion.status);
 
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
@@ -1066,7 +1066,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
      * 这一句是本用例的核心判据——「按源块坐标比」而不是按目标块，打出来才看得出
      * Step 5 的期望值取对了（错取目标坐标会静默判成"数据错"，或更糟：恒真通过）。
      * plane / src / dest 都是抽出来的 ⇒ 必须打出来，否则有 seed 也对不上是哪个块。 */
-    test_trace_summary("move plane=%u block=%u -> dest=%u (src≠dest): %u pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", (unsigned)plane, (unsigned)block, (unsigned)dest, (unsigned)PAGES_PER_BLOCK, (unsigned)CW_NUM, (unsigned long)PAGES_PER_BLOCK * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
+    test_trace_summary("move plane=%hhu block=%hu -> dest=%hu (src≠dest): %d pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", plane, block, dest, PAGES_PER_BLOCK, CW_NUM, (unsigned long)PAGES_PER_BLOCK * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 
     return MUNIT_OK;
 }
@@ -1105,7 +1105,7 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
     test_read_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
     /* 证据摘要来自夹具的 prog / read 两行（页数 + 逐槽比过的字节数），此处只点明阶段。 */
-    test_trace_summary("write_read block=%u plane=%u: erase -> prog -> read 三段走通", (unsigned)block, (unsigned)plane);
+    test_trace_summary("write_read block=%hu plane=%hhu: erase -> prog -> read 三段走通", block, plane);
 
     return MUNIT_OK;
 }
@@ -1138,7 +1138,7 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
     read_block_verify_erased(block, TEST_PLANE_BM(plane));
 
     /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
-    test_trace_summary("erase_verify block=%u plane=%u: erase -> %u pages 全 0xFF", (unsigned)block, (unsigned)plane, (unsigned)PAGES_PER_BLOCK);
+    test_trace_summary("erase_verify block=%hu plane=%hhu: erase -> %d pages 全 0xFF", block, plane, PAGES_PER_BLOCK);
 
     return MUNIT_OK;
 }
@@ -1202,7 +1202,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     }
 
     /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
-    test_trace_summary("cache_ops block=%u plane=%u: START_SEQ -> 31h x62 -> 3Fh 全 block 数据一致；00h-addr-31h 跳页入口（输出上一页、地址页下一步出）一致", (unsigned)block, (unsigned)plane);
+    test_trace_summary("cache_ops block=%hu plane=%hhu: START_SEQ -> 31h x62 -> 3Fh 全 block 数据一致；00h-addr-31h 跳页入口（输出上一页、地址页下一步出）一致", block, plane);
 
     return MUNIT_OK;
 }
@@ -1239,7 +1239,7 @@ static MunitResult test_block_cache_multi_plane(const MunitParameter params[], v
 
     test_read_block_cache_multi_plane(block, &L3_CONF(OP_READ_PAGE_CACHE_START_SEQ_MP, FC_CRC_DISABLE), NULL);
 
-    test_trace_summary("cache_multi_plane block=%u: 63 x two-plane 15h + 1 x 10h; START_SEQ_MP + 62 x SEQ_MP + LAST_MP, both planes PAA-verified", (unsigned)block);
+    test_trace_summary("cache_multi_plane block=%hu: 63 x two-plane 15h + 1 x 10h; START_SEQ_MP + 62 x SEQ_MP + LAST_MP, both planes PAA-verified", block);
 
     return MUNIT_OK;
 }
@@ -1285,7 +1285,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
 
     /* 证据摘要（--log-visible info）：两个 plane 的图案**天然不同**（源槽按 (plane, cw) 取）
      * ⇒ 读串 plane 必被抓到；打出来才看得出覆盖了两个 plane 而不是同一个读了两遍。 */
-    test_trace_summary("multi_plane block=%u bm=0x%02X: %u pages x %u plane x %u CW x %u B, 两 plane 图案互异", (unsigned)block, (unsigned)TEST_PLANE_BM_ALL, (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM, (unsigned)CW_NUM, (unsigned)FC_BUFFER_USER_SIZE);
+    test_trace_summary("multi_plane block=%hu bm=0x%02hhX: %d pages x %d plane x %u CW x %u B, 两 plane 图案互异", block, TEST_PLANE_BM_ALL, PAGES_PER_BLOCK, PLANE_NUM, CW_NUM, FC_BUFFER_USER_SIZE);
 
     return MUNIT_OK;
 }
@@ -1349,7 +1349,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
 
             /* 证据明细（--log-visible debug）：把**实际用的 flat 位**打出来——v35 的
              * plane 盲位图缺陷（plane 1 的 CW0 写成 0x01 而非 0x10）正是靠这一类自证才能一眼看穿。 */
-            test_trace_detail("probe page=%u cw=%u cw_bitmap=0x%08lX (flat = plane*CW_NUM + cw)", (unsigned)page, (unsigned)cw, (unsigned long)cw_bit);
+            test_trace_detail("probe page=%hu cw=%hhu cw_bitmap=0x%08lX (flat = plane*CW_NUM + cw)", page, cw, (unsigned long)cw_bit);
 
             test_memset_read_buffer(cmd);
             (void)test_submit_wait(cmd);
@@ -1390,7 +1390,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             cw_mask |= (uint32_t)1U << ((uint32_t)plane * CW_NUM + cws[i]);
         }
 
-        test_trace_summary("random block=%u plane=%u: %u pages x %u cw = %u probes; page_mask=0x%08lX%08lX cw_mask=0x%08lX, 逐 desc 对 desc->paa", (unsigned)block, (unsigned)plane, (unsigned)n_pages, (unsigned)n_cws, (unsigned)(n_pages * n_cws), (unsigned long)page_mask_hi, (unsigned long)page_mask_lo, (unsigned long)cw_mask);
+        test_trace_summary("random block=%hu plane=%hhu: %hhu pages x %hhu cw = %d probes; page_mask=0x%08lX%08lX cw_mask=0x%08lX, 逐 desc 对 desc->paa", block, plane, n_pages, n_cws, (n_pages * n_cws), page_mask_hi, page_mask_lo, cw_mask);
     }
 
     return MUNIT_OK;
@@ -1460,7 +1460,7 @@ static MunitResult test_block_load_fetch(const MunitParameter params[], void *da
     }
 
     /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
-    test_trace_summary("load_fetch b=%u plane=%u: op33(无desc)->op8 单 plane 一致；b=%u: op29(无desc)->op41 双 plane 一致", (unsigned)block, (unsigned)plane, (unsigned)block_mp);
+    test_trace_summary("load_fetch b=%hu plane=%hhu: op33(无desc)->op8 单 plane 一致；b=%hu: op29(无desc)->op41 双 plane 一致", block, plane, block_mp);
 
     return MUNIT_OK;
 }
@@ -1513,7 +1513,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
             got_meta = (uint32_t)got[0] | ((uint32_t)got[1] << 8U) | ((uint32_t)got[2] << 16U) | ((uint32_t)got[3] << 24U);
 
-            test_trace_summary("read_meta b=%u plane=%u page=%u cw=%u: got=0x%08lX expect=0x%08lX", (unsigned)block, (unsigned)plane, (unsigned)page, (unsigned)cw, (unsigned long)got_meta, (unsigned long)expected);
+            test_trace_summary("read_meta b=%hu plane=%hhu page=%hu cw=%hhu: got=0x%08lX expect=0x%08lX", block, plane, page, cw, (unsigned long)got_meta, (unsigned long)expected);
 
             munit_assert_uint32(got_meta, ==, expected);
         }
@@ -1537,7 +1537,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
                 got_meta = (uint32_t)meta_ptr[0] | ((uint32_t)meta_ptr[1] << 8U) | ((uint32_t)meta_ptr[2] << 16U) | ((uint32_t)meta_ptr[3] << 24U);
 
-                test_trace_summary("buffer_get_meta b=%u plane=%u page=%u cw=%u: got=0x%08lX expect=0x%08lX", (unsigned)block, (unsigned)plane, (unsigned)page, (unsigned)cw, (unsigned long)got_meta, (unsigned long)expected);
+                test_trace_summary("buffer_get_meta b=%hu plane=%hhu page=%hu cw=%hhu: got=0x%08lX expect=0x%08lX", block, plane, page, cw, (unsigned long)got_meta, (unsigned long)expected);
 
                 munit_assert_uint32(got_meta, ==, expected);
             }
@@ -1616,18 +1616,18 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 
     /* Phase 1：锁定前状态（证据） */
     raw_before = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
-    test_trace_summary("lock_status b=%u plane=%u BEFORE: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_before, (unsigned)((raw_before >> 2) & 1U), (unsigned)((raw_before >> 1) & 1U), (unsigned)(raw_before & 1U));
+    test_trace_summary("lock_status b=%hu plane=%hhu BEFORE: raw=0x%02hhX lock#=%u lt#=%u lt=%u", block, plane, raw_before, ((raw_before >> 2) & 1U), ((raw_before >> 1) & 1U), (raw_before & 1U));
 
     /* Phase 2：BLOCK_LOCK（2Ah，无地址周期 ⇒ 锁全片） */
     test_block_lock_cmd(block, plane, &L3_CONF(OP_BLOCK_LOCK, FC_CRC_ENABLE));
 
     /* Phase 3：锁定后状态（证据） */
     raw_locked = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
-    test_trace_summary("lock_status b=%u plane=%u LOCKED: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_locked, (unsigned)((raw_locked >> 2) & 1U), (unsigned)((raw_locked >> 1) & 1U), (unsigned)(raw_locked & 1U));
+    test_trace_summary("lock_status b=%hu plane=%hhu LOCKED: raw=0x%02hhX lock#=%u lt#=%u lt=%u", block, plane, raw_locked, ((raw_locked >> 2) & 1U), ((raw_locked >> 1) & 1U), (raw_locked & 1U));
 
     /* Phase 4：LOCK 是否真的挡住擦除——**只观察、不断言**（见用例头注释） */
     erase_st = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
-    test_trace_summary("lock_status b=%u plane=%u LOCK 后擦除 status=0x%X => %s", (unsigned)block, (unsigned)plane, (unsigned)erase_st.status, ((erase_st.status & FC_CW_STATUS_ERROR_MASK) != 0U) ? "LOCK 生效（擦除被拒）" : "LOCK 空转（本板 LOCK 引脚为低）");
+    test_trace_summary("lock_status b=%hu plane=%hhu LOCK 后擦除 status=0x%hX => %s", block, plane, erase_st.status, ((erase_st.status & FC_CW_STATUS_ERROR_MASK) != 0U) ? "LOCK 生效（擦除被拒）" : "LOCK 空转（本板 LOCK 引脚为低）");
 
     /* Phase 5：UNLOCK_LOW（23h）+ UNLOCK_HIGH（24h）——硬断言无错误位。
      * 23h@block 解锁 0..block、24h@block 解锁 block..末块 ⇒ 合起来把全器件恢复为未锁。 */
@@ -1636,12 +1636,12 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 
     /* Phase 6：解锁后状态（证据） */
     raw_after = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
-    test_trace_summary("lock_status b=%u plane=%u AFTER UNLOCK: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_after, (unsigned)((raw_after >> 2) & 1U), (unsigned)((raw_after >> 1) & 1U), (unsigned)(raw_after & 1U));
+    test_trace_summary("lock_status b=%hu plane=%hhu AFTER UNLOCK: raw=0x%02hhX lock#=%u lt#=%u lt=%u", block, plane, raw_after, ((raw_after >> 2) & 1U), ((raw_after >> 1) & 1U), (raw_after & 1U));
 
     /* Phase 7：可逆——块仍然完全可用（本用例唯一的硬判据） */
     lock_verify_block_usable(block, plane, page);
 
-    test_trace_summary("block_lock_ops b=%u plane=%u: 21/22/23/25 走通，锁序列后块仍可用（可逆）", (unsigned)block, (unsigned)plane);
+    test_trace_summary("block_lock_ops b=%hu plane=%hhu: 21/22/23/25 走通，锁序列后块仍可用（可逆）", block, plane);
 
     return MUNIT_OK;
 }
@@ -1859,7 +1859,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
                             fc_resource_stats_t rs;
 
                             (void)fc_get_resource_stats(&rs);
-                            test_trace_detail("p%02u %s%s submitted=%u drained=%u | cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u cq=%u", (unsigned)page, (sent != 0U) ? "sub  " : "retry", (polled != 0U) ? " +poll" : "      ", (unsigned)submitted, (unsigned)drained, (unsigned)rs.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)rs.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)rs.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)rs.sq_used, (unsigned)rs.cq_used);
+                            test_trace_detail("p%02hu %s%s submitted=%lu drained=%lu | cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu cq=%hu", page, (sent != 0U) ? "sub  " : "retry", (polled != 0U) ? " +poll" : "      ", submitted, drained, rs.command_used, FC_COMMAND_POOL_DEPTH, rs.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, FC_BUFFER_POOL_DEPTH, rs.sq_used, rs.cq_used);
                         }
 
                         munit_assert_uint32(++guard, <, L3_STRESS_BUDGET);
@@ -1885,7 +1885,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
         fc_resource_stats_t rs;
 
         (void)fc_get_resource_stats(&rs);
-        test_trace_summary("phase done: submitted=%u drained=%u | cmd=%u desc=%u buf=%u sq=%u cq=%u (应为全 0)", (unsigned)submitted, (unsigned)drained, (unsigned)rs.command_used, (unsigned)rs.descriptor_used, (unsigned)rs.buffer_used, (unsigned)rs.sq_used, (unsigned)rs.cq_used);
+        test_trace_summary("phase done: submitted=%lu drained=%lu | cmd=%hu desc=%hu buf=%hu sq=%hu cq=%hu (应为全 0)", submitted, drained, rs.command_used, rs.descriptor_used, rs.buffer_used, rs.sq_used, rs.cq_used);
     }
 }
 
@@ -1903,20 +1903,20 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
     const uint16_t block = l3_block_draw("mixed_pipeline");
 
     test_trace_begin();
-    test_trace_summary("mixed_pipeline block=%u ch=%u ce=%u lun=%u plane=%u page=%u batch=%u poll_every=%u", (unsigned)block, (unsigned)CH_NUM, (unsigned)CE_NUM, (unsigned)LUN_NUM, (unsigned)PLANE_NUM, (unsigned)PAGES_PER_BLOCK, (unsigned)L3_STRESS_BATCH, (unsigned)L3_STRESS_POLL_EVERY);
+    test_trace_summary("mixed_pipeline block=%hu ch=%d ce=%d lun=%d plane=%d page=%d batch=%hu poll_every=%u", block, CH_NUM, CE_NUM, LUN_NUM, PLANE_NUM, PAGES_PER_BLOCK, L3_STRESS_BATCH, L3_STRESS_POLL_EVERY);
 
     /* ── Phase 0：整块擦净（multi-plane 一次覆盖两个 plane）——给 Phase 1 一个干净起点 ── */
     l3_stress_expect_ok(test_erase_block(block, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_ENABLE)));
 
     /* ── Phase 1：流式写完整块（遍历 ch→ce→lun→page，multi-plane 命令），写完全部抽空 ── */
     l3_stress_stream(L3_STRESS_OP_PROG, block);
-    test_trace_summary("phase 1 done: PROGRAM 全块 %u 页 × %u plane", (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM);
+    test_trace_summary("phase 1 done: PROGRAM 全块 %d 页 × %d plane", PAGES_PER_BLOCK, PLANE_NUM);
 
     /* ── Phase 2：流式读回整块并逐 CW 校验（读在写全部落盘之后，无数据冒险） ── */
     l3_stress_stream(L3_STRESS_OP_READ, block);
-    test_trace_summary("phase 2 done: READ 全块 %u 页 × %u plane 逐 CW 校验通过", (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM);
+    test_trace_summary("phase 2 done: READ 全块 %d 页 × %d plane 逐 CW 校验通过", PAGES_PER_BLOCK, PLANE_NUM);
 
-    test_trace_summary("mixed_pipeline block=%u: 整块先写后读（流式提交 / 池满即抽干）通过", (unsigned)block);
+    test_trace_summary("mixed_pipeline block=%hu: 整块先写后读（流式提交 / 池满即抽干）通过", block);
 
     return MUNIT_OK;
 }
@@ -2174,7 +2174,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         munit_assert_uint32(l3_buf_used(), ==, base);
     }
 
-    test_trace_summary("buf_own_release base=%u: 00 上层释放 / 01 FC释放 / 10 上层申请+释放 / 11 上层申请+FC释放 —— 四档账目全部闭合", (unsigned)base);
+    test_trace_summary("buf_own_release base=%hu: 00 上层释放 / 01 FC释放 / 10 上层申请+释放 / 11 上层申请+FC释放 —— 四档账目全部闭合", base);
 
     return MUNIT_OK;
 }

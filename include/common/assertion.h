@@ -96,7 +96,8 @@ void assertion_platform_context(void);
  *
  * 格式串：本仓链接**完整 newlib**，标准长度修饰符 h/hh/l/ll/j/z/t 均可用。
  * 本平台 int32_t 即 long（用 %li/%lu）、size_t 即 unsigned int、char 无符号；
- * 8/16 位/枚举提升为 int，按 H44 用 (unsigned) 做格式匹配。
+ * 8/16 位/枚举提升为 int：格式串用匹配宽度的 %hhu/%hu/%d，32 位用 %lu；
+ * 不要用 (unsigned) 强转去迁就 %u。
  *
  * 浮点断言（ASSERT_FLOAT / ASSERT_DOUBLE / ASSERT_DOUBLE_EQUAL）依赖 printf 浮点
  * 支持：完整 newlib 自带，无需额外链接钩子。

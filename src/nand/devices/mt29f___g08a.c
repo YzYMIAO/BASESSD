@@ -298,7 +298,7 @@ nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, 
     /* 清零 DMA 完成标志，防止上一命令的残留标志导致 DATA_IN/DATA_OUT 误判 */
     nand_dma_clear_flags();
 
-    ENG_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n", (unsigned)operation, (unsigned)request->column, (unsigned)request->row[0], (const void *)request->data, (unsigned)request->data_length);
+    ENG_LOGD("nand_fc_start: op=%hhu col=%hu row=0x%06lX data=%p len=%hu\r\n", operation, request->column, request->row[0], (const void *)request->data, request->data_length);
 
     memset(&transaction->request, 0, sizeof(transaction->request));
     transaction->request.operation   = operation;
@@ -672,10 +672,10 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     }
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n", (unsigned)CONFIG_NAND_TIMING_MODE, (unsigned)result, (unsigned)transaction.completion.nand_status);
+        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02hhX status=0x%02hhX\r\n", CONFIG_NAND_TIMING_MODE, result, transaction.completion.nand_status);
         return result;
     }
-    LOGI(LOG_TAG_NAND "switched NAND to ONFI Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+    LOGI(LOG_TAG_NAND "switched NAND to ONFI Mode %u\r\n", CONFIG_NAND_TIMING_MODE);
 
     const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
 
@@ -685,16 +685,16 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     const DWORD tclr = NS_TO_PCC_CYCLES(g_nand_timing_high.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
     const DWORD tar  = NS_TO_PCC_CYCLES(g_nand_timing_high.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
 
-    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", (unsigned)CONFIG_NAND_TIMING_MODE, fast_pcc.SetupTime, fast_pcc.WaitSetupTime, fast_pcc.HoldSetupTime, fast_pcc.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
+    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", CONFIG_NAND_TIMING_MODE, fast_pcc.SetupTime, fast_pcc.WaitSetupTime, fast_pcc.HoldSetupTime, fast_pcc.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
 
     g_nand_handle.Init.TCLRSetupTime = tclr;
     g_nand_handle.Init.TARSetupTime  = tar;
     if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
     {
-        LOGE(LOG_TAG_NAND "HAL_NAND_Init (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+        LOGE(LOG_TAG_NAND "HAL_NAND_Init (Mode %u) failed\r\n", CONFIG_NAND_TIMING_MODE);
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI(LOG_TAG_NAND "FMC timing updated for Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+    LOGI(LOG_TAG_NAND "FMC timing updated for Mode %u\r\n", CONFIG_NAND_TIMING_MODE);
 
     {
         nand_fmc_config_t fast_fmc;
@@ -707,7 +707,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
 
         if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
         {
-            LOGE(LOG_TAG_NAND "FMC backend configure (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+            LOGE(LOG_TAG_NAND "FMC backend configure (Mode %u) failed\r\n", CONFIG_NAND_TIMING_MODE);
             return NAND_RESULT_OPERATION_FAILED;
         }
     }

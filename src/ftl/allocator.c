@@ -97,7 +97,7 @@ void alc_free_push(alc_t *alloc, WORD gblock)
     ASSERT(gblock < FTL_BLOCK_TOTAL);
     if (gblock >= FTL_BLOCK_TOTAL)
     {
-        LOGE(LOG_TAG_FTL "free_block: gblock %u out of range\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %hu out of range\r\n", gblock);
         return;
     }
 
@@ -105,7 +105,7 @@ void alc_free_push(alc_t *alloc, WORD gblock)
     ASSERT(!ftl_block_is_bad(&alloc->blocks[gblock]));
     if (ftl_block_is_bad(&alloc->blocks[gblock]))
     {
-        LOGE(LOG_TAG_FTL "free_block: gblock %u is bad, dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %hu is bad, dropped\r\n", gblock);
         return;
     }
 
@@ -113,7 +113,7 @@ void alc_free_push(alc_t *alloc, WORD gblock)
     ASSERT(ftl_block_state(&alloc->blocks[gblock]) != FTL_BLOCK_STATE_FREE);
     if (ftl_block_state(&alloc->blocks[gblock]) == FTL_BLOCK_STATE_FREE)
     {
-        LOGE(LOG_TAG_FTL "free_block: gblock %u double free, dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %hu double free, dropped\r\n", gblock);
         return;
     }
 
@@ -121,7 +121,7 @@ void alc_free_push(alc_t *alloc, WORD gblock)
     ASSERT(alloc->free_count < FTL_BLOCK_TOTAL);
     if (alloc->free_count >= FTL_BLOCK_TOTAL)
     {
-        LOGE(LOG_TAG_FTL "free_block: free pool full, gblock %u dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: free pool full, gblock %hu dropped\r\n", gblock);
         return;
     }
 
@@ -647,7 +647,7 @@ static WORD alc_super_close_live(alc_t *alloc, super_block_t *sb)
         ASSERT(entry.plane_blocks[plane] < BLOCKS_PER_PLANE);
         if (entry.plane_blocks[plane] >= BLOCKS_PER_PLANE)
         {
-            LOGE(LOG_TAG_FTL "closed_sb: plane%u block %u out of range\r\n", (unsigned)plane, (unsigned)entry.plane_blocks[plane]);
+            LOGE(LOG_TAG_FTL "closed_sb: plane%hhu block %hu out of range\r\n", plane, entry.plane_blocks[plane]);
             entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
             continue;
         }
@@ -1014,7 +1014,7 @@ void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
             continue;
         }
 
-        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%u bk=%u pg=%u cw=%u %s\r\n", t->seq, t->lba, t->pba, (unsigned)t->plane, (unsigned)t->block, (unsigned)t->page, (unsigned)t->cw, (t->kind == 0U) ? "write-ok" : ((t->kind == 1U) ? "program-fail" : "gc-write"));
+        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%hhu bk=%hu pg=%hhu cw=%hhu %s\r\n", t->seq, t->lba, t->pba, t->plane, t->block, t->page, t->cw, (t->kind == 0U) ? "write-ok" : ((t->kind == 1U) ? "program-fail" : "gc-write"));
         shown++;
     }
 }

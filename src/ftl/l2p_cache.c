@@ -210,7 +210,7 @@ static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
     if (cache->thrashing != was_thrashing)
     {
         /* 观测口：miss= 为最近窗口 miss 率；hit/miss= 为开机累计。 */
-        LOGI(LOG_TAG_L2P "thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n", (unsigned)cache->thrashing, (unsigned)cache->miss_pct, cache->hit_count, cache->miss_count);
+        LOGI(LOG_TAG_L2P "thrash=%d miss=%hhu%% hit=%lu miss_total=%lu\r\n", cache->thrashing, cache->miss_pct, cache->hit_count, cache->miss_count);
     }
 }
 
@@ -340,7 +340,7 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
         }
     }
 
-    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%u clean=%u dirty=%u loading=%u flushing=%u suppressed=%lu\r\n", region_id, (unsigned)inv, (unsigned)clean, (unsigned)dirty, (unsigned)loading, (unsigned)flushing, s_evict_fail_n);
+    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%hu clean=%hu dirty=%hu loading=%hu flushing=%hu suppressed=%lu\r\n", region_id, inv, clean, dirty, loading, flushing, s_evict_fail_n);
 
     s_evict_fail_ms = now_ms;
     s_evict_fail_n  = 0U;
@@ -481,7 +481,7 @@ static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
         return;
     }
 
-    LOGE(LOG_TAG_L2P "region %lu load failed %u times — degrade to unmapped (suppressed=%lu)\r\n", region_id, (unsigned)fail_count, s_degrade_n);
+    LOGE(LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped (suppressed=%lu)\r\n", region_id, fail_count, s_degrade_n);
 
     s_degrade_log_ms = now_ms;
     s_degrade_n      = 0U;
@@ -1125,7 +1125,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
     }
     else if (ftl_job_tick(&cache->job_log_ms))
     {
-        LOGI(LOG_TAG_L2P "job inflight load=%u flush=%u dirty=%u\r\n", (unsigned)cache->load_inflight, (unsigned)cache->flush_inflight, (unsigned)l2p_dirty_count(cache));
+        LOGI(LOG_TAG_L2P "job inflight load=%hhu flush=%hhu dirty=%hu\r\n", cache->load_inflight, cache->flush_inflight, l2p_dirty_count(cache));
     }
 
     for (WORD i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
@@ -1365,7 +1365,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     else
     {
         /* 不该发生：LOADING / FLUSHING 期间行不可被改写状态。 */
-        LOGE(LOG_TAG_L2P "unexpected completion state=%u\r\n", (unsigned)line->state);
+        LOGE(LOG_TAG_L2P "unexpected completion state=%d\r\n", line->state);
     }
 
     (void)fc_command_release(cmd);

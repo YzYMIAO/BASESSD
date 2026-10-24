@@ -429,13 +429,13 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_
              * 逐条 ERR 会刷屏；5s 一行仍能看见问题。 */
             if ((s_park_log_ms == 0U) || ((now_ms - s_park_log_ms) >= 5000U))
             {
-                LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%u parked=%u\r\n", pending->lba, (unsigned)i, (unsigned)parked);
+                LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n", pending->lba, i, parked);
                 s_park_log_ms = now_ms;
             }
         }
         else if (st != FTL_OK)
         {
-            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%u\r\n", pending->lba, (unsigned)i);
+            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
         }
 
         /* 结算：owners 必须在释放**之前**取走（组完成通知可能重入复用本槽）。 */

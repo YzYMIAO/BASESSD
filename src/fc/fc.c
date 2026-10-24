@@ -1530,7 +1530,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     {
         /* 构建失败（multi-plane 窄位图）：debug 档上一条 ASSERT 已停机，这里只在 release
          * 档可达——命令注 NAND_FAIL 完成项后了结，**绝不**把凭空造的回退地址提交给 NAND。 */
-        LOGW("fc: build request failed for op=%u cmd_id=%u status=%d\r\n", (unsigned)command->config.operation, (unsigned)command_id, (int)build_result);
+        LOGW("fc: build request failed for op=%hhu cmd_id=%hu status=%d\r\n", command->config.operation, command_id, (int)build_result);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;
     }
@@ -1542,7 +1542,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
-        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_bitmap=0x%02X plane_count=%u\r\n", (unsigned)command->config.operation, (unsigned)command_id, (unsigned)request.cw_bitmap, (unsigned)request.plane_count);
+        LOGW("fc: nand_dispatch_submit failed for op=%hhu cmd_id=%hu cw_bitmap=0x%02lX plane_count=%hhu\r\n", command->config.operation, command_id, request.cw_bitmap, request.plane_count);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;
     }
@@ -1593,7 +1593,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         {
             /* 构建失败（multi-plane 窄位图）→ 整链注 NAND_FAIL，与下面 submit 失败的兜底
              * 口径一致：已置 ACTIVE 的前缀命令一并了结，不留半截链。 */
-            LOGW("fc: build request failed for cmd_id=%u (chain %u/%u) status=%d\r\n", (unsigned)command_id, (unsigned)i, (unsigned)chain_count, (int)build_result);
+            LOGW("fc: build request failed for cmd_id=%hu (chain %hhu/%hhu) status=%d\r\n", command_id, i, chain_count, (int)build_result);
             for (j = 0U; j < chain_count; j++)
             {
                 fc_poll_fail_command(controller, chain->ids[j]);

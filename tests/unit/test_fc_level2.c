@@ -133,7 +133,7 @@ static nand_addr_t l2_addr_draw(const char *test, uint8_t plane)
         .cw    = 0U,
     };
 
-    test_trace_detail("addr block=%u page=%u plane=%u", (unsigned)addr.block, (unsigned)addr.page, (unsigned)addr.plane);
+    test_trace_detail("addr block=%hu page=%hhu plane=%hhu", addr.block, addr.page, addr.plane);
     return addr;
 }
 
@@ -213,7 +213,7 @@ static void l2_verify_meta_written(const fc_command_t *cmd)
          * 只报 [ OK ] 时看不出 Stage 0 到底写没写——空转的 encode 一样会返回 OK。 */
         if (i == 0U)
         {
-            test_trace_summary("meta written: %u CW, cw0=0x%08lX == desc->meta (Stage 0 真写了)", (unsigned)test_cw_count(cmd), (unsigned long)stored);
+            test_trace_summary("meta written: %hhu CW, cw0=0x%08lX == desc->meta (Stage 0 真写了)", test_cw_count(cmd), (unsigned long)stored);
         }
     }
 }
@@ -235,7 +235,7 @@ static void l2_verify_crc_written(const fc_command_t *cmd)
          * ⚠ 打的是**明文槽**的重算值——random=ON 时 desc 的 USER 区已加扰，拿它算必错。 */
         if (i == 0U)
         {
-            test_trace_summary("crc written: %u CW, cw0=0x%08lX == crc32(明文槽) (Stage 1 真写了)", (unsigned)test_cw_count(cmd), (unsigned long)stored);
+            test_trace_summary("crc written: %hhu CW, cw0=0x%08lX == crc32(明文槽) (Stage 1 真写了)", test_cw_count(cmd), (unsigned long)stored);
         }
     }
 }
@@ -259,7 +259,7 @@ static void l2_verify_parity_nonzero(const fc_command_t *cmd)
             uint32_t head = 0U;
 
             (void)memcpy(&head, base + FC_BUFFER_DATA_SIZE, sizeof(head));
-            test_trace_summary("parity written: %u CW, cw0[520..524)=0x%08lX != 0 (Stage 2 真写了)", (unsigned)test_cw_count(cmd), (unsigned long)head);
+            test_trace_summary("parity written: %hhu CW, cw0[520..524)=0x%08lX != 0 (Stage 2 真写了)", test_cw_count(cmd), (unsigned long)head);
         }
     }
 }
@@ -398,7 +398,7 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
 
     off = (uint32_t)munit_rand_int_range((int)c->lo, (int)c->hi - 1);
     bit = (uint32_t)munit_rand_int_range(0, 7);
-    test_trace_summary("case=%s inject cw[%u] bit %u", c->name, (unsigned)off, (unsigned)bit);
+    test_trace_summary("case=%s inject cw[%lu] bit %lu", c->name, off, bit);
 
     /* 步骤级没有原地解码，直接翻回来即可——不依赖任何"解码不改 buffer"假设 */
     cw[off] ^= (uint8_t)(1U << bit);
@@ -506,13 +506,13 @@ static void l2_bit01_log(const char *tag, const l2_bit01_t *st, uint16_t len)
 {
     uint8_t k;
 
-    test_trace_summary("%s: ones=%u/%u runs=%u mean_x100=%u", tag, (unsigned)st->ones, (unsigned)((uint32_t)len * 8U), (unsigned)st->runs, (unsigned)l2_bit01_mean_x100(st, len));
+    test_trace_summary("%s: ones=%lu/%lu runs=%lu mean_x100=%lu", tag, st->ones, ((uint32_t)len * 8U), st->runs, l2_bit01_mean_x100(st, len));
 
     for (k = 0U; k < 16U; k++)
     {
         if ((st->hist[0][k] + st->hist[1][k]) != 0U)
         {
-            test_trace_detail("  run len %2u%s : zero x%u, one x%u", (unsigned)(k + 1U), (k == 15U) ? "+" : " ", (unsigned)st->hist[0][k], (unsigned)st->hist[1][k]);
+            test_trace_detail("  run len %2u%s : zero x%lu, one x%lu", (k + 1U), (k == 15U) ? "+" : " ", st->hist[0][k], st->hist[1][k]);
         }
     }
 }
@@ -591,7 +591,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         fc_data_path_scramble(cw, seed);
         l2_bit01_analyze(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, &after);
 
-        test_trace_detail("--- %s: block=%u page=%u plane=%u cw=%u meta=0x%08X seed=0x%08X", tag[kind], (unsigned)addr.block, (unsigned)addr.page, (unsigned)addr.plane, (unsigned)addr.cw, (unsigned)meta, (unsigned)seed);
+        test_trace_detail("--- %s: block=%hu page=%hhu plane=%hhu cw=%hhu meta=0x%08lX seed=0x%08lX", tag[kind], addr.block, addr.page, addr.plane, addr.cw, meta, seed);
         l2_bit01_log("  plain    ", &before, FC_BUFFER_USER_SIZE);
         l2_bit01_log("  scrambled", &after, FC_BUFFER_USER_SIZE);
 
@@ -702,7 +702,7 @@ static void l2_ecc_flip(uint8_t *cw, uint32_t lo, uint32_t hi, uint32_t k)
         } while (dup != 0U);
 
         cw[pos[i] / 8U] ^= (uint8_t)(1U << (pos[i] % 8U));
-        test_trace_detail("  flip bit %u (cw[%u] bit %u)", (unsigned)pos[i], (unsigned)(pos[i] / 8U), (unsigned)(pos[i] % 8U));
+        test_trace_detail("  flip bit %lu (cw[%lu] bit %lu)", pos[i], (pos[i] / 8U), (pos[i] % 8U));
     }
 }
 
@@ -853,7 +853,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
         l2_ecc_flip(cw, L2_ECC_PARITY_LO, L2_ECC_PARITY_HI, c->p_k);
     }
 
-    test_trace_summary("case=%s inject=%u", c->name, (unsigned)total);
+    test_trace_summary("case=%s inject=%lu", c->name, total);
 
     /* BOUND 的"原子性"基准必须是**注入后**的状态：cw 本来就带 5 个错 bit，拿它跟干净的
      * ref 比永远不等。EXACT 用不到 inj。 */
@@ -1015,7 +1015,7 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
      * 往返恒等式会把问题原样盖过去。 */
     munit_assert_uint8(l2_user_matches_source(enc), ==, c->expect_plain);
 
-    test_trace_summary("case=%s bm=0x%02X random=%u crc=%u: %u CW, USER%s明文", c->name, (unsigned)c->cw_bitmap, (unsigned)c->random_mode, (unsigned)c->crc_mode, (unsigned)c->n_cw, (c->expect_plain != 0U) ? " 仍是" : " 已非");
+    test_trace_summary("case=%s bm=0x%02lX random=%hhu crc=%hhu: %hhu CW, USER%s明文", c->name, c->cw_bitmap, c->random_mode, c->crc_mode, c->n_cw, (c->expect_plain != 0U) ? " 仍是" : " 已非");
 
     l2_verify_meta_written(enc);
     l2_verify_crc_written(enc); /* CRC 对明文算 ⇒ 与 USER 是否已加扰无关 */
@@ -1057,7 +1057,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
 
     /* 证据（--log-visible info）：CRC 关闭时该字段应**原样保留哨兵** 0xFFFFFFFF
      * ⇒ 读侧 Pass 3 整个跳过。打出来才看得出"关闭"是真的没写，而不是写了个 0。 */
-    test_trace_summary("crc disabled: %u CW, [4,8) 全 0xFFFFFFFF（哨兵原样保留）", (unsigned)test_cw_count(enc));
+    test_trace_summary("crc disabled: %hhu CW, [4,8) 全 0xFFFFFFFF（哨兵原样保留）", test_cw_count(enc));
 
     munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
     return MUNIT_OK;
@@ -1170,7 +1170,7 @@ static MunitResult test_process_read_ok(const MunitParameter params[], void *dat
 
     /* 证据摘要（--log-visible info）：断言全在 helper 里，这里只把「证明了什么」打出来
      * ——链上实际 CW 数、比对字节数、以及「全部 READY + USER 回到源」这两个结论。 */
-    test_trace_summary("case=%s bm=0x%02X: encode+process_read 往返一致，%u CW x %u B，全部 READY 且 USER == 源", c->name, (unsigned)c->cw_bitmap, (unsigned)cw_count, (unsigned)((uint32_t)cw_count * FC_BUFFER_USER_SIZE));
+    test_trace_summary("case=%s bm=0x%02lX: encode+process_read 往返一致，%hhu CW x %lu B，全部 READY 且 USER == 源", c->name, c->cw_bitmap, cw_count, ((uint32_t)cw_count * FC_BUFFER_USER_SIZE));
 
     return MUNIT_OK;
 }
@@ -1219,7 +1219,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
 
     /* 证据（--log-visible info）：哪几个 CW 报了什么。裸 [ OK ] 看不出"确实只坏了 CW1、
      * 对照组干净"——而那正是这条用例的全部意义。 */
-    test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰", (unsigned)(FC_BUFFER_DATA_SIZE / 8U));
+    test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰", (FC_BUFFER_DATA_SIZE / 8U));
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return MUNIT_OK;
@@ -1398,7 +1398,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
     munit_assert_uint8(l2_user_matches_source(cmd), ==, 1U);
 
     /* 证据（--log-visible info）：RAW 模式跳过 ECC 编解码，parity 区应原样保留 0xAA 哨兵。 */
-    test_trace_summary("ldpc_raw: parity 区原样保留 0xAA（%u B/CW x %u CW）, 数据原样往返", (unsigned)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), (unsigned)test_cw_count(cmd));
+    test_trace_summary("ldpc_raw: parity 区原样保留 0xAA（%u B/CW x %hhu CW）, 数据原样往返", (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), test_cw_count(cmd));
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return MUNIT_OK;
@@ -1748,10 +1748,10 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 
     /* 证据（--log-visible info）：位图 → 实际链几何。位图是 **flat 绝对编号**
      * （bit n = plane*CW_NUM + cw）⇒ 打出来才看得出 plane 1 的 CW0 是 bit 4 而不是 bit 0。 */
-    test_trace_summary("cw_bitmap case=%s bitmap=0x%02X addr_plane=%u -> %u desc:", c->name, (unsigned)c->bitmap, (unsigned)c->addr_plane, (unsigned)n);
+    test_trace_summary("cw_bitmap case=%s bitmap=0x%02lX addr_plane=%hhu -> %hhu desc:", c->name, c->bitmap, c->addr_plane, n);
     for (i = 0U; i < n; i++)
     {
-        test_trace_detail("  desc[%u] plane=%u cw=%u", (unsigned)i, (unsigned)plane_out[i], (unsigned)cw_out[i]);
+        test_trace_detail("  desc[%hhu] plane=%hhu cw=%hhu", i, plane_out[i], cw_out[i]);
     }
 
     fc_command_release(cmd);

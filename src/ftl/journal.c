@@ -519,11 +519,11 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
 
     if (journal->handle.erase_fail_count < JRN_ERASE_FAIL_MAX)
     {
-        LOGW(LOG_TAG_JRN "ring block %u erase failed (%u/%u)\r\n", (unsigned)block, (unsigned)journal->handle.erase_fail_count, JRN_ERASE_FAIL_MAX);
+        LOGW(LOG_TAG_JRN "ring block %hhu erase failed (%hhu/%u\r\n", block, journal->handle.erase_fail_count, JRN_ERASE_FAIL_MAX);
         return;
     }
 
-    LOGE(LOG_TAG_JRN "ring block %u erase failed x%u — mark BAD\r\n", (unsigned)block, (unsigned)journal->handle.erase_fail_count);
+    LOGE(LOG_TAG_JRN "ring block %hhu erase failed x%hhu — mark BAD\r\n", block, journal->handle.erase_fail_count);
 
     journal->handle.bad_mask |= (1U << block);
 
@@ -635,7 +635,7 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, const bg_info_
         /* 心跳（见 ftl_job.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口 */
         if (ftl_job_heartbeat(&journal->handle.log_ms, &journal->handle.start_ms))
         {
-            LOGI(LOG_TAG_JRN "job phase=%u waddr=0x%08lx age=%lums\r\n", (unsigned)journal->handle.phase, journal->handle.waddr, ftl_job_age_ms(&journal->handle.start_ms));
+            LOGI(LOG_TAG_JRN "job phase=%d waddr=0x%08lx age=%lums\r\n", journal->handle.phase, journal->handle.waddr, ftl_job_age_ms(&journal->handle.start_ms));
         }
         jrn_status_fill(journal, out);
         return; /* 单飞行：job 已在飞 */
@@ -811,7 +811,7 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         }
         else if (!jrn_erase_start(journal))
         {
-            LOGE(LOG_TAG_JRN "erase kick failed blk=%u — 下轮重试\r\n", (unsigned)journal->handle.target_block);
+            LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.target_block);
         }
     }
 
@@ -824,7 +824,7 @@ static void jrn_erase_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
 {
     if (fc_cw_status_has_error(completion->status))
     {
-        LOGE(LOG_TAG_JRN "ring block erase failed blk=%u status=0x%02x — 重新挂起\r\n", (unsigned)journal->handle.target_block, completion->status);
+        LOGE(LOG_TAG_JRN "ring block erase failed blk=%hhu status=0x%02hx — 重新挂起\r\n", journal->handle.target_block, completion->status);
         /* 擦失败 ⇒ 目标块仍是脏的；绝不能把后续页写进去。重新挂起 need_erase，
          * 由 jrn_handle 下轮重试；持续失败由 jrn_erase_failed 标坏并跳过。 */
         jrn_erase_failed(journal, journal->handle.target_block);
@@ -863,7 +863,7 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
     {
         /* 上面的 ASSERT 在 release 下裁空 ⇒ 这里必须留运行期兜底：否则 job 永远
          * 卡在非 IDLE，后续 flush 再也起不来（命令还不回收就是池泄漏）。 */
-        LOGE(LOG_TAG_JRN "unexpected completion phase=%u\r\n", (unsigned)journal->handle.phase);
+        LOGE(LOG_TAG_JRN "unexpected completion phase=%d\r\n", journal->handle.phase);
         journal->handle.phase = JRN_IDLE;
         (void)fc_command_release(cmd);
     }
@@ -1017,7 +1017,7 @@ bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *o
     }
     if (read_errors != 0U)
     {
-        LOGW(LOG_TAG_JRN "ring scan: %u page(s) unreadable — 判型结果不可信\r\n", (unsigned)read_errors);
+        LOGW(LOG_TAG_JRN "ring scan: %hu page(s) unreadable — 判型结果不可信\r\n", read_errors);
     }
 
     return (out != NULL) && (out->page_seq > 0U);
@@ -1081,7 +1081,7 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
 
                 if (ftl_sync_erase_block_multi_plane(erase_addr) != FTL_OK)
                 {
-                    LOGE(LOG_TAG_JRN "resume ring erase failed blk=%u — 挂起补擦\r\n", (unsigned)next_block);
+                    LOGE(LOG_TAG_JRN "resume ring erase failed blk=%hhu — 挂起补擦\r\n", next_block);
                     jrn_erase_failed(journal, next_block);
 
                     if (journal->handle.ring_full)
@@ -1159,7 +1159,7 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const
 
     if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
-        LOGW(LOG_TAG_JRN "replay: page blk=%u page=%u unreadable\r\n", (unsigned)page->block, (unsigned)page->page);
+        LOGW(LOG_TAG_JRN "replay: page blk=%hhu page=%hhu unreadable\r\n", page->block, page->page);
         return 0U;
     }
 
@@ -1340,7 +1340,7 @@ ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequenc
      * ——应回退 full metadata rebuild（RISK-BOOT-08）。 */
     if (read_errors != 0U)
     {
-        LOGW(LOG_TAG_JRN "replay incomplete: %u page(s) unreadable\r\n", (unsigned)read_errors);
+        LOGW(LOG_TAG_JRN "replay incomplete: %hu page(s) unreadable\r\n", read_errors);
         return FTL_ERROR;
     }
 

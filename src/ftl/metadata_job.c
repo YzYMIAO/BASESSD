@@ -249,7 +249,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
     {
         /* 提交超时 = 资源 starvation 的瞬态中止：victim 不擦、下轮重来，无数据风险。
          * 每轮打 WRN 会被当成故障并刷屏 ⇒ 只在 debug 档可见。 */
-        LOGD(LOG_TAG_META "md job abort (transient timeout) phase=%u victim=%u moved=%u\r\n", (unsigned)j->timeout_phase, (unsigned)j->victim, (unsigned)j->moved);
+        LOGD(LOG_TAG_META "md job abort (transient timeout) phase=%d victim=%hu moved=%hu\r\n", j->timeout_phase, j->victim, j->moved);
     }
     else
     {
@@ -257,7 +257,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
 
         if (md_abort_log_is_due(&suppressed))
         {
-            LOGE(LOG_TAG_META "md job abort phase=%u victim=%u moved=%u (victim 不擦, suppressed=%lu)\r\n", (unsigned)j->phase, (unsigned)j->victim, (unsigned)j->moved, suppressed);
+            LOGE(LOG_TAG_META "md job abort phase=%d victim=%hu moved=%hu (victim 不擦, suppressed=%lu)\r\n", j->phase, j->victim, j->moved, suppressed);
         }
     }
 
@@ -493,7 +493,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->stall_ms   = 0U;
     j->phase      = MD_JOB_CP_READ;
 
-    LOGD(LOG_TAG_META "compact start victim=%u live=%u cur_page=%u\r\n", (unsigned)victim, (unsigned)dir->l2p_live[victim], (unsigned)dir->cur_metadata_page);
+    LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur_metadata_page);
 
     return MD_COMPACT_STARTED;
 }
@@ -560,7 +560,7 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
      * Directory 是权威：清零这条陈旧计数并以 LOGE 暴露（release 也拒绝空转，H14）。 */
     if (dir->l2p_live[j->victim] != 0U)
     {
-        LOGE(LOG_TAG_META "compact: victim %u live=%u but no directory entry — clear stale count\r\n", (unsigned)j->victim, (unsigned)dir->l2p_live[j->victim]);
+        LOGE(LOG_TAG_META "compact: victim %hu live=%hu but no directory entry — clear stale count\r\n", j->victim, dir->l2p_live[j->victim]);
         dir->l2p_live[j->victim] = 0U;
     }
 
@@ -583,7 +583,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
         {
             /* 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
              * "启动前已在飞的前台写落回 victim"：中止是安全的（victim 不擦）。 */
-            LOGW(LOG_TAG_META "compact: 当前块无空槽 (page=%u) — 中止\r\n", (unsigned)dir->cur_metadata_page);
+            LOGW(LOG_TAG_META "compact: 当前块无空槽 (page=%hhu) — 中止\r\n", dir->cur_metadata_page);
             return MD_COMPACT_FAILED;
         }
     }
@@ -664,7 +664,7 @@ static void md_handle_step(md_dir_cache_t *dir)
     }
     else if (ftl_job_heartbeat(&j->log_ms, &j->start_ms))
     {
-        LOGD(LOG_TAG_MD "job phase=%u victim=%u moved=%u pending=%u stall=%lums age=%lums\r\n", (unsigned)j->phase, (unsigned)j->victim, (unsigned)j->moved, (unsigned)dir->reclaim_pending_count, j->stall_ms, ftl_job_age_ms(&j->start_ms));
+        LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu stall=%lums age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim_pending_count, j->stall_ms, ftl_job_age_ms(&j->start_ms));
     }
 
     for (;;)
@@ -866,7 +866,7 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                     if (!j->anchor_ok)
                     {
-                        LOGW(LOG_TAG_META "anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
+                        LOGW(LOG_TAG_META "anchor write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->anchor_idx, j->anchor_seq);
                         md_handle_abort(dir);
                         break;
                     }
@@ -919,7 +919,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                 if (!md_log_block_is_reclaimable(dir, alloc, v))
                 {
                     /* 扫描期间又有 region 落回 victim（在飞的写回完成）⇒ 不能擦，留给下次。 */
-                    LOGD(LOG_TAG_META "compact: victim %u 仍有 %u 活 region — 不擦\r\n", (unsigned)v, (unsigned)dir->l2p_live[v]);
+                    LOGD(LOG_TAG_META "compact: victim %hu 仍有 %hu 活 region — 不擦\r\n", v, dir->l2p_live[v]);
                     j->phase = MD_JOB_DONE;
                     break;
                 }
@@ -934,13 +934,13 @@ static void md_handle_step(md_dir_cache_t *dir)
             }
 
             case MD_JOB_DONE:
-                LOGD(LOG_TAG_META "compact done victim=%u moved=%u\r\n", (unsigned)j->victim, (unsigned)j->moved);
+                LOGD(LOG_TAG_META "compact done victim=%hu moved=%hu\r\n", j->victim, j->moved);
                 md_handle_reset(dir);
                 break; /* 回 IDLE：继续循环（可能还有待回收的块）*/
 
             default:
                 /* 不该发生：phase 越界 ⇒ 清回 IDLE，否则 append_slot 永久让路。 */
-                LOGE(LOG_TAG_META "md job bad phase=%u — reset\r\n", (unsigned)j->phase);
+                LOGE(LOG_TAG_META "md job bad phase=%d — reset\r\n", j->phase);
                 md_handle_reset(dir);
                 return;
         }
@@ -1037,7 +1037,7 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
 
         if (j->reclaim_fail_count >= MD_RECLAIM_FAIL_MAX)
         {
-            LOGE(LOG_TAG_META "reclaim erase failed blk=%u x%u — mark BAD\r\n", (unsigned)j->reclaim_gblock, (unsigned)j->reclaim_fail_count);
+            LOGE(LOG_TAG_META "reclaim erase failed blk=%hu x%hhu — mark BAD\r\n", j->reclaim_gblock, j->reclaim_fail_count);
             (void)bbt_mark_bad(dir->alloc, j->reclaim_gblock);
             md_reclaim_clear(dir, j->reclaim_gblock);
             j->reclaim_fail_count  = 0U;
@@ -1045,7 +1045,7 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
         }
         else
         {
-            LOGW(LOG_TAG_META "reclaim erase failed blk=%u (%u/%u) — 位保留，下轮重试\r\n", (unsigned)j->reclaim_gblock, (unsigned)j->reclaim_fail_count, MD_RECLAIM_FAIL_MAX);
+            LOGW(LOG_TAG_META "reclaim erase failed blk=%hu (%hhu/%u) — 位保留，下轮重试\r\n", j->reclaim_gblock, j->reclaim_fail_count, MD_RECLAIM_FAIL_MAX);
         }
     }
     else
@@ -1141,7 +1141,7 @@ static void md_cp_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_comma
 
     if (failed)
     {
-        LOGW(LOG_TAG_META "compact: victim erase failed blk=%u — 登记重试\r\n", (unsigned)j->victim);
+        LOGW(LOG_TAG_META "compact: victim erase failed blk=%hu — 登记重试\r\n", j->victim);
         (void)md_reclaim_mark(dir, j->victim);
     }
     else
@@ -1208,7 +1208,7 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
         default:
             /* 不该发生：一条命令对应一个提交阶段（RECLAIM / CP_READ / CP_WRITE /
              * CP_ANCHOR_ERASE / CP_ANCHOR_WRITE / CP_RECLAIM）。 */
-            LOGE(LOG_TAG_META "md job unexpected completion phase=%u\r\n", (unsigned)j->phase);
+            LOGE(LOG_TAG_META "md job unexpected completion phase=%d\r\n", j->phase);
             (void)fc_command_release(cmd);
             j->waiting = false;
             md_handle_abort(dir);

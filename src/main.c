@@ -382,7 +382,7 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
         return FTL_ERROR;
     }
 
-    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n", ch, ce, lun, (unsigned)alloc->free_count, (unsigned)alc_pool_sum_counts(alloc->op_count, PLANE_NUM), (unsigned)alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
+    LOGI("[FTL ] instance ch=%hhu ce=%hhu lun=%hhu free=%hu op=%hu spare=%hu\r\n", ch, ce, lun, alloc->free_count, alc_pool_sum_counts(alloc->op_count, PLANE_NUM), alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
 
     LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n", (int)result.boot_type, result.cp_sequence, result.journal_entries, result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback"));
 
@@ -447,7 +447,7 @@ static DWORD ssd_ftl_host_lba_max(void)
 
                 const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
 
-                LOGI(LOG_TAG_CAP "ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n", (unsigned)ch, (unsigned)ce, (unsigned)lun, plane_usable_min, instance_blocks);
+                LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", ch, ce, lun, plane_usable_min, instance_blocks);
 
                 if (instance_blocks < cap_blocks)
                 {
@@ -509,7 +509,7 @@ static void ssd_ftl_log_status(void)
                     continue;
                 }
 
-                LOGI(LOG_TAG_STAT "ch=%u t=%lus free=%u bad=%u mig=%u/%u mv=%lu nop=%lu\r\n", (unsigned)ch, (now / 1000U), (unsigned)ftl->alloc.free_count, (unsigned)ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
+                LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ch, (now / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
             }
         }
     }
@@ -710,7 +710,7 @@ int main(void)
 
                 if (high_speed_result != NAND_RESULT_OK)
                 {
-                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02X — keep low speed\r\n", (unsigned)high_speed_result);
+                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — keep low speed\r\n", high_speed_result);
                 }
             }
         }

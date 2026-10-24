@@ -18,8 +18,8 @@
  *       job.log_ms = 0U;   // 空闲：清基准（两个时间戳必须一起清）
  *       job.start_ms = 0U;
  *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms)) {
- *       LOGI("[XX] job phase=%u ... age=%lums\r\n",
- *            (unsigned)job.phase, ..., ftl_job_age_ms(&job.start_ms));
+ *       LOGI("[XX] job phase=%d ... age=%lums\r\n",
+ *            job.phase, ..., ftl_job_age_ms(&job.start_ms));
  *   }
  *
  * 基准由 ftl_job_heartbeat **懒初始化**（首次见到在飞时记 start）⇒ job 起点无需显式

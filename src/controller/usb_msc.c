@@ -471,7 +471,7 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
     {
         /* 未知命令一律 ILLEGAL REQUEST；打印 opcode 便于定位主机实际下发什么
          * （Windows format/diskpart 会用到 VERIFY / SYNCHRONIZE CACHE(16) 等）。 */
-        LOGW("[USB ] unsupported SCSI opcode=0x%02X lun=%u\r\n", (unsigned)scsi_cmd[0], (unsigned)lun);
+        LOGW("[USB ] unsupported SCSI opcode=0x%02hhX lun=%hhu\r\n", scsi_cmd[0], lun);
         return TUD_MSC_RET_ERROR;
     }
 

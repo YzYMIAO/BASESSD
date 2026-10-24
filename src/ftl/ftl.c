@@ -299,7 +299,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                         slot->first_lba = l;
                         slot->lbas      = 0U;
 
-                        LOGW(LOG_TAG_FTL "dangling g=%u first_lba=%lu st=BAD newg=%u (retired; later LBAs aggregated)\r\n", (unsigned)gob, l, (unsigned)newg);
+                        LOGW(LOG_TAG_FTL "dangling g=%hu first_lba=%lu st=BAD newg=%hu (retired; later LBAs aggregated)\r\n", gob, l, newg);
                     }
 
                     slot->lbas++;
@@ -314,7 +314,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                         const char *old_state = ftl_block_state_name(old_st);
                         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[newg]));
 
-                        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n", l, oldp[bit], (unsigned)gob, old_state, (unsigned)ftl->alloc.blocks[gob].sb_id, (unsigned)newg, new_state, s_dangling_suppressed);
+                        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s supp=%lu\r\n", l, oldp[bit], gob, old_state, ftl->alloc.blocks[gob].sb_id, newg, new_state, s_dangling_suppressed);
                         s_dangling_log_ms     = now_ms;
                         s_dangling_suppressed = 0U;
                     }
@@ -349,7 +349,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_
 
     if (ftl_cmd_read_data(cmd, pending->buffer, data_size) != FTL_OK)
     {
-        LOGE(LOG_TAG_FTL "read data short lba=%lu cmd=%u\r\n", pending->lba, (unsigned)cmd_id);
+        LOGE(LOG_TAG_FTL "read data short lba=%lu cmd=%hu\r\n", pending->lba, cmd_id);
         return SSD_STATUS_IO_ERROR;
     }
 
@@ -567,7 +567,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     if ((s_write_retry_logged++ % FTL_WRITE_RETRY_LOG_EVERY) == 0U)
     {
-        LOGW(LOG_TAG_FTL "write retry lba=%lu cw=0x%02x retry=%u pba=0x%08lx/0x%08lx count=%lu\r\n", pending->lba, (unsigned)pending->cw_bitmap, (unsigned)pending->retry_count, pba[0], pba[1], s_write_retry_logged);
+        LOGW(LOG_TAG_FTL "write retry lba=%lu cw=0x%02hhx retry=%hhu pba=0x%08lx/0x%08lx count=%lu\r\n", pending->lba, pending->cw_bitmap, pending->retry_count, pba[0], pba[1], s_write_retry_logged);
     }
 
     return FTL_OK;
@@ -1248,7 +1248,7 @@ void ftl_contract_audit(const ftl_ctx_t *ftl)
     contract_check_jobs_idle(ftl);
     contract_check_boot_zero(ftl);
 
-    LOGI("[FTL ] contract ok ch=%u ce=%u lun=%u regions=%u tasks=%u\r\n", (unsigned)ftl->topo.ch, (unsigned)ftl->topo.ce, (unsigned)ftl->topo.lun, (unsigned)L2P_REGIONS_PER_INSTANCE, (unsigned)ftl->bg.task_count);
+    LOGI("[FTL ] contract ok ch=%hhu ce=%hhu lun=%hhu regions=%u tasks=%hhu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, L2P_REGIONS_PER_INSTANCE, ftl->bg.task_count);
 #endif
 }
 
@@ -1726,10 +1726,10 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     {
                         if (ftl->mig_handle->gc_nogain)
                         {
-                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n", (unsigned)ftl->alloc.free_count, suppressed);
+                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%hu) — IO_ERROR (suppressed=%lu)\r\n", ftl->alloc.free_count, suppressed);
                         }
 
-                        LOGE(LOG_TAG_FTL "drain stalled gi=%u next=%lu/%lu (suppressed=%lu)\r\n", (unsigned)gi, g->next, g->total, suppressed);
+                        LOGE(LOG_TAG_FTL "drain stalled gi=%hhu next=%lu/%lu (suppressed=%lu)\r\n", gi, g->next, g->total, suppressed);
                     }
                     g->agg_status = SSD_STATUS_IO_ERROR;
                     g->next       = g->total;
@@ -1744,7 +1744,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
         if (ftl_log_throttle_due(&s_subop_fail_log, &suppressed))
         {
-            LOGE(LOG_TAG_FTL "subop failed gi=%u next=%lu/%lu (suppressed=%lu)\r\n", (unsigned)gi, g->next, g->total, suppressed);
+            LOGE(LOG_TAG_FTL "subop failed gi=%hhu next=%lu/%lu (suppressed=%lu)\r\n", gi, g->next, g->total, suppressed);
         }
         g->agg_status = SSD_STATUS_IO_ERROR;
         g->next       = g->total;
@@ -2093,14 +2093,14 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
          * jrn_write_failure_clear 清 journal 标志；wbuf FAILED 由下一次成功操作清。 */
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n", (unsigned)jrn_fail, (unsigned)wb_fail, suppressed);
+            LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%d wb=%d) — complete best-effort (suppressed=%lu)\r\n", jrn_fail, wb_fail, suppressed);
         }
     }
     else if (timeout)
     {
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW(LOG_TAG_FTL "flush timeout %lums (wb=%u l2p=%u jrn=%u) — best-effort complete (suppressed=%lu)\r\n", flush_ms, (unsigned)wb_done, (unsigned)l2p_done, (unsigned)jrn_done, suppressed);
+            LOGW(LOG_TAG_FTL "flush timeout %lums (wb=%d l2p=%d jrn=%d) — best-effort complete (suppressed=%lu)\r\n", flush_ms, wb_done, l2p_done, jrn_done, suppressed);
         }
     }
 

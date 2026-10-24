@@ -647,7 +647,7 @@ void fc_boot_report(void)
     const char *data_path = "PIO";
 #endif
 
-    LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n", (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)FC_SQ_DEPTH, (unsigned)FC_HSQ_DEPTH, (unsigned)FC_CQ_DEPTH);
-    LOGI("[FC  ] topology ch=%u ce=%u lun=%u plane=%u raid=%s\r\n", (unsigned)CH_NUM, (unsigned)CE_NUM, (unsigned)LUN_NUM, (unsigned)PLANE_NUM, (CONFIG_FC_RAID != 0U) ? "on" : "off");
+    LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n", FC_COMMAND_POOL_DEPTH, FC_DESCRIPTOR_POOL_DEPTH, FC_BUFFER_POOL_DEPTH, FC_SQ_DEPTH, FC_HSQ_DEPTH, FC_CQ_DEPTH);
+    LOGI("[FC  ] topology ch=%d ce=%d lun=%d plane=%d raid=%s\r\n", CH_NUM, CE_NUM, LUN_NUM, PLANE_NUM, (CONFIG_FC_RAID != 0U) ? "on" : "off");
     LOGI("[FC  ] data path=%s ecc=%s random=%s\r\n", data_path, fc_ecc_algo_name(), fc_random_algo_name());
 }

@@ -184,7 +184,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     /* 观测口：一页一次编程；base/cw/nplanes/owners 即"合并了多少"的判据。
      * ⚠ LOGD（不是 LOGI）：批量写下每 4KB 一行、UART 阻塞 ~5ms，比 NAND 编程慢一个量级。 */
-    LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n", h->base, (unsigned)n_cw, (unsigned)write_planes, h->owners);
+    LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%hhu nplanes=%hhu owners=0x%lx\r\n", h->base, n_cw, write_planes, h->owners);
 
     /* 提交成功才清缓冲 */
     h->open     = false;
