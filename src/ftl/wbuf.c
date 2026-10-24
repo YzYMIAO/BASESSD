@@ -25,7 +25,7 @@
 #include "ftl_fc_interface.h" /* ftl_cmd_* / ftl_plane_* */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"
-#include "migrate.h" /* mig_handle_t / mig_trigger */
+#include "migrate.h" /* mig_handle_t / mig_gc_request_urgent */
 
 #include <string.h>
 
@@ -98,12 +98,12 @@ static ftl_status_e wb_flush(wb_handle_t *h)
      * 登记紧急 GC 后返回 FTL_AGAIN，缓冲原样保留，由 ftl_drain_group 下轮重试。
      *
      * ⚠ 搬移是异步 job：在完成回调/写路径里同步等它会把 superloop 卡死。
-     *   这里**只登记**原因，由 must-run 的 mig_handle 下一轮启动。 */
+     *   这里**只登记请求**，由 must-run 的 mig_handle 下一轮启动。 */
     DWORD pba[PLANE_NUM];
 
     if (alc_super_open_alloc_pair(h->alloc, ALC_SUPER_ALLOC_HOT, pba) != FTL_OK)
     {
-        mig_trigger(h->migrate, MIGRATE_REASON_GC_URGENT);
+        mig_gc_request_urgent(h->migrate);
         return FTL_AGAIN;
     }
 

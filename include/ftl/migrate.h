@@ -104,6 +104,9 @@ typedef struct ftl_context ftl_ctx_t;
  * 8 = 足够覆盖零星坏块，又能在死亡螺旋早期刹住。 */
 #define MIG_SYSTEMIC_READ_FAIL_MAX (8U)
 
+/* cache program 批次最多 4 页（= NAND per-LUN FIFO 深度）。 */
+#define MIG_BATCH_PAGES (4U)
+
 /* ── 目的页写失败（RISK-GC-02）──
  * 目的页写失败**不能**把整块标 BAD：该冷 SB 可能已有成功迁移的页，L2P 正指向它们。
  * 正确处置是**立即**关闭这个 Cold SB：失败页可能已半编程，不能 rewind；关闭后
@@ -127,19 +130,6 @@ typedef enum
     MIG_ERASE,              /* 提交阶段：擦 victim 的当前 plane */
     MIG_DONE                /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
 } mig_phase_e;
-
-/* cache program 批次最多 4 页（= NAND per-LUN FIFO 深度）。 */
-#define MIG_BATCH_PAGES (4U)
-
-/* 批内单页的搬运元数据（数据在 batch_buf 的同下标槽）。 */
-typedef struct
-{
-    DWORD base[PLANE_NUM];
-    DWORD cw_bitmap[PLANE_NUM];
-    DWORD cw_lba[PLANE_NUM][CW_NUM];
-    DWORD src[PLANE_NUM];
-    DWORD dst[PLANE_NUM];
-} mig_batch_page_t;
 
 /* 收尾方式（决定擦除后怎么处置 victim 的块）。 */
 typedef enum
@@ -165,6 +155,36 @@ typedef enum
     MIG_GC_START_URGENT = 0, /* wbuf 分配不到页对 */
     MIG_GC_START_PERIODIC    /* T1/T4 周期评估（磨损均衡走独立 WL） */
 } mig_gc_start_reason_e;
+
+/* 批内单页的搬运元数据（数据在 batch_buf 的同下标槽）。 */
+typedef struct
+{
+    DWORD base[PLANE_NUM];
+    DWORD cw_bitmap[PLANE_NUM];
+    DWORD cw_lba[PLANE_NUM][CW_NUM];
+    DWORD src[PLANE_NUM];
+    DWORD dst[PLANE_NUM];
+} mig_batch_page_t;
+
+/* 推进结果上报（mig_handle 出参；只读观测，外部不要据此驱动）。 */
+typedef struct
+{
+    ftl_mod_status_t base;
+
+    mig_phase_e       phase;    /* 观测；外部不要据此驱动 */
+    mig_kind_e        kind;     /* GC / WL / PREDICT */
+    WORD              migrated; /* 本次 job 已搬 CW 数 */
+    WORD              erased;   /* 本次 job 已擦 plane 数 */
+    bool              aborted;
+    bool              erase_failed;
+    bool              timed_out;
+    mig_phase_e       timeout_phase;
+    DWORD             reclaimed; /* 累计成功回收 SB 数（单调） */
+    DWORD             novictim;  /* 累计「触发但选不出 victim」次数（含 no-gain） */
+    DWORD             nogain;    /* 其中「有候选但收益不足」的次数（单调） */
+    gc_benefit_mode_e gc_mode;   /* 最近一次使用的模式（0=off/1=idle/2=emg） */
+    bool              gc_nogain; /* 最近一次空间 GC 结论 = 无收益 victim */
+} mig_status_t;
 
 /* ── 搬移 job（per-instance，放 ftl->mig_handle）──
  *
@@ -231,7 +251,7 @@ typedef struct mig_handle
     /* ⚠ 源块的全局块号（BST 索引）**不缓存**在 job 里：真值是 victim.plane_blocks[plane]，
      *   快路径（valid_total == 0 ⇒ 直接 ERASE）不经过 READ 阶段，缓存的字段在快路径下
      *   是 0 ⇒ 擦除收尾会改块 0 的元数据。用点在 migrate.c 的
-     *   mig_next_present_plane / mig_read_complete / mig_erase_complete，
+     *   mig_present_plane_next / mig_read_complete / mig_erase_complete，
      *   每次用 ftl_gblock() 现算。 */
 
     DWORD migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
@@ -305,14 +325,14 @@ typedef struct mig_handle
     DWORD   noop_count;      /* 累计成功回收的**空** victim 数（GC） */
     DWORD   novictim_count;  /* 触发但选不出 victim 的次数（含 no-gain） */
     DWORD   nogain_count;    /* 其中「有候选但收益不足」的次数 */
-    bool    urgent_gc;       /* mig_trigger(GC_URGENT) 登记（被 handle 消费） */
+    bool    urgent_gc;       /* mig_gc_request_urgent 登记（被 handle 消费） */
     int32_t error;           /* 最近一次中止的归因 */
 
     BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } mig_handle_t;
 
 /* 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
-static inline bool mig_is_fail_state_clean(const mig_handle_t *m)
+static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -334,38 +354,13 @@ static inline bool mig_is_fail_state_clean(const mig_handle_t *m)
  */
 void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes);
 
-/* 显式触发原因（设计 §4.4：只登记紧急/显式原因，周期评估由 handle 自持） */
-typedef enum
-{
-    MIGRATE_REASON_GC_URGENT = 0, /* 写路径分配不到页对（wbuf / host 写） */
-} mig_reason_e;
-
 /*
- * mig_trigger - 登记一个显式搬移请求（不立即启动；由下一次 mig_handle 消费）。
+ * mig_gc_request_urgent - 登记一次紧急 GC 请求（写路径分配不到页对）。
+ * 只登记，不立即启动；由下一次 mig_handle 消费。
  *
  * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param reason 触发原因
  */
-void mig_trigger(mig_handle_t *m, mig_reason_e reason);
-
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    mig_phase_e       phase;    /* 观测；外部不要据此驱动 */
-    mig_kind_e        kind;     /* GC / WL / PREDICT */
-    WORD              migrated; /* 本次 job 已搬 CW 数 */
-    WORD              erased;   /* 本次 job 已擦 plane 数 */
-    bool              aborted;
-    bool              erase_failed;
-    bool              timed_out;
-    mig_phase_e       timeout_phase;
-    DWORD             reclaimed; /* 累计成功回收 SB 数（单调） */
-    DWORD             novictim;  /* 累计「触发但选不出 victim」次数（含 no-gain） */
-    DWORD             nogain;    /* 其中「有候选但收益不足」的次数（单调） */
-    gc_benefit_mode_e gc_mode;   /* 最近一次使用的模式（0=off/1=idle/2=emg） */
-    bool              gc_nogain; /* 最近一次空间 GC 结论 = 无收益 victim */
-} mig_status_t;
+void mig_gc_request_urgent(mig_handle_t *m);
 
 /*
  * mig_handle - 推进搬移引擎（每轮 must-run；提交即返回）
@@ -373,7 +368,7 @@ typedef struct
  * 语义：
  *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
  *   ② 不在飞时，若 `load_level != BUSY`，按 handle 自持节拍评估新工作：
- *      紧急触发（mig_trigger）→ GC 10ms → WL 5s → predict 1s；
+ *      紧急触发（mig_gc_request_urgent）→ GC 10ms → WL 5s → predict 1s；
  *   ③ 每轮最多启动一个 job（单飞行）。
  *
  * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）

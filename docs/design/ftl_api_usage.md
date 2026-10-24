@@ -996,7 +996,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
 > `mig_handle` 的自持节拍：GC 10ms / WL 5s / predict 1s（仅 IDLE）；
 > `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
-> `migrate_trigger(GC_URGENT)` 只登记，下一轮由 must-run 启动。
+> `mig_gc_request_urgent()` 只登记，下一轮由 must-run 启动。
 
 > ⚠ **Phase 2.5 的开头是 `pending_confirm_service()`**——推进**停泊**的写确认，
 > 必须早于补发循环：停泊意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作

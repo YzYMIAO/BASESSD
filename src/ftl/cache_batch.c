@@ -386,7 +386,7 @@ static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
     {
         if (alc_super_open_alloc_pair(&ftl->alloc, ALC_SUPER_ALLOC_HOT, b->pba[j]) != FTL_OK)
         {
-            mig_trigger(ftl->mig_handle, MIGRATE_REASON_GC_URGENT);
+            mig_gc_request_urgent(ftl->mig_handle);
             cache_wb_discard(ftl, b);
             return FTL_AGAIN;
         }

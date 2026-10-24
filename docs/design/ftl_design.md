@@ -3102,7 +3102,7 @@ flowchart TD
 ① pending 表空间检查（不够 ⇒ FTL_AGAIN；此时未占用任何资源）
 ② fc_command_alloc（命令池空 ⇒ FTL_AGAIN；命令槽有 release ⇒ 排在页对之前）
 ③ alc_super_open_alloc_pair(ALC_SUPER_ALLOC_HOT, pba)
-     失败 ⇒ 释放命令槽 + mig_trigger(GC_URGENT) + FTL_AGAIN
+     失败 ⇒ 释放命令槽 + mig_gc_request_urgent() + FTL_AGAIN
 ④ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
 ⑤ wb_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_pair_cw（plane-major pair 镜像）
 ⑥ pend_alloc：owners、op=WRITE、n_cw、cw_bitmap、lba=base、new_pba/new_pba1
@@ -3311,7 +3311,7 @@ flowchart TB
   （`gc_read_page_with_lba` / `gc_decode_cw_lba`）。
 - **`migrate.c`（引擎）**：`mig_handle_t` 状态机；GC / 静态 WL / 慢死预测共用一台。
 - **不做**：不决定块元数据（allocator）；不决定坏块（BBT）；不做读恢复（RR）。
-- **入口**：`mig_handle`（自持节拍，内部才调 `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin`）；`mig_trigger(GC_URGENT)` 只登记紧急原因；完成服务
+- **入口**：`mig_handle`（自持节拍，内部才调 `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin`）；`mig_gc_request_urgent()` 只登记紧急原因；完成服务
   `ftl_migrate_callback`（GC 与 WL 共用）。
 
 #### 3.13.3 结构与不变量
@@ -3335,7 +3335,7 @@ flowchart TB
 | `read_fail_streak` / `paused` | 系统性读失败熔断计数 / 已熔断标志（跨 job 保留；整块迁移成功才清零 `RISK-GC-10`） |
 | `gc_eval_last_ms` / `wl_eval_last_ms` / `predict_last_ms` | handle 自持的求值节拍 |
 | `reclaimed_count` / `novictim_count` | 单调进展计数（外部经 `migrate_*_count()` 查询） |
-| `urgent_gc` | `mig_trigger(GC_URGENT)` 的登记位 |
+| `urgent_gc` | `mig_gc_request_urgent()` 的登记位 |
 | `error` | 最近一次中止归因 |
 
 **不变量**：
@@ -4249,7 +4249,7 @@ flowchart TB
 | BBT | `alloc->bbt.handle` | `bbt_handle(alloc, info, out)` | `bbt_status_t` |
 | Journal | `l2p_jrn_t.handle` | `jrn_handle(j, trigger, info, out)` | `jrn_status_t`；`jrn_is_idle` / `jrn_can_erase_victim` / `jrn_sequence_get` / `jrn_watermark_get` / `jrn_has_write_failure` |
 | Metadata | `md_dir_cache_t.handle` | `md_handle(dir, info, out)` | `md_status_t`；`md_is_busy` |
-| Migrate | `mig_handle_t` | `mig_handle(h, info, out)` / `mig_trigger(h, reason)` | `mig_status_t`；`mig_is_active` / `mig_reclaimed_count` / `mig_novictim_count` |
+| Migrate | `mig_handle_t` | `mig_handle(h, info, out)` / `mig_gc_request_urgent(h)` | `mig_status_t`（无独立访问器；调用方读 `mig_handle_t` 字段） |
 | RR | `rr_handle_t` | `rr_handle(h, info, out)` / `rr_trigger(h, owner)` | `rr_status_t` |
 | Checkpoint | `cp_handle_t` | `cp_handle(h, trigger, out)` | `cp_status_t`；`cp_is_active` |
 | L2P cache | `l2p_cache_t` | `l2p_handle(cache, dim, info, out)` | `l2p_status_t`；行查询/失效原语 |

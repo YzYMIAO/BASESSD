@@ -1300,7 +1300,7 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 
     ASSERT((!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) &&
            (ftl->mig_handle->phase == MIG_IDLE) &&
-           mig_is_fail_state_clean(ftl->mig_handle));
+           mig_fail_state_is_clean(ftl->mig_handle));
 
     ASSERT((ftl->read_recovery_handle.stage == RR_STAGE_IDLE) &&
            (ftl->read_recovery_handle.waiting == 0U) &&
