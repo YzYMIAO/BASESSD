@@ -34,7 +34,8 @@
  * ⚠ 页打包写缓冲在 `ftl/wbuf.c`（wbuf.h 定义 wb_handle_t），本文件只调用其接口。
  *
  * ⚠ 回收动作在 `ftl/migrate.c`：GC / WL / 慢死预测共用一台异步搬移 job
- *   （mig_begin_* / mig_handle）。触发求值在 `ftl/bg_scheduler.c`，写路径的按需 GC 在
+ *   （mig_gc_begin / mig_wl_begin / mig_predict_begin / mig_handle）。触发求值在
+ *   `ftl/bg_scheduler.c`，写路径的按需 GC 在
  *   ftl_issue_subop；本文件不直接触发搬移。
  *
  * ⚠ 多实例：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
@@ -1821,7 +1822,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
                     if (ftl_log_throttle_due(&s_nospace_log, &suppressed))
                     {
-                        if (ftl->mig_handle->gc_no_gain)
+                        if (ftl->mig_handle->gc_nogain)
                         {
                             LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n",
                                  (unsigned)ftl->alloc.free_count,

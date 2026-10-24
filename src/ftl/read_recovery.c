@@ -8,7 +8,7 @@
  *
  * 与 migrate.c 的分工：
  *   本文件只做**判定与记录**（rr_record_ecc / rr_predictive_scan / rr_retire_block）；
- *   搬移动作由 migrate.c 的搬移 job 执行（mig_begin_predict 调本文件的扫描，
+ *   搬移动作由 migrate.c 的搬移 job 执行（mig_predict_begin 调本文件的扫描，
  *   MIG_ERASE 完成后调本文件的退役）。
  *
  * 块健康状态机（rr_block_health_e，单调升级）：
@@ -750,11 +750,11 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
  *   返回：true 找到；false 未找到。
  *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、BAD/RETIRED 已出局）；
  *             命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
- *             （慢死第一信号）。调用者 mig_begin_predict 用 sb_id 反查 Closed 条目。
+ *             （慢死第一信号）。调用者 mig_predict_begin 用 sb_id 反查 Closed 条目。
  * -------------------------------------------------------------------- */
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 {
-    /* 层内接口：唯一调用者 mig_begin_predict 传 rr->alloc 与局部 gblock */
+    /* 层内接口：唯一调用者 mig_predict_begin 传 rr->alloc 与局部 gblock */
 
     for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {

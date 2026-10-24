@@ -19,7 +19,8 @@
  *
  * ── 状态机 ──
  *
- *   SELECT（在 mig_begin_* 里做，不是 job 阶段）→ READ → READ_SETTLE → WRITE → WRITE_SETTLE
+ *   SELECT（在 mig_gc_begin / mig_wl_begin / mig_predict_begin 里做，不是 job 阶段）
+ *   → READ → READ_SETTLE → WRITE → WRITE_SETTLE
  *   → FLUSH_JRN → ERASE → DONE
  *
  *   · READ  逐页逐 plane：异步读 → 完成时解 META 得 cw_lba、记 rr_record_ecc / read_count
@@ -68,6 +69,7 @@
 #include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
 #include "ftl_module.h"  /* bg_info_t / ftl_mod_status_t */
 #include "ftl_type.h"    /* DWORD */
+#include "gc.h"          /* gc_benefit_mode_e */
 #include "journal.h"     /* l2p_jrn_t（端口） */
 #include "l2p_cache.h"   /* l2p_cache_t（端口） */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
@@ -109,8 +111,8 @@ typedef struct ftl_context ftl_ctx_t;
  * 不能在同一 Open SB 上继续写下一页——那会把失败页留成 hole。 */
 
 /* ── 状态机的 phase ──
- * 约定同 rr_stage_e：纯计算 phase 只从 mig_step 进入、跑完立刻转下一个（不提交命令）；
- * 提交 phase 由 mig_step 提交命令后**原地停留**，等完成服务函数改写。
+ * 约定同 rr_stage_e：纯计算 phase 只从 mig_job_step 进入、跑完立刻转下一个（不提交命令）；
+ * 提交 phase 由 mig_job_step 提交命令后**原地停留**，等完成服务函数改写。
  * 判「有没有命令在飞」用 waiting 而不是 phase：提交可能因背压失败（phase 不变但无命令）。 */
 typedef enum
 {
@@ -196,7 +198,7 @@ typedef struct mig_handle
     mig_kind_e  kind;           /* victim 来源（GC / WL / predict） */
     const char *log_reason;     /* 观测：urgent/periodic/wl/pred（静态字符串） */
     DWORD       log_triggers;   /* 观测：GC 触发位并集 */
-    BYTE        post;           /* mig_post_e */
+    mig_post_e  post;           /* 收尾方式（FREE / RETIRE） */
     BYTE        page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     BYTE        plane;          /* 当前 plane（读/写/擦各自迭代） */
     DWORD       stall_ms;       /* 本轮连续「提交不出去」的起点（0 = 未计时） */
@@ -205,13 +207,13 @@ typedef struct mig_handle
     bool        timed_out;      /* true = 本次 job 因 deadline 中止 */
     mig_phase_e timeout_phase;  /* 超时发生的 phase */
     /* 读失败计数**按 plane 的源块**分别记（RISK-GC-01，跨 job 保留）。
-     * ⚠ 判据是「该块整块迁移成功」才清零（mig_finish），**不是**「读到另一页没报错」：
+     * ⚠ 判据是「该块整块迁移成功」才清零（mig_job_finish），**不是**「读到另一页没报错」：
      *   坏页通常在第 N 页，重试时第 0..N-1 页会先成功读一遍；按「任一页成功」清零
      *   会让阈值永不达到 ⇒ 每轮重选同一 victim、永久 abort、容量不再增长。
      *   两个 plane 的块号不同，故计数不能共用一个槽位（交替失败会互相冲掉）。 */
     WORD fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
 
-    WORD job_valid_cw; /* 本 job 起点 victim 的有效 CW 数（mig_finish 日志用） */
+    WORD job_valid_cw; /* 本 job 起点 victim 的有效 CW 数（mig_job_finish 日志用） */
 
     /* 系统性读失败熔断计数：**整块迁移成功（擦除成功）**才清零；连续 mark BAD
      * 达到 MIG_SYSTEMIC_READ_FAIL_MAX ⇒ paused=true。 */
@@ -228,7 +230,9 @@ typedef struct mig_handle
 
     /* ⚠ 源块的全局块号（BST 索引）**不缓存**在 job 里：真值是 victim.plane_blocks[plane]，
      *   快路径（valid_total == 0 ⇒ 直接 ERASE）不经过 READ 阶段，缓存的字段在快路径下
-     *   是 0 ⇒ 擦除收尾会改块 0 的元数据。见 migrate.c 的 mig_src_gblock。 */
+     *   是 0 ⇒ 擦除收尾会改块 0 的元数据。用点在 migrate.c 的
+     *   mig_next_present_plane / mig_read_complete / mig_erase_complete，
+     *   每次用 ftl_gblock() 现算。 */
 
     DWORD migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
     WORD  erased;   /* 本 job 已成功擦除的 plane 数（观测） */
@@ -274,13 +278,13 @@ typedef struct mig_handle
     DWORD gc_write_last_ms; /* total_writes 最近一次变化的时刻（0 = 尚未见过写） */
     bool  host_writing;     /* 最近一次求值的 host 写流判定 */
 
-    bool  gc_no_gain;        /* 最近一次空间 GC 结论：没有值得回收的 victim */
-    BYTE  gc_nogain_mode;    /* 产生该结论的 gc_benefit_mode_e（BYTE 存枚举，省 RAM） */
-    DWORD gc_nogain_ms;      /* 结论时刻（退避用） */
-    DWORD gc_nogain_writes;  /* 结论时的 *total_writes 快照 */
-    WORD  gc_nogain_free;    /* 结论时的 free_count 快照 */
-    WORD  gc_best_valid_pct; /* 最近一次扫描的域内最低有效率（0..100，观测） */
-    BYTE  gc_last_mode;      /* 最近一次实际使用的 gc_benefit_mode_e（观测） */
+    bool              gc_nogain;         /* 最近一次空间 GC 结论：没有值得回收的 victim */
+    gc_benefit_mode_e gc_nogain_mode;    /* 产生该结论的模式 */
+    DWORD             gc_nogain_ms;      /* 结论时刻（退避用） */
+    DWORD             gc_nogain_writes;  /* 结论时的 *total_writes 快照 */
+    WORD              gc_nogain_free;    /* 结论时的 free_count 快照 */
+    WORD              gc_best_valid_pct; /* 最近一次扫描的域内最低有效率（0..100，观测） */
+    gc_benefit_mode_e gc_last_mode;      /* 最近一次实际使用的模式（观测） */
 
     /* ── GC 会话观测（per-instance；跨 job 保留，[GC  ] end 后清零）──
      * 一次会话 = 从首个成功启动的 GC job 起，到连续 GC_SESSION_IDLE_MS 无 GC
@@ -348,19 +352,19 @@ typedef struct
 {
     ftl_mod_status_t base;
 
-    mig_phase_e phase;    /* 观测；外部不要据此驱动 */
-    mig_kind_e  kind;     /* GC / WL / PREDICT */
-    WORD        migrated; /* 本次 job 已搬 CW 数 */
-    WORD        erased;   /* 本次 job 已擦 plane 数 */
-    bool        aborted;
-    bool        erase_failed;
-    bool        timed_out;
-    mig_phase_e timeout_phase;
-    DWORD       reclaimed;  /* 累计成功回收 SB 数（单调） */
-    DWORD       novictim;   /* 累计「触发但选不出 victim」次数（含 no-gain） */
-    DWORD       nogain;     /* 其中「有候选但收益不足」的次数（单调） */
-    BYTE        gc_mode;    /* 最近一次使用的 gc_benefit_mode_e（0=off/1=idle/2=emg） */
-    bool        gc_no_gain; /* 最近一次空间 GC 结论 = 无收益 victim */
+    mig_phase_e       phase;    /* 观测；外部不要据此驱动 */
+    mig_kind_e        kind;     /* GC / WL / PREDICT */
+    WORD              migrated; /* 本次 job 已搬 CW 数 */
+    WORD              erased;   /* 本次 job 已擦 plane 数 */
+    bool              aborted;
+    bool              erase_failed;
+    bool              timed_out;
+    mig_phase_e       timeout_phase;
+    DWORD             reclaimed; /* 累计成功回收 SB 数（单调） */
+    DWORD             novictim;  /* 累计「触发但选不出 victim」次数（含 no-gain） */
+    DWORD             nogain;    /* 其中「有候选但收益不足」的次数（单调） */
+    gc_benefit_mode_e gc_mode;   /* 最近一次使用的模式（0=off/1=idle/2=emg） */
+    bool              gc_nogain; /* 最近一次空间 GC 结论 = 无收益 victim */
 } mig_status_t;
 
 /*

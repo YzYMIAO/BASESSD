@@ -33,7 +33,7 @@ struct ftl_context {
     uint8_t               md_load_failed;     // Directory 加载失败（RISK-BOOT-09）
     uint8_t               l2p_defer;          // L2P region 加载在飞（drain 不计卡死）
     bg_scheduler_t        bg;                 // 后台调度器（10 项任务）
-    migrate_handle_t     *migrate_handle;     // GC/WL/predict job + 自持节拍/计数（Phase 1.5）
+    mig_handle_t     *mig_handle;     // GC/WL/predict job + 自持节拍/计数（Phase 1.5）
     read_recovery_handle_t read_recovery_handle; // RR job 状态机 + 端口
     uint8_t              *rr_page_scratch;    // 恢复整页暂存（Phase 1.5 挂 storage）
 };
@@ -229,7 +229,7 @@ bool         ftl_op_is_in_dispatch(void);
 | `FTL_OP_HOST_IO` | `ftl_host_io_callback` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
 | `FTL_OP_JOURNAL` | `ftl_journal_callback` | `ftl->journal` | 阶段 2 |
 | `FTL_OP_READ_RECOVERY` | `ftl_read_recovery_callback` | `&ftl->read_recovery_handle` | 阶段 3 |
-| `FTL_OP_GC` / `FTL_OP_WL` | `ftl_migrate_callback` | `&ftl->migrate_handle` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
+| `FTL_OP_GC` / `FTL_OP_WL` | `ftl_migrate_callback` | `&ftl->mig_handle` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
 | `FTL_OP_L2P` | `ftl_l2p_callback` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
 | `FTL_OP_CHECKPOINT` | `ftl_checkpoint_callback` | `ftl->checkpoint_handle` | 阶段 6 |
 | `FTL_OP_BBT` | `ftl_bbt_callback` | `&ftl->alloc` | 阶段 7 |
@@ -969,14 +969,14 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
     Phase 3 ── 三级后台模式（判据 = 未决命令数近似空闲度，非"本轮有无提交 NAND"）
     ⚠ `bg_suspend` 置位（`bbt --erase` 后）⇒ 整体跳过 Phase 3，直接 return。
-    ⚠ v0.75 阶段 3/4 起：rr_handle() / migrate_handle() **任何档位都要跑**——RR 的 host 读
+    ⚠ v0.75 阶段 3/4 起：rr_handle() / mig_handle() **任何档位都要跑**——RR 的 host 读
       在等结果，搬移 job 可能是在 BUSY 档被写路径紧急 GC 起的，不占后台带宽预算。
     ⚠ v0.75 阶段 6 起：checkpoint_handle() 在**三档之外**先跑一次（Phase 3 首）——CP job
       可能在 BUSY 档被紧急水位起，后续阶段要跨档位走完；只在起它的那一档推进会把 job 钉死。
     ├── 三档之前（must-run 正确性关键集，无条件每轮跑）
     │   ├── checkpoint_handle(ADVANCE)       ← 推进在飞 CP（每轮只推进一次）
     │   ├── rr_handle()                      ← 推进在飞 RR
-    │   ├── migrate_handle()                 ← 推进在飞搬移 + 自持节拍（GC/WL/predict）
+    │   ├── mig_handle()                 ← 推进在飞搬移 + 自持节拍（GC/WL/predict）
     │   ├── metadata_handle()                ← 目录整理
     │   ├── journal_handle(ERASE_ONLY)       ← 新环形块没擦不能写
     │   └── checkpoint_handle(EMERGENCY)     ← Journal ≥95%
@@ -994,7 +994,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
         └── l2p_handle(cache, dim)            ← max_kick = 1
 ```
 
-> `migrate_handle` 的自持节拍：GC 10ms / WL 5s / predict 1s（仅 IDLE）；
+> `mig_handle` 的自持节拍：GC 10ms / WL 5s / predict 1s（仅 IDLE）；
 > `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
 > `migrate_trigger(GC_URGENT)` 只登记，下一轮由 must-run 启动。
 
@@ -1066,7 +1066,7 @@ include/ftl/
 ├── allocator.h                  # Allocator + Super Block + OP/Spare 池
 ├── journal.h                    # Journal + 四层保护
 ├── gc.h                         # GC 触发条件 + 选 victim（搬移在 migrate.h）
-├── migrate.h                    # 搬移 job（migrate_handle_t / mig_begin_* / migrate_handle），v0.75 阶段 4
+├── migrate.h                    # 搬移 job（mig_handle_t / mig_gc_begin / mig_wl_begin / mig_predict_begin / mig_handle），v0.75 阶段 4
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
 ├── ftl_op.h                     # ctx 旁表 + 路由 + op tag/回调 + CQ 排空（v0.75）

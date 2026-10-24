@@ -1594,14 +1594,14 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 
 ```mermaid
 flowchart TD
-    W1["mig_handle 自持节拍"] --> W2["mig_begin_wl（内部）"]
+    W1["mig_handle 自持节拍"] --> W2["mig_wl_begin（内部）"]
     W2 --> W3{"间隔门 total_writes 不低于 1000"}
     W3 -- "否" --> W0["不触发"]
     W3 -- "是" --> W4{"max_free_ec 减 min_used_ec 不低于 WL_THRESHOLD"}
     W4 -- "否" --> W0
     W4 -- "是" --> W5["wl_select_victim 最冷 used SB valid 不低于 70 百分比"]
     W5 -- "无" --> W0
-    W5 -- "有" --> W6["摘掉 cold SB 后 mig_start WL 目标取擦除最多的空闲块"]
+    W5 -- "有" --> W6["摘掉 cold SB 后 mig_job_start WL 目标取擦除最多的空闲块"]
     W6 --> W7["擦完 归还 Free Pool"]
 ```
 
@@ -1620,7 +1620,7 @@ flowchart TD
    `total_writes ≥ WL_MIN_WRITES`，求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
    搬移不改变擦除计数 ⇒ 差值不足时必须停止（否则是纯写放大，RISK-WL-08）。
 4. **选 victim**：与触发同门限，选平均擦除次数最小的 SB；平手看 valid_cw / read_count。
-5. **搬移**：`mig_begin_wl` 先 `alc_super_prepare_wl_destination` 摘掉当前 cold SB，再起
+5. **搬移**：`mig_wl_begin` 先 `alc_super_prepare_wl_destination` 摘掉当前 cold SB，再起
    job；目标页对走 `alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`（每 plane 取擦除最多的空闲块，无 OP
    兜底）。收尾 `MIG_POST_FREE`：擦完归还 Free Pool，源块由动态 WL 优先选中写入。
 
@@ -3311,7 +3311,7 @@ flowchart TB
   （`gc_read_page_with_lba` / `gc_decode_cw_lba`）。
 - **`migrate.c`（引擎）**：`mig_handle_t` 状态机；GC / 静态 WL / 慢死预测共用一台。
 - **不做**：不决定块元数据（allocator）；不决定坏块（BBT）；不做读恢复（RR）。
-- **入口**：`mig_handle`（自持节拍，内部才调 `mig_begin_gc/wl/predict`）；`mig_trigger(GC_URGENT)` 只登记紧急原因；完成服务
+- **入口**：`mig_handle`（自持节拍，内部才调 `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin`）；`mig_trigger(GC_URGENT)` 只登记紧急原因；完成服务
   `ftl_migrate_callback`（GC 与 WL 共用）。
 
 #### 3.13.3 结构与不变量
@@ -3364,7 +3364,7 @@ flowchart TB
     （`RISK-GC-11`）。重建条目无法得知真实写指针时按满 64 处理，由 FC 的 `BLANK` 识别兜底。
 12. **系统性读失败熔断**：连续 `MIG_SYSTEMIC_READ_FAIL_MAX`（8）个不同 victim 被标 BAD
     ⇒ `paused = true`，停止 GC/WL/predict 直到重启。计数与 `paused` **跨 job 保留**
-    （`mig_start` 的 memset 不得清掉），只在**整块迁移成功**时清零；逐 plane 擦除成功
+    （`mig_job_start` 的 memset 不得清掉），只在**整块迁移成功**时清零；逐 plane 擦除成功
     不算整块成功（`RISK-GC-10`）。
 13. **空间 GC 必须有收益判据**（`RISK-GC-13`）：只按水位无脑搬 96–98% 有效的块会让
     GC 在满盘只读时无限空转（实测 `free` 卡在 10–12、校验速度 297→192 KB/s）。
@@ -3375,7 +3375,7 @@ flowchart TB
     80% / 1% / 500 ms / 2 s 均为本仓自拟。过滤在 cost 评分**之前**做（否则可能因为
     「最差的块仍太有效」而漏掉更稀疏的候选）。
 14. **无收益结论要退避，且能变成 NO_SPACE**：`GC_SELECT_NOT_WORTHWHILE` ⇒ 置
-    `gc_no_gain` 并按 `GC_NO_GAIN_BACKOFF_MS` 退避（有新建写 / 进入紧急水位 / 时钟缺失
+    `gc_nogain` 并按 `GC_NOGAIN_BACKOFF_MS` 退避（有新建写 / 进入紧急水位 / 时钟缺失
     时立即重扫）；紧急水位下目的页也分配不到（`no free block`）同样置 no-gain。
     写路径在失速预算耗尽后据此报 `IO_ERROR`（不再无限 `FTL_AGAIN`）。
 
@@ -3397,9 +3397,9 @@ flowchart TB
 | `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
 | `free < 32` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
 
-`no-gain` 结论由 `mig_handle_t.gc_no_gain` 保存，退避 `GC_NO_GAIN_BACKOFF_MS`（500 ms）；
+`no-gain` 结论由 `mig_handle_t.gc_nogain` 保存，退避 `GC_NOGAIN_BACKOFF_MS`（500 ms）；
 新建写、进入紧急水位、或时钟缺失（`now_ms == 0`）时立即重扫。紧急水位下若连目的页都分配
-不到（`mig_abort("no free block")`）同样记 `no-gain`——否则会陷入「选中 → 分配失败 →
+不到（`mig_job_abort("no free block")`）同样记 `no-gain`——否则会陷入「选中 → 分配失败 →
 abort」的循环。写路径的 `ftl_drain_group` 在连续无进展后把组判为 `IO_ERROR`，并打
 `[FTL] no space: GC no-gain` 归因行。
 
@@ -3428,7 +3428,7 @@ flowchart TD
     FLUSH["MIG_FLUSH_JRN"]
     ERASE["MIG_ERASE"]
     DONE["MIG_DONE"]
-    IDLE -- "mig_begin 启动" --> READ
+    IDLE -- "mig_gc_begin / mig_wl_begin / mig_predict_begin 启动" --> READ
     READ -- "读完当前页所有 plane" --> RS
     RS -- "反查 L2P 得 cw_bitmap" --> WRITE
     RS -- "本页全空洞" --> WRITE
@@ -3443,8 +3443,8 @@ flowchart TD
 
 #### 3.13.6 关键流程
 
-1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_should_trigger`）；`mig_begin_gc`（内部）只
-   `gc_select_victim` → `mig_start(GC)`（post 由 kind 决定）。
+1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_should_trigger`）；`mig_gc_begin`（内部）只
+   `gc_select_victim` → `mig_job_start(GC)`（post 由 kind 决定）。
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
    记 `rr_record_ecc` / `read_count`（慢死预测闭环）。**读错误 ⇒ 中止**（该 plane
    源块的 `fail_count++`；累计 3 次标 BAD + 摘除 Closed plane）；只有“无错误 +
@@ -3531,7 +3531,7 @@ XOR/RAID。**本仓器件/配置下前两级无效**：MT29F4G08 的 read-retry 
 
 - **做**：读失败后的异步恢复状态机；per-block ECC 趋势（`rr` 在 BST）；预测巡检；
   退役（RETIRED）。
-- **不做**：不做 XOR/RAID 恢复（未实现）；不执行搬移（调用 `mig_begin_predict`）；
+- **不做**：不做 XOR/RAID 恢复（未实现）；不执行搬移（调用 `mig_predict_begin`）；
   不决定坏块持久化（BBT）。
 - **托管模型**：host 读失败时，把 pending 子操作托管给 RR job（保留 pending 项、
   不递减组在飞数）；job 一次只提交一条命令，完成由 `ftl_read_recovery_callback` 推进。
@@ -3587,7 +3587,7 @@ flowchart TD
 5. `PLANE_END`：成功则把 scratch 按 CW 偏移拷回 host buffer；失败则清零并按失败结算。
 6. `FINISH`：释放 pending 槽 + 组聚合；失败且确认不可恢复 ⇒ `bbt_mark_bad` + 数据迁移。
 7. **预测巡检**：`rr_predictive_scan` 找 health ≥ CRITICAL 的 Closed 块 →
-   `mig_begin_predict`（搬空并退役）。
+   `mig_predict_begin`（搬空并退役）。
 
 #### 3.14.6 失败语义
 
@@ -4084,7 +4084,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A["mig_handle 的自持求值（GC/WL/predict）"] --> B["选 victim"]
-    B --> C["mig_begin_ 拷贝 victim,清 job"]
+    B --> C["mig_job_start 拷贝 victim,清 job"]
     C --> D{"valid_total 等于 0"}
     D -- "是" --> E["快到 MIG_ERASE"]
     D -- "否" --> F["MIG_READ 逐页逐 plane 读"]
@@ -4394,8 +4394,8 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | Metadata | append_slot 只取槽；commit 才登记 | `l2p_cache` | Directory 指向未写页 |
 | Metadata | Anchor 先于 victim 擦除 | `md_job` phase | 掉电后映射永久丢失 |
 | Metadata | 固定层永不写 | `append_slot` | 反向映射到擦除态页 |
-| Migrate | 写新页 → 改 L2P/Journal → F10 → 擦旧块 | `mig_step` phase | 掉电丢数据 |
-| Migrate | 分配不到目标页 ⇒ 不擦 victim | `mig_abort` | 擦掉未搬的有效页 |
+| Migrate | 写新页 → 改 L2P/Journal → F10 → 擦旧块 | `mig_job_step` phase | 掉电丢数据 |
+| Migrate | 分配不到目标页 ⇒ 不擦 victim | `mig_job_abort` | 擦掉未搬的有效页 |
 | RR | 托管项不递减组 outstanding | `rr_handle` / `ftl_host_io_callback` | 组提前完成/丢通知 |
 | wbuf | owners 逐组记录，完成逐组递减 | `wb_flush` / pending | 组完成计数错乱 |
 | Service | pump 每轮一次；每实例都 service | `main.c` | NAND 预算重复/实例饿死 |

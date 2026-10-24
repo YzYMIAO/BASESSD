@@ -413,7 +413,7 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
  *
  * 保证 WL 的第一次分配会**新开**一个 high-wear SB（否则会续写动态 WL 选出的
  * 低擦除块）。已写过 ⇒ 关闭入 Closed 列表；未写过 ⇒ 块归还 Free Pool。
- * 只有 `mig_begin_wl` 在 host 空闲时调用。
+ * 只有 `mig_wl_begin` 在 host 空闲时调用。
  */
 void alc_super_prepare_wl_destination(alc_t *alloc);
 

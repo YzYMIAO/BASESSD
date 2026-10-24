@@ -116,7 +116,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `ftl/` | `allocator.c` | Tier 1 | **24** | ✅（2026-10-17 §二十七 补做） |
 | | `power_failure_recovery.c` | Tier 1 | **34**（对外入口 `ftl_media_check_format`/`ftl_media_format`/`ftl_boot_recovery` + 恢复/重建/Carve 内部前置条件） | ✅（2026-10-19 掉电恢复审查） |
 | | `wear_leveling.c` | Tier 1 | **0** | ⚠️ 见下注 2 |
-| | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_migrate_callback` 的 `completion`/`ctx` 非空与 `ctx == &ftl->migrate_handle`、`mig_begin_predict` 的 `closed_idx` 界内、`mig_finish` 的单飞行门） | **10** | ✅ |
+| | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_migrate_callback` 的 `completion`/`ctx` 非空与 `ftl->mig_handle == m`、`mig_predict_begin` 的 `closed_idx` 界内、`mig_job_finish` 的单飞行门） | **10** | ✅ |
 | | `pending.c` | Tier 2：6×`ftl == NULL` | **6**，但**全是下标越界**（`index < FTL_PENDING_MAX` / `gi < FTL_GROUP_MAX`），**没有 `ftl == NULL`** | ⚠️ 措辞与实现不符（见下注 3） |
 | | `read_recovery.c` | Tier 2：`rr_record_ecc`/`rr_predictive_scan`/`rr_retire_block`/`rr_handle` | **10** | ✅ |
 | `controller/` | `controller.c` | Tier 1 | **6**（`controller != NULL`、ch/ce/lun 界、路由结果 `tftl`/`fftl`） | ✅ |
@@ -1161,7 +1161,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `l2p_cache.c` | 12 | 8 | 含 `line_idx` 界内断言；`line == NULL`（cache miss）与依赖态判空**保留** |
 | `bbt.c` | 7 | 7 | 5 转 + 2 删（`bbt_factory_scan` / `bbt_load` 同文件调用者） |
 | `ftl_fc_interface.c` | 7 | 6 | 全为**出参**（FTL↔FC 边界）；`cmd == NULL`（池空，判据 3）**保留** |
-| `migrate.c` | 4 | 5 | `mig_begin_*`/`migrate_handle` 转；`mig_start`（static）删 |
+| `migrate.c` | 4 | 5 | `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin` / `mig_handle` 转；`mig_job_start`（static）删 |
 | `power_failure_recovery.c` | 4 | 9 | 3 个**对外入口**转；6 个同文件内部路径函数删 |
 | `bg_scheduler.c` | 3 | 2 | 任务表项判空 |
 | `ftl.c` | 3 | 3 | `ftl_init` + 本轮补的 `ftl_flush` / `ftl_trim`（C5：唯一调用点已 `ASSERT`） |

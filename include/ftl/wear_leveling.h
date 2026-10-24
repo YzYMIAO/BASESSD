@@ -87,7 +87,7 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim);
 
 /*
  * ⚠ 搬移在 `ftl/migrate.h` 的异步 job 里完成：GC 与 WL 共用同一台引擎，
- *   `mig_begin_wl` / `mig_begin_predict` 是这两个站点的入口（本文件只留触发判定与选块策略）。
+ *   `mig_wl_begin` / `mig_predict_begin` 是这两个站点的入口（本文件只留触发判定与选块策略）。
  */
 
 /*
