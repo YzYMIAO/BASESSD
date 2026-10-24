@@ -3031,7 +3031,8 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 
 #### 3.11.2 职责与边界
 
-**实现位置**：`src/ftl/wbuf.c`（`wb_handle` typed 入口 + `wb_has/read` 查询 + `static wb_program_page`），
+**实现位置**：`src/ftl/wbuf.c`（`wb_handle` typed 入口 + `wb_has/read` 查询 +
+`static wb_flush`（编程）/ `wb_append`（攒入）），
 结构体与接口声明在 `include/ftl/wbuf.h`。它是 FTL 层唯一**独立成文件**的子模块中
 最晚抽出的一支（其余子模块各自成文件）；`ftl.c` 只调用其接口，不碰 `wb_handle_t` 内部。
 
@@ -3095,22 +3096,26 @@ flowchart TD
     G --> H
 ```
 
-**`wb_handle(FLUSH)`**（资源获取**按有无归还路径排序**：先查余量、再取可释放的命令槽、
-最后取不可归还的页对 —— 见下）：
+**`wb_handle(FLUSH)`**（资源获取顺序：先做**不占资源**的余量检查，再取页对；
+命令/desc/buffer 由 `ftl_async_write_pair_cmd` 在页对之后分配，失败由统一出口归还页对）：
 
 ```text
-① pending 表空间检查（不够 ⇒ FTL_AGAIN；此时未占用任何资源）
-② fc_command_alloc（命令池空 ⇒ FTL_AGAIN；命令槽有 release ⇒ 排在页对之前）
+① host 预算检查 ftl_fc_host_budget_ok()（不足 ⇒ FTL_AGAIN；此时未占用任何资源）
+② pending 表余量检查（pend_slot_get_count >= FTL_PENDING_MAX ⇒ FTL_AGAIN）
 ③ alc_super_open_alloc_pair(ALC_SUPER_ALLOC_HOT, pba)
-     失败 ⇒ 释放命令槽 + mig_gc_request_urgent() + FTL_AGAIN
-④ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
-⑤ wb_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_pair_cw（plane-major pair 镜像）
-⑥ pend_alloc：owners、op=WRITE、n_cw、cw_bitmap、lba=base、new_pba/new_pba1
-⑦ ftl_op_submit(FTL_OP_HOST_IO)
-⑧ 提交成功后才清 wbuf（open=0/occupied=0/owners=0）；打一行 LOGD 观测
+     失败 ⇒ mig_gc_request_urgent() + FTL_AGAIN（未占用资源）
+④ page0 异步写屏障：本页覆盖的 plane 中 page>0 且该 plane 的 page0 未完成
+     ⇒ alc_super_open_rewind_pair + FTL_AGAIN
+⑤ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
+     page0 ⇒ 缺失 plane 补零、write_bitmap = FTL_CACHE_FULL_CW
+⑥ ftl_async_write_pair_cmd：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_pair_cw
+     （plane-major pair 镜像）；命令/desc/buffer 在此分配（失败 ⇒ 错误出口）
+⑦ pend_alloc：逐字段填 owners / op / n_cw / cw_bitmap / lba / new_pba*；pend_validate
+⑧ ftl_op_submit(FTL_OP_HOST_IO)（失败 ⇒ pend_remove + 错误出口）
+⑨ 提交成功后才清 wbuf（open=false / occupied=0 / owners=0）；打一行 LOGD 观测
 
-错误出口（④~⑦ 任一失败，H8 的唯一 goto 出口）：
-     fc_command_release（幂等）+ alc_super_open_rewind_pair（归还那对页）
+错误出口（④~⑧ 任一失败，H8 的唯一 goto 出口）：
+     fc_command_release（cmd 非空时）+ alc_super_open_rewind_pair（归还那对页）
      缓冲原样保留 ⇒ 下轮重试
 ```
 

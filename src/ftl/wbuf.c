@@ -7,11 +7,11 @@
  *   「逐子操作分配整对页」的浪费（背景与不变量见 wbuf.h 文件头）。
  *
  * 文件结构：
- *   1. 槽位位 / 查询    wb_lba_bit / wb_has / wb_read（static 辅助）
- *   2. 攒入与编程       wb_append / wb_flush / wb_program_page（static）
+ *   1. 槽位位 / 查询    wb_lba_bit（static）/ wb_has / wb_read
+ *   2. 攒入与编程       wb_flush / wb_append（static）
  *   3. 丢弃 / 复位      wb_drop / wb_reset（static）
  *   4. 空闲 flush       wb_maybe_flush_idle（static）
- *   5. typed 入口       wb_handle（事件分发 + 状态上报）
+ *   5. typed 入口       wb_init / wb_status_fill（static）/ wb_handle
  *
  * ⚠ 模块边界：本文件不 include ftl.h。只持有 allocator / pending 表 / migrate handle
  *   三个窄指针，调用它们的 owner API。
@@ -42,7 +42,7 @@ static BYTE wb_lba_bit(DWORD lba)
 
 bool wb_has(const wb_handle_t *h, DWORD lba)
 {
-    if (h->open == 0U)
+    if (!h->open)
     {
         return false;
     }
@@ -69,11 +69,9 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
 
 /* ── 2. 攒入与编程 ── */
 
-static ftl_status_e wb_flush(wb_handle_t *h);
-
 static ftl_status_e wb_flush(wb_handle_t *h)
 {
-    if ((h->open == 0U) || (h->occupied == 0U))
+    if ((!h->open) || (h->occupied == 0U))
     {
         return FTL_OK; /* 空：nothing to do */
     }
@@ -196,7 +194,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n", h->base, (unsigned)n_cw, (unsigned)write_planes, h->owners);
 
     /* 提交成功才清缓冲 */
-    h->open     = 0U;
+    h->open     = false;
     h->occupied = 0U;
     h->owners   = 0U;
     h->base     = 0U;
@@ -220,7 +218,7 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
     const DWORD window = ftl_lba_pair_base(lba);
 
     /* 换窗口：先把旧窗口编程掉。flush 失败（背压）则本子操作不消费，下轮重试。 */
-    if ((h->open != 0U) && (h->base != window))
+    if ((h->open) && (h->base != window))
     {
         ftl_status_e st = wb_flush(h);
 
@@ -230,9 +228,9 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
         }
     }
 
-    if (h->open == 0U)
+    if (!h->open)
     {
-        h->open     = 1U;
+        h->open     = true;
         h->base     = window;
         h->occupied = 0U;
         h->owners   = 0U;
@@ -255,7 +253,7 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
 
     /* 满：尝试立即编程（失败则留给 idle flush 重试；append 本身已成功 ⇒ 仍返 OK，
      * 否则调用者会重发同一子操作 ⇒ 重复计数）。 */
-    if (h->occupied == ((1U << FTL_LBA_PER_PAIR) - 1U))
+    if (h->occupied == FTL_CACHE_FULL_CW)
     {
         (void)wb_flush(h);
     }
@@ -282,7 +280,7 @@ static bool wb_drop(wb_handle_t *h, DWORD lba)
          * ⚠ 本动作是 wbuf 的**内部不变量**（occupied 清空 ⟺ owners 必须结算），
          *   收在这里，不由调用者手工维护（CLAUDE.md §3.1）。 */
         pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_OK);
-        h->open   = 0U;
+        h->open   = false;
         h->owners = 0U;
         h->base   = 0U;
     }
@@ -299,7 +297,7 @@ static void wb_reset(wb_handle_t *h)
         pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_IO_ERROR);
     }
 
-    h->open     = 0U;
+    h->open     = false;
     h->occupied = 0U;
     h->owners   = 0U;
     h->base     = 0U;
@@ -309,7 +307,7 @@ static void wb_reset(wb_handle_t *h)
 
 static void wb_maybe_flush_idle(wb_handle_t *h)
 {
-    if (h->open == 0U)
+    if (!h->open)
     {
         return;
     }
@@ -326,10 +324,8 @@ static void wb_maybe_flush_idle(wb_handle_t *h)
 
 void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate)
 {
-    ASSERT(alloc != NULL);
-    ASSERT(pending != NULL);
-    ASSERT(migrate != NULL);
-
+    /* 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
+     * （alloc / pending 为实例内嵌对象的地址，migrate 由同一审计保证）⇒ 不重复检查。 */
     memset(h, 0, sizeof(*h));
     h->alloc   = alloc;
     h->pending = pending;
@@ -339,17 +335,17 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_han
 static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
 {
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 Phase 2.5 驱动 */
-    out->base.wants_run = (h->open != 0U) || (h->occupied != 0U);
+    out->base.wants_run = h->open || (h->occupied != 0U);
     out->base.progress  = h->flushed_pages;
     out->base.next_ms   = 0U;
     out->base.error     = h->error;
 
-    if (h->error != (int32_t)FTL_OK)
+    if (h->error != FTL_OK)
     {
         out->state      = WBUF_STATE_FAILED;
         out->base.state = FTL_MODULE_FAILED;
     }
-    else if (h->open != 0U)
+    else if (h->open)
     {
         out->state      = WBUF_STATE_OPEN;
         out->base.state = FTL_MODULE_RUNNING;
@@ -360,12 +356,11 @@ static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
         out->base.state = FTL_MODULE_IDLE;
     }
 
-    out->open          = (h->open != 0U);
+    out->open          = h->open;
     out->occupied      = h->occupied;
     out->owners        = h->owners;
     out->flushed_pages = h->flushed_pages;
     out->drop_count    = h->drop_count;
-    out->timed_out     = false;
 }
 
 ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_info_t *info, wb_status_t *out)
@@ -375,7 +370,7 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_inf
 
     ftl_status_e st = FTL_OK;
 
-    switch ((wb_trigger_kind_e)trigger->kind)
+    switch (trigger->kind)
     {
         case WBUF_TRIGGER_APPEND:
             st = wb_append(h, trigger->gi, trigger->lba, trigger->data, trigger->n);
@@ -402,7 +397,7 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_inf
             break;
     }
 
-    h->error = (st == FTL_ERROR) ? (int32_t)FTL_ERROR : (int32_t)FTL_OK;
+    h->error = (st == FTL_ERROR) ? FTL_ERROR : FTL_OK;
 
     if (out != NULL)
     {

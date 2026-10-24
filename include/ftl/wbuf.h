@@ -37,6 +37,26 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* ── 类型 ── */
+
+/* 触发类型（wb_handle 的事件）。 */
+typedef enum
+{
+    WBUF_TRIGGER_APPEND = 0,       /* 把窗口内 n 个 CW 攒进缓冲 */
+    WBUF_TRIGGER_FLUSH,            /* 把当前缓冲页编程到 NAND */
+    WBUF_TRIGGER_DROP,             /* 丢弃某个 LBA（TRIM） */
+    WBUF_TRIGGER_RESET,            /* 丢弃整页并按写失败结算 owners */
+    WBUF_TRIGGER_MAYBE_FLUSH_IDLE, /* 无后续 append 时编程 */
+} wb_trigger_kind_e;
+
+/* 观测状态（wb_status_t.state）。 */
+typedef enum
+{
+    WBUF_STATE_IDLE = 0,
+    WBUF_STATE_OPEN,   /* 持有一个窗口，尚未 flush */
+    WBUF_STATE_FAILED, /* 最近一次操作硬失败 */
+} wb_state_e;
+
 /* ── 写缓冲状态（handle）── */
 typedef struct
 {
@@ -57,16 +77,7 @@ typedef struct
     struct mig_handle *migrate;
 } wb_handle_t;
 
-/* ── typed 入口 ── */
-typedef enum
-{
-    WBUF_TRIGGER_APPEND = 0,       /* 把窗口内 n 个 CW 攒进缓冲 */
-    WBUF_TRIGGER_FLUSH,            /* 把当前缓冲页编程到 NAND */
-    WBUF_TRIGGER_DROP,             /* 丢弃某个 LBA（TRIM） */
-    WBUF_TRIGGER_RESET,            /* 丢弃整页并按写失败结算 owners */
-    WBUF_TRIGGER_MAYBE_FLUSH_IDLE, /* 无后续 append 时编程 */
-} wb_trigger_kind_e;
-
+/* 触发参数。 */
 typedef struct
 {
     wb_trigger_kind_e kind;
@@ -77,14 +88,7 @@ typedef struct
     WORD        gi;   /* APPEND：贡献组号 */
 } wb_trigger_t;
 
-typedef enum
-{
-    WBUF_STATE_IDLE = 0,
-    WBUF_STATE_OPEN,     /* 持有一个窗口，尚未 flush */
-    WBUF_STATE_FLUSHING, /* 一页正在编程（同步提交即返回；由完成服务收尾） */
-    WBUF_STATE_FAILED,   /* 最近一次操作硬失败 */
-} wb_state_e;
-
+/* 状态上报。 */
 typedef struct
 {
     ftl_mod_status_t base;
@@ -95,8 +99,9 @@ typedef struct
     DWORD      owners;
     DWORD      flushed_pages;
     DWORD      drop_count;
-    bool       timed_out;
 } wb_status_t;
+
+/* ── 接口 ── */
 
 /* wb_init - 绑定窄上下文并复位 handle。 */
 void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
@@ -121,7 +126,7 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
  * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。 */
 static inline bool wb_is_idle(const wb_handle_t *h)
 {
-    return (h->open == 0U) && (h->occupied == 0U);
+    return (!h->open) && (h->occupied == 0U);
 }
 
 #endif /* FTL_WBUF_H */
