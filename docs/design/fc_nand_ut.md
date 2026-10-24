@@ -328,7 +328,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 #### 测试用例（16 个，其中 11 条地址随机化）
 
-> **2026-10-23 上板**：`test /fc-nand/` **56/56**（3 skipped，928.61 ms）；
+> **2026-10-23 上板**：`test /fc-nand/` **56/56**（3 skipped，928.61 ms）；新增 `/speed/fc_nand_rw` 2 次运行（破坏性，未上板），不计入该基线；
 > `block_cache_ops` 62.16 ms、`block_cache_multi_plane` 114.91 ms，均 OK。
 
 | 测试函数 | 场景 | 验证点 |
@@ -592,6 +592,24 @@ int ut_run_all(int argc, char *argv[])
 ```
 
 配套头文件 `tests/unit/ut_main.h` 声明该接口供 `usart.c` 包含。
+
+### 4.1.1 速度测试（`/speed/fc_nand_rw`，破坏性）
+
+`tests/unit/test_speed.c` 的 FC 段：用 FC 公共接口异步读写从 `BLOCKS_PER_PLANE/2`
+（1024）起的 100 个 per-plane 块（每条 multi-plane 命令覆盖两 plane，共 25 MiB），
+循环 `block → ch → ce → lun → page`，在途命令顶到 FC 池上限（约 16 条页命令）。
+
+- 参数：`mode=normal`（OP 31/30）或 `mode=cache`（两 plane cache 写 49/44/48、
+  cache 读 45/46/47）；
+- 计时：每块 DWT 累加，擦除单列、不计入写速度；结果只在 `--log-visible info` 显示；
+- **破坏性**：直接擦写 1024.. 的原始块，会破坏 live FTL 的用户映射。跑完 FC-only
+  必须 CLI `format` + POR；不要和裸 `test`（含 FTL）混跑后再依赖 FTL 状态。
+- 运行：`test --list /speed/` → `test --log-visible info /speed/fc_nand_rw`。
+- **板端 2026-10-24（23:22 镜像）**：normal 写 1671 / 读 1569 KB/s；cache 写 1795 /
+  读 1620 KB/s；erase 43 ms（不计入速度），2/2 通过（23:22 镜像；与 FTL 侧合计 4/4）。
+  同一 `/speed/` 根下还有 FTL 侧的 `/speed/ftl_rw`（见 `ftl_ut_design.md` §4.6）。
+- **板端 2026-10-25（release -O2）**：normal 写 3670 / 读 3533 KB/s；cache 写 4319 /
+  读 3591 KB/s（与 debug 相比全线 2.2–2.4×）；`/speed/` FC+FTL 合计 4/4。
 
 ### 4.2 UART CLI 集成
 

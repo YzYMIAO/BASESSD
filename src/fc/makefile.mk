@@ -9,6 +9,10 @@ ifeq ($(FC_NAND_TEST_ENABLE),1)
 #    ut_run_all；摘掉它会在链接期出现 undefined symbol。
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/framework/munit.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
+# 速度测试：一份源、两段实现（UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择）。
+# ⚠ 只在这里添加一次——src/ftl/makefile.mk 不再添加，否则 UT=（两者）时对象重复、
+#    套件数组符号重复定义。
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_speed.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/framework
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 CFLAGS += -DFC_NAND_TEST_ENABLE

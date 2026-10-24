@@ -42,6 +42,11 @@ extern MunitTest g_ftl_media_e2e_tests[];
 
 #endif /* UT_FTL_ENABLE */
 
+#if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
+/* 速度测试（test_speed.c）：/speed/fc_nand_rw 与 /speed/ftl_rw 由 UT 范围决定。 */
+extern MunitTest g_speed_tests[];
+#endif
+
 /* ⚠ 子套件前缀**必须以 '/' 结尾**：munit 只把前缀和用例名**首尾相接**
  * （munit.c:1285 下探子套件、:1103 拼用例名），**不补分隔符**。根前缀已带尾斜杠；
  * 子套件漏了就会打印成 "/fc-nand/lifecycleblock_multi_plane"，且过滤串
@@ -108,6 +113,10 @@ static MunitSuite g_ut_root_suite = {
                    },
 #endif /* UT_FTL_ENABLE */
 
+#if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
+                   /* 板端速度测试（破坏性；两条用例按 UT 范围出现） */
+                   {(char *)"/speed/", g_speed_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+#endif
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
     1,

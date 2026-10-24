@@ -34,6 +34,7 @@
 
 /* munit 打印用例前缀时不带换行；第一条证据行需要先给它收尾。 */
 static bool s_ev_line_started = false;
+static bool s_ev_suppressed   = false;
 
 void ftl_ut_trace_begin(void)
 {
@@ -42,9 +43,14 @@ void ftl_ut_trace_begin(void)
     s_ev_line_started = false;
 }
 
+void ftl_ut_trace_suppress(bool suppressed)
+{
+    s_ev_suppressed = suppressed;
+}
+
 static void ftl_ut_trace_emit(MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
-    if (!munit_log_visible(level))
+    if (s_ev_suppressed || !munit_log_visible(level))
     {
         return;
     }

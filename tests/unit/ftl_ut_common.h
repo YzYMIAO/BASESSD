@@ -11,6 +11,9 @@
 /* 证据输出（与 FC UT 的 [EV] 行同格式）：默认档不输出，info/debug 档可见。 */
 void ftl_ut_trace_begin(void);
 
+/* 临时压低所有 [EV] 输出（速度测试在 format 等准备阶段使用；跑完必须恢复 false）。 */
+void ftl_ut_trace_suppress(bool suppressed);
+
 MUNIT_PRINTF(1, 2)
 void ftl_ut_trace_summary(const char *format, ...);
 

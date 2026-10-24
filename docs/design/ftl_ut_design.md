@@ -1,7 +1,7 @@
 # FTL 单元测试设计（板端）
 
-> 状态：**已落地并上板**（2026-10-24，镜像 22:08:11）：`test /ftl/` **85/85 通过**、61.05 s。
-> 共 **63 个用例函数**（pure 48 + media 15），参数化展开为 85 次运行。
+> 状态：**已落地并上板**（2026-10-24，镜像 22:08:11）：原套件 **85/85 通过**、61.05 s。
+> `/speed/ftl_rw`（板端已通过）不属于 `/ftl/` 树；`/ftl/` 仍为 85 次运行。
 > 剩余未覆盖：M-11 的真介质注入、CP `VERSION_MISMATCH` 分支、真 POR/空白片/NAND 写擦失败注入。
 > 剩余未覆盖：M-11 的**真介质注入**部分（construct 不可读 victim 页）与写/擦失败注入。
 > 多圈 BBT ring 的 reload 选旧 record 已登记 `RISK-BBT-18`；Journal 压力下的 TRIM 持久化时序
@@ -46,6 +46,12 @@
     io/     L2P 驻留行 / GC / WL / RR 策略
   media/
     e2e/    格式化、写读、wbuf、flush、TRIM、模拟重启、GC/WL、BBT
+```
+`/speed/` 根套件（与 FC 侧共用 `test_speed.c`）：
+```
+/speed/
+  fc_nand_rw   FC 原始块 25 MiB 读写（normal / cache；仅 UT=FC 或 both）
+  ftl_rw       FTL host API 25 MiB 读写（normal / cache；仅 UT=FTL 或 both；破坏性）
 ```
 
 > media 侧只用 **一个 `e2e/` 子套件**：用例之间共享一次 format 与 `s_media_ready` 状态，
@@ -234,6 +240,16 @@
 | `format_in_progress_resume` | bbt | — | BBT 置 FORMAT_IN_PROGRESS + 擦 CP 池 → 重启后判 NO_RECORD/继续格式化（RISK-BOOT-04/17 的续做分支）；跑完完整格式化恢复介质 |
 | `cp_corrupt_refuse_format` | cp | — | 擦 CP 池 + 写非 FF 页 → `cp_media_status_probe=IO_ERROR`、`pfr_media_check_format` 拒绝格式化（RISK-BOOT-03） |
 
+### 4.6 `/speed/ftl_rw`（真 NAND，破坏性）
+
+| 用例 | 参数 | 覆盖 |
+|---|---|---|
+| `host_rw` | `mode=normal\|cache` | 100 gblock（51,200 LBA = 25 MiB）host 读写速度；首次运行先完整 format。`normal`：8-LBA chunk 写 + 8-LBA 读（cache 路径不触发）。`cache`：32-LBA cache 写（计时，断言 `wb_batches>0`）→ 8-LBA 普通写重铺同一范围（不计时，让物理页严格按 LBA 顺序落盘）→ 32-LBA cache 读（计时，**断言 `rd_batches>0`**）→ 8-LBA 普通读基线。cache read 未触发时打印 `DIAG ftl` 窗口与 `PROBE ftl` 探针（LBA0..15 的 PBA/plane/topo 判据、可收集 pair 数、失败码）并失败。**2026-10-25 板端实跑已暴露 RISK-HOST-13 的根因**（`cache_read_collect` 跨 plane 误用 `pba_page()`），修复已上板（2026-10-25）：`rd_path=cache`、`rdc` batches=1600 |
+
+输出只在 `--log-visible info/debug` 可见。运行：
+`test --log-visible info /speed/ftl_rw`。FC 侧的 `/speed/fc_nand_rw` 与本套件都有破坏性，
+建议分次运行；跑完 media 由用例自行格式化。
+
 未落地（按板端/注入项处理）：
 
 - M-11 的**真介质注入**部分：构造不可读 victim 页，断言压缩 abort 后 victim 的
@@ -351,7 +367,8 @@
 - NAND 页/擦/写失败注入：当前无 `ftl_sync_*` 注入 seam（覆盖回收/Anchor/abort 不擦 victim 的注入部分）。
 - 真空白片与格式化中断：`format_in_progress_and_used_medium_refusal` 需要真空白片或可注入的
   `FORMAT_IN_PROGRESS` 介质状态（RISK-BOOT-04/17、RISK-BBT-02）。
-- USB 主机行为、吞吐、H2testw、长时 soak。
+- USB 主机行为、外部吞吐（H2testw）、长时 soak；内部 FC/FTL 速度见 `/speed/fc_nand_rw` 与
+  `/speed/ftl_rw`（破坏性，单独运行）。
 - release 档特有行为（UT 为 debug 构建）。
 - 跨 LUN 条带/GC/WL（未实现）。
 
@@ -378,5 +395,6 @@
 | 条件 SKIP | `l2p_miss_unmapped_evict` 在 cache 有脏/在飞行时按设计跳过 | 代码内条件 |
 | CP 落盘证据 | `journal barrier cp 1->2`、`trim cp 2->3`（用例起点→落盘序号，RISK-UT-02） | 2026-10-24 21:14 隔离重跑 |
 | 未覆盖 | M-11 真介质注入、真空白片、NAND program/erase 注入、真 POR、USB/H2testw | §7 |
+| 速度（FTL） | `test --log-visible info /speed/ftl_rw` → normal/cache 两档各 25 MiB；**板端 2/2 通过**（2026-10-25 00:04 镜像，13.51 s）：normal 写 1065 / 读 1356 KB/s；cache 写 1107 / 读 1363 KB/s，`rd_path=cache`、`rdc batches=1600`、`err=0`（RISK-HOST-13 修复后首次真正走 cache）；读速与 normal 档基本相同（RISK-PERF-03） | 2026-10-25 00:04 镜像；release -O2（00:35 镜像）4/4：FC 写 3670 / 读 3533（cache 写 4319 / 读 3591），FTL 写 2499 / 读 3369（cache 写 2687 / 读 3369，`rd_path=cache`）；munit 计时受 CYCCNT 回绕影响，见 RISK-UT-05 |
 
 > 每一阶段结束都跑 `make all` / `make release` / `make tests UT=FTL`；未上板的用例标「未上板」。
