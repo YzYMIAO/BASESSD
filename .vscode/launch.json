@@ -13,7 +13,7 @@
       "gdbTarget": "localhost:2331",
 
       // 当前指向 release 测试镜像（make tests BUILD_TYPE=release，-O2）；
-      // 调试 debug 镜像时改回 "${workspaceFolder}/build/firmware/debug/bin/debug.elf"
+      // 跑 debug UT 时改为 "${workspaceFolder}/build/firmware/debug/bin/debug.elf"
       "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
@@ -46,7 +46,7 @@
       "serialNumber": "602717758",
 
       // 当前指向 release 测试镜像（make tests BUILD_TYPE=release，-O2）；
-      // 调试 debug 镜像时改回 "${workspaceFolder}/build/firmware/debug/bin/debug.elf"
+      // 跑 debug UT 时改为 "${workspaceFolder}/build/firmware/debug/bin/debug.elf"
       "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
