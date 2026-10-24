@@ -89,7 +89,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
      * ftl_async_write_pair_cmd() 在页对之后分配。取不到页对时无资源占用；页对之后的
      * 任何失败都由统一错误出口 alc_super_open_rewind_pair 归还（否则页对凭空蒸发，
      * 表现为容量无声流失，见 CLAUDE.md §3.1）。 */
-    if (pend_get_count(h->pending) >= FTL_PENDING_MAX)
+    if (pend_slot_get_count(h->pending) >= FTL_PENDING_MAX)
     {
         return FTL_AGAIN;
     }

@@ -142,7 +142,7 @@ bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n)
     ASSERT(ftl != NULL);
 
     return ftl_fc_host_budget_ok_n(n) &&
-           (((DWORD)pend_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
+           (((DWORD)pend_slot_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
 }
 
 /* ── 内部辅助 ── */
@@ -846,7 +846,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
          * 是数据源、恒非空，用 buffer 判别会把写全判成读。 */
         const bool is_read = pend_op_is_read(pending->op);
 
-        if (pending->op == PENDING_OP_WRITE_CACHE)
+        if (pend_op_is_write_cache(pending->op))
         {
             /* cache program 成员：中间页/末页/失败均由 batch 上下文结算；
              * 不走透明重试（op44 不能回读重发），也不走普通写失败分支（不按 plane 标坏）。 */
@@ -1311,7 +1311,7 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 
 static void contract_check_boot_zero(const ftl_ctx_t *ftl)
 {
-    ASSERT((pend_get_count(&ftl->pending) == 0U) && (pend_get_group_count(&ftl->pending) == 0U) &&
+    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) &&
            (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) &&
            (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) &&
            (ftl->l2p_defer == 0U));
@@ -1623,7 +1623,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
     /* 资源次序：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
      * 登记本子操作；表满却先建好链，只能整条回滚——白配一场。
      * ⚠ 必须在 wbuf 命中分支**之后**：那条路径同步完成、不占 pending 槽，不该被表满挡住。 */
-    if (pend_get_count(&ftl->pending) >= FTL_PENDING_MAX)
+    if (pend_slot_get_count(&ftl->pending) >= FTL_PENDING_MAX)
     {
         return FTL_AGAIN;
     }
@@ -1719,7 +1719,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
     while ((g->used != 0U) && (g->next < g->total))
     {
         const DWORD off    = g->next; /* 已下发到的 LBA 偏移（g->next 以 LBA 计，非子操作序号） */
-        const DWORD remain = g->count - off;
+        const DWORD remain = g->total - off;
         DWORD       glba   = (g->lba + off);
         void       *buffer = (BYTE *)g->buffer + (off * FTL_IU_BYTES);
         /* 本窗口内可提供的最大 LBA 数（≤ 一个 pair 窗口）。实际消费几个由
@@ -2014,7 +2014,6 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     g->stalls          = 0U;
     g->lba             = req->lba;
     g->buffer          = req->buffer;
-    g->count           = count;
     g->agg_status      = SSD_STATUS_OK;
     g->complete_flag   = req->complete_flag;
     g->status_out      = req->status_out;

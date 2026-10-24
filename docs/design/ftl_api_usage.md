@@ -226,7 +226,7 @@ bool         ftl_op_is_in_dispatch(void);
 | 槽 | 服务函数 | ctx | 备注 |
 |---|---|---|---|
 | `FTL_OP_SYNC_WAIT` | `ftl_sync_wait_callback` | `ftl_sync_waiter_t *`（调用者栈上） | 所有 `ftl_sync_*` |
-| `FTL_OP_HOST_IO` | `ftl_host_io_callback` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
+| `FTL_OP_HOST_IO` | `ftl_host_io_callback` | **NULL** | 服务函数自己 `pend_find(cmd_id)`（pending 表比任何新 ctx 都全） |
 | `FTL_OP_JOURNAL` | `ftl_journal_callback` | `ftl->journal` | 阶段 2 |
 | `FTL_OP_READ_RECOVERY` | `ftl_read_recovery_callback` | `&ftl->read_recovery_handle` | 阶段 3 |
 | `FTL_OP_GC` / `FTL_OP_WL` | `ftl_migrate_callback` | `&ftl->mig_handle` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
@@ -255,12 +255,12 @@ rr_handle(ftl);                                     /* 交给 job，本函数返
 ```
 
 - **pending 项保留、组在飞数不递减** ⇒ host 读组继续 pending，直到 RR job 收尾时
-  统一 `pending_release_index` + `pending_group_complete_subop_multi(owners, …)`。
+  统一 `pend_release_index` + `pend_group_complete_subop_multi(owners, …)`。
 - ⚠ `FTL_PENDING_CMD_NONE` 哨兵是**必需**的：命令一 release，其 `command_id`（= FC 命令池
-  下标）就会被后续 `fc_command_alloc` 复用，而 `pending_lookup` 按 id 扫**第一项** ⇒
+  下标）就会被后续 `fc_command_alloc` 复用，而 `pend_find` 按 id 扫**第一项** ⇒
   陈旧 id 会让一条新命令的完成撞上这个停泊项。
 - 停泊区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
-  `pending_find_op(ftl, op, &idx)` / `pending_release_index(ftl, idx)`。
+  `pend_find_op(ftl, op, &idx)` / `pend_release_index(ftl, idx)`。
 - `rr_handle` 由 `ftl_service_idle/normal/busy` 每轮调用一次（job 空闲且无托管项时只是
   一次 32 项线性扫描）。
 
@@ -276,10 +276,10 @@ pending->command_id = FTL_PENDING_CMD_NONE;
 return;                                           /* 组在飞数**不**递减 */
 ```
 
-- 推进者**不是**外部引擎，而是 `pending_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
-  按下标升序扫（停泊项的 `command_id` 已是哨兵，`pending_lookup` 查不到）：
+- 推进者**不是**外部引擎，而是 `pend_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
+  按下标升序扫（停泊项的 `command_id` 已是哨兵，`pend_find` 查不到）：
   仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_host_io_callback` **完全相同**的收尾
-  （`pending_release_index` + `pending_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
+  （`pend_release_index` + `pend_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
 - ⚠ 顺序**必须**早于 Phase 2.5 的补发循环（读旧映射的陈旧数据问题，见 §6.1 注）。
 - 停泊发生在 NAND 编程**成功之后** ⇒ 收尾的子操作状态恒 `SSD_STATUS_OK`（没有写失败分支）。
 
@@ -299,7 +299,7 @@ ftl_submit_write(ftl, &req)
     ├─ NAND_SUCCESS → ftl_confirm_write(ftl, pending)   ← ★ v0.75 阶段 5：**两遍式**
     │   ├─ 第一遍：逐 CW l2p_cache_ready(lba) → 任一未就绪 ⇒ 返 FTL_AGAIN（**一条都不动**）
     │   │            ⇒ 本项**停泊**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
-    │   │               组在飞数**不**递减），由 pending_confirm_service 每轮推进
+    │   │               组在飞数**不**递减），由 pend_confirm_service 每轮推进
     │   └─ 第二遍（全部就绪）：
     │        l2p_cache_read(lba) → old_pba  ← ★ 完成时**重查 L2P**（不存提交时快照）
     │        journal_append(lba, old, new)  ← 确认后记录
@@ -354,8 +354,8 @@ typedef struct {
 ```
 
 > **v0.58**：`ftl_io_request_t io` **不再内嵌**（`pending_add` 形参改为显式 `group/n_cw/lba/buffer/…`）；
-> 新增 `group` 关联到完成组。组管理 `pending_group_alloc/free/maybe_complete/count` 在 `pending.c`。
-> `pending_group_maybe_complete` 先发通知、**最后**才 `used=0`（回调可能重入提交）。
+> 新增 `group` 关联到完成组。组管理 `pend_group_alloc/free/maybe_complete/count` 在 `pending.c`。
+> `pend_group_maybe_complete` 先发通知、**最后**才 `used=0`（回调可能重入提交）。
 
 **坏块标记两阶段化**：
 
@@ -452,7 +452,7 @@ extern md_dir_cache_t        g_ftl_md[FTL_DIM_TOTAL];        /* SRAM4 */
 static ssd_controller_t      g_ctrl;
 
 /* ④ FTL 初始化（阶段 C：拓扑 + 共享 cache + storage）
- *    内部：绑定 storage → 五张表逐表 memset → pending_init
+ *    内部：绑定 storage → 五张表逐表 memset → pend_init
  *        → allocator_init（绑定 table_refs，free pool 空）
  *        → journal_init → metadata_dir_load → bbt_init（填充 BST bad 位） */
 const uint32_t dim = ftl_topo_dim((ftl_topology_t){.ch = ch, .ce = ce, .lun = lun});
@@ -998,13 +998,13 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
 > `mig_gc_request_urgent()` 只登记，下一轮由 must-run 启动。
 
-> ⚠ **Phase 2.5 的开头是 `pending_confirm_service()`**——推进**停泊**的写确认，
+> ⚠ **Phase 2.5 的开头是 `pend_confirm_service()`**——推进**停泊**的写确认，
 > 必须早于补发循环：停泊意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作
 > 就会读到旧物理页。
 > ⚠ 每实例的写回在飞上限 `L2P_FLUSH_MAX_INFLIGHT = 4`（一次写回 = 1 命令 + 4 buffer，
 > 不设上限会把 FC 池吃光 ⇒ host I/O 拿不到命令、全系统 `FTL_AGAIN`）。
 
-> `inflight = pending_count + pending_group_count`（⚠ v0.75 阶段 4 起**不再计入
+> `inflight = pend_slot_get_count + pend_group_get_count`（⚠ v0.75 阶段 4 起**不再计入
 > `ftl_op_ctx_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
 > 后台反被自己的命令饿死；后台活跃度由各自的单飞行门单独管）。
 > ⚠ `main.c` 的主循环**遍历全部实例**调 `ftl_service`（序 4：只跑 `[0][0][0]` 会让其余实例的
@@ -1036,14 +1036,14 @@ void ftl_service(ftl_context_t *ftl) {
     ftl_wbuf_maybe_flush_idle(ftl);   /* 页打包写缓冲的确定性空闲 flush */
 
     /* Phase 3: 三级后台模式（判据 = 未决命令数近似空闲度） */
-    queued   = pending_group_count(ftl);
-    inflight = (uint16_t)(pending_count(ftl) + queued + ftl_op_ctx_count());
+    queued   = pend_group_get_count(&ftl->pending);
+    inflight = (uint16_t)(pend_slot_get_count(&ftl->pending) + queued + ftl_op_ctx_count());
 
     if (ftl->bg_suspend != 0U) return;   /* `bbt --erase` 后整体跳过 Phase 3 */
 
     if (inflight == 0U) {
         ftl_service_idle(ftl);
-    } else if ((pending_count(ftl) > (FTL_PENDING_MAX / 2U)) || (queued != 0U)) {
+    } else if ((pend_slot_get_count(&ftl->pending) > (FTL_PENDING_MAX / 2U)) || (queued != 0U)) {
         ftl_service_busy(ftl);
     } else {
         ftl_service_normal(ftl);

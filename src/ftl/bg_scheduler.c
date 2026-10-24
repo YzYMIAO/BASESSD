@@ -344,8 +344,8 @@ void bg_scheduler_init(bg_scheduler_t *sched)
  * inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
 bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
 {
-    const WORD pending = pend_get_count(&ftl->pending);
-    const WORD queued  = pend_get_group_count(&ftl->pending);
+    const WORD pending = pend_slot_get_count(&ftl->pending);
+    const WORD queued  = pend_group_get_count(&ftl->pending);
 
     if ((pending == 0U) && (queued == 0U))
     {

@@ -102,7 +102,7 @@ void bg_scheduler_init(bg_scheduler_t *sched);
  * bg_scheduler_level_select - 负载 → 后台档位（纯函数）
  *
  * 判据：
- *   inflight = pend_get_count + pend_get_group_count
+ *   inflight = pend_slot_get_count + pend_group_get_count
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
  * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY。
  */

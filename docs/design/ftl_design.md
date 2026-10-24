@@ -3254,7 +3254,7 @@ flowchart TB
 #### 3.12.5 关键流程
 
 1. 主循环：`cli_service_poll` → `ftl_service_pump` → 逐实例 `ftl_service`。
-2. 档位选择：`inflight = pend_get_count + pend_get_group_count`；0 → IDLE；
+2. 档位选择：`inflight = pend_slot_get_count + pend_group_get_count`；0 → IDLE；
    `pending > 16` 或 `queued != 0` → BUSY；否则 NORMAL。
 3. Pass 0：按表序跑所有 `must_run`，无条件、不计预算。
 4. Pass 1：按表序扫预算任务；掩码允许、interval 到点才跑；`charge = MIN(elapsed, budget)`；
@@ -4277,7 +4277,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | BST / allocator / 池 | `allocator.c` / `bst.h` | `allocator_*`、`ftl_block_*` |
 | journal 持久性状态 | `journal.c` | `jrn_append` / 查询 |
 | metadata directory | `metadata.c` / `metadata_job.c` | `metadata_dir_*` / `md_is_busy` |
-| pending / groups | `pending.c` | `pending_*`（含 `pending_view_op` / `pending_group_window_pending`） |
+| pending / groups | `pending.c` | `pend_*`（含 `pend_view_op` / `pend_group_has_window_pending`） |
 | 完成派发面 | `ftl_op.c` | `ftl_op_*`、`g_op_callbacks` |
 | 各 job FSM | 各模块 handle | status / 查询 |
 | 调度定时器 | 各模块 handle | `now_ms` + status |
@@ -4301,7 +4301,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 状态机 | 状态 | 转移条件 | 谁推进 |
 |---|---|---|---|
-| **完成组** | `used=0 → used=1 → 完成 → used=0` | `next==total && outstanding==0` | `pending_group_*` |
+| **完成组** | `used=0 → used=1 → 完成 → used=0` | `next==total && outstanding==0` | `pend_group_*` |
 | **pending 项** | READ/WRITE → READ_RECOVERY / WRITE_CONFIRM → 释放 | 读失败 / 写成功但 L2P 未就绪 | `rr_handle` / `pend_confirm_service` |
 | **L2P 行** | INVALID → LOADING → CLEAN → DIRTY → FLUSHING → CLEAN/INVALID | miss / 写 / flush / 驱逐 | `l2p_cache_*` / `ftl_l2p_callback` |
 | **Journal job** | IDLE → WRITE → （ERASE）→ IDLE | 页满 / 换块 | `jrn_handle` / `ftl_journal_callback` |
