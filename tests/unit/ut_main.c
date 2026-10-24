@@ -32,17 +32,13 @@ extern MunitTest g_fc_lifecycle_tests[];
 
 #if defined(UT_FTL_ENABLE)
 
-/* ── FTL（src/ftl，纯 RAM L0 测试；见 docs/design/ftl_ut_munit.md） ── */
+/* ── FTL（src/ftl；见 docs/design/ftl_ut_design.md） ── */
 
-extern MunitTest g_ftl_allocator_tests[];
-extern MunitTest g_ftl_watermark_tests[];
-extern MunitTest g_ftl_gc_wl_tests[];
-extern MunitTest g_ftl_rr_tests[];
-extern MunitTest g_ftl_bbt_tests[];
-extern MunitTest g_ftl_metadata_tests[];
-extern MunitTest g_ftl_pending_ct_tests[];
-extern MunitTest g_ftl_group_tests[];
-extern MunitTest g_ftl_bg_tests[];
+extern MunitTest g_ftl_pure_mem_tests[];
+extern MunitTest g_ftl_pure_md_tests[];
+extern MunitTest g_ftl_pure_host_tests[];
+extern MunitTest g_ftl_pure_io_tests[];
+extern MunitTest g_ftl_media_e2e_tests[];
 
 #endif /* UT_FTL_ENABLE */
 
@@ -82,15 +78,29 @@ static MunitSuite g_ut_root_suite = {
                    (char *)"/ftl/",
                    NULL,
                    (MunitSuite[]){
-                   {(char *)"allocator/", g_ftl_allocator_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"watermark/", g_ftl_watermark_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"gc_wl/", g_ftl_gc_wl_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"rr/", g_ftl_rr_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"bbt/", g_ftl_bbt_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"metadata/", g_ftl_metadata_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"pending_ct/", g_ftl_pending_ct_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"group/", g_ftl_group_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"bg/", g_ftl_bg_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {
+                   (char *)"pure/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"mem/", g_ftl_pure_mem_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"md/", g_ftl_pure_md_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"host/", g_ftl_pure_host_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"io/", g_ftl_pure_io_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
+                   {
+                   (char *)"media/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"e2e/", g_ftl_media_e2e_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
                    1,

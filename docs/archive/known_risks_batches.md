@@ -415,3 +415,14 @@
 | RISK-TYPE-03 | 2026-10-23 | 静态收口：同类型 `(DWORD)` 强转已删除；`grep` 复核 | 重新引入同型强转 |
 | RISK-BOOT-12 | 2026-10-23 | initial CP 完整快照；format 后首次 PF 走快照+journal（debug 2026-10-20 上板通过） | initial CP 格式变更 |
 | RISK-PEND-01 | 2026-10-24 | 静态收口：`pend_group_t.count` 与 `total` 同值同义（C9 两套坐标）；两套 LBA 计数一旦漂移，`ftl_drain_group` 的 `remain` 会算错。已删除 `count`、统一用 `total`；`sizeof(pend_group_t)==48` 不变，`make all`/`make release` 零新告警 | 组进度再引入第二个 LBA 计数 |
+
+---
+
+## 2026-10-24 FTL UT 上板闭合
+
+| ID | 闭合于 | 依据 / 证据 | 重开触发 |
+|---|---|---|---|
+| RISK-MD-03 | 2026-10-24 | 旧冻结测试源已删除；新套件按 `docs/design/ftl_ut_design.md` 重建。板端 `test /ftl/pure/` 23/23、`test /ftl/media/` 5/5 全绿（media 22.5 s，含 format 10.4 s）；`make tests UT=FTL` 零告警 | 新套件再次与生产 API 漂移 |
+| RISK-BG-09 | 2026-10-24 | `bg_engine` 用例随 `/ftl/pure/host/` 上板通过 | bg 任务表/档位接口再变 |
+| RISK-PLAT-05 | 2026-10-24 | `LIB_DIR` 按配置分置后，UT 镜像上板 `test --list` 正常列出 28 条；普通镜像无 `test` 命令 | 构建目录命名再变 |
+

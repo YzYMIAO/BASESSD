@@ -14,7 +14,7 @@
 
 | ID | 状态 | 条目 | 来源 | 下一步 / 判据 |
 |---|---|---|---|---|
-| ISS-UT-01 | 待测试源 | **FTL L0 UT 套件（8 套件）冻结、无法编译**：测试源仍引用已删字段/旧签名（`ftl_context_t`、`ftl_allocator_t` 等）；用例清单已随文档归档 | `../archive/ftl_ut_munit.md`；`RISK-MD-03` / `RISK-BG-09` / `RISK-BBT-10` | 测试所有者按新 API 同步后跑 `make tests UT=FTL`；**不得**为编过回退生产代码或加兼容垫片（R2/R4） |
+| ISS-UT-01 | 已实现（2026-10-24 上板） | FTL UT 按 `docs/design/ftl_ut_design.md` 重建：pure 23/23、media 5/5 全绿 | `docs/design/ftl_ut_design.md`；`tests/unit/ftl_ut_common.*` | 按设计文档 §4 继续补 BBT/L2P/CP/GC 等未落地用例 |
 | ISS-HIL-01 | 未实现 | HIL L0 纯 RAM UT 9 例（state_machine / controller / scheduler / request）；`tests/unit/test_hil.c` 与 `g_hil_*_tests[]` 均不存在 | `../archive/hil_ut_design.md` Part A / 覆盖矩阵 | 先裁决 `ssd_controller_route` / `run_end` 是否导出到 `controller.h`；再按 `munit_adapter.md` 接线 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例：基础读写 9、拆分/聚合/背压 4、跨重启 8、后台/水位观测 3。v0.58~v0.66 期间可能用 CLI 人工跑过，但**无逐条上板记录** | `../archive/hil_ut_design.md` Part B | 按 `usb_msc_verification.md` 的矩阵补记录；跨重启 8 例优先（`reboot_persist_*` 已修，需确认） |
 | ISS-HIL-03 | 待测试源 | CH/CE/LUN>1 后的 HIL 扩维用例（route / run_end 在 1 维下过于平凡） | `../archive/hil_ut_design.md` §3 | 等真实多实例硬件或 N=2 影子构建；勿在 1 维伪造覆盖 |

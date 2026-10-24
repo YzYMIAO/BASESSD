@@ -55,6 +55,10 @@ sh/debug_env.sh
 手动分步（脚本失败时）见 `docs/design/wsl_debug_environment.md` §4.3。
 另一条路：`sh/flash.jlink`（JLink Commander 脚本，`loadfile ... .elf` + `r` + `g`），
 ⚠ 该文件在 `.gitignore` 里，是本机路径。
+⚠ **跑 UT 时 `launch.json` 的 `executable` 必须指到
+  `build/firmware/debug/bin/debug.elf`**：`make tests` 的产物在 `debug/`，而 `release/`
+  镜像没有 `test` 命令（`RISK-PLAT-05`）。普通 release 调试再改回
+  `build/firmware/release/bin/release.elf`（当前 `.vscode/launch.json` 已置为 debug）。
 
 ---
 
