@@ -27,7 +27,6 @@
 
 #include <string.h>
 
-/* 把每个 plane 的前 n 个块放进 Free Pool（测试自有表，plane 内块号 0..n-1）。 */
 /* ── 参数表（与 FC UT 同样的 MunitParameterEnum 形式）── */
 static const char        *s_gc_mode_values[] = {"off", "idle", "emergency", NULL};
 static MunitParameterEnum s_gc_mode_params[] = {
@@ -58,6 +57,7 @@ static l2p_cache_line_t s_l2p_line_saved;
 static DWORD            s_l2p_bitmap_saved[L2P_LOCAL_DIRTY_WORDS];
 static BYTE             s_cp_page[PAGE_MAIN_SIZE];
 
+/* 把每个 plane 的前 n 个块放进 Free Pool（测试自有表，plane 内块号 0..n-1）。 */
 static void mem_fill_free(alc_t *a, WORD n)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -68,6 +68,13 @@ static void mem_fill_free(alc_t *a, WORD n)
         }
     }
 }
+
+/* address_roundtrip — LBA/PBA 地址编码往返。
+ *
+ * 覆盖：LBA 的 page_base/cw/plane 拆分、PBA 的 plane/block/page/cw 拆分、
+ *       ftl_gblock(plane, block) 的 plane-major 全局编号。
+ * 判据：逐字段解回等于输入。地址/位图类错值在编译期完全无声（CLAUDE.md §3.2），
+ *       这条用例是后面所有建链用例的底板。纯 RAM。 */
 
 static MunitResult test_address_roundtrip(const MunitParameter params[], void *data)
 {
@@ -95,6 +102,13 @@ static MunitResult test_address_roundtrip(const MunitParameter params[], void *d
 
     return MUNIT_OK;
 }
+
+/* free_pool_invariants — Free Pool 账本不变量。
+ *
+ * 覆盖：入池/出池只维护池数组；state==FREE ⟺ 在池；出池不翻转 state（文档化语义）；
+ *       OP refill 按 plane LIFO 归还。
+ * 判据：free_count 与池内条目始终同步，refill 后 op_count 归零。
+ * 备注：FTL_BLOCK_STATE_FREE 会说谎（allocator_init 早于目录加载），选块以池为准。 */
 
 static MunitResult test_free_pool_invariants(const MunitParameter params[], void *data)
 {
@@ -142,6 +156,12 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
 
     return MUNIT_OK;
 }
+
+/* super_block_open_close — Super Block 开/关与 rewind（参数 mode=hot/cold/high_wear）。
+ *
+ * 覆盖：开 SB 时两 plane 各取同页号 PBA、块进 OPEN；rewind 后重取必须得到同一页
+ *       （不烧块）；close 后两 plane 块进 CLOSED 且记录 sb_id；closed 条目可摘除。
+ * 判据：PBA 合法、plane 位与入参一致、closed/free 计数同步。纯 RAM。 */
 
 static MunitResult test_super_block_open_close(const MunitParameter params[], void *data)
 {
@@ -211,6 +231,13 @@ static MunitResult test_super_block_open_close(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
+/* closed_list_add_drop — Closed SB 列表按 plane 摘除。
+ *
+ * 覆盖：加一个两 plane 的 closed 条目；只摘 plane0 时条目保留（另一 plane 仍有活
+ *       数据），两个 plane 都摘掉才释放条目。
+ * 判据：closed_sb_count 只在最后一个 plane 摘除时减少，防止半摘除导致条目泄漏
+ *       或同一条目被二次回收。纯 RAM。 */
+
 static MunitResult test_closed_list_add_drop(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -244,6 +271,12 @@ static MunitResult test_closed_list_add_drop(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
+/* valid_count_guard — 有效 CW 记账与 BAD 降级。
+ *
+ * 覆盖：valid_count 连续 +1；sub_if_live 在健康态减 1；块置 BAD 后继续 sub 必须无效。
+ * 判据：BAD 块不得再记账——uint16 回绕会变成 65535，直接污染 GC 有效率与 WL 判据。
+ * 备注：这是「状态不变量做 O(1) 守卫」（C12）在 BST 上的落点。纯 RAM。 */
+
 static MunitResult test_valid_count_guard(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -272,6 +305,13 @@ static MunitResult test_valid_count_guard(const MunitParameter params[], void *d
 
     return MUNIT_OK;
 }
+
+/* op_spare_pools — OP / Spare 两池的 per-plane 计数与边界。
+ *
+ * 覆盖：OP 每个 plane 独立计数并填到 FTL_OP_BLOCKS_PER_PLANE 上限；Spare 是 LIFO，
+ *       空池 pop 必须返回 false。
+ * 判据：一个 plane 填满不影响另一个；空池不能凭空给出块（返回垃圾块会让分配器
+ *       永久漏账）。纯 RAM。 */
 
 static MunitResult test_op_spare_pools(const MunitParameter params[], void *data)
 {
@@ -312,6 +352,13 @@ static MunitResult test_op_spare_pools(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
+/* erase_stats — 擦除后的块统计复位。
+ *
+ * 覆盖：alc_bst_note_erase 使 erase_count+1、记录 last_pe_ts、valid_count/read_count
+ *       清零、state 置 OPEN。
+ * 判据：擦除是「块内容作废」的唯一时刻；残留有效计数会让 GC/WL 把空块当热块。
+ * 备注：erase_count 是磨损均衡的持久化输入（P0-1）。纯 RAM。 */
+
 static MunitResult test_erase_stats(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -338,6 +385,13 @@ static MunitResult test_erase_stats(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* bbt_mark_bad — 标坏的完整后果（参数 plane=0/1）。
+ *
+ * 覆盖：BST 置 BAD、清 valid/sb_id、bad_count 与 dirty_gen 推进；同 plane Spare 弹
+ *       一块补 Free Pool；重复标坏保持幂等。
+ * 判据：bad_count/dirty_gen/Spare/free 四项都恰好变化一次；幂等重标不得重复弹块。
+ * 备注：Spare 是第一道替换，弹错 plane 会把好块配给无块可用的 plane。纯 RAM。 */
 
 static MunitResult test_bbt_mark_bad(const MunitParameter params[], void *data)
 {
@@ -384,6 +438,12 @@ static MunitResult test_bbt_mark_bad(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* bbt_metadata_bad — 元数据块丢失的降级路径。
+ *
+ * 覆盖：标坏元数据日志块（JOURNAL_BLOCK0）时不弹用户 Spare，而是置 pools.dirty
+ *       让候选池重算，并置 rebuild_required 要求下次开机全量重建。
+ * 判据：若这里误弹用户 Spare，元数据块会从用户数据区拿走块，账本永久偏移。纯 RAM。 */
+
 static MunitResult test_bbt_metadata_bad(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -412,6 +472,13 @@ static MunitResult test_bbt_metadata_bad(const MunitParameter params[], void *da
 
     return MUNIT_OK;
 }
+
+/* cw_masks — CW flat 位图工具。
+ *
+ * 覆盖：ftl_cw_bit 的绝对编号（plane*CW_NUM+cw）、span/plane 掩码、
+ *       popcount/plane_count、NAND_FIELD_MASK。
+ * 判据：plane1 的 CW0 必须是 bit CW_NUM 而不是 bit0。flat 编号用错就是 plane 盲
+ *       位图（H31），位会改到另一个 plane 上且不崩溃。纯 RAM。 */
 
 static MunitResult test_cw_masks(const MunitParameter params[], void *data)
 {
@@ -447,6 +514,12 @@ static MunitResult test_cw_masks(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* alloc_spare_full_refill_none — Spare 池满与空 Free Pool 边界。
+ *
+ * 覆盖：Spare 满时再 push 必须失败；清空 Spare 后从 Free Pool refill，而 Free Pool
+ *       也为空时 refill 返回 false 且池计数保持 0。
+ * 判据：不能凭空造块——Spare 与 Free Pool 的账本必须守恒。纯 RAM。 */
+
 static MunitResult test_alloc_spare_full_refill_none(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -481,6 +554,8 @@ static MunitResult test_alloc_spare_full_refill_none(const MunitParameter params
     return MUNIT_OK;
 }
 
+/* ══ 子套件 /ftl/pure/mem/：allocator / BST / BBT / CW 位图（纯 RAM）══ */
+
 MunitTest g_ftl_pure_mem_tests[] = {
     {           (char *)"address_roundtrip",            test_address_roundtrip, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
     {        (char *)"free_pool_invariants",         test_free_pool_invariants, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
@@ -495,6 +570,12 @@ MunitTest g_ftl_pure_mem_tests[] = {
     {(char *)"alloc_spare_full_refill_none", test_alloc_spare_full_refill_none, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
     {                                  NULL,                              NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,                NULL},
 };
+
+/* metadata_idle — metadata job 的启动基线。
+ *
+ * 覆盖：metadata_dir 句柄存在、md_handle_is_idle 为真、live block 计数为 0。
+ * 判据：live block 泄漏会让后续 reclaim 误判（把别人的块当自己的）；先钉住初始态。
+ * 备注：纯 RAM，不触碰介质。 */
 
 static MunitResult test_metadata_idle(const MunitParameter params[], void *data)
 {
@@ -513,6 +594,13 @@ static MunitResult test_metadata_idle(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* ring_geometry — md_ring 的记录数/块包含/plane 掩码几何。
+ *
+ * 覆盖：records_per_block = PAGES_PER_BLOCK / pages_per_record；total_records =
+ *       block_count × records_per_block；has_block 只认环内块；plane_at 越界返回
+ *       PLANE_NUM（哨兵语义）。
+ * 判据：几何量一旦算错，locate/回收会静默扫错块。纯 RAM。 */
 
 static MunitResult test_ring_geometry(const MunitParameter params[], void *data)
 {
@@ -547,6 +635,12 @@ static MunitResult test_ring_geometry(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* directory_commit — Directory 的 primary/pair 提交账本。
+ *
+ * 覆盖：primary 覆盖写要把旧位置 live 计数 -1、新位置 +1；PAIR 提交两份副本都计入
+ *       live 并置 dirty；entry/backup 查询分别返回两份 PBA。
+ * 判据：live 计数是元数据块回收的唯一依据，漏一次就永久漏账。纯 RAM。 */
 
 static MunitResult test_directory_commit(const MunitParameter params[], void *data)
 {
@@ -592,6 +686,12 @@ static MunitResult test_directory_commit(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
+/* journal_append — Journal 基本生命周期。
+ *
+ * 覆盖：init 后 idle、sequence 从 1 起（0 保留为「无序号」）；reserve + append 推进
+ *       序号并置 pending；未到水位时 needs_checkpoint 为假。
+ * 判据：sequence 是回放/截断的唯一顺序坐标；reserve 与 append 必须一一配对。纯 RAM。 */
+
 static MunitResult test_journal_append(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -622,6 +722,14 @@ static MunitResult test_journal_append(const MunitParameter params[], void *data
 
     return MUNIT_OK;
 }
+
+/* cp_encoders — Checkpoint 编码器与磨损页字节布局。
+ *
+ * 覆盖：block word 的 valid/state/temp/pool 位段打包解包；快照写入 CLOSED/有效数/
+ *       温度、OP/Spare 池标签，以及由 Directory 权威判定的 LOG 状态；磨损页固定
+ *       字节布局（erase/read/last_ecc/flags）。
+ * 判据：解码逐字段等于编码输入；布局是掉电恢复读回的唯一契约，错位即读成垃圾。
+ * 备注：纯 RAM，字节布局是跨版本兼容点。 */
 
 static MunitResult test_cp_encoders(const MunitParameter params[], void *data)
 {
@@ -708,6 +816,13 @@ static ftl_status_e ring_probe(void *ctx, WORD record_idx, bool full, DWORD *out
     return FTL_OK;
 }
 
+/* ring_locate — md_ring_locate 用 probe 回调定位最新记录。
+ *
+ * 覆盖：written=5 → newest_idx=4、sequence=5、write_idx=5（下一条）；空环 →
+ *       newest_idx=UINT16_MAX、sequence=0、write_idx=0。
+ * 判据：「空环」与「找不到最新记录」必须区分——前者可以继续格式化，后者要报错。
+ * 备注：probe 回调在纯 RAM 下模拟介质页有效性。 */
+
 static MunitResult test_ring_locate(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -744,6 +859,13 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* anchor_three_step — Anchor 的 prepare → page → commit 三步。
+ *
+ * 覆盖：prepare 分配序号/槽位并置 dirty；page 填 magic/sequence/chunk 头；
+ *       commit 清 dirty 并推进 anchor_sequence。
+ * 判据：任何一步漏掉都会让重启后的 Anchor 与 Directory 序号不一致（恢复选错记录）。
+ * 备注：纯 RAM；冷启动 locate 在这里用有效游标跳过。 */
 
 static MunitResult test_anchor_three_step(const MunitParameter params[], void *data)
 {
@@ -795,6 +917,12 @@ static MunitResult test_anchor_three_step(const MunitParameter params[], void *d
     return MUNIT_OK;
 }
 
+/* log_alloc_rotate_release — 元数据日志块的分配/释放/轮转。
+ *
+ * 覆盖：md_log_alloc 依次取 L2P log 区块并置 LOG 状态；release 归还为 NONE；
+ *       rotate 切到新块且页游标归零。
+ * 判据：日志块双分配或漏释放都会让 L2P 写回落到已作废的块。纯 RAM。 */
+
 static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -826,6 +954,12 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
 
     return MUNIT_OK;
 }
+
+/* cp_init_timer — Checkpoint 句柄初始态与定时器复位。
+ *
+ * 覆盖：cp_init 后 active/waiting=false、phase=IDLE；cp_timer_reset 把 last_ms 清 0。
+ * 判据：reset 不是「写成当前时刻」——下个 job 的起点由 cp_handle 写入，写成当前
+ *       会让定时判据永远差一拍（周期性 CP 不触发）。纯 RAM。 */
 
 static MunitResult test_cp_init_timer(const MunitParameter params[], void *data)
 {
@@ -859,6 +993,13 @@ static MunitResult test_cp_init_timer(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* md_status_error — 固定 metadata 错误采样的当前语义。
+ *
+ * 覆盖：handle.error 置 FTL_ERROR 后调用 md_handle；进入 IDLE 时 error 被清，采样
+ *       得到 FTL_OK（RISK-MD-17）。
+ * 判据：这是有意语义还是待修缺陷由 RISK-MD-17 跟踪；若将来改为粘滞错误，本用例
+ *       会先红，避免行为变化无人发现。纯 RAM。 */
+
 static MunitResult test_md_status_error(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -886,6 +1027,13 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
 
     return MUNIT_OK;
 }
+
+/* journal_write_fail_clear — Journal 写失败标记的清除条件。
+ *
+ * 覆盖：write_fail_seq=5 时，clear(cp=4) 保留 pending，clear(cp=5) 才清除；
+ *       needs_checkpoint 由显式 request 置位。
+ * 判据：只有 CP 水位追上失败点才允许清除，否则失败标记被悄悄丢掉、坏页仍可被选中。
+ * 备注：纯 RAM，不制造真实 NAND 失败（失败注入归 FI-NA）。 */
 
 static MunitResult test_journal_write_fail_clear(const MunitParameter params[], void *data)
 {
@@ -918,6 +1066,13 @@ static MunitResult test_journal_write_fail_clear(const MunitParameter params[], 
 
     return MUNIT_OK;
 }
+
+/* md_abort_keeps_victim — 压缩写 abort 不得回收/擦除 victim。
+ *
+ * 覆盖：构造「压缩写阶段取不到空槽」使 md_compact_write 返回 FAILED，触发
+ *       md_handle_abort；victim 仍有活 region。
+ * 判据：abort 只回 IDLE、清 victim/moved，**不得**把 victim 登记进回收位图或擦除
+ *       （否则活映射被静默丢掉，RISK-MD-06/16、BOOT-02）。纯 RAM。 */
 
 static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], void *data)
 {
@@ -958,6 +1113,13 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
 
     return MUNIT_OK;
 }
+
+/* journal_truncate_idempotent — Journal 截断计划/提交的幂等性。
+ *
+ * 覆盖：counter=0 防下溢不截断；水位不足不截断；足够时返回环形下一块；
+ *       commit 记录 pre_erased 并清 checkpoint/emergency；重复 plan 返回 ALREADY；
+ *       commit(NONE) 不清 pre_erased。
+ * 判据：commit(NONE) 清掉预擦块会让同一块被双擦——这是块寿命的直接损失。纯 RAM。 */
 
 static MunitResult test_journal_truncate_idempotent(const MunitParameter params[], void *data)
 {
@@ -1012,6 +1174,8 @@ static MunitResult test_journal_truncate_idempotent(const MunitParameter params[
     return MUNIT_OK;
 }
 
+/* ══ 子套件 /ftl/pure/md/：metadata / Journal / Checkpoint / Anchor（纯 RAM）══ */
+
 MunitTest g_ftl_pure_md_tests[] = {
     {              (char *)"metadata_idle",               test_metadata_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {              (char *)"ring_geometry",               test_ring_geometry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
@@ -1037,6 +1201,11 @@ static void host_group_done(void *ctx)
     s_group_done++;
 }
 
+/* host_idle — host 侧启动不变量。
+ *
+ * 覆盖：pending 槽/组、op ctx 全 0，wbuf idle，bg 任务表长度 = BG_TASK_COUNT。
+ * 判据：任一项非 0 都说明初始化漏了配对释放或上一个用例污染了全局池。纯 RAM。 */
+
 static MunitResult test_host_idle(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1057,6 +1226,12 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* pending_slots — pending 槽表的满/查找/移除/再分配。
+ *
+ * 覆盖：alloc 到 FTL_PENDING_MAX 后返回 NULL；按 command_id 查找/移除；移除后槽位
+ *       可再次分配。
+ * 判据：槽泄漏的症状是全系统 FTL_AGAIN 且不报错。纯 RAM。 */
 
 static MunitResult test_pending_slots(const MunitParameter params[], void *data)
 {
@@ -1094,6 +1269,12 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* group_exhaustion — 组槽满时的拒绝语义。
+ *
+ * 覆盖：填满 FTL_GROUP_MAX 后额外 alloc 必须返回 false；已有组的字段不得被覆盖
+ *       （RISK-PEND-02）。
+ * 判据：覆盖会在飞组的完成回调永远不触发，host 请求悬挂。纯 RAM。 */
+
 static MunitResult test_group_exhaustion(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1126,6 +1307,11 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
 
     return MUNIT_OK;
 }
+
+/* group_complete_once — 组完成只通知一次。
+ *
+ * 覆盖：两个子操作 outstanding 2→0；只有最后一个完成时回调一次、释放组槽。
+ * 判据：早完成或重复通知会让上层把同一请求结算两次（buffer 归属错乱）。纯 RAM。 */
 
 static MunitResult test_group_complete_once(const MunitParameter params[], void *data)
 {
@@ -1166,6 +1352,13 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
 
     return MUNIT_OK;
 }
+
+/* wbuf_append_read — 写缓冲的基本 append/read 与账本。
+ *
+ * 覆盖：单 CW 写入置 occupied 对应位、owners 记组、组在飞 +1；同 pair 窗口再写 CW5
+ *       形成离散两位；逐 CW 读回字节一致。
+ * 判据：occupied 是 flat 绝对编号（plane*CW_NUM+cw），位错了会把数据放到另一 plane。
+ * 备注：纯 RAM，pend 表由测试自建。 */
 
 static MunitResult test_wbuf_append_read(const MunitParameter params[], void *data)
 {
@@ -1228,6 +1421,11 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
+/* op_ctx — op ctx 表的 add/take/remove。
+ *
+ * 覆盖：add 后 count=1，take 取回同一指针并清表；add 后 remove 也归零。
+ * 判据：ctx 用 cmd_id 关联完成回调，泄漏会让完成派发拿错上下文。纯 RAM。 */
+
 static MunitResult test_op_ctx(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1253,6 +1451,12 @@ static MunitResult test_op_ctx(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* bg_engine — 后台调度器引擎初始化。
+ *
+ * 覆盖：bg_scheduler_init 后任务表长度 = BG_TASK_COUNT；level_select 对活实例返回
+ *       合法档位（< BG_LEVEL_NUM）。
+ * 判据：任务表长度与档位枚举是预算调度的坐标，先钉住入口。纯 RAM。 */
+
 static MunitResult test_bg_engine(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1276,6 +1480,12 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* op_ctx_capacity — op ctx 表的容量与同 id 覆盖语义。
+ *
+ * 覆盖：填满 FTL_OP_CTX_TABLE_SIZE 后计数不再增长；同 cmd_id 的 add 是覆盖而不是
+ *       追加；全部 remove 后归零。
+ * 判据：同 id 追加会让表提前耗尽，后续完成回调无处登记。纯 RAM。 */
 
 static MunitResult test_op_ctx_capacity(const MunitParameter params[], void *data)
 {
@@ -1310,6 +1520,12 @@ static MunitResult test_op_ctx_capacity(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
+/* op_route — 完成路由表的 set/get。
+ *
+ * 覆盖：(ch,ce,lun) 路由与 region 路由都取回同一实例；测试结束恢复原表。
+ * 判据：路由错一条，完成会派发到错误实例（L2P/journal 记账串实例）。
+ * 备注：恢复原表是必须的——completion 表是全局的。纯 RAM。 */
+
 static MunitResult test_op_route(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1339,6 +1555,12 @@ static MunitResult test_op_route(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* bg_level_select — 负载档位的判据。
+ *
+ * 覆盖：pending 槽 0→IDLE、8→NORMAL、17→BUSY；释放后回 IDLE；存在 used group 时
+ *       保守升 BUSY（给前台让路）。
+ * 判据：档位决定后台预算，判错会让 GC/CP 在 host 忙时抢资源。纯 RAM。 */
 
 static MunitResult test_bg_level_select(const MunitParameter params[], void *data)
 {
@@ -1384,6 +1606,12 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
 
     return MUNIT_OK;
 }
+
+/* wbuf_density — 参数化 n=1/2/4/8 的位图与数据区一致性。
+ *
+ * 覆盖：一次 append n 个 CW 后 occupied == (1<<n)-1、组在飞只 +1、每个 CW 读回字节一致。
+ * 判据：occupied 与 data[] 的索引必须同源（H31）；位图对而数据错会静默写错 CW。
+ * 备注：纯 RAM。 */
 
 static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
 {
@@ -1435,6 +1663,12 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* group_failure_aggregation — 组内子操作失败的状态聚合。
+ *
+ * 覆盖：第一个子操作 IO_ERROR 后 agg_status 立即粘滞；第二个子操作 OK 不能清零；
+ *       组只完成一次，status_out/complete_flag 反映失败。
+ * 判据：把部分失败报成成功会让 host 认为写入已持久化。纯 RAM。 */
+
 static MunitResult test_group_failure_aggregation(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1481,6 +1715,12 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
 
     return MUNIT_OK;
 }
+
+/* wbuf_drop_reset_owners — DROP/RESET 的贡献组结算语义。
+ *
+ * 覆盖：DROP 一个 CW 只清位；页仍有数据时 owners/在飞数不变；清空最后一个 CW 时
+ *       按 OK 结算贡献组一次。RESET 丢弃整页并按 IO_ERROR 结算。
+ * 判据：未编程数据被当成功上报就是静默丢写；结算漏一次则组永不完成。纯 RAM。 */
 
 static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], void *data)
 {
@@ -1576,6 +1816,12 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
+/* host_submit_invalid_args — host 入口的非法参数拒绝。
+ *
+ * 覆盖：count=0、buffer=NULL、lba=FTL_LBA_MAX、ftl=NULL 的读写都返回 FTL_ERROR；
+ *       且必须在分配任何槽/组/ctx 之前拒绝。
+ * 判据：先建组再校验会留下半建组，后续请求被永久占用一个组槽。纯 RAM。 */
+
 static MunitResult test_host_submit_invalid_args(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1623,6 +1869,8 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
     return MUNIT_OK;
 }
 
+/* ══ 子套件 /ftl/pure/host/：pending / 组 / wbuf / op ctx / bg 调度（纯 RAM）══ */
+
 MunitTest g_ftl_pure_host_tests[] = {
     {                (char *)"host_idle",                 test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {            (char *)"pending_slots",             test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
@@ -1641,6 +1889,7 @@ MunitTest g_ftl_pure_host_tests[] = {
     {                               NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
 };
 
+/* 同 mem_fill_free：GC/WL 用例用它把 Free Pool 补到目标水位。 */
 static void io_fill_free(alc_t *a, WORD n)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -1651,6 +1900,12 @@ static void io_fill_free(alc_t *a, WORD n)
         }
     }
 }
+
+/* policy_entry — GC/WL 策略入口的空盘基线。
+ *
+ * 覆盖：活实例上 gc_should_trigger 只返回 watermark/emergency 位，wl_should_trigger
+ *       返回合法布尔值，L2P load_inflight=0。
+ * 判据：先钉住入口无副作用；策略求值不应制造 I/O 或推进账本。纯 RAM。 */
 
 static MunitResult test_policy_entry(const MunitParameter params[], void *data)
 {
@@ -1672,6 +1927,12 @@ static MunitResult test_policy_entry(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* gc_trigger — GC 三级水位的触发判据。
+ *
+ * 覆盖：空池必命中 EMERGENCY；补到 FREE_POOL_TARGET 以上不触发；跌破 TARGET 但高于
+ *       紧急线时只命中 WATERMARK。
+ * 判据：水位是 GC 唯一的入口闸门；空池不触发会让写路径永久 FTL_AGAIN。纯 RAM。 */
 
 static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
 {
@@ -1709,6 +1970,12 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* gc_select_victim — GC victim 选择（参数 mode=off/idle/emergency）。
+ *
+ * 覆盖：两个 CLOSED SB 的有效 CW 分别为 10 与 248；三种 benefit 模式下都必须选
+ *       有效数据更少的那一个，并回报 best_valid_pct/scanned/eligible。
+ * 判据：选错 victim 会把写放大推到极高，且收回的块很快又被写满。纯 RAM。 */
 
 static MunitResult test_gc_select_victim(const MunitParameter params[], void *data)
 {
@@ -1762,6 +2029,12 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
 
     return MUNIT_OK;
 }
+
+/* wl_trigger_and_victim — WL 启动门与 victim。
+ *
+ * 覆盖：写入数低于 WL_MIN_WRITES 不触发；空闲块擦除次数高出 used 块 WL_THRESHOLD
+ *       后才触发；victim 取擦除次数最高的空闲块（UBI 判据）。
+ * 判据：差值门槛防抖，否则 idle 下会无限搬迁（v0.91 修复的形态）。纯 RAM。 */
 
 static MunitResult test_wl_trigger_and_victim(const MunitParameter params[], void *data)
 {
@@ -1825,6 +2098,12 @@ static MunitResult test_wl_trigger_and_victim(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
+/* rr_health — 读恢复的 ECC 健康状态机。
+ *
+ * 覆盖：HEALTHY→WARNING（连续上升达阈值）→CRITICAL（高水位）→DYING（RR_ECC_MAX）；
+ *       之后遇到低 ECC 也不回落。
+ * 判据：健康度必须单调——回落会让濒死块重新被当健康块使用。纯 RAM。 */
+
 static MunitResult test_rr_health(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1861,6 +2140,12 @@ static MunitResult test_rr_health(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* rr_predictive_retire — 预测性退役。
+ *
+ * 覆盖：块 ECC 达 RR_ECC_MAX 后 rr_predictive_scan 命中该块；rr_retire_block_at 置
+ *       RETIRED 并清 read_count/健康计数。
+ * 判据：退役块不得再被选块路径取到；清计数是为了让退役记录本身不参与评分。纯 RAM。 */
 
 static MunitResult test_rr_predictive_retire(const MunitParameter params[], void *data)
 {
@@ -1900,6 +2185,11 @@ static MunitResult test_rr_predictive_retire(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
+/* wl_victim_threshold — WL victim 的有效数据门槛。
+ *
+ * 覆盖：有效 10/256 CW（约 4%）时拒绝搬迁；有效 200/256（约 78%）时接受。
+ * 判据：搬高有效块几乎不回收空间却翻倍写放大；门槛是 WL 与 GC 的分工边界。纯 RAM。 */
+
 static MunitResult test_wl_victim_threshold(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1936,6 +2226,13 @@ static MunitResult test_wl_victim_threshold(const MunitParameter params[], void 
 
     return MUNIT_OK;
 }
+
+/* gc_decode_cw_lba — 从 FC desc 的 meta 解 CW 级 LBA。
+ *
+ * 覆盖：同页基址 → GC_DECODE_OK；全 FTL_LBA_INVALID → EMPTY；某 CW 落在别的页基址
+ *       → CORRUPT；只有部分 CW 写过（空洞）→ OK 且空洞保持 INVALID。
+ * 判据：GC 按这个结果决定搬哪些 CW；把空洞当有效会搬运垃圾，把 CORRUPT 当 OK
+ *       会按错误页基址重建映射。备注：需要 FC 命令槽，但不写 NAND。 */
 
 static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *data)
 {
@@ -2021,6 +2318,13 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
 
     return MUNIT_OK;
 }
+
+/* l2p_resident_states — L2P 行状态的三态语义。
+ *
+ * 覆盖：CLEAN 可读写；write 后转 DIRTY；FLUSHING 可读但写返 FTL_AGAIN；LOADING 读
+ *       写都返 FTL_AGAIN；批量掩码读写同源。
+ * 判据：LOADING 返回 FTL_AGAIN（「还不知道」）绝不能当成未映射——那会给 host 填假零。
+ * 备注：测试直接改 cache 行，结束前恢复行与脏位图，避免污染后续用例。纯 RAM。 */
 
 static MunitResult test_l2p_resident_states(const MunitParameter params[], void *data)
 {
@@ -2119,6 +2423,13 @@ static const l2p_owner_t *l2p_fake_owner_fn(void *ctx, DWORD global_region)
     return &s_fake_owner;
 }
 
+/* l2p_miss_unmapped_evict — L2P miss / 合法未映射 / 写回读。
+ *
+ * 覆盖：miss 首次读起异步加载并返 FTL_AGAIN；重试后为 CLEAN 且条目 NAND_PBA_INVALID
+ *       （合法未映射）；写入后读回新值。
+ * 判据：未映射是合法结果，加载中是暂态；两者混用会读到假数据。
+ * 备注：纯 RAM 不做 NAND 写回——若发现 DIRTY/FLUSHING/LOADING 行直接 SKIP。 */
+
 static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -2186,6 +2497,8 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
 
     return MUNIT_OK;
 }
+
+/* ══ 子套件 /ftl/pure/io/：GC / WL / RR / L2P（纯 RAM）══ */
 
 MunitTest g_ftl_pure_io_tests[] = {
     {           (char *)"policy_entry",            test_policy_entry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},

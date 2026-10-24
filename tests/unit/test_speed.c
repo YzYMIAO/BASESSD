@@ -983,6 +983,15 @@ static void spd_ftl_diag_window(ftl_ctx_t *ftl, DWORD base)
     ftl_ut_trace_summary("DIAG ftl window=%lu invalid=%hhu wb=%hhu plane=%hhu topo=%hhu pba=%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX", base, invalid, wb_hit, plane_bad, topo_bad, pba[0], pba[1], pba[2], pba[3], pba[4], pba[5], pba[6], pba[7], pba[8], pba[9], pba[10], pba[11], pba[12], pba[13], pba[14], pba[15]);
 }
 
+/* ftl_rw — FTL host API 的 25 MiB 顺序读写速度（/speed/ftl_rw）。
+ *
+ * 覆盖：100 gblock（51,200 LBA = 25 MiB）的 host 读写；mode=normal 用 8-LBA
+ *       （一个 pair）chunk，mode=cache 用 32-LBA chunk 触发 FTL 自动 cache 路径。
+ * cache 档流程：32-LBA cache 写（计时，断言 wb_batches>0）→ 8-LBA 普通 pair 重铺
+ *       （不计时；让物理页严格按 LBA 顺序落盘）→ 32-LBA cache 读（断言 rd_batches>0）
+ *       → 8-LBA 普通读基线。cache read 未触发时打印窗口诊断并失败。
+ * 判据：err=0（每个完成请求全量校验图案）；速度行只在 --log-visible info/debug 输出。
+ * 备注：首次运行会完整 format（时间单列，不计入 KB/s）；破坏性，跑 LBA 0..51199。 */
 static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data)
 {
     (void)data;

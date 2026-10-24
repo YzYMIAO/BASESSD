@@ -1,8 +1,10 @@
 /*
  * test_ftl_media.c — /ftl/media/：真 NAND 路径（破坏性）
  *
- * ⚠ 本文件的用例会在板端执行 format / 写 NAND；运行前拔掉 USB，跑完 format + POR。
- *    当前为脚手架：先验证活实例与结束不变量，真 NAND 用例按阶段 P4/P5 落地。
+ * ⚠ 本文件的用例会在板端执行 format / 写 NAND；运行前拔掉 USB。
+ *    首个用例的 media_prepare() 会做一次完整格式化，后续用例复用该介质；
+ *    trim/bbt/cp 类用例在末尾自行恢复介质，保证同一轮可重复运行。
+ *    跑完建议 CLI `format` + POR 再回到 USB 使用。
  */
 
 #include "bbt.h"
@@ -51,6 +53,12 @@ static DWORD media_atou(const char *s)
 
 static bool       s_media_ready;
 static ftl_ctx_t *s_media_ftl;
+
+/* media_live — 真介质活实例的账本基线。
+ *
+ * 覆盖：ftl_ut_assert_clean 检查 free/op/spare/bad 账本与池/组/ctx 归零。
+ * 判据：后续 media 用例都从这里起步；基线不干净时先报账本问题，不再叠加介质噪声。
+ * 备注：不写 NAND。 */
 
 static MunitResult test_media_live(const MunitParameter params[], void *data)
 {
@@ -104,6 +112,12 @@ static void media_fill_wr(DWORD lba, DWORD count)
     }
 }
 
+/* format_and_roundtrip — 首次格式化后的最小闭环。
+ *
+ * 覆盖：8 LBA（一个完整 pair）写 → flush → 读回逐字节一致。
+ * 判据：flush 保证 L2P/Journal 落盘，读回必须走真实映射而不是 wbuf 快路径。
+ * 备注：media_prepare 首次调用会做完整 format（约 10–21 s，视优化档而定）。 */
+
 static MunitResult test_format_and_roundtrip(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -129,6 +143,12 @@ static MunitResult test_format_and_roundtrip(const MunitParameter params[], void
 
     return MUNIT_OK;
 }
+
+/* cross_region_roundtrip — 跨 L2P region 边界的写读。
+ *
+ * 覆盖：起点 504、长度 16（跨 512 LBA 的 region 边界）。
+ * 判据：一次 host 请求跨 region 时，加载/写回两侧都不能别名到相邻 region 的条目。
+ * 备注：真 NAND。 */
 
 static MunitResult test_cross_region_roundtrip(const MunitParameter params[], void *data)
 {
@@ -158,6 +178,12 @@ static MunitResult test_cross_region_roundtrip(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
+/* host_io_matrix — 参数化 count×off 的长度/偏移矩阵。
+ *
+ * 覆盖：count=1/7/8/9/64 × off=0/3/7。8 是 pair 边界，9 是最小「跨 pair 非对齐」，
+ *       7 是奇尾；off 覆盖非 pair 对齐起点。
+ * 判据：写读逐字节一致；长度/偏移收缩错误会静默丢尾部数据。真 NAND。 */
+
 static MunitResult test_host_io_matrix(const MunitParameter params[], void *data)
 {
     (void)data;
@@ -185,6 +211,12 @@ static MunitResult test_host_io_matrix(const MunitParameter params[], void *data
 
     return MUNIT_OK;
 }
+
+/* host_io_random — 固定种子的随机 LBA/长度写读。
+ *
+ * 覆盖：8 轮，每轮随机 count（1..64）与 8192 LBA 范围内的偏移；每轮 flush 后读回。
+ * 判据：种子固定使失败可复现；随机起点持续压 L2P miss/驱逐与 Journal 追加。
+ * 备注：真 NAND。 */
 
 static MunitResult test_host_io_random(const MunitParameter params[], void *data)
 {
@@ -220,6 +252,12 @@ static MunitResult test_host_io_random(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
+/* flush_reboot_readback — flush 后模拟重启再读。
+ *
+ * 覆盖：写 8 LBA → flush → ftl_ut_reboot_from_media（quiesce + fc_init + re-arm）→ 读回。
+ * 判据：数据必须来自介质上的 L2P/Journal，而不是进程内 cache；free 计数前后自洽。
+ * 备注：真 NAND。 */
+
 static MunitResult test_flush_reboot_readback(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -248,6 +286,14 @@ static MunitResult test_flush_reboot_readback(const MunitParameter params[], voi
 
     return MUNIT_OK;
 }
+
+/* trim_no_resurrection — TRIM 的明确持久化点。
+ *
+ * 覆盖：写→flush→trim→flush→强制一次 CP（等 IDLE 且序号超过用例起点）→读 0 →
+ *       模拟重启 → 仍读 0。
+ * 判据：TRIM 失效走 Journal，Journal-only 的持久化有已知缺口（RISK-HOST-11）；
+ *       本用例锚定「CP 落盘后不复活」这一确定点，不把缺口语义当通过。
+ * 备注：CP 基准取写入前——flush/trim 自身可能已触发 CP，取请求前会把已推进当没推进。 */
 
 static MunitResult test_trim_no_resurrection(const MunitParameter params[], void *data)
 {
@@ -316,6 +362,12 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
+/* preload_region_zero_and_high — 低/高 region 的预载互不别名。
+ *
+ * 覆盖：重启后分别访问 LBA 0 与 LBA 96（高位 region），两处都读回各自数据。
+ * 判据：region 0 常被当作哨兵/预载目标，若与高位 region 共用行或路由，会读到对方数据。
+ * 备注：真 NAND。 */
+
 static MunitResult test_preload_region_zero_and_high(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -353,6 +405,14 @@ static MunitResult test_preload_region_zero_and_high(const MunitParameter params
 
     return MUNIT_OK;
 }
+
+/* journal_barrier_cp_progress — Journal 屏障与 CP 落盘。
+ *
+ * 覆盖：写→flush 后 journal 无 pending；显式 request CP 后序号推进、phase 回 IDLE，
+ *       且 on-media Header 的 sequence 等于目标；重启后数据一致。
+ * 判据：序号在 Header prep 时就 ++，只等序号会在 Header 未落盘时提前退出；
+ *       find_latest 会覆盖 cp_state.sequence，所以先取 cp_target 再调用（RISK-UT-02）。
+ * 备注：真 NAND。 */
 
 static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[], void *data)
 {
@@ -409,6 +469,12 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
     return MUNIT_OK;
 }
 
+/* gc_progress — 主动 GC 的搬移与回收推进。
+ *
+ * 覆盖：写 8 LBA 后关闭仍打开的 SB（保证 closed 列表里有有效 CW 的 victim）；
+ *       mig_gc_request_urgent 后 moved 或 reclaimed 至少一个增长；源 LBA 仍可读。
+ * 判据：搬移必须同时更新 L2P 与回收计数；只动一边会丢映射或漏回收。真 NAND。 */
+
 static MunitResult test_gc_progress(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -460,6 +526,13 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
 
     return MUNIT_OK;
 }
+
+/* wl_progress — 静态 WL 的搬迁（UBI 判据）。
+ *
+ * 覆盖：写满一个 SB（64 页 × 8 LBA）后关闭；把 used 块擦除次数压到 100、空闲块抬到
+ *       400 造出 UBI 判据；触发后必须进入 MIG_KIND_WL，moved 增长，数据仍可读。
+ * 判据：WL 目的块取擦除次数最高的空闲块；只搬不校验会静默丢冷数据。
+ * 备注：真 NAND；high-wear 分支未覆盖（RISK-WL-*）。 */
 
 static MunitResult test_wl_progress(const MunitParameter params[], void *data)
 {
@@ -563,6 +636,13 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* cp_probe_clean_media — 干净介质的启动判据。
+ *
+ * 覆盖：cp_media_status_probe=CURRENT 且 version=FTL_MEDIA_LAYOUT_VERSION；
+ *       pfr_media_check_format 判定无需格式化。
+ * 判据：误判会让每次启动都全片格式化（用户数据清零），这是启动路径最贵的错误。
+ * 备注：真 NAND。 */
+
 static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -605,6 +685,13 @@ static void media_erase_bbt_pool(alc_t *a)
     }
     memset(&a->bbt, 0, sizeof(a->bbt));
 }
+
+/* bbt_persist — BBT 的 save→reload 持久化。
+ *
+ * 覆盖：标坏一个空闲块 → bbt_save（dirty 清零、sequence 推进）→ 模拟重启并走
+ *       生产 bbt_init → 坏块仍在。
+ * 判据：坏块图丢失会把已知坏块当可用块写，首次上板才炸。
+ * 备注：先清 BBT 池隔离「多圈 ring 选中旧 record」的 RISK-BBT-18；真 NAND。 */
 
 static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
 {
@@ -661,6 +748,14 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
 }
 
 /* L1/L2 真 NAND 用例按 design 文档 §4.5 逐步加入；子套件在 ut_main.c 注册。 */
+/* format_in_progress_resume — 两阶段格式化中断后的恢复。
+ *
+ * 覆盖：写一条 FORMAT_IN_PROGRESS 的 BBT record（用更大 sequence 保证 bootstrap 扫描
+ *       选中）+ 擦 CP 池 ⇒ 探针 NO_RECORD、需要格式化；重启后标志恢复；完整 format
+ *       的提交点写 initial CP 并清标志。
+ * 判据：标志丢失 + 无 CP 会被判成「损坏」而拒绝启动或误格式化（RISK-BOOT-04/17/22）。
+ * 备注：不擦 BBT 载体——失败路径上擦 spare 会丢坏块图；bbt_save 在 dirty=0 时是空操作。 */
+
 static MunitResult test_format_in_progress_resume(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -722,6 +817,13 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* cp_corrupt_refuse_format — CP 损坏时必须拒绝格式化。
+ *
+ * 覆盖：擦 CP 池后在 slot0/page0 写非 FF 页 ⇒ 探针 IO_ERROR（不是 NO_RECORD）；
+ *       pfr_media_check_format 返回 FTL_ERROR 且 need_format=false；最后完整 format 恢复。
+ * 判据：介质有内容但没有有效 CP 时格式化会擦掉用户数据；必须拒绝并把决定权交给用户
+ *       （RISK-BOOT-03）。真 NAND。 */
+
 static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -775,6 +877,8 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
 
     return MUNIT_OK;
 }
+
+/* ══ 子套件 /ftl/media/e2e/：真 NAND 端到端（破坏性）══ */
 
 MunitTest g_ftl_media_e2e_tests[] = {
     {                  (char *)"media_live",                   test_media_live, media_setup, media_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,        NULL},
