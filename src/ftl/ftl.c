@@ -414,7 +414,7 @@ static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
  *     pending，等 RR 收尾时统一结算；
  *   · command_id 置哨兵：本命令随即 release，其 id 会被后续 fc_command_alloc 复用，
  *     留旧值会让新命令的完成误撞上本项；
- *   · 收尾（含一律报 IO_ERROR 的语义）在 rr_finish 里，见该处注释。
+ *   · 收尾（含一律报 IO_ERROR 的语义）在 rr_job_finish 里，见该处注释。
  * ⚠ 恢复**必须**异步：本函数跑在完成泵里，当场同步跑三级恢复就是泵里再开泵（嵌套泵），
  *   且整条 host 读流水线被一个坏页钉住。 */
 static void ftl_host_io_read_fail(ftl_ctx_t *ftl, pend_req_t *pending)

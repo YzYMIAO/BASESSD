@@ -54,7 +54,7 @@ typedef enum
 
 /* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
  * 消费方：ftl_host_io_callback 读成功后 rr_record_ecc；
- *         rr_should_predict / rr_get_health 查询健康度。
+ *         rr_get_health 查询健康度。
  *
  * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）
  * 只需与上一次比较，8 格环形缓冲实际供给的是最老那格的值（本次一并修复）。

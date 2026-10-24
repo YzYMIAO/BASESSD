@@ -16,10 +16,13 @@
  *           → CRITICAL（单次 ≥RR_ECC_HIGH_WATER 或趋势到顶）→ DYING（单次 ≥RR_ECC_MAX）
  *
  * 文件结构：
- *   1. 记录/判定   rr_record_ecc
- *   2. 恢复路径     rr_handle / rr_step（static）/ ftl_read_recovery_callback（异步 job 状态机）
- *   3. 判定扫描     rr_should_predict / rr_get_health / rr_predictive_scan
- *   4. 退役         rr_retire_block
+ *   1. 记录         rr_record_ecc / rr_record_block_ecc
+ *   2. 恢复 job     rr_read_submit / rr_select_plane / rr_settle_plane /
+ *                   rr_job_finish / rr_job_abort / rr_job_step（static）
+ *   3. typed handle rr_init / rr_trigger / rr_status_fill / rr_handle
+ *   4. 完成服务     rr_read_complete（static）/ ftl_read_recovery_callback
+ *   5. 判定扫描     rr_get_health / rr_predictive_scan
+ *   6. 退役         rr_retire_block / rr_retire_block_at
  *
  * ⚠ 层内接口（rr_record_ecc / rr_handle / rr_predictive_scan / rr_retire_block）
  *   形参由调用者保证非空；实例 handle 由 ftl_contract_audit 在 boot 期证明，
@@ -40,6 +43,13 @@
 #include "onfi_1_0.h"
 
 #include <string.h>
+
+/* ── 文件级静态数据 ── */
+
+/* 不可恢复读的限流日志：坏块上的 LBA 会被 host（文件系统元数据）反复读，
+ * 逐次 LOGE 会写满 UART 并拖慢校验。5 s 一行 + suppressed；已 BAD 的块不再重复标坏。 */
+static DWORD s_rr_unrec_log_ms;
+static DWORD s_rr_unrec_suppressed;
 
 /* ── 1. 记录 / 判定 ── */
 
@@ -69,7 +79,7 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
     /* 健康状态**单调升级**：只取 max，绝不回落。
      * ⚠ 逐条直接赋值会让 CRITICAL/DYING 块在后续几次低 ECC 连续上升时被打回
      *   WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖慢死信号。 */
-    BYTE level = track->health;
+    rr_block_health_e level = track->health;
 
     if ((track->rising_count >= RR_ECC_RISING_THRESHOLD) && (level < RR_BLOCK_WARNING))
     {
@@ -88,7 +98,8 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
 
 void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
 {
-    ASSERT(alloc != NULL);
+    /* 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
+     * gblock 的界内由 BST 唯一索引入口保证，此处只保留越界断言（H31）。 */
     ASSERT(gblock < FTL_BLOCK_TOTAL);
 
     bst_block_t *blk = &alloc->blocks[gblock];
@@ -97,17 +108,9 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
     blk->read_count++;
 }
 
-void rr_retire_block_at(alc_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    rr_retire_block(&alloc->blocks[gblock]);
-}
-
 /* ── 2. 恢复路径（异步 job 状态机）──
  *
- * 三级管线的**分步**实现：rr_step 的 stage 序列每步只提交一条命令就返回。
+ * 三级管线的**分步**实现：rr_job_step 的 stage 序列每步只提交一条命令就返回。
  *
  *   读一次；**只有 CRC_ERROR** 允许再读一次；UNC/NAND/META 等直接失败。
  *   本器件 `0x89` 是保留地址（无读电压重试表），邻居页辅助也无法恢复目标页
@@ -117,7 +120,7 @@ void rr_retire_block_at(alc_t *alloc, WORD gblock)
  * ⚠ 本文件的每一条命令都走 ftl_async_* + ftl_op_submit（**不同步等待**）——
  *   服务函数里再跑完成泵就是嵌套泵（见 ftl_op.h）。
  * ⚠ rr_select_plane 里的 l2p_read 不同步加载：region 未命中时
- *   它起异步加载并返回 FTL_AGAIN，rr_step 原地等下轮（`stall_ms` 清零，
+ *   它起异步加载并返回 FTL_AGAIN，rr_job_step 原地等下轮（`stall_ms` 清零，
  *   加载在飞不算提交卡死）。本文件至此**零同步等待**。
  */
 
@@ -133,11 +136,11 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
         return st;
     }
 
-    rr->waiting = 1U;
+    rr->waiting = true;
 
     if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, rr) != FTL_OK)
     {
-        rr->waiting = 0U;
+        rr->waiting = false;
         (void)fc_command_release(cmd);
         return FTL_AGAIN;
     }
@@ -196,16 +199,11 @@ static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
     return (rr->page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
 }
 
-/* 不可恢复读的限流日志：坏块上的 LBA 会被 host（文件系统元数据）反复读，
- * 逐次 LOGE 会写满 UART 并拖慢校验。5 s 一行 + suppressed；已 BAD 的块不再重复标坏。 */
-static DWORD s_rr_unrec_log_ms;
-static DWORD s_rr_unrec_n;
-
-static bool rr_unrec_log_due(DWORD *out_suppressed)
+static bool rr_unrec_log_is_due(DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    bool due = (s_rr_unrec_n >= 64U);
+    bool due = (s_rr_unrec_suppressed >= 64U);
 
     if ((!due) && (now_ms != 0U))
     {
@@ -215,13 +213,13 @@ static bool rr_unrec_log_due(DWORD *out_suppressed)
 
     if (!due)
     {
-        s_rr_unrec_n++;
+        s_rr_unrec_suppressed++;
         return false;
     }
 
-    *out_suppressed   = s_rr_unrec_n;
-    s_rr_unrec_n      = 0U;
-    s_rr_unrec_log_ms = now_ms;
+    *out_suppressed       = s_rr_unrec_suppressed;
+    s_rr_unrec_suppressed = 0U;
+    s_rr_unrec_log_ms     = now_ms;
     return true;
 }
 
@@ -246,7 +244,7 @@ static void rr_settle_plane(rr_handle_t *rr)
         }
         BYTE *dst = rr->owner.upper_buf + (k * FTL_IU_BYTES);
 
-        if (rr->recovered != 0U)
+        if (rr->recovered)
         {
             memcpy(dst, rr->page_scratch + (ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
         }
@@ -256,16 +254,18 @@ static void rr_settle_plane(rr_handle_t *rr)
         }
     }
 
-    if (rr->recovered == 0U)
+    if (!rr->recovered)
     {
-        rr->all_ok = 0U; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
+        rr->all_ok = false; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
         rr->planes_failed++;
 
-        const DWORD lba         = rr->owner.lba + rr->first;
-        const DWORD fail_pba    = rr->page; /* 目标页基址（cw=0） */
-        const DWORD fail_paa    = pba_to_paa(fail_pba);
-        const WORD  gblock      = ftl_pba_gblock(rr->page);
-        const bool  already_bad = ftl_block_is_bad(&rr->alloc->blocks[gblock]);
+        const DWORD lba      = rr->owner.lba + rr->first;
+        const DWORD fail_pba = rr->page; /* 目标页基址（cw=0） */
+        const DWORD fail_paa = pba_to_paa(fail_pba);
+        const WORD  gblock   = ftl_pba_gblock(fail_pba);
+
+        bst_block_t *const blk         = &rr->alloc->blocks[gblock];
+        const bool         already_bad = ftl_block_is_bad(blk);
 
         /* 读（含 CRC 重读）失败 ⇒ 页面已损坏提升为块级不可靠。
          * XOR/RAID 恢复未实现（CONFIG_FC_RAID=0）⇒ 块退役。
@@ -298,7 +298,7 @@ static void rr_settle_plane(rr_handle_t *rr)
         {
             DWORD suppressed = 0U;
 
-            if (rr_unrec_log_due(&suppressed))
+            if (rr_unrec_log_is_due(&suppressed))
             {
                 LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n",
                      lba,
@@ -328,28 +328,28 @@ static void rr_settle_plane(rr_handle_t *rr)
 
 /* 收尾：释放被托管的 pending 槽 + 让 host 读组结算。
  * owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。 */
-static void rr_finish(rr_handle_t *rr)
+static void rr_job_finish(rr_handle_t *rr)
 {
     const ssd_status_e status =
-        (rr->all_ok != 0U) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+        (rr->all_ok) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。
-     * owners 已在 rr->owner 中按值保存；先释放槽再结算组，顺序与旧端口一致。 */
+     * owners 已保存在 rr->owner（槽释放不影响本副本）；先释放槽再结算组。 */
     /* 不新增逐次 done 行：读失败现场由 [RR  ] unc（限流）承担，恢复过程由
      * [RR  ] job 心跳（卡住时才出现）承担。每次恢复都打 done 在坏介质下会刷屏。 */
 
     pend_release_index(rr->pending, rr->owner.pending_idx);
     pend_group_complete_subop_multi(rr->pending, rr->owner.owners, status);
 
-    rr->has_owner = 0U;
+    rr->has_owner = false;
     rr->stage     = RR_STAGE_IDLE;
-    rr->waiting   = 0U;
+    rr->waiting   = false;
 }
 
 /* 卡死兜底：提交侧长期无进展（命令池泄漏），按恢复失败收尾。
  * ⚠ **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。 */
-static void rr_abort(rr_handle_t *rr)
+static void rr_job_abort(rr_handle_t *rr)
 {
     LOGE(LOG_TAG_RR "submit stalled, abort lba=%lu\r\n", rr->owner.lba);
 
@@ -358,13 +358,13 @@ static void rr_abort(rr_handle_t *rr)
         memset(rr->owner.upper_buf + (k * FTL_IU_BYTES), 0, FTL_IU_BYTES);
     }
 
-    rr->all_ok = 0U;
-    rr->error  = (int32_t)FTL_TIMEOUT;
+    rr->all_ok = false;
+    rr->error  = FTL_TIMEOUT;
     rr->stage  = RR_STAGE_FINISH;
 }
 
 /* --------------------------------------------------------------------
- * rr_step
+ * rr_job_step
  *   功能：推进状态机——跑纯计算 stage 直到提交出一条命令、或整个 job 收尾。
  *   参数：ftl —— 实例。
  *   返回：无。
@@ -372,41 +372,40 @@ static void rr_abort(rr_handle_t *rr)
  *             return（stage 原地不动，等完成服务函数改写）；提交失败（背压）同样
  *             return，stage 不变 ⇒ 下轮 rr_handle 再试同一 stage（幂等）。
  * -------------------------------------------------------------------- */
-static void rr_step(rr_handle_t *rr)
+static void rr_job_step(rr_handle_t *rr)
 {
     for (;;)
     {
-        switch ((rr_stage_e)rr->stage)
+        switch (rr->stage)
         {
             case RR_STAGE_IDLE:
             {
                 /* 优先用 rr_trigger 登记的 owner；否则向 pending owner API 领取一个
                  * 被托管的读子操作。都没有就空闲退出。 */
-                if (rr->has_owner == 0U)
+                if (!rr->has_owner)
                 {
                     pend_op_view_t view;
-                    rr_owner_t     owner;
 
                     if (!pend_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view))
                     {
                         return;
                     }
-                    owner.owners      = view.owners;
-                    owner.pending_idx = view.index;
-                    owner.upper_buf   = (BYTE *)view.buffer;
-                    owner.lba         = view.lba;
-                    owner.n_cw        = view.n_cw;
-                    rr->owner         = owner;
-                    rr->has_owner     = 1U;
+
+                    rr->owner.owners      = view.owners;
+                    rr->owner.pending_idx = view.index;
+                    rr->owner.upper_buf   = (BYTE *)view.buffer;
+                    rr->owner.lba         = view.lba;
+                    rr->owner.n_cw        = view.n_cw;
+                    rr->has_owner         = true;
                 }
 
                 rr->plane            = 0U;
-                rr->recovered        = 0U;
+                rr->recovered        = false;
                 rr->planes_recovered = 0U;
                 rr->planes_failed    = 0U;
-                rr->error            = (int32_t)FTL_OK;
-                rr->all_ok           = 1U; /* 聚合结果：任一 plane 失败才清零 */
-                rr->stall_ms         = 0U; /* 新 job：卡死计数从头算（不复用上一 job 的） */
+                rr->error            = FTL_OK;
+                rr->all_ok           = true; /* 聚合结果：任一 plane 失败才清零 */
+                rr->stall_ms         = 0U;   /* 新 job：卡死计数从头算（不复用上一 job 的） */
                 rr->start_ms         = ftl_job_now_ms();
                 rr->log_ms           = rr->start_ms;
                 rr->stage            = RR_STAGE_PLANE;
@@ -441,14 +440,16 @@ static void rr_step(rr_handle_t *rr)
                 /* 目标页所在块已是 BAD：重试/邻居只能白读 NAND。直接按失败结算
                  * ——数据已不可恢复，早失败早返回（否则每次 host 读要白跑 8 次重试，
                  * 校验速度被拖到写速度以下）。 */
-                if (ftl_block_is_bad(&rr->alloc->blocks[ftl_pba_gblock(rr->page)]))
+                const WORD gblock = ftl_pba_gblock(rr->page);
+
+                if (ftl_block_is_bad(&rr->alloc->blocks[gblock]))
                 {
                     rr->stage = RR_STAGE_PLANE_END;
                     break;
                 }
 
                 rr->attempt     = 1U;
-                rr->recovered   = 0U;
+                rr->recovered   = false;
                 rr->retry_count = 0U;
                 rr->stage       = RR_STAGE_READ;
                 break;
@@ -463,7 +464,7 @@ static void rr_step(rr_handle_t *rr)
                  * stage 不变，下轮 rr_handle 重试。 */
                 if (st == FTL_ERROR)
                 {
-                    rr_abort(rr);
+                    rr_job_abort(rr);
                 }
                 return;
             }
@@ -475,7 +476,7 @@ static void rr_step(rr_handle_t *rr)
                 break;
 
             case RR_STAGE_FINISH:
-                rr_finish(rr);
+                rr_job_finish(rr);
                 break; /* 回到 IDLE，继续看还有没有下一个托管项 */
 
             default:
@@ -485,15 +486,70 @@ static void rr_step(rr_handle_t *rr)
     }
 }
 
-/* --------------------------------------------------------------------
- * rr_service_step
- *   功能：Read Recovery job 的推进主体（typed 入口的内部实现）。
- *   实现要点：分三支——空闲 ⇒ rr_step 领活；命令在飞 ⇒ 直接返回；未在飞又推进不下去
- *             （提交侧背压）⇒ 累计无进展时长，超 FTL_SUBMIT_TIMEOUT_MS 判卡死收尾。
- *             幂等且廉价：空闲且无托管项时只问一次 pending 端口。
- * -------------------------------------------------------------------- */
-static void rr_service_step(rr_handle_t *rr)
+/* ── typed handle（端口装配 / 触发 / 上报） ── */
+
+void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending)
 {
+    /* 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
+     * （cache / alloc / rr_page_scratch / pending 均为实例内嵌对象的地址）⇒ 不重复检查。 */
+    memset(rr, 0, sizeof(*rr));
+    rr->cache        = cache;
+    rr->alloc        = alloc;
+    rr->topo         = alc_topo(alloc);
+    rr->page_scratch = page_scratch;
+    rr->pending      = pending;
+    rr->error        = FTL_OK;
+}
+
+void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
+{
+    /* 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
+     * 当前 job 结束后由 pending 端口的 take 领走（行为与旧扫描一致）。 */
+    if ((rr->stage == RR_STAGE_IDLE) && (!rr->has_owner))
+    {
+        rr->owner     = *owner;
+        rr->has_owner = true;
+    }
+}
+
+static void rr_status_fill(const rr_handle_t *rr, rr_status_t *out)
+{
+    out->base.critical  = true; /* host 读在等结果，不推进即死等 */
+    out->base.wants_run = (rr->stage != RR_STAGE_IDLE) || (rr->has_owner);
+    out->base.progress  = rr->retry_count;
+    out->base.next_ms   = 0U;
+    out->base.error     = rr->error;
+
+    if (rr->waiting)
+    {
+        out->base.state = FTL_MODULE_WAITING;
+    }
+    else if (rr->stage != RR_STAGE_IDLE)
+    {
+        out->base.state = (rr->error != FTL_OK) ? FTL_MODULE_FAILED : FTL_MODULE_RUNNING;
+    }
+    else if (rr->has_owner)
+    {
+        out->base.state = FTL_MODULE_RUNNING;
+    }
+    else
+    {
+        out->base.state = FTL_MODULE_IDLE;
+    }
+
+    out->stage            = rr->stage;
+    out->waiting          = rr->waiting;
+    out->all_ok           = rr->all_ok;
+    out->retries          = rr->retry_count;
+    out->planes_recovered = rr->planes_recovered;
+    out->planes_failed    = rr->planes_failed;
+}
+
+void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
+{
+    /* info 当前不参与恢复决策；保留形参以统一 typed 入口。 */
+    (void)info;
+
     /* 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
      * ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
      *   那段同样属于「job 卡住」，正是心跳要暴露的。 */
@@ -513,113 +569,40 @@ static void rr_service_step(rr_handle_t *rr)
              ftl_job_age_ms(&rr->start_ms));
     }
 
-    if (rr->waiting != 0U)
+    if (!rr->waiting)
     {
-        return; /* 命令在飞：NAND 层自身超时保证它**必有**完成（超时置 FC_CW_STATUS_TIMEOUT） */
-    }
-
-    if (rr->stage == RR_STAGE_IDLE)
-    {
-        rr_step(rr); /* 无 job：看有没有新托管的子操作 */
-        return;
-    }
-
-    /* 有 job 却没在飞 = 上轮提交失败。连续无进展超过 submit deadline ⇒ 判卡死收尾。 */
-    {
-        const DWORD now_ms = ftl_job_now_ms();
-
-        if (now_ms != 0U)
+        if (rr->stage == RR_STAGE_IDLE)
         {
-            if (rr->stall_ms == 0U)
+            rr_job_step(rr); /* 无 job：看有没有新托管的子操作 */
+        }
+        else
+        {
+            /* 有 job 却没在飞 = 上轮提交失败。连续无进展超过 submit deadline ⇒ 判卡死收尾。 */
+            const DWORD now_ms = ftl_job_now_ms();
+
+            if (now_ms != 0U)
             {
-                rr->stall_ms = now_ms;
+                if (rr->stall_ms == 0U)
+                {
+                    rr->stall_ms = now_ms;
+                }
+                else if ((now_ms - rr->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
+                {
+                    rr->error = FTL_TIMEOUT;
+                    rr_job_abort(rr);
+                }
             }
-            else if ((now_ms - rr->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
-            {
-                rr->error = (int32_t)FTL_TIMEOUT;
-                rr_abort(rr);
-            }
+
+            rr_job_step(rr);
         }
     }
 
-    rr_step(rr);
-}
-
-/* ── typed handle（端口装配 / 触发 / 上报） ── */
-
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending)
-{
-    ASSERT(cache != NULL);
-    ASSERT(alloc != NULL);
-    ASSERT(page_scratch != NULL);
-    ASSERT(pending != NULL);
-
-    memset(rr, 0, sizeof(*rr));
-    rr->cache        = cache;
-    rr->alloc        = alloc;
-    rr->topo         = alc_topo(alloc);
-    rr->page_scratch = page_scratch;
-    rr->pending      = pending;
-    rr->error        = (int32_t)FTL_OK;
-}
-
-void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
-{
-    /* 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
-     * 当前 job 结束后由 pending 端口的 take 领走（行为与旧扫描一致）。 */
-    if ((rr->stage == RR_STAGE_IDLE) && (rr->has_owner == 0U))
-    {
-        rr->owner     = *owner;
-        rr->has_owner = 1U;
-    }
-}
-
-static void rr_status_fill(const rr_handle_t *rr, rr_status_t *out)
-{
-    out->base.critical  = true; /* host 读在等结果，不推进即死等 */
-    out->base.wants_run = (rr->stage != RR_STAGE_IDLE) || (rr->has_owner != 0U);
-    out->base.progress  = rr->retry_count;
-    out->base.next_ms   = 0U;
-    out->base.error     = rr->error;
-
-    if (rr->waiting != 0U)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (rr->stage != RR_STAGE_IDLE)
-    {
-        out->base.state = (rr->error != (int32_t)FTL_OK) ? FTL_MODULE_FAILED : FTL_MODULE_RUNNING;
-    }
-    else if (rr->has_owner != 0U)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->stage            = rr->stage;
-    out->waiting          = (rr->waiting != 0U);
-    out->all_ok           = (rr->all_ok != 0U);
-    out->retries          = rr->retry_count;
-    out->planes_recovered = rr->planes_recovered;
-    out->planes_failed    = rr->planes_failed;
-    out->desc_count       = 0U; /* compact 重下发机制：不保留失败命令的 desc */
-}
-
-void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
-{
-    /* info 当前不参与恢复决策；保留形参以统一 typed 入口。 */
-    (void)info;
-
-    rr_service_step(rr);
     rr_status_fill(rr, out);
 }
 
 /* ── RR 各 stage 的完成处理（ftl_read_recovery_callback 按 rr->stage 分派）──
  *
- * 共同约定：命令的 release 与 rr_step 续跑**不**在这里做（见 dispatcher）——
+ * 共同约定：命令的 release 与 rr_job_step 续跑**不**在这里做（见 dispatcher）——
  * 但 READ 分支必须在此把数据拷进 rr_page_scratch，因为 release 之后 desc 链失效。
  *
  * 读重试策略（SLC、本器件无 read-retry table）：
@@ -637,7 +620,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     if (!fc_cw_status_has_error(completion->status))
     {
         (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
-        rr->recovered = 1U;
+        rr->recovered = true;
         rr->stage     = RR_STAGE_PLANE_END;
         return;
     }
@@ -662,7 +645,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
  *         completion —— FC 完成状态；ctx —— rr。
  *   返回：无。
  *   实现要点：按 stage 分派到 rr_complete_* 判完成结果并改 stage，然后 release
- *             命令 → rr_step 续跑。
+ *             命令 → rr_job_step 续跑。
  *             ⚠ 成功判据：FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
@@ -683,15 +666,15 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
     /* 旁表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
      * 正常路径不该出现：每条 RR 命令提交时都登记了 &ftl->read_recovery_handle，
      * 且只被 take 一次。 */
-    if ((rr == NULL) || (rr->waiting == 0U))
+    if ((rr == NULL) || (!rr->waiting))
     {
         (void)fc_command_release(cmd);
         return;
     }
 
-    rr->waiting = 0U;
+    rr->waiting = false;
 
-    switch ((rr_stage_e)rr->stage)
+    switch (rr->stage)
     {
         case RR_STAGE_READ:
             rr_read_complete(rr, cmd, completion);
@@ -705,32 +688,9 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
 
     (void)fc_command_release(cmd);
 
-    rr_step(rr);
+    rr_job_step(rr);
 }
 /* ── 3. 判定（块数组 / 全表扫描）── */
-
-/* rr_should_predict — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，
- * 命中块号经 *gblock 出参给出（返回值只说"有没有命中"）。 */
-bool rr_should_predict(const bst_block_t *blocks, WORD max_blocks, WORD *gblock)
-{
-    if ((blocks == NULL) || (gblock == NULL))
-    {
-        return false;
-    }
-
-    for (WORD i = 0U; i < max_blocks; i++)
-    {
-        const rr_ecc_track_t *track = &blocks[i].rr;
-
-        if (track->health >= RR_BLOCK_CRITICAL)
-        {
-            *gblock = i;
-            return true;
-        }
-    }
-
-    return false;
-}
 
 /* rr_get_health — 取块健康状态（track 为 NULL 返回 HEALTHY） */
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
@@ -740,7 +700,7 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
         return RR_BLOCK_HEALTHY;
     }
 
-    return (rr_block_health_e)track->health;
+    return track->health;
 }
 
 /* --------------------------------------------------------------------
@@ -789,7 +749,9 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
                 {
                     continue;
                 }
-                if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])]))
+                const WORD peer_gblock = ftl_gblock(p, sb->plane_blocks[p]);
+
+                if (ftl_block_is_bad(&alloc->blocks[peer_gblock]))
                 {
                     bad_peer = true;
                     break;
@@ -835,4 +797,12 @@ void rr_retire_block(bst_block_t *b)
     b->rr.rising_count = 0U;
     b->rr.last_ecc     = 0U;
     b->read_count      = 0U;
+}
+
+void rr_retire_block_at(alc_t *alloc, WORD gblock)
+{
+    /* 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号。 */
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    rr_retire_block(&alloc->blocks[gblock]);
 }

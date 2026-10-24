@@ -72,9 +72,9 @@ typedef struct ftl_context ftl_ctx_t;
  */
 
 /* 状态机的 stage。约定：**stage 恒表示"当前该做/正在等的那一步"**——
- *   · 纯计算 stage（IDLE / PLANE / PLANE_END / FINISH）只从 rr_step 进入，
+ *   · 纯计算 stage（IDLE / PLANE / PLANE_END / FINISH）只从 rr_job_step 进入，
  *     跑完立刻转下一个 stage（不提交命令）；
- *   · 提交 stage（READ）由 rr_step 提交命令
+ *   · 提交 stage（READ）由 rr_job_step 提交命令
  *     后**原地停留**，等完成服务函数改写 stage。
  * 判「有没有命令在飞」用 waiting 而不是 stage：提交可能因背压失败（stage 不变但无命令）。 */
 typedef enum
@@ -159,7 +159,6 @@ typedef struct
     DWORD log_ms;
 } rr_handle_t;
 
-/* ── 模块 handle（typed 入口） ── */
 typedef struct
 {
     ftl_mod_status_t base;
@@ -170,8 +169,9 @@ typedef struct
     BYTE       retries; /* 已用读重试次数 */
     BYTE       planes_recovered;
     BYTE       planes_failed;
-    WORD       desc_count; /* 保留的 desc 数（compact 机制恒 0） */
 } rr_status_t;
+
+/* ── 接口 ── */
 
 /* rr_init - 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。 */
 void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending);
@@ -187,8 +187,6 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
  * @param out   出参：本轮结束后的上报（**非空**）
  */
 void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out);
-
-/* ── 接口 ── */
 
 /*
  * rr_record_ecc - 记录一次读取的 ECC bit 数，更新趋势
@@ -212,29 +210,8 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits);
  */
 void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits);
 
-/*
- * rr_retire_block_at - 退役 gblock（复位 read_count/ECC 趋势）
- *
- * @param alloc   分配器（持有 BST）
- * @param gblock  全局块号
- */
-void rr_retire_block_at(alc_t *alloc, WORD gblock);
-
 /* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
  * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
-
-/*
- * rr_should_predict - 检查是否需要预测性搬移
- *
- * ECC 趋势连续上升 ≥ RR_ECC_RISING_THRESHOLD 次
- * 或单次 ECC ≥ RR_ECC_HIGH_WATER → 返回该 Block。
- *
- * @param blocks    Block State Table（全表）
- * @param max_blocks 表大小（FTL_BLOCK_TOTAL）
- * @param gblock    输出：需搬移的全局 Block 编号
- * @return true 需要搬移，false 不需要
- */
-bool rr_should_predict(const bst_block_t *blocks, WORD max_blocks, WORD *gblock);
 
 /*
  * rr_get_health - 获取 Block 健康状态
@@ -268,5 +245,13 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
  * @param b 目标物理块
  */
 void rr_retire_block(bst_block_t *b);
+
+/*
+ * rr_retire_block_at - 退役 gblock（复位 read_count/ECC 趋势）
+ *
+ * @param alloc   分配器（持有 BST）
+ * @param gblock  全局块号
+ */
+void rr_retire_block_at(alc_t *alloc, WORD gblock);
 
 #endif /* FTL_READ_RECOVERY_H */

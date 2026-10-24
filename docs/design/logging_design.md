@@ -65,7 +65,7 @@
 | `[L2P ] job inflight` | INFO | `l2p_owner_flush_kick` | `load flush dirty` | 有在飞时 1 s |
 | `[TRIM] start/done` | INFO | `ftl_trim_begin/step` | start `lba n`；done `n elapsed` | 每次控制面 TRIM |
 | `[RR  ] unc` | ERROR（限流） | `rr_settle_plane` | `lba pba paa g pl bk pg cw retry st supp` | 首次故障 |
-| `[RR  ] job` | INFO | `rr_service_step` | `stage plane attempt retry stall age` | 卡住后 5 s |
+| `[RR  ] job` | INFO | `rr_handle` | `stage plane attempt retry stall age` | 卡住后 5 s |
 | `[FTL ] predictive relocate retired` | WARN | `mig_job_finish` | `g` | 每次 predict 命中 |
 
 空 victim（`vcw==0`）**不产生任何** `[MIG ] move`，也不会开启可见的 GC
