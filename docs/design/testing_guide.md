@@ -302,6 +302,7 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 | 配置 | 写 | 读 | 条件 |
 |---|---:|---:|---|
 | release 18:51:42 | **765 KB/s** | **884 KB/s** | 415/423 MB 无错误；断电重启 `restored`、`bad=0`（当时 `dng` 为 0）、`map/rd` 抽查通过 |
+| release -O2（2026-10-25） | **843 KB/s** | **889 KB/s** | 415/423 MB 无错误；与 18:51:42 的 765/884 同量级（主机缓存/GC 状态不同，非严格 A/B） |
 
 ### 7.2 4K 随机（Windows diskspd，128 MB 文件）
 
@@ -325,6 +326,27 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
   miss/驱逐，能压到 L2P 缓存、Journal、GC。
 - 因此 4K 随机不是“比 CW 还小”的测试，而是这个 FTL 最自然的随机 I/O 单位；
   真正更碎的是 512 B 随机，可作为极端用例，但不是日常必测。
+
+### 7.5 速度分层对照（2026-10-25，release -O2）
+
+器件 MT29F4G08ABADAWP（3.3 V，ONFI Mode 5，x16）：tWC/tRC = 20 ns ⇒ 总线 **100 MB/s**
+（1.8 V/25 ns 为 80 MB/s）；tR=25 µs、tPROG=200 µs（典型）、tERASE=700 µs（典型）。
+2-plane pair = 4096 B 主区（总线 4224 B ≈ 42.2 µs @100 MB/s）⇒ 理论上限：
+
+| 层级 | 读 | 写 |
+|---|---:|---:|
+| NAND 阵列 + 总线（2-plane） | 61 MB/s（普通）/ 97 MB/s（cache 流水） | 20.5 MB/s（cache program 稳态） |
+| FC raw（`/speed/fc_nand_rw`，cache 档） | 3.68 MB/s（阵列 **6%**） | 4.42 MB/s（**22%**） |
+| FTL host API（`/speed/ftl_rw`，cache 档） | 3.45 MB/s（**6%**） | 2.75 MB/s（**13%**） |
+| USB MSC（H2testw） | 0.889 MB/s（FS 总线 59%；FTL 内部 26%） | 0.843 MB/s（56%；31%） |
+
+按吞吐折算每个 4 KiB pair 的平均耗时：FC 读 1.11 ms / 写 0.93 ms；FTL 读 1.19 ms /
+写 1.49 ms，而器件单 pair 本身只需 67 µs（读）/ 242 µs（写）⇒ 当前内部瓶颈是 **CPU
+数据面**（PIO 逐字搬运 + randomizer/CRC + BCH），不是 NAND，也不是总线；USB FS
+12 Mbit/s 的 1.5 MB/s 是 host 侧硬顶。优化顺序与判据见 `known_risks.md` RISK-PERF-04。
+
+⚠ `/speed/` 读数是**吞吐**（含测试图案填充/校验 CPU），不是单命令延迟；munit 的
+`[ OK ] [ 耗时 ]` 受 DWT CYCCNT 回绕影响，速度只看行内 `*_ms`（RISK-UT-05）。
 
 ### 7.4 解释口径
 

@@ -6153,6 +6153,31 @@ ITCM：release **61,296 B**、debug **62,064 B**；`.dtcm_data` 67,832 B、
 
 ---
 
+## v1.00 — cache read 判据修正（已上板）
+
+**日期**：2026-10-25
+
+**问题**：FTL two-plane cache read 自 v0.93 实现以来**从未生效**（`cache_read_batches` 恒 0，
+每个 ≥16 LBA 的读在组首 decline 一次后回退普通读）。速度用例 `/speed/ftl_rw` 的探针定位到
+`cache_read_collect` 的两处判据错用：
+
+- `complete` 跨 plane 比较 `pba_page()`。`pba_page()` 只清 CW 位、**保留 plane/block 位**
+  ⇒ 两 plane 的同一页号永远不等（实测 plane0 `0x00045000` vs plane1 `0x000CDC04`），
+  收集结果恒为 0 个 pair。
+- 相邻 pair 的连续性用 `pba_page()+1`，那是给 **CW 位**加 1，不是页号 +1。
+
+**修正**：跨 plane 比较与连续性判断改用**页号字段** `pba_to_page()`；连续性仍要求
+同 plane 同块。跨 plane 不要求块号相同（Policy B 两 plane 独立选块），符合多平面 cache
+命令「两 plane 页号一致」的语义。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` / `make tests` / `make tests UT=FTL`
+通过，零新告警。**2026-10-25 已上板验证**：`/speed/ftl_rw` 2/2 通过，cache 档
+`rd_path=cache`、`rdc(b/d/f)=1600/0/0`、`err=0`（详见 RISK-HOST-13）。
+
+**介质布局**：无变化。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

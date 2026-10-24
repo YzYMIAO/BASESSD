@@ -1,6 +1,6 @@
 # USB MSC U 盘 — 可行性、架构与实施计划
 
-> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 全盘 H2testw 通过（release + 16 KB EP：写 673 KB/s / 读 758 KB/s，无错误）；掉电/多分区待测**。
+> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 全盘 H2testw 通过（release + 16 KB EP + `-O2`，2026-10-25：写 843 KB/s / 读 889 KB/s，415/423 MB 无错误）；掉电/多分区待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > 编译：`make all` / `make release` / `make tests UT=FC` 零新告警。
 > 上板证据（rev27）：Windows 识别 USB 磁盘 → MBR 分区 → FAT 格式化 →
@@ -12,7 +12,7 @@
 > 编译期上限 `FTL_LBA_MAX` 变为 **868,352（424 MiB）**；运行时按实际坏块取
 > min(plane)/min(instance)，以 boot `[CAP]` / USB READ CAPACITY 为准。
 > 上文 rev30 的 429 MiB 是历史证据，不重写。
-> 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）。
+> 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）；H2testw 吞吐与内部/器件上限的分层对照见 [`testing_guide.md`](testing_guide.md) §7.5 与 `known_risks.md` RISK-PERF-04。
 
 ---
 
