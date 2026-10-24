@@ -273,22 +273,22 @@
 | RISK-PERF-01 | 待后续 | OUT | — | 重复全表扫描 |
 | RISK-PERF-02 | 待后续 | OUT | — | 单 plane 目的写 |
 | RISK-GC-05 | 待后续 | OUT | — | GC bitmap 未实现 |
-| RISK-GC-06 | 待上板 | UT-P + UT-M + BOARD | `gc_trigger`、`gc_select_victim`、`gc_decode_cw_lba`、`gc_progress` | 并发 host 写/POR 人工 |
+| RISK-GC-06 | 部分已上板（2026-10-25：gc_trigger/select/decode/progress 已过；WL 5 s 节拍未直接断言） | UT-P + UT-M + BOARD | `gc_trigger`、`gc_select_victim`、`gc_decode_cw_lba`、`gc_progress` | 并发 host 写/POR 人工 |
 | RISK-JN-03 | 待上板 | UT-P + FI-NA | `journal_write_fail_clear` | 失败时序需注入 |
 | RISK-MIG-03 | 已修/部分上板 | UT-P + UT-M + BOARD | `valid_count_guard`、`trim_no_resurrection` | release 回绕负例未做 |
 | RISK-MIG-07 | 已复现 | BOARD | — | 需 H2testw / `fc=` 归因 |
 | RISK-MIG-08 | 待定位 | UT-M 部分 + BOARD | `bbt_persist` 的恢复段 | 全盘 dangling 需 H2testw |
 | RISK-GC-14 | 待上板 | UT-P + BOARD | `gc_select_victim` | NO_SPACE 假报需 host 负载 |
-| RISK-BBT-01 | 待上板 | UT-P + UT-M | `bbt_mark_bad`、`bbt_persist` | 幂等/持久化 |
+| RISK-BBT-01 | 部分已上板（2026-10-25：bbt_mark_bad/bbt_persist clean-pool 已过；写飞行中再标坏未验） | UT-P + UT-M | `bbt_mark_bad`、`bbt_persist` | 幂等/持久化 |
 | RISK-BBT-02 | 待上板 | UT-M 部分 + FI-NA | —（format-in-progress 未落地） | 读失败需注入 |
 | RISK-BBT-04 | 待后续 | OUT | — | 格式版本演进债 |
 | RISK-BBT-06 | 待后续 | UT-P 部分 + FI-NA | `bbt_metadata_bad` | 重复完成需注入 |
 | RISK-BBT-18 | 待定位 | UT-M 部分 | `bbt_persist`（先擦池） | 多圈 ring locate 选旧 record |
-| RISK-BBT-10 | 部分覆盖 | UT-P + UT-M | `bbt_mark_bad`、`bbt_metadata_bad`、`bbt_persist` | factory-scan / FORMAT_IN_PROGRESS 缺 |
-| RISK-BOOT-01 | 待上板 | UT-M | `preload_region_zero_and_high` | region 0/非 0 预载 |
-| RISK-BOOT-02 | 待上板 | UT-P + UT-M + BOARD | `md_abort_keeps_victim`；物理注入未落地 | carve 不选中已写块 |
+| RISK-BBT-10 | 部分覆盖（2026-10-25：`FORMAT_IN_PROGRESS` 恢复已由 UT 覆盖；factory-scan/format_erase 未做） | UT-P + UT-M | `bbt_mark_bad`、`bbt_metadata_bad`、`bbt_persist` | factory-scan / FORMAT_IN_PROGRESS 缺 |
+| RISK-BOOT-01 | 已闭合（2026-10-25：`preload_region_zero_and_high` 上板 85/85） | UT-M | `preload_region_zero_and_high` | region 0/非 0 预载 |
+| RISK-BOOT-02 | UT-P 已上板（2026-10-25：`md_abort_keeps_victim` RAM 语义）；物理注入未做 | UT-P + UT-M + BOARD | `md_abort_keeps_victim`；物理注入未落地 | carve 不选中已写块 |
 | RISK-BOOT-03 | 待上板 | UT-M | `cp_probe_clean_media`、`cp_corrupt_refuse_format` | 版本不符分支仍未覆盖 |
-| RISK-BOOT-04 | 待上板 | UT-M + BOARD | `format_in_progress_resume` | 三点掉电人工 |
+| RISK-BOOT-04 | 部分上板（2026-10-25：`format_in_progress_resume` 覆盖“save 后”断电点；erase 中/CP marker 前未做） | UT-M + BOARD | `format_in_progress_resume` | 三点掉电人工 |
 | RISK-BOOT-05 | 待上板 | UT-P + UT-M + BOARD | `cp_encoders`、`flush_reboot_readback`、`journal_barrier_cp_progress` | 真掉电人工 |
 | RISK-BOOT-13 | 待定位 | UT-M smoke + BOARD | `format_and_roundtrip` | HardFault 归因人工 |
 | RISK-MD-16 | 待定位 | UT-P + BOARD | `md_abort_keeps_victim`（RAM 语义） | 物理不可读 victim 页仍需注入 |
@@ -302,17 +302,17 @@
 | RISK-WL-04 | 待上板 | UT-P + UT-M + BOARD | `wl_trigger_and_victim`、`wl_victim_threshold`、`wl_progress` | POR/soak 人工 |
 | RISK-WL-05 | 待后续 | OUT | — | 重复全表扫描 |
 | RISK-IF-04 | 待上板 | UT-P + UT-M | `wbuf_density`、`host_io_matrix` | 布局/位图/迟到完成 |
-| RISK-IF-05 | 待上板 | UT-P | `op_ctx_capacity` | 64 项旁表 |
+| RISK-IF-05 | 已闭合（2026-10-25：`op_ctx_capacity` 上板 85/85） | UT-P | `op_ctx_capacity` | 64 项旁表 |
 | RISK-HOST-05 | 待定位 | BOARD | —（停泊超时纯 RAM 用例未落地） | 根因需现场日志 |
 | RISK-HOST-08 | 部分上板 | UT-M + BOARD | `trim_no_resurrection` | 极端时序人工 |
 | RISK-HOST-11 | 待定位 | UT-M + BOARD | `trim_no_resurrection`（顺序规避） | Journal 压力下 trim 持久化 |
 | RISK-HOST-09 | 待后续 | UT-M 特征化 + BOARD | `trim_no_resurrection` | 并发当前不可达 |
 | RISK-CR-02 | 待上板 | UT-P | `op_route`、`address_roundtrip` | dim 分解/路由 |
-| RISK-CR-03 | 待上板 | UT-P + UT-M | `op_route`、media 回归 | 分 handler/孤儿完成 |
+| RISK-CR-03 | 已闭合（2026-10-25：`/ftl/` 85/85 行为回归） | UT-P + UT-M | `op_route`、media 回归 | 分 handler/孤儿完成 |
 | RISK-WB-03 | 待上板 | UT-P + UT-M | `wbuf_append_read`、`wbuf_density`、`host_io_matrix` | 记账/位图/一次编程 |
 | RISK-LOG-02 | 待上板 | BOARD | — | 需 UART 速率观测 |
 | RISK-ARCH-02 | 待后续 | UT-P + OUT | `address_roundtrip` | 跨 LUN 未实现 |
-| RISK-ARCH-06 | 待后续 | UT-M + BOARD | media 回归 | 真 POR 人工 |
+| RISK-ARCH-06 | 已闭合（2026-10-25：`/ftl/` 85/85 + H2testw 415 MB 回归） | UT-M + BOARD | media 回归 | 真 POR 人工 |
 | RISK-USB-02 | 待上板 | BOARD | — | 拔线/复位/重枚举 |
 | RISK-USB-05 | 待上板 | BOARD | — | 需 USB 抓包看 FUA |
 | RISK-PLAT-07 | 信息/待决策 | BUILD | §6 构建顺序 | 共用 `debug.elf`，最后一次构建生效 |
@@ -322,7 +322,7 @@
 | RISK-ALLOC-06 | 待后续 | UT-P | `address_roundtrip` | 固定 `ftl_gblock` 截断行为 |
 | RISK-BIT-01 | 待后续 | UT-P | `cw_masks` | 掩码构造器交叉校验 |
 | RISK-RD-01 | 观察中 | UT-P + BOARD | `rr_health`、`rr_predictive_retire` | 映射/介质人工 |
-| RISK-PEND-02 | 已改未上板 | UT-P | `group_exhaustion` | 组槽耗尽 |
+| RISK-PEND-02 | 已闭合（2026-10-25：`group_exhaustion` 上板 85/85） | UT-P | `group_exhaustion` | 组槽耗尽 |
 | RISK-UT-01 | 已改未上板 | BUILD | 下次跑出 SKIP 的会话 | SKIP/FAIL 行格式 |
 | RISK-UT-02 | 已上板 | UT-M | `journal_barrier_cp_progress`、`trim_no_resurrection` | CP 判据已用 `cp 1->2` / `cp 2->3` 板端验证 |
 | RISK-UT-05 | 信息 | BUILD | — | munit 计时按 10.737 s（DWT CYCCNT）取模；速度只看行内 `*_ms` |

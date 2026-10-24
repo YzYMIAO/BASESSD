@@ -4307,8 +4307,10 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
    **不读** `*.handle.phase` / `waiting` / `active`。
 4. 超时四层归属：NAND/FC 操作超时在引擎；FTL 模块等待用自持 ms deadline；
    周期触发用 `last_run_ms` / `next_ms`；系统 liveness 用 IWDG（30 s，不在 ISR 喂狗）。
-5. 契约落地状态以 `known_risks.md` RISK-ARCH-06/10/11 与 `known_iss.md`
-   ISS-ARCH-01/02 为准；逐模块细节归档在 `docs/archive/ftl_module_contracts.md`。
+5. 契约落地状态以 `known_risks.md` RISK-ARCH-10/11 与 `known_iss.md`
+   ISS-ARCH-01/02 为准（RISK-ARCH-06 已于 2026-10-25 闭合，明细见
+   `docs/archive/known_risks_batches.md` §2026-10-25）；逐模块细节归档在
+   `docs/archive/ftl_module_contracts.md`。
 
 ### 5.2 状态机总表
 

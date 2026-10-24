@@ -79,6 +79,6 @@
 
 | ID | 状态 | 条目 | 来源 | 下一步 / 判据 |
 |---|---|---|---|---|
-| ISS-ARCH-01 | 未上板 | 模块 handle 契约迁移（Phase 0~8）：正常读写/GC/CP/journal/BBT 已由 2026-10-22 回归覆盖，**掉电/格式化中断/故障注入未单独验** | `../archive/ftl_module_contracts.md` §12；`RISK-ARCH-06` | 按 `RISK-ARCH-06` 的清单补板端回归 |
+| ISS-ARCH-01 | 已上板（2026-10-25） | 模块 handle 契约迁移（Phase 0~8）：正常读写/GC/CP/journal/BBT 已由 `/ftl/` 85/85 与 H2testw 415 MB 覆盖；**掉电/格式化中断/故障注入仍未单独验**（见 RISK-BOOT-22/BBT-18 等） | `../archive/ftl_module_contracts.md` §12；`RISK-ARCH-06`（已闭合，archive §2026-10-25） | 剩余只跟随 BOOT-22/BBT-18 等专项条目推进，不再单列契约回归 |
 | ISS-ARCH-02 | 待决策 | 契约正文（目标设计）与已落地签名存在偏离（`jrn_handle` trigger、`wbuf_handle` 返回码、`pending_confirm_*` 入参） | `../archive/ftl_module_contracts.md` §12；`RISK-ARCH-10` | 定“权威契约以哪份为准”；定稿前不要按文档强行改签名 |
 | ISS-CW-01 | 待决策 | `LUN_ADDR_WIDTH=0` 与多维地址构造的根因结论是否仍成立（cw 文档 §3.7 与 v0.73/v0.90 多维改动需对齐） | `../archive/cw_level_mapping_design.md` §3.7 | 与 ISS-ML-03 一起裁决 |

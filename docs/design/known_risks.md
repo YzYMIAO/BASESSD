@@ -37,7 +37,7 @@
 | RISK-PERF-04 | 信息（2026-10-25 release -O2 实测） | **内部数据面是 CPU-bound，NAND 阵列利用率极低**：2-plane 页 4096 B，按 datasheet（tR=25µs / tprog=200µs）阵列上限 ≈163.8 MB/s 读、20.5 MB/s 写。**接口上限也远未到**：x16 @3.3V Mode 5 的 tWC/tRC=20 ns ⇒ 2 B/20 ns = **100 MB/s** 总线（1.8V 25 ns ⇒ 80 MB/s）。按 datasheet 组合：2-plane pair（4096 B 主区）非流水读 25+42=67 µs ⇒ 61 MB/s，cache 流水读 ≈97 MB/s，cache program 稳态 4096 B/200 µs ⇒ 20.5 MB/s。release 实测：FC 读 3533–3591 KB/s（≈3.6 MB/s，阵列 6%）、FC 写 3670–4319 KB/s（≈4.0 MB/s，约 20%）、FTL host 读 3369 KB/s（5.7%）、FTL host 写 2499–2687 KB/s（12–13%）。debug→release 全线提速 2.2–2.5× ⇒ 瓶颈在 CPU 侧（PIO 拷贝 + randomizer/CRC + BCH），不是 NAND，也不是总线 | 无（功能正确性不受影响） | 按收益排序：① PIO → DMA（FC data path）；② BCH/randomizer 硬件化或向量化；③ 减少逐字节 copy。先用单 pair 拆 `tR` 与 CPU 段耗时验证 | 板端 2026-10-25 release 00:35 镜像 `/speed/` 4/4；H2testw 415/423 MB（**cache program + cache read 均开**）：写 843 KB/s、读 889 KB/s（USB FS 12 Mbit/s 的 56%/59%，FTL 内部的 31%/26%）；无 cache program 基线 765 KB/s（写 +10%），cache read 对读速无增益（884→889，RISK-PERF-03）；`src/platform/stm32h743/nand_dma.c`；MT29F4G08 datasheet tR/tprog/tWC/tRC |
 | RISK-PERF-02 | 待后续 | GC/WL 目的页仍逐 plane 单条写，没有 multi-plane 命令 | 正确性无影响 | 命令形式优化，需 FC 侧支持 | `docs/design/ftl_design.md §7.2` |
 | RISK-GC-05 | 待后续 | GC Bitmap（Layer 2）未实现：掉电后 GC 从块头重来 | 正确性由 F10 + 重试覆盖 | 性能优化项 | `docs/design/ftl_design.md §7.2` |
-| RISK-GC-06 | 待上板 | 本轮行为变化未板验：WL 5 s 节拍、CLOSED plane 门控、`valid_count` 单块上界、`gc_decode_cw_lba` 三态（T5 已于 2026-10-23 移出 GC） | 编译零告警 | 按 §2 板端清单回归（GC 并发覆盖写/TRIM、断电、WL、fault injection） | 提交 `fdc7c7f` |
+| RISK-GC-06 | 部分已上板（2026-10-25：gc_trigger/select/decode/progress 已过；WL 5 s 节拍未直接断言） | 本轮行为变化未板验：WL 5 s 节拍、CLOSED plane 门控、`valid_count` 单块上界、`gc_decode_cw_lba` 三态（T5 已于 2026-10-23 移出 GC） | 编译零告警 | 按 §2 板端清单回归（GC 并发覆盖写/TRIM、断电、WL、fault injection） | 提交 `fdc7c7f` |
 | RISK-JN-03 | 待上板 | `write_fail_pending` + CP 清账逻辑未做故障注入：页写失败 / 擦失败 / CP 早于失败点三种时序未实测 | 静态路径已审查 | 注入 Journal 页写失败，确认 victim 未擦、CP 后恢复 | `src/ftl/journal.c` / `src/ftl/checkpoint.c` |
 | RISK-MIG-03 | 已修；dangling 路径已上板观测（rev32），TRIM/release 回绕未单独验（**原二级崩溃**） | `bbt_mark_bad()` 清 `valid_count` 后，L2P 仍可能指向该块（predictive 读失败标坏 / full metadata rebuild 漏认）。写确认与 TRIM 直接调 `ftl_block_sub_valid()` ⇒ debug 撞 `valid_count > 0U` 断言（上板 rev27：`dangling lba=9 old=00025811 g=300 st=BAD ...` 后 `assertion failed bst.h:285`），release 则 uint16 回绕成 65535，虚高计数污染 GC/WL | 修法：`bst.h` 新增 `ftl_block_sub_valid_if_live()`（BAD 或 count==0 跳过）；写确认、TRIM、migrate 源块减计数统一用它 | ✅ rev32 上板已观测：308/2493 被 predict 标 BAD 后，host 覆盖写 LBA 440–447 只打 `[FTL] dangling lba=… g=308/2493 st=BAD … newg=313/4089 nst=OPEN`，**无断言、无回绕**，新映射正常落到 OPEN 块。待补：TRIM 同一 LBA；release 档回绕负例 | `include/ftl/bst.h` `ftl_block_sub_valid_if_live`；`src/ftl/ftl.c`（写确认 / `ftl_trim`）；`src/ftl/migrate.c`；rev27 崩溃日志 + rev32 dangling 日志 |
 | RISK-MIG-07 | 已复现（2026-10-21 夜 rev33），根因待定位 | **大批块在写阶段被 GC 读失败退役 ⇒ L2P 悬空到 BAD 块 ⇒ 校验阶段 host 读永久失败**：H2testw 写入 428 MB 期间 GC 累计 `mark BAD` 127 个 gblock（`fc_err`，page 8..61 均有）；`[FTL] dangling lba=208 ... st=BAD` 证明 L2P 仍指向已退役块。校验到 107 MB 时文件系统元数据 LBA 3 落在 gblock 356（已 BAD）⇒ RR 8 次重试失败 ⇒ 每次 host 重读都失败 ⇒ Code 21「设备未就绪」。**该 LBA 数据已不可恢复**（介质/读路径问题，不是映射崩溃）；写阶段本身全容量通过 | ① RR 对**已 BAD 块**快速失败（不再 8 次重试、不再重复 `bbt_mark_bad`）⇒ 校验速度与日志同时改善；② `read unrecoverable` 5 s 限流 + suppressed；③ MIG abort 日志增加原始 `fc=0x%08x` 状态位，用于区分 ECC 不可纠 / NAND 失败 / META 不符；④ 写阶段 GC 读失败率高仍是**开放问题** | 上板：format 后复跑，观察 `mark BAD` 速率是否仍 >100/次；看 `fc=` 位判断 UNC 占比；若以 UNC 为主 ⇒ 介质磨损，换片；若以 NAND/META 为主 ⇒ 查 GC 读地址/描述符链 | `src/ftl/read_recovery.c` `rr_settle_plane` / `rr_job_step`；`src/ftl/migrate.c` `mig_read_complete` / `mig_job_abort`；板端 `tmpl.log` 2026-10-21（2887 行）；**2026-10-21 夜 rev33 复现**（407 MiB 盘、第二个 279 MB 分区）：写入到 `free=1178→32` 后 GC 启动，156→**420** BAD（+264，全部 `fc_err`=UNC）、`dng=55`、`op=204/204→11/0`、`spare=50/50→0/29`，`wr` 在 53120 处冻结、USB 反复重挂载；悬空 LBA 从 262346 起（第二分区起点） |
@@ -50,12 +50,12 @@
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
-| RISK-BBT-01 | 待上板 | `bbt_mark_bad` 改为幂等 + `dirty_gen` 后，运行时标坏 / 重启持久化 / Spare 只减一次未实测 | 代码审查 + 编译零告警 | 上板：注入擦失败/RR 标坏，重启后 `bad_count`/`spare_count`/BBT 位一致；BBT 写飞行期间再标坏，下一次 save 必须包含新块 | `src/ftl/bbt.c` `bbt_mark_bad` / `bbt_write_submit` / `ftl_bbt_callback` |
+| RISK-BBT-01 | 部分已上板（2026-10-25：bbt_mark_bad/bbt_persist clean-pool 已过；写飞行中再标坏未验） | `bbt_mark_bad` 改为幂等 + `dirty_gen` 后，运行时标坏 / 重启持久化 / Spare 只减一次未实测 | 代码审查 + 编译零告警 | 上板：注入擦失败/RR 标坏，重启后 `bad_count`/`spare_count`/BBT 位一致；BBT 写飞行期间再标坏，下一次 save 必须包含新块 | `src/ftl/bbt.c` `bbt_mark_bad` / `bbt_write_submit` / `ftl_bbt_callback` |
 | RISK-BBT-02 | 待上板 | `ftl_sync_read_column` 现在对 NAND 错误返回 `FTL_ERROR`；工厂扫描对“读失败页”的判坏行为未实测 | BBT 侧 `!= FTL_OK ⇒ 坏块` 保守路径 | 注入列读失败，确认判坏而不是误判好块；注意空片出厂标记与 NAND 失败的区别 | `src/ftl/ftl_fc_interface.c` `ftl_sync_read_column` |
 | RISK-BBT-04 | 待后续 | BBT header **无布局版本字段**；只靠 `total_blocks` 做代理。块数相同但 bitmap 语义变化的格式演进无法识别 | `bbt_header_valid` 校验 `total_blocks == FTL_BLOCK_TOTAL` | 下次 BBT 格式变更时用 `reserved[]` 加版本（属于介质格式变更，需 bump `FTL_MEDIA_LAYOUT_VERSION`） | `include/ftl/bbt.h` `bbt_header_t` |
 | RISK-BBT-06 | 待后续 | `ftl_bbt_callback` 没有保存 in-flight `command_id`；擦完成与写完成若被重复投递，phase 可能误配 | `waiting==0` 的孤儿守卫只能挡 job 结束后的迟到完成 | **2026-10-19 核实**：FC 侧 `fc_complete_internal`（`fc.c:712-724`）**没有**「已 COMPLETED 就不重复入队」的守卫 ⇒ 是否重复完成完全取决于 NAND 层是否重复上报。当前 NAND 是单次轮询完成模型，无重复上报源 ⇒ 暂不修；换 NAND 引擎 / 加中断完成时**必须先补该守卫** | `src/ftl/bbt.c` `ftl_bbt_callback`；`src/fc/fc.c` `fc_complete_internal` |
 | RISK-BBT-18 | 待定位（2026-10-24 板端 UT 观测） | **多圈 BBT ring 上新写 record 后 reload 选到上一条**：介质历史 seq=1383、write_idx=103；`bbt_save` 写 seq=1384 到 idx=103 且返回 OK、dirty 清 0；随后 `bbt_load`/`bbt_init` 返回 **seq=1383、count=0**，新标坏块不在 bitmap。干净 BBT 池下 save→load 正常（seq=1），故持久化写入本身 OK；问题在 `md_ring_locate` 对“ring 已写满多圈 + 当前块半写”的定位（游标块末尾可能来自上一圈，“降序找最后一条有效”会选中旧 record）。后果：重启可能加载旧 BBT，最近运行期标坏的块丢失，坏块可能再次被分配 | clean-pool UT 覆盖基本持久化；运行期每次标坏仍会再写新 record；未观察到数据错误。**2026-10-24 21:29 第二次独立复现**：`format_in_progress_resume` 置 FORMAT_IN_PROGRESS 后 `bbt_save`，重启后标志读不回来（新 record 被旧 record 盖过）；用“更大 sequence 的新 record”可胜出 ⇒ 与“选旧 record”一致 | 构造 >2 圈 BBT 写入后 save/reload 复现；检查 `md_ring_locate` 的块末探针与游标块扫描，改为按 sequence 最大值而非“最后一个有效”定位；修后 clean/多圈两条 UT 都要过 | 板端 2026-10-24 `test /ftl/media/e2e/bbt_persist` 日志（seq1383→1384，reload 1383）；**同日 21:29** `format_in_progress_resume` 重启后 `alc_bbt_is_format_in_progress` 为 false（save 的 flag record 未被 reload 选中）；`src/ftl/metadata.c` `md_ring_locate`；`src/ftl/bbt.c` `bbt_save`/`bbt_load`；`tests/unit/test_ftl_media.c` `test_format_in_progress_resume`（sequence 抬升法） |
-| RISK-BBT-10 | 部分覆盖（2026-10-24 上板） | BBT 的 `mark_bad` 幂等/Spare 一次、元数据块丢失标记、clean-pool save→load 已由 `pure/mem/bbt_*` 与 `media/e2e/bbt_persist` 覆盖；`kick/scan_factory/format_erase/FORMAT_IN_PROGRESS` 恢复仍未单测 | 用例已入库；多圈 ring 定位问题见 RISK-BBT-18 | 补 factory-scan / format-in-progress 注入用例 | `tests/unit/test_ftl_pure.c`、`tests/unit/test_ftl_media.c`；`docs/design/ftl_ut_design.md` §4.1 |
+| RISK-BBT-10 | 部分覆盖（2026-10-25：`FORMAT_IN_PROGRESS` 恢复已由 UT 覆盖；factory-scan/format_erase 未做） | BBT 的 `mark_bad` 幂等/Spare 一次、元数据块丢失标记、clean-pool save→load 已由 `pure/mem/bbt_*` 与 `media/e2e/bbt_persist` 覆盖；`kick/scan_factory/format_erase` 仍未单测；`FORMAT_IN_PROGRESS` 恢复已由 `format_in_progress_resume` 覆盖（2026-10-25） | 用例已入库；多圈 ring 定位问题见 RISK-BBT-18 | 补 factory-scan / format-in-progress 注入用例 | `tests/unit/test_ftl_pure.c`、`tests/unit/test_ftl_media.c`；`docs/design/ftl_ut_design.md` §4.1 |
 
 ---
 
@@ -63,10 +63,9 @@
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
-| RISK-BOOT-01 | 待上板 | ~~F4 按 INVALID 行的 `region_id` 反查 CP bitmap ⇒ 全部别名到 region 0~~ | 新增 `l2p_cache_preload_region(cache, global_region, pba)`：由 CP bitmap **逐 bit** 找 INVALID 行、设 `region_id`、同步读、置 CLEAN/INVALID；F4 只对 resident CLEAN 行做 bitmap 失效 | 上板：region 0 与非 0 region 各预载一次，确认 `l2p_cache_find` 不返回别名、post-CP 映射可读 | `src/ftl/l2p_cache.c`；`src/ftl/power_failure_recovery.c` `pfr_boot_apply_region_bitmap` |
-| RISK-BOOT-02 | 待上板 | ~~carve 先于 full metadata rebuild ⇒ 写过块同时是池成员与 CLOSED 条目 ⇒ 活数据可被复用~~ | 三条路径统一 **full metadata rebuild / 快照 → carve**；`pfr_boot_carve_pools` 只把 `state == NONE` 的块入池，其余只计入 `total_blocks` | 上板：预置数据在旧 carve 会选中的块上，走 full metadata rebuild fallback 后验证不在池 | `src/ftl/power_failure_recovery.c` |
+| RISK-BOOT-02 | UT-P 已上板（2026-10-25：`md_abort_keeps_victim` RAM 语义）；物理注入未做 | ~~carve 先于 full metadata rebuild ⇒ 写过块同时是池成员与 CLOSED 条目 ⇒ 活数据可被复用~~ | 三条路径统一 **full metadata rebuild / 快照 → carve**；`pfr_boot_carve_pools` 只把 `state == NONE` 的块入池，其余只计入 `total_blocks` | 上板：预置数据在旧 carve 会选中的块上，走 full metadata rebuild fallback 后验证不在池 | `src/ftl/power_failure_recovery.c` |
 | RISK-BOOT-03 | 部分已上板（2026-10-24：IO_ERROR 分支已由 UT 覆盖） | ~~CP 读失败被当作“需要格式化” ⇒ 一次瞬时读错整片擦除~~ | `cp_media_status_probe` 区分 `CURRENT / NO_RECORD / VERSION_MISMATCH / IO_ERROR`；`pfr_media_check_format` 对 IO_ERROR 返回 `FTL_ERROR`，`main` 拒绝格式化并停止启动。UT `cp_corrupt_refuse_format` 已上板：擦 CP 池 + 写非 FF 页 ⇒ IO_ERROR、拒绝格式化 | 版本不符（VERSION_MISMATCH）分支仍未单测；真读失败注入仍无 seam | `src/ftl/checkpoint.c`；`src/main.c`；`tests/unit/test_ftl_media.c` `test_cp_corrupt_refuse_format` |
-| RISK-BOOT-04 | 待上板 | 两阶段格式化中途掉电后，重启不能判断“格式化未完成” | `FORMAT_IN_PROGRESS` 写入 `bbt_header_t.reserved[0]`，`bbt_load` 恢复；`cp_media_status_probe` 见该标志返回 NO_RECORD ⇒ 继续格式化 | 上板：save 后 / erase 中 / CP marker 前各断电一次 | `src/ftl/bbt.c`；`src/ftl/checkpoint.c` |
+| RISK-BOOT-04 | 部分上板（2026-10-25：`format_in_progress_resume` 覆盖“save 后”断电点；erase 中/CP marker 前未做） | 两阶段格式化中途掉电后，重启不能判断“格式化未完成” | `FORMAT_IN_PROGRESS` 写入 `bbt_header_t.reserved[0]`，`bbt_load` 恢复；`cp_media_status_probe` 见该标志返回 NO_RECORD ⇒ 继续格式化 | 上板：save 后 / erase 中 / CP marker 前各断电一次 | `src/ftl/bbt.c`；`src/ftl/checkpoint.c` |
 | RISK-BOOT-05 | 待上板 | 快照/恢复路径的校验与计数改动未板验：restore Pass 0 全量校验（不再部分应用 BAD）、`recovery_materialize_pba` 校验 ch/ce/lun、`recovery_add_closed` 传播列表满、`valid_cw` 改 `uint32_t` | 编译零告警；失败路径回退 full metadata rebuild | 上板：快照中途注入非法 word（不留下部分 BAD）；journal 注入越界 PBA（回退 full metadata rebuild）；满盘重建确认 `valid_cw` 不截断 | `src/ftl/power_failure_recovery.c` |
 | RISK-BOOT-13 | 观察中（2026-10-24：POR 后无记录，判定为旧镜像残留；原始 format 后写请求挂死仍未定位） | `format` 完成后未按提示 `POWER-CYCLE NOW` 就下发 `wr`：曾出现 CLI 请求永久 `busy`；同一会话的 `.noinit` 记录显示 **HardFault** `PC=0x2400038c LR=0x24000b09 CFSR=IACCVIOL HFSR=FORCED`（按 rev25 解析落在 CLI 16 KB `g_wr_buf` 内，属执行流跳进非可执行 RAM）。**但一次 POR 后 `previous crash` 行消失，且 format→POR→wr/fl 正常** ⇒ 该记录至少可能是 rev24/旧会话的陈旧记录，不能归因于本轮 FTL 改动。另：format 后未重启的 `wr` 本次返回 `status=-3`，未再挂死 | `format` 已打印 `POWER-CYCLE NOW`；未做运行期拒绝 | ① 继续在 rev25 上做正常读写/断电回归；② 若 `previous crash` 再次出现：立即 `crash` + 记录命令序列，按**当次镜像**符号表定位；③ 考虑让 format 后置 FTL 为不可提交状态直到重启 | rev25 日志 2026-10-20：首次 `.noinit` 有 HardFault；**POR 后无该行**；`arm-none-eabi-nm` `g_wr_buf=0x240002dc`。**2026-10-24 追加**：21:09/21:14 镜像多次软复位后仍报同签名 MemManage（PC=0x2400038c LR=0x24000b09 CFSR=0x00000001），但 **21:14 镜像真实断电（`reset reason: POR PIN BOR`）后启动无 `previous crash` 行** ⇒ 该记录是更早会话/镜像的 `.noinit` 残留，不是当前镜像的活缺陷。只有 **POR 后仍出现** 才按新崩溃重开 |
 | RISK-MD-16 | 待定位（2026-10-22 板端） | **victim 上的 region 页读失败 ⇒ 压缩每轮在同一页中止，victim 永不回收**：板端 GC 期间反复出现 `[META] md job abort phase=2 victim=46 moved=10 (victim 不擦)`；`phase=2 = MD_JOB_CP_READ`，且**没有**伴随 `submit stalled` ⇒ 是读命令完成状态带错误位（若为提交超时则属瞬态）。每次 `victim=46/moved=10` 完全相同 ⇒ 确定性坏页，不是瞬时背压。后果：该元数据日志块无法搬空、live 水位偏高、压缩反复白做；**无数据丢失**（abort 不擦 victim，未搬 region 仍指向它，已搬的指向新页） | abort 语义本身安全（两边都有效）；日志已区分瞬态超时（debug）与真异常（限流 LOGE） | ① 先在 abort 行打出完成状态位（`fc=`）以区分 UNC/CRC/META；② L2 双副本下若 victim 上那份不可读而另一份有效 ⇒ 压缩**跳过该副本**（保留 Directory 的另一份），不要中止整轮；③ 两份都不可读 ⇒ 按 RISK-BOOT-18 降级该 region | `src/ftl/metadata_job.c` `md_handle_abort` / `md_cp_read_complete`；`src/ftl/metadata.c` `md_compact_read`；板端 2026-10-22 GC 日志 |
@@ -109,7 +108,6 @@
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-IF-04 | 待上板 | 本轮行为变化未板验：plane 1 迁移数据、wbuf 稀疏页、越段位图 release 拒绝、迟到完成路径 | 编译零告警（release 两条 unused 已消失） | 按 §5 板端清单回归 | `src/ftl/ftl_fc_interface.c` / `ftl_op.c` |
-| RISK-IF-05 | 待上板 | 旁表容量 `FTL_OP_CTX_TABLE_SIZE` 32 → `FC_COMMAND_POOL_DEPTH`（64）：**修复**原容量小于真实上界（表按 `command_id` 键，上界 = 在飞命令数 ≤ 池深）⇒ 原「满则 `FTL_ERROR`」路径实为可达，且 `bbt.c` 会把它当永久失败吞掉 BBT save | `src/ftl/ftl_op.c` 加 `_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)`；RAM 代价 +256 B（8 B/项 × 32 项） | 上板：观察 `[FTL]` 心跳无异常；`ftl_op_ctx_count` 上界变 64 | `include/ftl/ftl_op.h` / `src/ftl/ftl_op.c` |
 
 ---
 
@@ -130,7 +128,6 @@
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-CR-02 | 待上板 | 坐标类改动未板验：`ftl_op_route_get_region` 的 dim→(ch,ce,lun) 分解改走 `ftl_dim_ch/ce/lun`（与 `lba_route_*` 收敛为同一套公式）。坐标属「编译期无声的三类量」 | 分解式与原手写式逐字同值；新增三个 `static inline` 纯函数（H42） | **必须上板**：跑一遍读写 + `map <lba>` | `include/ftl/l2p_cache.h` / `src/ftl/ftl_op.c` |
-| RISK-CR-03 | 待上板 | 9 个服务函数按 phase 拆 handler（纯代码搬移）+ 注释收敛（H37）；`ftl_checkpoint_callback` 额外把 `release + waiting=0` 提到 switch 之前（8 个 case 同构，`cp_job_abort` 不碰 `waiting`） | 判据 / 顺序 / 日志文案逐字不变；`switch` 的 `default` 副作用留在 dispatcher（§四） | 随常规回归上板（行为应逐字等价） | `src/ftl/{ftl,journal,bbt,read_recovery,checkpoint,metadata_job}.c` |
 
 ---
 
@@ -167,7 +164,6 @@
 | ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-ARCH-02 | 待后续（性能） | 跨 LUN superblock 条带 / 跨 LUN GC/WL **未实现**；当前 migrate 严格 per-LUN（源/目的/账本都在本实例） | per-LUN `mig_handle`；`lba_routes_to` 守卫 | 上板基线稳定、需要多 die 均衡/条带性能时重估；需要设备级 relocation 引擎 + 跨实例事务，不是改 handle 入参 | `docs/archive/multi_lun_generalization.md:26,358-359`；`migrate.c:553-557,524`；`allocator.c:26-34` |
-| RISK-ARCH-06 | 待后续 | 模块 handle 契约迁移**未上板**：只证 `make all` / `make release` 零新告警；2026-10-20 又删掉 6 个端口、提取 `pend_table_t`，行为保持更需板端回归 | 每个 Phase 保持行为；新增状态上报只读；`ftl_status_e` 增 `FTL_TIMEOUT`（未消费） | 上板回归：正常读写/GC/WL/RR/CP/journal/BBT/格式化/掉电重启；重点看完成路由、组结算与 `pending` 表提取后的索引 | `docs/archive/ftl_module_contracts.md`；本轮各模块 `*_handle` |
 
 ---
 
@@ -244,7 +240,6 @@
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
-| RISK-PEND-02 | 已改未上板（2026-10-24） | **组槽满的错误路径失效**：`pend_group_alloc` 返回 `int`，失败时返回 `FTL_ERROR`（=1，非负），调用点判 `gi < 0` 恒假 ⇒ 把**组 1** 当成新组，覆盖在飞请求的 `total/next/on_complete`，完成通知错投/丢失。组可以没有 pending 槽（整段未映射读组从不进 outstanding），故 `ftl_cache_budget_ok` 的 pending 预检挡不住组槽耗尽 | 改为 `bool pend_group_alloc(pend_table_t *, BYTE *out_gi)`：状态与数据分离（H38），调用点判返回值；`gi < 0` 判据删除 | 组槽耗尽注入（放宽/绕过 pending 预检）：返回 false、打印 `no free group slot`、不触碰任何组；常规上板回归 | `src/ftl/pending.c` `pend_group_alloc`；`src/ftl/ftl.c` 的建组点 |
 
 ---
 
@@ -335,7 +330,7 @@
 
 ## 已闭合
 
-> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-25）：RISK-HOST-13（2026-10-25） · RISK-NAND-04（2026-10-25）
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-25）：RISK-HOST-13（2026-10-25） · RISK-NAND-04（2026-10-25） · RISK-PEND-02（2026-10-25） · RISK-IF-05（2026-10-25） · RISK-BOOT-01（2026-10-25） · RISK-CR-03（2026-10-25） · RISK-ARCH-06（2026-10-25）
 
 > 闭合 = 缺陷已消除且有证据；明细已移入 archive §2026-10-24，本处保留 ID + 日期索引。
 > 若「重开触发」出现，按新条目重新登记。
