@@ -114,7 +114,7 @@ struct ftl_context;
  *
  * ⚠ 介质上的布局版本（`FTL_MEDIA_LAYOUT_VERSION`，写在 Checkpoint 头与 Anchor 页内）
  *   与当前固件不符（或根本没有当前版本记录）⇒ `ssd_ftl_boot` 自动全片格式化一次并
- *   写入当前版本标记（见 power_failure_recovery.c `ftl_media_format`）。
+ *   写入当前版本标记（见 power_failure_recovery.c `pfr_media_format`）。
  *   **任何改变介质格式的改动都必须把 `FTL_MEDIA_LAYOUT_VERSION` +1。**
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -274,7 +274,7 @@ static inline bool ftl_is_l2p_log_gblock(WORD g)
 /* ── 介质布局版本（NAND 上持久化格式的版本号）──
  * 任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
  * 都必须把 BASE +1。开机 cp_pool_find_latest / anchor_page_valid 都校验它；不符
- * （或介质上根本没有当前版本的 Checkpoint）⇒ ftl_media_format() 自动全片格式化
+ * （或介质上根本没有当前版本的 Checkpoint）⇒ pfr_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
 #define FTL_MEDIA_LAYOUT_VERSION_BASE (12U) /* v12：L2P region 双副本（日志区 46..93/plane，spare 94..97） */

@@ -403,7 +403,7 @@ void cp_timer_reset(cp_handle_t *h);
 /*
  * cp_initial_record_write - 全量格式化后写一条完整的 initial Checkpoint
  *
- * 只由 ftl_media_format() 在擦完全片后调用。写出完整 21 页 record：
+ * 只由 pfr_media_format() 在擦完全片后调用。写出完整 21 页 record：
  * 4 页 per-block metadata snapshot + 16 页磨损快照 + Header（最后写 = commit）。
  * sequence=1、journal_sequence=0；下次开机 cp_pool_find_latest 立即命中，
  * 版本判据只格式化一次；即使随后发生 power failure，也能用这份快照 + journal

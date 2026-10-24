@@ -913,10 +913,10 @@ flowchart TD
     PWR["上电"] --> JI["ftl_init: jrn_init"]
     JI --> MDL["md_load: Anchor → Directory"]
     MDL --> BBTI["bbt_init: BBT 或出厂扫描"]
-    BBTI --> VER["ftl_media_check_format: CP 介质状态"]
+    BBTI --> VER["pfr_media_check_format: CP 介质状态"]
     VER -- "NO_RECORD / 版本不符" --> FMT["全片格式化（两阶段 BBT）"]
     VER -- "I/O 错误" --> HALT["拒绝格式化 / 启动失败"]
-    VER -- "CURRENT" --> BR["ftl_boot_recovery"]
+    VER -- "CURRENT" --> BR["pfr_boot_recovery"]
     FMT --> BR
     BR --> JS["jrn_page_scan_latest"]
     JS --> CPF["cp_pool_find_latest"]
@@ -1041,21 +1041,21 @@ L2P region log（固定预留区，追加块）
 ```
 
 - 版本写在**两处**：Checkpoint Header 与 Anchor 页；两处独立校验，任一不符即该记录作废。
-- **触发判据**（唯一、自终止）：`ftl_media_check_format` 调
+- **触发判据**（唯一、自终止）：`pfr_media_check_format` 调
   `cp_media_status_probe`，只有 **NO_RECORD（空片）/ 版本不符** 才需要格式化；
   读到当前版本 CP 则不格式化；**CP 读不通（IO_ERROR）拒绝格式化**并返回错误——
   一次瞬时读错不能变成整片擦除。
-- **执行**（`ftl_media_format`）：`bbt_format_erase` 两阶段——先把当前坏块图（工厂标记 +
+- **执行**（`pfr_media_format`）：`bbt_format_erase` 两阶段——先把当前坏块图（工厂标记 +
   CP 快照并集）追加成一条 BBT record 并置 `FORMAT_IN_PROGRESS`（失败则**不擦用户块**），
   再擦除 **BBT 池之外**的全部块（擦失败标 BAD），随后再落一次 BBT 把新 BAD 并入。
   `FORMAT_IN_PROGRESS` **保持置位**，直到 initial Checkpoint **读回成功**才清除
-  （`ftl_format_end_bbt`）——格式化的提交点是 CP 落盘，不是擦除结束；`format --verify`
+  （`pfr_format_end_bbt`）——格式化的提交点是 CP 落盘，不是擦除结束；`format --verify`
   的全片擦除体检、Anchor/CP 写入都在这个窗口内。窗口内任一步复位/掉电，下次开机都按
   「继续格式化」处理（`cp_media_status_probe` 返回 NO_RECORD），不会把「有 BBT、无 CP」
   判成损坏介质而拒绝启动（RISK-BBT-14）。
   随后复位 Directory → 写初始 Anchor → 写一条当前版本的空 Checkpoint 标记。
 - **`format --verify` = 从头识别坏块**：`bbt_format_erase` 之后先清空 allocator 池，
-  再 `ftl_format_reset_bad_map` 清空**非 BBT 池**的旧 BAD 集（BBT 池保留本轮
+  再 `pfr_format_reset_bad_map` 清空**非 BBT 池**的旧 BAD 集（BBT 池保留本轮
   `FORMAT_IN_PROGRESS` record），然后对所有非 BBT 池块**只做擦除**：擦除命令成功即
   判为好块（包括原先标记 BAD 的块）。结束打印 `old_bad/recovered/new_bad`；`recovered`
   表示旧 BAD 里被本次判为好块的块数。
@@ -1127,7 +1127,7 @@ FTL 的运行时状态分两类：
 - **做**：判定启动类型；编排“扫描 → 分类 → 恢复块元数据 / 回放 Journal / full metadata rebuild → 建池”的顺序；
   维护恢复结果与统计。
 - **不做**：不定义 Journal/Checkpoint/Anchor 的记录格式（各模块自己拥有）；不做介质格式化
-  （`ftl_media_format` 在版本判据命中时调用）；不处理 host IO。
+  （`pfr_media_format` 在版本判据命中时调用）；不处理 host IO。
 - **上游**：`main.c` 的 `ssd_ftl_boot()`；**下游**：Journal、Checkpoint、Metadata、Allocator、L2P cache。
 
 #### 3.1.3 结构与不变量
@@ -1155,7 +1155,7 @@ FTL 的运行时状态分两类：
 
 ```mermaid
 flowchart TD
-    BOOT["ftl_boot_recovery"] --> LATEST["jrn_page_scan_latest 只读,不改状态"]
+    BOOT["pfr_boot_recovery"] --> LATEST["jrn_page_scan_latest 只读,不改状态"]
     LATEST --> FIND{"cp_pool_find_latest 有当前版本有效 Header"}
     FIND -- "否" --> FRESH["fresh full metadata rebuild 全扫 → carve"]
     FIND -- "是" --> LOAD{"cp_block_table_load"}
@@ -1201,7 +1201,7 @@ flowchart TD
    - `jrn_replay` 在降级基线上成功写入条目时**不再**清 `block_ctx->ok`：降级只丢该
      region 未被 Journal 覆盖的旧映射，**不影响** valid_count 增量（old/new PBA 来自
      条目本身）⇒ 保留块元数据快照，启动结果标 `bit=scoped`；
-   - `ftl_recovery_probe_blocks` 把降级 CW 单独计入 `l2p_degraded_cw`，**不再**计入
+   - `pfr_probe_blocks` 把降级 CW 单独计入 `l2p_degraded_cw`，**不再**计入
      `l2p_read_errors`；只有真正的读失败才回退 full metadata rebuild。
    - 丢失的映射由 host 读路径按 `IO_ERROR` 暴露（不零填）；降级 region 记入 cache 级
      `region_degraded_bitmap`，行被驱逐/重载后仍能识别。
@@ -1444,7 +1444,7 @@ spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含
 - **不做**：不维护 RAM 块状态（BST 是唯一数据源）；不决定替换哪个块（调用方给 plane）；
   不做数据迁移（migrate）。
 - **调用点**：`bbt_init`（boot）、写失败（`ftl.c`）、GC 擦除失败（`migrate.c`）、
-  读恢复失败（`read_recovery.c`）、格式化（`ftl_media_format`）。
+  读恢复失败（`read_recovery.c`）、格式化（`pfr_media_format`）。
 
 #### 3.3.3 结构与不变量
 
@@ -2093,7 +2093,7 @@ Anchor 仍引用的旧块）。
 | 擦 victim 中掉电 | victim 部分块擦除 | `l2p_live == 0` 才擦，且 Anchor 已先落盘 ⇒ 无映射指向 victim |
 | 回收日志块时掉电 | 无活 region 的块被擦 | 仅在 `l2p_live == 0`、Anchor 已覆盖当前 Directory（`!dirty`）时擦；满足后无映射引用它，安全 |
 | Anchor 池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效 Anchor；最坏走 full metadata rebuild |
-| 介质版本不符 | 记录作废 | `ftl_media_format` 全片格式化（§2.5） |
+| 介质版本不符 | 记录作废 | `pfr_media_format` 全片格式化（§2.5） |
 
 ⚠ **“没有本层 CRC”不是漏洞**：元数据页的 FC CRC 由 `FTL_PAGE_CFG_META` 统一开启；
 CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看似成功”的假阳性。
@@ -3739,7 +3739,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 ### 4.1 首次上电 / 介质版本不匹配 → 格式化
 
-**触发**：`ssd_ftl_boot` 调 `ftl_media_check_format()`；判据来自
+**触发**：`ssd_ftl_boot` 调 `pfr_media_check_format()`；判据来自
 `cp_media_status_probe()` 的四态：
 
 | CP 介质状态 | 判定 |
@@ -3751,9 +3751,9 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 ```mermaid
 flowchart TD
-    A["上电 ftl_init 完成"] --> B["ftl_media_check_format"]
+    A["上电 ftl_init 完成"] --> B["pfr_media_check_format"]
     B -- "CURRENT" --> C["正常启动 4-2 4-3 节"]
-    B -- "NO_RECORD / VERSION_MISMATCH" --> D["ftl_media_format"]
+    B -- "NO_RECORD / VERSION_MISMATCH" --> D["pfr_media_format"]
     B -- "IO_ERROR" --> H["拒绝格式化 / 启动失败"]
     D --> D1["bbt_format_erase 阶段①：置 FORMAT_IN_PROGRESS + bbt_save"]
     D1 -- "save 失败" --> H2["中止（不擦用户块）"]
@@ -3821,8 +3821,8 @@ sequenceDiagram
     B-->>B: Controller 到 Ready
 ```
 
-> **PFR 公开边界**：公开头只保留 `ftl_media_check_format` / `ftl_media_format` /
-> `ftl_boot_recovery` 三个顶层入口；fresh / clean / power-failure 子流程与 full metadata rebuild 原语
+> **PFR 公开边界**：公开头只保留 `pfr_media_check_format` / `pfr_media_format` /
+> `pfr_boot_recovery` 三个顶层入口；fresh / clean / power-failure 子流程与 full metadata rebuild 原语
 > （restore / probe / build_pools / reset / page_is_blank / scan_write_pointer /
 > close_block / carve / rebuild_closed_sb_list）全部为 `static`（RISK-ARCH-09）。
 

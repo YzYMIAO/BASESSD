@@ -473,7 +473,7 @@ static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_er
  *     ③ 再 save 一次，把擦除失败新标坏的块并入 BBT（best-effort；失败只留下
  *        dirty 给后台 bbt_handle，工厂坏块图已在 ① 持久化）。**不清**
  *        `format_in_progress`：格式化的提交点是 initial Checkpoint 落盘
- *        （`ftl_media_format` 末尾），不是擦除结束。
+ *        （`pfr_media_format` 末尾），不是擦除结束。
  *
  *   ⚠ **不读出厂坏块标记**：标记读取职责唯一归 bbt_init（且只在空片时做）。
  *     因此「必须在 bbt_init 之后调用」是承重的——出厂标记此时已在 BST 里。
@@ -533,7 +533,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
 
     /* ③ 把擦除失败新标坏的块并入 BBT（best-effort；工厂坏块图已在 ① 落盘，
      *    这里失败只留下 dirty 给后台 bbt_handle）。
-     *    **不清 format_in_progress**：清标志归 ftl_media_format 的提交点
+     *    **不清 format_in_progress**：清标志归 pfr_media_format 的提交点
      *    （initial Checkpoint 已读回），否则擦除后复位会让下次开机拒绝格式化。 */
     bbt_dirty_note(alloc);
     (void)bbt_save(alloc);

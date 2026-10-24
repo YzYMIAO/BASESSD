@@ -299,7 +299,7 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region
  *
  * 顺序：ftl_init（内部含 bbt_init 标坏块）→ 遍历 BST 非坏块回填 free pool
  *       （alc_init 不填 free pool、bbt 只标坏块——不回填则首次写失败）
- *       → ftl_boot_recovery → 日志。
+ *       → pfr_boot_recovery → 日志。
  *
  * @param ch/ce/lun 本实例绑定拓扑
  * @return 0 成功，负值失败
@@ -361,7 +361,7 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
 
     /* 坏块落点统计（开机基线，**早于格式判定**）：boot 可能因介质读不通而中止，
      * 先打一行保证失败时也能看到 BAD 分布。 */
-    ftl_boot_log_bad_areas(ftl);
+    pfr_boot_log_bad_areas(ftl);
 
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
@@ -382,7 +382,7 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
     LOGW("[FTL ] FORCE_FORMAT_ON_BOOT: full-chip write/read verify enabled\r\n");
 #    endif
 #else
-    if (ftl_media_check_format(ftl, &need_format) != FTL_OK)
+    if (pfr_media_check_format(ftl, &need_format) != FTL_OK)
     {
         LOGE("[FTL ] CP media unreadable — refuse to format ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
@@ -392,19 +392,19 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
     if (need_format)
     {
         LOGW("[FTL ] media blank / layout mismatch -> format\r\n");
-        if (ftl_media_format(ftl, format_verify) != FTL_OK)
+        if (pfr_media_format(ftl, format_verify) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
             return FTL_ERROR;
         }
     }
 
-    /* 池回填 / full metadata rebuild / 块元数据快照恢复全部在 ftl_boot_recovery 内完成：
+    /* 池回填 / full metadata rebuild / 块元数据快照恢复全部在 pfr_boot_recovery 内完成：
      *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
      *   · 无快照 / 快照损坏 ⇒ full metadata rebuild → carve。
      * ⚠ **full metadata rebuild 必须先于 carve**（full metadata rebuild 认领写过的块，carve 只把 state==NONE 的块入池）；
      *   carve 也**不能**在块元数据快照恢复之前做——否则池条目会重复。 */
-    if (ftl_boot_recovery(ftl, &result) != FTL_OK)
+    if (pfr_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
@@ -590,7 +590,7 @@ static void ssd_ftl_boot_all(void)
      *      ⚠ 它原在 ftl_init 里（逐实例调用）⇒ 实例 1 的 init 会抹掉实例 0 在飞的
      *      ctx 登记与已设好的路由表；已移到此处。
      *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
-     *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `ftl_boot_recovery`
+     *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `pfr_boot_recovery`
      *      （full metadata rebuild）会经 `l2p_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
      *      抽完成表。此时若 route 仍为 NULL，`ftl_op_dispatch` 解析出的 ftl 为 NULL，
      *      服务函数只 release 不推进状态 ⇒ job 永久卡死
@@ -617,7 +617,7 @@ static void ssd_ftl_boot_all(void)
     ftl_op_route_set(g_ftl_ptrs);
 
     /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
-     * 必须早于逐实例 boot（ftl_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
+     * 必须早于逐实例 boot（pfr_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
      * 且绝不能放进逐实例 ftl_init（第二个实例会清掉第一个实例的 line）。 */
     for (ch = 0U; ch < CH_NUM; ch++)
     {

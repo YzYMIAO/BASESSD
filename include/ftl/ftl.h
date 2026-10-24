@@ -185,7 +185,7 @@ typedef struct ftl_context
 
     /* Directory 加载失败（Anchor 池无有效 record / 读失败）。
      * ftl_init 仍建空 Directory（格式化/首次启动路径需要它），但**不能静默继续**：
-     * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。ftl_boot_recovery 在
+     * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。pfr_boot_recovery 在
      * 介质存在有效 Checkpoint 时据此拒绝启动；无 Checkpoint（空片）才放行。 */
     bool md_load_failed;
 

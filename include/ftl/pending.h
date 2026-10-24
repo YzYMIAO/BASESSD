@@ -326,10 +326,11 @@ WORD pend_slot_get_count(const pend_table_t *table);
 /*
  * pend_group_alloc - 申请一个空闲完成组槽（used=1，字段清零）
  *
- * @param table  pending 表
- * @return 组下标（0..FTL_GROUP_MAX-1），无空闲槽返回 FTL_ERROR
+ * @param table   pending 表
+ * @param out_gi  输出：组下标（0..FTL_GROUP_MAX-1；仅返回 true 时有效）
+ * @return true 成功；false = 组槽满
  */
-int pend_group_alloc(pend_table_t *table);
+bool pend_group_alloc(pend_table_t *table, BYTE *out_gi);
 
 /*
  * pend_group_get_count - 当前占用（未完成）的组数

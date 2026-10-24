@@ -481,7 +481,7 @@ for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++) {
     }
 }
 
-ftl_boot_recovery(&g_ftl[ch][ce][lun], &result);  // ⑥ 启动恢复（FRESH/CLEAN/POWER_FAILURE）
+pfr_boot_recovery(&g_ftl[ch][ce][lun], &result);  // ⑥ 启动恢复（FRESH/CLEAN/POWER_FAILURE）
 
 /* ⑦ controller 绑定：g_ftl_ptrs 三维指针表（类型匹配 ssd_controller_init 形参） */
 ssd_controller_init(&g_ctrl, g_ftl_ptrs);
@@ -900,7 +900,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `l2p_cache.c` | ❌ **零**（阶段 5） | 加载/写回全走 `ftl_async_*` + `ftl_op_submit(FTL_OP_L2P)`；对外只留 `*_sync` 自旋逃生口 |
 | `wear_leveling.c` | ❌ **零**（阶段 4） | 搬移主体并入 `migrate.c` |
 | `read_recovery.c` | ❌ **零**（阶段 3/5） | 三级恢复全异步；`rr_select_plane` 的 L2P 查询已三态化 |
-| `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
+| `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `pfr_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_is_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
 | `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |

@@ -1110,7 +1110,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
         const ftl_status_e md_ret = md_load(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
 
         /* 失败时仍建空 Directory（空片首启 / 格式化路径需要），但把失败状态留给
-         * ftl_boot_recovery：介质若已有有效 Checkpoint，空 Directory = 映射整体丢失
+         * pfr_boot_recovery：介质若已有有效 Checkpoint，空 Directory = 映射整体丢失
          * ⇒ 必须拒绝启动（RISK-BOOT-09）。 */
         ftl->md_load_failed = (md_ret != FTL_OK) ? 1U : 0U;
 
@@ -2000,8 +2000,9 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
 
     /* 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入：
      * 下发可能当场完成整组，届时通知就要读它们。 */
-    int gi = pend_group_alloc(&ftl->pending);
-    if (gi < 0)
+    BYTE gi = 0U;
+
+    if (!pend_group_alloc(&ftl->pending, &gi))
     {
         LOGE(LOG_TAG_FTL "%s: no free group slot\r\n", label);
         return FTL_ERROR;

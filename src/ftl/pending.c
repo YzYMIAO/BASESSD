@@ -185,12 +185,12 @@ WORD pend_slot_get_count(const pend_table_t *table)
 /* --------------------------------------------------------------------
  * pend_group_alloc
  *   功能：申请一个空闲完成组槽，used=1 并字段清零。
- *   参数：table —— pending 表。
- *   返回：组下标（0..FTL_GROUP_MAX-1），无空闲槽返回 FTL_ERROR。
- *   实现要点：组容量 = pending 容量（一个组至少占一个 pending 槽，组不会比在飞
- *             子操作多）；清零保证 total/next/outstanding/agg_status 从已知态起步。
+ *   参数：table —— pending 表；out_gi —— 出参组下标。
+ *   返回：true 成功（*out_gi 有效）；false = 组槽满。
+ *   实现要点：组容量 = FTL_GROUP_MAX；清零保证 total/next/outstanding/agg_status
+ *             从已知态起步。状态与数据分离（H38）：失败不得用非负的「组号」冒充。
  * -------------------------------------------------------------------- */
-int pend_group_alloc(pend_table_t *table)
+bool pend_group_alloc(pend_table_t *table, BYTE *out_gi)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -198,11 +198,12 @@ int pend_group_alloc(pend_table_t *table)
         {
             memset(&table->groups[i], 0, sizeof(table->groups[i]));
             table->groups[i].used = 1U;
-            return (int)i;
+            *out_gi               = i;
+            return true;
         }
     }
 
-    return FTL_ERROR; /* 组槽满 */
+    return false; /* 组槽满 */
 }
 
 /* pend_group_get_count — 占用（未完成）组数（有未完成组 = host 工作饿着 → 归 BUSY） */

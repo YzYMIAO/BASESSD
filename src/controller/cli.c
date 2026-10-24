@@ -20,7 +20,7 @@
 #include "l2p_cache.h"
 #include "log.h"
 #include "metadata.h"               /* md_pool_print（pool 诊断） */
-#include "power_failure_recovery.h" /* ftl_media_format（boot 失败后的恢复格式化） */
+#include "power_failure_recovery.h" /* pfr_media_format（boot 失败后的恢复格式化） */
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
@@ -1067,9 +1067,9 @@ static int uart_cli_bbt(int argc, char *argv[])
 /*
  * format — boot 失败后的恢复格式化（破坏性）
  *
- * 用途：CP/Anchor 介质状态无法被 ftl_media_check_format 判定为「空片/版本不符」
+ * 用途：CP/Anchor 介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
  * （例如上一轮 bbt --erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
- * 本命令直接对已 ftl_init 的实例执行 ftl_media_format：重落 BBT（带
+ * 本命令直接对已 ftl_init 的实例执行 pfr_media_format：重落 BBT（带
  * FORMAT_IN_PROGRESS）→ 擦除 BBT 池之外的块 → 写当前版本初始 Checkpoint。
  *
  * ⚠ 擦除全部用户数据与元数据；执行后必须断电重启，不能在运行中的 FTL 上继续用。
@@ -1122,7 +1122,7 @@ static int uart_cli_format(int argc, char *argv[])
                     (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
                 }
 
-                if (ftl_media_format(ftl, verify) != FTL_OK)
+                if (pfr_media_format(ftl, verify) != FTL_OK)
                 {
                     LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
                     return FUNC_STATUS_ERROR;
