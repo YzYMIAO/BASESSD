@@ -73,10 +73,7 @@ void stack_guard_init(void)
 {
     DWORD lo  = ((uintptr_t)&end + 3U) & ~3U;
     DWORD msp = stack_guard_msp();
-    DWORD hi  = ((msp > STACK_GUARD_INIT_FRAME_MARGIN)
-                     ? (msp - STACK_GUARD_INIT_FRAME_MARGIN)
-                     : msp) &
-               ~3U;
+    DWORD hi  = ((msp > STACK_GUARD_INIT_FRAME_MARGIN) ? (msp - STACK_GUARD_INIT_FRAME_MARGIN) : msp) & ~3U;
     DWORD addr;
 
     if (hi <= lo)
@@ -98,10 +95,7 @@ void stack_guard_init(void)
 
     g_armed = 1U;
 
-    (void)LOGI("[STK ] guard armed paint=[%08lx,%08lx) size=%lu B\r\n",
-               lo,
-               hi,
-               (hi - lo));
+    (void)LOGI("[STK ] guard armed paint=[%08lx,%08lx) size=%lu B\r\n", lo, hi, (hi - lo));
 }
 
 /* --------------------------------------------------------------------
@@ -132,10 +126,7 @@ void stack_guard_check(void)
         if ((g_alarm & STACK_GUARD_ALARM_MSP) == 0U)
         {
             g_alarm |= STACK_GUARD_ALARM_MSP;
-            (void)LOGE("[STK ] MSP out of range: %08lx (valid [%08lx,%08lx))\r\n",
-                       msp,
-                       g_paint_lo,
-                       (unsigned long)(uintptr_t)&_estack);
+            (void)LOGE("[STK ] MSP out of range: %08lx (valid [%08lx,%08lx))\r\n", msp, g_paint_lo, (unsigned long)(uintptr_t)&_estack);
         }
         return;
     }
@@ -160,10 +151,7 @@ void stack_guard_check(void)
         if ((g_alarm & STACK_GUARD_ALARM_OVERFLOW) == 0U)
         {
             g_alarm |= STACK_GUARD_ALARM_OVERFLOW;
-            (void)LOGE("[STK ] paint bottom clobbered @%08lx (peak=%lu B of %lu B)\r\n",
-                       g_paint_lo,
-                       (g_paint_hi - g_low_mark),
-                       (g_paint_hi - g_paint_lo));
+            (void)LOGE("[STK ] paint bottom clobbered @%08lx (peak=%lu B of %lu B)\r\n", g_paint_lo, (g_paint_hi - g_low_mark), (g_paint_hi - g_paint_lo));
         }
     }
 }
@@ -184,22 +172,9 @@ void stack_guard_report(void)
         return;
     }
 
-    (void)LOGI("[STK ] paint=[%08lx,%08lx) size=%lu B  dtcm_bottom=%08lx\r\n",
-               g_paint_lo,
-               g_paint_hi,
-               (g_paint_hi - g_paint_lo),
-               (unsigned long)(uintptr_t)&end);
-    (void)LOGI("[STK ] boot_msp=%08lx now_msp=%08lx peak=%lu B low=%08lx headroom=%lu B\r\n",
-               g_boot_msp,
-               msp,
-               (g_paint_hi - g_low_mark),
-               g_low_mark,
-               (g_low_mark - g_paint_lo));
-    (void)LOGI("[STK ] alarm=0x%lx hits=%lu %s%s\r\n",
-               g_alarm,
-               g_alarm_hits,
-               ((g_alarm & STACK_GUARD_ALARM_OVERFLOW) != 0U) ? "OVERFLOW " : "",
-               ((g_alarm & STACK_GUARD_ALARM_MSP) != 0U) ? "MSP " : "");
+    (void)LOGI("[STK ] paint=[%08lx,%08lx) size=%lu B  dtcm_bottom=%08lx\r\n", g_paint_lo, g_paint_hi, (g_paint_hi - g_paint_lo), (unsigned long)(uintptr_t)&end);
+    (void)LOGI("[STK ] boot_msp=%08lx now_msp=%08lx peak=%lu B low=%08lx headroom=%lu B\r\n", g_boot_msp, msp, (g_paint_hi - g_low_mark), g_low_mark, (g_low_mark - g_paint_lo));
+    (void)LOGI("[STK ] alarm=0x%lx hits=%lu %s%s\r\n", g_alarm, g_alarm_hits, ((g_alarm & STACK_GUARD_ALARM_OVERFLOW) != 0U) ? "OVERFLOW " : "", ((g_alarm & STACK_GUARD_ALARM_MSP) != 0U) ? "MSP " : "");
 }
 
 DWORD stack_guard_alarm(void)

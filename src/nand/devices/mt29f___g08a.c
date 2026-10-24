@@ -114,9 +114,7 @@ static const nand_fmc_timing_t g_nand_timing_high = {
  * 旧实现硬编码 5ns/4545ps，FMC 时钟一变就失真；现按实际 fmc_hz 算。
  * 旧实现（Mode 4 表）实测 HOLD/HiZ 各短 1 周期，命令/地址采样失败（RISK-NAND-03）。
  */
-static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
-                                   FMC_NAND_PCC_TimingTypeDef *pcc,
-                                   DWORD                       fmc_hz)
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
 {
     ASSERT(fmc_hz != 0U);
 
@@ -300,12 +298,7 @@ nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, 
     /* 清零 DMA 完成标志，防止上一命令的残留标志导致 DATA_IN/DATA_OUT 误判 */
     nand_dma_clear_flags();
 
-    ENG_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n",
-             (unsigned)operation,
-             (unsigned)request->column,
-             (unsigned)request->row[0],
-             (const void *)request->data,
-             (unsigned)request->data_length);
+    ENG_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n", (unsigned)operation, (unsigned)request->column, (unsigned)request->row[0], (const void *)request->data, (unsigned)request->data_length);
 
     memset(&transaction->request, 0, sizeof(transaction->request));
     transaction->request.operation   = operation;
@@ -450,37 +443,11 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
     /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。
      * 本器件 = 2^29 B；>4 GiB 器件在 32 位 unsigned long 下会溢出（本工程只跑 MT29F4G08）。 */
-    unsigned long capacity_mib = info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit *
-                                 info->logical_units / (1024UL * 1024UL);
+    unsigned long capacity_mib = info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit * info->logical_units / (1024UL * 1024UL);
 
-    LOGI(LOG_TAG_NAND "ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
-         (int)info->signature[0],
-         (int)info->signature[1],
-         (int)info->signature[2],
-         (int)info->signature[3],
-         (unsigned int)info->revision,
-         info->model);
-    LOGI(LOG_TAG_NAND "ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n",
-         capacity_mib,
-         info->data_bytes_per_page,
-         (unsigned int)info->spare_bytes_per_page,
-         info->data_bytes_per_partial_page,
-         (unsigned int)info->spare_bytes_per_partial_page,
-         info->pages_per_block,
-         info->blocks_per_unit,
-         (unsigned int)info->logical_units,
-         (unsigned int)info->address_cycles,
-         (unsigned int)info->column_cycles,
-         (unsigned int)info->row_cycles,
-         (unsigned int)info->bits_per_cell);
-    LOGI(LOG_TAG_NAND "ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
-         (unsigned int)info->ecc_bits,
-         (unsigned int)info->programs_per_page,
-         (unsigned int)info->tprog_max,
-         (unsigned int)info->tbers_max,
-         (unsigned int)info->tr_max,
-         (unsigned int)info->tccs_min,
-         (unsigned int)info->timing_mode_support);
+    LOGI(LOG_TAG_NAND "ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n", (int)info->signature[0], (int)info->signature[1], (int)info->signature[2], (int)info->signature[3], (unsigned int)info->revision, info->model);
+    LOGI(LOG_TAG_NAND "ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n", capacity_mib, info->data_bytes_per_page, (unsigned int)info->spare_bytes_per_page, info->data_bytes_per_partial_page, (unsigned int)info->spare_bytes_per_partial_page, info->pages_per_block, info->blocks_per_unit, (unsigned int)info->logical_units, (unsigned int)info->address_cycles, (unsigned int)info->column_cycles, (unsigned int)info->row_cycles, (unsigned int)info->bits_per_cell);
+    LOGI(LOG_TAG_NAND "ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n", (unsigned int)info->ecc_bits, (unsigned int)info->programs_per_page, (unsigned int)info->tprog_max, (unsigned int)info->tbers_max, (unsigned int)info->tr_max, (unsigned int)info->tccs_min, (unsigned int)info->timing_mode_support);
 }
 
 /* --------------------------------------------------------------------
@@ -606,11 +573,7 @@ BYTE nand_init(void)
     result = nand_fc_reset(&completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
-             (unsigned int)result,
-             (unsigned int)completion.nand_status,
-             (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT,
-                                            NAND_RB_GPIO_PIN));
+        LOGE(LOG_TAG_NAND "reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n", (unsigned int)result, (unsigned int)completion.nand_status, (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
         return result;
     }
     LOGI(LOG_TAG_NAND "reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
@@ -642,28 +605,18 @@ BYTE nand_init(void)
         result = nand_fc_read_parameter_page(page, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGW(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n",
-                 (unsigned int)result,
-                 (unsigned int)completion.nand_status);
+            LOGW(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
         }
         else if (nand_onfi_parameter_page_decode(page, &info) == 0U)
         {
-            LOGW(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
-                 (unsigned int)page[0],
-                 (unsigned int)page[1],
-                 (unsigned int)page[2],
-                 (unsigned int)page[3]);
+            LOGW(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n", (unsigned int)page[0], (unsigned int)page[1], (unsigned int)page[2], (unsigned int)page[3]);
         }
         else
         {
             nand_onfi_param_print(&info);
             if ((info.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (info.row_cycles != NAND_ROW_ADDR_CYCLES))
             {
-                LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n",
-                     (unsigned int)info.column_cycles,
-                     (unsigned int)info.row_cycles,
-                     (unsigned int)NAND_COLUMN_ADDR_CYCLES,
-                     (unsigned int)NAND_ROW_ADDR_CYCLES);
+                LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n", (unsigned int)info.column_cycles, (unsigned int)info.row_cycles, (unsigned int)NAND_COLUMN_ADDR_CYCLES, (unsigned int)NAND_ROW_ADDR_CYCLES);
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
         }
@@ -719,10 +672,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     }
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n",
-             (unsigned)CONFIG_NAND_TIMING_MODE,
-             (unsigned)result,
-             (unsigned)transaction.completion.nand_status);
+        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n", (unsigned)CONFIG_NAND_TIMING_MODE, (unsigned)result, (unsigned)transaction.completion.nand_status);
         return result;
     }
     LOGI(LOG_TAG_NAND "switched NAND to ONFI Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
@@ -735,16 +685,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     const DWORD tclr = NS_TO_PCC_CYCLES(g_nand_timing_high.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
     const DWORD tar  = NS_TO_PCC_CYCLES(g_nand_timing_high.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
 
-    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n",
-         (unsigned)CONFIG_NAND_TIMING_MODE,
-         fast_pcc.SetupTime,
-         fast_pcc.WaitSetupTime,
-         fast_pcc.HoldSetupTime,
-         fast_pcc.HiZSetupTime,
-         tclr,
-         tar,
-         fmc_hz,
-         tclk_ps);
+    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", (unsigned)CONFIG_NAND_TIMING_MODE, fast_pcc.SetupTime, fast_pcc.WaitSetupTime, fast_pcc.HoldSetupTime, fast_pcc.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
 
     g_nand_handle.Init.TCLRSetupTime = tclr;
     g_nand_handle.Init.TARSetupTime  = tar;

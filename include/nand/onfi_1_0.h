@@ -541,13 +541,11 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 /* 判断 operation 是否涉及用户数据传输（即是否需要 descriptor + buffer）。
  * NO_DATA 类操作（RESET、LOCK 等）和 ERASE 返回 0。
  * 推荐直接读 g_nand_operation_map[op].has_data。 */
-#define nand_operation_has_data(op) \
-    ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)
+#define nand_operation_has_data(op) ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)
 
 /* 返回 operation 的数据传输字节数。NO_DATA 类操作返回 0。
  * 推荐直接读 g_nand_operation_map[op].data_length。 */
-#define nand_operation_data_length(op) \
-    ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
+#define nand_operation_data_length(op) ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
 
 /* ── Phase V 多 LUN 辅助宏 ──
  * op_type/pair_op 判定（见 nand_operation_map_t）：
@@ -555,20 +553,11 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
  *   is_wait_or_fetch：该 OP 是否 WAIT/FETCH 段（等完成）
  *   is_splittable   ：原子 OP 且存在配对 OP（可拆分为 ISSUE+WAIT/FETCH）
  *   to_issue / get_pair：取配对 OP 码（原子 OP 取自身） */
-#define nand_operation_is_issue(op) \
-    ((op) < OP_COUNT ? (g_nand_operation_map[(op)].op_type == OP_TYPE_ISSUE) : 0U)
-#define nand_operation_is_wait_or_fetch(op)                                     \
-    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_WAIT) || \
-                        (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH))  \
-                     : 0U)
-#define nand_operation_is_splittable(op)                                          \
-    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_ATOMIC) && \
-                        (g_nand_operation_map[(op)].pair_op != 0U))               \
-                     : 0U)
-#define nand_operation_to_issue(op) \
-    ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
-#define nand_operation_get_pair(op) \
-    ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
+#define nand_operation_is_issue(op)         ((op) < OP_COUNT ? (g_nand_operation_map[(op)].op_type == OP_TYPE_ISSUE) : 0U)
+#define nand_operation_is_wait_or_fetch(op) ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_WAIT) || (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH)) : 0U)
+#define nand_operation_is_splittable(op)    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_ATOMIC) && (g_nand_operation_map[(op)].pair_op != 0U)) : 0U)
+#define nand_operation_to_issue(op)         ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
+#define nand_operation_get_pair(op)         ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
 
 /* ═══ 8. ONFI 参数页（Parameter Page，手册 Table 11） ═══
  *

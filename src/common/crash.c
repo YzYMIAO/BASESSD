@@ -132,8 +132,7 @@ void crash_record_fault(const crash_fault_record_t *fault)
 
 const crash_record_t *crash_record_get(void)
 {
-    if ((g_crash_record.magic != CRASH_MAGIC) ||
-        (g_crash_record.version != CRASH_VERSION))
+    if ((g_crash_record.magic != CRASH_MAGIC) || (g_crash_record.version != CRASH_VERSION))
     {
         return NULL;
     }

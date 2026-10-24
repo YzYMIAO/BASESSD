@@ -110,8 +110,7 @@ static const md_pool_spec_t s_pool_specs[] = {
 };
 
 /* 加池时枚举与表必须同时加一行：行数不符即编译失败。 */
-_Static_assert((sizeof(s_pool_specs) / sizeof(s_pool_specs[0])) == (size_t)MD_POOL_NUM,
-               "s_pool_specs rows must match md_pool_id_e");
+_Static_assert((sizeof(s_pool_specs) / sizeof(s_pool_specs[0])) == (size_t)MD_POOL_NUM, "s_pool_specs rows must match md_pool_id_e");
 
 /* 一次池扫描的中间结果（①~③ 步）。 */
 typedef struct
@@ -161,8 +160,7 @@ static bool md_ring_geom_valid(const md_ring_t *ring)
 {
     const BYTE valid_plane_bits = ((1U << PLANE_NUM) - 1U);
 
-    if ((ring->block_count < 2U) || (ring->pages_per_record == 0U) ||
-        (ring->pages_per_record > PAGES_PER_BLOCK))
+    if ((ring->block_count < 2U) || (ring->pages_per_record == 0U) || (ring->pages_per_record > PAGES_PER_BLOCK))
     {
         return false;
     }
@@ -177,8 +175,7 @@ static bool md_ring_geom_valid(const md_ring_t *ring)
     {
         return false; /* 槽位总数必须装进 WORD（写游标 / record 下标都是 16 位）*/
     }
-    if ((ring->block_count > MD_RING_MAX_BLOCKS) ||
-        (ring->nominal_count > MD_RING_MAX_BLOCKS))
+    if ((ring->block_count > MD_RING_MAX_BLOCKS) || (ring->nominal_count > MD_RING_MAX_BLOCKS))
     {
         return false; /* 候选表容量 */
     }
@@ -206,11 +203,7 @@ static bool md_ring_geom_valid(const md_ring_t *ring)
  *             `md_ring_addr` 是"取 plane_mask 里第一个 plane"的薄入口，
  *             镜像池的读回退/写镜像用 `_plane` 版本。
  * -------------------------------------------------------------------- */
-DWORD md_ring_addr_plane(const md_ring_t  *ring,
-                         const ftl_topo_t *topo,
-                         WORD              record_idx,
-                         BYTE              page_in_record,
-                         BYTE              plane)
+DWORD md_ring_addr_plane(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record, BYTE plane)
 {
     if (!md_ring_geom_valid(ring))
     {
@@ -258,10 +251,7 @@ static bool md_block_good_on_mask(const alc_t *alloc, WORD block, BYTE plane_mas
 /* 收名义区间的好块；不足 min_blocks 时从 shared spare 按升序补（受 spare_budget
  * 与全局 spare_used 双重限制）。**只补到硬下界，不强行补满名义数**：CP 少一块
  * 仍可轮转，把 spare 留给更紧的 BBT/Journal。 */
-static WORD md_pool_collect(md_ring_t            *ring,
-                            const alc_t          *alloc,
-                            const md_pool_spec_t *spec,
-                            bool                  spare_used[MD_SPARE_BLOCKS_PER_PLANE])
+static WORD md_pool_collect(md_ring_t *ring, const alc_t *alloc, const md_pool_spec_t *spec, bool spare_used[MD_SPARE_BLOCKS_PER_PLANE])
 {
     ring->first_block      = spec->first;
     ring->nominal_count    = spec->nominal;
@@ -383,10 +373,7 @@ bool md_pool_build_all(alc_t *alloc)
     return true;
 }
 
-DWORD md_ring_addr(const md_ring_t  *ring,
-                   const ftl_topo_t *topo,
-                   WORD              record_idx,
-                   BYTE              page_in_record)
+DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record)
 {
     const BYTE plane = md_ring_plane_at(ring->plane_mask, 0U);
 
@@ -394,11 +381,7 @@ DWORD md_ring_addr(const md_ring_t  *ring,
 }
 
 /* ①~③：逐块探末条 → 找游标块 → 游标块内找末条。 */
-static void md_ring_scan(const md_ring_t       *ring,
-                         metadata_ring_probe_fn probe,
-                         void                  *ctx,
-                         WORD                   rpb,
-                         md_ring_scan_t        *s)
+static void md_ring_scan(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, WORD rpb, md_ring_scan_t *s)
 {
     s->cursor_block    = UINT16_MAX;
     s->best_full_idx   = UINT16_MAX;
@@ -454,10 +437,7 @@ static void md_ring_scan(const md_ring_t       *ring,
 
 /* ⑥ 慢路径：快路径候选整条校验全失败（局部损坏）⇒ 全池廉价探针取 sequence 最大者，
  *    整条校验；失败则排除该 sequence 继续找次新。仅在损坏时付出全池代价。 */
-static bool md_ring_locate_fallback(metadata_ring_probe_fn probe,
-                                    void                  *ctx,
-                                    WORD                   total,
-                                    md_ring_locate_out_t  *out)
+static bool md_ring_locate_fallback(metadata_ring_probe_fn probe, void *ctx, WORD total, md_ring_locate_out_t *out)
 {
     DWORD limit = UINT32_MAX;
 
@@ -517,10 +497,7 @@ static bool md_ring_locate_fallback(metadata_ring_probe_fn probe,
  *     ⑤ 快路径：只在「最新满块」+「游标块末条」两个候选里整条校验（正常路径）；
  *     ⑥ 慢路径：快路径全失败（局部损坏）才全池扫描取次新，整条校验，逐轮降 limit。
  * -------------------------------------------------------------------- */
-ftl_status_e md_ring_locate(const md_ring_t       *ring,
-                            metadata_ring_probe_fn probe,
-                            void                  *ctx,
-                            md_ring_locate_out_t  *out)
+ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, md_ring_locate_out_t *out)
 {
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：指针均由调用者自持。 */
 
@@ -615,11 +592,7 @@ ftl_status_e md_ring_locate(const md_ring_t       *ring,
  *             分支（新取/刚擦的块再擦一次是幂等无害代价）。
  *             **不动介质**：擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦）。
  * -------------------------------------------------------------------- */
-ftl_status_e md_ring_prepare_addr(const md_ring_t  *ring,
-                                  const ftl_topo_t *topo,
-                                  WORD              write_idx,
-                                  DWORD            *out_addr,
-                                  bool             *out_need_erase)
+ftl_status_e md_ring_prepare_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr, bool *out_need_erase)
 {
     /* 前置条件（判据 2）：四个指针均由调用者自持。 */
 
@@ -655,10 +628,7 @@ ftl_status_e md_ring_prepare_addr(const md_ring_t  *ring,
  *             （运行期 job 走 md_ring_prepare_addr + 异步擦除）。
  *             镜像池（plane_mask 含多个 plane）用 multi-plane 擦，所有副本一起擦。
  * -------------------------------------------------------------------- */
-ftl_status_e md_ring_prepare_write(const md_ring_t  *ring,
-                                   const ftl_topo_t *topo,
-                                   WORD              write_idx,
-                                   DWORD            *out_addr)
+ftl_status_e md_ring_prepare_write(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr)
 {
     DWORD addr;
     bool  need_erase = false;
@@ -671,8 +641,7 @@ ftl_status_e md_ring_prepare_write(const md_ring_t  *ring,
     if (need_erase)
     {
         /* 换块：先擦目标块（池内轮转 ⇒ 该块持全池最旧 record，擦掉不丢信息） */
-        const int st = (md_ring_plane_count(ring->plane_mask) > 1U) ? ftl_sync_erase_block_multi_plane(addr)
-                                                                    : ftl_sync_erase_block(addr);
+        const int st = (md_ring_plane_count(ring->plane_mask) > 1U) ? ftl_sync_erase_block_multi_plane(addr) : ftl_sync_erase_block(addr);
         if (st != 0)
         {
             return FTL_ERROR;
@@ -690,8 +659,7 @@ ftl_status_e md_ring_prepare_write(const md_ring_t  *ring,
 /* 页头字段校验：magic + chunk_count + 布局版本。 */
 static bool md_anchor_header_valid(DWORD magic, WORD chunk_count, DWORD layout_version)
 {
-    return (magic == ANCHOR_MAGIC) && (chunk_count == ANCHOR_PAGE_COUNT) &&
-           (layout_version == FTL_MEDIA_LAYOUT_VERSION);
+    return (magic == ANCHOR_MAGIC) && (chunk_count == ANCHOR_PAGE_COUNT) && (layout_version == FTL_MEDIA_LAYOUT_VERSION);
 }
 
 /* Anchor 池几何：优先用 md_pool_build_all() 生成的候选池（跳过 BAD）；
@@ -717,9 +685,7 @@ static void md_anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
 
 /* 廉价探针：只读 chunk 0 的 20 字节页头取 sequence。
  * FC 读整页并校验 per-CW CRC + ECC，`length` 只限制拷出字节数。 */
-static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
-                                                 WORD                      record_idx,
-                                                 DWORD                    *out_sequence)
+static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c, WORD record_idx, DWORD *out_sequence)
 {
     const BYTE plane_count = md_ring_plane_count(c->ring->plane_mask);
 
@@ -733,8 +699,7 @@ static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
         {
             continue;
         }
-        if ((!md_anchor_header_valid(hdr.magic, hdr.chunk_count, hdr.layout_version)) ||
-            (hdr.chunk_index != 0U) || (hdr.sequence == 0U))
+        if ((!md_anchor_header_valid(hdr.magic, hdr.chunk_count, hdr.layout_version)) || (hdr.chunk_index != 0U) || (hdr.sequence == 0U))
         {
             continue;
         }
@@ -747,9 +712,7 @@ static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
 }
 
 /* 整条校验：全部页有效、chunk 序完整、各页 sequence 一致；不跨 plane 拼半条。 */
-static ftl_status_e md_anchor_record_probe_full(const anchor_probe_ctx_t *c,
-                                                WORD                      record_idx,
-                                                DWORD                    *out_sequence)
+static ftl_status_e md_anchor_record_probe_full(const anchor_probe_ctx_t *c, WORD record_idx, DWORD *out_sequence)
 {
     md_anchor_page_t page;
     const BYTE       plane_count = md_ring_plane_count(c->ring->plane_mask);
@@ -823,8 +786,7 @@ static ftl_status_e md_anchor_record_probe(void *ctx, WORD record_idx, bool full
 {
     const anchor_probe_ctx_t *c = (const anchor_probe_ctx_t *)ctx;
 
-    return full ? md_anchor_record_probe_full(c, record_idx, out_sequence)
-                : md_anchor_record_probe_cheap(c, record_idx, out_sequence);
+    return full ? md_anchor_record_probe_full(c, record_idx, out_sequence) : md_anchor_record_probe_cheap(c, record_idx, out_sequence);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -874,10 +836,7 @@ static void md_live_copy_add(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
     {
         if (!*warned)
         {
-            LOGW(LOG_TAG_META "directory entry %u: plane=%u block=%u out of range — skipped\r\n",
-                 (unsigned)entry_idx,
-                 (unsigned)plane,
-                 (unsigned)block);
+            LOGW(LOG_TAG_META "directory entry %u: plane=%u block=%u out of range — skipped\r\n", (unsigned)entry_idx, (unsigned)plane, (unsigned)block);
             *warned = true;
         }
         return;
@@ -967,11 +926,7 @@ static void md_boot_status_log(const md_dir_cache_t *dir)
 
     if (dir->cur_block_valid)
     {
-        LOGI(LOG_TAG_META "anchor_seq=%lu dyn=%u cur_blk=%u live_blks=%lu\r\n",
-             dir->anchor_sequence,
-             dyn,
-             (unsigned)dir->cur_metadata_block,
-             live_blocks);
+        LOGI(LOG_TAG_META "anchor_seq=%lu dyn=%u cur_blk=%u live_blks=%lu\r\n", dir->anchor_sequence, dyn, (unsigned)dir->cur_metadata_block, live_blocks);
     }
     else
     {
@@ -1044,9 +999,7 @@ static WORD md_entry_index_find(const md_dir_cache_t *dir, BYTE type, WORD id)
 
 /* md_entry_find — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID。
  * Directory 当前只登记 L2P_REGION；其余元数据是固定位置，不经过本函数。 */
-DWORD md_entry_find(const md_dir_cache_t *dir,
-                    BYTE                  type,
-                    WORD                  id)
+DWORD md_entry_find(const md_dir_cache_t *dir, BYTE type, WORD id)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
 
@@ -1072,10 +1025,7 @@ WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
  *   实现要点：容量满时**不追加**并 LOGE。对本项目的 L2P_REGION 不可达
  *             （容量 == region 数，全部在 fill_fixed 已登记）。
  * -------------------------------------------------------------------- */
-void md_entry_update(md_dir_cache_t *dir,
-                     BYTE            type,
-                     WORD            id,
-                     DWORD           new_pba)
+void md_entry_update(md_dir_cache_t *dir, BYTE type, WORD id, DWORD new_pba)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
 
@@ -1353,20 +1303,13 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
         }
     }
 
-    LOGI(LOG_TAG_META "L2P log area: live=%u free=%u reclaim=%u borrow=%u (total=%u/plane)\r\n",
-         (unsigned)n_live,
-         (unsigned)n_free,
-         (unsigned)n_reclaim,
-         (unsigned)dir->log_borrow_count,
-         (unsigned)L2P_LOG_BLOCKS_PER_PLANE);
+    LOGI(LOG_TAG_META "L2P log area: live=%u free=%u reclaim=%u borrow=%u (total=%u/plane)\r\n", (unsigned)n_live, (unsigned)n_free, (unsigned)n_reclaim, (unsigned)dir->log_borrow_count, (unsigned)L2P_LOG_BLOCKS_PER_PLANE);
 
     /* 固定区没有任何空闲块：运行期可以从 **OP 池**有界借用（L2P_LOG_BORROW_MAX）
      * 打破“压缩没有目标块”的死锁；只有 OP 池也空时才真正需要格式化。 */
     if (n_free == 0U)
     {
-        LOGW(LOG_TAG_META "L2P log area exhausted (free=0, reclaim=%u) — dynamic borrow up to %u blocks\r\n",
-             (unsigned)n_reclaim,
-             (unsigned)L2P_LOG_BORROW_MAX);
+        LOGW(LOG_TAG_META "L2P log area exhausted (free=0, reclaim=%u) — dynamic borrow up to %u blocks\r\n", (unsigned)n_reclaim, (unsigned)L2P_LOG_BORROW_MAX);
     }
 }
 
@@ -1388,8 +1331,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
 {
     /* 当前块已写满且无活 region：先从"当前写块"身份上摘下来，否则 mark_all 会把它
      * 永远排除；日志区没有空闲块时就再也换不了块（死等）。 */
-    if (dir->cur_block_valid && (dir->cur_metadata_page >= PAGES_PER_BLOCK) &&
-        (dir->l2p_live[dir->cur_metadata_block] == 0U))
+    if (dir->cur_block_valid && (dir->cur_metadata_page >= PAGES_PER_BLOCK) && (dir->l2p_live[dir->cur_metadata_block] == 0U))
     {
         const WORD gblock = dir->cur_metadata_block;
 
@@ -1436,10 +1378,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
          * ⇒ 掉电后每次开机全量重建（实测 `free=3241 cmd=0 buf=0` 仍 stall）。
          * 压缩/回收 job 会腾块；这里不能回退到用户 Free Pool。 */
         dir->handle.compact_wanted = true;
-        LOGD(LOG_TAG_META "log area exhausted: live=%u reclaim=%u cur_page=%u — request compact\r\n",
-             (unsigned)md_live_block_count_get(dir),
-             (unsigned)dir->reclaim_pending_count,
-             (unsigned)dir->cur_metadata_page);
+        LOGD(LOG_TAG_META "log area exhausted: live=%u reclaim=%u cur_page=%u — request compact\r\n", (unsigned)md_live_block_count_get(dir), (unsigned)dir->reclaim_pending_count, (unsigned)dir->cur_metadata_page);
         return false;
     }
 
@@ -1499,8 +1438,7 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
 
     /* 剩余页不足两份 ⇒ **先换块再取**：否则第一个槽消耗后第二个换块失败，
      * 第一个槽就白烧了（RISK-BOOT-18）。 */
-    if ((!dir->cur_block_valid) ||
-        ((WORD)dir->cur_metadata_page + L2P_REGION_COPIES > PAGES_PER_BLOCK))
+    if ((!dir->cur_block_valid) || ((WORD)dir->cur_metadata_page + L2P_REGION_COPIES > PAGES_PER_BLOCK))
     {
         if (!md_log_rotate(dir, alloc))
         {
@@ -1536,8 +1474,7 @@ static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
      * Anchor 条目来自介质（H29），损坏条目可能指向 Anchor/CP/BBT/Journal ⇒ 跳过。
      * ⚠ **不能**用 `md_block_is_metadata(NULL, ...)`：L2P 日志区是固定分区，会被一起
      *   排除 ⇒ 旧位置的活计数永不递减、`l2p_live` 只增不减（RISK-MD-13）。 */
-    if ((old != NAND_PBA_INVALID) && (pba_to_plane(old) < PLANE_NUM) &&
-        (pba_to_block(old) >= L2P_LOG_BLOCK0))
+    if ((old != NAND_PBA_INVALID) && (pba_to_plane(old) < PLANE_NUM) && (pba_to_block(old) >= L2P_LOG_BLOCK0))
     {
         WORD g = ftl_pba_gblock(old);
 
@@ -1580,11 +1517,7 @@ DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id)
  * 单副本模式只走一个 copy；MD_COMMIT_PAIR 走两个 copy。账本迁移原语是
  * md_region_copy_commit（旧位置 -1、新位置 +1、旧块归零登记回收）。
  */
-void md_commit_region(md_dir_cache_t  *dir,
-                      WORD             region_id,
-                      md_commit_mode_e mode,
-                      DWORD            new_primary,
-                      DWORD            new_backup)
+void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode, DWORD new_primary, DWORD new_backup)
 {
     ASSERT(region_id < METADATA_DIR_ENTRIES);
     ASSERT(mode < MD_COMMIT_MODE_NUM);
@@ -1840,9 +1773,7 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
             }
 
             /* entry_count 来自介质（不可信）：先夹到本页容量再窄化到 WORD。 */
-            const WORD n = (WORD)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE)
-                                      ? page.entry_count
-                                      : METADATA_DIR_ENTRIES_PER_PAGE);
+            const WORD n = (WORD)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE) ? page.entry_count : METADATA_DIR_ENTRIES_PER_PAGE);
 
             for (WORD k = 0U; k < n; k++)
             {
@@ -1990,8 +1921,7 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
 
     /* ── 当前日志块：可能尚无任何 region 指向它（刚分配、还没 commit），
      *    Directory 扫不到 ⇒ 必须显式排除，否则会被 Free Pool 回填当用户块收走。 ── */
-    if (md_dir->cur_block_valid && (plane == ftl_gblock_plane(md_dir->cur_metadata_block)) &&
-        (block == ftl_gblock_block(md_dir->cur_metadata_block)))
+    if (md_dir->cur_block_valid && (plane == ftl_gblock_plane(md_dir->cur_metadata_block)) && (block == ftl_gblock_block(md_dir->cur_metadata_block)))
     {
         return true;
     }
@@ -2043,8 +1973,7 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
             const BYTE ep = pba_to_plane(pba);
             const WORD eb = pba_to_block(pba);
 
-            if ((ep >= PLANE_NUM) || (eb >= BLOCKS_PER_PLANE) ||
-                md_block_is_metadata(NULL, ep, eb))
+            if ((ep >= PLANE_NUM) || (eb >= BLOCKS_PER_PLANE) || md_block_is_metadata(NULL, ep, eb))
             {
                 continue;
             }
@@ -2103,11 +2032,7 @@ void md_pool_print(const md_dir_cache_t *dir)
                 }
             }
 
-            LOGI(LOG_TAG_POOL "%-10s range=%u..%u good(plane-blocks)=%lu\r\n",
-                 part->name,
-                 (unsigned)L2P_LOG_BLOCK0,
-                 (L2P_LOG_AREA_END - 1U),
-                 good);
+            LOGI(LOG_TAG_POOL "%-10s range=%u..%u good(plane-blocks)=%lu\r\n", part->name, (unsigned)L2P_LOG_BLOCK0, (L2P_LOG_AREA_END - 1U), good);
             continue;
         }
 
@@ -2135,10 +2060,7 @@ void md_pool_print(const md_dir_cache_t *dir)
             continue;
         }
 
-        LOGI(LOG_TAG_POOL "%-10s nominal=%u candidates=%u\r\n",
-             part->name,
-             (unsigned)ring->nominal_count,
-             (unsigned)ring->block_count);
+        LOGI(LOG_TAG_POOL "%-10s nominal=%u candidates=%u\r\n", part->name, (unsigned)ring->nominal_count, (unsigned)ring->block_count);
 
         for (WORD i = 0U; i < ring->block_count; i++)
         {
@@ -2146,10 +2068,7 @@ void md_pool_print(const md_dir_cache_t *dir)
 
             if ((b < ring->first_block) || (b >= (ring->first_block + ring->nominal_count)))
             {
-                LOGI(LOG_TAG_POOL "%-10s remapped -> spare block=%u (candidate_idx=%u)\r\n",
-                     part->name,
-                     (unsigned)b,
-                     (unsigned)i);
+                LOGI(LOG_TAG_POOL "%-10s remapped -> spare block=%u (candidate_idx=%u)\r\n", part->name, (unsigned)b, (unsigned)i);
             }
         }
     }
@@ -2169,9 +2088,7 @@ void md_pool_service(struct ftl_context *ftl)
 
     /* 等元数据写路径空闲：换游标可能让在飞命令的落点与新候选表不一致。
      * 单线程 superloop ⇒ 这里不会与完成回调并发；只是在下一轮再试。 */
-    if (ftl->cp_handle->active || ftl->flush_active || ftl->mig_handle->active ||
-        (journal->handle.phase != JRN_IDLE) || alloc->bbt.handle.waiting ||
-        (dir->handle.phase != MD_JOB_IDLE) || dir->handle.waiting)
+    if (ftl->cp_handle->active || ftl->flush_active || ftl->mig_handle->active || (journal->handle.phase != JRN_IDLE) || alloc->bbt.handle.waiting || (dir->handle.phase != MD_JOB_IDLE) || dir->handle.waiting)
     {
         return;
     }
@@ -2262,9 +2179,6 @@ void md_pool_service(struct ftl_context *ftl)
 
     if ((s_pool_rebuilt_logged++ % MD_POOL_REBUILT_LOG_EVERY) == 0U)
     {
-        LOGW(LOG_TAG_POOL "rebuilt after metadata BAD (jrn_changed=%u rebuild_required=%u count=%lu)\r\n",
-             (jrn_changed ? 1U : 0U),
-             (alloc->bbt.rebuild_required ? 1U : 0U),
-             s_pool_rebuilt_logged);
+        LOGW(LOG_TAG_POOL "rebuilt after metadata BAD (jrn_changed=%u rebuild_required=%u count=%lu)\r\n", (jrn_changed ? 1U : 0U), (alloc->bbt.rebuild_required ? 1U : 0U), s_pool_rebuilt_logged);
     }
 }

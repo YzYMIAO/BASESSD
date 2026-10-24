@@ -161,15 +161,11 @@ struct ftl_context;
 #define FTL_CHECKPOINT_RECORDS_PER_BLOCK (PAGES_PER_BLOCK / FTL_CHECKPOINT_RECORD_PAGES)
 #define CHECKPOINT_POOL_BLOCKS           (8U) /* 策略：池内块数 */
 
-_Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL,
-               "块元数据快照页数必须恰好覆盖全部块");
-_Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL,
-               "磨损快照页数必须恰好覆盖全部块");
+_Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL, "块元数据快照页数必须恰好覆盖全部块");
+_Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL, "磨损快照页数必须恰好覆盖全部块");
 _Static_assert(FTL_CHECKPOINT_WEAR_PAGES <= UINT8_MAX, "磨损快照页数必须装进 BYTE");
-_Static_assert(FTL_CHECKPOINT_RECORD_PAGES <= PAGES_PER_BLOCK,
-               "一条 Checkpoint record 必须装得进一个块");
-_Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
-               "每块至少容纳 2 条 record（块满轮转需要）");
+_Static_assert(FTL_CHECKPOINT_RECORD_PAGES <= PAGES_PER_BLOCK, "一条 Checkpoint record 必须装得进一个块");
+_Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条 record（块满轮转需要）");
 
 /* ── Journal（环形日志）──
  * 容量策略：Journal 必须容纳"两次 checkpoint 之间"的全部映射更新。
@@ -209,11 +205,10 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 /* 每个 region 的**副本数**（RISK-BOOT-18 的 L2）：主 + 备。
  * 活数据 = COPIES × ideal；日志区取 (COPIES+1) × ideal（多一份工作余量：
  * current 块 / 压缩目标 / 坏块）。 */
-#define L2P_REGION_COPIES    (2U)
-#define L2P_LOG_BLOCKS_TOTAL (3U * L2P_LOG_IDEAL_BLOCKS) /* 96 = 2 份活数据 + 1 份余量 */
-#define L2P_LOG_BLOCKS_PER_PLANE \
-    (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
-#define L2P_LOG_BLOCK0 (FTL_METADATA_BLOCK_END)
+#define L2P_REGION_COPIES        (2U)
+#define L2P_LOG_BLOCKS_TOTAL     (3U * L2P_LOG_IDEAL_BLOCKS) /* 96 = 2 份活数据 + 1 份余量 */
+#define L2P_LOG_BLOCKS_PER_PLANE (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
+#define L2P_LOG_BLOCK0           (FTL_METADATA_BLOCK_END)
 
 /* 压缩触发水位：活日志块**超过**两份副本的理想块数（> 64）就启动压缩。
  * ⚠ 不额外留 25% 碎片余量：固定日志区 3× ideal（96 块），活数据 = 2× ideal（64 块），
@@ -324,14 +319,10 @@ _Static_assert(PLANE_NUM <= 8U, "plane_mask 是 BYTE，PLANE_NUM 不能超过 8"
 /* 固定元数据区不越界 */
 _Static_assert(FTL_METADATA_BLOCK_END <= BLOCKS_PER_PLANE, "固定元数据区超出每 plane 块数");
 _Static_assert(MD_SPARE_BLOCK0 == L2P_LOG_AREA_END, "shared spare 必须紧接 L2P 日志区");
-_Static_assert((MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE) == FTL_METADATA_AREA_END,
-               "FTL_METADATA_AREA_END 必须等于 shared spare 末尾");
-_Static_assert(FTL_METADATA_AREA_END <= BLOCKS_PER_PLANE,
-               "固定元数据区（含 L2P 日志 + shared spare）超出每 plane 块数");
-_Static_assert(L2P_LOG_BLOCKS_PER_PLANE >= (L2P_LOG_IDEAL_BLOCKS / PLANE_NUM + 1U),
-               "L2P 日志区至少要容纳理想表 + 1 个 current 块");
-_Static_assert((L2P_LOG_BLOCKS_PER_PLANE * PLANE_NUM) >= (L2P_LOG_IDEAL_BLOCKS + 2U),
-               "L2P 日志区预留不足（需理想表 + current + 压缩目标）");
+_Static_assert((MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE) == FTL_METADATA_AREA_END, "FTL_METADATA_AREA_END 必须等于 shared spare 末尾");
+_Static_assert(FTL_METADATA_AREA_END <= BLOCKS_PER_PLANE, "固定元数据区（含 L2P 日志 + shared spare）超出每 plane 块数");
+_Static_assert(L2P_LOG_BLOCKS_PER_PLANE >= (L2P_LOG_IDEAL_BLOCKS / PLANE_NUM + 1U), "L2P 日志区至少要容纳理想表 + 1 个 current 块");
+_Static_assert((L2P_LOG_BLOCKS_PER_PLANE * PLANE_NUM) >= (L2P_LOG_IDEAL_BLOCKS + 2U), "L2P 日志区预留不足（需理想表 + current + 压缩目标）");
 
 /* 元数据池：一条 record 装得进一块，每块至少一条；池至少 2 块
  * （换块流程是"先擦目标块再写" ⇒ 1 块的池会把自己擦掉）。*/
@@ -347,8 +338,7 @@ _Static_assert(BBT_POOL_BLOCKS >= 2U, "BBT 池至少 2 块");
 _Static_assert(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS <= CHECKPOINT_BLOCK0, "Anchor 与 Checkpoint 重叠");
 _Static_assert(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS <= BBT_BLOCK, "Checkpoint 与 BBT 重叠");
 _Static_assert(BBT_BLOCK + BBT_POOL_BLOCKS <= JOURNAL_BLOCK0, "BBT 与 Journal 重叠");
-_Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END,
-               "固定区末尾必须紧接 Journal 之后");
+_Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END, "固定区末尾必须紧接 Journal 之后");
 
 /* ── 元数据类型 ──
  * Directory 当前只登记 METADATA_TYPE_L2P_REGION；其余类型是固定分区，位置由布局
@@ -390,15 +380,14 @@ _Static_assert(sizeof(md_entry_t) == METADATA_ENTRY_BYTES, "md_entry_t 必须是
 
 typedef struct
 {
-    DWORD      magic;                                  /* ANCHOR_MAGIC */
-    DWORD      sequence;                               /* 单调递增（同一份的各 chunk 相同）*/
-    WORD       chunk_index;                            /* 0..ANCHOR_PAGE_COUNT-1 */
-    WORD       chunk_count;                            /* = ANCHOR_PAGE_COUNT */
-    DWORD      entry_count;                            /* 本 chunk 有效 entry 数 */
-    DWORD      layout_version;                         /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
-    md_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE]; /* 256 × 7 = 1792B */
-    BYTE       padding[PAGE_MAIN_SIZE - METADATA_ANCHOR_HEADER_BYTES -
-                 (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
+    DWORD      magic;                                                                                                           /* ANCHOR_MAGIC */
+    DWORD      sequence;                                                                                                        /* 单调递增（同一份的各 chunk 相同）*/
+    WORD       chunk_index;                                                                                                     /* 0..ANCHOR_PAGE_COUNT-1 */
+    WORD       chunk_count;                                                                                                     /* = ANCHOR_PAGE_COUNT */
+    DWORD      entry_count;                                                                                                     /* 本 chunk 有效 entry 数 */
+    DWORD      layout_version;                                                                                                  /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
+    md_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE];                                                                          /* 256 × 7 = 1792B */
+    BYTE       padding[PAGE_MAIN_SIZE - METADATA_ANCHOR_HEADER_BYTES - (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
 } md_anchor_page_t;
 
 /* 页头前缀：廉价探针只读这 20 字节（整页 CRC/ECC 仍由 FC 校验）。 */
@@ -413,10 +402,8 @@ typedef struct
 } md_anchor_header_t;
 
 /* 一页必须装得下：头 20B + 每页条目（无独立 CRC，页完整性由 FC 的 per-CW CRC + ECC 保证）*/
-_Static_assert(sizeof(md_anchor_header_t) == METADATA_ANCHOR_HEADER_BYTES,
-               "Anchor 页头前缀必须与结构体头部一致");
-_Static_assert(offsetof(md_anchor_page_t, entries) == METADATA_ANCHOR_HEADER_BYTES,
-               "Anchor 页头前缀与 entries 偏移不一致");
+_Static_assert(sizeof(md_anchor_header_t) == METADATA_ANCHOR_HEADER_BYTES, "Anchor 页头前缀必须与结构体头部一致");
+_Static_assert(offsetof(md_anchor_page_t, entries) == METADATA_ANCHOR_HEADER_BYTES, "Anchor 页头前缀与 entries 偏移不一致");
 _Static_assert(sizeof(md_anchor_page_t) == PAGE_MAIN_SIZE, "Anchor 页结构体不等于一页主区");
 _Static_assert((METADATA_DIR_ENTRIES % METADATA_DIR_ENTRIES_PER_PAGE) == 0U, "每页条目数不能整除总条目数");
 
@@ -553,18 +540,11 @@ bool md_pool_build_all(alc_t *alloc);
  *
  * record_idx ∈ [0, total)；page_in_record ∈ [0, pages_per_record)。
  */
-DWORD md_ring_addr(const md_ring_t  *ring,
-                   const ftl_topo_t *topo,
-                   WORD              record_idx,
-                   BYTE              page_in_record);
+DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record);
 
 /* 指定 plane 的同一个 record 槽地址（镜像池的读回退 / 写镜像用）。
  * plane 必须落在 ring->plane_mask 内；越界是调用者 bug ⇒ ASSERT。 */
-DWORD md_ring_addr_plane(const md_ring_t  *ring,
-                         const ftl_topo_t *topo,
-                         WORD              record_idx,
-                         BYTE              page_in_record,
-                         BYTE              plane);
+DWORD md_ring_addr_plane(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record, BYTE plane);
 
 /*
  * metadata_ring_probe_fn - 调用方的 record 探针（由 ring 模块回调）
@@ -583,10 +563,7 @@ DWORD md_ring_addr_plane(const md_ring_t  *ring,
  * ⚠ 契约：**失败时不写 *out_sequence**（调用者据此把"探针失败"与"sequence=0"分开）。
  *   写侧用 sequence 从 1 起，故 0 恒表示"未写"。
  */
-typedef ftl_status_e (*metadata_ring_probe_fn)(void  *ctx,
-                                               WORD   record_idx,
-                                               bool   full,
-                                               DWORD *out_sequence);
+typedef ftl_status_e (*metadata_ring_probe_fn)(void *ctx, WORD record_idx, bool full, DWORD *out_sequence);
 
 /* md_ring_locate 的输出：最新有效 record + 写游标。 */
 typedef struct
@@ -619,10 +596,7 @@ typedef struct
  * @param out 输出：最新有效 record 槽位 / sequence / 写游标（池空时 newest=UINT16_MAX、seq=0）
  * @return FTL_OK = 定位完成（含"池为空"）；FTL_ERROR = ring 几何非法
  */
-ftl_status_e md_ring_locate(const md_ring_t       *ring,
-                            metadata_ring_probe_fn probe,
-                            void                  *ctx,
-                            md_ring_locate_out_t  *out);
+ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, md_ring_locate_out_t *out);
 
 /*
  * md_ring_prepare_addr - 算写点槽位地址 + 判定是否需先擦该块（**不动介质**）
@@ -639,11 +613,7 @@ ftl_status_e md_ring_locate(const md_ring_t       *ring,
  * @param out_need_erase 输出：true = 写之前必须先擦 *out_addr 所在块
  * @return FTL_OK / FTL_ERROR（几何非法或槽位越界；ring/topo/出参由调用者提供）
  */
-ftl_status_e md_ring_prepare_addr(const md_ring_t  *ring,
-                                  const ftl_topo_t *topo,
-                                  WORD              write_idx,
-                                  DWORD            *out_addr,
-                                  bool             *out_need_erase);
+ftl_status_e md_ring_prepare_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr, bool *out_need_erase);
 
 /*
  * md_ring_prepare_write - 把写点槽位准备好（含换块擦除），返回该 record 第 0 页地址
@@ -657,10 +627,7 @@ ftl_status_e md_ring_prepare_addr(const md_ring_t  *ring,
  * @param out_addr  输出：record 第 0 页地址
  * @return FTL_OK / FTL_ERROR（擦除失败）
  */
-ftl_status_e md_ring_prepare_write(const md_ring_t  *ring,
-                                   const ftl_topo_t *topo,
-                                   WORD              write_idx,
-                                   DWORD            *out_addr);
+ftl_status_e md_ring_prepare_write(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr);
 
 /* ── 元数据目录后台 job ──
  *
@@ -895,9 +862,7 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes);
  * @return PBA；NAND_PBA_INVALID = 未找到。对 L2P region 而言"未找到"与"未映射"
  *         同义：`fill_fixed` 为每个 region 预登记一条，之后只在刷盘时覆盖。
  */
-DWORD md_entry_find(const md_dir_cache_t *dir,
-                    BYTE                  type,
-                    WORD                  id);
+DWORD md_entry_find(const md_dir_cache_t *dir, BYTE type, WORD id);
 
 /*
  * md_live_count_get - 某个 gblock 上还有多少 region 的**最新位置**落在它上面。
@@ -915,10 +880,7 @@ WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock);
  * @param id     L2P region_id / 0 for others
  * @param new_pba 新物理位置（PBA）
  */
-void md_entry_update(md_dir_cache_t *dir,
-                     BYTE            type,
-                     WORD            id,
-                     DWORD           new_pba);
+void md_entry_update(md_dir_cache_t *dir, BYTE type, WORD id, DWORD new_pba);
 
 /*
  * md_slot_pair_append - 一次预留**两个连续槽**（主/备副本，RISK-BOOT-18 的 L2）
@@ -948,9 +910,7 @@ void md_entry_update(md_dir_cache_t *dir,
  * @param out  输出两个 PBA（主、备）
  * @return true = 两槽都取到；false = 背压，未取槽
  */
-bool md_slot_pair_append(md_dir_cache_t *dir,
-                         alc_t          *alloc,
-                         DWORD           out[L2P_REGION_COPIES]);
+bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES]);
 
 /* ── 固定 L2P 日志区（RISK-MD-07 / RISK-CAP-02）──
  * 这 64 个 gblock 是**固定预留**的元数据区：只由 metadata 模块在
@@ -1045,11 +1005,7 @@ typedef enum
  * @param new_primary 主副本新位置；MD_COMMIT_BACKUP 时忽略（传 NAND_PBA_INVALID 占位）
  * @param new_backup  备副本新位置；MD_COMMIT_PRIMARY 时忽略（传 NAND_PBA_INVALID 占位）
  */
-void md_commit_region(md_dir_cache_t  *dir,
-                      WORD             region_id,
-                      md_commit_mode_e mode,
-                      DWORD            new_primary,
-                      DWORD            new_backup);
+void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode, DWORD new_primary, DWORD new_backup);
 
 /* ── 第二副本（RISK-BOOT-18 的 L2）──
  * `md_backup_find` 返回该 region 的备份 PBA（NAND_PBA_INVALID = 无副本）。 */

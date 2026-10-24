@@ -75,9 +75,7 @@ char *longestCommonPrefix(char **strs, int strsSize)
 
 int romanToInt(char *s)
 {
-    int symbol_val[26] =
-        {
-            0};
+    int symbol_val[26]    = {0};
     symbol_val['I' - 'A'] = 1;
     symbol_val['V' - 'A'] = 5;
     symbol_val['X' - 'A'] = 10;
@@ -108,12 +106,8 @@ int romanToInt(char *s)
 
 char *intToRoman(int num)
 {
-    static const int values[] =
-        {
-            1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
-    static const char *symbols[] =
-        {
-            "M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
+    static const int   values[]  = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+    static const char *symbols[] = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
 
     char *roman = malloc(sizeof(char) * 16);
 

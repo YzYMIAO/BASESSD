@@ -193,10 +193,7 @@ static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* 非对齐数据段的逐字节编码（mod8 查表推进校验寄存器） */
-static void bch_encode_unaligned(struct fc_bch_control *bch,
-                                 const unsigned char   *data,
-                                 unsigned int           len,
-                                 DWORD                 *ecc)
+static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char *data, unsigned int len, DWORD *ecc)
 {
     int          i;
     const DWORD *p;
@@ -223,16 +220,10 @@ static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
 
     for (i = 0; i < nwords; i++, src += 4)
     {
-        dst[i] = ((DWORD)swap_bits(bch, src[0]) << 24) |
-                 ((DWORD)swap_bits(bch, src[1]) << 16) |
-                 ((DWORD)swap_bits(bch, src[2]) << 8) |
-                 (DWORD)swap_bits(bch, src[3]);
+        dst[i] = ((DWORD)swap_bits(bch, src[0]) << 24) | ((DWORD)swap_bits(bch, src[1]) << 16) | ((DWORD)swap_bits(bch, src[2]) << 8) | (DWORD)swap_bits(bch, src[3]);
     }
     memcpy(pad, src, BCH_ECC_BYTES(bch) - 4 * nwords);
-    dst[nwords] = ((DWORD)swap_bits(bch, pad[0]) << 24) |
-                  ((DWORD)swap_bits(bch, pad[1]) << 16) |
-                  ((DWORD)swap_bits(bch, pad[2]) << 8) |
-                  (DWORD)swap_bits(bch, pad[3]);
+    dst[nwords] = ((DWORD)swap_bits(bch, pad[0]) << 24) | ((DWORD)swap_bits(bch, pad[1]) << 16) | ((DWORD)swap_bits(bch, pad[2]) << 8) | (DWORD)swap_bits(bch, pad[3]);
 }
 
 /* 把工作区写回 ECC 字节（与 load 对称） */
@@ -309,10 +300,7 @@ void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
         w = cpu_to_be32(*pdata++);
         if (bch->swap_bits)
         {
-            w = (DWORD)swap_bits(bch, (w >> 0)) |
-                ((DWORD)swap_bits(bch, (w >> 8)) << 8) |
-                ((DWORD)swap_bits(bch, (w >> 16)) << 16) |
-                ((DWORD)swap_bits(bch, (w >> 24)) << 24);
+            w = (DWORD)swap_bits(bch, (w >> 0)) | ((DWORD)swap_bits(bch, (w >> 8)) << 8) | ((DWORD)swap_bits(bch, (w >> 16)) << 16) | ((DWORD)swap_bits(bch, (w >> 24)) << 24);
         }
         w ^= r[0];
         p0 = tab0 + (l + 1) * ((w >> 0) & 0xFFU);
@@ -639,9 +627,7 @@ static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsign
     rows[0] = c;
     for (i = 0; i < m; i++)
     {
-        rows[i + 1] = bch->a_pow_tab[(unsigned int)(4 * i)] ^
-                      (a ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)k3)] : 0) ^
-                      (b ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)j)] : 0);
+        rows[i + 1] = bch->a_pow_tab[(unsigned int)(4 * i)] ^ (a ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)k3)] : 0) ^ (b ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)j)] : 0);
         j++;
         k3 += 2;
     }

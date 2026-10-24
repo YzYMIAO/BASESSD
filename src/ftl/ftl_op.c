@@ -37,8 +37,7 @@
 
 /* 旁表按 command_id 键 ⇒ 容量上界 = 同时在飞命令数 ≤ FC 命令池深度。
  * 池深是 FC 层的事实上界，写成常量会在 FC 扩容时静默变小（H4）。 */
-_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH,
-               "旁表容量必须 ≥ FC 命令池深度（推导见 ftl_op.h）");
+_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH, "旁表容量必须 ≥ FC 命令池深度（推导见 ftl_op.h）");
 
 /* 前置声明：服务函数定义在本文件末尾。 */
 static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
@@ -354,9 +353,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
      * 先 ftl_op_init 清一次、再 route_set），因为 boot 期 full metadata rebuild 就会经
      * l2p_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
      * 不再是"开机早期"的正常状态。 */
-    struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch,
-                                               cmd->config.ce,
-                                               cmd->config.lun);
+    struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
     /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
      * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */

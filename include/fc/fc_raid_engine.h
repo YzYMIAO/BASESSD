@@ -111,11 +111,7 @@ void fc_raid_restore(BYTE lun);
  * @param failed_idx  失败的 buffer 索引（0..count-1）
  * @param length      每个 buffer 的长度
  */
-void fc_raid_recover(BYTE *recovered,
-                     BYTE *buffers[],
-                     BYTE  count,
-                     BYTE  failed_idx,
-                     WORD  length);
+void fc_raid_recover(BYTE *recovered, BYTE *buffers[], BYTE count, BYTE failed_idx, WORD length);
 
 #endif /* CONFIG_FC_RAID */
 #endif /* FC_RAID_ENGINE_H */

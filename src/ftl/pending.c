@@ -82,8 +82,7 @@ pend_req_t *pend_find(pend_table_t *table, WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((table->slots[i].used != 0U) &&
-            (table->slots[i].command_id == cmd_id))
+        if ((table->slots[i].used != 0U) && (table->slots[i].command_id == cmd_id))
         {
             return &table->slots[i];
         }

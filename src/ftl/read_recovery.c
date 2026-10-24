@@ -207,8 +207,7 @@ static bool rr_unrec_log_is_due(DWORD *out_suppressed)
 
     if ((!due) && (now_ms != 0U))
     {
-        due = (s_rr_unrec_log_ms == 0U) ||
-              ((now_ms - s_rr_unrec_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+        due = (s_rr_unrec_log_ms == 0U) || ((now_ms - s_rr_unrec_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
     if (!due)
@@ -287,11 +286,7 @@ static void rr_settle_plane(rr_handle_t *rr)
             if ((rr->already_bad_logged[word] & bit) == 0U)
             {
                 rr->already_bad_logged[word] |= bit;
-                LOGW(LOG_TAG_RR "retired lba=%lu g=%u st=%s (data lost, count=%lu)\r\n",
-                     lba,
-                     (unsigned)gblock,
-                     stbuf,
-                     rr->already_bad_reads);
+                LOGW(LOG_TAG_RR "retired lba=%lu g=%u st=%s (data lost, count=%lu)\r\n", lba, (unsigned)gblock, stbuf, rr->already_bad_reads);
             }
         }
         else
@@ -300,18 +295,7 @@ static void rr_settle_plane(rr_handle_t *rr)
 
             if (rr_unrec_log_is_due(&suppressed))
             {
-                LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n",
-                     lba,
-                     fail_pba,
-                     fail_paa,
-                     (unsigned)gblock,
-                     (unsigned)pba_to_plane(fail_pba),
-                     (unsigned)pba_to_block(fail_pba),
-                     (unsigned)pba_to_page(fail_pba),
-                     (unsigned)pba_to_cw(fail_pba),
-                     (unsigned)rr->retry_count,
-                     stbuf,
-                     suppressed);
+                LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n", lba, fail_pba, fail_paa, (unsigned)gblock, (unsigned)pba_to_plane(fail_pba), (unsigned)pba_to_block(fail_pba), (unsigned)pba_to_page(fail_pba), (unsigned)pba_to_cw(fail_pba), (unsigned)rr->retry_count, stbuf, suppressed);
             }
 
             /* 首次不可纠：dump 与失败 PBA/LBA 相关的最近写轨迹（判二次编程/写后读坏）。 */
@@ -330,8 +314,7 @@ static void rr_settle_plane(rr_handle_t *rr)
  * owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。 */
 static void rr_job_finish(rr_handle_t *rr)
 {
-    const ssd_status_e status =
-        (rr->all_ok) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+    const ssd_status_e status = (rr->all_ok) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。
@@ -560,13 +543,7 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
     }
     else if (ftl_job_heartbeat(&rr->log_ms, &rr->start_ms))
     {
-        LOGI(LOG_TAG_RR "job stage=%u plane=%u attempt=%u retry=%u stall=%lums age=%lums\r\n",
-             (unsigned)rr->stage,
-             (unsigned)rr->plane,
-             (unsigned)rr->attempt,
-             (unsigned)rr->retry_count,
-             rr->stall_ms,
-             ftl_job_age_ms(&rr->start_ms));
+        LOGI(LOG_TAG_RR "job stage=%u plane=%u attempt=%u retry=%u stall=%lums age=%lums\r\n", (unsigned)rr->stage, (unsigned)rr->plane, (unsigned)rr->attempt, (unsigned)rr->retry_count, rr->stall_ms, ftl_job_age_ms(&rr->start_ms));
     }
 
     if (!rr->waiting)
@@ -728,8 +705,7 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 
         /* ECC 趋势（连续上升 ≥RISING / 单次 ≥HIGH_WATER）或 read disturb
          * 高水位（read_count 超阈值，慢死第一信号）都触发搬移。 */
-        if ((b->rr.health >= RR_BLOCK_CRITICAL) ||
-            (b->read_count >= RR_READ_DISTURB_THRESHOLD))
+        if ((b->rr.health >= RR_BLOCK_CRITICAL) || (b->read_count >= RR_READ_DISTURB_THRESHOLD))
         {
             /* 候选 SB 的另一个 plane 若已 BAD，migrate 读它必失败并 abort，
              * 而巡检每轮仍返回同一块 ⇒ 预测路径永久卡死。跳过该 SB。 */

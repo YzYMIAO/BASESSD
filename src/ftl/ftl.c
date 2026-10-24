@@ -141,8 +141,7 @@ bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n)
 {
     ASSERT(ftl != NULL);
 
-    return ftl_fc_host_budget_ok_n(n) &&
-           (((DWORD)pend_slot_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
+    return ftl_fc_host_budget_ok_n(n) && (((DWORD)pend_slot_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
 }
 
 /* ── 内部辅助 ── */
@@ -300,10 +299,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                         slot->first_lba = l;
                         slot->lbas      = 0U;
 
-                        LOGW(LOG_TAG_FTL "dangling g=%u first_lba=%lu st=BAD newg=%u (retired; later LBAs aggregated)\r\n",
-                             (unsigned)gob,
-                             l,
-                             (unsigned)newg);
+                        LOGW(LOG_TAG_FTL "dangling g=%u first_lba=%lu st=BAD newg=%u (retired; later LBAs aggregated)\r\n", (unsigned)gob, l, (unsigned)newg);
                     }
 
                     slot->lbas++;
@@ -313,21 +309,12 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                     /* 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。 */
                     const DWORD now_ms = ftl_job_now_ms();
 
-                    if ((now_ms == 0U) || (s_dangling_log_ms == 0U) ||
-                        ((now_ms - s_dangling_log_ms) >= FTL_JOB_LOG_INTERVAL_MS))
+                    if ((now_ms == 0U) || (s_dangling_log_ms == 0U) || ((now_ms - s_dangling_log_ms) >= FTL_JOB_LOG_INTERVAL_MS))
                     {
                         const char *old_state = ftl_block_state_name(old_st);
                         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[newg]));
 
-                        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n",
-                                   l,
-                                   oldp[bit],
-                                   (unsigned)gob,
-                                   old_state,
-                                   (unsigned)ftl->alloc.blocks[gob].sb_id,
-                                   (unsigned)newg,
-                                   new_state,
-                                   s_dangling_suppressed);
+                        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n", l, oldp[bit], (unsigned)gob, old_state, (unsigned)ftl->alloc.blocks[gob].sb_id, (unsigned)newg, new_state, s_dangling_suppressed);
                         s_dangling_log_ms     = now_ms;
                         s_dangling_suppressed = 0U;
                     }
@@ -356,10 +343,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
  * ⚠ 返回值必须查：desc 链比请求短时尾部不写（ftl_cmd_read_data 只在这一种情况报错），
  *   不查就等于把未初始化缓冲当数据交给 host。失败 ⇒ 本次读的结果不可信，跳过随后的
  *   ECC / read-disturb 记账（记账无意义）。 */
-static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t    *ftl,
-                                        fc_command_t *cmd,
-                                        pend_req_t   *pending,
-                                        WORD          cmd_id)
+static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_req_t *pending, WORD cmd_id)
 {
     DWORD data_size = FTL_IU_BYTES * pending->n_cw; /* 子操作字节数 */
 
@@ -537,9 +521,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (bit_mask_any(pending->cw_bitmap, ftl_cw_plane_mask(p)) &&
-            (pba_to_page(pba[p]) > 0U) &&
-            (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
+        if (bit_mask_any(pending->cw_bitmap, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
             alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
@@ -585,13 +567,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     if ((s_write_retry_logged++ % FTL_WRITE_RETRY_LOG_EVERY) == 0U)
     {
-        LOGW(LOG_TAG_FTL "write retry lba=%lu cw=0x%02x retry=%u pba=0x%08lx/0x%08lx count=%lu\r\n",
-             pending->lba,
-             (unsigned)pending->cw_bitmap,
-             (unsigned)pending->retry_count,
-             pba[0],
-             pba[1],
-             s_write_retry_logged);
+        LOGW(LOG_TAG_FTL "write retry lba=%lu cw=0x%02x retry=%u pba=0x%08lx/0x%08lx count=%lu\r\n", pending->lba, (unsigned)pending->cw_bitmap, (unsigned)pending->retry_count, pba[0], pba[1], s_write_retry_logged);
     }
 
     return FTL_OK;
@@ -672,10 +648,7 @@ static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *complet
 
         if (ftl_log_throttle_due(&s_cache_wb_fail_log, &suppressed))
         {
-            LOGE(LOG_TAG_FTL "cache-wb failed lba=%lu st=%s — close hot SB (suppressed=%lu)\r\n",
-                 ftl->cache_wb.lba,
-                 stbuf,
-                 suppressed);
+            LOGE(LOG_TAG_FTL "cache-wb failed lba=%lu st=%s — close hot SB (suppressed=%lu)\r\n", ftl->cache_wb.lba, stbuf, suppressed);
         }
 
         /* 只关 batch 页真正所在的 hot SB：batch 提交后 drain 可能已写满旧块并开了新 SB，
@@ -691,8 +664,7 @@ static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *complet
 
             const pend_req_t *p = &ftl->pending.slots[idx];
 
-            if ((alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) != ALC_SUPER_PBA_NOT_OPEN) ||
-                (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1) != ALC_SUPER_PBA_NOT_OPEN))
+            if ((alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) != ALC_SUPER_PBA_NOT_OPEN) || (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1) != ALC_SUPER_PBA_NOT_OPEN))
             {
                 (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
                 break;
@@ -703,8 +675,7 @@ static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *complet
     /* 已完成但尚未结算的成员按 IO_ERROR 结算；仍在飞的由各自完成回调结算。 */
     for (BYTE j = 0U; j < ftl->cache_wb.n; j++)
     {
-        if (bit_mask_any(ftl->cache_wb.done_mask, (DWORD)(1U << j)) &&
-            (ftl->cache_wb.pending_idx[j] != UINT8_MAX))
+        if (bit_mask_any(ftl->cache_wb.done_mask, (DWORD)(1U << j)) && (ftl->cache_wb.pending_idx[j] != UINT8_MAX))
         {
             const BYTE idx = ftl->cache_wb.pending_idx[j];
 
@@ -752,9 +723,7 @@ static void ftl_cache_wb_settle_success(ftl_ctx_t *ftl)
     }
 }
 
-static void ftl_cache_wb_member_done(ftl_ctx_t                 *ftl,
-                                     pend_req_t                *pending,
-                                     const fc_command_status_t *completion)
+static void ftl_cache_wb_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
 {
     const BYTE pending_idx = (BYTE)(pending - ftl->pending.slots);
     const BYTE j           = ftl_cache_wb_slot(ftl, pending_idx);
@@ -915,9 +884,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
 
             /* 透明重试：同一页在新块上重发一次。成功 ⇒ 组保持 pending（**不**递减
              * 在飞数），由新命令的完成继续推进；失败 ⇒ 走原 IO_ERROR 收尾。 */
-            if ((pending->op != PENDING_OP_WRITE_PAGE0) &&
-                (pending->retry_count < FTL_WRITE_RETRY_MAX) &&
-                (ftl_write_retry(ftl, pending, cmd) == FTL_OK))
+            if ((pending->op != PENDING_OP_WRITE_PAGE0) && (pending->retry_count < FTL_WRITE_RETRY_MAX) && (ftl_write_retry(ftl, pending, cmd) == FTL_OK))
             {
                 (void)fc_command_release(cmd);
                 return;
@@ -1161,19 +1128,11 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
 
 static void contract_check_handles(const ftl_ctx_t *ftl)
 {
-    ASSERT((ftl->cache != NULL) && (ftl->metadata_dir != NULL) &&
-           (ftl->journal != NULL) && (ftl->cp_handle != NULL) &&
-           (ftl->mig_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
+    ASSERT((ftl->cache != NULL) && (ftl->metadata_dir != NULL) && (ftl->journal != NULL) && (ftl->cp_handle != NULL) && (ftl->mig_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
 
-    ASSERT((ftl->table_refs.blocks != NULL) && (ftl->table_refs.free_blocks != NULL) &&
-           (ftl->table_refs.op_blocks != NULL) && (ftl->table_refs.spare_blocks != NULL) &&
-           (ftl->table_refs.closed_sb_list != NULL));
+    ASSERT((ftl->table_refs.blocks != NULL) && (ftl->table_refs.free_blocks != NULL) && (ftl->table_refs.op_blocks != NULL) && (ftl->table_refs.spare_blocks != NULL) && (ftl->table_refs.closed_sb_list != NULL));
 
-    ASSERT((ftl->alloc.blocks == ftl->table_refs.blocks) &&
-           (ftl->alloc.free_blocks == ftl->table_refs.free_blocks) &&
-           (ftl->alloc.op_blocks == ftl->table_refs.op_blocks) &&
-           (ftl->alloc.spare_blocks == ftl->table_refs.spare_blocks) &&
-           (ftl->alloc.closed_sb_list == ftl->table_refs.closed_sb_list));
+    ASSERT((ftl->alloc.blocks == ftl->table_refs.blocks) && (ftl->alloc.free_blocks == ftl->table_refs.free_blocks) && (ftl->alloc.op_blocks == ftl->table_refs.op_blocks) && (ftl->alloc.spare_blocks == ftl->table_refs.spare_blocks) && (ftl->alloc.closed_sb_list == ftl->table_refs.closed_sb_list));
 }
 
 static void contract_check_topology(const ftl_ctx_t *ftl)
@@ -1181,30 +1140,14 @@ static void contract_check_topology(const ftl_ctx_t *ftl)
     const ftl_topo_t *topo = &ftl->topo;
     const DWORD       dim  = ftl_topo_dim(*topo);
 
-    ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) &&
-           (dim < FTL_DIM_TOTAL) && (ftl_dim_ch(dim) == topo->ch) &&
-           (ftl_dim_ce(dim) == topo->ce) && (ftl_dim_lun(dim) == topo->lun));
+    ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) && (dim < FTL_DIM_TOTAL) && (ftl_dim_ch(dim) == topo->ch) && (ftl_dim_ce(dim) == topo->ce) && (ftl_dim_lun(dim) == topo->lun));
 
-    ASSERT((ftl->alloc.ch == topo->ch) && (ftl->alloc.ce == topo->ce) &&
-           (ftl->alloc.lun == topo->lun) && (ftl->cache->ch == topo->ch) &&
-           (ftl->cache->ce == topo->ce));
+    ASSERT((ftl->alloc.ch == topo->ch) && (ftl->alloc.ce == topo->ce) && (ftl->alloc.lun == topo->lun) && (ftl->cache->ch == topo->ch) && (ftl->cache->ce == topo->ce));
 
     /* 各模块在 init 时拷贝 topology；副本必须与实例路由一致。 */
-    ASSERT((ftl->metadata_dir->topo.ch == topo->ch) &&
-           (ftl->metadata_dir->topo.ce == topo->ce) &&
-           (ftl->metadata_dir->topo.lun == topo->lun) &&
-           (ftl->journal->topo.ch == topo->ch) && (ftl->journal->topo.ce == topo->ce) &&
-           (ftl->journal->topo.lun == topo->lun));
+    ASSERT((ftl->metadata_dir->topo.ch == topo->ch) && (ftl->metadata_dir->topo.ce == topo->ce) && (ftl->metadata_dir->topo.lun == topo->lun) && (ftl->journal->topo.ch == topo->ch) && (ftl->journal->topo.ce == topo->ce) && (ftl->journal->topo.lun == topo->lun));
 
-    ASSERT((ftl->cp_handle->topo.ch == topo->ch) &&
-           (ftl->cp_handle->topo.ce == topo->ce) &&
-           (ftl->cp_handle->topo.lun == topo->lun) &&
-           (ftl->mig_handle->topo.ch == topo->ch) &&
-           (ftl->mig_handle->topo.ce == topo->ce) &&
-           (ftl->mig_handle->topo.lun == topo->lun) &&
-           (ftl->read_recovery_handle.topo.ch == topo->ch) &&
-           (ftl->read_recovery_handle.topo.ce == topo->ce) &&
-           (ftl->read_recovery_handle.topo.lun == topo->lun));
+    ASSERT((ftl->cp_handle->topo.ch == topo->ch) && (ftl->cp_handle->topo.ce == topo->ce) && (ftl->cp_handle->topo.lun == topo->lun) && (ftl->mig_handle->topo.ch == topo->ch) && (ftl->mig_handle->topo.ce == topo->ce) && (ftl->mig_handle->topo.lun == topo->lun) && (ftl->read_recovery_handle.topo.ch == topo->ch) && (ftl->read_recovery_handle.topo.ce == topo->ce) && (ftl->read_recovery_handle.topo.lun == topo->lun));
 }
 
 static void contract_check_module_contexts(const ftl_ctx_t *ftl)
@@ -1217,23 +1160,19 @@ static void contract_check_module_contexts(const ftl_ctx_t *ftl)
 
     const cp_handle_t *cp = ftl->cp_handle;
 
-    ASSERT((cp->cache == ftl->cache) && (cp->journal == ftl->journal) &&
-           (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc));
+    ASSERT((cp->cache == ftl->cache) && (cp->journal == ftl->journal) && (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc));
 
     const mig_handle_t *mg = ftl->mig_handle;
 
-    ASSERT((mg->alloc == &ftl->alloc) && (mg->journal == ftl->journal) &&
-           (mg->cache == ftl->cache) && (mg->total_writes == &ftl->total_writes));
+    ASSERT((mg->alloc == &ftl->alloc) && (mg->journal == ftl->journal) && (mg->cache == ftl->cache) && (mg->total_writes == &ftl->total_writes));
 
     const rr_handle_t *rr = &ftl->read_recovery_handle;
 
-    ASSERT((rr->cache == ftl->cache) && (rr->alloc == &ftl->alloc) &&
-           (rr->page_scratch == ftl->rr_page_scratch) && (rr->pending == &ftl->pending));
+    ASSERT((rr->cache == ftl->cache) && (rr->alloc == &ftl->alloc) && (rr->page_scratch == ftl->rr_page_scratch) && (rr->pending == &ftl->pending));
 
     const wb_handle_t *wb = ftl->wbuf;
 
-    ASSERT((wb->alloc == &ftl->alloc) && (wb->pending == &ftl->pending) &&
-           (wb->migrate == ftl->mig_handle));
+    ASSERT((wb->alloc == &ftl->alloc) && (wb->pending == &ftl->pending) && (wb->migrate == ftl->mig_handle));
 }
 
 static void contract_check_identity(const ftl_ctx_t *ftl)
@@ -1248,25 +1187,18 @@ static void contract_check_identity(const ftl_ctx_t *ftl)
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
         const DWORD        global = (local * FTL_DIM_TOTAL) + dim;
-        const l2p_owner_t *owner =
-            ftl->cache->owner_of_region(ftl->cache->owner_ctx, global);
-        const QWORD lba = (QWORD)global * L2P_ENTRIES_PER_REGION;
+        const l2p_owner_t *owner  = ftl->cache->owner_of_region(ftl->cache->owner_ctx, global);
+        const QWORD        lba    = (QWORD)global * L2P_ENTRIES_PER_REGION;
 
-        ASSERT((owner != NULL) && (owner->dim == dim) &&
-               (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) &&
-               (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) &&
-               (owner->topo.lun == ftl->topo.lun) && (ftl_topo_dim(owner->topo) == dim));
+        ASSERT((owner != NULL) && (owner->dim == dim) && (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) && (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) && (owner->topo.lun == ftl->topo.lun) && (ftl_topo_dim(owner->topo) == dim));
 
-        ASSERT((ftl_op_route_get_region(global) == ftl) &&
-               (lba_route_ch(lba) == ftl->cache->ch) &&
-               (lba_route_ce(lba) == ftl->cache->ce));
+        ASSERT((ftl_op_route_get_region(global) == ftl) && (lba_route_ch(lba) == ftl->cache->ch) && (lba_route_ce(lba) == ftl->cache->ce));
     }
 }
 
 static void contract_check_bg(const ftl_ctx_t *ftl)
 {
-    ASSERT((ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) &&
-           (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
+    ASSERT((ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
 
     for (BYTE i = 0U; i < ftl->bg.task_count; i++)
     {
@@ -1278,43 +1210,24 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 {
     const jrn_handle_t *j = &ftl->journal->handle;
 
-    ASSERT((j->phase == JRN_IDLE) && (j->current_block < JOURNAL_BLOCK_COUNT) &&
-           (j->current_page < PAGES_PER_BLOCK) && (j->current_entry == 0U) &&
-           (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == 0U) &&
-           (j->checkpoint_needed == 0U) && (j->emergency == 0U) &&
-           (j->write_fail_count == 0U) && (j->write_fail_pending == 0U) &&
-           (j->pre_erased_block == JRN_BLOCK_NONE) && (j->bad_mask == 0U) &&
-           (j->erase_fail_count == 0U) && (j->ring_full == 0U));
+    ASSERT((j->phase == JRN_IDLE) && (j->current_block < JOURNAL_BLOCK_COUNT) && (j->current_page < PAGES_PER_BLOCK) && (j->current_entry == 0U) && (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == 0U) && (j->checkpoint_needed == 0U) && (j->emergency == 0U) && (j->write_fail_count == 0U) && (j->write_fail_pending == 0U) && (j->pre_erased_block == JRN_BLOCK_NONE) && (j->bad_mask == 0U) && (j->erase_fail_count == 0U) && (j->ring_full == 0U));
 
     const cp_handle_t *cp = ftl->cp_handle;
 
-    ASSERT((cp->active == 0U) && (cp->waiting == 0U) && (cp->failed == 0U) &&
-           (cp->phase == CP_IDLE) && (cp->cp_state.advance_next == 0U) &&
-           (cp->cp_state.cursor_valid == 0U));
+    ASSERT((cp->active == 0U) && (cp->waiting == 0U) && (cp->failed == 0U) && (cp->phase == CP_IDLE) && (cp->cp_state.advance_next == 0U) && (cp->cp_state.cursor_valid == 0U));
 
-    ASSERT((!md_is_busy(ftl->metadata_dir)) &&
-           (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) &&
-           ((!ftl->metadata_dir->cur_block_valid) ||
-            ((ftl->metadata_dir->cur_metadata_block < FTL_BLOCK_TOTAL) &&
-             (ftl->metadata_dir->cur_metadata_page <= PAGES_PER_BLOCK))));
+    ASSERT((!md_is_busy(ftl->metadata_dir)) && (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) && ((!ftl->metadata_dir->cur_block_valid) || ((ftl->metadata_dir->cur_metadata_block < FTL_BLOCK_TOTAL) && (ftl->metadata_dir->cur_metadata_page <= PAGES_PER_BLOCK))));
 
-    ASSERT((!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) &&
-           (ftl->mig_handle->phase == MIG_IDLE) &&
-           mig_fail_state_is_clean(ftl->mig_handle));
+    ASSERT((!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) && (ftl->mig_handle->phase == MIG_IDLE) && mig_fail_state_is_clean(ftl->mig_handle));
 
-    ASSERT((ftl->read_recovery_handle.stage == RR_STAGE_IDLE) &&
-           (ftl->read_recovery_handle.waiting == 0U) &&
-           (ftl->read_recovery_handle.has_owner == 0U));
+    ASSERT((ftl->read_recovery_handle.stage == RR_STAGE_IDLE) && (ftl->read_recovery_handle.waiting == 0U) && (ftl->read_recovery_handle.has_owner == 0U));
 
     ASSERT((!ftl->wbuf->open) && (ftl->wbuf->occupied == 0U) && (ftl->wbuf->error == FTL_OK));
 }
 
 static void contract_check_boot_zero(const ftl_ctx_t *ftl)
 {
-    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) &&
-           (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) &&
-           (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) &&
-           (ftl->l2p_defer == 0U));
+    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) && (ftl->l2p_defer == 0U));
 }
 
 #endif /* !NDEBUG */
@@ -1335,12 +1248,7 @@ void ftl_contract_audit(const ftl_ctx_t *ftl)
     contract_check_jobs_idle(ftl);
     contract_check_boot_zero(ftl);
 
-    LOGI("[FTL ] contract ok ch=%u ce=%u lun=%u regions=%u tasks=%u\r\n",
-         (unsigned)ftl->topo.ch,
-         (unsigned)ftl->topo.ce,
-         (unsigned)ftl->topo.lun,
-         (unsigned)L2P_REGIONS_PER_INSTANCE,
-         (unsigned)ftl->bg.task_count);
+    LOGI("[FTL ] contract ok ch=%u ce=%u lun=%u regions=%u tasks=%u\r\n", (unsigned)ftl->topo.ch, (unsigned)ftl->topo.ce, (unsigned)ftl->topo.lun, (unsigned)L2P_REGIONS_PER_INSTANCE, (unsigned)ftl->bg.task_count);
 #endif
 }
 
@@ -1600,9 +1508,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
 
                 if (ftl_log_throttle_due(&s_lost_log, &suppressed))
                 {
-                    LOGE(LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR (suppressed=%lu)\r\n",
-                         internal_lba,
-                         suppressed);
+                    LOGE(LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR (suppressed=%lu)\r\n", internal_lba, suppressed);
                 }
                 return FTL_ERROR;
             }
@@ -1724,8 +1630,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         void       *buffer = (BYTE *)g->buffer + (off * FTL_IU_BYTES);
         /* 本窗口内可提供的最大 LBA 数（≤ 一个 pair 窗口）。实际消费几个由
          * ftl_issue_subop 回填——读路径按 L2P 分组收缩，写路径按窗口边界收缩。 */
-        BYTE n_cw          = (remain >= FTL_LBA_PER_PAIR) ? FTL_LBA_PER_PAIR
-                                                          : remain;
+        BYTE n_cw          = (remain >= FTL_LBA_PER_PAIR) ? FTL_LBA_PER_PAIR : remain;
 
         ftl->l2p_defer = 0U; /* 每次下发前清零：本轮的背压原因由本次下发重新判定 */
 
@@ -1735,12 +1640,10 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         /* 连续 pair 的 two-plane cache read：每个 host 请求只试一次（组首子操作）。
          * 旧实现每个 8-LBA 子操作都试，H2testw 满盘读时 79k 次 decline，
          * 每次都先做一轮 L2P 查找/加载再回退普通读，是读速下降的主因之一。 */
-        if (pend_op_is_read(g->op) &&
-            ((g->next % (FTL_CACHE_READ_MAX_PAIRS * FTL_LBA_PER_PAIR)) == 0U))
+        if (pend_op_is_read(g->op) && ((g->next % (FTL_CACHE_READ_MAX_PAIRS * FTL_LBA_PER_PAIR)) == 0U))
         {
             DWORD                   used = 0U;
-            ftl_cache_read_result_e cr =
-                ftl_cache_read_try(ftl, gi, glba, buffer, remain, &used);
+            ftl_cache_read_result_e cr   = ftl_cache_read_try(ftl, gi, glba, buffer, remain, &used);
 
             if (cr == FTL_CACHE_READ_OK)
             {
@@ -1764,8 +1667,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         if (use_normal && (g->op == PENDING_OP_WRITE))
         {
             DWORD                          used = 0U;
-            const ftl_cache_write_result_e cw =
-                ftl_cache_write_try(ftl, gi, glba, buffer, remain, &used);
+            const ftl_cache_write_result_e cw   = ftl_cache_write_try(ftl, gi, glba, buffer, remain, &used);
 
             if (cw == FTL_CACHE_WRITE_OK)
             {
@@ -1824,16 +1726,10 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     {
                         if (ftl->mig_handle->gc_nogain)
                         {
-                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n",
-                                 (unsigned)ftl->alloc.free_count,
-                                 suppressed);
+                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n", (unsigned)ftl->alloc.free_count, suppressed);
                         }
 
-                        LOGE(LOG_TAG_FTL "drain stalled gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
-                             (unsigned)gi,
-                             g->next,
-                             g->total,
-                             suppressed);
+                        LOGE(LOG_TAG_FTL "drain stalled gi=%u next=%lu/%lu (suppressed=%lu)\r\n", (unsigned)gi, g->next, g->total, suppressed);
                     }
                     g->agg_status = SSD_STATUS_IO_ERROR;
                     g->next       = g->total;
@@ -1848,11 +1744,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
         if (ftl_log_throttle_due(&s_subop_fail_log, &suppressed))
         {
-            LOGE(LOG_TAG_FTL "subop failed gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
-                 (unsigned)gi,
-                 g->next,
-                 g->total,
-                 suppressed);
+            LOGE(LOG_TAG_FTL "subop failed gi=%u next=%lu/%lu (suppressed=%lu)\r\n", (unsigned)gi, g->next, g->total, suppressed);
         }
         g->agg_status = SSD_STATUS_IO_ERROR;
         g->next       = g->total;
@@ -2201,22 +2093,14 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
          * jrn_write_failure_clear 清 journal 标志；wbuf FAILED 由下一次成功操作清。 */
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n",
-                 (unsigned)jrn_fail,
-                 (unsigned)wb_fail,
-                 suppressed);
+            LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n", (unsigned)jrn_fail, (unsigned)wb_fail, suppressed);
         }
     }
     else if (timeout)
     {
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW(LOG_TAG_FTL "flush timeout %lums (wb=%u l2p=%u jrn=%u) — best-effort complete (suppressed=%lu)\r\n",
-                 flush_ms,
-                 (unsigned)wb_done,
-                 (unsigned)l2p_done,
-                 (unsigned)jrn_done,
-                 suppressed);
+            LOGW(LOG_TAG_FTL "flush timeout %lums (wb=%u l2p=%u jrn=%u) — best-effort complete (suppressed=%lu)\r\n", flush_ms, (unsigned)wb_done, (unsigned)l2p_done, (unsigned)jrn_done, suppressed);
         }
     }
 
@@ -2226,8 +2110,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
      * 频繁 fsync，逐次打印会刷屏。 */
     const DWORD now_log = ftl_job_now_ms();
 
-    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && !timeout &&
-        ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
+    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && !timeout && ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
     {
         s_flush_log_ms = now_log;
         LOGW(LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);

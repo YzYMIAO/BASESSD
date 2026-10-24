@@ -168,9 +168,7 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
 
         /* 排序键 = 平均擦除次数**最少** → 同擦除次数下 valid_cw 多（越冷越优先）
          * → 再按 read_sum 高（read disturb 风险高优先）。 */
-        if ((sb_ec < best_ec) ||
-            ((sb_ec == best_ec) && ((st.valid_cw > best.valid_cw) ||
-                                    ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))))
+        if ((sb_ec < best_ec) || ((sb_ec == best_ec) && ((st.valid_cw > best.valid_cw) || ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))))
         {
             best_ec         = sb_ec;
             best.found      = true;

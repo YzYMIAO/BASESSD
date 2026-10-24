@@ -1526,8 +1526,7 @@ ds_Stat ds_list_sort(ds_List *list, int (*comper)(void const *, void const *))
  * @param[in]     r_size  右子链表的大小
  * @param[in]     comper  比较函数
  */
-static void split_merge(
-    Node **left, Node **right, size_t l_size, size_t r_size, int (*comper)(void *const, void *const))
+static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size, int (*comper)(void *const, void *const))
 {
     size_t size = l_size + r_size;
     size_t l    = 0;

@@ -105,8 +105,7 @@
 
 /* ── 编译期自检（器件事实 ↔ 软件布局）── */
 _Static_assert((1U << LUN_ADDR_WIDTH) >= LUN_NUM, "LUN_ADDR_WIDTH 覆盖不了 LUN_NUM");
-_Static_assert(PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH + LUN_ADDR_WIDTH <= 24U,
-               "行地址超过 3 字节：ROW_0..2 只发 3 个行周期");
+_Static_assert(PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH + LUN_ADDR_WIDTH <= 24U, "行地址超过 3 字节：ROW_0..2 只发 3 个行周期");
 _Static_assert(PAA_LUN_SHIFT + LUN_ADDR_WIDTH <= 32U, "PAA 超出 32 位");
 _Static_assert(PAGE_MAIN_SIZE + PAGE_SPARE_SIZE == PAGE_SIZE, "主区 + 备区 != PAGE_SIZE");
 _Static_assert((1U << CW_WIDTH) == CW_NUM, "CW_WIDTH 与 CW_NUM 不一致");
@@ -173,19 +172,14 @@ static inline DWORD paa_to_lun(DWORD paa)
  *   故本函数**忽略 addr->ch / addr->ce**。 */
 static inline DWORD paa_from_addr(const nand_addr_t *addr)
 {
-    return ((DWORD)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) |
-           ((DWORD)(addr->page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) |
-           ((DWORD)(addr->plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) |
-           ((DWORD)(addr->block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) |
-           ((DWORD)(addr->lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
+    return ((DWORD)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) | ((DWORD)(addr->page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) | ((DWORD)(addr->plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) | ((DWORD)(addr->block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) | ((DWORD)(addr->lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
 }
 
 /* 展开地址的各字段是否在芯片规格范围内（nand_addr_t 版本）。
  * 打包版本见下方 paa_is_valid_paa()。 */
 static inline BYTE paa_is_valid_addr(const nand_addr_t *addr)
 {
-    return ((addr->page < PAGES_PER_BLOCK) && (addr->plane < PLANE_NUM) && (addr->block < BLOCKS_PER_PLANE) &&
-            (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
+    return ((addr->page < PAGES_PER_BLOCK) && (addr->plane < PLANE_NUM) && (addr->block < BLOCKS_PER_PLANE) && (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
 }
 
 /* 芯片行地址：具体编码由器件头提供（NAND_PAA_TO_ROW）。 */
@@ -223,37 +217,29 @@ static inline BYTE paa_same_page(DWORD a, DWORD b)
 /* 各字段是否在芯片规格范围内（DWORD 版本） */
 static inline BYTE paa_is_valid_paa(DWORD paa)
 {
-    return ((paa_to_page(paa) < PAGES_PER_BLOCK) &&
-            (paa_to_plane(paa) < PLANE_NUM) &&
-            (paa_to_block(paa) < BLOCKS_PER_PLANE) &&
-            (paa_to_lun(paa) < LUN_NUM) &&
-            (paa_to_cw(paa) < CW_NUM));
+    return ((paa_to_page(paa) < PAGES_PER_BLOCK) && (paa_to_plane(paa) < PLANE_NUM) && (paa_to_block(paa) < BLOCKS_PER_PLANE) && (paa_to_lun(paa) < LUN_NUM) && (paa_to_cw(paa) < CW_NUM));
 }
 
 /* ── PAA 替换字段 ── */
 
 static inline DWORD paa_with_page(DWORD paa, DWORD page)
 {
-    return ((paa & ~(PAA_PAGE_MASK << PAA_PAGE_SHIFT)) |
-            ((page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT));
+    return ((paa & ~(PAA_PAGE_MASK << PAA_PAGE_SHIFT)) | ((page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT));
 }
 
 static inline DWORD paa_with_plane(DWORD paa, DWORD plane)
 {
-    return ((paa & ~(PAA_PLANE_MASK << PAA_PLANE_SHIFT)) |
-            ((plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT));
+    return ((paa & ~(PAA_PLANE_MASK << PAA_PLANE_SHIFT)) | ((plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT));
 }
 
 static inline DWORD paa_with_block(DWORD paa, DWORD block)
 {
-    return ((paa & ~(PAA_BLOCK_MASK << PAA_BLOCK_SHIFT)) |
-            ((block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT));
+    return ((paa & ~(PAA_BLOCK_MASK << PAA_BLOCK_SHIFT)) | ((block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT));
 }
 
 static inline DWORD paa_with_lun(DWORD paa, DWORD lun)
 {
-    return ((paa & ~(PAA_LUN_MASK << PAA_LUN_SHIFT)) |
-            ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT));
+    return ((paa & ~(PAA_LUN_MASK << PAA_LUN_SHIFT)) | ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -279,8 +265,7 @@ static inline DWORD paa_with_lun(DWORD paa, DWORD lun)
 #define PLANE_CW_MASK ((DWORD)((NAND_FIELD_MASK(PLANE_ADDR_WIDTH) << PLANE_CW_SHIFT) | NAND_FIELD_MASK(CW_WIDTH)))
 
 /* plane 位必须紧邻 cw 位之上，中间不留空档 */
-_Static_assert(PLANE_CW_MASK == NAND_FIELD_MASK(CW_WIDTH + PLANE_ADDR_WIDTH),
-               "PLANE_CW_MASK 必须是连续的 [plane:1][cw:2]");
+_Static_assert(PLANE_CW_MASK == NAND_FIELD_MASK(CW_WIDTH + PLANE_ADDR_WIDTH), "PLANE_CW_MASK 必须是连续的 [plane:1][cw:2]");
 
 /* ── LBA → CW META ──
  *
@@ -293,9 +278,7 @@ _Static_assert(PLANE_CW_MASK == NAND_FIELD_MASK(CW_WIDTH + PLANE_ADDR_WIDTH),
  * 故 desc->meta 与 desc->paa 可用同一个 plane_cw 造出。 */
 static inline DWORD lba_to_meta(DWORD lba, DWORD plane, DWORD cw)
 {
-    return (lba & ~PLANE_CW_MASK) |
-           ((plane & NAND_FIELD_MASK(PLANE_ADDR_WIDTH)) << PLANE_CW_SHIFT) |
-           (cw & NAND_FIELD_MASK(CW_WIDTH));
+    return (lba & ~PLANE_CW_MASK) | ((plane & NAND_FIELD_MASK(PLANE_ADDR_WIDTH)) << PLANE_CW_SHIFT) | (cw & NAND_FIELD_MASK(CW_WIDTH));
 }
 
 /* ══════════════════════════════════════════════════════════════

@@ -183,10 +183,9 @@ static uint8_t l2_user_matches_source(const fc_command_t *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        const fc_descriptor_t *desc = test_cw_desc(cmd, i);
-        const uint8_t         *buf  = test_cw_user(cmd, i);
-        const uint8_t         *expect =
-            test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
+        const fc_descriptor_t *desc   = test_cw_desc(cmd, i);
+        const uint8_t         *buf    = test_cw_user(cmd, i);
+        const uint8_t         *expect = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
 
         for (uint16_t j = 0U; j < FC_BUFFER_USER_SIZE; j++)
         {
@@ -252,11 +251,7 @@ static void l2_verify_parity_nonzero(const fc_command_t *cmd)
         const uint8_t *base = test_cw_base(cmd, i);
 
         /* test_check_pattern 返回 1 表示"整段都是该 pattern"⇒ 断言 == 0 即"非全 0" */
-        munit_assert_uint8(test_check_pattern(base + FC_BUFFER_DATA_SIZE,
-                                              (uint16_t)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE),
-                                              0x00U),
-                           ==,
-                           0U);
+        munit_assert_uint8(test_check_pattern(base + FC_BUFFER_DATA_SIZE, (uint16_t)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0x00U), ==, 0U);
 
         /* 证据（--log-visible info）：parity 区首 4 字节的实际值（Stage 2 真写了）。 */
         if (i == 0U)
@@ -330,8 +325,7 @@ static const l2_crc_case_t l2_crc_cases[] = {
 /* 场景名（munit 要 NULL 结尾的 const char**），与 l2_crc_cases 一一对应。 */
 static const char *l2_crc_case_names[] = {"user-1", "crc-field-1", "meta-1", "parity-1", NULL};
 
-_Static_assert((sizeof(l2_crc_case_names) / sizeof(l2_crc_case_names[0]) - 1U) == (sizeof(l2_crc_cases) / sizeof(l2_crc_cases[0])),
-               "l2_crc_case_names 与 l2_crc_cases 数量不符");
+_Static_assert((sizeof(l2_crc_case_names) / sizeof(l2_crc_case_names[0]) - 1U) == (sizeof(l2_crc_cases) / sizeof(l2_crc_cases[0])), "l2_crc_case_names 与 l2_crc_cases 数量不符");
 
 /* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_crc_params[] = {
@@ -512,22 +506,13 @@ static void l2_bit01_log(const char *tag, const l2_bit01_t *st, uint16_t len)
 {
     uint8_t k;
 
-    test_trace_summary("%s: ones=%u/%u runs=%u mean_x100=%u",
-                       tag,
-                       (unsigned)st->ones,
-                       (unsigned)((uint32_t)len * 8U),
-                       (unsigned)st->runs,
-                       (unsigned)l2_bit01_mean_x100(st, len));
+    test_trace_summary("%s: ones=%u/%u runs=%u mean_x100=%u", tag, (unsigned)st->ones, (unsigned)((uint32_t)len * 8U), (unsigned)st->runs, (unsigned)l2_bit01_mean_x100(st, len));
 
     for (k = 0U; k < 16U; k++)
     {
         if ((st->hist[0][k] + st->hist[1][k]) != 0U)
         {
-            test_trace_detail("  run len %2u%s : zero x%u, one x%u",
-                              (unsigned)(k + 1U),
-                              (k == 15U) ? "+" : " ",
-                              (unsigned)st->hist[0][k],
-                              (unsigned)st->hist[1][k]);
+            test_trace_detail("  run len %2u%s : zero x%u, one x%u", (unsigned)(k + 1U), (k == 15U) ? "+" : " ", (unsigned)st->hist[0][k], (unsigned)st->hist[1][k]);
         }
     }
 }
@@ -606,14 +591,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         fc_data_path_scramble(cw, seed);
         l2_bit01_analyze(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, &after);
 
-        test_trace_detail("--- %s: block=%u page=%u plane=%u cw=%u meta=0x%08X seed=0x%08X",
-                          tag[kind],
-                          (unsigned)addr.block,
-                          (unsigned)addr.page,
-                          (unsigned)addr.plane,
-                          (unsigned)addr.cw,
-                          (unsigned)meta,
-                          (unsigned)seed);
+        test_trace_detail("--- %s: block=%u page=%u plane=%u cw=%u meta=0x%08X seed=0x%08X", tag[kind], (unsigned)addr.block, (unsigned)addr.page, (unsigned)addr.plane, (unsigned)addr.cw, (unsigned)meta, (unsigned)seed);
         l2_bit01_log("  plain    ", &before, FC_BUFFER_USER_SIZE);
         l2_bit01_log("  scrambled", &after, FC_BUFFER_USER_SIZE);
 
@@ -630,9 +608,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         /* ④ 明文明显偏置时，密文必须比它更靠近 50% */
         if (l2_bit01_bias(&before, FC_BUFFER_USER_SIZE) > 512U)
         {
-            munit_assert_uint32(l2_bit01_bias(&after, FC_BUFFER_USER_SIZE),
-                                <,
-                                l2_bit01_bias(&before, FC_BUFFER_USER_SIZE));
+            munit_assert_uint32(l2_bit01_bias(&after, FC_BUFFER_USER_SIZE), <, l2_bit01_bias(&before, FC_BUFFER_USER_SIZE));
         }
 
         /* ⑤ 自反：解扰后逐字节回到明文 */
@@ -795,8 +771,7 @@ static const char *l2_ecc_case_names[] = {
     NULL,
 };
 
-_Static_assert((sizeof(l2_ecc_case_names) / sizeof(l2_ecc_case_names[0]) - 1U) == (sizeof(l2_ecc_cases) / sizeof(l2_ecc_cases[0])),
-               "l2_ecc_case_names 与 l2_ecc_cases 数量不符");
+_Static_assert((sizeof(l2_ecc_case_names) / sizeof(l2_ecc_case_names[0]) - 1U) == (sizeof(l2_ecc_cases) / sizeof(l2_ecc_cases[0])), "l2_ecc_case_names 与 l2_ecc_cases 数量不符");
 
 /* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_ecc_params[] = {
@@ -971,8 +946,7 @@ static const char *l2_enc_case_names[] = {
     NULL,
 };
 
-_Static_assert((sizeof(l2_enc_case_names) / sizeof(l2_enc_case_names[0]) - 1U) == (sizeof(l2_enc_cases) / sizeof(l2_enc_cases[0])),
-               "l2_enc_case_names 与 l2_enc_cases 数量不符");
+_Static_assert((sizeof(l2_enc_case_names) / sizeof(l2_enc_case_names[0]) - 1U) == (sizeof(l2_enc_cases) / sizeof(l2_enc_cases[0])), "l2_enc_case_names 与 l2_enc_cases 数量不符");
 
 /* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_enc_params[] = {
@@ -1078,9 +1052,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
 
     for (uint8_t i = 0U; i < test_cw_count(enc); i++)
     {
-        munit_assert_uint32(test_check_pattern(test_cw_base(enc, i) + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE, 0xFFU),
-                            ==,
-                            1U);
+        munit_assert_uint32(test_check_pattern(test_cw_base(enc, i) + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE, 0xFFU), ==, 1U);
     }
 
     /* 证据（--log-visible info）：CRC 关闭时该字段应**原样保留哨兵** 0xFFFFFFFF
@@ -1142,8 +1114,7 @@ static const char *l2_rt_case_names[] = {
     NULL,
 };
 
-_Static_assert((sizeof(l2_rt_case_names) / sizeof(l2_rt_case_names[0]) - 1U) == (sizeof(l2_rt_cases) / sizeof(l2_rt_cases[0])),
-               "l2_rt_case_names 与 l2_rt_cases 数量不符");
+_Static_assert((sizeof(l2_rt_case_names) / sizeof(l2_rt_case_names[0]) - 1U) == (sizeof(l2_rt_cases) / sizeof(l2_rt_cases[0])), "l2_rt_case_names 与 l2_rt_cases 数量不符");
 
 /* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_rt_params[] = {
@@ -1248,8 +1219,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
 
     /* 证据（--log-visible info）：哪几个 CW 报了什么。裸 [ OK ] 看不出"确实只坏了 CW1、
      * 对照组干净"——而那正是这条用例的全部意义。 */
-    test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰",
-                       (unsigned)(FC_BUFFER_DATA_SIZE / 8U));
+    test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰", (unsigned)(FC_BUFFER_DATA_SIZE / 8U));
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return MUNIT_OK;
@@ -1347,9 +1317,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
     /* 证据（--log-visible info）：**声明的页 PBA** 与**页内 META** 各自的值。
      * ⚠ 这条用例曾被一条恒真断言盖住（篡改点落在 PLANE_CW_MASK 里被整段擦除）——
      *   把两个数打出来，正是为了让"篡改真的落在了掩码之上"一眼可查。 */
-    test_trace_summary("mata_error: 声明 PBA=0x%08lX vs 页内 META=0x%08lX（低 3 位同、高位异）-> 逐 CW MATA_ERROR, 数据仍一致",
-                       (unsigned long)cmd->meta,
-                       (unsigned long)test_cw_desc(cmd, 0U)->meta);
+    test_trace_summary("mata_error: 声明 PBA=0x%08lX vs 页内 META=0x%08lX（低 3 位同、高位异）-> 逐 CW MATA_ERROR, 数据仍一致", (unsigned long)cmd->meta, (unsigned long)test_cw_desc(cmd, 0U)->meta);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return MUNIT_OK;
@@ -1421,11 +1389,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
 
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        munit_assert_uint32(test_check_pattern(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE,
-                                               (uint16_t)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE),
-                                               0xAAU),
-                            ==,
-                            1U);
+        munit_assert_uint32(test_check_pattern(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, (uint16_t)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0xAAU), ==, 1U);
     }
 
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
@@ -1614,8 +1578,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
             (void)fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, test_cw_seed(data_cmd, i));
-            munit_assert_uint32(
-                test_check_pattern(test_cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i)), ==, 1U);
+            munit_assert_uint32(test_check_pattern(test_cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i)), ==, 1U);
         }
     }
 
@@ -1703,8 +1666,7 @@ static const char *l2_bm_case_names[] = {
     NULL,
 };
 
-_Static_assert((sizeof(l2_bm_case_names) / sizeof(l2_bm_case_names[0]) - 1U) == (sizeof(l2_bm_cases) / sizeof(l2_bm_cases[0])),
-               "l2_bm_case_names 与 l2_bm_cases 数量不符");
+_Static_assert((sizeof(l2_bm_case_names) / sizeof(l2_bm_case_names[0]) - 1U) == (sizeof(l2_bm_cases) / sizeof(l2_bm_cases[0])), "l2_bm_case_names 与 l2_bm_cases 数量不符");
 
 /* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_bm_params[] = {

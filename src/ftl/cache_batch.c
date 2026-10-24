@@ -79,9 +79,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
 
         const BYTE pl         = pba_to_plane(p);
         const bool same_plane = (pl < PLANE_NUM) && (pl == ftl_lba_plane(l));
-        const bool same_topo  = (pba_to_ch(p) == ftl->topo.ch) &&
-                               (pba_to_ce(p) == ftl->topo.ce) &&
-                               (pba_to_lun(p) == ftl->topo.lun);
+        const bool same_topo  = (pba_to_ch(p) == ftl->topo.ch) && (pba_to_ce(p) == ftl->topo.ce) && (pba_to_lun(p) == ftl->topo.lun);
 
         if ((!same_plane) || (!same_topo))
         {
@@ -105,9 +103,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
 }
 
 /* 收集可连续 cache 读的 pair；返回 pair 数（0..FTL_CACHE_READ_MAX_PAIRS）。 */
-static DWORD cache_read_collect(const cache_read_req_t *req,
-                                DWORD                   pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM],
-                                bool                   *defer)
+static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool *defer)
 {
     DWORD max_pairs = req->remain / FTL_LBA_PER_PAIR;
 
@@ -153,8 +149,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req,
             bool contiguous = true;
             for (BYTE p = 0U; contiguous && (p < PLANE_NUM); p++)
             {
-                contiguous = (pba_page(pair_pba[p]) == (pba_page(pba[j - 1U][p]) + 1U)) &&
-                             (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
+                contiguous = (pba_page(pair_pba[p]) == (pba_page(pba[j - 1U][p]) + 1U)) && (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
             }
             if (!contiguous)
             {
@@ -173,9 +168,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req,
 }
 
 /* 构建命令与 pending；失败时在 build_fail 统一回收。 */
-static bool cache_read_build(cache_read_build_t     *b,
-                             const cache_read_req_t *req,
-                             DWORD                   pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
+static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
@@ -257,9 +250,7 @@ build_fail:
     return false;
 }
 
-static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req,
-                                                 DWORD                   n_pairs,
-                                                 DWORD                   pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
+static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DWORD n_pairs, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
     cache_read_build_t b;
 
@@ -311,8 +302,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     ASSERT(ftl != NULL);
     ASSERT(used != NULL);
 
-    if ((remain < (FTL_CACHE_READ_MIN_PAIRS * FTL_LBA_PER_PAIR)) ||
-        ((lba & (FTL_LBA_PER_PAIR - 1U)) != 0U))
+    if ((remain < (FTL_CACHE_READ_MIN_PAIRS * FTL_LBA_PER_PAIR)) || ((lba & (FTL_LBA_PER_PAIR - 1U)) != 0U))
     {
         return FTL_CACHE_READ_DECLINED;
     }
@@ -396,12 +386,7 @@ static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         const BYTE           *src      = (const BYTE *)buffer + ((DWORD)j * FTL_LBA_PER_PAIR * FTL_IU_BYTES);
         const ftl_page_cfg_t *cfg      = FTL_PAGE_CFG_DATA(ftl_lba_page(page_lba));
 
-        const ftl_status_e st = ftl_async_write_pair_cmd(&b->cmds[j],
-                                                         b->pba[j],
-                                                         src,
-                                                         FTL_CACHE_FULL_CW,
-                                                         ftl_cache_prog_op(j, FTL_CACHE_WRITE_MAX_PAGES),
-                                                         cfg);
+        const ftl_status_e st = ftl_async_write_pair_cmd(&b->cmds[j], b->pba[j], src, FTL_CACHE_FULL_CW, ftl_cache_prog_op(j, FTL_CACHE_WRITE_MAX_PAGES), cfg);
 
         if (st != FTL_OK)
         {
@@ -437,12 +422,7 @@ static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
     return FTL_OK;
 }
 
-ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl,
-                                             WORD       gi,
-                                             DWORD      lba,
-                                             void      *buffer,
-                                             DWORD      remain,
-                                             DWORD     *used)
+ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);
     ASSERT(used != NULL);
@@ -456,8 +436,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl,
     const bool room_ok      = (alc_super_open_get_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
     const bool budget_ok    = ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
 
-    if (batch_active || (!enough_lbas) || (!lba_aligned) || (!wbuf_idle) ||
-        (!room_ok) || (!budget_ok))
+    if (batch_active || (!enough_lbas) || (!lba_aligned) || (!wbuf_idle) || (!room_ok) || (!budget_ok))
     {
         ftl->cache_wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;

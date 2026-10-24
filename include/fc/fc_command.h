@@ -155,9 +155,7 @@ typedef enum
  * 的 desc_id（兑现 fc_command_status_t.desc_id 的 "first-failing desc on error"），
  * 其余消费方一律经 `fc_cw_status_has_error()`。不要就地重列位——六位散落多处时
  * 漏一位不会有编译错误。 */
-#define FC_CW_STATUS_ERROR_MASK                                                                  \
-    (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | \
-     FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
+#define FC_CW_STATUS_ERROR_MASK (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
 
 /* 命令级聚合状态是否含任一错误位。
  * 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，

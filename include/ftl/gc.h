@@ -145,10 +145,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
  *         （无有效数据，调用者跳过）；GC_DECODE_CORRUPT = 写过的 CW 页基址不一致
  *         （META 损坏，调用者必须按不可迁移处理，**不得**擦 victim）。
  */
-gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
-                             DWORD         pba,
-                             DWORD         cw_lba[CW_NUM],
-                             DWORD        *page_base_out);
+gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block

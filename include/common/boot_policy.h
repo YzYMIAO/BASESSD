@@ -89,11 +89,7 @@ typedef int (*boot_signature_verify_fn)(const boot_image_header_t *header, void 
 DWORD boot_crc32(const void *data, size_t size);
 
 void boot_image_header_finalize(boot_image_header_t *header);
-int  boot_image_validate(const boot_image_header_t      *header,
-                         const boot_image_constraints_t *constraints,
-                         const BYTE                      actual_payload_hash[BOOT_SHA256_SIZE],
-                         boot_signature_verify_fn        verify_signature,
-                         void                           *verify_context);
+int  boot_image_validate(const boot_image_header_t *header, const boot_image_constraints_t *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn verify_signature, void *verify_context);
 
 void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot, DWORD active_firmware_version);
 void boot_metadata_finalize(boot_metadata_t *metadata);

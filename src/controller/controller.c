@@ -41,8 +41,7 @@ ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
     return controller->ftl[ch][ce][lun];
 }
 
-ssd_status_e ssd_controller_init(ssd_controller_t *controller,
-                                 ftl_ctx_t        *ftl[CH_NUM][CE_NUM][LUN_NUM])
+ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM])
 {
     BYTE ch;
     BYTE ce;
@@ -76,9 +75,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller,
                     return SSD_STATUS_INVALID_ARGUMENT;
                 }
                 /* 槽位索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
-                if ((ftl[ch][ce][lun]->topo.ch != ch) ||
-                    (ftl[ch][ce][lun]->topo.ce != ce) ||
-                    (ftl[ch][ce][lun]->topo.lun != lun))
+                if ((ftl[ch][ce][lun]->topo.ch != ch) || (ftl[ch][ce][lun]->topo.ce != ce) || (ftl[ch][ce][lun]->topo.lun != lun))
                 {
                     LOGE(LOG_TAG_CTRL "init failed: topo mismatch slot ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
                     ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
@@ -153,10 +150,7 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
              *   （H44 的「刻意加宽避免溢出」例外）。 */
             if (request->buffer_size < ((size_t)request->block_count * FTL_IU_BYTES))
             {
-                LOGE(LOG_TAG_CTRL "buffer too small count=%lu need=%zu have=%zu\r\n",
-                     request->block_count,
-                     (size_t)request->block_count * FTL_IU_BYTES,
-                     request->buffer_size);
+                LOGE(LOG_TAG_CTRL "buffer too small count=%lu need=%zu have=%zu\r\n", request->block_count, (size_t)request->block_count * FTL_IU_BYTES, request->buffer_size);
                 request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
                 request->complete_flag     = 1U;
                 return SSD_STATUS_INVALID_ARGUMENT;

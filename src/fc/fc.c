@@ -768,8 +768,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
         {
             fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
-            BYTE             n          = (paa_to_plane(descriptor->paa) * CW_NUM +
-                      paa_to_cw(descriptor->paa));
+            BYTE             n          = (paa_to_plane(descriptor->paa) * CW_NUM + paa_to_cw(descriptor->paa));
 
             ASSERT(n < CW_TOTAL_MAX);
             descriptor->status   = nand_completion->cw_status[n];
@@ -798,8 +797,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.status     = 0U;
     memset(&completion.param, 0, sizeof(completion.param)); /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
-    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
-        (fc_is_page_read(command->config.operation) != 0U))
+    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) && (fc_is_page_read(command->config.operation) != 0U))
     {
         /* 走 desc 链聚合：status 全链 OR；首个失败 CW 的 desc_id。
          * v28：**不再**聚合失败 CW 位图——上层要定位失败 CW，遍历 desc 链 OR 各 desc->status
@@ -849,10 +847,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
          * 寄存器值 / 页内 META / 器件 ONFI 签名 / 按列读的 4 字节写进控制器侧暂存，拷进 CQ
          * 返回段（都用 4 字节暂存 g_fc_return_staging，见 fc_build_dispatch_request）。
          * ⚠ SQ 命令体提交后不再被写（见 fc_command.h「SQ 不可变」）。 */
-        else if ((command->config.operation == OP_GET_FEATURES) ||
-                 (command->config.operation == OP_READ_META) ||
-                 (command->config.operation == OP_READ_ONFI_SIGNATURE) ||
-                 (command->config.operation == OP_READ_COLUMN))
+        else if ((command->config.operation == OP_GET_FEATURES) || (command->config.operation == OP_READ_META) || (command->config.operation == OP_READ_ONFI_SIGNATURE) || (command->config.operation == OP_READ_COLUMN))
         {
             BYTE i;
 
@@ -1048,9 +1043,7 @@ static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
         const fc_descriptor_t *desc = &controller->descriptor_pool[desc_id];
 
-        mp_req.cw_buffers[cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID)
-                                    ? fc_buffer_get_base(desc->buffer_id)
-                                    : NULL;
+        mp_req.cw_buffers[cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
         desc_id               = (fc_descriptor_id_t)desc->next_id;
     }
 
@@ -1061,9 +1054,7 @@ static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
         const fc_descriptor_t *desc = &controller->descriptor_pool[desc_id];
 
-        mp_req.cw_buffers[CW_NUM + cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID)
-                                             ? fc_buffer_get_base(desc->buffer_id)
-                                             : NULL;
+        mp_req.cw_buffers[CW_NUM + cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
         desc_id                        = (fc_descriptor_id_t)desc->next_id;
     }
 
@@ -1184,11 +1175,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
             /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
              * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
              * fc_buffer_id_to_real_buffer 直接读取。 */
-            request->cw_buffers[n] =
-                (fc_is_page_read(command->config.operation) != 0U) ||
-                        (fc_is_page_write(command->config.operation) != 0U)
-                    ? fc_buffer_get_base(descriptor->buffer_id)
-                    : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+            request->cw_buffers[n] = (fc_is_page_read(command->config.operation) != 0U) || (fc_is_page_write(command->config.operation) != 0U) ? fc_buffer_get_base(descriptor->buffer_id) : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
         }
         else
         {
@@ -1240,9 +1227,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
          * （回退到 command->paa 的同页地址 = v11 及以前的行为），生产不可达。 */
         for (plane = 0U; plane < plane_count; plane++)
         {
-            request->plane_paa[plane] = ((planes_with_desc & (1U << plane)) != 0U)
-                                            ? plane_row[plane]
-                                            : paa_with_plane(command->paa, plane);
+            request->plane_paa[plane] = ((planes_with_desc & (1U << plane)) != 0U) ? plane_row[plane] : paa_with_plane(command->paa, plane);
         }
     }
     else
@@ -1255,9 +1240,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
          * ASSERT(fc_command_cw_attached(...)) 在污染点拦下，此处不再复核。 */
         request->plane                     = paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
-        ASSERT(((planes_with_desc & (1U << request->plane)) == 0U) ||
-               ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) &&
-                (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));
+        ASSERT(((planes_with_desc & (1U << request->plane)) == 0U) || ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) && (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));
     }
 
     return FC_STATUS_OK;
@@ -1290,8 +1273,7 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
     }
     else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
     {
-        request->operation =
-            (LUN_NUM > 1U) ? OP_READ_PAGE_MULTI_PLANE_LOAD : OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
+        request->operation = (LUN_NUM > 1U) ? OP_READ_PAGE_MULTI_PLANE_LOAD : OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
     }
 
     /* Phase V: splittable 原子命令自动拆为 ISSUE（仅 LUN_NUM>1 时生效；
@@ -1370,8 +1352,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         /* v28：不置 cw_bitmap（同单 plane 擦除）——多 plane 擦除的 plane 集合由
          * plane_count/plane_paa[] 表达，与 CW 位图无关。 */
     }
-    else if ((command->config.operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) ||
-             (command->config.operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT))
+    else if ((command->config.operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) || (command->config.operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT))
     {
         /* 无 desc 的「纯加载」op（v45）：只把目标页搬进器件页缓冲，**不建 CW 位图、不占 buffer**
          * —— op 表里 has_data = 0（host 侧无数据搬运），故 ftl_cmd_needs_desc_chain 不要求链。
@@ -1398,8 +1379,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         }
         /* 不置 cw_bitmap（空集 = 无 CW 可访问）：加载 op 的 uop 无 DATA_OUT，位图/缓冲皆不用。 */
     }
-    else if ((command->config.operation == OP_SET_FEATURES) ||
-             (command->config.operation == OP_GET_FEATURES))
+    else if ((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES))
     {
         /* Feature 寄存器是 die 级、无 plane 语义，command->paa 从不设置（fc_command_alloc_internal
          * 做 (fc_command_t){0}），故 plane 恒 0。仍按 plane 落位，以保住"数据恒在
@@ -1463,11 +1443,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         request->column                              = (command->param.bytes[0] | (command->param.bytes[1] << 8U));
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
     }
-    else if ((command->config.operation == OP_BLOCK_UNLOCK_LOW) ||
-             (command->config.operation == OP_BLOCK_UNLOCK_HIGH) ||
-             (command->config.operation == OP_BLOCK_LOCK) ||
-             (command->config.operation == OP_BLOCK_LOCK_TIGHT) ||
-             (command->config.operation == OP_BLOCK_LOCK_STATUS))
+    else if ((command->config.operation == OP_BLOCK_UNLOCK_LOW) || (command->config.operation == OP_BLOCK_UNLOCK_HIGH) || (command->config.operation == OP_BLOCK_LOCK) || (command->config.operation == OP_BLOCK_LOCK_TIGHT) || (command->config.operation == OP_BLOCK_LOCK_STATUS))
     {
         /* 块锁族（v49）：**无 host 数据搬运**（op 表 has_data 全为 0），但 23h/24h/7Ah
          * 都带 3 个地址周期（R1/R2/R3）⇒ 行地址**必须取自 command->paa**，否则退化为
@@ -1542,8 +1518,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
 
     /* ── Stripe RAID 分支：raid=ENCODE 的 page write 走 Multi-Plane 提交 ── */
 #if CONFIG_FC_RAID
-    if ((fc_is_page_write(command->config.operation) != 0U) &&
-        (command->config.raid == FC_RAID_MODE_ENCODE))
+    if ((fc_is_page_write(command->config.operation) != 0U) && (command->config.raid == FC_RAID_MODE_ENCODE))
     {
         fc_status_e stripe_result = fc_stripe_submit(controller, command, command_id);
         return stripe_result; /* 成功/失败均已在 fc_stripe_submit 中处理 */
@@ -1555,10 +1530,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     {
         /* 构建失败（multi-plane 窄位图）：debug 档上一条 ASSERT 已停机，这里只在 release
          * 档可达——命令注 NAND_FAIL 完成项后了结，**绝不**把凭空造的回退地址提交给 NAND。 */
-        LOGW("fc: build request failed for op=%u cmd_id=%u status=%d\r\n",
-             (unsigned)command->config.operation,
-             (unsigned)command_id,
-             (int)build_result);
+        LOGW("fc: build request failed for op=%u cmd_id=%u status=%d\r\n", (unsigned)command->config.operation, (unsigned)command_id, (int)build_result);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;
     }
@@ -1570,11 +1542,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
-        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_bitmap=0x%02X plane_count=%u\r\n",
-             (unsigned)command->config.operation,
-             (unsigned)command_id,
-             (unsigned)request.cw_bitmap,
-             (unsigned)request.plane_count);
+        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_bitmap=0x%02X plane_count=%u\r\n", (unsigned)command->config.operation, (unsigned)command_id, (unsigned)request.cw_bitmap, (unsigned)request.plane_count);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;
     }
@@ -1625,11 +1593,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         {
             /* 构建失败（multi-plane 窄位图）→ 整链注 NAND_FAIL，与下面 submit 失败的兜底
              * 口径一致：已置 ACTIVE 的前缀命令一并了结，不留半截链。 */
-            LOGW("fc: build request failed for cmd_id=%u (chain %u/%u) status=%d\r\n",
-                 (unsigned)command_id,
-                 (unsigned)i,
-                 (unsigned)chain_count,
-                 (int)build_result);
+            LOGW("fc: build request failed for cmd_id=%u (chain %u/%u) status=%d\r\n", (unsigned)command_id, (unsigned)i, (unsigned)chain_count, (int)build_result);
             for (j = 0U; j < chain_count; j++)
             {
                 fc_poll_fail_command(controller, chain->ids[j]);
@@ -1692,8 +1656,7 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
 
         /* 链成员必须同一 target（FTL 保证）；不满足即链构造错误，
          * 此处 break 会静默把一条链截成两条、丢失链语义，故断言。 */
-        ASSERT((next->config.ch == head->config.ch) && (next->config.ce == head->config.ce) &&
-               (next->config.lun == head->config.lun));
+        ASSERT((next->config.ch == head->config.ch) && (next->config.ce == head->config.ce) && (next->config.lun == head->config.lun));
         need++;
         if (next->config.chain == FC_CHAIN_END)
         {
@@ -1772,8 +1735,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
          * ⚠ **只回推、不置 suspended**——置了会把链自己的续批也一并锁死（该 LUN 从此
          *   既不接受另一队列、也不接受本链，活锁）。
          * 生产路径恒假：FTL 恒 FC_CHAIN_END ⇒ chain_owner 恒 NONE。 */
-        if ((controller->scheduler.chain_owner[ch][ce][lun] != FC_CHAIN_OWNER_NONE) &&
-            (controller->scheduler.chain_owner[ch][ce][lun] != owner))
+        if ((controller->scheduler.chain_owner[ch][ce][lun] != FC_CHAIN_OWNER_NONE) && (controller->scheduler.chain_owner[ch][ce][lun] != owner))
         {
             (void)fc_submission_queue_push(queue, id);
             continue;
@@ -1819,8 +1781,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
          *   MORE ⇒ 这条链还没完，该 LUN 的填充权继续归本队列（下一批仍从这条队列取）；
          *   END  ⇒ 链在此收尾，解锁，另一条队列可以喂这个 LUN 了。
          * 单命令（need == 1）批尾恒 END ⇒ 恒写 NONE，即生产路径只是多一次无副作用的写。 */
-        controller->scheduler.chain_owner[ch][ce][lun] =
-            (controller->command_pool[chain.ids[need - 1U]].config.chain == FC_CHAIN_MORE) ? owner : FC_CHAIN_OWNER_NONE;
+        controller->scheduler.chain_owner[ch][ce][lun] = (controller->command_pool[chain.ids[need - 1U]].config.chain == FC_CHAIN_MORE) ? owner : FC_CHAIN_OWNER_NONE;
         (*dispatched)++;
     }
 

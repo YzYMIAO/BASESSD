@@ -88,8 +88,7 @@ static nand_dma_result_e nand_dma_init_stream(DMA_HandleTypeDef *handle, DMA_Str
 
 nand_dma_result_e nand_dma_init(void)
 {
-    if ((nand_dma_init_stream(&g_nand_dma_out, DMA2_Stream0) != 0U) ||
-        (nand_dma_init_stream(&g_nand_dma_in, DMA2_Stream1) != 0U))
+    if ((nand_dma_init_stream(&g_nand_dma_out, DMA2_Stream0) != 0U) || (nand_dma_init_stream(&g_nand_dma_in, DMA2_Stream1) != 0U))
     {
         return DMA_RESULT_ERROR;
     }
@@ -105,9 +104,7 @@ nand_dma_result_e nand_dma_init(void)
  * 轮询版（保留做后备，DMA 失败时回退到 PIO 前使用）
  * ══════════════════════════════════════════════════════════════════ */
 
-nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
-                                         const BYTE    *buffer,
-                                         WORD           length)
+nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg, const BYTE *buffer, WORD length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -118,10 +115,7 @@ nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
     nand_dma_cache_clean(buffer, length);
 
     /* 启动 DMA: memory → FMC data reg (memory-to-memory) */
-    if (HAL_DMA_Start(&g_nand_dma_out,
-                      (DWORD)buffer,
-                      (DWORD)fmc_data_reg,
-                      length) != HAL_OK)
+    if (HAL_DMA_Start(&g_nand_dma_out, (DWORD)buffer, (DWORD)fmc_data_reg, length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
     }
@@ -135,9 +129,7 @@ nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
     return DMA_RESULT_OK;
 }
 
-nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
-                                         BYTE          *buffer,
-                                         WORD           length)
+nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg, BYTE *buffer, WORD length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -145,10 +137,7 @@ nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
     }
 
     /* 启动 DMA: FMC data reg → memory (memory-to-memory) */
-    if (HAL_DMA_Start(&g_nand_dma_in,
-                      (DWORD)fmc_data_reg,
-                      (DWORD)buffer,
-                      length) != HAL_OK)
+    if (HAL_DMA_Start(&g_nand_dma_in, (DWORD)fmc_data_reg, (DWORD)buffer, length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
     }
@@ -169,9 +158,7 @@ nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
  * 中断版（非阻塞）
  * ══════════════════════════════════════════════════════════════════ */
 
-nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
-                                                  const BYTE    *buffer,
-                                                  WORD           length)
+nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg, const BYTE *buffer, WORD length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -183,10 +170,7 @@ nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
 
     g_dma_data_out_done = 0U;
 
-    if (HAL_DMA_Start_IT(&g_nand_dma_out,
-                         (DWORD)buffer,
-                         (DWORD)fmc_data_reg,
-                         length) != HAL_OK)
+    if (HAL_DMA_Start_IT(&g_nand_dma_out, (DWORD)buffer, (DWORD)fmc_data_reg, length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
     }
@@ -194,9 +178,7 @@ nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
     return DMA_RESULT_OK;
 }
 
-nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
-                                                  BYTE          *buffer,
-                                                  WORD           length)
+nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg, BYTE *buffer, WORD length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -205,10 +187,7 @@ nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
 
     g_dma_data_in_done = 0U;
 
-    if (HAL_DMA_Start_IT(&g_nand_dma_in,
-                         (DWORD)fmc_data_reg,
-                         (DWORD)buffer,
-                         length) != HAL_OK)
+    if (HAL_DMA_Start_IT(&g_nand_dma_in, (DWORD)fmc_data_reg, (DWORD)buffer, length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
     }

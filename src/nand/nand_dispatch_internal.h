@@ -187,10 +187,7 @@ typedef struct
 typedef void (*nand_dispatch_req_handler_t)(nand_dispatch_task_t *task);
 
 /* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_descriptor_id。 */
-typedef void (*nand_dispatch_completion_handler_t)(
-    nand_dispatch_task_t       *task,
-    BYTE                        result,
-    const nand_fc_completion_t *nand_completion);
+typedef void (*nand_dispatch_completion_handler_t)(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion);
 
 /* OP_COUNT 项，OP_* 直接作为下标。 */
 extern const nand_dispatch_req_handler_t        g_nand_dispatch_req_table[OP_COUNT];

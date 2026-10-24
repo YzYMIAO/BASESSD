@@ -374,11 +374,7 @@ void jrn_checkpoint_request(l2p_jrn_t *journal);
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
  * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
  *         不完整 ⇒ 调用者应回退 full metadata rebuild）。 */
-ftl_status_e jrn_replay(l2p_jrn_t        *journal,
-                        l2p_cache_t      *cache,
-                        DWORD             cp_sequence,
-                        DWORD            *out_entries,
-                        jrn_replay_ctx_t *block_ctx);
+ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx);
 
 /* 最近一次 jrn_replay 命中「降级 L2P region」的条目数（只读诊断 / 启动结果）。
  * 非 0 表示该 region 未被 Journal 覆盖的旧映射已丢；**不再**据此回退全量重建
@@ -404,10 +400,7 @@ DWORD jrn_replay_degraded_entries(void);
  *         JRN_TRUNC_ALREADY = 无需擦（水位 OK，该块已预擦过）；
  *         JRN_TRUNC_NO_TRUNCATE = 不截断（水位不满足）——**调用者不得据此复位水位标志**
  */
-jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal,
-                                      DWORD      up_to_sequence,
-                                      DWORD     *out_addr,
-                                      BYTE      *out_block);
+jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, DWORD *out_addr, BYTE *out_block);
 
 /*
  * jrn_truncate_commit - 截断 Journal 的**第二步**：记账 + 复位水位标志

@@ -128,36 +128,16 @@ static void boot_report_system(void)
     sys_clock_tree_t clk;
 
     boot_section("system");
-    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n",
-         (delay_port_core_clock_hz() / 1000000U),
-         (delay_port_hclk_hz() / 1000000U),
-         (get_icache_sta() != 0U) ? "on" : "off",
-         (get_dcache_sta() != 0U) ? "on" : "off",
-         sys_mpu_region_count());
+    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n", (delay_port_core_clock_hz() / 1000000U), (delay_port_hclk_hz() / 1000000U), (get_icache_sta() != 0U) ? "on" : "off", (get_dcache_sta() != 0U) ? "on" : "off", sys_mpu_region_count());
     /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
     sys_clock_tree_get(&clk);
     if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (clk.sysclk_hz / 1000000U),
-             (clk.hclk_hz / 1000000U),
-             (clk.pclk1_hz / 1000000U),
-             (clk.fmc_hz / 1000000U),
-             (clk.qspi_hz / 1000000U),
-             (clk.uart_hz / 1000000U));
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n", (clk.sysclk_hz / 1000000U), (clk.hclk_hz / 1000000U), (clk.pclk1_hz / 1000000U), (clk.fmc_hz / 1000000U), (clk.qspi_hz / 1000000U), (clk.uart_hz / 1000000U));
     }
     else
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (clk.sysclk_hz / 1000000U),
-             (clk.hclk_hz / 1000000U),
-             (clk.pclk1_hz / 1000000U),
-             (clk.pclk2_hz / 1000000U),
-             (clk.pclk3_hz / 1000000U),
-             (clk.pclk4_hz / 1000000U),
-             (clk.fmc_hz / 1000000U),
-             (clk.qspi_hz / 1000000U),
-             (clk.uart_hz / 1000000U));
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n", (clk.sysclk_hz / 1000000U), (clk.hclk_hz / 1000000U), (clk.pclk1_hz / 1000000U), (clk.pclk2_hz / 1000000U), (clk.pclk3_hz / 1000000U), (clk.pclk4_hz / 1000000U), (clk.fmc_hz / 1000000U), (clk.qspi_hz / 1000000U), (clk.uart_hz / 1000000U));
     }
 }
 
@@ -249,22 +229,13 @@ static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl
 /* g_wr_buf 从 .sram2_data 迁入 AXI .bss（SRAM12 留给 tables），显式计入预算。 */
 #define CLI_AXI_RAM_RESERVED (16U * 1024U)
 
-_Static_assert(sizeof(g_ftl_migrate) + sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) +
-                       FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <=
-                   BOARD_AXI_RAM_SIZE,
-               "FTL 挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
+_Static_assert(sizeof(g_ftl_migrate) + sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) + FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE, "FTL 挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
 /* FTL 自有 DTCM 对象；fc.o / fc_bch_engine.o / nand_dispatch.o 的 DTCM 对象在
  * 其它 TU，其总量不在此断言内，由 linker 的
  * `.dtcm_data + .noinit + 20KB <= DTCM` 兜底。 */
-_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_wbuf) + sizeof(g_ftl_journal) +
-                       BOARD_DTCM_STACK_RESERVE <=
-                   BOARD_DTCM_SIZE,
-               "DTCM 热数据 + stack/heap 预留超出 DTCM");
+_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_wbuf) + sizeof(g_ftl_journal) + BOARD_DTCM_STACK_RESERVE <= BOARD_DTCM_SIZE, "DTCM 热数据 + stack/heap 预留超出 DTCM");
 _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
-_Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) +
-                       sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <=
-                   BOARD_SRAM12_SIZE,
-               "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
+_Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) + sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
 _Static_assert(sizeof(g_ftl_checkpoint_handle) <= BOARD_SRAM3_SIZE, "cp_handle 超出 SRAM3");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -411,19 +382,9 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
         return FTL_ERROR;
     }
 
-    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
-         ch,
-         ce,
-         lun,
-         (unsigned)alloc->free_count,
-         (unsigned)alc_pool_sum_counts(alloc->op_count, PLANE_NUM),
-         (unsigned)alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
+    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n", ch, ce, lun, (unsigned)alloc->free_count, (unsigned)alc_pool_sum_counts(alloc->op_count, PLANE_NUM), (unsigned)alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
 
-    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n",
-         (int)result.boot_type,
-         result.cp_sequence,
-         result.journal_entries,
-         result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback"));
+    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n", (int)result.boot_type, result.cp_sequence, result.journal_entries, result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback"));
 
     return 0;
 }
@@ -486,12 +447,7 @@ static DWORD ssd_ftl_host_lba_max(void)
 
                 const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
 
-                LOGI(LOG_TAG_CAP "ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n",
-                     (unsigned)ch,
-                     (unsigned)ce,
-                     (unsigned)lun,
-                     plane_usable_min,
-                     instance_blocks);
+                LOGI(LOG_TAG_CAP "ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n", (unsigned)ch, (unsigned)ce, (unsigned)lun, plane_usable_min, instance_blocks);
 
                 if (instance_blocks < cap_blocks)
                 {
@@ -517,10 +473,7 @@ static DWORD ssd_ftl_host_lba_max(void)
         lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
     }
 
-    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n",
-         cap_blocks,
-         lba,
-         (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
+    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n", cap_blocks, lba, (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
 
     return (DWORD)lba;
 }
@@ -556,15 +509,7 @@ static void ssd_ftl_log_status(void)
                     continue;
                 }
 
-                LOGI(LOG_TAG_STAT "ch=%u t=%lus free=%u bad=%u mig=%u/%u mv=%lu nop=%lu\r\n",
-                     (unsigned)ch,
-                     (now / 1000U),
-                     (unsigned)ftl->alloc.free_count,
-                     (unsigned)ftl->alloc.bad_count,
-                     ((ftl->mig_handle->active != 0U) ? 1U : 0U),
-                     ((ftl->mig_handle->paused != 0U) ? 1U : 0U),
-                     ftl->mig_handle->moved_count,
-                     ftl->mig_handle->noop_count);
+                LOGI(LOG_TAG_STAT "ch=%u t=%lus free=%u bad=%u mig=%u/%u mv=%lu nop=%lu\r\n", (unsigned)ch, (now / 1000U), (unsigned)ftl->alloc.free_count, (unsigned)ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
             }
         }
     }
@@ -682,9 +627,7 @@ static void ssd_ftl_boot_all(void)
 
     /* ④ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
-    LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n",
-         g_ctrl.host_lba_max,
-         ((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL));
+    LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n", g_ctrl.host_lba_max, ((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL));
 }
 
 /* newlib calls this hook from __libc_init_array when no CRT provides it. */
@@ -767,8 +710,7 @@ int main(void)
 
                 if (high_speed_result != NAND_RESULT_OK)
                 {
-                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02X — keep low speed\r\n",
-                         (unsigned)high_speed_result);
+                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02X — keep low speed\r\n", (unsigned)high_speed_result);
                 }
             }
         }

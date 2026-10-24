@@ -62,8 +62,7 @@ static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
  * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。 */
 static BYTE __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
 {
-    return (fc_buffer_id_is_valid(buffer_id) != 0U) &&
-           (fc_buffer_state_get(&g_fc_controller, buffer_id) != 0U);
+    return (fc_buffer_id_is_valid(buffer_id) != 0U) && (fc_buffer_state_get(&g_fc_controller, buffer_id) != 0U);
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -326,8 +325,7 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
         }
     }
 
-    if (((WORD)(fc_get_sq_count(&g_fc_controller) + sq_need) > FC_SQ_DEPTH) ||
-        ((WORD)(fc_get_hsq_count(&g_fc_controller) + hsq_need) > FC_HSQ_DEPTH))
+    if (((WORD)(fc_get_sq_count(&g_fc_controller) + sq_need) > FC_SQ_DEPTH) || ((WORD)(fc_get_hsq_count(&g_fc_controller) + hsq_need) > FC_HSQ_DEPTH))
     {
         return FC_STATUS_QUEUE_FULL;
     }
@@ -457,9 +455,7 @@ BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
 
         if (paa_to_cw(d->paa) == cw_index)
         {
-            return (d->buffer_id != FC_BUFFER_ID_INVALID)
-                       ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
-                       : NULL;
+            return (d->buffer_id != FC_BUFFER_ID_INVALID) ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id) : NULL;
         }
         did = (fc_descriptor_id_t)d->next_id;
     }
@@ -651,18 +647,7 @@ void fc_boot_report(void)
     const char *data_path = "PIO";
 #endif
 
-    LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n",
-         (unsigned)FC_COMMAND_POOL_DEPTH,
-         (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-         (unsigned)FC_BUFFER_POOL_DEPTH,
-         (unsigned)FC_SQ_DEPTH,
-         (unsigned)FC_HSQ_DEPTH,
-         (unsigned)FC_CQ_DEPTH);
-    LOGI("[FC  ] topology ch=%u ce=%u lun=%u plane=%u raid=%s\r\n",
-         (unsigned)CH_NUM,
-         (unsigned)CE_NUM,
-         (unsigned)LUN_NUM,
-         (unsigned)PLANE_NUM,
-         (CONFIG_FC_RAID != 0U) ? "on" : "off");
+    LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n", (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)FC_SQ_DEPTH, (unsigned)FC_HSQ_DEPTH, (unsigned)FC_CQ_DEPTH);
+    LOGI("[FC  ] topology ch=%u ce=%u lun=%u plane=%u raid=%s\r\n", (unsigned)CH_NUM, (unsigned)CE_NUM, (unsigned)LUN_NUM, (unsigned)PLANE_NUM, (CONFIG_FC_RAID != 0U) ? "on" : "off");
     LOGI("[FC  ] data path=%s ecc=%s random=%s\r\n", data_path, fc_ecc_algo_name(), fc_random_algo_name());
 }

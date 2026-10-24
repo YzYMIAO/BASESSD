@@ -86,11 +86,7 @@ static inline bool ftl_fc_host_budget_ok_n(DWORD n)
 
     const DWORD cw = n * FTL_LBA_PER_PAIR;
 
-    return (st.command_used + n + FTL_FC_HOST_RESERVED_CMDS <= FC_COMMAND_POOL_DEPTH) &&
-           (st.descriptor_used + cw + FTL_FC_HOST_RESERVED_DESC <= FC_DESCRIPTOR_POOL_DEPTH) &&
-           (st.buffer_used + cw + FTL_FC_HOST_RESERVED_BUFS <= FC_BUFFER_POOL_DEPTH) &&
-           (st.sq_used + n + FTL_FC_HOST_RESERVED_SQ <= FC_SQ_DEPTH) &&
-           (st.hsq_used + FTL_FC_HOST_RESERVED_HSQ <= FC_HSQ_DEPTH);
+    return (st.command_used + n + FTL_FC_HOST_RESERVED_CMDS <= FC_COMMAND_POOL_DEPTH) && (st.descriptor_used + cw + FTL_FC_HOST_RESERVED_DESC <= FC_DESCRIPTOR_POOL_DEPTH) && (st.buffer_used + cw + FTL_FC_HOST_RESERVED_BUFS <= FC_BUFFER_POOL_DEPTH) && (st.sq_used + n + FTL_FC_HOST_RESERVED_SQ <= FC_SQ_DEPTH) && (st.hsq_used + FTL_FC_HOST_RESERVED_HSQ <= FC_HSQ_DEPTH);
 }
 
 /* host 是否还有余量提交一个子操作。查询失败时不阻塞前台（宁可少一次预留）。 */
@@ -498,11 +494,7 @@ ftl_status_e ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, DWORD pba
  * ⚠ 只给**固定元数据池**用；用户数据/日志块仍走单 plane/正常多 plane 数据路径。
  * ⚠ 这是 multi-plane program：两个 plane 的 page 必须都处于擦除态。
  */
-ftl_status_e ftl_async_write_page_mirror(fc_command_t        **out_cmd,
-                                         DWORD                 pba,
-                                         const void           *data,
-                                         DWORD                 length,
-                                         const ftl_page_cfg_t *cfg);
+ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 
 /*
@@ -534,12 +526,7 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
  *
  * @return FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参、地址或建链失败）。
  */
-ftl_status_e ftl_async_write_pair_cmd(fc_command_t        **out_cmd,
-                                      const DWORD           pba[PLANE_NUM],
-                                      const BYTE           *pair_buf,
-                                      DWORD                 cw_bitmap,
-                                      BYTE                  operation,
-                                      const ftl_page_cfg_t *cfg);
+ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_t *cfg);
 
 /*
  * 读页（异步）：OP_NORMAL_READ_PAGE_WITH_DATA_OUT，建链，**不提交**。

@@ -89,8 +89,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
     {
         return false;
     }
-    if (config->enable_wwdg &&
-        ((config->wwdg_refresh_min_ms == 0U) || (config->wwdg_refresh_max_ms <= config->wwdg_refresh_min_ms)))
+    if (config->enable_wwdg && ((config->wwdg_refresh_min_ms == 0U) || (config->wwdg_refresh_max_ms <= config->wwdg_refresh_min_ms)))
     {
         return false;
     }

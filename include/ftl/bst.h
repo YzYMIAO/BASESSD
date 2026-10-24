@@ -96,8 +96,7 @@ typedef enum
 } bst_state_e;
 
 /* 状态存于 BYTE ⇒ 值域必须装得下（枚举成员一多就会静默截断） */
-_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
-               "bst_state_e 超出 BYTE 值域");
+_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX, "bst_state_e 超出 BYTE 值域");
 
 /* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 bst_block_t 会从 20B 涨到 24B，
  * 4096 个块多占 16KB，多 LUN 影子构建会超 SRAM12。 */

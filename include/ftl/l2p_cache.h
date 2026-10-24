@@ -152,8 +152,7 @@ static inline BYTE lba_route_lun(QWORD lba)
 /* 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。 */
 static inline bool lba_routes_to(DWORD glba, ftl_topo_t topo)
 {
-    return (lba_route_ch(glba) == topo.ch) && (lba_route_ce(glba) == topo.ce) &&
-           (lba_route_lun(glba) == topo.lun);
+    return (lba_route_ch(glba) == topo.ch) && (lba_route_ce(glba) == topo.ce) && (lba_route_lun(glba) == topo.lun);
 }
 
 static inline WORD lba_to_entry(DWORD lba)

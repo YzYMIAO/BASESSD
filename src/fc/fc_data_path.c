@@ -77,8 +77,7 @@ static BYTE fc_collect_decode_buffers(const fc_command_t *cmd, BYTE *buffers[], 
     fc_descriptor_id_t desc_id;
     BYTE               count = 0U;
 
-    for (desc_id = (fc_descriptor_id_t)cmd->desc_id;
-         (desc_id != FC_DESCRIPTOR_ID_INVALID) && (count < max_count);)
+    for (desc_id = (fc_descriptor_id_t)cmd->desc_id; (desc_id != FC_DESCRIPTOR_ID_INVALID) && (count < max_count);)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
         if (desc == NULL)
@@ -197,8 +196,7 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
 
     /* 自洽但与本命令的 LBA 不符 = 读到了别的页（GC 路径 meta 为
      * FC_META_UNKNOWN，跳过本项，只做上面的自洽校验）。 */
-    if ((command_meta != FC_META_UNKNOWN) &&
-        (read_meta != lba_to_meta(command_meta, paa_to_plane(paa), paa_to_cw(paa))))
+    if ((command_meta != FC_META_UNKNOWN) && (read_meta != lba_to_meta(command_meta, paa_to_plane(paa), paa_to_cw(paa))))
     {
         return FC_CW_STATUS_MATA_ERROR;
     }
@@ -235,8 +233,7 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
 
     /* 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
      * 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历（原来 4 次）。 */
-    for (desc_id = (fc_descriptor_id_t)command->desc_id;
-         desc_id != FC_DESCRIPTOR_ID_INVALID;)
+    for (desc_id = (fc_descriptor_id_t)command->desc_id; desc_id != FC_DESCRIPTOR_ID_INVALID;)
     {
         /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
@@ -307,10 +304,7 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
  *       [520..528] 不参与（由后续 ECC 编码生成）。
  *     - XOR 累加：首条数据命令 memcpy 作初值，后续按 32-bit 字异或。
  * -------------------------------------------------------------------- */
-fc_status_e fc_data_path_generate_stripe_parity(
-    const fc_command_t *data_cmds[],
-    BYTE                data_count,
-    const fc_command_t *parity_cmd)
+fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[], BYTE data_count, const fc_command_t *parity_cmd)
 {
     BYTE               cw_count;
     BYTE               cw;
@@ -405,8 +399,7 @@ fc_status_e fc_data_path_generate_stripe_parity(
     /* ── ECC 编码 parity 命令的 buffer ── */
     if (parity_cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        for (desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
-             desc_id != FC_DESCRIPTOR_ID_INVALID;)
+        for (desc_id = (fc_descriptor_id_t)parity_cmd->desc_id; desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
             ASSERT(desc != NULL);

@@ -50,59 +50,58 @@ extern MunitTest g_ftl_bg_tests[];
  * （munit.c:1285 下探子套件、:1103 拼用例名），**不补分隔符**。根前缀已带尾斜杠；
  * 子套件漏了就会打印成 "/fc-nand/lifecycleblock_multi_plane"，且过滤串
  * "/fc-nand/lifecycle/…" 一条都匹配不上（用例名不带前导斜杠）。 */
-static MunitSuite g_ut_root_suite =
-    {
-        (char *)"",
-        NULL,
-        (MunitSuite[]){
+static MunitSuite g_ut_root_suite = {
+    (char *)"",
+    NULL,
+    (MunitSuite[]){
 #if defined(UT_FC_ENABLE)
-                       /* ══ FC-NAND 根 ══ */
-                       {
-                       (char *)"/fc-nand/",
-                       NULL,
-                       (MunitSuite[]){
-                       /* Level 1 */
-                       {(char *)"logic/", g_fc_logic_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   /* ══ FC-NAND 根 ══ */
+                   {
+                   (char *)"/fc-nand/",
+                   NULL,
+                   (MunitSuite[]){
+                   /* Level 1 */
+                   {(char *)"logic/", g_fc_logic_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-                       /* Level 2 */
-                       {(char *)"data_path/", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   /* Level 2 */
+                   {(char *)"data_path/", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-                       /* Level 3 */
-                       {(char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   /* Level 3 */
+                   {(char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-                       {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
-                       },
-                       1,
-                       MUNIT_SUITE_OPTION_NONE,
-                       },
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
 #endif /* UT_FC_ENABLE */
 
 #if defined(UT_FTL_ENABLE)
-                       /* ══ FTL 根 ══ */
-                       {
-                       (char *)"/ftl/",
-                       NULL,
-                       (MunitSuite[]){
-                       {(char *)"allocator/", g_ftl_allocator_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"watermark/", g_ftl_watermark_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"gc_wl/", g_ftl_gc_wl_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"rr/", g_ftl_rr_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"bbt/", g_ftl_bbt_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"metadata/", g_ftl_metadata_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"pending_ct/", g_ftl_pending_ct_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"group/", g_ftl_group_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"bg/", g_ftl_bg_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
-                       },
-                       1,
-                       MUNIT_SUITE_OPTION_NONE,
-                       },
+                   /* ══ FTL 根 ══ */
+                   {
+                   (char *)"/ftl/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"allocator/", g_ftl_allocator_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"watermark/", g_ftl_watermark_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"gc_wl/", g_ftl_gc_wl_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"rr/", g_ftl_rr_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"bbt/", g_ftl_bbt_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"metadata/", g_ftl_metadata_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"pending_ct/", g_ftl_pending_ct_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"group/", g_ftl_group_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"bg/", g_ftl_bg_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
 #endif /* UT_FTL_ENABLE */
 
-                       {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
-                       },
-        1,
-        MUNIT_SUITE_OPTION_NONE,
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+    1,
+    MUNIT_SUITE_OPTION_NONE,
 };
 
 /* ── 套件路径展开 ─────────────────────────────────────────────────────────────

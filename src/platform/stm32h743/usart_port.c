@@ -166,8 +166,7 @@ void usart_port_irq_handler(void)
         USART_UX->ICR = clear_flags;
     }
 
-    if ((uart_tx_dma_ready() == 0U) && ((USART_UX->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) &&
-        ((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U))
+    if ((uart_tx_dma_ready() == 0U) && ((USART_UX->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) && ((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U))
     {
         /*
          * TXE/TXFNF 表示 TDR 或 TX FIFO 尚有位置。连续填充可减少每个字符一次 IRQ 的开销；

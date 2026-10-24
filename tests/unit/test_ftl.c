@@ -131,11 +131,7 @@ static uint16_t ftl_fixture_backfill(ftl_allocator_t *alloc, uint16_t first, uin
  * 不走 allocator_add_closed_sb 是为了让 GC/WL 用例能**逐字段**摆弄（valid_count /
  * erase_count / read_count 由调用者自己写 BST）。会按需把 closed_sb_count 顶到 idx+1。
  */
-static void ftl_ut_put_closed_sb(ftl_allocator_t *alloc,
-                                 uint16_t         idx,
-                                 uint16_t         blk0,
-                                 uint16_t         blk1,
-                                 uint8_t          temperature)
+static void ftl_ut_put_closed_sb(ftl_allocator_t *alloc, uint16_t idx, uint16_t blk0, uint16_t blk1, uint8_t temperature)
 {
     super_block_t *sb = &alloc->closed_sb_list[idx];
 
@@ -255,9 +251,7 @@ static MunitResult test_alloc_free_block_clears_state(const MunitParameter param
     (void)fixture;
 
     ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE);
-    ftl_block_state_set(b,
-                        FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_RESERVED |
-                            FTL_BLOCK_STATE_TEMP_HOT);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_RESERVED | FTL_BLOCK_STATE_TEMP_HOT);
     ftl_block_set_sb(b, 7U);
 
     allocator_free_block(a, g);
@@ -893,8 +887,7 @@ static MunitResult test_wl_trigger_delta(const MunitParameter params[], void *fi
 
     /* 隔离自检：条件 2 / 条件 3 必须为假 */
     munit_assert_true(wl_max_erase(F) < (wl_avg_erase(F) * (uint32_t)WL_MAX_AVG_RATIO));
-    munit_assert_true(wl_count_blocks_below(F, wl_min_erase(F) + (uint32_t)WL_LOW_ZONE_WIDTH) <=
-                      ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
+    munit_assert_true(wl_count_blocks_below(F, wl_min_erase(F) + (uint32_t)WL_LOW_ZONE_WIDTH) <= ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
 
     munit_assert_int(wl_should_trigger(F), ==, 1);
 
@@ -935,8 +928,7 @@ static MunitResult test_wl_trigger_ratio(const MunitParameter params[], void *fi
 
     /* 隔离自检：条件 1（4900 < 5000）与条件 3（低区 204 块，不 > 204）必须为假 */
     munit_assert_true((wl_max_erase(F) - wl_min_erase(F)) < (uint32_t)WL_DELTA_THRESHOLD);
-    munit_assert_true(wl_count_blocks_below(F, wl_min_erase(F) + (uint32_t)WL_LOW_ZONE_WIDTH) <=
-                      ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
+    munit_assert_true(wl_count_blocks_below(F, wl_min_erase(F) + (uint32_t)WL_LOW_ZONE_WIDTH) <= ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
 
     munit_assert_int(wl_should_trigger(F), ==, 1);
 
@@ -964,8 +956,7 @@ static MunitResult test_wl_trigger_low_zone(const MunitParameter params[], void 
     munit_assert_uint32(wl_max_erase(F), ==, 0U);
     munit_assert_uint32(wl_avg_erase(F), ==, 0U); /* avg==0 ⇒ 条件 2 短路 */
 
-    munit_assert_true(wl_count_blocks_below(F, (uint32_t)WL_LOW_ZONE_WIDTH) >
-                      ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
+    munit_assert_true(wl_count_blocks_below(F, (uint32_t)WL_LOW_ZONE_WIDTH) > ((uint32_t)a->total_blocks * (uint32_t)WL_LOW_BLOCK_PCT / 100U));
     munit_assert_int(wl_should_trigger(F), ==, 1);
 
     return MUNIT_OK;
@@ -1511,10 +1502,7 @@ static MunitResult test_meta_dir_update_lookup_roundtrip(const MunitParameter pa
     metadata_dir_cache_t *d     = &ftl_fixture()->metadata_dir;
     uint16_t              r     = (uint16_t)ftl_rand_range(tag, 0U, (uint32_t)L2P_REGIONS_PER_INSTANCE - 1U);
     uint16_t              block = (uint16_t)ftl_rand_range(tag, (uint32_t)FTL_METADATA_BLOCK_END, (uint32_t)BLOCKS_PER_PLANE - 1U);
-    DWORD                 pba   = ftl_ut_pba(ftl_fixture()->topo.lun,
-                           block,
-                           (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PLANE_NUM - 1U),
-                           (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PAGES_PER_BLOCK - 1U));
+    DWORD                 pba   = ftl_ut_pba(ftl_fixture()->topo.lun, block, (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PLANE_NUM - 1U), (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PAGES_PER_BLOCK - 1U));
 
     (void)params;
     (void)fixture;
@@ -1527,9 +1515,7 @@ static MunitResult test_meta_dir_update_lookup_roundtrip(const MunitParameter pa
     munit_assert_uint16(d->count, ==, (uint16_t)L2P_REGIONS_PER_INSTANCE); /* 覆盖而非追加 */
 
     /* 其他 region 不受影响 */
-    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, (uint16_t)((r + 1U) % L2P_REGIONS_PER_INSTANCE)),
-                        !=,
-                        pba);
+    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, (uint16_t)((r + 1U) % L2P_REGIONS_PER_INSTANCE)), !=, pba);
 
     return MUNIT_OK;
 }
@@ -1547,9 +1533,7 @@ static MunitResult test_meta_dir_lookup_missing_unknown(const MunitParameter par
     munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_BBT, 0U), ==, (uint32_t)NAND_PBA_INVALID);
 
     /* 越界 id */
-    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, (uint16_t)L2P_REGIONS_PER_INSTANCE),
-                        ==,
-                        (uint32_t)NAND_PBA_INVALID);
+    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, (uint16_t)L2P_REGIONS_PER_INSTANCE), ==, (uint32_t)NAND_PBA_INVALID);
 
     /* NULL */
     munit_assert_uint32(metadata_dir_lookup(NULL, METADATA_TYPE_L2P_REGION, 0U), ==, (uint32_t)NAND_PBA_INVALID);
@@ -1751,19 +1735,7 @@ static MunitResult test_pending_add_lookup_remove(const MunitParameter params[],
     {
         cmds[i] = (uint16_t)(base + i);
 
-        munit_assert_int(pending_add(F,
-                                     cmds[i],
-                                     (uint32_t)(1U << i),
-                                     (DWORD)(i * 8U),
-                                     &dummy,
-                                     (uint8_t)(1U + (i % 8U)),
-                                     (DWORD)(0x1000U + i),
-                                     (DWORD)NAND_PBA_INVALID,
-                                     (uint8_t)(i & 1U),
-                                     PENDING_OP_WRITE,
-                                     (uint8_t)(0x01U << i)),
-                         ==,
-                         FTL_OK);
+        munit_assert_int(pending_add(F, cmds[i], (uint32_t)(1U << i), (DWORD)(i * 8U), &dummy, (uint8_t)(1U + (i % 8U)), (DWORD)(0x1000U + i), (DWORD)NAND_PBA_INVALID, (uint8_t)(i & 1U), PENDING_OP_WRITE, (uint8_t)(0x01U << i)), ==, FTL_OK);
     }
 
     munit_assert_uint16(pending_count(F), ==, n);
@@ -1821,35 +1793,19 @@ static MunitResult test_pending_full_32_rejects(const MunitParameter params[], v
 
     for (i = 0U; i < (uint16_t)FTL_PENDING_MAX; i++)
     {
-        munit_assert_int(pending_add(F,
-                                     (uint16_t)(i + 1U),
-                                     1U,
-                                     (DWORD)i,
-                                     NULL,
-                                     1U,
-                                     (DWORD)NAND_PBA_INVALID,
-                                     (DWORD)NAND_PBA_INVALID,
-                                     0U,
-                                     PENDING_OP_READ,
-                                     0U),
-                         ==,
-                         FTL_OK);
+        munit_assert_int(pending_add(F, (uint16_t)(i + 1U), 1U, (DWORD)i, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U), ==, FTL_OK);
     }
 
     munit_assert_uint16(pending_count(F), ==, (uint16_t)FTL_PENDING_MAX);
 
     /* 满 ⇒ 拒绝，计数不变 */
-    munit_assert_int(pending_add(F, 999U, 1U, 0U, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U),
-                     ==,
-                     FTL_ERROR);
+    munit_assert_int(pending_add(F, 999U, 1U, 0U, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U), ==, FTL_ERROR);
     munit_assert_uint16(pending_count(F), ==, (uint16_t)FTL_PENDING_MAX);
 
     /* 释放一个 ⇒ 再入成功 */
     pending_remove(F, 1U);
     munit_assert_uint16(pending_count(F), ==, (uint16_t)FTL_PENDING_MAX - 1U);
-    munit_assert_int(pending_add(F, 999U, 1U, 0U, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U),
-                     ==,
-                     FTL_OK);
+    munit_assert_int(pending_add(F, 999U, 1U, 0U, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U), ==, FTL_OK);
     munit_assert_uint16(pending_count(F), ==, (uint16_t)FTL_PENDING_MAX);
 
     return MUNIT_OK;
@@ -1868,9 +1824,7 @@ static MunitResult test_pending_count(const MunitParameter params[], void *fixtu
 
     for (i = 0U; i < 5U; i++)
     {
-        munit_assert_int(pending_add(F, i, (uint32_t)(1U << i), (DWORD)i, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U),
-                         ==,
-                         FTL_OK);
+        munit_assert_int(pending_add(F, i, (uint32_t)(1U << i), (DWORD)i, NULL, 1U, (DWORD)NAND_PBA_INVALID, (DWORD)NAND_PBA_INVALID, 0U, PENDING_OP_READ, 0U), ==, FTL_OK);
     }
     munit_assert_uint16(pending_count(F), ==, 5U);
 

@@ -142,11 +142,7 @@ static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wai
 
     if (delay_dwt_elapsed_us(w->start_cycles, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
-        LOGE(LOG_TAG_NAND "%s timeout op=%u polls=%u timeout_us=%u\r\n",
-             op_name,
-             state->request->operation,
-             w->polls,
-             state->timing->busy_timeout_us);
+        LOGE(LOG_TAG_NAND "%s timeout op=%u polls=%u timeout_us=%u\r\n", op_name, state->request->operation, w->polls, state->timing->busy_timeout_us);
         state->active = 0U;
         return 1U;
     }
@@ -166,15 +162,9 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
 {
     BYTE type = state->uops[state->uop_index].type;
 
-    if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) ||
-        (type == NAND_UOP_CHECK_FAIL))
+    if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) || (type == NAND_UOP_CHECK_FAIL))
     {
-        ENG_LOGD("uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
-                 (unsigned)state->uop_index,
-                 (unsigned)type,
-                 (unsigned)state->request->operation,
-                 (unsigned)state->completion->nand_status,
-                 (unsigned)state->debug_polls);
+        ENG_LOGD("uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n", (unsigned)state->uop_index, (unsigned)type, (unsigned)state->request->operation, (unsigned)state->completion->nand_status, (unsigned)state->debug_polls);
     }
 }
 
@@ -287,13 +277,9 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
             {
                 state->debug_polls++;
             }
-            if ((state->request->operation == OP_NORMAL_PROGRAM_PAGE) &&
-                ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
+            if ((state->request->operation == OP_NORMAL_PROGRAM_PAGE) && ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
             {
-                ENG_LOGD("program pending uop=%u status=0x%02X wait=%u\r\n",
-                         state->uop_index,
-                         state->completion->nand_status,
-                         state->debug_polls);
+                ENG_LOGD("program pending uop=%u status=0x%02X wait=%u\r\n", state->uop_index, state->completion->nand_status, state->debug_polls);
             }
             if (uop->type == NAND_UOP_WAIT_READY)
             {

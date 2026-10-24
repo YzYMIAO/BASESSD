@@ -61,10 +61,8 @@
 /* 页内批量 API 的几何前提：一个 pair（FTL_LBA_PER_PAIR 个 LBA）必须完整落在同一
  * L2P region 内（base 对齐 ⇒ base..base+7 同 region），否则批量读写会跨 region。
  * 这是编译期事实，不是运行期检查（C7：恒真的运行期断言不算守卫）。 */
-_Static_assert((L2P_ENTRIES_PER_REGION % FTL_LBA_PER_PAIR) == 0U,
-               "FTL_LBA_PER_PAIR 必须整除 L2P_ENTRIES_PER_REGION");
-_Static_assert((FTL_LBA_PER_PAIR & (FTL_LBA_PER_PAIR - 1U)) == 0U,
-               "FTL_LBA_PER_PAIR 必须是 2 的幂（掩码/页基址依赖）");
+_Static_assert((L2P_ENTRIES_PER_REGION % FTL_LBA_PER_PAIR) == 0U, "FTL_LBA_PER_PAIR 必须整除 L2P_ENTRIES_PER_REGION");
+_Static_assert((FTL_LBA_PER_PAIR & (FTL_LBA_PER_PAIR - 1U)) == 0U, "FTL_LBA_PER_PAIR 必须是 2 的幂（掩码/页基址依赖）");
 _Static_assert(FTL_LBA_PER_PAIR < 32U, "1U << FTL_LBA_PER_PAIR 会溢出 DWORD");
 
 /* 同一 region 连续加载失败多少次后降级为「全未映射的 CLEAN 行」（RISK-L2P-01）。
@@ -212,11 +210,7 @@ static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
     if (cache->thrashing != was_thrashing)
     {
         /* 观测口：miss= 为最近窗口 miss 率；hit/miss= 为开机累计。 */
-        LOGI(LOG_TAG_L2P "thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n",
-             (unsigned)cache->thrashing,
-             (unsigned)cache->miss_pct,
-             cache->hit_count,
-             cache->miss_count);
+        LOGI(LOG_TAG_L2P "thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n", (unsigned)cache->thrashing, (unsigned)cache->miss_pct, cache->hit_count, cache->miss_count);
     }
 }
 
@@ -307,8 +301,7 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 
     if ((!due) && (now_ms != 0U))
     {
-        due = (s_evict_fail_ms == 0U) ||
-              ((now_ms - s_evict_fail_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+        due = (s_evict_fail_ms == 0U) || ((now_ms - s_evict_fail_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
     if (!due)
@@ -347,14 +340,7 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
         }
     }
 
-    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%u clean=%u dirty=%u loading=%u flushing=%u suppressed=%lu\r\n",
-         region_id,
-         (unsigned)inv,
-         (unsigned)clean,
-         (unsigned)dirty,
-         (unsigned)loading,
-         (unsigned)flushing,
-         s_evict_fail_n);
+    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%u clean=%u dirty=%u loading=%u flushing=%u suppressed=%lu\r\n", region_id, (unsigned)inv, (unsigned)clean, (unsigned)dirty, (unsigned)loading, (unsigned)flushing, s_evict_fail_n);
 
     s_evict_fail_ms = now_ms;
     s_evict_fail_n  = 0U;
@@ -486,8 +472,7 @@ static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
 
     if ((!due) && (now_ms != 0U))
     {
-        due = (s_degrade_log_ms == 0U) ||
-              ((now_ms - s_degrade_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+        due = (s_degrade_log_ms == 0U) || ((now_ms - s_degrade_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
     if (!due)
@@ -496,10 +481,7 @@ static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
         return;
     }
 
-    LOGE(LOG_TAG_L2P "region %lu load failed %u times — degrade to unmapped (suppressed=%lu)\r\n",
-         region_id,
-         (unsigned)fail_count,
-         s_degrade_n);
+    LOGE(LOG_TAG_L2P "region %lu load failed %u times — degrade to unmapped (suppressed=%lu)\r\n", region_id, (unsigned)fail_count, s_degrade_n);
 
     s_degrade_log_ms = now_ms;
     s_degrade_n      = 0U;
@@ -583,9 +565,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
      * 已恢复的映射在行驱逐后消失（host 误报 IO_ERROR，GC 还可能漏搬有效 CW）。
      * 位图只用于 host 读的「未映射 ⇒ IO_ERROR」判定（RISK-BOOT-18）。 */
 
-    const DWORD primary = md_entry_find(owner->metadata_dir,
-                                        METADATA_TYPE_L2P_REGION,
-                                        local_region);
+    const DWORD primary = md_entry_find(owner->metadata_dir, METADATA_TYPE_L2P_REGION, local_region);
     const DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
 
     if ((primary == NAND_PBA_INVALID) && (backup == NAND_PBA_INVALID))
@@ -689,8 +669,7 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
     }
 
     /* 预取是 best-effort：不制造写回、不与 host 抢资源、不加剧 thrashing。 */
-    if (cache->thrashing || (cache->load_inflight >= L2P_PREFETCH_MAX_INFLIGHT) ||
-        (!ftl_fc_host_budget_ok()))
+    if (cache->thrashing || (cache->load_inflight >= L2P_PREFETCH_MAX_INFLIGHT) || (!ftl_fc_host_budget_ok()))
     {
         cache->prefetch_skipped++;
         return false;
@@ -891,8 +870,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
     const WORD  base_idx  = lba_to_entry(lba);
 
     l2p_cache_line_t *line = l2p_line_find(cache, region_id);
-    if ((line == NULL) || (line->state == L2P_CACHE_LOADING) ||
-        (line->state == L2P_CACHE_FLUSHING))
+    if ((line == NULL) || (line->state == L2P_CACHE_LOADING) || (line->state == L2P_CACHE_FLUSHING))
     {
         return FTL_AGAIN;
     }
@@ -1041,10 +1019,7 @@ static bool l2p_flush_resources_available(void)
         return false;
     }
 
-    return (stats.command_used < FC_COMMAND_POOL_DEPTH) &&
-           (stats.descriptor_used + CW_NUM <= FC_DESCRIPTOR_POOL_DEPTH) &&
-           (stats.buffer_used + CW_NUM <= FC_BUFFER_POOL_DEPTH) &&
-           (stats.sq_used < FC_SQ_DEPTH) && (stats.hsq_used < FC_HSQ_DEPTH);
+    return (stats.command_used < FC_COMMAND_POOL_DEPTH) && (stats.descriptor_used + CW_NUM <= FC_DESCRIPTOR_POOL_DEPTH) && (stats.buffer_used + CW_NUM <= FC_BUFFER_POOL_DEPTH) && (stats.sq_used < FC_SQ_DEPTH) && (stats.hsq_used < FC_HSQ_DEPTH);
 }
 
 /* --------------------------------------------------------------------
@@ -1116,11 +1091,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     /* 建链 + 把 entries 拷进 FC buffer（写的数据在 prepare 时就 memcpy 走了 ⇒
      * 提交后 line->entries 可自由改写，这正是"可读"而不"可写"的由来）。 */
     fc_command_t      *cmd          = NULL;
-    const ftl_status_e build_status = ftl_async_write_page(&cmd,
-                                                           region_addr[0],
-                                                           line->entries,
-                                                           L2P_REGION_SIZE,
-                                                           FTL_PAGE_CFG_META());
+    const ftl_status_e build_status = ftl_async_write_page(&cmd, region_addr[0], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
     if (build_status != FTL_OK)
     {
         /* 命令池空是瞬态背压（FTL_AGAIN）；只有地址/建链的硬失败才是 FTL_ERROR。
@@ -1154,10 +1125,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
     }
     else if (ftl_job_tick(&cache->job_log_ms))
     {
-        LOGI(LOG_TAG_L2P "job inflight load=%u flush=%u dirty=%u\r\n",
-             (unsigned)cache->load_inflight,
-             (unsigned)cache->flush_inflight,
-             (unsigned)l2p_dirty_count(cache));
+        LOGI(LOG_TAG_L2P "job inflight load=%u flush=%u dirty=%u\r\n", (unsigned)cache->load_inflight, (unsigned)cache->flush_inflight, (unsigned)l2p_dirty_count(cache));
     }
 
     for (WORD i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
@@ -1195,8 +1163,7 @@ bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim)
             continue;
         }
 
-        if ((line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_FLUSHING) ||
-            (line->state == L2P_CACHE_LOADING))
+        if ((line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_FLUSHING) || (line->state == L2P_CACHE_LOADING))
         {
             return false;
         }
@@ -1347,11 +1314,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         if ((!line->flush_fail) && (copy == 0U) && (line->flush_issued == 1U))
         {
             fc_command_t *cmd2 = NULL;
-            ftl_status_e  st   = ftl_async_write_page(&cmd2,
-                                                   line->flush_pba[1],
-                                                   line->entries,
-                                                   L2P_REGION_SIZE,
-                                                   FTL_PAGE_CFG_META());
+            ftl_status_e  st   = ftl_async_write_page(&cmd2, line->flush_pba[1], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
 
             if (st == FTL_OK)
             {

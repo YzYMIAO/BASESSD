@@ -27,17 +27,15 @@ typedef bool (*log_flush_sink_t)(DWORD timeout_ms);
  */
 DWORD log_write(log_level_e level, const char *message);
 /* 格式与实参类型由编译器按 printf 语义检查（GCC -Wformat）。 */
-__attribute__((format(printf, 2, 3)))
-DWORD
-            log_printf(log_level_e level, const char *format, ...);
-DWORD       log_vprintf(log_level_e level, const char *format, va_list args);
-void        log_set_level(log_level_e level);
-log_level_e log_get_level(void);
-void        log_set_sink(log_sink_t sink);
-bool        log_flush(DWORD timeout_ms);
-void        log_set_flush_sink(log_flush_sink_t sink);
-DWORD       log_get_truncated_count(void);
-DWORD       log_get_write_failure_count(void);
+__attribute__((format(printf, 2, 3))) DWORD log_printf(log_level_e level, const char *format, ...);
+DWORD                                       log_vprintf(log_level_e level, const char *format, va_list args);
+void                                        log_set_level(log_level_e level);
+log_level_e                                 log_get_level(void);
+void                                        log_set_sink(log_sink_t sink);
+bool                                        log_flush(DWORD timeout_ms);
+void                                        log_set_flush_sink(log_flush_sink_t sink);
+DWORD                                       log_get_truncated_count(void);
+DWORD                                       log_get_write_failure_count(void);
 
 /*
  * 企业固件中的业务代码使用这些宏。DEBUG 日志可在 release 构建中完全裁剪，

@@ -203,8 +203,7 @@ int **threeSum(int *nums, int numsSize, int *returnSize, int **returnColumnSizes
                     int new_capacity = capacity * 2; // 2倍扩容
 
                     // 扩容 result
-                    int **new_result = (int **)realloc(result,
-                                                       sizeof(int *) * new_capacity);
+                    int **new_result = (int **)realloc(result, sizeof(int *) * new_capacity);
 
                     if (new_result == NULL)
                     {
@@ -223,8 +222,7 @@ int **threeSum(int *nums, int numsSize, int *returnSize, int **returnColumnSizes
                     result = new_result;
 
                     // 扩容 returnColumnSizes
-                    int *new_col_sizes = (int *)realloc(*returnColumnSizes,
-                                                        sizeof(int) * new_capacity);
+                    int *new_col_sizes = (int *)realloc(*returnColumnSizes, sizeof(int) * new_capacity);
 
                     if (new_col_sizes == NULL)
                     {
@@ -407,8 +405,7 @@ int **fourSum(int *nums, int numsSize, int target, int *returnSize, int **return
         }
 
         // 剪枝：最大可能和
-        long long max_sum_i =
-            (long long)nums[i] + nums[numsSize - 1] + nums[numsSize - 2] + nums[numsSize - 3];
+        long long max_sum_i = (long long)nums[i] + nums[numsSize - 1] + nums[numsSize - 2] + nums[numsSize - 3];
 
         if (max_sum_i < target)
         {
@@ -432,8 +429,7 @@ int **fourSum(int *nums, int numsSize, int target, int *returnSize, int **return
             }
 
             // 剪枝：最大可能和
-            long long max_sum_j =
-                (long long)nums[i] + nums[j] + nums[numsSize - 1] + nums[numsSize - 2];
+            long long max_sum_j = (long long)nums[i] + nums[j] + nums[numsSize - 1] + nums[numsSize - 2];
 
             if (max_sum_j < target)
             {
@@ -462,8 +458,7 @@ int **fourSum(int *nums, int numsSize, int target, int *returnSize, int **return
                     {
                         int new_capacity = capacity * 2;
 
-                        int **new_result = (int **)realloc(result,
-                                                           sizeof(int *) * new_capacity);
+                        int **new_result = (int **)realloc(result, sizeof(int *) * new_capacity);
 
                         if (new_result == NULL)
                         {
@@ -481,8 +476,7 @@ int **fourSum(int *nums, int numsSize, int target, int *returnSize, int **return
 
                         result = new_result;
 
-                        int *new_col_sizes = (int *)realloc(*returnColumnSizes,
-                                                            sizeof(int) * new_capacity);
+                        int *new_col_sizes = (int *)realloc(*returnColumnSizes, sizeof(int) * new_capacity);
 
                         if (new_col_sizes == NULL)
                         {

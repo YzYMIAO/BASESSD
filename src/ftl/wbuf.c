@@ -108,9 +108,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     /* page0 异步写屏障：page>0 的写必须等同一 plane 的 page0 成功完成。 */
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) &&
-            (pba_to_page(pba[p]) > 0U) &&
-            (alc_super_open_get_pba_state(h->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
+        if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_get_pba_state(h->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
             alc_super_open_rewind_pair(h->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
@@ -144,12 +142,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(ftl_lba_page(h->base));
     fc_command_t         *cmd = NULL;
 
-    ftl_status_e ret = ftl_async_write_pair_cmd(&cmd,
-                                                pba,
-                                                h->data,
-                                                write_bitmap,
-                                                ftl_plane_write_op(write_planes),
-                                                cfg);
+    ftl_status_e ret = ftl_async_write_pair_cmd(&cmd, pba, h->data, write_bitmap, ftl_plane_write_op(write_planes), cfg);
 
     if (ret != FTL_OK)
     {

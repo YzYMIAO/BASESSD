@@ -599,9 +599,8 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
      * 当数据坏块处理（会错误弹用户 Spare、并漏掉 rebuild 标志）。 */
     const bool has_md_dir     = (alloc->md_dir != NULL);
     const bool is_l2p_live    = has_md_dir && (alloc->md_dir->l2p_live[gblock] != 0U);
-    const bool is_current_log = has_md_dir && alloc->md_dir->cur_block_valid &&
-                                (alloc->md_dir->cur_metadata_block == gblock);
-    const bool borrowed_log = is_l2p_live || is_current_log;
+    const bool is_current_log = has_md_dir && alloc->md_dir->cur_block_valid && (alloc->md_dir->cur_metadata_block == gblock);
+    const bool borrowed_log   = is_l2p_live || is_current_log;
 
     if ((block < FTL_METADATA_AREA_END) || borrowed_log)
     {
@@ -613,9 +612,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
         /* Journal / L2P 日志块（固定或借用）丢失无法在当前上电周期内恢复其映射 ⇒
          * 下次开机 full metadata rebuild（本仓自拟的 BBT 持久标志）。Anchor/CP/BBT
          * 不需要：候选池重算 + 下一次提交即可自愈。 */
-        if (borrowed_log ||
-            ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT))) ||
-            ftl_is_l2p_log_block(block))
+        if (borrowed_log || ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT))) || ftl_is_l2p_log_block(block))
         {
             alloc->bbt.rebuild_required = true;
             LOGE(LOG_TAG_BBT "metadata log block %u lost — rebuild required\r\n", (unsigned)block);
@@ -628,12 +625,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
             /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
             if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)
             {
-                LOGW(LOG_TAG_BLK "reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n",
-                     (unsigned)plane,
-                     (unsigned)alc_spare_get_count(alloc, plane),
-                     (unsigned)alc_op_get_count(alloc, plane),
-                     (unsigned)alloc->free_count,
-                     s_reserve_low_logged);
+                LOGW(LOG_TAG_BLK "reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n", (unsigned)plane, (unsigned)alc_spare_get_count(alloc, plane), (unsigned)alc_op_get_count(alloc, plane), (unsigned)alloc->free_count, s_reserve_low_logged);
             }
         }
     }
@@ -938,12 +930,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         }
         else if (ftl_job_heartbeat(&alloc->bbt.handle.log_ms, &alloc->bbt.handle.start_ms))
         {
-            LOGI(LOG_TAG_BBT "job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n",
-                 (unsigned)alloc->bbt.handle.phase,
-                 (unsigned)alloc->bbt.handle.waiting,
-                 alloc->bbt.sequence,
-                 (unsigned)alloc->bbt.write_idx,
-                 ftl_job_age_ms(&alloc->bbt.handle.start_ms));
+            LOGI(LOG_TAG_BBT "job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n", (unsigned)alloc->bbt.handle.phase, (unsigned)alloc->bbt.handle.waiting, alloc->bbt.sequence, (unsigned)alloc->bbt.write_idx, ftl_job_age_ms(&alloc->bbt.handle.start_ms));
         }
 
         if (alloc->bbt.handle.waiting != 0U)

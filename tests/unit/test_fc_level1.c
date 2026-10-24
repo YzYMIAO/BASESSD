@@ -115,8 +115,7 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
 
     /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
-    test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%X）时仍放行——数据走 param 内联段",
-                       (unsigned)FC_DESCRIPTOR_ID_INVALID);
+    test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%X）时仍放行——数据走 param 内联段", (unsigned)FC_DESCRIPTOR_ID_INVALID);
 
     return MUNIT_OK;
 }
@@ -624,14 +623,7 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
     munit_assert_uint16(info.tccs_min, ==, 100U);
 
     /* 证据（--log-visible info）：把解出的关键字段打出来。 */
-    test_trace_summary("ONFI param decode: model=%s page=%lu+%u block=%lup blocks=%lu ecc=%ubit timingmodes=0x%04X",
-                       info.model,
-                       (unsigned long)info.data_bytes_per_page,
-                       (unsigned int)info.spare_bytes_per_page,
-                       (unsigned long)info.pages_per_block,
-                       (unsigned long)info.blocks_per_unit,
-                       (unsigned int)info.ecc_bits,
-                       (unsigned int)info.timing_mode_support);
+    test_trace_summary("ONFI param decode: model=%s page=%lu+%u block=%lup blocks=%lu ecc=%ubit timingmodes=0x%04X", info.model, (unsigned long)info.data_bytes_per_page, (unsigned int)info.spare_bytes_per_page, (unsigned long)info.pages_per_block, (unsigned long)info.blocks_per_unit, (unsigned int)info.ecc_bits, (unsigned int)info.timing_mode_support);
 
     /* 破坏签名 → 返回 0，但字段仍被填满（解码函数如实报「签名不符」）。 */
     page[NAND_ONFI_PARAM_OFF_SIGNATURE] = 0x00U;

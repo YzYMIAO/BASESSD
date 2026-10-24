@@ -247,8 +247,7 @@ static WORD alc_free_find_block(const alc_t *alloc, BYTE plane, alc_super_alloc_
             continue;
         }
 
-        if ((best == FTL_GBLOCK_INVALID) ||
-            (high_wear ? (blk->erase_count > key) : (blk->erase_count < key)))
+        if ((best == FTL_GBLOCK_INVALID) || (high_wear ? (blk->erase_count > key) : (blk->erase_count < key)))
         {
             key  = blk->erase_count;
             best = gblock;
@@ -535,14 +534,12 @@ alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temp
 
     const BYTE plane = pba_to_plane(pba);
 
-    if ((!super_block_has_plane(sb, plane)) ||
-        (sb->plane_blocks[plane] != pba_to_block(pba)))
+    if ((!super_block_has_plane(sb, plane)) || (sb->plane_blocks[plane] != pba_to_block(pba)))
     {
         return ALC_SUPER_PBA_NOT_OPEN; /* 旧 SB 的迟到命令 */
     }
 
-    return ((sb->page0_programmed & (BYTE)(1U << plane)) != 0U) ? ALC_SUPER_PBA_OPEN_PAGE0_DONE
-                                                                : ALC_SUPER_PBA_OPEN_PAGE0_PENDING;
+    return ((sb->page0_programmed & (BYTE)(1U << plane)) != 0U) ? ALC_SUPER_PBA_OPEN_PAGE0_DONE : ALC_SUPER_PBA_OPEN_PAGE0_PENDING;
 }
 
 void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba)
@@ -712,9 +709,7 @@ bool alc_super_closed_find(const alc_t *alloc, const super_block_t *sb, WORD *ou
 }
 
 /* 实现要点：重建按单个物理块建条目，另一 plane 记哨兵；next_page 记满。 */
-WORD alc_super_closed_add(alc_t     *alloc,
-                          const WORD plane_blocks[PLANE_NUM],
-                          BYTE       temperature)
+WORD alc_super_closed_add(alc_t *alloc, const WORD plane_blocks[PLANE_NUM], BYTE temperature)
 {
     super_block_t sb;
 
@@ -1019,15 +1014,7 @@ void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
             continue;
         }
 
-        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%u bk=%u pg=%u cw=%u %s\r\n",
-             t->seq,
-             t->lba,
-             t->pba,
-             (unsigned)t->plane,
-             (unsigned)t->block,
-             (unsigned)t->page,
-             (unsigned)t->cw,
-             (t->kind == 0U) ? "write-ok" : ((t->kind == 1U) ? "program-fail" : "gc-write"));
+        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%u bk=%u pg=%u cw=%u %s\r\n", t->seq, t->lba, t->pba, (unsigned)t->plane, (unsigned)t->block, (unsigned)t->page, (unsigned)t->cw, (t->kind == 0U) ? "write-ok" : ((t->kind == 1U) ? "program-fail" : "gc-write"));
         shown++;
     }
 }

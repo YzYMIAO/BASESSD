@@ -178,9 +178,7 @@ static void qc_expand_links(void)
  *         入参前置违反（qc/data_in/data_out 为空）一律 ASSERT（v21，与同文件
  *         fc_ldpc_qc_decode 的写法一致）；g_initialized 是运行时状态，保留静默返回。
  * -------------------------------------------------------------------- */
-void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
-                       const BYTE         *data_in,
-                       BYTE               *data_out)
+void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out)
 {
     BYTE  parity[8];
     DWORD bit_pos, i;

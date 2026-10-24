@@ -131,10 +131,7 @@ fc_status_e fc_command_validate(const fc_command_t *command)
     ASSERT(command != NULL);
     ASSERT(command->config.operation < OP_COUNT);
     /* 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据） */
-    ASSERT((command->config.operation == OP_SET_FEATURES) ||
-           (command->config.operation == OP_GET_FEATURES) ||
-           !nand_operation_has_data(command->config.operation) ||
-           (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
+    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || !nand_operation_has_data(command->config.operation) || (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
     /* NDEBUG 下断言整段裁空 → command 变未用形参，吞掉（同 fc_submit 的 (void)command_id;） */
     (void)command;
 

@@ -399,10 +399,7 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
  *             位图外的 CW 若仍在链上（调用者与链不同源）填 0xFF，绝不把镜像里的
  *             无效 CW 数据带进新页。
  * -------------------------------------------------------------------- */
-static ftl_status_e ftl_cmd_write_data_cw_core(fc_command_t *cmd,
-                                               const BYTE   *page_buf,
-                                               DWORD         cw_bitmap,
-                                               bool          pair_major)
+static ftl_status_e ftl_cmd_write_data_cw_core(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap, bool pair_major)
 {
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
@@ -593,8 +590,7 @@ static fc_command_t *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_t 
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     /* 页 LBA → 扇区 LBA。FTL_LBA_UNKNOWN（FTL_PAGE_CFG_DATA_ANY）⇒ FC_META_UNKNOWN，
      * 让 FC 侧跳过「页内 META 与本命令 LBA 比对」那一项。 */
-    cmd->meta               = (cfg->lba == FTL_LBA_UNKNOWN) ? FC_META_UNKNOWN
-                                                            : (cfg->lba << CW_WIDTH);
+    cmd->meta               = (cfg->lba == FTL_LBA_UNKNOWN) ? FC_META_UNKNOWN : (cfg->lba << CW_WIDTH);
 
     return cmd;
 }
@@ -917,11 +913,7 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
  * 数据填装用 ftl_cmd_write_data_cw：链上两个 plane 的 desc 的 config.cw 都是 0..3，
  * 同一页镜像会按 CW 分别填进两个 plane（无需 2× 源缓冲）。
  */
-ftl_status_e ftl_async_write_page_mirror(fc_command_t        **out_cmd,
-                                         DWORD                 pba,
-                                         const void           *data,
-                                         DWORD                 length,
-                                         const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
 {
     ASSERT(pba_is_valid(pba));
 
@@ -1098,12 +1090,7 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
  *             支持稀疏位图（单 plane 普通写）；cache op 必须覆盖全部 plane。
  *             多 plane 命令的 desc 链必须覆盖每个 plane；各 plane 必须同 ch/ce/lun。
  * -------------------------------------------------------------------- */
-ftl_status_e ftl_async_write_pair_cmd(fc_command_t        **out_cmd,
-                                      const DWORD           pba[PLANE_NUM],
-                                      const BYTE           *pair_buf,
-                                      DWORD                 cw_bitmap,
-                                      BYTE                  operation,
-                                      const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd = ftl_cmd_prepare_alloc(operation, cfg);
 
@@ -1113,9 +1100,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t        **out_cmd,
     }
 
     const BYTE nplanes  = ftl_cw_bitmap_plane_count(cw_bitmap);
-    const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) ||
-                          (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) ||
-                          (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
+    const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
 
     ASSERT((!cache_op) || (nplanes == PLANE_NUM));
     (void)cache_op; /* release 下 ASSERT 裁空 */
@@ -1139,9 +1124,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t        **out_cmd,
         }
         else
         {
-            ASSERT((pba_to_ch(pba[p]) == pba_to_ch(first_pba)) &&
-                   (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) &&
-                   (pba_to_lun(pba[p]) == pba_to_lun(first_pba)));
+            ASSERT((pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba)));
         }
     }
 

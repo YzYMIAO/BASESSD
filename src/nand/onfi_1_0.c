@@ -43,134 +43,129 @@
 /* ── 读页（标准，含 DATA_OUT）────────────────────────────
  * 70h 轮询空闲 → 00h+C1C2R1R2R3 → 30h → tR → DATA_OUT 整页
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_normal_read_page_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         0U},
-        {            NAND_UOP_ROW_1,                         0U},
-        {            NAND_UOP_ROW_2,                         0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                         0U},
-        {         NAND_UOP_DATA_OUT,                         0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {       NAND_UOP_CHECK_FAIL,                         0U},
-        {              NAND_UOP_END,                         0U},
+static const nand_uop_t g_nand_normal_read_page_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         0U},
+    {            NAND_UOP_ROW_1,                         0U},
+    {            NAND_UOP_ROW_2,                         0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                         0U},
+    {         NAND_UOP_DATA_OUT,                         0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {       NAND_UOP_CHECK_FAIL,                         0U},
+    {              NAND_UOP_END,                         0U},
 };
 
 /* ── 读页（不含 DATA_OUT）────────────────────────────
  * 同 read_page，但 30h+tR 后数据留在页缓冲，不输出到总线；
  * 后续由 RANDOM_DATA_READ(05h-E0h) 逐 CW 读取。 */
-static const nand_uop_t g_nand_normal_read_page_without_data_out_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         0U},
-        {            NAND_UOP_ROW_1,                         0U},
-        {            NAND_UOP_ROW_2,                         0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                         0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {       NAND_UOP_CHECK_FAIL,                         0U},
-        {              NAND_UOP_END,                         0U},
+static const nand_uop_t g_nand_normal_read_page_without_data_out_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         0U},
+    {            NAND_UOP_ROW_1,                         0U},
+    {            NAND_UOP_ROW_2,                         0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                         0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {       NAND_UOP_CHECK_FAIL,                         0U},
+    {              NAND_UOP_END,                         0U},
 };
 
 /* CACHE_START_SEQ：单 plane Cache 读的“启动 + 第一页输出”
  * ── 00h+地址 → 30h → tR → 31h（输出本页、预取下一页）→ Dout ──
  * 后续页用 31h（无地址），末页用 3Fh。 */
-static const nand_uop_t g_nand_cache_start_seq_uops[] =
-    {
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {          NAND_UOP_COMMAND,     NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                           0U},
-        {         NAND_UOP_COLUMN_1,                           0U},
-        {            NAND_UOP_ROW_0,                           0U},
-        {            NAND_UOP_ROW_1,                           0U},
-        {            NAND_UOP_ROW_2,                           0U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                           0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CACHE_SEQ}, /* 31h */
-        {       NAND_UOP_WAIT_READY,                           0U},
-        {         NAND_UOP_DATA_OUT,                           0U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {       NAND_UOP_CHECK_FAIL,                           0U},
-        {              NAND_UOP_END,                           0U},
+static const nand_uop_t g_nand_cache_start_seq_uops[] = {
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {          NAND_UOP_COMMAND,     NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                           0U},
+    {         NAND_UOP_COLUMN_1,                           0U},
+    {            NAND_UOP_ROW_0,                           0U},
+    {            NAND_UOP_ROW_1,                           0U},
+    {            NAND_UOP_ROW_2,                           0U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                           0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CACHE_SEQ}, /* 31h */
+    {       NAND_UOP_WAIT_READY,                           0U},
+    {         NAND_UOP_DATA_OUT,                           0U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {       NAND_UOP_CHECK_FAIL,                           0U},
+    {              NAND_UOP_END,                           0U},
 };
 
 /* ── 编程页（标准）────────────────────────────
  * 70h 轮询空闲 → 80h+C1C2R1R2R3 → DATA_IN 整页 → 10h → tWB → tPROG
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_normal_program_page_uops[] =
-    {
-        {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                            0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                            0U},
-        {         NAND_UOP_COLUMN_1,                            0U},
-        {            NAND_UOP_ROW_0,                            0U},
-        {            NAND_UOP_ROW_1,                            0U},
-        {            NAND_UOP_ROW_2,                            0U},
-        {          NAND_UOP_DATA_IN,                            0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,              NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                            0U},
-        {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                            0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
-        {       NAND_UOP_CHECK_FAIL,                            0U},
-        {              NAND_UOP_END,                            0U},
+static const nand_uop_t g_nand_normal_program_page_uops[] = {
+    {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                            0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                            0U},
+    {         NAND_UOP_COLUMN_1,                            0U},
+    {            NAND_UOP_ROW_0,                            0U},
+    {            NAND_UOP_ROW_1,                            0U},
+    {            NAND_UOP_ROW_2,                            0U},
+    {          NAND_UOP_DATA_IN,                            0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,              NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                            0U},
+    {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                            0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
+    {       NAND_UOP_CHECK_FAIL,                            0U},
+    {              NAND_UOP_END,                            0U},
 };
 
 /* ── 块擦除 ────────────────────────────
  * 70h 轮询空闲 → 60h+R1R2R3 → D0h → tWB → tBERS
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_erase_block_uops[] =
-    {
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
-        {            NAND_UOP_ROW_0,                           0U},
-        {            NAND_UOP_ROW_1,                           0U},
-        {            NAND_UOP_ROW_2,                           0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                           0U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {       NAND_UOP_CHECK_FAIL,                           0U},
-        {              NAND_UOP_END,                           0U},
+static const nand_uop_t g_nand_erase_block_uops[] = {
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
+    {            NAND_UOP_ROW_0,                           0U},
+    {            NAND_UOP_ROW_1,                           0U},
+    {            NAND_UOP_ROW_2,                           0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                           0U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {       NAND_UOP_CHECK_FAIL,                           0U},
+    {              NAND_UOP_END,                           0U},
 };
 
 /* ── 复位 ────────────────────────────
@@ -383,178 +378,173 @@ static const nand_uop_t g_nand_cache_read_random_uops[] = {
 };
 /* ── 器件扩展：Two-Plane Read Cache（MT29F4G08 datasheet p.62-63）──
  * 31h/3Fh 之后必须用 06h-E0h 分别选 P0/P1 的 cache register 输出。 */
-static const nand_uop_t g_nand_cache_start_seq_mp_uops[] =
-    {
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_COMMAND,          NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND,        NAND_CMD_READ_PAGE_CACHE_SEQ},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {       NAND_UOP_CHECK_FAIL,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+static const nand_uop_t g_nand_cache_start_seq_mp_uops[] = {
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,          NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND,        NAND_CMD_READ_PAGE_CACHE_SEQ},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {       NAND_UOP_CHECK_FAIL,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
-static const nand_uop_t g_nand_cache_seq_mp_uops[] =
-    {
-        {          NAND_UOP_COMMAND,        NAND_CMD_READ_PAGE_CACHE_SEQ},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {       NAND_UOP_CHECK_FAIL,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+static const nand_uop_t g_nand_cache_seq_mp_uops[] = {
+    {          NAND_UOP_COMMAND,        NAND_CMD_READ_PAGE_CACHE_SEQ},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {       NAND_UOP_CHECK_FAIL,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
-static const nand_uop_t g_nand_cache_last_mp_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_PAGE_CACHE_LAST},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
-        {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {       NAND_UOP_CHECK_FAIL,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+static const nand_uop_t g_nand_cache_last_mp_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_PAGE_CACHE_LAST},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END},
+    {         NAND_UOP_DATA_OUT,                           PAGE_SIZE},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {       NAND_UOP_CHECK_FAIL,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
 /* ── 器件扩展：Two-Plane Program Page Cache（Figure 74 中间页）── */
-static const nand_uop_t g_nand_two_plane_program_cache_uops[] =
-    {
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_DATA_IN,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
-        {         NAND_UOP_DELAY_US,                                  1U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_DATA_IN,                           PAGE_SIZE},
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_CACHE},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+static const nand_uop_t g_nand_two_plane_program_cache_uops[] = {
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_DATA_IN,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
+    {         NAND_UOP_DELAY_US,                                  1U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_DATA_IN,                           PAGE_SIZE},
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_CACHE},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
 /* ── 器件扩展：Two-Plane Program Page Cache 末页（Figure 74，10h 收尾）──
  * 15h 只把 cache 交给阵列；上一页的编程结果在 FAILC。末页开始前先查 FAILC，
  * 结束后同时查 FAIL/FAILC。普通 op31 只查 FAIL，不能用于 cache 批次末页。 */
-static const nand_uop_t g_nand_two_plane_program_cache_end_uops[] =
-    {
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_DATA_IN,                                  0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
-        {         NAND_UOP_DELAY_US,                                  1U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_DATA_IN,                           PAGE_SIZE},
-        {          NAND_UOP_COMMAND,       NAND_CMD_PROGRAM_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+static const nand_uop_t g_nand_two_plane_program_cache_end_uops[] = {
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_DATA_IN,                                  0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
+    {         NAND_UOP_DELAY_US,                                  1U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_DATA_IN,                           PAGE_SIZE},
+    {          NAND_UOP_COMMAND,       NAND_CMD_PROGRAM_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    { NAND_UOP_CHECK_FAIL_CACHE,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
 /* ── Cache 编程（80h+地址+数据+15h）：页缓冲编程，配合 Cache 管线 ── */
@@ -731,186 +721,181 @@ static const nand_uop_t g_nand_otp_lock_uops[] = {
  * 00h+地址(P0) → 00h+地址(P1) → 30h → tR
  * → 06h+列地址+E0h 读 P0 → 06h+列地址(plane1)+E0h 读 P1
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_multi_plane_read_with_data_out_uops[] =
-    {
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+static const nand_uop_t g_nand_multi_plane_read_with_data_out_uops[] = {
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
  /* 第一组: 00h + 地址周期 (Plane 0) */
-        {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U},
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U},
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
  /* 第二组: 00h + 地址周期 (Plane 1) */
-        {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U},
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,            NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U},
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
  /* 30h + tR + 双页数据输出 */
-        {          NAND_UOP_COMMAND,          NAND_CMD_READ_PAGE_CONFIRM}, /* 30h */
-        {       NAND_UOP_WAIT_READY,                                  0U}, /* tR */
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE}, /* 06h: 选择 Plane 0 */
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U}, /* row[0] = plane 0 */
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END}, /* E0h */
-        {         NAND_UOP_DATA_OUT,                                  0U}, /* Plane 0 data: page_buffer[0..2111] */
-        {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE}, /* 06h: 选择 Plane 1 */
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U}, /* row[1] = plane 1 */
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END}, /* E0h */
-        {         NAND_UOP_DATA_OUT,                           PAGE_SIZE}, /* Plane 1 data: page_buffer[2112..4223] */
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {       NAND_UOP_CHECK_FAIL,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+    {          NAND_UOP_COMMAND,          NAND_CMD_READ_PAGE_CONFIRM}, /* 30h */
+    {       NAND_UOP_WAIT_READY,                                  0U}, /* tR */
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE}, /* 06h: 选择 Plane 0 */
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U}, /* row[0] = plane 0 */
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END}, /* E0h */
+    {         NAND_UOP_DATA_OUT,                                  0U}, /* Plane 0 data: page_buffer[0..2111] */
+    {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_TWO_PLANE}, /* 06h: 选择 Plane 1 */
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U}, /* row[1] = plane 1 */
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_RANDOM_DATA_READ_END}, /* E0h */
+    {         NAND_UOP_DATA_OUT,                           PAGE_SIZE}, /* Plane 1 data: page_buffer[2112..4223] */
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {       NAND_UOP_CHECK_FAIL,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
 /* ── 多 plane 读页 LOAD（ISSUE 段）────────────────────
  * 与 g_nand_multi_plane_read_without_data_out_uops 的前半段逐条相同：
  * 两组 00h+地址 + 30h + tWB，**不含 WAIT_READY(tR)**，发完立即返回。
  * 由 OP_READ_PAGE_WAIT 收尾；数据留页缓冲，逐 CW 用 06h 取回。 */
-static const nand_uop_t g_nand_multi_plane_read_load_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+static const nand_uop_t g_nand_multi_plane_read_load_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
  /* 第一组: 00h + 地址周期 (Plane 0) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         0U},
-        {            NAND_UOP_ROW_1,                         0U},
-        {            NAND_UOP_ROW_2,                         0U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         0U},
+    {            NAND_UOP_ROW_1,                         0U},
+    {            NAND_UOP_ROW_2,                         0U},
  /* 第二组: 00h + 地址周期 (Plane 1) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         1U},
-        {            NAND_UOP_ROW_1,                         1U},
-        {            NAND_UOP_ROW_2,                         1U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         1U},
+    {            NAND_UOP_ROW_1,                         1U},
+    {            NAND_UOP_ROW_2,                         1U},
  /* 30h + tWB，LUN 进入 tR */
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
-        {              NAND_UOP_END,                         0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
+    {              NAND_UOP_END,                         0U},
 };
 
 /* ── 多 plane 读（不含 DATA_OUT）────────────────────
  * 00h+地址(P0/P1) → 30h → tR，数据留页缓冲，后续由随机读逐 CW 取回。 */
-static const nand_uop_t g_nand_multi_plane_read_without_data_out_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+static const nand_uop_t g_nand_multi_plane_read_without_data_out_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
  /* 第一组: 00h + 地址周期 (Plane 0) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         0U},
-        {            NAND_UOP_ROW_1,                         0U},
-        {            NAND_UOP_ROW_2,                         0U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         0U},
+    {            NAND_UOP_ROW_1,                         0U},
+    {            NAND_UOP_ROW_2,                         0U},
  /* 第二组: 00h + 地址周期 (Plane 1) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         1U},
-        {            NAND_UOP_ROW_1,                         1U},
-        {            NAND_UOP_ROW_2,                         1U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         1U},
+    {            NAND_UOP_ROW_1,                         1U},
+    {            NAND_UOP_ROW_2,                         1U},
  /* 30h + tR，无数据输出（数据留在页缓冲中） */
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                         0U},
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {       NAND_UOP_CHECK_FAIL,                         0U},
-        {              NAND_UOP_END,                         0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                         0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {       NAND_UOP_CHECK_FAIL,                         0U},
+    {              NAND_UOP_END,                         0U},
 };
 
 /* ── 多 plane 编程 ─────────────────────────
  * 80h+地址+Din(P0) → 11h 切换 → 80h+地址(P1)+Din(P1)
  * → 10h → tWB → tPROG → 70h 轮询 + CHECK_FAIL。
  * 双 plane 数据在 page_buffer 拼接（P0@[0..2111]、P1@[2112..4223]）。 */
-static const nand_uop_t g_nand_multi_plane_program_uops[] =
-    {
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+static const nand_uop_t g_nand_multi_plane_program_uops[] = {
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
  /* ① 80h + 地址 + Din (Plane 0) */
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  0U}, /* row[0]——plane 0 */
-        {            NAND_UOP_ROW_1,                                  0U},
-        {            NAND_UOP_ROW_2,                                  0U},
-        {          NAND_UOP_DATA_IN,                                  0U}, /* Plane 0 全页: buffer[0..2111] */
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  0U}, /* row[0]——plane 0 */
+    {            NAND_UOP_ROW_1,                                  0U},
+    {            NAND_UOP_ROW_2,                                  0U},
+    {          NAND_UOP_DATA_IN,                                  0U}, /* Plane 0 全页: buffer[0..2111] */
   /* ③ 11h 切换 plane + 地址 + Din (Plane 1) */
-        {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
-        {         NAND_UOP_DELAY_US,                                  1U}, /* tADL: 11h 切换 plane */
-        {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP}, /* 80h: Plane 1 地址周期 */
-        {         NAND_UOP_COLUMN_0,                                  0U},
-        {         NAND_UOP_COLUMN_1,                                  0U},
-        {            NAND_UOP_ROW_0,                                  1U}, /* row[1]——plane 1 */
-        {            NAND_UOP_ROW_1,                                  1U},
-        {            NAND_UOP_ROW_2,                                  1U},
-        {          NAND_UOP_DATA_IN,                           PAGE_SIZE}, /* Plane 1 全页: buffer[2112..4223] */
+    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
+    {         NAND_UOP_DELAY_US,                                  1U}, /* tADL: 11h 切换 plane */
+    {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP}, /* 80h: Plane 1 地址周期 */
+    {         NAND_UOP_COLUMN_0,                                  0U},
+    {         NAND_UOP_COLUMN_1,                                  0U},
+    {            NAND_UOP_ROW_0,                                  1U}, /* row[1]——plane 1 */
+    {            NAND_UOP_ROW_1,                                  1U},
+    {            NAND_UOP_ROW_2,                                  1U},
+    {          NAND_UOP_DATA_IN,                           PAGE_SIZE}, /* Plane 1 全页: buffer[2112..4223] */
   /* ⑥ 10h 确认 + tPROG */
-        {          NAND_UOP_COMMAND,       NAND_CMD_PROGRAM_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                                  0U},
-        {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
-        {       NAND_UOP_CHECK_FAIL,                                  0U},
-        {              NAND_UOP_END,                                  0U},
+    {          NAND_UOP_COMMAND,       NAND_CMD_PROGRAM_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                                  0U},
+    {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                                  3U},
+    {       NAND_UOP_CHECK_FAIL,                                  0U},
+    {              NAND_UOP_END,                                  0U},
 };
 
 /* ── 多 plane 擦除 ─────────────────────────
  * 60h+行地址(P0) → 60h+行地址(P1) → D0h → tWB → tBERS
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_multi_plane_erase_uops[] =
-    {
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+static const nand_uop_t g_nand_multi_plane_erase_uops[] = {
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
  /* ① 60h + 行地址 (Plane 0，无列地址) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
-        {            NAND_UOP_ROW_0,                           0U}, /* row[0]——plane 0 */
-        {            NAND_UOP_ROW_1,                           0U},
-        {            NAND_UOP_ROW_2,                           0U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
+    {            NAND_UOP_ROW_0,                           0U}, /* row[0]——plane 0 */
+    {            NAND_UOP_ROW_1,                           0U},
+    {            NAND_UOP_ROW_2,                           0U},
  /* ③ 第二次 60h + 行地址 (Plane 1) */
-        {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
-        {            NAND_UOP_ROW_0,                           1U}, /* row[1]——plane 1 */
-        {            NAND_UOP_ROW_1,                           1U},
-        {            NAND_UOP_ROW_2,                           1U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
+    {            NAND_UOP_ROW_0,                           1U}, /* row[1]——plane 1 */
+    {            NAND_UOP_ROW_1,                           1U},
+    {            NAND_UOP_ROW_2,                           1U},
  /* ⑤ D0h 确认 + tBERS */
-        {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
-        {       NAND_UOP_WAIT_READY,                           0U},
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {       NAND_UOP_CHECK_FAIL,                           0U},
-        {              NAND_UOP_END,                           0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
+    {       NAND_UOP_WAIT_READY,                           0U},
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {       NAND_UOP_CHECK_FAIL,                           0U},
+    {              NAND_UOP_END,                           0U},
 };
 
 /* ── Phase V: ISSUE/WAIT/FETCH 拆分 uop 序列 ──
@@ -920,101 +905,95 @@ static const nand_uop_t g_nand_multi_plane_erase_uops[] =
 /* ── 读页 LOAD（ISSUE 段）────────────────────
  * 70h 轮询空闲 → 00h+地址 → 30h → tWB → END。
  * 不含 WAIT_READY(tR)——LUN 进入 tR 期，由 FETCH 接续。 */
-static const nand_uop_t g_nand_read_page_load_uops[] =
-    {
-        {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                         0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                         0U},
-        {         NAND_UOP_COLUMN_1,                         0U},
-        {            NAND_UOP_ROW_0,                         0U},
-        {            NAND_UOP_ROW_1,                         0U},
-        {            NAND_UOP_ROW_2,                         0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
-        {              NAND_UOP_END,                         0U}, /* ← LUN 进入 tR */
+static const nand_uop_t g_nand_read_page_load_uops[] = {
+    {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                         0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                         3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_READ_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                         0U},
+    {         NAND_UOP_COLUMN_1,                         0U},
+    {            NAND_UOP_ROW_0,                         0U},
+    {            NAND_UOP_ROW_1,                         0U},
+    {            NAND_UOP_ROW_2,                         0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,           NAND_TIME_TWB_US},
+    {              NAND_UOP_END,                         0U}, /* ← LUN 进入 tR */
 };
 
 /* ── 读页 WAIT（WAIT 段）────────────────────
  * WAIT_READY(tR) → 70h 轮询 + CHECK_FAIL；无 DATA_OUT。
  * LOAD / MULTI_PLANE_LOAD 的共同完成段。完成后数据仍在页缓冲，
  * 由 nand_dispatch 的 CW 链逐 CW 用 05h/06h 取回。 */
-static const nand_uop_t g_nand_read_page_wait_uops[] =
-    {
-        {       NAND_UOP_WAIT_READY,                   0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                   0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
-        {       NAND_UOP_CHECK_FAIL,                   0U},
-        {              NAND_UOP_END,                   0U},
+static const nand_uop_t g_nand_read_page_wait_uops[] = {
+    {       NAND_UOP_WAIT_READY,                   0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                   0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
+    {       NAND_UOP_CHECK_FAIL,                   0U},
+    {              NAND_UOP_END,                   0U},
 };
 
 /* ── 编程页 ISSUE（ISSUE 段）───────────────────
  * 70h 轮询空闲 → 80h+地址 → DATA_IN 整页 → 10h → tWB → END。
  * 不含 WAIT_READY(tPROG)——LUN 进入 tPROG 期，由 WAIT 接续。 */
-static const nand_uop_t g_nand_program_page_issue_uops[] =
-    {
-        {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                            0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_PROGRAM_PAGE_SETUP},
-        {         NAND_UOP_COLUMN_0,                            0U},
-        {         NAND_UOP_COLUMN_1,                            0U},
-        {            NAND_UOP_ROW_0,                            0U},
-        {            NAND_UOP_ROW_1,                            0U},
-        {            NAND_UOP_ROW_2,                            0U},
-        {          NAND_UOP_DATA_IN,                            0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},
-        {         NAND_UOP_DELAY_US,              NAND_TIME_TWB_US},
-        {              NAND_UOP_END,                            0U}, /* ← LUN 进入 tPROG */
+static const nand_uop_t g_nand_program_page_issue_uops[] = {
+    {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                            0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                            3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_PROGRAM_PAGE_SETUP},
+    {         NAND_UOP_COLUMN_0,                            0U},
+    {         NAND_UOP_COLUMN_1,                            0U},
+    {            NAND_UOP_ROW_0,                            0U},
+    {            NAND_UOP_ROW_1,                            0U},
+    {            NAND_UOP_ROW_2,                            0U},
+    {          NAND_UOP_DATA_IN,                            0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},
+    {         NAND_UOP_DELAY_US,              NAND_TIME_TWB_US},
+    {              NAND_UOP_END,                            0U}, /* ← LUN 进入 tPROG */
 };
 
 /* ── 编程页 WAIT（WAIT 段）────────────────────
  * WAIT_READY(tPROG) → 70h 轮询 + CHECK_FAIL。无数据传输。 */
-static const nand_uop_t g_nand_program_page_wait_uops[] =
-    {
-        {       NAND_UOP_WAIT_READY,                   0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                   0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
-        {       NAND_UOP_CHECK_FAIL,                   0U},
-        {              NAND_UOP_END,                   0U},
+static const nand_uop_t g_nand_program_page_wait_uops[] = {
+    {       NAND_UOP_WAIT_READY,                   0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                   0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
+    {       NAND_UOP_CHECK_FAIL,                   0U},
+    {              NAND_UOP_END,                   0U},
 };
 
 /* ── 擦除 ISSUE（ISSUE 段）───────────────────
  * 70h 轮询空闲 → 60h+行地址 → D0h → tWB → END。
  * 不含 WAIT_READY(tBERS)——LUN 进入 tBERS 期，由 WAIT 接续。 */
-static const nand_uop_t g_nand_erase_block_issue_uops[] =
-    {
-        {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                           0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
-        {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
-        {            NAND_UOP_ROW_0,                           0U},
-        {            NAND_UOP_ROW_1,                           0U},
-        {            NAND_UOP_ROW_2,                           0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
-        {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
-        {              NAND_UOP_END,                           0U}, /* ← LUN 进入 tBERS */
+static const nand_uop_t g_nand_erase_block_issue_uops[] = {
+    {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                           0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                           3U},
+    {          NAND_UOP_COMMAND,   NAND_CMD_BLOCK_ERASE_SETUP},
+    {            NAND_UOP_ROW_0,                           0U},
+    {            NAND_UOP_ROW_1,                           0U},
+    {            NAND_UOP_ROW_2,                           0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
+    {         NAND_UOP_DELAY_US,             NAND_TIME_TWB_US},
+    {              NAND_UOP_END,                           0U}, /* ← LUN 进入 tBERS */
 };
 
 /* ── 擦除 WAIT（WAIT 段）────────────────────
  * WAIT_READY(tBERS) → 70h 轮询 + CHECK_FAIL。无数据传输。 */
-static const nand_uop_t g_nand_erase_block_wait_uops[] =
-    {
-        {       NAND_UOP_WAIT_READY,                   0U},
-        {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
-        {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
-        {  NAND_UOP_DATA_OUT_STATUS,                   0U},
-        {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
-        {       NAND_UOP_CHECK_FAIL,                   0U},
-        {              NAND_UOP_END,                   0U},
+static const nand_uop_t g_nand_erase_block_wait_uops[] = {
+    {       NAND_UOP_WAIT_READY,                   0U},
+    {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
+    {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
+    {  NAND_UOP_DATA_OUT_STATUS,                   0U},
+    {NAND_UOP_JUMP_IF_NOT_READY,                   3U},
+    {       NAND_UOP_CHECK_FAIL,                   0U},
+    {              NAND_UOP_END,                   0U},
 };
 
 /* ======================================================================
@@ -1023,57 +1002,56 @@ static const nand_uop_t g_nand_erase_block_wait_uops[] =
  * 每项字段语义见 onfi_1_0.h 的 nand_operation_map_t 结构体注释；
  * uop 序列即上方各 g_nand_*_uops 数组。
  * ====================================================================== */
-const nand_operation_map_t g_nand_operation_map[OP_COUNT] =
-    {
-        [OP_RESET]                                  = {                                 .operation = OP_RESET,                          .name = "RESET",                 .command_1 = NAND_ONFI_CMD_RESET,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                             .uops = g_nand_reset_uops, .timing = {NAND_TIME_TWB_US, NAND_TIME_TRST_US, NAND_TIME_TWH_US, NAND_TIME_TRST_US}},
-        [OP_READ_ID]                                = {                               .operation = OP_READ_ID,                        .name = "READ_ID",                    .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 5U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PARAMETER_PAGE]                    = {                   .operation = OP_READ_PARAMETER_PAGE,            .name = "READ_PARAMETER_PAGE",        .command_1 = NAND_CMD_READ_PARAMETER_PAGE,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,             .data_length = 256U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_read_parameter_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_UNIQUE_ID]                         = {                        .operation = OP_READ_UNIQUE_ID,                 .name = "READ_UNIQUE_ID",             .command_1 = NAND_CMD_READ_UNIQUE_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,             .data_length = 256U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_read_unique_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_GET_FEATURES]                           = {                          .operation = OP_GET_FEATURES,                   .name = "GET_FEATURES",               .command_1 = NAND_CMD_GET_FEATURES,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_get_features_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_SET_FEATURES]                           = {                          .operation = OP_SET_FEATURES,                   .name = "SET_FEATURES",               .command_1 = NAND_CMD_SET_FEATURES,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 4U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_set_features_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_READ_STATUS]                            = {                           .operation = OP_READ_STATUS,                    .name = "READ_STATUS",                .command_1 = NAND_CMD_READ_STATUS,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_read_status_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_STATUS_ENHANCED]                   = {                  .operation = OP_READ_STATUS_ENHANCED,           .name = "READ_STATUS_ENHANCED",       .command_1 = NAND_CMD_READ_STATUS_ENHANCED,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,              .uops = g_nand_read_status_enhanced_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_RANDOM_DATA_READ]                       = {                      .operation = OP_RANDOM_DATA_READ,               .name = "RANDOM_DATA_READ",           .command_1 = NAND_CMD_RANDOM_DATA_READ, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 2U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_random_read_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_ONFI_SIGNATURE]                    = {                   .operation = OP_READ_ONFI_SIGNATURE,            .name = "READ_ONFI_SIGNATURE",                    .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_RANDOM_DATA_READ_MULTI_PLANE]           = {          .operation = OP_RANDOM_DATA_READ_MULTI_PLANE,   .name = "RANDOM_DATA_READ_MULTI_PLANE", .command_1 = NAND_CMD_RANDOM_DATA_READ_TWO_PLANE, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_random_read_multi_plane_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = {        .operation = OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, .name = "PROGRAM_FOR_INTERNAL_DATA_MOVE",          .command_1 = NAND_CMD_RANDOM_DATA_INPUT, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_internal_program_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_READ_META]                              = {                             .operation = OP_READ_META,                      .name = "READ_META",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = {        .operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT,           .name = "READ_PAGE_W_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,     .pair_op = OP_READ_PAGE_LOAD,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = {     .operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT,          .name = "READ_PAGE_WO_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U, .uops = g_nand_normal_read_page_without_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_SEQ]                    = {                   .operation = OP_READ_PAGE_CACHE_SEQ,            .name = "READ_PAGE_CACHE_SEQ",        .command_1 = NAND_CMD_READ_PAGE_CACHE_SEQ,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_cache_read_seq_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_RANDOM]                 = {                .operation = OP_READ_PAGE_CACHE_RANDOM,         .name = "READ_PAGE_CACHE_RANDOM",            .command_1 = NAND_CMD_READ_PAGE_SETUP,  .command_2 = NAND_CMD_READ_PAGE_CACHE_SEQ,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_cache_read_random_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_LAST]                   = {                  .operation = OP_READ_PAGE_CACHE_LAST,           .name = "READ_PAGE_CACHE_LAST",       .command_1 = NAND_CMD_READ_PAGE_CACHE_LAST,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                   .uops = g_nand_cache_read_last_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_START_SEQ]              = {             .operation = OP_READ_PAGE_CACHE_START_SEQ,      .name = "READ_PAGE_CACHE_START_SEQ",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                   .uops = g_nand_cache_start_seq_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_TWO_PLANE_PROGRAM_CACHE]                = {               .operation = OP_TWO_PLANE_PROGRAM_CACHE,        .name = "TWO_PLANE_PROGRAM_CACHE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_two_plane_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_TWO_PLANE_PROGRAM_CACHE_END]            = {           .operation = OP_TWO_PLANE_PROGRAM_CACHE_END,    .name = "TWO_PLANE_PROGRAM_CACHE_END",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,       .uops = g_nand_two_plane_program_cache_end_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_TWO_PLANE_PROGRAM_CACHE_FIRST]          = {         .operation = OP_TWO_PLANE_PROGRAM_CACHE_FIRST,  .name = "TWO_PLANE_PROGRAM_CACHE_FIRST",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_two_plane_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_READ_PAGE_CACHE_START_SEQ_MP]           = {          .operation = OP_READ_PAGE_CACHE_START_SEQ_MP,   .name = "READ_PAGE_CACHE_START_SEQ_MP",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                .uops = g_nand_cache_start_seq_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_SEQ_MP]                 = {                .operation = OP_READ_PAGE_CACHE_SEQ_MP,         .name = "READ_PAGE_CACHE_SEQ_MP",        .command_1 = NAND_CMD_READ_PAGE_CACHE_SEQ,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_cache_seq_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_CACHE_LAST_MP]                = {               .operation = OP_READ_PAGE_CACHE_LAST_MP,        .name = "READ_PAGE_CACHE_LAST_MP",       .command_1 = NAND_CMD_READ_PAGE_CACHE_LAST,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_cache_last_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_NORMAL_PROGRAM_PAGE]                    = {                   .operation = OP_NORMAL_PROGRAM_PAGE,                   .name = "PROGRAM_PAGE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U, .pair_op = OP_PROGRAM_PAGE_ISSUE,                 .min_busy_us = 0U,               .uops = g_nand_normal_program_page_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_PROGRAM_PAGE_CACHE]                     = {                    .operation = OP_PROGRAM_PAGE_CACHE,             .name = "PROGRAM_PAGE_CACHE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_ERASE_BLOCK]                            = {                           .operation = OP_ERASE_BLOCK,                    .name = "ERASE_BLOCK",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,  .pair_op = OP_ERASE_BLOCK_ISSUE,                 .min_busy_us = 0U,                       .uops = g_nand_erase_block_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
-        [OP_READ_FOR_INTERNAL_DATA_MOVE]            = {           .operation = OP_READ_FOR_INTERNAL_DATA_MOVE,    .name = "READ_FOR_INTERNAL_DATA_MOVE",            .command_1 = NAND_CMD_READ_PAGE_SETUP,   .command_2 = NAND_CMD_INTERNAL_DATA_MOVE,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_internal_read_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_BLOCK_UNLOCK_LOW]                       = {                      .operation = OP_BLOCK_UNLOCK_LOW,               .name = "BLOCK_UNLOCK_LOW",           .command_1 = NAND_CMD_BLOCK_UNLOCK_LOW,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_block_unlock_low_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_BLOCK_UNLOCK_HIGH]                      = {                     .operation = OP_BLOCK_UNLOCK_HIGH,              .name = "BLOCK_UNLOCK_HIGH",          .command_1 = NAND_CMD_BLOCK_UNLOCK_HIGH,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_block_unlock_high_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_BLOCK_LOCK]                             = {                            .operation = OP_BLOCK_LOCK,                     .name = "BLOCK_LOCK",                 .command_1 = NAND_CMD_BLOCK_LOCK,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                        .uops = g_nand_block_lock_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_BLOCK_LOCK_TIGHT]                       = {                      .operation = OP_BLOCK_LOCK_TIGHT,               .name = "BLOCK_LOCK_TIGHT",           .command_1 = NAND_CMD_BLOCK_LOCK_TIGHT,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_block_lock_tight_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_BLOCK_LOCK_STATUS]                      = {                     .operation = OP_BLOCK_LOCK_STATUS,              .name = "BLOCK_LOCK_STATUS",          .command_1 = NAND_CMD_BLOCK_LOCK_STATUS,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_block_lock_status_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_OTP_DATA_LOCK]                          = {                         .operation = OP_OTP_DATA_LOCK,                  .name = "OTP_DATA_LOCK",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                          .uops = g_nand_otp_lock_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_OTP_DATA_PROGRAM]                       = {                      .operation = OP_OTP_DATA_PROGRAM,               .name = "OTP_DATA_PROGRAM",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_normal_program_page_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_OTP_DATA_READ]                          = {                         .operation = OP_OTP_DATA_READ,                  .name = "OTP_DATA_READ",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = {.operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT,            .name = "MP_READ_WO_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U, .uops = g_nand_multi_plane_read_without_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = {   .operation = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT,             .name = "MP_READ_W_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,    .uops = g_nand_multi_plane_read_with_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_PROGRAM_PAGE_MULTI_PLANE]               = {              .operation = OP_PROGRAM_PAGE_MULTI_PLANE,       .name = "PROGRAM_PAGE_MULTI_PLANE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_multi_plane_program_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_ERASE_BLOCK_MULTI_PLANE]                = {               .operation = OP_ERASE_BLOCK_MULTI_PLANE,        .name = "ERASE_BLOCK_MULTI_PLANE",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 6U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_multi_plane_erase_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
-        [OP_READ_PAGE_LOAD]                         = {                        .operation = OP_READ_PAGE_LOAD,                 .name = "READ_PAGE_LOAD",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,     .pair_op = OP_READ_PAGE_WAIT,    .min_busy_us = NAND_TIME_TR_US,                    .uops = g_nand_read_page_load_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_WAIT]                         = {                        .operation = OP_READ_PAGE_WAIT,                 .name = "READ_PAGE_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_read_page_wait_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_READ_PAGE_MULTI_PLANE_LOAD]             = {            .operation = OP_READ_PAGE_MULTI_PLANE_LOAD,                   .name = "MP_READ_LOAD",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,     .pair_op = OP_READ_PAGE_WAIT,    .min_busy_us = NAND_TIME_TR_US,             .uops = g_nand_multi_plane_read_load_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
-        [OP_PROGRAM_PAGE_ISSUE]                     = {                    .operation = OP_PROGRAM_PAGE_ISSUE,             .name = "PROGRAM_PAGE_ISSUE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE, .op_type = OP_TYPE_ISSUE,  .pair_op = OP_PROGRAM_PAGE_WAIT, .min_busy_us = NAND_TIME_TPROG_US,                .uops = g_nand_program_page_issue_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_PROGRAM_PAGE_WAIT]                      = {                     .operation = OP_PROGRAM_PAGE_WAIT,              .name = "PROGRAM_PAGE_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT, .pair_op = OP_PROGRAM_PAGE_ISSUE,                 .min_busy_us = 0U,                 .uops = g_nand_program_page_wait_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
-        [OP_ERASE_BLOCK_ISSUE]                      = {                     .operation = OP_ERASE_BLOCK_ISSUE,              .name = "ERASE_BLOCK_ISSUE",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,   .pair_op = OP_ERASE_BLOCK_WAIT, .min_busy_us = NAND_TIME_TBERS_US,                 .uops = g_nand_erase_block_issue_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
-        [OP_ERASE_BLOCK_WAIT]                       = {                      .operation = OP_ERASE_BLOCK_WAIT,               .name = "ERASE_BLOCK_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT,  .pair_op = OP_ERASE_BLOCK_ISSUE,                 .min_busy_us = 0U,                  .uops = g_nand_erase_block_wait_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
-        [OP_READ_COLUMN]                            = {                           .operation = OP_READ_COLUMN,                    .name = "READ_COLUMN",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+const nand_operation_map_t g_nand_operation_map[OP_COUNT] = {
+    [OP_RESET]                                  = {                                 .operation = OP_RESET,                          .name = "RESET",                 .command_1 = NAND_ONFI_CMD_RESET,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                             .uops = g_nand_reset_uops, .timing = {NAND_TIME_TWB_US, NAND_TIME_TRST_US, NAND_TIME_TWH_US, NAND_TIME_TRST_US}},
+    [OP_READ_ID]                                = {                               .operation = OP_READ_ID,                        .name = "READ_ID",                    .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 5U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PARAMETER_PAGE]                    = {                   .operation = OP_READ_PARAMETER_PAGE,            .name = "READ_PARAMETER_PAGE",        .command_1 = NAND_CMD_READ_PARAMETER_PAGE,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,             .data_length = 256U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_read_parameter_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_UNIQUE_ID]                         = {                        .operation = OP_READ_UNIQUE_ID,                 .name = "READ_UNIQUE_ID",             .command_1 = NAND_CMD_READ_UNIQUE_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,             .data_length = 256U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_read_unique_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_GET_FEATURES]                           = {                          .operation = OP_GET_FEATURES,                   .name = "GET_FEATURES",               .command_1 = NAND_CMD_GET_FEATURES,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_get_features_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_SET_FEATURES]                           = {                          .operation = OP_SET_FEATURES,                   .name = "SET_FEATURES",               .command_1 = NAND_CMD_SET_FEATURES,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 4U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_set_features_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_READ_STATUS]                            = {                           .operation = OP_READ_STATUS,                    .name = "READ_STATUS",                .command_1 = NAND_CMD_READ_STATUS,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_read_status_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_STATUS_ENHANCED]                   = {                  .operation = OP_READ_STATUS_ENHANCED,           .name = "READ_STATUS_ENHANCED",       .command_1 = NAND_CMD_READ_STATUS_ENHANCED,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,              .uops = g_nand_read_status_enhanced_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_RANDOM_DATA_READ]                       = {                      .operation = OP_RANDOM_DATA_READ,               .name = "RANDOM_DATA_READ",           .command_1 = NAND_CMD_RANDOM_DATA_READ, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 2U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_random_read_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_ONFI_SIGNATURE]                    = {                   .operation = OP_READ_ONFI_SIGNATURE,            .name = "READ_ONFI_SIGNATURE",                    .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_RANDOM_DATA_READ_MULTI_PLANE]           = {          .operation = OP_RANDOM_DATA_READ_MULTI_PLANE,   .name = "RANDOM_DATA_READ_MULTI_PLANE", .command_1 = NAND_CMD_RANDOM_DATA_READ_TWO_PLANE, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_random_read_multi_plane_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = {        .operation = OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, .name = "PROGRAM_FOR_INTERNAL_DATA_MOVE",          .command_1 = NAND_CMD_RANDOM_DATA_INPUT, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_internal_program_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_READ_META]                              = {                             .operation = OP_READ_META,                      .name = "READ_META",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = {        .operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT,           .name = "READ_PAGE_W_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,     .pair_op = OP_READ_PAGE_LOAD,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = {     .operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT,          .name = "READ_PAGE_WO_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U, .uops = g_nand_normal_read_page_without_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_SEQ]                    = {                   .operation = OP_READ_PAGE_CACHE_SEQ,            .name = "READ_PAGE_CACHE_SEQ",        .command_1 = NAND_CMD_READ_PAGE_CACHE_SEQ,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_cache_read_seq_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_RANDOM]                 = {                .operation = OP_READ_PAGE_CACHE_RANDOM,         .name = "READ_PAGE_CACHE_RANDOM",            .command_1 = NAND_CMD_READ_PAGE_SETUP,  .command_2 = NAND_CMD_READ_PAGE_CACHE_SEQ,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_cache_read_random_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_LAST]                   = {                  .operation = OP_READ_PAGE_CACHE_LAST,           .name = "READ_PAGE_CACHE_LAST",       .command_1 = NAND_CMD_READ_PAGE_CACHE_LAST,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                   .uops = g_nand_cache_read_last_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_START_SEQ]              = {             .operation = OP_READ_PAGE_CACHE_START_SEQ,      .name = "READ_PAGE_CACHE_START_SEQ",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                   .uops = g_nand_cache_start_seq_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_TWO_PLANE_PROGRAM_CACHE]                = {               .operation = OP_TWO_PLANE_PROGRAM_CACHE,        .name = "TWO_PLANE_PROGRAM_CACHE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_two_plane_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_TWO_PLANE_PROGRAM_CACHE_END]            = {           .operation = OP_TWO_PLANE_PROGRAM_CACHE_END,    .name = "TWO_PLANE_PROGRAM_CACHE_END",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,       .uops = g_nand_two_plane_program_cache_end_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_TWO_PLANE_PROGRAM_CACHE_FIRST]          = {         .operation = OP_TWO_PLANE_PROGRAM_CACHE_FIRST,  .name = "TWO_PLANE_PROGRAM_CACHE_FIRST",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_two_plane_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_READ_PAGE_CACHE_START_SEQ_MP]           = {          .operation = OP_READ_PAGE_CACHE_START_SEQ_MP,   .name = "READ_PAGE_CACHE_START_SEQ_MP",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                .uops = g_nand_cache_start_seq_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_SEQ_MP]                 = {                .operation = OP_READ_PAGE_CACHE_SEQ_MP,         .name = "READ_PAGE_CACHE_SEQ_MP",        .command_1 = NAND_CMD_READ_PAGE_CACHE_SEQ,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                      .uops = g_nand_cache_seq_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_CACHE_LAST_MP]                = {               .operation = OP_READ_PAGE_CACHE_LAST_MP,        .name = "READ_PAGE_CACHE_LAST_MP",       .command_1 = NAND_CMD_READ_PAGE_CACHE_LAST,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_cache_last_mp_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_NORMAL_PROGRAM_PAGE]                    = {                   .operation = OP_NORMAL_PROGRAM_PAGE,                   .name = "PROGRAM_PAGE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U, .pair_op = OP_PROGRAM_PAGE_ISSUE,                 .min_busy_us = 0U,               .uops = g_nand_normal_program_page_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_PROGRAM_PAGE_CACHE]                     = {                    .operation = OP_PROGRAM_PAGE_CACHE,             .name = "PROGRAM_PAGE_CACHE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP,   .command_2 = NAND_CMD_PROGRAM_PAGE_CACHE,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_program_cache_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_ERASE_BLOCK]                            = {                           .operation = OP_ERASE_BLOCK,                    .name = "ERASE_BLOCK",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,  .pair_op = OP_ERASE_BLOCK_ISSUE,                 .min_busy_us = 0U,                       .uops = g_nand_erase_block_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
+    [OP_READ_FOR_INTERNAL_DATA_MOVE]            = {           .operation = OP_READ_FOR_INTERNAL_DATA_MOVE,    .name = "READ_FOR_INTERNAL_DATA_MOVE",            .command_1 = NAND_CMD_READ_PAGE_SETUP,   .command_2 = NAND_CMD_INTERNAL_DATA_MOVE,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                     .uops = g_nand_internal_read_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_BLOCK_UNLOCK_LOW]                       = {                      .operation = OP_BLOCK_UNLOCK_LOW,               .name = "BLOCK_UNLOCK_LOW",           .command_1 = NAND_CMD_BLOCK_UNLOCK_LOW,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_block_unlock_low_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_BLOCK_UNLOCK_HIGH]                      = {                     .operation = OP_BLOCK_UNLOCK_HIGH,              .name = "BLOCK_UNLOCK_HIGH",          .command_1 = NAND_CMD_BLOCK_UNLOCK_HIGH,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_block_unlock_high_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_BLOCK_LOCK]                             = {                            .operation = OP_BLOCK_LOCK,                     .name = "BLOCK_LOCK",                 .command_1 = NAND_CMD_BLOCK_LOCK,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                        .uops = g_nand_block_lock_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_BLOCK_LOCK_TIGHT]                       = {                      .operation = OP_BLOCK_LOCK_TIGHT,               .name = "BLOCK_LOCK_TIGHT",           .command_1 = NAND_CMD_BLOCK_LOCK_TIGHT,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_block_lock_tight_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_BLOCK_LOCK_STATUS]                      = {                     .operation = OP_BLOCK_LOCK_STATUS,              .name = "BLOCK_LOCK_STATUS",          .command_1 = NAND_CMD_BLOCK_LOCK_STATUS,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_block_lock_status_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_OTP_DATA_LOCK]                          = {                         .operation = OP_OTP_DATA_LOCK,                  .name = "OTP_DATA_LOCK",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                          .uops = g_nand_otp_lock_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_OTP_DATA_PROGRAM]                       = {                      .operation = OP_OTP_DATA_PROGRAM,               .name = "OTP_DATA_PROGRAM",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_normal_program_page_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_OTP_DATA_READ]                          = {                         .operation = OP_OTP_DATA_READ,                  .name = "OTP_DATA_READ",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,        .data_length = PAGE_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = {.operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT,            .name = "MP_READ_WO_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U, .uops = g_nand_multi_plane_read_without_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = {   .operation = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT,             .name = "MP_READ_W_DATA_OUT",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,    .uops = g_nand_multi_plane_read_with_data_out_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_PROGRAM_PAGE_MULTI_PLANE]               = {              .operation = OP_PROGRAM_PAGE_MULTI_PLANE,       .name = "PROGRAM_PAGE_MULTI_PLANE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 2U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U, .data_length = PAGE_BUFFER_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_multi_plane_program_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_ERASE_BLOCK_MULTI_PLANE]                = {               .operation = OP_ERASE_BLOCK_MULTI_PLANE,        .name = "ERASE_BLOCK_MULTI_PLANE",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 6U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                 .uops = g_nand_multi_plane_erase_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
+    [OP_READ_PAGE_LOAD]                         = {                        .operation = OP_READ_PAGE_LOAD,                 .name = "READ_PAGE_LOAD",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,     .pair_op = OP_READ_PAGE_WAIT,    .min_busy_us = NAND_TIME_TR_US,                    .uops = g_nand_read_page_load_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_WAIT]                         = {                        .operation = OP_READ_PAGE_WAIT,                 .name = "READ_PAGE_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT,                    .pair_op = 0U,                 .min_busy_us = 0U,                    .uops = g_nand_read_page_wait_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_READ_PAGE_MULTI_PLANE_LOAD]             = {            .operation = OP_READ_PAGE_MULTI_PLANE_LOAD,                   .name = "MP_READ_LOAD",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM, .address_cycles = 10U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,     .pair_op = OP_READ_PAGE_WAIT,    .min_busy_us = NAND_TIME_TR_US,             .uops = g_nand_multi_plane_read_load_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+    [OP_PROGRAM_PAGE_ISSUE]                     = {                    .operation = OP_PROGRAM_PAGE_ISSUE,             .name = "PROGRAM_PAGE_ISSUE",         .command_1 = NAND_CMD_PROGRAM_PAGE_SETUP, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 1U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,        .data_length = PAGE_SIZE, .op_type = OP_TYPE_ISSUE,  .pair_op = OP_PROGRAM_PAGE_WAIT, .min_busy_us = NAND_TIME_TPROG_US,                .uops = g_nand_program_page_issue_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_PROGRAM_PAGE_WAIT]                      = {                     .operation = OP_PROGRAM_PAGE_WAIT,              .name = "PROGRAM_PAGE_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT, .pair_op = OP_PROGRAM_PAGE_ISSUE,                 .min_busy_us = 0U,                 .uops = g_nand_program_page_wait_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
+    [OP_ERASE_BLOCK_ISSUE]                      = {                     .operation = OP_ERASE_BLOCK_ISSUE,              .name = "ERASE_BLOCK_ISSUE",          .command_1 = NAND_CMD_BLOCK_ERASE_SETUP,  .command_2 = NAND_CMD_BLOCK_ERASE_CONFIRM,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U, .op_type = OP_TYPE_ISSUE,   .pair_op = OP_ERASE_BLOCK_WAIT, .min_busy_us = NAND_TIME_TBERS_US,                 .uops = g_nand_erase_block_issue_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
+    [OP_ERASE_BLOCK_WAIT]                       = {                      .operation = OP_ERASE_BLOCK_WAIT,               .name = "ERASE_BLOCK_WAIT",                                  .command_1 = 0U,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,  .op_type = OP_TYPE_WAIT,  .pair_op = OP_ERASE_BLOCK_ISSUE,                 .min_busy_us = 0U,                  .uops = g_nand_erase_block_wait_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TBERS_US}},
+    [OP_READ_COLUMN]                            = {                           .operation = OP_READ_COLUMN,                    .name = "READ_COLUMN",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
 };
 
 /* nand_operation_has_data / nand_operation_data_length 已由 onfi_1_0.h 中的宏替代，
@@ -1102,8 +1080,7 @@ BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE],
     {
         info->signature[i] = page[NAND_ONFI_PARAM_OFF_SIGNATURE + i];
     }
-    signature_ok = ((info->signature[0] == 0x4FU) && (info->signature[1] == 0x4EU) &&
-                    (info->signature[2] == 0x46U) && (info->signature[3] == 0x49U));
+    signature_ok = ((info->signature[0] == 0x4FU) && (info->signature[1] == 0x4EU) && (info->signature[2] == 0x46U) && (info->signature[3] == 0x49U));
 
     info->revision = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_REVISION]);
     info->features = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_FEATURES]);

@@ -401,12 +401,7 @@ void fault_report_boot(void)
     {
         if (record->kind == CRASH_KIND_FAULT)
         {
-            LOGE("[FAULT] previous crash: %s PC=0x%08lx LR=0x%08lx CFSR=0x%08lx HFSR=0x%08lx\r\n",
-                 fault_kind_name(record->fault.fault_kind),
-                 record->fault.pc,
-                 record->fault.lr,
-                 record->fault.cfsr,
-                 record->fault.hfsr);
+            LOGE("[FAULT] previous crash: %s PC=0x%08lx LR=0x%08lx CFSR=0x%08lx HFSR=0x%08lx\r\n", fault_kind_name(record->fault.fault_kind), record->fault.pc, record->fault.lr, record->fault.cfsr, record->fault.hfsr);
         }
         else if (record->kind == CRASH_KIND_ABORT)
         {

@@ -309,8 +309,7 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
     l2p_jrn_entry_t *entry;
     for (WORD i = 0U; i < journal->handle.current_entry; i++)
     {
-        entry = (l2p_jrn_entry_t *)(journal->handle.page_buf + JRN_HEADER_SIZE +
-                                    sizeof(l2p_jrn_entry_t) * i);
+        entry = (l2p_jrn_entry_t *)(journal->handle.page_buf + JRN_HEADER_SIZE + sizeof(l2p_jrn_entry_t) * i);
         /* CP 边界之前的条目不得被合并：merge_floor 之后的覆盖写另起一条，
          * 否则 sequence 仍是旧的、new_pba 却是新的，块元数据 delta 回放会漏记。 */
         if ((entry->lba == lba) && (entry->sequence >= journal->handle.merge_floor))
@@ -332,8 +331,7 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
         return false;
     }
 
-    entry = (l2p_jrn_entry_t *)(journal->handle.page_buf + JRN_HEADER_SIZE +
-                                sizeof(l2p_jrn_entry_t) * journal->handle.current_entry);
+    entry = (l2p_jrn_entry_t *)(journal->handle.page_buf + JRN_HEADER_SIZE + sizeof(l2p_jrn_entry_t) * journal->handle.current_entry);
 
     entry->lba      = lba;
     entry->old_pba  = old_pba;
@@ -396,8 +394,7 @@ static void jrn_header_write(l2p_jrn_t *journal)
  * -------------------------------------------------------------------- */
 static bool jrn_freeze(l2p_jrn_t *journal)
 {
-    if ((journal->handle.phase != JRN_IDLE) || journal->handle.need_erase ||
-        journal->handle.ring_full)
+    if ((journal->handle.phase != JRN_IDLE) || journal->handle.need_erase || journal->handle.ring_full)
     {
         return false; /* 环已全部不可用：不再起新页写 */
     }
@@ -522,10 +519,7 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
 
     if (journal->handle.erase_fail_count < JRN_ERASE_FAIL_MAX)
     {
-        LOGW(LOG_TAG_JRN "ring block %u erase failed (%u/%u)\r\n",
-             (unsigned)block,
-             (unsigned)journal->handle.erase_fail_count,
-             JRN_ERASE_FAIL_MAX);
+        LOGW(LOG_TAG_JRN "ring block %u erase failed (%u/%u)\r\n", (unsigned)block, (unsigned)journal->handle.erase_fail_count, JRN_ERASE_FAIL_MAX);
         return;
     }
 
@@ -571,10 +565,9 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
 static void jrn_status_fill(const l2p_jrn_t *journal, jrn_status_t *out)
 {
     out->base.critical  = false; /* 由 must-run 适配器另行调用 ERASE_ONLY 入口保证 liveness */
-    out->base.wants_run = (journal->handle.phase != JRN_IDLE) || journal->handle.need_erase ||
-                          (journal->handle.current_entry != 0U);
-    out->base.progress = journal->handle.sequence_counter;
-    out->base.next_ms  = 0U;
+    out->base.wants_run = (journal->handle.phase != JRN_IDLE) || journal->handle.need_erase || (journal->handle.current_entry != 0U);
+    out->base.progress  = journal->handle.sequence_counter;
+    out->base.next_ms   = 0U;
 
     if (journal->handle.ring_full)
     {
@@ -642,10 +635,7 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, const bg_info_
         /* 心跳（见 ftl_job.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口 */
         if (ftl_job_heartbeat(&journal->handle.log_ms, &journal->handle.start_ms))
         {
-            LOGI(LOG_TAG_JRN "job phase=%u waddr=0x%08lx age=%lums\r\n",
-                 (unsigned)journal->handle.phase,
-                 journal->handle.waddr,
-                 ftl_job_age_ms(&journal->handle.start_ms));
+            LOGI(LOG_TAG_JRN "job phase=%u waddr=0x%08lx age=%lums\r\n", (unsigned)journal->handle.phase, journal->handle.waddr, ftl_job_age_ms(&journal->handle.start_ms));
         }
         jrn_status_fill(journal, out);
         return; /* 单飞行：job 已在飞 */
@@ -734,10 +724,7 @@ BYTE jrn_watermark_get(const l2p_jrn_t *journal)
      * ×100 不会溢出 DWORD。 */
     const DWORD entries_per_page = JRN_ENTRIES_PER_PAGE;
     const DWORD total_pages      = JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK;
-    const DWORD used_units       = ((journal->handle.current_block * PAGES_PER_BLOCK +
-                               journal->handle.current_page) *
-                              entries_per_page) +
-                             journal->handle.current_entry;
+    const DWORD used_units       = ((journal->handle.current_block * PAGES_PER_BLOCK + journal->handle.current_page) * entries_per_page) + journal->handle.current_entry;
 
     return ((used_units * 100U) / (total_pages * entries_per_page));
 }
@@ -926,12 +913,7 @@ static bool jrn_page_raw_blank(DWORD addr)
     return true;
 }
 
-static WORD jrn_ring_scan(const l2p_jrn_t *journal,
-                          DWORD            cp_sequence,
-                          jrn_page_ref_t  *out_pages,
-                          WORD             capacity,
-                          WORD            *out_count,
-                          jrn_page_ref_t  *out_latest)
+static WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_ref_t *out_pages, WORD capacity, WORD *out_count, jrn_page_ref_t *out_latest)
 {
     if (out_latest != NULL)
     {
@@ -1168,11 +1150,7 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
  * entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。
  * 写失败 ⇒ LOGW + block_ctx->ok=false（调用者回退 full metadata rebuild）。
  */
-static DWORD jrn_page_replay_apply(l2p_jrn_t            *journal,
-                                   l2p_cache_t          *cache,
-                                   const jrn_page_ref_t *page,
-                                   DWORD                 cp_sequence,
-                                   jrn_replay_ctx_t     *block_ctx)
+static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {
     DWORD raddr = jrn_page_addr(journal, page->block, page->page);
     BYTE  page_data[JRN_PAGE_SIZE];
@@ -1200,8 +1178,7 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t            *journal,
         memcpy(&entry_new_pba, page_data + offset + 8, 4);
         memcpy(&entry_seq, page_data + offset + 12, 4);
 
-        if ((entry_lba != FTL_LBA_INVALID) && ((QWORD)entry_lba < L2P_GLOBAL_LBA_MAX) &&
-            lba_routes_to(entry_lba, journal->topo))
+        if ((entry_lba != FTL_LBA_INVALID) && ((QWORD)entry_lba < L2P_GLOBAL_LBA_MAX) && lba_routes_to(entry_lba, journal->topo))
         {
             if (l2p_write_sync(cache, entry_lba, entry_new_pba) == FTL_OK)
             {
@@ -1241,9 +1218,7 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t            *journal,
         /* 块元数据增量：只对**快照之后**的条目记 valid_count。
          * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
          * materialize 由开机恢复模块注入——journal 不反向依赖 pfr。 */
-        if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence) &&
-            (block_ctx->materialize != NULL) && (block_ctx->valid_add != NULL) &&
-            (block_ctx->valid_sub != NULL))
+        if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence) && (block_ctx->materialize != NULL) && (block_ctx->valid_add != NULL) && (block_ctx->valid_sub != NULL))
         {
             const DWORD old_pba = entry_old_pba;
             const DWORD new_pba = entry_new_pba;
@@ -1297,11 +1272,7 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t            *journal,
  *     · out_entries 由应用循环按**成功写入 L2P 的条目**累加（读失败页 / 越界 LBA
  *       不计）——不能用 journal 的 RAM 写指针反推：jrn_resume 会清 current_entry。
  * -------------------------------------------------------------------- */
-ftl_status_e jrn_replay(l2p_jrn_t        *journal,
-                        l2p_cache_t      *cache,
-                        DWORD             cp_sequence,
-                        DWORD            *out_entries,
-                        jrn_replay_ctx_t *block_ctx)
+ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx)
 {
     /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
     jrn_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
@@ -1317,12 +1288,7 @@ ftl_status_e jrn_replay(l2p_jrn_t        *journal,
     /* 第一遍：扫环——收集需回放页 + 取最新页 */
     jrn_page_ref_t latest;
     WORD           replay_count = 0U;
-    const WORD     read_errors  = jrn_ring_scan(journal,
-                                           cp_sequence,
-                                           replay_pages,
-                                           (JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK),
-                                           &replay_count,
-                                           &latest);
+    const WORD     read_errors  = jrn_ring_scan(journal, cp_sequence, replay_pages, (JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK), &replay_count, &latest);
 
     /* 第二遍：按 (page_seq, entry_index) 递增序应用条目。
      * 插入排序（replay_count ≤ 256）：per-LBA last-write-wins——
@@ -1361,9 +1327,7 @@ ftl_status_e jrn_replay(l2p_jrn_t        *journal,
     }
     if (s_replay_write_fail_entries != 0U)
     {
-        LOGW(LOG_TAG_JRN "replay: L2P write failed for %lu entries (first lba=%lu) — force full metadata rebuild\r\n",
-             s_replay_write_fail_entries,
-             s_replay_write_fail_lba);
+        LOGW(LOG_TAG_JRN "replay: L2P write failed for %lu entries (first lba=%lu) — force full metadata rebuild\r\n", s_replay_write_fail_entries, s_replay_write_fail_lba);
     }
 
     if (out_entries != NULL)

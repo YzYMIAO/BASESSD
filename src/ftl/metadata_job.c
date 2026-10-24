@@ -76,9 +76,7 @@ static bool md_log_block_is_reclaimable(const md_dir_cache_t *dir, const alc_t *
 
 /* md_block_page_to_pba — gblock + 页号 → PBA（ch/ce/lun 取本 Directory 拓扑）。
  * ⚠ 单一转换漏斗（C9）：block/plane 的字段序只在这里出现一次，调用点不手写 pba_make。 */
-static DWORD md_block_page_to_pba(const md_dir_cache_t *dir,
-                                  WORD                  gblock,
-                                  BYTE                  page)
+static DWORD md_block_page_to_pba(const md_dir_cache_t *dir, WORD gblock, BYTE page)
 {
     const DWORD block = ftl_gblock_block(gblock);
     const DWORD plane = ftl_gblock_plane(gblock);
@@ -251,10 +249,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
     {
         /* 提交超时 = 资源 starvation 的瞬态中止：victim 不擦、下轮重来，无数据风险。
          * 每轮打 WRN 会被当成故障并刷屏 ⇒ 只在 debug 档可见。 */
-        LOGD(LOG_TAG_META "md job abort (transient timeout) phase=%u victim=%u moved=%u\r\n",
-             (unsigned)j->timeout_phase,
-             (unsigned)j->victim,
-             (unsigned)j->moved);
+        LOGD(LOG_TAG_META "md job abort (transient timeout) phase=%u victim=%u moved=%u\r\n", (unsigned)j->timeout_phase, (unsigned)j->victim, (unsigned)j->moved);
     }
     else
     {
@@ -262,11 +257,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
 
         if (md_abort_log_is_due(&suppressed))
         {
-            LOGE(LOG_TAG_META "md job abort phase=%u victim=%u moved=%u (victim 不擦, suppressed=%lu)\r\n",
-                 (unsigned)j->phase,
-                 (unsigned)j->victim,
-                 (unsigned)j->moved,
-                 suppressed);
+            LOGE(LOG_TAG_META "md job abort phase=%u victim=%u moved=%u (victim 不擦, suppressed=%lu)\r\n", (unsigned)j->phase, (unsigned)j->victim, (unsigned)j->moved, suppressed);
         }
     }
 
@@ -413,8 +404,7 @@ static ftl_status_e md_read_submit(md_dir_cache_t *dir, DWORD addr)
  *             直接擦除归还，无需搬移。平手取块号最小者：结果确定（跨复位可复现），
  *             且先分配的块通常收的是更早、更可能变冷的数据。
  * -------------------------------------------------------------------- */
-static WORD md_compact_victim_find(const md_dir_cache_t *dir,
-                                   const alc_t          *alloc)
+static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc)
 {
     WORD best      = UINT16_MAX;
     WORD best_live = UINT16_MAX;
@@ -503,10 +493,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->stall_ms   = 0U;
     j->phase      = MD_JOB_CP_READ;
 
-    LOGD(LOG_TAG_META "compact start victim=%u live=%u cur_page=%u\r\n",
-         (unsigned)victim,
-         (unsigned)dir->l2p_live[victim],
-         (unsigned)dir->cur_metadata_page);
+    LOGD(LOG_TAG_META "compact start victim=%u live=%u cur_page=%u\r\n", (unsigned)victim, (unsigned)dir->l2p_live[victim], (unsigned)dir->cur_metadata_page);
 
     return MD_COMPACT_STARTED;
 }
@@ -573,9 +560,7 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
      * Directory 是权威：清零这条陈旧计数并以 LOGE 暴露（release 也拒绝空转，H14）。 */
     if (dir->l2p_live[j->victim] != 0U)
     {
-        LOGE(LOG_TAG_META "compact: victim %u live=%u but no directory entry — clear stale count\r\n",
-             (unsigned)j->victim,
-             (unsigned)dir->l2p_live[j->victim]);
+        LOGE(LOG_TAG_META "compact: victim %u live=%u but no directory entry — clear stale count\r\n", (unsigned)j->victim, (unsigned)dir->l2p_live[j->victim]);
         dir->l2p_live[j->victim] = 0U;
     }
 
@@ -679,13 +664,7 @@ static void md_handle_step(md_dir_cache_t *dir)
     }
     else if (ftl_job_heartbeat(&j->log_ms, &j->start_ms))
     {
-        LOGD(LOG_TAG_MD "job phase=%u victim=%u moved=%u pending=%u stall=%lums age=%lums\r\n",
-             (unsigned)j->phase,
-             (unsigned)j->victim,
-             (unsigned)j->moved,
-             (unsigned)dir->reclaim_pending_count,
-             j->stall_ms,
-             ftl_job_age_ms(&j->start_ms));
+        LOGD(LOG_TAG_MD "job phase=%u victim=%u moved=%u pending=%u stall=%lums age=%lums\r\n", (unsigned)j->phase, (unsigned)j->victim, (unsigned)j->moved, (unsigned)dir->reclaim_pending_count, j->stall_ms, ftl_job_age_ms(&j->start_ms));
     }
 
     for (;;)
@@ -979,11 +958,10 @@ static void md_status_fill(const md_dir_cache_t *dir, md_status_t *out)
     const md_handle_t *j = &dir->handle;
 
     out->base.critical  = false; /* 由 must-run 适配器保证 liveness */
-    out->base.wants_run = (j->phase != MD_JOB_IDLE) || dir->reclaim_pending_count != 0U ||
-                          j->compact_wanted;
-    out->base.progress = j->reclaimed_count;
-    out->base.next_ms  = 0U; /* 事件驱动，无周期 */
-    out->base.error    = j->error;
+    out->base.wants_run = (j->phase != MD_JOB_IDLE) || dir->reclaim_pending_count != 0U || j->compact_wanted;
+    out->base.progress  = j->reclaimed_count;
+    out->base.next_ms   = 0U; /* 事件驱动，无周期 */
+    out->base.error     = j->error;
 
     if (j->waiting)
     {
@@ -1067,10 +1045,7 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
         }
         else
         {
-            LOGW(LOG_TAG_META "reclaim erase failed blk=%u (%u/%u) — 位保留，下轮重试\r\n",
-                 (unsigned)j->reclaim_gblock,
-                 (unsigned)j->reclaim_fail_count,
-                 MD_RECLAIM_FAIL_MAX);
+            LOGW(LOG_TAG_META "reclaim erase failed blk=%u (%u/%u) — 位保留，下轮重试\r\n", (unsigned)j->reclaim_gblock, (unsigned)j->reclaim_fail_count, MD_RECLAIM_FAIL_MAX);
         }
     }
     else

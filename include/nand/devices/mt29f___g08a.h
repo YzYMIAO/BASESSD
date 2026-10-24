@@ -48,11 +48,7 @@
  * LUN 位是本仓的连续行地址布局；具体器件以数据手册为准。当前 LUN_ADDR_WIDTH==0，
  * 展开后与旧实现逐位相同（3 个行周期）。
  */
-#define NAND_PAA_TO_ROW(paa)                                                \
-    ((DWORD)(paa_to_page(paa)) |                                            \
-     ((DWORD)(paa_to_plane(paa)) << PAGE_ADDR_WIDTH) |                      \
-     ((DWORD)(paa_to_block(paa)) << (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH)) | \
-     ((DWORD)(paa_to_lun(paa)) << (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH)))
+#define NAND_PAA_TO_ROW(paa) ((DWORD)(paa_to_page(paa)) | ((DWORD)(paa_to_plane(paa)) << PAGE_ADDR_WIDTH) | ((DWORD)(paa_to_block(paa)) << (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH)) | ((DWORD)(paa_to_lun(paa)) << (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH)))
 
 /*
  * FMC NAND Bank3 内存窗口（纯整数；仅 nand_fmc.c 写命令/地址/数据周期）。

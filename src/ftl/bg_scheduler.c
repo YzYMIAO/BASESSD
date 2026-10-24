@@ -58,11 +58,10 @@
 #define BG_TASK_CP_TRIGGER (1U << 9) /* Checkpoint 周期触发（预算） */
 
 /* 档位预设：只列出**预算任务**的位；must-run 由 bg_task_t.must_run 无条件执行。 */
-#define BG_TASK_BUDGETED_ALL \
-    (BG_TASK_L2P_FLUSH | BG_TASK_JRN_FLUSH | BG_TASK_BBT | BG_TASK_CP_TRIGGER)
-#define BG_IDLE_TASKS   (BG_TASK_BUDGETED_ALL)
-#define BG_NORMAL_TASKS (BG_TASK_BUDGETED_ALL)
-#define BG_BUSY_TASKS   (BG_TASK_L2P_FLUSH)
+#define BG_TASK_BUDGETED_ALL (BG_TASK_L2P_FLUSH | BG_TASK_JRN_FLUSH | BG_TASK_BBT | BG_TASK_CP_TRIGGER)
+#define BG_IDLE_TASKS        (BG_TASK_BUDGETED_ALL)
+#define BG_NORMAL_TASKS      (BG_TASK_BUDGETED_ALL)
+#define BG_BUSY_TASKS        (BG_TASK_L2P_FLUSH)
 
 /* 档位 → 预算规模（IDLE/NORMAL/BUSY）。锚定 onfi_1_0.c 时序（NAND_TIME_TPROG_US=700）：
  *  IDLE/NORMAL 2000µs ≈ 2~3 页写 + GC 全表求值；BUSY 700µs ≈ 恰 1 页写。
@@ -320,8 +319,7 @@ static const bg_task_t s_bg_tasks[] = {
 };
 
 /* 表项数必须与 BG_TASK_COUNT 一致（capacity 是 tasks[] 维度；错位会越界或漏装载）。 */
-_Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_COUNT,
-               "任务表项数与 BG_TASK_COUNT 不一致");
+_Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_COUNT, "任务表项数与 BG_TASK_COUNT 不一致");
 
 /* ── 装配与 Phase 3 ── */
 

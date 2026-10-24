@@ -51,8 +51,7 @@ typedef struct
  * @param ftl        FTL 实例三维数组 ftl[CH_NUM][CE_NUM][LUN_NUM]
  * @return SSD_STATUS_OK 成功，SSD_STATUS_INVALID_ARGUMENT 入参非法/槽位缺失/拓扑不符
  */
-ssd_status_e ssd_controller_init(ssd_controller_t *controller,
-                                 ftl_ctx_t        *ftl[CH_NUM][CE_NUM][LUN_NUM]);
+ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM]);
 ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
 BYTE         ssd_controller_is_complete(const ssd_request_t *request);
 
@@ -99,8 +98,7 @@ bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, 
  */
 static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controller)
 {
-    return ((controller != NULL) && (controller->host_lba_max != 0U)) ? controller->host_lba_max
-                                                                      : (DWORD)FTL_LBA_MAX;
+    return ((controller != NULL) && (controller->host_lba_max != 0U)) ? controller->host_lba_max : (DWORD)FTL_LBA_MAX;
 }
 
 /*
@@ -113,8 +111,7 @@ static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controll
  * @param controller Controller 上下文
  * @param next_state 目标状态
  */
-void ssd_controller_state_transition(ssd_controller_t *controller,
-                                     ssd_ctrl_state_e  next_state);
+void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state);
 
 /*
  * ssd_controller_schedule - Controller 优先级调度钩子（C1b，scheduler.c）

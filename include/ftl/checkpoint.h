@@ -206,10 +206,8 @@ typedef struct
 
 /* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
  * 不再同尺寸（阶段 B）。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
-_Static_assert(sizeof(((cp_handle_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
-               "cp_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
-_Static_assert(sizeof(((cp_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)),
-               "cp_handle_t.block_words 必须恰好覆盖全部块");
+_Static_assert(sizeof(((cp_handle_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "cp_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
+_Static_assert(sizeof(((cp_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)), "cp_handle_t.block_words 必须恰好覆盖全部块");
 
 /* ── Header Magic ── */
 /* Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）见
@@ -243,8 +241,7 @@ typedef struct
 } cp_header_t;
 
 _Static_assert(sizeof(cp_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
-_Static_assert(sizeof(((cp_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
-               "Header 位图必须是本 die 的局部 2048-bit 位图");
+_Static_assert(sizeof(((cp_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "Header 位图必须是本 die 的局部 2048-bit 位图");
 
 /* ── 块元数据快照 word 编解码（与 power_failure_recovery 共用）──
  * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块元数据快照」。
@@ -260,17 +257,12 @@ _Static_assert(sizeof(((cp_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WOR
 #define CP_BLOCK_POOL_OP          (1U)
 #define CP_BLOCK_POOL_SPARE       (2U)
 
-_Static_assert((unsigned)CP_BLOCK_WORD_MAX_VALID <= (unsigned)CP_BLOCK_WORD_VALID_MASK,
-               "valid_count 超出 word 位宽");
-_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)CP_BLOCK_WORD_STATE_MASK,
-               "state 超出 word 位宽");
+_Static_assert((unsigned)CP_BLOCK_WORD_MAX_VALID <= (unsigned)CP_BLOCK_WORD_VALID_MASK, "valid_count 超出 word 位宽");
+_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)CP_BLOCK_WORD_STATE_MASK, "state 超出 word 位宽");
 
 static inline WORD cp_block_word_pack(WORD valid, BYTE state, BYTE temp, BYTE pool)
 {
-    return ((valid & CP_BLOCK_WORD_VALID_MASK) |
-            ((state & CP_BLOCK_WORD_STATE_MASK) << CP_BLOCK_WORD_STATE_SHIFT) |
-            ((temp & 0x1U) << CP_BLOCK_WORD_TEMP_SHIFT) |
-            ((pool & CP_BLOCK_WORD_POOL_MASK) << CP_BLOCK_WORD_POOL_SHIFT));
+    return ((valid & CP_BLOCK_WORD_VALID_MASK) | ((state & CP_BLOCK_WORD_STATE_MASK) << CP_BLOCK_WORD_STATE_SHIFT) | ((temp & 0x1U) << CP_BLOCK_WORD_TEMP_SHIFT) | ((pool & CP_BLOCK_WORD_POOL_MASK) << CP_BLOCK_WORD_POOL_SHIFT));
 }
 
 static inline WORD cp_block_word_valid(WORD word)
@@ -306,11 +298,7 @@ static inline BYTE cp_block_word_pool(WORD word)
  * @param metadata_dir Directory
  * @param alloc        allocator（ch/ce/lun 同时作为本实例拓扑来源）
  */
-void cp_init(cp_handle_t    *h,
-             l2p_cache_t    *cache,
-             l2p_jrn_t      *journal,
-             md_dir_cache_t *metadata_dir,
-             alc_t          *alloc);
+void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cache_t *metadata_dir, alc_t *alloc);
 
 /*
  * cp_pool_find_latest - 扫描 Checkpoint 池找最新有效 Header
@@ -354,10 +342,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  * @param block_words 输出：FTL_BLOCK_TOTAL 个 16-bit word
  * @return true = 已加载且 CRC 通过；false = 无快照 / 损坏
  */
-bool cp_block_table_load(cp_handle_t       *h,
-                         const cp_header_t *cp,
-                         WORD               record_idx,
-                         WORD               block_words[FTL_BLOCK_TOTAL]);
+bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx, WORD block_words[FTL_BLOCK_TOTAL]);
 
 /*
  * cp_wear_table_load - 读取并校验 Checkpoint 记录里的磨损快照
@@ -373,9 +358,7 @@ bool cp_block_table_load(cp_handle_t       *h,
  * @param record_idx  该 Header 的池内槽位
  * @return true = 已加载并回填；false = 无快照 / 损坏
  */
-bool cp_wear_table_load(cp_handle_t       *h,
-                        const cp_header_t *cp,
-                        WORD               record_idx);
+bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx);
 
 /* cp_block_words_get - 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
  * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
@@ -418,9 +401,7 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl);
  * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
  * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
  * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。 */
-void cp_block_snapshot(const alc_t          *alloc,
-                       const md_dir_cache_t *md_dir,
-                       WORD                  words[FTL_BLOCK_TOTAL]);
+void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD words[FTL_BLOCK_TOTAL]);
 
 /* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。
  * 条目格式是 checkpoint.c 的内部布局；调用者只提供输出页。 */

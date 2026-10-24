@@ -146,12 +146,10 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
         request->io.lba    = lba;
         /* 缓冲步进 = 映射单元（FTL_IU_BYTES = 512B）——CW 级映射下 1 LBA = 1 个 CW
          * （= 512B 扇区），不是 2KB 页。 */
-        request->io.buffer = (BYTE *)request->buffer +
-                             ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
-        request->io.count = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
+        request->io.buffer = (BYTE *)request->buffer + ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
+        request->io.count  = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
 
-        st = (request->opcode == SSD_REQUEST_WRITE) ? ftl_submit_write(ftl, &request->io)
-                                                    : ftl_submit_read(ftl, &request->io);
+        st = (request->opcode == SSD_REQUEST_WRITE) ? ftl_submit_write(ftl, &request->io) : ftl_submit_read(ftl, &request->io);
         if (st != FTL_OK)
         {
             LOGE(LOG_TAG_CTRL "split submit failed lba=%llu count=%lu\r\n", lba, run_len);

@@ -460,9 +460,7 @@ ftl_status_e alc_super_close(alc_t *alloc, BYTE temperature);
  *       temperature — 温度流。
  * 返回：新条目在 closed_sb_list 的索引；列表满（release 兜底）返回 FTL_BLOCK_NO_SB。
  */
-WORD alc_super_closed_add(alc_t     *alloc,
-                          const WORD plane_blocks[PLANE_NUM],
-                          BYTE       temperature);
+WORD alc_super_closed_add(alc_t *alloc, const WORD plane_blocks[PLANE_NUM], BYTE temperature);
 
 /*
  * alc_super_closed_remove - 从 Closed 列表移除条目（swap-remove）

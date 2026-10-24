@@ -158,11 +158,7 @@ void fc_raid_restore(BYTE lun)
  *   实现要点：recovered 初始为 0，异或跳过 failed_idx 的所有 buffer；
  *         结果即 = 其余所有 buffer 的 XOR（RAID-5 重建公式）。
  * -------------------------------------------------------------------- */
-void fc_raid_recover(BYTE *recovered,
-                     BYTE *buffers[],
-                     BYTE  count,
-                     BYTE  failed_idx,
-                     WORD  length)
+void fc_raid_recover(BYTE *recovered, BYTE *buffers[], BYTE count, BYTE failed_idx, WORD length)
 {
     BYTE   i;
     DWORD *rec32    = (DWORD *)(void *)recovered;

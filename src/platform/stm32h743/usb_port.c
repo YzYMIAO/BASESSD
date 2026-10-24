@@ -67,15 +67,11 @@ bool usb_device_init(void)
      * 内部 DMA（TinyUSB 的 DMA 路径要求 arch == INTERNAL_DMA）。 */
     const DWORD ghwcfg2 = USB2_OTG_FS->GHWCFG2;
     const DWORD arch    = ghwcfg2 & 0x7U;
-    const char *arch_s  = (arch == 0U)   ? "slave-only"
-                          : (arch == 1U) ? "external-dma"
-                          : (arch == 2U) ? "internal-dma"
-                                         : "unknown";
+    const char *arch_s  = (arch == 0U) ? "slave-only" : (arch == 1U) ? "external-dma"
+                                                    : (arch == 2U)   ? "internal-dma"
+                                                                     : "unknown";
 
-    (void)LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n",
-               ghwcfg2,
-               arch,
-               arch_s);
+    (void)LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n", ghwcfg2, arch, arch_s);
 
     return ok;
 }

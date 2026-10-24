@@ -87,10 +87,8 @@ typedef struct
     BYTE  flags;                           /* 1 B：rising_count | health */
 } __attribute__((packed)) cp_wear_entry_t; /* 8 B */
 
-_Static_assert(sizeof(cp_wear_entry_t) == FTL_CHECKPOINT_WEAR_ENTRY_BYTES,
-               "磨损快照条目尺寸必须与 metadata.h 的页几何一致");
-_Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == PAGE_MAIN_SIZE,
-               "磨损快照页必须恰好装满一页主区");
+_Static_assert(sizeof(cp_wear_entry_t) == FTL_CHECKPOINT_WEAR_ENTRY_BYTES, "磨损快照条目尺寸必须与 metadata.h 的页几何一致");
+_Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == PAGE_MAIN_SIZE, "磨损快照页必须恰好装满一页主区");
 
 /* T3 定时的最小 journal 增量：一条 CP record 是 21 页，加此门后轻载下不会每个
  * 定时拍都写一条 record（数值为本仓经验值）。 */
@@ -178,8 +176,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
         {
             continue;
         }
-        if ((hdr->magic != CP_MAGIC) || (hdr->sequence == 0U) ||
-            (hdr->sequence == UINT32_MAX))
+        if ((hdr->magic != CP_MAGIC) || (hdr->sequence == 0U) || (hdr->sequence == UINT32_MAX))
         {
             continue; /* 0 = 未写；UINT32_MAX = 半编程（擦除态），见 cp_header_is_valid */
         }
@@ -274,12 +271,7 @@ static bool cp_job_stall(cp_handle_t *h)
             fc_resource_stats_t rs;
 
             (void)fc_get_resource_stats(&rs);
-            LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%u free=%u cmd=%u buf=%u\r\n",
-                 (now_ms - h->stall_ms),
-                 (unsigned)h->phase,
-                 (unsigned)h->alloc->free_count,
-                 (unsigned)rs.command_used,
-                 (unsigned)rs.buffer_used);
+            LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%u free=%u cmd=%u buf=%u\r\n", (now_ms - h->stall_ms), (unsigned)h->phase, (unsigned)h->alloc->free_count, (unsigned)rs.command_used, (unsigned)rs.buffer_used);
         }
         h->timed_out     = 1U;
         h->timeout_phase = h->phase;
@@ -358,11 +350,7 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
 
 /* 填写 Checkpoint Header 的固定字段；调用者随后按需补 timestamp。
  * region_bitmap == NULL 表示无 region 快照（initial record）。 */
-static void cp_header_fill(cp_header_t       *cp,
-                           const cp_handle_t *h,
-                           DWORD              sequence,
-                           DWORD              journal_seq,
-                           const DWORD       *region_bitmap)
+static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence, DWORD journal_seq, const DWORD *region_bitmap)
 {
     memset(cp, 0, sizeof(*cp));
 
@@ -483,8 +471,7 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
      * ⚠ 同理，**目录整理 job 在飞也算有进展**：它独占当前日志块的空槽，期间的
      *   脏 region 一律收到 FTL_AGAIN。一次正常的压缩要走上百轮命令，若照常累计就会撞
      *   FTL_SUBMIT_TIMEOUT_MS 把 Checkpoint 打回去。 */
-    if (l2p_has_flush_inflight(h->cache) || md_is_busy(h->metadata_dir) ||
-        h->metadata_dir->handle.compact_wanted)
+    if (l2p_has_flush_inflight(h->cache) || md_is_busy(h->metadata_dir) || h->metadata_dir->handle.compact_wanted)
     {
         /* 目录整理 job 在飞 / 已登记压缩请求都算有进展：等待它腾出日志槽，
          * 不把 CP 当成"提交不出去"打回去（否则日志区满时每 10~25ms abort 一次）。 */
@@ -832,9 +819,7 @@ static void cp_job_step(cp_handle_t *h)
 
                 /* sequence 在最终槽位确定后取（池内已有序号时才能续上）。
                  * LOGD 留作 seq=0 现场的取证：normal build 静默。 */
-                LOGD(LOG_TAG_CP "hdr_prep seq_before=%lu idx=%u\r\n",
-                     h->cp_state.sequence,
-                     (unsigned)h->hdr_idx);
+                LOGD(LOG_TAG_CP "hdr_prep seq_before=%lu idx=%u\r\n", h->cp_state.sequence, (unsigned)h->hdr_idx);
                 h->hdr_seq = ++h->cp_state.sequence;
 
                 h->block_page     = 0U;
@@ -855,8 +840,7 @@ static void cp_job_step(cp_handle_t *h)
                     if (h->block_ok == 0U)
                     {
                         /* 半编程槽：游标推进一槽，永不复用本条 record 的剩余页。 */
-                        h->cp_state.write_idx = ((h->hdr_idx + 1U) %
-                                                 md_ring_total_records(&h->hdr_ring));
+                        h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
                         cp_job_abort(h);
                         break;
                     }
@@ -880,8 +864,7 @@ static void cp_job_step(cp_handle_t *h)
                 {
                     if (h->block_ok == 0U)
                     {
-                        h->cp_state.write_idx = ((h->hdr_idx + 1U) %
-                                                 md_ring_total_records(&h->hdr_ring));
+                        h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
                         cp_job_abort(h);
                         break;
                     }
@@ -894,10 +877,7 @@ static void cp_job_step(cp_handle_t *h)
                 h->wear_page_crc[h->wear_page] = boot_crc32(h->wear_page_buf, PAGE_MAIN_SIZE);
 
                 const BYTE wear_page_index = (1U + CP_BLOCK_PAGES + h->wear_page);
-                DWORD      a               = md_ring_addr(&h->hdr_ring,
-                                       &h->topo,
-                                       h->hdr_idx,
-                                       wear_page_index);
+                DWORD      a               = md_ring_addr(&h->hdr_ring, &h->topo, h->hdr_idx, wear_page_index);
 
                 const ftl_status_e st = cp_write_submit(h, a, h->wear_page_buf, PAGE_MAIN_SIZE);
 
@@ -928,8 +908,7 @@ static void cp_job_step(cp_handle_t *h)
                  *   （region 已落盘、Anchor/Header 已写）⇒ 复位水位标志并收尾；
                  *   是否真的擦了只影响磨损优化，不影响本次 CP 的正确性。 */
                 DWORD addr;
-                if (jrn_truncate_plan(h->journal, h->journal_seq, &addr, &h->trunc_next) !=
-                    JRN_TRUNC_NEEDS_ERASE)
+                if (jrn_truncate_plan(h->journal, h->journal_seq, &addr, &h->trunc_next) != JRN_TRUNC_NEEDS_ERASE)
                 {
                     jrn_truncate_commit(h->journal, JRN_BLOCK_NONE);
                     h->phase = CP_DONE;
@@ -972,14 +951,10 @@ static void cp_job_step(cp_handle_t *h)
                      * 被跳过的 CP 不影响判据——最新序号看 `info` 的 cp= 或下一条 done。 */
                     const DWORD now_done = ftl_job_now_ms();
 
-                    if ((now_done != 0U) && ((h->log_done_ms == 0U) ||
-                                             ((now_done - h->log_done_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
+                    if ((now_done != 0U) && ((h->log_done_ms == 0U) || ((now_done - h->log_done_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
                     {
                         h->log_done_ms = now_done;
-                        LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu anchor=%s\r\n",
-                             h->hdr_seq,
-                             h->journal_seq,
-                             (h->anchor_skip != 0U) ? "skip" : "written");
+                        LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu anchor=%s\r\n", h->hdr_seq, h->journal_seq, (h->anchor_skip != 0U) ? "skip" : "written");
                     }
                 }
 
@@ -1143,10 +1118,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
         *out_record_idx = loc.newest_idx;
     }
 
-    LOGI(LOG_TAG_CP "find latest seq=%lu idx=%u jrn_seq=%lu\r\n",
-         cp->sequence,
-         (unsigned)loc.newest_idx,
-         cp->journal_sequence);
+    LOGI(LOG_TAG_CP "find latest seq=%lu idx=%u jrn_seq=%lu\r\n", cp->sequence, (unsigned)loc.newest_idx, cp->journal_sequence);
     return FTL_OK;
 }
 
@@ -1187,8 +1159,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
             {
                 *out_layout_version = hdr->layout_version;
             }
-            return (hdr->layout_version == FTL_MEDIA_LAYOUT_VERSION) ? CP_MEDIA_CURRENT
-                                                                     : CP_MEDIA_VERSION_MISMATCH;
+            return (hdr->layout_version == FTL_MEDIA_LAYOUT_VERSION) ? CP_MEDIA_CURRENT : CP_MEDIA_VERSION_MISMATCH;
         }
 
         return CP_MEDIA_IO_ERROR; /* locate 看到了 record，重读却读不通 */
@@ -1264,9 +1235,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  *             因历史路径停在 NONE，也编码成 LOG + no-pool，保证快照自洽
  *             （RISK-BOOT-15；否则一次 rebuild 之后的 CP 会让下次开机整份拒绝）。
  * -------------------------------------------------------------------- */
-void cp_block_snapshot(const alc_t          *alloc,
-                       const md_dir_cache_t *md_dir,
-                       WORD                  words[FTL_BLOCK_TOTAL])
+void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD words[FTL_BLOCK_TOTAL])
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
@@ -1298,8 +1267,7 @@ void cp_block_snapshot(const alc_t          *alloc,
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
-                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
-                            (CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
+                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) | (CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
             }
         }
         for (WORD i = 0U; i < alc_spare_get_count(alloc, p); i++)
@@ -1308,8 +1276,7 @@ void cp_block_snapshot(const alc_t          *alloc,
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
-                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
-                            (CP_BLOCK_POOL_SPARE << CP_BLOCK_WORD_POOL_SHIFT));
+                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) | (CP_BLOCK_POOL_SPARE << CP_BLOCK_WORD_POOL_SHIFT));
             }
         }
     }
@@ -1349,8 +1316,7 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
             entries[i].erase_count = wear.erase_count;
             entries[i].read_count  = wear.read_count;
             entries[i].last_ecc    = wear.rr.last_ecc;
-            entries[i].flags       = ((rising & CP_WEAR_RISING_MASK) |
-                                ((health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
+            entries[i].flags       = ((rising & CP_WEAR_RISING_MASK) | ((health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
         }
         else
         {
@@ -1370,9 +1336,7 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
  *             逐页应用：中途某页失败时，**已读页已回填**，其余块保持默认计数。
  *             失败只表示软状态不完整，**不得**触发格式化。
  * -------------------------------------------------------------------- */
-bool cp_wear_table_load(cp_handle_t       *h,
-                        const cp_header_t *cp,
-                        WORD               record_idx)
+bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
 {
     /* 读缓冲复用 cp_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
     ASSERT(h->active == 0U);
@@ -1381,16 +1345,9 @@ bool cp_wear_table_load(cp_handle_t       *h,
     {
         return false; /* initial CP / 旧记录：无磨损快照 */
     }
-    if ((cp->wear_entry_count != FTL_BLOCK_TOTAL) ||
-        (cp->wear_entry_bytes != FTL_CHECKPOINT_WEAR_ENTRY_BYTES) ||
-        (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES) ||
-        (cp->record_pages != CP_RECORD_PAGES))
+    if ((cp->wear_entry_count != FTL_BLOCK_TOTAL) || (cp->wear_entry_bytes != FTL_CHECKPOINT_WEAR_ENTRY_BYTES) || (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES) || (cp->record_pages != CP_RECORD_PAGES))
     {
-        LOGW(LOG_TAG_WEAR "snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
-             cp->wear_entry_count,
-             cp->wear_entry_bytes,
-             cp->wear_page_count,
-             cp->record_pages);
+        LOGW(LOG_TAG_WEAR "snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu rec=%lu)\r\n", cp->wear_entry_count, cp->wear_entry_bytes, cp->wear_page_count, cp->record_pages);
         return false;
     }
 
@@ -1408,11 +1365,7 @@ bool cp_wear_table_load(cp_handle_t       *h,
         {
             const BYTE plane      = md_ring_plane_at(ring.plane_mask, pi);
             const BYTE page_index = (1U + CP_BLOCK_PAGES + p);
-            DWORD      addr       = md_ring_addr_plane(&ring,
-                                            &h->topo,
-                                            record_idx,
-                                            page_index,
-                                            plane);
+            DWORD      addr       = md_ring_addr_plane(&ring, &h->topo, record_idx, page_index, plane);
 
             if (ftl_sync_read_page(addr, page, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
@@ -1441,8 +1394,7 @@ bool cp_wear_table_load(cp_handle_t       *h,
                 wear.read_count      = entries[i].read_count;
                 wear.rr.last_ecc     = entries[i].last_ecc;
                 wear.rr.rising_count = (BYTE)(entries[i].flags & CP_WEAR_RISING_MASK);
-                wear.rr.health       = (rr_block_health_e)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) &
-                                                     CP_WEAR_HEALTH_MASK);
+                wear.rr.health       = (rr_block_health_e)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) & CP_WEAR_HEALTH_MASK);
 
                 alc_bst_set_wear(h->alloc, g, &wear);
             }
@@ -1472,25 +1424,15 @@ bool cp_wear_table_load(cp_handle_t       *h,
  *             快照损坏**不得**触发格式化，也不得回退到更旧的 Checkpoint——
  *             旧快照属于旧 L2P 快照，回退会丢 journal 已截断的映射。
  * -------------------------------------------------------------------- */
-bool cp_block_table_load(cp_handle_t       *h,
-                         const cp_header_t *cp,
-                         WORD               record_idx,
-                         WORD               block_words[FTL_BLOCK_TOTAL])
+bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx, WORD block_words[FTL_BLOCK_TOTAL])
 {
     if (cp->block_page_count == 0U)
     {
         return false; /* initial CP / 旧记录：无快照 */
     }
-    if ((cp->block_word_count != FTL_BLOCK_TOTAL) ||
-        (cp->block_word_bytes != CP_BLOCK_WORD_BYTES) ||
-        (cp->block_page_count != CP_BLOCK_PAGES) ||
-        (cp->record_pages != CP_RECORD_PAGES))
+    if ((cp->block_word_count != FTL_BLOCK_TOTAL) || (cp->block_word_bytes != CP_BLOCK_WORD_BYTES) || (cp->block_page_count != CP_BLOCK_PAGES) || (cp->record_pages != CP_RECORD_PAGES))
     {
-        LOGW(LOG_TAG_BLK "header fields inconsistent (words=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
-             cp->block_word_count,
-             cp->block_word_bytes,
-             cp->block_page_count,
-             cp->record_pages);
+        LOGW(LOG_TAG_BLK "header fields inconsistent (words=%lu bytes=%lu pages=%lu rec=%lu)\r\n", cp->block_word_count, cp->block_word_bytes, cp->block_page_count, cp->record_pages);
         return false;
     }
 
@@ -1512,10 +1454,7 @@ bool cp_block_table_load(cp_handle_t       *h,
             const DWORD word_offset = p * CP_BLOCK_WORDS_PER_PAGE;
             DWORD       addr        = md_ring_addr_plane(&ring, &h->topo, record_idx, page_index, plane);
 
-            if (ftl_sync_read_page(addr,
-                                   &block_words[word_offset],
-                                   PAGE_MAIN_SIZE,
-                                   FTL_PAGE_CFG_META()) != FTL_OK)
+            if (ftl_sync_read_page(addr, &block_words[word_offset], PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
                 fail_page = p;
                 ok        = false;
@@ -1550,11 +1489,7 @@ bool cp_block_table_load(cp_handle_t       *h,
  *   实现要点：整体 memset 后再写回窄上下文；调用点必须在任何 job 字段被读之前
  *             （与旧的“先 memset 再绑定”顺序一致）。
  * -------------------------------------------------------------------- */
-void cp_init(cp_handle_t    *h,
-             l2p_cache_t    *cache,
-             l2p_jrn_t      *journal,
-             md_dir_cache_t *metadata_dir,
-             alc_t          *alloc)
+void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cache_t *metadata_dir, alc_t *alloc)
 {
     ASSERT(h != NULL);
     ASSERT(cache != NULL);
@@ -1592,9 +1527,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
 
         if (ftl_sync_write_page_mirror(addr, data, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
         {
-            LOGW(LOG_TAG_CP "init: snapshot page=%u write failed (addr=%08lx)\r\n",
-                 (unsigned)p,
-                 addr);
+            LOGW(LOG_TAG_CP "init: snapshot page=%u write failed (addr=%08lx)\r\n", (unsigned)p, addr);
             return false;
         }
     }
@@ -1619,13 +1552,9 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
     BYTE        *raw   = s_probe_raw;
     ftl_status_e r1    = ftl_sync_read_page(page1, raw, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META());
 
-    if ((r1 != FTL_OK) ||
-        ((raw[0] == 0xFFU) && (raw[1] == 0xFFU) && (raw[2] == 0xFFU) && (raw[3] == 0xFFU)))
+    if ((r1 != FTL_OK) || ((raw[0] == 0xFFU) && (raw[1] == 0xFFU) && (raw[2] == 0xFFU) && (raw[3] == 0xFFU)))
     {
-        LOGW(LOG_TAG_CP "init: snapshot page1 readback %s (addr=%08lx r=%d)\r\n",
-             (r1 != FTL_OK) ? "failed" : "blank",
-             page1,
-             (int)r1);
+        LOGW(LOG_TAG_CP "init: snapshot page1 readback %s (addr=%08lx r=%d)\r\n", (r1 != FTL_OK) ? "failed" : "blank", page1, (int)r1);
         return false;
     }
 
@@ -1640,8 +1569,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
     cp_header_t *rb  = &s_probe_hdr;
     ftl_status_e rst = ftl_sync_read_page(hdr_addr, rb, sizeof(*rb), FTL_PAGE_CFG_META());
 
-    return (rst == FTL_OK) && (rb->magic == CP_MAGIC) &&
-           (rb->sequence == cp->sequence) && (rb->layout_version == FTL_MEDIA_LAYOUT_VERSION);
+    return (rst == FTL_OK) && (rb->magic == CP_MAGIC) && (rb->sequence == cp->sequence) && (rb->layout_version == FTL_MEDIA_LAYOUT_VERSION);
 }
 
 ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
@@ -1691,10 +1619,7 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
 
         if (cp_initial_record_write_checked(ftl, &ring, slot, words, cp))
         {
-            LOGI(LOG_TAG_CP "init candidate block=%u slot=%u ok (base=%08lx)\r\n",
-                 (unsigned)ring.blocks[bi],
-                 (unsigned)slot,
-                 base);
+            LOGI(LOG_TAG_CP "init candidate block=%u slot=%u ok (base=%08lx)\r\n", (unsigned)ring.blocks[bi], (unsigned)slot, base);
 
             for (BYTE fi = 0U; fi < failed_count; fi++)
             {
@@ -1707,9 +1632,7 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
             return FTL_OK;
         }
 
-        LOGW(LOG_TAG_CP "init candidate block=%u slot=%u write/readback failed, try next\r\n",
-             (unsigned)ring.blocks[bi],
-             (unsigned)slot);
+        LOGW(LOG_TAG_CP "init candidate block=%u slot=%u write/readback failed, try next\r\n", (unsigned)ring.blocks[bi], (unsigned)slot);
         if (failed_count < CHECKPOINT_POOL_BLOCKS)
         {
             failed_blocks[failed_count++] = ring.blocks[bi];
@@ -1833,11 +1756,7 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
              * ⚠ 起点在 cp_job_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。 */
             if (ftl_job_heartbeat(&h->log_ms, &h->start_ms))
             {
-                LOGI(LOG_TAG_CP "job phase=%u wait=%u fail=%u age=%lums\r\n",
-                     (unsigned)h->phase,
-                     (unsigned)h->waiting,
-                     (unsigned)h->failed,
-                     ftl_job_age_ms(&h->start_ms));
+                LOGI(LOG_TAG_CP "job phase=%u wait=%u fail=%u age=%lums\r\n", (unsigned)h->phase, (unsigned)h->waiting, (unsigned)h->failed, ftl_job_age_ms(&h->start_ms));
             }
 
             cp_job_step(h);

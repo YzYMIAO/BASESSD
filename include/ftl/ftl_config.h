@@ -335,13 +335,7 @@ _Static_assert(PBA_USED_BITS <= 32U, "PBA 编码超出 32 位");
  * 声明 lun 成员，故把那一处 #if 收敛在本函数里（PBA_LUN_MASK 为 0 ⇒ lun 自然被忽略）。 */
 static inline DWORD pba_make(DWORD ch, DWORD ce, DWORD lun, DWORD block, DWORD plane, DWORD page, DWORD cw)
 {
-    return ((DWORD)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
-           ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) |
-           ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
-           ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
-           ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
-           ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
-           ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
+    return ((DWORD)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) | ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) | ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
 /* 字段视图 → PBA 字（值语义，pba_fields 的逆）。 */
@@ -458,45 +452,38 @@ static inline DWORD pba_page(DWORD pba)
 /* 同 page 内换 CW */
 static inline DWORD pba_with_cw(DWORD pba, DWORD cw)
 {
-    return (pba & ~NAND_FIELD_MASK(CW_WIDTH)) |
-           ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
+    return (pba & ~NAND_FIELD_MASK(CW_WIDTH)) | ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
 }
 
 /* 替换 PBA 中的各字段（直接按 PBA 移位，不经 PAA 往返） */
 static inline DWORD pba_with_page(DWORD pba, DWORD page)
 {
-    return ((pba & ~(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) |
-            ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
+    return ((pba & ~(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
 }
 
 static inline DWORD pba_with_plane(DWORD pba, DWORD plane)
 {
-    return ((pba & ~(PBA_PLANE_MASK << PLANE_CW_SHIFT)) |
-            ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT));
+    return ((pba & ~(PBA_PLANE_MASK << PLANE_CW_SHIFT)) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT));
 }
 
 static inline DWORD pba_with_block(DWORD pba, DWORD block)
 {
-    return ((pba & ~(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) |
-            ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
+    return ((pba & ~(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
 }
 
 static inline DWORD pba_with_lun(DWORD pba, DWORD lun)
 {
-    return ((pba & ~(PBA_LUN_MASK << PBA_LUN_SHIFT)) |
-            ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
+    return ((pba & ~(PBA_LUN_MASK << PBA_LUN_SHIFT)) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
 }
 
 static inline DWORD pba_with_ch(DWORD pba, DWORD ch)
 {
-    return ((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) |
-            ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
+    return ((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) | ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
 }
 
 static inline DWORD pba_with_ce(DWORD pba, DWORD ce)
 {
-    return ((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) |
-            ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
+    return ((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) | ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
 }
 
 /* ── 比较与校验 ── */
@@ -510,13 +497,7 @@ static inline bool pba_same_page(DWORD a, DWORD b)
 /* 各字段是否在芯片规格范围内 */
 static inline bool pba_is_valid(DWORD pba)
 {
-    return (pba_to_page(pba) < PAGES_PER_BLOCK) &&
-           (pba_to_plane(pba) < PLANE_NUM) &&
-           (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
-           (pba_to_lun(pba) < LUN_NUM) &&
-           (pba_to_cw(pba) < CW_NUM) &&
-           (pba_to_ch(pba) < CH_NUM) &&
-           (pba_to_ce(pba) < CE_NUM);
+    return (pba_to_page(pba) < PAGES_PER_BLOCK) && (pba_to_plane(pba) < PLANE_NUM) && (pba_to_block(pba) < BLOCKS_PER_PLANE) && (pba_to_lun(pba) < LUN_NUM) && (pba_to_cw(pba) < CW_NUM) && (pba_to_ch(pba) < CH_NUM) && (pba_to_ce(pba) < CE_NUM);
 }
 
 /* ══════════════════════════════════════════════════════════════════

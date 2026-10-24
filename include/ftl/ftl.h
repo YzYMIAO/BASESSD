@@ -89,24 +89,19 @@
  * ⚠ shared metadata spare 也必须计入：它是固定元数据分区的坏块替换池
  *   （BBT + sparing 的主流形态，见 metadata.h）。
  */
-#define FTL_HOST_DATA_BLOCKS_PER_INSTANCE                                  \
-    (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + \
-                         FTL_SPARE_POOL_PER_PLANE) *                       \
-                        PLANE_NUM))
+#define FTL_HOST_DATA_BLOCKS_PER_INSTANCE (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE) * PLANE_NUM))
 
 /* 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
  * （每 (ch,ce,lun) 是独立 FTL 实例；DIM=1 时 3392×256 = 868,352 = 424 MiB）。
  * ⚠ 这是**L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
  *   对外一律以 `ssd_controller_t.host_lba_max` 为准（RISK-CAP-03）。 */
-#define FTL_LBA_MAX \
-    ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
+#define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
 
 /* 主机可见容量（字节）：给日志/文档用，和 USB MSC 的 READ CAPACITY 同源。 */
 #define FTL_HOST_CAPACITY_BYTES ((QWORD)FTL_LBA_MAX * FTL_IU_BYTES)
 
 /* 主机范围必须落在共享 cache 的键空间内（C9：同一语义只允许一套上限）。 */
-_Static_assert((QWORD)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX,
-               "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
+_Static_assert((QWORD)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
 
 /* ── FTL 主上下文 ── */
 

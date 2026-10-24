@@ -54,19 +54,11 @@ extern BYTE g_nand_dma_enable;
 
 nand_dma_result_e nand_dma_init(void);
 
-nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
-                                         const BYTE    *buffer,
-                                         WORD           length);
-nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
-                                         BYTE          *buffer,
-                                         WORD           length);
+nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg, const BYTE *buffer, WORD length);
+nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg, BYTE *buffer, WORD length);
 
-nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
-                                                  const BYTE    *buffer,
-                                                  WORD           length);
-nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
-                                                  BYTE          *buffer,
-                                                  WORD           length);
+nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg, const BYTE *buffer, WORD length);
+nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg, BYTE *buffer, WORD length);
 
 BYTE nand_dma_data_out_done(void);
 BYTE nand_dma_data_in_done(void);

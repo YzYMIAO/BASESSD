@@ -25,8 +25,7 @@
 #include <string.h>
 
 #if defined(__GNUC__) && !defined(__MINGW32__)
-#    define ASSERTION_PRINTF(string_index, first_to_check) \
-        __attribute__((format(printf, string_index, first_to_check)))
+#    define ASSERTION_PRINTF(string_index, first_to_check) __attribute__((format(printf, string_index, first_to_check)))
 #else
 #    define ASSERTION_PRINTF(string_index, first_to_check)
 #endif
@@ -133,8 +132,7 @@ void assertion_platform_context(void);
         }                                                                                                                                                                   \
     } while (0)
 
-#define ASSERT_TYPE(T, fmt, a, op, b) \
-    ASSERT_TYPE_FULL("", "", T, fmt, a, op, b)
+#define ASSERT_TYPE(T, fmt, a, op, b) ASSERT_TYPE_FULL("", "", T, fmt, a, op, b)
 
 #define ASSERT_CHAR(a, op, b)   ASSERT_TYPE_FULL("'\\x", "'", char, "02x", a, op, b)
 #define ASSERT_UCHAR(a, op, b)  ASSERT_TYPE_FULL("'\\x", "'", unsigned char, "02x", a, op, b)
@@ -184,18 +182,16 @@ void assertion_platform_context(void);
 #define ASSERT_NULL(ptr)           ASSERT_PTR(ptr, ==, NULL)
 #define ASSERT_NOT_NULL(ptr)       ASSERT_PTR(ptr, !=, NULL)
 
-#define ASSERT_DOUBLE_EQUAL(a, b, precision)                                                                                                        \
-    do                                                                                                                                              \
-    {                                                                                                                                               \
-        const double assertion_tmp_a_    = (a);                                                                                                     \
-        const double assertion_tmp_b_    = (b);                                                                                                     \
-        const double assertion_tmp_diff_ = ((assertion_tmp_a_ - assertion_tmp_b_) < 0)                                                              \
-                                               ? -(assertion_tmp_a_ - assertion_tmp_b_)                                                             \
-                                               : (assertion_tmp_a_ - assertion_tmp_b_);                                                             \
-        if (ASSERT_UNLIKELY(assertion_tmp_diff_ > 1e-##precision))                                                                                  \
-        {                                                                                                                                           \
-            assertion_failf(__FILE__, __LINE__, "%s == %s (%0." #precision "g == %0." #precision "g)", #a, #b, assertion_tmp_a_, assertion_tmp_b_); \
-        }                                                                                                                                           \
+#define ASSERT_DOUBLE_EQUAL(a, b, precision)                                                                                                                             \
+    do                                                                                                                                                                   \
+    {                                                                                                                                                                    \
+        const double assertion_tmp_a_    = (a);                                                                                                                          \
+        const double assertion_tmp_b_    = (b);                                                                                                                          \
+        const double assertion_tmp_diff_ = ((assertion_tmp_a_ - assertion_tmp_b_) < 0) ? -(assertion_tmp_a_ - assertion_tmp_b_) : (assertion_tmp_a_ - assertion_tmp_b_); \
+        if (ASSERT_UNLIKELY(assertion_tmp_diff_ > 1e-##precision))                                                                                                       \
+        {                                                                                                                                                                \
+            assertion_failf(__FILE__, __LINE__, "%s == %s (%0." #precision "g == %0." #precision "g)", #a, #b, assertion_tmp_a_, assertion_tmp_b_);                      \
+        }                                                                                                                                                                \
     } while (0)
 
 #define ASSERT_STRING_EQUAL(a, b)                                                                                                  \

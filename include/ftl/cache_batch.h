@@ -81,11 +81,6 @@ typedef struct
  *   AGAIN —— 资源/空间瞬态，本轮停止 drain；
  *   ERROR —— 永久错误，组报 IO_ERROR。
  */
-ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl,
-                                             WORD                gi,
-                                             DWORD               lba,
-                                             void               *buffer,
-                                             DWORD               remain,
-                                             DWORD              *used);
+ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 #endif /* FTL_CACHE_BATCH_H */

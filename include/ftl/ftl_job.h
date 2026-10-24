@@ -87,9 +87,7 @@ static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
         return false;
     }
 
-    const DWORD interval = ((now_ms - *start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS)
-                               ? FTL_JOB_LOG_SLOW_INTERVAL_MS
-                               : FTL_JOB_LOG_INTERVAL_MS;
+    const DWORD interval = ((now_ms - *start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
 
     if ((now_ms - *log_ms) < interval)
     {

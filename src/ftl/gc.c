@@ -151,10 +151,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
  * ⚠ 同步版（gc_read_page_with_lba）与异步搬移 job（migrate.c）共用本函数——解码规则
  *   只此一份，避免两处漂移。
  * -------------------------------------------------------------------- */
-gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
-                             DWORD         pba,
-                             DWORD         cw_lba[CW_NUM],
-                             DWORD        *page_base_out)
+gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out)
 {
     const BYTE phys_plane = pba_to_plane(pba);
 
@@ -178,8 +175,7 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
         memcpy(&m, meta_ptr, sizeof(m));
 
         /* 合法 META 判据：非全 1（未写过）+ 低位 plane/cw 与本 CW 自洽 */
-        if ((m == FTL_LBA_INVALID) || (ftl_lba_cw(m) != c) ||
-            (ftl_lba_plane(m) != phys_plane))
+        if ((m == FTL_LBA_INVALID) || (ftl_lba_cw(m) != c) || (ftl_lba_plane(m) != phys_plane))
         {
             continue;
         }

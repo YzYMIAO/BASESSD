@@ -273,9 +273,7 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
         }
 
         /* 首次进入：启动 DMA（memory → FMC data reg） */
-        dma_ok = nand_dma_memory_to_fmc_start_IT(config->data,
-                                                 src,
-                                                 request->data_length);
+        dma_ok = nand_dma_memory_to_fmc_start_IT(config->data, src, request->data_length);
         if (dma_ok == 0U)
         {
             return NAND_RESULT_NOT_READY; /* DMA 启动中 */
@@ -336,13 +334,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
                 /* DEBUG 档：默认（log level info）不打印——同一次上电
                  * src/nand/devices/mt29f___g08a.c 已有一条 [INF] LOG_TAG_NAND "ID=..."，字节相同。
                  * 提到 INFO 会在用例体内抢先写 UART，粘在 munit 的结果行中间。 */
-                LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-                     request->buffer[0],
-                     request->buffer[1],
-                     request->buffer[2],
-                     request->buffer[3],
-                     request->buffer[4],
-                     (void *)request->buffer);
+                LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
             }
             completion->transfer_status = NAND_RESULT_OK;
             return NAND_RESULT_OK;
@@ -355,9 +347,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
         }
 
         /* 首次进入：启动 DMA（FMC data reg → memory） */
-        dma_ok = nand_dma_fmc_to_memory_start_IT(config->data,
-                                                 dst,
-                                                 request->data_length);
+        dma_ok = nand_dma_fmc_to_memory_start_IT(config->data, dst, request->data_length);
         if (dma_ok == 0U)
         {
             return NAND_RESULT_NOT_READY;
@@ -377,13 +367,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     if (request->operation == OP_READ_ID)
     {
         /* 同 DMA 路径：DEBUG 档，默认 INFO 档不打印（见上）。 */
-        LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-             request->buffer[0],
-             request->buffer[1],
-             request->buffer[2],
-             request->buffer[3],
-             request->buffer[4],
-             (void *)request->buffer);
+        LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
     }
 
     completion->transfer_status = NAND_RESULT_OK;
@@ -445,9 +429,7 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
 
     /* 首页之前没有本批的 cache 页：FAILC 可能残留上一批结果，只查 FAIL。
      * 其余 cache 页必须同时查 FAILC（上一页 cache program 的成败）。 */
-    const BYTE bad = (request->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST)
-                         ? NAND_STATUS_FAIL
-                         : (BYTE)(NAND_STATUS_FAIL | NAND_STATUS_FAILC);
+    const BYTE bad = (request->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) ? NAND_STATUS_FAIL : (BYTE)(NAND_STATUS_FAIL | NAND_STATUS_FAILC);
 
     return ((completion->nand_status & bad) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
 }
@@ -473,20 +455,19 @@ static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop
  * g_nand_fmc_handlers — UOP → handler 调度表
  *   说明与注意事项见文件开头的前向声明处。
  * -------------------------------------------------------------------- */
-static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
-    {
-        [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
-        [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
-        [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,
-        [NAND_UOP_COLUMN_1]          = nand_fmc_exec_column_1,
-        [NAND_UOP_ROW_0]             = nand_fmc_exec_row_0,
-        [NAND_UOP_ROW_1]             = nand_fmc_exec_row_1,
-        [NAND_UOP_ROW_2]             = nand_fmc_exec_row_2,
-        [NAND_UOP_DATA_IN]           = nand_fmc_exec_data_in,
-        [NAND_UOP_DATA_OUT]          = nand_fmc_exec_data_out,
-        [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
-        [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
-        [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
-        [NAND_UOP_CHECK_FAIL_CACHE]  = nand_fmc_exec_check_fail_cache,
-        [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
+static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] = {
+    [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
+    [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
+    [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,
+    [NAND_UOP_COLUMN_1]          = nand_fmc_exec_column_1,
+    [NAND_UOP_ROW_0]             = nand_fmc_exec_row_0,
+    [NAND_UOP_ROW_1]             = nand_fmc_exec_row_1,
+    [NAND_UOP_ROW_2]             = nand_fmc_exec_row_2,
+    [NAND_UOP_DATA_IN]           = nand_fmc_exec_data_in,
+    [NAND_UOP_DATA_OUT]          = nand_fmc_exec_data_out,
+    [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
+    [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
+    [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
+    [NAND_UOP_CHECK_FAIL_CACHE]  = nand_fmc_exec_check_fail_cache,
+    [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
 };

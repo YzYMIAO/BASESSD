@@ -41,9 +41,7 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter);
  * data_out[0..527] → 528B 码字（520B data + 8B parity）
  * qc/data_in/data_out 非空为前置条件（违反一律 ASSERT）；未初始化时静默返回。
  */
-void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
-                       const BYTE         *data_in,
-                       BYTE               *data_out);
+void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out);
 
 /*
  * QC-LDPC 硬判决解码

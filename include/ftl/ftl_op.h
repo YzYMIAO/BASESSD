@@ -93,9 +93,7 @@ typedef enum
 /* op_tag 只有 7 位（fc_command_t.op_tag）⇒ 槽数上限 128。 */
 _Static_assert(FTL_OP_COUNT <= 128U, "ftl_op_id_e 必须装进 fc_command_t.op_tag:7");
 
-typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
-                                     const fc_command_status_t *completion,
-                                     void                      *ctx);
+typedef void (*ftl_op_callback_fn_t)(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *

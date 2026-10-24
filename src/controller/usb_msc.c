@@ -164,23 +164,12 @@ static void usb_msc_note_write(DWORD bufsize)
 
 void usb_msc_io_stats_print(void)
 {
-    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu <=16K=%lu >16K=%lu\r\n",
-         s_wr_hist.calls,
-         s_wr_hist.bytes,
-         s_wr_hist.le_block,
-         s_wr_hist.le_4k,
-         s_wr_hist.le_epbuf,
-         s_wr_hist.gt_epbuf);
+    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu <=16K=%lu >16K=%lu\r\n", s_wr_hist.calls, s_wr_hist.bytes, s_wr_hist.le_block, s_wr_hist.le_4k, s_wr_hist.le_epbuf, s_wr_hist.gt_epbuf);
 
     {
         const DWORD avg_us = (s_lat.calls == 0U) ? 0U : (DWORD)(s_lat.total_us / s_lat.calls);
 
-        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%llums\r\n",
-             s_lat.calls,
-             avg_us,
-             s_lat.max_us,
-             s_lat.last_us,
-             s_lat.total_us / 1000U);
+        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%llums\r\n", s_lat.calls, avg_us, s_lat.max_us, s_lat.last_us, s_lat.total_us / 1000U);
     }
 }
 
@@ -203,8 +192,7 @@ static bool usb_msc_ready(void)
 
 static bool usb_msc_io_matches(bool is_write, DWORD lba, DWORD offset, DWORD length)
 {
-    return (s_msc_io.is_write == is_write) && (s_msc_io.lba == lba) &&
-           (s_msc_io.offset == offset) && (s_msc_io.length == length);
+    return (s_msc_io.is_write == is_write) && (s_msc_io.lba == lba) && (s_msc_io.offset == offset) && (s_msc_io.length == length);
 }
 
 /* 把 s_msc_io 里已登记的请求提交给 controller。
@@ -281,8 +269,7 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
 
     /* offset 只在端点缓冲小于 block 时非零；本仓 16384B ≥ 512B，恒为 0。
      * length 是主机数据阶段长度，先做边界检查再交给内部（H29/H31）。 */
-    if ((offset != 0U) || (length == 0U) || (length > sizeof(s_msc_bounce)) ||
-        ((length % USB_MSC_BLOCK_SIZE) != 0U))
+    if ((offset != 0U) || (length == 0U) || (length > sizeof(s_msc_bounce)) || ((length % USB_MSC_BLOCK_SIZE) != 0U))
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -383,8 +370,7 @@ void usb_msc_task(void)
     }
 
     /* FLUSH 无数据阶段：成功回执为 0（TinyUSB 侧已按命令类型区分 0 的语义）。 */
-    const int32_t transfer_result =
-        ok ? (s_msc_io.is_flush ? 0 : (int32_t)s_msc_io.length) : TUD_MSC_RET_ERROR;
+    const int32_t transfer_result = ok ? (s_msc_io.is_flush ? 0 : (int32_t)s_msc_io.length) : TUD_MSC_RET_ERROR;
 
     s_msc_io.state = USB_MSC_IO_IDLE;
     /* false = 主机已复位、命令已作废（pending_io 被清），无需处理。 */
@@ -536,8 +522,7 @@ void tud_event_hook_cb(BYTE rhport, DWORD eventid, bool in_isr)
     (void)rhport;
     (void)in_isr;
 
-    if ((eventid != DCD_EVENT_BUS_RESET_START) && (eventid != DCD_EVENT_BUS_RESET_END) &&
-        (eventid != DCD_EVENT_UNPLUGGED))
+    if ((eventid != DCD_EVENT_BUS_RESET_START) && (eventid != DCD_EVENT_BUS_RESET_END) && (eventid != DCD_EVENT_UNPLUGGED))
     {
         return;
     }

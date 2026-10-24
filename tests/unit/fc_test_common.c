@@ -435,9 +435,7 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
-    ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) ||
-           (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) ||
-           (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
+    ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -483,8 +481,7 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
-    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITH_DATA_OUT) ||
-           (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT));
+    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -499,10 +496,7 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
     /* cw_bitmap 与 test_prog_page 同口径。meta 由调用者给：普通读传**本页 PBA**
      * （与写路径一致，否则 Pass 4 ② 报错）；内部搬移用例要传**源页 PBA**——那页的
      * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_level3.c 的搬移用例）。 */
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index},
-                         test_plane_cw_bitmap(plane_bitmap),
-                         meta,
-                         config);
+    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index}, test_plane_cw_bitmap(plane_bitmap), meta, config);
 
     /* 读前 USER 区预填 0xCC：NAND 没填满时残留可见，便于区分「读失败」与「读到真数据」。 */
     test_memset_read_buffer(cmd);
@@ -624,8 +618,7 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
         fc_command_status_t completion;
 
         conf           = *config;
-        conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST
-                                      : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+        conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
 
         completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, page, &conf, NULL);
 
@@ -642,10 +635,7 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
     }
 
-    test_trace_summary("multi-plane cache prog block=%u: %u x 80h-11h-80h-15h + 1 x 80h-11h-80h-10h = %u pairs",
-                       (unsigned)block_index,
-                       (unsigned)(PAGES_PER_BLOCK - 1U),
-                       (unsigned)PAGES_PER_BLOCK);
+    test_trace_summary("multi-plane cache prog block=%u: %u x 80h-11h-80h-15h + 1 x 80h-11h-80h-10h = %u pairs", (unsigned)block_index, (unsigned)(PAGES_PER_BLOCK - 1U), (unsigned)PAGES_PER_BLOCK);
 
     if (data != NULL)
     {
@@ -666,10 +656,7 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
     fc_command_t       *cmd;
     fc_command_status_t completion;
 
-    cmd = test_cmd_build(&addr,
-                         test_plane_cw_bitmap(plane_bitmap),
-                         (uint32_t)pba_from_addr(&addr),
-                         config);
+    cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), config);
 
     test_memset_read_buffer(cmd);
 
@@ -707,13 +694,7 @@ static fc_command_status_t test_cache_start_seq(uint16_t block_index, uint8_t pl
 
     test_capture_cmd(cmd);
 
-    test_trace_detail("cache start p%02u op=%u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X",
-                      (unsigned)page,
-                      (unsigned)operation,
-                      (unsigned long)pba_from_addr(&addr),
-                      (unsigned)plane_bitmap,
-                      (unsigned)test_cw_count(cmd),
-                      (unsigned)completion.status);
+    test_trace_detail("cache start p%02u op=%u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X", (unsigned)page, (unsigned)operation, (unsigned long)pba_from_addr(&addr), (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return completion;
@@ -820,10 +801,7 @@ void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
         test_verify_page_paa(g_source_data, block_index, last_page, TEST_PLANE_BM_ALL);
     }
 
-    test_trace_summary("multi-plane cache read block=%u: START_SEQ_MP + %u SEQ_MP + LAST_MP = %u commands, both planes PAA-verified",
-                       (unsigned)block_index,
-                       (unsigned)(PAGES_PER_BLOCK - 2U),
-                       (unsigned)PAGES_PER_BLOCK);
+    test_trace_summary("multi-plane cache read block=%u: START_SEQ_MP + %u SEQ_MP + LAST_MP = %u commands, both planes PAA-verified", (unsigned)block_index, (unsigned)(PAGES_PER_BLOCK - 2U), (unsigned)PAGES_PER_BLOCK);
 
     if (data != NULL)
     {
@@ -875,13 +853,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     completion = test_submit_wait(cmd);
     test_capture_cmd(cmd);
 
-    test_trace_detail("cache random addr=p%02u -> out=p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X",
-                      (unsigned)addr_page,
-                      (unsigned)prefetched,
-                      (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}),
-                      (unsigned)plane_bitmap,
-                      (unsigned)test_cw_count(cmd),
-                      (unsigned)completion.status);
+    test_trace_detail("cache random addr=p%02u -> out=p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X", (unsigned)addr_page, (unsigned)prefetched, (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
 
     test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
     munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
@@ -907,15 +879,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
         test_verify_page_paa(g_source_data, block_index, next_page, plane_bitmap);
     }
 
-    test_trace_summary("cache random block=%u bm=0x%02X: START_SEQ(p%02u) out=p%02u -> RANDOM(addr=p%02u) out=p%02u -> 31h out=p%02u -> 3Fh out=p%02u, 4 pages PAA-verified",
-                       (unsigned)block_index,
-                       (unsigned)plane_bitmap,
-                       (unsigned)prev_page,
-                       (unsigned)prev_page,
-                       (unsigned)addr_page,
-                       (unsigned)prefetched,
-                       (unsigned)addr_page,
-                       (unsigned)(addr_page + 1U));
+    test_trace_summary("cache random block=%u bm=0x%02X: START_SEQ(p%02u) out=p%02u -> RANDOM(addr=p%02u) out=p%02u -> 31h out=p%02u -> 3Fh out=p%02u, 4 pages PAA-verified", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)prev_page, (unsigned)prev_page, (unsigned)addr_page, (unsigned)prefetched, (unsigned)addr_page, (unsigned)(addr_page + 1U));
 }
 
 /**************************************************************************
@@ -935,8 +899,7 @@ void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_in
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
     ASSERT(page_index < PAGES_PER_BLOCK);
-    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) ||
-           (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT));
+    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) || (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -1188,18 +1151,12 @@ void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t pa
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
-            const uint8_t *slot = &data[((uint32_t)plane * CW_NUM + (uint32_t)cw) * FC_BUFFER_USER_SIZE];
-            DWORD          expected =
-                paa_from_addr(&(nand_addr_t){.block = block_index, .plane = plane, .page = page_index, .cw = cw});
+            const uint8_t *slot     = &data[((uint32_t)plane * CW_NUM + (uint32_t)cw) * FC_BUFFER_USER_SIZE];
+            DWORD          expected = paa_from_addr(&(nand_addr_t){.block = block_index, .plane = plane, .page = page_index, .cw = cw});
 
             if (test_check_paa(slot, expected) == 0U)
             {
-                munit_errorf("PAA mismatch: block=%u page=%u plane=%u cw=%u (expected paa=0x%08lX)",
-                             (unsigned)block_index,
-                             (unsigned)page_index,
-                             (unsigned)plane,
-                             (unsigned)cw,
-                             (unsigned long)expected);
+                munit_errorf("PAA mismatch: block=%u page=%u plane=%u cw=%u (expected paa=0x%08lX)", (unsigned)block_index, (unsigned)page_index, (unsigned)plane, (unsigned)cw, (unsigned long)expected);
                 return;
             }
         }
@@ -1223,12 +1180,7 @@ void test_verify_erased(const fc_command_t *cmd)
         {
             if (buf[i] != 0xFFU)
             {
-                munit_errorf("chain[%u] plane=%u cw=%u offset=%u: got 0x%02X expected 0xFF (erased)",
-                             (unsigned)idx,
-                             (unsigned)paa_to_plane(desc->paa),
-                             (unsigned)paa_to_cw(desc->paa),
-                             (unsigned)i,
-                             (unsigned)buf[i]);
+                munit_errorf("chain[%u] plane=%u cw=%u offset=%u: got 0x%02X expected 0xFF (erased)", (unsigned)idx, (unsigned)paa_to_plane(desc->paa), (unsigned)paa_to_cw(desc->paa), (unsigned)i, (unsigned)buf[i]);
                 return;
             }
         }
@@ -1251,11 +1203,7 @@ uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd)
 
         if ((desc->status & FC_CW_STATUS_SUCCESS) == 0U)
         {
-            munit_errorf("chain[%u] plane=%u cw=%u status=0x%02X expected FC_CW_STATUS_SUCCESS",
-                         (unsigned)idx,
-                         (unsigned)paa_to_plane(desc->paa),
-                         (unsigned)paa_to_cw(desc->paa),
-                         (unsigned)desc->status);
+            munit_errorf("chain[%u] plane=%u cw=%u status=0x%02X expected FC_CW_STATUS_SUCCESS", (unsigned)idx, (unsigned)paa_to_plane(desc->paa), (unsigned)paa_to_cw(desc->paa), (unsigned)desc->status);
             all_ok = 0U;
         }
 

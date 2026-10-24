@@ -58,10 +58,7 @@ fc_status_e fc_data_path_encode(const fc_command_t *command);
  * @return FC_STATUS_OK；ECC 编码失败时透传其返回码。
  *         参数 / desc 链损坏的前置违反一律 ASSERT（不再返回 INVALID_ARGUMENT）。
  */
-fc_status_e fc_data_path_generate_stripe_parity(
-    const fc_command_t *data_cmds[],
-    BYTE                data_count,
-    const fc_command_t *parity_cmd);
+fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[], BYTE data_count, const fc_command_t *parity_cmd);
 #endif /* CONFIG_FC_RAID */
 
 /* ── 读路径 Stage 1：ECC 解码（FC 内部，CQ push 前） ── */

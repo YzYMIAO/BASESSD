@@ -11,8 +11,7 @@
 #include "controller.h"
 #include "log.h"
 
-void ssd_controller_state_transition(ssd_controller_t *controller,
-                                     ssd_ctrl_state_e  next_state)
+void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state)
 {
     ssd_ctrl_state_e prev_state;
 
@@ -35,8 +34,7 @@ void ssd_controller_state_transition(ssd_controller_t *controller,
 
         case SSD_CONTROLLER_INITIALIZING:
             /* 槽位校验结束：全部通过 → READY；任一失败 → FAILED */
-            if ((next_state == SSD_CONTROLLER_READY) ||
-                (next_state == SSD_CONTROLLER_FAILED))
+            if ((next_state == SSD_CONTROLLER_READY) || (next_state == SSD_CONTROLLER_FAILED))
             {
                 controller->state = next_state;
             }

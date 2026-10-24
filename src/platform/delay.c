@@ -47,8 +47,7 @@ static delay_status_e delay_systick_us_busy(DWORD us)
         current = delay_port_systick_value();
         if (current != previous)
         {
-            elapsed += (current < previous) ? (previous - current)
-                                            : (reload + 1U - current + previous);
+            elapsed += (current < previous) ? (previous - current) : (reload + 1U - current + previous);
             previous = current;
         }
     }
