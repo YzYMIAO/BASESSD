@@ -2831,6 +2831,10 @@ L2P 行在加载中（`FTL_AGAIN`）则本次返回 `AGAIN`，由 drain 下轮�
 之后。成员失败**不**启动 RR（RR 会向同 LUN 插命令，破坏 31h/3Fh 管线），直接报组
 IO_ERROR。详见 `include/ftl/cache_batch.h` / `src/ftl/cache_batch.c`。
 
+> 板端证据（2026-10-25 H2testw 415 MB）：`info` 的 `cr=25931/102794/681/0`
+> （batches/pairs/declines/fallbacks），平均 **3.96 pair/batch**、`fallbacks=0` ⇒
+> host 大块顺序读确实走 cache read（修复前 `batches` 恒 0，RISK-HOST-13）。
+
 **FTL cache program 批次（host 16 KiB，本仓自定）**：`ftl_drain_group` 在写分支、wbuf
 之前先尝试 `ftl_cache_write_try()`。条件：剩余 ≥32 LBA、LBA 8 对齐、wbuf 完全空闲、
 当前 hot Open SB 的 page0 已成功编程且余量 ≥4 页、资源足够。满足时一次提交 4 条
@@ -4602,8 +4606,9 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 > `FAIL` 会把中间页失败静默当成成功。op44 与末页 op48 都使用 `CHECK_FAIL_CACHE`
 > （FAIL | FAILC）；首页用 op49 只查 FAIL，避免残留 FAILC 误判。
 > **host 16 KiB 正常路径已上板**（2026-10-23 H2testw 415/423 MB 通过、843/889 KB/s，
-> `cw` 24906/99624/0 abort）；**FAILC 负例、失败注入、掉电注入仍未做**，
-> 不得据此声称 cache program 全部已验证。
+> `cw` 24906/99624/0 abort）；无 cache program 基线为 765/884 KB/s ⇒ **写 +10%、读不变**。
+> 2026-10-25 cache read 修复后复测仍为 843/889（`cr` 已生效但读速无增益，RISK-PERF-03）。
+> **FAILC 负例、失败注入、掉电注入仍未做**，不得据此声称 cache program 全部已验证。
 
 ### ADR-16 后台调度：时间预算 + must-run
 

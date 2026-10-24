@@ -299,10 +299,18 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 
 ### 7.1 全盘 H2testw（近满盘、GC 参与）
 
-| 配置 | 写 | 读 | 条件 |
-|---|---:|---:|---|
-| release 18:51:42 | **765 KB/s** | **884 KB/s** | 415/423 MB 无错误；断电重启 `restored`、`bad=0`（当时 `dng` 为 0）、`map/rd` 抽查通过 |
-| release -O2（2026-10-25） | **843 KB/s** | **889 KB/s** | 415/423 MB 无错误；与 18:51:42 的 765/884 同量级（主机缓存/GC 状态不同，非严格 A/B） |
+| 配置 | 写 | 读 | cache 状态 | 条件 |
+|---|---:|---:|---|---|
+| release（2026-10-22 18:51，近满盘/GC） | **765 KB/s** | **884 KB/s** | program **关**；read **未生效** | 415/423 MB 无错误；断电重启 `restored`、`bad=0`（当时 `dng` 为 0）、`map/rd` 抽查通过 |
+| release -O2（2026-10-25，从空盘写满） | **843 KB/s** | **889 KB/s** | program **开**（`cw=24906/99624/7945/0`）；read **开**（`cr=25931/102794/681/0`） | 415/423 MB 无错误；`cr` 平均 **3.96 pair/batch**、`fallbacks=0`；`cw` 每批 4 页、`aborts=0`；结束时 `free=61`、`bad=3` |
+
+**收口结论**（同一 release 档，非严格 A/B：盘况/GC 不同）：
+
+- **cache program 使顺序写 765 → 843 KB/s（+10%）**；`cw` 覆盖约 389 MiB / 415.6 MiB。
+- **cache read 修复后已生效**（`cr batches=25931`，修复前恒 0），但**读速 884 → 889 KB/s
+  在噪声内**，与 `/speed/ftl_rw` 的结论一致（RISK-PERF-03：瓶颈在 CPU 数据面，不在命令开销）。
+- `cr declines=681`（约 2.6% 尝试）来自 region/块边界处不足 2 pair 的窗口；`cw declines=7945`
+  多数是 `batch_active` 时 drain 重试，不是数据回退（回退字节只有约 26 MiB）。
 
 ### 7.2 4K 随机（Windows diskspd，128 MB 文件）
 

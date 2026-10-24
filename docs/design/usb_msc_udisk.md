@@ -1,6 +1,6 @@
 # USB MSC U 盘 — 可行性、架构与实施计划
 
-> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 全盘 H2testw 通过（release + 16 KB EP + `-O2`，2026-10-25：写 843 KB/s / 读 889 KB/s，415/423 MB 无错误）；掉电/多分区待测**。
+> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 全盘 H2testw 通过（release + 16 KB EP + `-O2` + cache program/read，2026-10-25：写 843 KB/s / 读 889 KB/s，415/423 MB 无错误；`cw`/`cr` 均已生效）；掉电/多分区待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > 编译：`make all` / `make release` / `make tests UT=FC` 零新告警。
 > 上板证据（rev27）：Windows 识别 USB 磁盘 → MBR 分区 → FAT 格式化 →
