@@ -29,10 +29,10 @@
  *                          pfr_refill_spare_pools / pfr_boot_fresh_start /
  *                          pfr_boot_apply_region_bitmap / pfr_boot_clean_start /
  *                          pfr_boot_power_failure / pfr_boot_log_bad_areas
- *   3. full metadata rebuild   pfr_rebuild_l2p_stats_* / pfr_scan_write_pointer /
+ *   3. full metadata rebuild   pfr_block_is_fixed / pfr_closed_sb_add（共享）/
+ *                          pfr_rebuild_l2p_stats_* / pfr_scan_write_pointer /
  *                          pfr_close_block / pfr_rebuild_closed_sb_list
- *   4. 块元数据快照恢复    pfr_block_is_fixed / pfr_closed_sb_add /
- *                          pfr_restore_blocks / pfr_probe_blocks /
+ *   4. 块元数据快照恢复    pfr_restore_blocks / pfr_probe_blocks /
  *                          pfr_build_pools / pfr_reset_blocks
  *   5. journal replay 端口 pfr_materialize_pba / pfr_valid_add / _sub
  *
@@ -83,7 +83,8 @@ static DWORD s_rebuild_first_region;
 
 /* PFR 内部恢复原语（full metadata rebuild / fresh / clean / PF）。只在本文件使用 ⇒ static，
  * 上层只可见 pfr_media_check_format / pfr_media_format / pfr_boot_recovery
- * （docs/archive/ftl_module_contracts.md §5「PFR boot orchestrator」）。 */
+ * （docs/archive/ftl_module_contracts.md §5「PFR boot orchestrator」）。
+ * 定义在后续各分节；本文件按「入口/编排在前、机制在后」组织，跨分节调用在此统一前置声明。 */
 static void pfr_boot_carve_pools(ftl_ctx_t *ftl);
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring);
 static void pfr_boot_clean_start(ftl_ctx_t            *ftl,
@@ -97,18 +98,10 @@ static void pfr_boot_power_failure(ftl_ctx_t         *ftl,
                                    BYTE               blocks_valid,
                                    pfr_boot_result_t *result);
 static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats);
-static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE *raw_buf);
-static void pfr_close_block(ftl_ctx_t           *ftl,
-                            BYTE                 plane,
-                            WORD                 block,
-                            BYTE                 pages_written,
-                            BYTE                 temperature,
-                            pfr_rebuild_stats_t *stats);
 static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL]);
 static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_block_restore_stats_t *stats);
 static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL]);
 static void pfr_reset_blocks(ftl_ctx_t *ftl);
-static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature);
 
 /* journal replay 端口（定义在文件末尾）。 */
 static bool pfr_materialize_pba(void *ctx, DWORD pba);
@@ -1179,6 +1172,37 @@ void pfr_boot_log_bad_areas(const struct ftl_context *ftl)
  * plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需恢复。
  * ══════════════════════════════════════════════════════════════════ */
 
+/* ── 共享块 helper（full rebuild / 快照恢复共用）── */
+
+/* 固定元数据区（分区表几何；含固定预留的 L2P 日志区）。 */
+static bool pfr_block_is_fixed(WORD g)
+{
+    /* 必须按分区表的 plane_mask 判：分区只在 mask 覆盖的 plane 上预留，表外同号块
+     * 是用户数据。不要写死 "block < 某常量"——布局随介质版本演进。 */
+    return md_block_is_metadata(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
+}
+
+/* 把一个物理块发成退化单 plane Closed 条目（与 full metadata rebuild 同口径；Policy B 不要求配对）。
+ * 返回 false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。 */
+static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
+{
+    WORD plane_blocks[PLANE_NUM];
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        plane_blocks[p] = FTL_BLOCK_NO_PLANE;
+    }
+    plane_blocks[ftl_gblock_plane(g)] = ftl_gblock_block(g);
+
+    if (alc_super_closed_add(&ftl->alloc, plane_blocks, temperature) == FTL_BLOCK_NO_SB)
+    {
+        LOGE(LOG_TAG_BLK "closed_sb_list full, g=%u dropped\r\n", (unsigned)g);
+        return false;
+    }
+
+    return true;
+}
+
 /* 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank_raw（C2：唯一实现；
  * full rebuild / BBT 探针 / 元数据日志区恢复共用）。 */
 
@@ -1504,35 +1528,6 @@ static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
  *   → build_pools（唯一入池点）
  * 任一步结构非法 ⇒ 调用者 `pfr_reset_blocks` + full metadata rebuild → carve。
  * ══════════════════════════════════════════════════════════════════ */
-
-/* 固定元数据区（分区表几何；含固定预留的 L2P 日志区）。 */
-static bool pfr_block_is_fixed(WORD g)
-{
-    /* 必须按分区表的 plane_mask 判：分区只在 mask 覆盖的 plane 上预留，表外同号块
-     * 是用户数据。不要写死 "block < 某常量"——布局随介质版本演进。 */
-    return md_block_is_metadata(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
-}
-
-/* 把一个物理块发成退化单 plane Closed 条目（与 full metadata rebuild 同口径；Policy B 不要求配对）。
- * 返回 false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。 */
-static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
-{
-    WORD plane_blocks[PLANE_NUM];
-
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
-    {
-        plane_blocks[p] = FTL_BLOCK_NO_PLANE;
-    }
-    plane_blocks[ftl_gblock_plane(g)] = ftl_gblock_block(g);
-
-    if (alc_super_closed_add(&ftl->alloc, plane_blocks, temperature) == FTL_BLOCK_NO_SB)
-    {
-        LOGE(LOG_TAG_BLK "closed_sb_list full, g=%u dropped\r\n", (unsigned)g);
-        return false;
-    }
-
-    return true;
-}
 
 static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 {
