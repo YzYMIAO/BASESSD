@@ -134,9 +134,12 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
                 break;
             }
         }
+        /* 跨 plane 必须比**页号字段**：`pba_page()` 保留 plane/block 位，两 plane
+         * 的同一页号取出来必然不等（Policy B 下两 plane 块号也可能不同）。
+         * 多平面 cache 命令只要求两 plane 页号一致，不要求块号相同。 */
         for (BYTE p = 1U; complete && (p < PLANE_NUM); p++)
         {
-            complete = (pba_page(pair_pba[p]) == pba_page(pair_pba[0]));
+            complete = (pba_to_page(pair_pba[p]) == pba_to_page(pair_pba[0]));
         }
         if (!complete)
         {
@@ -149,7 +152,8 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
             bool contiguous = true;
             for (BYTE p = 0U; contiguous && (p < PLANE_NUM); p++)
             {
-                contiguous = (pba_page(pair_pba[p]) == (pba_page(pba[j - 1U][p]) + 1U)) && (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
+                /* 页号 +1（不能对 `pba_page()` 加 1：那会加到 CW 位），且同一块。 */
+                contiguous = (pba_to_page(pair_pba[p]) == (pba_to_page(pba[j - 1U][p]) + 1U)) && (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
             }
             if (!contiguous)
             {
