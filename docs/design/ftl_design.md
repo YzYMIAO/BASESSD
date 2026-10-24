@@ -2819,8 +2819,12 @@ ftl_issue_subop(read) 对每个 LBA：
 随机读会吃掉 8 轮预算，被误判成卡死。
 
 **FTL cache read 批次（本仓自定）**：`ftl_drain_group` 在下发普通子操作前，先尝试
-`ftl_cache_read_try()`。条件：读组、LBA pair 对齐、剩余 ≥2 pair、8 个 LBA 全部映射且
-无 wbuf 命中、两 plane 页号相同且后续 pair 物理页 +1/同 block、资源足够。满足时一次
+`ftl_cache_read_try()`。**只在组内偏移为 32 LBA（`MAX_PAIRS × LBA_PER_PAIR`）整数倍时
+试一次**——每个 8-LBA 子操作都试会先做一轮 L2P 查找/加载再回退，是读速下降的旧形态。
+条件：读组、LBA pair 对齐、剩余 ≥2 pair、8 个 LBA 全部映射且
+无 wbuf 命中、两 plane 的**页号字段**相同（`pba_to_page()`；`pba_page()` 保留 plane/block
+位，只能用于同一 plane 内比较，不能跨 plane）且后续 pair 物理页 +1/同 block、资源足够；
+L2P 行在加载中（`FTL_AGAIN`）则本次返回 `AGAIN`，由 drain 下轮重试。满足时一次
 提交 `START_SEQ_MP + SEQ_MP×(N-2) + LAST_MP`（N≤4，对应 NAND per-LUN FIFO 深度），
 每条命令一个 pair、8 CW；否则回退现有单 pair 普通读。**不使用 FC chain**：4 条命令
 在同一 SQ 内连续提交，FTL 当前全部命令 `high_priority=0`，后续命令只会排在 sequence
@@ -4633,12 +4637,13 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 介质版本 12：L2P region 主备双副本（日志区 96 块、Anchor 16 页、容量 424 MiB） | **已上板（2026-10-22）** | 首启自动格式化 v11→v12；全盘 H2testw 415/423 MB 写+校验通过、`bad=0`；掉电/故障注入未做（见 `known_risks.md`） |
 | DIM=1 上板回归 | **部分完成（2026-10-22）** | 已覆盖：格式化启动、全盘写+校验、GC/CP、容量；未覆盖：掉电重启、格式化中断、故障注入 |
 | 阶段 D（审计/文档/验证） | 未开始 | 不是新功能；见 §7.3 |
-| FTL UT | **已重建并上板（2026-10-24）** | `test /ftl/` 85 次运行全过（63 个函数 + 参数化，61.05 s）；用例与风险矩阵见 `docs/design/ftl_ut_design.md` |
+| FTL UT | **已重建并上板；cache read 修复后已重跑全量（2026-10-25）** | `test /ftl/` 85 次运行全过（63 个函数 + 参数化，61.05 s；修复后 debug 01:09:23 镜像 **85/85、61.20 s**）；用例与风险矩阵见 `docs/design/ftl_ut_design.md`。⚠ 每次完整 media 运行会永久标坏 1 块（RISK-UT-06） |
 | 文档重构 | 本文 | 文档改动不涉及固件，不需要上板；不得写成“功能已验证” |
 | v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
 | v0.94 cache program（host 16 KiB + GC/WL 批次） | **host 正常路径已上板；GC batch/负例未验** | H2testw 415/423 MB 通过，`cw=24906/99624/0 abort`；`mb=0`（GC batch 未触发）；FAILC 负例、失败注入、掉电注入仍见 `known_risks` RISK-CACHE-02..07 |
 | v0.97 DTCM/ITCM 热路径 | **正常路径已上板；压力/掉电未覆盖** | 页缓冲 AXI_NOCACHE 后 `format` + H2testw **840/885 KB/s、415/423 MB 无错误**（`.dtcm_data` 58,952 B、BCH SRAM4）。交换版：BCH 42,656 B→DTCM、`g_ftl_md`→SRAM4，`.dtcm_data`=67,832 B、free≈63 KB；release 额外 ITCM 集使 `.ssd_code_high` 29,728→61,384 B（debug 61,992 B 不变）。2026-10-23 该组合 H2testw **843/887 KB/s、415/423 MB 0 错误**，`bad=0`；相对 840/885 为噪声级，且 `mig=0/0`/`gcm=0` ⇒ 额外 ITCM 集收益未证实（RISK-TCM-05/09） |
-| v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,296 B / debug 62,064 B；`make all/release/tests UT=FC` 零新告警；UT=FTL 冻结测试源失败 |
+| v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,296 B / debug 62,064 B；`make all/release/tests UT=FC` 零新告警；当时 UT=FTL 因冻结测试源失败（**2026-10-24 已重建，85 次全过**） |
+| v1.00 cache read 判据修正 | **已上板（2026-10-25）** | `cache_read_collect` 跨 plane 改用 `pba_to_page()`、连续性改为页号 +1；修复前 cache read 自实现以来从未生效（`batches` 恒 0）。`/speed/ftl_rw` 2/2、`rd_path=cache`、`rdc batches=1600`；全量 `/ftl/` 已在修复后镜像上重跑 **85/85（61.20 s）** |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
@@ -4944,6 +4949,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 所有命令都寻址 block 0 | `plane_paa[]` 未填，`cmd->paa` 白设 |
 | 测试“碰巧通过” | `expected_byte` 用 `(block<<8|page<<4|plane)` 后截断成 `uint8_t`，block 参数完全不影响结果 |
 | 只验了 page 0 | 其余 63 页的损坏全被漏掉 |
+| “cache read 已启用” | `cache_read_collect` 跨 plane 比较 `pba_page()`（保留 plane/block 位）⇒ `complete` 恒 false ⇒ `cache_read_batches` 恒 0，读静默回退普通路径；必须看计数器/断言给出“确实生效过”的证据（C8） |
 | `ASSERT` 在 release 下“保护”了 | `NDEBUG` 下展开为 `((void)0)`；后果若是静默介质破坏，必须另补 release 拒绝 |
 | `ASSERT(HAL_...())` 初始化成功 | `NDEBUG` 下表达式不求值 ⇒ 初始化根本没执行 |
 | `.bin` 逐字相同 | 动了 include 图时不成立（CMSIS `optimize("Os")` 会 TU 级泄漏） |

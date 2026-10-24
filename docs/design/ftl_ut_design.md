@@ -1,9 +1,11 @@
 # FTL 单元测试设计（板端）
 
-> 状态：**已落地并上板**（2026-10-24，镜像 22:08:11）：原套件 **85/85 通过**、61.05 s。
-> `/speed/ftl_rw`（板端已通过）不属于 `/ftl/` 树；`/ftl/` 仍为 85 次运行。
-> 剩余未覆盖：M-11 的真介质注入、CP `VERSION_MISMATCH` 分支、真 POR/空白片/NAND 写擦失败注入。
-> 剩余未覆盖：M-11 的**真介质注入**部分（construct 不可读 victim 页）与写/擦失败注入。
+> 状态：**已落地并上板**（2026-10-24，镜像 22:08:11）：`/ftl/` **85/85 通过**、61.05 s。
+> 2026-10-25 cache read 修复后已重跑全量（debug 01:09:23 镜像）：**85/85 通过、61.20 s**，
+> media 读用例已包含 ≥16 LBA 的 cache read 路径。
+> `/speed/ftl_rw` 不属于 `/ftl/` 树；`/ftl/` 仍为 85 次运行。
+> 剩余未覆盖：M-11 的**真介质注入**（construct 不可读 victim 页）、CP `VERSION_MISMATCH` 分支、
+> 真 POR/空白片/NAND 写擦失败注入。
 > 多圈 BBT ring 的 reload 选旧 record 已登记 `RISK-BBT-18`；Journal 压力下的 TRIM 持久化时序
 > 见 `RISK-HOST-11`；munit 的 SKIP/FAIL 行格式修复见 `RISK-UT-01`。
 > 本文替代已归档的 `docs/archive/ftl_ut_munit.md`（后者对应 v0.75 API，已失效）。
@@ -125,8 +127,9 @@
 ### 3.7 media 用例顺序与状态依赖
 
 - `media_prepare()` 只在第一次调用时执行 `ftl_ut_media_format()`；后续用例共享已格式化的介质。
-- 写介质的重用例（`host_io_matrix` / `host_io_random`）放在 TRIM 用例**之前**：
-  Journal 压力下 TRIM 的持久化时序有问题（`RISK-HOST-11`），用例顺序是其当前缓解。
+- 写介质的重用例（`host_io_matrix` / `host_io_random`）排在 TRIM 用例**之后**：
+  Journal 压力下 TRIM 的持久化时序有问题（`RISK-HOST-11`），先跑 TRIM、再压大量重写
+  是其当前缓解；不要为了“参数矩阵在前”调换二者顺序。
 - `trim_no_resurrection` 必须 `trim → flush → 强制 CP → 模拟重启`：TRIM 只记 Journal，
   不 flush 就重启会「复活」（`RISK-HOST-08/11`）。等待 CP 时要等 `phase == CP_IDLE`，
   CP 基准要在**用例起点**取（写入/trim 之前），并在调用 `cp_pool_find_latest` **之前**保存目标序号
@@ -144,16 +147,16 @@
 
 ### 4.1 `/ftl/pure/mem/`（allocator / BST / BBT / wear）
 
-14 个用例，参数化后 17 次运行。
+11 个用例，参数化后 14 次运行。
 
 | 用例 | 参数 | 覆盖 |
 |---|---|---|
-| `address_roundtrip` | — | LBA/PBA/PAA 往返、`ftl_gblock` 边界（RISK-ALLOC-06） |
-| `free_pool_invariants` | — | `state==FREE ⟺ 在池`、BAD/越界/池满拒绝 |
+| `address_roundtrip` | — | LBA 与 PBA 字段编解码往返、`ftl_gblock` 的 plane-major 编号（RISK-ALLOC-06） |
+| `free_pool_invariants` | — | 入池/出池账本、`state==FREE ⟺ 在池`、出池不改 state、OP refill LIFO |
 | `super_block_open_close` | `mode=hot\|cold\|high_wear` | 双 plane / 温度 / open-close-rewind |
 | `closed_list_add_drop` | — | swap-remove、部分 plane 释放 |
 | `valid_count_guard` | — | BAD 后减计数不回声（RISK-MIG-03） |
-| `op_spare_pools` | — | OP/Spare per-plane 隔离与 refill |
+| `op_spare_pools` | — | OP/Spare per-plane 独立计数、容量上限、Spare LIFO 与空池 pop 失败 |
 | `cw_masks` | — | `ftl_cw_bit` / span / plane mask（RISK-BIT-01） |
 | `erase_stats` | — | erase 计数与时间戳 |
 | `bbt_mark_bad` | `plane=0\|1` | 幂等、Spare 只减一次（RISK-BBT-01/10） |
@@ -169,7 +172,7 @@
 | `metadata_idle` | Directory 初始态 / live 计数 |
 | `ring_geometry` | ring 记录数、地址、plane 掩码 |
 | `directory_commit` | 主/备双副本提交、`dirty_gen` |
-| `journal_append` | 同 LBA 合并、watermark |
+| `journal_append` | init/reserve/append 序号推进、pending 置位、未到水位不请求 CP |
 | `ring_locate` | 假 probe 下 locate 选最新记录 |
 | `anchor_three_step` | Anchor prepare/page/commit 门槛（RISK-MD-06 纯 RAM 部分） |
 | `log_alloc_rotate_release` | 日志区分配、轮转、回收 |
@@ -187,16 +190,16 @@
 | 用例 | 参数 | 覆盖 |
 |---|---|---|
 | `host_idle` | — | pending/group/ctx 全空闲基线 |
-| `pending_slots` | — | 槽满、重复释放、索引 |
+| `pending_slots` | — | 槽满返回 NULL、按 command_id 查找/移除、移除后可再分配 |
 | `group_exhaustion` | — | 组槽耗尽返回 false 且不覆盖（RISK-PEND-02） |
 | `group_complete_once` | — | 多 owner 只完成一次 |
 | `group_failure_aggregation` | — | 子操作失败后 `agg_status` 粘滞，后续 OK 不清错 |
-| `wbuf_append_read` | — | append/drop/reset/owner 结算 |
+| `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners 与组在飞计数 |
 | `wbuf_drop_reset_owners` | — | DROP 清空页后 owners 结算一次（OK）、RESET 按 IO_ERROR 结算 |
 | `wbuf_density` | `n=1\|2\|4\|8` | pair 布局、稀疏 CW 位图（RISK-WB-03/IF-04） |
 | `op_ctx` | — | ctx add/take/remove 生命周期 |
 | `op_ctx_capacity` | — | 旁表容量与同 id 覆盖（RISK-IF-05） |
-| `bg_engine` | — | 任务表、预算/间隔、must-run |
+| `bg_engine` | — | 任务表长度 = `BG_TASK_COUNT`、`level_select` 返回合法档位 |
 | `op_route` | — | dim→(ch,ce,lun) 路由（RISK-CR-02） |
 | `bg_level_select` | — | 负载档位边界 |
 | `host_submit_invalid_args` | — | count=0 / buffer=NULL / LBA 越界 / ftl=NULL 均在分配池资源前拒绝 |
@@ -208,12 +211,12 @@
 | 用例 | 参数 | 覆盖 |
 |---|---|---|
 | `policy_entry` | — | GC/WL 触发位图入口 |
-| `gc_trigger` | — | 水位/紧急触发、plane 空 |
+| `gc_trigger` | — | 空池必 EMERGENCY、回到 TARGET 以上不触发、低于 TARGET 只 WATERMARK |
 | `gc_select_victim` | `mode=off\|idle\|emergency` | 三模式、valid 上界（RISK-GC-06/14） |
-| `gc_decode_cw_lba` | — | OK / 空 / 损坏三态 |
+| `gc_decode_cw_lba` | — | OK / EMPTY / CORRUPT / 空洞四态 |
 | `wl_trigger_and_victim` | — | UBI 判据 `max_free_ec − min_used_ec ≥ 200` |
 | `l2p_resident_states` | — | 驻留行 CLEAN/DIRTY/FLUSHING/LOADING、批量读 |
-| `l2p_miss_unmapped_evict` | — | 未映射 miss + CLOCK 驱逐；cache 有脏/在飞行时按设计 `MUNIT_SKIP` |
+| `l2p_miss_unmapped_evict` | — | miss→AGAIN→CLEAN+未映射、写后读回；cache 有脏/在飞行时按设计 `MUNIT_SKIP` |
 | `wl_victim_threshold` | — | 低有效 CW 跳过、≥70% 接受 |
 | `rr_health` | — | ECC 趋势、health 不降级 |
 | `rr_predictive_retire` | — | 预测巡检命中并退役 |
@@ -225,18 +228,18 @@
 | 用例 | 类型 | 参数 | 覆盖 |
 |---|---|---|---|
 | `media_live` | 冒烟 | — | 活实例、池账本基线 |
-| `format_and_roundtrip` | e2e | — | format → 写读往返 → flush（含一次 format 10 s） |
+| `format_and_roundtrip` | e2e | — | format → 写 → flush → 读回（含一次 format 10–21 s，视优化档） |
 | `cross_region_roundtrip` | e2e | — | 跨 region 写读、L2P 分区 |
 | `flush_reboot_readback` | e2e | — | flush → 模拟重启 → 读回（恢复路径正常分支） |
 | `trim_no_resurrection` | e2e | — | trim → flush → 强制 CP（基准取用例起点，等 job IDLE + Header 落盘）→ 模拟重启不复活（RISK-HOST-08/11、UT-02） |
 | `preload_region_zero_and_high` | l2p | — | region 0 与高 region 预载不别名（RISK-BOOT-01） |
-| `journal_barrier_cp_progress` | e2e | — | `fl` 后无 pending、CP seq 前进且 Header 落盘、重启恢复（RISK-UT-02） |
-| `gc_progress` | e2e | — | 压 `free_count` → 一轮真实搬移（RISK-GC-06/MIG-03） |
+| `journal_barrier_cp_progress` | e2e | — | flush 后无 pending、CP seq 前进且 Header 落盘、重启恢复（RISK-UT-02） |
+| `gc_progress` | e2e | — | 关闭 open SB 造 victim → urgent GC → moved/reclaimed 增长且数据可读（RISK-GC-06/MIG-03） |
 | `wl_progress` | e2e | — | 构造擦除差 → 一轮 WL（RISK-WL-04） |
 | `cp_probe_clean_media` | cp | — | `cp_media_status_probe` 判 CURRENT、不误格式化 |
 | `host_io_matrix` | e2e | `count=1\|7\|8\|9\|64` × `off=0\|3\|7` | 奇尾 / 跨 pair / 跨 region 写读矩阵 |
 | `host_io_random` | e2e | — | 固定种子 8 轮随机 LBA/长度写读 |
-| `bbt_persist` | bbt | — | 标坏 → save → 模拟重启仍 BAD（RISK-BBT-01/10；clean-pool 规避 RISK-BBT-18） |
+| `bbt_persist` | bbt | — | 标坏 → save → 模拟重启仍 BAD（RISK-BBT-01/10；clean-pool 规避 RISK-BBT-18）。⚠ 该 BAD 持久化且 `format` 不清除 ⇒ **每次运行永久消耗 1 块**（RISK-UT-06） |
 | `format_in_progress_resume` | bbt | — | BBT 置 FORMAT_IN_PROGRESS + 擦 CP 池 → 重启后判 NO_RECORD/继续格式化（RISK-BOOT-04/17 的续做分支）；跑完完整格式化恢复介质 |
 | `cp_corrupt_refuse_format` | cp | — | 擦 CP 池 + 写非 FF 页 → `cp_media_status_probe=IO_ERROR`、`pfr_media_check_format` 拒绝格式化（RISK-BOOT-03） |
 
@@ -244,7 +247,7 @@
 
 | 用例 | 参数 | 覆盖 |
 |---|---|---|
-| `host_rw` | `mode=normal\|cache` | 100 gblock（51,200 LBA = 25 MiB）host 读写速度；首次运行先完整 format。`normal`：8-LBA chunk 写 + 8-LBA 读（cache 路径不触发）。`cache`：32-LBA cache 写（计时，断言 `wb_batches>0`）→ 8-LBA 普通写重铺同一范围（不计时，让物理页严格按 LBA 顺序落盘）→ 32-LBA cache 读（计时，**断言 `rd_batches>0`**）→ 8-LBA 普通读基线。cache read 未触发时打印 `DIAG ftl` 窗口与 `PROBE ftl` 探针（LBA0..15 的 PBA/plane/topo 判据、可收集 pair 数、失败码）并失败。**2026-10-25 板端实跑已暴露 RISK-HOST-13 的根因**（`cache_read_collect` 跨 plane 误用 `pba_page()`），修复已上板（2026-10-25）：`rd_path=cache`、`rdc` batches=1600 |
+| `ftl_rw` | `mode=normal\|cache` | 100 gblock（51,200 LBA = 25 MiB）host 读写速度；首次运行先完整 format。`normal`：8-LBA chunk 写 + 8-LBA 读（cache 路径不触发）。`cache`：32-LBA cache 写（计时，断言 `wb_batches>0`）→ 8-LBA 普通写重铺同一范围（不计时，让物理页严格按 LBA 顺序落盘）→ 32-LBA cache 读（计时，**断言 `rd_batches>0`**）→ 8-LBA 普通读基线。cache read 未触发时打印 `DIAG ftl` 窗口（LBA0..15 的 PBA/plane/topo 判据）并失败。**2026-10-25 板端实跑已暴露 RISK-HOST-13 的根因**（`cache_read_collect` 跨 plane 误用 `pba_page()`），修复已上板（2026-10-25）：`rd_path=cache`、`rdc` batches=1600 |
 
 输出只在 `--log-visible info/debug` 可见。运行：
 `test --log-visible info /speed/ftl_rw`。FC 侧的 `/speed/fc_nand_rw` 与本套件都有破坏性，
@@ -313,7 +316,7 @@
 | RISK-USB-02 | 待上板 | BOARD | — | 拔线/复位/重枚举 |
 | RISK-USB-05 | 待上板 | BOARD | — | 需 USB 抓包看 FUA |
 | RISK-PLAT-07 | 信息/待决策 | BUILD | §6 构建顺序 | 共用 `debug.elf`，最后一次构建生效 |
-| RISK-NAND-04 | 部分定位 | BOARD | — | 吞吐测量 |
+| RISK-NAND-04 | 已闭合（2026-10-25） | BOARD | — | USB 写 200 KB/s 已消除（release -O2 H2testw 843/889 KB/s） |
 | RISK-NAND-05 | 待定位 | BOARD | — | 物理介质失效 |
 | RISK-NAND-06 | 待定位 | UT-M 部分 + BOARD | `format_and_roundtrip`、`gc_progress` | 全片 re-scan 人工 |
 | RISK-ALLOC-06 | 待后续 | UT-P | `address_roundtrip` | 固定 `ftl_gblock` 截断行为 |
@@ -322,6 +325,11 @@
 | RISK-PEND-02 | 已改未上板 | UT-P | `group_exhaustion` | 组槽耗尽 |
 | RISK-UT-01 | 已改未上板 | BUILD | 下次跑出 SKIP 的会话 | SKIP/FAIL 行格式 |
 | RISK-UT-02 | 已上板 | UT-M | `journal_barrier_cp_progress`、`trim_no_resurrection` | CP 判据已用 `cp 1->2` / `cp 2->3` 板端验证 |
+| RISK-UT-05 | 信息 | BUILD | — | munit 计时按 10.737 s（DWT CYCCNT）取模；速度只看行内 `*_ms` |
+| RISK-UT-06 | 信息 | UT-M | `bbt_persist` | 每次全量跑永久标坏 1 用户块（256 KiB）；反复跑会缩容量 |
+| RISK-HOST-13 | 已闭合（2026-10-25） | UT-M + OUT | `/speed/ftl_rw`（cache 读断言）、media 读用例 | cache read 判据修复已上板（`batches=1600`） |
+| RISK-PERF-03 | 信息 | OUT | `/speed/ftl_rw` | cache read 生效后读速无提升 |
+| RISK-PERF-04 | 信息 | OUT | `/speed/*` | 数据面 CPU-bound，阵列利用率见 RISK-PERF-04 |
 
 ## 6. 运行流程
 
@@ -357,7 +365,7 @@
   同一上电先跑过 media 写用例再跑 `test /ftl/` 就会看到 SKIP。
 
 预期（2026-10-24 板端实测）：`test /ftl/` **85 次运行、约 61 s**（含 format 10.5 s；
-77/77 通过，或 76 通过 + 1 SKIP 视 cache 状态）。
+85/85 通过，或 84 通过 + 1 SKIP 视 cache 状态）。
 
 ---
 
@@ -369,7 +377,7 @@
   `FORMAT_IN_PROGRESS` 介质状态（RISK-BOOT-04/17、RISK-BBT-02）。
 - USB 主机行为、外部吞吐（H2testw）、长时 soak；内部 FC/FTL 速度见 `/speed/fc_nand_rw` 与
   `/speed/ftl_rw`（破坏性，单独运行）。
-- release 档特有行为（UT 为 debug 构建）。
+- release 档特有行为：功能验收用 debug UT；release `-O2` UT 仅用于速度测量（`/speed/`），不作为功能验收。
 - 跨 LUN 条带/GC/WL（未实现）。
 
 ---
@@ -381,6 +389,8 @@
 - 新增 pure 用例：禁止调用 `ftl_init` / `pfr_*` / 任何 `ftl_sync_*` / NAND 命令。
 - 新增 media 用例：必须走 `media_prepare()`（首次调用做一次 format）、使用 LBA 尾窗、不得依赖 host 文件系统。
 - 每次改 API 后先跑 `make tests UT=FTL`；测试源与生产同仓维护，不再冻结。
+- 新增/修改用例必须保留「覆盖 / 判据 / 备注」注释块（对齐 `test_ftl_pure.c` /
+  `test_ftl_media.c` 现有风格），并同步 §4 用例表与本文件开头的运行数。
 
 ---
 
@@ -389,12 +399,12 @@
 | 项 | 结果 | 证据 |
 |---|---|---|
 | 编译门禁 | `make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` 零告警；format-check 通过 | 构建日志 |
-| 板端全量 | `test /ftl/` → **85/85 通过**、61.05 s（镜像 2026-10-24 22:08:11） | 串口日志 |
+| 板端全量 | `test /ftl/` → **85/85 通过**、61.05 s（镜像 2026-10-24 22:08:11）；cache read 修复后 **85/85、61.20 s**（debug 镜像 2026-10-25 01:09:23） | 串口日志 |
 | 纯 RAM | 56 次运行（48 个函数 + 参数化）已上板（21:57:59，10.38 ms） | 串口日志 |
 | media | 29 次运行（15 个函数 + `host_io_matrix` 15 组合 + 随机 8 轮；`cp_corrupt_refuse_format` 已上板） | 同上 |
 | 条件 SKIP | `l2p_miss_unmapped_evict` 在 cache 有脏/在飞行时按设计跳过 | 代码内条件 |
 | CP 落盘证据 | `journal barrier cp 1->2`、`trim cp 2->3`（用例起点→落盘序号，RISK-UT-02） | 2026-10-24 21:14 隔离重跑 |
 | 未覆盖 | M-11 真介质注入、真空白片、NAND program/erase 注入、真 POR、USB/H2testw | §7 |
-| 速度（FTL） | `test --log-visible info /speed/ftl_rw` → normal/cache 两档各 25 MiB；**板端 2/2 通过**（2026-10-25 00:04 镜像，13.51 s）：normal 写 1065 / 读 1356 KB/s；cache 写 1107 / 读 1363 KB/s，`rd_path=cache`、`rdc batches=1600`、`err=0`（RISK-HOST-13 修复后首次真正走 cache）；读速与 normal 档基本相同（RISK-PERF-03） | 2026-10-25 00:04 镜像；release -O2（00:35 镜像）4/4：FC 写 3670 / 读 3533（cache 写 4319 / 读 3591），FTL 写 2499 / 读 3369（cache 写 2687 / 读 3369，`rd_path=cache`）；munit 计时受 CYCCNT 回绕影响，见 RISK-UT-05 |
+| 速度（FTL） | `test --log-visible info /speed/ftl_rw` → normal/cache 两档各 25 MiB；**板端 2/2 通过**（2026-10-25 00:04 镜像；真实约 98 s，munit 显示 13.51 s 是 CYCCNT 回绕，见 RISK-UT-05）：normal 写 1065 / 读 1356 KB/s；cache 写 1107 / 读 1363 KB/s，`rd_path=cache`、`rdc batches=1600`、`err=0`（RISK-HOST-13 修复后首次真正走 cache）；读速与 normal 档基本相同（RISK-PERF-03） | 2026-10-25 00:04 镜像；release -O2（00:35 镜像）4/4：FC 写 3670 / 读 3533（cache 写 4319 / 读 3591），FTL 写 2499 / 读 3369（cache 写 2687 / 读 3369，`rd_path=cache`）；munit 计时受 CYCCNT 回绕影响，见 RISK-UT-05 |
 
 > 每一阶段结束都跑 `make all` / `make release` / `make tests UT=FTL`；未上板的用例标「未上板」。
