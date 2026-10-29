@@ -32,8 +32,8 @@ typedef enum
     FTL_CACHE_READ_ERROR    = 3, /* 永久错误：组报 IO_ERROR */
 } ftl_cache_read_result_e;
 
-/*
- * 尝试为当前读组提交一个 cache read 批次。
+/**
+ * @brief 尝试为当前读组提交一个 cache read 批次。
  *
  * @param ftl     FTL 实例
  * @param gi      组下标
@@ -71,15 +71,11 @@ typedef struct
     DWORD lba;                                    /* 起始 LBA（8 对齐） */
 } cache_wb_t;
 
-/*
- * 尝试为当前写组提交一个 16 KiB cache program 批次。
- *
+/**
+ * @brief 尝试为当前写组提交一个 16 KiB cache program 批次。
  * 前置：调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
- * 返回：
- *   DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）；
- *   OK —— 已提交，*used = 32；
- *   AGAIN —— 资源/空间瞬态，本轮停止 drain；
- *   ERROR —— 永久错误，组报 IO_ERROR。
+ *
+ * @return DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）； OK —— 已提交，*used = 32； AGAIN —— 资源/空间瞬态，本轮停止 drain； ERROR —— 永久错误，组报 IO_ERROR。/
  */
 ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 

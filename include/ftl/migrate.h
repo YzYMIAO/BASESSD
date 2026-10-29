@@ -331,7 +331,7 @@ typedef struct mig_handle
     BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } mig_handle_t;
 
-/* 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
+/** @brief 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
 static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -346,24 +346,24 @@ static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 
 /* ── 接口 ── */
 
-/*
- * mig_init - 绑定窄上下文并复位 handle。
+/**
+ * @brief 绑定窄上下文并复位 handle。
  *
  * @param m     handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param alloc / journal / cache / total_writes  窄上下文（init 绑定；拓扑取 alloc 的 ch/ce/lun）
  */
 void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes);
 
-/*
- * mig_gc_request_urgent - 登记一次紧急 GC 请求（写路径分配不到页对）。
+/**
+ * @brief 登记一次紧急 GC 请求（写路径分配不到页对）。
  * 只登记，不立即启动；由下一次 mig_handle 消费。
  *
  * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  */
 void mig_gc_request_urgent(mig_handle_t *m);
 
-/*
- * mig_handle - 推进搬移引擎（每轮 must-run；提交即返回）
+/**
+ * @brief 推进搬移引擎（每轮 must-run；提交即返回）
  *
  * 语义：
  *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；

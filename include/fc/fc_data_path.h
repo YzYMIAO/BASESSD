@@ -38,15 +38,17 @@
 
 /* ── 写路径（FC 内部） ── */
 
-/* 全自动写管线：加扰 → ECC 编码 → RAID XOR parity。
- * FTL 提交命令后、dispatch 前由 FC 自动调用（对 FTL 透明）。 */
+/**
+ * @brief 全自动写管线：加扰 → ECC 编码 → RAID XOR parity。
+ * FTL 提交命令后、dispatch 前由 FC 自动调用（对 FTL 透明）。
+ */
 fc_status_e fc_data_path_encode(const fc_command_t *command);
 
 #if CONFIG_FC_RAID
 /* ── 跨 Plane Stripe RAID parity 生成（FC 内部） ── */
 
-/*
- * 对 PLANE_NUM-1 条数据命令做跨命令 XOR，结果写入 parity 命令的 buffer，
+/**
+ * @brief 对 PLANE_NUM-1 条数据命令做跨命令 XOR，结果写入 parity 命令的 buffer，
  * 然后对 parity buffer 做 ECC 编码。
  *
  * data_cmds:   数据命令指针数组（长度 = data_count）
@@ -63,12 +65,12 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
 
 /* ── 读路径 Stage 1：ECC 解码（FC 内部，CQ push 前） ── */
 
-/*
+/**
  * 对命令的 desc 链做 ECC 解码 + 条件解扰。
  *
  * - 所有 CW 都 ECC 成功 → 解扰所有 buffer，更新 desc->status = READY，返回 OK
  * - 存在 ECC 失败的 CW   → 不解扰任何 buffer，返回 IO_ERROR
- *                          desc->status 在成功 CW 上设为 READY，失败 CW 上保持 UNC
+ * @brief >status 在成功 CW 上设为 READY，失败 CW 上保持 UNC
  *                          此时 buffer 处于 scrambled+ECC-corrected 状态，
  *                          可供 FTL 后续的 RAID XOR 恢复使用
  *
@@ -80,8 +82,8 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command);
 
 /* ── 读路径 Stage 2：RAID 恢复（FTL 触发） ── */
 
-/*
- * RAID XOR 重建 + ECC 重试 + 解扰指定 CW。
+/**
+ * @brief RAID XOR 重建 + ECC 重试 + 解扰指定 CW。
  *
  * FTL 在 fc_poll_completion 后遍历 desc 链，对 status=UNC 的 CW
  * 调用此函数。函数内部：
@@ -112,29 +114,35 @@ fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_id
  *   （见 tests/unit/fc_test_common.h「五」），重复编码 = 数据损坏。
  */
 
-/* 把本 CW 的逻辑地址（扇区 LBA）写进 [0,4)。写路径 Stage 0 的唯一写入者。 */
+/** @brief 把本 CW 的逻辑地址（扇区 LBA）写进 [0,4)。写路径 Stage 0 的唯一写入者。 */
 void fc_data_path_meta_write(BYTE *cw, DWORD meta);
 
-/* 对 USER 区 [8,520) 算 CRC-32 并写入 [4,8)。需先有明文 USER 数据。 */
+/** @brief 对 USER 区 [8,520) 算 CRC-32 并写入 [4,8)。需先有明文 USER 数据。 */
 void fc_data_path_crc_write(BYTE *cw);
 
-/* 加扰/解扰（同一个 XOR 变换，自反）。作用于 USER 区 [8,520)，
- * META/CRC 保持明文——读侧才能从页内 META 自举出同一个种子。 */
+/**
+ * @brief 加扰/解扰（同一个 XOR 变换，自反）。作用于 USER 区 [8,520)，
+ * META/CRC 保持明文——读侧才能从页内 META 自举出同一个种子。
+ */
 void fc_data_path_scramble(BYTE *cw, DWORD seed);
 
-/* ECC 编码：对 520B 数据区算 8B parity 写入 [520,528)。
- * 引擎未实现（NOT_SUPPORTED）时吞掉返回 OK——与管线行为一致。 */
+/**
+ * @brief ECC 编码：对 520B 数据区算 8B parity 写入 [520,528)。
+ * 引擎未实现（NOT_SUPPORTED）时吞掉返回 OK——与管线行为一致。
+ */
 fc_status_e fc_data_path_ecc_encode(BYTE *cw);
 
-/* ECC 解码。ecc_bits 出参可为 NULL（不需要纠正位数时）。 */
+/** @brief ECC 解码。ecc_bits 出参可为 NULL（不需要纠正位数时）。 */
 fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
 
-/* CRC 校验：1 = 重算值与 [4,8) 存的相等（通过），0 = 不通过。 */
+/** @brief CRC 校验：1 = 重算值与 [4,8) 存的相等（通过），0 = 不通过。 */
 BYTE fc_data_path_crc_check(const BYTE *cw);
 
-/* META 读回校验（Pass 4 的两项）：① 低 3 位自洽 == paa 的 plane/cw；
+/**
+ * @brief META 读回校验（Pass 4 的两项）：① 低 3 位自洽 == paa 的 plane/cw；
  * ② command_meta 非 FC_META_UNKNOWN 时须等于 lba_to_meta(command_meta, plane, cw)。
- * 返回 FC_CW_STATUS_MATA_ERROR（任一不符）或 0（通过）。 */
+ * 返回 FC_CW_STATUS_MATA_ERROR（任一不符）或 0（通过）。
+ */
 DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa);
 
 #endif /* FC_DATA_PATH_H */

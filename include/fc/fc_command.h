@@ -22,13 +22,13 @@
  * FC_BUFFER_POOL_DEPTH）。命令/描述符用 16 位 Pool ID 互相关联，
  * 0xFFFF = 无效句柄。
  *
- * ── 三套地址（v24；权威定义与位序表见 nand/nand_config.h）──
+ * ── 三套地址（权威定义与位序表见 nand/nand_config.h）──
  *
  *   LBA  逻辑地址      [CH][CE][LUN][BLOCK][PAGE][PLANE][CW]  FTL 用
  *   PBA  系统物理地址  与 LBA **逐位同构**                       **FTL 内部**用（含 ch/ce）
  *   PAA  芯片内地址    [CW][PAGE][PLANE][BLOCK][LUN]（BA6/PA 规则）FC → NAND 传它
  *
- * 分界（v47）：**FTL 交 LBA + PAA（PBA 在 FTL 侧 `pba_to_paa()` 一次转出），
+ * 分界：**FTL 交 LBA + PAA（PBA 在 FTL 侧 `pba_to_paa()` 一次转出），
  * FC 层只认 PAA 喂 NAND**。PBA 不再跨进 FC——它带 ch/ce，而 FC 的路由本就独立走
  * `config.ch/ce/lun`（见 fc_build_dispatch_request），两套编码并存只会制造静默算错地址的机会。
  * ⚠ 代价：PBA 与 LBA 同构时「`desc->paa` 与 `desc->meta` 用同一个 plane_cw 公式」的便利消失——
@@ -113,7 +113,7 @@ typedef enum
     FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
 } fc_priority_e;
 
-/* ⚠ 本头文件**不再**声明"完成路由归属模块"枚举（原 fc_command_module_t，v0.75 删）。
+/* ⚠ 本头文件**不声明**"完成路由归属模块"枚举。
  *
  * 它是 FTL 的概念（哪个功能拥有这条命令），不该由 FC 层声明。FC 只认
  * `fc_command_t.op_tag` 这个**不透明 7 位整数**：不解释、不分支，完成时原样拷进
@@ -157,23 +157,27 @@ typedef enum
  * 漏一位不会有编译错误。 */
 #define FC_CW_STATUS_ERROR_MASK (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
 
-/* 命令级聚合状态是否含任一错误位。
+/**
+ * @brief 命令级聚合状态是否含任一错误位。
  * 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，
- * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。 */
+ * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。
+ */
 static inline bool fc_cw_status_has_error(DWORD status)
 {
     return (status & FC_CW_STATUS_ERROR_MASK) != 0U;
 }
 
-/* 该 CW 是否被判定为擦除页（未编程）。与 has_error 正交：
- * 擦除页既不表示读成功，也不表示读失败——页上没有任何数据。 */
+/**
+ * @brief 该 CW 是否被判定为擦除页（未编程）。与 has_error 正交：
+ * 擦除页既不表示读成功，也不表示读失败——页上没有任何数据。
+ */
 static inline bool fc_cw_status_is_blank(DWORD status)
 {
     return (status & FC_CW_STATUS_BLANK) != 0U;
 }
 
-/*
- * fc_cw_status_str - 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
+/**
+ * @brief 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
  *
  * 输出例："READY|UNC"、"NAND|TIMEOUT"；未知位以 '?' 表示。
  * @param status 完成状态（FC_CW_STATUS_* 位或）
@@ -190,7 +194,7 @@ typedef struct fc_cmd_conf_t
     DWORD ch        : 2;   /* NAND channel number. */
     DWORD ce        : 2;   /* NAND chip-enable number. */
     DWORD lun       : 2;   /* NAND LUN number. */
-    DWORD cw        : 2;   /* Command: 每-plane CW 数减一。**v23 起 FTL 建链不再读它**
+    DWORD cw        : 2;   /* Command: 每-plane CW 数减一。**FTL 建链不读它**
                             *          （链长只由建链形参 cw_bitmap 的置位数决定）；当前读者只剩
                             *          FC 内 RAID stripe 的 cw_count 与测试，写者保留；
                             * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
@@ -220,7 +224,7 @@ struct fc_descriptor_t
     fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
-    DWORD         meta;           /* 本 CW 的**扇区 LBA**（v24）：建链时由 command->meta 的高位 +
+    DWORD         meta;           /* 本 CW 的**扇区 LBA**：建链时由 command->meta 的高位 +
                                    * 本 desc 的 plane/cw 造出（见 fc_command_configure_descriptor）；
                                    * 加扰种子取自它，读后存放 NAND 读回的 META 值。 */
 
@@ -235,13 +239,12 @@ struct fc_descriptor_t
  *   parameter0..3 / bytes[4]：SET_FEATURES 的内联数据（SQ）/ GET_FEATURES 读回的寄存器值（CQ）
  * 小端（Cortex-M7）下 parameter0 是最低字节。
  *
- * 历史（v28 删除）：本联合体曾另有 `DWORD cw_bitmap` 视图（flat CW 位图，
- * bit n = plane*CW_NUM + cw）——SQ 侧作「请求集」（FTL 想让本命令访问哪些 CW）、
- * CQ 侧作「失败集」（UNC / CRC_ERROR 置位）。两者均已删除，因为**它们都是派生量**：
- *   · 请求集：读者只有 FTL，且它是**建链的输入**⇒ 改由 ftl_cmd_configure_descriptors()
- *     的形参承载，命令结构体里不再留副本（v28）。
- *   · 失败集：读者只有上层，而上层本来就能遍历 desc 链 OR 各 desc->status ⇒
- *     FC 不再代为聚合（v28，见 fc_complete_from_nand）。
+ * 本联合体**不设** `DWORD cw_bitmap` 视图（flat CW 位图，bit n = plane*CW_NUM + cw）：
+ * 请求集与失败集都是**派生量**，不常驻命令结构体：
+ *   · 请求集：读者只有 FTL，且它是**建链的输入** ⇒ 由 ftl_cmd_configure_descriptors()
+ *     的形参承载。
+ *   · 失败集：读者只有上层，上层遍历 desc 链 OR 各 desc->status 即可 ⇒
+ *     FC 不代为聚合（见 fc_complete_from_nand）。
  *
  * ⚠ 别与 NAND 层的 request->cw_bitmap 混淆：那是 **NAND 真正访问的集合**，
  *   由 FC 按 desc 链重新铸出（fc_build_request_data_planes）；本联合体与它无关。
@@ -269,7 +272,7 @@ typedef union
  * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
  */
 
-/* command->meta 的「本命令无已知 LBA」哨兵（v24）。
+/* command->meta 的「本命令无已知 LBA」哨兵。
  *
  * 数据命令的 meta 是本命令的**扇区 LBA**；FC 侧 Pass 4 用它交叉校验读回的页内 META
  * （读到了别的页 ⇒ MATA_ERROR）。但 GC / 掉电重建**不知道** LBA——正是要从页内 META
@@ -287,18 +290,18 @@ struct fc_command_t
                                * 上层据它查"完成服务函数数组"派发 ⇒ ID 真的在命令上。
                                * 本字段不落介质（落介质的只有 meta/paa）⇒ 编号可自由重排。 */
     DWORD feature_addr : 8;   /* SET/GET_FEATURES register address, sent via COLUMN_0. */
-    DWORD meta;               /* META 值（本命令的**扇区 LBA**，v24 起），写入各 CW buffer[0..3]。
+    DWORD meta;               /* META 值（本命令的**扇区 LBA**），写入各 CW buffer[0..3]。
                                * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
                                * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
-    DWORD paa;                /* 本命令的**芯片内地址（PAA）**，v47 起由 FTL 在边界处
-                               * `pba_to_paa()` 转好后交来（v24~v46 此字段是 PBA，带 ch/ce）。
+    DWORD paa;                /* 本命令的**芯片内地址（PAA）**，由 FTL 在边界处
+                               * `pba_to_paa()` 转好后交来。
                                * 数据命令的逐 CW 行地址仍走 desc 链（Policy B：两 plane 可不同块）；
                                * 本字段供单 plane / 擦除 / Feature / READ_META 等无逐 CW 地址的
                                * 命令取行地址，以及 fc_command_plane_span 定 plane 段。
                                * ⚠ 路由（ch/ce/lun）**不在 PAA 里**——一律走 config。 */
     fc_cmd_conf_t config;     /* Operation, NAND location, CW and data-path configuration. */
     fc_param_t    param;      /* 仅 FEATURES 命令使用：SET_FEATURES 的内联数据 / GET_FEATURES 的读回值
-                               * （param.bytes）。「本命令访问哪些 CW」**不在命令里**（v28）——
+                               * （param.bytes）。「本命令访问哪些 CW」**不在命令里**——
                                * 它由 FTL 在建链时作形参交给 ftl_cmd_configure_descriptors()。 */
 };
 
@@ -312,8 +315,8 @@ struct fc_command_t
  *     与 desc id 不同空间——只对"哪个 CW 失败"这一含义有效，勿当 desc 下标用。
  *   Page Read 且带 desc 链时，再按链序覆盖为**首个失败 CW 的 descriptor id**，
  *   失败判据是 FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）；全链无失败位则保持初值。
- * ⚠ 目前 FTL 侧尚无读者；要定位失败 CW，由上层遍历 desc 链 OR 各 desc->status（v28 起
- *   FC 不再代为聚合失败位图）。 */
+ * ⚠ 目前 FTL 侧尚无读者；要定位失败 CW，由上层遍历 desc 链 OR 各 desc->status；
+ *   FC 不代为聚合失败位图。 */
 struct fc_command_status_t
 {
     DWORD command_id : 16;    /* Completed Command Pool ID. */
@@ -323,26 +326,27 @@ struct fc_command_status_t
     DWORD      status   : 9;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
     DWORD      reserved : 16; /* Reserved. */
     fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
-                               * （失败 CW 的定位走 desc 链，v28 起不在此聚合）。 */
+                               * （失败 CW 的定位走 desc 链，不在此聚合）。 */
 };
 
-/* --------------------------------------------------------------------
- * fc_command_plane_span
- *   功能：给出命令能触及的 plane 段 [*plane_first, *plane_last)。
- *   参数：command —— 命令；plane_first/plane_last —— 输出（调用者保证非空）。
- *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
- *   实现要点：
- *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
- *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
- *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
+/**
+ * @brief 给出命令能触及的 plane 段 [*plane_first, *plane_last)。
  *
- *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
- *   建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
- *   FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
- *   ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
- *     都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
- *     multi-plane handler 要一起动。
- * -------------------------------------------------------------------- */
+ * @param command 命令；plane_first/plane_last —— 输出（调用者保证非空）。
+ *
+ * @return 段内 plane 数（= multi_plane，单 plane 时为 1）。
+ *
+ * @note 实现要点：- multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
+ * - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
+ * plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
+ *
+ * 放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
+ * 建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
+ * FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
+ * ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
+ * 都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
+ * multi-plane handler 要一起动。
+ */
 static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plane_first, BYTE *plane_last)
 {
     const BYTE plane_count = (command->config.multi_plane > 0U) ? command->config.multi_plane : 1U;
@@ -354,16 +358,13 @@ static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plan
     return plane_count;
 }
 
-/* --------------------------------------------------------------------
- * fc_command_plane_span_cw_bitmap
- *   功能：本命令 plane 段内**全部** CW 的 flat 位图——「整段访问」的显式写法。
- *   参数：command —— 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
- *   返回：段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
- *   用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段
- *         路径（pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为
- *         形参交给建链入口。（v27 前它写进 cmd->param.cw_bitmap；v28 起该字段已删。）
- *   ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 本命令 plane 段内**全部** CW 的 flat 位图——「整段访问」的显式写法。
+ *
+ * @param command 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
+ *
+ * @return 段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径（pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
+ */
 static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
 {
     BYTE plane_first;
@@ -373,7 +374,21 @@ static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
     return ((1U << ((plane_last - plane_first) * CW_NUM)) - 1U) << (plane_first * CW_NUM);
 }
 
+/**
+ * @brief 校验命令配置合法性。
+ *
+ * @param command FC 命令。
+ *
+ * @return 恒 FC_STATUS_OK。实现要点（整函数转 ASSERT）：- 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是**调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的 sync_page_prepare 实参），**从不是 host 输入**，属判据 2，故一律 ASSERT（配置错误绝不发到硬件，§十三 定调）。- 本函数退化为「恒 OK」的校验钩子：debug 下跑内层断言；release 下调用点 fc_submit 的 ASSERT(... == OK) 整条裁空，无运行时开销。- has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要 buffer；data_input_cycles>0 只是其子集。- **不校验 CW 集合**（集合不在命令里）：它是 FTL 的建链输入， FC 只认 desc 链（链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见 ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
+ */
 fc_status_e fc_command_validate(const fc_command_t *command);
-BYTE        fc_cw_bitmap_is_plane_symmetric(DWORD mask);
+/**
+ * @brief 判断 flat CW 掩码在**每个 plane 上的 CW 集合是否相同**。
+ *
+ * @param mask flat 掩码（bit n = plane*CW_NUM + cw）。
+ *
+ * @return 1 = 对称（mask == 0 视为对称）；0 = 不对称。用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合（见 fc_data_path_generate_stripe_parity 的前置断言）。
+ */
+BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 
 #endif /* FC_COMMAND_H */

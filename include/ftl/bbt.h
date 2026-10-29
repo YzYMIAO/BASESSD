@@ -76,8 +76,8 @@ typedef struct
 
 /* ── bitmap / 候选块原语 ── */
 
-/*
- * bbt_is_bad - 查询 Block 是否坏块
+/**
+ * @brief 查询 Block 是否坏块
  *
  * @param bad_map  BBT bitmap
  * @param block    Block 编号
@@ -98,8 +98,8 @@ static inline bool bbt_is_bad(const BYTE *bad_map, WORD block)
     return ((bad_map[block >> 3] >> (block & 7U)) & 1U) != 0U;
 }
 
-/*
- * bbt_set_bad - 在 bitmap 中将 Block 标记为坏块
+/**
+ * @brief 在 bitmap 中将 Block 标记为坏块
  *
  * @param bad_map  BBT bitmap
  * @param block    Block 编号
@@ -112,10 +112,10 @@ static inline void bbt_set_bad(BYTE *bad_map, WORD block)
     }
 }
 
-/*
- * bbt_block_is_candidate - 该物理块是否属于当前 BBT 候选池
+/**
+ * @brief 该物理块是否属于当前 BBT 候选池
  *
- * BBT record 的候选池优先来自 `pools->bbt` 的实时候选表（v0.86 起，可能含
+ * BBT record 的候选池优先来自 `pools->bbt` 的实时候选表（可能含
  * shared metadata spare）；ring 未建立或不足 2 块时才退回名义区间
  * `[BBT_BLOCK, BBT_BLOCK + BBT_POOL_BLOCKS)`。
  *
@@ -134,8 +134,8 @@ static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
 
 /* ── 接口 ── */
 
-/*
- * bbt_init - BBT 初始化
+/**
+ * @brief BBT 初始化
  *
  * 从 NAND BBT 池加载 BBT，坏块位写入 alloc->blocks[].state。
  *
@@ -149,13 +149,13 @@ static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
  *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
  * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**（调用者传 &ftl->alloc）
- * @return 无。加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
- *         坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
+ * @note 加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
+ *       坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
  */
 void bbt_init(alc_t *alloc);
 
-/*
- * bbt_medium_has_ftl_data - 介质固定元数据区里是否已有合法的 FTL 页
+/**
+ * @brief 介质固定元数据区里是否已有合法的 FTL 页
  *
  * 只读。用于两处判空：
  *   · `bbt_init`：无有效 BBT 时，只有空片才允许出厂扫描；
@@ -168,8 +168,8 @@ void bbt_init(alc_t *alloc);
  */
 bool bbt_medium_has_ftl_data(alc_t *alloc);
 
-/*
- * bbt_factory_scan - 出厂坏块扫描
+/**
+ * @brief 出厂坏块扫描
  *
  * 遍历所有 Block（**跳过 Block 0**）的 Page 0，读 **spare 区首字节**（列 2048，
  * `OP_READ_COLUMN`）的**出厂坏块标记**：
@@ -191,8 +191,8 @@ bool bbt_medium_has_ftl_data(alc_t *alloc);
  */
 int bbt_factory_scan(alc_t *alloc);
 
-/*
- * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
+/**
+ * @brief 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
  *
  * ① `bbt_dirty_note + bbt_save`：把当前 BST 坏块图（含工厂标记 / CP 快照并集）
  *    追加成一条 record，并置 `BBT_FLAG_FORMAT_IN_PROGRESS`。失败 ⇒ FTL_ERROR，
@@ -212,8 +212,8 @@ int bbt_factory_scan(alc_t *alloc);
  */
 ftl_status_e bbt_format_erase(alc_t *alloc);
 
-/*
- * bbt_mark_bad - 运行时标记坏块
+/**
+ * @brief 运行时标记坏块
  *
  * ① bst_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
  * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_handle 攒批执行
@@ -225,12 +225,14 @@ ftl_status_e bbt_format_erase(alc_t *alloc);
  */
 ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
 
-/* bbt_dirty_note - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
- * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。 */
+/**
+ * @brief 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
+ * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。
+ */
 void bbt_dirty_note(alc_t *alloc);
 
-/*
- * bbt_save - 将 BBT 追加写入 NAND BBT 池
+/**
+ * @brief 将 BBT 追加写入 NAND BBT 池
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
@@ -239,8 +241,8 @@ void bbt_dirty_note(alc_t *alloc);
  */
 ftl_status_e bbt_save(alc_t *alloc);
 
-/*
- * bbt_load - 从 NAND BBT 池加载 BBT
+/**
+ * @brief 从 NAND BBT 池加载 BBT
  *
  * 池内轮转扫描（md_ring_locate），选 magic 正确且 sequence 最大者。
  * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
@@ -254,8 +256,8 @@ ftl_status_e bbt_save(alc_t *alloc);
  */
 ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
 
-/*
- * bbt_handle - BBT 后台持久化入口（typed handle；提交即返回）
+/**
+ * @brief BBT 后台持久化入口（typed handle；提交即返回）
  *
  * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
  *   换块需擦 ⇒ 异步擦（phase = BBT_JOB_ERASE）→ 擦完成再起写；
@@ -278,8 +280,8 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  */
 void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out);
 
-/*
- * bbt_spare_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
+/**
+ * @brief 从**指定 plane 的** Spare Pool 补充 Free Pool
  *
  * PROGRAM/ERASE 失败标记坏块后，从 Spare Pool 取一个好块
  * 加入 alloc->free_blocks 保容量水位。
@@ -293,8 +295,8 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out);
  */
 ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
 
-/*
- * bbt_print_bad_map - 逐块探测并打印坏块图（**诊断用**）
+/**
+ * @brief 逐块探测并打印坏块图（**诊断用**）
  *
  * 默认**只读**：对每个块读 Page 0 的 spare 首字节（**列 2048** = `PAGE_MAIN_SIZE`），
  * 非 0xFF ⇒ 出厂坏块。不写介质，可反复调用。

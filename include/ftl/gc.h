@@ -107,8 +107,8 @@ typedef struct
 
 /* ── 接口函数 ── */
 
-/*
- * gc_read_page_with_lba - 读取一页 NAND，取回逐 CW 的扇区 LBA
+/**
+ * @brief 读取一页 NAND，取回逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
  * ⚠ 唯一调用者是**掉电重建**（PFR 的 full metadata rebuild（内部）的逐页反查，开机结构性同步路径）。
@@ -128,8 +128,8 @@ typedef struct
  */
 ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
 
-/*
- * gc_decode_cw_lba - 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址
+/**
+ * @brief 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址
  *
  * gc_read_page_with_lba 的后半段（读之后的解码部分），单独导出供**异步**搬移 job 用：
  * job 的读是 ftl_async_read_page + 服务函数收尾，命令不在 gc_read_page_with_lba 的栈上，
@@ -147,8 +147,8 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
  */
 gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out);
 
-/*
- * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
+/**
+ * @brief 从 closed_sb_list 选择一个 victim Super Block
  *
  * 多维加权评分（设计 §4.3），cost 取小者胜：
  *
@@ -188,8 +188,8 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
  */
 gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out);
 
-/*
- * gc_should_trigger - 检查是否需要触发 GC，并返回**触发起因位掩码**
+/**
+ * @brief 检查是否需要触发 GC，并返回**触发起因位掩码**
  *
  * 三条触发（设计 §4.4），可多位同时命中：
  *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 主动补池

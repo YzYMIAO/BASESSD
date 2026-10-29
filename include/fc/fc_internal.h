@@ -52,7 +52,7 @@ extern "C"
 
     /* ── FC 控制器：命令状态机 + 三池引用 + 队列/调度器 ──
      * 仅内部实现可见；对外通过 fc_interface.h 的 API 访问。
-     * 队列头尾/计数直接读 sq/hsq/cq 字段（v10 起不再有独立的寄存器影子结构）。 */
+     * 队列头尾/计数直接读 sq/hsq/cq 字段（没有独立的寄存器影子结构）。 */
     typedef struct fc_t
     {
         fc_submission_queue_t sq;
@@ -99,75 +99,87 @@ extern "C"
      * 内部实现（fc.c 定义，fc_interface.c 经此调用）
      * ══════════════════════════════════════════════════════════ */
 
-    /* 初始化全局控制器（池清零 + 空闲链表 + 队列/调度器/NAND 初始化） */
+    /** @brief 初始化全局控制器（池清零 + 空闲链表 + 队列/调度器/NAND 初始化） */
     fc_status_e fc_init_internal(fc_t *controller);
 
-    /* 从空闲链表分配命令槽位，置 ALLOCATED */
+    /** @brief 从空闲链表分配命令槽位，置 ALLOCATED */
     fc_command_t *fc_command_alloc_internal(fc_t *controller);
 
-    /* ── 池/链原语（v17 起跨文件：建链入口在 fc_interface.c）──
+    /* ── 池/链原语（跨文件：建链入口在 fc_interface.c）──
      * fc_command_configure_descriptor（fc_interface.c 的公共入口）用这两个原语编排
-     * 一次建链；「按掩码一次性建链」的策略层自 v13 起在 FTL 侧
+     * 一次建链；「按掩码一次性建链」的策略层在 FTL 侧
      * （ftl_cmd_configure_descriptors），循环调公共入口实现。 */
 
-    /* 从空闲链表分配一个描述符（出池即自洽：next_id/buffer_id 显式置哨兵）。
+    /**
+     * @brief 从空闲链表分配一个描述符（出池即自洽：next_id/buffer_id 显式置哨兵）。
      * **不挂链**——desc 何时进入命令的数据链由调用者决定。
      * ⚠ **调用者契约**：分配后必须立刻 fc_command_chain_append，否则会产生
-     *   「已分配但不在任何链上」的游离 desc，破坏「失败即沿链完整回收」不变量
-     *   （v17 起该不变量由 fc_interface.c 的建链入口保证，不再由本原语保证）。 */
+     * 「已分配但不在任何链上」的游离 desc，破坏「失败即沿链完整回收」不变量
+     * （该不变量由 fc_interface.c 的建链入口保证，不再由本原语保证）。
+     */
     fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command);
 
-    /* 把已填好的 descriptor 追加到命令 desc 链尾（空链则本条即链头，前驱置 chain=MORE）。
-     * 调用者须保证 desc 的 paa/config/meta/next_id 均已填好。 */
+    /**
+     * @brief 把已填好的 descriptor 追加到命令 desc 链尾（空链则本条即链头，前驱置 chain=MORE）。
+     * 调用者须保证 desc 的 paa/config/meta/next_id 均已填好。
+     */
     void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor);
 
-    /* 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED */
+    /** @brief 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED */
     fc_status_e fc_submit_internal(fc_t *controller, fc_command_t *command);
 
-    /* 服务主循环单步（推进 NAND + 调度提交）——fc_service 的转发目标 */
+    /** @brief 服务主循环单步（推进 NAND + 调度提交）——fc_service 的转发目标 */
     fc_status_e fc_poll_internal(fc_t *controller);
 
-    /* 从 CQ 取一条完成项 */
+    /** @brief 从 CQ 取一条完成项 */
     fc_status_e fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion);
 
-    /* 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
+    /**
+     * @brief 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
      * 上限由调用方给（FC 不写死）；循环被 CQ 占用数天然封顶。
-     * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY。 */
+     *
+     * @return 取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY。
+     */
     fc_status_e fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count);
 
-    /* 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
+    /** @brief 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
     fc_status_e fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
 
-    /* 释放链头那一个 desc（含其 buffer），*head 前移到后继；*head 越界（空链）无操作 */
+    /** @brief 释放链头那一个 desc（含其 buffer），*head 前移到后继；*head 越界（空链）无操作 */
     void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_id_t *head);
 
-    /* 沿链释放全部 desc + buffer，*head 置 FC_DESCRIPTOR_ID_INVALID */
+    /** @brief 沿链释放全部 desc + buffer，*head 置 FC_DESCRIPTOR_ID_INVALID */
     void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id_t *head);
 
-    /* 从空闲链表分配一个 buffer 槽位并置占用 */
+    /** @brief 从空闲链表分配一个 buffer 槽位并置占用 */
     fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller);
 
-    /* 释放 buffer（状态清零 + 挂回空闲链表头）。
-     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
+    /**
+     * @brief 释放 buffer（状态清零 + 挂回空闲链表头）。
+     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。
+     */
     fc_status_e fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
-    /* 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
-     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
+    /**
+     * @brief 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
+     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。
+     */
     BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
-    /* 命令/描述符 ID → 指针（越界返回 NULL）——薄壳校验与便利函数使用 */
+    /** @brief 命令/描述符 ID → 指针（越界返回 NULL）——薄壳校验与便利函数使用 */
     fc_command_t    *fc_command_id_to_command_internal(fc_t *controller, WORD command_id);
     fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, WORD descriptor_id);
 
-    /* 指针 → 命令池索引（**唯一一份实现**；前置条件：command 属于 controller->command_pool） */
+    /** @brief 指针 → 命令池索引（**唯一一份实现**；前置条件：command 属于 controller->command_pool） */
     fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_command_t *command);
 
-    /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性，fc_submit 使用） */
+    /** @brief 校验命令的 desc 链是否全部归该命令所有（所有权一致性，fc_submit 使用） */
     BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
 
-    /* 资源统计读取器（fc_get_resource_stats 使用）。
-     * 三个状态读取器的 ID 恒由池派生或循环上界保证在范围内，越界一律 ASSERT
-     * （原先静默回退默认值，v21 改）。 */
+    /**
+     * @brief 资源统计读取器（fc_get_resource_stats 使用）。
+     * 三个状态读取器的 ID 恒由池派生或循环上界保证在范围内，越界一律 ASSERT。
+     */
     WORD            fc_get_sq_count(const fc_t *controller);
     WORD            fc_get_hsq_count(const fc_t *controller);
     WORD            fc_get_cq_count(const fc_t *controller);

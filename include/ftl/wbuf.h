@@ -103,11 +103,13 @@ typedef struct
 
 /* ── 接口 ── */
 
-/* wb_init - 绑定窄上下文并复位 handle。 */
+/**
+ * @brief 绑定窄上下文并复位 handle。
+ */
 void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
 
-/*
- * wb_handle - 事件驱动入口（docs §4.8）
+/**
+ * @brief 事件驱动入口（docs §4.8）
  *
  * 返回操作结果（**偏离 §4.8 的 void 签名**：写路径必须据此区分 FTL_AGAIN 背压与
  * FTL_ERROR 永久失败，P5 留痕）。`out` 非 NULL 时填本轮上报；调用者只关心返回值时
@@ -122,8 +124,10 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_inf
 bool wb_has(const wb_handle_t *h, DWORD lba);
 bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
 
-/* wbuf 是否完全空闲（无打开窗口、无未编程数据）。
- * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。 */
+/**
+ * @brief wbuf 是否完全空闲（无打开窗口、无未编程数据）。
+ * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。
+ */
 static inline bool wb_is_idle(const wb_handle_t *h)
 {
     return (!h->open) && (h->occupied == 0U);

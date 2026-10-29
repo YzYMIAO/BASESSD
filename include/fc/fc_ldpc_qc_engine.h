@@ -32,19 +32,20 @@ typedef struct
     BYTE max_iter;
 } fc_ldpc_qc_t;
 
-/* 单例初始化（首次调用构造查表，全局复用） */
+/** @brief 单例初始化（首次调用构造查表，全局复用） */
 fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter);
 
-/*
- * QC-LDPC 编码
+/**
+ * @brief QC-LDPC 编码
  * data_in[0..519] → 520B 用户数据
  * data_out[0..527] → 528B 码字（520B data + 8B parity）
  * qc/data_in/data_out 非空为前置条件（违反一律 ASSERT）；未初始化时静默返回。
+ * /
  */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out);
 
-/*
- * QC-LDPC 硬判决解码
+/**
+ * @brief LDPC 硬判决解码
  * data[0..527] → 528B 待解码码字（含 8B parity）
  * 直接修改 data 返回纠正后的码字
  * @return FC_STATUS_OK 或 FC_STATUS_IO_ERROR

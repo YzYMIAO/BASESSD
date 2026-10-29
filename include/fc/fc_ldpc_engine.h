@@ -29,7 +29,7 @@
 #    define FC_ECC_ALGO FC_ECC_ALGO_BCH
 #endif
 
-/* 活动 ECC 引擎名（诊断/开机横幅用）。与实现文件里的 fc_bch_init(13, 4, …) 就地一致。 */
+/** @brief 活动 ECC 引擎名（诊断/开机横幅用）。与实现文件里的 fc_bch_init(13, 4, …) 就地一致。 */
 const char *fc_ecc_algo_name(void);
 
 typedef struct
@@ -39,12 +39,14 @@ typedef struct
     BYTE max_iterations;
 } fc_ldpc_config_t;
 
-/* data_length 恒为 FC_BUFFER_DATA_SIZE（520，CW 缓冲 528B 减去 8B parity 尾区）；
- * 前置：data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。 */
+/**
+ * @brief data_length 恒为 FC_BUFFER_DATA_SIZE（520，CW 缓冲 528B 减去 8B parity 尾区）；
+ * 前置：data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。
+ */
 fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length);
 
-/*
- * fc_ldpc_decode - 解码单个 CW（data + parity 连续缓冲）
+/**
+ * @brief 解码单个 CW（data + parity 连续缓冲）
  *
  * BCH 分支下可选输出纠正的 bit 数：
  *   @param err_bits  out，非 NULL 时返回本 CW 解码纠正的错误 bit 数（BCH t=4 → 0..4）；

@@ -15,13 +15,7 @@
 
 #include "assertion.h"
 
-/* --------------------------------------------------------------------
- * fc_scheduler_init
- *   功能：初始化调度器（绑定 SQ/HSQ）。
- *   参数：scheduler —— 调度器；sq/hsq —— 队列指针。
- *   返回：FC_STATUS_OK。
- *   实现要点：入参前置条件由调用者保证（fc.c 传入本池的调度器与两条队列）。
- * -------------------------------------------------------------------- */
+// 实现要点：入参前置条件由调用者保证（fc.c 传入本池的调度器与两条队列）。
 fc_status_e fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
 {
     ASSERT(scheduler != NULL);

@@ -86,8 +86,8 @@ typedef enum
     RR_STAGE_FINISH     /* 收尾：释放 pending 槽 + 组聚合（纯计算） */
 } rr_stage_e;
 
-/*
- * rr_plane_step_e - rr_select_plane 的结果（RR_STAGE_PLANE 一步）
+/**
+ * @brief rr_select_plane 的结果（RR_STAGE_PLANE 一步）
  *
  * ⚠ 这里的 RR_PLANE_WAIT **不是硬失败**——是「该 LBA 的 L2P region 还在异步加载，
  *   原地等」；调用者据此**清零** stall 计数（加载在飞是有确定完成时刻的进展）。故它不能
@@ -173,14 +173,18 @@ typedef struct
 
 /* ── 接口 ── */
 
-/* rr_init - 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。 */
+/**
+ * @brief 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。
+ */
 void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending);
 
-/* rr_trigger - 登记一个被托管的读子操作（不立即推进）。 */
+/**
+ * @brief 登记一个被托管的读子操作（不立即推进）。
+ */
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
 
-/*
- * rr_handle - 推进 Read Recovery job（每轮 must-run；提交即返回）。
+/**
+ * @brief 推进 Read Recovery job（每轮 must-run；提交即返回）。
  *
  * @param rr    handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param info  本轮动态信息（当前未用，可传 NULL）
@@ -188,8 +192,8 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
  */
 void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out);
 
-/*
- * rr_record_ecc - 记录一次读取的 ECC bit 数，更新趋势
+/**
+ * @brief 记录一次读取的 ECC bit 数，更新趋势
  *
  * 每次 read 完成后记录 ecc_bits，与上一次读数比较：
  * 连续上升 → warning → critical → 触发搬移。
@@ -199,8 +203,8 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out);
  */
 void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits);
 
-/*
- * rr_record_block_ecc - 记录 gblock 一次读的 ECC 趋势并累加 read_count
+/**
+ * @brief 记录 gblock 一次读的 ECC 趋势并累加 read_count
  *
  * 迁移读路径不直接摸 allocator->blocks[]：由 RR（趋势数据 owner）提供唯一写入点。
  *
@@ -213,16 +217,16 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits);
 /* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
  * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
 
-/*
- * rr_get_health - 获取 Block 健康状态
+/**
+ * @brief 获取 Block 健康状态
  *
  * @param track per-Block ECC 追踪（&blocks[gblock].rr）
  * @return rr_block_health_e
  */
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track);
 
-/*
- * rr_predictive_scan - 巡检：找第一个 health ≥ CRITICAL 的 Closed 块
+/**
+ * @brief 巡检：找第一个 health ≥ CRITICAL 的 Closed 块
  *
  * 只扫 CLOSED（跳过 OPEN/FREE/BAD/LOG/RETIRED），返回全局物理 Block 号。
  * 慢死预测命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
@@ -233,8 +237,8 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track);
  */
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
 
-/*
- * rr_retire_block - 退役慢死块（不再分配新数据，不标坏）
+/**
+ * @brief 退役慢死块（不再分配新数据，不标坏）
  *
  * 有效数据已由调用方搬走，本函数：
  *   - 状态机：置 RETIRED（互斥枚举 ⇒ 一行赋值即抹掉原状态；温度字段正交，不动）
@@ -246,8 +250,8 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
  */
 void rr_retire_block(bst_block_t *b);
 
-/*
- * rr_retire_block_at - 退役 gblock（复位 read_count/ECC 趋势）
+/**
+ * @brief 退役 gblock（复位 read_count/ECC 趋势）
  *
  * @param alloc   分配器（持有 BST）
  * @param gblock  全局块号

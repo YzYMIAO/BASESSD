@@ -42,8 +42,8 @@
 #define FTL_JOB_LOG_SLOW_AFTER_MS    (5000U)
 #define FTL_JOB_LOG_SLOW_INTERVAL_MS (5000U)
 
-/*
- * ftl_job_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
+/**
+ * @brief 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
  *
  * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_scheduler 的
  * GC/RR/CP 功能节拍都调用它，避免两份同语义实现漂移。
@@ -59,8 +59,8 @@ static inline DWORD ftl_job_now_ms(void)
     return (platform->time_us() / 1000U);
 }
 
-/*
- * ftl_job_age_ms - job 已运行时长（毫秒）。基准未建立（*start_ms == 0）时返回 0。
+/**
+ * @brief job 已运行时长（毫秒）。基准未建立（*start_ms == 0）时返回 0。
  */
 static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
 {
@@ -69,8 +69,8 @@ static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
     return (start == 0U) ? 0U : (ftl_job_now_ms() - start);
 }
 
-/*
- * ftl_job_heartbeat - 心跳节拍到点了吗？
+/**
+ * @brief 心跳节拍到点了吗？
  *
  * 首次见到（*start_ms == 0）只**记基准**、不打（返回 false）；此后每满
  * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 true。
@@ -98,8 +98,8 @@ static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
     return true;
 }
 
-/*
- * ftl_job_tick - 只报计数的模块用的心跳（L2P cache：没有"单 job"结构）
+/**
+ * @brief 只报计数的模块用的心跳（L2P cache：没有"单 job"结构）
  *
  * 节拍判据与 ftl_job_heartbeat 逐字相同，只是不维护 start_ms——在飞的是若干 cache
  * line（load / flush），没有"某个 job 从哪一刻开始"可言 ⇒ 调用方只报计数，不报 age。

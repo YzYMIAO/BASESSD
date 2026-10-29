@@ -6,31 +6,29 @@
 #include <stdint.h>
 #include <string.h>
 
-/*
- * fc_bch_engine.c — BCH ECC 引擎（纠错码）
- *
- * 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
- * 内核依赖替换为标准 C；表存储改为**编译期静态结构体**（不再 malloc/free），
- * 因为本工程参数固定（m=13, t=4），表生命周期等于固件生命周期。
- *
- * ── 算法（BCH 码 = 有限域上的循环码）──
- *   编码：4 查找表并行 32bit 输入（生成多项式 g(x) 的 mod 查表）
- *   解码：综合式 S(x) → Berlekamp–Massey（错误位置多项式 σ(x)）
- *         → 求根（BTZ factoring：degree 1..4 解析 + 高次因数分解）
- *         → 按错误位置翻转 bit 纠正。
- *
- * ── 关键公式出处 ──
- *   · 域 GF(2^m)：本原多项式 prim_poly，元素 a_pow/a_log 查表（对数域乘法）
- *   · 生成多项式 g(x) = lcm{ m1(x), m3(x), ..., m(2t-1)(x) }，
- *     根 = 连续 2t 个 α^i 的极小多项式之积（BCH 码构造定理）
- *   · 综合式 S_j = r(α^j)，j=1..2t（接收多项式在根处的取值 = 错误分量）
- *   · Berlekamp–Massey：由 S 递推最小 σ(x)，σ(α^-i)=0 的位置即错误位置
- *   · Chien 搜索等价物：本实现用 BTZ 因子分解（度≤4 解析求根 + 递归分解）
- *
- * ── 本工程参数 ──
- *   m=13, t=4：ecc_bits = 13×4 = 52bit → ecc_bytes=7，8B 槽够用
- *   码长 n = 2^13 - 1 = 8191；数据位 ≤ n - 52（520B×8 = 4160 < 8139 ✓）
- */
+// fc_bch_engine.c — BCH ECC 引擎（纠错码）
+//
+// 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
+// 内核依赖替换为标准 C；表存储改为**编译期静态结构体**（不再 malloc/free），
+// 因为本工程参数固定（m=13, t=4），表生命周期等于固件生命周期。
+//
+// ── 算法（BCH 码 = 有限域上的循环码）──
+// 编码：4 查找表并行 32bit 输入（生成多项式 g(x) 的 mod 查表）
+// 解码：综合式 S(x) → Berlekamp–Massey（错误位置多项式 σ(x)）
+// → 求根（BTZ factoring：degree 1..4 解析 + 高次因数分解）
+// → 按错误位置翻转 bit 纠正。
+//
+// ── 关键公式出处 ──
+// · 域 GF(2^m)：本原多项式 prim_poly，元素 a_pow/a_log 查表（对数域乘法）
+// · 生成多项式 g(x) = lcm{ m1(x), m3(x), ..., m(2t-1)(x) }，
+// 根 = 连续 2t 个 α^i 的极小多项式之积（BCH 码构造定理）
+// · 综合式 S_j = r(α^j)，j=1..2t（接收多项式在根处的取值 = 错误分量）
+// · Berlekamp–Massey：由 S 递推最小 σ(x)，σ(α^-i)=0 的位置即错误位置
+// · Chien 搜索等价物：本实现用 BTZ 因子分解（度≤4 解析求根 + 递归分解）
+//
+// ── 本工程参数 ──
+// m=13, t=4：ecc_bits = 13×4 = 52bit → ecc_bytes=7，8B 槽够用
+// 码长 n = 2^13 - 1 = 8191；数据位 ≤ n - 52（520B×8 = 4160 < 8139 ✓）
 
 /* ── 辅助宏 ─────────────────────────────────────────────────────── */
 
@@ -40,7 +38,9 @@
 #    define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-/* fls — find last set bit（最高位位置+1；x=0 → 0） */
+/**
+ * @brief fls — find last set bit（最高位位置+1；x=0 → 0）
+ */
 static inline int fls(unsigned int x)
 {
     if (x == 0U)
@@ -50,7 +50,9 @@ static inline int fls(unsigned int x)
     return (int)(sizeof(unsigned int) * 8U - __builtin_clz(x));
 }
 
-/* 8-bit 位序反转（swap_bits 模式：NAND 数据位序与算法假设相反时用） */
+/**
+ * @brief 8-bit 位序反转（swap_bits 模式：NAND 数据位序与算法假设相反时用）
+ */
 static inline BYTE bitrev8(BYTE x)
 {
     x = ((x & 0xF0U) >> 4U) | ((x & 0x0FU) << 4U);
@@ -59,7 +61,9 @@ static inline BYTE bitrev8(BYTE x)
     return x;
 }
 
-/* 大端序转换（数据按 BE 语义输入 BCH 引擎） */
+/**
+ * @brief 大端序转换（数据按 BE 语义输入 BCH 引擎）
+ */
 static inline DWORD cpu_to_be32(DWORD x)
 {
     return __builtin_bswap32(x);
@@ -70,17 +74,15 @@ static inline DWORD cpu_to_be32(DWORD x)
 #define BCH_MAX_M 15 /* 域阶上限（GF(2^15)） */
 #define BCH_MAX_T 64 /* 纠错能力上限 */
 
-/*
- * BCH 引擎上下文：
- *   a_pow_tab[a_log_tab]  —— GF(2^m) 对数/反对数表（乘法→加法）
- *   mod8_tab               —— 编码查找表（每字节偏移，4 组 256 项）
- *   ecc_buf/ecc_buf2       —— 校验字工作区
- *   xi_tab                 —— 度 2 多项式求根用的迹映射表
- *   syn                    —— 综合式数组（2t 项）
- *   cache                  —— 多项式 mod 用对数表示缓存
- *   elp / poly_2t[]        —— 错误位置多项式 + 求根工作多项式
- *   swap_bits              —— 输入/输出位序是否交换
- */
+// BCH 引擎上下文：
+// a_pow_tab[a_log_tab]  —— GF(2^m) 对数/反对数表（乘法→加法）
+// mod8_tab               —— 编码查找表（每字节偏移，4 组 256 项）
+// ecc_buf/ecc_buf2       —— 校验字工作区
+// xi_tab                 —— 度 2 多项式求根用的迹映射表
+// syn                    —— 综合式数组（2t 项）
+// cache                  —— 多项式 mod 用对数表示缓存
+// elp / poly_2t[]        —— 错误位置多项式 + 求根工作多项式
+// swap_bits              —— 输入/输出位序是否交换
 struct fc_bch_control
 {
     unsigned int    m;
@@ -108,7 +110,7 @@ struct fc_bch_control
 #define BCH_ECC_BYTES(_p) ((_p)->ecc_bytes)
 #define BCH_ECC_MAX_WORDS DIV_ROUND_UP(BCH_MAX_M *BCH_MAX_T, 32)
 
-/* GF(2^m) 上的多项式：deg = 次数，c[] = 系数（低位优先） */
+// GF(2^m) 上的多项式：deg = 次数，c[] = 系数（低位优先）
 struct gf_poly
 {
     unsigned int deg;
@@ -192,7 +194,9 @@ static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
  * 编码
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* 非对齐数据段的逐字节编码（mod8 查表推进校验寄存器） */
+/**
+ * @brief 非对齐数据段的逐字节编码（mod8 查表推进校验寄存器）
+ */
 static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char *data, unsigned int len, DWORD *ecc)
 {
     int          i;
@@ -202,7 +206,7 @@ static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char
     while (len--)
     {
         BYTE tmp = swap_bits(bch, *data++);
-        /* 最高字节 ⊕ 输入字节 → 查表，表项与其余校验字异或移位 */
+        // 最高字节 ⊕ 输入字节 → 查表，表项与其余校验字异或移位
         p        = bch->mod8_tab + (unsigned int)(l + 1) * (((ecc[0] >> 24) ^ tmp) & 0xFFU);
         for (i = 0; i < l; i++)
         {
@@ -212,7 +216,9 @@ static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char
     }
 }
 
-/* 把 ECC 字节（可选位序交换）载入工作区（32bit 字） */
+/**
+ * @brief 把 ECC 字节（可选位序交换）载入工作区（32bit 字）
+ */
 static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
 {
     BYTE         pad[4] = {0, 0, 0, 0};
@@ -226,7 +232,9 @@ static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
     dst[nwords] = ((DWORD)swap_bits(bch, pad[0]) << 24) | ((DWORD)swap_bits(bch, pad[1]) << 16) | ((DWORD)swap_bits(bch, pad[2]) << 8) | (DWORD)swap_bits(bch, pad[3]);
 }
 
-/* 把工作区写回 ECC 字节（与 load 对称） */
+/**
+ * @brief 把工作区写回 ECC 字节（与 load 对称）
+ */
 static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
 {
     BYTE         pad[4];
@@ -246,16 +254,10 @@ static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
     memcpy(dst, pad, BCH_ECC_BYTES(bch) - 4 * nwords);
 }
 
-/* --------------------------------------------------------------------
- * fc_bch_encode
- *   功能：计算 data 的 BCH 校验码（增量支持）。
- *   参数：bch —— 引擎；data —— 输入数据；len —— 字节数；ecc —— 输出校验。
- *   返回：无。
- *   实现要点：4 查找表并行（每输入 32bit 分 4 字节查表异或），
- *         首尾非对齐段用 bch_encode_unaligned 兜底。
- *         入参前置违反（bch/data 为空）一律 ASSERT（v21）；ecc 可为 NULL 是
- *         有意的可选参数语义（增量计算），保留。
- * -------------------------------------------------------------------- */
+// 实现要点：4 查找表并行（每输入 32bit 分 4 字节查表异或），
+// 首尾非对齐段用 bch_encode_unaligned 兜底。
+// 入参前置违反（bch/data 为空）一律 ASSERT；ecc 可为 NULL 是
+// 有意的可选参数语义（增量计算），保留。
 void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, BYTE *ecc)
 {
     ASSERT(bch != NULL);
@@ -333,7 +335,9 @@ void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
  * 模 n（n=2^m-1）归约：α^n = 1。
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* 对 v 做 mod n 归约（利用 2^m ≡ 1 的循环性质） */
+/**
+ * @brief 对 v 做 mod n 归约（利用 2^m ≡ 1 的循环性质）
+ */
 static inline int modulo(struct fc_bch_control *bch, unsigned int v)
 {
     const unsigned int n = GF_N(bch);
@@ -345,14 +349,18 @@ static inline int modulo(struct fc_bch_control *bch, unsigned int v)
     return (int)v;
 }
 
-/* 快速 mod：v < n 原样返回，否则减一次 n（v 保证 < 2n） */
+/**
+ * @brief 快速 mod：v < n 原样返回，否则减一次 n（v 保证 < 2n）
+ */
 static inline int mod_s(struct fc_bch_control *bch, unsigned int v)
 {
     const unsigned int n = GF_N(bch);
     return (v < n) ? (int)v : (int)(v - n);
 }
 
-/* 多项式最高次数（x=0 → -1） */
+/**
+ * @brief 多项式最高次数（x=0 → -1）
+ */
 static inline int deg(unsigned int poly)
 {
     if (poly == 0)
@@ -362,7 +370,9 @@ static inline int deg(unsigned int poly)
     return (int)(sizeof(unsigned int) * 8U - __builtin_clz(poly)) - 1;
 }
 
-/* GF 除法 a/b = a_log[a] - a_log[b] 再查幂表 */
+/**
+ * @brief GF 除法 a/b = a_log[a] - a_log[b] 再查幂表
+ */
 static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b)
 {
     if ((a == 0U) || (b == 0U))
@@ -372,37 +382,49 @@ static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, un
     return bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)((int)bch->a_log_tab[a] + (int)((int)GF_N(bch) - (int)bch->a_log_tab[b])))];
 }
 
-/* GF 乘法 a·b = α^(log a + log b) */
+/**
+ * @brief GF 乘法 a·b = α^(log a + log b)
+ */
 static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b)
 {
     return (a && b) ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)((int)bch->a_log_tab[a] + (int)bch->a_log_tab[b]))] : 0;
 }
 
-/* GF 平方：a² = α^(2·log a) */
+/**
+ * @brief GF 平方：a² = α^(2·log a)
+ */
 static inline unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a)
 {
     return a ? bch->a_pow_tab[(unsigned int)mod_s(bch, 2 * (int)bch->a_log_tab[a])] : 0;
 }
 
-/* GF 逆：a^-1 = α^(n - log a)（n = 2^m-1 时 α^(n-1) = α^-1） */
+/**
+ * @brief GF 逆：a^-1 = α^(n - log a)（n = 2^m-1 时 α^(n-1) = α^-1）
+ */
 static inline unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a)
 {
     return bch->a_pow_tab[GF_N(bch) - (unsigned int)bch->a_log_tab[a]];
 }
 
-/* α^i（i 可为负，经 modulo 归约） */
+/**
+ * @brief α^i（i 可为负，经 modulo 归约）
+ */
 static inline unsigned int a_pow(struct fc_bch_control *bch, int i)
 {
     return bch->a_pow_tab[(unsigned int)modulo(bch, (unsigned int)i)];
 }
 
-/* 离散对数：a_log[x] = i 使 α^i = x */
+/**
+ * @brief 离散对数：a_log[x] = i 使 α^i = x
+ */
 static inline int a_log(struct fc_bch_control *bch, unsigned int x)
 {
     return (int)bch->a_log_tab[x];
 }
 
-/* 逆对数：a_ilog[x] = 指数 i 使 α^i = x（等价 gf_inv 的对数形式） */
+/**
+ * @brief 逆对数：a_ilog[x] = 指数 i 使 α^i = x（等价 gf_inv 的对数形式）
+ */
 static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
 {
     return mod_s(bch, GF_N(bch) - (unsigned int)bch->a_log_tab[x]);
@@ -462,7 +484,9 @@ static void gf_poly_copy(struct gf_poly *dst, struct gf_poly *src)
     memcpy(dst, src, GF_POLY_SZ(src->deg));
 }
 
-/* BM 算法：true = 成功（*out_deg = σ 的次数 = 错误数）；false = >t，不可纠。 */
+/**
+ * @brief BM 算法：true = 成功（*out_deg = σ 的次数 = 错误数）；false = >t，不可纠。
+ */
 static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg)
 {
     const unsigned int t = GF_T(bch), n = GF_N(bch);
@@ -529,7 +553,9 @@ static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const u
  *   compute_trace_bk_mod —— 计算迹多项式 T_k(x) = Σ_i x^(2^i) mod f。
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* 解 GF(2) 线性方程组（高斯消元 + 回代）；nsol = 2^k2 个解枚举 */
+/**
+ * @brief 解 GF(2) 线性方程组（高斯消元 + 回代）；nsol = 2^k2 个解枚举
+ */
 static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, unsigned int *sol, int nsol)
 {
     const int    m = (int)GF_M(bch);
@@ -603,12 +629,12 @@ static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, u
             x ^= x >> 1;
             x ^= x >> 2;
             x = (x & 0x11111111U) * 0x11111111U;
-            /* 第 r 行的解位落在 bit(m-r)。回代用的 tmp 里，解位一律比它的实际
-             * 位号高 1（故末行 sol = tmp >> 1），这是 upstream 的约定。
-             * ⚠ 写成 `tmp = (tmp << 1) | bit` 会把它放到 bit(m-1-r)——错一位，
-             *   而 tmp|1 又要参与下一次回代 ⇒ 整个解向量错位，不是最后差一位。
-             *   后果：BCH(m=13,t=4) 实际只有 t=2（3 bit 错一律当不可纠、4 bit 错
-             *   约 7% 被"纠"成另一个码字且返回 OK）。见 test_ecc_step_correct。 */
+            // 第 r 行的解位落在 bit(m-r)。回代用的 tmp 里，解位一律比它的实际
+            // 位号高 1（故末行 sol = tmp >> 1），这是 upstream 的约定。
+            // ⚠ 写成 `tmp = (tmp << 1) | bit` 会把它放到 bit(m-1-r)——错一位，
+            // 而 tmp|1 又要参与下一次回代 ⇒ 整个解向量错位，不是最后差一位。
+            // 后果：BCH(m=13,t=4) 实际只有 t=2（3 bit 错一律当不可纠、4 bit 错
+            // 约 7% 被"纠"成另一个码字且返回 OK）。见 test_ecc_step_correct。
             tmp |= (unsigned int)((x >> 28) & 1U) << (unsigned int)(m - r);
         }
         sol[p] = tmp >> 1;
@@ -753,7 +779,9 @@ static int find_poly_deg4_roots(struct fc_bch_control *bch, struct gf_poly *poly
     return n;
 }
 
-/* BTZ factoring */
+/**
+ * @brief BTZ factoring
+ */
 
 static void gf_poly_logrep(struct fc_bch_control *bch, const struct gf_poly *a, int *rep)
 {
@@ -930,23 +958,14 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  * 解码（综合式 → BM → 求根 → 纠错位置输出）
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* --------------------------------------------------------------------
- * fc_bch_decode
- *   功能：BCH 解码——检测并定位 data+recv_ecc 中的错误。
- *   参数：bch —— 引擎；data —— 数据；len —— 数据字节数；
- *         recv_ecc —— 接收校验；calc_ecc —— 预计算校验（可 NULL）；
- *         syn —— 预计算综合式（可 NULL）；errloc —— 输出错误位置数组。
- *   返回：纠正的错误数（≥0）；不可纠返回 -1。
- *   实现要点：
- *     - 入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT（v20）：
- *       它们由调用者保证（fc_ldpc_engine 传常量 len=FC_BUFFER_DATA_SIZE），
- *       若走 -1 会与"不可纠"哨兵撞车，被上游误判为不可纠、CW 静默置 UNC。
- *     - 无 calc_ecc/syn 时：先编码 data 得预期校验，与 recv_ecc 异或
- *       （= 错误综合式），全零则无错返回 0。
- *     - BM 求 σ；求根得 errloc；errloc 换算为 bit 位置
- *       （含 swap_bits / 位序翻转修正）。
- *     - 错误数 ≠ 根数 → 不可纠。
- * -------------------------------------------------------------------- */
+// 实现要点：- 入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT：
+// 它们由调用者保证（fc_ldpc_engine 传常量 len=FC_BUFFER_DATA_SIZE），
+// 若走 -1 会与"不可纠"哨兵撞车，被上游误判为不可纠、CW 静默置 UNC。
+// - 无 calc_ecc/syn 时：先编码 data 得预期校验，与 recv_ecc 异或
+// （= 错误综合式），全零则无错返回 0。
+// - BM 求 σ；求根得 errloc；errloc 换算为 bit 位置
+// （含 swap_bits / 位序翻转修正）。
+// - 错误数 ≠ 根数 → 不可纠。
 bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr)
 {
     ASSERT(bch != NULL);
@@ -1021,7 +1040,9 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
  * 初始化（域表 / 生成多项式 / 查找表 / 度 2 基底）
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* 构建 GF(2^m) 对数/反对数表：x 左移递推，遇本原多项式归约 */
+/**
+ * @brief 构建 GF(2^m) 对数/反对数表：x 左移递推，遇本原多项式归约
+ */
 static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
 {
     unsigned int       i, x = 1;
@@ -1049,7 +1070,9 @@ static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
     return true;
 }
 
-/* 构建 mod8 编码查找表：每输入字节偏移 8b，与生成多项式做多项式模除 */
+/**
+ * @brief 构建 mod8 编码查找表：每输入字节偏移 8b，与生成多项式做多项式模除
+ */
 static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
 {
     int       i, j, b, d;
@@ -1079,7 +1102,9 @@ static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
     }
 }
 
-/* 构建度 2 多项式求根用的迹映射表 xi_tab（二次方程判别式映射） */
+/**
+ * @brief 构建度 2 多项式求根用的迹映射表 xi_tab（二次方程判别式映射）
+ */
 static bool build_deg2_base(struct fc_bch_control *bch)
 {
     const int    m = (int)GF_M(bch);
@@ -1117,13 +1142,13 @@ static bool build_deg2_base(struct fc_bch_control *bch)
     return remaining == 0U;
 }
 
-/* --------------------------------------------------------------------
- * compute_generator_polynomial
- *   功能：计算 BCH 生成多项式 g(x)。
- *   实现要点：g(x) 的根 = α^(2i+1)（i=0..t-1），共 2t 个连续奇次幂；
- *         乘积展开得系数，打包为 32bit 大端字。
- *         输出同时设 bch->ecc_bits = deg(g) = m·t。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 计算 BCH 生成多项式 g(x)。
+ *
+ * @note 实现要点：g(x) 的根 = α^(2i+1)（i=0..t-1），共 2t 个连续奇次幂；
+ * 乘积展开得系数，打包为 32bit 大端字。
+ * 输出同时设 bch->ecc_bits = deg(g) = m·t。
+ */
 static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
 {
     const unsigned int m = GF_M(bch), t = GF_T(bch);
@@ -1133,7 +1158,7 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
     DWORD             *genpoly = s_bch.genpoly;
     struct gf_poly    *g       = (struct gf_poly *)s_bch.g_poly;
 
-    /* roots 用 bitmap：8192 个根只需 256 DWORD（原实现用 32 KB 数组）。 */
+    // roots 用 bitmap：8192 个根只需 256 DWORD（原实现用 32 KB 数组）。
     memset(roots, 0, sizeof(s_bch.roots));
 
     for (i = 0; i < t; i++)
@@ -1180,18 +1205,10 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
     return genpoly;
 }
 
-/* --------------------------------------------------------------------
- * fc_bch_init
- *   功能：初始化 BCH 引擎（分配上下文 + 建表）。
- *   参数：m —— 域阶（5..15）；t —— 纠错能力；prim_poly —— 本原多项式
- *         （0=默认查表）；swap_bits —— 是否交换数据位序。
- *   返回：引擎句柄；失败返回 NULL。
- *   实现要点：
- *     - 参数合法性校验（本工程固定 m=13/t=4；静态存储按该参数定尺寸）。
- *     - 全部表来自 `s_bch` 静态结构体，无堆分配。
- *     - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
- *       任一步失败即清零静态存储返回 NULL。
- * -------------------------------------------------------------------- */
+// 实现要点：- 参数合法性校验（本工程固定 m=13/t=4；静态存储按该参数定尺寸）。
+// - 全部表来自 `s_bch` 静态结构体，无堆分配。
+// - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
+// 任一步失败即清零静态存储返回 NULL。
 fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
     bool                      err = false;
@@ -1211,8 +1228,8 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
         0x402B,
         0x8003,
     };
-    /* 静态存储只覆盖本工程固定参数（m=13, t=4）。换参数时数组尺寸必须重算，
-     * 否则 ASSERT 会在这里暴露；不要靠运行时重新分配。 */
+    // 静态存储只覆盖本工程固定参数（m=13, t=4）。换参数时数组尺寸必须重算，
+    // 否则 ASSERT 会在这里暴露；不要靠运行时重新分配。
     ASSERT((m == (int)FC_BCH_M) && (t == (int)FC_BCH_T));
     if ((m != (int)FC_BCH_M) || (t != (int)FC_BCH_T))
     {
@@ -1272,7 +1289,7 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
     return bch;
 }
 
-/* 释放 BCH 引擎：静态存储只清零，不归还堆。 */
+// 释放 BCH 引擎：静态存储只清零，不归还堆。
 void fc_bch_free(fc_bch_control_t *bch)
 {
     if (bch == NULL)
@@ -1286,13 +1303,13 @@ void fc_bch_free(fc_bch_control_t *bch)
     }
 }
 
-/* 获取 ECC 字节数 */
+// 获取 ECC 字节数
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch)
 {
     return bch->ecc_bytes;
 }
 
-/* 获取纠错能力 t */
+// 获取纠错能力 t
 unsigned int fc_bch_t(const fc_bch_control_t *bch)
 {
     return bch->t;

@@ -39,9 +39,11 @@
  * 组容量 = pending 容量（一个组至少占一个 pending 槽，组不会比在飞子操作多）。 */
 #define FTL_GROUP_MAX (FTL_PENDING_MAX)
 
-/* 组 gi 在 owners 位掩码里的位（pend_req_t.owners / pend_group_t 的约定）。
+/**
+ * @brief 组 gi 在 owners 位掩码里的位（pend_req_t.owners / pend_group_t 的约定）。
  * 组号由 pend_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 DWORD 位宽。
- * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。 */
+ * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。
+ */
 static inline DWORD ftl_group_bit(WORD gi)
 {
     return 1U << gi;
@@ -103,7 +105,7 @@ static inline bool pend_op_is_write_confirm(BYTE op)
     return op == PENDING_OP_WRITE_CONFIRM;
 }
 
-/* cache program 批次成员（中间页或末页）。 */
+/** @brief cache program 批次成员（中间页或末页）。 */
 static inline bool pend_op_is_write_cache(BYTE op)
 {
     return op == PENDING_OP_WRITE_CACHE;
@@ -215,15 +217,15 @@ typedef struct
     BYTE  n_cw;   /* 子操作覆盖的 CW 数 */
 } pend_op_view_t;
 
-/*
- * pend_init - 清空 pending / group 两张表（per-instance）
+/**
+ * @brief 清空 pending / group 两张表（per-instance）
  *
  * @param table  pending 表（由 ftl_ctx_t 内嵌持有）
  */
 void pend_init(pend_table_t *table);
 
-/*
- * pend_alloc - 认领一个空闲 pending 槽（**调用者就地逐字段填**）
+/**
+ * @brief 认领一个空闲 pending 槽（**调用者就地逐字段填**）
  *
  * 返回该槽指针并置 used=1、其余字段清零；表满返回 NULL。字段由调用者（ftl / wbuf /
  * cache 批次的读写路径）**就地逐字段赋值**：字段名即文档（见 pend_req_t 的字段注释），
@@ -240,8 +242,8 @@ void pend_init(pend_table_t *table);
  */
 pend_req_t *pend_alloc(pend_table_t *table);
 
-/*
- * pend_validate - 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
+/**
+ * @brief 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
  *
  *   owners != 0  —— 至少一个贡献组（读恒单组；写页打包 ≥1）
  *   n_cw ∈ [1, FTL_LBA_PER_PAIR]
@@ -256,8 +258,8 @@ static inline void pend_validate(const pend_req_t *req)
     ASSERT((req->n_cw > 0U) && (req->n_cw <= FTL_LBA_PER_PAIR));
 }
 
-/*
- * pend_find - 按 command_id 查找本实例 pending 项
+/**
+ * @brief 按 command_id 查找本实例 pending 项
  *
  * @param table     pending 表
  * @param cmd_id  FC command_id
@@ -265,16 +267,16 @@ static inline void pend_validate(const pend_req_t *req)
  */
 pend_req_t *pend_find(pend_table_t *table, WORD cmd_id);
 
-/*
- * pend_remove - 移除本实例中已完成的 pending 项
+/**
+ * @brief 移除本实例中已完成的 pending 项
  *
  * @param table     pending 表
  * @param cmd_id  FC command_id
  */
 void pend_remove(pend_table_t *table, WORD cmd_id);
 
-/*
- * pend_find_op - 找**第一个** op 类型匹配的 pending 项（按下标升序）
+/**
+ * @brief 找**第一个** op 类型匹配的 pending 项（按下标升序）
  *
  * 供 Read Recovery 引擎取走被托管的子操作：那些项的 command_id 已置哨兵
  * （FTL_PENDING_CMD_NONE），按 id 查不到，只能按 op 找。
@@ -286,8 +288,8 @@ void pend_remove(pend_table_t *table, WORD cmd_id);
  */
 bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index);
 
-/*
- * pend_view_op - 按 op 取一个 pending 槽的只读视图（不释放槽）
+/**
+ * @brief 按 op 取一个 pending 槽的只读视图（不释放槽）
  *
  * 与 pend_find_op 的差别：一次填好 RR 需要的字段（owners/index/buffer/lba/n_cw），
  * 槽的释放仍由调用者在收尾时走 pend_release_index。字段拷贝即“视图”，不是第二套坐标。
@@ -299,8 +301,8 @@ bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index);
  */
 bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out);
 
-/*
- * pend_release_index - 按下标释放 pending 项（used=0）
+/**
+ * @brief 按下标释放 pending 项（used=0）
  *
  * 与 pend_remove 的差别：走**下标**而非 command_id。托管项脱钩后无 id 可查，
  * 收尾只能靠下标。越界是调用者 bug ⇒ ASSERT。
@@ -310,8 +312,8 @@ bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out);
  */
 void pend_release_index(pend_table_t *table, BYTE index);
 
-/*
- * pend_slot_get_count - 本实例当前未决（占用）的 pending 项数
+/**
+ * @brief 本实例当前未决（占用）的 pending 项数
  *
  * ftl_service 的档位判定用它近似 host IO 空闲度——
  * pending 占用高 = host IO 繁忙 → BUSY；占用低 = 空闲 → IDLE。
@@ -323,8 +325,8 @@ WORD pend_slot_get_count(const pend_table_t *table);
 
 /* ── 完成组 API（pend_group_t）── */
 
-/*
- * pend_group_alloc - 申请一个空闲完成组槽（used=1，字段清零）
+/**
+ * @brief 申请一个空闲完成组槽（used=1，字段清零）
  *
  * @param table   pending 表
  * @param out_gi  输出：组下标（0..FTL_GROUP_MAX-1；仅返回 true 时有效）
@@ -332,8 +334,8 @@ WORD pend_slot_get_count(const pend_table_t *table);
  */
 bool pend_group_alloc(pend_table_t *table, BYTE *out_gi);
 
-/*
- * pend_group_get_count - 当前占用（未完成）的组数
+/**
+ * @brief 当前占用（未完成）的组数
  *
  * ftl_service 的档位判定用它近似"排队未下发的 host 请求"——
  * 有未完成组 = host 工作饿着 → 归 BUSY。
@@ -343,8 +345,8 @@ bool pend_group_alloc(pend_table_t *table, BYTE *out_gi);
  */
 WORD pend_group_get_count(const pend_table_t *table);
 
-/*
- * pend_group_add_subop / pend_group_drop_subop - 组在飞数增减的唯一闸门
+/**
+ * @brief 组在飞数增减的唯一闸门
  *
  * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走
  * pend_group_complete_subop*（聚合状态 + 递减 + 试触发）。
@@ -355,8 +357,8 @@ WORD pend_group_get_count(const pend_table_t *table);
 void pend_group_add_subop(pend_table_t *table, WORD gi);
 void pend_group_drop_subop(pend_table_t *table, WORD gi);
 
-/*
- * pend_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
+/**
+ * @brief 一个子操作完成：聚合状态 + 递减 + 试触发
  *
  * 由 ftl_host_io_callback 在子操作簿记后调用（caller 通知字段的唯一写点）。
  * sub_status != OK 时粘进 agg_status；outstanding-- 后试发组完成通知。
@@ -367,8 +369,8 @@ void pend_group_drop_subop(pend_table_t *table, WORD gi);
  */
 void pend_group_complete_subop(pend_table_t *table, WORD gi, ssd_status_e sub_status);
 
-/*
- * pend_group_complete_subop_multi - 一个子操作完成、归属**多个组**：逐组聚合
+/**
+ * @brief 一个子操作完成、归属**多个组**：逐组聚合
  *
  * 页打包写缓冲下一页可能由多个组拼成（一页 = 一次 FC 命令 = 一个 pending 槽），
  * 完成时须对**每个**贡献组各递减一次在飞数（每个组对该窗口至多贡献一次 append ⇒
@@ -380,8 +382,8 @@ void pend_group_complete_subop(pend_table_t *table, WORD gi, ssd_status_e sub_st
  */
 void pend_group_complete_subop_multi(pend_table_t *table, DWORD owners, ssd_status_e sub_status);
 
-/*
- * pend_group_maybe_complete - 若组已全部下发且全部完成则发通知并释放槽
+/**
+ * @brief 若组已全部下发且全部完成则发通知并释放槽
  *
  * 条件：used 且 next==total 且 outstanding==0。满足则写 status_out/complete_flag、
  * 调 on_complete（**最后**才 used=0，因回调可能重入 submit 再申请组）。
@@ -391,8 +393,8 @@ void pend_group_complete_subop_multi(pend_table_t *table, DWORD owners, ssd_stat
  */
 void pend_group_maybe_complete(pend_table_t *table, WORD gi);
 
-/*
- * pend_group_has_window_pending - 是否还有写组的下一个 LBA 落在指定 pair 窗口
+/**
+ * @brief 是否还有写组的下一个 LBA 落在指定 pair 窗口
  *
  * 供 wbuf 的空闲 flush 判据使用；扫描 pending 表内的 groups[]，不暴露数组本身。
  *
@@ -415,13 +417,13 @@ bool pend_group_has_window_pending(const pend_table_t *table, DWORD window);
  */
 typedef ftl_status_e (*pending_confirm_handler_t)(void *ctx, pend_req_t *pending);
 
-/* 注册事务 handler（ftl_init 中调用一次）。 */
+/** @brief 注册事务 handler（ftl_init 中调用一次）。 */
 void pend_confirm_set_handler(pending_confirm_handler_t handler);
 
-/* 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
+/** @brief 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
 void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners);
 
-/* 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
+/** @brief 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
 void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_t *info);
 
 #endif /* FTL_PENDING_H */

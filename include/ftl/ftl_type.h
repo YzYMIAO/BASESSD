@@ -75,7 +75,7 @@ typedef enum
  * ftl_init 内部初始化，不暴露给 controller 层。
  * 各子模块在初始化时接收一份副本。
  *
- * ⚠ 2026-10-17 记（**有意不做的优化**，别当漏项）：本类型**可以**改成位域
+ * ⚠ **有意不做的优化**（别当漏项）：本类型**可以**改成位域
  *   （ch:2 / ce:2 / lun:?）省下每份 2 字节，但**当前不改**。收益 ~10 字节
  *   （3 B → 1 B，常驻副本仅 3 份：ftl->topo / journal->topo / metadata_dir.topo），
  *   代价四项：① 位宽宏在 nand_config.h，本头在依赖图底座，得加 include 才够得着；
@@ -121,7 +121,7 @@ typedef void (*pending_cb_t)(void *ctx);
  * ftl_io_req_t — 一次 FTL 读写请求的完整参数。
  *
  * 由 Controller 层构造后整体传入 ftl_submit_read / ftl_submit_write
- * （形参 (ftl, req) 共 2 个，替换原先 8 个散落形参）。
+ * （形参 (ftl, req) 共 2 个）。
  * pending 表按值嵌入本结构体（ftl->pending[i].io = *req），submit 调用期间
  * 只要求 req 有效，之后完成处理用 pending 表中的拷贝。
  */

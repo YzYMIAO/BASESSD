@@ -5,10 +5,8 @@
  * Block State Table（BST）— 统一 per-Block 结构体数组
  *
  * 背景：
- *   v0.31 接入 read recovery 后，per-block 元数据分散在四处
- *   （allocator->erase_counts / bad_blocks / bbt g_bbt_bitmap /
- *   rr_block_track），无统一承载，且 read recovery 的 ECC 追踪数组
- *   从未分配（空转）。本表把三类状态合并为单一数据源。
+ *   块的擦除次数、坏块状态、read recovery 的 ECC 追踪分属不同模块，
+ *   没有统一承载。本表把它们合并为单一数据源，避免同一块的状态多份维护。
  *
  * 索引语义：
  *   按「全局物理 Block 号」索引，gblock = plane * BLOCKS_PER_PLANE + block
@@ -21,7 +19,7 @@
  *   `ftl_table_refs_t`（见 allocator.h）里的指针。
  *   多 LUN 前置：每实例一份表 = 每实例一组独立对象，本表代码零改动。
  *
- * 有效位（DRAM-less approach ③，2026-10-13 定）：
+ * 有效位（DRAM-less approach ③）：
  *   本仓**不**维护任何常驻有效位图。有效性 = 逐 CW 读**页内 META**（即本仓的「OOB」
  *   反向映射：每个 CW 头 4B 存本 CW 的扇区 LBA）→ **反查 L2P** 判该 CW 是否仍指向本
  *   物理位置。这就是主流 DRAM-less 的 flash reverse-mapping
@@ -82,7 +80,7 @@ typedef struct
  * BAD 是终态；bbt_mark_bad 清 valid_count / sb_id，bbt_factory_scan / bbt_init 同样清。
  * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 bst_block_t.temp。
  *
- * ⚠ 无「预擦除 / 未擦除」分级态（P1-3）：Free Pool 是**一个**已擦除池（GC 先擦后归还），
+ * ⚠ 无「预擦除 / 未擦除」分级态：Free Pool 是**一个**已擦除池（GC 先擦后归还），
  *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
 typedef enum
 {
@@ -104,12 +102,7 @@ _Static_assert(sizeof(bst_state_e) == 1, "枚举不是 1 字节：检查 -fshort
 
 /* ── Block State Table 每行（per-block 条目）──
  * 全字段常驻 SRAM（纯块级聚合，**无**位图表；有效性现查 META+L2P，见文件头）。
- * 只保留**有消费方**的字段——无读者的字段已删除（v0.56）：
- *   · program_count (2B) —— 写成功++，从无读者；连带 Wear 表的持久化槽一并删
- *   · bad_reason    (1B) —— 仅 bbt_mark_bad 写入，无读者；`FTL_BLOCK_BAD_*` 枚举与
- *                            `bbt_mark_bad` 的 `reason` 形参一并删除（BBT 持久化本就是
- *                            bitmap，重启后原因必丢，属纯 RAM 诊断残留）
- *   · gc_generation (1B) —— GC 迁移成功++，从无读者
+ * 只保留**有消费方**的字段：
  *
  *   erase_count   合并 allocator->erase_counts[]（allocator/gc/wl 消费）
  *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty 消费）
@@ -155,19 +148,19 @@ _Static_assert(sizeof(bst_block_t) == 20, "bst_block_t 布局漂移（期望 20B
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
 
-/* per-plane block + plane → 全局 0..4095 */
+/** @brief plane block + plane → 全局 0..4095 */
 static inline WORD ftl_gblock(BYTE plane, WORD block)
 {
     return (plane * BLOCKS_PER_PLANE + block);
 }
 
-/* PBA → 全局块号（直接按 PBA 位序解，不经 PAA） */
+/** @brief PBA → 全局块号（直接按 PBA 位序解，不经 PAA） */
 static inline WORD ftl_pba_gblock(DWORD pba)
 {
     return ftl_gblock(pba_to_plane(pba), pba_to_block(pba));
 }
 
-/* gblock → plane / per-plane block（ftl_gblock 的逆，单点解码）。 */
+/** @brief gblock → plane / per-plane block（ftl_gblock 的逆，单点解码）。 */
 static inline BYTE ftl_gblock_plane(WORD g)
 {
     return (g / BLOCKS_PER_PLANE);
@@ -216,24 +209,28 @@ static inline void ftl_block_set_bad(bst_block_t *b)
     ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
 }
 
-/* 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator 的 FTL_TEMP_* 同值域）。
+/**
+ * @brief 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator 的 FTL_TEMP_* 同值域）。
  * 不在本头引用 FTL_TEMP_*（避免 allocator.h 循环 include），直接用值语义；
  * **不另立 `ftl_block_temp_t` 枚举**——同值域再来一套名字就是第二套坐标（C9）。
  * 温度与状态**正交** ⇒ `ftl_block_set_state` 不碰本字段；每次分配都显式写入，
- * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。 */
+ * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。
+ */
 static inline void ftl_block_set_temp(bst_block_t *b, BYTE temperature)
 {
     b->temp = temperature;
 }
 
-/* ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
+/** @brief ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
 static inline BYTE ftl_block_get_temp(const bst_block_t *b)
 {
     return b->temp;
 }
 
-/* 状态名（诊断日志用）。两个调用者：ftl.c 的 dangling 守卫、controller/cli.c 的 map。
- * H7：switch 必须有 default（非枚举值只可能来自内存损坏，返回 "?" 而不是静默取一支）。 */
+/**
+ * @brief 状态名（诊断日志用）。两个调用者：ftl.c 的 dangling 守卫、controller/cli.c 的 map。
+ * H7：switch 必须有 default（非枚举值只可能来自内存损坏，返回 "?" 而不是静默取一支）。
+ */
 static inline const char *ftl_block_state_name(bst_state_e st)
 {
     switch (st)
@@ -281,25 +278,25 @@ static inline void ftl_block_set_sb(bst_block_t *b, WORD sb_id)
  * SB 层的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB，当前 0..512），只用于
  * victim 评分；**不要**拿它作为单块 `valid_count` 的上界。
  *
- * ⚠ 本仓**无**「写过」位图（v0.60 删）：页内哪些 CW 有效由**页内 META + L2P 反查**
+ * ⚠ 本仓**无**「写过」位图：页内哪些 CW 有效由**页内 META + L2P 反查**
  *   逐 CW 现判（DRAM-less approach ③，见文件头）；本计数只服务 victim 选择。 */
 
-/* 有效 CW 计数 +1（写成功、GC/WL 搬入新页时各 CW 调一次） */
+/** @brief 有效 CW 计数 +1（写成功、GC/WL 搬入新页时各 CW 调一次） */
 static inline void ftl_block_add_valid(bst_block_t *b)
 {
     ASSERT(b->valid_count < FTL_CW_PER_BLOCK);
     b->valid_count++;
 }
 
-/* 有效 CW 计数 -1（覆盖写旧位置、GC/WL 搬离、TRIM、擦除前清账） */
+/** @brief 有效 CW 计数 -1（覆盖写旧位置、GC/WL 搬离、TRIM、擦除前清账） */
 static inline void ftl_block_sub_valid(bst_block_t *b)
 {
     ASSERT(b->valid_count > 0U);
     b->valid_count--;
 }
 
-/*
- * ftl_block_sub_valid_if_live - 仅在块仍可记账时 -1
+/**
+ * @brief 仅在块仍可记账时 -1
  *
  * 为什么不能直接调 ftl_block_sub_valid：
  *   - `bbt_mark_bad()` 会把 `valid_count` 清 0（坏块不再产生有效 CW）；
@@ -318,14 +315,16 @@ static inline void ftl_block_sub_valid_if_live(bst_block_t *b)
     }
 }
 
-/* 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
+/** @brief 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
 static inline void ftl_block_clear_valid(bst_block_t *b)
 {
     b->valid_count = 0U;
 }
 
-/* 直接设置 `valid_count`（块元数据快照恢复 / 重建用；日常增量仍走 add/sub）。
- * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。 */
+/**
+ * @brief 直接设置 `valid_count`（块元数据快照恢复 / 重建用；日常增量仍走 add/sub）。
+ * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。
+ */
 static inline void ftl_block_set_valid(bst_block_t *b, WORD valid)
 {
     b->valid_count = valid;

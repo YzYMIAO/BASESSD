@@ -25,7 +25,7 @@
 
 /* ── cache read ── */
 
-/* cache read 一次调用的公共参数；避免内部 helper 逐个传 6 个实参。 */
+// cache read 一次调用的公共参数；避免内部 helper 逐个传 6 个实参。
 typedef struct
 {
     ftl_ctx_t *ftl;
@@ -36,7 +36,7 @@ typedef struct
     DWORD     *used;
 } cache_read_req_t;
 
-/* 构建中的命令/pending 集合；只在 cache_read_submit 内使用。 */
+// 构建中的命令/pending 集合；只在 cache_read_submit 内使用。
 typedef struct
 {
     fc_command_t *cmds[FTL_CACHE_READ_MAX_PAIRS];
@@ -44,8 +44,10 @@ typedef struct
     DWORD         n_pairs;
 } cache_read_build_t;
 
-/* 校验一个 pair 的 L2P 映射、plane/拓扑与页内一致性。
- * *defer = 某次 l2p_read 遇到 LOADING（已起加载），调用者可下轮重试。 */
+/**
+ * @brief 校验一个 pair 的 L2P 映射、plane/拓扑与页内一致性。
+ * *defer = 某次 l2p_read 遇到 LOADING（已起加载），调用者可下轮重试。
+ */
 static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_pba[PLANE_NUM], bool *defer)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -102,7 +104,9 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
     return true;
 }
 
-/* 收集可连续 cache 读的 pair；返回 pair 数（0..FTL_CACHE_READ_MAX_PAIRS）。 */
+/**
+ * @brief 收集可连续 cache 读的 pair；返回 pair 数（0..FTL_CACHE_READ_MAX_PAIRS）。
+ */
 static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool *defer)
 {
     DWORD max_pairs = req->remain / FTL_LBA_PER_PAIR;
@@ -124,7 +128,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
             break;
         }
 
-        /* 两 plane 必须都有效且指向同一页；否则不是完整 pair。 */
+        // 两 plane 必须都有效且指向同一页；否则不是完整 pair。
         bool complete = true;
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
@@ -134,9 +138,9 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
                 break;
             }
         }
-        /* 跨 plane 必须比**页号字段**：`pba_page()` 保留 plane/block 位，两 plane
-         * 的同一页号取出来必然不等（Policy B 下两 plane 块号也可能不同）。
-         * 多平面 cache 命令只要求两 plane 页号一致，不要求块号相同。 */
+        // 跨 plane 必须比**页号字段**：`pba_page()` 保留 plane/block 位，两 plane
+        // 的同一页号取出来必然不等（Policy B 下两 plane 块号也可能不同）。
+        // 多平面 cache 命令只要求两 plane 页号一致，不要求块号相同。
         for (BYTE p = 1U; complete && (p < PLANE_NUM); p++)
         {
             complete = (pba_to_page(pair_pba[p]) == pba_to_page(pair_pba[0]));
@@ -146,13 +150,13 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
             break;
         }
 
-        /* 当前 pair 必须紧接上一 pair 的物理页；否则只提交已收集的前缀。 */
+        // 当前 pair 必须紧接上一 pair 的物理页；否则只提交已收集的前缀。
         if (j > 0U)
         {
             bool contiguous = true;
             for (BYTE p = 0U; contiguous && (p < PLANE_NUM); p++)
             {
-                /* 页号 +1（不能对 `pba_page()` 加 1：那会加到 CW 位），且同一块。 */
+                // 页号 +1（不能对 `pba_page()` 加 1：那会加到 CW 位），且同一块。
                 contiguous = (pba_to_page(pair_pba[p]) == (pba_to_page(pba[j - 1U][p]) + 1U)) && (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
             }
             if (!contiguous)
@@ -171,7 +175,9 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
     return n_pairs;
 }
 
-/* 构建命令与 pending；失败时在 build_fail 统一回收。 */
+/**
+ * @brief 构建命令与 pending；失败时在 build_fail 统一回收。
+ */
 static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
     for (DWORD i = 0U; i < b->n_pairs; i++)
@@ -267,7 +273,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
         return FTL_CACHE_READ_AGAIN;
     }
 
-    /* 记账必须早于 submit：完成可能在本轮 drain 之后立刻被泵处理。 */
+    // 记账必须早于 submit：完成可能在本轮 drain 之后立刻被泵处理。
     for (DWORD i = 0U; i < b.n_pairs; i++)
     {
         pend_group_add_subop(&req->ftl->pending, req->gi);
@@ -279,7 +285,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
     {
         if (ftl_op_submit(b.cmds[i], FTL_OP_HOST_IO, NULL) != FTL_OK)
         {
-            /* 已提交的成员保留并等待完成；未提交的成员回滚。 */
+            // 已提交的成员保留并等待完成；未提交的成员回滚。
             for (DWORD k = i; k < b.n_pairs; k++)
             {
                 pend_remove(&req->ftl->pending, ftl_cmd_id(b.cmds[k]));
@@ -349,7 +355,9 @@ typedef struct
     DWORD         n_pending;
 } cache_wb_build_t;
 
-/* 撤销尚未提交的构建：释放命令/pending + 归还页对。调用后 batch 缓冲/组未动。 */
+/**
+ * @brief 撤销尚未提交的构建：释放命令/pending + 归还页对。调用后 batch 缓冲/组未动。
+ */
 static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
 {
     for (BYTE i = 0U; i < b->n_cmd; i++)
@@ -373,7 +381,9 @@ static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
     ftl->cache_wb.active = false;
 }
 
-/* 分配 4 个页对、建 4 条命令、登记 4 个 pending（尚未提交）。 */
+/**
+ * @brief 分配 4 个页对、建 4 条命令、登记 4 个 pending（尚未提交）。
+ */
 static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const void *buffer, cache_wb_build_t *b)
 {
     for (BYTE j = 0U; j < FTL_CACHE_WRITE_MAX_PAGES; j++)
@@ -431,8 +441,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     ASSERT(ftl != NULL);
     ASSERT(used != NULL);
 
-    /* 条件不满足 = 正常回退，不是错误。
-     * alc_super_open_get_room>=4 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
+    // 条件不满足 = 正常回退，不是错误。
+    // alc_super_open_get_room>=4 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。
     const bool batch_active = ftl->cache_wb.active;
     const bool enough_lbas  = (remain >= FTL_CACHE_WRITE_LBAS);
     const bool lba_aligned  = ((lba & (FTL_LBA_PER_PAIR - 1U)) == 0U);

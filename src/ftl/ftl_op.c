@@ -35,21 +35,23 @@
 
 #include <string.h>
 
-/* 旁表按 command_id 键 ⇒ 容量上界 = 同时在飞命令数 ≤ FC 命令池深度。
- * 池深是 FC 层的事实上界，写成常量会在 FC 扩容时静默变小（H4）。 */
+// 旁表按 command_id 键 ⇒ 容量上界 = 同时在飞命令数 ≤ FC 命令池深度。
+// 池深是 FC 层的事实上界，写成常量会在 FC 扩容时静默变小（H4）。
 _Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH, "旁表容量必须 ≥ FC 命令池深度（推导见 ftl_op.h）");
 
-/* 前置声明：服务函数定义在本文件末尾。 */
+/**
+ * @brief 前置声明：服务函数定义在本文件末尾。
+ */
 static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 1. 静态资源 ── */
 
 static ftl_op_ctx_entry_t g_op_ctx[FTL_OP_CTX_TABLE_SIZE];
 
-/* 实例路由表：按命令 ch/ce/lun → FTL 实例。 */
+// 实例路由表：按命令 ch/ce/lun → FTL 实例。
 static struct ftl_context *g_op_route[CH_NUM][CE_NUM][LUN_NUM];
 
-/* 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可。 */
+// 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可。
 static BYTE g_dispatch_depth = 0U;
 
 /* ── 服务函数数组 ──
@@ -83,11 +85,11 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
 
 /* ── 2. 初始化 ── */
 
-/* ftl_op_init — 清空 ctx 旁表 + 实例路由表（开机调用一次）。
- *
- * ⚠ 清的是**全局**资源（两个 file-static），只能调一次：由 main.c 的
- *   ssd_ftl_boot_all 在**所有实例 boot 之前**调用。**不可**放进逐实例的 ftl_init ——
- *   那样实例 N 的 init 会抹掉实例 N-1 在飞的 ctx 登记，以及已设好的路由表。 */
+// ftl_op_init — 清空 ctx 旁表 + 实例路由表（开机调用一次）。
+//
+// ⚠ 清的是**全局**资源（两个 file-static），只能调一次：由 main.c 的
+// ssd_ftl_boot_all 在**所有实例 boot 之前**调用。**不可**放进逐实例的 ftl_init ——
+// 那样实例 N 的 init 会抹掉实例 N-1 在飞的 ctx 登记，以及已设好的路由表。
 void ftl_op_init(void)
 {
     memset(g_op_ctx, 0, sizeof(g_op_ctx));
@@ -96,20 +98,14 @@ void ftl_op_init(void)
 
 /* ── 3. ctx 旁表 ── */
 
-/* --------------------------------------------------------------------
- * ftl_op_ctx_add
- *   功能：为一个 command_id 登记 ctx。
- *   参数：cmd_id —— FC command_id；ctx —— 该命令的私有状态。
- *   返回：FTL_OK 成功；FTL_ERROR 表满（FTL_OP_CTX_TABLE_SIZE）。
- *   实现要点：本闸门保证**同一 cmd_id 至多一条表项**——命中已有项即**原地覆盖** ctx，
- *             不追加第二条。这个不变量必须在这里守：命令池只有 FC_COMMAND_POOL_DEPTH
- *             个 id，会被复用；若旧项因完成从未被观测而残留（CQ 满时 fc.c 强制置完成、
- *             FTL 感知不到那条 completion），再 add 同一 id 就会让表里出现两条同 id 项，
- *             而 ftl_op_ctx_take 按**首个**匹配摘链 ⇒ 服务函数拿到**陈旧**的 ctx
- *             并据此改状态，本命令自己的表项则永久泄漏。
- *             覆盖时记 LOGW：这条路径一旦发生必须自己报出来，否则就是静默失效（C8）。
- *             ctx 允许为 NULL（表示"无私有状态"，服务函数自行派生）。
- * -------------------------------------------------------------------- */
+// 实现要点：本闸门保证**同一 cmd_id 至多一条表项**——命中已有项即**原地覆盖** ctx，
+// 不追加第二条。这个不变量必须在这里守：命令池只有 FC_COMMAND_POOL_DEPTH
+// 个 id，会被复用；若旧项因完成从未被观测而残留（CQ 满时 fc.c 强制置完成、
+// FTL 感知不到那条 completion），再 add 同一 id 就会让表里出现两条同 id 项，
+// 而 ftl_op_ctx_take 按**首个**匹配摘链 ⇒ 服务函数拿到**陈旧**的 ctx
+// 并据此改状态，本命令自己的表项则永久泄漏。
+// 覆盖时记 LOGW：这条路径一旦发生必须自己报出来，否则就是静默失效（C8）。
+// ctx 允许为 NULL（表示"无私有状态"，服务函数自行派生）。
 ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
@@ -136,7 +132,7 @@ ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx)
     return FTL_ERROR;
 }
 
-/* ftl_op_ctx_remove — 按 command_id 释放表项（未找到则 no-op，幂等） */
+// ftl_op_ctx_remove — 按 command_id 释放表项（未找到则 no-op，幂等）
 void ftl_op_ctx_remove(WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
@@ -149,7 +145,7 @@ void ftl_op_ctx_remove(WORD cmd_id)
     }
 }
 
-/* ftl_op_ctx_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL） */
+// ftl_op_ctx_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL）
 void *ftl_op_ctx_take(WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
@@ -166,7 +162,7 @@ void *ftl_op_ctx_take(WORD cmd_id)
     return NULL;
 }
 
-/* ftl_op_ctx_count — 旁表当前占用项数（观测/自检用） */
+// ftl_op_ctx_count — 旁表当前占用项数（观测/自检用）
 WORD ftl_op_ctx_count(void)
 {
     WORD count = 0U;
@@ -184,14 +180,8 @@ WORD ftl_op_ctx_count(void)
 
 /* ── 4. 实例路由 ── */
 
-/* --------------------------------------------------------------------
- * ftl_op_route_set
- *   功能：把调用者的 route 数组内容逐格拷进 g_op_route（实例路由表）。
- *   参数：route —— [ch][ce][lun] → ftl_ctx_t* 数组；传 NULL 则清空 g_op_route。
- *   返回：无。
- *   实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让
- *             g_op_route 成为唯一持有者，避免悬垂。
- * -------------------------------------------------------------------- */
+// 实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让
+// g_op_route 成为唯一持有者，避免悬垂。
 void ftl_op_route_set(struct ftl_context *route[][CE_NUM][LUN_NUM])
 {
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
@@ -206,31 +196,19 @@ void ftl_op_route_set(struct ftl_context *route[][CE_NUM][LUN_NUM])
     }
 }
 
-/* --------------------------------------------------------------------
- * ftl_op_route_get
- *   功能：按命令 ch/ce/lun 取所属 FTL 实例（派发时用它找到正确实例）。
- *   参数：ch/ce/lun —— 命令自身 config 的三个坐标。
- *   返回：ftl_ctx_t*；ftl_op_route_set 之前为 NULL。
- *   实现要点：越界属编程错误（坐标由 FTL 从 PBA 灌入并经 pba_is_valid 校验）⇒ ASSERT。
- *             返回 NULL 同属编程错误（route_set 漏调）——但**不在此处断言**：判据在
- *             **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明），
- *             此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
- *             不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
- * -------------------------------------------------------------------- */
+// 实现要点：越界属编程错误（坐标由 FTL 从 PBA 灌入并经 pba_is_valid 校验）⇒ ASSERT。
+// 返回 NULL 同属编程错误（route_set 漏调）——但**不在此处断言**：判据在
+// **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明），
+// 此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
+// 不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
 struct ftl_context *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return g_op_route[ch][ce][lun];
 }
 
-/*
- * ftl_op_route_get_region
- *   功能：按**全局 L2P region** 取 owner FTL 实例（共享 cache 的 owner 解析）。
- *   参数：global_region —— 全局 region 序号（lba >> L2P_REGION_SHIFT）。
- *   返回：owner 实例；route_set 之前为 NULL。
- *   实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
- *             lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
- */
+// 实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
+// lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
 struct ftl_context *ftl_op_route_get_region(DWORD global_region)
 {
     const DWORD dim = global_region % FTL_DIM_TOTAL;
@@ -244,12 +222,12 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     WORD cmd_id = ftl_cmd_id(cmd);
 
-    /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
+    // ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。
     cmd->op_tag = op;
 
-    /* ② 登记必须**早于**提交（见头文件）。
-     *    ctx == NULL（host I/O）：主动清表项——cmd_id 是池下标、会复用，主动清是廉价保险。
-     *    ctx != NULL：由 ftl_op_ctx_add 保证同一 id 不出现第二条表项（见该函数）。 */
+    // ② 登记必须**早于**提交（见头文件）。
+    // ctx == NULL（host I/O）：主动清表项——cmd_id 是池下标、会复用，主动清是廉价保险。
+    // ctx != NULL：由 ftl_op_ctx_add 保证同一 id 不出现第二条表项（见该函数）。
     if (ctx != NULL)
     {
         if (ftl_op_ctx_add(cmd_id, ctx) != FTL_OK)
@@ -262,7 +240,7 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
         ftl_op_ctx_remove(cmd_id);
     }
 
-    /* ③ 提交。失败 ⇒ 回滚登记（瞬态背压，调用者下轮重试）。 */
+    // ③ 提交。失败 ⇒ 回滚登记（瞬态背压，调用者下轮重试）。
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
         ftl_op_ctx_remove(cmd_id);
@@ -331,41 +309,41 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
     BYTE                 op = completion->op_tag;
     ftl_op_callback_fn_t fn = (op < FTL_OP_COUNT) ? g_op_callbacks[op] : NULL;
 
-    /* command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。 */
+    // command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
     fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
     if (fn == NULL)
     {
-        /* 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
-         * 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。 */
+        // 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
+        // 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。
         LOGE(LOG_TAG_FTL "orphan completion cmd=%hu op=%hhu status=0x%02hx\r\n", completion->command_id, op, completion->status);
         ftl_op_ctx_remove(completion->command_id);
         (void)fc_command_release(cmd);
         return;
     }
 
-    /* 先摘链再回调——服务函数内部可能重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。 */
+    // 先摘链再回调——服务函数内部可能重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。
     void *ctx = ftl_op_ctx_take(completion->command_id);
 
-    /* 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
-     * "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
-     * 不变量：路由表由 main.c 在**逐实例 boot 之前**设好（见 ssd_ftl_boot_all ①：
-     * 先 ftl_op_init 清一次、再 route_set），因为 boot 期 full metadata rebuild 就会经
-     * l2p_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
-     * 不再是"开机早期"的正常状态。 */
+    // 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
+    // "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
+    // 不变量：路由表由 main.c 在**逐实例 boot 之前**设好（见 ssd_ftl_boot_all ①：
+    // 先 ftl_op_init 清一次、再 route_set），因为 boot 期 full metadata rebuild 就会经
+    // l2p_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
+    // 不再是"开机早期"的正常状态。
     struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
-    /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
-     * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */
+    // 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
+    // "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。
     g_dispatch_depth++;
     fn(ftl, completion, ctx);
     g_dispatch_depth--;
 }
 
-/* ftl_op_drain — 消费所有 CQ entry 并派发（ftl_service_pump 的 Phase 2）。
- *
- * 每条 completion 交 ftl_op_dispatch()：按 op_tag 查 g_op_callbacks[]，从旁表摘 ctx，
- * 再调对应服务函数。循环持续到 CQ 抽干为止。 */
+// ftl_op_drain — 消费所有 CQ entry 并派发（ftl_service_pump 的 Phase 2）。
+//
+// 每条 completion 交 ftl_op_dispatch()：按 op_tag 查 g_op_callbacks[]，从旁表摘 ctx，
+// 再调对应服务函数。循环持续到 CQ 抽干为止。
 void ftl_op_drain(void)
 {
     fc_command_status_t completion;
@@ -378,16 +356,18 @@ void ftl_op_drain(void)
 
 /* ── 7. 同步等待服务函数 ── */
 
-/* ftl_sync_wait_callback — 同步等待的完成服务：把 completion 存入 waiter、置 done=1。
+/**
+ * @brief ftl_sync_wait_callback — 同步等待的完成服务：把 completion 存入 waiter、置 done=1。
  *
  * **不 release 命令**——调用者（ftl_sync_submit_wait）要在 wait 返回后读 cmd 数据
- * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。 */
+ * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。
+ */
 static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
 
-    /* ctx == NULL = 超时路径已把旁表项摘掉，这是**迟到的完成**：waiter 的栈帧
-     * 早已失效，绝不能再解引用；但命令槽位仍必须回收，否则命令池泄漏。 */
+    // ctx == NULL = 超时路径已把旁表项摘掉，这是**迟到的完成**：waiter 的栈帧
+    // 早已失效，绝不能再解引用；但命令槽位仍必须回收，否则命令池泄漏。
     if (ctx == NULL)
     {
         LOGE(LOG_TAG_FTL "late sync completion cmd=%hu status=0x%02hx — released\r\n", completion->command_id, completion->status);

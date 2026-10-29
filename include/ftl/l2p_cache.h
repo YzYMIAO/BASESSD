@@ -75,16 +75,18 @@ _Static_assert((L2P_GLOBAL_REGIONS % 32U) == 0U, "全局 region 位图必须按 
 _Static_assert(L2P_GLOBAL_LBA_MAX <= (QWORD)UINT32_MAX, "全局 LBA 超出 DWORD 位宽");
 _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 64 word");
 
-/* 拓扑 → dim（ftl_dim_* 的逆）：ch + CH*(ce + CE*lun)。 */
+/** @brief 拓扑 → dim（ftl_dim_* 的逆）：ch + CH*(ce + CE*lun)。 */
 static inline DWORD ftl_topo_dim(ftl_topo_t topo)
 {
     return topo.ch + (CH_NUM * (topo.ce + (CE_NUM * topo.lun)));
 }
 
-/* dim → (ch,ce,lun)：ftl_topo_dim 的逆。
+/**
+ * @brief dim → (ch,ce,lun)：ftl_topo_dim 的逆。
  *
  * **所有** dim → 坐标的分解都走这三个：手写第二份就是第二套 region→die 坐标（C9）。
- * 返回值取自然宽度（0..*_NUM-1）⇒ 调用点不必窄化强转（H44）。 */
+ * 返回值取自然宽度（0..*_NUM-1）⇒ 调用点不必窄化强转（H44）。
+ */
 static inline BYTE ftl_dim_ch(DWORD dim)
 {
     return (dim % CH_NUM);
@@ -98,19 +100,19 @@ static inline BYTE ftl_dim_lun(DWORD dim)
     return (dim / (CH_NUM * CE_NUM));
 }
 
-/* 全局 LBA → 全局 region */
+/** @brief 全局 LBA → 全局 region */
 static inline DWORD lba_to_global_region(DWORD glba)
 {
     return (glba >> L2P_REGION_SHIFT);
 }
 
-/* 全局 region → owner die 内的局部 region（映射页落盘位置） */
+/** @brief 全局 region → owner die 内的局部 region（映射页落盘位置） */
 static inline DWORD l2p_global_to_local_region(DWORD global_region)
 {
     return global_region / FTL_DIM_TOTAL;
 }
 
-/* region 是否属于 dim 这个实例 */
+/** @brief region 是否属于 dim 这个实例 */
 static inline bool l2p_region_owned_by(DWORD global_region, DWORD dim)
 {
     return (global_region % FTL_DIM_TOTAL) == dim;
@@ -120,17 +122,18 @@ static inline bool l2p_region_owned_by(DWORD global_region, DWORD dim)
  * L2P_REGION_SHIFT（lba / 每 region 条目数）与 L2P_REGION_MASK（lba % 每 region
  * 条目数）见 ftl/ftl_config.h §一。*/
 
-/*
- * 全局 LBA → (ch,ce,lun) 路由。
+/**
+ * @brief 全局 LBA → (ch,ce,lun) 路由。
  *
  * 路由键 = **region 序号**（lba >> L2P_REGION_SHIFT），不是页号也不是条目号：
  * 一个 region（512 个 CW）整体落在同一个 die 上，region 的 flush 只碰一个实例。
  * 再把 region 序号按设备维度**分解**成三维：
- *     dim = region % FTL_DIM_TOTAL
- *     ch  = dim % CH_NUM
- *     ce  = (dim / CH_NUM) % CE_NUM
- *     lun = dim / (CH_NUM × CE_NUM)
+ * dim = region % FTL_DIM_TOTAL
+ * ch  = dim % CH_NUM
+ * ce  = (dim / CH_NUM) % CE_NUM
+ * lun = dim / (CH_NUM × CE_NUM)
  * FTL_DIM_TOTAL = 1 时恒为 (0,0,0)。
+ * /
  */
 static inline DWORD lba_route_dim(QWORD lba)
 {
@@ -149,7 +152,7 @@ static inline BYTE lba_route_lun(QWORD lba)
     return ftl_dim_lun(lba_route_dim(lba));
 }
 
-/* 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。 */
+/** @brief 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。 */
 static inline bool lba_routes_to(DWORD glba, ftl_topo_t topo)
 {
     return (lba_route_ch(glba) == topo.ch) && (lba_route_ce(glba) == topo.ce) && (lba_route_lun(glba) == topo.lun);
@@ -347,8 +350,8 @@ typedef struct
 
 /* ── 接口 ── */
 
-/*
- * l2p_init - 初始化共享 cache（设备级，每个 (ch,ce) 只调一次）
+/**
+ * @brief 初始化共享 cache（设备级，每个 (ch,ce) 只调一次）
  *
  * 清全局脏位图 / 所有 line / 统计 / 在飞计数；写入 (ch,ce) 与 owner 解析回调。
  * ⚠ **不能**放进逐实例的 `ftl_init`：第二个实例会把第一个实例的 line 清掉。
@@ -361,8 +364,8 @@ typedef struct
  */
 void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx);
 
-/*
- * l2p_region_preload - 开机恢复（F4）专用：把一个 region 页同步预载进 cache。
+/**
+ * @brief 开机恢复（F4）专用：把一个 region 页同步预载进 cache。
  *
  * 在 cache 中找一条 INVALID 行，先写 region_id，再把 pba 的 region 页同步读进 entries；
  * 成功置 CLEAN，失败置 INVALID（交给懒加载兜底）。
@@ -376,8 +379,8 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  */
 bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba);
 
-/*
- * l2p_region_prefetch - 顺序读 best-effort 预取一个 region（非阻塞）
+/**
+ * @brief 顺序读 best-effort 预取一个 region（非阻塞）
  *
  * 与 l2p_region_preload 的区别：可在运行期调用；会走 CLOCK 驱逐，但**不踢 DIRTY
  * 写回**（预取不制造写回）。已驻留/LOADING ⇒ 直接返回 true；thrashing / 在飞
@@ -387,8 +390,8 @@ bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba);
  */
 bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
 
-/*
- * l2p_read - 读取**全局 LBA** 对应的 PBA 映射（**三态**）
+/**
+ * @brief 读取**全局 LBA** 对应的 PBA 映射（**三态**）
  *
  *   hit（CLEAN / DIRTY / FLUSHING）→ *out = entry，返回 FTL_OK
  *   miss → CLOCK 选 victim（DIRTY 先起异步写回、LOADING/FLUSHING 跳过）、
@@ -409,8 +412,8 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
  */
 ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
 
-/*
- * l2p_is_ready - 确保**全局 LBA** 所在 region 已在 RAM（就绪前置）
+/**
+ * @brief 确保**全局 LBA** 所在 region 已在 RAM（就绪前置）
  *
  * 命中（CLEAN / DIRTY）⇒ 1；未命中 ⇒ 起异步加载并返回 0；LOADING / FLUSHING ⇒ 0。
  * 供"必须先就绪、再一次性应用多条改动"的调用者用（写确认 / 搬移收尾）：
@@ -425,8 +428,8 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
  */
 bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
 
-/*
- * l2p_write - 写入**全局 LBA** → PBA 映射（**三态**）
+/**
+ * @brief 写入**全局 LBA** → PBA 映射（**三态**）
  *
  * 只改 cache line 并置 DIRTY + 全局 region 脏位，不写 NAND（写回由 flush 起）。
  * 行未就绪（LOADING / FLUSHING）⇒ 返回 FTL_AGAIN，**不改任何状态**。
@@ -436,27 +439,28 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
  */
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
-/*
- * l2p_entries_read / l2p_entries_write - 页内批量读/写（写确认收敛）
+/**
+ * @brief 页内批量读/写（写确认收敛）
  *
  * `lba` 必须是页对基址（`FTL_LBA_PER_PAIR` 对齐），`mask` 的 bit0..7 对应
  * `lba+0..lba+7`；全部 LBA 必须落在同一 region（页对对齐 + region 大小是
  * `FTL_LBA_PER_PAIR` 的整数倍 ⇒ 编译期几何保证，见 l2p_cache.c 的 `_Static_assert`）。
  * 语义与逐条 `l2p_read`/`l2p_write` 一致：
- *   · 只处理 mask 置位的条目；每条仍调用 `l2p_hit_note`，thrashing/命中口径不变；
- *   · `l2p_entries_read` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
- *     返 FTL_AGAIN；当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
- *   · 行未就绪（LOADING；写还含 FLUSHING）⇒ FTL_AGAIN，且**不改任何状态**；
- *   · 写成功只置一次 `state=DIRTY` + region 脏位。
+ * · 只处理 mask 置位的条目；每条仍调用 `l2p_hit_note`，thrashing/命中口径不变；
+ * · `l2p_entries_read` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
+ * 返 FTL_AGAIN；当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
+ * · 行未就绪（LOADING；写还含 FLUSHING）⇒ FTL_AGAIN，且**不改任何状态**；
+ * · 写成功只置一次 `state=DIRTY` + region 脏位。
  * 用于 `ftl_confirm_write`：`l2p_line_find` 每页一次，而不是每 CW 一次。
+ * /
  */
 ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[]);
 ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
 
 /* ── 同步逃生口（见文件头；服务函数禁用）── */
 
-/*
- * l2p_read_sync / l2p_write_sync - 自旋等到就绪再读/写
+/**
+ * @brief 自旋等到就绪再读/写
  *
  * @param lba **全局** LBA
  * @return 同 l2p_read / l2p_write；自旋超预算 ⇒ FTL_ERROR。
@@ -464,8 +468,8 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
 ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
 ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
-/*
- * l2p_is_region_degraded - 该 region 是否已降级为「全未映射」（映射已丢）
+/**
+ * @brief 该 region 是否已降级为「全未映射」（映射已丢）
  *
  * 两处消费者：
  *   · 开机恢复：journal 回放 / 块元数据 probe 据此走范围化恢复而不是全量重建；
@@ -478,8 +482,8 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
  */
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 
-/*
- * l2p_flush_kick - 起一行 DIRTY 的异步写回（提交即返回）
+/**
+ * @brief 起一行 DIRTY 的异步写回（提交即返回）
  *
  * ① md_slot_pair_append 一次取主/备两个空槽（块满先取新块）
  * ② ftl_async_write_page 建链主副本 + 把 entries 拷进 FC buffer 并提交
@@ -500,8 +504,8 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
  */
 ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
 
-/*
- * l2p_owner_flush_kick - 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
+/**
+ * @brief 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
  *
  * 从下标 0 起扫，最多启动 max_kick 行 DIRTY（受共享 L2P_FLUSH_MAX_INFLIGHT 闸门）；
  * 跳过不属于 owner_dim 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
@@ -511,8 +515,8 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
  */
 void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
 
-/*
- * l2p_flush_owner_idle - 本 owner 是否已无待落盘的 L2P 行
+/**
+ * @brief 本 owner 是否已无待落盘的 L2P 行
  *
  * 异步 FLUSH job 的完成判据之一：没有 DIRTY / FLUSHING / LOADING 行。
  * LOADING 一并等待：行内容尚未有效，等它落定比提前完成安全（host 侧 BOT 串行，
@@ -520,8 +524,8 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
  */
 bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim);
 
-/*
- * l2p_owner_invalidate - 只失效某个 owner 的行与脏位（恢复/格式化用）
+/**
+ * @brief 只失效某个 owner 的行与脏位（恢复/格式化用）
  *
  * 共享 cache 下**不能**再按实例重新 init（会抹掉别的 LUN 刚回放的 DIRTY 行）。
  * 本函数只处理 l2p_region_owned_by(line->region_id, owner_dim) 的 resident 行：
@@ -530,8 +534,8 @@ bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim);
  */
 void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim);
 
-/*
- * l2p_owner_bitmap_snapshot - 全局脏位图 → 本 die 的局部 2048-bit 快照
+/**
+ * @brief 全局脏位图 → 本 die 的局部 2048-bit 快照
  *
  * Checkpoint 起点调用（先快照再 flush）。`out` 为 L2P_LOCAL_DIRTY_WORDS 个 word；
  * 映射关系：global_region = local_region * FTL_DIM_TOTAL + owner_dim。
@@ -539,8 +543,8 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim);
  */
 void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
 
-/*
- * l2p_handle - 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
+/**
+ * @brief 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
  *
  * 按 info->load_level 查**模块内** static const 表决定本轮 max_kick；只处理
  * owner_dim 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
@@ -552,13 +556,13 @@ void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD 
  */
 void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status_t *out);
 
-/* 读一行元信息（idx 越界/空行时 state == INVALID）。 */
+/** @brief 读一行元信息（idx 越界/空行时 state == INVALID）。 */
 void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out);
 
-/* 失效一行（仅 CLEAN/INVALID；恢复/格式化用）。 */
+/** @brief 失效一行（仅 CLEAN/INVALID；恢复/格式化用）。 */
 void l2p_line_invalidate(l2p_cache_t *cache, WORD idx);
 
-/* 是否有在飞写回（背压/进展判据；不暴露 flush_inflight 字段）。 */
+/** @brief 是否有在飞写回（背压/进展判据；不暴露 flush_inflight 字段）。 */
 bool l2p_has_flush_inflight(const l2p_cache_t *cache);
 
 #endif /* FTL_L2P_CACHE_H */

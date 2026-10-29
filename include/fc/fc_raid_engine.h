@@ -54,13 +54,13 @@ typedef struct
 
 /* ── 上下文管理 ── */
 
-/* 初始化指定 LUN 的 RAID 上下文 */
+/** @brief 初始化指定 LUN 的 RAID 上下文 */
 void fc_raid_init_ctx(BYTE lun);
 
 /* ── RAID 序列 ── */
 
-/*
- * 开始新的 RAID XOR 序列。
+/**
+ * @brief 开始新的 RAID XOR 序列。
  * 将 cw_buffer 拷贝到 acc_buf 作为累加器初始值。
  *
  * @param lun       LUN 编号
@@ -70,8 +70,8 @@ void fc_raid_init_ctx(BYTE lun);
  */
 fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
 
-/*
- * 累加一个 CW 到 RAID 累加器。acc_buf ^= cw_buffer。
+/**
+ * @brief 累加一个 CW 到 RAID 累加器。acc_buf ^= cw_buffer。
  *
  * @param lun       LUN 编号
  * @param cw_buffer 当前 CW 的数据
@@ -80,8 +80,8 @@ fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
  */
 fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
 
-/*
- * 结束 RAID 序列，将累加器结果写入 parity_buffer。
+/**
+ * @brief 结束 RAID 序列，将累加器结果写入 parity_buffer。
  * 写完后清 active 标志。
  *
  * @param lun           LUN 编号
@@ -92,16 +92,16 @@ fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer);
 
 /* ── 中断保护 ── */
 
-/* 保存 RAID 上下文到影子缓冲（HSQ 打断前调用） */
+/** @brief 保存 RAID 上下文到影子缓冲（HSQ 打断前调用） */
 void fc_raid_save(BYTE lun);
 
-/* 从影子缓冲恢复 RAID 上下文（HSQ 完成后调回） */
+/** @brief 从影子缓冲恢复 RAID 上下文（HSQ 完成后调回） */
 void fc_raid_restore(BYTE lun);
 
 /* ── 静态恢复（ECC 失败后使用，不需要 LUN 上下文） ── */
 
-/*
- * 从所有 CW 和 parity XOR 重建 failed_idx 的数据：
+/**
+ * @brief 从所有 CW 和 parity XOR 重建 failed_idx 的数据：
  *   recovered = buffers[0] ^ buffers[1] ^ ... ^ buffers[count-1]
  *   跳过 failed_idx。
  *

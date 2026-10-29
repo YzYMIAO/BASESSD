@@ -56,8 +56,8 @@ typedef struct
 
 /* ── 接口 ── */
 
-/*
- * wl_should_trigger - 检查是否需要触发静态 WL（UBI 模型）
+/**
+ * @brief 检查是否需要触发静态 WL（UBI 模型）
  *
  * 判据只有一条：
  *   max_free_ec − min_used_ec ≥ WL_THRESHOLD
@@ -72,8 +72,8 @@ typedef struct
  */
 bool wl_should_trigger(const alc_t *alloc, DWORD total_writes);
 
-/*
- * wl_select_victim - 选择 WL victim Super Block
+/**
+ * @brief 选择 WL victim Super Block
  *
  * 与 GC 相反：选**平均擦除次数最少**（最冷）且有效 CW ≥ 70% 的 Closed SB
  * （UBI 的 e1）；同擦除次数下按 valid_cw 多、read_sum 高排序。

@@ -35,16 +35,20 @@
 
 /* ── 1. 触发 / 选块 ── */
 
-/* --------------------------------------------------------------------
- * wl_candidate_get
- *   功能：判定一个 Closed 条目是否是静态 WL 的合法候选，并给出聚合统计与平均擦除次数。
- *   参数：alloc —— 分配器；sb —— Closed 条目（调用者从 closed_sb_list 取得）；
- *         out_stats —— 出参聚合统计（可 NULL）；out_ec —— 出参平均擦除次数（非 NULL）。
- *   返回：true = 合法候选（出参有效）；false = 跳过。
- *   实现要点：**触发判据与选块必须用同一套过滤**，否则「触发时认为有候选、选块时
- *             却选不出」会让 WL 每轮空转（C2 / C9）：跳过 Open、跳过含坏 plane、
- *             跳过全哨兵条目、要求有效 CW ≥ WL_MIN_VALID_RATIO。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 判定一个 Closed 条目是否是静态 WL 的合法候选，并给出聚合统计与平均擦除次数。
+ *
+ * @param alloc 分配器
+ * @param sb Closed 条目（调用者从 closed_sb_list 取得）
+ * @param out_stats 出参聚合统计（可 NULL）
+ * @param out_ec 出参平均擦除次数（非 NULL）。
+ *
+ * @return true = 合法候选（出参有效）；false = 跳过。
+ *
+ * @note 实现要点：**触发判据与选块必须用同一套过滤**，否则「触发时认为有候选、选块时
+ * 却选不出」会让 WL 每轮空转（C2 / C9）：跳过 Open、跳过含坏 plane、
+ * 跳过全哨兵条目、要求有效 CW ≥ WL_MIN_VALID_RATIO。
+ */
 static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_super_stats_t *out_stats, DWORD *out_ec)
 {
     if (sb->is_open)
@@ -52,8 +56,8 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
         return false;
     }
 
-    /* 任一 present plane 的块已坏 ⇒ 不可搬：migrate 读它必然失败并 abort，
-     * 而该 SB 仍可能是「有效 CW 最多」的候选 ⇒ 每轮重选、WL 永久卡死。 */
+    // 任一 present plane 的块已坏 ⇒ 不可搬：migrate 读它必然失败并 abort，
+    // 而该 SB 仍可能是「有效 CW 最多」的候选 ⇒ 每轮重选、WL 永久卡死。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         if (!super_block_has_plane(sb, p))
@@ -78,7 +82,7 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
         return false; /* 全哨兵条目 */
     }
 
-    /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元）。 */
+    // 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元）。
     const WORD min_valid_cw = (WORD)(FTL_CW_PER_SB * WL_MIN_VALID_RATIO / 100U);
 
     if (st.valid_cw < min_valid_cw)
@@ -94,28 +98,22 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
     return true;
 }
 
-/* --------------------------------------------------------------------
- * wl_should_trigger
- *   功能：判定是否该做一轮 WL（UBI 模型）。
- *   参数：alloc —— 分配器；total_writes —— 累计编程次数（启动门）。
- *   返回：true 触发；false 不触发。
- *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
- *             `max_free_ec - min_used_ec >= WL_THRESHOLD`：
- *               · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
- *               · e2 = Free Pool 中擦除次数最大的块。
- *             搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
- *             （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
- * -------------------------------------------------------------------- */
+// 实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
+// `max_free_ec - min_used_ec >= WL_THRESHOLD`：
+// · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
+// · e2 = Free Pool 中擦除次数最大的块。
+// 搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
+// （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
 bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
 {
-    /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
-     * 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
+    // 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
+    // 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。
     if (total_writes < WL_MIN_WRITES)
     {
         return false;
     }
 
-    /* e1：最冷的 used SB（Closed 列表平均擦除次数最小）。 */
+    // e1：最冷的 used SB（Closed 列表平均擦除次数最小）。
     DWORD min_used = UINT32_MAX;
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
@@ -138,16 +136,10 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
     return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }
 
-/* --------------------------------------------------------------------
- * wl_select_victim
- *   功能：挑「最冷」的 Closed SB（UBI 的 e1）：平均擦除次数最少。
- *   参数：alloc —— 分配器；victim —— 出参。
- *   返回：true 找到；false 未找到。
- *   实现要点：有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）；
- *             排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
- *             （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
- *             ⚠ 不再按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
- * -------------------------------------------------------------------- */
+// 实现要点：有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）；
+// 排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
+// （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
+// ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
 bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
 {
     wl_victim_t best;
@@ -166,8 +158,8 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
             continue;
         }
 
-        /* 排序键 = 平均擦除次数**最少** → 同擦除次数下 valid_cw 多（越冷越优先）
-         * → 再按 read_sum 高（read disturb 风险高优先）。 */
+        // 排序键 = 平均擦除次数**最少** → 同擦除次数下 valid_cw 多（越冷越优先）
+        // → 再按 read_sum 高（read disturb 风险高优先）。
         if ((sb_ec < best_ec) || ((sb_ec == best_ec) && ((st.valid_cw > best.valid_cw) || ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))))
         {
             best_ec         = sb_ec;

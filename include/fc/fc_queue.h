@@ -42,17 +42,52 @@ typedef struct
 
 /* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
 fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
+/**
+ * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
+ *
+ * @param queue 队列
+ * @param storage 完成项数组
+ * @param depth 容量。
+ *
+ * @return FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
+ */
 fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth);
 
-/* 入队满时返回 FC_STATUS_QUEUE_FULL；出队空时返回 FC_STATUS_QUEUE_EMPTY。
- * push 的 command_id 若为 FC_COMMAND_ID_INVALID（哨兵）属调用者 bug → ASSERT。 */
+/**
+ * @brief 入队满时返回 FC_STATUS_QUEUE_FULL；出队空时返回 FC_STATUS_QUEUE_EMPTY。
+ * push 的 command_id 若为 FC_COMMAND_ID_INVALID（哨兵）属调用者 bug → ASSERT。
+ */
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
+/**
+ * @brief 从队头弹出命令 ID。
+ *
+ * @param queue 队列
+ * @param command_id 输出。
+ *
+ * @return FC_STATUS_OK / QUEUE_EMPTY。
+ */
 fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id);
 
-/* Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。 */
+/** @brief Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。 */
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset);
 
+/**
+ * @brief 完成项入队尾（整个 fc_command_status_t 拷贝）。
+ *
+ * @param queue 队列
+ * @param completion 待入队完成项。
+ *
+ * @return FC_STATUS_OK / QUEUE_FULL。
+ */
 fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
+/**
+ * @brief 从队头弹出完成项。
+ *
+ * @param queue 队列
+ * @param completion 输出。
+ *
+ * @return FC_STATUS_OK / QUEUE_EMPTY。
+ */
 fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion);
 
 #endif /* FC_QUEUE_H */

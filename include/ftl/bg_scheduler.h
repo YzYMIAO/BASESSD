@@ -87,19 +87,23 @@ typedef struct
 
 /* ── 引擎接口 ── */
 
-/* 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
+/**
+ * @brief 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
  * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
- * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。 */
+ * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。
+ */
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
 
 /* ── FTL 策略接口 ── */
 
-/* 装载内置任务表 s_bg_tasks：拷贝到 tasks[]、置 task_count、清 cfg。
- * 表长是编译期常量（_Static_assert 保证 == BG_TASK_COUNT）⇒ 函数无表参数。 */
+/**
+ * @brief 装载内置任务表 s_bg_tasks：拷贝到 tasks[]、置 task_count、清 cfg。
+ * 表长是编译期常量（_Static_assert 保证 == BG_TASK_COUNT）⇒ 函数无表参数。
+ */
 void bg_scheduler_init(bg_scheduler_t *sched);
 
-/*
- * bg_scheduler_level_select - 负载 → 后台档位（纯函数）
+/**
+ * @brief 负载 → 后台档位（纯函数）
  *
  * 判据：
  *   inflight = pend_slot_get_count + pend_group_get_count
@@ -108,8 +112,8 @@ void bg_scheduler_init(bg_scheduler_t *sched);
  */
 bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
 
-/*
- * bg_scheduler_service - Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
+/**
+ * @brief Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
  *
  * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
  *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。

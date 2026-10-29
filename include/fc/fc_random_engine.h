@@ -32,8 +32,8 @@
 #    define FC_RANDOM_ALGO FC_RANDOM_ALGO_LFSR
 #endif
 
-/*
- * 加扰种子（v24）：**本 CW 的逻辑地址**，即该 CW 的 META 字段（扇区 LBA）。
+/**
+ * @brief 加扰种子：**本 CW 的逻辑地址**，即该 CW 的 META 字段（扇区 LBA）。
  *
  * 为什么是逻辑地址而不是物理地址：GC 搬页后逻辑地址不变 ⇒ 密文不变，
  * 不需要「解扰再按新物理地址重加扰」。这是存储主控的通行做法
@@ -43,18 +43,20 @@
  * 故每条 CW 用自己那条扇区 LBA 当种子。
  *
  * ⚠ 调用方（fc_data_path.c）必须传**该 CW 的扇区 LBA**（desc->meta / 从页内读回的
- *   明文 META），而不是 command->meta（那是本命令的页级基值）。
+ * 明文 META），而不是 command->meta（那是本命令的页级基值）。
+ * /
  */
 DWORD fc_random_seed_from_meta(DWORD cw_meta);
 
-/*
- * 对 data[0..length-1] 进行加扰/解扰。
+/**
+ * @brief 对 data[0..length-1] 进行加扰/解扰。
  * 加扰和解扰是同一操作（XOR 对称）。
  * 算法由 FC_RANDOM_ALGO 编译宏控制。
+ * /
  */
 fc_status_e fc_random_transform(BYTE *data, WORD length, DWORD seed);
 
-/* 获取当前使用的加扰算法名称（调试用） */
+/** @brief 获取当前使用的加扰算法名称（调试用） */
 const char *fc_random_algo_name(void);
 
 #endif /* FC_RANDOM_ENGINE_H */

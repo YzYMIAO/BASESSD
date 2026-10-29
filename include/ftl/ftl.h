@@ -84,8 +84,8 @@
  *
  * ⚠ L2P 日志区必须计入：它是**固定预留**的元数据区（4 MiB 表本体 × 2 份副本
  *   = 8 MiB，再留 1× 工作余量 = 12 MiB = 96 gblocks，RISK-BOOT-18 的 L2）。
- *   旧版把它从 Free Pool 动态分配且不扣容量，实测日志碎片到 1076 块（134 MiB），
- *   导致容量未满就写失败（RISK-MD-07 / RISK-CAP-02）。
+ *   若从 Free Pool 动态分配且不扣容量，日志碎片会吃掉用户容量（实测可达 1076 块 /
+ *   134 MiB），导致容量未满就写失败（RISK-MD-07 / RISK-CAP-02）。
  * ⚠ shared metadata spare 也必须计入：它是固定元数据分区的坏块替换池
  *   （BBT + sparing 的主流形态，见 metadata.h）。
  */
@@ -214,7 +214,7 @@ typedef struct ftl_context
     bg_scheduler_t bg;
 
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
-     * 观测计数（reclaimed / novictim）与求值节拍已收进 handle（mig_status_t）。
+     * 观测计数（reclaimed / novictim）与求值节拍在 handle 里（mig_status_t）。
      * 指针，由 storage 提供；含逐 plane 页镜像（page_buf，约 4KB），必须常驻。 */
     mig_handle_t *mig_handle;
 
@@ -234,8 +234,8 @@ typedef struct ftl_context
     BYTE write_retry_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
 } ftl_ctx_t;
 
-/*
- * ftl_storage_t - 描述符的外部存储
+/**
+ * @brief 描述符的外部存储
  *
  * storage 数组由 HIL 提供并决定落哪个域（main.c：五张表与 md→各自 section、
  * journal/cp_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
@@ -256,8 +256,8 @@ typedef struct
 
 /* ── 接口 ── */
 
-/*
- * ftl_global_init - 复位 FTL 文件级全局静态（只调用一次）
+/**
+ * @brief 复位 FTL 文件级全局静态（只调用一次）
  *
  * `ftl.o` 的 `.bss` 整文件落 DTCM（NOLOAD），`s_dangling[]`、日志节流等
  * 文件级静态不被启动代码清零；必须在**所有实例 ftl_init 之前**复位一次。
@@ -265,8 +265,8 @@ typedef struct
  */
 void ftl_global_init(void);
 
-/*
- * ftl_init - 初始化 FTL 子系统
+/**
+ * @brief 初始化 FTL 子系统
  *
  * 描述符只持有指针；storage 数组/挂载块由调用者提供。
  * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由调用者初始化一次后
@@ -283,16 +283,16 @@ void ftl_global_init(void);
  */
 ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
 
-/*
- * ftl_cache_budget_ok - host cache batch（读/写）共享的资源判据
+/**
+ * @brief host cache batch（读/写）共享的资源判据
  *
  * = FC 命令/desc/buffer/SQ/HSQ 余量（ftl_fc_host_budget_ok_n） +
  *   pending 表余量。读/写 batch 都走这一个入口，避免两份逐字重复的资源检查。
  */
 bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n);
 
-/*
- * ftl_contract_audit - debug-only 初始化契约自检（release 下空实现）
+/**
+ * @brief debug-only 初始化契约自检（release 下空实现）
  *
  * 在 ftl_init 与设备级 owner 登记完成后调用一次。只证明初始化后**不可变**的绑定：
  * 句柄、storage 数组、端口回调、topology 副本、PBA 布局、bg 任务表、owner/route 身份。
@@ -302,8 +302,8 @@ bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n);
  */
 void ftl_contract_audit(const ftl_ctx_t *ftl);
 
-/*
- * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）
+/**
+ * @brief 实例无关的每轮泵（superloop 每轮调一次）
  *
  * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
  * Phase 2: ftl_op_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
@@ -313,8 +313,8 @@ void ftl_contract_audit(const ftl_ctx_t *ftl);
  */
 void ftl_service_pump(void);
 
-/*
- * ftl_service - 单个 FTL 实例的服务（对**每个**实例都要调）
+/**
+ * @brief 单个 FTL 实例的服务（对**每个**实例都要调）
  *
  * Phase 2.5: 补发本实例各组的待下发子操作（host IO 优先于后台）
  * Phase 3:   本实例的时间预算后台调度（bg_scheduler_service：选档 → 任务表 → 预算）
@@ -326,8 +326,8 @@ void ftl_service_pump(void);
  */
 void ftl_service(ftl_ctx_t *ftl);
 
-/*
- * ftl_submit_read - 非阻塞提交读请求（长度任意）
+/**
+ * @brief 非阻塞提交读请求（长度任意）
  *
  * 请求带**长度**（req->count 个连续 LBA），FTL 自行决定单/双 plane 拆分：
  *   ① 建完成组（一条 host 请求 = 一个组）
@@ -344,8 +344,8 @@ void ftl_service(ftl_ctx_t *ftl);
  */
 ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
-/*
- * ftl_submit_write - 非阻塞提交写请求（长度任意）
+/**
+ * @brief 非阻塞提交写请求（长度任意）
  *
  * 与 ftl_submit_read 对称：FTL 按 count 拆子操作，每子操作分配新 PBA（**逐 plane
  * 独立选块**——Policy B：SB 两 plane 的块号各自独立）+ 建 desc 链 + 异步写 NAND。
@@ -357,8 +357,8 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  */
 ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
-/*
- * ftl_flush_begin / ftl_flush_step - 异步 FLUSH job（host SYNCHRONIZE CACHE / CLI `fl`）
+/**
+ * @brief 异步 FLUSH job（host SYNCHRONIZE CACHE / CLI `fl`）
  *
  * 主流形态：FLUSH 是**排队命令**，提交即返回，完成由 HIL 的完成通道
  * （本仓 `complete_flag` / `status_out`，见 docs/archive/ftl_host_interface.md A.1）
@@ -374,16 +374,16 @@ ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 void ftl_flush_begin(ftl_ctx_t *ftl);
 bool ftl_flush_step(ftl_ctx_t *ftl);
 
-/*
- * ftl_flush_cancel - 放弃当前 FLUSH job（HIL 撤销回执时调用，如 host 复位）
+/**
+ * @brief 放弃当前 FLUSH job（HIL 撤销回执时调用，如 host 复位）
  *
  * 只清本实例的 job 标志：在飞的数据操作由各自模块的异步路径自行收敛，无需回滚。
  * 下一次 begin 会以新的起点重新开始。
  */
 void ftl_flush_cancel(ftl_ctx_t *ftl);
 
-/*
- * ftl_trim_begin / ftl_trim_step - 异步取消 [lba, lba+count) 的 LBA 映射
+/**
+ * @brief 异步取消 [lba, lba+count) 的 LBA 映射
  *
  * begin 只登记范围；step 每次异步推进一小段（L2P 未就绪 / Journal 容量不足时
  * 返 FTL_AGAIN，不产生半状态）。完成后 step 返 FTL_OK 并清 active。

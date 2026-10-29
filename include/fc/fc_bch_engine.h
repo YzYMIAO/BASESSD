@@ -20,8 +20,8 @@
 
 typedef struct fc_bch_control fc_bch_control_t;
 
-/*
- * 初始化 BCH 引擎。
+/**
+ * @brief 初始化 BCH 引擎。
  * @m:          Galois 域阶数 (5..15)
  * @t:          纠错能力 (bit)
  * @prim_poly:  本原多项式 (0=使用默认)
@@ -30,20 +30,21 @@ typedef struct fc_bch_control fc_bch_control_t;
  */
 fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
 
-/* 释放 BCH 引擎资源 */
+/** @brief 释放 BCH 引擎资源 */
 void fc_bch_free(fc_bch_control_t *bch);
 
-/*
- * BCH 编码：计算 data 的 ECC 校验码。
+/**
+ * @brief BCH 编码：计算 data 的 ECC 校验码。
  * @ecc 缓冲区大小应为 bch->ecc_bytes 字节。
- *       首次调用前必须清零，支持增量计算。
- *       ecc 可为 NULL（增量计算语义）。
+ * 首次调用前必须清零，支持增量计算。
+ * ecc 可为 NULL（增量计算语义）。
  * bch / data 非空为前置条件（违反一律 ASSERT）。
+ * /
  */
 void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BYTE *ecc);
 
-/*
- * BCH 解码：检测并定位 data+recv_ecc 中的错误。
+/**
+ * @brief BCH 解码：检测并定位 data+recv_ecc 中的错误。
  * @errloc 输出错误位置数组（至少 t 个元素）。
  * @return  true = 解码完成（*out_nerr 为纠正的错误数，0..t）；false = 不可纠。
  *          入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT
@@ -55,10 +56,10 @@ void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BY
  */
 bool fc_bch_decode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr);
 
-/* 辅助函数：获取 BCH 引擎的 ECC 字节数 */
+/** @brief 辅助函数：获取 BCH 引擎的 ECC 字节数 */
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch);
 
-/* 辅助函数：获取纠错能力 t */
+/** @brief 辅助函数：获取纠错能力 t */
 unsigned int fc_bch_t(const fc_bch_control_t *bch);
 
 #endif /* FC_BCH_ENGINE_H */

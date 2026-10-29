@@ -78,8 +78,8 @@ typedef struct
 
 /* ── 接口 ── */
 
-/*
- * pfr_media_check_format - 判定介质是否需要（重新）格式化（区分 I/O 错误）
+/**
+ * @brief 判定介质是否需要（重新）格式化（区分 I/O 错误）
  *
  * 判据来自 `cp_media_status_probe`：
  *   · 当前版本 CP        ⇒ 不格式化；
@@ -93,8 +93,8 @@ typedef struct
  */
 ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_format);
 
-/*
- * pfr_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）
+/**
+ * @brief 全量格式化（擦本实例全部块 + 复位易失元数据状态）
  *
  * ① `bbt_format_erase`（两阶段：先持久化当前坏块图 + FORMAT_IN_PROGRESS，再擦 BBT 池之外的块，
  *    最后 best-effort 并入新 BAD；阶段①失败则不擦用户块）
@@ -112,8 +112,8 @@ ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_form
  */
 ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify);
 
-/*
- * pfr_boot_recovery - 主启动恢复入口
+/**
+ * @brief 主启动恢复入口
  *
  * 判断关机类型并执行对应恢复流程。
  * 在 fc_init() 之后、ftl_service() 开始之前调用。
@@ -130,11 +130,11 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify);
  */
 ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result);
 
-/*
- * pfr_boot_log_bad_areas - 按固定分区统计 BAD 块（只读 BST，不碰介质）
+/**
+ * @brief 按固定分区统计 BAD 块（只读 BST，不碰介质）
  *
  * 在每个实例 boot 完成、BAD 集合（BBT + CP 快照并集）已确定后调用一次。
- * 目的：区分坏块落在数据区还是元数据区——后者由 v11 候选块池 + shared metadata
+ * 目的：区分坏块落在数据区还是元数据区——后者由固定元数据区候选块池 + shared metadata
  * spare 吸收（`RISK-BBT-12/13`）；本行是验证「元数据区是否开始出现 BAD」的基线。
  * ⚠ 这是**开机基线**：运行期新增的 BAD 不在此行体现（下一次开机才计入）。
  */
