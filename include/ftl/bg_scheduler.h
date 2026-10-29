@@ -89,8 +89,13 @@ typedef struct
 
 /**
  * @brief 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
+ *
  * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
  * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。
+ *
+ * @param sched 本实例的调度器（任务表与本轮配置的发布点）。
+ * @param ftl   FTL 上下文（原样传给每个任务适配器）。
+ * @param cfg   本轮档位配置（起点发布到 sched->cfg，任务从这里读本轮策略参数）。
  */
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
 
@@ -99,6 +104,8 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
 /**
  * @brief 装载内置任务表 s_bg_tasks：拷贝到 tasks[]、置 task_count、清 cfg。
  * 表长是编译期常量（_Static_assert 保证 == BG_TASK_COUNT）⇒ 函数无表参数。
+ *
+ * @param sched 本实例的调度器（被写入 tasks[] / task_count，并复位 cfg 与 level）。
  */
 void bg_scheduler_init(bg_scheduler_t *sched);
 
@@ -108,7 +115,12 @@ void bg_scheduler_init(bg_scheduler_t *sched);
  * 判据：
  *   inflight = pend_slot_get_count + pend_group_get_count
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
- * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY。
+ *
+ * @param ftl FTL 上下文（读 pending 的 slot / group 计数）。
+ *
+ * @return BG_LEVEL_IDLE   pending 与 queued 全空（真空闲）
+ *         BG_LEVEL_NORMAL 中间负载
+ *         BG_LEVEL_BUSY   pending 过半池或有未决组
  */
 bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
 

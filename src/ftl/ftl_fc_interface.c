@@ -65,7 +65,8 @@ static BYTE s_mirror_page[PAGE_MAIN_SIZE];
  * @param plane_first 本命令 plane 段的起点（由 fc_command_plane_span 给出）。
  * @param plane_count 本命令 plane 段的 plane 数（由 fc_command_plane_span 给出）。
  *
- * @return FTL_OK / FTL_ERROR（空位图 / 越段 / multi-plane 未覆盖每个 plane）。
+ * @return FTL_OK 位图合法
+ *         FTL_ERROR 空位图 / 越段 / multi-plane 未覆盖每个 plane
  *
  * @note 实现要点：- **没有 0 的隐式展开**：名字叫 bitmap 就必须逐位字面，0 = 一个 CW 都不访问，
  * 不是合法的数据命令（建链会产出空链 → 提交后静默不搬任何数据）。
@@ -175,7 +176,9 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap)
  * @param pba 各 plane 的 PBA（**只校验本命令实际置位的 plane**）
  * @param cw_bitmap flat 字面位图（bit = plane*CW_NUM + cw），须落在 plane 段内。
  *
- * @return FTL_OK / FTL_AGAIN（desc/buffer 池空，瞬态背压）/ FTL_ERROR。
+ * @return FTL_OK 建链成功
+ *         FTL_AGAIN desc/buffer 池空（瞬态背压）
+ *         FTL_ERROR 位图非法 / 建链失败
  *
  * @note 实现要点：**未置位的 plane 整体跳过**——连 pba_is_valid 都不判。CW 级映射下一条
  * 子操作常只覆盖半个 pair（如只写 plane1 的 4 个 CW），此时调用者按约定
@@ -237,6 +240,9 @@ static ftl_status_e ftl_cmd_build_pair_chain(fc_command_t *cmd, const DWORD pba[
  * base_pba 必须是**本命令实际访问的第一个 plane**的 PBA：`fc_command_plane_span` 用
  * cmd->paa 的 plane 位定单 plane 命令的 plane 段，给错了段就错。整段入口（两 plane
  * 都在）传 pba[0]；CW 级入口只覆盖 plane1 时须传 pba[1]（见 ftl_cmd_setup_ppa_pair_cw）。
+ *
+ * @param cmd      命令（写 config.ch/ce/lun 与 paa）
+ * @param base_pba 本命令实际访问的第一个 plane 的 PBA（须通过 pba_is_valid）
  */
 static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, DWORD base_pba)
 {
@@ -368,6 +374,16 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
     return FTL_OK;
 }
 
+/**
+ * @brief 按 cw_bitmap 把镜像数据散射填进 desc 链各 CW 的 USER 区。
+ *
+ * @param cmd        已建链的命令
+ * @param page_buf   源镜像（布局由 pair_major 决定）
+ * @param cw_bitmap  flat 字面位图（bit = plane*CW_NUM + cw）
+ * @param pair_major true = pair 镜像（槽位 plane*CW_NUM + cw）；false = 单页镜像（槽位 cw）
+ * @return FTL_OK 搬入成功
+ *         FTL_ERROR 链上 desc 无 buffer
+ */
 static ftl_status_e ftl_cmd_write_data_cw_core(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap, bool pair_major)
 {
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
@@ -533,6 +549,10 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  *
  * 与地址/建链拆开是为了让异步入口能区分「池空（瞬态背压 ⇒ FTL_AGAIN）」与
  * 「地址非法 / 建链失败（编程错误 ⇒ FTL_ERROR）」——两者在同步原语里都被压成 NULL。
+ *
+ * @param operation 命令 operation 码
+ * @param cfg       页配置（crc / random / ldpc / 页 LBA）
+ * @return 已填好配置的命令；命令池空返回 NULL
  */
 static fc_command_t *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_t *cfg)
 {
@@ -559,6 +579,11 @@ static fc_command_t *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_t 
 
 /**
  * @brief 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。
+ *
+ * @param pba       目标页 / 块 PBA
+ * @param operation 命令 operation 码
+ * @param cfg       页配置（crc / random / ldpc / 页 LBA）
+ * @return 已建链的命令；池空或建链失败返回 NULL
  */
 static fc_command_t *ftl_sync_page_prepare(DWORD pba, BYTE operation, const ftl_page_cfg_t *cfg)
 {

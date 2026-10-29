@@ -260,26 +260,59 @@ _Static_assert(sizeof(((cp_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WOR
 _Static_assert((unsigned)CP_BLOCK_WORD_MAX_VALID <= (unsigned)CP_BLOCK_WORD_VALID_MASK, "valid_count 超出 word 位宽");
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)CP_BLOCK_WORD_STATE_MASK, "state 超出 word 位宽");
 
+/**
+ * @brief 把块状态字段打包成一个块元数据快照 word
+ *
+ * @param valid  有效页数（valid_count）
+ * @param state  块状态（FTL_BLOCK_STATE_*）
+ * @param temp   温度码（0/1）
+ * @param pool   池归属（CP_BLOCK_POOL_*）
+ * @return 打包后的 word
+ */
 static inline WORD cp_block_word_pack(WORD valid, BYTE state, BYTE temp, BYTE pool)
 {
     return ((valid & CP_BLOCK_WORD_VALID_MASK) | ((state & CP_BLOCK_WORD_STATE_MASK) << CP_BLOCK_WORD_STATE_SHIFT) | ((temp & 0x1U) << CP_BLOCK_WORD_TEMP_SHIFT) | ((pool & CP_BLOCK_WORD_POOL_MASK) << CP_BLOCK_WORD_POOL_SHIFT));
 }
 
+/**
+ * @brief 取出快照 word 里的有效页数
+ *
+ * @param word  块元数据快照 word
+ * @return 有效页数（valid_count）
+ */
 static inline WORD cp_block_word_valid(WORD word)
 {
     return (word & CP_BLOCK_WORD_VALID_MASK);
 }
 
+/**
+ * @brief 取出快照 word 里的块状态
+ *
+ * @param word  块元数据快照 word
+ * @return 块状态（FTL_BLOCK_STATE_*）
+ */
 static inline BYTE cp_block_word_state(WORD word)
 {
     return ((word >> CP_BLOCK_WORD_STATE_SHIFT) & CP_BLOCK_WORD_STATE_MASK);
 }
 
+/**
+ * @brief 取出快照 word 里的温度码
+ *
+ * @param word  块元数据快照 word
+ * @return 温度码（0/1）
+ */
 static inline BYTE cp_block_word_temp(WORD word)
 {
     return ((word >> CP_BLOCK_WORD_TEMP_SHIFT) & 0x1U);
 }
 
+/**
+ * @brief 取出快照 word 里的池归属
+ *
+ * @param word  块元数据快照 word
+ * @return 池归属（CP_BLOCK_POOL_*）
+ */
 static inline BYTE cp_block_word_pool(WORD word)
 {
     return ((word >> CP_BLOCK_WORD_POOL_SHIFT) & CP_BLOCK_WORD_POOL_MASK);
@@ -365,6 +398,9 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx);
 /**
  * @brief 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
  * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。
+ *
+ * @param h  Checkpoint handle
+ * @return 指向 handle 内 FTL_BLOCK_TOTAL 个 word 的常驻缓冲（非空，所有权归 handle）
  */
 WORD *cp_block_words_get(cp_handle_t *h);
 
@@ -384,6 +420,8 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out);
 
 /**
  * @brief 复位 T3 定时基准（boot 恢复 / 格式化后调用）。
+ *
+ * @param h  Checkpoint handle（清零 last_ms）
  */
 void cp_timer_reset(cp_handle_t *h);
 
@@ -408,12 +446,20 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl);
  * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
  * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
  * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。
+ *
+ * @param alloc   allocator（BST 与 OP/Spare 池归属的来源）
+ * @param md_dir  Metadata Directory；动态 LOG 块身份的权威（可为 NULL）
+ * @param words   输出：FTL_BLOCK_TOTAL 个编码后的 word
  */
 void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD words[FTL_BLOCK_TOTAL]);
 
 /**
  * @brief 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。
  * 条目格式是 checkpoint.c 的内部布局；调用者只提供输出页。
+ *
+ * @param alloc       allocator（BST 磨损计数的来源）
+ * @param page_index  磨损快照页号（0 .. FTL_CHECKPOINT_WEAR_PAGES-1）
+ * @param page        输出：一页主区（PAGE_MAIN_SIZE）
  */
 void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
 

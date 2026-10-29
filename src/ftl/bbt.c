@@ -81,10 +81,7 @@ typedef struct
 // 避免 boot/CLI 路径的 2KB 栈帧。
 static BYTE s_probe_raw[PAGE_SIZE];
 
-/**
- * @brief 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；
- * bbt_scan_factory 需要它在前面，故先声明。
- */
+// 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；bbt_factory_scan 需要它在前面，故先声明。
 static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase);
 
 // 一排每 plane 的块数。受**终端宽度**约束：每格定宽 BBT_MAP_ENTRY_W，两 plane 并排
@@ -104,6 +101,15 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
 
 /* ── 1. 池几何 / 校验 / 探针 ── */
 
+/**
+ * @brief 建立本实例的 BBT 池轮转视图
+ *
+ * 候选池已建立（`alloc->pools->bbt` 至少 2 块）时直接取用；否则退回自举池
+ * （`md_pool_build_bbt_bootstrap`），供池尚未建立的初始化路径扫描。
+ *
+ * @param ring  输出：BBT 池轮转描述
+ * @param alloc Allocator 上下文（取 `alloc->pools->bbt`；NULL 时走自举池）
+ */
 static void bbt_ring_init(md_ring_t *ring, const alc_t *alloc)
 {
     if ((alloc != NULL) && (alloc->pools != NULL) && (alloc->pools->bbt.block_count >= 2U))
@@ -117,8 +123,12 @@ static void bbt_ring_init(md_ring_t *ring, const alc_t *alloc)
 
 /**
  * @brief 整条校验（一条 record = 1 页）：magic + total_blocks。
+ *
  * total_blocks 是布局兼容性的代理判据：换块数/换 bitmap 语义后旧 record 必须作废。
  * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证。
+ *
+ * @param hdr record header
+ * @return true 有效，false 无效
  */
 static bool bbt_header_valid(const bbt_header_t *hdr)
 {
@@ -126,7 +136,10 @@ static bool bbt_header_valid(const bbt_header_t *hdr)
 }
 
 /**
- * @brief 本实例的池 + 路由（探针/定位/写点都要这一对，四处共用）
+ * @brief 装配本实例的池 + 路由（探针/定位/写点都要这一对，四处共用）
+ *
+ * @param alloc Allocator 上下文（取实例路由与候选池）
+ * @param ctx   输出：池轮转描述 + 拓扑路由
  */
 static void bbt_ctx_init(const alc_t *alloc, bbt_probe_ctx_t *ctx)
 {
@@ -135,7 +148,16 @@ static void bbt_ctx_init(const alc_t *alloc, bbt_probe_ctx_t *ctx)
 }
 
 /**
- * @brief BBT record 探针（见 metadata_ring_probe_fn）。full 与廉价探针等价（record 只有一页）。
+ * @brief BBT record 探针（见 metadata_ring_probe_fn）
+ *
+ * full 与廉价探针等价（record 只有一页）。镜像池：任一 plane 的副本
+ * header 有效且 sequence 非 0 即命中。
+ *
+ * @param ctx          探针上下文（`bbt_probe_ctx_t *`：池 + 路由）
+ * @param record_idx   池内槽下标
+ * @param full         是否完整探测（本 record 只有一页，忽略）
+ * @param out_sequence 输出：命中 record 的 sequence
+ * @return FTL_OK 命中；FTL_ERROR 该槽无有效副本
  */
 static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
@@ -414,6 +436,13 @@ int bbt_factory_scan(alc_t *alloc)
  * 调用者：bbt_factory_scan（出厂扫描，do_erase=0，**调用方已确认空片**）/
  * bbt_print_bad_map（诊断，按 CLI——读图的人须知这不是坏块图）/
  * 注：bbt_format_erase **不**调用本函数（标记读取职责只在 bbt_init）。
+ *
+ * @param alloc    分配器（取 ch/ce/lun 与几何）。
+ * @param plane    plane 号。
+ * @param block    plane 内块号。
+ * @param do_erase 非 0 = 探测时无条件擦除该块（擦除失败 ⇒ 判坏）。
+ *
+ * @return true = 坏块（列读失败 / 出厂标记非 0xFF / 擦除失败）。
  */
 static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase)
 {
@@ -617,7 +646,12 @@ void bbt_dirty_note(alc_t *alloc)
 
 /**
  * @brief 从 BST 重建一条 BBT record 的 header（同步 bbt_save 与异步 bbt_write_submit 共用）。
+ *
  * `sequence` 由调用者决定：同步路径刚自增，异步路径在 kick 起步时已自增。
+ *
+ * @param alloc    Allocator 上下文（从 BST 重建坏块位图，取 bad_count 与标志）
+ * @param sequence 写入 header 的 sequence
+ * @param header   输出：填好的 record header
  */
 static void bbt_build_header(const alc_t *alloc, DWORD sequence, bbt_header_t *header)
 {
@@ -965,7 +999,14 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
 }
 
 /**
- * @brief 擦完成。失败 ⇒ 游标**不推进**（擦没成，该槽还没被消耗），dirty 保留供下轮重试。
+ * @brief 擦完成的服务函数
+ *
+ * 成功 ⇒ 起写 record；失败 ⇒ 回 IDLE，游标**不推进**（擦没成，该槽还没被消耗），
+ * dirty 保留供下轮重试。
+ *
+ * @param alloc      Allocator 上下文
+ * @param cmd        完成的单条命令（本函数负责 fc_command_release）
+ * @param completion FC 完成状态（status 判成败）
  */
 static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -987,8 +1028,14 @@ static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
 }
 
 /**
- * @brief record 写完成。**无论成败都推进游标**：已写过的槽可能半编程，不可复用。
+ * @brief record 写完成的服务函数
+ *
+ * **无论成败都推进游标**：已写过的槽可能半编程，不可复用。
  * dirty 的清除还要比 dirty_gen —— 写飞行期间若又标了坏块，本条 record 是旧快照。
+ *
+ * @param alloc      Allocator 上下文
+ * @param cmd        完成的单条命令（本函数负责 fc_command_release）
+ * @param completion FC 完成状态（status 判成败）
  */
 static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {

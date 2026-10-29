@@ -88,9 +88,15 @@ static DWORD s_replay_write_fail_lba;
 
 /* ── Journal Block 页地址辅助 ── */
 /**
- * @brief jrn_page_addr — 第 b 块第 page 页的 NAND 地址（plane 由页号奇偶决定，见下）
+ * @brief 第 b 块第 page 页的 NAND 地址（plane 由页号奇偶决定）。
+ *
  * b 是**环形下标**，物理块号来自候选列表（跳过 BAD）。
  * ⚠ 候选列表由 jrn_init 从 alloc->pools->jrn 复制；池保证 4 块在构造时都非 BAD。
+ *
+ * @param journal Journal
+ * @param b       环形块下标（0..JOURNAL_BLOCK_COUNT-1）
+ * @param page    块内页号（偶页 P0、奇页 P1）
+ * @return 整页 PBA（cw=0）
  */
 static DWORD jrn_page_addr(const l2p_jrn_t *journal, BYTE b, BYTE page)
 {
@@ -102,9 +108,14 @@ static DWORD jrn_page_addr(const l2p_jrn_t *journal, BYTE b, BYTE page)
 }
 
 /**
- * @brief jrn_block_addr — 第 b 块的首页地址（擦除用的基址；plane/page 归零，cw=0）。
+ * @brief 第 b 块的首页地址（擦除用的基址；plane/page 归零，cw=0）。
+ *
  * ⚠ 页地址跨 P0/P1（见 jrn_page_addr）⇒ **所有擦除必须用
  * ftl_*_erase_block_multi_plane**，否则 P1 的那一半页不会被擦，环形回绕后二次编程。
+ *
+ * @param journal Journal
+ * @param b       环形块下标
+ * @return 块首页 PBA（所有擦除命令的基址）
  */
 static DWORD jrn_block_addr(const l2p_jrn_t *journal, BYTE b)
 {
@@ -115,7 +126,13 @@ static DWORD jrn_block_addr(const l2p_jrn_t *journal, BYTE b)
 
 /**
  * @brief 环形块是否已不可用：RAM bad_mask ∪ BST BAD（BBT 持久化后重启仍生效）。
+ *
  * journal 块跨两个 plane 交错（页号奇偶决定 plane）⇒ 任一 plane 的块 BAD 即跳过整块。
+ *
+ * @param journal Journal
+ * @param b       环形块下标
+ * @return true = 已不可用（bad_mask 命中，或任一 plane 的 gblock 为 BAD）
+ *         false = 可用
  */
 static bool jrn_ring_block_bad(const l2p_jrn_t *journal, BYTE b)
 {
@@ -136,7 +153,11 @@ static bool jrn_ring_block_bad(const l2p_jrn_t *journal, BYTE b)
 }
 
 /**
- * @brief 从 from 之后找下一个可用环形块；全部不可用返回 JRN_BLOCK_NONE。
+ * @brief 从 from 之后找下一个可用环形块。
+ *
+ * @param journal Journal
+ * @param from    起始环形块下标（从 from+1 开始搜索，可回绕）
+ * @return 下一个可用环形块下标；全部不可用 = JRN_BLOCK_NONE
  */
 static BYTE jrn_block_next(const l2p_jrn_t *journal, BYTE from)
 {
@@ -153,7 +174,10 @@ static BYTE jrn_block_next(const l2p_jrn_t *journal, BYTE from)
 }
 
 /**
- * @brief 环内第一个可用块（空环恢复写指针用）；全部不可用返回 JRN_BLOCK_NONE。
+ * @brief 环内第一个可用块（空环恢复写指针用）。
+ *
+ * @param journal Journal
+ * @return 第一个可用环形块下标；全部不可用 = JRN_BLOCK_NONE
  */
 static BYTE jrn_block_first_usable(const l2p_jrn_t *journal)
 {
@@ -222,9 +246,7 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc)
  * 3. 追加与刷页
  * ══════════════════════════════════════════════════════════ */
 
-/**
- * @brief 前置声明：jrn_append / jrn_reserve（页满时）要用，定义在本节稍后。
- */
+// 前置声明：jrn_append / jrn_reserve（页满时）要用，定义在本节稍后。
 static bool jrn_freeze(l2p_jrn_t *journal);
 
 // 实现要点：· **不阻塞**：只可能调用 jrn_freeze() 起一条异步页写，绝不同步刷页 /
@@ -369,7 +391,7 @@ static void jrn_header_write(l2p_jrn_t *journal)
  * @param journal Journal。
  *
  * @return true = 已异步起写（调用者不必再同步刷）；
- *              false = 未能起（job 忙 / 池空 / 建链失败），此时 page_buf 与写指针**原样未动**，调用者应返 FTL_AGAIN / 下一轮重试。
+ *         false = 未能起（job 忙 / 池空 / 建链失败），此时 page_buf 与写指针**原样未动**，调用者应返 FTL_AGAIN / 下一轮重试。
  *
  * @note 实现要点：· **单飞行**：phase != JRN_IDLE 直接拒绝——两条写会争同一个页地址。
  * · **待偿擦除也不许写**：need_erase 置位说明当前环形块**还没擦过**（换块后
@@ -553,6 +575,13 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
  * ══════════════════════════════════════════════════════════ */
 
 /* ── 状态上报（主流程只读这个，不窥探 handle 内部） ── */
+
+/**
+ * @brief 把 journal 的当前状态填入上报结构（只读 handle，不改状态）。
+ *
+ * @param journal Journal
+ * @param out     出参：上报结构（非空）
+ */
 static void jrn_status_fill(const l2p_jrn_t *journal, jrn_status_t *out)
 {
     out->base.critical  = false; /* 由 must-run 适配器另行调用 ERASE_ONLY 入口保证 liveness */
@@ -733,8 +762,11 @@ void jrn_watermark_update(l2p_jrn_t *journal)
 
 /**
  * @brief 记录一次 Journal 页写失败：条目已随 page_buf 清空而丢失。
+ *
  * 置 pending 阻止任何 victim 擦除，并强制一次 Checkpoint 把当前 L2P 落盘；
  * pending 由 jrn_write_failure_clear（CP Header 成功后）清除。
+ *
+ * @param journal Journal
  */
 static void jrn_write_failure_note(l2p_jrn_t *journal)
 {
@@ -747,11 +779,16 @@ static void jrn_write_failure_note(l2p_jrn_t *journal)
 
 /**
  * @brief Journal 页写完成（成功 / 失败共用）。两条路径都要推进落点并置 IDLE：
+ *
  * **指针推进守卫** —— 只在「写指针仍在起写位置」时推进；若指针已被回放/截断恢复
  * 推过落点，job 的落点已过期，不得再推进。
  * 失败页可能已半编程 ⇒ **绝不复用**；推进到 freeze 算好的下一落点，跨块时
  * need_erase 保留，由 jrn_handle 先擦目标块再写。条目已丢（page_buf 在提交时
  * 清空），由 write_fail_pending 兜住：GC 不会擦 victim，直到 CP 把当前 L2P 落盘。
+ *
+ * @param journal    Journal
+ * @param cmd        已完成命令（函数内释放）
+ * @param completion 完成状态（按 status 判成败）
  */
 static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -797,8 +834,14 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
 }
 
 /**
- * @brief Journal 环形块擦完成。失败判据必须是全集：只看 NAND_FAIL 会把 TIMEOUT / CRC
- * 当成擦成功，后续页写进可能未擦的块（二次编程 = 静默损坏）。
+ * @brief Journal 环形块擦完成。
+ *
+ * 失败判据必须是全集：只看 NAND_FAIL 会把 TIMEOUT / CRC 当成擦成功，
+ * 后续页写进可能未擦的块（二次编程 = 静默损坏）。
+ *
+ * @param journal    Journal
+ * @param cmd        已完成命令（函数内释放）
+ * @param completion 完成状态（按 status 判成败）
  */
 static void jrn_erase_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -860,6 +903,10 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
  * @brief 空片页判定（仅读失败时调用）：格式化后的 Journal 环形块是全 FF，
  * 带 META/CRC 校验的读会失败；raw 读全 FF ⇒ 空页，不是“不可读”。
  * 只有非 FF 的读失败才是真正不可信的页（RISK-BOOT-08）。
+ *
+ * @param addr 待判页的 NAND 地址
+ * @return true = raw 读成功且整页为 0xFF（空页）
+ *         false = 读失败，或存在非 0xFF 字节
  */
 static bool jrn_page_raw_blank(DWORD addr)
 {
@@ -895,7 +942,7 @@ static bool jrn_page_raw_blank(DWORD addr)
  * @param out_count 出参收集条数（可为 NULL）
  * @param out_latest 出参最新页（可为 NULL）。
  *
- * @return 无。
+ * @return 环内非空页的读失败数（0 = 全部可读）
  *
  * @note 实现要点：只读 NAND，**不改 journal 状态**（怎么用由调用方决定）。
  * 需回放判据是**整页**的：`page_seq + entry_count > cp_sequence`。
@@ -1120,12 +1167,19 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
 }
 
 /**
- * @brief 应用一页 Journal 条目；返回**成功写入 L2P 的条目数**。
+ * @brief 应用一页 Journal 条目。
  *
  * 开机回放 = 结构性同步：用同步逃生口（自旋泵），不 park、不返 FTL_AGAIN
  * ——此时 superloop 尚未建立，没人推进 job。
  * entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。
  * 写失败 ⇒ LOGW + block_ctx->ok=false（调用者回退 full metadata rebuild）。
+ *
+ * @param journal     Journal
+ * @param cache       共享 L2P cache（映射写入目标）
+ * @param page        待回放页引用（block / page / entry_count）
+ * @param cp_sequence checkpoint 截断水位（块元数据增量只记 sequence ≥ 它的条目）
+ * @param block_ctx   块元数据增量端口（可为 NULL = 不记账）
+ * @return 成功写入 L2P 的条目数（读失败页 = 0）
  */
 static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {

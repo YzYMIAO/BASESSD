@@ -153,13 +153,23 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
  * cache read/write 批次共用，避免各模块重复写 `(1U << (PLANE_NUM*CW_NUM))-1`。 */
 #define FTL_CACHE_FULL_CW ((DWORD)((1U << (PLANE_NUM * CW_NUM)) - 1U))
 
-/** @brief LBA → 页基址（低 CW_WIDTH 位 = cw 清零；plane 位保留） */
+/**
+ * @brief LBA → 页基址（低 CW_WIDTH 位 = cw 清零；plane 位保留）
+ *
+ * @param lba 逻辑地址
+ * @return 页基址（bit CW_WIDTH 仍是 plane 位，不是页号）
+ */
 static inline DWORD ftl_lba_page_base(DWORD lba)
 {
     return (lba & ~(CW_NUM - 1U));
 }
 
-/** @brief LBA → 页内 CW 号（0..CW_NUM-1） */
+/**
+ * @brief LBA → 页内 CW 号（0..CW_NUM-1）
+ *
+ * @param lba 逻辑地址
+ * @return CW 号
+ */
 static inline BYTE ftl_lba_cw(DWORD lba)
 {
     return (lba & (CW_NUM - 1U));
@@ -169,13 +179,22 @@ static inline BYTE ftl_lba_cw(DWORD lba)
  * @brief LBA → 该 LBA 应落在的**物理 plane**（bit CW_WIDTH 起，与 PBA 的 plane 位同源）。
  * 写路径按它选 plane、GC/WL 按它校验搬移目标 plane——「物理 plane == LBA 的 plane 位」
  * 是页内 META 可自洽还原 LBA 的前提（见本节头）。
+ *
+ * @param lba 逻辑地址
+ * @return 物理 plane 号（0..PLANE_NUM-1）
  */
 static inline BYTE ftl_lba_plane(DWORD lba)
 {
     return ((lba >> CW_WIDTH) & (PLANE_NUM - 1U));
 }
 
-/** @brief 页基址 + CW 号 → LBA（ftl_lba_page_base 的逆） */
+/**
+ * @brief 页基址 + CW 号 → LBA（ftl_lba_page_base 的逆）
+ *
+ * @param page_base 页基址
+ * @param cw 页内 CW 号
+ * @return 逻辑地址
+ */
 static inline DWORD ftl_lba_make(DWORD page_base, BYTE cw)
 {
     return (page_base | cw);
@@ -186,19 +205,32 @@ static inline DWORD ftl_lba_make(DWORD page_base, BYTE cw)
  * flat 位图中的**绝对编号**）。
  * 写缓冲的 occupied 与命令的 cw_bitmap 都是这个 flat 布局（bit = plane*CW_NUM + cw），
  * 且 LBA 低 3 位就是 [plane][cw] ⇒ 槽位号 = plane*CW_NUM + cw。
+ *
+ * @param lba 逻辑地址
+ * @return flat 位图中的绝对编号（0..FTL_LBA_PER_PAIR-1）
  */
 static inline BYTE ftl_lba_pair_slot(DWORD lba)
 {
     return (ftl_lba_plane(lba) * CW_NUM + ftl_lba_cw(lba));
 }
 
-/** @brief LBA → 页索引（bit 0 = plane，与 PBA 的 plane 位对齐） */
+/**
+ * @brief LBA → 页索引（bit 0 = plane，与 PBA 的 plane 位对齐）
+ *
+ * @param lba 逻辑地址
+ * @return 页粒度地址（含 plane 位）
+ */
 static inline DWORD ftl_lba_page(DWORD lba)
 {
     return (lba >> CW_WIDTH);
 }
 
-/** @brief LBA → 所属「pair 窗口」基址（8 个 LBA 一组：低 3 位全清零） */
+/**
+ * @brief LBA → 所属「pair 窗口」基址（8 个 LBA 一组：低 3 位全清零）
+ *
+ * @param lba 逻辑地址
+ * @return pair 窗口基址（FTL_LBA_PER_PAIR 对齐）
+ */
 static inline DWORD ftl_lba_pair_base(DWORD lba)
 {
     return (lba & ~(FTL_LBA_PER_PAIR - 1U));
@@ -260,36 +292,78 @@ static inline DWORD ftl_lba_pair_base(DWORD lba)
  *
  * 返回类型 = 字段的**自然宽度**：窄化在 getter 内完成一次，调用点不再逐个强转。 */
 
+/**
+ * @brief PBA → CH 号（字段自然宽度）
+ *
+ * @param pba 系统物理地址
+ * @return CH 号（0..CH_NUM-1）
+ */
 static inline BYTE pba_to_ch(DWORD pba)
 {
     return ((pba >> PBA_CH_SHIFT) & PBA_CH_MASK);
 }
 
+/**
+ * @brief PBA → CE 号（字段自然宽度）
+ *
+ * @param pba 系统物理地址
+ * @return CE 号（0..CE_NUM-1）
+ */
 static inline BYTE pba_to_ce(DWORD pba)
 {
     return ((pba >> PBA_CE_SHIFT) & PBA_CE_MASK);
 }
 
+/**
+ * @brief PBA → LUN 号（字段自然宽度）
+ *
+ * @param pba 系统物理地址
+ * @return LUN 号（0..LUN_NUM-1；LUN_ADDR_WIDTH == 0 时恒 0）
+ */
 static inline BYTE pba_to_lun(DWORD pba)
 {
     return ((pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK);
 }
 
+/**
+ * @brief PBA → plane 内块号
+ *
+ * @param pba 系统物理地址
+ * @return 块号（0..BLOCKS_PER_PLANE-1）
+ */
 static inline WORD pba_to_block(DWORD pba)
 {
     return ((pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK);
 }
 
+/**
+ * @brief PBA → 块内页号
+ *
+ * @param pba 系统物理地址
+ * @return 页号（0..PAGES_PER_BLOCK-1）
+ */
 static inline BYTE pba_to_page(DWORD pba)
 {
     return ((pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK);
 }
 
+/**
+ * @brief PBA → plane 号
+ *
+ * @param pba 系统物理地址
+ * @return plane 号（0..PLANE_NUM-1）
+ */
 static inline BYTE pba_to_plane(DWORD pba)
 {
     return ((pba >> PLANE_CW_SHIFT) & PBA_PLANE_MASK);
 }
 
+/**
+ * @brief PBA → 页内 CW 号
+ *
+ * @param pba 系统物理地址
+ * @return CW 号（0..CW_NUM-1）
+ */
 static inline BYTE pba_to_cw(DWORD pba)
 {
     return ((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
@@ -337,13 +411,27 @@ _Static_assert(PBA_USED_BITS <= 32U, "PBA 编码超出 32 位");
  * **按 PBA_*_SHIFT 宏打包**，不依赖位域布局（尾部位恒 0，无填充位垃圾）。
  * 这是 FTL 层「手搭地址」的唯一入口——位域结构体不能在 LUN_ADDR_WIDTH == 0 时
  * 声明 lun 成员，故把那一处 #if 收敛在本函数里（PBA_LUN_MASK 为 0 ⇒ lun 自然被忽略）。
+ *
+ * @param ch 通道号
+ * @param ce 片选号
+ * @param lun LUN 号（LUN_ADDR_WIDTH == 0 时被掩码忽略）
+ * @param block plane 内块号
+ * @param plane plane 号
+ * @param page 块内页号
+ * @param cw 页内 CW 号
+ * @return 打包后的 PBA 字
  */
 static inline DWORD pba_make(DWORD ch, DWORD ce, DWORD lun, DWORD block, DWORD plane, DWORD page, DWORD cw)
 {
     return ((DWORD)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) | ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) | ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
-/** @brief 字段视图 → PBA 字（值语义，pba_fields 的逆）。 */
+/**
+ * @brief 字段视图 → PBA 字（值语义，pba_fields 的逆）
+ *
+ * @param f PBA 字段视图
+ * @return 打包后的 PBA 字
+ */
 static inline DWORD pba_pack(nand_pba_fields_t f)
 {
 #if (LUN_ADDR_WIDTH > 0U)
@@ -353,7 +441,12 @@ static inline DWORD pba_pack(nand_pba_fields_t f)
 #endif
 }
 
-/** @brief PBA 字 → 字段视图（值语义）。逐字段走 pba_to_*（编译期可证的解码路径）。 */
+/**
+ * @brief PBA 字 → 字段视图（值语义）。逐字段走 pba_to_*（编译期可证的解码路径）。
+ *
+ * @param pba 系统物理地址
+ * @return 解出的字段视图
+ */
 static inline nand_pba_fields_t pba_fields(DWORD pba)
 {
     nand_pba_fields_t f;
@@ -425,7 +518,12 @@ static inline bool pba_fields_layout_matches(void)
     return ok;
 }
 
-/** @brief 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。 */
+/**
+ * @brief 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。
+ *
+ * @param pba 系统物理地址
+ * @return 芯片内地址（ch/ce 置 0，由调用者在 PAA→PBA 侧补回）
+ */
 static inline DWORD pba_to_paa(DWORD pba)
 {
     nand_addr_t addr;
@@ -445,50 +543,112 @@ static inline DWORD pba_to_paa(DWORD pba)
 /**
  * @brief 从芯片内地址 PAA + CH/CE 构造 PBA（字段重排，pba_to_paa 的逆）。
  * 仅作为跨层桥接：PAA 从 FC 侧回来时用它还原 PBA（见 ftl_fc_interface.h 的 ftl_cmd_pba）。
+ *
+ * @param ch 通道号（PAA 不携带，由调用者提供）
+ * @param ce 片选号（PAA 不携带，由调用者提供）
+ * @param paa 芯片内地址
+ * @return 系统物理地址
  */
 static inline DWORD paa_to_pba(DWORD ch, DWORD ce, DWORD paa)
 {
     return pba_make(ch, ce, paa_to_lun(paa), paa_to_block(paa), paa_to_plane(paa), paa_to_page(paa), paa_to_cw(paa));
 }
 
-/** @brief 取 PBA 的**页**（CW 位清零）——同一物理页的 4 个 CW 共享它 */
+/**
+ * @brief 取 PBA 的**页**（CW 位清零）——同一物理页的 4 个 CW 共享它
+ *
+ * @param pba 系统物理地址
+ * @return 页地址（CW 字段为 0）
+ */
 static inline DWORD pba_page(DWORD pba)
 {
     return (pba & ~(CW_NUM - 1U));
 }
 
-/** @brief 同 page 内换 CW */
+/**
+ * @brief 同 page 内换 CW
+ *
+ * @param pba 系统物理地址
+ * @param cw 新 CW 号
+ * @return 替换 CW 字段后的 PBA
+ */
 static inline DWORD pba_with_cw(DWORD pba, DWORD cw)
 {
     return (pba & ~NAND_FIELD_MASK(CW_WIDTH)) | ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
 }
 
-/** @brief 替换 PBA 中的各字段（直接按 PBA 移位，不经 PAA 往返） */
+/**
+ * @brief 替换 PBA 的页字段（直接按 PBA 移位，不经 PAA 往返）
+ *
+ * @param pba 系统物理地址
+ * @param page 新页号
+ * @return 替换页字段后的 PBA
+ */
 static inline DWORD pba_with_page(DWORD pba, DWORD page)
 {
     return ((pba & ~(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
 }
 
+/**
+ * @brief 替换 PBA 的 plane 字段。
+ *
+ * @param pba   物理地址。
+ * @param plane 目标 plane 号。
+ *
+ * @return 替换后的 PBA。
+ */
 static inline DWORD pba_with_plane(DWORD pba, DWORD plane)
 {
     return ((pba & ~(PBA_PLANE_MASK << PLANE_CW_SHIFT)) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT));
 }
 
+/**
+ * @brief 替换 PBA 的 block 字段。
+ *
+ * @param pba   物理地址。
+ * @param block 目标 plane 内块号。
+ *
+ * @return 替换后的 PBA。
+ */
 static inline DWORD pba_with_block(DWORD pba, DWORD block)
 {
     return ((pba & ~(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
 }
 
+/**
+ * @brief 替换 PBA 的 LUN 字段。
+ *
+ * @param pba 物理地址。
+ * @param lun 目标 LUN 号。
+ *
+ * @return 替换后的 PBA。
+ */
 static inline DWORD pba_with_lun(DWORD pba, DWORD lun)
 {
     return ((pba & ~(PBA_LUN_MASK << PBA_LUN_SHIFT)) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
 }
 
+/**
+ * @brief 替换 PBA 的 CH 字段。
+ *
+ * @param pba 物理地址。
+ * @param ch  目标通道号。
+ *
+ * @return 替换后的 PBA。
+ */
 static inline DWORD pba_with_ch(DWORD pba, DWORD ch)
 {
     return ((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) | ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
 }
 
+/**
+ * @brief 替换 PBA 的 CE 字段。
+ *
+ * @param pba 物理地址。
+ * @param ce  目标片选号。
+ *
+ * @return 替换后的 PBA。
+ */
 static inline DWORD pba_with_ce(DWORD pba, DWORD ce)
 {
     return ((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) | ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
@@ -496,13 +656,24 @@ static inline DWORD pba_with_ce(DWORD pba, DWORD ce)
 
 /* ── 比较与校验 ── */
 
-/** @brief 是否同 Page（无视 CW） */
+/**
+ * @brief 是否同 Page（无视 CW）
+ *
+ * @param a PBA
+ * @param b PBA
+ * @return true = 两 PBA 的页地址相同
+ */
 static inline bool pba_same_page(DWORD a, DWORD b)
 {
     return pba_page(a) == pba_page(b);
 }
 
-/** @brief 各字段是否在芯片规格范围内 */
+/**
+ * @brief 各字段是否在芯片规格范围内
+ *
+ * @param pba 系统物理地址
+ * @return true = 各字段均小于对应规格上限
+ */
 static inline bool pba_is_valid(DWORD pba)
 {
     return (pba_to_page(pba) < PAGES_PER_BLOCK) && (pba_to_plane(pba) < PLANE_NUM) && (pba_to_block(pba) < BLOCKS_PER_PLANE) && (pba_to_lun(pba) < LUN_NUM) && (pba_to_cw(pba) < CW_NUM) && (pba_to_ch(pba) < CH_NUM) && (pba_to_ce(pba) < CE_NUM);
@@ -512,7 +683,13 @@ static inline bool pba_is_valid(DWORD pba)
  * §三.3 CW 段位图
  * ══════════════════════════════════════════════════════════════════ */
 
-/** @brief 单 plane 段内、CW [cw_lo, cw_hi] 的 flat 位图（段起点由调用者左移） */
+/**
+ * @brief 单 plane 段内、CW [cw_lo, cw_hi] 的 flat 位图（段起点由调用者左移）
+ *
+ * @param cw_lo 段内起始 CW（含）
+ * @param cw_hi 段内结束 CW（含）
+ * @return 段内位图；调用者按 plane*CW_NUM 左移得到 flat 位图
+ */
 static inline DWORD ftl_cw_span_mask(BYTE cw_lo, BYTE cw_hi)
 {
     return ((1U << (cw_hi + 1U)) - 1U) & ~((1U << cw_lo) - 1U);
@@ -521,6 +698,9 @@ static inline DWORD ftl_cw_span_mask(BYTE cw_lo, BYTE cw_hi)
 /**
  * @brief 单个 plane 的全 CW 掩码（已左移到该 plane 的段）。
  * 一位一段：plane p 占 bit [p*CW_NUM, (p+1)*CW_NUM)——见 §三.3 的 flat 编号约定。
+ *
+ * @param plane plane 号
+ * @return flat 位图（该 plane 的全部 CW 位）
  */
 static inline DWORD ftl_cw_plane_mask(BYTE plane)
 {
@@ -532,6 +712,11 @@ static inline DWORD ftl_cw_plane_mask(BYTE plane)
  * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
  * 所有 CW 位图（含逐 plane 保存的 `mig_handle_t.cw_bitmap[]`）都用本函数构造，
  * 避免同一份位图出现「绝对位置、相对位判」两种写法。
+ *
+ * @param plane plane 号。
+ * @param cw    plane 内 CW 号。
+ *
+ * @return flat 位。
  */
 static inline DWORD ftl_cw_bit(BYTE plane, BYTE cw)
 {
@@ -541,6 +726,10 @@ static inline DWORD ftl_cw_bit(BYTE plane, BYTE cw)
 /**
  * @brief 位图覆盖了几个 plane（= 本命令的 multi-plane 数；全空 → 0，调用者自判非法）。
  * ⚠ 界走 PLANE_NUM（几何常量），与 fc_command_plane_span 的上界同源。
+ *
+ * @param bitmap flat CW 位图。
+ *
+ * @return 覆盖的 plane 数。
  */
 static inline BYTE ftl_cw_bitmap_plane_count(DWORD bitmap)
 {
@@ -560,6 +749,10 @@ static inline BYTE ftl_cw_bitmap_plane_count(DWORD bitmap)
 /**
  * @brief 位图的置位数（= 本页实际 CW 数，即 n_cw）。只看前 FTL_LBA_PER_PAIR 位——
  * 那是一页的总 CW 数，段外的高位不参与。
+ *
+ * @param bitmap flat CW 位图。
+ *
+ * @return 置位数（CW 数）。
  */
 static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
 {

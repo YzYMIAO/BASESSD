@@ -77,16 +77,36 @@ _Static_assert(FTL_LBA_PER_PAIR < 32U, "1U << FTL_LBA_PER_PAIR 会溢出 DWORD")
 /* ── 位图原语（本文件内部）──
  * 脏位图是 flat 绝对编号（bit = 全局 region）。set/clear/test 集中在此，
  * 避免调用点各自手写 word 下标与移位（H15 / C9）。 */
+/**
+ * @brief 置位图中的一位。
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标（flat 绝对编号）
+ */
 static void l2p_bitmap_set(DWORD *bitmap, DWORD bit)
 {
     bitmap[bit / 32U] |= (1UL << (bit & 31U));
 }
 
+/**
+ * @brief 清位图中的一位。
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标（flat 绝对编号）
+ */
 static void l2p_bitmap_clear(DWORD *bitmap, DWORD bit)
 {
     bitmap[bit / 32U] &= ~(1UL << (bit & 31U));
 }
 
+/**
+ * @brief 测试位图中的一位。
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标（flat 绝对编号）
+ * @return true = 该位置位
+ *         false = 该位清零
+ */
 static bool l2p_bitmap_test(const DWORD *bitmap, DWORD bit)
 {
     return (bitmap[bit / 32U] & (1UL << (bit & 31U))) != 0U;
@@ -95,6 +115,8 @@ static bool l2p_bitmap_test(const DWORD *bitmap, DWORD bit)
 /**
  * @brief 全局 region → owner FTL 实例（设备级注入的解析回调）。
  *
+ * @param cache         cache 上下文
+ * @param global_region 全局 region
  * @return owner 实例（恒非空；owner 表与 topology 的一致性由 ftl_contract_audit 在 boot 期证明）。
  *
  * @note 实现要点：共享 cache 的所有 metadata I/O 都以 owner 的目录/分配器为准。
@@ -170,6 +192,9 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  * 每次 cache 访问（命中或未命中）调用一次；窗口满 L2P_THRASH_WINDOW 时按 miss 率
  * 与滞回阈值更新 thrashing 标志并清零窗口。仅状态**翻转**时打一行观测日志
  * （阈值附近不抖动 ⇒ 不会刷屏）。
+ *
+ * @param cache   cache 上下文
+ * @param is_miss true = 本次访问未命中
  */
 static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
 {
@@ -213,6 +238,9 @@ static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
  *
  * CLOCK 的引用位“命中置 1”；若本行正是为当前这次访问刚加载完的（fresh），
  * 这一击是那次 miss 的重试 ⇒ 只消费 fresh，不计命中。
+ *
+ * @param cache cache 上下文
+ * @param line  命中的 cache 行
  */
 static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
 {
@@ -244,6 +272,10 @@ static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
  * 就会为同一 region 再分配一行 ⇒ 同一 region 两行分叉（一行 CLEAN 一行 DIRTY），
  * 后续读按**下标序**取第一行 ⇒ 写进另一行 ⇒ 映射静默不一致。
  * 命中后各调用者再按 state 判"能不能读/写"（见 l2p_read / write）。
+ *
+ * @param cache     cache 上下文
+ * @param region_id 全局 region
+ * @return 命中的行；NULL = 该 region 未驻留
  */
 static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
 {
@@ -285,6 +317,12 @@ static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
 static DWORD s_evict_fail_ms;
 static DWORD s_evict_fail_n;
 
+/**
+ * @brief 打一条「无可驱逐行」限流日志，并输出各状态行数。
+ *
+ * @param cache     cache 上下文
+ * @param region_id 触发驱逐失败的全局 region
+ */
 static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -338,6 +376,13 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
     s_evict_fail_n  = 0U;
 }
 
+/**
+ * @brief CLOCK 选一个可驱逐的 cache 行。
+ *
+ * @param cache       cache 上下文
+ * @param flush_dirty true = 遇 DIRTY 行先起异步写回再继续扫描；false = 跳过 DIRTY
+ * @return 选中的行；NULL = 当前没有可驱逐行（全在飞 / 脏行都刚起了写回）
+ */
 static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
 {
     WORD start = cache->clock_hand;
@@ -425,6 +470,12 @@ static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
 static DWORD s_load_fail_ms;
 static DWORD s_load_fail_n;
 
+/**
+ * @brief 打一条「加载启动失败」限流日志。
+ *
+ * @param region_id 加载失败的全局 region
+ * @param cause     失败原因字符串（"no_command" / "submit_backpressure"）
+ */
 static void l2p_load_fail_log(DWORD region_id, const char *cause)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -454,6 +505,12 @@ static void l2p_load_fail_log(DWORD region_id, const char *cause)
 static DWORD s_degrade_log_ms;
 static DWORD s_degrade_n;
 
+/**
+ * @brief 打一条「region 降级为全未映射」限流日志。
+ *
+ * @param region_id  降级的全局 region
+ * @param fail_count 连续加载失败次数
+ */
 static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -490,6 +547,13 @@ static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
  * @brief 提交一次 region 页读：首次加载与「主副本失败 → 备份副本」共用。
  * 成功：行置 LOADING、load_inflight++、记录本次 PBA；
  * 失败：行回到 INVALID（调用者下轮重试），返回 false。
+ *
+ * @param cache       cache 上下文
+ * @param line        目标 cache 行
+ * @param pba         要读取的 region 页物理地址
+ * @param log_failure true = 失败时打限流日志（预取路径传 false）
+ * @return true = 读命令已提交、行进入 LOADING
+ *         false = 未提交，行回到 INVALID
  */
 static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pba, bool log_failure)
 {
@@ -528,6 +592,19 @@ static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pb
     return true;
 }
 
+/**
+ * @brief 为一个 region 建立加载状态并提交读命令（或直接合成未映射行）。
+ *
+ * 未映射（主备 PBA 均为 NAND_PBA_INVALID）⇒ 不提交 NAND 读，直接置全 INVALID 的 CLEAN 行。
+ *
+ * @param cache       cache 上下文
+ * @param line        已选中的 cache 行
+ * @param region_id   全局 region
+ * @param log_failure true = 加载启动失败时打限流日志
+ * @param prefetch    true = 预取加载（fresh 保持 false）
+ * @return true = 已就绪（CLEAN）或读命令已提交（LOADING）
+ *         false = 读命令提交失败，行回到 INVALID
+ */
 static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD region_id, bool log_failure, bool prefetch)
 {
     const l2p_owner_t *owner        = l2p_owner_get(cache, region_id);
@@ -579,6 +656,14 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
     return l2p_load_submit(cache, line, pba, log_failure);
 }
 
+/**
+ * @brief 为 region 起一次懒加载：先选可驱逐行，再建加载状态。
+ *
+ * @param cache     cache 上下文
+ * @param region_id 全局 region
+ * @return true = 加载已起（或未映射直接 CLEAN）
+ *         false = 无可驱逐行 / 提交失败
+ */
 static bool l2p_load_start(l2p_cache_t *cache, DWORD region_id)
 {
     l2p_cache_line_t *line = l2p_line_evict(cache, true);
@@ -839,11 +924,8 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
     return FTL_OK;
 }
 
-/**
- * @brief 页内批量写：语义同逐条 l2p_write；只处理 mask 置位项，逐项记 hit，
- * 全部通过后才置 DIRTY + region 脏位（失败不产生半个状态）。
- * 前置（调用者保证）：lba 是 FTL_LBA_PER_PAIR 对齐的页对基址。
- */
+// 实现要点：只处理 mask 置位项，逐项记 hit；全部通过后才置 DIRTY + region 脏位
+// （失败不产生半个状态）。前置（调用者保证）：lba 是 FTL_LBA_PER_PAIR 对齐的页对基址。
 ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[])
 {
     mask &= ((1U << FTL_LBA_PER_PAIR) - 1U);
@@ -893,6 +975,12 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
  *   CLI `fl` 一旦撞上"池吃紧 ⇒ append_slot 让路"就会**死等**（自旋里没有任何人把
  *   compact 走完）。同步站点知道自己的 owner ⇒ 用 owner 的 metadata_dir/alloc
  *   推进该 die 的目录整理 job。 */
+/**
+ * @brief 同步逃生口的一次泵：推 NAND + 抽完成表，并推进 owner 的目录整理 job。
+ *
+ * @param cache cache 上下文（可为 NULL）
+ * @param owner owner 实例（可为 NULL；非空时推进其 metadata_dir 的 job）
+ */
 static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
 {
     ASSERT(!ftl_op_is_in_dispatch());
@@ -983,12 +1071,10 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region)
 /* ── 6. 写回 ── */
 
 /**
- * @brief 写回资源预检。
+ * @brief 统计全局脏位图的置位数。
  *
- * 一次 region 页写需要 1 条命令 + CW_NUM 个描述符 + CW_NUM 个 buffer，且必须能进
- * SQ/HSQ。这些资源与 metadata 日志槽位来自**不同的池**：不预检就 append_slot，
- * 一旦 FC 池空（FTL_AGAIN），槽位已推进且无法回收 ⇒ 持续背压下白烧日志块。
- * 单线程 superloop 且预检与建链之间不泵 ⇒ 资源不会被别人拿走。
+ * @param cache cache 上下文
+ * @return 脏位图全部 word 的置位总数
  */
 static WORD l2p_dirty_count(const l2p_cache_t *cache)
 {
@@ -1001,6 +1087,17 @@ static WORD l2p_dirty_count(const l2p_cache_t *cache)
     return count;
 }
 
+/**
+ * @brief 写回资源预检。
+ *
+ * 一次 region 页写需要 1 条命令 + CW_NUM 个描述符 + CW_NUM 个 buffer，且必须能进
+ * SQ/HSQ。这些资源与 metadata 日志槽位来自**不同的池**：不预检就 append_slot，
+ * 一旦 FC 池空（FTL_AGAIN），槽位已推进且无法回收 ⇒ 持续背压下白烧日志块。
+ * 单线程 superloop 且预检与建链之间不泵 ⇒ 资源不会被别人拿走。
+ *
+ * @return true = 命令/描述符/buffer/SQ/HSQ 都够一次 region 页写
+ *         false = 有任一资源不足或查询失败
+ */
 static bool l2p_flush_resources_available(void)
 {
     fc_resource_stats_t stats;
@@ -1411,6 +1508,12 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
     [BG_LEVEL_BUSY]   = L2P_FLUSH_MAX_BUSY,
 };
 
+/**
+ * @brief 填充 l2p_status_t 上报（供 l2p_handle 输出）。
+ *
+ * @param cache cache 上下文
+ * @param out   出参状态
+ */
 static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
 {
     WORD resident = 0U;

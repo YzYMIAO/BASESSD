@@ -18,15 +18,29 @@
 
 /* ── 待回收日志块位图 ── */
 
-/** @brief 置位；已置位返回 false。g 越界是内部调用者的编程错误 ⇒ 运行期拒绝（H31/C5）。 */
+/**
+ * @brief 置位；已置位返回 false。g 越界是内部调用者的编程错误 ⇒ 运行期拒绝（H31/C5）。
+ *
+ * @param dir Directory（待回收位图所属）
+ * @param g   候选 gblock 编号
+ * @return true = 本次新置位并计数
+ *         false = g 越界或该位已置位
+ */
 bool md_reclaim_mark(md_dir_cache_t *dir, WORD g);
 
-/** @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。 */
+/**
+ * @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。
+ *
+ * @param dir Directory
+ */
 void md_reclaim_reset(md_dir_cache_t *dir);
 
 /**
  * @brief 扫描全池，把"已无引用、非当前写块、确实是 LOG"的块登记进待回收位图。
  * **只登记，不擦除**：换块时调用，擦除全部交给后台 job。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器（读 BST 判 LOG 身份）
  */
 void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc);
 
@@ -35,7 +49,11 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc);
 /**
  * @brief 取当前日志块的**下一个空槽**并推进写指针（纯 RAM，不做任何块管理）。
  *
- * @return 槽位 PBA；无当前块 / 块已满 ⇒ NAND_PBA_INVALID。取到位置后**立即推进** cur_metadata_page：写失败时该页可能已半编程、不可复用。
+ * @param dir Directory
+ * @return 槽位 PBA
+ *         NAND_PBA_INVALID = 无当前块 / 块已满
+ *
+ * @note 取到位置后**立即推进** cur_metadata_page：写失败时该页可能已半编程、不可复用。
  */
 DWORD md_slot_take(md_dir_cache_t *dir);
 
@@ -47,22 +65,33 @@ DWORD md_slot_take(md_dir_cache_t *dir);
  * 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。漏一个 ⇒ append_slot 永久让路（phase 卡死）
  * 或下次压缩复用已消耗的槽（二次编程 = 静默损坏）。
  * ⚠ 不清 `reclaim_pending` / `reclaim_scan`：待回收知识不属于 job 状态。
+ *
+ * @param dir Directory
  */
 void md_handle_reset(md_dir_cache_t *dir);
 
-/** @brief 整理 job 是否空闲（无回收/压缩在跑）。 */
+/**
+ * @brief 整理 job 是否空闲（无回收/压缩在跑）。
+ *
+ * @param dir Directory
+ * @return true = job 处于 IDLE
+ *         false = 有 job 在跑
+ */
 static inline bool md_handle_is_idle(const md_dir_cache_t *dir)
 {
     return dir->handle.phase == MD_JOB_IDLE;
 }
 
 /**
- * @brief md_handle_is_compacting — 压缩 job 是否处于 CP_* 阶段。
+ * @brief 压缩 job 是否处于 CP_* 阶段。
  *
  * `commit_region` 据此**抑制逐次立即回收**：搬移 victim 的最后一个 region 时其活
  * 计数归零，但 Anchor 还没指向新位置 ⇒ 此刻擦 victim 会在掉电后丢映射（③④ 契约）。
  * 压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
- * /
+ *
+ * @param dir Directory
+ * @return true = phase 落在 CP_READ..CP_RECLAIM
+ *         false = 其他 phase
  */
 static inline bool md_handle_is_compacting(const md_dir_cache_t *dir)
 {
@@ -70,9 +99,13 @@ static inline bool md_handle_is_compacting(const md_dir_cache_t *dir)
 }
 
 /**
- * @brief md_log_block_is_idle — 该块是否"已无可回收的顾虑"：在范围内、活 region 为 0、
+ * @brief 该块是否"已无可回收的顾虑"：在范围内、活 region 为 0、
  * 且不是当前写块。**纯账本判据**，不含 BST 状态。
- * /
+ *
+ * @param dir Directory
+ * @param g   候选 gblock 编号
+ * @return true = 可回收
+ *         false = 越界 / 仍有活 region / 是当前写块
  */
 static inline bool md_log_block_is_idle(const md_dir_cache_t *dir, WORD g)
 {

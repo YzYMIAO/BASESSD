@@ -169,6 +169,12 @@ static bg_info_t bg_info_build(const ftl_ctx_t *ftl)
 
 /**
  * @brief 构造 Checkpoint 触发参数（ADVANCE / EMERGENCY / TIMER 三个适配器共用）。
+ *
+ * @param ftl    FTL 上下文（读 total_writes 与 journal 的 seq / 水位 / 紧急标志）。
+ * @param reason Checkpoint 触发原因（原样写入 trigger.reason）。
+ * @param force  强制请求标志（原样写入 trigger.force）。
+ *
+ * @return Checkpoint 触发参数快照（时钟、写入量、journal 水位 + reason / force）。
  */
 static cp_trigger_t bg_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason, bool force)
 {
@@ -188,8 +194,11 @@ static cp_trigger_t bg_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason
 
 /**
  * @brief 表首 · must_run（引擎 Pass 0 最先执行）—— 推进**已在飞**的 Checkpoint job。
+ *
  * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续步骤
  * 要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死。
+ *
+ * @param ftl FTL 上下文（推进其 cp_handle 上的在飞 job）。
  */
 static void bg_task_cp_join(ftl_ctx_t *ftl)
 {
@@ -202,6 +211,8 @@ static void bg_task_cp_join(ftl_ctx_t *ftl)
 /**
  * @brief 表 1 · must_run —— 推进 Read Recovery job。
  * host 读在等结果（托管的子操作占着组在飞数），不推进即死等；任何档位都要跑。
+ *
+ * @param ftl FTL 上下文（推进其 read_recovery_handle）。
  */
 static void bg_task_rr(ftl_ctx_t *ftl)
 {
@@ -215,6 +226,8 @@ static void bg_task_rr(ftl_ctx_t *ftl)
  * @brief 表 2 · must_run —— 推进搬移 job（GC/WL/预测共用，已在飞则续跑下一步）。
  * 写路径的紧急 GC 在 BUSY 档起（wb_handle(FLUSH) 分配不到块 ⇒ FTL_AGAIN），
  * 不推进即死锁；任何档位都要跑。
+ *
+ * @param ftl FTL 上下文（推进其 mig_handle；不在飞时按其自持节拍评估）。
  */
 static void bg_task_migrate(ftl_ctx_t *ftl)
 {
@@ -229,6 +242,8 @@ static void bg_task_migrate(ftl_ctx_t *ftl)
  * @brief 表 3 · must_run —— 元数据目录整理 job。
  * compact_wanted 是 append_slot 在**前台写路径**上置的（池吃紧时换块），
  * 不推进就是写路径永久 FTL_AGAIN；任何档位都要跑。
+ *
+ * @param ftl FTL 上下文（推进其 metadata_dir）。
  */
 static void bg_task_metadata(ftl_ctx_t *ftl)
 {
@@ -242,6 +257,8 @@ static void bg_task_metadata(ftl_ctx_t *ftl)
  * @brief 表 4 · must_run —— 补「未起的换块擦除」（表 9 的子集；表 9 会被 BUSY 掩掉，本项不会）。
  * 新环形块没擦过就不能往里写 ⇒ 任何档位都要补，否则 host 写路径卡死。
  * 判据（有无待擦块 / 是否已有 job 在飞）在 journal 模块内，本文件不读其内部字段。
+ *
+ * @param ftl FTL 上下文（其 journal 收到 JRN_TRIGGER_ERASE_ONLY）。
  */
 static void bg_task_journal_erase(ftl_ctx_t *ftl)
 {
@@ -256,6 +273,8 @@ static void bg_task_journal_erase(ftl_ctx_t *ftl)
  * @brief 表 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
  * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。cp_job_begin 只装配 job、
  * 单飞行（cp_handle.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。
+ *
+ * @param ftl FTL 上下文（按紧急水位触发其 cp_handle）。
  */
 static void bg_task_cp_emergency(ftl_ctx_t *ftl)
 {
@@ -269,6 +288,8 @@ static void bg_task_cp_emergency(ftl_ctx_t *ftl)
  * @brief 表 6 · 预算 — 后台 flush 脏 L2P region，条数上界取**本轮档位配置**（引擎发布的
  * sched->cfg，见 bg_scheduler.h）。BUSY 档只放行本项 ⇒ 最小预算 = 「must-run + 1 flush」。
  * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
+ *
+ * @param ftl FTL 上下文（读其 cache 与 topo 维度，经 bg_info 带本轮档位）。
  */
 static void bg_task_l2p_flush(ftl_ctx_t *ftl)
 {
@@ -285,6 +306,8 @@ static void bg_task_l2p_flush(ftl_ctx_t *ftl)
 /**
  * @brief 表 9 · 预算 — 推进 Journal 刷页 job（job 已在飞则空操作）。
  * BUSY 档被掩掉（host 饱和档不主动起页写；页满时 jrn_append 自己会起）。
+ *
+ * @param ftl FTL 上下文（推进其 journal 的刷页 job）。
  */
 static void bg_task_journal_flush(ftl_ctx_t *ftl)
 {
@@ -297,6 +320,8 @@ static void bg_task_journal_flush(ftl_ctx_t *ftl)
 /**
  * @brief 表 10 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
  * typed 入口：状态只走上报结构（本适配器不读 handle 内部）。
+ *
+ * @param ftl FTL 上下文（传其 alloc 与 bg_info 给 bbt_handle）。
  */
 static void bg_task_bbt(ftl_ctx_t *ftl)
 {
@@ -310,6 +335,8 @@ static void bg_task_bbt(ftl_ctx_t *ftl)
  * @brief 表 11 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
  * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
  * job 装配由 cp_job_begin（提交即返回），成败由 [CP] 心跳判。
+ *
+ * @param ftl FTL 上下文（按定时/水位/写入量触发其 cp_handle）。
  */
 static void bg_task_cp_trigger(ftl_ctx_t *ftl)
 {

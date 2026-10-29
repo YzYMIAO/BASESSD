@@ -142,6 +142,8 @@ ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_form
 /**
  * @brief 把格式化后的**空 Directory** 落成一条 Anchor record。
  *
+ * @param ftl FTL 实例（使用 metadata_dir 与 cp_handle 的 2KB 常驻缓冲）
+ *
  * @return FTL_OK / FTL_ERROR。
  *
  * @note 实现要点：`md_init` 只复位 RAM；不落盘的话下次开机
@@ -262,6 +264,8 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
  * **所有**非 BBT-pool 块（包括 BST 中标记为 BAD 的块）：擦除成功即 recovered。
  * BBT 池跳过（本轮坏块 record 在里面）；体检后所有块保持擦净状态。
  *
+ * @param ftl FTL 实例（使用 alloc 块表与 BBT；调用前 BAD 集已由 pfr_format_reset_bad_map 清空）
+ *
  * @return FTL_OK（体检完成，个别块已标坏）
  *         FTL_ERROR = BBT 落盘失败。
  */
@@ -330,6 +334,8 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
  * 判成损坏介质而拒绝启动。
  *
  * 显式失败路径**不**调用本函数：标志保持置位，下次开机重试格式化。
+ *
+ * @param alloc 分配器（BBT 记录属于它）
  *
  * @return false = BBT 落盘失败 —— 持久化记录仍是「格式化中」，下次开机会重新格式化（安全方向：宁可重擦，也不在半写元数据上启动）。
  */
@@ -613,6 +619,8 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
 /**
  * @brief 按几何顺序切分 Spare / OP / Free 池（无快照 或 快照失败时用）。
  *
+ * @param ftl FTL 实例（调用前 free/op/spare 计数必须为 0）
+ *
  * @note 实现要点：每 plane 先扣 Spare（50），再扣 OP（10%），其余进 Free。
  * **只把 state == NONE 的块入池**；full metadata rebuild / 快照已认领的 CLOSED/LOG/RETIRED
  * 只计入 total_blocks。快照路径不调用它（池来自快照），故要求池计数为 0。
@@ -670,7 +678,10 @@ static void pfr_boot_carve_pools(struct ftl_context *ftl)
 
 /**
  * @brief 开机池建立后：把 CP 快照 BAD 并集 / full metadata rebuild 标坏造成的 Spare 缺口，从 Free Pool 补回。
- * Free 不足时自然停在低水位，并打一行告警（容量下降是真实结果）。
+ *
+ * @param ftl FTL 实例
+ *
+ * @note Free 不足时自然停在低水位，并打一行告警（容量下降是真实结果）。
  */
 static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
 {
@@ -900,6 +911,7 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
  *
  * @param ftl FTL 实例
  * @param cp 最近 Checkpoint 头
+ * @param blocks_valid 块元数据快照是否已通过校验（0 = 无有效快照，跳过快照恢复）
  * @param result 出参启动结果。
  *
  * @note 实现要点：② jrn_replay 回放所有**未全被 CP 覆盖**的页（整页判据
@@ -1098,6 +1110,10 @@ void pfr_boot_log_bad_areas(const struct ftl_context *ftl)
 
 /**
  * @brief 固定元数据区（分区表几何；含固定预留的 L2P 日志区）。
+ *
+ * @param g 物理块全局编号（gblock）
+ *
+ * @return true = 属于固定元数据区；false = 用户数据区。
  */
 static bool pfr_block_is_fixed(WORD g)
 {
@@ -1108,7 +1124,13 @@ static bool pfr_block_is_fixed(WORD g)
 
 /**
  * @brief 把一个物理块发成退化单 plane Closed 条目（与 full metadata rebuild 同口径；Policy B 不要求配对）。
- * 返回 false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。
+ *
+ * @param ftl         FTL 实例
+ * @param g           物理块全局编号（gblock）
+ * @param temperature 块温度（FTL_TEMP_HOT / FTL_TEMP_COLD）
+ *
+ * @return true  = 条目已加入 Closed 列表；
+ *         false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。
  */
 static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
 {
@@ -1135,11 +1157,17 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
 /**
  * @brief 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
  *
- * 返回值语义：0 = 整块空白；k = 从页 0 到 k-1 连续写过、页 k 起全空；
- * PAGES_PER_BLOCK = 全写满**或存在 hole**（空白页之后又有写过的页）。
- * 存在 hole 时不能把第一个空白页当上界——那会把 hole 之后的页漏出 valid_count
- * （RISK-BOOT-06），故返回全块让调用者逐页反查。
+ * @param ftl     FTL 实例（只读 topo，用于构造 PBA）
+ * @param plane   物理 plane 号
+ * @param block   plane 内的物理块号
+ * @param raw_buf 整页 raw 缓冲（PAGE_SIZE），判空读页复用
  *
+ * @return 0               = 整块空白；
+ *         k               = 从页 0 到 k-1 连续写过、页 k 起全空；
+ *         PAGES_PER_BLOCK = 全写满**或存在 hole**（空白页之后又有写过的页）。
+ *
+ * @note 存在 hole 时不能把第一个空白页当上界——那会把 hole 之后的页漏出 valid_count
+ * （RISK-BOOT-06），故返回全块让调用者逐页反查。
  * ⚠ 代价：存在 hole 的块要扫完全部页（正常部分写块仍在第一个空白页停止）。
  * 这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
  * victim 的前提。
@@ -1209,6 +1237,9 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block,
     return first_blank;
 }
 
+/**
+ * @brief 清零文件级 L2P 扫描异常汇总（read fail CW / degraded CW / 首个降级 region）。
+ */
 static void pfr_rebuild_l2p_stats_reset(void)
 {
     s_rebuild_read_fail_cw = 0U;
@@ -1216,6 +1247,9 @@ static void pfr_rebuild_l2p_stats_reset(void)
     s_rebuild_first_region = UINT32_MAX;
 }
 
+/**
+ * @brief 汇总打印文件级 L2P 扫描异常（有计数时才打，避免扫描期逐块刷 UART）。
+ */
 static void pfr_rebuild_l2p_stats_report(void)
 {
     if (s_rebuild_read_fail_cw != 0U)
@@ -1232,7 +1266,15 @@ static void pfr_rebuild_l2p_stats_report(void)
  * @brief 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐 CW L2P 双校验回填 valid_count
  * （只计 L2P 仍指向本页本 CW 的真有效 CW，覆盖/torn 页不计；无常驻位图）。
  *
- * Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
+ * @param ftl         FTL 实例
+ * @param plane       物理 plane 号
+ * @param block       plane 内的物理块号
+ * @param pages_written 已写页数（来自 pfr_scan_write_pointer；调用者已跳过 0）
+ * @param temperature 块温度（FTL_TEMP_HOT / FTL_TEMP_COLD）
+ * @param stats       出参统计（可为 NULL；累加 blocks_rebuilt / l2p_read_errors /
+ *                    l2p_degraded_cw / valid_cw）
+ *
+ * @note Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
  * **单个物理块** 建一条 Closed 条目，另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵。
  */
 static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_written, BYTE temperature, pfr_rebuild_stats_t *stats)
@@ -1444,6 +1486,19 @@ static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
  * 任一步结构非法 ⇒ 调用者 `pfr_reset_blocks` + full metadata rebuild → carve。
  * ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 按 Checkpoint 块元数据快照恢复 BST 块状态与 Closed 列表。
+ *
+ * Pass 0 先全量校验所有 word，任何非法 word 都在改动状态之前拒绝；随后
+ * Pass 1 恢复 state/valid/temp/sb，Pass 2 用 Metadata Directory 修正动态 LOG 块，
+ * Pass 3 为 CLOSED 块补发 Closed 条目。
+ *
+ * @param ftl   FTL 实例
+ * @param words 每块 16-bit 快照 word（FTL_BLOCK_TOTAL 项）；Pass 2 会回写对账后的 LOG 块
+ *
+ * @return true  = 恢复完成；
+ *         false = 快照存在非法 word / 池标签冲突 / Closed 列表满，调用者应 reset 并回退 full metadata rebuild。
+ */
 static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 {
     alc_t *alloc = &ftl->alloc;
@@ -1646,6 +1701,18 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
     return true;
 }
 
+/**
+ * @brief 探测 CP 后分配、但 journal 条目可能丢失的池块，并处理陈旧 LOG 块。
+ *
+ * 活 LOG 块（Directory 仍引用）只计数；陈旧 LOG 按全页判空：已擦净交回 Free Pool，
+ * 仍有残留则发 Closed（valid=0）交 GC。池块 page 0 非空（或 page 1..3 非空）⇒
+ * 视为异常块，转 Closed 并按全块补算 valid_count。
+ *
+ * @param ftl   FTL 实例
+ * @param words 每块 16-bit 快照 word（FTL_BLOCK_TOTAL 项）；陈旧 LOG 擦净后回写 FREE
+ * @param stats 出参统计（可为 NULL；累加 log_blocks / closed_blocks / anomalies /
+ *              l2p_read_errors / l2p_degraded_cw / valid_cw）
+ */
 static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_block_restore_stats_t *stats)
 {
     alc_t *alloc = &ftl->alloc;
@@ -1797,6 +1864,15 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
     pfr_rebuild_l2p_stats_report();
 }
 
+/**
+ * @brief 按 BST 状态与快照 word 把 NONE 块放入 Free / OP / Spare 池（唯一入池点）。
+ *
+ * @param ftl   FTL 实例（调用前 free/op/spare 计数必须为 0）
+ * @param words 每块 16-bit 快照 word（FTL_BLOCK_TOTAL 项），用于读取池标签
+ *
+ * @return true  = 全部块归位；
+ *         false = OP/Spare 池溢出或遇到非池块（调用者回退 full metadata rebuild）。
+ */
 static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
 {
     alc_t *alloc = &ftl->alloc;
@@ -1875,6 +1951,14 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
     return true;
 }
 
+/**
+ * @brief 清空 allocator 的块状态与池账本（保留 BAD 终态）。
+ *
+ * 把非 BAD 块置 NONE 并清 valid/temp/sb，同时把 free/op/spare/closed 计数与
+ * hot/cold SB 归零；BAD 来自 BBT，是终态，不清。
+ *
+ * @param ftl FTL 实例
+ */
 static void pfr_reset_blocks(ftl_ctx_t *ftl)
 {
     alc_t *alloc = &ftl->alloc;
@@ -1908,6 +1992,13 @@ static void pfr_reset_blocks(ftl_ctx_t *ftl)
 /**
  * @brief jrn_replay 的 materialize 回调：把 PBA 所属块转成「可记账」状态。
  * 池块（FREE/OP/SPARE）⇒ Closed；BAD 忽略；固定/活 LOG 块 ⇒ false（回放不一致）。
+ *
+ * @param ctx FTL 实例（jrn_replay 回调上下文，类型 ftl_ctx_t *）
+ * @param pba journal 条目中的物理块地址（来自介质，先校验合法性与实例归属）
+ *
+ * @return true  = 块已处于可记账状态（含 BAD 块可忽略）；
+ *         false = PBA 非法 / 不属于本实例 / 指向固定或活 LOG 块 / 状态非法 /
+ *                 Closed 列表满（回放不一致）。
  */
 static bool pfr_materialize_pba(void *ctx, DWORD pba)
 {
@@ -1973,8 +2064,12 @@ static bool pfr_materialize_pba(void *ctx, DWORD pba)
 }
 
 /**
- * @brief jrn_replay 的 valid_count 增量端口（带守卫：越界/上溢/下溢置 *ok=false）。
+ * @brief jrn_replay 的 valid_count 增量端口（带守卫：越界/上溢置 *ok=false）。
  * materialize 已保证该块处于可记账状态；这里只做范围检查与 BST 单数据源更新。
+ *
+ * @param ctx FTL 实例（jrn_replay 回调上下文，类型 ftl_ctx_t *）
+ * @param pba 物理块地址
+ * @param ok  出参：块号越界或 valid_count 上溢时置 false，否则不改
  */
 static void pfr_valid_add(void *ctx, DWORD pba, bool *ok)
 {
@@ -2002,6 +2097,13 @@ static void pfr_valid_add(void *ctx, DWORD pba, bool *ok)
     ftl_block_add_valid(b);
 }
 
+/**
+ * @brief jrn_replay 的 valid_count 递减端口（带守卫：越界/下溢置 *ok=false）。
+ *
+ * @param ctx FTL 实例（jrn_replay 回调上下文，类型 ftl_ctx_t *）
+ * @param pba 物理块地址
+ * @param ok  出参：块号越界或 valid_count 已为 0 时置 false，否则不改
+ */
 static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok)
 {
     ftl_ctx_t *ftl = (ftl_ctx_t *)ctx;

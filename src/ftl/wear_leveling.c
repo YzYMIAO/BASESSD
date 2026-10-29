@@ -99,12 +99,20 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
     return true;
 }
 
-// 实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
-// `max_free_ec - min_used_ec >= WL_THRESHOLD`：
-// · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
-// · e2 = Free Pool 中擦除次数最大的块。
-// 搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
-// （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
+/**
+ * @brief 判定是否应触发静态 WL（UBI 模型）。
+ *
+ * @param alloc        分配器。
+ * @param total_writes 累计编程次数（启动门：不足 WL_MIN_WRITES 不求值）。
+ *
+ * @return true = 应触发；false = 不触发。
+ *
+ * @note 唯一判据是 `max_free_ec - min_used_ec >= WL_THRESHOLD`：
+ *   e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
+ *   e2 = Free Pool 中擦除次数最大的块。
+ *   搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
+ *   （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
+ */
 bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
 {
     // 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
@@ -137,10 +145,19 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
     return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }
 
-// 实现要点：有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）；
-// 排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
-// （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
-// ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
+/**
+ * @brief 选静态 WL 的搬运 victim（冷数据搬到高磨损块）。
+ *
+ * @param alloc  分配器。
+ * @param victim 出参：选中的候选（plane_blocks / valid_cw / read_count / next_page）。
+ *
+ * @return true = 找到候选；false = 无合法候选。
+ *
+ * @note 排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
+ *   （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
+ *   有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）。
+ *   ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
+ */
 bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
 {
     wl_victim_t best;

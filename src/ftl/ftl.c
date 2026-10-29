@@ -95,6 +95,17 @@ typedef struct
     DWORD suppressed; /* 自上次打印以来被抑制的条数 */
 } ftl_log_throttle_t;
 
+/**
+ * @brief 日志限流判定：到期则放行并清零抑制计数，未到期则累计后拒绝。
+ *
+ * @param t 该日志类别的限流状态（`ms` / `suppressed` 由本函数更新）
+ * @param out_suppressed 放行时写入自上次打印以来被抑制的条数（只在返回 true 时写）
+ * @return true  本次应打印
+ *         false 继续抑制
+ *
+ * @note 到期判据：抑制满 64 条，或平台时钟可用且距上次打印已达
+ * FTL_JOB_LOG_SLOW_INTERVAL_MS；时钟缺失（now_ms == 0）时退化为 64 条一行。
+ */
 static bool ftl_log_throttle_due(ftl_log_throttle_t *t, DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -146,9 +157,7 @@ bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n)
 
 /* ── 内部辅助 ── */
 
-/**
- * @brief 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到）
- */
+// 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到）。
 static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi);
 
 /**
@@ -157,7 +166,9 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi);
  * @param ftl 实例
  * @param pending 已完成的写子操作记录。
  *
- * @return FTL_OK 已全部应用；FTL_AGAIN 有 region 未就绪（**一条都没应用**，调用者下轮重来）。**只有这两态**——就绪前置挡住了唯一的失败源，第二遍不可能失败。
+ * @return FTL_OK    已全部应用
+ *         FTL_AGAIN 有 region 未就绪（**一条都没应用**，调用者下轮重来）；只有这两态——
+ *                   就绪前置挡住了唯一的失败源，第二遍不可能失败。
  *
  * @note 实现要点：· CW 级映射下 1 LBA = 1 CW：一个子操作覆盖 pending->n_cw 个连续**全局** LBA，
  * 每个 LBA 各自一条 Journal + 一条 L2P 更新（Journal 流量 ×4，已登记）。
@@ -347,6 +358,13 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
  * ⚠ 返回值必须查：desc 链比请求短时尾部不写（ftl_cmd_read_data 只在这一种情况报错），
  * 不查就等于把未初始化缓冲当数据交给 host。失败 ⇒ 本次读的结果不可信，跳过随后的
  * ECC / read-disturb 记账（记账无意义）。
+ *
+ * @param ftl 实例（读 disturb / RR 趋势记在本实例的 `alloc.blocks[]`）
+ * @param cmd 已完成的读命令（desc 链在此处仍有效，调用者随后才 release）
+ * @param pending 对应的子操作记录（提供 buffer / n_cw / lba）
+ * @param cmd_id 命令 id（仅用于错误日志定位）
+ * @return SSD_STATUS_OK       数据已完整拷出
+ *         SSD_STATUS_IO_ERROR 数据不足，结果不可信
  */
 static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_req_t *pending, WORD cmd_id)
 {
@@ -384,6 +402,11 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_
  * pend_confirm_service 每轮推进。与读失败的托管同构（命令脱钩、组不结算），区别是推进者
  * 在本文件而非 RR 引擎。
  * 返回 true = 已停泊 ⇒ 调用者**直接 release 并 return**（勿再动组簿记）。
+ *
+ * @param ftl 实例
+ * @param pending 已完成的写子操作记录（其命令由调用点随后 release）
+ * @return true  因 region 未就绪已停泊
+ *         false 已确认成功，按正常子操作完成继续
  */
 static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
 {
@@ -409,6 +432,9 @@ static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
  * · 收尾（含一律报 IO_ERROR 的语义）在 rr_job_finish 里，见该处注释。
  * ⚠ 恢复**必须**异步：本函数跑在完成泵里，当场同步跑三级恢复就是泵里再开泵（嵌套泵），
  * 且整条 host 读流水线被一个坏页钉住。
+ *
+ * @param ftl 实例（RR 触发入口在本实例的 `read_recovery_handle`）
+ * @param pending 失败的读子操作记录（原地改成 READ_RECOVERY 托管态）
  */
 static void ftl_host_io_read_fail(ftl_ctx_t *ftl, pend_req_t *pending)
 {
@@ -440,6 +466,10 @@ static void ftl_host_io_read_fail(ftl_ctx_t *ftl, pend_req_t *pending)
  *
  * 失败 plane 定位：遍历该命令的 desc 链，逐 CW 取 status；失败 CW 的 desc->paa
  * 给出 plane ⇒ 两个 plane 各自的块都能当场标坏（不再依赖 GC 擦除时才发现 plane1）。
+ *
+ * @param ftl 实例
+ * @param pending 失败的写子操作记录（提供本次分配的 new_pba / new_pba1）
+ * @param completion 命令完成状态（提供 command_id，用于遍历 desc 链取逐 CW 状态）
  */
 static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
 {
@@ -509,7 +539,12 @@ static DWORD s_write_retry_logged;
  *
  * 其他 = 无法重试，调用者按原 IO_ERROR 收尾。
  *
- * @return FTL_OK = 已提交（同一 pending 继续在飞，组在飞数**不**递减）；
+ * @param ftl 实例（数据拷出到 `write_retry_buf`、新页对从本实例 allocator 分配）
+ * @param pending 当前写子操作记录（提交成功后原地更新 command_id / new_pba / retry_count）
+ * @param old_cmd 失败的旧命令（desc 链仍持有本页数据，调用者随后才 release）
+ * @return FTL_OK    已提交（同一 pending 继续在飞，组在飞数**不**递减）
+ *         FTL_AGAIN 瞬态资源不足（Free/OP 耗尽、命令槽满、提交背压），本次未提交
+ *         FTL_ERROR 读回源数据失败或建链失败，无法重试
  */
 static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_command_t *old_cmd)
 {
@@ -593,6 +628,14 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
  *           成员等自己的完成回调结算（不在仍有命令时释放/复用槽位）。
  */
 
+/**
+ * @brief 按 pending 槽下标在批次成员表中查位置。
+ *
+ * @param ftl 实例
+ * @param pending_idx pending 表槽下标
+ * @return 批次成员下标 0..n-1
+ *         UINT8_MAX 不在本批次（已结算的迟到完成）
+ */
 static BYTE ftl_cache_wb_slot(const ftl_ctx_t *ftl, BYTE pending_idx)
 {
     for (BYTE j = 0U; j < ftl->cache_wb.n; j++)
@@ -605,6 +648,16 @@ static BYTE ftl_cache_wb_slot(const ftl_ctx_t *ftl, BYTE pending_idx)
     return UINT8_MAX;
 }
 
+/**
+ * @brief 结算一个批次成员：成功先确认映射，失败直接按 IO_ERROR 收尾。
+ *
+ * @param ftl 实例
+ * @param idx pending 表槽下标（UINT8_MAX = 空位，直接返回）
+ * @param status 该成员的组完成状态（SSD_STATUS_OK 才走确认路径）
+ *
+ * @note 确认遇 FTL_AGAIN ⇒ 停泊，槽位留待 pend_confirm_service 推进；
+ * 其余情况释放槽位并递减所属组。
+ */
 static void ftl_cache_wb_settle_idx(ftl_ctx_t *ftl, BYTE idx, ssd_status_e status)
 {
     if (idx == UINT8_MAX)
@@ -631,6 +684,11 @@ static void ftl_cache_wb_settle_idx(ftl_ctx_t *ftl, BYTE idx, ssd_status_e statu
     pend_group_complete_subop_multi(&ftl->pending, owners, status);
 }
 
+/**
+ * @brief 复位整批 cache program 上下文（active / final_done / 成员表全清）。
+ *
+ * @param ftl 实例
+ */
 static void ftl_cache_wb_clear(ftl_ctx_t *ftl)
 {
     ftl->cache_wb.active      = false;
@@ -646,6 +704,15 @@ static void ftl_cache_wb_clear(ftl_ctx_t *ftl)
     }
 }
 
+/**
+ * @brief 批次失败收敛：关闭真正承载本批的 hot SB，并按 IO_ERROR 结算已完成成员。
+ *
+ * @param ftl 实例
+ * @param completion 触发失败的完成状态（仅用于日志）
+ *
+ * @note 关闭 SB 与置 abort 只在首次失败时执行；已完成成员按 IO_ERROR 结算
+ * （摘除后不会重复），仍在飞的由各自完成回调结算，outstanding 归零后才清整批上下文。
+ */
 static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *completion)
 {
     if (!ftl->cache_wb.abort)
@@ -704,6 +771,12 @@ static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *complet
 
 /**
  * @brief 一个成员按 IO_ERROR 结算；这是 abort 路径的唯一成员收尾点。
+ *
+ * @param ftl 实例
+ * @param j 批次成员下标
+ *
+ * @note 成员先从批次表摘除再结算（结算会释放 pending 槽）；outstanding
+ * 归零时清整批上下文。
  */
 static void ftl_cache_wb_settle_member_error(ftl_ctx_t *ftl, BYTE j)
 {
@@ -720,6 +793,8 @@ static void ftl_cache_wb_settle_member_error(ftl_ctx_t *ftl, BYTE j)
 
 /**
  * @brief 整批成功：先拷贝 idx（组完成回调可重入并复用上下文），再逐页 confirm。
+ *
+ * @param ftl 实例
  */
 static void ftl_cache_wb_settle_success(ftl_ctx_t *ftl)
 {
@@ -739,6 +814,15 @@ static void ftl_cache_wb_settle_success(ftl_ctx_t *ftl)
     }
 }
 
+/**
+ * @brief cache program 成员的完成入口：按批次状态分派中间页 / 末页 / 失败路径。
+ *
+ * @param ftl 实例
+ * @param pending 已完成的成员记录
+ * @param completion 命令完成状态（决定本成员成功或失败）
+ *
+ * @note 找不到批次位置说明上下文已结算（迟到完成）：只释放槽位并按 IO_ERROR 报告。
+ */
 static void ftl_cache_wb_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
 {
     const BYTE pending_idx = (BYTE)(pending - ftl->pending.slots);
@@ -918,6 +1002,11 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
 
 /**
  * @brief pending 模块的 confirm handler：数据面事务仍在 FTL（Journal→L2P→BST 唯一顺序）。
+ *
+ * @param ctx 注入的 FTL 实例（pend_confirm_set_handler 绑定的 `ftl_ctx_t *`）
+ * @param pending 待确认的写子操作记录
+ * @return FTL_OK    已确认
+ *         FTL_AGAIN 仍未就绪（由 pending 模块继续停泊）
  */
 static ftl_status_e ftl_confirm_handler(void *ctx, pend_req_t *pending)
 {
@@ -1127,8 +1216,9 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
 /**
  * @brief 每个 ASSERT 按模块聚合：一条断言覆盖同一生命周期的一组字段。
  * 失败时 file:line 定位到模块组；需要逐字段定位时临时拆分。
+ *
+ * @param ftl 已初始化的实例（只读）
  */
-
 static void contract_check_handles(const ftl_ctx_t *ftl)
 {
     ASSERT((ftl->cache != NULL) && (ftl->metadata_dir != NULL) && (ftl->journal != NULL) && (ftl->cp_handle != NULL) && (ftl->mig_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
@@ -1138,6 +1228,11 @@ static void contract_check_handles(const ftl_ctx_t *ftl)
     ASSERT((ftl->alloc.blocks == ftl->table_refs.blocks) && (ftl->alloc.free_blocks == ftl->table_refs.free_blocks) && (ftl->alloc.op_blocks == ftl->table_refs.op_blocks) && (ftl->alloc.spare_blocks == ftl->table_refs.spare_blocks) && (ftl->alloc.closed_sb_list == ftl->table_refs.closed_sb_list));
 }
 
+/**
+ * @brief 校验 topology 副本与实例路由一致（各模块 init 时都拷了一份）。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_topology(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t *topo = &ftl->topo;
@@ -1153,6 +1248,11 @@ static void contract_check_topology(const ftl_ctx_t *ftl)
     ASSERT((ftl->cp_handle->topo.ch == topo->ch) && (ftl->cp_handle->topo.ce == topo->ce) && (ftl->cp_handle->topo.lun == topo->lun) && (ftl->mig_handle->topo.ch == topo->ch) && (ftl->mig_handle->topo.ce == topo->ce) && (ftl->mig_handle->topo.lun == topo->lun) && (ftl->read_recovery_handle.topo.ch == topo->ch) && (ftl->read_recovery_handle.topo.ce == topo->ce) && (ftl->read_recovery_handle.topo.lun == topo->lun));
 }
 
+/**
+ * @brief 校验各模块窄上下文绑定的指针与本实例账本一致。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_module_contexts(const ftl_ctx_t *ftl)
 {
     const md_dir_cache_t *md = ftl->metadata_dir;
@@ -1178,6 +1278,11 @@ static void contract_check_module_contexts(const ftl_ctx_t *ftl)
     ASSERT((wb->alloc == &ftl->alloc) && (wb->pending == &ftl->pending) && (wb->migrate == ftl->mig_handle));
 }
 
+/**
+ * @brief 校验本实例的 owner / route 身份（只查本实例拥有的 region）。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_identity(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t topo = ftl->topo;
@@ -1199,6 +1304,11 @@ static void contract_check_identity(const ftl_ctx_t *ftl)
     }
 }
 
+/**
+ * @brief 校验后台调度器任务表已装载且处于初始 IDLE 档。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_bg(const ftl_ctx_t *ftl)
 {
     ASSERT((ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
@@ -1209,6 +1319,11 @@ static void contract_check_bg(const ftl_ctx_t *ftl)
     }
 }
 
+/**
+ * @brief 校验各异步 job（journal / checkpoint / metadata / migrate / RR / wbuf）初始 idle。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 {
     const jrn_handle_t *j = &ftl->journal->handle;
@@ -1228,6 +1343,11 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
     ASSERT((!ftl->wbuf->open) && (ftl->wbuf->occupied == 0U) && (ftl->wbuf->error == FTL_OK));
 }
 
+/**
+ * @brief 校验开机零态：pending 空、计数为 0、无在飞 loading / flush。
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
 static void contract_check_boot_zero(const ftl_ctx_t *ftl)
 {
     ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) && (ftl->l2p_defer == 0U));
@@ -1351,8 +1471,9 @@ void ftl_service(ftl_ctx_t *ftl)
  * @param buffer 数据缓冲
  * @param n_cw 入参兼出参（最大可提供 / 实际消费的 LBA 数）。
  *
- * @return 三态——FTL_OK 已下发（或如未映射读般**同步完成**，不进 outstanding）；
- *          FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试； FTL_ERROR 永久失败（无可用块 / 映射表损坏）。
+ * @return FTL_OK    已下发（或如未映射读般**同步完成**，不进 outstanding）
+ *         FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试
+ *         FTL_ERROR 永久失败（无可用块 / 映射表损坏）
  *
  * @note 实现要点：⚠ 三态分类是全局枢纽（见上方分区头）。
  * · 读：逐 LBA 查 L2P，按 (物理 plane, 页) 分组——未映射、或同 plane 换了页
@@ -1748,8 +1869,11 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 }
 
 /**
- * @brief 顺序读检测 + L2P region 预取（best-effort）。
- * 只在 host 读请求提交成功后调用；写/flush/trim 显式 reset。
+ * @brief 复位顺序读检测状态，并使已算出的预取计划失效。
+ *
+ * @param ftl 实例（seq_* 字段与 seq_generation 由本函数更新）
+ *
+ * @note 写 / flush / trim 入口显式调用：它们会打断顺序读流。
  */
 static void ftl_seq_reset(ftl_ctx_t *ftl)
 {
@@ -1761,7 +1885,10 @@ static void ftl_seq_reset(ftl_ctx_t *ftl)
 }
 
 /**
- * @brief 只更新检测状态并算出目标，不在这里起加载（host 读应先拿资源）。
+ * @brief 只更新检测状态并算出预取目标，不在这里起加载（host 读应先拿资源）。
+ *
+ * @param ftl 实例（检测字段与 seq_prefetch_target 由本函数更新）
+ * @param req 刚受理的读请求（只读 lba / count）
  */
 static void ftl_seq_note_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 {
@@ -1830,6 +1957,9 @@ static void ftl_seq_note_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 
 /**
  * @brief drain 之后执行预取；若 on_complete 重入更新过检测器，generation 变化即放弃。
+ *
+ * @param ftl 实例
+ * @param generation 调用者记录的检测代次（与 ftl->seq_generation 不等即放弃）
  */
 static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
 {
@@ -1856,8 +1986,8 @@ static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
  * @param req 请求（count = 连续 LBA 数，buffer 非空）
  * @param op PENDING_OP_READ / PENDING_OP_WRITE（决定组类型与日志标签）。
  *
- * @return FTL_OK（已建组，可能仍有余量待 Phase 2.5 补发）
- *         FTL_ERROR（参数非法 /越界 / 组槽满）。
+ * @return FTL_OK    已建组（可能仍有余量待 Phase 2.5 补发）
+ *         FTL_ERROR 参数非法 / 越界 / 组槽满
  *
  * @note 实现要点：两个公开入口的流程**逐字相同**（差异只有 op 与日志文案）⇒ 收敛到本函数
  * 一份，避免两处各自漂移（H6：注释与代码不一致即缺陷，重复实现更甚）。
@@ -1959,6 +2089,8 @@ ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 /**
  * @brief host flush 也是"该落一次 checkpoint"的信号：没有 CP 时，掉电后只能拿初始 CP
  * （无块表）做全量重建。异步启动，限流 5s（半个 T3），避免 host 频繁 flush 写放大。
+ *
+ * @param ftl 实例（触发参数取自本实例的 CP / journal 状态）
  */
 static void ftl_flush_kick_cp(ftl_ctx_t *ftl)
 {
@@ -2106,6 +2238,11 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
 /**
  * @brief 本轮没有进展时的等待记账：超过上限 ⇒ 中止 TRIM（避免 CLI/USB 永久 BUSY）。
  * 有进展（processed > 0）就清等待起点；平台时钟缺失时退化为无超时（同 FLUSH）。
+ *
+ * @param ftl 实例（trim_wait_ms 由本函数更新）
+ * @param processed 本轮已处理的 LBA 数（0 = 无进展）
+ * @return FTL_AGAIN 继续等待
+ *         FTL_ERROR 等待超时，已中止 TRIM
  */
 static ftl_status_e ftl_trim_defer(ftl_ctx_t *ftl, BYTE processed)
 {

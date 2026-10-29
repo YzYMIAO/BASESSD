@@ -361,6 +361,10 @@ void ftl_op_drain(void)
  *
  * **不 release 命令**——调用者（ftl_sync_submit_wait）要在 wait 返回后读 cmd 数据
  * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。
+ *
+ * @param ftl        实例（本函数不用）。
+ * @param completion FC 完成状态。
+ * @param ctx        `ftl_sync_waiter_t *`；NULL = 迟到的完成（旁表项已摘）。
  */
 static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {

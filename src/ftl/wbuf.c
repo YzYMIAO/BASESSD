@@ -31,9 +31,13 @@
 
 /**
  * @brief 该 LBA 在 flat CW 位图（occupied / 命令 cw_bitmap）里的位。
+ *
  * ⚠ 走 ftl_cw_bit 而非手写 `1U << ftl_lba_pair_slot(lba)`——两者逐值同构
  * （slot ≡ plane*CW_NUM + cw），而 ftl_cw_bit 已文档化为**所有** CW 位图的唯一构造器
  * （见 ftl_config.h）。ftl_lba_pair_slot 仍用于 data[] 的**数组下标**（不是位）。
+ *
+ * @param lba 逻辑地址
+ * @return 位掩码（bit = plane*CW_NUM + cw）
  */
 static BYTE wb_lba_bit(DWORD lba)
 {
@@ -71,6 +75,16 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
 
 /* ── 2. 攒入与编程 ── */
 
+/**
+ * @brief 把当前缓冲页编程成一条 NAND 写命令并注册 pending。
+ * 空缓冲直接返回 FTL_OK；资源不足一律背压，缓冲原样保留（下轮重试）。
+ *
+ * @param h wbuf handle
+ * @return FTL_OK    空缓冲 / 已提交（提交成功即清缓冲）
+ *         FTL_AGAIN host 写预算不足 / pending 表满 / 取不到页对（已登记紧急 GC）/
+ *                   page0 异步写屏障未满足 / 建链资源（命令 / 描述符 / 缓冲池）不足 / SQ 满
+ *         FTL_ERROR 建链失败（入参、地址或命令链错误）
+ */
 static ftl_status_e wb_flush(wb_handle_t *h)
 {
     if ((!h->open) || (h->occupied == 0U))
@@ -208,6 +222,17 @@ wbuf_flush_fail:
     return ret;
 }
 
+/**
+ * @brief 把一个组的 n 个 CW 攒进当前窗口；窗口切换时先编程旧页。
+ *
+ * @param h      wbuf handle
+ * @param gi     贡献组号（登记进 owners / pending 子操作计数）
+ * @param lba    起始 LBA（n 个连续 LBA）
+ * @param buffer 数据源（n × FTL_IU_BYTES）
+ * @param n      CW 数
+ * @return FTL_OK    已攒入（满页立即编程失败也返回 OK，留给 idle flush 重试）
+ *         FTL_AGAIN 换窗口时旧页 flush 背压，本子操作未消费，需重试
+ */
 static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
 {
     const DWORD window = ftl_lba_pair_base(lba);
@@ -258,6 +283,14 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
 
 /* ── 3. 丢弃 / 复位 ── */
 
+/**
+ * @brief 从缓冲丢弃一个 LBA（TRIM）；窗口被清空时结算全部贡献组的在飞数。
+ *
+ * @param h   wbuf handle
+ * @param lba 逻辑地址
+ * @return true = 命中并已丢弃
+ *         false = 不在缓冲（无打开窗口 / pair 窗口不同 / 槽位为空）
+ */
 static bool wb_drop(wb_handle_t *h, DWORD lba)
 {
     if (!wb_has(h, lba))
@@ -283,6 +316,11 @@ static bool wb_drop(wb_handle_t *h, DWORD lba)
     return true;
 }
 
+/**
+ * @brief 丢弃整页缓冲，并按写失败（IO_ERROR）结算 owners 的在飞数。
+ *
+ * @param h wbuf handle
+ */
 static void wb_reset(wb_handle_t *h)
 {
     if (h->owners != 0U)
@@ -300,6 +338,12 @@ static void wb_reset(wb_handle_t *h)
 
 /* ── 4. 空闲 flush ── */
 
+/**
+ * @brief 无打开窗口或仍有写组会 append 本窗口时不动；否则尝试编程。
+ * flush 结果不在此结算（失败留给后续触发重试）。
+ *
+ * @param h wbuf handle
+ */
 static void wb_maybe_flush_idle(wb_handle_t *h)
 {
     if (!h->open)
@@ -327,6 +371,12 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_han
     h->migrate = migrate;
 }
 
+/**
+ * @brief 用 handle 当前状态填写上报结构。
+ *
+ * @param h   wbuf handle
+ * @param out 出参：状态上报（调用者保证非 NULL）
+ */
 static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
 {
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 Phase 2.5 驱动 */

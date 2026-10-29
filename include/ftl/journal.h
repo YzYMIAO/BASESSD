@@ -250,6 +250,10 @@ typedef struct
 
 /**
  * @brief 初始化 Journal：记录拓扑、绑定 allocator、复位写指针与序号
+ *
+ * @param journal 目标实例
+ * @param topo    目标 NAND 芯片路由（ch/ce/lun）
+ * @param alloc   allocator；取环形块候选池，擦除持续失败时经其 owner API 标坏
  */
 void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
 
@@ -259,7 +263,8 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
  * 用途：① 启动判型（干净关机 / 掉电）；② 干净关机的写指针恢复。**不改 journal 状态**，
  * 与回放共用同一套页头判定。
  *
- * @param journal Journal；out 出参（环空时全置 0，可为 NULL）
+ * @param journal        Journal
+ * @param out            出参：最新页引用（环空时全置 0，可为 NULL）
  * @param out_read_error 出参（可为 NULL）：true = 环内存在读失败页 ⇒ 最新页与
  *        「干净/掉电」判型都不可信，启动恢复应走掉电回放路径
  * @return true = 环非空（*out 有效）
@@ -307,8 +312,12 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
 
 /**
  * @brief 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
- * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
+ * （只改 new_pba，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
  *
+ * @param journal Journal
+ * @param lba     逻辑地址
+ * @param old_pba 更新前物理地址（就地合并时保留首条，回放不读）
+ * @param new_pba 更新后物理地址
  * @return true = 已追加 / 就地合并
  *         false = 页满且异步刷页起不来，本条目被丢弃。⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）；
  *               host 写确认 / GC/WL / TRIM 先用 jrn_reserve 预留，故其页满分支结构性不可达。
@@ -329,42 +338,101 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, const bg_info_
 
 /* ── 查询（替代外部直读 handle 字段）── */
 
-/** @brief 无在飞 job（写 / 擦都完成）。 */
+/**
+ * @brief 无在飞 job（写 / 擦都完成）。
+ *
+ * @param journal Journal
+ * @return true = phase 为 JRN_IDLE
+ *         false = 页写或换块擦除在飞
+ */
 bool jrn_is_idle(const l2p_jrn_t *journal);
 
-/** @brief 下一个待分配序号（= CP 截断水位）。 */
+/**
+ * @brief 下一个待分配序号（= CP 截断水位）。
+ *
+ * @param journal Journal
+ * @return sequence_counter 当前值
+ */
 DWORD jrn_sequence_get(const l2p_jrn_t *journal);
 
-/** @brief 当前使用率（0..100，全局写位置 / 全环容量）。 */
+/**
+ * @brief 当前使用率。
+ *
+ * @param journal Journal
+ * @return 0..100（全局已用条目 / 全环条目容量）
+ */
 BYTE jrn_watermark_get(const l2p_jrn_t *journal);
 
-/** @brief 持久性失败 pending 是否置位。 */
+/**
+ * @brief 持久性失败 pending 是否置位。
+ *
+ * @param journal Journal
+ * @return true = 有条目已丢，等 Checkpoint 兜底
+ *         false = 无持久性失败
+ */
 bool jrn_has_write_failure(const l2p_jrn_t *journal);
 
 /**
  * @brief Checkpoint Header 成功后清除持久性失败 pending。
+ *
  * 仅当该 CP 的 journal 水位（起点快照）≥ 失败时刻的 sequence 才清除：说明 CP 在
  * 失败之后启动，已把迁移后的 L2P 区域落盘；否则保留 pending，让下一次 CP 再试。
+ *
+ * @param journal        Journal
+ * @param cp_journal_seq 本次 CP 的 journal 水位（起点快照）
  */
 void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
 
-/** @brief 页缓冲里是否有未落盘条目。 */
+/**
+ * @brief 页缓冲里是否有未落盘条目。
+ *
+ * @param journal Journal
+ * @return true = current_entry 非 0
+ *         false = 页缓冲为空
+ */
 bool jrn_has_pending_entries(const l2p_jrn_t *journal);
 
-/** @brief 是否有「未起」的换块擦除（新环形块尚未擦）。 */
+/**
+ * @brief 是否有「未起」的换块擦除（新环形块尚未擦）。
+ *
+ * @param journal Journal
+ * @return true = need_erase 置位
+ *         false = 无待偿擦除
+ */
 bool jrn_has_erase_pending(const l2p_jrn_t *journal);
 
-/** @brief CP 水位标志（≥85% / ≥95%）。 */
+/**
+ * @brief CP 水位标志是否置位（≥85%）。
+ *
+ * @param journal Journal
+ * @return true = checkpoint_needed 置位
+ *         false = 未置位
+ */
 bool jrn_needs_checkpoint(const l2p_jrn_t *journal);
+
+/**
+ * @brief 紧急水位标志是否置位（≥95%）。
+ *
+ * @param journal Journal
+ * @return true = emergency 置位
+ *         false = 未置位
+ */
 bool jrn_is_emergency(const l2p_jrn_t *journal);
 
-/** @brief CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
+/**
+ * @brief CP Header 成功后设置合并边界（Checkpoint 模块调用）。
+ *
+ * @param journal  Journal
+ * @param sequence 新的 merge_floor；sequence 小于它的旧条目不得被同 LBA 原地合并
+ */
 void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence);
 
 /**
  * @brief 按当前写位置重算并置位 CP 水位标志。
- * 由写确认路径在每次 L2P 更新后调用（原 jrn_watermark_update 的归属收回
- * journal 模块：它是 journal 自己的状态）。
+ *
+ * 由写确认路径在每次 L2P 更新后调用；水位标志是 journal 自己的状态，由本模块维护。
+ *
+ * @param journal Journal
  */
 void jrn_watermark_update(l2p_jrn_t *journal);
 
@@ -372,26 +440,38 @@ void jrn_watermark_update(l2p_jrn_t *journal);
  * @brief 强制请求一次 Checkpoint（元数据失块后的恢复动作）
  *
  * 只置水位标志；由后台 CP 任务在安全点执行。不直接写介质。
+ *
+ * @param journal Journal
  */
 void jrn_checkpoint_request(l2p_jrn_t *journal);
 
-/** F10：全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
- * @brief LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 jrn_replay
- * 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。
- * ⚠ 判据是**整页**：`page_seq + entry_count > cp_sequence`。只看页首页序号
- *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。
- * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
- * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 jrn_resume 把落点放到最新页
- *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
+/**
+ * @brief 全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
+ *        per-LBA last-write-wins）。
+ *
+ * @param journal     Journal；回放结束时由 jrn_resume 恢复写指针与序号
+ * @param cache       共享 L2P cache（映射写入目标）
+ * @param cp_sequence checkpoint 截断水位（收集页与块元数据增量都按它过滤）
+ * @param out_entries 出参（可为 NULL）：实际应用成功的条目数（读失败的页不计入）
+ * @param block_ctx   块元数据增量端口（可为 NULL = 不记 valid_count）
  * @return FTL_OK = 完整回放
  *         FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
- *         不完整 ⇒ 调用者应回退 full metadata rebuild）。 */
+ *         不完整 ⇒ 调用者应回退 full metadata rebuild）。
+ *
+ * @note 需回放判据是**整页**：`page_seq + entry_count > cp_sequence`。只看页首页序号
+ *       （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。
+ * @note out_entries **不能**由 journal 的 RAM 写指针反推：末尾 jrn_resume 把落点放到
+ *       最新页之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
+ */
 ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx);
 
 /**
  * @brief 最近一次 jrn_replay 命中「降级 L2P region」的条目数（只读诊断 / 启动结果）。
- * 非 0 表示该 region 未被 Journal 覆盖的旧映射已丢；**不再**据此回退全量重建
- * （范围化恢复，见 RISK-BOOT-18）。调用前须已有一次 jrn_replay。
+ *
+ * 非 0 表示该 region 未被 Journal 覆盖的旧映射已丢。该计数只作诊断；
+ * 范围化恢复不据它回退全量重建（RISK-BOOT-18）。调用前须已有一次 jrn_replay。
+ *
+ * @return 命中降级 region 的条目数（0 = 未命中）
  */
 DWORD jrn_replay_degraded_entries(void);
 

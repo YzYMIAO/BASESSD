@@ -41,6 +41,10 @@ typedef enum
  * @param buffer  当前 host 读缓冲（后续 pair 按 4 KiB 递增）
  * @param remain  本组剩余 LBA 数
  * @param used    出参：OK 时消费的 LBA 数（N * FTL_LBA_PER_PAIR）
+ *
+ * @return FTL_CACHE_READ_DECLINED 条件不满足，调用者回退普通读（不计数为错误）；
+ *         FTL_CACHE_READ_OK 已提交；FTL_CACHE_READ_AGAIN 资源/加载瞬态，本轮停止；
+ *         FTL_CACHE_READ_ERROR 永久错误，组报 IO_ERROR。
  */
 ftl_cache_read_result_e ftl_cache_read_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
@@ -73,7 +77,15 @@ typedef struct
 
 /**
  * @brief 尝试为当前写组提交一个 16 KiB cache program 批次。
+ *
  * @pre 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
+ *
+ * @param ftl    实例。
+ * @param gi     写组下标。
+ * @param lba    本批起始 LBA（须 pair 对齐）。
+ * @param buffer 16 KiB 源数据（4 个 pair 页）。
+ * @param remain 本组剩余可写 LBA 数。
+ * @param used   出参：实际提交的 LBA 数（成功时 = FTL_CACHE_WRITE_LBAS）。
  *
  * @return DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）；
  *                   OK —— 已提交，*used = 32；

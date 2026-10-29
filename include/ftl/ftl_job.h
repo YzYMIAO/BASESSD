@@ -47,6 +47,8 @@
  *
  * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_scheduler 的
  * GC/RR/CP 功能节拍都调用它，避免两份同语义实现漂移。
+ *
+ * @return 当前毫秒；平台未注册（platform 或 time_us 为空）时 0。
  */
 static inline DWORD ftl_job_now_ms(void)
 {
@@ -61,6 +63,10 @@ static inline DWORD ftl_job_now_ms(void)
 
 /**
  * @brief job 已运行时长（毫秒）。基准未建立（*start_ms == 0）时返回 0。
+ *
+ * @param start_ms job 起始时刻的毫秒基准（0 = 未建立）。
+ *
+ * @return 已运行毫秒；基准未建立时 0。
  */
 static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
 {
@@ -75,6 +81,12 @@ static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
  * 首次见到（*start_ms == 0）只**记基准**、不打（返回 false）；此后每满
  * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 true。
  * 返回 true 时调用方打一行，age 用 ftl_job_age_ms(start_ms) 取。
+ *
+ * @param log_ms   上次打点时刻（进出参：到点时更新为当前时间）。
+ * @param start_ms job 起始时刻（进出参：首次调用时记当前时间，之后只读）。
+ *
+ * @return true  到点，调用方打一行
+ *         false 未到点，或首次仅记基准
  */
 static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
 {
@@ -104,6 +116,11 @@ static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
  * 节拍判据与 ftl_job_heartbeat 逐字相同，只是不维护 start_ms——在飞的是若干 cache
  * line（load / flush），没有"某个 job 从哪一刻开始"可言 ⇒ 调用方只报计数，不报 age。
  * 调用方在**无在飞**时把 *log_ms 直接置 0 清基准（无 start 可清）。
+ *
+ * @param log_ms 上次打点时刻（进出参：到点时更新为当前时间）。
+ *
+ * @return true  到点，调用方打一行
+ *         false 未到点或首次仅记基准
  */
 static inline bool ftl_job_tick(DWORD *log_ms)
 {

@@ -63,6 +63,12 @@
 /**
  * @brief `md_log_block_is_idle` + BST 确认它仍是本池的 LOG 块。
  * 用于回收/压缩的**擦除前**复核，防止把一个恰好活计数为 0 的用户块擦掉。
+ *
+ * @param dir   Directory（活 region 计数与当前写块）
+ * @param alloc 分配器（BST 块状态）
+ * @param g     候选 gblock 编号
+ * @return true = 可安全擦除
+ *         false = 仍被引用 / 是当前写块 / 不是 LOG 块
  */
 static bool md_log_block_is_reclaimable(const md_dir_cache_t *dir, const alc_t *alloc, WORD g)
 {
@@ -77,8 +83,13 @@ static bool md_log_block_is_reclaimable(const md_dir_cache_t *dir, const alc_t *
 }
 
 /**
- * @brief md_block_page_to_pba — gblock + 页号 → PBA（ch/ce/lun 取本 Directory 拓扑）。
+ * @brief gblock + 页号 → PBA（ch/ce/lun 取本 Directory 拓扑）。
  * ⚠ 单一转换漏斗（C9）：block/plane 的字段序只在这里出现一次，调用点不手写 pba_make。
+ *
+ * @param dir    Directory（提供 ch/ce/lun 拓扑）
+ * @param gblock gblock 编号
+ * @param page   块内页号
+ * @return 该页的 PBA
  */
 static DWORD md_block_page_to_pba(const md_dir_cache_t *dir, WORD gblock, BYTE page)
 {
@@ -117,6 +128,11 @@ bool md_reclaim_mark(md_dir_cache_t *dir, WORD g)
 /**
  * @brief 从轮转游标起找第一个置位的块号；**保持置位**（擦除在飞期间不丢，完成成功才清）。
  * 游标推进到 g+1：擦除持续失败的块不会永久挡住后续块。
+ *
+ * @param dir Directory
+ * @param out 出参：命中的 gblock（仅返回 true 时有效）
+ * @return true = 找到置位块
+ *         false = 位图全空
  */
 static bool md_reclaim_take(md_dir_cache_t *dir, WORD *out)
 {
@@ -141,6 +157,9 @@ static bool md_reclaim_take(md_dir_cache_t *dir, WORD *out)
 
 /**
  * @brief 清位（置位过才减计数）。
+ *
+ * @param dir Directory
+ * @param g   gblock 编号；越界直接返回
  */
 static void md_reclaim_clear(md_dir_cache_t *dir, WORD g)
 {
@@ -222,6 +241,13 @@ void md_handle_reset(md_dir_cache_t *dir)
 static DWORD s_abort_log_ms;
 static DWORD s_abort_log_n;
 
+/**
+ * @brief 判断本次中止日志是否该输出：5 s 一行；时钟缺失时每 64 次一行。
+ *
+ * @param out_suppressed 出参：自上次输出以来被抑制的条数
+ * @return true = 本次输出
+ *         false = 限流中，本次只累加抑制计数
+ */
 static bool md_abort_log_is_due(DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -250,6 +276,8 @@ static bool md_abort_log_is_due(DWORD *out_suppressed)
  * ⚠ **victim 不擦**（已登记的 region 已指向新页、未搬的仍指向 victim ⇒ 两边都有效），
  * 下次换块时重来即可——失败不回滚。
  * ⚠ 若 victim 已被搬空（live == 0），登记进待回收位图保持覆盖范围。
+ *
+ * @param dir Directory
  */
 static void md_handle_abort(md_dir_cache_t *dir)
 {
@@ -282,7 +310,11 @@ static void md_handle_abort(md_dir_cache_t *dir)
 
 /**
  * @brief 提交不出去超过 FTL_SUBMIT_TIMEOUT_MS ⇒ 中止 job（同 CP/MIG/RR 同族）。
- * 返回 true = 已中止。时钟缺失时 deadline 不生效。
+ * 时钟缺失时 deadline 不生效。
+ *
+ * @param dir Directory
+ * @return true = 已中止
+ *         false = 未超时 / 首次记录起点 / 时钟缺失
  */
 static bool md_handle_stall(md_dir_cache_t *dir)
 {
@@ -312,6 +344,11 @@ static bool md_handle_stall(md_dir_cache_t *dir)
 /**
  * @brief 提交一条已建好链的异步命令（所有 md_submit_* 的唯一漏斗）。
  * 先把 waiting 置位、提交失败再回滚；stall_ms 只在提交成功后清零。
+ *
+ * @param dir Directory（job 上下文，同时作为完成服务的 ctx）
+ * @param cmd 待提交命令；成功时所有权交给完成服务，失败时本函数 release
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN cmd 为空或提交背压（已回滚 waiting）
  */
 static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
 {
@@ -339,6 +376,13 @@ static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
 /**
  * @brief 提交一条异步写（搬移页 / Anchor 分页共用）。data 在 ftl_async_write_page 内已拷进
  * FC buffer ⇒ 调用者的缓冲随即可复用。
+ *
+ * @param dir    Directory
+ * @param addr   目标 PBA
+ * @param data   源数据
+ * @param length 写入字节数
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
  */
 static ftl_status_e md_write_submit(md_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
 {
@@ -355,6 +399,13 @@ static ftl_status_e md_write_submit(md_dir_cache_t *dir, DWORD addr, const void 
 /**
  * @brief 提交一条**镜像**异步写（固定元数据池：同一页用 multi-plane 写全部 plane）。
  * 只用于 Anchor/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_write_submit。
+ *
+ * @param dir    Directory
+ * @param addr   目标 PBA（同一 block/page 落到全部 plane）
+ * @param data   源数据
+ * @param length 写入字节数
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
  */
 static ftl_status_e md_write_mirror_submit(md_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
 {
@@ -370,6 +421,11 @@ static ftl_status_e md_write_mirror_submit(md_dir_cache_t *dir, DWORD addr, cons
 
 /**
  * @brief 提交一条异步擦除（日志块回收 / Anchor 换块 / victim 擦除共用）。
+ *
+ * @param dir  Directory
+ * @param addr 目标块 PBA（页号无意义）
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
  */
 static ftl_status_e md_erase_submit(md_dir_cache_t *dir, DWORD addr)
 {
@@ -385,6 +441,11 @@ static ftl_status_e md_erase_submit(md_dir_cache_t *dir, DWORD addr)
 
 /**
  * @brief 提交一条**镜像**异步擦除（固定元数据池的换块：所有 plane 一起擦）。
+ *
+ * @param dir  Directory
+ * @param addr 目标块 PBA（各 plane 同块号）
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
  */
 static ftl_status_e md_erase_multi_submit(md_dir_cache_t *dir, DWORD addr)
 {
@@ -402,6 +463,11 @@ static ftl_status_e md_erase_multi_submit(md_dir_cache_t *dir, DWORD addr)
  * @brief 提交一条异步读（搬移 victim 的 region 页 → job.cp_buf）。
  * ⚠ 读的数据**留在 desc 链上** ⇒ 目标缓冲必须活到完成，ftl_cmd_read_data 必须早于
  * release —— 二者都在 ftl_metadata_callback 里，缓冲就是 job.cp_buf（job 常驻 ⇒ 稳定）。
+ *
+ * @param dir  Directory
+ * @param addr 源 PBA（victim 上的 region 页）
+ * @return FTL_OK    已提交
+ *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
  */
 static ftl_status_e md_read_submit(md_dir_cache_t *dir, DWORD addr)
 {
@@ -468,7 +534,14 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
 /**
  * @brief 选 victim、核空槽预算、把 job 推进到 CP_READ（纯 RAM，不碰介质）。
  *
- * @return md_compact_start_e（起不动时 phase 留在 IDLE，由调用者决定是否换块）。
+ * @param dir   Directory
+ * @param alloc 分配器（读 BST 判 LOG 身份）
+ * @return MD_COMPACT_STARTED    已进入 CP_READ
+ *         MD_COMPACT_NO_CURRENT 无当前写块：无处可搬
+ *         MD_COMPACT_NO_VICTIM  无候选（零活块归 reclaim 管 / 只剩当前块）
+ *         MD_COMPACT_NO_SLOTS   当前块空槽装不下活 region 最少的 victim
+ *
+ * @note 起不动时 phase 留在 IDLE，由调用者决定是否换块。
  *
  * @note 实现要点：**无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
  * 又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
@@ -477,8 +550,6 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
  * ⚠ 已知良性竞态：job 启动前已发出、尚未 commit 的前台 region 写可能在扫描期间落回
  * victim ⇒ 实际需搬数超过本预算 ⇒ md_compact_write 取不到槽 ⇒ 中止。已登记 region
  * 指向新页、victim 不擦，无数据损失，只是本次压缩重来。
- *
- * @note 参数：dir / alloc。
  */
 static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *alloc)
 {
@@ -530,8 +601,11 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
 /**
  * @brief 从 job.region_id 起找 victim 上**下一个**仍有引用的 region，发起异步读。
  *
- * @return MD_COMPACT_SCANNED = 已扫完（未提交任何命令）；MD_COMPACT_SUBMITTED = 已提交（等完成）；
- *                             MD_COMPACT_BACKPRESSURE = 背压未提交（下轮重试）；MD_COMPACT_FAILED = 硬失败（调用者中止）。
+ * @param dir Directory（job 与 Directory 游标）
+ * @return MD_COMPACT_SCANNED      已扫完（未提交任何命令）
+ *         MD_COMPACT_SUBMITTED    已提交（等完成）
+ *         MD_COMPACT_BACKPRESSURE 背压未提交（下轮重试）
+ *         MD_COMPACT_FAILED       硬失败（调用者中止）
  *
  * @note 实现要点：游标先走后命中，提交失败再把游标退回来（重试同一 region）。
  * 搬移走的是**裸页拷贝**（region 页无头，就是 L2P_REGION_SIZE 字节的 entries
@@ -600,6 +674,7 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
 /**
  * @brief 把 job.cp_buf 写进当前块的新槽（槽只取一次，提交失败重试同一槽）。
  *
+ * @param dir Directory（job 与写指针）
  * @return 同 md_compact_read。
  */
 static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
@@ -633,6 +708,8 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
 /**
  * @brief 当前 victim 搬空后，继续挑下一个能装进当前块剩余空槽的稀疏 victim。
  *
+ * @param dir   Directory
+ * @param alloc 分配器（读 BST 判 LOG 身份）
  * @return true = 已切到下一个 victim（phase=CP_READ）
  *         false = 没有可装下的 victim。
  *
@@ -675,10 +752,10 @@ static bool md_compact_next(md_dir_cache_t *dir, const alc_t *alloc)
 /**
  * @brief 推进整理 job 一步（每轮服务循环调一次）。见 metadata.h 的 md_handle 注释。
  *
+ * @param dir Directory（allocator 走已绑定的 dir->alloc 端口）
+ *
  * @note 实现要点：`for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
  * 后 break（纯 RAM 阶段）。**不允许既不推进也不返回**——那会死循环。
- *
- * @note 参数：dir / alloc。
  */
 static void md_handle_step(md_dir_cache_t *dir)
 {
@@ -985,6 +1062,12 @@ static void md_handle_step(md_dir_cache_t *dir)
 
 /* ── 模块 handle（typed 入口） ── */
 
+/**
+ * @brief 把 job 内部状态填入 typed handle 的观测出参。
+ *
+ * @param dir Directory（只读）
+ * @param out 出参：本轮上报
+ */
 static void md_status_fill(const md_dir_cache_t *dir, md_status_t *out)
 {
     const md_handle_t *j = &dir->handle;
@@ -1041,6 +1124,9 @@ void md_handle(md_dir_cache_t *dir, const bg_info_t *info, md_status_t *out)
 /**
  * @brief 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
  * 且**先记账再归还**。固定区块回固定区（NONE）；用户区借来的块回 Free Pool。
+ *
+ * @param dir    Directory
+ * @param gblock 刚擦除完成的 gblock
  */
 static void md_block_erased_note(md_dir_cache_t *dir, WORD gblock)
 {
@@ -1053,6 +1139,11 @@ static void md_block_erased_note(md_dir_cache_t *dir, WORD gblock)
 /**
  * @brief 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证
  * 它不会永久挡住后续块）；成功 ⇒ 清位 + 归还。
+ *
+ * @param dir    Directory
+ * @param j      整理 job（waiting / 连续失败计数 / phase）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 擦除是否失败
  */
 static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
@@ -1100,6 +1191,11 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
 /**
  * @brief 整理 CP_READ 完成：成功把 region 整页拷进 job.cp_buf（**必须早于 release**）；
  * 读不回 ⇒ 中止——该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失。
+ *
+ * @param dir    Directory
+ * @param j      整理 job（waiting / phase）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 读是否失败
  */
 static void md_cp_read_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
@@ -1121,6 +1217,11 @@ static void md_cp_read_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
 /**
  * @brief 整理 CP_WRITE 完成：成功登记新位置；失败 ⇒ 槽已消耗（可能半编程）⇒ **不登记**，
  * region 仍指向 victim 旧页 ⇒ 无损失。
+ *
+ * @param dir    Directory
+ * @param j      整理 job（waiting / 当前搬移的 region 与副本 / phase）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 写是否失败
  */
 static void md_cp_write_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
@@ -1148,6 +1249,11 @@ static void md_cp_write_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command
 
 /**
  * @brief Anchor 换块擦完成：失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。
+ *
+ * @param dir    Directory
+ * @param j      整理 job（waiting / phase）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 擦除是否失败
  */
 static void md_anchor_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
@@ -1164,6 +1270,10 @@ static void md_anchor_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_com
 
 /**
  * @brief Anchor 一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
+ *
+ * @param j      整理 job（waiting / anchor_chunk / anchor_ok）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 本页写是否失败
  */
 static void md_anchor_write_complete(md_handle_t *j, fc_command_t *cmd, bool failed)
 {
@@ -1179,6 +1289,11 @@ static void md_anchor_write_complete(md_handle_t *j, fc_command_t *cmd, bool fai
 
 /**
  * @brief Victim 擦完成：失败 ⇒ victim 已无引用（Anchor 已落盘）⇒ 登记给回收阶段重试。
+ *
+ * @param dir    Directory
+ * @param j      整理 job（waiting / victim / phase）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 擦除是否失败
  */
 static void md_cp_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {

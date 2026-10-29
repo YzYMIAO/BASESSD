@@ -279,7 +279,8 @@ void ftl_global_init(void);
  * @param topo    本实例绑定的 NAND 芯片路由
  * @param cache   本实例所属 (ch,ce) 的共享 L2P cache（非空，设备级已初始化）
  * @param storage storage 数组/挂载块的存储（非空，所有指针都非空）
- * @return FTL_OK 成功
+ * @return FTL_OK    成功
+ *         FTL_ERROR 元数据候选池构建失败（拒绝启动）
  */
 ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
 
@@ -288,6 +289,11 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
  *
  * = FC 命令/desc/buffer/SQ/HSQ 余量（ftl_fc_host_budget_ok_n） +
  *   pending 表余量。读/写 batch 都走这一个入口，避免两份逐字重复的资源检查。
+ *
+ * @param ftl 实例（提供 pending 表；非 NULL）
+ * @param n 本次 batch 计划提交的子操作数
+ * @return true  两类资源都够
+ *         false 至少一类不足（调用者应拒绝或降级）
  */
 bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n);
 
@@ -340,7 +346,8 @@ void ftl_service(ftl_ctx_t *ftl);
  *
  * @param ftl  FTL 上下文
  * @param req  IO 请求描述（lba/buffer/count/complete_flag/status_out/on_complete/ctx）
- * @return FTL_OK 已受理，FTL_ERROR 立即失败（参数非法 / LBA 越界 / 组槽满）
+ * @return FTL_OK    已受理
+ *         FTL_ERROR 立即失败（参数非法 / LBA 越界 / 组槽满）
  */
 ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
@@ -353,7 +360,8 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  *
  * @param ftl  FTL 上下文
  * @param req  IO 请求描述（同 ftl_submit_read）
- * @return FTL_OK 已受理，FTL_ERROR 立即失败
+ * @return FTL_OK    已受理
+ *         FTL_ERROR 立即失败
  */
 ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
@@ -372,6 +380,14 @@ ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  * @param ftl  FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
 void ftl_flush_begin(ftl_ctx_t *ftl);
+
+/**
+ * @brief 推进 FLUSH job（每轮主循环调用一次）
+ *
+ * @param ftl FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
+ * @return true  完成（含无在飞 job 的幂等完成）
+ *         false 继续下一轮
+ */
 bool ftl_flush_step(ftl_ctx_t *ftl);
 
 /**
@@ -379,6 +395,8 @@ bool ftl_flush_step(ftl_ctx_t *ftl);
  *
  * 只清本实例的 job 标志：在飞的数据操作由各自模块的异步路径自行收敛，无需回滚。
  * 下一次 begin 会以新的起点重新开始。
+ *
+ * @param ftl FTL 上下文
  */
 void ftl_flush_cancel(ftl_ctx_t *ftl);
 
@@ -392,10 +410,20 @@ void ftl_flush_cancel(ftl_ctx_t *ftl);
  * @param ftl   FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  * @param lba   起始逻辑地址
  * @param count 连续 LBA 数（>0；越界返 FTL_ERROR）
- * @return begin: FTL_OK / FTL_AGAIN（已有 TRIM 在飞）/ FTL_ERROR
- *         step : FTL_OK（完成）/ FTL_AGAIN（继续下一轮）/ FTL_ERROR
+ * @return FTL_OK    已登记范围
+ *         FTL_AGAIN 已有 TRIM 在飞
+ *         FTL_ERROR 参数非法（count == 0 或越界）
  */
 ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
+
+/**
+ * @brief 推进 TRIM job（每次最多处理 FTL_TRIM_STEP_LBAS 条 LBA）
+ *
+ * @param ftl FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
+ * @return FTL_OK    已完成（或本就没有在飞 TRIM）
+ *         FTL_AGAIN 仍有剩余，下一轮继续
+ *         FTL_ERROR 等待超时或 L2P 读失败，已中止 TRIM
+ */
 ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
 
 #endif /* FTL_SERVICE_H */

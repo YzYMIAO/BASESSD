@@ -121,6 +121,10 @@ static inline void bbt_set_bad(BYTE *bad_map, WORD block)
  *
  * 纯函数；格式化/重建路径按块调用，放头文件供 bbt.c 与 PFR 共用，避免三份手写
  * 条件在后续修改时漂移。
+ *
+ * @param ring  BBT 池轮转描述（未建立或不足 2 块时可为 NULL，退回名义区间）
+ * @param block 物理块号（plane 内块号）
+ * @return true 属于候选池，false 不属于
  */
 static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
 {
@@ -228,7 +232,10 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
 
 /**
  * @brief 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
+ *
  * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。
+ *
+ * @param alloc Allocator 上下文（dirty / dirty_gen 在 alloc->bbt）
  */
 void bbt_dirty_note(alc_t *alloc);
 

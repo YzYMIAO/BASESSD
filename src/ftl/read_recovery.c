@@ -119,8 +119,17 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
  */
 
 /**
- * @brief 提交一条页读（目标页或邻居页）。数据在完成时由服务函数拷进 rr->page_scratch
- * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。
+ * @brief 提交一条页读（READ_RECOVERY 路由）；数据在完成时由 rr_read_complete 拷进
+ *        rr->page_scratch——**读**不像写那样在 prepare 阶段搬数据
+ *        （见 ftl_async_read_page 的注释）。
+ *
+ * @param rr  实例（提交成功后 waiting = true，stall_ms 清零）
+ * @param pba 目标页基址
+ * @param cfg 页配置（CRC / random / ldpc / lba）
+ *
+ * @return FTL_OK    已建链并提交
+ *         FTL_AGAIN 命令池空，或完成表 / SQ 满（命令已 release，可下轮重试）
+ *         FTL_ERROR 入参、地址或建链失败
  */
 static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cfg_t *cfg)
 {
@@ -154,13 +163,12 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
  *
  * @param rr 实例。
  *
- * @return RR_PLANE_READY 找到（page / page_lba / first 已填）；
- *                        RR_PLANE_SKIP 本子操作不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane；
- *                        RR_PLANE_WAIT 该 LBA 的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来。
+ * @return RR_PLANE_READY 找到（page / page_lba / first 已填）
+ *         RR_PLANE_SKIP  本子操作不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane
+ *         RR_PLANE_WAIT  该 LBA 的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来
  *
- * @note 实现要点：与原 ftl_recover_read_subop 的选页循环逐条一致——只看**第一个** plane
- * 匹配的 k（命中即 break，无论映射是否有效）。目标页取自 L2P 而非失败
- * 命令的 desc 链：读失败不改 L2P，二者同一。
+ * @note 实现要点：选页循环只看**第一个** plane 匹配的 k（命中即 break，无论映射是否有效）。
+ * 目标页取自 L2P 而非失败命令的 desc 链：读失败不改 L2P，二者同一。
  * ⚠ 三态：必须把"还不知道"（RR_PLANE_WAIT）与"未映射"（RR_PLANE_SKIP）分清——把前者当后者会让
  * RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
  * 头扫，先清 page/page_lba/first）。
@@ -197,6 +205,13 @@ static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
     return (rr->page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
 }
 
+/**
+ * @brief 判断不可恢复读日志是否该输出：5 s 一行；时钟缺失时每 64 条一行。
+ *
+ * @param out_suppressed 出参：自上次输出以来被抑制的条数（仅在返回 true 时写）
+ * @return true  本次输出
+ *         false 限流中，本次只累加抑制计数
+ */
 static bool rr_unrec_log_is_due(DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -310,7 +325,10 @@ static void rr_settle_plane(rr_handle_t *rr)
 
 /**
  * @brief 收尾：释放被托管的 pending 槽 + 让 host 读组结算。
- * owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。
+ *
+ * @param rr 实例（释放后复位 stage / waiting / has_owner）
+ *
+ * @note owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。
  */
 static void rr_job_finish(rr_handle_t *rr)
 {
@@ -332,7 +350,10 @@ static void rr_job_finish(rr_handle_t *rr)
 
 /**
  * @brief 卡死兜底：提交侧长期无进展（命令池泄漏），按恢复失败收尾。
- * ⚠ **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。
+ *
+ * @param rr 实例（清零 caller 缓冲，置 error = FTL_TIMEOUT，转 FINISH）
+ *
+ * @note **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。
  */
 static void rr_job_abort(rr_handle_t *rr)
 {
@@ -489,7 +510,7 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scrat
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
 {
     // 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
-    // 当前 job 结束后由 pending 端口的 take 领走（行为与旧扫描一致）。
+    // 当前 job 结束后由 pending 端口的 take 领走。
     if ((rr->stage == RR_STAGE_IDLE) && (!rr->has_owner))
     {
         rr->owner     = *owner;
@@ -497,6 +518,15 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
     }
 }
 
+/**
+ * @brief 把 handle 的当前状态整理成 rr_status_t 上报。
+ *
+ * @param rr  实例（只读）
+ * @param out 出参：本轮上报（非空）
+ *
+ * @note state 优先级：命令在飞 ⇒ WAITING；有 stage ⇒ RUNNING / FAILED（看 error）；
+ *       仅有 owner ⇒ RUNNING；否则 IDLE。
+ */
 static void rr_status_fill(const rr_handle_t *rr, rr_status_t *out)
 {
     out->base.critical  = true; /* host 读在等结果，不推进即死等 */
@@ -591,6 +621,16 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
  *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
  *     二者都**不实现**，失败即判坏。
  */
+/**
+ * @brief 处理 RR 页读完成：成功时拷数据，CRC 错误允许一次重读，其余进入结算。
+ *
+ * @param rr         实例（推进 stage / retry_count / last_status）
+ * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
+ * @param completion 完成状态（status 的 FC_CW_STATUS_* 位）
+ *
+ * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
+ *       UNC / NAND_FAIL / TIMEOUT / MATA_ERROR 直接交 rr_settle_plane 清零 + 标坏。
+ */
 static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     rr->retry_count = rr->attempt;
@@ -617,7 +657,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     }
 }
 
-// 实现要点：按 stage 分派到 rr_complete_* 判完成结果并改 stage，然后 release
+// 实现要点：按 stage 分派到 rr_read_complete 判完成结果并改 stage，然后 release
 // 命令 → rr_job_step 续跑。
 // ⚠ 成功判据：FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
 // ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
@@ -664,7 +704,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
 }
 /* ── 3. 判定（块数组 / 全表扫描）── */
 
-// rr_get_health — 取块健康状态（track 为 NULL 返回 HEALTHY）
+// 实现要点：NULL ⇒ RR_BLOCK_HEALTHY（调用方没有 ECC 追踪时按健康处理）。
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
 {
     if (track == NULL)
@@ -738,7 +778,7 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 /* ── 4. 退役 ── */
 
 // 实现要点：read_count 归零 = read disturb 重计（块仍活着，只是不再写）。
-// 计数随下一次 Checkpoint 的磨损快照持久化（不再有独立的 dirty 标记）。
+// 计数随下一次 Checkpoint 的磨损快照持久化（无独立 dirty 标记）。
 void rr_retire_block(bst_block_t *b)
 {
     // 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->alloc.blocks[gblock]

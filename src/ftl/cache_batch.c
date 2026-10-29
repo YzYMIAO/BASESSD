@@ -46,7 +46,14 @@ typedef struct
 
 /**
  * @brief 校验一个 pair 的 L2P 映射、plane/拓扑与页内一致性。
- * *defer = 某次 l2p_read 遇到 LOADING（已起加载），调用者可下轮重试。
+ *
+ * @param ftl      实例（只读）。
+ * @param base     本 pair 的起始 LBA（对齐到 FTL_LBA_PER_PAIR）。
+ * @param pair_pba 出参：每 plane 的 PBA；未映射的 plane 填 NAND_PBA_INVALID。
+ * @param defer    出参：置 true 表示某次 l2p_read 遇 LOADING（已起加载），调用者可下轮重试。
+ *
+ * @return true = 该 pair 可整对 cache 读；false = 不可（wbuf 未落盘 / 未映射 /
+ *         拓扑不符 / 非同一页）。
  */
 static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_pba[PLANE_NUM], bool *defer)
 {
@@ -105,7 +112,13 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
 }
 
 /**
- * @brief 收集可连续 cache 读的 pair；返回 pair 数（0..FTL_CACHE_READ_MAX_PAIRS）。
+ * @brief 收集可连续 cache 读的 pair。
+ *
+ * @param req   本次 cache read 的公共参数。
+ * @param pba   出参：已收集的 pair 物理地址（每 pair 每 plane）。
+ * @param defer 出参：见 cache_read_probe_pair。
+ *
+ * @return 收集到的完整且连续 pair 数（0..FTL_CACHE_READ_MAX_PAIRS）。
  */
 static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool *defer)
 {
@@ -177,6 +190,12 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
 
 /**
  * @brief 构建命令与 pending；失败时在 build_fail 统一回收。
+ *
+ * @param b   构建上下文：n_pairs 为入参，cmds / pends 为出参。
+ * @param req 本次 cache read 的公共参数。
+ * @param pba 每个 pair 每 plane 的物理地址。
+ *
+ * @return true = 全部命令与 pending 建好；false = 建链或 pending 不足，已回滚。
  */
 static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
@@ -260,6 +279,17 @@ build_fail:
     return false;
 }
 
+/**
+ * @brief 建命令与 pending 并提交 N 个 cache 读 pair。
+ *
+ * @param req     本次 cache read 的公共参数。
+ * @param n_pairs 已收集的 pair 数（≥ FTL_CACHE_READ_MIN_PAIRS）。
+ * @param pba     每个 pair 每 plane 的物理地址。
+ *
+ * @return FTL_CACHE_READ_OK 全部提交；FTL_CACHE_READ_AGAIN 建链失败或首批提交失败
+ *         （整批回滚或可安全重试）；FTL_CACHE_READ_ERROR 部分提交后失败
+ *         （已提交成员保留，组报 IO_ERROR）。
+ */
 static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DWORD n_pairs, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
     cache_read_build_t b;
@@ -357,6 +387,9 @@ typedef struct
 
 /**
  * @brief 撤销尚未提交的构建：释放命令/pending + 归还页对。调用后 batch 缓冲/组未动。
+ *
+ * @param ftl 实例。
+ * @param b   构建上下文（按 n_cmd / n_pending / n_alloc 逐项回收）。
  */
 static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
 {
@@ -383,6 +416,15 @@ static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
 
 /**
  * @brief 分配 4 个页对、建 4 条命令、登记 4 个 pending（尚未提交）。
+ *
+ * @param ftl    实例。
+ * @param gi     本子操作归属的组下标。
+ * @param lba    本批起始 LBA（FTL_LBA_PER_PAIR 对齐）。
+ * @param buffer 16 KiB 源数据（4 个 pair 页）。
+ * @param b      出参：本批的页对 PBA / 命令 / pending 记录。
+ *
+ * @return FTL_OK 全部建好；FTL_AGAIN 页对或 pending 不足（已回滚）；
+ *         其他 = 建链失败的状态码（已回滚）。
  */
 static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const void *buffer, cache_wb_build_t *b)
 {

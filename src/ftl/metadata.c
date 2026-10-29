@@ -155,6 +155,9 @@ static const DWORD s_md_partition_count = (sizeof(s_md_partitions) / sizeof(s_md
  * 这是**配置错误** ⇒ 调用者在 release 也必须拿到 FTL_ERROR（判据 9）。
  * 不要求 PAGES_PER_BLOCK % pages_per_record == 0：Checkpoint 的 21 页/record
  * 刻意向下取整，块尾剩余页不用。
+ *
+ * @param ring 待校验的池几何
+ * @return true = 几何合法；false = 非法
  */
 static bool md_ring_geom_valid(const md_ring_t *ring)
 {
@@ -225,6 +228,11 @@ DWORD md_ring_addr_plane(const md_ring_t *ring, const ftl_topo_t *topo, WORD rec
  * @brief 物理块在 plane_mask 的所有 plane 上都非 BAD。
  * 镜象/多 plane 擦写要求**同一物理块号**在每个 plane 上都可用，否则
  * ftl_async_write_page_mirror / multi-plane erase 会写到坏 plane 的同号块。
+ *
+ * @param alloc      分配器（读 BST 坏块标记）
+ * @param block      per-plane 块号
+ * @param plane_mask 需要全部可用的 plane 位掩码
+ * @return true = mask 内所有 plane 的同号块都非 BAD；false = 至少一个 BAD
  */
 static bool md_block_good_on_mask(const alc_t *alloc, WORD block, BYTE plane_mask)
 {
@@ -247,6 +255,12 @@ static bool md_block_good_on_mask(const alc_t *alloc, WORD block, BYTE plane_mas
  * @brief 收名义区间的好块；不足 min_blocks 时从 shared spare 按升序补（受 spare_budget
  * 与全局 spare_used 双重限制）。**只补到硬下界，不强行补满名义数**：CP 少一块
  * 仍可轮转，把 spare 留给更紧的 BBT/Journal。
+ *
+ * @param ring       输出：构建好的池几何
+ * @param alloc      分配器（读 BST 坏块标记）
+ * @param spec       该池的几何/补齐策略
+ * @param spare_used spare 占用标记（跨池共享；函数会置位已用项）
+ * @return 实际收集到的候选块数（ring->block_count）
  */
 static WORD md_pool_collect(md_ring_t *ring, const alc_t *alloc, const md_pool_spec_t *spec, bool spare_used[MD_SPARE_BLOCKS_PER_PLANE])
 {
@@ -379,6 +393,12 @@ DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_id
 
 /**
  * @brief ①~③：逐块探末条 → 找游标块 → 游标块内找末条。
+ *
+ * @param ring  池几何
+ * @param probe 调用方探针
+ * @param ctx   探针上下文
+ * @param rpb   每块 record 数
+ * @param s     输出：扫描中间结果
  */
 static void md_ring_scan(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, WORD rpb, md_ring_scan_t *s)
 {
@@ -437,6 +457,12 @@ static void md_ring_scan(const md_ring_t *ring, metadata_ring_probe_fn probe, vo
 /**
  * @brief ⑥ 慢路径：快路径候选整条校验全失败（局部损坏）⇒ 全池廉价探针取 sequence 最大者，
  * 整条校验；失败则排除该 sequence 继续找次新。仅在损坏时付出全池代价。
+ *
+ * @param probe 调用方探针
+ * @param ctx   探针上下文
+ * @param total 池内槽位总数
+ * @param out   输出：最新有效 record 槽位与 sequence
+ * @return true = 找到有效 record；false = 池内已无更多候选
  */
 static bool md_ring_locate_fallback(metadata_ring_probe_fn probe, void *ctx, WORD total, md_ring_locate_out_t *out)
 {
@@ -633,6 +659,11 @@ ftl_status_e md_ring_prepare_write(const md_ring_t *ring, const ftl_topo_t *topo
 
 /**
  * @brief 页头字段校验：magic + chunk_count + 布局版本。
+ *
+ * @param magic          页头 magic
+ * @param chunk_count    页头 chunk 总数
+ * @param layout_version 页头介质布局版本
+ * @return true = 三个字段均与当前格式一致；false = 任一不符
  */
 static bool md_anchor_header_valid(DWORD magic, WORD chunk_count, DWORD layout_version)
 {
@@ -642,6 +673,9 @@ static bool md_anchor_header_valid(DWORD magic, WORD chunk_count, DWORD layout_v
 /**
  * @brief Anchor 池几何：优先用 md_pool_build_all() 生成的候选池（跳过 BAD）；
  * 池尚未建立时退回名义区间（开机早期/测试），BAD 由后续 rebuild 修正。
+ *
+ * @param dir  Directory cache（取 alloc->pools）
+ * @param ring 输出：Anchor 池几何
  */
 static void md_anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
 {
@@ -665,6 +699,11 @@ static void md_anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
 /**
  * @brief 廉价探针：只读 chunk 0 的 20 字节页头取 sequence。
  * FC 读整页并校验 per-CW CRC + ECC，`length` 只限制拷出字节数。
+ *
+ * @param c            探针上下文（Directory + 池几何）
+ * @param record_idx   槽位号
+ * @param out_sequence 输出：该 record 的 sequence（成功时写）
+ * @return FTL_OK = 某个 plane 上读到有效页头；FTL_ERROR = 所有 plane 都失败
  */
 static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c, WORD record_idx, DWORD *out_sequence)
 {
@@ -694,6 +733,11 @@ static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c, WO
 
 /**
  * @brief 整条校验：全部页有效、chunk 序完整、各页 sequence 一致；不跨 plane 拼半条。
+ *
+ * @param c            探针上下文（Directory + 池几何）
+ * @param record_idx   槽位号
+ * @param out_sequence 输出：整条校验通过时的 sequence
+ * @return FTL_OK = 某个 plane 上整条有效；FTL_ERROR = 无 plane 通过
  */
 static ftl_status_e md_anchor_record_probe_full(const anchor_probe_ctx_t *c, WORD record_idx, DWORD *out_sequence)
 {
@@ -766,6 +810,12 @@ static ftl_status_e md_anchor_record_probe_full(const anchor_probe_ctx_t *c, WOR
 
 /**
  * @brief 探针入口：按 full 分派到廉价/整条两档。
+ *
+ * @param ctx          探针上下文（anchor_probe_ctx_t）
+ * @param record_idx   槽位号
+ * @param full         false = 廉价探针，true = 整条校验
+ * @param out_sequence 输出：该 record 的 sequence
+ * @return 探针函数的返回值（见 metadata_ring_probe_fn）
  */
 static ftl_status_e md_anchor_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
@@ -788,6 +838,8 @@ static ftl_status_e md_anchor_record_probe(void *ctx, WORD record_idx, bool full
  *
  * 共用于 md_init（首次格式化）与 md_load（基础层）：
  * Anchor 损坏时该层即"全部未映射"，不需要任何闪存读。
+ *
+ * @param dir Directory cache（输出：全部 region 预登记为未映射）
  */
 static void md_fixed_fill(md_dir_cache_t *dir)
 {
@@ -808,6 +860,11 @@ static void md_fixed_fill(md_dir_cache_t *dir)
 /**
  * @brief 把一个 region 副本的 PBA 计入 l2p_live（主/备共用同一套校验）。
  * `*warned` 保证整轮只警告一次；越界/固定非日志区一律跳过。
+ *
+ * @param dir       Directory cache（输出：l2p_live 计数）
+ * @param pba       某个 region 副本的 PBA
+ * @param entry_idx 该副本所属的 Directory 条目下标（仅用于告警定位）
+ * @param warned    输入/输出：本轮是否已告警（防止刷屏）
  */
 static void md_live_copy_add(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, bool *warned)
 {
@@ -850,6 +907,8 @@ static void md_live_copy_add(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
 
 /**
  * @brief 由 entries 重建 l2p_live（日志块 = 非固定元数据块）。
+ *
+ * @param dir Directory cache（输出：l2p_live 与 log_borrow_count）
  */
 static void md_live_rebuild(md_dir_cache_t *dir)
 {
@@ -900,6 +959,8 @@ static void md_live_rebuild(md_dir_cache_t *dir)
 
 /**
  * @brief 开机观测口（判据②「走动态分配」/ 判据③「Anchor 真的落盘」的唯一观测口）
+ *
+ * @param dir Directory cache（只读，打一条开机观测行）
  */
 static void md_boot_status_log(const md_dir_cache_t *dir)
 {
@@ -965,6 +1026,11 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
  * 只做线性扫描时，`md_compact_read` 对每个 region_id 各查一次 ⇒ O(N²)
  * （N = 2048，约 400 万次比较 ≈ 100 ms），元数据压缩期间主循环被拖住、USB
  * 事件得不到服务（表现为设备消失）。慢路径保留给非稠密/历史格式。
+ *
+ * @param dir  Directory cache
+ * @param type 元数据类型
+ * @param id   元数据 id
+ * @return 匹配条目的下标；未找到返回 dir->count
  */
 static WORD md_entry_index_find(const md_dir_cache_t *dir, BYTE type, WORD id)
 {
@@ -1186,6 +1252,11 @@ WORD md_live_block_count_get(const md_dir_cache_t *dir)
  * ⚠ 不能只看 page 0：日志是顺序追加、写失败页只消耗槽位不关闭块 ⇒ 可能
  * “page 0 空、后面有数据”（与 RISK-BOOT-14 的数据块假设不同）。把这种块当
  * 空闲分配会在未擦页上编程 = 静默损坏。首块非空即提前返回。
+ *
+ * @param alloc 分配器（取 ch/ce/lun 组 PBA）
+ * @param plane 物理 plane 号
+ * @param block per-plane 块号
+ * @return true = 整块逐页均空；false = 至少一页非空
  */
 static bool md_log_block_erased(const alc_t *alloc, BYTE plane, WORD block)
 {
@@ -1427,6 +1498,10 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
 /**
  * @brief 单个 PBA 的账本迁移：旧位置 -1、新位置 +1、旧块归零则登记回收。
  * 主/备副本共用（RISK-BOOT-18 的 L2 双副本）。
+ *
+ * @param dir     Directory cache（输出：l2p_live 账本）
+ * @param old     旧位置 PBA（NAND_PBA_INVALID = 未映射）
+ * @param new_pba 新位置 PBA
  */
 static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
 {
@@ -1698,6 +1773,10 @@ void md_anchor_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool
  * @brief 读胜者的全部页，逐页校验后覆盖对应区间。
  * 镜像池：每页先读首选 plane；该页不可信时回退到另一个 plane（sequence 必须仍等于
  * 被选中的 record sequence，绝不跨 record 拼页）。
+ *
+ * @param dir    Directory cache（输出：被覆盖的 entries / backup_pba）
+ * @param ring   池几何
+ * @param newest 胜出 record 的槽位号
  */
 static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD newest)
 {

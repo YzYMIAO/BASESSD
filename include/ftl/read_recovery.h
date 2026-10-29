@@ -57,7 +57,7 @@ typedef struct ftl_context ftl_ctx_t;
  * 频繁全扫无谓开销）。 */
 #define RR_SCAN_INTERVAL_MS (1000U)
 
-/* 预测性坏块状态 rr_block_health_e / ECC 历史 rr_ecc_track_t 已迁入 ftl/bst.h */
+/* 预测性坏块状态 rr_block_health_e / ECC 追踪 rr_ecc_track_t 定义在 ftl/bst.h */
 
 /* ── Read Recovery 上下文（= 异步 job 状态机）──
  *
@@ -175,11 +175,20 @@ typedef struct
 
 /**
  * @brief 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。
+ *
+ * @param rr           待绑定并复位的 handle
+ * @param cache        L2P cache（恢复选页时 l2p_read 的查表入口）
+ * @param alloc        分配器（持有 BST；拓扑与块状态来源）
+ * @param page_scratch 整页读缓冲（恢复读的落点）
+ * @param pending      pending 表（托管子操作的领取与结算）
  */
 void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending);
 
 /**
  * @brief 登记一个被托管的读子操作（不立即推进）。
+ *
+ * @param rr    handle
+ * @param owner 被托管子操作的身份（owners / pending_idx / upper_buf / lba / n_cw）
  */
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
 
@@ -195,8 +204,9 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out);
 /**
  * @brief 记录一次读取的 ECC bit 数，更新趋势
  *
- * 每次 read 完成后记录 ecc_bits，与上一次读数比较：
- * 连续上升 → warning → critical → 触发搬移。
+ * 每次 read 完成后记录 ecc_bits，与上一次读数比较：连续上升则累加 rising_count，
+ * 否则清零。三级水位（连续上升次数 / 单次高水位 / 单次上限）只升级 health，不回落；
+ * 搬移由巡检与迁移 job 另行触发。
  *
  * @param track    per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
  * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 desc 链全链 CW 的最大值，见 fc_get_cmd_ecc_max）
@@ -220,20 +230,22 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits);
 /**
  * @brief 获取 Block 健康状态
  *
- * @param track per-Block ECC 追踪（&blocks[gblock].rr）
- * @return rr_block_health_e
+ * @param track per-Block ECC 追踪（&blocks[gblock].rr）；可为 NULL
+ * @return RR_BLOCK_HEALTHY track 为 NULL（按健康处理）
+ *         track->health    track 非 NULL
  */
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track);
 
 /**
- * @brief 巡检：找第一个 health ≥ CRITICAL 的 Closed 块
+ * @brief 巡检：找第一个慢死候选的 Closed 块（health ≥ CRITICAL 或 read_count 超阈值）
  *
  * 只扫 CLOSED（跳过 OPEN/FREE/BAD/LOG/RETIRED），返回全局物理 Block 号。
  * 慢死预测命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
  *
  * @param alloc  FTL allocator（含 blocks 表）
  * @param gblock 输出：命中的全局 Block 号
- * @return true 命中，false 无
+ * @return true  命中，*gblock 有效
+ *         false 无命中的 Closed 块
  */
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
 
@@ -247,6 +259,9 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
  *     块仍可读（ECC 能纠），只是不再当新块分配。
  *
  * @param b 目标物理块
+ *
+ * @note 调用者必须先把该块从 Free Pool 移除：本函数只拿 bst_block_t*，置 RETIRED
+ *       挡不住分配（Free Pool 以数组为准）。
  */
 void rr_retire_block(bst_block_t *b);
 

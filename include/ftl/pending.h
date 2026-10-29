@@ -43,6 +43,10 @@
  * @brief 组 gi 在 owners 位掩码里的位（pend_req_t.owners / pend_group_t 的约定）。
  * 组号由 pend_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 DWORD 位宽。
  * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。
+ *
+ * @param gi 组下标（0..FTL_GROUP_MAX-1）。
+ *
+ * @return 该组在 owners 位掩码里的位。
  */
 static inline DWORD ftl_group_bit(WORD gi)
 {
@@ -90,22 +94,49 @@ typedef enum
  *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 pend_confirm_service
  *                         每轮扫描推进，完成路径不碰它。
  *   （READ_RECOVERY 同为停泊态，但判别走 pend_find_op 的**搜索实参**，不是谓词。） */
+/**
+ * @brief 是否活跃读子操作（普通读或 cache 读）。
+ *
+ * @param op pending 操作码。
+ *
+ * @return true = 读类活跃子操作。
+ */
 static inline bool pend_op_is_read(BYTE op)
 {
     return (op == PENDING_OP_READ) || (op == PENDING_OP_READ_CACHE);
 }
 
+/**
+ * @brief 是否活跃写子操作（普通写或 page0 写）。
+ *
+ * @param op pending 操作码。
+ *
+ * @return true = 写类活跃子操作。
+ */
 static inline bool pend_op_is_write(BYTE op)
 {
     return (op == PENDING_OP_WRITE) || (op == PENDING_OP_WRITE_PAGE0);
 }
 
+/**
+ * @brief 是否停泊态写确认子操作。
+ *
+ * @param op pending 操作码。
+ *
+ * @return true = WRITE_CONFIRM（命令已脱钩，由 pend_confirm_service 推进）。
+ */
 static inline bool pend_op_is_write_confirm(BYTE op)
 {
     return op == PENDING_OP_WRITE_CONFIRM;
 }
 
-/** @brief cache program 批次成员（中间页或末页）。 */
+/**
+ * @brief cache program 批次成员（中间页或末页）。
+ *
+ * @param op pending 操作码。
+ *
+ * @return true = WRITE_CACHE。
+ */
 static inline bool pend_op_is_write_cache(BYTE op)
 {
     return op == PENDING_OP_WRITE_CACHE;
@@ -250,6 +281,8 @@ pend_req_t *pend_alloc(pend_table_t *table);
  *
  * ⚠ 这两条 [BOUND] 不变量只在这里定义一份；pend_alloc 的每个调用点填完槽后各调一次，
  *   不在调用点重复实现。
+ *
+ * @param req 已填好的 pending 项。
  */
 static inline void pend_validate(const pend_req_t *req)
 {
@@ -417,13 +450,29 @@ bool pend_group_has_window_pending(const pend_table_t *table, DWORD window);
  */
 typedef ftl_status_e (*pending_confirm_handler_t)(void *ctx, pend_req_t *pending);
 
-/** @brief 注册事务 handler（ftl_init 中调用一次）。 */
+/**
+ * @brief 注册事务 handler（ftl_init 中调用一次）。
+ *
+ * @param handler 事务处理函数。
+ */
 void pend_confirm_set_handler(pending_confirm_handler_t handler);
 
-/** @brief 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
+/**
+ * @brief 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。
+ *
+ * @param table       pending 表。
+ * @param pending_idx 该子操作的 pending 槽下标。
+ * @param owners      贡献本子操作的组位掩码。
+ */
 void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners);
 
-/** @brief 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
+/**
+ * @brief 推进停泊列表（ftl_service Phase 2.5 开头调用）。
+ *
+ * @param table       pending 表。
+ * @param confirm_ctx 事务 handler 的上下文。
+ * @param info        本轮动态信息；NULL 时用平台时钟。
+ */
 void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_t *info);
 
 #endif /* FTL_PENDING_H */

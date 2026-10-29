@@ -78,6 +78,10 @@ static void mig_job_step(mig_handle_t *m);
  * 半写块（提前关闭 / GC 目的块）的空洞页物理上是擦除态，读回来 ECC 必失败；
  * 不按写指针截断就会把空洞当成「victim 读失败」并误标坏块（RISK-GC-11）。
  * temperature 不参与搬移决策，保持 memset 的默认值。
+ *
+ * @param sb           出参：组装出的 victim 视图（先整体清零，再填 plane_blocks 与 next_page）。
+ * @param plane_blocks 各 plane 的 plane 内块号（按 PLANE_NUM 逐个拷入）。
+ * @param next_page    该块已编程页数的上界（搬移只读 [0, next_page)）。
  */
 static void mig_victim_from_planes(super_block_t *sb, const WORD plane_blocks[PLANE_NUM], BYTE next_page)
 {
@@ -97,6 +101,13 @@ static void mig_victim_from_planes(super_block_t *sb, const WORD plane_blocks[PL
  * · 部分 plane 已擦除后 job 中止，重试时那些 plane 已是 FREE/RETIRED/BAD，
  * 再擦一次会重复计磨损 / 复活 BAD；
  * · 迁移期间被 RR 标 BAD 的 plane 不能再读/擦。
+ *
+ * @param alloc allocator（读 blocks[].state 判断 plane 是否仍可处理）。
+ * @param m     job（提供 victim 视图）。
+ * @param from  起始 plane 下标。
+ *
+ * @return 0..PLANE_NUM-1 —— 下一个仍归本 victim 且 state == CLOSED 的 plane 下标；
+ *         PLANE_NUM —— 没有这样的 plane。
  */
 static BYTE mig_present_plane_next(const alc_t *alloc, const mig_handle_t *m, BYTE from)
 {
@@ -123,6 +134,12 @@ static BYTE mig_present_plane_next(const alc_t *alloc, const mig_handle_t *m, BY
 /**
  * @brief 本 CW 的 META LBA 是否属于本实例且可查 L2P。
  * META 来自介质（H29）：未写过 / 越界 / 不属于本实例的条目一律跳过。
+ *
+ * @param m   job（取 topo 做实例路由判断）。
+ * @param lba META 中解析出的扇区 LBA。
+ *
+ * @return true  —— 非 FTL_LBA_INVALID、在 L2P 全局范围内且路由到本实例；
+ *         false —— 不可用于查 L2P。
  */
 static bool mig_lba_is_usable(const mig_handle_t *m, DWORD lba)
 {
@@ -131,6 +148,12 @@ static bool mig_lba_is_usable(const mig_handle_t *m, DWORD lba)
 
 /**
  * @brief victim 的某 plane 对应的全局块号；不存在该 plane ⇒ UINT16_MAX（日志哨兵）。
+ *
+ * @param m     job（提供 victim 视图）。
+ * @param plane plane 下标。
+ *
+ * @return 该 plane 的全局块号（BST 索引）；
+ *         UINT16_MAX —— victim 不含该 plane（日志哨兵）。
  */
 static WORD mig_victim_get_gblock(const mig_handle_t *m, BYTE plane)
 {
@@ -144,6 +167,12 @@ static WORD mig_victim_get_gblock(const mig_handle_t *m, BYTE plane)
 #if defined(DEBUG)
 /**
  * @brief 目标页 PBA 的全局块号；该 plane 没有目标页 ⇒ UINT16_MAX。仅 DEBUG move 行使用。
+ *
+ * @param m     job（dst[] 与 dst_allocated）。
+ * @param plane plane 下标。
+ *
+ * @return 目标页的全局块号；
+ *         UINT16_MAX —— 尚未分配目的页 / victim 不含该 plane / dst 非法。
  */
 static WORD mig_dst_get_gblock(const mig_handle_t *m, BYTE plane)
 {
@@ -159,6 +188,13 @@ static WORD mig_dst_get_gblock(const mig_handle_t *m, BYTE plane)
 
 /**
  * @brief victim 来源的名字（日志用）。表序 == mig_kind_e。
+ *
+ * @param kind victim 来源枚举。
+ *
+ * @return "gc"   —— 空间回收；
+ *         "wl"   —— 静态磨损均衡；
+ *         "pred" —— 慢死预测；
+ *         "?"    —— 越界值。
  */
 static const char *mig_kind_name(mig_kind_e kind)
 {
@@ -171,6 +207,12 @@ static const char *mig_kind_name(mig_kind_e kind)
 
 /**
  * @brief GC 会话启动原因的名字（日志用）。表序 == mig_gc_start_reason_e。
+ *
+ * @param reason GC 会话启动原因枚举。
+ *
+ * @return "urgent"   —— 写路径分配不到页对；
+ *         "periodic" —— 周期评估；
+ *         "?"        —— 越界值。
  */
 static const char *mig_gc_reason_name(mig_gc_start_reason_e reason)
 {
@@ -183,6 +225,13 @@ static const char *mig_gc_reason_name(mig_gc_start_reason_e reason)
 
 /**
  * @brief GC 收益判据模式的名字（日志用）。表序 == gc_benefit_mode_e。
+ *
+ * @param mode 收益判据模式枚举。
+ *
+ * @return "off"  —— 不筛收益（host 正在写）；
+ *         "idle" —— 空闲档收益判据；
+ *         "emg"  —— 紧急档收益判据；
+ *         "?"    —— 越界值。
  */
 static const char *mig_gc_mode_name(gc_benefit_mode_e mode)
 {
@@ -199,6 +248,12 @@ static const char *mig_gc_mode_name(gc_benefit_mode_e mode)
  * @brief 提交一条已建好的搬移命令：置 waiting、提交、失败回滚。
  * ⚠ stall_ms 只在**提交成功之后**清零：`ftl_op_submit` 自身失败（完成表满 / SQ 满）
  * 也属于"提交不出去"，提前清零会让 deadline 永不触发。
+ *
+ * @param m   job。
+ * @param cmd 已建好的搬移命令；**所有权转移**给 op 层，提交失败时由本函数 release。
+ *
+ * @return FTL_OK    —— 已提交，waiting 置位；
+ *         FTL_AGAIN —— 提交不出去（已 release 命令并回滚 waiting），调用方可重试。
  */
 static ftl_status_e mig_command_submit(mig_handle_t *m, fc_command_t *cmd)
 {
@@ -223,6 +278,12 @@ static ftl_status_e mig_command_submit(mig_handle_t *m, fc_command_t *cmd)
 /**
  * @brief 提交一条 victim 页读（整页，4 CW）。数据在完成时由服务函数拷进 m->page_buf
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。
+ *
+ * @param m job（读 m->src[m->plane] 当前 plane）。
+ *
+ * @return FTL_OK    —— 已提交（命令所有权移交 op 层）；
+ *         FTL_AGAIN —— 命令池空 / 提交背压，可重试；
+ *         FTL_ERROR —— 永久错误，调用点应中止 job。
  */
 static ftl_status_e mig_read_submit(mig_handle_t *m)
 {
@@ -241,6 +302,12 @@ static ftl_status_e mig_read_submit(mig_handle_t *m)
  * 整页重写会把无效 CW 连同其（陈旧的）META 一起搬过去，污染新页且多搬无用数据。
  * ⚠ 目标页的 plane 位就是 plane（alc_super_open_alloc_pair 的契约），故写进去的 META
  * 逐 CW 仍是正确的扇区 LBA。
+ *
+ * @param m job（目标页 m->dst[m->plane]、数据 m->page_buf、有效位 m->cw_bitmap）。
+ *
+ * @return FTL_OK    —— 已提交（命令所有权移交 op 层）；
+ *         FTL_AGAIN —— 命令池空 / 提交背压，可重试；
+ *         FTL_ERROR —— 永久错误，调用点应中止 job。
  */
 static ftl_status_e mig_write_submit(mig_handle_t *m)
 {
@@ -275,6 +342,12 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
 
 /**
  * @brief 提交一条 victim 块擦除。
+ *
+ * @param m job（擦 m->victim 的当前 plane）。
+ *
+ * @return FTL_OK    —— 已提交（命令所有权移交 op 层）；
+ *         FTL_AGAIN —— 命令池空 / 提交背压，可重试；
+ *         FTL_ERROR —— 永久错误，调用点应中止 job。
  */
 static ftl_status_e mig_erase_submit(mig_handle_t *m)
 {
@@ -447,6 +520,13 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
 /**
  * @brief 按触发位与 host 写流选收益判据模式（RISK-GC-13）。
  * 磨损均衡不在 GC 触发里，由独立 WL 路径处理，不在这里判 OFF。
+ *
+ * @param triggers     gc_should_trigger 返回的触发位掩码。
+ * @param host_writing 最近一次求值的 host 写流判定。
+ *
+ * @return GC_BENEFIT_EMERGENCY —— 紧急水位触发；
+ *         GC_BENEFIT_OFF       —— 水位触发且 host 正在写（不筛），或无触发；
+ *         GC_BENEFIT_IDLE      —— 水位触发且 host 不写（筛收益）。
  */
 static gc_benefit_mode_e mig_gc_mode_select(DWORD triggers, bool host_writing)
 {
@@ -464,6 +544,11 @@ static gc_benefit_mode_e mig_gc_mode_select(DWORD triggers, bool host_writing)
 /**
  * @brief 记录一次「空间 GC 没有值得搬的 victim」结论：退避 + 写路径 NO_SPACE 判据都依赖它。
  * ⚠ 只由空间 GC（mode != OFF）调用。
+ *
+ * @param m              job。
+ * @param mode           产生该结论的收益判据模式。
+ * @param best_valid_pct 本轮扫描的域内最低有效率（0..100）。
+ * @param now_ms         结论时刻（退避起点；0 = 无时钟）。
  */
 static void mig_gc_nogain_note(mig_handle_t *m, gc_benefit_mode_e mode, WORD best_valid_pct, DWORD now_ms)
 {
@@ -487,6 +572,14 @@ static void mig_gc_nogain_note(mig_handle_t *m, gc_benefit_mode_e mode, WORD bes
 
 /**
  * @brief 无收益结论后的复扫门（只挡 closed-list 扫描，不挡 10 ms 的 gc_should_trigger 计数器）。
+ *
+ * @param m        job。
+ * @param mode     本轮触发位对应的收益判据模式。
+ * @param triggers 本轮触发位掩码。
+ * @param now_ms   当前时刻（0 = 无时钟）。
+ *
+ * @return true  —— 允许本轮扫描 closed list；
+ *         false —— 仍处于 no-gain 退避窗口内，跳过扫描。
  */
 static bool mig_gc_scan_is_allowed(const mig_handle_t *m, gc_benefit_mode_e mode, DWORD triggers, DWORD now_ms)
 {
@@ -513,6 +606,18 @@ static bool mig_gc_scan_is_allowed(const mig_handle_t *m, gc_benefit_mode_e mode
     return (now_ms - m->gc_nogain_ms) >= GC_NOGAIN_BACKOFF_MS;
 }
 
+/**
+ * @brief 尝试启动一个 GC job：选 victim、装配 job。
+ *
+ * @param m        job。
+ * @param mode     收益判据模式（GC_BENEFIT_*）。
+ * @param now_ms   当前时刻（0 = 无时钟）。
+ * @param reason   启动原因（观测用）。
+ * @param triggers 触发位快照（观测用）。
+ *
+ * @return true  —— 已启动 job；
+ *         false —— 未启动（Journal 有写失败 pending / 选不出值得搬的 victim）。
+ */
 static bool mig_gc_begin(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms, mig_gc_start_reason_e reason, DWORD triggers)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
@@ -574,6 +679,14 @@ static bool mig_gc_begin(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms, 
     return true;
 }
 
+/**
+ * @brief 尝试启动一个静态磨损均衡 job。
+ *
+ * @param m job。
+ *
+ * @return true  —— 已启动 job；
+ *         false —— 未启动（写失败 pending / 未到触发条件 / 容量紧张让给 GC / 选不出 victim）。
+ */
 static bool mig_wl_begin(mig_handle_t *m)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
@@ -615,6 +728,14 @@ static bool mig_wl_begin(mig_handle_t *m)
     return true;
 }
 
+/**
+ * @brief 尝试启动一个慢死预测搬移 job（victim 来自 rr_predictive_scan）。
+ *
+ * @param m job。
+ *
+ * @return true  —— 已启动 job；
+ *         false —— 未启动（写失败 pending / scan 无命中 / closed 索引失效）。
+ */
 static bool mig_predict_begin(mig_handle_t *m)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
@@ -658,6 +779,11 @@ static bool mig_predict_begin(mig_handle_t *m)
  * @brief abort 日志限流（RISK-MIG-05）：坏块介质上 GC 会反复选中不可读 victim、每次
  * 重试都 abort；逐次 WRN 会把有效进展淹没。5 s 一行 + suppressed 计数；
  * `mark BAD` 仍逐块 LOGE（每个坏块只发生一次，是真正的结论）。
+ *
+ * @param out_suppressed 出参：本窗口内被抑制的条数（仅在返回 true 时写）。
+ *
+ * @return true  —— 本行应打印；
+ *         false —— 本行被抑制（内部已累加计数）。
  */
 static bool mig_abort_log_is_due(DWORD *out_suppressed)
 {
@@ -692,6 +818,9 @@ static bool mig_abort_log_is_due(DWORD *out_suppressed)
 /**
  * @brief 中止 job：不擦 victim、不动 L2P、不移除 closed 条目（源数据仍有效，下轮重试）。
  * 默认档限流打一行 abort；逐 plane 源块号属诊断细节，降到 LOGD。
+ *
+ * @param m      job。
+ * @param reason 中止原因（日志用，静态字符串）。
  */
 static void mig_job_abort(mig_handle_t *m, const char *reason)
 {
@@ -724,6 +853,12 @@ static void mig_job_abort(mig_handle_t *m, const char *reason)
 
 /**
  * @brief 时钟在一个 deadline 起点之后是否已越过 timeout。0 起点 = 刚开始计时。
+ *
+ * @param start_ms   计时起点（0 = 首次进入，本函数置为当前时刻）；返回后保持起点。
+ * @param timeout_ms 超时时长（ms）。
+ *
+ * @return true  —— 已越过 timeout；
+ *         false —— 未超时 / 刚开始计时 / 平台时钟缺失（deadline 不生效）。
  */
 static bool mig_deadline_is_expired(DWORD *start_ms, DWORD timeout_ms)
 {
@@ -743,6 +878,11 @@ static bool mig_deadline_is_expired(DWORD *start_ms, DWORD timeout_ms)
 
 /**
  * @brief 提交不出去超过 FTL_SUBMIT_TIMEOUT_MS ⇒ 中止 job。返回 true = 已中止。
+ *
+ * @param m job。
+ *
+ * @return true  —— 已中止（timed_out / timeout_phase 已置）；
+ *         false —— 未超时。
  */
 static bool mig_job_stall(mig_handle_t *m)
 {
@@ -759,6 +899,12 @@ static bool mig_job_stall(mig_handle_t *m)
 /**
  * @brief 等外部模块超过 FTL_WAIT_TIMEOUT_MS ⇒ 中止 job（不擦 victim）。返回 true = 已中止。
  * ⚠ 与 mig_job_stall 分开：外部命令在飞也计时——"在飞"不等于"会完成"。
+ *
+ * @param m      job。
+ * @param reason 中止原因（日志用，静态字符串）。
+ *
+ * @return true  —— 已中止（timed_out / timeout_phase 已置）；
+ *         false —— 未超时。
  */
 static bool mig_job_wait(mig_handle_t *m, const char *reason)
 {
@@ -774,6 +920,8 @@ static bool mig_job_wait(mig_handle_t *m, const char *reason)
 
 /**
  * @brief 推进到下一页（清本页状态）。读/写两阶段的页推进都走这里。
+ *
+ * @param m job（推进 m->page，并清本页 plane / cw_bitmap / base / decode_ok / write_ok）。
  */
 static void mig_page_next(mig_handle_t *m)
 {
@@ -794,6 +942,10 @@ static void mig_page_next(mig_handle_t *m)
  * - 命令从未提交（建链失败 / stall 超时）且本页对没有任何 plane 编程 ⇒ rewind；
  * - 命令已提交/可能半编程，或前序 plane 已编程 ⇒ 立即关闭 Cold SB。
  * 绝不能在同一个 Open SB 上继续写下一页。
+ *
+ * @param m                 job。
+ * @param command_attempted true = 命令可能已提交或已半编程 ⇒ 关闭 Cold SB；
+ *                          false = 本页对尚无 plane 编程 ⇒ rewind。
  */
 static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
 {
@@ -967,6 +1119,13 @@ static void mig_job_finish(mig_handle_t *m)
 /**
  * @brief 提交单个 plane 的页级映射（Journal→L2P→BST）。调用前已做就绪/容量前置。
  * 普通路径传 m 的字段、batch 路径传 batch 页的字段，故按数组传入。
+ *
+ * @param m       job（更新有效计数与 migrated）。
+ * @param plane   本 plane 下标。
+ * @param bitmap  逐 CW 有效位（flat 绝对编号，bit = plane*CW_NUM+cw）。
+ * @param cw_lba  逐 CW 的扇区 LBA（未写过 = FTL_LBA_INVALID）。
+ * @param src     各 plane 的源 PBA。
+ * @param dst     各 plane 的目标 PBA。
  */
 static void mig_plane_meta_commit(mig_handle_t *m, BYTE plane, const DWORD bitmap[PLANE_NUM], const DWORD cw_lba[PLANE_NUM][CW_NUM], const DWORD src[PLANE_NUM], const DWORD dst[PLANE_NUM])
 {
@@ -1026,6 +1185,11 @@ static void mig_plane_meta_commit(mig_handle_t *m, BYTE plane, const DWORD bitma
 /**
  * @brief 当前页有数据的 plane 是否共享同一页基址。pair 命令只有一个 cmd->meta，
  * 两 plane 都有数据时基址不一致会把 plane1 的 META 写错。
+ *
+ * @param m job（本页 cw_bitmap / base）。
+ *
+ * @return true  —— 有数据的 plane 之间页基址不一致；
+ *         false —— 一致或至多只有一个 plane 有数据。
  */
 static bool mig_page_base_has_mismatch(const mig_handle_t *m)
 {
@@ -1054,6 +1218,8 @@ static bool mig_page_base_has_mismatch(const mig_handle_t *m)
 
 /**
  * @brief 把当前页（数据已在 page_buf、元数据已在 m->cw_*）存入 batch 槽。
+ *
+ * @param m job（batch_count 由调用链保证 < MIG_BATCH_PAGES）。
  */
 static void mig_batch_store_page(mig_handle_t *m)
 {
@@ -1087,6 +1253,11 @@ static void mig_batch_store_page(mig_handle_t *m)
 
 /**
  * @brief 批内页的 L2P 就绪前置 + Journal 总容量预留。返回 true = 可以提交。
+ *
+ * @param m job（batch_count 页）。
+ *
+ * @return true  —— L2P 全部就绪且 Journal 容量预留成功，可以提交；
+ *         false —— 尚未就绪 / 容量不足（已挂起等待，超时会中止 job）。
  */
 static bool mig_batch_prepare_commit(mig_handle_t *m)
 {
@@ -1130,6 +1301,12 @@ static bool mig_batch_prepare_commit(mig_handle_t *m)
     return true;
 }
 
+/**
+ * @brief 释放 cmds[0..n) 中已建好的命令（NULL 条目跳过）。
+ *
+ * @param cmds 命令数组。
+ * @param n    需要释放的条数。
+ */
 static void mig_batch_release_cmds(fc_command_t *cmds[], BYTE n)
 {
     for (BYTE k = 0U; k < n; k++)
@@ -1141,6 +1318,12 @@ static void mig_batch_release_cmds(fc_command_t *cmds[], BYTE n)
     }
 }
 
+/**
+ * @brief 归还本次已分配但不打算使用的 n 个目的页对。
+ *
+ * @param m job。
+ * @param n 需要 rewind 的页对数。
+ */
 static void mig_batch_rewind_dst(mig_handle_t *m, BYTE n)
 {
     for (BYTE k = 0U; k < n; k++)
@@ -1151,6 +1334,14 @@ static void mig_batch_rewind_dst(mig_handle_t *m, BYTE n)
 
 /**
  * @brief 建 N 条 pair 命令（不提交）。失败时释放已建命令，返回 FTL_AGAIN/FTL_ERROR。
+ *
+ * @param m    job。
+ * @param n    本批页数（1..MIG_BATCH_PAGES）。
+ * @param cmds 出参：建好的 n 条命令（失败时已释放前序命令）。
+ *
+ * @return FTL_OK    —— n 条命令全部建好；
+ *         FTL_AGAIN —— 命令池 / 描述符 / 缓冲池空（瞬态背压）；
+ *         FTL_ERROR —— 建链失败。
  */
 static ftl_status_e mig_batch_build_cmds(mig_handle_t *m, BYTE n, fc_command_t *cmds[MIG_BATCH_PAGES])
 {
@@ -1189,6 +1380,12 @@ static ftl_status_e mig_batch_build_cmds(mig_handle_t *m, BYTE n, fc_command_t *
 
 /**
  * @brief 为 N 页分配连续目的页对；失败时归还已分配的前缀。
+ *
+ * @param m job（batch[].dst 为出参）。
+ * @param n 本批页数。
+ *
+ * @return true  —— n 个目的页对全部分配成功；
+ *         false —— 分配失败（已归还已分配的前缀）。
  */
 static bool mig_batch_alloc_dst(mig_handle_t *m, BYTE n)
 {
@@ -1210,6 +1407,14 @@ static bool mig_batch_alloc_dst(mig_handle_t *m, BYTE n)
  * 返回 false = 纯计算推进了一步，mig_job_step 继续处理下一个 phase。
  */
 
+/**
+ * @brief MIG_READ：读 victim 当前页的当前 plane（只读 [0, next_page)）。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（已提交 / 提交失败 / 原地等资源）；
+ *         false —— 纯计算推进了一步。
+ */
 static bool mig_read_step(mig_handle_t *m)
 {
     // 只读该块**已编程**的页 [0, next_page)。空洞页物理上是擦除态，读它只会得到
@@ -1357,6 +1562,15 @@ static bool mig_read_step(mig_handle_t *m)
     return true;
 }
 
+/**
+ * @brief MIG_READ_SETTLE：先做 L2P 就绪前置，再一次性算出本 plane 的 cw_bitmap。
+ * 空页（decode_ok == false）直接置空位图；region 未驻留则原地返回、下轮重扫。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（L2P 尚未就绪）；
+ *         false —— 纯计算推进了一步。
+ */
 static bool mig_read_settle_step(mig_handle_t *m)
 {
     const BYTE plane = m->plane;
@@ -1413,6 +1627,14 @@ static bool mig_read_settle_step(mig_handle_t *m)
     return false;
 }
 
+/**
+ * @brief MIG_WRITE：对本页下一个有待写 CW 的 plane 提交一条 CW 子集写。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（已提交 / 提交失败 / 原地等资源）；
+ *         false —— 纯计算推进了一步。
+ */
 static bool mig_write_step(mig_handle_t *m)
 {
     // 找本页下一个有待写 CW 的 plane
@@ -1450,6 +1672,14 @@ static bool mig_write_step(mig_handle_t *m)
     return true;
 }
 
+/**
+ * @brief MIG_WRITE_SETTLE：先做 L2P 就绪与 Journal 容量前置，再提交本 plane 的页级映射。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（尚未就绪 / 容量不足 / 等待超时）；
+ *         false —— 纯计算推进了一步。
+ */
 static bool mig_write_settle_step(mig_handle_t *m)
 {
     const BYTE plane = m->plane;
@@ -1512,6 +1742,11 @@ static bool mig_write_settle_step(mig_handle_t *m)
  * @brief 提交一个已收集的 batch：N 页 pair 命令，一次全进 SQ。
  * N>=2 用 cache program（首页 FIRST + 中间 CACHE + 末页 END）；N==1 用普通 op31。
  * 目的页预检保证同一 Open SB、页号 >=1 且 room>=N，因此不会跨块/落到 page0。
+ *
+ * @param m job（batch_count / batch[]）。
+ *
+ * @return true  —— 本轮到此为止（已提交 / 提交失败 / 背压原地等）；
+ *         false —— 纯计算推进了一步。
  */
 static bool mig_write_batch_step(mig_handle_t *m)
 {
@@ -1586,6 +1821,11 @@ static bool mig_write_batch_step(mig_handle_t *m)
 
 /**
  * @brief 批次全部成功后的两遍式确认：就绪/Journal 全过后，逐页提交映射。
+ *
+ * @param m job（batch_count / batch[]）。
+ *
+ * @return true  —— 本轮到此为止（尚未就绪 / 容量不足 / 等待超时）；
+ *         false —— 纯计算推进了一步。
  */
 static bool mig_write_settle_batch_step(mig_handle_t *m)
 {
@@ -1623,6 +1863,14 @@ static bool mig_write_settle_batch_step(mig_handle_t *m)
     return false;
 }
 
+/**
+ * @brief MIG_FLUSH_JRN：等 Journal job 空闲并确认搬移条目已落盘（F10 屏障）。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（Journal 在飞 / 刷不动 / 等待超时）；
+ *         false —— 屏障达成或无需屏障，进入 ERASE。
+ */
 static bool mig_flush_jrn_step(mig_handle_t *m)
 {
     // Journal 持久性失败 pending（页写失败 ⇒ 条目已丢）：
@@ -1673,6 +1921,14 @@ static bool mig_flush_jrn_step(mig_handle_t *m)
     return false;
 }
 
+/**
+ * @brief MIG_ERASE：逐个仍归本 victim 的 plane 提交异步擦除。
+ *
+ * @param m job。
+ *
+ * @return true  —— 本轮到此为止（已提交 / 提交失败 / 原地等资源）；
+ *         false —— 纯计算推进了一步（无剩余 plane ⇒ DONE）。
+ */
 static bool mig_erase_step(mig_handle_t *m)
 {
     m->plane = mig_present_plane_next(m->alloc, m, m->plane);
@@ -1815,6 +2071,13 @@ void mig_gc_request_urgent(mig_handle_t *m)
 
 /**
  * @brief GC 求值（自持节拍）：命中时返回 GC_TRIGGER_* 位掩码并打观测日志。
+ *
+ * @param m            job。
+ * @param now_ms       当前时刻（0 = 无时钟）。
+ * @param host_writing 出参：本轮的 host 写流判定。
+ *
+ * @return 非 0 —— gc_should_trigger 的触发位掩码（本轮可以尝试 GC）；
+ *         0    —— 本轮未到节拍 / 无触发 / 处于 no-gain 退避。
  */
 static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
 {
@@ -1864,6 +2127,13 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
     return triggers;
 }
 
+/**
+ * @brief 把 job 当前状态填进 mig_status_t（只读观测）。
+ *
+ * @param m    job。
+ * @param info 本轮动态信息（可空；非空时按 load_level 判 wants_run）。
+ * @param out  出参：本轮上报。
+ */
 static void mig_status_fill(const mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 {
     out->base.critical = true; /* 写路径紧急 GC 在 BUSY 档起，不推进即死锁 */
@@ -1914,6 +2184,9 @@ static void mig_status_fill(const mig_handle_t *m, const bg_info_t *info, mig_st
 
 /**
  * @brief GC 会话进展：只在会话活跃且距上次 >=5 s 时打；now_ms==0（无时钟）时不打。
+ *
+ * @param m      job。
+ * @param now_ms 当前时刻（0 = 无时钟，不打日志）。
  */
 static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
 {
@@ -1932,6 +2205,9 @@ static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
 
 /**
  * @brief GC 会话收尾：连续 GC_SESSION_IDLE_MS 没有 GC job 活动。
+ *
+ * @param m      job。
+ * @param now_ms 当前时刻（0 = 无时钟，不收尾）。
  */
 static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
 {
@@ -2074,6 +2350,10 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 /**
  * @brief MIG_READ 完成：拷数据 + 解 META 得逐 CW 的扇区 LBA；顺带记 ECC 趋势 + read_count
  * （慢死预测闭环）。失败 / 全页空洞 ⇒ 该 plane 无有效 CW，不影响另一 plane。
+ *
+ * @param m          job。
+ * @param cmd        完成的命令（本函数负责 release）。
+ * @param completion FC 完成状态。
  */
 static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -2191,6 +2471,10 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
 /**
  * @brief MIG_WRITE 完成：只记成败，L2P/Journal/有效计数的改动在 MIG_WRITE_SETTLE。
  * 写失败 ⇒ **中止 job，victim 不擦**（源数据仍有效，下轮再搬）；绝不能继续到 ERASE。
+ *
+ * @param m          job。
+ * @param cmd        完成的命令（本函数负责 release）。
+ * @param completion FC 完成状态。
  */
 static void mig_write_complete(mig_handle_t *m, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -2242,6 +2526,10 @@ static void mig_write_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
  * @brief MIG_WRITE_BATCH 完成：逐条 release，只有全部成功才进入两遍式确认。
  * 任一失败 ⇒ 立即关闭 cold SB 并 abort（victim 不擦）；其余在飞命令由孤儿守卫 release。
  * 没有映射被提交，因此未确认的 batch 页只是垃圾。
+ *
+ * @param m          job。
+ * @param cmd        完成的命令（本函数负责 release）。
+ * @param completion FC 完成状态。
  */
 static void mig_write_batch_complete(mig_handle_t *m, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -2292,6 +2580,10 @@ static void mig_write_batch_complete(mig_handle_t *m, fc_command_t *cmd, const f
 /**
  * @brief MIG_ERASE 完成：成功 ⇒ erase_count++ / last_pe_ts / 清 valid，
  * 然后按 post 二选一（FREE 入池 / RETIRE 退役）；失败 ⇒ bbt_mark_bad。
+ *
+ * @param m          job。
+ * @param cmd        完成的命令（本函数负责 release）。
+ * @param completion FC 完成状态。
  */
 static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_command_status_t *completion)
 {

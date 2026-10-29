@@ -23,9 +23,7 @@
 
 #include <string.h>
 
-/**
- * @brief 内部前向声明：Closed 提交在 Open 分配之后定义。
- */
+// 前向声明：Closed 提交在 Open 分配之后定义；契约写在定义处。
 static WORD alc_super_close_live(alc_t *alloc, super_block_t *sb);
 
 /* ── 1. 初始化 ── */
@@ -214,14 +212,17 @@ DWORD alc_free_get_max_erase(const alc_t *alloc)
 }
 
 /**
- * @brief 从 Free Pool 选该 plane 擦除最少的块
+ * @brief 从 Free Pool 为指定 plane 选一个块
  *
- * @return gblock 或 FTL_GBLOCK_INVALID。
+ * @param alloc 分配器
+ * @param plane 目标 plane
+ * @param mode  分配策略（决定取擦除最少还是最多）
+ *
+ * @return 选中的 gblock
+ *         FTL_GBLOCK_INVALID = 该 plane 无可用空闲块
  *
  * @note 实现要点：判据是 Free Pool 数组成员关系，不是 BST 的 FREE 位；
  * 选中 ⇒ alc_free_remove 必然成功。
- *
- * @note 参数：alloc — 分配器；plane — 目标 plane。
  */
 static WORD alc_free_find_block(const alc_t *alloc, BYTE plane, alc_super_alloc_mode_e mode)
 {
@@ -385,11 +386,14 @@ WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index)
 /**
  * @brief 为 Open SB 分配各 plane 的物理块
  *
- * @return true 成功；false 某 plane 无块。
+ * @param alloc 分配器
+ * @param sb    目标槽
+ * @param mode  分配策略
+ *
+ * @return true = 分配成功
+ *         false = 某 plane 无块
  *
  * @note 实现要点：选块阶段无副作用；全部就位后才出池并置 OPEN，失败无需回滚。
- *
- * @note 参数：alloc — 分配器；sb — 目标槽；mode — 分配策略。
  */
 static bool alc_super_open(alc_t *alloc, super_block_t *sb, alc_super_alloc_mode_e mode)
 {
@@ -612,13 +616,15 @@ void alc_super_prepare_wl_destination(alc_t *alloc)
 /**
  * @brief Open → Closed：唯一 live setter + 列表追加
  *
- * @return 新列表索引；FTL_BLOCK_NO_SB = 列表满，条目被拒绝。
+ * @param alloc 分配器
+ * @param sb    待关闭 SB（live 或重建时的临时条目）
+ *
+ * @return 新条目在 closed_sb_list 的索引
+ *         FTL_BLOCK_NO_SB = 列表满，条目被拒绝
  *
  * @note 实现要点：live 标志与列表副本必须在同一函数内完成——只改副本会让 Open SB
  * 继续被分配、或被重复关闭（RISK-ALLOC-01）。调用者必须检查失败码；列表满
  * 属结构异常，不能静默吞掉。
- *
- * @note 参数：alloc — 分配器；sb — 待关闭 SB（live 或重建时的临时条目）。
  */
 static WORD alc_super_close_live(alc_t *alloc, super_block_t *sb)
 {

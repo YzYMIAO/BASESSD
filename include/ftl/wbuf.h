@@ -105,6 +105,11 @@ typedef struct
 
 /**
  * @brief 绑定窄上下文并复位 handle。
+ *
+ * @param h       wbuf handle（整块清零后重新绑定上下文）
+ * @param alloc   allocator（取页对 / 归还页对 / 查 Open 页状态）
+ * @param pending pending 表（组在飞数结算 / 窗口占用查询 / 子操作登记）
+ * @param migrate migrate handle（Free Pool 耗尽时登记紧急 GC）
  */
 void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
 
@@ -117,16 +122,46 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_han
  *
  * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
  * 只有编程成功的 FLUSH 才清空缓冲。`info` 当前不参与决策（保留以统一 typed 入口）。
+ *
+ * @param h       wbuf handle
+ * @param trigger 触发参数（kind + 对应载荷：LBA / 数据 / CW 数 / 组号）
+ * @param info    后台调度信息（当前不参与决策，保留以统一 typed 入口）
+ * @param out     出参（可为 NULL）：非 NULL 时填本轮状态上报
+ * @return FTL_OK    操作完成 / 无需操作
+ *         FTL_AGAIN APPEND / FLUSH 遇到瞬态背压（缓冲保留，可重试）
+ *         FTL_ERROR FLUSH 建链失败 / trigger->kind 非法
  */
 ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_info_t *info, wb_status_t *out);
 
 /* ── 查询（读路径；只判不取） ── */
+
+/**
+ * @brief 该 LBA 是否在缓冲里（当前打开窗口内且槽位有效）。
+ *
+ * @param h   wbuf handle
+ * @param lba 逻辑地址
+ * @return true = 命中当前窗口的有效槽位
+ *         false = 未命中（无打开窗口 / pair 窗口不同 / 槽位为空）
+ */
 bool wb_has(const wb_handle_t *h, DWORD lba);
+
+/**
+ * @brief 从缓冲读取一个 IU 的数据。
+ *
+ * @param h   wbuf handle
+ * @param lba 逻辑地址
+ * @param out 输出缓冲（至少 FTL_IU_BYTES 字节）
+ * @return true = 命中并已拷贝 FTL_IU_BYTES 字节
+ *         false = 未命中（out 不被写）
+ */
 bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
 
 /**
  * @brief wbuf 是否完全空闲（无打开窗口、无未编程数据）。
  * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。
+ *
+ * @param h wbuf handle
+ * @return true = 完全空闲；false = 仍有打开窗口或未编程数据
  */
 static inline bool wb_is_idle(const wb_handle_t *h)
 {

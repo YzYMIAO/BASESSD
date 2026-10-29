@@ -331,7 +331,14 @@ typedef struct mig_handle
     BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } mig_handle_t;
 
-/** @brief 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
+/**
+ * @brief 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。
+ *
+ * @param m handle（只读）。
+ *
+ * @return true  —— 每个 plane 的 fail_gblock[] 都是 UINT16_MAX；
+ *         false —— 至少一个 plane 仍记着源块。
+ */
 static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -349,8 +356,13 @@ static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 /**
  * @brief 绑定窄上下文并复位 handle。
  *
- * @param m     handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param alloc / journal / cache / total_writes  窄上下文（init 绑定；拓扑取 alloc 的 ch/ce/lun）
+ * @param m            handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param alloc        allocator（拓扑也从这里取）
+ * @param journal      Journal 端口
+ * @param cache        L2P cache 端口
+ * @param total_writes host 累计写计数指针（host 写流判定与 WL 让路用）
+ *
+ * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
  */
 void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes);
 

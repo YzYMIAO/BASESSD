@@ -74,7 +74,15 @@
 #define FTL_FC_HOST_RESERVED_SQ   (4U)
 #define FTL_FC_HOST_RESERVED_HSQ  (2U)
 
-/** @brief host 是否还有余量提交 n 个子操作。查询失败时不阻塞前台（宁可少一次预留）。 */
+/**
+ * @brief host 是否还有余量提交 n 个子操作。
+ *
+ * 逐池检查：受理本批 n 个子操作后，命令 / desc / buffer / SQ / HSQ 仍各留
+ * FTL_FC_HOST_RESERVED_* 个槽位。查询失败时不阻塞前台（宁可少一次预留）。
+ *
+ * @param n 本批子操作数（命令 / SQ 各占 n 个槽，desc / buffer 各占 n × FTL_LBA_PER_PAIR 个）
+ * @return true 余量足够；false 应背压 host 写
+ */
 static inline bool ftl_fc_host_budget_ok_n(DWORD n)
 {
     fc_resource_stats_t st;
@@ -89,7 +97,11 @@ static inline bool ftl_fc_host_budget_ok_n(DWORD n)
     return (st.command_used + n + FTL_FC_HOST_RESERVED_CMDS <= FC_COMMAND_POOL_DEPTH) && (st.descriptor_used + cw + FTL_FC_HOST_RESERVED_DESC <= FC_DESCRIPTOR_POOL_DEPTH) && (st.buffer_used + cw + FTL_FC_HOST_RESERVED_BUFS <= FC_BUFFER_POOL_DEPTH) && (st.sq_used + n + FTL_FC_HOST_RESERVED_SQ <= FC_SQ_DEPTH) && (st.hsq_used + FTL_FC_HOST_RESERVED_HSQ <= FC_HSQ_DEPTH);
 }
 
-/** @brief host 是否还有余量提交一个子操作。查询失败时不阻塞前台（宁可少一次预留）。 */
+/**
+ * @brief host 是否还有余量提交一个子操作。查询失败时不阻塞前台（宁可少一次预留）。
+ *
+ * @return true 余量足够；false 应背压 host 写
+ */
 static inline bool ftl_fc_host_budget_ok(void)
 {
     return ftl_fc_host_budget_ok_n(1U);
@@ -106,6 +118,9 @@ static inline bool ftl_fc_host_budget_ok(void)
  * （见 fc_command.h）。本层调用者手里的 cmd 恒来自 fc_command_alloc()，故 ID 必然有效；
  * 池外指针（栈上的 fc_command_t）得到 FC_COMMAND_ID_INVALID——那是编程错误，
  * 调用方（pending_add / sync_wait）会因查不到而失败，不会静默串命令。
+ *
+ * @param cmd 命令指针（本层调用者恒来自 fc_command_alloc()）
+ * @return FC 命令池 ID；池外指针返回 FC_COMMAND_ID_INVALID
  */
 static inline WORD ftl_cmd_id(const fc_command_t *cmd)
 {
@@ -122,6 +137,9 @@ static inline WORD ftl_cmd_id(const fc_command_t *cmd)
  * param.bytes + feature_addr。两者都不建链（desc_id 保持 INVALID）。
  * 与 fc_command_validate 的接受条件对齐：只有 has_data 且非 FEATURES 的操作
  * 才要求 desc_id 有效。
+ *
+ * @param cmd 已填好 config.operation 的命令
+ * @return true 需要 desc 链；false 无数据负载（ERASE / RESET / LOCK / FEATURES 等）
  */
 static inline bool ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
 {
@@ -148,19 +166,32 @@ static inline bool ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
 /**
  * @brief plane 数 → config.multi_plane 字段。
  * 纯打包：nplanes 的值域由调用点紧邻的 ftl_plane_*_op 断言（同一个 nplanes）。
+ *
+ * @param nplanes 本子操作覆盖的 plane 数
+ * @return 1 → 0（单 plane 语义）；N > 1 → N
  */
 static inline BYTE ftl_plane_multi_field(BYTE nplanes)
 {
     return ((nplanes > 1U) ? nplanes : 0U);
 }
 
-/** @brief plane 数 → 读 operation 码。界取 PLANE_NUM，与 fc_command_plane_span 的上界同源。 */
+/**
+ * @brief plane 数 → 读 operation 码。界取 PLANE_NUM，与 fc_command_plane_span 的上界同源。
+ *
+ * @param nplanes 本子操作覆盖的 plane 数
+ * @return 单 plane → OP_NORMAL_READ_PAGE_WITH_DATA_OUT；多 plane → OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT
+ */
 static inline BYTE ftl_plane_read_op(BYTE nplanes)
 {
     return ((nplanes > 1U) ? OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT : OP_NORMAL_READ_PAGE_WITH_DATA_OUT);
 }
 
-/** @brief plane 数 → 写 operation 码。界同上。 */
+/**
+ * @brief plane 数 → 写 operation 码。界同上。
+ *
+ * @param nplanes 本子操作覆盖的 plane 数
+ * @return 单 plane → OP_NORMAL_PROGRAM_PAGE；多 plane → OP_PROGRAM_PAGE_MULTI_PLANE
+ */
 static inline BYTE ftl_plane_write_op(BYTE nplanes)
 {
     return ((nplanes > 1U) ? OP_PROGRAM_PAGE_MULTI_PLANE : OP_NORMAL_PROGRAM_PAGE);
@@ -169,6 +200,10 @@ static inline BYTE ftl_plane_write_op(BYTE nplanes)
 /**
  * @brief cache program 批次第 j 页（共 n 页）使用的 op：
  * 首页 = FIRST（只查 FAIL）、中间页 = CACHE（查 FAIL|FAILC）、末页 = END（10h）。
+ *
+ * @param j 批次内的页下标（0 起）
+ * @param n 批次总页数
+ * @return OP_TWO_PLANE_PROGRAM_CACHE_FIRST / _CACHE / _END
  */
 static inline BYTE ftl_cache_prog_op(BYTE j, BYTE n)
 {
@@ -203,7 +238,8 @@ static inline BYTE ftl_cache_prog_op(BYTE j, BYTE n)
  *
  * @param cmd       须已设 config.operation / multi_plane / paa（config.cw 已不读）
  * @param cw_bitmap flat 字面位图；无数据 op（ERASE / RESET / FEATURES）不读它
- * @return FTL_OK / FTL_ERROR（池空；位图 0 或越出 plane 段是编程错误 → ASSERT）
+ * @return FTL_OK 建链成功
+ *         FTL_ERROR 池空；位图 0 或越出 plane 段是编程错误 → ASSERT
  */
 ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap);
 
@@ -227,7 +263,7 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap);
  *   未用到的那半个 pair 的 pba 保持未初始化。
  *
  * @param cmd        FC 命令（须已设 config.operation / multi_plane / meta）
- * @param pba        [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
+ * @param pba        [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取本命令实际覆盖的第一个 plane）
  * @param cw_bitmap  flat 字面位图（bit = plane*CW_NUM + cw，0 = 空集 → ASSERT）
  * @return FTL_OK
  *         FTL_AGAIN（desc/buffer 池空）
@@ -235,7 +271,10 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap);
  */
 ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap);
 
-/* ── 地址直填：DWORD → FC 命令（PBA→PAA 的唯一关卡之一）──
+/* ── 地址直填：DWORD → FC 命令（PBA→PAA 的唯一关卡之一）── */
+
+/**
+ * @brief 地址直填：把 PBA 写进 FC 命令（PBA→PAA 的唯一关卡之一）。
  *
  * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
  * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
@@ -252,6 +291,11 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
  * 本入口把 fc_command_plane_span_cw_bitmap(cmd)（「本命令 plane 段内全部 CW」）算出来
  * 直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 / checkpoint /
  * sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
+ *
+ * @param cmd 已从 fc_command_alloc() 取得、且已判空的命令
+ * @param pba 本命令的 PBA（须通过 pba_is_valid）
+ * @return FTL_OK 建链成功
+ *         FTL_ERROR 池空 / 位图越段（ASSERT 后的 release 拒绝）
  */
 static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
 {
@@ -269,10 +313,8 @@ static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
     cmd->paa        = pba_to_paa(pba);
 
-    /**
-     * @brief 位图不存进命令结构体，直接算出来当实参传。
-     * 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。
-     */
+    // 位图不存进命令结构体，直接算出来当实参传。
+    // 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。
     return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 }
 
@@ -283,6 +325,9 @@ static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
  * 的表示。ch/ce 取 cmd->config 位域，其余字段由 paa_to_pba() 反重排。
  *
  * ⚠ 本函数与 pba_to_cmd() 是 FTL 层仅有的两处 PBA↔PAA 转换点。
+ *
+ * @param cmd 命令（ch/ce 取 config 位域，其余字段由 paa 反解）
+ * @return 该命令的行地址 PBA
  */
 static inline DWORD ftl_cmd_pba(const fc_command_t *cmd)
 {
@@ -323,7 +368,8 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
  * @param cmd     已建链的命令（desc_id 有效）
  * @param data    源数据
  * @param length  字节数
- * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ * @return FTL_OK 搬入成功
+ *         FTL_ERROR 链上 desc 无 buffer
  */
 ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD length);
 
@@ -338,7 +384,8 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
  * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap）
  * @param page_buf   整页镜像（FTL_READ_USER_SIZE 字节，CW c 的数据在 page_buf + c×512）
  * @param cw_bitmap  本页哪些 CW 有效（flat 字面位图，与本命令链同源）
- * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ * @return FTL_OK 搬入成功
+ *         FTL_ERROR 链上 desc 无 buffer
  */
 ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap);
 
@@ -355,7 +402,8 @@ ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWOR
  * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap，可跨两个 plane）
  * @param pair_buf   pair 镜像（`FTL_LBA_PER_PAIR * FTL_IU_BYTES` 字节）
  * @param cw_bitmap  本页哪些 CW 有效（flat 位图，bit = plane*CW_NUM + cw）
- * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ * @return FTL_OK 搬入成功
+ *         FTL_ERROR 链上 desc 无 buffer
  */
 ftl_status_e ftl_cmd_write_data_pair_cw(fc_command_t *cmd, const BYTE *pair_buf, DWORD cw_bitmap);
 
@@ -367,7 +415,8 @@ ftl_status_e ftl_cmd_write_data_pair_cw(fc_command_t *cmd, const BYTE *pair_buf,
  * @param cmd     已完成的命令（desc_id 有效）
  * @param buffer  输出缓冲
  * @param length  字节数
- * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ * @return FTL_OK 拷出成功
+ *         FTL_ERROR 链上 desc 无 buffer / 链比请求短
  */
 ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
 
@@ -390,7 +439,8 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  * @param cmd         已建链的命令（本函数负责提交）
  * @param status_out  输出：完成状态（可 NULL）
  * @param timeout_us  超时微秒（0 = 默认 10ms）
- * @return FTL_OK 完成（status_out 有效）；FTL_ERROR 提交失败 / 超时 / 旁表满
+ * @return FTL_OK 完成（status_out 有效）
+ *         FTL_ERROR 提交失败 / 超时 / 旁表满
  */
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us);
 
@@ -441,35 +491,72 @@ typedef struct
  *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（若忽略错误位会看不出来）。 */
 #define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN})
 
-/** @brief 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
+/**
+ * @brief 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。
+ *
+ * @param pba    目标页 PBA（整段访问，隐含两 plane 同 block）
+ * @param data   源数据（可 NULL；NULL 或 length 为 0 时不搬数据）
+ * @param length 字节数
+ * @param cfg    页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 成功
+ *         FTL_ERROR 池空 / 提交失败 / 命令报错 / 搬数据失败
+ */
 ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 
-/** @brief 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。 */
+/**
+ * @brief 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。
+ *
+ * @param pba    目标页 PBA
+ * @param buffer 输出缓冲（可 NULL；NULL 或 length 为 0 时不拷出）
+ * @param length 字节数
+ * @param cfg    页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 成功且页内容可信
+ *         FTL_ERROR 池空 / 提交失败 / 命令报错 / 拷出失败
+ */
 ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_t *cfg);
 
 /**
  * @brief 裸页读：LDPC_RAW，整页 4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE）。
+ *
  * ⚠ 刻意**不判定 NAND 失败**——BBT 坏页也要拿到原始位（上层按「非全 FF」判空）。
- * /
+ *
+ * @param pba    目标页 PBA
+ * @param buffer 输出缓冲（须 >= PAGE_SIZE，按 CW 槽位排布）
+ * @return FTL_OK 命令完成（内容不保证可信）
+ *         FTL_ERROR 池空 / 提交失败 / 取不到 CW 数据
  */
 ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer);
 
 /**
  * @brief 判整页是否未写过：RAW 读后检查每个 CW 槽（META+CRC+USER 前缀 512B）是否全 FF。
+ *
  * 读命令没走通 ⇒ 一律返回 false（判“非空”，保守方向）。
  * raw_buf 需 >= PAGE_SIZE；判据与 full rebuild / BBT 探针 / L2P 日志区恢复共用
  * （C2：唯一实现）。整段检查而非只看 META：半编程页的 META 可能仍是全 FF。
- * /
+ *
+ * @param pba     目标页 PBA
+ * @param raw_buf 整页工作缓冲（>= PAGE_SIZE；函数会先填 0xFF）
+ * @return true 整页未写过；false 有非 0xFF 字节或读命令失败
  */
 bool ftl_page_is_blank_raw(DWORD pba, void *raw_buf);
 
-/** @brief 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。 */
+/**
+ * @brief 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。
+ *
+ * @param pba 目标块 PBA（plane 取自它）
+ * @return FTL_OK 成功
+ *         FTL_ERROR 池空 / 提交失败 / 命令报错
+ */
 ftl_status_e ftl_sync_erase_block(DWORD pba);
 
 /**
  * @brief 擦块（多 plane）：OP_ERASE_BLOCK_MULTI_PLANE，擦**同一 block 号在两个 plane**
  * 上的两个物理块。只给跨 plane 的固定池（Journal：页地址按奇偶跨 plane）用；
  * 普通块擦除仍走单 plane 版本。PBA 的 plane 字段被忽略。
+ *
+ * @param pba 目标块 PBA（只用其 block 号，plane 字段被忽略）
+ * @return FTL_OK 成功
+ *         FTL_ERROR 池空 / 提交失败 / 命令报错
  */
 ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba);
 
@@ -487,7 +574,13 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba);
  *   ⇒ fc_command_alloc 恒 NULL ⇒ 全系统 FTL_AGAIN。
  * ⚠ 失败返回时命令已自行回收（与 ftl_sync_* 同约定），out_cmd 不被写入。
  *
- * @return FTL_OK 命令已备好；FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽（可稍后重试）。
+ * @param out_cmd 出参：已建链、已装好数据的命令（须提交或 release）
+ * @param pba     目标页 PBA（整段访问）
+ * @param data    源数据（可 NULL；NULL 或 length 为 0 时不搬数据）
+ * @param length  字节数
+ * @param cfg     页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 命令已备好
+ *         FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽（可稍后重试）
  */
 ftl_status_e ftl_async_write_page(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 
@@ -506,10 +599,19 @@ ftl_status_e ftl_async_write_page(fc_command_t **out_cmd, DWORD pba, const void 
  */
 ftl_status_e ftl_async_erase_block(fc_command_t **out_cmd, DWORD pba);
 
-/** @brief 多 plane 擦块（异步）：同 ftl_async_erase_block，op = OP_ERASE_BLOCK_MULTI_PLANE。 */
+/**
+ * @brief 多 plane 擦块（异步）：同 ftl_async_erase_block，op = OP_ERASE_BLOCK_MULTI_PLANE。
+ *
+ * @param out_cmd 出参：已建链的命令（须提交或 release）
+ * @param pba     目标块 PBA（只用其 block 号，plane 字段被忽略）
+ * @return FTL_OK 命令已备好
+ *         FTL_AGAIN 命令池空
+ *         FTL_ERROR 入参或地址非法 / 建链失败
+ */
 ftl_status_e ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, DWORD pba);
 
-/* ── 元数据镜像写（多 plane 同页同数据）──
+/**
+ * @brief 元数据镜像写（多 plane 同页同数据），**不提交**。
  *
  * 用 OP_PROGRAM_PAGE_MULTI_PLANE 把**同一份页数据**一次写入 PLANE_NUM 个 plane 的
  * 同一 block/page（元数据固定池的空间冗余；读侧任一副本有效即可）。
@@ -519,11 +621,27 @@ ftl_status_e ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, DWORD pba
  *
  * ⚠ 只给**固定元数据池**用；用户数据/日志块仍走单 plane/正常多 plane 数据路径。
  * ⚠ 这是 multi-plane program：两个 plane 的 page 必须都处于擦除态。
+ *
+ * @param out_cmd 出参：已建链、已装好数据的命令（须提交或 release）
+ * @param pba     目标块 PBA（其 block/page 被复制到每个 plane）
+ * @param data    页数据（长度可小于 PAGE_MAIN_SIZE，不足部分以 0xFF 补齐）
+ * @param length  有效字节数（<= PAGE_MAIN_SIZE）
+ * @param cfg     页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 命令已备好
+ *         FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽
+ *         FTL_ERROR 建链失败 / 搬数据失败
  */
 ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 
 /**
  * @brief 镜像写的同步版（建链 + 提交等待 + 判错）。
+ *
+ * @param pba    目标块 PBA（其 block/page 被复制到每个 plane）
+ * @param data   页数据（长度可小于 PAGE_MAIN_SIZE）
+ * @param length 有效字节数（<= PAGE_MAIN_SIZE）
+ * @param cfg    页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 成功
+ *         FTL_ERROR 建链失败 / 提交失败 / 命令报错
  */
 ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg);
 
@@ -539,8 +657,14 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
  * ⚠ cw_bitmap 须落在本命令 plane 段内（单 plane 命令的段由 pba 的 plane 决定，
  *   见 ftl_cmd_setup_ppa_pair_cw 的注释）；越段是编程错误 → ASSERT。
  *
- * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；
- *         FTL_ERROR 入参非法 / 地址非法 / 建链失败 / 搬数据失败。
+ * @param out_cmd   出参：已建链、已装好数据的命令（须提交或 release）
+ * @param pba       目标页 PBA（plane 由它决定）
+ * @param page_buf  单页镜像（FTL_READ_USER_SIZE 字节，CW c 的数据在 page_buf + c×512）
+ * @param cw_bitmap 本页哪些 CW 有效（flat 字面位图，bit = plane*CW_NUM + cw）
+ * @param cfg       页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 命令已备好（须提交或 release）
+ *         FTL_AGAIN 命令池空
+ *         FTL_ERROR 入参非法 / 地址非法 / 建链失败 / 搬数据失败
  */
 ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_t *cfg);
 
@@ -554,6 +678,12 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
  *   cw_bitmap 是 flat 绝对位图（bit = plane*CW_NUM+cw）。两 plane 都在时传全 1。
  * ⚠ 两个 pba 必须同 ch/ce/lun；多 plane 命令的 desc 链必须覆盖每个 plane。
  *
+ * @param out_cmd   出参：已建链、已装好数据的命令（须提交或 release）
+ * @param pba       [PLANE_NUM] 每 plane 的 PBA（只校验位图覆盖的 plane）
+ * @param pair_buf  plane-major pair 镜像（plane0 的 PAGE_MAIN_SIZE 字节 + plane1 的 PAGE_MAIN_SIZE 字节）
+ * @param cw_bitmap flat 绝对位图（bit = plane*CW_NUM + cw）
+ * @param operation 写页 operation（普通写或 cache program 批次中的一页）
+ * @param cfg       页配置（crc / random / ldpc / 页 LBA）
  * @return FTL_OK
  *         FTL_AGAIN（命令池空）
  *         FTL_ERROR（入参、地址或建链失败）。
@@ -570,7 +700,12 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
  *
  * 成败判据也搬到服务函数（同步版是 FC_CW_STATUS_ERROR_MASK 全集，见 ftl_sync_read_page）。
  *
- * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；FTL_ERROR 入参或地址非法。
+ * @param out_cmd 出参：已建链的命令（须提交或 release）
+ * @param pba     目标页 PBA
+ * @param cfg     页配置（crc / random / ldpc / 页 LBA）
+ * @return FTL_OK 命令已备好（须提交或 release）
+ *         FTL_AGAIN 命令池空
+ *         FTL_ERROR 入参或地址非法
  */
 ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_page_cfg_t *cfg);
 
@@ -586,8 +721,16 @@ ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_pa
  *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 ftl_op_route_get 解析归属实例）。
  *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
  *
- * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空。
- *         ⚠ out_cmd 由调用者传局部地址，不在此重复断言。
+ * @param out_cmd      出参：已备好的命令（须提交或 release）
+ * @param ch           目标 die 的 ch（完成派发路由键）
+ * @param ce           目标 die 的 ce（完成派发路由键）
+ * @param lun          目标 die 的 lun（完成派发路由键）
+ * @param feature_addr 特性寄存器地址
+ * @param mode         写入特性寄存器的值
+ * @return FTL_OK 命令已备好（须提交或 release）
+ *         FTL_AGAIN 命令池空
+ *
+ * @note out_cmd 由调用者传局部地址，本函数不重复断言。
  */
 ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode);
 
@@ -605,7 +748,12 @@ ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BY
  * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
  * column + 4 须落在页内：唯一调用者 bbt.c 传 PAGE_MAIN_SIZE（+4 ≤ PAGE_SIZE），
  * 本函数不重复校验。
- * /
+ *
+ * @param pba    目标页 PBA（行地址取 block/plane/page）
+ * @param column 列地址（spare 首字节 = PAGE_MAIN_SIZE）
+ * @param out    输出 4 字节（控制器侧暂存结果）
+ * @return FTL_OK 命令完成（内容不保证可信）
+ *         FTL_ERROR 池空 / 提交失败 / 命令报错
  */
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4]);
 

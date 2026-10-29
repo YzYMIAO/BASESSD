@@ -114,6 +114,9 @@ typedef struct
 
 /**
  * @brief cp_ring_init — 优先用候选池（跳过 BAD）；池未建立时退回名义区间
+ *
+ * @param alloc  allocator（取其 pools->cp 候选表；可为 NULL）
+ * @param ring   输出：初始化后的 Checkpoint 环
  */
 static void cp_ring_init(const alc_t *alloc, md_ring_t *ring)
 {
@@ -137,6 +140,9 @@ static void cp_ring_init(const alc_t *alloc, md_ring_t *ring)
 /**
  * @brief Header 校验（record 的 commit 页）：magic + 布局版本。
  * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证。
+ *
+ * @param hdr  待校验的 Header
+ * @return true = magic / 版本 / sequence 均有效；false = 无效（含 sequence 0 或 UINT32_MAX）
  */
 static bool cp_header_is_valid(const cp_header_t *hdr)
 {
@@ -162,6 +168,12 @@ static bool cp_header_is_valid(const cp_header_t *hdr)
 /**
  * @brief Checkpoint record 探针（见 metadata_ring_probe_fn）。
  * full 与廉价探针等价（一条 record 只有一页），故忽略。
+ *
+ * @param ctx           探针上下文（checkpoint_probe_ctx_t *）
+ * @param record_idx    待探测的记录槽位
+ * @param full          是否完整探测（本池恒等价，忽略）
+ * @param out_sequence  输出：命中记录的 sequence
+ * @return FTL_OK 命中；FTL_ERROR 无镜像 plane 可读 / 校验不符
  */
 static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
@@ -233,6 +245,8 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  * @brief 中止本次 CP：记**首次**失败相位、转 CP_DONE（**不**写 Header / **不**截断 journal）。
  * ⚠ 幂等：cp_job_stall 内部已调用一次，cp_regions_flush 的 FAILED 返回路径会再调一次；
  * 后面那次看到 phase 已是 CP_DONE，若覆盖 fail_phase 就会把真实相位（如 1）记成 12。
+ *
+ * @param h  Checkpoint handle
  */
 static void cp_job_abort(cp_handle_t *h)
 {
@@ -247,6 +261,10 @@ static void cp_job_abort(cp_handle_t *h)
 /**
  * @brief abort 日志限流：CP 在资源饥饿时每 10~25ms 重试一次，逐次 WRN 会刷屏。
  * 每个实例每 FTL_JOB_LOG_INTERVAL_MS 最多一行；时间戳跨 job 保留（cp_job_begin 不重置）。
+ *
+ * @param h       Checkpoint handle（读并更新 log_abort_ms）
+ * @param now_ms  当前毫秒
+ * @return true = 到点可打印；false = 仍在限流窗口内
  */
 static bool cp_job_abort_log_due(cp_handle_t *h, DWORD now_ms)
 {
@@ -262,6 +280,9 @@ static bool cp_job_abort_log_due(cp_handle_t *h, DWORD now_ms)
 /**
  * @brief 提交不出去超过 FTL_SUBMIT_TIMEOUT_MS ⇒ 中止 job（与 MIG/RR 同族）。
  * 返回 true = 已中止。时钟缺失时 deadline 不生效。
+ *
+ * @param h  Checkpoint handle（读/更新 stall_ms、timed_out）
+ * @return true = 已中止本次 job；false = 未到 deadline 或时钟缺失
  */
 static bool cp_job_stall(cp_handle_t *h)
 {
@@ -295,6 +316,10 @@ static bool cp_job_stall(cp_handle_t *h)
 
 /**
  * @brief 提交一条已建好的 CP 命令（写 / 擦共用）。成功才清零卡死计数。
+ *
+ * @param h    Checkpoint handle（置/回滚 waiting、清 stall_ms）
+ * @param cmd  已建好的命令（提交失败时由本函数 release）
+ * @return FTL_OK 已提交；FTL_AGAIN 提交失败（命令已 release）
  */
 static ftl_status_e cp_command_submit(cp_handle_t *h, fc_command_t *cmd)
 {
@@ -314,6 +339,10 @@ static ftl_status_e cp_command_submit(cp_handle_t *h, fc_command_t *cmd)
 /**
  * @brief 提交结果处理：true = 调用者必须 return（已中止，或已计卡死等待重试）。
  * FTL_ERROR = 配置/地址硬失败 ⇒ 立即中止；FTL_AGAIN = 瞬态背压 ⇒ 下轮重试。
+ *
+ * @param h   Checkpoint handle
+ * @param st  提交/建链的返回码
+ * @return true = 调用者必须 return；false = 提交成功，可继续推进
  */
 static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
 {
@@ -335,6 +364,12 @@ static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
  * @brief 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
  * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
  * ⇒ 调用者的栈缓冲随即可复用。
+ *
+ * @param h       Checkpoint handle
+ * @param addr    目标页地址（PBA）
+ * @param data    待写数据（返回后调用者缓冲可复用）
+ * @param length  写入长度（字节）
+ * @return FTL_OK 已提交；FTL_AGAIN 背压；FTL_ERROR 建链失败
  */
 static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data, DWORD length)
 {
@@ -352,6 +387,10 @@ static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data
 /**
  * @brief 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
  * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。
+ *
+ * @param h     Checkpoint handle
+ * @param addr  待擦块的基地址（PBA）
+ * @return FTL_OK 已提交；FTL_AGAIN 背压；FTL_ERROR 建链失败
  */
 static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
 {
@@ -369,6 +408,12 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
 /**
  * @brief 填写 Checkpoint Header 的固定字段；调用者随后按需补 timestamp。
  * region_bitmap == NULL 表示无 region 快照（initial record）。
+ *
+ * @param cp            输出：待填充的 Header
+ * @param h             来源 handle（读 block_words / wear_page_crc）
+ * @param sequence      本池的单调序号
+ * @param journal_seq   本次 job 起点的 journal 水位
+ * @param region_bitmap region 快照位图（可为 NULL = 无快照）
  */
 static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence, DWORD journal_seq, const DWORD *region_bitmap)
 {
@@ -409,6 +454,11 @@ static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence
 /**
  * @brief 按**快照**脏位图把每个脏 region 落盘（阶段②）。返回 CP_FLUSH_DONE = 全部已持久； CP_FLUSH_PENDING = 仍有在飞（下轮再来）；
  *        CP_FLUSH_FAILED = 硬失败（调用者中止，不写 Header）。
+ *
+ * @param h  Checkpoint handle（读快照位图、cache、metadata_dir）
+ * @return CP_FLUSH_DONE    全部 region 已持久
+ *         CP_FLUSH_PENDING 仍有在飞，下轮再来
+ *         CP_FLUSH_FAILED  硬失败，调用者中止
  *
  * @note 实现要点：**不按 state == DIRTY 过滤**——异步化后脏行可能已被后台 l2p_flush_kick
  * 起了写回（state = FLUSHING）而尚未完成，它同样属于"本周期改过、必须已持久"，
@@ -510,6 +560,10 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
 /**
  * @brief 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
  * dirty 保留 ⇒ 下次在新槽重试整条）。
+ *
+ * @param h       Checkpoint handle
+ * @param failed  擦除命令是否失败
+ * @param next    成功时要推进到的 phase
  */
 static void cp_erase_complete(cp_handle_t *h, bool failed, cp_phase_e next)
 {
@@ -524,6 +578,10 @@ static void cp_erase_complete(cp_handle_t *h, bool failed, cp_phase_e next)
 /**
  * @brief 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
  * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。
+ *
+ * @param h       Checkpoint handle
+ * @param failed  写命令是否失败
+ * @return true = 已中止（游标已推进）；false = 写成功，调用者继续下一页
  */
 static bool cp_snapshot_page_write_complete(cp_handle_t *h, bool failed)
 {
@@ -540,6 +598,9 @@ static bool cp_snapshot_page_write_complete(cp_handle_t *h, bool failed)
 /**
  * @brief Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。
+ *
+ * @param h       Checkpoint handle
+ * @param failed  Header 写命令是否失败
  */
 static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
 {
@@ -572,6 +633,9 @@ static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
  * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
  * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
  * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。
+ *
+ * @param h       Checkpoint handle
+ * @param failed  预擦命令是否失败
  */
 static void cp_trunc_erase_complete(cp_handle_t *h, bool failed)
 {
@@ -998,6 +1062,12 @@ static void cp_job_step(cp_handle_t *h)
 
 /* ── job 状态机入口（模块内部）── */
 
+/**
+ * @brief 启动一次 Checkpoint job：复位执行状态、取 job 起点快照、立刻推进第一步
+ *
+ * @param h  Checkpoint handle
+ * @return FTL_OK 已启动（可能停在某个提交阶段）；FTL_AGAIN 上一次 job 仍在跑（单飞行）
+ */
 static ftl_status_e cp_job_begin(cp_handle_t *h)
 {
     if (h->active != 0U)
@@ -1058,6 +1128,8 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
 
 /**
  * @brief 复位本实例的 CP 池游标/序号（找不到有效 record 时保持 0/无效）。
+ *
+ * @param cp  本实例的 cp_state_t（池游标/序号）
  */
 static void cp_cursor_reset(cp_state_t *cp)
 {
@@ -1495,6 +1567,13 @@ void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cach
 /**
  * @brief 写一条 initial CP record 并做回读校验（Header + 块元数据页）。
  * 返回 true 仅当 Header 与 page1 都真的落到介质上。
+ *
+ * @param ftl    FTL 实例（取 cp_handle 的读缓冲）
+ * @param ring   Checkpoint 环
+ * @param slot   待写入记录在环内的起始槽位
+ * @param words  块元数据快照（FTL_BLOCK_TOTAL 个 word）
+ * @param cp     已填充的 Header（commit 页，最后写）
+ * @return true = Header 与快照页均已落盘并通过回读校验；false = 任一步写/回读失败
  */
 static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *ring, WORD slot, const WORD *words, const cp_header_t *cp)
 {
@@ -1693,6 +1772,12 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
     return false;
 }
 
+/**
+ * @brief 把 job 执行状态填入对外上报结构
+ *
+ * @param h    Checkpoint handle
+ * @param out  输出：本轮上报（模块状态 + 各 phase 观测字段）
+ */
 static void cp_status_fill(const cp_handle_t *h, cp_status_t *out)
 {
     out->base.critical  = true; /* CP 跨轮推进，任何档位都要跑 */
