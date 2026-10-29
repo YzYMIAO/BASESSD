@@ -17,6 +17,7 @@
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 | `design/logging_design.md`（预期/非预期 + 打印预算 + 飞行记录器）+ `design/assertion_guidelines.md` + `design/fault_capture.md` |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
+| **项目水平 / 定位评估** | `design/project_positioning.md`（对照 OpenSSD / SPDK FTL 的定性评估；不是基准报告） |
 | **模块接口 / 解耦判据** | `design/ftl_design.md` §5.1.1/§5.1.2（handle 契约 / 字段所有权 / 超时 / 多 LUN；全文在 `archive/ftl_module_contracts.md`） |
 | **USB MSC / U 盘** | `design/usb_msc_udisk.md`（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `design/usb_msc_verification.md`（上板验证手册 + 判据 + 脚本）→ `design/testing_guide.md`（分层测试 / 工具 / 性能方法 / 实测） |
 | 多 LUN / 共享 L2P cache / 内存域 | `design/ftl_design.md` §2.1/§5.4 + `design/known_iss.md` §4（实施计划已归档） |
@@ -30,7 +31,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史 10，见 archive/README.md
-├── design/                    ← 活跃权威设计文档（17 个）+ known_iss/known_risks
+├── design/                    ← 活跃权威设计文档（18 个）+ known_iss/known_risks
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
