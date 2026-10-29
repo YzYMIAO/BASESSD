@@ -61,8 +61,8 @@ typedef struct
     /* 链锁：链一旦开始，该 LUN 的填充权归链所在的队列独占，直到链的 END 下发。
      * 取值 fc_chain_owner_e。**跨填充 pass 持久**——fc_poll_fill 的 suspended[] 每趟
      * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。
-     * 生产路径恒 NONE：FTL 全仓恒 FC_CHAIN_END（链长恒 1）⇒ 本表恒不被置位 ⇒ 准入
-     * 判断恒假、更新恒写 NONE ⇒ 对既有命令流零行为变化。 */
+     * 使用者：FTL 的 cache read / cache program run（整条序列标成一条 chain）。
+     * 单命令（chain = END，链长 1）下发后恒写 NONE，即普通命令流不改变准入。 */
     BYTE chain_owner[CH_NUM][CE_NUM][LUN_NUM];
 } fc_scheduler_t;
 

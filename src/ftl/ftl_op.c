@@ -282,7 +282,9 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
         added++;
     }
 
-    if (fc_submit_batch(cmds, n) != FC_STATUS_OK)
+    const fc_status_e submit_status = fc_submit_batch(cmds, n);
+
+    if (submit_status != FC_STATUS_OK)
     {
         if (ctx != NULL)
         {
@@ -291,7 +293,9 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
                 ftl_op_ctx_remove(ftl_cmd_id(cmds[i]));
             }
         }
-        return FTL_AGAIN;
+
+        // QUEUE_FULL 是瞬态资源（下轮重试）；其余是链契约违反等编程错误，永久失败。
+        return (submit_status == FC_STATUS_QUEUE_FULL) ? FTL_AGAIN : FTL_ERROR;
     }
 
     return FTL_OK;

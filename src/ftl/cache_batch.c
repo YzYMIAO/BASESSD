@@ -2,11 +2,12 @@
  * cache_batch.c — FTL cache read / cache program 批次（本仓自定）
  *
  * 两个方向共用同一模块，但各自保留独立的条件、命令序列与结果枚举：
- *   · cache read：连续 pair 页映射驻留且物理连续时，2~4 个 pair 用
+ *   · cache read：连续 pair 页映射驻留且物理连续时，整条 run 用
  *     START_SEQ_MP/SEQ_MP/LAST_MP 一次提交；
  *   · cache program：host 16 KiB 写 = 4 个 pair 页，按 op49/op44×2/op48 提交。
  *
- * 两者都不依赖 FC chain；条件不满足一律回退普通读 / wbuf 路径。
+ * 两者都把整条序列标成一条 FC chain，经 ftl_op_submit_batch 原子入队；
+ * 条件不满足一律回退普通读 / wbuf 路径。
  */
 
 #include "cache_batch.h"
@@ -22,6 +23,12 @@
 #include "wbuf.h"
 
 #include <string.h>
+
+/* cache read 单条 run 的 pair 上限：**由 FC 资源决定，不是 FIFO 深度**。
+ * 每 pair 占 FTL_LBA_PER_PAIR（8）个 desc / buffer，FC buffer 池 =
+ * FC_BUFFER_POOL_DEPTH ⇒ pair 数 ≤ FC_BUFFER_POOL_DEPTH / FTL_LBA_PER_PAIR。
+ * 实际批深再由 cache_batch_budget_ok() 逐级收缩（还要给后台留预留量）。 */
+#define FTL_CACHE_READ_MAX_PAIRS (FC_BUFFER_POOL_DEPTH / FTL_LBA_PER_PAIR)
 
 /* ── 资源判据 ── */
 
@@ -250,7 +257,9 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
         cmd->config.crc         = FC_CRC_ENABLE;
         cmd->config.random      = FC_RANDOM_ENABLE;
         cmd->config.ldpc        = FC_ECC_MODE_BCH;
-        cmd->config.chain       = FC_CHAIN_END;
+        // 整条 run 是一条 FC chain：只有末条 END。FC 据此在跨填充 pass 续批时
+        // 锁住该 LUN，另一队列（HSQ/SQ）的命令回推，序列不会被劈开。
+        cmd->config.chain       = (i + 1U < b->n_pairs) ? FC_CHAIN_MORE : FC_CHAIN_END;
         cmd->config.page_type   = FC_PAGE_TYPE_LP;
         cmd->meta               = ftl_lba_pair_base(req->lba + (i * FTL_LBA_PER_PAIR));
 
@@ -308,9 +317,8 @@ build_fail:
  * @param n_pairs 已收集的 pair 数（≥ FTL_CACHE_READ_MIN_PAIRS）。
  * @param pba     每个 pair 每 plane 的物理地址。
  *
- * @return FTL_CACHE_READ_OK 全部提交；FTL_CACHE_READ_AGAIN 建链失败或首批提交失败
- *         （整批回滚或可安全重试）；FTL_CACHE_READ_ERROR 部分提交后失败
- *         （已提交成员保留，组报 IO_ERROR）。
+ * @return FTL_CACHE_READ_OK 整批已提交；FTL_CACHE_READ_AGAIN 建链失败或整批入队遇
+ *         瞬态背压（全批回滚，可下轮重试）；FTL_CACHE_READ_ERROR 永久提交失败。
  */
 static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DWORD n_pairs, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM])
 {
@@ -331,26 +339,24 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
         pend_group_add_subop(&req->ftl->pending, req->gi);
     }
 
-    DWORD submitted = 0U;
+    // 整条 run 原子入队：FC 的 chain 机制要求链成员在同一队列**连续**入队；
+    // 逐条提交在资源不足时会留下半条链（前半已入队、后半没进），链语义被破坏。
+    const ftl_status_e submit_status = ftl_op_submit_batch(b.cmds, b.n_pairs, FTL_OP_HOST_IO, NULL);
 
-    for (DWORD i = 0U; i < b.n_pairs; i++)
+    if (submit_status != FTL_OK)
     {
-        if (ftl_op_submit(b.cmds[i], FTL_OP_HOST_IO, NULL) != FTL_OK)
+        // 整批未入队：命令、pending、组子操作计数全部回滚。
+        for (DWORD i = 0U; i < b.n_pairs; i++)
         {
-            // 已提交的成员保留并等待完成；未提交的成员回滚。
-            for (DWORD k = i; k < b.n_pairs; k++)
-            {
-                pend_remove(&req->ftl->pending, ftl_cmd_id(b.cmds[k]));
-                (void)fc_command_release(b.cmds[k]);
-                pend_group_drop_subop(&req->ftl->pending, req->gi);
-            }
-
-            req->ftl->cache_read_fallbacks++;
-
-            return (submitted == 0U) ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_ERROR;
+            pend_remove(&req->ftl->pending, ftl_cmd_id(b.cmds[i]));
+            (void)fc_command_release(b.cmds[i]);
+            pend_group_drop_subop(&req->ftl->pending, req->gi);
         }
 
-        submitted++;
+        req->ftl->cache_read_fallbacks++;
+
+        // 瞬态背压可重试；链契约违反等编程错误是永久失败（H38）。
+        return (submit_status == FTL_AGAIN) ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_ERROR;
     }
 
     *req->used = b.n_pairs * FTL_LBA_PER_PAIR;
@@ -386,6 +392,13 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     {
         ftl->cache_read_declines++;
         return defer ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_DECLINED;
+    }
+
+    // run 长度 = min(连续映射长度, 资源余量)：资源不够时收缩到能整条原子提交的
+    // 前缀，而不是整条放弃（尾部留给后续窗口/普通读）。
+    while ((n_pairs > FTL_CACHE_READ_MIN_PAIRS) && (cache_batch_budget_ok(ftl, n_pairs) == false))
+    {
+        n_pairs--;
     }
 
     if (cache_batch_budget_ok(ftl, n_pairs) == false)
@@ -472,6 +485,9 @@ static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
             return st;
         }
         b->n_cmd++;
+
+        // FIRST/中间/END 是一条 cache program 序列：末页才 END，其余 MORE。
+        b->cmds[j]->config.chain = (j + 1U < FTL_CACHE_WRITE_MAX_PAGES) ? FC_CHAIN_MORE : FC_CHAIN_END;
 
         pend_req_t *pending = pend_alloc(&ftl->pending);
 

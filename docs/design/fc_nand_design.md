@@ -4290,8 +4290,8 @@ fc_service() → fc_poll_internal
   │     └─ 无完成 → ②
   └─ ② fc_poll_fill（图 22）
         ├─ 两队列皆空 → QUEUE_EMPTY；无 room → NOT_READY（稍后重试）
-        ├─ 单命令 → fc_poll_dispatch_single（运行时唯一活路径）
-        └─ 链 → fc_poll_dispatch_chain（仅单测覆盖，见 §23.9）
+        ├─ 单命令 → fc_poll_dispatch_single
+        └─ 链 → fc_poll_dispatch_chain（FTL cache read / cache program run）
               └─ 失败兜底统一走 fc_poll_fail_command
 ```
 
@@ -4357,8 +4357,8 @@ fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
           → 是：单命令 submit / 链 submit_chain（原子追加 need 槽）
                 下发成功后按【批尾】chain 位更新 chain_owner（MORE→本队列 / END→NONE）
           → 否：该 LUN 本轮挂起 + 命令回推队尾（保序）
-        ⚠ FTL 运行时恒 chain = FC_CHAIN_END → need 恒 1 ⇒ chain_owner 恒 NONE
-          （链收集与链锁分支仅单测覆盖，见 §23.9）
+        FTL 的 cache read / cache program run 标成一条 chain（末条 END、其余 MORE）⇒
+        need = 本趟填充窗口；批尾 MORE 时 chain_owner 保持到链 END（见 §23.9）
 ```
 
 要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；

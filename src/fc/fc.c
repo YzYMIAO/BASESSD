@@ -1466,7 +1466,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  * （注 NAND_FAIL 完成并返回 IO_ERROR）。构建失败只有 multi-plane 窄位图一种，
  * debug 档已在 fc_build_request_data_planes 的 ASSERT 处停机，此处只在 release 档可达。
  * - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
- * - **运行时唯一活提交路径**（FTL 恒 chain=END，count 恒 1）。
+ * - 单命令路径；FTL 的 cache run 走 fc_poll_dispatch_chain。
  */
 static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
@@ -1535,7 +1535,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  * 与单命令路径的既有差异，勿统一）→ 构建 requests[i]。
  * - 全部构建完成后一次 nand_dispatch_submit_chain。
  * - 任一步失败 → 对应/整链命令注 NAND_FAIL 完成并返回 IO_ERROR。
- * - 运行时不会命中：FTL 恒 chain=END（count==1），本路径仅单测覆盖。
+ * - 使用者：FTL 的 cache read / cache program run（同一 (ch,ce,lun) 的连续命令）。
  */
 static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
@@ -1709,7 +1709,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         // 后入队的同 LUN 命令都排在链后面，只会在链结束（chain_owner 清）之后才被取。
         // ⚠ **只回推、不置 suspended**——置了会把链自己的续批也一并锁死（该 LUN 从此
         // 既不接受另一队列、也不接受本链，活锁）。
-        // 生产路径恒假：FTL 恒 FC_CHAIN_END ⇒ chain_owner 恒 NONE。
+        // chain_owner 为 NONE（无未结束的链）时恒假；FTL cache run 打开后只放行链所在队列。
         if ((controller->scheduler.chain_owner[ch][ce][lun] != FC_CHAIN_OWNER_NONE) && (controller->scheduler.chain_owner[ch][ce][lun] != owner))
         {
             (void)fc_submission_queue_push(queue, id);
@@ -1855,8 +1855,8 @@ static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_compl
 // 一次调用把本轮所有完成抽干（NAND 命令自身的失败不算 FC 故障——状态已在 CQ entry 里）。
 // - 无完成 → fc_poll_fill()：一次扫描把能放下的命令（含链）提交进 NAND
 // per-LUN FIFO（按 LUN 保序、HSQ 优先、room 判定）。
-// 运行时 FTL 所有命令 config.chain=FC_CHAIN_END，count 恒为 1 → 只有
-// fc_poll_dispatch_single 是活路径；fc_poll_dispatch_chain 仅单元测试覆盖。
+// 单命令走 fc_poll_dispatch_single；FTL 的 cache read / cache program run 标成
+// 一条 chain（count>1）走 fc_poll_dispatch_chain。
 // 调用方：ftl_service()（ftl.c）/ ftl_sync_submit_wait() / main.c 的裸 fc_service。
 // 契约见 fc_internal.h。
 fc_status_e fc_poll_internal(fc_t *controller)

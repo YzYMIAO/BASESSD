@@ -287,8 +287,12 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
     ASSERT(cmds != NULL);
     ASSERT(n > 0U);
 
-    WORD sq_need  = 0U;
-    WORD hsq_need = 0U;
+    WORD  sq_need        = 0U;
+    WORD  hsq_need       = 0U;
+    bool  has_chain      = false;
+    bool  mixed_queue    = false;
+    DWORD first_priority = 0U;
+    BYTE  last_chain     = FC_CHAIN_END;
 
     for (DWORD i = 0U; i < n; i++)
     {
@@ -302,6 +306,18 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
         ASSERT(fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) != 0U);
         (void)command_id; /* release 下 ASSERT 裁空，避免 unused 告警 */
 
+        if (i == 0U)
+        {
+            first_priority = command->high_priority;
+        }
+        else if (command->high_priority != first_priority)
+        {
+            mixed_queue = true;
+        }
+
+        has_chain  = (has_chain == true) || (command->config.chain == FC_CHAIN_MORE);
+        last_chain = command->config.chain;
+
         if (command->high_priority != 0U)
         {
             hsq_need++;
@@ -310,6 +326,18 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
         {
             sq_need++;
         }
+    }
+
+    // 链契约：一批里的 chain 必须**自闭合**（末条 END）且全批同优先级。
+    // · 混优先级 ⇒ 链被拆成 SQ/HSQ 两段，fc_poll_chain_length 只沿本队列 peek，
+    //   跳过的成员被当成不存在 ⇒ 序列静默错乱（cache read 输出错页 / 写错序列）；
+    // · 末条不是 END ⇒ chain_owner 永不解锁，该 LUN 的另一队列被永久饿死。
+    // 负例：cmds[0].chain=MORE 且 cmds[1].high_priority=1；或末条 chain=MORE。
+    // release 下必须拒绝而不是放行（H14：后果是静默介质破坏 / LUN 锁死）。
+    if ((has_chain == true) && ((mixed_queue == true) || (last_chain != FC_CHAIN_END)))
+    {
+        ASSERT(false);
+        return FC_STATUS_INVALID_ARGUMENT;
     }
 
     if (((WORD)(fc_get_sq_count(&g_fc_controller) + sq_need) > FC_SQ_DEPTH) || ((WORD)(fc_get_hsq_count(&g_fc_controller) + hsq_need) > FC_HSQ_DEPTH))

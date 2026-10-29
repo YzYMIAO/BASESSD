@@ -5,13 +5,14 @@
  * FTL cache batch（本仓自定）
  *
  * 读、写两个方向的 host 批量路径放在同一模块：
- *   · cache read：连续 pair 页映射已驻留且物理连续时，2~4 个 pair 用
+ *   · cache read：连续 pair 页映射已驻留且物理连续时，把整条 run 用
  *     START_SEQ_MP/SEQ_MP/LAST_MP 一次提交；
- *   · cache program：host 16 KiB 写 = 4 个 pair 页，条件满足时一次提交
- *     op49/op44×2/op48。
+ *   · cache program：host 16 KiB 写 = 4 个 pair 页，按 op49/op44×2/op48 提交。
  *
- * 两个方向都不依赖 FC chain，命令在同一 SQ 内连续提交；条件不满足一律回退
- * 普通单 pair 读 / wbuf 写路径。
+ * 两个方向都把整条序列标成一条 FC chain（末条 FC_CHAIN_END，其余 FC_CHAIN_MORE），
+ * 经 ftl_op_submit_batch() 原子、连续入队；FC 的 chain_owner 在链跨填充 pass 时
+ * 锁住该 LUN，另一队列回推——序列不会被 RR / GC / 其他命令劈开。
+ * 条件不满足一律回退普通单 pair 读 / wbuf 写路径。
  */
 
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR */
@@ -20,17 +21,22 @@
 struct ftl_context;
 
 /* ── cache read ──
- * 2 个 pair 才有收益（1 个 pair 用普通读）；批次上限 = NAND per-LUN FIFO 深度
- * （NAND_DISPATCH_CHAIN_DEPTH，当前 4），不另写字面量。 */
+ * 2 个 pair 才有收益（1 个 pair 用普通读）。单条 run 的长度上限由 FC 资源决定
+ * （见 cache_batch.c 的 FTL_CACHE_READ_MAX_PAIRS），**不再等于 per-LUN FIFO 深度**：
+ * FIFO 深度只决定 FC 每趟往 NAND 填充几条，链总长由 run 决定。 */
 #define FTL_CACHE_READ_MIN_PAIRS (2U)
-#define FTL_CACHE_READ_MAX_PAIRS NAND_DISPATCH_CHAIN_DEPTH
+
+/* cache read 尝试节拍：每 32 LBA（16 KiB host 传输 = 4 个 pair 窗口）试一次。
+ * 这是“多久重试一次”的节拍，不是 run 长度上限，与 FTL_CACHE_READ_MAX_PAIRS 解耦。
+ * 来源：CFG_TUD_MSC_EP_BUFSIZE = 16384 B（include/tusb_config.h）；接口变大时同步。 */
+#define FTL_CACHE_READ_TRIAL_LBAS (4U * FTL_LBA_PER_PAIR)
 
 typedef enum
 {
     FTL_CACHE_READ_DECLINED = 0, /* 条件不满足：调用者回退普通读 */
     FTL_CACHE_READ_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
     FTL_CACHE_READ_AGAIN    = 2, /* L2P 加载在飞/资源背压：本轮停止 */
-    FTL_CACHE_READ_ERROR    = 3, /* 永久错误：组报 IO_ERROR */
+    FTL_CACHE_READ_ERROR    = 3, /* 永久错误：组报 IO_ERROR（如链契约违反） */
 } ftl_cache_read_result_e;
 
 /**
@@ -50,9 +56,9 @@ typedef enum
 ftl_cache_read_result_e ftl_cache_read_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 /* ── cache program ──
- * 每批页数 = NAND per-LUN FIFO 深度（NAND_DISPATCH_CHAIN_DEPTH，当前 4）；
- * 当前几何下 = 16 KiB / 4 KiB。 */
-#define FTL_CACHE_WRITE_MAX_PAGES NAND_DISPATCH_CHAIN_DEPTH
+ * 每批页数 = host 单次写传输 16 KiB / 4 KiB 页 = 4（CFG_TUD_MSC_EP_BUFSIZE）。
+ * 不是 NAND FIFO 深度：链总长可以大于 FIFO 深度，由 FC 的 chain_owner 跨 pass 续批。 */
+#define FTL_CACHE_WRITE_MAX_PAGES (4U)
 
 /* 一批覆盖的 host LBA 数 = MAX_PAGES × pair 窗口；当前几何 = 16 KiB（32 × 512B）。 */
 #define FTL_CACHE_WRITE_LBAS (FTL_CACHE_WRITE_MAX_PAGES * FTL_LBA_PER_PAIR)

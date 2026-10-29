@@ -108,6 +108,8 @@
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-IF-04 | 待上板 | 本轮行为变化未板验：plane 1 迁移数据、wbuf 稀疏页、越段位图 release 拒绝、迟到完成路径 | 编译零告警（release 两条 unused 已消失） | 按 §5 板端清单回归 | `src/ftl/ftl_fc_interface.c` / `ftl_op.c` |
+| RISK-IF-06 | 待决策（2026-10-30 读码判定） | **FC chain 派发路径不处理 RAID stripe encode**：`fc_poll_dispatch_chain` 没有单命令路径的 `#if CONFIG_FC_RAID` 分支。若 FTL 把写命令标成 `FC_CHAIN_MORE` 且 `raid=ENCODE`，整链写入会**静默不写 parity**（`CONFIG_FC_RAID=0` 时 ENCODE 分支不编译，不构成实际失效） | RAID 关闭（R5）⇒ `raid` 字段固定 NORMAL、ENCODE 分支不编译；FTL 当前不设置 `raid=ENCODE` | 启用 RAID，或 FTL 写路径开始设置 `raid=ENCODE` **之前**：在 chain 路径补 stripe 分支，或 `ASSERT(raid != FC_RAID_MODE_ENCODE)`；加 UT 负例 | `src/fc/fc.c:1491-1499`（single 的 RAID 分支）vs `src/fc/fc.c:1540-1593`（chain 无该分支）；`include/fc/fc.h:38-52` |
+| RISK-IF-07 | 已改未上板（2026-10-30） | **一批 chain 违反契约会静默错乱或锁死 LUN**：① 混优先级 ⇒ `fc_submit_batch` 按 `high_priority` 把链拆到 SQ/HSQ 两段，`fc_poll_chain_length` 只沿单队列 peek，跳过的成员被当成不存在 ⇒ cache read 输出错页 / cache program 写错序列；② 末条不是 `END` ⇒ `chain_owner` 永不解锁，该 LUN 的另一队列被永久饿死 | `fc_submit_batch` 提交前检查：含 `FC_CHAIN_MORE` 时要求全批同优先级**且**末条 `FC_CHAIN_END`，否则 debug `ASSERT(false)` + release 返回 `FC_STATUS_INVALID_ARGUMENT`；`ftl_op_submit_batch` 把非 `QUEUE_FULL` 失败映射为 `FTL_ERROR`（不再重试成死循环）；当前所有调用者均为同优先级且末条 END | 上板：现有命令流（host 读/写、GC）行为不变；负例只能由 UT 构造（`cmds[0].chain=MORE` + `cmds[1].high_priority=1`，或末条 `chain=MORE`），测试源由用户维护（R4） | `src/fc/fc_interface.c` `fc_submit_batch`；`src/ftl/ftl_op.c` `ftl_op_submit_batch`；`src/ftl/cache_batch.c` `cache_read_submit` |
 
 ---
 

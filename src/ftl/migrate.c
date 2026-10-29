@@ -1373,6 +1373,10 @@ static ftl_status_e mig_batch_build_cmds(mig_handle_t *m, BYTE n, fc_command_t *
             mig_batch_release_cmds(cmds, n);
             return st;
         }
+
+        // N>=2 是一条 cache program 序列（FIRST/中间/END）：整批标成一条 FC chain，
+        // 末条 END，其余 MORE——链没结束时 FC 不让另一队列向该 LUN 插命令。
+        cmds[j]->config.chain = (j + 1U < n) ? FC_CHAIN_MORE : FC_CHAIN_END;
     }
 
     return FTL_OK;
@@ -1739,7 +1743,7 @@ static bool mig_write_settle_step(mig_handle_t *m)
 }
 
 /**
- * @brief 提交一个已收集的 batch：N 页 pair 命令，一次全进 SQ。
+ * @brief 提交一个已收集的 batch：N 页 pair 命令，一次全进 SQ 并标成一条 FC chain。
  * N>=2 用 cache program（首页 FIRST + 中间 CACHE + 末页 END）；N==1 用普通 op31。
  * 目的页预检保证同一 Open SB、页号 >=1 且 room>=N，因此不会跨块/落到 page0。
  *

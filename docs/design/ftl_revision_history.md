@@ -6195,6 +6195,33 @@ ITCM：release **61,296 B**、debug **62,064 B**；`.dtcm_data` 67,832 B、
 
 ---
 
+## v1.02 — cache read/write run 标成 FC chain（未上板）
+
+**日期**：2026-10-30
+
+**内容**：
+- cache read 的 run 长度改由 FC 资源决定（`FTL_CACHE_READ_MAX_PAIRS =
+  FC_BUFFER_POOL_DEPTH / FTL_LBA_PER_PAIR`，实际批深再按预算收缩），不再等于
+  `NAND_DISPATCH_CHAIN_DEPTH`；尝试节拍独立为 `FTL_CACHE_READ_TRIAL_LBAS`（32 LBA）。
+- 整条 run 标成一条 FC chain：末条 `FC_CHAIN_END`，其余 `FC_CHAIN_MORE`；
+  cache read 由逐条 `ftl_op_submit` 改为 `ftl_op_submit_batch` 原子入队（失败整批回滚）。
+- cache program（host 16 KiB）与 GC/WL batch 同样标 chain。
+- FC 侧复用既有 `chain_owner`：链跨填充 pass 时锁住该 LUN，另一队列回推；
+  **无 FC 功能改动**，只同步“生产路径恒 END / 仅单测覆盖”相关注释。
+- `FTL_CACHE_READ_ERROR` 保留：原子入队后它不再表示“部分提交”，改为表示永久提交
+  失败（如链契约违反）；`ftl_op_submit_batch` 把非 `QUEUE_FULL` 失败映射为 `FTL_ERROR`。
+- `fc_submit_batch` 增加链契约守卫：批内含 `FC_CHAIN_MORE` 时要求全批同优先级
+  **且**末条 `FC_CHAIN_END`，否则 debug `ASSERT` + release 返回
+  `FC_STATUS_INVALID_ARGUMENT`（防链被拆到 SQ/HSQ、防 owner 永不解锁）。
+
+**验证**：`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` 通过，
+零新告警。**未上板**：chain 路径此前仅 UT 覆盖，首次进生产必须上板验证跨 pass owner /
+HSQ 回推 / 失败页状态（R2 建链类改动）。
+
+**介质布局**：无变化。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

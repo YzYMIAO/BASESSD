@@ -2819,17 +2819,21 @@ ftl_issue_subop(read) 对每个 LBA：
 随机读会吃掉 8 轮预算，被误判成卡死。
 
 **FTL cache read 批次（本仓自定）**：`ftl_drain_group` 在下发普通子操作前，先尝试
-`ftl_cache_read_try()`。**只在组内偏移为 32 LBA（`MAX_PAIRS × LBA_PER_PAIR`）整数倍时
-试一次**——每个 8-LBA 子操作都试会先做一轮 L2P 查找/加载再回退，是读速下降的旧形态。
+`ftl_cache_read_try()`。**只在组内偏移为 32 LBA（`FTL_CACHE_READ_TRIAL_LBAS`）整数倍时
+试一次**——每个 8-LBA 子操作都试会先做一轮 L2P 查找/加载再回退，代价高。
 条件：读组、LBA pair 对齐、剩余 ≥2 pair、8 个 LBA 全部映射且
 无 wbuf 命中、两 plane 的**页号字段**相同（`pba_to_page()`；`pba_page()` 保留 plane/block
 位，只能用于同一 plane 内比较，不能跨 plane）且后续 pair 物理页 +1/同 block、资源足够；
 L2P 行在加载中（`FTL_AGAIN`）则本次返回 `AGAIN`，由 drain 下轮重试。满足时一次
-提交 `START_SEQ_MP + SEQ_MP×(N-2) + LAST_MP`（N≤4，对应 NAND per-LUN FIFO 深度），
-每条命令一个 pair、8 CW；否则回退现有单 pair 普通读。**不使用 FC chain**：4 条命令
-在同一 SQ 内连续提交，FTL 当前全部命令 `high_priority=0`，后续命令只会排在 sequence
-之后。成员失败**不**启动 RR（RR 会向同 LUN 插命令，破坏 31h/3Fh 管线），直接报组
-IO_ERROR。详见 `include/ftl/cache_batch.h` / `src/ftl/cache_batch.c`。
+提交 `START_SEQ_MP + SEQ_MP×(N-2) + LAST_MP`，每条命令一个 pair、8 CW；N 的上限由
+FC 资源（命令 / desc / buffer / pending 余量）决定，**不再等于 per-LUN FIFO 深度**，
+资源不足时收缩到能整条原子提交的前缀。整条 run 标成一条 FC chain（末条
+`FC_CHAIN_END`，其余 `FC_CHAIN_MORE`），经 `ftl_op_submit_batch()` 原子、连续入队
+（批内必须同优先级，否则 `fc_submit_batch` 拒绝——链不能被拆到 SQ/HSQ 两段）；
+FC 的 `chain_owner` 在链跨填充 pass 时锁住该 LUN，另一队列（HSQ/SQ）的命令回推，
+45h…46h…47h 不会被 RR / GC / 其他命令劈开。成员失败**不**启动 RR（RR 会向同 LUN
+插命令），失败页报组 IO_ERROR，其余成员按各自完成回调结算（不中止剩余链成员）。
+详见 `include/ftl/cache_batch.h` / `src/ftl/cache_batch.c`。
 
 > 板端证据（2026-10-25 H2testw 415 MB）：`info` 的 `cr=25931/102794/681/0`
 > （batches/pairs/declines/fallbacks），平均 **3.96 pair/batch**、`fallbacks=0` ⇒
@@ -2843,7 +2847,8 @@ two-plane 命令：首页 `OP_TWO_PLANE_PROGRAM_CACHE_FIRST`（只查 FAIL，避
 `OP_TWO_PLANE_PROGRAM_CACHE_END`（10h，查 FAIL/FAILC）。**15h 成功只释放命令，不更新 L2P/Journal、
 不递减 host 组**；末页成功后逐页 `ftl_confirm_write`（region 未就绪则停泊）。任一成员
 失败 ⇒ 关闭 hot SB、不确认映射；已完成的成员立即按 IO_ERROR 结算，仍在飞的成员等各自
-完成回调结算。命令经 `ftl_op_submit_batch()` 一次全进 SQ，不依赖 FC chain。详见
+完成回调结算。命令经 `ftl_op_submit_batch()` 一次全进 SQ，并标成一条 FC chain（末页 `FC_CHAIN_END`，
+其余 `FC_CHAIN_MORE`），15h/10h 序列不会被另一队列插入。详见
 `include/ftl/cache_batch.h` / `src/ftl/cache_batch.c`。
 wbuf 写 **page0** 时按 full pair 写（缺失 plane 补零、映射仍按原 CW 位图），保证同 SB
 的 page>0 写屏障与恢复 page0 捷径成立。
@@ -4625,6 +4630,29 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
 | 出处 | [`storage_controller_design_essentials.md`](storage_controller_design_essentials.md) 的调度形态；SPDK core poller 对照；`include/ftl/bg_scheduler.h` |
 
+### ADR-17 读写 run：FTL 构链，FC 执行 chain
+
+| 项 | 内容 |
+|---|---|
+| 背景 | cache read / cache program 的 45h…47h / 49h…48h 必须在器件 cache 管线上连续执行；任一条被其他命令插入就会破坏序列 |
+| 选项 | 依赖“全 FTL 命令走 SQ 且连续入队”的全局假设 / FTL 逐条提交并 defer 插入者 / **整条 run 标成 FC chain，控制器锁 LUN** |
+| 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，`ftl_op_submit_batch()` 原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨 pass 保留、另一队列回推，END 才解锁 |
+| 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨 pass 的 owner 状态解决“HSQ 插入劈开序列”（ISS-CACHE-01）；FC 侧复用既有 chain 机制，**无新增功能代码** |
+| 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_scheduler.h`），不是行业标准形态 |
+| 代价 | 链跨 pass 会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
+| 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
+| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`include/fc/fc_scheduler.h:28-68`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
+
+> 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
+> `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
+> （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`，见 `RISK-IF-07`）。
+>
+> ⚠ **状态：已改、未上板**（2026-10-30）。FC 侧无功能改动，只同步了“生产路径恒 END”
+> 相关注释；chain 路径此前仅 UT 覆盖，首启用必须上板验证跨 pass owner / HSQ 回推 /
+> 失败页状态（R2：建链类改动）。
+>
+> ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_risks.md` RISK-IF-06）。
+
 ---
 
 <a id="s7" name="s7"></a>
@@ -4652,6 +4680,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,296 B / debug 62,064 B；`make all/release/tests UT=FC` 零新告警；当时 UT=FTL 因冻结测试源失败（**2026-10-24 已重建，85 次全过**） |
 | v1.00 cache read 判据修正 | **已上板（2026-10-25）** | `cache_read_collect` 跨 plane 改用 `pba_to_page()`、连续性改为页号 +1；修复前 cache read 自实现以来从未生效（`batches` 恒 0）。`/speed/ftl_rw` 2/2、`rd_path=cache`、`rdc batches=1600`；全量 `/ftl/` 已在修复后镜像上重跑 **85/85（61.20 s）** |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
+| cache read/write run 的 FC chain（ADR-17） | **已改、未上板（2026-10-30）** | 读 run 长度改由 FC 资源决定（不再等于 FIFO 深度）、整条 run 标 `FC_CHAIN_MORE`/`END`、`ftl_op_submit_batch` 原子入队；cache program 与 GC/WL batch 同标。编译三关零新告警；**必须上板**验证跨 pass owner / HSQ 回推 / 失败页状态（R2 建链类改动） |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
 > `notepad.exe` / 16KB 非均匀 pattern 写入 → `Write-VolumeCache` → 拔插 USB →

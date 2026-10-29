@@ -145,11 +145,16 @@ extern "C"
      * 供 two-plane cache program 批次使用——不允许“前几条已提交、末条失败”留下
      * 未终结的 cache sequence。前置与 fc_submit 相同。
      *
+     * 链契约：批内只要含 `FC_CHAIN_MORE` 成员，全批必须同优先级（进同一条队列）
+     * 且末条必须是 `FC_CHAIN_END`；否则链会被拆到 SQ/HSQ 两段（序列错乱）或
+     * 永不闭合（chain_owner 不解锁，该 LUN 的另一队列被饿死）。
+     *
      * @param cmds 命令指针数组，长度为 n。
      * @param n    命令条数；须 > 0。
      *
-     * @return FC_STATUS_OK         全部入队。
-     *         FC_STATUS_QUEUE_FULL SQ 或 HSQ 余量不足（一条都不入队）。
+     * @return FC_STATUS_OK               全部入队。
+     *         FC_STATUS_QUEUE_FULL       SQ 或 HSQ 余量不足（一条都不入队）。
+     *         FC_STATUS_INVALID_ARGUMENT 批内含 chain 成员但优先级不一致。
      */
     fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n);
 

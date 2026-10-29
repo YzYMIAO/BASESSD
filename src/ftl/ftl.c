@@ -1744,10 +1744,10 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         ftl_status_e st         = FTL_OK;
         bool         use_normal = true;
 
-        // 连续 pair 的 two-plane cache read：每个 host 请求只试一次（组首子操作）。
-        // 旧实现每个 8-LBA 子操作都试，H2testw 满盘读时 79k 次 decline，
-        // 每次都先做一轮 L2P 查找/加载再回退普通读，是读速下降的主因之一。
-        if (pend_op_is_read(g->op) && ((g->next % (FTL_CACHE_READ_MAX_PAIRS * FTL_LBA_PER_PAIR)) == 0U))
+        // 连续 pair 的 two-plane cache read：每 32 LBA（16 KiB host 传输窗口）试一次。
+        // 每个 8-LBA 子操作都试会先做一轮 L2P 查找/加载再回退普通读，代价高；
+        // 节拍与 run 长度上限解耦（见 cache_batch.h）。
+        if (pend_op_is_read(g->op) && ((g->next % FTL_CACHE_READ_TRIAL_LBAS) == 0U))
         {
             DWORD                   used = 0U;
             ftl_cache_read_result_e cr   = ftl_cache_read_try(ftl, gi, glba, buffer, remain, &used);
