@@ -375,7 +375,8 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  * @param cache         共享 cache
  * @param global_region 全局 region（local × FTL_DIM_TOTAL + dim）
  * @param pba           Directory 给出的 region 页物理地址
- * @return true = 已驻留或预载成功；false = 无 INVALID 行 / 读失败
+ * @return true = 已驻留或预载成功
+ *         false = 无 INVALID 行 / 读失败
  */
 bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba);
 
@@ -386,7 +387,8 @@ bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba);
  * 写回**（预取不制造写回）。已驻留/LOADING ⇒ 直接返回 true；thrashing / 在飞
  * load 达 L2P_PREFETCH_MAX_INFLIGHT / FC 资源不足 / 无 CLEAN 候选 ⇒ 跳过并计数。
  *
- * @return true = 已驻留或加载已起；false = 本次跳过（host 路径无影响）
+ * @return true = 已驻留或加载已起
+ *         false = 本次跳过（host 路径无影响）
  */
 bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
 
@@ -407,7 +409,9 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
  * @param cache  cache 上下文
  * @param lba    **全局** LBA（host LBA；数据通路不做局部/全局预转）
  * @param out    出参 PBA（FTL_OK 与 FTL_ERROR 时有效；FTL_AGAIN 时未动）
- * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（lba 越界；
+ * @return FTL_OK
+ *         FTL_AGAIN（region 加载中，稍后重试）
+ *         FTL_ERROR（lba 越界；
  *         out 由调用者提供；cache 由 ftl_contract_audit 在 boot 期证明）
  */
 ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
@@ -478,7 +482,8 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
  *
  * @param cache         共享 L2P cache
  * @param global_region 全局 region（lba_to_global_region(lba)）
- * @return true = 发生过加载失败降级；false = 未驻留 / 合法未映射 / 正常加载
+ * @return true = 发生过加载失败降级
+ *         false = 未驻留 / 合法未映射 / 正常加载
  */
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 

@@ -262,7 +262,8 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
  * @param journal Journal；out 出参（环空时全置 0，可为 NULL）
  * @param out_read_error 出参（可为 NULL）：true = 环内存在读失败页 ⇒ 最新页与
  *        「干净/掉电」判型都不可信，启动恢复应走掉电回放路径
- * @return true = 环非空（*out 有效）；false = 环空（全部擦除 / 无有效页）
+ * @return true = 环非空（*out 有效）
+ *         false = 环空（全部擦除 / 无有效页）
  */
 bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error);
 
@@ -299,7 +300,8 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
  *   它会被 ftl_confirm_write 调用，必须保持 completion/service 调用栈无泵。
  * @param journal Journal
  * @param entries 本次最多追加的条目数（1..JRN_ENTRIES_PER_PAGE-1）
- * @return true = 已预留；false = 背压
+ * @return true = 已预留
+ *         false = 背压
  */
 bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
 
@@ -307,7 +309,9 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
  * @brief 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
  *
- * @return true = 已追加 / 就地合并；false = 页满且异步刷页起不来，本条目被丢弃。⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）； host 写确认 / GC/WL / TRIM 先用 jrn_reserve 预留，故其页满分支结构性不可达。
+ * @return true = 已追加 / 就地合并
+ *         false = 页满且异步刷页起不来，本条目被丢弃。⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）；
+ *               host 写确认 / GC/WL / TRIM 先用 jrn_reserve 预留，故其页满分支结构性不可达。
  */
 bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
 
@@ -379,7 +383,8 @@ void jrn_checkpoint_request(l2p_jrn_t *journal);
  * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
  * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 jrn_resume 把落点放到最新页
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
- * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
+ * @return FTL_OK = 完整回放
+ *         FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
  *         不完整 ⇒ 调用者应回退 full metadata rebuild）。 */
 ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx);
 

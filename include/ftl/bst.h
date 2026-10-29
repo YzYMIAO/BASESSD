@@ -221,7 +221,11 @@ static inline void ftl_block_set_temp(bst_block_t *b, BYTE temperature)
     b->temp = temperature;
 }
 
-/** @brief ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
+/**
+ * @brief 取块的温度流（0=HOT / 1=COLD）。
+ *
+ * ⚠ 返回值是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。
+ */
 static inline BYTE ftl_block_get_temp(const bst_block_t *b)
 {
     return b->temp;

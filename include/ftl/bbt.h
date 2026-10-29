@@ -164,7 +164,8 @@ void bbt_init(alc_t *alloc);
  *     否则“总线读死”也会返回 false。
  *
  * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @return true = 至少一页是合法 FTL 页（介质已格式化过）；false = 空片
+ * @return true = 至少一页是合法 FTL 页（介质已格式化过）
+ *         false = 空片
  */
 bool bbt_medium_has_ftl_data(alc_t *alloc);
 

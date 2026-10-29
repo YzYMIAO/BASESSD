@@ -229,7 +229,9 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap);
  * @param cmd        FC 命令（须已设 config.operation / multi_plane / meta）
  * @param pba        [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
  * @param cw_bitmap  flat 字面位图（bit = plane*CW_NUM + cw，0 = 空集 → ASSERT）
- * @return FTL_OK / FTL_AGAIN（desc/buffer 池空）/ FTL_ERROR（位图越段 → ASSERT）
+ * @return FTL_OK
+ *         FTL_AGAIN（desc/buffer 池空）
+ *         FTL_ERROR（位图越段 → ASSERT）
  */
 ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap);
 
@@ -495,7 +497,9 @@ ftl_status_e ftl_async_write_page(fc_command_t **out_cmd, DWORD pba, const void 
  * @param out_cmd 出参命令（非 NULL）
  * @param pba 目标块 PBA。
  *
- * @return FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参或地址非法 / 建链失败）。
+ * @return FTL_OK
+ *         FTL_AGAIN（命令池空）
+ *         FTL_ERROR（入参或地址非法 / 建链失败）。
  *
  * @note 实现要点：擦除慢（20ms 超时）是**同步版**的形参；异步版的超时由 FC 层自己的
  * 命令超时与 job watchdog 承担，本函数不设。
@@ -550,7 +554,9 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
  *   cw_bitmap 是 flat 绝对位图（bit = plane*CW_NUM+cw）。两 plane 都在时传全 1。
  * ⚠ 两个 pba 必须同 ch/ce/lun；多 plane 命令的 desc 链必须覆盖每个 plane。
  *
- * @return FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参、地址或建链失败）。
+ * @return FTL_OK
+ *         FTL_AGAIN（命令池空）
+ *         FTL_ERROR（入参、地址或建链失败）。
  */
 ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_t *cfg);
 

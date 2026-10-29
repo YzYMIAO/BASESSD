@@ -407,7 +407,8 @@ static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence
 }
 
 /**
- * @brief 按**快照**脏位图把每个脏 region 落盘（阶段②）。返回 CP_FLUSH_DONE = 全部已持久； CP_FLUSH_PENDING = 仍有在飞（下轮再来）；CP_FLUSH_FAILED = 硬失败（调用者中止，不写 Header）。
+ * @brief 按**快照**脏位图把每个脏 region 落盘（阶段②）。返回 CP_FLUSH_DONE = 全部已持久； CP_FLUSH_PENDING = 仍有在飞（下轮再来）；
+ *        CP_FLUSH_FAILED = 硬失败（调用者中止，不写 Header）。
  *
  * @note 实现要点：**不按 state == DIRTY 过滤**——异步化后脏行可能已被后台 l2p_flush_kick
  * 起了写回（state = FLUSHING）而尚未完成，它同样属于"本周期改过、必须已持久"，

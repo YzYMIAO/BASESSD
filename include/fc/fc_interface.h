@@ -66,7 +66,8 @@ extern "C"
      * 前置（违反一律 ASSERT，不返回错误码）：命令处于 ALLOCATED；plane 落在本命令 plane 段内；
      * CW 号 < CW_NUM；row_paa 的 plane 位 == plane。配置错误绝不发到硬件。
      *
-     * @return OK / RESOURCE_EMPTY（desc 或 buffer 池空）——只有「申请不到」才走返回码（模仿硬件行为）。**失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」是不变量，调用方沿链释放即完整回收（见下两个函数）。
+     * @return OK / RESOURCE_EMPTY（desc 或 buffer 池空）——只有「申请不到」才走返回码（模仿硬件行为）。
+     *            **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」是不变量，调用方沿链释放即完整回收（见下两个函数）。
      */
     fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa);
 
@@ -148,14 +149,14 @@ extern "C"
 
     /**
      * @brief ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）。
-     * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
+     * @pre buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
      */
     BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
 
     /**
      * @brief FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
      * 数据路径（加扰/ECC/RAID）使用此接口。
-     * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
+     * @pre buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
      */
     BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id);
 

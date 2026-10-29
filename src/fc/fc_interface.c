@@ -92,9 +92,12 @@ fc_command_t *fc_command_alloc(void)
 /**
  * @brief 判断 (plane, cw) 是否已在命令的 desc 链上（按 desc 自己的 PAA 算 n 匹配）。
  *
- * @param command 命令；plane/cw —— 目标 CW 坐标。
+ * @param command 命令。
+ * @param plane   目标 CW 的 plane。
+ * @param cw      目标 CW 的 CW 号。
  *
- * @return 1 = 已挂；0 = 未挂。
+ * @return 1 = 已挂
+ *         0 = 未挂。
  *
  * @note 实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
  * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，

@@ -73,9 +73,12 @@ typedef struct
 
 /**
  * @brief 尝试为当前写组提交一个 16 KiB cache program 批次。
- * 前置：调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
+ * @pre 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
  *
- * @return DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）； OK —— 已提交，*used = 32； AGAIN —— 资源/空间瞬态，本轮停止 drain； ERROR —— 永久错误，组报 IO_ERROR。/
+ * @return DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）；
+ *                   OK —— 已提交，*used = 32；
+ *                   AGAIN —— 资源/空间瞬态，本轮停止 drain；
+ *                   ERROR —— 永久错误，组报 IO_ERROR。
  */
 ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 

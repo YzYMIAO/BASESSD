@@ -340,7 +340,8 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  * @param cp          最近 Header（cp_pool_find_latest 的输出）
  * @param record_idx  该 Header 的池内槽位
  * @param block_words 输出：FTL_BLOCK_TOTAL 个 16-bit word
- * @return true = 已加载且 CRC 通过；false = 无快照 / 损坏
+ * @return true = 已加载且 CRC 通过
+ *         false = 无快照 / 损坏
  */
 bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx, WORD block_words[FTL_BLOCK_TOTAL]);
 
@@ -356,7 +357,8 @@ bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx,
  * @param h           Checkpoint handle
  * @param cp          最近 Header
  * @param record_idx  该 Header 的池内槽位
- * @return true = 已加载并回填；false = 无快照 / 损坏
+ * @return true = 已加载并回填
+ *         false = 无快照 / 损坏
  */
 bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx);
 

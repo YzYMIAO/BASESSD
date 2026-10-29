@@ -154,7 +154,9 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
  *
  * @param rr 实例。
  *
- * @return RR_PLANE_READY 找到（page / page_lba / first 已填）；RR_PLANE_SKIP 本子操作不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane；RR_PLANE_WAIT 该 LBA 的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来。
+ * @return RR_PLANE_READY 找到（page / page_lba / first 已填）；
+ *                        RR_PLANE_SKIP 本子操作不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane；
+ *                        RR_PLANE_WAIT 该 LBA 的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来。
  *
  * @note 实现要点：与原 ftl_recover_read_subop 的选页循环逐条一致——只看**第一个** plane
  * 匹配的 k（命中即 break，无论映射是否有效）。目标页取自 L2P 而非失败

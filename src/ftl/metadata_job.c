@@ -530,7 +530,8 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
 /**
  * @brief 从 job.region_id 起找 victim 上**下一个**仍有引用的 region，发起异步读。
  *
- * @return MD_COMPACT_SCANNED = 已扫完（未提交任何命令）；MD_COMPACT_SUBMITTED = 已提交（等完成）； MD_COMPACT_BACKPRESSURE = 背压未提交（下轮重试）；MD_COMPACT_FAILED = 硬失败（调用者中止）。
+ * @return MD_COMPACT_SCANNED = 已扫完（未提交任何命令）；MD_COMPACT_SUBMITTED = 已提交（等完成）；
+ *                             MD_COMPACT_BACKPRESSURE = 背压未提交（下轮重试）；MD_COMPACT_FAILED = 硬失败（调用者中止）。
  *
  * @note 实现要点：游标先走后命中，提交失败再把游标退回来（重试同一 region）。
  * 搬移走的是**裸页拷贝**（region 页无头，就是 L2P_REGION_SIZE 字节的 entries
@@ -632,7 +633,8 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
 /**
  * @brief 当前 victim 搬空后，继续挑下一个能装进当前块剩余空槽的稀疏 victim。
  *
- * @return true = 已切到下一个 victim（phase=CP_READ）；false = 没有可装下的 victim。
+ * @return true = 已切到下一个 victim（phase=CP_READ）
+ *         false = 没有可装下的 victim。
  *
  * @note 实现要点：victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
  * 更大的更装不下 ⇒ 直接结束本轮压缩，交给 Anchor/回收。

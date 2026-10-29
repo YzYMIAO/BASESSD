@@ -141,7 +141,8 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
  * @param pba           该命令的目标页 PBA（页基址，cw 位为 0；用于校验 META 的 plane 位）
  * @param cw_lba        输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID
  * @param page_base_out 输出：页基址（首个写过 CW 反推）（可为 NULL）
- * @return GC_DECODE_OK = 至少一个 CW 写过且页基址一致；GC_DECODE_EMPTY = 全页未写过
+ * @return GC_DECODE_OK = 至少一个 CW 写过且页基址一致
+ *         GC_DECODE_EMPTY = 全页未写过
  *         （无有效数据，调用者跳过）；GC_DECODE_CORRUPT = 写过的 CW 页基址不一致
  *         （META 损坏，调用者必须按不可迁移处理，**不得**擦 victim）。
  */

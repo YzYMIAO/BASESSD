@@ -46,7 +46,8 @@ void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BY
 /**
  * @brief BCH 解码：检测并定位 data+recv_ecc 中的错误。
  * @errloc 输出错误位置数组（至少 t 个元素）。
- * @return  true = 解码完成（*out_nerr 为纠正的错误数，0..t）；false = 不可纠。
+ * @return true = 解码完成（*out_nerr 为纠正的错误数，0..t）
+ *         false = 不可纠。
  *          入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT
  *          （见 assertion_guidelines.md §十五）。
  *          对于返回的错误位置 errloc[i]：

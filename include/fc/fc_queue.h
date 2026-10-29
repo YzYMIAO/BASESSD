@@ -42,6 +42,7 @@ typedef struct
 
 /* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
 fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
+
 /**
  * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
  *
@@ -58,6 +59,7 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  * push 的 command_id 若为 FC_COMMAND_ID_INVALID（哨兵）属调用者 bug → ASSERT。
  */
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
+
 /**
  * @brief 从队头弹出命令 ID。
  *
@@ -80,6 +82,7 @@ fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WOR
  * @return FC_STATUS_OK / QUEUE_FULL。
  */
 fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
+
 /**
  * @brief 从队头弹出完成项。
  *

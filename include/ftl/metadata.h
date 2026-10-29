@@ -531,7 +531,8 @@ void md_pool_build_bbt_bootstrap(md_ring_t *ring);
  *   BBT >= 2、Checkpoint >= 2、Journal == JOURNAL_BLOCK_COUNT；
  *   Anchor 只跳过 BAD（32 块固定区足够）。
  *
- * @return true = 全部满足；false = 某分区凑不齐（release 下调用者必须拒绝启动）
+ * @return true = 全部满足
+ *         false = 某分区凑不齐（release 下调用者必须拒绝启动）
  */
 bool md_pool_build_all(alc_t *alloc);
 
@@ -597,7 +598,8 @@ typedef struct
  * @param probe          调用方探针
  * @param ctx            探针上下文
  * @param out 输出：最新有效 record 槽位 / sequence / 写游标（池空时 newest=UINT16_MAX、seq=0）
- * @return FTL_OK = 定位完成（含"池为空"）；FTL_ERROR = ring 几何非法
+ * @return FTL_OK = 定位完成（含"池为空"）
+ *         FTL_ERROR = ring 几何非法
  */
 ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, md_ring_locate_out_t *out);
 
@@ -911,7 +913,8 @@ void md_entry_update(md_dir_cache_t *dir, BYTE type, WORD id, DWORD new_pba);
  * @param dir  Directory cache
  * @param alloc Allocator
  * @param out  输出两个 PBA（主、备）
- * @return true = 两槽都取到；false = 背压，未取槽
+ * @return true = 两槽都取到
+ *         false = 背压，未取槽
  */
 bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES]);
 
@@ -1105,7 +1108,8 @@ void md_handle(md_dir_cache_t *dir, const bg_info_t *info, md_status_t *out);
  * checkpoint.c 的 cp_regions_flush：脏 region 取不到槽（FTL_AGAIN）时若 job 在推进，
  * 就**不该**累计 CP 的 stall 计数——否则一次正常的长压缩会把 Checkpoint 打回去。
  *
- * @return true = 有 job 在跑；false = 空闲（或 dir == NULL）。
+ * @return true = 有 job 在跑
+ *         false = 空闲（或 dir == NULL）。
  */
 static inline bool md_is_busy(const md_dir_cache_t *dir)
 {

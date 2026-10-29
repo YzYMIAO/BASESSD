@@ -43,7 +43,8 @@
  * @param out_stats 出参聚合统计（可 NULL）
  * @param out_ec 出参平均擦除次数（非 NULL）。
  *
- * @return true = 合法候选（出参有效）；false = 跳过。
+ * @return true = 合法候选（出参有效）
+ *         false = 跳过。
  *
  * @note 实现要点：**触发判据与选块必须用同一套过滤**，否则「触发时认为有候选、选块时
  * 却选不出」会让 WL 每轮空转（C2 / C9）：跳过 Open、跳过含坏 plane、

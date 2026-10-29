@@ -262,7 +262,8 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
  * **所有**非 BBT-pool 块（包括 BST 中标记为 BAD 的块）：擦除成功即 recovered。
  * BBT 池跳过（本轮坏块 record 在里面）；体检后所有块保持擦净状态。
  *
- * @return FTL_OK（体检完成，个别块已标坏）；FTL_ERROR = BBT 落盘失败。
+ * @return FTL_OK（体检完成，个别块已标坏）
+ *         FTL_ERROR = BBT 落盘失败。
  */
 static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
 {

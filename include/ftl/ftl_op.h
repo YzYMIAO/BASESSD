@@ -217,7 +217,8 @@ void ftl_op_dispatch(const fc_command_status_t *completion);
  * 同步回退（会嵌套），改为丢弃该条目 + LOGE 并返回 false（见 journal.c）。
  * 迁移侧必须把 false 当失败中止（victim 不擦）；host 写路径当前只能记日志继续。
  *
- * @return true = 在派发内；false = 不在。
+ * @return true = 在派发内
+ *         false = 不在。
  */
 bool ftl_op_is_in_dispatch(void);
 

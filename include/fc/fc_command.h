@@ -332,7 +332,9 @@ struct fc_command_status_t
 /**
  * @brief 给出命令能触及的 plane 段 [*plane_first, *plane_last)。
  *
- * @param command 命令；plane_first/plane_last —— 输出（调用者保证非空）。
+ * @param command     命令。
+ * @param plane_first 输出：plane 段起点（调用者保证非空）。
+ * @param plane_last  输出：plane 段终点（调用者保证非空）。
  *
  * @return 段内 plane 数（= multi_plane，单 plane 时为 1）。
  *
@@ -363,7 +365,9 @@ static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plan
  *
  * @param command 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
  *
- * @return 段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径（pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
+ * @return 段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
+ *         用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径（pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。
+ *         ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  */
 static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
 {
@@ -379,15 +383,31 @@ static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
  *
  * @param command FC 命令。
  *
- * @return 恒 FC_STATUS_OK。实现要点（整函数转 ASSERT）：- 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是**调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的 sync_page_prepare 实参），**从不是 host 输入**，属判据 2，故一律 ASSERT（配置错误绝不发到硬件，§十三 定调）。- 本函数退化为「恒 OK」的校验钩子：debug 下跑内层断言；release 下调用点 fc_submit 的 ASSERT(... == OK) 整条裁空，无运行时开销。- has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要 buffer；data_input_cycles>0 只是其子集。- **不校验 CW 集合**（集合不在命令里）：它是 FTL 的建链输入， FC 只认 desc 链（链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见 ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
+ * @return 恒 FC_STATUS_OK。
+ *
+ * @note 实现要点（整函数转 ASSERT）：
+ *   - 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是
+ *     **调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的
+ *     sync_page_prepare 实参），**从不是 host 输入**，属判据 2，故一律 ASSERT
+ *     （配置错误绝不发到硬件，§十三 定调）。
+ *   - 本函数退化为「恒 OK」的校验钩子：debug 下跑内层断言；release 下调用点 fc_submit 的
+ *     ASSERT(... == OK) 整条裁空，无运行时开销。
+ *   - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要 buffer；
+ *     data_input_cycles>0 只是其子集。
+ *   - **不校验 CW 集合**（集合不在命令里）：它是 FTL 的建链输入，FC 只认 desc 链
+ *     （链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
+ *     ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
  */
 fc_status_e fc_command_validate(const fc_command_t *command);
+
 /**
  * @brief 判断 flat CW 掩码在**每个 plane 上的 CW 集合是否相同**。
  *
  * @param mask flat 掩码（bit n = plane*CW_NUM + cw）。
  *
- * @return 1 = 对称（mask == 0 视为对称）；0 = 不对称。用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合（见 fc_data_path_generate_stripe_parity 的前置断言）。
+ * @return 1 = 对称（mask == 0 视为对称）
+ *         0 = 不对称。
+ *         用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合（见 fc_data_path_generate_stripe_parity 的前置断言）。
  */
 BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 

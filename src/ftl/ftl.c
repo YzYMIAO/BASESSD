@@ -1351,7 +1351,8 @@ void ftl_service(ftl_ctx_t *ftl)
  * @param buffer 数据缓冲
  * @param n_cw 入参兼出参（最大可提供 / 实际消费的 LBA 数）。
  *
- * @return 三态——FTL_OK 已下发（或如未映射读般**同步完成**，不进 outstanding）； FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试； FTL_ERROR 永久失败（无可用块 / 映射表损坏）。
+ * @return 三态——FTL_OK 已下发（或如未映射读般**同步完成**，不进 outstanding）；
+ *          FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试； FTL_ERROR 永久失败（无可用块 / 映射表损坏）。
  *
  * @note 实现要点：⚠ 三态分类是全局枢纽（见上方分区头）。
  * · 读：逐 LBA 查 L2P，按 (物理 plane, 页) 分组——未映射、或同 plane 换了页
@@ -1855,7 +1856,8 @@ static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
  * @param req 请求（count = 连续 LBA 数，buffer 非空）
  * @param op PENDING_OP_READ / PENDING_OP_WRITE（决定组类型与日志标签）。
  *
- * @return FTL_OK（已建组，可能仍有余量待 Phase 2.5 补发）/ FTL_ERROR（参数非法 /越界 / 组槽满）。
+ * @return FTL_OK（已建组，可能仍有余量待 Phase 2.5 补发）
+ *         FTL_ERROR（参数非法 /越界 / 组槽满）。
  *
  * @note 实现要点：两个公开入口的流程**逐字相同**（差异只有 op 与日志文案）⇒ 收敛到本函数
  * 一份，避免两处各自漂移（H6：注释与代码不一致即缺陷，重复实现更甚）。

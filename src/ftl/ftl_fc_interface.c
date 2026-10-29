@@ -61,7 +61,9 @@ static BYTE s_mirror_page[PAGE_MAIN_SIZE];
 /**
  * @brief 校验建链形参 cw_bitmap —— 「本命令要访问哪些 CW」的唯一定义处。
  *
- * @param bitmap 调用者给的 flat 字面位图； plane_first / plane_count —— 本命令的 plane 段（由 fc_command_plane_span 给出）。
+ * @param bitmap      调用者给的 flat 字面位图。
+ * @param plane_first 本命令 plane 段的起点（由 fc_command_plane_span 给出）。
+ * @param plane_count 本命令 plane 段的 plane 数（由 fc_command_plane_span 给出）。
  *
  * @return FTL_OK / FTL_ERROR（空位图 / 越段 / multi-plane 未覆盖每个 plane）。
  *

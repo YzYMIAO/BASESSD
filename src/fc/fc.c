@@ -1237,7 +1237,8 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  * @param command_id 命令 ID
  * @param request 输出请求。
  *
- * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图——**唯一**的失败出口，由 fc_build_request_data_planes 透传）。其余路径不可失败（desc 链遍历按池深截断，不产生错误路径）。
+ * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图——**唯一**的失败出口，由 fc_build_request_data_planes 透传）。
+ *                      其余路径不可失败（desc 链遍历按池深截断，不产生错误路径）。
  *
  * @note 实现要点：- 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_bitmap / cw_buffers[] / plane_paa[]：
  * * ERASE_BLOCK：只填 plane_paa[本 plane]，**不置掩码**（擦除无逐 CW 数据，
@@ -1745,7 +1746,9 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
  *
  * @param controller FC 控制器。
  *
- * @return FC_STATUS_OK（本轮至少提交了一条）/ IO_ERROR（提交失败，剩余命令留在队列）/ QUEUE_EMPTY / NOT_READY（无可提交，供 ftl_service 结束本轮 fc_service 循环）。
+ * @return FC_STATUS_OK（本轮至少提交了一条）
+ *         IO_ERROR（提交失败，剩余命令留在队列）/ QUEUE_EMPTY
+ *         NOT_READY（无可提交，供 ftl_service 结束本轮 fc_service 循环）。
  *
  * @note 实现要点：- **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
  * - **共享 suspended**：HSQ 因 room 不足挂起某 LUN 后，SQ 本轮也跳过该 LUN——

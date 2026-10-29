@@ -382,7 +382,8 @@ static inline nand_pba_fields_t pba_fields(DWORD pba)
  * 值语义（pba_pack / pba_fields）本身**不依赖**本结论 —— 它们走宏。本检查保证的是
  * **强转可用**：`*(DWORD *)&fields` 与 pba_pack(fields) 同值。
  *
- * @return true = 布局与 PBA_*_SHIFT 一致；false = 不一致（调用者应断言）
+ * @return true = 布局与 PBA_*_SHIFT 一致
+ *         false = 不一致（调用者应断言）
  */
 static inline bool pba_fields_layout_matches(void)
 {

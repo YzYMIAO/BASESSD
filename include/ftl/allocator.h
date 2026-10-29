@@ -230,7 +230,8 @@ static inline ftl_topo_t alc_topo(const alc_t *alloc)
  * @param counts 首地址（WORD[]）
  * @param count 元素个数。
  *
- * @return 各元素之和。调用点直接传 `alloc->op_count` / `alloc->spare_count` + `PLANE_NUM`；元素宽度由 `WORD *` 类型确定，不再为两个池各包一层 getter。
+ * @return 各元素之和。调用点直接传 `alloc->op_count` / `alloc->spare_count` + `PLANE_NUM`；
+ *         元素宽度由 `WORD *` 类型确定，不再为两个池各包一层 getter。
  */
 WORD alc_pool_sum_counts(const WORD *counts, BYTE count);
 
@@ -255,7 +256,8 @@ void alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *refs);
  * 避免运行期坏块直接吃用户可用块。
  *
  * @param alloc 分配器；plane 目标 plane
- * @return 取到的 gblock（已入 Free）；FTL_GBLOCK_INVALID = OP 池也空
+ * @return 取到的 gblock（已入 Free）
+ *         FTL_GBLOCK_INVALID = OP 池也空
  */
 WORD alc_free_refill_from_op(alc_t *alloc, BYTE plane);
 
@@ -309,7 +311,9 @@ bool alc_op_push(alc_t *alloc, BYTE plane, WORD gblock);
  * @param alloc 分配器
  * @param plane 目标 plane。
  *
- * @return gblock（已出池、state=LOG）；FTL_GBLOCK_INVALID = 该 plane Free Pool 空。用途：固定 L2P 日志区满时的**有界溢出**。从 OP（GC headroom）借还闭环，不动用户容量；借出的块由 metadata 的 `l2p_live` / `md_block_is_metadata`动态识别，擦空后回 OP。
+ * @return gblock（已出池、state=LOG）
+ *         FTL_GBLOCK_INVALID = 该 plane Free Pool 空。用途：固定 L2P 日志区满时的**有界溢出**。
+ *         从 OP（GC headroom）借还闭环，不动用户容量；借出的块由 metadata 的 `l2p_live` / `md_block_is_metadata`动态识别，擦空后回 OP。
  */
 WORD alc_op_alloc_log_block(alc_t *alloc, BYTE plane);
 
@@ -354,7 +358,8 @@ bool alc_spare_pop(alc_t *alloc, BYTE plane, WORD *out_gblock);
  * 摘 Free → state 置 NONE → push Spare；无同 plane 空闲块时自然停止（容量下降）。
  *
  * @param alloc 分配器；plane 目标 plane
- * @return true = 至少移了一块；false = 已满 / 无可补
+ * @return true = 至少移了一块
+ *         false = 已满 / 无可补
  */
 bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane);
 
@@ -411,7 +416,8 @@ alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temp
  * @param alloc 分配器
  * @param mode 分配策略（温度流 + 选块方向 + OP 兜底）； out[PLANE_NUM] — 各 plane 页基址 PBA。
  *
- * @return FTL_OK；FTL_AGAIN = 某 plane 无块（瞬态，调用者触发 GC）。`ALC_SUPER_ALLOC_COLD_HIGH_WEAR` 是静态 WL 目标：强制新开 cold SB、每 plane 取 erase_count 最大的空闲块、不允许 OP 兜底（OP 块擦除次数不受该策略控制）。
+ * @return FTL_OK；FTL_AGAIN = 某 plane 无块（瞬态，调用者触发 GC）。
+ *         `ALC_SUPER_ALLOC_COLD_HIGH_WEAR` 是静态 WL 目标：强制新开 cold SB、每 plane 取 erase_count 最大的空闲块、不允许 OP 兜底（OP 块擦除次数不受该策略控制）。
  */
 ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode, DWORD out[PLANE_NUM]);
 
@@ -481,7 +487,8 @@ void alc_super_closed_remove(alc_t *alloc, WORD closed_idx);
  * @param alloc  分配器
  * @param plane  plane 号
  * @param block  该 plane 内的块号
- * @return true = 条目已无任何 plane（条目被移除）；false = 仍有其他 plane 或未找到
+ * @return true = 条目已无任何 plane（条目被移除）
+ *         false = 仍有其他 plane 或未找到
  */
 bool alc_super_closed_drop_plane(alc_t *alloc, BYTE plane, WORD block);
 
@@ -492,7 +499,8 @@ bool alc_super_closed_drop_plane(alc_t *alloc, BYTE plane, WORD block);
  * @param sb 目标条目
  * @param out_idx 出参索引。
  *
- * @return true = 找到；false = 不在列表。
+ * @return true = 找到
+ *         false = 不在列表。
  */
 bool alc_super_closed_find(const alc_t *alloc, const super_block_t *sb, WORD *out_idx);
 

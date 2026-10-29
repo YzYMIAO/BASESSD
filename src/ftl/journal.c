@@ -368,7 +368,8 @@ static void jrn_header_write(l2p_jrn_t *journal)
  *
  * @param journal Journal。
  *
- * @return true = 已异步起写（调用者不必再同步刷）；false = 未能起（job 忙 / 池空 / 建链失败），此时 page_buf 与写指针**原样未动**，调用者应返 FTL_AGAIN / 下一轮重试。
+ * @return true = 已异步起写（调用者不必再同步刷）；
+ *              false = 未能起（job 忙 / 池空 / 建链失败），此时 page_buf 与写指针**原样未动**，调用者应返 FTL_AGAIN / 下一轮重试。
  *
  * @note 实现要点：· **单飞行**：phase != JRN_IDLE 直接拒绝——两条写会争同一个页地址。
  * · **待偿擦除也不许写**：need_erase 置位说明当前环形块**还没擦过**（换块后
@@ -457,7 +458,8 @@ static bool jrn_freeze(l2p_jrn_t *journal)
  *
  * @param journal Journal（job.target_block = 待擦块）。
  *
- * @return true = 已起（phase = JRN_ERASE，need_erase 已清）；false = 未起（池空 / 建链失败， need_erase 保留，由 jrn_handle 下轮重试）。
+ * @return true = 已起（phase = JRN_ERASE，need_erase 已清）
+ *         false = 未起（池空 / 建链失败， need_erase 保留，由 jrn_handle 下轮重试）。
  *
  * @note 实现要点：擦的是**已推进到**的新环形块，故必须在任何页写进该块之前完成。
  */
@@ -887,7 +889,9 @@ static bool jrn_page_raw_blank(DWORD addr)
  * @brief 扫一遍环形块池——找**最新页**（最大 page_seq），并按需收集需回放页。
  *
  * @param journal Journal
- * @param cp_sequence 回放水位； out_pages / capacity —— 收集数组与其容量（out_pages == NULL = 只找最新页）
+ * @param cp_sequence 回放水位。
+ * @param out_pages   收集数组（NULL = 只找最新页）。
+ * @param capacity    收集数组容量。
  * @param out_count 出参收集条数（可为 NULL）
  * @param out_latest 出参最新页（可为 NULL）。
  *

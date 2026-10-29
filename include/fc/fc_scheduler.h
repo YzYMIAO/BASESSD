@@ -70,7 +70,9 @@ typedef struct
 /**
  * @brief 初始化调度器（绑定 SQ/HSQ）。
  *
- * @param scheduler 调度器；sq/hsq —— 队列指针。
+ * @param scheduler 调度器。
+ * @param sq        提交队列（SQ）。
+ * @param hsq       高优先级提交队列（HSQ）。
  *
  * @return FC_STATUS_OK。
  *

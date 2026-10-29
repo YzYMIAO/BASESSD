@@ -774,7 +774,8 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  *
  * @param alloc 分配器（写点 = alloc->bbt.write_idx）。
  *
- * @return FTL_OK 已提交（waiting = 1）；FTL_ERROR 建链/提交失败（**waiting 保持 0**，调用者停在 BBT_JOB_WRITE 等下一轮 kick 续跑——**不重擦块**）。
+ * @return FTL_OK 已提交（waiting = 1）；
+ *                FTL_ERROR 建链/提交失败（**waiting 保持 0**，调用者停在 BBT_JOB_WRITE 等下一轮 kick 续跑——**不重擦块**）。
  *
  * @note 实现要点：record 内容在**提交时**从 BST 重建（不是起步时快照）——换块擦的等待
  * 期间新标坏的块会被一并记进本条 record，是严格的信息超集。
