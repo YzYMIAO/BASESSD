@@ -20,9 +20,10 @@
 struct ftl_context;
 
 /* ── cache read ──
- * 2 个 pair 才有收益（1 个 pair 用普通读）；4 = NAND per-LUN FIFO 深度。 */
+ * 2 个 pair 才有收益（1 个 pair 用普通读）；批次上限 = NAND per-LUN FIFO 深度
+ * （NAND_DISPATCH_CHAIN_DEPTH，当前 4），不另写字面量。 */
 #define FTL_CACHE_READ_MIN_PAIRS (2U)
-#define FTL_CACHE_READ_MAX_PAIRS (4U)
+#define FTL_CACHE_READ_MAX_PAIRS NAND_DISPATCH_CHAIN_DEPTH
 
 typedef enum
 {
@@ -49,10 +50,11 @@ typedef enum
 ftl_cache_read_result_e ftl_cache_read_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 /* ── cache program ──
- * 4 = NAND per-LUN FIFO 深度；也是 16 KiB / 4 KiB。 */
-#define FTL_CACHE_WRITE_MAX_PAGES (4U)
+ * 每批页数 = NAND per-LUN FIFO 深度（NAND_DISPATCH_CHAIN_DEPTH，当前 4）；
+ * 当前几何下 = 16 KiB / 4 KiB。 */
+#define FTL_CACHE_WRITE_MAX_PAGES NAND_DISPATCH_CHAIN_DEPTH
 
-/* host 16 KiB = 32 × 512B LBA = 4 × pair（8 LBA）。 */
+/* 一批覆盖的 host LBA 数 = MAX_PAGES × pair 窗口；当前几何 = 16 KiB（32 × 512B）。 */
 #define FTL_CACHE_WRITE_LBAS (FTL_CACHE_WRITE_MAX_PAGES * FTL_LBA_PER_PAIR)
 
 typedef enum

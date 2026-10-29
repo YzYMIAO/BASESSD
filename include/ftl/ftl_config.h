@@ -114,6 +114,9 @@ _Static_assert(FTL_DIM_TOTAL >= 1U, "设备维度数非法");
 _Static_assert((CW_NUM & (CW_NUM - 1U)) == 0U, "CW_NUM 必须是 2 的幂");
 _Static_assert((PLANE_NUM & (PLANE_NUM - 1U)) == 0U, "PLANE_NUM 必须是 2 的幂");
 
+/* cache batch 假设一条 multi-plane 命令覆盖全部 plane；器件必须支持。 */
+_Static_assert(PLANE_NUM <= NAND_MAX_MULTI_PLANE, "器件 multi-plane 能力不足：PLANE_NUM > NAND_MAX_MULTI_PLANE");
+
 /* CW 总数必须整除每 region 条目数（否则最后一个 region 不满）*/
 _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能被每 region 条目数整除");
 
@@ -148,6 +151,8 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
 
 /* 一对 plane 页覆盖的 LBA 数（8 = 2 plane × 4 CW） */
 #define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
+/* cw_bitmap 是 BYTE：FTL_LBA_PER_PAIR 超过 8 会在 pend_req_t 里静默截断。 */
+_Static_assert(FTL_LBA_PER_PAIR <= 8U, "cw_bitmap 是 BYTE；PLANE_NUM*CW_NUM 超过 8 会静默截断");
 
 /* 一个 pair 页的 flat CW 全掩码（bit = plane*CW_NUM+cw）。
  * cache read/write 批次共用，避免各模块重复写 `(1U << (PLANE_NUM*CW_NUM))-1`。 */

@@ -64,6 +64,10 @@
 /* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要 PLANE_NUM 倍。 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
 
+/* NAND per-LUN 命令 FIFO 深度（dispatch 层）：每槽一条命令。
+ * FTL cache batch 的批次上限按它派生（cache_batch.h），不要另写 4。 */
+#define NAND_DISPATCH_CHAIN_DEPTH (4U)
+
 /* 行地址数组深度（nand_command_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
  *   PLANE_NUM      —— 当前器件实际 plane 数，是数据模型的"宽度"，
  *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / plane_paa 的长度 /

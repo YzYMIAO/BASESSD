@@ -23,6 +23,26 @@
 
 #include <string.h>
 
+/* ── 资源判据 ── */
+
+/**
+ * @brief host cache batch（读/写）共享的资源判据。
+ *
+ * = FC 命令 / desc / buffer / SQ / HSQ 余量（ftl_fc_host_budget_ok_n）+
+ *   pending 表余量。读 / 写 batch 都走这一个入口，避免两份逐字重复的资源检查。
+ *
+ * @param ftl 实例（提供 pending 表；非 NULL）。
+ * @param n   本次 batch 计划提交的子操作数。
+ *
+ * @return true = 两类资源都够；false = 至少一类不足（调用者应拒绝或降级）。
+ */
+static bool cache_batch_budget_ok(const ftl_ctx_t *ftl, DWORD n)
+{
+    ASSERT(ftl != NULL);
+
+    return ftl_fc_host_budget_ok_n(n) && (((DWORD)pend_slot_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
+}
+
 /* ── cache read ── */
 
 // cache read 一次调用的公共参数；避免内部 helper 逐个传 6 个实参。
@@ -141,7 +161,8 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
             break;
         }
 
-        // 两 plane 必须都有效且指向同一页；否则不是完整 pair。
+        // 两 plane 必须都有效且页号相同：这是 multi-plane 命令的器件约束
+        // （ONFI 3.2 / Micron datasheet 要求同一页地址），不是本仓的特化。
         bool complete = true;
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
@@ -164,6 +185,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
         }
 
         // 当前 pair 必须紧接上一 pair 的物理页；否则只提交已收集的前缀。
+        // 同 block 是本仓的保守选择（不跨块），跨块直接回退普通读——不是器件强制。
         if (j > 0U)
         {
             bool contiguous = true;
@@ -366,7 +388,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         return defer ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_DECLINED;
     }
 
-    if (ftl_cache_budget_ok(ftl, n_pairs) == false)
+    if (cache_batch_budget_ok(ftl, n_pairs) == false)
     {
         ftl->cache_read_fallbacks++;
         return FTL_CACHE_READ_DECLINED;
@@ -490,7 +512,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     const bool lba_aligned  = ((lba & (FTL_LBA_PER_PAIR - 1U)) == 0U);
     const bool wbuf_idle    = wb_is_idle(ftl->wbuf);
     const bool room_ok      = (alc_super_open_get_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
-    const bool budget_ok    = ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
+    const bool budget_ok    = cache_batch_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
 
     if (batch_active || (enough_lbas == false) || (lba_aligned == false) || (wbuf_idle == false) || (room_ok == false) || (budget_ok == false))
     {

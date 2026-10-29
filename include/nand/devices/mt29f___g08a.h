@@ -28,6 +28,10 @@
 #define PAGES_PER_BLOCK  (64)
 #define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM        (2)
+/* 一条 multi-plane 命令最多覆盖几个 plane（Micron datasheet 的 Two-Plane Command Set；
+ * ONFI 1.0 没有 multi-plane，不能拿它当出处）。FTL cache batch 假设一条命令覆盖
+ * PLANE_NUM 个 plane，编译期在 ftl_config.h 校验 PLANE_NUM <= 本宏。 */
+#define NAND_MAX_MULTI_PLANE (2U)
 
 /* 拓扑：每片选 LUN 数 + 本板通道/片选数。
  * LUN_ADDR_WIDTH 由 nand_config.h 从 LUN_NUM 推导。

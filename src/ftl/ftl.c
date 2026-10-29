@@ -148,13 +148,6 @@ static ftl_log_throttle_t s_subop_fail_log;
 // host cache program 批次失败：host 反复重试同一坏页时每个批次都会失败 ⇒ 限流。
 static ftl_log_throttle_t s_cache_wb_fail_log;
 
-bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n)
-{
-    ASSERT(ftl != NULL);
-
-    return ftl_fc_host_budget_ok_n(n) && (((DWORD)pend_slot_get_count(&ftl->pending) + n) <= FTL_PENDING_MAX);
-}
-
 /* ── 内部辅助 ── */
 
 // 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到）。
@@ -1759,21 +1752,29 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
             DWORD                   used = 0U;
             ftl_cache_read_result_e cr   = ftl_cache_read_try(ftl, gi, glba, buffer, remain, &used);
 
-            if (cr == FTL_CACHE_READ_OK)
+            switch (cr)
             {
-                g->stalls = 0U;
-                g->next += used;
-                continue;
-            }
-            if (cr == FTL_CACHE_READ_AGAIN)
-            {
-                st         = FTL_AGAIN;
-                use_normal = false;
-            }
-            else if (cr == FTL_CACHE_READ_ERROR)
-            {
-                st         = FTL_ERROR;
-                use_normal = false;
+                case FTL_CACHE_READ_OK:
+                    g->stalls = 0U;
+                    g->next += used;
+                    continue;
+
+                case FTL_CACHE_READ_DECLINED:
+                    break; /* 条件不满足：显式回退普通读 */
+
+                case FTL_CACHE_READ_AGAIN:
+                    st         = FTL_AGAIN;
+                    use_normal = false;
+                    break;
+
+                case FTL_CACHE_READ_ERROR:
+                    st         = FTL_ERROR;
+                    use_normal = false;
+                    break;
+
+                default:
+                    ASSERT(false); /* H7/C7：新增枚举值必须在此显式处理 */
+                    break;
             }
         }
 
@@ -1783,21 +1784,29 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
             DWORD                          used = 0U;
             const ftl_cache_write_result_e cw   = ftl_cache_write_try(ftl, gi, glba, buffer, remain, &used);
 
-            if (cw == FTL_CACHE_WRITE_OK)
+            switch (cw)
             {
-                g->stalls = 0U;
-                g->next += used;
-                continue;
-            }
-            if (cw == FTL_CACHE_WRITE_AGAIN)
-            {
-                st         = FTL_AGAIN;
-                use_normal = false;
-            }
-            else if (cw == FTL_CACHE_WRITE_ERROR)
-            {
-                st         = FTL_ERROR;
-                use_normal = false;
+                case FTL_CACHE_WRITE_OK:
+                    g->stalls = 0U;
+                    g->next += used;
+                    continue;
+
+                case FTL_CACHE_WRITE_DECLINED:
+                    break; /* 条件不满足：显式回退 wbuf 普通写 */
+
+                case FTL_CACHE_WRITE_AGAIN:
+                    st         = FTL_AGAIN;
+                    use_normal = false;
+                    break;
+
+                case FTL_CACHE_WRITE_ERROR:
+                    st         = FTL_ERROR;
+                    use_normal = false;
+                    break;
+
+                default:
+                    ASSERT(false); /* H7/C7：新增枚举值必须在此显式处理 */
+                    break;
             }
         }
 

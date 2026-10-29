@@ -157,18 +157,18 @@ typedef struct ftl_context
     DWORD seq_prefetch_target; /* 本次检测算出的目标 region */
     bool  seq_prefetch_valid;  /* target 有效且尚未执行 */
 
-    /* FTL cache read 批量提交的观测计数（未上板前仅计数，不参与决策）。 */
-    DWORD cache_read_batches;
-    DWORD cache_read_pairs;
-    DWORD cache_read_declines;
-    DWORD cache_read_fallbacks;
+    /* FTL cache read 批量提交的观测计数（不参与决策；用于性能归因）。 */
+    DWORD cache_read_batches;   /* 成功提交的批次数 */
+    DWORD cache_read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均批深） */
+    DWORD cache_read_declines;  /* 收集不足最小 pair 数而放弃尝试的次数（不连续 / wbuf 命中 / L2P 加载中） */
+    DWORD cache_read_fallbacks; /* 已决定走 cache read 但资源不足或提交失败而回退的次数 */
 
     /* host cache program 批次（per-instance，单 LUN 单批）。 */
-    cache_wb_t cache_wb;
-    DWORD      cache_wb_batches;
-    DWORD      cache_wb_pages;
-    DWORD      cache_wb_declines;
-    DWORD      cache_wb_aborts;
+    cache_wb_t cache_wb;          /* 在飞批次的上下文（页对 / 命令 / pending 槽 / 完成掩码） */
+    DWORD      cache_wb_batches;  /* 成功提交的批次数 */
+    DWORD      cache_wb_pages;    /* 累计提交的页数 */
+    DWORD      cache_wb_declines; /* 条件不满足而回退 wbuf 的次数 */
+    DWORD      cache_wb_aborts;   /* 批次首次成员失败而中止的次数（同一批只计一次） */
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
@@ -283,19 +283,6 @@ void ftl_global_init(void);
  *         FTL_ERROR 元数据候选池构建失败（拒绝启动）
  */
 ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
-
-/**
- * @brief host cache batch（读/写）共享的资源判据
- *
- * = FC 命令/desc/buffer/SQ/HSQ 余量（ftl_fc_host_budget_ok_n） +
- *   pending 表余量。读/写 batch 都走这一个入口，避免两份逐字重复的资源检查。
- *
- * @param ftl 实例（提供 pending 表；非 NULL）
- * @param n 本次 batch 计划提交的子操作数
- * @return true  两类资源都够
- *         false 至少一类不足（调用者应拒绝或降级）
- */
-bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n);
 
 /**
  * @brief debug-only 初始化契约自检（release 下空实现）

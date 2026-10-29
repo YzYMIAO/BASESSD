@@ -6,8 +6,8 @@
 
 #include <stdint.h>
 
-/* One fixed per-LUN FIFO (depth NAND_DISPATCH_CHAIN_DEPTH) is attached to each LUN. */
-#define NAND_DISPATCH_CHAIN_DEPTH (4U)
+/* One fixed per-LUN FIFO (depth NAND_DISPATCH_CHAIN_DEPTH) is attached to each LUN.
+ * 深度定义在 nand_config.h（FTL cache batch 也按它派生批次上限）。 */
 
 /*
  * 每个 LUN 一个待处理 FIFO，深度 = NAND_DISPATCH_CHAIN_DEPTH。
