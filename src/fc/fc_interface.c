@@ -4,7 +4,7 @@
  * 职责：
  *   对外 API：参数校验 + 转发到 fc.c 的 fc_*_internal()（参数化控制器实现）。
  *   建链入口：fc_command_configure_descriptor —— **唯一一条**建链函数，含机制体
- *             （出池 desc/buffer、填 PAA/config/meta、挂链尾）。已收敛至此。
+ *             （出池 desc/buffer、填 PAA/config/meta、挂链尾）。
  *   除建链编排外不含任何池/调度/数据路径逻辑——那些留在 fc.c（核心）中；
  *   建链函数只调用 fc.c 的池/链原语，不直接读写池内部字段。
  *
@@ -32,7 +32,7 @@
 
 #include <stddef.h>
 
-// 命令指针 → 池索引。区间检查 + 减法，O(1)（原为 O(256) 线性扫描）。
+// 命令指针 → 池索引。区间检查 + 减法，O(1)。
 // 返回 0 = 指针不落在命令池区间内（例如栈上的 fc_command_t），没有对应 ID。
 BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 {
@@ -52,7 +52,11 @@ BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 }
 
 /**
- * @brief buffer ID 有效性（< 池深度且已占用）
+ * @brief buffer ID 是否落在池内（不检查占用）。
+ *
+ * @param buffer_id 待检查的 buffer ID。
+ *
+ * @return 1 = < FC_BUFFER_POOL_DEPTH；0 = 越界。
  */
 static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
 {
@@ -61,7 +65,12 @@ static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
 
 /**
  * @brief 是否占用（供 fc_buffer_release / id_to_real_buffer / get_base 的前置 ASSERT 用）。
- * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
+ *
+ * @param buffer_id 待检查的 buffer ID。
+ *
+ * @return 1 = 池内且已占用；0 = 越界或未占用。
+ *
+ * @note 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。
  */
 static BYTE __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
@@ -120,8 +129,7 @@ static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *c
     return 0U;
 }
 
-// 实现要点：- 本函数即**机制体**：上层自行组装 CW 集合（例如只读离散 CW），
-// 循环调用即可。
+// 实现要点：
 // - **校验段在机制段之前**：任何非法实参都在出池之前返回，不污染池子——
 // 否则会先分配一个 desc 再失败，破坏「失败即沿链完整回收」的干净语义。
 // - **行地址来自实参 row_paa，不从 command->paa 推导**：multi-plane 命令一个
@@ -149,8 +157,8 @@ static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *c
 // - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
 // 是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
 // - **buffer 从哪来由 config.buf_own 决定**：上层申请（申请位 = 1）时用调用者
-// 传进来的 buffer_id（无失败路径）；FC 申请（默认）时保持既有的「挂链后申请、
-// 池空 → RESOURCE_EMPTY、desc 留链上」语义。归属语义见 fc_buf_own_e。
+// 传进来的 buffer_id（无失败路径）；FC 申请（默认）时挂链后申请，
+// 池空 → RESOURCE_EMPTY、desc 留链上。归属语义见 fc_buf_own_e。
 fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
 {
     fc_command_id_t  command_id;
@@ -165,7 +173,7 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
      * 这是模仿硬件的行为，返回码在意料之中。
      * 其余一律是**配置错误**——句柄非法 / 生命周期不符 / 坐标越界 / 重复挂同一 n /
      * row_paa 的 plane 与实参不符——都是调用者 bug，绝不能带着错配置发到硬件，
-     * 故全部 ASSERT（不再返回 INVALID_ARGUMENT）。 */
+     * 故全部 ASSERT（不返回 INVALID_ARGUMENT）。 */
     ASSERT(command != NULL);
     ASSERT(fc_command_to_id(command, &command_id) != 0U);
     ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
@@ -231,8 +239,8 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
     return FC_STATUS_OK;
 }
 
-// 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)。
-// 4 参签名保持不变——FTL 的两个调用点、RAID parity 建链、既有单测都无需改动。
+// 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)，
+// 即 buffer 由 FC 在建链时申请。
 fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
 {
     return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
@@ -254,12 +262,13 @@ fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
     return head;
 }
 
+// 对外入口：前置校验（ASSERT）后转发到 fc_submit_internal；唯一合法失败是队列满。
 fc_status_e fc_submit(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
     /* ── 校验段：全是调用者自铸值（它持有的句柄 / 它设的状态 / 它填的 config）——
-     *    属配置错误，绝不带错配置发到硬件，故一律 ASSERT，不再返回 INVALID_ARGUMENT。
+     *    属配置错误，绝不带错配置发到硬件，故一律 ASSERT，不返回 INVALID_ARGUMENT。
      *    本函数唯一合法失败是队列满（资源），由 fc_submit_internal 返回 QUEUE_FULL。 ── */
     ASSERT(command != NULL);
     ASSERT(fc_command_to_id(command, &command_id) != 0U);
@@ -321,6 +330,7 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
     return FC_STATUS_OK;
 }
 
+// 对外入口：转发到 fc_poll_internal，固定使用单例控制器。
 fc_status_e fc_service(void)
 {
     return fc_poll_internal(&g_fc_controller);
@@ -334,6 +344,7 @@ fc_status_e fc_poll_completion(fc_command_status_t *completion)
     return fc_poll_completion_internal(&g_fc_controller, completion);
 }
 
+// 对外入口：前置校验（出参非空）后转发到 fc_poll_completions_internal。
 fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     ASSERT(completions != NULL);
@@ -375,7 +386,7 @@ fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id)
 }
 
 // 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节）。
-// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
+// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）；成功时恒非空。
 BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
     BYTE *base;
@@ -389,7 +400,7 @@ BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 }
 
 // FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用）。
-// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。
+// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）；成功时恒非空。
 BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
@@ -526,6 +537,7 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
     return fc_descriptor_id_to_descriptor_internal(&g_fc_controller, descriptor_id);
 }
 
+// 对外入口：队列占用直接读队列计数，三池占用逐槽扫描状态表。
 fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
 {
     WORD index;

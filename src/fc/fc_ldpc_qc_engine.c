@@ -67,6 +67,9 @@ static BYTE g_initialized = 0U;
 
 /**
  * @brief 线性同余 PRNG：state = state*1103515245 + 12345（标准 LCG 参数）
+ *
+ * @param state 随机数状态（就地更新）
+ * @return 本次生成的 32 位随机值（等于更新后的 state）
  */
 static DWORD lcg_rand(DWORD *state)
 {
@@ -174,8 +177,7 @@ static void qc_expand_links(void)
 
 // 实现要点：阶梯结构编码——数据位为 1 时异或其关联的校验位
 // （parity 初始为 0，逐数据位累加即得校验向量）。
-// 入参前置违反（qc/data_in/data_out 为空）一律 ASSERT（与同文件
-// fc_ldpc_qc_decode 的写法一致）；g_initialized 是运行时状态，保留静默返回。
+// g_initialized 是运行时状态，未初始化时保留静默返回（不写 data_out）。
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out)
 {
     BYTE  parity[8];
@@ -219,6 +221,8 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_o
  * 解码（硬判决 Bit-flipping）
  * ═══════════════════════════════════════════════════════════════ */
 
+// 实现要点：每轮先算综合式，全零即成功；统计失败校验数达到自适应阈值
+// （min(3, syn_ones)）的变量位翻转；无位可翻表示陷入不动点，直接判失败。
 fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
 {
     BYTE  syndromes[QC_M];
@@ -320,6 +324,7 @@ fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
  * 初始化
  * ═══════════════════════════════════════════════════════════════ */
 
+// 实现要点：首次调用填写静态单例并展开查表，后续调用直接复用同一句柄。
 fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
 {
     static fc_ldpc_qc_t g_qc;
@@ -339,6 +344,14 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
     return &g_qc;
 }
 
+/**
+ * @brief 释放 QC-LDPC 引擎
+ *
+ * 查表为全局静态数组、句柄为静态单例，无动态资源可回收，本函数为空操作；
+ * 保留该接口以对齐其他 ECC 引擎的 init/free 生命周期。
+ *
+ * @param qc 引擎句柄（未使用）
+ */
 void fc_ldpc_qc_free(fc_ldpc_qc_t *qc)
 {
     (void)qc;

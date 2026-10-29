@@ -50,6 +50,7 @@ DWORD fc_crc_compute(const BYTE *user_data)
     return crc_compute(user_data, FC_CRC_USER_SIZE);
 }
 
+// 实现要点：复用 fc_crc_compute 重算，按是否等于 stored_crc 映射为 FC_CRC_RESULT_*。
 BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc)
 {
     // user_data 前置条件由调用者保证

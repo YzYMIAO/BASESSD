@@ -83,6 +83,10 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
 
 /**
  * @brief 8 步递推：输出 8 bit，返回次态。与逐 bit 版本完全一致。
+ *
+ * @param lfsr 当前 16 位 LFSR 状态
+ * @param out  输出：本步产生的 8 bit（逐位移入）
+ * @return     递推 8 步后的次态
  */
 static WORD fc_lfsr_step8(WORD lfsr, BYTE *out)
 {
@@ -118,6 +122,11 @@ typedef struct
 static fc_lfsr_tab_t s_lfsr_tab;
 static BYTE          s_lfsr_tab_ready;
 
+/**
+ * @brief 构造 LFSR 的 4 张查表（低/高字节各一组 out/next）。
+ *
+ * 表建立后置 s_lfsr_tab_ready，后续调用不再重建。
+ */
 static void fc_lfsr_tab_build(void)
 {
     for (WORD v = 0U; v < 256U; v++)
@@ -161,6 +170,9 @@ static void fc_lfsr_tab_selfcheck(void)
 
 /**
  * @brief 取下一个伪随机字节（查表版；调用前表已建立）。
+ *
+ * @param state 输入输出：LFSR 状态，函数内推进到次态
+ * @return      本步产生的伪随机字节（用作异或掩码）
  */
 static BYTE fc_lfsr_next(WORD *state)
 {
@@ -172,7 +184,15 @@ static BYTE fc_lfsr_next(WORD *state)
     return out;
 }
 
-/* ── fc_random_transform_impl（LFSR 算法） ──
+/**
+ * @brief 用 16 级 LFSR 对 data 原地加扰/解扰。
+ *
+ * 首次调用时建立查表，debug 档另做一次查表与逐 bit 递推的等价自检。
+ *
+ * @param data   待变换的数据缓冲（原地修改）
+ * @param length 数据字节数
+ * @param seed   加扰种子；低 16 位作 LFSR 初态，为 0 时退化为 1
+ * @return       FC_STATUS_OK
  */
 static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
@@ -222,7 +242,13 @@ static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 // 适合资源极度受限的场景。
 #    define FC_SIMPLE_XOR_PATTERN_LEN (64U)
 
-/* ── fc_random_transform_impl（SIMPLE_XOR 算法） ──
+/**
+ * @brief 用 64 字节伪随机 pattern 循环异或 data。
+ *
+ * @param data   待变换的数据缓冲（原地修改）
+ * @param length 数据字节数
+ * @param seed   加扰种子，作为 XOR-shift 递推初值生成 pattern
+ * @return       FC_STATUS_OK
  */
 static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
@@ -252,7 +278,13 @@ static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 
 #elif (FC_RANDOM_ALGO == FC_RANDOM_ALGO_XORSHIFT)
 
-/* ── fc_random_transform_impl（XORSHIFT 算法） ──
+/**
+ * @brief 用 32 位 XOR-shift 递推逐字节异或 data。
+ *
+ * @param data   待变换的数据缓冲（原地修改）
+ * @param length 数据字节数
+ * @param seed   加扰种子，作为 XOR-shift 递推初值（调用者保证非零）
+ * @return       FC_STATUS_OK
  */
 static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {

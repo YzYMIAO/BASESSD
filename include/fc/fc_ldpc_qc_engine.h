@@ -32,23 +32,39 @@ typedef struct
     BYTE max_iter;
 } fc_ldpc_qc_t;
 
-/** @brief 单例初始化（首次调用构造查表，全局复用） */
+/**
+ * @brief 单例初始化（首次调用构造查表，全局复用）
+ *
+ * @param max_iter 最大迭代次数；为 0 时取默认值 15
+ * @return 引擎句柄（指向静态单例，调用者不负责释放）
+ */
 fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter);
 
 /**
  * @brief QC-LDPC 编码
- * data_in[0..519] → 520B 用户数据
- * data_out[0..527] → 528B 码字（520B data + 8B parity）
- * qc/data_in/data_out 非空为前置条件（违反一律 ASSERT）；未初始化时静默返回。
- * /
+ *
+ * data_in[0..519] → 520B 用户数据；
+ * data_out[0..527] → 528B 码字（520B data + 8B parity）。
+ * 引擎未初始化时静默返回，data_out 不被写入。
+ *
+ * @param qc       引擎句柄（当前实现未读取；校验矩阵为文件内静态表）
+ * @param data_in  520B 用户数据
+ * @param data_out 528B 输出码字
+ * @pre qc / data_in / data_out 非空（违反一律 ASSERT）。
  */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out);
 
 /**
  * @brief LDPC 硬判决解码
- * data[0..527] → 528B 待解码码字（含 8B parity）
- * 直接修改 data 返回纠正后的码字
- * @return FC_STATUS_OK 或 FC_STATUS_IO_ERROR
+ *
+ * data[0..527] → 528B 待解码码字（含 8B parity）；直接修改 data 返回纠正后的码字。
+ *
+ * @param qc   引擎句柄（读取其中的最大迭代次数）
+ * @param data 528B 码字，解码后就地更新
+ * @return FC_STATUS_OK —— 码字合法或在迭代内收敛
+ *         FC_STATUS_IO_ERROR —— 达到最大迭代或陷入不动点仍不可纠
+ *         FC_STATUS_INVALID_ARGUMENT —— 引擎未初始化
+ * @pre qc / data 非空（违反一律 ASSERT）。
  */
 fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data);
 

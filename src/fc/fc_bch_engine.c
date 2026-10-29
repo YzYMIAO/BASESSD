@@ -40,6 +40,8 @@
 
 /**
  * @brief fls — find last set bit（最高位位置+1；x=0 → 0）
+ * @param x 待求值
+ * @return 最高置位 bit 的位置 +1；x=0 时返回 0
  */
 static inline int fls(unsigned int x)
 {
@@ -52,6 +54,8 @@ static inline int fls(unsigned int x)
 
 /**
  * @brief 8-bit 位序反转（swap_bits 模式：NAND 数据位序与算法假设相反时用）
+ * @param x 输入字节
+ * @return 位序反转后的字节
  */
 static inline BYTE bitrev8(BYTE x)
 {
@@ -63,6 +67,8 @@ static inline BYTE bitrev8(BYTE x)
 
 /**
  * @brief 大端序转换（数据按 BE 语义输入 BCH 引擎）
+ * @param x 主机序 32 位字
+ * @return 字节序反转后的 32 位字
  */
 static inline DWORD cpu_to_be32(DWORD x)
 {
@@ -185,6 +191,12 @@ static DWORD       *compute_generator_polynomial(struct fc_bch_control *bch);
  * 辅助函数
  * ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 按引擎配置决定是否对输入字节做位序反转。
+ * @param bch BCH 控制句柄
+ * @param in  输入字节
+ * @return bch->swap_bits 置位时为 bitrev8(in)，否则原样返回
+ */
 static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
 {
     return bch->swap_bits ? bitrev8(in) : in;
@@ -196,6 +208,10 @@ static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
 
 /**
  * @brief 非对齐数据段的逐字节编码（mod8 查表推进校验寄存器）
+ * @param bch  BCH 控制句柄
+ * @param data 输入数据（不要求 4 字节对齐）
+ * @param len  数据字节数
+ * @param ecc  校验寄存器工作区（BCH_ECC_WORDS 个 DWORD，原地推进）
  */
 static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char *data, unsigned int len, DWORD *ecc)
 {
@@ -218,6 +234,9 @@ static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char
 
 /**
  * @brief 把 ECC 字节（可选位序交换）载入工作区（32bit 字）
+ * @param bch BCH 控制句柄
+ * @param dst 目标工作区（BCH_ECC_WORDS 个 DWORD）
+ * @param src ECC 字节源（ecc_bytes 字节，末尾不足 4 字节处补零）
  */
 static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
 {
@@ -234,6 +253,9 @@ static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
 
 /**
  * @brief 把工作区写回 ECC 字节（与 load 对称）
+ * @param bch BCH 控制句柄
+ * @param dst ECC 字节目标缓冲区（ecc_bytes 字节）
+ * @param src 工作区（BCH_ECC_WORDS 个 DWORD）
  */
 static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
 {
@@ -337,6 +359,9 @@ void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
 
 /**
  * @brief 对 v 做 mod n 归约（利用 2^m ≡ 1 的循环性质）
+ * @param bch BCH 控制句柄
+ * @param v   待归约的无符号值
+ * @return 归约到 [0, n) 的结果
  */
 static inline int modulo(struct fc_bch_control *bch, unsigned int v)
 {
@@ -351,6 +376,9 @@ static inline int modulo(struct fc_bch_control *bch, unsigned int v)
 
 /**
  * @brief 快速 mod：v < n 原样返回，否则减一次 n（v 保证 < 2n）
+ * @param bch BCH 控制句柄
+ * @param v   待归约的值（调用者保证 < 2n）
+ * @return 归约到 [0, n) 的结果
  */
 static inline int mod_s(struct fc_bch_control *bch, unsigned int v)
 {
@@ -360,6 +388,8 @@ static inline int mod_s(struct fc_bch_control *bch, unsigned int v)
 
 /**
  * @brief 多项式最高次数（x=0 → -1）
+ * @param poly 多项式系数位图
+ * @return 最高非零 bit 的位置；poly=0 时返回 -1（零多项式次数无定义）
  */
 static inline int deg(unsigned int poly)
 {
@@ -372,6 +402,10 @@ static inline int deg(unsigned int poly)
 
 /**
  * @brief GF 除法 a/b = a_log[a] - a_log[b] 再查幂表
+ * @param bch BCH 控制句柄
+ * @param a   被除数（GF 元素）
+ * @param b   除数（GF 元素）
+ * @return a/b；a 或 b 为 0 时返回 0
  */
 static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b)
 {
@@ -384,6 +418,10 @@ static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, un
 
 /**
  * @brief GF 乘法 a·b = α^(log a + log b)
+ * @param bch BCH 控制句柄
+ * @param a   乘数（GF 元素）
+ * @param b   乘数（GF 元素）
+ * @return a·b；任一为 0 时返回 0
  */
 static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b)
 {
@@ -392,6 +430,9 @@ static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, un
 
 /**
  * @brief GF 平方：a² = α^(2·log a)
+ * @param bch BCH 控制句柄
+ * @param a   待平方值（GF 元素）
+ * @return a²；a 为 0 时返回 0
  */
 static inline unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a)
 {
@@ -400,6 +441,9 @@ static inline unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a)
 
 /**
  * @brief GF 逆：a^-1 = α^(n - log a)（n = 2^m-1 时 α^(n-1) = α^-1）
+ * @param bch BCH 控制句柄
+ * @param a   待求逆的 GF 元素
+ * @return a 的乘法逆元
  */
 static inline unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a)
 {
@@ -408,6 +452,9 @@ static inline unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a)
 
 /**
  * @brief α^i（i 可为负，经 modulo 归约）
+ * @param bch BCH 控制句柄
+ * @param i   指数（可为负）
+ * @return α^i
  */
 static inline unsigned int a_pow(struct fc_bch_control *bch, int i)
 {
@@ -416,6 +463,9 @@ static inline unsigned int a_pow(struct fc_bch_control *bch, int i)
 
 /**
  * @brief 离散对数：a_log[x] = i 使 α^i = x
+ * @param bch BCH 控制句柄
+ * @param x   GF 元素
+ * @return 满足 α^i = x 的指数 i
  */
 static inline int a_log(struct fc_bch_control *bch, unsigned int x)
 {
@@ -423,7 +473,10 @@ static inline int a_log(struct fc_bch_control *bch, unsigned int x)
 }
 
 /**
- * @brief 逆对数：a_ilog[x] = 指数 i 使 α^i = x（等价 gf_inv 的对数形式）
+ * @brief 逆对数：返回 x^-1 的指数 n - log x（即 gf_inv 的对数形式）
+ * @param bch BCH 控制句柄
+ * @param x   GF 元素
+ * @return x 的乘法逆元对应的指数
  */
 static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
 {
@@ -438,6 +491,12 @@ static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
  * 校验字部分（ecc 字）参与其中；最终 S_(2j+1) = S_j²（GF 平方，域特性）。
  * ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 由校验字计算 2t 项综合式 S_j = r(α^j)。
+ * @param bch BCH 控制句柄
+ * @param ecc 校验字工作区（BCH_ECC_WORDS 个 DWORD，尾部 padding bit 会被就地清零）
+ * @param syn 输出综合式数组（2t 项）
+ */
 static void compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned int *syn)
 {
     int          i, j, s;
@@ -479,13 +538,23 @@ static void compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned i
  * 迭代：当前偏差 d → 修正多项式 → 必要时更新上次成功位置 pp/pd。
  * ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 复制多项式（含 deg+1 个系数）。
+ * @param dst 目标多项式（容量须容纳 src->deg）
+ * @param src 源多项式
+ */
 static void gf_poly_copy(struct gf_poly *dst, struct gf_poly *src)
 {
     memcpy(dst, src, GF_POLY_SZ(src->deg));
 }
 
 /**
- * @brief BM 算法：true = 成功（*out_deg = σ 的次数 = 错误数）；false = >t，不可纠。
+ * @brief BM 算法：由综合式递推错误位置多项式 σ(x)。
+ * @param bch     BCH 控制句柄
+ * @param syn     综合式数组（2t 项）
+ * @param out_deg 输出 σ 的次数（= 错误数，0..t）
+ * @return true  成功，*out_deg 有效
+ *         false σ 的次数 > t，不可纠
  */
 static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg)
 {
@@ -555,6 +624,11 @@ static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const u
 
 /**
  * @brief 解 GF(2) 线性方程组（高斯消元 + 回代）；nsol = 2^k2 个解枚举
+ * @param bch  BCH 控制句柄
+ * @param rows 方程组行（原地消元）
+ * @param sol  输出解向量（nsol 项）
+ * @param nsol 期望的解个数（须等于 2^k2）
+ * @return 实际解个数 nsol；无解或解个数与期望不符时返回 0
  */
 static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, unsigned int *sol, int nsol)
 {
@@ -642,6 +716,15 @@ static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, u
     return nsol;
 }
 
+/**
+ * @brief 求四次仿射多项式的根：先构造 m 行线性方程组，再交给 solve_linear_system。
+ * @param bch   BCH 控制句柄
+ * @param a     仿射多项式系数 a
+ * @param b     仿射多项式系数 b
+ * @param c     仿射多项式系数 c
+ * @param roots 输出根数组（4 项）
+ * @return 找到的根数（0..4）
+ */
 static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsigned int b, unsigned int c, unsigned int *roots)
 {
     int          i, j, k3;
@@ -669,6 +752,13 @@ static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsign
     return solve_linear_system(bch, rows, roots, 4);
 }
 
+/**
+ * @brief 解析求一次多项式在 GF(2^m) 中的根。
+ * @param bch   BCH 控制句柄
+ * @param poly 一次多项式
+ * @param roots 输出根数组（1 项）
+ * @return 找到的根数（0 或 1）
+ */
 static int find_poly_deg1_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
 {
     if (!poly->c[0])
@@ -679,6 +769,13 @@ static int find_poly_deg1_roots(struct fc_bch_control *bch, struct gf_poly *poly
     return 1;
 }
 
+/**
+ * @brief 解析求二次多项式在 GF(2^m) 中的根（变换为 z²+z+u 后用迹映射表判定）。
+ * @param bch   BCH 控制句柄
+ * @param poly 二次多项式
+ * @param roots 输出根数组（2 项）
+ * @return 找到的根数（0 或 2）
+ */
 static int find_poly_deg2_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
 {
     int          n = 0, i, l0 = (int)bch->a_log_tab[poly->c[0]], l1 = (int)bch->a_log_tab[poly->c[1]], l2 = (int)bch->a_log_tab[poly->c[2]];
@@ -704,6 +801,13 @@ static int find_poly_deg2_roots(struct fc_bch_control *bch, struct gf_poly *poly
     return n;
 }
 
+/**
+ * @brief 解析求三次多项式在 GF(2^m) 中的根（归约为仿射四次方程的求解）。
+ * @param bch   BCH 控制句柄
+ * @param poly 三次多项式
+ * @param roots 输出根数组（3 项）
+ * @return 找到的根数（0..3）
+ */
 static int find_poly_deg3_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
 {
     int          i, n = 0;
@@ -729,6 +833,13 @@ static int find_poly_deg3_roots(struct fc_bch_control *bch, struct gf_poly *poly
     return n;
 }
 
+/**
+ * @brief 解析求四次多项式在 GF(2^m) 中的根（归约为仿射四次方程的求解）。
+ * @param bch   BCH 控制句柄
+ * @param poly 四次多项式
+ * @param roots 输出根数组（4 项）
+ * @return 找到的根数（0 或 4）
+ */
 static int find_poly_deg4_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
 {
     int          i, l, n = 0;
@@ -780,9 +891,11 @@ static int find_poly_deg4_roots(struct fc_bch_control *bch, struct gf_poly *poly
 }
 
 /**
- * @brief BTZ factoring
+ * @brief 计算多项式的对数表示（各系数除以首项后的离散对数，零系数记 -1）。
+ * @param bch BCH 控制句柄
+ * @param a   多项式
+ * @param rep 输出对数表示数组（a->deg 项）
  */
-
 static void gf_poly_logrep(struct fc_bch_control *bch, const struct gf_poly *a, int *rep)
 {
     int i, d = (int)a->deg, l = (int)(GF_N(bch) - (unsigned int)a_log(bch, a->c[a->deg]));
@@ -792,6 +905,13 @@ static void gf_poly_logrep(struct fc_bch_control *bch, const struct gf_poly *a, 
     }
 }
 
+/**
+ * @brief 多项式取模：a 原地变为 a mod b，并更新 a->deg。
+ * @param bch BCH 控制句柄
+ * @param a   被除多项式（原地变成余式）
+ * @param b   除数多项式
+ * @param rep b 的对数表示缓存；为 NULL 时用 bch->cache 现算
+ */
 static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const struct gf_poly *b, int *rep)
 {
     int                la, p, m2;
@@ -829,6 +949,13 @@ static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const str
     }
 }
 
+/**
+ * @brief 多项式除法：q = a / b，a 原地变为余式。
+ * @param bch BCH 控制句柄
+ * @param a   被除多项式（原地被模掉）
+ * @param b   除数多项式
+ * @param q   输出商多项式
+ */
 static void gf_poly_div(struct fc_bch_control *bch, struct gf_poly *a, const struct gf_poly *b, struct gf_poly *q)
 {
     if ((unsigned int)a->deg >= b->deg)
@@ -844,6 +971,13 @@ static void gf_poly_div(struct fc_bch_control *bch, struct gf_poly *a, const str
     }
 }
 
+/**
+ * @brief 欧几里得算法求多项式最大公因式（原地修改 a、b）。
+ * @param bch BCH 控制句柄
+ * @param a   多项式 a
+ * @param b   多项式 b
+ * @return 最大公因式（指向 a 或 b 的工作区）
+ */
 static struct gf_poly *gf_poly_gcd(struct fc_bch_control *bch, struct gf_poly *a, struct gf_poly *b)
 {
     struct gf_poly *tmp;
@@ -863,6 +997,14 @@ static struct gf_poly *gf_poly_gcd(struct fc_bch_control *bch, struct gf_poly *a
     return a;
 }
 
+/**
+ * @brief 计算以 k 为迹阶的迹多项式 T_k(x) mod f。
+ * @param bch BCH 控制句柄
+ * @param k   迹阶
+ * @param f   模多项式
+ * @param z   工作多项式（复用 poly_2t 工作区）
+ * @param out 输出迹多项式
+ */
 static void compute_trace_bk_mod(struct fc_bch_control *bch, int k, const struct gf_poly *f, struct gf_poly *z, struct gf_poly *out)
 {
     const int m = (int)GF_M(bch);
@@ -897,6 +1039,14 @@ static void compute_trace_bk_mod(struct fc_bch_control *bch, int k, const struct
     }
 }
 
+/**
+ * @brief BTZ 分解：用迹多项式与 f 的 GCD 把 f 拆成两个因子。
+ * @param bch BCH 控制句柄
+ * @param k   迹的阶
+ * @param f   待分解多项式（原地被拆分）
+ * @param g   输出第一个因子（无法拆分时 = f）
+ * @param h   输出第二个因子（无法拆分时 NULL）
+ */
 static void factor_polynomial(struct fc_bch_control *bch, int k, struct gf_poly *f, struct gf_poly **g, struct gf_poly **h)
 {
     struct gf_poly *f2 = bch->poly_2t[0], *q = bch->poly_2t[1], *tk = bch->poly_2t[2], *z = bch->poly_2t[3], *gcd;
@@ -917,6 +1067,14 @@ static void factor_polynomial(struct fc_bch_control *bch, int k, struct gf_poly 
     }
 }
 
+/**
+ * @brief 求多项式在 GF(2^m) 中的全部根：度 ≤4 解析求解，高次递归 BTZ 分解。
+ * @param bch   BCH 控制句柄
+ * @param k     当前 BTZ 分解的迹阶（根节点传 1，递归时递增）
+ * @param poly  待求根多项式（高次时会被原地拆分）
+ * @param roots 输出根数组
+ * @return 找到的根数
+ */
 static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf_poly *poly, unsigned int *roots)
 {
     int             cnt;
@@ -1042,6 +1200,10 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
 
 /**
  * @brief 构建 GF(2^m) 对数/反对数表：x 左移递推，遇本原多项式归约
+ * @param bch  BCH 控制句柄
+ * @param poly 本原多项式
+ * @return true  构建成功
+ *         false 多项式次数与 m 不符，或 α 的周期不是 n（非本原多项式）
  */
 static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
 {
@@ -1072,6 +1234,8 @@ static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
 
 /**
  * @brief 构建 mod8 编码查找表：每输入字节偏移 8b，与生成多项式做多项式模除
+ * @param bch BCH 控制句柄
+ * @param g   生成多项式（32bit 大端字数组）
  */
 static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
 {
@@ -1104,6 +1268,8 @@ static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
 
 /**
  * @brief 构建度 2 多项式求根用的迹映射表 xi_tab（二次方程判别式映射）
+ * @param bch BCH 控制句柄
+ * @return true 成功（m 个迹映射全部找到）；false 失败
  */
 static bool build_deg2_base(struct fc_bch_control *bch)
 {
@@ -1144,10 +1310,11 @@ static bool build_deg2_base(struct fc_bch_control *bch)
 
 /**
  * @brief 计算 BCH 生成多项式 g(x)。
- *
- * @note 实现要点：g(x) 的根 = α^(2i+1)（i=0..t-1），共 2t 个连续奇次幂；
- * 乘积展开得系数，打包为 32bit 大端字。
- * 输出同时设 bch->ecc_bits = deg(g) = m·t。
+ * @param bch BCH 控制句柄
+ * @return 指向静态 genpoly 的生成多项式（32bit 大端字数组）
+ * @note g(x) 的根 = α^(2i+1)（i=0..t-1），共 2t 个连续奇次幂；
+ *       乘积展开得系数，打包为 32bit 大端字。
+ *       输出同时设 bch->ecc_bits = deg(g) = m·t。
  */
 static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
 {
@@ -1303,13 +1470,13 @@ void fc_bch_free(fc_bch_control_t *bch)
     }
 }
 
-// 获取 ECC 字节数
+// 读取初始化时缓存的 ecc_bytes，不重新计算。
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch)
 {
     return bch->ecc_bytes;
 }
 
-// 获取纠错能力 t
+// 读取初始化时缓存的纠错能力 t。
 unsigned int fc_bch_t(const fc_bch_control_t *bch)
 {
     return bch->t;

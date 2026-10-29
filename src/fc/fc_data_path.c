@@ -43,6 +43,8 @@
 /**
  * @brief 判断一条 CW 缓冲是否为**擦除页**（整条 528B 全 0xFF）。
  *
+ * @param cw 528B CW buffer。
+ *
  * @return true = 物理上从未编程。
  *
  * @note 实现要点：判据是**整条 CW**（META+CRC+USER+ECC），不是只看 USER 区——
@@ -219,7 +221,7 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
 // 加扰区 [FC_CRC_USER_OFFSET, FC_BUFFER_DATA_SIZE) —— **META/CRC 保持明文**，
 // 读路径才能从页内 META 自举出种子（GC / 掉电重建不知道 LBA）。
 // - Stage 2：ECC 编码（非 LDPC_RAW 模式）——对 520B 数据区编码，8B parity 写入。
-// - Stage 3 已被移除：跨命令 stripe RAID 在 generate_stripe_parity() 单独处理。
+// - 跨命令 stripe RAID 由 fc_data_path_generate_stripe_parity() 单独处理。
 fc_status_e fc_data_path_encode(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -230,7 +232,7 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
     ASSERT(command != NULL);
 
     // 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
-    // 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历（原来 4 次）。
+    // 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历。
     for (desc_id = (fc_descriptor_id_t)command->desc_id; desc_id != FC_DESCRIPTOR_ID_INVALID;)
     {
         // desc_id 来自 command->desc_id 链，链上 ID 必在池范围内
@@ -268,22 +270,13 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
         desc_id = (fc_descriptor_id_t)desc->next_id;
     }
 
-    /* ── Stage 3 (removed): 跨命令 stripe RAID 在 fc_data_path_generate_stripe_parity() 中处理 ── */
+    /* ── 跨命令 stripe RAID 由 fc_data_path_generate_stripe_parity() 处理 ── */
 
     return FC_STATUS_OK;
 }
 
 /* ══════════════════════════════════════════════════════════
  * 跨 Plane Stripe RAID 编码 — FC 内部调用
- *
- * 当 PLANE_NUM-1 条数据命令累积完成后，FC 自动调用此函数。
- * XOR 所有数据命令对应 CW 的数据区（FC_BUFFER_DATA_SIZE=520B），
- * 结果写入 parity 命令的 buffer，然后对 parity buffer 做 ECC 编码。
- *
- * data_cmds: 数据命令指针数组（长度 = PLANE_NUM - 1）
- * data_count: 数据命令数量
- * parity_cmd: 已分配 desc+buffer 的 parity 命令（接收 XOR 结果）
- *
  * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
  * ══════════════════════════════════════════════════════════ */
 
@@ -412,9 +405,6 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
 
 /* ══════════════════════════════════════════════════════════
  * 读路径 Stage 1 — FC 内部，CQ push 前
- *
- * 对 desc 链逐 CW 做 ECC 解码 + 更新 descriptor status。
- * 全部成功 → 解扰所有 buffer。有失败 → buffer 保持 scrambled 状态。
  * ══════════════════════════════════════════════════════════ */
 
 // 实现要点：- Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 全 0xFF 的
@@ -560,10 +550,6 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
 /* ══════════════════════════════════════════════════════════
  * 读路径 Stage 2 — FTL 触发
- *
- * FTL 遍历 desc 链发现 status=UNC 时调用。
- * 内部：XOR 重建 → ECC 重试 → 解扰所有 CW → 更新 desc status。
- *
  * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
  * ══════════════════════════════════════════════════════════ */
 

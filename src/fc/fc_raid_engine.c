@@ -26,7 +26,7 @@
 static fc_raid_context_t g_raid_ctx[LUN_NUM];
 static fc_raid_context_t g_raid_shadow[LUN_NUM];
 
-// 初始化指定 LUN 的 RAID 上下文
+// 清空上下文与影子缓冲，使该 LUN 回到空闲态。
 void fc_raid_init_ctx(BYTE lun)
 {
     // 前置条件由调用者保证（fc.c 按 LUN_NUM 循环传入）
@@ -36,6 +36,7 @@ void fc_raid_init_ctx(BYTE lun)
     memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_context_t));
 }
 
+// 把第一个 CW 拷入累加器，并置序列为进行中。
 fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
 {
     // 入参前置条件由调用者保证
@@ -90,6 +91,7 @@ fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
     return FC_STATUS_OK;
 }
 
+// 把累加器结果拷出到 parity buffer，并复位序列状态。
 fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
 {
     // 入参前置条件由调用者保证

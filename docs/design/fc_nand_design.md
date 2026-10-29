@@ -23,6 +23,7 @@
 > - **Phase V**: 多 LUN 并发 ISSUE/WAIT/FETCH 拆分 + FMC 后端数组化 + 调度器 phase 机（§18.7 完整实现）
 > - **Phase X**: FC-NAND 全模块注释补全 + 行业方案对比补全（§21）
 > - **Phase Y**: 初始化 / 运行时全链路走读章节（§22/§23，图 14–22）+ 源码关键路径注释补全
+> - **注释规范 (2026-10-29)**: 全模块函数契约补全（@brief/@param/@return），统一 `/** */` + 实现细节 `//`（CLAUDE.md S5/S6）
 > - **v8 (2026-10-06)**: FC→NAND 分发重构为 **per-LUN FIFO（深 4，每槽 = 一条命令）**——删 per-channel FIFO / Phase 1 / Phase 2 / busy 表 / Phase I 读饥饿保护；FC 侧改填充 pass（§2.7、§4.2/4.3、§16、§20、§23.5–23.9）
 > - **v9 (2026-10-06)**: CW 索引空间统一为 **flat 绝对号 `n = plane*CW_NUM + cw`**——删 `cw_count[]`/`cws[][]`/`cw_paa[][]`/`slot_to_plane_cw`，新增 `plane_paa[PLANE_NUM]`（§25.11、§13–§14、§23.8）
 > - **v10 (2026-10-07)**: 删除**软件寄存器影子** `fc_registers` / `fc_register_queue_state()`——字段重复 + 零读者，队列用量改由 `fc_get_*_count` / `fc_get_resource_stats()` 提供（§2.8）

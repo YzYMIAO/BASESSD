@@ -31,12 +31,19 @@ static fc_bch_control_t *g_bch = NULL;
 static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
-// 惰性初始化 BCH 引擎（m=13, t=4，本工程 CW 参数）。
-// 初始化失败必须可见：旧实现返回 NOT_SUPPORTED 后编码/解码会“成功跳过”，
-// 等于静默关闭 ECC（C8/§3.2）。静态存储后失败只可能是参数/断言错误。
+// 惰性初始化的单次日志标志：成功/失败各只打印一次，避免每次编解码刷屏。
 static BYTE s_bch_init_failed;
 static BYTE s_bch_init_logged;
 
+/**
+ * @brief 惰性初始化 BCH 引擎（m=13, t=4）
+ *
+ * 初始化失败必须可见：编码/解码不得“成功跳过”，否则等于静默关闭 ECC（C8/§3.2）。
+ * 表为静态存储，失败只可能是参数/断言错误。
+ *
+ * @return 1 = 引擎可用
+ *         0 = 初始化失败（失败已 LOG 一次，此后 ECC 不可用）
+ */
 static BYTE fc_ecc_init_bch(void)
 {
     if (g_bch == NULL)
@@ -62,6 +69,9 @@ static BYTE fc_ecc_init_bch(void)
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
 /**
  * @brief 惰性初始化 QC-LDPC 引擎（最大迭代 15）
+ *
+ * @return 1 = 引擎可用
+ *         0 = 初始化失败
  */
 static BYTE fc_ecc_init_ldpc(void)
 {
@@ -73,7 +83,7 @@ static BYTE fc_ecc_init_ldpc(void)
 }
 #endif
 
-// 活动 ECC 引擎名（诊断/开机横幅用）。字符串与上方 fc_bch_init(13, 4, …) 就地一致。
+// 字符串随编译宏在 "BCH(13,4)" / "LDPC" 之间切换，与 fc_bch_init(13, 4, …) 的就地参数一致。
 const char *fc_ecc_algo_name(void)
 {
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)

@@ -159,7 +159,13 @@ typedef enum
 
 /**
  * @brief 命令级聚合状态是否含任一错误位。
- * 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，
+ *
+ * @param status 命令级聚合状态（FC_CW_STATUS_* 位或）
+ *
+ * @return true  含至少一个错误位
+ *         false 不含任何错误位
+ *
+ * @note 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，
  * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。
  */
 static inline bool fc_cw_status_has_error(DWORD status)
@@ -168,8 +174,15 @@ static inline bool fc_cw_status_has_error(DWORD status)
 }
 
 /**
- * @brief 该 CW 是否被判定为擦除页（未编程）。与 has_error 正交：
- * 擦除页既不表示读成功，也不表示读失败——页上没有任何数据。
+ * @brief 该 CW 是否被判定为擦除页（未编程）。
+ *
+ * @param status CW 状态（FC_CW_STATUS_* 位或）
+ *
+ * @return true  该 CW 是擦除页
+ *         false 该 CW 不是擦除页
+ *
+ * @note 与 fc_cw_status_has_error 正交：擦除页既不表示读成功，也不表示读失败——
+ * 页上没有任何数据。
  */
 static inline bool fc_cw_status_is_blank(DWORD status)
 {
@@ -179,11 +192,15 @@ static inline bool fc_cw_status_is_blank(DWORD status)
 /**
  * @brief 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
  *
- * 输出例："READY|UNC"、"NAND|TIMEOUT"；未知位以 '?' 表示。
  * @param status 完成状态（FC_CW_STATUS_* 位或）
- * @param buf    输出缓冲；非空
- * @param buflen 缓冲长度
- * @return buf（便于直接放进 LOG 实参）
+ * @param buf    输出缓冲（可传 NULL）
+ * @param buflen 缓冲容量（含结尾 NUL）
+ *
+ * @return buf  便于直接放进 LOG 实参
+ *         ""   buf 为 NULL 或 buflen 为 0
+ *
+ * @note 输出例："READY|UNC"、"NAND|TIMEOUT"；未知位以 '?' 表示。
+ * 输出按 buflen 截断，不越界。
  */
 const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen);
 
@@ -365,9 +382,12 @@ static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plan
  *
  * @param command 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
  *
- * @return 段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
- *         用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径（pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。
- *         ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
+ * @return 段内每个 CW 一位置 1 的 flat 位图（bit n = plane*CW_NUM + cw）；
+ *         plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF。
+ *
+ * @note 用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径
+ * （pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。
+ * ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  */
 static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
 {
@@ -405,9 +425,11 @@ fc_status_e fc_command_validate(const fc_command_t *command);
  *
  * @param mask flat 掩码（bit n = plane*CW_NUM + cw）。
  *
- * @return 1 = 对称（mask == 0 视为对称）
- *         0 = 不对称。
- *         用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合（见 fc_data_path_generate_stripe_parity 的前置断言）。
+ * @return 1 对称（mask == 0 视为对称）
+ *         0 不对称
+ *
+ * @note 用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合
+ * （见 fc_data_path_generate_stripe_parity 的前置断言）。
  */
 BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 

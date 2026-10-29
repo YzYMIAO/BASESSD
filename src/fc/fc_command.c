@@ -79,6 +79,7 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
     return buf;
 }
 
+// 以 plane 0 的低 CW_NUM 位为基准逐 plane 比较；mask == 0 时各 plane 均为 0，判为对称。
 BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 {
     const DWORD plane_bits = ((1U << CW_NUM) - 1U);
@@ -95,6 +96,7 @@ BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
     return 1U;
 }
 
+// 实现要点：只做前置条件断言，恒返回 FC_STATUS_OK；release 下断言整段裁空。
 fc_status_e fc_command_validate(const fc_command_t *command)
 {
     ASSERT(command != NULL);

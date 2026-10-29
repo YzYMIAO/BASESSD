@@ -54,7 +54,11 @@ typedef struct
 
 /* ── 上下文管理 ── */
 
-/** @brief 初始化指定 LUN 的 RAID 上下文 */
+/**
+ * @brief 初始化指定 LUN 的 RAID 上下文，清零上下文与影子缓冲。
+ *
+ * @param lun LUN 编号（调用者保证 < LUN_NUM）
+ */
 void fc_raid_init_ctx(BYTE lun);
 
 /* ── RAID 序列 ── */
@@ -66,7 +70,10 @@ void fc_raid_init_ctx(BYTE lun);
  * @param lun       LUN 编号
  * @param cw_buffer 第一个 CW 的数据（PAA 对应的 buffer）
  * @param total     本次序列期望的 CW 总数（含第一个）
- * @return          FC_STATUS_OK 或 FC_STATUS_NOT_READY（LUN 忙）
+ * @return FC_STATUS_OK           序列已启动
+ *         FC_STATUS_NOT_READY    该 LUN 已有 RAID 序列进行中
+ *
+ * @note 入参非法（lun 越界 / cw_buffer 为 NULL / total 为 0）由断言拦截。
  */
 fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
 
@@ -75,8 +82,11 @@ fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
  *
  * @param lun       LUN 编号
  * @param cw_buffer 当前 CW 的数据
- * @return          FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT（序列未开始）。
- *                  超出 total 的累加属调用者计数 bug → ASSERT。
+ * @return FC_STATUS_OK                已累加
+ *         FC_STATUS_INVALID_ARGUMENT  RAID 序列未开始
+ *
+ * @note 入参非法（lun 越界 / cw_buffer 为 NULL）由断言拦截；
+ *       超出 total 的累加属调用者计数 bug，由断言拦截。
  */
 fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
 
@@ -86,16 +96,27 @@ fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
  *
  * @param lun           LUN 编号
  * @param parity_buffer 输出：XOR 结果写入此 buffer
- * @return              FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT
+ * @return FC_STATUS_OK                累加结果已写入 parity_buffer
+ *         FC_STATUS_INVALID_ARGUMENT  RAID 序列未开始
+ *
+ * @note 入参非法（lun 越界 / parity_buffer 为 NULL）由断言拦截。
  */
 fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer);
 
 /* ── 中断保护 ── */
 
-/** @brief 保存 RAID 上下文到影子缓冲（HSQ 打断前调用） */
+/**
+ * @brief 保存 RAID 上下文到影子缓冲（HSQ 打断前调用）。
+ *
+ * @param lun LUN 编号；越界时直接忽略
+ */
 void fc_raid_save(BYTE lun);
 
-/** @brief 从影子缓冲恢复 RAID 上下文（HSQ 完成后调回） */
+/**
+ * @brief 从影子缓冲恢复 RAID 上下文（HSQ 完成后调回）。
+ *
+ * @param lun LUN 编号；越界时直接忽略
+ */
 void fc_raid_restore(BYTE lun);
 
 /* ── 静态恢复（ECC 失败后使用，不需要 LUN 上下文） ── */
@@ -110,6 +131,9 @@ void fc_raid_restore(BYTE lun);
  * @param count       buffers 总数
  * @param failed_idx  失败的 buffer 索引（0..count-1）
  * @param length      每个 buffer 的长度
+ *
+ * @note recovered 先清零再累加；buffers[i] 为 NULL 的条目跳过；
+ *       length 按 4 字节字对齐处理，尾部不足一字的余数字节不参与。
  */
 void fc_raid_recover(BYTE *recovered, BYTE *buffers[], BYTE count, BYTE failed_idx, WORD length);
 
