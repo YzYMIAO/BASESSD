@@ -165,7 +165,7 @@ static BYTE jrn_block_next(const l2p_jrn_t *journal, BYTE from)
     {
         const BYTE b = ((from + i) % JOURNAL_BLOCK_COUNT);
 
-        if (!jrn_ring_block_bad(journal, b))
+        if (jrn_ring_block_bad(journal, b) == false)
         {
             return b;
         }
@@ -183,7 +183,7 @@ static BYTE jrn_block_first_usable(const l2p_jrn_t *journal)
 {
     for (BYTE b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
-        if (!jrn_ring_block_bad(journal, b))
+        if (jrn_ring_block_bad(journal, b) == false)
         {
             return b;
         }
@@ -279,7 +279,7 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
 
     // 当前页剩余槽位不够：只起异步刷页。失败原因（在飞/待擦/池空）都是瞬态，
     // 由 jrn_handle 在后续轮次推进；调用者停泊重试。
-    if (!jrn_freeze(journal))
+    if (jrn_freeze(journal) == false)
     {
         return false;
     }
@@ -824,7 +824,7 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
             journal->handle.pre_erased_block = JRN_BLOCK_NONE;
             journal->handle.need_erase       = false;
         }
-        else if (!jrn_erase_start(journal))
+        else if (jrn_erase_start(journal) == false)
         {
             LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.target_block);
         }
@@ -980,7 +980,7 @@ static WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_
             DWORD raddr = jrn_page_addr(journal, b, page);
             if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
-                if (!jrn_page_raw_blank(raddr))
+                if (jrn_page_raw_blank(raddr) == false)
                 {
                     read_errors++; /* 非空页读失败：真正的不可信页 */
                 }
@@ -1434,7 +1434,7 @@ void jrn_truncate_commit(l2p_jrn_t *journal, BYTE erased_block)
     // （后者覆盖 truncate 被弱桩替换的纯 RAM 测试构建）。
     // ⚠ 持久性失败 pending 未清时**保留**标志：说明本次 CP 早于失败点，没有把
     // 迁移后的 L2P 全部落盘，必须再触发一次 CP，而不是把水位门关掉。
-    if (!journal->handle.write_fail_pending)
+    if (journal->handle.write_fail_pending == false)
     {
         journal->handle.emergency         = false;
         journal->handle.checkpoint_needed = false;

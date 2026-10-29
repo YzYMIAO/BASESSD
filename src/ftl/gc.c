@@ -346,7 +346,7 @@ DWORD gc_should_trigger(const alc_t *alloc)
     {
         const BYTE p = ftl_gblock_plane(alloc->free_blocks[i]);
 
-        if ((p < PLANE_NUM) && (!seen[p]))
+        if ((p < PLANE_NUM) && (seen[p] == false))
         {
             seen[p] = true;
             seen_n++;

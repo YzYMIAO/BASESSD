@@ -58,10 +58,10 @@ pend_req_t *pend_alloc(pend_table_t *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if (table->slots[i].used == 0U)
+        if (table->slots[i].used == false)
         {
             memset(&table->slots[i], 0, sizeof(table->slots[i]));
-            table->slots[i].used = 1U;
+            table->slots[i].used = true;
             return &table->slots[i];
         }
     }
@@ -74,7 +74,7 @@ pend_req_t *pend_find(pend_table_t *table, WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((table->slots[i].used != 0U) && (table->slots[i].command_id == cmd_id))
+        if ((table->slots[i].used == true) && (table->slots[i].command_id == cmd_id))
         {
             return &table->slots[i];
         }
@@ -90,7 +90,7 @@ void pend_remove(pend_table_t *table, WORD cmd_id)
 
     if (req != NULL)
     {
-        req->used = 0U;
+        req->used = false;
     }
 }
 
@@ -101,7 +101,7 @@ bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((table->slots[i].used != 0U) && (table->slots[i].op == op))
+        if ((table->slots[i].used == true) && (table->slots[i].op == op))
         {
             if (out_index != NULL)
             {
@@ -118,7 +118,7 @@ bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
 {
     BYTE idx = 0U;
 
-    if (!pend_find_op(table, op, &idx))
+    if (pend_find_op(table, op, &idx) == false)
     {
         return false;
     }
@@ -138,9 +138,9 @@ bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
 // 故越界一律 ASSERT（判据 2：调用者保证的前置条件），不静默 no-op。
 void pend_release_index(pend_table_t *table, BYTE index)
 {
-    ASSERT(table->slots[index].used != 0U); /* 重复释放即簿记错误，留现场 */
+    ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
 
-    table->slots[index].used = 0U;
+    table->slots[index].used = false;
 }
 
 // pend_slot_get_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度）
@@ -150,7 +150,7 @@ WORD pend_slot_get_count(const pend_table_t *table)
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if (table->slots[i].used != 0U)
+        if (table->slots[i].used == true)
         {
             count++;
         }
@@ -167,10 +167,10 @@ bool pend_group_alloc(pend_table_t *table, BYTE *out_gi)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
-        if (table->groups[i].used == 0U)
+        if (table->groups[i].used == false)
         {
             memset(&table->groups[i], 0, sizeof(table->groups[i]));
-            table->groups[i].used = 1U;
+            table->groups[i].used = true;
             *out_gi               = i;
             return true;
         }
@@ -186,7 +186,7 @@ WORD pend_group_get_count(const pend_table_t *table)
 
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
-        if (table->groups[i].used != 0U)
+        if (table->groups[i].used == true)
         {
             count++;
         }
@@ -204,7 +204,7 @@ WORD pend_group_get_count(const pend_table_t *table)
 void pend_group_add_subop(pend_table_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
-    ASSERT(g->used != 0U);
+    ASSERT(g->used == true);
 
     g->outstanding++;
 }
@@ -212,7 +212,7 @@ void pend_group_add_subop(pend_table_t *table, WORD gi)
 void pend_group_drop_subop(pend_table_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
-    ASSERT(g->used != 0U);
+    ASSERT(g->used == true);
     ASSERT(g->outstanding > 0U);
 
     g->outstanding--;
@@ -226,7 +226,7 @@ void pend_group_drop_subop(pend_table_t *table, WORD gi)
 void pend_group_complete_subop(pend_table_t *table, WORD gi, ssd_status_e sub_status)
 {
     pend_group_t *g = &table->groups[gi];
-    ASSERT(g->used != 0U); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
+    ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
 
     if (sub_status != SSD_STATUS_OK)
     {
@@ -262,7 +262,7 @@ void pend_group_complete_subop_multi(pend_table_t *table, DWORD owners, ssd_stat
 void pend_group_maybe_complete(pend_table_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
-    if ((g->used == 0U) || (g->next < g->total) || (g->outstanding != 0U))
+    if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
     {
         return;
     }
@@ -281,7 +281,7 @@ void pend_group_maybe_complete(pend_table_t *table, WORD gi)
     }
 
     // 回调可能重入 ftl_submit_* 再申请组槽 ⇒ used 清零必须在通知之后
-    g->used = 0U;
+    g->used = false;
 }
 
 // 实现要点：只读扫描 groups[]，数组本身不暴露给 wbuf。
@@ -291,7 +291,7 @@ bool pend_group_has_window_pending(const pend_table_t *table, DWORD window)
     {
         const pend_group_t *g = &table->groups[i];
 
-        if ((g->used == 0U) || (!pend_op_is_write(g->op)) || (g->next >= g->total))
+        if ((g->used == false) || (pend_op_is_write(g->op) == false) || (g->next >= g->total))
         {
             continue;
         }
@@ -319,7 +319,7 @@ void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
 {
     pend_req_t *pending = &table->slots[pending_idx];
 
-    ASSERT(pending->used != 0U);
+    ASSERT(pending->used == true);
 
     pending->op         = PENDING_OP_WRITE_CONFIRM;
     pending->command_id = FTL_PENDING_CMD_NONE;
@@ -337,7 +337,7 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((table->slots[i].used != 0U) && pend_op_is_write_confirm(table->slots[i].op))
+        if ((table->slots[i].used == true) && pend_op_is_write_confirm(table->slots[i].op))
         {
             parked++;
         }
@@ -347,7 +347,7 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_
     {
         pend_req_t *pending = &table->slots[i];
 
-        if ((pending->used == 0U) || (!pend_op_is_write_confirm(pending->op)))
+        if ((pending->used == false) || (pend_op_is_write_confirm(pending->op) == false))
         {
             continue;
         }

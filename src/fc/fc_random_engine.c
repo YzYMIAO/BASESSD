@@ -120,7 +120,7 @@ typedef struct
 } fc_lfsr_tab_t;
 
 static fc_lfsr_tab_t s_lfsr_tab;
-static BYTE          s_lfsr_tab_ready;
+static bool          s_lfsr_tab_ready = false;
 
 /**
  * @brief 构造 LFSR 的 4 张查表（低/高字节各一组 out/next）。
@@ -135,7 +135,7 @@ static void fc_lfsr_tab_build(void)
         s_lfsr_tab.next_hi[v] = fc_lfsr_step8((WORD)(v << 8U), &s_lfsr_tab.out_hi[v]);
     }
 
-    s_lfsr_tab_ready = 1U;
+    s_lfsr_tab_ready = true;
 }
 
 #    ifndef NDEBUG
@@ -199,7 +199,7 @@ static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
     // data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲）
     ASSERT(data != NULL);
 
-    if (s_lfsr_tab_ready == 0U)
+    if (s_lfsr_tab_ready == false)
     {
         fc_lfsr_tab_build();
 #    ifndef NDEBUG

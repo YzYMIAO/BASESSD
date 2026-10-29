@@ -89,11 +89,11 @@ static fc_command_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
 static fc_command_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
 static fc_command_status_t g_fc_cq_storage[FC_CQ_DEPTH];
 static fc_command_id_t     g_fc_descriptor_owner[FC_DESCRIPTOR_POOL_DEPTH];
-static BYTE                g_fc_command_state[FC_COMMAND_POOL_DEPTH];
+static fc_cmd_state_e      g_fc_command_state[FC_COMMAND_POOL_DEPTH];
 static fc_command_id_t     g_fc_command_free_next[FC_COMMAND_POOL_DEPTH];
 static WORD                g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
 static WORD                g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
-static BYTE                g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
+static fc_buffer_state_e   g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 
 // GET/SET_FEATURES 的 4 字节内联数据暂存，按 command_id（= 命令池槽位号）索引。
 // 为什么需要：SQ 命令提交后不可写（见 fc_command.h「SQ 不可变」），而引擎需要一个
@@ -120,10 +120,9 @@ fc_t g_fc_controller;
  *
  * @param operation NAND 操作码
  *
- * @return 1 = 是 Page Read
- *         0 = 不是
+ * @return true = 是 Page Read；false = 不是
  */
-static BYTE fc_is_page_read(BYTE operation)
+static bool fc_is_page_read(BYTE operation)
 {
     switch (operation)
     {
@@ -138,9 +137,9 @@ static BYTE fc_is_page_read(BYTE operation)
         case OP_READ_PAGE_CACHE_LAST_MP:
         case OP_RANDOM_DATA_READ:
         case OP_RANDOM_DATA_READ_MULTI_PLANE: /* 06h-E0h 多 plane 逐 CW 取数（与 05h 对称） */
-            return 1U;
+            return true;
         default:
-            return 0U;
+            return false;
     }
 }
 
@@ -152,10 +151,9 @@ static BYTE fc_is_page_read(BYTE operation)
  *
  * @param operation NAND 操作码
  *
- * @return 1 = 是 Page Write
- *         0 = 不是
+ * @return true = 是 Page Write；false = 不是
  */
-static BYTE fc_is_page_write(BYTE operation)
+static bool fc_is_page_write(BYTE operation)
 {
     switch (operation)
     {
@@ -167,9 +165,9 @@ static BYTE fc_is_page_write(BYTE operation)
         case OP_TWO_PLANE_PROGRAM_CACHE_FIRST:
         case OP_PROGRAM_PAGE_MULTI_PLANE:
         case OP_PROGRAM_PAGE_ISSUE: /* Phase V */
-            return 1U;
+            return true;
         default:
-            return 0U;
+            return false;
     }
 }
 
@@ -187,7 +185,7 @@ WORD fc_get_cq_count(const fc_t *controller)
     return controller->cq.count;
 }
 // 状态读取器契约见 fc_internal.h。ID 越界即不变量破坏，一律 ASSERT。
-BYTE fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
+fc_cmd_state_e fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
 {
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return controller->command_state[command_id];
@@ -197,7 +195,7 @@ fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, WORD descriptor_
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return controller->descriptor_owner[descriptor_id];
 }
-BYTE fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
+fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     return controller->buffer_state[buffer_id];
@@ -242,7 +240,7 @@ BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buff
 fc_status_e fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
-    controller->buffer_state[buffer_id]     = 0U;
+    controller->buffer_state[buffer_id]     = FC_BUFFER_STATE_FREE;
     controller->buffer_free_next[buffer_id] = controller->buffer_free_head;
     controller->buffer_free_head            = buffer_id;
     return FC_STATUS_OK;
@@ -277,7 +275,7 @@ static BYTE fc_command_descriptor_count(const fc_t *controller, const fc_command
 }
 
 // 提交前的一致性校验（契约见 fc_internal.h）：正常路径恒为 1，返回 0 表示链被破坏。
-BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
+bool fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
     BYTE               remaining     = fc_command_descriptor_count(controller, command);
@@ -286,16 +284,16 @@ BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id
     {
         if (descriptor_id >= FC_DESCRIPTOR_POOL_DEPTH)
         {
-            return 0U;
+            return false;
         }
         if (controller->descriptor_owner[descriptor_id] != command_id)
         {
-            return 0U;
+            return false;
         }
         descriptor_id = (fc_descriptor_id_t)controller->descriptor_pool[descriptor_id].next_id;
         remaining--;
     }
-    return 1U;
+    return true;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -408,12 +406,11 @@ fc_status_e fc_init_internal(fc_t *controller)
     for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
     {
         controller->buffer_free_next[index] = ((index + 1U) < FC_BUFFER_POOL_DEPTH) ? (index + 1U) : UINT16_MAX;
-        controller->buffer_state[index]     = 0U;
+        controller->buffer_state[index]     = FC_BUFFER_STATE_FREE;
     }
     controller->command_free_head    = 0U;
     controller->descriptor_free_head = 0U;
     controller->buffer_free_head     = 0U;
-    controller->active_handle        = FC_COMMAND_ID_INVALID;
 
     return FC_STATUS_OK;
 }
@@ -562,7 +559,7 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
         return FC_BUFFER_ID_INVALID;
     }
     controller->buffer_free_head           = controller->buffer_free_next[buffer_index];
-    controller->buffer_state[buffer_index] = 1U;
+    controller->buffer_state[buffer_index] = FC_BUFFER_STATE_OCCUPIED;
     return (fc_buffer_id_t)buffer_index;
 }
 
@@ -739,7 +736,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     /* ── Step 2: Data path processing (ECC decode + conditional descramble) ──
      * 仅对 Page Read 命令执行。READ_ID / GET_FEATURES 等命令
      * 返回的数据不是 ECC 编码的 NAND 页数据，不应进入 Data Path。 */
-    if (fc_is_page_read(command->config.operation) != 0U)
+    if (fc_is_page_read(command->config.operation) == true)
     {
         (void)fc_data_path_process_read(command);
         // 即使 process_read 返回 IO_ERROR（有 CW 不可纠），
@@ -756,7 +753,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.status     = 0U;
     memset(&completion.param, 0, sizeof(completion.param)); /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
-    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) && (fc_is_page_read(command->config.operation) != 0U))
+    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) && (fc_is_page_read(command->config.operation) == true))
     {
         // 走 desc 链聚合：status 全链 OR；首个失败 CW 的 desc_id。
         // **不**聚合失败 CW 位图——上层要定位失败 CW，遍历 desc 链 OR 各 desc->status
@@ -1145,7 +1142,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
             // Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
             // 非 page 命令数据直接写入 USER 区域，test/FTL 通过
             // fc_buffer_id_to_real_buffer 直接读取。
-            request->cw_buffers[n] = (fc_is_page_read(command->config.operation) != 0U) || (fc_is_page_write(command->config.operation) != 0U) ? fc_buffer_get_base(descriptor->buffer_id) : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+            request->cw_buffers[n] = (fc_is_page_read(command->config.operation) == true) || (fc_is_page_write(command->config.operation) == true) ? fc_buffer_get_base(descriptor->buffer_id) : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
         }
         else
         {
@@ -1486,14 +1483,14 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
 
     /* ── Data Path encode: Random 加扰 → ECC 编码（RAID XOR 已移至 stripe 路径）──
      * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
-    if (fc_is_page_write(command->config.operation) != 0U)
+    if (fc_is_page_write(command->config.operation) == true)
     {
         (void)fc_data_path_encode(command);
     }
 
     /* ── Stripe RAID 分支：raid=ENCODE 的 page write 走 Multi-Plane 提交 ── */
 #if CONFIG_FC_RAID
-    if ((fc_is_page_write(command->config.operation) != 0U) && (command->config.raid == FC_RAID_MODE_ENCODE))
+    if ((fc_is_page_write(command->config.operation) == true) && (command->config.raid == FC_RAID_MODE_ENCODE))
     {
         fc_status_e stripe_result = fc_stripe_submit(controller, command, command_id);
         return stripe_result; /* 成功/失败均已在 fc_stripe_submit 中处理 */
@@ -1560,7 +1557,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
 
         /* ── Data Path encode: Random 加扰 → ECC 编码 → RAID XOR ──
          * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
-        if (fc_is_page_write(command->config.operation) != 0U)
+        if (fc_is_page_write(command->config.operation) == true)
         {
             (void)fc_data_path_encode(command);
         }

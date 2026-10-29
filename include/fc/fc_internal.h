@@ -42,13 +42,29 @@ extern "C"
     /* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
     typedef struct
     {
-        BYTE            active;                       /* 0=空闲, 1=积累中 */
+        bool            active;                       /* true = 积累中 */
         BYTE            ch, ce, lun;                  /* 目标 LUN */
         BYTE            count;                        /* 已积累的数据命令数 */
         fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
         fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
     } fc_stripe_accum_t;
 #endif /* CONFIG_FC_RAID */
+
+    /* ── 命令 / buffer 状态枚举（fc.c / fc_interface.c 共享） ── */
+    typedef enum
+    {
+        FC_COMMAND_STATE_FREE = 0U, /* 空闲 */
+        FC_COMMAND_STATE_ALLOCATED, /* 已分配（可配置 desc/buffer） */
+        FC_COMMAND_STATE_QUEUED,    /* 已提交到 SQ/HSQ */
+        FC_COMMAND_STATE_ACTIVE,    /* 已出队，NAND 执行中 */
+        FC_COMMAND_STATE_COMPLETED  /* 完成项已入 CQ（可释放） */
+    } fc_cmd_state_e;
+
+    typedef enum
+    {
+        FC_BUFFER_STATE_FREE     = 0U, /* 未占用 */
+        FC_BUFFER_STATE_OCCUPIED = 1U, /* 已分配给某条命令 */
+    } fc_buffer_state_e;
 
     /* ── FC 控制器：命令状态机 + 三池引用 + 队列/调度器 ──
      * 仅内部实现可见；对外通过 fc_interface.h 的 API 访问。
@@ -63,17 +79,15 @@ extern "C"
         fc_descriptor_t      *descriptor_pool;
         BYTE(*buffer_pool)
         [FC_BUFFER_POOL_CW_SIZE];
-        fc_command_id_t *descriptor_owner;
-        BYTE            *command_state;
-        fc_command_id_t *command_free_next;
-        WORD            *descriptor_free_next;
-        WORD            *buffer_free_next;
-        BYTE            *buffer_state;
-        fc_command_id_t  command_free_head;
-        WORD             descriptor_free_head;
-        WORD             buffer_free_head;
-        fc_command_id_t  active_handle;
-        BYTE             active_valid;
+        fc_command_id_t   *descriptor_owner;
+        fc_cmd_state_e    *command_state;
+        fc_command_id_t   *command_free_next;
+        WORD              *descriptor_free_next;
+        WORD              *buffer_free_next;
+        fc_buffer_state_e *buffer_state;
+        fc_command_id_t    command_free_head;
+        WORD               descriptor_free_head;
+        WORD               buffer_free_head;
 
         /* ── Stripe RAID 积累状态 ── */
 #if CONFIG_FC_RAID
@@ -84,16 +98,6 @@ extern "C"
 
     /* 全局单例控制器：在 fc.c 中定义，fc_interface.c 引用 */
     extern fc_t g_fc_controller;
-
-    /* ── 命令状态枚举（fc.c / fc_interface.c 共享） ── */
-    typedef enum
-    {
-        FC_COMMAND_STATE_FREE = 0U, /* 空闲 */
-        FC_COMMAND_STATE_ALLOCATED, /* 已分配（可配置 desc/buffer） */
-        FC_COMMAND_STATE_QUEUED,    /* 已提交到 SQ/HSQ */
-        FC_COMMAND_STATE_ACTIVE,    /* 已出队，NAND 执行中 */
-        FC_COMMAND_STATE_COMPLETED  /* 完成项已入 CQ（可释放） */
-    } fc_cmd_state_e;
 
     /* ══════════════════════════════════════════════════════════
      * 内部实现（fc.c 定义，fc_interface.c 经此调用）
@@ -289,9 +293,9 @@ extern "C"
      * @param command_id 命令在池内的槽位号。
      * @param command    待校验命令。
      *
-     * @return 1 = 链上每个 desc 都归该命令；0 = 存在归属不符或链越界。
+     * @return true = 链上每个 desc 都归该命令；false = 存在归属不符或链越界。
      */
-    BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
+    bool fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
 
     /*
      * 资源统计读取器（fc_get_resource_stats 使用）。
@@ -333,7 +337,7 @@ extern "C"
      *
      * @return fc_cmd_state_e 状态值。
      */
-    BYTE fc_command_state_get(const fc_t *controller, fc_command_id_t command_id);
+    fc_cmd_state_e fc_command_state_get(const fc_t *controller, fc_command_id_t command_id);
 
     /**
      * @brief 读描述符的归属命令 ID。
@@ -351,9 +355,9 @@ extern "C"
      * @param controller FC 控制器。
      * @param buffer_id  池内 buffer ID。
      *
-     * @return 1 = 占用；0 = 空闲。
+     * @return FC_BUFFER_STATE_OCCUPIED / FC_BUFFER_STATE_FREE。
      */
-    BYTE fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
+    fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
 
 #ifdef __cplusplus
 }

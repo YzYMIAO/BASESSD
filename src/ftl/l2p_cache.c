@@ -329,12 +329,12 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 
     bool due = (s_evict_fail_n >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (s_evict_fail_ms == 0U) || ((now_ms - s_evict_fail_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         s_evict_fail_n++;
         return;
@@ -482,12 +482,12 @@ static void l2p_load_fail_log(DWORD region_id, const char *cause)
 
     bool due = (s_load_fail_n >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (s_load_fail_ms == 0U) || ((now_ms - s_load_fail_ms) >= FTL_JOB_LOG_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         s_load_fail_n++;
         return;
@@ -517,12 +517,12 @@ static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
 
     bool due = (s_degrade_n >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (s_degrade_log_ms == 0U) || ((now_ms - s_degrade_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         s_degrade_n++;
         return;
@@ -643,7 +643,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
         // host：fresh=true（下一次命中是本次 miss 的重试，不计 hit）；
         // 预取：fresh=false（未来 host 命中是真实预取收益，保留 prefetch 标志到首次命中）。
         line->state = L2P_CACHE_CLEAN;
-        line->fresh = !prefetch;
+        line->fresh = (prefetch == false);
         return true;
     }
 
@@ -682,7 +682,7 @@ bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba)
 {
     // pba 来自 Metadata Directory（介质读回，H29 不可信输入）⇒ 运行期拒绝而非 ASSERT：
     // release 下 ASSERT 裁空会让非法地址直接进同步读。
-    if (!pba_is_valid(pba))
+    if (pba_is_valid(pba) == false)
     {
         return false;
     }
@@ -743,7 +743,7 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
     }
 
     // 预取是 best-effort：不制造写回、不与 host 抢资源、不加剧 thrashing。
-    if (cache->thrashing || (cache->load_inflight >= L2P_PREFETCH_MAX_INFLIGHT) || (!ftl_fc_host_budget_ok()))
+    if (cache->thrashing || (cache->load_inflight >= L2P_PREFETCH_MAX_INFLIGHT) || (ftl_fc_host_budget_ok() == false))
     {
         cache->prefetch_skipped++;
         return false;
@@ -758,7 +758,7 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
         return false;
     }
 
-    if (!l2p_load_begin(cache, line, global_region, false, true))
+    if (l2p_load_begin(cache, line, global_region, false, true) == false)
     {
         cache->prefetch_skipped++;
         return false;
@@ -983,7 +983,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
  */
 static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
 {
-    ASSERT(!ftl_op_is_in_dispatch());
+    ASSERT(ftl_op_is_in_dispatch() == false);
 
     ftl_service_pump();
 
@@ -1145,7 +1145,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     }
 
     // 先确认 FC 侧拿得到命令/描述符/buffer/队列槽位，再消耗 metadata 槽位。
-    if (!l2p_flush_resources_available())
+    if (l2p_flush_resources_available() == false)
     {
         return FTL_AGAIN;
     }
@@ -1153,7 +1153,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     // 双副本：一次预留主/备两个槽（剩余页不足先换块，避免烧掉半对）。
     DWORD region_addr[L2P_REGION_COPIES];
 
-    if (!md_slot_pair_append(owner->metadata_dir, owner->alloc, region_addr))
+    if (md_slot_pair_append(owner->metadata_dir, owner->alloc, region_addr) == false)
     {
         // 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
         // ⚠ 不能报 FTL_ERROR：l2p_owner_flush_kick 会跳过本行、cp_regions_flush 会**中止
@@ -1212,7 +1212,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
         const l2p_cache_line_t *line = &cache->lines[i];
 
         // 只刷自己的行：共享 cache 里别的 LUN 的行由它们自己的 CP/flush 处理。
-        if ((line->state != L2P_CACHE_DIRTY) || !l2p_region_owned_by(line->region_id, owner_dim))
+        if ((line->state != L2P_CACHE_DIRTY) || (l2p_region_owned_by(line->region_id, owner_dim) == false))
         {
             continue;
         }
@@ -1237,7 +1237,7 @@ bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim)
     {
         const l2p_cache_line_t *line = &cache->lines[i];
 
-        if (!l2p_region_owned_by(line->region_id, owner_dim))
+        if (l2p_region_owned_by(line->region_id, owner_dim) == false)
         {
             continue;
         }
@@ -1305,7 +1305,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
             line->state           = L2P_CACHE_CLEAN;
             // host 加载：下一次命中是本次 miss 的重试，不计 hit。
             // 预取：保留 prefetch 标志，下一次 host 命中计真实收益。
-            line->fresh           = !line->prefetch;
+            line->fresh           = (line->prefetch == false);
 
             // 从备份副本读成功 ⇒ 交换主/备，后续加载不必先读坏主副本。
             // 两份 PBA 都已计入 l2p_live，交换不改变账本，只置 Directory 脏。
@@ -1331,13 +1331,13 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
             const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
             bool        retried = false;
 
-            if ((!line->load_use_backup) && (backup != NAND_PBA_INVALID) && (backup != line->load_pba))
+            if ((line->load_use_backup == false) && (backup != NAND_PBA_INVALID) && (backup != line->load_pba))
             {
                 line->load_use_backup = true;
                 retried               = l2p_load_submit(ftl->cache, line, backup, true);
             }
 
-            if (!retried)
+            if (retried == false)
             {
                 // 两份都失败：先有限次重试（置 INVALID 让下次访问重新加载），超过上限才
                 // 降级为「全未映射的 CLEAN 行」。两个极端都要避免：
@@ -1382,7 +1382,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         }
 
         // 主副本成功 ⇒ 提交备份副本（此时只有这一条命令在飞，不额外占 credit）。
-        if ((!line->flush_fail) && (copy == 0U) && (line->flush_issued == 1U))
+        if ((line->flush_fail == false) && (copy == 0U) && (line->flush_issued == 1U))
         {
             fc_command_t *cmd2 = NULL;
             ftl_status_e  st   = ftl_async_write_page(&cmd2, line->flush_pba[1], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
@@ -1409,7 +1409,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         // 已发出的副本全部完成 ⇒ 收尾：两份都成功才原子提交。
         if (line->flush_done >= line->flush_issued)
         {
-            if ((!line->flush_fail) && (line->flush_issued == 2U))
+            if ((line->flush_fail == false) && (line->flush_issued == 2U))
             {
                 const WORD  local_region = l2p_global_to_local_region(line->region_id);
                 const DWORD primary      = line->flush_pba[0];
@@ -1457,7 +1457,7 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim)
         {
             continue; /* 空行：region_id 无语义，无需处理 */
         }
-        if (!l2p_region_owned_by(line->region_id, owner_dim))
+        if (l2p_region_owned_by(line->region_id, owner_dim) == false)
         {
             continue; /* 别的 LUN 的行，不能碰 */
         }
@@ -1558,7 +1558,7 @@ void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
     // 判据在模块内，主流程不读 cache->thrashing。
-    if (!cache->thrashing)
+    if (cache->thrashing == false)
     {
         const BYTE max_kick = s_l2p_flush_max[info->load_level];
 

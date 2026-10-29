@@ -229,7 +229,7 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
         {
             bbt_set_bad(old_bad, g);
         }
-        if (!is_bad)
+        if (is_bad == false)
         {
             continue;
         }
@@ -299,7 +299,7 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
 
         tested++;
 
-        if (!ok)
+        if (ok == false)
         {
             bad++;
             LOGE(LOG_TAG_FLT "format --verify: gblock=%hu (plane=%hhu block=%hu) failed — mark BAD\r\n", g, plane, block);
@@ -404,7 +404,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
             if (bbt_is_bad(old_bad, g))
             {
                 old_bad_n++;
-                if (!now_bad)
+                if (now_bad == false)
                 {
                     recovered++;
                 }
@@ -420,7 +420,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
 
     // 用 verify 后的最终 BAD 集重建候选池（BBT/CP/Journal 可能从 shared spare 补块）。
     // 失败 ⇒ 元数据区已无足够好块，格式化必须失败（release 拒绝，判据 9）。
-    if (!md_pool_build_all(&ftl->alloc))
+    if (md_pool_build_all(&ftl->alloc) == false)
     {
         LOGE(LOG_TAG_FTL "format: metadata candidate pool build failed\r\n");
         return FTL_ERROR;
@@ -428,7 +428,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
 
     // BBT 候选可能因 verify 新发现的 BAD 改变 ⇒ 强制 bbt_save 在新池上重新定位，
     // 把最终 BAD 图落到新的 BBT 候选块；否则下次开机扫旧候选可能读不到最新 record。
-    ftl->alloc.bbt.cursor_valid = 0U;
+    ftl->alloc.bbt.cursor_valid = false;
     bbt_dirty_note(&ftl->alloc);
 
     if (bbt_save(&ftl->alloc) != FTL_OK)
@@ -476,7 +476,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
 
     // 提交点：initial CP 已可读 ⇒ 清 FORMAT_IN_PROGRESS 并落盘。此后掉电，
     // 下次开机按「干净格式化」启动。落盘失败则保持「格式化中」，重做。
-    if (!pfr_format_end_bbt(&ftl->alloc))
+    if (pfr_format_end_bbt(&ftl->alloc) == false)
     {
         LOGE(LOG_TAG_BBT "format: 清 FORMAT_IN_PROGRESS 落盘失败 — 下次开机会重新格式化\r\n");
         return FTL_ERROR;
@@ -487,7 +487,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
     pfr_reset_blocks(ftl);
 
     // 格式化后 Directory 就是全新的「全部未映射」，之前的加载失败不再有意义。
-    ftl->md_load_failed = 0U;
+    ftl->md_load_failed = false;
 
     return FTL_OK;
 }
@@ -519,7 +519,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     if (cp_pool_find_latest(ftl->cp_handle, cp, &cp_idx) != FTL_OK)
     {
         // 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。
-        ftl->md_load_failed = 0U;
+        ftl->md_load_failed = false;
 
         pfr_boot_fresh_start(ftl, &ring);
 
@@ -546,7 +546,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
         // 让首个 CP 尽快提交重建后的状态并清标志。
         jrn_checkpoint_request(ftl->journal);
 
-        ftl->md_load_failed          = 0U;
+        ftl->md_load_failed          = false;
         local_result.boot_type       = BOOT_CLEAN_START;
         local_result.cp_sequence     = cp->sequence;
         local_result.journal_entries = 0U;
@@ -558,7 +558,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     // 介质已有有效 Checkpoint，但 Directory 加载失败 ⇒ 空 Directory 会让旧 region
     // 映射整体丢失（RISK-BOOT-09）。此时没有可用的「重扫 L2P region」路径，唯一
     // 诚实的做法是拒绝启动并保留介质，由用户决定是否格式化。
-    if (ftl->md_load_failed != 0U)
+    if (ftl->md_load_failed == true)
     {
         LOGE(LOG_TAG_META "Directory load failed but checkpoint seq=%lu exists — refuse to boot\r\n", cp->sequence);
         return FTL_ERROR;
@@ -567,13 +567,13 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     WORD      *block_words  = cp_block_words_get(ftl->cp_handle);
     const bool blocks_valid = cp_block_table_load(ftl->cp_handle, cp, cp_idx, block_words);
 
-    if (!blocks_valid)
+    if (blocks_valid == false)
     {
         LOGW(LOG_TAG_BLK "unavailable (rec=%hu seq=%lu) — block accounting via full metadata rebuild\r\n", cp_idx, cp->sequence);
     }
 
     // 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。
-    if (!cp_wear_table_load(ftl->cp_handle, cp, cp_idx))
+    if (cp_wear_table_load(ftl->cp_handle, cp, cp_idx) == false)
     {
         LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%hu seq=%lu) — read pages kept, rest default\r\n", cp_idx, cp->sequence);
     }
@@ -593,7 +593,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     // ⚠ 环内有读失败页 ⇒ 最新页与判型都不可信：不能据此判「干净关机」
     // （否则可能少回放条目）。保守走掉电回放路径；回放也会因读失败返回
     // FTL_ERROR，再由 pfr_boot_power_failure 回退 full metadata rebuild。
-    if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp->journal_sequence))
+    if ((ring_read_error == false) && ((ring.page_seq + ring.entry_count) <= cp->journal_sequence))
     {
         // 干净关机
         pfr_boot_clean_start(ftl, cp, blocks_valid ? 1U : 0U, false, &local_result.blocks_restored, &ring);
@@ -780,7 +780,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
         {
             continue; /* DIRTY / FLUSHING / LOADING / INVALID 均不在此处理 */
         }
-        if (!l2p_region_owned_by(line.region_id, dim))
+        if (l2p_region_owned_by(line.region_id, dim) == false)
         {
             continue; /* 共享 cache：别的 LUN 的行由它们自己的恢复处理 */
         }
@@ -810,7 +810,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
 
         const DWORD global = (local * FTL_DIM_TOTAL) + dim;
 
-        if (!l2p_region_preload(ftl->cache, global, addr))
+        if (l2p_region_preload(ftl->cache, global, addr) == false)
         {
             LOGW(LOG_TAG_BLK "preload region %lu failed\r\n", local);
         }
@@ -865,12 +865,12 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
         }
     }
 
-    if (!restored)
+    if (restored == 0)
     {
         // initial Checkpoint = 全量格式化写的空快照（seq=1 / 无块表 / journal 水位 0）。
         // 此时用户区已由 format 擦净，full metadata rebuild（全盘扫描 4096×64 页）没有信息可恢复，
         // 直接 reset + carve 即可；跳过它把首次启动从几十秒降到一次池切分。
-        const bool initial_cp = (!force_rebuild) && (cp->sequence == 1U) && (cp->journal_sequence == 0U) && (cp->block_word_count == 0U) && (cp->wear_entry_count == 0U);
+        const bool initial_cp = (force_rebuild == false) && (cp->sequence == 1U) && (cp->journal_sequence == 0U) && (cp->block_word_count == 0U) && (cp->wear_entry_count == 0U);
 
         if (initial_cp)
         {
@@ -884,7 +884,7 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
         pfr_reset_blocks(ftl);
 
         // full metadata rebuild 先认领写过块，carve 再只把 state==NONE 的块入池（避免池成员重叠）。
-        if (!initial_cp)
+        if (initial_cp == false)
         {
             pfr_rebuild_stats_t rebuild_stats;
 
@@ -949,7 +949,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
     DWORD      entry_count = 0U;
     const bool replay_ok   = (jrn_replay(ftl->journal, ftl->cache, cp_sequence, &entry_count, (blocks_applied != 0U) ? &block_ctx : NULL) == FTL_OK);
 
-    if (!replay_ok)
+    if (replay_ok == false)
     {
         // 回放不完整（环内有读失败页）：journal 写态已恢复，但映射可能缺失
         // ⇒ 强制回退 full metadata rebuild（见下方 restored 判定）。
@@ -1000,7 +1000,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
         }
     }
 
-    if (!restored)
+    if (restored == 0)
     {
         // 走了全量重建 ⇒ 本次启动**不是**范围化恢复。清掉可能由 journal/probe
         // 提前置上的 scoped，否则 boot 位会把 fallback 谎报成 scoped（R1）。
@@ -1053,7 +1053,7 @@ void pfr_boot_log_bad_areas(const struct ftl_context *ftl)
         {
             const WORD g = ftl_gblock(plane, block);
 
-            if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
+            if (ftl_block_is_bad(&ftl->alloc.blocks[g]) == false)
             {
                 continue;
             }
@@ -1202,7 +1202,7 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block,
 
             DWORD addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-            if (!ftl_page_is_blank_raw(addr, raw_buf))
+            if (ftl_page_is_blank_raw(addr, raw_buf) == false)
             {
                 return PAGES_PER_BLOCK;
             }
@@ -1285,7 +1285,7 @@ static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
     const WORD   g     = ftl_gblock(plane, block);
 
     // 退化单 plane 条目的构造与快照恢复同源（C2）。列表满（结构上不应发生）⇒ 放弃本块。
-    if (!pfr_closed_sb_add(ftl, g, temperature))
+    if (pfr_closed_sb_add(ftl, g, temperature) == false)
     {
         return;
     }
@@ -1318,7 +1318,7 @@ static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
         {
             // ⚠ 先校验不可信 META LBA 再使用：FTL_LBA_INVALID / 越界都不查表
             // （H29；全全局化后坏值可能落进另一个合法区间）。
-            if ((cw_lba[cw] == FTL_LBA_INVALID) || ((QWORD)cw_lba[cw] >= L2P_GLOBAL_LBA_MAX) || !lba_routes_to(cw_lba[cw], ftl->topo))
+            if ((cw_lba[cw] == FTL_LBA_INVALID) || ((QWORD)cw_lba[cw] >= L2P_GLOBAL_LBA_MAX) || (lba_routes_to(cw_lba[cw], ftl->topo) == false))
             {
                 continue;
             }
@@ -1692,7 +1692,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
         {
             continue;
         }
-        if (!pfr_closed_sb_add(ftl, g, b->temp))
+        if (pfr_closed_sb_add(ftl, g, b->temp) == false)
         {
             return false; /* 列表满：恢复结果不完整，调用者回退 full metadata rebuild */
         }
@@ -1764,14 +1764,14 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
             {
                 DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-                if (!ftl_page_is_blank_raw(pba, raw_buf))
+                if (ftl_page_is_blank_raw(pba, raw_buf) == false)
                 {
                     any = true;
                     break;
                 }
             }
 
-            if (!any)
+            if (any == false)
             {
                 // 已被擦除：交回 Free Pool。
                 ftl_block_set_state(b, FTL_BLOCK_STATE_NONE);
@@ -1805,7 +1805,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
         const BYTE pool = cp_block_word_pool(w);
         const BYTE ws   = cp_block_word_state(w);
 
-        if (!((ws == FTL_BLOCK_STATE_FREE) || (pool == CP_BLOCK_POOL_OP) || (pool == CP_BLOCK_POOL_SPARE)))
+        if (((ws == FTL_BLOCK_STATE_FREE) || (pool == CP_BLOCK_POOL_OP) || (pool == CP_BLOCK_POOL_SPARE)) == false)
         {
             continue; /* 不是池块（不应发生；build_pools 会拒绝） */
         }
@@ -1831,14 +1831,14 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
 
                 DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-                if (!ftl_page_is_blank_raw(pba, raw_buf))
+                if (ftl_page_is_blank_raw(pba, raw_buf) == false)
                 {
                     later_written = true;
                     break;
                 }
             }
 
-            if (!later_written)
+            if (later_written == false)
             {
                 continue;
             }
@@ -1926,7 +1926,7 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
         }
         else if (pool == CP_BLOCK_POOL_OP)
         {
-            if (!alc_op_push(alloc, plane, g))
+            if (alc_op_push(alloc, plane, g) == false)
             {
                 LOGE(LOG_TAG_BLK "OP pool overflow at g=%hu\r\n", g);
                 return false;
@@ -1934,7 +1934,7 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
         }
         else if (pool == CP_BLOCK_POOL_SPARE)
         {
-            if (!alc_spare_push(alloc, plane, g))
+            if (alc_spare_push(alloc, plane, g) == false)
             {
                 LOGE(LOG_TAG_BLK "Spare pool overflow at g=%hu\r\n", g);
                 return false;
@@ -2006,7 +2006,7 @@ static bool pfr_materialize_pba(void *ctx, DWORD pba)
 
     // journal 条目来自介质（H29 不可信输入）：先校验 PBA 属于本实例且字段合法，
     // 否则会把 valid_count 记到别的块，而 L2P 存下一个越界地址。
-    if ((!pba_is_valid(pba)) || (pba_to_ch(pba) != ftl->topo.ch) || (pba_to_ce(pba) != ftl->topo.ce) || (pba_to_lun(pba) != ftl->topo.lun))
+    if ((pba_is_valid(pba) == false) || (pba_to_ch(pba) != ftl->topo.ch) || (pba_to_ce(pba) != ftl->topo.ce) || (pba_to_lun(pba) != ftl->topo.lun))
     {
         return false; /* block_ctx.ok=false ⇒ 调用者回退 full metadata rebuild */
     }

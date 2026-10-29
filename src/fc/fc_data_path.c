@@ -163,7 +163,7 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
     return fc_ldpc_decode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE, ecc_bits);
 }
 
-BYTE fc_data_path_crc_check(const BYTE *cw)
+bool fc_data_path_crc_check(const BYTE *cw)
 {
     DWORD stored_crc;
     DWORD computed_crc;
@@ -174,7 +174,7 @@ BYTE fc_data_path_crc_check(const BYTE *cw)
     (void)memcpy(&stored_crc, cw + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
     computed_crc = fc_crc_compute(cw + FC_CRC_USER_OFFSET);
 
-    return (computed_crc == stored_crc) ? 1U : 0U;
+    return (computed_crc == stored_crc);
 }
 
 DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
@@ -531,7 +531,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
                 if (command->config.crc == FC_CRC_ENABLE)
                 {
-                    if (fc_data_path_crc_check(buffer) == 0U)
+                    if (fc_data_path_crc_check(buffer) == false)
                     {
                         desc->status |= FC_CW_STATUS_CRC_ERROR;
                     }

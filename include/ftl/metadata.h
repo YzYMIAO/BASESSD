@@ -355,11 +355,14 @@ _Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END,
 /* ── 元数据类型 ──
  * Directory 当前只登记 METADATA_TYPE_L2P_REGION；其余类型是固定分区，位置由布局
  * 常量决定，不经过 Directory lookup。类型字段保留完整命名空间，供介质格式演进。 */
-#define METADATA_TYPE_L2P_REGION (0U) /* L2P Region 数据 */
-#define METADATA_TYPE_JOURNAL    (1U) /* Journal Block */
-#define METADATA_TYPE_CHECKPOINT (2U) /* Checkpoint */
-#define METADATA_TYPE_BBT        (3U) /* Bad Block Table */
-#define METADATA_TYPE_COUNT      (4U)
+typedef enum
+{
+    METADATA_TYPE_L2P_REGION = 0, /* L2P Region 数据 */
+    METADATA_TYPE_JOURNAL    = 1, /* Journal Block */
+    METADATA_TYPE_CHECKPOINT = 2, /* Checkpoint */
+    METADATA_TYPE_BBT        = 3, /* Bad Block Table */
+    METADATA_TYPE_COUNT      = 4,
+} metadata_type_e;
 
 /* ── Directory 容量 ──
  * = 每实例 L2P region 数：**每个 region 都必须能登记自己的位置**，否则
@@ -376,9 +379,9 @@ _Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END,
 
 typedef struct
 {
-    BYTE  type; /* METADATA_TYPE_* */
-    WORD  id;   /* L2P region_id / 0 for others */
-    DWORD pba;  /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"本实例元数据必在本实例 ch/ce"假设）*/
+    metadata_type_e type; /* METADATA_TYPE_* */
+    WORD            id;   /* L2P region_id / 0 for others */
+    DWORD           pba;  /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"本实例元数据必在本实例 ch/ce"假设）*/
 } __attribute__((packed)) md_entry_t;
 
 _Static_assert(sizeof(md_entry_t) == METADATA_ENTRY_BYTES, "md_entry_t 必须是 7 字节");
@@ -776,6 +779,13 @@ typedef struct
     bool      need_erase; /* true = 写之前必须先擦 base 所在块 */
 } md_anchor_prepare_out_t;
 
+/* 压缩搬移的副本号。 */
+typedef enum
+{
+    MD_COPY_PRIMARY = 0, /* 主副本 */
+    MD_COPY_BACKUP  = 1, /* 备份副本 */
+} md_copy_e;
+
 /* 布尔量直接用 bool；**不压位域**——位域布局是 implementation-defined，
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
 typedef struct
@@ -790,7 +800,7 @@ typedef struct
     WORD              victim;              /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
     WORD              region_id;           /* 搬移游标（下一个待查 region_id）*/
     WORD              cur_region;          /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
-    BYTE              cur_copy;            /* 当前搬移的副本（0=主 / 1=备，RISK-BOOT-18 L2）*/
+    md_copy_e         cur_copy;            /* 当前搬移的副本（主 / 备）*/
     WORD              moved;               /* 本次压缩已搬 region 数（观测）*/
     WORD              reclaim_gblock;      /* 在飞擦除的块（完成时归还它）*/
     WORD              reclaim_fail_gblock; /* 连续擦除失败计数对应的块（RISK-MD-01）*/
@@ -918,7 +928,7 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes);
  * @return PBA；NAND_PBA_INVALID = 未找到。对 L2P region 而言"未找到"与"未映射"
  *         同义：`fill_fixed` 为每个 region 预登记一条，之后只在刷盘时覆盖。
  */
-DWORD md_entry_find(const md_dir_cache_t *dir, BYTE type, WORD id);
+DWORD md_entry_find(const md_dir_cache_t *dir, metadata_type_e type, WORD id);
 
 /**
  * @brief 某个 gblock 上还有多少 region 的**最新位置**落在它上面。
@@ -940,7 +950,7 @@ WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock);
  * @param id     L2P region_id / 0 for others
  * @param new_pba 新物理位置（PBA）
  */
-void md_entry_update(md_dir_cache_t *dir, BYTE type, WORD id, DWORD new_pba);
+void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD new_pba);
 
 /**
  * @brief 一次预留**两个连续槽**（主/备副本，RISK-BOOT-18 的 L2）

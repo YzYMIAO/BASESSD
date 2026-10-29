@@ -80,7 +80,7 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
 }
 
 // 以 plane 0 的低 CW_NUM 位为基准逐 plane 比较；mask == 0 时各 plane 均为 0，判为对称。
-BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
+bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 {
     const DWORD plane_bits = ((1U << CW_NUM) - 1U);
     const DWORD low        = mask & plane_bits;
@@ -90,10 +90,10 @@ BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
     {
         if (((mask >> (plane * CW_NUM)) & plane_bits) != low)
         {
-            return 0U;
+            return false;
         }
     }
-    return 1U;
+    return true;
 }
 
 // 实现要点：只做前置条件断言，恒返回 FC_STATUS_OK；release 下断言整段裁空。
@@ -102,7 +102,7 @@ fc_status_e fc_command_validate(const fc_command_t *command)
     ASSERT(command != NULL);
     ASSERT(command->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）
-    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || !nand_operation_has_data(command->config.operation) || (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
+    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(command->config.operation) == false) || (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
     // NDEBUG 下断言整段裁空 → command 变未用形参，吞掉（同 fc_submit 的 (void)command_id;）
     (void)command;
 

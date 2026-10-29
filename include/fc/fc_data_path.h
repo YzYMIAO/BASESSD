@@ -175,9 +175,9 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
  *
  * @param cw 528B CW buffer（USER 区须为明文，即解扰之后）。
  *
- * @return 1U 存储值与重算值相等；0U 不相等。
+ * @return true = 存储值与重算值相等；false = 不相等。
  */
-BYTE fc_data_path_crc_check(const BYTE *cw);
+bool fc_data_path_crc_check(const BYTE *cw);
 
 /**
  * @brief META 读回校验，包含两项：

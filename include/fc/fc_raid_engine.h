@@ -39,7 +39,7 @@
 /* 每个 LUN 的 RAID 上下文 */
 typedef struct
 {
-    BYTE  active;                          /* 0=空闲, 1=RAID 序列进行中 */
+    bool  active;                          /* true = RAID 序列进行中 */
     BYTE  acc_buf[FC_BUFFER_POOL_CW_SIZE]; /* XOR 累加器缓冲（一个 CW 大小） */
     BYTE  processed;                       /* 已累加的 CW 数（含 START） */
     BYTE  total;                           /* 期望累加的总 CW 数 */

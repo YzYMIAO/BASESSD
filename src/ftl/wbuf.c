@@ -48,7 +48,7 @@ static BYTE wb_lba_bit(DWORD lba)
 
 bool wb_has(const wb_handle_t *h, DWORD lba)
 {
-    if (!h->open)
+    if (h->open == false)
     {
         return false;
     }
@@ -62,7 +62,7 @@ bool wb_has(const wb_handle_t *h, DWORD lba)
 
 bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
 {
-    if (!wb_has(h, lba))
+    if (wb_has(h, lba) == false)
     {
         return false;
     }
@@ -87,14 +87,14 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
  */
 static ftl_status_e wb_flush(wb_handle_t *h)
 {
-    if ((!h->open) || (h->occupied == 0U))
+    if ((h->open == false) || (h->occupied == 0U))
     {
         return FTL_OK; /* 空：nothing to do */
     }
 
     // host 写给后台留资源：池接近满时先背压，别把 CP/GC/journal 的命令槽吃光。
     // 页留在 wbuf 里不丢，下一轮继续（FTL_AGAIN 由组重试）。见 ftl_fc_interface.h。
-    if (!ftl_fc_host_budget_ok())
+    if (ftl_fc_host_budget_ok() == false)
     {
         return FTL_AGAIN;
     }
@@ -146,7 +146,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     {
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
-            if (!bit_mask_any(h->occupied, ftl_cw_plane_mask(p)))
+            if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) == false)
             {
                 memset(&h->data[p * CW_NUM * FTL_IU_BYTES], 0, CW_NUM * FTL_IU_BYTES);
             }
@@ -184,7 +184,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     pending->buffer             = NULL;
     pending->new_pba            = pba[0];
     pending->new_pba1           = pba[1];
-    pending->cache_intermediate = 0U;
+    pending->cache_intermediate = false;
     pend_validate(pending);
 
     // 提交（tag = HOST_IO ⇒ 完成时由 g_op_callbacks[FTL_OP_HOST_IO] 收尾）。
@@ -248,7 +248,7 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
         }
     }
 
-    if (!h->open)
+    if (h->open == false)
     {
         h->open     = true;
         h->base     = window;
@@ -293,7 +293,7 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
  */
 static bool wb_drop(wb_handle_t *h, DWORD lba)
 {
-    if (!wb_has(h, lba))
+    if (wb_has(h, lba) == false)
     {
         return false;
     }
@@ -346,7 +346,7 @@ static void wb_reset(wb_handle_t *h)
  */
 static void wb_maybe_flush_idle(wb_handle_t *h)
 {
-    if (!h->open)
+    if (h->open == false)
     {
         return;
     }

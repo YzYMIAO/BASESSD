@@ -761,7 +761,7 @@ static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsign
  */
 static int find_poly_deg1_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
 {
-    if (!poly->c[0])
+    if (poly->c[0] == 0)
     {
         return 0;
     }
@@ -780,7 +780,7 @@ static int find_poly_deg2_roots(struct fc_bch_control *bch, struct gf_poly *poly
 {
     int          n = 0, i, l0 = (int)bch->a_log_tab[poly->c[0]], l1 = (int)bch->a_log_tab[poly->c[1]], l2 = (int)bch->a_log_tab[poly->c[2]];
     unsigned int u, v, r;
-    if (!poly->c[0] || !poly->c[1])
+    if ((poly->c[0] == 0) || (poly->c[1] == 0))
     {
         return 0;
     }
@@ -812,7 +812,7 @@ static int find_poly_deg3_roots(struct fc_bch_control *bch, struct gf_poly *poly
 {
     int          i, n = 0;
     unsigned int a2, b2, c2, e3, tmp[4];
-    if (!poly->c[0])
+    if (poly->c[0] == 0)
     {
         return 0;
     }
@@ -921,7 +921,7 @@ static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const str
     {
         return;
     }
-    if (!rep)
+    if (rep == NULL)
     {
         rep = bch->cache;
         gf_poly_logrep(bch, b, rep);
@@ -943,7 +943,7 @@ static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const str
         }
     }
     a->deg = (int)(d - 1U);
-    while (!c[a->deg] && a->deg)
+    while ((c[a->deg] == 0) && a->deg)
     {
         a->deg--;
     }
@@ -1033,7 +1033,7 @@ static void compute_trace_bk_mod(struct fc_bch_control *bch, int k, const struct
             gf_poly_mod(bch, z, f, bch->cache);
         }
     }
-    while (!out->c[out->deg] && out->deg)
+    while ((out->c[out->deg] == 0) && out->deg)
     {
         out->deg--;
     }
@@ -1136,9 +1136,9 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
 
     ASSERT(8U * len <= (bch->n - bch->ecc_bits));
 
-    if (!syn)
+    if (syn == NULL)
     {
-        if (!calc_ecc)
+        if (calc_ecc == NULL)
         {
             ASSERT(data != NULL);
             ASSERT(recv_ecc != NULL);
@@ -1156,7 +1156,7 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
                 bch->ecc_buf[i] ^= bch->ecc_buf2[i];
                 sum |= bch->ecc_buf[i];
             }
-            if (!sum)
+            if (sum == 0)
             {
                 *out_nerr = 0U;
                 return true;
@@ -1165,7 +1165,7 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
         compute_syndromes(bch, bch->ecc_buf, bch->syn);
         syn = bch->syn;
     }
-    if (!compute_error_locator_polynomial(bch, syn, &nerr))
+    if (compute_error_locator_polynomial(bch, syn, &nerr) == false)
     {
         return false;
     }
@@ -1184,7 +1184,7 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
                 return false;
             }
             errloc[i] = nbits - 1 - errloc[i];
-            if (!bch->swap_bits)
+            if (bch->swap_bits == 0)
             {
                 errloc[i] = (errloc[i] & ~7U) | (7U - (errloc[i] & 7U));
             }
@@ -1295,7 +1295,7 @@ static bool build_deg2_base(struct fc_bch_control *bch)
         for (i = 0; i < 2; i++)
         {
             r = a_log(bch, y);
-            if (y && (r < m) && !xi[r])
+            if (y && (r < m) && (xi[r] == 0))
             {
                 bch->xi_tab[r] = x;
                 xi[r]          = 1;
@@ -1428,11 +1428,11 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
         bch->poly_2t[i] = (struct gf_poly *)s_bch.poly_2t[i];
     }
 
-    if (!err)
+    if (err == 0)
     {
-        err = !build_gf_tables(bch, prim_poly);
+        err = (build_gf_tables(bch, prim_poly) == false);
     }
-    if (!err)
+    if (err == 0)
     {
         genpoly = compute_generator_polynomial(bch);
         if (genpoly)
@@ -1444,9 +1444,9 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bi
             err = true;
         }
     }
-    if (!err)
+    if (err == 0)
     {
-        err = !build_deg2_base(bch);
+        err = (build_deg2_base(bch) == false);
     }
     if (err)
     {

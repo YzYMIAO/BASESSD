@@ -67,7 +67,7 @@ void alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *refs)
     // 反向索引：未坏块置 NO_SB；坏块由 bbt_init 置 BAD，不在此动。
     for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        if (!ftl_block_is_bad(&alloc->blocks[i]))
+        if (ftl_block_is_bad(&alloc->blocks[i]) == false)
         {
             ftl_block_set_sb(&alloc->blocks[i], FTL_BLOCK_NO_SB);
         }
@@ -102,7 +102,7 @@ void alc_free_push(alc_t *alloc, WORD gblock)
     }
 
     // BAD 是终态，入池会把它改回 FREE。
-    ASSERT(!ftl_block_is_bad(&alloc->blocks[gblock]));
+    ASSERT(ftl_block_is_bad(&alloc->blocks[gblock]) == false);
     if (ftl_block_is_bad(&alloc->blocks[gblock]))
     {
         LOGE(LOG_TAG_FTL "free_block: gblock %hu is bad, dropped\r\n", gblock);
@@ -198,7 +198,7 @@ DWORD alc_free_get_max_erase(const alc_t *alloc)
             }
         }
 
-        if (!any)
+        if (any == false)
         {
             return 0U;
         }
@@ -363,7 +363,7 @@ bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane)
         alc_free_remove(alloc, pick);
         ftl_block_set_state(&alloc->blocks[pick], FTL_BLOCK_STATE_NONE);
 
-        if (!alc_spare_push(alloc, plane, pick))
+        if (alc_spare_push(alloc, plane, pick) == false)
         {
             alc_free_push(alloc, pick); /* 回滚（目标未满时不应发生） */
             break;
@@ -399,7 +399,7 @@ static bool alc_super_open(alc_t *alloc, super_block_t *sb, alc_super_alloc_mode
 {
     const BYTE temperature = (mode == ALC_SUPER_ALLOC_HOT) ? FTL_TEMP_HOT : FTL_TEMP_COLD;
     const bool high_wear   = (mode == ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
-    const bool allow_op    = !high_wear;
+    const bool allow_op    = (high_wear == false);
     WORD       gblock[PLANE_NUM];
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -450,7 +450,7 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
     {
         for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
-            if (!super_block_has_plane(sb, plane))
+            if (super_block_has_plane(sb, plane) == false)
             {
                 continue;
             }
@@ -465,7 +465,7 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
         }
     }
 
-    if (!sb->is_open || (sb->next_page >= PAGES_PER_BLOCK))
+    if ((sb->is_open == false) || (sb->next_page >= PAGES_PER_BLOCK))
     {
         if (sb->is_open)
         {
@@ -476,7 +476,7 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
         }
         // 策略只影响**新开** SB 的选块方向；已打开的 SB 继续追加（同一 job 内
         // 连续写页）。高磨损模式不允许 OP 兜底：OP 块擦除次数不受该策略控制。
-        if (!alc_super_open(alloc, sb, mode))
+        if (alc_super_open(alloc, sb, mode) == false)
         {
             return FTL_AGAIN;
         }
@@ -499,7 +499,7 @@ BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature)
 {
     const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
-    if ((!sb->is_open) || (sb->next_page >= PAGES_PER_BLOCK))
+    if ((sb->is_open == false) || (sb->next_page >= PAGES_PER_BLOCK))
     {
         return 0U;
     }
@@ -508,7 +508,7 @@ BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature)
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        if (!super_block_has_plane(sb, plane))
+        if (super_block_has_plane(sb, plane) == false)
         {
             return 0U;
         }
@@ -531,14 +531,14 @@ alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temp
 {
     const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
-    if ((!sb->is_open) || (pba == NAND_PBA_INVALID))
+    if ((sb->is_open == false) || (pba == NAND_PBA_INVALID))
     {
         return ALC_SUPER_PBA_NOT_OPEN;
     }
 
     const BYTE plane = pba_to_plane(pba);
 
-    if ((!super_block_has_plane(sb, plane)) || (sb->plane_blocks[plane] != pba_to_block(pba)))
+    if ((super_block_has_plane(sb, plane) == false) || (sb->plane_blocks[plane] != pba_to_block(pba)))
     {
         return ALC_SUPER_PBA_NOT_OPEN; /* 旧 SB 的迟到命令 */
     }
@@ -550,7 +550,7 @@ void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD p
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
-    if ((!sb->is_open) || (pba == NAND_PBA_INVALID) || (pba_to_page(pba) != 0U))
+    if ((sb->is_open == false) || (pba == NAND_PBA_INVALID) || (pba_to_page(pba) != 0U))
     {
         return;
     }
@@ -559,7 +559,7 @@ void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD p
     // 否则会把新 SB 的 page0 屏障误置为已通过。
     const BYTE plane = pba_to_plane(pba);
 
-    if ((!super_block_has_plane(sb, plane)) || (sb->plane_blocks[plane] != pba_to_block(pba)))
+    if ((super_block_has_plane(sb, plane) == false) || (sb->plane_blocks[plane] != pba_to_block(pba)))
     {
         return;
     }
@@ -588,7 +588,7 @@ void alc_super_prepare_wl_destination(alc_t *alloc)
 
     super_block_t *sb = &alloc->cold_sb;
 
-    if (!sb->is_open)
+    if (sb->is_open == false)
     {
         return;
     }
@@ -646,7 +646,7 @@ static WORD alc_super_close_live(alc_t *alloc, super_block_t *sb)
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        if (!super_block_has_plane(&entry, plane))
+        if (super_block_has_plane(&entry, plane) == false)
         {
             continue;
         }
@@ -682,7 +682,7 @@ ftl_status_e alc_super_close(alc_t *alloc, BYTE temperature)
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
-    if (!sb->is_open)
+    if (sb->is_open == false)
     {
         return FTL_ERROR;
     }
@@ -828,7 +828,7 @@ void alc_super_get_stats(const alc_t *alloc, const super_block_t *sb, alc_super_
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        if (!super_block_has_plane(sb, plane))
+        if (super_block_has_plane(sb, plane) == false)
         {
             continue;
         }
@@ -867,7 +867,7 @@ void alc_super_get_stats(const alc_t *alloc, const super_block_t *sb, alc_super_
 // 实现要点：与 migrate 擦除完成同口径；供元数据日志块等不经 migrate 的擦除路径调用。
 void alc_bst_note_erase(alc_t *alloc, WORD gblock, DWORD now)
 {
-    ASSERT(!ftl_block_is_bad(&alloc->blocks[gblock]));
+    ASSERT(ftl_block_is_bad(&alloc->blocks[gblock]) == false);
 
     bst_block_t *b = &alloc->blocks[gblock];
 
@@ -944,9 +944,9 @@ void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 
 /* ── 9. Trace ── */
 
-void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, BYTE kind)
+void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, alc_trace_kind_e kind)
 {
-    if ((alloc == NULL) || (!pba_is_valid(pba)))
+    if ((alloc == NULL) || (pba_is_valid(pba) == false))
     {
         return;
     }
@@ -1015,7 +1015,7 @@ void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
             continue;
         }
 
-        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%hhu bk=%hu pg=%hhu cw=%hhu %s\r\n", t->seq, t->lba, t->pba, t->plane, t->block, t->page, t->cw, (t->kind == 0U) ? "write-ok" : ((t->kind == 1U) ? "program-fail" : "gc-write"));
+        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%hhu bk=%hu pg=%hhu cw=%hhu %s\r\n", t->seq, t->lba, t->pba, t->plane, t->block, t->page, t->cw, (t->kind == ALC_TRACE_WRITE_OK) ? "write-ok" : ((t->kind == ALC_TRACE_PROGRAM_FAIL) ? "program-fail" : "gc-write"));
         shown++;
     }
 }

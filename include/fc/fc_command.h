@@ -425,12 +425,11 @@ fc_status_e fc_command_validate(const fc_command_t *command);
  *
  * @param mask flat 掩码（bit n = plane*CW_NUM + cw）。
  *
- * @return 1 对称（mask == 0 视为对称）
- *         0 不对称
+ * @return true = 对称（mask == 0 视为对称）；false = 不对称
  *
  * @note 用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合
  * （见 fc_data_path_generate_stripe_parity 的前置断言）。
  */
-BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask);
+bool fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 
 #endif /* FC_COMMAND_H */

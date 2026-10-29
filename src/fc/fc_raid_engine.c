@@ -46,13 +46,13 @@ fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
-    if (ctx->active != 0U)
+    if (ctx->active == true)
     {
         return FC_STATUS_NOT_READY;
     }
 
     memcpy(ctx->acc_buf, cw_buffer, FC_BUFFER_POOL_CW_SIZE);
-    ctx->active    = 1U;
+    ctx->active    = true;
     ctx->processed = 1U;
     ctx->total     = total;
     return FC_STATUS_OK;
@@ -71,7 +71,7 @@ fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
-    if (ctx->active == 0U)
+    if (ctx->active == false)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -100,14 +100,14 @@ fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
-    if (ctx->active == 0U)
+    if (ctx->active == false)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
 
     memcpy(parity_buffer, ctx->acc_buf, FC_BUFFER_POOL_CW_SIZE);
 
-    ctx->active    = 0U;
+    ctx->active    = false;
     ctx->processed = 0U;
     ctx->total     = 0U;
     return FC_STATUS_OK;

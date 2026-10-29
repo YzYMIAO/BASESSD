@@ -218,12 +218,12 @@ static bool rr_unrec_log_is_due(DWORD *out_suppressed)
 
     bool due = (s_rr_unrec_suppressed >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (s_rr_unrec_log_ms == 0U) || ((now_ms - s_rr_unrec_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         s_rr_unrec_suppressed++;
         return false;
@@ -266,7 +266,7 @@ static void rr_settle_plane(rr_handle_t *rr)
         }
     }
 
-    if (!rr->recovered)
+    if (rr->recovered == false)
     {
         rr->all_ok = false; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
         rr->planes_failed++;
@@ -388,11 +388,11 @@ static void rr_job_step(rr_handle_t *rr)
             {
                 // 优先用 rr_trigger 登记的 owner；否则向 pending owner API 领取一个
                 // 被托管的读子操作。都没有就空闲退出。
-                if (!rr->has_owner)
+                if (rr->has_owner == false)
                 {
                     pend_op_view_t view;
 
-                    if (!pend_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view))
+                    if (pend_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view) == false)
                     {
                         return;
                     }
@@ -511,7 +511,7 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
 {
     // 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
     // 当前 job 结束后由 pending 端口的 take 领走。
-    if ((rr->stage == RR_STAGE_IDLE) && (!rr->has_owner))
+    if ((rr->stage == RR_STAGE_IDLE) && (rr->has_owner == false))
     {
         rr->owner     = *owner;
         rr->has_owner = true;
@@ -578,7 +578,7 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
         LOGI(LOG_TAG_RR "job stage=%d plane=%hhu attempt=%hhu retry=%hhu stall=%lums age=%lums\r\n", rr->stage, rr->plane, rr->attempt, rr->retry_count, rr->stall_ms, ftl_job_age_ms(&rr->start_ms));
     }
 
-    if (!rr->waiting)
+    if (rr->waiting == false)
     {
         if (rr->stage == RR_STAGE_IDLE)
         {
@@ -636,7 +636,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     rr->retry_count = rr->attempt;
     rr->last_status = completion->status; /* 收尾日志解码用 */
 
-    if (!fc_cw_status_has_error(completion->status))
+    if (fc_cw_status_has_error(completion->status) == false)
     {
         (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
         rr->recovered = true;
@@ -678,7 +678,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
     // 旁表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
     // 正常路径不该出现：每条 RR 命令提交时都登记了 &ftl->read_recovery_handle，
     // 且只被 take 一次。
-    if ((rr == NULL) || (!rr->waiting))
+    if ((rr == NULL) || (rr->waiting == false))
     {
         (void)fc_command_release(cmd);
         return;
@@ -750,7 +750,7 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 
             for (BYTE p = 0U; p < PLANE_NUM; p++)
             {
-                if (!super_block_has_plane(sb, p))
+                if (super_block_has_plane(sb, p) == false)
                 {
                     continue;
                 }

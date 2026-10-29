@@ -34,7 +34,7 @@
 
 // 命令指针 → 池索引。区间检查 + 减法，O(1)。
 // 返回 0 = 指针不落在命令池区间内（例如栈上的 fc_command_t），没有对应 ID。
-BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
+bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 {
     const fc_command_t *pool = g_fc_controller.command_pool;
 
@@ -45,10 +45,10 @@ BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 
     if ((command < pool) || (command >= &pool[FC_COMMAND_POOL_DEPTH]))
     {
-        return 0U;
+        return false;
     }
     *command_id = fc_command_to_id_internal(&g_fc_controller, command);
-    return 1U;
+    return true;
 }
 
 /**
@@ -56,9 +56,9 @@ BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
  *
  * @param buffer_id 待检查的 buffer ID。
  *
- * @return 1 = < FC_BUFFER_POOL_DEPTH；0 = 越界。
+ * @return true = 池内；false = 越界。
  */
-static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
+static bool fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
 {
     return (buffer_id < FC_BUFFER_POOL_DEPTH);
 }
@@ -68,14 +68,14 @@ static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
  *
  * @param buffer_id 待检查的 buffer ID。
  *
- * @return 1 = 池内且已占用；0 = 越界或未占用。
+ * @return true = 池内且已占用；false = 越界或未占用。
  *
  * @note 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。
  */
-static BYTE __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
+static bool __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
 {
-    return (fc_buffer_id_is_valid(buffer_id) != 0U) && (fc_buffer_state_get(&g_fc_controller, buffer_id) != 0U);
+    return (fc_buffer_id_is_valid(buffer_id) == true) && (fc_buffer_state_get(&g_fc_controller, buffer_id) != FC_BUFFER_STATE_FREE);
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -105,14 +105,13 @@ fc_command_t *fc_command_alloc(void)
  * @param plane   目标 CW 的 plane。
  * @param cw      目标 CW 的 CW 号。
  *
- * @return 1 = 已挂
- *         0 = 未挂。
+ * @return true = 已挂；false = 未挂。
  *
  * @note 实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
  * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）。
  */
-static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *command, BYTE plane, BYTE cw)
+static bool __attribute__((unused)) fc_command_cw_attached(const fc_command_t *command, BYTE plane, BYTE cw)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
 
@@ -122,11 +121,11 @@ static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *c
 
         if ((paa_to_plane(descriptor->paa) == plane) && (paa_to_cw(descriptor->paa) == cw))
         {
-            return 1U;
+            return true;
         }
         descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
     }
-    return 0U;
+    return false;
 }
 
 // 实现要点：
@@ -175,14 +174,14 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
      * row_paa 的 plane 与实参不符——都是调用者 bug，绝不能带着错配置发到硬件，
      * 故全部 ASSERT（不返回 INVALID_ARGUMENT）。 */
     ASSERT(command != NULL);
-    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    ASSERT(fc_command_to_id(command, &command_id) == true);
     ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
     (void)command_id; /* release（NDEBUG）下上面两条 ASSERT 被裁掉，command_id 仅用于前置条件 */
     // plane 必须落在本命令的 plane 段内，CW 号必须在页内
     (void)fc_command_plane_span(command, &plane_first, &plane_last);
     ASSERT((cw < CW_NUM) && (plane >= plane_first) && (plane < plane_last));
     // 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据）
-    ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
+    ASSERT(fc_command_cw_attached(command, plane, cw) == false);
     // row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符）
     ASSERT(paa_to_plane(row_paa) == plane);
     // buffer 归属（buf_own）与 buffer_id 实参必须一致：
@@ -271,7 +270,7 @@ fc_status_e fc_submit(fc_command_t *command)
      *    属配置错误，绝不带错配置发到硬件，故一律 ASSERT，不返回 INVALID_ARGUMENT。
      *    本函数唯一合法失败是队列满（资源），由 fc_submit_internal 返回 QUEUE_FULL。 ── */
     ASSERT(command != NULL);
-    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    ASSERT(fc_command_to_id(command, &command_id) == true);
     ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
     ASSERT(fc_command_validate(command) == FC_STATUS_OK);
     ASSERT(fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) != 0U);
@@ -297,7 +296,7 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
         fc_command_id_t command_id;
 
         ASSERT(command != NULL);
-        ASSERT(fc_command_to_id(command, &command_id) != 0U);
+        ASSERT(fc_command_to_id(command, &command_id) == true);
         ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
         ASSERT(fc_command_validate(command) == FC_STATUS_OK);
         ASSERT(fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) != 0U);
@@ -361,7 +360,7 @@ fc_status_e fc_command_release(fc_command_t *command)
 
     // 指针身份是配置错误（栈上的 fc_command_t 没有对应命令可释放）→ ASSERT，不返回 INVALID_ARGUMENT
     ASSERT(command != NULL);
-    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    ASSERT(fc_command_to_id(command, &command_id) == true);
     (void)command_id; /* release（NDEBUG）下上面 ASSERT 被裁掉，command_id 仅用于前置条件 */
 
     // 幂等性（已 FREE 直接返回 OK）由 internal 版统一负责，此处不重复判
@@ -381,7 +380,7 @@ fc_buffer_id_t fc_buffer_alloc(void)
 // 释放 buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不返回 INVALID_ARGUMENT）。
 fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id)
 {
-    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
+    ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     return fc_buffer_release_internal(&g_fc_controller, buffer_id);
 }
 
@@ -391,7 +390,7 @@ BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
     BYTE *base;
 
-    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
+    ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     // 占用即保证池内指针非空（_internal 只做数组下标），无需再判 NULL
     base = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 
@@ -403,7 +402,7 @@ BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 // 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）；成功时恒非空。
 BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 {
-    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
+    ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
@@ -567,7 +566,7 @@ fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
     }
     for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
     {
-        if (fc_buffer_state_get(&g_fc_controller, index) != 0U)
+        if (fc_buffer_state_get(&g_fc_controller, index) != FC_BUFFER_STATE_FREE)
         {
             stats->buffer_used++;
         }

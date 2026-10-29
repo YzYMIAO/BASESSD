@@ -61,7 +61,7 @@ static BYTE g_col_weight[QC_N]; /* 每列权重（固定为 3） */
 static WORD g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U]; /* 每行约 198 个 */
 static WORD g_row_weight[QC_M];
 
-static BYTE g_initialized = 0U;
+static bool g_initialized = false;
 
 /* ── 伪随机数生成器（固定种子，保证每次编译生成相同 H） ────── */
 
@@ -189,7 +189,7 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_o
 
     (void)qc; /* qc 本实现未用（校验矩阵为文件内静态表）；NDEBUG 下断言裁空后靠它消警告 */
 
-    if (!g_initialized)
+    if (g_initialized == false)
     {
         return;
     }
@@ -235,7 +235,7 @@ fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
     // qc/data 为入参前置条件；g_initialized 是运行时初始化状态，保留返回码
     ASSERT(qc != NULL);
     ASSERT(data != NULL);
-    if (!g_initialized)
+    if (g_initialized == false)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -340,7 +340,7 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
     qc_build_base();
     qc_expand_links();
 
-    g_initialized = 1U;
+    g_initialized = true;
     return &g_qc;
 }
 

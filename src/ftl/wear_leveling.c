@@ -61,7 +61,7 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
     // 而该 SB 仍可能是「有效 CW 最多」的候选 ⇒ 每轮重选、WL 永久卡死。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (!super_block_has_plane(sb, p))
+        if (super_block_has_plane(sb, p) == false)
         {
             continue;
         }
@@ -130,7 +130,7 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
         const super_block_t *sb    = alc_super_closed_get_at(alloc, i);
         DWORD                sb_ec = 0U;
 
-        if (!wl_candidate_get(alloc, sb, NULL, &sb_ec))
+        if (wl_candidate_get(alloc, sb, NULL, &sb_ec) == false)
         {
             continue;
         }
@@ -171,7 +171,7 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
         alc_super_stats_t    st;
         DWORD                sb_ec = 0U;
 
-        if (!wl_candidate_get(alloc, sb, &st, &sb_ec))
+        if (wl_candidate_get(alloc, sb, &st, &sb_ec) == false)
         {
             continue;
         }
@@ -192,7 +192,7 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
         }
     }
 
-    if (!best.found)
+    if (best.found == false)
     {
         return false;
     }

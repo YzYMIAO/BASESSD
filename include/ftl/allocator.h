@@ -137,16 +137,23 @@ typedef struct
  * 64 × 20B ≈ 1.3 KB，放 alc_t（AXI RAM）。 */
 #define ALC_TRACE_DEPTH (64U)
 
+typedef enum
+{
+    ALC_TRACE_WRITE_OK     = 0, /* 写确认成功 */
+    ALC_TRACE_PROGRAM_FAIL = 1, /* program fail */
+    ALC_TRACE_GC_WRITE     = 2, /* GC 搬移写 */
+} alc_trace_kind_e;
+
 typedef struct
 {
-    DWORD seq;   /* 记录序号（单调） */
-    DWORD lba;   /* host LBA */
-    DWORD pba;   /* 目标 PBA（cw 位保留） */
-    BYTE  plane; /* 以下为 pba 解码，便于日志直接打印 */
-    WORD  block;
-    BYTE  page;
-    BYTE  cw;
-    BYTE  kind; /* 0 = 写确认成功；1 = program fail */
+    DWORD            seq;   /* 记录序号（单调） */
+    DWORD            lba;   /* host LBA */
+    DWORD            pba;   /* 目标 PBA（cw 位保留） */
+    BYTE             plane; /* 以下为 pba 解码，便于日志直接打印 */
+    WORD             block;
+    BYTE             page;
+    BYTE             cw;
+    alc_trace_kind_e kind; /* 写确认成功 / program fail / GC 写 */
 } alc_trace_t;
 
 /* ── Allocator 上下文 ── */
@@ -683,7 +690,7 @@ static inline bool alc_bbt_is_rebuild_required(const alc_t *alloc)
  * @param pba   目标 PBA
  * @param kind  0 = 写确认成功；1 = program fail
  */
-void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, BYTE kind);
+void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, alc_trace_kind_e kind);
 
 /**
  * @brief 打印与 (lba, pba) 相关的最近轨迹（首次 UNC/program-fail 时调用）

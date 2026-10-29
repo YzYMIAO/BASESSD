@@ -127,7 +127,7 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap)
     // cmd 由调用者从 fc_command_alloc() 取且已判空；此处不重复断言。
     // 唯一合法失败是**池空**（desc/buffer）——那才是返回码。
 
-    if (!ftl_cmd_needs_desc_chain(cmd))
+    if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
         cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
         return FTL_OK;
@@ -275,7 +275,7 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
     ASSERT(pba_is_valid(pba[first_plane]));
     ftl_cmd_bind_pair_topo(cmd, pba[first_plane]);
 
-    if (!ftl_cmd_needs_desc_chain(cmd))
+    if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
         cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
         return FTL_OK;
@@ -493,7 +493,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     // 目标终态：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI 调用
     // （那些路径在 superloop 之前，没有别人 drain CQ，必须同步）。
     // 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。
-    ASSERT(!ftl_op_is_in_dispatch());
+    ASSERT(ftl_op_is_in_dispatch() == false);
 
     ftl_sync_waiter_t waiter;
     waiter.cmd_id = ftl_cmd_id(cmd);
@@ -1015,7 +1015,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
     const BYTE nplanes  = ftl_cw_bitmap_plane_count(cw_bitmap);
     const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
 
-    ASSERT((!cache_op) || (nplanes == PLANE_NUM));
+    ASSERT((cache_op == false) || (nplanes == PLANE_NUM));
     (void)cache_op; /* release 下 ASSERT 裁空 */
 
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
@@ -1024,7 +1024,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (!bit_mask_any(cw_bitmap, ftl_cw_plane_mask(p)))
+        if (bit_mask_any(cw_bitmap, ftl_cw_plane_mask(p)) == false)
         {
             continue;
         }

@@ -110,7 +110,7 @@ ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
     {
-        if ((g_op_ctx[i].used != 0U) && (g_op_ctx[i].cmd_id == cmd_id))
+        if ((g_op_ctx[i].used == true) && (g_op_ctx[i].cmd_id == cmd_id))
         {
             LOGW(LOG_TAG_FTL "completion entry cmd=%hu reused — stale ctx overwritten\r\n", cmd_id);
             g_op_ctx[i].ctx = ctx;
@@ -120,9 +120,9 @@ ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx)
 
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
     {
-        if (g_op_ctx[i].used == 0U)
+        if (g_op_ctx[i].used == false)
         {
-            g_op_ctx[i].used   = 1U;
+            g_op_ctx[i].used   = true;
             g_op_ctx[i].cmd_id = cmd_id;
             g_op_ctx[i].ctx    = ctx;
             return FTL_OK;
@@ -137,9 +137,9 @@ void ftl_op_ctx_remove(WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
     {
-        if ((g_op_ctx[i].used != 0U) && (g_op_ctx[i].cmd_id == cmd_id))
+        if ((g_op_ctx[i].used == true) && (g_op_ctx[i].cmd_id == cmd_id))
         {
-            g_op_ctx[i].used = 0U;
+            g_op_ctx[i].used = false;
             return;
         }
     }
@@ -150,11 +150,11 @@ void *ftl_op_ctx_take(WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
     {
-        if ((g_op_ctx[i].used != 0U) && (g_op_ctx[i].cmd_id == cmd_id))
+        if ((g_op_ctx[i].used == true) && (g_op_ctx[i].cmd_id == cmd_id))
         {
             void *ctx = g_op_ctx[i].ctx;
 
-            g_op_ctx[i].used = 0U;
+            g_op_ctx[i].used = false;
             return ctx;
         }
     }
@@ -169,7 +169,7 @@ WORD ftl_op_ctx_count(void)
 
     for (BYTE i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
     {
-        if (g_op_ctx[i].used != 0U)
+        if (g_op_ctx[i].used == true)
         {
             count++;
         }

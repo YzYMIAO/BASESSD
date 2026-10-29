@@ -81,7 +81,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
         }
 
         const bool pba_ok = (st == FTL_OK) && (p != NAND_PBA_INVALID) && pba_is_valid(p);
-        if (!pba_ok)
+        if (pba_ok == false)
         {
             return false;
         }
@@ -90,7 +90,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
         const bool same_plane = (pl < PLANE_NUM) && (pl == ftl_lba_plane(l));
         const bool same_topo  = (pba_to_ch(p) == ftl->topo.ch) && (pba_to_ce(p) == ftl->topo.ce) && (pba_to_lun(p) == ftl->topo.lun);
 
-        if ((!same_plane) || (!same_topo))
+        if ((same_plane == false) || (same_topo == false))
         {
             return false; /* 映射表损坏/跨实例：交给普通读路径报错 */
         }
@@ -100,7 +100,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
             const bool same_page  = pba_same_page(pair_pba[pl], p);
             const bool same_block = (pba_to_block(pair_pba[pl]) == pba_to_block(p));
 
-            if ((!same_page) || (!same_block))
+            if ((same_page == false) || (same_block == false))
             {
                 return false;
             }
@@ -136,7 +136,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
         const DWORD base = req->lba + (j * FTL_LBA_PER_PAIR);
         DWORD       pair_pba[PLANE_NUM];
 
-        if (!cache_read_probe_pair(req->ftl, base, pair_pba, defer))
+        if (cache_read_probe_pair(req->ftl, base, pair_pba, defer) == false)
         {
             break;
         }
@@ -158,7 +158,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
         {
             complete = (pba_to_page(pair_pba[p]) == pba_to_page(pair_pba[0]));
         }
-        if (!complete)
+        if (complete == false)
         {
             break;
         }
@@ -172,7 +172,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
                 // 页号 +1（不能对 `pba_page()` 加 1：那会加到 CW 位），且同一块。
                 contiguous = (pba_to_page(pair_pba[p]) == (pba_to_page(pba[j - 1U][p]) + 1U)) && (pba_to_block(pair_pba[p]) == pba_to_block(pba[j - 1U][p]));
             }
-            if (!contiguous)
+            if (contiguous == false)
             {
                 break;
             }
@@ -258,7 +258,7 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
         pending->buffer             = (BYTE *)req->buffer + (i * FTL_LBA_PER_PAIR * FTL_IU_BYTES);
         pending->new_pba            = NAND_PBA_INVALID;
         pending->new_pba1           = NAND_PBA_INVALID;
-        pending->cache_intermediate = 0U;
+        pending->cache_intermediate = false;
         pend_validate(pending);
     }
 
@@ -297,7 +297,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
     memset(&b, 0, sizeof(b));
     b.n_pairs = n_pairs;
 
-    if (!cache_read_build(&b, req, pba))
+    if (cache_read_build(&b, req, pba) == false)
     {
         req->ftl->cache_read_fallbacks++;
         return FTL_CACHE_READ_AGAIN;
@@ -366,7 +366,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         return defer ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_DECLINED;
     }
 
-    if (!ftl_cache_budget_ok(ftl, n_pairs))
+    if (ftl_cache_budget_ok(ftl, n_pairs) == false)
     {
         ftl->cache_read_fallbacks++;
         return FTL_CACHE_READ_DECLINED;
@@ -492,7 +492,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     const bool room_ok      = (alc_super_open_get_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
     const bool budget_ok    = ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
 
-    if (batch_active || (!enough_lbas) || (!lba_aligned) || (!wbuf_idle) || (!room_ok) || (!budget_ok))
+    if (batch_active || (enough_lbas == false) || (lba_aligned == false) || (wbuf_idle == false) || (room_ok == false) || (budget_ok == false))
     {
         ftl->cache_wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;

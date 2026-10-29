@@ -72,7 +72,7 @@
  */
 static bool md_log_block_is_reclaimable(const md_dir_cache_t *dir, const alc_t *alloc, WORD g)
 {
-    if (!md_log_block_is_idle(dir, g))
+    if (md_log_block_is_idle(dir, g) == false)
     {
         return false;
     }
@@ -192,7 +192,7 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        if (!md_log_block_is_reclaimable(dir, alloc, g))
+        if (md_log_block_is_reclaimable(dir, alloc, g) == false)
         {
             continue;
         }
@@ -202,7 +202,7 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
 
 DWORD md_slot_take(md_dir_cache_t *dir)
 {
-    if ((!dir->cur_block_valid) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
+    if ((dir->cur_block_valid == false) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
         return NAND_PBA_INVALID;
     }
@@ -254,12 +254,12 @@ static bool md_abort_log_is_due(DWORD *out_suppressed)
 
     bool due = (s_abort_log_n >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (s_abort_log_ms == 0U) || ((now_ms - s_abort_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         s_abort_log_n++;
         return false;
@@ -557,7 +557,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
 
     j->compact_wanted = false;
 
-    if (!dir->cur_block_valid)
+    if (dir->cur_block_valid == false)
     {
         return MD_COMPACT_NO_CURRENT; /* 无当前写块：无处可搬 */
     }
@@ -622,19 +622,19 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
         const DWORD primary = md_entry_find(dir, METADATA_TYPE_L2P_REGION, rid);
         const DWORD backup  = md_backup_find(dir, rid);
         DWORD       old     = NAND_PBA_INVALID;
-        BYTE        copy    = 0U;
+        md_copy_e   copy    = MD_COPY_PRIMARY;
 
         // 副本感知：victim 上可能只有主、只有备、或两份都在。
         // 两份都在时先搬主，下一次重扫同一 rid 再搬备（游标不前进）。
         if ((primary != NAND_PBA_INVALID) && (ftl_pba_gblock(primary) == j->victim))
         {
             old  = primary;
-            copy = 0U;
+            copy = MD_COPY_PRIMARY;
         }
         else if ((backup != NAND_PBA_INVALID) && (ftl_pba_gblock(backup) == j->victim))
         {
             old  = backup;
-            copy = 1U;
+            copy = MD_COPY_BACKUP;
         }
 
         if (old == NAND_PBA_INVALID)
@@ -806,11 +806,11 @@ static void md_handle_step(md_dir_cache_t *dir)
                 }
                 // free 水位是压缩的**主判据**：空闲日志块低于水位就压，不等 live
                 // 涨到接近区上限（那时压缩已无目标块）。每轮扫 64 个块，开销可忽略。
-                if (!j->compact_wanted && (md_log_area_free_count(alloc) <= L2P_LOG_FREE_WATERMARK))
+                if ((j->compact_wanted == false) && (md_log_area_free_count(alloc) <= L2P_LOG_FREE_WATERMARK))
                 {
                     j->compact_wanted = true;
                 }
-                if (!j->compact_wanted)
+                if (j->compact_wanted == false)
                 {
                     return; /* 无事可做 */
                 }
@@ -850,7 +850,7 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                 WORD g = 0U;
 
-                if (!md_reclaim_take(dir, &g))
+                if (md_reclaim_take(dir, &g) == false)
                 {
                     // 计数非 0 但位图全空：计数与位图不一致（不该发生）。
                     // 清计数回 IDLE，避免每轮空转。
@@ -865,7 +865,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                 // ② 成了当前写块 ⇒ 正在被追加；
                 // ③ 不再带 LOG ⇒ 已被别处归还/复用。
                 // 任一命中即放弃本次（清位），**绝不擦活块**。
-                if (!md_log_block_is_reclaimable(dir, alloc, g))
+                if (md_log_block_is_reclaimable(dir, alloc, g) == false)
                 {
                     md_reclaim_clear(dir, g);
                     j->phase = MD_JOB_IDLE;
@@ -973,7 +973,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不擦 victim。
                     md_anchor_commit(dir, &j->anchor_ring, j->anchor_idx, j->anchor_ok);
 
-                    if (!j->anchor_ok)
+                    if (j->anchor_ok == false)
                     {
                         LOGW(LOG_TAG_META "anchor write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->anchor_idx, j->anchor_seq);
                         md_handle_abort(dir);
@@ -982,7 +982,7 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                     // 只有 Anchor 确实覆盖了当前 Directory 时才允许登记新的回收候选：
                     // 否则 on-media Anchor 仍引用「看起来已死」的块，擦了就是掉电丢映射。
-                    if (!dir->dirty)
+                    if (dir->dirty == false)
                     {
                         md_reclaim_mark_all(dir, alloc);
                     }
@@ -1025,7 +1025,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                     j->phase = MD_JOB_DONE;
                     break;
                 }
-                if (!md_log_block_is_reclaimable(dir, alloc, v))
+                if (md_log_block_is_reclaimable(dir, alloc, v) == false)
                 {
                     // 扫描期间又有 region 落回 victim（在飞的写回完成）⇒ 不能擦，留给下次。
                     LOGD(LOG_TAG_META "compact: victim %hu 仍有 %hu 活 region — 不擦\r\n", v, dir->l2p_live[v]);
@@ -1199,7 +1199,7 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
  */
 static void md_cp_read_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
-    if (!failed)
+    if (failed == false)
     {
         (void)ftl_cmd_read_data(cmd, j->cp_buf, L2P_REGION_SIZE);
     }
@@ -1234,7 +1234,7 @@ static void md_cp_write_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command
         return;
     }
 
-    if (j->cur_copy == 0U)
+    if (j->cur_copy == MD_COPY_PRIMARY)
     {
         md_commit_region(dir, j->cur_region, MD_COMMIT_PRIMARY, j->slot, NAND_PBA_INVALID);
     }

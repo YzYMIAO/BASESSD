@@ -301,9 +301,9 @@ extern "C"
      * @param command    命令指针。
      * @param command_id ID 出参；返回 1 时写入。
      *
-     * @return 1 = command 在命令池内；0 = 不在池内。
+     * @return true = command 在命令池内；false = 不在池内。
      */
-    BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id);
+    bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id);
 
     /**
      * @brief ID→指针转换。前置条件：descriptor_id 为命令 desc 链中的池内 ID。

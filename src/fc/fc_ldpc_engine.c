@@ -32,8 +32,8 @@ static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
 // 惰性初始化的单次日志标志：成功/失败各只打印一次，避免每次编解码刷屏。
-static BYTE s_bch_init_failed;
-static BYTE s_bch_init_logged;
+static bool s_bch_init_failed = false;
+static bool s_bch_init_logged = false;
 
 /**
  * @brief 惰性初始化 BCH 引擎（m=13, t=4）
@@ -51,15 +51,15 @@ static BYTE fc_ecc_init_bch(void)
         g_bch = fc_bch_init(13, 4, 0U, 0U);
         if (g_bch == NULL)
         {
-            if (s_bch_init_failed == 0U)
+            if (s_bch_init_failed == false)
             {
-                s_bch_init_failed = 1U;
+                s_bch_init_failed = true;
                 LOGE("[FC  ] BCH init FAILED: ECC is disabled (check static storage/size)\r\n");
             }
         }
-        else if (s_bch_init_logged == 0U)
+        else if (s_bch_init_logged == false)
         {
-            s_bch_init_logged = 1U;
+            s_bch_init_logged = true;
             LOGI("[FC  ] BCH ready: static tables, no heap\r\n");
         }
     }
@@ -185,7 +185,7 @@ fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data
         // data_length 恒 ≥ 8（520），parity 尾区足够
         ASSERT(data_length >= 8U);
 
-        if (!fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc, &nerr))
+        if (fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc, &nerr) == false)
         {
             return FC_STATUS_IO_ERROR;
         }

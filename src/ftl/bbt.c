@@ -176,7 +176,7 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
         {
             continue;
         }
-        if ((!bbt_header_valid(&hdr)) || (hdr.sequence == 0U))
+        if ((bbt_header_valid(&hdr) == false) || (hdr.sequence == 0U))
         {
             continue; /* sequence 从 1 起；0 = 未写 */
         }
@@ -211,7 +211,7 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
     {
         for (WORD block = 0U; block < FTL_METADATA_AREA_END; block++)
         {
-            if (!md_block_is_metadata(NULL, plane, block))
+            if (md_block_is_metadata(NULL, plane, block) == false)
             {
                 continue; /* 该 plane 的这个块号不是固定元数据（可能是用户数据） */
             }
@@ -282,13 +282,13 @@ void bbt_init(alc_t *alloc)
     // 前置条件（判据 2 / §二十六「子模块公开入口」）：唯一调用者 ftl.c 传 &ftl->alloc。
 
     alloc->bbt.sequence           = 0U;
-    alloc->bbt.dirty              = 0U;
+    alloc->bbt.dirty              = false;
     alloc->bbt.dirty_gen          = 0U;
     alloc->bbt.format_in_progress = false;
     alloc->bbt.rebuild_required   = false;
     // 清异步 job（alc_init 已零化，此处再钉一次）
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
-    alloc->bbt.handle.waiting     = 0U;
+    alloc->bbt.handle.waiting     = false;
 
     // 尝试从 NAND 加载已存在的 BBT
     {
@@ -367,7 +367,7 @@ int bbt_factory_scan(alc_t *alloc)
 {
     WORD bad_idx = 0U;
 
-    alloc->bbt.dirty = 0U;
+    alloc->bbt.dirty = false;
 
     for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
@@ -396,7 +396,7 @@ int bbt_factory_scan(alc_t *alloc)
 
     // 先按扫描结果建好候选池（BBT 本身可能落在 shared spare），再写 BBT record；
     // 否则 bbt_save 会沿用自举扫描列表，可能选中刚扫出的坏块。
-    if (!md_pool_build_all(alloc))
+    if (md_pool_build_all(alloc) == false)
     {
         LOGE(LOG_TAG_BBT "factory scan: metadata candidate pool build failed — BBT not saved\r\n");
         return bad_idx;
@@ -528,7 +528,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
             }
 
             // 擦不掉 ⇒ 坏块（已是坏块的不重复计数）
-            if (!ftl_block_is_bad(&alloc->blocks[gblock]))
+            if (ftl_block_is_bad(&alloc->blocks[gblock]) == false)
             {
                 ftl_block_set_bad(&alloc->blocks[gblock]); /* 终态：互斥，无需清位 */
                 ftl_block_clear_valid(&alloc->blocks[gblock]);
@@ -618,7 +618,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
             LOGE(LOG_TAG_BBT "metadata log block %hu lost — rebuild required\r\n", block);
         }
     }
-    else if (!alloc->bbt.format_in_progress && (bbt_spare_refill(alloc, plane) != FTL_OK))
+    else if ((alloc->bbt.format_in_progress == false) && (bbt_spare_refill(alloc, plane) != FTL_OK))
     {
         if (alc_free_refill_from_op(alloc, plane) == FTL_GBLOCK_INVALID)
         {
@@ -638,7 +638,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
 // 从而覆盖“写命令在飞期间又标坏了一块”的丢更新窗口。
 void bbt_dirty_note(alc_t *alloc)
 {
-    alloc->bbt.dirty = 1U;
+    alloc->bbt.dirty = true;
     alloc->bbt.dirty_gen++;
 }
 
@@ -678,7 +678,7 @@ ftl_status_e bbt_save(alc_t *alloc)
 {
     // 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。
 
-    if (alloc->bbt.dirty == 0U)
+    if (alloc->bbt.dirty == false)
     {
         return FTL_OK;
     }
@@ -690,7 +690,7 @@ ftl_status_e bbt_save(alc_t *alloc)
     // ⚠ sequence 只取 max：候选池可能因 BAD/体检而**缩小**，被移出池的块上仍可能
     // 留着更高 sequence 的旧 record（bootstrap 扫描仍会读到它）。若这里把 sequence
     // 降到新池内的最大值，下一次开机可能让旧 record 胜出、读到旧坏块图。
-    if (alloc->bbt.cursor_valid == 0U)
+    if (alloc->bbt.cursor_valid == false)
     {
         md_ring_locate_out_t loc;
 
@@ -703,7 +703,7 @@ ftl_status_e bbt_save(alc_t *alloc)
         {
             alloc->bbt.sequence = loc.sequence;
         }
-        alloc->bbt.cursor_valid = 1U;
+        alloc->bbt.cursor_valid = true;
     }
 
     alloc->bbt.sequence++;
@@ -728,7 +728,7 @@ ftl_status_e bbt_save(alc_t *alloc)
 
     alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % md_ring_total_records(&ctx.ring));
 
-    alloc->bbt.dirty = 0U;
+    alloc->bbt.dirty = false;
     return FTL_OK;
 }
 
@@ -742,7 +742,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
     // 复位本实例池状态：无有效 record 时保持 0/无效（后续 bbt_save 从池首开始）
     alloc->bbt.sequence           = 0U;
     alloc->bbt.write_idx          = 0U;
-    alloc->bbt.cursor_valid       = 0U;
+    alloc->bbt.cursor_valid       = false;
     alloc->bbt.format_in_progress = false;
 
     bbt_probe_ctx_t ctx;
@@ -763,7 +763,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
         return FTL_ERROR; /* 池内无有效 record */
     }
 
-    alloc->bbt.cursor_valid = 1U;
+    alloc->bbt.cursor_valid = true;
 
     // 重读胜者（locate 只返回序号，Header 本体要再读一次）。
     // 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。
@@ -778,14 +778,14 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
         {
             continue;
         }
-        if ((!bbt_header_valid(&best)) || (best.sequence != alloc->bbt.sequence))
+        if ((bbt_header_valid(&best) == false) || (best.sequence != alloc->bbt.sequence))
         {
             continue;
         }
         found = true;
         break;
     }
-    if (!found)
+    if (found == false)
     {
         return FTL_ERROR;
     }
@@ -843,7 +843,7 @@ static ftl_status_e bbt_write_submit(alc_t *alloc)
     }
 
     alloc->bbt.handle.phase   = BBT_JOB_WRITE;
-    alloc->bbt.handle.waiting = 1U;
+    alloc->bbt.handle.waiting = true;
     return FTL_OK;
 }
 
@@ -860,11 +860,11 @@ static ftl_status_e bbt_write_submit(alc_t *alloc)
 static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
 {
     out->base.critical  = false; /* BBT 持久化属预算任务，不占 must-run 正确性关键集 */
-    out->base.wants_run = (alloc->bbt.handle.phase != BBT_JOB_IDLE) || (alloc->bbt.dirty != 0U);
+    out->base.wants_run = (alloc->bbt.handle.phase != BBT_JOB_IDLE) || (alloc->bbt.dirty == true);
     out->base.progress  = alloc->bbt.sequence;
     out->base.next_ms   = 0U; /* dirty 驱动，无周期 */
 
-    if (alloc->bbt.handle.waiting != 0U)
+    if (alloc->bbt.handle.waiting == true)
     {
         out->base.state = FTL_MODULE_WAITING;
     }
@@ -872,7 +872,7 @@ static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
     {
         out->base.state = FTL_MODULE_RUNNING;
     }
-    else if (alloc->bbt.dirty != 0U)
+    else if (alloc->bbt.dirty == true)
     {
         out->base.state = FTL_MODULE_RUNNING;
     }
@@ -886,7 +886,7 @@ static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
     out->base.error = (int32_t)FTL_OK;
 
     out->phase     = alloc->bbt.handle.phase;
-    out->dirty     = (alloc->bbt.dirty != 0U);
+    out->dirty     = (alloc->bbt.dirty == true);
     out->dirty_gen = alloc->bbt.dirty_gen;
     out->sequence  = alloc->bbt.sequence;
     out->write_idx = alloc->bbt.write_idx;
@@ -921,7 +921,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
             LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, ftl_job_age_ms(&alloc->bbt.handle.start_ms));
         }
 
-        if (alloc->bbt.handle.waiting != 0U)
+        if (alloc->bbt.handle.waiting == true)
         {
             break; /* ① 命令在飞 */
         }
@@ -935,7 +935,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
             break; /* ③ ERASE 在飞（waiting 必为 1，此处只是防御） */
         }
 
-        if (alloc->bbt.dirty == 0U)
+        if (alloc->bbt.dirty == false)
         {
             break; /* ④ 无变更 */
         }
@@ -944,7 +944,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         bbt_ctx_init(alloc, &ctx);
 
         // 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽
-        if (alloc->bbt.cursor_valid == 0U)
+        if (alloc->bbt.cursor_valid == false)
         {
             md_ring_locate_out_t loc;
 
@@ -955,7 +955,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
             }
             alloc->bbt.sequence     = loc.sequence;
             alloc->bbt.write_idx    = loc.write_idx;
-            alloc->bbt.cursor_valid = 1U;
+            alloc->bbt.cursor_valid = true;
         }
 
         alloc->bbt.sequence++;
@@ -984,13 +984,13 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
                 break;
             }
             alloc->bbt.handle.phase   = BBT_JOB_ERASE;
-            alloc->bbt.handle.waiting = 1U;
+            alloc->bbt.handle.waiting = true;
             break;
         }
 
         // 不必换块 ⇒ 直接起写。先落 phase，提交被背压拒就停在 WRITE/waiting=0 等续跑
         alloc->bbt.handle.phase   = BBT_JOB_WRITE;
-        alloc->bbt.handle.waiting = 0U;
+        alloc->bbt.handle.waiting = false;
         (void)bbt_write_submit(alloc);
     } while (0);
 
@@ -1014,7 +1014,7 @@ static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     {
         LOGE(LOG_TAG_BBT "ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n", completion->status);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
-        alloc->bbt.handle.waiting = 0U;
+        alloc->bbt.handle.waiting = false;
         (void)fc_command_release(cmd);
         return;
     }
@@ -1022,7 +1022,7 @@ static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     // 擦成功 ⇒ 起写。先落 phase，提交被背压拒就停在 WRITE/waiting=0 等续跑
     // （**不再回 IDLE**——回 IDLE 会让下轮 kick 重走 prepare_addr 再擦一次同一块）。
     alloc->bbt.handle.phase   = BBT_JOB_WRITE;
-    alloc->bbt.handle.waiting = 0U;
+    alloc->bbt.handle.waiting = false;
     (void)bbt_write_submit(alloc);
     (void)fc_command_release(cmd);
 }
@@ -1050,7 +1050,7 @@ static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     }
     else if (alloc->bbt.dirty_gen == alloc->bbt.handle.dirty_gen)
     {
-        alloc->bbt.dirty = 0U;
+        alloc->bbt.dirty = false;
     }
     else
     {
@@ -1058,7 +1058,7 @@ static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     }
 
     alloc->bbt.handle.phase   = BBT_JOB_IDLE;
-    alloc->bbt.handle.waiting = 0U;
+    alloc->bbt.handle.waiting = false;
     (void)fc_command_release(cmd);
 }
 
@@ -1073,7 +1073,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
     // 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。
-    if (alloc->bbt.handle.waiting == 0U)
+    if (alloc->bbt.handle.waiting == false)
     {
         LOGE(LOG_TAG_BBT "orphan completion phase=%d — ignored\r\n", alloc->bbt.handle.phase);
         (void)fc_command_release(cmd);
@@ -1093,7 +1093,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         // 不该发生：一条命令对应一个 job，phase 必为 ERASE / WRITE。
         LOGE(LOG_TAG_BBT "unexpected completion phase=%d\r\n", alloc->bbt.handle.phase);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
-        alloc->bbt.handle.waiting = 0U;
+        alloc->bbt.handle.waiting = false;
         (void)fc_command_release(cmd);
     }
 }
@@ -1117,7 +1117,7 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane)
     }
 
     WORD gblock;
-    if (!alc_spare_pop(alloc, plane, &gblock))
+    if (alc_spare_pop(alloc, plane, &gblock) == false)
     {
         return FTL_ERROR; /* 该 plane Spare Pool 耗尽 */
     }

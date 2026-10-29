@@ -112,12 +112,12 @@ static bool ftl_log_throttle_due(ftl_log_throttle_t *t, DWORD *out_suppressed)
 
     bool due = (t->suppressed >= 64U);
 
-    if ((!due) && (now_ms != 0U))
+    if ((due == false) && (now_ms != 0U))
     {
         due = (t->ms == 0U) || ((now_ms - t->ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
     }
 
-    if (!due)
+    if (due == false)
     {
         t->suppressed++;
         return false;
@@ -201,7 +201,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
 
     const DWORD mask = pending->cw_bitmap & ((1U << FTL_LBA_PER_PAIR) - 1U);
 
-    if ((mask != 0U) && (!l2p_is_ready(ftl->cache, pending->lba)))
+    if ((mask != 0U) && (l2p_is_ready(ftl->cache, pending->lba) == false))
     {
         return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
     }
@@ -212,7 +212,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
     // 页满分支。
     const BYTE n_entries = ftl_cw_bitmap_popcount(mask);
 
-    if ((n_entries != 0U) && (!jrn_reserve(ftl->journal, n_entries)))
+    if ((n_entries != 0U) && (jrn_reserve(ftl->journal, n_entries) == false))
     {
         return FTL_AGAIN;
     }
@@ -264,7 +264,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
         const WORD  newg  = ftl_pba_gblock(new_p);
 
         // 飞行记录器：记录成功确认的 host 写（kind=0）。
-        alc_trace_record(&ftl->alloc, l, new_p, 0U);
+        alc_trace_record(&ftl->alloc, l, new_p, ALC_TRACE_WRITE_OK);
 
         ftl_block_add_valid(&ftl->alloc.blocks[newg]);
 
@@ -508,13 +508,13 @@ static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc
 
     if (((bad_plane_mask & 0x1U) != 0U) && (pending->new_pba != NAND_PBA_INVALID))
     {
-        alc_trace_record(&ftl->alloc, pending->lba, pending->new_pba, 1U);
+        alc_trace_record(&ftl->alloc, pending->lba, pending->new_pba, ALC_TRACE_PROGRAM_FAIL);
         alc_trace_dump(&ftl->alloc, pending->lba, pending->new_pba);
         (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(pending->new_pba));
     }
     if (((bad_plane_mask & 0x2U) != 0U) && (pending->new_pba1 != NAND_PBA_INVALID))
     {
-        alc_trace_record(&ftl->alloc, pending->lba, pending->new_pba1, 1U);
+        alc_trace_record(&ftl->alloc, pending->lba, pending->new_pba1, ALC_TRACE_PROGRAM_FAIL);
         alc_trace_dump(&ftl->alloc, pending->lba, pending->new_pba1);
         (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(pending->new_pba1));
     }
@@ -715,7 +715,7 @@ static void ftl_cache_wb_clear(ftl_ctx_t *ftl)
  */
 static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *completion)
 {
-    if (!ftl->cache_wb.abort)
+    if (ftl->cache_wb.abort == false)
     {
         char  stbuf[48];
         DWORD suppressed = 0U;
@@ -838,12 +838,12 @@ static void ftl_cache_wb_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const 
         return;
     }
 
-    const bool ok = !fc_cw_status_has_error(completion->status);
+    const bool ok = (fc_cw_status_has_error(completion->status) == false);
 
     ftl->cache_wb.done_mask |= (BYTE)(1U << j);
     ftl->cache_wb.outstanding--;
 
-    if (!ok)
+    if (ok == false)
     {
         ftl_cache_wb_fail(ftl, completion);
         return;
@@ -916,9 +916,9 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
             return;
         }
 
-        if (!fc_cw_status_has_error(completion->status))
+        if (fc_cw_status_has_error(completion->status) == false)
         {
-            if (!is_read)
+            if (is_read == false)
             {
                 // page0 异步写屏障：只记**本命令实际覆盖的 plane**。PAGE0 补全写
                 // 覆盖两 plane（缺失 plane 写零），两个 page0 都已编程。
@@ -945,7 +945,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
             {
                 sub_status = ftl_host_io_read_ok(ftl, cmd, pending, cmd_id);
             }
-            else if (pending->cache_intermediate == 0U)
+            else if (pending->cache_intermediate == false)
             {
                 // cache_intermediate 页跳过 L2P/Journal 更新，等最终 10h 确认。
                 if (ftl_host_io_write_ok(ftl, pending))
@@ -1132,7 +1132,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     // 而 BBT 自身靠 record 的 magic/sequence 在「名义块 + shared spare」上自举。
     bbt_init(&ftl->alloc);
 
-    if (!md_pool_build_all(&ftl->alloc))
+    if (md_pool_build_all(&ftl->alloc) == false)
     {
         LOGE("[FTL ] metadata candidate pool build failed — refuse boot\r\n");
         return FTL_ERROR;
@@ -1328,19 +1328,19 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 {
     const jrn_handle_t *j = &ftl->journal->handle;
 
-    ASSERT((j->phase == JRN_IDLE) && (j->current_block < JOURNAL_BLOCK_COUNT) && (j->current_page < PAGES_PER_BLOCK) && (j->current_entry == 0U) && (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == 0U) && (j->checkpoint_needed == 0U) && (j->emergency == 0U) && (j->write_fail_count == 0U) && (j->write_fail_pending == 0U) && (j->pre_erased_block == JRN_BLOCK_NONE) && (j->bad_mask == 0U) && (j->erase_fail_count == 0U) && (j->ring_full == 0U));
+    ASSERT((j->phase == JRN_IDLE) && (j->current_block < JOURNAL_BLOCK_COUNT) && (j->current_page < PAGES_PER_BLOCK) && (j->current_entry == 0U) && (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == false) && (j->checkpoint_needed == false) && (j->emergency == false) && (j->write_fail_count == 0U) && (j->write_fail_pending == false) && (j->pre_erased_block == JRN_BLOCK_NONE) && (j->bad_mask == 0U) && (j->erase_fail_count == 0U) && (j->ring_full == false));
 
     const cp_handle_t *cp = ftl->cp_handle;
 
-    ASSERT((cp->active == 0U) && (cp->waiting == 0U) && (cp->failed == 0U) && (cp->phase == CP_IDLE) && (cp->cp_state.advance_next == 0U) && (cp->cp_state.cursor_valid == 0U));
+    ASSERT((cp->active == false) && (cp->waiting == false) && (cp->failed == false) && (cp->phase == CP_IDLE) && (cp->cp_state.advance_next == false) && (cp->cp_state.cursor_valid == false));
 
-    ASSERT((!md_is_busy(ftl->metadata_dir)) && (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) && ((!ftl->metadata_dir->cur_block_valid) || ((ftl->metadata_dir->cur_metadata_block < FTL_BLOCK_TOTAL) && (ftl->metadata_dir->cur_metadata_page <= PAGES_PER_BLOCK))));
+    ASSERT((md_is_busy(ftl->metadata_dir) == false) && (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) && ((ftl->metadata_dir->cur_block_valid == false) || ((ftl->metadata_dir->cur_metadata_block < FTL_BLOCK_TOTAL) && (ftl->metadata_dir->cur_metadata_page <= PAGES_PER_BLOCK))));
 
-    ASSERT((!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) && (ftl->mig_handle->phase == MIG_IDLE) && mig_fail_state_is_clean(ftl->mig_handle));
+    ASSERT((ftl->mig_handle->active == false) && (ftl->mig_handle->waiting == false) && (ftl->mig_handle->phase == MIG_IDLE) && mig_fail_state_is_clean(ftl->mig_handle));
 
-    ASSERT((ftl->read_recovery_handle.stage == RR_STAGE_IDLE) && (ftl->read_recovery_handle.waiting == 0U) && (ftl->read_recovery_handle.has_owner == 0U));
+    ASSERT((ftl->read_recovery_handle.stage == RR_STAGE_IDLE) && (ftl->read_recovery_handle.waiting == false) && (ftl->read_recovery_handle.has_owner == false));
 
-    ASSERT((!ftl->wbuf->open) && (ftl->wbuf->occupied == 0U) && (ftl->wbuf->error == FTL_OK));
+    ASSERT((ftl->wbuf->open == false) && (ftl->wbuf->occupied == 0U) && (ftl->wbuf->error == FTL_OK));
 }
 
 /**
@@ -1350,7 +1350,7 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
  */
 static void contract_check_boot_zero(const ftl_ctx_t *ftl)
 {
-    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) && (ftl->l2p_defer == 0U));
+    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == false) && (ftl->l2p_defer == false));
 }
 
 #endif /* !NDEBUG */
@@ -1420,7 +1420,7 @@ void ftl_service(ftl_ctx_t *ftl)
     // 只遍历**本实例**的组（每实例一份 groups 表）。
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
-        if (ftl->pending.groups[i].used != 0U)
+        if (ftl->pending.groups[i].used == true)
         {
             ftl_drain_group(ftl, i);
         }
@@ -1497,7 +1497,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
 
     // 写：攒进页打包缓冲（窗口满 / 切换窗口时内部触发编程），本函数对写**到此为止**。
     // 数据在 wb_handle(FLUSH) 里一次编程——分配/建链/提交/确认全在那里。
-    if (!pend_op_is_read(g->op))
+    if (pend_op_is_read(g->op) == false)
     {
         // 回填窗口夹住后的实际消费数——调用者（ftl_drain_group）据此推进 g->next。
         // ⚠ 不可漏：内部 n 可能被窗口边界夹小（internal_lba 未 8 对齐时 avail<8），
@@ -1556,8 +1556,8 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
             // FTL_ERROR 仅越界，此时 p 保持 INVALID。
             if (l2p_read(ftl->cache, l, &p) == FTL_AGAIN)
             {
-                ftl->l2p_defer = 1U; /* 告知 drain：这是加载在飞，不是卡死 */
-                break;               /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
+                ftl->l2p_defer = true; /* 告知 drain：这是加载在飞，不是卡死 */
+                break;                 /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
             }
 
             if (p == NAND_PBA_INVALID)
@@ -1573,7 +1573,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
             // 读**别的物理页**的 desc 链——静默读到错误数据。
             // 这是**数据**损坏而非编程错误 ⇒ 报错返回（不 ASSERT），由 drain 把本组标
             // IO_ERROR 交给 host，不 brick 设备。
-            if (!pba_is_valid(p))
+            if (pba_is_valid(p) == false)
             {
                 LOGE(LOG_TAG_FTL "rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n", l, p);
                 return FTL_ERROR;
@@ -1593,7 +1593,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
                 return FTL_ERROR;
             }
 
-            if ((pba[pl] != NAND_PBA_INVALID) && (!pba_same_page(pba[pl], p)))
+            if ((pba[pl] != NAND_PBA_INVALID) && (pba_same_page(pba[pl], p) == false))
             {
                 break; /* 同 plane 跨页：本子操作到此为止，余下交给下一轮 */
             }
@@ -1608,7 +1608,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
         {
             // 首 LBA 未就绪（region 在加载）⇒ 本轮无进展，返背压等加载完成。
             // ⚠ 必须**先**判这一条：把"还不知道"当成"未映射"会给 host 填一页零。
-            if (ftl->l2p_defer != 0U)
+            if (ftl->l2p_defer == true)
             {
                 return FTL_AGAIN;
             }
@@ -1698,7 +1698,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
     pending->buffer             = buffer;
     pending->new_pba            = NAND_PBA_INVALID;
     pending->new_pba1           = NAND_PBA_INVALID;
-    pending->cache_intermediate = 0U;
+    pending->cache_intermediate = false;
     pend_validate(pending);
 
     *n_cw = n; /* 回填实际消费的 LBA 数（调用者据此推进） */
@@ -1736,7 +1736,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 {
     pend_group_t *g = &ftl->pending.groups[gi];
 
-    while ((g->used != 0U) && (g->next < g->total))
+    while ((g->used == true) && (g->next < g->total))
     {
         const DWORD off    = g->next; /* 已下发到的 LBA 偏移（g->next 以 LBA 计，非子操作序号） */
         const DWORD remain = g->total - off;
@@ -1746,7 +1746,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         // ftl_issue_subop 回填——读路径按 L2P 分组收缩，写路径按窗口边界收缩。
         BYTE n_cw          = (remain >= FTL_LBA_PER_PAIR) ? FTL_LBA_PER_PAIR : remain;
 
-        ftl->l2p_defer = 0U; /* 每次下发前清零：本轮的背压原因由本次下发重新判定 */
+        ftl->l2p_defer = false; /* 每次下发前清零：本轮的背压原因由本次下发重新判定 */
 
         ftl_status_e st         = FTL_OK;
         bool         use_normal = true;
@@ -1825,9 +1825,9 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
             // Free Pool 空时正是靠它补池。一次回收要数百 ms，8 轮预算远不够，
             // 计进来会把正常等待判成 IO_ERROR（RISK-GC-09）。
             // 真卡死（命令丢失 / 搬移超时不退）由各自 deadline 与 NAND 超时兜底。
-            const bool bg_progress = (ftl->l2p_defer != 0U) || ftl->mig_handle->active;
+            const bool bg_progress = (ftl->l2p_defer == true) || ftl->mig_handle->active;
 
-            if (!bg_progress)
+            if (bg_progress == false)
             {
                 if (++g->stalls > FTL_DRAIN_STALL_MAX)
                 {
@@ -1932,7 +1932,7 @@ static void ftl_seq_note_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
     const bool  cross_region = (last_region > first_region);
     const bool  near_end     = (used + FTL_SEQ_PREFETCH_AHEAD_LBAS) >= L2P_ENTRIES_PER_REGION;
 
-    if ((!cross_region) && (!near_end))
+    if ((cross_region == false) && (near_end == false))
     {
         return;
     }
@@ -1946,7 +1946,7 @@ static void ftl_seq_note_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 
     const QWORD target_lba = (QWORD)target * L2P_ENTRIES_PER_REGION;
 
-    if ((target_lba >= FTL_LBA_MAX) || (!lba_routes_to((DWORD)target_lba, ftl->topo)))
+    if ((target_lba >= FTL_LBA_MAX) || (lba_routes_to((DWORD)target_lba, ftl->topo) == false))
     {
         return; /* 只预取本实例会访问、且主机可见的 region */
     }
@@ -1963,7 +1963,7 @@ static void ftl_seq_note_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
  */
 static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
 {
-    if ((generation != ftl->seq_generation) || (!ftl->seq_prefetch_valid))
+    if ((generation != ftl->seq_generation) || (ftl->seq_prefetch_valid == false))
     {
         return;
     }
@@ -2026,7 +2026,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     // 下发可能当场完成整组，届时通知就要读它们。
     BYTE gi = 0U;
 
-    if (!pend_group_alloc(&ftl->pending, &gi))
+    if (pend_group_alloc(&ftl->pending, &gi) == false)
     {
         LOGE(LOG_TAG_FTL "%s: no free group slot\r\n", label);
         return FTL_ERROR;
@@ -2152,7 +2152,7 @@ void ftl_flush_begin(ftl_ctx_t *ftl)
 
 bool ftl_flush_step(ftl_ctx_t *ftl)
 {
-    if (!ftl->flush_active)
+    if (ftl->flush_active == false)
     {
         return true; /* 没有在飞的 flush：对调用者而言就是"已完成" */
     }
@@ -2182,7 +2182,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     const bool cache_wb_pending = pend_find_op(&ftl->pending, PENDING_OP_WRITE_CACHE, NULL);
     const bool wb_done          = (wb_status.state == WBUF_STATE_IDLE) && (wb_status.occupied == 0U);
     const bool l2p_done         = l2p_flush_owner_idle(ftl->cache, dim);
-    const bool jrn_done         = jrn_is_idle(ftl->journal) && !jrn_has_pending_entries(ftl->journal);
+    const bool jrn_done         = jrn_is_idle(ftl->journal) && (jrn_has_pending_entries(ftl->journal) == false);
     const bool jrn_fail         = jrn_has_write_failure(ftl->journal);
     const bool wb_fail          = (wb_status.state == WBUF_STATE_FAILED);
     const bool fail             = jrn_fail || wb_fail;
@@ -2191,7 +2191,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     const DWORD flush_ms = ftl_job_now_ms() - ftl->flush_start_ms;
     const bool  timeout  = (ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_TIMEOUT_MS);
 
-    if (!((wb_done && l2p_done && jrn_done && !confirm_pending && !cache_wb_pending && !ftl->cache_wb.active) || fail || timeout))
+    if (((wb_done && l2p_done && jrn_done && (confirm_pending == false) && (cache_wb_pending == false) && (ftl->cache_wb.active == false)) || fail || timeout) == false)
     {
         return false;
     }
@@ -2223,7 +2223,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     // 频繁 fsync，逐次打印会刷屏。
     const DWORD now_log = ftl_job_now_ms();
 
-    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && !timeout && ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
+    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
     {
         s_flush_log_ms = now_log;
         LOGW(LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
@@ -2312,7 +2312,7 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
 {
     ASSERT(ftl != NULL);
 
-    if (!ftl->trim_active)
+    if (ftl->trim_active == false)
     {
         return FTL_OK;
     }
@@ -2341,11 +2341,11 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
             continue;
         }
 
-        if (!l2p_is_ready(ftl->cache, l))
+        if (l2p_is_ready(ftl->cache, l) == false)
         {
             return ftl_trim_defer(ftl, processed); /* 已起异步加载：游标不动 */
         }
-        if (!jrn_reserve(ftl->journal, 1U))
+        if (jrn_reserve(ftl->journal, 1U) == false)
         {
             return ftl_trim_defer(ftl, processed); /* 已起异步刷页：游标不动 */
         }

@@ -52,10 +52,10 @@ struct ftl_context;
  *
  * 只留 command_id → ctx：命令该跑哪个完成服务函数由命令自己携带
  * （fc_command_t.op_tag → g_op_callbacks[]），旁表不存 handler。
- * 8 B/项（2 B 位域 + 2 B 补齐 + 4 B 指针，Cortex-M 指针 4 B）。 */
+ * 8 B/项（3 B 位域 + 1 B 补齐 + 4 B 指针，Cortex-M 指针 4 B）。 */
 typedef struct
 {
-    WORD  used   : 1;  /* 1=槽位占用 */
+    bool  used   : 1;  /* true = 槽位占用 */
     WORD  cmd_id : 15; /* FC command_id */
     void *ctx;         /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
 } ftl_op_ctx_entry_t;
