@@ -239,6 +239,7 @@ void md_handle_reset(md_dir_cache_t *dir)
 // 中止日志限流：真异常（读页失败 / Anchor 写坏 / 账本分叉）会每轮 GC 重复，
 // 逐次 WRN 会刷屏；5 s 一行 + 被抑制条数（时钟缺失时 64 次一行）。
 static DWORD s_abort_log_ms;
+static DWORD s_stall_log_ms; /* 提交 deadline 触发的 abort 日志限流时间戳 */
 static DWORD s_abort_log_n;
 
 /**
@@ -252,11 +253,16 @@ static bool md_abort_log_is_due(DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    bool due = (s_abort_log_n >= 64U);
+    // 有时间源时按时间限流；条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
+    bool due;
 
-    if ((due == false) && (now_ms != 0U))
+    if (now_ms != 0U)
     {
         due = (s_abort_log_ms == 0U) || ((now_ms - s_abort_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    }
+    else
+    {
+        due = (s_abort_log_n >= 64U);
     }
 
     if (due == false)
@@ -325,6 +331,15 @@ static bool md_handle_stall(md_dir_cache_t *dir)
     {
         return false;
     }
+
+    // cache 序列打开时，后台提交被门控拒绝是**预期**等待：序列在下一窗口/下一 chunk
+    // 收尾（空闲守卫 1 s 兜底），不应当作提交卡死而中止 job（也会刷屏）。
+    if (ftl_op_cache_seq_active() == true)
+    {
+        j->stall_ms = 0U;
+        return false;
+    }
+
     if (j->stall_ms == 0U)
     {
         j->stall_ms = now_ms;
@@ -332,7 +347,11 @@ static bool md_handle_stall(md_dir_cache_t *dir)
     }
     if ((now_ms - j->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
     {
-        LOGW(LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
+        if ((s_stall_log_ms == 0U) || ((now_ms - s_stall_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS))
+        {
+            LOGW(LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
+            s_stall_log_ms = now_ms;
+        }
         j->timed_out     = true;
         j->timeout_phase = j->phase;
         md_handle_abort(dir);
@@ -1329,7 +1348,7 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
 
     md_handle_t *j = &dir->handle;
 
-    const bool failed = fc_cw_status_has_error(completion->status);
+    const bool failed = fc_cmd_status_has_error(completion->status);
 
     switch (j->phase)
     {

@@ -29,7 +29,8 @@ typedef struct
 typedef struct
 {
     BYTE execution_status; /* NAND_RESULT_* */
-    BYTE nand_status;      /* Raw 70h status value after command completion. */
+    BYTE nand_status;      /* 70h 原始状态：OP 后（FAIL/FAILC） */
+    BYTE pre_status;       /* 70h 原始状态：OP 前（RDY/ARDY/WP） */
 } nand_fc_completion_t;
 
 /* 异步事务：引擎状态 + 命令数据存储体。

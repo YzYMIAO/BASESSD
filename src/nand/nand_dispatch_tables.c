@@ -59,20 +59,19 @@ static void req_init(nand_dispatch_task_t *task, WORD column, BYTE *data, WORD d
  *   参数：task —— 正在收尾的任务；result —— NAND_RESULT_* 执行结果；
  *         nand_completion —— 底层 NAND 完成信息（本 handler 不使用）。
  *   返回：无。
- *   实现要点：result 到 FC_CW_STATUS_* 映射统一为
- *         OK→SUCCESS / TIMEOUT→TIMEOUT / 其余→NAND_FAIL；
+ *   实现要点：result 到 descriptor 状态映射：OK→UNUSED（0）/ 其余→FAIL；
+ *         TIMEOUT 是命令级（execution_status），不在 per-CW 位里区分；
  *         失败时 failed_descriptor_id 固定为 0（无逐 CW 区分）。
  *         遍历掩码置位、按 flat 绝对编号写 cw_status[n]——单 plane 与 multi-plane
  *         在此完全同构（旧实现里 multi-plane 走单独的 plane-major 走位版本，
  *         统一索引空间后两者逐字节等价，已合并）。
  *         **掩码为空时写 cw_status[0]**（与 completion_single 同口径）——v28 起
- *         ERASE 不再由 FC 伪造一个 CW0 位，擦除请求的位图是**合法空集**；FC 的非 page
- *         read 聚合分支是全表 OR，靠这一格读到擦除成败（否则失败被静默吞掉）。
+ *         ERASE 不再由 FC 伪造一个 CW0 位，擦除请求的位图是**合法空集**；
+ *         命令级聚合现在直接读 NAND 的 FAIL/execution_status，不再 OR cw_status；
  * -------------------------------------------------------------------- */
 static void completion_all_cws(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_SUCCESS : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                                                                      : FC_CW_STATUS_NAND_FAIL;
+    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
 
     (void)nand_completion;
@@ -108,8 +107,7 @@ static void completion_all_cws(nand_dispatch_task_t *task, BYTE result, const na
  * -------------------------------------------------------------------- */
 static void completion_per_cw(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_SUCCESS : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                                                                      : FC_CW_STATUS_NAND_FAIL;
+    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
 
     (void)nand_completion;
     task->completion.cw_status[task->cw_index] = status;
@@ -133,8 +131,7 @@ static void completion_per_cw(nand_dispatch_task_t *task, BYTE result, const nan
  * -------------------------------------------------------------------- */
 static void completion_single(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_SUCCESS : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                                                                      : FC_CW_STATUS_NAND_FAIL;
+    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
 
     (void)nand_completion;
@@ -169,7 +166,7 @@ static void completion_load(nand_dispatch_task_t *task, BYTE result, const nand_
     {
         return;
     }
-    status = (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT : FC_CW_STATUS_NAND_FAIL;
+    status = FC_CW_STATUS_FAIL;
     for (i = 0U; i < (CW_NUM * PLANE_NUM); i++)
     {
         task->completion.cw_status[i] = status;

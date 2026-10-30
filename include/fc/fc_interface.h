@@ -145,9 +145,10 @@ extern "C"
      * 供 two-plane cache program 批次使用——不允许“前几条已提交、末条失败”留下
      * 未终结的 cache sequence。前置与 fc_submit 相同。
      *
-     * 链契约：批内只要含 `FC_CHAIN_MORE` 成员，全批必须同优先级（进同一条队列）
-     * 且末条必须是 `FC_CHAIN_END`；否则链会被拆到 SQ/HSQ 两段（序列错乱）或
-     * 永不闭合（chain_owner 不解锁，该 LUN 的另一队列被饿死）。
+     * 链契约：批内只要含 `FC_CHAIN_MORE` 成员，全批必须同优先级（进同一条队列），
+     * 否则链会被拆到 SQ/HSQ 两段（序列错乱）。末条**允许** `FC_CHAIN_MORE`——
+     * 这是流式序列的中间窗口；FTL 的序列状态负责在 run_end 发 `FC_CHAIN_END`，
+     * `chain_owner` 跨窗口保留。
      *
      * @param cmds 命令指针数组，长度为 n。
      * @param n    命令条数；须 > 0。
@@ -326,6 +327,38 @@ extern "C"
      *
      * @return 恒 FC_STATUS_OK。
      */
+    /* ── 诊断：队列头 / 链锁快照（只读，不改状态）──
+     * 排障用：用例/运维在「FTL 回不到 idle」时打印它，看是哪个队列的头卡住、
+     * 以及该 LUN 的链锁归谁（chain_owner）。生产路径不调用。 */
+    typedef struct
+    {
+        WORD  sq_used;
+        WORD  hsq_used;
+        BYTE  chain_owner; /* fc_chain_owner_e */
+        WORD  sq_head_id;
+        WORD  sq_head_chain;
+        BYTE  sq_head_op;
+        WORD  hsq_head_id;
+        WORD  hsq_head_chain;
+        BYTE  hsq_head_op;
+        BYTE  lun_used;       /* NAND per-LUN FIFO 已用槽 */
+        BYTE  lun_phase;      /* NAND per-LUN FSM 相位（LUN_PHASE_*） */
+        DWORD fill_calls;     /* FC 填充 pass 累计调用次数 */
+        DWORD fill_pops;      /* 填充 pass 累计从队列 pop 的命令数 */
+        BYTE  sq_head_state;  /* SQ 头命令的状态（fc_cmd_state_e：0=FREE 1=QUEUED 2=ACTIVE 3=COMPLETED） */
+        WORD  sched_sq_count; /* 调度器实际扫描的 SQ 的 count（应与 sq_used 相同） */
+        BYTE  sched_sq_bound; /* 1 = scheduler->sq/hsq 就绑在 controller->sq/hsq 上 */
+    } fc_debug_state_t;
+
+    /**
+     * @brief 取队列头 / 链锁快照（只读）。
+     *
+     * @param out 出参；须非空。
+     *
+     * @return 恒 FC_STATUS_OK。
+     */
+    fc_status_e fc_debug_state_get(fc_debug_state_t *out);
+
     fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats);
 
 #ifdef __cplusplus

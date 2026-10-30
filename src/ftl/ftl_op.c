@@ -216,11 +216,56 @@ struct ftl_context *ftl_op_route_get_region(DWORD global_region)
     return ftl_op_route_get(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
 }
 
+bool ftl_op_cache_seq_active(void)
+{
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const struct ftl_context *ftl = g_op_route[ch][ce][lun];
+
+                // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
+                // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
+                if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 /* ── 5. 提交 ── */
+
+// 序列门控：cache 序列 `active || draining` 期间，只允许所有者提交该 LUN 的命令；其余返回
+// FTL_AGAIN 并置 break_requested（序列在下一窗口末尾 END，后台/其他 host 命令随后执行）。
+// draining = 窗口已提交完但命令仍在飞：门控必须继续关到排空，否则器件侧的 31h/3Fh 管线
+// 会被别的提交劈开（RISK-CACHE-14）。
+static bool ftl_op_seq_gate(const fc_command_t *cmd)
+{
+    struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
+
+    if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)) && (ftl->cache_seq.owner_submit == false))
+    {
+        ftl->cache_seq.break_requested = true;
+        return true;
+    }
+
+    return false;
+}
 
 ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     WORD cmd_id = ftl_cmd_id(cmd);
+
+    if (ftl_op_seq_gate(cmd) == true)
+    {
+        return FTL_AGAIN;
+    }
 
     // ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。
     cmd->op_tag = op;
@@ -255,6 +300,14 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
 {
     ASSERT(cmds != NULL);
     ASSERT(n > 0U);
+
+    for (DWORD i = 0U; i < n; i++)
+    {
+        if (ftl_op_seq_gate(cmds[i]) == true)
+        {
+            return FTL_AGAIN;
+        }
+    }
 
     DWORD added = 0U;
 

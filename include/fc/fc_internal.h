@@ -359,6 +359,14 @@ extern "C"
      */
     fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
 
+    /**
+     * @brief 读填充 pass 的累计计数（诊断「命令在 SQ 却不下发」）。
+     *
+     * @param calls 出参：fc_poll_fill 累计调用次数。
+     * @param pops  出参：填充 pass 累计从队列 pop 的命令数。
+     */
+    void fc_debug_fill_counters(DWORD *calls, DWORD *pops);
+
 #ifdef __cplusplus
 }
 #endif

@@ -292,7 +292,6 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
     bool  has_chain      = false;
     bool  mixed_queue    = false;
     DWORD first_priority = 0U;
-    BYTE  last_chain     = FC_CHAIN_END;
 
     for (DWORD i = 0U; i < n; i++)
     {
@@ -315,8 +314,7 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
             mixed_queue = true;
         }
 
-        has_chain  = (has_chain == true) || (command->config.chain == FC_CHAIN_MORE);
-        last_chain = command->config.chain;
+        has_chain = (has_chain == true) || (command->config.chain == FC_CHAIN_MORE);
 
         if (command->high_priority != 0U)
         {
@@ -328,13 +326,13 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
         }
     }
 
-    // 链契约：一批里的 chain 必须**自闭合**（末条 END）且全批同优先级。
+    // 链契约：一批里的 chain 必须全批同优先级；**末条允许 MORE**（流式窗口）。
     // · 混优先级 ⇒ 链被拆成 SQ/HSQ 两段，fc_poll_chain_length 只沿本队列 peek，
     //   跳过的成员被当成不存在 ⇒ 序列静默错乱（cache read 输出错页 / 写错序列）；
-    // · 末条不是 END ⇒ chain_owner 永不解锁，该 LUN 的另一队列被永久饿死。
-    // 负例：cmds[0].chain=MORE 且 cmds[1].high_priority=1；或末条 chain=MORE。
-    // release 下必须拒绝而不是放行（H14：后果是静默介质破坏 / LUN 锁死）。
-    if ((has_chain == true) && ((mixed_queue == true) || (last_chain != FC_CHAIN_END)))
+    // · 末条 MORE 是合法中间窗口：FTL 的序列状态保证在 run_end 发 END；FC 的
+    //   chain_owner 跨窗口保留，下一窗口继续。
+    // 负例：cmds[0].chain=MORE 且 cmds[1].high_priority=1 ⇒ release 拒绝。
+    if ((has_chain == true) && (mixed_queue == true))
     {
         ASSERT(false);
         return FC_STATUS_INVALID_ARGUMENT;
@@ -565,6 +563,46 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
 }
 
 // 对外入口：队列占用直接读队列计数，三池占用逐槽扫描状态表。
+fc_status_e fc_debug_state_get(fc_debug_state_t *out)
+{
+    ASSERT(out != NULL);
+
+    memset(out, 0, sizeof(*out));
+    out->sq_used     = fc_get_sq_count(&g_fc_controller);
+    out->hsq_used    = fc_get_hsq_count(&g_fc_controller);
+    out->chain_owner = g_fc_controller.scheduler.chain_owner[0][0][0];
+    out->lun_used    = nand_dispatch_lun_used(0U, 0U, 0U);
+    out->lun_phase   = nand_dispatch_lun_phase(0U, 0U, 0U);
+    fc_debug_fill_counters(&out->fill_calls, &out->fill_pops);
+    out->sched_sq_count = (g_fc_controller.scheduler.sq != NULL) ? g_fc_controller.scheduler.sq->count : 0U;
+    out->sched_sq_bound = ((g_fc_controller.scheduler.sq == &g_fc_controller.sq) && (g_fc_controller.scheduler.hsq == &g_fc_controller.hsq)) ? 1U : 0U;
+
+    const fc_command_id_t sq_id = fc_submission_queue_peek(&g_fc_controller.sq, 0U);
+
+    if (sq_id != FC_COMMAND_ID_INVALID)
+    {
+        const fc_command_t *cmd = fc_command_id_to_command(sq_id);
+
+        out->sq_head_id    = sq_id;
+        out->sq_head_state = (BYTE)fc_command_state_get(&g_fc_controller, sq_id);
+        out->sq_head_chain = (WORD)cmd->config.chain;
+        out->sq_head_op    = (BYTE)cmd->config.operation;
+    }
+
+    const fc_command_id_t hsq_id = fc_submission_queue_peek(&g_fc_controller.hsq, 0U);
+
+    if (hsq_id != FC_COMMAND_ID_INVALID)
+    {
+        const fc_command_t *cmd = fc_command_id_to_command(hsq_id);
+
+        out->hsq_head_id    = hsq_id;
+        out->hsq_head_chain = (WORD)cmd->config.chain;
+        out->hsq_head_op    = (BYTE)cmd->config.operation;
+    }
+
+    return FC_STATUS_OK;
+}
+
 fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
 {
     WORD index;

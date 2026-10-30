@@ -462,9 +462,9 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  * 自行 fc_command_release。共同的命令配置：单 plane、FC_CHAIN_END、LP 页、
  * CW 0..3（擦除为 0，无数据链）。
  *
- * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CW_STATUS_ERROR_MASK 全集
- * （NAND_FAIL / TIMEOUT / CRC_ERROR / UNC / MATA_ERROR / RAID_ERROR 任一置位即
- * FTL_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
+ * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CMD_STATUS_ERROR_MASK 全集
+ * （NAND_FAIL / FAIL_CACHE / TIMEOUT / DATA_ERROR / MATA_ERROR 任一置位即 FTL_ERROR；
+ * UNC/CRC/RAID 合并为 DATA_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
  * 与 ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与 spare 正是它们的
  * 返回物），成败由调用者按内容自判。
  */
@@ -698,7 +698,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
  * 数据留在命令的 desc 链上，只有服务函数在 release 之前调 ftl_cmd_read_data 才拿得到。
  * ⇒ 调用者指定的目标缓冲必须在**命令完成之前**保持有效，且拷出必须早于 release。
  *
- * 成败判据也搬到服务函数（同步版是 FC_CW_STATUS_ERROR_MASK 全集，见 ftl_sync_read_page）。
+ * 成败判据也搬到服务函数（同步版是 FC_CMD_STATUS_ERROR_MASK 全集，见 ftl_sync_read_page）。
  *
  * @param out_cmd 出参：已建链的命令（须提交或 release）
  * @param pba     目标页 PBA

@@ -399,7 +399,7 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     entry.command_id = 0x01U;
-    entry.status     = FC_CW_STATUS_READY;
+    entry.status     = FC_CMD_STATUS_RDY;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
 
     entry.command_id = 0x02U;
@@ -443,7 +443,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     fc_command_status_t entry = {0};
-    entry.status              = FC_CW_STATUS_READY;
+    entry.status              = FC_CMD_STATUS_RDY;
 
     for (i = 0U; i < TEST_CQ_DEPTH; i++)
     {

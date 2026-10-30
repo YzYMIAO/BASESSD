@@ -74,7 +74,8 @@ void ssd_controller_service(ssd_controller_t *controller);
  *
  * 只清 `flush_req` 指针，**不**中止 FTL 侧的 flush job：job 会按自己的完成判据或
  * 1 s 超时收敛。这样避免「请求对象已被前端复用，controller 迟到的完成回执照样写回
- * 新请求」的竞态（USB 的 `s_msc_io.request` 是静态复用对象）。
+ * 新请求」的竞态（USB 的在飞 `ssd_request_t` 位于 usb_msc.c 的槽对象里，
+ * 调用者不得在请求完成前复用/清零它）。
  */
 void ssd_controller_cancel_flush(ssd_controller_t *controller);
 

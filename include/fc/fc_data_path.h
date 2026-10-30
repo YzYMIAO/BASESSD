@@ -83,7 +83,9 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  * @return FC_STATUS_OK       所有 CW 无不可纠错误（擦除页与 NOT_SUPPORTED 按成功处理），buffer 已解扰。
  *         FC_STATUS_IO_ERROR 存在不可纠的 CW（未解扰，需 FTL 处理）。
  *
- * @note 整条 CW 全 0xFF 的擦除页记为 FC_CW_STATUS_BLANK 而非失败，跳过解扰 / CRC / META 校验。
+ * @note 整条 CW 全 0xFF 的擦除页记为 FC_CW_STATUS_EMPTY 而非失败，跳过解扰 / CRC / META 校验。
+ *       仅在执行 ECC 解码的路径生效；`FC_ECC_MODE_LDPC_RAW` 跳过 ECC ⇒ 不做该识别，
+ *       擦除页按 CRC/META 失败上报（RAW 读的调用方自行判空）。
  */
 fc_status_e fc_data_path_process_read(const fc_command_t *command);
 

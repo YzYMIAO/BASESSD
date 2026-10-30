@@ -109,7 +109,9 @@ typedef struct
  * @param h       wbuf handle（整块清零后重新绑定上下文）
  * @param alloc   allocator（取页对 / 归还页对 / 查 Open 页状态）
  * @param pending pending 表（组在飞数结算 / 窗口占用查询 / 子操作登记）
- * @param migrate migrate handle（Free Pool 耗尽时登记紧急 GC）
+ * @param migrate migrate handle（Free Pool 耗尽时登记紧急 GC）；**允许 NULL** ——
+ *                无后台迁移器时（纯 RAM 单测）只做背压，不登记 GC。生产路径由
+ *                `ftl.c` 绑定真实 handle，不传 NULL。
  */
 void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
 

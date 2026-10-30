@@ -219,6 +219,11 @@ TU_ATTR_WEAK void tud_msc_write10_complete_cb(uint8_t lun) {
   (void) lun;
 }
 
+/* 【本仓补丁】CBW 信息钩子：命令开始时给出总 block_count/起始 LBA；应用可覆盖。 */
+TU_ATTR_WEAK void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count) {
+  (void) lun; (void) lba; (void) block_count;
+}
+
 TU_ATTR_WEAK void tud_msc_scsi_complete_cb(uint8_t lun, uint8_t const scsi_cmd[16]) {
   (void) lun;
   (void) scsi_cmd;
@@ -858,6 +863,11 @@ static void proc_read10_cmd(mscd_interface_t* p_msc) {
   uint32_t const lba = rdwr10_get_lba(p_cbw->command) + (p_msc->xferred_len / block_sz);
   uint32_t const offset = p_msc->xferred_len % block_sz;
 
+  // 【本仓补丁】命令起点：把 CBW 的总 block_count/起始 LBA 交给应用。
+  if (p_msc->xferred_len == 0U) {
+    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw));
+  }
+
   // remaining bytes capped at class buffer
   int32_t nbytes = (int32_t)tu_min32(CFG_TUD_MSC_EP_BUFSIZE, p_cbw->total_bytes - p_msc->xferred_len);
 
@@ -903,6 +913,11 @@ static void proc_write10_cmd(mscd_interface_t* p_msc) {
     (void) tud_msc_set_sense(p_cbw->lun, SCSI_SENSE_DATA_PROTECT, 0x27, 0x00);
     fail_scsi_op(p_msc, MSC_CSW_STATUS_FAILED);
     return;
+  }
+
+  // 【本仓补丁】命令起点：把 CBW 的总 block_count/起始 LBA 交给应用。
+  if (p_msc->xferred_len == 0U) {
+    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw));
   }
 
   // remaining bytes capped at class buffer

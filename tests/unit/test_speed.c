@@ -24,6 +24,7 @@
 
 #include "cli.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "delay.h"
+#include "fc.h"
 #include "ftl_job.h"
 #include "munit.h"
 #include "ssd_types.h"
@@ -313,7 +314,7 @@ static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_t *peak)
             continue;
         }
 
-        if ((buf[i].status & FC_CW_STATUS_ERROR_MASK) != 0U)
+        if ((buf[i].status & FC_CMD_STATUS_ERROR_MASK) != 0U)
         {
             (*errors)++;
         }
@@ -516,7 +517,7 @@ static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out,
         status = test_erase_block(blocks[i], TEST_PLANE_BM_ALL, &conf);
         total_us += spd_clock_elapsed_us(&clock);
 
-        if ((status.status & FC_CW_STATUS_ERROR_MASK) != 0U)
+        if ((status.status & FC_CMD_STATUS_ERROR_MASK) != 0U)
         {
             (*errors)++;
         }
@@ -704,7 +705,9 @@ static void spd_ftl_fill(DWORD lba, BYTE *buf, DWORD count)
     }
 }
 
-static bool spd_ftl_check(DWORD lba, const BYTE *buf, DWORD count)
+/* 首个不匹配字节的偏移；全等时返回 count*FTL_IU_BYTES。
+ * 只用于失败时的定位打印：错在哪个 LBA、偏移多少、期望/实际各是什么。 */
+static DWORD spd_ftl_first_mismatch(DWORD lba, const BYTE *buf, DWORD count)
 {
     const DWORD base  = lba * FTL_IU_BYTES;
     const DWORD bytes = count * FTL_IU_BYTES;
@@ -713,10 +716,51 @@ static bool spd_ftl_check(DWORD lba, const BYTE *buf, DWORD count)
     {
         if (buf[i] != spd_ftl_pattern(base + i))
         {
-            return false;
+            return i;
         }
     }
-    return true;
+    return bytes;
+}
+
+/* 每次 phase 最多打 8 条错误明细（--log-visible info 才输出），
+ * 用来区分「状态错误」与「数据错」，并把错点收敛到具体 LBA/偏移。 */
+static DWORD s_spd_err_prints;
+
+static void spd_ftl_note_status_error(bool write, DWORD chunk, const spd_ftl_req_t *slot)
+{
+    if (s_spd_err_prints >= 8U)
+    {
+        return;
+    }
+    s_spd_err_prints++;
+    ftl_ut_trace_summary("SPEED err#%lu %s%lu lba=%lu count=%lu STATUS=%d",
+                         s_spd_err_prints,
+                         (write ? "wr" : "rd"),
+                         chunk,
+                         slot->lba,
+                         slot->count,
+                         (int)slot->status);
+}
+
+static void spd_ftl_note_data_error(bool write, DWORD chunk, const spd_ftl_req_t *slot, DWORD offset)
+{
+    if (s_spd_err_prints >= 8U)
+    {
+        return;
+    }
+    s_spd_err_prints++;
+
+    const DWORD byte_addr = (slot->lba * FTL_IU_BYTES) + offset;
+    const BYTE  expected  = spd_ftl_pattern(byte_addr);
+
+    ftl_ut_trace_summary("SPEED err#%lu %s%lu lba=%lu off=%lu got=0x%02hhX exp=0x%02hhX",
+                         s_spd_err_prints,
+                         (write ? "wr" : "rd"),
+                         chunk,
+                         slot->lba,
+                         offset,
+                         slot->buf[offset],
+                         expected);
 }
 
 static void spd_ftl_slots_reset(void)
@@ -804,6 +848,7 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
     DWORD guard    = 0U;
 
     spd_ftl_slots_reset();
+    s_spd_err_prints = 0U;
 
     while ((next < (DWORD)SPD_FTL_LBAS) || (inflight != 0U))
     {
@@ -850,10 +895,17 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
             if (slot->status != SSD_STATUS_OK)
             {
                 (*errors)++;
+                spd_ftl_note_status_error(write, chunk, slot);
             }
-            else if ((!write) && (!spd_ftl_check(slot->lba, slot->buf, slot->count)))
+            else if (!write)
             {
-                (*errors)++;
+                const DWORD offset = spd_ftl_first_mismatch(slot->lba, slot->buf, slot->count);
+
+                if (offset != (slot->count * FTL_IU_BYTES))
+                {
+                    (*errors)++;
+                    spd_ftl_note_data_error(write, chunk, slot, offset);
+                }
             }
             slot->used = false;
             if (inflight != 0U)
@@ -882,7 +934,11 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
 
 static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
 {
-    const DWORD t0 = ftl_job_now_ms();
+    const DWORD      t0 = ftl_job_now_ms();
+    fc_debug_state_t dbg0;
+
+    memset(&dbg0, 0, sizeof(dbg0));
+    (void)fc_debug_state_get(&dbg0);
 
     for (;;)
     {
@@ -901,6 +957,30 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
 
         if ((ftl_job_now_ms() - t0) > 10000U)
         {
+            // 排障：把「谁卡住」+ 本次等待期间填充 pass 的**增量**打出来。
+            // 增量比绝对值有用：fill 不涨 ⇒ 填充没被调用；pops 不涨 ⇒ 扫描没看到命令。
+            fc_debug_state_t dbg;
+
+            memset(&dbg, 0, sizeof(dbg));
+            (void)fc_debug_state_get(&dbg);
+            ftl_ut_trace_summary("SPEED idle timeout: sq=%hu hsq=%hu owner=%hhu lun_used=%hhu lun_phase=%hhu fill_delta=%lu/%lu sq_head=%hu st=%hhu chain=%hu op=%hhu sched_sq=%hu bound=%hhu hsq_head=%hu chain=%hu op=%hhu ctx=%hu",
+                                 dbg.sq_used,
+                                 dbg.hsq_used,
+                                 (unsigned)dbg.chain_owner,
+                                 dbg.lun_used,
+                                 dbg.lun_phase,
+                                 dbg.fill_calls - dbg0.fill_calls,
+                                 dbg.fill_pops - dbg0.fill_pops,
+                                 dbg.sq_head_id,
+                                 dbg.sq_head_state,
+                                 dbg.sq_head_chain,
+                                 (unsigned)dbg.sq_head_op,
+                                 dbg.sched_sq_count,
+                                 dbg.sched_sq_bound,
+                                 dbg.hsq_head_id,
+                                 dbg.hsq_head_chain,
+                                 (unsigned)dbg.hsq_head_op,
+                                 ftl_op_ctx_count());
             return false;
         }
     }
@@ -1009,6 +1089,9 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     ftl_ctx_t *ftl = ftl_ut_live();
 
+    const char *rd_s   = munit_parameters_get(params, "rd");
+    const BYTE  rdepth = ((rd_s != NULL) && (rd_s[0] == '1')) ? 1U : 4U;
+
     /* 首次运行格式化：确定性，并修复 FC 原始写留下的脏状态。format 时间单列。 */
     DWORD fmt_ms = 0U;
 
@@ -1023,6 +1106,19 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         s_ftl_formatted = true;
         ftl             = ftl_ut_live();
     }
+    else
+    {
+        /* 组合隔离（每个用例开始时回到已知状态）：
+         * 非首个组合先把 FTL 从介质重建（quiesce + fc_init + 重新武装 + pfr 恢复），
+         * 清掉上一组合留在 RAM 里的任何运行态。**介质内容保留**（写/校验的输入不变），
+         * 这样每个组合都是「同一份介质、同一段代码、干净的控制面」下测出来的。
+         * ⚠ 这不是掩盖泄漏：teardown 仍然断言资源归零，泄漏照样会红。 */
+        ftl_ut_trace_suppress(true);
+        ftl_ut_reboot_from_media();
+        ftl_ut_trace_suppress(false);
+        ftl = ftl_ut_live();
+        ftl_ut_trace_summary("SPEED isolation: reboot from media before mode=%s rd=%hhu", mode_s, rdepth);
+    }
 
     if (((QWORD)SPD_FTL_LBA_BASE + SPD_FTL_LBAS) > (QWORD)ssd_controller_host_lba_max(&g_ctrl))
     {
@@ -1031,7 +1127,6 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     const DWORD wchunk = (mode == SPD_FTL_MODE_CACHE) ? 32U : 8U;
     const BYTE  wdepth = (mode == SPD_FTL_MODE_CACHE) ? 1U : 4U;
-    const BYTE  rdepth = 4U;
     const DWORD bytes  = (DWORD)SPD_FTL_BYTES;
 
     spd_ftl_cache_t c0;
@@ -1043,12 +1138,16 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
     spd_ftl_cache_t dr_cache;
     spd_ftl_cache_t dr_after_normal;
 
-    DWORD errors       = 0U;
-    DWORD wr_ms        = 0U;
-    DWORD prep_ms      = 0U;
-    DWORD rd_cache_ms  = 0U;
-    DWORD rd_normal_ms = 0U;
-    DWORD flush_ms     = 0U;
+    DWORD errors         = 0U;
+    DWORD err_after_wr   = 0U;
+    DWORD err_after_prep = 0U;
+    DWORD err_after_rdc  = 0U;
+    DWORD err_after_rd8  = 0U;
+    DWORD wr_ms          = 0U;
+    DWORD prep_ms        = 0U;
+    DWORD rd_cache_ms    = 0U;
+    DWORD rd_normal_ms   = 0U;
+    DWORD flush_ms       = 0U;
 
     spd_ftl_cache_get(ftl, &c0);
     bool ok = spd_ftl_phase(ftl, true, wchunk, wdepth, &wr_ms, &errors);
@@ -1063,6 +1162,8 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         }
         flush_ms = ftl_job_now_ms() - t0;
     }
+
+    err_after_wr = errors;
 
     spd_ftl_cache_get(ftl, &c1);
     spd_ftl_cache_diff(&c0, &c1, &dw);
@@ -1084,6 +1185,8 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         }
     }
 
+    err_after_prep = errors;
+
     spd_ftl_cache_get(ftl, &cr0);
 
     /* 读 1：cache 档用 32-LBA（cache read），normal 档用 8-LBA（普通读）。 */
@@ -1093,6 +1196,8 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
     {
         ok = spd_ftl_phase(ftl, false, rd_chunk, rdepth, &rd_cache_ms, &errors);
     }
+
+    err_after_rdc = errors;
 
     spd_ftl_cache_get(ftl, &c2);
     spd_ftl_cache_diff(&cr0, &c2, &dr_cache);
@@ -1107,50 +1212,81 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         rd_normal_ms = rd_cache_ms;
     }
 
+    err_after_rd8 = errors;
+
     spd_ftl_cache_get(ftl, &c3);
     spd_ftl_cache_diff(&c2, &c3, &dr_after_normal);
 
     if (!spd_ftl_wait_idle(ftl))
     {
-        errors++;
+        errors++; /* 细节由 spd_ftl_wait_idle 的超时行携带 */
     }
 
     const bool  rd_is_cache = (mode == SPD_FTL_MODE_CACHE) && (dr_cache.rd_batches > 0U);
     const DWORD rd_ms       = (mode == SPD_FTL_MODE_CACHE) ? (rd_is_cache ? rd_cache_ms : rd_normal_ms) : rd_cache_ms;
     const char *rd_path     = rd_is_cache ? "cache" : "normal";
 
+    ftl_ut_trace_summary("SPEED ftl err split mode=%s rd=%hhu: wr=%lu prep=%lu rd_cache=%lu rd_8=%lu flush_idle=%lu",
+                         mode_s,
+                         rdepth,
+                         err_after_wr,
+                         err_after_prep - err_after_wr,
+                         err_after_rdc - err_after_prep,
+                         err_after_rd8 - err_after_rdc,
+                         errors - err_after_rd8);
     ftl_ut_trace_summary("SPEED ftl mode=%s  WR=%lu KB/s  RD=%lu KB/s  |  rd_path=%s rd_normal=%lu KB/s gblocks=%u lbas=%u bytes=%lu wr_ms=%lu prep_ms=%lu rd_ms=%lu rd_normal_ms=%lu fmt_ms=%lu flush_ms=%lu wb(b/d)=%lu/%lu rdc(b/d/f)=%lu/%lu/%lu rdn(b/d)=%lu/%lu err=%lu", mode_s, spd_kbps_from_us(bytes, wr_ms * 1000U), spd_kbps_from_us(bytes, rd_ms * 1000U), rd_path, spd_kbps_from_us(bytes, rd_normal_ms * 1000U), SPD_FTL_BLOCKS, SPD_FTL_LBAS, bytes, wr_ms, prep_ms, rd_ms, rd_normal_ms, fmt_ms, flush_ms, dw.wb_batches, dw.wb_declines, dr_cache.rd_batches, dr_cache.rd_declines, dr_cache.rd_fallbacks, dr_after_normal.rd_batches, dr_after_normal.rd_declines, errors);
     ftl_ut_trace_detail("SPEED ftl mode=%s wchunk=%lu wdepth=%hhu rdchunk=%lu rdepth=%hhu wb(b/p/d/a)=%lu/%lu/%lu/%lu rdc(b/p/d/f)=%lu/%lu/%lu/%lu", mode_s, wchunk, wdepth, rd_chunk, rdepth, dw.wb_batches, dw.wb_pages, dw.wb_declines, dw.wb_aborts, dr_cache.rd_batches, dr_cache.rd_pairs, dr_cache.rd_declines, dr_cache.rd_fallbacks);
 
+    /* 判据**不中止套件**：同一轮要跑完 mode × rd 的全部组合，把
+     * 「rd=4 错 / rd=1 对」这类对比留在一次上板里。失败只把本组合标 FAIL。 */
+    bool failed = false;
+
     if (!ok)
     {
-        munit_errorf("ftl speed phase did not drain (errors=%lu)", errors);
+        ftl_ut_trace_summary("SPEED ftl phase did not drain (errors=%lu)", errors);
+        failed = true;
     }
 
     /* C8：cache 档必须证明「本次真的走了 cache 读」，否则打印窗口诊断并失败。 */
     if (mode == SPD_FTL_MODE_CACHE)
     {
-        munit_assert_uint32(dw.wb_batches, >, 0U);
+        if (dw.wb_batches == 0U)
+        {
+            ftl_ut_trace_summary("SPEED ftl cache: no cache-program batch (wb=0)");
+            failed = true;
+        }
         if (dr_cache.rd_batches == 0U)
         {
             spd_ftl_diag_window(ftl, SPD_FTL_LBA_BASE);
-            munit_errorf("cache read did not engage: batches=0 declines=%lu fallbacks=%lu", dr_cache.rd_declines, dr_cache.rd_fallbacks);
+            ftl_ut_trace_summary("SPEED ftl cache read did not engage: declines=%lu fallbacks=%lu", dr_cache.rd_declines, dr_cache.rd_fallbacks);
+            failed = true;
         }
     }
     else
     {
-        munit_assert_uint32(dw.wb_batches, ==, 0U);
-        munit_assert_uint32(dr_cache.rd_batches, ==, 0U);
+        if ((dw.wb_batches != 0U) || (dr_cache.rd_batches != 0U))
+        {
+            ftl_ut_trace_summary("SPEED ftl normal: unexpected cache path wb=%lu rdc=%lu", dw.wb_batches, dr_cache.rd_batches);
+            failed = true;
+        }
     }
 
-    munit_assert_uint32(errors, ==, 0U);
-    return MUNIT_OK;
+    if (errors != 0U)
+    {
+        failed = true;
+    }
+
+    return (failed == true) ? MUNIT_FAIL : MUNIT_OK;
 }
 
-static const char        *s_ftl_speed_modes[]  = {"normal", "cache", NULL};
-static MunitParameterEnum s_ftl_speed_params[] = {
-    {(char *)"mode", s_ftl_speed_modes},
-    {          NULL,              NULL}
+static const char *s_ftl_speed_modes[]          = {"normal", "cache", NULL};
+/* 读深度：4 = 四个独立 host 请求并发（USB 双缓冲的 2 倍压力），1 = 逐个。
+ * 用来区分「并发/序列所有权」与「单个窗口内部的器件序列」两类问题。 */
+static const char        *s_ftl_speed_rdepths[] = {"4", "1", NULL};
+static MunitParameterEnum s_ftl_speed_params[]  = {
+    {(char *)"mode",   s_ftl_speed_modes},
+    {  (char *)"rd", s_ftl_speed_rdepths},
+    {          NULL,                NULL}
 };
 
 #endif /* UT_FTL_ENABLE */

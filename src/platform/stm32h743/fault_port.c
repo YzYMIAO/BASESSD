@@ -139,11 +139,12 @@ void fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity)
 /* ────────────────────────────── 异常入口 ────────────────────────────── */
 
 /*
- * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR。
+ * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR，
+ * fault_r7 为蹦床在 C 序言之前抓到的 R7（硬件不压 R4~R11，只能这样取）。
  * 现场在此抓取（只有 port 侧够得着 CMSIS/寄存器），随后转交共享层，不返回。
  */
-void fault_port_entry_c(DWORD *frame, DWORD exc_return) __attribute__((used, noinline));
-void fault_port_entry_c(DWORD *frame, DWORD exc_return)
+void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7) __attribute__((used, noinline));
+void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7)
 {
     fault_ctx_t ctx;
 
@@ -153,6 +154,7 @@ void fault_port_entry_c(DWORD *frame, DWORD exc_return)
     ctx.psp        = __get_PSP();
     ctx.exc_return = exc_return;
     ctx.fp_frame   = ((exc_return & 0x10U) == 0U) ? 1U : 0U;
+    ctx.r7         = fault_r7;
 
     ctx.r0   = frame[0];
     ctx.r1   = frame[1];
@@ -169,6 +171,8 @@ void fault_port_entry_c(DWORD *frame, DWORD exc_return)
     ctx.bfar  = SCB->BFAR;
     ctx.afsr  = SCB->AFSR;
     ctx.shcsr = SCB->SHCSR;
+    ctx.ccr   = SCB->CCR;
+    ctx.fpccr = FPU->FPCCR;
 
     fault_report_and_halt(&ctx);
 }
@@ -186,6 +190,7 @@ static void fault_trampoline(void)
                    "mrseq r0, msp          \n"
                    "mrsne r0, psp          \n"
                    "mov   r1, lr           \n"
+                   "mov   r2, r7           \n" /* 出错上下文的 R7，C 序言前抓 */
                    "b     fault_port_entry_c \n");
 }
 

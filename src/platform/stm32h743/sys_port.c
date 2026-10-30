@@ -16,7 +16,10 @@ static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
   /* Flash: executable read-only firmware. */
     {.Enable = MPU_REGION_ENABLE,  .Number = 0U, .BaseAddress = 0x08000000U,   .Size = MPU_REGION_SIZE_2MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_PRIV_RO_URO,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
  /* The two TCM blocks connect directly to the Cortex-M7. */
-    {.Enable = MPU_REGION_ENABLE,  .Number = 1U, .BaseAddress = 0x00000000U,  .Size = MPU_REGION_SIZE_64KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
+  /* ITCM（0x0..0xFFFF）只放 .ssd_code_high，启动文件在 MPU 使能前就完成搬运 ⇒
+  * 运行期一律只读：任何野写在这里会当场 MemManage（MMFAR=被写地址），而不是
+  * 静默改掉指令、等到执行到那一条才以看似无关的故障爆发。 */
+    {.Enable = MPU_REGION_ENABLE,  .Number = 1U, .BaseAddress = 0x00000000U,  .Size = MPU_REGION_SIZE_64KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_PRIV_RO_URO,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
     {.Enable = MPU_REGION_ENABLE,  .Number = 2U, .BaseAddress = 0x20000000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
  /* AXI SRAM includes normal .data/.bss placement. */
     {.Enable = MPU_REGION_ENABLE,  .Number = 3U, .BaseAddress = 0x24000000U, .Size = MPU_REGION_SIZE_512KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},

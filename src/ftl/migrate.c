@@ -836,7 +836,7 @@ static void mig_job_abort(mig_handle_t *m, const char *reason)
         const WORD g0 = mig_victim_get_gblock(m, 0U);
         const WORD g1 = (PLANE_NUM > 1U) ? mig_victim_get_gblock(m, 1U) : UINT16_MAX;
 
-        (void)fc_cw_status_str(m->last_fc_status, stbuf, sizeof(stbuf));
+        (void)fc_cmd_status_str(m->last_fc_status, stbuf, sizeof(stbuf));
         LOGW(LOG_TAG_MIG "abort kind=%s g0=%hu g1=%hu phase=%d page=%hhu plane=%hhu — %s fc=0x%08lx(%s) supp=%lu\r\n", mig_kind_name(m->kind), g0, g1, m->phase, m->page, m->plane, reason, m->last_fc_status, stbuf, suppressed);
     }
 
@@ -886,6 +886,13 @@ static bool mig_deadline_is_expired(DWORD *start_ms, DWORD timeout_ms)
  */
 static bool mig_job_stall(mig_handle_t *m)
 {
+    // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
+    if (ftl_op_cache_seq_active() == true)
+    {
+        m->stall_ms = 0U;
+        return false;
+    }
+
     if (mig_deadline_is_expired(&m->stall_ms, FTL_SUBMIT_TIMEOUT_MS))
     {
         m->timed_out     = true;
@@ -2070,6 +2077,10 @@ void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *ca
 
 void mig_gc_request_urgent(mig_handle_t *m)
 {
+    // 句柄由调用者持有：生产路径恒为 &ftl->mig_*；wb_flush 的可选端口分支已在
+    // 调用点判空，这里不重复返回码（H2）。NULL 写进来会落到 urgent_gc 的偏移
+    // （本结构该字段偏移 0x4220）⇒ 直接踩 ITCM 代码，必须当场停。
+    ASSERT(m != NULL);
     m->urgent_gc = true;
 }
 
@@ -2374,7 +2385,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
 
     m->last_fc_status = completion->status; /* 诊断：abort 日志带上原始状态位 */
 
-    if (fc_cw_status_has_error(completion->status))
+    if (fc_cmd_status_has_error(completion->status))
     {
         read_ok = false;
         cause   = "fc_err";
@@ -2482,7 +2493,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
  */
 static void mig_write_complete(mig_handle_t *m, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    const bool write_ok = (fc_cw_status_has_error(completion->status) == false);
+    const bool write_ok = (fc_cmd_status_is_success(completion->status));
 
     (void)fc_command_release(cmd);
     m->waiting  = false;
@@ -2541,7 +2552,7 @@ static void mig_write_batch_complete(mig_handle_t *m, fc_command_t *cmd, const f
 
     m->last_fc_status = completion->status;
 
-    if (fc_cw_status_has_error(completion->status))
+    if (fc_cmd_status_has_error(completion->status))
     {
         m->batch_failed = true;
     }
@@ -2595,7 +2606,7 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
     const WORD  gsrc         = ftl_gblock(plane, m->victim.plane_blocks[plane]);
     const DWORD total_writes = *m->total_writes;
 
-    if (fc_cw_status_has_error(completion->status) == false)
+    if (fc_cmd_status_is_success(completion->status))
     {
         m->erased++;
         if (ftl_block_is_bad(&m->alloc->blocks[gsrc]))

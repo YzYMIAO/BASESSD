@@ -103,7 +103,7 @@ typedef enum
 
 /* 提交 deadline：连续提交不出去超过 `FTL_SUBMIT_TIMEOUT_MS` 即判卡死，
  * 按恢复失败收尾。⚠ 只兜「提交侧」——命令一旦在飞，NAND 层自身的 wait/jump 超时保证
- * 它必有完成（超时置 FC_CW_STATUS_TIMEOUT），故不在飞时强拆 job。
+ * 它必有完成（超时置 FC_CMD_STATUS_TIMEOUT），故不在飞时强拆 job。
  * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。 */
 
 /*
@@ -138,7 +138,7 @@ typedef struct
     BYTE       retry_count;       /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
     BYTE       planes_recovered;  /* 本次 job 恢复成功的 plane 数（观测） */
     BYTE       planes_failed;     /* 本次 job 恢复失败的 plane 数（观测） */
-    DWORD      last_status;       /* 最近一次读完成状态（FC_CW_STATUS_*，日志解码用） */
+    DWORD      last_status;       /* 最近一次读完成状态（FC_CMD_STATUS_*，日志解码用） */
     DWORD      already_bad_reads; /* host 重读已退役块的累计次数（观测） */
     /* 已退役块重读日志：每 gblock 只打一次，其余只计数（防 host 反复读同一 LBA 刷屏）。 */
     DWORD already_bad_logged[FTL_BLOCK_TOTAL / 32U];

@@ -1,6 +1,7 @@
 #include "fc_bch_engine.h"
 
 #include "assertion.h"
+#include "ssd_compiler.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -1237,7 +1238,7 @@ static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
  * @param bch BCH 控制句柄
  * @param g   生成多项式（32bit 大端字数组）
  */
-static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
+static SSD_CODE_FAST void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
 {
     int       i, j, b, d;
     DWORD     data, hi, lo, *tab;
@@ -1376,7 +1377,7 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
 // - 全部表来自 `s_bch` 静态结构体，无堆分配。
 // - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
 // 任一步失败即清零静态存储返回 NULL。
-fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
+SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
     bool                      err = false;
     unsigned int              i;

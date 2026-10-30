@@ -53,6 +53,20 @@ typedef struct
     DWORD bfar;
     DWORD afsr;
     DWORD shcsr;
+
+    /* 平台配置寄存器（判定 UNALIGNED 的关键证据）：
+     * ccr：bit9=STKALIGN、bit3=UNALIGN_TRP、bit16/17=DC/IC；
+     * fpccr：bit31=ASPEN、bit30=LSPEN（FPU lazy stacking 开关）。
+     * 不放在 port 私有代码里，是因为这类异常只能从「这两组位 + 异常帧原始内容 +
+     * PC 处实时指令字」三者合起来解释。 */
+    DWORD ccr;
+    DWORD fpccr;
+
+    /* 异常入口处尚未被 C 序言覆盖的寄存器（port 侧蹦床抓取）：
+     * r7：出错函数的帧指针。普通 LDR 报 UNALIGNED 时，靠它核对「访问地址
+     *     到底对没对齐」；帧里没有 R4~R11，这是唯一能补回来的一个。
+     * 注意 handler 态的 CONTROL.FPCA 恒为 0（入异常时被清），不能用它判扩展帧。 */
+    DWORD r7;
 } fault_ctx_t;
 
 /* 使能 MemManage/BusFault/UsageFault，避免全部升级成 HardFault，便于区分。 */

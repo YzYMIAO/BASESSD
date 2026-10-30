@@ -264,6 +264,7 @@ nand_result_e nand_fc_execute(BYTE operation, const nand_fc_request_t *request, 
     status                       = nand_engine_execute(nand_fmc_backend_get(), map->uops, &map->timing, &command_request, &command_completion);
     completion->execution_status = status;
     completion->nand_status      = command_completion.nand_status;
+    completion->pre_status       = command_completion.pre_status;
     return status;
 }
 
@@ -348,6 +349,7 @@ nand_result_e nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
     {
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
+        completion->pre_status       = transaction->completion.pre_status;
         ENG_LOGD("complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
         transaction->engine.active = 0U;
     }

@@ -71,7 +71,8 @@ typedef struct
 {
     WORD command_id;
     BYTE execution_status;
-    BYTE nand_status;
+    BYTE nand_status;                 /* OP 后读状态（FAIL/FAILC） */
+    BYTE pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
     BYTE cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
     BYTE ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
     WORD failed_descriptor_id;
@@ -125,5 +126,30 @@ BYTE nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx);
  * 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界是调用者编程错误（断言）。
  */
 BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun);
+
+/**
+ * @brief 目标 LUN FIFO 的已用槽数（只读，诊断用）。
+ *
+ * @param ch  通道号。
+ * @param ce  片选号。
+ * @param lun LUN 号。
+ *
+ * @return 已用槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
+ *
+ * @note 与 `nand_dispatch_lun_phase()` 合起来区分「FIFO 满（等完成）」与
+ *       「FSM 卡在某个相位」——FC 侧出现「命令在 SQ 却不下发」时用。
+ */
+BYTE nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun);
+
+/**
+ * @brief 目标 LUN FSM 的当前相位（只读，诊断用）。
+ *
+ * @param ch  通道号。
+ * @param ce  片选号。
+ * @param lun LUN 号。
+ *
+ * @return LUN_PHASE_*（0=IDLE / 1=ISSUE / 2=ISSUED / 3=FETCH）。
+ */
+BYTE nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun);
 
 #endif /* NAND_DISPATCH_H */

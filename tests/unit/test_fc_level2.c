@@ -168,13 +168,13 @@ static fc_command_t *l2_cmd(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t
 
 /* 要求每个 CW 的 status **恰好**是 READY（一个错误位都没有）。
  * 共享夹具的 test_verify_cw_status_all_success 只看 SUCCESS 位，而
- * FC_CW_STATUS_SUCCESS == FC_CW_STATUS_READY，CRC_ERROR / MATA_ERROR 会与它共存
+ * descriptor 成功 = FC_CW_STATUS_UNUSED(0)；CRC_ERROR / MATA_ERROR 单独置位
  * 而不被发现；本层的正向用例要的是"干净读回"，故单独加这条更严的判据。 */
 static void l2_verify_all_ready(const fc_command_t *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        munit_assert_uint32(test_cw_desc(cmd, i)->status, ==, FC_CW_STATUS_READY);
+        munit_assert_uint32(test_cw_desc(cmd, i)->status, ==, FC_CW_STATUS_UNUSED);
     }
 }
 
@@ -1149,7 +1149,7 @@ static const l2_rt_case_t *l2_rt_case_find(const char *name)
  * 本函数只负责选行、把"证明了什么"打进证据摘要。
  *
  * 判据用 l2_verify_all_ready 而非夹具的 test_verify_cw_status_all_success：后者只看
- * SUCCESS 位，而 FC_CW_STATUS_SUCCESS == FC_CW_STATUS_READY，CRC_ERROR / MATA_ERROR
+ * 成功位，而 descriptor 成功 = FC_CW_STATUS_UNUSED(0)，CRC_ERROR / MATA_ERROR
  * 会与它共存而不被发现 —— 正向用例要的是"一个错误位都没有"。
  * ⚠ 全程**不提交**命令：提交后 FC 会自己再跑一遍 encode / process_read，重复编码会让
  *   用例空转（见文件头「全部用例都是 buffer 级」）。 */
@@ -1210,7 +1210,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     /* 验证 desc status：CW1 为 UNC，其余为 READY（Pass 1 是**赋值**，错误位不会残留） */
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        munit_assert_uint32(test_cw_desc(cmd, i)->status, ==, (i == 1U) ? FC_CW_STATUS_UNC : FC_CW_STATUS_READY);
+        munit_assert_uint32(test_cw_desc(cmd, i)->status, ==, (i == 1U) ? FC_CW_STATUS_UNC : FC_CW_STATUS_UNUSED);
     }
 
     /* Pass 2 被跳过（"全部成功才解扰"）⇒ 未破坏的 CW0 也仍停在**加扰态**、不是明文。

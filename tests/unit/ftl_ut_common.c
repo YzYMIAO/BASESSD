@@ -458,6 +458,35 @@ void ftl_ut_assert_clean(ftl_ctx_t *ftl)
 
     munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, 0U);
     munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, 0U);
+
+    /* ctx 残留 = 有能力登记却没被派发的命令留在队列里。这里把「谁卡住」一并打出来
+     * （只读快照；munit_errorf 会带出这行），否则只有一句 count!=0 无法定位。 */
+    if (ftl_op_ctx_count() != 0U)
+    {
+        fc_debug_state_t dbg;
+
+        memset(&dbg, 0, sizeof(dbg));
+        (void)fc_debug_state_get(&dbg);
+        munit_errorf("ftl teardown leaked op ctx=%hu | sq=%hu hsq=%hu owner=%hhu lun=%hhu/%hhu sched_sq=%hu bound=%hhu | sq_head=%hu st=%hhu chain=%hhu op=%hhu | hsq_head=%hu chain=%hhu op=%hhu | fill=%lu/%lu",
+                     ftl_op_ctx_count(),
+                     dbg.sq_used,
+                     dbg.hsq_used,
+                     (unsigned)dbg.chain_owner,
+                     dbg.lun_used,
+                     dbg.lun_phase,
+                     dbg.sched_sq_count,
+                     dbg.sched_sq_bound,
+                     dbg.sq_head_id,
+                     dbg.sq_head_state,
+                     dbg.sq_head_chain,
+                     (unsigned)dbg.sq_head_op,
+                     dbg.hsq_head_id,
+                     dbg.hsq_head_chain,
+                     (unsigned)dbg.hsq_head_op,
+                     dbg.fill_calls,
+                     dbg.fill_pops);
+    }
+
     munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
 
     memset(&rs, 0, sizeof(rs));

@@ -538,7 +538,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  *   · operation（PROGRAM / READ / ERASE）
  *   · 配置（crc / random / ldpc / lba）
  *   · 数据方向（写：submit 前搬入；读：完成后搬出）
- *   · 是否判失败位（写/读页/擦除判 FC_CW_STATUS_ERROR_MASK 全集；RAW 读刻意不判）
+ *   · 是否判失败位（写/读页/擦除判 FC_CMD_STATUS_ERROR_MASK 全集；RAW 读刻意不判）
  *   · 超时（擦除 20ms，其余默认）
  */
 
@@ -623,7 +623,7 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -633,7 +633,7 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
     return FTL_OK;
 }
 
-// 实现要点：失败判据用 FC_CW_STATUS_ERROR_MASK 全集（理由见下方行内 ⚠）。
+// 实现要点：失败判据用 FC_CMD_STATUS_ERROR_MASK 全集（理由见下方行内 ⚠）。
 ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
@@ -648,17 +648,17 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    // 失败判据 = FC_CW_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
-    // **只认 NAND_FAIL 是错的**：UNC 与 MATA_ERROR 会让本页内容不可信却照常拷出——
-    // · UNC：fc_data_path_read 在任何 CW 不可纠时**提前返回**，buffer 停在
-    // "ECC 半修正 + 未解扰" 态（Pass 2/3/4 全跳过），拷出来的是加扰垃圾；
+    // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
+    // **只认 NAND_FAIL 是错的**：DATA_ERROR / MATA_ERROR 会让本页内容不可信却照常拷出——
+    // · DATA_ERROR（UNC/CRC/RAID）：fc_data_path_read 在任何 CW 不可纠时**提前返回**，
+    //   buffer 停在 "ECC 半修正 + 未解扰" 态（Pass 2/3/4 全跳过），拷出来的是加扰垃圾；
     // · MATA_ERROR：页内 META 与预期不符 = **读到了别的页**（或页已擦除）。
     // 后果实例：L2P region 页读回垃圾 → l2p_cache_find_or_load 标 CLEAN → 垃圾 PBA
     // 被 flush 写回介质**永久化**，读路径再拿它当 ch/ce/lun 路由字段用。
     // 空页也会命中 MATA_ERROR ⇒ 返回 FTL_ERROR ⇒ 调用者保持 entries
     // 全 NAND_PBA_INVALID，与"未映射"语义一致（这正是各调用点的既有兜底分支）。
     // ⚠ 未映射的 L2P region 不在此列：Directory 条目就是 INVALID，加载路径根本不发读。
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -764,7 +764,7 @@ ftl_status_e ftl_sync_erase_block(DWORD pba)
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -792,7 +792,7 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -803,7 +803,7 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
 }
 
 // 实现要点：列地址走命令级 param 字节 0/1（小端）；4 字节先拷贝，再按
-// FC_CW_STATUS_ERROR_MASK 全集判错——读失败返回 FTL_ERROR，BBT 据此
+// FC_CMD_STATUS_ERROR_MASK 全集判错——读失败返回 FTL_ERROR，BBT 据此
 // 保守判坏（否则失败页的 0xFF 参数会被误读成“好块”）。
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
 {
@@ -841,7 +841,7 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
     // 返回 FTL_ERROR 让 BBT 按“读失败 ⇒ 坏块（保守）”处理。
     (void)memcpy(out, completion.param.bytes, 4U);
 
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -918,7 +918,7 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if (fc_cw_status_has_error(completion.status))
+    if (fc_cmd_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;

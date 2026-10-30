@@ -90,7 +90,8 @@ typedef struct
  * transfer_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
 typedef struct
 {
-    BYTE nand_status;
+    BYTE nand_status; /* 70h 原始状态：OP 后的读状态（FAIL/FAILC） */
+    BYTE pre_status;  /* 70h 原始状态：OP 前的读状态（RDY/ARDY/WP） */
     BYTE transfer_status;
 } nand_command_completion_t;
 
@@ -143,8 +144,9 @@ typedef struct
     WORD                           uop_index;
     WORD                           debug_polls;
     BYTE                           active;
-    nand_engine_wait_t             wait; /* WAIT_READY 忙等状态 */
-    nand_engine_wait_t             jump; /* JUMP_IF_NOT_READY 忙等状态 */
+    WORD                           pre_jump_index; /* 第一个 JUMP_IF_NOT_READY 的 uop 下标；只在该下标更新 pre_status */
+    nand_engine_wait_t             wait;           /* WAIT_READY 忙等状态 */
+    nand_engine_wait_t             jump;           /* JUMP_IF_NOT_READY 忙等状态 */
 } nand_engine_state_t;
 
 /* --------------------------------------------------------------------

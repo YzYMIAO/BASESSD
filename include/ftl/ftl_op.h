@@ -193,6 +193,20 @@ struct ftl_context *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun);
  */
 struct ftl_context *ftl_op_route_get_region(DWORD global_region);
 
+/**
+ * @brief 是否有任何实例的 cache 流式序列处于打开状态。
+ *
+ * @return true = 至少一个实例的 `cache_seq.active || draining`
+ *                （draining = 窗口已提交完、命令仍在飞，门控同样关着）。
+ *
+ * @note 提交侧 deadline（CP/MIG/RR/MD 的 `FTL_SUBMIT_TIMEOUT_MS`）用它区分
+ *       「序列门控造成的**预期**等待」与「真的提交不出去」：序列打开时后台提交会被
+ *       `ftl_op_seq_gate` 拒绝并置 `break_requested`，序列在下一窗口 / 下一 chunk 收尾
+ *       （空闲守卫 1 s 兜底）⇒ 等待有界，不应中止 job、也不应刷屏。
+ *       多 LUN 下是保守（coarse）判据：只会延后中止，不会漏判。
+ */
+bool ftl_op_cache_seq_active(void);
+
 /* ── 提交 ── */
 
 /**

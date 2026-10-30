@@ -293,10 +293,44 @@ static void verify_chain_paa(const fc_command_t *cmd)
  *  erased == 0：逐 desc 与「该 desc 的 PAA」比对；erased != 0：逐 desc USER 区全 0xFF。
  *
  *  ⚠ 擦除页的 META 是 0xFF…，数据路径 Pass 4 ①（自洽）必然不过 ⇒ 该 CW 带 MATA_ERROR
- *    位；但 FC_CW_STATUS_SUCCESS 是**另一个位**，仍置位，故「逐 CW SUCCESS」判据照旧
- *    成立（与改造前一致，不是本轮引入的）。也正因如此，擦除路径不能用聚合 status 的
- *    错误掩码当判据——那是 test_prog_block / test_read_block 的判据。
+ *    位；但 descriptor 成功 = FC_CW_STATUS_UNUSED(0)，错误位单独置位
+ *    成立（与改造前一致，不是本轮引入的）。也正因如此，擦除路径用
+ *    `verify_cw_status_erased`（允许 CRC|MATA|EMPTY），不能用聚合错误掩码判据——
+ *    那是 test_prog_block / test_read_block 的判据。
  **************************************************************************/
+
+/* 擦除页裸读（LDPC RAW、CRC 开）的期望状态：
+ * 整页不是有效码字 ⇒ CRC/META 天然置位；ECC 被跳过 ⇒ 不会出现 EMPTY。
+ * 只要没有 FAIL / UNC / RAID（介质或数据路径真错误），就认为擦除态读回成立；
+ * 数据全 0xFF 由 test_verify_erased 另行逐字节断言。 */
+static uint8_t verify_cw_status_erased(const fc_command_t *cmd)
+{
+    const DWORD        allowed = FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_EMPTY;
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    uint8_t            idx     = 0U;
+    uint8_t            all_ok  = 1U;
+
+    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    {
+        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+
+        munit_assert_not_null(desc);
+
+        if ((desc->status & ~allowed) != 0U)
+        {
+            char stbuf[32];
+
+            (void)fc_cw_status_str(desc->status, stbuf, sizeof(stbuf));
+            munit_errorf("chain[%hhu] plane=%lu cw=%hu status=%s: erased-page read has unexpected error bits (allowed CRC|MATA|EMPTY)", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), stbuf);
+            all_ok = 0U;
+        }
+
+        desc_id = (fc_descriptor_id_t)desc->next_id;
+        idx++;
+    }
+
+    return all_ok;
+}
 
 static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap, uint8_t erased, const fc_cmd_conf_t *config)
 {
@@ -305,14 +339,14 @@ static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap
     test_memset_read_buffer(cmd);
     (void)test_submit_wait(cmd);
 
-    munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
-
     if (erased != 0U)
     {
+        munit_assert_uint8(verify_cw_status_erased(cmd), ==, 1U);
         test_verify_erased(cmd);
     }
     else
     {
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
         verify_chain_paa(cmd);
     }
 
@@ -532,7 +566,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_READ_ONFI_SIGNATURE, FC_CRC_ENABLE));
         fc_command_status_t completion = test_submit_wait(cmd);
 
-        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         munit_assert_uint8(completion.param.bytes[0], ==, 0x4FU); /* 'O' */
         munit_assert_uint8(completion.param.bytes[1], ==, 0x4EU); /* 'N' */
         munit_assert_uint8(completion.param.bytes[2], ==, 0x46U); /* 'F' */
@@ -555,7 +589,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
         cmd->feature_addr = 0x01U;
 
-        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
+        munit_assert_uint32(test_submit_wait(cmd).status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
@@ -635,7 +669,7 @@ static void l3_feature_get(uint8_t addr, uint8_t out[4])
     cmd->feature_addr = addr;
 
     completion = test_submit_wait(cmd);
-    munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     (void)memcpy(out, completion.param.bytes, 4U);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -652,7 +686,7 @@ static void l3_feature_set(uint8_t addr, const uint8_t in[4])
     (void)memcpy(cmd->param.bytes, in, 4U);
 
     completion = test_submit_wait(cmd);
-    munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
@@ -821,7 +855,7 @@ static void l3_prio_drain(void)
         {
             uint8_t matched = 0U;
 
-            munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+            munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
             for (uint8_t j = 0U; j < g_l3_prio_used; j++)
             {
@@ -967,7 +1001,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         fc_command_status_t completion;
 
         completion = test_submit_wait(cmd);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+        munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
         /* 证据摘要（--log-visible info）：打出状态字的实际值。
          * op_idx = 项目 op 表下标，onfi = 真正发到线上的命令字节（0x70 / 0x78）。 */
@@ -1058,7 +1092,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         const uint32_t      tag        = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page});
         fc_command_status_t completion = test_read_page(dest, TEST_PLANE_BM(plane), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
-        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(plane));
     }
 
@@ -1224,6 +1258,37 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
  *    - 双 plane cache 读的 06h plane 选择正确
  *    - 两 plane 的 PAA pattern 各自独立校验（读串 plane 必被抓）
  **************************************************************************/
+
+/*  test_block_cache_multi_plane_cross_block — 两 plane 分属不同 block 的双 plane cache 读写
+ *
+ *  与 block_cache_multi_plane 的唯一差别：plane0 / plane1 各写一个 block。
+ *  这不是特例——生产 FTL（Policy B）的每个 pair 两 plane 都在不同 gblock 上；
+ *  同块版覆盖不到「跨块时 05h-E0h plane 选择 + 31h 预取推进是否仍按页 +1」。
+ *
+ *  判据：两 plane 的 USER 区逐 CW 等于**各自 block** 的 PAA 图案（读串 plane / 读错页当场红）。
+ */
+static MunitResult test_block_cache_multi_plane_cross_block(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    uint16_t blocks[PLANE_NUM];
+
+    blocks[0] = l3_block_draw("block_cache_multi_plane_cross_block");
+    blocks[1] = l3_dest_draw("block_cache_multi_plane_cross_block", blocks[0]);
+
+    test_trace_begin();
+
+    test_erase_block(blocks[0], TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_DISABLE));
+    test_erase_block(blocks[1], TEST_PLANE_BM(1), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_DISABLE));
+
+    test_prog_block_cache_multi_plane_pair(blocks, &L3_CONF(OP_TWO_PLANE_PROGRAM_CACHE, FC_CRC_DISABLE), NULL);
+    test_read_block_cache_multi_plane_pair(blocks, &L3_CONF(OP_READ_PAGE_CACHE_START_SEQ_MP, FC_CRC_DISABLE));
+
+    test_trace_summary("cache_multi_plane_cross_block: plane0 blk=%hu / plane1 blk=%hu; 63 x two-plane 15h + 1 x 10h; START_SEQ_MP + 62 x SEQ_MP + LAST_MP, both planes PAA-verified", blocks[0], blocks[1]);
+
+    return MUNIT_OK;
+}
 
 static MunitResult test_block_cache_multi_plane(const MunitParameter params[], void *data)
 {
@@ -1525,7 +1590,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
             fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), base, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
             fc_command_status_t completion = test_submit_wait(cmd);
 
-            munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+            munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
             for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2 */
             {
@@ -1584,13 +1649,13 @@ static void lock_verify_block_usable(uint16_t block, uint8_t plane, uint16_t pag
     fc_command_status_t completion;
 
     completion = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
-    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     completion = test_prog_page(block, TEST_PLANE_BM(plane), page, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
-    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     completion = test_read_page(block, TEST_PLANE_BM(plane), page, meta, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
-    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(plane));
 }
@@ -1627,7 +1692,7 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 
     /* Phase 4：LOCK 是否真的挡住擦除——**只观察、不断言**（见用例头注释） */
     erase_st = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
-    test_trace_summary("lock_status b=%hu plane=%hhu LOCK 后擦除 status=0x%hX => %s", block, plane, erase_st.status, ((erase_st.status & FC_CW_STATUS_ERROR_MASK) != 0U) ? "LOCK 生效（擦除被拒）" : "LOCK 空转（本板 LOCK 引脚为低）");
+    test_trace_summary("lock_status b=%hu plane=%hhu LOCK 后擦除 status=0x%hX => %s", block, plane, erase_st.status, ((erase_st.status & FC_CMD_STATUS_ERROR_MASK) != 0U) ? "LOCK 生效（擦除被拒）" : "LOCK 空转（本板 LOCK 引脚为低）");
 
     /* Phase 5：UNLOCK_LOW（23h）+ UNLOCK_HIGH（24h）——硬断言无错误位。
      * 23h@block 解锁 0..block、24h@block 解锁 block..末块 ⇒ 合起来把全器件恢复为未锁。 */
@@ -1778,7 +1843,7 @@ static uint16_t l3_stress_reap(void)
         l3_stress_slot_t *slot = l3_stress_slot_find((uint16_t)buf[j].command_id);
 
         munit_assert_not_null(slot);
-        munit_assert_uint32(buf[j].status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        munit_assert_uint32(buf[j].status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         if (slot->operation == L3_STRESS_OP_READ)
         {
             test_capture_cmd(slot->cmd);
@@ -1892,7 +1957,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
 /* Phase 0 前置命令的硬判据：无错误位。 */
 static void l3_stress_expect_ok(fc_command_status_t completion)
 {
-    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 }
 
 static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data)
@@ -2208,24 +2273,25 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    {          "init_sequence",           test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "feature_write_read",      test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "chain_priority_lock",     test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {           "status_query",            test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "internal_data_move",      test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {     "block_erase_verify",      test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {       "block_write_read",        test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {        "block_cache_ops",         test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {"block_cache_multi_plane", test_block_cache_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {      "block_multi_plane",       test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {      "block_random_data",       test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {       "block_load_fetch",        test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {        "block_read_meta",         test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {         "block_lock_ops",          test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {         "mixed_pipeline",          test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {        "buf_own_release",         test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                      "init_sequence",                       test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "feature_write_read",                  test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                "chain_priority_lock",                 test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                       "status_query",                        test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "internal_data_move",                  test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                 "block_erase_verify",                  test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                   "block_write_read",                    test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                    "block_cache_ops",                     test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {            "block_cache_multi_plane",             test_block_cache_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {"block_cache_multi_plane_cross_block", test_block_cache_multi_plane_cross_block, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                  "block_multi_plane",                   test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                  "block_random_data",                   test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                   "block_load_fetch",                    test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                    "block_read_meta",                     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                     "block_lock_ops",                      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                     "mixed_pipeline",                      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                    "buf_own_release",                     test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    {                     NULL,                         NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                                 NULL,                                     NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

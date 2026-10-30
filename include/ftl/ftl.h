@@ -15,7 +15,7 @@
 
 #include "allocator.h"    /* ftl_table_refs_t, super_block_t */
 #include "bg_scheduler.h" /* 时间预算后台调度器（ftl_ctx_t 含调度器） */
-#include "cache_batch.h"  /* cache_wb_t（host cache program 批次） */
+#include "cache_batch.h"  /* cache read/write 批次的常量与对 FTL 的尝试入口 */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_req_t */
 #include "gc.h"
@@ -56,6 +56,10 @@
  *   在飞时清零/不累加——否则一次数百 ms 的正常回收会被 8 轮预算判成 IO_ERROR
  *   （RISK-GC-09）。 */
 #define FTL_DRAIN_STALL_MAX (8U)
+
+/* cache 序列跨 chunk 等待下一 chunk 的上限：超过即关闭序列状态，避免门控永久
+ * 挡住该 LUN。16 KiB chunk 的 USB 传输在 ms 级，1s 是宽松上界（时钟缺失时不计时）。 */
+#define FTL_CACHE_SEQ_IDLE_MS (1000U)
 
 /* 写失败透明重试次数上限（H4：只重试一次就够覆盖「遇到一个新坏块」的情形；
  * 第二次仍失败说明介质/通道有问题，如实返回 IO_ERROR，不掩盖故障）。 */
@@ -104,6 +108,88 @@
 _Static_assert((QWORD)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
 
 /* ── FTL 主上下文 ── */
+
+/* cache 流式序列状态（per instance；读 / 写各自一套，kind 区分）。
+ * start/middle/end 由 FTL 的方向 + 连续性判断决定，不依赖 FC 的额外标志。 */
+typedef enum
+{
+    FTL_CACHE_SEQ_NONE = 0,
+    FTL_CACHE_SEQ_READ,
+    FTL_CACHE_SEQ_WRITE,
+} ftl_cache_seq_kind_e;
+
+/* cache 写序列的未确认页 FIFO 深度：上界 = 两个在飞 chunk（2×4 页）+ 前一 chunk
+ * 的尾页 + 余量。满了写路径返回 AGAIN，等完成泵结算。 */
+#define FTL_CACHE_SEQ_RING (16U)
+
+/* 写序列的逐页确认状态（读序列不用）。
+ * 缓存程序是流水线：第 i 页的最终结果由**第 i+1 条命令**的 FAIL_CACHE 给出，
+ * END（10h）的 FAIL 给出最后一页的结论。因此已提交页在下一条命令完成前都不能
+ * 确认映射，必须按提交顺序排队。 */
+typedef struct
+{
+    BYTE unconf[FTL_CACHE_SEQ_RING]; /* 未确认页的 pending 槽下标（提交顺序） */
+    BYTE head;                       /* 队头环形下标 */
+    BYTE count;                      /* 未确认页数 */
+} ftl_cache_wr_t;
+
+typedef struct
+{
+    ftl_cache_seq_kind_e kind;
+    bool                 active;    /* true = 设备侧序列打开（START 已发、END 未发） */
+    bool                 draining;  /* true = 窗口已提交完但命令仍在飞：门控继续关着，
+                                     * 直到所有者组的在飞子操作归零。**不能**在提交
+                                     * 完的瞬间就放开 LUN —— 那会让别的组在这个
+                                     * 31h/3Fh 管线还没走完时插命令（RISK-CACHE-14）。 */
+    bool           owner_submit;    /* 序列所有者正在提交窗口（门控旁路） */
+    bool           break_requested; /* 非所有者提交被门控拒绝 ⇒ 下一窗口末尾 END */
+    WORD           owner_gi;        /* 最近持有序列的组（窗口记账 / 门控归因） */
+    DWORD          next_lba;        /* 下一条命令的起始 LBA */
+    DWORD          cmd_start;       /* 打开序列的 SCSI 命令起始 LBA */
+    DWORD          cmd_total;       /* 该命令总 LBA 数（跨 chunk 续序列的判据） */
+    DWORD          idle_ms;         /* 所有者组已释放/已发完后等待下一 chunk 的起点 */
+    ftl_cache_wr_t wr;              /* 写序列的逐页确认 FIFO */
+} ftl_cache_seq_t;
+
+/**
+ * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
+ *
+ * @param ftl 实例。
+ *
+ * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（RISK-IF-09，待上板确认）。
+ *       若调用时仍有该序列的命令在飞，置 `draining` 让门控继续关到排空——否则别的组会在
+ *       31h/3Fh 管线半途插命令（RISK-CACHE-14）。
+ */
+void ftl_cache_seq_release(struct ftl_context *ftl);
+
+/* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）── */
+/**
+ * @brief 把一页的 pending 槽压入未确认 FIFO。
+ *
+ * @param ftl 实例。
+ * @param idx pending 槽下标。
+ *
+ * @return true = 已入队；false = FIFO 满（调用者应视为资源不足）。
+ */
+bool ftl_cache_wr_ring_push(struct ftl_context *ftl, BYTE idx);
+
+/**
+ * @brief 弹出最早未确认页的 pending 槽下标。
+ *
+ * @param ftl 实例。
+ *
+ * @return 待结算页的 pending 下标；UINT8_MAX = FIFO 空。
+ */
+BYTE ftl_cache_wr_ring_pop(struct ftl_context *ftl);
+
+/**
+ * @brief 中止写序列：未确认页一律按 IO_ERROR 结算、关闭 hot SB、清序列状态。
+ *
+ * @param ftl 实例。
+ *
+ * @note 只结算仍在本序列 FIFO 里的页；已经由后继命令结算的页不受影响。
+ */
+void ftl_cache_wr_abort(struct ftl_context *ftl);
 
 typedef struct ftl_context
 {
@@ -161,14 +247,17 @@ typedef struct ftl_context
     DWORD cache_read_batches;   /* 成功提交的批次数 */
     DWORD cache_read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均批深） */
     DWORD cache_read_declines;  /* 收集不足最小 pair 数而放弃尝试的次数（不连续 / wbuf 命中 / L2P 加载中） */
+    DWORD cache_seq_breaks;     /* D4：门控拒绝导致的序列提前收尾次数（读+写） */
     DWORD cache_read_fallbacks; /* 已决定走 cache read 但资源不足或提交失败而回退的次数 */
 
+    /* cache 读写流式序列（per-instance，单 LUN 同时一条）。 */
+    ftl_cache_seq_t cache_seq;
+
     /* host cache program 批次（per-instance，单 LUN 单批）。 */
-    cache_wb_t cache_wb;          /* 在飞批次的上下文（页对 / 命令 / pending 槽 / 完成掩码） */
-    DWORD      cache_wb_batches;  /* 成功提交的批次数 */
-    DWORD      cache_wb_pages;    /* 累计提交的页数 */
-    DWORD      cache_wb_declines; /* 条件不满足而回退 wbuf 的次数 */
-    DWORD      cache_wb_aborts;   /* 批次首次成员失败而中止的次数（同一批只计一次） */
+    DWORD cache_wb_batches;  /* 成功提交的批次数 */
+    DWORD cache_wb_pages;    /* 累计提交的页数 */
+    DWORD cache_wb_declines; /* 条件不满足而回退 wbuf 的次数 */
+    DWORD cache_wb_aborts;   /* 批次首次成员失败而中止的次数（同一批只计一次） */
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的

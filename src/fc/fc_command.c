@@ -15,26 +15,16 @@
 #include <stddef.h>
 #include <string.h>
 
-// 输出示例："READY|UNC" / "UNC" / "NAND|TIMEOUT"。
-// 位顺序按严重性/可读性排列；未知位以 "?" 占位。只写 buf，不分配资源。
-const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
+// 状态位名表 → "A|B|?"。位顺序按严重性/可读性排列；未知位以 "?" 占位。
+// 只写 buf，不分配资源。
+typedef struct
 {
-    static const struct
-    {
-        DWORD       bit;
-        const char *name;
-    } tbl[] = {
-        { FC_CW_STATUS_NAND_FAIL,    "NAND"},
-        {   FC_CW_STATUS_TIMEOUT, "TIMEOUT"},
-        { FC_CW_STATUS_CRC_ERROR,     "CRC"},
-        {       FC_CW_STATUS_UNC,     "UNC"},
-        {FC_CW_STATUS_MATA_ERROR,    "MATA"},
-        {FC_CW_STATUS_RAID_ERROR,    "RAID"},
-        {     FC_CW_STATUS_READY,   "READY"},
-        { FC_CW_STATUS_PROTECTED,    "PROT"},
-        {     FC_CW_STATUS_BLANK,   "BLANK"},
-    };
+    DWORD       bit;
+    const char *name;
+} fc_status_name_t;
 
+static const char *fc_status_str_format(const fc_status_name_t *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
+{
     if ((buf == NULL) || (buflen == 0U))
     {
         return "";
@@ -44,7 +34,7 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
     DWORD used  = 0U;
     DWORD known = 0U;
 
-    for (DWORD i = 0U; i < (sizeof(tbl) / sizeof(tbl[0])); i++)
+    for (DWORD i = 0U; i < count; i++)
     {
         if ((status & tbl[i].bit) == 0U)
         {
@@ -77,6 +67,36 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
     }
     buf[used] = '\0';
     return buf;
+}
+
+static const fc_status_name_t s_cw_status_names[] = {
+    {      FC_CW_STATUS_FAIL,  "FAIL"},
+    {       FC_CW_STATUS_UNC,   "UNC"},
+    { FC_CW_STATUS_CRC_ERROR,   "CRC"},
+    {FC_CW_STATUS_MATA_ERROR,  "MATA"},
+    {FC_CW_STATUS_RAID_ERROR,  "RAID"},
+    {     FC_CW_STATUS_EMPTY, "EMPTY"},
+};
+
+static const fc_status_name_t s_cmd_status_names[] = {
+    { FC_CMD_STATUS_NAND_FAIL,    "NAND"},
+    {FC_CMD_STATUS_FAIL_CACHE,   "FAILC"},
+    {   FC_CMD_STATUS_TIMEOUT, "TIMEOUT"},
+    {FC_CMD_STATUS_DATA_ERROR,    "DATA"},
+    {FC_CMD_STATUS_MATA_ERROR,    "MATA"},
+    {    FC_CMD_STATUS_AREADY,    "ARDY"},
+    {       FC_CMD_STATUS_RDY,     "RDY"},
+    {        FC_CMD_STATUS_WP,      "WP"},
+};
+
+const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
+{
+    return fc_status_str_format(s_cw_status_names, (DWORD)(sizeof(s_cw_status_names) / sizeof(s_cw_status_names[0])), status, buf, buflen);
+}
+
+const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen)
+{
+    return fc_status_str_format(s_cmd_status_names, (DWORD)(sizeof(s_cmd_status_names) / sizeof(s_cmd_status_names[0])), status, buf, buflen);
 }
 
 // 以 plane 0 的低 CW_NUM 位为基准逐 plane 比较；mask == 0 时各 plane 均为 0，判为对称。

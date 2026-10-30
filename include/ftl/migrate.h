@@ -85,7 +85,7 @@ typedef struct ftl_context ftl_ctx_t;
  * 提交侧（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）用
  * `FTL_SUBMIT_TIMEOUT_MS`；等外部模块（L2P region / Journal 刷页）用
  * `FTL_WAIT_TIMEOUT_MS`。命令一旦在飞，NAND 层的 wait/jump 超时保证它必有完成
- * （超时置 FC_CW_STATUS_TIMEOUT），故不在飞时强拆 job。
+ * （超时置 FC_CMD_STATUS_TIMEOUT），故不在飞时强拆 job。
  * 超过 deadline ⇒ 中止 job（不擦 victim，数据无损，下轮重试）。
  * ⚠ 平台时钟缺失（now_ms == 0）时 deadline 不生效——退化为「无超时」；本板
  *   `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。 */

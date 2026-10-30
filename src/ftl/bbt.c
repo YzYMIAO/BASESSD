@@ -1010,7 +1010,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
  */
 static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    if (fc_cw_status_has_error(completion->status))
+    if (fc_cmd_status_has_error(completion->status))
     {
         LOGE(LOG_TAG_BBT "ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n", completion->status);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
@@ -1044,7 +1044,7 @@ static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     bbt_ctx_init(alloc, &rctx);
     alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % md_ring_total_records(&rctx.ring));
 
-    if (fc_cw_status_has_error(completion->status))
+    if (fc_cmd_status_has_error(completion->status))
     {
         LOGE(LOG_TAG_BBT "record write failed status=0x%02x — dirty 保留\r\n", completion->status);
     }

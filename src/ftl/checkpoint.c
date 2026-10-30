@@ -292,6 +292,14 @@ static bool cp_job_stall(cp_handle_t *h)
     {
         return false;
     }
+
+    // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
+    if (ftl_op_cache_seq_active() == true)
+    {
+        h->stall_ms = 0U;
+        return false;
+    }
+
     if (h->stall_ms == 0U)
     {
         h->stall_ms = now_ms;
@@ -679,7 +687,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
         return;
     }
 
-    const bool failed = fc_cw_status_has_error(completion->status);
+    const bool failed = fc_cmd_status_has_error(completion->status);
 
     // 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
     // cp_job_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。

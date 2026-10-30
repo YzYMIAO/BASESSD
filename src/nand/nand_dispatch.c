@@ -103,6 +103,7 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, BYTE result,
 {
     task->completion.execution_status = result;
     task->completion.nand_status      = nand_completion->nand_status;
+    task->completion.pre_status       = nand_completion->pre_status;
 
     g_nand_dispatch_completion_table[task->operation](task, result, nand_completion);
 }
@@ -230,6 +231,18 @@ BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
      * 保留防御会退化成静默活锁（越界 → 恒 0 → 该 LUN 永久挂起），断言停机更好定位。 */
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return (NAND_DISPATCH_CHAIN_DEPTH - g_nand_dispatch_queues[ch][ce][lun].count);
+}
+
+BYTE nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun)
+{
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    return (BYTE)g_nand_dispatch_queues[ch][ce][lun].count;
+}
+
+BYTE nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun)
+{
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    return g_nand_dispatch_queues[ch][ce][lun].phase;
 }
 
 /* ======================================================================
@@ -451,6 +464,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
     {
         ctx->nand_completion.execution_status = task->completion.execution_status;
         ctx->nand_completion.nand_status      = task->completion.nand_status;
+        ctx->nand_completion.pre_status       = task->completion.pre_status;
         ctx->result                           = task->completion.execution_status;
         return NAND_DISPATCH_LUN_DONE;
     }
@@ -473,6 +487,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
 
     ctx->nand_completion.execution_status = result;
     ctx->nand_completion.nand_status      = task->transaction.completion.nand_status;
+    ctx->nand_completion.pre_status       = task->transaction.completion.pre_status;
     ctx->result                           = result;
     return NAND_DISPATCH_LUN_DONE;
 }
@@ -503,6 +518,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
         }
         ctx->nand_completion.execution_status = result;
         ctx->nand_completion.nand_status      = task->transaction.completion.nand_status;
+        ctx->nand_completion.pre_status       = task->transaction.completion.pre_status;
     }
     else if (task->transaction.engine.active != 0U)
     {
@@ -645,6 +661,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         }
         ctx->nand_completion.execution_status = result;
         ctx->nand_completion.nand_status      = task->transaction.completion.nand_status;
+        ctx->nand_completion.pre_status       = task->transaction.completion.pre_status;
     }
 
     ctx->result = result;

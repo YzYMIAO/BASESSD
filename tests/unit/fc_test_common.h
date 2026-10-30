@@ -300,6 +300,16 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
 void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
 void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
 
+/* 跨块 pair 版：两 plane 各在一个 block（Policy B 的真实形态，生产 FTL 恒如此）。
+ *   与上面同块版的差别只有地址来源：行地址逐 plane 取 blocks[plane]（走
+ *   ftl_cmd_setup_ppa_pair_cw，与生产同一个建链入口），故 meta 只能取整对共用的
+ *   LBA 口径（一个命令只有一个 command->meta）。
+ *   覆盖点：05h-E0h 的 plane 选择与 31h 预取推进在「两 plane 不同块」下是否仍按页 +1。 */
+fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_conf_t *config);
+void          test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config, uint8_t **data);
+void          test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config);
+void          test_verify_page_pair_paa(const uint8_t *data, const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint8_t plane_bitmap);
+
 /* test_read_cache_random：cache 读的「随机跳页」入口——OP_READ_PAGE_CACHE_RANDOM（00h-addr-31h）。
  *
  *   手册原文：「reads the specified block and page **into the data register** while the
@@ -371,7 +381,7 @@ void test_capture_cmd(const fc_command_t *cmd);
 /* 按 (block, page, plane_bitmap) 逐槽校验 data 里的 PAA 图案——页 helper 的读回判据。 */
 void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t page_index, uint8_t plane_bitmap);
 
-/* 活链版：逐 desc 断言 USER 区全 0xFF（擦除态） / 每 CW 的 status 含 FC_CW_STATUS_SUCCESS。 */
+/* 活链版：逐 desc 断言 USER 区全 0xFF（擦除态） / 每 CW 的 status == FC_CW_STATUS_UNUSED（成功）。 */
 void    test_verify_erased(const fc_command_t *cmd);
 uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd);
 

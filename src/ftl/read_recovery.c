@@ -287,7 +287,7 @@ static void rr_settle_plane(rr_handle_t *rr)
         // · 好块首次不可纠 ⇒ 完整现场（PBA/PAA/plane/block/page/cw + 解码状态）⇒ 限流。
         char stbuf[48];
 
-        (void)fc_cw_status_str(rr->last_status, stbuf, sizeof(stbuf));
+        (void)fc_cmd_status_str(rr->last_status, stbuf, sizeof(stbuf));
 
         if (already_bad)
         {
@@ -591,7 +591,12 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
 
             if (now_ms != 0U)
             {
-                if (rr->stall_ms == 0U)
+                // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计 deadline。
+                if (ftl_op_cache_seq_active() == true)
+                {
+                    rr->stall_ms = 0U;
+                }
+                else if (rr->stall_ms == 0U)
                 {
                     rr->stall_ms = now_ms;
                 }
@@ -626,17 +631,56 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
  *
  * @param rr         实例（推进 stage / retry_count / last_status）
  * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
- * @param completion 完成状态（status 的 FC_CW_STATUS_* 位）
+ * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
  *
  * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
  *       UNC / NAND_FAIL / TIMEOUT / MATA_ERROR 直接交 rr_settle_plane 清零 + 标坏。
  */
+/**
+ * @brief 扫 desc 链判断失败是否**只有 CRC**（RR 允许再读一次的唯一情形）。
+ *
+ * @param cmd 读命令（desc 链在 release 前有效）。
+ *
+ * @return true = 至少一个失败 CW，且所有失败 CW 的错误位都只有 CRC_ERROR。
+ *
+ * @note 命令级 DATA_ERROR 把 UNC/CRC/RAID 合并成一位；要判 CRC-only 必须回看 desc。
+ */
+static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
+{
+    bool any = false;
+    WORD did = cmd->desc_id;
+
+    while (did != FC_DESCRIPTOR_ID_INVALID)
+    {
+        const fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
+
+        if (d == NULL)
+        {
+            break;
+        }
+
+        const DWORD err = d->status & FC_CW_STATUS_ERROR_MASK;
+
+        if (err != 0U)
+        {
+            if ((err & ~FC_CW_STATUS_CRC_ERROR) != 0U)
+            {
+                return false;
+            }
+            any = true;
+        }
+        did = d->next_id;
+    }
+
+    return any;
+}
+
 static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     rr->retry_count = rr->attempt;
     rr->last_status = completion->status; /* 收尾日志解码用 */
 
-    if (fc_cw_status_has_error(completion->status) == false)
+    if (fc_cmd_status_is_success(completion->status))
     {
         (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
         rr->recovered = true;
@@ -644,9 +688,12 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
         return;
     }
 
-    const DWORD err = completion->status & FC_CW_STATUS_ERROR_MASK;
+    // 命令级 DATA_ERROR 合并了 UNC/CRC/RAID，CRC-only 要回看 desc；
+    // NAND/FAILC/TIMEOUT/MATA 任意一个出现都不是 CRC-only。
+    const DWORD err_bits = completion->status & FC_CMD_STATUS_ERROR_MASK;
+    const bool  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
 
-    if (((err & ~FC_CW_STATUS_CRC_ERROR) == 0U) && (rr->attempt < 2U))
+    if (crc_only && (rr->attempt < 2U))
     {
         rr->attempt++;
         rr->stage = RR_STAGE_READ; /* CRC 错：再读一次 */
@@ -659,7 +706,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
 
 // 实现要点：按 stage 分派到 rr_read_complete 判完成结果并改 stage，然后 release
 // 命令 → rr_job_step 续跑。
-// ⚠ 成功判据：FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
+// ⚠ 成功判据：FC_CMD_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
 // ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
 void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {

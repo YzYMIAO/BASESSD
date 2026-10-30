@@ -82,6 +82,10 @@ static DWORD s_replay_degraded_region;
 static DWORD s_replay_write_fail_entries;
 static DWORD s_replay_write_fail_lba;
 
+/* erase kick 失败日志限流（时间优先，无时钟时 64 条兜底）。 */
+static DWORD s_erase_kick_log_ms;
+static DWORD s_erase_kick_n;
+
 /* ══════════════════════════════════════════════════════════
  * 1. 页地址辅助
  * ══════════════════════════════════════════════════════════ */
@@ -792,7 +796,7 @@ static void jrn_write_failure_note(l2p_jrn_t *journal)
  */
 static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    const bool failed = fc_cw_status_has_error(completion->status);
+    const bool failed = fc_cmd_status_has_error(completion->status);
 
     if (failed)
     {
@@ -826,7 +830,30 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         }
         else if (jrn_erase_start(journal) == false)
         {
-            LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.target_block);
+            // 背压（池空 / 队列满 / cache 序列门控）是**预期**等待，need_erase 保留、下轮重试。
+            // 限流 5 s 一行（时间优先），避免 host 大顺序写 + GC 期间刷屏。
+            const DWORD now_ms = ftl_job_now_ms();
+            bool        due;
+
+            if (now_ms != 0U)
+            {
+                due = (s_erase_kick_log_ms == 0U) || ((now_ms - s_erase_kick_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+            }
+            else
+            {
+                due = (s_erase_kick_n >= 64U);
+            }
+
+            if (due == true)
+            {
+                LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试 (suppressed=%lu)\r\n", journal->handle.target_block, s_erase_kick_n);
+                s_erase_kick_log_ms = now_ms;
+                s_erase_kick_n      = 0U;
+            }
+            else
+            {
+                s_erase_kick_n++;
+            }
         }
     }
 
@@ -845,7 +872,7 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
  */
 static void jrn_erase_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    if (fc_cw_status_has_error(completion->status))
+    if (fc_cmd_status_has_error(completion->status))
     {
         LOGE(LOG_TAG_JRN "ring block erase failed blk=%hhu status=0x%02hx — 重新挂起\r\n", journal->handle.target_block, completion->status);
         // 擦失败 ⇒ 目标块仍是脏的；绝不能把后续页写进去。重新挂起 need_erase，

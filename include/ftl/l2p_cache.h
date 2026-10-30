@@ -513,6 +513,20 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
 bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
 
 /**
+ * @brief 纯驻留探针：只查 cache 行，**不启动加载、不记账**。
+ *
+ * @param cache L2P cache。
+ * @param lba   全局 LBA。
+ *
+ * @return true  = 行有效且 entries 可读（CLEAN / DIRTY / FLUSHING）；
+ *         false = 无行 / LOADING。
+ *
+ * @note 用于 cache 序列窗口末尾的断点探测：序列打开时 `l2p_read` 起的加载读会被
+ * FTL 门控挡住 ⇒ 用本函数避免启动加载。
+ */
+bool l2p_is_resident(l2p_cache_t *cache, DWORD lba);
+
+/**
  * @brief 写入**全局 LBA** → PBA 映射（**三态**）
  *
  * 只改 cache line 并置 DIRTY + 全局 region 脏位，不写 NAND（写回由 flush 起）。

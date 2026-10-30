@@ -45,6 +45,7 @@
 #include "fc_scheduler.h"
 #include "log.h"
 #include "nand_dispatch.h"
+#include "ssd_compiler.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -169,6 +170,19 @@ static bool fc_is_page_write(BYTE operation)
         default:
             return false;
     }
+}
+
+/* 填充 pass 计数：排障用（fc_debug_state_get 读取）。 */
+static DWORD s_fill_calls;
+static DWORD s_fill_pops;
+
+void fc_debug_fill_counters(DWORD *calls, DWORD *pops)
+{
+    ASSERT(calls != NULL);
+    ASSERT(pops != NULL);
+
+    *calls = s_fill_calls;
+    *pops  = s_fill_pops;
 }
 
 /* ── 资源统计读取器（fc_get_resource_stats 用，fc_interface.c 调用；契约见 fc_internal.h） ── */
@@ -302,7 +316,7 @@ bool fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id
 
 // 契约见 fc_internal.h。三池本体与队列存储是文件作用域 static，地址在整个固件
 // 生命周期内固定，DMA 看到的物理地址不变；可重复调用以重置。
-fc_status_e fc_init_internal(fc_t *controller)
+SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
 {
     fc_status_e result;
     WORD        index;
@@ -753,56 +767,107 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.status     = 0U;
     memset(&completion.param, 0, sizeof(completion.param)); /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
-    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) && (fc_is_page_read(command->config.operation) == true))
+    /* 命令级状态 = NAND 前/后两次读状态的位 + 数据路径聚合。
+     * 前一次（pre_status）：RDY/ARDY/WP —— 命令下发时的器件状态；
+     * 后一次（nand_status）：FAIL/FAILC —— 本次操作结果。
+     * 命令成功 = 错误位全 0，**不是 RDY**。 */
     {
-        // 走 desc 链聚合：status 全链 OR；首个失败 CW 的 desc_id。
-        // **不**聚合失败 CW 位图——上层要定位失败 CW，遍历 desc 链 OR 各 desc->status
-        // 即可（desc 链本来就完整留在池里直到 fc_command_release），FC 不必代为派生。
-        fc_descriptor_id_t did        = (fc_descriptor_id_t)command->desc_id;
-        BYTE               found_fail = 0U;
+        const BYTE pre  = nand_completion->pre_status;
+        const BYTE post = nand_completion->nand_status;
+        const BYTE exec = nand_completion->execution_status;
+        DWORD      cmd  = 0U;
 
-        while (did < FC_DESCRIPTOR_POOL_DEPTH)
+        // post 不一定是 70h 状态寄存器：BLOCK_LOCK_STATUS 的 7Ah 字节也经
+        // DATA_OUT_STATUS 进 nand_status（bit0 是 LT，不是 FAIL），不能按状态位映射。
+        const bool post_is_70h = (command->config.operation != OP_BLOCK_LOCK_STATUS);
+
+        if ((post_is_70h == true) && ((post & NAND_STATUS_FAIL) != 0U))
         {
-            const fc_descriptor_t *d = &controller->descriptor_pool[did];
+            cmd |= FC_CMD_STATUS_NAND_FAIL;
+        }
+        // FAILC 只在 cache program 的**中间页/末页**有意义；首页(49h)与非 cache op
+        // 的状态字节里 bit1 可能是上一批残留，不能映射（与 CHECK_FAIL_CACHE 的
+        // 分 op 判据一致：FIRST 只查 FAIL）。
+        const bool fail_cache_valid = (command->config.operation == OP_TWO_PLANE_PROGRAM_CACHE) || (command->config.operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
 
-            completion.status |= d->status;
-            // 更新 desc_id 指向**首个失败 CW** 的 desc——契约见 fc_command_status_t.desc_id
-            // （"first-failing desc on error"）。失败位取 FC_CW_STATUS_ERROR_MASK 全集，
-            // 不只 UNC：ECC 纠错成功但 CRC/META 校验失败的 CW 同样是失败 CW（其 status 为
-            // READY|CRC_ERROR / READY|MATA_ERROR），此前只认 UNC 会让这类命令的 desc_id
-            // 停留在 NAND 层透传值（读成功时即 INVALID），与契约不符。
-            if ((found_fail == 0U) && fc_cw_status_has_error(d->status))
+        if ((post_is_70h == true) && (fail_cache_valid == true) && ((post & NAND_STATUS_FAILC) != 0U))
+        {
+            cmd |= FC_CMD_STATUS_FAIL_CACHE;
+        }
+        if ((pre & NAND_STATUS_READY) != 0U)
+        {
+            cmd |= FC_CMD_STATUS_RDY;
+        }
+        if ((pre & NAND_STATUS_ARDY) != 0U)
+        {
+            cmd |= FC_CMD_STATUS_AREADY;
+        }
+        if ((pre & NAND_STATUS_WP) != 0U)
+        {
+            cmd |= FC_CMD_STATUS_WP;
+        }
+
+        if (exec == NAND_RESULT_TIMEOUT)
+        {
+            cmd |= FC_CMD_STATUS_TIMEOUT;
+        }
+        else if ((exec != NAND_RESULT_OK) && ((cmd & (FC_CMD_STATUS_NAND_FAIL | FC_CMD_STATUS_FAIL_CACHE)) == 0U))
+        {
+            // 构建/提交失败注入（exec = NOT_READY）没有状态字节：按 NAND_FAIL 上报。
+            cmd |= FC_CMD_STATUS_NAND_FAIL;
+        }
+
+        if (command->desc_id != FC_DESCRIPTOR_ID_INVALID)
+        {
+            // per-CW：先把 NAND 的 per-CW 结果并进 desc，再把 desc 聚合成命令级。
+            // **不只 page read**：program 的 desc 也要拿到 FAIL，否则 FTL 的程序失败
+            // 平面归因只能回退 plane0（ftl.c 的 bad_plane_mask）。
+            // 失败类别（UNC/CRC/MATA/RAID）只留在 desc；命令级只保留 DATA_ERROR/MATA。
+            fc_descriptor_id_t did        = (fc_descriptor_id_t)command->desc_id;
+            BYTE               found_fail = 0U;
+            BYTE               slot       = 0U;
+
+            while ((did < FC_DESCRIPTOR_POOL_DEPTH) && (slot < CW_TOTAL_MAX))
             {
-                completion.desc_id = did;
-                found_fail         = 1U;
+                fc_descriptor_t *d = &controller->descriptor_pool[did];
+                // cw_status[] 是 flat 绝对编号（plane*CW_NUM+cw）；desc 链可能只覆盖子集
+                // （flat 掩码读），不能拿链序 slot 直接当索引。
+                const BYTE flat    = (BYTE)((paa_to_plane(d->paa) * CW_NUM) + paa_to_cw(d->paa));
+
+                d->status |= nand_completion->cw_status[flat];
+
+                if ((d->status & FC_CW_STATUS_FAIL) != 0U)
+                {
+                    cmd |= FC_CMD_STATUS_NAND_FAIL;
+                }
+                if ((d->status & FC_CW_STATUS_MATA_ERROR) != 0U)
+                {
+                    cmd |= FC_CMD_STATUS_MATA_ERROR;
+                }
+                if ((d->status & (FC_CW_STATUS_UNC | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_RAID_ERROR)) != 0U)
+                {
+                    cmd |= FC_CMD_STATUS_DATA_ERROR;
+                }
+                if ((found_fail == 0U) && fc_cw_status_has_error(d->status))
+                {
+                    completion.desc_id = did;
+                    found_fail         = 1U;
+                }
+                did = (fc_descriptor_id_t)d->next_id;
+                slot++;
             }
-            did = (fc_descriptor_id_t)d->next_id;
-        }
-    }
-    else
-    {
-        // 非 page read：直接透传 NAND completion 状态（无 per-CW 解码）。
-        // 未用到的槽位由 nand_dispatch_completion_init() 预置 FC_CW_STATUS_UNUSED(=0)。
-        BYTE slot;
-
-        for (slot = 0U; slot < CW_TOTAL_MAX; slot++)
-        {
-            completion.status |= nand_completion->cw_status[slot];
         }
 
-        // OP_BLOCK_LOCK_STATUS：7Ah 的状态字节由引擎**直读 DQ 总线**送进
-        // completion->nand_status（NAND_UOP_DATA_OUT_STATUS，见 nand_fmc.c 的
-        // nand_fmc_exec_data_out_status），**不经任何数据缓冲** ⇒ 只能从这里取。
-        // 字节位定义（MT29F4G08 手册）：I/O2 = Lock#（0 = 锁定，1 = 未锁）、
-        // I/O1 = LT#、I/O0 = LT（1 = 紧锁）。
+        // 非 page read：命令级状态已由上面的 NAND 位给出；下面只处理特殊返回段。
+        // OP_BLOCK_LOCK_STATUS：7Ah 的状态字节由引擎直读 DQ 总线送进
+        // completion->nand_status（NAND_UOP_DATA_OUT_STATUS），不经数据缓冲 ⇒ 只能从这里取。
         if (command->config.operation == OP_BLOCK_LOCK_STATUS)
         {
             completion.param.bytes[0] = nand_completion->nand_status;
         }
         // GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN：引擎把
         // 寄存器值 / 页内 META / 器件 ONFI 签名 / 按列读的 4 字节写进控制器侧暂存，拷进 CQ
-        // 返回段（都用 4 字节暂存 g_fc_return_staging，见 fc_build_dispatch_request）。
-        // ⚠ SQ 命令体提交后不再被写（见 fc_command.h「SQ 不可变」）。
+        // 返回段（都用 4 字节暂存 g_fc_return_staging）。
         else if ((command->config.operation == OP_GET_FEATURES) || (command->config.operation == OP_READ_META) || (command->config.operation == OP_READ_ONFI_SIGNATURE) || (command->config.operation == OP_READ_COLUMN))
         {
             BYTE i;
@@ -812,6 +877,8 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
                 completion.param.bytes[i] = g_fc_return_staging[nand_completion->command_id][i];
             }
         }
+
+        completion.status = cmd;
     }
 
     /* ── Step 4: buffer 归属 = FC 释放（buf_own bit0 = 1，即 01/11）时当场归还 ──
@@ -1043,7 +1110,7 @@ stripe_error:
         memset(&fail_comp, 0, sizeof(fail_comp));
         fail_comp.command_id       = data_cmd_id;
         fail_comp.execution_status = NAND_RESULT_NOT_READY;
-        fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+        fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
         (void)fc_complete_from_nand(controller, &fail_comp);
     }
     return FC_STATUS_IO_ERROR;
@@ -1071,7 +1138,7 @@ stripe_error:
  * @param command_id 失败命令。
  *
  * @note 实现要点：request 构建失败 / submit 失败共用；execution_status 用
- * NOT_READY 表示"未能提交"，cw_status[0] 置 FC_CW_STATUS_NAND_FAIL。
+ * NOT_READY 表示"未能提交"，cw_status[0] 置 FC_CW_STATUS_FAIL。
  */
 static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 {
@@ -1080,7 +1147,7 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
     memset(&fail_comp, 0, sizeof(fail_comp));
     fail_comp.command_id       = command_id;
     fail_comp.execution_status = NAND_RESULT_NOT_READY;
-    fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+    fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
     (void)fc_complete_from_nand(controller, &fail_comp);
 }
 
@@ -1664,6 +1731,8 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
  * 链成员连续且逐个回推，链头永远排在成员之前，链序不破。
  * - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
  */
+/* 填充拒绝下发的原因（限流 8 条）：`S`=本趟已挂起该 LUN、`L`=链锁归另一队列、
+ * `R`=FIFO 剩余槽放不下整条链。只用于定位「命令在 SQ 却一直不发」。 */
 static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, BYTE owner, BYTE suspended[CH_NUM][CE_NUM][LUN_NUM], BYTE *dispatched)
 {
     WORD total;
@@ -1687,6 +1756,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         BYTE                 j;
 
         (void)fc_submission_queue_pop(queue, &id);
+        s_fill_pops++;
         cmd = fc_command_id_to_command(id);
         ASSERT(cmd != NULL);
 
@@ -1788,6 +1858,7 @@ static fc_status_e fc_poll_fill(fc_t *controller)
     BYTE            dispatched = 0U;
 
     memset(suspended, 0, sizeof(suspended));
+    s_fill_calls++;
 
     /* ── HSQ 优先：先扫 HSQ，再扫 SQ；同一套扫描逻辑，共享同一张 suspended 表 ── */
     if (fc_poll_fill_queue(controller, scheduler->hsq, FC_CHAIN_OWNER_HSQ, suspended, &dispatched) != FC_STATUS_OK)

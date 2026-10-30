@@ -117,7 +117,12 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     if (alc_super_open_alloc_pair(h->alloc, ALC_SUPER_ALLOC_HOT, pba) != FTL_OK)
     {
-        mig_gc_request_urgent(h->migrate);
+        // migrate 是本模块的**可选端口**：纯 RAM 单测用 wb_init(..., NULL) 隔离
+        // 后台迁移器，此时只做背压，不登记紧急 GC（见 wbuf.h wb_init 契约）。
+        if (h->migrate != NULL)
+        {
+            mig_gc_request_urgent(h->migrate);
+        }
         return FTL_AGAIN;
     }
 
@@ -175,16 +180,16 @@ static ftl_status_e wb_flush(wb_handle_t *h)
         goto wbuf_flush_fail;
     }
 
-    pending->command_id         = ftl_cmd_id(cmd);
-    pending->owners             = h->owners;
-    pending->op                 = page0 ? PENDING_OP_WRITE_PAGE0 : PENDING_OP_WRITE;
-    pending->n_cw               = n_cw;
-    pending->cw_bitmap          = h->occupied;
-    pending->lba                = h->base;
-    pending->buffer             = NULL;
-    pending->new_pba            = pba[0];
-    pending->new_pba1           = pba[1];
-    pending->cache_intermediate = false;
+    pending->command_id = ftl_cmd_id(cmd);
+    pending->owners     = h->owners;
+    pending->op         = page0 ? PENDING_OP_WRITE_PAGE0 : PENDING_OP_WRITE;
+    pending->n_cw       = n_cw;
+    pending->cw_bitmap  = h->occupied;
+    pending->lba        = h->base;
+    pending->buffer     = NULL;
+    pending->new_pba    = pba[0];
+    pending->new_pba1   = pba[1];
+    pending->cache_role = PEND_CACHE_ROLE_NONE;
     pend_validate(pending);
 
     // 提交（tag = HOST_IO ⇒ 完成时由 g_op_callbacks[FTL_OP_HOST_IO] 收尾）。

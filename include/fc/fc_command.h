@@ -120,53 +120,57 @@ typedef enum
  * `fc_command_status_t.op_tag`。语义（= FTL 的 `ftl_op_id_e`）由 FTL 侧定义，
  * 见 include/ftl/ftl_op.h。 */
 
-/*
-| 状态 | 汇总规则 |
-|---|---|
-| `NAND_FAIL` | 任意 CW 置位即置位 |
-| `TIMEOUT` | 任意 CW 置位即置位 |
-| `CRC_ERROR` | 任意 CW 置位即置位 |
-| `UNC` | 任意 CW 置位即置位 |
-| `MATA_ERROR` | 任意 CW 置位即置位 |
-| `RAID_ERROR` | 任意 CW 置位即置位 |
-| `READY` | 建议所有有效 CW 都 Ready 后才算命令 Ready |
-| `PROTECTED` | 任意 CW 或目标块受保护即置位 |
-| `BLANK` | 任意 CW 置位即置位；**不是错误位**——表示该 CW 物理上是擦除页 |
-*/
-/* 每 CW 状态位：命令级聚合状态 = 各 CW 状态按上表规则 OR 合并 */
-#define FC_CW_STATUS_NAND_FAIL  (1U << 0)
-#define FC_CW_STATUS_TIMEOUT    (1U << 1)
-#define FC_CW_STATUS_CRC_ERROR  (1U << 2)
-#define FC_CW_STATUS_UNC        (1U << 3)
+/* 状态有两套坐标：
+ *   · descriptor 状态（FC_CW_STATUS_*，per-CW）：数据路径结果 + NAND per-CW FAIL；
+ *   · command 状态（FC_CMD_STATUS_*，命令级）：NAND 前/后两次读状态的位 + 数据路径聚合。
+ * 两者不共用位号；命令级的数据路径只保留 DATA_ERROR/MATA 两个聚合位，具体类别看 desc。
+ *
+ * NAND 70h 状态位（Table 18）：bit0 FAIL（后一次读状态，当前操作）、
+ * bit1 FAILC（后一次读状态，上一页 cache program）、bit5 ARDY、bit6 RDY、bit7 WP。
+ * 这些位在 command 状态里保持原义，**不是“命令成功”**：
+ * 命令成功 = FAIL/FAILC/TIMEOUT/DATA_ERROR/MATA 全 0；RDY/AREADY/WP 是器件状态。
+ */
+
+/* ── descriptor 状态（per-CW） ── */
+#define FC_CW_STATUS_UNUSED (0U)
+#define FC_CW_STATUS_FAIL   (1U << 0) /* 70h FAIL（后一次读状态）：该 CW 的 NAND 操作失败 */
+/* bit1/2 保留 */
+#define FC_CW_STATUS_RAID_ERROR (1U << 3)
 #define FC_CW_STATUS_MATA_ERROR (1U << 4)
-#define FC_CW_STATUS_RAID_ERROR (1U << 5)
-#define FC_CW_STATUS_READY      (1U << 6)
-#define FC_CW_STATUS_PROTECTED  (1U << 7)
-/* 擦除页（erased page）：整条 CW（META+CRC+USER+ECC）全 0xFF。
+#define FC_CW_STATUS_CRC_ERROR  (1U << 5)
+#define FC_CW_STATUS_UNC        (1U << 6)
+/* 空页（erased page）：整条 CW（META+CRC+USER+ECC）全 0xFF。
  * 全 0xFF 不是合法 BCH 码字 ⇒ 解码必然报 UNC；若不单独识别，GC 读到半写块的空洞页
  * 就会把整块当坏块退役（RISK-GC-11）。**不属于 FC_CW_STATUS_ERROR_MASK**：
  * 「页从未编程」是介质的合法状态，不是读错误。 */
-#define FC_CW_STATUS_BLANK   (1U << 8)
-#define FC_CW_STATUS_UNUSED  (0U)
-#define FC_CW_STATUS_SUCCESS (FC_CW_STATUS_READY)
+#define FC_CW_STATUS_EMPTY (1U << 7)
 
-/* 「失败位」的规范集合——上表六个错误位的并集（READY / PROTECTED / UNUSED 不算失败）。
- * 它是失败判定的**唯一定义**：fc_complete_from_nand()（fc.c）用它挑出**首个失败 CW**
- * 的 desc_id（兑现 fc_command_status_t.desc_id 的 "first-failing desc on error"），
- * 其余消费方一律经 `fc_cw_status_has_error()`。不要就地重列位——六位散落多处时
- * 漏一位不会有编译错误。 */
-#define FC_CW_STATUS_ERROR_MASK (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
+/* 「失败位」的规范集合：descriptor 的五个错误位。
+ * 它是**首个失败 CW** 判定的唯一定义（fc_complete_from_nand 用它挑 desc_id）；
+ * 其余消费方一律经 `fc_cw_status_has_error()`。 */
+#define FC_CW_STATUS_ERROR_MASK (FC_CW_STATUS_FAIL | FC_CW_STATUS_RAID_ERROR | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC)
+
+/* ── command 状态（命令级） ── */
+#define FC_CMD_STATUS_NAND_FAIL  (1U << 0) /* 70h FAIL（后一次读状态） */
+#define FC_CMD_STATUS_FAIL_CACHE (1U << 1) /* 70h FAILC（后一次读状态，上一页 cache program） */
+#define FC_CMD_STATUS_TIMEOUT    (1U << 2) /* 忙等超时（前一次读状态仍 busy） */
+#define FC_CMD_STATUS_DATA_ERROR (1U << 3) /* 任一 CW：UNC/CRC/RAID */
+#define FC_CMD_STATUS_MATA_ERROR (1U << 4) /* 任一 CW：MATA（BBT 无 desc 也用它） */
+#define FC_CMD_STATUS_AREADY     (1U << 5) /* 70h ARDY（前一次读状态：阵列/内部操作状态） */
+#define FC_CMD_STATUS_RDY        (1U << 6) /* 70h RDY（前一次读状态：cache 是否可接收新数据） */
+#define FC_CMD_STATUS_WP         (1U << 7) /* 70h WP（0=protected，1=not protected） */
+
+/* 命令级失败位：不含 RDY/AREADY/WP —— 它们是器件状态，不是命令成败。 */
+#define FC_CMD_STATUS_ERROR_MASK (FC_CMD_STATUS_NAND_FAIL | FC_CMD_STATUS_FAIL_CACHE | FC_CMD_STATUS_TIMEOUT | FC_CMD_STATUS_DATA_ERROR | FC_CMD_STATUS_MATA_ERROR)
 
 /**
- * @brief 命令级聚合状态是否含任一错误位。
+ * @brief descriptor 状态是否含任一错误位。
  *
- * @param status 命令级聚合状态（FC_CW_STATUS_* 位或）
+ * @param status descriptor 状态（FC_CW_STATUS_* 位或）
  *
- * @return true  含至少一个错误位
- *         false 不含任何错误位
+ * @return true  含至少一个错误位；false 不含。
  *
- * @note 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，
- * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。
+ * @note 读路径的成败判据 = 本函数（单看 FAIL 会把 UNC / MATA 当成功）。
  */
 static inline bool fc_cw_status_has_error(DWORD status)
 {
@@ -174,35 +178,84 @@ static inline bool fc_cw_status_has_error(DWORD status)
 }
 
 /**
- * @brief 该 CW 是否被判定为擦除页（未编程）。
+ * @brief 该 CW 是否被判定为空页（从未编程）。
  *
- * @param status CW 状态（FC_CW_STATUS_* 位或）
+ * @param status descriptor 状态（FC_CW_STATUS_* 位或）
  *
- * @return true  该 CW 是擦除页
- *         false 该 CW 不是擦除页
+ * @return true  空页；false 非空页。
  *
- * @note 与 fc_cw_status_has_error 正交：擦除页既不表示读成功，也不表示读失败——
- * 页上没有任何数据。
+ * @note 与 fc_cw_status_has_error 正交：空页既不表示读成功，也不表示读失败。
  */
-static inline bool fc_cw_status_is_blank(DWORD status)
+static inline bool fc_cw_status_is_empty(DWORD status)
 {
-    return (status & FC_CW_STATUS_BLANK) != 0U;
+    return (status & FC_CW_STATUS_EMPTY) != 0U;
+}
+
+/**
+ * @brief descriptor 是否读成功（无错误、非空页）。
+ *
+ * @param status descriptor 状态（FC_CW_STATUS_* 位或）
+ *
+ * @return true = 成功（状态为 0）；false = 有错误或空页。
+ */
+static inline bool fc_cw_status_is_success(DWORD status)
+{
+    return status == FC_CW_STATUS_UNUSED;
+}
+
+/**
+ * @brief 命令级状态是否含任一错误位。
+ *
+ * @param status command 状态（FC_CMD_STATUS_* 位或）
+ *
+ * @return true  命令失败；false 命令成功（RDY/AREADY/WP 不影响成败）。
+ */
+static inline bool fc_cmd_status_has_error(DWORD status)
+{
+    return (status & FC_CMD_STATUS_ERROR_MASK) != 0U;
+}
+
+/**
+ * @brief 命令是否成功（错误位全 0）。
+ *
+ * @param status command 状态（FC_CMD_STATUS_* 位或）
+ *
+ * @return true = 成功；false = 失败。
+ */
+static inline bool fc_cmd_status_is_success(DWORD status)
+{
+    return (status & FC_CMD_STATUS_ERROR_MASK) == 0U;
 }
 
 /**
  * @brief 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
  *
- * @param status 完成状态（FC_CW_STATUS_* 位或）
+ * @param status descriptor 状态（FC_CW_STATUS_* 位或）
  * @param buf    输出缓冲（可传 NULL）
  * @param buflen 缓冲容量（含结尾 NUL）
  *
  * @return buf  便于直接放进 LOG 实参
  *         ""   buf 为 NULL 或 buflen 为 0
  *
- * @note 输出例："READY|UNC"、"NAND|TIMEOUT"；未知位以 '?' 表示。
+ * @note 输出例："UNC"、"CRC|MATA"、"EMPTY"；未知位以 '?' 表示。
  * 输出按 buflen 截断，不越界。
  */
 const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen);
+
+/**
+ * @brief 把 FC_CMD_STATUS_* 位解码成短字符串（日志用）
+ *
+ * @param status command 状态（FC_CMD_STATUS_* 位或）
+ * @param buf    输出缓冲（可传 NULL）
+ * @param buflen 缓冲容量（含结尾 NUL）
+ *
+ * @return buf  便于直接放进 LOG 实参
+ *         ""   buf 为 NULL 或 buflen 为 0
+ *
+ * @note 输出例："NAND|TIMEOUT"、"FAILC"、"DATA"、"RDY"；未知位以 '?' 表示。
+ * 输出按 buflen 截断，不越界。
+ */
+const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
 
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t
@@ -247,7 +300,7 @@ struct fc_descriptor_t
 
     /* 注意：meta 的高位来自 command->meta（本命令的扇区 LBA），低 3 位
      * [plane][cw] 由本 desc 决定——两者同一套编码（PLANE_CW_MASK）。 */
-    DWORD status   : 9; /* CW status, using FC_CW_STATUS_* bits. */
+    DWORD status   : 8; /* CW status, using FC_CW_STATUS_* bits. */
     DWORD ecc_bits : 8; /* ECC corrected bit count from last completion; 0 if no error. */
 };
 
@@ -322,9 +375,11 @@ struct fc_command_t
                                * 它由 FTL 在建链时作形参交给 ftl_cmd_configure_descriptors()。 */
 };
 
-/* CQ 完成项：命令级聚合状态 + 命令级返回段。
+/* CQ 完成项：命令级状态 + 命令级返回段。
  * Per-CW 细节（status/ecc_bits）只留在 descriptor 链中，聚合 ECC 用 fc_get_cmd_ecc_max()；
- * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。
+ * 命令级 status 用 FC_CMD_STATUS_* 位（NAND_FAIL=0x01、FAIL_CACHE=0x02、TIMEOUT=0x04…）。
+ * RDY/AREADY/WP 是 NAND 器件状态位，也在 status 里，但**不参与成败判定**——
+ * 成败只看 FC_CMD_STATUS_ERROR_MASK。
  *
  * desc_id 的取值（fc_complete_from_nand 组装）：
  *   初值 = NAND 层透传的 failed_descriptor_id（无失败时即 FC_DESCRIPTOR_ID_INVALID）。
@@ -332,16 +387,16 @@ struct fc_command_t
  *     与 desc id 不同空间——只对"哪个 CW 失败"这一含义有效，勿当 desc 下标用。
  *   Page Read 且带 desc 链时，再按链序覆盖为**首个失败 CW 的 descriptor id**，
  *   失败判据是 FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）；全链无失败位则保持初值。
- * ⚠ 目前 FTL 侧尚无读者；要定位失败 CW，由上层遍历 desc 链 OR 各 desc->status；
- *   FC 不代为聚合失败位图。 */
+ * FTL 要具体数据路径类别（UNC/CRC/RAID/MATA）时，用 desc_id 读 desc->status；
+ * 命令级只给 DATA_ERROR/MATA_ERROR 两个聚合位。 */
 struct fc_command_status_t
 {
     DWORD command_id : 16;    /* Completed Command Pool ID. */
     DWORD desc_id    : 16;    /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
     DWORD op_tag     : 7;     /* Copy of command->op_tag —— 上层**不必反查命令**即可派发
                                * （g_op_callbacks[completion.op_tag]）。 */
-    DWORD      status   : 9;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
-    DWORD      reserved : 16; /* Reserved. */
+    DWORD      status   : 8;  /* Command-level status; FC_CMD_STATUS_* bits. */
+    DWORD      reserved : 17; /* Reserved. */
     fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
                                * （失败 CW 的定位走 desc 链，不在此聚合）。 */
 };

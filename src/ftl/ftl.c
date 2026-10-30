@@ -56,6 +56,7 @@
 #include "ftl_op.h"  /* ftl_op_submit / FTL_OP_* */
 #include "log.h"
 #include "pending.h"
+#include "ssd_compiler.h"
 #include "wbuf.h"
 
 #include <string.h>
@@ -85,6 +86,9 @@ static BYTE               s_dangling_next;
 
 // 非预期 dangling 的限流（1 s 一行 + 被抑制条数）。
 static DWORD s_dangling_log_ms;
+/* cache 读命令失败（ECC/CRC/EMPTY 等）的限流时间戳：window 级错误通常成片出现，
+ * 1 s 一条足够定位「错在哪类页、哪个 PBA」。 */
+static DWORD s_cache_rd_err_log_ms;
 static DWORD s_dangling_suppressed;
 
 // 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时，5 s 打一行并给出被
@@ -110,11 +114,17 @@ static bool ftl_log_throttle_due(ftl_log_throttle_t *t, DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    bool due = (t->suppressed >= 64U);
+    // 有时间源时**按时间**限流；条数只作无时钟时的兜底——否则高频事件
+    // （如门控期间的背压）一秒撞满 64 条，日志仍会成串。
+    bool due;
 
-    if ((due == false) && (now_ms != 0U))
+    if (now_ms != 0U)
     {
         due = (t->ms == 0U) || ((now_ms - t->ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    }
+    else
+    {
+        due = (t->suppressed >= 64U);
     }
 
     if (due == false)
@@ -151,6 +161,138 @@ static ftl_log_throttle_t s_cache_wb_fail_log;
 /* ── 内部辅助 ── */
 
 // 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到）。
+/**
+ * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
+ *
+ * @param ftl 实例。
+ *
+ * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（RISK-IF-09，待上板确认）。
+ *       本函数与 idle 守卫不在每 I/O 热路径上，放内部 Flash，不占 ITCM。
+ */
+void SSD_CODE_FAST ftl_cache_seq_release(ftl_ctx_t *ftl)
+{
+    if ((ftl->cache_seq.kind == FTL_CACHE_SEQ_WRITE) && (ftl->cache_seq.wr.count != 0U))
+    {
+        ftl_cache_wr_abort(ftl); /* 未确认页按错误结算 + 关 SB + 清状态 */
+        return;
+    }
+
+    // 序列被放弃时要分清「命令还在飞」与「已经排空」：前者必须继续关着门控，
+    // 否则别的组会在 31h/3Fh 管线半途插命令（RISK-CACHE-14）；后者才真正放开。
+    const WORD gi        = ftl->cache_seq.owner_gi;
+    const bool in_flight = (ftl->cache_seq.kind == FTL_CACHE_SEQ_READ) && (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) && (ftl->pending.groups[gi].outstanding != 0U);
+
+    ftl->cache_seq.kind            = FTL_CACHE_SEQ_NONE;
+    ftl->cache_seq.active          = false;
+    ftl->cache_seq.draining        = in_flight;
+    ftl->cache_seq.break_requested = false;
+    ftl->cache_seq.idle_ms         = 0U;
+}
+
+/**
+ * @brief 组被弃/失败时关闭它持有的 cache 序列。
+ *
+ * @param ftl 实例。
+ * @param gi  组下标。
+ *
+ * @note 不关闭会让序列门控永久挡住该 LUN 的所有提交（门控只认 owner_submit）。
+ */
+static void SSD_CODE_FAST ftl_cache_seq_close(ftl_ctx_t *ftl, WORD gi)
+{
+    if ((ftl->cache_seq.active == true) && (ftl->cache_seq.owner_gi == gi))
+    {
+        ftl_cache_seq_release(ftl);
+    }
+}
+
+/**
+ * @brief 序列守卫：两件事 —— ① `draining` 的排空判定；② chunk 边界序列等下一 chunk 的
+ *        空闲超时。
+ *
+ * @param ftl 实例。
+ *
+ * @note ① `draining`：所有者组的在飞子操作归零 ⇒ 清 `draining` 放开 LUN；超过
+ *       FTL_CACHE_SEQ_IDLE_MS 也强制清（组异常消失时不能把 LUN 永久锁死）。
+ *       ② `active`：chunk 边界保持打开等同一命令的下一 chunk；所有者组已释放且超时无人接手
+ *       ⇒ 关闭状态。
+ *       两者时钟缺失（now_ms == 0）时都不计时。
+ */
+static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
+{
+    // 排空守卫：窗口已提交、命令仍在飞 ⇒ 门控继续关着，直到所有者组的在飞子操作
+    // 归零（或 1 s 兜底：组异常消失时不能把 LUN 永久锁死）。
+    if (ftl->cache_seq.draining == true)
+    {
+        const WORD gi        = ftl->cache_seq.owner_gi;
+        const bool in_flight = (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) && (ftl->pending.groups[gi].outstanding != 0U);
+
+        if (in_flight == false)
+        {
+            ftl->cache_seq.draining = false;
+            ftl->cache_seq.idle_ms  = 0U;
+            return;
+        }
+
+        const DWORD now_ms = ftl_job_now_ms();
+
+        if ((now_ms == 0U) || (ftl->cache_seq.idle_ms == 0U))
+        {
+            if (now_ms != 0U)
+            {
+                ftl->cache_seq.idle_ms = now_ms;
+            }
+            return;
+        }
+
+        if ((now_ms - ftl->cache_seq.idle_ms) > FTL_CACHE_SEQ_IDLE_MS)
+        {
+            ftl->cache_seq.draining = false;
+            ftl->cache_seq.idle_ms  = 0U;
+        }
+        return;
+    }
+
+    if (ftl->cache_seq.active == false)
+    {
+        return;
+    }
+
+    const DWORD cmd_end = ftl->cache_seq.cmd_start + ftl->cache_seq.cmd_total;
+
+    if (ftl->cache_seq.next_lba >= cmd_end)
+    {
+        ftl_cache_seq_release(ftl); /* 命令已到头却没有 LAST：错误路径提前关了组 */
+        return;
+    }
+
+    // 所有者组仍在**下发**本序列的页 ⇒ 有进展，不计空闲。
+    // 组已释放（读）或已把本 chunk 全部下发、在等下一 chunk 确认尾页（写）⇒ 开始计时。
+    const bool owner_valid    = (ftl->cache_seq.owner_gi < FTL_GROUP_MAX) && (ftl->pending.groups[ftl->cache_seq.owner_gi].used == true);
+    const bool owner_draining = (owner_valid == true) && (ftl->pending.groups[ftl->cache_seq.owner_gi].next < ftl->pending.groups[ftl->cache_seq.owner_gi].total);
+
+    if (owner_draining == true)
+    {
+        ftl->cache_seq.idle_ms = 0U; /* 所有者仍在推进：不计空闲 */
+        return;
+    }
+
+    const DWORD now_ms = ftl_job_now_ms();
+
+    if ((now_ms == 0U) || (ftl->cache_seq.idle_ms == 0U))
+    {
+        if (now_ms != 0U)
+        {
+            ftl->cache_seq.idle_ms = now_ms;
+        }
+        return;
+    }
+
+    if ((now_ms - ftl->cache_seq.idle_ms) > FTL_CACHE_SEQ_IDLE_MS)
+    {
+        ftl_cache_seq_release(ftl);
+    }
+}
+
 static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi);
 
 /**
@@ -467,7 +609,8 @@ static void ftl_host_io_read_fail(ftl_ctx_t *ftl, pend_req_t *pending)
 static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
 {
     // 失败 plane 掩码：逐 desc 取 CW 状态 + desc->paa 的 plane。
-    // 旧实现只标 new_pba（plane0），plane1 的失败要等 GC 擦除时才暴露（RISK-MIG-07）。
+    // FC 把 NAND per-CW FAIL 并进 desc（program 与 read 都并），plane1 的失败不再
+    // 等到 GC 擦除才暴露（RISK-MIG-07）。
     DWORD bad_plane_mask = 0U;
 
     fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
@@ -490,13 +633,14 @@ static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc
 
     if (bad_plane_mask == 0U)
     {
-        // 没有逐 CW 失败位（命令级失败）：退回旧行为，按 plane0 表项标坏。
+        // 没有逐 CW 失败位（如无 desc 的命令）：按 plane0 表项标坏。
+        // 带 desc 的 program 现在由 FC 把 NAND per-CW FAIL 并进 desc ⇒ 正常走上面的掩码。
         bad_plane_mask = (1U << pba_to_plane(pending->new_pba));
     }
 
     char stbuf[48];
 
-    (void)fc_cw_status_str(completion->status, stbuf, sizeof(stbuf));
+    (void)fc_cmd_status_str(completion->status, stbuf, sizeof(stbuf));
     LOGW(LOG_TAG_FTL "program-fail lba=%lu pl=0x%lx st=%s\r\n", pending->lba, bad_plane_mask, stbuf);
 
     if (((bad_plane_mask & 0x1U) != 0U) && (pending->new_pba != NAND_PBA_INVALID))
@@ -613,45 +757,82 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
     return FTL_OK;
 }
 
-/* ── host cache program 批次（PENDING_OP_WRITE_CACHE）──
+/* ── host cache program 序列（PENDING_OP_WRITE_CACHE）──
  *
- * 中间页成功：释放命令、保留 pending/组在飞数，等末页。
- * 末页成功：全部成员按各自 pending 逐个 confirm（AGAIN ⇒ 停泊），各组恰好减一次。
- * 任一失败：关闭 hot SB，不确认映射；已完成的成员立即按 IO_ERROR 结算，仍在飞的
- *           成员等自己的完成回调结算（不在仍有命令时释放/复用槽位）。
+ * 缓存程序是流水线：第 i 页的最终结果由**第 i+1 条命令**的 FAIL_CACHE 给出，
+ * 最后一页由 END（10h）的 FAIL 给出。所以已提交页不能在完成时立刻确认映射，
+ * 必须按提交顺序进未确认 FIFO（ftl->cache_seq.wr），等后继命令 / END 结算。
+ *
+ * 任一错误位（FAILC / NAND_FAIL / TIMEOUT / ...）⇒ 序列中止：未确认页一律不确认
+ * 映射（按 IO_ERROR 结算）、关闭 hot SB、清序列状态。与旧的整批失败语义一致。
  */
 
-/**
- * @brief 按 pending 槽下标在批次成员表中查位置。
- *
- * @param ftl 实例
- * @param pending_idx pending 表槽下标
- * @return 批次成员下标 0..n-1
- *         UINT8_MAX 不在本批次（已结算的迟到完成）
- */
-static BYTE ftl_cache_wb_slot(const ftl_ctx_t *ftl, BYTE pending_idx)
+bool ftl_cache_wr_ring_push(ftl_ctx_t *ftl, BYTE idx)
 {
-    for (BYTE j = 0U; j < ftl->cache_wb.n; j++)
+    ftl_cache_wr_t *wr = &ftl->cache_seq.wr;
+
+    if (wr->count >= FTL_CACHE_SEQ_RING)
     {
-        if (ftl->cache_wb.pending_idx[j] == pending_idx)
+        return false;
+    }
+
+    wr->unconf[(BYTE)((wr->head + wr->count) % FTL_CACHE_SEQ_RING)] = idx;
+    wr->count++;
+    return true;
+}
+
+#if !defined(NDEBUG)
+/**
+ * @brief 未确认 FIFO 是否仍含某个 pending 槽（仅供 ASSERT；release 裁掉）。
+ *
+ * @param ftl 实例。
+ * @param idx pending 槽下标。
+ *
+ * @return true = 仍在 FIFO 里。
+ */
+static bool ftl_cache_wr_ring_contains(const ftl_ctx_t *ftl, BYTE idx)
+{
+    const ftl_cache_wr_t *wr = &ftl->cache_seq.wr;
+
+    for (BYTE k = 0U; k < wr->count; k++)
+    {
+        if (wr->unconf[(BYTE)((wr->head + k) % FTL_CACHE_SEQ_RING)] == idx)
         {
-            return j;
+            return true;
         }
     }
-    return UINT8_MAX;
+
+    return false;
+}
+#endif
+
+BYTE ftl_cache_wr_ring_pop(ftl_ctx_t *ftl)
+{
+    ftl_cache_wr_t *wr = &ftl->cache_seq.wr;
+
+    if (wr->count == 0U)
+    {
+        return UINT8_MAX;
+    }
+
+    const BYTE idx = wr->unconf[wr->head];
+
+    wr->head = (BYTE)((wr->head + 1U) % FTL_CACHE_SEQ_RING);
+    wr->count--;
+    return idx;
 }
 
 /**
- * @brief 结算一个批次成员：成功先确认映射，失败直接按 IO_ERROR 收尾。
+ * @brief 结算一个写页：成功先确认映射，失败直接按 IO_ERROR 收尾。
  *
  * @param ftl 实例
  * @param idx pending 表槽下标（UINT8_MAX = 空位，直接返回）
- * @param status 该成员的组完成状态（SSD_STATUS_OK 才走确认路径）
+ * @param status 该页的最终状态（SSD_STATUS_OK 才走确认路径）
  *
  * @note 确认遇 FTL_AGAIN ⇒ 停泊，槽位留待 pend_confirm_service 推进；
- * 其余情况释放槽位并递减所属组。
+ *       其余情况释放槽位并递减所属组。
  */
-static void ftl_cache_wb_settle_idx(ftl_ctx_t *ftl, BYTE idx, ssd_status_e status)
+static void ftl_cache_wr_settle_idx(ftl_ctx_t *ftl, BYTE idx, ssd_status_e status)
 {
     if (idx == UINT8_MAX)
     {
@@ -678,190 +859,135 @@ static void ftl_cache_wb_settle_idx(ftl_ctx_t *ftl, BYTE idx, ssd_status_e statu
 }
 
 /**
- * @brief 复位整批 cache program 上下文（active / final_done / 成员表全清）。
+ * @brief 未确认队列里是否还有页属于**当前** hot SB。
  *
- * @param ftl 实例
+ * @param ftl 实例。
+ *
+ * @return true = 至少一页的 PBA 仍属于当前 open SB（此时才应关闭它）。
+ *
+ * @note 提交后 drain 可能已写满旧块并开了新 SB；无条件关闭「当前 hot SB」会误关无关块。
  */
-static void ftl_cache_wb_clear(ftl_ctx_t *ftl)
+static bool ftl_cache_wr_pages_in_open_sb(const ftl_ctx_t *ftl)
 {
-    ftl->cache_wb.active      = false;
-    ftl->cache_wb.abort       = false;
-    ftl->cache_wb.final_done  = false;
-    ftl->cache_wb.n           = 0U;
-    ftl->cache_wb.outstanding = 0U;
-    ftl->cache_wb.done_mask   = 0U;
+    const ftl_cache_wr_t *wr = &ftl->cache_seq.wr;
 
-    for (BYTE j = 0U; j < FTL_CACHE_WRITE_MAX_PAGES; j++)
+    for (BYTE k = 0U; k < wr->count; k++)
     {
-        ftl->cache_wb.pending_idx[j] = UINT8_MAX;
-    }
-}
+        const BYTE        idx = wr->unconf[(BYTE)((wr->head + k) % FTL_CACHE_SEQ_RING)];
+        const pend_req_t *p   = &ftl->pending.slots[idx];
 
-/**
- * @brief 批次失败收敛：关闭真正承载本批的 hot SB，并按 IO_ERROR 结算已完成成员。
- *
- * @param ftl 实例
- * @param completion 触发失败的完成状态（仅用于日志）
- *
- * @note 关闭 SB 与置 abort 只在首次失败时执行；已完成成员按 IO_ERROR 结算
- * （摘除后不会重复），仍在飞的由各自完成回调结算，outstanding 归零后才清整批上下文。
- */
-static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *completion)
-{
-    if (ftl->cache_wb.abort == false)
-    {
-        char  stbuf[48];
-        DWORD suppressed = 0U;
-
-        (void)fc_cw_status_str(completion->status, stbuf, sizeof(stbuf));
-
-        ftl->cache_wb.abort = true;
-        ftl->cache_wb_aborts++;
-
-        if (ftl_log_throttle_due(&s_cache_wb_fail_log, &suppressed))
+        if ((alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) != ALC_SUPER_PBA_NOT_OPEN) ||
+            (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1) != ALC_SUPER_PBA_NOT_OPEN))
         {
-            LOGE(LOG_TAG_FTL "cache-wb failed lba=%lu st=%s — close hot SB (suppressed=%lu)\r\n", ftl->cache_wb.lba, stbuf, suppressed);
-        }
-
-        // 只关 batch 页真正所在的 hot SB：batch 提交后 drain 可能已写满旧块并开了新 SB，
-        // 无条件关“当前 hot SB”会误关无关块。
-        for (BYTE j = 0U; j < ftl->cache_wb.n; j++)
-        {
-            const BYTE idx = ftl->cache_wb.pending_idx[j];
-
-            if (idx == UINT8_MAX)
-            {
-                continue;
-            }
-
-            const pend_req_t *p = &ftl->pending.slots[idx];
-
-            if ((alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) != ALC_SUPER_PBA_NOT_OPEN) || (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1) != ALC_SUPER_PBA_NOT_OPEN))
-            {
-                (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
-                break;
-            }
+            return true;
         }
     }
 
-    // 已完成但尚未结算的成员按 IO_ERROR 结算；仍在飞的由各自完成回调结算。
-    for (BYTE j = 0U; j < ftl->cache_wb.n; j++)
-    {
-        if (bit_mask_any(ftl->cache_wb.done_mask, (DWORD)(1U << j)) && (ftl->cache_wb.pending_idx[j] != UINT8_MAX))
-        {
-            const BYTE idx = ftl->cache_wb.pending_idx[j];
-
-            ftl->cache_wb.pending_idx[j] = UINT8_MAX;
-            ftl_cache_wb_settle_idx(ftl, idx, SSD_STATUS_IO_ERROR);
-        }
-    }
-
-    if (ftl->cache_wb.outstanding == 0U)
-    {
-        ftl_cache_wb_clear(ftl);
-    }
+    return false;
 }
 
-/**
- * @brief 一个成员按 IO_ERROR 结算；这是 abort 路径的唯一成员收尾点。
- *
- * @param ftl 实例
- * @param j 批次成员下标
- *
- * @note 成员先从批次表摘除再结算（结算会释放 pending 槽）；outstanding
- * 归零时清整批上下文。
- */
-static void ftl_cache_wb_settle_member_error(ftl_ctx_t *ftl, BYTE j)
+void ftl_cache_wr_abort(ftl_ctx_t *ftl)
 {
-    const BYTE idx = ftl->cache_wb.pending_idx[j];
+    ftl_cache_wr_t *wr = &ftl->cache_seq.wr;
 
-    ftl->cache_wb.pending_idx[j] = UINT8_MAX;
-    ftl_cache_wb_settle_idx(ftl, idx, SSD_STATUS_IO_ERROR);
-
-    if (ftl->cache_wb.outstanding == 0U)
+    if (ftl_cache_wr_pages_in_open_sb(ftl) == true)
     {
-        ftl_cache_wb_clear(ftl);
+        (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
     }
+
+    while (wr->count > 0U)
+    {
+        ftl_cache_wr_settle_idx(ftl, ftl_cache_wr_ring_pop(ftl), SSD_STATUS_IO_ERROR);
+    }
+
+    ftl->cache_seq.kind            = FTL_CACHE_SEQ_NONE;
+    ftl->cache_seq.active          = false;
+    ftl->cache_seq.break_requested = false;
+    ftl->cache_seq.idle_ms         = 0U;
 }
 
 /**
- * @brief 整批成功：先拷贝 idx（组完成回调可重入并复用上下文），再逐页 confirm。
- *
- * @param ftl 实例
- */
-static void ftl_cache_wb_settle_success(ftl_ctx_t *ftl)
-{
-    BYTE       idx_copy[FTL_CACHE_WRITE_MAX_PAGES];
-    const BYTE n = ftl->cache_wb.n;
-
-    for (BYTE k = 0U; k < n; k++)
-    {
-        idx_copy[k] = ftl->cache_wb.pending_idx[k];
-    }
-
-    ftl_cache_wb_clear(ftl);
-
-    for (BYTE k = 0U; k < n; k++)
-    {
-        ftl_cache_wb_settle_idx(ftl, idx_copy[k], SSD_STATUS_OK);
-    }
-}
-
-/**
- * @brief cache program 成员的完成入口：按批次状态分派中间页 / 末页 / 失败路径。
+ * @brief cache program 成员的完成入口：按「前一页 / END 末页 / 失败」三条路径结算。
  *
  * @param ftl 实例
  * @param pending 已完成的成员记录
- * @param completion 命令完成状态（决定本成员成功或失败）
+ * @param completion 命令完成状态（FAILC 归因上一页，END 的 FAIL 归因最后一页）
  *
- * @note 找不到批次位置说明上下文已结算（迟到完成）：只释放槽位并按 IO_ERROR 报告。
+ * @note 找不到 pending 的迟到完成由调用者兜底（本函数只处理仍登记在序列里的页）。
  */
-static void ftl_cache_wb_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
+static void ftl_cache_wr_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const fc_command_status_t *completion)
 {
-    const BYTE pending_idx = (BYTE)(pending - ftl->pending.slots);
-    const BYTE j           = ftl_cache_wb_slot(ftl, pending_idx);
+    ftl_cache_seq_t *seq      = &ftl->cache_seq;
+    const BYTE       idx      = (BYTE)(pending - ftl->pending.slots);
+    const DWORD      page_lba = pending->lba;
+    const bool       ok       = fc_cmd_status_is_success(completion->status);
+    const bool       is_end   = (pending->cache_role == PEND_CACHE_ROLE_END);
 
-    if (j == UINT8_MAX)
+    // 1) 前一页：本命令的 FAILC 给出它的最终结论。FIRST 页没有本序列的上一页
+    //    （此时 FIFO 头就是它自己）⇒ 不结算。
+    if ((seq->wr.count > 0U) && (seq->wr.unconf[seq->wr.head] != idx))
     {
-        // 上下文已结算（迟到完成）：只释放槽位并报错，不触碰批次。
-        const DWORD owners = pending->owners;
+        const BYTE prev = ftl_cache_wr_ring_pop(ftl);
 
-        pend_release_index(&ftl->pending, pending_idx);
-        pend_group_complete_subop_multi(&ftl->pending, owners, SSD_STATUS_IO_ERROR);
+        ftl_cache_wr_settle_idx(ftl, prev, (ok == true) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR);
+    }
+
+    // 完成按提交序 ⇒ 结算掉前一页后，FIFO 头必须就是本页。这条不变量若破坏，
+    // 后续页会永久留在 FIFO 里（组永不完成）——用可失败的断言钉住（C7）。
+    ASSERT((seq->wr.count > 0U) && (seq->wr.unconf[seq->wr.head] == idx));
+
+    if (ok == true)
+    {
+        if (is_end == true)
+        {
+            // END 的 FAIL 位 = 最后一页的最终结果（0 ⇒ 成功）。此刻 FIFO 头应是本页。
+            if ((seq->wr.count > 0U) && (seq->wr.unconf[seq->wr.head] == idx))
+            {
+                (void)ftl_cache_wr_ring_pop(ftl);
+            }
+            ftl_cache_wr_settle_idx(ftl, idx, SSD_STATUS_OK);
+
+            // ⚠ **不能**在这里清 kind / 断言 FIFO 空：同一命令的下一 chunk 或 D4/journal
+            // 断点后的新窗口可能已提交，其页正排在 FIFO 后面（完成按提交序，END 只收尾
+            // 自己那个子序列）。这里只验证本页确实已从 FIFO 摘除。
+            ASSERT(ftl_cache_wr_ring_contains(ftl, idx) == false);
+        }
         return;
     }
 
-    const bool ok = (fc_cw_status_has_error(completion->status) == false);
+    // 2) 任一错误：序列中止。块级失败 ⇒ 关闭 hot SB，后续页不确认映射。
+    char  stbuf[48];
+    DWORD suppressed = 0U;
 
-    ftl->cache_wb.done_mask |= (BYTE)(1U << j);
-    ftl->cache_wb.outstanding--;
+    (void)fc_cmd_status_str(completion->status, stbuf, sizeof(stbuf));
+    ftl->cache_wb_aborts++;
 
-    if (ok == false)
+    if (ftl_log_throttle_due(&s_cache_wb_fail_log, &suppressed))
     {
-        ftl_cache_wb_fail(ftl, completion);
-        return;
+        LOGE(LOG_TAG_FTL "cache-wr failed lba=%lu st=%s — close hot SB (suppressed=%lu)\r\n", page_lba, stbuf, suppressed);
     }
 
-    if (ftl->cache_wb.abort)
+    if (ftl_cache_wr_pages_in_open_sb(ftl) == true)
     {
-        ftl_cache_wb_settle_member_error(ftl, j);
-        return;
+        (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
     }
 
-    if (pending->cache_intermediate)
+    // 本页与其余未确认页一律不确认映射（可能已 program，但块已关闭；host 会重试）。
+    if ((seq->wr.count > 0U) && (seq->wr.unconf[seq->wr.head] == idx))
     {
-        // 命令已释放；槽位保留到末页统一确认。
-        pending->command_id = FTL_PENDING_CMD_NONE;
+        (void)ftl_cache_wr_ring_pop(ftl);
     }
-    else
+    ftl_cache_wr_settle_idx(ftl, idx, SSD_STATUS_IO_ERROR);
+
+    while (seq->wr.count > 0U)
     {
-        ftl->cache_wb.final_done = true;
+        ftl_cache_wr_settle_idx(ftl, ftl_cache_wr_ring_pop(ftl), SSD_STATUS_IO_ERROR);
     }
 
-    if (ftl->cache_wb.final_done && (ftl->cache_wb.outstanding == 0U))
-    {
-        ftl_cache_wb_settle_success(ftl);
-    }
+    seq->kind            = FTL_CACHE_SEQ_NONE;
+    seq->active          = false;
+    seq->break_requested = false;
+    seq->idle_ms         = 0U;
 }
 
 // 实现要点：按 {读,写}×{成功,失败} 分派到 4 个 ftl_host_io_* 分支（见各自注释）；
@@ -894,7 +1020,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
         // 不是单看 NAND_FAIL：ECC 不可纠只置 UNC（fc_data_path.c 的 ECC 分支），
         // 页内 META 不符只置 MATA_ERROR——两者的 NAND_FAIL 都恒清，单看它会把
         // 「内容不可信」当成功。且 UNC 时 FC 跳过后面的解扰/修正 pass，缓冲里
-        // 是**加扰垃圾**，搬给 host 就是静默数据损坏。判据见 fc_cw_status_has_error()。
+        // 是**加扰垃圾**，搬给 host 就是静默数据损坏。判据见 fc_cmd_status_has_error()。
         //
         // 分流依据是 pending->op（显式操作类型），不是 buffer——写请求的 buffer
         // 是数据源、恒非空，用 buffer 判别会把写全判成读。
@@ -904,12 +1030,12 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
         {
             // cache program 成员：中间页/末页/失败均由 batch 上下文结算；
             // 不走透明重试（op44 不能回读重发），也不走普通写失败分支（不按 plane 标坏）。
-            ftl_cache_wb_member_done(ftl, pending, completion);
+            ftl_cache_wr_member_done(ftl, pending, completion);
             (void)fc_command_release(cmd);
             return;
         }
 
-        if (fc_cw_status_has_error(completion->status) == false)
+        if (fc_cmd_status_is_success(completion->status))
         {
             if (is_read == false)
             {
@@ -938,9 +1064,9 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
             {
                 sub_status = ftl_host_io_read_ok(ftl, cmd, pending, cmd_id);
             }
-            else if (pending->cache_intermediate == false)
+            else
             {
-                // cache_intermediate 页跳过 L2P/Journal 更新，等最终 10h 确认。
+                // 普通写 / page0 写：完成后确认映射（cache program 成员已在上面分流）。
                 if (ftl_host_io_write_ok(ftl, pending))
                 {
                     (void)fc_command_release(cmd);
@@ -954,6 +1080,15 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
             {
                 // cache sequence 仍在同 LUN 队列里：这里启动 RR 会向同 LUN 插命令，
                 // 破坏 31h/3Fh 管线。直接报组错误；后续成员照常完成。
+                // 失败原因（NAND_FAIL/UNC/CRC/MATA/EMPTY…）只在这条 completion 上有，
+                // 限流打出来：定位「缓存读指到了什么页」不靠猜。
+                const DWORD now_ms = ftl_job_now_ms();
+
+                if ((now_ms == 0U) || (s_cache_rd_err_log_ms == 0U) || ((now_ms - s_cache_rd_err_log_ms) >= 1000U))
+                {
+                    s_cache_rd_err_log_ms = now_ms;
+                    LOGE(LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
+                }
                 sub_status = SSD_STATUS_IO_ERROR;
             }
             else
@@ -1018,6 +1153,7 @@ void ftl_global_init(void)
     memset(s_dangling, 0, sizeof(s_dangling));
     s_dangling_next       = 0U;
     s_dangling_log_ms     = 0U;
+    s_cache_rd_err_log_ms = 0U;
     s_dangling_suppressed = 0U;
     s_flush_log_ms        = 0U;
     s_write_retry_logged  = 0U;
@@ -1030,7 +1166,7 @@ void ftl_global_init(void)
 
 // 实现要点：本实例只持有指针，storage 数组/挂载块由 HIL 提供，
 // 位于 NOLOAD 段 ⇒ 本函数必须显式 memset。
-ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
+SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
 {
     // 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]、共享 cache、storage。
     ASSERT(ftl != NULL);
@@ -1151,11 +1287,11 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     ftl->cache_read_pairs     = 0U;
     ftl->cache_read_declines  = 0U;
     ftl->cache_read_fallbacks = 0U;
-    memset(&ftl->cache_wb, 0, sizeof(ftl->cache_wb));
-    ftl->cache_wb_batches  = 0U;
-    ftl->cache_wb_pages    = 0U;
-    ftl->cache_wb_declines = 0U;
-    ftl->cache_wb_aborts   = 0U;
+    ftl->cache_seq_breaks     = 0U;
+    ftl->cache_wb_batches     = 0U;
+    ftl->cache_wb_pages       = 0U;
+    ftl->cache_wb_declines    = 0U;
+    ftl->cache_wb_aborts      = 0U;
     {
         const ftl_status_e md_ret = md_load(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
 
@@ -1212,7 +1348,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_handles(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_handles(const ftl_ctx_t *ftl)
 {
     ASSERT((ftl->cache != NULL) && (ftl->metadata_dir != NULL) && (ftl->journal != NULL) && (ftl->cp_handle != NULL) && (ftl->mig_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
 
@@ -1226,7 +1362,7 @@ static void contract_check_handles(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_topology(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_topology(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t *topo = &ftl->topo;
     const DWORD       dim  = ftl_topo_dim(*topo);
@@ -1246,7 +1382,7 @@ static void contract_check_topology(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_module_contexts(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_module_contexts(const ftl_ctx_t *ftl)
 {
     const md_dir_cache_t *md = ftl->metadata_dir;
 
@@ -1276,7 +1412,7 @@ static void contract_check_module_contexts(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_identity(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t topo = ftl->topo;
     const DWORD      dim  = ftl_topo_dim(topo);
@@ -1302,7 +1438,7 @@ static void contract_check_identity(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_bg(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_bg(const ftl_ctx_t *ftl)
 {
     ASSERT((ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
 
@@ -1317,7 +1453,7 @@ static void contract_check_bg(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_jobs_idle(const ftl_ctx_t *ftl)
 {
     const jrn_handle_t *j = &ftl->journal->handle;
 
@@ -1341,14 +1477,14 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
  *
  * @param ftl 已初始化的实例（只读）
  */
-static void contract_check_boot_zero(const ftl_ctx_t *ftl)
+static SSD_CODE_FAST void contract_check_boot_zero(const ftl_ctx_t *ftl)
 {
     ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == false) && (ftl->l2p_defer == false));
 }
 
 #endif /* !NDEBUG */
 
-void ftl_contract_audit(const ftl_ctx_t *ftl)
+SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_t *ftl)
 {
 #if defined(NDEBUG)
     (void)ftl; /* release：审计不存在，行为与今天一致 */
@@ -1418,6 +1554,9 @@ void ftl_service(ftl_ctx_t *ftl)
             ftl_drain_group(ftl, i);
         }
     }
+
+    // 安全网：chunk 边界序列保持打开等同一命令的下一 chunk；孤儿序列超时关闭。
+    ftl_cache_seq_idle_guard(ftl);
 
     // Phase 2.5 尾：页打包写缓冲的**确定性空闲 flush**——补发循环跑完后，若再无写组会
     // 向当前窗口 append，就把缓冲编程掉（否则这些 host 写永不完成）。放在 bg_suspend
@@ -1682,16 +1821,16 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
         return FTL_AGAIN; /* pending 表满：瞬态 */
     }
 
-    pending->command_id         = ftl_cmd_id(cmd);
-    pending->owners             = ftl_group_bit(gi);
-    pending->op                 = PENDING_OP_READ;
-    pending->n_cw               = n;
-    pending->cw_bitmap          = 0U;
-    pending->lba                = internal_lba;
-    pending->buffer             = buffer;
-    pending->new_pba            = NAND_PBA_INVALID;
-    pending->new_pba1           = NAND_PBA_INVALID;
-    pending->cache_intermediate = false;
+    pending->command_id = ftl_cmd_id(cmd);
+    pending->owners     = ftl_group_bit(gi);
+    pending->op         = PENDING_OP_READ;
+    pending->n_cw       = n;
+    pending->cw_bitmap  = 0U;
+    pending->lba        = internal_lba;
+    pending->buffer     = buffer;
+    pending->new_pba    = NAND_PBA_INVALID;
+    pending->new_pba1   = NAND_PBA_INVALID;
+    pending->cache_role = PEND_CACHE_ROLE_NONE;
     pend_validate(pending);
 
     *n_cw = n; /* 回填实际消费的 LBA 数（调用者据此推进） */
@@ -1747,7 +1886,11 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         // 连续 pair 的 two-plane cache read：每 32 LBA（16 KiB host 传输窗口）试一次。
         // 每个 8-LBA 子操作都试会先做一轮 L2P 查找/加载再回退普通读，代价高；
         // 节拍与 run 长度上限解耦（见 cache_batch.h）。
-        if (pend_op_is_read(g->op) && ((g->next % FTL_CACHE_READ_TRIAL_LBAS) == 0U))
+        // 序列所有者必须每轮尝试续窗口（窗口消费量不一定落在节拍边界上）；
+        // 其余情况按 32-LBA 节拍试（避免随机读每次先付一轮 L2P 查找）。
+        const bool seq_owner = (ftl->cache_seq.active == true) && (ftl->cache_seq.owner_gi == gi);
+
+        if (pend_op_is_read(g->op) && (seq_owner || ((g->next % FTL_CACHE_READ_TRIAL_LBAS) == 0U)))
         {
             DWORD                   used = 0U;
             ftl_cache_read_result_e cr   = ftl_cache_read_try(ftl, gi, glba, buffer, remain, &used);
@@ -1834,7 +1977,16 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
             // Free Pool 空时正是靠它补池。一次回收要数百 ms，8 轮预算远不够，
             // 计进来会把正常等待判成 IO_ERROR（RISK-GC-09）。
             // 真卡死（命令丢失 / 搬移超时不退）由各自 deadline 与 NAND 超时兜底。
-            const bool bg_progress = (ftl->l2p_defer == true) || ftl->mig_handle->active;
+            // · 别的组持有 cache 设备序列：本组被序列门控挡回是**确定性等待**
+            //   （所有者每轮都在推进），不能累计成「卡死」。
+            const bool other_seq   = (ftl->cache_seq.active == true) && (ftl->cache_seq.owner_gi != gi);
+            // 写序列所有者被确认 FIFO / 资源暂时挡回时，队列里的页命令一定有完成
+            // （NAND 每命令有超时），属**有确定完成时刻的进展**，不计 stall。
+            const bool wr_inflight = (ftl->cache_seq.kind == FTL_CACHE_SEQ_WRITE) && (ftl->cache_seq.owner_gi == gi) && (ftl->cache_seq.wr.count > 0U);
+            // 读序列所有者的在飞子操作同理：NAND 每命令有超时 ⇒ 必有完成。
+            // 没有它，读窗口一次占满 FC 池时后续窗口的预算等待会被误判成卡死。
+            const bool rd_inflight = (ftl->cache_seq.kind == FTL_CACHE_SEQ_READ) && (ftl->cache_seq.owner_gi == gi) && (g->outstanding > 0U);
+            const bool bg_progress = (ftl->l2p_defer == true) || ftl->mig_handle->active || other_seq || wr_inflight || rd_inflight;
 
             if (bg_progress == false)
             {
@@ -1856,6 +2008,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     }
                     g->agg_status = SSD_STATUS_IO_ERROR;
                     g->next       = g->total;
+                    ftl_cache_seq_close(ftl, gi);
                 }
             }
             break;
@@ -1871,6 +2024,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
         }
         g->agg_status = SSD_STATUS_IO_ERROR;
         g->next       = g->total;
+        ftl_cache_seq_close(ftl, gi);
         break;
     }
 
@@ -2040,15 +2194,38 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
         LOGE(LOG_TAG_FTL "%s: no free group slot\r\n", label);
         return FTL_ERROR;
     }
-    pend_group_t *g    = &ftl->pending.groups[gi];
-    g->op              = op;
-    g->total           = count; /* 进度以 **LBA** 计（子操作数由 drain 现场决定，可降级） */
-    g->next            = 0U;
-    g->outstanding     = 0U;
-    g->stalls          = 0U;
-    g->lba             = req->lba;
-    g->buffer          = req->buffer;
-    g->agg_status      = SSD_STATUS_OK;
+    pend_group_t *g       = &ftl->pending.groups[gi];
+    g->op                 = op;
+    g->total              = count; /* 进度以 **LBA** 计（子操作数由 drain 现场决定，可降级） */
+    g->next               = 0U;
+    g->outstanding        = 0U;
+    g->stalls             = 0U;
+    g->lba                = req->lba;
+    g->buffer             = req->buffer;
+    g->agg_status         = SSD_STATUS_OK;
+    // cache 读序列的命令上下文：total_lbas 来自 SCSI CBW（跨 chunk 连续），
+    // 为 0 时本请求即整条命令（CLI / 无 CBW 信息）。
+    const DWORD cmd_total = (req->total_lbas != 0U) ? req->total_lbas : count;
+    const DWORD cmd_off   = (req->total_lbas != 0U) ? req->offset_lbas : 0U;
+
+    ASSERT(cmd_off <= (DWORD)req->lba);
+    g->cmd_start = ((DWORD)req->lba - cmd_off);
+    g->cmd_total = cmd_total;
+
+    // 序列只跨**同一 SCSI 命令**的 chunk（§4.8「不跨 SCSI 命令」）。不同命令（写或
+    // 读的另一命令）到达时，上一命令不可能再续 ⇒ 关闭序列状态，否则门控会挡住它。
+    if (ftl->cache_seq.active == true)
+    {
+        const ftl_cache_seq_kind_e want = (op == PENDING_OP_READ) ? FTL_CACHE_SEQ_READ : FTL_CACHE_SEQ_WRITE;
+
+        // 序列只跨**同一 SCSI 命令**的 chunk。类型不同或命令上下文不同 ⇒ 上一序列
+        // 不可能再续；写序列会中止并结算未确认页（否则组永远等不到确认）。
+        if ((ftl->cache_seq.kind != want) || (ftl->cache_seq.cmd_start != g->cmd_start) || (ftl->cache_seq.cmd_total != g->cmd_total))
+        {
+            ftl_cache_seq_release(ftl);
+        }
+    }
+
     g->complete_flag   = req->complete_flag;
     g->status_out      = req->status_out;
     g->on_complete     = req->on_complete;
@@ -2189,6 +2366,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     // L2P 脏行还没出现，否则 flush 会「提前完成」。
     const bool confirm_pending  = pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL);
     const bool cache_wb_pending = pend_find_op(&ftl->pending, PENDING_OP_WRITE_CACHE, NULL);
+    const bool cache_wr_active  = (ftl->cache_seq.active == true) && (ftl->cache_seq.kind == FTL_CACHE_SEQ_WRITE);
     const bool wb_done          = (wb_status.state == WBUF_STATE_IDLE) && (wb_status.occupied == 0U);
     const bool l2p_done         = l2p_flush_owner_idle(ftl->cache, dim);
     const bool jrn_done         = jrn_is_idle(ftl->journal) && (jrn_has_pending_entries(ftl->journal) == false);
@@ -2200,7 +2378,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     const DWORD flush_ms = ftl_job_now_ms() - ftl->flush_start_ms;
     const bool  timeout  = (ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_TIMEOUT_MS);
 
-    if (((wb_done && l2p_done && jrn_done && (confirm_pending == false) && (cache_wb_pending == false) && (ftl->cache_wb.active == false)) || fail || timeout) == false)
+    if (((wb_done && l2p_done && jrn_done && (confirm_pending == false) && (cache_wb_pending == false) && (cache_wr_active == false)) || fail || timeout) == false)
     {
         return false;
     }

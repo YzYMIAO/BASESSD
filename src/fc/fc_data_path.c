@@ -9,7 +9,7 @@
  *     NAND Read 完成后、CQ push 前，FC 内部自动调用。
  *     遍历 desc 链：ECC 解码 → 更新 desc->status。
  *     全部成功才解扰；有失败则保持加扰（供 RAID XOR 在 scrambled domain 恢复）。
- *     **擦除页单独识别**（整条 CW 全 0xFF ⇒ FC_CW_STATUS_BLANK）：它不是读错误，
+ *     **擦除页单独识别**（整条 CW 全 0xFF ⇒ FC_CW_STATUS_EMPTY）：它不是读错误，
  *     跳过解扰/CRC/META 校验；否则 GC 读到半写块的空洞页会把整块误标坏（RISK-GC-11）。
  *
  *   Stage 2: fc_data_path_raid_recover()
@@ -52,7 +52,7 @@
  * 只有从未编程的页才整条全 0xFF。
  * ⚠ 只在 ECC 解码失败后调用：解码成功的页不解此判据（避免误吞真实数据）。
  */
-static bool fc_cw_is_blank(const BYTE *cw)
+static bool fc_cw_is_empty(const BYTE *cw)
 {
     for (DWORD i = 0U; i < FC_BUFFER_POOL_CW_SIZE; i++)
     {
@@ -459,12 +459,12 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
             if (result == FC_STATUS_IO_ERROR)
             {
-                if (fc_cw_is_blank(buffer))
+                if (fc_cw_is_empty(buffer))
                 {
                     // 擦除页：全 0xFF 不是合法 BCH 码字，解码必然失败——但这是
                     // 「页从未编程」，不是读错误。置 BLANK（非错误位），让上层
                     // （GC 搬移 / 掉电重建）按空页跳过，而不是把整块标坏。
-                    desc->status   = FC_CW_STATUS_BLANK;
+                    desc->status   = FC_CW_STATUS_EMPTY;
                     desc->ecc_bits = 0U;
                 }
                 else
@@ -477,14 +477,14 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
             else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
             {
                 // ECC 成功（或跳过）：desc status 置 READY，记录纠正的 bit 数
-                desc->status   = FC_CW_STATUS_READY;
+                desc->status   = FC_CW_STATUS_UNUSED;
                 desc->ecc_bits = ecc_bits;
             }
         }
         else
         {
             // LDPC RAW 模式：跳过 ECC 解码，直接标记 READY
-            desc->status = FC_CW_STATUS_READY;
+            desc->status = FC_CW_STATUS_UNUSED;
         }
 
         desc_id = (fc_descriptor_id_t)desc->next_id;
@@ -514,7 +514,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
         buffer = fc_buffer_get_base(desc->buffer_id);
         if (buffer != NULL)
         {
-            if (fc_cw_status_is_blank(desc->status))
+            if (fc_cw_status_is_empty(desc->status))
             {
                 desc->meta = FC_META_UNKNOWN;
             }
@@ -623,7 +623,7 @@ fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_id
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
         if (desc != NULL)
         {
-            desc->status = FC_CW_STATUS_READY;
+            desc->status = FC_CW_STATUS_UNUSED;
         }
         desc_id = (fc_descriptor_id_t)desc->next_id;
         i++;

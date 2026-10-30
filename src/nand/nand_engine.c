@@ -96,7 +96,9 @@ nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
     state->wait.polls                  = 0U;
     state->jump.started                = 0U;
     state->jump.polls                  = 0U;
+    state->pre_jump_index              = 0xFFFFU;
     state->completion->nand_status     = 0U;
+    state->completion->pre_status      = 0U;
     state->completion->transfer_status = NAND_RESULT_OK;
     return nand_engine_step(state);
 }
@@ -218,6 +220,17 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
         /* ── NAND_UOP_JUMP_IF_NOT_READY：引擎直接处理的条件跳转微指令 ── */
         if (uop->type == NAND_UOP_JUMP_IF_NOT_READY)
         {
+            // OP 前的第一次读状态是“命令下发时的器件状态”（RDY/ARDY/WP）；
+            // OP 后的第二次读状态是操作结果（FAIL/FAILC）。只跟随**第一个** JUMP
+            // 的循环更新 pre_status（busy 时保留最后一次读到的 busy 状态）。
+            if (state->pre_jump_index == 0xFFFFU)
+            {
+                state->pre_jump_index = state->uop_index;
+            }
+            if (state->uop_index == state->pre_jump_index)
+            {
+                state->completion->pre_status = state->completion->nand_status;
+            }
             if ((state->completion->nand_status & NAND_STATUS_READY) != 0U)
             {
                 /* NAND ready（状态字节 bit6）→ 复位本组忙等状态，推进到下一 UOP。

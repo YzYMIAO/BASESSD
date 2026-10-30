@@ -79,12 +79,26 @@ typedef enum
     PENDING_OP_READ_CACHE    = 4, /* FTL cache read 批次成员：完成拷回 host，
                                    *   但失败**不**托管给 RR（RR 会向同 LUN 插命令，
                                    *   破坏仍在队列里的 cache sequence）——直接报 IO_ERROR。 */
-    PENDING_OP_WRITE_CACHE   = 5, /* FTL cache program 批次成员：中间页只释放命令，
-                                   *   不确认映射/不递减组；末页成功后整批统一确认。
-                                   *   cache_intermediate 区分中间页（1）与末页（0）。 */
+    PENDING_OP_WRITE_CACHE   = 5, /* FTL cache program 序列成员：页的最终结论由
+                                   *   **下一条命令的 FAIL_CACHE**（或 END 的 FAIL）给出，
+                                   *   见 cache_role。完成前只释放命令，不确认映射/不递减组。 */
     PENDING_OP_WRITE_PAGE0   = 6, /* 页0 补全写：命令覆盖两 plane（缺失 plane 写零），
                                    *   映射只按 cw_bitmap 的原始位图确认。 */
 } pend_op_e;
+
+/* ── cache program 页在序列中的角色（PENDING_OP_WRITE_CACHE 专用）──
+ * 完成路径据此判断「本命令给哪一页的最终结论」：
+ *   FIRST        —— 序列首条：没有本序列的上一页，FAILC 是残留，不据此结算；
+ *   INTERMEDIATE —— 中间页：FAILC 结算**上一页**，本页等下一命令；
+ *   END          —— 末条（10h）：FAILC 结算上一页，FAIL/NAND_FAIL 结算本页。
+ * 值域 0..3 由 ARM EABI 短枚举落为 1 B，与旧 bool 字段同宽（pend_req_t 仍 32 B）。 */
+typedef enum
+{
+    PEND_CACHE_ROLE_NONE = 0, /* 非 cache program 成员（普通写 / page0 / 读） */
+    PEND_CACHE_ROLE_FIRST,
+    PEND_CACHE_ROLE_INTERMEDIATE,
+    PEND_CACHE_ROLE_END,
+} pend_cache_role_e;
 
 /* ── op 谓词（判别一律走这里，调用点不裸比枚举值）──
  * 形参取 BYTE：pend_req_t.op / pend_group_t.op 都是 BYTE 字段。
@@ -164,12 +178,12 @@ typedef struct
     WORD command_id; /* FC command_id */
 
     /* ── 1B 对齐 ── */
-    bool      used;               /* true: 槽位占用 */
-    pend_op_e op;                 /* 完成路径判别（读/写），见文件头 ⚠ */
-    BYTE      n_cw;               /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
-    BYTE      cw_bitmap;          /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
-    bool      cache_intermediate; /* true: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
-    BYTE      retry_count;        /* 写失败后已重试次数（透明重试；见 ftl_host_io_callback） */
+    bool              used;        /* true: 槽位占用 */
+    pend_op_e         op;          /* 完成路径判别（读/写），见文件头 ⚠ */
+    BYTE              n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
+    BYTE              cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
+    pend_cache_role_e cache_role;  /* cache program 序列中的页角色；NONE = 其他写 */
+    BYTE              retry_count; /* 写失败后已重试次数（透明重试；见 ftl_host_io_callback） */
 } pend_req_t;
 
 _Static_assert(sizeof(pend_req_t) == 32, "pend_req_t 布局漂移（期望 32B）");
@@ -207,8 +221,10 @@ typedef struct
     void                  *on_complete_ctx; /* 回调上下文 */
 
     /* ── 4B ── */
-    DWORD total; /* 本请求 LBA 总数（进度以 LBA 计） */
-    DWORD next;  /* 已下发到的 LBA 偏移（0..total） */
+    DWORD total;     /* 本请求（run）LBA 总数（进度以 LBA 计） */
+    DWORD next;      /* 已下发到的 LBA 偏移（0..total） */
+    DWORD cmd_start; /* 所属 SCSI 命令的起始 LBA（跨 run/chunk 的 cache 序列上下文） */
+    DWORD cmd_total; /* 所属 SCSI 命令的总 LBA 数（0 = 未知，按本请求处理） */
 
     /* ── 2B / 1B ── */
     WORD         outstanding; /* 已下发、未完成的子操作数 */
@@ -218,7 +234,7 @@ typedef struct
     ssd_status_e agg_status;  /* 粘性错误：任一子操作失败 → 非 OK */
 } pend_group_t;
 
-_Static_assert(sizeof(pend_group_t) == 48, "pend_group_t 布局漂移（期望 48B）");
+_Static_assert(sizeof(pend_group_t) == 56, "pend_group_t 布局漂移（期望 56B）");
 
 /*
  * pend_table_t — pending / group 两张表的 owner 上下文

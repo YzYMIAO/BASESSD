@@ -56,6 +56,10 @@
 /* 70h 状态字节位定义：bit6=READY、bit0=FAIL */
 #define NAND_STATUS_READY 0x40U
 #define NAND_STATUS_FAIL  0x01U
+/* bit5 = ARDY：0 = 内部操作未完成（编程中），1 = 全部内部操作完成（cache mode）。
+ * bit7 = WP：0 = protected，1 = not protected。 */
+#define NAND_STATUS_ARDY 0x20U
+#define NAND_STATUS_WP   0x80U
 /* bit1 = FAILC：**上一页** cache program 的成败。15h 后当前页 FAIL 尚未反映阵列结果，
  * 必须同时看 FAILC；只查 FAIL 会把中间页失败静默当成成功。 */
 #define NAND_STATUS_FAILC 0x02U

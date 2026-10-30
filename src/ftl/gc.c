@@ -61,7 +61,7 @@
 // `cw_lba[c]`。未写过的 CW（META 全 FF）填 `FTL_LBA_INVALID`。调用者据此**逐 CW 反查 L2P**
 // 判有效性——不靠任何常驻位图（flash reverse-mapping，见 bst.h 文件头）。
 //
-// ⚠ 成败判据 = FC_CW_STATUS_ERROR_MASK 全集（fc_cw_status_has_error）：UNC / MATA_ERROR
+// ⚠ 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集（fc_cmd_status_has_error）：UNC / MATA_ERROR
 // 页的内容不可信，不得当成功解析 META。
 ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
@@ -100,7 +100,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 
         // ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / MATA_ERROR
         // 页当成功读并解析 META（重建期可能写回错误映射）。
-        if (fc_cw_status_has_error(completion.status))
+        if (fc_cmd_status_has_error(completion.status))
         {
             (void)fc_command_release(cmd);
             return FTL_ERROR;

@@ -55,6 +55,7 @@
 #include "ftl_type.h" /* BG_LEVEL_* / BG_LEVEL_NUM（档位 → max_kick 表） */
 #include "log.h"
 #include "onfi_1_0.h"
+#include "ssd_compiler.h"
 
 #include <string.h>
 
@@ -133,7 +134,7 @@ static const l2p_owner_t *l2p_owner_get(const l2p_cache_t *cache, DWORD global_r
 // 实现要点：**设备级只调一次**（main.c 在逐实例 boot 之前）。不能放进
 // per-instance ftl_init——第二个实例会清掉第一个实例的 line。
 // metadata 依赖（md_dir/alloc）不再存在 cache 里，由 owner 按需解析。
-void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
+SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
 {
     // 前置条件（判据 2）：调用者传设备级存储 + 非空解析回调。
     ASSERT(cache != NULL);
@@ -327,11 +328,16 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    bool due = (s_evict_fail_n >= 64U);
+    // 有时间源时按时间限流；条数只作无时钟时的兜底。
+    bool due;
 
-    if ((due == false) && (now_ms != 0U))
+    if (now_ms != 0U)
     {
         due = (s_evict_fail_ms == 0U) || ((now_ms - s_evict_fail_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    }
+    else
+    {
+        due = (s_evict_fail_n >= 64U);
     }
 
     if (due == false)
@@ -478,13 +484,22 @@ static DWORD s_load_fail_n;
  */
 static void l2p_load_fail_log(DWORD region_id, const char *cause)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms   = ftl_job_now_ms();
+    // 序列门控造成的提交背压是**预期**等待（序列下一窗口收尾）：降为 5 s 一行的慢节拍，
+    // 避免 host 大顺序读写 + GC 期间刷屏；其余失败仍按 1 s。
+    const bool  gated    = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
+    const DWORD interval = (gated == true) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
 
-    bool due = (s_load_fail_n >= 64U);
+    // 有时间源时按时间限流；条数只作无时钟时的兜底。
+    bool due;
 
-    if ((due == false) && (now_ms != 0U))
+    if (now_ms != 0U)
     {
-        due = (s_load_fail_ms == 0U) || ((now_ms - s_load_fail_ms) >= FTL_JOB_LOG_INTERVAL_MS);
+        due = (s_load_fail_ms == 0U) || ((now_ms - s_load_fail_ms) >= interval);
+    }
+    else
+    {
+        due = (s_load_fail_n >= 64U);
     }
 
     if (due == false)
@@ -837,6 +852,26 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
     l2p_access_note(cache, true);
     (void)l2p_load_start(cache, lba_to_global_region(lba));
     return false;
+}
+
+bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
+{
+    ASSERT(cache != NULL);
+
+    if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
+    {
+        return false;
+    }
+
+    const l2p_cache_line_t *line = l2p_line_find(cache, lba_to_global_region(lba));
+
+    if (line == NULL)
+    {
+        return false;
+    }
+
+    /* FLUSHING 的 entries 仍是有效快照（l2p_read 也允许读）⇒ 算驻留。 */
+    return (line->state == L2P_CACHE_CLEAN) || (line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_FLUSHING);
 }
 
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
@@ -1282,7 +1317,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     // 完成只可能属于一次在飞的 load/flush；行在这期间不可驱逐、不可改写状态。
     ASSERT((line->state == L2P_CACHE_LOADING) || (line->state == L2P_CACHE_FLUSHING));
 
-    const BYTE failed = fc_cw_status_has_error(completion->status) ? 1U : 0U;
+    const BYTE failed = fc_cmd_status_has_error(completion->status) ? 1U : 0U;
 
     if (line->state == L2P_CACHE_LOADING)
     {
