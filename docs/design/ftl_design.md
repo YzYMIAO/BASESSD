@@ -3782,130 +3782,206 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 #### 3.16.1 背景与需求
 
-主流主控把主机 chunk 的连续读写当作**一条设备级 cache 序列**执行——START/END 只在序列边界
-出现，窗口只是资源边界。本仓同理：`src/ftl/cache_batch.c` 负责把「连续的 pair 页」拼成窗口，
-按方向决定读序列（45/46/47）或写序列（49/44/48），其余提交一律由 FTL 门控让路。
+主机一次传输就是一个 SCSI 命令（USB MSC 一个 CBW），连续 16 KiB = 32 LBA = 4 个 pair 页。
+若按 8 LBA 一条命令下发，每条都要付一次 `00h-30h` 启动或一次完整页编程，器件侧的 `tR` /
+`tPROG` 无法与命令开销重叠。主流做法是把这段连续访问当成**一条设备级 cache 序列**：
+START / END 只在序列边界出现，窗口只是资源边界。
 
-与 FC 的分工：
+本仓由 `src/ftl/cache_batch.c` 承担这层：把连续的 pair 页拼成窗口，按方向选择读序列
+（45/46/47）或写序列（49/44/48），其余提交一律由 FTL 门控让路。
+
+与相邻模块的分工：
 
 - **FC 不自带序列句柄 / tag**：start / middle / end 由 FTL 按方向 + 连续性判断；FC 只提供
-  「链」把窗口的命令**原子、连续**入队，并在跨填充 pass 时锁住该 LUN。
-- **FTL 不碰器件 opcode**：读侧 45/46/47、写侧 49/44/48 的字节序列属于 NAND/FC 层
-  （`include/nand/onfi_1_0.h`），本模块只给 `fc_command_t` 的 operation 与地址。
-
-**已定决策（2026-10-30 评审）**
-
-| # | 决策 | 说明 |
-|---|---|---|
-| 1 | 控制器 1 chunk lookahead | 两个 16 KiB 槽；写非末 chunk 提前回流控回执（控制器细节见 `docs/design/usb_msc_udisk.md`） |
-| 2 | D3 + D4 断点 | block/物理边界 + 「有后台提交被门控拒绝」⇒ 下一窗口收尾 |
-| 3 | SCSI CBW 的 block_count 作为 total | 1 block = 1 LBA = 1 CW = 512 B；`tud_msc_cbw_info_cb` 最小钩子 |
-| 4 | 不跨 SCSI 命令 | 命令上下文按组保存；不同命令到达即释放序列 |
-| 5 | 写开序列阈值 = 4 个 pair 页 | 续序列允许 1 页尾巴 |
-| 6 | FC 不加序列句柄/标志 | 只用 FC 现有链 + FTL 门控 |
-| 7 | 状态字重构 | 命令级 `FAIL_CACHE` / `NAND_FAIL` 可用（v1.03） |
+  「链」把窗口的命令原子、连续入队，并在跨填充 pass 时锁住该 LUN（§3.10）。
+- **FTL 不碰器件 opcode**：读侧 45/46/47、写侧 49/44/48 的字节序列属于 NAND / FC 层
+  （§3.15、`include/nand/onfi_1_0.h`），本模块只给出 operation 与地址。
+- **控制器只管槽与流控**：双 16 KiB 槽、非末 chunk 提前回执、`TUD_MSC_RET_BUSY` 背压属
+  `src/controller/usb_msc.c`（`docs/design/usb_msc_udisk.md`），不在本模块。
 
 #### 3.16.2 职责与边界
 
-**做**：窗口收集（读）/ 窗口构建（写）、序列状态机、门控旁路与断点（D3/D4）、写页的
-`FAIL_CACHE` 逐页确认、`info` 的 `cr=` / `cw=` / `d4=` 计数。
+- **做**：窗口收集（读）/ 窗口构建（写）、序列状态机、门控旁路与断点（D3 / D4）、
+  写页的 `FAIL_CACHE` 逐页确认、`info` 的 `cr=` / `cw=` / `d4=` 计数。
+- **不做**：FC 序列句柄 / tag；跨 SCSI 命令合并；IRQ 驱动；多 LUN 交织；器件 opcode 顺序；
+  控制器槽管理与 USB 流控。
+- **调用者**：`ftl_drain_group()` 在读 / 写子操作路径的最前面各试一次
+  （`ftl_cache_read_try` / `ftl_cache_write_try`）；条件不满足一律回退普通读 / wbuf 写。
 
-**不做**：FC 序列句柄 / tag；跨 SCSI 命令合并；IRQ 驱动；多 LUN 交织；控制器双槽与 USB
-流控（属 `src/controller/usb_msc.c`，见 `docs/design/usb_msc_udisk.md`）；器件 opcode 顺序
-（属 NAND/FC 层）。
+#### 3.16.3 结构与约束
 
-#### 3.16.3 结构与不变量
+`ftl->cache_seq`（per 实例）承载全部序列状态：
 
-- `ftl->cache_seq`（per 实例）：`kind`（READ/WRITE）、`active`、`draining`、`owner_gi`、
-  `next_lba`、`cmd_start` / `cmd_total`、`owner_submit`、`break_requested`、`idle_ms`；
-  写侧另有逐页确认 FIFO `wr{unconf,head,count}`（深度 `FTL_CACHE_SEQ_RING`）。
-- **命令上下文按组保存**（`pend_group_t.cmd_start/cmd_total`，来自 CBW）：序列只跨同一 SCSI
-  命令的 chunk，续接条件 = 同上下文 + `next_lba == lba`；序列本身只记打开它的命令。
-- **窗口 = 资源边界**；**断点** = 命令到头 / hot SB block 到头 / 物理不连续（读）/ 命令尾
-  不足一个 pair / D4 / 下一窗口 L2P region 未驻留 / journal 预留失败。**chunk 边界不是断点**。
-- 序列所有者批次由 `cache_read_submit` / `cache_write_try` 置 `owner_submit` 旁路
-  `ftl_op_seq_gate`；其他提交（host / GC / WL / CP / journal / metadata / L2P / RR）一律
-  `FTL_AGAIN` 并置 `break_requested`（D4），序列在**下一窗口**收尾；`info` 的 `d4=` 计该次数。
-  门控是**唯一提交漏斗**（`src/ftl` 下无绕过 `ftl_op_submit*` 的 `fc_submit`），后台各路径
-  按瞬态背压重试。
-  ⚠ 满盘 + 持续 GC 时后台几乎每轮都在尝试提交 ⇒ `break_requested` 每窗口都为真，序列退化为
-  逐 chunk（2026-10-30 H2testw：`d4=24820` / 约 5.2 万窗口）——D4 的设计取舍（后台进展优先），
-  空闲盘上序列会跨多个 chunk。
-  ⚠ 后台 job 的提交 deadline（`FTL_SUBMIT_TIMEOUT_MS = 10 ms`）短于 USB 一个 chunk 的间隔
-  （16 KiB ≈ 19 ms @ 0.84 MB/s）⇒ 序列打开期间四类 job（META/CP/MIG/RR）的 stall 检查先用
-  `ftl_op_cache_seq_active()` 挂起 deadline，避免每 10 ms abort 一次并刷屏。
-- **「提交完」≠「序列结束」**（RISK-CACHE-14 的根因）：窗口提交成功后 `active=false`，但置
-  `draining=true`；门控条件是 `(active || draining) && !owner_submit`，直到**所有者组的在飞
-  子操作归零**才放开 LUN（`ftl_cache_seq_idle_guard`，1 s 兜底防组异常消失锁死）。
-  `ftl_cache_seq_release()`（被放弃 / 被别的组撑开）同样按「是否还有在飞命令」决定继续关门控
-  还是放开。少了这条，窗口的 31h/3Fh 管线还没走完，别的组 / 后台的提交就能进同一 LUN ——
-  2026-10-30 实测 4 组并发时 200/1600 个窗口在 plane 0 读到**擦除页**（`UNC`、`badp=4/0`、
-  CW 缓冲 `0xFF`），单流（rd=1）永远看不到。
-  **写侧不需要 `draining`**：窗口末条恒为 END（10h），设备侧 cache program 管线在该命令上
-  显式收尾（随后再来的 80h 是全新序列）；非末窗口（44h，链尾 MORE）期间 `active` 仍为 true，
-  门控照常关着。
+| 字段 | 含义 |
+|---|---|
+| `kind` | READ / WRITE / NONE |
+| `active` | 设备侧序列打开（START 已发、END 未发） |
+| `draining` | 窗口已提交完但命令仍在飞：门控继续关着，直到所有者组在飞归零 |
+| `owner_submit` | 序列所有者正在提交窗口（门控旁路） |
+| `break_requested` | 非所有者提交被门控拒绝 ⇒ 下一窗口末尾 END（D4） |
+| `owner_gi` / `next_lba` | 最近持有序列的组 / 下一条命令的起始 LBA |
+| `cmd_start` / `cmd_total` | 打开序列的 SCSI 命令上下文（来自 CBW） |
+| `idle_ms` | chunk 边界等待下一 chunk 的计时起点 |
+| `wr{unconf,head,count}` | 写序列的逐页确认 FIFO（深度 `FTL_CACHE_SEQ_RING`） |
 
-#### 3.16.4 关键流程：cache read
+已定决策：
 
-- 开序列前预加载 region（`lba` 与 `lba+511`，≤2 行）；窗口末 1 pair 的 lookahead **只查 8 条
-  LBA 驻留**（`l2p_is_resident`，不触发加载——序列打开时加载读会被门控挡住）。
-- 放弃序列（命令不同 / 续接点不符 / 续窗口首 pair 收不到 / 组被弃 / 空闲 1 s）只清 RAM、
-  **不发 LAST**（RISK-IF-09/10）。
-- 器件语义（`include/nand/onfi_1_0.h:256-282`）：`31h` 输出的是**上一条命令地址页的下一页**
-  （预取页），所以序列要求物理连续。跨窗口期间若 L2P 被改（GC/RR），命令地址会与预取页漂移
-  ——但读命令期间只有**内容保持的重映射**（GC 复制同内容、RR 恢复同内容；host 写由 BOT 串行），
-  且 `erase` 的提交在序列期间被门控、旧页在序列结束前不会被擦 ⇒ 预取页内容仍等于当前映射内容；
-  窗口内 `collect + submit` 无泵插入，不存在「收集后、提交前」的漂移窗口。TRIM 把下一页解映射
-  ⇒ 收集端看到 INVALID 直接放弃序列走普通读（零填充）。
-- 残余：ECC / read_count 统计按命令地址（新块）记账，预取实际读的是旧块（一次性统计偏差）。
+| 决策 | 原因 / 说明 |
+|---|---|
+| 控制器 1 chunk lookahead（双槽） | chunk k 的尾页要由 chunk k+1 的首条命令确认 ⇒ 非末 chunk 提前回流控回执 |
+| 断点 = D3 + D4 | 物理/块边界 + 「有后台提交被门控拒绝」，序列在下一窗口收尾 |
+| CBW 的 `block_count` 作为 total | 1 block = 1 LBA = 1 CW = 512 B；`tud_msc_cbw_info_cb` 最小钩子 |
+| 不跨 SCSI 命令 | 命令上下文按组保存；不同命令到达即释放序列 |
+| 写开序列阈值 = 4 个 pair 页 | 续序列允许 1 页尾巴 |
+| FC 不加序列句柄 / 标志 | 只用 FC 现有链 + FTL 门控 |
+| 状态字重构 | 命令级 `FAIL_CACHE` / `NAND_FAIL` 可用（两套位表见 §3.15.7） |
 
-#### 3.16.5 关键流程：cache program
+易错点：
 
-- 首条 49（FIRST，只查 FAIL）、中间 44（15h）、断点末条 48（10h）。第 i 页的最终结论由
-  **第 i+1 条命令的 `FAIL_CACHE`** 给出，末页由 END 的 FAIL 给出 ⇒ 已提交页进确认 FIFO，
-  第 i+1 条完成时结算前一页。任一错误位（`FAILC` / `NAND_FAIL` / `TIMEOUT` / …）⇒ 序列中止：
-  未确认页一律不确认映射、关闭 hot SB。
-- 开序列前预加载窗口 region；每窗口 `jrn_reserve` 本窗口条目，失败即本窗口 END。
-- ⚠ **FIFO 是全局的**：同一命令的下一 chunk（或 D4 / journal / block 断点后的新窗口）可能在
-  前一个 END 完成前就提交 ⇒ END 只收尾**自己那个子序列**，不在完成回调里清 `kind` / 断言
-  FIFO 空；只断言「本页已从 FIFO 摘除」。
+- **命令上下文按组保存**（`pend_group_t.cmd_start/cmd_total`）：同一 SCSI 命令的后续 chunk
+  是不同组；续接条件 = 同上下文 + `next_lba == lba`。序列本身只记打开它的命令。
+- **窗口 = 资源边界，不是语义边界**：断点 = 命令到头 / hot SB block 到头 / 物理不连续（读）/
+  命令尾不足一个 pair / D4 / 下一窗口 L2P region 未驻留 / journal 预留失败。**chunk 边界不是断点**。
+- **`owner_submit` 是门控的唯一旁路**：其他提交（host / GC / WL / CP / journal / metadata /
+  L2P / RR）一律 `FTL_AGAIN` 并置 `break_requested`。门控是唯一提交漏斗（`src/ftl` 下没有
+  绕过 `ftl_op_submit*` 的 `fc_submit`）。
+- **「提交完」≠「序列结束」**：见 §3.16.6 的 `draining` 不变量。
+- **写确认 FIFO 是全局的**：同一命令的下一 chunk（或 D4 / journal / block 断点后的新窗口）
+  可能在前一个 END 完成前就提交 ⇒ END 只收尾**自己那个子序列**。
+- **满盘 + 持续 GC 时 D4 恒真**：后台几乎每轮都在尝试提交 ⇒ `break_requested` 每个窗口都为真，
+  序列退化为逐 chunk（`d4=` 接近窗口数，2026-10-30 H2testw `d4=24820` / 约 5.2 万窗口）。
+  这是 D4 的设计取舍（后台进展优先），不是缺陷；空闲盘上序列会跨多个 chunk。后台 job 的
+  10 ms 提交 deadline 在序列期间被挂起（§3.12），避免每 10 ms abort 一次。
 
-#### 3.16.6 失败语义与掉电
+**① 序列状态与门控**
 
-未确认页不写 Journal / L2P；掉电后按「部分写块」关闭、不续写。读数据错误按 D7 逐页上报；
-读命令级失败关序列后由 RR 接管（RR 的提交同样被门控，序列先收尾）。
+```mermaid
+flowchart TD
+    I["IDLE：门控开"] -- "开窗口（读 / 写）" --> W["WINDOW_OPEN：active=true，门控关（owner_submit 旁路）"]
+    W -- "窗口尾 MORE：跨窗口继续" --> W
+    W -- "读：窗口尾 END 提交成功" --> D["DRAINING：active=false、draining=true，门控仍关"]
+    W -- "写：窗口尾 END（10h）提交成功" --> I
+    D -- "所有者组在飞子操作归零 / 1 s 守卫" --> I
+    W -- "读：放弃且仍有在飞（命令不同 / 续接不符 / 组被弃）" --> D
+    W -- "放弃且已排空（读空闲 1 s）" --> I
+```
 
-实测（2026-10-30）：4 组并发下若门控在窗口提交后立即放开，plane 0 会读到擦除页——即
-§3.16.3 的 `draining` 不变量；修复后 `rd=1` / `rd=4` 数据均 0 错，H2testw 415/422 MB 0 错误。
+#### 3.16.4 读序列
 
-#### 3.16.7 常量与出处
+```text
+① 组收到读（g->next 处）→ ftl_cache_read_try()
+② 开序列：预加载 lba 与 lba+511 所在 region（≤2 行）；末窗口 lookahead 只查 8 条 LBA 驻留
+③ 收集：同 block、页 +1、两 plane 同页；每窗口上限 FTL_CACHE_READ_MAX_PAIRS
+④ 末 pair lookahead：下一窗口 region 驻留且物理连续 ⇒ 本窗口 MORE，否则 LAST
+⑤ 建链：START(45) / SEQ(46) / LAST(47)，整批 ftl_op_submit_batch()（owner_submit 旁路门控）
+⑥ 收尾：end_seq ⇒ active=false 且 draining=true；否则 active=true 等下一窗口
+⑦ 放弃：命令不同 / 续接点不符 / 空闲 1 s ⇒ 只清 RAM，**不发 LAST**
+```
 
-| 常量 | 值 | 说明 |
+**② 一次 16 KiB 读的窗口与门控**
+
+```mermaid
+sequenceDiagram
+    participant H as USB MSC
+    participant F as FTL cache_seq
+    participant C as FC 链 / 队列
+    participant N as NAND 器件
+    H->>F: chunk k（32 LBA = 4 pair）
+    F->>F: 预加载 region，8 LBA 驻留探针（末 pair lookahead）
+    F->>C: START 45 + SEQ 46 ×2 + LAST 47，整批提交（owner_submit 旁路门控）
+    C->>N: 链连续执行：30h 装入、31h 预取输出、3Fh 收尾
+    Note over F,C: 其他提交被门控拒绝并置 break_requested（D4），序列在下一窗口收尾
+    N-->>C: 每命令完成（per-CW 状态）
+    C-->>F: 完成派发（op tag 选服务函数）
+    F->>F: END 提交 ⇒ active=false、draining=true
+    Note over F: draining 期间门控保持关闭，直到所有者组 outstanding=0
+    F-->>H: 组完成（数据已拷回 / 流控回执）
+```
+
+器件语义（`include/nand/onfi_1_0.h:256-282`）：`31h` 输出的是**上一条命令地址页的下一页**
+（预取页），所以序列要求物理连续。跨窗口期间若 L2P 被改（GC / RR），命令地址会与预取页
+漂移——但读命令期间只有**内容保持的重映射**（GC 复制同内容、RR 恢复同内容；host 写由 BOT
+串行），且 `erase` 的提交在序列期间被门控、旧页在序列结束前不会被擦 ⇒ 预取页内容仍等于
+当前映射内容；窗口内 `collect + submit` 无泵插入，不存在「收集后、提交前」的漂移窗口。
+TRIM 把下一页解映射 ⇒ 收集端看到 INVALID 直接放弃序列走普通读（零填充）。残余：ECC /
+read_count 统计按命令地址（新块）记账，预取实际读的是旧块（一次性统计偏差）。
+
+#### 3.16.5 写序列
+
+```text
+① 预加载窗口 region；每窗口 jrn_reserve 本窗口条目，失败 ⇒ 本窗口 END
+② 首条 49（FIRST，只查 FAIL）、中间 44（15h）、断点末条 48（10h）
+③ 第 i 页的结论由第 i+1 条的 FAIL_CACHE 给出，末页由 END 的 FAIL 给出
+   ⇒ 已提交页进确认 FIFO，第 i+1 条完成时结算前一页
+④ 任一错误位（FAILC / NAND_FAIL / TIMEOUT / …）⇒ 序列中止：
+   未确认页一律不确认映射、关闭 hot SB
+```
+
+**③ 写窗口：逐页 FAIL_CACHE 滞后一页**
+
+```mermaid
+sequenceDiagram
+    participant F as FTL cache_seq
+    participant C as FC 链 / 队列
+    participant N as NAND 器件
+    F->>C: 49 FIRST（页 0，只查 FAIL）
+    F->>C: 44 15h（页 1）
+    F->>C: 44 15h（页 2）
+    F->>C: 48 10h（页 3，END）
+    C->>N: 链连续执行（首条 80h 装入 cache 寄存器）
+    N-->>F: 页 0 的结论 = 页 1 那条命令的 FAIL_CACHE
+    N-->>F: 页 1 ← 页 2 的 FAIL_CACHE；页 2 ← END 的 FAIL_CACHE
+    Note over F: 任一错误位 ⇒ 序列中止：未确认页不确认映射、关闭 hot SB
+    F->>F: 逐页结算进确认 FIFO，END 只收尾自己这个子序列
+```
+
+写侧不需要 `draining`：窗口末条恒为 END（10h），设备侧 cache program 管线在该命令上显式
+收尾（随后再来的 80h 是全新序列）；非末窗口（44h，链尾 MORE）期间 `active` 仍为 true，
+门控照常关着。
+
+#### 3.16.6 不变量与禁止项
+
+| 约束 | 原因 |
+|---|---|
+| 窗口提交完置 `draining`，门控在 `active` 或 `draining` 期间都关闭，直到所有者组在飞归零（1 s 兜底） | 提交成功 ≠ 器件管线走完；早放开会让别的组插进 31h/3Fh 管线，实测 200/1600 窗口在 plane 0 读到擦除页 |
+| `ftl_cache_seq_release()` 按「是否还有在飞命令」决定继续关门控还是放开 | 被别的组撑开 / 组被弃时同样不能把管线劈开 |
+| 所有提交必须经 `ftl_op_submit*` | 绕过门控会把命令插进链，链语义与序列语义同时失效 |
+| 序列只在同一 SCSI 命令内延续 | CBW 是语义边界；跨命令合并会让 BOT 的 chunk 顺序无法表达 |
+| 读序列放弃不发 LAST | 放弃时下一页 PBA 未知；设备侧残序列由后续命令 / 新 START 重置（RISK-IF-09） |
+| 不在 END 回调里断言确认 FIFO 空 | 同一命令的下一子序列可能已排在其后 |
+
+#### 3.16.7 失败语义
+
+| 情况 | 结果 | 数据影响 |
 |---|---|---|
-| `FTL_CACHE_READ_MIN_PAIRS` | 2 | 新序列最少 pair 数；续序列允许 1 pair 尾巴 |
-| `FTL_CACHE_READ_TRIAL_LBAS` | 4 × `FTL_LBA_PER_PAIR` = 32 | 多久试一次 cache read（节拍，不是窗口上限，来自 `CFG_TUD_MSC_EP_BUFSIZE` = 16 KiB） |
-| `FTL_CACHE_WRITE_MAX_PAGES` | 4 | 写窗口页数上限（同 16 KiB 传输） |
-| `FTL_CACHE_SEQ_RING` | 16 | 写侧逐页确认 FIFO 深度（两在飞 chunk × 4 页 + 尾页 + 余量） |
-| `FTL_CACHE_SEQ_IDLE_MS` | 1000 | 孤儿序列守卫 |
+| 读命令级失败（UNC / CRC / MATA / TIMEOUT） | 按 D7 逐页上报组 `IO_ERROR`、序列关闭；**不**交 RR（RR 会向同 LUN 插命令） | 该页不可用；后续成员照常完成 |
+| 写任一错误位 | 序列中止：未确认页不确认映射、关闭 hot SB | 未确认页不写 Journal / L2P；掉电后按部分写块关闭 |
+| 下一窗口 region 未驻留 / 加载在飞 | 本窗口 END，后续回退普通读 | 无 |
+| journal 预留失败 | 本窗口 END | 无 |
+| 序列被放弃（命令不同 / 续接不符 / 空闲 1 s） | 只清 RAM，不发设备命令 | 无 |
+| 请求不足 2 个 pair（读）/ 不足窗口（写） | 回退普通读 / wbuf 写 | 无 |
 
-出处：`docs/reference/README.md` §F1（Linux MTD 顺序 cache read）/ §C4（OCOWFC）；
-`include/nand/onfi_1_0.h:230-282`（MT29F4G08 datasheet p.62-63 / p.74 的 op 序列）；
-`include/ftl/cache_batch.h`。
+#### 3.16.8 常量与出处
 
-#### 3.16.8 主流对照与验证
+| 常量 | 值 | 来源 |
+|---|---|---|
+| `FTL_CACHE_READ_MIN_PAIRS` | 2 | `include/ftl/cache_batch.h` |
+| `FTL_CACHE_READ_TRIAL_LBAS` | 32（4 × `FTL_LBA_PER_PAIR`，= `CFG_TUD_MSC_EP_BUFSIZE` 16 KiB） | 同上 |
+| `FTL_CACHE_WRITE_MAX_PAGES` | 4 | 同上 |
+| `FTL_CACHE_SEQ_RING` | 16 | `include/ftl/ftl.h` |
+| `FTL_CACHE_SEQ_IDLE_MS` | 1000 | 同上 |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_op.h`（序列打开时挂起，见 §3.12） |
 
-**主流对照**（判据与出处见 §3.16.1 / §3.16.7）：本仓与上述实现的差异是**不做 FC 序列句柄、
-不做跨 SCSI 命令合并**（BOT 串行下收益有限），改为靠 FTL 门控 + `draining` 保证器件序列不被
-劈开；窗口大小由资源（FC 池 / 16 KiB 传输）而非器件决定。
+#### 3.16.9 主流对照
 
-**验证**：
+「连续 chunk 走一条设备级 cache 序列」是主控的通用做法：公开可查的同类实现是 Linux MTD
+rawnand 的顺序 cache read（`0x31` / `0x3F`，commit `003fe4b9545b…`）与 OCOWFC 的 cache-mode
+流水线（`docs/reference/README.md` §F1 / §C4）；写侧「逐页 `FAIL_CACHE` 确认」按 MT29F4G08
+datasheet 的 15h / 10h 语义设计（`include/nand/onfi_1_0.h:230-282`）。
 
-- 已上板：H2testw 415/422 MB 0 错误（release -O2 镜像 `写 867 / 读 887 KB/s`；`cr=26475/104138/1793/0`
-  全 fallback=0、`cw=25538/100912/7983/0` abort=0、`d4=18020`）；全套 UT 148/148（debug 镜像）；新增
-  `/fc-nand/lifecycle/block_cache_multi_plane_cross_block`（跨块双 plane）作回归。
-- 未做：命令 trace（读 45 一次 / 46×N / 47 一次；写 49 一次 / 44×N / 48 一次、窗口间无插入）、
-  程序失败 / 超时 / 掉电注入。
-- 风险：`known_risks.md` RISK-IF-07/09/10/11/12、RISK-CACHE-14、RISK-USB-07/08。
+**本仓自定**的是：不做 FC 序列句柄、不做跨 SCSI 命令合并（BOT 串行下收益有限），窗口大小由
+资源（FC 池 / 16 KiB 传输）而非器件决定；序列不被劈开靠 FTL 门控 + `draining`，而不是靠
+FC 层的会话对象。
 
 <a id="s4" name="s4"></a>
 
