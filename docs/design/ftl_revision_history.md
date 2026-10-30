@@ -6215,8 +6215,36 @@ ITCM：release **61,296 B**、debug **62,064 B**；`.dtcm_data` 67,832 B、
   `FC_STATUS_INVALID_ARGUMENT`（防链被拆到 SQ/HSQ、防 owner 永不解锁）。
 
 **验证**：`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` 通过，
-零新告警。**未上板**：chain 路径此前仅 UT 覆盖，首次进生产必须上板验证跨 pass owner /
-HSQ 回推 / 失败页状态（R2 建链类改动）。
+零新告警。板端（2026-10-30，用户）：H2testw **415/423 MB、无错误、843/887 KB/s** ⇒
+host 4 页链（读 45h/46h×3/47h、写 49h/44h/44h/48h）正常。**未覆盖**：跨 pass owner
+（链长 >4 页）、HSQ 回推、失败页状态、守卫拒绝路径；这些仍需 FC UT / 大请求上板。
+
+**介质布局**：无变化。
+
+---
+
+## v1.03 — FC 状态字重构：descriptor / command 分开（未上板）
+
+**日期**：2026-10-30
+
+**内容**：
+- 状态拆成两套 8 位坐标：descriptor（per-CW：FAIL/RAID/MATA/CRC/UNC/EMPTY）与
+  command（命令级：NAND_FAIL/FAIL_CACHE/TIMEOUT/DATA_ERROR/MATA/AREADY/RDY/WP）。
+  命令状态不再复制数据路径类别；具体类别读 `desc_id` 指向的 descriptor。
+- 明确 NAND 一个 OP 的**前后两次读状态**：`pre_status`（RDY/ARDY/WP）与
+  `nand_status`（FAIL/FAILC）。命令成功 = 后一次读状态 FAIL/FAILC 全 0，不是 RDY。
+  引擎在第一个 `JUMP_IF_NOT_READY` 循环里捕获并保留 `pre_status`（busy 超时也保留）。
+- `FC_CW_STATUS_BLANK` → `FC_CW_STATUS_EMPTY`；成功 = `FC_CW_STATUS_UNUSED`(0)，
+  不再有 READY 成功位。
+- FTL 一律改用 `fc_cmd_status_has_error()` / `FC_CMD_STATUS_ERROR_MASK`；
+  RR 的 CRC-only 判据改为回看 desc 链（命令级 `DATA_ERROR` 合并了 UNC/CRC/RAID）。
+- 修 RISK-IF-08：desc 合并按 flat CW 把 NAND per-CW 结果并进 **所有带 desc 的命令**
+  （program 也并）；page-read 的 TIMEOUT 现在一定进命令状态，不再可能被数据路径的
+  READY 掩盖。program 失败平面归因因此不再回退 plane0（`ftl.c` 的 bad_plane_mask）。
+
+**验证**：`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` 通过，
+零新告警。DWARF 核实 `fc_command_status_t` 仍 12 B、`fc_descriptor_t` 仍 20 B（C6）。
+**未上板**：FC UT / H2testw / 超时与 CRC 负例仍未跑。
 
 **介质布局**：无变化。
 

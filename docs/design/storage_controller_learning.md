@@ -266,6 +266,15 @@
 **NAND 控制器 RTL**
 - OpenCores ONFI NAND Controller — https://opencores.org/projects/nand_controller （VHDL）
 - NandFlashController — https://github.com/cjhonlyone/NandFlashController （Verilog/AXI）
+- OCOWFC（Open-Channel Open-Way Flash Controller）— https://github.com/yhqiu16/OCOWFC
+  （FPL 2021；cache-mode pipelining + 双级调度器；论文 https://ieeexplore.ieee.org/abstract/document/9556350）
+
+**NAND 命令序列（cache read/program 的展开）**
+- Linux MTD rawnand sequential cache read（`31h`/`3Fh`，commit `003fe4b`）—
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011
+  （镜像 https://git.embedded.cherry.de/puma-linux.git/commit/drivers/mtd/nand/raw?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011）
+- ⚠ cache program（49h/44h/48h）**没有**找到完整开源实现；权威依据是 Micron MTG Table 18 /
+  Figure 74 的 FAILC（见 `docs/reference/README.md` §F2）
 
 **嵌入式 FTL**
 - SPIFTL — https://github.com/earlephilhower/SPIFTL

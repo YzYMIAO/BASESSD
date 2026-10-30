@@ -131,7 +131,7 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 | DEBUG 收敛：GC trig 5 s、删逐页/逐 CW MIG/JRN/RR 流水 | 已改、未上板 |
 | dangling 按旧 gblock 聚合（ftl.c） | 已改、未上板 |
 | RR：已退役块每 gblock 一次、好块首故障全字段 + `st=`（read_recovery.c） | 已改、未上板 |
-| `fc_cw_status_str()` 解码（fc_command.c） | 已改、未上板 |
+| `fc_cw_status_str()` / `fc_cmd_status_str()` 解码（fc_command.c） | 已改、未上板 |
 | 写轨迹飞行记录器（allocator.c / ftl.c / read_recovery.c） | 已改、未上板 |
 | CP done / GC trig 降 DEBUG；MIG 单块降 WARN | 已改、未上板 |
 | GC 系统性读失败熔断（`MIG_SYSTEMIC_READ_FAIL_MAX=8`） | 已改、未上板（RISK-GC-10） |

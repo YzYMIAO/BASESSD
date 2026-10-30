@@ -166,6 +166,17 @@ docs/reference/
 - **怎么读**：重点读它的**功能划分**段落（谁在控制器、谁在软件），不是读它的 PCIe 细节。
 - **为什么没备份**：MIT DSpace 的 PDF 被 **AWS WAF 人机验证**拦截（见 §三）。
 
+#### C4. OCOWFC（Open-Channel Open-Way Flash Controller，**未备份**）
+
+- **是什么**：开源 FPGA NAND 控制器（FPL 2021，`yhqiu16/OCOWFC`），支持 channel / way / plane
+  交织、**cache-mode pipelining**、per-way 异步队列，以及**双级硬件命令调度器**（上层提高
+  multi-plane / cache-mode 利用率，下层细粒度交错覆盖 busy 期）。
+- **价值**：**本仓 FC 控制器侧的形态对照**——尤其「cache 序列怎么进队列、怎么和普通命令交错」。
+  本仓的 `chain_owner` + 填充窗口是它在小 FIFO / 小池下的简化版。
+- **URL**：<https://github.com/yhqiu16/OCOWFC>；论文
+  <https://ieeexplore.ieee.org/abstract/document/9556350>
+- ⚠ **未备份**：Verilog RTL，需按需 clone；本文分析基于公开 README / 论文摘要。
+
 ### D. 小型 / 嵌入式 FTL（**最贴近本仓 DRAM-less 路线**）
 
 #### D1. LeaFTL（`LeaFTL.pdf`）
@@ -206,6 +217,25 @@ docs/reference/
 
 #### E3. zns-tools（`zns-tools.pdf`）
 - ZNS 工具链论文，偏实验工具，参考价值有限。
+
+### F. 命令序列 / 驱动实现（cache read / program 的展开）
+
+#### F1. Linux MTD rawnand 的顺序 cache read（**未备份**）
+
+- **是什么**：Linux 主线 `drivers/mtd/nand/raw` 的 sequential cache read——一次
+  `00h-addr-30h` 之后，后续页用 `31h`（READ CACHE SEQUENTIAL），末页 `3Fh`（READ CACHE END）；
+  提交 `003fe4b9545b83cca4f7a7633695d1f69a0b0011` 的 `nand_lp_exec_cont_read_page_op()`。
+- **价值**：**cache read 序列的开源展开样本**。它的分工是「上层知道这次读多少页，再展开成一条
+  序列」——与本仓「FTL 决定 run、FC 执行」一致。
+- **不覆盖**：driver 层一次多页读，没有本仓的 per-LUN owner / 开放窗口（硬件控制器队列深）。
+- **URL**：<https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011>
+  （镜像：<https://git.embedded.cherry.de/puma-linux.git/commit/drivers/mtd/nand/raw?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011>）
+
+#### F2. cache program 的开源空缺（如实登记）
+
+- 公开结果只确认 Linux 定义了 `NAND_CMD_CACHEDPROG 0x15`；**没有完整的 49h/44h/48h 开源序列实现**。
+- **权威依据**仍是 Micron MTG Table 18 / Figure 74 的 FAILC 语义（`E1` 与外部 datasheet）；
+  本仓的增量确认（第 i+1 条确认第 i 页）是**本仓自拟**，不是行业标准形态。
 
 ---
 

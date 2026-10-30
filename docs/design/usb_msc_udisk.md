@@ -159,11 +159,18 @@ flowchart TD
 
 ### 4.3 缓冲与并发
 
-- 单命令在飞；静态 bounce buffer（`CFG_TUD_MSC_EP_BUFSIZE = 16384 B`）必须活到
-  FTL `complete_flag`。
-- READ：USB 端点缓冲 → 提交到 bounce → 完成 → 拷回端点缓冲 → USB IN。
-- WRITE：USB OUT 数据先拷进 bounce → 提交 → 完成 → 发 CSW。
-- 主机复位/拔出时在飞请求标记 `discard`：完成后只收尾，不回写 USB 缓冲。
+- **单条 SCSI 命令在飞**（BOT 串行）；但同一条 WRITE(10) 的**两个 chunk** 可以同时在飞
+  —— 写路径需要 1 chunk lookahead：缓存程序序列里 chunk k 的最后一页由 chunk k+1 的
+  第一条命令的 `FAIL_CACHE` 确认（`docs/design/ftl_design.md` §3.16）。
+- 两个槽（`usb_msc_slot_t`）：每槽 16 KiB bounce（0 号 AXI `.bss`、1 号 DTCM，均 CPU-only）
+  + 一个 `ssd_request_t`。bounce 必须活到该槽的 FTL `complete_flag`。
+- WRITE：端点缓冲 → 拷进槽 bounce → 提交 → **非末 chunk 立即回流控回执**
+  （`tud_msc_async_io_done(length)`，让主机发下一 chunk）；末 chunk 等 FTL 完成再回执，
+  成败即 CSW 成败。两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）；
+  主循环在 `usb_device_task` 前先跑 `ftl_service`，且 `tud_task` 单次最多处理
+  `CFG_TUD_TASK_EVENTS_PER_RUN`（16）个事件 ⇒ 不会饿死 FTL。
+- READ：USB 端点缓冲 → 提交到槽 bounce → 完成 → 拷回端点缓冲 → USB IN（不需要 lookahead）。
+- 主机复位/拔出时在飞槽标记 `discard`：完成后只收尾，不回写 USB 缓冲。
 - 不支持多 LUN；不支持 TRIM。
 
 ---
@@ -265,7 +272,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
   - `tud_msc_inquiry_cb` / `tud_msc_start_stop_cb` / `tud_msc_test_unit_ready_cb`；
   - SCSI SYNCHRONIZE CACHE → `SSD_REQUEST_FLUSH`（`ftl_flush`，仅主循环上下文）；
   - `tud_event_hook_cb`：总线复位/拔出时把在飞请求标记 `discard`。
-- 静态 bounce buffer；单命令在飞。
+- 两个槽各带 16 KiB bounce；单条 SCSI 命令在飞，写路径两个 chunk 可同时在飞（§4.3）。
 
 ### Phase 3：主循环与仲裁（**✅ rev30 已上板**）
 

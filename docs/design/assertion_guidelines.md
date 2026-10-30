@@ -514,7 +514,7 @@ if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC)) { completion.desc_id =
 "first-failing desc on error"，被删的 `set_cw` 也是全集口径，只有内联循环是少数派，
 故**改内联版去对齐契约**，而不是改文档：
 
-- `include/fc/fc_command.h` 新增 `FC_CW_STATUS_ERROR_MASK`（六个错误位的规范并集），
+- `include/fc/fc_command.h` 新增 `FC_CW_STATUS_ERROR_MASK`（descriptor 错误位的规范并集；现为 FAIL/RAID/MATA/CRC/UNC 五位；命令级另有 `FC_CMD_STATUS_ERROR_MASK`），
   把原先只存在于 `set_cw` 里的那份"失败位集合"固化成唯一一份命名定义；
 - `fc.c` 的完成项聚合循环改用该掩码判失败（`found_unc` → `found_fail`）；
 - 顺带把 `desc_id` 的字段注释补全：初值来自 NAND 透传的 `failed_descriptor_id`

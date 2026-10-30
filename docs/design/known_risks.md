@@ -68,6 +68,7 @@
 | RISK-BOOT-04 | 部分上板（2026-10-25：`format_in_progress_resume` 覆盖“save 后”断电点；erase 中/CP marker 前未做） | 两阶段格式化中途掉电后，重启不能判断“格式化未完成” | `FORMAT_IN_PROGRESS` 写入 `bbt_header_t.reserved[0]`，`bbt_load` 恢复；`cp_media_status_probe` 见该标志返回 NO_RECORD ⇒ 继续格式化 | 上板：save 后 / erase 中 / CP marker 前各断电一次 | `src/ftl/bbt.c`；`src/ftl/checkpoint.c` |
 | RISK-BOOT-05 | 待上板 | 快照/恢复路径的校验与计数改动未板验：restore Pass 0 全量校验（不再部分应用 BAD）、`recovery_materialize_pba` 校验 ch/ce/lun、`recovery_add_closed` 传播列表满、`valid_cw` 改 `uint32_t` | 编译零告警；失败路径回退 full metadata rebuild | 上板：快照中途注入非法 word（不留下部分 BAD）；journal 注入越界 PBA（回退 full metadata rebuild）；满盘重建确认 `valid_cw` 不截断 | `src/ftl/power_failure_recovery.c` |
 | RISK-BOOT-13 | 观察中（2026-10-24：POR 后无记录，判定为旧镜像残留；原始 format 后写请求挂死仍未定位） | `format` 完成后未按提示 `POWER-CYCLE NOW` 就下发 `wr`：曾出现 CLI 请求永久 `busy`；同一会话的 `.noinit` 记录显示 **HardFault** `PC=0x2400038c LR=0x24000b09 CFSR=IACCVIOL HFSR=FORCED`（按 rev25 解析落在 CLI 16 KB `g_wr_buf` 内，属执行流跳进非可执行 RAM）。**但一次 POR 后 `previous crash` 行消失，且 format→POR→wr/fl 正常** ⇒ 该记录至少可能是 rev24/旧会话的陈旧记录，不能归因于本轮 FTL 改动。另：format 后未重启的 `wr` 本次返回 `status=-3`，未再挂死 | `format` 已打印 `POWER-CYCLE NOW`；未做运行期拒绝 | ① 继续在 rev25 上做正常读写/断电回归；② 若 `previous crash` 再次出现：立即 `crash` + 记录命令序列，按**当次镜像**符号表定位；③ 考虑让 format 后置 FTL 为不可提交状态直到重启 | rev25 日志 2026-10-20：首次 `.noinit` 有 HardFault；**POR 后无该行**；`arm-none-eabi-nm` `g_wr_buf=0x240002dc`。**2026-10-24 追加**：21:09/21:14 镜像多次软复位后仍报同签名 MemManage（PC=0x2400038c LR=0x24000b09 CFSR=0x00000001），但 **21:14 镜像真实断电（`reset reason: POR PIN BOR`）后启动无 `previous crash` 行** ⇒ 该记录是更早会话/镜像的 `.noinit` 残留，不是当前镜像的活缺陷。只有 **POR 后仍出现** 才按新崩溃重开 |
+| RISK-BOOT-23 | 已解释（观察中，2026-10-30 两次上板对照） | **非正常复位后最新 CP record 双 plane 读失败 ⇒ 全量 metadata rebuild**：`[CP] find latest seq=17 idx=2` → `[BLK] read failed plane=0/1 page=0 rec=2` → `unavailable (rec=2 seq=17)` → `fallback to full metadata rebuild (power failure, blocks_valid=0 applied=0 ctx_ok=0 replay_ok=1)`；重建成功（`blocks=60 valid_cw=13283`），`bad areas cp=0`（该 CP 块未标坏）。若**每次** dirty reset 都复现，说明最新 CP 记录的坏页退避不足（下次 boot 最新 CP 仍指向同一坏页），代价只是启动慢，无数据丢失。**2026-10-30 对照**：dirty reset（前一次写/GC 后）⇒ 重建一次；随后 format 后的 PIN reset ⇒ `boot type=1 restored`、无重建 ⇒ 前次重建由 dirty metadata 触发，符合设计预期；受控掉电注入仍未做。 | Journal 回放成功（`journal_entries=41 replay_ok=1`）；全量重建成功；同次 H2testw 417 MB 0 错误。 | **重访**：下次干净断电上电看是否仍有 `[BLK] read failed ... rec=` / `fallback`；只在 dirty reset 后出现 ⇒ 预期接受并记录；干净上电也复现 ⇒ 查 boot 读 CP 失败时是否应标坏该块并切换 CP 块 | `src/ftl/checkpoint.c` `find latest`；`src/ftl/power_failure_recovery.c:572/1012`；板端 2026-10-30 启动日志 |
 | RISK-MD-16 | 待定位（2026-10-22 板端） | **victim 上的 region 页读失败 ⇒ 压缩每轮在同一页中止，victim 永不回收**：板端 GC 期间反复出现 `[META] md job abort phase=2 victim=46 moved=10 (victim 不擦)`；`phase=2 = MD_JOB_CP_READ`，且**没有**伴随 `submit stalled` ⇒ 是读命令完成状态带错误位（若为提交超时则属瞬态）。每次 `victim=46/moved=10` 完全相同 ⇒ 确定性坏页，不是瞬时背压。后果：该元数据日志块无法搬空、live 水位偏高、压缩反复白做；**无数据丢失**（abort 不擦 victim，未搬 region 仍指向它，已搬的指向新页） | abort 语义本身安全（两边都有效）；日志已区分瞬态超时（debug）与真异常（限流 LOGE） | ① 先在 abort 行打出完成状态位（`fc=`）以区分 UNC/CRC/META；② L2 双副本下若 victim 上那份不可读而另一份有效 ⇒ 压缩**跳过该副本**（保留 Directory 的另一份），不要中止整轮；③ 两份都不可读 ⇒ 按 RISK-BOOT-18 降级该 region | `src/ftl/metadata_job.c` `md_handle_abort` / `md_cp_read_complete`；`src/ftl/metadata.c` `md_compact_read`；板端 2026-10-22 GC 日志 |
 | RISK-MD-17 | 待决策（2026-10-24 审查发现） | **status.error 看不到整理 job 的最近一次中止**：`md_handle_abort` 把 `handle.error` 置为 `FTL_ERROR`，但 `md_handle_step` 的 IDLE 分支在**每次**进入 IDLE 时先写 `FTL_OK`；`md_handle` 是先 step 后 `md_status_fill`，abort（无论来自完成回调还是 step 内）后的下一次采样前 error 已被清回 `FTL_OK`。后果：host/诊断只看到 `error=0`，无法归因最近一次 abort；无数据损坏（abort 本身不擦 victim） | abort 仍会打 `[META] md job abort phase=...` 日志；`md_status_t` 的 `phase/victim/moved` 仍可观测 | 若 `status.error` 要作为对外归因：把清除点从「进入 IDLE」移到「真正启动新 job」（reclaim/anchor/compact 将要设置 phase 处），并补一条 UT/板端负例（构造 abort 后读 status）；否则在文档中明确该字段只反映“当前 job” | `src/ftl/metadata_job.c:708`（IDLE 清 error）/ `:282`（abort 置 error）/ `:992`（status_fill 读取） |
 | RISK-BOOT-22 | 已复现（2026-10-24 板端；未修） | **格式化中断后可能拒绝格式化/启动**：两阶段格式化在「BBT 已落盘（带 FORMAT_IN_PROGRESS）、initial CP 尚未写」时掉电；重启时若 `bbt_init` 因 RISK-BBT-18 选中了**旧 BBT record**（不带标志），`cp_media_status_probe` 会把「有 BBT、无 CP」判成 `CP_MEDIA_IO_ERROR` ⇒ `pfr_media_check_format` 拒绝格式化，`boot failed, fallback to fc_service`。设备需人工 CLI `format` 恢复。后果是可用性问题，不是数据破坏（此时尚无用户数据承诺） | 无产品侧缓解。UT `format_in_progress_resume` 用“更大的 BBT sequence”让新 record 在 bootstrap 扫描中胜出，从而隔离该变量（不擦 BBT 载体） | 优先修 RISK-BBT-18（locate 按 sequence 最大值选）；修好后本用例可去掉 bootstrap 清池。重访：每次改 BBT/CP 池几何或 locate 都要在“中断格式化”介质上重启验证 | 板端 2026-10-24 21:32:27 启动：`[ERR] [BOOT] CP media unreadable — refuse to format` + `[ERR] [FTL] boot failed, fallback to fc_service`；`src/ftl/checkpoint.c` `cp_media_status_probe`；`src/ftl/bbt.c` `bbt_load` / `bbt_save`（sequence 只取候选池 max）；`tests/unit/test_ftl_media.c` `test_format_in_progress_resume` |
@@ -76,6 +77,8 @@
 ---
 
 ## 2C. L2P cache
+
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30）：RISK-L2P-08（已闭合 2026-10-30，ITCM 野写的根因与写者均定位）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
@@ -90,7 +93,7 @@
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-CP-03 | 待上板 | 本轮状态机改动未板验：提交状态传播（FTL_ERROR 立即中止）、`find_latest` 失败复位游标、水位公式精确到条目 | 编译零告警 | 正常 CP、各 phase 掉电、journal 回切、85%/95% 触发点 | `src/ftl/checkpoint.c` |
-| RISK-CP-04 | 待定位（上板观测 2026-10-20 / 2026-10-21 复现） | **持续 host 写流下 CP 提交饥饿**：H2testw 期间反复出现 `[CP] submit stalled 25ms — abort phase=1`。CP 用 `ftl_op_submit` 申请 FC 命令，host 写可占满 `FC_COMMAND_POOL_DEPTH=64`（`FTL_PENDING_MAX=32` 个写各占 2 条命令）⇒ CP 连续 10ms（`FTL_SUBMIT_TIMEOUT_MS`）申请不到槽位即中止重试。后果：checkpoint 长期不推进、journal 环增长；环满后 host 写被 Backpressure 拒绝，表现为写停顿（无静默损坏）。当前无法区分它是 GC 活锁的**症状**还是独立缺陷。2026-10-21 复现时日志刷屏，已加 abort 日志限流（见 RISK-CP-05），但饥饿本身未修 | 中止后可重试；journal 环满是安全背压，不会越界写；abort 日志 1s/实例 | ① 先修 RISK-GC-07 后复跑 H2testw，观察 CP 是否仍持续 abort；② 若仍复现：给元数据/CP 预留命令槽，或让 CP 的 submit deadline 长于 host 写突发；③ 上板确认 journal 水位与 CP 成功率 | `src/ftl/checkpoint.c` `cp_job_stall` / `cp_command_result_handle`；`src/ftl/ftl_op.c` `ftl_op_submit`；`include/fc/fc.h` `FC_COMMAND_POOL_DEPTH`；串口 rev30/2026-10-21 日志 |
+| RISK-CP-04 | 待定位；2026-10-30 H2testw 未复现（cp=1724 持续递增、无 `[CP] submit stalled` 行） | **持续 host 写流下 CP 提交饥饿**：H2testw 期间反复出现 `[CP] submit stalled 25ms — abort phase=1`。CP 用 `ftl_op_submit` 申请 FC 命令，host 写可占满 `FC_COMMAND_POOL_DEPTH=64`（`FTL_PENDING_MAX=32` 个写各占 2 条命令）⇒ CP 连续 10ms（`FTL_SUBMIT_TIMEOUT_MS`）申请不到槽位即中止重试。后果：checkpoint 长期不推进、journal 环增长；环满后 host 写被 Backpressure 拒绝，表现为写停顿（无静默损坏）。当前无法区分它是 GC 活锁的**症状**还是独立缺陷。2026-10-21 复现时日志刷屏，已加 abort 日志限流（见 RISK-CP-05），但饥饿本身未修 | 中止后可重试；journal 环满是安全背压，不会越界写；abort 日志 1s/实例。**2026-10-30 增补**：cache 序列打开期间 CP 的提交 deadline 由 `ftl_op_cache_seq_active()` 挂起（RISK-IF-13），避免门控等待触发本 abort | ① 先修 RISK-GC-07 后复跑 H2testw，观察 CP 是否仍持续 abort；② 若仍复现：给元数据/CP 预留命令槽，或让 CP 的 submit deadline 长于 host 写突发；③ 上板确认 journal 水位与 CP 成功率 | `src/ftl/checkpoint.c` `cp_job_stall` / `cp_command_result_handle`；`src/ftl/ftl_op.c` `ftl_op_submit`；`include/fc/fc.h` `FC_COMMAND_POOL_DEPTH`；串口 rev30/2026-10-21 日志 |
 
 ---
 
@@ -107,9 +110,15 @@
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
-| RISK-IF-04 | 待上板 | 本轮行为变化未板验：plane 1 迁移数据、wbuf 稀疏页、越段位图 release 拒绝、迟到完成路径 | 编译零告警（release 两条 unused 已消失） | 按 §5 板端清单回归 | `src/ftl/ftl_fc_interface.c` / `ftl_op.c` |
+| RISK-IF-04 | 部分上板（2026-10-30：全盘写/校验 0 错误；GC 搬迁 41.4 万页 ⇒ plane1 迁移与背压回退已走量）；wbuf 稀疏页 / 越段位图 release / 迟到完成负例未注入 | 本轮行为变化未板验：plane 1 迁移数据、wbuf 稀疏页、越段位图 release 拒绝、迟到完成路径 | 编译零告警（release 两条 unused 已消失） | 按 §5 板端清单回归 | `src/ftl/ftl_fc_interface.c` / `ftl_op.c` |
 | RISK-IF-06 | 待决策（2026-10-30 读码判定） | **FC chain 派发路径不处理 RAID stripe encode**：`fc_poll_dispatch_chain` 没有单命令路径的 `#if CONFIG_FC_RAID` 分支。若 FTL 把写命令标成 `FC_CHAIN_MORE` 且 `raid=ENCODE`，整链写入会**静默不写 parity**（`CONFIG_FC_RAID=0` 时 ENCODE 分支不编译，不构成实际失效） | RAID 关闭（R5）⇒ `raid` 字段固定 NORMAL、ENCODE 分支不编译；FTL 当前不设置 `raid=ENCODE` | 启用 RAID，或 FTL 写路径开始设置 `raid=ENCODE` **之前**：在 chain 路径补 stripe 分支，或 `ASSERT(raid != FC_RAID_MODE_ENCODE)`；加 UT 负例 | `src/fc/fc.c:1491-1499`（single 的 RAID 分支）vs `src/fc/fc.c:1540-1593`（chain 无该分支）；`include/fc/fc.h:38-52` |
-| RISK-IF-07 | 已改未上板（2026-10-30） | **一批 chain 违反契约会静默错乱或锁死 LUN**：① 混优先级 ⇒ `fc_submit_batch` 按 `high_priority` 把链拆到 SQ/HSQ 两段，`fc_poll_chain_length` 只沿单队列 peek，跳过的成员被当成不存在 ⇒ cache read 输出错页 / cache program 写错序列；② 末条不是 `END` ⇒ `chain_owner` 永不解锁，该 LUN 的另一队列被永久饿死 | `fc_submit_batch` 提交前检查：含 `FC_CHAIN_MORE` 时要求全批同优先级**且**末条 `FC_CHAIN_END`，否则 debug `ASSERT(false)` + release 返回 `FC_STATUS_INVALID_ARGUMENT`；`ftl_op_submit_batch` 把非 `QUEUE_FULL` 失败映射为 `FTL_ERROR`（不再重试成死循环）；当前所有调用者均为同优先级且末条 END | 上板：现有命令流（host 读/写、GC）行为不变；负例只能由 UT 构造（`cmds[0].chain=MORE` + `cmds[1].high_priority=1`，或末条 `chain=MORE`），测试源由用户维护（R4） | `src/fc/fc_interface.c` `fc_submit_batch`；`src/ftl/ftl_op.c` `ftl_op_submit_batch`；`src/ftl/cache_batch.c` `cache_read_submit` |
+| RISK-IF-07 | 正常路径已上板（2026-10-30：5.2 万窗口、全盘 0 错误；跨 chunk 链正常）；混优先级 / wild-chain 负例未注入（代码守卫保留） | **一批 chain 违反契约会静默错乱或锁死 LUN**：① 混优先级 ⇒ `fc_submit_batch` 按 `high_priority` 把链拆到 SQ/HSQ 两段，`fc_poll_chain_length` 只沿单队列 peek，跳过的成员被当成不存在 ⇒ cache read 输出错页 / cache program 写错序列；② 末条 `MORE` 而没有后续 END ⇒ `chain_owner` 永不解锁，该 LUN 的另一队列被永久饿死 | `fc_submit_batch` 仍拒绝混优先级（debug `ASSERT` + release `INVALID_ARGUMENT`）；**末条 MORE 改为合法**（流式中间窗口），由 FTL 的 cache 序列状态机保证最终 END（`end_seq` = run 到头 / 物理断 / D4 / 尾部不足一对）、`ftl_op_submit*` 门控保证窗口间无插入；孤儿序列由 `ftl_cache_seq_idle_guard()`（1s）关闭。**写序列**用同一机制（首 49 / 中间 44 / 断点 48，窗口末条 MORE 跨 chunk 续链） | 上板：读/写流式窗口跨 chunk 的 END、D4 断点、wild-chain 负例（FTL 断点算错） | `src/fc/fc_interface.c` `fc_submit_batch`；`src/ftl/ftl_op.c` 门控；`src/ftl/cache_batch.c` `cache_read_submit`；`include/ftl/ftl.h` `ftl_cache_seq_t` |
+| RISK-IF-08 | 已改、未上板（2026-10-30 状态字重构） | **page read 的完成聚合忽略 NAND 结果位**：`fc_complete_from_nand` 的 page-read 分支只 OR `desc->status`（数据路径），不 OR `nand_completion->cw_status`（NAND FAIL/TIMEOUT）。① NAND 读 FAIL 不以 `NAND_FAIL` 上报（通常数据路径也会置 UNC，错误可见但归因含糊）；② NAND 读 TIMEOUT 若 buffer 仍是上一次的有效数据且 `meta=FC_META_UNKNOWN`（GC/raw 读），ECC/CRC/META 都能过 ⇒ 命令被报成 READY，**静默返回陈旧数据**（§3.2） | 状态字重构已修：page-read 分支按 flat CW 把 `cw_status[]` 并进 desc（`FC_CW_STATUS_FAIL`）；命令级从 `pre_status`/`nand_status`/`execution_status` 映射 `NAND_FAIL`/`FAIL_CACHE`/`RDY`/`AREADY`/`WP`/`TIMEOUT`。TIMEOUT 现在一定进命令状态，FTL 的 `fc_cmd_status_has_error` 会拒绝陈旧数据 | 上板负例：注入 NAND 读超时并保留旧 buffer（GC/raw 读），确认命令状态带 `TIMEOUT`、FTL 不进成功路径 | `src/fc/fc.c` `fc_complete_from_nand` Step 3；`src/nand/nand_engine.c` `pre_jump_index`；`src/nand/nand_dispatch_tables.c` `completion_per_cw`；`include/fc/fc_command.h` `FC_CMD_STATUS_*` |
+| RISK-IF-09 | 待上板（2026-10-30，P1 读流式） | **放弃序列只清 RAM，不发设备 LAST**：跨 chunk 的序列在「命令上下文不同 / 续接点不一致 / 续窗口首 pair 收不到 / 组被弃或失败 / 空闲超时」时由 `ftl_cache_seq_release()` 释放状态，但 NAND 侧仍停在 cache read 模式（预取页未消费）。假设：后续命令（普通读 `00h/30h` 或新 `START 45h`）会终止残序列，且不会有副作用。若器件要求显式 `47h LAST` 或 `FFh RESET`，则残序列会让后续读出错/挂起 | ① 只有上述异常入口才发生（正常路径必在 run 头 `START`、run 尾 `LAST`）；② 放弃后立刻允许普通读，并由 `ftl_cache_seq_idle_guard()` 限时 1s；③ 读数据错误按 D7 逐页上报，不会静默成功 | **上板负例**：读中途拔线/主机中止 → 再读同一/相邻 LBA，逐字节比对；若出现错页/超时，改为「放弃时下发 `FFh RESET`（LUN reset）收尾」并复核 datasheet 原文（R12） | `src/ftl/cache_batch.c` `ftl_cache_read_try`；`src/ftl/ftl.c` `ftl_cache_seq_release` / `ftl_cache_seq_idle_guard`；`include/ftl/ftl.h` `ftl_cache_seq_t` |
+| RISK-IF-10 | 待上板（2026-10-30，P1 读流式） | **被放弃的 MORE 链尾会占住 FC `chain_owner`**：流式窗口末条 `MORE` 后若下一窗口（同一 SCSI 命令的下一 chunk）不再到来，链在 FC 侧没有 `END`；`chain_owner` 只由「末条 END」或「派发失败」清。期间同 LUN 的 **HSQ 后台命令（CP/journal/GC）被永久饿死**，直到下一次主机提交（任意命令作为新链尾 END） | FTL 门控 + `ftl_cache_seq_idle_guard()` 只释放 FTL 状态，**不碰** FC 链；正常路径下一 chunk 在 ms 级到达并续链；USB BOT 串行 + CLI gate ⇒ 同一时刻只有一个主机命令 | **上板**：大顺序读中途中止/拔线，观察之后 CP/journal 是否恢复；若饿死，需要 FC 侧「强制结束链」或放弃时下发 LUN reset（优先走 reset，顺带覆盖 RISK-IF-09）。跟踪触发：任何时候发现「主机空闲但 journal 水位不降」 | `src/fc/fc.c` `fc_poll_fill_queue`（chain_owner 更新）；`src/ftl/cache_batch.c` `cache_read_build`（末条 chain 位）；`src/ftl/ftl.c` `ftl_cache_seq_idle_guard` |
+| RISK-IF-11 | 正常路径已上板（2026-10-30：10.1 万页确认、cw abort=0、全盘 0 错误）；失败注入未做 | **逐页确认依赖「完成按提交顺序」与 FAILC 语义**：缓存程序第 i 页的最终结果由第 i+1 条命令的 `FAIL_CACHE` 给出，确认 FIFO 按提交顺序 pop（头==自己的页才跳过）。若 FC 的完成顺序被破坏，或器件 FAILC 的「上一页」归属与实现不符，会把成功页标失败/把失败页当成功（**静默坏数据**）。 | ① FC 每 LUN FIFO 严格先进先出，完成按序；② FAILC 只在 op44/op48 映射（op49 首页不映射，避免残留）；③ 任一错误位（FAILC/NAND_FAIL/TIMEOUT/…）⇒ 整个序列中止、未确认页一律不确认映射、关闭 hot SB。 | **上板负例**：注入单 plane/双 plane 中间页 program 失败，确认失败页及其后页不确认、之前页已确认；命令 trace 复核完成顺序；若器件 FAILC 归属与假设不符，改为按 desc 逐 CW 状态归因 | `src/ftl/ftl.c` `ftl_cache_wr_member_done`；`src/fc/fc.c:778`（`fail_cache_valid`）；`src/nand/nand_fmc.c` `nand_fmc_exec_check_fail_cache` |
+| RISK-IF-12 | 满盘压测已上板（2026-10-30：free=2 + 持续 GC，未观测 1s 停顿/IO_ERROR）；注入式验证未做 | **确认停泊 × 序列门控可能退化到 1 s idle 守卫**：序列打开时 L2P 加载 / journal 刷页的提交被 `ftl_op_seq_gate` 挡住；若确认因此停泊、且最老的组被占住（两个槽都用满），下一 chunk 无空闲槽 ⇒ 序列看不到下一窗口、停泊无法推进，直到 idle 守卫（1 s）中止序列（尾页按错误结算，host 重试）。 | ① 开序列前预加载窗口 L2P region；② 每窗口 `jrn_reserve` 预留本窗口条目，失败即本窗口 END（序列结束，刷页/加载能跑）；③ 下一窗口 L2P 驻留 lookahead；④ `ftl_cache_seq_idle_guard()` 兜底。 | **上板**：大顺序写 + free pool 低位（journal/GC 压力）测吞吐、IO_ERROR 计数与最长写停顿；若出现 >100 ms 停顿或非注入性 IO_ERROR，优先增加第三槽或把「预留失败立即 END」扩展到 ring 级 | `src/ftl/cache_batch.c` `ftl_cache_write_try`；`src/ftl/ftl.c` `ftl_cache_seq_idle_guard`；`src/controller/usb_msc.c` 槽状态机 |
+| RISK-IF-13 | 审计结论 + deadline 挂起 + 限流均上板验证（2026-10-30 新镜像 17:33：满盘写+校验全程无 submit-stalled 刷屏，JRN/L2P 单行带 suppressed、GC/CP/journal 均推进） | **门控覆盖与后台/RR 交互（判定结论，非缺陷）**：`ftl_op_submit*` 是唯一提交漏斗（`src/ftl` 下 `grep fc_submit` 为 0），门控覆盖 host / GC / WL / CP / journal / metadata / L2P / RR。各后台路径都把门控拒绝当 `FTL_AGAIN` 重试：迁移 `mig_command_submit` 释放命令并回退 waiting、RR `rr_read_submit` 释放命令且 stage 不变、journal/checkpoint/metadata/L2P 同型。被拒提交置 `break_requested`，序列在下一窗口收尾；BOT 串行下 RR（host 读触发）与写序列不共存。 | **上板发现并已修**：后台提交 deadline（`FTL_SUBMIT_TIMEOUT_MS=10ms`）短于 USB 一个 chunk 的间隔（16 KiB @ ~0.84 MB/s ≈ 19 ms）⇒ 写序列打开期间 META/CP/MIG/RR 每 10 ms abort 一次并刷屏。修复：四类 job 的 stall 检查先看 `ftl_op_cache_seq_active()`，序列打开时**挂起 deadline**（等待有界：D4 下一窗口 / 空闲守卫 1 s）；META 的 stall 日志另加 5 s 限流。`info` 的 `d4=` 计数证明 D4 生效。 | **上板**：大顺序读写 + 后台 GC 压测，观察 `d4=`、`mig=` 与 `rrab=`；若后台长时间无进展，检查是否为门控未收尾（序列卡在等 chunk） | `src/ftl/ftl_op.c` 门控；`src/ftl/migrate.c:265`；`src/ftl/read_recovery.c:146`；`src/ftl/journal.c:451` |
 
 ---
 
@@ -132,6 +141,8 @@
 | RISK-CR-02 | 待上板 | 坐标类改动未板验：`ftl_op_route_get_region` 的 dim→(ch,ce,lun) 分解改走 `ftl_dim_ch/ce/lun`（与 `lba_route_*` 收敛为同一套公式）。坐标属「编译期无声的三类量」 | 分解式与原手写式逐字同值；新增三个 `static inline` 纯函数（H42） | **必须上板**：跑一遍读写 + `map <lba>` | `include/ftl/l2p_cache.h` / `src/ftl/ftl_op.c` |
 
 ---
+
+| RISK-FC-05 | **复现条件已消除，底层原因未证实**（2026-10-30） | `/speed/ftl_rw` 连跑 4 组合时，`cache rd=4` 结束后 FTL 回不到 idle：一条带 ctx 的**后台双 plane 页写**（`op=31`、`chain=END`）留在 SQ 头，`lun_used=0/lun_phase=IDLE/owner=NONE`，填充 pass 在跑（`fill_delta=7496/3748`）却没把这条命令发出去，teardown 断言 `ftl_op_ctx_count()==0` 失败。单独跑该组合不复现 ⇒ 依赖前序组合留下的状态。 | **测试侧隔离**：`/speed/ftl_rw` 的非首个组合开始时先 `ftl_ut_reboot_from_media()`（quiesce + `fc_init` + 重新武装 + PFR），只清 RAM 运行态、保留介质内容。全套 `test` 已 **148/148 通过**（2026-10-30 22:43:58 镜像）。FC 侧只读诊断 `fc_debug_state_get()`（队列头 / 链锁 / LUN / 填充计数）保留。 | **重访触发**：① 若在 H2testw 或长时间 running 下出现「host I/O 变慢/停住」；② 若其它测试再出现 teardown ctx 残留，`ftl teardown leaked …` 行会带 `sq_head/st/bound/sched_sq/fill`，按该行定位。⚠ **这不是修复**：泄漏可能在,只是复现条件被隔离掉；不要把它当成已闭合。 | 串口 2026-10-30（`SPEED idle timeout:` 行）；`src/fc/fc.c` `fc_poll_fill_queue` / `fc_debug_fill_counters`；`src/fc/fc_interface.c` `fc_debug_state_get`；`tests/unit/test_speed.c`（组合隔离）；`tests/unit/ftl_ut_common.c`（teardown 泄漏消息） |
 
 ## 2I. 页打包写缓冲 wbuf（`wbuf.c` + `wbuf.h`，本轮审查）
 
@@ -178,6 +189,8 @@
 | RISK-USB-02 | 待上板 | MSC 异步完成路径未实测：`tud_msc_async_io_done()` 的 deferred 回调、主机复位期间的 `discard` 收尾都只在静态路径成立 | `discard` 标志 + `tud_ready()` 守卫；FTL 只持有静态 bounce buffer | 上板：读写过程中拔线/总线复位/重新枚举，确认无死命令、无残留 CSW 错误；确认不会出现 `pending_io` 永久为真 | `src/controller/usb_msc.c` `usb_msc_task` / `tud_umount_cb` |
 | RISK-USB-05 | 待上板 | WRITE(10) 的 **FUA** 位未处理：主机若只发 FUA 而不发 SYNCHRONIZE CACHE，命令完成时数据仍在 FTL 缓冲/日志，不保证已编程到 NAND | 主机 fsync 路径通常随后发 SYNCHRONIZE CACHE；`ftl_flush` 会先刷 wbuf 再刷 L2P/journal | 上板抓包确认主机是否使用 FUA；若使用，需要在写完成路径补 flush（或在 MSC 回调里记录 FUA 并要求 `usb_msc_task` 完成后 flush） | `src/controller/usb_msc.c` `usb_msc_transfer`；`src/ftl/ftl.c` `ftl_flush` |
 | RISK-PLAT-07 | 信息 / 待决策（2026-10-24） | **所有构建配置共用同一个 `debug.elf`**（`BIN_DIR`/`TARGET` 只按 debug/release 分，不按 `UT` 分）：`make tests UT=FTL` 后再 `make tests UT=FC`，后者的镜像**只含 FC 套件**并覆盖前者。板端现象是 `test /ftl/` 打印 `NO test run,0(100%) skipped.`（不是套件坏，是镜像里没有 FTL 用例）。2026-10-24 已真实踩到一次 | 无代码改动。构建顺序纪律：**最后一个构建决定烧录镜像**；烧 FTL UT 前必须让 `make tests UT=FTL` 是最后一次链接。已把 FTL UT 镜像重新链接回来 | 待决策：是否按配置给 ELF 命名（如 `debug_ut_FTL.elf`）并把 `launch.json`/烧录路径跟着分；在此之前，怀疑「用例凭空消失」时先看横幅时间戳对应的**最后一次**构建命令 | `config.mk:76-81`（`BIN_DIR`/`TARGET` 共用）；`docs/design/ftl_ut_design.md` 运行流程；板端 2026-10-24 20:05:13 镜像 `test /ftl/` → `NO test run` |
+| RISK-USB-07 | USB 路径已上板（2026-10-30：2.7 万写 chunk + 全盘 0 错误）；CLI static 请求继承路径未专项验证 | **`request->io` 模板的 per-run 字段跨命令残留**：`ssd_request_split()` 把本 run 的 `total_lbas/offset_lbas` 写回 `request->io`（跨命令复用的模板）。USB 路径每次 `usb_msc_submit()` 都 `memset` 并重设，**CLI 路径**是 `static g_cli_pending.req`：第一次读后 `total_lbas` 变成该次 `block_count`、`offset_lbas` 停在最后一个 run 的偏移 ⇒ 下一条 CLI 命令继承旧命令的 `run_end`（序列过早/过晚 END，最坏是序列打开到 1s 空闲守卫） | 已改：split 入口把 `cbw_total/cbw_offset` 取成本地常量、命令总长用 `cmd_total`，循环内只写 per-run 值，**所有出口还原模板** | 上板：连续两条不同长度的 CLI `rd`，确认第二条仍走 cache 读且 `45h/47h` 成对；若后续把 `ssd_request_t` 改为流水提交，必须去掉「还原模板」改为按请求保存 | `src/controller/request.c` `ssd_request_split` |
+| RISK-USB-08 | 正常路径已上板（2026-10-30：满盘写流下 lookahead/BUSY 走量，CSW 全成功）；失败 CSW 未注入 | **写 lookahead 的提前回执 / BUSY 背压未上板**：非末写 chunk 在 FTL 确认前就回 `tud_msc_async_io_done`（纯流控），若中途失败，最终由末 chunk 的 CSW 报错；主机对「提前回执后 CSW 失败」的行为未验证。另一风险：两槽都忙时返回 `TUD_MSC_RET_BUSY`，依赖 `tud_task` 单次最多 16 个事件（`CFG_TUD_TASK_EVENTS_PER_RUN`）才不饿死 FTL。 | 末 chunk 回执前用 `s_wr_error` 汇总前序 chunk 的失败；FTL 失败不确认映射，host 重试走新 SB。 | **上板**：写大文件 + 程序失败注入；观察 CSW 是否失败、主循环是否被 BUSY 重投拖慢；若 BUSY 重投开销显著，改为「第三槽 + 更低概率背压」或给 TinyUSB 事件上限调小 | `src/controller/usb_msc.c` `usb_msc_task` / `usb_msc_slot_complete`；`third_party/tinyusb/src/tusb_option.h:651`（事件上限） |
 | RISK-PLAT-08 | 信息 / 待定位（2026-10-25 启动记录） | **`.noinit` 故障记录出现一次新的 HardFault**：`PC=0x0801665e LR=0xffffffff CFSR=0x00000400 HFSR=0x40000000`（IMPRECISERR + FORCED）。用**当前** debug 镜像符号解，PC 落在 newlib `_svfiprintf_r`（`vfprintf.c:1584`）；故障发生的镜像无法确定——记录跨 PIN 复位保留、只有断电才清（§3.3），不能据此说“又崩了一次”，也不能排除是之前 release/H2testw 会话留下的。本次 01:09:23 镜像跑 `/ftl/` 85/85 正常，运行期间无新故障 | 无 | 先断电清空 `.noinit`，再用同一镜像复现；若再现，用**当场镜像**的 `.sym`/`.elf` 解 PC，检查 printf 调用点与栈哨兵/帧指针 | 板端 2026-10-25 01:09 启动 `previous crash:` 行；`docs/design/fault_capture.md`；`src/platform/stm32h743/fault_port.c` |
 
 ---
@@ -210,6 +223,7 @@
 
 > 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-24）：RISK-ARCH-12（已改未上板）
 
+
 ## 2R. 位运算公共宏（2026-10-21 从 CLAUDE.md 迁入，未改代码）
 
 | ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
@@ -221,6 +235,8 @@
 ## 2S. FTL cache read（2026-10-23，未上板）
 
 > 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-24）：RISK-CACHE-01（已改未上板）
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30）：RISK-CACHE-14（已闭合 2026-10-30，并发 cache 读门控早开）
+
 
 ## 2T. FTL cache program（2026-10-23，host 正常路径已上板）
 
@@ -229,6 +245,10 @@
 ## 2U. ITCM / DTCM 热路径（2026-10-23，正常路径已上板；压力/掉电未覆盖）
 
 > 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-24）：RISK-TCM-01（已上板验证） · RISK-TCM-02（已上板验证） · RISK-TCM-03（已上板验证） · RISK-TCM-04（已上板验证） · RISK-TCM-09（已上板验证） · RISK-TCM-05（已上板验证） · RISK-TCM-06（已上板验证） · RISK-TCM-08（已上板验证） · RISK-TCM-07（已判定）
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30）：RISK-TCM-10（已闭合 2026-10-30，ITCM 运行期只读）
+
+| ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
 
 ## 2V. 板端读完整性事件（2026-10-23，观察中）
 
@@ -256,6 +276,8 @@
 ---
 
 ## 2Y. UT 框架输出（2026-10-24）
+
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30）：RISK-UT-07（已闭合 2026-10-30，FC 擦除页判据）
 
 | ID | 状态 | 缺陷 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
@@ -332,6 +354,9 @@
 
 ## 已闭合
 
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30）：RISK-IF-14（2026-10-30）
+> 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-30 闭合：cache 序列并发门控 / ITCM 野写 / MPU 只读 / erase 判据）：RISK-CACHE-14（2026-10-30） · RISK-L2P-08（2026-10-30） · RISK-TCM-10（2026-10-30） · RISK-UT-07（2026-10-30）
+>
 > 本节条目已归档（见 `docs/archive/known_risks_batches.md` §2026-10-25）：RISK-HOST-13（2026-10-25） · RISK-NAND-04（2026-10-25） · RISK-PEND-02（2026-10-25） · RISK-IF-05（2026-10-25） · RISK-BOOT-01（2026-10-25） · RISK-CR-03（2026-10-25） · RISK-ARCH-06（2026-10-25）
 
 > 闭合 = 缺陷已消除且有证据；明细已移入 archive §2026-10-24，本处保留 ID + 日期索引。

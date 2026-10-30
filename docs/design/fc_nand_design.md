@@ -327,39 +327,64 @@ struct fc_descriptor_t {
 - **per-CW META**：`meta` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 META 值。建链时（`fc_command_configure_descriptor()`，v17 前为 `fc_command_attach_cw()` → `fc_command_configure_descriptor_internal()`）用 `lba_to_meta(command->meta, plane, cw)` 自动计算 `desc->meta`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。FC 在 decode 路径中自动对比 desc->meta 与读回值，不匹配时置 MATA_ERROR。
   - **v24 起**：`command->meta` 是**扇区 LBA**（`页 LBA << CW_WIDTH`），`desc->meta` 是该 CW 的完整扇区 LBA（不再是"页 LBA 低 2 位塞 CW 号"）；`lba_to_meta(lba, plane, cw)` 同时把 **plane** 写进低 3 位，使 plane0/plane1 的 4 条 CW 各有唯一 meta（旧编码里 plane1 的 desc 会拿到 plane0 的 meta，两条 desc 撞值）。低 3 位编码与 PBA 的 `[plane:1][cw:2]` **同一套**（`PLANE_CW_MASK` / `PLANE_CW_SHIFT`，两个宏都定义在 `include/nand/nand_config.h` —— FC 侧铸 `desc->meta` 要用，故不随 PBA 搬走）。
 
-### 2.4 CW 状态位
+### 2.4 状态位：descriptor 与 command 分开
+
+NAND 每个 OP 有**前后两次读状态**（70h）：
+
+- **OP 前**：`RDY`(bit6)/`ARDY`(bit5) —— 命令下发时的器件状态；busy 轮询超时 ⇒ `TIMEOUT`；
+- **OP 后**：`FAIL`(bit0)/`FAILC`(bit1) —— 本次操作结果；`FAILC` 是**上一页** cache program 的结果。
+
+**命令成功 = 后一次读状态的 `FAIL/FAILC` 全 0（且无 `TIMEOUT`/数据路径错误），不是 `RDY`。**
+
+**descriptor 状态（per-CW，`FC_CW_STATUS_*`）**
 
 ```c
-FC_CW_STATUS_NAND_FAIL   // NAND 操作失败
-FC_CW_STATUS_TIMEOUT     // 超时
-FC_CW_STATUS_CRC_ERROR   // CRC 校验错误
-FC_CW_STATUS_UNC         // 不可纠正错误
-FC_CW_STATUS_MATA_ERROR  // MATA 校验错误
-FC_CW_STATUS_RAID_ERROR  // RAID 恢复失败
-FC_CW_STATUS_READY       // 操作完成（= SUCCESS）
-FC_CW_STATUS_PROTECTED   // 目标块受保护
-FC_CW_STATUS_BLANK       // 擦除页（整条 CW 全 0xFF）；**不是错误位**
+FC_CW_STATUS_FAIL        // (1<<0) 70h FAIL：该 CW 的 NAND 操作失败（后一次读状态）
+FC_CW_STATUS_RAID_ERROR  // (1<<3) RAID 恢复失败
+FC_CW_STATUS_MATA_ERROR  // (1<<4) META 校验错误
+FC_CW_STATUS_CRC_ERROR   // (1<<5) CRC 校验错误
+FC_CW_STATUS_UNC         // (1<<6) 不可纠正错误
+FC_CW_STATUS_EMPTY       // (1<<7) 空页（整条 CW 全 0xFF，从未编程）；不是错误位
+// bit1/2 保留
 ```
 
-状态汇总规则：READY 需要所有有效 CW 就绪；失败位任意 CW 置位即置位。
+成功 = `FC_CW_STATUS_UNUSED`(0)；`FC_CW_STATUS_ERROR_MASK = FAIL|RAID|MATA|CRC|UNC`。
 
-**`BLANK` 的含义**：整条 CW（META+CRC+USER+ECC）全 0xFF ⇒ 该页**从未编程**。
+**command 状态（命令级，`FC_CMD_STATUS_*`）**
+
+```c
+FC_CMD_STATUS_NAND_FAIL  // (1<<0) 70h FAIL（后一次读状态）
+FC_CMD_STATUS_FAIL_CACHE // (1<<1) 70h FAILC（后一次读状态，上一页 cache program）
+FC_CMD_STATUS_TIMEOUT    // (1<<2) 忙等超时（前一次读状态仍 busy）
+FC_CMD_STATUS_DATA_ERROR // (1<<3) 任一 CW：UNC/CRC/RAID（具体类别看 desc）
+FC_CMD_STATUS_MATA_ERROR // (1<<4) 任一 CW：MATA（BBT 无 desc 也用它）
+FC_CMD_STATUS_AREADY     // (1<<5) 70h ARDY（前一次读状态：阵列/内部操作状态）
+FC_CMD_STATUS_RDY        // (1<<6) 70h RDY（前一次读状态：cache 是否可接收新数据）
+FC_CMD_STATUS_WP         // (1<<7) 70h WP（0=protected，1=not protected）
+```
+
+`FC_CMD_STATUS_ERROR_MASK = NAND_FAIL|FAIL_CACHE|TIMEOUT|DATA_ERROR|MATA_ERROR`；
+`RDY/AREADY/WP` 是器件状态，不参与成败判定。
+
+⚠ `post` 不一定是 70h：`BLOCK_LOCK_STATUS` 的 7Ah 字节也经 `DATA_OUT_STATUS` 进
+`nand_status`（bit0 是 LT，不是 FAIL），FC **不**按 FAIL/FAILC 映射该 op，只由其执行结果判成败。
+
+**`EMPTY` 的含义**：整条 CW（META+CRC+USER+ECC）全 0xFF ⇒ 该页**从未编程**。
 全 0xFF 不是合法 BCH 码字，解码必然失败；若不单独识别就会报成 `UNC`，GC 读到半写块
 的空洞页时会把整块误标坏块（`RISK-GC-11`）。识别发生在 `fc_data_path_process_read()`
-Pass 1 解码失败之后：置 `BLANK` 并跳过解扰 / CRC / META 三项（此后三项对擦除页无意义）。
-`FC_CW_STATUS_ERROR_MASK` **不含** BLANK——「页未编程」是介质合法状态，不是读错误。
-⚠ 擦除页**一律跳过 META 自洽校验**（无论 `command->meta` 是否已知）：FC 的整页读恒覆盖本
-plane 全部 CW，而 host 写的稀疏页只编程部分 CW ⇒ 同一页里必然有空兄弟 CW；对它们做 META
-校验会把整条命令判成 `MATA_ERROR`，让 RR/GC 把可读的好页误标坏块（`RISK-GC-12`）。
-「映射指向未编程页」由 FTL 的 dangling 守卫与 L2P 反查负责，不在 FC 判。
+Pass 1 解码失败之后：置 `EMPTY` 并跳过解扰 / CRC / META 三项。
+`FC_CW_STATUS_ERROR_MASK` **不含** EMPTY——「页未编程」是介质合法状态，不是读错误。
+⚠ 擦除页**一律跳过 META 自洽校验**（`RISK-GC-12`）。
 
-**谁在读这些失败位**：
+**谁在读**：
 
-- **FC 侧**：`FC_CW_STATUS_ERROR_MASK`（六个错误位的并集，见 `fc_command.h`）用于挑出**首个失败 CW** 的
-  `desc_id`（`fc.c:778`），兑现 `fc_command_status_t.desc_id` 的契约（"first-failing desc on error"）。
-- **FTL 侧**：目前**只判 `FC_CW_STATUS_NAND_FAIL`**（`ftl.c:92`、`ftl_fc_interface.c:431/459/527`、
-  `gc.c:75`、`read_recovery.c:96`）⇒ `UNC` / `CRC_ERROR` / `MATA_ERROR` 被当成功。
-  **已检出的错误会以 `SSD_STATUS_OK` 交给主机**——见 §8.2。
+- **FC 侧**：`FC_CW_STATUS_ERROR_MASK` 挑出**首个失败 CW** 的 `desc_id`；
+  `fc_complete_from_nand` 把 NAND per-CW 结果并进 desc（**所有带 desc 的命令，含 program**），
+  再把 desc 聚合为 command 状态（NAND FAIL→`NAND_FAIL`，MATA→`MATA_ERROR`，
+  UNC/CRC/RAID→`DATA_ERROR`）。program 的 FAIL 因此也进 desc，
+  FTL 的程序失败平面归因不再回退 plane0。
+- **FTL 侧**：一律用 `fc_cmd_status_has_error()`（`FC_CMD_STATUS_ERROR_MASK`）判成败；
+  要具体数据路径类别时读 `desc_id` 指向的 desc 状态（RR 的 CRC-only 判据即如此）。
 
 ### 2.5 完成状态 (fc_command_status_t)
 
@@ -368,8 +393,8 @@ struct fc_command_status_t {
     DWORD command_id : 16;  // 完成命令的 Pool ID
     DWORD desc_id    : 16;  // 首个失败 CW 的 descriptor id；0xFFFF = 无失败
     DWORD op_tag     : 7;   // 不透明完成标签（FTL 的 ftl_op_id_e），完成派发用
-    DWORD status     : 9;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR；bit8 = BLANK）
-    DWORD reserved   : 16;  // 保留
+    DWORD status     : 8;   // 命令级状态（FC_CMD_STATUS_*）
+    DWORD reserved   : 17;  // 保留
     fc_param_t param;       // 命令级返回段：仅 GET_FEATURES=寄存器值 bytes（v28 起无失败位图视图）
 };
 ```
@@ -429,8 +454,8 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 **两个容易混的点**：
 
-1. **FC 的 `IO_ERROR` ≠ 主机的 `IO_ERROR`。** 中间隔着 FTL 的翻译。而 `ftl.c:92` 那条路上只查
-   `FC_CW_STATUS_NAND_FAIL`（bit 0），`UNC` 是 bit 3 ⇒ **读失败会被当成功**交给主机——见 §8.2。
+1. **FC 的 `IO_ERROR` ≠ 主机的 `IO_ERROR`。** 中间隔着 FTL 的翻译。FTL 侧用
+   `fc_cmd_status_has_error()`（`FC_CMD_STATUS_ERROR_MASK` 全集）判成败，不是只看 `NAND_FAIL`（见 §2.4）。
 2. **数据路径的返回值在生产里是「被丢弃」的。** `fc.c:744`：
 
    ```c
@@ -2838,7 +2863,7 @@ RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码
 
 ## 16. 命令链执行设计 (Phase D — 续)
 
-> ⚠ **运行时状态提示**：命令链是「**能力已实现、但 FTL 运行时未启用**」的路径。FTL 所有命令恒设 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，实际只走**单命令路径**（`fc_poll_dispatch_single`）。本章讲的是链式执行的设计与单测覆盖；运行时主干请见 [§23.9「澄清：运行时其实不走命令链」](#239-澄清运行时其实不走命令链)。
+> ⚠ **运行时状态提示**：除 **FTL cache read / cache program 的 run** 外，FTL 命令恒设 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，走**单命令路径**（`fc_poll_dispatch_single`）。cache run 自 2026-10-30（P1 读流式，未上板）起标成链（窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`，可跨填充 pass / 跨 chunk 续链）⇒ 运行时**也会**走 `fc_poll_dispatch_chain`，见 [§23.9 的 v-streaming 更新](#239-澄清运行时其实不走命令链)。本章讲链式执行的设计与单测覆盖。
 >
 > 🔁 **v8 语义变更（2026-10-06，per-LUN FIFO）**：本章 16.2 起的方案描述**已被取代**。链不再是"执行中的 chain 对象 + cursor"，而是 **per-LUN 待处理 FIFO 里的连续 N 槽**（每槽 = 一条命令）：
 > - **原子**：`nand_dispatch_submit_chain()` 先判 `room >= N`，不足则整批拒收、无副作用；
@@ -4357,8 +4382,9 @@ fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
           → 是：单命令 submit / 链 submit_chain（原子追加 need 槽）
                 下发成功后按【批尾】chain 位更新 chain_owner（MORE→本队列 / END→NONE）
           → 否：该 LUN 本轮挂起 + 命令回推队尾（保序）
-        FTL 的 cache read / cache program run 标成一条 chain（末条 END、其余 MORE）⇒
-        need = 本趟填充窗口；批尾 MORE 时 chain_owner 保持到链 END（见 §23.9）
+        FTL 的 cache read / cache program run 标成一条 chain（窗口末条在断点 END、
+        否则 MORE；窗口可跨填充 pass / 跨 chunk）⇒ need = 本趟填充窗口；批尾 MORE 时
+        chain_owner 保持到链 END（见 §23.9 的 v-streaming 更新）
 ```
 
 要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；
@@ -4388,6 +4414,9 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 ### 23.9 澄清：运行时其实不走命令链
 
+> **口径更新（2026-10-30）**：标题与下面三条**保留为历史口径**（其余命令仍恒 `END`）；
+> **cache read / cache program 的 run 现在会组链**——见本节末尾「v-streaming 更新」。
+
 **这是最容易被 §16 与图 11 误导的一点。** §16 / 图 11 用大量篇幅讲"命令链执行"（per-LUN chain buffer、`submit_chain`、原子入队），但：
 
 - FTL 运行时**所有**命令都设 `config.chain = FC_CHAIN_END`（`src/ftl/` 下共 **23 处**，含 `ftl.c` / `metadata.c` / `checkpoint.c` / `gc.c` / `journal.c` / `bbt.c` / `pfr` 等）。因此调度器**永不组链**，`count` 恒为 1。
@@ -4405,6 +4434,15 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 > 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
 > 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充 pass 下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨 pass 持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
+
+> 🔁 **v-streaming 更新（2026-10-30，P1 读流式，未上板）**：上面的「FTL 恒 `FC_CHAIN_END`
+> ⇒ 运行时 `chain_owner` 恒 NONE」**不再成立**。FTL cache read / cache program 把一条 run
+> 标成一条链：窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`（允许跨填充 pass、
+> 读序列还允许跨 USB chunk 续链），`ftl_op_submit_batch()` 原子入队，序列打开期间
+> `ftl_op_submit*` 门控阻止同 LUN 的其他提交插入。运行时因此**会**走
+> `fc_poll_dispatch_chain`，`chain_owner` 的跨 pass 锁是这条路径的正确性前提。其余命令仍恒
+> `END`。**未上板**：需要命令 trace 与中止/恢复负例（`known_risks.md` RISK-IF-07/09/10；
+> 设计见 `docs/design/ftl_design.md` §3.16，实现见 `src/ftl/cache_batch.c`）。
 
 ---
 

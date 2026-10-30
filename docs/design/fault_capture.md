@@ -111,10 +111,28 @@ static void fault_trampoline(void)
 
 FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,xPSR）**之后**，所以 `frame[0..7]` 的取法在有/无 FPU 帧时都成立；`fp_frame` 只作提示。
 
+> **栈扫描窗口（2026-10-30）**：原 32 词只覆盖硬件异常帧（FP 扩展帧 0x88 B），
+> 被中断函数自己的栈帧（含保存的 LR = 真正调用者）在它之上、落不进窗口。
+> 已扩到 96 词，并把 **ITCM 热代码**（`.ssd_code_high`，VMA 0x0）也纳入候选，
+> 行尾标 `[itcm]`。ITCM 区间的小整数噪声用「≥0x1000 且 Thumb 位为 1」压低。
+
 > **出处（2026-10-14 核实）**：Zephyr `include/zephyr/arch/arm/cortex_m/exception.h` 的 `struct arch_esf` 把
 > `struct __basic_sf {r0,r1,r2,r3,r12,lr,pc,xpsr}` 放在 `struct __fpu_sf {s[16],fpscr,undefined}` **之前**，
 > 且故障路径直接用 `esf->basic.pc` 取出错 PC ⇒ **基本帧在低地址、SP 指向 R0**，FPU 帧在高地址。
 > 这条结论是「PC/LR 可作证据」的前提：若排布反过来，`frame[6]` 读到的是 S6 而不是 PC，整个故障现场就是垃圾。
+> 2026-10-30 板端按此解码得到的 PC/LR/R0..xPSR 与代码语义自洽，验证成立。
+
+> **打印项（2026-10-30）**：除 R0-R3/R12/LR/PC/xPSR 外，现场还打三项，专门用于拆「对齐指令报
+> UNALIGNED」这类不自洽的故障：
+> - `R7(f)`：蹦床在 C 序言之前抓的出错上下文 R7（硬件只压 R0-R3/R12/LR/PC/xPSR，**不压 R4-R11**），
+>   行尾直接标 8 字节对齐与否 —— 帧指针是普通 `ldr [r7,#off]` 的地址来源。
+> - `code:`：PC 附近 10 个字的**实时内存内容**（ITCM/Flash/SRAM，不是 ELF 里的那份），行尾标 `<- PC`。
+>   野写踩 ITCM 会让「跑着的指令」与符号表不一致 —— **2026-10-30 实测就抓到一次**：
+>   `0x4220` 实时 `0x22016801` vs ELF `0x220168BB`（一字节 `BB→01`），`ldr r3,[r7,#8]`
+>   变成 `ldr r1,[r0]`，而 `r0=0xFFFFFFFF` ⇒ 非对齐字读 ⇒ UNALIGNED。**帧、CCR、R7 全部正常，
+>   唯一异常是指令字节**：没有这条打印，现场会一直指向被踩的受害者而不是写方。
+> - 教训：`CONTROL.FPCA` 在 handler 态**恒被清零**（入异常时由硬件清），不能用来判扩展帧，
+>   故不打；判扩展帧只看 `EXC_RETURN` bit4。
 
 ### 5.2 轮询控制台：故障时中断通路已不可信
 

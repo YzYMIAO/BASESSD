@@ -179,7 +179,7 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 > `mata_error` 与 `crc_error` 断言形状相同（逐 CW 查一个 `status` 位）但 setup 机制不同
 > （改 `cmd->meta` vs 翻 `config.crc` + 预置哨兵），同样不并。
 
-> **「返回值仍 OK」是刻意的**：`fc_data_path_process_read` 在 Pass 3/Pass 4 标脏后**不改返回值**（`fc_data_path.c:551` 恒返回 `FC_STATUS_OK`），所以判「读成功」必须查 `desc->status == FC_CW_STATUS_READY`，只看返回值会漏掉 CRC / META 校验回归。
+> **「返回值仍 OK」是刻意的**：`fc_data_path_process_read` 在 Pass 3/Pass 4 标脏后**不改返回值**（`fc_data_path.c:551` 恒返回 `FC_STATUS_OK`），所以判「读成功」必须查 `desc->status == FC_CW_STATUS_UNUSED`（成功 = 0），只看返回值会漏掉 CRC / META 校验回归。
 
 | 测试函数 | 参数组合 | 验证策略 |
 |---|---|---|
@@ -285,7 +285,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **裸页 config**：本文件用 `L3_CONF(operation, crc)` 复合字面量给出「裸页」形态——与改造前 `program_page` / `read_page` / `erase_block` 字段逐字一致（**不加扰** + **LDPC RAW** + **不 RAID**；crc 逐处给，裸页读写沿用池默认的 `FC_CRC_ENABLE`，cache 与 multi-plane 路径显式 `FC_CRC_DISABLE`）。`ch/ce/lun` 由 `test_cmd_build` 从 addr 覆盖，`multi_plane` 由 operation 派生。
 - **不走页 helper 的命令**（READ_ID / GET_FEATURES / 状态查询 / 内部搬移 / RANDOM_DATA_READ）用夹具的三件零件自己拼：`test_cmd_build()`（建链）+ `test_submit_wait()`（提交轮询，**命令仍归调用者**）+ `fc_command_release()`；平面段位图用 `test_plane_cw_bitmap(plane_bitmap)` 正推，`addr.plane` 用 `test_first_plane(plane_bitmap)`。
 - **读回校验分两档**：整段读用 `test_verify_page_paa(data, block, page, plane_bitmap)`（按地址**重算**期望，覆盖段内全部 CW）；部分掩码读（如 RANDOM_DATA_READ 只抽 1 个 CW）用本文件的 `verify_chain_paa(cmd)`（只看**链上实际有的** desc，期望取 `desc->paa`）——此时段内其余 CW 的源槽根本没被这次读填过。
-- **擦除页的判据只能是逐 CW `FC_CW_STATUS_SUCCESS`**：擦除页 META = 0xFF…，Pass 4 ① 自洽必然不过 ⇒ 该 CW 带 `MATA_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 SUCCESS 位），不能用 `test_read_block` 的聚合判据。
+- **擦除页的判据只能是逐 CW `FC_CW_STATUS_EMPTY` / 成功 = 0**：擦除页 META = 0xFF…，Pass 4 ① 自洽必然不过 ⇒ 该 CW 带 `MATA_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 `EMPTY`/`UNUSED`），不能用 `test_read_block` 的聚合判据。
 
 #### 随机地址与种子（v1.22）
 
@@ -390,7 +390,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **Step 3（★ 链锁：链没结束 HSQ 插不进）**：连续 `fc_submit` 8 条 SQ 链（前 7 条 `chain=FC_CHAIN_MORE`、末条 `FC_CHAIN_END`，set/get 交替），`fc_service()` **一次**（前 4 条进 FIFO，`chain_owner=SQ`），再投 HSQ `set1(y)`/`get1(y)`，抽干；`get1` 读到 `y`、**终值 `y`**。
 - **Step 4**：还原 `01h` 原值。
 
-**判据的区分力**：无链锁时 HSQ 的 `y` 会插在链的第 4、5 条之间，链的后 4 条（含 `set0(x)`）会在 `y` 之后执行 ⇒ 终值 **`x`**；有链锁 ⇒ 终值 **`y`**。Step 2 与 Step 3 合起来才说明问题：**HSQ 确实能抢占**（Step 2 读回 `x` 而非 `y`）、**但链一旦开始就抢不进来**（Step 3 终值 `y`）。⚠ **生产路径零影响**——FTL 恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE，只有本用例（及未来真用链的调用者）会走到新分支。夹具新增 `g_l3_prio_slots[]` + `l3_prio_reset/submit/drain`（按 `command_id` 配回槽位、GET 存值、release，与 `mixed_pipeline` 的 CID 配对同路）。
+**判据的区分力**：无链锁时 HSQ 的 `y` 会插在链的第 4、5 条之间，链的后 4 条（含 `set0(x)`）会在 `y` 之后执行 ⇒ 终值 **`x`**；有链锁 ⇒ 终值 **`y`**。Step 2 与 Step 3 合起来才说明问题：**HSQ 确实能抢占**（Step 2 读回 `x` 而非 `y`）、**但链一旦开始就抢不进来**（Step 3 终值 `y`）。⚠ **当时的判据**是「生产路径零影响」——FTL 恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE。**2026-10-30 起该前提已变**：FTL cache read/program 的 run 会组链（见 `docs/design/ftl_design.md` §3.16、`known_risks.md` RISK-IF-07），本用例覆盖的链锁路径已是生产前提，需上板用读流式 trace 复核。夹具新增 `g_l3_prio_slots[]` + `l3_prio_reset/submit/drain`（按 `command_id` 配回槽位、GET 存值、release，与 `mixed_pipeline` 的 CID 配对同路）。
 
 #### buffer 归属用例（v53）
 
@@ -900,7 +900,7 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 | ⑥ | **同源编解码** | `l2_ecc_cw_build` 用 `fc_data_path_ecc_encode` 造码字，与解码同族 ⇒ **共享约定的 bug 两边一起错仍能往返通过**，无独立参考向量 |
 
 > ⚠ 更要紧的一层：`beyond-5` 这类超能力场景下的**误纠**是 ECC **自己抓不到**的，要靠 Pass 3 的 CRC；
-> 而本工程 FTL 只判 `FC_CW_STATUS_NAND_FAIL`（见 `fc_nand_design.md` §8.2）⇒
+> 而本工程 FTL 用 `fc_cmd_status_has_error` 全错误位判据（见 `fc_nand_design.md` §2.4）⇒
 > **ECC 单测全绿 ≠ 主机读到的数据一定对**。
 
 **提高计划（四步，按性价比排序）**：
