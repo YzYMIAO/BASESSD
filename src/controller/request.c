@@ -130,12 +130,10 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
     request->io.on_complete     = on_sub_complete;
     request->io.on_complete_ctx = request;
 
-    /* CBW 给出的命令总长/起始偏移只在本次 split 内有效：request->io 是跨命令
-     * 复用的模板（USB 每次 memset、CLI 是 static），把 per-run 值留在里面会让
-     * 下一次 CLI 请求继承上一条命令的 total/offset（静默错误 run_end）。 */
-    const DWORD cbw_total  = request->io.total_lbas; /* 0 = 调用者未给（CLI） */
-    const DWORD cbw_offset = request->io.offset_lbas;
-    const DWORD cmd_total  = (cbw_total != 0U) ? cbw_total : request->block_count;
+    /* 「本 chunk 之后同一 host 命令还剩多少 LBA」只在本次 split 内有效：
+     * request->io 是跨命令复用的模板（USB 每次 memset、CLI 是 static），把 per-run
+     * 值留在里面会让下一次请求继承上一条命令的剩余长度。 */
+    const DWORD chunk_remaining = request->io.cmd_remaining; /* 0 = 调用者未给（CLI / 命令末尾） */
 
     lba     = request->start_lba;
     lba_end = request->start_lba + request->block_count;
@@ -150,14 +148,13 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
         /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
         ASSERT(ftl != NULL);
 
-        request->io.lba         = lba;
+        request->io.lba           = lba;
         /* 缓冲步进 = 映射单元（FTL_IU_BYTES = 512B）——CW 级映射下 1 LBA = 1 个 CW
          * （= 512B 扇区），不是 2KB 页。 */
-        request->io.buffer      = (BYTE *)request->buffer + ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
-        request->io.count       = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
-        /* 命令总长（USB 用 CBW 总 block_count；CLI 回退到本请求 block_count）与 run 偏移。 */
-        request->io.total_lbas  = cmd_total;
-        request->io.offset_lbas = cbw_offset + (DWORD)(lba - request->start_lba);
+        request->io.buffer        = (BYTE *)request->buffer + ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
+        request->io.count         = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
+        /* 本 run 之后同一 host 命令还剩的 LBA = 本 chunk 余量 + chunk 内后续 run。 */
+        request->io.cmd_remaining = chunk_remaining + (DWORD)(lba_end - run_end);
 
         st = (request->opcode == SSD_REQUEST_WRITE) ? ftl_submit_write(ftl, &request->io) : ftl_submit_read(ftl, &request->io);
         if (st != FTL_OK)
@@ -171,16 +168,14 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
             {
                 request->complete_flag = 1U;
             }
-            request->io.total_lbas  = cbw_total; /* 还原模板：见上方注释 */
-            request->io.offset_lbas = cbw_offset;
+            request->io.cmd_remaining = chunk_remaining; /* 还原模板：见上方注释 */
             return err_status;
         }
         submitted++;
         lba = run_end;
     }
 
-    request->io.total_lbas  = cbw_total; /* 还原模板：见上方注释 */
-    request->io.offset_lbas = cbw_offset;
+    request->io.cmd_remaining = chunk_remaining; /* 还原模板：见上方注释 */
 
     return SSD_STATUS_OK;
 }

@@ -87,6 +87,7 @@ typedef enum
     FTL_OP_CHECKPOINT,    /* Checkpoint job（checkpoint.c） */
     FTL_OP_BBT,           /* BBT 持久化 job（bbt.c） */
     FTL_OP_METADATA,      /* L2P 日志块整理 job（metadata_job.c） */
+    FTL_OP_CACHE_PAD,     /* cache 写序列的 padding END（ftl.c：有序收尾设备序列） */
     FTL_OP_COUNT          /* 计数哨兵 */
 } ftl_op_id_e;
 
@@ -295,6 +296,19 @@ void ftl_op_drain(void);
  * @param ctx 提交时登记的上下文。
  */
 void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/**
+ * @brief cache 写序列 **padding END（本仓自拟）** 的完成服务函数（定义在 ftl.c）。
+ *
+ * 由 g_op_callbacks[FTL_OP_CACHE_PAD] 引用；ctx 不用（序列状态在 ftl->cache_seq）。
+ * 语义：用本命令的 FAIL_CACHE 结算未确认 FIFO 里的最后一页（该页已对 host 提前
+ * 回执），padding 页自身不映射、失败忽略；随后关闭序列、放开 L2P 门控。
+ *
+ * @param ftl 实例。
+ * @param completion FC 完成状态。
+ * @param ctx 提交时登记的上下文（当前恒 NULL）。
+ */
+void ftl_cache_pad_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /**
  * @brief Journal 刷页 job 的完成服务函数（定义在 journal.c）。

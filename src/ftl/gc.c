@@ -229,10 +229,47 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     const DWORD max_erase = (erase_stats.erase_max > 0U) ? erase_stats.erase_max : 1U;
     const DWORD max_pe_ts = erase_stats.max_pe_ts;
 
-    DWORD best_cost  = UINT32_MAX;
-    WORD  best_valid = (FTL_CW_PER_SB + 1U);
-    WORD  best_pct   = 101U; /* >100 = 尚未见到候选 */
-    bool  found      = false;
+    DWORD                best_cost      = UINT32_MAX;
+    WORD                 best_valid     = (FTL_CW_PER_SB + 1U);
+    DWORD                best_cost_any  = UINT32_MAX; /* 无偏好组（仅当偏好组为空时使用） */
+    WORD                 best_valid_any = (FTL_CW_PER_SB + 1U);
+    WORD                 best_pct       = 101U; /* >100 = 尚未见到候选 */
+    bool                 found          = false;
+    bool                 found_any      = false;
+    const super_block_t *victim         = NULL;
+    const super_block_t *victim_any     = NULL;
+
+    // plane 平衡偏好（本仓自拟，RISK-ALLOC-09）：成对条目回收后两侧各 +1；单 plane 条目
+    // 只补一侧。某 plane 低于单 plane 水位且两 plane 不均衡时，优先「成对条目 + 饥饿 plane
+    // 的单条目」，避免 GC 把空闲块堆到一侧导致成对分配失败。
+    BYTE starved = PLANE_NUM; /* == PLANE_NUM ⇒ 两 plane 持平，无偏好 */
+
+    {
+        WORD fmin = UINT16_MAX;
+        WORD fmax = 0U;
+
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            const WORD c = alc_free_get_count(alloc, p);
+
+            if (c < fmin)
+            {
+                fmin    = c;
+                starved = p;
+            }
+            if (c > fmax)
+            {
+                fmax = c;
+            }
+        }
+
+        // 只在**真的饥饿**（低于单 plane 水位）时才引入偏好；两 plane 都健康时保持原贪心，
+        // 避免为了持平去做无谓的高成本搬移。
+        if ((fmin == fmax) || (fmin >= FREE_POOL_PLANE_LOW))
+        {
+            starved = PLANE_NUM;
+        }
+    }
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
@@ -296,20 +333,41 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
         DWORD cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
 
+        // 偏好判定：成对条目（plane_count == PLANE_NUM）总是优先；单 plane 条目只有
+        // 属于饥饿 plane 时才优先。
+        const bool preferred = ((starved >= PLANE_NUM) || (st.plane_count != 1U)) ? true : super_block_has_plane(sb, starved);
+
         // cost 相等时取有效页更少者（确定性，且退化为单维贪心）
-        if ((cost < best_cost) || ((cost == best_cost) && (st.valid_cw < best_valid)))
+        if (preferred == true)
         {
-            best_cost   = cost;
-            best_valid  = st.valid_cw;
-            out->victim = sb;
-            found       = true;
+            if ((cost < best_cost) || ((cost == best_cost) && (st.valid_cw < best_valid)))
+            {
+                best_cost  = cost;
+                best_valid = st.valid_cw;
+                victim     = sb;
+                found      = true;
+            }
+        }
+        else if ((cost < best_cost_any) || ((cost == best_cost_any) && (st.valid_cw < best_valid_any)))
+        {
+            best_cost_any  = cost;
+            best_valid_any = st.valid_cw;
+            victim_any     = sb;
+            found_any      = true;
         }
     }
 
     out->best_valid_pct = (best_pct <= 100U) ? best_pct : 0U;
 
-    if (found)
+    if (found == true)
     {
+        out->victim = victim;
+        return GC_SELECT_OK;
+    }
+
+    if (found_any == true)
+    {
+        out->victim = victim_any; /* 偏好组为空（只有富 plane 的单条目）：退回原贪心 */
         return GC_SELECT_OK;
     }
 
@@ -334,26 +392,19 @@ DWORD gc_should_trigger(const alc_t *alloc)
 
     // T1：空闲块水位（主动补池，还留有余量就开工）。
     // ⚠ 分配器按 **plane 成对**取块；total free 在目标线附近时可能全部落在 plane0，
-    // 而 plane1 已 0 块。旧判据只看 total ⇒ 不触发 GC，host 写只能吃 OP 池
-    // （现场：`free=32` 但 `op=204/157→112`）。因此总水位之外还要检查
-    // 「任一 plane 无空闲块」。
-    // 扫描到两个 plane 都出现即可提前退出，正常盘通常前几项就覆盖两 plane。
-    bool seen[PLANE_NUM];
-    memset(seen, 0, sizeof(seen));
-    BYTE seen_n = 0U;
+    // 而 plane1 已枯竭。判据 = 总水位 **或任一 plane 低于单 plane 水位**
+    // （per-plane 计数由 allocator 闸门维护，O(PLANE_NUM)）。
+    bool plane_low = false;
 
-    for (WORD i = 0U; (i < alloc->free_count) && (seen_n < PLANE_NUM); i++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        const BYTE p = ftl_gblock_plane(alloc->free_blocks[i]);
-
-        if ((p < PLANE_NUM) && (seen[p] == false))
+        if (alc_free_get_count(alloc, p) < FREE_POOL_PLANE_LOW)
         {
-            seen[p] = true;
-            seen_n++;
+            plane_low = true;
         }
     }
 
-    if ((alloc->free_count < FREE_POOL_TARGET) || (seen_n < PLANE_NUM))
+    if ((alloc->free_count < FREE_POOL_TARGET) || (plane_low == true))
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }

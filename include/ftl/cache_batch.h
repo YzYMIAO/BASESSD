@@ -5,11 +5,16 @@
  * FTL cache 流式序列（读 / 写，本仓自定）
  *
  * 读、写两个方向的 host 路径放在同一模块：
- *   · cache read：连续 pair 页映射已驻留且物理连续时，按窗口提交
- *     START_SEQ_MP/SEQ_MP/LAST_MP；序列跨窗口、跨 chunk 保持，START 只在 run 头、
- *     LAST 只在断点；
+ *   · cache read：连续 pair 页映射已驻留且物理连续（同 block page+1，或两 plane
+ *     都 block+1/page0——31h 可跨 block）时，按窗口提交 START_SEQ_MP/SEQ_MP/LAST_MP；
+ *     序列跨窗口、跨 host 传输段保持，START 只在顺序流开头、LAST 只在断点；
  *   · cache program：首窗口首条 op49、中间 op44（15h）、断点末条 op48（10h）；
- *     窗口上限 4 个 pair 页，序列同样跨窗口、跨 chunk。
+ *     窗口上限 4 个 pair 页，序列跨窗口、跨 host 传输段、跨物理 block。
+ *
+ * 是否进入序列由 **FTL 的顺序流检测器**决定（连续 LBA ≥ FTL_STREAM_MIN_LBAS，
+ * 见 ftl.h），不是 host 传下来的开关；序列打开后按 cache_seq.next_lba 延续。
+ * 序列的主动断点见 ftl_cache_write_try 的注释（Journal 配额 / 命令尾 / D4 等；
+ * 物理 block 边界不是断点——写 cache program 每条命令自带地址，序列跨 block 续写）。
  *
  * 两个方向都按窗口标 FC chain（窗口末条在**断点**是 FC_CHAIN_END，否则 FC_CHAIN_MORE），
  * 经 ftl_op_submit_batch() 原子、连续入队；FC 的 chain_owner 在链跨填充 pass 时
@@ -26,15 +31,25 @@ struct ftl_context;
 /* ── cache read ──
  * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
  * （单条 LAST 收尾，见 cache_batch.c 的 ftl_cache_read_try）。
- * 单条窗口的 pair 上限由 FC 资源决定（见 cache_batch.c 的 FTL_CACHE_READ_MAX_PAIRS），
- * **不再等于 per-LUN FIFO 深度**：FIFO 深度只决定 FC 每趟往 NAND 填充几条。 */
+ * 单条窗口的 pair 上限由 FC 资源决定（见 cache_batch.c 的 FTL_CACHE_READ_MAX_PAIRS）：
+ * per-LUN FIFO 深度只决定 FC 每趟往 NAND 填充几条，不是窗口上限。
+ * 尝试时机：序列所有者每轮都试（续窗口）；其余情况只在 FTL 顺序流检测器判为
+ * 顺序读时尝试（判据是连续 LBA 长度，与 host 传输段长度无关）。 */
 #define FTL_CACHE_READ_MIN_PAIRS (2U)
 
-/* cache read 尝试节拍：每 32 LBA（16 KiB host 传输 = 4 个 pair 窗口）试一次。
- * 这是“多久试一次”的节拍，不是窗口长度上限，与 FTL_CACHE_READ_MAX_PAIRS 解耦；
- * **序列所有者不受节拍限制**（窗口消费量不一定落在节拍边界上，必须每轮续窗口）。
- * 来源：CFG_TUD_MSC_EP_BUFSIZE = 16384 B（include/tusb_config.h）；接口变大时同步。 */
-#define FTL_CACHE_READ_TRIAL_LBAS (4U * FTL_LBA_PER_PAIR)
+/* 读序列单段上限（pair，跨 block 续接后仍需收尾）。
+ *
+ * why：READ PAGE CACHE SEQUENTIAL (31h) 可以跨 block（同 die；禁止跨 die/LUN ——
+ * `docs/reference/datasheet_mt29f_cache_ops.md` §2），所以 block 边界不再是自然断点；
+ * 但**整段读序列期间该 die 的 cache 寄存器被占用（ARDY = 0），程序命令发不进去**，
+ * Journal / L2P / GC / 元数据写会被序列门控挡在段外。断点就是后台元数据在这块 die 上的
+ * 让步点，必须有一个与器件无关的上限。
+ *
+ * 口径：128 pair = 512 KiB 数据，按实测顺序读 ~887 KB/s 约 0.58 s 一段；与写侧
+ * Journal 顺序页配额（63 pair ≈ 0.29 s）同一量级的让步节奏。太小则 START 数回升，
+ * 太大则 GC/CP 在长顺序读期间得不到窗口。
+ * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展（RISK-CACHE-20）。 */
+#define FTL_CACHE_READ_MAX_RUN_PAIRS (128U)
 
 typedef enum
 {
@@ -48,7 +63,7 @@ typedef enum
  * @brief 尝试为当前读组提交一个 cache read 窗口；序列状态跨调用保留。
  *
  * @param ftl     FTL 实例（序列状态在 ftl->cache_seq）
- * @param gi      组下标（组的 cmd_start/cmd_total 是续序列的命令上下文）
+ * @param gi      组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
  * @param lba     当前子操作起始全局 LBA（必须 pair 对齐才尝试）
  * @param buffer  当前 host 读缓冲（后续 pair 按 4 KiB 递增）
  * @param remain  本组剩余 LBA 数
@@ -80,7 +95,7 @@ typedef enum
  * @pre 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
  *
  * @param ftl    实例（序列状态与逐页确认 FIFO 在 ftl->cache_seq）
- * @param gi     写组下标（组的 cmd_start/cmd_total 是续序列的命令上下文）
+ * @param gi     写组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
  * @param lba    本窗口起始 LBA（须 pair 对齐）
  * @param buffer 本窗口源数据（最多 4 × 4 KiB）
  * @param remain 本组剩余可写 LBA 数
@@ -91,8 +106,11 @@ typedef enum
  *                   AGAIN —— 资源 / 确认 FIFO / 加载瞬态，本轮停止 drain；
  *                   ERROR —— 永久错误，组报 IO_ERROR。
  *
- * @note 断点（末条 48/10h）：命令到头 / block 到头 / D4 / 命令尾不足一对 /
- *       journal 预留失败 / 下一窗口 L2P 未驻留。chunk 边界**不是**断点。
+ * @note 断点（在数据页上 END）：Journal 顺序页写满 / D4 / 命令尾不足一对 /
+ *       journal 预留失败 / 下一窗口 L2P 未驻留 / **收尾块时分配器开不出新块**。
+ *       **host 传输段、host 命令、物理 block 边界都不是断点**——同一 LBA 流跨三者
+ *       续接（44/48h 每条自带地址，见 `docs/reference/datasheet_mt29f_cache_ops.md`
+ *       §5/§6）；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
  */
 ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 

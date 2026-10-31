@@ -121,7 +121,10 @@ fl
 
 - GC：写满/近满，观察 `[MIG ]`、`free`；
 - WL：长时间 idle，观察是否异常搬迁；
-- 掉电：写到一半 / TRIM 后断电，重启 `map`/`rd`；
+- 掉电：写到一半 / TRIM 后断电，重启 `map`/`rd`；**已验证一轮（2026-10-31）**：format → H2testw 写 130 MB 时断设备电 → 上电 `boot type=2`、`journal_entries=8704`、`closed=1050 free=2335 anomalies=0`，挂载后 H2testw verify 117 MB **0 错误**；尾差（130→117 MB）主要是主机写回缓存/文件大小元数据，设备窗口未分离（RISK-CACHE-18）；第二轮（覆盖写）2026-10-31：写 245 MB 掉电（`closed=1962 anomalies=0`）→ 删文件覆盖写 140 MB 掉电（`journal_entries=7688`、`closed=3086+2 anomalies`、`map 1000` VERDICT ok）；内容校验未做。**旧数据内容的低成本校验（建议）**：保留一个旧 `.h2w` 不删、删其余 → H2testw 再写新的（占用被释放的簇）→ 写到一半掉电 → 重启后 H2testw verify：它会校验所有现存 `.h2w`，旧文件过校验即证「未被覆盖的旧数据完好」。不要用 CLI `wr` 造 pattern（单次 ≤32 扇区、裸 LBA 会与主机 FS 冲突）。**可选（暂缓，2026-10-31 用户决定）**：设备 VWC 窗口量化——预分配文件（`SetLength` 后只 flush 一次）+ `FileOptions.WriteThrough` 逐块写已知 pattern，写到一半断设备电，重启后按块比对，丢失量应 ≤ ~1 MB。⚠ 不能用 CLI `wr`（同步确认，不经过提前回执窗口）；用 H2testw 也无法分离主机 FS 元数据。
+**2026-10-31 flush 屏障已验证**：写 168 MB → 关闭 H2testw → 安全弹出 → 断设备电 → 上电 `boot type=1`/`journal_entries=0`、`closed=1342 free=2043 anomalies=0`、verify **167 MB 0 错误、无尺寸缺口** ⇒ flush 是真正的持久性屏障；未 flush 时的尺寸缺口来自主机写回/FS 元数据。
+**2026-10-31 补充观察**：写 152 MB 后空闲 ~20 s 再断设备电，上电 `boot type=1`（干净启动）、`journal_entries=0`——空闲期 CP 追平后覆盖了 Journal 尾部，无需回放；`closed=1222 free=2163 anomalies=0` 对账一致，verify **137 MB 0 错误**（152→137 的差仍是主机侧文件大小元数据未落盘，文件未 close）。
+**判读坑（2026-10-31 实测）**：不 flush 拔电后 H2testw verify 可能报 `Error reading file … Code 1392（文件或目录损坏）`——这是**主机文件系统元数据不一致**（文件大小已落盘、簇链没落盘），不是设备数据错；数据错会报 `Data error at offset …`。先 `chkdsk /f` 再判（2026-10-31 闭环：chkdsk 修正文件大小 138→127 MB 后，H2testw verify **127 MB 0 错误**、`dng=0`）。要测设备掉电窗口必须让主机先 flush/关写缓存，否则测到的是 FAT/NTFS 的崩溃一致性。TRIM 后掉电、GC 压力下掉电未做；
 - 坏块：`bbt fault` 注入，确认写重试/报错。
 
 ### Phase C：主机接口
@@ -176,8 +179,9 @@ fl
 - `test /fc-nand/...`：FC ECC/CRC/加扰/建链/多 plane/压力；
 - `info` / `diag`：`free/op/bad/dng/mig/cp/jrn`；新增
   两行：`l2p[ch][ce][lun] seq=<run>/<max> pf=<calls>/<started>/<skipped>/<resident>/<hits>
-  cr=<batches>/<pairs>/<declines>/<fallbacks>` 与
-  `l2p[ch][ce][lun] cw=<batches>/<pages>/<declines>/<aborts> mb=<jobs>/<pages>/<aborts>`；
+  cr=<batches>/<pairs>/<starts>/<declines>/<fallbacks>` 与
+  `l2p[ch][ce][lun] cw=<batches>/<pages>/<declines>/<aborts> sw=<starts>/<page_ends>
+  pc=<pad_closes> jf=<journal_page_writes> mb=<jobs>/<pages>/<aborts>`；
 - **顺序读预取 / cache read**：先 `wr` 一段连续数据，再连续执行
   `rd <lba> 32`（每次 16 KiB，跨 512-LBA region）。`info` 的 `seq` 应增长、
   `pf started/hits` 增长；`cr batches/pairs` 增长说明 cache read 批次真的生效；

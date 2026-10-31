@@ -50,6 +50,12 @@ typedef enum
 #define FREE_POOL_TARGET    (32U)
 #define FREE_POOL_EMERGENCY (8U)
 
+/* 单 plane 空闲水位（本仓自拟）。成对分配要求「每个 plane 各一块」——只看总水位会出现
+ * 「free=264 但一侧为 0」的分配失败（板端 2026-10-31 RISK-ALLOC-09）。任一 plane 低于
+ * 该值即视为饥饿，触发 GC 并让 victim 选择优先回收该 plane。
+ * 取 4：够一次成对分配 + GC 目的页对 + CP/journal 的短时余量；经验值，不是行业标准。 */
+#define FREE_POOL_PLANE_LOW (4U)
+
 /* ── OP / Spare 保留池（按 plane）── */
 #define FTL_OP_PERCENT          (10U) /* OP 预留百分比 */
 #define FTL_OP_BLOCKS_PER_PLANE ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)
@@ -168,6 +174,9 @@ typedef struct
     /* Free Pool */
     WORD *free_blocks;
     WORD  free_count;
+    /* per-plane 空闲块数：由唯一闸门 alc_free_push / alc_free_remove 维护（README 的「四本账」）。
+     * 成对分配与 GC 的 plane 平衡判据都读它，不再扫 free_blocks 推导。 */
+    WORD free_plane_count[PLANE_NUM];
 
     /* OP / Spare（per-plane） */
     alc_op_block_table_t    *op_blocks;
@@ -304,6 +313,45 @@ void alc_free_push(alc_t *alloc, WORD gblock);
  * @param gblock 全局块号。
  */
 void alc_free_remove(alc_t *alloc, WORD gblock);
+
+/**
+ * @brief 各 plane 的 Free Pool 块数（O(1)，由 push/remove 闸门维护）
+ *
+ * 用途：成对分配的单 plane 水位判定、GC victim 的 plane 平衡偏好。
+ *
+ * @param alloc 分配器
+ * @param plane 目标 plane
+ * @return 该 plane 的空闲块数（0..BLOCKS_PER_PLANE）
+ */
+static inline WORD alc_free_get_count(const alc_t *alloc, BYTE plane)
+{
+    ASSERT(plane < PLANE_NUM);
+    return alloc->free_plane_count[plane];
+}
+
+/**
+ * @brief 最饥渴 plane 的空闲块数（成对分配真正可用的余量）
+ *
+ * 总 `free_count` 不能代表成对分配能力——一侧为空即无法分配（RISK-ALLOC-09）。
+ * 诊断 / 水位判据都看这个值；只用它做观测，不替代 per-plane 判定。
+ *
+ * @param alloc 分配器
+ * @return 各 plane 空闲块数的最小值
+ */
+static inline WORD alc_free_min_plane_count(const alc_t *alloc)
+{
+    WORD m = alloc->free_plane_count[0];
+
+    for (BYTE p = 1U; p < PLANE_NUM; p++)
+    {
+        if (alloc->free_plane_count[p] < m)
+        {
+            m = alloc->free_plane_count[p];
+        }
+    }
+
+    return m;
+}
 
 /**
  * @brief Free Pool 中「各 plane 最大擦除次数」的最小值
@@ -452,10 +500,37 @@ typedef enum
 BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature);
 
 /**
+ * @brief cache 写序列专用的 Open SB 余量（含「新块由本序列自己打开」的语义）
+ *
+ * 与 `alc_super_open_get_room` 的差异只有三种状态：
+ *   · **无 Open SB / SB 已满** ⇒ 返回 `PAGES_PER_BLOCK`：下一次
+ *     `alc_super_open_alloc_pair` 会关闭旧块并开新块，新块的 page0 由**本序列**
+ *     在第一页程序时承担（写流程会在成功结算时 `note_page_programmed`）。
+ *   · **SB 已开、page0 尚未成功**：
+ *       `page0_from_seq == true`（page0 是本序列当前在飞/已提交的页）⇒ 返回
+ *       `PAGES_PER_BLOCK - next_page`：cache program 是**有序管线**，page0 的失败
+ *       会中止整个序列（其后页一律不确认），因此不会出现「page0 失败但 page>0
+ *       被确认」而击穿 rebuild 的 page0 空白捷径；
+ *       否则 ⇒ 0（page0 属于别的写者，必须等它确认）。
+ *   · 其余（plane 不全 / 含 BAD / page0 已成功）与 `get_room` 相同。
+ *
+ * ⚠ 只有**同一 cache 序列**可以传 `page0_from_seq == true`；独立程序者
+ *   （wbuf / GC / WL）仍必须用 `get_pba_state` 的 page0 屏障。
+ *
+ * @param alloc          分配器
+ * @param temperature    FTL_TEMP_HOT / FTL_TEMP_COLD
+ * @param page0_from_seq 当前页（若为 page0）是否由本 cache 序列写入
+ * @return 可连续分配的页对数（0..PAGES_PER_BLOCK）
+ */
+BYTE alc_super_open_get_room_seq(const alc_t *alloc, BYTE temperature, bool page0_from_seq);
+
+/**
  * @brief 记录某个 Open SB 的页编程成功（page0 异步写屏障）
  *
- * 只关心 page 0：在它成功前，`alc_super_open_alloc_pair` 拒绝对同一 SB 分配 page ≥1，
- * 防止「page0 失败但后续页已编程」击穿掉电恢复的 page0 空白捷径。
+ * 只关心 page 0：它成功前，**独立程序者**（wbuf / GC / WL）在提交点被
+ * `alc_super_open_get_pba_state` 的 page0 屏障挡住（`alloc_pair` 本身不拒绝分配），
+ * 防止「page0 失败但后续页已确认」击穿掉电恢复的 page0 空白捷径；
+ * cache 写序列则靠**有序管线**保证同一不变量（见 `alc_super_open_get_room_seq`）。
  * 失败/关闭由 alc_super_close 处理（新 SB 的 flag 为 false）。
  *
  * @param alloc       分配器
@@ -481,6 +556,20 @@ void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD p
  *         ALC_SUPER_PBA_OPEN_PAGE0_DONE = 属于当前 SB 且 page0 已成功
  */
 alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temperature, DWORD pba);
+
+/**
+ * @brief 只读判断：现在能不能开出一个新的 SB（不改变任何状态）
+ *
+ * 用途：写序列跨 block 续写的准入——吃完当前 SB 之前必须确认下一个 SB 开得出来，
+ * 否则序列会停在「有打开的设备序列、没有可提交的数据页」，门控挡住 GC、padding END
+ * 也无页可分配（RISK-CACHE-15 的盘满例外会中止一条已回执的序列）。
+ *
+ * @param alloc 分配器
+ * @param mode  与即将使用的 `alc_super_open_alloc_pair` 相同的策略
+ *
+ * @return true = 每个 plane 都能选到块（Free Pool，或 OP 池里有非 BAD 块）
+ */
+bool alc_super_can_open(const alc_t *alloc, alc_super_alloc_mode_e mode);
 
 /**
  * @brief 按策略分配各 plane 当前页的 PBA

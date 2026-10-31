@@ -61,6 +61,22 @@
  * 挡住该 LUN。16 KiB chunk 的 USB 传输在 ms 级，1s 是宽松上界（时钟缺失时不计时）。 */
 #define FTL_CACHE_SEQ_IDLE_MS (1000U)
 
+/* 顺序流检测阈值（本仓自定，FTL 自判）：同一方向连续 LBA 累计达到 64 条
+ * （32 KiB = 两个 16 KiB host 传输段）才认为进入顺序流，允许开 cache 序列。
+ * 依据：本阈值是工程取值（两个 16 KiB 传输段），没有对应的论文 / 规范参数；
+ * 形态上对齐 DRAM-less 分支"顺序访问按整页 / 整段落盘"的处理（DFTL，Gupta et al.,
+ * ASPLOS'09；见 docs/design/storage_controller_learning.md 的经典论文清单）。
+ * 阈值只用于过滤单个随机请求，不是 QoS 参数。
+ * ⚠ host 传输段（USB 16 KiB）只是 LBA 流的一次交付，不是本阈值的作用域——
+ *   跨段连续由 seq->next_lba 延续，见 docs/design/ftl_design.md §3.16。 */
+#define FTL_STREAM_MIN_LBAS (64U)
+
+/* 顺序写序列的主动断点 = Journal 顺序页剩余空间（`jrn_seq_room()`）：页写满
+ * （508 条，按整 pair 用到 504 条 = 63 pair ≈252 KiB）即 END，让这张页落盘。
+ * 顺序序列占用每个 plane 的 cache 寄存器期间不能插元数据写，所以断点由页容量
+ * 而非 host 命令边界决定（页可以跨多条 host 命令续用）。器件约束：END（48h）
+ * 必须落在数据页上，故窗口始终按 pair 整数倍提交。 */
+
 /* 写失败透明重试次数上限（H4：只重试一次就够覆盖「遇到一个新坏块」的情形；
  * 第二次仍失败说明介质/通道有问题，如实返回 IO_ERROR，不掩盖故障）。 */
 #define FTL_WRITE_RETRY_MAX (1U)
@@ -136,20 +152,50 @@ typedef struct
 typedef struct
 {
     ftl_cache_seq_kind_e kind;
-    bool                 active;    /* true = 设备侧序列打开（START 已发、END 未发） */
-    bool                 draining;  /* true = 窗口已提交完但命令仍在飞：门控继续关着，
-                                     * 直到所有者组的在飞子操作归零。**不能**在提交
-                                     * 完的瞬间就放开 LUN —— 那会让别的组在这个
-                                     * 31h/3Fh 管线还没走完时插命令（RISK-CACHE-14）。 */
-    bool           owner_submit;    /* 序列所有者正在提交窗口（门控旁路） */
-    bool           break_requested; /* 非所有者提交被门控拒绝 ⇒ 下一窗口末尾 END */
-    WORD           owner_gi;        /* 最近持有序列的组（窗口记账 / 门控归因） */
-    DWORD          next_lba;        /* 下一条命令的起始 LBA */
-    DWORD          cmd_start;       /* 打开序列的 SCSI 命令起始 LBA */
-    DWORD          cmd_total;       /* 该命令总 LBA 数（跨 chunk 续序列的判据） */
-    DWORD          idle_ms;         /* 所有者组已释放/已发完后等待下一 chunk 的起点 */
-    ftl_cache_wr_t wr;              /* 写序列的逐页确认 FIFO */
+
+    /* ⚠ 偏离 H32（P5 留痕）：active / draining / closing 是**同一设备管线**的
+     * 互斥状态，这里沿用既有 bool 组而不是互斥枚举（改动面大且需同步全部判定点）；
+     * 互斥性由 ftl_cache_seq_release / close_step / pad 回调三处维护。
+     * 后续重构时收敛成一个状态枚举。 */
+
+    bool active;              /* true = 设备侧序列打开（START 已发、END 未发） */
+    bool draining;            /* true = 读序列已放弃但命令仍在飞：门控继续关着，
+                               * 直到所有者组的在飞子操作归零（RISK-CACHE-14）。 */
+    bool owner_submit;        /* 序列所有者正在提交窗口（门控旁路） */
+    bool break_requested;     /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
+    bool close_requested;     /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
+                               * flush / 前台等待）：service 用 padding END 落下
+                               * 一个收尾页，把最后一页的 FAIL_CACHE 结算掉。 */
+    bool closing;             /* padding END 已在飞：门控继续关，新的窗口等待 */
+    bool own_page0;           /* 当前 hot SB 的 page0 由**本序列**写入：允许它在确认前
+                               * 继续写 page>0（有序管线保证 page0 失败会中止其后所有页，
+                               * 见 allocator.h 的 alc_super_open_get_room_seq）。
+                               * 序列开始即清、分配 page0 时置位；跨 block 续写时由新块
+                               * 的分配重新置位（新 SB 的 page0 同样由本序列写）。 */
+    WORD  owner_gi;           /* 最近持有序列的组（窗口记账 / 门控归因） */
+    DWORD next_lba;           /* 续序列的判据：下一个 host 数据段必须从这里开始 */
+    DWORD idle_ms;            /* 所有者组已释放/已发完后等待下一段的起点 */
+    DWORD run_pairs;          /* 读序列本段已提交的 pair 数（跨 block 续接的让步上限，
+                               * 见 cache_batch.h 的 FTL_CACHE_READ_MAX_RUN_PAIRS） */
+    DWORD pad_pba[PLANE_NUM]; /* padding END 页的逐 plane PBA。Policy B 下两 plane 的块号
+                               * 不同 ⇒ 回调记账必须用真实地址，不能用 pba_with_plane()
+                               * 从 plane0 推导（那样会漏记 plane1 的 page0 屏障）。 */
+    ftl_cache_wr_t wr;        /* 写序列的逐页确认 FIFO */
 } ftl_cache_seq_t;
+
+/* 顺序流检测器（per instance × per direction）——FTL 自己判断顺序读写的状态。
+ *
+ * 判据只有一条：同一方向相邻 host 请求**首尾相接**（本请求起始 LBA == 上一请求的
+ * 结束 LBA）。连续长度累计达到 FTL_STREAM_MIN_LBAS 即进入顺序流；LBA 空档或换向
+ * 即复位（flush / trim 不打断检测——它们不改变后续写的 LBA 连续性，新起点由判据
+ * 自然处理）。它只决定 cache 序列**能否开启**；序列一旦打开，延续由
+ * cache_seq.next_lba 判定（与 host 传输段边界无关）。 */
+typedef struct
+{
+    DWORD last_end; /* 上一请求的结束 LBA（exclusive）；FTL_LBA_INVALID = 无上一请求 */
+    DWORD run;      /* 连续 LBA 累计（封顶在阈值附近，只用于判 ≥ FTL_STREAM_MIN_LBAS） */
+    bool  active;   /* true = 连续长度已达阈值（顺序流） */
+} ftl_stream_det_t;
 
 /**
  * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
@@ -234,6 +280,10 @@ typedef struct ftl_context
     DWORD total_writes;
     DWORD dangling_total; /* L2P 指向 valid_count==0 的累计覆盖写次数（[STAT]/info 用） */
 
+    /* 顺序流检测（per-instance；ftl_submit_common 更新）。cache 序列的开启判据。 */
+    ftl_stream_det_t stream_rd; /* 读方向 */
+    ftl_stream_det_t stream_wr; /* 写方向 */
+
     /* 顺序读检测（per-instance；ftl_submit_common 更新）。
      * seq_run 在非连续读/写/flush/trim 时归零；只用于 L2P region 预取。 */
     DWORD seq_last_end_lba;    /* 上一读请求末 LBA（exclusive） */
@@ -244,8 +294,9 @@ typedef struct ftl_context
     bool  seq_prefetch_valid;  /* target 有效且尚未执行 */
 
     /* FTL cache read 批量提交的观测计数（不参与决策；用于性能归因）。 */
-    DWORD cache_read_batches;   /* 成功提交的批次数 */
-    DWORD cache_read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均批深） */
+    DWORD cache_read_batches;   /* 成功提交的窗口数 */
+    DWORD cache_read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均窗口深度） */
+    DWORD cache_read_starts;    /* 打开的读序列段数（START 计数；batches / starts = 平均段长） */
     DWORD cache_read_declines;  /* 收集不足最小 pair 数而放弃尝试的次数（不连续 / wbuf 命中 / L2P 加载中） */
     DWORD cache_seq_breaks;     /* D4：门控拒绝导致的序列提前收尾次数（读+写） */
     DWORD cache_read_fallbacks; /* 已决定走 cache read 但资源不足或提交失败而回退的次数 */
@@ -254,10 +305,13 @@ typedef struct ftl_context
     ftl_cache_seq_t cache_seq;
 
     /* host cache program 批次（per-instance，单 LUN 单批）。 */
-    DWORD cache_wb_batches;  /* 成功提交的批次数 */
-    DWORD cache_wb_pages;    /* 累计提交的页数 */
-    DWORD cache_wb_declines; /* 条件不满足而回退 wbuf 的次数 */
-    DWORD cache_wb_aborts;   /* 批次首次成员失败而中止的次数（同一批只计一次） */
+    DWORD cache_wb_batches;    /* 成功提交的窗口数 */
+    DWORD cache_wb_pages;      /* 累计提交的页数（pages / batches = 平均窗口深度） */
+    DWORD cache_wb_declines;   /* 条件不满足而回退 wbuf 的次数 */
+    DWORD cache_wb_aborts;     /* 批次首次成员失败而中止的次数（同一批只计一次） */
+    DWORD cache_wb_starts;     /* 打开的写序列段数（START 计数） */
+    DWORD cache_wb_page_ends;  /* 写满一张 Journal 顺序页而主动 END 的次数（≈每 252 KiB 一次） */
+    DWORD cache_wb_pad_closes; /* padding END 有序收尾的次数（LBA 不连续 / 空闲 / flush） */
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的

@@ -43,6 +43,7 @@ void alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *refs)
 
     alloc->free_blocks = refs->free_blocks;
     alloc->free_count  = 0U;
+    memset(alloc->free_plane_count, 0, sizeof(alloc->free_plane_count));
 
     alloc->op_blocks    = refs->op_blocks;
     alloc->spare_blocks = refs->spare_blocks;
@@ -127,6 +128,17 @@ void alc_free_push(alc_t *alloc, WORD gblock)
 
     alloc->free_blocks[alloc->free_count++] = gblock;
 
+    // per-plane 账本与平铺池同步维护（唯一入池点）。
+    {
+        const BYTE plane = ftl_gblock_plane(gblock);
+
+        ASSERT(plane < PLANE_NUM);
+        if (plane < PLANE_NUM)
+        {
+            alloc->free_plane_count[plane]++;
+        }
+    }
+
     bst_block_t *b = &alloc->blocks[gblock];
 
     ftl_block_set_state(b, FTL_BLOCK_STATE_FREE);
@@ -142,6 +154,17 @@ void alc_free_remove(alc_t *alloc, WORD gblock)
         if (alloc->free_blocks[i] == gblock)
         {
             ASSERT(ftl_block_state(&alloc->blocks[gblock]) == FTL_BLOCK_STATE_FREE);
+            // per-plane 账本与平铺池同步维护（唯一出池点）。
+            {
+                const BYTE plane = ftl_gblock_plane(gblock);
+
+                ASSERT(plane < PLANE_NUM);
+                ASSERT(alloc->free_plane_count[plane] > 0U);
+                if ((plane < PLANE_NUM) && (alloc->free_plane_count[plane] > 0U))
+                {
+                    alloc->free_plane_count[plane]--;
+                }
+            }
             alloc->free_blocks[i] = alloc->free_blocks[--alloc->free_count];
             return;
         }
@@ -384,6 +407,50 @@ WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index)
 /* ── 6. Super Block：Open ── */
 
 /**
+ * @brief 只读判断：现在能不能开出一个新的 SB（不改变任何状态）。
+ *
+ * why：写序列跨 block 续写时，必须在**吃完当前 SB 之前**确认下一个开得出来。
+ * 否则序列会停在「设备序列已打开、没有可提交的数据页」——序列门控挡住 GC，
+ * padding END 也无页可分配（RISK-CACHE-15 的盘满例外会中止一条**已回执**的序列）。
+ *
+ * @param alloc 分配器
+ * @param mode  与即将使用的 `alc_super_open_alloc_pair` 相同的策略
+ *
+ * @return true = 每个 plane 都能选到块（Free Pool，或 OP 池里有非 BAD 块）
+ */
+bool alc_super_can_open(const alc_t *alloc, alc_super_alloc_mode_e mode)
+{
+    const bool allow_op = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (alc_free_find_block(alloc, plane, mode) != FTL_GBLOCK_INVALID)
+        {
+            continue;
+        }
+
+        if (allow_op == false)
+        {
+            return false;
+        }
+
+        bool any_op = false;
+
+        for (WORD i = 0U; (i < alloc->op_count[plane]) && (any_op == false); i++)
+        {
+            any_op = (ftl_block_is_bad(&alloc->blocks[alloc->op_blocks[plane][i]]) == false);
+        }
+
+        if (any_op == false)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * @brief 为 Open SB 分配各 plane 的物理块
  *
  * @param alloc 分配器
@@ -525,6 +592,39 @@ BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature)
     }
 
     return room;
+}
+
+BYTE alc_super_open_get_room_seq(const alc_t *alloc, BYTE temperature, bool page0_from_seq)
+{
+    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    // 无 Open SB / 已满：下一次 alloc_pair 会关旧块、开新块。新块的 page0 由本序列
+    // 在第一页程序时承担；能否真的开出新块由 alloc_pair 的返回值决定（这里只报容量）。
+    if ((sb->is_open == false) || (sb->next_page >= PAGES_PER_BLOCK))
+    {
+        return PAGES_PER_BLOCK;
+    }
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (super_block_has_plane(sb, plane) == false)
+        {
+            return 0U;
+        }
+        // page0 屏障：page0 属于**别的写者**时必须等它成功；由本序列自己写的 page0
+        // 可以继续（有序管线保证 page0 失败会中止其后所有页，不击穿 rebuild 捷径）。
+        if (((sb->page0_programmed & (BYTE)(1U << plane)) == 0U) && (page0_from_seq == false))
+        {
+            return 0U;
+        }
+        // BAD 块不能继续写；alloc 主路径会关闭该 SB，这里同样按 0 处理。
+        if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])]))
+        {
+            return 0U;
+        }
+    }
+
+    return (BYTE)(PAGES_PER_BLOCK - sb->next_page);
 }
 
 alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temperature, DWORD pba)

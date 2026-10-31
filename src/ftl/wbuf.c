@@ -115,15 +115,18 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     // 这里**只登记请求**，由 must-run 的 mig_handle 下一轮启动。
     DWORD pba[PLANE_NUM];
 
-    if (alc_super_open_alloc_pair(h->alloc, ALC_SUPER_ALLOC_HOT, pba) != FTL_OK)
+    const ftl_status_e alc_st = alc_super_open_alloc_pair(h->alloc, ALC_SUPER_ALLOC_HOT, pba);
+
+    if (alc_st != FTL_OK)
     {
         // migrate 是本模块的**可选端口**：纯 RAM 单测用 wb_init(..., NULL) 隔离
         // 后台迁移器，此时只做背压，不登记紧急 GC（见 wbuf.h wb_init 契约）。
-        if (h->migrate != NULL)
+        if ((alc_st == FTL_AGAIN) && (h->migrate != NULL))
         {
             mig_gc_request_urgent(h->migrate);
         }
-        return FTL_AGAIN;
+        // H38：永久失败（如 Closed 列表满）原样上报，不能伪装成瞬态重试。
+        return alc_st;
     }
 
     // page0 异步写屏障：page>0 的写必须等同一 plane 的 page0 成功完成。

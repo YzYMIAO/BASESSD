@@ -284,7 +284,7 @@ static inline bool ftl_is_l2p_log_gblock(WORD g)
  * （或介质上根本没有当前版本的 Checkpoint）⇒ pfr_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (12U) /* v12：L2P region 双副本（日志区 46..93/plane，spare 94..97） */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (13U) /* v13：Journal 页头 16B（+base_lba）与顺序流映射页（JSEG，4B 条目） */
 
 /*
  * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）。

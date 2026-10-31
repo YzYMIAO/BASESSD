@@ -163,12 +163,16 @@ flowchart TD
   —— 写路径需要 1 chunk lookahead：缓存程序序列里 chunk k 的最后一页由 chunk k+1 的
   第一条命令的 `FAIL_CACHE` 确认（`docs/design/ftl_design.md` §3.16）。
 - 两个槽（`usb_msc_slot_t`）：每槽 16 KiB bounce（0 号 AXI `.bss`、1 号 DTCM，均 CPU-only）
-  + 一个 `ssd_request_t`。bounce 必须活到该槽的 FTL `complete_flag`。
-- WRITE：端点缓冲 → 拷进槽 bounce → 提交 → **非末 chunk 立即回流控回执**
-  （`tud_msc_async_io_done(length)`，让主机发下一 chunk）；末 chunk 等 FTL 完成再回执，
-  成败即 CSW 成败。两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）；
-  主循环在 `usb_device_task` 前先跑 `ftl_service`，且 `tud_task` 单次最多处理
-  `CFG_TUD_TASK_EVENTS_PER_RUN`（16）个事件 ⇒ 不会饿死 FTL。
+  + 一个 `ssd_request_t`。bounce 必须活到该槽的 FTL 完成（FTL 可能因背压延后消费）。
+- WRITE = **volatile write cache**：端点缓冲 → 拷进槽 bounce → 提交 → **立即回流控回执**
+  （`tud_msc_async_io_done(length)`，**含一条命令的最后一段**）。主机因此不必等最后一页的
+  `FAIL_CACHE` 就能发下一条命令 ⇒ FTL 的设备 cache 序列可以跨 host 命令延续
+  （`ftl_design.md` §3.16.5）。槽位保留到 FTL 完成（只回收缓冲，不再发 CSW）。
+  已回执的写段之后失败 ⇒ 置 **deferred error**，由**下一条** READ/WRITE/FLUSH 命令的 CSW
+  失败一次（TinyUSB 不支持自定义 sense，这是本仓近似，见 `known_risks.md` RISK-USBC-01）。
+  两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）。
+- 打开中的写序列会占用一个槽直到 FTL 收尾（空闲 1 s / 下一条命令 / flush 触发 padding
+  END）⇒ `usb_msc_host_busy()`（CLI 用）在此期间为 true，CLI 命令需重试。
 - READ：USB 端点缓冲 → 提交到槽 bounce → 完成 → 拷回端点缓冲 → USB IN（不需要 lookahead）。
 - 主机复位/拔出时在飞槽标记 `discard`：完成后只收尾，不回写 USB 缓冲。
 - 不支持多 LUN；不支持 TRIM。

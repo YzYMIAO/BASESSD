@@ -906,6 +906,8 @@ static bool mig_job_stall(mig_handle_t *m)
 /**
  * @brief 等外部模块超过 FTL_WAIT_TIMEOUT_MS ⇒ 中止 job（不擦 victim）。返回 true = 已中止。
  * ⚠ 与 mig_job_stall 分开：外部命令在飞也计时——"在飞"不等于"会完成"。
+ * ⚠ 例外：等待原因是 **cache 序列门控**时不计时——门控等待必然在段边界结束
+ *   （配额 / block 头 / 命令尾），与 mig_job_stall 同口径（见函数内注释）。
  *
  * @param m      job。
  * @param reason 中止原因（日志用，静态字符串）。
@@ -915,6 +917,16 @@ static bool mig_job_stall(mig_handle_t *m)
  */
 static bool mig_job_wait(mig_handle_t *m, const char *reason)
 {
+    // cache 序列打开时，等的是**门控**（Journal 刷页 / L2P 写回被序列挡住），不是
+    // 在飞的外部命令：序列由配额 / block 头 / 命令尾收尾，等待必然在段边界结束。
+    // 与 mig_job_stall 同口径不计超时；否则长顺序写（一段 ~300 ms 墙钟）会让本 job
+    // 每 50 ms 中止一次，GC/WL 在 host 持续写下永远拿不到 Journal 容量。
+    if (ftl_op_cache_seq_active() == true)
+    {
+        m->wait_ms = 0U;
+        return false;
+    }
+
     if (mig_deadline_is_expired(&m->wait_ms, FTL_WAIT_TIMEOUT_MS))
     {
         m->timed_out     = true;

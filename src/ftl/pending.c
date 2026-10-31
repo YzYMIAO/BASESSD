@@ -143,6 +143,25 @@ void pend_release_index(pend_table_t *table, BYTE index)
     table->slots[index].used = false;
 }
 
+bool pend_has_foreign_write(const pend_table_t *table)
+{
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        const pend_req_t *p = &table->slots[i];
+
+        if ((p->used == false) || (p->cache_role != PEND_CACHE_ROLE_NONE))
+        {
+            continue;
+        }
+        if ((p->op == PENDING_OP_WRITE) || (p->op == PENDING_OP_WRITE_PAGE0) || (p->op == PENDING_OP_WRITE_CONFIRM))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // pend_slot_get_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度）
 WORD pend_slot_get_count(const pend_table_t *table)
 {

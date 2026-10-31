@@ -56,6 +56,7 @@
 #include "ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
 #include "log.h"
 #include "onfi_1_0.h"
+#include "ssd_compiler.h"
 
 #include <string.h>
 
@@ -225,12 +226,17 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc)
         }
     }
 
-    journal->handle.current_block    = 0U;
-    journal->handle.current_page     = 0U;
-    journal->handle.current_entry    = 0U;
-    journal->handle.sequence_counter = 1U;
-    journal->handle.merge_floor      = 0U;
-    journal->handle.pre_erased_block = JRN_BLOCK_NONE;
+    journal->handle.current_block     = 0U;
+    journal->handle.current_page      = 0U;
+    journal->handle.current_entry     = 0U;
+    journal->handle.sequence_counter  = 1U;
+    journal->handle.persisted_seq     = 1U; /* 空环：序号 1 之前“全部已落盘”（无条目） */
+    journal->handle.write_page_seq    = 1U;
+    journal->handle.write_entry_count = 0U;
+    journal->handle.merge_floor       = 0U;
+    journal->handle.pre_erased_block  = JRN_BLOCK_NONE;
+    journal->handle.page_kind         = JRN_PAGE_LBA;
+    journal->handle.page_base         = 0U;
 
     memset(journal->handle.page_buf, 0xFF, sizeof(journal->handle.page_buf));
 
@@ -242,8 +248,9 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc)
     journal->handle.write_fail_pending = false;
 
     // 异步刷页 job 复位：无在飞、无待偿擦除
-    journal->handle.phase      = JRN_IDLE;
-    journal->handle.need_erase = false;
+    journal->handle.phase       = JRN_IDLE;
+    journal->handle.need_erase  = false;
+    journal->handle.page_writes = 0U;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -253,6 +260,17 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc)
 // 前置声明：jrn_append / jrn_reserve（页满时）要用，定义在本节稍后。
 static bool jrn_freeze(l2p_jrn_t *journal);
 
+/**
+ * @brief 当前页缓冲可容纳的条目数（按页型）。
+ *
+ * @param journal Journal
+ * @return JRN_PAGE_SEG ⇒ 508；JRN_PAGE_LBA ⇒ 127
+ */
+static WORD jrn_page_capacity(const l2p_jrn_t *journal)
+{
+    return (journal->handle.page_kind == JRN_PAGE_SEG) ? (WORD)JRN_SEG_ENTRIES_PER_PAGE : (WORD)JRN_ENTRIES_PER_PAGE;
+}
+
 // 实现要点：· **不阻塞**：只可能调用 jrn_freeze() 起一条异步页写，绝不同步刷页 /
 // 调 ftl_sync_submit_wait / ftl_op_drain。成功与否由后续 service 轮推进。
 // · **留 1 个空槽**：要求 current_entry + entries < JRN_ENTRIES_PER_PAGE。
@@ -260,6 +278,9 @@ static bool jrn_freeze(l2p_jrn_t *journal);
 // 在调用链上结构性不可达。
 // · 合并（同 LBA 就地更新）只会减少实际占槽数，因此按最坏情况 entries 预留是安全的；
 // 多预留只会让页提前异步刷出，不影响正确性。
+// · 顺序页专用于顺序流（顺序条目不携带 LBA，混装会破坏隐式坐标）：普通条目
+//   遇到顺序页时先把该页刷出（**空页也刷**——顺序确认是异步的，"此刻为空"不等于
+//   "以后不会有顺序条目"，只有刷出后才能安全改作普通页），调用者下轮重试。
 bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
 {
     // 前置条件（判据 2）：调用者一律传 ftl->journal。
@@ -273,6 +294,12 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
     // 环全部不可用：页缓冲永远刷不出去，预留成功只会制造“看起来记下了”的假象。
     if (journal->handle.ring_full)
     {
+        return false;
+    }
+
+    if (journal->handle.page_kind != JRN_PAGE_LBA)
+    {
+        (void)jrn_freeze(journal);
         return false;
     }
 
@@ -313,6 +340,13 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
         return false;
     }
 
+    // 顺序页只装顺序条目（4B，无 LBA）；普通条目必须等它刷出后换页。
+    // jrn_reserve 已先处理（含空页刷出），这里只留防御。
+    if (journal->handle.page_kind != JRN_PAGE_LBA)
+    {
+        return false;
+    }
+
     // 更新合并：当前页缓冲里已有同一 LBA 的条目 ⇒ 就地更新，不新增条目。
     // 回放按页序 + 页内下标应用（per-LBA last-write-wins），页内同 LBA 只保留最新
     // new_pba 即正确；old_pba 仅首条保留（回放不读 old_pba）。
@@ -335,7 +369,7 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
 
     // 页已满且上一轮异步刷页未成功（job 忙 / 池空）⇒ 本条无处可放，丢弃。
     // ⚠ 守卫必须在按 current_entry 取槽位**之前**：current_entry ==
-    // JRN_ENTRIES_PER_PAGE 时 `JRN_HEADER_SIZE + 127×16 = 2060 > 2048`
+    // JRN_ENTRIES_PER_PAGE（127）时第 127 条的偏移已是 `16 + 127×16 = 2048`，越界
     // 会写出 page_buf 之外（踩到 jrn_handle_t）。
     // 丢弃的后果与「掉电丢最后一页 journal」同级（回放少应用一次映射更新）；
     // 整页由 jrn_handle 下轮刷掉后自动恢复。
@@ -367,6 +401,162 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
     return true;
 }
 
+/* ── 顺序流映射页 ── */
+
+bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need)
+{
+    if (journal->handle.ring_full)
+    {
+        return false;
+    }
+
+    const DWORD used = journal->handle.current_entry;
+    const DWORD room = (used < JRN_SEG_ENTRIES_PER_PAGE) ? (JRN_SEG_ENTRIES_PER_PAGE - used) : 0U;
+
+    // 跨命令续用同一张顺序页：页型对、已有条目、空间够本段、LBA 连续。
+    // 这是"一张页填满再断"的落点——不因 host 命令边界刷页。
+    if ((journal->handle.page_kind == JRN_PAGE_SEG) && (used != 0U) && (room >= need) && (lba == (journal->handle.page_base + used)))
+    {
+        return true;
+    }
+
+    if (used != 0U)
+    {
+        // 其他情况（LBA 不连续 / 空间不够本段 / 上一段尾页）：先异步刷出旧页。
+        // freeze 成功后页缓冲归零、页型复位；这个动作就是设计中「END 之后落元数据」。
+        if (jrn_freeze(journal) == false)
+        {
+            return false;
+        }
+    }
+
+    journal->handle.page_kind = JRN_PAGE_SEG;
+    journal->handle.page_base = 0U; /* 基准由首条 append 落定（见 jrn_handle_t 注释） */
+    return true;
+}
+
+WORD jrn_seq_room(const l2p_jrn_t *journal)
+{
+    if (journal->handle.page_kind != JRN_PAGE_SEG)
+    {
+        return 0U;
+    }
+    if (journal->handle.current_entry >= JRN_SEG_ENTRIES_PER_PAGE)
+    {
+        return 0U;
+    }
+
+    return (WORD)(JRN_SEG_ENTRIES_PER_PAGE - journal->handle.current_entry);
+}
+
+DWORD jrn_page_writes(const l2p_jrn_t *journal)
+{
+    return journal->handle.page_writes;
+}
+
+bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries)
+{
+    ASSERT(entries < JRN_SEG_ENTRIES_PER_PAGE);
+
+    if (entries == 0U)
+    {
+        return true;
+    }
+    if (journal->handle.ring_full)
+    {
+        return false;
+    }
+
+    if (journal->handle.page_kind == JRN_PAGE_SEG)
+    {
+        return (((DWORD)journal->handle.current_entry + entries) < JRN_SEG_ENTRIES_PER_PAGE);
+    }
+
+    return (journal->handle.current_entry == 0U); /* 空普通页可转顺序页；非空 ⇒ 本窗口必须 END */
+}
+
+bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries)
+{
+    ASSERT(entries < JRN_SEG_ENTRIES_PER_PAGE);
+
+    if (entries == 0U)
+    {
+        return true;
+    }
+    if (journal->handle.ring_full)
+    {
+        return false;
+    }
+
+    const DWORD capacity = jrn_page_capacity(journal);
+
+    if (journal->handle.page_kind == JRN_PAGE_SEG)
+    {
+        // 隐式坐标必须全批可追加：首条（本页尚无条目）任意，其余必须紧接已追加条目。
+        // 坐标断裂时刷页换页 —— 调用者停泊后重试会落到一张新页（基准重新落定）。
+        if ((journal->handle.current_entry != 0U) && (lba != (journal->handle.page_base + journal->handle.current_entry)))
+        {
+            (void)jrn_freeze(journal);
+            return false;
+        }
+        if (((DWORD)journal->handle.current_entry + entries) < capacity)
+        {
+            return true;
+        }
+        (void)jrn_freeze(journal);
+        return false;
+    }
+
+    if (journal->handle.current_entry == 0U)
+    {
+        return true; /* 空页：jrn_append_seq 会把它定为顺序页 */
+    }
+
+    // 普通页上有未落盘条目：不能隐式编码，先刷出（调用者下轮重试）。
+    (void)jrn_freeze(journal);
+    return false;
+}
+
+bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba)
+{
+    if (journal->handle.ring_full)
+    {
+        return false;
+    }
+
+    if (journal->handle.current_entry == 0U)
+    {
+        // 空白页：本页类型与基准 LBA 由首条条目落定。顺序确认按提交序到达，
+        // 因此第一条确认的 LBA 就是本页的隐式起点。
+        journal->handle.page_kind = JRN_PAGE_SEG;
+        journal->handle.page_base = lba;
+    }
+
+    if ((journal->handle.page_kind != JRN_PAGE_SEG) || (lba != (journal->handle.page_base + journal->handle.current_entry)))
+    {
+        return false; /* 隐式坐标断裂（jrn_seq_reserve 应已判掉；防御） */
+    }
+
+    if (journal->handle.current_entry >= JRN_SEG_ENTRIES_PER_PAGE)
+    {
+        (void)jrn_freeze(journal);
+        return false;
+    }
+
+    DWORD *slot = (DWORD *)(void *)(journal->handle.page_buf + JRN_HEADER_SIZE + (sizeof(l2p_jrn_seg_entry_t) * journal->handle.current_entry));
+
+    *slot = new_pba;
+    journal->handle.current_entry++;
+    journal->handle.sequence_counter++;
+
+    if (journal->handle.current_entry >= JRN_SEG_ENTRIES_PER_PAGE)
+    {
+        (void)jrn_freeze(journal);
+    }
+
+    return true;
+}
+
 /**
  * @brief 把页头写进 page_buf（magic + page_seq + entry_count + block_seq）。
  *
@@ -378,15 +568,18 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
  */
 static void jrn_header_write(l2p_jrn_t *journal)
 {
-    DWORD magic           = JRN_MAGIC;
-    DWORD hdr_page_seq    = journal->handle.sequence_counter - journal->handle.current_entry;
-    WORD  hdr_entry_count = journal->handle.current_entry;
-    WORD  hdr_block_seq   = journal->handle.current_block;
+    const bool seg             = (journal->handle.page_kind == JRN_PAGE_SEG);
+    DWORD      magic           = seg ? JRN_MAGIC_SEG : JRN_MAGIC;
+    DWORD      hdr_page_seq    = journal->handle.sequence_counter - journal->handle.current_entry;
+    WORD       hdr_entry_count = journal->handle.current_entry;
+    WORD       hdr_block_seq   = journal->handle.current_block;
+    DWORD      hdr_base_lba    = seg ? journal->handle.page_base : 0U;
 
     memcpy(journal->handle.page_buf + 0, &magic, sizeof(magic));
     memcpy(journal->handle.page_buf + 4, &hdr_page_seq, sizeof(hdr_page_seq));
     memcpy(journal->handle.page_buf + 8, &hdr_entry_count, sizeof(hdr_entry_count));
     memcpy(journal->handle.page_buf + 10, &hdr_block_seq, sizeof(hdr_block_seq));
+    memcpy(journal->handle.page_buf + 12, &hdr_base_lba, sizeof(hdr_base_lba));
 }
 
 /**
@@ -467,10 +660,17 @@ static bool jrn_freeze(l2p_jrn_t *journal)
     }
     journal->handle.need_erase = need_erase;
     journal->handle.phase      = JRN_WRITE;
+    journal->handle.page_writes++;
 
     // 换块与逐页 flush 都不打 INFO：JRN 是高频元数据维护，序号看 info 的 jrn=；
     // 只有真正错误（写失败/擦失败/环满）才输出。
+    // 记录本页的序号区间：页写成功后用它推进 WAL 水位（RISK-L2P-09）。
+    journal->handle.write_page_seq    = journal->handle.sequence_counter - journal->handle.current_entry;
+    journal->handle.write_entry_count = journal->handle.current_entry;
+
     journal->handle.current_entry = 0U;
+    journal->handle.page_kind     = JRN_PAGE_LBA;
+    journal->handle.page_base     = 0U;
     memset(journal->handle.page_buf, 0xFF, sizeof(journal->handle.page_buf));
     return true;
 }
@@ -689,6 +889,11 @@ DWORD jrn_sequence_get(const l2p_jrn_t *journal)
     return journal->handle.sequence_counter;
 }
 
+DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
+{
+    return journal->handle.persisted_seq;
+}
+
 bool jrn_has_write_failure(const l2p_jrn_t *journal)
 {
     return journal->handle.write_fail_pending;
@@ -736,14 +941,17 @@ void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence)
 
 BYTE jrn_watermark_get(const l2p_jrn_t *journal)
 {
-    // 全环全局口径（精确到条目）：分子必须是「全局写位置」，不是单块内 current_page
-    // ——否则 85%/95% 会提前或永不触发。最大 used_units = 256 × 127 ≈ 32512，
-    // ×100 不会溢出 DWORD。
+    // 全环全局口径（按已写页 × 每页条目数）：分子是「全局写位置」，不是单块内
+    // current_page——否则 85%/95% 会提前或永不触发。×100 不会溢出 DWORD。
+    // ⚠ 顺序流映射页每页可装 508 条（> 127），该口径会**高估**占用（每写满一张
+    //   顺序页仍只按 127 条计）⇒ 只会提前触发 Checkpoint，方向是安全的；
+    //   当前页的 508 条加上已写页基数可能超过分母，故结果封顶 100。
     const DWORD entries_per_page = JRN_ENTRIES_PER_PAGE;
     const DWORD total_pages      = JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK;
     const DWORD used_units       = ((journal->handle.current_block * PAGES_PER_BLOCK + journal->handle.current_page) * entries_per_page) + journal->handle.current_entry;
+    const DWORD percent          = ((used_units * 100U) / (total_pages * entries_per_page));
 
-    return ((used_units * 100U) / (total_pages * entries_per_page));
+    return (percent > 100U) ? (BYTE)100U : (BYTE)percent;
 }
 
 void jrn_watermark_update(l2p_jrn_t *journal)
@@ -810,6 +1018,17 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         journal->handle.current_page  = journal->handle.target_page;
     }
     journal->handle.phase = JRN_IDLE;
+
+    if (failed == false)
+    {
+        // WAL 水位：本页成功落盘 ⇒ 它覆盖的序号区间全部持久化（RISK-L2P-09）。
+        const DWORD next_seq = journal->handle.write_page_seq + (DWORD)journal->handle.write_entry_count;
+
+        if (next_seq > journal->handle.persisted_seq)
+        {
+            journal->handle.persisted_seq = next_seq;
+        }
+    }
 
     if (failed)
     {
@@ -935,7 +1154,7 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
  * @return true = raw 读成功且整页为 0xFF（空页）
  *         false = 读失败，或存在非 0xFF 字节
  */
-static bool jrn_page_raw_blank(DWORD addr)
+static SSD_CODE_FAST bool jrn_page_raw_blank(DWORD addr)
 {
     BYTE *raw = s_raw_page;
 
@@ -977,14 +1196,16 @@ static bool jrn_page_raw_blank(DWORD addr)
  * （> cp_sequence）随页面一起丢。
  * 页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
  */
-static WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_ref_t *out_pages, WORD capacity, WORD *out_count, jrn_page_ref_t *out_latest)
+static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_ref_t *out_pages, WORD capacity, WORD *out_count, jrn_page_ref_t *out_latest)
 {
     if (out_latest != NULL)
     {
         out_latest->page_seq    = 0U;
+        out_latest->base_lba    = 0U;
         out_latest->block       = 0U;
         out_latest->page        = 0U;
         out_latest->entry_count = 0U;
+        out_latest->kind        = JRN_PAGE_LBA;
     }
 
     WORD count       = 0U;
@@ -1014,40 +1235,66 @@ static WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_
                 continue;
             }
 
+            jrn_page_kind_e kind;
+            DWORD           magic;
+
+            memcpy(&magic, page_data + 0, sizeof(magic));
+            if (magic == JRN_MAGIC)
             {
-                DWORD magic;
-                memcpy(&magic, page_data + 0, sizeof(magic));
-                if (magic != JRN_MAGIC)
-                {
-                    continue; /* 非 Journal 页 */
-                }
+                kind = JRN_PAGE_LBA;
+            }
+            else if (magic == JRN_MAGIC_SEG)
+            {
+                kind = JRN_PAGE_SEG;
+            }
+            else
+            {
+                continue; /* 非 Journal 页 */
             }
 
             DWORD page_seq;
             WORD  entry_count;
             memcpy(&page_seq, page_data + 4, sizeof(page_seq));
             memcpy(&entry_count, page_data + 8, sizeof(entry_count));
-            if ((entry_count == 0U) || (entry_count > JRN_ENTRIES_PER_PAGE))
+
+            const WORD page_capacity = (kind == JRN_PAGE_SEG) ? (WORD)JRN_SEG_ENTRIES_PER_PAGE : (WORD)JRN_ENTRIES_PER_PAGE;
+
+            if ((entry_count == 0U) || (entry_count > page_capacity))
             {
-                continue; /* 空页 / 非法 count */
+                continue; /* 空页 / 非法 count（介质读回，不可信） */
+            }
+
+            DWORD base_lba;
+            memcpy(&base_lba, page_data + 12, sizeof(base_lba));
+
+            // 顺序页的隐式 LBA 区间必须整体落在 L2P 键空间内。base_lba 来自介质
+            // （不可信输入，H29）：不校验的话 base 接近 UINT32_MAX 时 base+k 回绕成
+            // 一个小合法 LBA，回放会把映射写到错误的 LBA（H31 越界判据的同类）。
+            if ((kind == JRN_PAGE_SEG) && (((QWORD)base_lba + entry_count) > (QWORD)L2P_GLOBAL_LBA_MAX))
+            {
+                continue;
             }
 
             // 最新页（用于恢复写指针与序号）：取 page_seq 最大者
             if ((out_latest != NULL) && (page_seq >= out_latest->page_seq))
             {
                 out_latest->page_seq    = page_seq;
+                out_latest->base_lba    = base_lba;
                 out_latest->block       = b;
                 out_latest->page        = page;
                 out_latest->entry_count = entry_count;
+                out_latest->kind        = kind;
             }
 
             // 需回放页：本页**最后一条**的序号已过水位 ⇒ 页内至少一条没进 L2P 表
             if ((out_pages != NULL) && (count < capacity) && ((page_seq + entry_count) > cp_sequence))
             {
                 out_pages[count].page_seq    = page_seq;
+                out_pages[count].base_lba    = base_lba;
                 out_pages[count].block       = b;
                 out_pages[count].page        = page;
                 out_pages[count].entry_count = entry_count;
+                out_pages[count].kind        = kind;
                 count++;
             }
         }
@@ -1063,7 +1310,7 @@ static WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_sequence, jrn_page_
     return read_errors;
 }
 
-bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error)
+SSD_CODE_FAST bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error)
 {
     // 前置条件（判据 2）：调用者一律传 ftl->journal。out / out_read_error 可为 NULL。
 
@@ -1088,7 +1335,7 @@ bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *o
 // 擦除失败 ⇒ 重新挂起 `job.need_erase`，首次写前由 kick/flush 补擦；
 // ③ 序号取 max(最新页序号 + 1, floor)，0 抬到 1（0 保留作「无序号」，
 // 与 jrn_init 同约定；否则 journal_truncate 的水位校验会被 0 挡掉）。
-void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence)
+SSD_CODE_FAST void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence)
 {
     // 前置条件（判据 2）：调用者一律传 ftl->journal。latest 可为 NULL（文档化契约）。
 
@@ -1174,9 +1421,14 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
         next = 1U;
     }
 
-    journal->handle.current_entry    = 0U;
-    journal->handle.sequence_counter = next;
-    journal->handle.merge_floor      = 0U;
+    journal->handle.current_entry     = 0U;
+    journal->handle.sequence_counter  = next;
+    journal->handle.persisted_seq     = next; /* 扫描到的页都在介质上：水位直接对齐 */
+    journal->handle.write_page_seq    = next;
+    journal->handle.write_entry_count = 0U;
+    journal->handle.merge_floor       = 0U;
+    journal->handle.page_kind         = JRN_PAGE_LBA;
+    journal->handle.page_base         = 0U;
 
     // 开机没有“未完成迁移”的上下文：上次上电的失败 pending 不跨重启。
     journal->handle.write_fail_count   = 0U;
@@ -1208,7 +1460,7 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
  * @param block_ctx   块元数据增量端口（可为 NULL = 不记账）
  * @return 成功写入 L2P 的条目数（读失败页 = 0）
  */
-static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
+static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {
     DWORD raddr = jrn_page_addr(journal, page->block, page->page);
     BYTE  page_data[JRN_PAGE_SIZE];
@@ -1225,16 +1477,40 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const
 
     for (WORD k = 0U; k < page->entry_count; k++)
     {
-        const WORD offset = (JRN_HEADER_SIZE + sizeof(l2p_jrn_entry_t) * k);
-
         DWORD entry_lba;
         DWORD entry_old_pba;
         DWORD entry_new_pba;
         DWORD entry_seq;
-        memcpy(&entry_lba, page_data + offset + 0, 4);
-        memcpy(&entry_old_pba, page_data + offset + 4, 4);
-        memcpy(&entry_new_pba, page_data + offset + 8, 4);
-        memcpy(&entry_seq, page_data + offset + 12, 4);
+
+        if (page->kind == JRN_PAGE_SEG)
+        {
+            // 顺序页：LBA / 序号都由页头 + 下标隐式给出，只落盘 new_pba。
+            entry_lba = page->base_lba + k;
+            entry_seq = page->page_seq + k;
+            memcpy(&entry_new_pba, page_data + JRN_HEADER_SIZE + (sizeof(l2p_jrn_seg_entry_t) * k), 4);
+
+            // 被替换的映射从 L2P 基线取（与确认路径"完成时重查 L2P"同源）：
+            // 回放严格按 (page_seq, 下标) 递增序应用，读到的就是确认时刻的旧值。
+            // 只在需要记块元数据增量时读（水位之前的条目是幂等映射写，不记账）。
+            entry_old_pba = NAND_PBA_INVALID;
+            if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))
+            {
+                if (l2p_read_sync(cache, entry_lba, &entry_old_pba) != FTL_OK)
+                {
+                    block_ctx->ok = false;
+                    entry_old_pba = NAND_PBA_INVALID;
+                }
+            }
+        }
+        else
+        {
+            const WORD offset = (JRN_HEADER_SIZE + sizeof(l2p_jrn_entry_t) * k);
+
+            memcpy(&entry_lba, page_data + offset + 0, 4);
+            memcpy(&entry_old_pba, page_data + offset + 4, 4);
+            memcpy(&entry_new_pba, page_data + offset + 8, 4);
+            memcpy(&entry_seq, page_data + offset + 12, 4);
+        }
 
         if ((entry_lba != FTL_LBA_INVALID) && ((QWORD)entry_lba < L2P_GLOBAL_LBA_MAX) && lba_routes_to(entry_lba, journal->topo))
         {
@@ -1321,7 +1597,7 @@ static DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const
 // · 末尾 jrn_resume 把写指针落到最新页之后并接续序号。
 // · out_entries 由应用循环按**成功写入 L2P 的条目**累加（读失败页 / 越界 LBA
 // 不计）——不能用 journal 的 RAM 写指针反推：jrn_resume 会清 current_entry。
-ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx)
+SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx)
 {
     // JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。
     jrn_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];

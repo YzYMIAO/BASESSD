@@ -134,6 +134,31 @@ static inline DWORD lba_to_global_region(DWORD glba)
 }
 
 /**
+ * @brief 同一实例 LBA 流的下一个 L2P region 基址（顺序流跨 region 预加载用）。
+ *
+ * @param lba 当前 LBA
+ * @return 下一个 region 的起始 LBA；没有下一个（超出 L2P 键空间）⇒ FTL_LBA_INVALID
+ *
+ * @note DIM=1 时就是 `(region + 1) × 512 LBA`；DIM>1 时按 `FTL_DIM_TOTAL` 步进
+ *       （该实例自己的下一个 region）。调用方仍需用 `lba_routes_to()` 校验归属
+ *       （DIM>1 时可能落在别的实例上），并按主机容量决定是否值得预加载。
+ */
+static inline DWORD lba_next_region_base(DWORD lba)
+{
+    const DWORD next = lba_to_global_region(lba) + FTL_DIM_TOTAL;
+
+    if (next >= L2P_GLOBAL_REGIONS)
+    {
+        return FTL_LBA_INVALID;
+    }
+
+    // LBA 是 32 位地址字（H9）；超大配置下键空间若超出 32 位则视为"没有下一个"。
+    const QWORD base = (QWORD)next * L2P_ENTRIES_PER_REGION;
+
+    return (base > (QWORD)UINT32_MAX) ? FTL_LBA_INVALID : (DWORD)base;
+}
+
+/**
  * @brief 全局 region → owner die 内的局部 region（映射页落盘位置）。
  *
  * @param global_region 全局 region
@@ -315,6 +340,12 @@ typedef struct
     DWORD load_pba;        /* 在飞/最近一次加载的 PBA */
     bool  load_use_backup; /* true = 当前这次读的是备份副本 */
 
+    /* 本行映射所依赖的 Journal 序号上界（WAL 次序，RISK-L2P-09）：
+     * 每次映射更新（jrn_append 之后）记录当时的 sequence_counter；区域写回
+     * （l2p_flush_kick）要求 Journal 的持久化水位 ≥ 它，保证「日志先于数据」。
+     * 0 = 无依赖（新加载 / 恢复生成的行）。 */
+    DWORD dirty_seq;
+
     /* 本行由顺序读预取发起（本仓自定）。
      * 预取加载完成时 fresh=0，第一次 host 命中计 hit 并清本标志；
      * 异步失败/降级/行被驱逐/初始化时清。 */
@@ -327,12 +358,17 @@ typedef struct
  * FTL 实例（owner die）。端口只暴露**共享服务的最小集**，不返回整个 ftl_context。
  * 回调由设备级 init 注入（main.c），内部复用 lba_route_* + ftl_op_route_get。
  */
+/* 前向声明：owner 端口需要 Journal 的 WAL 水位（RISK-L2P-09 的区域写回闸门）。
+ * 不 include journal.h——journal.h 反向 include 本头，会成环。 */
+struct l2p_jrn_s;
+
 typedef struct
 {
-    DWORD           dim; /* 本 owner 的实例编号（global 路由键） */
-    md_dir_cache_t *metadata_dir;
-    alc_t          *alloc;
-    ftl_topo_t      topo;
+    DWORD             dim; /* 本 owner 的实例编号（global 路由键） */
+    md_dir_cache_t   *metadata_dir;
+    alc_t            *alloc;
+    ftl_topo_t        topo;
+    struct l2p_jrn_s *journal; /* 本 die 的 Journal：区域写回前查 WAL 水位（可为 NULL：纯 RAM 夹具） */
 } l2p_owner_t;
 
 typedef const l2p_owner_t *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);
@@ -351,7 +387,9 @@ typedef struct
     DWORD            prefetch_skipped;      /* 资源/行/thrashing/越界跳过 */
     DWORD            prefetch_resident;     /* 目标已驻留 */
     DWORD            prefetch_hits;         /* 预取行第一次被 host 命中的次数 */
-    int32_t          error;                 /* 最近一次硬失败（status.error） */
+    DWORD            wal_defer_count;       /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09 观测：
+                                             * >0 = 闸门确实生效过；持续为 0 说明 Journal 总是领先） */
+    int32_t error;                          /* 最近一次硬失败（status.error） */
 
     /* ── Thrashing 检测窗口（阈值见文件头 L2P_THRASH_*）──
      * 与累计 hit/miss_count 互补：累计量随开机时长渐近，反映不了**当前**行为，

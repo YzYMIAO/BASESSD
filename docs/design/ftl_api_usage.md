@@ -700,93 +700,55 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
 
 ### 3.1 数据结构
 
+> **权威定义在 `include/ftl/journal.h`**（本文不复制结构体/签名，避免两处漂移）。
+> 这里只给页格式常量与阅读要点。
+
 ```c
-#define JOURNAL_BLOCK_COUNT       (CW_NUM)  // 环形 4 blocks（= CW_NUM）
-#define JOURNAL_BLOCK0            (BBT_BLOCK + BBT_POOL_BLOCKS)  // J0 起始 Block（当前 = 42，见 metadata.h）
-#define JRN_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
-#define JRN_ENTRIES_PER_PAGE  ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / 16)  // 推导 = 127
-#define JRN_HEADER_SIZE       (12)      // Header 大小
-#define JRN_MAGIC             (0x524F554AUL)  // "JOUR"
-#define JRN_BLOCK_NONE        (0xFFU)   // 「无预擦除块」哨兵（v0.54）
-
-/* Journal entry — 16B */
-typedef struct {
-    uint32_t    lba;            // LBA
-    DWORD  old_pba;        // 修改前的 PBA
-    DWORD  new_pba;        // 修改后的 PBA
-    uint32_t    sequence;       // 单调递增序号
-} __attribute__((packed)) l2p_journal_entry_t;
-
-/* Journal 上下文 */
-typedef struct {
-    ftl_topo_t topo;                       // 目标 NAND 芯片路由
-    DWORD     block_pba[JOURNAL_BLOCK_COUNT];  // 各 Journal Block PBA 基址
-    uint8_t        current_block;              // 当前写入 block (0..3)
-    uint8_t        current_page;               // 当前写入 page (0..63)
-    uint8_t        current_entry;              // 当前页内 entry 偏移 (0..126)
-    uint32_t       sequence_counter;           // 全局序号
-    uint8_t        pre_erased_block;           // v0.54：被 truncate 预擦除的环形块号
-    uint8_t        page_buf[JRN_PAGE_SIZE];// SRAM buffer
-    uint8_t        checkpoint_needed;          // 水位标志
-    uint8_t        emergency;                  // 紧急标志（≥95%）
-} l2p_journal_t;
+#define JOURNAL_BLOCK_COUNT       (CW_NUM)                       /* 环形 4 blocks（= CW_NUM） */
+#define JRN_PAGE_SIZE             (PAGE_MAIN_SIZE)               /* = 2048 */
+#define JRN_HEADER_SIZE           (16U)                          /* magic+page_seq+entry_count+block_seq+base_lba */
+#define JRN_ENTRIES_PER_PAGE      ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / 16) /* 通用页推导 = 127 */
+#define JRN_SEG_ENTRIES_PER_PAGE  ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / 4)  /* 顺序映射页推导 = 508 */
+#define JRN_MAGIC                 (0x524F554AUL)                 /* "JOUR"：LBA 显式页 */
+#define JRN_MAGIC_SEG             (0x4745534AUL)                 /* "JSEG"：顺序流映射页 */
+#define JRN_BLOCK_NONE            (0xFFU)                        /* 「无预擦除块」哨兵 */
 ```
+
+| 对象 | 要点 |
+|---|---|
+| 两种页型 | `JOUR`：16 B/条（lba / old_pba / new_pba / sequence），127 条；`JSEG`：4 B/条（new_pba），508 条，lba = base_lba + 下标。两种页不混装 |
+| `jrn_handle_t.current_entry` | **WORD**（顺序页可到 508）；`page_kind` / `page_base` 是当前页缓冲的页型与顺序页基准（首条 append 落定） |
+| 预留 / 追加 | 通用页：`jrn_reserve` + `jrn_append`；顺序写确认：`jrn_seq_begin` / `jrn_seq_reserve` / `jrn_seq_ready` / `jrn_append_seq` |
+| 回放 / 截断 | `jrn_page_scan_latest` → `jrn_resume` → `jrn_replay`；`jrn_truncate_plan/commit` |
 
 ### 3.2 接口
 
-```c
-/* 初始化 journal */
-void journal_init(l2p_journal_t *journal, ftl_topo_t topo);
-
-/*
- * 追加一条 journal entry。
- * 内部：写入 page_buf → page_buf 满时 flush 到 NAND。
- * v0.54：页缓冲里已有同一 LBA 时就地更新 new_pba（不新增条目、不消耗 sequence）。
- */
-void journal_append(l2p_journal_t *journal, DWORD lba,
-                    DWORD old_pba, DWORD new_pba);
-
-/*
- * 将当前 page_buf 写入 NAND（即使未满也可强制写）。
- * 写满块时回切到下一 Block（环形共 JOURNAL_BLOCK_COUNT 块）。
- * v0.54：本函数是环形块擦除的**唯一**一点；若该块已被 journal_truncate 预擦除
- * （pre_erased_block 记账）则跳过擦除——旧实现在 truncate 与本函数各擦一次 = 双倍磨损。
- */
-void journal_flush_page(l2p_journal_t *journal);
-
-/*
- * 启动时回放 journal entries → 重建 cache。
- * F10：只回放 page_seq > cp_sequence 的页（≤ cp_sequence 的条目已在
- * checkpoint 时 flush 进 NAND L2P 表），按 (page_seq, entry_index) 递增序
- * 应用（per-LBA last-write-wins）。旧实现只回放最大一页 → 掉电跨 ≥2 页丢写。
- * v0.69：out_entries（可为 NULL）回填**实际应用成功的条目数**——在应用循环里累加，
- * 读失败的页不计；**不能**由 journal 的 RAM 写指针反推（journal_resume 会清 current_entry）。
- */
-ftl_status_e journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
-                            uint32_t cp_sequence, uint32_t *out_entries);
-
-/*
- * 截断 sequence ≤ up_to_sequence 的条目（Checkpoint 已把它们写进 NAND L2P 表）。
- * v0.54：预擦除环形最旧块并记账（pre_erased_block），由 journal_flush_page 回切时消费；
- *        水位不足以覆盖全部已写条目（(up_to_sequence + 1) < sequence_counter）时**不截断**。
- */
-void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
-```
+> 见 `include/ftl/journal.h` 的 Doxygen 契约（按页型分四组：通用页、顺序映射页、
+> 查询/截断、回放）。本文不复制签名——签名仍在演进（见 `ftl-api-change-pending` 的约定）。
 
 ### 3.3 Page 格式
 
 ```
-Header (12B):
-  magic       (4B) = 0x524F554A ("JOUR")
+Header (16B, 两种页型共用):
+  magic       (4B) = 0x524F554A ("JOUR" 通用页) / 0x4745534A ("JSEG" 顺序映射页)
   page_seq    (4B) = 本页第一条 entry 的全局序号
-  entry_count (2B) = 本页有效 entry 数 (0~JRN_ENTRIES_PER_PAGE=127)
+  entry_count (2B) = 本页有效 entry 数（JOUR 0~127 / JSEG 0~508）
   block_seq   (2B) = 本 Journal Block 写入轮次
+  base_lba    (4B) = JSEG 的首条 LBA（JOUR 恒 0）
 
-Entries (N × 16B, N ≤ 127):
+JOUR Entries (N × 16B, N ≤ 127):
   lba(4B) | old_pba(4B) | new_pba(4B) | sequence(4B)
 
-Padding: (127 - N) × 16B = 0xFF
+JSEG Entries (N × 4B, N ≤ 508):
+  new_pba(4B)；lba = base_lba + 下标，sequence = page_seq + 下标（隐式坐标）
+
+Padding: 余量 = 0xFF
 ```
+
+`JSEG` 是**顺序写确认专用**的 Journal 页（cache program 页）：按提交序到达的确认条目
+LBA 连续，故可省掉 lba/old_pba/sequence，每页容纳 508 条（≈ 63.5 个 pair 页）。
+`base_lba` 由首条 append 落定；回放时 `old_pba` 由 L2P 基线现读（见
+`docs/design/ftl_design.md` §3.7.3 / §3.16.5）。
 
 ---
 
@@ -930,7 +892,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `wear_leveling.c` | ❌ **零**（阶段 4） | 搬移主体并入 `migrate.c` |
 | `read_recovery.c` | ❌ **零**（阶段 3/5） | 三级恢复全异步；`rr_select_plane` 的 L2P 查询已三态化 |
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `pfr_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
-| `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_is_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
+| `journal.c` | ⚠ 4 处 | 全在开机 / 结构性路径：`jrn_page_scan_latest` 的页头读与裸空白页判定、`jrn_resume` 的换块擦、`jrn_replay` 的页读；运行期只有**异步** freeze（`jrn_freeze`），无同步回退 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
 | `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |

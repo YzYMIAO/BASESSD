@@ -69,7 +69,9 @@ static BYTE g_dispatch_depth = 0U;
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_handle）；
  *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
- *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）。 */
+ *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）；
+ *   · FTL_OP_CACHE_PAD：cache 写序列的 padding END（ctx = NULL）——用一条不映射的
+ *     零页给提前回执的最后一页提供 FAIL_CACHE 结算点，然后关闭序列。 */
 static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_sync_wait_callback,
     [FTL_OP_HOST_IO]       = ftl_host_io_callback,
@@ -81,6 +83,7 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
     [FTL_OP_CHECKPOINT]    = ftl_checkpoint_callback,
     [FTL_OP_BBT]           = ftl_bbt_callback,
     [FTL_OP_METADATA]      = ftl_metadata_callback,
+    [FTL_OP_CACHE_PAD]     = ftl_cache_pad_callback,
 };
 
 /* ── 2. 初始化 ── */
@@ -241,17 +244,38 @@ bool ftl_op_cache_seq_active(void)
 
 /* ── 5. 提交 ── */
 
+/**
+ * @brief 该 op 被门控时是否应请求序列断点。
+ *
+ * @param op 提交者登记的操作类型（FTL_OP_*）
+ * @return true = 前台 / 同步 / 恢复类提交：拒绝即请求下一窗口 END（D4）
+ *         false = 后台元数据：只被挡住、不请求断点，关在段边界外
+ *
+ * @note 分解依据（docs/design/ftl_design.md §3.16.5）：顺序序列占用每个 plane 的 cache 寄存器，
+ *       Journal / L2P / GC / WL / CP / 元数据目录在此期间**本来就写不进去**。若它们
+ *       每次重试都置 break_requested，序列就会被后台任务切回逐窗口长度（这正是
+ *       传输段大小成为序列上限的机制）。设计 A 让它们等在段边界（配额 / block 头 /
+ *       region 不驻留）由 FTL 主动收尾后落盘。
+ */
+static bool ftl_op_seq_gate_breaks(ftl_op_id_e op)
+{
+    return (op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_READ_RECOVERY);
+}
+
 // 序列门控：cache 序列 `active || draining` 期间，只允许所有者提交该 LUN 的命令；其余返回
-// FTL_AGAIN 并置 break_requested（序列在下一窗口末尾 END，后台/其他 host 命令随后执行）。
+// FTL_AGAIN（序列在下一窗口末尾 END，后台/其他 host 命令随后执行）。
 // draining = 窗口已提交完但命令仍在飞：门控必须继续关到排空，否则器件侧的 31h/3Fh 管线
 // 会被别的提交劈开（RISK-CACHE-14）。
-static bool ftl_op_seq_gate(const fc_command_t *cmd)
+static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
 {
     struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
     if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)) && (ftl->cache_seq.owner_submit == false))
     {
-        ftl->cache_seq.break_requested = true;
+        if (ftl_op_seq_gate_breaks(op) == true)
+        {
+            ftl->cache_seq.break_requested = true;
+        }
         return true;
     }
 
@@ -262,7 +286,7 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     WORD cmd_id = ftl_cmd_id(cmd);
 
-    if (ftl_op_seq_gate(cmd) == true)
+    if (ftl_op_seq_gate(cmd, op) == true)
     {
         return FTL_AGAIN;
     }
@@ -303,7 +327,7 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
 
     for (DWORD i = 0U; i < n; i++)
     {
-        if (ftl_op_seq_gate(cmds[i]) == true)
+        if (ftl_op_seq_gate(cmds[i], op) == true)
         {
             return FTL_AGAIN;
         }

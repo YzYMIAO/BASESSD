@@ -1978,6 +1978,7 @@ static void pfr_reset_blocks(ftl_ctx_t *ftl)
     }
 
     alloc->free_count = 0U;
+    memset(alloc->free_plane_count, 0, sizeof(alloc->free_plane_count));
     memset(alloc->op_count, 0, sizeof(alloc->op_count));
     memset(alloc->spare_count, 0, sizeof(alloc->spare_count));
     alloc->closed_sb_count = 0U;

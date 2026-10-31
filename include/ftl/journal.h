@@ -14,8 +14,14 @@
  *
  * 布局：
  *   Journal 是 JOURNAL_BLOCK_COUNT 个块的环形池（块位置 JOURNAL_BLOCK0 起）；
- *   每页 = 页头（12B：magic + page_seq + entry_count + block_seq）+ N 条 l2p_jrn_entry_t。
- *   N 由 (页主区 − 页头) ÷ 条目大小**推导**，不写死（见 JRN_ENTRIES_PER_PAGE）。
+ *   每页 = 页头（16B：magic + page_seq + entry_count + block_seq + base_lba）+ N 条条目。
+ *   两种页型由 magic 区分、条目大小不同，N 由 (页主区 − 页头) ÷ 条目大小**推导**：
+ *     · LBA 显式页（JRN_MAGIC，16B/条）——随机写 / GC / TRIM 的通用形态；
+ *     · 顺序流映射页（JRN_MAGIC_SEG，4B/条）——只存 new_pba，LBA = base_lba + 下标。
+ *   顺序流映射页是**本仓自拟**的页型：形态取自 DFTL 的 translation page（顺序流下
+ *   LBA 可由位置隐式表达），差异是它放在 Journal 环形页里、页头带全局 page_seq 供回放
+ *   定序；每页条目数从 127 提到 508 ⇒ 一次 START/END 可覆盖 ~252 KiB。
+ *   详见 docs/design/ftl_design.md §3.7 / §3.16.9。
  *
  * ⚠ **介质读回**不转断言（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 页，
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。模块入口与命令
@@ -24,8 +30,9 @@
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
- *   （jrn_handle / g_op_callbacks[FTL_OP_JOURNAL]）。数据面（host 写确认 / GC / WL /
- *   TRIM）一律先 jrn_reserve 预留、不足则停泊重试，**模块不提供同步刷页出口**。
+ *   （jrn_handle / g_op_callbacks[FTL_OP_JOURNAL]）。数据面一律先预留、不足则停泊
+ *   重试，**模块不提供同步刷页出口**：通用页用 jrn_reserve，cache 顺序写确认用
+ *   jrn_seq_ready + jrn_append_seq（顺序流映射页，见下）。
  */
 
 #include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
@@ -47,9 +54,15 @@
 /* 「无预擦除块」哨兵（truncate 预擦除记账，见 l2p_jrn_t） */
 #define JRN_BLOCK_NONE (0xFFU)
 
-/* Journal Page Header */
-#define JRN_HEADER_SIZE (12U)          /* magic(4) + page_seq(4) + entry_count(2) + block_seq(2) */
-#define JRN_MAGIC       (0x524F554AUL) /* "JOUR" */
+/* Journal Page Header
+ *   magic(4) + page_seq(4) + entry_count(2) + block_seq(2) + base_lba(4)。
+ * base_lba 只对顺序流映射页有效（LBA 显式页恒 0）。
+ * ⚠ 介质字节序：页头与条目的多字节字段**一律小端**（与 ONFI 参数页口径一致，
+ *   见 `src/nand/onfi_1_0.c` 的字节序说明）。写入/解析都用 memcpy 原生字，
+ *   目标平台（Cortex-M7，小端）与格式一致；换大端平台必须在此处集中转换。 */
+#define JRN_HEADER_SIZE (16U)
+#define JRN_MAGIC       (0x524F554AUL) /* "JOUR"：LBA 显式页（16B 条目） */
+#define JRN_MAGIC_SEG   (0x4745534AUL) /* "JSEG"：顺序流映射页（4B 条目，LBA = base_lba + 下标） */
 
 /* 一条 L2P 更新：lba 的映射从 old_pba 变为 new_pba（16B，packed 无填充） */
 typedef struct
@@ -60,10 +73,23 @@ typedef struct
     DWORD sequence; /* 全局单调序号（回放按 (page_seq, 页内下标) 定序） */
 } __attribute__((packed)) l2p_jrn_entry_t;
 
+/* 顺序流映射页的一条：只存 new_pba；lba = base_lba + 页内下标，
+ * sequence = page_seq + 页内下标（两条坐标都由位置隐式给出，故不落盘）。 */
+typedef DWORD l2p_jrn_seg_entry_t;
+
 /* 每页条目数 = (页主区 − 页头) ÷ 条目大小，向下取整。
- * ⚠ 必须推导：条目 16B 时 128 条 ⇒ 12 + 128×16 = 2060 > 2048，
+ * ⚠ 必须推导：条目 16B 时 128 条 ⇒ 16 + 128×16 = 2064 > 2048，
  *   第 127 条会写出 page_buf 之外（踩到 l2p_jrn_t 的后续字段）。*/
-#define JRN_ENTRIES_PER_PAGE ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_entry_t))
+#define JRN_ENTRIES_PER_PAGE     ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_entry_t))
+#define JRN_SEG_ENTRIES_PER_PAGE ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_seg_entry_t))
+
+/* 当前页缓冲的条目类型。页型由**本页第一条 append 的调用方**决定：
+ * 顺序流的确认走 jrn_append_seq（顺序页），其余一律走 jrn_append（LBA 显式页）。 */
+typedef enum
+{
+    JRN_PAGE_LBA = 0, /* 页头 JRN_MAGIC，16B 条目 */
+    JRN_PAGE_SEG = 1, /* 页头 JRN_MAGIC_SEG，4B 条目（base_lba 由首条 append 落定） */
+} jrn_page_kind_e;
 
 /* ── 异步刷页 job ──
  *
@@ -119,8 +145,15 @@ typedef struct
     /* ── 环形写游标 ── */
     BYTE  current_block;
     BYTE  current_page;
-    BYTE  current_entry;
+    WORD  current_entry; /* 当前页已追加条数（顺序页可到 JRN_SEG_ENTRIES_PER_PAGE=508 ⇒ 不能是 BYTE） */
     DWORD sequence_counter;
+
+    /* 当前页缓冲的条目类型与顺序页基准 LBA（JRN_PAGE_SEG 时有效）。
+     * base 在**首条 jrn_append_seq 时**落定，不在 jrn_seq_begin 时定：顺序流的
+     * 确认是异步的，上个序列的尾页可能在新序列 START 之后才确认——按首条确认的
+     * LBA 定基准，隐含坐标（base + 下标）才与确认顺序一致。 */
+    jrn_page_kind_e page_kind;
+    DWORD           page_base;
 
     /* CP 边界：sequence < merge_floor 的旧条目**不得**被同 LBA 原地合并。
      * 否则 CP 后的覆盖写会复用 CP 前的 sequence 却带新的 new_pba ⇒
@@ -162,9 +195,22 @@ typedef struct
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
     DWORD start_ms;
     DWORD log_ms;
+
+    /* 本次开机提交的页写次数（观测：元数据页写放大 / 断点频率）。 */
+    DWORD page_writes;
+
+    /* ── WAL 水位（RISK-L2P-09）──
+     * persisted_seq = 已**成功落盘**的条目序号上界（exclusive）。
+     * 在飞页的序号区间在 freeze 时记入 [write_page_seq, +write_entry_count)，
+     * 页写成功后推进 persisted_seq。L2P 区域写回必须等 persisted_seq ≥ 该行的
+     * dirty_seq，保证「日志先于数据」——否则掉电后会出现「映射在、valid_count 缺」，
+     * GC 可能把仍被 L2P 引用的块当空块回收（静默丢数据）。 */
+    DWORD persisted_seq;
+    DWORD write_page_seq;
+    WORD  write_entry_count;
 } jrn_handle_t;
 
-typedef struct
+typedef struct l2p_jrn_s
 {
     ftl_topo_t topo; /* 目标 NAND 芯片路由 */
 
@@ -181,13 +227,15 @@ typedef struct
     jrn_handle_t handle;
 } l2p_jrn_t;
 
-/* Journal 环形页引用：位置 + 页序号 + 条目数（jrn_page_scan_latest 出参） */
+/* Journal 环形页引用：位置 + 页序号 + 页型 + 条目数（jrn_page_scan_latest 出参） */
 typedef struct
 {
-    DWORD page_seq;    /* 页头记录的**首条**条目序号 */
-    BYTE  block;       /* 环形块号（0..JOURNAL_BLOCK_COUNT-1） */
-    BYTE  page;        /* 块内页号 */
-    BYTE  entry_count; /* 本页条目数 */
+    DWORD           page_seq;    /* 页头记录的**首条**条目序号 */
+    DWORD           base_lba;    /* JRN_PAGE_SEG：本页首条条目的 LBA（其余页型为 0） */
+    BYTE            block;       /* 环形块号（0..JOURNAL_BLOCK_COUNT-1） */
+    BYTE            page;        /* 块内页号 */
+    WORD            entry_count; /* 本页条目数（顺序页可到 508 ⇒ WORD） */
+    jrn_page_kind_e kind;        /* 页型（回放按页型解析条目） */
 } jrn_page_ref_t;
 
 /* journal 执行状态（上报用，不是内部 phase 编号） */
@@ -295,18 +343,20 @@ bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *o
 void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence);
 
 /**
- * @brief 非阻塞预留当前页的 entries 个槽位（host 写确认路径用）。
+ * @brief 非阻塞预留当前页的 entries 个槽位（16 B 通用页的调用者用）。
  *
  * 成功 ⇒ 调用者随后追加 entries 条时**不会**触发 jrn_append 的页满分支；
- * 失败 ⇒ 当前页不够且异步刷页起不来（在飞 / 待擦 / 池空 / 环满），调用者应返
- * FTL_AGAIN 停泊，**不得**追加条目或改 L2P。
+ * 失败 ⇒ 当前页不够 / 当前页是顺序页 / 异步刷页起不来（在飞 / 待擦 / 池空 / 环满），
+ * 调用者应返 FTL_AGAIN 停泊，**不得**追加条目或改 L2P。
  *
+ * ⚠ 顺序页（JRN_PAGE_SEG）只接顺序条目：本函数遇到它会先起异步刷页并返回 false，
+ *   下一轮重试落到一张通用页（空顺序页也刷，见 §3.16.5）。
  * ⚠ 本函数只可能起一条**异步**页写，绝不同步刷页 / 等待 / ftl_op_drain：
  *   它会被 ftl_confirm_write 调用，必须保持 completion/service 调用栈无泵。
  * @param journal Journal
  * @param entries 本次最多追加的条目数（1..JRN_ENTRIES_PER_PAGE-1）
  * @return true = 已预留
- *         false = 背压
+ *         false = 背压 / 页型不符（已起刷页）
  */
 bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
 
@@ -319,10 +369,103 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
  * @param old_pba 更新前物理地址（就地合并时保留首条，回放不读）
  * @param new_pba 更新后物理地址
  * @return true = 已追加 / 就地合并
- *         false = 页满且异步刷页起不来，本条目被丢弃。⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）；
- *               host 写确认 / GC/WL / TRIM 先用 jrn_reserve 预留，故其页满分支结构性不可达。
+ *         false = 页满 / 当前页是顺序页，本条目未写入。⚠ 返回 false 时调用者必须按
+ *               “映射未持久化”处理：迁移侧中止 job（victim 不擦）；
+ *               GC/WL / TRIM / wbuf 写确认先用 jrn_reserve 预留，故其页满分支结构性
+ *               不可达；**cache 顺序写确认不走本函数**（走 jrn_append_seq）。
  */
 bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
+
+/* ── 顺序流映射页（JRN_PAGE_SEG；docs/design/ftl_design.md §3.16 / §3.7.3）──
+ *
+ * 写入模型：一条顺序流 = 连续的 host 写页；其确认条目按**提交顺序**到达，因此
+ * LBA 可以由 `base_lba + 页内下标` 隐式表达，每页装 508 条（16B 通用页只有 127）。
+ * 四个入口的分工：
+ *   jrn_seq_begin   —— 顺序流 START 时调用：把当前页切换/刷出成空白顺序页；
+ *   jrn_seq_reserve —— **提交路径**的容量预留（不校验坐标：确认尚未发生）；
+ *   jrn_seq_ready   —— **确认路径**的页型 / 隐式坐标 / 容量检查；
+ *   jrn_append_seq  —— 追加一条（只记 new_pba）。
+ * ⚠ 顺序页**专用于顺序流**：普通 append/reserve 遇到顺序页会先把它刷出
+ *   （空页也刷，保持页型判定单一），因此两种页型不会混装。 */
+
+/**
+ * @brief 顺序流开始：确保当前页可接收新的顺序段（**尽量跨命令续用同一张页**）。
+ *
+ * @param journal Journal
+ * @param lba     本顺序段第一条条目的 LBA（窗口基址）
+ * @param need    本段至少需要多少条空间（通常 = 一个窗口的条目数）
+ * @return true = 当前页可接收顺序条目（已切换 / 已续用）
+ *         false = 旧页刷出起不来（在飞 / 待擦 / 池空 / 序列门控）⇒ 调用者本次不要
+ *                 开 cache 序列，回退普通写路径
+ *
+ * @note 续用判据（把"一张页填满再断"做实）：页型是顺序页、已有条目、剩余空间
+ *       ≥ need、且 `lba == page_base + current_entry`（LBA 连续）⇒ **不刷页**，
+ *       直接在同一页继续追加。这样一张 JSEG 页可以覆盖多条 host 命令的连续写入
+ *       （最多 63 pair ≈ 252 KiB），元数据落盘频率按页而不是按命令。
+ *       否则旧页只起**异步**刷页（jrn_freeze），刷出后页缓冲归零并切到新顺序页。
+ *       基准 LBA 仍由首条 append 落定（见 jrn_handle_t）。
+ */
+bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need);
+
+/**
+ * @brief 当前顺序页还能追加多少条（非顺序页 / 页未打开 = 0）。
+ *
+ * 写路径按它收缩窗口并在**页满**处主动 END：这是"顺序页写满再断"的唯一判据。
+ *
+ * @param journal Journal
+ * @return 剩余条目数（0..JRN_SEG_ENTRIES_PER_PAGE）
+ */
+WORD jrn_seq_room(const l2p_jrn_t *journal);
+
+/**
+ * @brief 本次开机已提交的 Journal 页写次数（观测：页写放大 / 断点频率）。
+ *
+ * @param journal Journal
+ * @return 页写命令累计提交数
+ */
+DWORD jrn_page_writes(const l2p_jrn_t *journal);
+
+/**
+ * @brief 顺序页容量预留（**提交路径**用：只判页型 / 容量，不判坐标）。
+ *
+ * @param journal Journal
+ * @param entries 本次窗口最多追加的条目数（1..JRN_SEG_ENTRIES_PER_PAGE-1）
+ * @return true = 当前页装得下（顺序页，或可转顺序页的空普通页）
+ *         false = 需要先刷页 / 环不可用 ⇒ 调用者把本窗口当断点（END）
+ *
+ * @note 提交时 `current_entry` 只反映**已确认**条目，落后于提交点，因此这里
+ *       **不能**做隐式坐标校验（那会把每条有未确认页的窗口误判成断裂）。
+ *       坐标校验在确认路径的 jrn_seq_ready 做。
+ */
+bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries);
+
+/**
+ * @brief 顺序页确认前检查：页型 / 隐式坐标 / 容量（host 写确认路径动账前调用）。
+ *
+ * @param journal Journal
+ * @param lba     本批条目的起始 LBA
+ * @param entries 本批条目数（1..JRN_SEG_ENTRIES_PER_PAGE-1）
+ * @return true = 随后 jrn_append_seq 不会因页满 / 坐标断裂失败
+ *         false = 页型或坐标不符（已起异步刷页）/ 环不可用 ⇒ 调用者停泊重试
+ *
+ * @note 坐标与容量必须在追加**之前**判掉：部分追加后再失败会让重试从页首重发，
+ *       与隐式下标冲突。确认按提交顺序到达，故 current_entry 就是本批的位置。
+ */
+bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries);
+
+/**
+ * @brief 顺序页追加一条：lba 必须等于 current 页的 base_lba + 已追加条数。
+ *
+ * 首条 append 落定本页 base_lba；entry_count 与 sequence_counter 同步 +1
+ * （页头 page_seq 仍由 `sequence_counter − current_entry` 反推）。
+ *
+ * @param journal Journal
+ * @param lba     逻辑地址（必须与隐式位置一致）
+ * @param new_pba 更新后物理地址
+ * @return true = 已追加
+ *         false = 环不可用 / 页型或隐式坐标不符（调用者停泊，由刷页后重试恢复）
+ */
+bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
 
 /* ── 模块 handle（typed 入口，docs/archive/ftl_module_contracts.md §3.3 / §4.2）── */
 
@@ -354,6 +497,18 @@ bool jrn_is_idle(const l2p_jrn_t *journal);
  * @return sequence_counter 当前值
  */
 DWORD jrn_sequence_get(const l2p_jrn_t *journal);
+
+/**
+ * @brief 已成功落盘的 Journal 序号上界（exclusive）
+ *
+ * 用途：L2P 区域写回的 WAL 次序闸门（RISK-L2P-09）——区域页只能在覆盖其映射的
+ * Journal 条目落盘之后写。调用者（`l2p_flush_kick`）在 `persisted_seq < dirty_seq`
+ * 时退让重试，由 Journal 服务把当前页冻结并落盘。
+ *
+ * @param journal Journal
+ * @return 已落盘条目的上界：序号 < 该值的条目均已持久化
+ */
+DWORD jrn_persisted_seq(const l2p_jrn_t *journal);
 
 /**
  * @brief 当前使用率。

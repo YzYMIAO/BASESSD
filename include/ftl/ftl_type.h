@@ -127,11 +127,15 @@ typedef void (*pending_cb_t)(void *ctx);
  */
 typedef struct
 {
-    QWORD                  lba;             /* Host 逻辑地址（NVMe 协议宽度） */
-    void                  *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
-    DWORD                  count;           /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
-    DWORD                  total_lbas;      /* 本 SCSI 命令的总 LBA 数（0 = 未知，按 count 处理） */
-    DWORD                  offset_lbas;     /* 本请求在命令内的偏移（0 = 命令起点） */
+    QWORD lba;                              /* Host 逻辑地址（NVMe 协议宽度） */
+    void *buffer;                           /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
+    DWORD count;                            /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
+    DWORD cmd_remaining;                    /* 同一 host 命令在本请求之后还剩的 LBA 数（0 = 本请求是命令末尾）。
+                                             * **只**用于识别「命令尾不足一个 pair」并在最后一个整 pair
+                                             * 数据页上提前收尾（尾 1..7 LBA 只能走 wbuf/普通读）。
+                                             * host 命令边界**不是** cache 序列的断点：设备序列跨命令延续，
+                                             * 没有数据页可 END 时由 padding END 收尾（ftl_design §3.16）。
+                                             * 也**不是**开启顺序读写的开关。 */
     volatile BYTE         *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
     volatile ssd_status_e *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
     pending_cb_t           on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */

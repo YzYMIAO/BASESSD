@@ -6250,9 +6250,178 @@ host 4 页链（读 45h/46h×3/47h、写 49h/44h/44h/48h）正常。**未覆盖*
 
 ---
 
+## v1.04 — cache 序列改由 FTL 顺序流检测器驱动 + Journal 顺序映射页（设计 A；2026-10-31 上板验证）
+
+**日期**：2026-10-31
+
+**起因**：v1.00 的"流式"实际仍按 host 传输段截断——`ftl_cache_read_try/write_try` 以
+CBW 的 `total_lbas/offset_lbas` 作命令上下文，序列每 16 KiB 就重开；H2testw 的
+`cr≈3.93 pair/batch` 就是证据。用户定调：**顺序读写是 FTL 的判断，host 传输段不是 FTL
+的语义边界**；顺序写占用 plane cache 寄存器期间元数据写不下来，所以 FTL 要**主动按配额
+截断**，落完元数据再开新段。
+
+**关键决策（设计 A）**：
+
+| 决策 | 选择 | 拒绝方案 | 理由 |
+|---|---|---|---|
+| 序列开启 | FTL 顺序流检测器（连续 LBA ≥ 64） | host 下发开关（CBW 总长/偏移） | 传输段是 USB 的交付粒度，不是 FTL 语义 |
+| 序列延续 | `cache_seq.next_lba == 请求起始 LBA` | 同 SCSI 命令上下文 | 同一 LBA 流跨段延续；命令身份不是判据 |
+| 命令末尾 | `cmd_remaining`（只给 END 落点） | 用命令上下文判续接 | 器件要求 END/LAST 落在最后一个数据页 |
+| Journal 条目 | 顺序写用 JSEG 页（4B/条，LBA 隐式） | 全部 16B 通用页 | 504 条/页 ⇒ 一段可覆盖 252 KiB；DFTL translation page 同形态 |
+| 主动截断 | 到 JSEG 页配额（63 pair 页）END，START 时刷旧页 | 每传输段 END | 元数据写的必要代价；掉电窗口从 16 KiB 放宽到 252 KiB |
+| 门控 | 后台元数据（Journal/L2P/GC/WL/CP/metadata/BBT）被挡但**不**置 `break_requested` | 所有后台提交都请求断点 | 否则后台每轮重试都把序列切回逐窗口（v1.00 的 `cr≈3.93` 主因） |
+
+**实现落点**：
+- `ftl_io_req_t.total_lbas/offset_lbas` → `cmd_remaining`（单个 DWORD）；`pend_group_t`
+  同步替换（`cmd_start/cmd_total` 删除，结构体仍 56 B）。
+- `ftl.h` 新增 `ftl_stream_det_t stream_rd/stream_wr` 与常量 `FTL_STREAM_MIN_LBAS` /
+  `FTL_CACHE_WRITE_STREAM_ENTRIES`；`ftl_submit_common` 更新检测器，
+  续接判据改为 `next_lba`。
+- `cache_batch.c`：开启条件 = 检测器 + 请求起点 pair 对齐 + 无普通写确认在飞；
+  写序列加配额与 `cmd_remaining` 断点；读序列 `run_limit` → 命令末尾。
+- `journal.h/.c`：页头 12 B → 16 B（+`base_lba`）；新增 `JRN_MAGIC_SEG` / `JRN_PAGE_SEG`、
+  `jrn_seq_begin` / `jrn_seq_reserve` / `jrn_seq_ready` / `jrn_append_seq`；
+  `current_entry` BYTE → WORD；回放按页型解析，JSEG 的 `old_pba` 从 L2P 基线现读。
+- `ftl_op.c`：后台元数据（Journal/L2P/GC/WL/CP/metadata/BBT）被门控但不置
+  `break_requested`；只有 host / 同步 / RR 提交请求断点。
+- `migrate.c`：`mig_job_wait` 在 cache 序列打开时不计 `FTL_WAIT_TIMEOUT_MS`——长段
+  （~300 ms 墙钟）下否则 GC/WL 每 50 ms 中止一次，host 持续写时拿不到 Journal 容量。
+- 观测：`info` 的 `cw=` 行新增 `sw=段数/配额断点数`；`cr=` 行新增读段数
+  （`batches/pairs/starts/declines/fallbacks`）。判据 = 读 `batches/starts`、写
+  `pages/starts` 明显 > 4（写应接近 63）。
+
+**验证**：`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` /
+`make tests` 通过，零新告警。**未上板**：顺序写 `pages/starts`、跨段 START/SEQ/END、
+JSEG 页回放（掉电重启）、配额断点后的元数据落盘都需板端证据（R1）。
+
+**介质布局**：**v13**（Journal 页头与页型变化；首启自动格式化，旧数据不保留）。
+
+---
+
+## v1.05 — 设备序列跨 host 命令：volatile write cache + padding END（2026-10-31 上板验证）
+
+**日期**：2026-10-31
+
+**起因**：v1.04 的序列仍以 host 命令为边界（`cmd_remaining==0` 即 END），实测每条
+SCSI WRITE 只有 ~57 KiB（3.58 × 16 KiB），63 pair 的顺序页配额永远触发不了
+（`sw=7455/0`）。用户定调：**这是配套决定，按主流做**——把 host 回执与最后一页的
+确认解耦，让设备序列真正跨命令。
+
+**关键决策**：
+
+| 决策 | 选择 | 拒绝方案 | 理由 |
+|---|---|---|---|
+| 写段回执 | **所有写段（含末段）提交即回执** | 末段等 FTL 确认 | BOT 下主机等 CSW 才发下一条命令；末段不提前回执就无法跨命令（会 1 s 超时） |
+| 写失败上报 | **deferred error**：下一条 READ/WRITE/FLUSH 失败一次 | 改写已发 CSW（不可能） | 主流写缓存语义；TinyUSB 无自定义 sense，用"下一条命令失败"近似（RISK-USBC-01，本仓自拟近似） |
+| 无数据 END | **padding END**：不映射零页（META=UNKNOWN）作为 48h | abort（丢已回执数据） | 器件没有不带数据的 END；padding 每段最多一次（≈0.4% 页写） |
+| 主动断点 | Journal 顺序页写满（504 条 = 63 pair ≈252 KiB） | host 命令边界 | 顺序序列占用 plane cache 寄存器，元数据只在断点落盘；页可跨命令续用 |
+| 读序列 | 同样跨命令；LAST 只在物理/region 断点 / 命令尾 / D4 | 每条命令 LAST | lookahead 改为按"路由/键空间 + region 驻留"判续，不再用命令末尾 |
+
+**实现落点**：
+- `usb_msc.c`：写段（含末段）提交即 `tud_msc_async_io_done`；槽位保留到 FTL 完成只回收
+  缓冲；`s_deferred_write_error` 在下一命令数据入口上报一次；写延迟改在**回执点**测量。
+- `ftl.c`：`close_requested` / `closing` 状态；`ftl_cache_seq_close_step`（Phase 2.5）
+  提交 padding END；`ftl_cache_pad_submit` / `ftl_cache_pad_callback`（`FTL_OP_CACHE_PAD`）；
+  padding 页落在 page0 成功时记 `page0_programmed`、失败关 hot SB；flush 入口置
+  `close_requested`；idle 守卫与 `ftl_submit_common` 不再 abort 写序列。
+- `cache_batch.c`：写/读的 `end_seq` 去掉 `at_cmd_end`；写窗口按 `jrn_seq_room()` 收缩，
+  **页满**才是主动断点；LBA 不连续 / 低空间 / 前台等待 → `close_requested` + AGAIN
+  （不计 stall）；读 lookahead 用 `lba_routes_to` + 键空间上界替代命令末尾。
+- `journal.h/.c`：`jrn_seq_begin(lba, need)` 跨命令续用（LBA 连续 + 空间够）；新增
+  `jrn_seq_room()` / `jrn_page_writes()`（`info` 的 `jf=`）。
+- 观测：`cw=` 行新增 `sw=starts/page_ends pc=pad_closes jf=page_writes`。
+- ITCM：padding/close 路径与 Journal 开机路径（scan/resume/replay）改放 `.ssd_code_fast`
+  （Flash，boot/冷路径），release `.ssd_code_high` 62,696 B（余量 2,840 B，RISK-TCM-11）。
+- **cache 路径自开 block page0**（`alc_super_open_get_room_seq` + `cache_seq.own_page0` +
+  成功结算时记 `page0_programmed`）：消除每个 block 边界回退 wbuf 的整段（≈4 页）及其
+  引起的 Journal 顺序页冻结；page0 屏障改由**有序管线**自证（page0 FAIL_CACHE 失败中止
+  其后所有页，不击穿 rebuild 捷径，RISK-CACHE-19）。剩余：63 pair 的 JSEG 配额与 64 页
+  block 差 1 页，每块最后 1 页仍走 wbuf（1 页/块）。
+- **顺序流跨 region 预加载**（写/读 START 时用 `lba_next_region_base()` 额外加载本实例的
+  下一个 L2P region；`ftl_seq_note_read` 的预取目标也收敛到同一推导）：L2P region 边界
+  不再把序列切成两半，段长从平均 ~32 页升到接近 63（JSEG 页容量）。用
+  `l2p_region_prefetch`（best-effort：thrashing / 在飞上限 / FC 预算节流，不踢脏行、
+  不挤 host load），失败/被驱逐时 lookahead 照常 END（安全降级）。
+
+**验证**：`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` /
+`make tests` 通过，零新告警。**未上板**：deferred error 注入、跨命令 START/END 计数、
+`pages/starts` ≈ 63、padding 收尾、断电窗口都需板端证据（RISK-CACHE-15/16/18、RISK-USBC-01）。
+
+**介质布局**：无变化（v13）。
+
+---
+
+## v1.06 — 读写序列跨物理 block（器件原文判据；2026-10-31 上板验证）
+
+**日期**：2026-10-31
+
+**起因**：用户贴出 MT29F4G08 datasheet 原文，纠正了两处判断：① `READ PAGE CACHE
+SEQUENTIAL (31h)` **可以跨 block**（同一 die；禁止跨 die/LUN）；② `PROGRAM PAGE CACHE
+(80h-15h)` 每条命令**自带地址**，写侧本来就没有物理连续性要求。原文摘录入库
+`docs/reference/datasheet_mt29f_cache_ops.md`（R12 判据出处）。此前把"同 block"当成器件
+语义（RISK-DOC-02）是错的。
+
+**关键决策**：
+
+| 决策 | 选择 | 拒绝方案 | 理由 |
+|---|---|---|---|
+| 读连续性判据 | 同 block page+1 **或两 plane 都 block+1/page0** | 放宽到任意物理相邻 | 31h 由器件自增，只能表达"下一页"；两 plane 必须同时成立（two-plane 31h 每 plane 各前进一页） |
+| 读单段上限 | `FTL_CACHE_READ_MAX_RUN_PAIRS` = 128 pair | 不限长 | 读序列期间该 die 的 cache 寄存器被占用（ARDY=0），程序命令发不进去 ⇒ 断点是后台元数据的让步点（与写侧 Journal 配额同性质） |
+| 写 block 断点 | **取消**：窗口吃干 SB 后由 `alloc_pair` 关旧块开新块，序列继续 | 保持 block 到头 END | 44/48h 每条自带地址；窗口仍 clamp 到 SB 剩余（一次构建不跨 SB，保 `rewind_pair` 回滚前提） |
+| 写开序列阈值 | 允许 1 页窗口（原 ≥4） | 保持 ≥4 | 63 pair 的 JSEG 配额与 64 页 block 差 1 页：块尾页不再回退 wbuf |
+| 跨块准入 | 收尾块时 `alc_super_can_open` 为 false ⇒ 该窗口 END | 无条件跨块 | 否则序列停在「设备序列打开、无页可提交」：门控挡 GC、padding END 也无页可分配（RISK-CACHE-15 盘满例） |
+
+**实现落点**：
+- `cache_batch.c`：`cache_read_pair_contiguous()`（收集与 lookahead 共用）；读 `run_pairs`
+  计数 + 上限强制 LAST；写 `end_seq` 去掉 `block_end`；`min_pages` 起始改 1；
+  `jrn_seq_begin` 预留量改 `min(4, room)`；`alc_super_can_open` 准入。
+- `allocator.c/.h`：新增只读 `alc_super_can_open()`。
+- `ftl.h`：`cache_seq.run_pairs`；`own_page0` 注释更新（跨块后由新块分配重新置位）。
+- 文档：§3.16.4/§3.16.5、§3.16.10 限制表与验收、`known_risks.md` RISK-CACHE-20/21、
+  RISK-DOC-02（已改）。
+
+**验证**：五个构建关（`make all` / `make release` / `make tests UT=FTL` / `make tests UT=FC` /
+`make tests`）通过，零新告警。**未上板**：`cr` 的 `pairs/starts`（~32 → 65~128）、
+`wr − cw pages`（wbuf 页数）趋近 0、`jf`、长读/长写期间 GC 进展都需板端证据。
+
+**板端首跑（2026-10-31，debug 镜像）**：写阶段跑到 405.6 MiB 时 `[ERR] drain stalled gi=0 next=0/32`，该 chunk 已提前回执 ⇒ deferred error ⇒ 主机判「卷被外部更改」并反复重挂，此后 `free` 冻结在 135 块、小写也全失败。**写出逻辑本身判读正常**：`sw=1622/1575`、`pc=45`、`d4=2` ⇒ 1622 次 START 全部有序收尾（1575 page_end + 45 padding + 2 D4），`cw aborts=0`、`pages/starts`=62.9；`jf=3362`；`wr=103,892` 对 `cw pages=101,947`（差 ≈1,900 = wbuf 回退页，仍 ≈1 页/块）。**故障已归因（第二跑 dump）**：`free=1489 sb_open=1 np=1 p0=01 wb_busy=1 pend=0` ⇒ padding END 页落在新 SB 的 page0 时，回调用 `pba_with_plane(plane0,1)` 推导 plane1 地址，Policy B 下块号不同 ⇒ plane1 的 page0 屏障漏记 ⇒ wbuf 永久 `FTL_AGAIN`（RISK-CACHE-24）。修复：`cache_seq.pad_pba[PLANE_NUM]` 记录 submit 时真实两 plane PBA，回调逐 plane 记账。新增的 `ftl_drain_stall_dump()` 与 `bg_progress` 两条确定性等待（Journal 在飞 / 停泊确认）保留。同时观察到 CP 长期停在 `phase=8`（RISK-CACHE-23），且因 CP 未推进，失败后掉电重启时上次数据不可见（anchor 仍为初始 seq=1）。**修复后上板验证（2026-10-31，17:55 镜像）**：H2testw **415/415 MB 0 错误**，写 894 KB/s、读 888 KB/s；`pc=51` 无 stall、`sw=1663/1610`、`aborts=0`、`pages/starts`=62.8；读 `cr=27435/105840/2583/430/0` ⇒ `pairs/starts`=41.0（预取 100% 命中；段长受分配器物理块不连续限制，非 128 上限）。Injection 类（掉电回放/deferred error/page0 失败）仍未做。读阶段未跑，读侧跨 block 仍未验证。
+
+## v1.07 — 低 free 成对分配失败：per-plane 水位 + victim 平衡 + 错误语义（2026-10-31 上板验证：生路；漂移由 v1.08 修）
+
+**日期**：2026-10-31
+
+**起因**：GC 压力测试（写满 → 删文件 → 再写）在 `free=264` 时 `drain stalled`：`sb_open=0`、`nc=64`、`pend=0`/`wb_busy=0`/FC 池全空 ⇒ 唯一阻塞是**打不开新 SB（每 plane 各需一块）**。根因：恢复路径把 closed 列表建成**单 plane 条目**（CP 快照 word 无 `sb_id`），GC 逐块回收空块（`nop` 54→671、`mv=0`）使 free 池 plane 失衡；`cache_wr_build` 又把永久失败映射成 `FTL_AGAIN`，重试到 stall（RISK-ALLOC-09）。
+
+**改动**：
+- `allocator`：新增 `free_plane_count[PLANE_NUM]`（唯一闸门 push/remove 维护）+ `alc_free_get_count` / `alc_free_min_plane_count`；恢复重置点同步清零。
+- `gc`：T1 增加「任一 plane 的 free < `FREE_POOL_PLANE_LOW`(4)」；victim 选择在饥饿时优先「成对条目 + 饥饿 plane 的单条目」，偏好组空才退回原贪心；两 plane 健康时行为不变。
+- 错误语义（H38）：`cache_wr_build` / `wb_flush` 把 alloc 的 `FTL_ERROR` 原样上报，不再伪装成 `FTL_AGAIN`。
+- 诊断：stall dump 与 `info` 的 diag 行增加 `fpmin`（最饥渴 plane 的空闲块数）。
+
+**未做**：持久化 block→SB 归属（恢复期成对重建）——用户 2026-10-31 决定不做打折版，登记为 `known_iss.md` ISS-FTL-17（需介质格式升级 + 首启格式化 + 掉电恢复重验）。
+
+**验证**：五关构建零新告警；release `.ssd_code_high` 63,664 B（余量 1,872 B）。**未上板**：验收 = 同一 GC 压力场景下`free` 跌破 32 后写不中断、`fpmin` 不长期贴 0、`mig mv` 有增长。
+
+## v1.08 — L2P 区域写回补 WAL 次序（journal 先落盘；2026-10-31 上板验证）
+
+**日期**：2026-10-31
+
+**起因**：GC 压力测试出现 `dng=10`/`rrab=1215`、读 LBA 0 命中 META 不符页并被 RR 退役（data lost）、H2testw Code 34。静态分析定位：确认路径是「Journal 追加到 RAM 页缓冲 → L2P 行原地更新」，两者落盘无次序；`l2p_flush_kick` 不等 Journal 页落盘就写回区域 ⇒ 掉电后「映射在、valid_count 缺」⇒ 漂移/丢数据（RISK-L2P-09）。
+
+**改动**：
+- `journal`：`jrn_handle_t` 增加 `persisted_seq` / `write_page_seq` / `write_entry_count`；`jrn_freeze` 记录在飞页的序号区间，页写成功时推进 `persisted_seq`；新增 `jrn_persisted_seq()`；`jrn_init`/`jrn_resume` 初始化水位。
+- `l2p_cache`：行增加 `dirty_seq`（映射更新后记录 `sequence_counter`）；`l2p_flush_kick` 增加 WAL 闸门（`persisted_seq < dirty_seq` ⇒ `wal_defer++` + `FTL_AGAIN`）；行加载/失效清零；`wal_defer_count` 经 `info` 的 `wd=` 观测。
+- `main.c`：L2P owner 端口增加 `journal` 指针（前向声明 `struct l2p_jrn_s`，避免 journal.h ↔ l2p_cache.h 环）。
+
+**验证**：五关构建零新告警；release `.ssd_code_high` 63,856 B（余量 1,680 B）。**上板验证（2026-10-31 20:38 镜像）**：format 后基线全盘写+校验 `dng=0`/`rrab=0`（`wd` 计数证明闸门生效）；删文件重写压到 `free<32`（GC 启动）时拔 USB 掉电 → `boot type=2`、`journal_entries=4608`、`closed=3354 free=28 anomalies=0`、**`dng=0`/`rrab=0`**；chkdsk 修主机 FS 后 verify **127 MB 0 错误**。对比修复前同场景 `dng=10`/`rrab=1215`/数据丢失 ⇒ RISK-L2P-09 闭合。判据仍成立：`dng=0`、`rrab=0`、verify 0 错误、`wd>0`（闸门确实生效）。
+
+**介质布局**：无变化（v13）。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
-当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
+当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（13）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
 任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
 都必须把 BASE +1；版本不符或缺失 ⇒ 首启自动全片格式化。
 
@@ -6269,3 +6438,4 @@ host 4 页链（读 45h/46h×3/47h、写 49h/44h/44h/48h）正常。**未覆盖*
 | v10 | 新增固定预留的 L2P 日志区（46..77/plane，32 块/plane）；`FTL_METADATA_AREA_END` 46 → 78；主机容量 437 → 429 MiB | 块布局变化；老固件会把 46..77 当用户数据/动态日志块 |
 | v11 | 新增 shared metadata spare（78..81/plane）；固定元数据分区改为「候选块池（跳过 BAD + spare 补缺）」；`FTL_METADATA_AREA_END` 78 → 82；主机容量上限 429 → 428 MiB；新增 `REBUILD_REQUIRED` BBT 标志（reserved[1]） | 块布局变化；老固件会把 78..81 当用户数据 |
 | v12 | L2P region 主备双副本：日志区 32→48 块/plane（46..93），shared spare 94..97，`FTL_METADATA_AREA_END` 82 → 98；Anchor 记录 8→16 页（新增备份 PBA 半）；主机容量 428 → **424 MiB**；`lba_max=868,352` | 块布局与 Anchor 记录格式变化；老固件会把 78..93 当用户数据、且读不懂 16 页 Anchor |
+| v13 | Journal 页头 12 → 16 B（新增 `base_lba`），新增顺序流映射页（`JSEG`，4 B 条目）与页型 magic | 老固件的 12 B 页头会把新页的条目区解析错位（magic 相同、条目起点不同）⇒ 回放错误映射 |

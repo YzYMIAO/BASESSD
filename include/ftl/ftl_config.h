@@ -241,6 +241,20 @@ static inline DWORD ftl_lba_pair_base(DWORD lba)
     return (lba & ~(FTL_LBA_PER_PAIR - 1U));
 }
 
+/**
+ * @brief LBA 是否 pair 对齐（低 3 位全 0）。
+ *
+ * @param lba 逻辑地址
+ * @return true = 对齐（可以是一个 pair 窗口 / cache 序列窗口的起点）
+ *
+ * @note pair 对齐判据只在这里定义一份；cache 序列起点、CLI pair 诊断与
+ *       `ftl_confirm_write` 的窗口基址断言都走它（C9：同一语义一套判据）。
+ */
+static inline bool ftl_lba_is_pair_aligned(DWORD lba)
+{
+    return (lba & (FTL_LBA_PER_PAIR - 1U)) == 0U;
+}
+
 /* ══════════════════════════════════════════════════════════════════
  * §三.2 PBA 侧（系统物理地址）
  *

@@ -209,7 +209,7 @@ _Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2
  *   （读路径查 L2P 分组、写路径按 plane 位选页，见 ftl_issue_subop），
  *   消费几个 LBA 也由它决定。这样"怎么拆"不外泄给调用者。
  */
-/* 字段按对齐从大到小排列；_Static_assert 钉住 48B。 */
+/* 字段按对齐从大到小排列；_Static_assert 钉住 48B（-fshort-enums：枚举 1B）。 */
 typedef struct
 {
     /* ── 8B / 指针 ── */
@@ -221,10 +221,9 @@ typedef struct
     void                  *on_complete_ctx; /* 回调上下文 */
 
     /* ── 4B ── */
-    DWORD total;     /* 本请求（run）LBA 总数（进度以 LBA 计） */
-    DWORD next;      /* 已下发到的 LBA 偏移（0..total） */
-    DWORD cmd_start; /* 所属 SCSI 命令的起始 LBA（跨 run/chunk 的 cache 序列上下文） */
-    DWORD cmd_total; /* 所属 SCSI 命令的总 LBA 数（0 = 未知，按本请求处理） */
+    DWORD total;         /* 本请求（run）LBA 总数（进度以 LBA 计） */
+    DWORD next;          /* 已下发到的 LBA 偏移（0..total） */
+    DWORD cmd_remaining; /* 同一 host 命令在本请求之后还剩的 LBA 数（0 = 命令末尾；见 ftl_io_req_t） */
 
     /* ── 2B / 1B ── */
     WORD         outstanding; /* 已下发、未完成的子操作数 */
@@ -234,7 +233,7 @@ typedef struct
     ssd_status_e agg_status;  /* 粘性错误：任一子操作失败 → 非 OK */
 } pend_group_t;
 
-_Static_assert(sizeof(pend_group_t) == 56, "pend_group_t 布局漂移（期望 56B）");
+_Static_assert(sizeof(pend_group_t) == 48, "pend_group_t 布局漂移（期望 48B）");
 
 /*
  * pend_table_t — pending / group 两张表的 owner 上下文
@@ -248,6 +247,18 @@ typedef struct
     pend_req_t   slots[FTL_PENDING_MAX];
     pend_group_t groups[FTL_GROUP_MAX];
 } pend_table_t;
+
+/**
+ * @brief 是否有**非 cache 序列**的写在飞或停泊（wbuf / GC/WL 的普通写确认）。
+ *
+ * 用途：cache 写序列开启前用它确认"顺序页不会被普通条目插进来"——顺序映射页
+ * 不携带 LBA，混装会破坏隐式坐标（见 journal.h 的 JRN_PAGE_SEG）。
+ *
+ * @param table pending 表
+ * @return true = 至少一条 WRITE / WRITE_PAGE0 / WRITE_CONFIRM 且 cache_role==NONE
+ *         false = 没有普通写确认
+ */
+bool pend_has_foreign_write(const pend_table_t *table);
 
 /*
  * pend_op_view_t — 按 op 查找一个 pending 槽的只读视图

@@ -53,6 +53,7 @@
 #include "ftl_job.h"  /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"   /* ftl_op_submit / ftl_op_is_in_dispatch */
 #include "ftl_type.h" /* BG_LEVEL_* / BG_LEVEL_NUM（档位 → max_kick 表） */
+#include "journal.h"  /* jrn_sequence_get / jrn_persisted_seq（WAL 次序闸门，RISK-L2P-09） */
 #include "log.h"
 #include "onfi_1_0.h"
 #include "ssd_compiler.h"
@@ -161,6 +162,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
         line->access_count = 0U;
         line->fresh        = false;
         line->prefetch     = false;
+        line->dirty_seq    = 0U;
     }
 
     cache->clock_hand        = 0U;
@@ -171,6 +173,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
     cache->prefetch_skipped  = 0U;
     cache->prefetch_resident = 0U;
     cache->prefetch_hits     = 0U;
+    cache->wal_defer_count   = 0U;
 
     // 在飞计数归零：设备级 init 发生在任何命令之前
     cache->load_inflight  = 0U;
@@ -636,6 +639,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
     line->region_id    = region_id;
     line->access_count = 1U;
     line->state        = L2P_CACHE_LOADING;
+    line->dirty_seq    = 0U;    /* 介质内容，无 Journal 依赖（RISK-L2P-09） */
     line->fresh        = false; /* host 完成时置 true；预取完成时保持 false */
     line->degraded     = false; /* 新一次加载尝试：降级标志只反映最近一次结果 */
     line->prefetch     = prefetch;
@@ -874,6 +878,27 @@ bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
     return (line->state == L2P_CACHE_CLEAN) || (line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_FLUSHING);
 }
 
+/**
+ * @brief 记录本行映射依赖的 Journal 序号上界（WAL 次序，RISK-L2P-09）
+ *
+ * 所有调用点都满足「先 jrn_append / jrn_append_seq、后写 L2P」。这里取当前的
+ * `sequence_counter`（下一条待分配序号）：区域写回时要求 Journal 落盘水位 ≥ 它，
+ * 即覆盖本行更新的条目都已持久化。
+ *
+ * @param cache     cache
+ * @param line      目标行
+ * @param region_id 全局 region（用于解析 owner 的 Journal）
+ */
+static void l2p_note_dirty_seq(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD region_id)
+{
+    const l2p_owner_t *owner = l2p_owner_get(cache, region_id);
+
+    if ((owner != NULL) && (owner->journal != NULL))
+    {
+        line->dirty_seq = jrn_sequence_get(owner->journal);
+    }
+}
+
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
 {
     // 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。
@@ -907,6 +932,7 @@ ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
 
     // Region 级脏标记（F4）：置本 region 的 bit。flush 落盘成功后清零。
     l2p_bitmap_set(cache->region_dirty_bitmap, region_id);
+    l2p_note_dirty_seq(cache, line, region_id);
     return FTL_OK;
 }
 
@@ -996,6 +1022,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
 
     line->state = L2P_CACHE_DIRTY;
     l2p_bitmap_set(cache->region_dirty_bitmap, region_id);
+    l2p_note_dirty_seq(cache, line, region_id);
     return FTL_OK;
 }
 
@@ -1173,6 +1200,16 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 
     // 映射页属于哪个 owner die 由全局 region 解析；写回必须落到 owner 的目录/分配器。
     const l2p_owner_t *owner = l2p_owner_get(cache, line->region_id);
+
+    // WAL 次序（RISK-L2P-09）：区域页只能在覆盖其映射的 Journal 条目**落盘之后**写。
+    // 否则掉电后区域里的新映射生效、而 valid_count 只有 CP 快照 + 存活回放的数字
+    // ⇒ 计数偏低甚至为 0 ⇒ dangling、GC 误回收仍被引用的块（静默丢数据）。
+    // 不满足就退让：Journal 服务每轮会把当前页冻结并推进 persisted_seq。
+    if ((owner->journal != NULL) && (line->dirty_seq != 0U) && (jrn_persisted_seq(owner->journal) < line->dirty_seq))
+    {
+        cache->wal_defer_count++;
+        return FTL_AGAIN;
+    }
 
     if (cache->flush_inflight >= L2P_FLUSH_MAX_INFLIGHT)
     {
@@ -1618,9 +1655,10 @@ void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out)
 
 void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
 {
-    cache->lines[idx].state    = L2P_CACHE_INVALID;
-    cache->lines[idx].degraded = false;
-    cache->lines[idx].prefetch = false;
+    cache->lines[idx].state     = L2P_CACHE_INVALID;
+    cache->lines[idx].degraded  = false;
+    cache->lines[idx].prefetch  = false;
+    cache->lines[idx].dirty_seq = 0U; /* 行内容作废：不再有 Journal 依赖 */
 }
 
 bool l2p_has_flush_inflight(const l2p_cache_t *cache)

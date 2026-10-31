@@ -76,11 +76,14 @@ typedef enum
 } usb_msc_slot_state_t;
 
 /*
- * 一个在飞 chunk。写路径需要 1 chunk lookahead（双缓冲）：
- * 缓存程序序列里 chunk k 的最后一页要由 chunk k+1 的第一条命令的 FAIL_CACHE 确认，
- * 若等 chunk k 的 FTL 请求完成才收 k+1 就会互相等待。所以：
- *   · 非末写 chunk 提交后**立即**回流控回执（让主机发下一 chunk），槽位保留到 FTL 完成；
- *   · 末 chunk 等 FTL 完成（END 确认最后一页）后再回执，成败即 CSW 成败；
+ * 一个在飞 chunk。写路径是 **volatile write cache** 语义（与主流 SSD 一致）：
+ *   · 所有写 chunk（含末 chunk）**提交即回流控回执**，主机可以立刻发下一段/下一条
+ *     命令——设备 cache 序列因此可以跨 host 命令连续（FTL 只在 Journal 顺序页满 /
+ *     block 头 / 空闲 / LBA 不连续时主动收尾）；
+ *   · 槽位保留到 FTL 完成（bounce 缓冲在 FTL 消费完之前不能被复用）；
+ *   · 写 chunk 之后的失败**不在本条命令上报**：置 deferred error，由下一条
+ *     READ/WRITE/FLUSH 命令的 CSW 报告一次（本仓用"下一条命令失败"近似 SCSI 的
+ *     deferred sense；TinyUSB 不支持自定义 sense data）；
  *   · 两个槽都占用时写回调返回 TUD_MSC_RET_BUSY（数据留在端点缓冲，协议栈重投）。
  * 读路径不需要 lookahead：每 chunk 完成即回执，下一 chunk 才会来。
  */
@@ -91,8 +94,7 @@ typedef struct
     volatile bool                 discard; /* 主机已复位/拔出：完成后丢弃结果 */
     bool                          is_write;
     bool                          is_flush; /* SYNCHRONIZE CACHE：无数据阶段 */
-    bool                          is_last;  /* 本 chunk 是 SCSI 命令的最后一个 */
-    bool                          ack_sent; /* 非末写 chunk 的流控回执已发 */
+    bool                          ack_sent; /* 写 chunk 的流控回执已发（提交即回执） */
     DWORD                         order;    /* 到达序：完成按序处理（前 chunk 错误先记录） */
     DWORD                         lba;
     DWORD                         offset;
@@ -111,13 +113,34 @@ static usb_msc_slot_t s_slots[USB_MSC_SLOT_NUM];
 static BYTE s_bounce0[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
 static BYTE s_bounce1[CFG_TUD_MSC_EP_BUFSIZE] DTCM_DATA __attribute__((aligned(4)));
 
-/* 当前 SCSI 命令的 CBW 信息（tud_msc_cbw_info_cb 填写）。total_lbas 让 FTL 的
- * cache 序列跨 chunk 保持打开（读、写都用）；0 = 未知（按单 chunk 处理）。 */
+/* 当前 SCSI 命令的 CBW 信息（tud_msc_cbw_info_cb 填写）。它只用于给 FTL 计算
+ * 「本 chunk 之后同一命令还剩多少 LBA」（cache 序列 END 的落点）；序列本身由 FTL
+ * 的顺序流检测器判定，host 传输段边界不构成断点。0 = 未知（按单 chunk 处理）。 */
 static DWORD s_cmd_lba;
 static DWORD s_cmd_blocks;
 
 static DWORD s_order_next; /* 下一条到达 chunk 的序 */
-static bool  s_wr_error;   /* 本 SCSI 写命令已有 chunk 失败（非末 chunk 已提前回执） */
+
+/* 已提前回执的写 chunk 后来失败（volatile write cache）：留到下一条命令上报一次。 */
+static bool s_deferred_write_error;
+
+/**
+ * @brief 取走 deferred 写错误（有则本次命令失败）。
+ *
+ * @return true = 上一条已回执的写有失败；本次命令应失败（并已清除标志）
+ *         false = 无 deferred 错误
+ */
+static bool usb_msc_take_deferred_error(void)
+{
+    if (s_deferred_write_error == false)
+    {
+        return false;
+    }
+
+    s_deferred_write_error = false;
+    LOGW("[USB ] deferred write error — fail the next command (volatile write cache)\r\n");
+    return true;
+}
 
 /* 【本仓补丁】TinyUSB CBW 信息钩子：命令开始时记录总 block_count / 起始 LBA。
  * 应用侧强符号，覆盖 msc_device.c 的 weak 默认实现。 */
@@ -127,7 +150,7 @@ void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count)
     {
         s_cmd_lba    = lba;
         s_cmd_blocks = block_count;
-        s_wr_error   = false; /* 新 SCSI 命令：清上一条的粘性错误 */
+        /* ⚠ 不清 deferred 写错误：它必须留给下一条能承载状态的命令上报。 */
     }
 }
 
@@ -231,12 +254,12 @@ void usb_msc_init(void)
 {
     /* 在 usb_device_init() 之前调用，USB ISR 尚未使能；可整体清零。 */
     memset(s_slots, 0, sizeof(s_slots));
-    s_slots[0].bounce = s_bounce0;
-    s_slots[1].bounce = s_bounce1;
-    s_cmd_lba         = 0U;
-    s_cmd_blocks      = 0U;
-    s_order_next      = 0U;
-    s_wr_error        = false;
+    s_slots[0].bounce      = s_bounce0;
+    s_slots[1].bounce      = s_bounce1;
+    s_cmd_lba              = 0U;
+    s_cmd_blocks           = 0U;
+    s_order_next           = 0U;
+    s_deferred_write_error = false;
 }
 
 static bool usb_msc_ready(void)
@@ -312,15 +335,20 @@ static bool usb_msc_slot_submit(usb_msc_slot_t *slot)
     {
         const DWORD blocks = slot->length / USB_MSC_BLOCK_SIZE;
 
-        request->opcode         = slot->is_write ? SSD_REQUEST_WRITE : SSD_REQUEST_READ;
-        request->start_lba      = slot->lba;
-        request->block_count    = blocks;
-        request->buffer         = slot->bounce;
-        request->buffer_size    = slot->length;
-        /* SCSI 命令总范围（FTL 的 run_end）与本 chunk 在命令内的偏移。
-         * CBW 未知（0）时退化为单 chunk 语义。 */
-        request->io.total_lbas  = (s_cmd_blocks != 0U) ? s_cmd_blocks : blocks;
-        request->io.offset_lbas = (s_cmd_blocks != 0U) ? (DWORD)(slot->lba - s_cmd_lba) : 0U;
+        request->opcode      = slot->is_write ? SSD_REQUEST_WRITE : SSD_REQUEST_READ;
+        request->start_lba   = slot->lba;
+        request->block_count = blocks;
+        request->buffer      = slot->bounce;
+        request->buffer_size = slot->length;
+        /* 同一 SCSI 命令在本 chunk 之后还剩多少 LBA：FTL 只用它判断 cache 序列
+         * END 的落点（器件要求 END 在最后一个数据页）。CBW 未知（0）⇒ 按单 chunk
+         * 语义（本段是命令末尾）。传输段本身的边界不是 FTL 的序列边界。 */
+        if (s_cmd_blocks != 0U)
+        {
+            const QWORD consumed = (QWORD)(slot->lba - s_cmd_lba) + blocks;
+
+            request->io.cmd_remaining = (s_cmd_blocks > consumed) ? (DWORD)(s_cmd_blocks - consumed) : 0U;
+        }
     }
 
     if (ssd_controller_submit(&g_ctrl, request) != SSD_STATUS_OK)
@@ -385,7 +413,6 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
     slot->usb_buffer = buffer;
     slot->discard    = false;
     slot->ack_sent   = false;
-    slot->is_last    = (s_cmd_blocks == 0U) || (((lba - s_cmd_lba) + blocks) >= s_cmd_blocks);
 
     if (is_write)
     {
@@ -408,10 +435,16 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
     return TUD_MSC_RET_ASYNC;
 }
 
-/* 完成一个槽：写非末 chunk 只回收缓冲；末 chunk / 读 / flush 负责回执。 */
+/* 完成一个槽：写 chunk 只回收缓冲并记录 deferred error（回执已在提交时发出）；
+ * 读 / flush 负责回执（数据与 CSW）。 */
 static void usb_msc_slot_complete(usb_msc_slot_t *slot)
 {
-    usb_msc_note_latency(slot->submit_cycles);
+    // 写 chunk 的"设备侧延迟"在**回执点**记录（volatile write cache：完成可能远晚于
+    // 回执）；读 / flush 在完成点记录。
+    if (slot->is_write == false)
+    {
+        usb_msc_note_latency(slot->submit_cycles);
+    }
 
     const bool ok = (slot->request.completion_status == SSD_STATUS_OK);
 
@@ -436,26 +469,15 @@ static void usb_msc_slot_complete(usb_msc_slot_t *slot)
 
     if (slot->is_write)
     {
+        // 写 chunk 一律提交即回执（volatile write cache）：本槽的完成只回收缓冲；
+        // 失败延后到**下一条命令**上报（本命令的 CSW 早已发出）。
         if (ok == false)
         {
-            s_wr_error = true;
-        }
-
-        if (slot->is_last == false)
-        {
-            slot->state = USB_MSC_SLOT_FREE; /* 流控回执已发，这里只回收缓冲 */
-            return;
-        }
-
-        const bool final_ok = (ok == true) && (s_wr_error == false);
-
-        if (final_ok == true)
-        {
-            s_wr_error = false;
+            s_deferred_write_error = true;
+            LOGE("[USB ] write chunk failed after ack lba=%lu len=%lu — deferred\r\n", slot->lba, slot->length);
         }
 
         slot->state = USB_MSC_SLOT_FREE;
-        (void)tud_msc_async_io_done(final_ok ? (int32_t)slot->length : TUD_MSC_RET_ERROR, false);
         return;
     }
 
@@ -475,8 +497,8 @@ void usb_msc_task(void)
 {
     DWORD done_mask = 0U;
 
-    /* 按到达序处理：写序列中前一个 chunk 的错误必须先记录，末 chunk 的回执才能判失败。
-     * （上一个 chunk 的 FTL 完成一定早于末 chunk —— 末 chunk 的首条命令才确认它的尾页。） */
+    /* 按到达序处理槽位：先回收先到达的槽、按序记录 deferred 错误。回执已在提交时发出，
+     * 这里的顺序只影响缓冲回收与错误归因，不影响 CSW 时机（volatile write cache）。 */
     for (BYTE n = 0U; n < USB_MSC_SLOT_NUM; n++)
     {
         usb_msc_slot_t *slot = NULL;
@@ -525,11 +547,13 @@ void usb_msc_task(void)
             }
         }
 
-        /* 非末写 chunk：提交后立即回流控回执，让主机发下一 chunk。
-         * 它的 FTL 完成（下一个 chunk 的首条命令确认本 chunk 尾页）只用于回收缓冲。 */
-        if ((slot->is_write == true) && (slot->is_flush == false) && (slot->is_last == false) && (slot->ack_sent == false))
+        /* 写 chunk（含末 chunk）：提交后立即回流控回执（volatile write cache）。
+         * 设备 cache 序列因此可以跨 host 命令连续；槽位的 FTL 完成只用于回收缓冲
+         * 与 deferred error 记录。 */
+        if ((slot->is_write == true) && (slot->is_flush == false) && (slot->ack_sent == false))
         {
             slot->ack_sent = true;
+            usb_msc_note_latency(slot->submit_cycles); /* 主机可见延迟 = submit → 回执 */
             (void)tud_msc_async_io_done((int32_t)slot->length, false);
         }
 
@@ -552,12 +576,23 @@ int32_t tud_msc_read10_cb(BYTE lun, DWORD lba, DWORD offset, void *buffer, DWORD
         return TUD_MSC_RET_ERROR;
     }
 
+    // deferred 写错误在**下一条能承载状态的命令**上报一次（近似 SCSI deferred sense）。
+    if (usb_msc_take_deferred_error() == true)
+    {
+        return TUD_MSC_RET_ERROR;
+    }
+
     return usb_msc_transfer(false, lba, offset, buffer, bufsize);
 }
 
 int32_t tud_msc_write10_cb(BYTE lun, DWORD lba, DWORD offset, BYTE *buffer, DWORD bufsize)
 {
     if (lun != 0U)
+    {
+        return TUD_MSC_RET_ERROR;
+    }
+
+    if (usb_msc_take_deferred_error() == true)
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -640,6 +675,13 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
         return TUD_MSC_RET_ERROR;
     }
 
+    // deferred 写错误在 FLUSH 上同样要上报（它是持久性屏障；上一条已回执的写失败
+    // 不能被吞掉）。
+    if (usb_msc_take_deferred_error() == true)
+    {
+        return TUD_MSC_RET_ERROR;
+    }
+
     /* BOT 串行：同一时刻只允许一条 host 命令在飞（与 READ/WRITE 的槽门一致）。 */
     if (!usb_msc_ready() || usb_msc_host_busy())
     {
@@ -656,7 +698,6 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
     slot->is_write   = false;
     slot->is_flush   = true;
     slot->order      = s_order_next++;
-    slot->is_last    = true;
     slot->lba        = 0U;
     slot->offset     = 0U;
     slot->length     = 0U;
