@@ -592,7 +592,8 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
 
             if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
             {
-                ftl->l2p_defer = true; // 有确定完成的后台进展，drain 不计 stall
+                // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
+                ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
                 ftl->cache_read_declines++;
                 return FTL_CACHE_READ_AGAIN;
             }
@@ -650,7 +651,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         ftl->cache_read_declines++;
         if (defer == true)
         {
-            ftl->l2p_defer = true;
+            ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
         }
         if (seq->active == true)
         {
@@ -925,8 +926,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
             // 续接点不一致：本序列不能再由本窗口续。**不能 abort**——设备序列已
             // 提前回执，未确认页还没结算；交给 service 用 padding END 有序收尾，
             // 本组下轮重试（确定性等待，不计 stall）。
-            seq->close_requested = true;
-            ftl->l2p_defer       = true;
+            seq->close_requested = true; /* 进展由 seq_closing 表达（bg_progress 已含） */
             return FTL_CACHE_WRITE_AGAIN;
         }
     }
@@ -961,8 +961,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         {
             // 本段没有可续的完整页（命令尾 / 低于最小窗口）：设备序列保持打开，
             // 交给 service 用 padding END 有序收尾；本组下轮重试。
-            seq->close_requested = true;
-            ftl->l2p_defer       = true;
+            seq->close_requested = true; /* 进展由 seq_closing 表达（bg_progress 已含） */
             ftl->cache_wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }
@@ -1003,8 +1002,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         {
             // 当前 block 已被关闭/写满：本窗口无法续。写序列已提前回执 ⇒ **不能
             // abort**；请 service 用 padding END 收尾（padding 自己会开新块）。
-            seq->close_requested = true;
-            ftl->l2p_defer       = true;
+            seq->close_requested = true; /* 进展由 seq_closing 表达（bg_progress 已含） */
             ftl->cache_wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }
@@ -1057,7 +1055,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
         if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
         {
-            ftl->l2p_defer = true; // 有确定完成的后台进展：drain 不计 stall
+            // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
+            ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
             ftl->cache_wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }

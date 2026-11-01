@@ -2859,7 +2859,8 @@ flowchart TD
 ftl_issue_subop(read) 对每个 LBA：
   ① wbuf 命中（该窗口尚未 flush）⇒ 直接从 wbuf.data 拷出，消费 1 个 LBA
   ② 否则 l2p_read(global_lba)
-       - FTL_AGAIN（LOADING）⇒ 置 l2p_defer=1，停止本子操作，下轮重试
+       - FTL_AGAIN（region 未驻留）⇒ `l2p_defer = l2p_cache_any_inflight()`，
+         停止本子操作，下轮重试
        - FTL_OK + INVALID（未映射）⇒ 零填充，消费 1 个 LBA
        - FTL_OK + PBA ⇒ 按 (physical plane, page) 分组
   ③ 页变化/plane 变化时收缩子操作范围
@@ -2867,8 +2868,17 @@ ftl_issue_subop(read) 对每个 LBA：
   ⑤ pend_alloc → 填 read 字段 → outstanding++ → ftl_op_submit
 ```
 
-`l2p_defer` 的作用：region 加载在飞是“有进展”，不能计入 `stalls`；否则一次正常的
-随机读会吃掉 8 轮预算，被误判成卡死。
+`l2p_defer` 的作用：**确实有** region 加载/写回命令在飞时是“有进展”，不能计入 `stalls`；
+否则一次正常的随机读会吃掉 8 轮预算，被误判成卡死。
+
+⚠ **判据必须是「在飞命令」，不是「我刚才想加载」**（主流判据：进展 = 已提交命令的完成，
+见 `fc_nand_design.md §26` 的队列/完成模型；请求无资源时进 allocation/retry 队列、其它工作照跑，
+`docs/reference/README.md` 的 Cosmos+ `request_schedule/allocation.c` / SPDK FTL）。
+`l2p_load_start()` 会因**无空闲行**或**提交被拒**而失败并返回 false，此时没有加载在飞；
+若仍宣称"在飞"，`ftl_drain_group` 的 stall 检测永久失效 ⇒ 组永不结束 ⇒ cache 序列永不关闭 ⇒
+`ftl_op_seq_gate` 持续拒绝后台提交 ⇒ 脏行排不出去（RISK-HOST-14 的环形等待）。
+因此 `l2p_defer` 一律由 `l2p_cache_any_inflight(cache)`（`load_inflight || flush_inflight`）派生；
+「序列收尾」这类进展由 `bg_progress` 里的 `seq_closing` 表达，不借 `l2p_defer`。
 
 **FTL cache read（流式序列，本仓自定）**：`ftl_drain_group` 在下发普通子操作前先尝试
 `ftl_cache_read_try()`。序列状态在 `ftl->cache_seq`（per 实例），**跨窗口、跨 chunk 保持**：

@@ -788,4 +788,20 @@ void l2p_line_invalidate(l2p_cache_t *cache, WORD idx);
  */
 bool l2p_has_flush_inflight(const l2p_cache_t *cache);
 
+/**
+ * @brief 是否**确实有** L2P 加载/写回命令在飞（drain 的"确定性进展"判据）。
+ *
+ * 主流判据是「进展 = 已提交命令的完成」（队列/完成模型）：只有真在飞的命令才有
+ * 确定完成时刻。用"我刚才想加载"当进展，会让卡死检测永久失效——本仓曾因此形成
+ * 环形等待（RISK-HOST-14）：加载启动失败 → 声称在飞 → drain 不计 stall →
+ * 组永不结束 → 序列门控永不打开 → 脏行永远排不出去。
+ *
+ * @param cache L2P cache
+ * @return true = 至少一条加载或写回命令在飞
+ */
+static inline bool l2p_cache_any_inflight(const l2p_cache_t *cache)
+{
+    return (cache->load_inflight > 0U) || (cache->flush_inflight > 0U);
+}
+
 #endif /* FTL_L2P_CACHE_H */

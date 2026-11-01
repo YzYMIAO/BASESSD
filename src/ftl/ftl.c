@@ -2402,8 +2402,11 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
                 // FTL_ERROR 仅越界，此时 p 保持 INVALID。
                 if (l2p_read(ftl->cache, l, &p) == FTL_AGAIN)
                 {
-                    ftl->l2p_defer = true; /* 告知 drain：这是加载在飞，不是卡死 */
-                    break;                 /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
+                    // ⚠ 「进展」只认**在飞命令**：加载可能**启动失败**（无空闲行 / 提交被拒），
+                    // 此时若宣称"在飞"，drain 的 stall 检测会永久失效，形成环形等待
+                    // （RISK-HOST-14）。主流判据 = 队列/完成模型：没有在飞命令就没有确定完成时刻。
+                    ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
+                    break; /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
                 }
             }
 
