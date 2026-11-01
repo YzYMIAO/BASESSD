@@ -167,7 +167,7 @@
 
 | 术语 | 含义 |
 |---|---|
-| **bg_scheduler** | 时间预算后台调度器：must-run 集 + interval/预算任务 |
+| **bg_scheduler** | 时间预算后台调度器：must-run 集 + 预算任务 |
 | **must-run** | 每轮无条件执行、不占预算的正确性关键任务 |
 | **op tag** | 完成服务函数选择器；`g_op_callbacks[]` 的下标 |
 | **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
@@ -3288,37 +3288,69 @@ coalescing。本仓没有 SLC cache（介质本身就是 SLC），只做**同窗
 
 #### 3.12.1 背景与需求
 
-FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。它必须同时做三件事：
+FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它必须同时做三件事：
 
 1. **推进 NAND**：FC 的命令引擎与完成队列是全局的，每轮只能推一次；
 2. **服务 host IO**：补发未下发的子操作，处理停泊的写确认；
-3. **跑后台**：Journal 刷页、L2P 回写、CP、GC、WL、BBT 持久化、读恢复。
+3. **跑后台**：Journal 刷页、L2P 写回、CP、GC、WL、BBT 持久化、读恢复。
 
-如果后台任务按“每轮全跑”实现，host 忙时会被后台拖慢；如果后台完全让路，GC 不推进，
-Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**：按负载分档，给每档固定
-预算与任务掩码，must-run 只放“不跑就会死锁/挂起”的动作。
+如果后台按“每轮全跑”实现，host 忙时会被拖慢；如果后台完全让路，GC 不推进，Free Pool
+耗尽后写会永久失败。于是需要一份**确定性的前台保护规则**：按负载分档，给每档固定的
+任务集合与预算。
 
-#### 3.12.2 职责与边界
+**先记住这个模型，本节其余内容都是它的推论**：
+
+> **所有 kick 都是“提交一步就返回”。** 任务函数被调一次，只做一件事——把一条命令
+> 挂到 FC 队列 / 推进状态机一步，然后立刻返回。真正的耗时（tNAND 读、写、擦）发生在
+> **下一轮**或**完成回调**里。
+
+由此得到两个直接结论：
+
+- **“预算”管的不是 CPU 时间，而是“每轮允许提交多少条命令”。** 一次 kick 只花几十 µs，
+  所以 700 µs / 2000 µs 这两个数，实际读作“本轮后台最多占多少提交机会”。
+- **确定性保护靠“档位 → 允许哪些任务 / 几条”，不靠 `elapsed` 计时。** 平台时钟是
+  SysTick，1 ms 分辨率；用它做“本轮是否超预算”的判据精度不够，只能当上界参考。
+  真正的行为约束是**档位掩码**（BUSY 档只放一个预算任务）与**各模块内的条数上界**
+  （如 `L2P_FLUSH_MAX_BUSY`）。
+
+#### 3.12.2 术语
+
+本节几个行话，首次出现即此义：
+
+| 术语 | 含义 |
+|---|---|
+| **kick** | 调用一次任务函数：只提交一步 / 一条命令就返回，不等完成 |
+| **档位** | 按 host 繁忙度选出的三档负载：`IDLE` / `NORMAL` / `BUSY` |
+| **预算** | 本轮允许预算任务消耗的上界（µs）；由 kick 的 `MIN(elapsed, budget_us)` 累计 |
+| **must-run** | 正确性关键任务：无条件每轮执行，**不 gate、不占预算** |
+| **表序** | `s_bg_tasks[]` 中的位置。**表序 = 执行序 = 优先级**，没有独立的 `priority` 字段 |
+
+#### 3.12.3 职责与边界
 
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
   - Phase 2.5：`pend_confirm_service` → 遍历组 `ftl_drain_group` → `wb_handle(MAYBE_FLUSH_IDLE)`；
   - Phase 3：`bg_scheduler_service(ftl)`（`ftl.c` 里只有这一行调用）。
-- **`bg_scheduler.c/h`**：一个模块承载两层内容——引擎（must-run pass + 预算 pass +
-  interval 门 + 预算截断，函数本身零 kick 知识）与 FTL 策略段（10 个 `static` 适配器把
-  异构 kick 包成 `void(ftl_ctx_t*)` + 任务表 `s_bg_tasks` + 档位预算表 `s_bg_level_cfg` +
-  `bg_scheduler_init` / `bg_scheduler_level_select` / `bg_scheduler_service`）。GC / WL / predict 的求值
-  节拍在 **migrate handle 内自持**，不在策略段。
-- **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎函数不决定档位（档位是 FTL 域
-  策略，归策略段）。
+- **`bg_scheduler.c/h`**：一个模块承载两层内容——
+  - **引擎**：must-run pass + 预算 pass + 预算截断（函数本身零 kick 知识，
+    不认识任何具体任务）；
+  - **FTL 策略段**：10 个 `static` 适配器把异构 kick 包成 `void(ftl_ctx_t *)` + 任务表
+    `s_bg_tasks` + 档位预算表 `s_bg_level_cfg` + `bg_scheduler_init` /
+    `bg_scheduler_level_select` / `bg_scheduler_service`。
 
-#### 3.12.3 结构与不变量
+  两层同放一个 `.c` 是刻意的：引擎的接口就是“一张 `bg_task_t` 表”，把策略段拆出去只会让
+  引擎多一层间接；而“档位是 FTL 域策略”这条边界，靠**引擎不决定档位**（档位由策略段在同轮
+  先写入 `sched->level`）来保证。
+- **GC / WL / predict 的求值节拍**在 migrate handle 内自持，不单列成任务。
+- **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎函数不决定档位。
 
-`bg_task_t`：`func` / `mask` / `interval_ms` / `last_run_ms` / `budget_us` / `must_run`（`bool`）。
+#### 3.12.4 结构与不变量
+
+`bg_task_t`：`func` / `mask` / `budget_us` / `must_run`（`bool`）。
 `bg_scheduler_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
 引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，供 typed 模块
 入口构造 `bg_info_t`）。
-`bg_level_cfg_t`：每轮总预算 / L2P flush 条数上界 / 任务掩码。
+`bg_level_cfg_t`：每轮总预算 / 任务掩码（预算任务位集合）。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
 再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
@@ -3326,44 +3358,85 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`。表项数由 `_Static_assert` 在编译期
 锁死为 `BG_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
-**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）：
+**must-run 的归纳判据（6 项同一条）**：**有前台请求或在飞 job 正在等它**——不跑就死锁或
+host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
-| 表序 | 任务 | 类型 | interval | 预算 | 语义 |
-|---:|---|---|---:|---:|---|
-| 0 | Checkpoint 推进 | must-run | — | — | `cp_handle(ADVANCE)`：在飞 CP 跨档位走完 |
-| 1 | RR 推进 | must-run | — | — | `rr_handle`：host 读在等结果 |
-| 2 | 搬移推进 + 求值 | must-run | — | — | `mig_handle`：推进在飞 job；自持 GC 10ms / WL 5s / predict 1s（仅 IDLE，BUSY 不评估） |
-| 3 | 元数据目录 | must-run | — | — | `md_handle`：压缩请求由前台置位，不推进即永久 FTL_AGAIN |
-| 4 | Journal 预擦 | must-run | — | — | `jrn_handle(ERASE_ONLY)`：新环形块没擦不能写 |
-| 5 | 紧急 CP | must-run | — | — | `cp_handle(EMERGENCY)`：Journal ≥95% 每轮响应 |
-| 6 | L2P flush | 预算 | 0 | 1500 µs | `l2p_handle`；条数上界由模块内档位表决定 |
-| 7 | Journal 刷页 | 预算 | 0 | 700 µs | `jrn_handle(FLUSH)`；BUSY 被掩掉 |
-| 8 | BBT 持久化 | 预算 | 0 | 700 µs | `bbt_handle`：攒批写（磨损计数随 CP） |
-| 9 | CP 触发 | 预算 | 0 | 100 µs | `cp_handle(TIMER)`：T1/T2/T3 |
+**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的预算值（must-run 不占预算）：
+
+| 表序 | 任务 | 类型 | 预算 | 语义 |
+|---:|---|---|---:|---|
+| 0 | Checkpoint 推进 | must-run | — | `cp_handle(ADVANCE)`：在飞 CP 跨档位走完 |
+| 1 | RR 推进 | must-run | — | `rr_handle`：host 读在等结果 |
+| 2 | 搬移推进 + 求值 | must-run | — | `mig_handle`：推进在飞 job；自持 GC 10 ms / WL 5 s / predict 1 s（仅 IDLE，BUSY 不评估） |
+| 3 | 元数据目录 | must-run | — | `md_handle`：压缩请求由前台置位，不推进即永久 FTL_AGAIN |
+| 4 | Journal 预擦 | must-run | — | `jrn_handle(ERASE_ONLY)`：新环形块没擦不能写 |
+| 5 | 紧急 CP | must-run | — | `cp_handle(EMERGENCY)`：Journal ≥95% 每轮响应 |
+| 6 | L2P flush | 预算 | 1500 µs | `l2p_handle`；条数上界由模块内档位表决定 |
+| 7 | Journal 刷页 | 预算 | 700 µs | `jrn_handle(FLUSH)`；BUSY 被掩掉 |
+| 8 | BBT 持久化 | 预算 | 700 µs | `bbt_handle`：攒批写（磨损计数随 CP） |
+| 9 | CP 触发 | 预算 | 100 µs | `cp_handle(TIMER)`：T1/T2/T3 |
 
 **档位**：
 
-| 档位 | 条件 | 总预算 | 任务掩码 |
+| 档位 | 条件（`bg_scheduler_level_select`） | 总预算 | 允许的预算任务 |
 |---|---|---:|---|
-| IDLE | `pending + groups == 0` | 2000 µs | 表序 6..9 全开 |
-| NORMAL | 非 IDLE 且 `pending ≤ 16` 且 `queued == 0` | 2000 µs | 表序 6..9 |
-| BUSY | `pending > 16` 或 `queued != 0` | 700 µs | 仅表序 6（L2P flush） |
+| IDLE | `pending == 0 && queued == 0` | 2000 µs | 表序 6..9 全开 |
+| NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 2000 µs | 表序 6..9 全开 |
+| BUSY | `pending > FTL_PENDING_MAX/2` 或 `queued != 0` | 700 µs | **仅表序 6（L2P flush）** |
+
+（`pending` = 待下发子操作数 `pend_slot_get_count`；`queued` = 未完成组数
+`pend_group_get_count`；`FTL_PENDING_MAX = 32`，故分界当前为 16。**判据写表达式不写数字**：
+池尺寸一改，写死的数就错了。）
 
 **不变量**：
 
 1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗预算。
 2. **每个实例都要调 `ftl_service`**：漏一个，它的 Journal/CP/BBT/GC 永不推进。
 3. **must-run 不 gate、不占预算**：它们是防死锁/防 host 挂起的动作。
-4. **确定性保护靠“档位 → 条数/掩码”**，不靠 `elapsed` 计时：kick 都是“提交即返回”，
-   `elapsed` 只反映 CPU 时间（SysTick 1 ms 量化）。
-5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ interval/预算失效，每轮都跑；
-   防刷屏靠各任务内部单飞行/事件门。
+4. **确定性保护靠“档位 → 掩码/条数”**，不靠 `elapsed` 计时（理由见 §3.12.1）。
+5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 预算计账失效（`elapsed=0` 永不截断），
+   后台每轮都跑；防刷屏靠各任务内部单飞行/事件门。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
    判定收在 `bg_scheduler_service` 首行（早于 must-run pass）。
 
-#### 3.12.4 主循环
+#### 3.12.5 一轮走查（host 正在连续写）
+
+把上面的规则跑一遍，数字取典型值，只为说明形状：
+
+```text
+前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
+      cfg = { total_budget_us = 700, task_mask = BG_TASK_L2P_FLUSH }
+
+Pass 0（must-run，表序 0..5，全部执行，不计预算）
+  cp_handle(ADVANCE)        → 在飞 CP 推进一步（没有在飞则空操作）
+  rr_handle                 → 读恢复：无待恢复页则空操作
+  mig_handle                → 在飞 GC/WL 推进一步（BUSY 档不发起新的求值）
+  md_handle                 → 目录压缩（有 compact_wanted 才动）
+  jrn_handle(ERASE_ONLY)    → 新环形块没擦过就补一次擦
+  cp_handle(EMERGENCY)      → journal 未到 95% 则空操作
+  ⇒ 最坏 6 次 kick，每次只提交 ≤1 条命令
+
+Pass 1（预算）
+  budget_remaining = 700
+  表序 6 L2P flush : 掩码允许 → 执行
+                     l2p_handle 按档位踢 ≤ L2P_FLUSH_MAX_BUSY(1) 条写回
+                     假设耗时 120 µs ⇒ charge 120，remaining 580 ≥ 250 → 继续
+  表序 7 Journal   : 掩码不含 → 跳过
+  表序 8 BBT       : 掩码不含 → 跳过
+  表序 9 CP 触发   : 掩码不含 → 跳过
+  ⇒ 本轮实际发生：最多 6 次 must-run kick（多数是空操作）+ 1 条 L2P 写回命令
+```
+
+对照 **IDLE** 档（host 空闲）：`total = 2000`、四项预算任务全开 ⇒ L2P 写回最多 4 条、
+Journal 刷页、BBT、CP 触发依次执行，剩余预算 < 250 µs 即截断。host 空闲时后台跑满。
+
+**BUSY 档为什么只留 L2P 写回**：写回是**释放 L2P 缓存行**的唯一途径——它是写路径的
+依赖项，不是“可选优化”。其余三项（Journal 刷页 / BBT / CP 触发）停在 BUSY 不会让 host
+卡住：Journal 页满时 `jrn_append` 自己会起刷页（§3.9.4），BBT 攒批、CP 有紧急水位兜底。
+
+#### 3.12.6 主循环
 
 ```mermaid
 flowchart TB
@@ -3378,31 +3451,39 @@ flowchart TB
         S4 -- "否" --> S6["bg_scheduler_level_select 选档"]
         S6 --> S7["bg_scheduler_run"]
         S7 --> S8["Pass 0 must-run"]
-        S7 --> S9["Pass 1 interval 预算 表序"]
+        S7 --> S9["Pass 1 预算 表序"]
     end
     P2 --> S1
 ```
 
-#### 3.12.5 关键流程
+#### 3.12.7 关键流程
 
 1. 主循环：`cli_service_poll` → `ftl_service_pump` → 逐实例 `ftl_service`。
 2. 档位选择：`inflight = pend_slot_get_count + pend_group_get_count`；0 → IDLE；
-   `pending > 16` 或 `queued != 0` → BUSY；否则 NORMAL。
+   `pending > FTL_PENDING_MAX/2` 或 `queued != 0` → BUSY；否则 NORMAL。
 3. Pass 0：按表序跑所有 `must_run`，无条件、不计预算。
-4. Pass 1：按表序扫预算任务；掩码允许、interval 到点才跑；`charge = MIN(elapsed, budget)`；
-   剩余预算 < 250 µs 即截断。
+4. Pass 1：按表序扫预算任务；**本档位掩码允许**才跑；`charge = MIN(elapsed, budget)`；
+   剩余预算 < `BG_MIN_TASK_BUDGET_US`（250 µs）即截断。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
 
-#### 3.12.6 失败语义
+#### 3.12.8 与相邻章节的关系（读本节前先看这三条）
+
+| 相邻章节 | 关系 |
+|---|---|
+| **§3.9.5 读子操作 / `l2p_defer`** | 前台 `ftl_drain_group` 能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（`l2p_cache_any_inflight`），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（RISK-HOST-14 的环形等待） |
+| **§3.10 完成派发面（`ftl_op`）** | `ftl_op_seq_gate` 决定**后台提交能否成功**：cache 序列 `active/draining` 期间只放行所有者；被拒的 kick 返回 FTL_AGAIN，本轮白跑、下轮重试 |
+| **§3.11 页打包写缓冲（wbuf）** | `wb_handle(MAYBE_FLUSH_IDLE)` 属于 **Phase 2.5**（host IO 收尾），不在本节的 Phase 3；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
+
+#### 3.12.9 失败语义
 
 | 情况 | 结果 | 影响 |
 |---|---|---|
 | 某任务提交被背压 | kick 保留状态，下轮重试 | 后台变慢，不影响正确性 |
 | must-run 任务自身卡死 | 心跳日志（job phase/age）暴露 | 由各 job 的 stall 上限中止 |
-| 时钟缺失 | 无 interval/预算门控 | 后台更频繁，靠内部事件门防刷屏 |
+| 时钟缺失 | 无预算门控 | 后台更频繁，靠内部事件门防刷屏 |
 | `bg_suspend` 置位 | Phase 3 整体跳过 | 只能复位恢复（诊断/擦片后） |
 
-#### 3.12.7 常量与出处
+#### 3.12.10 常量与出处
 
 | 常量 | 值 | 来源 |
 |---|---|---|
@@ -3412,16 +3493,15 @@ flowchart TB
 | `GC_LOG_INTERVAL_MS` | 1000 | `include/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
 | `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
+| `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） | `include/ftl/pending.h` |
 | 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_scheduler.c` |
 | `BG_MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
-#### 3.12.8 主流对照
+#### 3.12.11 主流对照
 
-“主循环 + 独立后台调度器 + 每任务 interval/预算/优先级”是主控固件的常见形态
+“主循环 + 独立后台调度器 + 每任务预算/优先级”是主控固件的常见形态
 （SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定预算
 （不是连续带宽调节）与 must-run 集合的划分。
-
----
 
 <a id="s3-13" name="s3-13"></a>
 
@@ -4609,9 +4689,7 @@ flowchart TD
     E1 --> F["Pass 1 预算任务"]
     F --> F1{"掩码允许"}
     F1 -- "否" --> G["下一任务"]
-    F1 -- "是" --> DUE{"interval 到点"}
-    DUE -- "否" --> G
-    DUE -- "是" --> F3["执行 kick 提交即返回"]
+    F1 -- "是" --> F3["执行 kick 提交即返回"]
     F3 --> F4["charge 为 MIN elapsed, budget"]
     F4 --> F5{"剩余预算不足 250µs"}
     F5 -- "是" --> H["截断"]
@@ -5076,9 +5154,9 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 项 | 内容 |
 |---|---|
 | 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
-| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务 interval + 预算 + must-run |
+| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务预算 + must-run |
 | 选择 | **10 项任务表：6 must-run（不 gate、不占预算）+ 4 预算任务；三级负载→固定预算/掩码** |
-| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按 interval/优先级/总预算截断；前台保护是确定性的（条数/掩码），不依赖 µs 计时 |
+| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/总预算截断；前台保护是确定性的（条数/掩码），不依赖 µs 计时 |
 | 主流 | 主控固件常见“poller + 后台调度器 + 每任务预算”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时退化为无门控 |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |

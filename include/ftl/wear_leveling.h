@@ -38,7 +38,7 @@
  *   （drivers/mtd/ubi/Kconfig / wl.c）。默认值面向高耐久 SLC；本器件无本地 P/E 一手
  *   数据，按本仓磨损量级取 200（本仓自拟，不是器件规格）。上板观察后可调。 */
 
-/* 静态 WL 的**求值节拍**（调度器 interval_ms）：判据要扫 Closed 列表 + Free Pool，
+/* 静态 WL 的**求值节拍**（由 migrate handle 自持，不在后台调度器任务表里）：判据要扫 Closed 列表 + Free Pool，
  * 不能每轮都跑。静态 WL 本身是慢过程，5 s 一次足以收敛，同时把 4096 块扫描的
  * CPU 成本压到可忽略。 */
 #define WL_EVAL_INTERVAL_MS (5000U)

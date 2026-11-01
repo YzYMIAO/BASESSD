@@ -5,7 +5,7 @@
  * bg_scheduler — 时间预算后台调度器（通用引擎 + FTL 任务表/档位策略）
  *
  * 一个模块同时承载两层内容：
- *   · 引擎：must-run pass + 预算 pass（interval 门 / charge 计账 / 预算不足截断）。
+ *   · 引擎：must-run pass + 预算 pass（charge 计账 / 预算不足截断）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
  *     void(ftl_ctx_t*)）+ 档位→预算映射（s_bg_level_cfg）+ 档位选择
  *     （bg_scheduler_level_select）+ Phase 3 入口（bg_scheduler_service）。
@@ -17,19 +17,17 @@
  * 脱离 FTL 头文件独立编译。
  *
  * 关键语义：
- *   · must_run = 正确性关键集（清单见 s_bg_tasks）：**无条件每轮跑、不受
- *     interval 门控、不占预算**——它们是防死锁/防 host 读挂起的动作，删了系统会挂。
- *   · interval_ms = 最小执行间隔；0 = 不设调度器级间隔（任务内部事件门管节流，如
- *     journal 的页满门）。last_run_ms == 0 作「尚未运行」哨兵 ⇒ 立即跑。
+ *   · must_run = 正确性关键集（清单见 s_bg_tasks）：**无条件每轮跑、不占预算**
+ *     ——它们是防死锁/防 host 读挂起的动作，删了系统会挂。
  *   · task_mask = 本档位允许的预算任务位集合（BG_IDLE/NORMAL/BUSY_TASKS 预设）；
  *     每个表项用 `.mask` 声明自己的位，表序只决定执行顺序。
  *   · budget_us = 单次**计账上限**（charge = MIN(elapsed, budget_us)），不是执行中断/
  *     硬钳制：任务函数跑到返回为止，超出的时间只是不被计入 charge。
  *     ⚠ kick 全部「提交即返回」⇒ elapsed 只反映 CPU 时间（平台 time_us 实测 SysTick
  *     1ms 量化）；**确定性前台保护由档位 → l2p 条数/任务掩码承担**（见本文件策略段）。
- *   · 时钟缺失（time_us 缺失或恒 0）：interval 门与预算计账一并失效——last_run_ms 恒 0
- *     ⇒ 每轮都跑、elapsed=0 永不截断，即「无门控」，靠各任务内部单飞行/脏位/事件门
- *     防刷屏。⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
+ *   · 时钟缺失（time_us 缺失或恒 0）：预算计账失效——elapsed=0 永不截断，即
+ *     「无门控」，靠各任务内部单飞行/脏位/事件门防刷屏。
+ *     ⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
  */
 
 #include "ftl_type.h"  /* bg_level_e */
@@ -56,12 +54,10 @@ typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
 
 typedef struct
 {
-    bg_task_func_t func;        /* 适配器（FTL 策略段定义） */
-    DWORD          mask;        /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；budget pass 按档位 task_mask 选择 */
-    DWORD          interval_ms; /* 最小执行间隔；0 = 不设调度器级间隔（内部事件门管） */
-    DWORD          last_run_ms; /* 上次运行时刻；0 = 尚未运行 ⇒ 立即跑（哨兵） */
-    WORD           budget_us;   /* 单次计账上限：charge = MIN(elapsed, budget_us) */
-    bool           must_run;    /* true = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
+    bg_task_func_t func;      /* 适配器（FTL 策略段定义） */
+    DWORD          mask;      /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；budget pass 按档位 task_mask 选择 */
+    WORD           budget_us; /* 单次计账上限：charge = MIN(elapsed, budget_us) */
+    bool           must_run;  /* true = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
 } bg_task_t;
 
 /* 档位 → 预算规模（FTL 策略表，引擎不持有） */
@@ -88,7 +84,7 @@ typedef struct
 /* ── 引擎接口 ── */
 
 /**
- * @brief 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
+ * @brief 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算（**表序即优先级**，预算不足截断）。
  *
  * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
  * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。

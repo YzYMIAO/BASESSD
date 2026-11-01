@@ -1,25 +1,13 @@
 /*
- * bg_scheduler.c — 时间预算后台调度器（通用引擎 + FTL 任务表/档位策略）
+ * bg_scheduler.c — 时间预算后台调度器：引擎 + FTL 任务表/档位策略
  *
- * 文件分两段：
- *   · 引擎：只管理「must-run pass + 预算 pass」的机械执行（interval 门 / charge 计账 /
- *     表序优先），不知道任何具体后台任务。
- *   · FTL 策略：s_bg_tasks 任务表 + 10 个 static 适配器（把异构 kick 包成
- *     void(ftl_ctx_t*)）+ 档位→预算映射（s_bg_level_cfg）+ 任务表装载
- *     （bg_scheduler_init）+ 档位选择 + Phase 3 入口。
+ * 本文件两段：
+ *   · 引擎（本段）：机械执行 Pass 0 must-run + Pass 1 预算任务，不认识任何具体任务。
+ *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_tasks + 档位表 s_bg_level_cfg
+ *     + 装配 / 选档 / Phase 3 入口。
  *
- * 两个 pass：
- *   · Pass 0（must-run）：正确性关键集无条件每轮跑——不 gate、不占预算。
- *   · Pass 1（预算）：按优先级（表序）执行预算任务；interval 未到 / 本档位掩掉 / 预算
- *     耗尽即截断。elapsed 预算时钟 = 平台 time_us；时钟缺失时退化为「无门控」。
- *
- * 正确性关键集（must_run）无条件每轮跑、不 gate、不占预算——删了系统会挂：
- *   cp_handle / rr / mig_handle / metadata_dir / journal need_erase / 紧急 CP。
- * 全表每项的 interval / must_run / budget 依据见 bg_scheduler.h 头注与下方各适配器注释。
- *
- * ⚠ 每个任务在表项 `.mask` 里携带自己的位；表序只决定执行顺序，不兼职位号。
- * ⚠ 预算时钟 = 平台 time_us（SysTick 1ms 量化）；确定性前台保护由「档位→条数/掩码」
- *   承担（见 s_bg_level_cfg 与 bg_scheduler.h「关键语义」）。
+ * 语义定义（must_run / budget_us / task_mask / 时钟缺失）见 `bg_scheduler.h` 头注，
+ * 设计说明见 `docs/design/ftl_design.md §3.12`——不在此重复，避免两份漂移。
  */
 
 #include "bg_scheduler.h"
@@ -96,7 +84,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
         }
     }
 
-    // Pass 1：预算 + interval + 优先级（表按执行序预排序，线性扫）。
+    // Pass 1：预算 + 优先级（表按执行序预排序，线性扫）。
     const ssd_platform_ops_t *platform         = ssd_platform_get();
     const bool                clock_ok         = (platform != NULL) && (platform->time_us != NULL);
     DWORD                     budget_remaining = cfg->total_budget_us;
@@ -114,18 +102,9 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
             continue; /* 本档位不跑该任务 */
         }
 
-        // interval 门：仅时钟可用时生效；last_run_ms==0 = 尚未运行 ⇒ 立即跑（哨兵）
-        if (clock_ok && (task->interval_ms != 0U))
-        {
-            DWORD now_ms = (platform->time_us() / 1000U);
-            if ((task->last_run_ms != 0U) && ((now_ms - task->last_run_ms) < task->interval_ms))
-            {
-                continue;
-            }
-        }
-
-        // 执行 + 计账：charge = MIN(elapsed, budget_us)。时钟缺失（clock_ok=0 或恒 0）
-        // ⇒ elapsed=0、永不截断 —— 退化为「无门控」，防刷屏靠任务内部事件门。
+        // 执行 + 计账：charge = MIN(elapsed, budget_us)。预算只是**计账上限**，不是
+        // 执行中断：任务跑到返回为止。时钟缺失（clock_ok=0 或恒 0）⇒ elapsed=0、
+        // 永不截断 —— 退化为「无门控」，防刷屏靠任务内部事件门。
         DWORD now_us = clock_ok ? platform->time_us() : 0U;
         task->func(ftl);
         if (clock_ok)
@@ -134,10 +113,6 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
             DWORD charge  = (elapsed < task->budget_us) ? elapsed : task->budget_us;
 
             budget_remaining = (budget_remaining > charge) ? (budget_remaining - charge) : 0U;
-            if (task->interval_ms != 0U)
-            {
-                task->last_run_ms = (platform->time_us() / 1000U);
-            }
         }
 
         if (budget_remaining < BG_MIN_TASK_BUDGET_US)
@@ -254,7 +229,7 @@ static void bg_task_metadata(ftl_ctx_t *ftl)
 }
 
 /**
- * @brief 表 4 · must_run —— 补「未起的换块擦除」（表 9 的子集；表 9 会被 BUSY 掩掉，本项不会）。
+ * @brief 表 4 · must_run —— 补「未起的换块擦除」（表 7 的子集；表 7 会被 BUSY 掩掉，本项不会）。
  * 新环形块没擦过就不能往里写 ⇒ 任何档位都要补，否则 host 写路径卡死。
  * 判据（有无待擦块 / 是否已有 job 在飞）在 journal 模块内，本文件不读其内部字段。
  *
@@ -304,7 +279,7 @@ static void bg_task_l2p_flush(ftl_ctx_t *ftl)
 }
 
 /**
- * @brief 表 9 · 预算 — 推进 Journal 刷页 job（job 已在飞则空操作）。
+ * @brief 表 7 · 预算 — 推进 Journal 刷页 job（job 已在飞则空操作）。
  * BUSY 档被掩掉（host 饱和档不主动起页写；页满时 jrn_append 自己会起）。
  *
  * @param ftl FTL 上下文（推进其 journal 的刷页 job）。
@@ -318,7 +293,7 @@ static void bg_task_journal_flush(ftl_ctx_t *ftl)
 }
 
 /**
- * @brief 表 10 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
+ * @brief 表 8 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
  * typed 入口：状态只走上报结构（本适配器不读 handle 内部）。
  *
  * @param ftl FTL 上下文（传其 alloc 与 bg_info 给 bbt_handle）。
@@ -332,7 +307,7 @@ static void bg_task_bbt(ftl_ctx_t *ftl)
 }
 
 /**
- * @brief 表 11 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
+ * @brief 表 9 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
  * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
  * job 装配由 cp_job_begin（提交即返回），成败由 [CP] 心跳判。
  *
@@ -359,7 +334,7 @@ static const bg_task_t s_bg_tasks[] = {
     {.func = bg_task_journal_erase,  .mask = BG_TASK_JRN_ERASE,   .must_run = true}, /* 新环形块没擦不能写，BUSY 也要补 */
     { .func = bg_task_cp_emergency,   .mask = BG_TASK_CP_EMERG,   .must_run = true}, /* Journal ≥95%，任何档位随时响应 */
 
-  // 表 6..9 · 预算任务：interval 到点 + 本档位掩码放行才跑，占预算。
+  // 表 6..9 · 预算任务：本档位掩码放行才跑，占预算。
   // GC/WL/predict 由 migrate handle 自持节拍（docs §4.4），不单列任务。
     {    .func = bg_task_l2p_flush,  .mask = BG_TASK_L2P_FLUSH, .budget_us = 1500U},
     {.func = bg_task_journal_flush,  .mask = BG_TASK_JRN_FLUSH,  .budget_us = 700U},
