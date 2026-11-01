@@ -344,7 +344,7 @@ FC_CW_STATUS_RAID_ERROR  // (1<<3) RAID 恢复失败
 FC_CW_STATUS_MATA_ERROR  // (1<<4) META 校验错误
 FC_CW_STATUS_CRC_ERROR   // (1<<5) CRC 校验错误
 FC_CW_STATUS_UNC         // (1<<6) 不可纠正错误
-FC_CW_STATUS_EMPTY       // (1<<7) 空页（整条 CW 全 0xFF，从未编程）；不是错误位
+FC_CW_STATUS_EMPTY       // (1<<7) 空页（整条 CW 的 1 比特占比 ≥99%，从未编程）；不是错误位
 // bit1/2 保留
 ```
 
@@ -369,7 +369,10 @@ FC_CMD_STATUS_WP         // (1<<7) 70h WP（0=protected，1=not protected）
 ⚠ `post` 不一定是 70h：`BLOCK_LOCK_STATUS` 的 7Ah 字节也经 `DATA_OUT_STATUS` 进
 `nand_status`（bit0 是 LT，不是 FAIL），FC **不**按 FAIL/FAILC 映射该 op，只由其执行结果判成败。
 
-**`EMPTY` 的含义**：整条 CW（META+CRC+USER+ECC）全 0xFF ⇒ 该页**从未编程**。
+**`EMPTY` 的含义**：整条 CW（META+CRC+USER+ECC，528 B）的 **1 比特占比 ≥ 99%** ⇒ 该页**从未编程**。
+阈值推导：加扰后的数据页 ≈50%；不加扰的元数据页即便 USER 全 0xFF，META+CRC+parity 也必写非 FF
+⇒ 上界 ≈97%；擦除页 100%。取 99% 既容忍擦除页 ~42 bit 读扰动，也不误判编程过的页。
+⚠ 判据只在**解码路径**成立：RAW 读（LDPC_RAW）跳过 ECC，不产生本状态。
 全 0xFF 不是合法 BCH 码字，解码必然失败；若不单独识别就会报成 `UNC`，GC 读到半写块
 的空洞页时会把整块误标坏块（`RISK-GC-11`）。识别发生在 `fc_data_path_process_read()`
 Pass 1 解码失败之后：置 `EMPTY` 并跳过解扰 / CRC / META 三项。

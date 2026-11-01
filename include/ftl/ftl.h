@@ -138,20 +138,62 @@ typedef enum
  * 的尾页 + 余量。满了写路径返回 AGAIN，等完成泵结算。 */
 #define FTL_CACHE_SEQ_RING (16U)
 
-/* 写序列的逐页确认状态（读序列不用）。
- * 缓存程序是流水线：第 i 页的最终结果由**第 i+1 条命令**的 FAIL_CACHE 给出，
- * END（10h）的 FAIL 给出最后一页的结论。因此已提交页在下一条命令完成前都不能
- * 确认映射，必须按提交顺序排队。 */
+/* 写序列的「已编程页表」（读序列不用）。
+ *
+ * 缓存程序是流水线：第 i 页的编程结论由**第 i+1 条命令**的 FAIL_CACHE 给出，
+ * END（10h）的 FAIL 给出最后一页的结论。早回执（RISK-CACHE-27）把**组完成**从
+ * 「等到 FAILC」提前到「本页命令完成」，因此本表要在窗口内记住每页的落点：
+ *   · 读路径靠它把 LBA 指到刚编程的页（此时 L2P 可能还没确认）；
+ *   · 后续 FAILC 判失败时靠它撤销（RISK-CACHE-28）。
+ * 环按**提交顺序**；head 是最老、尚未被弹出（= 尚未「已证明且已确认」）的页。
+ * 结论的落点不是 head，而是独立的结论游标——确认可能背压滞后，head 会停在
+ * 「已证明、等确认」的页上（见 ftl_cache_wr_t.pend_idx）。 */
+typedef enum
+{
+    FTL_CACHE_PAGE_PROGRAMMED = 0, /* 已编程；待确认（Journal→L2P→BST） */
+    FTL_CACHE_PAGE_CONFIRMED,      /* 已进 L2P；等后继证明 */
+    FTL_CACHE_PAGE_FAILED,         /* 后继 FAILC 判失败；等撤销（L2P 失效 + region 降级） */
+} ftl_cache_page_state_e;
+
 typedef struct
 {
-    BYTE unconf[FTL_CACHE_SEQ_RING]; /* 未确认页的 pending 槽下标（提交顺序） */
-    BYTE head;                       /* 队头环形下标 */
-    BYTE count;                      /* 未确认页数 */
+    DWORD lba;       /* 页基址 */
+    DWORD pba0;      /* plane0 的真实 PBA（Policy B 下两 plane 块号不同，不可用
+                      * pba_with_plane 从 plane0 推导） */
+    DWORD pba1;      /* plane1 的真实 PBA */
+    BYTE  cw_bitmap; /* 本页覆盖的 CW（通常 FTL_CACHE_FULL_CW） */
+    BYTE  state;     /* ftl_cache_page_state_e */
+    bool  proven;    /* 后继命令的 FAIL 结论已到、且成功（END 由自身 STATUS 证明） */
+} ftl_cache_page_t;
+
+typedef struct
+{
+    ftl_cache_page_t page[FTL_CACHE_SEQ_RING]; /* 已编程页（提交顺序） */
+    BYTE             head;                     /* 队头环形下标（确认/弹出的起点） */
+    BYTE             count;                    /* 已编程未证明的页数 */
+
+    /* 结论游标：**下一条 cache 命令的 FAIL_CACHE 结论落在哪一页**。
+     *
+     * 不能用 head 代替：结论按页序到达，而确认（Journal→L2P）可能背压滞后，
+     * head 会停在「已证明、等确认」的页上；此时再用 head 承接新结论，会让该页
+     * 被重复证明、而真正待证的页永远等不到结论（环排不空 ⇒ flush 超时）。
+     * 环形下标是绝对下标（pop 只动 head/count，不搬元素），所以不会因弹出而漂移；
+     * 该页未证明前不可能被弹出。 */
+    BYTE pend_idx;   /* 待结论页的 page[] 绝对下标 */
+    bool pend_valid; /* false = 没有待结论页（新序列首条 / END 页自身已证明） */
 } ftl_cache_wr_t;
 
 typedef struct
 {
     ftl_cache_seq_kind_e kind;
+    BYTE                 gen; /* 写序列代号：**中止时**递增。cache 成员的完成带自己的
+                               * 代号，与当前代号不一致 ⇒ 迟到完成（序列已死），只结算
+                               * 组、不碰页表。正常开新序列不递增：迟到的 END 页
+                               * （proven）与新页表关系明确，递增反而误判合法完成。 */
+    BYTE wr_inflight;         /* 已下发、尚未完成的 cache 写成员数（提交时 +，完成时 -）。
+                               * 页在**完成时**才进页表，只看 wr.count 会漏掉仍在编程
+                               * 的页：flush 屏障与「开新序列」都必须等它归零
+                               * （RISK-CACHE-29）。 */
 
     /* ⚠ 偏离 H32（P5 留痕）：active / draining / closing 是**同一设备管线**的
      * 互斥状态，这里沿用既有 bool 组而不是互斥枚举（改动面大且需同步全部判定点）；
@@ -208,34 +250,31 @@ typedef struct
  */
 void ftl_cache_seq_release(struct ftl_context *ftl);
 
-/* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）── */
-/**
- * @brief 把一页的 pending 槽压入未确认 FIFO。
+/* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）──
  *
- * @param ftl 实例。
- * @param idx pending 槽下标。
- *
- * @return true = 已入队；false = FIFO 满（调用者应视为资源不足）。
+ * 早回执（RISK-CACHE-27）：页在**自身命令完成**时入表（提交时不压 pending 下标），
+ * 组的完成也不等后继 FAILC。表的用途见 ftl_cache_page_t 的注释。
  */
-bool ftl_cache_wr_ring_push(struct ftl_context *ftl, BYTE idx);
+/**
+ * @brief 读覆盖层：该 LBA 是否有「已编程、尚未进 L2P」的页。
+ *
+ * @param ftl     实例。
+ * @param lba     全局 host LBA。
+ * @param out_pba 命中时写入该 LBA 所在 plane 的页基址 PBA（调用者再按 cw 取）。
+ *
+ * @return true = 命中，读必须走 out_pba。
+ */
+bool ftl_cache_wr_lookup(const struct ftl_context *ftl, DWORD lba, DWORD *out_pba);
 
 /**
- * @brief 弹出最早未确认页的 pending 槽下标。
+ * @brief 该 LBA 是否落在**已判失败、尚未撤销**的 cache 页上。
  *
  * @param ftl 实例。
+ * @param lba 全局 host LBA。
  *
- * @return 待结算页的 pending 下标；UINT8_MAX = FIFO 空。
+ * @return true = 读该 LBA 必须报 IO_ERROR（撤销完成前 L2P 可能仍指着失败页）。
  */
-BYTE ftl_cache_wr_ring_pop(struct ftl_context *ftl);
-
-/**
- * @brief 中止写序列：未确认页一律按 IO_ERROR 结算、关闭 hot SB、清序列状态。
- *
- * @param ftl 实例。
- *
- * @note 只结算仍在本序列 FIFO 里的页；已经由后继命令结算的页不受影响。
- */
-void ftl_cache_wr_abort(struct ftl_context *ftl);
+bool ftl_cache_wr_failed_covers(const struct ftl_context *ftl, DWORD lba);
 
 typedef struct ftl_context
 {
@@ -275,6 +314,11 @@ typedef struct ftl_context
      *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
      * 指针，由 storage 提供；落 SRAM3。 */
     cp_handle_t *cp_handle;
+
+    /* volatile write cache 的**延后错误**（RISK-CACHE-27）：已回执的 cache 页后来
+     * 被判失败时置位；由下一次 ftl_submit_read/write 返回 FTL_ERROR 一次并清零，
+     * 控制器经 ftl_take_deferred_error() 消费（RISK-USBC-01 的 FTL 侧对应物）。 */
+    bool deferred_error;
 
     /* 统计 */
     DWORD total_writes;
@@ -493,6 +537,18 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  * @return FTL_OK    已受理
  *         FTL_ERROR 立即失败
  */
+/**
+ * @brief 取走并清除「延后错误」标志（volatile write cache 语义）。
+ *
+ * @param ftl 实例。
+ * @return true = 上一次已回执的写后来被判失败；调用者应在**下一条**能承载状态的
+ *         host 命令上上报一次错误（控制器 `usb_msc_take_deferred_error` 消费）。
+ *
+ * @note 早回执后组在页编程完成时就报 OK，FAILC 要晚一条命令才到；这条通道就是把
+ *       那个迟到的结论交回给控制器的唯一出口（RISK-USBC-01 的 FTL 侧对应物）。
+ */
+bool ftl_take_deferred_error(ftl_ctx_t *ftl);
+
 ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
 /**

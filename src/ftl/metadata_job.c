@@ -200,18 +200,18 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
     }
 }
 
-DWORD md_slot_take(md_dir_cache_t *dir)
+DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
 {
-    if ((dir->cur_block_valid == false) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
+    if ((plane >= PLANE_NUM) || (dir->cur_valid[plane] == false) || (dir->cur_page[plane] >= PAGES_PER_BLOCK))
     {
         return NAND_PBA_INVALID;
     }
 
-    const BYTE page = dir->cur_metadata_page;
+    const BYTE page = dir->cur_page[plane];
 
-    dir->cur_metadata_page++;
+    dir->cur_page[plane]++;
 
-    return md_block_page_to_pba(dir, dir->cur_metadata_block, page);
+    return md_block_page_to_pba(dir, dir->cur_block[plane], page);
 }
 
 void md_handle_reset(md_dir_cache_t *dir)
@@ -222,6 +222,9 @@ void md_handle_reset(md_dir_cache_t *dir)
     // 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。
     const DWORD   reclaimed  = dir->handle.reclaimed_count;
     const int32_t last_error = dir->handle.error;
+
+    // 放弃本 job 可能持有的 Anchor 单飞锁（prepare 之后没走到 commit）。
+    md_anchor_abort(dir, MD_ANCHOR_OWNER_MD);
 
     memset(&dir->handle, 0, sizeof(dir->handle));
     dir->handle.victim              = UINT16_MAX;
@@ -334,7 +337,7 @@ static bool md_handle_stall(md_dir_cache_t *dir)
 
     // cache 序列打开时，后台提交被门控拒绝是**预期**等待：序列在下一窗口/下一 chunk
     // 收尾（空闲守卫 1 s 兜底），不应当作提交卡死而中止 job（也会刷屏）。
-    if (ftl_op_cache_seq_active() == true)
+    if (ftl_op_bg_submit_deferred() == true)
     {
         j->stall_ms = 0U;
         return false;
@@ -529,9 +532,13 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
         {
             continue; /* 零活块：reclaim 的活，直接擦，不必搬 */
         }
-        if (dir->cur_block_valid && (g == dir->cur_metadata_block))
         {
-            continue; /* 当前写块正在被追加，不搬 */
+            const BYTE p = ftl_gblock_plane(g);
+
+            if ((p < PLANE_NUM) && dir->cur_valid[p] && (g == dir->cur_block[p]))
+            {
+                continue; /* 该 plane 的当前写块正在被追加，不搬 */
+            }
         }
 
         const bst_block_t *b = &alloc->blocks[g];
@@ -565,7 +572,7 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
  * @note 实现要点：**无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
  * 又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
  * 空槽预算在此**重算**（不在 append_slot 置位时算）：置位到本函数之间可能
- * 又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_metadata_page 核才准。
+ * 又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_page[victim 的 plane] 核才准。
  * ⚠ 已知良性竞态：job 启动前已发出、尚未 commit 的前台 region 写可能在扫描期间落回
  * victim ⇒ 实际需搬数超过本预算 ⇒ md_compact_write 取不到槽 ⇒ 中止。已登记 region
  * 指向新页、victim 不擦，无数据损失，只是本次压缩重来。
@@ -576,16 +583,23 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
 
     j->compact_wanted = false;
 
-    if (dir->cur_block_valid == false)
-    {
-        return MD_COMPACT_NO_CURRENT; /* 无当前写块：无处可搬 */
-    }
-
     WORD victim = md_compact_victim_find(dir, alloc);
 
     if (victim == UINT16_MAX)
     {
         return MD_COMPACT_NO_VICTIM; /* 全池零活（reclaim 已管）或只剩当前块 */
+    }
+
+    // 记下 victim：失败路径（NO_CURRENT / NO_SLOTS）由调用者按它的 plane 换块。
+    j->victim = victim;
+
+    // 搬移目标 = **victim 所在 plane 的当前块**：副本搬完仍留在同一 plane，
+    // 主/备各占一个 plane 的布局不被压缩破坏。
+    const BYTE victim_plane = ftl_gblock_plane(victim);
+
+    if ((victim_plane >= PLANE_NUM) || (dir->cur_valid[victim_plane] == false))
+    {
+        return MD_COMPACT_NO_CURRENT; /* 该 plane 无当前写块：无处可搬 */
     }
 
     // 空槽预算：victim 的全部活 region 必须一次装进当前块（l2p_live 的定义就是
@@ -595,7 +609,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     // 不预留时，在飞写落回 victim 会让实际需搬数超过预算 ⇒ md_slot_take 取不到槽 ⇒
     // 本次压缩中止（良性但白做）。预留槽把该竞态从「中止」降为「容量少两页」。
     // 代价：victim 活 region 数等于剩余槽位时本轮到不了它，换块后再来。
-    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_metadata_page);
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_page[victim_plane]);
     const WORD need_slots = (dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS);
 
     if (need_slots > free_slots)
@@ -612,7 +626,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->stall_ms   = 0U;
     j->phase      = MD_JOB_CP_READ;
 
-    LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur_metadata_page);
+    LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur_page[victim_plane]);
 
     return MD_COMPACT_STARTED;
 }
@@ -702,12 +716,15 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
 
     if (j->slot == NAND_PBA_INVALID)
     {
-        j->slot = md_slot_take(dir);
+        // 搬到 **victim 所在 plane** 的当前块（副本留在原 plane）。
+        const BYTE plane = ftl_gblock_plane(j->victim);
+
+        j->slot = md_slot_take(dir, plane);
         if (j->slot == NAND_PBA_INVALID)
         {
-            // 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
+            // 该 plane 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
             // "启动前已在飞的前台写落回 victim"：中止是安全的（victim 不擦）。
-            LOGW(LOG_TAG_META "compact: 当前块无空槽 (page=%hhu) — 中止\r\n", dir->cur_metadata_page);
+            LOGW(LOG_TAG_META "compact: 当前块无空槽 (plane=%hhu page=%hhu) — 中止\r\n", plane, (plane < PLANE_NUM) ? dir->cur_page[plane] : 0U);
             return MD_COMPACT_FAILED;
         }
     }
@@ -748,7 +765,14 @@ static bool md_compact_next(md_dir_cache_t *dir, const alc_t *alloc)
         return false;
     }
 
-    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_metadata_page);
+    const BYTE plane = ftl_gblock_plane(victim);
+
+    if ((plane >= PLANE_NUM) || (dir->cur_valid[plane] == false))
+    {
+        return false;
+    }
+
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_page[plane]);
     const WORD need_slots = (dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS);
 
     if (need_slots > free_slots)
@@ -767,6 +791,34 @@ static bool md_compact_next(md_dir_cache_t *dir, const alc_t *alloc)
 /* ══════════════════════════════════════════════════════════════════
  * 四、job 状态机
  * ══════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief 待回收队列是否该**立即**擦（懒擦门控）。
+ *
+ * 开机时 `md_log_area_restore` 把日志区**全部**非活块登记为回收候选（不读介质判空，
+ * 见 RISK-IF-15），其中多数本来就是擦除态。若立即全擦，等于每次开机白付几十次
+ * P/E；而其中只有「空闲块不足水位」的那部分才是真需要补的。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器（读固定日志区空闲块数）
+ *
+ * @return true  = 该擦（空闲块低于水位，或有借来的日志块待归还）
+ *         false = 候选留在队列里，等水位降下来再擦
+ *
+ * @note 借用块例外：从 OP 池借来的日志块占用有上限的借用配额（L2P_LOG_BORROW_MAX），
+ *       必须擦完归还，否则压缩再也拿不到目标块（RISK-MD-08）。
+ */
+static bool md_reclaim_is_eager(const md_dir_cache_t *dir, const alc_t *alloc)
+{
+    // 擦到「多于水位」为止：水位本身正是压缩触发点（`free <= WATERMARK ⇒ compact`），
+    // 停在等于水位会让压缩在开机后一直空转。
+    if (md_log_area_free_count(alloc) <= L2P_LOG_FREE_WATERMARK)
+    {
+        return true;
+    }
+
+    return (dir->log_borrow_count != 0U);
+}
 
 /**
  * @brief 推进整理 job 一步（每轮服务循环调一次）。见 metadata.h 的 md_handle 注释。
@@ -808,7 +860,7 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 j->error = (int32_t)FTL_OK; /* 新 job 起点：清上一次的失败归因 */
 
-                if (dir->reclaim_pending_count != 0U)
+                if ((dir->reclaim_pending_count != 0U) && md_reclaim_is_eager(dir, alloc))
                 {
                     // ③→④ 契约（同压缩路径）：普通 L2P flush 在活计数归零时就登记了
                     // 回收候选，但新位置只在 RAM Directory 里。擦除前必须先把当前
@@ -850,7 +902,10 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                     if ((no_slot || no_cur) && at_floor)
                     {
-                        (void)md_log_rotate(dir, alloc);
+                        // 换 **victim 所在 plane** 的当前块（搬移目标就在那个 plane）。
+                        const BYTE vp = (j->victim != UINT16_MAX) ? ftl_gblock_plane(j->victim) : 0U;
+
+                        (void)md_log_rotate(dir, alloc, (vp < PLANE_NUM) ? vp : 0U);
                     }
                     return;
                 }
@@ -862,6 +917,15 @@ static void md_handle_step(md_dir_cache_t *dir)
                 // Anchor 落后于 Directory（登记之后、擦除之前又有 commit）⇒ 不能擦；
                 // 回 IDLE，下一轮先写 Anchor（上面的 dirty 分支）。
                 if (dir->dirty)
+                {
+                    j->phase = MD_JOB_IDLE;
+                    break;
+                }
+
+                // 懒擦门控（同 IDLE 分支的判据）：空闲块够用就**不擦**，候选留在队列里。
+                // 开机把日志区全部非活块登记为候选，其中多数本来就是擦除态——立即全擦
+                // 等于每次开机白付几十次 P/E。
+                if (md_reclaim_is_eager(dir, alloc) == false)
                 {
                     j->phase = MD_JOB_IDLE;
                     break;
@@ -948,12 +1012,18 @@ static void md_handle_step(md_dir_cache_t *dir)
                 // ③ Anchor：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
                 // 唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。
                 md_anchor_prepare_out_t anchor;
-                md_anchor_step_e        r = md_anchor_prepare(dir, &anchor);
+                md_anchor_step_e        r = md_anchor_prepare(dir, &anchor, MD_ANCHOR_OWNER_MD);
 
                 if (r == MD_ANCHOR_FAILED)
                 {
                     md_handle_abort(dir);
                     break;
+                }
+                if (r == MD_ANCHOR_BUSY)
+                {
+                    // 另一个 writer（CP job）正在写 Anchor：背压重试（RISK-MD-06）。
+                    (void)md_handle_stall(dir);
+                    return;
                 }
                 if (r == MD_ANCHOR_CLEAN)
                 {
@@ -1057,6 +1127,9 @@ static void md_handle_step(md_dir_cache_t *dir)
                 if (md_erase_submit(dir, addr) != FTL_OK)
                 {
                     (void)md_handle_stall(dir);
+                }
+                else
+                {
                 }
                 return;
             }

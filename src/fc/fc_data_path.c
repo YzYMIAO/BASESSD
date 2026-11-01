@@ -9,7 +9,7 @@
  *     NAND Read 完成后、CQ push 前，FC 内部自动调用。
  *     遍历 desc 链：ECC 解码 → 更新 desc->status。
  *     全部成功才解扰；有失败则保持加扰（供 RAID XOR 在 scrambled domain 恢复）。
- *     **擦除页单独识别**（整条 CW 全 0xFF ⇒ FC_CW_STATUS_EMPTY）：它不是读错误，
+ *     **擦除页单独识别**（整条 CW 的 1 比特占比 ≥ 99% ⇒ FC_CW_STATUS_EMPTY）：它不是读错误，
  *     跳过解扰/CRC/META 校验；否则 GC 读到半写块的空洞页会把整块误标坏（RISK-GC-11）。
  *
  *   Stage 2: fc_data_path_raid_recover()
@@ -40,28 +40,42 @@
 #include <stddef.h>
 #include <string.h>
 
-/**
- * @brief 判断一条 CW 缓冲是否为**擦除页**（整条 528B 全 0xFF）。
+/* 擦除页判据的阈值：整条 CW（528B = 4224 bit）中「1」的占比，单位 %。
  *
- * @param cw 528B CW buffer。
+ * 推导（三种页的 1 占比）：
+ *   · 数据页     —— 写入时 RANDOM_ENABLE 加扰 ⇒ 约 50%；
+ *   · 元数据页   —— 不加扰，但 META(4B) + CRC(4B) + ECC parity(8B) 必写非 FF
+ *                   ⇒ 即使 USER 区全是 0xFF，1 占比上界 ≈ 1 - 16/528 ≈ 97%；
+ *   · 擦除页     —— 100%（读扰动只让极少数位变 0）。
+ * 取 99%：与「编程过的页」最近的情形（97%）留 2 个百分点，同时容忍擦除页
+ * 最多 42 bit 的读扰动。
+ * 方向性：阈值取低 ⇒ 把编程过的页判成空页（在未擦页上编程，介质损坏）；
+ *         阈值取高 ⇒ 把空页判成写过（多擦一次，只花磨损）。故取高一侧。 */
+#define FC_CW_BLANK_ONES_PCT (99U)
+
+/**
+ * @brief 判断一条 CW 缓冲是否为**擦除页**（1 比特占比 ≥ FC_CW_BLANK_ONES_PCT）。
+ *
+ * @param cw 528B CW buffer（META + CRC + USER + ECC parity）。
  *
  * @return true = 物理上从未编程。
  *
- * @note 实现要点：判据是**整条 CW**（META+CRC+USER+ECC），不是只看 USER 区——
- * 用户数据可能恰好全 0xFF，但那种页的 ECC 校验字节必然不是 0xFF；
- * 只有从未编程的页才整条全 0xFF。
+ * @note 实现要点：判据必须覆盖**整条 CW**，且必须在**解码路径**上用——
+ *   · 只看 USER 区不够：用户数据可能恰好全 0xFF（如整 region 被 TRIM 的 L2P 页）；
+ *   · 在 RAW 读上用也不够：RAW 读刻意跳过 ECC，拿到的只是位，判断空/非空的
+ *     依据（ECC 是否成码字、parity 是否写成）全被跳过了。
  * ⚠ 只在 ECC 解码失败后调用：解码成功的页不解此判据（避免误吞真实数据）。
  */
-static bool fc_cw_is_empty(const BYTE *cw)
+static bool fc_cw_is_blank(const BYTE *cw)
 {
+    DWORD ones = 0U;
+
     for (DWORD i = 0U; i < FC_BUFFER_POOL_CW_SIZE; i++)
     {
-        if (cw[i] != 0xFFU)
-        {
-            return false;
-        }
+        ones += (DWORD)__builtin_popcount((unsigned)cw[i]);
     }
-    return true;
+
+    return ((ones * 100U) >= (FC_BUFFER_POOL_CW_SIZE * 8U * FC_CW_BLANK_ONES_PCT));
 }
 
 #if CONFIG_FC_RAID
@@ -407,8 +421,8 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  * 读路径 Stage 1 — FC 内部，CQ push 前
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：- Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 全 0xFF 的
-// 擦除页不算失败，置 BLANK 后由后续 Pass 跳过。
+// 实现要点：- Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 的 1 比特
+// 占比 ≥ 99%（见 fc_cw_is_blank）的擦除页不算失败，置 EMPTY 后由后续 Pass 跳过。
 // - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
 // - Pass 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外），
 // 故 GC / 掉电重建不必预先知道 LBA。
@@ -459,7 +473,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
             if (result == FC_STATUS_IO_ERROR)
             {
-                if (fc_cw_is_empty(buffer))
+                if (fc_cw_is_blank(buffer))
                 {
                     // 擦除页：全 0xFF 不是合法 BCH 码字，解码必然失败——但这是
                     // 「页从未编程」，不是读错误。置 BLANK（非错误位），让上层

@@ -358,7 +358,7 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 12 Mbit/s 的 1.5 MB/s 是 host 侧硬顶。优化顺序与判据见 `known_risks.md` RISK-PERF-04。
 
 ⚠ `/speed/` 读数是**吞吐**（含测试图案填充/校验 CPU），不是单命令延迟；munit 的
-`[ OK ] [ 耗时 ]` 受 DWT CYCCNT 回绕影响，速度只看行内 `*_ms`（RISK-UT-05）。
+`[ OK ] [ 耗时 ]` 已改为「平台 ms 数回绕 + DWT 亚毫秒」（RISK-UT-05，2026-10-31 **未上板**）；历史日志里 10.7 s 附近的取模值仍按旧口径解读。速度结论始终只看行内 `*_ms`。
 
 ### 7.4 解释口径
 

@@ -171,7 +171,12 @@ BASE_FLAGS  = $(WARN_FLAGS) $(INC_FLAGS) $(FIRMWARE_CFLAGS)
 
 # 4.4 调试/优化选项（根据BUILD_TYPE）
 ifeq ($(BUILD_TYPE), debug)
-    OPT_FLAGS   = -O0 -g3 -ggdb3
+    # -O2：debug 档只保留「断言生效 + 无 NDEBUG + 完整符号」，不再用 -O0 换调试便利
+    # （断点仍可用；局部变量可能被优化掉）。与 release 的差别收敛为 NDEBUG 与代码放置。
+    # ⚠ 需要 -O0 对照（排查时序敏感缺陷）时显式覆盖：`make tests DEBUG_OPT=-O0`；
+    #   默认值不变，避免「临时改回来的那一次忘了还原」。
+    DEBUG_OPT  ?= -O2
+    OPT_FLAGS   = $(DEBUG_OPT) -g3 -ggdb3
     DBG_FLAGS   = -DDEBUG -D_DEBUG
     APP_SUFFIX  = _debug
 else ifeq ($(BUILD_TYPE), release)

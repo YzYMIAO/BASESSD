@@ -165,11 +165,15 @@ flowchart TD
 - 两个槽（`usb_msc_slot_t`）：每槽 16 KiB bounce（0 号 AXI `.bss`、1 号 DTCM，均 CPU-only）
   + 一个 `ssd_request_t`。bounce 必须活到该槽的 FTL 完成（FTL 可能因背压延后消费）。
 - WRITE = **volatile write cache**：端点缓冲 → 拷进槽 bounce → 提交 → **立即回流控回执**
-  （`tud_msc_async_io_done(length)`，**含一条命令的最后一段**）。主机因此不必等最后一页的
-  `FAIL_CACHE` 就能发下一条命令 ⇒ FTL 的设备 cache 序列可以跨 host 命令延续
+  （`tud_msc_async_io_done(length)`，**含一条命令的最后一段**）。主机因此不必等
+  最后一页的 `FAIL_CACHE` 就能发下一条命令 ⇒ FTL 的设备 cache 序列可以跨 host 命令延续
   （`ftl_design.md` §3.16.5）。槽位保留到 FTL 完成（只回收缓冲，不再发 CSW）。
+  FTL 侧对应地把**组完成点**提前到「页编程完成」（早回执，RISK-CACHE-27）：同一 LBA 在
+  FTL 组完成后立刻读，读覆盖层直读刚编程的页。
   已回执的写段之后失败 ⇒ 置 **deferred error**，由**下一条** READ/WRITE/FLUSH 命令的 CSW
-  失败一次（TinyUSB 不支持自定义 sense，这是本仓近似，见 `known_risks.md` RISK-USBC-01）。
+  失败一次。`usb_msc_take_deferred_error()` **先问各 FTL 实例**（`ftl_take_deferred_error`），
+  再落回控制器自己的标志——早回执后 FAILC 的结论只存在于 FTL 的粘性标志里。
+  （TinyUSB 不支持自定义 sense，这是本仓近似，见 `known_risks.md` RISK-USBC-01。）
   两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）。
 - 打开中的写序列会占用一个槽直到 FTL 收尾（空闲 1 s / 下一条命令 / flush 触发 padding
   END）⇒ `usb_msc_host_busy()`（CLI 用）在此期间为 true，CLI 命令需重试。
@@ -319,7 +323,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 | PA11/PA12 接线未确认 | 无原理图；也可能 PB14/PB15 | 上板枚举失败先换 AF/引脚；用万用表确认 |
 | TinyUSB MSC 异步回调 | 已改用 `TUD_MSC_RET_ASYNC` + `tud_msc_async_io_done`；主机复位时需丢弃在飞结果 | `discard` 标志 + `tud_ready()` 守卫；未上板 |
 | `ftl_flush` 非 barrier | 只 best-effort，不能承诺绝对掉电持久 | SYNCHRONIZE CACHE 只在前序写完成后调用；文档写清 |
-| WRITE(10) 的 FUA 位被忽略 | 主机要求“本条写必须落盘”时，v1 只把数据交给 FTL，不额外 flush | 主流主机 fsync 会随后发 SYNCHRONIZE CACHE；若实测有只发 FUA 的场景，在写完成回调里加 flush |
+| WRITE(10) 的 FUA 位被忽略（**有意**，用户裁决 2026-11-01） | 主机要求「本条写必须落盘」时，本仓只把数据交给 FTL，不额外 flush | 主机 fsync 通常随后发 SYNCHRONIZE CACHE（完整屏障）；若抓包发现只发 FUA 的主机，按 `RISK-USB-05` 的要点补（末 chunk 等一次 flush，不在 SCSI 回调自旋） |
 | `.noncacheable_buffer` 放置 | 链接器匹配模式漏前导点，`g_nand_channel_page_buffer` 落在可缓存 AXI RAM | **不在 USB 补丁内修**；已登记 `RISK-PLAT-01`（待决策，改地址必须上板） |
 | CLI/USB 双前端 | 无全局锁 | 共用 host busy 闸门 |
 | FS 12 Mbps | ≈1 MB/s；HS 需 ULPI，本板不可行 | v1 接受；性能另测 |

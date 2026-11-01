@@ -334,6 +334,11 @@ void pend_confirm_set_handler(pending_confirm_handler_t handler)
     s_confirm_handler = handler;
 }
 
+pending_confirm_handler_t pend_confirm_get_handler(void)
+{
+    return s_confirm_handler;
+}
+
 void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
 {
     pend_req_t *pending = &table->slots[pending_idx];

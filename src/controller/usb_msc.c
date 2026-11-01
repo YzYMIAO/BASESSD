@@ -132,6 +132,23 @@ static bool s_deferred_write_error;
  */
 static bool usb_msc_take_deferred_error(void)
 {
+    /* FTL 侧的迟到结论优先（RISK-CACHE-27）：早回执后写组在页编程完成时就报 OK，
+     * FAIL_CACHE 要晚一条命令才到 ⇒ 那个结论只存在于 FTL 的粘性错误里。 */
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                if (ftl_take_deferred_error(g_ctrl.ftl[ch][ce][lun]) == true)
+                {
+                    LOGW("[USB ] deferred write error (FTL) — fail the next command\r\n");
+                    return true;
+                }
+            }
+        }
+    }
+
     if (s_deferred_write_error == false)
     {
         return false;

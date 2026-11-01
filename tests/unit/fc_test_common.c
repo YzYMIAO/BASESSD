@@ -56,11 +56,12 @@ void test_trace_begin(void)
     }
 }
 
-static void test_trace_emit(MunitLogLevel level, const char *tag, const char *format, va_list ap)
+static void test_trace_emit(bool force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
     /* 可见性判断放在**最前面**：默认档（visible = error）连下面那个 '\n' 都不输出，
-     * 于是报告格式与改造前逐字一致。 */
-    if (!munit_log_visible(level))
+     * 于是报告格式与改造前逐字一致。force = 关键指标行（/speed 的速度）：属于"结果"，
+     * 不受档位过滤。 */
+    if ((force == false) && !munit_log_visible(level))
     {
         return;
     }
@@ -82,7 +83,7 @@ void test_trace_summary(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    test_trace_emit(MUNIT_LOG_INFO, "[EV] ", format, ap);
+    test_trace_emit(false, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 
@@ -91,7 +92,16 @@ void test_trace_detail(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    test_trace_emit(MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    test_trace_emit(false, MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    va_end(ap);
+}
+
+void test_result(const char *format, ...)
+{
+    va_list ap;
+
+    va_start(ap, format);
+    test_trace_emit(true, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 

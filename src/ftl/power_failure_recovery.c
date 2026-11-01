@@ -69,10 +69,6 @@
 
 /* ── 文件级静态数据 ── */
 
-// 块扫描用的整页 raw 缓冲：boot/format 单线程串行，放文件级 static（AXI .bss），
-// 避免多个 2KB 局部数组在恢复调用链上叠加。
-static BYTE s_scan_raw[PAGE_SIZE];
-
 // rebuild / restore 扫描期的 L2P 异常汇总（每轮扫描一行）。
 // pfr_close_block 每扫到一个写过块就累加；逐块/逐 CW 打印会写满 UART TX 环
 // 并拖慢开机（RISK-JN-05）。计数是文件级：两条扫描入口各自清零、结束时汇总；
@@ -90,6 +86,89 @@ static DWORD s_rebuild_first_region;
 static void pfr_boot_carve_pools(ftl_ctx_t *ftl);
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring);
 static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, bool force_rebuild, bool *blocks_restored, const jrn_page_ref_t *ring);
+/**
+ * @brief 「计数偏低」探针（RISK-MD-06）：快照里 `valid_count==0` 的 CLOSED 块是否仍有 L2P 引用。
+ *
+ * 这类块正是 GC **快路径**（`mig_job_start`：有效计数为 0 ⇒ 只擦不迁）的处理对象；
+ * 计数一旦偏低，擦掉它就是**静默丢数据**。每块只读 page 0（开机同步上下文，与 full
+ * rebuild 同类），最多查 32 块；命中才打一行。
+ *
+ * @param ftl FTL 实例（L2P 已完成恢复 + 回放）
+ * @return 命中的实时映射条数（0 = 未发现偏低）
+ */
+WORD pfr_count_underrun_probe(struct ftl_context *ftl)
+{
+    WORD hits = 0U;
+
+    // 「计数偏低」探针（RISK-MD-06）：快照里 `valid_count==0` 的 CLOSED 块，是否仍有 L2P 引用。
+    // 这类块正是 GC **快路径**（`mig_job_start`：有效计数为 0 ⇒ 只擦不迁）的处理对象；
+    // 一旦计数偏低，擦掉它就是**静默丢数据**。这里在开机同步上下文里每块只读 page 0
+    // （合法：与 full rebuild 同类的同步读），最多查 32 块，代价可忽略。
+    {
+        WORD  checked = 0U;
+        WORD  hit_n   = 0U;
+        WORD  hit_g   = UINT16_MAX;
+        DWORD hit_lba = FTL_LBA_INVALID;
+
+        for (WORD g = 0U; (g < FTL_BLOCK_TOTAL) && (checked < 32U); g++)
+        {
+            bst_block_t *b = &ftl->alloc.blocks[g];
+
+            if (md_block_is_metadata(NULL, ftl_gblock_plane(g), ftl_gblock_block(g)) || ftl_block_is_bad(b) || (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED) || (b->valid_count != 0U))
+            {
+                continue;
+            }
+            checked++;
+
+            // 抽样 4 页（0 / 1/4 / 1/2 / 3/4）：只读 page 0 会漏掉活映射落在后段的块。
+            // 空白页按「LBA 无效」自然跳过，代价只是多 3 次同步读。
+            static const BYTE s_probe_pages[4] = {0U, (BYTE)(PAGES_PER_BLOCK / 4U), (BYTE)(PAGES_PER_BLOCK / 2U), (BYTE)((PAGES_PER_BLOCK * 3U) / 4U)};
+
+            for (BYTE pi = 0U; pi < 4U; pi++)
+            {
+                const DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, ftl_gblock_block(g), ftl_gblock_plane(g), s_probe_pages[pi], 0U);
+                DWORD       cw_lba[CW_NUM];
+
+                if (gc_read_page_with_lba(pba, cw_lba) != FTL_OK)
+                {
+                    continue;
+                }
+                for (BYTE cw = 0U; cw < CW_NUM; cw++)
+                {
+                    DWORD cur = NAND_PBA_INVALID;
+
+                    if ((cw_lba[cw] == FTL_LBA_INVALID) || ((QWORD)cw_lba[cw] >= L2P_GLOBAL_LBA_MAX) || (lba_routes_to(cw_lba[cw], ftl->topo) == false))
+                    {
+                        continue;
+                    }
+                    if (l2p_read_sync(ftl->cache, cw_lba[cw], &cur) != FTL_OK)
+                    {
+                        continue;
+                    }
+                    if (cur == pba_with_cw(pba, cw))
+                    {
+                        if (hit_n == 0U)
+                        {
+                            hit_g   = g;
+                            hit_lba = cw_lba[cw];
+                        }
+                        hit_n++;
+                    }
+                }
+            }
+        }
+
+        hits = hit_n;
+
+        if (hit_n != 0U)
+        {
+            LOGE(LOG_TAG_BLK "count underrun: %hu live mapping(s) inside zero-count CLOSED block(s); first g=%hu lba=%lu (checked=%hu) — GC fast-path would lose them\r\n", hit_n, hit_g, hit_lba, checked);
+        }
+    }
+
+    return hits;
+}
+
 static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, pfr_boot_result_t *result);
 static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats);
 static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL]);
@@ -103,6 +182,13 @@ static void pfr_reset_blocks(ftl_ctx_t *ftl);
 static bool pfr_materialize_pba(void *ctx, DWORD pba);
 static void pfr_valid_add(void *ctx, DWORD pba, bool *ok);
 static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok);
+
+/* 回放期「减到 0 以下」的现场（RISK-MD-06）：次数 + 首个 gblock 与它的**快照状态**。
+ * FREE/NONE = 该块在 CP 快照里就在池里（journal 的 old 指向已归还块）；
+ * LOG       = 指向 L2P 日志块；CLOSED  = 已关闭但计数为 0。 */
+static WORD s_sub_zero_n;
+static WORD s_sub_zero_g = UINT16_MAX;
+static BYTE s_sub_zero_st;
 
 /* ══════════════════════════════════════════════════════════════════
  * 介质布局版本 —— 开机自动格式化
@@ -158,13 +244,14 @@ static ftl_status_e pfr_format_write_initial_anchor(ftl_ctx_t *ftl)
 
     dir->dirty = true; /* 空 Directory 也要落一条 record */
 
-    if (md_anchor_prepare(dir, &anchor) != MD_ANCHOR_READY)
+    if (md_anchor_prepare(dir, &anchor, MD_ANCHOR_OWNER_BOOT) != MD_ANCHOR_READY)
     {
         return FTL_ERROR;
     }
 
     if (anchor.need_erase && (ftl_sync_erase_block(anchor.base) != FTL_OK))
     {
+        md_anchor_abort(dir, MD_ANCHOR_OWNER_BOOT); /* 放弃已 prepare 的 Anchor 写（清单飞锁，RISK-MD-06） */
         return FTL_ERROR;
     }
 
@@ -497,9 +584,9 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
 // 都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
 // ② cp_pool_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
 // ③ 最新页 page_seq ≤ cp->journal_sequence ⇒ 干净关机；否则异常掉电。
-ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
+static ftl_status_e pfr_boot_recovery_body(struct ftl_context *ftl, pfr_boot_result_t *result)
 {
-    // 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。
+    // 前置条件（判据 2）：调用者传实例与栈上 &result（见下方唯一入口）。
 
     pfr_boot_result_t local_result;
     memset(&local_result, 0, sizeof(local_result));
@@ -606,12 +693,43 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     }
 
     // 异常掉电
+    // 诊断（RISK-MD-06）：判型所依据的现场，一次开机一行（只读）。
+    // `newest` = Journal 环里最新一页覆盖到的序号；gap = 它超出 CP 覆盖范围的部分
+    // （需要回放且必须仍留在环里的条目数）。与环容量（4 块 × 64 页 × 127~508 条/页）
+    // 对比即知「覆盖窗口是否够」。region 级明细见 `l2p_region_diag_log()`。
+    {
+        const DWORD newest = (DWORD)ring.page_seq + (DWORD)ring.entry_count;
+        const DWORD gap    = (newest > cp->journal_sequence) ? (newest - cp->journal_sequence) : 0U;
+
+        (void)LOGW(LOG_TAG_BLK "power-failure diag: cp_seq=%lu cp_jseq=%lu ring_pseq=%lu ring_n=%hu ring_err=%d newest=%lu gap=%lu\r\n",
+                   cp->sequence,
+                   cp->journal_sequence,
+                   ring.page_seq,
+                   ring.entry_count,
+                   (int)ring_read_error,
+                   newest,
+                   gap);
+    }
+
     pfr_boot_power_failure(ftl, cp, blocks_valid ? 1U : 0U, &local_result);
 
     local_result.boot_type   = BOOT_POWER_FAILURE;
     local_result.cp_sequence = cp->sequence;
     *result                  = local_result;
     return FTL_OK;
+}
+
+ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
+{
+    // 前置条件（判据 2）：唯一调用链（main.c 的 ssd_ftl_boot / UT 的 reboot 夹具）
+    // 传实例与栈上 &result。
+    const ftl_status_e status = pfr_boot_recovery_body(ftl, result);
+
+    // 只读取证（RISK-MD-06）：恢复期间降级的 region，其落点页在介质上是「擦除态」
+    // 还是「有数据但 CRC 不符」。放在这里而不是 main.c——UT 的模拟重启直接调本函数，
+    // 不经过 ssd_ftl_boot；且恢复已结束、没有在飞命令，同步原样读安全。
+
+    return status;
 }
 
 /* ── 三条启动路径（fresh / clean / power-failure）── */
@@ -743,6 +861,8 @@ static void pfr_boot_fresh_start(struct ftl_context *ftl, const jrn_page_ref_t *
     // ⑥ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。
     // 必须在块状态重建（reset / rebuild / carve）之后。
     md_log_area_restore(ftl->metadata_dir, &ftl->alloc);
+
+    (void)pfr_count_underrun_probe(ftl);
 }
 
 /**
@@ -894,6 +1014,7 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
     }
 
     pfr_refill_spare_pools(ftl);
+    (void)pfr_count_underrun_probe(ftl);
 
     // ② Journal RAM 写态恢复（环形块未被擦，必须接回写指针/序号）。
     jrn_resume(ftl->journal, ring, cp->journal_sequence);
@@ -932,6 +1053,10 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
     WORD            *block_words    = cp_block_words_get(ftl->cp_handle);
     jrn_replay_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
+    block_ctx.fail_pba = NAND_PBA_INVALID; /* 0 是合法 PBA：失败位置必须显式置哨兵 */
+    s_sub_zero_n       = 0U;               /* 本轮回放的现场计数 */
+    s_sub_zero_g       = UINT16_MAX;
+    s_sub_zero_st      = 0U;
 
     if ((blocks_valid != 0U) && pfr_restore_blocks(ftl, block_words))
     {
@@ -955,6 +1080,59 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
         // ⇒ 强制回退 full metadata rebuild（见下方 restored 判定）。
         LOGW(LOG_TAG_BLK "journal replay incomplete — force full metadata rebuild\r\n");
         block_ctx.ok = false;
+    }
+
+    // 一致性守卫（RISK-MD-06）：**目录引用的块，其 valid_count 必须 > 0**。
+    // 不一致说明块账与目录已分叉（重建少算 / 静默夹账 / 块被误清零）。此时继续使用
+    // 这份快照，下一次开机回放会对该块做 `valid_sub` 并撞下溢守卫 ⇒ 整份快照作废
+    // （`ctx_ok=0`、`reason=5`）。这里在**回放刚结束、现场还完整**的位置先报出来。
+    //
+    // 判据是现成账本 `l2p_live`（每块被目录引用的 region 数），O(FTL_BLOCK_TOTAL)，无 I/O。
+    {
+        WORD bad_n     = 0U;
+        WORD first_g   = UINT16_MAX;
+        WORD first_liv = 0U;
+
+        for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+        {
+            const WORD live = md_live_count_get(ftl->metadata_dir, g);
+
+            // 只比**用户数据块**：固定区 + 当前/借用的 L2P 日志块本来就不维护
+            // valid_count（日志块的有效性由 l2p_live 自己表达），比了必误报。
+            if (md_block_is_metadata(ftl->metadata_dir, ftl_gblock_plane(g), ftl_gblock_block(g)))
+            {
+                continue;
+            }
+            if ((live == 0U) || ftl_block_is_bad(&ftl->alloc.blocks[g]) || (ftl->alloc.blocks[g].valid_count != 0U))
+            {
+                continue;
+            }
+            if (bad_n == 0U)
+            {
+                first_g   = g;
+                first_liv = live;
+            }
+            bad_n++;
+        }
+
+        if (bad_n != 0U)
+        {
+            const bst_state_e st = ftl_block_state(&ftl->alloc.blocks[first_g]);
+
+            LOGE(LOG_TAG_BLK "count/dir mismatch: %hu block(s) referenced but valid_count=0; first g=%hu live=%hu st=%s bad=%hu\r\n", bad_n, first_g, first_liv, ftl_block_state_name(st), ftl->alloc.bad_count);
+
+            // 这才是「快照不可信」的判据：目录仍引用的块计数为 0。作废快照走全量重建。
+            block_ctx.ok = false;
+        }
+    }
+
+    // 回放期「减到 0 被跳过」的现场（RISK-MD-06）：非 0 才打一行。
+    // 这是本次修复是否真正起作用的**唯一直接证据**——旧实现会让同一场景走 full rebuild。
+    if (s_sub_zero_n != 0U)
+    {
+        const bst_state_e zst = (s_sub_zero_g < FTL_BLOCK_TOTAL) ? ftl_block_state(&ftl->alloc.blocks[s_sub_zero_g]) : FTL_BLOCK_STATE_NONE;
+
+        LOGW(LOG_TAG_BLK "replay: %hu sub-at-zero kept (not fatal); first g=%hu st=%s live=%hu\r\n", s_sub_zero_n, s_sub_zero_g, ftl_block_state_name(zst), (s_sub_zero_g < FTL_BLOCK_TOTAL) ? md_live_count_get(ftl->metadata_dir, s_sub_zero_g) : 0U);
     }
 
     // 降级 region 只丢旧映射，不再让快照失效（范围化恢复）。这里先记标记，
@@ -1009,7 +1187,14 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
         // 诊断：把「快照是否加载 / 是否应用 / 回放是否成功」一并打出——
         // ctx_ok=false 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
         // Pass 0 拒绝）、replay_ok=false 或回放内部把 ok 清 0（降级/写失败）。
-        LOGW(LOG_TAG_BLK "fallback to full metadata rebuild (power failure, blocks_valid=%hhu applied=%hhu ctx_ok=%d replay_ok=%u)\r\n", blocks_valid, blocks_applied, block_ctx.ok, (replay_ok ? 1U : 0U));
+        // `vc_end` / `live` 是**回放结束后**该块的值，用来区分两种根因：
+        //   vc_end > 0 ⇒ sub 跑在对应 add 之前（回放顺序/重复问题）；
+        //   vc_end == 0 ⇒ 该块在快照里就没有有效 CW（账本/快照分叉）。
+        const WORD fg     = (block_ctx.fail_pba != NAND_PBA_INVALID) ? ftl_pba_gblock(block_ctx.fail_pba) : (WORD)UINT16_MAX;
+        const WORD vc_end = (fg < FTL_BLOCK_TOTAL) ? ftl->alloc.blocks[fg].valid_count : 0U;
+        const WORD lv_end = (fg < FTL_BLOCK_TOTAL) ? md_live_count_get(ftl->metadata_dir, fg) : 0U;
+
+        LOGW(LOG_TAG_BLK "fallback to full metadata rebuild (power failure, blocks_valid=%hhu applied=%hhu ctx_ok=%d replay_ok=%u reason=%hhu pba=%08lX g=%hu vc_end=%hu live=%hu sub0=%hu/%hu/%hhu)\r\n", blocks_valid, blocks_applied, block_ctx.ok, (replay_ok ? 1U : 0U), block_ctx.fail_reason, block_ctx.fail_pba, fg, vc_end, lv_end, s_sub_zero_n, s_sub_zero_g, s_sub_zero_st);
         pfr_reset_blocks(ftl);
 
         // full metadata rebuild 用已回放的 L2P 反查；先认领写过块，carve 再只把 state==NONE 的块入池。
@@ -1019,6 +1204,7 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
     }
 
     pfr_refill_spare_pools(ftl);
+    (void)pfr_count_underrun_probe(ftl);
 
     // ⑥ Controller → Ready
     cp_timer_reset(ftl->cp_handle);
@@ -1151,8 +1337,10 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
     return true;
 }
 
-// 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank_raw（C2：唯一实现；
-// full rebuild / BBT 探针 / 元数据日志区恢复共用）。
+// 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank（C2：唯一实现；
+// full rebuild / BBT 探针 / Journal 扫页 / 元数据日志区恢复共用）。
+// 它是**解码路径**判据（FC 判 ECC 是否成码字 + 整条 CW 的 1 比特占比），
+// 不是「RAW 读数 FF」——RAW 读刻意跳过 ECC，没有判空依据（RISK-IF-15）。
 
 /**
  * @brief 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
@@ -1160,8 +1348,6 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
  * @param ftl     FTL 实例（只读 topo，用于构造 PBA）
  * @param plane   物理 plane 号
  * @param block   plane 内的物理块号
- * @param raw_buf 整页 raw 缓冲（PAGE_SIZE），判空读页复用
- *
  * @return 0               = 整块空白；
  *         k               = 从页 0 到 k-1 连续写过、页 k 起全空；
  *         PAGES_PER_BLOCK = 全写满**或存在 hole**（空白页之后又有写过的页）。
@@ -1172,9 +1358,9 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
  * 这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
  * victim 的前提。
  */
-static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE *raw_buf)
+static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block)
 {
-    // 快速判空：page 0 的 4 个 CW META 全 FF ⇒ 整块空白。
+    // 快速判空：page 0 是擦除页 ⇒ 整块空白。
     //
     // 正常写模型是**顺序追加**：块从 page 0 开始写；page 0 编程失败时写路径会
     // 关闭 SB（ftl_host_io_callback 的失败分支），不会继续写后续页。因此
@@ -1188,7 +1374,7 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block,
     // 见 known_risks RISK-BOOT-14。
     DWORD first = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 0U, 0U);
 
-    if (ftl_page_is_blank_raw(first, raw_buf))
+    if (ftl_page_is_blank(first))
     {
         // page0 空白还不能判定整块空白：cache program 批次 / 异步写可能留下
         // 「page0 失败、page1..3 已编程」的块。探测前 4 页（batch 上限），
@@ -1202,7 +1388,7 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block,
 
             DWORD addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-            if (ftl_page_is_blank_raw(addr, raw_buf) == false)
+            if (ftl_page_is_blank(addr) == false)
             {
                 return PAGES_PER_BLOCK;
             }
@@ -1219,7 +1405,7 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block,
     {
         DWORD addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-        if (ftl_page_is_blank_raw(addr, raw_buf))
+        if (ftl_page_is_blank(addr))
         {
             if (first_blank == PAGES_PER_BLOCK)
             {
@@ -1386,8 +1572,6 @@ static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
 {
     // 前置条件（判据 2）：唯一调用者在本文件（boot 三条路径）。
 
-    BYTE *raw_buf = s_scan_raw;
-
     alc_t *alloc = &ftl->alloc;
 
     if (stats != NULL)
@@ -1435,10 +1619,10 @@ static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
                 continue;
             }
 
-            // ② 判空找写指针（第一个全 FF 页）
-            BYTE np = pfr_scan_write_pointer(ftl, plane, block, raw_buf);
+            // ② 判空找写指针（第一个擦除页）
+            BYTE np = pfr_scan_write_pointer(ftl, plane, block);
 
-            // ③ 未写过（全 FF）→ 保持 FREE
+            // ③ 未写过（整块擦除页）→ 保持 FREE
             if (np == 0U)
             {
                 continue;
@@ -1725,8 +1909,6 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
 
     pfr_rebuild_l2p_stats_reset();
 
-    BYTE *raw_buf = s_scan_raw;
-
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         if (pfr_block_is_fixed(g))
@@ -1764,7 +1946,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
             {
                 DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-                if (ftl_page_is_blank_raw(pba, raw_buf) == false)
+                if (ftl_page_is_blank(pba) == false)
                 {
                     any = true;
                     break;
@@ -1817,7 +1999,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
         // 且被复用的块内容已无 L2P 引用；接受并在注释登记。
         DWORD pba0 = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 0U, 0U);
 
-        if (ftl_page_is_blank_raw(pba0, raw_buf))
+        if (ftl_page_is_blank(pba0))
         {
             bool later_written = false;
 
@@ -1831,7 +2013,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_bl
 
                 DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-                if (ftl_page_is_blank_raw(pba, raw_buf) == false)
+                if (ftl_page_is_blank(pba) == false)
                 {
                     later_written = true;
                     break;
@@ -2125,7 +2307,19 @@ static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok)
     }
     if (b->valid_count == 0U)
     {
-        *ok = false;
+        // 与运行期 `ftl_block_sub_valid_if_live`（bst.h）**同口径**：计数已为 0 ⇒
+        // 无可减，跳过。原来这里判硬失败，等于把「一条陈旧映射」升级成「整份块元数据
+        // 快照作废 ⇒ full rebuild ⇒ 丢映射」（RISK-MD-06 的放大器）。
+        // 真正该作废快照的是「目录仍引用该块」那种，由回放后的不变量守卫判定。
+        if (s_sub_zero_n == 0U)
+        {
+            s_sub_zero_g  = g;
+            s_sub_zero_st = (BYTE)ftl_block_state(b);
+        }
+        if (s_sub_zero_n < UINT16_MAX)
+        {
+            s_sub_zero_n++;
+        }
         return;
     }
     ftl_block_sub_valid(b);

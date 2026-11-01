@@ -410,6 +410,9 @@ uint8_t          test_check_pattern(const uint8_t *buffer, uint16_t length, uint
  *                           前缀后面，不会出错。
  *   test_trace_summary() —— MUNIT_LOG_INFO：这条用例证明了什么（汇总量）。
  *   test_trace_detail()  —— MUNIT_LOG_DEBUG：逐页 / 逐 CW 明细。
+ *   test_result()        —— **总是输出**（不看 `--log-visible`）：基准类用例的关键指标
+ *                           （`/speed` 的读/写 KB/s）。它属于"测试结果"而不是诊断 ——
+ *                           默认档只报 `[ OK ]` 看不到速度并不合理。
  *
  * ⚠ 消息自带换行与 `[EV] ` 前缀，**调用者不要自己加 \n**。
  * ⚠ 该 fork 关掉了 fork、无 stderr 捕获（munit.c），故用例内的输出立刻到 UART。
@@ -428,5 +431,9 @@ void test_trace_summary(const char *format, ...);
 
 MUNIT_PRINTF(1, 2)
 void test_trace_detail(const char *format, ...);
+
+/* 关键指标行：无论 --log-visible 取值都输出（前缀仍是 "[EV] "）。 */
+MUNIT_PRINTF(1, 2)
+void test_result(const char *format, ...);
 
 #endif /* FC_TEST_COMMON_H */

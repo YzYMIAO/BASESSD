@@ -20,6 +20,11 @@ void ftl_ut_trace_summary(const char *format, ...);
 MUNIT_PRINTF(1, 2)
 void ftl_ut_trace_detail(const char *format, ...);
 
+/* 关键指标行：无论 --log-visible 取值都输出（前缀仍是 "[EV] "）。基准类用例
+ * （/speed）的读/写速度属于"结果"而不是诊断，默认档也必须看得到。 */
+MUNIT_PRINTF(1, 2)
+void ftl_ut_result(const char *format, ...);
+
 /* 活实例（g_ctrl.ftl[0][0][0]）；结构性恒非空，取不到直接断言失败。 */
 ftl_ctx_t *ftl_ut_live(void);
 
@@ -41,6 +46,17 @@ md_dir_cache_t *ftl_ut_ram_md(void);
  * LBA 窗口固定在容量尾部，避免碰文件系统常用区。 */
 #define FTL_UT_LBA_BASE      (((DWORD)FTL_LBA_MAX - 8192U) & ~7U)
 #define FTL_UT_IO_TIMEOUT_MS 5000U
+
+/**
+ * @brief 排空 FTL/FC 的在飞资源（置 `bg_suspend` 并泵到全部池 / CQ / op ctx 归零）。
+ *
+ * @param ftl 实例。
+ *
+ * @note 用在夹具 teardown：用例可能把后台命令（journal / CP / BBT）的提交留在
+ *       最后一次泵之后，完成会滞留在 FC 的 CQ 里，污染下一个套件。
+ *       ⚠ 返回时 `bg_suspend` 仍为 1，调用者负责恢复。
+ */
+void ftl_ut_quiesce(ftl_ctx_t *ftl);
 
 void ftl_ut_reboot_from_media(void);
 void ftl_ut_media_format(void);

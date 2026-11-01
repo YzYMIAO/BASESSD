@@ -242,6 +242,58 @@ bool ftl_op_cache_seq_active(void)
     return false;
 }
 
+/**
+ * @brief 主机 I/O 是否仍在飞（任一实例还有未完成的完成组）。
+ *
+ * @return true = 至少一个实例的组表里有占用中的组（在飞子操作或未下发完的 LBA）。
+ */
+static bool ftl_op_host_groups_inflight(void)
+{
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const struct ftl_context *ftl = g_op_route[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
+                {
+                    const pend_group_t *g = &ftl->pending.groups[gi];
+
+                    if ((g->used == true) && ((g->outstanding != 0U) || (g->next < g->total)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief 后台 job 的**提交被拒**是否属于预期等待（挂起提交 deadline 的判据）。
+ *
+ * @return true = 预期等待：cache 序列打开（D4 原判据）**或** 主机组仍在飞。
+ *
+ * @note 第二条的必要性（RISK-IF-13 同一族）：主机持续提交时 FC 命令池/SQ 被占满是
+ *       预期（不是卡死）；若每 10 ms 把 Checkpoint / L2P 写回 / 迁移打回去，元数据
+ *       永远排不上队 —— 进而把「写确认停泊」拖成 100 ms 超时、变成 host 写失败
+ *       （RISK-HOST-05 支路 (a) 的触发链）。主机空闲后本判据自动为假，真正的卡死
+ *       仍会被 deadline 暴露。
+ */
+bool ftl_op_bg_submit_deferred(void)
+{
+    return (ftl_op_cache_seq_active() == true) || (ftl_op_host_groups_inflight() == true);
+}
+
 /* ── 5. 提交 ── */
 
 /**
@@ -385,6 +437,32 @@ bool ftl_op_is_in_dispatch(void)
     return (g_dispatch_depth != 0U);
 }
 
+/**
+ * @brief 该 op 的服务函数是否**必须**拿到私有 ctx（ctx == NULL ⇒ 解引用即越界）。
+ *
+ * 与 `g_op_callbacks[]` 一一对应：HOST_IO / CACHE_PAD 的 ctx 本就不用（服务函数自行
+ * pend_find / 读 ftl->cache_seq）；SYNC_WAIT 的 NULL 有明确语义（超时后的迟到完成，
+ * 由它自己处理并 release）。其余 op 的 ctx 指向真实结构体（journal / rr / mig /
+ * cp / alloc / metadata_dir / line），NULL 会在服务函数里被当结构体解引用。
+ */
+static bool ftl_op_requires_ctx(BYTE op)
+{
+    switch (op)
+    {
+        case FTL_OP_JOURNAL:
+        case FTL_OP_READ_RECOVERY:
+        case FTL_OP_GC:
+        case FTL_OP_WL:
+        case FTL_OP_L2P:
+        case FTL_OP_CHECKPOINT:
+        case FTL_OP_BBT:
+        case FTL_OP_METADATA:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
     BYTE                 op = completion->op_tag;
@@ -405,6 +483,19 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 
     // 先摘链再回调——服务函数内部可能重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。
     void *ctx = ftl_op_ctx_take(completion->command_id);
+
+    // 该 op 要求私有 ctx 但旁表里没有 ⇒ 绝不能把 NULL 交给服务函数：
+    // 它们会把它当结构体解引用。STM32H7 上地址 0 是 ITCM（可读），不会立即 HardFault，
+    // 而是把代码字节当结构体字段用 ⇒ 随后的 release/commit 越界改写块状态与目录
+    // （现场：metadata 回调拿到 NULL 后按 ITCM 垃圾执行，日志出现 g=5112 / dgen=817140 /
+    // cur_valid=12 的错乱记录，并产生"同一页被编程两次 + 两个 region 同一 PBA"）。
+    // 这里只拒绝并留痕，命令槽位必须回收（C5/H14：release 档也要拒绝，不能只靠 ASSERT）。
+    if ((ctx == NULL) && ftl_op_requires_ctx(op))
+    {
+        LOGE(LOG_TAG_FTL "completion without ctx cmd=%hu op=%hhu status=0x%02hx — dropped\r\n", completion->command_id, op, completion->status);
+        (void)fc_command_release(cmd);
+        return;
+    }
 
     // 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
     // "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。

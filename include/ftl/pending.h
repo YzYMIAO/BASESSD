@@ -172,7 +172,10 @@ typedef struct
     /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
      *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
      *   提交时快照会让两条 journal 都指向最初映射（链断）。 */
-    DWORD park_ms; /* WRITE_CONFIRM 停泊起点（ms；内部字段，外部不要读） */
+    DWORD park_ms; /* WRITE_CONFIRM 停泊**预算起点**（ms；内部字段，外部不要读）。
+                    * 语义 = 「最近一次确知有进展的时刻」：确认 handler 在其依赖确实在飞
+                    * （region 加载 / Journal 页写）时刷新它，超时判据因此只在**无进展**
+                    * 时才成立（RISK-HOST-05 支路 (a)，见 docs/design/assertion_guidelines）。 */
 
     /* ── 2B 对齐 ── */
     WORD command_id; /* FC command_id */
@@ -184,9 +187,12 @@ typedef struct
     BYTE              cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
     pend_cache_role_e cache_role;  /* cache program 序列中的页角色；NONE = 其他写 */
     BYTE              retry_count; /* 写失败后已重试次数（透明重试；见 ftl_host_io_callback） */
+    BYTE              cache_gen;   /* cache program 成员所属**写序列代号**：完成时与
+                                    * `cache_seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
+                                    * 取代，本页不得确认映射（迟到完成，RISK-CACHE-19） */
 } pend_req_t;
 
-_Static_assert(sizeof(pend_req_t) == 32, "pend_req_t 布局漂移（期望 32B）");
+_Static_assert(sizeof(pend_req_t) == 36, "pend_req_t 布局漂移（期望 36B）");
 
 /* pending 只有 new_pba/new_pba1 两个 plane 字段：维度一旦 >2，必须显式改结构，
  * 不能靠 `pba[0]/pba[1]` 静默漏掉新增 plane（H39）。 */
@@ -483,6 +489,17 @@ typedef ftl_status_e (*pending_confirm_handler_t)(void *ctx, pend_req_t *pending
  * @param handler 事务处理函数。
  */
 void pend_confirm_set_handler(pending_confirm_handler_t handler);
+
+/**
+ * @brief 读回当前注册的事务 handler。
+ *
+ * @return 当前 handler（未注册时为 NULL）。
+ *
+ * @note 存在的唯一理由 = 让测试能**临时替换并原样还原**（停泊超时用例要注入
+ *       一个恒返 FTL_AGAIN 的 handler）。生产代码不读它 —— 若有调用点，说明
+ *       设计里出现了第二个事务入口。
+ */
+pending_confirm_handler_t pend_confirm_get_handler(void);
 
 /**
  * @brief 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。

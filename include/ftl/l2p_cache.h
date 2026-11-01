@@ -653,6 +653,14 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
  * @return true = 发生过加载失败降级
  *         false = 未驻留 / 合法未映射 / 正常加载
  */
+/**
+ * @brief 把 region 标记为「映射已丢」（degraded）：host 读其未映射 LBA 报 IO_ERROR。
+ *
+ * @param cache         共享 L2P cache。
+ * @param global_region 全局 region 号。
+ */
+void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region);
+
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 
 /**
@@ -680,6 +688,14 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
  *         FTL_ERROR 地址/建链的硬失败
  */
 ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
+
+/**
+ * @brief 导出 L2P 诊断环（仅 debug：最近 256 次 region 写回/加载的有效条目数）。
+ *
+ * @note 平时不打印（避免刷屏），由测试在发现数据不符时调一次（RISK-CACHE-26）。
+ *       release 下为空实现。
+ */
+void l2p_diag_dump(void);
 
 /**
  * @brief 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）

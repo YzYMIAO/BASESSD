@@ -516,9 +516,13 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
 ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_t *cfg);
 
 /**
- * @brief 裸页读：LDPC_RAW，整页 4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE）。
+ * @brief 裸页读：LDPC_RAW，4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE，
+ *        每 CW 只拷 **USER 512B**；槽尾 16B（META/CRC/parity）不填）。
  *
- * ⚠ 刻意**不判定 NAND 失败**——BBT 坏页也要拿到原始位（上层按「非全 FF」判空）。
+ * ⚠ 刻意**不判定 NAND 失败**——诊断 dump / 出厂坏块探针要拿到原始位。
+ * ⚠ **不能用来判空**：LDPC_RAW 跳过 ECC，且本层拿不到 META/CRC/parity，
+ *   「RAW 读 + 数 FF」判不出「编程过没有」——判空用 `ftl_page_is_blank`
+ *   / `ftl_page_blank_check`（解码路径 + FC 的 CW 状态位）。见 RISK-IF-15。
  *
  * @param pba    目标页 PBA
  * @param buffer 输出缓冲（须 >= PAGE_SIZE，按 CW 槽位排布）
@@ -528,17 +532,34 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
 ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer);
 
 /**
- * @brief 判整页是否未写过：RAW 读后检查每个 CW 槽（META+CRC+USER 前缀 512B）是否全 FF。
+ * @brief 判整页是否**从未编程**（擦除页）：普通读一次，看 FC 是否把每个 CW 都判为擦除页。
+ *
+ * 判据在**解码路径**里成立（FC 侧 `fc_cw_is_blank` + `FC_CW_STATUS_EMPTY`）：
+ * 依据是 ECC 是否成码字 + 整条 528B CW 的 1 比特占比 + parity 是否写成。
+ * ⇒ FTL 不需要、也**不应该**自己拿 USER 区字节去猜（FC 只向 FTL 暴露 USER 512B）。
+ * ⚠ 不要用 `ftl_sync_read_page_raw()` + 数 FF 实现本判据：RAW 读跳过 ECC，
+ *   空/非空的证据全被跳过（RISK-IF-15）。
  *
  * 读命令没走通 ⇒ 一律返回 false（判“非空”，保守方向）。
- * raw_buf 需 >= PAGE_SIZE；判据与 full rebuild / BBT 探针 / L2P 日志区恢复共用
- * （C2：唯一实现）。整段检查而非只看 META：半编程页的 META 可能仍是全 FF。
+ * 判据与 full rebuild / BBT 探针 / Journal 扫页 / L2P 日志区恢复共用（C2：唯一实现）。
  *
- * @param pba     目标页 PBA
- * @param raw_buf 整页工作缓冲（>= PAGE_SIZE；函数会先填 0xFF）
- * @return true 整页未写过；false 有非 0xFF 字节或读命令失败
+ * @param pba 目标页 PBA
+ * @return true 该页从未编程；false 已编程 / 读失败（保守判非空）
  */
-bool ftl_page_is_blank_raw(DWORD pba, void *raw_buf);
+bool ftl_page_is_blank(DWORD pba);
+
+/**
+ * @brief 同 `ftl_page_is_blank`，但把"命令没走通"与"已编程"分开报告。
+ *
+ * 需要区分「介质是空片」与「总线/超时读不通」的调用者用它（空片判定、出厂探测）；
+ * 其它调用者用 `ftl_page_is_blank` 即可（读失败按非空处理）。
+ *
+ * @param pba   目标页 PBA
+ * @param blank 出参：true = 该页从未编程（仅 FTL_OK 时有效）
+ * @return FTL_OK    读命令完成，*blank 有效
+ *         FTL_ERROR 池空 / 提交失败 / 超时（*blank 未写）
+ */
+ftl_status_e ftl_page_blank_check(DWORD pba, bool *blank);
 
 /**
  * @brief 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。

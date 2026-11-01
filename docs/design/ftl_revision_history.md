@@ -6419,6 +6419,95 @@ SEQUENTIAL (31h)` **可以跨 block**（同一 die；禁止跨 die/LUN）；② 
 
 ---
 
+## v1.09 — debug 注入 seam + 失败侧 UT（2026-10-31 上板验证）
+
+**日期**：2026-10-31
+
+**起因**：`ISS-FTL-16` —— 最贵的几条「静默失效」验证（cache FAILC 中止、page0 失败、
+Journal 写失败）只能等真 NAND 自发失败，无法重复执行。
+
+**改动**：
+- 新增 `include/common/fault_inject.h` + `src/common/fault_inject.c`：debug-only 注入点
+  （`NDEBUG` 下退化为 `static inline` 空实现，release 零代码）。`fi_cache_fail_arm(page_lba)`
+  在指定 cache program 命令的完成上伪造 `FAIL_CACHE`（一次性；器件语义 = 命令 K 结算
+  page K-1）；`fi_journal_fail_arm(n)` 让接下来 n 次 Journal 页写按失败结算；`fi_reset()`
+  由 pure/media 两个测试夹具在 setup 调用。
+- `l2p_cache`：WAL 闸门在 `jrn_has_write_failure()` 时**放行**（RISK-L2P-10）。
+- `pending`：新增 `pend_confirm_get_handler()`（仅供测试临时替换并原样还原停泊 handler）。
+- UT：新增 `l2p_wal_gate`、`confirm_park_timeout`、`cache_failc_abort`（arm=1/2/last）、
+  `journal_write_fail_wal_stall`、`cache_seq_cross_block`、`bbt_ring_reload`、
+  `boot_restore_reconcile`；扩展 `free_pool_invariants`（两本账恒等）、`gc_trigger`
+  （单 plane 水位）、`gc_select_victim`（饥饿 plane 偏好/回退）、`journal_barrier_cp_progress`
+  （`persisted_seq ≥ 写入序号`）、`trim_no_resurrection`（不 request CP 的 journal-only 段）。
+
+**RISK-L2P-10（本批修复）**：Journal 页写失败后，失败页条目已随 `page_buf` 清空而丢失，
+`persisted_seq` 永远覆盖不到那段序号 ⇒ WAL 闸门把 Checkpoint 的区域落盘永久挡住，
+而清除失败标记（`write_fail_pending`）的唯一途径就是「CP 完成」⇒ 死锁。修复 =
+失败窗口内闸门放行（CP 本身就是恢复机制：提交后快照全部 L2P 并截断 Journal）。
+该缺陷由新增用例在首次上板时暴露。
+
+**验证**：五关构建零新告警。**上板（2026-10-31 22:08 镜像）**：`test /ftl/media/`
+**36/36 通过**（108.5 s），含 `journal_write_fail_wal_stall`（1.11 s）、`cache_failc_abort`
+arm=1/2/last（6.83 / 10.37 / 10.73 s）、`cache_seq_cross_block`、`bbt_ring_reload`、
+`boot_restore_reconcile`；纯 RAM 套件在同日上一轮全量运行中全绿（含 `l2p_wal_gate`、
+`confirm_park_timeout`、两本账/水位/victim 三例）。
+
+**介质布局**：无变化（v13）。
+
+---
+
+## v1.10 — FTL volatile write cache：早回执 + 读可见 + deferred error（未上板）
+
+**日期**：2026-11-01
+
+**起因**：`RISK-CACHE-25` —— 同步主机（`ftl_submit_write` + 等 `complete_flag`，一条命令在飞）
+在组完成前不发下一段 ⇒ 尾页只能等 `FTL_CACHE_SEQ_IDLE_MS`（1 s）padding 收尾，
+`/speed/ftl_rw chunk=32` 实测 142 KB/s（`wr_ms=180001`）。根因不是断点策略，而是
+**完成点**：设备 cache program 的结论滞后一页，组等到结论才完成。
+
+**改动**（用户裁决：不推翻 v1.05 的跨命令序列，改完成点）：
+- `cache_seq.wr` 从「待结算 FIFO」升级为**已编程页表**（`lba/pba0/pba1/cw_bitmap/state/proven`
+  + 结论游标 `pend_idx`）。页在**自身命令完成**时入表并立即结算子操作（早回执）。
+- 确认（Journal→L2P→BST）与组完成解耦：`ftl_cache_wr_confirm_step()` 每轮 service 按提交序推进。
+- 读覆盖层：`wb_read` 之后、`l2p_read` 之前查页表，命中直读刚编程的 PBA（RISK-CACHE-27）；
+  cache 读批量对含未确认 LBA 的 pair 判不可批量。
+- FAILC 撤销：Journal + L2P 写 `NAND_PBA_INVALID`、region **立即** degraded、粘性 deferred error；
+  失败页覆盖的 LBA 读直接 IO_ERROR（`ftl_cache_wr_failed_covers`，RISK-CACHE-28）。
+- 序列中止语义保留 RISK-CACHE-19：任一错误（含 FAILC）⇒ 其后未证明页一律不确认；器件已证明的页保留。
+- flush 屏障：等页表排空（`wr.count==0`）**且没有在飞成员**（`wr_inflight==0`）+ Journal/L2P/wbuf 空闲（RISK-CACHE-29）。
+- 序列表号 `cache_seq.gen` 只在**中止**时递增（迟到完成守卫）；窗口构建的环/顺序页余量
+  计入 `wr_inflight`（否则完成后集中入表即溢出）。
+- 控制器：`usb_msc_take_deferred_error()` 先问各 FTL 实例（早回执后 FAILC 的结论只存在于
+  FTL 的粘性标志里）。FUA **不实现**（用户裁决，RISK-USB-05 / ISS-USB-03）。
+
+**UT / 登记同步**：`cache_failc_abort` 的判据改为「失败页读 IO_ERROR、同批未确认页读旧
+数据、重启后失败 LBA 读零（降级位不持久）」，并在失败写后先断言 `ftl_take_deferred_error`
+只报一次（否则粘性错误会挡掉后续读）；RISK-HOST-05 / CP-04 / IF-13 的提交 deadline 判据
+统一为 `ftl_op_bg_submit_deferred()`（序列打开或主机组在飞）；`ut_run_all()` 每条命令复位
+media 会话状态（RISK-UT-08）。
+
+**验证**：五关构建零新告警（`all` / `release` / `tests UT=FTL` / `tests UT=FC` / `tests`）。
+
+**2026-11-01 板端（release -O2 全量 UT，镜像 `04:31:58`）**：`test` **156/156**（3 skipped，
+237.9 s），含之前只在隔离路径验过的项：
+- `/ftl/pure/` 58/58、`/ftl/media/` 36/36（`cache_failc_abort` **arm=1/2/last 全过**：失败页读
+  IO_ERROR、同批未确认页读旧数据、重启后读零、deferred 只报一次）；
+- `/speed/ftl_rw`：chunk=8/16/32 写 **3329/3179/3208 KB/s**、读 3379/3330/3386 KB/s，
+  `rd_path=cache`、`err=0`；FC 上下限同镜像：写 3639 normal / 4281 cache、读 3500/3557。
+- debug -O0 同用例 chunk=32 = 1222 KB/s（旧值 142 KB/s、`wr_ms=180001`）⇒ 早回执 + 读覆盖层
+  在真实主机形态下成立，release 档相对 debug 提速约 2.6×。
+
+⚠ 隔离运行时的 `arm=last`「重启后读零」失败已定位并修复：media 套件因 `s_media_ready`
+（进程级 static）**跳过格式化**，介质被先跑的 `/fc-nand/lifecycle/` 原始块测试改写。
+已改为每条 `test` 命令复位一次（`RISK-UT-08`）；本次全量运行的 `format_and_roundtrip`
+10.28 s（release 格式化量级）证明重格式化生效，156/156 通过。
+
+**仍未验**：H2testw 全盘、USB 端到端 deferred 注入、断电窗口量化（`RISK-CACHE-18/29`）。
+
+**介质布局**：无变化（v13）。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（13）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
@@ -6439,3 +6528,4 @@ SEQUENTIAL (31h)` **可以跨 block**（同一 die；禁止跨 die/LUN）；② 
 | v11 | 新增 shared metadata spare（78..81/plane）；固定元数据分区改为「候选块池（跳过 BAD + spare 补缺）」；`FTL_METADATA_AREA_END` 78 → 82；主机容量上限 429 → 428 MiB；新增 `REBUILD_REQUIRED` BBT 标志（reserved[1]） | 块布局变化；老固件会把 78..81 当用户数据 |
 | v12 | L2P region 主备双副本：日志区 32→48 块/plane（46..93），shared spare 94..97，`FTL_METADATA_AREA_END` 82 → 98；Anchor 记录 8→16 页（新增备份 PBA 半）；主机容量 428 → **424 MiB**；`lba_max=868,352` | 块布局与 Anchor 记录格式变化；老固件会把 78..93 当用户数据、且读不懂 16 页 Anchor |
 | v13 | Journal 页头 12 → 16 B（新增 `base_lba`），新增顺序流映射页（`JSEG`，4 B 条目）与页型 magic | 老固件的 12 B 页头会把新页的条目区解析错位（magic 相同、条目起点不同）⇒ 回放错误映射 |
+| v14 | Anchor 页头 20 → 24 B（新增 `dirty_gen`）：整条 record 的 16 页必须同 `sequence` 且同代数，否则整条作废（RISK-MD-06 混代记录）。**同时**：L2P region 主/备改为**每 plane 各一个当前块**（主→plane0、备→plane1），不再"同块连续两页"——冗余不变、每 plane 容量利用率翻倍 | Anchor 页头布局变化（老固件解不出新页头，新固件也读不懂旧页头）⇒ 首启自动格式化；日志区的块内布局变化对 Directory 不可见（仍按 PBA 读） |

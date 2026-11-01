@@ -38,6 +38,9 @@ extern MunitTest g_ftl_pure_mem_tests[];
 extern MunitTest g_ftl_pure_md_tests[];
 extern MunitTest g_ftl_pure_host_tests[];
 extern MunitTest g_ftl_pure_io_tests[];
+
+/* test_ftl_media.c：每次 `test` 命令开始时复位「介质已格式化」状态（RISK-UT-08） */
+extern void      ftl_ut_media_session_reset(void);
 extern MunitTest g_ftl_media_e2e_tests[];
 
 #endif /* UT_FTL_ENABLE */
@@ -172,6 +175,12 @@ int ut_run_all(int argc, char *argv[])
 {
     uint8_t n = 0U;
     int     i;
+
+#if defined(UT_FTL_ENABLE)
+    /* 介质状态只在本条 `test` 命令内有效：FC 原始块测试 / 上一条命令都会改变它，
+     * 媒体套件必须重新格式化一次（RISK-UT-08）。 */
+    ftl_ut_media_session_reset();
+#endif
 
     g_ut_leaf_count = 0U;
     ut_collect_leaf_paths(&g_ut_root_suite, "");

@@ -250,6 +250,9 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  */
 static void cp_job_abort(cp_handle_t *h)
 {
+    // 放弃本 job 可能持有的 Anchor 单飞锁（prepare 之后没走到 commit）。
+    md_anchor_abort(h->metadata_dir, MD_ANCHOR_OWNER_CP);
+
     if (h->failed == false)
     {
         h->failed     = true;
@@ -294,7 +297,7 @@ static bool cp_job_stall(cp_handle_t *h)
     }
 
     // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
-    if (ftl_op_cache_seq_active() == true)
+    if (ftl_op_bg_submit_deferred() == true)
     {
         h->stall_ms = 0U;
         return false;
@@ -792,12 +795,19 @@ static void cp_job_step(cp_handle_t *h)
                 // ③ Anchor：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
                 // 这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。
                 md_anchor_prepare_out_t anchor;
-                md_anchor_step_e        r = md_anchor_prepare(h->metadata_dir, &anchor);
+                md_anchor_step_e        r = md_anchor_prepare(h->metadata_dir, &anchor, MD_ANCHOR_OWNER_CP);
 
                 if (r == MD_ANCHOR_FAILED)
                 {
                     cp_job_abort(h);
                     break;
+                }
+                if (r == MD_ANCHOR_BUSY)
+                {
+                    // 另一个 writer（metadata job）正在写 Anchor：背压重试同一阶段
+                    // （RISK-MD-06：不推进 sequence、不取槽）。
+                    (void)cp_job_stall(h);
+                    return;
                 }
                 if (r == MD_ANCHOR_CLEAN)
                 {
@@ -1270,41 +1280,30 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
 
     // 没有可定位的 record：raw 读 CP 池 slot 0 的 page 0（两 plane）区分三种情形：
     // · 命令走不通        ⇒ IO_ERROR（总线/超时，不格式化）
-    // · 读到非 FF 内容    ⇒ 有介质内容但没有有效 CP（损坏，不格式化）
-    // · 读到全 FF         ⇒ 再看固定元数据区是否已写过：空片 ⇒ NO_RECORD；
+    // · 读到已编程的页    ⇒ 有介质内容但没有有效 CP（损坏，不格式化）
+    // · 读到擦除页        ⇒ 再看固定元数据区是否已写过：空片 ⇒ NO_RECORD；
     // 其它元数据已写 ⇒ IO_ERROR（CP 缺失，不自动擦片）
+    // ⚠ 判空走 `ftl_page_blank_check`（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比），
+    //   不是「RAW 读数 FF」——RAW 读跳过 ECC，也没把 META/CRC/parity 交给 FTL（RISK-IF-15）。
     // ⚠ 不要只用 bbt_medium_has_ftl_data 判空：它对“空片”和“总线读死”都返回 false。
-    bool cmd_ok = false;
-    bool non_ff = false;
+    bool cmd_ok      = false;
+    bool any_written = false;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        DWORD addr = md_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
-        BYTE *raw  = s_probe_raw;
+        const DWORD addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
+        bool        blank = false;
 
-        (void)memset(raw, 0xFF, PAGE_SIZE);
-        if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
+        if (ftl_page_blank_check(addr, &blank) != FTL_OK)
         {
             continue;
         }
         cmd_ok = true;
 
-        for (BYTE cw = 0U; cw < CW_NUM; cw++)
+        if (blank == false)
         {
-            const BYTE *p = raw + (cw * FC_BUFFER_POOL_CW_SIZE);
-
-            for (BYTE k = 0U; k < 16U; k++)
-            {
-                if (p[k] != 0xFFU)
-                {
-                    non_ff = true;
-                    break;
-                }
-            }
-            if (non_ff)
-            {
-                break;
-            }
+            any_written = true;
+            break;
         }
     }
 
@@ -1312,7 +1311,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
     {
         return CP_MEDIA_IO_ERROR;
     }
-    if (non_ff)
+    if (any_written)
     {
         return CP_MEDIA_IO_ERROR;
     }

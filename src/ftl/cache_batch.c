@@ -113,11 +113,20 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
 
     for (BYTE k = 0U; k < FTL_LBA_PER_PAIR; k++)
     {
-        const DWORD l = base + k;
+        const DWORD l      = base + k;
+        DWORD       wr_pba = NAND_PBA_INVALID;
 
         if (wb_has(ftl->wbuf, l))
         {
             return false; /* 写缓冲未落盘：走普通读的 wbuf 快路径 */
+        }
+        if (ftl_cache_wr_lookup(ftl, l, &wr_pba) == true)
+        {
+            return false; /* 已编程未确认（RISK-CACHE-27）：真值不在 L2P，走普通读 */
+        }
+        if (ftl_cache_wr_failed_covers(ftl, l) == true)
+        {
+            return false; /* 已判失败未撤销（RISK-CACHE-28）：交给普通读报 IO_ERROR */
         }
 
         DWORD              p  = NAND_PBA_INVALID;
@@ -870,6 +879,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         pending->new_pba     = b->pba[j][0];
         pending->new_pba1    = b->pba[j][1];
         pending->cache_role  = role;
+        pending->cache_gen   = ftl->cache_seq.gen;
         pending->retry_count = 0U;
         pend_validate(pending);
 
@@ -977,7 +987,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // 开新序列时要求上一段的 cache program 页全部确认完：新序列的 START 可能需要
     // 刷出旧顺序页（LBA 不连续时），迟到的确认会落到新页、破坏其隐式坐标/容量。
     // 停泊的确认同样算"未排空"（它尚未 append，LBA 也未知先后）。
-    if ((starting == true) && ((seq->wr.count != 0U) || (pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL) == true)))
+    if ((starting == true) && ((seq->wr.count != 0U) || (seq->wr_inflight != 0U) || (pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL) == true)))
     {
         ftl->cache_wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
@@ -1074,17 +1084,21 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // ⚠ 必须减去**在飞未确认页**的条目：`current_entry` 只计已 append 的条目，
     // 确认滞后于提交；不减就会把页算满后再追加，触发序列期间的页刷被门控
     // （确认停泊 / 1 s 中止）。每个在飞页确认时追加 FTL_LBA_PER_PAIR 条。
-    const DWORD page_free       = jrn_seq_room(ftl->journal);
-    const DWORD inflight        = seq->wr.count * FTL_LBA_PER_PAIR;
-    const DWORD page_usable     = (page_free > inflight) ? (page_free - inflight) : 0U;
-    const DWORD page_room_pairs = page_usable / FTL_LBA_PER_PAIR;
+    // 在飞 = 已进页表（wr.count）+ 已下发未完成（wr_inflight）。页在**完成时**才进
+    // 页表（早回执），只减 wr.count 会把还在编程的页当成"没有"，窗口就会被放大到
+    // 超过环深/顺序页容量——完成后集中入表即溢出（环满 ASSERT / 顺序页超发）。
+    const DWORD wr_pages_pending = seq->wr.count + seq->wr_inflight;
+    const DWORD page_free        = jrn_seq_room(ftl->journal);
+    const DWORD inflight         = wr_pages_pending * FTL_LBA_PER_PAIR;
+    const DWORD page_usable      = (page_free > inflight) ? (page_free - inflight) : 0U;
+    const DWORD page_room_pairs  = page_usable / FTL_LBA_PER_PAIR;
 
     if (n_pages > page_room_pairs)
     {
         n_pages = page_room_pairs;
     }
 
-    const BYTE ring_free = (BYTE)(FTL_CACHE_SEQ_RING - seq->wr.count);
+    const BYTE ring_free = (wr_pages_pending < FTL_CACHE_SEQ_RING) ? (BYTE)(FTL_CACHE_SEQ_RING - wr_pages_pending) : 0U;
 
     if (n_pages > ring_free)
     {
@@ -1168,6 +1182,9 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         {
             pend_group_add_subop(&ftl->pending, gi);
         }
+        // 在飞成员数：完成入口（ftl_cache_wr_member_done）逐个递减，flush 屏障与
+        // 「开新序列」都等它归零。页在完成时才进页表，这个计数补上「已下发未完成」的洞。
+        ftl->cache_seq.wr_inflight = (BYTE)(ftl->cache_seq.wr_inflight + b.n_pend);
 
         // 序列所有者通道：门控对本批旁路（其他提交会被延迟并置 break_requested）。
         const bool owner_prev = ftl->cache_seq.owner_submit;
@@ -1178,6 +1195,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
         if (st != FTL_OK)
         {
+            ftl->cache_seq.wr_inflight = (BYTE)(ftl->cache_seq.wr_inflight - b.n_pend);
+
             for (BYTE j = 0U; j < b.n_pend; j++)
             {
                 pend_release_index(&ftl->pending, b.pend_idx[j]);
@@ -1199,15 +1218,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         return (st == FTL_AGAIN) ? FTL_CACHE_WRITE_AGAIN : FTL_CACHE_WRITE_ERROR;
     }
 
-    // 提交成功：按提交顺序把每页挂到未确认 FIFO（下一条命令的 FAILC 才能结算它）。
-    for (BYTE j = 0U; j < b.n_pend; j++)
-    {
-        if (ftl_cache_wr_ring_push(ftl, b.pend_idx[j]) == false)
-        {
-            ASSERT(false); /* 窗口大小已按 ring_free 收紧，不应溢出 */
-            break;
-        }
-    }
+    // 页在**完成**时进入「已编程页表」（ftl_cache_wr_member_done，早回执）——
+    // 提交时**不**压 pending 下标：页在完成时入表（RISK-CACHE-27）。
 
     if ((end_seq == true) && (seq->break_requested == true))
     {

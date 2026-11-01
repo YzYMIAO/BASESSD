@@ -47,15 +47,16 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc);
 /* ── 写指针 ── */
 
 /**
- * @brief 取当前日志块的**下一个空槽**并推进写指针（纯 RAM，不做任何块管理）。
+ * @brief 取**指定 plane** 当前日志块的下一个空槽并推进该 plane 的写指针（纯 RAM）。
  *
- * @param dir Directory
+ * @param dir   Directory
+ * @param plane 目标 plane（主副本 → plane0 当前块，备副本 → plane1 当前块）
  * @return 槽位 PBA
- *         NAND_PBA_INVALID = 无当前块 / 块已满
+ *         NAND_PBA_INVALID = 该 plane 无当前块 / 块已满
  *
- * @note 取到位置后**立即推进** cur_metadata_page：写失败时该页可能已半编程、不可复用。
+ * @note 取到位置后**立即推进** cur_page[plane]：写失败时该页可能已半编程、不可复用。
  */
-DWORD md_slot_take(md_dir_cache_t *dir);
+DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane);
 
 /* ── job 状态 ── */
 
@@ -100,12 +101,16 @@ static inline bool md_handle_is_compacting(const md_dir_cache_t *dir)
 
 /**
  * @brief 该块是否"已无可回收的顾虑"：在范围内、活 region 为 0、
- * 且不是当前写块。**纯账本判据**，不含 BST 状态。
+ * 没有在飞写回的槽位预留，且不是当前写块。**纯账本判据**，不含 BST 状态。
  *
  * @param dir Directory
  * @param g   候选 gblock 编号
  * @return true = 可回收
- *         false = 越界 / 仍有活 region / 是当前写块
+ *         false = 越界 / 仍有活 region / 有在飞槽位 / 是当前写块
+ *
+ * @note 在飞槽位（`md_slot_reserved`）必须挡住：写命令发出到 commit 之间，槽里的
+ *       数据还没进 Directory，`l2p_live` 看不到；此时擦块会把在飞数据连同落点一起
+ *       丢掉，commit 后 Directory 指向已擦页（RISK-MD-06）。
  */
 static inline bool md_log_block_is_idle(const md_dir_cache_t *dir, WORD g)
 {
@@ -117,9 +122,17 @@ static inline bool md_log_block_is_idle(const md_dir_cache_t *dir, WORD g)
     {
         return false;
     }
-    if (dir->cur_block_valid && (g == dir->cur_metadata_block))
+    if (md_slot_reserved(dir, g))
     {
         return false;
+    }
+    {
+        const BYTE p = ftl_gblock_plane(g);
+
+        if ((p < PLANE_NUM) && dir->cur_valid[p] && (g == dir->cur_block[p]))
+        {
+            return false; /* 该 plane 当前的写块：正在被追加 */
+        }
     }
 
     return true;

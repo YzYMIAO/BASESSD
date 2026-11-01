@@ -541,8 +541,15 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 | `chunk_index` / `chunk_count` | 2 + 2 B | 页序 / 总页数（= `ANCHOR_PAGE_COUNT` = 8） |
 | `entry_count` | 4 B | 本页有效条目数（≤ 256） |
 | `layout_version` | 4 B | 介质布局版本；不符 ⇒ 本页作废 |
+| `dirty_gen` | 4 B | 本页**填充时刻**的 Directory 代数（整条 record 要求 16 页全部相同） |
 | `entries[256]` | 1792 B | 256 × 7 B |
-| `padding` | 236 B | 补齐到一页主区 |
+| `padding` | 232 B | 补齐到一页主区（头 24 B） |
+
+**记录级一致性（v14，RISK-MD-06）**：一条 record 的 16 页跨多个服务循环写；若写入
+期间 Directory 有更新，早写的页是旧代、晚写的是新代，在媒体上看起来完全合法。加载
+侧要求 16 页的 `sequence` 与 `dirty_gen` **全部一致**，否则整条作废、回退到上一条
+一致记录（丢失的增量由 Journal 回放补回）。这消除了"混代目录被当作最新快照加载 ⇒
+两个代次的条目在复用过的页上互相碰撞（两个 region 指向同一页）"的路径。
 
 **几何**：2048 条 Directory ⇒ 8 页/record；每块 8 条 record；池 32 块 ⇒ 256 个槽位。
 **副本**：P0+P1 镜像——同一页用 multi-plane program 写两个 plane；读侧任一副本有效。
@@ -1213,7 +1220,7 @@ flowchart TD
    只按 BST+池编码，NONE/no-pool 会让下一次开机的快照校验整份失败——`RISK-BOOT-15`）；
    写过的块建退化单 plane 的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。
    full metadata rebuild **先于 carve**：否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
-   - **空闲块快速判空**：page 0 的 4 个 CW META 全 FF ⇒ 直接返回 0，**不再扫 64 页**。
+   - **空闲块快速判空**：`ftl_page_is_blank(page 0)`（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比）⇒ 直接返回 0，**不再扫 64 页**。
      这把空闲块从 64 次读降到 1 次（本板 3392 个空闲块约省 21.7 万次页读）。
    - **写过的块**：从 page 1 继续找第一个空白页，并检测 hole（空白页后又有写过页
      ⇒ 返回整块让调用者逐页反查）。
@@ -1227,7 +1234,7 @@ flowchart TD
 |---|---:|---|
 | clean + 块元数据快照 | ~150 ms + L2P 日志区恢复 | 不跑 full metadata rebuild；probe 只读池块 page 0 |
 | power failure | ~250 ms + L2P 日志区恢复 | 多 Journal 回放 |
-| L2P 日志区恢复 | ~0.3–1 s | 非活日志块逐页判空（每块最多 64 次 raw 读）；活块直接置 LOG，不读 |
+| L2P 日志区恢复 | ~0 | 非活块一律置 LOG + 登记回收（**不读介质**）；擦除按 free 水位懒执行（`md_reclaim_is_eager`）|
 | full metadata rebuild 兜底 | ~400~550 ms（**空片**） | 全盘扫描 + 逐页反查 |
 
 ⚠ 上表 rebuild 行是**空片**量级（page 0 快路径一跳到底）。**写过的介质**上每个写过的
@@ -1757,10 +1764,9 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `dirty_gen` | 4 B | Directory 变更代数；每次 `md_entry_update` 自增 |
 | `anchor_gen` | 4 B | 本次 Anchor 写入所覆盖的 `dirty_gen` 快照（过期保护） |
 | `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 live 日志块判据（防御分支 / probe） |
-| `cur_metadata_block` | 2 B | 当前日志块 gblock |
-| `cur_metadata_page` | 1 B | 当前日志块下一可用页 |
-| `cur_block_valid` | 1 B | 游标是否已建立 |
-| `cur_metadata_plane` | 1 B | 下一个新日志块选哪个 plane（轮转） |
+| `cur_block[PLANE_NUM]` | 2 B × plane | **每 plane 一个**当前日志块 gblock（主副本→plane0、备副本→plane1） |
+| `cur_page[PLANE_NUM]` | 1 B × plane | 该 plane 当前日志块下一可用页 |
+| `cur_valid[PLANE_NUM]` | 1 B × plane | 该 plane 游标是否已建立 |
 | `reclaim_pending` / `count` / `scan` | ~516 B | 待回收位图 + 计数 + 轮转起点 |
 | `handle` | ~2.2 KiB | 回收/压缩 handle（含 `cp_buf[2048]`） |
 | `anchor_write_idx` | 2 B | Anchor 池写点槽位 |
@@ -1790,7 +1796,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 
 1. **`entries` 容量 = 每实例 region 数**：每个 region 都必须能登记自己的位置；
    容量不足会让“满则丢弃”丢掉已落到日志块的 region，重启后回落到“未映射” = 更新永久丢失。
-2. **`l2p_live[g]` = 最新位置在 g 上的 region 数**。归零才可擦；当前日志块除外。
+2. **`l2p_live[g]` = 最新位置在 g 上的 region 数**。归零才可擦；各 plane 的当前写块除外。
 3. **`append_slot` 只取槽、不登记**；`commit_region` 只登记。两者分离是崩溃安全前提。
 4. **Anchor 先于 victim 擦除**：压缩的顺序是“搬移 → 登记 → Anchor 落盘 → 擦 victim → 归还”。
 5. **`entries` 存 PBA，不存 PAA**；读取一律经 `lookup`，不现场手写位置公式。
@@ -1828,18 +1834,20 @@ return pba_make(topo->ch, topo->ce, topo->lun, block, plane, page, 0)
 ⑥ 快路径全失败 ⇒ 慢路径全池扫描（只在损坏时付全池代价）
 ```
 
-**L2P 日志块的地址**不是 ring record：一页一个 region 副本，每次 flush 取两个
-连续页（主/备），追加游标是
-`(cur_metadata_block, cur_metadata_page, cur_metadata_plane)`。块满时：
+**L2P 日志块的地址**不是 ring record：一页一个 region 副本。每次 flush 从**两个
+plane 各取一页**（主副本 → plane0 的当前块，备副本 → plane1 的当前块），每 plane
+的追加游标是 `(cur_block[p], cur_page[p])`。这样单个 plane 的块被擦/写坏时，另一
+plane 的副本仍完整（RISK-BOOT-18 的 L2 冗余）；每个 plane 的块写满 64 页才换块。
+任一 plane 的块满/无游标时换**该 plane** 的块：
 
 ```text
 md_slot_pair_append
-  ├─ 当前块剩余 ≥ 2 页 ⇒ 返回连续两页 PBA，page += 2
-  ├─ 剩余不足 2 页/无当前块
-  │   ├─ 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
+  ├─ 两 plane 各剩余 ≥ 1 页 ⇒ 各返回一页 PBA，page[p] += 1
+  ├─ 某 plane 剩余不足 1 页/无当前块
+  │   ├─ 该 plane 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
   │   ├─ md_reclaim_mark_all：把 l2p_live==0 且非当前的 LOG 块**只登记**进
   │   │                      reclaim_pending 位图（不擦；擦除由后台 job 异步做）
-  │   ├─ allocator_alloc_log_block(alloc, cur_metadata_plane) 取整块
+  │   ├─ allocator_alloc_log_block(alloc, plane) 取整块
   │   ├─ 设置 cur_metadata_block / page=0 / cur_block_valid=1
   │   └─ cur_metadata_plane 轮转到下一 plane
   └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN，
@@ -1902,12 +1910,12 @@ sequenceDiagram
 
     C->>D: md_slot_pair_append
     alt 当前块剩余 ≥ 2 页
-        D->>D: 返回连续两页 PBA, page 加二
+        D->>D: 两 plane 各返回一页 PBA, page[p] 加一
     else 块满/无当前块
         D->>D: md_reclaim_mark_all 只登记零活 LOG 块（不擦）
         D->>A: allocator_alloc_log_block
         A-->>D: 新 gblock
-        D->>D: 更新 cur_block page plane, plane 轮转
+        D->>D: 更新 cur_block[p] / page[p]
     end
     D-->>C: 两页 PBA（主/备），失败为 false
     C->>N: 写主副本页 异步
@@ -1942,12 +1950,19 @@ Anchor 装配、测试使用；运行期 L2P region 的更新走 `commit_region`
 region 全部被改写、最新位置都迁到别处后，这个块才没有活引用，才能擦。`l2p_live[g]`
 就是这个计数；它只在 `commit_region` 里增减，并在 `md_load` 里重建。
 
-**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足四条：
+**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足五条：
 
-1. `l2p_live[g] == 0`；
+1. `l2p_live[g] == 0` **且该块上没有在飞写回的槽位预留**（`md_slot_reserved`，见下）；
 2. `g != cur_metadata_block`（已满且零活的当前块会先被摘掉当前身份）；
 3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）；
 4. **`dir->dirty == false`**（on-media Anchor 已覆盖当前 Directory；见下方 ③→④ 契约）。
+
+⚠ **条件 1 的后半句不可省**：`l2p_live` 只统计**已 commit** 的位置。写回从
+`md_slot_pair_append` 取槽到 commit 之间，槽里的数据还在写命令上、Directory 尚未
+登记 ⇒ 该块可能 `l2p_live == 0`，但其实马上就会有活 region 落回来。此时换块/擦除
+会把在飞数据连同其落点一起丢掉，写完成后的 commit 再把 Directory 指向已擦页
+（重启 region 读失败、映射丢失，RISK-MD-06）。所以在飞写回在 `slot_resv[]` 里占一个
+表项，块的"可回收"判据同时看它；commit/失败后释放。
 
 登记点：`commit_region` 旧位置归零、`append_slot` 换走零活旧块、换块时的
 `md_reclaim_mark_all` 扫描、压缩/擦除失败重试。**登记只置位，不碰 NAND**；
@@ -2250,6 +2265,11 @@ flowchart LR
    甚至为 0 ⇒ dangling（RISK-ALLOC-10）、GC 按 `valid_cw==0` 误回收仍被 L2P 引用的块
    ⇒ 静默丢数据。同一条规则也保证 F4（`pfr_boot_apply_region_bitmap`）的
    「未置位区 NAND 页更旧」假设成立。
+   ⚠ **例外：Journal 页写失败时闸门必须放行**（RISK-L2P-10）。失败页的条目已随
+   `page_buf` 清空而丢失，`persisted_seq` 永远覆盖不到那段序号；若继续退让，
+   Checkpoint 的区域落盘被永久挡住，而清除失败标记（`write_fail_pending`）的唯一
+   途径就是「CP 完成」⇒ 互相等待。此时 CP 本身就是恢复机制：它完成后快照全部 L2P
+   并截断 Journal，CP 未提交时新写的区域页无人引用，不产生额外损失。
 
 #### 3.6.4 读路径
 
@@ -2286,7 +2306,8 @@ l2p_write(lba, pba)
 
 l2p_flush_kick(line)
     ├─ 非 DIRTY / 已在 FLUSHING ⇒ 返回
-    ├─ **WAL 闸门**：jrn_persisted_seq < line->dirty_seq ⇒ wal_defer++、返回 FTL_AGAIN
+    ├─ **WAL 闸门**：jrn_persisted_seq < line->dirty_seq 且**无 Journal 写失败**
+    │   ⇒ wal_defer++、返回 FTL_AGAIN（写失败时放行，见不变量 8 的例外）
     ├─ flush_inflight 达上限 ⇒ FTL_AGAIN
     ├─ md_slot_pair_append 取两槽（失败 ⇒ 行保持 DIRTY）
     ├─ 起异步写主副本；state = FLUSHING
@@ -2963,6 +2984,13 @@ pend_group_complete_subop_multi(owners, status)
 
 停泊项的 `command_id = NONE`、组 `outstanding` 不递减；收尾时由引擎统一结算。
 
+**WRITE_CONFIRM 的超时预算是「无进展时长」而不是「停泊时长」**（RISK-HOST-05 支路 (a)）：
+确认 handler 在依赖**确实有待推进的工作**时刷新 `park_ms`——
+`ftl_confirm_progress_pending()`：L2P region 加载在飞 / region 写回在飞 / Journal 页写在飞 /
+Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journal 待刷条目；
+全都没有时不刷新，`FTL_GROUP_DRAIN_TIMEOUT_MS`（100 ms）到期按 IO_ERROR 结算。这样后台拥塞（CP 提交被门控、Journal 擦除排队）不会把**有限**的
+等待变成 host 写失败，而结构性卡死仍然有界。
+
 #### 3.9.8 失败语义
 
 | 情况 | 结果 | 数据影响 |
@@ -3442,7 +3470,7 @@ flowchart TB
 6. **源块 gblock 不缓存**：快路径（valid_total==0）不经过 READ；缓存字段会是 0。
    真值始终是 `victim.plane_blocks[plane]`。
 7. **完成错误即中止**：READ / WRITE 完成带 `FC_CMD_STATUS_ERROR_MASK`（或数据拷出失败）
-   ⇒ 中止 job，victim 不擦。只有**擦除页**（FC 的 desc 报 `FC_CW_STATUS_EMPTY`，或 META 全 FF）才允许跳过；
+   ⇒ 中止 job，victim 不擦。只有**擦除页**（FC 的 desc 报 `FC_CW_STATUS_EMPTY`，即整条 CW 1 比特占比 ≥99%）才允许跳过；
    擦除页不是读错误——全 0xFF 的 CW 解码必然失败，FC 单独识别后按空页上报（`RISK-GC-11`）。
 8. **提交时重查 L2P**：READ_SETTLE 到 WRITE_SETTLE 之间 host 写/TRIM 可能已改映射；
    只有 L2P 仍指向源 CW 才迁移，被抢先的 CW 跳过（不再引用 victim）。
@@ -3555,7 +3583,7 @@ flowchart TD
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
    记 `rr_record_ecc` / `read_count`（慢死预测闭环）。**读错误 ⇒ 中止**（该 plane
    源块的 `fail_count++`；累计 3 次标 BAD + 摘除 Closed plane）；只有“无错误 +
-   META 全 FF”的空页才跳过。
+   `FC_CW_STATUS_EMPTY`”的空页才跳过。
 3. `MIG_READ_SETTLE`：**先 `l2p_is_ready` 前置**，全部就绪后才逐 CW 反查 L2P；
    仍指向本物理 CW 才置 `cw_bitmap`。半途而废会让 bitmap 一半有一半没有。
 4. `MIG_WRITE`：本页有有效 CW ⇒ `alc_super_open_alloc_pair(ALC_SUPER_ALLOC_COLD)` → 提交 CW 子集写。
@@ -3589,7 +3617,7 @@ flowchart TD
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
 | 分配不到目标页 | 中止，不擦 victim | 已搬移页指向新页；未搬移页仍指向 victim；下轮重来 |
-| NAND 读失败 | 中止，不擦 victim；该 plane 源块 `fail_count++` | 源数据仍在；空页（无错误 + META 全 FF）才跳过 |
+| NAND 读失败 | 中止，不擦 victim；该 plane 源块 `fail_count++` | 源数据仍在；空页（无错误 + `FC_CW_STATUS_EMPTY`）才跳过 |
 | 同一 plane 源块读失败累计 3 次 | `bbt_mark_bad` + 摘除该 plane 的 Closed 条目 | 坏块被隔离，GC 换候选；该块上不可读的数据本就无法恢复 |
 | NAND 写失败 | 中止，不擦 victim | 该 plane 的 L2P 未动；源数据仍有效，下轮再搬 |
 | Journal append 丢弃 / L2P 写失败 | 中止，不擦 victim | 该 CW 的映射未持久化；前一 CW 的迁移保持有效 |
@@ -3907,8 +3935,9 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 | 序列延续只看 `next_lba` | host 传输段 / 命令身份都不是 FTL 语义边界 |
 | 主动断点 = Journal 顺序页写满（508 条 → 504 整 pair） | 顺序序列占用 plane cache 寄存器，元数据只能在断点落盘；页可跨命令续用 |
 | padding END 收尾 | 器件没有"无数据 END"；用一个不映射的零页给最后一页提供 FAIL_CACHE 结算点（≤每 252 KiB 一次） |
-| 读序列同样跨命令 | LAST 只在物理/region 断点 / 命令尾不足一对 / D4；放弃不发 LAST（RISK-IF-09） |
+| 读序列同样跨命令 | LAST 只在物理/region 断点 / 命令尾不足一对 / D4；放弃不发 LAST（RISK-IF-09）。⚠ 同步主机（等 `complete_flag` 才发下一条）在序列挂着期间会多等空闲守卫 1 s —— 见 RISK-CACHE-25（本仓信息项，目标主机 USB 不受影响） |
 | 后台元数据被门控但不置 `break_requested` | 否则序列退回逐窗口长度 |
+| 后台提交 deadline 在「序列打开 **或** 主机组在飞」时挂起 | 主机持续提交时 FC 池/SQ 占满是预期等待；不让后台把 CP/L2P 写回/迁移每 10 ms 中止一次（否则元数据永远排不上队 → 写确认停泊超时 → host 写失败）。`mig_job_wait`（等外部命令）不适用 |
 | FC 不加序列句柄 | 只用 FC 现有链 + FTL 门控 |
 
 易错点：
@@ -3985,26 +4014,57 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
    本序列自己打开**，新块 page0 计入本序列；page0 尚未确认时本序列可继续写 page>0——
    有序管线保证 page0 失败会中止其后所有页，rebuild 的 page0 空白捷径不被击穿）
 ④ 命令：首窗口首条 49（FIRST）/ 中间 44（15h）/ 断点末条 48（10h）
-⑤ 逐页确认：第 i 页的结论由第 i+1 条命令的 FAIL_CACHE 给出；末页由 END 的 FAIL 给出
-   （与 block 无关：跨 block 的下一对同样给出上一页的 FAILC）
-⑥ 确认路径：cache 页走 JSEG 顺序页（jrn_seq_ready + jrn_append_seq，4B/条隐式 LBA）
-⑦ 断点（在**数据页**上 END）：
+⑤ 逐页结论：第 i 页的结论由第 i+1 条命令的 FAIL_CACHE 给出；末页由 END 的 FAIL 给出
+   （与 block 无关：跨 block 的下一对同样给出上一页的 FAILC）。结论落在
+   `cache_seq.wr` 的**结论游标**（pend_idx）上，不是队头——确认可能背压滞后，
+   队头会停在「已证明、等确认」的页（见 §3.16.5「volatile write cache」）
+⑥ **早回执**：页在**自身命令完成**时就结算子操作（组完成 ⇒ host 可见完成），
+   不再等下一命令的 FAILC；组完成与确认/证明解耦（RISK-CACHE-27）
+⑦ 确认路径：cache 页走 JSEG 顺序页（jrn_seq_ready + jrn_append_seq，4B/条隐式 LBA），
+   由 `ftl_cache_wr_confirm_step()` 每轮 service 按提交序推进（背压 = 下轮再来）
+⑧ 断点（在**数据页**上 END）：
    · Journal 顺序页写满（本窗口吃干剩余空间，≈63 pair / 252 KiB）
    · 命令尾不足一个 pair（用 cmd_remaining 提前收尾，尾段走 wbuf）
    · D4（前台提交被门控拒绝）
    · **收尾块时分配器开不出新块**（`alc_super_can_open` 为 false）：保持序列打开会让
      门控挡住 GC、padding END 也无页可分配 ⇒ 退回旧语义在 block 边界 END（RISK-CACHE-15）
    · 物理 block 边界**不是**断点：44/48h 每条自带地址（datasheet §5/§6）
-⑧ 有序收尾（没有数据页可 END 时 → **padding END（本仓自拟）**）：
+⑨ 有序收尾（没有数据页可 END 时 → **padding END（本仓自拟）**）：
    LBA 不连续 / 下一命令方向不同 / 空闲 1 s / flush / 前台等待
    ⇒ service 提交一个**不映射的零页**（页头 META=UNKNOWN）作为 48h，
    用它的 FAIL_CACHE 结算最后一页，然后 active=false。
    ⚠ padding 页落在新 SB 的 page0 时，成功回调必须用**逐 plane 的真实 PBA**
    （`cache_seq.pad_pba[]`）记 page0 屏障：Policy B 下两 plane 块号不同，用
    `pba_with_plane(plane0, 1)` 推导会让 plane1 的屏障永久漏记（RISK-CACHE-24）
-⑨ 失败：任一错误位 ⇒ 中止序列；未确认页按 IO_ERROR 结算、关 hot SB；
-   **deferred error** 由控制器在下一条命令上报
+⑩ 失败：任一错误位 ⇒ 中止序列；器件**已证明**的页保留（正常确认并弹出），
+   其余未证明页按 IO_ERROR 结算、关 hot SB；FAILC 落点页立即把其 region 置 degraded；
+   **deferred error** 由控制器在下一条命令上报（RISK-CACHE-28 / RISK-USBC-01）
+⑪ 读可见性：已编程、尚未确认的页由**读覆盖层**直读刚编程的 PBA（不等 L2P 确认）；
+   已判失败、撤销未完成的页读直接 IO_ERROR（绝不返回可疑页内容）
 ```
+
+**volatile write cache（早回执）**
+
+写段的 CSW 不再等「上一页被证明」：页命令完成即入表并结算组。代价是三条新语义，
+必须一起看：
+
+| 问题 | 处理 | 依据 |
+|---|---|---|
+| 已回执但未确认的页，读怎么看到新数据 | 读路径在 `wb_read` 之后、`l2p_read` 之前查「已编程页表」，命中直读该页 PBA；cache 读批量对含未确认 LBA 的 pair 判不可批量 | RISK-CACHE-27 |
+| 后来 FAILC 判失败怎么办 | 撤销该页（Journal + L2P `NAND_PBA_INVALID`）、**立即**置 region degraded、粘性 deferred error；撤销完成前的读也报 IO_ERROR | RISK-CACHE-28 |
+| flush 什么时候算完成 | 等「已编程页表」全部证明并确认进 L2P（`wr.count == 0`）**且没有在飞成员**（`wr_inflight == 0`，页在完成时才入表）+ Journal/L2P/wbuf 空闲 | RISK-CACHE-18 / RISK-CACHE-29 |
+
+**在飞成员计数（`wr_inflight`）**：页在**完成时**才入表 ⇒ 只数 `wr.count` 会把「已下发、
+仍在 NAND 里编程」的页当成不存在。flush 屏障与「开新序列」都要求它归零；窗口构建
+（环余量 / Journal 顺序页余量）也必须把它算进「在飞」，否则完成后集中入表即溢出。
+
+**迟到完成**：序列中止后仍在飞的 cache 命令，完成时会带**序列代号**（`pend_req_t.cache_gen`
+vs `cache_seq.gen`）；不一致 ⇒ 只按 IO_ERROR 结算组，页一律不入表、不确认映射。没有这一层，
+中止后的迟到页会被确认进 L2P，击穿 RISK-CACHE-19 的 page0 捷径（rebuild 跳过 page0 空白的块）。
+
+**confirmed 不等于 proven**：确认（Journal→L2P→BST）只要页已编程就推进，证明要等下一
+命令的 FAILC。两者顺序都按提交序；结论游标（pend_idx）独立于队头，避免「队头已证明、
+等确认」时新结论打错页（环排不空 ⇒ flush 超时）。
 
 **③ 写窗口：逐页 FAIL_CACHE 滞后一页 + 跨命令序列**
 
@@ -4023,6 +4083,7 @@ sequenceDiagram
     F->>N: 44×m …（同一序列，无 START；命令 N 的末页由本窗口首条 FAILC 结算）
     Note over F,N: 顺序页填满 504 条 ⇒ 在数据页上 END；下一次 START 时刷页
     Note over F,N: LBA 不连续 / 空闲 / flush ⇒ padding END（零页）结算最后一页
+    Note over F,N: 每页命令完成即早回执（VWC）；FAILC 晚一条命令到 ⇒ 撤销 + deferred error
 ```
 
 **Journal 顺序映射页**：顺序流的确认条目按提交序到达，LBA = `base_lba + 下标`，每条 4 B
@@ -4049,7 +4110,9 @@ sequenceDiagram
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
 | 读命令级失败（UNC / CRC / MATA / TIMEOUT） | 逐页上报组 IO_ERROR、序列关闭；RR 不介入 | 该页不可用 |
-| 写任一错误位 | 序列中止：未确认页不确认映射、关 hot SB；**deferred error** 由下一条命令上报 | 失败页及其后不确认；已回执命令的 CSW 不改写 |
+| 写任一错误位（NAND_FAIL / TIMEOUT / DATA_ERROR） | 序列中止：本页按 IO_ERROR 当场结算（尚未回执），其余未证明页按 IO_ERROR 结算、关 hot SB；**deferred error** 由下一条命令上报 | 失败页及其后不确认；已回执命令的 CSW 不改写 |
+| 写命令的 FAIL_CACHE（判**前一页**失败） | 前一页标失败 + **整个序列中止**（同一条可疑管线；保住 RISK-CACHE-19 的 page0 捷径）；本页也按 IO_ERROR 结算 | 器件已证明的页保留；失败页撤销 + region degraded |
+| 已回执页后来被判失败 | 撤销：Journal + L2P 写 `NAND_PBA_INVALID`；region **立即**置 degraded；读该 region 的未映射 LBA / 失败页覆盖的 LBA 报 IO_ERROR | 主机可见地失败（不是零填、不是旧数据）；同 region 其它未映射 LBA 也报错（RISK-CACHE-28 的已知取舍） |
 | padding END 失败 | 最后一页按 IO_ERROR 结算；关 hot SB | 该页映射不确认（deferred error） |
 | 顺序页预留失败 / 页满 | 本窗口 END（页满断点） | 无 |
 | 空闲 / LBA 不连续 / flush | padding END 有序收尾 | 无（最后一页正常结算） |
@@ -4080,7 +4143,19 @@ datasheet（`docs/reference/README.md` §F1 / §C4；`include/nand/onfi_1_0.h:23
 实现写成行业标准形态**：`padding END` 与"下一条能承载状态的命令直接失败一次"都是
 **本仓自拟**。与公开 SCSI 语义的差异：TinyUSB MSC 不支持自定义 sense data，所以本仓
 无法给出 CHECK CONDITION + deferred sense（具体 ASC 不作断言），只能用命令级失败近似
-（RISK-USBC-01）。`SYNCHRONIZE CACHE` 在正常路径会先把序列 padding 收尾，并等 Journal 与 L2P 都落盘；
+（RISK-USBC-01）。
+
+**早回执（volatile write cache）**：写命令在页编程完成（不是提交）后即可完成——与
+DRAM 型/DRAM-less 主控都把「完成点」放在设备侧缓冲写完之后同型；差异是本仓**不做**
+RAM 里的写合并缓存，未确认数据直接落在 NAND 页里，靠读覆盖层保证可见性。掉电窗口
+因此是「已编程未证明的页 + 未落盘的 Journal 映射」，量化见 RISK-CACHE-18。
+
+**FUA（不实现，用户裁决 2026-11-01）**：WRITE(10) 的 CDB byte1 bit3 是 FUA（T10 SBC-3
+§5.26：FUA=1 ⇒ 设备不得在数据真正写到介质前返回 GOOD，见 `docs/reference/README.md`
+§外部规范）。本仓**忽略**该位，依赖主机 fsync 的后续 `SYNCHRONIZE CACHE` 作为持久性
+屏障；取舍与恢复要点见 `known_risks.md` RISK-USB-05。
+
+`SYNCHRONIZE CACHE` 在正常路径会先把序列 padding 收尾，并等 Journal 与 L2P 都落盘；
 L2P 区域写回现在按 **WAL 次序**等覆盖其映射的 Journal 条目先落盘（§3.6 不变量 8），
 所以正常完成的 flush 是「日志 + 数据」的完整屏障。只有**超时路径**仍是 best-effort
 （`FTL_FLUSH_TIMEOUT_MS`，元数据真卡死时主机不能永不完成），那一路不是绝对屏障。
@@ -4390,7 +4465,7 @@ sequenceDiagram
     C->>C: flush_inflight 达上限 则 FTL_AGAIN
     C->>D: md_slot_pair_append
     alt 当前日志块剩余 ≥ 2 页
-        D-->>C: 连续两页 PBA（主/备）
+        D-->>C: 两 plane 各一页 PBA（主/备）
     else 剩余不足 2 页
         D->>D: 登记 l2p_live 为 0 的 LOG 块到 reclaim_pending（不擦）
         D->>A: alloc_log_block

@@ -520,6 +520,33 @@ DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
 // 只对 plane 0 折叠，flat 掩码下"只取 plane 0"会恒为 0；
 // desc->ecc_bits 由该函数对链上**每个** desc 填写，全链取值无损。
 // 调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
+// 实现要点：走 desc 链的**全链**（含两个 plane），空链按"非空页"处理——
+// 没有 CW 就没有证据，不能断言"没写过"（保守方向同 fc_cw_status_is_empty 的用法）。
+// EMPTY 由数据路径 Stage 1 在 ECC 解码失败后按 1 比特占比判定（fc_cw_is_blank），
+// 因此本函数只对**读命令 + 已完成的命令**有意义。
+bool fc_get_cmd_all_cw_empty(const fc_command_t *command)
+{
+    fc_descriptor_id_t desc_id;
+    WORD               n = 0U;
+
+    ASSERT(command != NULL);
+
+    desc_id = (fc_descriptor_id_t)command->desc_id;
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+
+        if (fc_cw_status_is_empty(descriptor->status) == false)
+        {
+            return false;
+        }
+        n++;
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    return (n > 0U);
+}
+
 BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;

@@ -887,7 +887,7 @@ static bool mig_deadline_is_expired(DWORD *start_ms, DWORD timeout_ms)
 static bool mig_job_stall(mig_handle_t *m)
 {
     // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
-    if (ftl_op_cache_seq_active() == true)
+    if (ftl_op_bg_submit_deferred() == true)
     {
         m->stall_ms = 0U;
         return false;
@@ -921,6 +921,9 @@ static bool mig_job_wait(mig_handle_t *m, const char *reason)
     // 在飞的外部命令：序列由配额 / block 头 / 命令尾收尾，等待必然在段边界结束。
     // 与 mig_job_stall 同口径不计超时；否则长顺序写（一段 ~300 ms 墙钟）会让本 job
     // 每 50 ms 中止一次，GC/WL 在 host 持续写下永远拿不到 Journal 容量。
+    // ⚠ 这里**只**按序列判据挂起（不用 `ftl_op_bg_submit_deferred`）：本函数等的是
+    //   外部模块的在飞命令，"在飞"不代表"会完成"，主机忙不是给它免死的理由
+    //   （与 mig_job_stall 的提交背压判据区分开）。
     if (ftl_op_cache_seq_active() == true)
     {
         m->wait_ms = 0U;

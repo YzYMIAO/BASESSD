@@ -5,6 +5,7 @@
 #include <time.h>
 
 #if defined(MUNIT_ENABLE_TIMING)
+#    include "platform.h"
 #    include "sys.h"
 
 /* 纳秒/微秒常量 */
@@ -13,6 +14,18 @@
 
 /* DWT CYCCNT 读取（直接访问寄存器，不依赖 delay 模块） */
 #    define MUNIT_DWT_CYCCNT (*((volatile uint32_t *)0xE0001004UL))
+
+/* ── 计时源：平台毫秒时钟数回绕 + DWT 供亚毫秒精度（RISK-UT-05）──
+ * DWT CYCCNT 是 32 位、400 MHz ⇒ 每 2^32/400e6 ≈ 10.737 s 回绕一次，单看它会把
+ * 长用例报成取模后的时长（例如 21 s 的 format 显示成 10.6 s）。这里用**平台毫秒
+ * 时钟**（与 `ftl_job_now_ms` 同一源，`ssd_platform_get()->time_us`）判断回绕次数，
+ * DWT 只补亚毫秒部分：
+ *     ns = (cycles + k × 2^32) × 1e6 / 400
+ * k 由「毫秒差换算的周期数」四舍五入得到；毫秒源只有 ±1 ms 误差（40 万周期，
+ * 远小于 2^32），只在「真时长恰好落在回绕边界 ±1 ms 内」时会选错一次。
+ * ⚠ 平台时钟未注册（`time_us == NULL`）时退化为原 32 位行为——那时无法判回绕。 */
+#    define MUNIT_CPU_HZ        (400000000ULL)
+#    define MUNIT_CYCLES_PER_US (MUNIT_CPU_HZ / 1000000ULL)
 
 /*
  * munit_print_time — 打印纳秒时间值，自适应选择单位
@@ -61,22 +74,40 @@ static void __attribute__((unused)) munit_timing_init(void)
 typedef struct
 {
     uint32_t start_cycles;
+    uint64_t start_us;
 } munit_timing_ctx_t;
+
+static uint64_t munit_now_us(void)
+{
+    const ssd_platform_ops_t *ops = ssd_platform_get();
+
+    return ((ops != NULL) && (ops->time_us != NULL)) ? (uint64_t)ops->time_us() : 0ULL;
+}
 
 static void munit_timing_start(munit_timing_ctx_t *ctx)
 {
     ctx->start_cycles = MUNIT_DWT_CYCCNT;
+    ctx->start_us     = munit_now_us();
 }
 
 static uint64_t munit_timing_stop(const munit_timing_ctx_t *ctx)
 {
-    uint32_t now     = MUNIT_DWT_CYCCNT;
-    uint32_t elapsed = now - ctx->start_cycles;
+    const uint32_t cycles = (uint32_t)(MUNIT_DWT_CYCCNT - ctx->start_cycles);
+    const uint64_t us     = munit_now_us() - ctx->start_us;
+    const int64_t  est    = (int64_t)us * (int64_t)MUNIT_CYCLES_PER_US;
+    const int64_t  diff   = est - (int64_t)cycles;
+    int64_t        wraps  = (diff + (1LL << 31)) / (1LL << 32);
 
-    /* cycles → ns = cycles * 1e9 / 400MHz（STM32H743 @400MHz） */
-    uint64_t ns = (uint64_t)elapsed * 1000000000ULL;
-    ns /= 400000000ULL;
-    return ns;
+    if (wraps < 0)
+    {
+        wraps = 0; /* 平台时钟没走（未注册 / 被测试替换）：按未回绕处理 */
+    }
+
+    const uint64_t total = (uint64_t)cycles + ((uint64_t)wraps * (1ULL << 32));
+
+    /* cycles → ns = cycles × 1000 / 400（1 µs = 400 周期，1 µs = 1000 ns）。
+     * 先乘 1000 再除，避免 total × 1e9 溢出（约 45000 s 才溢出）。 */
+    return (total * 1000ULL) / MUNIT_CYCLES_PER_US;
 }
 #endif /* MUNIT_ENABLE_TIMING */
 static MunitLogLevel munit_log_level_fatal   = MUNIT_LOG_ERROR;

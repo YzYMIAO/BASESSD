@@ -288,6 +288,20 @@ extern "C"
      */
     BYTE fc_get_cmd_ecc_max(const fc_command_t *command);
 
+    /**
+     * @brief 命令读到的所有 CW 是否都是**擦除页**（desc 链上每个 CW 都是 FC_CW_STATUS_EMPTY）。
+     *
+     * 这是「这一页编程过没有」的**唯一权威判据**：空/非空的依据（ECC 是否成码字、
+     * parity 是否写成）只有 FC 看得见，FTL 只拿得到 USER 区。
+     * 须在 fc_command_release() 之前调用（desc 释放后失效）。
+     *
+     * @param command 命令；须非空，且是读命令（写命令的 desc 状态不表示介质内容）。
+     *
+     * @return true  = 链上每个 CW 都判为擦除页
+     *         false = 至少一个 CW 不是（含解码成功 / UNC / 读失败）
+     */
+    bool fc_get_cmd_all_cw_empty(const fc_command_t *command);
+
     /* ═══════ ⑤ 查询工具 ═══════ */
     /**
      * @brief ID→指针转换。前置条件：command_id 为 fc_command_alloc() 分配出的池内槽位号。

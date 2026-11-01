@@ -26,7 +26,7 @@
  *   4. 同步提交等待    ftl_sync_submit_wait（ftl_op 机制的客户端）
  *   5. 页级同步原语    ftl_cmd_prepare_alloc / ftl_sync_page_prepare（static）+
  *                      ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw /
- *                      ftl_page_is_blank_raw / ftl_sync_erase_block[_multi_plane] /
+ *                      ftl_page_blank_check / ftl_page_is_blank / ftl_sync_erase_block[_multi_plane] /
  *                      ftl_sync_read_column
  *   6. 元数据镜像写    ftl_async_write_page_mirror / ftl_sync_write_page_mirror
  *   7. 页级异步原语    ftl_async_write_page / ftl_async_write_page_cw / ftl_async_write_pair_cmd /
@@ -49,8 +49,10 @@
 #include <string.h>
 
 // 页级原语的两种常量配置（文件作用域初始化器，H47 允许；局部一律逐字段赋值）。
-static const ftl_page_cfg_t s_page_cfg_raw = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
-static const ftl_page_cfg_t s_page_cfg_bch = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+static const ftl_page_cfg_t s_page_cfg_raw   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
+static const ftl_page_cfg_t s_page_cfg_bch   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+// 判空专用：ECC 开（空/非空要靠它）、CRC/加扰/META 比对全关（与页面内容无关）。
+static const ftl_page_cfg_t s_page_cfg_blank = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN};
 
 // 短页（< PAGE_MAIN_SIZE，如 BBT header 540 B）的补齐缓冲。单线程 superloop；
 // 数据在 ftl_async_write_page_mirror 返回前已拷进 FC buffer，调用者无需持有。
@@ -674,7 +676,10 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
     return FTL_OK;
 }
 
-// 实现要点：**刻意不判 NAND 失败**——坏页/空页也要拿原始数据（判空、判出厂坏块都靠它）。
+// 实现要点：**刻意不判 NAND 失败**——坏页也要拿原始数据（诊断 dump / 出厂坏块探针用）。
+// ⚠ 它**不是**判空手段：LDPC_RAW 跳过 ECC，且 FC 只向 FTL 暴露 USER 512B，
+//   META/CRC/parity 都拿不到；「RAW 读 + 数 FF」判不出「编程过没有」（RISK-IF-15）。
+//   判空一律用 ftl_page_is_blank / ftl_page_blank_check（解码路径 + FC 的 CW 状态位）。
 ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
 {
     const ftl_page_cfg_t *cfg = &s_page_cfg_raw;
@@ -692,9 +697,10 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
         return FTL_ERROR;
     }
 
-    // 不判 NAND 失败：整页 4 个 CW 无条件拷出。
+    // 不判 NAND 失败：整页 4 个 CW 无条件拷出，每 CW 只拷 USER 512B（FC 的分层契约），
+    // 槽尾 16B（META/CRC/parity）不填。
     // 但取不到 CW 数据是**控制器侧**错误（desc/buffer 缺失），不是坏页——此时返回 OK
-    // 会让判空/判坏块看到空洞，故必须报错。
+    // 会让调用者看到空洞，故必须报错。
     for (BYTE cw = 0U; cw < CW_NUM; cw++)
     {
         const BYTE *src = fc_get_cmd_data_ptr(cmd, cw);
@@ -713,38 +719,46 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
     return FTL_OK;
 }
 
-// 实现要点：RAW 读按 CW 拷回 **FC_BUFFER_USER_SIZE（512B，从 CW 基址起）**，
-// 覆盖 META 4B + CRC 4B + USER 前缀 504B。检查整段而不是只看 META：
-// 写失败可能留下半编程页（META 全 FF 但 USER 已被打掉），只查 META
-// 会把它判空、随后在未擦页上编程 = 静默损坏。
-// 读失败一律判“非空”（保守方向）：命令没走通时 buffer 内容未定义，
+// 实现要点：**走解码路径**——"这一页编程过没有"的证据（ECC 是否成码字、
+// 整条 CW 的 1 比特占比、parity 是否写成）全在 FC，FTL 只拿得到 USER 区。
+// ⇒ 这里只发一次普通读，然后读 FC 给出的 CW 状态位（fc_get_cmd_all_cw_empty）。
+// ⚠ **不能用 RAW 读判空**：LDPC_RAW 刻意跳过 ECC，空/非空的依据全部被跳过；
+//   而且 RAW 读只交出 USER 512B，META/CRC/parity 根本看不见（RISK-IF-15）。
+// 读失败 / 超时一律判"非空"（保守方向）：命令没走通时不能断言"没写过"——
 // 当空页会让调用者把写过块当空闲块复用（静默覆盖活数据）。
-// ⚠ 残留假空：RANDOM_DISABLE 且用户数据全 FF、META=FC_META_UNKNOWN
-// 的页仍会被判空；FTL 的数据/元数据页都不写该哨兵。
-bool ftl_page_is_blank_raw(DWORD pba, void *raw_buf)
+ftl_status_e ftl_page_blank_check(DWORD pba, bool *blank)
 {
-    BYTE *buf = (BYTE *)raw_buf;
+    // 前置条件（判据 2）：out 由调用者持有。
+    ASSERT(blank != NULL);
 
-    memset(buf, 0xFF, PAGE_SIZE);
-    if (ftl_sync_read_page_raw(pba, buf) != FTL_OK)
+    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &s_page_cfg_blank);
+
+    if (cmd == NULL)
     {
-        return false;
+        return FTL_ERROR;
     }
 
-    for (BYTE cw = 0U; cw < CW_NUM; cw++)
-    {
-        const BYTE *slot = buf + (cw * FC_BUFFER_POOL_CW_SIZE);
+    fc_command_status_t completion;
 
-        for (DWORD i = 0U; i < FC_BUFFER_USER_SIZE; i++)
-        {
-            if (slot[i] != 0xFFU)
-            {
-                return false;
-            }
-        }
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
     }
 
-    return true;
+    // 不看 completion.status：擦除页在 FC 里不是错误位（FC_CW_STATUS_EMPTY）。
+    *blank = fc_get_cmd_all_cw_empty(cmd);
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+bool ftl_page_is_blank(DWORD pba)
+{
+    bool blank = false;
+
+    // 读命令没走通 ⇒ 判"非空"（保守方向）：命令没走通时不能断言"没写过"。
+    return (ftl_page_blank_check(pba, &blank) == FTL_OK) && blank;
 }
 
 // 实现要点：擦除慢，超时放宽到 20ms（其余原语用默认 10ms）。

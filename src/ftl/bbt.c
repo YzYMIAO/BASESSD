@@ -77,10 +77,6 @@ typedef struct
 // 判「介质是否被写过」，抽样而非全扫以控制开机路径成本。
 #define BBT_USER_SAMPLE_COUNT (8U)
 
-// 判空/抽样用的整页 raw 缓冲：单线程串行调用，放文件级 static（AXI .bss），
-// 避免 boot/CLI 路径的 2KB 栈帧。
-static BYTE s_probe_raw[PAGE_SIZE];
-
 // 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；bbt_factory_scan 需要它在前面，故先声明。
 static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase);
 
@@ -191,22 +187,21 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
 /* ── 2. 初始化 / 出厂扫描 ── */
 
 // 实现要点：判据 = **分区表里每个固定分区实际使用的 plane（plane_mask）中，只要
-// 有一页能读成合法的 FTL 页**——即 FC 的 per-CW CRC 与 META 自洽校验
-// 全过（fc_data_path_meta_check：META 必须编码本页的 plane/cw）。
-// · 空片：该区每页都是全 FF ⇒ META 自洽校验必挂（全 FF 的 META 解不出
-// 正确的 plane/cw 位）⇒ 读必失败 ⇒ 返回 0。
-// · **不用「字节是否全 FF」这类内容启发式**：那会把「出厂坏块块」（主区
-// 本来就已损坏/带残数据）误判成「写过的块」，方向恰好反了。这里让 FC
-// 自己去判「这是不是一页合法的 FTL 页」，坏块块读不成 ⇒ 不误判。
+// 有一页**不是擦除页**（`ftl_page_blank_check`：FC 判 ECC 是否成码字 + 整条 CW 的
+// 1 比特占比）⇒ 介质上有 FTL 写过的页。
+// · 空片：该区每页都是擦除页 ⇒ 返回 false。
+// 判据放在**解码路径**，不在 RAW 读上：RAW 读（LDPC_RAW）刻意跳过 ECC，空/非空的
+// 依据（ECC 是否成码字、parity 是否写成）全被跳过，FTL 又只看得到 USER 512B
+// ⇒ 「RAW 读 + 数 FF」这种组合判不出「编程过没有」（RISK-IF-15）。
+// · 读不通的页（出厂坏块块）⇒ `ftl_page_blank_check` 返回 FTL_ERROR ⇒ 跳过，
+//   不参与「写过」判定，方向与"坏块块不是写过"一致。
 // · 与 FTL 的**布局/格式版本无关**：FC 层的 CW 结构（META/CRC/ECC）不随
 // FTL 版本变，故版本升级后的介质照样认得出——这正是必须覆盖的场景。
 // ⚠ 只读不写；只在 bbt_load 失败时才调用（正常开机不付这份代价）。
 // ⚠ 只探**固定元数据区**：该区的页一律以 FTL_PAGE_CFG_META()（RANDOM_DISABLE）写，
-// 与这里的读配置一致；用户数据页用 DATA 配置（带解扰）写，不在此列、也不需要。
+// 与这里的读配置无关（判空只看 ECC 与位占比）；用户数据页不在此列、也不需要。
 bool bbt_medium_has_ftl_data(alc_t *alloc)
 {
-    BYTE scratch[16];
-
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         for (WORD block = 0U; block < FTL_METADATA_AREA_END; block++)
@@ -216,9 +211,10 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
                 continue; /* 该 plane 的这个块号不是固定元数据（可能是用户数据） */
             }
 
-            const DWORD addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
+            const DWORD addr  = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
+            bool        blank = false;
 
-            if (ftl_sync_read_page(addr, scratch, sizeof(scratch), FTL_PAGE_CFG_META()) == FTL_OK)
+            if ((ftl_page_blank_check(addr, &blank) == FTL_OK) && (blank == false))
             {
                 return true;
             }
@@ -226,12 +222,12 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
     }
 
     // 固定元数据区被擦、用户区仍有数据：只查元数据区会把介质误判为空片，
-    // 随后的出厂扫描会覆盖已失效的坏块图（RISK-BBT-05）。抽样用户区 Page 0 的
-    // META（4B，明文）判「写过」——抽样而不是全扫：本函数只在 BBT 载入失败时执行，
-    // 全扫 4096 块 × 一次 NAND 读在开机路径上不可接受。残留风险：用户数据恰好
-    // 全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质已丢失元数据，属于灾后场景。
+    // 随后的出厂扫描会覆盖已失效的坏块图（RISK-BBT-05）。抽样用户区 Page 0，
+    // 用 `ftl_page_is_blank` 判「是否从未编程」——抽样而不是全扫：本函数只在
+    // BBT 载入失败时执行，全扫 4096 块 × 一次 NAND 读在开机路径上不可接受。
+    // 残留风险：用户数据恰好全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质
+    // 已丢失元数据，属于灾后场景。
     {
-        BYTE      *raw   = s_probe_raw;
         const WORD start = FTL_METADATA_AREA_END;
 
         if (start < BLOCKS_PER_PLANE)
@@ -249,23 +245,13 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
                 {
                     const DWORD addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
 
-                    if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
-                    {
-                        continue; /* 读不通的块不当作“有数据”（与固定区探针同口径） */
-                    }
-                    // 逐 CW 看 META（CW 基址偏移 0，明文）：只写部分 CW 的页
-                    // 也能被识别。
-                    for (BYTE cw = 0U; cw < CW_NUM; cw++)
-                    {
-                        const BYTE *p = raw + cw * FC_BUFFER_POOL_CW_SIZE;
+                    // 判空走解码路径（ECC 是否成码字 + 整条 CW 的 1 比特占比），
+                    // 不是「RAW 读数 FF」：RAW 读跳过 ECC，也看不到 META/parity。
+                    bool blank = false;
 
-                        for (BYTE i = 0U; i < FC_CRC_META_SIZE; i++)
-                        {
-                            if (p[i] != 0xFFU)
-                            {
-                                return true; /* 写过：META 非 FF */
-                            }
-                        }
+                    if ((ftl_page_blank_check(addr, &blank) == FTL_OK) && (blank == false))
+                    {
+                        return true;
                     }
                 }
             }
@@ -599,7 +585,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     // 当数据坏块处理（会错误弹用户 Spare、并漏掉 rebuild 标志）。
     const bool has_md_dir     = (alloc->md_dir != NULL);
     const bool is_l2p_live    = has_md_dir && (alloc->md_dir->l2p_live[gblock] != 0U);
-    const bool is_current_log = has_md_dir && alloc->md_dir->cur_block_valid && (alloc->md_dir->cur_metadata_block == gblock);
+    const bool is_current_log = has_md_dir && (gblock < FTL_BLOCK_TOTAL) && alloc->md_dir->cur_valid[plane] && (alloc->md_dir->cur_block[plane] == gblock);
     const bool borrowed_log   = is_l2p_live || is_current_log;
 
     if ((block < FTL_METADATA_AREA_END) || borrowed_log)

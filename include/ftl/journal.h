@@ -287,6 +287,18 @@ typedef enum
  * （TRIM 只减 old；old==new 跳过）。materialize 失败 / 越界 / 下溢 ⇒ ok=0，
  * 调用者据此丢弃快照恢复结果并回退 full metadata rebuild。
  */
+/* 回放记账失败的原因码：`ok=false` 是个布尔，分不出是哪一条守卫挂的。
+ * 开机只打一次（错误路径，无 I/O），供定位「首次违反的是哪条不变量」。 */
+typedef enum
+{
+    JRN_REPLAY_FAIL_NONE = 0,    /* 未失败 */
+    JRN_REPLAY_FAIL_L2P_READ,    /* 顺序页取 old PBA 失败（l2p_read_sync）*/
+    JRN_REPLAY_FAIL_L2P_WRITE,   /* 回放写 L2P 失败（l2p_write_sync）*/
+    JRN_REPLAY_FAIL_MATERIALIZE, /* PBA 的块无法进入可记账状态 */
+    JRN_REPLAY_FAIL_VALID_ADD,   /* valid_count+1 守卫失败（越界 / 上溢）*/
+    JRN_REPLAY_FAIL_VALID_SUB,   /* valid_count−1 守卫失败（越界 / 下溢）*/
+} jrn_replay_fail_e;
+
 typedef struct
 {
     bool (*materialize)(void *ctx, DWORD pba);
@@ -294,6 +306,8 @@ typedef struct
     void (*valid_sub)(void *ctx, DWORD pba, bool *ok);
     void *ctx; /* 调用者自持（PFR 传 &g_ftl[...]） */
     bool  ok;
+    BYTE  fail_reason; /* jrn_replay_fail_e：**首次**失败的原因（后续不覆盖）*/
+    DWORD fail_pba;    /* 首次失败时正在记账的 PBA（NAND_PBA_INVALID = 无）*/
 } jrn_replay_ctx_t;
 
 /**

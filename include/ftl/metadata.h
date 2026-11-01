@@ -205,7 +205,9 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
 /* 每个 region 的**副本数**（RISK-BOOT-18 的 L2）：主 + 备。
  * 活数据 = COPIES × ideal；日志区取 (COPIES+1) × ideal（多一份工作余量：
  * current 块 / 压缩目标 / 坏块）。 */
-#define L2P_REGION_COPIES        (2U)
+#define L2P_REGION_COPIES (2U)
+/* 主/备各占**一个 plane** 的当前块（RISK-BOOT-18 L2）⇒ 副本数不得超过 plane 数。 */
+_Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_NUM（副本无法分 plane）");
 #define L2P_LOG_BLOCKS_TOTAL     (3U * L2P_LOG_IDEAL_BLOCKS) /* 96 = 2 份活数据 + 1 份余量 */
 #define L2P_LOG_BLOCKS_PER_PLANE (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
 #define L2P_LOG_BLOCK0           (FTL_METADATA_BLOCK_END)
@@ -229,6 +231,13 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
 
 /* L2P 日志区末尾（= shared metadata spare 起点）。 */
 #define L2P_LOG_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
+
+/* 在飞写回的槽位预留表容量（RISK-MD-06）。
+ * 每次 L2P region 写回在 `md_slot_pair_append` 取两个槽后，到 commit/失败之前占一个
+ * 表项；这块**不能被换出或回收**——槽里的数据还没进 Directory，`l2p_live` 看不见它。
+ * 容量按写回并发上限取；`l2p_cache.c` 用静态断言钉住
+ * `MD_SLOT_RESV_MAX >= L2P_FLUSH_MAX_INFLIGHT`（两层各有自己的数，靠断言防漂移）。 */
+#define MD_SLOT_RESV_MAX (8U)
 
 /* ── 共享 metadata spare（仅补固定元数据分区的 BAD 缺额）──
  * 4 块/plane 是用户选定的预算（= 2 MiB）；按 BBT BAD 集分配给
@@ -284,7 +293,7 @@ static inline bool ftl_is_l2p_log_gblock(WORD g)
  * （或介质上根本没有当前版本的 Checkpoint）⇒ pfr_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (13U) /* v13：Journal 页头 16B（+base_lba）与顺序流映射页（JSEG，4B 条目） */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (14U) /* v14：Anchor 页头 +dirty_gen（整条记录的页间一致性校验，RISK-MD-06） */
 
 /*
  * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
@@ -391,7 +400,7 @@ _Static_assert(sizeof(md_entry_t) == METADATA_ENTRY_BYTES, "md_entry_t 必须是
  * 每页装 METADATA_DIR_ENTRIES_PER_PAGE 条，各自带 magic/sequence。
  * 单页损坏只丢该页（其余页仍可用），且读写只需一个 2KB 缓冲。
  * ⚠ 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证。*/
-#define METADATA_ANCHOR_HEADER_BYTES (20U)
+#define METADATA_ANCHOR_HEADER_BYTES (24U)
 
 typedef struct
 {
@@ -401,11 +410,12 @@ typedef struct
     WORD       chunk_count;                                                                                                     /* = ANCHOR_PAGE_COUNT */
     DWORD      entry_count;                                                                                                     /* 本 chunk 有效 entry 数 */
     DWORD      layout_version;                                                                                                  /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
+    DWORD      dirty_gen;                                                                                                       /* 本页**填充时刻**的 Directory 代数（RISK-MD-06）*/
     md_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE];                                                                          /* 256 × 7 = 1792B */
     BYTE       padding[PAGE_MAIN_SIZE - METADATA_ANCHOR_HEADER_BYTES - (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
 } md_anchor_page_t;
 
-/* 页头前缀：廉价探针只读这 20 字节（整页 CRC/ECC 仍由 FC 校验）。 */
+/* 页头前缀：廉价探针只读这 24 字节（整页 CRC/ECC 仍由 FC 校验）。 */
 typedef struct
 {
     DWORD magic;
@@ -414,9 +424,13 @@ typedef struct
     WORD  chunk_count;
     DWORD entry_count;
     DWORD layout_version;
+    DWORD dirty_gen; /* 填充时刻的 Directory 代数：整条记录要求 16 页**全部相同**（RISK-MD-06）*/
 } md_anchor_header_t;
 
-/* 一页必须装得下：头 20B + 每页条目（无独立 CRC，页完整性由 FC 的 per-CW CRC + ECC 保证）*/
+/* 一页必须装得下：头 24B + 每页条目（无独立 CRC，页完整性由 FC 的 per-CW CRC + ECC 保证）
+ * ⚠ `dirty_gen` 的目的：一条 record 的 16 页跨多个服务循环写，期间目录可能更新。
+ *   记录**每页填充时刻**的代数后，加载侧要求 16 页代数一致 ⇒ 混代记录整条作废、
+ *   回退上一条一致记录（而不是把"页 0 旧代 / 页 N 新代"当有效目录加载）。*/
 _Static_assert(sizeof(md_anchor_header_t) == METADATA_ANCHOR_HEADER_BYTES, "Anchor 页头前缀必须与结构体头部一致");
 _Static_assert(offsetof(md_anchor_page_t, entries) == METADATA_ANCHOR_HEADER_BYTES, "Anchor 页头前缀与 entries 偏移不一致");
 _Static_assert(sizeof(md_anchor_page_t) == PAGE_MAIN_SIZE, "Anchor 页结构体不等于一页主区");
@@ -767,6 +781,8 @@ typedef enum
     MD_ANCHOR_CLEAN  = 0U, /* dir 不脏、无需写 Anchor：调用者整段跳过 */
     MD_ANCHOR_READY  = 1U, /* 出参全部有效，可以写 Anchor */
     MD_ANCHOR_FAILED = 2U, /* 定位/取槽失败：调用者中止 job */
+    MD_ANCHOR_BUSY   = 3U, /* 另一个 writer（CP job / metadata job）正在写 Anchor：
+                            * 背压重试，**不推进 sequence、不取槽**（RISK-MD-06） */
 } md_anchor_step_e;
 
 /* md_anchor_prepare 的输出：READY 时全部有效。 */
@@ -852,20 +868,44 @@ typedef struct md_dir_cache
     WORD  count;           /* 有效 entry 数 */
     DWORD anchor_sequence; /* 当前 Anchor sequence */
     bool  dirty;           /* 是否有未写回 Anchor 的变更 */
+    bool  anchor_busy;     /* Anchor 写入单飞（RISK-MD-06）：prepare 置位、commit 清；
+                            * 第二个 writer 得到 MD_ANCHOR_BUSY。CP job 与 metadata job
+                            * 都会写 Anchor，并发 prepare 会把两个 sequence 写进同一槽。 */
+    BYTE anchor_owner;     /* 单飞持有者（MD_ANCHOR_OWNER_*）：abort 只释放自己的锁，
+                            * 防一个 job 的超时中止把另一个 job 的锁清掉。 */
     DWORD dirty_gen;       /* Directory 变更代数：每次 update 自增 */
     DWORD anchor_gen;      /* 本次 Anchor 写入所覆盖的 dirty_gen 快照 */
 
     /* ── L2P 日志块（元数据写模型：只追加 + 块池轮转）──
      * 每个 region 写进「当前日志块」的下一空槽（一 region = 一页）。块满则从
      * **固定 L2P 日志区**取新块（NONE = 已擦净）。l2p_live 记每个日志块上还有多少
-     * region 的**最新位置**落在这里 —— 归零即置 reclaim_pending，由后台 job 异步擦除。
+     * region 的**最新位置**落在这里。
+     * ⚠ 归零**不等于**可回收：还要没有在飞写回的槽位预留（`slot_resv`，见下）——
+     *   否则写命令还在飞、Directory 尚未 commit，擦块就会把在飞数据连同其落点一起丢。
      * l2p_live 同时是 `md_block_is_metadata` 的唯一动态块判据（C9：不维护第二套坐标）。 */
     WORD l2p_live[FTL_BLOCK_TOTAL]; /* 每 gblock 的活 region 数 */
-    WORD cur_metadata_block;        /* 当前日志块 gblock（cur_block_valid=false 时无意义）*/
-    BYTE cur_metadata_page;         /* 当前日志块内下一可用页 */
-    bool cur_block_valid;           /* 游标是否已建立（false = 尚未分配日志块）*/
-    BYTE cur_metadata_plane;        /* 下一个新日志块选哪个 plane（轮转）*/
-    WORD log_borrow_count;          /* 从 OP 池借用的日志块数（≤ L2P_LOG_BORROW_MAX）*/
+
+    /* ── 当前写块：**每 plane 一个**（RISK-BOOT-18 的 L2，2026-11-01 收口）──
+     * 一次 region 写回 = 主副本写 plane p 的当前块、备副本写**另一个 plane** 的当前块
+     * （`md_slot_pair_append` 从每个 plane 各取一页）。这样：
+     *   · 单个 plane 的块被擦/写坏时，另一 plane 的副本仍完整 ⇒ 读回退备份并交换主备；
+     *   · 每个 plane 的块用满 64 页才换块（此前"主备同块连续两页"每个 region 吃掉
+     *     两块页、每块只能放 32 个 region，日志区一半容量被同块冗余吃掉）；
+     *   · 擦除 / 回收 / 磨损仍按 gblock 单 plane 进行，与固定元数据池的 multi-plane
+     *     镜像不同（那是"同页写所有 plane"，这里是"每个 plane 各一份独立页"）。
+     * `cur_valid[p]=false` ⇒ 该 plane 尚未分配当前块。 */
+    WORD cur_block[PLANE_NUM]; /* 当前日志块 gblock（按 plane 下标）*/
+    BYTE cur_page[PLANE_NUM];  /* 当前日志块内下一可用页 */
+    bool cur_valid[PLANE_NUM]; /* 游标是否已建立 */
+    WORD log_borrow_count;     /* 从 OP 池借用的日志块数（≤ L2P_LOG_BORROW_MAX）*/
+
+    /* ── 在飞写回的槽位预留（RISK-MD-06）──
+     * 表项 = 该次写回的主副本 PBA（备副本同块）；NAND_PBA_INVALID = 空。
+     * 语义：从 `md_slot_pair_append` 发放槽位到 `md_slot_release` 之间，该槽所在块
+     * **不得换出/回收**。只靠 `l2p_live == 0` 不够——写命令在飞时槽里的数据还没进
+     * Directory，l2p_live 看不到它，块会被当成"零活"擦掉 ⇒ 写完成再 commit 就把
+     * Directory 指向已擦页（重启 region 读失败 + 映射丢失）。 */
+    DWORD slot_resv[MD_SLOT_RESV_MAX];
 
     /* ── 待回收日志块位图（RAM 态，不跨重启）──
      * commit_region 在活计数归零时置位；append_slot 换走旧当前块时若其已空也置位。
@@ -910,7 +950,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 32U) == 0U, "FTL_BLOCK_TOTAL 必须是 32 的�
  * 不需要访问 NAND）。写过并刷盘的 region 由 md_commit_region 覆盖成
  * 日志块上的真实位置。
  *
- * 游标全部置**无效**（cur_block_valid = 0 / anchor_cursor_valid = 0）：首次追加
+ * 每 plane 游标全部置**无效**（cur_valid[p] = false / anchor_cursor_valid = 0）：首次追加
  * 才从固定 L2P 日志区取块，避免"没拿块就用"。
  *
  * @param dir          Directory cache（由调用者提供存储）
@@ -966,13 +1006,13 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
  * 归还——本函数只登记，不同步擦除。**绝不回退到用户 Free Pool**：分配失败返回
  * false，由上层重试（待压缩/回收腾出块后自然成功）。
  *
- * 日志块在哪个 plane 由 dir->cur_metadata_plane 轮转决定（写入目标与 region 归属
+ * 主副本固定写 plane0 的当前块、备副本固定写 plane1 的当前块（写入目标与 region 归属
  * 无关：位置由 pba 自身携带，读回一律经 Directory 查 pba）。
  *
  * ⚠ **本函数不做压缩**：换块后若活日志块数超水位，只登记 `job.compact_wanted`——
  *   压缩由 md_handle 起异步 job 做，避免在写回路径上同步阻塞数十毫秒。
  * ⚠ **整理 job 在飞时一律返回 false**：压缩的空槽预算按发放那一刻的
- *   cur_metadata_page 核定，期间再发放会打乱预算与 ③④ 顺序。调用者
+ *   cur_page[plane] 核定，期间再发放会打乱预算与 ③④ 顺序。调用者
  *   （l2p_flush_kick）据此返回 FTL_AGAIN，下轮重试。
  *
  * @param dir  Directory cache
@@ -980,8 +1020,43 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
  * @param out  输出两个 PBA（主、备）
  * @return true = 两槽都取到
  *         false = 背压，未取槽
+ *
+ * @note 成功返回即占用一个 `slot_resv` 表项（主副本 PBA 标识）。调用者**必须**在该
+ *       次写回的终态（commit 成功，或建链/提交/写失败）调用一次 `md_slot_release`。
+ *       漏释放的方向是"块暂时不可回收"（容量损失，可见），不会写坏介质。
  */
 bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES]);
+
+/**
+ * @brief 释放在飞写回的槽位预留（与 `md_slot_pair_append` 严格配对）。
+ *
+ * @param dir     Directory cache
+ * @param primary 该次写回 `md_slot_pair_append` 返回的主副本 PBA
+ * @param backup  同一次写回返回的备副本 PBA（两个副本在不同 plane 的块上，各有一条预留）
+ *
+ * @note 找不到对应表项（重复释放 / 传错 PBA）只触发 debug 断言，不改账本。
+ */
+void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD backup);
+
+/**
+ * @brief 该 gblock 上是否有尚未 commit/失败的在飞写回槽位。
+ *
+ * 纯读谓词，供回收/换块判据使用（`md_log_block_is_idle` / `md_log_rotate`）。
+ * 实现见 `metadata_slot.c`（非 ITCM 热路径）。
+ *
+ * @param dir Directory cache
+ * @param g   候选 gblock 编号
+ * @return true = 有在飞槽位（块不可换出/回收）
+ *         false = 无（或 g 越界）
+ */
+bool md_slot_reserved(const md_dir_cache_t *dir, WORD g);
+
+/**
+ * @brief 清空槽位预留表（开机加载 / 格式化时调用：RAM 态，不跨重启）。
+ *
+ * @param dir Directory cache
+ */
+void md_slot_reset(md_dir_cache_t *dir);
 
 /* ── 固定 L2P 日志区（RISK-MD-07 / RISK-CAP-02）──
  * 这 64 个 gblock 是**固定预留**的元数据区：只由 metadata 模块在
@@ -995,12 +1070,13 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
 
 /**
  * @brief 开机按 Directory 恢复固定日志区的块状态
- * @param dir   已由 Anchor 加载好的 Directory（l2p_live / cur_metadata_block 有效）
+ * @param dir   已由 Anchor 加载好的 Directory（l2p_live / cur_block[] 有效）
  * @param alloc 分配器（读 BST；本函数不改 Free/OP/Spare 池）
  *
- * 活块与当前写块置 LOG；非活块读 page 0 判空：空 ⇒ NONE（空闲），非空 ⇒ LOG +
- * 登记回收（后台擦除后由 md_log_release 置 NONE）。只在开机路径调用（允许
- * 同步 NAND 读）；每块一次 page 0 读，最多 L2P_LOG_BLOCKS_TOTAL 次。
+ * 活块与当前写块置 LOG；非活块**一律**置 LOG + 登记回收（后台擦除后由 md_log_release
+ * 置 NONE）——**不读介质判「是否已擦净」**：FTL 只看得见 USER 512B，判不出
+ * 「编程过没有」（RISK-IF-15），判错就是在未擦页上编程。擦除按空闲水位懒执行
+ * （`md_reclaim_is_eager`），开机只补到水位，不会把日志区重擦一遍。
  */
 void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc);
 
@@ -1019,22 +1095,23 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc);
 WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane);
 
 /**
- * @brief 换一个新的当前写块
+ * @brief 换**指定 plane** 的当前写块（每 plane 一个当前块，RISK-BOOT-18 L2）
  *
  * 两个调用者：
- *   · 追加路径（md_slot_pair_append）：当前块写满或剩余页不足 2 时换块；
- *   · 整理 job（md_handle_step）：压缩因当前块空槽不足起不动时**强制换块**。
- *     压缩的 destination 就是当前块，而换块原本只由追加触发 ⇒ host 写停止后
- *     没有追加 ⇒ 不换块 ⇒ 压缩永远拿不到整块空槽，日志区锁死。
+ *   · 追加路径（md_slot_pair_append）：该 plane 的当前块写满/无游标时换块；
+ *   · 整理 job（md_handle_step）：压缩因该 plane 当前块空槽不足起不动时**强制换块**。
+ *     压缩的 destination 就是 victim 所在 plane 的当前块；换块原本只由追加触发
+ *     ⇒ host 写停止后没有追加 ⇒ 不换块 ⇒ 压缩永远拿不到整块空槽，日志区锁死。
  *
  * 旧当前块若已无活 region ⇒ 登记回收；换块时扫描全池只登记不擦。
  *
- * @param dir   Directory cache（换块并更新游标）
+ * @param dir   Directory cache（换块并更新该 plane 的游标）
  * @param alloc 分配器（取块 / 读块状态）
- * @return true = 已换到新块（cur_metadata_page == 0）；
- *         false = 没换（固定区无空闲块且借用已满，或刚换块但活块数超水位、本轮不发放槽位）
+ * @param plane 目标 plane（主副本 → 0、备副本 → 1）
+ * @return true = 已换到新块（cur_page[plane] == 0）；
+ *         false = 没换（该 plane 固定区无空闲块且借用已满，或刚换块但活块数超水位）
  */
-bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc);
+bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane);
 
 /**
  * @brief 擦除成功后归还一个日志块
@@ -1095,6 +1172,25 @@ void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode
 
 /* ── 第二副本（RISK-BOOT-18 的 L2）── */
 /**
+ * @brief 每 plane 的当前写块游标是否在界内（纯读；上板自检用）。
+ *
+ * @param dir Directory cache
+ * @return true = 全部 plane 的游标合法（未建立也算合法）
+ */
+static inline bool md_cursor_bounds_ok(const md_dir_cache_t *dir)
+{
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        if (dir->cur_valid[p] && ((dir->cur_block[p] >= FTL_BLOCK_TOTAL) || (dir->cur_page[p] > PAGES_PER_BLOCK)))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * @brief 查该 region 的备份副本 PBA
  * @param dir       Directory cache
  * @param region_id L2P region_id
@@ -1117,7 +1213,23 @@ DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id);
  * @return md_anchor_step_e：MD_ANCHOR_READY 需要写（出参全部有效）；
  *         MD_ANCHOR_CLEAN 无需写（dir 不脏）；MD_ANCHOR_FAILED 失败（定位失败）
  */
-md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir, md_anchor_prepare_out_t *out);
+/* Anchor 单飞持有者（RISK-MD-06）：abort 只释放**自己**的锁。 */
+#define MD_ANCHOR_OWNER_NONE (0U)
+#define MD_ANCHOR_OWNER_CP   (1U) /* Checkpoint job（CP_ANCHOR_*） */
+#define MD_ANCHOR_OWNER_MD   (2U) /* metadata 整理 job（MD_JOB_CP_ANCHOR_*） */
+#define MD_ANCHOR_OWNER_BOOT (3U) /* 格式化 / 开机初始 Anchor */
+
+md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir, md_anchor_prepare_out_t *out, BYTE owner);
+
+/**
+ * @brief 放弃一次已 prepare 的 Anchor 写（清 `anchor_busy`）。
+ *
+ * @param dir 目录。
+ *
+ * @note 供 job 的中止 / 复位路径调用：prepare 之后没走到 commit 就放弃时，必须清
+ *       单飞标志，否则另一个 writer 永远拿不到锁（RISK-MD-06）。
+ */
+void md_anchor_abort(md_dir_cache_t *dir, BYTE owner);
 
 /**
  * @brief 组第 chunk 页 Anchor 数据（纯 RAM）
@@ -1147,7 +1259,7 @@ void md_anchor_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool
  * ③ 读胜者各页装配覆盖对应区间（逐页再校验 chunk_index/sequence）；
  * ④ 由装配后的 entries 重建 l2p_live。
  *
- * **日志块游标不跨重启恢复**：cur_block_valid 置 false，首次追加时从固定 L2P 日志区
+ * **日志块游标不跨重启恢复**：cur_valid[] 置 false，首次追加时从固定 L2P 日志区
  * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live 保住，
  * 待其 region 全部改写后由后台整理 job 异步擦除归还。
  * Anchor 游标则**由 locate 结果恢复**（anchor_write_idx / anchor_sequence），避免首次

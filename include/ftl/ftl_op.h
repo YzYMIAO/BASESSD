@@ -208,6 +208,13 @@ struct ftl_context *ftl_op_route_get_region(DWORD global_region);
  */
 bool ftl_op_cache_seq_active(void);
 
+/**
+ * @brief 后台 job 的提交被拒是否属于预期等待（挂起提交 deadline 用）。
+ *
+ * @return true = cache 序列打开，或主机组仍在飞（详见 .c 的契约注释）。
+ */
+bool ftl_op_bg_submit_deferred(void);
+
 /* ── 提交 ── */
 
 /**

@@ -48,7 +48,8 @@
 #include "journal.h"
 
 #include "assertion.h"
-#include "bbt.h" /* bbt_mark_bad（环形块持续擦除失败，RISK-JN-01） */
+#include "bbt.h"          /* bbt_mark_bad（环形块持续擦除失败，RISK-JN-01） */
+#include "fault_inject.h" /* 测试镜像专属注入点（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入） */
 #include "fc.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
@@ -68,10 +69,6 @@
 // CP 水位阈值（只本模块使用）：≥85% 请求 Checkpoint，≥95% 紧急。
 #define JRN_FULL_THRESHOLD (85U)
 #define JRN_CRITICAL       (95U)
-
-// 回放/扫描用的整页 raw 缓冲。放文件级 static（AXI .bss）而不是 2KB 局部数组：
-// journal 扫描只在单线程 superloop 内串行执行，无重入。
-static BYTE s_raw_page[PAGE_SIZE];
 
 // 回放期间的异常计数（jrn_replay 起点清零，结束时各打一行）。
 //
@@ -1004,7 +1001,11 @@ static void jrn_write_failure_note(l2p_jrn_t *journal)
  */
 static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    const bool failed = fc_cmd_status_has_error(completion->status);
+    // 测试镜像专属注入（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入）：把本次页写按失败结算，用于验证「失败页不推进
+    // persisted_seq ⇒ L2P 区域写回被 WAL 闸门挡住」与 write_fail_pending 的恢复路径。
+    // 先求值再合成（H28：有副作用的调用不放进表达式）。
+    const bool injected = fi_journal_fail_take();
+    const bool failed   = fc_cmd_status_has_error(completion->status) || injected;
 
     if (failed)
     {
@@ -1146,36 +1147,20 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
  * ══════════════════════════════════════════════════════════ */
 
 /**
- * @brief 空片页判定（仅读失败时调用）：格式化后的 Journal 环形块是全 FF，
- * 带 META/CRC 校验的读会失败；raw 读全 FF ⇒ 空页，不是“不可读”。
- * 只有非 FF 的读失败才是真正不可信的页（RISK-BOOT-08）。
+ * @brief 空片页判定：格式化后的 Journal 环形块是擦除页，带 META/CRC 校验的读会失败；
+ * 用 `ftl_page_is_blank` 走解码路径判（ECC 是否成码字 + 整条 CW 的 1 比特占比）。
+ * 只有**非空且读失败**的页才是真正不可信的页（RISK-BOOT-08）。
  *
  * @param addr 待判页的 NAND 地址
- * @return true = raw 读成功且整页为 0xFF（空页）
- *         false = 读失败，或存在非 0xFF 字节
+ * @return true = 该页从未编程（空页）
+ *         false = 已编程，或读命令没走通
+ *
+ * @note 不用 RAW 读 + 数 FF：RAW 读刻意跳过 ECC（判空依据全被跳过），
+ *       且只交出 USER 512B，看不出 META/CRC/parity 是否写成（RISK-IF-15）。
  */
 static SSD_CODE_FAST bool jrn_page_raw_blank(DWORD addr)
 {
-    BYTE *raw = s_raw_page;
-
-    // raw 读只填 4 个 CW 的用户区（512B × 4，间隔 FC_BUFFER_POOL_CW_SIZE）；
-    // 尾部/间隔字节不填。先铺 FF，避免残留字节把空页误判成非空。
-    memset(raw, 0xFF, PAGE_SIZE);
-
-    if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
-    {
-        return false;
-    }
-
-    for (DWORD i = 0U; i < PAGE_SIZE; i++)
-    {
-        if (raw[i] != 0xFFU)
-        {
-            return false;
-        }
-    }
-
-    return true;
+    return ftl_page_is_blank(addr);
 }
 
 /**
@@ -1460,6 +1445,16 @@ SSD_CODE_FAST void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, 
  * @param block_ctx   块元数据增量端口（可为 NULL = 不记账）
  * @return 成功写入 L2P 的条目数（读失败页 = 0）
  */
+static SSD_CODE_FAST void jrn_replay_note_fail(jrn_replay_ctx_t *c, BYTE reason, DWORD pba)
+{
+    // 只记**首次**：后续失败是首条的连带结果，记多了反而看不出起点。
+    if ((c != NULL) && (c->fail_reason == (BYTE)JRN_REPLAY_FAIL_NONE))
+    {
+        c->fail_reason = reason;
+        c->fail_pba    = pba;
+    }
+}
+
 static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {
     DWORD raddr = jrn_page_addr(journal, page->block, page->page);
@@ -1498,6 +1493,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
                 if (l2p_read_sync(cache, entry_lba, &entry_old_pba) != FTL_OK)
                 {
                     block_ctx->ok = false;
+                    jrn_replay_note_fail(block_ctx, (BYTE)JRN_REPLAY_FAIL_L2P_READ, entry_new_pba);
                     entry_old_pba = NAND_PBA_INVALID;
                 }
             }
@@ -1545,6 +1541,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
                 if (block_ctx != NULL)
                 {
                     block_ctx->ok = false;
+                    jrn_replay_note_fail(block_ctx, (BYTE)JRN_REPLAY_FAIL_L2P_WRITE, entry_new_pba);
                 }
             }
         }
@@ -1563,22 +1560,33 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
                 {
                     if (block_ctx->materialize(block_ctx->ctx, new_pba))
                     {
-                        block_ctx->valid_add(block_ctx->ctx, new_pba, &block_ctx->ok);
+                        bool ok_one = true;
+
+                        block_ctx->valid_add(block_ctx->ctx, new_pba, &ok_one);
+                        if (ok_one == false)
+                        {
+                            block_ctx->ok = false;
+                            jrn_replay_note_fail(block_ctx, (BYTE)JRN_REPLAY_FAIL_VALID_ADD, new_pba);
+                        }
                     }
                     else
                     {
                         block_ctx->ok = false;
+                        jrn_replay_note_fail(block_ctx, (BYTE)JRN_REPLAY_FAIL_MATERIALIZE, new_pba);
                     }
                 }
                 if (old_pba != NAND_PBA_INVALID)
                 {
-                    if (block_ctx->materialize(block_ctx->ctx, old_pba))
-                    {
-                        block_ctx->valid_sub(block_ctx->ctx, old_pba, &block_ctx->ok);
-                    }
-                    else
+                    // ⚠ **不**对 old 调 materialize：它会把池块/日志块转成 CLOSED 并清 0
+                    // 计数——既让随后的减法撞下溢，又把这颗块从池里摘掉（容量损失）。
+                    // old 只做减法；计数已为 0 时由 pfr_valid_sub 按运行期同口径跳过。
+                    bool ok_one = true;
+
+                    block_ctx->valid_sub(block_ctx->ctx, old_pba, &ok_one);
+                    if (ok_one == false)
                     {
                         block_ctx->ok = false;
+                        jrn_replay_note_fail(block_ctx, (BYTE)JRN_REPLAY_FAIL_VALID_SUB, old_pba);
                     }
                 }
             }

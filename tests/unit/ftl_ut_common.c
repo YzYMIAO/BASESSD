@@ -11,6 +11,7 @@
 
 #include "checkpoint.h"
 #include "cli.h" /* g_ctrl */
+#include "fault_inject.h"
 #include "fc_interface.h"
 #include "ftl_job.h"
 #include "ftl_op.h"
@@ -48,9 +49,9 @@ void ftl_ut_trace_suppress(bool suppressed)
     s_ev_suppressed = suppressed;
 }
 
-static void ftl_ut_trace_emit(MunitLogLevel level, const char *tag, const char *format, va_list ap)
+static void ftl_ut_trace_emit(bool force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
-    if (s_ev_suppressed || !munit_log_visible(level))
+    if (s_ev_suppressed || ((force == false) && !munit_log_visible(level)))
     {
         return;
     }
@@ -72,7 +73,7 @@ void ftl_ut_trace_summary(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    ftl_ut_trace_emit(MUNIT_LOG_INFO, "[EV] ", format, ap);
+    ftl_ut_trace_emit(false, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 
@@ -81,7 +82,16 @@ void ftl_ut_trace_detail(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    ftl_ut_trace_emit(MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    ftl_ut_trace_emit(false, MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    va_end(ap);
+}
+
+void ftl_ut_result(const char *format, ...)
+{
+    va_list ap;
+
+    va_start(ap, format);
+    ftl_ut_trace_emit(true, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 
@@ -200,8 +210,9 @@ static volatile ssd_status_e s_io_status;
 
 /* 让在飞命令收敛：停掉后台新任务，泵到 FC 池/CQ/ctx 全空。
  * ⚠ 必须在 ftl_init 前做：否则旧 CP/Journal 的迟到完成会在新实例上触发
- *    `h->waiting != 0` 断言（checkpoint.c:587）。 */
-static void ftl_ut_quiesce(ftl_ctx_t *ftl)
+ *    `h->waiting != 0` 断言（checkpoint.c:587）。
+ * ⚠ 返回时 `bg_suspend` 仍为 1：调用者按需恢复。 */
+void ftl_ut_quiesce(ftl_ctx_t *ftl)
 {
     const DWORD t0 = ftl_job_now_ms();
 
@@ -430,6 +441,7 @@ void *ftl_ut_pure_setup(const MunitParameter params[], void *data)
 
     (void)ftl_ut_live();
     ftl_ut_ram_init();
+    fi_reset(); /* 注入状态是进程级的：漏一次复位会静默污染后续用例 */
     return NULL;
 }
 

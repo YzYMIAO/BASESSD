@@ -69,6 +69,19 @@ static void mem_fill_free(alc_t *a, WORD n)
     }
 }
 
+/* per-plane 空闲计数的总和。它是 `free_count` 的**第二本账**（RISK-ALLOC-09 引入），
+ * 两个量必须恒等 —— 漂移即「成对分配失败」的前兆，且编译期完全无声。 */
+static WORD mem_plane_free_sum(const alc_t *a)
+{
+    WORD sum = 0U;
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        sum = (WORD)(sum + alc_free_get_count(a, p));
+    }
+    return sum;
+}
+
 /* address_roundtrip — LBA/PBA 地址编码往返。
  *
  * 覆盖：LBA 的 page_base/cw/plane 拆分、PBA 的 plane/block/page/cw 拆分、
@@ -106,8 +119,10 @@ static MunitResult test_address_roundtrip(const MunitParameter params[], void *d
 /* free_pool_invariants — Free Pool 账本不变量。
  *
  * 覆盖：入池/出池只维护池数组；state==FREE ⟺ 在池；出池不翻转 state（文档化语义）；
- *       OP refill 按 plane LIFO 归还。
- * 判据：free_count 与池内条目始终同步，refill 后 op_count 归零。
+ *       OP refill 按 plane LIFO 归还；per-plane 计数（RISK-ALLOC-09 的第二本账）
+ *       与 flat 池恒同步、出池/归还只动所属 plane。
+ * 判据：free_count 与池内条目始终同步，refill 后 op_count 归零；两本账一旦漂移，
+ *       成对分配会在低水位无声失败（编译期不可见）。
  * 备注：FTL_BLOCK_STATE_FREE 会说谎（allocator_init 早于目录加载），选块以池为准。 */
 
 static MunitResult test_free_pool_invariants(const MunitParameter params[], void *data)
@@ -124,6 +139,14 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
     mem_fill_free(a, 4U);
 
     munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS));
+
+    /* per-plane 账与 flat 池必须同步（唯一闸门 alc_free_push/remove 维护两本账）。 */
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        munit_assert_uint32(alc_free_get_count(a, p), ==, 4U);
+    }
+    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint32(alc_free_min_plane_count(a), ==, 4U);
 
     /* state == FREE ⟺ 在池；SB 归属已清。 */
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -143,6 +166,12 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
     munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS - 1U));
     munit_assert_uint32(ftl_block_state(&a->blocks[ftl_gblock(0U, 1U)]), ==, FTL_BLOCK_STATE_FREE);
 
+    /* 出池必须**只从所属 plane** 扣账：扣错 side 会让计数漂移，成对分配随后失败。 */
+    munit_assert_uint32(alc_free_get_count(a, 0U), ==, 3U);
+    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 4U);
+    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint32(alc_free_min_plane_count(a), ==, 3U);
+
     /* OP refill：把 OP 块归还 Free Pool（LIFO，per-plane）。 */
     munit_assert_true(alc_op_push(a, 1U, ftl_gblock(1U, 4U)));
     const WORD refilled = alc_free_refill_from_op(a, 1U);
@@ -151,8 +180,13 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
     munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS));
     munit_assert_uint32(a->op_count[1], ==, 0U);
 
-    ftl_ut_trace_detail("free pool: fill=%u blocks; remove g=%hu; refill from op1 -> g=%hu; op1=%hu; removed block state=%d", (unsigned)FTL_UT_BLOCKS, ftl_gblock(0U, 1U), refilled, a->op_count[1], (int)ftl_block_state(&a->blocks[ftl_gblock(0U, 1U)]));
-    ftl_ut_trace_summary("free pool: 0 -> %u (fill) -> %u (remove) -> %hu (refill g%hu)", (unsigned)FTL_UT_BLOCKS, (unsigned)(FTL_UT_BLOCKS - 1U), a->free_count, refilled);
+    /* refill 回到**借用它的那个 plane**（per-plane 池是 LIFO），两本账仍同步。 */
+    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 5U);
+    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint32(alc_free_min_plane_count(a), ==, 3U);
+
+    ftl_ut_trace_detail("free pool: fill=%u blocks; remove g=%hu; refill from op1 -> g=%hu; op1=%hu; removed block state=%d; plane0=%hu plane1=%hu fpmin=%hu", (unsigned)FTL_UT_BLOCKS, ftl_gblock(0U, 1U), refilled, a->op_count[1], (int)ftl_block_state(&a->blocks[ftl_gblock(0U, 1U)]), alc_free_get_count(a, 0U), alc_free_get_count(a, 1U), alc_free_min_plane_count(a));
+    ftl_ut_trace_summary("free pool: 0 -> %u (fill) -> %u (remove) -> %hu (refill g%hu); fpmin=%hu", (unsigned)FTL_UT_BLOCKS, (unsigned)(FTL_UT_BLOCKS - 1U), a->free_count, refilled, alc_free_min_plane_count(a));
 
     return MUNIT_OK;
 }
@@ -893,7 +927,7 @@ static MunitResult test_anchor_three_step(const MunitParameter params[], void *d
     d->anchor_write_idx    = 0U;
     d->anchor_sequence     = 0U;
 
-    munit_assert_int(md_anchor_prepare(d, &prep), ==, MD_ANCHOR_READY);
+    munit_assert_int(md_anchor_prepare(d, &prep, MD_ANCHOR_OWNER_BOOT), ==, MD_ANCHOR_READY);
     munit_assert_uint32(prep.seq, ==, 1U);
     munit_assert_uint32(prep.idx, ==, 0U);
 
@@ -945,12 +979,18 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
     md_log_release(d, g0);
     munit_assert_uint32(ftl_block_state(&a->blocks[g0]), ==, FTL_BLOCK_STATE_NONE);
 
-    munit_assert_true(md_log_rotate(d, a));
-    munit_assert_true(d->cur_block_valid);
-    munit_assert_uint32(d->cur_metadata_page, ==, 0U);
+    // 每 plane 一个当前写块（RISK-BOOT-18 L2）：逐 plane 换块并校验各自的游标，
+    // 不写死 plane 下标（H39）。
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        munit_assert_true(md_log_rotate(d, a, p));
+        munit_assert_true(d->cur_valid[p]);
+        munit_assert_uint32(d->cur_page[p], ==, 0U);
+        ftl_ut_trace_detail("md log: plane=%hhu cur=g%hu page=%hhu valid=%d", p, d->cur_block[p], d->cur_page[p], (int)d->cur_valid[p]);
+    }
 
-    ftl_ut_trace_detail("md log: alloc g%hu -> g%hu; release g%hu -> state=%d; rotate -> cur=g%hu page=%hhu valid=%d", g0, g1, g0, (int)ftl_block_state(&a->blocks[g0]), d->cur_metadata_block, d->cur_metadata_page, (int)d->cur_block_valid);
-    ftl_ut_trace_summary("md log: alloc g%hu->g%hu; release g%hu->NONE; rotate cur=g%hu page=%hhu", g0, g1, g0, d->cur_metadata_block, d->cur_metadata_page);
+    munit_assert_uint32(ftl_block_state(&a->blocks[g1]), ==, FTL_BLOCK_STATE_LOG);
+    ftl_ut_trace_summary("md log: alloc g%hu->g%hu; release g%hu->NONE; rotate all %u plane(s)", g0, g1, g0, (unsigned)PLANE_NUM);
 
     return MUNIT_OK;
 }
@@ -1088,7 +1128,12 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
     /* 构造「压缩写阶段取不到空槽」⇒ md_compact_write 返回 FAILED ⇒ md_handle_abort。
      * victim 仍有活 region：abort 只回 IDLE，不得把它登记进回收位图（更不得擦除）。 */
     d->l2p_live[victim] = 3U;
-    d->cur_block_valid  = false;
+
+    // 无当前写块（每 plane 一个，RISK-BOOT-18 L2）⇒ md_compact_write 取不到槽。
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        d->cur_valid[p] = false;
+    }
 
     d->handle.phase  = MD_JOB_CP_WRITE;
     d->handle.victim = victim;
@@ -1716,6 +1761,93 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* confirm_park_timeout — 写确认停泊的超时收尾（RISK-HOST-05 的纯 RAM 部分）。
+ *
+ * 覆盖：handler 恒返 FTL_AGAIN 时，未到 deadline 保留停泊（槽/组/通知都不动）；
+ *       到达 FTL_GROUP_DRAIN_TIMEOUT_MS 后释放槽、按 IO_ERROR 结算组一次。
+ * 判据：停泊项若永不超时，host 写组永久 pending ⇒ 后续 I/O 拿不到组槽（全系统 AGAIN）；
+ *       若过早超时，正在异步加载的 region 会被误判失败（静默丢写）。纯 RAM。 */
+
+static ftl_status_e park_again_handler(void *ctx, pend_req_t *pending)
+{
+    (void)ctx;
+    (void)pending;
+
+    return FTL_AGAIN;
+}
+
+static MunitResult test_confirm_park_timeout(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ut_trace_begin();
+
+    pend_table_t          table;
+    BYTE                  gi     = 0U;
+    volatile BYTE         flag   = 0U;
+    volatile ssd_status_e status = SSD_STATUS_OK;
+
+    memset(&table, 0, sizeof(table));
+    pend_init(&table);
+    munit_assert_true(pend_group_alloc(&table, &gi));
+
+    pend_group_t *g      = &table.groups[gi];
+    pend_req_t   *p      = pend_alloc(&table);
+    const WORD    idx    = (WORD)(p - table.slots);
+    const DWORD   owners = ftl_group_bit(gi);
+
+    g->op            = PENDING_OP_WRITE;
+    g->total         = (DWORD)FTL_LBA_PER_PAIR;
+    g->next          = (DWORD)FTL_LBA_PER_PAIR;
+    g->status_out    = &status;
+    g->complete_flag = &flag;
+    g->outstanding   = 1U;
+
+    p->lba    = FTL_UT_LBA_BASE;
+    p->n_cw   = FTL_LBA_PER_PAIR;
+    p->owners = owners;
+    pend_validate(p); /* owners/n_cw 的 [BOUND] 不变量（pend_alloc 契约） */
+    pend_confirm_park(&table, idx, owners);
+    munit_assert_true(pend_op_is_write_confirm(p->op));
+
+    /* 停泊时刻显式给定：本用例不该依赖板端开机时钟是否已走（park_ms==0 会让
+     * service 走「懒初始化」分支，测不到超时）。 */
+    p->park_ms = 1000U;
+
+    pending_confirm_handler_t old = pend_confirm_get_handler();
+
+    pend_confirm_set_handler(park_again_handler);
+
+    bg_info_t info;
+
+    memset(&info, 0, sizeof(info));
+    info.now_ms = 1099U; /* 差 1 ms 到 deadline */
+
+    pend_confirm_service(&table, NULL, &info);
+
+    munit_assert_true(p->used); /* 未超时：仍停泊 */
+    munit_assert_true(g->used);
+    munit_assert_uint32(flag, ==, 0U);
+    munit_assert_uint32(pend_slot_get_count(&table), ==, 1U);
+
+    info.now_ms = 1100U; /* == FTL_GROUP_DRAIN_TIMEOUT_MS */
+
+    pend_confirm_service(&table, NULL, &info);
+
+    munit_assert_false(p->used);
+    munit_assert_false(g->used);
+    munit_assert_uint32(flag, ==, 1U);
+    munit_assert_int(status, ==, SSD_STATUS_IO_ERROR);
+
+    pend_confirm_set_handler(old);
+
+    ftl_ut_trace_detail("confirm park: t=1099 -> parked=%d groups=%hu; t=1100 -> released flag=%hu status=%d", 1, pend_group_get_count(&table), flag, (int)status);
+    ftl_ut_trace_summary("confirm park: t<timeout keeps park; t==timeout settles IO_ERROR once");
+
+    return MUNIT_OK;
+}
+
 /* wbuf_drop_reset_owners — DROP/RESET 的贡献组结算语义。
  *
  * 覆盖：DROP 一个 CW 只清位；页仍有数据时 owners/在飞数不变；清空最后一个 CW 时
@@ -1877,6 +2009,7 @@ MunitTest g_ftl_pure_host_tests[] = {
     {         (char *)"group_exhaustion",          test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {      (char *)"group_complete_once",       test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {(char *)"group_failure_aggregation", test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {     (char *)"confirm_park_timeout",      test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {         (char *)"wbuf_append_read",          test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {   (char *)"wbuf_drop_reset_owners",    test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {             (char *)"wbuf_density",              test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
@@ -1931,7 +2064,8 @@ static MunitResult test_policy_entry(const MunitParameter params[], void *data)
 /* gc_trigger — GC 三级水位的触发判据。
  *
  * 覆盖：空池必命中 EMERGENCY；补到 FREE_POOL_TARGET 以上不触发；跌破 TARGET 但高于
- *       紧急线时只命中 WATERMARK。
+ *       紧急线时只命中 WATERMARK；**总水位达标但单 plane 低于 FREE_POOL_PLANE_LOW**
+ *       时仍命中 WATERMARK（RISK-ALLOC-09）。
  * 判据：水位是 GC 唯一的入口闸门；空池不触发会让写路径永久 FTL_AGAIN。纯 RAM。 */
 
 static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
@@ -1953,9 +2087,24 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
     const DWORD trig_empty = trig; /* 证据：空池的首个判定 */
 
     /* 补到 TARGET 以上：不再触发。 */
-    io_fill_free(a, 20U);
+    io_fill_free(a, 32U);
     munit_assert_uint32(a->free_count, >=, (DWORD)FREE_POOL_TARGET);
     munit_assert_uint32(gc_should_trigger(a), ==, 0U);
+
+    /* per-plane 水位（RISK-ALLOC-09）：**总水位仍在 TARGET 之上**，但把 plane1 抽到
+     * 低于单 plane 水位 ⇒ 必须触发。只判 total 的实现会在这里返回 0，接着成对分配
+     * 在低水位无声失败 —— 这条是把「两本账」与「一本总账」区分开的负例。 */
+    for (WORD i = 0U; i < (WORD)(32U - (FREE_POOL_PLANE_LOW - 1U)); i++)
+    {
+        alc_free_remove(a, ftl_gblock(1U, i));
+    }
+    munit_assert_uint32(a->free_count, >=, (DWORD)FREE_POOL_TARGET);
+    munit_assert_uint32(alc_free_get_count(a, 1U), ==, (DWORD)(FREE_POOL_PLANE_LOW - 1U));
+    munit_assert_uint32(alc_free_min_plane_count(a), ==, (DWORD)(FREE_POOL_PLANE_LOW - 1U));
+
+    const DWORD trig_plane_low = gc_should_trigger(a);
+
+    munit_assert_uint32((trig_plane_low & GC_TRIGGER_WATERMARK), !=, 0U);
 
     /* 掉到 TARGET 以下（仍高于紧急线）：只命中 WATERMARK。 */
     while (a->free_count >= (WORD)FREE_POOL_TARGET)
@@ -1965,17 +2114,20 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
     trig = gc_should_trigger(a);
     munit_assert_uint32((trig & GC_TRIGGER_WATERMARK), !=, 0U);
 
-    ftl_ut_trace_detail("gc trigger: free 0 -> emergency=%d; free 40 -> 0; free %hu (<%u) -> watermark=%d trig=0x%02lX", (int)((trig_empty & GC_TRIGGER_EMERGENCY) != 0U), a->free_count, (unsigned)FREE_POOL_TARGET, (int)((trig & GC_TRIGGER_WATERMARK) != 0U), trig);
-    ftl_ut_trace_summary("gc trigger: free 0 -> emergency; 40 -> 0; %hu -> watermark", a->free_count);
+    ftl_ut_trace_detail("gc trigger: free 0 -> emergency=%d; free 64 -> 0; plane1=%hu fpmin=%hu -> watermark=%d; free %hu (<%u) -> watermark=%d trig=0x%02lX", (int)((trig_empty & GC_TRIGGER_EMERGENCY) != 0U), alc_free_get_count(a, 1U), alc_free_min_plane_count(a), (int)((trig_plane_low & GC_TRIGGER_WATERMARK) != 0U), a->free_count, (unsigned)FREE_POOL_TARGET, (int)((trig & GC_TRIGGER_WATERMARK) != 0U), trig);
+    ftl_ut_trace_summary("gc trigger: free 0 -> emergency; 64 -> 0; plane1=%hu (<%u) -> watermark; %hu -> watermark", alc_free_get_count(a, 1U), (unsigned)FREE_POOL_PLANE_LOW, a->free_count);
 
     return MUNIT_OK;
 }
 
 /* gc_select_victim — GC victim 选择（参数 mode=off/idle/emergency）。
  *
- * 覆盖：两个 CLOSED SB 的有效 CW 分别为 10 与 248；三种 benefit 模式下都必须选
- *       有效数据更少的那一个，并回报 best_valid_pct/scanned/eligible。
- * 判据：选错 victim 会把写放大推到极高，且收回的块很快又被写满。纯 RAM。 */
+ * 覆盖：① 两个 CLOSED SB 的有效 CW 分别为 10 与 248：三种 benefit 模式下都必须选
+ *       有效数据更少的那一个，并回报 best_valid_pct/scanned/eligible；
+ *       ② 单 plane 空闲失衡时（RISK-ALLOC-09）优先「成对条目 + 饥饿 plane 的单条目」
+ *       —— 有效页最少的富-plane 单条目不得被优先；
+ *       ③ 偏好组为空时必须回退到普通贪心，不得报无候选。
+ * 判据：选错 victim 会把写放大推到极高，且回收后 plane 失衡会让成对分配失败。纯 RAM。 */
 
 static MunitResult test_gc_select_victim(const MunitParameter params[], void *data)
 {
@@ -2024,8 +2176,69 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
     munit_assert_not_null(out.victim);
     munit_assert_uint32(out.victim->plane_blocks[0], ==, 0U);
 
-    ftl_ut_trace_detail("gc victim[%s]: valid a=10 b=%u -> best=%hu%% scanned=%hu eligible=%hu victim.plane0=%hu", mode_s, (unsigned)(FTL_CW_PER_BLOCK - 8U), out.best_valid_pct, out.scanned, out.eligible, out.victim->plane_blocks[0]);
-    ftl_ut_trace_summary("gc victim[%s]: valid 10 vs %u -> best=%hu%% scanned=%hu", mode_s, (unsigned)(FTL_CW_PER_BLOCK - 8U), out.best_valid_pct, out.scanned);
+    /* ── ② 饥饿 plane 偏好（RISK-ALLOC-09）：单 plane 条目在富 plane 上时不得优先 ──
+     * free 池：plane0 = 4、plane1 = 2 ⇒ plane1 饥饿（< FREE_POOL_PLANE_LOW）。
+     * 再放一个**有效页最少**的单 plane CLOSED 条目（只在 plane0，block 6）：
+     * 朴素贪心会选它（cost 最低），但回收它只补富 plane ⇒ 必须选成对条目 a。 */
+    for (WORD i = 2U; i < 6U; i++)
+    {
+        alc_free_push(a, ftl_gblock(0U, i));
+    }
+    for (WORD i = 2U; i < 4U; i++)
+    {
+        alc_free_push(a, ftl_gblock(1U, i));
+    }
+
+    WORD blocks_c[PLANE_NUM];
+
+    blocks_c[0] = 6U;
+    blocks_c[1] = FTL_BLOCK_NO_PLANE;
+    munit_assert_uint32(alc_super_closed_add(a, blocks_c, FTL_TEMP_HOT), !=, FTL_BLOCK_NO_SB);
+    ftl_block_set_valid(&a->blocks[ftl_gblock(0U, 6U)], 4U);
+
+    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 2U);
+    munit_assert_uint32(alc_free_min_plane_count(a), ==, 2U);
+
+    memset(&out, 0, sizeof(out));
+    munit_assert_int(gc_select_victim(a, mode, &out), ==, GC_SELECT_OK);
+    munit_assert_not_null(out.victim);
+    munit_assert_uint32(out.victim->plane_blocks[0], ==, 0U);
+    munit_assert_uint32(out.victim->plane_blocks[1], !=, (DWORD)FTL_BLOCK_NO_PLANE);
+
+    const WORD victim_pref = out.victim->plane_blocks[0];
+
+    /* ── ③ 偏好组为空 ⇒ 回退到富 plane 的单条目（不得报 NO_CANDIDATE/无收益）──
+     * 只有单 plane 条目、且都不含饥饿 plane：偏好组空，必须是「有候选就回收」，
+     * 否则低水位时 GC 反过来拒绝干活，成对分配永久等不到块。 */
+    ftl_ut_ram_init();
+
+    a = ftl_ut_ram_alloc();
+
+    WORD blocks_d[PLANE_NUM];
+
+    blocks_d[0] = 6U;
+    blocks_d[1] = FTL_BLOCK_NO_PLANE;
+    munit_assert_uint32(alc_super_closed_add(a, blocks_d, FTL_TEMP_HOT), !=, FTL_BLOCK_NO_SB);
+    ftl_block_set_valid(&a->blocks[ftl_gblock(0U, 6U)], 4U);
+
+    for (WORD i = 2U; i < 6U; i++)
+    {
+        alc_free_push(a, ftl_gblock(0U, i));
+    }
+    for (WORD i = 2U; i < 4U; i++)
+    {
+        alc_free_push(a, ftl_gblock(1U, i));
+    }
+
+    memset(&out, 0, sizeof(out));
+    munit_assert_int(gc_select_victim(a, mode, &out), ==, GC_SELECT_OK);
+    munit_assert_not_null(out.victim);
+    munit_assert_uint32(out.victim->plane_blocks[0], ==, 6U);
+
+    const WORD victim_fallback = out.victim->plane_blocks[0];
+
+    ftl_ut_trace_detail("gc victim[%s]: valid a=10 b=%u -> best=%hu%% scanned=%hu eligible=%hu; starved-plane preference picked plane0-block %hu (single-plane block 6 skipped); fallback picked %hu", mode_s, (unsigned)(FTL_CW_PER_BLOCK - 8U), out.best_valid_pct, out.scanned, out.eligible, victim_pref, victim_fallback);
+    ftl_ut_trace_summary("gc victim[%s]: valid 10 vs %u -> best=%hu%% scanned=%hu; starved-plane preference + fallback OK", mode_s, (unsigned)(FTL_CW_PER_BLOCK - 8U), out.best_valid_pct, out.scanned);
 
     return MUNIT_OK;
 }
@@ -2498,6 +2711,83 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
     return MUNIT_OK;
 }
 
+/* l2p_wal_gate — L2P 区域写回必须等 Journal 落盘（WAL 次序，RISK-L2P-09）。
+ *
+ * 覆盖：dirty 行的 `dirty_seq` 高于 Journal 的 `persisted_seq` ⇒ `l2p_flush_kick`
+ *       退让（FTL_AGAIN、`wal_defer_count` +1、不提交任何写）；水位追上后闸门放行。
+ * 判据：区域页先于 Journal 落盘 ⇒ 掉电后「映射在、valid_count 缺」→ 计数漂移 →
+ *       GC 按 valid_cw==0 误回收活块（v1.08 已在板上复现并修复）。
+ * 备注：纯 RAM、**不制造 I/O** —— 放行侧用 flush_inflight 饱和挡住闸门之后的路径，
+ *       结果只可能是 FTL_AGAIN，且 `wal_defer_count` 不再增长（可区分是哪一处退让）。 */
+
+static MunitResult test_l2p_wal_gate(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ut_trace_begin();
+
+    ftl_ctx_t   *f = ftl_ut_live();
+    l2p_cache_t *c = f->cache;
+
+    l2p_jrn_t journal;
+
+    memset(&journal, 0, sizeof(journal));
+    jrn_init(&journal, f->topo, ftl_ut_ram_alloc());
+
+    /* 伪造 owner：region → 本用例的 Journal（只读水位，不做目录/介质访问）。 */
+    l2p_owner_fn_t old_fn  = c->owner_of_region;
+    void          *old_ctx = c->owner_ctx;
+
+    s_fake_owner.dim          = 0U;
+    s_fake_owner.metadata_dir = ftl_ut_ram_md();
+    s_fake_owner.alloc        = ftl_ut_ram_alloc();
+    s_fake_owner.topo         = f->topo;
+    s_fake_owner.journal      = &journal;
+    c->owner_of_region        = l2p_fake_owner_fn;
+    c->owner_ctx              = NULL;
+
+    /* 借第 0 行做实验，结束后原样还原（活实例的行属于开机加载的 region，不能留脏）。 */
+    l2p_cache_line_t *line = &c->lines[0];
+    l2p_cache_line_t  saved;
+    const BYTE        saved_inflight = c->flush_inflight;
+
+    memcpy(&saved, line, sizeof(saved));
+
+    line->state        = L2P_CACHE_DIRTY;
+    line->dirty_seq    = 100U;
+    line->flush_issued = 0U;
+    line->flush_done   = 0U;
+    line->flush_fail   = false;
+
+    journal.handle.persisted_seq = 99U;
+
+    /* 放行侧也必须停在这里：inflight 饱和 ⇒ 闸门之后的路径同样只返回 AGAIN，
+     * 但不会让 wal_defer_count 增长（这一条把「哪一处退让」区分开）。 */
+    c->flush_inflight = L2P_FLUSH_MAX_INFLIGHT;
+
+    const DWORD defer0 = c->wal_defer_count;
+
+    munit_assert_int(l2p_flush_kick(c, 0), ==, FTL_AGAIN);
+    munit_assert_uint32(c->wal_defer_count, ==, defer0 + 1U);
+
+    journal.handle.persisted_seq = line->dirty_seq;
+
+    munit_assert_int(l2p_flush_kick(c, 0), ==, FTL_AGAIN);
+    munit_assert_uint32(c->wal_defer_count, ==, defer0 + 1U); /* 闸门已放行：退让来自 inflight */
+
+    *line                = saved;
+    c->flush_inflight    = saved_inflight;
+    c->owner_of_region   = old_fn;
+    c->owner_ctx         = old_ctx;
+    s_fake_owner.journal = NULL; /* 它指向本函数的栈上 journal：不清会留下悬垂指针 */
+
+    ftl_ut_trace_detail("wal gate: dirty_seq=100 persisted=99 -> AGAIN wd=%lu; persisted=100 -> AGAIN(no defer) wd=%lu", defer0 + 1U, c->wal_defer_count);
+    ftl_ut_trace_summary("wal gate: persisted<dirty defers (+%lu); persisted>=dirty passes", 1UL);
+
+    return MUNIT_OK;
+}
+
 /* ══ 子套件 /ftl/pure/io/：GC / WL / RR / L2P（纯 RAM）══ */
 
 MunitTest g_ftl_pure_io_tests[] = {
@@ -2508,6 +2798,7 @@ MunitTest g_ftl_pure_io_tests[] = {
     {  (char *)"wl_trigger_and_victim",   test_wl_trigger_and_victim, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {    (char *)"l2p_resident_states",     test_l2p_resident_states, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {(char *)"l2p_miss_unmapped_evict", test_l2p_miss_unmapped_evict, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
+    {           (char *)"l2p_wal_gate",            test_l2p_wal_gate, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {    (char *)"wl_victim_threshold",     test_wl_victim_threshold, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {              (char *)"rr_health",               test_rr_health, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {   (char *)"rr_predictive_retire",    test_rr_predictive_retire, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
