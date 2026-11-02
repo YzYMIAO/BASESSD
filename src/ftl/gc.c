@@ -52,7 +52,7 @@
 // alloc → config → submit → sync_wait → get_meta → release
 //
 // 唯一调用者是掉电重建（PFR 的 full metadata rebuild（内部）的逐页反查）。
-// 搬移读（GC / WL / 慢死预测）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
+// 搬移读（GC / WL / 预测性退役）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
 // gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
 //
 // ⚠ 读整页只是为了取回页内 META；**不向调用者拷用户数据**（本函数没有数据出参）。

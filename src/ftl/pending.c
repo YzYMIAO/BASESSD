@@ -12,14 +12,14 @@
  *   pending.h —— 表结构（pend_req_t / pend_group_t）+ 容量宏 + 语义约定；
  *   本文件     —— 两张表的增删查 + 组完成编排，无新数据结构。
  *
- * 存储：pending[] / groups[] 由 pend_table_t（per-instance）持有；文件级 static
+ * 存储：pending[] / groups[] 由 pending_ctx_t（per-instance）持有；文件级 static
  *   只放进程级 handler 与日志限流时间戳，不持有表数据。
  *
  * 文件结构：
  *   1. pending 表基础操作   init / alloc / find / remove / find_op / view_op / release_index / count
  *   2. 完成组操作           alloc / count / add·drop_subop / complete_subop[_multi] /
  *                           maybe_complete / has_window_pending
- *   3. write-confirm 停泊   set_handler / park / service
+ *   3. write-confirm 待入账   set_handler / park / service
  *
  * ⚠ 读写判别必须**显式携带** op（pend_op_e），不可从 buffer 字段反推——
  *   写请求的 buffer 是数据源、非 NULL ⇒ `buffer != NULL` 对写恒真（见 pending.h 文件头）。
@@ -28,7 +28,7 @@
 #include "pending.h"
 
 #include "assertion.h"
-#include "ftl_job.h"    /* ftl_job_now_ms（confirm 停泊超时） */
+#include "ftl_job.h"    /* ftl_job_now_ms（confirm 待入账超时） */
 #include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS */
 #include "log.h"
 
@@ -39,14 +39,14 @@
 // write-confirm 事务 handler（ftl_init 注册一次，之后只读调用）。
 static pending_confirm_handler_t s_confirm_handler;
 
-// 停泊超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
+// 待入账超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
 static DWORD s_park_log_ms;
 
 // pend_init — 清空本实例的 pending 表与完成组表
 //
 // 全零即「无占用」（used==0），开机/重建时调用。表是 per-instance 的：每个 FTL
 // 实例各有一份 pending/groups（多 LUN 下完成按命令的 ch/ce/lun 路由回本实例）。
-void pend_init(pend_table_t *table)
+void pend_init(pending_ctx_t *table)
 {
     memset(table->slots, 0, sizeof(table->slots));
     memset(table->groups, 0, sizeof(table->groups));
@@ -55,7 +55,7 @@ void pend_init(pend_table_t *table)
 // 实现要点：表满属预期内的资源结果，保留返回码（判据 3）。
 // ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P（见 pend_req_t 注释）。
 // ⚠ 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
-pend_req_t *pend_alloc(pend_table_t *table)
+pend_req_t *pend_alloc(pending_ctx_t *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -71,7 +71,7 @@ pend_req_t *pend_alloc(pend_table_t *table)
 }
 
 // pend_find — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32）
-pend_req_t *pend_find(pend_table_t *table, WORD cmd_id)
+pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -85,7 +85,7 @@ pend_req_t *pend_find(pend_table_t *table, WORD cmd_id)
 }
 
 // pend_remove — 置 used=0 释放槽位；未找到则 no-op（幂等，供完成路径重复调用）
-void pend_remove(pend_table_t *table, WORD cmd_id)
+void pend_remove(pending_ctx_t *table, WORD cmd_id)
 {
     pend_req_t *req = pend_find(table, cmd_id);
 
@@ -98,7 +98,7 @@ void pend_remove(pend_table_t *table, WORD cmd_id)
 // 实现要点：供 Read Recovery 取走被托管的子操作——那些项的 command_id 已置
 // FTL_PENDING_CMD_NONE，pend_find 查不到，只能按 op 找。
 // 按下标升序 = 先进先出，与「托管顺序」一致（append-only，无移动）。
-bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index)
+bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -116,7 +116,7 @@ bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index)
 }
 
 // 按 op 查槽，把调用者需要的字段拷进出参；只读，不改槽状态。
-bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
+bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
 {
     BYTE idx = 0U;
 
@@ -138,7 +138,7 @@ bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
 // 实现要点：与 pend_remove 的差别只在寻址方式——托管项脱钩后无 command_id 可查，
 // 收尾只能按下标。⚠ 下标由 pend_find_op 产出且表无移动 ⇒ 恒有效，
 // 故越界一律 ASSERT，不静默 no-op。
-void pend_release_index(pend_table_t *table, BYTE index)
+void pend_release_index(pending_ctx_t *table, BYTE index)
 {
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
 
@@ -146,7 +146,7 @@ void pend_release_index(pend_table_t *table, BYTE index)
 }
 
 // 是否存在不属于 cache 序列的写在飞（cache_role == NONE）：有则本 LBA 流不能再按序列续。
-bool pend_has_foreign_write(const pend_table_t *table)
+bool pend_has_foreign_write(const pending_ctx_t *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -166,7 +166,7 @@ bool pend_has_foreign_write(const pend_table_t *table)
 }
 
 // pend_slot_get_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度）
-WORD pend_slot_get_count(const pend_table_t *table)
+WORD pend_slot_get_count(const pending_ctx_t *table)
 {
     WORD count = 0U;
 
@@ -185,7 +185,7 @@ WORD pend_slot_get_count(const pend_table_t *table)
 
 // 实现要点：组容量 = FTL_GROUP_MAX；清零保证 total/next/outstanding/agg_status
 // 从已知态起步。状态与数据分离（H38）：失败不得用非负的「组号」冒充。
-bool pend_group_alloc(pend_table_t *table, BYTE *out_gi)
+bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -202,7 +202,7 @@ bool pend_group_alloc(pend_table_t *table, BYTE *out_gi)
 }
 
 // pend_group_get_count — 占用（未完成）组数（有未完成组 = host 工作饿着 → 归 BUSY）
-WORD pend_group_get_count(const pend_table_t *table)
+WORD pend_group_get_count(const pending_ctx_t *table)
 {
     WORD count = 0U;
 
@@ -223,7 +223,7 @@ WORD pend_group_get_count(const pend_table_t *table)
 // 故所有增减都收敛到本对函数；完整完成走
 // pend_group_complete_subop*（带聚合状态与完成通知），
 // 提交失败回滚走 drop（不触发完成通知）。
-void pend_group_add_subop(pend_table_t *table, WORD gi)
+void pend_group_add_subop(pending_ctx_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
     ASSERT(g->used == true);
@@ -232,7 +232,7 @@ void pend_group_add_subop(pend_table_t *table, WORD gi)
 }
 
 // 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
-void pend_group_drop_subop(pend_table_t *table, WORD gi)
+void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
     ASSERT(g->used == true);
@@ -246,7 +246,7 @@ void pend_group_drop_subop(pend_table_t *table, WORD gi)
 // · agg_status **粘性**：仅当 sub_status != OK 时写入，一旦失败即保留首个错误，
 // 后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
 // · outstanding-- 后交 pend_group_maybe_complete 判是否整组完成。
-void pend_group_complete_subop(pend_table_t *table, WORD gi, ssd_status_e sub_status)
+void pend_group_complete_subop(pending_ctx_t *table, WORD gi, ssd_status_e sub_status)
 {
     pend_group_t *g = &table->groups[gi];
     ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
@@ -265,7 +265,7 @@ void pend_group_complete_subop(pend_table_t *table, WORD gi, ssd_status_e sub_st
 
 // 实现要点：owners 按值传入即局部副本，遍历它安全——回调（on_complete）可能重入
 // 复用组槽，但本循环只认传入的位掩码，不受槽位变动影响。
-void pend_group_complete_subop_multi(pend_table_t *table, DWORD owners, ssd_status_e sub_status)
+void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_status_e sub_status)
 {
     for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
@@ -282,7 +282,7 @@ void pend_group_complete_subop_multi(pend_table_t *table, DWORD owners, ssd_stat
 // · 通知顺序：写 status_out → 置 complete_flag → 调 on_complete。
 // · ⚠ used=0 必须在**通知之后**：on_complete 回调可能重入 ftl_submit_*
 // 再申请组槽，若先清零则本槽可能被该重入立刻复用、又被这里清零。
-void pend_group_maybe_complete(pend_table_t *table, WORD gi)
+void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
     if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
@@ -308,7 +308,7 @@ void pend_group_maybe_complete(pend_table_t *table, WORD gi)
 }
 
 // 实现要点：只读扫描 groups[]，数组本身不暴露给 wbuf。
-bool pend_group_has_window_pending(const pend_table_t *table, DWORD window)
+bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -327,9 +327,9 @@ bool pend_group_has_window_pending(const pend_table_t *table, DWORD window)
     return false;
 }
 
-/* ── write-confirm park（停泊列表 = pending 表里的 WRITE_CONFIRM 项）──
+/* ── write-confirm park（待入账列表 = pending 表里的 WRITE_CONFIRM 项）──
  *
- * 不另建一张列表：停泊项本来就在 pending 表里（op = WRITE_CONFIRM、command_id
+ * 不另建一张列表：待入账项本来就在 pending 表里（op = WRITE_CONFIRM、command_id
  * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。pending 模块负责扫描/超时/结算，
  * 数据面事务由 FTL 注入的 handler 执行（C2/R9：不复制 Journal→L2P→BST 顺序）。 */
 
@@ -344,10 +344,10 @@ pending_confirm_handler_t pend_confirm_get_handler(void)
     return s_confirm_handler;
 }
 
-// 把「已编程、确认未完成」的子操作转成停泊项（契约见 include/ftl/pending.h）。
+// 把「已编程、确认未完成」的子操作转成待入账项（契约见 include/ftl/pending.h）。
 // 槽本身由写路径持有，这里只改 op / owners 两个字段；release 由结算侧（成功、
 // 失败或超时）唯一负责 —— 两侧都释放就是重复归还（C12）。
-void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
+void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
 {
     pend_req_t *pending = &table->slots[pending_idx];
 
@@ -360,7 +360,7 @@ void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
 }
 
 /**
- * @brief 槽是否是「已编程、确认未完成」的停泊项。
+ * @brief 槽是否是「已编程、确认未完成」的待入账项。
  */
 static bool pend_is_confirm_parked(const pend_req_t *p)
 {
@@ -369,16 +369,16 @@ static bool pend_is_confirm_parked(const pend_req_t *p)
 
 // 写确认结算（[svc] 步骤之一，调用点见 ftl_service）。
 // 契约（时机 / 入参）见 include/ftl/pending.h；此处只记实现要点：
-//   · 逐条调确认 handler：FTL_AGAIN = region 仍在加载 ⇒ 停泊保留、下轮再来；
-//     停泊超过 FTL_GROUP_DRAIN_TIMEOUT_MS（100 ms）按 IO_ERROR 结算，避免元数据区
-//     卡死时 host 写永久挂起（它只兜「确认停泊」，兜不住别的等待）。
+//   · 逐条调确认 handler：FTL_AGAIN = region 仍在加载 ⇒ 保留待入账、下轮再来；
+//     待入账超过 FTL_GROUP_DRAIN_TIMEOUT_MS（100 ms）按 IO_ERROR 结算，避免元数据区
+//     卡死时 host 写永久挂起（它只兜「确认未完成」，兜不住别的等待）。
 //   · 结算顺序：先取走 owners、再释放槽——组完成通知可能重入复用本槽。
 //   · 只有真正结算（成功或失败）才释放槽并触发组完成；FTL_AGAIN 不动任何状态。
-void pend_confirm_service(pend_table_t *table, void *confirm_ctx)
+void pend_confirm_service(pending_ctx_t *table, void *confirm_ctx)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    // 本轮进入时的停泊总数。限流日志必须报「同时有多少条在等」——只打扫描到的
+    // 本轮进入时的待入账总数。限流日志必须报「同时有多少条在等」——只打扫描到的
     // 第一条（常是 idx=0）会被误读成「只有一个 region 卡住」（RISK-HOST-05）。
     WORD parked = 0U;
 
@@ -401,7 +401,7 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx)
 
         if (pending->park_ms == 0U)
         {
-            // 懒初始化停泊时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
+            // 懒初始化待入账时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
             // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
             pending->park_ms = now_ms;
         }
@@ -412,7 +412,7 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx)
         {
             if ((now_ms - pending->park_ms) < FTL_GROUP_DRAIN_TIMEOUT_MS)
             {
-                continue; /* region 仍在加载：保留停泊，下轮再来 */
+                continue; /* region 仍在加载：保留待入账，下轮再来 */
             }
 
             // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），

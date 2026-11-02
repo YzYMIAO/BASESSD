@@ -136,7 +136,7 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result);
  * spare 吸收（`RISK-BBT-12/13`）；本行是验证「元数据区是否开始出现 BAD」的基线。
  * ⚠ 这是**开机基线**：运行期新增的 BAD 不在此行体现（下一次开机才计入）。
  *
- * @param ftl 只读：从 BST 统计各分区（anchor/cp/bbt/journal/l2p_log/spare/data）的 BAD 块数
+ * @param ftl 只读：从 BST 统计各分区（dir_ckpt/cp/bbt/journal/l2p_log/spare/data）的 BAD 块数
  */
 void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl);
 

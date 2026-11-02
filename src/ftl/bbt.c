@@ -311,7 +311,7 @@ void bbt_init(alc_t *alloc)
     // 而是 FTL 自己的数据——FC 一次页编程写 PAGE_SIZE = 2112（主区 2048 + 备区 64），
     // 页缓冲按 4 × CW(528B) 拼 ⇒ CW3 的尾巴 64 字节正好落进备区，覆盖掉出厂标记。
     // 于是「列 2048 非 0xFF ⇒ 坏块」这条判据在用过的介质上退化成「哪些块被写过」，
-    // 重扫会把**所有写过的块**（含活的 Anchor/Checkpoint/Wear）判成坏块，随后
+    // 重扫会把**所有写过的块**（含活的目录检查点/Checkpoint/Wear）判成坏块，随后
     // bbt_save 把这份垃圾落盘 —— 真坏块反而丢了，活块全废。
     //
     // 判据 = bbt_medium_has_ftl_data()（元数据区里有没有合法的 FTL 页）。
@@ -442,7 +442,7 @@ static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_er
 
     // ② 可选擦除——**无条件发**。
     // 擦除不能因为 ① 命中就提前 return：命中可能只是「写过」——元数据区
-    // （0..FTL_METADATA_AREA_END）里的 L2P/Anchor/Checkpoint/BBT/Journal 块正是
+    // （0..FTL_METADATA_AREA_END）里的 L2P/目录检查点/Checkpoint/BBT/Journal 块正是
     // 列 2048 非 0xFF 的那批。跳过它们 ⇒ 擦完断电重启，FTL 仍从原处读回旧
     // checkpoint/BBT，`free`/`cp_seq` 一个不少。
     if (do_erase != 0U)
@@ -592,7 +592,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
         }
 
         // Journal / L2P 日志块（固定或借用）丢失无法在当前上电周期内恢复其映射 ⇒
-        // 下次开机 full metadata rebuild（本仓自拟的 BBT 持久标志）。Anchor/CP/BBT
+        // 下次开机 full metadata rebuild（本仓自拟的 BBT 持久标志）。目录检查点/CP/BBT
         // 不需要：候选池重算 + 下一次提交即可自愈。
         if (borrowed_log || ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT))) || ftl_is_l2p_log_block(block))
         {

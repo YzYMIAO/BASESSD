@@ -174,7 +174,7 @@
 | `directory_commit` | 主/备双副本提交、`dirty_gen` |
 | `journal_append` | init/reserve/append 序号推进、pending 置位、未到水位不请求 CP |
 | `ring_locate` | 假 probe 下 locate 选最新记录 |
-| `anchor_three_step` | Anchor prepare/page/commit 门槛（RISK-MD-06 纯 RAM 部分） |
+| `dir_ckpt_three_step` | 目录检查点 prepare/page/commit 门槛（RISK-MD-06 纯 RAM 部分） |
 | `log_alloc_rotate_release` | 日志区分配、轮转、回收 |
 | `cp_init_timer` | CP 初始化与定时触发复位 |
 | `md_status_error` | `status.error` 清零点特征化（RISK-MD-17） |
@@ -194,7 +194,7 @@
 | `group_exhaustion` | — | 组槽耗尽返回 false 且不覆盖（RISK-PEND-02） |
 | `group_complete_once` | — | 多 owner 只完成一次 |
 | `group_failure_aggregation` | — | 子操作失败后 `agg_status` 粘滞，后续 OK 不清错 |
-| `confirm_park_timeout` | — | 写确认停泊：未到 deadline 保留停泊（槽/组/通知不动）；到达 `FTL_GROUP_DRAIN_TIMEOUT_MS` 释放槽并按 IO_ERROR 结算一次（RISK-HOST-05 的纯 RAM 部分；handler 由 `pend_confirm_get_handler` 保存并还原） |
+| `confirm_park_timeout` | — | 写确认待入账：未到 deadline 保留待入账（槽/组/通知不动）；到达 `FTL_GROUP_DRAIN_TIMEOUT_MS` 释放槽并按 IO_ERROR 结算一次（RISK-HOST-05 的纯 RAM 部分；handler 由 `pend_confirm_get_handler` 保存并还原） |
 | `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners 与组在飞计数 |
 | `wbuf_drop_reset_owners` | — | DROP 清空页后 owners 结算一次（OK）、RESET 按 IO_ERROR 结算 |
 | `wbuf_density` | `n=1\|2\|4\|8` | pair 布局、稀疏 CW 位图（RISK-WB-03/IF-04） |
@@ -291,7 +291,7 @@
 
 | ID | 状态 | 处置 | 用例 / 流程 | 备注 |
 |---|---|---|---|---|
-| RISK-MD-06 | 已修未上板 | UT-P + BOARD | `anchor_three_step`；回收注入未落地 | 需释放日志块 + Anchor 落盘 |
+| RISK-MD-06 | 已修未上板 | UT-P + BOARD | `dir_ckpt_three_step`；回收注入未落地 | 需释放日志块 + 目录检查点落盘 |
 | RISK-PERF-01 | 待后续 | OUT | — | 重复全表扫描 |
 | RISK-PERF-02 | 待后续 | OUT | — | 单 plane 目的写 |
 | RISK-GC-05 | 待后续 | OUT | — | GC bitmap 未实现 |
@@ -402,7 +402,7 @@
 ## 7. 不覆盖项
 
 - 真 POR / 掉电：人工断电流程，不进 munit（允许 `ftl_init`+`pfr_boot_recovery` 模拟，但只标“模拟重启”）。
-- NAND 页/擦/写失败注入：当前无 `ftl_sync_*` 注入 seam（覆盖回收/Anchor/abort 不擦 victim 的注入部分）。
+- NAND 页/擦/写失败注入：当前无 `ftl_sync_*` 注入 seam（覆盖回收/目录检查点/abort 不擦 victim 的注入部分）。
 - 真空白片与格式化中断：`format_in_progress_and_used_medium_refusal` 需要真空白片或可注入的
   `FORMAT_IN_PROGRESS` 介质状态（RISK-BOOT-04/17、RISK-BBT-02）。
 - USB 主机行为、外部吞吐（H2testw）、长时 soak；内部 FC/FTL 速度见 `/speed/fc_nand_rw` 与

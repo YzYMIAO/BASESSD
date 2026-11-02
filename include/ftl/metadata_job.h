@@ -87,7 +87,7 @@ static inline bool md_handle_is_idle(const md_dir_cache_t *dir)
  * @brief 压缩 job 是否处于 CP_* 阶段。
  *
  * `commit_region` 据此**抑制逐次立即回收**：搬移 victim 的最后一个 region 时其活
- * 计数归零，但 Anchor 还没指向新位置 ⇒ 此刻擦 victim 会在掉电后丢映射（③④ 契约）。
+ * 计数归零，但目录检查点还没指向新位置 ⇒ 此刻擦 victim 会在掉电后丢映射（③④ 契约）。
  * 压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
  *
  * @param dir Directory

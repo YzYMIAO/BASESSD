@@ -943,7 +943,7 @@ static int uart_cli_bbt(int argc, char *argv[])
 /*
  * format — boot 失败后的恢复格式化（破坏性）
  *
- * 用途：CP/Anchor 介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
+ * 用途：CP/目录检查点介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
  * （例如上一轮 bbt --erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
  * 本命令直接对已 ftl_init 的实例执行 pfr_media_format：重落 BBT（带
  * FORMAT_IN_PROGRESS）→ 擦除 BBT 池之外的块 → 写当前版本初始 Checkpoint。

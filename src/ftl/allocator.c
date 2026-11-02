@@ -961,7 +961,7 @@ void alc_bst_note_erase(alc_t *alloc, WORD gblock, DWORD now)
     ftl_block_clear_valid(b);
 
     // read disturb 是「自上次擦除以来」的计数：擦除把它清零。
-    // rr.health / last_ecc / rising_count **保留**——慢死趋势要跨擦除周期观察。
+    // rr.health / last_ecc / rising_count **保留**——预测性退役趋势要跨擦除周期观察。
     b->read_count = 0U;
 }
 

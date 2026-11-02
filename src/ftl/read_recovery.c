@@ -1,10 +1,10 @@
 /*
- * read_recovery.c — 读恢复（CRC 重读一次 + 慢死预测 + 块退役）
+ * read_recovery.c — 读恢复（CRC 重读一次 + 预测性退役 + 块退役）
  *
  * 职责：
  *   读失败时：一次正常读；只有 CRC_ERROR 允许再读一次；其余直接失败并块退役
  *   （本器件无 read-retry table，见头文件说明）。
- *   以及 ECC 趋势/read disturb 驱动的「慢死预测」——提前搬空将坏块并退役。
+ *   以及 ECC 趋势/read disturb 驱动的「预测性退役」——提前搬空将坏块并退役。
  *
  * 与 migrate.c 的分工：
  *   本文件只做**判定与记录**（rr_record_ecc / rr_predictive_scan / rr_retire_block）；
@@ -72,7 +72,7 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
 
     // 健康状态**单调升级**：只取 max，绝不回落。
     // ⚠ 逐条直接赋值会让 CRITICAL/DYING 块在后续几次低 ECC 连续上升时被打回
-    // WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖慢死信号。
+    // WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖预测性退役信号。
     rr_block_health_e level = track->health;
 
     if ((track->rising_count >= RR_ECC_RISING_THRESHOLD) && (level < RR_BLOCK_WARNING))
@@ -496,7 +496,7 @@ static void rr_job_step(rr_handle_t *rr)
 /* ── typed handle（端口装配 / 触发 / 上报） ── */
 
 // 装配：整块清零、绑定 cache/alloc/scratch/pending 端口；不碰介质。
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending)
+void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pending_ctx_t *pending)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
     // （cache / alloc / rr_page_scratch / pending 均为实例内嵌对象的地址）⇒ 不重复检查。
@@ -724,7 +724,7 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
 
 // 实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、BAD/RETIRED 已出局）；
 // 命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
-// （慢死第一信号）。调用者 mig_predict_begin 用 sb_id 反查 Closed 条目。
+// （预测性退役第一信号）。调用者 mig_predict_begin 用 sb_id 反查 Closed 条目。
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 {
     // 层内接口：唯一调用者 mig_predict_begin 传 rr->alloc 与局部 gblock
@@ -733,14 +733,14 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
     {
         const bst_block_t *b = &alloc->blocks[i];
 
-        // 慢死预测只针对 Closed 块：Open 还在写、Free 没数据、Retired/Bad 已出局
+        // 预测性退役只针对 Closed 块：Open 还在写、Free 没数据、Retired/Bad 已出局
         if (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED)
         {
             continue;
         }
 
         // ECC 趋势（连续上升 ≥RISING / 单次 ≥HIGH_WATER）或 read disturb
-        // 高水位（read_count 超阈值，慢死第一信号）都触发搬移。
+        // 高水位（read_count 超阈值，预测性退役第一信号）都触发搬移。
         if ((b->rr.health >= RR_BLOCK_CRITICAL) || (b->read_count >= RR_READ_DISTURB_THRESHOLD))
         {
             // 候选 SB 的另一个 plane 若已 BAD，migrate 读它必失败并 abort，

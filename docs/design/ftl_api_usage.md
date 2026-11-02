@@ -22,7 +22,7 @@ FTL 自行决定**，Controller 只按 FTL 实例边界切连续 run 后提交�
 typedef struct ftl_context {
     ftl_topo_t        topo;             /* 本 FTL 绑定的 NAND 芯片路由 */
     l2p_cache_t      *cache;            /* 共享 L2P cache（同一 (ch,ce) 共用） */
-    pend_table_t      pending;          /* 子操作表 + 完成组（per-instance） */
+    pending_ctx_t      pending;          /* 子操作表 + 完成组（per-instance） */
     wb_handle_t      *wbuf;             /* 页打包写缓冲 */
     ftl_table_refs_t  table_refs;       /* 五张表的引用（按值保存，可审计） */
     alc_t             alloc;            /* allocator（指针已绑到 table_refs） */
@@ -287,15 +287,15 @@ rr_handle(ftl);                                     /* 交给 job，本函数返
   统一 `pend_release_index` + `pend_group_complete_subop_multi(owners, …)`。
 - ⚠ `FTL_PENDING_CMD_NONE` 哨兵是**必需**的：命令一 release，其 `command_id`（= FC 命令池
   下标）就会被后续 `fc_command_alloc` 复用，而 `pend_find` 按 id 扫**第一项** ⇒
-  陈旧 id 会让一条新命令的完成撞上这个停泊项。
-- 停泊区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
+  陈旧 id 会让一条新命令的完成撞上这个待入账项。
+- 待入账区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
   `pend_find_op(ftl, op, &idx)` / `pend_release_index(ftl, idx)`。
 - `rr_handle` 由 `ftl_service_idle/normal/busy` 每轮调用一次（job 空闲且无托管项时只是
   一次 32 项线性扫描）。
 
-#### 1.5.2 写确认的「停泊」约定（v0.75 阶段 5）
+#### 1.5.2 写确认的「待入账」约定（v0.75 阶段 5）
 
-同构的第二处停泊：写**已编程成功**、但 L2P region 尚未就绪（正在异步加载）⇒ 不能当场
+同构的第二处待入账：写**已编程成功**、但 L2P region 尚未就绪（正在异步加载）⇒ 不能当场
 `ftl_confirm_write`（那会在完成泵里同步等 NAND）。
 
 ```c
@@ -306,13 +306,13 @@ return;                                           /* 组在飞数**不**递减 *
 ```
 
 - 推进者**不是**外部引擎，而是 `pend_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
-  按下标升序扫（停泊项的 `command_id` 已是哨兵，`pend_find` 查不到）：
+  按下标升序扫（待入账项的 `command_id` 已是哨兵，`pend_find` 查不到）：
   仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_host_io_callback` **完全相同**的收尾
   （`pend_release_index` + `pend_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
 - ⚠ 顺序**必须**早于 Phase 2.5 的补发循环（读旧映射的陈旧数据问题，见 §6.1 注）。
-- 停泊发生在 NAND 编程**成功之后** ⇒ 收尾的子操作状态恒 `SSD_STATUS_OK`（没有写失败分支）。
+- 待入账发生在 NAND 编程**成功之后** ⇒ 收尾的子操作状态恒 `SSD_STATUS_OK`（没有写失败分支）。
 
-### 1.6 写完成确认（modify-after-confirm）
+### 1.6 写完成确认（先编程后映射（program-before-map））
 
 写请求（`ftl_submit_write`）的 Journal + L2P 更新不在提交路径中执行，而是后移到 completion handler 中、确认 NAND PROGRAM 成功后执行：
 
@@ -327,7 +327,7 @@ ftl_submit_write(ftl, &req)
   ftl_op_dispatch()
     ├─ NAND_SUCCESS → ftl_confirm_write(ftl, pending)   ← ★ v0.75 阶段 5：**两遍式**
     │   ├─ 第一遍：逐 CW l2p_cache_ready(lba) → 任一未就绪 ⇒ 返 FTL_AGAIN（**一条都不动**）
-    │   │            ⇒ 本项**停泊**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
+    │   │            ⇒ 本项**待入账**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
     │   │               组在飞数**不**递减），由 pend_confirm_service 每轮推进
     │   └─ 第二遍（全部就绪）：
     │        l2p_cache_read(lba) → old_pba  ← ★ 完成时**重查 L2P**（不存提交时快照）
@@ -894,7 +894,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `pfr_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 4 处 | 全在开机 / 结构性路径：`jrn_page_scan_latest` 的页头读与裸空白页判定、`jrn_resume` 的换块擦、`jrn_replay` 的页读；运行期只有**异步** freeze（`jrn_freeze`），无同步回退 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
-| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
+| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / 目录检查点落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的目录检查点读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
 | `ftl_fc_interface.c` | — | 同步原语与 `ftl_async_*` 异步原语的定义处（机制层） |
@@ -902,7 +902,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 ⚠ **`ftl_sync_submit_wait` 的目标终态已达成**（v0.75 阶段 8）：只被开机 / 格式化 / 出厂扫描 /
 CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，且**全是结构性同步**（在 `main`
 进 superloop 前执行，无人 drain CQ）或非派发上下文的回退（`journal.c` ①），**会长期保留**。
-`checkpoint.c`（阶段 6）、`bbt.c`（阶段 7）、`metadata.c` 的压缩与 Anchor（阶段 8）
+`checkpoint.c`（阶段 6）、`bbt.c`（阶段 7）、`metadata.c` 的压缩与目录检查点（阶段 8）
 四条异步化路径**都已不再出现**在这一栏里——即"由 job 承载"的那些同步站点已经清零。
 
 ### 5.4 约束汇总
@@ -915,7 +915,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 | GC 搬移读/写 | ENABLE | ENABLE | BCH | GC | lba |
 | BBT 读/写 | **ENABLE** | DISABLE | BCH | BBT | 不填 |
 | Checkpoint 读写 | **ENABLE** | DISABLE | BCH | CHECKPOINT | 不填 |
-| Anchor (Directory) 读写 | **ENABLE** | DISABLE | BCH | METADATA | 不填 |
+| 目录检查点 (Directory) 读写 | **ENABLE** | DISABLE | BCH | METADATA | 不填 |
 | BBT 出厂扫描（`OP_READ_COLUMN` 读列 2048，v63） | DISABLE | DISABLE | BCH | BBT | 不填 |
 
 > ⚠ **v0.62 起元数据页 CRC = ENABLE**（`FTL_PAGE_CFG_META` 由 `FC_CRC_DISABLE` 翻为
@@ -989,8 +989,8 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
 > `mig_gc_request_urgent()` 只登记，下一轮由 must-run 启动。
 
-> ⚠ **Phase 2.5 的开头是 `pend_confirm_service()`**——推进**停泊**的写确认，
-> 必须早于补发循环：停泊意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作
+> ⚠ **Phase 2.5 的开头是 `pend_confirm_service()`**——推进**待入账**的写确认，
+> 必须早于补发循环：待入账意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作
 > 就会读到旧物理页。
 > ⚠ 每实例的写回在飞上限 `L2P_FLUSH_MAX_INFLIGHT = 4`（一次写回 = 1 命令 + 4 buffer，
 > 不设上限会把 FC 池吃光 ⇒ host I/O 拿不到命令、全系统 `FTL_AGAIN`）。
@@ -1075,7 +1075,7 @@ src/ftl/
 ├── allocator.c                  # Free Pool + OP/Spare + 磨损均衡
 ├── journal.c                    # append/flush_page/replay/truncate + 刷页 job（v0.75 阶段 2）
 ├── gc.c                         # 选 victim（gc_select_victim）+ gc_read_page_with_lba
-├── migrate.c                    # GC/WL/慢死预测共用搬移 job（v0.75 阶段 4）
+├── migrate.c                    # GC/WL/预测性退役共用搬移 job（v0.75 阶段 4）
 ├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
 ├── ftl_op.c                     # ctx 旁表 + 路由 + 提交 + 派发/排空（v0.75）

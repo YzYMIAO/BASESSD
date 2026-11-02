@@ -14,7 +14,7 @@
  *   这两级无效，故不实现。）
  *
  * ECC 趋势预测：
- *   ECC 连续 N 次上升 → 该 Block 进入"慢死"（Slow Death）状态
+ *   ECC 连续 N 次上升 → 该 Block 进入**预测性退役**（predictive failure analysis，PFA）候选
  *   → 在数据彻底损坏前主动搬移。
  *
  * 当前实现：
@@ -35,7 +35,7 @@
 #include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"
 #include "l2p_cache.h"
-#include "pending.h" /* pend_table_t */
+#include "pending.h" /* pending_ctx_t */
 
 #include <stdint.h>
 
@@ -43,13 +43,13 @@
 #define RR_ECC_RISING_THRESHOLD (4U)  /* 连续上升 ≥4 次触发预测 */
 #define RR_ECC_HIGH_WATER       (6U)  /* 单次 ECC ≥6 bits → 告警 */
 #define RR_ECC_MAX              (15U) /* BCH t=4 最大可纠 bit 数（保守上限）*/
-/* read disturb 慢死阈值——单块自上次擦除以来的累计读次数超此值即视为慢死候选。
+/* read disturb 预测性退役阈值——单块自上次擦除以来的累计读次数超此值即视为预测性退役候选。
  * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（migrate.c）共同累加；
  * 取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取每块 1000 次
  * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（alc_bst_note_erase）。 */
 #define RR_READ_DISTURB_THRESHOLD (1000U)
 
-/* 慢死预测巡检节拍（由 migrate handle 自持）：≥1s 才扫一轮（read disturb 是慢变量，
+/* 预测性退役巡检节拍（由 migrate handle 自持）：≥1s 才扫一轮（read disturb 是慢变量，
  * 频繁全扫无谓开销）。 */
 #define RR_SCAN_INTERVAL_MS (1000U)
 
@@ -140,11 +140,11 @@ typedef struct
     DWORD already_bad_logged[FTL_BLOCK_TOTAL / 32U];
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
-    l2p_cache_t  *cache;
-    alc_t        *alloc;
-    ftl_topo_t    topo;
-    BYTE         *page_scratch;
-    pend_table_t *pending;
+    l2p_cache_t   *cache;
+    alc_t         *alloc;
+    ftl_topo_t     topo;
+    BYTE          *page_scratch;
+    pending_ctx_t *pending;
 
     rr_owner_t owner;     /* 当前被托管的子操作 */
     bool       has_owner; /* true = owner 有效（rr_trigger 登记） */
@@ -166,7 +166,7 @@ typedef struct
  * @param page_scratch 整页读缓冲（恢复读的落点）
  * @param pending      pending 表（托管子操作的领取与结算）
  */
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending);
+void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pending_ctx_t *pending);
 
 /**
  * @brief 登记一个被托管的读子操作（不立即推进）。
@@ -219,10 +219,10 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits);
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track);
 
 /**
- * @brief 巡检：找第一个慢死候选的 Closed 块（health ≥ CRITICAL 或 read_count 超阈值）
+ * @brief 巡检：找第一个预测性退役候选的 Closed 块（health ≥ CRITICAL 或 read_count 超阈值）
  *
  * 只扫 CLOSED（跳过 OPEN/FREE/BAD/LOG/RETIRED），返回全局物理 Block 号。
- * 慢死预测命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
+ * 预测性退役命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
  *
  * @param alloc  FTL allocator（含 blocks 表）
  * @param gblock 输出：命中的全局 Block 号
@@ -232,7 +232,7 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track);
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock);
 
 /**
- * @brief 退役慢死块（不再分配新数据，不标坏）
+ * @brief 退役一个预测性退役候选块（不再分配新数据，不标坏）
  *
  * 有效数据已由调用方搬走，本函数：
  *   - 状态机：置 RETIRED（互斥枚举 ⇒ 一行赋值即抹掉原状态；温度字段正交，不动）

@@ -987,7 +987,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
     // 开新序列时要求上一段的 cache program 页全部确认完：新序列的 START 可能需要
     // 刷出旧顺序页（LBA 不连续时），迟到的确认会落到新页、破坏其隐式坐标/容量。
-    // 停泊的确认同样算"未排空"（它尚未 append，LBA 也未知先后）。
+    // 待入账的确认同样算"未排空"（它尚未 append，LBA 也未知先后）。
     if ((starting == true) && ((seq->wr.count != 0U) || (seq->wr_inflight != 0U) || (pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL) == true)))
     {
         ftl->cache_stream.wb_declines++;
@@ -1084,7 +1084,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // （508 条按整 pair 用到 504 条 = 63 pair ≈252 KiB）。
     // ⚠ 必须减去**在飞未确认页**的条目：`current_entry` 只计已 append 的条目，
     // 确认滞后于提交；不减就会把页算满后再追加，触发序列期间的页刷被门控
-    // （确认停泊 / 1 s 中止）。每个在飞页确认时追加 FTL_LBA_PER_PAIR 条。
+    // （确认待入账 / 1 s 中止）。每个在飞页确认时追加 FTL_LBA_PER_PAIR 条。
     // 在飞 = 已进页表（wr.count）+ 已下发未完成（wr_inflight）。页在**完成时**才进
     // 页表（早回执），只减 wr.count 会把还在编程的页当成"没有"，窗口就会被放大到
     // 超过环深/顺序页容量——完成后集中入表即溢出（环满 ASSERT / 顺序页超发）。
@@ -1149,7 +1149,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         end_seq = true;
     }
 
-    // 顺序页预留：失败 ⇒ 本窗口 END（序列收尾后刷页能跑，停泊的确认才能推进）。
+    // 顺序页预留：失败 ⇒ 本窗口 END（序列收尾后刷页能跑，待入账的确认才能推进）。
     _Static_assert((FTL_CACHE_WRITE_MAX_PAGES * FTL_LBA_PER_PAIR) < JRN_SEG_ENTRIES_PER_PAGE, "journal seq window must fit one page");
 
     if (jrn_seq_reserve(ftl->journal, (WORD)(n_pages * FTL_LBA_PER_PAIR)) == false)

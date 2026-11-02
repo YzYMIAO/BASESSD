@@ -7,7 +7,7 @@
  * 只管账本，不碰介质：块的擦除由调用者在 alc_free_push 之前完成。
  *
  * 不变量：
- *   ① 四本账各有唯一闸门：Free Pool = alc_free_push / alc_free_remove；
+ *   ① 四类池（Free/OP/Spare/Closed）各有唯一闸门：Free Pool = alc_free_push / alc_free_remove；
  *      OP = alc_op_push（出池由 alc_free_refill_from_op 内部完成）；Spare = alc_spare_push/pop；
  *      Closed = alc_super_closed_add /
  *      alc_super_closed_remove。标量计数（free_count / closed_sb_count）直接读；
@@ -174,7 +174,7 @@ typedef struct
     /* Free Pool */
     WORD *free_blocks;
     WORD  free_count;
-    /* per-plane 空闲块数：由唯一闸门 alc_free_push / alc_free_remove 维护（README 的「四本账」）。
+    /* per-plane 空闲块数：由唯一闸门 alc_free_push / alc_free_remove 维护（README 的「四类池」）。
      * 成对分配与 GC 的 plane 平衡判据都读它，不再扫 free_blocks 推导。 */
     WORD free_plane_count[PLANE_NUM];
 

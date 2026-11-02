@@ -15,7 +15,7 @@
  * 每条 record 在 P0/P1 镜像）。池首块/块数由 ftl/metadata.h 按几何推导
  * （「固定元数据区布局」）。
  *
- * 写模型与 Anchor / BBT 一致（见 ftl/metadata.h §元数据写模型）：
+ * 写模型与目录检查点 / BBT 一致（见 ftl/metadata.h §元数据写模型）：
  * 只追加到擦除过的页 + 每条 record 带单调 sequence + 池内轮转 + 最新有效胜。
  * ⚠ Header 绝不就地重写：NAND 只能 1→0，第二次编程会静默损坏旧 Header，
  *   使 cp_pool_find_latest 失败 ⇒ 开机误走 fresh ⇒ 映射全丢。
@@ -36,7 +36,7 @@
  * 承载：每一步提交命令后即返回，完成由 g_op_callbacks[FTL_OP_CHECKPOINT]
  * （ftl_checkpoint_callback）按 phase 收尾，下一轮 cp_handle 续跑。
  *
- * ⚠ **掉电安全契约不变**：先 flush region → 再 flush Anchor → 最后写 Header。
+ * ⚠ **掉电安全契约不变**：先 flush region → 再 flush 目录检查点 → 最后写 Header。
  *   Header 是"承诺书"——它一旦落盘，boot 就信 region_bitmap 里置位的 region 在
  *   NAND 上，故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
@@ -56,19 +56,19 @@
 
 typedef enum
 {
-    CP_IDLE = 0,      /* 无 job */
-    CP_FLUSH_REGIONS, /* ① 按快照 bitmap 逐个落盘脏 region（起 L2P 异步写回，等全部完成） */
-    CP_ANCHOR_PREP,   /* ② 定位 Anchor 游标 + 取槽（可能含一次性同步定位） */
-    CP_ANCHOR_ERASE,  /* ② 换块擦（仅需换块时） */
-    CP_ANCHOR_WRITE,  /* ② 逐页写 Anchor record */
-    CP_HDR_PREP,      /* ③ 定位 Checkpoint 游标 + 取 Header 槽 */
-    CP_HDR_ERASE,     /* ③ 换块擦（仅需换块时） */
-    CP_BLOCK_WRITE,   /* ③ 逐页写 块元数据快照（**必须早于 Header**：Header 是整条 record 的 commit） */
-    CP_WEAR_WRITE,    /* ③ 逐页写 磨损快照（erase/read/ECC health；同样早于 Header） */
-    CP_HDR_WRITE,     /* ③ 写 Header */
-    CP_TRUNC_PREP,    /* ④ 水位判定：算 journal 预擦块 */
-    CP_TRUNC_ERASE,   /* ④ 预擦 journal 环形最旧块 */
-    CP_DONE,          /* 收尾：释放 active，记日志 */
+    CP_IDLE = 0,       /* 无 job */
+    CP_FLUSH_REGIONS,  /* ① 按快照 bitmap 逐个落盘脏 region（起 L2P 异步写回，等全部完成） */
+    CP_DIR_CKPT_PREP,  /* ② 定位目录检查点游标 + 取槽（可能含一次性同步定位） */
+    CP_DIR_CKPT_ERASE, /* ② 换块擦（仅需换块时） */
+    CP_DIR_CKPT_WRITE, /* ② 逐页写目录检查点记录 */
+    CP_HDR_PREP,       /* ③ 定位 Checkpoint 游标 + 取 Header 槽 */
+    CP_HDR_ERASE,      /* ③ 换块擦（仅需换块时） */
+    CP_BLOCK_WRITE,    /* ③ 逐页写 块元数据快照（**必须早于 Header**：Header 是整条 record 的 commit） */
+    CP_WEAR_WRITE,     /* ③ 逐页写 磨损快照（erase/read/ECC health；同样早于 Header） */
+    CP_HDR_WRITE,      /* ③ 写 Header */
+    CP_TRUNC_PREP,     /* ④ 水位判定：算 journal 预擦块 */
+    CP_TRUNC_ERASE,    /* ④ 预擦 journal 环形最旧块 */
+    CP_DONE,           /* 收尾：释放 active，记日志 */
 } cp_phase_e;
 
 /* 触发原因（观测 / 策略分流；行为上统一走同一状态机） */
@@ -96,7 +96,7 @@ typedef enum
  * 开机由 cp_pool_find_latest 恢复。不能做成 file-scope static：多实例会共享同一份
  * 游标/序号，各自往同一个池槽写、sequence 互相踩。
  *
- * ⚠ 与 journal / Anchor / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
+ * ⚠ 与 journal / 目录检查点 / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
 typedef struct
 {
     DWORD sequence;              /* 本池自己的单调序号（最新有效 record） */
@@ -139,15 +139,15 @@ typedef struct
     DWORD region_bitmap[L2P_LOCAL_DIRTY_WORDS];
     DWORD journal_seq; /* = journal.sequence_counter（截断/回放水位） */
 
-    /* ② Anchor（一条 record = ANCHOR_PAGE_COUNT 页，逐页提交） */
-    md_ring_t anchor_ring;
-    DWORD     anchor_base;       /* record 第 0 页地址（md_anchor_prepare 回传） */
-    WORD      anchor_idx;        /* 池内槽位（commit 要用） */
-    DWORD     anchor_seq;        /* ++dir->anchor_sequence（prepare 时已自增） */
-    BYTE      anchor_chunk;      /* 下一页要写的页序 */
-    bool      anchor_ok;         /* true = 全部分页写成功（否则整条作废） */
-    bool      anchor_need_erase; /* true = 写之前先擦 *anchor_base 所在块 */
-    bool      anchor_skip;       /* true = Directory 无变更 ⇒ 整段跳过 */
+    /* ② 目录检查点（一条 record = DIR_CKPT_PAGE_COUNT 页，逐页提交） */
+    md_ring_t dir_ckpt_ring;
+    DWORD     dir_ckpt_base;       /* record 第 0 页地址（md_dir_ckpt_prepare 回传） */
+    WORD      dir_ckpt_idx;        /* 池内槽位（commit 要用） */
+    DWORD     dir_ckpt_seq;        /* ++dir->dir_ckpt_sequence（prepare 时已自增） */
+    BYTE      dir_ckpt_chunk;      /* 下一页要写的页序 */
+    bool      dir_ckpt_ok;         /* true = 全部分页写成功（否则整条作废） */
+    bool      dir_ckpt_need_erase; /* true = 写之前先擦 *dir_ckpt_base 所在块 */
+    bool      dir_ckpt_skip;       /* true = Directory 无变更 ⇒ 整段跳过 */
 
     /* ③ Header + 块元数据快照（一条 record = 1 + FTL_CHECKPOINT_BLOCK_PAGES 页） */
     md_ring_t hdr_ring;

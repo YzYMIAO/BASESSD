@@ -20,7 +20,7 @@
  * 屏障语义：GC/WL 的 F10 契约要求「搬移条目先落盘再擦 victim」，走 `MIG_FLUSH_JRN`
  *   的**异步**等待（jrn_handle + 超时）；HIL `fl` 走异步 flush job。
  *   Journal 模块**不提供同步刷页出口**：需要容量的调用者先用 jrn_reserve，不足即
- *   返 FTL_AGAIN 停泊，由 jrn_handle 在后续 service 轮推进。
+ *   返 FTL_AGAIN 待入账，由 jrn_handle 在后续 service 轮推进。
  *
  * 掉电保护：Journal 页 Random **关闭**、CRC **开启**（由下层 FC 提供 per-CW CRC +
  *   ECC），外加页头 magic + entry_count 合法性 + page_seq 单调三层结构判据（设计 §7.6）。
@@ -305,7 +305,7 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
     }
 
     // 当前页剩余槽位不够：只起异步刷页。失败原因（在飞/待擦/池空）都是瞬态，
-    // 由 jrn_handle 在后续轮次推进；调用者停泊重试。
+    // 由 jrn_handle 在后续轮次推进；调用者待入账重试。
     if (jrn_freeze(journal) == false)
     {
         return false;
@@ -451,7 +451,7 @@ DWORD jrn_page_writes(const l2p_jrn_t *journal)
     return journal->handle.page_writes;
 }
 
-// 预判本段能否放进当前页（不刷页、不改状态）；不足由调用者停泊后重试。
+// 预判本段能否放进当前页（不刷页、不改状态）；不足由调用者待入账后重试。
 bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries)
 {
     ASSERT(entries < JRN_SEG_ENTRIES_PER_PAGE);
@@ -492,7 +492,7 @@ bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries)
     if (journal->handle.page_kind == JRN_PAGE_SEG)
     {
         // 隐式坐标必须全批可追加：首条（本页尚无条目）任意，其余必须紧接已追加条目。
-        // 坐标断裂时刷页换页 —— 调用者停泊后重试会落到一张新页（基准重新落定）。
+        // 坐标断裂时刷页换页 —— 调用者待入账后重试会落到一张新页（基准重新落定）。
         if ((journal->handle.current_entry != 0U) && (lba != (journal->handle.page_base + journal->handle.current_entry)))
         {
             (void)jrn_freeze(journal);

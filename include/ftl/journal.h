@@ -30,7 +30,7 @@
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
- *   （jrn_handle / g_op_callbacks[FTL_OP_JOURNAL]）。数据面一律先预留、不足则停泊
+ *   （jrn_handle / g_op_callbacks[FTL_OP_JOURNAL]）。数据面一律先预留、不足则待入账
  *   重试，**模块不提供同步刷页出口**：通用页用 jrn_reserve，cache 顺序写确认用
  *   jrn_seq_ready + jrn_append_seq（顺序流映射页，见下）。
  */
@@ -336,7 +336,7 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
  *
  * 成功 ⇒ 调用者随后追加 entries 条时**不会**触发 jrn_append 的页满分支；
  * 失败 ⇒ 当前页不够 / 当前页是顺序页 / 异步刷页起不来（在飞 / 待擦 / 池空 / 环满），
- * 调用者应返 FTL_AGAIN 停泊，**不得**追加条目或改 L2P。
+ * 调用者应返 FTL_AGAIN 待入账，**不得**追加条目或改 L2P。
  *
  * ⚠ 顺序页（JRN_PAGE_SEG）只接顺序条目：本函数遇到它会先起异步刷页并返回 false，
  *   下一轮重试落到一张通用页（空顺序页也刷，见 §3.16.5）。
@@ -435,7 +435,7 @@ bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries);
  * @param lba     本批条目的起始 LBA
  * @param entries 本批条目数（1..JRN_SEG_ENTRIES_PER_PAGE-1）
  * @return true = 随后 jrn_append_seq 不会因页满 / 坐标断裂失败
- *         false = 页型或坐标不符（已起异步刷页）/ 环不可用 ⇒ 调用者停泊重试
+ *         false = 页型或坐标不符（已起异步刷页）/ 环不可用 ⇒ 调用者待入账重试
  *
  * @note 坐标与容量必须在追加**之前**判掉：部分追加后再失败会让重试从页首重发，
  *       与隐式下标冲突。确认按提交顺序到达，故 current_entry 就是本批的位置。
@@ -452,7 +452,7 @@ bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries);
  * @param lba     逻辑地址（必须与隐式位置一致）
  * @param new_pba 更新后物理地址
  * @return true = 已追加
- *         false = 环不可用 / 页型或隐式坐标不符（调用者停泊，由刷页后重试恢复）
+ *         false = 环不可用 / 页型或隐式坐标不符（调用者待入账，由刷页后重试恢复）
  */
 bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
 

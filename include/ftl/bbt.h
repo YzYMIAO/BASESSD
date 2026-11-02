@@ -16,7 +16,7 @@
  * RAM 运行时坏块位统一存于 bst_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
  *
- * 写模型与 Anchor / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）：
+ * 写模型与目录检查点 / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）：
  * **只追加、环形轮转、最新有效胜**。对同一份 record 就地重写会在第二个坏块出现时
  * 损坏 BBT ⇒ bbt_load 失败 ⇒ 开机不知道哪些块坏 ⇒ 用到坏块丢数据。
  */
@@ -131,7 +131,7 @@ static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
  *     sequence 保持 0、不置 dirty ⇒ 不落盘）。真坏块由运行时 bbt_mark_bad 兜底。
  *
  * ⚠ 为什么：用过的块 Page 0 的 spare 首字节是 FTL 自己的数据（页编程 2112B 把 CW3
- *   尾巴 64 字节溢进备区），不是出厂标记 ⇒ 重扫会把所有写过的块（含活的 Anchor/
+ *   尾巴 64 字节溢进备区），不是出厂标记 ⇒ 重扫会把所有写过的块（含活的目录检查点/
  *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
  * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**（调用者传 &ftl->alloc）

@@ -2,18 +2,18 @@
  * metadata_job.c — 元数据目录整理 job：日志块回收 + 抗碎片压缩
  *
  * 与 metadata.c 的分工：
- *   metadata.c     —— Directory 结构、Anchor 落盘/加载、region 追加/登记（同步原语）；
+ *   metadata.c     —— Directory 结构、目录检查点落盘/加载、region 追加/登记（同步原语）；
  *   metadata_job.c —— 两件"要碰 NAND 的整理活"的异步状态机：
  *                     ① 回收：待回收位图（reclaim_pending）里的块 ⇒ 擦 + 归还固定 L2P 日志区；
- *                     ② 压缩：挑活 region 最少的 victim，搬进当前块，落 Anchor 后擦除。
+ *                     ② 压缩：挑活 region 最少的 victim，搬进当前块，落目录检查点后擦除。
  *   共享的内部原语（位图 / md_slot_take / md_handle_reset）也定义在本文件，声明在
  *   include/ftl/metadata_job.h。
  *
  * 设计约束（与 metadata.h 的 md_handle_t 长注释配套）：
  *   · **一次只提交一条命令**：提交阶段设 waiting 就返回；纯 RAM 阶段连续推进到下一个
  *     提交阶段或终态。推进一律由 md_handle 驱动（服务函数不推进，见下）。
- *   · **服务函数不推进状态机**（同 ftl_checkpoint_callback）：CP_ANCHOR_PREP 要调
- *     md_anchor_prepare，而它在游标未建立时会**同步**扫池定位
+ *   · **服务函数不推进状态机**（同 ftl_checkpoint_callback）：CP_DIR_CKPT_PREP 要调
+ *     md_dir_ckpt_prepare，而它在游标未建立时会**同步**扫池定位
  *     （md_ring_locate → ftl_sync_read_page）——在完成泵里跑就是嵌套泵
  *     （l2p_sync_pump 首行有 ASSERT 挡）。故 ftl_metadata_callback 只记结果 + release + 改
  *     phase，下一轮 kick 接着走。
@@ -25,7 +25,7 @@
  *   〇、文件级 helper（块身份复核 / 地址换算）
  *   一、待回收位图 / 写指针 / job 复位
  *   二、job 提交原语（abort / stall / submit）
- *   三、压缩（victim 选择 / 搬移 / Anchor / 回收）
+ *   三、压缩（victim 选择 / 搬移 / 目录检查点 / 回收）
  *   四、job 状态机
  *   五、模块入口与状态
  *   六、完成服务
@@ -228,8 +228,8 @@ void md_handle_reset(md_dir_cache_t *dir)
     const DWORD   reclaimed  = dir->handle.reclaimed_count;
     const int32_t last_error = dir->handle.error;
 
-    // 放弃本 job 可能持有的 Anchor 单飞锁（prepare 之后没走到 commit）。
-    md_anchor_abort(dir, MD_ANCHOR_OWNER_MD);
+    // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
+    md_dir_ckpt_abort(dir, MD_DIR_CKPT_OWNER_MD);
 
     memset(&dir->handle, 0, sizeof(dir->handle));
     dir->handle.victim              = UINT16_MAX;
@@ -244,7 +244,7 @@ void md_handle_reset(md_dir_cache_t *dir)
  * 二、job 提交原语（abort / stall / submit）
  * ══════════════════════════════════════════════════════════════════ */
 
-// 中止日志限流：真异常（读页失败 / Anchor 写坏 / 账本分叉）会每轮 GC 重复，
+// 中止日志限流：真异常（读页失败 / 目录检查点写坏 / 账本分叉）会每轮 GC 重复，
 // 逐次 WRN 会刷屏；5 s 一行 + 被抑制条数（时钟缺失时 64 次一行）。
 static DWORD s_abort_log_ms;
 static DWORD s_stall_log_ms; /* 提交 deadline 触发的 abort 日志限流时间戳 */
@@ -401,7 +401,7 @@ static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
 }
 
 /**
- * @brief 提交一条异步写（搬移页 / Anchor 分页共用）。data 在 ftl_async_write_page 内已拷进
+ * @brief 提交一条异步写（搬移页 / 目录检查点分页共用）。data 在 ftl_async_write_page 内已拷进
  * FC buffer ⇒ 调用者的缓冲随即可复用。
  *
  * @param dir    Directory
@@ -425,7 +425,7 @@ static ftl_status_e md_write_submit(md_dir_cache_t *dir, DWORD addr, const void 
 
 /**
  * @brief 提交一条**镜像**异步写（固定元数据池：同一页用 multi-plane 写全部 plane）。
- * 只用于 Anchor/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_write_submit。
+ * 只用于目录检查点/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_write_submit。
  *
  * @param dir    Directory
  * @param addr   目标 PBA（同一 block/page 落到全部 plane）
@@ -447,7 +447,7 @@ static ftl_status_e md_write_mirror_submit(md_dir_cache_t *dir, DWORD addr, cons
 }
 
 /**
- * @brief 提交一条异步擦除（日志块回收 / Anchor 换块 / victim 擦除共用）。
+ * @brief 提交一条异步擦除（日志块回收 / 目录检查点换块 / victim 擦除共用）。
  *
  * @param dir  Directory
  * @param addr 目标块 PBA（页号无意义）
@@ -509,7 +509,7 @@ static ftl_status_e md_read_submit(md_dir_cache_t *dir, DWORD addr)
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * 三、压缩（victim 选择 / 搬移 / Anchor / 回收）
+ * 三、压缩（victim 选择 / 搬移 / 目录检查点 / 回收）
  * ══════════════════════════════════════════════════════════════════ */
 
 /**
@@ -622,14 +622,14 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
         return MD_COMPACT_NO_SLOTS;
     }
 
-    j->victim     = victim;
-    j->region_id  = 0U;
-    j->cur_region = 0U;
-    j->moved      = 0U;
-    j->slot       = NAND_PBA_INVALID;
-    j->anchor_ok  = false;
-    j->stall_ms   = 0U;
-    j->phase      = MD_JOB_CP_READ;
+    j->victim      = victim;
+    j->region_id   = 0U;
+    j->cur_region  = 0U;
+    j->moved       = 0U;
+    j->slot        = NAND_PBA_INVALID;
+    j->dir_ckpt_ok = false;
+    j->stall_ms    = 0U;
+    j->phase       = MD_JOB_CP_READ;
 
     LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur_page[victim_plane]);
 
@@ -755,7 +755,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
  *         false = 没有可装下的 victim。
  *
  * @note 实现要点：victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
- * 更大的更装不下 ⇒ 直接结束本轮压缩，交给 Anchor/回收。
+ * 更大的更装不下 ⇒ 直接结束本轮压缩，交给目录检查点/回收。
  * 一次新生块可退多个稀疏块（每个 victim 约 1–2 个活 region），这是把
  * live_log_blocks 从上千块收敛到理想值的关键（RISK-MD-07）。
  */
@@ -867,12 +867,12 @@ static void md_handle_step(md_dir_cache_t *dir)
                 {
                     // ③→④ 契约（同压缩路径）：普通 L2P flush 在活计数归零时就登记了
                     // 回收候选，但新位置只在 RAM Directory 里。擦除前必须先把当前
-                    // Directory 写成 Anchor；否则掉电后 on-media Anchor 仍指向该块。
+                    // Directory 写成目录检查点；否则掉电后 on-media 目录检查点仍指向该块。
                     if (dir->dirty)
                     {
-                        j->anchor_for_reclaim = true;
-                        j->victim             = UINT16_MAX;
-                        j->phase              = MD_JOB_CP_ANCHOR_PREP;
+                        j->dir_ckpt_for_reclaim = true;
+                        j->victim               = UINT16_MAX;
+                        j->phase                = MD_JOB_CP_DIR_CKPT_PREP;
                         break;
                     }
                     j->phase = MD_JOB_RECLAIM;
@@ -917,8 +917,8 @@ static void md_handle_step(md_dir_cache_t *dir)
 
             case MD_JOB_RECLAIM:
             {
-                // Anchor 落后于 Directory（登记之后、擦除之前又有 commit）⇒ 不能擦；
-                // 回 IDLE，下一轮先写 Anchor（上面的 dirty 分支）。
+                // 目录检查点落后于 Directory（登记之后、擦除之前又有 commit）⇒ 不能擦；
+                // 回 IDLE，下一轮先写目录检查点（上面的 dirty 分支）。
                 if (dir->dirty)
                 {
                     j->phase = MD_JOB_IDLE;
@@ -991,7 +991,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                 {
                     break; /* phase 已置 CP_READ，循环继续 */
                 }
-                j->phase = MD_JOB_CP_ANCHOR_PREP;
+                j->phase = MD_JOB_CP_DIR_CKPT_PREP;
                 break;
             }
 
@@ -1010,80 +1010,80 @@ static void md_handle_step(md_dir_cache_t *dir)
                 return;
             }
 
-            case MD_JOB_CP_ANCHOR_PREP:
+            case MD_JOB_CP_DIR_CKPT_PREP:
             {
-                // ③ Anchor：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
+                // ③ 目录检查点：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
                 // 唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。
-                md_anchor_prepare_out_t anchor;
-                md_anchor_step_e        r = md_anchor_prepare(dir, &anchor, MD_ANCHOR_OWNER_MD);
+                md_dir_ckpt_prepare_out_t dir_ckpt;
+                md_dir_ckpt_step_e        r = md_dir_ckpt_prepare(dir, &dir_ckpt, MD_DIR_CKPT_OWNER_MD);
 
-                if (r == MD_ANCHOR_FAILED)
+                if (r == MD_DIR_CKPT_FAILED)
                 {
                     md_handle_abort(dir);
                     break;
                 }
-                if (r == MD_ANCHOR_BUSY)
+                if (r == MD_DIR_CKPT_BUSY)
                 {
-                    // 另一个 writer（CP job）正在写 Anchor：背压重试（RISK-MD-06）。
+                    // 另一个 writer（CP job）正在写目录检查点：背压重试（RISK-MD-06）。
                     (void)md_handle_stall(dir);
                     return;
                 }
-                if (r == MD_ANCHOR_CLEAN)
+                if (r == MD_DIR_CKPT_CLEAN)
                 {
-                    // Directory 已与 on-media Anchor 一致：跳过写入，直接进入下一步。
+                    // Directory 已与 on-media 目录检查点一致：跳过写入，直接进入下一步。
                     // 普通回收路径回 RECLAIM；压缩路径回 CP_RECLAIM 擦 victim。
-                    const bool for_reclaim = j->anchor_for_reclaim;
+                    const bool for_reclaim = j->dir_ckpt_for_reclaim;
 
-                    j->anchor_for_reclaim = false;
-                    j->phase              = for_reclaim ? MD_JOB_RECLAIM : MD_JOB_CP_RECLAIM;
+                    j->dir_ckpt_for_reclaim = false;
+                    j->phase                = for_reclaim ? MD_JOB_RECLAIM : MD_JOB_CP_RECLAIM;
                     break;
                 }
 
-                j->anchor_ring       = anchor.ring;
-                j->anchor_base       = anchor.base;
-                j->anchor_idx        = anchor.idx;
-                j->anchor_seq        = anchor.seq;
-                j->anchor_need_erase = anchor.need_erase;
-                j->anchor_chunk      = 0U;
-                j->anchor_ok         = true;
-                j->phase             = anchor.need_erase ? MD_JOB_CP_ANCHOR_ERASE : MD_JOB_CP_ANCHOR_WRITE;
+                j->dir_ckpt_ring       = dir_ckpt.ring;
+                j->dir_ckpt_base       = dir_ckpt.base;
+                j->dir_ckpt_idx        = dir_ckpt.idx;
+                j->dir_ckpt_seq        = dir_ckpt.seq;
+                j->dir_ckpt_need_erase = dir_ckpt.need_erase;
+                j->dir_ckpt_chunk      = 0U;
+                j->dir_ckpt_ok         = true;
+                j->phase               = dir_ckpt.need_erase ? MD_JOB_CP_DIR_CKPT_ERASE : MD_JOB_CP_DIR_CKPT_WRITE;
                 break;
             }
 
-            case MD_JOB_CP_ANCHOR_ERASE:
-                if (md_erase_multi_submit(dir, j->anchor_base) != FTL_OK)
+            case MD_JOB_CP_DIR_CKPT_ERASE:
+                if (md_erase_multi_submit(dir, j->dir_ckpt_base) != FTL_OK)
                 {
                     (void)md_handle_stall(dir);
                 }
                 return;
 
-            case MD_JOB_CP_ANCHOR_WRITE:
+            case MD_JOB_CP_DIR_CKPT_WRITE:
             {
-                if (j->anchor_chunk >= ANCHOR_PAGE_COUNT)
+                if (j->dir_ckpt_chunk >= DIR_CKPT_PAGE_COUNT)
                 {
                     // 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不擦 victim。
-                    md_anchor_commit(dir, &j->anchor_ring, j->anchor_idx, j->anchor_ok);
+                    md_dir_ckpt_commit(dir, &j->dir_ckpt_ring, j->dir_ckpt_idx, j->dir_ckpt_ok);
 
-                    if (j->anchor_ok == false)
+                    if (j->dir_ckpt_ok == false)
                     {
-                        LOGW(LOG_TAG_META "anchor write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->anchor_idx, j->anchor_seq);
+                        LOGW(LOG_TAG_META "dir_ckpt write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->dir_ckpt_idx, j->dir_ckpt_seq);
                         md_handle_abort(dir);
                         break;
                     }
 
-                    // 只有 Anchor 确实覆盖了当前 Directory 时才允许登记新的回收候选：
-                    // 否则 on-media Anchor 仍引用「看起来已死」的块，擦了就是掉电丢映射。
+                    // 只有目录检查点确实覆盖了当前 Directory 时才允许登记新的回收候选：
+                    // 否则 on-media 目录检查点仍引用「看起来已死」的块，擦了就是掉电丢映射。
                     if (dir->dirty == false)
                     {
                         md_reclaim_mark_all(dir, alloc);
                     }
 
-                    if (j->anchor_for_reclaim)
+                    if (j->dir_ckpt_for_reclaim)
                     {
-                        j->anchor_for_reclaim = false;
-                        // 写入期间又有 commit ⇒ 回 IDLE 再写一条 Anchor，不能擦。
-                        j->phase              = dir->dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
+                        j->dir_ckpt_for_reclaim = false;
+                        // 写入期间又有 commit ⇒ 回 IDLE 再写一条目录检查点，不能擦。
+                        j->phase                = dir->dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
                         break;
                     }
 
@@ -1091,12 +1091,12 @@ static void md_handle_step(md_dir_cache_t *dir)
                     break;
                 }
 
-                const DWORD anchor_page = pba_to_page(j->anchor_base) + j->anchor_chunk;
-                DWORD       aaddr       = pba_with_page(j->anchor_base, anchor_page);
+                const DWORD dir_ckpt_page = pba_to_page(j->dir_ckpt_base) + j->dir_ckpt_chunk;
+                DWORD       aaddr         = pba_with_page(j->dir_ckpt_base, dir_ckpt_page);
 
-                md_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
+                md_dir_ckpt_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 
-                md_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
+                md_dir_ckpt_page(dir, j->dir_ckpt_seq, j->dir_ckpt_chunk, &page);
 
                 const DWORD page_size = sizeof(page);
 
@@ -1111,7 +1111,7 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 const WORD v = j->victim;
 
-                // ④ 擦 victim —— 只在它**确实已无引用**时（③ Anchor 已落盘）。
+                // ④ 擦 victim —— 只在它**确实已无引用**时（③ 目录检查点已落盘）。
                 if (v == UINT16_MAX)
                 {
                     j->phase = MD_JOB_DONE;
@@ -1300,14 +1300,14 @@ static void md_cp_write_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command
 }
 
 /**
- * @brief Anchor 换块擦完成：失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。
+ * @brief 目录检查点换块擦完成：失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。
  *
  * @param dir    Directory
  * @param j      整理 job（waiting / phase）
  * @param cmd    完成命令（本函数 release）
  * @param failed 擦除是否失败
  */
-static void md_anchor_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
+static void md_dir_ckpt_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
     (void)fc_command_release(cmd);
     j->waiting = false;
@@ -1317,30 +1317,30 @@ static void md_anchor_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_com
         md_handle_abort(dir);
         return;
     }
-    j->phase = MD_JOB_CP_ANCHOR_WRITE;
+    j->phase = MD_JOB_CP_DIR_CKPT_WRITE;
 }
 
 /**
- * @brief Anchor 一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
+ * @brief 目录检查点一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
  *
- * @param j      整理 job（waiting / anchor_chunk / anchor_ok）
+ * @param j      整理 job（waiting / dir_ckpt_chunk / dir_ckpt_ok）
  * @param cmd    完成命令（本函数 release）
  * @param failed 本页写是否失败
  */
-static void md_anchor_write_complete(md_handle_t *j, fc_command_t *cmd, bool failed)
+static void md_dir_ckpt_write_complete(md_handle_t *j, fc_command_t *cmd, bool failed)
 {
     (void)fc_command_release(cmd);
     j->waiting = false;
 
     if (failed)
     {
-        j->anchor_ok = false; /* 整条作废（不取半条）*/
+        j->dir_ckpt_ok = false; /* 整条作废（不取半条）*/
     }
-    j->anchor_chunk = (j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+    j->dir_ckpt_chunk = (j->dir_ckpt_chunk + 1U); /* 无论成败都往后写下一页 */
 }
 
 /**
- * @brief Victim 擦完成：失败 ⇒ victim 已无引用（Anchor 已落盘）⇒ 登记给回收阶段重试。
+ * @brief Victim 擦完成：失败 ⇒ victim 已无引用（目录检查点已落盘）⇒ 登记给回收阶段重试。
  *
  * @param dir    Directory
  * @param j      整理 job（waiting / victim / phase）
@@ -1397,12 +1397,12 @@ void ftl_metadata_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion
             md_cp_write_complete(dir, j, cmd, failed);
             return;
 
-        case MD_JOB_CP_ANCHOR_ERASE:
-            md_anchor_erase_complete(dir, j, cmd, failed);
+        case MD_JOB_CP_DIR_CKPT_ERASE:
+            md_dir_ckpt_erase_complete(dir, j, cmd, failed);
             return;
 
-        case MD_JOB_CP_ANCHOR_WRITE:
-            md_anchor_write_complete(j, cmd, failed);
+        case MD_JOB_CP_DIR_CKPT_WRITE:
+            md_dir_ckpt_write_complete(j, cmd, failed);
             return;
 
         case MD_JOB_CP_RECLAIM:
@@ -1410,11 +1410,11 @@ void ftl_metadata_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion
             return;
 
         case MD_JOB_IDLE:
-        case MD_JOB_CP_ANCHOR_PREP:
+        case MD_JOB_CP_DIR_CKPT_PREP:
         case MD_JOB_DONE:
         default:
             // 不该发生：一条命令对应一个提交阶段（RECLAIM / CP_READ / CP_WRITE /
-            // CP_ANCHOR_ERASE / CP_ANCHOR_WRITE / CP_RECLAIM）。
+            // CP_DIR_CKPT_ERASE / CP_DIR_CKPT_WRITE / CP_RECLAIM）。
             LOGE(LOG_TAG_META "md job unexpected completion phase=%d\r\n", j->phase);
             (void)fc_command_release(cmd);
             j->waiting = false;

@@ -2,12 +2,12 @@
 #define FTL_MIGRATE_H
 
 /*
- * migrate — Super Block 搬移引擎（GC / 静态 WL / 慢死预测**共用一台**异步 job）
+ * migrate — Super Block 搬移引擎（GC / 静态 WL / 预测性退役**共用一台**异步 job）
  *
  * 把「读 victim 的有效 CW → 写进冷块 → 更新 L2P/Journal → 擦除归还」实现为
- * **异步 job 状态机**。GC / WL / 慢死预测的搬移主体逐字同构，差别只在
+ * **异步 job 状态机**。GC / WL / 预测性退役的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
- *   · 擦完怎么处置（GC / WL：归还 Free Pool；慢死预测：退役 RETIRED）。
+ *   · 擦完怎么处置（GC / WL：归还 Free Pool；预测性退役：退役 RETIRED）。
  * 故共用**一个** mig_handle_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
@@ -24,7 +24,7 @@
  *   → FLUSH_JRN → ERASE → DONE
  *
  *   · READ  逐页逐 plane：异步读 → 完成时解 META 得 cw_lba、记 rr_record_ecc / read_count
- *           （慢死预测闭环）。读失败 / 全页空洞 ⇒ 该 plane 无有效 CW。
+ *           （预测性退役闭环）。读失败 / 全页空洞 ⇒ 该 plane 无有效 CW。
  *   · READ_SETTLE 纯计算：逐 CW 反查 L2P 得 cw_bitmap。**先就绪前置**——
  *           region 未驻留会起异步加载并**原地等待**，全部就绪才动 bitmap；否则半途而废
  *           会让 bitmap 一半有一半没有（重试时又从头 `|=`，语义静默错乱）。
@@ -39,7 +39,7 @@
  *   · ERASE 逐 plane 异步擦：成功走 `alc_bst_note_erase`（erase_count / last_pe_ts /
  *           清 valid），然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池，
  *           GC 与静态 WL 用），`MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役
- *           （慢死预测用，见 allocator.h 不变量②）；
+ *           （预测性退役用，见 allocator.h 不变量②）；
  *           失败（且尚未 BAD）`bbt_mark_bad`，并置 `erase_failed`：该 SB 不计入
  *           `gc_reclaimed_count`、不打印 predict 退役日志。
  *   · DONE  alc_super_closed_find + alc_super_closed_remove + 进展计数
@@ -131,7 +131,7 @@ typedef enum
 typedef enum
 {
     MIG_POST_FREE = 0, /* GC / 静态 WL：擦完归还 Free Pool，重新进入磨损轮转 */
-    MIG_POST_RETIRE    /* 慢死预测 / read recovery：**不入池**，置 RETIRED
+    MIG_POST_RETIRE    /* 预测性退役 / read recovery：**不入池**，置 RETIRED
                         * （不再分配、不标坏、仍可读）。
                         * ⚠ 退役块不得进 Free Pool——选块判据是 Free Pool **数组**，
                         *    留在池里会被再次分配 */
@@ -142,7 +142,7 @@ typedef enum
 {
     MIG_KIND_GC = 0, /* 空间回收（gc_select_victim） */
     MIG_KIND_WL,     /* 静态磨损均衡（wl_select_victim） */
-    MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
+    MIG_KIND_PREDICT /* 预测性退役旁路（rr_predictive_scan） */
 } mig_kind_e;
 
 /* GC 会话的启动原因（只用于观测；不影响选块/回收决策）。 */

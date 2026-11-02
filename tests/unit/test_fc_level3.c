@@ -100,7 +100,7 @@
  * 地址里的 block 字段是 **per-plane** 号（0..BLOCKS_PER_PLANE-1）。窗口取每 plane 块数的
  * 30%~70%，**编译期**从 BLOCKS_PER_PLANE 算出（2048 ⇒ 614..1433），不写死数字。
  * 目的：避开**固定**元数据区 —— 本仓 per-plane 编号下它落在 0..41 一带
- * （L2P 0..31 / Anchor 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，
+ * （L2P 0..31 / 目录检查点 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，
  *  见 src/ftl/metadata.c 的 ftl_is_metadata_block），L3_BLOCK_LO = 614 远在其上。
  *
  * ⚠ 窗口只保证避开**固定**区：跑 UT 时 FTL 是活的（src/main.c 无条件 ssd_ftl_boot_all()，

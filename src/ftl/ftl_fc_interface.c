@@ -919,7 +919,7 @@ ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, cons
     return FTL_OK;
 }
 
-// 同步镜像写（Anchor 主备同页）：建链/提交/完成任一失败都压成 FTL_ERROR。
+// 同步镜像写（目录检查点主备同页）：建链/提交/完成任一失败都压成 FTL_ERROR。
 ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd;

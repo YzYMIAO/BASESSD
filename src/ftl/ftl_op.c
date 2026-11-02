@@ -65,7 +65,7 @@ static BYTE g_dispatch_depth = 0U;
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（ctx = ftl->journal）；
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->read_recovery_handle）；
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = ftl->mig_handle）——**同一台引擎**，
- *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）；
+ *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 预测性退役退役）；
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_handle）；
  *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
@@ -286,7 +286,7 @@ static bool ftl_op_host_groups_inflight(void)
  *
  * @note 第二条的必要性（RISK-IF-13 同一族）：主机持续提交时 FC 命令池/SQ 被占满是
  *       预期（不是卡死）；若每 10 ms 把 Checkpoint / L2P 写回 / 迁移打回去，元数据
- *       永远排不上队 —— 进而把「写确认停泊」拖成 100 ms 超时、变成 host 写失败
+ *       永远排不上队 —— 进而把「写确认待入账」拖成 100 ms 超时、变成 host 写失败
  *       （RISK-HOST-05 支路 (a) 的触发链）。主机空闲后本判据自动为假，真正的卡死
  *       仍会被 deadline 暴露。
  */

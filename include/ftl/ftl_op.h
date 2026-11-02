@@ -79,7 +79,7 @@ typedef enum
     FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c） */
     FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c） */
     FTL_OP_GC,            /* GC 搬移 job（migrate.c） */
-    FTL_OP_WL,            /* 静态 WL / 慢死预测搬移 job（migrate.c，与 GC 共用引擎） */
+    FTL_OP_WL,            /* 静态 WL / 预测性退役搬移 job（migrate.c，与 GC 共用引擎） */
     FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c） */
     FTL_OP_CHECKPOINT,    /* Checkpoint job（checkpoint.c） */
     FTL_OP_BBT,           /* BBT 持久化 job（bbt.c） */
@@ -341,7 +341,7 @@ void ftl_journal_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
 void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
 
 /**
- * @brief 搬移 job（GC / 静态 WL / 慢死预测）的完成服务函数（定义在 migrate.c）。
+ * @brief 搬移 job（GC / 静态 WL / 预测性退役）的完成服务函数（定义在 migrate.c）。
  *
  * 由 g_op_callbacks[FTL_OP_GC] 与 [FTL_OP_WL] **共同**引用（同一台引擎，靠 job.kind
  * 区分 victim 来源、job.post 区分收尾）；ctx = `mig_handle_t *`（= ftl->mig_handle）。
@@ -410,10 +410,10 @@ void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
  *   · RECLAIM     ⇒ 成功清待回收位 + alc_free_push；失败保留位，下轮重试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
  *   · CP_WRITE    ⇒ 成功 md_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
- *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；
+ *   · CP_DIR_CKPT_* ⇒ 逐页写 + commit（无论成败都推进游标）；
  *   · CP_RECLAIM  ⇒ 擦完归还 victim → DONE。
  * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 md_handle）——
- *   整理 job 的 CP_ANCHOR_PREP 里有同步原语（游标未建立时要读池定位），在完成泵里跑
+ *   整理 job 的 CP_DIR_CKPT_PREP 里有同步原语（游标未建立时要读池定位），在完成泵里跑
  *   就是嵌套泵。推进交给下一轮 ftl_service 的 md_handle。
  *
  * @param ftl 实例。

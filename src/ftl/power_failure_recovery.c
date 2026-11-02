@@ -22,7 +22,7 @@
  *   ★ full metadata rebuild 只在「无快照 / 快照损坏 / 增量记账不一致」时兜底。
  *
  * 文件结构：
- *   1. 介质版本 / 格式化   pfr_media_check_format / pfr_format_write_initial_anchor /
+ *   1. 介质版本 / 格式化   pfr_media_check_format / pfr_format_write_initial_dir_ckpt /
  *                          pfr_format_reset_bad_map / pfr_format_verify_blocks /
  *                          pfr_format_end_bbt / pfr_media_format
  *   2. 启动恢复            pfr_boot_recovery（总入口）/ pfr_boot_carve_pools /
@@ -224,7 +224,7 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
 }
 
 /**
- * @brief 把格式化后的**空 Directory** 落成一条 Anchor record。
+ * @brief 把格式化后的**空 Directory** 落成一条目录检查点记录。
  *
  * @param ftl FTL 实例（使用 metadata_dir 与 cp_handle 的 2KB 常驻缓冲）
  *
@@ -233,36 +233,36 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
  * @note 实现要点：`md_init` 只复位 RAM；不落盘的话下次开机
  * md_load 失败，而 initial Checkpoint（seq=1）存在 ⇒
  * pfr_boot_recovery 按 RISK-BOOT-09 拒绝启动。故必须先把空 Directory
- * 写成 Anchor，再写 initial Checkpoint（后者是整条 record 的 commit）。
+ * 写成目录检查点，再写 initial Checkpoint（后者是整条 record 的 commit）。
  */
-static ftl_status_e pfr_format_write_initial_anchor(ftl_ctx_t *ftl)
+static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
 {
-    md_dir_cache_t         *dir = ftl->metadata_dir;
-    md_anchor_prepare_out_t anchor;
+    md_dir_cache_t           *dir = ftl->metadata_dir;
+    md_dir_ckpt_prepare_out_t dir_ckpt;
 
     dir->dirty = true; /* 空 Directory 也要落一条 record */
 
-    if (md_anchor_prepare(dir, &anchor, MD_ANCHOR_OWNER_BOOT) != MD_ANCHOR_READY)
+    if (md_dir_ckpt_prepare(dir, &dir_ckpt, MD_DIR_CKPT_OWNER_BOOT) != MD_DIR_CKPT_READY)
     {
         return FTL_ERROR;
     }
 
-    if (anchor.need_erase && (ftl_sync_erase_block(anchor.base) != FTL_OK))
+    if (dir_ckpt.need_erase && (ftl_sync_erase_block(dir_ckpt.base) != FTL_OK))
     {
-        md_anchor_abort(dir, MD_ANCHOR_OWNER_BOOT); /* 放弃已 prepare 的 Anchor 写（清单飞锁，RISK-MD-06） */
+        md_dir_ckpt_abort(dir, MD_DIR_CKPT_OWNER_BOOT); /* 放弃已 prepare 的目录检查点写（清单飞锁，RISK-MD-06） */
         return FTL_ERROR;
     }
 
     bool ok = true;
 
-    for (BYTE chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
+    for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
     {
-        // 2KB Anchor 页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。
-        md_anchor_page_t *page        = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
-        const DWORD       anchor_page = pba_to_page(anchor.base) + chunk;
-        const DWORD       addr        = pba_with_page(anchor.base, anchor_page);
+        // 2KB 目录检查点页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。
+        md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr_buf;
+        const DWORD         dir_ckpt_page = pba_to_page(dir_ckpt.base) + chunk;
+        const DWORD         addr          = pba_with_page(dir_ckpt.base, dir_ckpt_page);
 
-        md_anchor_page(dir, anchor.seq, chunk, page);
+        md_dir_ckpt_page(dir, dir_ckpt.seq, chunk, page);
         if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != FTL_OK)
         {
             ok = false;
@@ -274,16 +274,16 @@ static ftl_status_e pfr_format_write_initial_anchor(ftl_ctx_t *ftl)
     // 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。
     if (ok)
     {
-        md_anchor_page_t *probe = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
+        md_dir_ckpt_page_t *probe = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr_buf;
 
-        if ((ftl_sync_read_page(anchor.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != ANCHOR_MAGIC) || (probe->sequence != anchor.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
+        if ((ftl_sync_read_page(dir_ckpt.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != DIR_CKPT_MAGIC) || (probe->sequence != dir_ckpt.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
-            LOGE(LOG_TAG_META "format: Anchor readback failed — fixed metadata block may be BAD\r\n");
+            LOGE(LOG_TAG_META "format: directory checkpoint readback failed — fixed metadata block may be BAD\r\n");
             ok = false;
         }
     }
 
-    md_anchor_commit(dir, &anchor.ring, anchor.idx, ok);
+    md_dir_ckpt_commit(dir, &dir_ckpt.ring, dir_ckpt.idx, ok);
     return ok ? FTL_OK : FTL_ERROR;
 }
 
@@ -412,7 +412,7 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
 /**
  * @brief 结束「格式化进行中」，把提交状态落盘
  *
- * 格式化是跨多次 NAND 写的长事务：擦除 →（可选）全片体检 → 初始 Anchor →
+ * 格式化是跨多次 NAND 写的长事务：擦除 →（可选）全片体检 → 初始目录检查点 →
  * initial Checkpoint。FORMAT_IN_PROGRESS 从 `bbt_format_erase` 起点保持到
  * **initial CP 读回成功**；中途复位/掉电 ⇒ 下次开机按「继续格式化」处理
  * （cp_media_status_probe 返回 NO_RECORD），而不是把「有 BBT、无 CP」
@@ -522,10 +522,10 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
 
     md_init(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
 
-    // 空 Directory 必须先落 Anchor，否则下次开机 CP 存在但 Directory 加载失败。
-    if (pfr_format_write_initial_anchor(ftl) != FTL_OK)
+    // 空 Directory 必须先落目录检查点，否则下次开机 CP 存在但 Directory 加载失败。
+    if (pfr_format_write_initial_dir_ckpt(ftl) != FTL_OK)
     {
-        LOGE(LOG_TAG_META "format: initial Anchor write failed\r\n");
+        LOGE(LOG_TAG_META "format: initial directory checkpoint write failed\r\n");
         return FTL_ERROR;
     }
 
@@ -1208,20 +1208,20 @@ static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE b
     result->blocks_restored = restored;
 }
 
-// 统计各分区（Anchor/CP/BBT/Journal/L2P/spare/User）的坏块与 reserved 数并打一行日志。
+// 统计各分区（目录检查点/CP/BBT/Journal/L2P/spare/User）的坏块与 reserved 数并打一行日志。
 void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
 {
-    // Anchor 是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
+    // 目录检查点是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
     // 避免 `block >= 0` 的恒真比较告警。
-    _Static_assert(ANCHOR_BLOCK0 == 0U, "bad-area stats 假定元数据分区从块 0 开始");
+    _Static_assert(DIR_CKPT_BLOCK0 == 0U, "bad-area stats 假定元数据分区从块 0 开始");
 
-    DWORD anchor  = 0U;
-    DWORD cp      = 0U;
-    DWORD bbt     = 0U;
-    DWORD journal = 0U;
-    DWORD l2p_log = 0U;
-    DWORD spare   = 0U;
-    DWORD data    = 0U;
+    DWORD dir_ckpt = 0U;
+    DWORD cp       = 0U;
+    DWORD bbt      = 0U;
+    DWORD journal  = 0U;
+    DWORD l2p_log  = 0U;
+    DWORD spare    = 0U;
+    DWORD data     = 0U;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -1234,9 +1234,9 @@ void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
                 continue;
             }
 
-            if (block < (ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS))
+            if (block < (DIR_CKPT_BLOCK0 + DIR_CKPT_POOL_BLOCKS))
             {
-                anchor++;
+                dir_ckpt++;
             }
             else if ((block >= CHECKPOINT_BLOCK0) && (block < (CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS)))
             {
@@ -1266,7 +1266,7 @@ void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
     }
 
     // 只读 BST；不写介质。总量 = bad_count（BBT 与快照并集后的基线）。
-    LOGI(LOG_TAG_BLK "bad areas ch=%hhu ce=%hhu lun=%hhu: anchor=%lu cp=%lu bbt=%lu journal=%lu l2p_log=%lu spare=%lu data=%lu total=%lu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, anchor, cp, bbt, journal, l2p_log, spare, data, anchor + cp + bbt + journal + l2p_log + spare + data);
+    LOGI(LOG_TAG_BLK "bad areas ch=%hhu ce=%hhu lun=%hhu: dir_ckpt=%lu cp=%lu bbt=%lu journal=%lu l2p_log=%lu spare=%lu data=%lu total=%lu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, dir_ckpt, cp, bbt, journal, l2p_log, spare, data, dir_ckpt + cp + bbt + journal + l2p_log + spare + data);
 }
 
 /* ══════════════════════════════════════════════════════════════════

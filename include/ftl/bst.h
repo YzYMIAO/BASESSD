@@ -61,7 +61,7 @@ typedef struct
 {
     BYTE              last_ecc;     /* 最近一次读的 ECC bit 数 */
     BYTE              rising_count; /* 连续上升计数（不上升即清零） */
-    rr_block_health_e health;       /* 慢死趋势 */
+    rr_block_health_e health;       /* 预测性退役趋势 */
 } rr_ecc_track_t;                   /* 3B */
 
 /* 磨损/ECC 快照：Checkpoint 的 per-block wear 条目与 BST 之间的搬运单元。

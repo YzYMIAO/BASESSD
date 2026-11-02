@@ -334,8 +334,8 @@ struct ftl_context
     /* Pending Request 表 + 完成组表（per-instance）
      * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段），
      * 一条 host 请求一个组（聚合其全部子操作的完成通知）。
-     * 提取为 pend_table_t，让 RR / wbuf 只持有该表的指针，而不是整个 FTL 上下文。 */
-    pend_table_t pending;
+     * 提取为 pending_ctx_t，让 RR / wbuf 只持有该表的指针，而不是整个 FTL 上下文。 */
+    pending_ctx_t pending;
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
      * 见 wbuf.h 的 wb_handle_t。事件走 wb_handle()，读路径走 wb_has/read。
@@ -383,7 +383,7 @@ struct ftl_context
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     bool bg_suspend;
 
-    /* Directory 加载失败（Anchor 池无有效 record / 读失败）。
+    /* Directory 加载失败（目录检查点池无有效 record / 读失败）。
      * ftl_init 仍建空 Directory（格式化/首次启动路径需要它），但**不能静默继续**：
      * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。pfr_boot_recovery 在
      * 介质存在有效 Checkpoint 时据此拒绝启动；无 Checkpoint（空片）才放行。 */
@@ -418,7 +418,7 @@ struct ftl_context
      * 装载；每轮由 bg_scheduler_service（后台调度步）选档后跑 bg_scheduler_run。 */
     bg_scheduler_t bg;
 
-    /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
+    /* 搬移 job（GC / 静态 WL / 预测性退役共用一台异步引擎，见 migrate.h）。
      * 观测计数（reclaimed / novictim）与求值节拍在 handle 里。
      * 指针，由 storage 提供；含逐 plane 页镜像（page_buf，约 4KB），必须常驻。 */
     mig_handle_t *mig_handle;
@@ -520,7 +520,7 @@ void ftl_service_pump(void);
  * | 步骤 | 做什么 | 实现 |
  * |---|---|---|
  * | 元数据候选池重算 | 元数据 BAD 后重算候选池（纯 RAM；等 metadata job 空闲） | `md_pool_service` |
- * | 写确认结算 | 推进停泊的写确认（**必须先于 host 补发**：停泊意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `pend_confirm_service` |
+ * | 写确认结算 | 推进待入账的写确认（**必须先于 host 补发**：待入账意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `pend_confirm_service` |
  * | cache 序列确认 | 按序确认已编程页（Journal→L2P→BST）、撤销失败页、弹出已证明页 | `ftl_cache_wr_confirm_step` |
  * | host 补发 | 逐组下发待补发的子操作（host IO 优先于后台） | `ftl_drain_group` |
  * | 序列收尾 | 孤儿序列超时关闭（读序列放弃）+ 写序列 padding END 有序收尾 | `ftl_cache_seq_idle_guard` / `_close_step` |
@@ -588,7 +588,7 @@ ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  *
  * 用法：HIL 提交 FLUSH 时调 begin（幂等）；此后每轮主循环调 step，返回 true = 完成。
  * 完成 = wbuf 无未编程数据 + 本 owner 的 L2P 无 DIRTY/FLUSHING/LOADING +
- *        Journal 无在飞 job 且无未落盘条目 + 无停泊中的 WRITE_CONFIRM。
+ *        Journal 无在飞 job 且无未落盘条目 + 无待入账中的 WRITE_CONFIRM。
  * Journal 持久性失败（best-effort）直接结束并打 WRN——与旧的同步语义一致。
  *
  * @param ftl  FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）

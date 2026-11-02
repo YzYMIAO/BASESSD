@@ -66,6 +66,6 @@ typedef struct
  * 模块 deadline 必须 > NAND 超时 + 余量；NAND 已返回 TIMEOUT 时不再叠加。 */
 #define FTL_WAIT_TIMEOUT_MS        (50U)  /* 等 L2P/Journal 等外部模块 */
 #define FTL_SUBMIT_TIMEOUT_MS      (10U)  /* 提交背压（池空/QUEUE 满） */
-#define FTL_GROUP_DRAIN_TIMEOUT_MS (100U) /* 写确认停泊 / 组收尾 */
+#define FTL_GROUP_DRAIN_TIMEOUT_MS (100U) /* 写确认待入账 / 组收尾 */
 
 #endif /* FTL_MODULE_H */

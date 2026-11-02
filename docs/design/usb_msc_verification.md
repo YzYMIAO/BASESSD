@@ -40,7 +40,7 @@
 
 - 大文件/GC 压力、`dd` 吞吐
 - 写过程中掉电恢复
-- `RISK-MD-06`（回收旧日志块 vs Anchor 落盘）的专项复现
+- `RISK-MD-06`（回收旧日志块 vs 目录检查点落盘）的专项复现
 - `RISK-MIG-02`（predictive 迁移活锁）的修复验证
 - UASP / TRIM / 多 LUN / HS 480 Mbps（v1 非目标）
 
@@ -116,7 +116,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 > **424 MiB / 444,596,224**（0 坏块）或按 `[CAP]` 动态值，见 §5 与 `known_iss.md`。
 | USB-V08 | 写过程中掉电 | 写临时文件时断板子电源，重启重挂载 | 盘能重新挂载；FTL journal/CP 恢复；损坏范围可解释 | ⬜ 待测 |
 | USB-V09 | 吞吐 | 大文件复制 / `dd` 计时 | USB FS 预期 ~1 MB/s 量级；记录实测 | ⬜ 待测 |
-| FTL-V01 | `RISK-MD-06` 回收前 Anchor | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`anchor_seq > cp_seq` | ⬜ 待测 |
+| FTL-V01 | `RISK-MD-06` 回收前目录检查点 | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`dir_ckpt_seq > cp_seq` | ⬜ 待测 |
 | FTL-V02 | `RISK-MIG-02` predictive 活锁 | 观察串口 `[MIG] abort kind=2 ... victim read failed` | 不应反复重选同一 victim；坏块应被隔离 | ⬜ 待测 |
 
 ---
@@ -402,7 +402,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 **仍未验证**：
 
 - 大文件/GC/CP 压力、`dd` 吞吐、写过程中掉电（USB-V07/V08/V09）。
-- `RISK-MD-06` 的回收前 Anchor 专项（FTL-V01）。
+- `RISK-MD-06` 的回收前目录检查点专项（FTL-V01）。
 - `RISK-MIG-02` 的 predictive 活锁（FTL-V02）。
 
 ---
@@ -421,7 +421,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 5. **USB-V08**：写临时文件时断板子电源 → 重启重挂载 → 检查 FTL 恢复日志
    （`boot type` / `journal_entries` / `[L2P]`）。
 6. **USB-V09**：记录大文件复制耗时，换算 MB/s。
-7. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前 Anchor。
+7. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前目录检查点。
 8. **FTL-V02**：若 `victim read failed` 风暴复现，修 `RISK-MIG-02`。
 
 ---

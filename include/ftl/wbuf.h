@@ -73,7 +73,7 @@ typedef struct
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
     alc_t             *alloc;
-    pend_table_t      *pending;
+    pending_ctx_t     *pending;
     struct mig_handle *migrate;
 } wb_handle_t;
 
@@ -113,7 +113,7 @@ typedef struct
  *                无后台迁移器时（纯 RAM 单测）只做背压，不登记 GC。生产路径由
  *                `ftl.c` 绑定真实 handle，不传 NULL。
  */
-void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
+void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_handle *migrate);
 
 /**
  * @brief 事件驱动入口（docs §4.8）

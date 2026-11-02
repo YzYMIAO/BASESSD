@@ -894,21 +894,21 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* anchor_three_step — Anchor 的 prepare → page → commit 三步。
+/* dir_ckpt_three_step — 目录检查点的 prepare → page → commit 三步。
  *
  * 覆盖：prepare 分配序号/槽位并置 dirty；page 填 magic/sequence/chunk 头；
- *       commit 清 dirty 并推进 anchor_sequence。
- * 判据：任何一步漏掉都会让重启后的 Anchor 与 Directory 序号不一致（恢复选错记录）。
+ *       commit 清 dirty 并推进 dir_ckpt_sequence。
+ * 判据：任何一步漏掉都会让重启后的 目录检查点与 Directory 序号不一致（恢复选错记录）。
  * 备注：纯 RAM；冷启动 locate 在这里用有效游标跳过。 */
 
-static MunitResult test_anchor_three_step(const MunitParameter params[], void *data)
+static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void *data)
 {
     (void)params;
     (void)data;
 
-    md_anchor_prepare_out_t prep;
-    md_anchor_page_t        page;
-    static md_anchor_page_t s_anchor_page;
+    md_dir_ckpt_prepare_out_t prep;
+    md_dir_ckpt_page_t        page;
+    static md_dir_ckpt_page_t s_dir_ckpt_page;
 
     ftl_ut_trace_begin();
 
@@ -917,36 +917,36 @@ static MunitResult test_anchor_three_step(const MunitParameter params[], void *d
 
     munit_assert_true(md_pool_build_all(a));
 
-    d->dirty               = true;
-    d->anchor_cursor_valid = false;
+    d->dirty                 = true;
+    d->dir_ckpt_cursor_valid = false;
 
     memset(&prep, 0, sizeof(prep));
 
     /* 冷启动游标会同步扫介质；纯 RAM 测试先给一个有效游标，跳过 locate。 */
-    d->anchor_cursor_valid = true;
-    d->anchor_write_idx    = 0U;
-    d->anchor_sequence     = 0U;
+    d->dir_ckpt_cursor_valid = true;
+    d->dir_ckpt_write_idx    = 0U;
+    d->dir_ckpt_sequence     = 0U;
 
-    munit_assert_int(md_anchor_prepare(d, &prep, MD_ANCHOR_OWNER_BOOT), ==, MD_ANCHOR_READY);
+    munit_assert_int(md_dir_ckpt_prepare(d, &prep, MD_DIR_CKPT_OWNER_BOOT), ==, MD_DIR_CKPT_READY);
     munit_assert_uint32(prep.seq, ==, 1U);
     munit_assert_uint32(prep.idx, ==, 0U);
 
-    memset(&s_anchor_page, 0, sizeof(s_anchor_page));
-    md_anchor_page(d, prep.seq, 0U, &s_anchor_page);
+    memset(&s_dir_ckpt_page, 0, sizeof(s_dir_ckpt_page));
+    md_dir_ckpt_page(d, prep.seq, 0U, &s_dir_ckpt_page);
 
-    munit_assert_uint32(s_anchor_page.magic, ==, (DWORD)ANCHOR_MAGIC);
-    munit_assert_uint32(s_anchor_page.sequence, ==, prep.seq);
-    munit_assert_uint32(s_anchor_page.chunk_index, ==, 0U);
-    munit_assert_uint32(s_anchor_page.chunk_count, ==, (DWORD)ANCHOR_PAGE_COUNT);
+    munit_assert_uint32(s_dir_ckpt_page.magic, ==, (DWORD)DIR_CKPT_MAGIC);
+    munit_assert_uint32(s_dir_ckpt_page.sequence, ==, prep.seq);
+    munit_assert_uint32(s_dir_ckpt_page.chunk_index, ==, 0U);
+    munit_assert_uint32(s_dir_ckpt_page.chunk_count, ==, (DWORD)DIR_CKPT_PAGE_COUNT);
 
-    md_anchor_commit(d, &prep.ring, prep.idx, true);
+    md_dir_ckpt_commit(d, &prep.ring, prep.idx, true);
 
     munit_assert_false(d->dirty);
-    munit_assert_uint32(d->anchor_sequence, ==, prep.seq);
+    munit_assert_uint32(d->dir_ckpt_sequence, ==, prep.seq);
 
     (void)page;
-    ftl_ut_trace_detail("anchor: dirty 1->%d; prepare seq=%lu idx=%hu; page magic=0x%08lX seq=%lu chunk=%hu/%hu; commit anchor_sequence=%lu", (int)d->dirty, prep.seq, prep.idx, s_anchor_page.magic, s_anchor_page.sequence, s_anchor_page.chunk_index, s_anchor_page.chunk_count, d->anchor_sequence);
-    ftl_ut_trace_summary("anchor: dirty 1->%d seq 0->%lu idx=%hu chunks=%hu", (int)d->dirty, prep.seq, prep.idx, s_anchor_page.chunk_count);
+    ftl_ut_trace_detail("dir_ckpt: dirty 1->%d; prepare seq=%lu idx=%hu; page magic=0x%08lX seq=%lu chunk=%hu/%hu; commit dir_ckpt_sequence=%lu", (int)d->dirty, prep.seq, prep.idx, s_dir_ckpt_page.magic, s_dir_ckpt_page.sequence, s_dir_ckpt_page.chunk_index, s_dir_ckpt_page.chunk_count, d->dir_ckpt_sequence);
+    ftl_ut_trace_summary("dir_ckpt: dirty 1->%d seq 0->%lu idx=%hu chunks=%hu", (int)d->dirty, prep.seq, prep.idx, s_dir_ckpt_page.chunk_count);
 
     return MUNIT_OK;
 }
@@ -1208,7 +1208,7 @@ static MunitResult test_journal_truncate_idempotent(const MunitParameter params[
     return MUNIT_OK;
 }
 
-/* ══ 子套件 /ftl/pure/md/：metadata / Journal / Checkpoint / Anchor（纯 RAM）══ */
+/* ══ 子套件 /ftl/pure/md/：metadata / Journal / Checkpoint / 目录检查点（纯 RAM）══ */
 
 MunitTest g_ftl_pure_md_tests[] = {
     {              (char *)"metadata_idle",               test_metadata_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
@@ -1216,7 +1216,7 @@ MunitTest g_ftl_pure_md_tests[] = {
     {           (char *)"directory_commit",            test_directory_commit, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"journal_append",              test_journal_append, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {                (char *)"ring_locate",                 test_ring_locate, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"anchor_three_step",           test_anchor_three_step, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        (char *)"dir_ckpt_three_step",         test_dir_ckpt_three_step, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {   (char *)"log_alloc_rotate_release",    test_log_alloc_rotate_release, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {              (char *)"cp_init_timer",               test_cp_init_timer, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {            (char *)"md_status_error",             test_md_status_error, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
@@ -1272,7 +1272,7 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    pend_table_t table;
+    pending_ctx_t table;
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
@@ -1314,8 +1314,8 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
-    pend_table_t table;
-    BYTE         gi[FTL_GROUP_MAX];
+    pending_ctx_t table;
+    BYTE          gi[FTL_GROUP_MAX];
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
@@ -1352,8 +1352,8 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
     (void)params;
     (void)data;
 
-    pend_table_t table;
-    BYTE         gi = 0U;
+    pending_ctx_t table;
+    BYTE          gi = 0U;
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
@@ -1399,12 +1399,12 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
-    wb_handle_t  h;
-    pend_table_t table;
-    BYTE         gi = 0U;
-    BYTE         src[FTL_IU_BYTES];
-    BYTE         out[FTL_IU_BYTES];
-    wb_trigger_t tr;
+    wb_handle_t   h;
+    pending_ctx_t table;
+    BYTE          gi = 0U;
+    BYTE          src[FTL_IU_BYTES];
+    BYTE          out[FTL_IU_BYTES];
+    wb_trigger_t  tr;
 
     ftl_ut_trace_begin();
     memset(&h, 0, sizeof(h));
@@ -1651,12 +1651,12 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
 {
     (void)data;
 
-    BYTE         src[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
-    BYTE         out[FTL_IU_BYTES];
-    wb_handle_t  h;
-    pend_table_t table;
-    BYTE         gi = 0U;
-    const BYTE   n  = (BYTE)(munit_parameters_get(params, "n")[0] - '0');
+    BYTE          src[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
+    BYTE          out[FTL_IU_BYTES];
+    wb_handle_t   h;
+    pending_ctx_t table;
+    BYTE          gi = 0U;
+    const BYTE    n  = (BYTE)(munit_parameters_get(params, "n")[0] - '0');
 
     ftl_ut_trace_begin();
 
@@ -1710,7 +1710,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
 
     ftl_ut_trace_begin();
 
-    pend_table_t          table;
+    pending_ctx_t         table;
     BYTE                  gi     = 0U;
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
@@ -1750,11 +1750,11 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     return MUNIT_OK;
 }
 
-/* confirm_park_timeout — 写确认停泊的超时收尾（RISK-HOST-05 的纯 RAM 部分）。
+/* confirm_park_timeout — 写确认待入账的超时收尾（RISK-HOST-05 的纯 RAM 部分）。
  *
- * 覆盖：handler 恒返 FTL_AGAIN 时，未到 deadline 保留停泊（槽/组/通知都不动）；
+ * 覆盖：handler 恒返 FTL_AGAIN 时，未到 deadline 保留待入账（槽/组/通知都不动）；
  *       到达 FTL_GROUP_DRAIN_TIMEOUT_MS 后释放槽、按 IO_ERROR 结算组一次。
- * 判据：停泊项若永不超时，host 写组永久 pending ⇒ 后续 I/O 拿不到组槽（全系统 AGAIN）；
+ * 判据：待入账项若永不超时，host 写组永久 pending ⇒ 后续 I/O 拿不到组槽（全系统 AGAIN）；
  *       若过早超时，正在异步加载的 region 会被误判失败（静默丢写）。纯 RAM。 */
 
 static ftl_status_e park_again_handler(void *ctx, pend_req_t *pending)
@@ -1772,7 +1772,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
 
     ftl_ut_trace_begin();
 
-    pend_table_t          table;
+    pending_ctx_t         table;
     BYTE                  gi     = 0U;
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
@@ -1800,7 +1800,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     pend_confirm_park(&table, idx, owners);
     munit_assert_true(pend_op_is_write_confirm(p->op));
 
-    /* 停泊时刻显式给定：本用例不该依赖板端开机时钟是否已走（park_ms==0 会让
+    /* 待入账时刻显式给定：本用例不该依赖板端开机时钟是否已走（park_ms==0 会让
      * service 走「懒初始化」分支，测不到超时）。 */
     p->park_ms = 1000U;
 
@@ -1815,7 +1815,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     pend_confirm_service(&table, NULL);
     ftl_ut_clock_restore();
 
-    munit_assert_true(p->used); /* 未超时：仍停泊 */
+    munit_assert_true(p->used); /* 未超时：仍待入账 */
     munit_assert_true(g->used);
     munit_assert_uint32(flag, ==, 0U);
     munit_assert_uint32(pend_slot_get_count(&table), ==, 1U);
@@ -1851,11 +1851,11 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
 
     ftl_ut_trace_begin();
 
-    wb_handle_t  h;
-    pend_table_t table;
-    BYTE         gi = 0U;
-    BYTE         src[2U * FTL_IU_BYTES];
-    wb_trigger_t tr;
+    wb_handle_t   h;
+    pending_ctx_t table;
+    BYTE          gi = 0U;
+    BYTE          src[2U * FTL_IU_BYTES];
+    wb_trigger_t  tr;
 
     memset(&h, 0, sizeof(h));
     memset(&table, 0, sizeof(table));

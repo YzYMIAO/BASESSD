@@ -2,7 +2,7 @@
  * checkpoint.c — L2P 全量快照（Checkpoint 池环形轮转 + 触发/水位）
  *
  * 职责：
- *   把 L2P 缓存里的脏 region 固化进 NAND L2P 日志块、flush Metadata Directory（Anchor）、
+ *   把 L2P 缓存里的脏 region 固化进 NAND L2P 日志块、flush Metadata Directory（目录检查点）、
  *   再写一条 Checkpoint Header 记录「此刻 L2P 已落盘到哪」，最后截断 Journal；
  *   开机由 cp_pool_find_latest 在池内挑最新一条有效记录恢复游标/序号。
  *
@@ -17,7 +17,7 @@
  *   判定（同步站点当场擦；异步 job 提交异步擦，见 CP_HDR_ERASE）。
  *
  * 掉电安全顺序（不可倒，见下方"异步 job"的长注释）：
- *   先 flush region → 再 flush Anchor → 最后写 Header 声称「已落盘」。
+ *   先 flush region → 再 flush 目录检查点 → 最后写 Header 声称「已落盘」。
  *   Header 是"承诺书"：它一旦落盘，boot 就信 bitmap 里置位的 region 在 NAND 上，
  *   故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
@@ -107,7 +107,7 @@ typedef struct
 /* ── Checkpoint 池：环形轮转（一条 record = 21 页、P0+P1 镜像）──
  *
  * 池几何由 ftl/metadata.h 推导；sequence 与写游标是**本池自己的**（与 journal /
- * Anchor / BBT 的 sequence 互不相干），开机由 cp_pool_find_latest 恢复。
+ * 目录检查点 / BBT 的 sequence 互不相干），开机由 cp_pool_find_latest 恢复。
  *
  * 游标/序号是 per-instance 的 h->cp_state（cp_state_t）：file-scope static 在多实例
  * 下会互相覆盖。 */
@@ -218,17 +218,17 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  * 同一份**顺序契约**由 phase 承载：每个阶段提交一条命令就返回，完成由
  * g_op_callbacks[FTL_OP_CHECKPOINT]（ftl_checkpoint_callback）按 phase 收尾，下一轮
  * ftl_service 调 cp_handle 续跑。同步流水线会阻塞数十毫秒
- * （脏 region 写回 + 8 页 Anchor + Header + 预擦），期间 host I/O 的完成泵停摆。
+ * （脏 region 写回 + 8 页目录检查点 + Header + 预擦），期间 host I/O 的完成泵停摆。
  *
  * ⚠ **顺序即掉电安全契约（不可倒）**：
  *     ① 快照 region 脏标记 + journal 水位（**必须在任何 flush 之前**：flush 成功会清位）
  *     ② flush 脏 region（任一失败 ⇒ 中止，不写 Header）
- *     ③ flush Anchor（**必须早于 Header**）
+ *     ③ flush 目录检查点（**必须早于 Header**）
  *     ④ 写 Header（**无论成败都推进池游标**：半编程槽不可复用）
  *     ⑤ 截断 Journal（预擦环形最旧块）+ 复位水位标志
  *
  * ⚠ **快照点必须在 job 起点**：CP 跨多轮，若把 `journal.sequence_counter` 取在
- *   Anchor 之后（CP 末尾），则在 CP_ANCHOR 期间完成的 host 写会同时满足：
+ *   目录检查点之后（CP 末尾），则在 CP_DIR_CKPT 期间完成的 host 写会同时满足：
  *   ① region 脏位在 RAM 里置了但没进本次快照（不会被 flush）；② 其 journal 条目
  *   seq ≤ 末尾水位（boot 视为"已进 L2P 表"而跳过回放）⇒ **两边都不认，静默丢映射**。
  *   故水位与脏位图**一起在 job 起点取定**：此后任何 host 写都有 seq > 快照水位，
@@ -236,7 +236,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  *   预擦只是磨损优化，跳过它只是让 jrn_handle 换块时自己异步擦（每块每圈仍只擦一次）。
  *
  * ⚠ **服务函数不推进状态机**（与 migrate 的 ftl_migrate_callback 不同）：本 job 的
- *   CP_ANCHOR_PREP / CP_HDR_PREP 里有同步原语（游标未建立时要 md_ring_locate
+ *   CP_DIR_CKPT_PREP / CP_HDR_PREP 里有同步原语（游标未建立时要 md_ring_locate
  *   读池定位），在完成泵里跑就是嵌套泵（l2p_sync_pump 有 ASSERT 挡）。故
  *   ftl_checkpoint_callback 只记结果 + release + 改 phase，推进一律留给下一轮 ftl_service。
  * ══════════════════════════════════════════════════════════════════ */
@@ -250,8 +250,8 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  */
 static void cp_job_abort(cp_handle_t *h)
 {
-    // 放弃本 job 可能持有的 Anchor 单飞锁（prepare 之后没走到 commit）。
-    md_anchor_abort(h->metadata_dir, MD_ANCHOR_OWNER_CP);
+    // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
+    md_dir_ckpt_abort(h->metadata_dir, MD_DIR_CKPT_OWNER_CP);
 
     if (h->failed == false)
     {
@@ -372,7 +372,7 @@ static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
 }
 
 /**
- * @brief 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
+ * @brief 提交一条异步写（目录检查点分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
  * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
  * ⇒ 调用者的栈缓冲随即可复用。
  *
@@ -396,7 +396,7 @@ static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data
 }
 
 /**
- * @brief 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
+ * @brief 提交一条异步擦除（目录检查点换块 / Checkpoint 换块 / Journal 预擦共用）。
  * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。
  *
  * @param h     Checkpoint handle
@@ -699,17 +699,17 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
 
     switch ((cp_phase_e)h->phase)
     {
-        case CP_ANCHOR_ERASE:
-            cp_erase_complete(h, failed, CP_ANCHOR_WRITE);
+        case CP_DIR_CKPT_ERASE:
+            cp_erase_complete(h, failed, CP_DIR_CKPT_WRITE);
             return;
 
-        case CP_ANCHOR_WRITE:
+        case CP_DIR_CKPT_WRITE:
             // 无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。
             if (failed)
             {
-                h->anchor_ok = false;
+                h->dir_ckpt_ok = false;
             }
-            h->anchor_chunk = (h->anchor_chunk + 1U);
+            h->dir_ckpt_chunk = (h->dir_ckpt_chunk + 1U);
             return;
 
         case CP_HDR_ERASE:
@@ -740,12 +740,12 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
 
         case CP_IDLE:
         case CP_FLUSH_REGIONS:
-        case CP_ANCHOR_PREP:
+        case CP_DIR_CKPT_PREP:
         case CP_HDR_PREP:
         case CP_TRUNC_PREP:
         case CP_DONE:
         default:
-            // 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
+            // 不该发生：一条命令对应一个提交阶段（DIR_CKPT_ERASE / DIR_CKPT_WRITE /
             // HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。
             LOGE(LOG_TAG_CP "unexpected completion phase=%d\r\n", h->phase);
             cp_job_abort(h);
@@ -786,80 +786,80 @@ static void cp_job_step(cp_handle_t *h)
                 {
                     return; /* 仍有脏行在飞 */
                 }
-                h->phase = CP_ANCHOR_PREP;
+                h->phase = CP_DIR_CKPT_PREP;
                 break;
             }
 
-            case CP_ANCHOR_PREP:
+            case CP_DIR_CKPT_PREP:
             {
-                // ③ Anchor：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
+                // ③ 目录检查点：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
                 // 这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。
-                md_anchor_prepare_out_t anchor;
-                md_anchor_step_e        r = md_anchor_prepare(h->metadata_dir, &anchor, MD_ANCHOR_OWNER_CP);
+                md_dir_ckpt_prepare_out_t dir_ckpt;
+                md_dir_ckpt_step_e        r = md_dir_ckpt_prepare(h->metadata_dir, &dir_ckpt, MD_DIR_CKPT_OWNER_CP);
 
-                if (r == MD_ANCHOR_FAILED)
+                if (r == MD_DIR_CKPT_FAILED)
                 {
                     cp_job_abort(h);
                     break;
                 }
-                if (r == MD_ANCHOR_BUSY)
+                if (r == MD_DIR_CKPT_BUSY)
                 {
-                    // 另一个 writer（metadata job）正在写 Anchor：背压重试同一阶段
+                    // 另一个 writer（metadata job）正在写目录检查点：背压重试同一阶段
                     // （RISK-MD-06：不推进 sequence、不取槽）。
                     (void)cp_job_stall(h);
                     return;
                 }
-                if (r == MD_ANCHOR_CLEAN)
+                if (r == MD_DIR_CKPT_CLEAN)
                 {
-                    // Directory 无变更：整段跳过（Anchor 每写一条都消耗池内槽位，
+                    // Directory 无变更：整段跳过（目录检查点每写一条都消耗池内槽位，
                     // 空转会让池无谓轮转）。
-                    h->anchor_skip = true;
-                    h->phase       = CP_HDR_PREP;
+                    h->dir_ckpt_skip = true;
+                    h->phase         = CP_HDR_PREP;
                     break;
                 }
 
-                h->anchor_ring       = anchor.ring;
-                h->anchor_base       = anchor.base;
-                h->anchor_idx        = anchor.idx;
-                h->anchor_seq        = anchor.seq;
-                h->anchor_need_erase = anchor.need_erase;
-                h->anchor_chunk      = 0U;
-                h->anchor_ok         = true;
-                h->phase             = anchor.need_erase ? CP_ANCHOR_ERASE : CP_ANCHOR_WRITE;
+                h->dir_ckpt_ring       = dir_ckpt.ring;
+                h->dir_ckpt_base       = dir_ckpt.base;
+                h->dir_ckpt_idx        = dir_ckpt.idx;
+                h->dir_ckpt_seq        = dir_ckpt.seq;
+                h->dir_ckpt_need_erase = dir_ckpt.need_erase;
+                h->dir_ckpt_chunk      = 0U;
+                h->dir_ckpt_ok         = true;
+                h->phase               = dir_ckpt.need_erase ? CP_DIR_CKPT_ERASE : CP_DIR_CKPT_WRITE;
                 break;
             }
 
-            case CP_ANCHOR_ERASE:
-                (void)cp_command_result_handle(h, cp_erase_submit(h, h->anchor_base));
+            case CP_DIR_CKPT_ERASE:
+                (void)cp_command_result_handle(h, cp_erase_submit(h, h->dir_ckpt_base));
                 return;
 
-            case CP_ANCHOR_WRITE:
+            case CP_DIR_CKPT_WRITE:
             {
-                if (h->anchor_chunk >= ANCHOR_PAGE_COUNT)
+                if (h->dir_ckpt_chunk >= DIR_CKPT_PAGE_COUNT)
                 {
                     // 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不写 Header。
-                    const bool anchor_ok = (h->anchor_ok == true);
+                    const bool dir_ckpt_ok = (h->dir_ckpt_ok == true);
 
-                    md_anchor_commit(h->metadata_dir, &h->anchor_ring, h->anchor_idx, anchor_ok);
+                    md_dir_ckpt_commit(h->metadata_dir, &h->dir_ckpt_ring, h->dir_ckpt_idx, dir_ckpt_ok);
 
-                    if (anchor_ok == false)
+                    if (dir_ckpt_ok == false)
                     {
-                        LOGW(LOG_TAG_META "anchor write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", h->anchor_idx, h->anchor_seq);
+                        LOGW(LOG_TAG_META "dir_ckpt write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", h->dir_ckpt_idx, h->dir_ckpt_seq);
                         cp_job_abort(h);
                         break;
                     }
-                    // 本 job 只写了 Anchor；块元数据 / 磨损快照 / Header 还没写。
+                    // 本 job 只写了目录检查点；块元数据 / 磨损快照 / Header 还没写。
                     // Header 是整条 record 的 commit 页 ⇒ 必须继续走 HDR_PREP。
                     h->phase = CP_HDR_PREP;
                     break;
                 }
 
-                const DWORD       anchor_page = pba_to_page(h->anchor_base) + h->anchor_chunk;
-                DWORD             aaddr       = pba_with_page(h->anchor_base, anchor_page);
-                md_anchor_page_t *page        = (md_anchor_page_t *)h->hdr_buf;
+                const DWORD         dir_ckpt_page = pba_to_page(h->dir_ckpt_base) + h->dir_ckpt_chunk;
+                DWORD               aaddr         = pba_with_page(h->dir_ckpt_base, dir_ckpt_page);
+                md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)h->hdr_buf;
 
-                md_anchor_page(h->metadata_dir, h->anchor_seq, h->anchor_chunk, page);
+                md_dir_ckpt_page(h->metadata_dir, h->dir_ckpt_seq, h->dir_ckpt_chunk, page);
 
                 const DWORD        page_size = sizeof(*page);
                 const ftl_status_e st        = cp_write_submit(h, aaddr, page, page_size);
@@ -871,7 +871,7 @@ static void cp_job_step(cp_handle_t *h)
             case CP_HDR_PREP:
             {
                 // ④ Header：定位写游标（游标未建立时才扫池——开机 cp_pool_find_latest
-                // 已建立时零代价）。⚠ 这里可能同步读池（同 CP_ANCHOR_PREP）。
+                // 已建立时零代价）。⚠ 这里可能同步读池（同 CP_DIR_CKPT_PREP）。
                 cp_ring_init(h->alloc, &h->hdr_ring);
 
                 if (h->cp_state.cursor_valid == false)
@@ -1008,7 +1008,7 @@ static void cp_job_step(cp_handle_t *h)
                 // ⑤ 截断 Journal：预擦环形最旧块（纯 RAM 判定 + 算址，不动介质）。
                 // ⚠ 无论 plan 返回 JRN_TRUNC_ALREADY（已预擦过）还是
                 // JRN_TRUNC_NO_TRUNCATE（水位不满足），本 CP 都已**完成**它承诺的事
-                // （region 已落盘、Anchor/Header 已写）⇒ 复位水位标志并收尾；
+                // （region 已落盘、目录检查点/Header 已写）⇒ 复位水位标志并收尾；
                 // 是否真的擦了只影响磨损优化，不影响本次 CP 的正确性。
                 DWORD addr;
                 if (jrn_truncate_plan(h->journal, h->journal_seq, &addr, &h->trunc_next) != JRN_TRUNC_NEEDS_ERASE)
@@ -1057,7 +1057,7 @@ static void cp_job_step(cp_handle_t *h)
                     if ((now_done != 0U) && ((h->log_done_ms == 0U) || ((now_done - h->log_done_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
                     {
                         h->log_done_ms = now_done;
-                        LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu anchor=%s\r\n", h->hdr_seq, h->journal_seq, (h->anchor_skip == true) ? "skip" : "written");
+                        LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s\r\n", h->hdr_seq, h->journal_seq, (h->dir_ckpt_skip == true) ? "skip" : "written");
                     }
                 }
 

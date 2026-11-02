@@ -2510,7 +2510,7 @@ nand_dispatch_completion_t（command_id / execution_status / nand_status /
 | Read Retry | 要知道哪个 CW 失败 → desc_id 标记 + status |
 | RAID Recovery | 逐 CW 检查解码状态（CQ 只有命令级聚合） |
 | 长链命令完成，CQ 已出队 | CQ 状态丢失，Descriptor 保留状态 |
-| 聚合 ECC 趋势（BER/慢死预测） | `fc_get_cmd_ecc_max()` 从 desc 链取全链最大值 |
+| 聚合 ECC 趋势（BER/预测性退役） | `fc_get_cmd_ecc_max()` 从 desc 链取全链最大值 |
 | 错误注入/调试 | 状态持续可查 |
 
 `module` 字段覆盖全部 FC 使用者：HOST_IO / FTL / GC / READ_RECOVERY / METADATA / BBT / CHECKPOINT / WEAR_LEVELING。
@@ -3855,7 +3855,7 @@ Mode 5 当前选定值为 **SET=4 / WAIT=3 / HOLD=2 / HiZ=5**（Setup 另有 `ce
 
 ```
 nand_init: HAL_NAND_Init(保守 4/6/2/4) → RESET/READ_ID/ONFI 参数页校验 → 保持 Mode 0
-FTL boot/恢复: 全程 Mode 0（Anchor / CP / Journal / rebuild 都在保守时序下完成）
+FTL boot/恢复: 全程 Mode 0（目录检查点 / CP / Journal / rebuild 都在保守时序下完成）
 boot 完成后: nand_enable_high_speed() → SET_FEATURES(01h, 5)
   → nand_fmc_timing_to_pcc(g_nand_timing_high) → HAL_NAND_Init(快速)
   → nand_fmc_init(g_nand_timing_high)

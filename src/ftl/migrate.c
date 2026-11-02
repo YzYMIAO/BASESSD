@@ -1,9 +1,9 @@
 /*
- * migrate.c — Super Block 搬移引擎（GC / 静态 WL / 慢死预测共用）
+ * migrate.c — Super Block 搬移引擎（GC / 静态 WL / 预测性退役共用）
  *
  * 职责：
  *   把 victim SB 的有效 CW 逐页搬到 Cold 流新块，更新 L2P / Journal / 有效计数，
- *   最后擦除 victim 并归还（GC / 静态 WL）或退役（慢死预测）。三处搬移的差别只在**谁当 victim**
+ *   最后擦除 victim 并归还（GC / 静态 WL）或退役（预测性退役）。三处搬移的差别只在**谁当 victim**
  *   （kind）与**擦完怎么处置**（post），故共用一台异步 job。
  *
  * 文件结构：
@@ -193,7 +193,7 @@ static WORD mig_dst_get_gblock(const mig_handle_t *m, BYTE plane)
  *
  * @return "gc"   —— 空间回收；
  *         "wl"   —— 静态磨损均衡；
- *         "pred" —— 慢死预测；
+ *         "pred" —— 预测性退役；
  *         "?"    —— 越界值。
  */
 static const char *mig_kind_name(mig_kind_e kind)
@@ -386,7 +386,7 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
 
     // 收尾方式与目的块磨损档由 kind 唯一决定，避免调用者传入不一致的组合：
     // GC / 静态 WL → 归还 Free Pool；WL 目的块走高磨损档；
-    // 慢死预测 → 退役、不入池。
+    // 预测性退役 → 退役、不入池。
     const mig_post_e post          = (kind == MIG_KIND_PREDICT) ? MIG_POST_RETIRE : MIG_POST_FREE;
     const bool       dst_high_wear = (kind == MIG_KIND_WL);
 
@@ -729,7 +729,7 @@ static bool mig_wl_begin(mig_handle_t *m)
 }
 
 /**
- * @brief 尝试启动一个慢死预测搬移 job（victim 来自 rr_predictive_scan）。
+ * @brief 尝试启动一个预测性退役搬移 job（victim 来自 rr_predictive_scan）。
  *
  * @param m job。
  *
@@ -750,7 +750,7 @@ static bool mig_predict_begin(mig_handle_t *m)
         return false;
     }
 
-    // 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块）。
+    // 预测性退役块必在 closed_sb_list 中（scan 只返回 CLOSED 块）。
     const WORD closed_idx   = ftl_block_sb_id(&m->alloc->blocks[gblock]);
     const WORD closed_count = m->alloc->closed_sb_count;
 
@@ -1053,7 +1053,7 @@ static void mig_job_finish(mig_handle_t *m)
             }
             else if (m->kind == MIG_KIND_PREDICT)
             {
-                // 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次
+                // 预测性退役命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次
                 for (BYTE p = 0U; p < PLANE_NUM; p++)
                 {
                     if (super_block_has_plane(&m->victim, p) == false)
@@ -2322,7 +2322,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
 
 /**
  * @brief MIG_READ 完成：拷数据 + 解 META 得逐 CW 的扇区 LBA；顺带记 ECC 趋势 + read_count
- * （慢死预测闭环）。失败 / 全页空洞 ⇒ 该 plane 无有效 CW，不影响另一 plane。
+ * （预测性退役闭环）。失败 / 全页空洞 ⇒ 该 plane 无有效 CW，不影响另一 plane。
  *
  * @param m          job。
  * @param cmd        完成的命令（本函数负责 release）。
@@ -2363,7 +2363,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
             const WORD gsrc = ftl_gblock(plane, m->victim.plane_blocks[plane]);
             const BYTE ecc  = fc_get_cmd_ecc_max(cmd);
 
-            // B4：搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
+            // B4：搬移读记录 ECC 趋势 + read disturb 计数（预测性退役闭环）。
             // 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。
             // 趋势/read_count 的写入点是 RR owner API，migrate 不直接摸 BST。
             rr_record_block_ecc(m->alloc, gsrc, ecc);
@@ -2587,7 +2587,7 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
             // 退役直接 RETIRED，与「state == FREE ⟺ 在池」不变量一致（allocator.h ②）。
             if (m->post == MIG_POST_RETIRE)
             {
-                // 慢死预测：搬空的块**退役**（RETIRED，不再分配新数据、不标坏、仍可读）。
+                // 预测性退役：搬空的块**退役**（RETIRED，不再分配新数据、不标坏、仍可读）。
                 // GC / 静态 WL 走 FREE 分支，块重新进入磨损轮转。
                 // victim 正常是 CLOSED、从未入池 ⇒ remove_from_free 是文档化 no-op
                 // （allocator.h 判据 4）；保留它是为了让「退役块绝不留在池里」不依赖调用顺序。

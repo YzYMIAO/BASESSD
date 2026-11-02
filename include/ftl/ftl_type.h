@@ -73,7 +73,7 @@ typedef enum
  *
  * 描述本 FTL 实例管理的芯片路由。
  *   ch/ce/lun — 本 FTL 绑定的 NAND 芯片。
- *               元数据（Journal/BBT/Checkpoint/Anchor）存放在此芯片。
+ *               元数据（Journal/BBT/Checkpoint/目录检查点）存放在此芯片。
  *               用户数据由 allocator 基于此拓扑做负载均衡路由。
  *
  * ftl_init 内部初始化，不暴露给 controller 层。

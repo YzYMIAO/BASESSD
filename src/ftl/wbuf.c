@@ -372,7 +372,7 @@ static void wb_maybe_flush_idle(wb_handle_t *h)
 /* ── 5. typed 入口 ── */
 
 // 装配：整块清零（复位窗口/占用/组位图/计数）再绑定三个 owner 指针；不碰介质。
-void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate)
+void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_handle *migrate)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
     // （alloc / pending 为实例内嵌对象的地址，migrate 由同一审计保证）⇒ 不重复检查。

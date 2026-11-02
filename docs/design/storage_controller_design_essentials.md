@@ -603,7 +603,7 @@ NAND die（写入时可能再叠 on-die ECC）
 | 单 CW 超 ECC 能力 | read retry → 软判决 → RAID 重建 |
 | 整块失效 | 坏块标记 + 备用块替换 |
 | 掉电 | journal/checkpoint 恢复 |
-| 元数据损坏 | 冗余副本（anchor 页） |
+| 元数据损坏 | 冗余副本（dir_ckpt 页） |
 
 ---
 
