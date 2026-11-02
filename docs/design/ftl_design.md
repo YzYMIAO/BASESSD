@@ -1198,7 +1198,7 @@ flowchart TD
    最后 `jrn_resume(floor=cp_seq)`。
    - **live L2P 日志块的自愈**（`RISK-BOOT-15`）：这类块归 `metadata_dir` 所有、
      不在 allocator 池里，合法 word 是 `NONE + no pool tag`。校验阶段对
-     `md_live_count_get(dir, g) > 0` 的块放行，Pass 2 按 Directory 修正为 `LOG`
+     `md_live_count_get(dir, g) > 0` 的块放行，第 3 遍按 Directory 修正为 `LOG`
      （Directory 是 live 日志块身份的唯一权威）。否则旧版 full rebuild 留下的
      NONE/no-pool 会让**整份**快照被拒绝，每次冷启动都全盘重建。
 5. **PF**：先恢复块元数据 → `jrn_replay`（所有 `page_seq+entry_count > cp_seq` 的页，
@@ -1248,7 +1248,7 @@ flowchart TD
 |---|---|---|
 | 无有效 CP | fresh + full metadata rebuild | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
 | 块元数据快照 CRC 失败 | 该快照丢弃，走 full metadata rebuild | 用户数据不丢；恢复时间变长 |
-| 快照 word 为 `NONE/no-pool`（live L2P 日志块） | **不丢弃**：Directory 是权威，Pass 2 修正为 LOG（`RISK-BOOT-15`） | 自愈旧版 rebuild 留下的快照；避免每次冷启动全盘 rebuild |
+| 快照 word 为 `NONE/no-pool`（live L2P 日志块） | **不丢弃**：Directory 是权威，第 3 遍修正为 LOG（`RISK-BOOT-15`） | 自愈旧版 rebuild 留下的快照；避免每次冷启动全盘 rebuild |
 | 快照 word 非法且**不是** live 日志块 | 该快照丢弃，走 full metadata rebuild | 保守：块账本可能不可信（`RISK-BOOT-15`） |
 | Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
 | L2P region 加载降级（两份副本都读失败） | 行 CLEAN + 全 INVALID + `degraded=1`，置 cache 级降级位图 | 保留快照走**范围化恢复**（`bit=scoped`）；该 region 未被 Journal 覆盖的旧映射丢失，host 读该范围返回 `IO_ERROR`；其余数据不受影响（`RISK-BOOT-18`） |
@@ -3335,7 +3335,7 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
     **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
     **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台调度**（`bg_scheduler_service`）。
 - **`bg_scheduler.c/h`**：一个模块承载两层内容——
-  - **引擎**：must-run pass + 预算 pass + 预算截断（函数本身零 kick 知识，
+  - **引擎**：必跑任务 + 预算任务 + 预算截断（函数本身零 kick 知识，
     不认识任何具体任务）；
   - **FTL 策略段**：10 个 `static` 适配器把异构 kick 包成 `void(ftl_ctx_t *)` + 任务表
     `s_bg_tasks` + 档位预算表 `s_bg_level_cfg` + `bg_scheduler_init` /
@@ -3402,7 +3402,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
-   判定收在 `bg_scheduler_service` 首行（早于 must-run pass）。
+   判定收在 `bg_scheduler_service` 首行（早于必跑任务）。
 
 #### 3.12.5 一轮走查（host 正在连续写）
 
@@ -3412,7 +3412,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
       cfg = { total_budget_us = 700, task_mask = BG_TASK_L2P_FLUSH }
 
-Pass 0（must-run，表序 0..5，全部执行，不计预算）
+① 必跑任务（must-run，表序 0..5，全部执行，不计预算）
   cp_handle(ADVANCE)        → 在飞 CP 推进一步（没有在飞则空操作）
   rr_handle                 → 读恢复：无待恢复页则空操作
   mig_handle                → 在飞 GC/WL 推进一步（BUSY 档不发起新的求值）
@@ -3421,7 +3421,7 @@ Pass 0（must-run，表序 0..5，全部执行，不计预算）
   cp_handle(EMERGENCY)      → journal 未到 95% 则空操作
   ⇒ 最坏 6 次 kick，每次只提交 ≤1 条命令
 
-Pass 1（预算）
+② 预算任务（按表序 + 总预算）
   budget_remaining = 700
   表序 6 L2P flush : 掩码允许 → 执行
                      l2p_handle 按档位踢 ≤ L2P_FLUSH_MAX_BUSY(1) 条写回
@@ -3453,8 +3453,8 @@ flowchart TB
         S4 -- "是" --> S5["return"]
         S4 -- "否" --> S6["bg_scheduler_level_select 选档"]
         S6 --> S7["bg_scheduler_run"]
-        S7 --> S8["Pass 0 must-run"]
-        S7 --> S9["Pass 1 预算 表序"]
+        S7 --> S8["必跑任务 must-run"]
+        S7 --> S9["预算任务（按表序）"]
     end
     P2 --> S1
 ```
@@ -3464,8 +3464,8 @@ flowchart TB
 1. 主循环：`cli_service_poll` → `ftl_service_pump` → 逐实例 `ftl_service`。
 2. 档位选择：`inflight = pend_slot_get_count + pend_group_get_count`；0 → IDLE；
    `pending > FTL_PENDING_MAX/2` 或 `queued != 0` → BUSY；否则 NORMAL。
-3. Pass 0：按表序跑所有 `must_run`，无条件、不计预算。
-4. Pass 1：按表序扫预算任务；**本档位掩码允许**才跑；`charge = MIN(elapsed, budget)`；
+3. 先跑必跑任务：按表序跑所有 `must_run`，无条件、不计预算。
+4. 再跑预算任务：按表序扫；**本档位掩码允许**才跑；`charge = MIN(elapsed, budget)`；
    剩余预算 < `BG_MIN_TASK_BUDGET_US`（250 µs）即截断。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
 
@@ -4683,14 +4683,14 @@ flowchart TD
     B -- "是" --> Z["return"]
     B -- "否" --> C["level 为 select pending groups"]
     C --> D["bg_scheduler_run"]
-    D --> E["Pass 0 must-run 按表序"]
+    D --> E["必跑任务 must-run 按表序"]
     E --> E1["cp_handle"]
     E --> E2["rr_handle"]
     E --> E3["mig_handle"]
     E --> E4["md_handle"]
     E --> E5["journal need_erase"]
     E --> E6["emergency CP"]
-    E1 --> F["Pass 1 预算任务"]
+    E1 --> F["预算任务（表序 + 总预算）"]
     F --> F1{"掩码允许"}
     F1 -- "否" --> G["下一任务"]
     F1 -- "是" --> F3["执行 kick 提交即返回"]
@@ -5171,10 +5171,10 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 |---|---|
 | 背景 | cache read / cache program 的 45h…47h / 49h…48h 必须在器件 cache 管线上连续执行；任一条被其他命令插入就会破坏序列 |
 | 选项 | 依赖“全 FTL 命令走 SQ 且连续入队”的全局假设 / FTL 逐条提交并 defer 插入者 / **整条 run 标成 FC chain，控制器锁 LUN** |
-| 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，`ftl_op_submit_batch()` 原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨 pass 保留、另一队列回推，END 才解锁 |
-| 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨 pass 的 owner 状态解决“HSQ 插入劈开序列”（ISS-CACHE-01）；FC 侧复用既有 chain 机制，**无新增功能代码** |
+| 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，`ftl_op_submit_batch()` 原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨轮次保留、另一队列回推，END 才解锁 |
+| 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨轮次的 owner 状态解决“HSQ 插入劈开序列”（ISS-CACHE-01）；FC 侧复用既有 chain 机制，**无新增功能代码** |
 | 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_scheduler.h`），不是行业标准形态 |
-| 代价 | 链跨 pass 会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
+| 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
 | 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
 | 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`include/fc/fc_scheduler.h:28-68`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
 
@@ -5183,7 +5183,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 > （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`，见 `RISK-IF-07`）。
 >
 > ⚠ **状态：已改、未上板**（2026-10-30）。FC 侧无功能改动，只同步了“生产路径恒 END”
-> 相关注释；chain 路径此前仅 UT 覆盖，首启用必须上板验证跨 pass owner / HSQ 回推 /
+> 相关注释；chain 路径此前仅 UT 覆盖，首启用必须上板验证跨轮次 owner / HSQ 回推 /
 > 失败页状态（R2：建链类改动）。
 >
 > ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_risks.md` RISK-IF-06）。
@@ -5215,7 +5215,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,296 B / debug 62,064 B；`make all/release/tests UT=FC` 零新告警；当时 UT=FTL 因冻结测试源失败（**2026-10-24 已重建，85 次全过**） |
 | v1.00 cache read 判据修正 | **已上板（2026-10-25）** | `cache_read_collect` 跨 plane 改用 `pba_to_page()`、连续性改为页号 +1；修复前 cache read 自实现以来从未生效（`batches` 恒 0）。`/speed/ftl_rw` 2/2、`rd_path=cache`、`rdc batches=1600`；全量 `/ftl/` 已在修复后镜像上重跑 **85/85（61.20 s）** |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
-| cache read/write run 的 FC chain（ADR-17） | **已改、未上板（2026-10-30）** | 读 run 长度改由 FC 资源决定（不再等于 FIFO 深度）、整条 run 标 `FC_CHAIN_MORE`/`END`、`ftl_op_submit_batch` 原子入队；cache program 与 GC/WL batch 同标。编译三关零新告警；**必须上板**验证跨 pass owner / HSQ 回推 / 失败页状态（R2 建链类改动） |
+| cache read/write run 的 FC chain（ADR-17） | **已改、未上板（2026-10-30）** | 读 run 长度改由 FC 资源决定（不再等于 FIFO 深度）、整条 run 标 `FC_CHAIN_MORE`/`END`、`ftl_op_submit_batch` 原子入队；cache program 与 GC/WL batch 同标。编译三关零新告警；**必须上板**验证跨轮次 owner / HSQ 回推 / 失败页状态（R2 建链类改动） |
 | P1 cache 读流式序列 | 正常路径已上板（2026-10-30 debug：H2testw 415/423 MB 0 错误；**release -O2（23:14 镜像）H2testw 415/422 MB 0 错误、写 867 / 读 887 KB/s**，`cr=26475/104138/1793/0`（declines 上升 = `draining` 门控让其他组退避）；format 后空盘基线读 887 KB/s，确认上一轮 779 是 GC 竞争；cr=26.4k 窗口/103.7k pair、fallback=0）；命令 trace / 中止负例未做 | 序列状态跨窗口/跨 chunk（`ftl_cache_seq_t` + `pend_group_t.cmd_start/cmd_total`）；START 一次、中间 SEQ、LAST 只在断点；8 条 LBA 驻留 lookahead（不触发加载）；同 LUN 门控 + D4 `break_requested`；孤儿序列 1s 守卫（`ftl_cache_seq_idle_guard`，放 `.ssd_code_fast`）。编译四关（`all`/`release`/`tests UT=FTL`/`tests UT=FC`）零新告警；boot-only 代码（`ftl_init`/`ftl_contract_audit`/`contract_check_*`/`l2p_init`/`fc_init_internal`/`fc_bch_init`/`build_mod8_tables`）移 `.ssd_code_fast` 后 debug `.ssd_code_high` 57,168 B（余量 8,368 B），release 61,344 B。**必须上板**：45 一次 / 46×N / 47 一次且跨 chunk 无插入、读中途中止后再读、中止后 CP/journal 不饿死（RISK-IF-09/10）；顺带修 `request.c` io 模板残留（RISK-USB-07） |
 | P2 cache 写流式序列 | 正常路径已上板（2026-10-30 debug：写 869 KB/s、cw=25.5k 窗口/100.8k 页、abort=0、全盘 0 错误；**release -O2（23:14 镜像）：写 867 KB/s、`cw=25538/100912/7983/0`（abort=0）、全盘 0 错误**）；程序失败 / 掉电注入未做 | 写序列跨窗口/跨 chunk（首 49/中间 44/断点 48）；逐页确认 FIFO（第 i 页由 i+1 的 `FAIL_CACHE` 确认、末页由 END）；窗口前 L2P 预加载 + journal 预留，失败即以 END 收尾；控制器双槽（1 chunk lookahead、非末 chunk 立即流控回执、`TUD_MSC_RET_BUSY` 背压）。编译四关零新告警；debug `.ssd_code_high` 58,664 B（余量 6,872 B），DTCM 84,528 B。**必须上板**：写 trace（49 一次 / 44×N / 48 一次、跨 chunk 无插入）、H2testw、程序失败/掉电注入（RISK-IF-11/12/13） |
 | P3 门控 / 后台 / RR 审计 | 审计结论 + deadline 挂起 + 限流均上板验证（2026-10-30 新镜像：无 submit-stalled 刷屏，GC/CP/journal 推进；`d4=13882` 空盘 vs 24820 满盘） | `src/ftl` 下无绕过 `ftl_op_submit*` 的 `fc_submit` ⇒ 门控覆盖 host / GC / WL / CP / journal / metadata / L2P / RR；各后台路径把门控拒绝当 `FTL_AGAIN` 重试（迁移/RR 释放命令后下轮重试），被拒提交置 `break_requested`，序列在下一窗口收尾；`info` 新增 `d4=` 计数。BOT 串行下 RR（host 读触发）与写序列不共存。 |

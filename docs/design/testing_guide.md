@@ -500,7 +500,7 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 
 - `CFG_TUD_MSC_EP_BUFSIZE` 4096 → 16384；`[USB ] latency` DWT 统计；
 - stack guard release 启动崩溃修复（`RISK-PLAT-04`）；
-- LFSR 8-step 查表、FC 多 Pass 合并、FTL 确认批量化；
+- LFSR 8-step 查表、FC 读路径多步骤合并、FTL 确认批量化；
 - 写确认/TRIM 全异步、Journal 背压、CLI 上报错位修复、MIG 空块日志抑制。
 
 ### 9.3 后续方案

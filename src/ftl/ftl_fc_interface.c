@@ -657,7 +657,7 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
     // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
     // **只认 NAND_FAIL 是错的**：DATA_ERROR / MATA_ERROR 会让本页内容不可信却照常拷出——
     // · DATA_ERROR（UNC/CRC/RAID）：fc_data_path_read 在任何 CW 不可纠时**提前返回**，
-    //   buffer 停在 "ECC 半修正 + 未解扰" 态（Pass 2/3/4 全跳过），拷出来的是加扰垃圾；
+    //   buffer 停在 "ECC 半修正 + 未解扰" 态（步骤 2/3/4 全跳过），拷出来的是加扰垃圾；
     // · MATA_ERROR：页内 META 与预期不符 = **读到了别的页**（或页已擦除）。
     // 后果实例：L2P region 页读回垃圾 → l2p_cache_find_or_load 标 CLEAN → 垃圾 PBA
     // 被 flush 写回介质**永久化**，读路径再拿它当 ch/ce/lun 路由字段用。

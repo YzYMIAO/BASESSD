@@ -1708,7 +1708,7 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
         // 成败判据 = **全部**错误位（UNC / CRC / MATA_ERROR / NAND_FAIL / TIMEOUT / RAID），
         // 不是单看 NAND_FAIL：ECC 不可纠只置 UNC（fc_data_path.c 的 ECC 分支），
         // 页内 META 不符只置 MATA_ERROR——两者的 NAND_FAIL 都恒清，单看它会把
-        // 「内容不可信」当成功。且 UNC 时 FC 跳过后面的解扰/修正 pass，缓冲里
+        // 「内容不可信」当成功。且 UNC 时 FC 跳过后面的解扰/修正步骤，缓冲里
         // 是**加扰垃圾**，搬给 host 就是静默数据损坏。判据见 fc_cmd_status_has_error()。
         //
         // 分流依据是 pending->op（显式操作类型），不是 buffer——写请求的 buffer
@@ -2220,7 +2220,7 @@ void ftl_service_pump(void)
 {
     // [pump] 推进 NAND：fc_service。
     // 第 1 次调用即把本轮所有完成抽干（nand_dispatch_poll 全遍历 + sink 逐条消费），
-    // 之后几次走填充 pass；预算因此封顶的是"本轮跑几次 fc_service"，不是完成条数。
+    // 之后几次走填充轮次；预算因此封顶的是"本轮跑几次 fc_service"，不是完成条数。
     for (BYTE i = 0U; i < NAND_SUBMIT_BUDGET; i++)
     {
         if (fc_service() != FC_STATUS_OK)

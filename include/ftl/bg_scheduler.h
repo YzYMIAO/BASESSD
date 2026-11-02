@@ -5,7 +5,7 @@
  * bg_scheduler — 时间预算后台调度器（通用引擎 + FTL 任务表/档位策略）
  *
  * 一个模块同时承载两层内容：
- *   · 引擎：must-run pass + 预算 pass（charge 计账 / 预算不足截断）。
+ *   · 引擎：必跑任务 + 预算任务（charge 计账 / 预算不足截断）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
  *     void(ftl_ctx_t*)）+ 档位→预算映射（s_bg_level_cfg）+ 档位选择
  *     （bg_scheduler_level_select）+ 后台调度步入口（bg_scheduler_service）。
@@ -50,7 +50,7 @@ typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
 typedef struct
 {
     bg_task_func_t func;      /* 适配器（FTL 策略段定义） */
-    DWORD          mask;      /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；budget pass 按档位 task_mask 选择 */
+    DWORD          mask;      /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；预算任务按档位 task_mask 选择 */
     WORD           budget_us; /* 单次计账上限：charge = MIN(elapsed, budget_us) */
     bool           must_run;  /* true = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
 } bg_task_t;
@@ -79,7 +79,7 @@ typedef struct
 /* ── 引擎接口 ── */
 
 /**
- * @brief 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算（**表序即优先级**，预算不足截断）。
+ * @brief 跑一轮：先无条件跑 must-run，再按表序在总预算内跑其余任务（**表序即优先级**，预算不足截断）。
  *
  * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
  * 档位本身由策略层在调用前写入 sched->level（模块入口据此读本轮档位）。
@@ -118,7 +118,7 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
 /**
  * @brief [svc] 后台调度步入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
  *
- * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
+ * ⚠ bg_suspend 判定在函数内**最先**做（早于必跑任务）：`bbt --erase` 之后介质已空
  *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。
  *
  * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）

@@ -35,7 +35,7 @@
 
 /* ── 宏 ── */
 
-#define NAND_SUBMIT_BUDGET  (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充 pass） */
+#define NAND_SUBMIT_BUDGET  (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充轮次） */
 #define CP_WRITE_INTERVAL   (1024U)  /* 写入量触发间隔 */
 #define CP_TIME_INTERVAL_MS (10000U) /* 定时触发间隔（ms）*/
 

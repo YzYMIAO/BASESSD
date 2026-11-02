@@ -346,7 +346,7 @@ typedef union
 
 /* command->meta 的「本命令无已知 LBA」哨兵。
  *
- * 数据命令的 meta 是本命令的**扇区 LBA**；FC 侧 Pass 4 用它交叉校验读回的页内 META
+ * 数据命令的 meta 是本命令的**扇区 LBA**；FC 侧 步骤 4 用它交叉校验读回的页内 META
  * （读到了别的页 ⇒ MATA_ERROR）。但 GC / 掉电重建**不知道** LBA——正是要从页内 META
  * 读回来，故它们把 meta 置成本哨兵，FC 跳过「读错页」那一项校验（META 自洽性仍校验）。
  * 不用 0 当哨兵：0 是合法的扇区 LBA（页 0 / plane 0 / CW 0）。 */

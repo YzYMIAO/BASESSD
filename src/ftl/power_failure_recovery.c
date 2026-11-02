@@ -1175,7 +1175,7 @@ static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE b
 
         // 诊断：把「快照是否加载 / 是否应用 / 回放是否成功」一并打出——
         // ctx_ok=false 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
-        // Pass 0 拒绝）、replay_ok=false 或回放内部把 ok 清 0（降级/写失败）。
+        // 第 1 遍 拒绝）、replay_ok=false 或回放内部把 ok 清 0（降级/写失败）。
         // `vc_end` / `live` 是**回放结束后**该块的值，用来区分两种根因：
         //   vc_end > 0 ⇒ sub 跑在对应 add 之前（回放顺序/重复问题）；
         //   vc_end == 0 ⇒ 该块在快照里就没有有效 CW（账本/快照分叉）。
@@ -1593,7 +1593,7 @@ static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stat
             // 动态 LOG 块归 metadata_dir 所有，不在 allocator 任何池里——但 BST state
             // **必须显式写 LOG**，不能留 NONE。`cp_block_snapshot()` 只按
             // BST state + OP/Spare 池归属编码块表；NONE 且无池标签会被下一次开机的
-            // `pfr_restore_blocks()` Pass 0 判为非法并拒绝**整份**快照
+            // `pfr_restore_blocks()` 第 1 遍 判为非法并拒绝**整份**快照
             // ⇒ 又走全盘 build，形成每次冷启动都 rebuild 的循环（RISK-BOOT-15）。
             // Directory 是动态 LOG 块身份的唯一权威，这里按它落 state。
             if (md_block_is_metadata(ftl->metadata_dir, plane, block))
@@ -1659,12 +1659,12 @@ static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stat
 /**
  * @brief 按 Checkpoint 块元数据快照恢复 BST 块状态与 Closed 列表。
  *
- * Pass 0 先全量校验所有 word，任何非法 word 都在改动状态之前拒绝；随后
- * Pass 1 恢复 state/valid/temp/sb，Pass 2 用 Metadata Directory 修正动态 LOG 块，
- * Pass 3 为 CLOSED 块补发 Closed 条目。
+ * 第 1 遍：先全量校验所有 word，任何非法 word 都在改动状态之前拒绝；随后
+ * 第 2 遍：恢复 state/valid/temp/sb；第 3 遍：用 Metadata Directory 修正动态 LOG 块；
+ * 第 4 遍：为 CLOSED 块补发 Closed 条目。
  *
  * @param ftl   FTL 实例
- * @param words 每块 16-bit 快照 word（FTL_BLOCK_TOTAL 项）；Pass 2 会回写对账后的 LOG 块
+ * @param words 每块 16-bit 快照 word（FTL_BLOCK_TOTAL 项）；第 3 遍会回写对账后的 LOG 块
  *
  * @return true  = 恢复完成；
  *         false = 快照存在非法 word / 池标签冲突 / Closed 列表满，调用者应 reset 并回退 full metadata rebuild。
@@ -1673,7 +1673,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 {
     alc_t *alloc = &ftl->alloc;
 
-    // Pass 0：先全量校验。任何非法 word 必须在**改动任何状态之前**拒绝——
+    // 第 1 遍：先全量校验。任何非法 word 必须在**改动任何状态之前**拒绝——
     // 否则后面遇到坏 word 时，前面已应用的 BAD/state 会留下（reset 保留 BAD），
     // 语义损坏的快照可以永久标坏好块。
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
@@ -1686,7 +1686,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 
         if (pfr_block_is_fixed(g) || ftl_block_is_bad(&alloc->blocks[g]))
         {
-            continue; /* 这两类在 Pass 1 不读取 word 的字段 */
+            continue; /* 这两类在 第 2 遍 不读取 word 的字段 */
         }
 
         if ((valid > CP_BLOCK_WORD_MAX_VALID) || (st > FTL_BLOCK_STATE_BAD) || (temp > 1U) || (pool > CP_BLOCK_POOL_SPARE))
@@ -1705,7 +1705,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
             return false;
         }
         // live 动态 LOG 块例外：它不属任何 allocator 池，full rebuild 留下的
-        // word 就是 NONE/no-pool。Directory 是身份的唯一权威 ⇒ 放行；Pass 2 会把它
+        // word 就是 NONE/no-pool。Directory 是身份的唯一权威 ⇒ 放行；第 3 遍 会把它
         // 修正为 LOG（RISK-BOOT-15 的自愈路径，避免为一处旧快照做全盘 rebuild）。
         if ((st == FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE) && (md_live_count_get(ftl->metadata_dir, g) == 0U))
         {
@@ -1714,7 +1714,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
         }
     }
 
-    // Pass 1：state / valid / temp / sb_id（不做池、不发 Closed 条目）。
+    // 第 2 遍：state / valid / temp / sb_id（不做池、不发 Closed 条目）。
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         const WORD w     = words[g];
@@ -1780,7 +1780,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
                 break;
 
             case FTL_BLOCK_STATE_LOG:
-                // Directory 在 Pass 2 对账（它才是动态块身份的权威）。
+                // Directory 在 第 3 遍 对账（它才是动态块身份的权威）。
                 ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
                 ftl_block_clear_valid(b);
                 ftl_block_set_temp(b, 0U);
@@ -1818,7 +1818,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
         }
     }
 
-    // Pass 2：Metadata Directory 是动态 LOG 块的唯一权威。
+    // 第 3 遍：Metadata Directory 是动态 LOG 块的唯一权威。
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         if (pfr_block_is_fixed(g))
@@ -1849,7 +1849,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
         }
     }
 
-    // Pass 3：Closed 列表（退化单 plane；Open 已在 Pass 1 降级）。
+    // 第 4 遍：Closed 列表（退化单 plane；Open 已在 第 2 遍 降级）。
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         if (pfr_block_is_fixed(g))

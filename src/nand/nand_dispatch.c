@@ -222,7 +222,7 @@ BYTE nand_dispatch_is_armed(void)
  *   功能：查询目标 LUN FIFO 的剩余槽数。
  *   参数：ch/ce/lun —— 目标。
  *   返回：剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- *   实现要点：FC 填充 pass 靠它判断能否放下整条链（need ≤ free 才下发）。
+ *   实现要点：FC 填充轮次靠它判断能否放下整条链（need ≤ free 才下发）。
  *         ch/ce/lun 由调用者保证在界内（唯一调用者 fc_poll_fill 调用前已断言）。
  * -------------------------------------------------------------------- */
 BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)

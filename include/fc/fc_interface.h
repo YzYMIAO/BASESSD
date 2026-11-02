@@ -357,8 +357,8 @@ extern "C"
         BYTE  hsq_head_op;
         BYTE  lun_used;       /* NAND per-LUN FIFO 已用槽 */
         BYTE  lun_phase;      /* NAND per-LUN FSM 相位（LUN_PHASE_*） */
-        DWORD fill_calls;     /* FC 填充 pass 累计调用次数 */
-        DWORD fill_pops;      /* 填充 pass 累计从队列 pop 的命令数 */
+        DWORD fill_calls;     /* FC 填充轮次累计调用次数 */
+        DWORD fill_pops;      /* 填充轮次累计从队列 pop 的命令数 */
         BYTE  sq_head_state;  /* SQ 头命令的状态（fc_cmd_state_e：0=FREE 1=QUEUED 2=ACTIVE 3=COMPLETED） */
         WORD  sched_sq_count; /* 调度器实际扫描的 SQ 的 count（应与 sq_used 相同） */
         BYTE  sched_sq_bound; /* 1 = scheduler->sq/hsq 就绑在 controller->sq/hsq 上 */

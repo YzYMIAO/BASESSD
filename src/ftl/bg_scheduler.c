@@ -2,7 +2,7 @@
  * bg_scheduler.c — 时间预算后台调度器：引擎 + FTL 任务表/档位策略
  *
  * 本文件两段：
- *   · 引擎（本段）：机械执行 Pass 0 must-run + Pass 1 预算任务，不认识任何具体任务。
+ *   · 引擎（本段）：机械执行「必跑任务（must-run）」与「预算任务」两批，不认识任何具体任务。
  *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_tasks + 档位表 s_bg_level_cfg
  *     + 装配 / 选档 / 后台调度步入口。
  *
@@ -65,16 +65,16 @@ static const bg_level_cfg_t s_bg_level_cfg[BG_LEVEL_NUM] = {
  * 引擎
  * ════════════════════════════════════════════════════════════════════════ */
 
-// 执行一轮：Pass 0 无条件跑 must-run（表序即优先级），Pass 1 在总预算内按表序跑非 must-run。
+// 执行一轮：先无条件跑 must-run（表序即优先级），再在总预算内按表序跑非 must-run。
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
 {
     // 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不各自反查档位表。
     // 档位（sched->level）由策略层 bg_scheduler_service 在同轮先写入，本引擎不改。
     sched->cfg = cfg;
 
-    // Pass 0：must-run 正确性关键集（不 gate、不占预算）。
+    // 必跑任务：正确性关键集（不 gate、不占预算）。
     // 表序即执行序：cp_handle（表首）必须最先——在飞的 CP 要跨轮推进，
-    // 拖到预算 pass 里会被低优先级/预算耗尽饿死。
+    // 拖到预算任务里会被低优先级/预算耗尽饿死。
     for (BYTE i = 0U; i < sched->task_count; i++)
     {
         if ((sched->tasks[i].func != NULL) && sched->tasks[i].must_run)
@@ -83,7 +83,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
         }
     }
 
-    // Pass 1：预算 + 优先级（表按执行序预排序，线性扫）。
+    // 预算任务：按表序 + 总预算（表已按执行序预排序，线性扫）。
     const ssd_platform_ops_t *platform         = ssd_platform_get();
     const bool                clock_ok         = (platform != NULL) && (platform->time_us != NULL);
     DWORD                     budget_remaining = cfg->total_budget_us;
@@ -151,10 +151,10 @@ static cp_trigger_t bg_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason
 /* ── 10 个适配器（包异构 kick → void(ftl_ctx_t*)）── */
 
 /**
- * @brief 表首 · must_run（引擎 Pass 0 最先执行）—— 推进**已在飞**的 Checkpoint job。
+ * @brief 表首 · must_run（引擎最先执行的一批）—— 推进**已在飞**的 Checkpoint job。
  *
  * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续步骤
- * 要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死。
+ * 要跨多轮跨档位走完——排在预算任务里会被低优先级/预算耗尽饿死。
  *
  * @param ftl FTL 上下文（推进其 cp_handle 上的在飞 job）。
  */
@@ -357,7 +357,7 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
 
 // bg_scheduler_service — [svc] 后台调度：bg_suspend 判定 → 选档 → 取档位配置 → 引擎跑一轮。
 //
-// ⚠ bg_suspend 必须**最先** return（早于 must-run pass）：`bbt --erase` 之后介质已空
+// ⚠ bg_suspend 必须**最先** return（早于必跑任务）：`bbt --erase` 之后介质已空
 // 而 RAM 状态陈旧，任何后台写（含 must-run 里的 journal/CP/元数据目录）都是往干净
 // 芯片上倒垃圾。推进 NAND / 完成泵 / host 补发不受影响（NAND 泵与 host IO 照常）。
 //

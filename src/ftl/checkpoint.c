@@ -1338,7 +1338,7 @@ void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD wo
 
         // Directory 是动态 LOG 块身份的唯一权威：它不属 allocator 池，合法编码是
         // LOG + no-pool。若 BST 因历史路径停在 NONE，照实编码会让下一次开机的
-        // Pass 0 判为非法并拒绝**整份**快照（RISK-BOOT-15）⇒ 每次冷启动全盘 rebuild。
+        // 第 1 遍校验判为非法并拒绝**整份**快照（RISK-BOOT-15）⇒ 每次冷启动全盘 rebuild。
         // BAD 是终态，不得被 LOG 覆盖。
         if ((md_dir != NULL) && (ftl_block_is_bad(blk) == false) && (md_live_count_get(md_dir, g) > 0U))
         {

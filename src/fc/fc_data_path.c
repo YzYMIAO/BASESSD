@@ -173,7 +173,7 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
 {
     ASSERT(cw != NULL);
 
-    // 不吞 NOT_SUPPORTED：调用者（Pass 1）要把它当「成功但零纠正」处理
+    // 不吞 NOT_SUPPORTED：调用者（步骤 1）要把它当「成功但零纠正」处理
     return fc_ldpc_decode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE, ecc_bits);
 }
 
@@ -201,7 +201,7 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
     (void)memcpy(&read_meta, cw, FC_CRC_META_SIZE);
 
     // 自洽校验：META 低 3 位必须就是本 CW 的 plane/cw。**先抓这个**——
-    // 种子取自 META（Pass 2），META 损坏 ⇒ 种子也错 ⇒ 解出的 USER 是垃圾，
+    // 种子取自 META（步骤 2），META 损坏 ⇒ 种子也错 ⇒ 解出的 USER 是垃圾，
     // 而 ECC/CRC 都查不出来（CRC 在加扰区外、是明文，但它保护的是 USER，
     // 种子错时 CRC 必然不过——不过那已被记成 CRC_ERROR，语义不如这里直接）。
     // ⚠ 必须用 paa_to_plane/paa_to_cw 而非链走位：cw_bitmap 不满时
@@ -421,13 +421,13 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  * 读路径 Stage 1 — FC 内部，CQ push 前
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：- Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 的 1 比特
-// 占比 ≥ 99%（见 fc_cw_is_blank）的擦除页不算失败，置 EMPTY 后由后续 Pass 跳过。
+// 实现要点：- 步骤 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 的 1 比特
+// 占比 ≥ 99%（见 fc_cw_is_blank）的擦除页不算失败，置 EMPTY 后由后续步骤跳过。
 // - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
-// - Pass 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外），
+// - 步骤 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外），
 // 故 GC / 掉电重建不必预先知道 LBA。
-// - Pass 3：CRC 校验（使能时）——失败置 CRC_ERROR 位。
-// - Pass 4：META 读回 + 两项校验：① 自洽（低 3 位 == 本 desc 的 plane/cw）；
+// - 步骤 3：CRC 校验（使能时）——失败置 CRC_ERROR 位。
+// - 步骤 4：META 读回 + 两项校验：① 自洽（低 3 位 == 本 desc 的 plane/cw）；
 // ② 与本命令的 LBA 比对（command->meta 为 FC_META_UNKNOWN 时跳过）。任一不符置 MATA_ERROR。
 fc_status_e fc_data_path_process_read(const fc_command_t *command)
 {
@@ -453,7 +453,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
         }
     }
 
-    /* ── Pass 1: ECC 解码所有 CW ── */
+    /* ── 步骤 1: ECC 解码所有 CW ── */
     desc_id = (fc_descriptor_id_t)command->desc_id;
 
     for (cw = 0U; cw < total_desc; cw++)
@@ -512,7 +512,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
         return FC_STATUS_IO_ERROR;
     }
 
-    /* ── Pass 2：解扰 + CRC + META（合并为一次逐 CW 遍历）──
+    /* ── 步骤 2：解扰 + CRC + META（合并为一次逐 CW 遍历）──
      * 顺序不可换：解扰 → CRC → META。META/CRC 在加扰区之外，先读 META 取种子
      * 不会改变结果；擦除页永远按「无 LBA」处理（RISK-GC-12）。 */
     desc_id = (fc_descriptor_id_t)command->desc_id;

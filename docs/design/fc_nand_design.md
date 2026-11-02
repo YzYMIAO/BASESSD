@@ -110,7 +110,7 @@
 │  FC 模块（firmware 层：命令池 / desc 链 / buffer 池）          │
 │    fc_command.c     命令与 Descriptor 结构                    │
 │    fc_queue.c       SQ / HSQ / CQ 环形队列                    │
-│    fc_scheduler.c   调度器状态（SQ/HSQ 绑定；填充 pass 在 fc.c）│
+│    fc_scheduler.c   调度器状态（SQ/HSQ 绑定；填充轮次在 fc.c）│
 │    fc_data_path.c   写: META→CRC→加扰→ECC→Stripe RAID        │
 │                    读: ECC→解扰→CRC→META (+ RAID 恢复)       │
 │    fc_random/ldpc/raid/crc_engine.c  软件引擎                 │
@@ -317,7 +317,7 @@ struct fc_descriptor_t {
   代价：v24「一条公式造两个值」的便利消失，换来 FC 层内 PBA 归零。
 - **为什么 PBA 的 plane 在 page 之下**（与 PAA 相反）：FTL 的页号 `internal_lba` 里 plane 就是最低位（`ftl.c` 的 `l2p_cache_read(internal_lba + 1)` 取 plane1）。取 `LBA >> CW_WIDTH` 必须**逐位等于**今天的 `internal_lba`，否则 plane1 会变成 `internal_lba + 64`，L2P 编号、journal / checkpoint 的页号、所有 `+1` 约定全要改。选 `[page][plane]` 而不是跟 PAA 的 `[plane][page]` 就是**为了这一点**。
 - **PAA 布局不动**：`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 保持原样，`paa_make` 的全部调用点字段值逐位不变（v25 只把形参序换成 `nand_addr_t` 具名字段，见 §6.2）。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
-- **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用（PAA 不共用），所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，Pass 4 才能拿它做自洽校验。
+- **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用（PAA 不共用），所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，步骤 4 才能拿它做自洽校验。
 
 设计决策：
 - **Descriptor 中 CW 字段为"当前 CW 索引"**，不同于 Command 中 CW 为"数量减一"
@@ -375,7 +375,7 @@ FC_CMD_STATUS_WP         // (1<<7) 70h WP（0=protected，1=not protected）
 ⚠ 判据只在**解码路径**成立：RAW 读（LDPC_RAW）跳过 ECC，不产生本状态。
 全 0xFF 不是合法 BCH 码字，解码必然失败；若不单独识别就会报成 `UNC`，GC 读到半写块
 的空洞页时会把整块误标坏块（`RISK-GC-11`）。识别发生在 `fc_data_path_process_read()`
-Pass 1 解码失败之后：置 `EMPTY` 并跳过解扰 / CRC / META 三项。
+步骤 1 解码失败之后：置 `EMPTY` 并跳过解扰 / CRC / META 三项。
 `FC_CW_STATUS_ERROR_MASK` **不含** EMPTY——「页未编程」是介质合法状态，不是读错误。
 ⚠ 擦除页**一律跳过 META 自洽校验**（`RISK-GC-12`）。
 
@@ -443,7 +443,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 | 类 | 位置 | 情形 |
 |---|---|---|
-| **A. 介质 / ECC** | `fc_data_path.c:543` | `process_read` Pass 1 有 CW 不可纠 ⇒ **短路**返回（Pass 2/3/4 全没跑） |
+| **A. 介质 / ECC** | `fc_data_path.c:543` | `process_read` 步骤 1 有 CW 不可纠 ⇒ **短路**返回（步骤 2/3/4 全没跑） |
 | | `fc_data_path.c:692` | `raid_recover`：RAID 重建后 ECC 仍失败 ⇒ 硬件不可恢复 |
 | | `fc_ldpc_engine.c:170` | BCH 找不到 ≤ t 的解 |
 | | `fc_ldpc_qc_engine.c:331` | LDPC 迭代到不动点仍不收敛 |
@@ -470,7 +470,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
    生产**不看返回值**，只看 `desc->status`（Step 3 全链 OR，`fc.c:772`）。所以单测里
    `munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_IO_ERROR)`（`test_fc_level2.c:1107`）
-   钉的是**函数契约**——它仍是唯一钉住「Pass 1 失败即短路」的地方（后续「不解扰」「CW1=UNC 其余 READY」
+   钉的是**函数契约**——它仍是唯一钉住「步骤 1 失败即短路」的地方（后续「不解扰」「CW1=UNC 其余 READY」
    两条断言都依赖这个短路），但别把它当成「生产靠这个码判错」。
 
 ### 2.6 队列系统
@@ -483,7 +483,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 ### 2.7 调度器 (fc_scheduler_t)
 
-**v8（per-LUN FIFO，2026-10-06）**：调度规则改为「填充 pass」——`fc_poll_fill()`（在 `src/fc/fc.c`）
+**v8（per-LUN FIFO，2026-10-06）**：调度规则改为「填充轮次」——`fc_poll_fill()`（在 `src/fc/fc.c`）
 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进 NAND 侧 per-LUN FIFO：
 
 - **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（HSQ 同样参与链）。
@@ -494,8 +494,8 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 - **共享挂起表**：HSQ 挂起某 LUN 后，SQ 本轮也跳过该 LUN——否则同 LUN 的 SQ 命令会插到
   HSQ 命令之前下发，优先级倒挂。
 - **链锁（v52）**：一条链可能长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`），被拆成
-  多批、分多次填充 pass 下发。批与批之间若无跨 pass 状态，另一条队列的命令就会插进链的
-  「已下发部分」与「还没下发的部分」之间。故 `fc_scheduler_t` 持有一张**跨 pass 持久**的
+  多批、分多次填充轮次下发。批与批之间若无跨轮次状态，另一条队列的命令就会插进链的
+  「已下发部分」与「还没下发的部分」之间。故 `fc_scheduler_t` 持有一张**跨轮次持久**的
   per-LUN `chain_owner[ch][ce][lun]`（取值 `fc_chain_owner_t`：NONE / SQ / HSQ）：
   链一旦开始，该 LUN 的**填充权归链所在的那条提交队列独占**，直到链的 END 下发。规则三处
   （`fc_poll_fill_queue`）：**准入**——`chain_owner != NONE && != 本队列` 的命令回推跳过
@@ -663,7 +663,7 @@ fc_service()
   │          │     NAND 命令自身失败不算——状态已在 CQ entry 里）
   │          └─ 无完成（返回 0）→ 继续 ②
   │
-  ├─ ② fc_poll_fill(controller)                   ← 一次填充 pass（v8）
+  ├─ ② fc_poll_fill(controller)                   ← 一次填充轮次（v8）
   │     ├─ 快照 HSQ 数 → 扫 HSQ（need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
   │     ├─ 快照 SQ 数  → 扫 SQ （need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
   │     │                （HSQ/SQ 共用同一张挂起表：HSQ 挂起的 LUN，SQ 本轮也跳过）
@@ -686,7 +686,7 @@ fc_service()
         └─ nand_dispatch_submit_chain(reqs, count) ← 整链原子追加
 ```
 
-**要点**：一次 `fc_service()` 要么把本轮所有完成抽干（`nand_dispatch_poll` 全遍历 + sink 逐条消费），要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每个 LUN 每轮恰好 step 一次，完成经 sink 逐条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
+**要点**：一次 `fc_service()` 要么把本轮所有完成抽干（`nand_dispatch_poll` 全遍历 + sink 逐条消费），要么走一次填充轮次——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每个 LUN 每轮恰好 step 一次，完成经 sink 逐条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
 
 ---
 
@@ -1322,14 +1322,14 @@ NAND 读取完成
 NAND 读取完成
   │
   ├─ Stage 1 / FC 内部（CQ push 前）：fc_data_path_process_read()
-  │   Pass 1  ECC 解码每个 CW：
+  │   步骤 1  ECC 解码每个 CW：
   │     ├─ 全部成功 → 各 desc->status = READY，记录 ecc_bits
   │     └─ 有 CW 不可纠 → desc->status = UNC，
   │                       保持 ECC-corrected + scrambled（供 RAID 恢复）
-  │                       提前返回 IO_ERROR，跳过 Pass 2~4
-  │   Pass 2  解扰所有 CW（v24：seed 从页内**明文 META** 自举，范围 [8,520)）
-  │   Pass 3  CRC 校验 → 不匹配置 CRC_ERROR
-  │   Pass 4  META 读回：自洽（低 3 位 == 本 desc 的 plane/cw）+ 交叉校验
+  │                       提前返回 IO_ERROR，跳过步骤 2~4
+  │   步骤 2  解扰所有 CW（v24：seed 从页内**明文 META** 自举，范围 [8,520)）
+  │   步骤 3  CRC 校验 → 不匹配置 CRC_ERROR
+  │   步骤 4  META 读回：自洽（低 3 位 == 本 desc 的 plane/cw）+ 交叉校验
   │           （lba_to_meta(command->meta, plane, cw) 对比，command->meta == FC_META_UNKNOWN 时跳过后者）
   │           → 不匹配置 MATA_ERROR
   │
@@ -1350,11 +1350,11 @@ NAND 读取完成
 
 | 校验 | 抓什么 | 抓不到什么 |
 |---|---|---|
-| **Pass 1 ECC** | 介质里**随机散布**的位错（≤ t = 4） | **误纠**（报成功但解错，见 §21.3.3）；超能力 → `UNC` |
-| **Pass 3 CRC** | ECC **误纠**（落在 USER 那 512B 里的部分）+ **数据路径逻辑错**（buffer / 加扰 / 搬运任一环出错都会让 CRC 不过） | 只盖 `[8,520)`；对**系统性**错误图样有线性盲区（`g(x)` 的倍数是恒通过的） |
-| **Pass 4 META** | META 损坏——低 3 位**自洽**（== 本 desc 的 plane/cw）+ 与 `command->meta` **逐位精确比对** | `command->meta == FC_META_UNKNOWN` 时**跳过**精确比对（GC / 掉电重建不知道 LBA） |
+| **步骤 1（ECC）** | 介质里**随机散布**的位错（≤ t = 4） | **误纠**（报成功但解错，见 §21.3.3）；超能力 → `UNC` |
+| **步骤 3（CRC）** | ECC **误纠**（落在 USER 那 512B 里的部分）+ **数据路径逻辑错**（buffer / 加扰 / 搬运任一环出错都会让 CRC 不过） | 只盖 `[8,520)`；对**系统性**错误图样有线性盲区（`g(x)` 的倍数是恒通过的） |
+| **步骤 4（META）** | META 损坏——低 3 位**自洽**（== 本 desc 的 plane/cw）+ 与 `command->meta` **逐位精确比对** | `command->meta == FC_META_UNKNOWN` 时**跳过**精确比对（GC / 掉电重建不知道 LBA） |
 
-**加扰开启时还有一道隐式的**：Pass 2 的种子取自**页内明文 META**（`fc_random_seed_from_meta`），所以 META 错 ⇒ 种子错 ⇒ USER 解成垃圾 ⇒ Pass 3 必然失败。**这正是 GC 路径跳过 Pass 4 交叉校验仍然安全的原因**——但它是**隐式耦合**，一旦 `random=OFF` 就失效（见 §5.3）。
+**加扰开启时还有一道隐式的**：步骤 2 的种子取自**页内明文 META**（`fc_random_seed_from_meta`），所以 META 错 ⇒ 种子错 ⇒ USER 解成垃圾 ⇒ 步骤 3 必然失败。**这正是 GC 路径跳过 步骤 4 交叉校验仍然安全的原因**——但它是**隐式耦合**，一旦 `random=OFF` 就失效（见 §5.3）。
 
 ### 单 CW 步骤原语（v29）
 
@@ -1366,18 +1366,18 @@ descriptor / 链：
 |---|---|---|
 | `fc_data_path_meta_write(cw, meta)` | 写 Stage 0 | `memcpy(cw, &meta, 4)` |
 | `fc_data_path_crc_write(cw)` | 写 Stage 1a | `fc_crc_compute(cw + 8)` → 写 `cw[4..8)` |
-| `fc_data_path_scramble(cw, seed)` | 写 Stage 1b / 读 Pass 2 | `fc_random_transform(cw + 8, 512, seed)`；自反 ⇒ 加解扰同一函数 |
+| `fc_data_path_scramble(cw, seed)` | 写 Stage 1b / 读步骤 2 | `fc_random_transform(cw + 8, 512, seed)`；自反 ⇒ 加解扰同一函数 |
 | `fc_data_path_ecc_encode(cw)` | 写 Stage 2 | `fc_ldpc_encode(&FC_DATA_PATH_LDPC_CFG, cw, 520)` |
-| `fc_data_path_ecc_decode(cw, &ecc_bits)` | 读 Pass 1 | `fc_ldpc_decode(...)` |
-| `fc_data_path_crc_check(cw)` | 读 Pass 3 | 1 = 重算值 == `cw[4..8)` |
-| `fc_data_path_meta_check(cw, command_meta, paa)` | 读 Pass 4 | `FC_CW_STATUS_MATA_ERROR` 或 0 |
+| `fc_data_path_ecc_decode(cw, &ecc_bits)` | 读步骤 1 | `fc_ldpc_decode(...)` |
+| `fc_data_path_crc_check(cw)` | 读步骤 3 | 1 = 重算值 == `cw[4..8)` |
+| `fc_data_path_meta_check(cw, command_meta, paa)` | 读步骤 4 | `FC_CW_STATUS_MATA_ERROR` 或 0 |
 
 **为什么拆**：让「调了哪些步骤」直接等于「开了哪些功能」。单测（Level 2 步骤级）拿一块 buffer 调这些
 原语就能验算法本身，不必建链、也不必用 `config` 位去组合出「只开 CRC」这类状态。`fc_ldpc_config_t`
 也顺带收敛为文件内唯一一份 `FC_DATA_PATH_LDPC_CFG`（原在 encode / process_read / stripe_parity /
 raid_recover 各写了一遍字面量 `{520, 8, 4}`）。
 
-⚠ **留在管线里**（原语覆盖不到的）：gate 三个 `if` / Pass 2 的 `if (all_ok)` / 链遍历 / `desc->meta`
+⚠ **留在管线里**（原语覆盖不到的）：gate 三个 `if` / 步骤 2 的 `if (all_ok)` / 链遍历 / `desc->meta`
 写回 / `desc->status` 赋值 / 错误码透传——这些要验得建链，属「管线级」用例。
 ⚠ **提交出去的命令绝不能再手工调这些原语**——FC 自己会跑整条管线，重复编码 = 数据损坏。
 
@@ -1411,25 +1411,25 @@ FC 内部通过 fc_buffer_get_base() 获取 CW 基址（[0]），
 
 | 字段 | 范围 | 保护者 |
 |---|---|---|
-| META | `[0:4)` | **ECC**（在 `[0,520)` 码字内）+ Pass 4 自洽 / 精确比对 +（加扰开启时）种子耦合 |
+| META | `[0:4)` | **ECC**（在 `[0,520)` 码字内）+ 步骤 4 自洽 / 精确比对 +（加扰开启时）种子耦合 |
 | CRC | `[4:8)` | **ECC**——CRC 字段本身不自我覆盖，靠 ECC 保证它没在存储 / 传输中损坏 |
 | USER | `[8:520)` | **ECC** + **CRC-32** |
 | PARITY | `[520:528)` | **ECC**（它本身就是 ECC 的产物，没有第二层） |
 
-**为什么「CRC 只盖 USER」是分工，不是漏**：CRC 在这里的职责是**抓 ECC 误纠**（§21.3.3）——误纠是**整码字**事件，可能落在 META 也可能落在 USER；落在 USER 的由 CRC 抓，落在 META 的由 Pass 4 抓。而 Pass 4 在**期望值已知**时用的是**逐位精确比对**，检出率 100%，**比 CRC-32 的 1−2⁻³² 更强**。
+**为什么「CRC 只盖 USER」是分工，不是漏**：CRC 在这里的职责是**抓 ECC 误纠**（§21.3.3）——误纠是**整码字**事件，可能落在 META 也可能落在 USER；落在 USER 的由 CRC 抓，落在 META 的由 步骤 4 抓。而 步骤 4 在**期望值已知**时用的是**逐位精确比对**，检出率 100%，**比 CRC-32 的 1−2⁻³² 更强**。
 
 **四条读取路径的 META 保护矩阵**：
 
 | 路径 | `random` | `crc` | `command->meta` | META 靠什么查 |
 |---|---|---|---|---|
-| 主机数据读（`FTL_PAGE_CFG_DATA`） | ON | ON | 已知 | Pass 4 **精确比对** |
-| GC / 搬移读（`gc.c:52`） | ON | ON | `FC_META_UNKNOWN` | Pass 4 自洽（3 位）+ **种子耦合 → CRC 失败** |
-| 元数据页读（`FTL_PAGE_CFG_META`） | OFF | OFF | `0`（期望值即 `plane_cw`） | Pass 4 **精确比对** |
+| 主机数据读（`FTL_PAGE_CFG_DATA`） | ON | ON | 已知 | 步骤 4 **精确比对** |
+| GC / 搬移读（`gc.c:52`） | ON | ON | `FC_META_UNKNOWN` | 步骤 4 自洽（3 位）+ **种子耦合 → CRC 失败** |
+| 元数据页读（`FTL_PAGE_CFG_META`） | OFF | OFF | `0`（期望值即 `plane_cw`） | 步骤 4 **精确比对** |
 | RAW 读（`LDPC_RAW`） | OFF | OFF | — | 无——**刻意**（坏页也要原始数据） |
 
 **四条生产路径都能检出 META 损坏。**
 
-**行业对照**：这不是本工程的特例。T10 PI / DIF 的 guard 是 CRC-16，也**只盖逻辑块数据**；「地址对不对」靠 reference tag **与期望值比对**，不靠 CRC——与本工程 Pass 4 是同一个思路。判据不是「CRC 该盖哪些字节」，而是「**这个字段出错时，你能不能用别的手段发现**」：期望值已知 → 比对；期望值未知 → 需要**独立**校验；字段本身无冗余 → 只能靠 ECC。
+**行业对照**：这不是本工程的特例。T10 PI / DIF 的 guard 是 CRC-16，也**只盖逻辑块数据**；「地址对不对」靠 reference tag **与期望值比对**，不靠 CRC——与本工程 步骤 4 是同一个思路。判据不是「CRC 该盖哪些字节」，而是「**这个字段出错时，你能不能用别的手段发现**」：期望值已知 → 比对；期望值未知 → 需要**独立**校验；字段本身无冗余 → 只能靠 ECC。
 
 **⚠ 本工程的差异点**：GC / 掉电重建路径（期望值**未知**）靠的是**种子耦合**——它是加扰的一个**副产品**，没写进任何契约，且一旦 `random=OFF` 就失效。行业在这里会放一个**显式**校验（独立 CRC / 序号 / 冗余存储）。见 §8.2 与 §21.3.5。
 
@@ -1581,7 +1581,7 @@ static inline uint32_t   paa_to_nand_row(DWORD paa);         // 转换为 NAND �
 | 桩文件清理 | `bad_block.c`, `ecc.c`, `nand_command.c`, `nand_timing.c` 已删除 | ✅ 已解决 |
 | 双完成结构转换 | `fc_complete_from_nand()` 简化为直接字段拷贝 | ✅ 已解决 |
 | **FTL 只判 `NAND_FAIL`** | FC 把 `UNC` / `CRC_ERROR` / `MATA_ERROR` 都 OR 进 `completion.status`（`fc.c:772` 全链聚合），但 FTL 五处判据只查 bit0 ⇒ **已检出的错误当成功交给主机**（`*status_out = SSD_STATUS_OK`）。本工程无 read retry / RAID 兜底（`CONFIG_FC_RAID=0`）⇒ 等效 UBER ≈ `P(误纠)` 而非 `P(误纠) × 2⁻³²`（理论见 §21.3.3）。**在 FTL 层，本次不改 `src/ftl/**`** | 📝 已文档化 |
-| **GC / 掉电重建路径 META 缺显式校验** | `command->meta == FC_META_UNKNOWN` 时 Pass 4 交叉校验被跳过，META 只剩 3 位自洽 + **种子耦合**（隐式，且依赖加扰开启）。行业在此放显式校验（独立 CRC / 序号 / 冗余）。见 §5.3 | 📝 已文档化 |
+| **GC / 掉电重建路径 META 缺显式校验** | `command->meta == FC_META_UNKNOWN` 时 步骤 4 交叉校验被跳过，META 只剩 3 位自洽 + **种子耦合**（隐式，且依赖加扰开启）。行业在此放显式校验（独立 CRC / 序号 / 冗余）。见 §5.3 | 📝 已文档化 |
 
 ### 8.3 功能扩展规划
 
@@ -2866,7 +2866,7 @@ RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码
 
 ## 16. 命令链执行设计 (Phase D — 续)
 
-> ⚠ **运行时状态提示**：除 **FTL cache read / cache program 的 run** 外，FTL 命令恒设 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，走**单命令路径**（`fc_poll_dispatch_single`）。cache run 自 2026-10-30（P1 读流式，未上板）起标成链（窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`，可跨填充 pass / 跨 chunk 续链）⇒ 运行时**也会**走 `fc_poll_dispatch_chain`，见 [§23.9 的 v-streaming 更新](#239-澄清运行时其实不走命令链)。本章讲链式执行的设计与单测覆盖。
+> ⚠ **运行时状态提示**：除 **FTL cache read / cache program 的 run** 外，FTL 命令恒设 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，走**单命令路径**（`fc_poll_dispatch_single`）。cache run 自 2026-10-30（P1 读流式，未上板）起标成链（窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`，可跨填充轮次 / 跨 chunk 续链）⇒ 运行时**也会**走 `fc_poll_dispatch_chain`，见 [§23.9 的 v-streaming 更新](#239-澄清运行时其实不走命令链)。本章讲链式执行的设计与单测覆盖。
 >
 > 🔁 **v8 语义变更（2026-10-06，per-LUN FIFO）**：本章 16.2 起的方案描述**已被取代**。链不再是"执行中的 chain 对象 + cursor"，而是 **per-LUN 待处理 FIFO 里的连续 N 槽**（每槽 = 一条命令）：
 > - **原子**：`nand_dispatch_submit_chain()` 先判 `room >= N`，不足则整批拒收、无副作用；
@@ -3145,8 +3145,8 @@ fc_command_submit(&command_C);
 
 > ⚠ **「HSQ 在整个链执行期间无法插入」这句到 v52 才真正成立**。链长 ≤ `FC_SCHEDULER_CHAIN_MAX`（4）
 > 时，整条链一批进 FIFO，`nand_dispatch_submit_chain` 保证一批内原子，确实插不进；但**链长 > 4**
-> 时会被拆成多批、分多次填充 pass 下发，而 v51 及以前**批与批之间无锁** ⇒ HSQ 可插在批边界上。
-> v52 新增跨 pass 持久的 per-LUN 链锁（`fc_scheduler_t.chain_owner`，见 §2.7）补上这段：
+> 时会被拆成多批、分多次填充轮次下发，而 v51 及以前**批与批之间无锁** ⇒ HSQ 可插在批边界上。
+> v52 新增跨轮次持久的 per-LUN 链锁（`fc_scheduler_t.chain_owner`，见 §2.7）补上这段：
 > 链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发。
 
 ### 16.10 与 Phase D (函数指针表) 的关系
@@ -3158,14 +3158,14 @@ fc_command_submit(&command_C);
 | 改动范围 | nand_dispatch 内部 | nand_dispatch + fc_scheduler + fc |
 | 代码编译 | ✅ 通过 | ✅ 通过 |
 
-### 流程图：命令链执行（图 11 配套：调度器填充 pass）
+### 流程图：命令链执行（图 11 配套：调度器填充轮次）
 
 > 🔁 **v8 起本节已取代**：`fc_scheduler_select_chain` / `fc_scheduler_select` 与 busy 表、读饥饿保护全部删除。
 > 选择逻辑搬进 `src/fc/fc.c` 的 `fc_poll_fill()`——一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进
 > NAND 的 per-LUN FIFO。下方为**旧实现**的历史记录，保留以对照语义变化。
 
 ```text
-fc_poll_fill(controller)                ← 一次 pass（v8）
+fc_poll_fill(controller)                ← 一次填充轮次（v8）
   │
   ├─ 快照 HSQ 数 / SQ 数
   │
@@ -3185,7 +3185,7 @@ fc_poll_fill(controller)                ← 一次 pass（v8）
 返回：有下发 → OK；下发失败 → IO_ERROR；两队列空 → QUEUE_EMPTY；无 room → NOT_READY
 ```
 
-**旋转语义**：`pop(队头)+push(队尾)` 只动 head/tail 指针，Command Pool 内容不变；一次完整 pass 等价于一轮轮转，
+**旋转语义**：`pop(队头)+push(队尾)` 只动 head/tail 指针，Command Pool 内容不变；完整轮次走完等价于队列轮转一圈，
 未下发的命令保持相对顺序。
 
 <details>
@@ -3626,7 +3626,7 @@ FMC 总线 (地址/数据/控制线共用)
 
 | 层面 | 多通道支持程度 | 能否验证 |
 |------|--------------|---------|
-| FC 填充 pass（`fc_poll_fill`） | ✅ 代码完整，改 `CH_NUM` 即可（"忙"查 `nand_dispatch_lun_free`） | ❌ 单通道硬件 |
+| FC 填充轮次（`fc_poll_fill`） | ✅ 代码完整，改 `CH_NUM` 即可（"忙"查 `nand_dispatch_lun_free`） | ❌ 单通道硬件 |
 | dispatch per-LUN FIFO | ✅ 代码完整 | ❌ 单通道硬件 |
 | dispatch poll 遍历 | ✅ 代码完整 | ❌ 单通道硬件 |
 | FMC 后端 | ✅ 单例共享（`g_nand_fmc_instance`，窗口/时序与坐标无关） | ❌ 多 bank 需重构（单 NAND） |
@@ -3875,7 +3875,7 @@ boot 完成后: nand_enable_high_speed() → SET_FEATURES(01h, 5)
 
 > 🗑 **v8 起本章机制已删除（2026-10-06）**。`FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET`、
 > `fc_scheduler_op_is_read()`、`consecutive_write_count` 与相关旋转逻辑随 per-LUN FIFO 重构一并移除：
-> 填充 pass（`fc_poll_fill`）改为「HSQ 优先 + 按 LUN 保序」，不再做读写计数与读优先旋转。
+> 填充轮次（`fc_poll_fill`）改为「HSQ 优先 + 按 LUN 保序」，不再做读写计数与读优先旋转。
 > 在 `CH_NUM=CE_NUM=LUN_NUM=1` 的当前平台上该保护本就近乎无效（见 20.x 备注）。
 > 本章保留为设计记录，供未来多 LUN/多通道 QoS 重启时参考。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
@@ -4011,7 +4011,7 @@ ECC 超能力时有**两种**表现，只有第一种是安全的：
 UE ≈ P(误纠) × P(CRC 漏检) ≈ P(误纠) × 2⁻³²
 ```
 
-单靠 ECC 打不到 1e-15 / 1e-16 的 UBER 目标，**必须有 CRC 这一道**。本工程的读路径 Pass 3 就是它（见 §5.2）；「CRC 只覆盖 USER、不覆盖 META」是刻意的覆盖边界（见 §5.3）。
+单靠 ECC 打不到 1e-15 / 1e-16 的 UBER 目标，**必须有 CRC 这一道**。本工程的读路径 步骤 3 就是它（见 §5.2）；「CRC 只覆盖 USER、不覆盖 META」是刻意的覆盖边界（见 §5.3）。
 
 > 出处：Koopman, *32-Bit Cyclic Redundancy Codes for Internet Applications*, DSN 2002；
 > *Error Characterization, Mitigation, and Recovery in Flash-Memory-Based SSDs*（arXiv:1706.08642）；
@@ -4048,14 +4048,14 @@ UE ≈ P(误纠) × P(CRC 漏检) ≈ P(误纠) × 2⁻³²
 **不知道** LBA，只能从页内 META 读回来。若 META 仍在加扰区内，就构成"要 META 才能解扰 / 要解扰才能拿 META"
 的循环依赖；强行改种子会让 GC 解出垃圾 LBA → L2P 查不到 → 源块有效页被逐个标记无效却从未搬迁 →
 静默数据丢失。故加扰范围由 `[0,520)` 收窄到 `[8,520)`（`FC_CRC_USER_OFFSET` 起、`FC_BUFFER_USER_SIZE` 长），
-**META 与 CRC 保持明文**，读路径 Pass 2 直接读明文 META 自举种子。
+**META 与 CRC 保持明文**，读路径 步骤 2 直接读明文 META 自举种子。
 
 > 加扰粒度 = **被寻址逻辑单元**。本工程一个 CW（512 B 用户数据）= 一个扇区 = 一个逻辑单元，故每条 CW 用
 > 自己那条扇区 LBA 当种子；这正是业界"种子 = 被寻址逻辑单元的地址"（一个逻辑块由若干 512 B–2 kB 的
 > ECC 码字组成，块内码字共用该逻辑块的种子）。详见 `docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。
 
 **副作用（v38 记录）**：明文 META + 种子耦合还带来一个**隐式**的保护——**META 损坏会传染成 CRC 失败**
-（种子错 ⇒ USER 解成垃圾 ⇒ Pass 3 不过）。这是「期望值未知」路径（GC / 掉电重建）上 META 的**唯一动态保护**，
+（种子错 ⇒ USER 解成垃圾 ⇒ 步骤 3 不过）。这是「期望值未知」路径（GC / 掉电重建）上 META 的**唯一动态保护**，
 但它没写进任何契约，且依赖 `random` 开启。详见 §5.3 的「四条读取路径 META 保护矩阵」。
 
 #### 21.3.6 无硬件 XOR → 软件 RAID
@@ -4370,7 +4370,7 @@ dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 
 ### 23.7 流程图：调度器取命令决策（图 22）
 
 ```text
-fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
+fc_poll_fill()   ← 一次填充轮次（快照 HSQ/SQ 数量后各扫一遍）
   │
   ├─ 先扫 HSQ（快照数）：与 SQ 同一套链逻辑（HSQ 同样参与链）
   │     链锁准入（v52）：chain_owner[ch][ce][lun] 非 NONE 且非 HSQ → 回推跳过（不置 suspended）
@@ -4386,13 +4386,13 @@ fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
                 下发成功后按【批尾】chain 位更新 chain_owner（MORE→本队列 / END→NONE）
           → 否：该 LUN 本轮挂起 + 命令回推队尾（保序）
         FTL 的 cache read / cache program run 标成一条 chain（窗口末条在断点 END、
-        否则 MORE；窗口可跨填充 pass / 跨 chunk）⇒ need = 本趟填充窗口；批尾 MORE 时
+        否则 MORE；窗口可跨填充轮次 / 跨 chunk）⇒ need = 本趟填充窗口；批尾 MORE 时
         chain_owner 保持到链 END（见 §23.9 的 v-streaming 更新）
 ```
 
 要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；
 HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避免优先级倒挂）；
-**链锁（v52）**是另一张表（`chain_owner`，跨 pass 持久）——链没结束时，该 LUN 只接受链所在
+**链锁（v52）**是另一张表（`chain_owner`，跨轮次持久）——链没结束时，该 LUN 只接受链所在
 队列的命令，另一条队列回推，直到链 END 下发（见 §2.7）；
 "忙"由 `nand_dispatch_lun_free()` 表达，不再有 FC 侧 busy 表；读饥饿保护已删除。
 
@@ -4436,14 +4436,14 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 >
 > 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
-> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充 pass 下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨 pass 持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
+> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充轮次下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨轮次持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
 
 > 🔁 **v-streaming 更新（2026-10-30，P1 读流式，未上板）**：上面的「FTL 恒 `FC_CHAIN_END`
 > ⇒ 运行时 `chain_owner` 恒 NONE」**不再成立**。FTL cache read / cache program 把一条 run
-> 标成一条链：窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`（允许跨填充 pass、
+> 标成一条链：窗口末条在断点是 `FC_CHAIN_END`、否则 `FC_CHAIN_MORE`（允许跨填充轮次、
 > 读序列还允许跨 USB chunk 续链），`ftl_op_submit_batch()` 原子入队，序列打开期间
 > `ftl_op_submit*` 门控阻止同 LUN 的其他提交插入。运行时因此**会**走
-> `fc_poll_dispatch_chain`，`chain_owner` 的跨 pass 锁是这条路径的正确性前提。其余命令仍恒
+> `fc_poll_dispatch_chain`，`chain_owner` 的跨轮次锁是这条路径的正确性前提。其余命令仍恒
 > `END`。**未上板**：需要命令 trace 与中止/恢复负例（`known_risks.md` RISK-IF-07/09/10；
 > 设计见 `docs/design/ftl_design.md` §3.16，实现见 `src/ftl/cache_batch.c`）。
 
@@ -5178,7 +5178,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | 图 8 | FMC 后端 UOP 执行 | `grep -n "g_nand_fmc_handlers" src/nand/nand_fmc.c` |
 | 图 9 | nand_dispatch poll 遍历模型（per-LUN FIFO） | `grep -n "nand_dispatch_poll\|nand_dispatch_lun_step" src/nand/nand_dispatch.c` |
 | 图 10 | LUN 相位机（Phase V） | `grep -n "LUN_PHASE_" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
-| 图 11 | 调度器填充 pass（fc_poll_fill） | `grep -n "fc_poll_fill\|nand_dispatch_lun_free" src/fc/fc.c src/nand/nand_dispatch.c` |
+| 图 11 | 调度器填充轮次（fc_poll_fill） | `grep -n "fc_poll_fill\|nand_dispatch_lun_free" src/fc/fc.c src/nand/nand_dispatch.c` |
 | 图 12 | Stripe RAID 写提交 | `grep -n "fc_stripe_submit" src/fc/fc.c` |
 | 图 13 | 完成回写与 CQ 组装 | `grep -n "fc_complete_from_nand" src/fc/fc.c` |
 | 图 14 | 上电初始化分层调用时序 | `grep -n "fc_init\|nand_init\|ssd_ftl_boot_all" src/main.c` |
@@ -5189,7 +5189,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
 | 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_cycles\|min_busy_us\|delay_dwt_cycles_now" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
-| 图 22 | 调度器填充 pass 决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|chain_owner\|nand_dispatch_lun_free" src/fc/fc.c` |
+| 图 22 | 调度器填充轮次决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|chain_owner\|nand_dispatch_lun_free" src/fc/fc.c` |
 
 ## 附录 B：建议阅读顺序
 

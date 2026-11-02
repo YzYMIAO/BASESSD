@@ -17,7 +17,7 @@
  * 物理 block 边界不是断点——写 cache program 每条命令自带地址，序列跨 block 续写）。
  *
  * 两个方向都按窗口标 FC chain（窗口末条在**断点**是 FC_CHAIN_END，否则 FC_CHAIN_MORE），
- * 经 ftl_op_submit_batch() 原子、连续入队；FC 的 chain_owner 在链跨填充 pass 时
+ * 经 ftl_op_submit_batch() 原子、连续入队；FC 的 chain_owner 在链跨填充轮次时
  * 锁住该 LUN，另一队列回推。序列打开期间由 FTL 门控（ftl_op_submit*）延迟同 LUN 的
  * 其他提交，序列不会被 RR / GC / 其他 host 命令劈开。
  * 条件不满足一律回退普通单 pair 读 / wbuf 写路径。

@@ -8,7 +8,7 @@
 /*
  * 调度器：HSQ 优先于普通 SQ。
  *
- * 本模块只承载调度器状态与"命令链"描述类型；**选择逻辑在 fc.c 的填充 pass**
+ * 本模块只承载调度器状态与"命令链"描述类型；**选择逻辑在 fc.c 的填充轮次**
  * （fc_poll_fill）——它需要把选中的命令立即交给 fc_poll_dispatch_single/chain，
  * 与 FC 提交路径同文件。
  *
@@ -28,7 +28,7 @@ typedef struct
 /* ── 链归属队列（per-LUN 链锁）──
  *
  * 问题：一条链可能长于 NAND per-LUN FIFO 深（FC_SCHEDULER_CHAIN_MAX = 4），会被
- * fc_poll_chain_length 截成多批、分多次填充 pass 下发。批与批之间若没有**跨 pass** 的
+ * fc_poll_chain_length 截成多批、分多次填充轮次下发。批与批之间若没有**跨轮次** 的
  * 状态，另一条队列（HSQ 或 SQ）的命令就会插进链的「已下发部分」与「还没下发的部分」
  * 之间，把一条本该连续执行的链劈开。
  *
@@ -42,7 +42,7 @@ typedef struct
  * 空间、每趟清零；本表管「链没完」、跨趟保留。准入只回推、不置 suspended。
  *
  * 前置契约：链成员必须在**同一条提交队列**里**连续入队**。这是「只让拥有者队列喂」
- * 就够的全部理由——续批因此恒是该 LUN 在队列里**最老**的那几条，填充 pass 按序扫描
+ * 就够的全部理由——续批因此恒是该 LUN 在队列里**最老**的那几条，填充轮次按序扫描
  * 必然先取到它们。现有 fc_submit 一次只提交一条，连续性**无人保证**，靠调用者自觉
  * （与 fc_poll_chain_length 依赖的假设是同一个）。
  *
@@ -59,7 +59,7 @@ typedef struct
     fc_submission_queue_t *sq;
     fc_submission_queue_t *hsq;
     /* 链锁：链一旦开始，该 LUN 的填充权归链所在的队列独占，直到链的 END 下发。
-     * 取值 fc_chain_owner_e。**跨填充 pass 持久**——fc_poll_fill 的 suspended[] 每趟
+     * 取值 fc_chain_owner_e。**跨填充轮次持久**——fc_poll_fill 的 suspended[] 每趟
      * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。
      * 使用者：FTL 的 cache read / cache program run（整条序列标成一条 chain）。
      * 单命令（chain = END，链长 1）下发后恒写 NONE，即普通命令流不改变准入。 */

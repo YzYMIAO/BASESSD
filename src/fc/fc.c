@@ -172,7 +172,7 @@ static bool fc_is_page_write(BYTE operation)
     }
 }
 
-/* 填充 pass 计数：排障用（fc_debug_state_get 读取）。 */
+/* 填充轮次计数：排障用（fc_debug_state_get 读取）。 */
 static DWORD s_fill_calls;
 static DWORD s_fill_pops;
 
@@ -1576,7 +1576,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
 
     const BYTE submit_result = nand_dispatch_submit(&request);
 
-    // 填充 pass（fc_poll_fill）已按 nand_dispatch_lun_free() 预留槽位，
+    // 填充轮次（fc_poll_fill）已按 nand_dispatch_lun_free() 预留槽位，
     // 此处不应再遇到 NOT_READY；其余失败（设备未就绪等）才是真错误。
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
@@ -1645,7 +1645,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
 
     const BYTE submit_result = nand_dispatch_submit_chain(reqs, chain_count);
 
-    // 填充 pass 已按 nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。
+    // 填充轮次已按 nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
@@ -1834,7 +1834,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
 }
 
 /**
- * @brief 一次填充 pass——扫描 HSQ/SQ，把可下发的命令（含链）提交进 NAND per-LUN FIFO。
+ * @brief 一次填充轮次——扫描 HSQ/SQ，把可下发的命令（含链）提交进 NAND per-LUN FIFO。
  *
  * @param controller FC 控制器。
  *
@@ -1845,7 +1845,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
  * @note 实现要点：- **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
  * - **共享 suspended**：HSQ 因 room 不足挂起某 LUN 后，SQ 本轮也跳过该 LUN——
  * 否则同 LUN 的 SQ 命令会插到 HSQ 命令之前下发，优先级倒挂。
- * - **链锁独占（跨 pass 持久，与 suspended 正交）**：链一旦开始，该 LUN 的填充权
+ * - **链锁独占（跨轮次持久，与 suspended 正交）**：链一旦开始，该 LUN 的填充权
  * 归链所在队列独占，直到链的 END 下发——另一条队列的命令一律回推。
  * 与上一条的区别：suspended 管"本趟 room 不足"、每趟清零；chain_owner 管"链没完"、
  * 跨趟保留。两者互不影响（链锁准入只回推，不置 suspended）。
@@ -1949,7 +1949,7 @@ fc_status_e fc_poll_internal(fc_t *controller)
         return FC_STATUS_OK;
     }
 
-    // 无完成 → 填充 pass：一次扫描把可下发命令（含链）提交进 NAND per-LUN FIFO。
+    // 无完成 → 填充轮次：一次扫描把可下发命令（含链）提交进 NAND per-LUN FIFO。
     result = fc_poll_fill(controller);
     return result;
 }
