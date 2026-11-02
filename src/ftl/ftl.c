@@ -23,8 +23,8 @@
  *   步骤清单的唯一定义见 include/ftl/ftl.h 的 ftl_service() 契约。
  *
  * 文件结构（与下方分区注释一一对应）：
- *   1. 内部辅助        ftl_confirm_write / ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成
- *                      分支）/ pend_confirm_service
+ *   1. 内部辅助        ftl_confirm_write / ftl_confirm_pending / ftl_confirm_service /
+ *                      ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成分支）
  *   2. 对外接口        ftl_init / ftl_service_pump / ftl_service
  *   3. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
  *   4. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
@@ -96,6 +96,9 @@ static DWORD s_dangling_log_ms;
  * 1 s 一条足够定位「错在哪类页、哪个 PBA」。 */
 static DWORD s_cache_rd_err_log_ms;
 static DWORD s_dangling_suppressed;
+
+// 待入账超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
+static DWORD s_confirm_log_ms;
 
 // 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时，5 s 打一行并给出被
 // 抑制条数；平台时钟缺失时退化为 64 次一行。各类别用独立实例（互不抑制）。
@@ -419,13 +422,13 @@ typedef struct
 } ftl_page_desc_t;
 
 /**
- * @brief 写确认钩子（pend_confirm_service 调）：region 未就绪即返回 FTL_AGAIN 继续待入账；
+ * @brief 写确认事务：region 未就绪即返回 FTL_AGAIN 继续待入账；
  *        就绪后按页型（顺序映射页 / 通用页）写 Journal，再更新 L2P。
  */
 static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const ftl_page_desc_t *d)
 {
-    // 两个调用点（ftl_host_io_callback 的 `if (pending != NULL)` 内 / pend_confirm_service 的
-    // `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。
+    // 三个调用点（host 完成路径 / cache 写确认步 / 写确认服务）都传非空 ftl 与描述符
+    // ⇒ 不在本函数复检（§十附 / §二十六）。
     // 同理 d->lba 恒为**窗口基址**（唯一写点是 wb_handle(FLUSH) 的 wbuf.base）——
     // 下面用 ftl_lba_plane/cw(l) 取代"从位下标反解坐标"就依赖这条。
 
@@ -556,6 +559,26 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const ftl_page_desc_t *d)
 }
 
 /**
+ * @brief 待入账槽 → 确认描述的唯一构造点（host 完成路径与写确认服务共用）。
+ *
+ * @param ftl     实例。
+ * @param pending 待确认的写子操作记录。
+ * @return FTL_OK / FTL_AGAIN / FTL_ERROR（见 ftl_confirm_write）。
+ */
+static ftl_status_e ftl_confirm_pending(ftl_ctx_t *ftl, pend_req_t *pending)
+{
+    ftl_page_desc_t d;
+
+    d.lba       = pending->lba;
+    d.new_pba   = pending->new_pba;
+    d.new_pba1  = pending->new_pba1;
+    d.cw_bitmap = pending->cw_bitmap;
+    d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
+
+    return ftl_confirm_write(ftl, &d);
+}
+
+/**
  * @brief 覆盖/解除映射前的**常驻守卫**：L2P 指向的旧块在 BST 里 0 有效时留现场。
  *
  * 触发条件：`valid_count == 0` 却仍被 L2P 引用。此后每次覆盖写该 LBA 都会撞
@@ -682,7 +705,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_
  * @brief 写成功（非 cache 中间页）：逐 CW 确认 Journal + L2P + 有效计数。
  * ⚠ region 未就绪（正在异步加载）⇒ 把本项置为**待入账**：命令脱钩（command_id 置哨兵，本命令
  * 随即 release，id 会被复用）+ 组在飞数**不**递减（host 写组继续 pending），由
- * pend_confirm_service 每轮推进。与读失败的托管同构（命令脱钩、组不结算），区别是推进者
+ * ftl_confirm_service 每轮推进。与读失败的托管同构（命令脱钩、组不结算），区别是推进者
  * 在本文件而非 RR 引擎。
  * 返回 true = 已待入账 ⇒ 调用者**直接 release 并 return**（勿再动组簿记）。
  *
@@ -693,15 +716,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_
  */
 static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
 {
-    ftl_page_desc_t d;
-
-    d.lba       = pending->lba;
-    d.new_pba   = pending->new_pba;
-    d.new_pba1  = pending->new_pba1;
-    d.cw_bitmap = pending->cw_bitmap;
-    d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
-
-    if (ftl_confirm_write(ftl, &d) != FTL_AGAIN)
+    if (ftl_confirm_pending(ftl, pending) != FTL_AGAIN)
     {
         return false;
     }
@@ -712,12 +727,73 @@ static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
         pending->park_ms = ftl_job_now_ms();
     }
 
-    // 待入账：命令脱钩、组在飞数不递减；待入账列表与超时归 pending 模块
-    // （docs §5「Confirm → pending 服务」）。
+    // 待入账：命令脱钩、组在飞数不递减；待入账项存 pending 表，推进由本文件的
+    // 写确认服务负责（docs §5「Confirm → pending 服务」）。
     const WORD pending_idx = (pending - ftl->pending.slots);
 
     pend_confirm_park(&ftl->pending, pending_idx, pending->owners);
     return true;
+}
+
+/**
+ * @brief 写确认服务：推进**待入账**的写确认（ftl_service 的 [svc] 步）。
+ *
+ * @param ftl 实例。
+ *
+ * @note 循环在 FTL（控制器写管线的形态：映射更新由 FTL 执行），pending 只提供
+ *       表原语；结算顺序不变量由 pend_confirm_settle 维护。
+ */
+static void ftl_confirm_service(ftl_ctx_t *ftl)
+{
+    const DWORD now_ms = ftl_job_now_ms();
+
+    // 本轮进入时的待入账总数。限流日志必须报「同时有多少条在等」——只打扫描到的
+    // 第一条（常是 idx=0）会被误读成「只有一个 region 卡住」（RISK-HOST-05）。
+    const WORD parked = pend_confirm_get_count(&ftl->pending);
+
+    BYTE cursor = 0U;
+    BYTE index;
+
+    while (pend_confirm_find_next(&ftl->pending, &cursor, &index) == true)
+    {
+        pend_req_t *pending = &ftl->pending.slots[index];
+
+        if (pending->park_ms == 0U)
+        {
+            // 懒初始化待入账时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
+            // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
+            pending->park_ms = now_ms;
+        }
+
+        const ftl_status_e st = ftl_confirm_pending(ftl, pending);
+
+        if (st == FTL_AGAIN)
+        {
+            if (pend_confirm_is_expired(pending, now_ms) == false)
+            {
+                continue; /* region 仍在加载：保留待入账，下轮再来 */
+            }
+
+            // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
+            // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
+            if ((s_confirm_log_ms == 0U) || ((now_ms - s_confirm_log_ms) >= 5000U))
+            {
+                LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n",
+                     pending->lba,
+                     index,
+                     parked);
+                s_confirm_log_ms = now_ms;
+            }
+        }
+        else if (st != FTL_OK)
+        {
+            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, index);
+        }
+
+        const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+
+        pend_confirm_settle(&ftl->pending, index, status);
+    }
 }
 
 /**
@@ -1681,7 +1757,7 @@ static SSD_CODE_FAST void ftl_cache_seq_close_step(ftl_ctx_t *ftl)
 
 // 实现要点：按 {读,写}×{成功,失败} 分派到 4 个 ftl_host_io_* 分支（见各自注释）；
 // 其中读失败与写成功（region 未就绪）是**托管/待入账**路径——命令当场
-// release 并 return，组在飞数不递减，由 RR 引擎 / pend_confirm_service 收尾。
+// release 并 return，组在飞数不递减，由 RR 引擎 / ftl_confirm_service 收尾。
 // 其余路径收尾 pend_remove + 组聚合，最后 release
 // （**本服务函数拥有命令**）。
 //
@@ -1807,7 +1883,7 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
         // ⚠ 页打包下一页可能由**多个组**拼成 ⇒ 按 owners 位掩码逐组递减。
         // ⚠ owners 必须在 pend_remove **之前**取走：组完成通知会调 on_complete，
         // 回调可能重入 ftl_submit_* 并复用本槽 ⇒ 释放后再读就是读别人的字段。
-        // （另外两处结算点 read_recovery.c / pend_confirm_service 同此顺序。）
+        // （另外两处结算点 read_recovery.c / pend_confirm_settle 同此顺序。）
         DWORD owners = pending->owners;
 
         pend_remove(&ftl->pending, cmd_id);
@@ -1815,27 +1891,6 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
     }
 
     (void)fc_command_release(cmd);
-}
-
-/**
- * @brief pending 模块的 confirm handler：数据面事务仍在 FTL（Journal→L2P→BST 唯一顺序）。
- *
- * @param ctx 注入的 FTL 实例（pend_confirm_set_handler 绑定的 `ftl_ctx_t *`）
- * @param pending 待确认的写子操作记录
- * @return FTL_OK    已确认
- *         FTL_AGAIN 仍未就绪（由 pending 模块继续待入账）
- */
-static ftl_status_e ftl_confirm_handler(void *ctx, pend_req_t *pending)
-{
-    ftl_page_desc_t d;
-
-    d.lba       = pending->lba;
-    d.new_pba   = pending->new_pba;
-    d.new_pba1  = pending->new_pba1;
-    d.cw_bitmap = pending->cw_bitmap;
-    d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
-
-    return ftl_confirm_write((ftl_ctx_t *)ctx, &d);
 }
 
 /* ── 模块端口装配（每个 helper 只做一件事：建端口 + 绑定） ── */
@@ -1853,6 +1908,7 @@ void ftl_global_init(void)
     s_dangling_log_ms     = 0U;
     s_cache_rd_err_log_ms = 0U;
     s_dangling_suppressed = 0U;
+    s_confirm_log_ms      = 0U;
     s_flush_log_ms        = 0U;
     s_write_retry_logged  = 0U;
     memset(&s_flush_err_log, 0, sizeof(s_flush_err_log));
@@ -1915,9 +1971,8 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t
     // 编译期常量数组，见 ftl_op.c；旁表只回答"这条命令的私有状态在哪"。）
 
     // ├─ Pending Request 表（per-instance） ──
-    // confirm 待入账的推进归 pending 模块；事务 handler 由 FTL 注入一次。
+    // 待入账项存本实例的 pending 表；推进由 ftl_service 的写确认服务负责。
     pend_init(&ftl->pending);
-    pend_confirm_set_handler(ftl_confirm_handler);
 
     // ├─ storage 数组显式清零（启动不碰 .sram*_data；装配挂载块同）──
     // 五张表：alc_init 逐块读 ftl_block_is_bad() ⇒ blocks 必须先清零；
@@ -2228,7 +2283,7 @@ void ftl_service(ftl_ctx_t *ftl)
     // [svc] 写确认结算：推进**待入账**的写确认。必须早于 host 补发——待入账意味着那个 LBA
     // 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
     // 顺序约定：先处理**已完成**的，再下发新的。
-    pend_confirm_service(&ftl->pending, ftl);
+    ftl_confirm_service(ftl);
 
     // [svc] cache 序列确认：推进 cache 写序列的「已编程页表」——按序确认（Journal→L2P→BST）、
     // 撤销失败页、弹出已证明页（RISK-CACHE-27/28）。组早已完成，这里只做元数据记账。

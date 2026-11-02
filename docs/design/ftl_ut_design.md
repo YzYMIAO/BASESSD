@@ -20,7 +20,7 @@
    - **pure（RAM）**：测模块内部功能与不变量。真 NAND 只能打到正常路径，池闸门、组槽耗尽、同 LBA 合并、L2P 三态、Directory 主备提交等分支必须在 RAM 里构造。
    - **media（真 NAND）**：测跨模块契约与恢复路径，走 FTL host API + 真实 FC/NAND 完成。
 3. **模拟规模小、结构体同型**：pure 用例使用生产数组/结构体，只填少量状态（8 gblock、4 页、2~4 cache 行），不引入第二套编译期几何。
-4. **不新增生产 seam**：只用现有 `time_us`、`l2p_owner_fn_t`、`metadata_ring_probe_fn`、`jrn_replay_ctx_t`、`pending_confirm_handler_t`。
+4. **不新增生产 seam**：只用现有 `time_us`、`l2p_owner_fn_t`、`metadata_ring_probe_fn`、`jrn_replay_ctx_t`；待入账用例直接测 `pend_confirm_*` 纯原语（谓词实参带 `now_ms`），不注入 handler。
 5. **证据分级**：默认只打用例名 + 结果；`--log-visible info` 打简单前后对比（输入→输出关键值），
    `--log-visible debug` 打完整对比（逐项 inputs/outputs）；项目日志由 `--log-project` 单独控制，
    测试期间默认静默。证据必须能回答「断言比较的是哪两个值」，否则通过也不能服人（C8）。
@@ -185,7 +185,7 @@
 
 ### 4.3 `/ftl/pure/host/`（pending / group / wbuf / ftl_op / bg）
 
-15 个用例，参数化后 18 次运行。
+16 个用例，参数化后 19 次运行。
 
 | 用例 | 参数 | 覆盖 |
 |---|---|---|
@@ -194,7 +194,8 @@
 | `group_exhaustion` | — | 组槽耗尽返回 false 且不覆盖（RISK-PEND-02） |
 | `group_complete_once` | — | 多 owner 只完成一次 |
 | `group_failure_aggregation` | — | 子操作失败后 `agg_status` 粘滞，后续 OK 不清错 |
-| `confirm_park_timeout` | — | 写确认待入账：未到 deadline 保留待入账（槽/组/通知不动）；到达 `FTL_GROUP_DRAIN_TIMEOUT_MS` 释放槽并按 IO_ERROR 结算一次（RISK-HOST-05 的纯 RAM 部分；handler 由 `pend_confirm_get_handler` 保存并还原） |
+| `confirm_park_timeout` | — | 写确认待入账：`pend_confirm_is_expired` 在 deadline 前为 false、到点为 true；`pend_confirm_settle` 释放槽并按 IO_ERROR 结算一次（RISK-HOST-05 的纯 RAM 部分） |
+| `confirm_scan_skips_non_parked` | — | 遍历只命中 `WRITE_CONFIRM` 槽：同表内普通 used 写槽被跳过，结算不影响它（负例：`used` ≠ 待入账） |
 | `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners 与组在飞计数 |
 | `wbuf_drop_reset_owners` | — | DROP 清空页后 owners 结算一次（OK）、RESET 按 IO_ERROR 结算 |
 | `wbuf_density` | `n=1\|2\|4\|8` | pair 布局、稀疏 CW 位图（RISK-WB-03/IF-04） |

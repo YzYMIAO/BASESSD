@@ -13,13 +13,13 @@
  *   本文件     —— 两张表的增删查 + 组完成编排，无新数据结构。
  *
  * 存储：pending[] / groups[] 由 pending_ctx_t（per-instance）持有；文件级 static
- *   只放进程级 handler 与日志限流时间戳，不持有表数据。
+ *   只放下溢留痕的限流时间戳，不持有表数据。
  *
  * 文件结构：
  *   1. pending 表基础操作   init / alloc / find / remove / find_op / view_op / release_index / count
  *   2. 完成组操作           alloc / count / add·drop_subop / complete_subop[_multi] /
  *                           maybe_complete / has_window_pending
- *   3. write-confirm 待入账   set_handler / park / service
+ *   3. write-confirm 待入账   park / find_next / is_expired / settle / get_count
  *
  * ⚠ 读写判别必须**显式携带** op（pend_op_e），不可从 buffer 字段反推——
  *   写请求的 buffer 是数据源、非 NULL ⇒ `buffer != NULL` 对写恒真（见 pending.h 文件头）。
@@ -35,12 +35,6 @@
 #include <string.h>
 
 /* ── 文件级静态数据 ── */
-
-// write-confirm 事务 handler（ftl_init 注册一次，之后只读调用）。
-static pending_confirm_handler_t s_confirm_handler;
-
-// 待入账超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
-static DWORD s_park_log_ms;
 
 // 组 outstanding 下溢（重复完成 / 重复回滚）的 release 留痕：debug 由 ASSERT 拦住，
 // release 必须阻止 WORD 回绕（回绕 ⇒ 组永不完成 ⇒ host 写挂死）。
@@ -248,19 +242,10 @@ static void pend_note_underflow(const char *who, WORD gi)
     }
 }
 
-// 实现要点：outstanding 是「已下发、未完成」的组不变量。写点分散在 host 读
-// （ftl_issue_subop）与页打包写（wb_handle(APPEND)）两处、递减点分散在
-// 完成服务与提交失败回滚——任一处漏掉即 host 写组永不完成、挂死。
-// 故所有增减都收敛到本对函数；完整完成走
-// pend_group_complete_subop*（带聚合状态与完成通知），
-// 提交失败回滚走 drop（不触发完成通知）。
-void pend_group_add_subop(pending_ctx_t *table, WORD gi)
-{
-    ASSERT(gi < FTL_GROUP_MAX);
-    ASSERT(table->groups[gi].used == true);
-
-    table->groups[gi].outstanding++;
-}
+// 实现要点：outstanding 是「已下发、未完成」的组不变量。add 是单字段 fast path，
+// 定义在 pending.h（`static inline`，H42）；本文件保留递减侧——完整完成走
+// pend_group_complete_subop*（聚合状态 + 完成通知），提交失败回滚走 drop
+// （不触发完成通知）。任一处漏掉即 host 写组永不完成、挂死（§3.1）。
 
 // 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
 void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
@@ -386,19 +371,11 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
 /* ── write-confirm park（待入账列表 = pending 表里的 WRITE_CONFIRM 项）──
  *
  * 不另建一张列表：待入账项本来就在 pending 表里（op = WRITE_CONFIRM、command_id
- * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。pending 模块负责扫描/超时/结算，
- * 数据面事务由 FTL 注入的 handler 执行（C2/R9：不复制 Journal→L2P→BST 顺序）。 */
-
-// 注册写确认事务 handler（ftl_init 一次性），之后只读调用。
-void pend_confirm_set_handler(pending_confirm_handler_t handler)
-{
-    s_confirm_handler = handler;
-}
-
-pending_confirm_handler_t pend_confirm_get_handler(void)
-{
-    return s_confirm_handler;
-}
+ * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。
+ * 本模块只提供表原语（遍历 / 判超时 / 结算）；数据面事务由调用者的写确认服务
+ * 直调执行（C2/R9：不复制 Journal→L2P→BST 顺序）。
+ * 顺序不变量（owners → release → complete）只在本文件的 pend_confirm_settle 内
+ * 维护，调用者不碰 owners 与 release。 */
 
 // 把「已编程、确认未完成」的子操作转成待入账项（契约见 include/ftl/pending.h）。
 // 槽本身由写路径持有，这里只改 op / owners 两个字段；release 由结算侧（成功、
@@ -417,80 +394,70 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
     pending->park_ms    = ftl_job_now_ms();
 }
 
-/**
- * @brief 槽是否是「已编程、确认未完成」的待入账项。
- */
+// 槽是否处于待入账态：已占用且 op 已翻成 WRITE_CONFIRM。
 static bool pend_is_confirm_parked(const pend_req_t *p)
 {
     return (p->used == true) && pend_op_is_write_confirm(p->op);
 }
 
-// 写确认结算（[svc] 步骤之一，调用点见 ftl_service）。
-// 契约（时机 / 入参）见 include/ftl/pending.h；此处只记实现要点：
-//   · 逐条调确认 handler：FTL_AGAIN = region 仍在加载 ⇒ 保留待入账、下轮再来；
-//     待入账超过 FTL_GROUP_DRAIN_TIMEOUT_MS（100 ms）按 IO_ERROR 结算，避免元数据区
-//     卡死时 host 写永久挂起（它只兜「确认未完成」，兜不住别的等待）。
-//   · 结算顺序：先取走 owners、再释放槽——组完成通知可能重入复用本槽。
-//   · 只有真正结算（成功或失败）才释放槽并触发组完成；FTL_AGAIN 不动任何状态。
-void pend_confirm_service(pending_ctx_t *table, void *confirm_ctx)
+bool pend_confirm_find_next(const pending_ctx_t *table, BYTE *cursor, BYTE *out_index)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    ASSERT(table != NULL);
+    ASSERT(cursor != NULL);
+    ASSERT(out_index != NULL);
 
-    // 本轮进入时的待入账总数。限流日志必须报「同时有多少条在等」——只打扫描到的
-    // 第一条（常是 idx=0）会被误读成「只有一个 region 卡住」（RISK-HOST-05）。
-    WORD parked = 0U;
-
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = *cursor; i < FTL_PENDING_MAX; i++)
     {
-        if (pend_is_confirm_parked(&table->slots[i]))
+        if (pend_is_confirm_parked(&table->slots[i]) == true)
         {
-            parked++;
+            *out_index = i;
+            *cursor    = (BYTE)(i + 1U);
+            return true;
         }
     }
 
+    *cursor = (BYTE)FTL_PENDING_MAX;
+    return false;
+}
+
+bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms)
+{
+    ASSERT(pending != NULL);
+
+    // park_ms == 0 = 尚未起算（懒初始化）⇒ 不判超时。平台时钟缺失时 now_ms 恒 0，
+    // 同样永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
+    return (pending->park_ms != 0U) && ((now_ms - pending->park_ms) >= FTL_GROUP_DRAIN_TIMEOUT_MS);
+}
+
+void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
+{
+    ASSERT(table != NULL);
+    ASSERT(index < FTL_PENDING_MAX);
+
+    pend_req_t *pending = &table->slots[index];
+
+    ASSERT(pend_is_confirm_parked(pending));
+
+    // owners 必须在释放**之前**取走：组完成通知可能重入提交并复用本槽。
+    const DWORD owners = pending->owners;
+
+    pend_release_index(table, index);
+    pend_group_complete_subop_multi(table, owners, status);
+}
+
+WORD pend_confirm_get_count(const pending_ctx_t *table)
+{
+    ASSERT(table != NULL);
+
+    WORD count = 0U;
+
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        pend_req_t *pending = &table->slots[i];
-
-        if (pend_is_confirm_parked(pending) == false)
+        if (pend_is_confirm_parked(&table->slots[i]) == true)
         {
-            continue;
+            count++;
         }
-
-        if (pending->park_ms == 0U)
-        {
-            // 懒初始化待入账时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
-            // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
-            pending->park_ms = now_ms;
-        }
-
-        const ftl_status_e st = s_confirm_handler(confirm_ctx, pending);
-
-        if (st == FTL_AGAIN)
-        {
-            if ((now_ms - pending->park_ms) < FTL_GROUP_DRAIN_TIMEOUT_MS)
-            {
-                continue; /* region 仍在加载：保留待入账，下轮再来 */
-            }
-
-            // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
-            // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
-            if ((s_park_log_ms == 0U) || ((now_ms - s_park_log_ms) >= 5000U))
-            {
-                LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n", pending->lba, i, parked);
-                s_park_log_ms = now_ms;
-            }
-        }
-        else if (st != FTL_OK)
-        {
-            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
-        }
-
-        // 结算：owners 必须在释放**之前**取走（组完成通知可能重入复用本槽）。
-        const DWORD        owners = pending->owners;
-        const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
-
-        pend_release_index(table, i);
-        pend_group_complete_subop_multi(table, owners, status);
     }
+
+    return count;
 }

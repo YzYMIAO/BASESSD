@@ -15,6 +15,7 @@
  *   **buffer 非空 ≠ 写。**
  */
 
+#include "assertion.h"  /* ASSERT（inline 组计数 fast path） */
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
 #include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_t, ssd_status_e */
 
@@ -70,8 +71,8 @@ typedef enum
                                    *   L2P region 未就绪（正在异步加载）时把本项置为**待入账**——
                                    *   FC 命令已脱钩（command_id = FTL_PENDING_CMD_NONE）、
                                    *   组在飞数**不**递减（host 写组继续 pending）。
-                                   *   与 READ_RECOVERY 的差别：无外部引擎，由 pend_confirm_service
-                                   *   每轮扫描推进（pend_find_op 按下标序找它）。
+                                   *   与 READ_RECOVERY 的差别：无外部引擎，由调用者的写确认服务
+                                   *   每轮用 pend_confirm_find_next 扫描推进。
                                    *   ⚠ 待入账项**不可被 pend_find 撞到**：id 已置哨兵。
                                    *   术语：本仓中文名「待入账」，主流称 deferred write completion
                                    *   （DFTL 的 translation page miss 导致映射更新延后）。英文代码
@@ -105,7 +106,7 @@ typedef enum
  *
  * 语义：
  *   is_read / is_write —— **活跃**子操作，完成路径按它们分派（拷数据 / 确认记账）。
- *   is_write_confirm   —— **待入账**态（命令已脱钩、组在飞数不递减），由 pend_confirm_service
+ *   is_write_confirm   —— **待入账**态（命令已脱钩、组在飞数不递减），由写确认服务
  *                         每轮扫描推进，完成路径不碰它。
  *   （READ_RECOVERY 同为待入账态，但判别走 pend_find_op 的**搜索实参**，不是谓词。） */
 /**
@@ -137,7 +138,7 @@ static inline bool pend_op_is_write(BYTE op)
  *
  * @param op pending 操作码。
  *
- * @return true = WRITE_CONFIRM（命令已脱钩，由 pend_confirm_service 推进）。
+ * @return true = WRITE_CONFIRM（命令已脱钩，由写确认服务推进）。
  */
 static inline bool pend_op_is_write_confirm(BYTE op)
 {
@@ -417,10 +418,20 @@ WORD pend_group_get_count(const pending_ctx_t *table);
  * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走
  * pend_group_complete_subop*（聚合状态 + 递减 + 试触发）。
  *
+ * add 是单字段 fast path（H42：头文件 inline）；drop / complete 带下溢策略与完成回调，
+ * 定义在 `.c`。
+ *
  * @param table  pending 表
  * @param gi   组下标（0..FTL_GROUP_MAX-1；组必须 used）
  */
-void pend_group_add_subop(pending_ctx_t *table, WORD gi);
+static inline void pend_group_add_subop(pending_ctx_t *table, WORD gi)
+{
+    ASSERT(gi < FTL_GROUP_MAX);
+    ASSERT(table->groups[gi].used == true);
+
+    table->groups[gi].outstanding++;
+}
+
 void pend_group_drop_subop(pending_ctx_t *table, WORD gi);
 
 /**
@@ -472,34 +483,16 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window);
 
 /* ── write-confirm park（docs §5「Confirm → pending 服务」）──
  *
- * 待入账列表归 pending 模块；FTL 不再扫 pending[] 找 PENDING_OP_WRITE_CONFIRM。
- * 事务（Journal → L2P → BST ±）仍由 FTL 注入的 handler 执行——pending 只负责
- * 遍历/超时/结算，避免把数据面事务复制进 pending 模块（C2/R9）。
+ * 待入账项就存在 pending 表里（op = WRITE_CONFIRM、command_id 已脱钩为哨兵），
+ * 不另建第二张列表（C9）。本模块只提供表原语（遍历 / 判超时 / 结算）；
+ * 数据面事务（Journal → L2P → BST ±）由调用者的写确认服务直调执行，
+ * 避免把数据面事务复制进 pending 模块（C2/R9）。
  *
- * handler 返回：
- *   FTL_OK    —— 事务已应用；pending 释放槽 + 组聚合完成；
- *   FTL_AGAIN —— region 未就绪；保留待入账，超 ms deadline 后按 IO_ERROR 收尾；
- *   FTL_ERROR —— 永久失败；释放槽 + 组报 IO_ERROR。
+ * 调用者按事务结果选择结算状态：
+ *   FTL_OK    —— 事务已应用；以 SSD_STATUS_OK 结算；
+ *   FTL_AGAIN —— region 未就绪；未到期保留待入账，到期后以 IO_ERROR 结算；
+ *   FTL_ERROR —— 永久失败；以 IO_ERROR 结算。
  */
-typedef ftl_status_e (*pending_confirm_handler_t)(void *ctx, pend_req_t *pending);
-
-/**
- * @brief 注册事务 handler（ftl_init 中调用一次）。
- *
- * @param handler 事务处理函数。
- */
-void pend_confirm_set_handler(pending_confirm_handler_t handler);
-
-/**
- * @brief 读回当前注册的事务 handler。
- *
- * @return 当前 handler（未注册时为 NULL）。
- *
- * @note 存在的唯一理由 = 让测试能**临时替换并原样还原**（待入账超时用例要注入
- *       一个恒返 FTL_AGAIN 的 handler）。生产代码不读它 —— 若有调用点，说明
- *       设计里出现了第二个事务入口。
- */
-pending_confirm_handler_t pend_confirm_get_handler(void);
 
 /**
  * @brief 把一个已成功编程、但确认尚未完成的写子操作登记进待入账列表。
@@ -511,11 +504,43 @@ pending_confirm_handler_t pend_confirm_get_handler(void);
 void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners);
 
 /**
- * @brief 推进待入账列表（ftl_service 的写确认结算步调用）。
+ * @brief 从 cursor 起取下一个待入账槽（只读遍历，不改任何状态）。
  *
- * @param table       pending 表。
- * @param confirm_ctx 事务 handler 的上下文。
+ * @param table      pending 表。
+ * @param cursor     [in,out] 扫描起点；命中后推进到命中项之后，扫完置 FTL_PENDING_MAX。
+ * @param out_index  命中的槽下标。
+ * @return true 命中一个待入账槽；false 本轮扫描结束。
  */
-void pend_confirm_service(pending_ctx_t *table, void *confirm_ctx);
+bool pend_confirm_find_next(const pending_ctx_t *table, BYTE *cursor, BYTE *out_index);
+
+/**
+ * @brief 待入账项是否已超过确认 deadline。
+ *
+ * @param pending 待入账槽。
+ * @param now_ms  当前时刻（ms）。
+ * @return true 已超时；
+ *         false 未超时，或尚未起算（park_ms == 0）。
+ */
+bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms);
+
+/**
+ * @brief 结算一个待入账槽：取 owners、释放槽、按 status 聚合完成组。
+ *
+ * @param table  pending 表。
+ * @param index  待入账槽下标（必须仍处于待入账态）。
+ * @param status 本次结算的完成状态（SSD_STATUS_OK / SSD_STATUS_IO_ERROR）。
+ *
+ * @note 顺序不变量在本函数内维护：owners 必须在释放**之前**取走 —— 组完成通知
+ *       可能重入提交并复用本槽。
+ */
+void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status);
+
+/**
+ * @brief 当前待入账项数（日志用：必须报「同时有多少条在等」）。
+ *
+ * @param table pending 表。
+ * @return 待入账项数。
+ */
+WORD pend_confirm_get_count(const pending_ctx_t *table);
 
 #endif /* FTL_PENDING_H */

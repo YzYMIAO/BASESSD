@@ -2928,14 +2928,14 @@ pend_group_complete_subop_multi(owners, status)
 | 脱钩态 | 触发 | 语义 | 谁推进 |
 |---|---|---|---|
 | `READ_RECOVERY` | 读 NAND 失败 | **错误恢复**：子操作托管给 RR job；恢复成功则拷回，失败则 IO_ERROR | `rr_handle`（§3.14） |
-| `WRITE_CONFIRM` | 写 NAND 成功、L2P region 未就绪 | **待入账**（deferred write completion）：映射入账延后到 region 就绪 | `pend_confirm_service`（每轮的**写确认结算**步） |
+| `WRITE_CONFIRM` | 写 NAND 成功、L2P region 未就绪 | **待入账**（deferred write completion）：映射入账延后到 region 就绪 | `ftl_confirm_service`（每轮的**写确认结算**步） |
 
 ⚠ `READ_RECOVERY` 属于错误恢复，不是「待入账」——复用同一张表只是为了不重复建队列；
 两者的推进者和超时语义都不同。脱钩项的 `command_id = NONE`、组 `outstanding` 不递减，
 收尾时由各自的推进者统一结算。
 
 **WRITE_CONFIRM 的超时预算是「无进展时长」而不是「待入账时长」**（RISK-HOST-05 支路 (a)）：
-确认 handler 在依赖**确实有待推进的工作**时刷新 `park_ms`——
+写完成路径在依赖**确实有待推进的工作**时刷新 `park_ms`——
 `ftl_confirm_progress_pending()`：L2P region 加载在飞 / region 写回在飞 / Journal 页写在飞 /
 Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journal 待刷条目；
 全都没有时不刷新，`FTL_GROUP_DRAIN_TIMEOUT_MS`（100 ms）到期按 IO_ERROR 结算。这样后台拥塞（CP 提交被门控、Journal 擦除排队）不会把**有限**的
@@ -2954,7 +2954,7 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 | 读 desc 链短于请求 | 立即 `SSD_STATUS_IO_ERROR` | 尾部缓冲未写，不得当数据交给 host |
 | cache program 批次任一成员失败 | 关闭目的 SB；整批不确认映射；已完成的成员立即 IO_ERROR，在飞成员等各自完成回调 | 未确认页成为无映射垃圾，由 GC 回收；host 可重试 |
 | 写 NAND 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚到旧数据 |
-| 写成功但 L2P 未就绪 | 待入账 → `pend_confirm_service` | 下轮补齐，不重复记账 |
+| 写成功但 L2P 未就绪 | 待入账 → `ftl_confirm_service` | 下轮补齐，不重复记账 |
 
 #### 3.9.9 常量与出处
 
@@ -3272,7 +3272,7 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
   - 实例步骤（按执行序，唯一定义见 `include/ftl/ftl.h` 的 `ftl_service()` 契约）：
-    **元数据候选池重算**（`md_pool_service`）→ **写确认结算**（`pend_confirm_service`）→
+    **元数据候选池重算**（`md_pool_service`）→ **写确认结算**（`ftl_confirm_service`）→
     **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_drain_group`）→
     **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
     **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台调度**（`bg_scheduler_service`）。
@@ -3391,7 +3391,7 @@ flowchart TB
         P1["fc_service x 最多 4 次"] --> P2["ftl_op_drain"]
     end
     subgraph "ftl_service ftl 每实例"
-        S1["pend_confirm_service"] --> S2["逐组 ftl_drain_group"]
+        S1["ftl_confirm_service"] --> S2["逐组 ftl_drain_group"]
         S2 --> S3["wb_handle(MAYBE_FLUSH_IDLE)"]
         S3 --> S4{"bg_scheduler_service: bg_suspend"}
         S4 -- "是" --> S5["return"]
@@ -4452,7 +4452,7 @@ sequenceDiagram
     alt 写成功且非中间页
         C->>L: 第一遍 ready 页对 + jrn_reserve(n)
         alt region 未就绪 或 Journal 容量不足
-            C->>C: 待入账 WRITE_CONFIRM 下轮 pend_confirm_service
+            C->>C: 待入账 WRITE_CONFIRM 下轮 ftl_confirm_service
         else 就绪且已预留
             loop 每个有效 CW
                 C->>J: jrn_append
@@ -4486,7 +4486,7 @@ sequenceDiagram
 - 分配不到页 ⇒ 紧急 GC + `FTL_AGAIN`；数据仍在 wbuf。
 - 提交失败 ⇒ 保留 wbuf，下轮重试。
 - PROGRAM 失败 ⇒ 关 SB + 标坏；L2P 不动（旧数据仍可达）。
-- L2P region 未就绪 ⇒ 待入账 `WRITE_CONFIRM`；`pend_confirm_service` 下轮重试，不重复记账。
+- L2P region 未就绪 ⇒ 待入账 `WRITE_CONFIRM`；`ftl_confirm_service` 下轮重试，不重复记账。
 - Journal 容量不足 / 页写在飞 / 换块待擦 ⇒ `jrn_reserve` 返 `false` ⇒ 同样待入账
   `WRITE_CONFIRM`；confirm 内**不同步**刷 Journal，由 `jrn_handle` 异步推进后再重试。
 
@@ -4805,7 +4805,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 状态机 | 状态 | 转移条件 | 谁推进 |
 |---|---|---|---|
 | **完成组** | `used=0 → used=1 → 完成 → used=0` | `next==total && outstanding==0` | `pend_group_*` |
-| **pending 项** | READ/WRITE → READ_RECOVERY / WRITE_CONFIRM → 释放 | 读失败 / 写成功但 L2P 未就绪 | `rr_handle` / `pend_confirm_service` |
+| **pending 项** | READ/WRITE → READ_RECOVERY / WRITE_CONFIRM → 释放 | 读失败 / 写成功但 L2P 未就绪 | `rr_handle` / `ftl_confirm_service` |
 | **L2P 行** | INVALID → LOADING → CLEAN → DIRTY → FLUSHING → CLEAN/INVALID | miss / 写 / flush / 驱逐 | `l2p_cache_*` / `ftl_l2p_callback` |
 | **Journal job** | IDLE → WRITE → （ERASE）→ IDLE | 页满 / 换块 | `jrn_handle` / `ftl_journal_callback` |
 | **CP job** | IDLE → FLUSH_REGIONS → DIR_CKPT_* → HDR_* → TRUNC_* → DONE | phase 完成 | `cp_handle` / `ftl_checkpoint_callback` |

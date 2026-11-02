@@ -520,7 +520,7 @@ void ftl_service_pump(void);
  * | 步骤 | 做什么 | 实现 |
  * |---|---|---|
  * | 元数据候选池重算 | 元数据 BAD 后重算候选池（纯 RAM；等 metadata job 空闲） | `md_pool_service` |
- * | 写确认结算 | 推进待入账的写确认（**必须先于 host 补发**：待入账意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `pend_confirm_service` |
+ * | 写确认结算 | 推进待入账的写确认（**必须先于 host 补发**：待入账意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `ftl_confirm_service` |
  * | cache 序列确认 | 按序确认已编程页（Journal→L2P→BST）、撤销失败页、弹出已证明页 | `ftl_cache_wr_confirm_step` |
  * | host 补发 | 逐组下发待补发的子操作（host IO 优先于后台） | `ftl_drain_group` |
  * | 序列收尾 | 孤儿序列超时关闭（读序列放弃）+ 写序列 padding END 有序收尾 | `ftl_cache_seq_idle_guard` / `_close_step` |

@@ -305,7 +305,7 @@ pending->command_id = FTL_PENDING_CMD_NONE;
 return;                                           /* 组在飞数**不**递减 */
 ```
 
-- 推进者**不是**外部引擎，而是 `pend_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
+- 推进者**不是**外部引擎，而是 `ftl_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
   按下标升序扫（待入账项的 `command_id` 已是哨兵，`pend_find` 查不到）：
   仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_host_io_callback` **完全相同**的收尾
   （`pend_release_index` + `pend_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
@@ -328,7 +328,7 @@ ftl_submit_write(ftl, &req)
     ├─ NAND_SUCCESS → ftl_confirm_write(ftl, pending)   ← ★ v0.75 阶段 5：**两遍式**
     │   ├─ 第一遍：逐 CW l2p_cache_ready(lba) → 任一未就绪 ⇒ 返 FTL_AGAIN（**一条都不动**）
     │   │            ⇒ 本项**待入账**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
-    │   │               组在飞数**不**递减），由 pend_confirm_service 每轮推进
+    │   │               组在飞数**不**递减），由 ftl_confirm_service 每轮推进
     │   └─ 第二遍（全部就绪）：
     │        l2p_cache_read(lba) → old_pba  ← ★ 完成时**重查 L2P**（不存提交时快照）
     │        journal_append(lba, old, new)  ← 确认后记录
@@ -956,7 +956,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
 > `mig_gc_request_urgent()` 只登记，下一轮由 must-run 启动。
 
-> ⚠ **Phase 2.5 的开头是 `pend_confirm_service()`**——推进**待入账**的写确认，
+> ⚠ **Phase 2.5 的开头是 `ftl_confirm_service()`**——推进**待入账**的写确认，
 > 必须早于补发循环：待入账意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作
 > 就会读到旧物理页。
 > ⚠ 每实例的写回在飞上限 `L2P_FLUSH_MAX_INFLIGHT = 4`（一次写回 = 1 命令 + 4 buffer，

@@ -1750,21 +1750,12 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     return MUNIT_OK;
 }
 
-/* confirm_park_timeout — 写确认待入账的超时收尾（RISK-HOST-05 的纯 RAM 部分）。
+/* confirm_park_timeout — 写确认待入账的超时判据与结算原语（RISK-HOST-05 的纯 RAM 部分）。
  *
- * 覆盖：handler 恒返 FTL_AGAIN 时，未到 deadline 保留待入账（槽/组/通知都不动）；
- *       到达 FTL_GROUP_DRAIN_TIMEOUT_MS 后释放槽、按 IO_ERROR 结算组一次。
+ * 覆盖：pend_confirm_is_expired 在 deadline 前为 false、到点（==）为 true；
+ *       pend_confirm_settle 释放槽、按 IO_ERROR 结算组一次；待入账计数随结算归零。
  * 判据：待入账项若永不超时，host 写组永久 pending ⇒ 后续 I/O 拿不到组槽（全系统 AGAIN）；
  *       若过早超时，正在异步加载的 region 会被误判失败（静默丢写）。纯 RAM。 */
-
-static ftl_status_e park_again_handler(void *ctx, pend_req_t *pending)
-{
-    (void)ctx;
-    (void)pending;
-
-    return FTL_AGAIN;
-}
-
 static MunitResult test_confirm_park_timeout(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1799,41 +1790,118 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     pend_validate(p); /* owners/n_cw 的 [BOUND] 不变量（pend_alloc 契约） */
     pend_confirm_park(&table, idx, owners);
     munit_assert_true(pend_op_is_write_confirm(p->op));
+    munit_assert_uint32(pend_confirm_get_count(&table), ==, 1U);
 
-    /* 待入账时刻显式给定：本用例不该依赖板端开机时钟是否已走（park_ms==0 会让
-     * service 走「懒初始化」分支，测不到超时）。 */
+    /* 待入账时刻显式给定：超时判据只吃 park_ms，不依赖板端开机时钟。 */
     p->park_ms = 1000U;
 
-    pending_confirm_handler_t old = pend_confirm_get_handler();
+    /* 超时判据是纯谓词：1099 未到、1100 到期（== deadline）。 */
+    munit_assert_false(pend_confirm_is_expired(p, 1099U)); /* 差 1 ms */
+    munit_assert_true(pend_confirm_is_expired(p, 1100U));  /* == FTL_GROUP_DRAIN_TIMEOUT_MS */
 
-    pend_confirm_set_handler(park_again_handler);
-
-    /* 伪时钟只包住 service 调用：断言失败时 munit 会 longjmp，
-     * 留在用例里的 install 会让后续用例读到倒退的时钟。 */
-    ftl_ut_clock_install();
-    ftl_ut_clock_set_ms(1099U); /* 差 1 ms 到 deadline */
-    pend_confirm_service(&table, NULL);
-    ftl_ut_clock_restore();
-
-    munit_assert_true(p->used); /* 未超时：仍待入账 */
+    /* 未到期：槽/组/通知都不动（判据成立才谈得上结算）。 */
+    munit_assert_true(p->used);
     munit_assert_true(g->used);
     munit_assert_uint32(flag, ==, 0U);
     munit_assert_uint32(pend_slot_get_count(&table), ==, 1U);
 
-    ftl_ut_clock_install();
-    ftl_ut_clock_set_ms(1100U); /* == FTL_GROUP_DRAIN_TIMEOUT_MS */
-    pend_confirm_service(&table, NULL);
-    ftl_ut_clock_restore();
+    /* 到期结算一次：释放槽 + 组按 IO_ERROR 完成。 */
+    pend_confirm_settle(&table, idx, SSD_STATUS_IO_ERROR);
 
     munit_assert_false(p->used);
     munit_assert_false(g->used);
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_IO_ERROR);
+    munit_assert_uint32(pend_confirm_get_count(&table), ==, 0U);
 
-    pend_confirm_set_handler(old);
+    ftl_ut_trace_detail("confirm park: t=1099 expired=0; t=1100 settle -> flag=%hhu status=%d",
+                        flag,
+                        (int)status);
+    ftl_ut_trace_summary("confirm park: predicate flips at deadline; settle releases once with IO_ERROR");
 
-    ftl_ut_trace_detail("confirm park: t=1099 -> parked=%d groups=%hu; t=1100 -> released flag=%hu status=%d", 1, pend_group_get_count(&table), flag, (int)status);
-    ftl_ut_trace_summary("confirm park: t<timeout keeps park; t==timeout settles IO_ERROR once");
+    return MUNIT_OK;
+}
+
+/* confirm_scan_skips_non_parked — 待入账遍历只命中 WRITE_CONFIRM 槽。
+ *
+ * 覆盖：同表内一个普通 used 槽 + 一个待入账槽时，pend_confirm_find_next 跳过前者、
+ *       只返回后者；结算后计数归零，普通槽不受影响。
+ * 判据：若遍历用 used 而不是 op 判别，会把在飞写当待入账结算 ⇒ 组被提前完成、
+ *       命令随后再结算一次（重复完成）。纯 RAM。 */
+static MunitResult test_confirm_scan_skips_non_parked(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ut_trace_begin();
+
+    pending_ctx_t         table;
+    BYTE                  gi     = 0U;
+    volatile BYTE         flag   = 0U;
+    volatile ssd_status_e status = SSD_STATUS_OK;
+
+    memset(&table, 0, sizeof(table));
+    pend_init(&table);
+    munit_assert_true(pend_group_alloc(&table, &gi));
+
+    pend_group_t *g      = &table.groups[gi];
+    const DWORD   owners = ftl_group_bit(gi);
+
+    g->op            = PENDING_OP_WRITE;
+    g->total         = (DWORD)FTL_LBA_PER_PAIR;
+    g->next          = (DWORD)FTL_LBA_PER_PAIR;
+    g->status_out    = &status;
+    g->complete_flag = &flag;
+    g->outstanding   = 1U;
+
+    /* 槽 A：普通在飞写（used 但 op 不是 WRITE_CONFIRM）。 */
+    pend_req_t *a = pend_alloc(&table);
+
+    a->lba    = FTL_UT_LBA_BASE;
+    a->n_cw   = FTL_LBA_PER_PAIR;
+    a->owners = owners;
+    a->op     = PENDING_OP_WRITE;
+    pend_validate(a);
+
+    /* 槽 B：待入账。 */
+    pend_req_t *b     = pend_alloc(&table);
+    const WORD  idx_b = (WORD)(b - table.slots);
+
+    b->lba    = FTL_UT_LBA_BASE;
+    b->n_cw   = FTL_LBA_PER_PAIR;
+    b->owners = owners;
+    pend_validate(b);
+    pend_confirm_park(&table, idx_b, owners);
+
+    munit_assert_uint32(pend_confirm_get_count(&table), ==, 1U);
+
+    BYTE cursor = 0U;
+    BYTE hit    = 0U;
+
+    /* 遍历必须跳过 A（used 但非待入账），只命中 B。 */
+    munit_assert_true(pend_confirm_find_next(&table, &cursor, &hit));
+    munit_assert_uint32(hit, ==, idx_b);
+    munit_assert_false(pend_confirm_find_next(&table, &cursor, &hit));
+
+    pend_confirm_settle(&table, idx_b, SSD_STATUS_OK);
+
+    munit_assert_true(a->used); /* 普通写槽不参与待入账结算 */
+    munit_assert_false(b->used);
+    munit_assert_uint32(flag, ==, 1U);
+    munit_assert_int(status, ==, SSD_STATUS_OK);
+    munit_assert_uint32(pend_confirm_get_count(&table), ==, 0U);
+
+    /* B 已释放后，剩下的 A 仍不该被遍历命中（负例：used ≠ 待入账）。 */
+    cursor = 0U;
+    munit_assert_false(pend_confirm_find_next(&table, &cursor, &hit));
+
+    ftl_ut_trace_detail("confirm scan: parked=%hu hit=%hhu; after settle a_used=%d flag=%hhu status=%d",
+                        pend_confirm_get_count(&table),
+                        hit,
+                        a->used,
+                        flag,
+                        (int)status);
+    ftl_ut_trace_summary("confirm scan: find_next skips used-non-parked; settle touches only parked");
 
     return MUNIT_OK;
 }
@@ -1994,22 +2062,23 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
 /* ══ 子套件 /ftl/pure/host/：pending / 组 / wbuf / op ctx / bg 调度（纯 RAM）══ */
 
 MunitTest g_ftl_pure_host_tests[] = {
-    {                (char *)"host_idle",                 test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {            (char *)"pending_slots",             test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {         (char *)"group_exhaustion",          test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {      (char *)"group_complete_once",       test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {(char *)"group_failure_aggregation", test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {     (char *)"confirm_park_timeout",      test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {         (char *)"wbuf_append_read",          test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {   (char *)"wbuf_drop_reset_owners",    test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {             (char *)"wbuf_density",              test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
-    {                   (char *)"op_ctx",                    test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {          (char *)"op_ctx_capacity",           test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                (char *)"bg_engine",                 test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                 (char *)"op_route",                  test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {          (char *)"bg_level_select",           test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    { (char *)"host_submit_invalid_args",  test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                               NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
+    {                    (char *)"host_idle",                     test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                (char *)"pending_slots",                 test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {             (char *)"group_exhaustion",              test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {          (char *)"group_complete_once",           test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {    (char *)"group_failure_aggregation",     test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {         (char *)"confirm_park_timeout",          test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {(char *)"confirm_scan_skips_non_parked", test_confirm_scan_skips_non_parked, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {             (char *)"wbuf_append_read",              test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {       (char *)"wbuf_drop_reset_owners",        test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                 (char *)"wbuf_density",                  test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
+    {                       (char *)"op_ctx",                        test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {              (char *)"op_ctx_capacity",               test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                    (char *)"bg_engine",                     test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                     (char *)"op_route",                      test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {              (char *)"bg_level_select",               test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {     (char *)"host_submit_invalid_args",      test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                                   NULL,                               NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
 };
 
 /* 同 mem_fill_free：GC/WL 用例用它把 Free Pool 补到目标水位。 */
