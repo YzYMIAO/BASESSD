@@ -1413,12 +1413,6 @@ static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
     }
 }
 
-// 读某个 region 的备份 PBA（INVALID = 无副本）。
-DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id)
-{
-    return (region_id < METADATA_DIR_ENTRIES) ? dir->backup_pba[region_id] : NAND_PBA_INVALID;
-}
-
 // md_commit_region - 按 mode 提交一个或两个副本。
 //
 // 单副本模式只走一个 copy；MD_COMMIT_PAIR 走两个 copy。账本迁移原语是

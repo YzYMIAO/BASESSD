@@ -403,14 +403,18 @@ bool alc_op_push(alc_t *alloc, BYTE plane, WORD gblock);
 WORD alc_op_alloc_log_block(alc_t *alloc, BYTE plane);
 
 /**
- * @brief OP 池元素只读访问；调用者保证 index < op_count[plane]。
+ * @brief OP 池元素只读访问；调用者保证 plane < PLANE_NUM、index < op_count[plane]
+ *        （偏离 H14：现有唯一调用链已保证，不另加断言）。
  *
  * @param alloc 分配器
  * @param plane 目标 plane
  * @param index 池内下标
  * @return 该槽位的 gblock。
  */
-WORD alc_op_get_at(const alc_t *alloc, BYTE plane, WORD index);
+static inline WORD alc_op_get_at(const alc_t *alloc, BYTE plane, WORD index)
+{
+    return alloc->op_blocks[plane][index];
+}
 
 /* ── 4. Spare Pool ── */
 
@@ -465,14 +469,18 @@ bool alc_spare_pop(alc_t *alloc, BYTE plane, WORD *out_gblock);
 bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane);
 
 /**
- * @brief Spare 池元素只读访问；调用者保证 index < spare_count[plane]。
+ * @brief Spare 池元素只读访问；调用者保证 plane < PLANE_NUM、index < spare_count[plane]
+ *        （偏离 H14：现有唯一调用链已保证，不另加断言）。
  *
  * @param alloc 分配器
  * @param plane 目标 plane
  * @param index 池内下标
  * @return 该槽位的 gblock。
  */
-WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index);
+static inline WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index)
+{
+    return alloc->spare_blocks[plane][index];
+}
 
 /* ── 5. Super Block：Open ── */
 
@@ -739,9 +747,16 @@ void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear);
  *
  * @param alloc 分配器
  * @param gblock 全局块号
- * @param out 输出快照。
+ * @param out 输出快照（由唯一调用者 checkpoint.c 传本地地址；模块内部不重复守卫）。
  */
-void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out);
+static inline void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out)
+{
+    const bst_block_t *blk = &alloc->blocks[gblock];
+
+    out->erase_count = blk->erase_count;
+    out->read_count  = blk->read_count;
+    out->rr          = blk->rr;
+}
 
 /* ── 8. BBT ── */
 

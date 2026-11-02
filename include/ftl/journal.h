@@ -412,7 +412,10 @@ WORD jrn_seq_room(const l2p_jrn_t *journal);
  * @param journal Journal
  * @return 页写命令累计提交数
  */
-DWORD jrn_page_writes(const l2p_jrn_t *journal);
+static inline DWORD jrn_page_writes(const l2p_jrn_t *journal)
+{
+    return journal->handle.page_writes;
+}
 
 /**
  * @brief 顺序页容量预留（**提交路径**用：只判页型 / 容量，不判坐标）。
@@ -475,7 +478,10 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger);
  * @return true = phase 为 JRN_IDLE
  *         false = 页写或换块擦除在飞
  */
-bool jrn_is_idle(const l2p_jrn_t *journal);
+static inline bool jrn_is_idle(const l2p_jrn_t *journal)
+{
+    return journal->handle.phase == JRN_IDLE;
+}
 
 /**
  * @brief 下一个待分配序号（= CP 截断水位）。
@@ -483,7 +489,10 @@ bool jrn_is_idle(const l2p_jrn_t *journal);
  * @param journal Journal
  * @return sequence_counter 当前值
  */
-DWORD jrn_sequence_get(const l2p_jrn_t *journal);
+static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
+{
+    return journal->handle.sequence_counter;
+}
 
 /**
  * @brief 已成功落盘的 Journal 序号上界（exclusive）
@@ -495,7 +504,10 @@ DWORD jrn_sequence_get(const l2p_jrn_t *journal);
  * @param journal Journal
  * @return 已落盘条目的上界：序号 < 该值的条目均已持久化
  */
-DWORD jrn_persisted_seq(const l2p_jrn_t *journal);
+static inline DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
+{
+    return journal->handle.persisted_seq;
+}
 
 /**
  * @brief 当前使用率。
@@ -512,7 +524,10 @@ BYTE jrn_watermark_get(const l2p_jrn_t *journal);
  * @return true = 有条目已丢，等 Checkpoint 兜底
  *         false = 无持久性失败
  */
-bool jrn_has_write_failure(const l2p_jrn_t *journal);
+static inline bool jrn_has_write_failure(const l2p_jrn_t *journal)
+{
+    return journal->handle.write_fail_pending;
+}
 
 /**
  * @brief Checkpoint Header 成功后清除持久性失败 pending。
@@ -532,7 +547,10 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
  * @return true = current_entry 非 0
  *         false = 页缓冲为空
  */
-bool jrn_has_pending_entries(const l2p_jrn_t *journal);
+static inline bool jrn_has_pending_entries(const l2p_jrn_t *journal)
+{
+    return journal->handle.current_entry != 0U;
+}
 
 /**
  * @brief 是否有「未起」的换块擦除（新环形块尚未擦）。
@@ -541,7 +559,10 @@ bool jrn_has_pending_entries(const l2p_jrn_t *journal);
  * @return true = need_erase 置位
  *         false = 无待偿擦除
  */
-bool jrn_has_erase_pending(const l2p_jrn_t *journal);
+static inline bool jrn_has_erase_pending(const l2p_jrn_t *journal)
+{
+    return journal->handle.need_erase;
+}
 
 /**
  * @brief CP 水位标志是否置位（≥85%）。
@@ -550,7 +571,10 @@ bool jrn_has_erase_pending(const l2p_jrn_t *journal);
  * @return true = checkpoint_needed 置位
  *         false = 未置位
  */
-bool jrn_needs_checkpoint(const l2p_jrn_t *journal);
+static inline bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
+{
+    return journal->handle.checkpoint_needed;
+}
 
 /**
  * @brief 紧急水位标志是否置位（≥95%）。
@@ -559,7 +583,10 @@ bool jrn_needs_checkpoint(const l2p_jrn_t *journal);
  * @return true = emergency 置位
  *         false = 未置位
  */
-bool jrn_is_emergency(const l2p_jrn_t *journal);
+static inline bool jrn_is_emergency(const l2p_jrn_t *journal)
+{
+    return journal->handle.emergency;
+}
 
 /**
  * @brief CP Header 成功后设置合并边界（Checkpoint 模块调用）。

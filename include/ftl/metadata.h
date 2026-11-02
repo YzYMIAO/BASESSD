@@ -1176,7 +1176,10 @@ static inline bool md_cursor_bounds_ok(const md_dir_cache_t *dir)
  * @param region_id L2P region_id
  * @return 备份 PBA；NAND_PBA_INVALID = 无副本（或 region_id 越界）
  */
-DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id);
+static inline DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id)
+{
+    return (region_id < METADATA_DIR_ENTRIES) ? dir->backup_pba[region_id] : NAND_PBA_INVALID;
+}
 
 /* ── 目录检查点落盘的三段式（唯一形态）──
  *

@@ -1818,9 +1818,3 @@ void cp_timer_reset(cp_handle_t *h)
 {
     h->last_ms = 0U;
 }
-
-// 取 Block Word Buffer（CP record 里随页携带的块属性位图）；指针由实例持有，不拷贝。
-WORD *cp_block_words_get(cp_handle_t *h)
-{
-    return h->block_words;
-}

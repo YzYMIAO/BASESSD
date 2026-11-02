@@ -42,6 +42,11 @@ static pending_confirm_handler_t s_confirm_handler;
 // 待入账超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
 static DWORD s_park_log_ms;
 
+// 组 outstanding 下溢（重复完成 / 重复回滚）的 release 留痕：debug 由 ASSERT 拦住，
+// release 必须阻止 WORD 回绕（回绕 ⇒ 组永不完成 ⇒ host 写挂死）。
+static DWORD s_group_underflow_log_ms;
+static WORD  s_group_underflow_n;
+
 // pend_init — 清空本实例的 pending 表与完成组表
 //
 // 全零即「无占用」（used==0），开机/重建时调用。表是 per-instance 的：每个 FTL
@@ -140,6 +145,7 @@ bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
 // 故越界一律 ASSERT，不静默 no-op。
 void pend_release_index(pending_ctx_t *table, BYTE index)
 {
+    ASSERT(index < FTL_PENDING_MAX);
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
 
     table->slots[index].used = false;
@@ -217,6 +223,31 @@ WORD pend_group_get_count(const pending_ctx_t *table)
     return count;
 }
 
+// 组 outstanding 下溢的限流日志：时间可用时 5 s 一行，缺时钟时 64 条一行。
+static void pend_note_underflow(const char *who, WORD gi)
+{
+    const DWORD now_ms = ftl_job_now_ms();
+    bool        due;
+
+    if (now_ms != 0U)
+    {
+        due = (s_group_underflow_log_ms == 0U) || ((now_ms - s_group_underflow_log_ms) >= 5000U);
+        if (due)
+        {
+            s_group_underflow_log_ms = now_ms;
+        }
+    }
+    else
+    {
+        due = ((s_group_underflow_n++ & 63U) == 0U);
+    }
+
+    if (due)
+    {
+        LOGE(LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
+    }
+}
+
 // 实现要点：outstanding 是「已下发、未完成」的组不变量。写点分散在 host 读
 // （ftl_issue_subop）与页打包写（wb_handle(APPEND)）两处、递减点分散在
 // 完成服务与提交失败回滚——任一处漏掉即 host 写组永不完成、挂死。
@@ -225,20 +256,32 @@ WORD pend_group_get_count(const pending_ctx_t *table)
 // 提交失败回滚走 drop（不触发完成通知）。
 void pend_group_add_subop(pending_ctx_t *table, WORD gi)
 {
-    pend_group_t *g = &table->groups[gi];
-    ASSERT(g->used == true);
+    ASSERT(gi < FTL_GROUP_MAX);
+    ASSERT(table->groups[gi].used == true);
 
-    g->outstanding++;
+    table->groups[gi].outstanding++;
 }
 
 // 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
 void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
 {
+    ASSERT(gi < FTL_GROUP_MAX);
+
     pend_group_t *g = &table->groups[gi];
+
     ASSERT(g->used == true);
+
+    // 与 complete_subop 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
     ASSERT(g->outstanding > 0U);
 
-    g->outstanding--;
+    if (g->outstanding > 0U)
+    {
+        g->outstanding--;
+    }
+    else
+    {
+        pend_note_underflow("drop", gi);
+    }
 }
 
 // 实现要点：· caller 通知字段（complete_flag / status_out / on_complete）的**唯一写点**：
@@ -248,16 +291,27 @@ void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
 // · outstanding-- 后交 pend_group_maybe_complete 判是否整组完成。
 void pend_group_complete_subop(pending_ctx_t *table, WORD gi, ssd_status_e sub_status)
 {
+    ASSERT(gi < FTL_GROUP_MAX);
+
     pend_group_t *g = &table->groups[gi];
-    ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
+
+    ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误 */
 
     if (sub_status != SSD_STATUS_OK)
     {
         g->agg_status = sub_status; /* 粘性：一旦失败即保留 */
     }
+
+    // 与 drop_subop 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
+    ASSERT(g->outstanding > 0U);
+
     if (g->outstanding > 0U)
     {
         g->outstanding--;
+    }
+    else
+    {
+        pend_note_underflow("complete", gi);
     }
 
     pend_group_maybe_complete(table, gi);
@@ -284,6 +338,8 @@ void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_sta
 // 再申请组槽，若先清零则本槽可能被该重入立刻复用、又被这里清零。
 void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
 {
+    ASSERT(gi < FTL_GROUP_MAX);
+
     pend_group_t *g = &table->groups[gi];
     if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
     {
@@ -349,6 +405,8 @@ pending_confirm_handler_t pend_confirm_get_handler(void)
 // 失败或超时）唯一负责 —— 两侧都释放就是重复归还（C12）。
 void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
 {
+    ASSERT(pending_idx < FTL_PENDING_MAX);
+
     pend_req_t *pending = &table->slots[pending_idx];
 
     ASSERT(pending->used == true);

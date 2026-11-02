@@ -1742,9 +1742,3 @@ void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
     cache->lines[idx].prefetch  = false;
     cache->lines[idx].dirty_seq = 0U; /* 行内容作废：不再有 Journal 依赖 */
 }
-
-// 是否有区域页写回在飞（CP 判断能否推进的输入之一）。
-bool l2p_has_flush_inflight(const l2p_cache_t *cache)
-{
-    return cache->flush_inflight != 0U;
-}

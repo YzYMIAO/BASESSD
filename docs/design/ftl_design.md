@@ -2770,7 +2770,7 @@ FTL 不能把它当成一条 NAND 命令：
 - 上层只想要**一次**完成通知，而不是每个子操作一次；
 - 资源不足时要能“待入账”，下轮继续，而不是丢请求或阻塞主循环。
 
-**group + pending + owners** 就是为这四件事存在的。
+**group + pending + owners** 就是为这五件事存在的。
 
 #### 3.9.2 职责与边界
 
@@ -2781,6 +2781,17 @@ FTL 不能把它当成一条 NAND 命令：
 
 #### 3.9.3 结构与不变量
 
+**术语**（本节后面反复出现）：
+
+| 术语 | 含义 |
+|---|---|
+| 子操作 | 一次 `ftl_op_submit` 对应的一个 pending 槽（一条 FC 命令） |
+| 组 | 一条 host 请求的完成单元（`pend_group_t`）；完成通知只触发一次 |
+| 槽 | `pending_ctx_t.slots[]` 的一项（`pend_req_t`） |
+| 窗口 | 一次 wbuf / cache 序列提交的资源单位；**不是**序列边界 |
+| 序列（run） | 跨窗口保持的 cache 读/写序列，见 §3.16 |
+| D4 | 非所有者提交被门控拒绝 ⇒ 序列在下一窗口边界收尾，见 §3.16 |
+
 **`ftl_io_req_t`**（`ftl_type.h`）：`lba`（uint64）、`buffer`、`count`、
 `complete_flag`、`status_out`、`on_complete`、`ctx`。`count` 是**连续 LBA 数**；
 plane 配对由 FTL 内部决定，不暴露 `pages`。
@@ -2790,11 +2801,13 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 | 字段 | 含义 |
 |---|---|
 | `used` / `op` | 组占用 / READ 或 WRITE |
+| `lba` / `buffer` | host 起始 LBA / 基缓冲 |
 | `next` / `total` | 已下发到的 LBA 偏移 / 总 LBA 数（uint32，可达 868,352） |
+| `cmd_remaining` | 同一 host 命令在本请求之后还剩的 LBA 数（0 = 命令末尾；只用于 END 落点） |
 | `outstanding` | 已下发、未完成的子操作数 |
 | `stalls` | 连续无进展 drain 轮数（上限 8） |
 | `agg_status` | 粘性错误：任一子操作失败即非 OK |
-| `complete_flag` / `status_out` / `on_complete` / `ctx` | 完成通知 |
+| `complete_flag` / `status_out` / `on_complete` / `on_complete_ctx` | 完成通知 |
 
 **`pend_req_t`**（32 项）：
 
@@ -2802,12 +2815,20 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 |---|---|
 | `used` / `command_id` | 槽占用 / FC 命令 id；待入账时 = `FTL_PENDING_CMD_NONE` |
 | `owners` | 贡献本子操作的组位掩码（bit gi） |
-| `op` | READ / WRITE / READ_RECOVERY / WRITE_CONFIRM / READ_CACHE |
+| `op` | READ / WRITE / READ_RECOVERY / WRITE_CONFIRM / READ_CACHE / WRITE_CACHE |
 | `n_cw` / `cw_bitmap` | 搬运的 CW 数 / 写页的有效 CW 位图 |
 | `lba` | 子操作起始**全局** LBA；写页打包时是窗口基址 |
-| `buffer` | 读的写回地址；写恒 NULL（数据在 wbuf） |
+| `buffer` | 读的写回地址；写页打包恒 NULL（数据在 wbuf） |
 | `new_pba` / `new_pba1` | 新分配的 plane0/plane1 页 PBA |
-| `cache_intermediate` | Cache Program 中间页（15h）：完成时不确认 L2P/Journal、不递减组 |
+| `cache_role` | cache program 序列中的页角色（NONE = 其他写） |
+| `cache_gen` | 所属写序列代号；与 `cache_stream.seq.gen` 不一致 ⇒ 迟到完成，不得确认映射（RISK-CACHE-19） |
+| `retry_count` | 写失败后已重试次数（透明重试） |
+| `park_ms` | 待入账超时预算起点（内部字段，外部不要读） |
+
+⚠ **两套表的分工**：`pend_req_t` 是「命令 → 组」的追踪表（完成派发据此找组）；
+`cache_stream.seq.wr` 是「已编程页 → FAIL_CACHE 结论」的 FIFO（早回执后，命令完成 ≠
+页结论，页的最终成败由下一命令的 FAILC 给出，见 §3.16.5）。同一页会同时出现在两处，
+但两者回答的问题不同：前者回答「这个组还差几次完成」，后者回答「这一页的映射能不能确认」。
 
 **不变量**：
 
@@ -2821,39 +2842,22 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 
 #### 3.9.4 提交流程
 
-```mermaid
-flowchart TD
-    A["Host 发起 ftl_submit_read write"]
-    B["校验参数"]
-    C["pend_group_alloc 建组"]
-    D["填组字段"]
-    E["ftl_drain_group 下发子操作"]
-    F["循环 直到 next 等于 total"]
-    G["读或写分支 消费 1 到 8 个 LBA"]
-    H["登记 pending"]
-    I["ftl_op_submit"]
-    J["outstanding 加一"]
-    K["FTL_OK 已受理"]
-    L["FC 完成"]
-    M["complete_subop_multi"]
-    N["next 等于 total 且 outstanding 为 0"]
-    O["完成通知一次"]
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-    E --> F
-    F --> G
-    G --> H
-    H --> I
-    I --> J
-    J --> F
-    F --> K
-    K --> L
-    L --> M
-    M --> N
-    N --> O
+```text
+ftl_submit_read/write
+ ① 校验：LBA 范围 / count ≠ 0 / buffer 非空（host 输入 ⇒ 返回码，不转断言）
+ ② pend_group_alloc：建组、填通知字段与 total
+ ③ 循环（直到 next == total）：
+     ftl_issue_subop 按读/写分支消费 1..8 个 LBA
+       ├─ 成功：pending 槽登记 → ftl_op_submit → outstanding++
+       ├─ FTL_AGAIN：保留 next，本轮结束、下轮重试
+       └─ 连续 8 轮无进展（stalls 达 FTL_DRAIN_STALL_MAX）：弃未下发子操作、组报 IO_ERROR
+ ④ 命令完成 → pend_group_complete_subop_multi：outstanding--、粘 agg_status
+ ⑤ next == total && outstanding == 0 → 通知一次
+     （写 status_out、置 complete_flag、调 on_complete，最后才释放组）
 ```
+
+要点：提交侧只负责「把子操作交出去」，完成侧只负责「把组收齐」；两者靠 pending 表 +
+组号连接，提交路径**不同步等待**任何 NAND 完成。
 
 #### 3.9.5 读子操作
 
@@ -2861,8 +2865,8 @@ flowchart TD
 ftl_issue_subop(read) 对每个 LBA：
   ① wbuf 命中（该窗口尚未 flush）⇒ 直接从 wbuf.data 拷出，消费 1 个 LBA
   ② 否则 l2p_read(global_lba)
-       - FTL_AGAIN（region 未驻留）⇒ `l2p_defer = l2p_cache_any_inflight()`，
-         停止本子操作，下轮重试
+       - FTL_AGAIN（region 未驻留）⇒ `l2p_defer` 由 `l2p_cache_any_inflight()` 派生，
+         停止本子操作、下轮重试
        - FTL_OK + INVALID（未映射）⇒ 零填充，消费 1 个 LBA
        - FTL_OK + PBA ⇒ 按 (physical plane, page) 分组
   ③ 页变化/plane 变化时收缩子操作范围
@@ -2882,85 +2886,12 @@ ftl_issue_subop(read) 对每个 LBA：
 因此 `l2p_defer` 一律由 `l2p_cache_any_inflight(cache)`（`load_inflight || flush_inflight`）派生；
 「序列收尾」这类进展由 `bg_progress` 里的 `seq_closing` 表达，不借 `l2p_defer`。
 
-**FTL cache read（流式序列，本仓自定）**：`ftl_drain_group` 在下发普通子操作前先尝试
-`ftl_cache_read_try()`。序列状态在 `ftl->cache_stream.seq`（per 实例），**跨窗口、跨 chunk 保持**：
-START 只在 run 头，LAST 只在断点，中间窗口全 SEQ；**窗口只是资源边界**，不是序列边界。
-条件：读组、LBA pair 对齐、8 个 LBA 全部映射且无 wbuf 命中、两 plane 的**页号字段**相同
-（`pba_to_page()`；`pba_page()` 保留 plane/block 位，只能用于同一 plane 内比较）且后续 pair
-是**同 block 的 page+1**，或**两 plane 都跨到 block+1 的 page 0**（`READ PAGE CACHE
-SEQUENTIAL 31h` 可跨 block、禁止跨 die/LUN，见 `docs/reference/datasheet_mt29f_cache_ops.md`
-§2）；L2P 行在加载中（`FTL_AGAIN`）则本次返回 `AGAIN`，由 drain 下轮重试。
-单段上限 `FTL_CACHE_READ_MAX_RUN_PAIRS` = 128 pair：读序列期间该 die 的 cache 寄存器被占用
-（ARDY = 0），程序命令发不进去 ⇒ 断点是后台元数据在本实例上的让步点（与写侧 Journal 配额
-同性质），不是器件约束。
-新序列 ≥2 pair，**续序列允许 1 pair 尾巴**。开启条件 = **FTL 顺序流检测器**
-（`ftl->cache_stream.rd`：同一方向连续 LBA 累计 ≥ `FTL_STREAM_MIN_LBAS` = 64）+ 请求起点
-pair 对齐；**序列所有者每轮都尝试续窗口**，其余情况检测器未判为顺序流就直接走普通读。
-
-**续接判据只看 LBA**（`cache_stream.seq.next_lba == 本请求起始 LBA`）：host 传输段（USB 16 KiB）
-只是同一条 LBA 流的一次交付，**不是序列边界**；方向不同或续接点不符才释放状态。
-命令末尾由 `pend_group_t.cmd_remaining`（同一 host 命令在本请求之后还剩多少 LBA）
-单独表达，只用于 END / LAST 落点（器件要求收尾命令落在最后一个数据页）。
-窗口末做 **1 pair lookahead**（`run_ended`）：下一页不在同一物理 run / 8 条 L2P 未全驻留 /
-命令到头 / 尾部不足一对 / D4 ⇒ 本窗口末条 `LAST_MP`，否则 `SEQ_MP + MORE`。
-lookahead **只用纯驻留探针 `l2p_is_resident()`**（不触发加载）：序列打开时加载读会被门控
-挡住 ⇒ 死锁。新序列开前预加载 `lba` 与 `lba+511` 所在 region（≤2 行，一行 = 一 region）。
-
-序列打开期间 `ftl_op_submit*` 门控延迟同 LUN 的其他提交（host / GC / CP / journal）；
-**host / 同步 / RR** 被拒者置 `break_requested`，序列在**下一窗口边界**收尾（D4，不依赖
-must-run 查询）。⚠ **后台元数据（Journal / L2P / GC / WL / CP / metadata / BBT）例外**：
-它们被门控但**不置** `break_requested`——这些写在序列期间本来就写不进去，若每次重试都
-请求断点，序列会退化为逐窗口长度（设计 A 要的正是"到配额才断"；v1.00 的
-`cr≈3.93 pair/batch` 主要就是它们造成的）。
-所有者批次由 `cache_read_submit()` 置 `owner_submit` 旁路。整窗标一条 FC chain
-（断点末条 `FC_CHAIN_END`，否则 `FC_CHAIN_MORE`），经 `ftl_op_submit_batch()` 原子入队，
-批内必须同优先级。资源不足时收缩到能原子提交的前缀。
-
-异常入口（方向不同 / 续接点不一致 / 续窗口首 pair 收不到 / 组被弃或失败 / 空闲 1s）
-由 `ftl_cache_seq_release()` 释放状态，**不发设备 LAST**（放弃时下一页 PBA 未知）
-——设备侧残序列由后续命令/新 START 重置，见 `known_risks.md` RISK-IF-09/10，**待上板**。
-成员失败**不**启动 RR（RR 会向同 LUN 插命令），失败页报组 IO_ERROR，其余成员按各自完成
-回调结算（不中止剩余链成员）。完整设计见 §3.16；
-代码见 `include/ftl/cache_batch.h` / `src/ftl/cache_batch.c`。
-
-> 板端证据（2026-10-25 H2testw 415 MB）：`info` 的 `cr=25931/102794/681/0`
-> （batches/pairs/declines/fallbacks），平均 **3.96 pair/batch**、`fallbacks=0` ⇒
-> host 大块顺序读确实走 cache read（修复前 `batches` 恒 0，RISK-HOST-13）。
-
-**FTL cache program（流式写序列，本仓自定）**：`ftl_drain_group` 在写分支、wbuf 之前先尝试
-`ftl_cache_write_try()`。序列状态与读共用 `ftl->cache_stream.seq`（`kind = WRITE`），**跨窗口、
-跨 chunk 保持**：首窗口首条 `OP_TWO_PLANE_PROGRAM_CACHE_FIRST`（49：只查 FAIL，避免残留
-FAILC 误判），中间 `_CACHE`（44，15h），断点末条 `_END`（48，10h）。
-
-- **断点**：Journal 顺序页写满 / D4 / 命令尾不足一个 pair / 本窗口 journal 预留失败 /
-  收尾块时分配器开不出新块。**chunk、host 命令、物理 block 边界都不是断点**：写 cache
-  program 的 44/48h 每条自带地址，序列跨 block 续写（`docs/reference/datasheet_mt29f_cache_ops.md`
-  §5/§6）；窗口仍 clamp 到 Open SB 剩余（一次构建不跨 SB，保 `alc_super_open_rewind_pair`
-  的回滚前提），下一个窗口由 `alloc_pair` 关旧块、开新块后继续。
-- **开序列阈值**：LBA 8 对齐、wbuf 空闲、SB 有余量（含 1..3 页的块尾；块尾 1 页窗口正好
-  接上 Journal 页配额与 block 长度差）；续序列允许 1 页。
-- **逐页确认（滞后一页）**：第 i 页的最终结论由**第 i+1 条命令**的 `FAIL_CACHE` 给出，
-  最后一页由 END 的 FAIL 给出。已提交页按顺序进 `ftl->cache_stream.seq.wr` FIFO；
-  第 i+1 条完成时 `pop` 前一页并 `ftl_confirm_write`（region 未就绪则待入账）。
-- **失败**：任一错误位（FAILC/NAND_FAIL/TIMEOUT/…）⇒ 序列中止：未确认页一律不确认映射
-  （按 IO_ERROR 结算）、关闭承载它的 hot SB、清序列状态。
-- **L2P / journal**：开序列前预加载窗口 region；窗口末 lookahead 若下一窗口 region 未驻留
-  ⇒ 本窗口 END；每窗口提交前 `jrn_reserve` 预留本窗口条目，失败 ⇒ 本窗口 END。两者都是
-  「序列结束才能起加载/刷页」的断点原因，与读路径同源。
-- **控制器配合**：chunk k 的尾页要由 chunk k+1 的首条命令确认 ⇒ `usb_msc.c` 用两个槽
-  （volatile write cache）：所有写 chunk（**含末 chunk**）提交后立即回流控回执，主机不
-  等最后一页的 `FAIL_CACHE`；写失败作为 deferred error 由下一条命令上报。
-  两槽都占用时返回 `TUD_MSC_RET_BUSY`。详见 §3.16.5。
-- 窗口经 `ftl_op_submit_batch()` 原子入队，标成 FC chain（断点末条 `END`，否则 `MORE`）；
-  序列打开期间 `ftl_op_submit*` 门控延迟同 LUN 的其他提交（D4）。
-
-详见 §3.16 与 `src/ftl/cache_batch.c`。
-wbuf 写 **page0** 时按 full pair 写（缺失 plane 补零、映射仍按原 CW 位图），保证同 SB
-的 page>0 写屏障与恢复 page0 捷径成立。**cache 写序列**也会自己打开新块并写 page0
-（`own_page0`）：它靠有序管线保证 page0 失败会中止其后所有页，不依赖"page0 成功后才
-写 page>0"的提交点屏障；成功结算时记 `page0_programmed`（§3.16.5）。
-
-**cache 读 / 写序列**（窗口构建、门控、断点、器件语义）自成一节，见 **§3.16**。
+**cache 读序列（选读）**：`ftl_drain_group` 在下发普通子操作前先尝试
+`ftl_cache_read_try()`——命中时整窗按 `45h/46h/47h` 批量提交；窗口只是资源边界，
+序列可跨窗口、跨 host 命令保持。开序列条件（顺序流检测、pair 对齐、两 plane 物理
+连续）、lookahead、128 pair 单段上限、门控与 D4、放弃语义**全部见 §3.16.4**。
+本节只保留与提交/pending 相关的两点：序列打开期间后台提交被门控（非所有者被拒置
+`break_requested`）；序列状态在 `ftl->cache_stream.seq`（per 实例）。
 
 #### 3.9.6 写子操作
 
@@ -2977,7 +2908,12 @@ ftl_issue_subop(write)：
 
 真正的 NAND 写、pending 登记、L2P/Journal 确认都在 `wb_handle(FLUSH)` 与完成路径里。
 
-#### 3.9.7 组完成与待入账
+wbuf 写 **page0** 时按 full pair 写（缺失 plane 补零、映射仍按原 CW 位图），保证同 SB
+的 page>0 写屏障与恢复 page0 捷径成立。**cache 写序列**也会自己打开新块并写 page0
+（`own_page0`）：它靠有序管线保证 page0 失败会中止其后所有页，不依赖「page0 成功后才写
+page>0」的提交点屏障；成功结算时记 `page0_programmed`（§3.16.5）。
+
+#### 3.9.7 组完成与脱钩态
 
 ```text
 pend_group_complete_subop_multi(owners, status)
@@ -2987,14 +2923,16 @@ pend_group_complete_subop_multi(owners, status)
         ⇒ 最后才 used=0（回调可能重入 submit 再申请组）
 ```
 
-两个待入账态：
+两种**脱钩态**（FC 命令已释放、组 `outstanding` 不递减；两者都复用 pending 表，但语义不同）：
 
-| 待入账态 | 触发 | 谁推进 |
-|---|---|---|
-| `READ_RECOVERY` | 读 NAND 失败，子操作托管给 RR job | `rr_handle`（§3.14） |
-| `WRITE_CONFIRM` | 写 NAND 成功，但 L2P region 未就绪 | `pend_confirm_service`（每轮的**写确认结算**步） |
+| 脱钩态 | 触发 | 语义 | 谁推进 |
+|---|---|---|---|
+| `READ_RECOVERY` | 读 NAND 失败 | **错误恢复**：子操作托管给 RR job；恢复成功则拷回，失败则 IO_ERROR | `rr_handle`（§3.14） |
+| `WRITE_CONFIRM` | 写 NAND 成功、L2P region 未就绪 | **待入账**（deferred write completion）：映射入账延后到 region 就绪 | `pend_confirm_service`（每轮的**写确认结算**步） |
 
-待入账项的 `command_id = NONE`、组 `outstanding` 不递减；收尾时由引擎统一结算。
+⚠ `READ_RECOVERY` 属于错误恢复，不是「待入账」——复用同一张表只是为了不重复建队列；
+两者的推进者和超时语义都不同。脱钩项的 `command_id = NONE`、组 `outstanding` 不递减，
+收尾时由各自的推进者统一结算。
 
 **WRITE_CONFIRM 的超时预算是「无进展时长」而不是「待入账时长」**（RISK-HOST-05 支路 (a)）：
 确认 handler 在依赖**确实有待推进的工作**时刷新 `park_ms`——
@@ -3011,7 +2949,7 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 | pending/组槽满 | `FTL_ERROR`（隐式背压） | 请求被拒，host 自行重试 |
 | 子操作遇到 `FTL_AGAIN` | 保留 `next`，下轮重试 | 无 |
 | 连续 8 轮无进展 | 弃未下发子操作，组报 IO_ERROR | 已下发子操作照常完成 |
-| 读 NAND 失败 | 待入账 → RR；不递减 outstanding | 恢复成功则拷回，失败则 IO_ERROR |
+| 读 NAND 失败 | 脱钩（托管给 RR）；不递减 outstanding | 恢复成功则拷回，失败则 IO_ERROR |
 | 读成败判据 | **全错误位**（`fc_cmd_status_has_error`），非仅 `NAND_FAIL` | UNC / MATA 只置 `DATA_ERROR`/`MATA_ERROR`，单看 `NAND_FAIL` 会把加扰页当成功搬给 host |
 | 读 desc 链短于请求 | 立即 `SSD_STATUS_IO_ERROR` | 尾部缓冲未写，不得当数据交给 host |
 | cache program 批次任一成员失败 | 关闭目的 SB；整批不确认映射；已完成的成员立即 IO_ERROR，在飞成员等各自完成回调 | 未确认页成为无映射垃圾，由 GC 回收；host 可重试 |
@@ -3033,6 +2971,8 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 “请求拆分 + 完成组 + 子操作表 + 背压/待入账”是主控固件数据面的标准形态：host 命令被拆成
 介质命令，完成按命令 id 回收，组完成只通知一次。**本仓自定**的是 32 项固定表、
 8 轮 stall 预算与页打包的 `owners` 位掩码。
+
+#### 3.9.11 FLUSH / TRIM（相邻控制面命令）
 
 **FLUSH 语义边界**（`ftl_flush_begin/step`）：把 wbuf、L2P 脏 region、Journal 刷到 NAND，
 **不是** NVMe barrier——返回时不保证已产生新的 Checkpoint；掉电后仍靠“上一个 CP + Journal
@@ -4162,6 +4102,11 @@ vs `cache_stream.seq.gen`）；不一致 ⇒ 只按 IO_ERROR 结算组，页一�
 **confirmed 不等于 proven**：确认（Journal→L2P→BST）只要页已编程就推进，证明要等下一
 命令的 FAILC。两者顺序都按提交序；结论游标（pend_idx）独立于队头，避免「队头已证明、
 等确认」时新结论打错页（环排不空 ⇒ flush 超时）。
+
+**控制器配合（双槽 / 早回执）**：chunk k 的尾页要由 chunk k+1 的首条命令确认 ⇒
+`usb_msc.c` 用两个槽（volatile write cache）：所有写 chunk（**含末 chunk**）提交后立即
+流控回执，主机不等最后一页的 `FAIL_CACHE`；写失败作为 deferred error 由下一条命令上报。
+两槽都占用时返回 `TUD_MSC_RET_BUSY`。
 
 **③ 写窗口：逐页 FAIL_CACHE 滞后一页 + 跨命令序列**
 

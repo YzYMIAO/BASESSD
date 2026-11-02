@@ -205,7 +205,7 @@ _Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2
  * pend_group_complete_subop 递减 outstanding → 全部完成（next==total 且
  * outstanding==0）时 pend_group_maybe_complete 一次性发通知并置 used=0。
  *
- * ⚠ total/next 必须 DWORD：host 连续 LBA 数 count 可达 FTL_LBA_MAX（894,976），
+ * ⚠ total/next 必须 DWORD：host 连续 LBA 数 count 可达 FTL_LBA_MAX（868,352，424 MiB），
  *   二者都以 **LBA 计**，WORD 会溢出。outstanding 被 FC buffer 池限到 ~16
  *   （128 buffer ÷ 每多 plane 命令 8 buffer），WORD 够。
  *

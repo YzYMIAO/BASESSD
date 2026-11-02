@@ -445,12 +445,6 @@ WORD jrn_seq_room(const l2p_jrn_t *journal)
     return (WORD)(JRN_SEG_ENTRIES_PER_PAGE - journal->handle.current_entry);
 }
 
-// 本次开机累计提交的 Journal 页写次数（观测，用于评估写放大）。
-DWORD jrn_page_writes(const l2p_jrn_t *journal)
-{
-    return journal->handle.page_writes;
-}
-
 // 预判本段能否放进当前页（不刷页、不改状态）；不足由调用者待入账后重试。
 bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries)
 {
@@ -821,29 +815,6 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger)
 }
 
 /* ── 查询（替代外部直读 handle 字段） ── */
-bool jrn_is_idle(const l2p_jrn_t *journal)
-{
-    return journal->handle.phase == JRN_IDLE;
-}
-
-// 只读：下一条待分配的 Journal 序号（区域写回的 WAL 水位判据用）。
-DWORD jrn_sequence_get(const l2p_jrn_t *journal)
-{
-    return journal->handle.sequence_counter;
-}
-
-// 只读：已确认落盘的条目序号上界（exclusive）。
-DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
-{
-    return journal->handle.persisted_seq;
-}
-
-// 是否有未清的 Journal 持久性失败（等 CP 覆盖失败点后由 clear 清除）。
-bool jrn_has_write_failure(const l2p_jrn_t *journal)
-{
-    return journal->handle.write_fail_pending;
-}
-
 // CP 起点水位 ≥ 失败点才清失败标志；否则保留等下一次 CP。
 void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq)
 {
@@ -855,34 +826,10 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq)
     }
 }
 
-// 当前页缓冲里是否还有未落盘条目。
-bool jrn_has_pending_entries(const l2p_jrn_t *journal)
-{
-    return journal->handle.current_entry != 0U;
-}
-
-// 是否有待擦块（换块时擦除失败，等下轮补擦）。
-bool jrn_has_erase_pending(const l2p_jrn_t *journal)
-{
-    return journal->handle.need_erase;
-}
-
-// 是否请求了 Checkpoint（水位 ≥ 85% 或外部触发）。
-bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
-{
-    return journal->handle.checkpoint_needed;
-}
-
 // 置 Checkpoint 请求位（外部触发；真正起 CP 由调度器决定）。
 void jrn_checkpoint_request(l2p_jrn_t *journal)
 {
     journal->handle.checkpoint_needed = true;
-}
-
-// 是否进入紧急态（水位 ≥ 95%）。
-bool jrn_is_emergency(const l2p_jrn_t *journal)
-{
-    return journal->handle.emergency;
 }
 
 // 设置同 LBA 就地合并的下限序号（更早的条目不再参与合并）。

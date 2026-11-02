@@ -344,47 +344,14 @@ ftl_submit_write(ftl, &req)
 （`valid_count` 虚高、journal 重复条目）。两遍之间无泵（单线程顺序执行）⇒ 就绪判定与
 第二遍之间状态不可能变。
 
-**Pending 表条目**（v0.58 起**不再**内嵌 `ftl_io_req_t`——子操作字段显式化，避免 `count`
-（host run 长）与子操作自身长度共用一个字段产生二义）：
+**实现结构以 `include/ftl/pending.h` 为准**（`pend_req_t` / `pend_group_t` / `pending_ctx_t`）。
+对 HIL/调用者可见的只有：
 
-```c
-typedef struct {
-    uint16_t used;               /* 1: 槽位占用 */
-    uint16_t command_id;         /* FC command_id */
-    uint16_t group;              /* ★ 所属完成组 ftl->pending.groups[] 下标 */
-    uint8_t  op;                 /* ftl_pending_op_t：完成路径判别（读/写），显式给出不可反推 */
-    uint8_t  n_cw;               /* ★ 本子操作搬运的 CW 数（字节数 ÷ FTL_IU_BYTES） */
-    DWORD    lba;                /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
-    void    *buffer;             /* 子操作缓冲（= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES） */
-    /* ↓↓↓ 写完成确认（写专用，读请求时无效） ↓↓↓ */
-    DWORD new_pba;            /* 新分配 plane0 页 PBA（未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
-    DWORD new_pba1;           /* 新分配 plane1 页 PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
-    /* ⚠ 不存 old_pba：完成时按 LBA 重查 L2P 得"此刻被替换的映射"（比提交时快照更正确）*/
-    uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h）：不确认 L2P/Journal、不递减组 */
-} ftl_pending_req_t;
-```
+- `ftl_submit_*` 的入参 `ftl_io_req_t`：`lba / count / buffer / complete_flag / status_out / on_complete / ctx`；
+- 组完成通知：一条 host 请求的全部子操作完成后**只触发一次**。
 
-**完成组 `ftl_io_group_t`**（`ftl->pending.groups[FTL_GROUP_MAX]`，`FTL_GROUP_MAX = FTL_PENDING_MAX = 32`）：
-
-```c
-typedef struct {
-    uint8_t  used, op, stalls;   /* 占用 / 读或写 / 连续无进展 drain 轮数（背压预算） */
-    uint16_t outstanding;        /* 已下发、未完成的子操作数（被 FC buffer 池限到 ~16） */
-    uint32_t total, next;        /* 本请求 LBA 总数（= count）/ 已下发到的 LBA 偏移（uint32：count 可达 1M） */
-    uint64_t lba;                /* host 起始 LBA */
-    void    *buffer;             /* host 基缓冲 */
-    uint32_t count;              /* host 连续 LBA 数 */
-    ssd_status_e agg_status;     /* 粘性错误：任一子操作失败 → 非 OK */
-    volatile uint8_t      *complete_flag;   /* 全部子操作完成后置 1 */
-    volatile ssd_status_e *status_out;      /* 组完成后写入 agg_status */
-    pending_cb_t           on_complete;     /* 组完成后回调一次 */
-    void                  *on_complete_ctx;
-} ftl_io_group_t;
-```
-
-> **v0.58**：`ftl_io_req_t io` **不再内嵌**（`pending_add` 形参改为显式 `group/n_cw/lba/buffer/…`）；
-> 新增 `group` 关联到完成组。组管理 `pend_group_alloc/free/maybe_complete/count` 在 `pending.c`。
-> `pend_group_maybe_complete` 先发通知、**最后**才 `used=0`（回调可能重入提交）。
+内部字段（`owners`、`cache_role / cache_gen`、`new_pba / new_pba1`、`park_ms` 等）不属于
+HIL 契约，不在本文复制——避免与 `pending.h` 漂移（同 C9）。
 
 **坏块标记两阶段化**：
 

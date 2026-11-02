@@ -294,13 +294,6 @@ bool alc_op_push(alc_t *alloc, BYTE plane, WORD gblock)
     return true;
 }
 
-// 调用者保证：plane < PLANE_NUM、index < op_count[plane]（checkpoint 遍历循环）。
-// （偏离 H14：现有唯一调用链已保证。）
-WORD alc_op_get_at(const alc_t *alloc, BYTE plane, WORD index)
-{
-    return alloc->op_blocks[plane][index];
-}
-
 // 从 **OP 池**借一块作为动态 L2P 日志块（固定日志区满时的有界溢出）。
 // 为什么从 OP 而不是用户 Free Pool：OP 是容量公式之外的 GC headroom，借还都在 OP
 // 内闭环，不动用户可用容量；固定区满时正是写放大高、OP 最该被借用的场景。
@@ -395,13 +388,6 @@ bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane)
     }
 
     return moved;
-}
-
-// 调用者保证：plane < PLANE_NUM、index < spare_count[plane]。
-// （偏离 H14：现有唯一调用链已保证。）
-WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index)
-{
-    return alloc->spare_blocks[plane][index];
 }
 
 /* ── 6. Super Block：Open ── */
@@ -1008,16 +994,6 @@ void alc_bst_get_erase_stats(const alc_t *alloc, alc_bst_erase_stats_t *out)
 }
 
 // 导出块的磨损快照（erase/read/ECC 趋势）给 Checkpoint；只拷贝，不改块状态。
-void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out)
-{
-    // out 由唯一调用者 checkpoint.c 传本地快照地址；模块内部不重复守卫。
-    const bst_block_t *blk = &alloc->blocks[gblock];
-
-    out->erase_count = blk->erase_count;
-    out->read_count  = blk->read_count;
-    out->rr          = blk->rr;
-}
-
 // 恢复块的磨损快照（Checkpoint 回放）；覆盖三字段，不触发任何记账。
 void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 {

@@ -770,7 +770,10 @@ void l2p_line_invalidate(l2p_cache_t *cache, WORD idx);
  * @return true = 有在飞写回
  *         false = 无在飞写回
  */
-bool l2p_has_flush_inflight(const l2p_cache_t *cache);
+static inline bool l2p_has_flush_inflight(const l2p_cache_t *cache)
+{
+    return cache->flush_inflight != 0U;
+}
 
 /**
  * @brief 是否**确实有** L2P 加载/写回命令在飞（drain 的"确定性进展"判据）。

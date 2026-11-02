@@ -386,7 +386,10 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx);
  * @param h  Checkpoint handle
  * @return 指向 handle 内 FTL_BLOCK_TOTAL 个 word 的常驻缓冲（非空，所有权归 handle）
  */
-WORD *cp_block_words_get(cp_handle_t *h);
+static inline WORD *cp_block_words_get(cp_handle_t *h)
+{
+    return h->block_words;
+}
 
 /* ── 运行期 Checkpoint ── */
 
