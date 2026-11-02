@@ -14,7 +14,7 @@
  *   4. 收尾           mig_job_abort / mig_job_stall / mig_job_wait / mig_page_next / mig_dst_fail_cleanup
  *                     / mig_job_finish（static）
  *   5. 推进           5.1 映射提交 / 5.2 batch 辅助 / 5.3 各 phase 处理 + mig_job_step（static）
- *   6. typed handle   mig_init / mig_gc_request_urgent / mig_gc_evaluate / mig_status_fill / mig_handle
+ *   6. typed handle   mig_init / mig_gc_request_urgent / mig_gc_evaluate / mig_handle
  *   7. 完成服务       ftl_migrate_callback（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）
  *
  * 设计要点见 include/ftl/migrate.h（状态机、单飞行、F10 契约）。
@@ -1920,10 +1920,8 @@ static bool mig_flush_jrn_step(mig_handle_t *m)
     }
 
     {
-        // typed 入口：job 空闲且有待写页 ⇒ 起异步刷页。info 由 migrate 的调用方
-        // 在本阶段后续传入；这里位移推进不依赖动态信息。
-        jrn_status_t jst;
-        jrn_handle(m->journal, NULL, &jst);
+        // typed 入口：job 空闲且有待写页 ⇒ 起异步刷页。
+        jrn_handle(m->journal, NULL);
     }
 
     if (jrn_is_idle(m->journal) == false)
@@ -2160,54 +2158,6 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
 }
 
 /**
- * @brief 把 job 当前状态填进 mig_status_t（只读观测）。
- *
- * @param m    job。
- * @param level 本轮后台档位（BUSY 档 wants_run 只保留在飞 job）。
- * @param out  出参：本轮上报。
- */
-static void mig_status_fill(const mig_handle_t *m, bg_level_e level, mig_status_t *out)
-{
-    out->base.critical = true; /* 写路径紧急 GC 在 BUSY 档起，不推进即死锁 */
-    out->base.progress = m->reclaimed_count;
-    out->base.next_ms  = 0U;
-    out->base.error    = m->error;
-
-    out->base.wants_run = m->active || (level != BG_LEVEL_BUSY);
-
-    if (m->waiting)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (m->active)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else if (m->error != FTL_OK)
-    {
-        out->base.state = FTL_MODULE_FAILED;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->phase         = m->phase;
-    out->kind          = m->kind;
-    out->migrated      = m->migrated;
-    out->erased        = m->erased;
-    out->aborted       = m->aborted;
-    out->erase_failed  = m->erase_failed;
-    out->timed_out     = m->timed_out;
-    out->timeout_phase = m->timeout_phase;
-    out->reclaimed     = m->reclaimed_count;
-    out->novictim      = m->novictim_count;
-    out->nogain        = m->nogain_count;
-    out->gc_mode       = m->gc_last_mode;
-    out->gc_nogain     = m->gc_nogain;
-}
-
-/**
  * @brief GC 会话进展：只在会话活跃且距上次 >=5 s 时打；now_ms==0（无时钟）时不打。
  *
  * @param m      job。
@@ -2263,7 +2213,7 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
 }
 
 // 每轮入口：在飞时推进当前 job（附带心跳），空闲时按节拍求值并尝试开新 job，最后填上报。
-void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
+void mig_handle(mig_handle_t *m, bg_level_e level)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
@@ -2280,7 +2230,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
 
         mig_job_step(m);
         mig_gc_session_progress(m, now_ms);
-        mig_status_fill(m, level, out);
+
         return;
     }
 
@@ -2291,7 +2241,6 @@ void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
     // ② 系统性命中熔断：不再启动任何 GC/WL/predict（重启才清）。
     if (m->paused)
     {
-        mig_status_fill(m, level, out);
         return;
     }
 
@@ -2307,7 +2256,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
         // 不是「空闲补池」。
         const gc_benefit_mode_e mode = (m->alloc->free_count <= FREE_POOL_EMERGENCY) ? GC_BENEFIT_EMERGENCY : GC_BENEFIT_OFF;
         (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_URGENT, 0U);
-        mig_status_fill(m, level, out);
+
         return;
     }
 
@@ -2328,7 +2277,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
                 (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
             }
         }
-        mig_status_fill(m, level, out);
+
         return;
     }
 
@@ -2367,8 +2316,6 @@ void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
             (void)mig_predict_begin(m);
         }
     }
-
-    mig_status_fill(m, level, out);
 }
 
 /* ── 7. 完成服务（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）── */

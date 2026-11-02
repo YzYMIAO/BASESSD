@@ -2,12 +2,12 @@
 #define FTL_BG_SCHEDULER_H
 
 /*
- * bg_scheduler — 时间预算后台调度器（通用引擎 + FTL 任务表/档位策略）
+ * bg_scheduler — 工作量配额后台调度器（通用引擎 + FTL 任务表/档位策略）
  *
  * 一个模块同时承载两层内容：
- *   · 引擎：必跑任务 + 预算任务（charge 计账 / 预算不足截断）。
+ *   · 引擎：必跑任务 + 预算任务（工作量配额 + 墙钟兜底）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
- *     void(ftl_ctx_t*)）+ 档位→预算映射（s_bg_level_cfg）+ 档位选择
+ *     void(ftl_ctx_t*)）+ 档位→配额映射（s_bg_level_cfg）+ 档位选择
  *     （bg_scheduler_level_select）+ 后台调度步入口（bg_scheduler_service）。
  * 设计见 docs/design/ftl_design.md §3.12。
  *
@@ -17,17 +17,16 @@
  * 脱离 FTL 头文件独立编译。
  *
  * 关键语义：
- *   · must_run = 正确性关键集（清单见 s_bg_tasks）：**无条件每轮跑、不占预算**
+ *   · must_run = 正确性关键集（清单见 s_bg_tasks）：**无条件每轮跑、不占配额**
  *     ——它们是防死锁/防 host 读挂起的动作，删了系统会挂。
  *   · task_mask = 本档位允许的预算任务位集合（BG_IDLE/NORMAL/BUSY_TASKS 预设）；
  *     每个表项用 `.mask` 声明自己的位，表序只决定执行顺序。
- *   · budget_us = 单次**计账上限**（charge = MIN(elapsed, budget_us)），不是执行中断/
- *     硬钳制：任务函数跑到返回为止，超出的时间只是不被计入 charge。
- *     ⚠ kick 全部「提交即返回」⇒ elapsed 只反映 CPU 时间（平台 time_us 实测 SysTick
- *     1ms 量化）；**确定性前台保护由档位 → l2p 条数/任务掩码承担**（见本文件策略段）。
- *   · 时钟缺失（time_us 缺失或恒 0）：预算计账失效——elapsed=0 永不截断，即
- *     「无门控」，靠各任务内部单飞行/脏位/事件门防刷屏。
- *     ⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
+ *   · units = 单次调用占用的**工作量单位**（≈ 本轮最多提交的条数；L2P 的具体条数
+ *     由模块内 max_kick 再收一层）。配额是**确定性**的：不读时钟、与机器速度无关。
+ *   · total_units = 本档位每轮配额；配额不足即截断（表序 = 优先级）。
+ *   · 时间只做**异常兜底**：单轮墙钟超过 BG_ROUND_HARD_LIMIT_US 即截断——只能在
+ *     任务之间检查，不能抢占；时钟缺失时该兜底失效，靠档位掩码 + 模块内
+ *     单飞行/脏位/事件门防刷屏。
  */
 
 #include "ftl_type.h"  /* bg_level_e */
@@ -41,7 +40,7 @@
  * bg_scheduler_init 的装载数直接取表长，不接收运行期 count 参数。 */
 #define BG_TASK_COUNT (10U)
 
-/* ── 档位（负载 → 预算规模，见 bg_scheduler.c s_bg_level_cfg；
+/* ── 档位（负载 → 配额规模，见 bg_scheduler.c s_bg_level_cfg；
  *    bg_level_e / BG_LEVEL_NUM 在 ftl_type.h）── */
 
 /* 统一任务签名：适配器包异构 kick → void(ftl_ctx_t*) */
@@ -49,24 +48,24 @@ typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
 
 typedef struct
 {
-    bg_task_func_t func;      /* 适配器（FTL 策略段定义） */
-    DWORD          mask;      /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；预算任务按档位 task_mask 选择 */
-    WORD           budget_us; /* 单次计账上限：charge = MIN(elapsed, budget_us) */
-    bool           must_run;  /* true = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
+    bg_task_func_t func;     /* 适配器（FTL 策略段定义） */
+    DWORD          mask;     /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；预算任务按档位 task_mask 选择 */
+    WORD           units;    /* 单次调用的工作量单位（≈ 本轮最多提交的条数） */
+    bool           must_run; /* true = 正确性关键集：不 gate、不占配额、无条件每轮跑 */
 } bg_task_t;
 
-/* 档位 → 预算规模（FTL 策略表，引擎不持有） */
+/* 档位 → 工作量配额（FTL 策略表，引擎不持有） */
 typedef struct
 {
-    DWORD total_budget_us; /* 每轮总预算（µs） */
-    DWORD task_mask;       /* 本档位允许的预算任务位集合（BG_TASK_*，定义见 bg_scheduler.c） */
+    DWORD total_units; /* 每轮工作量配额（单位见 bg_task_t.units） */
+    DWORD task_mask;   /* 本档位允许的预算任务位集合（BG_TASK_*，定义见 bg_scheduler.c） */
 } bg_level_cfg_t;
 
-/* 每实例一份的后台调度器状态 */
+/* 每实例一份的后台调度器状态（任务表本身是共享只读，不逐实例复制） */
 typedef struct
 {
-    bg_task_t tasks[BG_TASK_COUNT];
-    BYTE      task_count; /* 已装载的项数 */
+    const bg_task_t *tasks;      /* 指向静态任务表 s_bg_tasks（init 绑定一次） */
+    BYTE             task_count; /* 已装载的项数 */
     /* 本轮生效的档位配置，由 bg_scheduler_run 在起点发布。
      * 任务读本轮策略参数走这里，不各自反查档位表——反查是第二套读取路径，
      * 与引擎实际使用的那份配置可能不同步。 */

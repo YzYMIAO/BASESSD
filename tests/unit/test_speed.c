@@ -845,14 +845,14 @@ static bool spd_ftl_submit(ftl_ctx_t *ftl, spd_ftl_req_t *slot, DWORD lba, DWORD
 static void spd_ftl_cache_get(const ftl_ctx_t *ftl, spd_ftl_cache_t *out)
 {
     memset(out, 0, sizeof(*out));
-    out->wb_batches   = ftl->cache_wb_batches;
-    out->wb_pages     = ftl->cache_wb_pages;
-    out->wb_declines  = ftl->cache_wb_declines;
-    out->wb_aborts    = ftl->cache_wb_aborts;
-    out->rd_batches   = ftl->cache_read_batches;
-    out->rd_pairs     = ftl->cache_read_pairs;
-    out->rd_declines  = ftl->cache_read_declines;
-    out->rd_fallbacks = ftl->cache_read_fallbacks;
+    out->wb_batches   = ftl->cache_stream.wb_batches;
+    out->wb_pages     = ftl->cache_stream.wb_pages;
+    out->wb_declines  = ftl->cache_stream.wb_declines;
+    out->wb_aborts    = ftl->cache_stream.wb_aborts;
+    out->rd_batches   = ftl->cache_stream.read_batches;
+    out->rd_pairs     = ftl->cache_stream.read_pairs;
+    out->rd_declines  = ftl->cache_stream.read_declines;
+    out->rd_fallbacks = ftl->cache_stream.read_fallbacks;
 }
 
 static void spd_ftl_cache_diff(const spd_ftl_cache_t *a, const spd_ftl_cache_t *b, spd_ftl_cache_t *out)

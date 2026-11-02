@@ -232,7 +232,7 @@ bool ftl_op_cache_seq_active(void)
 
                 // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
                 // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
-                if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)))
+                if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)))
                 {
                     return true;
                 }
@@ -323,11 +323,11 @@ static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
 {
     ftl_ctx_t *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
-    if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)) && (ftl->cache_seq.owner_submit == false))
+    if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
     {
         if (ftl_op_seq_gate_breaks(op) == true)
         {
-            ftl->cache_seq.break_requested = true;
+            ftl->cache_stream.seq.break_requested = true;
         }
         return true;
     }
@@ -444,7 +444,7 @@ bool ftl_op_is_in_dispatch(void)
  * @brief 该 op 的服务函数是否**必须**拿到私有 ctx（ctx == NULL ⇒ 解引用即越界）。
  *
  * 与 `g_op_callbacks[]` 一一对应：HOST_IO / CACHE_PAD 的 ctx 本就不用（服务函数自行
- * pend_find / 读 ftl->cache_seq）；SYNC_WAIT 的 NULL 有明确语义（超时后的迟到完成，
+ * pend_find / 读 ftl->cache_stream.seq）；SYNC_WAIT 的 NULL 有明确语义（超时后的迟到完成，
  * 由它自己处理并 release）。其余 op 的 ctx 指向真实结构体（journal / rr / mig /
  * cp / alloc / metadata_dir / line），NULL 会在服务函数里被当结构体解引用。
  */

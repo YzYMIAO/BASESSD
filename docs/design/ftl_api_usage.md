@@ -34,7 +34,7 @@ typedef struct ftl_context {
     bool              bg_suspend;       /* 后台写闸门（bbt --erase 置位） */
     bool              md_load_failed;   /* Directory 加载失败（RISK-BOOT-09） */
     bool              l2p_defer;        /* L2P region 加载在飞（drain 不计卡死） */
-    bg_scheduler_t    bg;               /* 时间预算后台调度器（10 项任务） */
+    bg_scheduler_t    bg;               /* 工作量配额后台调度器（10 项任务） */
     mig_handle_t     *mig_handle;       /* GC / WL / predict 共用搬移引擎 */
     rr_handle_t       read_recovery_handle; /* Read Recovery job 状态机 */
     BYTE             *rr_page_scratch;  /* 恢复整页暂存 */

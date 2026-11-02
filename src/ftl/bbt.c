@@ -824,52 +824,6 @@ static ftl_status_e bbt_write_submit(alc_t *alloc)
     return FTL_OK;
 }
 
-/**
- * @brief 把模块执行状态整理成 typed 上报（主流程只读这个，不窥探 handle 内部）。
- *
- * @param alloc 分配器
- * @param out 出参。
- *
- * @note 实现要点：state 的判据是本轮结束时的**可行动性**，不是内部 phase 编号：
- * 命令在飞 ⇒ WAITING（等完成）；phase 未回 IDLE 但无命令 ⇒ RUNNING
- * （还需续提交）；只剩 dirty ⇒ RUNNING（下一步会起 job）；否则 IDLE。
- */
-static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
-{
-    out->base.critical  = false; /* BBT 持久化属预算任务，不占 must-run 正确性关键集 */
-    out->base.wants_run = (alloc->bbt.handle.phase != BBT_JOB_IDLE) || (alloc->bbt.dirty == true);
-    out->base.progress  = alloc->bbt.sequence;
-    out->base.next_ms   = 0U; /* dirty 驱动，无周期 */
-
-    if (alloc->bbt.handle.waiting == true)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (alloc->bbt.handle.phase != BBT_JOB_IDLE)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else if (alloc->bbt.dirty == true)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    // 本模块目前不记录失败码：提交侧失败一律保留 dirty/phase 由下轮重试，
-    // 完成侧失败在 ftl_bbt_callback 里 LOGE 并保留状态。
-    out->base.error = (int32_t)FTL_OK;
-
-    out->phase     = alloc->bbt.handle.phase;
-    out->dirty     = (alloc->bbt.dirty == true);
-    out->dirty_gen = alloc->bbt.dirty_gen;
-    out->sequence  = alloc->bbt.sequence;
-    out->write_idx = alloc->bbt.write_idx;
-    out->bad_count = alloc->bad_count;
-}
-
 // 实现要点：· **单飞行**：① 命令在飞 ⇒ 直接返回；② phase == WRITE 且不在飞 ⇒ 上一步提交
 // 被背压拒，只续提交写（**不重擦**——擦已成功，重擦纯属磨损）；③ 其余非 IDLE
 // （= ERASE 在飞）⇒ 返回；④ IDLE 才装配新 job。
@@ -878,7 +832,7 @@ static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
 // ⇒ 不是嵌套泵。job 的其余步骤全部"提交即返回"。
 // · sequence 在**起步时**自增；续跑路径不会再自增。
 // 擦失败 ⇒ 回 IDLE、dirty 保留、write_idx 不动，下轮重试。
-void bbt_handle(alc_t *alloc, bbt_status_t *out)
+void bbt_handle(alc_t *alloc)
 {
     do
     {
@@ -967,7 +921,6 @@ void bbt_handle(alc_t *alloc, bbt_status_t *out)
     } while (0);
 
     // 统一上报出口：无论推进是否早退，主流程都拿本轮状态。
-    bbt_status_fill(alloc, out);
 }
 
 /**

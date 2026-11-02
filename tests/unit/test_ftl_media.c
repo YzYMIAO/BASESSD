@@ -673,19 +673,17 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     m->wl_eval_last_ms = 0U;
     m->wl_last_writes  = ftl->total_writes;
 
-    const DWORD  moved0 = m->moved_count;
-    const DWORD  t0     = ftl_job_now_ms();
-    mig_status_t st;
+    const DWORD moved0 = m->moved_count;
+    const DWORD t0     = ftl_job_now_ms();
 
-    memset(&st, 0, sizeof(st));
-    mig_handle(m, BG_LEVEL_IDLE, &st);
+    mig_handle(m, BG_LEVEL_IDLE);
 
     munit_assert_true(m->active);
     munit_assert_int(m->kind, ==, MIG_KIND_WL);
 
     while ((m->moved_count == moved0) && ((ftl_job_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 3U)))
     {
-        mig_handle(m, BG_LEVEL_IDLE, &st);
+        mig_handle(m, BG_LEVEL_IDLE);
         ftl_service_pump();
     }
 
@@ -957,7 +955,7 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
  *   三种情况都必须：组报 IO_ERROR、`cache_wb_aborts` 恰好 +1、已确认前缀 = 新数据、
  *   **失败页的 LBA 读 IO_ERROR**（RISK-CACHE-28）、同批未确认页保留旧映射。
  *   ⚠ 不断言「序列已关闭」：中止后同一条 host 命令的剩余 LBA 会合法地重新开一条
- *   序列，结束时 `cache_seq.active` 可能为真。
+ *   序列，结束时 `cache_stream.seq.active` 可能为真。
  * 判据：失败页之后的页若被确认，rebuild 会引用一个 page0 未落盘的块 ⇒ 静默丢数据。
  * 备注：注入点在 FTL 层（`ftl_cache_wr_member_done`），验证的是 FTL 策略；器件
  *       FAILC 归属与 7Ah 状态字节仍须上板（RISK-IF-11）。真 NAND。 */
@@ -1030,11 +1028,11 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
 
     fi_cache_fail_arm(arm_lba);
 
-    const DWORD aborts0 = ftl->cache_wb_aborts;
+    const DWORD aborts0 = ftl->cache_stream.wb_aborts;
 
     munit_assert_false(ftl_ut_host_write(lba, count, s_mx_wr)); /* 组必须报错 */
 
-    const DWORD aborts = ftl->cache_wb_aborts - aborts0;
+    const DWORD aborts = ftl->cache_stream.wb_aborts - aborts0;
 
     /* 只有被注入的那一条命令能触发中止：多一条说明有迟到的完成又走了失败路径。 */
     munit_assert_uint32(aborts, ==, 1U);
@@ -1458,7 +1456,7 @@ static MunitResult test_cache_seq_cross_block(const MunitParameter params[], voi
         munit_assert_true(ftl_ut_host_read(lba + (r * chunk), chunk, s_mx_rd));
     }
 
-    const DWORD pairs0 = ftl->cache_read_pairs;
+    const DWORD pairs0 = ftl->cache_stream.read_pairs;
 
     for (DWORD r = 0U; r < (total / chunk); r++)
     {
@@ -1473,7 +1471,7 @@ static MunitResult test_cache_seq_cross_block(const MunitParameter params[], voi
         }
     }
 
-    const DWORD pairs = ftl->cache_read_pairs - pairs0;
+    const DWORD pairs = ftl->cache_stream.read_pairs - pairs0;
 
     /* 1024 LBA = 128 pair；允许首尾窗口各少一对（START 只在流头、末窗口必 END）。 */
     munit_assert_uint32(pairs, >=, (total / FTL_LBA_PER_PAIR) - 8U);

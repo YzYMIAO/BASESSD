@@ -20,7 +20,6 @@
 
 #include "allocator.h"  /* alc_t */
 #include "ftl_config.h" /* §一 容量/分解宏 + §三.2 DWORD / pba_* */
-#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"   /* DWORD */
 #include "metadata.h"   /* metadata_dir_* / md_dir_cache_t（Directory 访问） */
 
@@ -440,20 +439,6 @@ typedef struct
     void          *owner_ctx;
 } l2p_cache_t;
 
-/* ── 模块 handle（typed 入口，docs §4.7） ── */
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    BYTE  load_inflight;
-    BYTE  flush_inflight;
-    WORD  dirty_regions;  /* 本 (ch,ce) 全局脏位图的置位数 */
-    WORD  resident_lines; /* 非 INVALID 行数 */
-    bool  thrashing;
-    BYTE  miss_pct;
-    DWORD evictions;
-} l2p_status_t;
-
 /* ── 查询（替代外部直读 cache 内部） ── */
 typedef struct
 {
@@ -758,9 +743,8 @@ void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD 
  * @param cache  共享 cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param dim    本实例的 owner dim（ftl_topo_dim(topo)）
  * @param level  本轮后台档位（IDLE / NORMAL / BUSY）
- * @param out    出参：本轮结束后的上报（**非空**）
  */
-void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level, l2p_status_t *out);
+void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level);
 
 /**
  * @brief 读一行元信息（idx 越界/空行时 state == INVALID）。

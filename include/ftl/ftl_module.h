@@ -10,14 +10,14 @@
  *   · 共享数据面账本（L2P / BST / allocator / journal 水位 / metadata / pending /
  *     completion）保持共享 device context，模块**不**复制账本；
  *   · 模块只拥有**执行状态**（FSM / 单飞行 / 计时器 / 进度计数），对外只暴露
- *     typed `*_handle(handle, trigger/level, status)` 与纯查询；
+ *     typed `*_handle(handle, trigger/level)` 与纯查询（仅 wbuf 的入口带可选 out）；
  *   · 主流程不窥探模块内部 phase / active / waiting / stage。
  *
- * 本头只放**跨模块共用**的类型；各模块的 `*_status_t` 用嵌入 base 的方式扩展自己的
- * 上报字段（见 bbt.h / journal.h / ...）。
+ * 本头只放**跨模块共用**的类型；现仅 `wb_status_t` 仍嵌 `ftl_mod_status_t base`，
+ * 其余模块的 handle 入口不回报状态（只做动作）。
  */
 
-#include "ftl_type.h" /* ftl_status_e（FTL_TIMEOUT） */
+#include "ssd_types.h" /* DWORD */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -41,7 +41,7 @@ typedef enum
 } ftl_mod_state_e;
 
 /*
- * ftl_mod_status_t — 所有模块 status 的公共前缀
+ * ftl_mod_status_t — status 的公共前缀（现仅 wbuf 使用）
  *
  * 字段语义：
  *   state     本轮结束后的模块状态（见上）；

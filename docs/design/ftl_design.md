@@ -167,8 +167,8 @@
 
 | 术语 | 含义 |
 |---|---|
-| **bg_scheduler** | 时间预算后台调度器：must-run 集 + 预算任务 |
-| **must-run** | 每轮无条件执行、不占预算的正确性关键任务 |
+| **bg_scheduler** | 工作量配额后台调度器：must-run 集 + 预算任务 |
+| **must-run** | 每轮无条件执行、不占配额的正确性关键任务 |
 | **op tag** | 完成服务函数选择器；`g_op_callbacks[]` 的下标 |
 | **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
 | **pending / group** | 子操作追踪表 / 一条 host 请求的完成组 |
@@ -234,7 +234,7 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 |---|---|---|
 | 主机写不丢映射 | 映射变更先入 Journal；Checkpoint 截断前 Journal 不得擦 | §3.7、§3.8 |
 | 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免 full metadata rebuild | §3.8、§3.1 |
-| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + 时间预算；must-run 只放防死锁动作 | §3.12 |
+| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + 工作量配额；must-run 只放防死锁动作 | §3.12 |
 | 写放大可控 | CW 级映射 + 页打包 + 只搬有效 CW + 冷热分离 | §3.11、§3.13 |
 | 容量不无声流失 | 池账本唯一闸门；坏块/退役块不得留在 Free Pool；块元数据快照 | §3.2、§3.8 |
 | 坏块不扩散 | 出厂扫描先读后擦；运行时隔离 + Spare 按 plane 补充 | §3.3 |
@@ -2881,7 +2881,7 @@ ftl_issue_subop(read) 对每个 LBA：
 「序列收尾」这类进展由 `bg_progress` 里的 `seq_closing` 表达，不借 `l2p_defer`。
 
 **FTL cache read（流式序列，本仓自定）**：`ftl_drain_group` 在下发普通子操作前先尝试
-`ftl_cache_read_try()`。序列状态在 `ftl->cache_seq`（per 实例），**跨窗口、跨 chunk 保持**：
+`ftl_cache_read_try()`。序列状态在 `ftl->cache_stream.seq`（per 实例），**跨窗口、跨 chunk 保持**：
 START 只在 run 头，LAST 只在断点，中间窗口全 SEQ；**窗口只是资源边界**，不是序列边界。
 条件：读组、LBA pair 对齐、8 个 LBA 全部映射且无 wbuf 命中、两 plane 的**页号字段**相同
 （`pba_to_page()`；`pba_page()` 保留 plane/block 位，只能用于同一 plane 内比较）且后续 pair
@@ -2892,10 +2892,10 @@ SEQUENTIAL 31h` 可跨 block、禁止跨 die/LUN，见 `docs/reference/datasheet
 （ARDY = 0），程序命令发不进去 ⇒ 断点是后台元数据在本实例上的让步点（与写侧 Journal 配额
 同性质），不是器件约束。
 新序列 ≥2 pair，**续序列允许 1 pair 尾巴**。开启条件 = **FTL 顺序流检测器**
-（`ftl->stream_rd`：同一方向连续 LBA 累计 ≥ `FTL_STREAM_MIN_LBAS` = 64）+ 请求起点
+（`ftl->cache_stream.rd`：同一方向连续 LBA 累计 ≥ `FTL_STREAM_MIN_LBAS` = 64）+ 请求起点
 pair 对齐；**序列所有者每轮都尝试续窗口**，其余情况检测器未判为顺序流就直接走普通读。
 
-**续接判据只看 LBA**（`cache_seq.next_lba == 本请求起始 LBA`）：host 传输段（USB 16 KiB）
+**续接判据只看 LBA**（`cache_stream.seq.next_lba == 本请求起始 LBA`）：host 传输段（USB 16 KiB）
 只是同一条 LBA 流的一次交付，**不是序列边界**；方向不同或续接点不符才释放状态。
 命令末尾由 `pend_group_t.cmd_remaining`（同一 host 命令在本请求之后还剩多少 LBA）
 单独表达，只用于 END / LAST 落点（器件要求收尾命令落在最后一个数据页）。
@@ -2926,7 +2926,7 @@ must-run 查询）。⚠ **后台元数据（Journal / L2P / GC / WL / CP / meta
 > host 大块顺序读确实走 cache read（修复前 `batches` 恒 0，RISK-HOST-13）。
 
 **FTL cache program（流式写序列，本仓自定）**：`ftl_drain_group` 在写分支、wbuf 之前先尝试
-`ftl_cache_write_try()`。序列状态与读共用 `ftl->cache_seq`（`kind = WRITE`），**跨窗口、
+`ftl_cache_write_try()`。序列状态与读共用 `ftl->cache_stream.seq`（`kind = WRITE`），**跨窗口、
 跨 chunk 保持**：首窗口首条 `OP_TWO_PLANE_PROGRAM_CACHE_FIRST`（49：只查 FAIL，避免残留
 FAILC 误判），中间 `_CACHE`（44，15h），断点末条 `_END`（48，10h）。
 
@@ -2938,7 +2938,7 @@ FAILC 误判），中间 `_CACHE`（44，15h），断点末条 `_END`（48，10h
 - **开序列阈值**：LBA 8 对齐、wbuf 空闲、SB 有余量（含 1..3 页的块尾；块尾 1 页窗口正好
   接上 Journal 页配额与 block 长度差）；续序列允许 1 页。
 - **逐页确认（滞后一页）**：第 i 页的最终结论由**第 i+1 条命令**的 `FAIL_CACHE` 给出，
-  最后一页由 END 的 FAIL 给出。已提交页按顺序进 `ftl->cache_seq.wr` FIFO；
+  最后一页由 END 的 FAIL 给出。已提交页按顺序进 `ftl->cache_stream.seq.wr` FIFO；
   第 i+1 条完成时 `pop` 前一页并 `ftl_confirm_write`（region 未就绪则停泊）。
 - **失败**：任一错误位（FAILC/NAND_FAIL/TIMEOUT/…）⇒ 序列中止：未确认页一律不确认映射
   （按 IO_ERROR 结算）、关闭承载它的 hot SB、清序列状态。
@@ -3306,12 +3306,12 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 由此得到两个直接结论：
 
-- **“预算”管的不是 CPU 时间，而是“每轮允许提交多少条命令”。** 一次 kick 只花几十 µs，
-  所以 700 µs / 2000 µs 这两个数，实际读作“本轮后台最多占多少提交机会”。
-- **确定性保护靠“档位 → 允许哪些任务 / 几条”，不靠 `elapsed` 计时。** 平台时钟是
-  SysTick，1 ms 分辨率；用它做“本轮是否超预算”的判据精度不够，只能当上界参考。
-  真正的行为约束是**档位掩码**（BUSY 档只放一个预算任务）与**各模块内的条数上界**
-  （如 `L2P_FLUSH_MAX_BUSY`）。
+- **“预算”按工作量单位记，不按时间。** 一次 kick 通常 = 一条命令 ≈ 1 个 unit；
+  每档位给固定配额（IDLE/NORMAL 4、BUSY 1），配额不足即截断。L2P 一次 kick 的具体
+  条数由模块内档位表（`L2P_FLUSH_MAX_*`）再收一层。
+- **确定性保护靠“档位 → 允许哪些任务 / 配额几条”，不靠计时。** 时间只做单轮墙钟
+  兜底（`BG_ROUND_HARD_LIMIT_US`，只在任务之间检查、不能抢占）：机器快慢不影响
+  配额，兜底只防某个 kick 异常膨胀。
 
 #### 3.12.2 术语
 
@@ -3321,8 +3321,8 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 |---|---|
 | **kick** | 调用一次任务函数：只提交一步 / 一条命令就返回，不等完成 |
 | **档位** | 按 host 繁忙度选出的三档负载：`IDLE` / `NORMAL` / `BUSY` |
-| **预算** | 本轮允许预算任务消耗的上界（µs）；由 kick 的 `MIN(elapsed, budget_us)` 累计 |
-| **must-run** | 正确性关键任务：无条件每轮执行，**不 gate、不占预算** |
+| **预算（工作量）** | 本轮预算任务可用的工作量单位；每次 kick 扣 `units`，不足即截断 |
+| **must-run** | 正确性关键任务：无条件每轮执行，**不 gate、不占配额** |
 | **表序** | `s_bg_tasks[]` 中的位置。**表序 = 执行序 = 优先级**，没有独立的 `priority` 字段 |
 
 #### 3.12.3 职责与边界
@@ -3335,10 +3335,10 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
     **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
     **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台调度**（`bg_scheduler_service`）。
 - **`bg_scheduler.c/h`**：一个模块承载两层内容——
-  - **引擎**：必跑任务 + 预算任务 + 预算截断（函数本身零 kick 知识，
+  - **引擎**：必跑任务 + 预算任务 + 配额截断（函数本身零 kick 知识，
     不认识任何具体任务）；
   - **FTL 策略段**：10 个 `static` 适配器把异构 kick 包成 `void(ftl_ctx_t *)` + 任务表
-    `s_bg_tasks` + 档位预算表 `s_bg_level_cfg` + `bg_scheduler_init` /
+    `s_bg_tasks` + 档位配额表 `s_bg_level_cfg` + `bg_scheduler_init` /
     `bg_scheduler_level_select` / `bg_scheduler_service`。
 
   两层同放一个 `.c` 是刻意的：引擎的接口就是“一张 `bg_task_t` 表”，把策略段拆出去只会让
@@ -3349,24 +3349,25 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 #### 3.12.4 结构与不变量
 
-`bg_task_t`：`func` / `mask` / `budget_us` / `must_run`（`bool`）。
+`bg_task_t`：`func` / `mask` / `units`（工作量单位）/ `must_run`（`bool`）。
 `bg_scheduler_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
 引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，模块入口
 直接读取）。
-`bg_level_cfg_t`：每轮总预算 / 任务掩码（预算任务位集合）。
+`bg_level_cfg_t`：每轮工作量配额 / 任务掩码（预算任务位集合）。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
 再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
 （`BG_TASK_*`），表序不再兼职位号。加任务 = 在 `s_bg_tasks` 里插一行并给 `.mask` 新位 +
-视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`。表项数由 `_Static_assert` 在编译期
+视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`，并确认对应档位的 `total_units`
+足够容纳新任务（配额不够会被截掉）。表项数由 `_Static_assert` 在编译期
 锁死为 `BG_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
 **must-run 的归纳判据（6 项同一条）**：**有前台请求或在飞 job 正在等它**——不跑就死锁或
 host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
-**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的预算值（must-run 不占预算）：
+**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的配额（must-run 不占配额）：
 
-| 表序 | 任务 | 类型 | 预算 | 语义 |
+| 表序 | 任务 | 类型 | 配额（units） | 语义 |
 |---:|---|---|---:|---|
 | 0 | Checkpoint 推进 | must-run | — | `cp_handle(ADVANCE)`：在飞 CP 跨档位走完 |
 | 1 | RR 推进 | must-run | — | `rr_handle`：host 读在等结果 |
@@ -3374,18 +3375,18 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 | 3 | 元数据目录 | must-run | — | `md_handle`：压缩请求由前台置位，不推进即永久 FTL_AGAIN |
 | 4 | Journal 预擦 | must-run | — | `jrn_handle(ERASE_ONLY)`：新环形块没擦不能写 |
 | 5 | 紧急 CP | must-run | — | `cp_handle(EMERGENCY)`：Journal ≥95% 每轮响应 |
-| 6 | L2P flush | 预算 | 1500 µs | `l2p_handle`；条数上界由模块内档位表决定 |
-| 7 | Journal 刷页 | 预算 | 700 µs | `jrn_handle(FLUSH)`；BUSY 被掩掉 |
-| 8 | BBT 持久化 | 预算 | 700 µs | `bbt_handle`：攒批写（磨损计数随 CP） |
-| 9 | CP 触发 | 预算 | 100 µs | `cp_handle(TIMER)`：T1/T2/T3 |
+| 6 | L2P flush | 预算 | 1 | `l2p_handle`；条数上界由模块内档位表决定 |
+| 7 | Journal 刷页 | 预算 | 1 | `jrn_handle(FLUSH)`；BUSY 被掩掉 |
+| 8 | BBT 持久化 | 预算 | 1 | `bbt_handle`：攒批写（磨损计数随 CP） |
+| 9 | CP 触发 | 预算 | 1 | `cp_handle(TIMER)`：T1/T2/T3 |
 
 **档位**：
 
-| 档位 | 条件（`bg_scheduler_level_select`） | 总预算 | 允许的预算任务 |
+| 档位 | 条件（`bg_scheduler_level_select`） | 总配额 | 允许的预算任务 |
 |---|---|---:|---|
-| IDLE | `pending == 0 && queued == 0` | 2000 µs | 表序 6..9 全开 |
-| NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 2000 µs | 表序 6..9 全开 |
-| BUSY | `pending > FTL_PENDING_MAX/2` 或 `queued != 0` | 700 µs | **仅表序 6（L2P flush）** |
+| IDLE | `pending == 0 && queued == 0` | 4 | 表序 6..9 全开 |
+| NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 4 | 表序 6..9 全开 |
+| BUSY | `pending > FTL_PENDING_MAX/2` 或 `queued != 0` | 1 | **仅表序 6（L2P flush）** |
 
 （`pending` = 待下发子操作数 `pend_slot_get_count`；`queued` = 未完成组数
 `pend_group_get_count`；`FTL_PENDING_MAX = 32`，故分界当前为 16。**判据写表达式不写数字**：
@@ -3393,12 +3394,12 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 **不变量**：
 
-1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗预算。
+1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗配额。
 2. **每个实例都要调 `ftl_service`**：漏一个，它的 Journal/CP/BBT/GC 永不推进。
-3. **must-run 不 gate、不占预算**：它们是防死锁/防 host 挂起的动作。
+3. **must-run 不 gate、不占配额**：它们是防死锁/防 host 挂起的动作。
 4. **确定性保护靠“档位 → 掩码/条数”**，不靠 `elapsed` 计时（理由见 §3.12.1）。
-5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 预算计账失效（`elapsed=0` 永不截断），
-   后台每轮都跑；防刷屏靠各任务内部单飞行/事件门。
+5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 墙钟兜底失效（配额仍生效，任务照常按
+   配额截断）；防刷屏靠各任务内部单飞行/事件门。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
@@ -3410,9 +3411,9 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 ```text
 前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
-      cfg = { total_budget_us = 700, task_mask = BG_TASK_L2P_FLUSH }
+      cfg = { total_units = 1, task_mask = BG_TASK_L2P_FLUSH }
 
-① 必跑任务（must-run，表序 0..5，全部执行，不计预算）
+① 必跑任务（must-run，表序 0..5，全部执行，不计配额）
   cp_handle(ADVANCE)        → 在飞 CP 推进一步（没有在飞则空操作）
   rr_handle                 → 读恢复：无待恢复页则空操作
   mig_handle                → 在飞 GC/WL 推进一步（BUSY 档不发起新的求值）
@@ -3421,19 +3422,20 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
   cp_handle(EMERGENCY)      → journal 未到 95% 则空操作
   ⇒ 最坏 6 次 kick，每次只提交 ≤1 条命令
 
-② 预算任务（按表序 + 总预算）
-  budget_remaining = 700
-  表序 6 L2P flush : 掩码允许 → 执行
+② 预算任务（按表序 + 工作量配额；另有 4 ms 墙钟兜底）
+  units_left = 1
+  表序 6 L2P flush : 掩码允许、units = 1 ≤ 1 → 执行
                      l2p_handle 按档位踢 ≤ L2P_FLUSH_MAX_BUSY(1) 条写回
-                     假设耗时 120 µs ⇒ charge 120，remaining 580 ≥ 250 → 继续
+                     units_left -= 1 ⇒ 0
   表序 7 Journal   : 掩码不含 → 跳过
   表序 8 BBT       : 掩码不含 → 跳过
   表序 9 CP 触发   : 掩码不含 → 跳过
   ⇒ 本轮实际发生：最多 6 次 must-run kick（多数是空操作）+ 1 条 L2P 写回命令
 ```
 
-对照 **IDLE** 档（host 空闲）：`total = 2000`、四项预算任务全开 ⇒ L2P 写回最多 4 条、
-Journal 刷页、BBT、CP 触发依次执行，剩余预算 < 250 µs 即截断。host 空闲时后台跑满。
+对照 **IDLE** 档（host 空闲）：`total_units = 4`、四项预算任务全开 ⇒ L2P 写回、
+Journal 刷页、BBT、CP 触发各执行一次，配额用尽即截断；单轮墙钟超过 4 ms 也会兜底截断。
+host 空闲时后台跑满。
 
 **BUSY 档为什么只留 L2P 写回**：写回是**释放 L2P 缓存行**的唯一途径——它是写路径的
 依赖项，不是“可选优化”。其余三项（Journal 刷页 / BBT / CP 触发）停在 BUSY 不会让 host
@@ -3464,9 +3466,9 @@ flowchart TB
 1. 主循环：`cli_service_poll` → `ftl_service_pump` → 逐实例 `ftl_service`。
 2. 档位选择：`inflight = pend_slot_get_count + pend_group_get_count`；0 → IDLE；
    `pending > FTL_PENDING_MAX/2` 或 `queued != 0` → BUSY；否则 NORMAL。
-3. 先跑必跑任务：按表序跑所有 `must_run`，无条件、不计预算。
-4. 再跑预算任务：按表序扫；**本档位掩码允许**才跑；`charge = MIN(elapsed, budget)`；
-   剩余预算 < `BG_MIN_TASK_BUDGET_US`（250 µs）即截断。
+3. 先跑必跑任务：按表序跑所有 `must_run`，无条件、不计配额。
+4. 再跑预算任务：按表序扫；**本档位掩码允许且配额够**才跑（每次扣 `units`）；
+   单轮墙钟超过 `BG_ROUND_HARD_LIMIT_US`（4 ms）即兜底截断（不抢占）。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
 
 #### 3.12.8 与相邻章节的关系（读本节前先看这三条）
@@ -3483,7 +3485,7 @@ flowchart TB
 |---|---|---|
 | 某任务提交被背压 | kick 保留状态，下轮重试 | 后台变慢，不影响正确性 |
 | must-run 任务自身卡死 | 心跳日志（job phase/age）暴露 | 由各 job 的 stall 上限中止 |
-| 时钟缺失 | 无预算门控 | 后台更频繁，靠内部事件门防刷屏 |
+| 时钟缺失 | 墙钟兜底失效（配额仍生效） | 靠内部事件门防刷屏 |
 | `bg_suspend` 置位 | **后台调度**步整体跳过 | 只能复位恢复（诊断/擦片后） |
 
 #### 3.12.10 常量与出处
@@ -3497,13 +3499,13 @@ flowchart TB
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
 | `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
 | `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） | `include/ftl/pending.h` |
-| 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_scheduler.c` |
-| `BG_MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
+| 档位配额 | 4 / 4 / 1（工作量单位） | `src/ftl/bg_scheduler.c` |
+| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
 
 #### 3.12.11 主流对照
 
-“主循环 + 独立后台调度器 + 每任务预算/优先级”是主控固件的常见形态
-（SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定预算
+“主循环 + 独立后台调度器 + 每任务配额/优先级”是主控固件的常见形态
+（SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定配额
 （不是连续带宽调节）与 must-run 集合的划分。
 
 <a id="s3-13" name="s3-13"></a>
@@ -3975,7 +3977,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 | 层 | 延续判据 | 主动断点 |
 |---|---|---|
-| **设备 cache 序列**（START/SEQ/END） | `cache_seq.next_lba == 下一段起始 LBA`——**跨 host 传输段、跨 host 命令、跨物理 block**延续 | Journal 顺序页写满（≈63 pair / 252 KiB）/ LBA 不连续 / 空闲 / flush / 收尾块时开不出新块 |
+| **设备 cache 序列**（START/SEQ/END） | `cache_stream.seq.next_lba == 下一段起始 LBA`——**跨 host 传输段、跨 host 命令、跨物理 block**延续 | Journal 顺序页写满（≈63 pair / 252 KiB）/ LBA 不连续 / 空闲 / flush / 收尾块时开不出新块 |
 | **Journal 顺序页**（JSEG） | 同上（LBA 连续且页内有空间） | 页写满（504 条）/ LBA 不连续 / 空间不足一个窗口 |
 
 为什么设备序列能跨 host 命令：控制器改成 **volatile write cache** 语义——**所有**写
@@ -3994,7 +3996,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 #### 3.16.2 职责与边界
 
-- **做**：顺序流检测（`stream_rd/wr`）、窗口收集/构建、序列状态机、门控旁路、
+- **做**：顺序流检测（`cache_stream.rd/wr`）、窗口收集/构建、序列状态机、门控旁路、
   `FAIL_CACHE` 逐页确认、**padding END 有序收尾**、Journal 顺序页跨命令续用与页满断点、
   `info` 的 `cr=` / `cw=` / `sw=` / `pc=` / `jf=` / `d4=` 计数。
 - **不做**：FC 序列句柄 / tag；IRQ 驱动；多 LUN 交织（序列 per 实例）；器件 opcode 顺序；
@@ -4004,7 +4006,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 #### 3.16.3 结构与约束
 
-`ftl->cache_seq`（per 实例）承载全部序列状态，`ftl->stream_rd/stream_wr` 承载检测器：
+`ftl->cache_stream.seq`（per 实例）承载全部序列状态，`ftl->cache_stream.rd/wr` 承载检测器：
 
 | 字段 | 含义 |
 |---|---|
@@ -4109,7 +4111,7 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
 ④ 命令：首窗口首条 49（FIRST）/ 中间 44（15h）/ 断点末条 48（10h）
 ⑤ 逐页结论：第 i 页的结论由第 i+1 条命令的 FAIL_CACHE 给出；末页由 END 的 FAIL 给出
    （与 block 无关：跨 block 的下一对同样给出上一页的 FAILC）。结论落在
-   `cache_seq.wr` 的**结论游标**（pend_idx）上，不是队头——确认可能背压滞后，
+   `cache_stream.seq.wr` 的**结论游标**（pend_idx）上，不是队头——确认可能背压滞后，
    队头会停在「已证明、等确认」的页（见 §3.16.5「volatile write cache」）
 ⑥ **早回执**：页在**自身命令完成**时就结算子操作（组完成 ⇒ host 可见完成），
    不再等下一命令的 FAILC；组完成与确认/证明解耦（RISK-CACHE-27）
@@ -4127,7 +4129,7 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
    ⇒ service 提交一个**不映射的零页**（页头 META=UNKNOWN）作为 48h，
    用它的 FAIL_CACHE 结算最后一页，然后 active=false。
    ⚠ padding 页落在新 SB 的 page0 时，成功回调必须用**逐 plane 的真实 PBA**
-   （`cache_seq.pad_pba[]`）记 page0 屏障：Policy B 下两 plane 块号不同，用
+   （`cache_stream.seq.pad_pba[]`）记 page0 屏障：Policy B 下两 plane 块号不同，用
    `pba_with_plane(plane0, 1)` 推导会让 plane1 的屏障永久漏记（RISK-CACHE-24）
 ⑩ 失败：任一错误位 ⇒ 中止序列；器件**已证明**的页保留（正常确认并弹出），
    其余未证明页按 IO_ERROR 结算、关 hot SB；FAILC 落点页立即把其 region 置 degraded；
@@ -4152,7 +4154,7 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
 （环余量 / Journal 顺序页余量）也必须把它算进「在飞」，否则完成后集中入表即溢出。
 
 **迟到完成**：序列中止后仍在飞的 cache 命令，完成时会带**序列代号**（`pend_req_t.cache_gen`
-vs `cache_seq.gen`）；不一致 ⇒ 只按 IO_ERROR 结算组，页一律不入表、不确认映射。没有这一层，
+vs `cache_stream.seq.gen`）；不一致 ⇒ 只按 IO_ERROR 结算组，页一律不入表、不确认映射。没有这一层，
 中止后的迟到页会被确认进 L2P，击穿 RISK-CACHE-19 的 page0 捷径（rebuild 跳过 page0 空白的块）。
 
 **confirmed 不等于 proven**：确认（Journal→L2P→BST）只要页已编程就推进，证明要等下一
@@ -4271,7 +4273,7 @@ Journal 顺序映射页的形态出处（DFTL translation page）与差异见 §
 
 **验收判据（上板）**：
 - 写：`info` 的 `cw=… sw=starts/page_ends pc=pad_closes jf=journal_page_writes`；
-  `cache_wb_pages / cache_wb_starts` 在**跨 region 预加载 + 跨 block 续写**后应接近 63
+  `cache_stream.wb_pages / cache_stream.wb_starts` 在**跨 region 预加载 + 跨 block 续写**后应接近 63
   （JSEG 页容量仍是硬上限）；`wr − cw pages`（wbuf 页数）应接近 0（块尾页不再回退 wbuf）；
   `pc` 只随 LBA 不连续 / flush 出现（少量）；`jf` 应接近 pairs/63——块尾 wbuf 页走普通
   Journal 条目（`JRN_PAGE_LBA`）会先把当前 JSEG 页冻结，块尾页进序列后 JSEG 页才能填满。
@@ -4690,13 +4692,15 @@ flowchart TD
     E --> E4["md_handle"]
     E --> E5["journal need_erase"]
     E --> E6["emergency CP"]
-    E1 --> F["预算任务（表序 + 总预算）"]
+    E1 --> F["预算任务（表序 + 配额）"]
     F --> F1{"掩码允许"}
     F1 -- "否" --> G["下一任务"]
-    F1 -- "是" --> F3["执行 kick 提交即返回"]
-    F3 --> F4["charge 为 MIN elapsed, budget"]
-    F4 --> F5{"剩余预算不足 250µs"}
-    F5 -- "是" --> H["截断"]
+    F1 -- "是" --> F2{"配额 ≥ units"}
+    F2 -- "否" --> H["截断"]
+    F2 -- "是" --> F3["执行 kick 提交即返回"]
+    F3 --> F4["units_left -= units"]
+    F4 --> F5{"墙钟 > 4ms"}
+    F5 -- "是" --> H
     F5 -- "否" --> G
     G --> F1
 ```
@@ -4781,33 +4785,31 @@ flowchart TB
   **不得读/写** `*.handle.phase` / `waiting` / `active`，只经 poll/status/查询；
   跨模块字段走 owner API 或只读实例字段（无端口结构体）。完整契约见 `docs/archive/ftl_module_contracts.md`。
 
-### 5.1.1 模块 handle 与上报契约
+### 5.1.1 模块 handle 契约
 
 公共类型在 `include/ftl/ftl_module.h`（设计与落地状态见本节 §5.1.1/§5.1.2；
 全文归档在 `docs/archive/ftl_module_contracts.md`）：
 
 | 类型 | 关键字段 | 用途 |
 |---|---|---|
-| `ftl_mod_state_e` | IDLE / RUNNING / WAITING / BLOCKED / FAILED | 本轮结束后的模块状态 |
-| `ftl_mod_status_t` | state / critical / wants_run / progress / next_ms / error | 所有 `*_status_t` 的公共前缀 |
+| `ftl_mod_state_e` | IDLE / RUNNING / WAITING / BLOCKED / FAILED | 模块状态（现仅 `wb_status_t` 使用） |
+| `ftl_mod_status_t` | state / critical / wants_run / progress / next_ms / error | 公共 status 前缀（现仅 `wb_status_t` 使用） |
 
-各模块 `*_status_t` 嵌入 `ftl_mod_status_t base`，再带自己的观测字段：
+模块入口只做**动作**（提交/推进，提交即返回），不回报状态：
 
-| 模块 | handle / 上下文 | typed 入口 | status / 查询 |
+| 模块 | handle / 上下文 | 入口 | 查询 |
 |---|---|---|---|
-| BBT | `alloc->bbt.handle` | `bbt_handle(alloc, info, out)` | `bbt_status_t` |
-| Journal | `l2p_jrn_t.handle` | `jrn_handle(j, trigger, info, out)` | `jrn_status_t`；`jrn_is_idle` / `jrn_can_erase_victim` / `jrn_sequence_get` / `jrn_watermark_get` / `jrn_has_write_failure` |
-| Metadata | `md_dir_cache_t.handle` | `md_handle(dir, info, out)` | `md_status_t`；`md_is_busy` |
-| Migrate | `mig_handle_t` | `mig_handle(h, info, out)` / `mig_gc_request_urgent(h)` | `mig_status_t`（无独立访问器；调用方读 `mig_handle_t` 字段） |
-| RR | `rr_handle_t` | `rr_handle(h, info, out)` / `rr_trigger(h, owner)` | `rr_status_t` |
-| Checkpoint | `cp_handle_t` | `cp_handle(h, trigger, out)` | `cp_status_t`；`cp_is_active` |
-| L2P cache | `l2p_cache_t` | `l2p_handle(cache, dim, info, out)` | `l2p_status_t`；行查询/失效原语 |
-| Wbuf | `wb_handle_t` | `wb_handle(h, trigger, info, out)` | `wb_status_t`；`wb_has/read` |
+| BBT | `alloc->bbt.handle` | `bbt_handle(alloc)` | — |
+| Journal | `l2p_jrn_t.handle` | `jrn_handle(j, trigger)` | `jrn_is_idle` / `jrn_can_erase_victim` / `jrn_sequence_get` / `jrn_watermark_get` / `jrn_has_write_failure` |
+| Metadata | `md_dir_cache_t.handle` | `md_handle(dir)` | `md_is_busy` |
+| Migrate | `mig_handle_t` | `mig_handle(h, level)` / `mig_gc_request_urgent(h)` | 调用方读 `mig_handle_t` 字段 |
+| RR | `rr_handle_t` | `rr_handle(h)` / `rr_trigger(h, owner)` | — |
+| Checkpoint | `cp_handle_t` | `cp_handle(h, trigger)` | `cp_is_active` |
+| L2P cache | `l2p_cache_t` | `l2p_handle(cache, dim, level)` | 行查询/失效原语 |
+| Wbuf | `wb_handle_t` | `wb_handle(h, trigger, out)` | `wb_status_t`；`wb_has/read` |
 
-主流程只读 status / 查询（如 `jrn_is_idle`、`cp_is_active`、
-`mig_reclaimed_count`），**不读** `*.handle.phase` / `waiting` / `active`。
-`critical` 标记 must-run；`wants_run` / `next_ms` 供调度器决定下一轮是否还调；
-`progress` 是单调进展计数（区分「在推进」与「卡死」）。
+主流程只走查询接口（如 `jrn_is_idle`、`cp_is_active`），**不读**
+`*.handle.phase` / `waiting` / `active`。
 
 **时间与超时**：模块自持 `now_ms` 节拍；提交背压用 `FTL_SUBMIT_TIMEOUT_MS`（10 ms），
 等外部模块（L2P / Journal）用 `FTL_WAIT_TIMEOUT_MS`（50 ms），confirm park 用
@@ -4815,8 +4817,7 @@ flowchart TB
 提交 deadline 与外部等待 deadline 都归零（写序列由 Journal 配额 / 命令尾收尾、读序列由
 128 pair 单段上限收尾，等待必然在段边界结束）；否则一段 ~300 ms 的长顺序写会让
 GC/WL 每 50 ms 中止一次。
-超时统一走 `FTL_TIMEOUT`，模块 status 带 `timed_out` / `timeout_phase`（RR 以
-`error = FTL_TIMEOUT` 上报）。时钟缺失时 deadline 不生效；本板
+超时统一走 `FTL_TIMEOUT`（模块内部记录 error，不再有统一的 status 上报）。时钟缺失时 deadline 不生效；本板
 `ssd_platform_register` 强制 `time_us` 非空 ⇒ 该分支不可达。
 
 ### 5.1.2 字段所有权与单写者
@@ -4832,9 +4833,9 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | metadata directory | `metadata.c` / `metadata_job.c` | `metadata_dir_*` / `md_is_busy` |
 | pending / groups | `pending.c` | `pend_*`（含 `pend_view_op` / `pend_group_has_window_pending`） |
 | 完成派发面 | `ftl_op.c` | `ftl_op_*`、`g_op_callbacks` |
-| 各 job FSM | 各模块 handle | status / 查询 |
-| 调度定时器 | 各模块 handle | `now_ms` + status |
-| 观测计数 | 各模块 handle | status / log |
+| 各 job FSM | 各模块 handle | 查询接口 |
+| 调度定时器 | 各模块 handle | 模块内部 `now_ms` + 查询 |
+| 观测计数 | 各模块 handle | 查询 / log |
 
 规则：
 
@@ -5152,16 +5153,16 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 > 2026-10-25 cache read 修复后复测仍为 843/889（`cr` 已生效但读速无增益，RISK-PERF-03）。
 > **FAILC 负例、失败注入、掉电注入仍未做**，不得据此声称 cache program 全部已验证。
 
-### ADR-16 后台调度：时间预算 + must-run
+### ADR-16 后台调度：工作量配额 + must-run
 
 | 项 | 内容 |
 |---|---|
 | 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
-| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务预算 + must-run |
-| 选择 | **10 项任务表：6 must-run（不 gate、不占预算）+ 4 预算任务；三级负载→固定预算/掩码** |
-| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/总预算截断；前台保护是确定性的（条数/掩码），不依赖 µs 计时 |
-| 主流 | 主控固件常见“poller + 后台调度器 + 每任务预算”；本仓用固定分档而非连续带宽调节 |
-| 代价 | 分档粒度粗；时钟缺失时退化为无门控 |
+| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务时间预算 + must-run / 每任务工作量配额 + must-run |
+| 选择 | **10 项任务表：6 must-run（不 gate、不占配额）+ 4 预算任务；三级负载→固定配额/掩码** |
+| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/工作量配额截断；时间只做单轮墙钟兜底——前台保护是确定性的（条数/掩码），不依赖计时 |
+| 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
+| 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
 | 出处 | [`storage_controller_design_essentials.md`](storage_controller_design_essentials.md) 的调度形态；SPDK core poller 对照；`include/ftl/bg_scheduler.h` |
 
@@ -5221,7 +5222,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | P3 门控 / 后台 / RR 审计 | 审计结论 + deadline 挂起 + 限流均上板验证（2026-10-30 新镜像：无 submit-stalled 刷屏，GC/CP/journal 推进；`d4=13882` 空盘 vs 24820 满盘） | `src/ftl` 下无绕过 `ftl_op_submit*` 的 `fc_submit` ⇒ 门控覆盖 host / GC / WL / CP / journal / metadata / L2P / RR；各后台路径把门控拒绝当 `FTL_AGAIN` 重试（迁移/RR 释放命令后下轮重试），被拒提交置 `break_requested`，序列在下一窗口收尾；`info` 新增 `d4=` 计数。BOT 串行下 RR（host 读触发）与写序列不共存。 |
 | 上板刷屏（META/CP/MIG/RR submit stalled、JRN erase kick、L2P load fail） | 已上板验证（2026-10-30 新镜像 17:33：JRN/L2P 单行带 suppressed、无 META 刷屏） | 后台提交 deadline（10 ms）短于 USB chunk 间隔（~19 ms），写序列门控期间四类 job 每 10 ms abort + WRN 刷屏；另有 `[JRN] erase kick failed`（无节流 ERR）与 `[L2P] load start failed` 的 64 条计数突发。修复：① `ftl_op_cache_seq_active()` 在序列打开时挂起四类 job 的提交 deadline；② 限流策略统一为**时间优先**（有钟按 5 s/1 s，无钟才用 64 条兜底）——`ftl.c` 共享限流、META abort、L2P load/evict；③ gate 造成的 L2P 加载失败降为 5 s 慢节拍；④ JRN erase-kick 日志加 5 s 限流 + suppressed。2026-10-30 上板 H2testw（未 format，417/423 MB）：META 刷屏消失，`JRN`/`L2P` 仍见旧镜像的节流前日志；四关零新告警，待新镜像复测 |
 | P4 文档合并 / 旧路径清理 | **已完成（2026-10-30，未上板）** | 临时设计稿并入 §3.16 并删除；删除 `cache_wb_t` 旧整批状态机、`FTL_CACHE_WRITE_LBAS` 死宏、`wr.abort` 死字段；四关零新告警；上板回归清单见 §7.1。**上板前 review 又修 2 处**：① USB 槽回收 `memset` 后 `bounce` 指针变 NULL ⇒ 保存/恢复；② 写 END 完成回调过早清 `kind` / 断言 FIFO 空 ⇒ 改为只验证本页已摘除（多子序列共存） |
-| **v1.04 设计 A：FTL 顺序流 + Journal 顺序映射页** | **已改、未上板（2026-10-31）** | 序列开启改由 `stream_rd/wr` 检测器（连续 LBA ≥64）判定；延续只看 `next_lba`（传输段不是断点）；`cmd_remaining` 只给 END 落点；写段配额 = 一张 JSEG 页 504 条（63 pair 页 ≈252 KiB）；后台元数据被门控但不请求断点。介质版本 **v13（首启自动格式化）**。四关（`all`/`release`/`tests UT=FTL`/`tests UT=FC`）零新告警。**上板判据**：`info` 的 `cw=`/`sw=` ⇒ `pages/starts` 接近 63；跨段只有一次 START；掉电重启回放 JSEG。见 §3.16.10 与 `known_risks.md` RISK-CACHE-15/16/17 |
+| **v1.04 设计 A：FTL 顺序流 + Journal 顺序映射页** | **已改、未上板（2026-10-31）** | 序列开启改由 `cache_stream.rd/wr` 检测器（连续 LBA ≥64）判定；延续只看 `next_lba`（传输段不是断点）；`cmd_remaining` 只给 END 落点；写段配额 = 一张 JSEG 页 504 条（63 pair 页 ≈252 KiB）；后台元数据被门控但不请求断点。介质版本 **v13（首启自动格式化）**。四关（`all`/`release`/`tests UT=FTL`/`tests UT=FC`）零新告警。**上板判据**：`info` 的 `cw=`/`sw=` ⇒ `pages/starts` 接近 63；跨段只有一次 START；掉电重启回放 JSEG。见 §3.16.10 与 `known_risks.md` RISK-CACHE-15/16/17 |
 
 | **v1.05 设备序列跨 host 命令（volatile write cache）** | **已改、未上板（2026-10-31）** | 写段（含末段）提交即回执；设备序列跨命令延续；主动断点 = Journal 顺序页写满（63 pair ≈252 KiB）；padding END 收尾无数据断点；写失败 = deferred error（下一条命令失败一次）。`info`：`sw=starts/page_ends pc=pad_closes jf=page_writes`。四关零新告警。**上板判据**：`pages/starts≈63`、`jf≈sw+断点`、`pc` 少量、deferred 注入可见、断电窗口符合 RISK-CACHE-18。见 §3.16 与 `known_risks.md` RISK-CACHE-15/16/18、RISK-USBC-01 |
 
@@ -5470,8 +5471,8 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `GC_EVAL_INTERVAL_MS` | 10 | `include/ftl/gc.h` |
 | `GC_LOG_INTERVAL_MS` | 1000 | `include/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
-| 档位预算 | IDLE 2000 / NORMAL 2000 / BUSY 700 µs | `src/ftl/bg_scheduler.c` |
-| `BG_MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
+| 档位配额 | IDLE 4 / NORMAL 4 / BUSY 1（工作量单位） | `src/ftl/bg_scheduler.c` |
+| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
 
 #### FC 资源
 
@@ -5522,7 +5523,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `mig_handle_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
 | `rr_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
 | `wb_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
-| `ftl_mod_state_e` / `ftl_mod_status_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀 |
+| `ftl_mod_state_e` / `ftl_mod_status_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀（现仅 wbuf） |
 | `bg_scheduler_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
 | `bbt_header_t` / `bbt_state_t` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_t` | `src/ftl/checkpoint.c` | CP 磨损快照条目（8 B/块；内部类型）|
@@ -5549,7 +5550,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 所有命令都寻址 block 0 | `plane_paa[]` 未填，`cmd->paa` 白设 |
 | 测试“碰巧通过” | `expected_byte` 用 `(block<<8|page<<4|plane)` 后截断成 `uint8_t`，block 参数完全不影响结果 |
 | 只验了 page 0 | 其余 63 页的损坏全被漏掉 |
-| “cache read 已启用” | `cache_read_collect` 跨 plane 比较 `pba_page()`（保留 plane/block 位）⇒ `complete` 恒 false ⇒ `cache_read_batches` 恒 0，读静默回退普通路径；必须看计数器/断言给出“确实生效过”的证据（C8） |
+| “cache read 已启用” | `cache_read_collect` 跨 plane 比较 `pba_page()`（保留 plane/block 位）⇒ `complete` 恒 false ⇒ `cache_stream.read_batches` 恒 0，读静默回退普通路径；必须看计数器/断言给出“确实生效过”的证据（C8） |
 | `ASSERT` 在 release 下“保护”了 | `NDEBUG` 下展开为 `((void)0)`；后果若是静默介质破坏，必须另补 release 拒绝 |
 | `ASSERT(HAL_...())` 初始化成功 | `NDEBUG` 下表达式不求值 ⇒ 初始化根本没执行 |
 | `.bin` 逐字相同 | 动了 include 图时不成立（CMSIS `optimize("Os")` 会 TU 级泄漏） |

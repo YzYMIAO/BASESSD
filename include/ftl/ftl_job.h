@@ -58,7 +58,9 @@ static inline DWORD ftl_job_now_ms(void)
     {
         return 0U;
     }
-    return (platform->time_us() / 1000U);
+    /* QWORD µs → DWORD ms 是接口边界上的有意窄化：所有消费方都用差值（回绕安全，
+     * 约 49.7 天一圈），显式写出截断。 */
+    return (DWORD)(platform->time_us() / 1000U);
 }
 
 /**

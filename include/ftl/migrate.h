@@ -67,7 +67,7 @@
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_module.h"  /* ftl_mod_status_t */
+#include "ftl_module.h"  /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
 #include "ftl_type.h"    /* DWORD */
 #include "gc.h"          /* gc_benefit_mode_e */
 #include "journal.h"     /* l2p_jrn_t（端口） */
@@ -161,26 +161,6 @@ typedef struct
     DWORD src[PLANE_NUM];
     DWORD dst[PLANE_NUM];
 } mig_batch_page_t;
-
-/* 推进结果上报（mig_handle 出参；只读观测，外部不要据此驱动）。 */
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    mig_phase_e       phase;    /* 观测；外部不要据此驱动 */
-    mig_kind_e        kind;     /* GC / WL / PREDICT */
-    WORD              migrated; /* 本次 job 已搬 CW 数 */
-    WORD              erased;   /* 本次 job 已擦 plane 数 */
-    bool              aborted;
-    bool              erase_failed;
-    bool              timed_out;
-    mig_phase_e       timeout_phase;
-    DWORD             reclaimed; /* 累计成功回收 SB 数（单调） */
-    DWORD             novictim;  /* 累计「触发但选不出 victim」次数（含 no-gain） */
-    DWORD             nogain;    /* 其中「有候选但收益不足」的次数（单调） */
-    gc_benefit_mode_e gc_mode;   /* 最近一次使用的模式（0=off/1=idle/2=emg） */
-    bool              gc_nogain; /* 最近一次空间 GC 结论 = 无收益 victim */
-} mig_status_t;
 
 /* ── 搬移 job（per-instance，放 ftl->mig_handle）──
  *
@@ -381,9 +361,8 @@ void mig_gc_request_urgent(mig_handle_t *m);
  *
  * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param level 本轮后台档位（IDLE / NORMAL / BUSY）
- * @param out   出参：本轮结束后的上报（**非空**）
  */
-void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out);
+void mig_handle(mig_handle_t *m, bg_level_e level);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 

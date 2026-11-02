@@ -16,7 +16,7 @@
  */
 
 #include "allocator.h"    /* ftl_table_refs_t, super_block_t */
-#include "bg_scheduler.h" /* 时间预算后台调度器（ftl_ctx_t 含调度器） */
+#include "bg_scheduler.h" /* 工作量配额后台调度器（ftl_ctx_t 含调度器） */
 #include "cache_batch.h"  /* cache read/write 批次的常量与对 FTL 的尝试入口 */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_req_t */
@@ -237,13 +237,54 @@ typedef struct
  * 结束 LBA）。连续长度累计达到 FTL_STREAM_MIN_LBAS 即进入顺序流；LBA 空档或换向
  * 即复位（flush / trim 不打断检测——它们不改变后续写的 LBA 连续性，新起点由判据
  * 自然处理）。它只决定 cache 序列**能否开启**；序列一旦打开，延续由
- * cache_seq.next_lba 判定（与 host 传输段边界无关）。 */
+ * cache_stream.seq.next_lba 判定（与 host 传输段边界无关）。 */
 typedef struct
 {
     DWORD last_end; /* 上一请求的结束 LBA（exclusive）；FTL_LBA_INVALID = 无上一请求 */
     DWORD run;      /* 连续 LBA 累计（封顶在阈值附近，只用于判 ≥ FTL_STREAM_MIN_LBAS） */
     bool  active;   /* true = 连续长度已达阈值（顺序流） */
 } ftl_stream_det_t;
+
+/* cache 流式模块状态（per instance）——顺序检测 / 读预取 / 观测计数 / 设备侧序列。
+ *
+ * 两个检测器**坐标不同**，不要合并：
+ *   · rd / wr（ftl_stream_det_t）：按 **LBA 数**累计，flush / trim 不打断；
+ *     判据是 cache 序列**能否开启**（FTL_STREAM_MIN_LBAS）。
+ *   · prefetch_*：按 **请求次数**累计，flush / trim 时复位；
+ *     只用于 L2P region 预取（FTL_SEQ_PREFETCH_MIN_RUN）。 */
+typedef struct
+{
+    /* 设备侧 cache 读写序列（单 LUN 同时一条；跨窗口 / 跨 chunk 保持）。 */
+    ftl_cache_seq_t seq;
+
+    /* 顺序流检测：cache 序列的开启判据。 */
+    ftl_stream_det_t rd; /* 读方向 */
+    ftl_stream_det_t wr; /* 写方向 */
+
+    /* 顺序读检测：只用于 L2P region 预取。 */
+    DWORD prefetch_last_end;   /* 上一读请求末 LBA（exclusive） */
+    DWORD prefetch_run;        /* 连续读请求计数 */
+    DWORD prefetch_run_max;    /* 本次开机最大连续读长度（观测） */
+    DWORD prefetch_generation; /* 每次检测更新/重置递增，防 on_complete 重入覆盖 */
+    DWORD prefetch_target;     /* 本次检测算出的目标 region */
+    bool  prefetch_valid;      /* target 有效且尚未执行 */
+
+    /* 观测计数（不参与决策；用于性能归因）。 */
+    DWORD read_batches;   /* 成功提交的读窗口数 */
+    DWORD read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均窗口深度） */
+    DWORD read_starts;    /* 打开的读序列段数（START 计数；batches / starts = 平均段长） */
+    DWORD read_declines;  /* 收集不足最小 pair 数而放弃尝试的次数（不连续 / wbuf 命中 / L2P 加载中） */
+    DWORD seq_breaks;     /* D4：门控拒绝导致的序列提前收尾次数（读+写） */
+    DWORD read_fallbacks; /* 已决定走 cache read 但资源不足或提交失败而回退的次数 */
+
+    DWORD wb_batches;    /* 成功提交的写窗口数 */
+    DWORD wb_pages;      /* 累计提交的页数（pages / batches = 平均窗口深度） */
+    DWORD wb_declines;   /* 条件不满足而回退 wbuf 的次数 */
+    DWORD wb_aborts;     /* 批次首次成员失败而中止的次数（同一批只计一次） */
+    DWORD wb_starts;     /* 打开的写序列段数（START 计数） */
+    DWORD wb_page_ends;  /* 写满一张 Journal 顺序页而主动 END 的次数（≈每 252 KiB 一次） */
+    DWORD wb_pad_closes; /* padding END 有序收尾的次数（LBA 不连续 / 空闲 / flush） */
+} ftl_cache_stream_t;
 
 /**
  * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
@@ -330,38 +371,9 @@ struct ftl_context
     DWORD total_writes;
     DWORD dangling_total; /* L2P 指向 valid_count==0 的累计覆盖写次数（[STAT]/info 用） */
 
-    /* 顺序流检测（per-instance；ftl_submit_common 更新）。cache 序列的开启判据。 */
-    ftl_stream_det_t stream_rd; /* 读方向 */
-    ftl_stream_det_t stream_wr; /* 写方向 */
-
-    /* 顺序读检测（per-instance；ftl_submit_common 更新）。
-     * seq_run 在非连续读/写/flush/trim 时归零；只用于 L2P region 预取。 */
-    DWORD seq_last_end_lba;    /* 上一读请求末 LBA（exclusive） */
-    DWORD seq_run;             /* 连续读请求计数 */
-    DWORD seq_run_max;         /* 本次开机最大连续读长度（观测） */
-    DWORD seq_generation;      /* 每次检测更新/重置递增，防 on_complete 重入覆盖 */
-    DWORD seq_prefetch_target; /* 本次检测算出的目标 region */
-    bool  seq_prefetch_valid;  /* target 有效且尚未执行 */
-
-    /* FTL cache read 批量提交的观测计数（不参与决策；用于性能归因）。 */
-    DWORD cache_read_batches;   /* 成功提交的窗口数 */
-    DWORD cache_read_pairs;     /* 累计提交的 pair 数（pairs / batches = 平均窗口深度） */
-    DWORD cache_read_starts;    /* 打开的读序列段数（START 计数；batches / starts = 平均段长） */
-    DWORD cache_read_declines;  /* 收集不足最小 pair 数而放弃尝试的次数（不连续 / wbuf 命中 / L2P 加载中） */
-    DWORD cache_seq_breaks;     /* D4：门控拒绝导致的序列提前收尾次数（读+写） */
-    DWORD cache_read_fallbacks; /* 已决定走 cache read 但资源不足或提交失败而回退的次数 */
-
-    /* cache 读写流式序列（per-instance，单 LUN 同时一条）。 */
-    ftl_cache_seq_t cache_seq;
-
-    /* host cache program 批次（per-instance，单 LUN 单批）。 */
-    DWORD cache_wb_batches;    /* 成功提交的窗口数 */
-    DWORD cache_wb_pages;      /* 累计提交的页数（pages / batches = 平均窗口深度） */
-    DWORD cache_wb_declines;   /* 条件不满足而回退 wbuf 的次数 */
-    DWORD cache_wb_aborts;     /* 批次首次成员失败而中止的次数（同一批只计一次） */
-    DWORD cache_wb_starts;     /* 打开的写序列段数（START 计数） */
-    DWORD cache_wb_page_ends;  /* 写满一张 Journal 顺序页而主动 END 的次数（≈每 252 KiB 一次） */
-    DWORD cache_wb_pad_closes; /* padding END 有序收尾的次数（LBA 不连续 / 空闲 / flush） */
+    /* cache 流式模块状态：顺序检测 / 读预取 / 观测计数 / 设备侧序列。
+     * 字段与不变量见 ftl_cache_stream_t。 */
+    ftl_cache_stream_t cache_stream;
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
@@ -401,13 +413,13 @@ struct ftl_context
     DWORD trim_start_ms;  /* 本次 TRIM 起点（观测 elapsed；无时钟为 0） */
     DWORD trim_wait_ms;   /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
 
-    /* 时间预算后台调度器（per-instance）。
+    /* 工作量配额后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 bg_scheduler_init 从 `ftl/bg_scheduler.c` 的静态表
      * 装载；每轮由 bg_scheduler_service（后台调度步）选档后跑 bg_scheduler_run。 */
     bg_scheduler_t bg;
 
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
-     * 观测计数（reclaimed / novictim）与求值节拍在 handle 里（mig_status_t）。
+     * 观测计数（reclaimed / novictim）与求值节拍在 handle 里。
      * 指针，由 storage 提供；含逐 plane 页镜像（page_buf，约 4KB），必须常驻。 */
     mig_handle_t *mig_handle;
 
@@ -627,5 +639,21 @@ ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
  *         FTL_ERROR 等待超时或 L2P 读失败，已中止 TRIM
  */
 ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
+
+/* ── 内部辅助（FTL 层内共用，不属于 HIL 接口）── */
+
+/**
+ * @brief 按当前实例状态构造一次 Checkpoint 触发快照。
+ *
+ * @param ftl    实例（读 total_writes 与 journal 的 seq / 水位 / 紧急标志）
+ * @param reason 触发原因（原样写入 trigger.reason）
+ * @param force  强制请求标志（显式 CP 传 true；后台适配器传 false）
+ *
+ * @return 触发快照（now_ms 取调用时刻）
+ *
+ * @note 后台适配器（bg_scheduler）与显式 CP（ftl_flush_kick_cp）共用——同一组字段
+ *       只在单处装配，`cp_trigger_t` 加字段时不会漏改某一处。
+ */
+cp_trigger_t ftl_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason, bool force);
 
 #endif /* FTL_SERVICE_H */

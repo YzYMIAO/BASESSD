@@ -245,8 +245,8 @@
 | `format_in_progress_resume` | bbt | — | BBT 置 FORMAT_IN_PROGRESS + 擦 CP 池 → 重启后判 NO_RECORD/继续格式化（RISK-BOOT-04/17 的续做分支）；跑完完整格式化恢复介质 |
 | `cp_corrupt_refuse_format` | cp | — | 擦 CP 池 + 写非 FF 页 → `cp_media_status_probe=IO_ERROR`、`pfr_media_check_format` 拒绝格式化（RISK-BOOT-03） |
 | `journal_write_fail_wal_stall` | e2e | — | 注入 2 次 Journal 页写失败 ⇒ `write_fail_pending` 置位、`persisted_seq` 落后于 dirty 行；放开注入后 CP 必须在有界时间内完成并清除标记、数据可读（RISK-JN-03 + 死锁回归 RISK-L2P-10） |
-| `cache_failc_abort` | e2e | `arm=1\|2\|last` | 在**指定命令**的完成上伪造 FAIL_CACHE（命令 K 结算上一页 page K-1）⇒ 已确认 LBA 前缀保留（0/8/48，新数据）；**失败页的 LBA 读 IO_ERROR**（撤销 + region 降级，RISK-CACHE-28）；同批未确认页保留旧映射（读旧内容）；组报 IO_ERROR、`cache_wb_aborts` 恰好 +1；重启后前缀仍可见，失败 LBA 退化为未映射（降级位不持久，读零填——RISK-CACHE-28 已知边界）（RISK-CACHE-19/24/27/28） |
-| `cache_seq_cross_block` | e2e | — | 连续写 1024 LBA（2 个物理 block）后分段读回逐字节比对；`cache_read_pairs` 覆盖整段、`cache_read_fallbacks` 不增长（RISK-CACHE-20/21 的正确性判据；不断言 starts==1，物理相邻由分配器决定） |
+| `cache_failc_abort` | e2e | `arm=1\|2\|last` | 在**指定命令**的完成上伪造 FAIL_CACHE（命令 K 结算上一页 page K-1）⇒ 已确认 LBA 前缀保留（0/8/48，新数据）；**失败页的 LBA 读 IO_ERROR**（撤销 + region 降级，RISK-CACHE-28）；同批未确认页保留旧映射（读旧内容）；组报 IO_ERROR、`cache_stream.wb_aborts` 恰好 +1；重启后前缀仍可见，失败 LBA 退化为未映射（降级位不持久，读零填——RISK-CACHE-28 已知边界）（RISK-CACHE-19/24/27/28） |
+| `cache_seq_cross_block` | e2e | — | 连续写 1024 LBA（2 个物理 block）后分段读回逐字节比对；`cache_stream.read_pairs` 覆盖整段、`cache_stream.read_fallbacks` 不增长（RISK-CACHE-20/21 的正确性判据；不断言 starts==1，物理相邻由分配器决定） |
 | `bbt_ring_reload` | bbt | — | 清池 → 两次「标坏+save」→ 重启走生产 `bbt_init` → 两个坏块都在（RISK-BBT-18 的回归判据：多条 record 后重启必须载入最新；⚠ 每次运行永久消耗 2 块，RISK-UT-06） |
 | `boot_restore_reconcile` | boot | — | 写+flush → 记录 free/OP/Spare/Closed/open 合计 → 重启后合计守恒、抽样读回一致（BOOT-24 的账本对账部分；真掉电仍归 BOARD） |
 
@@ -255,10 +255,10 @@
 | 用例 | 类型 | 参数 | 判据 |
 |---|---|---|---|
 | `cache_early_ack_read_visible` | e2e | `chunk=32`（同步主机 depth=1，正是 RISK-CACHE-25 的形态） | 写 32 LBA（cache 序列、组在页编程完成时完成）→ **不等 flush** 立刻读回同一段 → 逐字节等于写入值（RISK-CACHE-27）；随后 flush + 重启再读仍一致。负例：若读覆盖层失效，读回旧内容 ⇒ 必须红 |
-| `cache_failc_undo_read_error` | e2e | 复用 `fi_cache_fail_arm` | 注入 FAILC ⇒ 下一条 host 命令（`ftl_submit_*`）返回 `FTL_ERROR` **一次**（`ftl_take_deferred_error`）；失败页覆盖的 LBA 读回 IO_ERROR；同 region 未映射 LBA 也 IO_ERROR（RISK-CACHE-28 的已知取舍）；注入清除后新写可落盘、环能排空（`cache_seq.wr.count==0`） |
+| `cache_failc_undo_read_error` | e2e | 复用 `fi_cache_fail_arm` | 注入 FAILC ⇒ 下一条 host 命令（`ftl_submit_*`）返回 `FTL_ERROR` **一次**（`ftl_take_deferred_error`）；失败页覆盖的 LBA 读回 IO_ERROR；同 region 未映射 LBA 也 IO_ERROR（RISK-CACHE-28 的已知取舍）；注入清除后新写可落盘、环能排空（`cache_stream.seq.wr.count==0`） |
 | `cache_early_ack_flush_barrier` | e2e | — | 写一段后 `ftl_flush_begin/step`：flush 完成前 `wr.count>0` 必须阻止完成；完成后 `wr.count==0`、L2P 中该段映射为新 PBA、重启读回一致（RISK-CACHE-29 的屏障面） |
 
-⚠ `cache_failc_abort` 的既有判据在 v1.10 不变（`cache_wb_aborts` 恰好 +1：FAILC 只标记
+⚠ `cache_failc_abort` 的既有判据在 v1.10 不变（`cache_stream.wb_aborts` 恰好 +1：FAILC 只标记
 前一页，abort 跳过错已判失败项与器件已证明页）。
 
 ### 4.6 `/speed/ftl_rw`（真 NAND，破坏性）

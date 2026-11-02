@@ -22,7 +22,8 @@
  */
 
 #include "allocator.h"
-#include "ftl_type.h" /* ftl_ctx_t */
+#include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
+#include "ftl_type.h"   /* ftl_ctx_t */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
@@ -120,21 +121,6 @@ typedef struct
     bool        force;             /* 显式请求（开机/诊断） */
     cp_reason_e reason;            /* force 时优先用 */
 } cp_trigger_t;
-
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    cp_phase_e phase; /* 观测；外部不要据此驱动 */
-    bool       active;
-    DWORD      journal_seq;    /* 本次 job 起点的 journal 水位 */
-    BYTE       anchor_pages;   /* 已写 Anchor 页数 */
-    bool       header_written; /* Header（commit 页）已写 */
-    bool       truncated;      /* 本次已做 journal 截断 */
-    cp_phase_e fail_phase;     /* 中止发生的 phase */
-    bool       timed_out;
-    cp_phase_e timeout_phase;
-} cp_status_t;
 
 typedef struct
 {
@@ -412,9 +398,8 @@ WORD *cp_block_words_get(cp_handle_t *h);
  *
  * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger 本轮触发信息（**非空**）
- * @param out    出参：本轮结束后的上报（**非空**）
  */
-void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out);
+void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger);
 
 /**
  * @brief 复位 T3 定时基准（boot 恢复 / 格式化后调用）。

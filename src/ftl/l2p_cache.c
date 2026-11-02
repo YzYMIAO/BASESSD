@@ -1108,8 +1108,7 @@ static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
 
     if ((cache != NULL) && (owner != NULL))
     {
-        md_status_t md_status;
-        md_handle(owner->metadata_dir, &md_status);
+        md_handle(owner->metadata_dir);
     }
 }
 
@@ -1708,54 +1707,8 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
     [BG_LEVEL_BUSY]   = L2P_FLUSH_MAX_BUSY,
 };
 
-/**
- * @brief 填充 l2p_status_t 上报（供 l2p_handle 输出）。
- *
- * @param cache cache 上下文
- * @param out   出参状态
- */
-static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
-{
-    WORD resident = 0U;
-
-    for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
-    {
-        if (cache->lines[i].state != L2P_CACHE_INVALID)
-        {
-            resident++;
-        }
-    }
-
-    out->base.critical  = false; /* 后台写回属预算任务；同步逃生口自管 deadline */
-    out->base.wants_run = (cache->flush_inflight != 0U) || (l2p_dirty_count(cache) != 0U);
-    out->base.progress  = cache->hit_count + cache->miss_count;
-    out->base.next_ms   = 0U;
-    out->base.error     = cache->error;
-
-    if (cache->flush_inflight != 0U)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (out->base.wants_run)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->load_inflight  = cache->load_inflight;
-    out->flush_inflight = cache->flush_inflight;
-    out->dirty_regions  = l2p_dirty_count(cache);
-    out->resident_lines = resident;
-    out->thrashing      = cache->thrashing;
-    out->miss_pct       = cache->miss_pct;
-    out->evictions      = cache->eviction_count;
-}
-
 // 每轮入口：thrashing 期间不主动 flush；否则按档位踢本 owner 的脏行，再填上报。
-void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level, l2p_status_t *out)
+void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level)
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
     // 判据在模块内，主流程不读 cache->thrashing。
@@ -1765,8 +1718,6 @@ void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level, l2p_status_t *o
 
         l2p_owner_flush_kick(cache, dim, max_kick);
     }
-
-    l2p_status_fill(cache, out);
 }
 
 // 读一行诊断信息；下标越界返回 INVALID（诊断入口不中断）。

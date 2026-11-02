@@ -23,8 +23,7 @@
 
 #include "allocator.h"
 #include "assertion.h"
-#include "ftl_module.h" /* ftl_mod_status_t */
-#include "metadata.h"   /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
+#include "metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -56,23 +55,6 @@ typedef struct
 
 _Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
 _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
-
-/* ── BBT 模块 handle 的上报结构（docs/archive/ftl_module_contracts.md §4.1）──
- *
- * `base` 是公共前缀（state / critical / wants_run / progress / next_ms / error）。
- * BBT 只做提交背压，**无周期** ⇒ next_ms 恒 0。
- */
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    bbt_handle_phase_e phase;     /* 观测；外部不要据此驱动 */
-    bool               dirty;     /* 是否有未落盘变更 */
-    DWORD              dirty_gen; /* dirty 代际（写飞行期间的新变更） */
-    DWORD              sequence;  /* 本池单调序号 */
-    WORD               write_idx; /* 池内下一个待写槽 */
-    WORD               bad_count; /* 当前坏块数 */
-} bbt_status_t;
 
 /* ── bitmap / 候选块原语 ── */
 
@@ -283,9 +265,8 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  * ⚠ 只由后台调度器/B 档调用。开机/格式化路径仍走同步 bbt_save。
  *
  * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param out    出参：本轮结束后的上报（**非空**，由调用者提供）
  */
-void bbt_handle(alc_t *alloc, bbt_status_t *out);
+void bbt_handle(alc_t *alloc);
 
 /**
  * @brief 从**指定 plane 的** Spare Pool 补充 Free Pool

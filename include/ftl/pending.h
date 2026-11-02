@@ -182,7 +182,7 @@ typedef struct
     pend_cache_role_e cache_role;  /* cache program 序列中的页角色；NONE = 其他写 */
     BYTE              retry_count; /* 写失败后已重试次数（透明重试；见 ftl_host_io_callback） */
     BYTE              cache_gen;   /* cache program 成员所属**写序列代号**：完成时与
-                                    * `cache_seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
+                                    * `cache_stream.seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
                                     * 取代，本页不得确认映射（迟到完成，RISK-CACHE-19） */
 } pend_req_t;
 

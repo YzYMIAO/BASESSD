@@ -27,7 +27,7 @@
  *   2. 异步 job        cp_job_step（static）/ cp_job_begin /
  *                      cp_handle / ftl_checkpoint_callback
  *   3. 创建/恢复       cp_pool_find_latest / cp_initial_record_write
- *   4. 触发/上报       cp_should_start / cp_status_fill / cp_handle
+ *   4. 触发/上报       cp_should_start / cp_handle
  *
  * 游标/序号是 **per-instance**（ftl_ctx_t.cp，见 cp_state_t）——
  * 多实例（多 LUN）下每实例一份，互不干扰。
@@ -1780,50 +1780,8 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
     return false;
 }
 
-/**
- * @brief 把 job 执行状态填入对外上报结构
- *
- * @param h    Checkpoint handle
- * @param out  输出：本轮上报（模块状态 + 各 phase 观测字段）
- */
-static void cp_status_fill(const cp_handle_t *h, cp_status_t *out)
-{
-    out->base.critical  = true; /* CP 跨轮推进，任何档位都要跑 */
-    out->base.wants_run = (h->active == true);
-    out->base.progress  = h->cp_state.sequence;
-    out->base.next_ms   = 0U;
-    out->base.error     = (h->failed == true) ? (int32_t)FTL_ERROR : (int32_t)FTL_OK;
-
-    if (h->waiting == true)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (h->active == true)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else if (h->failed == true)
-    {
-        out->base.state = FTL_MODULE_FAILED;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->phase          = h->phase;
-    out->active         = (h->active == true);
-    out->journal_seq    = h->journal_seq;
-    out->anchor_pages   = h->anchor_chunk;
-    out->header_written = (h->phase > CP_HDR_WRITE) || ((h->failed == true) && h->fail_phase == CP_HDR_WRITE);
-    out->truncated      = (h->phase > CP_TRUNC_ERASE);
-    out->fail_phase     = h->fail_phase;
-    out->timed_out      = (h->timed_out == true);
-    out->timeout_phase  = h->timeout_phase;
-}
-
 // typed 入口：ADVANCE 才推进状态机（在飞时一轮只推进一次），未在飞时按触发条件起新 job。
-void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
+void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
 {
     if (h->active == true)
     {
@@ -1853,8 +1811,6 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
             h->last_ms = trigger->now_ms;
         }
     }
-
-    cp_status_fill(h, out);
 }
 
 // 清零周期计时基准：下一次服务从零重新计时（起 job 失败后也要调，否则每轮重触发）。

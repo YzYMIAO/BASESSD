@@ -3,14 +3,14 @@
  *
  * 两个方向共用同一模块，但各自保留独立的条件、命令序列与结果枚举：
  *   · cache read：连续 pair 页映射驻留且物理连续时，按窗口提交
- *     START_SEQ_MP/SEQ_MP/LAST_MP；序列状态（ftl->cache_seq）跨窗口、跨 host 传输段
+ *     START_SEQ_MP/SEQ_MP/LAST_MP；序列状态（ftl->cache_stream.seq）跨窗口、跨 host 传输段
  *     保持，START 只在顺序流头，LAST 只在断点（物理/L2P 块/命令尾/D4）；
  *   · cache program：首窗口首条 op49、中间 op44（15h）、**断点**末条 op48（10h）；
  *     窗口上限 4 个 pair 页，序列同样跨窗口、跨传输段（逐页确认见 ftl.c）。
  *     顺序写确认进 Journal 顺序映射页（JSEG），到配额主动 END 落元数据
  *     （见 journal.h 与 docs/design/ftl_design.md §3.16.5）。
  *
- * 是否进入序列由 ftl->stream_rd/wr 顺序流检测器判定（连续 LBA 阈值），**host 传输段
+ * 是否进入序列由 ftl->cache_stream.rd/wr 顺序流检测器判定（连续 LBA 阈值），**host 传输段
  * 边界不是断点**。两者都按窗口标 FC chain，经 ftl_op_submit_batch 原子入队；条件
  * 不满足一律回退普通读 / wbuf 路径。
  */
@@ -455,7 +455,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
 
     if (cache_read_build(&b, req, pba, start_seq, end_seq) == false)
     {
-        req->ftl->cache_read_fallbacks++;
+        req->ftl->cache_stream.read_fallbacks++;
         return FTL_CACHE_READ_AGAIN;
     }
 
@@ -468,11 +468,11 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
     // 整条 run 原子入队：FC 的 chain 机制要求链成员在同一队列**连续**入队；
     // 逐条提交在资源不足时会留下半条链（前半已入队、后半没进），链语义被破坏。
     // 序列所有者通道：门控对本批旁路（其他提交会被延迟并置 break_requested）。
-    const bool owner_prev = req->ftl->cache_seq.owner_submit;
+    const bool owner_prev = req->ftl->cache_stream.seq.owner_submit;
 
-    req->ftl->cache_seq.owner_submit = true;
-    const ftl_status_e submit_status = ftl_op_submit_batch(b.cmds, b.n_pairs, FTL_OP_HOST_IO, NULL);
-    req->ftl->cache_seq.owner_submit = owner_prev;
+    req->ftl->cache_stream.seq.owner_submit = true;
+    const ftl_status_e submit_status        = ftl_op_submit_batch(b.cmds, b.n_pairs, FTL_OP_HOST_IO, NULL);
+    req->ftl->cache_stream.seq.owner_submit = owner_prev;
 
     if (submit_status != FTL_OK)
     {
@@ -484,15 +484,15 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
             pend_group_drop_subop(&req->ftl->pending, req->gi);
         }
 
-        req->ftl->cache_read_fallbacks++;
+        req->ftl->cache_stream.read_fallbacks++;
 
         // 瞬态背压可重试；链契约违反等编程错误是永久失败（H38）。
         return (submit_status == FTL_AGAIN) ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_ERROR;
     }
 
     *req->used = b.n_pairs * FTL_LBA_PER_PAIR;
-    req->ftl->cache_read_batches++;
-    req->ftl->cache_read_pairs += b.n_pairs;
+    req->ftl->cache_stream.read_batches++;
+    req->ftl->cache_stream.read_pairs += b.n_pairs;
     return FTL_CACHE_READ_OK;
 }
 
@@ -513,7 +513,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     }
 
     const pend_group_t *g   = &ftl->pending.groups[gi];
-    ftl_cache_seq_t    *seq = &ftl->cache_seq;
+    ftl_cache_seq_t    *seq = &ftl->cache_stream.seq;
 
     // 续序列：方向与接续点必须一致（host 传输段边界不是断点）。
     // 上下文不同 / 续接点不一致（乱序、空洞）⇒ 这条序列已不可能由本组续；若仍
@@ -531,7 +531,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
             return FTL_CACHE_READ_DECLINED;
         }
     }
-    else if (ftl->stream_rd.active == false)
+    else if (ftl->cache_stream.rd.active == false)
     {
         return FTL_CACHE_READ_DECLINED; /* FTL 顺序流检测器未判为顺序读 */
     }
@@ -595,7 +595,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
             {
                 // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
                 ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
-                ftl->cache_read_declines++;
+                ftl->cache_stream.read_declines++;
                 return FTL_CACHE_READ_AGAIN;
             }
         }
@@ -649,7 +649,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
 
     if (collected < min_pairs)
     {
-        ftl->cache_read_declines++;
+        ftl->cache_stream.read_declines++;
         if (defer == true)
         {
             ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
@@ -684,7 +684,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
 
     if (cache_batch_budget_ok(ftl, n) == false)
     {
-        ftl->cache_read_fallbacks++;
+        ftl->cache_stream.read_fallbacks++;
         // 序列打开时不能回退普通读（会劈开设备序列）⇒ 重试等资源。
         return (seq->active == true) ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_DECLINED;
     }
@@ -707,7 +707,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     {
         if ((end_seq == true) && (seq->break_requested == true))
         {
-            ftl->cache_seq_breaks++; /* D4：后台/其他提交触发的断点 */
+            ftl->cache_stream.seq_breaks++; /* D4：后台/其他提交触发的断点 */
         }
 
         seq->kind      = FTL_CACHE_SEQ_READ;
@@ -718,7 +718,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
 
         if (starting == true)
         {
-            ftl->cache_read_starts++; /* 观测：batches / starts = 平均段长 */
+            ftl->cache_stream.read_starts++; /* 观测：batches / starts = 平均段长 */
         }
 
         if (end_seq == true)
@@ -822,7 +822,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         // 承担——成功结算时记 page0_programmed；失败时序列中止、其后页不确认。
         if (pba_to_page(b->pba[j][0]) == 0U)
         {
-            ftl->cache_seq.own_page0 = true;
+            ftl->cache_stream.seq.own_page0 = true;
         }
 
         const DWORD           page_lba = lba + ((DWORD)j * FTL_LBA_PER_PAIR);
@@ -881,7 +881,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         pending->new_pba     = b->pba[j][0];
         pending->new_pba1    = b->pba[j][1];
         pending->cache_role  = role;
-        pending->cache_gen   = ftl->cache_seq.gen;
+        pending->cache_gen   = ftl->cache_stream.seq.gen;
         pending->retry_count = 0U;
         pend_validate(pending);
 
@@ -900,7 +900,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
     if (ftl_lba_is_pair_aligned(lba) == false)
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -910,7 +910,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     }
 
     const pend_group_t *g   = &ftl->pending.groups[gi];
-    ftl_cache_seq_t    *seq = &ftl->cache_seq;
+    ftl_cache_seq_t    *seq = &ftl->cache_stream.seq;
 
     // 本 host 命令的结束（= 本请求之后仍属于同一命令的 LBA 也在内）：只用于 END 落点。
     const DWORD cmd_end = cache_batch_cmd_end(g, lba, remain);
@@ -932,9 +932,9 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
             return FTL_CACHE_WRITE_AGAIN;
         }
     }
-    else if (ftl->stream_wr.active == false)
+    else if (ftl->cache_stream.wr.active == false)
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED; /* FTL 顺序流检测器未判为顺序写 */
     }
 
@@ -946,7 +946,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // 整段走 wbuf（随机/未对齐写本来也不值得 cache program 序列）。
     if ((starting == true) && (ftl_lba_is_pair_aligned((DWORD)g->lba) == false))
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -964,16 +964,16 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
             // 本段没有可续的完整页（命令尾 / 低于最小窗口）：设备序列保持打开，
             // 交给 service 用 padding END 有序收尾；本组下轮重试。
             seq->close_requested = true; /* 进展由 seq_closing 表达（bg_progress 已含） */
-            ftl->cache_wb_declines++;
+            ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
     if ((starting == true) && (wb_is_idle(ftl->wbuf) == false))
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -981,7 +981,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // 顺序页不携带 LBA，普通条目混进来会破坏隐式坐标；等它们确认完再开（下个窗口重试）。
     if ((starting == true) && pend_has_foreign_write(&ftl->pending))
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -990,7 +990,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     // 停泊的确认同样算"未排空"（它尚未 append，LBA 也未知先后）。
     if ((starting == true) && ((seq->wr.count != 0U) || (seq->wr_inflight != 0U) || (pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL) == true)))
     {
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -1005,10 +1005,10 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
             // 当前 block 已被关闭/写满：本窗口无法续。写序列已提前回执 ⇒ **不能
             // abort**；请 service 用 padding END 收尾（padding 自己会开新块）。
             seq->close_requested = true; /* 进展由 seq_closing 表达（bg_progress 已含） */
-            ftl->cache_wb_declines++;
+            ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -1025,7 +1025,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
         if (jrn_seq_begin(ftl->journal, lba, (WORD)(first_pages * FTL_LBA_PER_PAIR)) == false)
         {
-            ftl->cache_wb_declines++;
+            ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_DECLINED; /* 页写起不来：本窗口回退 wbuf */
         }
     }
@@ -1059,7 +1059,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         {
             // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
             ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
-            ftl->cache_wb_declines++;
+            ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }
     }
@@ -1110,10 +1110,10 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     {
         if (starting == false)
         {
-            ftl->cache_wb_declines++;
+            ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN; /* 确认 FIFO 满：等完成泵结算 */
         }
-        ftl->cache_wb_declines++;
+        ftl->cache_stream.wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;
     }
 
@@ -1185,18 +1185,18 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         }
         // 在飞成员数：完成入口（ftl_cache_wr_member_done）逐个递减，flush 屏障与
         // 「开新序列」都等它归零。页在完成时才进页表，这个计数补上「已下发未完成」的洞。
-        ftl->cache_seq.wr_inflight = (BYTE)(ftl->cache_seq.wr_inflight + b.n_pend);
+        ftl->cache_stream.seq.wr_inflight = (BYTE)(ftl->cache_stream.seq.wr_inflight + b.n_pend);
 
         // 序列所有者通道：门控对本批旁路（其他提交会被延迟并置 break_requested）。
-        const bool owner_prev = ftl->cache_seq.owner_submit;
+        const bool owner_prev = ftl->cache_stream.seq.owner_submit;
 
-        ftl->cache_seq.owner_submit = true;
-        st                          = ftl_op_submit_batch(b.cmds, b.n_cmd, FTL_OP_HOST_IO, NULL);
-        ftl->cache_seq.owner_submit = owner_prev;
+        ftl->cache_stream.seq.owner_submit = true;
+        st                                 = ftl_op_submit_batch(b.cmds, b.n_cmd, FTL_OP_HOST_IO, NULL);
+        ftl->cache_stream.seq.owner_submit = owner_prev;
 
         if (st != FTL_OK)
         {
-            ftl->cache_seq.wr_inflight = (BYTE)(ftl->cache_seq.wr_inflight - b.n_pend);
+            ftl->cache_stream.seq.wr_inflight = (BYTE)(ftl->cache_stream.seq.wr_inflight - b.n_pend);
 
             for (BYTE j = 0U; j < b.n_pend; j++)
             {
@@ -1224,7 +1224,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
     if ((end_seq == true) && (seq->break_requested == true))
     {
-        ftl->cache_seq_breaks++; /* D4：后台/其他提交触发的断点 */
+        ftl->cache_stream.seq_breaks++; /* D4：后台/其他提交触发的断点 */
     }
 
     seq->kind     = FTL_CACHE_SEQ_WRITE;
@@ -1234,12 +1234,12 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
 
     if (starting == true)
     {
-        ftl->cache_wb_starts++;
+        ftl->cache_stream.wb_starts++;
     }
 
     if (page_end == true)
     {
-        ftl->cache_wb_page_ends++; /* 观测：约每 63 pair / 252 KiB 一次 */
+        ftl->cache_stream.wb_page_ends++; /* 观测：约每 63 pair / 252 KiB 一次 */
     }
 
     if (end_seq == true)
@@ -1253,8 +1253,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         seq->active = true;
     }
 
-    ftl->cache_wb_batches++;
-    ftl->cache_wb_pages += n_pages;
+    ftl->cache_stream.wb_batches++;
+    ftl->cache_stream.wb_pages += n_pages;
     *used = n_pages * FTL_LBA_PER_PAIR;
     return FTL_CACHE_WRITE_OK;
 }

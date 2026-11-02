@@ -38,7 +38,6 @@
 
 #include "allocator.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
-#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
@@ -837,21 +836,6 @@ typedef struct
     BYTE cp_buf[L2P_REGION_SIZE];
 } md_handle_t;
 
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    md_handle_phase_e phase;           /* 观测；外部不要据此驱动 */
-    WORD              victim;          /* 压缩 victim（UINT16_MAX = 无） */
-    WORD              moved;           /* 本次压缩已搬 region 数 */
-    DWORD             reclaimed;       /* 累计擦除成功的日志块数（单调进度） */
-    bool              compact_wanted;  /* 池吃紧，请求压缩 */
-    bool              anchor_ok;       /* Anchor 分页写是否全部成功 */
-    bool              reclaim_pending; /* 有已登记待回收的日志块 */
-    bool              timed_out;       /* 本次 job 因 deadline 中止 */
-    md_handle_phase_e timeout_phase;   /* 超时发生的 phase */
-} md_status_t;
-
 /* ── 常驻 Directory Cache（33,752 B，`g_ftl_md[]` 落 SRAM4，见 src/ftl/metadata.c） ── */
 typedef struct md_dir_cache
 {
@@ -1295,9 +1279,8 @@ void md_pool_service(ftl_ctx_t *ftl);
  * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位）。
  *
  * @param dir   Directory cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param out   出参：本轮结束后的上报（**非空**）
  */
-void md_handle(md_dir_cache_t *dir, md_status_t *out);
+void md_handle(md_dir_cache_t *dir);
 
 /**
  * @brief 整理 job 是否在跑（有命令在飞或处在中间 phase）。

@@ -1045,23 +1045,19 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
     (void)params;
     (void)data;
 
-    md_status_t out;
-
     ftl_ut_trace_begin();
 
     md_dir_cache_t *d = ftl_ut_ram_md();
 
     d->handle.error = FTL_ERROR;
 
-    memset(&out, 0, sizeof(out));
-
-    md_handle(d, &out);
+    md_handle(d);
 
     /* 当前语义：进入 IDLE 时清 error ⇒ 采样看不到上一次 abort（RISK-MD-17）。 */
-    munit_assert_int(out.base.error, ==, FTL_OK);
+    munit_assert_int(d->handle.error, ==, FTL_OK);
 
-    ftl_ut_trace_detail("md status: handle.error FTL_ERROR -> sampled base.error=%d (IDLE clears; RISK-MD-17)", (int)out.base.error);
-    ftl_ut_trace_summary("md status: handle.error FTL_ERROR -> sampled=%d (IDLE clears)", (int)out.base.error);
+    ftl_ut_trace_detail("md handle.error FTL_ERROR -> sampled=%d (IDLE clears; RISK-MD-17)", (int)d->handle.error);
+    ftl_ut_trace_summary("md handle.error FTL_ERROR -> sampled=%d (IDLE clears)", (int)d->handle.error);
 
     return MUNIT_OK;
 }
@@ -1138,10 +1134,7 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
     d->handle.slot   = NAND_PBA_INVALID;
     d->handle.moved  = 7U;
 
-    md_status_t out;
-
-    memset(&out, 0, sizeof(out));
-    md_handle(d, &out);
+    md_handle(d);
 
     munit_assert_int(d->handle.phase, ==, MD_JOB_IDLE);
     munit_assert_uint32(d->l2p_live[victim], ==, 3U);

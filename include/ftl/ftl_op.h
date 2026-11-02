@@ -194,7 +194,7 @@ ftl_ctx_t *ftl_op_route_get_region(DWORD global_region);
 /**
  * @brief 是否有任何实例的 cache 流式序列处于打开状态。
  *
- * @return true = 至少一个实例的 `cache_seq.active || draining`
+ * @return true = 至少一个实例的 `cache_stream.seq.active || draining`
  *                （draining = 窗口已提交完、命令仍在飞，门控同样关着）。
  *
  * @note 提交侧 deadline（CP/MIG/RR/MD 的 `FTL_SUBMIT_TIMEOUT_MS`）用它区分
@@ -304,7 +304,7 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
 /**
  * @brief cache 写序列 **padding END（本仓自拟）** 的完成服务函数（定义在 ftl.c）。
  *
- * 由 g_op_callbacks[FTL_OP_CACHE_PAD] 引用；ctx 不用（序列状态在 ftl->cache_seq）。
+ * 由 g_op_callbacks[FTL_OP_CACHE_PAD] 引用；ctx 不用（序列状态在 ftl->cache_stream.seq）。
  * 语义：用本命令的 FAIL_CACHE 结算未确认 FIFO 里的最后一页（该页已对 host 提前
  * 回执），padding 页自身不映射、失败忽略；随后关闭序列、放开 L2P 门控。
  *

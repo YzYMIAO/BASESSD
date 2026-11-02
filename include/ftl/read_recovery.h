@@ -32,7 +32,7 @@
 #include "bst.h"        /* rr_ecc_track_t, rr_block_health_e, bst_block_t */
 #include "fc_command.h" /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_module.h" /* ftl_mod_status_t */
+#include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "pending.h" /* pend_table_t */
@@ -155,18 +155,6 @@ typedef struct
     DWORD log_ms;
 } rr_handle_t;
 
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    rr_stage_e stage; /* 观测；外部不要据此驱动 */
-    bool       waiting;
-    bool       all_ok;  /* 本次 job 所有 plane 都恢复成功 */
-    BYTE       retries; /* 已用读重试次数 */
-    BYTE       planes_recovered;
-    BYTE       planes_failed;
-} rr_status_t;
-
 /* ── 接口 ── */
 
 /**
@@ -192,9 +180,8 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
  * @brief 推进 Read Recovery job（每轮 must-run；提交即返回）。
  *
  * @param rr    handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param out   出参：本轮结束后的上报（**非空**）
  */
-void rr_handle(rr_handle_t *rr, rr_status_t *out);
+void rr_handle(rr_handle_t *rr);
 
 /**
  * @brief 记录一次读取的 ECC bit 数，更新趋势

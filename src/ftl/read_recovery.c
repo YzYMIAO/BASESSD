@@ -19,7 +19,7 @@
  *   1. 记录         rr_record_ecc / rr_record_block_ecc
  *   2. 恢复 job     rr_read_submit / rr_select_plane / rr_settle_plane /
  *                   rr_job_finish / rr_job_abort / rr_job_step（static）
- *   3. typed handle rr_init / rr_trigger / rr_status_fill / rr_handle
+ *   3. typed handle rr_init / rr_trigger / rr_handle
  *   4. 完成服务     rr_read_complete（static）/ ftl_read_recovery_callback
  *   5. 判定扫描     rr_get_health / rr_predictive_scan
  *   6. 退役         rr_retire_block / rr_retire_block_at
@@ -521,50 +521,8 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
     }
 }
 
-/**
- * @brief 把 handle 的当前状态整理成 rr_status_t 上报。
- *
- * @param rr  实例（只读）
- * @param out 出参：本轮上报（非空）
- *
- * @note state 优先级：命令在飞 ⇒ WAITING；有 stage ⇒ RUNNING / FAILED（看 error）；
- *       仅有 owner ⇒ RUNNING；否则 IDLE。
- */
-static void rr_status_fill(const rr_handle_t *rr, rr_status_t *out)
-{
-    out->base.critical  = true; /* host 读在等结果，不推进即死等 */
-    out->base.wants_run = (rr->stage != RR_STAGE_IDLE) || (rr->has_owner);
-    out->base.progress  = rr->retry_count;
-    out->base.next_ms   = 0U;
-    out->base.error     = rr->error;
-
-    if (rr->waiting)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (rr->stage != RR_STAGE_IDLE)
-    {
-        out->base.state = (rr->error != FTL_OK) ? FTL_MODULE_FAILED : FTL_MODULE_RUNNING;
-    }
-    else if (rr->has_owner)
-    {
-        out->base.state = FTL_MODULE_RUNNING;
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->stage            = rr->stage;
-    out->waiting          = rr->waiting;
-    out->all_ok           = rr->all_ok;
-    out->retries          = rr->retry_count;
-    out->planes_recovered = rr->planes_recovered;
-    out->planes_failed    = rr->planes_failed;
-}
-
 // 每轮入口：空闲清心跳；在飞时打心跳并推进 stage；无在飞时领取托管项或判提交超时。
-void rr_handle(rr_handle_t *rr, rr_status_t *out)
+void rr_handle(rr_handle_t *rr)
 {
     // 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
     // ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
@@ -611,8 +569,6 @@ void rr_handle(rr_handle_t *rr, rr_status_t *out)
             rr_job_step(rr);
         }
     }
-
-    rr_status_fill(rr, out);
 }
 
 /* ── RR 各 stage 的完成处理（ftl_read_recovery_callback 按 rr->stage 分派）──

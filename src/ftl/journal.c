@@ -37,7 +37,7 @@
  *   2. 初始化         jrn_init
  *   3. 追加与刷页     jrn_reserve / jrn_append / jrn_header_write / jrn_freeze
  *   4. 环形擦除       jrn_erase_start / jrn_erase_failed
- *   5. handle/查询    jrn_status_fill / jrn_handle / 查询 / jrn_write_failure_clear /
+ *   5. handle/查询    jrn_handle / 查询 / jrn_write_failure_clear /
  *                     jrn_watermark_update
  *   6. 失败记账/完成  jrn_write_failure_note / jrn_complete_* /
  *                     ftl_journal_callback
@@ -780,65 +780,14 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
 
 /* ── 状态上报（主流程只读这个，不窥探 handle 内部） ── */
 
-/**
- * @brief 把 journal 的当前状态填入上报结构（只读 handle，不改状态）。
- *
- * @param journal Journal
- * @param out     出参：上报结构（非空）
- */
-static void jrn_status_fill(const l2p_jrn_t *journal, jrn_status_t *out)
-{
-    out->base.critical  = false; /* 由 must-run 适配器另行调用 ERASE_ONLY 入口保证 liveness */
-    out->base.wants_run = (journal->handle.phase != JRN_IDLE) || journal->handle.need_erase || (journal->handle.current_entry != 0U);
-    out->base.progress  = journal->handle.sequence_counter;
-    out->base.next_ms   = 0U;
-
-    if (journal->handle.ring_full)
-    {
-        out->state          = JRN_STATE_RING_FULL;
-        out->base.state     = FTL_MODULE_BLOCKED;
-        out->base.wants_run = false;
-    }
-    else if (journal->handle.write_fail_pending)
-    {
-        out->state      = JRN_STATE_FAILED;
-        out->base.state = FTL_MODULE_FAILED;
-    }
-    else if (journal->handle.phase == JRN_WRITE)
-    {
-        out->state      = JRN_STATE_WRITE_WAIT;
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (journal->handle.phase == JRN_ERASE)
-    {
-        out->state      = JRN_STATE_ERASE_WAIT;
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else
-    {
-        out->state      = JRN_STATE_IDLE;
-        out->base.state = (out->base.wants_run ? FTL_MODULE_RUNNING : FTL_MODULE_IDLE);
-    }
-
-    out->base.error    = journal->handle.write_fail_pending ? (int32_t)FTL_ERROR : (int32_t)FTL_OK;
-    out->sequence      = journal->handle.sequence_counter;
-    out->write_failed  = journal->handle.write_fail_pending;
-    out->ring_full     = journal->handle.ring_full;
-    out->erase_pending = journal->handle.need_erase;
-    out->current_block = journal->handle.current_block;
-    out->current_page  = journal->handle.current_page;
-    out->current_entry = journal->handle.current_entry;
-}
-
 // 实现要点：job 已在飞 ⇒ 只做心跳（单飞行）。有未起的擦除时**优先补擦**：
 // 新环形块没擦过就不能往里写。ERASE_ONLY 到此为止（host 饱和档让路）。
-void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, jrn_status_t *out)
+void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger)
 {
     const bool erase_only = (trigger != NULL) && (*trigger == JRN_TRIGGER_ERASE_ONLY);
 
     if (journal->handle.ring_full)
     {
-        jrn_status_fill(journal, out);
         return; /* 环全部不可用：不重试擦除（已 LOGE 过），也不写未擦块 */
     }
 
@@ -849,7 +798,7 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, jrn_status_t *
         {
             LOGI(LOG_TAG_JRN "job phase=%d waddr=0x%08lx age=%lums\r\n", journal->handle.phase, journal->handle.waddr, ftl_job_age_ms(&journal->handle.start_ms));
         }
-        jrn_status_fill(journal, out);
+
         return; /* 单飞行：job 已在飞 */
     }
 
@@ -859,18 +808,16 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, jrn_status_t *
     if (journal->handle.need_erase)
     {
         (void)jrn_erase_start(journal);
-        jrn_status_fill(journal, out);
+
         return;
     }
 
     if (erase_only || (journal->handle.current_entry == 0U))
     {
-        jrn_status_fill(journal, out);
         return; /* ERASE_ONLY 不起页写；无待写数据也到此为止 */
     }
 
     (void)jrn_freeze(journal);
-    jrn_status_fill(journal, out);
 }
 
 /* ── 查询（替代外部直读 handle 字段） ── */

@@ -37,7 +37,6 @@
 
 #include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "metadata.h"    /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
@@ -128,7 +127,7 @@ typedef enum
  * 归属：`l2p_jrn_t.handle`（per-instance）。共享账本（L2P cache / BST /
  * allocator）不在这里；需要它们时走 `l2p_jrn_t` 里的端口。
  *
- * 主流程**不读**本结构的 phase / 游标 / 失败位：只读 `jrn_status_t` 与查询
+ * 主流程**不读**本结构的 phase / 游标 / 失败位：只走查询接口
  * （docs/archive/ftl_module_contracts.md §4.2）。
  */
 typedef struct
@@ -237,30 +236,6 @@ typedef struct
     WORD            entry_count; /* 本页条目数（顺序页可到 508 ⇒ WORD） */
     jrn_page_kind_e kind;        /* 页型（回放按页型解析条目） */
 } jrn_page_ref_t;
-
-/* journal 执行状态（上报用，不是内部 phase 编号） */
-typedef enum
-{
-    JRN_STATE_IDLE = 0,
-    JRN_STATE_WRITE_WAIT, /* 页写在飞 */
-    JRN_STATE_ERASE_WAIT, /* 换块擦在飞 */
-    JRN_STATE_RING_FULL,  /* 全部环形块不可用：停止写入 */
-    JRN_STATE_FAILED,     /* 持久性失败 pending（条目已丢，等 CP 兜底） */
-} jrn_state_e;
-
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    jrn_state_e state;
-    DWORD       sequence;     /* sequence_counter（单调） */
-    bool        write_failed; /* write_fail_pending */
-    bool        ring_full;
-    bool        erase_pending; /* need_erase */
-    BYTE        current_block;
-    BYTE        current_page;
-    WORD        current_entry;
-} jrn_status_t;
 
 /*
  * jrn_trigger_e — 本轮调用的意图
@@ -488,9 +463,8 @@ bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
  *
  * @param journal  Journal；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger  本轮意图（NULL 视作 FLUSH）
- * @param out      出参：本轮结束后的上报（**非空**）
  */
-void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, jrn_status_t *out);
+void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger);
 
 /* ── 查询（替代外部直读 handle 字段）── */
 

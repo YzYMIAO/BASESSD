@@ -12,7 +12,7 @@
  *     窗口上限 4 个 pair 页，序列跨窗口、跨 host 传输段、跨物理 block。
  *
  * 是否进入序列由 **FTL 的顺序流检测器**决定（连续 LBA ≥ FTL_STREAM_MIN_LBAS，
- * 见 ftl.h），不是 host 传下来的开关；序列打开后按 cache_seq.next_lba 延续。
+ * 见 ftl.h），不是 host 传下来的开关；序列打开后按 cache_stream.seq.next_lba 延续。
  * 序列的主动断点见 ftl_cache_write_try 的注释（Journal 配额 / 命令尾 / D4 等；
  * 物理 block 边界不是断点——写 cache program 每条命令自带地址，序列跨 block 续写）。
  *
@@ -61,7 +61,7 @@ typedef enum
 /**
  * @brief 尝试为当前读组提交一个 cache read 窗口；序列状态跨调用保留。
  *
- * @param ftl     FTL 实例（序列状态在 ftl->cache_seq）
+ * @param ftl     FTL 实例（序列状态在 ftl->cache_stream.seq）
  * @param gi      组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
  * @param lba     当前子操作起始全局 LBA（必须 pair 对齐才尝试）
  * @param buffer  当前 host 读缓冲（后续 pair 按 4 KiB 递增）
@@ -93,7 +93,7 @@ typedef enum
  *
  * @pre 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
  *
- * @param ftl    实例（序列状态与逐页确认 FIFO 在 ftl->cache_seq）
+ * @param ftl    实例（序列状态与逐页确认 FIFO 在 ftl->cache_stream.seq）
  * @param gi     写组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
  * @param lba    本窗口起始 LBA（须 pair 对齐）
  * @param buffer 本窗口源数据（最多 4 × 4 KiB）

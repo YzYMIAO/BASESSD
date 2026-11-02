@@ -1157,51 +1157,10 @@ static void md_handle_step(md_dir_cache_t *dir)
 
 /* ── 模块 handle（typed 入口） ── */
 
-/**
- * @brief 把 job 内部状态填入 typed handle 的观测出参。
- *
- * @param dir Directory（只读）
- * @param out 出参：本轮上报
- */
-static void md_status_fill(const md_dir_cache_t *dir, md_status_t *out)
-{
-    const md_handle_t *j = &dir->handle;
-
-    out->base.critical  = false; /* 由 must-run 适配器保证 liveness */
-    out->base.wants_run = (j->phase != MD_JOB_IDLE) || dir->reclaim_pending_count != 0U || j->compact_wanted;
-    out->base.progress  = j->reclaimed_count;
-    out->base.next_ms   = 0U; /* 事件驱动，无周期 */
-    out->base.error     = j->error;
-
-    if (j->waiting)
-    {
-        out->base.state = FTL_MODULE_WAITING;
-    }
-    else if (out->base.wants_run)
-    {
-        out->base.state = FTL_MODULE_RUNNING; /* phase 非 IDLE 已包含在 wants_run 里 */
-    }
-    else
-    {
-        out->base.state = FTL_MODULE_IDLE;
-    }
-
-    out->phase           = j->phase;
-    out->victim          = j->victim;
-    out->moved           = j->moved;
-    out->reclaimed       = j->reclaimed_count;
-    out->compact_wanted  = j->compact_wanted;
-    out->anchor_ok       = j->anchor_ok;
-    out->reclaim_pending = (dir->reclaim_pending_count != 0U);
-    out->timed_out       = j->timed_out;
-    out->timeout_phase   = j->timeout_phase;
-}
-
 // 每轮入口：推进整理状态机一次，再填状态上报。
-void md_handle(md_dir_cache_t *dir, md_status_t *out)
+void md_handle(md_dir_cache_t *dir)
 {
     md_handle_step(dir);
-    md_status_fill(dir, out);
 }
 
 /* ══════════════════════════════════════════════════════════════════
