@@ -23,14 +23,12 @@
 
 #include "allocator.h"
 #include "checkpoint.h" /* cp_header_t */
+#include "ftl_type.h"   /* ftl_ctx_t */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "ssd_types.h"
 
 #include <stdint.h>
-
-/* ── 前向声明 ── */
-struct ftl_context;
 
 /* ── 启动类型 ── */
 typedef enum
@@ -91,7 +89,7 @@ typedef struct
  * @param out_need_format 输出：true = 需要格式化
  * @return FTL_OK 判定完成；FTL_ERROR CP 介质读不通（未格式化）
  */
-ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_format);
+ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format);
 
 /**
  * @brief 全量格式化（擦本实例全部块 + 复位易失元数据状态）
@@ -110,7 +108,7 @@ ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_form
  * @param verify true = 追加全片擦除体检（破坏性）
  * @return FTL_OK / FTL_ERROR
  */
-ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify);
+ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify);
 
 /**
  * @brief 主启动恢复入口
@@ -128,7 +126,7 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify);
  * @param result 输出：启动结果
  * @return FTL_OK 成功；FTL_ERROR 失败
  */
-ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result);
+ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result);
 
 /**
  * @brief 按固定分区统计 BAD 块（只读 BST，不碰介质）
@@ -140,7 +138,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
  *
  * @param ftl 只读：从 BST 统计各分区（anchor/cp/bbt/journal/l2p_log/spare/data）的 BAD 块数
  */
-void pfr_boot_log_bad_areas(const struct ftl_context *ftl);
+void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl);
 
 /**
  * @brief 「计数偏低」探针（RISK-MD-06）：抽样零计数 CLOSED 块，反查 L2P 是否仍有映射指进去。
@@ -151,6 +149,6 @@ void pfr_boot_log_bad_areas(const struct ftl_context *ftl);
  * @param ftl FTL 实例
  * @return 命中的实时映射条数（0 = 未发现偏低）
  */
-WORD pfr_count_underrun_probe(struct ftl_context *ftl);
+WORD pfr_count_underrun_probe(ftl_ctx_t *ftl);
 
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

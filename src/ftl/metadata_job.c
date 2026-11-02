@@ -105,6 +105,7 @@ static DWORD md_block_page_to_pba(const md_dir_cache_t *dir, WORD gblock, BYTE p
 
 /* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
 
+// 登记一个待回收块（幂等：已置位返回 false；越界块号不入图）。
 bool md_reclaim_mark(md_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
@@ -181,6 +182,7 @@ static void md_reclaim_clear(md_dir_cache_t *dir, WORD g)
     }
 }
 
+// 清空待回收位图、计数与扫描游标（格式化 / 目录重建后调用）。
 void md_reclaim_reset(md_dir_cache_t *dir)
 {
     memset(dir->reclaim_pending, 0, sizeof(dir->reclaim_pending));
@@ -188,6 +190,7 @@ void md_reclaim_reset(md_dir_cache_t *dir)
     dir->reclaim_scan          = 0U;
 }
 
+// 全盘重扫：把所有可回收日志块登记进位图（开机 / 目录重建后）。
 void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
@@ -200,6 +203,7 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
     }
 }
 
+// 从当前写块取一个空槽：plane 无当前块或块已满返回 INVALID，取到即推进写指针。
 DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
 {
     if ((plane >= PLANE_NUM) || (dir->cur_valid[plane] == false) || (dir->cur_page[plane] >= PAGES_PER_BLOCK))
@@ -214,6 +218,7 @@ DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
     return md_block_page_to_pba(dir, dir->cur_block[plane], page);
 }
 
+// 复位 job 状态：保留单调进度与最近错误，其余清零并重写「无」哨兵。
 void md_handle_reset(md_dir_cache_t *dir)
 {
     // reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
@@ -830,8 +835,6 @@ static bool md_reclaim_is_eager(const md_dir_cache_t *dir, const alc_t *alloc)
  */
 static void md_handle_step(md_dir_cache_t *dir)
 {
-    // 前置条件（判据 2）：调用者一律传 dir；allocator 走已绑定端口。
-
     alc_t       *alloc = dir->alloc;
     md_handle_t *j     = &dir->handle;
 
@@ -1194,11 +1197,9 @@ static void md_status_fill(const md_dir_cache_t *dir, md_status_t *out)
     out->timeout_phase   = j->timeout_phase;
 }
 
-void md_handle(md_dir_cache_t *dir, const bg_info_t *info, md_status_t *out)
+// 每轮入口：推进整理状态机一次，再填状态上报。
+void md_handle(md_dir_cache_t *dir, md_status_t *out)
 {
-    // info 当前不参与目录整理决策（事件驱动）；保留形参以统一 typed 入口。
-    (void)info;
-
     md_handle_step(dir);
     md_status_fill(dir, out);
 }
@@ -1407,7 +1408,7 @@ static void md_cp_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_comma
 
 // 实现要点：**本函数不推进状态机**（见本文件开头的说明）：只把 phase 改到"下一步该
 // 干什么"，由下一轮 md_handle 续跑。
-void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_metadata_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;

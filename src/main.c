@@ -169,7 +169,7 @@ static void boot_report_console(void)
  *                       + FC 命令池 + NAND dispatch 队列 + BCH 静态表
  *                       （CPU-only 热数据；DMA 不可访问，故 FC buffer/
  *                       NAND page buffer 不进来）
- *   AXI_RAM（.bss）：g_ftl_migrate / g_ftl_rr_page_scratch（Phase 1.5 挂载块）
+ *   AXI_RAM（.bss）：g_ftl_migrate / g_ftl_rr_page_scratch（装配挂载块）
  *                    + g_l2p_cache（共享热 cache）+ CLI 写缓冲 + 其它 .bss
  *   AXI_NOCACHE（.noncacheable_buffer）：FC buffer pool / return staging /
  *                    NAND 页缓冲（页缓冲放 DTCM 会破坏 multi-plane program，
@@ -180,7 +180,7 @@ static void boot_report_console(void)
  *   SRAM4（.sram4_data）：g_ftl_md 33,752 B（与 BCH 交换；TCM 之前本就在此域）
  *
  * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
- * Phase 1.5 的挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
+ * 装配挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
  * DIM=1：`.dtcm_data` 67,832B / ITCM 61,296B（release）、62,064B（debug）；
  * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
  * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
@@ -205,7 +205,7 @@ static cp_handle_t    g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
 extern l2p_jrn_t      g_ftl_journal[FTL_DIM_TOTAL];
 extern md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
 
-/* Phase 1.5：三块大状态挂 storage 指针；wbuf 落 DTCM，migrate/rr 留 AXI。
+/* 装配挂载：三块大状态挂 storage 指针；wbuf 落 DTCM，migrate/rr 留 AXI。
  * 挂指针**不减少总 RAM**，只让 ftl_ctx_t 变小、放置可控、handle 形态统一。 */
 static mig_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
 extern wb_handle_t  g_ftl_wbuf[FTL_DIM_TOTAL];
@@ -604,7 +604,7 @@ static void ssd_ftl_boot_all(void)
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
     for (DWORD dim = 0U; dim < FTL_DIM_TOTAL; dim++)
     {
-        const struct ftl_context *owner = ftl_op_route_get_region(dim);
+        const ftl_ctx_t *owner = ftl_op_route_get_region(dim);
 
         if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
         {
@@ -753,7 +753,7 @@ int main(void)
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
      *   g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
-     *                     再对**每个**实例调 ftl_service()（Phase 2.5/3 后台）。
+     *                     再对**每个**实例调 ftl_service()（host 补发 / 后台调度）。
      *                     ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
      *                       journal / checkpoint / bbt / GC 永不推进（序 4）。
      *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
@@ -775,7 +775,7 @@ int main(void)
             /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
             ftl_service_pump();
 
-            /* ② 逐实例后台：Phase 2.5 补发子操作 + Phase 3 三级后台 */
+            /* ② 逐实例后台：host 补发 + 后台调度 */
             for (ch = 0U; ch < CH_NUM; ch++)
             {
                 for (ce = 0U; ce < CE_NUM; ce++)

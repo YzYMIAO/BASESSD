@@ -910,7 +910,7 @@ static int uart_cli_bbt(int argc, char *argv[])
                 }
                 /* 擦除前先关掉本实例的后台写：擦除要跑十几秒，且擦完介质已空而 RAM 状态
                  * 陈旧（CP_TIME_INTERVAL_MS=10s 的定时 checkpoint 会把旧状态写回去，
-                 * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过 Phase 3，无清除路径。 */
+                 * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过后台调度步，无清除路径。 */
                 if (do_erase != 0U)
                 {
                     ftl->bg_suspend = 1U;
@@ -924,7 +924,7 @@ static int uart_cli_bbt(int argc, char *argv[])
 
                         memset(&trigger, 0, sizeof(trigger));
                         trigger.kind = WBUF_TRIGGER_RESET;
-                        (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
+                        (void)wb_handle(ftl->wbuf, &trigger, &status);
                     }
                 }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
@@ -995,7 +995,7 @@ static int uart_cli_format(int argc, char *argv[])
 
                     memset(&trigger, 0, sizeof(trigger));
                     trigger.kind = WBUF_TRIGGER_RESET;
-                    (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
+                    (void)wb_handle(ftl->wbuf, &trigger, &status);
                 }
 
                 if (pfr_media_format(ftl, verify) != FTL_OK)

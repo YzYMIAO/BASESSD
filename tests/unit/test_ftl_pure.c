@@ -1046,7 +1046,6 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
     (void)data;
 
     md_status_t out;
-    bg_info_t   info;
 
     ftl_ut_trace_begin();
 
@@ -1054,10 +1053,9 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
 
     d->handle.error = FTL_ERROR;
 
-    memset(&info, 0, sizeof(info));
     memset(&out, 0, sizeof(out));
 
-    md_handle(d, &info, &out);
+    md_handle(d, &out);
 
     /* 当前语义：进入 IDLE 时清 error ⇒ 采样看不到上一次 abort（RISK-MD-17）。 */
     munit_assert_int(out.base.error, ==, FTL_OK);
@@ -1140,12 +1138,10 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
     d->handle.slot   = NAND_PBA_INVALID;
     d->handle.moved  = 7U;
 
-    bg_info_t   info;
     md_status_t out;
 
-    memset(&info, 0, sizeof(info));
     memset(&out, 0, sizeof(out));
-    md_handle(d, &info, &out);
+    md_handle(d, &out);
 
     munit_assert_int(d->handle.phase, ==, MD_JOB_IDLE);
     munit_assert_uint32(d->l2p_live[victim], ==, 3U);
@@ -1437,7 +1433,7 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     tr.n    = 1U;
     tr.gi   = gi;
 
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_true(wb_has(&h, 0U));
     munit_assert_true(wb_read(&h, 0U, out));
     munit_assert_memory_equal(FTL_IU_BYTES, src, out);
@@ -1451,7 +1447,7 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     }
     tr.lba  = 5U;
     tr.data = src2;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, ((1UL << 0U) | (1UL << 5U)));
     munit_assert_true(wb_read(&h, 5U, out));
     munit_assert_memory_equal(FTL_IU_BYTES, src2, out);
@@ -1691,7 +1687,7 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
     tr.n    = n;
     tr.gi   = gi;
 
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, ((1UL << n) - 1UL));
     munit_assert_uint32(table.groups[gi].outstanding, ==, 1U);
 
@@ -1819,21 +1815,22 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
 
     pend_confirm_set_handler(park_again_handler);
 
-    bg_info_t info;
-
-    memset(&info, 0, sizeof(info));
-    info.now_ms = 1099U; /* 差 1 ms 到 deadline */
-
-    pend_confirm_service(&table, NULL, &info);
+    /* 伪时钟只包住 service 调用：断言失败时 munit 会 longjmp，
+     * 留在用例里的 install 会让后续用例读到倒退的时钟。 */
+    ftl_ut_clock_install();
+    ftl_ut_clock_set_ms(1099U); /* 差 1 ms 到 deadline */
+    pend_confirm_service(&table, NULL);
+    ftl_ut_clock_restore();
 
     munit_assert_true(p->used); /* 未超时：仍停泊 */
     munit_assert_true(g->used);
     munit_assert_uint32(flag, ==, 0U);
     munit_assert_uint32(pend_slot_get_count(&table), ==, 1U);
 
-    info.now_ms = 1100U; /* == FTL_GROUP_DRAIN_TIMEOUT_MS */
-
-    pend_confirm_service(&table, NULL, &info);
+    ftl_ut_clock_install();
+    ftl_ut_clock_set_ms(1100U); /* == FTL_GROUP_DRAIN_TIMEOUT_MS */
+    pend_confirm_service(&table, NULL);
+    ftl_ut_clock_restore();
 
     munit_assert_false(p->used);
     munit_assert_false(g->used);
@@ -1889,7 +1886,7 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
     tr.data = src;
     tr.n    = 2U;
     tr.gi   = gi;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, 0x03U);
     munit_assert_uint32(g->outstanding, ==, 1U);
 
@@ -1897,13 +1894,13 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
     memset(&tr, 0, sizeof(tr));
     tr.kind = WBUF_TRIGGER_DROP;
     tr.lba  = 0U;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, 0x02U);
     munit_assert_uint32(g->outstanding, ==, 1U);
 
     /* DROP 最后一个 CW：页清空 ⇒ 贡献组结算一次（OK），组完成。 */
     tr.lba = 1U;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, 0U);
     munit_assert_uint32(h.owners, ==, 0U);
     munit_assert_uint32(g->outstanding, ==, 0U);
@@ -1930,11 +1927,11 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
     tr.data = src;
     tr.n    = 2U;
     tr.gi   = gi2;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
 
     memset(&tr, 0, sizeof(tr));
     tr.kind = WBUF_TRIGGER_RESET;
-    munit_assert_int(wb_handle(&h, &tr, NULL, NULL), ==, FTL_OK);
+    munit_assert_int(wb_handle(&h, &tr, NULL), ==, FTL_OK);
     munit_assert_uint32(h.occupied, ==, 0U);
     munit_assert_uint32(h.owners, ==, 0U);
     munit_assert_uint32(g2->outstanding, ==, 0U);

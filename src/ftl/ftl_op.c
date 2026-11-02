@@ -42,14 +42,14 @@ _Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH, "旁表容量必�
 /**
  * @brief 前置声明：服务函数定义在本文件末尾。
  */
-static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+static void ftl_sync_wait_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 1. 静态资源 ── */
 
 static ftl_op_ctx_entry_t g_op_ctx[FTL_OP_CTX_TABLE_SIZE];
 
 // 实例路由表：按命令 ch/ce/lun → FTL 实例。
-static struct ftl_context *g_op_route[CH_NUM][CE_NUM][LUN_NUM];
+static ftl_ctx_t *g_op_route[CH_NUM][CE_NUM][LUN_NUM];
 
 // 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可。
 static BYTE g_dispatch_depth = 0U;
@@ -185,7 +185,7 @@ WORD ftl_op_ctx_count(void)
 
 // 实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让
 // g_op_route 成为唯一持有者，避免悬垂。
-void ftl_op_route_set(struct ftl_context *route[][CE_NUM][LUN_NUM])
+void ftl_op_route_set(ftl_ctx_t *route[][CE_NUM][LUN_NUM])
 {
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
@@ -204,7 +204,7 @@ void ftl_op_route_set(struct ftl_context *route[][CE_NUM][LUN_NUM])
 // **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明），
 // 此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
 // 不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
-struct ftl_context *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
+ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return g_op_route[ch][ce][lun];
@@ -212,13 +212,14 @@ struct ftl_context *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 
 // 实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
 // lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
-struct ftl_context *ftl_op_route_get_region(DWORD global_region)
+ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
 {
     const DWORD dim = global_region % FTL_DIM_TOTAL;
 
     return ftl_op_route_get(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
 }
 
+// 任一实例有 cache 序列未收尾（active 或 draining）；deadline 挂起判据必须把 draining 算进来。
 bool ftl_op_cache_seq_active(void)
 {
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
@@ -227,7 +228,7 @@ bool ftl_op_cache_seq_active(void)
         {
             for (BYTE lun = 0U; lun < LUN_NUM; lun++)
             {
-                const struct ftl_context *ftl = g_op_route[ch][ce][lun];
+                const ftl_ctx_t *ftl = g_op_route[ch][ce][lun];
 
                 // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
                 // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
@@ -255,7 +256,7 @@ static bool ftl_op_host_groups_inflight(void)
         {
             for (BYTE lun = 0U; lun < LUN_NUM; lun++)
             {
-                const struct ftl_context *ftl = g_op_route[ch][ce][lun];
+                const ftl_ctx_t *ftl = g_op_route[ch][ce][lun];
 
                 if (ftl == NULL)
                 {
@@ -320,7 +321,7 @@ static bool ftl_op_seq_gate_breaks(ftl_op_id_e op)
 // 会被别的提交劈开（RISK-CACHE-14）。
 static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
 {
-    struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
+    ftl_ctx_t *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
     if ((ftl != NULL) && ((ftl->cache_seq.active == true) || (ftl->cache_seq.draining == true)) && (ftl->cache_seq.owner_submit == false))
     {
@@ -334,6 +335,7 @@ static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
     return false;
 }
 
+// 提交唯一入口：先过序列门控，写 op_tag，再把 ctx 登记进旁表——登记必须早于下发。
 ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     WORD cmd_id = ftl_cmd_id(cmd);
@@ -432,6 +434,7 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
 
 /* ── 6. 派发 / 排空 ── */
 
+// 是否正处在完成派发中（服务函数据此拒绝重入 ftl_service）。
 bool ftl_op_is_in_dispatch(void)
 {
     return (g_dispatch_depth != 0U);
@@ -463,6 +466,7 @@ static bool ftl_op_requires_ctx(BYTE op)
     }
 }
 
+// 完成派发：先摘旁表再回调（服务函数可能重入登记）；孤儿 tag / 缺 ctx 只释放命令并留痕。
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
     BYTE                 op = completion->op_tag;
@@ -503,7 +507,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
     // 先 ftl_op_init 清一次、再 route_set），因为 boot 期 full metadata rebuild 就会经
     // l2p_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
     // 不再是"开机早期"的正常状态。
-    struct ftl_context *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
+    ftl_ctx_t *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
 
     // 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
     // "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。
@@ -512,7 +516,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
     g_dispatch_depth--;
 }
 
-// ftl_op_drain — 消费所有 CQ entry 并派发（ftl_service_pump 的 Phase 2）。
+// ftl_op_drain — 消费所有 CQ entry 并派发（ftl_service_pump 的完成泵步）。
 //
 // 每条 completion 交 ftl_op_dispatch()：按 op_tag 查 g_op_callbacks[]，从旁表摘 ctx，
 // 再调对应服务函数。循环持续到 CQ 抽干为止。
@@ -538,7 +542,7 @@ void ftl_op_drain(void)
  * @param completion FC 完成状态。
  * @param ctx        `ftl_sync_waiter_t *`；NULL = 迟到的完成（旁表项已摘）。
  */
-static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+static void ftl_sync_wait_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
 

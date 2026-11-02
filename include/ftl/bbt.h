@@ -23,7 +23,7 @@
 
 #include "allocator.h"
 #include "assertion.h"
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "metadata.h"   /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
@@ -283,10 +283,9 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  * ⚠ 只由后台调度器/B 档调用。开机/格式化路径仍走同步 bbt_save。
  *
  * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param info   本轮动态信息（当前未用，可传 NULL）
  * @param out    出参：本轮结束后的上报（**非空**，由调用者提供）
  */
-void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out);
+void bbt_handle(alc_t *alloc, bbt_status_t *out);
 
 /**
  * @brief 从**指定 plane 的** Spare Pool 补充 Free Pool

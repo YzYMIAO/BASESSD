@@ -210,7 +210,6 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
 // 不能按 next_page 缩分母——半写块的空洞页会让它看起来「100% 有效」而被误跳过。
 gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out)
 {
-    // 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc、合法 mode 与栈上 &out。
     ASSERT(alloc != NULL);
     ASSERT(out != NULL);
     ASSERT((mode == GC_BENEFIT_OFF) || (mode == GC_BENEFIT_IDLE) || (mode == GC_BENEFIT_EMERGENCY));

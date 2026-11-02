@@ -496,6 +496,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
     return FTL_CACHE_READ_OK;
 }
 
+// host 读的 cache 命中尝试：pair 对齐 / 组有效 / 序列方向与接续点任一不满足即 DECLINED，交调用者回退普通读。
 ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);
@@ -891,6 +892,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
     return FTL_OK;
 }
 
+// host 写的 cache 命中外理：写序列被读序列占用时返回 AGAIN（不回退），其余不满足即 DECLINED。
 ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);

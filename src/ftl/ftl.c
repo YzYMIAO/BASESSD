@@ -10,15 +10,17 @@
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
  *   pending.c          —— 子操作登记 + 组完成聚合（一条 host 请求 = 一个 group）。
- *   ftl_op.c           —— ctx 旁表 + 实例路由 + 提交 + CQ 排空/派发（Phase 2）。
+ *   ftl_op.c           —— ctx 旁表 + 实例路由 + 提交 + CQ 排空/派发（[pump] 完成泵）。
  *   其余模块（gc / wl / journal / checkpoint / bbt / l2p_cache）各司其职，
  *   见各自文件头。
  *
  * 服务主循环（ftl_service）四阶段：
- *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
- *   Phase 2    ftl_op_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
- *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
- *   Phase 3    bg_scheduler_service —— 时间预算后台调度（本文件只有一行调用）
+ *   [pump] 推进 NAND   fc_service × NAND_SUBMIT_BUDGET
+ *   [pump] 完成泵      ftl_op_drain —— 按命令 op_tag 派发到服务函数数组
+ *   —— 以上在 ftl_service_pump（实例无关，每轮一次）；以下在 ftl_service（每实例）——
+ *   [svc]  元数据候选池重算 / 写确认结算 / cache 序列确认 / host 补发 /
+ *          序列收尾 / wbuf 空闲 flush / 后台调度（bg_scheduler_service）
+ *   步骤清单的唯一定义见 include/ftl/ftl.h 的 ftl_service() 契约。
  *
  * 文件结构（与下方分区注释一一对应）：
  *   1. 内部辅助        ftl_confirm_write / ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成
@@ -28,7 +30,7 @@
  *   4. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
  *
  * ⚠ 后台调度在 `ftl/bg_scheduler.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
- *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / Phase 3 入口 bg_scheduler_service；
+ *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / 后台调度入口 bg_scheduler_service；
  *   通用引擎也在同一文件。本文件不持有任何后台策略。
  *
  * ⚠ 页打包写缓冲在 `ftl/wbuf.c`（wbuf.h 定义 wb_handle_t），本文件只调用其接口。
@@ -40,7 +42,7 @@
  *
  * ⚠ 多实例：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
  *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
- *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 Phase 2.5/3——
+ *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 host 补发 / 后台调度——
  *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进。
  */
 
@@ -162,12 +164,15 @@ static ftl_log_throttle_t s_subop_fail_log;
 // host cache program 批次失败：host 反复重试同一坏页时每个批次都会失败 ⇒ 限流。
 static ftl_log_throttle_t s_cache_wb_fail_log;
 
+// cache 序列 draining 兜底放锁的日志限流：强制放锁是异常路径，卡死时 5s 一行即可。
+static ftl_log_throttle_t s_seq_drain_stall_log;
+
 /* ── 内部辅助 ── */
 
 static bool ftl_cache_wr_has_unproven(const ftl_ctx_t *ftl);
 static void ftl_cache_wr_abort(ftl_ctx_t *ftl);
 
-// 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到）。
+// 组下发机制（定义在文件后部；ftl_service 的 host 补发步先用到）。
 /**
  * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
  *
@@ -249,7 +254,7 @@ static void SSD_CODE_FAST ftl_cache_seq_close(ftl_ctx_t *ftl, WORD gi)
  * @param ftl 实例。
  *
  * @note ① `draining`：所有者组的在飞子操作归零 ⇒ 清 `draining` 放开 LUN；超过
- *       FTL_CACHE_SEQ_IDLE_MS 也强制清（组异常消失时不能把 LUN 永久锁死）。
+ *       FTL_CACHE_SEQ_DRAIN_STALL_MS 也强制清（命令卡死时不能把 LUN 永久锁死）。
  *       ② `active`：序列跨 host 传输段 / 跨 host 命令保持打开，等同一 LBA 流的下一段；
  *       所有者组已释放且超时无人接手 ⇒ 写序列置 `close_requested`（service 用 padding
  *       END 收尾，不丢提前回执页）；读序列直接释放（不发 LAST）。
@@ -258,7 +263,7 @@ static void SSD_CODE_FAST ftl_cache_seq_close(ftl_ctx_t *ftl, WORD gi)
 static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
 {
     // 排空守卫：窗口已提交、命令仍在飞 ⇒ 门控继续关着，直到所有者组的在飞子操作
-    // 归零（或 1 s 兜底：组异常消失时不能把 LUN 永久锁死）。
+    // 归零（或 1 s 兜底：命令卡死时不能把 LUN 永久锁死；放锁时留 WRN 现场）。
     if (ftl->cache_seq.draining == true)
     {
         const WORD gi        = ftl->cache_seq.owner_gi;
@@ -282,8 +287,16 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
             return;
         }
 
-        if ((now_ms - ftl->cache_seq.idle_ms) > FTL_CACHE_SEQ_IDLE_MS)
+        if ((now_ms - ftl->cache_seq.idle_ms) > FTL_CACHE_SEQ_DRAIN_STALL_MS)
         {
+            // 兜底放锁是异常路径（命令 1s 没排空）：必须留现场，否则真卡死时无记录。
+            DWORD suppressed = 0U;
+
+            if (ftl_log_throttle_due(&s_seq_drain_stall_log, &suppressed))
+            {
+                LOGW(LOG_TAG_FTL "seq drain force-clear gi=%hu outstanding=%hu age=%lums (LUN gate reopened; suppressed=%lu)\r\n", gi, ftl->pending.groups[gi].outstanding, now_ms - ftl->cache_seq.idle_ms, suppressed);
+            }
+
             ftl->cache_seq.draining = false;
             ftl->cache_seq.idle_ms  = 0U;
         }
@@ -297,10 +310,10 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
 
     // 所有者组仍在**下发**本序列的页 ⇒ 有进展，不计空闲。
     // 组已释放（读）或已把本 chunk 全部下发、在等下一 chunk 确认尾页（写）⇒ 开始计时。
-    const bool owner_valid    = (ftl->cache_seq.owner_gi < FTL_GROUP_MAX) && (ftl->pending.groups[ftl->cache_seq.owner_gi].used == true);
-    const bool owner_draining = (owner_valid == true) && (ftl->pending.groups[ftl->cache_seq.owner_gi].next < ftl->pending.groups[ftl->cache_seq.owner_gi].total);
+    const bool owner_valid   = (ftl->cache_seq.owner_gi < FTL_GROUP_MAX) && (ftl->pending.groups[ftl->cache_seq.owner_gi].used == true);
+    const bool owner_issuing = (owner_valid == true) && (ftl->pending.groups[ftl->cache_seq.owner_gi].next < ftl->pending.groups[ftl->cache_seq.owner_gi].total);
 
-    if (owner_draining == true)
+    if (owner_issuing == true)
     {
         ftl->cache_seq.idle_ms = 0U; /* 所有者仍在推进：不计空闲 */
         return;
@@ -405,6 +418,10 @@ typedef struct
     bool  seq_page; /* 顺序页（cache program）⇒ Journal 走 jrn_append_seq */
 } ftl_page_desc_t;
 
+/**
+ * @brief 写确认钩子（pend_confirm_service 调）：region 未就绪即返回 FTL_AGAIN 继续停泊；
+ *        就绪后按页型（顺序映射页 / 通用页）写 Journal，再更新 L2P。
+ */
 static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const ftl_page_desc_t *d)
 {
     // 两个调用点（ftl_host_io_callback 的 `if (pending != NULL)` 内 / pend_confirm_service 的
@@ -1536,6 +1553,7 @@ static SSD_CODE_FAST ftl_status_e ftl_cache_pad_submit(ftl_ctx_t *ftl)
     return FTL_OK;
 }
 
+// padding 收尾页完成：按 FAILC 判定上一页成败（收尾页自身不映射数据），并补 page0 屏障记账。
 void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // ctx 恒 NULL（见 ftl_op.h 契约）；序列状态在 ftl->cache_seq。
@@ -1632,7 +1650,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_t *ftl, const fc_command_statu
 }
 
 /**
- * @brief 序列有序收尾入口（Phase 2.5 每轮调用）。
+ * @brief 序列有序收尾入口（host 补发之后每轮调用）。
  *
  * 读序列：直接放弃（不发 LAST）；写序列：提交 padding END（不能 abort——未确认页
  * 已经对 host 提前回执）。资源不足时保持关闭请求，下轮重试。
@@ -1669,7 +1687,7 @@ static SSD_CODE_FAST void ftl_cache_seq_close_step(ftl_ctx_t *ftl)
 //
 // ⚠ 本函数**不得**同步等待（见 ftl_op.h）——它跑在完成泵里，再调
 // ftl_sync_submit_wait 就是嵌套泵（泵里再开泵，完成顺序与栈深都失控）。
-void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     (void)ctx; /* host I/O 不登记旁表 ctx */
 
@@ -1824,6 +1842,7 @@ static ftl_status_e ftl_confirm_handler(void *ctx, pend_req_t *pending)
 
 /* ── 对外接口 ── */
 
+// 复位 ftl.o 的文件级静态（NOLOAD 段不清零）：dangling 环与各类限流日志基准。
 void ftl_global_init(void)
 {
     // ftl.o 的 .bss 随整文件规则落 DTCM（NOLOAD），文件级日志/守卫静态不在
@@ -1841,13 +1860,13 @@ void ftl_global_init(void)
     memset(&s_nospace_log, 0, sizeof(s_nospace_log));
     memset(&s_subop_fail_log, 0, sizeof(s_subop_fail_log));
     memset(&s_cache_wb_fail_log, 0, sizeof(s_cache_wb_fail_log));
+    memset(&s_seq_drain_stall_log, 0, sizeof(s_seq_drain_stall_log));
 }
 
 // 实现要点：本实例只持有指针，storage 数组/挂载块由 HIL 提供，
 // 位于 NOLOAD 段 ⇒ 本函数必须显式 memset。
 SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
 {
-    // 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]、共享 cache、storage。
     ASSERT(ftl != NULL);
     ASSERT(cache != NULL);
     ASSERT(storage != NULL);
@@ -1900,13 +1919,13 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t
     pend_init(&ftl->pending);
     pend_confirm_set_handler(ftl_confirm_handler);
 
-    // ├─ storage 数组显式清零（启动不碰 .sram*_data；Phase 1.5 挂载块同）──
+    // ├─ storage 数组显式清零（启动不碰 .sram*_data；装配挂载块同）──
     // 五张表：alc_init 逐块读 ftl_block_is_bad() ⇒ blocks 必须先清零；
     // free/op/spare/closed 的读者按 count 有界，逐表清零让 NOLOAD 语义确定。
     // metadata_dir：load/init 不覆盖全部字段 ⇒ 先整表清零。
     // journal：init 只重置部分 job 字段 ⇒ 先整表清零。
     // cp_handle：active 在 cp_job_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
-    // migrate / wbuf / rr_page_scratch：Phase 1.5 挂载块，与其余数组一致清零。
+    // migrate / wbuf / rr_page_scratch：装配挂载块，与其余数组一致清零。
     // ⚠ 全部 memset 必须早于 md_load。
     memset(ftl->table_refs.blocks, 0, FTL_BLOCK_TOTAL * sizeof(*ftl->table_refs.blocks));
     memset(ftl->table_refs.free_blocks, 0, FTL_BLOCK_TOTAL * sizeof(*ftl->table_refs.free_blocks));
@@ -1916,7 +1935,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t
     memset(ftl->metadata_dir, 0, sizeof(*ftl->metadata_dir));
     memset(ftl->journal, 0, sizeof(*ftl->journal));
     memset(ftl->cp_handle, 0, sizeof(*ftl->cp_handle));
-    // Phase 1.5 挂载块：与其余 storage 数组一致显式清零（未来若落 NOLOAD 段，
+    // 装配挂载块：与其余 storage 数组一致显式清零（未来若落 NOLOAD 段，
     // 启动代码不清零）。
     memset(ftl->mig_handle, 0, sizeof(*ftl->mig_handle));
     memset(ftl->wbuf, 0, sizeof(*ftl->wbuf));
@@ -2199,7 +2218,7 @@ SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_t *ftl)
 // （per-instance 调用会把 fc_service 预算重复消耗 N 遍）。
 void ftl_service_pump(void)
 {
-    // Phase 1: fc_service 推进 NAND。
+    // [pump] 推进 NAND：fc_service。
     // 第 1 次调用即把本轮所有完成抽干（nand_dispatch_poll 全遍历 + sink 逐条消费），
     // 之后几次走填充 pass；预算因此封顶的是"本轮跑几次 fc_service"，不是完成条数。
     for (BYTE i = 0U; i < NAND_SUBMIT_BUDGET; i++)
@@ -2210,13 +2229,13 @@ void ftl_service_pump(void)
         }
     }
 
-    // Phase 2: 统一完成泵（按命令 op_tag 派发到服务函数数组，见 ftl_op.c）
+    // [pump] 完成泵：按命令 op_tag 派发到服务函数数组（见 ftl_op.c）
     ftl_op_drain();
 }
 
 // 实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
 // 实例调本函数（多实例下所有实例都要推进，不能只跑 [0][0][0]）。
-// Phase 3 收缩为一次 bg_scheduler_service——档位选择 / 任务表 / 预算规模全在
+// 后台调度收缩为一次 bg_scheduler_service——档位选择 / 任务表 / 预算规模全在
 // `ftl/bg_scheduler.c`（含 bg_suspend 判定，见该处头注）。
 void ftl_service(ftl_ctx_t *ftl)
 {
@@ -2224,21 +2243,21 @@ void ftl_service(ftl_ctx_t *ftl)
     // NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
     // 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。
 
-    // Phase 2.4：运行期元数据 BAD 后的候选池重算（纯 RAM；等元数据 job 空闲才做）。
+    // [svc] 元数据候选池重算：运行期元数据 BAD 后重算候选池（纯 RAM；等元数据 job 空闲才做）。
     // 必须早于本轮新 I/O：游标/候选表先一致，再允许分配与提交。
     md_pool_service(ftl);
 
-    // Phase 2.5 首：推进**停泊**的写确认。必须早于补发——停泊意味着那个 LBA
+    // [svc] 写确认结算：推进**停泊**的写确认。必须早于 host 补发——停泊意味着那个 LBA
     // 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
-    // 顺序与 Phase 2.5 的既有约定一致：先处理**已完成**的，再下发新的。
-    pend_confirm_service(&ftl->pending, ftl, NULL);
+    // 顺序约定：先处理**已完成**的，再下发新的。
+    pend_confirm_service(&ftl->pending, ftl);
 
-    // Phase 2.5 次：推进 cache 写序列的「已编程页表」——按序确认（Journal→L2P→BST）、
+    // [svc] cache 序列确认：推进 cache 写序列的「已编程页表」——按序确认（Journal→L2P→BST）、
     // 撤销失败页、弹出已证明页（RISK-CACHE-27/28）。组早已完成，这里只做元数据记账。
     ftl_cache_wr_confirm_step(ftl);
 
-    // Phase 2.5: 补发 host 子操作。完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），
-    // 再把各组的待下发子操作补上；顺序保证 host IO 优先于 Phase 3 的后台任务。
+    // [svc] host 补发：下发各组的待补发子操作。完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），
+    // 再把各组的待下发子操作补上；顺序保证 host IO 优先于后台调度。
     // 只遍历**本实例**的组（每实例一份 groups 表）。
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -2255,17 +2274,17 @@ void ftl_service(ftl_ctx_t *ftl)
     // 读序列直接放弃。放在补发之后：本轮的窗口先发出去，再决定是否收尾。
     ftl_cache_seq_close_step(ftl);
 
-    // Phase 2.5 尾：页打包写缓冲的**确定性空闲 flush**——补发循环跑完后，若再无写组会
+    // [svc] wbuf 空闲 flush：页打包写缓冲的**确定性空闲 flush**——补发循环跑完后，若再无写组会
     // 向当前窗口 append，就把缓冲编程掉（否则这些 host 写永不完成）。放在 bg_suspend
     // 判定之前：它是 host IO 的收尾，不是后台任务。
     {
         wb_trigger_t trigger;
         memset(&trigger, 0, sizeof(trigger));
         trigger.kind = WBUF_TRIGGER_MAYBE_FLUSH_IDLE;
-        (void)wb_handle(ftl->wbuf, &trigger, NULL, NULL);
+        (void)wb_handle(ftl->wbuf, &trigger, NULL);
     }
 
-    // Phase 3: 时间预算后台调度 —— 档位选择 / 10 项任务表 / 预算规模 / bg_suspend
+    // [svc] 后台调度：时间预算后台调度 —— 档位选择 / 10 项任务表 / 预算规模 / bg_suspend
     // 判定全在 ftl/bg_scheduler.c（本文件不持有后台策略）。
     bg_scheduler_service(ftl);
 }
@@ -2341,7 +2360,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
         trigger.n    = n;
         trigger.gi   = gi;
 
-        return wb_handle(ftl->wbuf, &trigger, NULL, NULL);
+        return wb_handle(ftl->wbuf, &trigger, NULL);
     }
 
     /* ── 以下为读路径 ── */
@@ -2728,7 +2747,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
         if (st == FTL_AGAIN)
         {
-            // 瞬态背压：本轮到此为止，下轮 ftl_service Phase 2.5 再补。
+            // 瞬态背压：本轮到此为止，下轮 ftl_service 的 host 补发步再补。
             // 连续无进展超预算 → 判真卡死，弃未下发者并报错（已下发的照常完成）。
             // ⚠ **有确定完成时刻的后台进展不算无进展**：
             // · L2P region 加载在飞（l2p_defer）：NAND 层 wait/jump 超时保证命令必有完成；
@@ -2952,7 +2971,7 @@ static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
  * @param req 请求（count = 连续 LBA 数，buffer 非空）
  * @param op PENDING_OP_READ / PENDING_OP_WRITE（决定组类型与日志标签）。
  *
- * @return FTL_OK    已建组（可能仍有余量待 Phase 2.5 补发）
+ * @return FTL_OK    已建组（可能仍有余量待 host 补发步补发）
  *         FTL_ERROR 参数非法 / 越界 / 组槽满
  *
  * @note 实现要点：两个公开入口的流程**逐字相同**（差异只有 op 与日志文案）⇒ 收敛到本函数
@@ -3070,7 +3089,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
         seq_gen = ftl->seq_generation;
     }
 
-    // 快路径：小请求当场下发完；遇背压则余下留待 ftl_service Phase 2.5 补发。
+    // 快路径：小请求当场下发完；遇背压则余下留待 ftl_service 的 host 补发步补发。
     // 数据在 ftl_op_drain 中拷贝回 buffer（读），Journal + L2P 在完成
     // handler 中确认 NAND PROGRAM 成功后执行（写）。
     ftl_drain_group(ftl, gi);
@@ -3089,6 +3108,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     return FTL_OK;
 }
 
+// 取走「延迟错误」标志（读-改-清）；无错误返回 false。
 bool ftl_take_deferred_error(ftl_ctx_t *ftl)
 {
     if (ftl == NULL)
@@ -3102,11 +3122,13 @@ bool ftl_take_deferred_error(ftl_ctx_t *ftl)
     return has;
 }
 
+// host 读提交：与写共用 ftl_submit_common，只差 pending 的 op 类型。
 ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 {
     return ftl_submit_common(ftl, req, PENDING_OP_READ);
 }
 
+// host 写提交：同上，op = WRITE。
 ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req)
 {
     return ftl_submit_common(ftl, req, PENDING_OP_WRITE);
@@ -3144,6 +3166,7 @@ static void ftl_flush_kick_cp(ftl_ctx_t *ftl)
     cp_handle(ftl->cp_handle, &trigger, &status);
 }
 
+// 取消 flush：只清 job 标志，在飞的 wbuf / L2P / journal 操作各自完成，不破坏不变量。
 void ftl_flush_cancel(ftl_ctx_t *ftl)
 {
     // 只摘 job 标志：wbuf / L2P / journal 的在飞操作有各自的服务路径，
@@ -3178,9 +3201,10 @@ void ftl_flush_begin(ftl_ctx_t *ftl)
 
     memset(&trigger, 0, sizeof(trigger));
     trigger.kind = WBUF_TRIGGER_FLUSH;
-    (void)wb_handle(ftl->wbuf, &trigger, NULL, NULL);
+    (void)wb_handle(ftl->wbuf, &trigger, NULL);
 }
 
+// flush 一轮：推进 wbuf / L2P / journal；四类在飞数据全部落定（或失败/超时）才返回 true。
 bool ftl_flush_step(ftl_ctx_t *ftl)
 {
     if (ftl->flush_active == false)
@@ -3197,7 +3221,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     wb_trigger.kind = WBUF_TRIGGER_MAYBE_FLUSH_IDLE;
 
     wb_status_t wb_status;
-    (void)wb_handle(ftl->wbuf, &wb_trigger, NULL, &wb_status);
+    (void)wb_handle(ftl->wbuf, &wb_trigger, &wb_status);
 
     // ② L2P：继续 kick 本 owner 的脏行（受共享 credit 池门控）。
     l2p_owner_flush_kick(ftl->cache, dim, L2P_CACHE_SIZE);
@@ -3205,7 +3229,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     // ③ Journal：推进异步刷页 job。
     const jrn_trigger_e jrn_trigger = JRN_TRIGGER_FLUSH;
     jrn_status_t        jrn_status;
-    jrn_handle(ftl->journal, &jrn_trigger, NULL, &jrn_status);
+    jrn_handle(ftl->journal, &jrn_trigger, &jrn_status);
 
     // ④ 完成判据：四类在飞数据全部落定。停泊中的写确认也必须先完成——它对应的
     // L2P 脏行还没出现，否则 flush 会「提前完成」。
@@ -3348,6 +3372,7 @@ ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count)
     return FTL_OK;
 }
 
+// TRIM 一轮：最多处理 FTL_TRIM_STEP_LBAS 条；未完成返回 FTL_AGAIN，完成或映射错误返回终态。
 ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
 {
     ASSERT(ftl != NULL);
@@ -3374,7 +3399,7 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
             memset(&trigger, 0, sizeof(trigger));
             trigger.kind = WBUF_TRIGGER_DROP;
             trigger.lba  = l;
-            (void)wb_handle(ftl->wbuf, &trigger, NULL, NULL);
+            (void)wb_handle(ftl->wbuf, &trigger, NULL);
 
             ftl->trim_lba++;
             processed++;

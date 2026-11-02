@@ -96,7 +96,7 @@ static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blo
  * @param ftl FTL 实例（L2P 已完成恢复 + 回放）
  * @return 命中的实时映射条数（0 = 未发现偏低）
  */
-WORD pfr_count_underrun_probe(struct ftl_context *ftl)
+WORD pfr_count_underrun_probe(ftl_ctx_t *ftl)
 {
     WORD hits = 0U;
 
@@ -198,10 +198,8 @@ static BYTE s_sub_zero_st;
 // · CURRENT            ⇒ 不格式化；
 // · NO_RECORD / 版本不符 ⇒ 格式化（空片多擦一次，写标记后自愈）；
 // · IO_ERROR            ⇒ 不格式化，返回错误——一次瞬时读错不能变成整片擦除。
-ftl_status_e pfr_media_check_format(struct ftl_context *ftl, bool *out_need_format)
+ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
 {
-    // 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与局部 bool。
-
     DWORD             media_version = 0U;
     cp_media_status_e st            = cp_media_status_probe(ftl->cp_handle, &media_version);
 
@@ -450,10 +448,8 @@ static bool pfr_format_end_bbt(alc_t *alloc)
 // 下次开机都会继续格式化，而不是拒绝启动。
 // ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
 // ⚠ BST 的 erase_count 保留旧值（开机已从 CP 磨损快照回填）——仅影响磨损均衡起点。
-ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
+ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
 {
-    // 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]。
-
     // 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
     // 都还完整，格式化不完成、可重试。
     if (bbt_format_erase(&ftl->alloc) != FTL_OK)
@@ -584,10 +580,8 @@ ftl_status_e pfr_media_format(struct ftl_context *ftl, bool verify)
 // 都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
 // ② cp_pool_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
 // ③ 最新页 page_seq ≤ cp->journal_sequence ⇒ 干净关机；否则异常掉电。
-static ftl_status_e pfr_boot_recovery_body(struct ftl_context *ftl, pfr_boot_result_t *result)
+static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *result)
 {
-    // 前置条件（判据 2）：调用者传实例与栈上 &result（见下方唯一入口）。
-
     pfr_boot_result_t local_result;
     memset(&local_result, 0, sizeof(local_result));
 
@@ -719,10 +713,9 @@ static ftl_status_e pfr_boot_recovery_body(struct ftl_context *ftl, pfr_boot_res
     return FTL_OK;
 }
 
-ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
+// 掉电恢复唯一入口：跑恢复主体；结束后做一次只读取证（观测用，不改变恢复结果）。
+ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result)
 {
-    // 前置条件（判据 2）：唯一调用链（main.c 的 ssd_ftl_boot / UT 的 reboot 夹具）
-    // 传实例与栈上 &result。
     const ftl_status_e status = pfr_boot_recovery_body(ftl, result);
 
     // 只读取证（RISK-MD-06）：恢复期间降级的 region，其落点页在介质上是「擦除态」
@@ -743,7 +736,7 @@ ftl_status_e pfr_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
  * **只把 state == NONE 的块入池**；full metadata rebuild / 快照已认领的 CLOSED/LOG/RETIRED
  * 只计入 total_blocks。快照路径不调用它（池来自快照），故要求池计数为 0。
  */
-static void pfr_boot_carve_pools(struct ftl_context *ftl)
+static void pfr_boot_carve_pools(ftl_ctx_t *ftl)
 {
     alc_t *alloc = &ftl->alloc;
 
@@ -829,10 +822,8 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
  * ④ jrn_resume 按环内最新页接回写指针（序号下限 1）。
  * ⑤ checkpoint sequence 归零。
  */
-static void pfr_boot_fresh_start(struct ftl_context *ftl, const jrn_page_ref_t *ring)
+static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
 {
-    // 前置条件（判据 2）：唯一调用者 pfr_boot_recovery 持有实例与 ring 快照。
-
     // ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景）
     const DWORD dim = ftl_topo_dim(ftl->topo);
 
@@ -952,7 +943,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
  * ⚠ 即使判定 clean，也要 probe 池块：本仓无关机 journal flush，
  * 「丢最后一页 journal」与 clean 在介质上不可区分。
  */
-static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp, BYTE blocks_valid, bool force_rebuild, bool *blocks_restored, const jrn_page_ref_t *ring)
+static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, bool force_rebuild, bool *blocks_restored, const jrn_page_ref_t *ring)
 {
     // ① 共享 cache 已由设备级 init 置空；本路径只按 CP bitmap 约束本 owner 的行
     // （首次 miss 时按需从 NAND L2P Table 加载）。
@@ -1039,10 +1030,8 @@ static void pfr_boot_clean_start(struct ftl_context *ftl, const cp_header_t *cp,
  * `page_seq + entry_count > cp_sequence`；只回放最大一页会静默丢
  * ≥2 页条目）；④ full metadata rebuild closed_sb_list（不再恢复 hot_sb/cold_sb 写指针）。
  */
-static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *cp, BYTE blocks_valid, pfr_boot_result_t *result)
+static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, pfr_boot_result_t *result)
 {
-    // 前置条件（判据 2）：唯一调用者 pfr_boot_recovery 持有实例与局部结构。
-
     DWORD cp_sequence = cp->journal_sequence;
 
     // ① 共享 cache 已由设备级 init 置空；journal 回放把本 owner 的映射写进 cache。
@@ -1219,7 +1208,8 @@ static void pfr_boot_power_failure(struct ftl_context *ftl, const cp_header_t *c
     result->blocks_restored = restored;
 }
 
-void pfr_boot_log_bad_areas(const struct ftl_context *ftl)
+// 统计各分区（Anchor/CP/BBT/Journal/L2P/spare/User）的坏块与 reserved 数并打一行日志。
+void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
 {
     // Anchor 是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
     // 避免 `block >= 0` 的恒真比较告警。
@@ -1465,8 +1455,6 @@ static void pfr_rebuild_l2p_stats_report(void)
  */
 static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_written, BYTE temperature, pfr_rebuild_stats_t *stats)
 {
-    // 前置条件（判据 2）：pages_written 来自 pfr_scan_write_pointer，调用者已跳过 0。
-
     alc_t *const alloc = &ftl->alloc;
     const WORD   g     = ftl_gblock(plane, block);
 
@@ -1568,10 +1556,8 @@ static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
  * @note 实现要点：Policy B 下两 plane 的块不再同号 ⇒ 按**单物理块**建 Closed 条目
  * （另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需、也无法恢复。
  */
-static void pfr_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stats_t *stats)
+static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats)
 {
-    // 前置条件（判据 2）：唯一调用者在本文件（boot 三条路径）。
-
     alc_t *alloc = &ftl->alloc;
 
     if (stats != NULL)

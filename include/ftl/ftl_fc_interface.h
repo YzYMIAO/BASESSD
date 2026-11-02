@@ -299,7 +299,7 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
  */
 static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
 {
-    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
+    /* cmd 由调用者从 fc_command_alloc() 取且已判空 ⇒ 本函数不再判空。 */
 
     /* 边界不变量：进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当 suspended[][][] 下标
      * 直接用，越界即栈越界写。校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()

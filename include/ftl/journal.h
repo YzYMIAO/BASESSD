@@ -37,7 +37,7 @@
 
 #include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "metadata.h"    /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
@@ -488,10 +488,9 @@ bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
  *
  * @param journal  Journal；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger  本轮意图（NULL 视作 FLUSH）
- * @param info     本轮动态信息（now_ms / load_level；当前只用于观测，不改变判据）
  * @param out      出参：本轮结束后的上报（**非空**）
  */
-void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, const bg_info_t *info, jrn_status_t *out);
+void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, jrn_status_t *out);
 
 /* ── 查询（替代外部直读 handle 字段）── */
 

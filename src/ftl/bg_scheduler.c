@@ -4,7 +4,7 @@
  * 本文件两段：
  *   · 引擎（本段）：机械执行 Pass 0 must-run + Pass 1 预算任务，不认识任何具体任务。
  *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_tasks + 档位表 s_bg_level_cfg
- *     + 装配 / 选档 / Phase 3 入口。
+ *     + 装配 / 选档 / 后台调度步入口。
  *
  * 语义定义（must_run / budget_us / task_mask / 时钟缺失）见 `bg_scheduler.h` 头注，
  * 设计说明见 `docs/design/ftl_design.md §3.12`——不在此重复，避免两份漂移。
@@ -65,10 +65,9 @@ static const bg_level_cfg_t s_bg_level_cfg[BG_LEVEL_NUM] = {
  * 引擎
  * ════════════════════════════════════════════════════════════════════════ */
 
+// 执行一轮：Pass 0 无条件跑 must-run（表序即优先级），Pass 1 在总预算内按表序跑非 must-run。
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
 {
-    // 前置条件（判据 2）：调用者传 &ftl->bg 与自持的 s_bg_level_cfg[] 表项。
-
     // 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不各自反查档位表。
     // 档位（sched->level）由策略层 bg_scheduler_service 在同轮先写入，本引擎不改。
     sched->cfg = cfg;
@@ -123,24 +122,8 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
 }
 
 /* ════════════════════════════════════════════════════════════════════════
- * FTL 策略（适配器 / 任务表 / 装配 / Phase 3 入口）
+ * FTL 策略（适配器 / 任务表 / 装配 / 后台调度步入口）
  * ════════════════════════════════════════════════════════════════════════ */
-
-/**
- * @brief 构造 typed 模块入口的 bg_info_t（本轮动态信息）。
- *
- * @param ftl 实例。
- *
- * @return {now_ms, load_level}。load_level 取引擎本轮发布的档位（bg_scheduler_run 在跑任何任务前写入），不在这里重新选档——重选是第二套读路径。
- */
-static bg_info_t bg_info_build(const ftl_ctx_t *ftl)
-{
-    bg_info_t info;
-
-    info.now_ms     = ftl_job_now_ms();
-    info.load_level = ftl->bg.level;
-    return info;
-}
 
 /**
  * @brief 构造 Checkpoint 触发参数（ADVANCE / EMERGENCY / TIMER 三个适配器共用）。
@@ -191,10 +174,9 @@ static void bg_task_cp_join(ftl_ctx_t *ftl)
  */
 static void bg_task_rr(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    rr_status_t     status;
+    rr_status_t status;
 
-    rr_handle(&ftl->read_recovery_handle, &info, &status);
+    rr_handle(&ftl->read_recovery_handle, &status);
 }
 
 /**
@@ -206,11 +188,10 @@ static void bg_task_rr(ftl_ctx_t *ftl)
  */
 static void bg_task_migrate(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    mig_status_t    status;
+    mig_status_t status;
 
-    // typed 入口：在飞推进 + 不在飞时按 handle 自持节拍评估 GC/WL/predict。
-    mig_handle(ftl->mig_handle, &info, &status);
+    // 在飞推进 + 不在飞时按 handle 自持节拍评估 GC/WL/predict。
+    mig_handle(ftl->mig_handle, ftl->bg.level, &status);
 }
 
 /**
@@ -222,10 +203,9 @@ static void bg_task_migrate(ftl_ctx_t *ftl)
  */
 static void bg_task_metadata(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    md_status_t     status;
+    md_status_t status;
 
-    md_handle(ftl->metadata_dir, &info, &status);
+    md_handle(ftl->metadata_dir, &status);
 }
 
 /**
@@ -237,11 +217,10 @@ static void bg_task_metadata(ftl_ctx_t *ftl)
  */
 static void bg_task_journal_erase(ftl_ctx_t *ftl)
 {
-    const bg_info_t     info    = bg_info_build(ftl);
     const jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
     jrn_status_t        status;
 
-    jrn_handle(ftl->journal, &trigger, &info, &status);
+    jrn_handle(ftl->journal, &trigger, &status);
 }
 
 /**
@@ -264,18 +243,16 @@ static void bg_task_cp_emergency(ftl_ctx_t *ftl)
  * sched->cfg，见 bg_scheduler.h）。BUSY 档只放行本项 ⇒ 最小预算 = 「must-run + 1 flush」。
  * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
  *
- * @param ftl FTL 上下文（读其 cache 与 topo 维度，经 bg_info 带本轮档位）。
+ * @param ftl FTL 上下文（读其 cache 与 topo 维度，并把本轮档位传给模块）。
  */
 static void bg_task_l2p_flush(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    l2p_status_t    status;
+    l2p_status_t status;
 
-    // typed 入口：档位 → max_kick 的 static const 表在 l2p 模块内；
-    // thrashing 降级也在模块内判定。
+    // 档位 → max_kick 的 static const 表在 l2p 模块内；thrashing 降级也在模块内判定。
     const DWORD dim = ftl_topo_dim(ftl->topo);
 
-    l2p_handle(ftl->cache, dim, &info, &status);
+    l2p_handle(ftl->cache, dim, ftl->bg.level, &status);
 }
 
 /**
@@ -286,24 +263,22 @@ static void bg_task_l2p_flush(ftl_ctx_t *ftl)
  */
 static void bg_task_journal_flush(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    jrn_status_t    status;
+    jrn_status_t status;
 
-    jrn_handle(ftl->journal, NULL, &info, &status);
+    jrn_handle(ftl->journal, NULL, &status);
 }
 
 /**
  * @brief 表 8 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
  * typed 入口：状态只走上报结构（本适配器不读 handle 内部）。
  *
- * @param ftl FTL 上下文（传其 alloc 与 bg_info 给 bbt_handle）。
+ * @param ftl FTL 上下文（传其 alloc 给 bbt_handle）。
  */
 static void bg_task_bbt(ftl_ctx_t *ftl)
 {
-    const bg_info_t info = bg_info_build(ftl);
-    bbt_status_t    status;
+    bbt_status_t status;
 
-    bbt_handle(&ftl->alloc, &info, &status);
+    bbt_handle(&ftl->alloc, &status);
 }
 
 /**
@@ -345,7 +320,7 @@ static const bg_task_t s_bg_tasks[] = {
 // 表项数必须与 BG_TASK_COUNT 一致（capacity 是 tasks[] 维度；错位会越界或漏装载）。
 _Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_COUNT, "任务表项数与 BG_TASK_COUNT 不一致");
 
-/* ── 装配与 Phase 3 ── */
+/* ── 装配与后台调度步 ── */
 
 // bg_scheduler_init — 把 s_bg_tasks 装载进实例的调度器。由 ftl_init 在装配末尾调用一次。
 // 表长是编译期常量（上面的 _Static_assert 已证明 == BG_TASK_COUNT）⇒ 无运行期边界参数。
@@ -380,11 +355,11 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
     return BG_LEVEL_NORMAL;
 }
 
-// bg_scheduler_service — Phase 3：bg_suspend 判定 → 选档 → 取档位配置 → 引擎跑一轮。
+// bg_scheduler_service — [svc] 后台调度：bg_suspend 判定 → 选档 → 取档位配置 → 引擎跑一轮。
 //
 // ⚠ bg_suspend 必须**最先** return（早于 must-run pass）：`bbt --erase` 之后介质已空
 // 而 RAM 状态陈旧，任何后台写（含 must-run 里的 journal/CP/元数据目录）都是往干净
-// 芯片上倒垃圾。Phase 1/2/2.5 不受影响（NAND 泵 + host IO 照常）。
+// 芯片上倒垃圾。推进 NAND / 完成泵 / host 补发不受影响（NAND 泵与 host IO 照常）。
 //
 // 空闲度用 pending（host IO 未决）+ groups（未完成的 host 请求）近似：
 // 全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
@@ -403,7 +378,7 @@ void bg_scheduler_service(ftl_ctx_t *ftl)
 
     const bg_level_e level = bg_scheduler_level_select(ftl);
     // 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。
-    // 档位先发布到调度器：typed 模块入口的 bg_info_t.load_level 取这里。
+    // 档位先发布到调度器：模块入口读 sched->level，不各自重选。
     ftl->bg.level          = level;
     bg_scheduler_run(&ftl->bg, ftl, &s_bg_level_cfg[level]);
 }

@@ -673,25 +673,19 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     m->wl_eval_last_ms = 0U;
     m->wl_last_writes  = ftl->total_writes;
 
-    bg_info_t info;
-
-    memset(&info, 0, sizeof(info));
-    info.now_ms     = ftl_job_now_ms() + 1U;
-    info.load_level = BG_LEVEL_IDLE;
-
     const DWORD  moved0 = m->moved_count;
     const DWORD  t0     = ftl_job_now_ms();
     mig_status_t st;
 
     memset(&st, 0, sizeof(st));
-    mig_handle(m, &info, &st);
+    mig_handle(m, BG_LEVEL_IDLE, &st);
 
     munit_assert_true(m->active);
     munit_assert_int(m->kind, ==, MIG_KIND_WL);
 
     while ((m->moved_count == moved0) && ((ftl_job_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 3U)))
     {
-        mig_handle(m, &info, &st);
+        mig_handle(m, BG_LEVEL_IDLE, &st);
         ftl_service_pump();
     }
 

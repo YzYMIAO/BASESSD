@@ -77,6 +77,9 @@ static l2p_diag_entry_t s_l2p_diag[L2P_DIAG_DEPTH];
 static WORD             s_l2p_diag_next;
 static WORD             s_l2p_diag_count;
 
+/**
+ * @brief 记一条 region 访问流水到 debug 诊断环（环形覆盖，最多 L2P_DIAG_DEPTH 条）。
+ */
 static void l2p_diag_note(DWORD region, WORD nv, BYTE loaded)
 {
     s_l2p_diag[s_l2p_diag_next].region = region;
@@ -91,6 +94,7 @@ static void l2p_diag_note(DWORD region, WORD nv, BYTE loaded)
 }
 #endif
 
+// 打印诊断环里的最近访问流水（仅 debug 构建有内容）。
 void l2p_diag_dump(void)
 {
 #if !defined(NDEBUG)
@@ -187,7 +191,6 @@ static const l2p_owner_t *l2p_owner_get(const l2p_cache_t *cache, DWORD global_r
 // metadata 依赖（md_dir/alloc）不再存在 cache 里，由 owner 按需解析。
 SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
 {
-    // 前置条件（判据 2）：调用者传设备级存储 + 非空解析回调。
     ASSERT(cache != NULL);
     ASSERT(owner_of_region != NULL);
 
@@ -747,6 +750,7 @@ static bool l2p_load_start(l2p_cache_t *cache, DWORD region_id)
     return l2p_load_begin(cache, line, region_id, true, false);
 }
 
+// 同步预载：按 Directory 的 PBA 直接读进一个 INVALID 行；无空行返回 false（交给懒加载）。
 bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba)
 {
     // pba 来自 Metadata Directory（介质读回，H29 不可信输入）⇒ 运行期拒绝而非 ASSERT：
@@ -792,6 +796,7 @@ bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba)
     return false; /* 无 INVALID 行（全 DIRTY/在飞）：交给懒加载 */
 }
 
+// 异步预取：best-effort，thrashing / 在飞上限 / host 预算不足时跳过；已驻留直接返回 true。
 bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
 {
     ASSERT(cache != NULL);
@@ -839,10 +844,9 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
 
 /* ── 5. 对外读写 ── */
 
+// 读一个 IU：越界回填 INVALID 并返回 ERROR；未驻留起加载、LOADING 未就绪，均返回 AGAIN。
 ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
 {
-    // 前置条件（判据 2）：调用者传 ftl->cache 与自己的出参地址。
-
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
     {
         // ⚠ **必须**回填 out：三态化后 FTL_ERROR 的调用者仍会读 *out（"读得 INVALID
@@ -881,9 +885,10 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
     return FTL_AGAIN;
 }
 
+// 就绪探针：CLEAN/DIRTY 才算就绪（FLUSHING 不算）；miss 时起加载并记一次 miss。
 bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
 {
-    // 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。
+    // lba 是 host 输入：越界按数据错误处理（write no-op / read FTL_ERROR），不做断言。
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return true; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
@@ -908,6 +913,7 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
     return false;
 }
 
+// 是否驻留且 entries 可信（CLEAN/DIRTY/FLUSHING；LOADING 不算）；不触发加载、不记账。
 bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
 {
     ASSERT(cache != NULL);
@@ -949,9 +955,10 @@ static void l2p_note_dirty_seq(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD
     }
 }
 
+// 写映射：越界 no-op 返回 OK；未驻留起加载返回 AGAIN；命中则改 entry、置 DIRTY 与 region 脏位。
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
 {
-    // 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。
+    // lba 是 host 输入：越界按数据错误处理（no-op），不做断言。
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return FTL_OK; /* 越界 no-op：数据通路的调用点都自带范围检查 */
@@ -1102,10 +1109,11 @@ static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
     if ((cache != NULL) && (owner != NULL))
     {
         md_status_t md_status;
-        md_handle(owner->metadata_dir, NULL, &md_status);
+        md_handle(owner->metadata_dir, &md_status);
     }
 }
 
+// 同步读：read + pump 循环直到出结果或耗尽 guard，超时打日志返回 FTL_ERROR。
 ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out)
 {
     DWORD              guard = L2P_SYNC_GUARD_MAX;
@@ -1131,6 +1139,7 @@ ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out)
     return FTL_ERROR;
 }
 
+// 同步写：等 region 就绪（is_ready）+ pump，再 l2p_write 落映射；超时返回 FTL_ERROR。
 ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba)
 {
     DWORD              guard = L2P_SYNC_GUARD_MAX;
@@ -1174,6 +1183,7 @@ void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region)
     l2p_bitmap_set(cache->region_degraded_bitmap, global_region);
 }
 
+// region 是否曾降级：以 cache 级位图为权威（行被驱逐后仍保留），再兜底扫行。
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region)
 {
     if ((cache == NULL) || (global_region >= L2P_GLOBAL_REGIONS))
@@ -1258,9 +1268,6 @@ static bool l2p_flush_resources_available(void)
 // 已推进），但信息不丢——region 仍指向上一份有效记录。
 ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 {
-    // 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持（下标越界是内部
-    // 自铸句柄，非外部输入）——两侧都收口成断言。
-
     l2p_cache_line_t *line = &cache->lines[line_idx];
 
     if (line->state != L2P_CACHE_DIRTY)
@@ -1346,11 +1353,9 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     return FTL_OK;
 }
 
+// 按 owner 踢脏行写回：最多 max_kick 条；遇 AGAIN 立即停（闸门满/池空），硬失败行跳过。
 void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
 {
-    // 前置条件（判据 2）：调用者传 ftl->cache、本实例 dim 与档位表里的非零条数
-    // （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。
-
     // 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
     // ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。
     if ((cache->flush_inflight == 0U) && (cache->load_inflight == 0U))
@@ -1386,6 +1391,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
     }
 }
 
+// 该 owner 是否没有未落定的行：DIRTY/FLUSHING/LOADING 任一存在即不空闲。
 bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -1417,7 +1423,8 @@ bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim)
 // Directory 不登记 ⇒ 该 region 仍指向上一份有效记录，无信息丢失）。
 // · 其余状态 ⇒ 编程错误（LOADING/FLUSHING 期间行不可被改写状态），debug 断言。
 
-void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+// 区域页完成：LOADING 成功填表 / 失败置 INVALID；FLUSHING 成功提交整页、失败回 DIRTY。
+void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_cache_line_t *line = (l2p_cache_line_t *)ctx;
 
@@ -1747,13 +1754,14 @@ static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
     out->evictions      = cache->eviction_count;
 }
 
-void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status_t *out)
+// 每轮入口：thrashing 期间不主动 flush；否则按档位踢本 owner 的脏行，再填上报。
+void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level, l2p_status_t *out)
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
     // 判据在模块内，主流程不读 cache->thrashing。
     if (cache->thrashing == false)
     {
-        const BYTE max_kick = s_l2p_flush_max[info->load_level];
+        const BYTE max_kick = s_l2p_flush_max[level];
 
         l2p_owner_flush_kick(cache, dim, max_kick);
     }
@@ -1761,6 +1769,7 @@ void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status
     l2p_status_fill(cache, out);
 }
 
+// 读一行诊断信息；下标越界返回 INVALID（诊断入口不中断）。
 void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out)
 {
     if (idx >= L2P_CACHE_SIZE)
@@ -1774,6 +1783,7 @@ void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out)
     out->state     = cache->lines[idx].state;
 }
 
+// 使一行作废（格式化 / 重建时用）：清状态、降级与 Journal 依赖标记。
 void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
 {
     cache->lines[idx].state     = L2P_CACHE_INVALID;
@@ -1782,6 +1792,7 @@ void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
     cache->lines[idx].dirty_seq = 0U; /* 行内容作废：不再有 Journal 依赖 */
 }
 
+// 是否有区域页写回在飞（CP 判断能否推进的输入之一）。
 bool l2p_has_flush_inflight(const l2p_cache_t *cache)
 {
     return cache->flush_inflight != 0U;

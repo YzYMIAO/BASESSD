@@ -2990,7 +2990,7 @@ pend_group_complete_subop_multi(owners, status)
 | 停泊态 | 触发 | 谁推进 |
 |---|---|---|
 | `READ_RECOVERY` | 读 NAND 失败，子操作托管给 RR job | `rr_handle`（§3.14） |
-| `WRITE_CONFIRM` | 写 NAND 成功，但 L2P region 未就绪 | `pend_confirm_service`（每轮 Phase 2.5） |
+| `WRITE_CONFIRM` | 写 NAND 成功，但 L2P region 未就绪 | `pend_confirm_service`（每轮的**写确认结算**步） |
 
 停泊项的 `command_id = NONE`、组 `outstanding` 不递减；收尾时由引擎统一结算。
 
@@ -3249,7 +3249,7 @@ flowchart TD
 ⚠ 取到页对后**任何**失败都必须 `alc_super_open_rewind_pair` 归还：命令从未提交 ⇒ 页从未被编程，
 归还是安全的；不归还则每次重试白烧 2 页，表现为**容量无声流失**（CLAUDE.md §3.1）。
 
-**空闲 flush**：`wb_handle(MAYBE_FLUSH_IDLE)` 在 `ftl_service` Phase 2.5 检查“是否还有写组
+**空闲 flush**：`wb_handle(MAYBE_FLUSH_IDLE)` 在 `ftl_service` 的 **wbuf 空闲 flush** 步检查“是否还有写组
 指向当前窗口”；没有就 flush，确保 host 收尾不会无限等待。
 
 #### 3.11.5 失败语义
@@ -3329,8 +3329,11 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
-  - Phase 2.5：`pend_confirm_service` → 遍历组 `ftl_drain_group` → `wb_handle(MAYBE_FLUSH_IDLE)`；
-  - Phase 3：`bg_scheduler_service(ftl)`（`ftl.c` 里只有这一行调用）。
+  - 实例步骤（按执行序，唯一定义见 `include/ftl/ftl.h` 的 `ftl_service()` 契约）：
+    **元数据候选池重算**（`md_pool_service`）→ **写确认结算**（`pend_confirm_service`）→
+    **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_drain_group`）→
+    **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
+    **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台调度**（`bg_scheduler_service`）。
 - **`bg_scheduler.c/h`**：一个模块承载两层内容——
   - **引擎**：must-run pass + 预算 pass + 预算截断（函数本身零 kick 知识，
     不认识任何具体任务）；
@@ -3348,8 +3351,8 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 `bg_task_t`：`func` / `mask` / `budget_us` / `must_run`（`bool`）。
 `bg_scheduler_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
-引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，供 typed 模块
-入口构造 `bg_info_t`）。
+引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，模块入口
+直接读取）。
 `bg_level_cfg_t`：每轮总预算 / 任务掩码（预算任务位集合）。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
@@ -3472,7 +3475,7 @@ flowchart TB
 |---|---|
 | **§3.9.5 读子操作 / `l2p_defer`** | 前台 `ftl_drain_group` 能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（`l2p_cache_any_inflight`），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（RISK-HOST-14 的环形等待） |
 | **§3.10 完成派发面（`ftl_op`）** | `ftl_op_seq_gate` 决定**后台提交能否成功**：cache 序列 `active/draining` 期间只放行所有者；被拒的 kick 返回 FTL_AGAIN，本轮白跑、下轮重试 |
-| **§3.11 页打包写缓冲（wbuf）** | `wb_handle(MAYBE_FLUSH_IDLE)` 属于 **Phase 2.5**（host IO 收尾），不在本节的 Phase 3；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
+| **§3.11 页打包写缓冲（wbuf）** | `wb_handle(MAYBE_FLUSH_IDLE)` 属于 **wbuf 空闲 flush** 步（host IO 收尾），不在本节的**后台调度**步；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
 
 #### 3.12.9 失败语义
 
@@ -3481,7 +3484,7 @@ flowchart TB
 | 某任务提交被背压 | kick 保留状态，下轮重试 | 后台变慢，不影响正确性 |
 | must-run 任务自身卡死 | 心跳日志（job phase/age）暴露 | 由各 job 的 stall 上限中止 |
 | 时钟缺失 | 无预算门控 | 后台更频繁，靠内部事件门防刷屏 |
-| `bg_suspend` 置位 | Phase 3 整体跳过 | 只能复位恢复（诊断/擦片后） |
+| `bg_suspend` 置位 | **后台调度**步整体跳过 | 只能复位恢复（诊断/擦片后） |
 
 #### 3.12.10 常量与出处
 
@@ -3997,7 +4000,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 - **不做**：FC 序列句柄 / tag；IRQ 驱动；多 LUN 交织（序列 per 实例）；器件 opcode 顺序；
   控制器槽管理（在 `usb_msc.c`）。
 - **调用者**：`ftl_drain_group()` 在读 / 写子操作路径最前面各试一次；`ftl_service`
-  Phase 2.5 每轮调 `ftl_cache_seq_close_step()`。
+  **序列收尾**步每轮调 `ftl_cache_seq_close_step()`。
 
 #### 3.16.3 结构与约束
 
@@ -4007,7 +4010,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 |---|---|
 | `kind` | READ / WRITE / NONE |
 | `active` | 设备侧序列打开（START 已发、END 未发） |
-| `draining` | 读序列已放弃但命令仍在飞：门控继续关到所有者组在飞归零 |
+| `draining` | 读序列已放弃但命令仍在飞：门控继续关到所有者组在飞归零；超过 `FTL_CACHE_SEQ_DRAIN_STALL_MS` 强制放锁并留 WRN（命令卡死兜底） |
 | `owner_submit` | 序列所有者正在提交窗口（门控旁路） |
 | `break_requested` | 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 |
 | `close_requested` | 写序列需要**有序收尾**（LBA 不连续 / 空闲 / flush / 前台等待） |
@@ -4220,6 +4223,7 @@ sequenceDiagram
 | `JRN_SEG_ENTRIES_PER_PAGE` | 508（`(2048 − 16) / 4`；按整 pair 用到 504 = 63 pair ≈252 KiB） | `include/ftl/journal.h` |
 | `FTL_CACHE_SEQ_RING` | 16 | `include/ftl/ftl.h` |
 | `FTL_CACHE_SEQ_IDLE_MS` | 1000 | 同上 |
+| `FTL_CACHE_SEQ_DRAIN_STALL_MS` | 1000 | 同上（draining 卡死兜底，与空闲等待分开） |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_op.h` |
 
 #### 3.16.9 主流对照
@@ -4671,11 +4675,11 @@ flowchart TD
 
 ### 4.9 后台调度一轮
 
-**触发**：每轮 `ftl_service(ftl)` 的 Phase 3。
+**触发**：每轮 `ftl_service(ftl)` 的**后台调度**步。
 
 ```mermaid
 flowchart TD
-    A["Phase 2-5 完成"] --> B{"bg_suspend"}
+    A["host 补发完成"] --> B{"bg_suspend"}
     B -- "是" --> Z["return"]
     B -- "否" --> C["level 为 select pending groups"]
     C --> D["bg_scheduler_run"]
@@ -4763,7 +4767,7 @@ flowchart TB
 - `ftl_ctx_t` 是描述符：只持有指针与热状态；`ftl_storage_t` 提供
   `tables` / `metadata_dir` / `journal` / `cp_handle` / `migrate` / `wbuf` /
   `rr_page_scratch`，`main.c` 决定落哪个域。
-- **Phase 1.5 挂载块**：`mig_handle_t` / `wb_handle_t` / `rr_page_scratch` 已从
+- **装配挂载块**：`mig_handle_t` / `wb_handle_t` / `rr_page_scratch` 已从
   `ftl_ctx_t` 内嵌改为 `ftl_storage_t` 指针：`g_ftl` / `g_ftl_wbuf` / `g_ftl_journal`
   落 DTCM（CPU-only 热数据），`g_ftl_migrate` / `g_ftl_rr_page_scratch` 落 AXI；`ftl_init` 只绑定指针并
   显式 memset。**挂指针不减少总 RAM**，收益是 `ftl_ctx_t` 变小、放置可控、handle
@@ -4786,7 +4790,6 @@ flowchart TB
 |---|---|---|
 | `ftl_mod_state_e` | IDLE / RUNNING / WAITING / BLOCKED / FAILED | 本轮结束后的模块状态 |
 | `ftl_mod_status_t` | state / critical / wants_run / progress / next_ms / error | 所有 `*_status_t` 的公共前缀 |
-| `bg_info_t` | now_ms / load_level | 调度器每轮交给模块的只读动态信息 |
 
 各模块 `*_status_t` 嵌入 `ftl_mod_status_t base`，再带自己的观测字段：
 
@@ -5519,7 +5522,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `mig_handle_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
 | `rr_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
 | `wb_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
-| `ftl_mod_state_e` / `ftl_mod_status_t` / `bg_info_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀 / 每轮动态信息 |
+| `ftl_mod_state_e` / `ftl_mod_status_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀 |
 | `bg_scheduler_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
 | `bbt_header_t` / `bbt_state_t` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_t` | `src/ftl/checkpoint.c` | CP 磨损快照条目（8 B/块；内部类型）|

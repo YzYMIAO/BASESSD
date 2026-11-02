@@ -34,9 +34,9 @@
  *      （md_ring_locate）——前者在 superloop 之前跑（无泵可等），后者只在
  *      冷启动后首次整理出现。
  *
- * 断言口径：init/bind 入口与 release 关键边界用 ASSERT（判据 2）；运行期模块入口的
- * 实例句柄/出参由调用链保证，不再逐次复检；ring 几何非法、槽位越界等
- * 配置错误在 release 也必须拒绝（判据 9），因此保留 FTL_ERROR 返回。
+ * 断言口径：init/bind 入口与 release 关键边界用 ASSERT；运行期模块入口的实例句柄/
+ * 出参由调用链保证，不再逐次复检；ring 几何非法、槽位越界等配置错误在 release 也
+ * 必须拒绝，因此保留 FTL_ERROR 返回。
  */
 
 #include "metadata.h"
@@ -311,6 +311,7 @@ static WORD md_pool_collect(md_ring_t *ring, const alc_t *alloc, const md_pool_s
     return ring->block_count;
 }
 
+// BBT 未定位时的兜底池：名义 BBT 块 + 全部 shared spare（record 自带 magic/sequence，坏块靠探针忽略）。
 void md_pool_build_bbt_bootstrap(md_ring_t *ring)
 {
     // 未知 BAD 集：名义 BBT 块 + 全部 shared spare。BBT record 自带 magic/sequence，
@@ -331,6 +332,7 @@ void md_pool_build_bbt_bootstrap(md_ring_t *ring)
     }
 }
 
+// 重算全部元数据池候选（Anchor/CP/BBT/journal/L2P 日志）；绑定缺失返回 false，调用者停止重试。
 bool md_pool_build_all(alc_t *alloc)
 {
     if ((alloc == NULL) || (alloc->pools == NULL))
@@ -385,6 +387,7 @@ bool md_pool_build_all(alc_t *alloc)
     return true;
 }
 
+// 池内 (record, page) → PBA：固定取 plane_mask 的第一个 plane（镜像页的规范副本）。
 DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record)
 {
     const BYTE plane = md_ring_plane_at(ring->plane_mask, 0U);
@@ -512,10 +515,9 @@ static bool md_ring_locate_fallback(metadata_ring_probe_fn probe, void *ctx, WOR
     }
 }
 
+// 在池内定位最新 record：出参先给确定值；几何非法返回 FTL_ERROR（配置错误，release 也拒绝）。
 ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, md_ring_locate_out_t *out)
 {
-    // 前置条件（判据 2 / §二十六「子模块公开入口」）：指针均由调用者自持。
-
     // 出参先给确定值：几何非法时也能安全读；池空时 newest=UINT16_MAX、seq=0
     // （调用者据此续序号）。
     out->newest_idx = UINT16_MAX;
@@ -602,8 +604,6 @@ ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe,
 // **不动介质**：擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦）。
 ftl_status_e md_ring_prepare_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr, bool *out_need_erase)
 {
-    // 前置条件（判据 2）：四个指针均由调用者自持。
-
     if (md_ring_geom_valid(ring) == false)
     {
         return FTL_ERROR;
@@ -1080,13 +1080,12 @@ static WORD md_entry_index_find(const md_dir_cache_t *dir, BYTE type, WORD id)
 // Directory 当前只登记 L2P_REGION；其余元数据是固定位置，不经过本函数。
 DWORD md_entry_find(const md_dir_cache_t *dir, metadata_type_e type, WORD id)
 {
-    // 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。
-
     const WORD i = md_entry_index_find(dir, type, id);
 
     return (i < dir->count) ? dir->entries[i].pba : NAND_PBA_INVALID;
 }
 
+// 块被多少 L2P region 引用（活计数）；越界块号按「无引用」处理（来源可能是介质/快照）。
 WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
 {
     if (gblock >= FTL_BLOCK_TOTAL)
@@ -1100,8 +1099,6 @@ WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
 // （容量 == region 数，全部在 fill_fixed 已登记）。
 void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD new_pba)
 {
-    // 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。
-
     // 查找现有 entry（覆盖旧位置）
     const WORD i = md_entry_index_find(dir, type, id);
 
@@ -1139,6 +1136,7 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
 
 /* ── 固定 L2P 日志区：分配 / 归还 / 开机恢复（RISK-MD-07 / RISK-CAP-02）── */
 
+// 在固定 L2P 日志区找一块「已擦净、空闲」的块，标 LOG 后返回；没有返回 FTL_GBLOCK_INVALID。
 WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 {
     ASSERT(plane < PLANE_NUM);
@@ -1184,6 +1182,7 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
     return FTL_GBLOCK_INVALID;
 }
 
+// 归还日志块：固定区内留 NONE，借来的回 OP 池；BAD 是终态，不回收。
 void md_log_release(md_dir_cache_t *dir, WORD gblock)
 {
     ASSERT(gblock < FTL_BLOCK_TOTAL);
@@ -1255,6 +1254,7 @@ WORD md_log_area_free_count(const alc_t *alloc)
     return n;
 }
 
+// 统计固定 L2P 日志区内活计数非 0 的块数（诊断 / info 用）。
 WORD md_live_block_count_get(const md_dir_cache_t *dir)
 {
     WORD n = 0U;
@@ -1273,6 +1273,7 @@ WORD md_live_block_count_get(const md_dir_cache_t *dir)
     return n;
 }
 
+// 开机恢复日志区：按活计数分「存活 / 待回收」，非活块全部登记进 reclaim 位图。
 void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
 {
     WORD n_live    = 0U;
@@ -1526,8 +1527,6 @@ void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode
 // ⚠ 不动介质：换块擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦命令）。
 md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir, md_anchor_prepare_out_t *out, BYTE owner)
 {
-    // 前置条件（判据 2）：两个指针均由调用者自持。
-
     if (dir->dirty == false)
     {
         return MD_ANCHOR_CLEAN; /* 无变更早退：Anchor 每写一条都消耗池内槽位，空转会让池无谓轮转 */
@@ -1585,8 +1584,6 @@ md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir, md_anchor_prepare_out_t 
 // padding 归零 ⇒ 介质内容确定；本页有效条目数 = 全局有效范围 [0,count) 与本页区间的交。
 void md_anchor_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_anchor_page_t *page)
 {
-    // 前置条件（判据 2）：两个指针均由调用者自持。
-
     // chunk 0..PRIMARY-1 承载主 PBA；PRIMARY..COUNT-1 承载 backup_pba[]（同一 id 区间）。
     const bool backup      = (chunk >= ANCHOR_DIR_PRIMARY_PAGES);
     const BYTE local_chunk = backup ? (BYTE)(chunk - ANCHOR_DIR_PRIMARY_PAGES) : chunk;
@@ -1645,8 +1642,6 @@ void md_anchor_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_anchor_
 // `dirty_gen` 在写入期间又前进（期间有新的 commit）时保留 dirty ⇒ 下次在新槽重试整条。
 void md_anchor_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool ok)
 {
-    // 前置条件（判据 2）：两个指针均由调用者自持。
-
     dir->anchor_write_idx = ((idx + 1U) % md_ring_total_records(ring));
 
     if (ok && (dir->dirty_gen == dir->anchor_gen))
@@ -1658,6 +1653,7 @@ void md_anchor_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool
     dir->anchor_owner = MD_ANCHOR_OWNER_NONE;
 }
 
+// 释放 Anchor 单飞锁：只释放自己持有的那一个（别人的超时中止不能清本 writer 的锁）。
 void md_anchor_abort(md_dir_cache_t *dir, BYTE owner)
 {
     // 只释放**自己**的锁：另一个 job 的超时中止不能把本 writer 的单飞清掉。
@@ -2016,9 +2012,18 @@ void md_pool_print(const md_dir_cache_t *dir)
     }
 }
 
-void md_pool_service(struct ftl_context *ftl)
+// 元数据 BAD 后的候选池重算（[svc] 步骤之一，调用点见 ftl_service）。
+// 契约（时机 / 前置 / 返回）见 include/ftl/metadata.h；此处只记实现要点：
+//   · 三个入口门，任一不满足即本轮跳过、下轮再来：pools 未置脏 / bg_suspend /
+//     有元数据类命令在飞（CP、flush、migrate、journal、BBT、目录整理）——
+//     换游标可能让在飞命令的落点与新候选表不一致。
+//   · 重算成功后作废三条游标（Anchor / BBT / CP）：下一次定位按新候选表重扫。
+//   · 重算失败（元数据区已无足够好块）⇒ 清脏位 + 置 bbt.rebuild_required，
+//     停止每轮重试；下次开机由 BBT / 全量重建兜底。
+//   · 必须排在**本轮新 I/O 之前**（它是 ftl_service 的第一步）：游标与候选表先一致，
+//     随后才允许分配与提交。
+void md_pool_service(ftl_ctx_t *ftl)
 {
-    // 前置条件（判据 2）：唯一调用者 ftl_service 传 &g_ftl[...]。
     alc_t          *alloc   = &ftl->alloc;
     md_dir_cache_t *dir     = ftl->metadata_dir;
     l2p_jrn_t      *journal = ftl->journal;
@@ -2030,7 +2035,7 @@ void md_pool_service(struct ftl_context *ftl)
 
     // 等元数据写路径空闲：换游标可能让在飞命令的落点与新候选表不一致。
     // 单线程 superloop ⇒ 这里不会与完成回调并发；只是在下一轮再试。
-    if (ftl->cp_handle->active || ftl->flush_active || ftl->mig_handle->active || (journal->handle.phase != JRN_IDLE) || alloc->bbt.handle.waiting || (dir->handle.phase != MD_JOB_IDLE) || dir->handle.waiting)
+    if (ftl->cp_handle->active || ftl->flush_active || ftl->mig_handle->active || (journal->handle.phase != JRN_IDLE) || alloc->bbt.handle.waiting || md_is_busy(dir))
     {
         return;
     }
@@ -2233,8 +2238,6 @@ SSD_CODE_FAST bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD 
 
 SSD_CODE_FAST void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD backup)
 {
-    // 前置条件（判据 2）：调用者传本实例的 metadata_dir 与自己拿到的两个 PBA。
-
     BYTE released = 0U;
 
     for (BYTE i = 0U; i < MD_SLOT_RESV_MAX; i++)
@@ -2252,8 +2255,6 @@ SSD_CODE_FAST void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD bac
 
 SSD_CODE_FAST bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 {
-    // 前置条件（判据 2）：调用者传本实例的 metadata_dir / allocator 与 plane 下标。
-
     if (plane >= PLANE_NUM)
     {
         return false;

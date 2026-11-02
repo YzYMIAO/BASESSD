@@ -10,7 +10,7 @@
  *   · 共享数据面账本（L2P / BST / allocator / journal 水位 / metadata / pending /
  *     completion）保持共享 device context，模块**不**复制账本；
  *   · 模块只拥有**执行状态**（FSM / 单飞行 / 计时器 / 进度计数），对外只暴露
- *     typed `*_handle(handle, trigger/info, status)` 与纯查询；
+ *     typed `*_handle(handle, trigger/level, status)` 与纯查询；
  *   · 主流程不窥探模块内部 phase / active / waiting / stage。
  *
  * 本头只放**跨模块共用**的类型；各模块的 `*_status_t` 用嵌入 base 的方式扩展自己的
@@ -60,21 +60,6 @@ typedef struct
     DWORD           next_ms;
     int32_t         error;
 } ftl_mod_status_t;
-
-/*
- * bg_info_t — 调度器每轮交给模块的只读动态信息
- *
- * 只传**每轮会变**的量；编译期常量由模块自己 include，只读策略表放模块内
- * `static const`，每实例不可变配置在 `*_init` 时绑定进 handle（H10）。
- *
- * free_blocks / pending 等由需要它的模块通过 allocator/pending 端口查询，或放进
- * 该模块自己的 trigger —— 不塞进本结构（否则每个模块都被迫接收无关量）。
- */
-typedef struct
-{
-    DWORD      now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
-    bg_level_e load_level; /* 后台档位（ftl_type.h） */
-} bg_info_t;
 
 /* ── ms deadline（本仓取值，须上板标定；docs §6.3）──
  * 统一绝对 deadline，不用 rounds（rounds 随主循环速率漂移）。

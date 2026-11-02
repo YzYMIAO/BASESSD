@@ -306,7 +306,7 @@ void ftl_ut_media_format(void)
     trigger.kind = WBUF_TRIGGER_RESET;
 
     ftl->bg_suspend = 1U;
-    (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
+    (void)wb_handle(ftl->wbuf, &trigger, &status);
 
     munit_assert_int(pfr_media_format(ftl, false), ==, FTL_OK);
 

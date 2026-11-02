@@ -465,8 +465,8 @@ static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
  * @note 实现要点（整函数转 ASSERT）：
  *   - 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是
  *     **调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的
- *     sync_page_prepare 实参），**从不是 host 输入**，属判据 2，故一律 ASSERT
- *     （配置错误绝不发到硬件，§十三 定调）。
+ *     sync_page_prepare 实参），**从不是 host 输入** ⇒ 一律 ASSERT
+ *     （配置错误绝不发到硬件）。
  *   - 本函数退化为「恒 OK」的校验钩子：debug 下跑内层断言；release 下调用点 fc_submit 的
  *     ASSERT(... == OK) 整条裁空，无运行时开销。
  *   - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要 buffer；

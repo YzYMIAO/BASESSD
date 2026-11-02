@@ -265,8 +265,6 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
 // （单数据源方向：NAND bitmap → BST）。
 void bbt_init(alc_t *alloc)
 {
-    // 前置条件（判据 2 / §二十六「子模块公开入口」）：唯一调用者 ftl.c 传 &ftl->alloc。
-
     alloc->bbt.sequence           = 0U;
     alloc->bbt.dirty              = false;
     alloc->bbt.dirty_gen          = 0U;
@@ -476,8 +474,6 @@ static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_er
 // 误判成损坏介质（cp_media_status_probe 的 IO_ERROR 分支）。
 ftl_status_e bbt_format_erase(alc_t *alloc)
 {
-    // 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。
-
     // ① 先持久化当前坏块图（工厂标记 + CP 快照并集都在 BST），并置“格式化进行中”。
     // 失败 ⇒ 不擦任何用户块：工厂标记仍完整，可下次重试。
     alloc->bbt.format_in_progress = true;
@@ -662,8 +658,6 @@ static void bbt_build_header(const alc_t *alloc, DWORD sequence, bbt_header_t *h
 // （半编程槽不可复用）；失败保留 dirty 供下次重试。NAND 格式一字不改。
 ftl_status_e bbt_save(alc_t *alloc)
 {
-    // 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。
-
     if (alloc->bbt.dirty == false)
     {
         return FTL_OK;
@@ -722,9 +716,6 @@ ftl_status_e bbt_save(alc_t *alloc)
 // locate 只回序号，header 本体要按该序号**再读一次**并复核 sequence。
 ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence)
 {
-    // 死守卫（判据 2 / §十附判据 2）：唯一调用者 bbt_init（同文件）传已断言的 alloc、
-    // 局部数组 tmp_bad_map 与两个局部变量地址——四个指针结构上恒非空。
-
     // 复位本实例池状态：无有效 record 时保持 0/无效（后续 bbt_save 从池首开始）
     alloc->bbt.sequence           = 0U;
     alloc->bbt.write_idx          = 0U;
@@ -887,15 +878,10 @@ static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
 // ⇒ 不是嵌套泵。job 的其余步骤全部"提交即返回"。
 // · sequence 在**起步时**自增；续跑路径不会再自增。
 // 擦失败 ⇒ 回 IDLE、dirty 保留、write_idx 不动，下轮重试。
-void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
+void bbt_handle(alc_t *alloc, bbt_status_t *out)
 {
     do
     {
-        // info 目前不参与 BBT 决策（dirty 驱动、无周期）；保留形参以统一 typed 入口。
-        (void)info;
-
-        // 前置条件（判据 2）：后台适配器传 &ftl->alloc。
-
         // 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age
         if (alloc->bbt.handle.phase == BBT_JOB_IDLE)
         {
@@ -1050,7 +1036,7 @@ static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
 
 // 实现要点：按 job.phase 分派到 bbt_erase_complete / bbt_write_complete（见各自注释）。
 // ⚠ 本函数**只**收尾/续提交，不调 bbt_handle（续提交是提交侧动作，无需嵌套泵）。
-void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     alc_t *alloc = (alc_t *)ctx;
 
@@ -1119,8 +1105,6 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane)
 void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
 {
     char line[BBT_MAP_LINE_MAX];
-
-    // 前置条件（判据 2）：唯一调用者 cli.c 已判 ftl 非空后传 &ftl->alloc。
 
     LOGI("CH=%hhu  CE=%hhu  LUN=%hhu\r\n", alloc->ch, alloc->ce, alloc->lun);
     {

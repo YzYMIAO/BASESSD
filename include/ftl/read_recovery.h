@@ -32,16 +32,12 @@
 #include "bst.h"        /* rr_ecc_track_t, rr_block_health_e, bst_block_t */
 #include "fc_command.h" /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "pending.h" /* pend_table_t */
 
 #include <stdint.h>
-
-/* 前向声明（ftl_ctx_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
-struct ftl_context;
-typedef struct ftl_context ftl_ctx_t;
 
 /* ── ECC 趋势参数 ── */
 #define RR_ECC_RISING_THRESHOLD (4U)  /* 连续上升 ≥4 次触发预测 */
@@ -196,10 +192,9 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner);
  * @brief 推进 Read Recovery job（每轮 must-run；提交即返回）。
  *
  * @param rr    handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param info  本轮动态信息（当前未用，可传 NULL）
  * @param out   出参：本轮结束后的上报（**非空**）
  */
-void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out);
+void rr_handle(rr_handle_t *rr, rr_status_t *out);
 
 /**
  * @brief 记录一次读取的 ECC bit 数，更新趋势

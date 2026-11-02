@@ -38,17 +38,13 @@
 
 #include "allocator.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/* ftl_ctx_t 的前向声明（md_pool_service 只用到指针；完整定义在 ftl.h，
- * 而 ftl.h 又 include 本头，不能反向 include）。 */
-struct ftl_context;
 
 /* ══════════════════════════════════════════════════════════════════
  * 固定元数据区布局（单一事实来源）
@@ -1287,20 +1283,21 @@ void md_pool_print(const md_dir_cache_t *dir);
  * 仍走后台 job），不在这里同步写介质。
  *
  * @param ftl FTL 实例上下文（提供 alloc / metadata_dir / journal）
+ *
+ * @note ⚠ 调用方必须把它排在**本轮新 I/O 之前**：游标与候选表要先一致，随后才允许
+ *       分配与提交；否则同一轮里会出现「按旧候选表分配、按新表定位」。
  */
-void md_pool_service(struct ftl_context *ftl);
+void md_pool_service(ftl_ctx_t *ftl);
 
 /**
  * @brief 推进元数据目录整理 job（typed handle；提交即返回）
  *
- * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位），`info` 当前
- * 不参与决策；保留形参以统一 typed 入口。
+ * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位）。
  *
  * @param dir   Directory cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param info  本轮动态信息（当前未用，可传 NULL）
  * @param out   出参：本轮结束后的上报（**非空**）
  */
-void md_handle(md_dir_cache_t *dir, const bg_info_t *info, md_status_t *out);
+void md_handle(md_dir_cache_t *dir, md_status_t *out);
 
 /**
  * @brief 整理 job 是否在跑（有命令在飞或处在中间 phase）。

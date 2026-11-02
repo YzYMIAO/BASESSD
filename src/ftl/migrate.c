@@ -43,7 +43,7 @@
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
 #include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
-#include "ftl_type.h"         /* BG_LEVEL_*（bg_info_t.load_level） */
+#include "ftl_type.h"         /* BG_LEVEL_* */
 #include "gc.h"               /* gc_select_victim / gc_decode_cw_lba */
 #include "journal.h"          /* jrn_handle / jrn_append / JRN_IDLE */
 #include "l2p_cache.h"        /* l2p_read / l2p_write */
@@ -1923,7 +1923,7 @@ static bool mig_flush_jrn_step(mig_handle_t *m)
         // typed 入口：job 空闲且有待写页 ⇒ 起异步刷页。info 由 migrate 的调用方
         // 在本阶段后续传入；这里位移推进不依赖动态信息。
         jrn_status_t jst;
-        jrn_handle(m->journal, NULL, NULL, &jst);
+        jrn_handle(m->journal, NULL, &jst);
     }
 
     if (jrn_is_idle(m->journal) == false)
@@ -2073,6 +2073,7 @@ static void mig_job_step(mig_handle_t *m)
 
 /* ── 6. typed handle（端口装配 / 触发 / 自持节拍 / 上报）── */
 
+// 装配：整块清零、绑定 alloc/journal/cache 端口、失败块表置无效；不碰介质。
 void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
@@ -2090,6 +2091,7 @@ void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *ca
     m->error = FTL_OK;
 }
 
+// 置紧急 GC 请求位（wb_flush 取不到页对时调用）：只排队，下一轮求值才真正触发。
 void mig_gc_request_urgent(mig_handle_t *m)
 {
     // 句柄由调用者持有：生产路径恒为 &ftl->mig_*；wb_flush 的可选端口分支已在
@@ -2161,24 +2163,17 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
  * @brief 把 job 当前状态填进 mig_status_t（只读观测）。
  *
  * @param m    job。
- * @param info 本轮动态信息（可空；非空时按 load_level 判 wants_run）。
+ * @param level 本轮后台档位（BUSY 档 wants_run 只保留在飞 job）。
  * @param out  出参：本轮上报。
  */
-static void mig_status_fill(const mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
+static void mig_status_fill(const mig_handle_t *m, bg_level_e level, mig_status_t *out)
 {
     out->base.critical = true; /* 写路径紧急 GC 在 BUSY 档起，不推进即死锁 */
     out->base.progress = m->reclaimed_count;
     out->base.next_ms  = 0U;
     out->base.error    = m->error;
 
-    if (info != NULL)
-    {
-        out->base.wants_run = m->active || (info->load_level != BG_LEVEL_BUSY);
-    }
-    else
-    {
-        out->base.wants_run = m->active;
-    }
+    out->base.wants_run = m->active || (level != BG_LEVEL_BUSY);
 
     if (m->waiting)
     {
@@ -2267,9 +2262,10 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
     m->gc_session_aborted   = 0U;
 }
 
-void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
+// 每轮入口：在飞时推进当前 job（附带心跳），空闲时按节拍求值并尝试开新 job，最后填上报。
+void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out)
 {
-    const DWORD now_ms = info->now_ms;
+    const DWORD now_ms = ftl_job_now_ms();
 
     // ① 在飞：只服务当前 job（提交即返回）。
     if (m->active)
@@ -2284,7 +2280,7 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 
         mig_job_step(m);
         mig_gc_session_progress(m, now_ms);
-        mig_status_fill(m, info, out);
+        mig_status_fill(m, level, out);
         return;
     }
 
@@ -2295,7 +2291,7 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
     // ② 系统性命中熔断：不再启动任何 GC/WL/predict（重启才清）。
     if (m->paused)
     {
-        mig_status_fill(m, info, out);
+        mig_status_fill(m, level, out);
         return;
     }
 
@@ -2311,14 +2307,14 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
         // 不是「空闲补池」。
         const gc_benefit_mode_e mode = (m->alloc->free_count <= FREE_POOL_EMERGENCY) ? GC_BENEFIT_EMERGENCY : GC_BENEFIT_OFF;
         (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_URGENT, 0U);
-        mig_status_fill(m, info, out);
+        mig_status_fill(m, level, out);
         return;
     }
 
     // ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
     // GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
     // 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。
-    if (info->load_level == BG_LEVEL_BUSY)
+    if (level == BG_LEVEL_BUSY)
     {
         if (m->alloc->free_count < FREE_POOL_TARGET)
         {
@@ -2332,7 +2328,7 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
                 (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
             }
         }
-        mig_status_fill(m, info, out);
+        mig_status_fill(m, level, out);
         return;
     }
 
@@ -2360,19 +2356,19 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 
             m->wl_last_writes = writes;
 
-            if (host_quiet && (info->load_level == BG_LEVEL_IDLE))
+            if (host_quiet && (level == BG_LEVEL_IDLE))
             {
                 (void)mig_wl_begin(m);
             }
         }
-        else if ((info->load_level == BG_LEVEL_IDLE) && ((m->predict_last_ms == 0U) || ((now_ms - m->predict_last_ms) >= RR_SCAN_INTERVAL_MS)))
+        else if ((level == BG_LEVEL_IDLE) && ((m->predict_last_ms == 0U) || ((now_ms - m->predict_last_ms) >= RR_SCAN_INTERVAL_MS)))
         {
             m->predict_last_ms = now_ms;
             (void)mig_predict_begin(m);
         }
     }
 
-    mig_status_fill(m, info, out);
+    mig_status_fill(m, level, out);
 }
 
 /* ── 7. 完成服务（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）── */
@@ -2692,7 +2688,8 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
     mig_job_step(m);
 }
 
-void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+// FC 完成派发：按当前 phase 结算搬移命令再步进 job；ctx 为空 = 迟到完成，只释放命令不解引用。
+void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;

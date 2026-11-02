@@ -5,6 +5,10 @@
 
 #include <stdint.h>
 
+/* FTL 实例句柄的不透明类型（完整定义在 ftl.h）。模块头用它声明形参指针，
+ * 避免反向 include ftl.h 形成头文件环（ftl.h 会 include 全部模块头）。 */
+typedef struct ftl_context ftl_ctx_t;
+
 /*
  * FTL 层基础类型 —— 标量/枚举/拓扑 + 对外请求类型。
  *

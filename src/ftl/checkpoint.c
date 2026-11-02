@@ -668,7 +668,7 @@ static void cp_trunc_erase_complete(cp_handle_t *h, bool failed)
 // 嵌套泵）——只把 phase 改到"下一步该干什么"，由下一轮 cp_handle 续跑。
 // ⚠ Header 的池游标**无论成败都推进**（半编程槽不可复用）；失败时**不**截断
 // journal、**不**复位水位标志。
-void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
@@ -1228,6 +1228,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
     return FTL_OK;
 }
 
+// 只探测 CP 池有无合法 record（版本不符也算存在）：结果决定开机走 clean 恢复还是格式化。
 cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_version)
 {
     checkpoint_probe_ctx_t ctx;
@@ -1641,7 +1642,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
 // 实现要点：目的是让下次开机的版本判据（cp_pool_find_latest 成功 ⇒ 版本匹配）
 // 立即命中 ⇒ 自动格式化只发生一次，不会因"开机写了元数据但还没写过
 // checkpoint"而在下次开机再格式化一遍。sequence 从 1 起（0 = 未写）。
-ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
+ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
 {
     cp_handle_t *h     = ftl->cp_handle;
     WORD        *words = cp_block_words_get(h);
@@ -1821,6 +1822,7 @@ static void cp_status_fill(const cp_handle_t *h, cp_status_t *out)
     out->timeout_phase  = h->timeout_phase;
 }
 
+// typed 入口：ADVANCE 才推进状态机（在飞时一轮只推进一次），未在飞时按触发条件起新 job。
 void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
 {
     if (h->active == true)
@@ -1855,11 +1857,13 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
     cp_status_fill(h, out);
 }
 
+// 清零周期计时基准：下一次服务从零重新计时（起 job 失败后也要调，否则每轮重触发）。
 void cp_timer_reset(cp_handle_t *h)
 {
     h->last_ms = 0U;
 }
 
+// 取 Block Word Buffer（CP record 里随页携带的块属性位图）；指针由实例持有，不拷贝。
 WORD *cp_block_words_get(cp_handle_t *h)
 {
     return h->block_words;

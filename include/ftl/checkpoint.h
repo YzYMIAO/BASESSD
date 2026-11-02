@@ -22,14 +22,12 @@
  */
 
 #include "allocator.h"
+#include "ftl_type.h" /* ftl_ctx_t */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
 
 #include <stdint.h>
-
-/* ── 前向声明（ftl_ctx_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
-struct ftl_context;
 
 /* ── 异步 Checkpoint job ──
  *
@@ -439,7 +437,7 @@ void cp_timer_reset(cp_handle_t *h);
  * @param ftl  FTL 实例（含 allocator / checkpoint handle / topo）
  * @return FTL_OK / FTL_ERROR（任一分页写失败 ⇒ 不写 Header，无有效 record）
  */
-ftl_status_e cp_initial_record_write(struct ftl_context *ftl);
+ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl);
 
 /**
  * @brief 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。

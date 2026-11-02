@@ -24,9 +24,8 @@
  */
 
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR */
+#include "ftl_type.h"   /* ftl_ctx_t */
 #include "ssd_types.h"
-
-struct ftl_context;
 
 /* ── cache read ──
  * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
@@ -73,7 +72,7 @@ typedef enum
  *         FTL_CACHE_READ_OK 已提交；FTL_CACHE_READ_AGAIN 资源/加载瞬态，本轮停止；
  *         FTL_CACHE_READ_ERROR 永久错误，组报 IO_ERROR。
  */
-ftl_cache_read_result_e ftl_cache_read_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
+ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 /* ── cache program ──
  * 窗口页数上限 = host 单次写传输 16 KiB / 4 KiB 页 = 4（CFG_TUD_MSC_EP_BUFSIZE）。
@@ -112,6 +111,6 @@ typedef enum
  *       续接（44/48h 每条自带地址，见 `docs/reference/datasheet_mt29f_cache_ops.md`
  *       §5/§6）；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
  */
-ftl_cache_write_result_e ftl_cache_write_try(struct ftl_context *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
+ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 #endif /* FTL_CACHE_BATCH_H */

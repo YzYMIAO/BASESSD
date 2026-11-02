@@ -562,38 +562,21 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
     return FTL_OK;
 }
 
+// 当前 Open SB 还能分配几页（非序列形态：page0 屏障必须已通过）。
+// 无 Open SB / 已满返回 0；其余判定委托序列形态（屏障不旁路）。
 BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature)
 {
     const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
     if ((sb->is_open == false) || (sb->next_page >= PAGES_PER_BLOCK))
     {
-        return 0U;
+        return 0U; /* 与序列形态的差异点：这里返回 0，序列形态报整块容量 */
     }
 
-    BYTE room = (BYTE)(PAGES_PER_BLOCK - sb->next_page);
-
-    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        if (super_block_has_plane(sb, plane) == false)
-        {
-            return 0U;
-        }
-        // page0 屏障：未成功编程的 plane 不允许继续分配。
-        if ((sb->page0_programmed & (BYTE)(1U << plane)) == 0U)
-        {
-            return 0U;
-        }
-        // BAD 块不能继续写；alloc 主路径会关闭该 SB，这里同样按 0 处理。
-        if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])]))
-        {
-            return 0U;
-        }
-    }
-
-    return room;
+    return alc_super_open_get_room_seq(alloc, temperature, false);
 }
 
+// 同上，但按序列语义：无 Open SB / 已满时报整块容量，page0 由本序列自己写时可越过屏障。
 BYTE alc_super_open_get_room_seq(const alc_t *alloc, BYTE temperature, bool page0_from_seq)
 {
     const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
@@ -627,6 +610,7 @@ BYTE alc_super_open_get_room_seq(const alc_t *alloc, BYTE temperature, bool page
     return (BYTE)(PAGES_PER_BLOCK - sb->next_page);
 }
 
+// 某 PBA 所属 plane 在当前 Open SB 的 page0 状态；不属于当前 SB（迟到命令）按未打开。
 alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temperature, DWORD pba)
 {
     const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
@@ -646,6 +630,7 @@ alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temp
     return ((sb->page0_programmed & (BYTE)(1U << plane)) != 0U) ? ALC_SUPER_PBA_OPEN_PAGE0_DONE : ALC_SUPER_PBA_OPEN_PAGE0_PENDING;
 }
 
+// page0 编程完成：按 plane+block 确认仍是当前 SB 才置屏障位（迟到完成属于旧 SB 时忽略）。
 void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba)
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
@@ -1022,6 +1007,7 @@ void alc_bst_get_erase_stats(const alc_t *alloc, alc_bst_erase_stats_t *out)
     out->good_count = n;
 }
 
+// 导出块的磨损快照（erase/read/ECC 趋势）给 Checkpoint；只拷贝，不改块状态。
 void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out)
 {
     // out 由唯一调用者 checkpoint.c 传本地快照地址；模块内部不重复守卫。
@@ -1032,6 +1018,7 @@ void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out)
     out->rr          = blk->rr;
 }
 
+// 恢复块的磨损快照（Checkpoint 回放）；覆盖三字段，不触发任何记账。
 void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 {
     // wear 由唯一调用者 checkpoint.c 传本地快照地址；模块内部不重复守卫。
@@ -1044,6 +1031,7 @@ void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 
 /* ── 9. Trace ── */
 
+// 记录一跳映射变更进诊断环（alloc 为空 / pba 非法时静默返回）；只写 RAM。
 void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, alc_trace_kind_e kind)
 {
     if ((alloc == NULL) || (pba_is_valid(pba) == false))
@@ -1063,6 +1051,7 @@ void alc_trace_record(alc_t *alloc, DWORD lba, DWORD pba, alc_trace_kind_e kind)
     t->kind  = kind;
 }
 
+// 在诊断环里查指定 lba/pba 的历史，统计重复 PBA 并打前 8 条。
 void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
 {
     if (alloc == NULL)

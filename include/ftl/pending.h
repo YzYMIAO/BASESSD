@@ -16,7 +16,6 @@
  */
 
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
-#include "ftl_module.h" /* bg_info_t（confirm service 入参） */
 #include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_t, ssd_status_e */
 
 #include <stdint.h>
@@ -52,11 +51,6 @@ static inline DWORD ftl_group_bit(WORD gi)
 {
     return 1U << gi;
 }
-
-/* 前向声明（ftl_ctx_t 在 ftl.h 中定义；本文件被 ftl.h include，
- * 用 struct 标签前向引用打破环） */
-struct ftl_context;
-typedef struct ftl_context ftl_ctx_t;
 
 /* ── 操作类型：完成路径的判别依据 ──
  * 必须由 submit 侧显式给出，**不可**从 buffer 字段反推（见文件头 ⚠）。 */
@@ -511,12 +505,11 @@ pending_confirm_handler_t pend_confirm_get_handler(void);
 void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners);
 
 /**
- * @brief 推进停泊列表（ftl_service Phase 2.5 开头调用）。
+ * @brief 推进停泊列表（ftl_service 的写确认结算步调用）。
  *
  * @param table       pending 表。
  * @param confirm_ctx 事务 handler 的上下文。
- * @param info        本轮动态信息；NULL 时用平台时钟。
  */
-void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_t *info);
+void pend_confirm_service(pend_table_t *table, void *confirm_ctx);
 
 #endif /* FTL_PENDING_H */

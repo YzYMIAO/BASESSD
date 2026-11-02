@@ -20,7 +20,7 @@
 
 #include "allocator.h"  /* alc_t */
 #include "ftl_config.h" /* §一 容量/分解宏 + §三.2 DWORD / pba_* */
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "ftl_type.h"   /* DWORD */
 #include "metadata.h"   /* metadata_dir_* / md_dir_cache_t（Directory 访问） */
 
@@ -752,15 +752,15 @@ void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD 
 /**
  * @brief 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
  *
- * 按 info->load_level 查**模块内** static const 表决定本轮 max_kick；只处理
+ * 按 level 查**模块内** static const 表决定本轮 max_kick；只处理
  * owner_dim 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
  *
  * @param cache  共享 cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param dim    本实例的 owner dim（ftl_topo_dim(topo)）
- * @param info   本轮动态信息（now_ms / load_level）
+ * @param level  本轮后台档位（IDLE / NORMAL / BUSY）
  * @param out    出参：本轮结束后的上报（**非空**）
  */
-void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status_t *out);
+void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level, l2p_status_t *out);
 
 /**
  * @brief 读一行元信息（idx 越界/空行时 state == INVALID）。

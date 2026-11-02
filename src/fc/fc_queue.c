@@ -49,7 +49,7 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
 }
 
 // 实现要点：INVALID 哨兵入队 = 调用者 bug（入队 ID 全由 FC 自铸，见 fc.c），
-// 按判据 2 转 ASSERT；只有「队列满」才是预期内的运行结果。
+// 一律 ASSERT；只有「队列满」才是预期内的运行结果。
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
     ASSERT(queue != NULL);

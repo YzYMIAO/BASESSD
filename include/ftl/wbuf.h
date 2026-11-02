@@ -30,7 +30,7 @@
 
 #include "allocator.h"  /* alc_t */
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_e */
-#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h" /* ftl_mod_status_t */
 #include "pending.h"    /* pend_req_t（端口出参类型） */
 #include "ssd_types.h"  /* ssd_status_e */
 
@@ -123,17 +123,16 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_han
  * 可传 NULL（状态上报丢弃，不分配 dummy status）。
  *
  * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
- * 只有编程成功的 FLUSH 才清空缓冲。`info` 当前不参与决策（保留以统一 typed 入口）。
+ * 只有编程成功的 FLUSH 才清空缓冲。
  *
  * @param h       wbuf handle
  * @param trigger 触发参数（kind + 对应载荷：LBA / 数据 / CW 数 / 组号）
- * @param info    后台调度信息（当前不参与决策，保留以统一 typed 入口）
  * @param out     出参（可为 NULL）：非 NULL 时填本轮状态上报
  * @return FTL_OK    操作完成 / 无需操作
  *         FTL_AGAIN APPEND / FLUSH 遇到瞬态背压（缓冲保留，可重试）
  *         FTL_ERROR FLUSH 建链失败 / trigger->kind 非法
  */
-ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_info_t *info, wb_status_t *out);
+ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t *out);
 
 /* ── 查询（读路径；只判不取） ── */
 

@@ -28,7 +28,8 @@
 #include "pending.h"
 
 #include "assertion.h"
-#include "ftl_job.h" /* ftl_job_now_ms（confirm 停泊超时） */
+#include "ftl_job.h"    /* ftl_job_now_ms（confirm 停泊超时） */
+#include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS */
 #include "log.h"
 
 #include <string.h>
@@ -114,6 +115,7 @@ bool pend_find_op(const pend_table_t *table, pend_op_e op, BYTE *out_index)
     return false;
 }
 
+// 按 op 查槽，把调用者需要的字段拷进出参；只读，不改槽状态。
 bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
 {
     BYTE idx = 0U;
@@ -135,7 +137,7 @@ bool pend_view_op(const pend_table_t *table, pend_op_e op, pend_op_view_t *out)
 
 // 实现要点：与 pend_remove 的差别只在寻址方式——托管项脱钩后无 command_id 可查，
 // 收尾只能按下标。⚠ 下标由 pend_find_op 产出且表无移动 ⇒ 恒有效，
-// 故越界一律 ASSERT（判据 2：调用者保证的前置条件），不静默 no-op。
+// 故越界一律 ASSERT，不静默 no-op。
 void pend_release_index(pend_table_t *table, BYTE index)
 {
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
@@ -143,6 +145,7 @@ void pend_release_index(pend_table_t *table, BYTE index)
     table->slots[index].used = false;
 }
 
+// 是否存在不属于 cache 序列的写在飞（cache_role == NONE）：有则本 LBA 流不能再按序列续。
 bool pend_has_foreign_write(const pend_table_t *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
@@ -228,6 +231,7 @@ void pend_group_add_subop(pend_table_t *table, WORD gi)
     g->outstanding++;
 }
 
+// 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
 void pend_group_drop_subop(pend_table_t *table, WORD gi)
 {
     pend_group_t *g = &table->groups[gi];
@@ -329,6 +333,7 @@ bool pend_group_has_window_pending(const pend_table_t *table, DWORD window)
  * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。pending 模块负责扫描/超时/结算，
  * 数据面事务由 FTL 注入的 handler 执行（C2/R9：不复制 Journal→L2P→BST 顺序）。 */
 
+// 注册写确认事务 handler（ftl_init 一次性），之后只读调用。
 void pend_confirm_set_handler(pending_confirm_handler_t handler)
 {
     s_confirm_handler = handler;
@@ -339,6 +344,9 @@ pending_confirm_handler_t pend_confirm_get_handler(void)
     return s_confirm_handler;
 }
 
+// 把「已编程、确认未完成」的子操作转成停泊项（契约见 include/ftl/pending.h）。
+// 槽本身由写路径持有，这里只改 op / owners 两个字段；release 由结算侧（成功、
+// 失败或超时）唯一负责 —— 两侧都释放就是重复归还（C12）。
 void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
 {
     pend_req_t *pending = &table->slots[pending_idx];
@@ -351,9 +359,24 @@ void pend_confirm_park(pend_table_t *table, WORD pending_idx, DWORD owners)
     pending->park_ms    = ftl_job_now_ms();
 }
 
-void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_t *info)
+/**
+ * @brief 槽是否是「已编程、确认未完成」的停泊项。
+ */
+static bool pend_is_confirm_parked(const pend_req_t *p)
 {
-    const DWORD now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();
+    return (p->used == true) && pend_op_is_write_confirm(p->op);
+}
+
+// 写确认结算（[svc] 步骤之一，调用点见 ftl_service）。
+// 契约（时机 / 入参）见 include/ftl/pending.h；此处只记实现要点：
+//   · 逐条调确认 handler：FTL_AGAIN = region 仍在加载 ⇒ 停泊保留、下轮再来；
+//     停泊超过 FTL_GROUP_DRAIN_TIMEOUT_MS（100 ms）按 IO_ERROR 结算，避免元数据区
+//     卡死时 host 写永久挂起（它只兜「确认停泊」，兜不住别的等待）。
+//   · 结算顺序：先取走 owners、再释放槽——组完成通知可能重入复用本槽。
+//   · 只有真正结算（成功或失败）才释放槽并触发组完成；FTL_AGAIN 不动任何状态。
+void pend_confirm_service(pend_table_t *table, void *confirm_ctx)
+{
+    const DWORD now_ms = ftl_job_now_ms();
 
     // 本轮进入时的停泊总数。限流日志必须报「同时有多少条在等」——只打扫描到的
     // 第一条（常是 idx=0）会被误读成「只有一个 region 卡住」（RISK-HOST-05）。
@@ -361,7 +384,7 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((table->slots[i].used == true) && pend_op_is_write_confirm(table->slots[i].op))
+        if (pend_is_confirm_parked(&table->slots[i]))
         {
             parked++;
         }
@@ -371,14 +394,16 @@ void pend_confirm_service(pend_table_t *table, void *confirm_ctx, const bg_info_
     {
         pend_req_t *pending = &table->slots[i];
 
-        if ((pending->used == false) || (pend_op_is_write_confirm(pending->op) == false))
+        if (pend_is_confirm_parked(pending) == false)
         {
             continue;
         }
 
         if (pending->park_ms == 0U)
         {
-            pending->park_ms = now_ms; /* 懒初始化：停泊时刻（沿用 ftl_job 的时钟口径） */
+            // 懒初始化停泊时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
+            // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
+            pending->park_ms = now_ms;
         }
 
         const ftl_status_e st = s_confirm_handler(confirm_ctx, pending);

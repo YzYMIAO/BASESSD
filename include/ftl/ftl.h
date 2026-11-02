@@ -5,9 +5,11 @@
  * ftl_service — 主循环调度器
  *
  * 每轮 superloop 两段（**泵与实例分开**）：
- *   ① ftl_service_pump()   —— **实例无关**：Phase 1 推进 NAND + Phase 2 抽干完成表。
+ *   ① ftl_service_pump()   —— **实例无关**：[pump] 推进 NAND + [pump] 完成泵。
  *                              全局的 NAND 引擎与完成表，每轮**只调一次**。
- *   ② ftl_service(ftl)     —— **单实例**：Phase 2.5 补发子操作 + Phase 3 三级后台。
+ *   ② ftl_service(ftl)     —— **单实例**：元数据候选池重算 → 写确认结算 →
+ *                              cache 序列确认 → host 补发 → 序列收尾 →
+ *                              wbuf 空闲 flush → 后台调度（逐步清单见 ftl_service 契约）。
  *                              对**每一个**实例都要调（多 LUN 下不能只跑 [0][0][0]）。
  *
  * 三级模式切换依据未决命令数（pending + 组），非"本轮提交了几条 NAND"。
@@ -60,6 +62,10 @@
 /* cache 序列跨 chunk 等待下一 chunk 的上限：超过即关闭序列状态，避免门控永久
  * 挡住该 LUN。16 KiB chunk 的 USB 传输在 ms 级，1s 是宽松上界（时钟缺失时不计时）。 */
 #define FTL_CACHE_SEQ_IDLE_MS (1000U)
+
+/* 窗口已提交、命令却迟迟不排空的兜底：超过即强制放开 LUN 门控（异常路径，留 WRN）。
+ * 与 IDLE_MS 理由不同——那是「等 host 下一段」，这是「等器件命令完成」，故分开命名。 */
+#define FTL_CACHE_SEQ_DRAIN_STALL_MS (1000U)
 
 /* 顺序流检测阈值（本仓自定，FTL 自判）：同一方向连续 LBA 累计达到 64 条
  * （32 KiB = 两个 16 KiB host 传输段）才认为进入顺序流，允许开 cache 序列。
@@ -248,7 +254,7 @@ typedef struct
  *       若调用时仍有该序列的命令在飞，置 `draining` 让门控继续关到排空——否则别的组会在
  *       31h/3Fh 管线半途插命令（RISK-CACHE-14）。
  */
-void ftl_cache_seq_release(struct ftl_context *ftl);
+void ftl_cache_seq_release(ftl_ctx_t *ftl);
 
 /* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）──
  *
@@ -264,7 +270,7 @@ void ftl_cache_seq_release(struct ftl_context *ftl);
  *
  * @return true = 命中，读必须走 out_pba。
  */
-bool ftl_cache_wr_lookup(const struct ftl_context *ftl, DWORD lba, DWORD *out_pba);
+bool ftl_cache_wr_lookup(const ftl_ctx_t *ftl, DWORD lba, DWORD *out_pba);
 
 /**
  * @brief 该 LBA 是否落在**已判失败、尚未撤销**的 cache 页上。
@@ -274,9 +280,9 @@ bool ftl_cache_wr_lookup(const struct ftl_context *ftl, DWORD lba, DWORD *out_pb
  *
  * @return true = 读该 LBA 必须报 IO_ERROR（撤销完成前 L2P 可能仍指着失败页）。
  */
-bool ftl_cache_wr_failed_covers(const struct ftl_context *ftl, DWORD lba);
+bool ftl_cache_wr_failed_covers(const ftl_ctx_t *ftl, DWORD lba);
 
-typedef struct ftl_context
+struct ftl_context
 {
     /* 拓扑信息（本 FTL 绑定的 NAND 芯片路由） */
     ftl_topo_t topo; /* 本 FTL 绑定的 NAND 芯片路由 */
@@ -292,7 +298,7 @@ typedef struct ftl_context
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
      * 见 wbuf.h 的 wb_handle_t。事件走 wb_handle()，读路径走 wb_has/read。
-     * 指针，由 storage 提供并决定落哪个域（Phase 1.5）。 */
+     * 指针，由 storage 提供并决定落哪个域（装配挂载）。 */
     wb_handle_t *wbuf;
 
     /* 五张表的引用（表本体由 HIL 独立定义、各自选内存域）。
@@ -361,7 +367,7 @@ typedef struct ftl_context
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
      * 布局 ⇒ 唯一正确的后续动作是复位。置位后 bg_scheduler_service 整体跳过（含 must-run
      * 集：checkpoint / journal / 元数据目录 / bbt / GC 全在那里），杜绝把旧 RAM 状态
-     * 写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
+     * 写回擦净的芯片；推进 NAND / 完成泵 / host 补发照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     bool bg_suspend;
 
@@ -397,7 +403,7 @@ typedef struct ftl_context
 
     /* 时间预算后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 bg_scheduler_init 从 `ftl/bg_scheduler.c` 的静态表
-     * 装载；每轮 Phase 3 由 bg_scheduler_service 选档后跑 bg_scheduler_run。 */
+     * 装载；每轮由 bg_scheduler_service（后台调度步）选档后跑 bg_scheduler_run。 */
     bg_scheduler_t bg;
 
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
@@ -419,7 +425,7 @@ typedef struct ftl_context
      * 从失败命令的 desc 链读回（`ftl_cmd_read_data`），用于在新块上重建命令。
      * 单线程 superloop ⇒ 只需一份，同步使用。 */
     BYTE write_retry_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
-} ftl_ctx_t;
+};
 
 /**
  * @brief 描述符的外部存储
@@ -436,9 +442,9 @@ typedef struct
     md_dir_cache_t         *metadata_dir;
     l2p_jrn_t              *journal;
     cp_handle_t            *cp_handle;
-    mig_handle_t           *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
-    wb_handle_t            *wbuf;            /* Phase 1.5 */
-    BYTE                   *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
+    mig_handle_t           *migrate;         /* 装配挂载：指针（不减少总 RAM） */
+    wb_handle_t            *wbuf;            /* 装配挂载 */
+    BYTE                   *rr_page_scratch; /* 装配挂载：FTL_READ_USER_SIZE */
 } ftl_storage_t;
 
 /* ── 接口 ── */
@@ -485,8 +491,9 @@ void ftl_contract_audit(const ftl_ctx_t *ftl);
 /**
  * @brief 实例无关的每轮泵（superloop 每轮调一次）
  *
- * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
- * Phase 2: ftl_op_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
+ * 步骤（按执行序）：
+ *   ① `[pump] 推进 NAND` —— fc_service() ≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成
+ *   ② `[pump] 完成泵`    —— ftl_op_drain()：从 CQ 取完成，按命令 ch/ce/lun 路由回实例
  *
  * ⚠ 必须在所有 ftl_service() 之前调，且**每轮只调一次**——NAND 引擎与完成表都是
  *   全局单份，per-instance 调用会把 fc_service 预算重复消耗 N 遍。
@@ -496,8 +503,17 @@ void ftl_service_pump(void);
 /**
  * @brief 单个 FTL 实例的服务（对**每个**实例都要调）
  *
- * Phase 2.5: 补发本实例各组的待下发子操作（host IO 优先于后台）
- * Phase 3:   本实例的时间预算后台调度（bg_scheduler_service：选档 → 任务表 → 预算）
+ * **步骤清单（唯一定义；其它模块一律用这些名字引用，不用编号）**，按执行序：
+ *
+ * | 步骤 | 做什么 | 实现 |
+ * |---|---|---|
+ * | 元数据候选池重算 | 元数据 BAD 后重算候选池（纯 RAM；等 metadata job 空闲） | `md_pool_service` |
+ * | 写确认结算 | 推进停泊的写确认（**必须先于 host 补发**：停泊意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `pend_confirm_service` |
+ * | cache 序列确认 | 按序确认已编程页（Journal→L2P→BST）、撤销失败页、弹出已证明页 | `ftl_cache_wr_confirm_step` |
+ * | host 补发 | 逐组下发待补发的子操作（host IO 优先于后台） | `ftl_drain_group` |
+ * | 序列收尾 | 孤儿序列超时关闭（读序列放弃）+ 写序列 padding END 有序收尾 | `ftl_cache_seq_idle_guard` / `_close_step` |
+ * | wbuf 空闲 flush | 确认再无写组会 append 时，把页打包缓冲编程掉（否则这些写永不完成） | `wb_handle(MAYBE_FLUSH_IDLE)` |
+ * | 后台调度 | 选档 → 任务表 → 预算（`bg_scheduler_service`） | `bg_scheduler_service` |
  *
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
  *   journal / checkpoint / bbt / GC 永不推进。
@@ -512,7 +528,7 @@ void ftl_service(ftl_ctx_t *ftl);
  * 请求带**长度**（req->count 个连续 LBA），FTL 自行决定单/双 plane 拆分：
  *   ① 建完成组（一条 host 请求 = 一个组）
  *   ② 逐子操作下发（每个子操作 2 页 Multi-Plane，末条奇数页时单 plane）
- *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service Phase 2.5
+ *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service 的 host 补发步
  *   ④ 数据在 ftl_op_drain 中路由回 buffer
  *
  * ⚠ 一次调用的完成通知（complete_flag/status_out/on_complete）**只在全部子操作

@@ -90,6 +90,7 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
     track->health = level;
 }
 
+// 记录一次读的 ECC 位数（块级趋势）并累加 read_count；越界块号属内部簿记错误 ⇒ 断言。
 void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
@@ -494,6 +495,7 @@ static void rr_job_step(rr_handle_t *rr)
 
 /* ── typed handle（端口装配 / 触发 / 上报） ── */
 
+// 装配：整块清零、绑定 cache/alloc/scratch/pending 端口；不碰介质。
 void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pend_table_t *pending)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
@@ -507,6 +509,7 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scrat
     rr->error        = FTL_OK;
 }
 
+// 单飞行：空闲时才接受新 owner；忙时丢弃（托管项仍在 pending 表，job 结束后再领）。
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
 {
     // 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
@@ -560,11 +563,9 @@ static void rr_status_fill(const rr_handle_t *rr, rr_status_t *out)
     out->planes_failed    = rr->planes_failed;
 }
 
-void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
+// 每轮入口：空闲清心跳；在飞时打心跳并推进 stage；无在飞时领取托管项或判提交超时。
+void rr_handle(rr_handle_t *rr, rr_status_t *out)
 {
-    // info 当前不参与恢复决策；保留形参以统一 typed 入口。
-    (void)info;
-
     // 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
     // ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
     // 那段同样属于「job 卡住」，正是心跳要暴露的。
@@ -675,6 +676,9 @@ static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
     return any;
 }
 
+/**
+ * @brief 读命令完成：成功把页拷进 scratch 并进 PLANE_END；仅 CRC-only 允许再读一次。
+ */
 static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     rr->retry_count = rr->attempt;
@@ -708,7 +712,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
 // 命令 → rr_job_step 续跑。
 // ⚠ 成功判据：FC_CMD_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
 // ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
-void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
@@ -845,6 +849,7 @@ void rr_retire_block(bst_block_t *b)
     b->read_count      = 0U;
 }
 
+// 按 gblock 退役：置 RETIRED（不标坏、仍可读）；调用者负责先把块驱逐出 Free Pool。
 void rr_retire_block_at(alc_t *alloc, WORD gblock)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号。

@@ -67,7 +67,7 @@
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_module.h"  /* bg_info_t / ftl_mod_status_t */
+#include "ftl_module.h"  /* ftl_mod_status_t */
 #include "ftl_type.h"    /* DWORD */
 #include "gc.h"          /* gc_benefit_mode_e */
 #include "journal.h"     /* l2p_jrn_t（端口） */
@@ -76,10 +76,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-
-/* 前向声明（ftl_ctx_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
-struct ftl_context;
-typedef struct ftl_context ftl_ctx_t;
 
 /* ── 提交/等待 deadline（绝对 ms，docs §6.3）──
  * 提交侧（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）用
@@ -384,10 +380,10 @@ void mig_gc_request_urgent(mig_handle_t *m);
  *   ③ 每轮最多启动一个 job（单飞行）。
  *
  * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param info  本轮动态信息（now_ms / load_level）
+ * @param level 本轮后台档位（IDLE / NORMAL / BUSY）
  * @param out   出参：本轮结束后的上报（**非空**）
  */
-void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out);
+void mig_handle(mig_handle_t *m, bg_level_e level, mig_status_t *out);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 
