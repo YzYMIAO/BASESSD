@@ -116,36 +116,14 @@ typedef struct
  * @return true  本次应打印
  *         false 继续抑制
  *
- * @note 到期判据：抑制满 64 条，或平台时钟可用且距上次打印已达
- * FTL_JOB_LOG_SLOW_INTERVAL_MS；时钟缺失（now_ms == 0）时退化为 64 条一行。
+ * @note 到期判据：平台时钟可用 ⇒ 距上次打印已达 FTL_JOB_LOG_SLOW_INTERVAL_MS；
+ *       时钟缺失（now_ms == 0）⇒ 抑制满 FTL_JOB_LOG_COUNT_FALLBACK 条。
  */
 static bool ftl_log_throttle_due(ftl_log_throttle_t *t, DWORD *out_suppressed)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-
-    // 有时间源时**按时间**限流；条数只作无时钟时的兜底——否则高频事件
-    // （如门控期间的背压）一秒撞满 64 条，日志仍会成串。
-    bool due;
-
-    if (now_ms != 0U)
-    {
-        due = (t->ms == 0U) || ((now_ms - t->ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-    else
-    {
-        due = (t->suppressed >= 64U);
-    }
-
-    if (due == false)
-    {
-        t->suppressed++;
-        return false;
-    }
-
-    *out_suppressed = t->suppressed;
-    t->suppressed   = 0U;
-    t->ms           = now_ms;
-    return true;
+    // 时间优先，条数只作无时钟时的兜底——否则高频事件（如门控期间的背压）一秒
+    // 撞满 64 条，日志仍会成串。
+    return ftl_job_log_due(&t->ms, &t->suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS, out_suppressed);
 }
 
 // flush 日志限流（RISK-USB-06；host 频繁 fsync 时避免刷屏）：
@@ -618,20 +596,14 @@ static void ftl_dangling_check(ftl_ctx_t *ftl, DWORD l, DWORD old_pba, WORD new_
     }
 
     // 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。
-    const DWORD now_ms = ftl_job_now_ms();
+    DWORD suppressed = 0U;
 
-    if ((now_ms == 0U) || (s_dangling_log_ms == 0U) || ((now_ms - s_dangling_log_ms) >= FTL_JOB_LOG_INTERVAL_MS))
+    if (ftl_job_log_due(&s_dangling_log_ms, &s_dangling_suppressed, FTL_JOB_LOG_INTERVAL_MS, &suppressed))
     {
         const char *old_state = ftl_block_state_name(old_st);
         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g]));
 
-        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s supp=%lu\r\n", l, old_pba, gob, old_state, ftl->alloc.blocks[gob].sb_id, new_g, new_state, s_dangling_suppressed);
-        s_dangling_log_ms     = now_ms;
-        s_dangling_suppressed = 0U;
-    }
-    else
-    {
-        s_dangling_suppressed++;
+        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s supp=%lu\r\n", l, old_pba, gob, old_state, ftl->alloc.blocks[gob].sb_id, new_g, new_state, suppressed);
     }
 }
 
@@ -770,7 +742,7 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
 
             // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
             // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
-            if ((s_confirm_log_ms == 0U) || ((now_ms - s_confirm_log_ms) >= 5000U))
+            if (ftl_job_log_due(&s_confirm_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
             {
                 // 只在真正要打日志时统计。日志必须报「同时有多少条在等」——只打
                 // 扫描到的第一条（常是 idx=0）会被误读成「只有一个 region 卡住」
@@ -781,7 +753,6 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
                      pending->lba,
                      i,
                      parked);
-                s_confirm_log_ms = now_ms;
             }
         }
         else if (st != FTL_OK)
@@ -1846,11 +1817,8 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
                 // 破坏 31h/3Fh 管线。直接报组错误；后续成员照常完成。
                 // 失败原因（NAND_FAIL/UNC/CRC/MATA/EMPTY…）只在这条 completion 上有，
                 // 限流打出来：定位「缓存读指到了什么页」不靠猜。
-                const DWORD now_ms = ftl_job_now_ms();
-
-                if ((now_ms == 0U) || (s_cache_rd_err_log_ms == 0U) || ((now_ms - s_cache_rd_err_log_ms) >= 1000U))
+                if (ftl_job_log_due(&s_cache_rd_err_log_ms, NULL, FTL_JOB_LOG_INTERVAL_MS, NULL))
                 {
-                    s_cache_rd_err_log_ms = now_ms;
                     LOGE(LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
                 }
                 sub_status = SSD_STATUS_IO_ERROR;
@@ -3396,11 +3364,8 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
 
     // 耗时日志限流 5 s（单线程 superloop；多实例共享一个时间戳即可）。host 若
     // 频繁 fsync，逐次打印会刷屏。
-    const DWORD now_log = ftl_job_now_ms();
-
-    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
+    if ((ftl->flush_start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && ftl_job_log_due(&s_flush_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
     {
-        s_flush_log_ms = now_log;
         LOGW(LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
     }
 

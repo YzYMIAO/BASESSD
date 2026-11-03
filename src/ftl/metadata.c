@@ -348,27 +348,6 @@ static WORD md_pool_collect(md_ring_t *ring, const alc_t *alloc, const md_pool_s
     return ring->block_count;
 }
 
-// BBT 未定位时的兜底池：名义 BBT 块 + 全部 shared spare（record 自带 magic/sequence，坏块靠探针忽略）。
-void md_pool_build_bbt_bootstrap(md_ring_t *ring)
-{
-    // 未知 BAD 集：名义 BBT 块 + 全部 shared spare。BBT record 自带 magic/sequence，
-    // 坏块/空块读失败由 md_ring_locate 的探针自然忽略。
-    ring->first_block      = BBT_BLOCK;
-    ring->nominal_count    = BBT_POOL_BLOCKS;
-    ring->block_count      = 0U;
-    ring->pages_per_record = 1U;
-    ring->plane_mask       = METADATA_MIRROR_PLANE_MASK;
-
-    for (WORD b = BBT_BLOCK; b < (BBT_BLOCK + BBT_POOL_BLOCKS); b++)
-    {
-        ring->blocks[ring->block_count++] = b;
-    }
-    for (WORD s = MD_SPARE_BLOCK0; s < FTL_METADATA_AREA_END; s++)
-    {
-        ring->blocks[ring->block_count++] = s;
-    }
-}
-
 // 重算全部元数据池候选（目录检查点/CP/BBT/journal/L2P 日志）；绑定缺失返回 false，调用者停止重试。
 bool md_pool_build_all(alc_t *alloc)
 {

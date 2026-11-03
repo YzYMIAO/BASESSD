@@ -215,25 +215,7 @@ static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
  */
 static bool rr_unrec_log_is_due(DWORD *out_suppressed)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-
-    bool due = (s_rr_unrec_suppressed >= 64U);
-
-    if ((due == false) && (now_ms != 0U))
-    {
-        due = (s_rr_unrec_log_ms == 0U) || ((now_ms - s_rr_unrec_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-
-    if (due == false)
-    {
-        s_rr_unrec_suppressed++;
-        return false;
-    }
-
-    *out_suppressed       = s_rr_unrec_suppressed;
-    s_rr_unrec_suppressed = 0U;
-    s_rr_unrec_log_ms     = now_ms;
-    return true;
+    return ftl_job_log_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS, out_suppressed);
 }
 
 /**

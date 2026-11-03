@@ -151,4 +151,20 @@ static inline bool ftl_job_tick(DWORD *log_ms)
     return true;
 }
 
+/**
+ * @brief 日志限流：有时间源时按时间（首次立即放行），无时钟时按条数兜底。
+ *
+ * @param last_ms        上次打印时刻（进出参；0 = 尚未打印）
+ * @param count          自上次打印以来被抑制的条数（进出参；NULL = 不做条数兜底）
+ * @param interval_ms    时间间隔（毫秒）
+ * @param out_suppressed 放行时写入被抑制条数（可 NULL；仅在返回 true 时写）
+ * @return true  本次应打印
+ *         false 继续抑制
+ *
+ * @note 无时钟（ftl_job_now_ms() == 0）且 count == NULL ⇒ 恒 false：纯观测日志在
+ *       缺时钟时静默，避免每轮刷屏（与 ftl_job_heartbeat 同取舍）。有 count 时退化
+ *       为「抑制满 FTL_JOB_LOG_COUNT_FALLBACK 条打一行」。
+ */
+bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms, DWORD *out_suppressed);
+
 #endif /* FTL_JOB_H */

@@ -382,23 +382,10 @@ static DWORD s_evict_fail_n;
  */
 static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    DWORD suppressed = 0U;
 
-    // 有时间源时按时间限流；条数只作无时钟时的兜底。
-    bool due;
-
-    if (now_ms != 0U)
+    if (ftl_job_log_due(&s_evict_fail_ms, &s_evict_fail_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, &suppressed) == false)
     {
-        due = (s_evict_fail_ms == 0U) || ((now_ms - s_evict_fail_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-    else
-    {
-        due = (s_evict_fail_n >= 64U);
-    }
-
-    if (due == false)
-    {
-        s_evict_fail_n++;
         return;
     }
 
@@ -432,10 +419,7 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
         }
     }
 
-    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%hu clean=%hu dirty=%hu loading=%hu flushing=%hu suppressed=%lu\r\n", region_id, inv, clean, dirty, loading, flushing, s_evict_fail_n);
-
-    s_evict_fail_ms = now_ms;
-    s_evict_fail_n  = 0U;
+    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%hu clean=%hu dirty=%hu loading=%hu flushing=%hu suppressed=%lu\r\n", region_id, inv, clean, dirty, loading, flushing, suppressed);
 }
 
 /**
@@ -540,33 +524,18 @@ static DWORD s_load_fail_n;
  */
 static void l2p_load_fail_log(DWORD region_id, const char *cause)
 {
-    const DWORD now_ms   = ftl_job_now_ms();
     // 序列门控造成的提交背压是**预期**等待（序列下一窗口收尾）：降为 5 s 一行的慢节拍，
     // 避免 host 大顺序读写 + GC 期间刷屏；其余失败仍按 1 s。
-    const bool  gated    = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
-    const DWORD interval = (gated == true) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
+    const bool  gated      = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
+    const DWORD interval   = (gated == true) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
+    DWORD       suppressed = 0U;
 
-    // 有时间源时按时间限流；条数只作无时钟时的兜底。
-    bool due;
-
-    if (now_ms != 0U)
+    if (ftl_job_log_due(&s_load_fail_ms, &s_load_fail_n, interval, &suppressed) == false)
     {
-        due = (s_load_fail_ms == 0U) || ((now_ms - s_load_fail_ms) >= interval);
-    }
-    else
-    {
-        due = (s_load_fail_n >= 64U);
-    }
-
-    if (due == false)
-    {
-        s_load_fail_n++;
         return;
     }
 
-    LOGW(LOG_TAG_L2P "load start failed region=%lu cause=%s suppressed=%lu\r\n", region_id, cause, s_load_fail_n);
-    s_load_fail_ms = now_ms;
-    s_load_fail_n  = 0U;
+    LOGW(LOG_TAG_L2P "load start failed region=%lu cause=%s suppressed=%lu\r\n", region_id, cause, suppressed);
 }
 
 // region 降级日志的限流（RISK-L2P-04 / RISK-JN-05）。
@@ -584,25 +553,14 @@ static DWORD s_degrade_n;
  */
 static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    DWORD suppressed = 0U;
 
-    bool due = (s_degrade_n >= 64U);
-
-    if ((due == false) && (now_ms != 0U))
+    if (ftl_job_log_due(&s_degrade_log_ms, &s_degrade_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, &suppressed) == false)
     {
-        due = (s_degrade_log_ms == 0U) || ((now_ms - s_degrade_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-
-    if (due == false)
-    {
-        s_degrade_n++;
         return;
     }
 
-    LOGE(LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped (suppressed=%lu)\r\n", region_id, fail_count, s_degrade_n);
-
-    s_degrade_log_ms = now_ms;
-    s_degrade_n      = 0U;
+    LOGE(LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped (suppressed=%lu)\r\n", region_id, fail_count, suppressed);
 }
 
 // 内部：为 region_id 启动一次异步加载。

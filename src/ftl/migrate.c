@@ -790,32 +790,9 @@ static bool mig_predict_begin(mig_handle_t *m)
  */
 static bool mig_abort_log_is_due(DWORD *out_suppressed)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-
-    // 有时间源时**按时间**限流（1 行/5 s），count 只作为无时钟时的兜底。
-    // 不能把 count>=64 当成主判据：free=1 的 abort 循环一秒能撞几十次，64 次
-    // 很快到，日志仍会刷屏。
-    bool due;
-
-    if (now_ms != 0U)
-    {
-        due = (s_abort_log_ms == 0U) || ((now_ms - s_abort_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-    else
-    {
-        due = (s_abort_suppressed >= 64U);
-    }
-
-    if (due == false)
-    {
-        s_abort_suppressed++;
-        return false;
-    }
-
-    *out_suppressed    = s_abort_suppressed;
-    s_abort_suppressed = 0U;
-    s_abort_log_ms     = now_ms;
-    return true;
+    // 时间优先（1 行/5 s），条数只作无时钟时的兜底：free=1 的 abort 循环一秒能撞
+    // 几十次，把 count>=64 当主判据仍会刷屏。
+    return ftl_job_log_due(&s_abort_log_ms, &s_abort_suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS, out_suppressed);
 }
 
 /**
@@ -2166,12 +2143,11 @@ static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
     {
         return;
     }
-    if ((m->gc_session_log_ms != 0U) && ((now_ms - m->gc_session_log_ms) < FTL_JOB_LOG_SLOW_INTERVAL_MS))
+    if (ftl_job_log_due(&m->gc_session_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL) == false)
     {
         return;
     }
 
-    m->gc_session_log_ms = now_ms;
     LOGI(LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu\r\n", m->gc_session_jobs, m->gc_session_moved, m->gc_session_reclaimed, m->gc_session_noop, m->gc_session_aborted, m->alloc->free_count);
 }
 

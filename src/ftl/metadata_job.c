@@ -259,30 +259,8 @@ static DWORD s_abort_log_n;
  */
 static bool md_abort_log_is_due(DWORD *out_suppressed)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-
-    // 有时间源时按时间限流；条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
-    bool due;
-
-    if (now_ms != 0U)
-    {
-        due = (s_abort_log_ms == 0U) || ((now_ms - s_abort_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    }
-    else
-    {
-        due = (s_abort_log_n >= 64U);
-    }
-
-    if (due == false)
-    {
-        s_abort_log_n++;
-        return false;
-    }
-
-    *out_suppressed = s_abort_log_n;
-    s_abort_log_n   = 0U;
-    s_abort_log_ms  = now_ms;
-    return true;
+    // 时间优先，条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
+    return ftl_job_log_due(&s_abort_log_ms, &s_abort_log_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, out_suppressed);
 }
 
 /**
@@ -355,10 +333,9 @@ static bool md_handle_stall(md_dir_cache_t *dir)
     }
     if ((now_ms - j->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
     {
-        if ((s_stall_log_ms == 0U) || ((now_ms - s_stall_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS))
+        if (ftl_job_log_due(&s_stall_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
         {
             LOGW(LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
-            s_stall_log_ms = now_ms;
         }
         j->timed_out     = true;
         j->timeout_phase = j->phase;

@@ -38,7 +38,7 @@
 // 组 outstanding 下溢（重复完成 / 重复回滚）的 release 留痕：debug 由 ASSERT 拦住，
 // release 必须阻止 WORD 回绕（回绕 ⇒ 组永不完成 ⇒ host 写挂死）。
 static DWORD s_group_underflow_log_ms;
-static WORD  s_group_underflow_n;
+static DWORD s_group_underflow_n;
 
 // 清除 pending 项与 command_id 的映射；脱钩项（NONE）不登记，直接跳过。
 static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
@@ -276,23 +276,7 @@ WORD pend_group_get_count(const pending_ctx_t *table)
 // 组 outstanding 下溢的限流日志：时间可用时 5 s 一行，缺时钟时 64 条一行。
 static void pend_note_underflow(const char *who, WORD gi)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-    bool        due;
-
-    if (now_ms != 0U)
-    {
-        due = (s_group_underflow_log_ms == 0U) || ((now_ms - s_group_underflow_log_ms) >= 5000U);
-        if (due)
-        {
-            s_group_underflow_log_ms = now_ms;
-        }
-    }
-    else
-    {
-        due = ((s_group_underflow_n++ & 63U) == 0U);
-    }
-
-    if (due)
+    if (ftl_job_log_due(&s_group_underflow_log_ms, &s_group_underflow_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
     {
         LOGE(LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
     }

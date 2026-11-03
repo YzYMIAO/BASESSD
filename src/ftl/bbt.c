@@ -101,7 +101,7 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  * @brief 建立本实例的 BBT 池轮转视图
  *
  * 候选池已建立（`alloc->pools->bbt` 至少 2 块）时直接取用；否则退回自举池
- * （`md_pool_build_bbt_bootstrap`），供池尚未建立的初始化路径扫描。
+ * （名义 BBT 块 + 全部 shared spare），供池尚未建立的初始化路径扫描。
  *
  * @param ring  输出：BBT 池轮转描述
  * @param alloc Allocator 上下文（取 `alloc->pools->bbt`；NULL 时走自举池）
@@ -114,21 +114,22 @@ static void bbt_ring_init(md_ring_t *ring, const alc_t *alloc)
         return;
     }
 
-    md_pool_build_bbt_bootstrap(ring);
-}
+    // 自举池：此时 BAD 集未知，不做过滤。record 自带 magic/sequence，坏块/空块的
+    // 读失败由 md_ring_locate 的探针自然忽略。
+    ring->first_block      = BBT_BLOCK;
+    ring->nominal_count    = BBT_POOL_BLOCKS;
+    ring->block_count      = 0U;
+    ring->pages_per_record = 1U;
+    ring->plane_mask       = METADATA_MIRROR_PLANE_MASK;
 
-/**
- * @brief 整条校验（一条 record = 1 页）：magic + total_blocks。
- *
- * total_blocks 是布局兼容性的代理判据：换块数/换 bitmap 语义后旧 record 必须作废。
- * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证。
- *
- * @param hdr record header
- * @return true 有效，false 无效
- */
-static bool bbt_header_valid(const bbt_header_t *hdr)
-{
-    return (hdr->magic == BBT_MAGIC) && (hdr->total_blocks == BBT_MAX_BLOCKS);
+    for (WORD b = BBT_BLOCK; b < (BBT_BLOCK + BBT_POOL_BLOCKS); b++)
+    {
+        ring->blocks[ring->block_count++] = b;
+    }
+    for (WORD s = MD_SPARE_BLOCK0; s < FTL_METADATA_AREA_END; s++)
+    {
+        ring->blocks[ring->block_count++] = s;
+    }
 }
 
 /**
@@ -172,9 +173,12 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
         {
             continue;
         }
-        if ((bbt_header_valid(&hdr) == false) || (hdr.sequence == 0U))
+        // record 有效性 = magic + total_blocks。total_blocks 是布局兼容性的代理判据：
+        // 换块数 / 换 bitmap 语义后旧 record 必须作废；无本层 CRC，页完整性由 FC 的
+        // per-CW CRC + ECC 保证。sequence 从 1 起，0 = 未写。
+        if ((hdr.magic != BBT_MAGIC) || (hdr.total_blocks != BBT_MAX_BLOCKS) || (hdr.sequence == 0U))
         {
-            continue; /* sequence 从 1 起；0 = 未写 */
+            continue;
         }
 
         *out_sequence = hdr.sequence;
@@ -627,34 +631,6 @@ void bbt_dirty_note(alc_t *alloc)
 
 /* ── 5. 同步持久化 ── */
 
-/**
- * @brief 从 BST 重建一条 BBT record 的 header（同步 bbt_save 与异步 bbt_write_submit 共用）。
- *
- * `sequence` 由调用者决定：同步路径刚自增，异步路径在 kick 起步时已自增。
- *
- * @param alloc    Allocator 上下文（从 BST 重建坏块位图，取 bad_count 与标志）
- * @param sequence 写入 header 的 sequence
- * @param header   输出：填好的 record header
- */
-static void bbt_build_header(const alc_t *alloc, DWORD sequence, bbt_header_t *header)
-{
-    memset(header, 0, sizeof(*header));
-    header->magic        = BBT_MAGIC;
-    header->sequence     = sequence;
-    header->total_blocks = BBT_MAX_BLOCKS;
-    header->bad_count    = alloc->bad_count;
-    header->reserved[0]  = alloc->bbt.format_in_progress ? BBT_FLAG_FORMAT_IN_PROGRESS : 0U;
-    header->reserved[1]  = alloc->bbt.rebuild_required ? BBT_FLAG_REBUILD_REQUIRED : 0U;
-
-    for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
-    {
-        if (ftl_block_is_bad(&alloc->blocks[gblock]))
-        {
-            bbt_set_bad(header->bad_map, gblock);
-        }
-    }
-}
-
 // 实现要点：游标未建立时先定位池内最新 record 的下一槽；**无论成败都推进游标**
 // （半编程槽不可复用）；失败保留 dirty 供下次重试。NAND 格式一字不改。
 ftl_status_e bbt_save(alc_t *alloc)
@@ -689,8 +665,26 @@ ftl_status_e bbt_save(alc_t *alloc)
 
     alloc->bbt.sequence++;
 
+    // record 格式与异步路径 bbt_write_submit **必须逐字相同**（两条写路径共用同一个
+    // 池，字段不一致会让另一条路径写出的 record 读回时判无效）。sequence 用本路径
+    // 刚自增的值。
     bbt_header_t header;
-    bbt_build_header(alloc, alloc->bbt.sequence, &header);
+
+    (void)memset(&header, 0, sizeof(header));
+    header.magic        = BBT_MAGIC;
+    header.sequence     = alloc->bbt.sequence;
+    header.total_blocks = BBT_MAX_BLOCKS;
+    header.bad_count    = alloc->bad_count;
+    header.reserved[0]  = alloc->bbt.format_in_progress ? BBT_FLAG_FORMAT_IN_PROGRESS : 0U;
+    header.reserved[1]  = alloc->bbt.rebuild_required ? BBT_FLAG_REBUILD_REQUIRED : 0U;
+
+    for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+    {
+        if (ftl_block_is_bad(&alloc->blocks[gblock]))
+        {
+            bbt_set_bad(header.bad_map, gblock);
+        }
+    }
 
     // 追加写：池内下一槽（块满则先擦池内下一块）。
     // 无论成败都推进游标（已写过的槽可能半编程，不可复用）。
@@ -756,7 +750,9 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
         {
             continue;
         }
-        if ((bbt_header_valid(&best) == false) || (best.sequence != alloc->bbt.sequence))
+        // 与 bbt_record_probe 同一有效性判据（magic + total_blocks）。
+        if ((best.magic != BBT_MAGIC) || (best.total_blocks != BBT_MAX_BLOCKS) ||
+            (best.sequence != alloc->bbt.sequence))
         {
             continue;
         }
@@ -800,8 +796,24 @@ static ftl_status_e bbt_write_submit(alc_t *alloc)
     bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
+    // record 格式与同步路径 bbt_save **必须逐字相同**；sequence 在 kick 起步时已自增。
     bbt_header_t header;
-    bbt_build_header(alloc, alloc->bbt.sequence, &header);
+
+    (void)memset(&header, 0, sizeof(header));
+    header.magic        = BBT_MAGIC;
+    header.sequence     = alloc->bbt.sequence;
+    header.total_blocks = BBT_MAX_BLOCKS;
+    header.bad_count    = alloc->bad_count;
+    header.reserved[0]  = alloc->bbt.format_in_progress ? BBT_FLAG_FORMAT_IN_PROGRESS : 0U;
+    header.reserved[1]  = alloc->bbt.rebuild_required ? BBT_FLAG_REBUILD_REQUIRED : 0U;
+
+    for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+    {
+        if (ftl_block_is_bad(&alloc->blocks[gblock]))
+        {
+            bbt_set_bad(header.bad_map, gblock);
+        }
+    }
 
     // 快照本条 record 的 dirty 代际：写飞行期间若又标坏（dirty_gen++），
     // 完成时不能清 dirty，必须再落一条 record。

@@ -956,27 +956,11 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         {
             // 背压（池空 / 队列满 / cache 序列门控）是**预期**等待，need_erase 保留、下轮重试。
             // 限流 5 s 一行（时间优先），避免 host 大顺序写 + GC 期间刷屏。
-            const DWORD now_ms = ftl_job_now_ms();
-            bool        due;
+            DWORD suppressed = 0U;
 
-            if (now_ms != 0U)
+            if (ftl_job_log_due(&s_erase_kick_log_ms, &s_erase_kick_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, &suppressed))
             {
-                due = (s_erase_kick_log_ms == 0U) || ((now_ms - s_erase_kick_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
-            }
-            else
-            {
-                due = (s_erase_kick_n >= 64U);
-            }
-
-            if (due == true)
-            {
-                LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试 (suppressed=%lu)\r\n", journal->handle.target_block, s_erase_kick_n);
-                s_erase_kick_log_ms = now_ms;
-                s_erase_kick_n      = 0U;
-            }
-            else
-            {
-                s_erase_kick_n++;
+                LOGE(LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试 (suppressed=%lu)\r\n", journal->handle.target_block, suppressed);
             }
         }
     }

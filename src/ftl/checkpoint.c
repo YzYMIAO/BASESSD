@@ -263,21 +263,16 @@ static void cp_job_abort(cp_handle_t *h)
 
 /**
  * @brief abort 日志限流：CP 在资源饥饿时每 10~25ms 重试一次，逐次 WRN 会刷屏。
- * 每个实例每 FTL_JOB_LOG_INTERVAL_MS 最多一行；时间戳跨 job 保留（cp_job_begin 不重置）。
+ * 每个实例每 FTL_JOB_LOG_SLOW_INTERVAL_MS 最多一行；时间戳跨 job 保留
+ * （cp_job_begin 不重置）。
  *
- * @param h       Checkpoint handle（读并更新 log_abort_ms）
- * @param now_ms  当前毫秒
+ * @param h  Checkpoint handle（读并更新 log_abort_ms）
  * @return true = 到点可打印；false = 仍在限流窗口内
  */
-static bool cp_job_abort_log_due(cp_handle_t *h, DWORD now_ms)
+static bool cp_job_abort_log_due(cp_handle_t *h)
 {
     // 5s：CP 饥饿时每 10~25ms 重试一次，1s 一行仍偏密；卡死是持续状态，5s 足够可见。
-    if ((h->log_abort_ms != 0U) && ((now_ms - h->log_abort_ms) < FTL_JOB_LOG_SLOW_INTERVAL_MS))
-    {
-        return false;
-    }
-    h->log_abort_ms = now_ms;
-    return true;
+    return ftl_job_log_due(&h->log_abort_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL);
 }
 
 /**
@@ -310,7 +305,7 @@ static bool cp_job_stall(cp_handle_t *h)
     }
     if ((now_ms - h->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
     {
-        if (cp_job_abort_log_due(h, now_ms))
+        if (cp_job_abort_log_due(h))
         {
             fc_resource_stats_t rs;
 
@@ -323,28 +318,6 @@ static bool cp_job_stall(cp_handle_t *h)
         return true;
     }
     return false;
-}
-
-/**
- * @brief 提交一条已建好的 CP 命令（写 / 擦共用）。成功才清零卡死计数。
- *
- * @param h    Checkpoint handle（置/回滚 waiting、清 stall_ms）
- * @param cmd  已建好的命令（提交失败时由本函数 release）
- * @return FTL_OK 已提交；FTL_AGAIN 提交失败（命令已 release）
- */
-static ftl_status_e cp_command_submit(cp_handle_t *h, fc_command_t *cmd)
-{
-    h->waiting = true; /* 先置位、提交失败再回滚 */
-
-    if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, h) != FTL_OK)
-    {
-        h->waiting = false;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    h->stall_ms = 0U;
-    return FTL_OK;
 }
 
 /**
@@ -392,7 +365,18 @@ static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data
     {
         return st; /* FTL_AGAIN 池空 / FTL_ERROR 建链失败 */
     }
-    return cp_command_submit(h, cmd);
+
+    // 先置 waiting、提交失败再回滚：完成服务函数以 waiting 判在飞。
+    h->waiting = true;
+    if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, h) != FTL_OK)
+    {
+        h->waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    h->stall_ms = 0U; /* 有命令交出去 ⇒ 卡死计时清零 */
+    return FTL_OK;
 }
 
 /**
@@ -413,7 +397,18 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
     {
         return st;
     }
-    return cp_command_submit(h, cmd);
+
+    // 先置 waiting、提交失败再回滚：完成服务函数以 waiting 判在飞。
+    h->waiting = true;
+    if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, h) != FTL_OK)
+    {
+        h->waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    h->stall_ms = 0U; /* 有命令交出去 ⇒ 卡死计时清零 */
+    return FTL_OK;
 }
 
 /**
@@ -569,44 +564,6 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
 // 共同前提：命令已 release、job.waiting 已清零（由派发处统一做）。
 
 /**
- * @brief 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
- * dirty 保留 ⇒ 下次在新槽重试整条）。
- *
- * @param h       Checkpoint handle
- * @param failed  擦除命令是否失败
- * @param next    成功时要推进到的 phase
- */
-static void cp_erase_complete(cp_handle_t *h, bool failed, cp_phase_e next)
-{
-    if (failed)
-    {
-        cp_job_abort(h);
-        return;
-    }
-    h->phase = next;
-}
-
-/**
- * @brief 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
- * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。
- *
- * @param h       Checkpoint handle
- * @param failed  写命令是否失败
- * @return true = 已中止（游标已推进）；false = 写成功，调用者继续下一页
- */
-static bool cp_snapshot_page_write_complete(cp_handle_t *h, bool failed)
-{
-    if (failed == false)
-    {
-        return false;
-    }
-    h->block_ok           = false;
-    h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
-    cp_job_abort(h);
-    return true;
-}
-
-/**
  * @brief Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。
  *
@@ -637,31 +594,6 @@ static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
         LOGI(LOG_TAG_CP "rebuild_required cleared — rebuilt metadata committed\r\n");
     }
     h->phase = CP_TRUNC_PREP;
-}
-
-/**
- * @brief Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
- * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
- * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
- * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。
- *
- * @param h       Checkpoint handle
- * @param failed  预擦命令是否失败
- */
-static void cp_trunc_erase_complete(cp_handle_t *h, bool failed)
-{
-    if (failed)
-    {
-        LOGW(LOG_TAG_CP "journal pre-erase failed blk=%hhu — 不记账，等待重试\r\n", h->trunc_next);
-        jrn_truncate_commit(h->journal, JRN_BLOCK_NONE);
-    }
-    else
-    {
-        // commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
-        // 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。
-        jrn_truncate_commit(h->journal, h->trunc_next);
-    }
-    h->phase = CP_DONE;
 }
 
 // 实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
@@ -700,7 +632,15 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
     switch ((cp_phase_e)h->phase)
     {
         case CP_DIR_CKPT_ERASE:
-            cp_erase_complete(h, failed, CP_DIR_CKPT_WRITE);
+            // 擦失败 ⇒ 中止（不推进游标，dirty 保留 ⇒ 下次在新槽重试整条）。
+            if (failed)
+            {
+                cp_job_abort(h);
+            }
+            else
+            {
+                h->phase = CP_DIR_CKPT_WRITE;
+            }
             return;
 
         case CP_DIR_CKPT_WRITE:
@@ -713,20 +653,42 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
             return;
 
         case CP_HDR_ERASE:
-            cp_erase_complete(h, failed, CP_BLOCK_WRITE);
+            // 擦失败 ⇒ 中止（不推进游标，dirty 保留 ⇒ 下次在新槽重试整条）。
+            if (failed)
+            {
+                cp_job_abort(h);
+            }
+            else
+            {
+                h->phase = CP_BLOCK_WRITE;
+            }
             return;
 
         case CP_BLOCK_WRITE:
-            if (cp_snapshot_page_write_complete(h, failed) == false)
+            if (failed == false)
             {
                 h->block_page = (h->block_page + 1U);
+            }
+            else
+            {
+                // 整条 record 作废（不写 Header）；游标推进一槽——剩余页可能半编程，永不复用。
+                h->block_ok           = false;
+                h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
+                cp_job_abort(h);
             }
             return;
 
         case CP_WEAR_WRITE:
-            if (cp_snapshot_page_write_complete(h, failed) == false)
+            if (failed == false)
             {
                 h->wear_page = (h->wear_page + 1U);
+            }
+            else
+            {
+                // 同 CP_BLOCK_WRITE：作废整条 record 并推进游标。
+                h->block_ok           = false;
+                h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
+                cp_job_abort(h);
             }
             return;
 
@@ -735,7 +697,21 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
             return;
 
         case CP_TRUNC_ERASE:
-            cp_trunc_erase_complete(h, failed);
+            if (failed)
+            {
+                // **擦成功才**记账：jrn_handle 回切到该块会跳过擦除 ⇒ 写进未擦块
+                // （二次编程 = 静默损坏）。commit(NONE) 只复位水位标志，该块保持
+                // "未预擦"，journal 回切时由 need_erase 重试。
+                LOGW(LOG_TAG_CP "journal pre-erase failed blk=%hhu — 不记账，等待重试\r\n", h->trunc_next);
+                jrn_truncate_commit(h->journal, JRN_BLOCK_NONE);
+            }
+            else
+            {
+                // commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
+                // 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。
+                jrn_truncate_commit(h->journal, h->trunc_next);
+            }
+            h->phase = CP_DONE;
             return;
 
         case CP_IDLE:
@@ -1031,7 +1007,7 @@ static void cp_job_step(cp_handle_t *h)
             {
                 if (h->failed)
                 {
-                    if (cp_job_abort_log_due(h, ftl_job_now_ms()))
+                    if (cp_job_abort_log_due(h))
                     {
                         LOGW(LOG_TAG_CP "abort at phase=%d (不写 Header / 不截断，脏区与 journal 保留)\r\n", h->fail_phase);
                     }
@@ -1040,7 +1016,7 @@ static void cp_job_step(cp_handle_t *h)
                 {
                     // sequence 0 = 本 Header 在开机被忽略（commit 页无效）。
                     // 这是缺陷状态：限流后以 ERR 暴露，不再每 CP 刷一行。
-                    if (cp_job_abort_log_due(h, ftl_job_now_ms()))
+                    if (cp_job_abort_log_due(h))
                     {
                         LOGE(LOG_TAG_CP "done with invalid seq=0 — header ignored at boot\r\n");
                     }
@@ -1052,11 +1028,8 @@ static void cp_job_step(cp_handle_t *h)
                     // 限流 5 s：水位触发（1024 次写）可能快于 5 s，逐条打印会在
                     // 115200 串口上刷屏（写满 4 KB TX 环后 uart_log_write 会等待）。
                     // 被跳过的 CP 不影响判据——最新序号看 `info` 的 cp= 或下一条 done。
-                    const DWORD now_done = ftl_job_now_ms();
-
-                    if ((now_done != 0U) && ((h->log_done_ms == 0U) || ((now_done - h->log_done_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
+                    if (ftl_job_log_due(&h->log_done_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
                     {
-                        h->log_done_ms = now_done;
                         LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s\r\n", h->hdr_seq, h->journal_seq, (h->dir_ckpt_skip == true) ? "skip" : "written");
                     }
                 }

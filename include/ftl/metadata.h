@@ -565,16 +565,6 @@ typedef struct md_pools
 } md_pools_t;
 
 /**
- * @brief BBT 自举候选池（未知 BAD 集时使用）
- *
- * 名义 BBT 块 + 全部 shared spare 候选（不做 BAD 过滤）；BBT record 自带
- * magic/sequence，坏块/空块的读失败会被 `md_ring_locate` 自然忽略。
- *
- * @param ring 输出：BBT 池几何
- */
-void md_pool_build_bbt_bootstrap(md_ring_t *ring);
-
-/**
  * @brief 用 BBT BAD 集重建四个固定元数据分区的候选池
  *
  * 候选 = 名义区间内（plane_mask 所有 plane 都）非 BAD 的块；不足名义数时从
