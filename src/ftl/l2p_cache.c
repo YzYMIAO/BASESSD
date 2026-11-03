@@ -9,7 +9,7 @@
  * 共享模型：
  *   同一 (ch,ce) 下的所有 LUN 共用一份 cache（g_l2p_cache[ch][ce]）。
  *   cache 行/脏位图的键是**全局 region**；映射页在 NAND 上的位置是
- *   **owner die 内的局部 region**（global_region / FTL_DIM_TOTAL）。
+ *   **owner die 内的局部 region**（global_region / DIE_MAX）。
  *   owner 由全局 region 经注入的 owner_of_region 回调解析；load/flush/commit
  *   一律使用 owner 的 metadata_dir / alloc / topo。
  *
@@ -1353,7 +1353,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 }
 
 // 按 owner 踢脏行写回：最多 max_kick 条；遇 AGAIN 立即停（闸门满/池空），硬失败行跳过。
-void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
+void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick)
 {
     // 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
     // ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。
@@ -1371,7 +1371,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
         const l2p_cache_line_t *line = &cache->lines[i];
 
         // 只刷自己的行：共享 cache 里别的 LUN 的行由它们自己的 CP/flush 处理。
-        if ((line->state != L2P_CACHE_DIRTY) || (l2p_region_owned_by(line->region_id, owner_dim) == false))
+        if ((line->state != L2P_CACHE_DIRTY) || (l2p_region_owned_by(line->region_id, owner_die) == false))
         {
             continue;
         }
@@ -1391,13 +1391,13 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
 }
 
 // 该 owner 是否没有未落定的行：DIRTY/FLUSHING/LOADING 任一存在即不空闲。
-bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim)
+bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_die)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         const l2p_cache_line_t *line = &cache->lines[i];
 
-        if (l2p_region_owned_by(line->region_id, owner_dim) == false)
+        if (l2p_region_owned_by(line->region_id, owner_die) == false)
         {
             continue;
         }
@@ -1438,8 +1438,8 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
     ASSERT(line < &ftl->cache->lines[L2P_CACHE_SIZE]);
 
     // 命令按 PBA 的 ch/ce/lun 路由回 owner；line 的全局 region 必须属于同一个 owner。
-    ASSERT(ftl_topo_dim(ftl->topo) == (line->region_id % FTL_DIM_TOTAL));
-    ASSERT(l2p_owner_get(ftl->cache, line->region_id)->dim == ftl_topo_dim(ftl->topo));
+    ASSERT(topo_2_die(ftl->topo) == (line->region_id % DIE_MAX));
+    ASSERT(l2p_owner_get(ftl->cache, line->region_id)->die == topo_2_die(ftl->topo));
 
     // 完成只可能属于一次在飞的 load/flush；行在这期间不可驱逐、不可改写状态。
     ASSERT((line->state == L2P_CACHE_LOADING) || (line->state == L2P_CACHE_FLUSHING));
@@ -1646,7 +1646,7 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
 // 共享 cache 下不能按实例重新 init：那样会抹掉别的 LUN 刚回放的 DIRTY 行和
 // 全局脏位。本函数只动本 owner 的 resident 行，并清本 owner 的全局脏位。
 // 恢复期不应有在飞命令；FLUSHING/LOADING 行重写会泄漏在飞计数 ⇒ ASSERT。
-void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim)
+void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -1656,7 +1656,7 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim)
         {
             continue; /* 空行：region_id 无语义，无需处理 */
         }
-        if (l2p_region_owned_by(line->region_id, owner_dim) == false)
+        if (l2p_region_owned_by(line->region_id, owner_die) == false)
         {
             continue; /* 别的 LUN 的行，不能碰 */
         }
@@ -1672,24 +1672,24 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim)
     }
 
     // 清本 owner 的全局脏位：local 0..L2P_REGIONS_PER_INSTANCE-1
-    // → global = local * DIM + owner_dim。
+    // → global = local * DIE_MAX + owner_die。
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        const DWORD global_region = (local * FTL_DIM_TOTAL) + owner_dim;
+        const DWORD global_region = (local * DIE_MAX) + owner_die;
 
         l2p_bitmap_clear(cache->region_dirty_bitmap, global_region);
         l2p_bitmap_clear(cache->region_degraded_bitmap, global_region);
     }
 }
 
-// Checkpoint 起点调用（先快照再 flush）。DIM=1 时等价于整份位图拷贝。
-void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD out[L2P_LOCAL_DIRTY_WORDS])
+// Checkpoint 起点调用（先快照再 flush）。DIE_MAX=1 时等价于整份位图拷贝。
+void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS])
 {
     memset(out, 0, L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD));
 
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        const DWORD global = (local * FTL_DIM_TOTAL) + owner_dim;
+        const DWORD global = (local * DIE_MAX) + owner_die;
 
         if (l2p_bitmap_test(cache->region_dirty_bitmap, global))
         {
@@ -1708,7 +1708,7 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
 };
 
 // 每轮入口：thrashing 期间不主动 flush；否则按档位踢本 owner 的脏行，再填上报。
-void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level)
+void l2p_handle(l2p_cache_t *cache, DWORD die, bg_level_e level)
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
     // 判据在模块内，主流程不读 cache->thrashing。
@@ -1716,7 +1716,7 @@ void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level)
     {
         const BYTE max_kick = s_l2p_flush_max[level];
 
-        l2p_owner_flush_kick(cache, dim, max_kick);
+        l2p_owner_flush_kick(cache, die, max_kick);
     }
 }
 

@@ -452,10 +452,243 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
     LOGI(LOG_TAG_NAND "ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n", (unsigned int)info->ecc_bits, (unsigned int)info->programs_per_page, (unsigned int)info->tprog_max, (unsigned int)info->tbers_max, (unsigned int)info->tr_max, (unsigned int)info->tccs_min, (unsigned int)info->timing_mode_support);
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * 上电拓扑扫描：只产出“板级物理事实”（哪些 target 存在、logical_units、
+ * 逐 LUN present）。紧凑 die 编号与 LUN→die 表在 FTL 层（ftl_config.h / ftl.c）。
+ * ══════════════════════════════════════════════════════════════ */
+nand_target_info_t g_nand_targets[CH_MAX][CE_MAX];
+
+/* 无器件/无响应时 DQ 总线读到全 1（浮空）；78h 状态字节用它判 LUN 不存在。 */
+#define NAND_STATUS_NO_RESPONSE (0xFFU)
+
+/* 板级物理通路表：每一项表示 (ch,ce) 有一条可寻址的 NAND target。
+ * 当前板：FMC Bank3 + 单个 NCE，只有 (0,0)。多 target 板卡在此扩展，
+ * 并在 nand_select_target() 里实现对应的 FMC bank / CE# GPIO 切换。
+ * ⚠ 这张表是**板级事实**，不是 NAND 器件属性。 */
+typedef struct
+{
+    BYTE ch;
+    BYTE ce;
+} nand_board_target_t;
+
+static const nand_board_target_t s_board_targets[] = {
+    {0U, 0U},
+};
+
+/* 板级 target 选择：当前实现只校验通路表。多 target 板卡在这里切换片选。 */
+nand_result_e nand_select_target(BYTE ch, BYTE ce)
+{
+    if ((ch >= CH_MAX) || (ce >= CE_MAX))
+    {
+        return NAND_RESULT_INVALID_ARGUMENT;
+    }
+
+    for (size_t i = 0U; i < (sizeof(s_board_targets) / sizeof(s_board_targets[0])); i++)
+    {
+        if ((s_board_targets[i].ch == ch) && (s_board_targets[i].ce == ce))
+        {
+            return NAND_RESULT_OK;
+        }
+    }
+
+    return NAND_RESULT_NOT_READY;
+}
+
+/* 78h READ STATUS ENHANCED：行地址里带 LUN/plane 位，读指定 LUN 的状态字节。
+ * 状态经 completion.nand_status 回传（DATA_OUT_STATUS 不写 buffer）。 */
+nand_result_e nand_fc_read_status_enhanced(DWORD row, nand_fc_completion_t *completion)
+{
+    nand_fc_request_t request;
+
+    memset(&request, 0, sizeof(request));
+    request.column      = 0U;
+    request.row[0]      = row;
+    request.data        = NULL;
+    request.data_length = 1U;
+
+    return nand_fc_execute(OP_READ_STATUS_ENHANCED, &request, completion);
+}
+
+// 无器件判据：READ ID 全 00 / 全 FF。
+static BYTE nand_id_is_blank(const BYTE id[5])
+{
+    BYTE all_00 = 1U;
+    BYTE all_ff = 1U;
+
+    for (BYTE i = 0U; i < 5U; i++)
+    {
+        if (id[i] != 0x00U)
+        {
+            all_00 = 0U;
+        }
+        if (id[i] != 0xFFU)
+        {
+            all_ff = 0U;
+        }
+    }
+
+    return ((all_00 != 0U) || (all_ff != 0U)) ? 1U : 0U;
+}
+
+// 单 target 探测：选择通路 → RESET → READ_ID → ONFI 参数页 → 逐 LUN 78h。
+// 仅 armed==0 的同步路径可调。
+nand_result_e nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
+{
+    nand_fc_completion_t completion;
+    BYTE                 id[5];
+    nand_result_e        result;
+    WORD                 lun_count;
+
+    ASSERT(info != NULL);
+    memset(info, 0, sizeof(*info));
+
+    /* Step 4: 板级 target 选择。无物理通路 ⇒ 该坐标不存在，不算错误；
+     * 坐标越界是调用者错误，按 INVALID 返回。 */
+    result = nand_select_target(ch, ce);
+    if (result == NAND_RESULT_INVALID_ARGUMENT)
+    {
+        return result;
+    }
+    if (result != NAND_RESULT_OK)
+    {
+        return NAND_RESULT_NOT_READY;
+    }
+
+    /* Step 5: RESET（FFh）。无响应 = 该位置没有器件。 */
+    delay_ms(1U);
+    result = nand_fc_reset(&completion);
+    if (result != NAND_RESULT_OK)
+    {
+        return NAND_RESULT_NOT_READY;
+    }
+
+    /* Step 6: READ_ID + 厂商 ID 校验。 */
+    result = nand_fc_read_id(id, &completion);
+    if (result != NAND_RESULT_OK)
+    {
+        return NAND_RESULT_NOT_READY;
+    }
+    if (nand_id_is_blank(id) != 0U)
+    {
+        return NAND_RESULT_NOT_READY;
+    }
+    LOGI(LOG_TAG_NAND "ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
+    if ((((DWORD)id[1] << 24U) | ((DWORD)id[2] << 16U) | ((DWORD)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
+    {
+        LOGE(LOG_TAG_NAND "unexpected ID\r\n");
+        return NAND_RESULT_OPERATION_FAILED;
+    }
+
+    /* Step 6b: ONFI 参数页。LUN 数是器件属性，必须从参数页取；读不到 /
+     * 解码失败就不能猜（固定值可能是错的），按 target 失效处理。 */
+    {
+        BYTE                   page[NAND_ONFI_PARAM_PAGE_SIZE];
+        nand_onfi_param_info_t onfi;
+
+        result = nand_fc_read_parameter_page(page, &completion);
+        if (result != NAND_RESULT_OK)
+        {
+            LOGE(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
+            return NAND_RESULT_OPERATION_FAILED;
+        }
+        if (nand_onfi_parameter_page_decode(page, &onfi) == 0U)
+        {
+            LOGE(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n", (unsigned int)page[0], (unsigned int)page[1], (unsigned int)page[2], (unsigned int)page[3]);
+            return NAND_RESULT_OPERATION_FAILED;
+        }
+
+        nand_onfi_param_print(&onfi);
+        if ((onfi.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (onfi.row_cycles != NAND_ROW_ADDR_CYCLES))
+        {
+            LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n", (unsigned int)onfi.column_cycles, (unsigned int)onfi.row_cycles, (unsigned int)NAND_COLUMN_ADDR_CYCLES, (unsigned int)NAND_ROW_ADDR_CYCLES);
+            return NAND_RESULT_INVALID_ARGUMENT;
+        }
+
+        if ((onfi.logical_units == 0U) || (onfi.logical_units > LUN_MAX))
+        {
+            LOGE(LOG_TAG_NAND "ONFI logical_units=%u out of range (LUN_MAX=%u)\r\n", (unsigned int)onfi.logical_units, (unsigned int)LUN_MAX);
+            return NAND_RESULT_INVALID_ARGUMENT;
+        }
+        lun_count = (WORD)onfi.logical_units;
+    }
+
+    /* Step 7: 逐 LUN 探测。78h 的行地址带 LUN 位；无响应 LUN 读到 0xFF
+     * （浮空总线），据此填 lun_present[]。当前器件 logical_units=1，
+     * 但循环按实际值走，多 LUN 器件无需改这里。 */
+    for (BYTE lun = 0U; lun < lun_count; lun++)
+    {
+        nand_addr_t addr;
+        DWORD       row;
+        BYTE        status;
+
+        memset(&addr, 0, sizeof(addr));
+        addr.lun = lun;
+        row      = paa_to_nand_row(paa_from_addr(&addr));
+
+        result = nand_fc_read_status_enhanced(row, &completion);
+        if (result != NAND_RESULT_OK)
+        {
+            LOGE(LOG_TAG_NAND "lun %hhu status probe failed, result=0x%02X\r\n", lun, (unsigned int)result);
+            return NAND_RESULT_OPERATION_FAILED;
+        }
+
+        status                 = completion.nand_status;
+        info->lun_present[lun] = (status == NAND_STATUS_NO_RESPONSE) ? 0U : 1U;
+        LOGI(LOG_TAG_NAND "lun=%hhu status=0x%02X present=%hhu\r\n", lun, (unsigned int)status, (unsigned int)info->lun_present[lun]);
+    }
+
+    if (info->lun_present[0] == 0U)
+    {
+        LOGE(LOG_TAG_NAND "target ch=%hhu ce=%hhu: LUN0 no response\r\n", ch, ce);
+        return NAND_RESULT_NOT_READY;
+    }
+
+    info->present   = 1U;
+    info->lun_count = (BYTE)lun_count;
+    return NAND_RESULT_OK;
+}
+
+// 遍历 CH_MAX × CE_MAX：存在的 target 记入 g_nand_targets；主 target (0,0) 必须存在。
+nand_result_e nand_scan_targets(void)
+{
+    BYTE present = 0U;
+
+    memset(g_nand_targets, 0, sizeof(g_nand_targets));
+
+    for (BYTE ch = 0U; ch < CH_MAX; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_MAX; ce++)
+        {
+            nand_target_info_t  info;
+            const nand_result_e result = nand_target_probe(ch, ce, &info);
+
+            if (result == NAND_RESULT_OK)
+            {
+                g_nand_targets[ch][ce] = info;
+                present                = 1U;
+                LOGI(LOG_TAG_NAND "scan ch=%hhu ce=%hhu present luns=%hhu\r\n", ch, ce, info.lun_count);
+            }
+            else if (result != NAND_RESULT_NOT_READY)
+            {
+                LOGE(LOG_TAG_NAND "scan ch=%hhu ce=%hhu failed 0x%02X\r\n", ch, ce, (unsigned int)result);
+                return result;
+            }
+        }
+    }
+
+    if (present == 0U)
+    {
+        LOGE(LOG_TAG_NAND "scan: no target present\r\n");
+        return NAND_RESULT_NOT_READY;
+    }
+
+    return NAND_RESULT_OK;
+}
+
 /* --------------------------------------------------------------------
  * nand_init
  *   功能：NAND 芯片低速全初始化（FMC 硬件 + MSP + DMA +
- *         RESET + READ_ID + ONFI 参数页校验）。
+ *         拓扑扫描：RESET + READ_ID + ONFI 参数页）。
  *   参数：无。
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：
@@ -470,13 +703,12 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
  *     Step 2 HAL_NAND_Init → MspInit（时钟/GPIO/NCE）★首次碰硬件
  *     Step 3 per-[ch][ce][lun] FMC 后端实例
  *     Step 4 DMA（本配置 no-op，失败仅回退 PIO）
- *     Step 5 RESET（FFh）★启动命令绕过 dispatch，直连 engine
- *     Step 6 READ_ID + 厂商 ID 校验
- *     Step 6b 读 ONFI 参数页（Table 11）+ 打印设备信息（非致命，失败仅 LOGW）
+ *     Step 5+ 拓扑扫描：nand_scan_targets → nand_target_probe
+ *             （选择板级通路 / RESET / READ_ID / ONFI 参数页 / 逐 LUN 78h）
+ *             遍历 CH_MAX × CE_MAX，结果写 g_nand_targets。
  *   高速模式切换不在这里：见 nand_enable_high_speed()。
- *   调用链：main.c → nand_init → {HAL_NAND_Init,
- *          nand_fmc_init, nand_fc_reset, nand_fc_read_id,
- *          nand_fc_read_parameter_page}；
+ *   调用链：main.c → nand_init → {HAL_NAND_Init, nand_fmc_init,
+ *          nand_scan_targets → nand_target_probe}；
  *          随后 main.c 在 ssd_ftl_boot_all() 成功后调 nand_enable_high_speed()。
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
@@ -484,9 +716,6 @@ BYTE nand_init(void)
 {
     FMC_NAND_PCC_TimingTypeDef common_timing;
     FMC_NAND_PCC_TimingTypeDef attribute_timing;
-    nand_fc_completion_t       completion;
-    BYTE                       id[5];
-    BYTE                       result;
 
     memset(&common_timing, 0, sizeof(common_timing));
     memset(&attribute_timing, 0, sizeof(attribute_timing));
@@ -567,67 +796,20 @@ BYTE nand_init(void)
         }
     }
 
-    /* ── Step 5: RESET（FFh）──
-     * Datasheet power-on rule: allow R/B# to become valid before the first FFh command.
-     * ★ 启动命令经 nand_fc_execute 直连 nand_engine，绕过 fc / nand_dispatch
-     *   命令队列——此刻 g_nand_dispatch_armed 仍为 0，nand_dispatch_submit 会拒收。 */
-    delay_ms(1U);
-    result = nand_fc_reset(&completion);
-    if (result != NAND_RESULT_OK)
-    {
-        LOGE(LOG_TAG_NAND "reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n", (unsigned int)result, (unsigned int)completion.nand_status, (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
-        return result;
-    }
-    LOGI(LOG_TAG_NAND "reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
-    /* ── Step 6: READ_ID + 厂商 ID 校验 ── */
-    result = nand_fc_read_id(id, &completion);
-    if (result != NAND_RESULT_OK)
-    {
-        LOGE(LOG_TAG_NAND "read ID failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
-        return result;
-    }
-    LOGI(LOG_TAG_NAND "ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
-    /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand/devices/mt29f___g08a.h */
-    if ((((DWORD)id[1] << 24U) | ((DWORD)id[2] << 16U) | ((DWORD)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
-    {
-        LOGE(LOG_TAG_NAND "unexpected ID\r\n");
-        return NAND_RESULT_OPERATION_FAILED;
-    }
+    /* ── Step 5/6：拓扑扫描（nand_scan_targets → nand_target_probe）──
+     * RESET / READ_ID / ONFI 参数页的结果写入 g_nand_targets；紧凑 die 表由
+     * FTL 在 ssd_ftl_boot_all() 里构建。当前硬件只有一个 target。 */
+    const nand_result_e scan_result = nand_scan_targets();
 
-    /* ── Step 6b: 读 ONFI 参数页并打印设备信息（手册 Table 11，256 字节）──
-     * 同步路径（此刻 armed==0，契约允许）。
-     * 读失败 / 签名不符 = 非致命（ID 已匹配 ⇒ 器件是好的，参数页读打嗝不该 brick）。
-     * 但**解码成功后的地址周期数不符是致命的**：本仓 UOP 表固定发
-     * NAND_COLUMN_ADDR_CYCLES 列 + NAND_ROW_ADDR_CYCLES 行，器件报告的周期数不同
-     * ⇒ 每条命令都发错地址（静默写坏介质）⇒ release 档也必须拒绝启动。 */
+    if (scan_result != NAND_RESULT_OK)
     {
-        BYTE                   page[NAND_ONFI_PARAM_PAGE_SIZE];
-        nand_onfi_param_info_t info;
-
-        result = nand_fc_read_parameter_page(page, &completion);
-        if (result != NAND_RESULT_OK)
-        {
-            LOGW(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
-        }
-        else if (nand_onfi_parameter_page_decode(page, &info) == 0U)
-        {
-            LOGW(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n", (unsigned int)page[0], (unsigned int)page[1], (unsigned int)page[2], (unsigned int)page[3]);
-        }
-        else
-        {
-            nand_onfi_param_print(&info);
-            if ((info.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (info.row_cycles != NAND_ROW_ADDR_CYCLES))
-            {
-                LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n", (unsigned int)info.column_cycles, (unsigned int)info.row_cycles, (unsigned int)NAND_COLUMN_ADDR_CYCLES, (unsigned int)NAND_ROW_ADDR_CYCLES);
-                return NAND_RESULT_INVALID_ARGUMENT;
-            }
-        }
+        LOGE(LOG_TAG_NAND "target scan failed: 0x%02X\r\n", (unsigned int)scan_result);
+        return (BYTE)scan_result;
     }
 
     LOGI(LOG_TAG_NAND "init complete (low speed)\r\n");
     return NAND_RESULT_OK;
 }
-
 /* --------------------------------------------------------------------
  * nand_enable_high_speed
  *   功能：初始化全部完成后，把 NAND 切到 CONFIG_NAND_TIMING_MODE 并同步更新 FMC 时序。

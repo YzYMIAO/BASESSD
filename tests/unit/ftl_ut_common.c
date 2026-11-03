@@ -101,10 +101,25 @@ void ftl_ut_result(const char *format, ...)
 
 ftl_ctx_t *ftl_ut_live(void)
 {
-    ftl_ctx_t *ftl = g_ctrl.ftl[0][0][0];
+    ftl_ctx_t *ftl = g_ctrl.ftl[0];
 
     munit_assert_not_null(ftl);
     return ftl;
+}
+
+void ftl_ut_topology_init(void)
+{
+    static bool s_topology_ready = false;
+
+    if (s_topology_ready)
+    {
+        return;
+    }
+
+    /* 用上电扫描结果重建，而不是依赖主 boot 留下的表；与生产建表同一入口。 */
+    munit_assert_true(ftl_topology_build(g_nand_targets));
+    munit_assert_uint32(DIE_MAX, >, 0U);
+    s_topology_ready = true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -255,10 +270,10 @@ void ftl_ut_reboot_from_media(void)
     nand_dispatch_set_armed(1U); /* fc_init 会复位置位；与 FC UT 的 test_setup 同做法 */
     ftl_op_init();
 
-    static struct ftl_context *s_route[CH_NUM][CE_NUM][LUN_NUM];
+    static struct ftl_context *s_route[FTL_DIE_MAX];
 
     memset(s_route, 0, sizeof(s_route));
-    s_route[0][0][0] = ftl;
+    s_route[0] = ftl;
     ftl_op_route_set(s_route);
 
     const ftl_topo_t       topo  = ftl->topo;
@@ -444,6 +459,7 @@ void *ftl_ut_pure_setup(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    ftl_ut_topology_init();
     (void)ftl_ut_live();
     ftl_ut_ram_init();
     fi_reset(); /* 注入状态是进程级的：漏一次复位会静默污染后续用例 */

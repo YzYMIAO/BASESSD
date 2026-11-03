@@ -159,31 +159,31 @@ WORD ftl_op_ctx_count(void);
 /**
  * @brief 设置实例路由表。
  *
- * 全局旁表保持单一（FC CQ 全局、cmd_id 全局唯一），派发时按命令 ch/ce/lun
- * 路由到对应 FTL 实例。本函数在 main.c 填完 g_ftl_ptrs 后调用一次——
+ * 全局旁表保持单一（FC CQ 全局、cmd_id 全局唯一），路由表按**紧凑 die 号**
+ * 索引；命令完成仍带 (ch,ce,lun)，由 chcelun_2_die() 唯一漏斗转换后查表。
+ * 本函数在 main.c 填完 g_ftl_ptrs 后调用一次——
  * ⚠ **必须早于逐实例 boot**：boot 期的 full metadata rebuild 就会经 l2p_read_sync 抽完成表。
  * 传 NULL 则清空（boot 失败回退 fc_service 时用）。
  *
- * @param route 实例路由表；NULL = 清空。
+ * @param route die → 实例指针表（长度 FTL_DIE_MAX）；NULL = 清空。
  */
-void ftl_op_route_set(ftl_ctx_t *route[][CE_NUM][LUN_NUM]);
+void ftl_op_route_set(ftl_ctx_t *const *route);
 
 /**
- * @brief 按 (ch,ce,lun) 取实例（未设置返回 NULL；越界断言）
+ * @brief 按 (ch,ce,lun) 取实例（坐标不存在 / 未设置返回 NULL；越界断言）
  *
  * @param ch 通道号。
  * @param ce 片选号。
  * @param lun LUN 号。
  *
- * @return 实例指针；未设置返回 NULL。
+ * @return 实例指针；稀疏拓扑空洞或未设置返回 NULL。
  */
 ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun);
 
 /**
  * @brief 按全局 L2P region 取 owner 实例。
- * dim = global_region % FTL_DIM_TOTAL，再用 l2p_cache.h 的 ftl_dim_ch/ce/lun 分解后转
- * ftl_op_route_get。共享 L2P cache 的 owner 解析用它，避免把 region→die 的分解
- * 散落在 cache/CLI 各处（H13）；分解式只有 ftl_dim_* 一份实现（C9）。
+ * die = global_region % DIE_MAX，直接查 die 路由表。共享 L2P cache 的
+ * owner 解析用它，避免把 region→die 的分解散落在 cache/CLI 各处（H13）。
  *
  * @param global_region 全局 L2P region 号。
  *

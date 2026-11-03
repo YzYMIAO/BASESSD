@@ -181,13 +181,13 @@ static void boot_report_console(void)
  *
  * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
  * 装配挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
- * DIM=1：`.dtcm_data` 67,832B / ITCM 61,296B（release）、62,064B（debug）；
+ * 单 die：`.dtcm_data` 67,832B / ITCM 61,296B（release）、62,064B（debug）；
  * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
  * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
  * 完整容量由 linker ASSERT 核对。栈预留按历史实测 5,448B + 余量取 20KB。
  * ══════════════════════════════════════════════════════════════════ */
 /* DTCM 热数据定义在 ftl.c；链接脚本按整个目标文件放 .dtcm_data。 */
-extern ftl_ctx_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+extern ftl_ctx_t g_ftl[FTL_DIE_MAX];
 
 /* 共享 L2P cache：同一 (ch,ce) 下所有 LUN 共用一份（阶段 B）。
  * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
@@ -196,22 +196,22 @@ static l2p_cache_t g_l2p_cache[CH_NUM][CE_NUM];
 /* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。
  * 五张表**各自独立定义**，每张可单独换 section/内存域；当前全部落 SRAM12，
  * 将来要挪某一张只改该行的 section 宏，不动别的表。 */
-static bst_block_t    g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD           g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD           g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
-static WORD           g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
-static super_block_t  g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
-static cp_handle_t    g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
-extern l2p_jrn_t      g_ftl_journal[FTL_DIM_TOTAL];
-extern md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
+static bst_block_t    g_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD           g_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD           g_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD           g_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_t  g_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+static cp_handle_t    g_ftl_checkpoint_handle[FTL_DIE_MAX] SRAM3_DATA;
+extern l2p_jrn_t      g_ftl_journal[FTL_DIE_MAX];
+extern md_dir_cache_t g_ftl_md[FTL_DIE_MAX];
 
 /* 装配挂载：三块大状态挂 storage 指针；wbuf 落 DTCM，migrate/rr 留 AXI。
  * 挂指针**不减少总 RAM**，只让 ftl_ctx_t 变小、放置可控、handle 形态统一。 */
-static mig_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
-extern wb_handle_t  g_ftl_wbuf[FTL_DIM_TOTAL];
-static BYTE         g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
+static mig_handle_t g_ftl_migrate[FTL_DIE_MAX];
+extern wb_handle_t  g_ftl_wbuf[FTL_DIE_MAX];
+static BYTE         g_ftl_rr_page_scratch[FTL_DIE_MAX][FTL_READ_USER_SIZE];
 
-ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
+ssd_controller_t g_ctrl; /* controller 路由表（按 compact die 号收 g_ftl 指针）；非 static：
                           * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
 static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
 
@@ -238,74 +238,96 @@ _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4"
 _Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) + sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
 _Static_assert(sizeof(g_ftl_checkpoint_handle) <= BOARD_SRAM3_SIZE, "cp_handle 超出 SRAM3");
 
-/* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
+/* die → 实例指针表（类型匹配 ssd_controller_init / ftl_op_route_set 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
  * -Wincompatible-pointer-types 恒报），此处显式构造。 */
-static ftl_ctx_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
+static ftl_ctx_t *g_ftl_ptrs[FTL_DIE_MAX];
 
-/* 共享 L2P cache 的 owner 端口表（docs §4.7）：每 dim 一份，只暴露
- * {dim, metadata_dir, alloc, topo}，不把整个 ftl_context 交给 l2p_cache。
+/* die → FTL 实例：g_ftl 与路由表都按 compact die 号索引。 */
+static ftl_ctx_t *ssd_ftl_die_get(ftl_die_id_t die)
+{
+    ASSERT(die < DIE_MAX);
+    return &g_ftl[die];
+}
+
+static ftl_topo_t ssd_ftl_die_topo(ftl_die_id_t die)
+{
+    ftl_topo_t topo;
+
+    topo.ch  = die_2_ch(die);
+    topo.ce  = die_2_ce(die);
+    topo.lun = die_2_lun(die);
+
+    return topo;
+}
+
+/* 共享 L2P cache 的 owner 端口表（docs §4.7）：每 die 一份，只暴露
+ * {die, metadata_dir, alloc, topo}，不把整个 ftl_context 交给 l2p_cache。
  * 由 ssd_ftl_boot 在 ftl_init 之后填充；生命周期覆盖全程。 */
-static l2p_owner_t g_l2p_owner[FTL_DIM_TOTAL];
+static l2p_owner_t g_l2p_owner[FTL_DIE_MAX];
 
 /*
  * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
  *
  * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
- * 复用 ftl_op_route_get_region（与 lba_route_* 同一套公式，避免第二套坐标）。
+ * 复用 ftl_op_route_get_region（与 lba_2_* 同一套公式，避免第二套坐标）。
  */
 static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
 {
     (void)ctx;
 
-    const DWORD dim = global_region % FTL_DIM_TOTAL;
+    ASSERT(DIE_MAX != 0U);
 
-    ASSERT(dim < FTL_DIM_TOTAL);
-    ASSERT(g_l2p_owner[dim].metadata_dir != NULL);
+    const DWORD die = global_region % DIE_MAX;
 
-    return &g_l2p_owner[dim];
+    ASSERT(die < DIE_MAX);
+    ASSERT(g_l2p_owner[die].metadata_dir != NULL);
+
+    return &g_l2p_owner[die];
 }
 
 /*
- * ssd_ftl_boot - 初始化单个 (ch,ce,lun) FTL 实例
+ * ssd_ftl_boot - 初始化单个 die 的 FTL 实例
  *
  * 顺序：ftl_init（内部含 bbt_init 标坏块）→ 遍历 BST 非坏块回填 free pool
  *       （alc_init 不填 free pool、bbt 只标坏块——不回填则首次写失败）
  *       → pfr_boot_recovery → 日志。
  *
- * @param ch/ce/lun 本实例绑定拓扑
+ * @param die 紧凑 die 号（g_die_table 给出对应 (ch,ce,lun)）
  * @return 0 成功，负值失败
  */
-static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
+static ftl_status_e ssd_ftl_boot(ftl_die_id_t die)
 {
-    ftl_ctx_t        *ftl = &g_ftl[ch][ce][lun];
+    ASSERT(die < DIE_MAX);
+
+    ftl_ctx_t        *ftl = &g_ftl[die];
     alc_t            *alloc;
     pfr_boot_result_t result;
 
     ftl_topo_t topo;
-    topo.ch  = ch;
-    topo.ce  = ce;
-    topo.lun = lun;
+    topo.ch  = die_2_ch(die);
+    topo.ce  = die_2_ce(die);
+    topo.lun = die_2_lun(die);
 
-    const DWORD dim = ftl_topo_dim(topo);
+    const BYTE ch  = topo.ch;
+    const BYTE ce  = topo.ce;
+    const BYTE lun = topo.lun;
 
     ftl_table_refs_t refs;
-    refs.blocks         = g_ftl_blocks[dim];
-    refs.free_blocks    = g_ftl_free_blocks[dim];
-    refs.op_blocks      = g_ftl_op_blocks[dim];
-    refs.spare_blocks   = g_ftl_spare_blocks[dim];
-    refs.closed_sb_list = g_ftl_closed_sb_list[dim];
+    refs.blocks         = g_ftl_blocks[die];
+    refs.free_blocks    = g_ftl_free_blocks[die];
+    refs.op_blocks      = g_ftl_op_blocks[die];
+    refs.spare_blocks   = g_ftl_spare_blocks[die];
+    refs.closed_sb_list = g_ftl_closed_sb_list[die];
 
     ftl_storage_t storage;
     storage.table_refs      = &refs;
-    storage.metadata_dir    = &g_ftl_md[dim];
-    storage.journal         = &g_ftl_journal[dim];
-    storage.cp_handle       = &g_ftl_checkpoint_handle[dim];
-    storage.migrate         = &g_ftl_migrate[dim];
-    storage.wbuf            = &g_ftl_wbuf[dim];
-    storage.rr_page_scratch = g_ftl_rr_page_scratch[dim];
-
-    ASSERT(dim < FTL_DIM_TOTAL);
+    storage.metadata_dir    = &g_ftl_md[die];
+    storage.journal         = &g_ftl_journal[die];
+    storage.cp_handle       = &g_ftl_checkpoint_handle[die];
+    storage.migrate         = &g_ftl_migrate[die];
+    storage.wbuf            = &g_ftl_wbuf[die];
+    storage.rr_page_scratch = g_ftl_rr_page_scratch[die];
 
     if (ftl_init(ftl, topo, &g_l2p_cache[ch][ce], &storage) != FTL_OK)
     {
@@ -318,12 +340,12 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
     /* L2P owner 端口：必须在任何 cache 访问（含下面的格式化/恢复）之前就绪。 */
     l2p_owner_t owner;
 
-    owner.dim          = dim;
+    owner.die          = die;
     owner.metadata_dir = ftl->metadata_dir;
     owner.alloc        = &ftl->alloc;
     owner.topo         = ftl->topo;
     owner.journal      = ftl->journal; /* WAL 水位闸门（RISK-L2P-09） */
-    g_l2p_owner[dim]   = owner;
+    g_l2p_owner[die]   = owner;
 
     /* debug-only：初始化契约自检。必须在 owner 登记之后、任何 cache 访问之前——
      * 校验全部句柄/端口绑定、topology 副本与 owner/route 身份。
@@ -408,53 +430,42 @@ static DWORD ssd_ftl_host_lba_max(void)
 {
     DWORD cap_blocks = UINT32_MAX;
 
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        const ftl_ctx_t *ftl              = ssd_ftl_die_get(die);
+        const ftl_topo_t topo             = ssd_ftl_die_topo(die);
+        DWORD            plane_usable_min = UINT32_MAX;
+
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            DWORD good = 0U;
+
+            for (WORD block = FTL_METADATA_AREA_END; block < BLOCKS_PER_PLANE; block++)
             {
-                const ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+                const WORD g = ftl_gblock(plane, block);
 
-                if (ftl == NULL)
+                if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
                 {
-                    continue;
-                }
-
-                DWORD plane_usable_min = UINT32_MAX;
-
-                for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-                {
-                    DWORD good = 0U;
-
-                    for (WORD block = FTL_METADATA_AREA_END; block < BLOCKS_PER_PLANE; block++)
-                    {
-                        const WORD g = ftl_gblock(plane, block);
-
-                        if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
-                        {
-                            good++;
-                        }
-                    }
-
-                    const DWORD reserved = FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE;
-                    const DWORD usable   = (good > reserved) ? (good - reserved) : 0U;
-
-                    if (usable < plane_usable_min)
-                    {
-                        plane_usable_min = usable;
-                    }
-                }
-
-                const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
-
-                LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", ch, ce, lun, plane_usable_min, instance_blocks);
-
-                if (instance_blocks < cap_blocks)
-                {
-                    cap_blocks = instance_blocks;
+                    good++;
                 }
             }
+
+            const DWORD reserved = FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE;
+            const DWORD usable   = (good > reserved) ? (good - reserved) : 0U;
+
+            if (usable < plane_usable_min)
+            {
+                plane_usable_min = usable;
+            }
+        }
+
+        const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
+
+        LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", topo.ch, topo.ce, topo.lun, plane_usable_min, instance_blocks);
+
+        if (instance_blocks < cap_blocks)
+        {
+            cap_blocks = instance_blocks;
         }
     }
 
@@ -463,7 +474,7 @@ static DWORD ssd_ftl_host_lba_max(void)
         cap_blocks = 0U;
     }
 
-    QWORD lba = (QWORD)cap_blocks * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL;
+    QWORD lba = (QWORD)cap_blocks * PAGES_PER_BLOCK * CW_NUM * DIE_MAX;
 
     if (lba > FTL_LBA_MAX)
     {
@@ -498,22 +509,12 @@ static void ssd_ftl_stat_task(void *context, DWORD now_ms)
 
     const DWORD uptime_ms = delay_now_ms();
 
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                const ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+        const ftl_ctx_t *ftl  = ssd_ftl_die_get(die);
+        const ftl_topo_t topo = ssd_ftl_die_topo(die);
 
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-
-                LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
-            }
-        }
+        LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
     }
 }
 
@@ -546,37 +547,26 @@ static void ssd_ftl_bg_tick_task(void *context, DWORD now_ms)
         s_bbt_last_ms = now;
     }
 
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        ftl_ctx_t *ftl = ssd_ftl_die_get(die);
+
+        bg_scheduler_refill(&ftl->bg);
+        ftl->l2p_flush_due = 1U;
+        cp_timer_poll(ftl->cp_handle);
+
+        if (bbt_due != false)
         {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
-
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-
-                bg_scheduler_refill(&ftl->bg);
-                ftl->l2p_flush_due = 1U;
-                cp_timer_poll(ftl->cp_handle);
-
-                if (bbt_due != false)
-                {
-                    ftl->alloc.bbt.flush_due = 1U;
-                }
-            }
+            ftl->alloc.bbt.flush_due = 1U;
         }
     }
 }
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
  *
- *   ① 建 g_ftl_ptrs 三维指针表 + ftl_op_route_set —— **必须早于逐实例 boot**，
+ *   ① 建 g_ftl_ptrs die 指针表 + ftl_op_route_set —— **必须早于逐实例 boot**，
  *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_read_sync 抽完成表）。
- *   ② 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
+ *   ② 逐 die boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
  *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
  *   ④ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
  */
@@ -584,7 +574,6 @@ static void ssd_ftl_boot_all(void)
 {
     BYTE         ch;
     BYTE         ce;
-    BYTE         lun;
     int          boot_ok = 1;
     ssd_status_e ctrl_ret;
 
@@ -600,22 +589,28 @@ static void ssd_ftl_boot_all(void)
      *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
      *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
      *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
+    /* ① 拓扑建表：板级扫描结果（g_nand_targets，armed 之前已填）→ 紧凑 die 表。
+     * 必须在逐实例 boot 之前；纯 RAM，不碰硬件。
+     * Phase 2b：L2P/容量按运行时 DIE_MAX；稀疏拓扑允许部分 (ch,ce,lun) 槽为 NULL。 */
+    if (!ftl_topology_build(g_nand_targets))
+    {
+        LOGE("[FTL ] topology build failed\r\n");
+        return;
+    }
+
     ftl_global_init();
     ftl_op_init();
-    for (ch = 0U; ch < CH_NUM; ch++)
+    memset(g_ftl_ptrs, 0, sizeof(g_ftl_ptrs)); /* 稀疏拓扑：缺失 die 保持 NULL */
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                g_ftl_ptrs[ch][ce][lun] = &g_ftl[ch][ce][lun];
+        ftl_ctx_t *ftl = &g_ftl[die];
 
-                /* 预绑 controller 的实例指针：boot 失败时 ssd_controller_init 不会执行，
-                 * 但 CLI 的 `bbt --erase` 仍需要实例才能擦除旧/坏介质。
-                 * boot 成功后 ssd_controller_init 会重新校验并绑定同一组指针。 */
-                g_ctrl.ftl[ch][ce][lun] = g_ftl_ptrs[ch][ce][lun];
-            }
-        }
+        g_ftl_ptrs[die] = ftl;
+
+        /* 预绑 controller 的实例指针：boot 失败时 ssd_controller_init 不会执行，
+         * 但 CLI 的 `bbt --erase` 仍需要实例才能擦除旧/坏介质。
+         * boot 成功后 ssd_controller_init 会重新校验并绑定同一组指针。 */
+        g_ctrl.ftl[die] = ftl;
     }
     ftl_op_route_set(g_ftl_ptrs);
 
@@ -630,18 +625,12 @@ static void ssd_ftl_boot_all(void)
         }
     }
 
-    /* ② 逐实例 boot */
-    for (ch = 0U; ch < CH_NUM; ch++)
+    /* ② 逐 die boot */
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        if (ssd_ftl_boot(die) != FTL_OK)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                if (ssd_ftl_boot(ch, ce, lun) != FTL_OK)
-                {
-                    boot_ok = 0;
-                }
-            }
+            boot_ok = 0;
         }
     }
 
@@ -654,17 +643,17 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
-    /* ②.5 路由 ↔ dim 的往返自检（owner 解析的根基）：
-     * ftl_topo_dim(route(dim)) 必须等于 dim；公式漂移会让每次 cache 操作找不到 owner。
+    /* ②.5 路由 ↔ die 的往返自检（owner 解析的根基）：
+     * topo_2_die(route(die)) 必须等于 die；公式漂移会让每次 cache 操作找不到 owner。
      * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
-    for (DWORD dim = 0U; dim < FTL_DIM_TOTAL; dim++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        const ftl_ctx_t *owner = ftl_op_route_get_region(dim);
+        const ftl_ctx_t *owner = ftl_op_route_get_region(die);
 
-        if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
+        if ((owner == NULL) || (topo_2_die(owner->topo) != die))
         {
-            LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", dim);
+            LOGE("[FTL ] route/die mismatch die=%hu\r\n", die);
             ftl_op_route_set(NULL);
             return;
         }
@@ -826,19 +815,15 @@ int main(void)
     /* FTL 周期求值（GC/WL/predict）：每实例一个 timer 任务，ctx = mig_handle。 */
     if (g_ftl_ready != 0)
     {
-        for (BYTE ch = 0U; ch < CH_NUM; ch++)
+        for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
         {
-            for (BYTE ce = 0U; ce < CE_NUM; ce++)
-            {
-                for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-                {
-                    ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+            ftl_ctx_t *ftl = ssd_ftl_die_get(die);
 
-                    if ((ftl != NULL) && (!mig_timer_register(ftl->mig_handle)))
-                    {
-                        LOGE("[SYS ] migrate timer register failed ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
-                    }
-                }
+            if (!mig_timer_register(ftl->mig_handle))
+            {
+                const ftl_topo_t topo = ssd_ftl_die_topo(die);
+
+                LOGE("[SYS ] migrate timer register failed ch=%hhu ce=%hhu lun=%hhu\r\n", topo.ch, topo.ce, topo.lun);
             }
         }
     }
@@ -862,23 +847,13 @@ int main(void)
         cli_service_poll();
         if (g_ftl_ready)
         {
-            BYTE ch;
-            BYTE ce;
-            BYTE lun;
-
             /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
             ftl_service_pump();
 
-            /* ② 逐实例后台：host 补发 + 后台调度 */
-            for (ch = 0U; ch < CH_NUM; ch++)
+            /* ② 逐 die 后台：host 补发 + 后台调度 */
+            for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
             {
-                for (ce = 0U; ce < CE_NUM; ce++)
-                {
-                    for (lun = 0U; lun < LUN_NUM; lun++)
-                    {
-                        ftl_service(&g_ftl[ch][ce][lun]);
-                    }
-                }
+                ftl_service(ssd_ftl_die_get(die));
             }
         }
         else

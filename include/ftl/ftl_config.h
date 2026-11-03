@@ -22,14 +22,14 @@
  *   PAGES_PER_BLOCK    64       每块页数
  *   PLANE_NUM          2        每 die plane 数
  *   BLOCKS_PER_PLANE   2048     每 plane 块数
- *   LUN_NUM            1        每片选 LUN 数
+ *   LUN_NUM            1        器件每片选 LUN 数（ONFI logical_units 的编译期上界）
  *   CW_NUM             4        每页 codeword 数（= 每页扇区数 = 映射单元数）
  *   FC_BUFFER_USER_SIZE 512 B   每 CW 用户数据区（fc.h；= CW_SIZE − 2×8B 头尾）
  *
  * ── 容量公式（怎么算出来）──
  *   CW 总数    = FTL_BLOCK_TOTAL × PAGES_PER_BLOCK × CW_NUM        （每实例）
  *   region 数  = CW 总数 ÷ 每 region 条目数                        （每实例）
- *   条目总数   = region 数 × 每 region 条目数 × FTL_DIM_TOTAL       （= FTL_IU_TOTAL）
+ *   条目总数   = region 数 × 每 region 条目数 × DIE_MAX       （= FTL_IU_TOTAL）
  *   映射容量   = 条目总数 × 每 CW 用户字节
  *   主机容量   = 数据块数 × 每块 CW 数 × 每 CW 用户字节
  *                （数据块 = 总块数 − 固定元数据 − OP − Spare；见 ftl.h FTL_LBA_MAX）
@@ -48,6 +48,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* 静态容量（数组上限）与运行期实际 die 数（扫描后只读）。
+ * FTL_DIE_MAX 只用于数组维度 / 静态断言；DIE_MAX 是运行时调度坐标。 */
+#define FTL_DIE_MAX (CH_MAX * CE_MAX * LUN_MAX)
+extern WORD g_die_count;
+#define DIE_MAX (g_die_count)
 
 /* ══════════════════════════════════════════════════════════════════
  * 一、几何量（全部由 nand_config.h 推出，不写死）
@@ -68,9 +74,8 @@
 /* 每 region 字节数 = 一页主区 */
 #define L2P_REGION_SIZE (L2P_ENTRIES_PER_REGION * sizeof(DWORD))
 
-/* 设备维度总数 = 通道 × 片选 × 每片选 LUN 数
- * —— 每个 (ch,ce,lun) 是一个**独立 FTL 实例**（分片模型，见 l2p_cache.h 路由）*/
-#define FTL_DIM_TOTAL (CH_NUM * CE_NUM * LUN_NUM)
+/* 设备维度总数在运行时由扫描决定（DIE_MAX = g_die_count）；
+ * 每个实际存在的 die 是一个独立 FTL 实例（分片模型，见 l2p_cache.h 路由）。 */
 
 /* 每 (ch,ce,lun) 实例的 CW 总数 = 块数 × 每块页数 × 每页 CW 数 */
 #define FTL_CW_TOTAL (FTL_BLOCK_TOTAL * PAGES_PER_BLOCK * CW_NUM)
@@ -84,7 +89,7 @@
  * —— 每实例条目数 × 设备维度数。
  * ⚠ 这不是主机可见容量：它包含固定元数据块、OP 预留与 Spare。
  *   主机容量见 ftl.h 的 FTL_LBA_MAX（扣除这些块之后的 437 MiB）。 */
-#define FTL_IU_TOTAL ((QWORD)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * FTL_DIM_TOTAL)
+#define FTL_IU_TOTAL ((QWORD)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * DIE_MAX)
 
 /* 映射表寻址容量（物理 CW 覆盖的字节数）——同样不是主机可见容量。
  * 主机可见容量用 ftl.h 的 FTL_HOST_CAPACITY_BYTES。 */
@@ -106,8 +111,8 @@ _Static_assert((1UL << L2P_REGION_SHIFT) == L2P_ENTRIES_PER_REGION, "L2P_REGION_
 /* 映射单元（CW 用户区）与 CW 槽几何自洽：用户区 + 前 8B(META+CRC) + 后 8B(PARITY) == CW_SIZE */
 _Static_assert(FTL_IU_BYTES + (2U * FC_BUFFER_USER_OFFSET) == CW_SIZE, "CW 用户区与 CW_SIZE 不自洽");
 
-/* 维度数至少为 1 */
-_Static_assert(FTL_DIM_TOTAL >= 1U, "设备维度数非法");
+/* 静态容量至少为 1 */
+_Static_assert(FTL_DIE_MAX >= 1U, "设备维度数非法");
 
 /* LBA 低位按「2 的幂」做掩码/移位（ftl_lba_page_base 的 ~(CW_NUM-1)、
  * ftl_lba_plane 的 (PLANE_NUM-1)）——几何量不满足时静默算错地址，故编译期钉死。 */
@@ -784,6 +789,52 @@ static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
         bitmap &= bitmap - 1U; /* 清最低置位 */
     }
     return n;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ * 紧凑 die 表（扫描结果的 FTL 调度坐标）
+ *
+ * 板级扫描（nand_scan_targets）只给出“哪些 (ch,ce) target 存在、logical_units
+ * 多少”；FTL 据此给实际存在的 LUN 分配紧凑 die 号，并维护两张互为逆映射的表：
+ *
+ *   g_chcelun_table[ch][ce][lun] → 紧凑 die 号；FTL_DIE_INVALID = 不存在
+ *   g_die_table[die]             → ftl_topo_t{ch,ce,lun}；字段全 0xFF = 未分配
+ *
+ * die 是软件调度坐标；FC/NAND 提交仍用 (ch,ce,lun)，在提交边界由 g_die_table 转换。
+ *
+ * 编号顺序 = ch 最快、lun 最慢（与 topo_2_die 一致）：满配矩形拓扑下
+ * die == topo_2_die(topo)，避免第二套扁平坐标（C9）。稀疏拓扑时 die 紧凑。
+ * ══════════════════════════════════════════════════════════════ */
+
+/* WORD 元素 + 0xFFFF 哨兵；若 FTL_DIE_MAX 逼近 0xFFFF，改 DWORD + 0xFFFFFFFF。 */
+#define FTL_DIE_INVALID ((WORD)0xFFFFU)
+_Static_assert(FTL_DIE_MAX < FTL_DIE_INVALID, "FTL_DIE_MAX 超出 WORD 哨兵范围");
+
+/* g_die_table 未分配尾项的 ch/ce/lun 字段值（BYTE）。 */
+#define FTL_TOPO_FIELD_INVALID ((BYTE)0xFFU)
+
+typedef WORD ftl_die_id_t; /* 紧凑 die 号 */
+
+extern WORD       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
+extern ftl_topo_t g_die_table[FTL_DIE_MAX];
+
+/* die → 物理坐标：唯一分解点；未分配尾项字段为 0xFF，不得访问。 */
+static inline BYTE die_2_ch(ftl_die_id_t die)
+{
+    ASSERT(die < DIE_MAX);
+    return g_die_table[die].ch;
+}
+
+static inline BYTE die_2_ce(ftl_die_id_t die)
+{
+    ASSERT(die < DIE_MAX);
+    return g_die_table[die].ce;
+}
+
+static inline BYTE die_2_lun(ftl_die_id_t die)
+{
+    ASSERT(die < DIE_MAX);
+    return g_die_table[die].lun;
 }
 
 #endif /* FTL_CONFIG_H */

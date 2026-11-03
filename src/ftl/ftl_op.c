@@ -30,7 +30,7 @@
 #include "fc.h"               /* fc_submit / fc_poll_completion / fc_command_release */
 #include "ftl.h"              /* ftl_ctx_t */
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
-#include "l2p_cache.h"        /* ftl_dim_ch/ce/lun（dim → 坐标的唯一分解点） */
+#include "l2p_cache.h"        /* die_2_ch/ce/lun（die → 坐标的唯一分解点） */
 #include "log.h"
 
 #include <string.h>
@@ -48,8 +48,9 @@ static void ftl_sync_wait_callback(ftl_ctx_t *ftl, const fc_command_status_t *co
 
 static ftl_op_ctx_entry_t g_op_ctx[FTL_OP_CTX_TABLE_SIZE];
 
-// 实例路由表：按命令 ch/ce/lun → FTL 实例。
-static ftl_ctx_t *g_op_route[CH_NUM][CE_NUM][LUN_NUM];
+// 实例路由表：按紧凑 die 号 → FTL 实例。命令完成仍带 (ch,ce,lun)，
+// 由 chcelun_2_die() 唯一漏斗转换后查表。
+static ftl_ctx_t *g_op_route[FTL_DIE_MAX];
 
 // 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可。
 static BYTE g_dispatch_depth = 0U;
@@ -185,58 +186,60 @@ WORD ftl_op_ctx_count(void)
 
 // 实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让
 // g_op_route 成为唯一持有者，避免悬垂。
-void ftl_op_route_set(ftl_ctx_t *route[][CE_NUM][LUN_NUM])
+void ftl_op_route_set(ftl_ctx_t *const *route)
 {
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (WORD die = 0U; die < FTL_DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                g_op_route[ch][ce][lun] = (route != NULL) ? route[ch][ce][lun] : NULL;
-            }
-        }
+        g_op_route[die] = (route != NULL) ? route[die] : NULL;
     }
 }
 
 // 实现要点：越界属编程错误（坐标由 FTL 从 PBA 灌入并经 pba_is_valid 校验）⇒ ASSERT。
+// 坐标查不到 die（稀疏拓扑的空洞）不是编程错误：返回 NULL，由被调方按“无归属”处理。
 // 返回 NULL 同属编程错误（route_set 漏调）——但**不在此处断言**：判据在
 // **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明），
 // 此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
 // 不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
 ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
-    return g_op_route[ch][ce][lun];
+    ASSERT((ch < CH_MAX) && (ce < CE_MAX) && (lun < LUN_MAX));
+
+    const DWORD die = chcelun_2_die(ch, ce, lun);
+
+    if ((die == FTL_DIE_INVALID) || (die >= DIE_MAX))
+    {
+        return NULL;
+    }
+    return g_op_route[die];
 }
 
-// 实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
-// lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
+/* die → 本实例路由：唯一坐标就是 die，不再经 (ch,ce,lun) 分解。 */
+static const ftl_ctx_t *ftl_op_route_get_die(ftl_die_id_t die)
+{
+    ASSERT(die < DIE_MAX);
+    return g_op_route[die];
+}
+
+// 实现要点：全局 region 的 die 坐标 = region % DIE_MAX（与 lba_2_die 同一公式）。
 ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
 {
-    const DWORD dim = global_region % FTL_DIM_TOTAL;
+    ASSERT(DIE_MAX != 0U);
 
-    return ftl_op_route_get(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
+    return g_op_route[global_region % DIE_MAX];
 }
 
 // 任一实例有 cache 序列未收尾（active 或 draining）；deadline 挂起判据必须把 draining 算进来。
 bool ftl_op_cache_seq_active(void)
 {
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                const ftl_ctx_t *ftl = g_op_route[ch][ce][lun];
+        const ftl_ctx_t *ftl = ftl_op_route_get_die(die);
 
-                // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
-                // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
-                if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)))
-                {
-                    return true;
-                }
-            }
+        // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
+        // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
+        if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)))
+        {
+            return true;
         }
     }
 
@@ -250,28 +253,22 @@ bool ftl_op_cache_seq_active(void)
  */
 static bool ftl_op_host_groups_inflight(void)
 {
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        const ftl_ctx_t *ftl = ftl_op_route_get_die(die);
+
+        if (ftl == NULL)
         {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            continue;
+        }
+
+        for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
+        {
+            const pend_group_t *g = &ftl->pending.groups[gi];
+
+            if ((g->used == true) && ((g->outstanding != 0U) || (g->next < g->total)))
             {
-                const ftl_ctx_t *ftl = g_op_route[ch][ce][lun];
-
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-
-                for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
-                {
-                    const pend_group_t *g = &ftl->pending.groups[gi];
-
-                    if ((g->used == true) && ((g->outstanding != 0U) || (g->next < g->total)))
-                    {
-                        return true;
-                    }
-                }
+                return true;
             }
         }
     }

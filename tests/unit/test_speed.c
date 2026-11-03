@@ -6,7 +6,8 @@
  *   /speed/ftl_rw     —— FTL host API 读写 100 gblock（两档：normal/cache）
  *
  * 计时口径：
- *   · FC：每块用 DWT 计时后累加（避免 CYCCNT 约 10.7 s 回绕）；擦除单独统计，不计入写速度。
+ *   · FC：每块用 SysTick µs 计时后累加（`delay_time_now_us` / `delay_time_since_us`）；
+ *     擦除单独统计，不计入写速度。
  *   · FTL：用 ftl_job_now_ms()（1 ms）计整个 phase；format / flush 单列，不计入 KB/s。
  *
  * 输出：**每个读写用例的速度结果行**（`SPEED fc mode=…` / `SPEED ftl chunk=…`）
@@ -359,9 +360,9 @@ static bool spd_fc_drain(DWORD *errors, fc_resource_stats_t *peak)
     return true;
 }
 
-/* 一个 phase：block → ch → ce → lun → page。每块结束 drain 到在途归零：
+/* 一个 phase：block → die → page。每块结束 drain 到在途归零：
  *   · cache 序列边界明确（FIRST..END 不跨块）；
- *   · 本块 DWT 计时不会跨 CYCCNT 回绕。
+ *   · 本块计时区间远小于 32 位 µs 回绕周期（~71.6 min），差值比较安全。
  * 池上限约 16 条 multi-plane 页命令（8 desc + 8 buf/条），块内仍会把在途顶到上限。 */
 static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out, DWORD *errors, fc_resource_stats_t *peak)
 {
@@ -378,67 +379,65 @@ static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[S
 
         spd_clock_start(&clock);
 
-        for (BYTE ch = 0U; (ch < (BYTE)CH_NUM) && ok; ch++)
+        for (ftl_die_id_t die = 0U; (die < DIE_MAX) && ok; die++)
         {
-            for (BYTE ce = 0U; (ce < (BYTE)CE_NUM) && ok; ce++)
-            {
-                for (BYTE lun = 0U; (lun < (BYTE)LUN_NUM) && ok; lun++)
-                {
-                    for (BYTE page = 0U; (page < (BYTE)PAGES_PER_BLOCK) && ok; page++)
-                    {
-                        for (;;)
-                        {
-                            spd_fc_slot_t *slot = spd_fc_slot_alloc();
-                            fc_command_t  *cmd;
+            const BYTE ch  = die_2_ch(die);
+            const BYTE ce  = die_2_ce(die);
+            const BYTE lun = die_2_lun(die);
 
-                            if (slot == NULL)
+            for (BYTE page = 0U; (page < (BYTE)PAGES_PER_BLOCK) && ok; page++)
+            {
+                for (;;)
+                {
+                    spd_fc_slot_t *slot = spd_fc_slot_alloc();
+                    fc_command_t  *cmd;
+
+                    if (slot == NULL)
+                    {
+                        (void)fc_service();
+                        (void)spd_fc_reap(errors, peak);
+                        if (++guard > SPD_FC_DRAIN_GUARD)
+                        {
+                            (*errors)++;
+                            ok = false;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    cmd = spd_fc_try_build(mode, write, blocks[b], page, ch, ce, lun);
+                    if (cmd != NULL)
+                    {
+                        if (fc_submit(cmd) == FC_STATUS_OK)
+                        {
+                            slot->cmd    = cmd;
+                            slot->block  = blocks[b];
+                            slot->page   = page;
+                            slot->ch     = ch;
+                            slot->ce     = ce;
+                            slot->lun    = lun;
+                            slot->verify = !write;
+                            s_fc_inflight++;
+                            since_reap++;
+
+                            if (since_reap >= (WORD)SPD_FC_REAP_EVERY)
                             {
                                 (void)fc_service();
                                 (void)spd_fc_reap(errors, peak);
-                                if (++guard > SPD_FC_DRAIN_GUARD)
-                                {
-                                    (*errors)++;
-                                    ok = false;
-                                    break;
-                                }
-                                continue;
+                                since_reap = 0U;
                             }
-
-                            cmd = spd_fc_try_build(mode, write, blocks[b], page, ch, ce, lun);
-                            if (cmd != NULL)
-                            {
-                                if (fc_submit(cmd) == FC_STATUS_OK)
-                                {
-                                    slot->cmd    = cmd;
-                                    slot->block  = blocks[b];
-                                    slot->page   = page;
-                                    slot->ch     = ch;
-                                    slot->ce     = ce;
-                                    slot->lun    = lun;
-                                    slot->verify = !write;
-                                    s_fc_inflight++;
-                                    since_reap++;
-
-                                    if (since_reap >= (WORD)SPD_FC_REAP_EVERY)
-                                    {
-                                        (void)fc_service();
-                                        (void)spd_fc_reap(errors, peak);
-                                        since_reap = 0U;
-                                    }
-                                    break; /* 本页已提交 */
-                                }
-                                (void)fc_command_release(cmd);
-                            }
-
-                            (void)fc_service();
-                            (void)spd_fc_reap(errors, peak);
-                            if (++guard > SPD_FC_DRAIN_GUARD)
-                            {
-                                (*errors)++;
-                                ok = false;
-                                break;
-                            }
+                            break; /* 本页已提交 */
                         }
+                        (void)fc_command_release(cmd);
+                    }
+
+                    (void)fc_service();
+                    (void)spd_fc_reap(errors, peak);
+                    if (++guard > SPD_FC_DRAIN_GUARD)
+                    {
+                        (*errors)++;
+                        ok = false;
+                        break;
                     }
                 }
             }
@@ -479,7 +478,7 @@ static bool spd_fc_pair_is_good(const ftl_ctx_t *ftl, WORD block)
 
 static WORD spd_fc_pick_blocks(WORD *out)
 {
-    const ftl_ctx_t *ftl = g_ctrl.ftl[0][0][0];
+    const ftl_ctx_t *ftl = g_ctrl.ftl[0];
     WORD             n   = 0U;
 
     /* 先按用户要求从 50% 处往上；不够再回扫 98..（避开固定元数据 0..41）。 */
@@ -559,7 +558,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
-    ftl_ctx_t *ftl           = g_ctrl.ftl[0][0][0];
+    ftl_ctx_t *ftl           = g_ctrl.ftl[0];
     const bool saved_suspend = (ftl != NULL) ? ftl->bg_suspend : false;
 
     /* 原始擦写期间禁止 FTL 后台/分配器动作；测试返回后由用户 format+POR 收尾。 */
@@ -779,7 +778,7 @@ static void spd_ftl_note_data_error(bool write, DWORD chunk, const spd_ftl_req_t
     /* 诊断（RISK-CACHE-26）：当场问一次 L2P——映射丢了（INVALID）还是映射在但页内容为 0。
      * 只在失败路径上执行；`l2p_read` 可能触发一次加载，属可接受的代价。 */
     {
-        ftl_ctx_t *ftl = g_ctrl.ftl[0][0][0];
+        ftl_ctx_t *ftl = g_ctrl.ftl[0];
 
         if ((ftl != NULL) && (ftl->cache != NULL))
         {
@@ -1020,6 +1019,7 @@ static void *spd_ftl_setup(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    ftl_ut_topology_init();
     (void)ftl_ut_live();
     return NULL;
 }

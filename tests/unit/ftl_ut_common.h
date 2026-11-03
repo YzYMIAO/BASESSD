@@ -25,8 +25,12 @@ void ftl_ut_trace_detail(const char *format, ...);
 MUNIT_PRINTF(1, 2)
 void ftl_ut_result(const char *format, ...);
 
-/* 活实例（g_ctrl.ftl[0][0][0]）；结构性恒非空，取不到直接断言失败。 */
+/* 活实例（g_ctrl.ftl[0]，die 0）；结构性恒非空，取不到直接断言失败。 */
 ftl_ctx_t *ftl_ut_live(void);
+
+/* 按 die 重建 UT 拓扑（单 target / 单 LUN 的测试坐标）。
+ * 每个套件 setup 调一次：UT 不依赖主 boot 的 die 表顺序。 */
+void ftl_ut_topology_init(void);
 
 /* 伪时钟：保存当前平台 ops → 换成测试时钟；必须成对调用并恢复。 */
 void ftl_ut_clock_install(void);

@@ -29,7 +29,7 @@
 /* ── 宏 ──
  * L2P 容量与分解宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
  * L2P_REGIONS_PER_INSTANCE / L2P_REGION_SHIFT / L2P_REGION_MASK /
- * FTL_DIM_TOTAL）见 ftl/ftl_config.h §一；
+ * DIE_MAX）见 ftl/ftl_config.h §一；
  * 元数据块布局见 ftl/metadata.h「固定元数据区布局」。*/
 #define L2P_CACHE_SIZE (64U) /* cache 行数（可配 32/64/128）*/
 
@@ -69,60 +69,42 @@
  * 用局部 region（每个 die 只有 L2P_REGIONS_PER_INSTANCE 个槽）。
  * cache 行/脏位图用全局 region 键；metadata 的 lookup/append/commit 用局部 region。
  */
-#define L2P_GLOBAL_REGIONS     (L2P_REGIONS_PER_INSTANCE * FTL_DIM_TOTAL)
-#define L2P_GLOBAL_LBA_MAX     ((QWORD)L2P_GLOBAL_REGIONS * L2P_ENTRIES_PER_REGION)
-#define L2P_DIRTY_BITMAP_WORDS (L2P_GLOBAL_REGIONS / 32U)
-#define L2P_LOCAL_DIRTY_WORDS  (L2P_REGIONS_PER_INSTANCE / 32U)
+/* 等长键空间：位图按静态上限分配，运行时只用前 DIE_MAX 个 die 的 region。 */
+#define L2P_GLOBAL_REGIONS_MAX    (L2P_REGIONS_PER_INSTANCE * FTL_DIE_MAX)
+#define L2P_GLOBAL_REGIONS        (L2P_REGIONS_PER_INSTANCE * DIE_MAX)
+#define L2P_GLOBAL_LBA_MAX_AT_MAX ((QWORD)L2P_GLOBAL_REGIONS_MAX * L2P_ENTRIES_PER_REGION)
+#define L2P_GLOBAL_LBA_MAX        ((QWORD)L2P_GLOBAL_REGIONS * L2P_ENTRIES_PER_REGION)
+#define L2P_DIRTY_BITMAP_WORDS    (L2P_GLOBAL_REGIONS_MAX / 32U)
+#define L2P_LOCAL_DIRTY_WORDS     (L2P_REGIONS_PER_INSTANCE / 32U)
 
-_Static_assert((L2P_GLOBAL_REGIONS % 32U) == 0U, "全局 region 位图必须按 32 bit 对齐");
-_Static_assert(L2P_GLOBAL_LBA_MAX <= (QWORD)UINT32_MAX, "全局 LBA 超出 DWORD 位宽");
+_Static_assert((L2P_GLOBAL_REGIONS_MAX % 32U) == 0U, "全局 region 位图必须按 32 bit 对齐");
+_Static_assert(L2P_GLOBAL_LBA_MAX_AT_MAX <= (QWORD)UINT32_MAX, "全局 LBA 超出 DWORD 位宽");
 _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 64 word");
 
 /**
- * @brief 拓扑 → dim（ftl_dim_* 的逆）：ch + CH*(ce + CE*lun)。
+ * @brief (ch,ce,lun) → 紧凑 die 号（查扫描表的唯一漏斗）。
+ *
+ * @param ch/ce/lun 物理坐标
+ * @return 紧凑 die 号（0..DIE_MAX-1）；越界或不存在 ⇒ FTL_DIE_INVALID
+ */
+static inline DWORD chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
+{
+    if ((ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
+    {
+        return FTL_DIE_INVALID;
+    }
+    return g_chcelun_table[ch][ce][lun];
+}
+
+/**
+ * @brief 拓扑 → 紧凑 die 号（查扫描表，不再用矩形公式）。
  *
  * @param topo 通道/片选/LUN 三维坐标
- * @return 全局实例编号（0..FTL_DIM_TOTAL-1）
+ * @return 紧凑 die 号（0..DIE_MAX-1）；不存在 ⇒ FTL_DIE_INVALID
  */
-static inline DWORD ftl_topo_dim(ftl_topo_t topo)
+static inline DWORD topo_2_die(ftl_topo_t topo)
 {
-    return topo.ch + (CH_NUM * (topo.ce + (CE_NUM * topo.lun)));
-}
-
-/**
- * @brief dim → ch：ftl_topo_dim 的逆。
- *
- * **所有** dim → 坐标的分解都走这三个：手写第二份就是第二套 region→die 坐标（C9）。
- * 返回值取自然宽度（0..*_NUM-1）⇒ 调用点不必窄化强转（H44）。
- *
- * @param dim 全局实例编号
- * @return 通道号（0..CH_NUM-1）
- */
-static inline BYTE ftl_dim_ch(DWORD dim)
-{
-    return (dim % CH_NUM);
-}
-
-/**
- * @brief dim → ce：ftl_topo_dim 的逆。
- *
- * @param dim 全局实例编号
- * @return 片选号（0..CE_NUM-1）
- */
-static inline BYTE ftl_dim_ce(DWORD dim)
-{
-    return ((dim / CH_NUM) % CE_NUM);
-}
-
-/**
- * @brief dim → lun：ftl_topo_dim 的逆。
- *
- * @param dim 全局实例编号
- * @return LUN 号（0..LUN_NUM-1）
- */
-static inline BYTE ftl_dim_lun(DWORD dim)
-{
-    return (dim / (CH_NUM * CE_NUM));
+    return chcelun_2_die(topo.ch, topo.ce, topo.lun);
 }
 
 /**
@@ -142,13 +124,13 @@ static inline DWORD lba_to_global_region(DWORD glba)
  * @param lba 当前 LBA
  * @return 下一个 region 的起始 LBA；没有下一个（超出 L2P 键空间）⇒ FTL_LBA_INVALID
  *
- * @note DIM=1 时就是 `(region + 1) × 512 LBA`；DIM>1 时按 `FTL_DIM_TOTAL` 步进
+ * @note DIE_MAX=1 时就是 `(region + 1) × 512 LBA`；DIE_MAX>1 时按 `DIE_MAX` 步进
  *       （该实例自己的下一个 region）。调用方仍需用 `lba_routes_to()` 校验归属
- *       （DIM>1 时可能落在别的实例上），并按主机容量决定是否值得预加载。
+ *       （DIE_MAX>1 时可能落在别的实例上），并按主机容量决定是否值得预加载。
  */
 static inline DWORD lba_next_region_base(DWORD lba)
 {
-    const DWORD next = lba_to_global_region(lba) + FTL_DIM_TOTAL;
+    const DWORD next = lba_to_global_region(lba) + DIE_MAX;
 
     if (next >= L2P_GLOBAL_REGIONS)
     {
@@ -165,24 +147,26 @@ static inline DWORD lba_next_region_base(DWORD lba)
  * @brief 全局 region → owner die 内的局部 region（映射页落盘位置）。
  *
  * @param global_region 全局 region
- * @return owner die 内的局部 region（global_region / FTL_DIM_TOTAL）
+ * @return owner die 内的局部 region（global_region / DIE_MAX）
  */
 static inline DWORD l2p_global_to_local_region(DWORD global_region)
 {
-    return global_region / FTL_DIM_TOTAL;
+    ASSERT(DIE_MAX != 0U);
+    return global_region / DIE_MAX;
 }
 
 /**
- * @brief region 是否属于 dim 这个实例。
+ * @brief region 是否属于 die 这个实例。
  *
  * @param global_region 全局 region
- * @param dim           全局实例编号
+ * @param die           全局实例编号
  * @return true = 属于该实例
  *         false = 属于其他实例
  */
-static inline bool l2p_region_owned_by(DWORD global_region, DWORD dim)
+static inline bool l2p_region_owned_by(DWORD global_region, DWORD die)
 {
-    return (global_region % FTL_DIM_TOTAL) == dim;
+    ASSERT(DIE_MAX != 0U);
+    return (global_region % DIE_MAX) == die;
 }
 
 /* ── Region 分解 ──
@@ -190,23 +174,22 @@ static inline bool l2p_region_owned_by(DWORD global_region, DWORD dim)
  * 条目数）见 ftl/ftl_config.h §一。*/
 
 /**
- * @brief 全局 LBA → 实例编号（dim）路由。
+ * @brief 全局 LBA → 实例编号（die）路由。
  *
  * 路由键 = **region 序号**（lba >> L2P_REGION_SHIFT），不是页号也不是条目号：
  * 一个 region（512 个 CW）整体落在同一个 die 上，region 的 flush 只碰一个实例。
- * 再把 region 序号按设备维度**分解**成三维：
- * dim = region % FTL_DIM_TOTAL
- * ch  = dim % CH_NUM
- * ce  = (dim / CH_NUM) % CE_NUM
- * lun = dim / (CH_NUM × CE_NUM)
- * FTL_DIM_TOTAL = 1 时恒为 (0,0,0)。
+ * 再把 region 序号按设备维度**分解**：
+ * die = region % DIE_MAX
+ * ch/ce/lun = g_die_table[die]
+ * DIE_MAX = 1 时恒为 (0,0,0)。
  *
  * @param lba 全局 LBA
- * @return 实例编号（region % FTL_DIM_TOTAL）
+ * @return 紧凑 die 号（region % DIE_MAX）
  */
-static inline DWORD lba_route_dim(QWORD lba)
+static inline DWORD lba_2_die(QWORD lba)
 {
-    return ((lba >> L2P_REGION_SHIFT) % FTL_DIM_TOTAL);
+    ASSERT(DIE_MAX != 0U);
+    return ((lba >> L2P_REGION_SHIFT) % DIE_MAX);
 }
 
 /**
@@ -215,9 +198,9 @@ static inline DWORD lba_route_dim(QWORD lba)
  * @param lba 全局 LBA
  * @return 通道号
  */
-static inline BYTE lba_route_ch(QWORD lba)
+static inline BYTE lba_2_ch(QWORD lba)
 {
-    return ftl_dim_ch(lba_route_dim(lba));
+    return die_2_ch(lba_2_die(lba));
 }
 
 /**
@@ -226,9 +209,9 @@ static inline BYTE lba_route_ch(QWORD lba)
  * @param lba 全局 LBA
  * @return 片选号
  */
-static inline BYTE lba_route_ce(QWORD lba)
+static inline BYTE lba_2_ce(QWORD lba)
 {
-    return ftl_dim_ce(lba_route_dim(lba));
+    return die_2_ce(lba_2_die(lba));
 }
 
 /**
@@ -237,9 +220,9 @@ static inline BYTE lba_route_ce(QWORD lba)
  * @param lba 全局 LBA
  * @return LUN 号
  */
-static inline BYTE lba_route_lun(QWORD lba)
+static inline BYTE lba_2_lun(QWORD lba)
 {
-    return ftl_dim_lun(lba_route_dim(lba));
+    return die_2_lun(lba_2_die(lba));
 }
 
 /**
@@ -252,7 +235,7 @@ static inline BYTE lba_route_lun(QWORD lba)
  */
 static inline bool lba_routes_to(DWORD glba, ftl_topo_t topo)
 {
-    return (lba_route_ch(glba) == topo.ch) && (lba_route_ce(glba) == topo.ce) && (lba_route_lun(glba) == topo.lun);
+    return (lba_2_ch(glba) == topo.ch) && (lba_2_ce(glba) == topo.ce) && (lba_2_lun(glba) == topo.lun);
 }
 
 /**
@@ -359,7 +342,7 @@ typedef struct
  *
  * cache 跨 LUN 共享后，load/flush/commit 需要知道某个全局 region 属于哪个
  * FTL 实例（owner die）。端口只暴露**共享服务的最小集**，不返回整个 ftl_context。
- * 回调由设备级 init 注入（main.c），内部复用 lba_route_* + ftl_op_route_get。
+ * 回调由设备级 init 注入（main.c），内部复用 lba_2_* + ftl_op_route_get。
  */
 /* 前向声明：owner 端口需要 Journal 的 WAL 水位（RISK-L2P-09 的区域写回闸门）。
  * 不 include journal.h——journal.h 反向 include 本头，会成环。 */
@@ -367,7 +350,7 @@ struct l2p_jrn_s;
 
 typedef struct
 {
-    DWORD             dim; /* 本 owner 的实例编号（global 路由键） */
+    DWORD             die; /* 本 owner 的实例编号（global 路由键） */
     md_dir_cache_t   *metadata_dir;
     alc_t            *alloc;
     ftl_topo_t        topo;
@@ -436,7 +419,7 @@ typedef struct
      * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
     DWORD job_log_ms;
 
-    /* 全局 region → owner FTL 实例（按 lba_route_* / ftl_op_route_get 解析）。
+    /* 全局 region → owner FTL 实例（按 lba_2_* / ftl_op_route_get 解析）。
      * load/flush/commit 用 owner 的 metadata_dir / alloc / topo，cache 自身不再持有
      * 单一实例的依赖指针。设备级 init 注入一次，生命周期到复位。 */
     l2p_owner_fn_t owner_of_region;
@@ -476,7 +459,7 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  * 从而维持「一个 region 只占一行」的不变量。
  *
  * @param cache         共享 cache
- * @param global_region 全局 region（local × FTL_DIM_TOTAL + dim）
+ * @param global_region 全局 region（local × DIE_MAX + die）
  * @param pba           Directory 给出的 region 页物理地址
  * @return true = 已驻留或预载成功
  *         false = 无 INVALID 行 / 读失败
@@ -690,13 +673,13 @@ void l2p_diag_dump(void);
  * @brief 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
  *
  * 从下标 0 起扫，最多启动 max_kick 行 DIRTY（受共享 L2P_FLUSH_MAX_INFLIGHT 闸门）；
- * 跳过不属于 owner_dim 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
+ * 跳过不属于 owner_die 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
  *
  * @param cache     共享 cache
- * @param owner_dim 本实例的 dim（ftl_topo_dim(ftl->topo)）
+ * @param owner_die 本实例的 die（topo_2_die(ftl->topo)）
  * @param max_kick  本轮最多起几条（档位表见 l2p_cache.c 的 s_l2p_flush_max）
  */
-void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick);
 
 /**
  * @brief 本 owner 是否已无待落盘的 L2P 行
@@ -706,49 +689,49 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
  * 等待有界）。
  *
  * @param cache     共享 cache
- * @param owner_dim 本实例的 dim
+ * @param owner_die 本实例的 die
  * @return true = 本 owner 已无待落盘或在飞的行
  *         false = 仍有 DIRTY / FLUSHING / LOADING 行
  */
-bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim);
+bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_die);
 
 /**
  * @brief 只失效某个 owner 的行与脏位（恢复/格式化用）
  *
  * 共享 cache 下**不能**再按实例重新 init（会抹掉别的 LUN 刚回放的 DIRTY 行）。
- * 本函数只处理 l2p_region_owned_by(line->region_id, owner_dim) 的 resident 行：
+ * 本函数只处理 l2p_region_owned_by(line->region_id, owner_die) 的 resident 行：
  * entries 填 0xFF、region_id 清零、置 INVALID，并清该 owner 的全局脏位。
  * ⚠ 行处于 FLUSHING/LOADING 是编程错误（恢复期不应有在飞命令）⇒ ASSERT。
  *
  * @param cache     共享 cache
- * @param owner_dim 本实例的 dim
+ * @param owner_die 本实例的 die
  */
-void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim);
+void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die);
 
 /**
  * @brief 全局脏位图 → 本 die 的局部 2048-bit 快照
  *
  * Checkpoint 起点调用（先快照再 flush）。`out` 为 L2P_LOCAL_DIRTY_WORDS 个 word；
- * 映射关系：global_region = local_region * FTL_DIM_TOTAL + owner_dim。
- * DIM=1 时等价于整份位图拷贝。
+ * 映射关系：global_region = local_region * DIE_MAX + owner_die。
+ * DIE_MAX=1 时等价于整份位图拷贝。
  *
  * @param cache     共享 cache
- * @param owner_dim 本实例的 dim
+ * @param owner_die 本实例的 die
  * @param out       出参局部位图（L2P_LOCAL_DIRTY_WORDS 个 word）
  */
-void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
+void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
 
 /**
  * @brief 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
  *
  * 按 level 查**模块内** static const 表决定本轮 max_kick；只处理
- * owner_dim 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
+ * owner_die 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
  *
  * @param cache  共享 cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param dim    本实例的 owner dim（ftl_topo_dim(topo)）
+ * @param die    本实例的 owner die（topo_2_die(topo)）
  * @param level  本轮后台档位（IDLE / NORMAL / BUSY）
  */
-void l2p_handle(l2p_cache_t *cache, DWORD dim, bg_level_e level);
+void l2p_handle(l2p_cache_t *cache, DWORD die, bg_level_e level);
 
 /**
  * @brief 读一行元信息（idx 越界/空行时 state == INVALID）。

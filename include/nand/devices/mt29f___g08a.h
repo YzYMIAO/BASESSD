@@ -33,12 +33,12 @@
  * PLANE_NUM 个 plane，编译期在 ftl_config.h 校验 PLANE_NUM <= 本宏。 */
 #define NAND_MAX_MULTI_PLANE (2U)
 
-/* 拓扑：每片选 LUN 数 + 本板通道/片选数。
- * LUN_ADDR_WIDTH 由 nand_config.h 从 LUN_NUM 推导。
- * ⚠ CH_NUM/CE_NUM 是「本板装了什么」，暂放器件层；多板卡时再拆 board config。 */
-#define LUN_NUM (1) /* MT29F4G08 单 die；换多 die 芯片改此宏 */
-#define CH_NUM  (1)
-#define CE_NUM  (1)
+/* 器件 LUN 容量：MT29F4G08 的 ONFI 参数页 logical_units = 1。
+ *
+ * 这是**器件属性**（不是板级固定值），用于推导 LUN_ADDR_WIDTH 与数组上界；
+ * 运行时实际 LUN 数由 ONFI 参数页读取、并逐 LUN 用 78h 探测确认。
+ * 换多 LUN 器件时改此宏（同时改厂商数据手册对应的容量/位宽）。 */
+#define LUN_NUM (1)
 
 /* ── 地址位宽（器件手册的 BA/PA 划分才是权威，不从 ceil-log2 推）── */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5：每 Block 64 页 */
@@ -90,7 +90,8 @@
 
 /*
  * nand_init
- *   功能：低速初始化 FMC 硬件并通过 OP_RESET/OP_READ_ID/ONFI 参数页验证 NAND。
+ *   功能：低速初始化 FMC 硬件，并做拓扑扫描（RESET / READ ID / ONFI 参数页 /
+ *         逐 LUN 78h）验证 NAND。
  *         启动全程保持默认 Mode 0；高速切换由 nand_enable_high_speed() 在
  *         boot 完成后单独执行。
  *   参数：无。

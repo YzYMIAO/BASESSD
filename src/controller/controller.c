@@ -4,6 +4,7 @@
 #include "log.h"
 
 #include <stddef.h>
+#include <string.h>
 
 /* 外部：request.c — 按实例边界切 run / 提交子请求 */
 ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
@@ -12,9 +13,9 @@ QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWO
 /*
  * ssd_controller_route - 按全局 LBA 路由到对应 FTL 实例
  *
- * 使用 l2p_cache.h 的 lba_route_ch/ce/lun（region 粒度取模）选实例；
- * 后续换哈希策略只改此处。CH_NUM=CE_NUM=LUN_NUM=1 时恒返回 ftl[0][0][0]。
- * 非 static：request.c 拆分循环共用（前向声明在 request.c），不暴露进公共头。
+ * 使用 l2p_cache.h 的 lba_2_die（region 粒度取模）选实例；后续换哈希策略
+ * 只改该函数。非 static：request.c 拆分循环共用（前向声明在 request.c），
+ * 不暴露进公共头。
  *
  * @param controller Controller 上下文（调用者保证非 NULL）
  * @param lba        Host 全局 LBA（QWORD）
@@ -22,32 +23,20 @@ QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWO
  */
 ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
 {
-    BYTE ch;
-    BYTE ce;
-    BYTE lun;
-
     /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
     ASSERT(controller != NULL);
 
-    ch  = lba_route_ch(lba);
-    ce  = lba_route_ce(lba);
-    lun = lba_route_lun(lba);
+    const DWORD die = lba_2_die(lba);
 
-    /* 路由取模结果本应在 [0,N) 内；越界只可能是 CH_NUM/CE_NUM/LUN_NUM 宏配置错误 */
-    ASSERT(ch < CH_NUM);
-    ASSERT(ce < CE_NUM);
-    ASSERT(lun < LUN_NUM);
+    /* 路由取模结果本应在 [0,DIE_MAX) 内 */
+    ASSERT(die < DIE_MAX);
 
-    return controller->ftl[ch][ce][lun];
+    return controller->ftl[die];
 }
 
-ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM])
+ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die)
 {
-    BYTE ch;
-    BYTE ce;
-    BYTE lun;
-
-    if ((controller == NULL) || (ftl == NULL))
+    if ((controller == NULL) || (ftl_by_die == NULL))
     {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
@@ -58,32 +47,34 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *ftl[CH
     controller->trim_started = false;
     controller->host_lba_max = (DWORD)FTL_LBA_MAX;
 
-    /* 逐槽校验并绑定 FTL 实例：任一槽位缺失或槽位与实例 topo 不符即失败。
+    /* 稀疏拓扑 / 重复 init：先清空 die 槽，缺失项保持 NULL。 */
+    memset(controller->ftl, 0, sizeof(controller->ftl));
+
+    /* 逐 present die 校验并绑定 FTL 实例：稀疏拓扑允许部分 die 槽为 NULL。
      * 状态机（C1）：入口 RESET → INITIALIZING，校验结果驱动 READY/FAILED。 */
     ssd_controller_state_transition(controller, SSD_CONTROLLER_INITIALIZING);
 
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        const BYTE ch   = die_2_ch(die);
+        const BYTE ce   = die_2_ce(die);
+        const BYTE lun  = die_2_lun(die);
+        ftl_ctx_t *slot = ftl_by_die[die];
+
+        if (slot == NULL)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                if (ftl[ch][ce][lun] == NULL)
-                {
-                    LOGE(LOG_TAG_CTRL "init failed: null FTL slot ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-                    ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
-                    return SSD_STATUS_INVALID_ARGUMENT;
-                }
-                /* 槽位索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
-                if ((ftl[ch][ce][lun]->topo.ch != ch) || (ftl[ch][ce][lun]->topo.ce != ce) || (ftl[ch][ce][lun]->topo.lun != lun))
-                {
-                    LOGE(LOG_TAG_CTRL "init failed: topo mismatch slot ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-                    ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
-                    return SSD_STATUS_INVALID_ARGUMENT;
-                }
-                controller->ftl[ch][ce][lun] = ftl[ch][ce][lun];
-            }
+            LOGE(LOG_TAG_CTRL "init failed: null FTL slot die=%hu ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
+            return SSD_STATUS_INVALID_ARGUMENT;
         }
+        /* die 索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
+        if ((slot->topo.ch != ch) || (slot->topo.ce != ce) || (slot->topo.lun != lun))
+        {
+            LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
+            return SSD_STATUS_INVALID_ARGUMENT;
+        }
+        controller->ftl[die] = slot;
     }
 
     ssd_controller_state_transition(controller, SSD_CONTROLLER_READY);
@@ -202,23 +193,13 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
             }
 
             {
-                BYTE fch;
-                BYTE fce;
-                BYTE flun;
-
-                for (fch = 0U; fch < CH_NUM; fch++)
+                for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
                 {
-                    for (fce = 0U; fce < CE_NUM; fce++)
-                    {
-                        for (flun = 0U; flun < LUN_NUM; flun++)
-                        {
-                            ftl_ctx_t *fftl = controller->ftl[fch][fce][flun];
+                    ftl_ctx_t *fftl = controller->ftl[die];
 
-                            /* 槽位由 ssd_controller_init 绑满，恒非空 */
-                            ASSERT(fftl != NULL);
-                            ftl_flush_begin(fftl);
-                        }
-                    }
+                    /* present die 由 ssd_controller_init 绑满，恒非空 */
+                    ASSERT(fftl != NULL);
+                    ftl_flush_begin(fftl);
                 }
             }
 
@@ -244,27 +225,17 @@ static void ssd_controller_flush_service(ssd_controller_t *controller)
 
     bool all_done = true;
 
-    BYTE fch;
-    BYTE fce;
-    BYTE flun;
-
-    /* 先推进**全部**实例再判完成：某一实例未完成时直接 return 会让后面的实例
+    /* 先推进**全部** present die 再判完成：某一实例未完成时直接 return 会让后面的实例
      * 永远得不到推进（多实例下 FLUSH 卡死）。 */
-    for (fch = 0U; fch < CH_NUM; fch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (fce = 0U; fce < CE_NUM; fce++)
+        ftl_ctx_t *fftl = controller->ftl[die];
+
+        ASSERT(fftl != NULL);
+
+        if (!ftl_flush_step(fftl))
         {
-            for (flun = 0U; flun < LUN_NUM; flun++)
-            {
-                ftl_ctx_t *fftl = controller->ftl[fch][fce][flun];
-
-                ASSERT(fftl != NULL);
-
-                if (!ftl_flush_step(fftl))
-                {
-                    all_done = false;
-                }
-            }
+            all_done = false;
         }
     }
 
@@ -369,21 +340,11 @@ void ssd_controller_cancel_flush(ssd_controller_t *controller)
      * 把回执写到新请求上。在飞的数据操作有自己的服务路径，不需要回滚。 */
     controller->flush_req = NULL;
 
-    BYTE ch;
-    BYTE ce;
-    BYTE lun;
-
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                ftl_ctx_t *ftl = controller->ftl[ch][ce][lun];
+        ftl_ctx_t *ftl = controller->ftl[die];
 
-                ASSERT(ftl != NULL);
-                ftl_flush_cancel(ftl);
-            }
-        }
+        ASSERT(ftl != NULL);
+        ftl_flush_cancel(ftl);
     }
 }

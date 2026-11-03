@@ -43,6 +43,7 @@
 
 #include "assertion.h"
 #include "bbt.h"
+#include "boot_policy.h" /* boot_crc32：拓扑 fingerprint（复用已有 CRC32） */
 #include "checkpoint.h"
 #include "fc.h"
 #include "ftl.h" /* ftl_ctx_t（服务函数要从实例取 &ftl->alloc） */
@@ -58,10 +59,47 @@
 #include <stddef.h>
 #include <string.h>
 
+/*
+ * 运行期介质布局版本：单 die 保持 BASE（兼容现有介质）；多 die 把 die 数与
+ * topology map 编入版本，拓扑变化 ⇒ 版本不符 ⇒ 走 pfr_media_format()。
+ *
+ * fingerprint 用现有 `boot_crc32`（CRC-32/ISO-HDLC）而不是
+ * `version * 33 + field`：后者的混合能力差，不同 (ch,ce,lun) 序列容易落到
+ * 同一值；拓扑差异一旦撞哈希，介质版本判据就会把错误拓扑当成同一布局继续用。
+ * 只序列化字段字节，不哈希结构体 padding（其值不确定）。
+ */
+DWORD ftl_media_layout_version(void)
+{
+    if (g_die_count <= 1U)
+    {
+        return FTL_MEDIA_LAYOUT_VERSION_BASE;
+    }
+
+    /* [count_lo][count_hi][ch0][ce0][lun0][ch1]... —— 只含已分配 die。 */
+    BYTE   topo[2U + (FTL_DIE_MAX * 3U)];
+    size_t used = 2U;
+
+    topo[0] = (BYTE)(g_die_count & 0xFFU);
+    topo[1] = (BYTE)((g_die_count >> 8U) & 0xFFU);
+
+    for (WORD die = 0U; die < DIE_MAX; die++)
+    {
+        topo[used++] = g_die_table[die].ch;
+        topo[used++] = g_die_table[die].ce;
+        topo[used++] = g_die_table[die].lun;
+    }
+
+    const DWORD fingerprint = boot_crc32(topo, used);
+
+    /* bit31 固定为 1：多 die 版本不可能与单 die 的 BASE 小版本号相撞。
+     * 有效哈希 31 位，碰撞概率 2^-31。 */
+    return 0x80000000UL | (fingerprint & 0x7FFFFFFFUL);
+}
+
 // 每实例 Metadata Directory cache（CPU-only）。链接脚本按整个 metadata.o 的 .bss
 // 放进 SRAM4（与 BCH 交换：BCH 在 DTCM）；`.sram4_data` 是 NOLOAD ⇒ ftl_init
 // 绑定后对该实例显式 memset。
-md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
+md_dir_cache_t g_ftl_md[FTL_DIE_MAX];
 
 // 候选池重建日志节流：第 1 次立即打印，此后每 N 次一条（元数据坏块风暴不刷屏）。
 // N=16：重建本身较贵且罕见，16 条足以覆盖一次故障风暴。

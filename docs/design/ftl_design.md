@@ -390,27 +390,47 @@ flowchart TB
 | 用户容量（主机可见） | **424 MiB** | 数据块 3392 × 64 页 × 4 CW × 512B；映射空间为 1,048,576 IU |
 | 拓扑维度 | `CH_NUM × CE_NUM × LUN_NUM` | `ftl_config.h` §一 |
 
-**实例模型**：每个 `(ch, ce, lun)` 是一个**完整独立**的 FTL 实例，各有一份
+**实例模型**：每个实际存在的 die 是一个**完整独立**的 FTL 实例，各有一份
 L2P 表、目录检查点/Checkpoint/BBT/Journal 分区与块池。主机 LBA 空间按 **region**
-切分到各实例（`lba_route_*`，见 §5.4）；`FTL_DIM_TOTAL = CH × CE × LUN`。
+切分到各实例（`lba_2_*`，见 §5.4）；静态容量 `FTL_DIE_MAX = CH_MAX × CE_MAX × LUN_MAX`
+（数组维度），运行时实际数 `DIE_MAX = g_die_count`（扫描结果）。
 
-当前构建 `CH = CE = LUN = 1` ⇒ `FTL_DIM_TOTAL = 1`，下面所有“每实例”的量就是全设备量。
+当前构建 `CH = CE = LUN = 1` ⇒ `DIE_MAX = FTL_DIE_MAX = 1`，下面所有“每实例”的量就是全设备量。
 多 LUN 的地址/内存设计见 `docs/archive/multi_lun_generalization.md`。
+
+**运行时拓扑（Phase 1/2a/2b，2026-11-03，未上板）**：主控不假设矩形满配。上电在
+`nand_dispatch_set_armed(1)` 之前由 `nand_scan_targets` 逐个探测 `(ch,ce)` target：
+先经板级 `nand_select_target` 选通路，再 RESET / READ ID / ONFI 参数页，最后用
+`READ STATUS ENHANCED (78h)` 逐 LUN 探测。结果写 **NAND/板级**的 `g_nand_targets`
+（present / ONFI `logical_units` / `lun_present[]`）。FTL 在 `ssd_ftl_boot_all` 里用
+`ftl_topology_build` 给实际存在的 LUN 分配**紧凑 die 号**，维护
+`g_chcelun_table`（`(ch,ce,lun)→die`）与 `g_die_table`（`die→ftl_topo_t{ch,ce,lun}`）。
+Phase 2b：实例存储 `g_ftl[die]`、实例路由 `g_op_route[die]`、controller 路由
+`controller->ftl[die]`、L2P 路由、容量、介质布局版本全部按运行时 `DIE_MAX`
+（= `g_die_count`）与 `g_die_table` 索引；数组按静态上限 `FTL_DIE_MAX` 分配。
+板级容量 `CH_MAX`/`CE_MAX` 来自板卡接线（`NAND_BOARD_CH_NUM`/`NAND_BOARD_CE_NUM`），
+`LUN_MAX` 来自器件头 `LUN_NUM`；运行时实际值以扫描结果为准，不写死。
+单 die 时与旧布局逐位一致（介质版本仍为 BASE，不触发重格式化）；多 die 时
+`ftl_media_layout_version()` 用 `boot_crc32` 把 die 数 + topology map 编入版本，拓扑变化 ⇒
+版本不符 ⇒ 自动格式化。稀疏拓扑允许部分 die 槽为 NULL，controller 只校验 present die。
+共享 L2P cache 仍按 **(ch,ce) 一份**（同一 target 的多个 LUN 共享同一份 cache），
+不按 die 复制——否则同一 L2P 行的 load/flush 会在多个副本间分叉。
+登记见 `known_risks.md` RISK-TOP-01 / `known_iss.md` ISS-TOP-01。**地址/布局改动，未上板。**
 
 **口径表（每实例 vs 全局；混了就会算错）**
 
-| 量 | 口径 | 公式 | dim=1 |
+| 量 | 口径 | 公式 | die=1 |
 |---|---|---|---|
-| `FTL_DIM_TOTAL` | 设备 | `CH_NUM × CE_NUM × LUN_NUM` | 1 |
+| `FTL_DIE_MAX` / `DIE_MAX` | 静态上限 / 运行时实际 | `CH_MAX × CE_MAX × LUN_MAX` / `g_die_count` | 1 / 1 |
 | `FTL_BLOCK_TOTAL` | **每实例** | `BLOCKS_PER_PLANE × PLANE_NUM` | 4096 |
 | `FTL_CW_TOTAL` | **每实例** | `FTL_BLOCK_TOTAL × PAGES_PER_BLOCK × CW_NUM` | 1,048,576 |
 | `L2P_REGIONS_PER_INSTANCE` | **每实例** | `FTL_CW_TOTAL ÷ 512` | 2048 |
 | `FTL_L2P_TABLE_BYTES` | **每实例** | `L2P_REGIONS_PER_INSTANCE × 512 × 4 B` | 4 MiB |
-| `FTL_IU_TOTAL` | **全局** | `L2P_REGIONS_PER_INSTANCE × 512 × FTL_DIM_TOTAL` | 1,048,576（映射寻址空间） |
+| `FTL_IU_TOTAL` | **全局** | `L2P_REGIONS_PER_INSTANCE × 512 × DIE_MAX` | 1,048,576（映射寻址空间） |
 | `FTL_MAPPING_CAPACITY_BYTES` | **全局** | `FTL_IU_TOTAL × 512 B` | 512 MiB（映射空间，非主机容量） |
-| `FTL_LBA_MAX` | **全局** | 数据块 × 64 页 × 4 CW × `FTL_DIM_TOTAL` | 868,352（424 MiB，0 坏块） |
+| `FTL_LBA_MAX` | **全局** | 数据块 × 64 页 × 4 CW × `DIE_MAX` | 868,352（424 MiB，0 坏块） |
 
-多 dim 时**每实例的数字不变**（2048 region / 1,048,576 LBA），只有设备总量 ×`FTL_DIM_TOTAL`；
+多 die 时**每实例的数字不变**（2048 region / 1,048,576 LBA），只有设备总量 ×`DIE_MAX`；
 条带粒度恒为 1 个 region = 512 LBA = 256 KiB。主机容量还要扣固定元数据 98 块/plane、
 OP 204 块/plane、Spare 50 块/plane（§2.3）。
 
@@ -1034,7 +1054,7 @@ L2P region log（固定预留区，追加块）
 - 同一语义只允许一套坐标。`gblock` 与“per-plane block + plane”不得在业务代码里各算各的；
   一律 `ftl_gblock()` / `ftl_gblock_plane()` / `ftl_gblock_block()`。
 - 全局 region 与局部 region 的转换只在 `l2p_global_to_local_region()` /
-  `lba_route_*` 发生；现场手写 `region / FTL_DIM_TOTAL` 是缺陷。
+  `lba_2_*` 发生；现场手写 `region / DIE_MAX` 是缺陷。
 - PBA↔PAA 只在 FTL↔FC 边界转换；FC 层不认 PBA，FTL 业务层不手写 PAA 位运算。
 - 方向相反的转换（例如 `pba_with_page`）必须用构造函数，不用掩码拼装。
 
@@ -1045,10 +1065,15 @@ L2P region log（固定预留区，追加块）
 隐式前提）⇒ 新数据 AND 旧数据 = **静默损坏**。因此：
 
 ```c
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (13U)
-#define FTL_MEDIA_LAYOUT_VERSION \
-    (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (14U)
+
+DWORD ftl_media_layout_version(void);
+#define FTL_MEDIA_LAYOUT_VERSION (ftl_media_layout_version())
 ```
+
+- 单 die（`DIE_MAX == 1`）⇒ 返回 BASE，**不额外格式化**（兼容现有介质）。
+- 多 die ⇒ BASE + die 数 + `g_die_table` 哈希；拓扑变化（哪怕 die 数相同）也会被
+  识别为版本不符，首次启用自动全片格式化。
 
 - 版本写在**两处**：Checkpoint Header 与目录检查点页；两处独立校验，任一不符即该记录作废。
 - **触发判据**（唯一、自终止）：`pfr_media_check_format` 调
@@ -1867,7 +1892,7 @@ md_slot_pair_append
 flowchart LR
     A["l2p_read miss"] --> B["l2p_load_start"]
     B --> C["owner = owner_of_region(global_region) → l2p_owner_t"]
-    C --> D["local_region 为 global FTL_DIM_TOTAL"]
+    C --> D["local_region 为 global DIE_MAX"]
     D --> E["md_entry_find L2P_REGION, local_region"]
     E --> F{"pba 有效"}
     F -- "是" --> G["ftl_async_read_page pba"]
@@ -2082,7 +2107,7 @@ md_dir_ckpt_commit(dir, &dir_ckpt.ring, dir_ckpt.idx, ok)
 | `l2p_owner_bitmap_snapshot` | Checkpoint 起点取本 die 的局部脏位图；Directory 不参与 |
 | `md_is_busy` | CP 的 `cp_regions_flush` 用它区分“压缩在推进”与“真卡死”，不误计 stall |
 | CP 的目录检查点阶段 | `md_dir_ckpt_prepare/page/commit`，与压缩 job 共用同一套三段式 |
-| 共享 cache 的 owner | `owner_of_region(global_region)` 返回 `l2p_owner_t {dim, metadata_dir, alloc, topo}`；不返回整个 `ftl_ctx_t` |
+| 共享 cache 的 owner | `owner_of_region(global_region)` 返回 `l2p_owner_t {die, metadata_dir, alloc, topo}`；不返回整个 `ftl_ctx_t` |
 
 **`md_block_is_metadata` 的三条分支**（full metadata rebuild / 建池共用）：
 
@@ -2183,7 +2208,7 @@ Cache 带来三个新问题，模块必须正面回答：
   不决定 Checkpoint 时机（§3.8）。
 - **共享模型**：一个 `(ch, ce)` 一份 cache，同 `(ch,ce)` 下的多个 LUN 共用；
   每行用**全局 region** 作键，load/flush 时通过 `owner_of_region` 解析到 `l2p_owner_t`。
-- **后台入口**：`l2p_handle(cache, dim, info, status)` 只处理本 owner 的 DIRTY 行；
+- **后台入口**：`l2p_handle(cache, die, info, status)` 只处理本 owner 的 DIRTY 行；
   档位→`max_kick` 的 `static const` 表在模块内，`thrashing` 降级也在模块内判定。
   同步逃生口 `*_sync` 自己用 drain deadline，不经过本入口。
 
@@ -2218,7 +2243,7 @@ Cache 带来三个新问题，模块必须正面回答：
 | `region_dirty_bitmap[]` | **全局** region 脏位；Checkpoint 按 owner 过滤快照 |
 | `load_inflight` / `flush_inflight` | 在飞计数；后者是写回背压闸门 |
 | `ch` / `ce` | 本 cache 服务范围 |
-| `owner_of_region` / `owner_ctx` | 全局 region → `l2p_owner_t`（dim / metadata_dir / alloc / topo） |
+| `owner_of_region` / `owner_ctx` | 全局 region → `l2p_owner_t`（die / metadata_dir / alloc / topo） |
 
 **状态机**：
 
@@ -2964,7 +2989,7 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
 | `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
 | `FTL_LBA_PER_PAIR` | 8（2 plane × 4 CW） | `include/ftl/ftl_config.h` |
-| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × FTL_DIM_TOTAL`（= 868,352） | `include/ftl/ftl.h` |
+| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） | `include/ftl/ftl.h` |
 
 #### 3.9.10 主流对照
 
@@ -3012,7 +3037,7 @@ FTL 需要回答两个问题：
 | 结构 | 字段 | 说明 |
 |---|---|---|
 | `ftl_op_ctx_entry_t` | cmd_id / ctx | `FTL_OP_CTX_TABLE_SIZE` 项旁表（容量推导见 §3.10.7） |
-| `g_op_route[CH][CE][LUN]` | `ftl_ctx_t *` | 实例路由 |
+| `g_op_route[FTL_DIE_MAX]` | `ftl_ctx_t *` | 实例路由（按 compact die 号索引） |
 | `ftl_op_id_e` | `FTL_OP_HOST_IO / L2P / JOURNAL / CHECKPOINT / METADATA / GC / WL / BBT / READ_RECOVERY / ...` | `g_op_callbacks[]` 下标 |
 | `ftl_sync_waiter_t` | cmd_id / done / status | 同步逃生口的等待器 |
 
@@ -3039,7 +3064,7 @@ flowchart LR
     C --> D{"op_tag 合法"}
     D -- "否" --> E["ftl_op_ctx_remove fc_command_release LOGE 孤儿"]
     D -- "是" --> F["ftl_op_ctx_take cmd_id"]
-    F --> G["ftl_op_route_get ch,ce,lun"]
+    F --> G["ftl_op_route_get ch,ce,lun → die"]
     G --> H["g_op_callbacks tag ftl, completion, ctx"]
 ```
 
@@ -4672,12 +4697,12 @@ CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在�
 ```mermaid
 flowchart TB
     subgraph "设备级 启动时一次"
-        ROUTE["g_op_route CH CE LUN 实例路由"]
+        ROUTE["g_op_route die 实例路由"]
         CT["ftl_op ctx 旁表 cmd_id 到 ctx"]
         LC["g_l2p_cache CH CE 共享 L2P cache"]
     end
 
-    subgraph "每实例 g_ftl dim 描述符,DTCM"
+    subgraph "每实例 g_ftl die 描述符,DTCM"
         CTX["ftl_ctx_t topo cache* pending groups wbuf* table_refs alloc journal* metadata_dir* cp_handle* mig_handle* rr_handle rr_page_scratch* bg"]
         TAB["ftl_table_refs_t → blocks / free / op / spare / closed"]
         MD["md_dir_cache_t entries l2p_live job"]
@@ -4755,7 +4780,7 @@ flowchart TB
 | Migrate | `mig_handle_t` | `mig_handle(h, level)` / `mig_gc_request_urgent(h)` | 调用方读 `mig_handle_t` 字段 |
 | RR | `rr_handle_t` | `rr_handle(h)` / `rr_trigger(h, owner)` | — |
 | Checkpoint | `cp_handle_t` | `cp_handle(h, trigger)` | `cp_is_active` |
-| L2P cache | `l2p_cache_t` | `l2p_handle(cache, dim, level)` | 行查询/失效原语 |
+| L2P cache | `l2p_cache_t` | `l2p_handle(cache, die, level)` | 行查询/失效原语 |
 | Wbuf | `wb_handle_t` | `wb_handle(h, trigger, out)` | `wb_status_t`；`wb_has/read` |
 
 主流程只走查询接口（如 `jrn_is_idle`、`cp_is_active`），**不读**
@@ -4853,11 +4878,11 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 概念 | 定义 | 用途 |
 |---|---|---|
-| `FTL_DIM_TOTAL` | `CH_NUM × CE_NUM × LUN_NUM` | 设备实例数 |
+| `FTL_DIE_MAX` / `DIE_MAX` | `CH_MAX × CE_MAX × LUN_MAX` / `g_die_count` | 静态上限 / 运行时实际 die 数 |
 | 全局 LBA | host LBA | 数据通路唯一坐标 |
 | 全局 region | `LBA >> 9` | cache 行键、脏位图键 |
-| 局部 region | `global_region / FTL_DIM_TOTAL` | 映射页在 owner die 的落盘位置 |
-| owner | `lba_route_*` / `ftl_op_route_get` | 全局 region → 实例 |
+| 局部 region | `global_region / DIE_MAX` | 映射页在 owner die 的落盘位置 |
+| owner | `lba_2_*` / `ftl_op_route_get` | 全局 region → 实例 |
 | 实例 | `g_ftl[ch][ce][lun]` | 独立 L2P / 池 / Journal / CP / MD |
 | 共享 cache | `g_l2p_cache[ch][ce]` | 同 `(ch,ce)` 下所有 LUN 共用 |
 
@@ -5288,7 +5313,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `FTL_BLOCK_TOTAL` | 4096 | `include/ftl/bst.h` |
 | `FTL_IU_BYTES` | 512 | `include/ftl/ftl_config.h` |
 | `FTL_IU_TOTAL` | 1,048,576（**映射表寻址空间，非主机容量**） | 同上 |
-| `FTL_DIM_TOTAL` | `CH_NUM × CE_NUM × LUN_NUM` | 同上 |
+| `FTL_DIE_MAX` / `DIE_MAX` | `CH_MAX × CE_MAX × LUN_MAX` / `g_die_count` | 同上（静态上限 / 运行时实际） |
 | `L2P_REGION_SHIFT` | 9（512 entry/region） | 同上 |
 | `FTL_LBA_PER_PAIR` | 8 | 同上 |
 | PBA 位序 | `CW(0) / PLANE(2) / PAGE(3) / BLOCK(9) / LUN / CE / CH` | 同上 |
@@ -5313,7 +5338,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `FTL_GROUP_MAX` | 32 | 同上 |
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
 | `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
-| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × FTL_DIM_TOTAL`（= 868,352） | 同上 |
+| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） | 同上 |
 | `FTL_OP_CTX_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/ftl_op.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/ftl_op.c` 有 `_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
 
 #### Journal
@@ -5465,7 +5490,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `ftl_io_req_t` | `include/ftl/ftl_type.h` | lba / buffer / count / 完成通知 |
 | `pend_req_t`（32 B） | `include/ftl/pending.h` | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 |
 | `pend_group_t`（48 B） | 同上 | next / total / outstanding / agg_status |
-| `l2p_cache_t` / `l2p_cache_line_t` / `l2p_owner_t` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 回调 `{dim, metadata_dir, alloc, topo}` |
+| `l2p_cache_t` / `l2p_cache_line_t` / `l2p_owner_t` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 回调 `{die, metadata_dir, alloc, topo}` |
 | `l2p_jrn_t` / `jrn_handle_t` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / `alloc`（坏块走 owner API） |
 | `cp_header_t` / `cp_handle_t` | `include/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / 窄上下文 |
 | `md_entry_t` / `md_dir_ckpt_page_t` / `md_ring_t` / `md_dir_cache_t` / `md_handle_t` | `include/ftl/metadata.h` | Directory / 目录检查点 / 池几何 / 回收压缩 job / `alloc`+`total_writes` 窄指针 |

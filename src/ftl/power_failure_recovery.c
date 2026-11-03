@@ -211,7 +211,7 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
 
         case CP_MEDIA_NO_RECORD:
         case CP_MEDIA_VERSION_MISMATCH:
-            LOGI(LOG_TAG_BOOT "format required: media_version=%lu current=%u\r\n", media_version, FTL_MEDIA_LAYOUT_VERSION);
+            LOGI(LOG_TAG_BOOT "format required: media_version=%lu current=%lu\r\n", media_version, FTL_MEDIA_LAYOUT_VERSION);
             *out_need_format = true;
             return FTL_OK;
 
@@ -825,9 +825,9 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
 {
     // ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景）
-    const DWORD dim = ftl_topo_dim(ftl->topo);
+    const DWORD die = topo_2_die(ftl->topo);
 
-    l2p_owner_invalidate(ftl->cache, dim);
+    l2p_owner_invalidate(ftl->cache, die);
 
     // ② full metadata rebuild **先于 carve**：写过的块必须先被认领成 CLOSED；否则 carve 把它们放进
     // Spare/OP 后，full metadata rebuild 再把同块建 Closed ⇒ 池成员与非空闲块重叠。
@@ -878,7 +878,7 @@ static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
  */
 static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
 {
-    const DWORD dim = ftl_topo_dim(ftl->topo);
+    const DWORD die = topo_2_die(ftl->topo);
 
     // ① 失效本 owner 的 resident CLEAN 行中不在 CP bitmap 的 region。
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -891,7 +891,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
         {
             continue; /* DIRTY / FLUSHING / LOADING / INVALID 均不在此处理 */
         }
-        if (l2p_region_owned_by(line.region_id, dim) == false)
+        if (l2p_region_owned_by(line.region_id, die) == false)
         {
             continue; /* 共享 cache：别的 LUN 的行由它们自己的恢复处理 */
         }
@@ -919,7 +919,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
             continue; /* 未映射：无页可预载，懒加载合成全 INVALID 行 */
         }
 
-        const DWORD global = (local * FTL_DIM_TOTAL) + dim;
+        const DWORD global = (local * DIE_MAX) + die;
 
         if (l2p_region_preload(ftl->cache, global, addr) == false)
         {

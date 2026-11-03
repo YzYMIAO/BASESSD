@@ -50,7 +50,7 @@ extern DWORD syscalls_heap_used(void);
  * ssd_controller_t.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
  * 故仍用 _Static_assert 钉住 FTL_LBA_MAX 装得进 32 位。
  */
-_Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
+_Static_assert(FTL_LBA_MAX_AT_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
 
 static char g_cli_line[USART_CLI_LINE_CAPACITY];
 static WORD g_cli_length;
@@ -177,7 +177,7 @@ static DWORD uart_cli_expect_word(DWORD byte_offset)
  * 复用 l2p_cache.h 的分片公式；8-LBA pair 窗口不跨 region，故按窗口基址取即可。 */
 static ftl_ctx_t *uart_cli_ftl_for_lba(QWORD lba)
 {
-    return g_ctrl.ftl[lba_route_ch(lba)][lba_route_ce(lba)][lba_route_lun(lba)];
+    return g_ctrl.ftl[lba_2_die(lba)];
 }
 
 /* 解析十进制/十六进制数。成功且全部消费返回 true；失败/残留返回 false。 */
@@ -536,42 +536,40 @@ static int uart_cli_info(int argc, char *argv[])
         (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
     }
 
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        ch  = die_2_ch(die);
+        ce  = die_2_ce(die);
+        lun = die_2_lun(die);
+
+        const ftl_ctx_t *ftl = g_ctrl.ftl[die];
+
+        if (ftl == NULL)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                const ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
+            continue;
+        }
+        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrashing, ftl->cache->miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.sequence_counter, ftl->total_writes);
 
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-                (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrashing, ftl->cache->miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.sequence_counter, ftl->total_writes);
+        /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
+        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->reclaimed_count, ftl->mig_handle->moved_count, ftl->mig_handle->noop_count, ftl->mig_handle->novictim_count, ftl->mig_handle->erased, ftl->mig_handle->read_fail_streak, ftl->mig_handle->gc_last_mode, ftl->mig_handle->nogain_count, alc_free_min_plane_count(&ftl->alloc));
+        // 运行期账本自查（RISK-MD-06）：零计数 CLOSED 块是否仍有活映射。
+        // 放在 CLI（结构性同步上下文）而不是数据面，避免抢占 FC 资源。
+        // 探针内部有同步读 + 泵，故取 g_ctrl 的非 const 指针（本处 ftl 是 const 视图）。
+        (void)pfr_count_underrun_probe(g_ctrl.ftl[die]);
 
-                /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
-                (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->reclaimed_count, ftl->mig_handle->moved_count, ftl->mig_handle->noop_count, ftl->mig_handle->novictim_count, ftl->mig_handle->erased, ftl->mig_handle->read_fail_streak, ftl->mig_handle->gc_last_mode, ftl->mig_handle->nogain_count, alc_free_min_plane_count(&ftl->alloc));
-                // 运行期账本自查（RISK-MD-06）：零计数 CLOSED 块是否仍有活映射。
-                // 放在 CLI（结构性同步上下文）而不是数据面，避免抢占 FC 资源。
-                // 探针内部有同步读 + 泵，故取 g_ctrl 的非 const 指针（本处 ftl 是 const 视图）。
-                (void)pfr_count_underrun_probe(g_ctrl.ftl[ch][ce][lun]);
+        /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
+         * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch_calls, ftl->cache->prefetch_started, ftl->cache->prefetch_skipped, ftl->cache->prefetch_resident, ftl->cache->prefetch_hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->batch_jobs, ftl->mig_handle->batch_pages, ftl->mig_handle->batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->wal_defer_count);
 
-                /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
-                 * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
-                (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch_calls, ftl->cache->prefetch_started, ftl->cache->prefetch_skipped, ftl->cache->prefetch_resident, ftl->cache->prefetch_hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
-                (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->batch_jobs, ftl->mig_handle->batch_pages, ftl->mig_handle->batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->wal_defer_count);
+        /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
+         * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
+        const md_dir_cache_t *md  = ftl->metadata_dir;
+        const md_handle_t    *job = &md->handle;
 
-                /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
-                 * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
-                const md_dir_cache_t *md  = ftl->metadata_dir;
-                const md_handle_t    *job = &md->handle;
-
-                if ((job->phase != MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
-                {
-                    (void)LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall=%lums pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, job->stall_ms, md->reclaim_pending_count, job->victim);
-                }
-            }
+        if ((job->phase != MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
+        {
+            (void)LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall=%lums pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, job->stall_ms, md->reclaim_pending_count, job->victim);
         }
     }
 
@@ -738,14 +736,15 @@ static int uart_cli_addr(int argc, char *argv[])
         }
         if (argc == 6)
         {
-            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
             {
                 (void)LOGE("addr: invalid ch/ce/lun\r\n");
                 return FUNC_STATUS_ERROR;
             }
         }
 
-        const ftl_ctx_t   *ftl = g_ctrl.ftl[ch][ce][lun];
+        const DWORD        die = chcelun_2_die((BYTE)ch, (BYTE)ce, (BYTE)lun);
+        const ftl_ctx_t   *ftl = ((die == FTL_DIE_INVALID) || (die >= DIE_MAX)) ? NULL : g_ctrl.ftl[die];
         const bst_block_t *b;
 
         if (ftl == NULL)
@@ -836,9 +835,6 @@ static int uart_cli_stack(int argc, char *argv[])
 static int uart_cli_bbt(int argc, char *argv[])
 {
     BYTE do_erase = 0U;
-    BYTE ch;
-    BYTE ce;
-    BYTE lun;
 
 #ifndef NDEBUG
     /* 负例注入：bbt fault <plane> <block> —— 把指定物理块标 BAD 并触发候选池重算。
@@ -846,7 +842,7 @@ static int uart_cli_bbt(int argc, char *argv[])
      * ⚠ 若该块持有活元数据，会丢一份副本；只在 debug 档提供。 */
     if ((argc == 4) && (strcmp(argv[1], "fault") == 0))
     {
-        ftl_ctx_t *ftl = g_ctrl.ftl[0][0][0];
+        ftl_ctx_t *ftl = g_ctrl.ftl[0];
 
         if (ftl == NULL)
         {
@@ -896,40 +892,34 @@ static int uart_cli_bbt(int argc, char *argv[])
         LOGW("bbt --erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
     }
 
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        ftl_ctx_t *ftl = g_ctrl.ftl[die];
+
+        if (ftl == NULL)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
+            continue;
+        }
+        /* 擦除前先关掉本实例的后台写：擦除要跑十几秒，且擦完介质已空而 RAM 状态
+         * 陈旧（CP_TIME_INTERVAL_MS=10s 的定时 checkpoint 会把旧状态写回去，
+         * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过后台调度步，无清除路径。 */
+        if (do_erase != 0U)
+        {
+            ftl->bg_suspend = 1U;
+            /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
+             * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
+             * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
+             * 否则 host 写组永不完成。 */
             {
-                ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
+                wb_trigger_t trigger;
+                wb_status_t  status;
 
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-                /* 擦除前先关掉本实例的后台写：擦除要跑十几秒，且擦完介质已空而 RAM 状态
-                 * 陈旧（CP_TIME_INTERVAL_MS=10s 的定时 checkpoint 会把旧状态写回去，
-                 * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过后台调度步，无清除路径。 */
-                if (do_erase != 0U)
-                {
-                    ftl->bg_suspend = 1U;
-                    /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
-                     * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
-                     * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
-                     * 否则 host 写组永不完成。 */
-                    {
-                        wb_trigger_t trigger;
-                        wb_status_t  status;
-
-                        memset(&trigger, 0, sizeof(trigger));
-                        trigger.kind = WBUF_TRIGGER_RESET;
-                        (void)wb_handle(ftl->wbuf, &trigger, &status);
-                    }
-                }
-                bbt_print_bad_map(&ftl->alloc, do_erase);
+                memset(&trigger, 0, sizeof(trigger));
+                trigger.kind = WBUF_TRIGGER_RESET;
+                (void)wb_handle(ftl->wbuf, &trigger, &status);
             }
         }
+        bbt_print_bad_map(&ftl->alloc, do_erase);
     }
 
     if (do_erase != 0U)
@@ -974,40 +964,38 @@ static int uart_cli_format(int argc, char *argv[])
         LOGW("format --verify: full-chip erase check enabled (erase OK = good block).\r\n");
     }
 
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        ch  = die_2_ch(die);
+        ce  = die_2_ce(die);
+        lun = die_2_lun(die);
+
+        ftl_ctx_t *ftl = g_ctrl.ftl[die];
+
+        if (ftl == NULL)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
-
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-
-                /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
-                ftl->bg_suspend = 1U;
-                {
-                    wb_trigger_t trigger;
-                    wb_status_t  status;
-
-                    memset(&trigger, 0, sizeof(trigger));
-                    trigger.kind = WBUF_TRIGGER_RESET;
-                    (void)wb_handle(ftl->wbuf, &trigger, &status);
-                }
-
-                if (pfr_media_format(ftl, verify) != FTL_OK)
-                {
-                    LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-                    return FUNC_STATUS_ERROR;
-                }
-
-                done = 1U;
-                LOGI("format: done ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-            }
+            continue;
         }
+
+        /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
+        ftl->bg_suspend = 1U;
+        {
+            wb_trigger_t trigger;
+            wb_status_t  status;
+
+            memset(&trigger, 0, sizeof(trigger));
+            trigger.kind = WBUF_TRIGGER_RESET;
+            (void)wb_handle(ftl->wbuf, &trigger, &status);
+        }
+
+        if (pfr_media_format(ftl, verify) != FTL_OK)
+        {
+            LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+            return FUNC_STATUS_ERROR;
+        }
+
+        done = 1U;
+        LOGI("format: done ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
     }
 
     if (done == 0U)
@@ -1033,24 +1021,22 @@ static int uart_cli_pool(int argc, char *argv[])
 
     BYTE done = 0U;
 
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        const BYTE ch  = die_2_ch(die);
+        const BYTE ce  = die_2_ce(die);
+        const BYTE lun = die_2_lun(die);
+
+        const ftl_ctx_t *ftl = g_ctrl.ftl[die];
+
+        if (ftl == NULL)
         {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                const ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
-
-                if (ftl == NULL)
-                {
-                    continue;
-                }
-
-                LOGI(LOG_TAG_POOL "ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
-                md_pool_print(ftl->metadata_dir);
-                done = 1U;
-            }
+            continue;
         }
+
+        LOGI(LOG_TAG_POOL "ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
+        md_pool_print(ftl->metadata_dir);
+        done = 1U;
     }
 
     if (done == 0U)

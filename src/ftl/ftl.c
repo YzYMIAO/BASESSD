@@ -67,9 +67,9 @@
 // FTL 每 I/O 热数据。链接脚本按整个 ftl.o 把 .bss 放进 DTCM。
 // 这些对象都是 CPU-only：NAND/FC 的 DMA buffer 不在这里，DMA1/2 也访问不到 DTCM。
 // `.dtcm_data` 是 NOLOAD ⇒ ftl_init 对每个实例显式 memset。
-ftl_ctx_t   g_ftl[CH_NUM][CE_NUM][LUN_NUM];
-wb_handle_t g_ftl_wbuf[FTL_DIM_TOTAL];
-l2p_jrn_t   g_ftl_journal[FTL_DIM_TOTAL];
+ftl_ctx_t   g_ftl[FTL_DIE_MAX];
+wb_handle_t g_ftl_wbuf[FTL_DIE_MAX];
+l2p_jrn_t   g_ftl_journal[FTL_DIE_MAX];
 
 // dangling 守卫日志：
 // · `st=BAD` 是**预期降级**（旧块已退役，数据本不可读）⇒ 每个旧 gblock 只打一行，
@@ -1918,6 +1918,86 @@ void ftl_global_init(void)
     memset(&s_seq_drain_stall_log, 0, sizeof(s_seq_drain_stall_log));
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * 紧凑 die 表（扫描结果的 FTL 调度坐标）
+ *
+ * 板级扫描（nand_scan_targets，armed 之前）只给出哪些 (ch,ce) target 存在、
+ * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
+ * ══════════════════════════════════════════════════════════════ */
+WORD       g_die_count;
+WORD       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
+ftl_topo_t g_die_table[FTL_DIE_MAX];
+
+bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
+{
+    memset(g_chcelun_table, 0xFF, sizeof(g_chcelun_table));
+    for (WORD die = 0U; die < FTL_DIE_MAX; die++)
+    {
+        g_die_table[die].ch  = FTL_TOPO_FIELD_INVALID;
+        g_die_table[die].ce  = FTL_TOPO_FIELD_INVALID;
+        g_die_table[die].lun = FTL_TOPO_FIELD_INVALID;
+    }
+    g_die_count = 0U;
+
+    /* 编号顺序必须与 topo_2_die 一致（ch 最快、lun 最慢）：
+     * 满配矩形拓扑下 die == topo_2_die，避免出现第二套扁平坐标（C9）。
+     * 稀疏拓扑时 die 紧凑。 */
+    for (BYTE lun = 0U; lun < LUN_MAX; lun++)
+    {
+        for (BYTE ce = 0U; ce < CE_MAX; ce++)
+        {
+            for (BYTE ch = 0U; ch < CH_MAX; ch++)
+            {
+                if ((targets[ch][ce].present == 0U) || (lun >= targets[ch][ce].lun_count) || (targets[ch][ce].lun_present[lun] == 0U))
+                {
+                    continue;
+                }
+
+                if (g_die_count >= FTL_DIE_MAX)
+                {
+                    return false;
+                }
+
+                g_chcelun_table[ch][ce][lun] = g_die_count;
+                g_die_table[g_die_count].ch  = ch;
+                g_die_table[g_die_count].ce  = ce;
+                g_die_table[g_die_count].lun = lun;
+                g_die_count++;
+            }
+        }
+    }
+
+    if (g_die_count == 0U)
+    {
+        return false;
+    }
+
+    /* 往返自检：die → ftl_topo_t → (ch,ce,lun) → die。 */
+    for (WORD die = 0U; die < DIE_MAX; die++)
+    {
+        const BYTE ch  = die_2_ch(die);
+        const BYTE ce  = die_2_ce(die);
+        const BYTE lun = die_2_lun(die);
+
+        if ((ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX) || (g_chcelun_table[ch][ce][lun] != die))
+        {
+            return false;
+        }
+    }
+
+    /* 未分配的尾项必须保持无效（三个字段都 0xFF）。 */
+    for (WORD die = DIE_MAX; die < FTL_DIE_MAX; die++)
+    {
+        if ((g_die_table[die].ch != FTL_TOPO_FIELD_INVALID) || (g_die_table[die].ce != FTL_TOPO_FIELD_INVALID) || (g_die_table[die].lun != FTL_TOPO_FIELD_INVALID))
+        {
+            return false;
+        }
+    }
+
+    LOGI(LOG_TAG_FTL "topology: dies=%hu (max=%u)\r\n", g_die_count, (unsigned int)FTL_DIE_MAX);
+    return true;
+}
+
 // 实现要点：本实例只持有指针，storage 数组/挂载块由 HIL 提供，
 // 位于 NOLOAD 段 ⇒ 本函数必须显式 memset。
 SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
@@ -2105,9 +2185,9 @@ static SSD_CODE_FAST void contract_check_handles(const ftl_ctx_t *ftl)
 static SSD_CODE_FAST void contract_check_topology(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t *topo = &ftl->topo;
-    const DWORD       dim  = ftl_topo_dim(*topo);
+    const DWORD       die  = topo_2_die(*topo);
 
-    ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) && (dim < FTL_DIM_TOTAL) && (ftl_dim_ch(dim) == topo->ch) && (ftl_dim_ce(dim) == topo->ce) && (ftl_dim_lun(dim) == topo->lun));
+    ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) && (die < DIE_MAX) && (die_2_ch(die) == topo->ch) && (die_2_ce(die) == topo->ce) && (die_2_lun(die) == topo->lun));
 
     ASSERT((ftl->alloc.ch == topo->ch) && (ftl->alloc.ce == topo->ce) && (ftl->alloc.lun == topo->lun) && (ftl->cache->ch == topo->ch) && (ftl->cache->ce == topo->ce));
 
@@ -2155,7 +2235,7 @@ static SSD_CODE_FAST void contract_check_module_contexts(const ftl_ctx_t *ftl)
 static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t topo = ftl->topo;
-    const DWORD      dim  = ftl_topo_dim(topo);
+    const DWORD      die  = topo_2_die(topo);
 
     ASSERT(ftl->cache->owner_of_region != NULL);
     ASSERT(ftl_op_route_get(topo.ch, topo.ce, topo.lun) == ftl);
@@ -2163,13 +2243,13 @@ static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_t *ftl)
     // 只查本实例拥有的 region：其他 LUN 的 owner 可能尚未 boot。
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        const DWORD        global = (local * FTL_DIM_TOTAL) + dim;
+        const DWORD        global = (local * DIE_MAX) + die;
         const l2p_owner_t *owner  = ftl->cache->owner_of_region(ftl->cache->owner_ctx, global);
         const QWORD        lba    = (QWORD)global * L2P_ENTRIES_PER_REGION;
 
-        ASSERT((owner != NULL) && (owner->dim == dim) && (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) && (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) && (owner->topo.lun == ftl->topo.lun) && (ftl_topo_dim(owner->topo) == dim));
+        ASSERT((owner != NULL) && (owner->die == die) && (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) && (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) && (owner->topo.lun == ftl->topo.lun) && (topo_2_die(owner->topo) == die));
 
-        ASSERT((ftl_op_route_get_region(global) == ftl) && (lba_route_ch(lba) == ftl->cache->ch) && (lba_route_ce(lba) == ftl->cache->ce));
+        ASSERT((ftl_op_route_get_region(global) == ftl) && (lba_2_ch(lba) == ftl->cache->ch) && (lba_2_ce(lba) == ftl->cache->ce));
     }
 }
 
@@ -2271,7 +2351,7 @@ void ftl_service_pump(void)
 // `ftl/bg_scheduler.c`（含 bg_suspend 判定，见该处头注）。
 void ftl_service(ftl_ctx_t *ftl)
 {
-    // 唯一调用点 main.c 传 &g_ftl[ch][ce][lun]（静态数组元素，结构性恒非空）；
+    // 唯一调用点 main.c 传 &g_ftl[die]（静态数组元素，结构性恒非空）；
     // NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
     // 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。
 
@@ -3248,7 +3328,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
         return true; /* 没有在飞的 flush：对调用者而言就是"已完成" */
     }
 
-    const DWORD dim = ftl_topo_dim(ftl->topo);
+    const DWORD die = topo_2_die(ftl->topo);
 
     // ① wbuf：把打开的窗口推下去，并取当前状态。
     wb_trigger_t wb_trigger;
@@ -3260,7 +3340,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     (void)wb_handle(ftl->wbuf, &wb_trigger, &wb_status);
 
     // ② L2P：继续 kick 本 owner 的脏行（受共享 credit 池门控）。
-    l2p_owner_flush_kick(ftl->cache, dim, L2P_CACHE_SIZE);
+    l2p_owner_flush_kick(ftl->cache, die, L2P_CACHE_SIZE);
 
     // ③ Journal：推进异步刷页 job。
     const jrn_trigger_e jrn_trigger = JRN_TRIGGER_FLUSH;
@@ -3277,7 +3357,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     const bool cache_wb_pending = (ftl->cache_stream.seq.wr.count != 0U) || (ftl->cache_stream.seq.wr_inflight != 0U);
     const bool cache_wr_active  = (ftl->cache_stream.seq.active == true) && (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_WRITE);
     const bool wb_done          = (wb_status.state == WBUF_STATE_IDLE) && (wb_status.occupied == 0U);
-    const bool l2p_done         = l2p_flush_owner_idle(ftl->cache, dim);
+    const bool l2p_done         = l2p_flush_owner_idle(ftl->cache, die);
     const bool jrn_done         = jrn_is_idle(ftl->journal) && (jrn_has_pending_entries(ftl->journal) == false);
     const bool jrn_fail         = jrn_has_write_failure(ftl->journal);
     const bool wb_fail          = (wb_status.state == WBUF_STATE_FAILED);

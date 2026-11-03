@@ -18,9 +18,9 @@ typedef struct
 {
     ssd_ctrl_state_e state;
 
-    /* FTL 实例三维路由表：ftl[ch][ce][lun] 指向绑定该 (ch,ce,lun) 的 FTL 实例。
-     * CH_NUM/CE_NUM/LUN_NUM 来自 nand_config.h（当前全 1 = 单实例折叠，仅 4B）。 */
-    ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM];
+    /* FTL 实例路由表：按紧凑 die 号索引，指向该 die 的 FTL 实例。
+     * 数组容量用静态上界 FTL_DIE_MAX；实际有效项 = DIE_MAX（扫描结果）。 */
+    ftl_ctx_t *ftl[FTL_DIE_MAX];
 
     /* 在飞的 FLUSH 请求（NULL = 无）。FLUSH 是异步命令：submit 只登记并启动
      * 各实例的 flush job，完成由 ssd_controller_service 每轮推进后置
@@ -41,17 +41,17 @@ typedef struct
 } ssd_controller_t;
 
 /*
- * ssd_controller_init - 初始化 Controller，绑定 FTL 实例三维表
+ * ssd_controller_init - 初始化 Controller，按 compact die 号绑定 FTL 实例表
  *
- * 形参按 C 数组退化规则实为指向 [CE_NUM][LUN_NUM] 子数组的指针；
- * 每个槽位必须非空，且槽位索引须与实例 topo.ch/ce/lun 一致
- *（保证 LBA 路由与芯片定位语义一致）。
+ * 只检查 present die：对每个 die < DIE_MAX，ftl_by_die[die] 必须非空，且
+ * 实例 topo 必须与 die 表分解出的 (ch,ce,lun) 一致（保证 LBA 路由与芯片
+ * 定位语义一致）。稀疏拓扑的空洞不访问。
  *
  * @param controller Controller 上下文
- * @param ftl        FTL 实例三维数组 ftl[CH_NUM][CE_NUM][LUN_NUM]
+ * @param ftl_by_die die → 实例指针表（长度 FTL_DIE_MAX，前 DIE_MAX 项有效）
  * @return SSD_STATUS_OK 成功，SSD_STATUS_INVALID_ARGUMENT 入参非法/槽位缺失/拓扑不符
  */
-ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM]);
+ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die);
 ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
 BYTE         ssd_controller_is_complete(const ssd_request_t *request);
 

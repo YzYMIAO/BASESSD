@@ -15,9 +15,9 @@
  *   - nand_addr_t 与 PAA 访问器 / 替换函数
  *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]
  *
- * 器件事实（PAGE_SIZE / PAGES_PER_BLOCK / PLANE_NUM / LUN_NUM / CH_NUM /
- * CE_NUM / 地址位宽 / NAND_PAA_TO_ROW / FMC / ID）在
- * `nand/devices/<family>.h`，由宏选择：
+ * 器件事实（PAGE_SIZE / PAGES_PER_BLOCK / PLANE_NUM / LUN_NUM / 地址位宽 /
+ * NAND_PAA_TO_ROW / FMC / ID）在 `nand/devices/<family>.h`，由宏选择。
+ * 板级容量（CH_NUM / CE_NUM）不在器件头里，见下面「板级物理容量」段：
  *
  *     make NAND_DEVICE=MT29F___G08A      # 默认
  *
@@ -33,6 +33,33 @@
 #else
 #    error "NAND device not selected: make NAND_DEVICE=<family>"
 #endif
+
+/* ══════════════════════════════════════════════════════════════
+ * 板级物理容量（数组上界；不是器件几何）
+ *
+ * CH_NUM / CE_NUM 是**板卡接线**属性：几个 NAND 通道、每通道几个片选。
+ * 它们不能从 NAND 器件头推出——同一颗芯片可以接 1 条或多条通道。
+ * 实际存在多少 target 由 nand_scan_targets() 上电扫描决定。
+ *
+ * LUN_MAX 来自器件头 LUN_NUM（器件属性）；运行时实际 LUN 数由 ONFI
+ * 参数页 logical_units 给出，并逐 LUN 用 78h 探测确认。
+ * 构建时可用 -DNAND_BOARD_CH_NUM=... / -DNAND_BOARD_CE_NUM=... 覆盖。
+ * ══════════════════════════════════════════════════════════════ */
+#ifndef NAND_BOARD_CH_NUM
+#    define NAND_BOARD_CH_NUM (1U)
+#endif
+#ifndef NAND_BOARD_CE_NUM
+#    define NAND_BOARD_CE_NUM (1U)
+#endif
+
+#define CH_NUM  NAND_BOARD_CH_NUM
+#define CE_NUM  NAND_BOARD_CE_NUM
+#define CH_MAX  CH_NUM
+#define CE_MAX  CE_NUM
+#define LUN_MAX LUN_NUM
+
+_Static_assert(CH_NUM >= 1U, "板级通道数至少为 1");
+_Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 
 /* ══════════════════════════════════════════════════════════════
  * 一、位宽推导与软件布局
@@ -314,5 +341,24 @@ static inline nand_addr_t addr_from_paa(BYTE ch, BYTE ce, DWORD paa)
 
     return addr;
 }
+
+/* ══════════════════════════════════════════════════════════════
+ * 上电扫描结果（板级/物理事实）
+ *
+ * present      : 该 (ch,ce) target 是否有物理通路且 READ ID 匹配。
+ * lun_count    : ONFI 参数页 logical_units（运行时实际值，不是宏）。
+ * lun_present[]: 逐 LUN 用 READ STATUS ENHANCED (78h) 探测的结果；
+ *                1 = 该 LUN 有响应。target 不存在时全 0。
+ *
+ * 紧凑 die 编号与 LUN→die 表在 FTL 层（ftl_config.h）。
+ * ══════════════════════════════════════════════════════════════ */
+typedef struct
+{
+    BYTE present;
+    BYTE lun_count;
+    BYTE lun_present[LUN_MAX];
+} nand_target_info_t;
+
+extern nand_target_info_t g_nand_targets[CH_MAX][CE_MAX];
 
 #endif /* NAND_CONFIG_H */

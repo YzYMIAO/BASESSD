@@ -58,7 +58,7 @@
 #define USB_MSC_BCD_DEVICE 0x0100U /* bcdDevice：本仓设备版本 1.00 */
 
 /* SCSI READ CAPACITY 的块计数是 32 位；越界会让主机看到错误容量。 */
-_Static_assert(FTL_LBA_MAX <= UINT32_MAX, "SCSI block count must fit 32 bits");
+_Static_assert(FTL_LBA_MAX_AT_MAX <= UINT32_MAX, "SCSI block count must fit 32 bits");
 
 /* USB MSC sector 与 FTL 映射单元必须一一对应；任一侧改变都会破坏 LBA 语义。 */
 _Static_assert(USB_MSC_BLOCK_SIZE == FTL_IU_BYTES, "MSC sector must equal FTL mapping unit");
@@ -134,18 +134,12 @@ static bool usb_msc_take_deferred_error(void)
 {
     /* FTL 侧的迟到结论优先（RISK-CACHE-27）：早回执后写组在页编程完成时就报 OK，
      * FAIL_CACHE 要晚一条命令才到 ⇒ 那个结论只存在于 FTL 的粘性错误里。 */
-    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
     {
-        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        if (ftl_take_deferred_error(g_ctrl.ftl[die]) == true)
         {
-            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
-            {
-                if (ftl_take_deferred_error(g_ctrl.ftl[ch][ce][lun]) == true)
-                {
-                    LOGW("[USB ] deferred write error (FTL) — fail the next command\r\n");
-                    return true;
-                }
-            }
+            LOGW("[USB ] deferred write error (FTL) — fail the next command\r\n");
+            return true;
         }
     }
 

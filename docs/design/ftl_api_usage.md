@@ -437,34 +437,34 @@ nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit
  * g_ftl_md 定义在 metadata.c（SRAM4）；五张表落 SRAM12、cp_handle 落 SRAM3。
  * 由 ftl_storage_t 绑定。 */
 extern ftl_ctx_t             g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* DTCM */
-static ftl_block_t   g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD          g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD          g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
-static WORD          g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
-static super_block_t g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
-static checkpoint_handle_t              g_ftl_checkpoint_handle[FTL_DIM_TOTAL]  SRAM3_DATA;
-extern l2p_jrn_t             g_ftl_journal[FTL_DIM_TOTAL];   /* DTCM */
-extern md_dir_cache_t        g_ftl_md[FTL_DIM_TOTAL];        /* SRAM4 */
+static ftl_block_t   g_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          g_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          g_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD          g_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_t g_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+static checkpoint_handle_t              g_ftl_checkpoint_handle[FTL_DIE_MAX]  SRAM3_DATA;
+extern l2p_jrn_t             g_ftl_journal[FTL_DIE_MAX];   /* DTCM */
+extern md_dir_cache_t        g_ftl_md[FTL_DIE_MAX];        /* SRAM4 */
 static ssd_controller_t      g_ctrl;
 
 /* ④ FTL 初始化（阶段 C：拓扑 + 共享 cache + storage）
  *    内部：绑定 storage → 五张表逐表 memset → pend_init
  *        → alc_init（绑定 table_refs，free pool 空）
  *        → journal_init → metadata_dir_load → bbt_init（填充 BST bad 位） */
-const uint32_t dim = ftl_topo_dim((ftl_topo_t){.ch = ch, .ce = ce, .lun = lun});
+const uint32_t die = topo_2_die((ftl_topo_t){.ch = ch, .ce = ce, .lun = lun});
 
 ftl_table_refs_t refs;
-refs.blocks         = g_ftl_blocks[dim];
-refs.free_blocks    = g_ftl_free_blocks[dim];
-refs.op_blocks      = g_ftl_op_blocks[dim];
-refs.spare_blocks   = g_ftl_spare_blocks[dim];
-refs.closed_sb_list = g_ftl_closed_sb_list[dim];
+refs.blocks         = g_ftl_blocks[die];
+refs.free_blocks    = g_ftl_free_blocks[die];
+refs.op_blocks      = g_ftl_op_blocks[die];
+refs.spare_blocks   = g_ftl_spare_blocks[die];
+refs.closed_sb_list = g_ftl_closed_sb_list[die];
 
 ftl_storage_t storage;
 storage.table_refs        = &refs;
-storage.metadata_dir      = &g_ftl_md[dim];
-storage.journal           = &g_ftl_journal[dim];
-storage.checkpoint_handle = &g_ftl_checkpoint_handle[dim];
+storage.metadata_dir      = &g_ftl_md[die];
+storage.journal           = &g_ftl_journal[die];
+storage.checkpoint_handle = &g_ftl_checkpoint_handle[die];
 ftl_init(&g_ftl[ch][ce][lun], (ftl_topo_t){.ch = ch, .ce = ce, .lun = lun},
          &g_l2p_cache[ch][ce], &storage);
 
@@ -479,7 +479,7 @@ for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++) {
 
 pfr_boot_recovery(&g_ftl[ch][ce][lun], &result);  // ⑥ 启动恢复（FRESH/CLEAN/POWER_FAILURE）
 
-/* ⑦ controller 绑定：g_ftl_ptrs 三维指针表（类型匹配 ssd_controller_init 形参） */
+/* ⑦ controller 绑定：g_ftl_ptrs 按 compact die 号索引（类型匹配 ssd_controller_init 形参） */
 ssd_controller_init(&g_ctrl, g_ftl_ptrs);
 
 /* 主循环（企业级异步模式；v0.37 g_ftl_ready 守卫） */
@@ -549,9 +549,9 @@ typedef struct {
 } l2p_cache_t;
 
 /* 全局 LBA → (ch,ce,lun) 路由（行业主控哈希；LUN_NUM=1 时恒 0） */
-static inline uint32_t lba_route_ch(uint64_t lba);
-static inline uint32_t lba_route_ce(uint64_t lba);
-static inline uint32_t lba_route_lun(uint64_t lba);
+static inline uint32_t lba_2_ch(uint64_t lba);
+static inline uint32_t lba_2_ce(uint64_t lba);
+static inline uint32_t lba_2_lun(uint64_t lba);
 
 /* 全局 region → owner die 内的局部 region（映射页落盘位置；单一漏斗） */
 static inline uint32_t l2p_global_to_local_region(uint32_t global_region);
@@ -605,18 +605,18 @@ ftl_status_e l2p_cache_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
 ftl_status_e l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
 
 /* 后台写回推进：每轮 ftl_service 调一次，只处理本 owner，最多起 max_kick 行 */
-void l2p_owner_flush_kick(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, uint32_t owner_die, uint8_t max_kick);
 
 /* ── 同步逃生口（自旋泵；只许结构性同步上下文，服务函数禁用）── */
 ftl_status_e l2p_cache_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
 ftl_status_e l2p_cache_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 ftl_status_e l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx);
-ftl_status_e l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim);
+ftl_status_e l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_die);
 
 /* 恢复/格式化：只失效本 owner 的行与脏位（不能整 cache re-init） */
-void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim);
+void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_die);
 /* Checkpoint 快照：全局脏位图 → 本 die 的局部 2048-bit 位图 */
-void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim,
+void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_die,
                                      uint32_t out[L2P_LOCAL_DIRTY_WORDS]);
 ```
 
@@ -940,7 +940,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     │   └── checkpoint_handle(EMERGENCY)     ← Journal ≥95%
     │
     ├── IDLE 模式 (inflight == 0):               全力后台
-    │   ├── l2p_handle(cache, dim)            ← 档位 → max_kick（模块内表）
+    │   ├── l2p_handle(cache, die)            ← 档位 → max_kick（模块内表）
     │   ├── journal_handle(FLUSH)             ← 异步刷页
     │   ├── bbt_handle()                      ← 攒批持久化
     │   └── checkpoint_handle(TIMER)          ← T1/T2/T3 触发评估
@@ -949,7 +949,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     │   └── 同 IDLE 的四项（l2p max_kick 降到 4）
     │
     └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
-        └── l2p_handle(cache, dim)            ← max_kick = 1
+        └── l2p_handle(cache, die)            ← max_kick = 1
 ```
 
 > 周期评估：timer 表每 10 ms 调 `mig_eval`（GC 求值）；WL 5s / predict 1s 的间隔门仍在

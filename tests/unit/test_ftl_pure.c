@@ -1582,7 +1582,7 @@ static MunitResult test_op_route(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    struct ftl_context *route[CH_NUM][CE_NUM][LUN_NUM];
+    struct ftl_context *route[FTL_DIE_MAX];
     ftl_ctx_t          *live  = ftl_ut_live();
     ftl_ctx_t          *saved = ftl_op_route_get(0U, 0U, 0U);
 
@@ -1591,14 +1591,14 @@ static MunitResult test_op_route(const MunitParameter params[], void *data)
     munit_assert_not_null(saved);
 
     memset(route, 0, sizeof(route));
-    route[0][0][0] = live;
+    route[0] = live;
     ftl_op_route_set(route);
 
     munit_assert_ptr_equal(ftl_op_route_get(0U, 0U, 0U), live);
     munit_assert_ptr_equal(ftl_op_route_get_region(0U), live);
 
     memset(route, 0, sizeof(route));
-    route[0][0][0] = saved;
+    route[0] = saved;
     ftl_op_route_set(route);
 
     ftl_ut_trace_detail("op route: (0,0,0) saved=%p -> live=%p; region0=%p; restored=%p", (void *)saved, (void *)live, (void *)ftl_op_route_get_region(0U), (void *)ftl_op_route_get(0U, 0U, 0U));
@@ -2741,7 +2741,7 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
 
     memcpy(s_l2p_bitmap_saved, c->region_dirty_bitmap, sizeof(s_l2p_bitmap_saved));
 
-    s_fake_owner.dim          = 0U;
+    s_fake_owner.die          = 0U;
     s_fake_owner.metadata_dir = ftl_ut_ram_md();
     s_fake_owner.alloc        = ftl_ut_ram_alloc();
     s_fake_owner.topo         = f->topo;
@@ -2808,7 +2808,7 @@ static MunitResult test_l2p_wal_gate(const MunitParameter params[], void *data)
     l2p_owner_fn_t old_fn  = c->owner_of_region;
     void          *old_ctx = c->owner_ctx;
 
-    s_fake_owner.dim          = 0U;
+    s_fake_owner.die          = 0U;
     s_fake_owner.metadata_dir = ftl_ut_ram_md();
     s_fake_owner.alloc        = ftl_ut_ram_alloc();
     s_fake_owner.topo         = f->topo;

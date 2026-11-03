@@ -118,16 +118,19 @@
 #define FTL_HOST_DATA_BLOCKS_PER_INSTANCE (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE) * PLANE_NUM))
 
 /* 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
- * （每 (ch,ce,lun) 是独立 FTL 实例；DIM=1 时 3392×256 = 868,352 = 424 MiB）。
+ * （每 (ch,ce,lun) 是独立 FTL 实例；单 die 时 3392×256 = 868,352 = 424 MiB）。
  * ⚠ 这是**L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
  *   对外一律以 `ssd_controller_t.host_lba_max` 为准（RISK-CAP-03）。 */
-#define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
+#define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * DIE_MAX)
+
+/* 静态上限版本：只用于编译期断言（运行期用 FTL_LBA_MAX）。 */
+#define FTL_LBA_MAX_AT_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIE_MAX)
 
 /* 主机可见容量（字节）：给日志/文档用，和 USB MSC 的 READ CAPACITY 同源。 */
 #define FTL_HOST_CAPACITY_BYTES ((QWORD)FTL_LBA_MAX * FTL_IU_BYTES)
 
 /* 主机范围必须落在共享 cache 的键空间内（C9：同一语义只允许一套上限）。 */
-_Static_assert((QWORD)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
+_Static_assert(FTL_LBA_MAX_AT_MAX <= L2P_GLOBAL_LBA_MAX_AT_MAX, "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
 
 /* ── FTL 主上下文 ── */
 
@@ -474,6 +477,19 @@ typedef struct
  * 不能放在逐实例 ftl_init 里：多实例/运行期 re-init 会清掉已运行实例的共享状态。
  */
 void ftl_global_init(void);
+
+/**
+ * @brief 由上电扫描结果构建紧凑 die 表（纯 RAM，不碰硬件）
+ *
+ * targets 由 nand_scan_targets() 在 armed 之前填好
+ * （present / lun_count / lun_present[]）。
+ * 只给实际存在且 78h 探测有响应的 LUN 分配紧凑 die 号；
+ * g_chcelun_table 与 g_die_table 互为逆映射。
+ *
+ * @param targets 板级物理拓扑（CH_MAX × CE_MAX）
+ * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
+ */
+bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX]);
 
 /**
  * @brief 初始化 FTL 子系统

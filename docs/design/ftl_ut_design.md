@@ -72,7 +72,9 @@
 
 ### 3.1 活实例
 
-- `ftl_ut_live()` 返回 `g_ctrl.ftl[0][0][0]`（`extern ssd_controller_t g_ctrl`）。`ftl_ctx_t` 约 287 KB，无法复制。
+- `ftl_ut_live()` 返回 `g_ctrl.ftl[0]`（die 0；`extern ssd_controller_t g_ctrl`）。`ftl_ctx_t` 约 287 KB，无法复制。
+- 每个套件 setup 调 `ftl_ut_topology_init()`：用 `g_nand_targets` 重建 die 表，
+  UT 不依赖主 boot 留下的表顺序；route/reboot 也按 die 索引。
 - pure 用例**不 reset 活实例的 allocator/metadata**；使用测试自有对象。
 - 需要活实例 L2P 行的用例，只借 2~4 行，teardown 原样恢复。
 
@@ -202,7 +204,7 @@
 | `op_ctx` | — | ctx add/take/remove 生命周期 |
 | `op_ctx_capacity` | — | 旁表容量与同 id 覆盖（RISK-IF-05） |
 | `bg_engine` | — | 任务表长度 = `BG_TASK_COUNT`、`level_select` 返回合法档位 |
-| `op_route` | — | dim→(ch,ce,lun) 路由（RISK-CR-02） |
+| `op_route` | — | die→(ch,ce,lun) 路由（RISK-CR-02） |
 | `bg_level_select` | — | 负载档位边界 |
 | `host_submit_invalid_args` | — | count=0 / buffer=NULL / LBA 越界 / ftl=NULL 均在分配池资源前拒绝 |
 
@@ -330,7 +332,7 @@
 | RISK-HOST-08 | 部分上板 | UT-M + BOARD | `trim_no_resurrection` | 极端时序人工 |
 | RISK-HOST-11 | 部分覆盖（2026-10-31 板端：journal-only 段通过；原始压力复现未重跑） | UT-M + BOARD | `trim_no_resurrection`（强制 CP + journal-only 两段） | Journal 压力下 trim 持久化 |
 | RISK-HOST-09 | 待后续 | UT-M 特征化 + BOARD | `trim_no_resurrection` | 并发当前不可达 |
-| RISK-CR-02 | 待上板 | UT-P | `op_route`、`address_roundtrip` | dim 分解/路由 |
+| RISK-CR-02 | 待上板 | UT-P | `op_route`、`address_roundtrip` | die 分解/路由 |
 | RISK-CR-03 | 已闭合（2026-10-25：`/ftl/` 85/85 行为回归） | UT-P + UT-M | `op_route`、media 回归 | 分 handler/孤儿完成 |
 | RISK-WB-03 | 待上板 | UT-P + UT-M | `wbuf_append_read`、`wbuf_density`、`host_io_matrix` | 记账/位图/一次编程 |
 | RISK-LOG-02 | 待上板 | BOARD | — | 需 UART 速率观测 |

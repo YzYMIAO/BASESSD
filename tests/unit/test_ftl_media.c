@@ -95,6 +95,7 @@ static void *media_setup(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    ftl_ut_topology_init();
     (void)ftl_ut_live();
     fi_reset(); /* 注入状态是进程级的：漏一次复位会静默污染后续用例 */
     return NULL;

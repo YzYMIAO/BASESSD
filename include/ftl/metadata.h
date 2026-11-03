@@ -103,8 +103,8 @@
  *
  * ⚠ **每个 (ch,ce,lun) 用同一份块号**：本 FTL 是"分片模型"——每个 die 一个完整
  *   独立实例（各自的 L2P 表/目录检查点/BBT/Journal/Checkpoint），主机 LBA 空间
- *   按 region 切分到各实例（lba_route_* 用全局 region；映射页落盘位置用
- *   global_region / FTL_DIM_TOTAL 的局部 region，见 l2p_cache.h）。
+ *   按 region 切分到各实例（lba_2_* 用全局 region；映射页落盘位置用
+ *   global_region / DIE_MAX 的局部 region，见 l2p_cache.h）。
  *   分区**不随 LUN/CE/CH 错开**。
  *
  * ⚠ 介质上的布局版本（`FTL_MEDIA_LAYOUT_VERSION`，写在 Checkpoint 头与目录检查点页内）
@@ -292,11 +292,14 @@ static inline bool ftl_is_l2p_log_gblock(WORD g)
 
 /*
  * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
- * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本不额外 +1，**不额外格式化**。
- * - DIM>1：同一个 LBA 的编码与单实例不同 ⇒ +1，首次启用自动全片格式化。
+ * - DIE_MAX == 1：global == local，介质上的值逐位不变 ⇒ 版本保持 BASE，
+ *   **不额外格式化**（与现有单 die 介质兼容）。
+ * - DIE_MAX > 1：把 die 数 + topology map 哈希编入版本 ⇒ 不同拓扑（哪怕 die 数
+ *   相同）也会被识别为版本不符，首次启用自动全片格式化。
  * 这是本仓自定的格式策略。
  */
-#define FTL_MEDIA_LAYOUT_VERSION (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
+DWORD ftl_media_layout_version(void);
+#define FTL_MEDIA_LAYOUT_VERSION (ftl_media_layout_version())
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 
