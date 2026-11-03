@@ -739,7 +739,7 @@ ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_pa
  * 无 plane/page 语义（同 fc.c 中 OP_SET_FEATURES 分支的注释）。
  *
  * ⚠ ch/ce/lun 必须由调用者显式给：它们不是地址，而是**完成派发的实例路由键**
- *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 ftl_op_route_get 解析归属实例）。
+ *   （ftl_op_drain 按命令自身 ch/ce/lun 经 ftl_op_route_get 解析归属实例）。
  *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
  *
  * @param out_cmd      出参：已备好的命令（须提交或 release）

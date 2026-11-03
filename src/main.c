@@ -584,7 +584,7 @@ static void ssd_ftl_boot_all(void)
      *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
      *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `pfr_boot_recovery`
      *      （full metadata rebuild）会经 `l2p_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
-     *      抽完成表。此时若 route 仍为 NULL，`ftl_op_dispatch` 解析出的 ftl 为 NULL，
+     *      抽完成表。此时若 route 仍为 NULL，`ftl_op_drain` 解析出的 ftl 为 NULL，
      *      服务函数只 release 不推进状态 ⇒ job 永久卡死
      *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
      *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
@@ -647,16 +647,10 @@ static void ssd_ftl_boot_all(void)
      * topo_2_die(route(die)) 必须等于 die；公式漂移会让每次 cache 操作找不到 owner。
      * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
-    for (BYTE die = 0U; die < DIE_MAX; die++)
+    if (ftl_op_route_verify() == false)
     {
-        const ftl_ctx_t *owner = ftl_op_route_get_die(die);
-
-        if ((owner == NULL) || (topo_2_die(owner->topo) != die))
-        {
-            LOGE("[FTL ] route/die mismatch die=%hhu\r\n", die);
-            ftl_op_route_set(NULL);
-            return;
-        }
+        ftl_op_route_set(NULL);
+        return;
     }
 
     /* ③ controller 就绪 */

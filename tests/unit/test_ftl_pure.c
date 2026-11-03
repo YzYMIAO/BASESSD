@@ -1255,8 +1255,8 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
     munit_assert_true(wb_is_idle(ftl->wbuf));
     munit_assert_uint32(ftl->bg.task_count, ==, (DWORD)BG_TASK_COUNT);
 
-    ftl_ut_trace_detail("host idle: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
-    ftl_ut_trace_summary("host: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
+    ftl_ut_trace_detail("host idle: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
+    ftl_ut_trace_summary("host: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
 
     return MUNIT_OK;
 }
@@ -1454,10 +1454,12 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* op_ctx — request 表的 add/take/remove。
+/* op_ctx — request 表的 add/remove。
  *
- * 覆盖：add 后 count=1，take 取回同一指针并清表；add 后 remove 也归零。
- * 判据：ctx 用 cmd_id 关联完成回调，泄漏会让完成派发拿错上下文。纯 RAM。 */
+ * 覆盖：add 后 count=1，remove 后归零。
+ * 判据：ctx 用 cmd_id 关联完成回调，泄漏会让完成派发拿错上下文。纯 RAM。
+ * 注：take 已内联进 ftl_op_drain（单调用的循环体步骤），其“取 {ctx,op} 后清项”
+ *     语义由每个完成事件的正常派发路径覆盖，不再单独测。 */
 
 static MunitResult test_op_ctx(const MunitParameter params[], void *data)
 {
@@ -1472,20 +1474,15 @@ static MunitResult test_op_ctx(const MunitParameter params[], void *data)
     munit_assert_int(ftl_op_req_add(60U, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
     munit_assert_uint32(ftl_op_req_count(), ==, 1U);
 
-    void       *ctx = NULL;
-    ftl_op_id_e op  = FTL_OP_NONE;
-
-    munit_assert_true(ftl_op_req_take(60U, &ctx, &op));
-    munit_assert_ptr_equal(ctx, &dummy);
-    munit_assert_int(op, ==, FTL_OP_HOST_IO);
+    ftl_op_req_remove(60U);
     munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
     ftl_op_req_add(61U, FTL_OP_HOST_IO, &dummy);
     ftl_op_req_remove(61U);
     munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
-    ftl_ut_trace_detail("op request: add(60) -> count=1; take(60) -> count=0; add(61)+remove(61) -> count=%hu", ftl_op_req_count());
-    ftl_ut_trace_summary("op request: count 0->1 (add 60) ->0 (take) ->0 (add 61 + remove)");
+    ftl_ut_trace_detail("op request: add(60) -> count=1; remove(60) -> count=0; add(61)+remove(61) -> count=%hu", ftl_op_req_count());
+    ftl_ut_trace_summary("op request: count 0->1 (add 60) ->0 (remove) ->0 (add 61 + remove)");
 
     return MUNIT_OK;
 }
@@ -2068,7 +2065,7 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
     munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, groups0);
     munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
-    ftl_ut_trace_detail("submit invalid: count=0, buffer=NULL, lba=FTL_LBA_MAX+1, ftl=NULL -> all ERROR; slots %hu->%hu groups %hu->%hu ctx=0", slots0, pend_slot_get_count(&ftl->pending), groups0, pend_group_get_count(&ftl->pending));
+    ftl_ut_trace_detail("submit invalid: count=0, buffer=NULL, lba=FTL_LBA_MAX+1, ftl=NULL -> all ERROR; slots %hu->%hu groups %hu->%hu req=0", slots0, pend_slot_get_count(&ftl->pending), groups0, pend_group_get_count(&ftl->pending));
     ftl_ut_trace_summary("host submit: invalid args rejected before resource allocation");
 
     return MUNIT_OK;

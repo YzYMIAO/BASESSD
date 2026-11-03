@@ -1141,7 +1141,7 @@ ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_pa
 
 // 实现要点：**不绑 PBA**——cmd->paa 恒 0（fc_command_alloc 已清零）：特性寄存器是
 // die 级、无 plane/page 语义，FC 侧 OP_SET_FEATURES 分支也不读它。
-// 但 ch/ce/lun **必须**填——ftl_op_dispatch 靠它们解析归属实例。
+// 但 ch/ce/lun **必须**填——ftl_op_drain 靠它们解析归属实例。
 // 其余命令配置逐字沿用原 read_recovery.c 内联版本的字段取值，差别只有"不提交"。
 ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {

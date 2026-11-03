@@ -991,7 +991,7 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
 
             memset(&dbg, 0, sizeof(dbg));
             (void)fc_debug_state_get(&dbg);
-            ftl_ut_trace_summary("SPEED idle timeout: sq=%hu hsq=%hu owner=%hhu lun_used=%hhu lun_phase=%hhu fill_delta=%lu/%lu sq_head=%hu st=%hhu chain=%hu op=%hhu sched_sq=%hu bound=%hhu hsq_head=%hu chain=%hu op=%hhu ctx=%hu",
+            ftl_ut_trace_summary("SPEED idle timeout: sq=%hu hsq=%hu owner=%hhu lun_used=%hhu lun_phase=%hhu fill_delta=%lu/%lu sq_head=%hu st=%hhu chain=%hu op=%hhu sched_sq=%hu bound=%hhu hsq_head=%hu chain=%hu op=%hhu req=%hu",
                                  dbg.sq_used,
                                  dbg.hsq_used,
                                  (unsigned)dbg.chain_owner,

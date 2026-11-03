@@ -263,7 +263,7 @@ void ftl_ut_reboot_from_media(void)
 
     ftl_ut_quiesce(ftl);
 
-    ftl_ut_trace_detail("reboot: quiesced (ctx=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: quiesced (req=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
     (void)fc_init();
@@ -500,7 +500,7 @@ void ftl_ut_assert_clean(ftl_ctx_t *ftl)
 
         memset(&dbg, 0, sizeof(dbg));
         (void)fc_debug_state_get(&dbg);
-        munit_errorf("ftl teardown leaked op ctx=%hu | sq=%hu hsq=%hu owner=%hhu lun=%hhu/%hhu sched_sq=%hu bound=%hhu | sq_head=%hu st=%hhu chain=%hhu op=%hhu | hsq_head=%hu chain=%hhu op=%hhu | fill=%lu/%lu",
+        munit_errorf("ftl teardown leaked op req=%hu | sq=%hu hsq=%hu owner=%hhu lun=%hhu/%hhu sched_sq=%hu bound=%hhu | sq_head=%hu st=%hhu chain=%hhu op=%hhu | hsq_head=%hu chain=%hhu op=%hhu | fill=%lu/%lu",
                      ftl_op_req_count(),
                      dbg.sq_used,
                      dbg.hsq_used,
