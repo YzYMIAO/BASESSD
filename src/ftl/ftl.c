@@ -10,13 +10,13 @@
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
  *   pending.c          —— 子操作登记 + 组完成聚合（一条 host 请求 = 一个 group）。
- *   ftl_op.c           —— ctx 旁表 + 实例路由 + 提交 + CQ 排空/派发（[pump] 完成泵）。
+ *   ftl_op.c           —— request 表 + 实例路由 + 提交 + CQ 排空/派发（[pump] 完成泵）。
  *   其余模块（gc / wl / journal / checkpoint / bbt / l2p_cache）各司其职，
  *   见各自文件头。
  *
  * 服务主循环（ftl_service）四阶段：
  *   [pump] 推进 NAND   fc_service × NAND_SUBMIT_BUDGET
- *   [pump] 完成泵      ftl_op_drain —— 按命令 op_tag 派发到服务函数数组
+ *   [pump] 完成泵      ftl_op_drain —— 按 request.op 派发到服务函数数组
  *   —— 以上在 ftl_service_pump（实例无关，每轮一次）；以下在 ftl_service（每实例）——
  *   [svc]  元数据候选池重算 / 写确认结算 / cache 序列确认 / host 补发 /
  *          序列收尾 / wbuf 空闲 flush / 后台调度（bg_scheduler_service）
@@ -810,8 +810,8 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
  */
 static void ftl_host_io_read_fail(ftl_ctx_t *ftl, pend_req_t *pending)
 {
-    pending->op         = PENDING_OP_READ_RECOVERY;
-    pending->command_id = FTL_PENDING_CMD_NONE;
+    pending->op = PENDING_OP_READ_RECOVERY;
+    pend_detach_command(&ftl->pending, pending);
 
     // typed 触发：把 owner 交给 RR handle；RR busy 时该项仍留在 pending 表，
     // 当前 job 收尾后由 pending 端口的 take 领走（行为与旧扫描一致）。
@@ -981,9 +981,9 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
     }
 
     // 提交成功后才改 pending：失败路径仍按旧 command_id 收尾（见函数头）。
-    pending->command_id = ftl_cmd_id(cmd);
-    pending->new_pba    = pba[0];
-    pending->new_pba1   = pba[1];
+    pend_bind(&ftl->pending, pending, ftl_cmd_id(cmd));
+    pending->new_pba  = pba[0];
+    pending->new_pba1 = pba[1];
     pending->retry_count++;
 
     if ((s_write_retry_logged++ % FTL_WRITE_RETRY_LOG_EVERY) == 0U)
@@ -1764,7 +1764,7 @@ static SSD_CODE_FAST void ftl_cache_seq_close_step(ftl_ctx_t *ftl)
 // ftl_sync_submit_wait 就是嵌套泵（泵里再开泵，完成顺序与栈深都失控）。
 void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    (void)ctx; /* host I/O 不登记旁表 ctx */
+    (void)ctx; /* host I/O 不登记request 表 */
 
     // command_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
     // ID 在池内，恒返回非空指针。
@@ -2042,12 +2042,12 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t
     ftl->wbuf            = storage->wbuf;
     ftl->rr_page_scratch = storage->rr_page_scratch;
 
-    // ⚠ 这里**不**调 ftl_op_init()：旁表与实例路由表都是**全局**资源
+    // ⚠ 这里**不**调 ftl_op_init()：request 表与实例路由表都是**全局**资源
     // （ftl_op.c 的 file-static），而本函数是**逐实例**调用的 ——
     // 在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉 main.c 已设好的路由表。
     // 该函数由 main.c 的 ssd_ftl_boot_all 在**所有实例 boot 之前**调用一次。
-    // （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_callbacks[] 是
-    // 编译期常量数组，见 ftl_op.c；旁表只回答"这条命令的私有状态在哪"。）
+    // （完成派发不需要在此注册 handler：request 表里带 op，g_op_callbacks[] 是
+    // 编译期常量数组，见 ftl_op.c；request 表只回答"这条命令的私有状态在哪"。）
 
     // ├─ Pending Request 表（per-instance） ──
     // 待入账项存本实例的 pending 表；推进由 ftl_service 的写确认服务负责。
@@ -2325,7 +2325,7 @@ SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_t *ftl)
 }
 
 // 实现要点：这两段不依赖任何实例：NAND 引擎（fc_service）是全局的，完成表
-// （ftl_op ctx 旁表/路由）也是全局的、按命令的 ch/ce/lun 路由回实例。
+// （ftl_op request 表/路由）也是全局的、按命令的 ch/ce/lun 路由回实例。
 // 故 superloop 每轮**只调一次**，而不是每个实例调一次
 // （per-instance 调用会把 fc_service 预算重复消耗 N 遍）。
 void ftl_service_pump(void)
@@ -2341,7 +2341,7 @@ void ftl_service_pump(void)
         }
     }
 
-    // [pump] 完成泵：按命令 op_tag 派发到服务函数数组（见 ftl_op.c）
+    // [pump] 完成泵：按 request.op 派发到服务函数数组（见 ftl_op.c）
     ftl_op_drain();
 }
 
@@ -2662,7 +2662,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
 
     // 注册 pending 子操作（必须早于 submit，避免竞态）。读：owners = 单组位、写专用字段传
     // INVALID、cw_bitmap 传 0；lba 传**全局** LBA（L2P/Journal/META 均按全局索引）。
-    pend_req_t *pending = pend_alloc(&ftl->pending);
+    pend_req_t *pending = pend_alloc(&ftl->pending, ftl_cmd_id(cmd));
 
     if (pending == NULL)
     {
@@ -2670,7 +2670,6 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
         return FTL_AGAIN; /* pending 表满：瞬态 */
     }
 
-    pending->command_id = ftl_cmd_id(cmd);
     pending->owners     = ftl_group_bit(gi);
     pending->op         = PENDING_OP_READ;
     pending->n_cw       = n;

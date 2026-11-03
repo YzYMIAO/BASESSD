@@ -269,8 +269,8 @@ static l2p_owner_t g_l2p_owner[FTL_DIE_MAX];
 /*
  * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
  *
- * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
- * 复用 ftl_op_route_get_region（与 lba_2_* 同一套公式，避免第二套坐标）。
+ * 共享 cache 的 load/flush/commit 用它找 owner die。die 坐标按
+ * global_region % DIE_MAX 计算（与 lba_2_die 同一公式，避免第二套坐标）。
  */
 static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
 {
@@ -649,7 +649,7 @@ static void ssd_ftl_boot_all(void)
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        const ftl_ctx_t *owner = ftl_op_route_get_region(die);
+        const ftl_ctx_t *owner = ftl_op_route_get_die(die);
 
         if ((owner == NULL) || (topo_2_die(owner->topo) != die))
         {

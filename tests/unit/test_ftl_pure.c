@@ -1251,12 +1251,12 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
 
     munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, 0U);
     munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, 0U);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
     munit_assert_true(wb_is_idle(ftl->wbuf));
     munit_assert_uint32(ftl->bg.task_count, ==, (DWORD)BG_TASK_COUNT);
 
-    ftl_ut_trace_detail("host idle: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_ctx_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
-    ftl_ut_trace_summary("host: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_ctx_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
+    ftl_ut_trace_detail("host idle: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
+    ftl_ut_trace_summary("host: pending=%hu groups=%hu ctx=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), (int)wb_is_idle(ftl->wbuf), ftl->bg.task_count);
 
     return MUNIT_OK;
 }
@@ -1282,22 +1282,21 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
 
     for (WORD i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        slots[i] = pend_alloc(&table);
+        slots[i] = pend_alloc(&table, (WORD)i);
         munit_assert_not_null(slots[i]);
     }
 
-    munit_assert_null(pend_alloc(&table));
+    munit_assert_null(pend_alloc(&table, 0U));
     munit_assert_uint32(pend_slot_get_count(&table), ==, (DWORD)FTL_PENDING_MAX);
 
     /* 按 command_id 查找/移除；移除后槽位可再分配。 */
-    slots[0]->command_id = 0x1234U;
-    munit_assert_ptr_equal(pend_find(&table, 0x1234U), slots[0]);
-    pend_remove(&table, 0x1234U);
-    munit_assert_null(pend_find(&table, 0x1234U));
+    munit_assert_ptr_equal(pend_find(&table, 0U), slots[0]);
+    pend_remove(&table, 0U);
+    munit_assert_null(pend_find(&table, 0U));
     munit_assert_uint32(pend_slot_get_count(&table), ==, (DWORD)(FTL_PENDING_MAX - 1U));
-    munit_assert_not_null(pend_alloc(&table));
+    munit_assert_not_null(pend_alloc(&table, 0U));
 
-    ftl_ut_trace_detail("pending: alloc 0->%u (full); alloc-on-full=NULL; remove id=0x1234 -> count=%u; realloc ok", (unsigned)FTL_PENDING_MAX, (unsigned)FTL_PENDING_MAX - 1U);
+    ftl_ut_trace_detail("pending: alloc 0->%u (full); alloc-on-full=NULL; remove id=0 -> count=%u; realloc ok", (unsigned)FTL_PENDING_MAX, (unsigned)FTL_PENDING_MAX - 1U);
     ftl_ut_trace_summary("pending: alloc 0->%u (full) -> %u (remove) -> %u (realloc)", (unsigned)FTL_PENDING_MAX, (unsigned)FTL_PENDING_MAX - 1U, (unsigned)FTL_PENDING_MAX);
 
     return MUNIT_OK;
@@ -1455,7 +1454,7 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* op_ctx — op ctx 表的 add/take/remove。
+/* op_ctx — request 表的 add/take/remove。
  *
  * 覆盖：add 后 count=1，take 取回同一指针并清表；add 后 remove 也归零。
  * 判据：ctx 用 cmd_id 关联完成回调，泄漏会让完成派发拿错上下文。纯 RAM。 */
@@ -1469,18 +1468,24 @@ static MunitResult test_op_ctx(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
-    munit_assert_int(ftl_op_ctx_add(60U, &dummy), ==, FTL_OK);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 1U);
-    munit_assert_ptr_equal(ftl_op_ctx_take(60U), &dummy);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_int(ftl_op_req_add(60U, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
+    munit_assert_uint32(ftl_op_req_count(), ==, 1U);
 
-    ftl_op_ctx_add(61U, &dummy);
-    ftl_op_ctx_remove(61U);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    void       *ctx = NULL;
+    ftl_op_id_e op  = FTL_OP_NONE;
 
-    ftl_ut_trace_detail("op ctx: add(60) -> count=1; take(60) -> count=0; add(61)+remove(61) -> count=%hu", ftl_op_ctx_count());
-    ftl_ut_trace_summary("op ctx: count 0->1 (add 60) ->0 (take) ->0 (add 61 + remove)");
+    munit_assert_true(ftl_op_req_take(60U, &ctx, &op));
+    munit_assert_ptr_equal(ctx, &dummy);
+    munit_assert_int(op, ==, FTL_OP_HOST_IO);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+
+    ftl_op_req_add(61U, FTL_OP_HOST_IO, &dummy);
+    ftl_op_req_remove(61U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+
+    ftl_ut_trace_detail("op request: add(60) -> count=1; take(60) -> count=0; add(61)+remove(61) -> count=%hu", ftl_op_req_count());
+    ftl_ut_trace_summary("op request: count 0->1 (add 60) ->0 (take) ->0 (add 61 + remove)");
 
     return MUNIT_OK;
 }
@@ -1532,9 +1537,9 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* op_ctx_capacity — op ctx 表的容量与同 id 覆盖语义。
+/* op_ctx_capacity — request 表的容量与同 id 覆盖语义。
  *
- * 覆盖：填满 FTL_OP_CTX_TABLE_SIZE 后计数不再增长；同 cmd_id 的 add 是覆盖而不是
+ * 覆盖：填满 FTL_OP_REQ_TABLE_SIZE 后计数不再增长；同 cmd_id 的 add 是覆盖而不是
  *       追加；全部 remove 后归零。
  * 判据：同 id 追加会让表提前耗尽，后续完成回调无处登记。纯 RAM。 */
 
@@ -1547,26 +1552,26 @@ static MunitResult test_op_ctx_capacity(const MunitParameter params[], void *dat
 
     ftl_ut_trace_begin();
 
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
-    for (WORD i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
+    for (WORD i = 0U; i < FTL_OP_REQ_TABLE_SIZE; i++)
     {
-        munit_assert_int(ftl_op_ctx_add(i, &dummy), ==, FTL_OK);
+        munit_assert_int(ftl_op_req_add(i, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
     }
-    munit_assert_uint32(ftl_op_ctx_count(), ==, (DWORD)FTL_OP_CTX_TABLE_SIZE);
+    munit_assert_uint32(ftl_op_req_count(), ==, (DWORD)FTL_OP_REQ_TABLE_SIZE);
 
     /* 同 cmd_id 覆盖而不是追加：容量仍为 64。 */
-    munit_assert_int(ftl_op_ctx_add(0U, &dummy), ==, FTL_OK);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, (DWORD)FTL_OP_CTX_TABLE_SIZE);
+    munit_assert_int(ftl_op_req_add(0U, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
+    munit_assert_uint32(ftl_op_req_count(), ==, (DWORD)FTL_OP_REQ_TABLE_SIZE);
 
-    for (WORD i = 0U; i < FTL_OP_CTX_TABLE_SIZE; i++)
+    for (WORD i = 0U; i < FTL_OP_REQ_TABLE_SIZE; i++)
     {
-        ftl_op_ctx_remove(i);
+        ftl_op_req_remove(i);
     }
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
-    ftl_ut_trace_detail("op ctx: count 0->%u (fill); same-id add(0) -> count=%u; remove all -> count=%hu", (unsigned)FTL_OP_CTX_TABLE_SIZE, (unsigned)FTL_OP_CTX_TABLE_SIZE, ftl_op_ctx_count());
-    ftl_ut_trace_summary("op ctx: count 0->%u (fill) -> %u (same-id) -> 0 (remove)", (unsigned)FTL_OP_CTX_TABLE_SIZE, (unsigned)FTL_OP_CTX_TABLE_SIZE);
+    ftl_ut_trace_detail("op request: count 0->%u (fill); same-id add(0) -> count=%u; remove all -> count=%hu", (unsigned)FTL_OP_REQ_TABLE_SIZE, (unsigned)FTL_OP_REQ_TABLE_SIZE, ftl_op_req_count());
+    ftl_ut_trace_summary("op request: count 0->%u (fill) -> %u (same-id) -> 0 (remove)", (unsigned)FTL_OP_REQ_TABLE_SIZE, (unsigned)FTL_OP_REQ_TABLE_SIZE);
 
     return MUNIT_OK;
 }
@@ -1627,14 +1632,14 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
 
     for (WORD i = 0U; i < 8U; i++)
     {
-        slots[i] = pend_alloc(&f->pending);
+        slots[i] = pend_alloc(&f->pending, (WORD)i);
         munit_assert_not_null(slots[i]);
     }
     munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_NORMAL);
 
     for (WORD i = 8U; i < 17U; i++)
     {
-        slots[i] = pend_alloc(&f->pending);
+        slots[i] = pend_alloc(&f->pending, (WORD)i);
         munit_assert_not_null(slots[i]);
     }
     munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_BUSY);
@@ -1790,7 +1795,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     munit_assert_true(pend_group_alloc(&table, &gi));
 
     pend_group_t *g      = &table.groups[gi];
-    pend_req_t   *p      = pend_alloc(&table);
+    pend_req_t   *p      = pend_alloc(&table, 0U);
     const WORD    idx    = (WORD)(p - table.slots);
     const DWORD   owners = ftl_group_bit(gi);
 
@@ -1872,7 +1877,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     g->outstanding   = 1U;
 
     /* 槽 A：普通在飞写（used 但 op 不是 WRITE_CONFIRM）。 */
-    pend_req_t *a     = pend_alloc(&table);
+    pend_req_t *a     = pend_alloc(&table, 0U);
     const WORD  idx_a = (WORD)(a - table.slots);
 
     a->lba    = FTL_UT_LBA_BASE;
@@ -1882,7 +1887,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     pend_validate(a);
 
     /* 槽 B：待入账。 */
-    pend_req_t *b     = pend_alloc(&table);
+    pend_req_t *b     = pend_alloc(&table, 1U);
     const WORD  idx_b = (WORD)(b - table.slots);
 
     b->lba    = FTL_UT_LBA_BASE;
@@ -2061,7 +2066,7 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
     /* 非法参数必须在分配任何池资源之前拒绝。 */
     munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, slots0);
     munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, groups0);
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
     ftl_ut_trace_detail("submit invalid: count=0, buffer=NULL, lba=FTL_LBA_MAX+1, ftl=NULL -> all ERROR; slots %hu->%hu groups %hu->%hu ctx=0", slots0, pend_slot_get_count(&ftl->pending), groups0, pend_group_get_count(&ftl->pending));
     ftl_ut_trace_summary("host submit: invalid args rejected before resource allocation");

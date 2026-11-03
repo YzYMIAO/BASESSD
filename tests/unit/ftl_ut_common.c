@@ -247,7 +247,7 @@ void ftl_ut_quiesce(ftl_ctx_t *ftl)
         memset(&rs, 0, sizeof(rs));
         (void)fc_get_resource_stats(&rs);
 
-        if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_ctx_count() == 0U))
+        if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U))
         {
             return;
         }
@@ -263,7 +263,7 @@ void ftl_ut_reboot_from_media(void)
 
     ftl_ut_quiesce(ftl);
 
-    ftl_ut_trace_detail("reboot: quiesced (ctx=%hu cp_waiting=%d cp_phase=%d)", ftl_op_ctx_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: quiesced (ctx=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
     (void)fc_init();
@@ -494,14 +494,14 @@ void ftl_ut_assert_clean(ftl_ctx_t *ftl)
 
     /* ctx 残留 = 有能力登记却没被派发的命令留在队列里。这里把「谁卡住」一并打出来
      * （只读快照；munit_errorf 会带出这行），否则只有一句 count!=0 无法定位。 */
-    if (ftl_op_ctx_count() != 0U)
+    if (ftl_op_req_count() != 0U)
     {
         fc_debug_state_t dbg;
 
         memset(&dbg, 0, sizeof(dbg));
         (void)fc_debug_state_get(&dbg);
         munit_errorf("ftl teardown leaked op ctx=%hu | sq=%hu hsq=%hu owner=%hhu lun=%hhu/%hhu sched_sq=%hu bound=%hhu | sq_head=%hu st=%hhu chain=%hhu op=%hhu | hsq_head=%hu chain=%hhu op=%hhu | fill=%lu/%lu",
-                     ftl_op_ctx_count(),
+                     ftl_op_req_count(),
                      dbg.sq_used,
                      dbg.hsq_used,
                      (unsigned)dbg.chain_owner,
@@ -520,7 +520,7 @@ void ftl_ut_assert_clean(ftl_ctx_t *ftl)
                      dbg.fill_pops);
     }
 
-    munit_assert_uint32(ftl_op_ctx_count(), ==, 0U);
+    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
 
     memset(&rs, 0, sizeof(rs));
     (void)fc_get_resource_stats(&rs);

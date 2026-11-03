@@ -355,8 +355,8 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
 // 全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
 // （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
 //
-// ⚠ **空闲度不计 ftl_op ctx 旁表**：后台 job（journal / RR / 搬移）的命令也登记在
-// ftl_op ctx 旁表里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
+// ⚠ **空闲度不计 ftl_op request 表**：后台 job（journal / RR / 搬移）的命令也登记在
+// ftl_op request 表里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
 // 从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自的
 // 各模块**内部**的单飞行门（不在这里窥探 phase/active）单独管，与 host 侧解耦。
 void bg_scheduler_service(ftl_ctx_t *ftl)

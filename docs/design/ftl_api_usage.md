@@ -205,18 +205,18 @@ void         alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *ref
 
 `ftl_op.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
 completion 丢失问题。**v0.75 起**派发**唯一出口**是 `ftl_op_dispatch()`：旁表只存 `ctx`，
-handler 由命令携带的 **op tag** 查 `g_op_callbacks[]` 得到（见 `ftl_op.h`）。
+handler 由 request 表里的 **op** 查 `g_op_callbacks[]` 得到（见 `ftl_op.h`）。
 
 ```c
 // ftl_op.h — 接口（v0.75 起表项只留 ctx）
 
-#define FTL_OP_CTX_TABLE_SIZE (64U)
+#define FTL_OP_REQ_TABLE_SIZE FC_COMMAND_POOL_DEPTH
 
-/* 登记一条命令的私有状态（服务函数的选择由命令的 op_tag 决定） */
-ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx);
+/* 登记一条命令的 request（op + 私有状态） */
+ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx);
 
-/* 查 + 摘链 + 返回 ctx（先摘再回调，容许服务函数重入登记） */
-void *ftl_op_ctx_take(WORD cmd_id);
+/* 查 + 清项 + 取 {ctx, op}（先清再回调，容许服务函数重入登记） */
+bool ftl_op_req_take(WORD cmd_id, void **ctx_out, ftl_op_id_e *op_out);
 
 /* 消费所有 CQ entry → ftl_op_dispatch() */
 void ftl_op_drain(void);
@@ -235,13 +235,13 @@ bool         ftl_op_is_in_dispatch(void);
 ```
 
 **路由规则**（`ftl_op_dispatch`）：
-1. `op = completion->op_tag`；越界或 `g_op_callbacks[op] == NULL` ⇒ **孤儿命令**：
-   `ftl_op_ctx_remove` + `fc_command_release` + LOGE（正常不应发生）。
-2. 命中 ⇒ `ctx = ftl_op_ctx_take(command_id)`（**先摘链再回调**）。
+1. `ftl_op_req_take(command_id, &ctx, &op)` 取 request；未命中 ⇒ **孤儿/迟到完成**：
+   `fc_command_release` + LOGE（正常不应发生）。
+2. `fn = g_op_callbacks[op]`；越界/空槽 ⇒ 孤儿，release + LOGE。
 3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `ftl_op_route_get` 解析
    （路由表在逐实例 boot 之前设好；NULL 属编程错误）。
 
-**op tag 的语义 = 完成服务函数选择器，不是「这是哪个功能」**：同步提交的命令一律带
+**request.op 的语义 = 完成服务函数选择器，不是「这是哪个功能」**：同步提交的命令一律带
 `FTL_OP_SYNC_WAIT`（其服务函数 = 唤醒等待者），因为阻塞调用方的收尾是**调用者在
 `ftl_sync_submit_wait` 返回后自己做的**；给同步命令打功能 tag 会让服务函数与调用者对
 同一份状态各推进一次。某个功能站点被改成异步之后，该站点才把 tag 换成它的功能 op ID。
@@ -905,7 +905,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
     Phase 2 ── 处理完成回调
     ├── ftl_op_drain()（统一完成泵）
-    └── ftl_op_dispatch() 按 op_tag 查 g_op_callbacks[]
+    └── ftl_op_dispatch() 按 request.op 查 g_op_callbacks[]
           ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
           │              → 组可能完成（发一次组通知）
           ├── METADATA → release
@@ -964,7 +964,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > 不设上限会把 FC 池吃光 ⇒ host I/O 拿不到命令、全系统 `FTL_AGAIN`）。
 
 > `inflight = pend_slot_get_count + pend_group_get_count`（⚠ v0.75 阶段 4 起**不再计入
-> `ftl_op_ctx_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
+> `ftl_op_req_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
 > 后台反被自己的命令饿死；后台活跃度由各自的单飞行门单独管）。
 > ⚠ `main.c` 的主循环**遍历全部实例**调 `ftl_service`（序 4：只跑 `[0][0][0]` 会让其余实例的
 > journal / checkpoint / bbt / GC 永不推进）；`ftl_service_pump()` 每轮只调一次。
@@ -996,7 +996,7 @@ void ftl_service(ftl_ctx_t *ftl) {
 
     /* Phase 3: 三级后台模式（判据 = 未决命令数近似空闲度） */
     queued   = pend_group_get_count(&ftl->pending);
-    inflight = (uint16_t)(pend_slot_get_count(&ftl->pending) + queued + ftl_op_ctx_count());
+    inflight = (uint16_t)(pend_slot_get_count(&ftl->pending) + queued + ftl_op_req_count());
 
     if (ftl->bg_suspend != 0U) return;   /* `bbt --erase` 后整体跳过 Phase 3 */
 

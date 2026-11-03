@@ -428,7 +428,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  * 内部就是 ftl_op 机制的一个客户端：
  *   ① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上 waiter、提交；
  *   ② 自旋 fc_service() + ftl_op_drain() 直到 waiter.done；
- *   ③ 超时则 ftl_op_ctx_remove 后返回 FTL_ERROR。
+ *   ③ 超时则 ftl_op_req_remove 后返回 FTL_ERROR。
  *
  * ⚠ **只在结构性必须顺序执行的路径上用**：开机初始化 / 全片格式化 / 出厂坏块扫描 /
  *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
@@ -440,7 +440,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  * @param status_out  输出：完成状态（可 NULL）
  * @param timeout_us  超时微秒（0 = 默认 10ms）
  * @return FTL_OK 完成（status_out 有效）
- *         FTL_ERROR 提交失败 / 超时 / 旁表满
+ *         FTL_ERROR 提交失败 / 超时 / request 登记失败
  */
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us);
 

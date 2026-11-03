@@ -113,12 +113,11 @@ typedef enum
     FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
 } fc_priority_e;
 
-/* ⚠ 本头文件**不声明**"完成路由归属模块"枚举。
- *
- * 它是 FTL 的概念（哪个功能拥有这条命令），不该由 FC 层声明。FC 只认
- * `fc_command_t.op_tag` 这个**不透明 7 位整数**：不解释、不分支，完成时原样拷进
- * `fc_command_status_t.op_tag`。语义（= FTL 的 `ftl_op_id_e`）由 FTL 侧定义，
- * 见 include/ftl/ftl_op.h。 */
+/* ⚠ 本头文件**不声明**“完成路由归属模块”枚举，命令对象也不携带 FTL 的完成
+ * 服务函数选择器。它是 FTL 的概念（哪个功能拥有这条命令），由 FTL 的 request
+ * 表按 command_id 保存（见 include/ftl/ftl_op.h）。
+ * CQE（`fc_command_status_t`）只带 command_id / status；FTL 完成派发时用
+ * command_id 取回自己的 request 表项。 */
 
 /* 状态有两套坐标：
  *   · descriptor 状态（FC_CW_STATUS_*，per-CW）：数据路径结果 + NAND per-CW FAIL；
@@ -356,12 +355,7 @@ struct fc_command_t
 {
     DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD op_tag        : 7;  /* 不透明 7 位完成标签（= FTL 的 ftl_op_id_e，见 ftl_op.h）。
-                               * FC **不解释、不分支**，只在完成时原样拷进
-                               * fc_command_status_t.op_tag（fc.c 的 fc_complete_from_nand）。
-                               * 上层据它查"完成服务函数数组"派发 ⇒ ID 真的在命令上。
-                               * 本字段不落介质（落介质的只有 meta/paa）⇒ 编号可自由重排。 */
-    DWORD feature_addr : 8;   /* SET/GET_FEATURES register address, sent via COLUMN_0. */
+    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
     DWORD meta;               /* META 值（本命令的**扇区 LBA**），写入各 CW buffer[0..3]。
                                * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
                                * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
@@ -393,14 +387,12 @@ struct fc_command_t
  * 命令级只给 DATA_ERROR/MATA_ERROR 两个聚合位。 */
 struct fc_command_status_t
 {
-    DWORD command_id : 16;    /* Completed Command Pool ID. */
-    DWORD desc_id    : 16;    /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
-    DWORD op_tag     : 7;     /* Copy of command->op_tag —— 上层**不必反查命令**即可派发
-                               * （g_op_callbacks[completion.op_tag]）。 */
-    DWORD      status   : 8;  /* Command-level status; FC_CMD_STATUS_* bits. */
-    DWORD      reserved : 17; /* Reserved. */
-    fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
-                               * （失败 CW 的定位走 desc 链，不在此聚合）。 */
+    DWORD      command_id : 16; /* Completed Command Pool ID. */
+    DWORD      desc_id    : 16; /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
+    DWORD      status     : 8;  /* Command-level status; FC_CMD_STATUS_* bits. */
+    DWORD      reserved   : 24; /* Reserved. */
+    fc_param_t param;           /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
+                                 * （失败 CW 的定位走 desc 链，不在此聚合）。 */
 };
 
 /**

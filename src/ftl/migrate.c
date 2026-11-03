@@ -261,9 +261,9 @@ static ftl_status_e mig_command_submit(mig_handle_t *m, fc_command_t *cmd)
     m->waiting = true;
 
     // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-    const ftl_op_id_e op_tag = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+    const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
 
-    if (ftl_op_submit(cmd, op_tag, m) != FTL_OK)
+    if (ftl_op_submit(cmd, op, m) != FTL_OK)
     {
         m->waiting = false;
         (void)fc_command_release(cmd);
@@ -1807,9 +1807,9 @@ static bool mig_write_batch_step(mig_handle_t *m)
 
     if (st == FTL_OK)
     {
-        const ftl_op_id_e op_tag = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+        const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
 
-        st = ftl_op_submit_batch(cmds, n, op_tag, m);
+        st = ftl_op_submit_batch(cmds, n, op, m);
 
         if (st != FTL_OK)
         {
@@ -2690,7 +2690,7 @@ void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
 
     fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
-    // 旁表项缺失（ctx == NULL）= 重复/迟到的完成：只 release 命令，不解引用 m。
+    // request 表项缺失（ctx == NULL）= 重复/迟到的完成：只 release 命令，不解引用 m。
     // 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。
     if (m == NULL)
     {

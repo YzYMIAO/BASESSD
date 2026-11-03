@@ -177,7 +177,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     // 注册 pending（owners = 贡献本页的组位掩码；lba = 窗口基址；buffer 传 NULL）。
     // 认领槽位后就地逐字段填——字段名即文档（见 pend_req_t 注释）。
-    pend_req_t *pending = pend_alloc(h->pending);
+    pend_req_t *pending = pend_alloc(h->pending, ftl_cmd_id(cmd));
 
     if (pending == NULL)
     {
@@ -185,7 +185,6 @@ static ftl_status_e wb_flush(wb_handle_t *h)
         goto wbuf_flush_fail;
     }
 
-    pending->command_id = ftl_cmd_id(cmd);
     pending->owners     = h->owners;
     pending->op         = page0 ? PENDING_OP_WRITE_PAGE0 : PENDING_OP_WRITE;
     pending->n_cw       = n_cw;
@@ -198,7 +197,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     pend_validate(pending);
 
     // 提交（tag = HOST_IO ⇒ 完成时由 g_op_callbacks[FTL_OP_HOST_IO] 收尾）。
-    // ctx 传 NULL：host I/O 的私有状态在 pending 表里（比旁表 ctx 更全）。
+    // ctx 传 NULL：host I/O 的私有状态在 pending 表里（比request 表 更全）。
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
         const WORD cmd_id = ftl_cmd_id(cmd);

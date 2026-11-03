@@ -361,10 +361,6 @@ fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, ui
     cmd->config.ce          = (DWORD)addr->ce;
     cmd->config.lun         = (DWORD)addr->lun;
     cmd->config.multi_plane = (is_multi != 0U) ? (DWORD)PLANE_NUM : 0U;
-    /* op_tag 是**不透明**的 7 位完成标签：FC 不解释、不分支，只在完成时原样拷进
-     * fc_command_status_t（fc.c 的 fc_complete_from_nand）。测试统一填 HOST_IO——
-     * 非 0 才让 Level 3 的 cmd_diff_report 对它的字段稳定性检查不是空转。 */
-    cmd->op_tag             = (DWORD)FTL_OP_HOST_IO;
     cmd->paa                = paa_from_addr(addr);
     cmd->meta               = meta;
 
@@ -854,7 +850,6 @@ fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], 
     cmd->config.ce          = 0U;
     cmd->config.lun         = 0U;
     cmd->config.multi_plane = (DWORD)PLANE_NUM;
-    cmd->op_tag             = (DWORD)FTL_OP_HOST_IO;
     cmd->meta               = lba_meta;
 
     if (ftl_cmd_setup_ppa_pair_cw(cmd, pba, test_plane_cw_bitmap(TEST_PLANE_BM_ALL)) != FTL_OK)

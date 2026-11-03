@@ -432,7 +432,6 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
     CMD_FIELD_U(command_id);
     CMD_FIELD_U(desc_id);
     CMD_FIELD_U(high_priority);
-    CMD_FIELD_U(op_tag);
     CMD_FIELD_U(feature_addr);
     CMD_FIELD_U(meta);
     CMD_FIELD_U(paa);
@@ -2123,7 +2122,6 @@ static fc_command_t *l3_buf_own_build_upper(fc_buffer_id_t buffer_id, uint8_t bu
     cmd->config.ce          = 0U;
     cmd->config.lun         = 0U;
     cmd->config.multi_plane = 0U;
-    cmd->op_tag             = (DWORD)FTL_OP_HOST_IO;
     cmd->paa                = paa_from_addr(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U});
     cmd->meta               = 0U;
 

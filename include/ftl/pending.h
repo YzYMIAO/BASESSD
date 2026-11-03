@@ -16,6 +16,7 @@
  */
 
 #include "assertion.h"  /* ASSERT（inline 组计数 fast path / 超时谓词） */
+#include "fc.h"         /* FC_COMMAND_POOL_DEPTH（command_id 直接索引） */
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
 #include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
 #include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_t, ssd_status_e */
@@ -25,8 +26,8 @@
 #define FTL_PENDING_MAX (32U)
 
 /* 「本项已与 FC 命令脱钩」哨兵：Read Recovery 托管读失败的子操作时用它覆盖 command_id。
- * 理由：那条 FC 命令随即被 release，其 command_id 会被后续 fc_command_alloc **复用**，
- * 而 pend_find 按 command_id 线性扫首个匹配——留旧值会让新命令的完成误撞上本项。
+ * 理由：那条 FC 命令随即被 release，其 command_id 会被后续 fc_command_alloc **复用**；
+ * 脱钩项不进入命令映射，只能按 op 查找（pend_find_op），不会被新命令误撞。
  * 0xFFFF 不可达：FC_COMMAND_POOL_DEPTH = 64（命令 id 恒 < 64）。 */
 #define FTL_PENDING_CMD_NONE (0xFFFFU)
 
@@ -254,6 +255,9 @@ typedef struct
 {
     pend_req_t   slots[FTL_PENDING_MAX];
     pend_group_t groups[FTL_GROUP_MAX];
+    /* command_id → slots 下标；0xFF = 未绑定。
+     * 直接索引后 pend_find 不再线性扫描；脱钩项（FTL_PENDING_CMD_NONE）不登记。 */
+    BYTE slot_of[FC_COMMAND_POOL_DEPTH];
 } pending_ctx_t;
 
 /**
@@ -291,11 +295,10 @@ typedef struct
 void pend_init(pending_ctx_t *table);
 
 /**
- * @brief 认领一个空闲 pending 槽（**调用者就地逐字段填**）
+ * @brief 认领一个空闲 pending 槽并绑定 command_id（**调用者就地逐字段填**）
  *
- * 返回该槽指针并置 used=1、其余字段清零；表满返回 NULL。字段由调用者（ftl / wbuf /
- * cache 批次的读写路径）**就地逐字段赋值**：字段名即文档（见 pend_req_t 的字段注释），
- * 不要做成多形参注册函数——那读不出「在登记什么」。
+ * 返回该槽指针，置 used=1、command_id=cmd_id，并写入 command_id → 槽下标映射；
+ * 表满返回 NULL。字段由调用者（ftl / wbuf / cache 批次的读写路径）就地逐字段赋值。
  *
  * 表满是预期内的资源结果 ⇒ 返回码（判据 3），不 ASSERT。
  *
@@ -303,10 +306,32 @@ void pend_init(pending_ctx_t *table);
  * ⚠ 认领即置 used=1 ⇒ 调用者填字段之前不得有任何可能返 FTL_AGAIN 的早退，
  *   否则槽位泄漏（表里多一条 used=1 的垃圾项）。各调用点均填完立刻使用。
  *
- * @param table  pending 表
- * @return 空闲槽指针；NULL = 表满
+ * @param table   pending 表
+ * @param cmd_id  FC command_id；必须 < FC_COMMAND_POOL_DEPTH
+ * @return 空闲槽指针；NULL = 表满或 command_id 越界
  */
-pend_req_t *pend_alloc(pending_ctx_t *table);
+pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id);
+
+/**
+ * @brief 把已存在的 pending 槽重新绑定到新的 command_id（写重试替换命令时用）。
+ *
+ * 先清除旧 id 的映射，再写新 id 的映射；槽的 used 状态不变。
+ *
+ * @param table   pending 表
+ * @param req     已存在的 pending 项
+ * @param cmd_id  新 command_id；必须 < FC_COMMAND_POOL_DEPTH
+ */
+void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id);
+
+/**
+ * @brief 把 pending 项与 FC 命令脱钩（command_id 置 FTL_PENDING_CMD_NONE）。
+ *
+ * 脱钩项不进入 command_id 映射，只能按 op 查找；用于 Read Recovery 托管项。
+ *
+ * @param table pending 表
+ * @param req   已存在的 pending 项
+ */
+void pend_detach_command(pending_ctx_t *table, pend_req_t *req);
 
 /**
  * @brief 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
@@ -327,11 +352,11 @@ static inline void pend_validate(const pend_req_t *req)
 }
 
 /**
- * @brief 按 command_id 查找本实例 pending 项
+ * @brief 按 command_id 查找本实例 pending 项（直接索引）
  *
- * @param table     pending 表
+ * @param table   pending 表
  * @param cmd_id  FC command_id
- * @return 指向 pending 项的指针, NULL 未找到
+ * @return 指向 pending 项的指针；NULL 未找到
  */
 pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id);
 

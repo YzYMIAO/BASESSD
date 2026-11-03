@@ -40,27 +40,71 @@
 static DWORD s_group_underflow_log_ms;
 static WORD  s_group_underflow_n;
 
-// pend_init — 清空本实例的 pending 表与完成组表
-//
-// 全零即「无占用」（used==0），开机/重建时调用。表是 per-instance 的：每个 FTL
-// 实例各有一份 pending/groups（多 LUN 下完成按命令的 ch/ce/lun 路由回本实例）。
+// 清除 pending 项与 command_id 的映射；脱钩项（NONE）不登记，直接跳过。
+static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
+{
+    const WORD cmd_id = req->command_id;
+    const BYTE index  = (BYTE)(req - table->slots);
+
+    if ((cmd_id < FC_COMMAND_POOL_DEPTH) && (table->slot_of[cmd_id] == index))
+    {
+        table->slot_of[cmd_id] = 0xFF;
+    }
+}
+
+// 清空本实例的 pending 表、完成组表与 command_id 映射。
 void pend_init(pending_ctx_t *table)
 {
     memset(table->slots, 0, sizeof(table->slots));
     memset(table->groups, 0, sizeof(table->groups));
+    memset(table->slot_of, 0xFF, sizeof(table->slot_of));
 }
 
-// 实现要点：表满属预期内的资源结果，保留返回码（判据 3）。
+// 把已存在的 pending 槽绑定到新的 command_id（写重试替换命令时用）。
+void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id)
+{
+    ASSERT(table != NULL);
+    ASSERT(req != NULL);
+    ASSERT((req >= table->slots) && (req < &table->slots[FTL_PENDING_MAX]));
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    const BYTE index = (BYTE)(req - table->slots);
+
+    pend_unbind(table, req);
+    ASSERT(table->slot_of[cmd_id] == 0xFF); /* 同一 command_id 不得同时绑两个槽 */
+    req->command_id        = cmd_id;
+    table->slot_of[cmd_id] = index;
+}
+
+// 与 FC 命令脱钩：清映射并把 command_id 置哨兵；脱钩项只能按 op 查找。
+void pend_detach_command(pending_ctx_t *table, pend_req_t *req)
+{
+    ASSERT(table != NULL);
+    ASSERT(req != NULL);
+
+    pend_unbind(table, req);
+    req->command_id = FTL_PENDING_CMD_NONE;
+}
+
+// 认领槽位并绑定 command_id；表满或 id 越界返回 NULL。
 // ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P（见 pend_req_t 注释）。
 // ⚠ 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
-pend_req_t *pend_alloc(pending_ctx_t *table)
+pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id)
 {
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    if (cmd_id >= FC_COMMAND_POOL_DEPTH)
+    {
+        return NULL;
+    }
+
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (table->slots[i].used == false)
         {
             memset(&table->slots[i], 0, sizeof(table->slots[i]));
             table->slots[i].used = true;
+            pend_bind(table, &table->slots[i], cmd_id);
             return &table->slots[i];
         }
     }
@@ -68,27 +112,39 @@ pend_req_t *pend_alloc(pending_ctx_t *table)
     return NULL; /* 表满 */
 }
 
-// pend_find — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32）
+// 按 command_id 直接索引；映射为空/槽已释放/id 不匹配都返回 NULL。
 pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
 {
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    if (cmd_id >= FC_COMMAND_POOL_DEPTH)
     {
-        if ((table->slots[i].used == true) && (table->slots[i].command_id == cmd_id))
-        {
-            return &table->slots[i];
-        }
+        return NULL;
     }
 
-    return NULL;
+    const BYTE index = table->slot_of[cmd_id];
+
+    if (index >= FTL_PENDING_MAX)
+    {
+        return NULL;
+    }
+
+    pend_req_t *req = &table->slots[index];
+
+    if ((req->used == false) || (req->command_id != cmd_id))
+    {
+        return NULL;
+    }
+
+    return req;
 }
 
-// pend_remove — 置 used=0 释放槽位；未找到则 no-op（幂等，供完成路径重复调用）
+// 置 used=0 释放槽位并清映射；未找到则 no-op（幂等，供完成路径重复调用）。
 void pend_remove(pending_ctx_t *table, WORD cmd_id)
 {
     pend_req_t *req = pend_find(table, cmd_id);
 
     if (req != NULL)
     {
+        pend_unbind(table, req);
         req->used = false;
     }
 }
@@ -141,6 +197,7 @@ void pend_release_index(pending_ctx_t *table, BYTE index)
     ASSERT(index < FTL_PENDING_MAX);
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
 
+    pend_unbind(table, &table->slots[index]);
     table->slots[index].used = false;
 }
 
@@ -383,10 +440,10 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
 
     ASSERT(pending->used == true);
 
-    pending->op         = PENDING_OP_WRITE_CONFIRM;
-    pending->command_id = FTL_PENDING_CMD_NONE;
-    pending->owners     = owners;
-    pending->park_ms    = ftl_job_now_ms();
+    pend_detach_command(table, pending);
+    pending->op      = PENDING_OP_WRITE_CONFIRM;
+    pending->owners  = owners;
+    pending->park_ms = ftl_job_now_ms();
 }
 
 void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)

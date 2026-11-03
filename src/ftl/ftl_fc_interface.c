@@ -485,7 +485,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
 // 实现要点：① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上
 // waiter、提交（登记早于提交）；② 自旋 fc_service() +
 // ftl_op_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
-// ⚠ 非目标 completion 由 drain 按各自的 op_tag 派发，本函数无需处理。
+// ⚠ 非目标 completion 由 drain 按各自 request.op 派发，本函数无需处理。
 // ⚠ **不 release**：调用者要在返回后读 cmd 数据才 release（见 ftl_op.h）。
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us)
 {
@@ -506,7 +506,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
     if (ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) != FTL_OK)
     {
-        return FTL_ERROR; /* 提交失败（背压/旁表满）——命令未提交，调用者自行 release */
+        return FTL_ERROR; /* 提交失败（背压/request 登记失败）——命令未提交，调用者自行 release */
     }
 
     for (;;)
@@ -523,7 +523,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
         elapsed++;
         if (elapsed > max_wait)
         {
-            ftl_op_ctx_remove(waiter.cmd_id);
+            ftl_op_req_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
     }

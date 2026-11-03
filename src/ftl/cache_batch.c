@@ -397,7 +397,7 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
 
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
-        b->pends[i] = pend_alloc(&req->ftl->pending);
+        b->pends[i] = pend_alloc(&req->ftl->pending, ftl_cmd_id(b->cmds[i]));
 
         if (b->pends[i] == NULL)
         {
@@ -406,7 +406,6 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
 
         pend_req_t *pending = b->pends[i];
 
-        pending->command_id = ftl_cmd_id(b->cmds[i]);
         pending->owners     = ftl_group_bit(req->gi);
         pending->op         = PENDING_OP_READ_CACHE;
         pending->n_cw       = FTL_LBA_PER_PAIR;
@@ -863,7 +862,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         // 窗口只是一条更长序列的一段：断点末条 END，否则 MORE。
         b->cmds[j]->config.chain = (j + 1U < n_pages) ? FC_CHAIN_MORE : ((end_seq == true) ? FC_CHAIN_END : FC_CHAIN_MORE);
 
-        pend_req_t *pending = pend_alloc(&ftl->pending);
+        pend_req_t *pending = pend_alloc(&ftl->pending, ftl_cmd_id(b->cmds[j]));
 
         if (pending == NULL)
         {
@@ -871,7 +870,6 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
             return FTL_AGAIN;
         }
 
-        pending->command_id  = ftl_cmd_id(b->cmds[j]);
         pending->owners      = ftl_group_bit(gi);
         pending->op          = PENDING_OP_WRITE_CACHE;
         pending->n_cw        = FTL_LBA_PER_PAIR;

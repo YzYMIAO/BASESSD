@@ -395,9 +395,8 @@ FC_CMD_STATUS_WP         // (1<<7) 70h WP（0=protected，1=not protected）
 struct fc_command_status_t {
     DWORD command_id : 16;  // 完成命令的 Pool ID
     DWORD desc_id    : 16;  // 首个失败 CW 的 descriptor id；0xFFFF = 无失败
-    DWORD op_tag     : 7;   // 不透明完成标签（FTL 的 ftl_op_id_e），完成派发用
     DWORD status     : 8;   // 命令级状态（FC_CMD_STATUS_*）
-    DWORD reserved   : 17;  // 保留
+    DWORD reserved   : 24;  // 保留
     fc_param_t param;       // 命令级返回段：仅 GET_FEATURES=寄存器值 bytes（v28 起无失败位图视图）
 };
 ```
@@ -405,7 +404,8 @@ struct fc_command_status_t {
 CQ 条目 12 字节，64 条 CQ 共 768 字节。
 
 **设计要点：**
-- **module 字段**：拷贝自 `command->module`，FTL 收到完成通知后可直接路由到对应模块（Host IO / GC / Read Recovery 等），无需通过 command_id 查询再决定路由。
+- **CQE 不带完成服务函数选择器**：FTL 用 `command_id` 从自己的 request 表取 `{ctx, op}`；
+  FC 命令对象和 CQE 都不携带 FTL 概念（分层：FC 只认命令 ID / 状态）。
 - **只带命令级聚合**：**v7 删除了 `ecc_bit0..3`**。per-CW `status` / `ecc_bits` 只留在 Descriptor 链，
   命令级聚合 ECC 走 `fc_get_cmd_ecc_max()`（取全链最大值）。
   **v28 起不再聚合失败 CW 位图**（原走 `param.cw_bitmap`）——上层要定位失败 CW，遍历 desc 链
@@ -2405,29 +2405,30 @@ while (desc_id < FC_DESCRIPTOR_POOL_DEPTH) {
 | 长链路命令完成，CQ 已出队 | ❌ 状态已丢失 | **✅ Descriptor 保留状态** |
 | 错误注入/调试分析 | ❌ | **✅ 状态持续可查** |
 
-#### 13.4.5 op_tag 字段直接路由
+#### 13.4.5 CQE 不带 op：FTL request 表按 command_id 路由
 
-`fc_command_status_t.op_tag` 拷贝自 `command->op_tag`，使上层收到 CQ 条目后无需通过 `command_id` 查询命令再决定路由：
+主流完成项只带 CID/status；命令类型/完成服务函数由固件 request context 保存。
+本仓对应地：
+
+- `fc_command_t` 与 `fc_command_status_t` 都**不携带** FTL 的 `ftl_op_id_e`；
+- FTL 在 `ftl_op_submit()` 时按 `command_id` 直接索引自己的 request 表，
+  保存 `{ctx, op}`；
+- `ftl_op_dispatch()` 收到 CQE 后用 `command_id` 取 request，再按 `op` 查
+  `g_op_callbacks[]`：
 
 ```c
-// 不拷 op_tag 的方式：
 status = fc_poll_completion(&completion);
-cmd = fc_command_id_to_command(completion.command_id);
-switch (cmd->op_tag) { ... }  // 需要一次额外指针查询
-
-// 拷了 op_tag 的方式：
-status = fc_poll_completion(&completion);
-service = g_op_callbacks[completion.op_tag];  // 直接派发
-service(ftl, &completion, ctx);
+if (ftl_op_req_take(completion.command_id, &ctx, &op) == false) {
+    /* 孤儿 / 迟到完成：release 命令 */
+} else {
+    service = g_op_callbacks[op];
+    service(ftl, &completion, ctx);
+}
 ```
 
-⚠ **FC 对 `op_tag` 是不透明的**：7 位整数，FC 不解释、不分支，只在完成时原样拷贝。
-取值语义（= FTL 的 `ftl_op_id_e`）由上层定义 —— 见 `include/ftl/ftl_op.h`。FC 侧**不声明**
-这套枚举（v0.75 删除了原 `fc_command_module_t`：它是 FTL 概念，不该由 FC 声明）。
-
-为什么是 7 位：原 `module : 4` + 紧随其后的 `reserved1 : 3` 合并而成（见
-`fc_command.h` 的位域布局），不新增字段、不改结构体大小、不落介质（落介质的只有
-`meta` / `paa`）⇒ 编号可自由重排，无介质版本影响。
+这样 FC 层保持通用（不解释 FTL 的完成服务函数枚举），FTL 侧每个在飞命令都有
+一条 request（host IO 也有，`ctx == NULL`），不会出现“CQE 有 op、命令对象也有 op”
+两份真相。
 
 ### 13.5 Dispatch 请求/完成结构总览
 

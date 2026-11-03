@@ -978,7 +978,7 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
         memset(&stats, 0, sizeof(stats));
         (void)fc_get_resource_stats(&stats);
 
-        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_ctx_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U))
+        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U))
         {
             return true;
         }
@@ -1008,7 +1008,7 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
                                  dbg.hsq_head_id,
                                  dbg.hsq_head_chain,
                                  (unsigned)dbg.hsq_head_op,
-                                 ftl_op_ctx_count());
+                                 ftl_op_req_count());
             return false;
         }
     }

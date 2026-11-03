@@ -682,7 +682,7 @@ void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *compl
     rr_handle_t *rr = (rr_handle_t *)ctx;
     ASSERT(rr == &ftl->read_recovery_handle);
 
-    // 旁表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
+    // request 表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
     // 正常路径不该出现：每条 RR 命令提交时都登记了 &ftl->read_recovery_handle，
     // 且只被 take 一次。
     if ((rr == NULL) || (rr->waiting == false))

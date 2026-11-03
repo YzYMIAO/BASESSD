@@ -102,7 +102,7 @@
 
 每个用例 teardown 断言：
 
-- `pend_slot_get_count()==0`、`pend_group_get_count()==0`、`ftl_op_ctx_count()==0`；
+- `pend_slot_get_count()==0`、`pend_group_get_count()==0`、`ftl_op_req_count()==0`；
 - FC 资源统计 `sq/hsq/cq/command/descriptor/buffer` 全 0；
 - migrate/checkpoint/metadata/journal/wbuf/L2P 均 idle；
 - allocator 对账：`state==FREE ⟺ 在 Free Pool`，BAD 不在任何池/Closed，计数不越界。
@@ -118,7 +118,7 @@
 
 顺序是承重的，缺一步就在板端以断言/日志风暴的形式暴露：
 
-1. `ftl_ut_quiesce()`：泵到 FC 池、CQ、`ftl_op_ctx_count()` 全 0（否则旧 CP 的迟到完成撞 `checkpoint.c` 的 `h->waiting != 0`）；
+1. `ftl_ut_quiesce()`：泵到 FC 池、CQ、`ftl_op_req_count()` 全 0（否则旧 CP 的迟到完成撞 `checkpoint.c` 的 `h->waiting != 0`）；
 2. `fc_init()` 后必须 `nand_dispatch_set_armed(1)`（`fc_init` 会清派发放行闩锁）；
 3. `ftl_op_init()` + 恢复实例路由表（`ftl_op_route_set`）；
 4. 先拷出 `storage` 指针（`ftl_init` 会 memset 整个上下文），再 `ftl_init` + `l2p_init`；

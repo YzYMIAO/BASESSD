@@ -763,7 +763,6 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
      * 聚合 ECC 走 fc_get_cmd_ecc_max()（须在 fc_command_release() 前调用）。 */
     completion.command_id = nand_completion->command_id;
     completion.desc_id    = nand_completion->failed_descriptor_id;
-    completion.op_tag     = command->op_tag;
     completion.status     = 0U;
     memset(&completion.param, 0, sizeof(completion.param)); /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
@@ -987,7 +986,6 @@ static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     // 否则 data_cmd 若是「上层申请」档，建链入口会因拿不到上层 buffer_id 而断言。
     parity_cmd->config.buf_own   = FC_BUF_OWN_FC_ALLOC_FC_FREE;
     parity_cmd->high_priority    = data_cmd->high_priority;
-    parity_cmd->op_tag           = data_cmd->op_tag;
     parity_cmd->meta             = data_cmd->meta;
 
     // 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1。
