@@ -1010,7 +1010,7 @@ NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未�
 > 当场停机，而不是留到上板后靠"偶发丢命令"去猜。**
 
 **落地形态**：`src/ftl/ftl_op.c` 里 `g_dispatch_depth` 深度计数（单线程顺序主循环 ⇒ 普通变量，
-无需原子），`ftl_op_dispatch` 用 `g_dispatch_depth++` / `g_dispatch_depth--` 包住服务函数调用
+无需原子），`ftl_op_drain` 的循环体用 `g_dispatch_depth++` / `g_dispatch_depth--` 包住服务函数调用
 （含它内部的嵌套派发，故计数天然覆盖嵌套）。`l2p_sync_pump()`（`l2p_cache.c`，四个 `*_sync`
 逃生口的自旋泵）第一行就是 `ASSERT(ftl_op_is_in_dispatch() == 0)`。
 

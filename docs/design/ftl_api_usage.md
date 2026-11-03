@@ -204,21 +204,21 @@ void         alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *ref
 ### 1.5 ftl_op 完成派发面（ctx 旁表 + op tag，v0.75 起）
 
 `ftl_op.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
-completion 丢失问题。**v0.75 起**派发**唯一出口**是 `ftl_op_dispatch()`：旁表只存 `ctx`，
+completion 丢失问题。派发**唯一出口**是 `ftl_op_drain()`：旁表只存 `ctx`，
 handler 由 request 表里的 **op** 查 `g_op_callbacks[]` 得到（见 `ftl_op.h`）。
 
 ```c
-// ftl_op.h — 接口（v0.75 起表项只留 ctx）
+// ftl_op.h — request 表接口（表项 = {ctx, op, pending}）
 
 #define FTL_OP_REQ_TABLE_SIZE FC_COMMAND_POOL_DEPTH
 
 /* 登记一条命令的 request（op + 私有状态） */
 ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx);
 
-/* 查 + 清项 + 取 {ctx, op}（先清再回调，容许服务函数重入登记） */
-bool ftl_op_req_take(WORD cmd_id, void **ctx_out, ftl_op_id_e *op_out);
+/* 丢弃一条 request（回滚 / 超时摘项；幂等） */
+void ftl_op_req_remove(WORD cmd_id);
 
-/* 消费所有 CQ entry → ftl_op_dispatch() */
+/* 消费所有 CQ entry 并逐条派发（取 {ctx,op} 后立即清表项） */
 void ftl_op_drain(void);
 
 /* 同步等待器（FTL_OP_SYNC_WAIT 的 ctx，由同步原语在**自己栈上**持有） */
@@ -230,13 +230,12 @@ typedef struct {
 
 // ftl_op.h — 提交侧 / 服务函数数组
 ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
-void         ftl_op_dispatch(const fc_command_status_t *completion);
 bool         ftl_op_is_in_dispatch(void);
 ```
 
-**路由规则**（`ftl_op_dispatch`）：
-1. `ftl_op_req_take(command_id, &ctx, &op)` 取 request；未命中 ⇒ **孤儿/迟到完成**：
-   `fc_command_release` + LOGE（正常不应发生）。
+**路由规则**（`ftl_op_drain` 的循环体）：
+1. 用 command_id 直接索引 request 表，取 `{ctx, op}` 后立即清项；`pending == false` ⇒
+   **孤儿/迟到完成**：`fc_command_release` + LOGE。
 2. `fn = g_op_callbacks[op]`；越界/空槽 ⇒ 孤儿，release + LOGE。
 3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `ftl_op_route_get` 解析
    （路由表在逐实例 boot 之前设好；NULL 属编程错误）。
@@ -324,7 +323,7 @@ ftl_submit_write(ftl, &req)
 
        ↓ 几十~几百 μs 后
 
-  ftl_op_dispatch()
+  ftl_op_drain() 的完成派发
     ├─ NAND_SUCCESS → ftl_confirm_write(ftl, pending)   ← ★ v0.75 阶段 5：**两遍式**
     │   ├─ 第一遍：逐 CW l2p_cache_ready(lba) → 任一未就绪 ⇒ 返 FTL_AGAIN（**一条都不动**）
     │   │            ⇒ 本项**待入账**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
@@ -905,7 +904,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
     Phase 2 ── 处理完成回调
     ├── ftl_op_drain()（统一完成泵）
-    └── ftl_op_dispatch() 按 request.op 查 g_op_callbacks[]
+    └── ftl_op_drain() 循环体按 request.op 查 g_op_callbacks[]
           ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
           │              → 组可能完成（发一次组通知）
           ├── METADATA → release

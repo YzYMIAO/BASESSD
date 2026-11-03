@@ -284,7 +284,7 @@ flowchart TB
         C2 --> C3["NAND 执行"]
         C3 --> C4["FC CQ"]
         C4 --> C5["ftl_service_pump ftl_op_drain S3-10"]
-        C5 --> C6["ftl_op_dispatch op tag 选服务函数"]
+        C5 --> C6["drain 循环体：按 request.op 选服务函数"]
         C6 --> C7["ftl_host_io_callback 读 拷回 写 confirm"]
     end
 
@@ -3034,7 +3034,7 @@ FTL 的命令是异步的：`ftl_op_submit` 返回后，命令在 FC/NAND 里执
 **关键事实：`completion` 里没有 ch/ce/lun，也不携带 op；派发用到
 `command_id / status`（另有 `desc_id / param` 供数据路径与诊断）。** 实例坐标在
 `fc_command_t::config` 里；完成服务函数选择器（op）和私有 ctx 在 FTL request 表里。
-dispatch 用 `command_id` 取回命令与 request，再按 `cmd->config.{ch,ce,lun}` 路由、
+完成派发用 `command_id` 取回命令与 request，再按 `cmd->config.{ch,ce,lun}` 路由、
 按 `request.op` 选服务函数。
 命令在完成回调返回前一直有效（由 release 归属保证）。
 
@@ -3074,7 +3074,7 @@ flowchart LR
 路由访问器：
 
 - `ftl_op_route_get(ch, ce, lun)`：完成派发用，按命令自身的物理坐标查；
-- `ftl_op_route_get_die(die)`：按 compact die 号查，boot 自检/外部模块用；
+- `ftl_op_route_verify()`：boot 自检，校验 g_op_route 与 g_die_table 的 die 往返一致；
 - `ftl_op_route_get_region(region)`：全局 region → owner 实例。
 
 `ftl_sync_waiter_t` 是 `FTL_OP_SYNC_WAIT` 的 ctx，由同步原语放在**自己栈上**：
@@ -3090,8 +3090,8 @@ typedef struct
 
 **不变量：**
 
-1. **先 take 再回调。** `ftl_op_req_take(command_id, &ctx, &op)` 先清项再返回；服务函数
-   可以在自己的回调里重新登记/释放表项，不会踩到本项。
+1. **先摘表项再回调。** `ftl_op_drain` 用 command_id 直接索引 request 表，取 `{ctx, op}`
+   后立即清项再回调；服务函数可以在自己的回调里重新登记/释放表项，不会踩到本项。
 2. **一个 command_id 一条表项。** `command_id` 是 request 表下标 ⇒ 天然唯一；
    `ftl_op_req_add` 命中已有 pending 项时覆盖并 `LOGW`（旧项只可能来自未观测完成）。
 3. **按命令自身的 `cmd->config.{ch,ce,lun}` 路由**，不是按“谁在 drain”。
@@ -3107,21 +3107,21 @@ typedef struct
 | 路径 | 谁 release |
 |---|---|
 | `ftl_op_submit` / `ftl_op_submit_batch` 返回非 `FTL_OK` | 调用者（命令未提交） |
-| request 缺失 / op 非法 | `ftl_op_dispatch` |
+| request 缺失 / op 非法 | `ftl_op_drain` |
 | `FTL_OP_HOST_IO` / 各异步 job 正常完成 | 对应服务函数 |
 | `FTL_OP_SYNC_WAIT` 成功 | 调用者：`ftl_sync_submit_wait` 返回后读数据再 release |
-| `FTL_OP_SYNC_WAIT` 超时后的迟到完成 | `ftl_op_dispatch`（missing-request 分支） |
+| `FTL_OP_SYNC_WAIT` 超时后的迟到完成 | `ftl_op_drain`（missing-request 分支） |
 
 #### 3.10.3 提交路径
 
-入口：`src/ftl/ftl_op.c:283` 的 `ftl_op_submit(cmd, op, ctx)`。
+入口：`src/ftl/ftl_op.c:364` 的 `ftl_op_submit(cmd, op, ctx)`。
 
 ```mermaid
 flowchart TD
     A["ftl_op_submit(cmd, op, ctx)"] --> B{"ftl_op_seq_gate(cmd, op)"}
     B -- "拒绝" --> R1["FTL_AGAIN<br/>命令未提交，调用者保留"]
     B -- "放行" --> C["ftl_op_req_add(cmd_id, op, ctx)"]
-    C -- "失败（id 越界 / 要求 ctx）" --> R2["FTL_ERROR<br/>命令未提交"]
+    C -- "失败（cmd_id 越界）" --> R2["FTL_ERROR<br/>命令未提交"]
     C -- "成功" --> G["fc_submit(cmd)"]
     G -- "失败" --> H["ftl_op_req_remove(cmd_id)"]
     H --> R3["FTL_AGAIN<br/>命令未提交，调用者保留"]
@@ -3134,13 +3134,15 @@ flowchart TD
    所有者提交；被挡住返回 `FTL_AGAIN`。前台/同步/恢复类提交会置
    `seq.break_requested`，后台元数据只等待、不请求断点（见 §3.16.5）。
 2. **登记 request**：每个在飞命令都 `ftl_op_req_add(cmd_id, op, ctx)`；ctx == NULL
-   （host IO / cache padding）也登记，只是没有私有状态。CQE 与 FC 命令对象都不携带 op。
+   （host IO / cache padding）也登记，只是没有私有状态。op 范围与 op/ctx 配对是
+   **前置条件**：违反即编程错误，debug 由 ASSERT 停机；运行期唯一的失败是
+   `cmd_id` 越界（池外命令指针）。CQE 与 FC 命令对象都不携带 op。
 3. **提交**：`fc_submit(cmd)`。登记必须早于提交——提交后完成可能立刻被下一轮 drain
    处理，那时 request 还没登记就会丢完成。
 4. **失败回滚**：`fc_submit` 失败只 `ftl_op_req_remove`，返回 `FTL_AGAIN`；
    **不 release 命令**。调用者保留命令，下轮重试或自行 release。
 
-**批量提交** `ftl_op_submit_batch(cmds, n, op, ctx)`（`src/ftl/ftl_op.c:323`）：
+**批量提交** `ftl_op_submit_batch(cmds, n, op, ctx)`（`src/ftl/ftl_op.c:398`）：
 
 - 先对**全部**命令过序列门控；任一被挡 ⇒ `FTL_AGAIN`，一条都不提交；
 - 再逐条登记 request；任一登记失败 ⇒ 回滚已登记项，返回 `FTL_ERROR`；
@@ -3150,16 +3152,16 @@ flowchart TD
 
 #### 3.10.4 完成路径
 
-入口：`ftl_op_drain()`（`src/ftl/ftl_op.c:473`）循环 `fc_poll_completion()`，每条完成交
-`ftl_op_dispatch()`（`:420`）。
+入口：`ftl_op_drain()` 循环 `fc_poll_completion()`，每条完成的派发直接在循环体内完成
+（无独立函数边界）。
 
 ```mermaid
 flowchart TD
-    A["ftl_op_drain: fc_poll_completion"] --> B["ftl_op_dispatch(completion)"]
-    B --> C["cmd = fc_command_id_to_command(completion->command_id)"]
-    C --> D{"ftl_op_req_take(cmd_id, &ctx, &op)"}
-    D -- "false" --> O["missing request<br/>fc_command_release + LOGE"]
-    D -- "true" --> E{"fn = g_op_callbacks[op] == NULL?"}
+    A["ftl_op_drain: while fc_poll_completion"] --> C["cmd = fc_command_id_to_command(...)<br/>req = &g_op_req[completion.command_id]"]
+    C --> D{"req.pending == false?"}
+    D -- "是" --> O["missing request<br/>fc_command_release + LOGE"]
+    D -- "否" --> X["ctx = req.ctx; op = req.op<br/>req 清项"]
+    X --> E{"fn = g_op_callbacks[op] == NULL?"}
     E -- "是" --> G["orphan op<br/>fc_command_release + LOGE"]
     E -- "否" --> H["ftl = ftl_op_route_get(cmd->config.ch, ce, lun)"]
     H --> I["g_dispatch_depth++"]
@@ -3171,10 +3173,10 @@ flowchart TD
 
 1. **先取命令对象**：`fc_command_id_to_command(completion->command_id)`。公共壳已断言
    command id 在池内，恒返回非空；实例坐标从 `cmd->config` 读，而不是从 `completion` 读。
-2. **取 request**：`ftl_op_req_take(command_id, &ctx, &op)` 查表并清项；
-   返回 false = 迟到/孤儿完成（超时已摘项），只 release 命令。
+2. **取 request**：用 command_id 直接索引 request 表，取 `{ctx, op}` 后立即清项；
+   `pending == false` = 迟到/孤儿完成（超时已摘项），只 release 命令。
 3. **ctx 语义**：每条在飞命令都有 request（host IO 的 ctx 为 NULL）；要求 ctx 的 op
-   在 `ftl_op_req_add` 登记时就拒绝 NULL，因此 dispatch 不再做“缺 ctx”分支。
+   在 `ftl_op_req_add` 登记时由 ASSERT 拒绝 NULL，因此 drain 不做“缺 ctx”分支。
 4. **路由**：`ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun)`。
    内部经 `chcelun_2_die()` 查 `g_op_route[die]`；稀疏拓扑的空洞返回 NULL。
    路由表由 `main.c` 在逐实例 boot 之前设好；NULL 属编程错误，具体后果由服务函数决定
@@ -3210,8 +3212,8 @@ sequenceDiagram
 - waiter 在调用者**栈上**；`ftl_op_submit` 把 `&waiter` 登记为 ctx。
 - 入口断言 `ftl_op_is_in_dispatch() == false`，禁止嵌套泵。
 - 自旋体是 `fc_service()` + `ftl_op_drain()`；非目标完成由 drain 按各自 request.op 正常派发。
-- 超时：`ftl_op_req_remove(waiter.cmd_id)` 后返回错误。之后迟到的完成在 dispatch 里
-  `ftl_op_req_take` 失败，走 missing-request 分支，只 release 命令，不解引用已失效的栈。
+- 超时：`ftl_op_req_remove(waiter.cmd_id)` 后返回错误。之后迟到的完成在 drain 里
+  看到 `pending == false`，走 missing-request 分支，只 release 命令，不解引用已失效的栈。
 - `ftl_sync_wait_callback` **不 release**：调用者要在 wait 返回后读 `ftl_cmd_read_data`
   等命令数据，提前释放会悬垂。
 
@@ -3219,13 +3221,13 @@ sequenceDiagram
 
 | 情况 | 判定点 | 行为 | 命令 release |
 |---|---|---|---|
-| request 表项缺失（迟到/孤儿） | `ftl_op_req_take` 返回 false | `LOGE` + 丢弃，不回调 | dispatch |
-| op 非法 / `g_op_callbacks[op] == NULL` | `fn == NULL` | `LOGE` + 丢弃 | dispatch |
+| request 表项缺失（迟到/孤儿） | `req->pending == false` | `LOGE` + 丢弃，不回调 | drain |
+| op 非法 / `g_op_callbacks[op] == NULL` | `fn == NULL` | `LOGE` + 丢弃 | drain |
 | 路由表项为 NULL | `ftl_op_route_get` 返回 NULL | 编程错误；回调按自身约定处理（实例无关回调只用 ctx） | 对应服务函数（与正常完成相同） |
 | 序列门控拒绝 | `ftl_op_seq_gate` | `FTL_AGAIN`，未提交 | 调用者 |
-| request 登记失败（id 越界 / 要求 ctx 的 op 传 NULL） | `ftl_op_req_add` | `FTL_ERROR`，未提交 | 调用者 |
+| request 登记失败（cmd_id 越界） | `ftl_op_req_add` | `FTL_ERROR`，未提交；op/ctx 配对违反是编程错误，debug 由 ASSERT 停机 | 调用者 |
 | FC SQ 满 / 提交失败 | `fc_submit` / `fc_submit_batch` | 回滚 request；`QUEUE_FULL` → `FTL_AGAIN` | 调用者 |
-| 同步等待超时 | wait 循环 | 清 request 表项，返回错误；迟到完成走 missing-request 分支 | 调用者；迟到完成由 dispatch release |
+| 同步等待超时 | wait 循环 | 清 request 表项，返回错误；迟到完成走 missing-request 分支 | 调用者；迟到完成由 drain release |
 | 服务函数里调同步等待 | `ASSERT(ftl_op_is_in_dispatch() == false)` | debug 停机 | N/A |
 
 #### 3.10.7 容量与常量
@@ -3247,7 +3249,7 @@ NVMe/主控数据面的基本模型是「提交队列 + 完成队列 + 命令 ID
 - `command_id` 对应 NVMe 的 CID，用来连接 FC 完成项与 FTL request 表；
 - `request.op` 是本仓的“服务函数选择器”，不是 NVMe 的命令类型字段；
 - 实例路由按命令自身的 `(ch,ce,lun)` 解析，对应主控按 target/queue 归属完成；
-- **本仓自定**：按 command_id 直接索引的 request 表、单一全局 CQ、`先 take 再 dispatch` 的防重入顺序，
+- **本仓自定**：按 command_id 直接索引的 request 表、单一全局 CQ、`先摘表项再回调` 的防重入顺序，
   以及 `g_dispatch_depth` 对嵌套完成泵的拦截。
 
 ---

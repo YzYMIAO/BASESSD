@@ -201,7 +201,7 @@
 | `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners 与组在飞计数 |
 | `wbuf_drop_reset_owners` | — | DROP 清空页后 owners 结算一次（OK）、RESET 按 IO_ERROR 结算 |
 | `wbuf_density` | `n=1\|2\|4\|8` | pair 布局、稀疏 CW 位图（RISK-WB-03/IF-04） |
-| `op_ctx` | — | ctx add/take/remove 生命周期 |
+| `op_ctx` | — | request add/remove 生命周期 |
 | `op_ctx_capacity` | — | 旁表容量与同 id 覆盖（RISK-IF-05） |
 | `bg_engine` | — | 任务表长度 = `BG_TASK_COUNT`、`level_select` 返回合法档位 |
 | `op_route` | — | die→(ch,ce,lun) 路由（RISK-CR-02） |

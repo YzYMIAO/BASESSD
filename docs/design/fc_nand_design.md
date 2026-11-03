@@ -2413,14 +2413,18 @@ while (desc_id < FC_DESCRIPTOR_POOL_DEPTH) {
 - `fc_command_t` 与 `fc_command_status_t` 都**不携带** FTL 的 `ftl_op_id_e`；
 - FTL 在 `ftl_op_submit()` 时按 `command_id` 直接索引自己的 request 表，
   保存 `{ctx, op}`；
-- `ftl_op_dispatch()` 收到 CQE 后用 `command_id` 取 request，再按 `op` 查
+- `ftl_op_drain()` 收到 CQE 后用 `command_id` 取 request，再按 `op` 查
   `g_op_callbacks[]`：
 
 ```c
 status = fc_poll_completion(&completion);
-if (ftl_op_req_take(completion.command_id, &ctx, &op) == false) {
+req = &g_op_req[completion.command_id];        /* 直接索引 request 表 */
+if (req->pending == false) {
     /* 孤儿 / 迟到完成：release 命令 */
 } else {
+    ctx = req->ctx;
+    op  = req->op;
+    req->ctx = NULL; req->op = FTL_OP_NONE; req->pending = false;  /* 先摘再回调 */
     service = g_op_callbacks[op];
     service(ftl, &completion, ctx);
 }
