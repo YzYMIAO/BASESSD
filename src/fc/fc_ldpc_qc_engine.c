@@ -175,9 +175,15 @@ static void qc_expand_links(void)
  * 编码
  * ═══════════════════════════════════════════════════════════════ */
 
-// 实现要点：阶梯结构编码——数据位为 1 时异或其关联的校验位
-// （parity 初始为 0，逐数据位累加即得校验向量）。
-// g_initialized 是运行时状态，未初始化时保留静默返回（不写 data_out）。
+/**
+ * @brief QC-LDPC 编码：拷 520B 数据，阶梯结构逐位累加出 8B parity
+ *
+ * 引擎未初始化时静默返回不写 data_out——调用方须保证先 init。
+ *
+ * @param qc      引擎句柄（校验矩阵为文件内静态表，未使用）
+ * @param data_in 528B 码字缓冲（前 520B 为数据）
+ * @param data_out 输出：528B 码字（数据 + parity）
+ */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out)
 {
     BYTE  parity[8];
@@ -221,8 +227,16 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_o
  * 解码（硬判决 Bit-flipping）
  * ═══════════════════════════════════════════════════════════════ */
 
-// 实现要点：每轮先算综合式，全零即成功；统计失败校验数达到自适应阈值
-// （min(3, syn_ones)）的变量位翻转；无位可翻表示陷入不动点，直接判失败。
+/**
+ * @brief QC-LDPC 硬判决解码（Bit-flipping）
+ *
+ * 每轮算综合式，全零即成功；失败校验数达自适应阈值 min(3, syn_ones) 的
+ * 变量位翻转；无位可翻说明陷入不动点，判失败。
+ *
+ * @param qc   引擎句柄（取其 max_iter）
+ * @param data 528B 码字缓冲（原地纠正）
+ * @return FC_STATUS_OK / FC_STATUS_IO_ERROR（不可纠）/ FC_STATUS_INVALID_ARGUMENT（未初始化）
+ */
 fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
 {
     BYTE  syndromes[QC_M];
@@ -324,7 +338,14 @@ fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
  * 初始化
  * ═══════════════════════════════════════════════════════════════ */
 
-// 实现要点：首次调用填写静态单例并展开查表，后续调用直接复用同一句柄。
+/**
+ * @brief 初始化 QC-LDPC 引擎（首次调用建基矩阵并展开链接）
+ *
+ * 后续调用直接返回同一静态单例。
+ *
+ * @param max_iter 最大迭代轮数，0 表示取默认 15
+ * @return 引擎句柄
+ */
 fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
 {
     static fc_ldpc_qc_t g_qc;

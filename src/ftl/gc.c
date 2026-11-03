@@ -48,21 +48,15 @@
 
 /* ── 1. 共用原语 ── */
 
-// 内部管理 FC 命令生命周期：
-// alloc → config → submit → sync_wait → get_meta → release
-//
-// 唯一调用者是掉电重建（PFR 的 full metadata rebuild（内部）的逐页反查）。
-// 搬移读（GC / WL / 预测性退役）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
-// gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
-//
-// ⚠ 读整页只是为了取回页内 META；**不向调用者拷用户数据**（本函数没有数据出参）。
-// ⚠ CW 级映射（IU = 1 CW）+ DRAM-less approach ③：本函数读**整页**（该 plane 的 4 个 CW），
-// 把**每个 CW 自己的 META**（本仓的「OOB」反向映射，头 4B = 该 CW 的扇区 LBA）解码到
-// `cw_lba[c]`。未写过的 CW（META 全 FF）填 `FTL_LBA_INVALID`。调用者据此**逐 CW 反查 L2P**
-// 判有效性——不靠任何常驻位图（flash reverse-mapping，见 bst.h 文件头）。
-//
-// ⚠ 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集（fc_cmd_status_has_error）：UNC / MATA_ERROR
-// 页的内容不可信，不得当成功解析 META。
+/**
+ * @brief 读一页并逐 CW 取出 META LBA
+ *
+ * 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集：UNC/MATA 页内容不可信。
+ *
+ * @param pba    目标页 PBA
+ * @param cw_lba 输出：逐 CW 的 LBA（未写过 = FTL_LBA_INVALID）
+ * @return FTL_OK；FTL_ERROR 读失败 / 内容不可信
+ */
 ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
     // 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。
@@ -120,20 +114,17 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     return FTL_OK;
 }
 
-// 实现要点：每个 CW 的 META = 该 CW 自己的**扇区** LBA（低位 [plane][cw] 就是它的物理位置）；
-// 未写过的 CW 读回 0xFF…（META = 0xFFFFFFFF）。**不能直接取 CW0 的 META**——
-// CW 级写/搬移允许页内只编一个 CW 子集（`wr 2 2` 只落 plane0 的 CW2/CW3；
-// GC 搬移也只编有效 CW），此时 CW0 可能是空位，直接取会得到 0xFFFFFFFF。
-//
-// 故取**首个写过的 CW** c_lo，用 base = META(c_lo) − c_lo 反推页基址。不变量：
-// 一个物理页只被**一次**编程操作写（host 子操作或 GC/WL 搬移各占一个全新页），
-// 该操作以同一页基址 B 编程 ⇒ 每个写过的 CW c 的 META 恒为 B + c（搬移也保持
-// 「LBA 相对页基址的偏移」），故 base = META(c_lo) − c_lo = B，base + c 对**所有**
-// 写过的 c 都还原出正确 LBA（页内允许有空洞 CW，如源页只搬 CW0/CW2）。
-//
-// ⚠ 必须在 fc_command_release 之前调用（meta 指针指向命令的 desc 链）。
-// ⚠ 同步版（gc_read_page_with_lba）与异步搬移 job（migrate.c）共用本函数——解码规则
-// 只此一份，避免两处漂移。
+/**
+ * @brief 解码命令 desc 链上的逐 CW LBA
+ *
+ * 只此一份，避免两处漂移。
+ *
+ * @param cmd           完成的读命令
+ * @param pba           目标页 PBA
+ * @param cw_lba        输出：逐 CW LBA
+ * @param page_base_out 输出：页基址
+ * @return 解码结果（OK / EMPTY / FAIL）
+ */
 gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out)
 {
     const BYTE phys_plane = pba_to_plane(pba);
@@ -200,14 +191,17 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
 
 /* ── 2. 选 victim ── */
 
-// 实现要点：四项各自归一化到 0..1000——vr 有效页率、er 磨损率（越大越**避开**临近寿命块）、
-// cp 温度（COLD 加分）、yp 年龄（越老越优先）；cost = 加权和，取小者胜；
-// cost 相等取有效页更少者（确定性）。erase 项用 QWORD 防溢出；
-// age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
-// ⚠ **先过滤、后评分**：若先选 cost 最小再判收益，可能出现「最差块仍太有效 ⇒ 报无收益，
-// 而其实还有更稀疏的候选」。过滤条件见本文件的收益判据阈值注释。
-// ⚠ 分母用 `st.plane_count * FTL_CW_PER_BLOCK`（BAD/哨兵 plane 已被 alc_super_get_stats 排除）；
-// 不能按 next_page 缩分母——半写块的空洞页会让它看起来「100% 有效」而被误跳过。
+/**
+ * @brief 选一个 GC victim
+ *
+ * 有效率按 plane_count × 块容量算，不按 next_page 缩（半写块会被误判为
+ * 100% 有效）。
+ *
+ * @param alloc 分配器
+ * @param mode  收益模式
+ * @param out   输出：victim 与统计
+ * @return 选择结果（OK / NO_VICTIM / NO_GAIN）
+ */
 gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out)
 {
     ASSERT(alloc != NULL);
@@ -375,9 +369,14 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
 /* ── 3. 触发判定 ── */
 
-// 实现要点：只看**空间与磨损**——T1 水位 < FREE_POOL_TARGET（主动补池）；
-// T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低，池见底）；
-// 磨损维护由 wear_leveling 的 UBI 判据独立触发，不占 GC 触发位。
+/**
+ * @brief 求本轮 GC 触发位并集
+ *
+ * 磨损维护由 wear_leveling 独立触发，不占 GC 触发位。
+ *
+ * @param alloc 分配器
+ * @return 触发位并集（0 = 不触发）
+ */
 DWORD gc_should_trigger(const alc_t *alloc)
 {
     // NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），

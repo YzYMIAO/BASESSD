@@ -15,13 +15,16 @@
 
 #include <stddef.h>
 
-// 判据（见 docs/design/fc_nand_design.md §24）：
-// 指针判空 → ASSERT —— 传空指针是调用者的编程错误，不变量破坏就该留下现场；
-// 值域校验 → 返回码 —— QUEUE_FULL / QUEUE_EMPTY / 越界 offset 是预期内的运行结果，
-// 必须返回给上层（fc.c:709 就靠 QUEUE_FULL 做背压判断）；
-// INVALID 哨兵入队 → ASSERT（见 docs/design/assertion_guidelines.md §十五）
-// —— 入队 ID 由 FC 自铸，传哨兵是调用者 bug，非运行结果。
-
+/**
+ * @brief 初始化提交队列（SQ / HSQ 共用）
+ *
+ * 存储由调用方提供，本模块不分配内存；单线程访问（fc_service 内），无锁。
+ *
+ * @param queue   队列
+ * @param storage 条目存储（depth 项）
+ * @param depth   容量（非 0）
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
@@ -34,7 +37,14 @@ fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
     queue->count   = 0U;
     return FC_STATUS_OK;
 }
-
+/**
+ * @brief 初始化完成队列
+ *
+ * @param queue   队列
+ * @param storage 条目存储（depth 项）
+ * @param depth   容量（非 0）
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
@@ -48,8 +58,15 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
     return FC_STATUS_OK;
 }
 
-// 实现要点：INVALID 哨兵入队 = 调用者 bug（入队 ID 全由 FC 自铸，见 fc.c），
-// 一律 ASSERT；只有「队列满」才是预期内的运行结果。
+/**
+ * @brief 命令 ID 入队
+ *
+ * 入队 ID 全由 FC 自铸，传入 INVALID 哨兵即调用者 bug；只有队列满是预期结果。
+ *
+ * @param queue      提交队列
+ * @param command_id 命令 ID（≠ FC_COMMAND_ID_INVALID）
+ * @return FC_STATUS_OK / FC_STATUS_QUEUE_FULL
+ */
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
     ASSERT(queue != NULL);
@@ -63,7 +80,13 @@ fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
     queue->count++;
     return FC_STATUS_OK;
 }
-
+/**
+ * @brief 命令 ID 出队
+ *
+ * @param queue      提交队列
+ * @param command_id 输出：命令 ID
+ * @return FC_STATUS_OK / FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
 {
     ASSERT(queue != NULL);
@@ -77,7 +100,13 @@ fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
     queue->count--;
     return FC_STATUS_OK;
 }
-
+/**
+ * @brief 完成项入队
+ *
+ * @param queue      完成队列
+ * @param completion 完成项（按值复制）
+ * @return FC_STATUS_OK / FC_STATUS_QUEUE_FULL
+ */
 fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
 {
     ASSERT(queue != NULL);
@@ -91,7 +120,13 @@ fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
     queue->count++;
     return FC_STATUS_OK;
 }
-
+/**
+ * @brief 完成项出队
+ *
+ * @param queue      完成队列
+ * @param completion 输出：完成项
+ * @return FC_STATUS_OK / FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
 {
     ASSERT(queue != NULL);
@@ -105,7 +140,13 @@ fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
     queue->count--;
     return FC_STATUS_OK;
 }
-
+/**
+ * @brief 只读查看队列第 offset 项（不移动 head）
+ *
+ * @param queue  提交队列
+ * @param offset 相对队首的偏移
+ * @return 命令 ID；offset 越界返回 FC_COMMAND_ID_INVALID
+ */
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset)
 {
     ASSERT(queue != NULL);

@@ -32,8 +32,13 @@
 
 #include <stddef.h>
 
-// 命令指针 → 池索引。区间检查 + 减法，O(1)。
-// 返回 0 = 指针不落在命令池区间内（例如栈上的 fc_command_t），没有对应 ID。
+/**
+ * @brief 命令指针 → 池索引（O(1)）
+ *
+ * @param command    命令指针
+ * @param command_id 输出：池索引
+ * @return true 在池内；false 不在命令池区间（如栈上命令）
+ */
 bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 {
     const fc_command_t *pool = g_fc_controller.command_pool;
@@ -82,7 +87,11 @@ static bool __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_
  * ① 初始化
  * ══════════════════════════════════════════════════════════ */
 
-// 初始化全局控制器（幂等，可重复调用以重置）
+/**
+ * @brief 初始化全局控制器（幂等，可重复调用以重置）
+ *
+ * @return FC_STATUS_OK；其余见 fc_init_internal
+ */
 fc_status_e fc_init(void)
 {
     return fc_init_internal(&g_fc_controller);
@@ -92,7 +101,11 @@ fc_status_e fc_init(void)
  * ② 命令生命周期
  * ══════════════════════════════════════════════════════════ */
 
-// 分配命令槽位
+/**
+ * @brief 分配命令槽位
+ *
+ * @return 命令指针；NULL = 命令池空
+ */
 fc_command_t *fc_command_alloc(void)
 {
     return fc_command_alloc_internal(&g_fc_controller);
@@ -107,7 +120,7 @@ fc_command_t *fc_command_alloc(void)
  *
  * @return true = 已挂；false = 未挂。
  *
- * @note 实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
+ * @note 链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
  * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）。
  */
@@ -128,36 +141,19 @@ static bool __attribute__((unused)) fc_command_cw_attached(const fc_command_t *c
     return false;
 }
 
-// 实现要点：
-// - **校验段在机制段之前**：任何非法实参都在出池之前返回，不污染池子——
-// 否则会先分配一个 desc 再失败，破坏「失败即沿链完整回收」的干净语义。
-// - **行地址来自实参 row_paa，不从 command->paa 推导**：multi-plane 命令一个
-// DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
-// plane/cw 位由实参决定，row_paa 的对应位被忽略（plane 位经 ASSERT 保证一致）。
-// - **两条公式各造一个值**：
-// desc->paa  = paa_with_cw(paa_with_plane(row_paa, plane), cw)   —— PAA 空间
-// desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw       —— LBA 空间
-// PAA 的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），plane_cw 掩码技巧
-// 只在 LBA/PBA 空间成立，故 desc->paa 改用 nand_config.h 的现成 helper；
-// desc->meta 仍是 LBA（plane/cw 低 3 位相邻，PLANE_CW_MASK 有效）。
-// 代价：不能再用一条 plane_cw 公式造两个值，换来 FC 层内 PBA 归零。
-// - CW 号由调用方给出（FTL 侧的掩码枚举），**不由 desc 序号推导**——链走位
-// （desc 序号）与 CW 号解耦：按链走位索引的地方不动，CW 号一律从
-// paa_to_cw(desc->paa) 取。
-// - meta = lba_to_meta(command->meta, plane, cw)（即上面的公式）。
-// - **顺序：分配 desc → 填字段 → 挂链 → 分配 buffer**。先挂链是为了让
-// 「已分配的 desc 全部在链上」恒成立——任何一步失败后调用方沿链释放即完整
-// 回收，不需要「链外半成品」的就地回滚。代价是链上会短暂/长期存在
-// buffer_id == FC_BUFFER_ID_INVALID 的 desc（buffer 池 128 < desc 池 256，
-// buffer 分配失败是最现实的路径），走链的读者（释放 / count / 掩码重建）
-// 都要容忍——释放侧已按此实现。
-// - **不搬数据**：数据搬运由上层（FTL）在链建好之后、且仅对写操作执行，
-// 见 ftl_cmd_write_data。放这里会让「建链失败→整链释放」白做一遍拷贝。
-// - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
-// 是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
-// - **buffer 从哪来由 config.buf_own 决定**：上层申请（申请位 = 1）时用调用者
-// 传进来的 buffer_id（无失败路径）；FC 申请（默认）时挂链后申请，
-// 池空 → RESOURCE_EMPTY、desc 留链上。归属语义见 fc_buf_own_e。
+/**
+ * @brief 建链入口：分配 desc、填 PAA/config/meta、挂链、按需分配 buffer
+ *
+ * 失败不回滚：已分配的 desc 都在链上，调用方沿链释放即完整回收。唯一合法
+ * 失败是资源池空（RESOURCE_EMPTY）。
+ *
+ * @param command   命令（ALLOCATED 且 plane 段/掩码已设好）
+ * @param plane     plane 号
+ * @param cw        CW 号
+ * @param row_paa   该 plane 的行地址（PAA）
+ * @param buffer_id 上层申请的 buffer（buf_own 默认路径传 INVALID）
+ * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY desc/buffer 池空
+ */
 fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
 {
     fc_command_id_t  command_id;
@@ -238,30 +234,54 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
     return FC_STATUS_OK;
 }
 
-// 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)，
-// 即 buffer 由 FC 在建链时申请。
+/**
+ * @brief 建链入口（FC 申请 buffer 的默认路径）
+ *
+ * @param command 命令
+ * @param plane   plane 号
+ * @param cw      CW 号
+ * @param row_paa 该 plane 的行地址
+ * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY 池空
+ */
 fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
 {
     return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
 }
 
-// 释放链头那一个 desc（含其 buffer），返回新链头。
-// 传值/取回而非传指针：command->desc_id 是位域，&command->desc_id 取不了地址。
+/**
+ * @brief 释放链头一个 desc（含其 buffer），返回新链头
+ *
+ * @param head 当前链头
+ * @return 新链头；FC_DESCRIPTOR_ID_INVALID = 链已空
+ */
 fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head)
 {
     fc_descriptor_chain_release_head_internal(&g_fc_controller, &head);
     return head;
 }
 
-// 沿链释放全部 desc + buffer，返回 FC_DESCRIPTOR_ID_INVALID。
-// 建链中途失败的回滚入口；释放后命令只剩命令槽位（由 fc_command_release 收尾）。
+/**
+ * @brief 沿链释放全部 desc + buffer
+ *
+ * 建链中途失败的回滚入口。
+ *
+ * @param head 链头
+ * @return FC_DESCRIPTOR_ID_INVALID
+ */
 fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
 {
     fc_descriptor_chain_release_all_internal(&g_fc_controller, &head);
     return head;
 }
 
-// 对外入口：前置校验（ASSERT）后转发到 fc_submit_internal；唯一合法失败是队列满。
+/**
+ * @brief 提交一条命令
+ *
+ * 唯一合法失败是队列满；其余配置错误一律 ASSERT。
+ *
+ * @param command 命令（ALLOCATED）
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL
+ */
 fc_status_e fc_submit(fc_command_t *command)
 {
     fc_command_id_t command_id;
@@ -279,9 +299,15 @@ fc_status_e fc_submit(fc_command_t *command)
     return fc_submit_internal(&g_fc_controller, command);
 }
 
-// 实现要点：先精确预检两条队列余量，再逐条入队。单线程 superloop 下预检与入队之间
-// 没有其他生产者；若仍失败说明不变量被破坏，ASSERT 留现场（release 下返回错误）。
-// cache program 批次依赖“全进或全不进”——不允许前 3 条已入队、第 4 条失败。
+/**
+ * @brief 批量提交（全进或全不进）
+ *
+ * cache program 批次依赖此语义；链契约要求全批同优先级。
+ *
+ * @param cmds 命令数组
+ * @param n    条数
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL；FC_STATUS_INVALID_ARGUMENT 链契约违反
+ */
 fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
 {
     ASSERT(cmds != NULL);
@@ -355,13 +381,22 @@ fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
     return FC_STATUS_OK;
 }
 
-// 对外入口：转发到 fc_poll_internal，固定使用单例控制器。
+/**
+ * @brief 推进 FC 服务（NAND 引擎 + 完成回写）
+ *
+ * @return FC_STATUS_OK；其余见 fc_poll_internal
+ */
 fc_status_e fc_service(void)
 {
     return fc_poll_internal(&g_fc_controller);
 }
 
-// 从 CQ 取完成项
+/**
+ * @brief 从 CQ 取一条完成项
+ *
+ * @param completion 输出：完成项
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_poll_completion(fc_command_status_t *completion)
 {
     // completion 为出参前置条件
@@ -369,7 +404,14 @@ fc_status_e fc_poll_completion(fc_command_status_t *completion)
     return fc_poll_completion_internal(&g_fc_controller, completion);
 }
 
-// 对外入口：前置校验（出参非空）后转发到 fc_poll_completions_internal。
+/**
+ * @brief 从 CQ 批量取完成项
+ *
+ * @param completions 输出数组
+ * @param max_count   最多取几条
+ * @param count       输出：实际条数
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     ASSERT(completions != NULL);
@@ -377,9 +419,14 @@ fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count
     return fc_poll_completions_internal(&g_fc_controller, completions, max_count, count);
 }
 
-// 实现要点：**幂等**——命令已在 FREE 状态（空闲链上）时直接返回 OK，
-// 调用者不必自己判断"还活着吗"。命令须不在 CQ 中
-// （FTL 应已 poll_completion 取走完成项）。
+/**
+ * @brief 释放命令槽位（幂等）
+ *
+ * 已 FREE 直接返回 OK；命令须不在 CQ 中。
+ *
+ * @param command 命令
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_command_release(fc_command_t *command)
 {
     fc_command_id_t command_id;
@@ -397,21 +444,38 @@ fc_status_e fc_command_release(fc_command_t *command)
  * ③ buffer 访问
  * ══════════════════════════════════════════════════════════ */
 
-// 分配 buffer
+/**
+ * @brief 分配 buffer
+ *
+ * @return buffer id；FC_BUFFER_ID_INVALID = 池空
+ */
 fc_buffer_id_t fc_buffer_alloc(void)
 {
     return fc_buffer_alloc_internal(&g_fc_controller);
 }
 
-// 释放 buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不返回 INVALID_ARGUMENT）。
+/**
+ * @brief 释放 buffer
+ *
+ * 前置：buffer_id 须已占用（未占用是配置错误 ⇒ ASSERT）。
+ *
+ * @param buffer_id buffer id
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     return fc_buffer_release_internal(&g_fc_controller, buffer_id);
 }
 
-// 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节）。
-// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）；成功时恒非空。
+/**
+ * @brief buffer id → USER 数据区指针（跳过 META+CRC）
+ *
+ * 前置：buffer_id 须已占用；成功时恒非空。
+ *
+ * @param buffer_id buffer id
+ * @return USER 数据区指针
+ */
 BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
     BYTE *base;
@@ -424,16 +488,29 @@ BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
     return base + FC_BUFFER_USER_OFFSET;
 }
 
-// FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用）。
-// 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）；成功时恒非空。
+/**
+ * @brief buffer id → CW 基址（528B，含 META/CRC/PARITY）
+ *
+ * 前置：buffer_id 须已占用；成功时恒非空。
+ *
+ * @param buffer_id buffer id
+ * @return CW 基址
+ */
 BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
-// 返回命令中 **CW 号 == cw_index** 的 CW 的 META 指针（校验物理地址用）。
-// 按 paa_to_cw(desc->paa) 匹配，不是链走位——flat CW 掩码下两者会分叉。
+/**
+ * @brief 返回命令中 CW 号 == cw_index 的 CW 的 META 指针
+ *
+ * 按 paa_to_cw(desc->paa) 匹配，不是链走位。
+ *
+ * @param command  命令
+ * @param cw_index CW 号
+ * @return META 指针；未找到 / 无 buffer 返回 NULL
+ */
 BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
 {
     fc_descriptor_id_t did;
@@ -461,8 +538,15 @@ BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
  *   硬件 FCC 不提供「按 CW 拷贝数据」的寄存器，数据是固件 DMA 填的。
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：按 `paa_to_cw(desc->paa)` 匹配，**不是**链走位——flat CW 掩码下
-// 两者会分叉（见 fc_command.h 不变量 2）。uniform 命令下等价。
+/**
+ * @brief 返回命令中 CW 号 == cw_index 的 CW 的数据指针
+ *
+ * 按 paa_to_cw 匹配，不是链走位（flat CW 掩码下两者会分叉）。
+ *
+ * @param command  命令
+ * @param cw_index CW 号
+ * @return 数据指针；未找到 / 无 buffer 返回 NULL
+ */
 BYTE *fc_get_cmd_data_ptr(fc_command_t *command, BYTE cw_index)
 {
     fc_descriptor_id_t desc_id;
@@ -490,10 +574,14 @@ BYTE *fc_get_cmd_data_ptr(fc_command_t *command, BYTE cw_index)
     return NULL;
 }
 
-// 实现要点：**链是 CW 集合的唯一真值**（FC 内没有掩码输入，
-// 命令结构体里也没有该字段）。凡需要"掩码形状"的判定（如 RAID 的 plane 对称性）
-// 一律先在此按链重建。
-// 调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
+/**
+ * @brief 按 desc 链重建命令的 flat CW 位图
+ *
+ * 链是 CW 集合的唯一真值；须在 fc_command_release 之前调用。
+ *
+ * @param command 命令
+ * @return flat 位图（bit = plane*CW_NUM + cw）
+ */
 DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -516,14 +604,14 @@ DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
     return mask;
 }
 
-// 实现要点：**取全链**（含两个 plane）——fc_complete_from_nand 的 per-CW ECC
-// 只对 plane 0 折叠，flat 掩码下"只取 plane 0"会恒为 0；
-// desc->ecc_bits 由该函数对链上**每个** desc 填写，全链取值无损。
-// 调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
-// 实现要点：走 desc 链的**全链**（含两个 plane），空链按"非空页"处理——
-// 没有 CW 就没有证据，不能断言"没写过"（保守方向同 fc_cw_status_is_empty 的用法）。
-// EMPTY 由数据路径 Stage 1 在 ECC 解码失败后按 1 比特占比判定（fc_cw_is_blank），
-// 因此本函数只对**读命令 + 已完成的命令**有意义。
+/**
+ * @brief 命令读到的所有 CW 是否都是擦除页
+ *
+ * 空链按「非空」处理（没有 CW 就没有证据）；只对读命令 + 已完成命令有意义。
+ *
+ * @param command 命令
+ * @return true 全部 CW 都是 EMPTY；false 否则
+ */
 bool fc_get_cmd_all_cw_empty(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -547,6 +635,14 @@ bool fc_get_cmd_all_cw_empty(const fc_command_t *command)
     return (n > 0U);
 }
 
+/**
+ * @brief 命令 desc 链上最大的 ECC bit 数
+ *
+ * 须在 fc_command_release 之前调用。
+ *
+ * @param command 命令
+ * @return 最大 ECC bit 数；空链为 0
+ */
 BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -572,7 +668,12 @@ BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
  * ⑤ 查询工具
  * ══════════════════════════════════════════════════════════ */
 
-// 命令 ID → 命令指针（ID 恒为池内 ID，越界是调用者编程错误）
+/**
+ * @brief 命令 ID → 命令指针
+ *
+ * @param command_id 池内命令 ID
+ * @return 命令指针
+ */
 fc_command_t *fc_command_id_to_command(WORD command_id)
 {
     // command_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
@@ -581,7 +682,12 @@ fc_command_t *fc_command_id_to_command(WORD command_id)
     return fc_command_id_to_command_internal(&g_fc_controller, command_id);
 }
 
-// 描述符 ID → 描述符指针（ID 恒为池内 ID，越界是调用者编程错误）
+/**
+ * @brief 描述符 ID → 描述符指针
+ *
+ * @param descriptor_id 池内描述符 ID
+ * @return 描述符指针
+ */
 fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
 {
     // descriptor_id 只来自命令 desc 链（configure_descriptors 铸出），恒在池内。
@@ -589,7 +695,12 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
     return fc_descriptor_id_to_descriptor_internal(&g_fc_controller, descriptor_id);
 }
 
-// 对外入口：队列占用直接读队列计数，三池占用逐槽扫描状态表。
+/**
+ * @brief 汇总队列/三池/调度器调试状态
+ *
+ * @param out 输出
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_debug_state_get(fc_debug_state_t *out)
 {
     ASSERT(out != NULL);
@@ -630,6 +741,12 @@ fc_status_e fc_debug_state_get(fc_debug_state_t *out)
     return FC_STATUS_OK;
 }
 
+/**
+ * @brief 汇总队列与三池占用
+ *
+ * @param stats 输出
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
 {
     WORD index;
@@ -667,9 +784,11 @@ fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
     return FC_STATUS_OK;
 }
 
-// 实现要点：全部编译期常量 + 两个只读引擎名 getter，无副作用。
-// 与断言路径的 [RES] 现场行（fc_assert_context.c）互补：此处打「容量」，
-// 那里打「占用」。
+/**
+ * @brief 打印 FC 容量与拓扑（开机一次）
+ *
+ * 与断言路径的 [RES] 现场行互补：此处打容量，那里打占用。
+ */
 void fc_boot_report(void)
 {
 #if CONFIG_NAND_DMA

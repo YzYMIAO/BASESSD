@@ -1062,15 +1062,16 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] = {
  * ONFI 参数页解码（手册 Table 11）
  * ═══════════════════════════════════════════════════════════════════════ */
 
-/* --------------------------------------------------------------------
- * nand_onfi_parameter_page_decode
- *   功能：把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t（纯函数）。
- *   参数：page —— 至少 NAND_ONFI_PARAM_PAGE_SIZE 字节；info —— 输出。
- *   返回：1 = 签名是 "ONFI"；0 = 签名不符（info 仍被填满，供诊断打印）。
- *   实现要点：零 HAL / 零日志 / 零硬件 ⇒ 纯 RAM 可单测。字段偏移见
- *         onfi_1_0.h 的 NAND_ONFI_PARAM_OFF_*；多字节一律小端；
- *         model 串按器件约定去尾部空格填充（解成可比的 C 串）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t
+ *
+ * 纯函数（零 HAL / 日志 / 硬件）。字段偏移见 onfi_1_0.h 的
+ * NAND_ONFI_PARAM_OFF_*；多字节一律小端；model 串去尾部空格填充。
+ *
+ * @param page 参数页（≥ NAND_ONFI_PARAM_PAGE_SIZE 字节）
+ * @param info 输出：解码结果
+ * @return 1 签名为 "ONFI"；0 签名不符（info 仍被填满，供诊断打印）
+ */
 BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info)
 {
     BYTE i;

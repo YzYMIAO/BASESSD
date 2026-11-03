@@ -50,16 +50,23 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
  * 每事务可变状态在 nand_engine_state_t，不在 backend，故多 LUN 并发安全。 */
 static nand_fmc_instance_t g_nand_fmc_instance;
 
-/*
- * 后端访问器。
- * 同步路径 nand_fc_execute()/nand_fc_start() 与 nand_dispatch_task_load()
- * 都取这唯一后端（单 bank 拓扑下与坐标无关）。
+/**
+ * @brief 取 FMC 后端单例
+ *
+ * 同步路径与 nand_dispatch_task_load() 共用同一后端（单 bank 拓扑下与坐标无关）。
+ *
+ * @return 后端接口（handlers 为 const 表，context 指向实例内 config）
  */
 const nand_engine_backend_t *nand_fmc_backend_get(void)
 {
     return &g_nand_fmc_instance.backend;
 }
-
+/**
+ * @brief 装配 FMC 后端单例
+ *
+ * @param config FMC 窗口指针 + 时序（按值复制进实例，故生命周期只需到调用结束）
+ * @return NAND_RESULT_OK
+ */
 nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
 {
     /* 前置条件由调用者保证（nand_init 传入模块内 const config） */
@@ -71,16 +78,14 @@ nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_wait_ready
- *   功能：轮询 RB# GPIO 等待 NAND busy 结束（WAIT_READY 微指令）。
- *   参数：context —— nand_fmc_config_t*（本 handler 不使用）；
- *         uop/request/completion —— 不使用。
- *   返回：NAND_RESULT_OK（ready）/ NAND_RESULT_TIMEOUT（超时）。
- *   实现要点：tWB 已由上游 DELAY_US 保证，此处只做纯 spin-wait；
- *         轮询次数兼作超时微秒（每次 delay_us(1)，polls≥busy_timeout_us
- *         即超时）；首读即 HIGH 视为 ready（极短 busy 或无 busy）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
+ *
+ * tWB 已由上游 DELAY_US 保证，此处只做纯 spin-wait；首读即 HIGH 视为 ready。
+ *
+ * @param timing 取其 busy_timeout_us 作超时（轮询计次兼作微秒）
+ * @return NAND_RESULT_OK / NAND_RESULT_TIMEOUT
+ */
 static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
@@ -119,14 +124,12 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_command
- *   功能：写命令字节（COMMAND 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 command 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：uop->operand 即命令字节，写入 FMC 命令窗口
- *         （FMC_BASE|CMD_OFFSET，A16=1 选命令口）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写命令字节（COMMAND）
+ *
+ * @param uop operand 即命令字节
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -138,13 +141,13 @@ static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop,
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_column_0
- *   功能：写列地址低字节（COLUMN_0 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 address 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：ONFI 5 地址周期规则——列地址占 2 字节，COLUMN_0 写低字节。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写列地址低字节（COLUMN_0）
+ *
+ * ONFI 5 地址周期：列地址 2 字节，本微指令写低字节。
+ *
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -156,13 +159,11 @@ static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_column_1
- *   功能：写列地址高字节（COLUMN_1 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 address 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：ONFI 5 地址周期规则——列地址占 2 字节，COLUMN_1 写高字节。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写列地址高字节（COLUMN_1）
+ *
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -174,14 +175,12 @@ static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_row_0
- *   功能：写行地址低字节（ROW_0 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 address 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：uop->operand 作 request->row[] 的 plane 下标
- *         （Multi-Plane 时第 0/1 个 plane 的行地址分两个 ROW 段写）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写行地址低字节（ROW_0）
+ *
+ * @param uop operand 作 row[] 的 plane 下标（multi-plane 时两个 plane 分两段写）
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -192,13 +191,12 @@ static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_row_1
- *   功能：写行地址中间字节（ROW_1 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 address 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：uop->operand 作 plane 下标；取第 8~15 位。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写行地址中间字节（ROW_1，第 8~15 位）
+ *
+ * @param uop operand 作 row[] 的 plane 下标
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -209,13 +207,12 @@ static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_row_2
- *   功能：写行地址高字节（ROW_2 微指令）。
- *   参数：context —— nand_fmc_config_t*，取其 address 窗口指针。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：uop->operand 作 plane 下标；取第 16~23 位。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写行地址高字节（ROW_2，第 16~23 位）
+ *
+ * @param uop operand 作 row[] 的 plane 下标
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -226,20 +223,15 @@ static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_data_in
- *   功能：写数据到 NAND（Program 数据阶段，DATA_IN 微指令）。
- *   参数：context —— nand_fmc_config_t*；request —— 源缓冲 + 长度。
- *   返回：NAND_RESULT_OK / NOT_READY（DMA 忙，稍后重试）/
- *         INVALID_ARGUMENT（buffer 空）。
- *   实现要点：
- *     - uop->operand 作 buffer 偏移（Multi-Plane Program 第二 plane 偏移）。
- *     - DMA 路径三态：查完成→取走；查忙→NOT_READY；首次→启动 DMA。
- *       DMA 启动失败回退 PIO（abort + fall through）。
- *     - PIO 路径逐字节写 FMC 数据窗口，每字节后 __DMB() 防重排
- *       （volatile 不保证连续写顺序，写缓冲/DMA 下必须 DMB）。
- *     - 非阻塞协议：本函数可被多次调用（引擎 step 循环驱动）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 向 NAND 写数据（DATA_IN）
+ *
+ * 非阻塞：可被引擎 step 循环多次调用。DMA 启动失败回退 PIO；PIO 每字节后
+ * __DMB()，因为 volatile 不保证连续写 FMC 数据窗口的顺序。
+ *
+ * @param uop operand 作 buffer 偏移（multi-plane program 第二 plane）
+ * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY（DMA 进行中）
+ */
 static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -295,17 +287,14 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_data_out
- *   功能：从 NAND 读数据（DATA_OUT 微指令）。
- *   参数：context —— nand_fmc_config_t*；request —— 目标缓冲 + 长度。
- *   返回：NAND_RESULT_OK / NOT_READY（DMA 忙）/ INVALID_ARGUMENT。
- *   实现要点：与 nand_fmc_exec_data_in 对称——
- *     - uop->operand 作 buffer 偏移（Multi-Plane Read 第二 Plane 偏移）。
- *     - DMA 完成后必须 Invalidate D-Cache，否则 CPU 读到脏缓存
- *       （STM32H7 D-Cache 一致性，关键点）。
- *     - DMA 启动失败回退 PIO。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 从 NAND 读数据（DATA_OUT）
+ *
+ * 与 DATA_IN 对称。DMA 完成后必须 Invalidate D-Cache，否则 CPU 读到陈旧缓存。
+ *
+ * @param uop operand 作 buffer 偏移（multi-plane read 第二 plane）
+ * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY（DMA 进行中）
+ */
 static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -374,15 +363,13 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_data_out_status
- *   功能：读 70h 状态字节（DATA_OUT_STATUS 微指令）。
- *   参数：context —— nand_fmc_config_t*；completion —— 回填 nand_status。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：直读 DQ 总线一次即得状态字节，不经 buffer；
- *         状态经 completion 链回传上层。状态位含义：
- *         bit6 = READY、bit0 = FAIL。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 读 70h 状态字节（DATA_OUT_STATUS）
+ *
+ * 直读 DQ 总线写入 completion->nand_status，不经 buffer。
+ *
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
@@ -398,14 +385,13 @@ static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_check_fail
- *   功能：检查上一步读到的状态字节 FAIL 位（CHECK_FAIL 微指令）。
- *   参数：completion —— 含 nand_status（上一步 DATA_OUT_STATUS 填入）。
- *   返回：NAND_RESULT_OK（无 FAIL）/ NAND_RESULT_OPERATION_FAILED。
- *   实现要点：只查 FAIL 位（bit0），不查 READY 位——READY 由
- *         JUMP_IF_NOT_READY / WAIT_READY 阶段保证。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 检查 nand_status 的 FAIL 位（CHECK_FAIL）
+ *
+ * 只查 bit0 FAIL；READY 由 WAIT_READY / JUMP_IF_NOT_READY 保证。
+ *
+ * @return NAND_RESULT_OK / NAND_RESULT_OPERATION_FAILED
+ */
 static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
@@ -415,12 +401,14 @@ static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *u
     return ((completion->nand_status & NAND_STATUS_FAIL) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_check_fail_cache
- *   功能：cache program 状态检查——同时看当前页 FAIL（bit0）与上一页 FAILC（bit1）。
- *   实现要点：15h 完成时当前页的 FAIL 未必已反映阵列编程结果；上一页结果在 FAILC。
- *         只查 FAIL 会把中间页失败当成成功，随后末页 10h 再确认映射 = 静默坏数据。
- * -------------------------------------------------------------------- */
+/**
+ * @brief cache program 状态检查：FAIL 与上一页 FAILC 同查（CHECK_FAIL_CACHE）
+ *
+ * 只查 FAIL 会把中间页失败当成功，末页 10h 再确认映射 = 静默坏数据。
+ * 首页（CACHE_FIRST）无本批上一页，FAILC 可能是上一批残留，故只查 FAIL。
+ *
+ * @return NAND_RESULT_OK / NAND_RESULT_OPERATION_FAILED
+ */
 static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
@@ -434,13 +422,12 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
     return ((completion->nand_status & bad) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
 }
 
-/* --------------------------------------------------------------------
- * nand_fmc_exec_delay_us
- *   功能：固定微秒延时（DELAY_US 微指令）。
- *   参数：uop —— operand 即延时微秒数。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：对应 ONFI 时序参数（tWB/tWHR 等）的软件延时。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 固定微秒延时（DELAY_US，用于 tWB / tWHR 等 ONFI 时序）
+ *
+ * @param uop operand 即延时微秒数
+ * @return 恒 NAND_RESULT_OK
+ */
 static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;

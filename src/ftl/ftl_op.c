@@ -85,8 +85,11 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
 
 /* ── 2. 初始化 ── */
 
-// 全局资源只能清一次：调用顺序由 main.c 的 boot 流程保证（见 ftl_op.h）。
-// 放进逐实例 ftl_init 会抹掉其它实例在飞的登记和已设好的路由表。
+/**
+ * @brief 初始化 op 分发表、路由表与 request 索引
+ *
+ * 设备级只调一次；放进逐实例 ftl_init 会抹掉其它实例在飞的登记。
+ */
 void ftl_op_init(void)
 {
     memset(g_op_req, 0, sizeof(g_op_req));
@@ -128,9 +131,16 @@ static bool __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
     }
 }
 
-// command_id 是命令池槽位号，直接索引。每个在飞命令一条表项：op + ctx。
-// 槽位已有 pending 项时覆盖并 LOGW：旧项只可能来自未被观测的完成
-// （例如 CQ 满时 fc.c 强制置完成），属于异常但可恢复。
+/**
+ * @brief 登记一条未决 request（cmd_id → op + ctx）
+ *
+ * 重复登记是编程错误（ASSERT）；CQ 满时 fc.c 强制置完成属异常但可恢复。
+ *
+ * @param cmd_id 命令 id
+ * @param op     操作类型
+ * @param ctx    服务上下文
+ * @return FTL_OK；FTL_ERROR 重复 / 越界
+ */
 ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx)
 {
     // op / ctx 由内部调用者按 op 语义选定，违反即编程错误：debug 停机。release 下
@@ -159,9 +169,13 @@ ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx)
     return FTL_OK;
 }
 
-// 幂等：未登记直接返回。cmd_id 只来自“刚登记成功”的表项（提交/批量回滚、同步
-// 超时摘项），调用路径已保证在表内，故不需要运行期范围分支；越界是编程错误，
-// debug 由 ASSERT 停机。
+/**
+ * @brief 摘除一条 request
+ *
+ * 未登记由 debug ASSERT 停机。
+ *
+ * @param cmd_id 命令 id
+ */
 void ftl_op_req_remove(WORD cmd_id)
 {
     ASSERT(cmd_id < FTL_OP_REQ_TABLE_SIZE);
@@ -171,7 +185,13 @@ void ftl_op_req_remove(WORD cmd_id)
     g_op_req[cmd_id].pending = false;
 }
 
-// 所有未决 request（含 host IO）；用于 UT/quiesce 判断全部完成。
+/**
+ * @brief 未决 request 数（含 host IO）
+ *
+ * 用于 UT / quiesce 判断全部完成。
+ *
+ * @return 未决数
+ */
 WORD ftl_op_req_count(void)
 {
     WORD count = 0U;
@@ -189,8 +209,13 @@ WORD ftl_op_req_count(void)
 
 /* ── 4. 实例路由 ── */
 
-// 实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让
-// g_op_route 成为唯一持有者，避免悬垂。
+/**
+ * @brief 绑定 die 路由表
+ *
+ * 绑定后 g_op_route 成为唯一持有者，避免悬垂。
+ *
+ * @param route die → 实例表
+ */
 void ftl_op_route_set(ftl_ctx_t *const *route)
 {
     for (BYTE die = 0U; die < FTL_DIE_MAX; die++)
@@ -199,11 +224,16 @@ void ftl_op_route_set(ftl_ctx_t *const *route)
     }
 }
 
-// 越界坐标由 chcelun_2_die() 返回 FTL_DIE_INVALID；稀疏空洞同样是 INVALID。
-// 两者都按“无路由”返回 NULL —— 这是合法运行期状态，由被调方处理。
-// route_set 漏调同样返回 NULL；本函数不断言 route 已设置，那项判据留给 boot 期
-// 契约自检（ftl_contract_audit）。
-// 不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
+/**
+ * @brief 按 ch/ce/lun 取实例
+ *
+ * 不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
+ *
+ * @param ch  目标 ch
+ * @param ce  目标 ce
+ * @param lun 目标 lun
+ * @return 实例；NULL = 未绑定
+ */
 ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
     const BYTE die = chcelun_2_die(ch, ce, lun);
@@ -220,7 +250,13 @@ ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
     return g_op_route[die];
 }
 
-// 路由表由本模块私有持有；boot 自检直接读 g_op_route，不对外暴露 die 访问器。
+/**
+ * @brief 路由表自检（boot 用）
+ *
+ * 路由表由本模块私有持有；不对外暴露 die 访问器。
+ *
+ * @return true 一致；false 不一致
+ */
 bool ftl_op_route_verify(void)
 {
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -237,7 +273,14 @@ bool ftl_op_route_verify(void)
     return true;
 }
 
-// 实现要点：全局 region 的 die 坐标 = region % DIE_MAX（与 lba_2_die 同一公式）。
+/**
+ * @brief 按全局 region 取 owner 实例
+ *
+ * die 坐标 = region % DIE_MAX（与 lba_2_die 同一公式）。
+ *
+ * @param global_region 全局 region
+ * @return 实例；NULL = 未绑定
+ */
 ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
 {
     ASSERT(DIE_MAX != 0U);
@@ -245,7 +288,13 @@ ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
     return g_op_route[global_region % DIE_MAX];
 }
 
-// 任一实例有 cache 序列未收尾（active 或 draining）；deadline 挂起判据必须把 draining 算进来。
+/**
+ * @brief 任一实例是否有 cache 序列未收尾（active 或 draining）
+ *
+ * deadline 挂起判据必须把 draining 算进来。
+ *
+ * @return true 有未收尾序列
+ */
 bool ftl_op_cache_seq_active(void)
 {
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -263,10 +312,13 @@ bool ftl_op_cache_seq_active(void)
     return false;
 }
 
-// 除 cache 序列外还要看主机组是否在飞：主机持续提交时 FC 命令池/SQ 被占满是
-// 预期（不是卡死）。若每 10 ms 把 Checkpoint / L2P 写回 / 迁移打回去，元数据
-// 永远排不上队，进而把写确认拖成 host 写失败（RISK-IF-13 / RISK-HOST-05）。
-// 主机空闲后本判据自动为假，真正的卡死仍会被 deadline 暴露。
+/**
+ * @brief 后台提交是否应挂起 deadline
+ *
+ * 主机空闲后本判据自动为假；真正的卡死仍会被 deadline 暴露。
+ *
+ * @return true 应挂起
+ */
 bool ftl_op_bg_submit_deferred(void)
 {
     if (ftl_op_cache_seq_active() == true)
@@ -334,9 +386,16 @@ static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
     return false;
 }
 
-// 三步顺序有硬约束：门控先于登记（被拒的命令不能留下 request 表项），登记先于下发
-// （完成可能在同一轮 drain 就被派发）。fc_submit 失败只回滚登记：命令仍归调用者，
-// 属瞬态背压，返回 FTL_AGAIN 让调用者下轮重试。
+/**
+ * @brief 提交一条命令并登记 request
+ *
+ * 池满 / 完成表满属瞬态背压，返回 FTL_AGAIN 让调用者下轮重试。
+ *
+ * @param cmd 命令
+ * @param op  操作类型
+ * @param ctx 服务上下文
+ * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 编程错误
+ */
 ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     // cmd 由调用者从 fc_command_alloc() 取得（池外指针 ftl_cmd_id() 会给
@@ -368,9 +427,17 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 
 /* ── 批量提交（cache program 批次）── */
 
-// 门控按整批先判（任一条被拒即整批不进，此时尚无登记项）；随后逐条登记，登记失败
-// 回滚已登记项。fc_submit_batch 保证整批原子入队：QUEUE_FULL 是瞬态资源，其余是
-// 链契约违反等编程错误，永久失败。
+/**
+ * @brief 批量提交同 op 的命令链
+ *
+ * 链契约违反等编程错误属永久失败。
+ *
+ * @param cmds 命令数组
+ * @param n    条数
+ * @param op   操作类型
+ * @param ctx  服务上下文
+ * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 编程错误
+ */
 ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_e op, void *ctx)
 {
     ASSERT(cmds != NULL);
@@ -423,15 +490,23 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
 
 /* ── 6. 派发 / 排空 ── */
 
-// 深度非零 = 调用栈上有完成服务函数。服务函数据此拒绝再跑完成泵（ftl_sync_* 的
-// drain）：嵌套派发会在外层服务函数尚未返回时重入同一 job 状态机。
+/**
+ * @brief 当前是否在完成派发中
+ *
+ * 嵌套派发会在外层服务函数尚未返回时重入同一 job 状态机。
+ *
+ * @return true 正在派发
+ */
 bool ftl_op_is_in_dispatch(void)
 {
     return (g_dispatch_depth != 0U);
 }
 
-// 循环到抽干为止：服务函数可能在本轮里提交新命令并立即完成，只看进入时的 CQ
-// 深度会漏掉这些完成。
+/**
+ * @brief 从 CQ 取完成并按 request 分派
+ *
+ * 每轮调用；深度会漏掉这些完成。
+ */
 void ftl_op_drain(void)
 {
     fc_command_status_t completion;

@@ -10,7 +10,16 @@
 #include "fc_scheduler.h"
 
 #include "assertion.h"
-
+/**
+ * @brief 绑定调度器状态与 SQ / HSQ 队列
+ *
+ * 命令选择不在本文件：由 fc_poll_fill 按 LUN 保序、HSQ 优先扫描提交。
+ *
+ * @param scheduler 调度器状态
+ * @param sq        普通提交队列
+ * @param hsq       高优先级提交队列
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
 {
     ASSERT(scheduler != NULL);

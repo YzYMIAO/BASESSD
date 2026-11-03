@@ -105,7 +105,15 @@ static DWORD md_block_page_to_pba(const md_dir_cache_t *dir, WORD gblock, BYTE p
 
 /* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
 
-// 登记一个待回收块（幂等：已置位返回 false；越界块号不入图）。
+/**
+ * @brief 登记一个待回收块（幂等）
+ *
+ * 已置位返回 false；越界块号不入图。
+ *
+ * @param dir Directory
+ * @param g   全局块号
+ * @return true 本次新登记；false 已登记 / 越界
+ */
 bool md_reclaim_mark(md_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
@@ -182,7 +190,13 @@ static void md_reclaim_clear(md_dir_cache_t *dir, WORD g)
     }
 }
 
-// 清空待回收位图、计数与扫描游标（格式化 / 目录重建后调用）。
+/**
+ * @brief 清空待回收位图、计数与扫描游标
+ *
+ * 格式化 / 目录重建后调用。
+ *
+ * @param dir Directory
+ */
 void md_reclaim_reset(md_dir_cache_t *dir)
 {
     memset(dir->reclaim.bitmap, 0, sizeof(dir->reclaim.bitmap));
@@ -190,7 +204,14 @@ void md_reclaim_reset(md_dir_cache_t *dir)
     dir->reclaim.scan  = 0U;
 }
 
-// 全盘重扫：把所有可回收日志块登记进位图（开机 / 目录重建后）。
+/**
+ * @brief 全盘重扫：把所有可回收日志块登记进位图
+ *
+ * 开机 / 目录重建后调用。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ */
 void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
@@ -203,7 +224,15 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
     }
 }
 
-// 从当前写块取一个空槽：plane 无当前块或块已满返回 INVALID，取到即推进写指针。
+/**
+ * @brief 从当前写块取一个空槽
+ *
+ * plane 无当前块或块已满返回 INVALID；取到即推进写指针。
+ *
+ * @param dir   Directory
+ * @param plane 目标 plane
+ * @return 槽 PBA；NAND_PBA_INVALID = 无可用槽
+ */
 DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
 {
     if ((plane >= PLANE_NUM) || (dir->cur.valid[plane] == false) || (dir->cur.page[plane] >= PAGES_PER_BLOCK))
@@ -218,7 +247,13 @@ DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
     return md_block_page_to_pba(dir, dir->cur.block[plane], page);
 }
 
-// 复位 job 状态：保留单调进度与最近错误，其余清零并重写「无」哨兵。
+/**
+ * @brief 复位整理 job 状态
+ *
+ * 保留单调进度与最近错误，其余清零并重写「无」哨兵。
+ *
+ * @param dir Directory
+ */
 void md_handle_reset(md_dir_cache_t *dir)
 {
     // reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
@@ -488,7 +523,7 @@ static ftl_status_e md_read_submit(md_dir_cache_t *dir, DWORD addr)
  *
  * @return victim 的 gblock；无候选返回 UINT16_MAX。
  *
- * @note 实现要点：零活块**不在此列**——它们已登记在 reclaim_pending，由 RECLAIM 阶段
+ * @note 零活块**不在此列**——它们已登记在 reclaim_pending，由 RECLAIM 阶段
  * 直接擦除归还，无需搬移。平手取块号最小者：结果确定（跨复位可复现），
  * 且先分配的块通常收的是更早、更可能变冷的数据。
  */
@@ -542,7 +577,7 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
  *
  * @note 起不动时 phase 留在 IDLE，由调用者决定是否换块。
  *
- * @note 实现要点：**无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
+ * @note **无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
  * 又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
  * 空槽预算在此**重算**（不在 append_slot 置位时算）：置位到本函数之间可能
  * 又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_page[victim 的 plane] 核才准。
@@ -613,7 +648,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
  *         MD_COMPACT_BACKPRESSURE 背压未提交（下轮重试）
  *         MD_COMPACT_FAILED       硬失败（调用者中止）
  *
- * @note 实现要点：游标先走后命中，提交失败再把游标退回来（重试同一 region）。
+ * @note 游标先走后命中，提交失败再把游标退回来（重试同一 region）。
  * 搬移走的是**裸页拷贝**（region 页无头，就是 L2P_REGION_SIZE 字节的 entries
  * 数组，与 l2p_cache 的读写口径逐字节一致）——不经过 l2p_cache，故不触发
  * "写→evict→flush→又要块"的递归。
@@ -722,7 +757,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
  * @return true = 已切到下一个 victim（phase=CP_READ）
  *         false = 没有可装下的 victim。
  *
- * @note 实现要点：victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
+ * @note victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
  * 更大的更装不下 ⇒ 直接结束本轮压缩，交给目录检查点/回收。
  * 一次新生块可退多个稀疏块（每个 victim 约 1–2 个活 region），这是把
  * live_log_blocks 从上千块收敛到理想值的关键（RISK-MD-07）。
@@ -798,7 +833,7 @@ static bool md_reclaim_is_eager(const md_dir_cache_t *dir, const alc_t *alloc)
  *
  * @param dir Directory（allocator 走已绑定的 dir->alloc 端口）
  *
- * @note 实现要点：`for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
+ * @note `for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
  * 后 break（纯 RAM 阶段）。**不允许既不推进也不返回**——那会死循环。
  */
 static void md_handle_step(md_dir_cache_t *dir)
@@ -1128,7 +1163,13 @@ static void md_handle_step(md_dir_cache_t *dir)
 
 /* ── 模块 handle（typed 入口） ── */
 
-// 每轮入口：推进整理状态机一次，再填状态上报。
+/**
+ * @brief 元数据整理 job 每轮入口
+ *
+ * 推进整理状态机一次，再填状态上报。
+ *
+ * @param dir Directory
+ */
 void md_handle(md_dir_cache_t *dir)
 {
     md_handle_step(dir);
@@ -1336,8 +1377,15 @@ static void md_cp_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_comma
     j->phase = MD_JOB_DONE;
 }
 
-// 实现要点：**本函数不推进状态机**（见本文件开头的说明）：只把 phase 改到"下一步该
-// 干什么"，由下一轮 md_handle 续跑。
+/**
+ * @brief 元数据整理命令完成服务
+ *
+ * 只记结果 + 改 phase；不推进状态机（阶段里有同步原语，完成泵内会嵌套泵）。
+ *
+ * @param ftl        实例
+ * @param completion FC 完成状态
+ * @param ctx        md_dir_cache_t *
+ */
 void ftl_metadata_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。

@@ -32,16 +32,26 @@
 
 #include <stddef.h>
 
-// 实现要点：- 时钟使能、HAL 配置、外设应答自检都在平台层 crc_init() 内；
-// 自检不过一律 ASSERT，不再有「失败静默继续」的降级路径。
+/**
+ * @brief 初始化硬件 CRC 外设
+ *
+ * 时钟使能、HAL 配置与外设应答自检都在平台层 crc_init() 内；自检不过
+ * 一律 ASSERT，不再有「失败静默继续」的降级路径。
+ */
 void fc_crc_init(void)
 {
     crc_init();
 }
 
-// 实现要点：- 平台层每次先 RESET 引擎回 INIT 值，保证独立计算。
-// - 对齐是硬性前置条件：HAL 的 WORDS 分支直接按 DWORD* 解引用。
-// 实测三个调用点（buffer 池 +8、测试夹具两块 malloc 缓冲）全部满足。
+/**
+ * @brief 计算 CW 的 512B USER 数据 CRC-32
+ *
+ * 平台层每次先 RESET 引擎回 INIT 值，保证独立计算；user_data 须 4 字节对齐
+ * （HAL 的 WORDS 分支直接按 DWORD* 解引用）。
+ *
+ * @param user_data USER 区首地址
+ * @return CRC-32
+ */
 DWORD fc_crc_compute(const BYTE *user_data)
 {
     // user_data 前置条件由调用者保证
@@ -50,7 +60,13 @@ DWORD fc_crc_compute(const BYTE *user_data)
     return crc_compute(user_data, FC_CRC_USER_SIZE);
 }
 
-// 实现要点：复用 fc_crc_compute 重算，按是否等于 stored_crc 映射为 FC_CRC_RESULT_*。
+/**
+ * @brief 校验 USER 数据 CRC 是否等于存储值
+ *
+ * @param user_data  USER 区首地址
+ * @param stored_crc 读回的 CRC 字段
+ * @return FC_CRC_RESULT_OK / FC_CRC_RESULT_ERROR
+ */
 BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc)
 {
     // user_data 前置条件由调用者保证

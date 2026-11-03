@@ -64,17 +64,14 @@ BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] NAND_
  * 辅助函数
  * ====================================================================== */
 
-/* --------------------------------------------------------------------
- * nand_dispatch_completion_init
- *   功能：初始化一个 completion 结构（全清零 + 哨兵值）。
- *   参数：completion —— 目标；command_id —— FC 关联键。
- *   返回：无。
- *   实现要点：
- *     - *completion = {0} 复合字面量整体清零。
- *     - failed_descriptor_id 置 FC_DESCRIPTOR_ID_INVALID。
- *     - cw_status 用 CW_TOTAL_MAX（=8，单/多 plane 最大值）全量预置
- *       FC_CW_STATUS_UNUSED，避免脏数据（掩码内的格稍后由 completion handler 覆写）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 初始化一个 completion 结构（全清零 + 哨兵）
+ *
+ * cw_status 全量预置 FC_CW_STATUS_UNUSED，避免脏数据。
+ *
+ * @param completion 目标
+ * @param command_id FC 关联键
+ */
 static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, WORD command_id)
 {
     BYTE i;
@@ -88,17 +85,13 @@ static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion
     }
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_task_complete
- *   功能：统一收尾路径——写 execution_status/nand_status 后按 operation
- *         分派到对应 completion 策略 handler。
- *   参数：task —— 完成任务；result —— 执行结果；nand_completion —— NAND 完成。
- *   返回：无。
- *   实现要点：经 g_nand_dispatch_completion_table[operation] 分派
- *        （completion_per_cw / all_cws / multi_plane，见 nand_dispatch_tables.c）。
- *         注意 poll 中多处先改写 task->operation 再 complete，handler 按
- *         最新 operation 匹配（如 LOAD→WAIT 切换）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 统一收尾：写状态后按 operation 分派到 completion 策略 handler
+ *
+ * @param task           完成任务
+ * @param result         执行结果
+ * @param nand_completion NAND 完成
+ */
 static void nand_dispatch_task_complete(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
     task->completion.execution_status = result;
@@ -108,22 +101,14 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, BYTE result,
     g_nand_dispatch_completion_table[task->operation](task, result, nand_completion);
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_task_load
- *   功能：把 FC 预解析的 request 搬运到 LUN FIFO 的 task slot。
- *   参数：task —— 目标 slot；request —— 预解析请求。
- *   返回：无。
- *   实现要点：
- *     - 复位 started=0（poll 的启动判断依赖 started==0）；cw_index 置为掩码最低位。
- *     - Phase V：绑定 per-LUN backend，并一次性绑定引擎上下文三指针——
- *       backend/request/completion 随 transaction 固定（指向 transaction 自己的
- *       存储，地址不变），nand_engine_start 只收 uops/timing。
- *     - cw_buffers 按 **flat 绝对 CW 号 n** 逐格搬运：只搬 cw_bitmap 里的位。
- *       ⚠ 掩码外的格**不清零**（本函数不做整体 memset，task slot 会被 FIFO 复用）——
- *         它们保持上一次占用该 slot 的残留指针。"掩码外无有效 buffer"由**消费点**保证：
- *         所有取 buffer 的循环都按 cw_bitmap 走，空掩码（擦除）的消费点不读 cw_buffers。
- *       plane_paa 无条件照拷 PLANE_NUM 格。plane 字段必须无条件赋值。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 把 FC 预解析 request 搬到 LUN FIFO 的 task slot
+ *
+ * 只搬掩码内的 cw_buffers；掩码外保持 slot 残留（消费点保证不读）。
+ *
+ * @param task    目标 slot
+ * @param request 预解析请求
+ */
 static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispatch_request_t *request)
 {
     BYTE n;
@@ -165,7 +150,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
      * "该 desc 的 plane/cw 位是 n"是同一条表达式。真正可能错位的情形（desc plane 位
      * 与 command->paa 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
      * 校验（越段 → ASSERT）拦下，不会走到这里。
-     * ⚠ 擦除（v28 起）位图为空 ⇒ 上面这个循环一格都不搬，cw_buffers[] 保持上一次占用
+     * ⚠ 擦除位图为空 ⇒ 上面这个循环一格都不搬，cw_buffers[] 保持上一次占用
      * 该 slot 的残留值。擦除路径不读 cw_buffers[]（req_erase 只用 plane_paa），故安全；
      * 但"空掩码 = 无 buffer 可读"这条契约**依赖消费点真的不读**——新增无数据 op 时注意。 */
 }
@@ -174,15 +159,11 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
  * 初始化 / 就绪
  * ====================================================================== */
 
-/* --------------------------------------------------------------------
- * nand_dispatch_init
- *   功能：清零软件调度状态。
- *   参数：无。
- *   返回：恒 NAND_RESULT_OK。
- *   实现要点：仅清软件状态，不碰 FMC 硬件（见 nand_dispatch.h）。
- *   调用链：fc_init_internal() → 本函数。因为纯 memset，FC 可以先于
- *          nand_init()（碰 FMC 硬件）执行，见 main.c 的初始化级联。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 清零软件调度状态（不碰 FMC 硬件）
+ *
+ * @return 恒 NAND_RESULT_OK
+ */
 nand_result_e nand_dispatch_init(void)
 {
     memset(g_nand_dispatch_queues, 0, sizeof(g_nand_dispatch_queues));
@@ -193,38 +174,34 @@ nand_result_e nand_dispatch_init(void)
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_set_armed
- *   功能：置/清异步路径放行闩锁。
- *   参数：armed —— 非 0 放行。
- *   返回：无。
- *   实现要点：归一化到 0/1；仅在 nand_dispatch_enqueue() 一处检查，poll 不检查。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 置/清异步路径放行闩锁（归一化到 0/1）
+ *
+ * @param armed 非 0 放行
+ */
 void nand_dispatch_set_armed(BYTE armed)
 {
     g_nand_dispatch_armed = (armed != 0U) ? 1U : 0U;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_is_armed
- *   功能：查询异步路径放行闩锁。
- *   返回：1 = 已放行；0 = 未放行（初始化阶段）。
- *   实现要点：与 set_armed 归一化语义一致，恒返回 0/1；
- *         供 nand_fc_execute 的"仅初始化可调"契约断言使用。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 查询异步路径放行闩锁
+ *
+ * @return 1 已放行；0 未放行
+ */
 BYTE nand_dispatch_is_armed(void)
 {
     return g_nand_dispatch_armed;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_lun_free
- *   功能：查询目标 LUN FIFO 的剩余槽数。
- *   参数：ch/ce/lun —— 目标。
- *   返回：剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- *   实现要点：FC 填充轮次靠它判断能否放下整条链（need ≤ free 才下发）。
- *         ch/ce/lun 由调用者保证在界内（唯一调用者 fc_poll_fill 调用前已断言）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 目标 LUN FIFO 的剩余槽数
+ *
+ * @param ch  目标 ch
+ * @param ce  目标 ce
+ * @param lun 目标 lun
+ * @return 剩余槽数
+ */
 BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
 {
     /* 唯一调用者是 fc_poll_fill，且调用前已 ASSERT 过 ch/ce/lun（同源值）。
@@ -233,12 +210,28 @@ BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
     return (NAND_DISPATCH_CHAIN_DEPTH - g_nand_dispatch_queues[ch][ce][lun].count);
 }
 
+/**
+ * @brief 目标 LUN FIFO 的占用槽数
+ *
+ * @param ch  目标 ch
+ * @param ce  目标 ce
+ * @param lun 目标 lun
+ * @return 占用槽数
+ */
 BYTE nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return (BYTE)g_nand_dispatch_queues[ch][ce][lun].count;
 }
 
+/**
+ * @brief 目标 LUN 的相位机当前相位
+ *
+ * @param ch  目标 ch
+ * @param ce  目标 ce
+ * @param lun 目标 lun
+ * @return 相位（LUN_PHASE_*）
+ */
 BYTE nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
@@ -254,18 +247,15 @@ BYTE nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun)
  *   - 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
  * ====================================================================== */
 
-/* --------------------------------------------------------------------
- * nand_dispatch_enqueue
- *   功能：把一批（1..NAND_DISPATCH_CHAIN_DEPTH）命令按 room 追加到 LUN FIFO。
- *   参数：requests —— 命令数组（同一 ch/ce/lun）；count —— 批大小。
- *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（剩余深度不足整批，无副作用）。
- *   实现要点：
- *     - 放行闩锁在此检查：单命令与整链共用本漏斗，避免两入口再分叉。
- *     - 空间原子检查用 (count+queue->count) 无符号比较；
- *       count≤4、queue->count≤4，无溢出风险。
- *     - 逐槽 nand_dispatch_task_load() 到 tasks[(head+count+i)%DEPTH]；
- *       全部预加载完成后才提交 count（poll 不会看到半挂载的批）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 把一批命令按 room 原子追加到 LUN FIFO
+ *
+ * 放行闩锁在此检查；剩余深度不足整批则整体拒收、无副作用。
+ *
+ * @param requests 命令数组（同 ch/ce/lun）
+ * @param count    批大小
+ * @return OK / INVALID_ARGUMENT 未放行 / NOT_READY 深度不足
+ */
 static nand_result_e nand_dispatch_enqueue(const nand_dispatch_request_t *requests, BYTE count)
 {
     nand_dispatch_lun_queue_t *queue;
@@ -310,25 +300,24 @@ static nand_result_e nand_dispatch_enqueue(const nand_dispatch_request_t *reques
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_submit
- *   功能：单命令入队（非阻塞登记）。
- *   参数：request —— 预解析的单个命令请求。
- *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（FIFO 满）。
- *   实现要点：仅转发 nand_dispatch_enqueue（放行闩锁与 room 检查都在那里）；
- *         实际执行在后续 poll。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 单命令入队（非阻塞登记）
+ *
+ * @param request 预解析请求
+ * @return OK / INVALID_ARGUMENT / NOT_READY
+ */
 nand_result_e nand_dispatch_submit(const nand_dispatch_request_t *request)
 {
     return nand_dispatch_enqueue(request, 1U);
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_submit_chain
- *   功能：整链原子入队（多命令按序执行）。
- *   参数：requests —— 命令数组；count —— 链长（1..NAND_DISPATCH_CHAIN_DEPTH）。
- *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（剩余深度不足整链，无副作用）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 整链原子入队
+ *
+ * @param requests 命令数组
+ * @param count    链长
+ * @return OK / INVALID_ARGUMENT / NOT_READY
+ */
 nand_result_e nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count)
 {
     return nand_dispatch_enqueue(requests, count);
@@ -392,16 +381,14 @@ typedef struct
     BYTE                        result;
 } nand_dispatch_lun_ctx_t;
 
-/* --------------------------------------------------------------------
- * nand_dispatch_task_fc_start
- *   功能：发起异步 ONFI 事务并置初始相位。
- *   参数：queue —— 所属 LUN FIFO；task —— 目标任务；fc_result —— 输出 nand_fc_start 返回码。
- *   返回：NAND_DISPATCH_START_ASYNC / NAND_DISPATCH_START_SYNC。
- *   实现要点：
- *     - 相位按操作类型判定：ISSUE 型置 LUN_PHASE_ISSUE，其余（WAIT/FETCH/原子）置 FETCH。
- *       ISSUED 块的 pair_op 目标必为 WAIT/FETCH 型，故此处统一判定与"固定置 FETCH"等价。
- *     - 相位在 NOT_READY 判定之前提交——下一轮路由依赖它。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 发起异步 ONFI 事务并置初始相位
+ *
+ * @param queue     所属 LUN FIFO
+ * @param task      目标任务
+ * @param fc_result 输出：nand_fc_start 返回码
+ * @return ASYNC / SYNC
+ */
 static nand_dispatch_start_outcome_t nand_dispatch_task_fc_start(nand_dispatch_lun_queue_t *queue, nand_dispatch_task_t *task, BYTE *fc_result)
 {
     BYTE result;
@@ -420,15 +407,14 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_fc_start(nand_dispatch_l
     return (result == NAND_RESULT_NOT_READY) ? NAND_DISPATCH_START_ASYNC : NAND_DISPATCH_START_SYNC;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_task_start
- *   功能：构建 request + 发起事务（命令启动的唯一入口，含日志点）。
- *   参数：queue —— 所属 LUN FIFO；task —— 目标任务；fc_result —— 输出 nand_fc_start 返回码。
- *   返回：ASYNC / SYNC。
- *   实现要点：日志点必须夹在"构建 request"与"nand_fc_start"之间，
- *         故 build_request 与 fc_start 在同一函数内串联，不拆开。
- *         req_table handler 无返回码（构建不存在失败路径），故此处直接接续。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 构建 request 并发起事务（命令启动唯一入口，含日志点）
+ *
+ * @param queue     所属 LUN FIFO
+ * @param task      目标任务
+ * @param fc_result 输出：nand_fc_start 返回码
+ * @return ASYNC / SYNC
+ */
 static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_queue_t *queue, nand_dispatch_task_t *task, BYTE *fc_result)
 {
     g_nand_dispatch_req_table[task->operation](task);
@@ -438,19 +424,12 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
     return nand_dispatch_task_fc_start(queue, task, fc_result);
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_issued_advance
- *   功能：LUN_PHASE_ISSUED 推进——等最短忙期到点，启动配对的 WAIT/FETCH。
- *   参数：ctx —— 单 LUN 上下文。
- *   返回：WAIT（忙期未到或启动异步）/ DONE（已同步完成，nand_completion 有效）。
- *   实现要点：
- *     - min_busy_us = tR(38)/tPROG(700)/tBERS(5000)，带余量的典型值。
- *     - 到点后切配对 OP（LOAD↔WAIT / ISSUE↔WAIT）；原子 OP 的 pair_op==自身，
- *       跳过不切换。
- *     - **ISSUE 段失败立即短路**：不再发配对 WAIT，直接把失败结果交回驱动路径，
- *       让 cw_chain 以非 OK 收尾。
- *     - 同步完成时相位已是 FETCH，调用方直接进入完成处理链。
- * -------------------------------------------------------------------- */
+/**
+ * @brief ISSUED 相位推进：等最短忙期到点，启动配对的 WAIT/FETCH
+ *
+ * @param ctx 单 LUN 上下文
+ * @return WAIT / DONE（nand_completion 有效）
+ */
 static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
@@ -492,19 +471,12 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
     return NAND_DISPATCH_LUN_DONE;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_lun_drive
- *   功能：Per-LUN FSM 单步——启动队头 pre-loaded 命令或推进已启动事务，
- *         并处理 ISSUE 段完成 → ISSUED 的相位切换。
- *   参数：ctx —— 单 LUN 上下文（result / nand_completion 就地更新）。
- *   返回：WAIT（本轮无进展）/ DONE（已产出 result）。
- *   实现要点：
- *     - started==0：submit 已预加载但未启动，走 task_start。
- *     - started!=0：transaction.engine.active 为 0 说明命令已在 start() 中同步
- *       完成（如 FETCH WAIT_READY 已 ready），直接取已存的 execution_status，
- *       不再 step（nand_fc_step 对 active==0 会返回 INVALID_ARGUMENT）。
- *     - ISSUE 段完成 → task_complete + 转 ISSUED + 记 µs 起点，不报完成。
- * -------------------------------------------------------------------- */
+/**
+ * @brief Per-LUN FSM 单步：启动或推进队头事务
+ *
+ * @param ctx 单 LUN 上下文（result / nand_completion 就地更新）
+ * @return WAIT / DONE
+ */
 static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task = &ctx->queue->tasks[ctx->queue->head];
@@ -550,52 +522,34 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
     return NAND_DISPATCH_LUN_DONE;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_is_load_complete_op / nand_dispatch_is_fetch_op
- *   功能：CW 链的 op 分类（决定链如何推进）。
- *   参数：operation —— OP_*。
- *   返回：1 = 是；0 = 否。
- *   实现要点：
- *     - load-complete：页已加载进 NAND 页缓冲、自身不输出数据；完成后从掩码
- *       最低位开始逐 CW 取数。命中两类：
- *         · WITHOUT_DATA_OUT（LUN=1 的原子加载路径，含等待 tR）
- *         · OP_READ_PAGE_WAIT（LUN>1 的 Phase V：LOAD ISSUE 发完后由 WAIT 收尾）
- *     - fetch：从页缓冲按列地址取单个 CW；每完成一个推进一个置位。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 是否为「页已加载进页缓冲」的 op
+ *
+ * @param operation OP_*
+ * @return 1 是；0 否
+ */
 static BYTE nand_dispatch_is_load_complete_op(BYTE operation)
 {
     return ((operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) || (operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT) || (operation == OP_READ_PAGE_WAIT)) ? 1U : 0U;
 }
 
+/**
+ * @brief 是否为「从页缓冲逐 CW 取数」的 op
+ *
+ * @param operation OP_*
+ * @return 1 是；0 否
+ */
 static BYTE nand_dispatch_is_fetch_op(BYTE operation)
 {
     return ((operation == OP_RANDOM_DATA_READ) || (operation == OP_RANDOM_DATA_READ_MULTI_PLANE)) ? 1U : 0U;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_task_cw_chain
- *   功能：CW 级 chaining——「加载进页缓冲 + 逐 CW 取数」的链式推进。
- *   参数：ctx —— 单 LUN 上下文。
- *   返回：CW_ASYNC（下一 CW 异步启动，本轮到此为止）/ CW_DONE。
- *   实现要点：
- *     - 每步先 task_complete，再判断是否可续读。
- *     - **页已加载 op**（WITHOUT_DATA_OUT 两种 / Phase V 的 READ_PAGE_WAIT）
- *       完成后从掩码最低位起发取数 op；失败则链在此终止
- *       （completion_load 已把失败刷满全部槽位）。
- *     - **取数 op** 每完成一个推进到掩码的下一个置位，直到链尾。
- *     - **旧语义 op**（WITH_DATA_OUT 普通读 / OTP 读）：掩码最低位那个 CW 已由
- *       DATA_OUT 取回，其余逐 CW 随机读——保留原行为（FC 已把普通读转成加载型，
- *       此路只剩直接下发场景）。
- *     - 取数 op 按 plane 选：单 plane → OP_RANDOM_DATA_READ（05h-列-E0h）；
- *       多 plane → OP_RANDOM_DATA_READ_MULTI_PLANE（06h-列-行-E0h，行地址带 plane 位）。
- *     - 推进完全在 **flat CW 掩码**上进行（nand_dispatch_cw_next），不再有 plane-major
- *       槽位、也不再有槽位→(plane, CW) 的换算：n / CW_NUM = plane，n % CW_NUM = CW 号。
- *     - 列地址 = CW 号 × CW_SIZE；行地址取 plane_paa[n / CW_NUM]。
- *     - 链内 start 的错误码仍走完成路径，只有 NOT_READY 才中止本轮。
+/**
+ * @brief CW 级链式推进：加载进页缓冲后逐 CW 取数
  *
- * 注意：本函数是**命令内**多 CW 的推进，与 FC 侧"命令链"（多条命令）无关；
- *       命令链在 NAND 侧只是 FIFO 里的连续槽。
- * -------------------------------------------------------------------- */
+ * @param ctx 单 LUN 上下文
+ * @return CW_ASYNC / CW_DONE
+ */
 static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
@@ -668,19 +622,13 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
     return (result == NAND_RESULT_NOT_READY) ? NAND_DISPATCH_CW_ASYNC : NAND_DISPATCH_CW_DONE;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_scatter_page_buffer
- *   功能：把页缓冲的整页数据拆回各 CW buffer。
- *   参数：task —— 已完成任务（自带 ch/ce/lun，定位页缓冲）。
- *   返回：无。
- *   实现要点：两类操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
- *     - 单 plane Cache 读（START_SEQ/SEQ/RANDOM/LAST）：offset = CW 号 × CW_SIZE。
- *     - 双 plane cache 读（START_SEQ_MP/SEQ_MP/LAST_MP）与 Multi-Plane
- *       WITH_DATA_OUT：offset = plane × PAGE_SIZE + CW 号 × CW_SIZE。
- *     **遍历只走掩码里的置位**：plane = n / CW_NUM、CW 号 = n % CW_NUM，
- *     不再有独立的槽位号或 PAA 里的 CW 位。
- *     页缓冲按 (ch, ce, lun) 各持一块，故索引一律取自 task 自身。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 把页缓冲整页数据拆回各 CW buffer
+ *
+ * 只遍历掩码内的置位；单 plane / 双 plane 的 offset 规则不同。
+ *
+ * @param task 已完成任务
+ */
 static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
 {
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -707,22 +655,12 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     }
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_lun_step
- *   功能：Per-LUN FSM 单步——推进队头命令，完成即回填 completion 并出队。
- *   参数：ctx —— 单 LUN 上下文。
- *   返回：WAIT（本轮无进展，调用方看下一 LUN）/ DONE（队头命令完成，*completion
- *         已回填且已出队）。
- *   实现要点：
- *     - ISSUED 块只在进入驱动前判一次（与原实现一致）：先等最短忙期。
- *       issued_advance 返回 DONE 时相位已是 FETCH，落到下方驱动路径收尾。
- *     - 返回 WAIT 的出口必须已提交全部持久状态：
- *       ISSUED 忙期未到 / 配对启动异步 / started==0 首次启动异步 / step 异步 /
- *       ISSUE 段完成转 ISSUED / CW 链续读异步。
- *     - 完成即出队（head 前移、count 递减、相位复位 IDLE）。
- *       每槽 = 一条命令 = 一份 completion——链中间命令的状态不再被吞掉。
- *     - 本函数只管 LUN 自身的执行/簿记；跨通道的扫描游标由调用方 poll 维护。
- * -------------------------------------------------------------------- */
+/**
+ * @brief Per-LUN FSM 单步：推进队头命令，完成即回填并出队
+ *
+ * @param ctx 单 LUN 上下文
+ * @return WAIT / DONE
+ */
 static nand_dispatch_lun_outcome_t nand_dispatch_lun_step(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t       *task;
@@ -761,21 +699,15 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_step(nand_dispatch_lun_ctx_
     return NAND_DISPATCH_LUN_DONE;
 }
 
-/* --------------------------------------------------------------------
- * nand_dispatch_poll
- *   功能：遍历全部 (ch, ce, lun)，每 LUN 推进一条命令；完成一条就当场交给 sink。
- *   参数：sink —— 完成回调（每条完成调用一次，调用方在其中消费，可不缓存）；
- *         ctx  —— 透传给 sink 的调用方上下文。
- *   返回：本轮产出的完成条数（0 = 无完成；上限 CH_NUM×CE_NUM×LUN_NUM）。
- *   实现要点：
- *     - **全遍历、不早退**：每个 LUN 每轮恰好 step 一次，无论前面是否有人完成。
- *       这是公平性的来源——若"碰到第一条完成就返回"，索引靠前的 LUN 会系统性
- *       抢占，靠后的 LUN 步数递减、可被饿死（旧 g_nand_channel_cursor 只轮转通道，
- *       ce/lun 恒从 0 起，挡不住这个偏斜）。
- *     - 完成经 sink 逐条交出，故本函数只用一个 completion 槽复用，无需批量数组。
- *     - 命令执行状态不体现在返回值里：它已由 completion.cw_status 承载
- *       （completion handler 把 NAND_RESULT_* 映射成 FC_CW_STATUS_*）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 遍历全部 LUN，每 LUN 推进一条；完成经 sink 逐条交出
+ *
+ * 全遍历不早退，保证公平；返回本轮产出条数。
+ *
+ * @param sink 完成回调
+ * @param ctx  透传给 sink 的上下文
+ * @return 本轮完成条数
+ */
 BYTE nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx)
 {
     nand_dispatch_completion_t completion;

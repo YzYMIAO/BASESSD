@@ -53,8 +53,14 @@ static DWORD s_rr_unrec_suppressed;
 
 /* ── 1. 记录 / 判定 ── */
 
-// 实现要点：连续上升计数（本次 > 上次则 +1，否则清零）；三级水位各自升级 health，
-// 只升不降（恢复由 rr_retire_block 复位）。
+/**
+ * @brief 记录一次 ECC 位数，更新趋势（只升不降）
+ *
+ * 恢复由 rr_retire_block 复位。
+ *
+ * @param track    ECC 趋势
+ * @param ecc_bits 本次 ECC bit 数
+ */
 void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
 {
     // 层内接口：调用者一律传 &bst_block_t.rr（BST 常驻，恒非 NULL）
@@ -90,7 +96,15 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
     track->health = level;
 }
 
-// 记录一次读的 ECC 位数（块级趋势）并累加 read_count；越界块号属内部簿记错误 ⇒ 断言。
+/**
+ * @brief 记录一次块级读的 ECC 位数并累加 read_count
+ *
+ * 越界块号属内部簿记错误 ⇒ 断言。
+ *
+ * @param alloc    分配器
+ * @param gblock   全局块号
+ * @param ecc_bits 本次 ECC bit 数
+ */
 void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
@@ -168,7 +182,7 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
  *         RR_PLANE_SKIP  本子操作不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane
  *         RR_PLANE_WAIT  该 LBA 的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来
  *
- * @note 实现要点：选页循环只看**第一个** plane 匹配的 k（命中即 break，无论映射是否有效）。
+ * @note 选页循环只看**第一个** plane 匹配的 k（命中即 break，无论映射是否有效）。
  * 目标页取自 L2P 而非失败命令的 desc 链：读失败不改 L2P，二者同一。
  * ⚠ 三态：必须把"还不知道"（RR_PLANE_WAIT）与"未映射"（RR_PLANE_SKIP）分清——把前者当后者会让
  * RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
@@ -222,7 +236,7 @@ static bool rr_unrec_log_is_due(void)
  *
  * @param rr 实例。
  *
- * @note 实现要点：恢复读是**整页**读、从 CW0 起连续拷出（落 rr_page_scratch），而子操作
+ * @note 恢复读是**整页**读、从 CW0 起连续拷出（落 rr_page_scratch），而子操作
  * 可能只覆盖页内部分 CW ⇒ 必须按各 CW 的真实偏移（ftl_lba_cw）搬回，
  * 否则整段错位。
  */
@@ -351,7 +365,7 @@ static void rr_job_abort(rr_handle_t *rr)
  *
  * @param rr 实例。
  *
- * @note 实现要点：**只在没有命令在飞时调用**（waiting == 0）。提交 stage 提交成功即
+ * @note **只在没有命令在飞时调用**（waiting == 0）。提交 stage 提交成功即
  * return（stage 原地不动，等完成服务函数改写）；提交失败（背压）同样
  * return，stage 不变 ⇒ 下轮 rr_handle 再试同一 stage（幂等）。
  */
@@ -470,7 +484,17 @@ static void rr_job_step(rr_handle_t *rr)
 
 /* ── typed handle（端口装配 / 触发 / 上报） ── */
 
-// 装配：整块清零、绑定 cache/alloc/scratch/pending 端口；不碰介质。
+/**
+ * @brief 装配 RR handle：清零、绑定 cache/alloc/scratch/pending
+ *
+ * 不碰介质。
+ *
+ * @param rr           handle
+ * @param cache        L2P cache
+ * @param alloc        分配器
+ * @param page_scratch 整页暂存
+ * @param pending      pending 表
+ */
 void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pending_ctx_t *pending)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
@@ -484,7 +508,14 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scrat
     rr->error        = FTL_OK;
 }
 
-// 单飞行：空闲时才接受新 owner；忙时丢弃（托管项仍在 pending 表，job 结束后再领）。
+/**
+ * @brief 登记一个待恢复 owner
+ *
+ * 单飞行：空闲时才接受；忙时丢弃（托管项仍在 pending 表，job 结束后再领）。
+ *
+ * @param rr    handle
+ * @param owner 托管子操作
+ */
 void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
 {
     // 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
@@ -496,7 +527,13 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
     }
 }
 
-// 每轮入口：空闲清心跳；在飞时打心跳并推进 stage；无在飞时领取托管项或判提交超时。
+/**
+ * @brief RR job 每轮入口
+ *
+ * 空闲清心跳；在飞打心跳并推进 stage；无在飞时领取托管项或判提交超时。
+ *
+ * @param rr handle
+ */
 void rr_handle(rr_handle_t *rr)
 {
     // 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
@@ -638,10 +675,15 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     }
 }
 
-// 实现要点：按 stage 分派到 rr_read_complete 判完成结果并改 stage，然后 release
-// 命令 → rr_job_step 续跑。
-// ⚠ 成功判据：FC_CMD_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
-// ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
+/**
+ * @brief Read Recovery 命令完成服务
+ *
+ * 不得同步等待（见 ftl_op.h）。
+ *
+ * @param ftl        实例
+ * @param completion FC 完成状态
+ * @param ctx        rr_handle_t *
+ */
 void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
@@ -685,7 +727,14 @@ void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *compl
 }
 /* ── 3. 判定（块数组 / 全表扫描）── */
 
-// 实现要点：NULL ⇒ RR_BLOCK_HEALTHY（调用方没有 ECC 追踪时按健康处理）。
+/**
+ * @brief 取 ECC 趋势的健康档位
+ *
+ * NULL 按健康处理（调用方没有 ECC 追踪时）。
+ *
+ * @param track ECC 趋势（可 NULL）
+ * @return 健康档位
+ */
 rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
 {
     if (track == NULL)
@@ -696,9 +745,15 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
     return track->health;
 }
 
-// 实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、BAD/RETIRED 已出局）；
-// 命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
-// （预测性退役第一信号）。调用者 mig_predict_begin 用 sb_id 反查 Closed 条目。
+/**
+ * @brief 扫描 BST 找预测性退役候选
+ *
+ * 预测性退役第一信号；调用者 mig_predict_begin 用 sb_id 反查 Closed 条目。
+ *
+ * @param alloc  分配器
+ * @param gblock 输出：命中的全局块号
+ * @return true 命中；false 无候选
+ */
 bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 {
     // 层内接口：唯一调用者 mig_predict_begin 传 rr->alloc 与局部 gblock
@@ -758,8 +813,13 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
 
 /* ── 4. 退役 ── */
 
-// 实现要点：read_count 归零 = read disturb 重计（块仍活着，只是不再写）。
-// 计数随下一次 Checkpoint 的磨损快照持久化（无独立 dirty 标记）。
+/**
+ * @brief 把块置为 RETIRED（不标坏、仍可读）
+ *
+ * 计数随下一次 Checkpoint 的磨损快照持久化（无独立 dirty 标记）。
+ *
+ * @param b 块条目
+ */
 void rr_retire_block(bst_block_t *b)
 {
     // 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->alloc.blocks[gblock]
@@ -779,7 +839,14 @@ void rr_retire_block(bst_block_t *b)
     b->read_count      = 0U;
 }
 
-// 按 gblock 退役：置 RETIRED（不标坏、仍可读）；调用者负责先把块驱逐出 Free Pool。
+/**
+ * @brief 按 gblock 退役块
+ *
+ * 置 RETIRED（不标坏、仍可读）；调用者负责先把块驱逐出 Free Pool。
+ *
+ * @param alloc  分配器
+ * @param gblock 全局块号
+ */
 void rr_retire_block_at(alc_t *alloc, WORD gblock)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号。

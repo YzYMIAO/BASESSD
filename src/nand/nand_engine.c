@@ -32,15 +32,19 @@
 
 #define NAND_ENGINE_MAX_UOPS 64U
 
-/* --------------------------------------------------------------------
- * nand_engine_execute
- *   功能：阻塞式执行整条 UOP 序列，直到完成或出错。
- *   参数：backend —— 后端 handler 表 + context；uops —— UOP 序列；
- *         timing —— 时序参数；request/completion —— 命令数据。
- *   返回：NAND_RESULT_OK 或错误码。
- *   实现要点：@deprecated 仅初始化阶段同步调用（nand_init）；
- *         把协作式 step 循环压成 while(NOT_READY) 阻塞调用。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 阻塞执行整条 UOP 序列，直到完成或出错
+ *
+ * 把协作式 step 循环压成 while(NOT_READY) 阻塞调用。仅供初始化阶段
+ * （nand_init，armed==0）使用；运行期走 nand_engine_start/step。
+ *
+ * @param backend    后端 handler 表 + context
+ * @param uops       UOP 序列
+ * @param timing     时序参数
+ * @param request    命令数据
+ * @param completion 输出：执行状态 + NAND 状态字节
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     /* 引擎上下文的 backend/request/completion 三指针随 state 固定，先绑定再 start */
@@ -59,19 +63,17 @@ nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const na
     return result;
 }
 
-/* --------------------------------------------------------------------
- * nand_engine_start
- *   功能：复位引擎游标并立即推进一步。
- *   参数：state —— 引擎状态（调用方提供，须已绑定 backend/request/completion）；
- *         uops —— UOP 序列；timing —— 时序参数。
- *   返回：NAND_RESULT_OK / NOT_READY / 错误码。
- *   实现要点：
- *     - 只复位游标/超时/active，不整体清零：backend/request/completion 由
- *       调用方绑定、跨 start 保留（原实现整体清零，故此处逐个显式复位）。
- *     - 末尾直接调一次 step：无 busy 阶段命令（RESET 等）在 start
- *       内即完成（上层 nand_fc_start 据此清 active）。
- *     - 返回值可为 OK 或 NOT_READY，调用方须两者都接受。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 复位引擎游标并立即推进一步
+ *
+ * 只复位游标/超时/active，不整体清零：backend/request/completion 由调用方
+ * 绑定并跨 start 保留。末尾先 step 一次，无 busy 阶段的命令在 start 内即完成。
+ *
+ * @param state 引擎状态（已绑定 backend/request/completion）
+ * @param uops  UOP 序列
+ * @param timing 时序参数（busy_timeout_us 必须非 0）
+ * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY / 错误码
+ */
 nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
 {
     /* 前置条件由调用者保证（见 nand_engine.h）：state->backend/request/completion 三指针
@@ -103,14 +105,15 @@ nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
     return nand_engine_step(state);
 }
 
-/* --------------------------------------------------------------------
- * nand_engine_wait_latch
- *   功能：一次性锁存忙等起点（SysTick µs 时间戳 + 轮询计数清零）。
- *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态（wait / jump）。
- *   返回：NAND_RESULT_OK（本次锁存成功，或之前已锁存）/ INVALID_ARGUMENT（µs 时钟不可用）。
- *   实现要点：WAIT_READY 与 JUMP_IF_NOT_READY 各持一组状态、走同一入口；
- *         失败时清 active，调用方直接返回。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 一次性锁存忙等起点（µs 时间戳 + 轮询计数清零）
+ *
+ * WAIT_READY 与 JUMP_IF_NOT_READY 各持一组状态、走同一入口。
+ *
+ * @param state 引擎状态
+ * @param w     该忙等所属的超时状态
+ * @return NAND_RESULT_OK（本次或此前已锁存）/ NAND_RESULT_INVALID_ARGUMENT（µs 时钟不可用，active 已清）
+ */
 static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_t *w)
 {
     if (w->started != 0U)
@@ -127,14 +130,17 @@ static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_engine_wait_timeout
- *   功能：忙等超时检测——轮询计数 +1 后判双条件。
- *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态；op_name —— 日志用的微指令名。
- *   返回：1 = 已超时（active 已清）；0 = 未超时。
- *   实现要点：SysTick µs 预算与轮询计数任一超限即判超时（时间戳防计数单位
- *         误解，计数防 µs 时钟不可用/漂移）；polls 饱和递增防回绕。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 忙等超时检测：轮询计数 +1 后判双条件
+ *
+ * µs 预算与轮询计数任一超限即超时：时间戳防计数单位误解，计数防 µs 时钟
+ * 不可用/漂移。polls 饱和递增防回绕。
+ *
+ * @param state   引擎状态
+ * @param w       该忙等所属的超时状态
+ * @param op_name 日志用的微指令名
+ * @return 1 已超时（active 已清）；0 未超时
+ */
 static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
 {
     if (w->polls < UINT16_MAX)
@@ -151,15 +157,13 @@ static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wai
     return 0U;
 }
 
-/* --------------------------------------------------------------------
- * nand_engine_uop_log_ok
- *   功能：按类型白名单打印 UOP 成功日志（只打关键节点，避免刷屏）。
- *   参数：state —— 引擎状态（uop_index / request / completion 供打印）。
- *   返回：无。
- *   实现要点：白名单是"会改变 NAND 状态或需要观察"的微指令；纯地址/命令
- *         字节写入不打。NAND_UOP_END 不在此列——它在 step 里提前返回，
- *         永远到不了 handler 成功分支。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 按类型白名单打印 UOP 成功日志（只打关键节点，避免刷屏）
+ *
+ * 白名单是「会改变 NAND 状态或需要观察」的微指令；纯地址/命令字节写入不打。
+ *
+ * @param state 引擎状态（uop_index / request / completion 供打印）
+ */
 static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
 {
     BYTE type = state->uops[state->uop_index].type;
@@ -170,22 +174,16 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
     }
 }
 
-/* --------------------------------------------------------------------
- * nand_engine_step
- *   功能：推进 UOP 游标一次（可消费多个 UOP），驱动后端。
- *   参数：state —— 引擎状态（游标 + 超时字段）。
- *   返回：NAND_RESULT_OK（本步完成，可继续）/ NOT_READY（外设忙，让出）/
- *         TIMEOUT / INVALID_ARGUMENT / OPERATION_FAILED。
- *   实现要点（核心状态机）：
- *     - END → 置 inactive，返回 transfer_status（命令结果）。
- *     - JUMP_IF_NOT_READY → 引擎直接处理：ready 则前进；busy 则
- *       µs+计数双超时，未超时回跳 operand 步（70h 轮询循环）。
- *     - 其余 UOP → 查后端 handler 表执行；OK 则前进并清零 wait 状态；
- *       NOT_READY 则让出（WAIT_READY 同时做超时检测）。
- *     - 循环跑满 NAND_ENGINE_MAX_UOPS 无 END → 非法序列，报错。
- *   忙等/日志的类型特化装饰抽成三个 static helper（见上），本函数只留
- *   解释器骨架：END / JUMP 是控制流（不查表），其余一律走 handler 表。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 推进 UOP 游标一次（可消费多个 UOP），驱动后端
+ *
+ * END 置 inactive 并返回命令结果；JUMP_IF_NOT_READY 由引擎直接处理
+ * （ready 前进，busy 双条件超时后回跳 operand 步）；其余类型查后端
+ * handler 表执行。循环跑满 NAND_ENGINE_MAX_UOPS 无 END 视为非法序列。
+ *
+ * @param state 引擎状态（游标 + 超时字段）
+ * @return NAND_RESULT_OK / NOT_READY（让出）/ TIMEOUT / INVALID_ARGUMENT / OPERATION_FAILED
+ */
 nand_result_e nand_engine_step(nand_engine_state_t *state)
 {
     const nand_uop_t  *uop;

@@ -22,7 +22,18 @@ typedef struct
     DWORD       bit;
     const char *name;
 } fc_status_name_t;
-
+/**
+ * @brief 把状态位集合格式化成 "A|B|?" 文本
+ *
+ * 只写 buf，不分配资源；buf 不足时截断。未知位置以 "?" 占位。
+ *
+ * @param tbl    位名表
+ * @param count  表项数
+ * @param status 状态位集合
+ * @param buf    输出缓冲
+ * @param buflen 缓冲长度（0 时返回空串）
+ * @return buf（或 buflen 为 0 时的空串）
+ */
 static const char *fc_status_str_format(const fc_status_name_t *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
 {
     if ((buf == NULL) || (buflen == 0U))
@@ -88,18 +99,39 @@ static const fc_status_name_t s_cmd_status_names[] = {
     {       FC_CMD_STATUS_RDY,     "RDY"},
     {        FC_CMD_STATUS_WP,      "WP"},
 };
-
+/**
+ * @brief CW 状态位转文本（"FAIL|UNC|CRC|…"）
+ *
+ * @param status CW 状态位集合
+ * @param buf    输出缓冲
+ * @param buflen 缓冲长度
+ * @return buf
+ */
 const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
 {
     return fc_status_str_format(s_cw_status_names, (DWORD)(sizeof(s_cw_status_names) / sizeof(s_cw_status_names[0])), status, buf, buflen);
 }
-
+/**
+ * @brief 命令状态位转文本（"NAND|FAILC|TIMEOUT|…"）
+ *
+ * @param status 命令状态位集合
+ * @param buf    输出缓冲
+ * @param buflen 缓冲长度
+ * @return buf
+ */
 const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen)
 {
     return fc_status_str_format(s_cmd_status_names, (DWORD)(sizeof(s_cmd_status_names) / sizeof(s_cmd_status_names[0])), status, buf, buflen);
 }
 
-// 以 plane 0 的低 CW_NUM 位为基准逐 plane 比较；mask == 0 时各 plane 均为 0，判为对称。
+/**
+ * @brief 判断 flat CW 位图是否各 plane 一致
+ *
+ * 以 plane 0 的低 CW_NUM 位为基准逐 plane 比较；mask == 0 视为对称。
+ *
+ * @param mask flat 绝对 CW 位图
+ * @return true 对称；false 不对称
+ */
 bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 {
     const DWORD plane_bits = ((1U << CW_NUM) - 1U);
@@ -116,7 +148,14 @@ bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
     return true;
 }
 
-// 实现要点：只做前置条件断言，恒返回 FC_STATUS_OK；release 下断言整段裁空。
+/**
+ * @brief 命令前置条件校验
+ *
+ * 只做 ASSERT，恒返回 FC_STATUS_OK；release 下断言整段裁空。
+ *
+ * @param command 命令
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_command_validate(const fc_command_t *command)
 {
     ASSERT(command != NULL);

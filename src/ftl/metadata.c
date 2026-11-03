@@ -59,14 +59,13 @@
 #include <stddef.h>
 #include <string.h>
 
-/*
- * 运行期介质布局版本：单 die 保持 BASE（兼容现有介质）；多 die 把 die 数与
- * topology map 编入版本，拓扑变化 ⇒ 版本不符 ⇒ 走 pfr_media_format()。
+/**
+ * @brief 计算当前介质布局版本
  *
- * fingerprint 用现有 `boot_crc32`（CRC-32/ISO-HDLC）而不是
- * `version * 33 + field`：后者的混合能力差，不同 (ch,ce,lun) 序列容易落到
- * 同一值；拓扑差异一旦撞哈希，介质版本判据就会把错误拓扑当成同一布局继续用。
- * 只序列化字段字节，不哈希结构体 padding（其值不确定）。
+ * 单 die = BASE；多 die 把 die 数与 topology map 编入版本，拓扑变化 ⇒ 版本不符
+ * ⇒ 格式化。用 boot_crc32 哈希字段字节（不哈希 padding）。
+ *
+ * @return 介质布局版本
  */
 DWORD ftl_media_layout_version(void)
 {
@@ -231,12 +230,18 @@ static bool md_ring_geom_valid(const md_ring_t *ring)
     return true;
 }
 
-// 实现要点：先按 records_per_block 整除得**候选下标**、取余得块内记录号，
-// 再查 `ring->blocks[]` 得到物理块号，乘 pages_per_record 得块内页号。
-// 地址公式的唯一出口；候选池让同一 record_idx 在不同 BAD 集下落到
-// 不同物理块，但 **sequence 扫描定位**不依赖固定块号。
-// `md_ring_addr` 是"取 plane_mask 里第一个 plane"的薄入口，
-// 镜像池的读回退/写镜像用 `_plane` 版本。
+/**
+ * @brief 唯一地址公式：record 槽位 + plane → PBA
+ *
+ * 候选池变化会让同一 record_idx 落到不同物理块，定位不依赖固定块号。
+ *
+ * @param ring           池几何
+ * @param topo           ch/ce/lun
+ * @param record_idx     池内槽位
+ * @param page_in_record record 内页序
+ * @param plane          目标 plane
+ * @return 该槽位的 PBA；几何/槽位非法返回 NAND_PBA_INVALID
+ */
 DWORD md_ring_addr_plane(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record, BYTE plane)
 {
     if (md_ring_geom_valid(ring) == false)
@@ -348,7 +353,14 @@ static WORD md_pool_collect(md_ring_t *ring, const alc_t *alloc, const md_pool_s
     return ring->block_count;
 }
 
-// 重算全部元数据池候选（目录检查点/CP/BBT/journal/L2P 日志）；绑定缺失返回 false，调用者停止重试。
+/**
+ * @brief 用 BBT BAD 集重建四个固定元数据分区的候选池
+ *
+ * 候选 = 名义区间内（所有 plane）非 BAD 的块；不足时从 shared spare 补。
+ *
+ * @param alloc 分配器（读 BST；pools 为输出目标）
+ * @return true 全部满足；false 某分区凑不齐（release 下拒绝启动）
+ */
 bool md_pool_build_all(alc_t *alloc)
 {
     if ((alloc == NULL) || (alloc->pools == NULL))
@@ -403,7 +415,17 @@ bool md_pool_build_all(alc_t *alloc)
     return true;
 }
 
-// 池内 (record, page) → PBA：固定取 plane_mask 的第一个 plane（镜像页的规范副本）。
+/**
+ * @brief 池内 (record, page) → PBA（镜像页的规范副本）
+ *
+ * 固定取 plane_mask 的第一个 plane。
+ *
+ * @param ring           池几何
+ * @param topo           ch/ce/lun
+ * @param record_idx     池内槽位
+ * @param page_in_record record 内页序
+ * @return PBA；几何/槽位非法返回 NAND_PBA_INVALID
+ */
 DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_idx, BYTE page_in_record)
 {
     const BYTE plane = md_ring_plane_at(ring->plane_mask, 0U);
@@ -531,7 +553,17 @@ static bool md_ring_locate_fallback(metadata_ring_probe_fn probe, void *ctx, WOR
     }
 }
 
-// 在池内定位最新 record：出参先给确定值；几何非法返回 FTL_ERROR（配置错误，release 也拒绝）。
+/**
+ * @brief 定位池内最新有效 record 与下一个可写槽
+ *
+ * 出参先给确定值；几何非法返回 FTL_ERROR（配置错误，release 也拒绝）。
+ *
+ * @param ring  池几何
+ * @param probe 调用方探针
+ * @param ctx   探针上下文
+ * @param out   输出：最新槽位 / sequence / 写游标
+ * @return FTL_OK（含池空）；FTL_ERROR 几何非法
+ */
 ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, md_ring_locate_out_t *out)
 {
     // 出参先给确定值：几何非法时也能安全读；池空时 newest=UINT16_MAX、seq=0
@@ -614,10 +646,18 @@ ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_probe_fn probe,
     return FTL_OK;
 }
 
-// 实现要点：仅当 write_idx 落在块首（% rpb == 0）才需擦块。池内轮转 ⇒ 该块持全池
-// 最旧 record，且每条 record 是完整快照 ⇒ 擦掉不丢信息；块内槽 0 恒走本
-// 分支（新取/刚擦的块再擦一次是幂等无害代价）。
-// **不动介质**：擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦）。
+/**
+ * @brief 算写点地址 + 判定是否需先擦块（不动介质）
+ *
+ * write_idx 落在块首才需擦；池内轮转 ⇒ 该块持最旧完整快照，擦掉不丢信息。
+ *
+ * @param ring           池几何
+ * @param topo           ch/ce/lun
+ * @param write_idx      写点槽位
+ * @param out_addr       输出：record 第 0 页地址
+ * @param out_need_erase 输出：是否需先擦该块
+ * @return FTL_OK；FTL_ERROR 几何/槽位非法
+ */
 ftl_status_e md_ring_prepare_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr, bool *out_need_erase)
 {
     if (md_ring_geom_valid(ring) == false)
@@ -643,9 +683,17 @@ ftl_status_e md_ring_prepare_addr(const md_ring_t *ring, const ftl_topo_t *topo,
     return FTL_OK;
 }
 
-// 实现要点：= md_ring_prepare_addr + 同步擦除。**同步原语，仅开机/格式化用**
-// （运行期 job 走 md_ring_prepare_addr + 异步擦除）。
-// 镜像池（plane_mask 含多个 plane）用 multi-plane 擦，所有副本一起擦。
+/**
+ * @brief md_ring_prepare_addr + 同步擦除（仅开机/格式化用）
+ *
+ * 镜像池用 multi-plane 擦，所有副本一起清；运行期走异步擦。
+ *
+ * @param ring      池几何
+ * @param topo      ch/ce/lun
+ * @param write_idx 写点槽位
+ * @param out_addr  输出：record 第 0 页地址
+ * @return FTL_OK；FTL_ERROR 擦除失败
+ */
 ftl_status_e md_ring_prepare_write(const md_ring_t *ring, const ftl_topo_t *topo, WORD write_idx, DWORD *out_addr)
 {
     DWORD addr;
@@ -1022,8 +1070,15 @@ static void md_boot_status_log(const md_dir_cache_t *dir)
          dir->count);
 }
 
-// 实现要点：游标置无效是"绝不复用可能已编程的旧页"的保证——首次追加才从 Free
-// Pool 新取块。
+/**
+ * @brief 初始化 Directory：绑指针、清计数、游标置无效
+ *
+ * 首次追加才从 Free Pool 取块。
+ *
+ * @param dir          Directory
+ * @param alloc        分配器
+ * @param total_writes 累计写计数指针（只持有）
+ */
 void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
     // 前置条件：唯一调用点 ftl_init 传 &ftl->alloc / &ftl->stats.total_writes（调用链已保证）。
@@ -1092,8 +1147,16 @@ static WORD md_entry_index_find(const md_dir_cache_t *dir, BYTE type, WORD id)
     return dir->count;
 }
 
-// md_entry_find — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID。
-// Directory 当前只登记 L2P_REGION；其余元数据是固定位置，不经过本函数。
+/**
+ * @brief 线性查 (type,id) 的登记 PBA
+ *
+ * 当前只登记 L2P_REGION；其余元数据是固定位置，不经过本函数。
+ *
+ * @param dir  Directory
+ * @param type 条目类型
+ * @param id   条目 id
+ * @return 登记的 PBA；未找到返回 NAND_PBA_INVALID
+ */
 DWORD md_entry_find(const md_dir_cache_t *dir, metadata_type_e type, WORD id)
 {
     const WORD i = md_entry_index_find(dir, type, id);
@@ -1101,7 +1164,15 @@ DWORD md_entry_find(const md_dir_cache_t *dir, metadata_type_e type, WORD id)
     return (i < dir->count) ? dir->entries[i].pba : NAND_PBA_INVALID;
 }
 
-// 块被多少 L2P region 引用（活计数）；越界块号按「无引用」处理（来源可能是介质/快照）。
+/**
+ * @brief 块被多少 L2P region 引用（活计数）
+ *
+ * 越界块号按「无引用」处理（来源可能是介质/快照）。
+ *
+ * @param dir    Directory
+ * @param gblock 全局块号
+ * @return 活 region 数
+ */
 WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
 {
     if (gblock >= FTL_BLOCK_TOTAL)
@@ -1111,8 +1182,16 @@ WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
     return dir->l2p_live[gblock];
 }
 
-// 实现要点：容量满时**不追加**并 LOGE。对本项目的 L2P_REGION 不可达
-// （容量 == region 数，全部在 fill_fixed 已登记）。
+/**
+ * @brief 更新/追加 (type,id) 的 PBA 登记
+ *
+ * 容量满时不追加并 LOGE；本项目容量 == region 数，fill_fixed 已登记全部。
+ *
+ * @param dir     Directory
+ * @param type    条目类型
+ * @param id      条目 id
+ * @param new_pba 新 PBA
+ */
 void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD new_pba)
 {
     // 查找现有 entry（覆盖旧位置）
@@ -1152,7 +1231,14 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
 
 /* ── 固定 L2P 日志区：分配 / 归还 / 开机恢复（RISK-MD-07 / RISK-CAP-02）── */
 
-// 在固定 L2P 日志区找一块「已擦净、空闲」的块，标 LOG 后返回；没有返回 FTL_GBLOCK_INVALID。
+/**
+ * @brief 在固定 L2P 日志区分配一块「已擦净、空闲」的块并标 LOG
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ * @param plane 目标 plane
+ * @return gblock；FTL_GBLOCK_INVALID = 无可用块
+ */
 WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 {
     ASSERT(plane < PLANE_NUM);
@@ -1198,7 +1284,14 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
     return FTL_GBLOCK_INVALID;
 }
 
-// 归还日志块：固定区内留 NONE，借来的回 OP 池；BAD 是终态，不回收。
+/**
+ * @brief 归还一个日志块
+ *
+ * 固定区内留 NONE，借来的回 OP 池；BAD 是终态，不回收。
+ *
+ * @param dir    Directory
+ * @param gblock 全局块号
+ */
 void md_log_release(md_dir_cache_t *dir, WORD gblock)
 {
     ASSERT(gblock < FTL_BLOCK_TOTAL);
@@ -1242,9 +1335,14 @@ void md_log_release(md_dir_cache_t *dir, WORD gblock)
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 }
 
-// 固定 L2P 日志区的**空闲块数**（state == NONE 且非 BAD）。
-// 压缩触发的主判据：按 free 水位压，而不是等 live 涨到接近区上限——
-// live 接近上限时压缩已经没有目标块，只能死锁（RISK-MD-08）。
+/**
+ * @brief 固定 L2P 日志区的空闲块数（state == NONE 且非 BAD）
+ *
+ * 压缩触发的主判据：按 free 水位压，而不是等 live 接近上限（RISK-MD-08）。
+ *
+ * @param alloc 分配器
+ * @return 空闲块数
+ */
 WORD md_log_area_free_count(const alc_t *alloc)
 {
     WORD n = 0U;
@@ -1270,7 +1368,12 @@ WORD md_log_area_free_count(const alc_t *alloc)
     return n;
 }
 
-// 统计固定 L2P 日志区内活计数非 0 的块数（诊断 / info 用）。
+/**
+ * @brief 固定 L2P 日志区内活计数非 0 的块数（诊断 / info 用）
+ *
+ * @param dir Directory
+ * @return 活块数
+ */
 WORD md_live_block_count_get(const md_dir_cache_t *dir)
 {
     WORD n = 0U;
@@ -1289,7 +1392,14 @@ WORD md_live_block_count_get(const md_dir_cache_t *dir)
     return n;
 }
 
-// 开机恢复日志区：按活计数分「存活 / 待回收」，非活块全部登记进 reclaim 位图。
+/**
+ * @brief 开机恢复日志区：按活计数分「存活 / 待回收」
+ *
+ * 非活块全部登记进 reclaim 位图。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ */
 void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
 {
     WORD n_live    = 0U;
@@ -1373,14 +1483,10 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
 }
 
 // false = 没换（固定日志区无空闲块，或活块数超水位请求了压缩）。
-// 实现要点：
-// · 旧当前块已无活 region ⇒ 登记待回收；扫描全池只登记、不擦。
-// · 每个 plane 一个当前块：本函数只换**指定 plane** 的块，只从**该 plane 的固定
-// L2P 日志区**取块（md_log_alloc），不碰用户 Free Pool。
-// · 活日志块数超过 L2P_LOG_COMPACT_TRIGGER 时只登记 `job.compact_wanted` 并返回
-// false——新块整块空槽，正好把多个稀疏 victim 一次搬空。
-// · 压缩 job 也调用本函数：当前块空槽装不下 victim 时，新块的整块空槽是压缩唯一
-// 的 destination；换块原本只由追加触发，host 写一停就会永久缺目标槽。
+// 换块只影响**指定 plane**，只从该 plane 的固定 L2P 日志区取块，不碰用户池。
+// 活块数超 L2P_LOG_COMPACT_TRIGGER 时只登记 compact_wanted 并返回 false。
+// 压缩 job 也复用本函数：当前块装不下 victim 时，新块的整块空槽是唯一
+// destination。
 
 /**
  * @brief 单个 PBA 的账本迁移：旧位置 -1、新位置 +1、旧块归零则登记回收。
@@ -1429,15 +1535,18 @@ static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
     }
 }
 
-// md_commit_region - 按 mode 提交一个或两个副本。
-//
-// 单副本模式只走一个 copy；MD_COMMIT_PAIR 走两个 copy。账本迁移原语是
-// md_region_copy_commit（旧位置 -1、新位置 +1、旧块归零登记回收）。
-// 实现要点：只对**动态日志块**位置（非固定元数据块）增减活计数——INVALID（未映射）
-// 不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，由后台 job
-// 异步擦除；位图不会像单槽那样被后来的块覆盖。
-// ⚠ **本函数不擦 NAND**：它运行在完成派发里（`ftl_l2p_callback` 的 FLUSHING 分支），
-// 就地擦块 = 在完成泵里嵌套泵。
+/**
+ * @brief 提交一个 region 的新位置（账本迁移）
+ *
+ * 旧位置 -1、新位置 +1；旧块归零且非当前块 ⇒ 登记 reclaim_pending。
+ * 不擦 NAND（运行在完成派发里，就地擦 = 嵌套泵）。
+ *
+ * @param dir         Directory
+ * @param region_id   全局 region
+ * @param mode        单副本 / 主备
+ * @param new_primary 新主副本 PBA
+ * @param new_backup  新备副本 PBA
+ */
 void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode, DWORD new_primary, DWORD new_backup)
 {
     ASSERT(region_id < METADATA_DIR_ENTRIES);
@@ -1531,10 +1640,17 @@ void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode
  * 可以回到服务循环。三段式把「Directory 格式」留在本文件，「状态机」留给调用者。
  */
 
-// MD_DIR_CKPT_FAILED = 失败（定位失败 / 池定位失败 / 槽位越界）。
-// 副作用：游标未建立时定位并置 dir_ckpt_cursor_valid；**dir_ckpt_sequence 自增**
-// （序号先取，再取槽）。
-// ⚠ 不动介质：换块擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦命令）。
+/**
+ * @brief 目录检查点写入准备：定位游标 + 取槽
+ *
+ * 副作用：游标未建立时定位并置 cursor_valid；sequence 先自增再取槽。
+ * 不动介质（换块擦由调用者做）。
+ *
+ * @param dir   Directory
+ * @param out   输出：ring/base/idx/seq/need_erase
+ * @param owner 单飞持有者（MD_DIR_CKPT_OWNER_*）
+ * @return CLEAN / READY / FAILED / BUSY
+ */
 md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_t *dir, md_dir_ckpt_prepare_out_t *out, BYTE owner)
 {
     if (dir->ckpt.dirty == false)
@@ -1591,7 +1707,16 @@ md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_t *dir, md_dir_ckpt_prepare_
     return MD_DIR_CKPT_READY;
 }
 
-// padding 归零 ⇒ 介质内容确定；本页有效条目数 = 全局有效范围 [0,count) 与本页区间的交。
+/**
+ * @brief 组一页目录检查点
+ *
+ * padding 归零 ⇒ 介质内容确定；有效条目数 = 全局有效范围与本页区间的交集。
+ *
+ * @param dir   Directory
+ * @param seq   本 record 的 sequence
+ * @param chunk 页序
+ * @param page  输出：一页
+ */
 void md_dir_ckpt_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_dir_ckpt_page_t *page)
 {
     // chunk 0..PRIMARY-1 承载主 PBA；PRIMARY..COUNT-1 承载 backup_pba[]（同一 id 区间）。
@@ -1648,8 +1773,17 @@ void md_dir_ckpt_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_dir_c
     }
 }
 
-// ⚠ **无论成败都推进游标**：已写过的槽（可能半编程）不可复用。ok == false 或
-// `dirty_gen` 在写入期间又前进（期间有新的 commit）时保留 dirty ⇒ 下次在新槽重试整条。
+/**
+ * @brief 提交目录检查点：推进游标、按代际清 dirty
+ *
+ * 无论成败都推进游标（半编程槽不可复用）；ok == false 或写入期间 dirty_gen
+ * 又前进时保留 dirty，下次在新槽重试整条。
+ *
+ * @param dir  Directory
+ * @param ring 池几何
+ * @param idx  写入的槽位
+ * @param ok   分页是否全部成功
+ */
 void md_dir_ckpt_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool ok)
 {
     dir->ckpt.write_idx = ((idx + 1U) % md_ring_total_records(ring));
@@ -1663,7 +1797,14 @@ void md_dir_ckpt_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bo
     dir->ckpt.owner = MD_DIR_CKPT_OWNER_NONE;
 }
 
-// 释放目录检查点单飞锁：只释放自己持有的那一个（别人的超时中止不能清本 writer 的锁）。
+/**
+ * @brief 释放目录检查点单飞锁
+ *
+ * 只释放自己持有的那一个；别人的超时中止不能清本 writer 的锁。
+ *
+ * @param dir   Directory
+ * @param owner 持有者
+ */
 void md_dir_ckpt_abort(md_dir_cache_t *dir, BYTE owner)
 {
     // 只释放**自己**的锁：另一个 job 的超时中止不能把本 writer 的单飞清掉。
@@ -1760,9 +1901,17 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
     }
 }
 
-// 实现要点：先 fill_fixed 铺基础层（目录检查点缺页/损坏时该区间回落"未映射"，不出现空洞）；
-// 定位失败或无有效记录 ⇒ 清游标返回错误；读胜者逐页校验，坏页保留基础层；
-// **日志块游标不跨重启恢复**；目录检查点游标由 locate 结果恢复。
+/**
+ * @brief 开机加载 Directory
+ *
+ * 先 fill_fixed 铺基础层（缺页/损坏回落未映射，无空洞），再 locate 最新目录
+ * 检查点并逐页校验；定位失败/无有效记录 ⇒ 清游标返回错误，坏页保留基础层。
+ *
+ * @param dir          Directory
+ * @param alloc        分配器
+ * @param total_writes 累计写计数指针
+ * @return FTL_OK；FTL_ERROR 无有效记录 / 读失败
+ */
 ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
     // 前置条件：唯一调用点传 ftl->metadata_dir / &ftl->alloc / &ftl->stats.total_writes。
@@ -1841,13 +1990,17 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
  * 六、元数据块判定
  * ══════════════════════════════════════════════════════════════════ */
 
-// 实现要点：三分支——
-// ① 固定保留区：`block < FTL_METADATA_AREA_END`（含 shared spare；名义 BAD 块也保留）；
-// ② 当前日志块（刚分配还没 commit，Directory 扫不到，必须显式排除）；
-// ③ 已登记日志块：用 `l2p_live[g] != 0` 做 O(1) 判定（该账本的定义就是
-// "最新位置落在 g 的 region 数"）。debug 档保留全表扫描做差分自检。
-// ②③ 是**从用户区动态取的**块 ⇒ 必须带 plane 比较；只比块号会连带掩掉另一 plane
-// 的同号块（既出不了 free pool、又被 full metadata rebuild 跳过，白丢一个可用块）。
+/**
+ * @brief 判断物理块是否属于元数据
+ *
+ * 固定保留区 + 当前日志块 + 已登记日志块（l2p_live）；动态块必须带 plane
+ * 比较，否则会掩掉另一 plane 的同号块。
+ *
+ * @param md_dir Directory（可 NULL = 只判固定分区）
+ * @param plane  plane 号
+ * @param block  该 plane 内的块号
+ * @return true = 元数据块
+ */
 bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
 {
     /* ── 固定元数据块：0..FTL_METADATA_AREA_END-1 **全部保留** ──
@@ -1951,8 +2104,13 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
  * 七、池诊断与服务
  * ══════════════════════════════════════════════════════════════════ */
 
-// 输出每个分区的 nominal / 实际候选数，以及因 BAD 被 shared spare 顶替的块。
-// 只读 RAM，不碰介质。
+/**
+ * @brief 打印每个分区的候选池（nominal / 实际 / 被 spare 顶替）
+ *
+ * 只读 RAM，不碰介质。
+ *
+ * @param dir Directory
+ */
 void md_pool_print(const md_dir_cache_t *dir)
 {
     if ((dir == NULL) || (dir->alloc == NULL) || (dir->alloc->pools == NULL))
@@ -2022,16 +2180,14 @@ void md_pool_print(const md_dir_cache_t *dir)
     }
 }
 
-// 元数据 BAD 后的候选池重算（[svc] 步骤之一，调用点见 ftl_service）。
-// 契约（时机 / 前置 / 返回）见 include/ftl/metadata.h；此处只记实现要点：
-//   · 三个入口门，任一不满足即本轮跳过、下轮再来：pools 未置脏 / bg_suspend /
-//     有元数据类命令在飞（CP、flush、migrate、journal、BBT、目录整理）——
-//     换游标可能让在飞命令的落点与新候选表不一致。
-//   · 重算成功后作废三条游标（目录检查点 / BBT / CP）：下一次定位按新候选表重扫。
-//   · 重算失败（元数据区已无足够好块）⇒ 清脏位 + 置 bbt.rebuild_required，
-//     停止每轮重试；下次开机由 BBT / 全量重建兜底。
-//   · 必须排在**本轮新 I/O 之前**（它是 ftl_service 的第一步）：游标与候选表先一致，
-//     随后才允许分配与提交。
+/**
+ * @brief 元数据候选池重算服务（ftl_service 第一步）
+ *
+ * 重算成功后作废目录检查点/BBT/CP 游标；失败则清脏位 + 置 rebuild_required，
+ * 等下次开机兜底。必须排在本轮新 I/O 之前。
+ *
+ * @param ftl FTL 实例
+ */
 void md_pool_service(ftl_ctx_t *ftl)
 {
     alc_t          *alloc   = &ftl->alloc;
@@ -2158,6 +2314,13 @@ void md_pool_service(ftl_ctx_t *ftl)
  * 可见），不会写坏介质；重复释放由 debug 断言暴露。
  * ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 复位在飞写回槽位预留表
+ *
+ * RAM 态，不跨重启；上一次运行的写回全部随掉电终止。
+ *
+ * @param dir Directory
+ */
 SSD_CODE_FAST void md_slot_reset(md_dir_cache_t *dir)
 {
     for (BYTE i = 0U; i < MD_SLOT_RESV_MAX; i++)
@@ -2166,6 +2329,16 @@ SSD_CODE_FAST void md_slot_reset(md_dir_cache_t *dir)
     }
 }
 
+/**
+ * @brief 取一对写回槽位（主→plane0 当前块、备→plane1 当前块）
+ *
+ * 任一 plane 换不出块 ⇒ 背压，且未消耗任何槽。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ * @param out   输出：主/备 PBA
+ * @return true 已取到；false 背压（未改状态）
+ */
 SSD_CODE_FAST bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES])
 {
     // 前置条件：调用者传 ftl->metadata_dir / &ftl->alloc / 栈上数组（调用链已保证）。
@@ -2246,6 +2419,15 @@ SSD_CODE_FAST bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD 
     return true;
 }
 
+/**
+ * @brief 释放在飞写回槽位（与 pair_append 严格配对）
+ *
+ * 期望恰好释放主/备两条；少/多由 ASSERT 暴露。
+ *
+ * @param dir     Directory
+ * @param primary 主副本 PBA
+ * @param backup  备副本 PBA
+ */
 SSD_CODE_FAST void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD backup)
 {
     BYTE released = 0U;
@@ -2263,6 +2445,16 @@ SSD_CODE_FAST void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD bac
     ASSERT(released == L2P_REGION_COPIES);
 }
 
+/**
+ * @brief 换指定 plane 的当前日志块
+ *
+ * 旧块无活 region 才登记回收；不在此擦介质。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ * @param plane 目标 plane
+ * @return true 已换块；false 无可用块 / 背压
+ */
 SSD_CODE_FAST bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 {
     if (plane >= PLANE_NUM)
@@ -2340,9 +2532,15 @@ SSD_CODE_FAST bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
     return true;
 }
 
-/* ⚠ 标 `noinline` 是**放置约束**，不是性能选择：本文件其余部分在 ITCM，而本函数在
- * Flash；若让 GCC 把它内联进同 TU 的调用者，那份循环会被复制进 ITCM（实测 +100 B，
- * release ITCM 只剩 ~300 B 余量）。保持外联 = 一次 Flash 调用，换 ITCM 预算。 */
+/**
+ * @brief 该 gblock 是否还有在飞写回槽位预留
+ *
+ * noinline 是放置约束：本文件其余部分在 ITCM，本函数留在 Flash 以省 ITCM。
+ *
+ * @param dir Directory
+ * @param g   全局块号
+ * @return true = 有预留（不得回收）
+ */
 SSD_CODE_FAST __attribute__((noinline)) bool md_slot_reserved(const md_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)

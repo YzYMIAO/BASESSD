@@ -26,7 +26,11 @@
 static fc_raid_context_t g_raid_ctx[LUN_NUM];
 static fc_raid_context_t g_raid_shadow[LUN_NUM];
 
-// 清空上下文与影子缓冲，使该 LUN 回到空闲态。
+/**
+ * @brief 清空该 LUN 的 RAID 上下文与影子缓冲
+ *
+ * @param lun LUN 号（< LUN_NUM）
+ */
 void fc_raid_init_ctx(BYTE lun)
 {
     // 前置条件由调用者保证（fc.c 按 LUN_NUM 循环传入）
@@ -36,7 +40,14 @@ void fc_raid_init_ctx(BYTE lun)
     memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_context_t));
 }
 
-// 把第一个 CW 拷入累加器，并置序列为进行中。
+/**
+ * @brief 以第一个 CW 作为 XOR 累加器初值，启动一次 parity 累积
+ *
+ * @param lun       LUN 号（< LUN_NUM）
+ * @param cw_buffer 首个 CW（528B）
+ * @param total     本组 CW 总数（含首个）
+ * @return FC_STATUS_OK / FC_STATUS_NOT_READY（该 LUN 已有活跃序列）
+ */
 fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
 {
     // 入参前置条件由调用者保证
@@ -58,7 +69,13 @@ fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
     return FC_STATUS_OK;
 }
 
-// 实现要点：按 32 位字对齐 XOR（528B / 4 = 132 字）。
+/**
+ * @brief 把一个 CW 按 32 位字异或进累加器
+ *
+ * @param lun       LUN 号（< LUN_NUM）
+ * @param cw_buffer CW（528B）
+ * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（无活跃序列）
+ */
 fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
 {
     WORD         i;
@@ -91,7 +108,13 @@ fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
     return FC_STATUS_OK;
 }
 
-// 把累加器结果拷出到 parity buffer，并复位序列状态。
+/**
+ * @brief 把累加器结果拷出为 parity CW 并复位序列状态
+ *
+ * @param lun           LUN 号（< LUN_NUM）
+ * @param parity_buffer 输出：528B parity
+ * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（无活跃序列）
+ */
 fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
 {
     // 入参前置条件由调用者保证
@@ -113,7 +136,11 @@ fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
     return FC_STATUS_OK;
 }
 
-// HSQ 打断保护：保存/恢复上下文（中断路径用）
+/**
+ * @brief 保存该 LUN 的 RAID 上下文到影子缓冲（HSQ 打断保护）
+ *
+ * @param lun LUN 号；越界时静默跳过
+ */
 void fc_raid_save(BYTE lun)
 {
     if (lun < LUN_NUM)
@@ -121,7 +148,11 @@ void fc_raid_save(BYTE lun)
         g_raid_shadow[lun] = g_raid_ctx[lun];
     }
 }
-
+/**
+ * @brief 从影子缓冲恢复该 LUN 的 RAID 上下文
+ *
+ * @param lun LUN 号；越界时静默跳过
+ */
 void fc_raid_restore(BYTE lun)
 {
     if (lun < LUN_NUM)
@@ -130,8 +161,17 @@ void fc_raid_restore(BYTE lun)
     }
 }
 
-// 实现要点：recovered 初始为 0，异或跳过 failed_idx 的所有 buffer；
-// 结果即 = 其余所有 buffer 的 XOR（RAID-5 重建公式）。
+/**
+ * @brief RAID-5 重建：recovered = 除 failed_idx 外所有 CW 的 XOR
+ *
+ * 异或自逆，结果与被恢复 CW 处于同一 scrambled domain。
+ *
+ * @param recovered  输出：重建结果（length 字节）
+ * @param buffers    CW 数组（NULL 项跳过）
+ * @param count      数组长度（非 0）
+ * @param failed_idx 失败 CW 下标（< count）
+ * @param length     重建长度（字节）
+ */
 void fc_raid_recover(BYTE *recovered, BYTE *buffers[], BYTE count, BYTE failed_idx, WORD length)
 {
     BYTE   i;

@@ -83,7 +83,11 @@ static BYTE fc_ecc_init_ldpc(void)
 }
 #endif
 
-// 字符串随编译宏在 "BCH(13,4)" / "LDPC" 之间切换，与 fc_bch_init(13, 4, …) 的就地参数一致。
+/**
+ * @brief 当前编译出的 ECC 算法名
+ *
+ * @return "BCH(13,4)" 或 "LDPC"（随 FC_ECC_ALGO 切换）
+ */
 const char *fc_ecc_algo_name(void)
 {
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
@@ -93,8 +97,17 @@ const char *fc_ecc_algo_name(void)
 #endif
 }
 
-// 实现要点：- BCH 分支：fc_bch_encode 生成 8B parity 写 data[520..527]。
-// - LDPC 分支：qc_encode 输入输出均为 528B 完整码字。
+/**
+ * @brief ECC 编码统一入口：对 data[0..data_length) 编码，parity 写在其后 8B
+ *
+ * BCH 分支由 fc_bch_encode 生成 8B parity；LDPC 分支以 528B 完整码字为输入输出。
+ * 引擎不可用时返回 NOT_SUPPORTED，由调用方按「跳过 ECC」处理。
+ *
+ * @param config      ECC 配置（当前由编译宏决定算法，未使用）
+ * @param data        CW 缓冲（528B）
+ * @param data_length 数据区字节数（≤ FC_BUFFER_DATA_SIZE = 520）
+ * @return FC_STATUS_OK / FC_STATUS_NOT_SUPPORTED
+ */
 fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length)
 {
     (void)config;
@@ -149,9 +162,15 @@ fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data
 #endif
 }
 
-// 实现要点：- BCH 分支：fc_bch_decode 返回错误位置数组，errloc<8*len 为数据区
-// 错误，按位翻转纠正；err_bits = 纠正数（0..t）。
-// - LDPC 分支：qc_decode 内部按 528B 码字直接操作。
+/**
+ * @brief ECC 解码统一入口：校验 data + 其后 8B parity，并原地纠正数据区
+ *
+ * @param config      ECC 配置（未使用）
+ * @param data        CW 缓冲（528B）
+ * @param data_length 数据区字节数（≤ FC_BUFFER_DATA_SIZE = 520）
+ * @param err_bits    输出：纠正的 bit 数（可 NULL）
+ * @return FC_STATUS_OK / FC_STATUS_NOT_SUPPORTED / FC_STATUS_IO_ERROR（不可纠）
+ */
 fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits)
 {
     (void)config;

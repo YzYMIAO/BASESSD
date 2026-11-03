@@ -40,7 +40,12 @@
 static DWORD s_group_underflow_log_ms;
 static DWORD s_group_underflow_n;
 
-// 清除 pending 项与 command_id 的映射；脱钩项（NONE）不登记，直接跳过。
+/**
+ * @brief 清除 pending 项与 command_id 的映射
+ *
+ * @param table pending 表
+ * @param req   待脱钩的请求槽；command_id 为 NONE 时跳过
+ */
 static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
 {
     const WORD cmd_id = req->command_id;
@@ -52,7 +57,11 @@ static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
     }
 }
 
-// 清空本实例的 pending 表、完成组表与 command_id 映射。
+/**
+ * @brief 清空本实例的 pending 表、完成组表与 command_id 映射
+ *
+ * @param table pending 表
+ */
 void pend_init(pending_ctx_t *table)
 {
     memset(table->slots, 0, sizeof(table->slots));
@@ -60,7 +69,13 @@ void pend_init(pending_ctx_t *table)
     memset(table->slot_of, 0xFF, sizeof(table->slot_of));
 }
 
-// 把已存在的 pending 槽绑定到新的 command_id（写重试替换命令时用）。
+/**
+ * @brief 把已有 pending 槽绑定到新的 command_id（写重试替换命令时用）
+ *
+ * @param table  pending 表
+ * @param req    pending 槽
+ * @param cmd_id 新 command_id
+ */
 void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id)
 {
     ASSERT(table != NULL);
@@ -76,7 +91,14 @@ void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id)
     table->slot_of[cmd_id] = index;
 }
 
-// 与 FC 命令脱钩：清映射并把 command_id 置哨兵；脱钩项只能按 op 查找。
+/**
+ * @brief 与 FC 命令脱钩：清映射并把 command_id 置哨兵
+ *
+ * 脱钩项只能按 op 查找。
+ *
+ * @param table pending 表
+ * @param req   待脱钩的槽
+ */
 void pend_detach_command(pending_ctx_t *table, pend_req_t *req)
 {
     ASSERT(table != NULL);
@@ -86,9 +108,15 @@ void pend_detach_command(pending_ctx_t *table, pend_req_t *req)
     req->command_id = FTL_PENDING_CMD_NONE;
 }
 
-// 认领槽位并绑定 command_id；表满或 id 越界返回 NULL。
-// ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P（见 pend_req_t 注释）。
-// ⚠ 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
+/**
+ * @brief 分配一个 pending 槽并绑定 command_id
+ *
+ * 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
+ *
+ * @param table  pending 表
+ * @param cmd_id 绑定的 command_id
+ * @return 槽指针；NULL = 池满
+ */
 pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id)
 {
     ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
@@ -112,7 +140,15 @@ pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id)
     return NULL; /* 表满 */
 }
 
-// 按 command_id 直接索引；映射为空/槽已释放/id 不匹配都返回 NULL。
+/**
+ * @brief 按 command_id 直接索引 pending 槽
+ *
+ * 映射为空 / 槽已释放 / id 不匹配都返回 NULL。
+ *
+ * @param table  pending 表
+ * @param cmd_id command_id
+ * @return 槽指针；NULL = 未找到
+ */
 pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
 {
     if (cmd_id >= FC_COMMAND_POOL_DEPTH)
@@ -137,7 +173,14 @@ pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
     return req;
 }
 
-// 置 used=0 释放槽位并清映射；未找到则 no-op（幂等，供完成路径重复调用）。
+/**
+ * @brief 释放一个 pending 槽并清映射
+ *
+ * 未找到则 no-op（幂等，供完成路径重复调用）。
+ *
+ * @param table  pending 表
+ * @param cmd_id command_id
+ */
 void pend_remove(pending_ctx_t *table, WORD cmd_id)
 {
     pend_req_t *req = pend_find(table, cmd_id);
@@ -149,9 +192,16 @@ void pend_remove(pending_ctx_t *table, WORD cmd_id)
     }
 }
 
-// 实现要点：供 Read Recovery 取走被托管的子操作——那些项的 command_id 已置
-// FTL_PENDING_CMD_NONE，pend_find 查不到，只能按 op 找。
-// 按下标升序 = 先进先出，与「托管顺序」一致（append-only，无移动）。
+/**
+ * @brief 按 op 找托管项（command_id 已置 NONE）
+ *
+ * 下标升序 = FIFO，与托管顺序一致。
+ *
+ * @param table     pending 表
+ * @param op        操作类型
+ * @param out_index 输出：槽下标
+ * @return true 找到；false 无托管项
+ */
 bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
@@ -169,7 +219,16 @@ bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index)
     return false;
 }
 
-// 按 op 查槽，把调用者需要的字段拷进出参；只读，不改槽状态。
+/**
+ * @brief 按 op 查槽并拷出只读视图
+ *
+ * 不改槽状态。
+ *
+ * @param table pending 表
+ * @param op    操作类型
+ * @param out   输出：视图
+ * @return true 找到；false 无托管项
+ */
 bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
 {
     BYTE idx = 0U;
@@ -189,9 +248,14 @@ bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
     return true;
 }
 
-// 实现要点：与 pend_remove 的差别只在寻址方式——托管项脱钩后无 command_id 可查，
-// 收尾只能按下标。⚠ 下标由 pend_find_op 产出且表无移动 ⇒ 恒有效，
-// 故越界一律 ASSERT，不静默 no-op。
+/**
+ * @brief 按索引释放托管项
+ *
+ * 下标由 pend_find_op 产出且表无移动 ⇒ 越界 ASSERT。
+ *
+ * @param table pending 表
+ * @param index 槽下标
+ */
 void pend_release_index(pending_ctx_t *table, BYTE index)
 {
     ASSERT(index < FTL_PENDING_MAX);
@@ -201,7 +265,14 @@ void pend_release_index(pending_ctx_t *table, BYTE index)
     table->slots[index].used = false;
 }
 
-// 是否存在不属于 cache 序列的写在飞（cache_role == NONE）：有则本 LBA 流不能再按序列续。
+/**
+ * @brief 是否有不属于 cache 序列的写在飞（cache_role == NONE）
+ *
+ * 有则本 LBA 流不能再按序列续。
+ *
+ * @param table pending 表
+ * @return true 有外部写；false 无
+ */
 bool pend_has_foreign_write(const pending_ctx_t *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
@@ -221,7 +292,14 @@ bool pend_has_foreign_write(const pending_ctx_t *table)
     return false;
 }
 
-// pend_slot_get_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度）
+/**
+ * @brief 本实例占用的 pending 槽位数
+ *
+ * ftl_service 档位判定用它近似 host IO 空闲度。
+ *
+ * @param table pending 表
+ * @return 占用槽位数
+ */
 WORD pend_slot_get_count(const pending_ctx_t *table)
 {
     WORD count = 0U;
@@ -239,8 +317,15 @@ WORD pend_slot_get_count(const pending_ctx_t *table)
 
 /* ── 完成组（pend_group_t）── */
 
-// 实现要点：组容量 = FTL_GROUP_MAX；清零保证 total/next/outstanding/agg_status
-// 从已知态起步。状态与数据分离（H38）：失败不得用非负的「组号」冒充。
+/**
+ * @brief 分配一个完成组
+ *
+ * 组容量 FTL_GROUP_MAX；清零保证从已知态起步。
+ *
+ * @param table  pending 表
+ * @param out_gi 输出：组下标
+ * @return true 已分配；false 组表满
+ */
 bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
@@ -257,7 +342,14 @@ bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi)
     return false; /* 组槽满 */
 }
 
-// pend_group_get_count — 占用（未完成）组数（有未完成组 = host 工作饿着 → 归 BUSY）
+/**
+ * @brief 未完成组数
+ *
+ * 有未完成组 = host 工作饿着 → 归 BUSY。
+ *
+ * @param table pending 表
+ * @return 组数
+ */
 WORD pend_group_get_count(const pending_ctx_t *table)
 {
     WORD count = 0U;
@@ -273,18 +365,25 @@ WORD pend_group_get_count(const pending_ctx_t *table)
     return count;
 }
 
-// 组 outstanding 下溢的限流日志：时间可用时 5 s 一行，缺时钟时 64 条一行。
+/**
+ * @brief 组 outstanding 下溢的限流日志
+ *
+ * @param who 触发者（静态字符串，日志用）
+ * @param gi  组下标
+ */
 static void pend_note_underflow(const char *who, WORD gi)
 {
     LOGE_IF(ftl_job_log_due(&s_group_underflow_log_ms, &s_group_underflow_n, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
 }
 
-// 实现要点：outstanding 是「已下发、未完成」的组不变量。add 是单字段 fast path，
-// 定义在 pending.h（`static inline`，H42）；本文件保留递减侧——完整完成走
-// pend_group_complete_subop_multi（聚合状态 + 完成通知），提交失败回滚走 drop
-// （不触发完成通知）。任一处漏掉即 host 写组永不完成、挂死（§3.1）。
-
-// 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
+/**
+ * @brief 撤销一个尚未提交的子操作（组在飞数 -1）
+ *
+ * 不触发完成通知；任一路径漏掉即 host 写组永不完成。
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ */
 void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
 {
     ASSERT(gi < FTL_GROUP_MAX);
@@ -306,14 +405,15 @@ void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
     }
 }
 
-// 实现要点：· caller 通知字段（complete_flag / status_out / on_complete）的**唯一写点**：
-// 由 ftl_host_io_callback 在子操作簿记后调用。
-// · owners 按值传入即局部副本，遍历它安全——回调（on_complete）可能重入复用组槽，
-// 但本循环只认传入的位掩码，不受槽位变动影响。
-// · 单组完成逻辑直接展开在循环内：本函数是唯一生产入口，省一层栈帧（栈预算 2 KiB）。
-// · agg_status **粘性**：仅当 sub_status != OK 时写入，一旦失败即保留首个错误，
-// 后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
-// · outstanding-- 后交 pend_group_maybe_complete 判是否整组完成。
+/**
+ * @brief 一条命令完成多个组的子操作
+ *
+ * agg_status 粘性；outstanding-- 后交 maybe_complete。
+ *
+ * @param table      pending 表
+ * @param owners     组位图
+ * @param sub_status 本子操作状态
+ */
 void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_status_e sub_status)
 {
     for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
@@ -348,12 +448,14 @@ void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_sta
     }
 }
 
-// 实现要点：· 完成条件：used 且 next==total（子操作已全部下发）且 outstanding==0
-// （已下发的都已完成）。任一不满足即直接返回——这是**负例守卫**（判据 8），
-// 保证通知绝不早发。
-// · 通知顺序：写 status_out → 置 complete_flag → 调 on_complete。
-// · ⚠ used=0 必须在**通知之后**：on_complete 回调可能重入 ftl_submit_*
-// 再申请组槽，若先清零则本槽可能被该重入立刻复用、又被这里清零。
+/**
+ * @brief 若组已归零则结算
+ *
+ * used=0 必须在通知之后（回调可能重入再申请槽）。
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ */
 void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
 {
     ASSERT(gi < FTL_GROUP_MAX);
@@ -381,7 +483,15 @@ void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
     g->used = false;
 }
 
-// 实现要点：只读扫描 groups[]，数组本身不暴露给 wbuf。
+/**
+ * @brief 该窗口是否还有未完成的组
+ *
+ * 只读扫描 groups[]；数组不暴露给 wbuf。
+ *
+ * @param table  pending 表
+ * @param window 窗口号
+ * @return true 仍有未完成组
+ */
 bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
@@ -410,9 +520,15 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
  * 顺序不变量（owners → release → complete）只在本文件的 pend_confirm_settle 内
  * 维护，调用者不碰 owners 与 release。 */
 
-// 把「已编程、确认未完成」的子操作转成待入账项（契约见 include/ftl/pending.h）。
-// 槽本身由写路径持有，这里只改 op / owners 两个字段；release 由结算侧（成功、
-// 失败或超时）唯一负责 —— 两侧都释放就是重复归还（C12）。
+/**
+ * @brief 把一个 pending 槽挂到组的待入账集合
+ *
+ * 失败或超时的释放由本函数唯一负责——两侧都释放就是重复归还（C12）。
+ *
+ * @param table       pending 表
+ * @param pending_idx pending 槽下标
+ * @param owners      组位图
+ */
 void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
 {
     ASSERT(pending_idx < FTL_PENDING_MAX);
@@ -427,6 +543,13 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
     pending->park_ms = ftl_job_now_ms();
 }
 
+/**
+ * @brief 结算一条待入账项（成功 / 失败）
+ *
+ * @param table  pending 表
+ * @param index  pending 槽下标
+ * @param status 结算状态
+ */
 void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
 {
     ASSERT(table != NULL);
@@ -443,6 +566,12 @@ void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
     pend_group_complete_subop_multi(table, owners, status);
 }
 
+/**
+ * @brief 待入账项数量
+ *
+ * @param table pending 表
+ * @return 数量
+ */
 WORD pend_confirm_get_count(const pending_ctx_t *table)
 {
     ASSERT(table != NULL);

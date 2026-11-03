@@ -12,6 +12,13 @@
 /* 无时钟（ftl_job_now_ms() == 0）时的条数兜底：抑制满这么多条放行一行。 */
 #define FTL_JOB_LOG_COUNT_FALLBACK (64U)
 
+/**
+ * @brief 起算心跳：记 start/log 并置 active
+ *
+ * 时钟缺失时 start=0，due 恒 false。
+ *
+ * @param hb 心跳对象
+ */
 void ftl_heartbeat_begin(ftl_heartbeat_t *hb)
 {
     hb->start_ms = ftl_job_now_ms();
@@ -19,6 +26,14 @@ void ftl_heartbeat_begin(ftl_heartbeat_t *hb)
     hb->active   = true;
 }
 
+/**
+ * @brief 心跳到点了吗
+ *
+ * 到点返回 true 并推进 log_ms：前 5 s 每 1 s，之后每 5 s。
+ *
+ * @param hb 心跳对象
+ * @return true 到点；false 未到点 / 未 active
+ */
 bool ftl_heartbeat_due(ftl_heartbeat_t *hb)
 {
     if (hb->active == false)
@@ -38,6 +53,13 @@ bool ftl_heartbeat_due(ftl_heartbeat_t *hb)
     return true;
 }
 
+/**
+ * @brief 清心跳基准
+ *
+ * 下一个 job 必须重新 begin。
+ *
+ * @param hb 心跳对象
+ */
 void ftl_heartbeat_end(ftl_heartbeat_t *hb)
 {
     hb->start_ms = 0U;
@@ -45,6 +67,14 @@ void ftl_heartbeat_end(ftl_heartbeat_t *hb)
     hb->active   = false;
 }
 
+/**
+ * @brief 初始化限流状态
+ *
+ * last=0 ⇒ 首次立即放行。
+ *
+ * @param rl          限流对象
+ * @param interval_ms 时间间隔
+ */
 void ftl_ratelimit_init(ftl_ratelimit_t *rl, DWORD interval_ms)
 {
     rl->last_ms     = 0U;
@@ -52,13 +82,29 @@ void ftl_ratelimit_init(ftl_ratelimit_t *rl, DWORD interval_ms)
     rl->suppressed  = 0U;
 }
 
+/**
+ * @brief 限流到点了吗
+ *
+ * 复用 ftl_job_log_due 的引擎；interval 由对象携带。
+ *
+ * @param rl 限流对象
+ * @return true 应打印；false 继续抑制
+ */
 bool ftl_ratelimit_due(ftl_ratelimit_t *rl)
 {
     return ftl_job_log_due(&rl->last_ms, &rl->suppressed, rl->interval_ms);
 }
 
-// 实现要点：时间优先；条数只在无时钟时兜底（有 clock 时 count 仅累计、不参与放行）。
-// 放行时复位 count / last_ms。
+/**
+ * @brief 日志限流引擎：时间优先，无时钟时按条数兜底
+ *
+ * 放行时复位 count / last_ms。
+ *
+ * @param last_ms     上次打印时刻（0 = 尚未打印）
+ * @param count       被抑制条数（可 NULL）
+ * @param interval_ms 时间间隔
+ * @return true 应打印；false 继续抑制
+ */
 bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms)
 {
     const DWORD now_ms = ftl_job_now_ms();

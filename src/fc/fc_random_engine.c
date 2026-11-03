@@ -23,12 +23,15 @@
  * 种子生成（唯一一种）
  * ══════════════════════════════════════════════════════════════════ */
 
-// 实现要点：- **折叠 32 → 16 位**：下游 LFSR 状态取 `seed & 0xFFFF`，若不折叠，
-// 扇区 LBA 相差 65536（= 32 MB）的两页会撞种子，而器件有 1M 扇区。
-// - 折叠后做雪崩混合（splitmix32 常量），让相邻 LBA 的种子充分分散
-// （同一页内 4 条 CW 的 LBA 只差 1，必须散开）。
-// - 非零保护：LFSR 全零是吸收态。
-// 与物理地址无关：GC 搬页后逻辑地址不变 ⇒ 密文不变（存储主控惯例）。
+/**
+ * @brief 由 CW 的 META 派生加扰种子
+ *
+ * 32→16 位折叠避免相差 64K 扇区的 LBA 撞种子，再做雪崩混合让相邻 LBA 充分
+ * 分散。与物理地址无关：GC 搬页后逻辑地址不变 ⇒ 密文不变。
+ *
+ * @param cw_meta 本 CW 的 META（逻辑地址）
+ * @return 非零 32 位种子
+ */
 DWORD fc_random_seed_from_meta(DWORD cw_meta)
 {
     // 折叠：高位并进低位，保住 32 位的全部信息
@@ -310,13 +313,24 @@ static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  * 公接口
  * ══════════════════════════════════════════════════════════════════ */
 
-// 加扰/解扰（XOR 对称；算法由编译宏决定）
+/**
+ * @brief 加扰/解扰（XOR 对称，算法由编译宏决定）
+ *
+ * @param data   数据缓冲（原地修改）
+ * @param length 字节数
+ * @param seed   fc_random_seed_from_meta 给出的种子
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_random_transform(BYTE *data, WORD length, DWORD seed)
 {
     return fc_random_transform_impl(data, length, seed);
 }
 
-// 当前算法名（调试用）
+/**
+ * @brief 当前编译出的加扰算法名
+ *
+ * @return 算法名（调试输出用）
+ */
 const char *fc_random_algo_name(void)
 {
 #if (FC_RANDOM_ALGO == FC_RANDOM_ALGO_XORSHIFT)

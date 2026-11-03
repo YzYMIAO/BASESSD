@@ -54,17 +54,12 @@
 #define FC_CW_BLANK_ONES_PCT (99U)
 
 /**
- * @brief 判断一条 CW 缓冲是否为**擦除页**（1 比特占比 ≥ FC_CW_BLANK_ONES_PCT）。
+ * @brief 判断一条 CW 是否为擦除页（1 比特占比 ≥ 99%）
  *
- * @param cw 528B CW buffer（META + CRC + USER + ECC parity）。
+ * 只在 ECC 解码失败后调用；解码成功的页不适用，避免误吞真实数据。
  *
- * @return true = 物理上从未编程。
- *
- * @note 实现要点：判据必须覆盖**整条 CW**，且必须在**解码路径**上用——
- *   · 只看 USER 区不够：用户数据可能恰好全 0xFF（如整 region 被 TRIM 的 L2P 页）；
- *   · 在 RAW 读上用也不够：RAW 读刻意跳过 ECC，拿到的只是位，判断空/非空的
- *     依据（ECC 是否成码字、parity 是否写成）全被跳过了。
- * ⚠ 只在 ECC 解码失败后调用：解码成功的页不解此判据（避免误吞真实数据）。
+ * @param cw 528B CW buffer（META + CRC + USER + ECC parity）
+ * @return true 物理上从未编程
  */
 static bool fc_cw_is_blank(const BYTE *cw)
 {
@@ -80,18 +75,14 @@ static bool fc_cw_is_blank(const BYTE *cw)
 
 #if CONFIG_FC_RAID
 /**
- * @brief 沿 desc 链收集命令所有 CW 的 buffer 基址。
+ * @brief 沿 desc 链收集命令所有 CW 的 buffer 基址
  *
- * @param cmd 命令
- * @param buffers 输出指针数组
- * @param max_count 容量上限（CW_TOTAL_MAX）。
+ * 索引与 desc 链位置对齐，供 RAID 解码路径操作全 CW。
  *
- * @return 收集到的 CW 数量。
- *
- * @note 实现要点：解码路径需操作全 CW，用 fc_buffer_get_base 取 528B 完整 CW
- * 基址（含 META/CRC/PARITY），索引与 desc 链位置对齐。
- * ⚠ 不输出 PAA 数组：解扰种子从 buffer 内的**明文 META** 自举，
- * PAA 这个唯一用途消失（§十七 判据 5）。
+ * @param cmd       命令
+ * @param buffers   输出指针数组
+ * @param max_count 容量上限（CW_TOTAL_MAX）
+ * @return 收集到的 CW 数量
  */
 static BYTE fc_collect_decode_buffers(const fc_command_t *cmd, BYTE *buffers[], BYTE max_count)
 {
@@ -130,13 +121,22 @@ static const fc_ldpc_config_t FC_DATA_PATH_LDPC_CFG = {
     .parity_bytes   = 8U,
     .max_iterations = 4U,
 };
-
+/**
+ * @brief 把本 CW 的 META 写入 CW 头部 [0..4)
+ *
+ * @param cw   528B CW buffer
+ * @param meta 扇区 LBA 派生的 META
+ */
 void fc_data_path_meta_write(BYTE *cw, DWORD meta)
 {
     ASSERT(cw != NULL);
     (void)memcpy(cw, &meta, FC_CRC_META_SIZE);
 }
-
+/**
+ * @brief 对明文 USER 区算 CRC 并写入 CW 的 CRC 字段 [4..8)
+ *
+ * @param cw 528B CW buffer（META 已写入）
+ */
 void fc_data_path_crc_write(BYTE *cw)
 {
     DWORD crc;
@@ -147,7 +147,14 @@ void fc_data_path_crc_write(BYTE *cw)
     crc = fc_crc_compute(cw + FC_CRC_USER_OFFSET);
     (void)memcpy(cw + FC_CRC_META_SIZE, &crc, FC_CRC_FIELD_SIZE);
 }
-
+/**
+ * @brief 加扰/解扰 CW 的 USER 区（XOR 自反）
+ *
+ * 加扰区 [8, 520)：META/CRC 保持明文，读路径才能从页内 META 自举种子。
+ *
+ * @param cw   528B CW buffer
+ * @param seed 由本 CW META 派生
+ */
 void fc_data_path_scramble(BYTE *cw, DWORD seed)
 {
     ASSERT(cw != NULL);
@@ -156,7 +163,14 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed)
     // 加解扰是同一个 XOR 变换（自反），故只有一个函数。
     (void)fc_random_transform(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, seed);
 }
-
+/**
+ * @brief 对 CW 数据区（520B）做 ECC 编码，parity 写入 [520, 528)
+ *
+ * 引擎未实现（NOT_SUPPORTED）视为跳过。
+ *
+ * @param cw 528B CW buffer（已加扰）
+ * @return FC_STATUS_OK / 编码错误
+ */
 fc_status_e fc_data_path_ecc_encode(BYTE *cw)
 {
     fc_status_e result;
@@ -168,7 +182,15 @@ fc_status_e fc_data_path_ecc_encode(BYTE *cw)
     // 引擎未实现（NOT_SUPPORTED）视为跳过——与管线原行为一致，不当作错误
     return (result == FC_STATUS_NOT_SUPPORTED) ? FC_STATUS_OK : result;
 }
-
+/**
+ * @brief 对 CW 做 ECC 解码并回填纠正 bit 数
+ *
+ * 不吞 NOT_SUPPORTED：调用者需把它当作「成功且零纠正」。
+ *
+ * @param cw       528B CW buffer
+ * @param ecc_bits 输出：纠正的 bit 数（可 NULL）
+ * @return FC_STATUS_OK / NOT_SUPPORTED / IO_ERROR（不可纠）
+ */
 fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
 {
     ASSERT(cw != NULL);
@@ -176,7 +198,12 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
     // 不吞 NOT_SUPPORTED：调用者（步骤 1）要把它当「成功但零纠正」处理
     return fc_ldpc_decode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE, ecc_bits);
 }
-
+/**
+ * @brief 重算 USER 区 CRC 并与 CW 内存储值比对
+ *
+ * @param cw 已解扰的 CW buffer
+ * @return true 一致；false 不一致
+ */
 bool fc_data_path_crc_check(const BYTE *cw)
 {
     DWORD stored_crc;
@@ -190,7 +217,17 @@ bool fc_data_path_crc_check(const BYTE *cw)
 
     return (computed_crc == stored_crc);
 }
-
+/**
+ * @brief META 两项校验：低 3 位自洽 + 与本命令 LBA 比对
+ *
+ * 自洽项先查：种子取自 META，META 损坏 ⇒ 解出垃圾且只会被报成 CRC_ERROR。
+ * command_meta == FC_META_UNKNOWN（GC 路径）时跳过第二项。
+ *
+ * @param cw           已解扰的 CW buffer
+ * @param command_meta 本命令的 META，或 FC_META_UNKNOWN
+ * @param paa          本 CW 的物理地址（取 plane/cw）
+ * @return 0 通过；FC_CW_STATUS_MATA_ERROR 不通过
+ */
 DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
 {
     DWORD read_meta;
@@ -229,13 +266,15 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
  * 编码 — FC 内部调用
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：- Stage 0：META 写入——每个 CW 的 meta 拷贝到 buffer[0..4]。
-// - Stage 1：CRC 编码（config.crc 使能时）——对 USER 区算 CRC 存 buffer[4..8]。
-// - Stage 1：加扰（config.random 使能时）——seed 由本 CW 的 **META（扇区 LBA）** 派生；
-// 加扰区 [FC_CRC_USER_OFFSET, FC_BUFFER_DATA_SIZE) —— **META/CRC 保持明文**，
-// 读路径才能从页内 META 自举出种子（GC / 掉电重建不知道 LBA）。
-// - Stage 2：ECC 编码（非 LDPC_RAW 模式）——对 520B 数据区编码，8B parity 写入。
-// - 跨命令 stripe RAID 由 fc_data_path_generate_stripe_parity() 单独处理。
+/**
+ * @brief 编码一条命令的全部 CW：META → CRC → 加扰 → ECC
+ *
+ * 四步只依赖本 CW 的 buffer，故合并为一次 desc 链遍历；先加扰再 ECC。
+ * 跨命令 stripe parity 由 fc_data_path_generate_stripe_parity() 负责。
+ *
+ * @param command 写命令
+ * @return FC_STATUS_OK / ECC 编码错误
+ */
 fc_status_e fc_data_path_encode(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -296,10 +335,17 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
 
 #if CONFIG_FC_RAID
 
-// 实现要点：- parity 的 CW 数须与数据命令一致（跨命令按 CW 对齐）。
-// - 数据区 FC_BUFFER_DATA_SIZE=520B 参与 XOR；ECC parity 区
-// [520..528] 不参与（由后续 ECC 编码生成）。
-// - XOR 累加：首条数据命令 memcpy 作初值，后续按 32-bit 字异或。
+/**
+ * @brief 生成跨平面 stripe 的 parity CW 并做 ECC 编码
+ *
+ * parity[cw][0..520) = XOR(各数据命令对应 CW 的 [0..520))；ECC parity 区
+ * 不参与 XOR，由本函数末尾的 ECC 编码生成。
+ *
+ * @param data_cmds  数据命令数组（plane 对称）
+ * @param data_count 数据命令数（非 0）
+ * @param parity_cmd parity 命令（CW 数须与数据命令一致）
+ * @return FC_STATUS_OK / ECC 编码错误
+ */
 fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[], BYTE data_count, const fc_command_t *parity_cmd)
 {
     BYTE               cw_count;
@@ -421,14 +467,15 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  * 读路径 Stage 1 — FC 内部，CQ push 前
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：- 步骤 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 的 1 比特
-// 占比 ≥ 99%（见 fc_cw_is_blank）的擦除页不算失败，置 EMPTY 后由后续步骤跳过。
-// - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
-// - 步骤 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外），
-// 故 GC / 掉电重建不必预先知道 LBA。
-// - 步骤 3：CRC 校验（使能时）——失败置 CRC_ERROR 位。
-// - 步骤 4：META 读回 + 两项校验：① 自洽（低 3 位 == 本 desc 的 plane/cw）；
-// ② 与本命令的 LBA 比对（command->meta 为 FC_META_UNKNOWN 时跳过）。任一不符置 MATA_ERROR。
+/**
+ * @brief 读路径 Stage 1：ECC 解码 → 解扰 → CRC → META 校验
+ *
+ * 任一 CW 不可纠即返回 IO_ERROR 且不解扰，供 FTL RAID 在 scrambled domain
+ * 恢复。擦除页（1 占比 ≥ 99%）置 EMPTY，不算失败。
+ *
+ * @param command 读命令（CQ push 前由 FC 内部调用）
+ * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
+ */
 fc_status_e fc_data_path_process_read(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -569,10 +616,15 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
 #if CONFIG_FC_RAID
 
-// 实现要点：- 收集全 CW buffer+PAA，XOR 重建 failed CW（scrambled domain 内）。
-// - ECC 重试：重建后仍不可纠 → 返回 IO_ERROR。
-// - 解扰所有 CW（seed 从各 CW 的明文 META 自举）。
-// - 沿 desc 链把所有 desc status 置 READY。
+/**
+ * @brief 读路径 Stage 2：RAID XOR 重建失败 CW 并重新解码
+ *
+ * 重建后 ECC 重试仍失败即硬件不可恢复；成功后解扰全 CW 并把 desc 置 READY。
+ *
+ * @param cmd           读命令
+ * @param failed_cw_idx 失败 CW 在 desc 链中的下标
+ * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
+ */
 fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx)
 {
     BYTE              *buffers[CW_TOTAL_MAX];

@@ -46,7 +46,13 @@ static BYTE wb_lba_bit(DWORD lba)
 
 /* ── 1. 查询 ── */
 
-// 查询：当前窗口内该 LBA 的槽位是否有数据（命中即可从缓冲直接读出）。
+/**
+ * @brief 查询该 LBA 在当前窗口的缓冲槽是否有数据
+ *
+ * @param h   wbuf handle
+ * @param lba 全局 host LBA
+ * @return true = 命中，可从缓冲直接读；false = 未命中 / 窗口未开
+ */
 bool wb_has(const wb_handle_t *h, DWORD lba)
 {
     if (h->open == false)
@@ -61,7 +67,16 @@ bool wb_has(const wb_handle_t *h, DWORD lba)
     return (h->occupied & wb_lba_bit(lba)) != 0U;
 }
 
-// 从缓冲拷出 1 IU；未命中返回 false 且不写 out（拷出后缓冲仍保持占用）。
+/**
+ * @brief 从缓冲拷出 1 IU
+ *
+ * 未命中不写 out；拷出后缓冲仍保持占用。
+ *
+ * @param h   wbuf handle
+ * @param lba 全局 host LBA
+ * @param out 输出 IU（调用者保证非 NULL）
+ * @return true = 命中并拷出；false = 未命中（out 未写）
+ */
 bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
 {
     if (wb_has(h, lba) == false)
@@ -370,7 +385,16 @@ static void wb_maybe_flush_idle(wb_handle_t *h)
 
 /* ── 5. typed 入口 ── */
 
-// 装配：整块清零（复位窗口/占用/组位图/计数）再绑定三个 owner 指针；不碰介质。
+/**
+ * @brief 初始化 wbuf handle
+ *
+ * 整块清零（窗口 / 占用 / 组位图 / 计数）后绑定 owner 指针；不碰介质。
+ *
+ * @param h       wbuf handle
+ * @param alloc   allocator
+ * @param pending pending 表
+ * @param migrate migrate handle
+ */
 void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_handle *migrate)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
@@ -418,13 +442,16 @@ static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
     out->drop_count    = h->drop_count;
 }
 
-// typed 入口：按 trigger->kind 分发给各 helper（[svc] 与 host 写路径共用）。
-// 契约（各 kind 的返回语义、缓冲保留规则）见 include/ftl/wbuf.h；此处只记实现要点：
-//   · 本函数只做分发，不承载任何一种触发的事件逻辑 —— 各自在 wb_append / wb_flush /
-//     wb_drop / wb_reset / wb_maybe_flush_idle 里。
-//   · h->error 记「最近一次操作是否失败」，供读路径（wb_has/wb_read）决定是否还信缓冲；
-//     APPEND 成功不清它 —— 失败状态只有下一次成功 FLUSH/RESET 才消除。
-//   · out 可为 NULL（多数调用点不需要状态上报）。
+/**
+ * @brief wbuf typed 入口：按 trigger->kind 分发
+ *
+ * 只做分发，不承载事件逻辑；h->error 只由下一次成功 FLUSH/RESET 清除。
+ *
+ * @param h       wbuf handle
+ * @param trigger 触发描述
+ * @param out     可选状态上报（可为 NULL）
+ * @return 各 kind 的返回语义见 wbuf.h
+ */
 ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t *out)
 {
     ftl_status_e st = FTL_OK;

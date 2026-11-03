@@ -197,8 +197,15 @@ static BYTE jrn_block_first_usable(const l2p_jrn_t *journal)
  * 2. 初始化
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：sequence_counter 从 1 起（0 保留作「无序号」）；page_buf 填 0xFF 表示
-// 空页（与 NAND 擦除态一致）。
+/**
+ * @brief 初始化 Journal：绑拓扑/allocator、复位环形游标与页缓冲
+ *
+ * sequence 从 1 起（0 = 无序号）；page_buf 填 0xFF = 空页（与擦除态一致）。
+ *
+ * @param journal Journal
+ * @param topo    本实例拓扑
+ * @param alloc   分配器（持续擦除失败 → 标坏）
+ */
 void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc)
 {
     // 前置条件：唯一调用点 ftl_init 传 &ftl->alloc（调用链已保证非空，不重复 ASSERT，H2/H49）。
@@ -268,16 +275,15 @@ static WORD jrn_page_capacity(const l2p_jrn_t *journal)
     return (journal->handle.state.page_kind == JRN_PAGE_SEG) ? (WORD)JRN_SEG_ENTRIES_PER_PAGE : (WORD)JRN_ENTRIES_PER_PAGE;
 }
 
-// 实现要点：· **不阻塞**：只可能调用 jrn_freeze() 起一条异步页写，绝不同步刷页 /
-// 调 ftl_sync_submit_wait / ftl_op_drain。成功与否由后续 service 轮推进。
-// · **留 1 个空槽**：要求 current_entry + entries < JRN_ENTRIES_PER_PAGE。
-// 追加结束后 current_entry 不会达到页满，jrn_append 的页满分支
-// 在调用链上结构性不可达。
-// · 合并（同 LBA 就地更新）只会减少实际占槽数，因此按最坏情况 entries 预留是安全的；
-// 多预留只会让页提前异步刷出，不影响正确性。
-// · 顺序页专用于顺序流（顺序条目不携带 LBA，混装会破坏隐式坐标）：普通条目
-//   遇到顺序页时先把该页刷出（**空页也刷**——顺序确认是异步的，"此刻为空"不等于
-//   "以后不会有顺序条目"，只有刷出后才能安全改作普通页），调用者下轮重试。
+/**
+ * @brief 为一页追加预留 entries 条容量
+ *
+ * 不阻塞：页满只起异步 jrn_freeze；起不来留给 jrn_handle 下轮刷。
+ *
+ * @param journal Journal
+ * @param entries 本次要追加的条数
+ * @return true 已预留；false 当前页放不下（调用者待入账后重试）
+ */
 bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
 {
     ASSERT(entries < JRN_ENTRIES_PER_PAGE);
@@ -321,11 +327,18 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries)
     return ((DWORD)journal->handle.state.current_entry + entries) < JRN_ENTRIES_PER_PAGE;
 }
 
-// 实现要点：· 页满（current_entry 达 JRN_ENTRIES_PER_PAGE）只起**异步**刷页（jrn_freeze）；
-// 起不来（job 忙 / 命令池空 / 待擦）时**任何上下文都不做同步回退**——同步刷页
-// 会重入完成派发。整页留给 jrn_handle 后续轮刷出，后续 append 丢弃并 LOGE。
-// · 需要“不丢条目”的调用者先用 jrn_reserve 预留：host 写确认、GC/WL 搬移、
-// TRIM job 都走这条。
+/**
+ * @brief 追加一条通用映射日志（16B）
+ *
+ * 页满只异步刷页；起不来时不同步回退（会重入完成派发）。需要不丢条目的调用者
+ * 先 jrn_reserve。
+ *
+ * @param journal Journal
+ * @param lba     host LBA
+ * @param old_pba 旧 PBA
+ * @param new_pba 新 PBA
+ * @return true 已追加；false 环满 / 页满且刷不动（后续追加丢弃并 LOGE）
+ */
 bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
 {
     // 环全部不可用：当前页缓冲永远刷不出去，追加只会制造“看起来记下了”的假象。
@@ -397,7 +410,16 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
 
 /* ── 顺序流映射页 ── */
 
-// 开启/续用一张顺序映射页：页型对、空间够且 LBA 连续才续；否则先刷旧页再换新页。
+/**
+ * @brief 开启/续用一张顺序映射页
+ *
+ * 页型对、空间够且 LBA 连续才续；否则先刷旧页再换新页。
+ *
+ * @param journal Journal
+ * @param lba     首条 LBA
+ * @param need    本段需要的条目数
+ * @return true 可写入；false 需先刷页（调用者下轮重试）
+ */
 bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need)
 {
     if (journal->handle.state.ring_full)
@@ -430,7 +452,12 @@ bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need)
     return true;
 }
 
-// 当前顺序页还能装几条（非顺序页 / 已满返回 0）。
+/**
+ * @brief 当前顺序页还能装几条
+ *
+ * @param journal Journal
+ * @return 剩余条数；非顺序页 / 已满返回 0
+ */
 WORD jrn_seq_room(const l2p_jrn_t *journal)
 {
     if (journal->handle.state.page_kind != JRN_PAGE_SEG)
@@ -445,7 +472,13 @@ WORD jrn_seq_room(const l2p_jrn_t *journal)
     return (WORD)(JRN_SEG_ENTRIES_PER_PAGE - journal->handle.state.current_entry);
 }
 
-// 预判本段能否放进当前页（不刷页、不改状态）；不足由调用者待入账后重试。
+/**
+ * @brief 预判本段能否放进当前页（不刷页、不改状态）
+ *
+ * @param journal Journal
+ * @param entries 本段条目数
+ * @return true 放得下；false 不足（调用者待入账后重试）
+ */
 bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries)
 {
     ASSERT(entries < JRN_SEG_ENTRIES_PER_PAGE);
@@ -467,7 +500,16 @@ bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries)
     return (journal->handle.state.current_entry == 0U); /* 空普通页可转顺序页；非空 ⇒ 本窗口必须 END */
 }
 
-// 追加前检查：页型/空间/LBA 连续任一不满足就先刷页并返回 false（调用者下轮重试）。
+/**
+ * @brief 追加前检查：页型/空间/LBA 连续
+ *
+ * 任一不满足就先刷页并返回 false（调用者下轮重试）。
+ *
+ * @param journal Journal
+ * @param lba     首条 LBA
+ * @param entries 本段条目数
+ * @return true 可直接追加；false 需先刷页
+ */
 bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries)
 {
     ASSERT(entries < JRN_SEG_ENTRIES_PER_PAGE);
@@ -510,7 +552,16 @@ bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries)
     return false;
 }
 
-// 追加一条顺序映射条目（4B，LBA 隐式 = 页基准 + 下标）；页满才起异步刷页，不在此同步刷。
+/**
+ * @brief 追加一条顺序映射条目（4B，LBA 隐式 = 页基准 + 下标）
+ *
+ * 页满才起异步刷页，不在此同步刷。
+ *
+ * @param journal Journal
+ * @param lba     host LBA
+ * @param new_pba 新 PBA
+ * @return true 已追加；false 页满且刷不动（丢弃并 LOGE）
+ */
 bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba)
 {
     if (journal->handle.state.ring_full)
@@ -556,7 +607,7 @@ bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba)
  *
  * @param journal Journal。
  *
- * @note 实现要点：hdr_page_seq 由 `sequence_counter − current_entry` **反推**本页首条序号
+ * @note hdr_page_seq 由 `sequence_counter − current_entry` **反推**本页首条序号
  * （与 jrn_append 的就地合并约定耦合，二者必须同步）。
  * memcpy 写入以避免 alignment 警告。
  */
@@ -584,7 +635,7 @@ static void jrn_header_write(l2p_jrn_t *journal)
  * @return true = 已异步起写（调用者不必再同步刷）；
  *         false = 未能起（job 忙 / 池空 / 建链失败），此时 page_buf 与写指针**原样未动**，调用者应返 FTL_AGAIN / 下一轮重试。
  *
- * @note 实现要点：· **单飞行**：phase != JRN_IDLE 直接拒绝——两条写会争同一个页地址。
+ * @note · **单飞行**：phase != JRN_IDLE 直接拒绝——两条写会争同一个页地址。
  * · **待偿擦除也不许写**：need_erase 置位说明当前环形块**还没擦过**（换块后
  * 擦命令没起起来），此时往里写就是往没擦的块编程 ⇒ 同样拒绝。
  * （jrn_handle 会先补擦，再起页写。）
@@ -681,7 +732,7 @@ static bool jrn_freeze(l2p_jrn_t *journal)
  * @return true = 已起（phase = JRN_ERASE，need_erase 已清）
  *         false = 未起（池空 / 建链失败， need_erase 保留，由 jrn_handle 下轮重试）。
  *
- * @note 实现要点：擦的是**已推进到**的新环形块，故必须在任何页写进该块之前完成。
+ * @note 擦的是**已推进到**的新环形块，故必须在任何页写进该块之前完成。
  */
 static bool jrn_erase_start(l2p_jrn_t *journal)
 {
@@ -713,7 +764,7 @@ static bool jrn_erase_start(l2p_jrn_t *journal)
  * @param journal Journal
  * @param block 失败的环形块。
  *
- * @note 实现要点：· 标坏 = RAM bad_mask + （分配器已绑定时）bbt_mark_bad 两个 plane 的块。
+ * @note · 标坏 = RAM bad_mask + （分配器已绑定时）bbt_mark_bad 两个 plane 的块。
  * BBT 持久化后，重启时 bbt_init 会把块置 BAD，jrn_ring_block_bad 直接跳过。
  * · 跳到下一个可用块；若全部不可用 ⇒ ring_full，journal 停止写入（不写未擦块、
  * 也不再无限重试擦除）。
@@ -774,8 +825,14 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
 
 /* ── 状态上报（主流程只读这个，不窥探 handle 内部） ── */
 
-// 实现要点：job 已在飞 ⇒ 只做心跳（单飞行）。有未起的擦除时**优先补擦**：
-// 新环形块没擦过就不能往里写。ERASE_ONLY 到此为止（host 饱和档让路）。
+/**
+ * @brief 推进 Journal job：刷页 / 换块擦除
+ *
+ * 单飞行：在飞只心跳；有未起擦除时优先补擦（新块未擦不能写）。
+ *
+ * @param journal Journal
+ * @param trigger 触发信息（可 NULL = 服务轮）
+ */
 void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger)
 {
     const bool erase_only = (trigger != NULL) && (*trigger == JRN_TRIGGER_ERASE_ONLY);
@@ -818,7 +875,14 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger)
 }
 
 /* ── 查询（替代外部直读 handle 字段） ── */
-// CP 起点水位 ≥ 失败点才清失败标志；否则保留等下一次 CP。
+/**
+ * @brief 尝试清除持久性失败标志
+ *
+ * CP 起点水位 ≥ 失败点才清；否则保留等下一次 CP。
+ *
+ * @param journal        Journal
+ * @param cp_journal_seq 本次 CP 的 journal 水位
+ */
 void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq)
 {
     // CP 起点水位 ≥ 失败点 ⇒ 该 CP 在失败之后快照了脏区并把 L2P 落盘；
@@ -829,19 +893,39 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq)
     }
 }
 
-// 置 Checkpoint 请求位（外部触发；真正起 CP 由调度器决定）。
+/**
+ * @brief 置 Checkpoint 请求位（外部触发）
+ *
+ * 真正起 CP 由调度器决定。
+ *
+ * @param journal Journal
+ */
 void jrn_checkpoint_request(l2p_jrn_t *journal)
 {
     journal->handle.state.checkpoint_needed = true;
 }
 
-// 设置同 LBA 就地合并的下限序号（更早的条目不再参与合并）。
+/**
+ * @brief 设置同 LBA 就地合并的下限序号
+ *
+ * 更早的条目不再参与合并，避免 CP 后的覆盖写复用旧 sequence。
+ *
+ * @param journal  Journal
+ * @param sequence 合并在该 sequence 之后才允许
+ */
 void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence)
 {
     journal->handle.state.merge_floor = sequence;
 }
 
-// 全环占用百分比（全局写位置口径，封顶 100）；供 85%/95% 阈值判断。
+/**
+ * @brief 全环占用百分比（全局写位置口径，封顶 100）
+ *
+ * 供 85% / 95% 阈值判断。
+ *
+ * @param journal Journal
+ * @return 0..100
+ */
 BYTE jrn_watermark_get(const l2p_jrn_t *journal)
 {
     // 全环全局口径（按已写页 × 每页条目数）：分子是「全局写位置」，不是单块内
@@ -857,7 +941,13 @@ BYTE jrn_watermark_get(const l2p_jrn_t *journal)
     return (percent > 100U) ? (BYTE)100U : (BYTE)percent;
 }
 
-// 按当前占用更新紧急/需 Checkpoint 两个标志（只置位；截断后由 commit 复位）。
+/**
+ * @brief 按当前占用更新紧急 / 需 Checkpoint 标志
+ *
+ * 只置位；截断后由 commit 复位。
+ *
+ * @param journal Journal
+ */
 void jrn_watermark_update(l2p_jrn_t *journal)
 {
     const BYTE used = jrn_watermark_get(journal);
@@ -996,9 +1086,15 @@ static void jrn_erase_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
     (void)fc_command_release(cmd);
 }
 
-// 实现要点：按 job.phase 分派到 jrn_write_complete / jrn_erase_complete
-// （见各自注释）。job.phase 只能取 WRITE / ERASE，其余是状态机破坏 ⇒
-// 这里的 ASSERT 只覆盖 debug，release 兜底分支见函数体。
+/**
+ * @brief Journal 命令完成服务
+ *
+ * 只按 job.phase 分派，不推进状态机（阶段里有同步原语，泵内会嵌套）。
+ *
+ * @param ftl        完成派发解析出的实例
+ * @param completion FC 完成状态
+ * @param ctx        l2p_jrn_t *
+ */
 void ftl_journal_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_jrn_t *journal = (l2p_jrn_t *)ctx;
@@ -1061,7 +1157,7 @@ static SSD_CODE_FAST bool jrn_page_raw_blank(DWORD addr)
  *
  * @return 环内非空页的读失败数（0 = 全部可读）
  *
- * @note 实现要点：只读 NAND，**不改 journal 状态**（怎么用由调用方决定）。
+ * @note 只读 NAND，**不改 journal 状态**（怎么用由调用方决定）。
  * 需回放判据是**整页**的：`page_seq + entry_count > cp_sequence`。
  * 只看页首页序号会把跨水位的那一页整页跳过——它页尾的新条目
  * （> cp_sequence）随页面一起丢。
@@ -1181,6 +1277,14 @@ static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_seque
     return read_errors;
 }
 
+/**
+ * @brief 扫环找最新的有效页
+ *
+ * @param journal        Journal
+ * @param out            输出：最新页引用
+ * @param out_read_error 输出：是否遇到读错误
+ * @return true 找到；false 环内无有效页
+ */
 SSD_CODE_FAST bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error)
 {
     const WORD read_errors = jrn_ring_scan(journal, 0U, NULL, 0U, NULL, out);
@@ -1197,13 +1301,15 @@ SSD_CODE_FAST bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t
     return (out != NULL) && (out->page_seq > 0U);
 }
 
-// 实现要点：① 落点是最新页**之后一页**——最新页已编程，续填会在页满时对同一页
-// 二次编程（NAND 只能 1→0 ⇒ 页头 entry_count 被 AND 成错值）；
-// ② 跨块时先擦下一块（那里还留着上一圈的旧页）；**不记账
-// pre_erased_block**——那块马上会被写满，下一圈回切时仍需按常规擦一次。
-// 擦除失败 ⇒ 重新挂起 `job.need_erase`，首次写前由 kick/flush 补擦；
-// ③ 序号取 max(最新页序号 + 1, floor)，0 抬到 1（0 保留作「无序号」，
-// 与 jrn_init 同约定；否则 journal_truncate 的水位校验会被 0 挡掉）。
+/**
+ * @brief 从最新页恢复写点
+ *
+ * 写点 = 最新页下一页；跨块先擦但不记 pre_erased（马上会被写满）。
+ *
+ * @param journal        Journal
+ * @param latest         最新页引用
+ * @param floor_sequence 回放 / 合并下限
+ */
 SSD_CODE_FAST void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence)
 {
     DWORD next          = floor_sequence;
@@ -1337,6 +1443,16 @@ static SSD_CODE_FAST void jrn_replay_note_fail(jrn_replay_ctx_t *c, BYTE reason,
     }
 }
 
+/**
+ * @brief 应用单页回放：按 META 的 LBA 写 L2P，跳过读失败/越界条目
+ *
+ * @param journal     Journal
+ * @param cache       L2P cache
+ * @param page        待回放页（block/page）
+ * @param cp_sequence CP 水位；sequence ≤ 水位的条目不回放
+ * @param block_ctx   回放上下文（记录首次失败）
+ * @return 成功写入 L2P 的条目数
+ */
 static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {
     DWORD raddr = jrn_page_addr(journal, page->block, page->page);
@@ -1478,15 +1594,19 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
     return applied;
 }
 
-// 实现要点：· 第一遍（jrn_ring_scan）收集「需回放页」进栈上数组 replay_pages[]
-// （JOURNAL_BLOCK_COUNT 块 × PAGES_PER_BLOCK 页，共 256 项 8B = 2KB；
-// ⚠ 256 > 255 ⇒ 计数/下标必须 WORD，BYTE 会死循环），
-// 同时取到最新页用于恢复写指针。
-// · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
-// 条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
-// · 末尾 jrn_resume 把写指针落到最新页之后并接续序号。
-// · out_entries 由应用循环按**成功写入 L2P 的条目**累加（读失败页 / 越界 LBA
-// 不计）——不能用 journal 的 RAM 写指针反推：jrn_resume 会清 current_entry。
+/**
+ * @brief 回放 CP 之后的所有 Journal 条目
+ *
+ * 两遍：扫描收集需回放页（256 项，计数用 WORD）→ 插入排序 → 按 LBA
+ * last-write-wins；out_entries 只计成功写入 L2P 的条目。
+ *
+ * @param journal     Journal
+ * @param cache       L2P cache
+ * @param cp_sequence CP 水位
+ * @param out_entries 输出：成功回放条数
+ * @param block_ctx   回放上下文（块账回调 / 失败归因）
+ * @return FTL_OK；FTL_ERROR 关键页读失败
+ */
 SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx)
 {
     // JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。
@@ -1560,7 +1680,13 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DW
     return FTL_OK;
 }
 
-// 最近一次回放的「降级 region 条目」数（只读；供 PFR 判断是否走了范围化恢复）。
+/**
+ * @brief 最近一次回放的「降级 region 条目」数（只读）
+ *
+ * 供 PFR 判断是否走了范围化恢复。
+ *
+ * @return 条目数
+ */
 DWORD jrn_replay_degraded_entries(void)
 {
     return s_replay_degraded_entries;
@@ -1570,9 +1696,17 @@ DWORD jrn_replay_degraded_entries(void)
  * 8. 截断
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：① 水位校验：若水位不足以覆盖全部已写条目，**不截断**（最旧块可能仍持有回放
-// 需要的条目，擦掉即丢数据）；sequence_counter == 0 一并挡掉避免下溢。
-// ② 待擦块 = 环形下一块；已预擦过（pre_erased_block）⇒ 无需重擦。
+/**
+ * @brief 计算 Journal 环形预擦计划
+ *
+ * 水位不足以覆盖全部已写条目 ⇒ 不截断（最旧块可能仍持有回放条目）。
+ *
+ * @param journal        Journal
+ * @param up_to_sequence 截断水位
+ * @param out_addr       输出：待擦块基地址
+ * @param out_block      输出：待擦环形块号
+ * @return NEEDS_ERASE / ALREADY / NO_TRUNCATE
+ */
 jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, DWORD *out_addr, BYTE *out_block)
 {
     // ① 水位校验。
@@ -1607,7 +1741,12 @@ jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, 
     return JRN_TRUNC_NEEDS_ERASE;
 }
 
-// 截断提交：记下本圈已擦块（避免二次擦）；无持久性失败时复位水位标志。
+/**
+ * @brief 提交截断：记下本圈已擦块、无失败时复位水位标志
+ *
+ * @param journal      Journal
+ * @param erased_block 已擦块号（JRN_BLOCK_NONE = 未擦）
+ */
 void jrn_truncate_commit(l2p_jrn_t *journal, BYTE erased_block)
 {
     // 记账：异步 job 回切到该块时跳过擦除——保证同一块每圈只擦一次。

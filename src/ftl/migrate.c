@@ -408,7 +408,7 @@ static ftl_status_e mig_erase_submit(mig_handle_t *m)
  * @param reason 观测原因
  * @param triggers 触发计数快照。
  *
- * @note 实现要点：**快路径**——各 plane valid_count 之和 == 0 ⇒ 直接进 ERASE（省整块 NAND
+ * @note **快路径**——各 plane valid_count 之和 == 0 ⇒ 直接进 ERASE（省整块 NAND
  * 读；整块空洞 plane 的根因已由页打包写缓冲消除）。
  * victim 按值拷贝：closed_sb_list 在搬移期间可能被 allocator 追加/挪动，
  * 持指针会让「本 job 的 victim」随列表漂移（allocator.h 不变量③）。
@@ -913,7 +913,7 @@ static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
  *
  * @param m migrate handle。
  *
- * @note 实现要点：定位 victim 在 closed_sb_list 的索引由 allocator 统一完成（比对全部 plane；
+ * @note 定位 victim 在 closed_sb_list 的索引由 allocator 统一完成（比对全部 plane；
  * Policy B 下退化单 plane 条目的哨兵 plane 相同，只比一个 plane 会命中另一条）。
  * aborted ⇒ 不做任何列表/计数变更（victim 未被擦，仍有效）。
  */
@@ -1893,7 +1893,7 @@ static bool mig_erase_step(mig_handle_t *m)
  *
  * @param m migrate handle。
  *
- * @note 实现要点：提交失败（背压）⇒ 原地返回，由 mig_handle 下轮重试同一阶段（幂等）；
+ * @note 提交失败（背压）⇒ 原地返回，由 mig_handle 下轮重试同一阶段（幂等）；
  * 连续超过 FTL_SUBMIT_TIMEOUT_MS 无进展 ⇒ 中止。永久错误立即中止。
  */
 static void mig_job_step(mig_handle_t *m)
@@ -1984,7 +1984,17 @@ static void mig_job_step(mig_handle_t *m)
 
 /* ── 6. typed handle（端口装配 / 触发 / 自持节拍 / 上报）── */
 
-// 装配：整块清零、绑定 alloc/journal/cache 端口、失败块表置无效；不碰介质。
+/**
+ * @brief 装配 migrate handle
+ *
+ * 整块清零、绑定端口、失败块表置无效；不碰介质。
+ *
+ * @param m            handle
+ * @param alloc        分配器
+ * @param journal      Journal
+ * @param cache        L2P cache
+ * @param total_writes 累计写计数指针
+ */
 void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
@@ -2005,7 +2015,13 @@ void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *ca
     m->state.error = FTL_OK;
 }
 
-// 置紧急 GC 请求位（wb_flush 取不到页对时调用）：只排队，下一轮求值才真正触发。
+/**
+ * @brief 置紧急 GC 请求位
+ *
+ * 只排队，下一轮求值才真正触发。
+ *
+ * @param m handle
+ */
 void mig_gc_request_urgent(mig_handle_t *m)
 {
     // 句柄由调用者持有：生产路径恒为 &ftl->mig_*；wb_flush 的可选端口分支已在
@@ -2112,7 +2128,14 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
     m->state.session.aborted   = 0U;
 }
 
-// 每轮入口：只做在飞推进、会话收尾、紧急 GC。周期求值见 mig_eval（timer 表调用）。
+/**
+ * @brief 搬移引擎每轮入口
+ *
+ * 只做在飞推进、会话收尾、紧急 GC；周期求值见 mig_eval。
+ *
+ * @param m     handle
+ * @param level 本轮后台档位
+ */
 void mig_handle(mig_handle_t *m, bg_level_e level)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -2171,9 +2194,13 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
     }
 }
 
-// 周期求值（timer 表每 GC_EVAL_INTERVAL_MS 唤醒）：GC → WL 5s → predict 1s；每轮最多一个 job。
-// ⚠ 时钟分配：timer 的 now_ms（TIM6）只是唤醒节拍，不参与 FTL 时间戳；本函数内所有
-//   deadline/interval 一律读 ftl_job_now_ms()（SysTick），与 mig_handle / mig_job_* 同源。
+/**
+ * @brief GC 周期求值入口（timer 10ms）
+ *
+ * WL/predict 由各自 timer 任务驱动；三者共享 job.active 单飞行。
+ *
+ * @param m handle
+ */
 void mig_eval(mig_handle_t *m)
 {
     const DWORD now_ms = ftl_job_now_ms();
@@ -2218,8 +2245,14 @@ void mig_eval(mig_handle_t *m)
     }
 }
 
-// WL 求值（timer 表每 WL_EVAL_INTERVAL_MS 唤醒）。单飞行/熔断/紧急 GC 由 m->job.active 仲裁；
-// GC 任务注册在前，同一轮先跑 ⇒ GC 起了 job 时这里会看到 active 而跳过。
+/**
+ * @brief WL 周期求值（timer 表每 WL_EVAL_INTERVAL_MS 唤醒）
+ *
+ * 单飞行/熔断/紧急 GC 由 m->job.active 仲裁；GC 任务注册在前，同一轮先跑 ⇒
+ * GC 起了 job 时这里看到 active 即跳过。
+ *
+ * @param m handle
+ */
 static void mig_wl_eval(mig_handle_t *m)
 {
     if (m->job.active || m->state.failure.paused || m->state.urgent_gc || (m->state.level != BG_LEVEL_IDLE))
@@ -2239,7 +2272,11 @@ static void mig_wl_eval(mig_handle_t *m)
     }
 }
 
-// predict 求值（timer 表每 RR_SCAN_INTERVAL_MS 唤醒）。
+/**
+ * @brief predict 周期求值（timer 表每 RR_SCAN_INTERVAL_MS 唤醒）
+ *
+ * @param m handle
+ */
 static void mig_predict_eval(mig_handle_t *m)
 {
     if (m->job.active || m->state.failure.paused || m->state.urgent_gc || (m->state.level != BG_LEVEL_IDLE))
@@ -2250,24 +2287,48 @@ static void mig_predict_eval(mig_handle_t *m)
     (void)mig_predict_begin(m);
 }
 
+/**
+ * @brief timer 回调：GC 求值
+ *
+ * @param context mig_handle_t *
+ * @param now_ms  timer 快照（FTL 时间戳仍由 mig_eval 内部读 SysTick）
+ */
 static void mig_eval_task(void *context, DWORD now_ms)
 {
-    (void)now_ms; /* TIM6 只负责唤醒；FTL 时间戳由 mig_eval 内部读 SysTick。 */
+    (void)now_ms;
     mig_eval((mig_handle_t *)context);
 }
 
+/**
+ * @brief timer 回调：WL 求值
+ *
+ * @param context mig_handle_t *
+ * @param now_ms  timer 快照（未使用）
+ */
 static void mig_wl_eval_task(void *context, DWORD now_ms)
 {
     (void)now_ms;
     mig_wl_eval((mig_handle_t *)context);
 }
 
+/**
+ * @brief timer 回调：predict 求值
+ *
+ * @param context mig_handle_t *
+ * @param now_ms  timer 快照（未使用）
+ */
 static void mig_predict_eval_task(void *context, DWORD now_ms)
 {
     (void)now_ms;
     mig_predict_eval((mig_handle_t *)context);
 }
 
+/**
+ * @brief 注册 GC/WL/predict 三个 timer 任务（幂等）
+ *
+ * @param m handle
+ * @return true 已注册 / 本次成功；false timer 表满
+ */
 bool mig_timer_register(mig_handle_t *m)
 {
     ASSERT(m != NULL);
@@ -2614,7 +2675,15 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
     mig_job_step(m);
 }
 
-// FC 完成派发：按当前 phase 结算搬移命令再步进 job；ctx 为空 = 迟到完成，只释放命令不解引用。
+/**
+ * @brief 搬移命令完成服务
+ *
+ * 按 phase 结算再步进 job；ctx 为空 = 迟到完成，只释放命令不解引用。
+ *
+ * @param ftl        实例
+ * @param completion FC 完成状态
+ * @param ctx        mig_handle_t *
+ */
 void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。

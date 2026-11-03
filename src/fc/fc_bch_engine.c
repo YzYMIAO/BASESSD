@@ -277,10 +277,17 @@ static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
     memcpy(dst, pad, BCH_ECC_BYTES(bch) - 4 * nwords);
 }
 
-// 实现要点：4 查找表并行（每输入 32bit 分 4 字节查表异或），
-// 首尾非对齐段用 bch_encode_unaligned 兜底。
-// 入参前置违反（bch/data 为空）一律 ASSERT；ecc 可为 NULL 是
-// 有意的可选参数语义（增量计算），保留。
+/**
+ * @brief 计算数据段的 BCH 校验字
+ *
+ * 4 张查找表并行处理对齐的 32bit 段，首尾非对齐段逐字节兜底。
+ * ecc 非 NULL 时以其为初值并写回（增量计算），为 NULL 时从零算起。
+ *
+ * @param bch  BCH 控制句柄
+ * @param data 数据段
+ * @param len  字节数
+ * @param ecc  校验字缓冲（ecc_bytes 字节，可 NULL）
+ */
 void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, BYTE *ecc)
 {
     ASSERT(bch != NULL);
@@ -1117,14 +1124,22 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  * 解码（综合式 → BM → 求根 → 纠错位置输出）
  * ═══════════════════════════════════════════════════════════════════ */
 
-// 实现要点：- 入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT：
-// 它们由调用者保证（fc_ldpc_engine 传常量 len=FC_BUFFER_DATA_SIZE），
-// 若走 -1 会与"不可纠"哨兵撞车，被上游误判为不可纠、CW 静默置 UNC。
-// - 无 calc_ecc/syn 时：先编码 data 得预期校验，与 recv_ecc 异或
-// （= 错误综合式），全零则无错返回 0。
-// - BM 求 σ；求根得 errloc；errloc 换算为 bit 位置
-// （含 swap_bits / 位序翻转修正）。
-// - 错误数 ≠ 根数 → 不可纠。
+/**
+ * @brief 解码并给出错误 bit 位置
+ *
+ * 无 syn 时先用 data 与 recv_ecc 的差算综合式；BM 求错误位置多项式，
+ * 求根得错误位置。错误数 ≠ 根数，或根越界 ⇒ 不可纠。
+ *
+ * @param bch       BCH 控制句柄
+ * @param data      数据段（calc_ecc 为 NULL 时使用）
+ * @param len       数据字节数（须满足 8*len ≤ n - ecc_bits）
+ * @param recv_ecc  读回的校验字（可 NULL）
+ * @param calc_ecc  预算的校验字（可 NULL）
+ * @param syn       直接给出的综合式（非 NULL 时忽略前三项）
+ * @param errloc    输出：错误 bit 位置数组（容量 ≥ t）
+ * @param out_nerr  输出：错误 bit 数
+ * @return true 可纠（含 0 错）；false 不可纠
+ */
 bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr)
 {
     ASSERT(bch != NULL);
@@ -1373,10 +1388,17 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
     return genpoly;
 }
 
-// 实现要点：- 参数合法性校验（本工程固定 m=13/t=4；静态存储按该参数定尺寸）。
-// - 全部表来自 `s_bch` 静态结构体，无堆分配。
-// - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
-// 任一步失败即清零静态存储返回 NULL。
+/**
+ * @brief 初始化 BCH 引擎（建域表 → 生成多项式 → mod8 表 → 度 2 基底）
+ *
+ * 表全部来自静态存储 s_bch，无堆分配；任一步失败即清零并返回 NULL。
+ *
+ * @param m         域阶（本工程固定 13）
+ * @param t         纠错 bit 数（本工程固定 4）
+ * @param prim_poly 本原多项式，0 表示按 m 取内置表
+ * @param swap_bits 是否交换输入/输出位序
+ * @return 引擎句柄；失败返回 NULL
+ */
 SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
     bool                      err = false;
@@ -1457,7 +1479,11 @@ SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly
     return bch;
 }
 
-// 释放 BCH 引擎：静态存储只清零，不归还堆。
+/**
+ * @brief 释放 BCH 引擎（静态存储只清零，不归还堆）
+ *
+ * @param bch 引擎句柄（NULL 时无操作）
+ */
 void fc_bch_free(fc_bch_control_t *bch)
 {
     if (bch == NULL)
@@ -1471,13 +1497,23 @@ void fc_bch_free(fc_bch_control_t *bch)
     }
 }
 
-// 读取初始化时缓存的 ecc_bytes，不重新计算。
+/**
+ * @brief 校验字字节数
+ *
+ * @param bch BCH 控制句柄
+ * @return 初始化时缓存的 ecc_bytes
+ */
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch)
 {
     return bch->ecc_bytes;
 }
 
-// 读取初始化时缓存的纠错能力 t。
+/**
+ * @brief 纠错能力 t
+ *
+ * @param bch BCH 控制句柄
+ * @return 初始化时缓存的 t
+ */
 unsigned int fc_bch_t(const fc_bch_control_t *bch)
 {
     return bch->t;

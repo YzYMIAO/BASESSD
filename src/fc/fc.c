@@ -176,6 +176,12 @@ static bool fc_is_page_write(BYTE operation)
 static DWORD s_fill_calls;
 static DWORD s_fill_pops;
 
+/**
+ * @brief 读取填充轮次计数（排障用）
+ *
+ * @param calls 输出：填充调用次数
+ * @param pops  输出：出队次数
+ */
 void fc_debug_fill_counters(DWORD *calls, DWORD *pops)
 {
     ASSERT(calls != NULL);
@@ -186,29 +192,69 @@ void fc_debug_fill_counters(DWORD *calls, DWORD *pops)
 }
 
 /* ── 资源统计读取器（fc_get_resource_stats 用，fc_interface.c 调用；契约见 fc_internal.h） ── */
+/**
+ * @brief SQ 当前占用数
+ *
+ * @param controller FC 控制器
+ * @return 队列条数
+ */
 WORD fc_get_sq_count(const fc_t *controller)
 {
     return controller->sq.count;
 }
+/**
+ * @brief HSQ 当前占用数
+ *
+ * @param controller FC 控制器
+ * @return 队列条数
+ */
 WORD fc_get_hsq_count(const fc_t *controller)
 {
     return controller->hsq.count;
 }
+/**
+ * @brief CQ 当前占用数
+ *
+ * @param controller FC 控制器
+ * @return 队列条数
+ */
 WORD fc_get_cq_count(const fc_t *controller)
 {
     return controller->cq.count;
 }
-// 状态读取器契约见 fc_internal.h。ID 越界即不变量破坏，一律 ASSERT。
+/**
+ * @brief 读命令状态
+ *
+ * ID 越界即不变量破坏 ⇒ ASSERT。
+ *
+ * @param controller FC 控制器
+ * @param command_id 池内命令 ID
+ * @return 命令状态
+ */
 fc_cmd_state_e fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
 {
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return controller->command_state[command_id];
 }
+/**
+ * @brief 读 desc 的归属命令 ID
+ *
+ * @param controller    FC 控制器
+ * @param descriptor_id 池内 desc ID
+ * @return 归属命令 ID；FC_COMMAND_ID_INVALID = 空闲
+ */
 fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, WORD descriptor_id)
 {
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return controller->descriptor_owner[descriptor_id];
 }
+/**
+ * @brief 读 buffer 占用状态
+ *
+ * @param controller FC 控制器
+ * @param buffer_id  池内 buffer ID
+ * @return buffer 状态
+ */
 fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
@@ -216,6 +262,13 @@ fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buf
 }
 
 /* ── 命令/描述符 ID ↔ 指针（范围由公共壳 fc_interface.c 校验；契约见 fc_internal.h） ── */
+/**
+ * @brief 命令 ID → 命令指针
+ *
+ * @param controller FC 控制器
+ * @param command_id 池内命令 ID
+ * @return 命令指针
+ */
 fc_command_t *fc_command_id_to_command_internal(fc_t *controller, WORD command_id)
 {
     // 公共壳 fc_command_id_to_command() 已断言过 command_id < FC_COMMAND_POOL_DEPTH
@@ -223,8 +276,15 @@ fc_command_t *fc_command_id_to_command_internal(fc_t *controller, WORD command_i
     return &controller->command_pool[command_id];
 }
 
-// 指针 → 池索引。命令 ID 由「指针 − command_pool 基址」派生，不是 fc_command_t 的字段。
-// 前置条件：command 属于本控制器的 command_pool（公共壳已校验区间）。
+/**
+ * @brief 命令指针 → 池索引（指针 − 池基址）
+ *
+ * 前置：command 属于本控制器命令池。
+ *
+ * @param controller FC 控制器
+ * @param command    命令指针
+ * @return 池索引
+ */
 fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_command_t *command)
 {
     ASSERT(controller != NULL);
@@ -234,6 +294,13 @@ fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_comma
     return (fc_command_id_t)(command - controller->command_pool);
 }
 
+/**
+ * @brief 描述符 ID → 描述符指针
+ *
+ * @param controller    FC 控制器
+ * @param descriptor_id 池内 desc ID
+ * @return 描述符指针
+ */
 fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, WORD descriptor_id)
 {
     // 公共壳 fc_descriptor_id_to_descriptor() 已断言过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH
@@ -241,16 +308,28 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, WORD 
     return &controller->descriptor_pool[descriptor_id];
 }
 
-// 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
-// buffer_id 恒由池派生、且调用者已先校验占用（公共壳 ASSERT 占用 / 链释放前判
-// != FC_BUFFER_ID_INVALID）——越界即不变量破坏，断言（同 fc_command_id_to_command_internal）。
+/**
+ * @brief buffer ID → CW 基址（528B，不做 USER 偏移）
+ *
+ * @param controller FC 控制器
+ * @param buffer_id  池内 buffer ID
+ * @return CW 基址
+ */
 BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     return controller->buffer_pool[buffer_id];
 }
 
-// 内部：释放 buffer（状态清零 + 挂回空闲链表头）；调用者须已保证处于占用态。
+/**
+ * @brief 释放 buffer（状态清零 + 挂回空闲链表头）
+ *
+ * 调用者须已保证处于占用态。
+ *
+ * @param controller FC 控制器
+ * @param buffer_id  池内 buffer ID
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
@@ -288,7 +367,16 @@ static BYTE fc_command_descriptor_count(const fc_t *controller, const fc_command
     return count;
 }
 
-// 提交前的一致性校验（契约见 fc_internal.h）：正常路径恒为 1，返回 0 表示链被破坏。
+/**
+ * @brief 校验命令 desc 链全部归属本命令
+ *
+ * 提交前的一致性校验；返回 false 表示链被破坏。
+ *
+ * @param controller FC 控制器
+ * @param command_id 命令 ID
+ * @param command    命令
+ * @return true 链完整且归属一致；false 链被破坏
+ */
 bool fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
@@ -314,8 +402,14 @@ bool fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id
  * 3. 初始化
  * ══════════════════════════════════════════════════════════ */
 
-// 契约见 fc_internal.h。三池本体与队列存储是文件作用域 static，地址在整个固件
-// 生命周期内固定，DMA 看到的物理地址不变；可重复调用以重置。
+/**
+ * @brief 初始化 FC 控制器：清三池/队列/状态位图并挂指针
+ *
+ * 三池本体是文件作用域 static，地址在固件生命周期内固定；可重复调用以重置。
+ *
+ * @param controller FC 控制器
+ * @return FC_STATUS_OK
+ */
 SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
 {
     fc_status_e result;
@@ -433,8 +527,14 @@ SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
  * 4. 资源分配 / 回滚 / 释放
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：清零 + desc_id=INVALID（未配置描述符）。**不清 command_id**——
-// 结构体里根本没有这个字段，ID 由指针派生。契约见 fc_internal.h。
+/**
+ * @brief 分配命令槽位（清零 + desc_id=INVALID）
+ *
+ * 不清 command_id——结构体无此字段，ID 由指针派生。
+ *
+ * @param controller FC 控制器
+ * @return 命令指针；NULL = 命令池空
+ */
 fc_command_t *fc_command_alloc_internal(fc_t *controller)
 {
     fc_command_id_t command_id;
@@ -451,12 +551,15 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
     return &controller->command_pool[command_id];
 }
 
-// 实现要点：descriptor_owner[desc]=command_id（O(1) 反查表）。契约见 fc_internal.h。
-// **不挂任何链**——desc 何时进入命令的数据链由调用者
-// （fc_command_configure_descriptor，fc_interface.c）决定，本函数只负责出池。
-// 出池的 desc 必须自洽：整体清零会把 next_id/buffer_id 都变成 0
-// （两个 0 都是合法号——链会走进 desc 0，释放会误放别人的 buffer 0），
-// 故显式置哨兵。
+/**
+ * @brief 分配 desc 并登记归属（不挂链）
+ *
+ * 出池即自洽：next_id/buffer_id 显式置哨兵。
+ *
+ * @param controller FC 控制器
+ * @param command    归属命令
+ * @return desc 指针；NULL = desc 池空
+ */
 fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command)
 {
     WORD            descriptor_index;
@@ -482,7 +585,7 @@ fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *co
  * @param controller FC 控制器
  * @param descriptor_index 池内下标。
  *
- * @note 实现要点：**不碰数据链、不碰 buffer**——只把 desc 本体还池。调用者负责
+ * @note **不碰数据链、不碰 buffer**——只把 desc 本体还池。调用者负责
  * 先把该 desc 从链上摘掉（见 fc_descriptor_chain_release_head_internal）。
  */
 static void fc_descriptor_release_internal(fc_t *controller, WORD descriptor_index)
@@ -493,9 +596,14 @@ static void fc_descriptor_release_internal(fc_t *controller, WORD descriptor_ind
     controller->descriptor_free_head                   = descriptor_index;
 }
 
-// 实现要点：**先读 next_id 再释放**——释放会把 desc 整体清零。
-// buffer_id == FC_BUFFER_ID_INVALID 是合法态（buffer 池比 desc 池小，
-// 分配失败时 desc 已挂链但无 buffer），跳过 buffer 释放。契约见 fc_internal.h。
+/**
+ * @brief 释放链头一个 desc（含其 buffer），头指针推进到 next
+ *
+ * 先读 next_id 再释放（释放会整体清零）；无 buffer 的 desc 跳过 buffer 释放。
+ *
+ * @param controller FC 控制器
+ * @param head       链头（进出参）
+ */
 void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_id_t *head)
 {
     fc_descriptor_id_t descriptor_id;
@@ -516,12 +624,12 @@ void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_i
     fc_descriptor_release_internal(controller, descriptor_id);
 }
 
-// 实现要点：结束条件是链自己的哨兵——每轮 release_head 把 *head 推进到 next_id，
-// 走完链尾后 *head == FC_DESCRIPTOR_ID_INVALID（0xFFFF ≥ 池深），循环自然结束。
-// 与全仓其余走链循环（fc_complete_from_nand / 完成项折叠 / 填 META /
-// fc_build_request_data_planes）同一写法，**不另设计数上界**（链长 ≤ CW_TOTAL_MAX
-// 是掩码位宽决定的结构不变量，走链时无需重复）。
-// 末尾的 *head 赋值是显式后置条件（保证返回恒为 INVALID），不是循环判据。契约见 fc_internal.h。
+/**
+ * @brief 沿链释放全部 desc + buffer，头指针置 INVALID
+ *
+ * @param controller FC 控制器
+ * @param head       链头（进出参）
+ */
 void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id_t *head)
 {
     while (*head < FC_DESCRIPTOR_POOL_DEPTH)
@@ -537,7 +645,7 @@ void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id
  * @param controller FC 控制器
  * @param command 命令。
  *
- * @note 实现要点：只动 buffer，**不动 desc 链、不动命令槽位**——它们仍由
+ * @note 只动 buffer，**不动 desc 链、不动命令槽位**——它们仍由
  * fc_command_release 回收。唯一调用者：fc_complete_from_nand 在
  * 「buf_own 的释放位 = FC 释放（01/11）」时当场归还（此时完成项已组装完毕，
  * 之后没有任何读者碰 buffer）。抹 INVALID 是为了让随后的链释放自然跳过，
@@ -562,7 +670,12 @@ static void fc_command_release_buffers_internal(fc_t *controller, fc_command_t *
     }
 }
 
-// 契约见 fc_internal.h。
+/**
+ * @brief 分配一个 buffer
+ *
+ * @param controller FC 控制器
+ * @return buffer ID；FC_BUFFER_ID_INVALID = 池空
+ */
 fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 {
     WORD buffer_index;
@@ -581,11 +694,15 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 // 不设只放 desc、不放命令槽的中间态回滚——调用点后面紧跟
 // fc_command_release_internal_api()，它把「desc 链 + buffer + 命令槽位」一并做完。
 
-// 实现要点：沿命令的 desc 链（command->desc_id + next_id）释放 desc+buffer，
-// 命令槽位置 FREE 回池。**幂等**：已 FREE 的命令直接返回 OK——这一步
-// 必须挡在最前面，因为释放会把命令结构体整体清零，desc_id 归 0
-// （是个合法 desc 号），重复释放会顺着别人的链把别人的 desc 释放掉。
-// 调用方（公共接口）已保证指针在池内、命令不在 CQ 中。契约见 fc_internal.h。
+/**
+ * @brief 释放命令：沿链释放 desc+buffer，命令槽位回 FREE（幂等）
+ *
+ * 已 FREE 直接返回 OK（释放会清零命令，重复释放会顺着 desc 0 释放别人的链）。
+ *
+ * @param controller FC 控制器
+ * @param command    命令
+ * @return FC_STATUS_OK
+ */
 fc_status_e fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
 {
     fc_command_id_t    command_id;
@@ -616,12 +733,15 @@ fc_status_e fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
  *   fc_interface.c 的 fc_command_configure_descriptor；本节只留池/链原语。
  * ══════════════════════════════════════════════════════════ */
 
-// 实现要点：- 走 next_id 找链尾（链长 ≤ CW_TOTAL_MAX，O(N) 可接受，且不必让调用方维护 previous）。
-// - 空链时本条即链头（记入 command->desc_id）；否则前驱 next_id 串上并置 config.chain = MORE。
-// - 末条保持 FC_CHAIN_END（desc 分配时已整体清零），无需回改。
-// - **调用者契约（跨文件）**：desc 必须已填好 paa/config/meta/next_id——调用者是
-// fc_interface.c 的建链入口 fc_command_configure_descriptor，它保证「出池即挂链」，
-// 故链上不存在半成品 desc。契约见 fc_internal.h。
+/**
+ * @brief 把已填好的 desc 追加到命令链尾
+ *
+ * 空链即链头；前驱 chain 置 MORE，末条保持 END。调用者保证 desc 自洽。
+ *
+ * @param controller FC 控制器
+ * @param command    命令
+ * @param descriptor 待挂 desc
+ */
 void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor)
 {
     const fc_descriptor_id_t new_id = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
@@ -666,7 +786,13 @@ static fc_status_e fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *q
     return FC_STATUS_QUEUE_FULL;
 }
 
-// 实现要点：按 high_priority 选 HSQ/SQ；投递后刷新命令状态位。契约见 fc_internal.h。
+/**
+ * @brief 命令入队（按 high_priority 选 HSQ/SQ），状态置 QUEUED
+ *
+ * @param controller FC 控制器
+ * @param command    命令
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL
+ */
 fc_status_e fc_submit_internal(fc_t *controller, fc_command_t *command)
 {
     fc_status_e result;
@@ -710,7 +836,7 @@ fc_status_e fc_complete_internal(fc_t *controller, fc_command_status_t *completi
  *
  * @return FC_STATUS_OK / IO_ERROR（CQ 满强制 COMPLETED 防泄漏）。
  *
- * @note 实现要点：- Step 1：把 nand_completion 的 per-CW status/ecc_bits 写回 desc。
+ * @note Step 1：把 nand_completion 的 per-CW status/ecc_bits 写回 desc。
  * - Step 2：Page Read 命令做 data path（ECC 解码 + 条件解扰）。
  * - Step 3：组装完成项——page read 从 desc 读 ECC 解码后状态
  * （聚合 status + 前 4 CW ECC + 首个失败 CW 的 desc_id，见 FC_CW_STATUS_ERROR_MASK），
@@ -919,7 +1045,7 @@ static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
  * @param controller FC 控制器
  * @param parity_id parity 命令 ID。
  *
- * @note 实现要点：在 NAND completion 路径中调用（parity 数据已完成使命），
+ * @note 在 NAND completion 路径中调用（parity 数据已完成使命），
  * 把 desc/buffer 挂回空闲链，command 槽位置 FREE 回池。
  */
 static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id)
@@ -1135,7 +1261,7 @@ stripe_error:
  * @param controller FC 控制器
  * @param command_id 失败命令。
  *
- * @note 实现要点：request 构建失败 / submit 失败共用；execution_status 用
+ * @note request 构建失败 / submit 失败共用；execution_status 用
  * NOT_READY 表示"未能提交"，cw_status[0] 置 FC_CW_STATUS_FAIL。
  */
 static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
@@ -1158,7 +1284,7 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
  *
  * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图，见下）。
  *
- * @note 实现要点：- 每个 desc 落位到 **flat 绝对 CW 号 n = plane*CW_NUM + cw** 那一格：
+ * @note 每个 desc 落位到 **flat 绝对 CW 号 n = plane*CW_NUM + cw** 那一格：
  * 置 request->cw_bitmap 的 bit n、写 request->cw_buffers[n]。落位顺序无关紧要
  * （掩码是集合），故不再有"槽位计数器"，也不再有链序 == plane-major 的不变量。
  * - **链长度即 CW 数**（不由 config.cw 推导）：popcount(cw_bitmap)。
@@ -1283,7 +1409,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
  *
  * @param request 已构建完成的 dispatch 请求。
  *
- * @note 实现要点：- 读改写先把 WITH_DATA_OUT 换成「加载型」op；写/擦再按 splittable 拆成
+ * @note 读改写先把 WITH_DATA_OUT 换成「加载型」op；写/擦再按 splittable 拆成
  * ISSUE（仅 LUN_NUM>1）。两处互不重叠，顺序不敏感，但读改写必须在这之后
  * 不再被 splittable 判定命中——LOAD/WAIT 本身已是 ISSUE/WAIT 型。
  * - 由 fc_build_dispatch_request 末尾调用；单命令与链式路径共用。
@@ -1327,7 +1453,7 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图——**唯一**的失败出口，由 fc_build_request_data_planes 透传）。
  *                      其余路径不可失败（desc 链遍历按池深截断，不产生错误路径）。
  *
- * @note 实现要点：- 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_bitmap / cw_buffers[] / plane_paa[]：
+ * @note 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_bitmap / cw_buffers[] / plane_paa[]：
  * * ERASE_BLOCK：只填 plane_paa[本 plane]，**不置掩码**（擦除无逐 CW 数据，
  * 请求位图是合法空集，completion 的空集分支会写 cw_status[0]），无 buffer；
  * * ERASE_BLOCK_MULTI_PLANE：填 plane_paa[0..1]，同样不置掩码；
@@ -1525,7 +1651,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  *
  * @return FC_STATUS_OK / IO_ERROR / fc_stripe_submit 结果。
  *
- * @note 实现要点：- page write 先 fc_data_path_encode（内含 Stage 0 写 META）。
+ * @note page write 先 fc_data_path_encode（内含 Stage 0 写 META）。
  * - raid=ENCODE 的 page write 走 fc_stripe_submit（Multi-Plane）。
  * - 其余构建 request → nand_dispatch_submit；**构建失败与 submit 失败同路兜底**
  * （注 NAND_FAIL 完成并返回 IO_ERROR）。构建失败只有 multi-plane 窄位图一种，
@@ -1596,7 +1722,7 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  *
  * @return FC_STATUS_OK / IO_ERROR。
  *
- * @note 实现要点：- 逐条：置 ACTIVE → page write encode（不做 META/PAA 预填，
+ * @note 逐条：置 ACTIVE → page write encode（不做 META/PAA 预填，
  * 与单命令路径的既有差异，勿统一）→ 构建 requests[i]。
  * - 全部构建完成后一次 nand_dispatch_submit_chain。
  * - 任一步失败 → 对应/整链命令注 NAND_FAIL 完成并返回 IO_ERROR。
@@ -1666,7 +1792,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
  *
  * @return 链长（1..FC_SCHEDULER_CHAIN_MAX）。
  *
- * @note 实现要点：- head->config.chain == FC_CHAIN_END → 单命令，返回 1。
+ * @note head->config.chain == FC_CHAIN_END → 单命令，返回 1。
  * - 否则 peek 后续，收集同一 (ch,ce,lun) 的连续命令，直到 chain==END 或链满。
  * - 只 peek 不消耗——真正弹出在 fc_poll_fill_queue 里，链放不下时可原样留在队列。
  */
@@ -1717,7 +1843,7 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
  *
  * @return FC_STATUS_OK / IO_ERROR（提交失败，剩余命令留在队列）。
  *
- * @note 实现要点：- **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
+ * @note **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
  * 否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
  * - **链锁准入**：该 LUN 上有未结束的链（chain_owner != NONE）且链不归本队列 →
  * 本命令回推跳过。**只回推、不置 suspended**——置了会把链自己的续批一起锁死。
@@ -1731,6 +1857,18 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
  */
 /* 填充拒绝下发的原因（限流 8 条）：`S`=本趟已挂起该 LUN、`L`=链锁归另一队列、
  * `R`=FIFO 剩余槽放不下整条链。只用于定位「命令在 SQ 却一直不发」。 */
+/**
+ * @brief 单队列填充轮次：按 LUN 保序、链锁准入、room 判定
+ *
+ * 取不走的命令 pop 后回推队尾（等价一次旋转）；提交失败即中止本轮。
+ *
+ * @param controller FC 控制器
+ * @param queue      目标队列
+ * @param owner      队列所有者（SQ/HSQ）
+ * @param suspended  本轮已挂起 LUN 表
+ * @param dispatched 累计已提交条数（进出）
+ * @return FC_STATUS_OK；FC_STATUS_IO_ERROR 提交失败
+ */
 static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, BYTE owner, BYTE suspended[CH_NUM][CE_NUM][LUN_NUM], BYTE *dispatched)
 {
     WORD total;
@@ -1840,7 +1978,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
  *         IO_ERROR（提交失败，剩余命令留在队列）/ QUEUE_EMPTY
  *         NOT_READY（无可提交，供 ftl_service 结束本轮 fc_service 循环）。
  *
- * @note 实现要点：- **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
+ * @note **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
  * - **共享 suspended**：HSQ 因 room 不足挂起某 LUN 后，SQ 本轮也跳过该 LUN——
  * 否则同 LUN 的 SQ 命令会插到 HSQ 命令之前下发，优先级倒挂。
  * - **链锁独占（跨轮次持久，与 suspended 正交）**：链一旦开始，该 LUN 的填充权
@@ -1919,15 +2057,12 @@ static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_compl
 #endif /* CONFIG_FC_RAID */
 }
 
-// 实现要点：- 先 nand_dispatch_poll() 推进 NAND 全部 LUN；每条完成经 sink 回调**当场消费**
-// （fc_complete_from_nand + 清 stripe parity），故一个 sink 上下文即可，无需缓存批量。
-// 一次调用把本轮所有完成抽干（NAND 命令自身的失败不算 FC 故障——状态已在 CQ entry 里）。
-// - 无完成 → fc_poll_fill()：一次扫描把能放下的命令（含链）提交进 NAND
-// per-LUN FIFO（按 LUN 保序、HSQ 优先、room 判定）。
-// 单命令走 fc_poll_dispatch_single；FTL 的 cache read / cache program run 标成
-// 一条 chain（count>1）走 fc_poll_dispatch_chain。
-// 调用方：ftl_service()（ftl.c）/ ftl_sync_submit_wait() / main.c 的裸 fc_service。
-// 契约见 fc_internal.h。
+/**
+ * @brief FC 服务主入口：先取 NAND 完成，无完成则填充下发
+ *
+ * @param controller FC 控制器
+ * @return FC_STATUS_OK；FC_STATUS_IO_ERROR CQ 满 / 提交失败
+ */
 fc_status_e fc_poll_internal(fc_t *controller)
 {
     fc_status_e        result;
@@ -1956,7 +2091,13 @@ fc_status_e fc_poll_internal(fc_t *controller)
  * 10. CQ 出口
  * ══════════════════════════════════════════════════════════ */
 
-// fc_poll_completion_internal / fc_poll_completions_internal 的契约见 fc_internal.h。
+/**
+ * @brief 从 CQ 取一条完成项
+ *
+ * @param controller FC 控制器
+ * @param completion 输出：完成项
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion)
 {
     fc_status_e result;
@@ -1965,6 +2106,15 @@ fc_status_e fc_poll_completion_internal(fc_t *controller, fc_command_status_t *c
     return result;
 }
 
+/**
+ * @brief 从 CQ 批量取完成项
+ *
+ * @param controller  FC 控制器
+ * @param completions 输出数组
+ * @param max_count   最多取几条
+ * @param count       输出：实际条数
+ * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
+ */
 fc_status_e fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     WORD n = 0U;

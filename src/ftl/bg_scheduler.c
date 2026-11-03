@@ -66,7 +66,15 @@ static const bg_level_cfg_t s_bg_level_cfg[BG_LEVEL_NUM] = {
  * 引擎
  * ════════════════════════════════════════════════════════════════════════ */
 
-// 执行一轮：先无条件跑 must-run（表序即优先级），再在总预算内按表序跑非 must-run。
+/**
+ * @brief 跑一轮后台任务
+ *
+ * 先无条件跑 must-run（表序即优先级），再在 credit 内按表序跑预算任务。
+ *
+ * @param sched 本实例调度器
+ * @param ftl   FTL 上下文
+ * @param cfg   本轮档位配置（发布到 sched->cfg）
+ */
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
 {
     // 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不各自反查档位表。
@@ -124,9 +132,13 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
     sched->credits = units_left;
 }
 
-// 补充预算 credit：timer 任务每 BG_TOKEN_INTERVAL_MS 调一次。
-// 上限 = grant_units × BG_TOKEN_CAP_TICKS；grant_units 是编译期 1..4 的档位值，
-// 乘法不会溢出。cfg 尚未发布（首次 bg_scheduler_run 之前）时不补。
+/**
+ * @brief 补充预算 credit（timer 每 BG_TOKEN_INTERVAL_MS 调用）
+ *
+ * 上限 = grant_units × BG_TOKEN_CAP_TICKS；cfg 尚未发布时不补。
+ *
+ * @param sched 本实例调度器
+ */
 void bg_scheduler_refill(bg_scheduler_t *sched)
 {
     if (sched->cfg == NULL)
@@ -316,8 +328,13 @@ _Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_COUNT, "�
 
 /* ── 装配与后台调度步 ── */
 
-// bg_scheduler_init — 把共享只读任务表 s_bg_tasks 绑定到实例的调度器（不复制）。由 ftl_init 在装配末尾调用一次。
-// 表长是编译期常量（上面的 _Static_assert 已证明 == BG_TASK_COUNT）⇒ 无运行期边界参数。
+/**
+ * @brief 装载内置 FTL 任务表
+ *
+ * 表长是编译期常量（_Static_assert 已证明 == BG_TASK_COUNT）⇒ 无运行期边界参数。
+ *
+ * @param sched 本实例调度器
+ */
 void bg_scheduler_init(bg_scheduler_t *sched)
 {
     sched->tasks      = s_bg_tasks; /* 共享只读表：不逐实例复制 */
@@ -327,8 +344,14 @@ void bg_scheduler_init(bg_scheduler_t *sched)
     sched->credits    = 0U; /* 首次 refill 后才有预算任务可跑 */
 }
 
-// bg_scheduler_level_select — 负载 → 档位（纯函数，无副作用）：
-// inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。
+/**
+ * @brief 负载 → 后台档位（纯函数）
+ *
+ * inflight 全空 = IDLE；pending > 半池或有未决组 = BUSY；中间 = NORMAL。
+ *
+ * @param ftl 实例
+ * @return 档位
+ */
 bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
 {
     const WORD pending = pend_slot_get_count(&ftl->pending);
@@ -345,20 +368,13 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
     return BG_LEVEL_NORMAL;
 }
 
-// bg_scheduler_service — [svc] 后台调度：bg_suspend 判定 → 选档 → 取档位配置 → 引擎跑一轮。
-//
-// ⚠ bg_suspend 必须**最先** return（早于必跑任务）：`bbt --erase` 之后介质已空
-// 而 RAM 状态陈旧，任何后台写（含 must-run 里的 journal/CP/元数据目录）都是往干净
-// 芯片上倒垃圾。推进 NAND / 完成泵 / host 补发不受影响（NAND 泵与 host IO 照常）。
-//
-// 空闲度用 pending（host IO 未决）+ groups（未完成的 host 请求）近似：
-// 全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
-// （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
-//
-// ⚠ **空闲度不计 ftl_op request 表**：后台 job（journal / RR / 搬移）的命令也登记在
-// ftl_op request 表里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
-// 从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自的
-// 各模块**内部**的单飞行门（不在这里窥探 phase/active）单独管，与 host 侧解耦。
+/**
+ * @brief 后台调度步入口：选档 → 配置 → 跑一轮
+ *
+ * 各模块内部的单飞行门单独管，与 host 侧解耦。
+ *
+ * @param ftl 实例
+ */
 void bg_scheduler_service(ftl_ctx_t *ftl)
 {
     if (ftl->flags.bg_suspend == true)

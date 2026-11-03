@@ -219,17 +219,16 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_T
 }
 #endif /* CONFIG_NAND_TIMING_MODE */
 
-/* --------------------------------------------------------------------
- * nand_fc_execute
- *   功能：同步执行单个 ONFI 操作（阻塞直至完成）。
- *   参数：operation —— OP_*（< OP_COUNT）；request —— 列/行/数据；
- *         completion —— 回填执行状态 + NAND 状态字节。
- *   返回：NAND_RESULT_OK / 错误码。
- *   实现要点：经 g_nand_operation_map[operation] 取 UOP 序列，
- *         手工展开 request（row 只拷前 2 个 plane，NAND_PLANE_MAX=4 深度）
- *         后调用 nand_engine_execute 阻塞执行。
- *         契约：仅初始化阶段（armed==0）可调，见下 ASSERT。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 同步执行单个 ONFI 操作（阻塞至完成）
+ *
+ * 仅初始化阶段（armed==0）可调；经 g_nand_operation_map 取 UOP 序列后阻塞执行。
+ *
+ * @param operation  OP_*（< OP_COUNT）
+ * @param request    列/行/数据
+ * @param completion 输出：执行状态 + NAND 状态字节
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     const nand_operation_map_t *map;
@@ -268,18 +267,16 @@ nand_result_e nand_fc_execute(BYTE operation, const nand_fc_request_t *request, 
     return status;
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_start
- *   功能：发起异步 ONFI 事务（非阻塞，仅推进一步引擎）。
- *   参数：transaction —— 事务状态（含 backend/engine）；operation —— OP_*；
- *         request —— 命令数据。
- *   返回：NAND_RESULT_OK（start 内已完成，active 已清）/
- *         NOT_READY（有 busy 阶段，需 nand_fc_step 推进）/ 错误码。
- *   实现要点：
- *     - 先清 DMA 残留完成标志，防 DATA_IN/OUT 误判。
- *     - engine.backend 由调用者（nand_dispatch_task_load）绑定，恒非空（前置条件断言）。
- *     - nand_engine_start 末尾即 step 一次：无 busy 阶段命令直接完成。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 发起异步 ONFI 事务（非阻塞，只推进一步）
+ *
+ * 先清 DMA 残留标志；start 内无 busy 阶段的命令直接完成。
+ *
+ * @param transaction 事务状态（backend 已绑定）
+ * @param operation   OP_*
+ * @param request     命令数据
+ * @return OK / NOT_READY（需 nand_fc_step）/ 错误码
+ */
 nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request)
 {
     const nand_operation_map_t *map;
@@ -327,14 +324,15 @@ nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, 
     return result;
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_step
- *   功能：推进异步事务一个引擎步（配合 nand_fc_start 使用）。
- *   参数：transaction —— 发起中的事务；completion —— 完成时回填。
- *   返回：NAND_RESULT_NOT_READY（未完成，继续 poll）/ 完成结果。
- *   实现要点：engine step 直到非 NOT_READY 才算完成，完成时回填
- *         completion 并清 active。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 推进异步事务一个引擎步
+ *
+ * 完成时回填 completion 并清 active。
+ *
+ * @param transaction 发起中的事务
+ * @param completion  输出：完成状态
+ * @return NOT_READY（继续 poll）/ 完成结果
+ */
 nand_result_e nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
 {
     BYTE result;
@@ -356,11 +354,12 @@ nand_result_e nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
     return result;
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_reset
- *   功能：NAND 复位（同步）。
- *   返回：NAND_RESULT_OK / 错误码。
- * -------------------------------------------------------------------- */
+/**
+ * @brief NAND 复位（同步）
+ *
+ * @param completion 输出：完成状态
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_reset(nand_fc_completion_t *completion)
 {
     nand_fc_request_t request;
@@ -372,12 +371,13 @@ nand_result_e nand_fc_reset(nand_fc_completion_t *completion)
     return nand_fc_execute(OP_RESET, &request, completion);
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_read_id
- *   功能：读取芯片 ID（5 字节，同步）。
- *   参数：id —— 输出缓冲（≥5 字节）；completion —— 状态。
- *   返回：NAND_RESULT_OK / 错误码。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 读取芯片 ID（5 字节，同步）
+ *
+ * @param id         输出：5 字节
+ * @param completion 输出：完成状态
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
 {
     ASSERT(id != NULL);
@@ -391,13 +391,15 @@ nand_result_e nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
     return nand_fc_execute(OP_READ_ID, &request, completion);
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_read_parameter_page
- *   功能：读 ONFI 参数页（ECh，256 字节，同步）。
- *   参数：page —— 输出缓冲（≥ NAND_ONFI_PARAM_PAGE_SIZE 字节）；completion —— 状态。
- *   返回：NAND_RESULT_OK / 错误码。
- *   实现要点：column / row 恒 0——ECh 无地址语义（uop 序列只有 COLUMN_0 = 0）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 读 ONFI 参数页（ECh，256 字节，同步）
+ *
+ * column / row 恒 0（ECh 无地址语义）。
+ *
+ * @param page       输出：参数页
+ * @param completion 输出：完成状态
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
 {
     ASSERT(page != NULL);
@@ -411,13 +413,16 @@ nand_result_e nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], 
     return nand_fc_execute(OP_READ_PARAMETER_PAGE, &request, completion);
 }
 
-/* --------------------------------------------------------------------
- * nand_fc_set_features
- *   功能：写 Feature 寄存器（SET_FEATURES，同步）。
- *   参数：feature_address —— 寄存器地址；feature_data —— 4 字节值。
- *   返回：NAND_RESULT_OK / 错误码。
- *   实现要点：column 复用为 feature 地址，data 长度固定 4。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 写 Feature 寄存器（同步）
+ *
+ * column 复用为 feature 地址，data 长度固定 4。
+ *
+ * @param feature_address 寄存器地址
+ * @param feature_data    4 字节值
+ * @param completion      输出：完成状态
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion)
 {
     ASSERT(feature_data != NULL);
@@ -431,16 +436,13 @@ nand_result_e nand_fc_set_features(BYTE feature_address, const BYTE feature_data
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
 }
 
-/* --------------------------------------------------------------------
- * nand_onfi_param_print
- *   功能：把解码后的 ONFI 参数页打三行开机日志（设备信息）。
- *   参数：info —— 已解码的参数页。
- *   返回：无。
- *   实现要点：每行必须 < 192 字符（src/common/log.c 的 message[192] 上限，超长会被
- *         截断并打 "...[truncated]"）。时序字段只打原值、不打单位后缀——量纲见手册
- *         Table 11，仓库内未查证。address_cycles 同时打原值与解码后的
- *         C/R 周期数（0x23 = C2/R3），供 nand_init 的一致性检查对读。
- * -------------------------------------------------------------------- */
+/**
+ * @brief 把解码后的 ONFI 参数页打三行开机日志
+ *
+ * 每行必须 < 192 字符（log.c 的 message[192] 上限）。
+ *
+ * @param info 已解码的参数页
+ */
 static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
     /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。
@@ -475,7 +477,13 @@ static const nand_board_target_t s_board_targets[] = {
     {0U, 0U},
 };
 
-/* 板级 target 选择：当前实现只校验通路表。多 target 板卡在这里切换片选。 */
+/**
+ * @brief 板级 target 选择（当前只校验通路表）
+ *
+ * @param ch 目标 ch
+ * @param ce 目标 ce
+ * @return OK / INVALID_ARGUMENT 越界 / NOT_READY 无通路
+ */
 nand_result_e nand_select_target(BYTE ch, BYTE ce)
 {
     if ((ch >= CH_MAX) || (ce >= CE_MAX))
@@ -494,8 +502,15 @@ nand_result_e nand_select_target(BYTE ch, BYTE ce)
     return NAND_RESULT_NOT_READY;
 }
 
-/* 78h READ STATUS ENHANCED：行地址里带 LUN/plane 位，读指定 LUN 的状态字节。
- * 状态经 completion.nand_status 回传（DATA_OUT_STATUS 不写 buffer）。 */
+/**
+ * @brief 78h READ STATUS ENHANCED（同步）
+ *
+ * 行地址带 LUN/plane 位；状态经 completion.nand_status 回传。
+ *
+ * @param row        行地址
+ * @param completion 输出：完成状态
+ * @return NAND_RESULT_OK / 错误码
+ */
 nand_result_e nand_fc_read_status_enhanced(DWORD row, nand_fc_completion_t *completion)
 {
     nand_fc_request_t request;
@@ -509,7 +524,12 @@ nand_result_e nand_fc_read_status_enhanced(DWORD row, nand_fc_completion_t *comp
     return nand_fc_execute(OP_READ_STATUS_ENHANCED, &request, completion);
 }
 
-// 无器件判据：READ ID 全 00 / 全 FF。
+/**
+ * @brief READ ID 是否为无器件（全 00 / 全 FF）
+ *
+ * @param id 5 字节 ID
+ * @return 1 无器件；0 有器件
+ */
 static BYTE nand_id_is_blank(const BYTE id[5])
 {
     BYTE all_00 = 1U;
@@ -530,8 +550,16 @@ static BYTE nand_id_is_blank(const BYTE id[5])
     return ((all_00 != 0U) || (all_ff != 0U)) ? 1U : 0U;
 }
 
-// 单 target 探测：选择通路 → RESET → READ_ID → ONFI 参数页 → 逐 LUN 78h。
-// 仅 armed==0 的同步路径可调。
+/**
+ * @brief 单 target 探测：选择通路 → RESET → READ_ID → ONFI 参数页 → 逐 LUN 78h
+ *
+ * 仅 armed==0 的同步路径可调。
+ *
+ * @param ch   目标 ch
+ * @param ce   目标 ce
+ * @param info 输出：target 信息
+ * @return OK / NOT_READY 无器件 / INVALID_ARGUMENT / OPERATION_FAILED
+ */
 nand_result_e nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
 {
     nand_fc_completion_t completion;
@@ -648,7 +676,13 @@ nand_result_e nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
     return NAND_RESULT_OK;
 }
 
-// 遍历 CH_MAX × CE_MAX：存在的 target 记入 g_nand_targets；主 target (0,0) 必须存在。
+/**
+ * @brief 遍历 CH_MAX × CE_MAX 探测 target
+ *
+ * 存在的 target 记入 g_nand_targets；主 target (0,0) 必须存在。
+ *
+ * @return OK / NOT_READY 无 target / 错误码
+ */
 nand_result_e nand_scan_targets(void)
 {
     BYTE present = 0U;
@@ -685,33 +719,13 @@ nand_result_e nand_scan_targets(void)
     return NAND_RESULT_OK;
 }
 
-/* --------------------------------------------------------------------
- * nand_init
- *   功能：NAND 芯片低速全初始化（FMC 硬件 + MSP + DMA +
- *         拓扑扫描：RESET + READ_ID + ONFI 参数页）。
- *   参数：无。
- *   返回：NAND_RESULT_OK / 错误码。
- *   实现要点：
- *     - FMC 用 Bank3、8 位总线、ECC 关闭；初始时序为 power-on
- *       默认 Mode 0 的保守寄存器周期数（4/6/2/3）。
- *     - RESET/READ_ID 在低速时序下完成；ID 校验跳过厂商字节 id[0]。
- *     - 本函数**不切高速模式**：启动全程保持低速，保证初始化时序余量；
- *       切换由 nand_enable_high_speed() 在 FTL boot/恢复完成后单独执行。
- *     - DMA 初始化失败仅回退 PIO，非致命。
- *   步骤编号（与函数体内 Step 标记一一对应）：
- *     Step 1 FMC 句柄 + PCC 时序（纯软件填结构体）
- *     Step 2 HAL_NAND_Init → MspInit（时钟/GPIO/NCE）★首次碰硬件
- *     Step 3 per-[ch][ce][lun] FMC 后端实例
- *     Step 4 DMA（本配置 no-op，失败仅回退 PIO）
- *     Step 5+ 拓扑扫描：nand_scan_targets → nand_target_probe
- *             （选择板级通路 / RESET / READ_ID / ONFI 参数页 / 逐 LUN 78h）
- *             遍历 CH_MAX × CE_MAX，结果写 g_nand_targets。
- *   高速模式切换不在这里：见 nand_enable_high_speed()。
- *   调用链：main.c → nand_init → {HAL_NAND_Init, nand_fmc_init,
- *          nand_scan_targets → nand_target_probe}；
- *          随后 main.c 在 ssd_ftl_boot_all() 成功后调 nand_enable_high_speed()。
- *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
- * -------------------------------------------------------------------- */
+/**
+ * @brief NAND 低速全初始化（FMC + MSP + DMA + 拓扑扫描）
+ *
+ * 启动全程保持低速；高速切换由 nand_enable_high_speed 在 FTL boot 后执行。
+ *
+ * @return NAND_RESULT_OK / 错误码
+ */
 BYTE nand_init(void)
 {
     FMC_NAND_PCC_TimingTypeDef common_timing;
@@ -810,17 +824,14 @@ BYTE nand_init(void)
     LOGI(LOG_TAG_NAND "init complete (low speed)\r\n");
     return NAND_RESULT_OK;
 }
-/* --------------------------------------------------------------------
- * nand_enable_high_speed
- *   功能：初始化全部完成后，把 NAND 切到 CONFIG_NAND_TIMING_MODE 并同步更新 FMC 时序。
- *   返回：NAND_RESULT_OK / 错误码。
- *   实现要点：
- *     - 上电初始化（RESET/READ_ID/ONFI/FTL 元数据恢复）全程保持低速 Mode 0，
- *       保证启动路径的时序余量；本函数只在 boot 完成后调用一次。
- *     - armed 已置位，不能再走阻塞式 nand_fc_execute：用 nand_fc_start/step
- *       直接推进一次 SET_FEATURES 事务（此时无其它命令在飞）。
- *     - SET_FEATURES 成功后才改 FMC 时序；失败则保持低速，不影响功能。
- * -------------------------------------------------------------------- */
+/**
+ * @brief boot 完成后切到 CONFIG_NAND_TIMING_MODE 并更新 FMC 时序
+ *
+ * armed 已置位，用 nand_fc_start/step 推进 SET_FEATURES；失败保持低速。
+ *
+ * @param fmc_hz FMC 内核时钟
+ * @return OK / 错误码
+ */
 BYTE nand_enable_high_speed(DWORD fmc_hz)
 {
 #if (CONFIG_NAND_TIMING_MODE != 0U)
@@ -903,25 +914,23 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     return NAND_RESULT_OK;
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
-
+/**
+ * @brief 当前 NAND 时序模式
+ *
+ * @return 模式号（0 = 低速）
+ */
 BYTE nand_get_timing_mode(void)
 {
     return s_timing_mode;
 }
 
-/* --------------------------------------------------------------------
- * HAL_NAND_MspInit
- *   功能：HAL 平台的 MSP 回调（时钟 + GPIO 引脚复用配置）。
- *   参数：hnand —— HAL 句柄（本函数不使用）。
- *   返回：无。
- *   实现要点：由 HAL_NAND_Init 内部调用；使能 FMC/GPIOD/GPIOE/GPIOG
- *         时钟；引脚映射：
- *         GPIOD PIN6 = R/B#（上拉输入）
- *         GPIOG PIN9  = FMC NCE（片选，AF12）
- *         GPIOD 8/11/12/14/15 + GPIOE 7/8/9/10 = D0~D7 数据总线（AF12）
- *         （NWE/NOE/ALE/CLE 的 GPIO 由 HAL 句柄字段经 FMC 复用在
- *          本板设计下归入上述脚位范围）
- * -------------------------------------------------------------------- */
+/**
+ * @brief HAL 平台 MSP 回调：时钟 + GPIO 引脚复用
+ *
+ * 由 HAL_NAND_Init 内部调用；R/B# 上拉输入，NCE/数据总线 AF12。
+ *
+ * @param hnand HAL 句柄（未使用）
+ */
 void HAL_NAND_MspInit(NAND_HandleTypeDef *hnand)
 {
     GPIO_InitTypeDef gpio;

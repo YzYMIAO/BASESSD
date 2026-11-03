@@ -111,10 +111,15 @@ static BYTE s_sub_zero_st;
  * 介质布局版本 —— 开机自动格式化
  * ══════════════════════════════════════════════════════════════════ */
 
-// 实现要点：判据来自 cp_media_status_probe：
-// · CURRENT            ⇒ 不格式化；
-// · NO_RECORD / 版本不符 ⇒ 格式化（空片多擦一次，写标记后自愈）；
-// · IO_ERROR            ⇒ 不格式化，返回错误——一次瞬时读错不能变成整片擦除。
+/**
+ * @brief 开机格式化判据：决定是否需要格式化
+ *
+ * IO_ERROR ⇒ 不格式化、返回错误（一次瞬时读错不能变成整片擦除）。
+ *
+ * @param ftl             实例
+ * @param out_need_format 输出：是否需要格式化
+ * @return FTL_OK；FTL_ERROR 介质不可读
+ */
 ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
 {
     DWORD             media_version = 0U;
@@ -147,7 +152,7 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
  *
  * @return FTL_OK / FTL_ERROR。
  *
- * @note 实现要点：`md_init` 只复位 RAM；不落盘的话下次开机
+ * @note `md_init` 只复位 RAM；不落盘的话下次开机
  * md_load 失败，而 initial Checkpoint（seq=1）存在 ⇒
  * pfr_boot_recovery 按 RISK-BOOT-09 拒绝启动。故必须先把空 Directory
  * 写成目录检查点，再写 initial Checkpoint（后者是整条 record 的 commit）。
@@ -355,16 +360,15 @@ static bool pfr_format_end_bbt(alc_t *alloc)
     return bbt_save(alloc) == FTL_OK;
 }
 
-// 实现要点：① `bbt_format_erase` 两阶段：**先落 BBT**（当前坏块图 +
-// FORMAT_IN_PROGRESS），再擦除 BBT 池之外的块（擦失败标 BAD）；
-// ② `md_init` 把 Directory 复位为"全部未映射"；
-// ③ `cp_initial_record_write` 写当前版本标记 ⇒ 下次开机版本判据命中，
-// 格式化只发生一次；
-// ④ **提交点**：initial CP **读回成功**后才清 FORMAT_IN_PROGRESS。
-// 中间任一步（含 format --verify 的数分钟体检）复位/掉电，
-// 下次开机都会继续格式化，而不是拒绝启动。
-// ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
-// ⚠ BST 的 erase_count 保留旧值（开机已从 CP 磨损快照回填）——仅影响磨损均衡起点。
+/**
+ * @brief 全片格式化（两阶段擦除 + initial CP）
+ *
+ * 必须在 ftl_init 之后、free pool 回填之前调用。
+ *
+ * @param ftl    实例
+ * @param verify 是否做全片擦除体检
+ * @return FTL_OK；FTL_ERROR 格式化失败
+ */
 ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
 {
     // 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
@@ -492,11 +496,16 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
     return FTL_OK;
 }
 
-// 实现要点：① 扫 Journal 环形块池取最新页（jrn_page_scan_latest）——**只读不改状态**，
-// 故不调 jrn_replay（后者会修改 journal 内部状态）。三条启动路径
-// 都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
-// ② cp_pool_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
-// ③ 最新页 page_seq ≤ cp->journal_sequence ⇒ 干净关机；否则异常掉电。
+/**
+ * @brief 开机恢复编排：扫 Journal 最新页 → 找最新 CP → 判定 clean / power-failure。
+ *
+ * @param ftl    FTL 实例
+ * @param result 出参启动结果
+ * @return FTL_OK / FTL_ERROR
+ *
+ * @note 扫 Journal 只读，不改 journal 状态；三条启动路径都用这份快照恢复 RAM 写态。
+ *       最新页 page_seq ≤ cp->journal_sequence ⇒ clean，否则异常掉电。
+ */
 static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *result)
 {
     pfr_boot_result_t local_result;
@@ -576,21 +585,9 @@ static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *re
         LOGW(LOG_TAG_WEAR "snapshot incomplete (rec=%hu seq=%lu) — read pages kept, rest default\r\n", cp_idx, cp->sequence);
     }
 
-    // ③ 判型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
-    //
-    // ⚠ 判据必须是**整页**的 `page_seq + entry_count`，与 jrn_replay 的回放过滤
-    // 同口径。`cp->journal_sequence` 的语义是「下一个待分配序号」（Checkpoint job
-    // 直接取 sequence_counter，journal_truncate 的注释亦如此声明）⇒ 被 CP 覆盖的条目
-    // 是 seq < cp->journal_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
-    // 全被覆盖 ⟺ page_seq + entry_count ≤ cp->journal_sequence。
-    //
-    // ⚠ 不能只看页首（page_seq ≤ cp->journal_sequence）：Checkpoint 之后写入的第一页
-    // page_seq 正好 == cp->journal_sequence，只看页首会把「写→掉电」判成干净、不回放
-    // ⇒ 数据静默丢失。上板签名：`boot type=1 journal_entries=0` +
-    // `[BLK] rebuild blocks=N valid_cw=0` + `rd FAIL ... got 00000000`。
-    // ⚠ 环内有读失败页 ⇒ 最新页与判型都不可信：不能据此判「干净关机」
-    // （否则可能少回放条目）。保守走掉电回放路径；回放也会因读失败返回
-    // FTL_ERROR，再由 pfr_boot_power_failure 回退 full metadata rebuild。
+    // ③ 判型：最新页整页被 CP 覆盖 ⇒ clean。判据必须用 page_seq + entry_count
+    // （与 jrn_replay 同口径）；只看页首会把「写→掉电」误判成 clean。
+    // 环内有读失败页 ⇒ 不判 clean，保守走回放。
     if ((ring_read_error == false) && ((ring.page_seq + ring.entry_count) <= cp->journal_sequence))
     {
         // 干净关机
@@ -630,7 +627,15 @@ static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *re
     return FTL_OK;
 }
 
-// 掉电恢复唯一入口：跑恢复主体；结束后做一次只读取证（观测用，不改变恢复结果）。
+/**
+ * @brief 掉电恢复唯一入口
+ *
+ * 跑恢复主体，结束后做一次只读取证（观测用，不改变恢复结果）。
+ *
+ * @param ftl    实例
+ * @param result 输出：恢复结果
+ * @return FTL_OK；FTL_ERROR 恢复失败
+ */
 ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result)
 {
     const ftl_status_e status = pfr_boot_recovery_body(ftl, result);
@@ -649,9 +654,8 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result)
  *
  * @param ftl FTL 实例（调用前 free/op/spare 计数必须为 0）
  *
- * @note 实现要点：每 plane 先扣 Spare（50），再扣 OP（10%），其余进 Free。
- * **只把 state == NONE 的块入池**；full metadata rebuild / 快照已认领的 CLOSED/LOG/RETIRED
- * 只计入 total_blocks。快照路径不调用它（池来自快照），故要求池计数为 0。
+ * @note 每 plane 先扣 Spare（50）、再扣 OP（10%），其余进 Free；只把 state == NONE 的块入池。
+ *       full rebuild / 快照已认领的 CLOSED/LOG/RETIRED 只计入 total_blocks。
  */
 static void pfr_boot_carve_pools(ftl_ctx_t *ftl)
 {
@@ -732,12 +736,9 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
  * @param ftl FTL 实例（前置条件，由 pfr_boot_recovery 保证，不在此复检）
  * @param ring Journal 环形块池快照。
  *
- * @note 实现要点：① 失效**本 owner** 的 L2P cache 行与脏位（共享 cache 不能整体 re-init，
- * 否则会抹掉别的 LUN 刚回放的 DIRTY 行）。
- * ② full metadata rebuild Closed SB 列表（认领写过的块）。
- * ③ carve 只把仍为 state NONE 的块放进 Spare/OP/Free。
- * ④ jrn_resume 按环内最新页接回写指针（序号下限 1）。
- * ⑤ checkpoint sequence 归零。
+ * @note ① 只失效本 owner 的 L2P 行与脏位（共享 cache 不能整体 re-init）。
+ *       ② full rebuild 认领写过的块；③ carve 只把 NONE 块入池；④ jrn_resume 接回写指针；
+ *       ⑤ checkpoint sequence 归零。
  */
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
 {
@@ -777,17 +778,9 @@ static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
  * @param ftl FTL 实例
  * @param cp 最近 Checkpoint 头（含 region_bitmap）。
  *
- * @note 实现要点：① 只处理 resident **CLEAN** 行：bitmap 未置位 ⇒ INVALID（懒加载 CP 时刻快照）。
- * DIRTY（journal 回放数据）保持待 flush；FLUSHING/LOADING 有命令在飞，跳过。
- * ② 按 CP bitmap **逐位预载**：每个置位 local region 由
- * `l2p_region_preload` 分配一条 INVALID 行、写 region_id、同步读页。
- * **绝不**按 INVALID 行的 region_id 反查 bitmap——init 时所有 INVALID 行
- * region_id=0，按行遍历会让所有行别名到 region 0。
- * ③ 目录条目为 INVALID（region 从未写过 / 刷盘未成功）⇒ 无页可预载，留给懒加载。
- *
- * F4：掉电恢复时，checkpoint 只保证「bitmap 置位的 region」的 NAND 页等于
- * CP 时刻快照。置位区预载 CLEAN（CP 时已 flush 落盘）；未置位区 INVALID，
- * 下一访问懒加载 CP 时刻快照（该区未在本次 CP 落盘，NAND 页为更旧值/从未写）。
+ * @note ① 只处理 resident CLEAN 行；DIRTY 保持待 flush，FLUSHING/LOADING 跳过。
+ *       ② 按 CP bitmap 逐位预载；不能按 INVALID 行的 region_id 反查（init 时全为 0，
+ *          按行遍历会全部别名到 region 0）。③ 条目 INVALID ⇒ 无页可预载，留给懒加载。
  *
  * 必须在 jrn_replay 之后调用。
  */
@@ -853,10 +846,8 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
  * @param blocks_restored 出参：true = 走快照路径
  * @param ring Journal 环形块池快照。
  *
- * @note 实现要点：clean 下 Checkpoint 覆盖全部 journal 条目，不需要回放；但必须
- * jrn_resume 接回写指针/序号（环形块并未被擦）。
- * ⚠ 即使判定 clean，也要 probe 池块：本仓无关机 journal flush，
- * 「丢最后一页 journal」与 clean 在介质上不可区分。
+ * @note clean 下 CP 覆盖全部 journal 条目，但仍需 jrn_resume 接回写指针。
+ *       即使 clean 也要 probe 池块：无关机 flush 时「丢最后一页」与 clean 在介质上不可区分。
  */
 static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, bool force_rebuild, bool *blocks_restored, const jrn_page_ref_t *ring)
 {
@@ -940,9 +931,8 @@ static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blo
  * @param blocks_valid 块元数据快照是否已通过校验（0 = 无有效快照，跳过快照恢复）
  * @param result 出参启动结果。
  *
- * @note 实现要点：② jrn_replay 回放所有**未全被 CP 覆盖**的页（整页判据
- * `page_seq + entry_count > cp_sequence`；只回放最大一页会静默丢
- * ≥2 页条目）；④ full metadata rebuild closed_sb_list（不再恢复 hot_sb/cold_sb 写指针）。
+ * @note ② jrn_replay 按整页判据（page_seq + entry_count > cp_seq）回放，不能只回放最大一页；
+ *       ④ full rebuild closed_sb_list，不恢复 hot/cold SB 写指针。
  */
 static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, pfr_boot_result_t *result)
 {
@@ -1121,7 +1111,11 @@ static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE b
     result->blocks_restored = restored;
 }
 
-// 统计各分区（目录检查点/CP/BBT/Journal/L2P/spare/User）的坏块与 reserved 数并打一行日志。
+/**
+ * @brief 统计各分区的坏块与 reserved 数并打一行日志
+ *
+ * @param ftl 实例（只读）
+ */
 void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
 {
     // 目录检查点是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
@@ -1263,18 +1257,8 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
  */
 static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block)
 {
-    // 快速判空：page 0 是擦除页 ⇒ 整块空白。
-    //
-    // 正常写模型是**顺序追加**：块从 page 0 开始写；page 0 编程失败时写路径会
-    // 关闭 SB（ftl_host_io_callback 的失败分支），不会继续写后续页。因此
-    // “page 0 空白、但后面有数据”在当前写模型下不可达。
-    //
-    // 这一条把空闲块的扫描从 64 页降到 1 页：4096 块 × 64 页 → 约 4k 页，
-    // 是 full metadata rebuild 的主要提速点。
-    //
-    // ⚠ 若将来引入“page 0 失败后继续写”或开放 Open SB 续写，这个假设失效：
-    // 必须恢复全块扫描，或在 page 0 空白后补读 page 63（仍是 2 次/空闲块）。
-    // 见 known_risks RISK-BOOT-14。
+    // 快路径：page 0 是擦除页 ⇒ 整块空白（顺序追加 + page0 失败即关 SB，后续页不可达）。
+    // 这把空闲块扫描从 64 页降到 1 页；若将来允许 page0 失败后继续写，必须恢复全块扫描。
     DWORD first = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 0U, 0U);
 
     if (ftl_page_is_blank(first))
@@ -1466,8 +1450,7 @@ static void pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
  * @param ftl FTL 实例
  * @param stats 出参统计（blocks_rebuilt / valid_cw / partial_blocks，可为 NULL）。
  *
- * @note 实现要点：Policy B 下两 plane 的块不再同号 ⇒ 按**单物理块**建 Closed 条目
- * （另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需、也无法恢复。
+ * @note Policy B 下两 plane 块不同号 ⇒ 按单物理块建 Closed 条目，另一 plane 记哨兵。
  */
 static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats)
 {

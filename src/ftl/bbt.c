@@ -190,20 +190,15 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
 
 /* ── 2. 初始化 / 出厂扫描 ── */
 
-// 实现要点：判据 = **分区表里每个固定分区实际使用的 plane（plane_mask）中，只要
-// 有一页**不是擦除页**（`ftl_page_blank_check`：FC 判 ECC 是否成码字 + 整条 CW 的
-// 1 比特占比）⇒ 介质上有 FTL 写过的页。
-// · 空片：该区每页都是擦除页 ⇒ 返回 false。
-// 判据放在**解码路径**，不在 RAW 读上：RAW 读（LDPC_RAW）刻意跳过 ECC，空/非空的
-// 依据（ECC 是否成码字、parity 是否写成）全被跳过，FTL 又只看得到 USER 512B
-// ⇒ 「RAW 读 + 数 FF」这种组合判不出「编程过没有」（RISK-IF-15）。
-// · 读不通的页（出厂坏块块）⇒ `ftl_page_blank_check` 返回 FTL_ERROR ⇒ 跳过，
-//   不参与「写过」判定，方向与"坏块块不是写过"一致。
-// · 与 FTL 的**布局/格式版本无关**：FC 层的 CW 结构（META/CRC/ECC）不随
-// FTL 版本变，故版本升级后的介质照样认得出——这正是必须覆盖的场景。
-// ⚠ 只读不写；只在 bbt_load 失败时才调用（正常开机不付这份代价）。
-// ⚠ 只探**固定元数据区**：该区的页一律以 FTL_PAGE_CFG_META()（RANDOM_DISABLE）写，
-// 与这里的读配置无关（判空只看 ECC 与位占比）；用户数据页不在此列、也不需要。
+/**
+ * @brief 介质固定元数据区里是否已有合法 FTL 页
+ *
+ * 只读；只在 bbt_load 失败时调用，用于区分空片与已格式化介质。判空走解码
+ * 路径（RISK-IF-15），不能用 RAW 读。
+ *
+ * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）
+ * @return true 已格式化过；false 空片
+ */
 bool bbt_medium_has_ftl_data(alc_t *alloc)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -265,8 +260,13 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
     return false;
 }
 
-// 实现要点：读到 BBT 后从 bitmap 重建 BST 的 BAD 位并清 OPEN/CLOSED/FREE/sb_id
-// （单数据源方向：NAND bitmap → BST）。
+/**
+ * @brief 从 NAND BBT 池加载坏块表并重建 BST BAD 位
+ *
+ * 无有效 BBT 时只有空片才允许出厂扫描；已用介质拒绝重扫，坏块表从空开始。
+ *
+ * @param alloc Allocator 上下文（blocks / bad_count 输出）
+ */
 void bbt_init(alc_t *alloc)
 {
     alloc->bbt.sequence           = 0U;
@@ -340,19 +340,15 @@ void bbt_init(alc_t *alloc)
     (void)bbt_factory_scan(alloc);
 }
 
-// 实现要点：判据 = **OOB 出厂标记**（`bbt_probe_block_bad(..., do_erase=0)`），
-// 与器件手册的建 BBT 流程一致（见 bbt_probe_block_bad 的引文）。
-// 跳过 block 0（出厂总是好块）；扫描完置 dirty 并 bbt_save 落盘。
-//
-// ⚠ **前置条件：介质必须是空片**（`bbt_init` 用 `bbt_medium_has_ftl_data` 把关）。
-// 用过的块 Page 0 的 spare 首字节是 FTL 自己的数据（页编程 2112B 把 CW3 尾巴 64
-// 字节溢进备区），不是出厂标记 ⇒ 在用过的介质上扫出来的不是坏块图，而是
-// 「哪些块被写过」图。本函数自己**判不了**这件事（它读的就是那个字节），
-// 判据在调用方。
-//
-// ⚠ 判据不能用 raw 读返回码或“数据全 FF”：raw 跳过 ECC，物理失败页仍回
-// READY；全 FF 既可能是空块也可能是坏块。唯一成立的判据是
-// OP_READ_COLUMN 读 spare[0]（列 2048）。
+/**
+ * @brief 出厂坏块扫描（OOB 标记）
+ *
+ * 前置：介质必须是空片（用过的块 spare[0] 是 FTL 数据，扫出来是「哪些块被
+ * 写过」）；只读不擦。扫描完置 dirty 并落盘。
+ *
+ * @param alloc Allocator 上下文（BST 输出）
+ * @return 检出的坏块数
+ */
 int bbt_factory_scan(alc_t *alloc)
 {
     WORD bad_idx = 0U;
@@ -464,20 +460,15 @@ static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_er
 
 /* ── 3. 格式化 ── */
 
-// 实现要点：① `format_in_progress=true` + `bbt_save`：当前坏块图（工厂标记 + CP 快照并集）
-// 先落盘；失败立即返回，用户数据与工厂标记都还完整。
-// ② 擦除 **BBT 池之外** 的全部块（所有 plane）；擦失败标 BAD。
-// BBT 池保留，以保存 ① 的 record。
-// ③ 再 save 一次，把擦除失败新标坏的块并入 BBT（best-effort；失败只留下
-// dirty 给后台 bbt_handle，工厂坏块图已在 ① 持久化）。**不清**
-// `format_in_progress`：格式化的提交点是 initial Checkpoint 落盘
-// （`pfr_media_format` 末尾），不是擦除结束。
-//
-// ⚠ **不读出厂坏块标记**：标记读取职责唯一归 bbt_init（且只在空片时做）。
-// 因此「必须在 bbt_init 之后调用」是承重的——出厂标记此时已在 BST 里。
-// ⚠ ②/体检/写初始元数据任一步中途掉电：最新 BBT record 仍带
-// FORMAT_IN_PROGRESS，下次开机会继续格式化，而不是把“有 BBT、无 CP”
-// 误判成损坏介质（cp_media_status_probe 的 IO_ERROR 分支）。
+/**
+ * @brief 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
+ *
+ * 必须在 bbt_init 之后调用（出厂标记只在 bbt_init 读取）；① 失败时不擦任何
+ * 用户块。FORMAT_IN_PROGRESS 由调用者在 initial CP 落盘后清除。
+ *
+ * @param alloc Allocator 上下文
+ * @return FTL_OK；FTL_ERROR ① 的 BBT save 失败
+ */
 ftl_status_e bbt_format_erase(alc_t *alloc)
 {
     // ① 先持久化当前坏块图（工厂标记 + CP 快照并集都在 BST），并置“格式化进行中”。
@@ -538,8 +529,16 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
 
 /* ── 4. 标坏 / dirty ── */
 
-// 实现要点：清有效位图是必需的——坏块后残留的 VPC/bitmap 会让 GC/WL 误判其为可回收块；
-// **不**同步 bbt_save（持久化交后台 bbt_handle 批量）；Spare 耗尽不影响标坏（容量自然下降）。
+/**
+ * @brief 运行时标坏块（幂等，BAD 终态）
+ *
+ * 先驱逐 Free Pool 再置 BAD；不同步落盘（交后台 bbt_handle）；Spare 耗尽
+ * 不影响标坏。
+ *
+ * @param alloc  Allocator 上下文
+ * @param gblock 全局块号
+ * @return FTL_OK（含已 BAD 的幂等早退）；FTL_ERROR 参数非法
+ */
 ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
 {
     if ((alloc == NULL) || (gblock >= BBT_MAX_BLOCKS) || (alloc->blocks == NULL))
@@ -621,9 +620,13 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     return FTL_OK;
 }
 
-// bbt_dirty_note — BBT 的唯一 dirty 闸门。
-// 每次置位推进 dirty_gen：写 job 组 header 时快照它，完成时只有代际未变才清 dirty，
-// 从而覆盖“写命令在飞期间又标坏了一块”的丢更新窗口。
+/**
+ * @brief 标记 BBT 有未落盘变更（唯一 dirty 闸门）
+ *
+ * 每次置位推进 dirty_gen，写 job 用它检测「写飞行期间又标坏」的丢更新。
+ *
+ * @param alloc Allocator 上下文
+ */
 void bbt_dirty_note(alc_t *alloc)
 {
     alloc->bbt.dirty = true;
@@ -632,8 +635,15 @@ void bbt_dirty_note(alc_t *alloc)
 
 /* ── 5. 同步持久化 ── */
 
-// 实现要点：游标未建立时先定位池内最新 record 的下一槽；**无论成败都推进游标**
-// （半编程槽不可复用）；失败保留 dirty 供下次重试。NAND 格式一字不改。
+/**
+ * @brief 将 BBT 追加写入 NAND BBT 池（同步）
+ *
+ * 游标未建立时先定位；无论成败都推进游标（半编程槽不可复用）；失败保留
+ * dirty 供重试。
+ *
+ * @param alloc Allocator 上下文
+ * @return FTL_OK（含 dirty==0 早退）；FTL_ERROR 定位/写失败
+ */
 ftl_status_e bbt_save(alc_t *alloc)
 {
     if (alloc->bbt.dirty == false)
@@ -708,8 +718,17 @@ ftl_status_e bbt_save(alc_t *alloc)
     return FTL_OK;
 }
 
-// 实现要点：进入即复位 alloc->bbt（找不到时保持 0/无效 ⇒ 后续 save 从池首开始）；
-// locate 只回序号，header 本体要按该序号**再读一次**并复核 sequence。
+/**
+ * @brief 从 NAND BBT 池加载最新有效 record
+ *
+ * 池内轮转扫描；命中后恢复本实例的 sequence 与写游标。找不到时保持 0/无效。
+ *
+ * @param alloc     Allocator 上下文（池路由与游标写回）
+ * @param bad_map   输出：bitmap
+ * @param bad_count 输出：坏块数
+ * @param sequence  输出：最新 sequence
+ * @return FTL_OK；FTL_ERROR 无有效 BBT
+ */
 ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence)
 {
     // 复位本实例池状态：无有效 record 时保持 0/无效（后续 bbt_save 从池首开始）
@@ -786,7 +805,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  * @return FTL_OK 已提交（waiting = 1）；
  *                FTL_ERROR 建链/提交失败（**waiting 保持 0**，调用者停在 BBT_JOB_WRITE 等下一轮 kick 续跑——**不重擦块**）。
  *
- * @note 实现要点：record 内容在**提交时**从 BST 重建（不是起步时快照）——换块擦的等待
+ * @note record 内容在**提交时**从 BST 重建（不是起步时快照）——换块擦的等待
  * 期间新标坏的块会被一并记进本条 record，是严格的信息超集。
  * header 是**栈上** 540 B：ftl_async_write_page 在 prepare 时已把它拷进
  * FC buffer 池（同 jrn_freeze 的做法，不需要为异步保留快照缓冲）。
@@ -838,14 +857,14 @@ static ftl_status_e bbt_write_submit(alc_t *alloc)
     return FTL_OK;
 }
 
-// 实现要点：· **单飞行**：① 命令在飞 ⇒ 直接返回；② phase == WRITE 且不在飞 ⇒ 上一步提交
-// 被背压拒，只续提交写（**不重擦**——擦已成功，重擦纯属磨损）；③ 其余非 IDLE
-// （= ERASE 在飞）⇒ 返回；④ IDLE 才装配新 job。
-// · 游标未建立时的 `md_ring_locate` 是**同步**的（扫池逐页读），但只在
-// 首次落盘发生一次，且本函数由后台调度调用（不在完成泵内）
-// ⇒ 不是嵌套泵。job 的其余步骤全部"提交即返回"。
-// · sequence 在**起步时**自增；续跑路径不会再自增。
-// 擦失败 ⇒ 回 IDLE、dirty 保留、write_idx 不动，下轮重试。
+/**
+ * @brief BBT 后台持久化入口（提交即返回）
+ *
+ * 单飞行；换块先异步擦再写。sequence 在起步时自增，续跑不再自增；擦失败
+ * 回 IDLE、dirty 保留、游标不动。
+ *
+ * @param alloc Allocator 上下文
+ */
 void bbt_handle(alc_t *alloc)
 {
     do
@@ -1011,8 +1030,15 @@ static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command
     (void)fc_command_release(cmd);
 }
 
-// 实现要点：按 job.phase 分派到 bbt_erase_complete / bbt_write_complete（见各自注释）。
-// ⚠ 本函数**只**收尾/续提交，不调 bbt_handle（续提交是提交侧动作，无需嵌套泵）。
+/**
+ * @brief BBT 命令完成服务
+ *
+ * 只收尾 / 续提交，不调 bbt_handle（避免在完成泵里嵌套泵）。
+ *
+ * @param ftl        实例
+ * @param completion FC 完成状态
+ * @param ctx        alc_t *
+ */
 void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
 {
     alc_t *alloc = (alc_t *)ctx;
@@ -1049,10 +1075,15 @@ void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
 
 /* ── 7. Spare 补池 ── */
 
-// 实现要点：只出不进（出厂每 plane 预留 FTL_SPARE_POOL_PER_PLANE 个）。调用者保证
-// 该块已擦除（alc_free_push 契约）。
-// ⚠ 必须按 plane 取：Spare 池按 super block 粒度预留，补错 plane 不恢复该
-// plane 的配对能力（原实现从全局池 LIFO 弹出，实际总补 plane 0）。
+/**
+ * @brief 从指定 plane 的 Spare Pool 补充 Free Pool
+ *
+ * 必须按 plane 取：补错 plane 不恢复该 plane 的配对能力。
+ *
+ * @param alloc Allocator 上下文
+ * @param plane 坏块所属 plane
+ * @return FTL_OK；FTL_ERROR 参数非法 / Spare 耗尽
+ */
 ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane)
 {
     // Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
@@ -1077,8 +1108,14 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane)
 
 /* ── 8. 诊断打印 ── */
 
-// 实现要点：每格定宽 BBT_MAP_ENTRY_W，两 plane 并排（行长受终端宽度约束，见宏注释）；
-// 坏块打的是**本 plane 绝对块号**而非排内列号（避免与 FF 并排被误读成十六进制）。
+/**
+ * @brief 逐块探测并打印坏块图（诊断）
+ *
+ * 默认只读；do_erase != 0 时额外逐块擦除（会抹掉该实例全部元数据/用户数据）。
+ *
+ * @param alloc    Allocator 上下文
+ * @param do_erase 0 = 只读；非 0 = 逐块擦除并判擦除失败
+ */
 void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
 {
     char line[BBT_MAP_LINE_MAX];
