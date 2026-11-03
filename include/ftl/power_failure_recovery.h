@@ -48,32 +48,6 @@ typedef struct
     bool            scoped;          /* true = 快照保留，但有降级 region 的旧映射丢失（范围化恢复） */
 } pfr_boot_result_t;
 
-/* ── 掉电重建闭环的标志量（上板验证用，UART 可读） ── */
-typedef struct
-{
-    WORD  blocks_rebuilt;  /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
-    WORD  partial_blocks;  /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
-    WORD  l2p_read_errors; /* 逐 CW 反查 L2P 的读失败次数（valid_cw 可能少算） */
-    WORD  l2p_degraded_cw; /* 命中的「降级 region」CW 数：映射已丢，不再计 read_errors */
-    DWORD valid_cw;        /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
-} pfr_rebuild_stats_t;
-
-/* ── 块元数据快照恢复（Checkpoint 的 16-bit/块 word）──
- * 格式编码在 checkpoint.h（记录格式的 owner）；恢复编排在本模块（开机恢复的 owner）。
- * 统计仅用于观测日志。 */
-typedef struct
-{
-    WORD  closed_blocks;   /* 恢复出的 Closed 条目数（退化单 plane 计） */
-    WORD  log_blocks;      /* 恢复出的活 LOG 块数 */
-    WORD  anomalies;       /* 探测发现的「池块却有数据」块数 */
-    WORD  l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 full metadata rebuild） */
-    WORD  l2p_degraded_cw; /* 命中的降级 region CW 数：只丢映射，不回退全量重建（RISK-BOOT-18） */
-    DWORD valid_cw;        /* 探测补算出的有效 CW 数 */
-} pfr_block_restore_stats_t;
-
-/* ── full metadata rebuild / 块元数据恢复原语是**模块内部实现**（static，定义在 .c）──
- * 上游只能通过 pfr_boot_recovery 触发；full metadata rebuild 的判空/写指针/逐 CW 反查三者同源。 */
-
 /* ── 接口 ── */
 
 /**
@@ -117,10 +91,9 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify);
  * 在 fc_init() 之后、ftl_service() 开始之前调用。
  *
  * 流程：
- *   ① 扫描 Journal（jrn_page_scan_latest，获取最新页/sequence）
- *   ② 扫描 Checkpoint（cp_pool_find_latest）
- *   ③ 判断类型 → fresh / clean / power failure
- *   ④ 对应恢复路径
+ *   ① 扫描 Journal（jrn_page_scan_latest）与 Checkpoint（cp_pool_find_latest）
+ *   ② 判型产出恢复计划（fresh / snapshot / replay / force-rebuild）
+ *   ③ 按计划执行；快照不可用 ⇒ full metadata rebuild 兜底
  *
  * @param ftl  FTL 上下文（已部分初始化：ch/ce/lun）
  * @param result 输出：启动结果

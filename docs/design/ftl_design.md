@@ -1172,8 +1172,10 @@ FTL 的运行时状态分两类：
 | 结构 | 关键字段 | 说明 |
 |---|---|---|
 | `pfr_boot_type_e` | `FRESH / CLEAN / POWER_FAILURE` | 启动分类 |
-| `pfr_boot_result_t` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored` | 观测/日志 |
-| `pfr_rebuild_stats_t` | `blocks_rebuilt`、`partial_blocks`、`valid_cw` | full metadata rebuild 结果 |
+| `pfr_boot_result_t` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored`、`scoped` | 观测/日志；由执行层最后一次性填满 |
+| `pfr_plan_e`（内部） | `FRESH / SNAPSHOT / REPLAY / FORCE_REBUILD` | `pfr_boot_plan()` 产出的唯一决策点 |
+| `pfr_stats_t`（内部） | `closed`、`partial`、`l2p_read_errors`、`l2p_degraded_cw`、`valid_cw`、`sub_zero` | 本次启动唯一统计；计数一律 `DWORD` |
+| `pfr_block_table_t`（内部） | `word`、`loaded`、`restored`、`probed` | 块快照的显式对账进度；`build_pools` 断言 `probed` |
 | `cp_handle_t.block_words` | 16-bit/块 × 4096 | Checkpoint 的块元数据快照，boot 时复用为加载缓冲 |
 | `cp_handle_t.wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 8 B/块 × 4096 → 16 页 | 磨损快照写进度 / 每页 CRC / 组页缓冲 |
 
@@ -1215,10 +1217,11 @@ flowchart TD
 1. **扫描**：`jrn_page_scan_latest()` 只读环形池，取 `(block, page, page_seq, entry_count)`；
    `cp_pool_find_latest()` 用 `md_ring_locate` 扫 Checkpoint 池，取最新有效 Header，
    同时恢复本实例的 CP 序号与写游标。
-2. **分类**：
-   - 无有效 CP → **fresh**；
-   - `page_seq + entry_count <= cp.journal_sequence` → **clean**（Journal 已全部落入 L2P）；
-   - 否则 → **power failure**（有未回放的增量）。
+2. **分类**：`pfr_boot_plan()` 是唯一决策点，产出 `pfr_plan_e`：
+   - 无有效 CP → **FRESH**；
+   - `REBUILD_REQUIRED` → **FORCE_REBUILD**（不尝试快照）；
+   - `page_seq + entry_count <= cp.journal_sequence` → **SNAPSHOT**（Journal 已全部落入 L2P）；
+   - 否则 → **REPLAY**（有未回放的增量）。
 3. **fresh**：失效本 owner 的 cache 行/脏位 → **full metadata rebuild（重建 Closed 列表）→ carve 池**
    （carve 只把 state==NONE 的块入池）→ Spare 补池 → `jrn_resume(floor=1)`。
 4. **clean**：块元数据快照有效时 `restore_blocks`（先全量校验再应用）→ 按 CP 位图
