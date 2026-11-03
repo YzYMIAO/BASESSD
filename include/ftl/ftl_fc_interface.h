@@ -374,38 +374,25 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
 ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD length);
 
 /**
- * @brief CW 级数据填装（按页内 CW 偏移从整页镜像散射取数）
+ * @brief CW 级数据填装（按页内 CW 偏移从源镜像散射取数）
  *
  * 与 ftl_cmd_write_data 的差别只在取数方式：后者按**链序打包**消费连续源缓冲
- * （host 写路径：主机数据本来就紧凑），本函数按 **CW 偏移**从整页镜像取数
+ * （host 写路径：主机数据本来就紧凑），本函数按 **CW 偏移**从镜像取数
  * （GC/WL 搬移：源是整页镜像，只需搬其中几个有效 CW，且搬入位置必须保持原 CW 偏移
  * ——页内 META 的 LBA 由 CW 号决定，挪位即错）。位图外的 CW 填 0xFF。
  *
- * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap）
- * @param page_buf   整页镜像（FTL_READ_USER_SIZE 字节，CW c 的数据在 page_buf + c×512）
- * @param cw_bitmap  本页哪些 CW 有效（flat 字面位图，与本命令链同源）
- * @return FTL_OK 搬入成功
- *         FTL_ERROR 链上 desc 无 buffer
- */
-ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap);
-
-/**
- * @brief CW 级数据填装（**plane-major pair 镜像**）
- *
- * 与 ftl_cmd_write_data_cw 的唯一差别是源布局：
- *   · `ftl_cmd_write_data_cw`：单页镜像（2KB），两个 plane 读同一份数据（mirror/GC/WL）；
- *   · 本函数：pair 镜像（4KB），槽位按 `plane*CW_NUM + cw` 排布（页打包 wbuf
- *     的 `h->data` 就是这个布局）。
- * ⚠ 两者不能合并成同一套取数：wbuf 的 plane1 数据在 `page_buf + 4*512`，而 mirror
- *   的两个 plane 本来就该相同；误用会让 plane1 复制 plane0（host 大文件静默损坏）。
- *
  * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap，可跨两个 plane）
- * @param pair_buf   pair 镜像（`FTL_LBA_PER_PAIR * FTL_IU_BYTES` 字节）
- * @param cw_bitmap  本页哪些 CW 有效（flat 位图，bit = plane*CW_NUM + cw）
+ * @param page_buf   源镜像，布局由 pair_major 决定
+ * @param cw_bitmap  本页哪些 CW 有效（flat 字面位图，bit = plane*CW_NUM + cw）
+ * @param pair_major false = 单页镜像（2KB，两个 plane 读同一份数据，槽位 cw）；
+ *                   true  = pair 镜像（4KB，槽位 plane*CW_NUM + cw，页打包 wbuf 的 h->data）
  * @return FTL_OK 搬入成功
  *         FTL_ERROR 链上 desc 无 buffer
+ *
+ * @note 两种布局不能合并成同一套取数：wbuf 的 plane1 数据在 `page_buf + 4*512`，
+ *       而 mirror 的两个 plane 本来就该相同；误用会让 plane1 复制 plane0（host 大文件静默损坏）。
  */
-ftl_status_e ftl_cmd_write_data_pair_cw(fc_command_t *cmd, const BYTE *pair_buf, DWORD cw_bitmap);
+ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap, bool pair_major);
 
 /**
  * @brief 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
