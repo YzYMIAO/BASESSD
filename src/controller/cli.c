@@ -519,17 +519,9 @@ static int uart_cli_info(int argc, char *argv[])
     BYTE                     ch;
     BYTE                     ce;
     BYTE                     lun;
-    bool                     dump_diag = false;
 
-    /* `info --diag`：额外导出 L2P 诊断环（最近 256 次 region 写回/加载的有效条目数，
-     * debug 档才有内容；平时零输出，RISK-CACHE-26 排障用）。 */
-    for (int i = 1; i < argc; i++)
-    {
-        if (strcmp(argv[i], "--diag") == 0)
-        {
-            dump_diag = true;
-        }
-    }
+    (void)argc;
+    (void)argv;
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
@@ -552,11 +544,6 @@ static int uart_cli_info(int argc, char *argv[])
 
         /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
         (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->reclaimed_count, ftl->mig_handle->moved_count, ftl->mig_handle->noop_count, ftl->mig_handle->novictim_count, ftl->mig_handle->erased, ftl->mig_handle->read_fail_streak, ftl->mig_handle->gc_last_mode, ftl->mig_handle->nogain_count, alc_free_min_plane_count(&ftl->alloc));
-        // 运行期账本自查（RISK-MD-06）：零计数 CLOSED 块是否仍有活映射。
-        // 放在 CLI（结构性同步上下文）而不是数据面，避免抢占 FC 资源。
-        // 探针内部有同步读 + 泵，故取 g_ctrl 的非 const 指针（本处 ftl 是 const 视图）。
-        (void)pfr_count_underrun_probe(g_ctrl.ftl[die]);
-
         /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
          * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
         (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch_calls, ftl->cache->prefetch_started, ftl->cache->prefetch_skipped, ftl->cache->prefetch_resident, ftl->cache->prefetch_hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
@@ -574,11 +561,6 @@ static int uart_cli_info(int argc, char *argv[])
     }
 
     usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
-
-    if (dump_diag)
-    {
-        l2p_diag_dump(); /* RISK-CACHE-26：最近 256 次 region 写回/加载的有效条目数 */
-    }
 
     return FUNC_STATUS_SUCCESS;
 }
@@ -1197,7 +1179,7 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {     "tr",                                                                                                                                                          "tr <lba>",                                                                              "trim one lba", 2U,  2U,      uart_cli_tr},
     {     "fl",                                                                                                                                                                "fl",                                                         "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
     {     "wp",                                                                                                                                                  "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
-    {   "info",                                                                                                                                                     "info [--diag]",                      "show controller + FTL statistics (--diag: dump L2P region diag ring)", 1U,  2U,    uart_cli_info},
+    {   "info",                                                                                                                                                              "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
     {    "map",                                                                                                                                                         "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
     {   "addr",                                                                                                            "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]",                                  "translate PBA/PAA/gblock address fields (read-only diag)", 3U,  6U,    uart_cli_addr},
     {  "rdpaa",                                                                                                                                               "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},

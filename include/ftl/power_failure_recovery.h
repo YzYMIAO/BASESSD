@@ -140,15 +140,4 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result);
  */
 void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl);
 
-/**
- * @brief 「计数偏低」探针（RISK-MD-06）：抽样零计数 CLOSED 块，反查 L2P 是否仍有映射指进去。
- *
- * 开机路径（三条启动路径末尾）与 CLI `info --diag` 共用。每块抽 4 页，最多 32 块。
- * **同步读**：只允许在开机 / CLI 这类结构性同步上下文调用。
- *
- * @param ftl FTL 实例
- * @return 命中的实时映射条数（0 = 未发现偏低）
- */
-WORD pfr_count_underrun_probe(ftl_ctx_t *ftl);
-
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

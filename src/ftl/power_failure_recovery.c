@@ -86,89 +86,6 @@ static DWORD s_rebuild_first_region;
 static void pfr_boot_carve_pools(ftl_ctx_t *ftl);
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring);
 static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, bool force_rebuild, bool *blocks_restored, const jrn_page_ref_t *ring);
-/**
- * @brief 「计数偏低」探针（RISK-MD-06）：快照里 `valid_count==0` 的 CLOSED 块是否仍有 L2P 引用。
- *
- * 这类块正是 GC **快路径**（`mig_job_start`：有效计数为 0 ⇒ 只擦不迁）的处理对象；
- * 计数一旦偏低，擦掉它就是**静默丢数据**。每块只读 page 0（开机同步上下文，与 full
- * rebuild 同类），最多查 32 块；命中才打一行。
- *
- * @param ftl FTL 实例（L2P 已完成恢复 + 回放）
- * @return 命中的实时映射条数（0 = 未发现偏低）
- */
-WORD pfr_count_underrun_probe(ftl_ctx_t *ftl)
-{
-    WORD hits = 0U;
-
-    // 「计数偏低」探针（RISK-MD-06）：快照里 `valid_count==0` 的 CLOSED 块，是否仍有 L2P 引用。
-    // 这类块正是 GC **快路径**（`mig_job_start`：有效计数为 0 ⇒ 只擦不迁）的处理对象；
-    // 一旦计数偏低，擦掉它就是**静默丢数据**。这里在开机同步上下文里每块只读 page 0
-    // （合法：与 full rebuild 同类的同步读），最多查 32 块，代价可忽略。
-    {
-        WORD  checked = 0U;
-        WORD  hit_n   = 0U;
-        WORD  hit_g   = UINT16_MAX;
-        DWORD hit_lba = FTL_LBA_INVALID;
-
-        for (WORD g = 0U; (g < FTL_BLOCK_TOTAL) && (checked < 32U); g++)
-        {
-            bst_block_t *b = &ftl->alloc.blocks[g];
-
-            if (md_block_is_metadata(NULL, ftl_gblock_plane(g), ftl_gblock_block(g)) || ftl_block_is_bad(b) || (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED) || (b->valid_count != 0U))
-            {
-                continue;
-            }
-            checked++;
-
-            // 抽样 4 页（0 / 1/4 / 1/2 / 3/4）：只读 page 0 会漏掉活映射落在后段的块。
-            // 空白页按「LBA 无效」自然跳过，代价只是多 3 次同步读。
-            static const BYTE s_probe_pages[4] = {0U, (BYTE)(PAGES_PER_BLOCK / 4U), (BYTE)(PAGES_PER_BLOCK / 2U), (BYTE)((PAGES_PER_BLOCK * 3U) / 4U)};
-
-            for (BYTE pi = 0U; pi < 4U; pi++)
-            {
-                const DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, ftl_gblock_block(g), ftl_gblock_plane(g), s_probe_pages[pi], 0U);
-                DWORD       cw_lba[CW_NUM];
-
-                if (gc_read_page_with_lba(pba, cw_lba) != FTL_OK)
-                {
-                    continue;
-                }
-                for (BYTE cw = 0U; cw < CW_NUM; cw++)
-                {
-                    DWORD cur = NAND_PBA_INVALID;
-
-                    if ((cw_lba[cw] == FTL_LBA_INVALID) || ((QWORD)cw_lba[cw] >= L2P_GLOBAL_LBA_MAX) || (lba_routes_to(cw_lba[cw], ftl->topo) == false))
-                    {
-                        continue;
-                    }
-                    if (l2p_read_sync(ftl->cache, cw_lba[cw], &cur) != FTL_OK)
-                    {
-                        continue;
-                    }
-                    if (cur == pba_with_cw(pba, cw))
-                    {
-                        if (hit_n == 0U)
-                        {
-                            hit_g   = g;
-                            hit_lba = cw_lba[cw];
-                        }
-                        hit_n++;
-                    }
-                }
-            }
-        }
-
-        hits = hit_n;
-
-        if (hit_n != 0U)
-        {
-            LOGE(LOG_TAG_BLK "count underrun: %hu live mapping(s) inside zero-count CLOSED block(s); first g=%hu lba=%lu (checked=%hu) — GC fast-path would lose them\r\n", hit_n, hit_g, hit_lba, checked);
-        }
-    }
-
-    return hits;
-}
-
 static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blocks_valid, pfr_boot_result_t *result);
 static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats);
 static bool pfr_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL]);
@@ -852,8 +769,6 @@ static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
     // ⑥ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。
     // 必须在块状态重建（reset / rebuild / carve）之后。
     md_log_area_restore(ftl->metadata_dir, &ftl->alloc);
-
-    (void)pfr_count_underrun_probe(ftl);
 }
 
 /**
@@ -1005,7 +920,6 @@ static void pfr_boot_clean_start(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE blo
     }
 
     pfr_refill_spare_pools(ftl);
-    (void)pfr_count_underrun_probe(ftl);
 
     // ② Journal RAM 写态恢复（环形块未被擦，必须接回写指针/序号）。
     jrn_resume(ftl->journal, ring, cp->journal_sequence);
@@ -1193,7 +1107,6 @@ static void pfr_boot_power_failure(ftl_ctx_t *ftl, const cp_header_t *cp, BYTE b
     }
 
     pfr_refill_spare_pools(ftl);
-    (void)pfr_count_underrun_probe(ftl);
 
     // ⑥ Controller → Ready
     cp_timer_reset(ftl->cp_handle);

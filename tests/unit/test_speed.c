@@ -729,7 +729,6 @@ static DWORD spd_ftl_first_mismatch(DWORD lba, const BYTE *buf, DWORD count)
  * ⚠ 走 `[EV]`（`--log-visible info` 才可见）——默认档只保留用例名 + 结果 + 耗时，
  *   与 munit 三层输出约定一致。 */
 static DWORD s_spd_err_prints;
-static BYTE  l2p_diag_first_dump; /* 每轮只导出一次 L2P 诊断环 */
 
 static void spd_ftl_note_status_error(bool write, DWORD chunk, const spd_ftl_req_t *slot)
 {
@@ -766,14 +765,6 @@ static void spd_ftl_note_data_error(bool write, DWORD chunk, const spd_ftl_req_t
                          offset,
                          slot->buf[offset],
                          expected);
-
-    /* 首次不符时导出 L2P 诊断环（RISK-CACHE-26）：最近 256 次 region 写回/加载的
-     * 有效条目数。只在失败路径执行一次，平时零输出。 */
-    if ((s_spd_err_prints == 1U) && (l2p_diag_first_dump == 0U))
-    {
-        l2p_diag_first_dump = 1U;
-        l2p_diag_dump();
-    }
 
     /* 诊断（RISK-CACHE-26）：当场问一次 L2P——映射丢了（INVALID）还是映射在但页内容为 0。
      * 只在失败路径上执行；`l2p_read` 可能触发一次加载，属可接受的代价。 */

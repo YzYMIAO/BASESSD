@@ -9,7 +9,7 @@
  * 文件结构：
  *   1. 内部工具       mig_victim_from_planes / mig_present_plane_next / mig_lba_is_usable /
  *                     *_get_gblock / *_name（static）
- *   2. 提交原语       mig_command_submit / mig_read_submit / mig_write_submit / mig_erase_submit（static）
+ *   2. 提交原语       mig_read_submit / mig_write_submit / mig_erase_submit（static）
  *   3. 启动/触发      mig_job_start / GC 收益判据 / mig_gc_begin / mig_wl_begin / mig_predict_begin
  *   4. 收尾           mig_job_abort / mig_job_stall / mig_job_wait / mig_page_next / mig_dst_fail_cleanup
  *                     / mig_job_finish（static）
@@ -246,37 +246,6 @@ static const char *mig_gc_mode_name(gc_benefit_mode_e mode)
 /* ── 2. 提交原语 ── */
 
 /**
- * @brief 提交一条已建好的搬移命令：置 waiting、提交、失败回滚。
- * ⚠ stall_ms 只在**提交成功之后**清零：`ftl_op_submit` 自身失败（完成表满 / SQ 满）
- * 也属于"提交不出去"，提前清零会让 deadline 永不触发。
- *
- * @param m   job。
- * @param cmd 已建好的搬移命令；**所有权转移**给 op 层，提交失败时由本函数 release。
- *
- * @return FTL_OK    —— 已提交，waiting 置位；
- *         FTL_AGAIN —— 提交不出去（已 release 命令并回滚 waiting），调用方可重试。
- */
-static ftl_status_e mig_command_submit(mig_handle_t *m, fc_command_t *cmd)
-{
-    m->waiting = true;
-
-    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-    const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
-
-    if (ftl_op_submit(cmd, op, m) != FTL_OK)
-    {
-        m->waiting = false;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    m->stall_ms    = 0U;
-    m->wait_ms     = 0U;
-    m->cmd_wait_ms = 0U;
-    return FTL_OK;
-}
-
-/**
  * @brief 提交一条 victim 页读（整页，4 CW）。数据在完成时由服务函数拷进 m->page_buf
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。
  *
@@ -295,7 +264,23 @@ static ftl_status_e mig_read_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_command_submit(m, cmd);
+    m->waiting = true;
+
+    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
+    const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+
+    if (ftl_op_submit(cmd, op, m) != FTL_OK)
+    {
+        m->waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
+    m->stall_ms    = 0U;
+    m->wait_ms     = 0U;
+    m->cmd_wait_ms = 0U;
+    return FTL_OK;
 }
 
 /**
@@ -328,7 +313,23 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
 
         m->dummy_page0 = true;
         m->dummy_pba   = pba0;
-        return mig_command_submit(m, zero_cmd);
+        m->waiting     = true;
+
+        // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
+        const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+
+        if (ftl_op_submit(zero_cmd, op, m) != FTL_OK)
+        {
+            m->waiting = false;
+            (void)fc_command_release(zero_cmd);
+            return FTL_AGAIN;
+        }
+
+        // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
+        m->stall_ms    = 0U;
+        m->wait_ms     = 0U;
+        m->cmd_wait_ms = 0U;
+        return FTL_OK;
     }
 
     fc_command_t      *cmd;
@@ -338,7 +339,23 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_command_submit(m, cmd);
+    m->waiting = true;
+
+    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
+    const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+
+    if (ftl_op_submit(cmd, op, m) != FTL_OK)
+    {
+        m->waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
+    m->stall_ms    = 0U;
+    m->wait_ms     = 0U;
+    m->cmd_wait_ms = 0U;
+    return FTL_OK;
 }
 
 /**
@@ -361,7 +378,23 @@ static ftl_status_e mig_erase_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_command_submit(m, cmd);
+    m->waiting = true;
+
+    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
+    const ftl_op_id_e op = (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+
+    if (ftl_op_submit(cmd, op, m) != FTL_OK)
+    {
+        m->waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
+    m->stall_ms    = 0U;
+    m->wait_ms     = 0U;
+    m->cmd_wait_ms = 0U;
+    return FTL_OK;
 }
 
 /* ── 3. 启动/触发 ── */

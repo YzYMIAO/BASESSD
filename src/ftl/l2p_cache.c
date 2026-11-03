@@ -61,55 +61,6 @@
 
 #include <string.h>
 
-#if !defined(NDEBUG)
-/* 临时诊断环（RISK-CACHE-26）：记录最近 N 次「region 写回提交 / 加载完成」的有效条目数。
- * 平时**不打印**（避免刷屏）；测试发现数据不符时调一次 `l2p_diag_dump()` 导出。 */
-#    define L2P_DIAG_DEPTH (256U)
-
-typedef struct
-{
-    DWORD region;
-    WORD  nv;
-    BYTE  loaded; /* 1 = 加载完成；0 = 写回提交 */
-} l2p_diag_entry_t;
-
-static l2p_diag_entry_t s_l2p_diag[L2P_DIAG_DEPTH];
-static WORD             s_l2p_diag_next;
-static WORD             s_l2p_diag_count;
-
-/**
- * @brief 记一条 region 访问流水到 debug 诊断环（环形覆盖，最多 L2P_DIAG_DEPTH 条）。
- */
-static void l2p_diag_note(DWORD region, WORD nv, BYTE loaded)
-{
-    s_l2p_diag[s_l2p_diag_next].region = region;
-    s_l2p_diag[s_l2p_diag_next].nv     = nv;
-    s_l2p_diag[s_l2p_diag_next].loaded = loaded;
-    s_l2p_diag_next                    = (WORD)((s_l2p_diag_next + 1U) % L2P_DIAG_DEPTH);
-
-    if (s_l2p_diag_count < (WORD)L2P_DIAG_DEPTH)
-    {
-        s_l2p_diag_count++;
-    }
-}
-#endif
-
-// 打印诊断环里的最近访问流水（仅 debug 构建有内容）。
-void l2p_diag_dump(void)
-{
-#if !defined(NDEBUG)
-    for (WORD i = 0U; i < s_l2p_diag_count; i++)
-    {
-        const WORD idx = (WORD)((s_l2p_diag_next + (WORD)L2P_DIAG_DEPTH - s_l2p_diag_count + i) % (WORD)L2P_DIAG_DEPTH);
-
-        LOGW(LOG_TAG_L2P "diag: region %lu %s nv=%hu\r\n",
-             s_l2p_diag[idx].region,
-             (s_l2p_diag[idx].loaded != 0U) ? "loaded" : "flushed",
-             s_l2p_diag[idx].nv);
-    }
-#endif
-}
-
 // 页内批量 API 的几何前提：一个 pair（FTL_LBA_PER_PAIR 个 LBA）必须完整落在同一
 // L2P region 内（base 对齐 ⇒ base..base+7 同 region），否则批量读写会跨 region。
 // 这是编译期事实，不是运行期检查（C7：恒真的运行期断言不算守卫）。
@@ -1424,21 +1375,6 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
             line->degraded        = false;
             line->state           = L2P_CACHE_CLEAN;
 
-#if !defined(NDEBUG)
-            // 临时诊断（RISK-CACHE-26）：记录加载完成时的有效条目数（见写回提交点）。
-            {
-                WORD nv = 0U;
-
-                for (WORD i = 0U; i < L2P_ENTRIES_PER_REGION; i++)
-                {
-                    if (line->entries[i] != NAND_PBA_INVALID)
-                    {
-                        nv++;
-                    }
-                }
-                l2p_diag_note(line->region_id, nv, 1U);
-            }
-#endif
             // host 加载：下一次命中是本次 miss 的重试，不计 hit。
             // 预取：保留 prefetch 标志，下一次 host 命中计真实收益。
             line->fresh = (line->prefetch == false);
@@ -1553,23 +1489,6 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
 
                 // 顺序不可倒：先写后记账（掉电最多多留一份旧记录）。
                 md_commit_region(ftl->metadata_dir, local_region, MD_COMMIT_PAIR, primary, backup);
-
-#if !defined(NDEBUG)
-                // 临时诊断（RISK-CACHE-26）：记录写回提交时的有效条目数（**不打印**，
-                // 由 l2p_diag_dump 在数据不符时一次性导出，避免刷屏）。
-                {
-                    WORD nv = 0U;
-
-                    for (WORD i = 0U; i < L2P_ENTRIES_PER_REGION; i++)
-                    {
-                        if (line->entries[i] != NAND_PBA_INVALID)
-                        {
-                            nv++;
-                        }
-                    }
-                    l2p_diag_note(line->region_id, nv, 0U);
-                }
-#endif
 
                 line->state = L2P_CACHE_CLEAN;
 

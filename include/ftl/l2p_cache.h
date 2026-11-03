@@ -662,14 +662,6 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
 
 /**
- * @brief 导出 L2P 诊断环（仅 debug：最近 256 次 region 写回/加载的有效条目数）。
- *
- * @note 平时不打印（避免刷屏），由测试在发现数据不符时调一次（RISK-CACHE-26）。
- *       release 下为空实现。
- */
-void l2p_diag_dump(void);
-
-/**
  * @brief 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
  *
  * 从下标 0 起扫，最多启动 max_kick 行 DIRTY（受共享 L2P_FLUSH_MAX_INFLIGHT 闸门）；
