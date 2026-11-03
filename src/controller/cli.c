@@ -540,23 +540,23 @@ static int uart_cli_info(int argc, char *argv[])
         {
             continue;
         }
-        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrashing, ftl->cache->miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.sequence_counter, ftl->total_writes);
+        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
         /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
-        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->reclaimed_count, ftl->mig_handle->moved_count, ftl->mig_handle->noop_count, ftl->mig_handle->novictim_count, ftl->mig_handle->erased, ftl->mig_handle->read_fail_streak, ftl->mig_handle->gc_last_mode, ftl->mig_handle->nogain_count, alc_free_min_plane_count(&ftl->alloc));
+        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->stats.dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.reclaimed, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop, ftl->mig_handle->state.counters.novictim, ftl->mig_handle->job.erased, ftl->mig_handle->state.failure.read_fail_streak, ftl->mig_handle->state.benefit.last_mode, ftl->mig_handle->state.counters.nogain, alc_free_min_plane_count(&ftl->alloc));
         /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
          * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch_calls, ftl->cache->prefetch_started, ftl->cache->prefetch_skipped, ftl->cache->prefetch_resident, ftl->cache->prefetch_hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->batch_jobs, ftl->mig_handle->batch_pages, ftl->mig_handle->batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->wal_defer_count);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->job.batch_jobs, ftl->mig_handle->job.batch_pages, ftl->mig_handle->job.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
 
         /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
          * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
         const md_dir_cache_t *md  = ftl->metadata_dir;
         const md_handle_t    *job = &md->handle;
 
-        if ((job->phase != MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
+        if ((job->phase != MD_JOB_IDLE) || (md->reclaim.count != 0U))
         {
-            (void)LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall=%lums pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, job->stall_ms, md->reclaim_pending_count, job->victim);
+            (void)LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall_armed=%d pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, (int)job->submit_deadline.armed, md->reclaim.count, job->victim);
         }
     }
 
@@ -887,7 +887,7 @@ static int uart_cli_bbt(int argc, char *argv[])
          * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过后台调度步，无清除路径。 */
         if (do_erase != 0U)
         {
-            ftl->bg_suspend = 1U;
+            ftl->flags.bg_suspend = 1U;
             /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
              * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
              * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
@@ -960,7 +960,7 @@ static int uart_cli_format(int argc, char *argv[])
         }
 
         /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
-        ftl->bg_suspend = 1U;
+        ftl->flags.bg_suspend = 1U;
         {
             wb_trigger_t trigger;
             wb_status_t  status;

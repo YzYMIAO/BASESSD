@@ -23,6 +23,7 @@
 #include "assertion.h"   /* ASSERT（inline 访问器与地址展开的入参检查） */
 #include "bst.h"         /* bst_block_t, FTL_BLOCK_TOTAL, ftl_gblock */
 #include "ftl_config.h"  /* DWORD, pba_make */
+#include "ftl_job.h"     /* ftl_heartbeat_t（BBT job 观测） */
 #include "ftl_type.h"    /* ftl_status_e, ftl_topo_t */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
@@ -118,8 +119,7 @@ typedef struct
     bbt_handle_phase_e phase;     /* 异步持久化状态机 */
     bool               waiting;   /* true = 有命令在飞 */
     DWORD              dirty_gen; /* 本条 record 组 header 时的 dirty 代际快照 */
-    DWORD              start_ms;
-    DWORD              log_ms;
+    ftl_heartbeat_t    hb;        /* job 心跳（start/log + active） */
 } bbt_handle_t;
 
 /* BBT 后台持久化「起新 job」的节拍；在飞续跑不受此限（bbt_handle 先处理在飞态）。

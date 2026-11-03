@@ -361,7 +361,7 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl)
 // 各模块**内部**的单飞行门（不在这里窥探 phase/active）单独管，与 host 侧解耦。
 void bg_scheduler_service(ftl_ctx_t *ftl)
 {
-    if (ftl->bg_suspend == true)
+    if (ftl->flags.bg_suspend == true)
     {
         return;
     }

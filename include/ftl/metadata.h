@@ -38,6 +38,7 @@
 
 #include "allocator.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
+#include "ftl_job.h"    /* ftl_heartbeat_t / ftl_deadline_t */
 #include "ftl_type.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（目录检查点页打包自检）*/
 
@@ -809,7 +810,7 @@ typedef struct
     WORD              reclaim_gblock;       /* 在飞擦除的块（完成时归还它）*/
     WORD              reclaim_fail_gblock;  /* 连续擦除失败计数对应的块（RISK-MD-01）*/
     BYTE              reclaim_fail_count;   /* 该块连续擦除失败次数；达上限即标坏并清位 */
-    DWORD             stall_ms;             /* 连续「提交不出去」的起点（0 = 未计时） */
+    ftl_deadline_t    submit_deadline;      /* 连续「提交不出去」deadline */
     bool              timed_out;            /* true = 本次 job 因 deadline 中止 */
     md_handle_phase_e timeout_phase;        /* 超时发生的 phase */
     WORD              dir_ckpt_idx;         /* 本目录检查点记录 的池内槽位 */
@@ -821,8 +822,7 @@ typedef struct
     int32_t           error;                /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
-    DWORD start_ms;
-    DWORD log_ms;
+    ftl_heartbeat_t hb;
 
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
      * 服务循环，栈帧早已返回。放 job 而非栈（同 mig_handle.page_buf / rr_page_scratch）。 */
@@ -830,83 +830,59 @@ typedef struct
 } md_handle_t;
 
 /* ── 常驻 Directory Cache（33,752 B，`g_ftl_md[]` 落 SRAM4，见 src/ftl/metadata.c） ── */
+/* 目录检查点的状态机（单飞 + 代数 + 游标）。 */
+typedef struct
+{
+    DWORD sequence;     /* 当前目录检查点 sequence */
+    DWORD dirty_gen;    /* Directory 变更代数：每次 update 自增 */
+    DWORD covered_gen;  /* 本次写入所覆盖的 dirty_gen 快照 */
+    WORD  write_idx;    /* 池内下一个待写槽 */
+    bool  cursor_valid; /* 游标是否已建立 */
+    bool  dirty;        /* 是否有未写回变更 */
+    bool  busy;         /* 写入单飞（RISK-MD-06） */
+    BYTE  owner;        /* 单飞持有者（MD_DIR_CKPT_OWNER_*） */
+} md_dir_ckpt_t;
+
+/* 每 plane 的 L2P 日志当前写块游标。 */
+typedef struct
+{
+    WORD block[PLANE_NUM]; /* 当前日志块 gblock */
+    BYTE page[PLANE_NUM];  /* 块内下一可用页 */
+    bool valid[PLANE_NUM]; /* 游标是否已建立 */
+} md_l2p_cur_t;
+
+/* 待回收日志块位图 + 轮转起点。 */
+typedef struct
+{
+    DWORD bitmap[FTL_BLOCK_TOTAL / 32U];
+    WORD  count;
+    WORD  scan; /* 轮转起点：擦除持续失败的块不再永久挡住后续块 */
+} md_reclaim_t;
+
 typedef struct md_dir_cache
 {
     md_entry_t entries[METADATA_DIR_ENTRIES];
-    /* L2P region 的**第二份副本** PBA（RISK-BOOT-18 的 L2）。
-     * 与 entries[i].pba 同一代、同一次 commit 写入；目录检查点的 backup chunks 承载它。
-     * NAND_PBA_INVALID = 该 region 还没有副本（未写过 / 旧介质单副本）。
-     * ⚠ 副本也计入 l2p_live（回收判据是“所有占用者都走了”）。 */
+    /* L2P region 的第二份副本 PBA（RISK-BOOT-18 的 L2）。 */
     DWORD backup_pba[METADATA_DIR_ENTRIES];
-    WORD  count;             /* 有效 entry 数 */
-    DWORD dir_ckpt_sequence; /* 当前目录检查点 sequence */
-    bool  dirty;             /* 是否有未写回目录检查点的变更 */
-    bool  dir_ckpt_busy;     /* 目录检查点写入单飞（RISK-MD-06）：prepare 置位、commit 清；
-                              * 第二个 writer 得到 MD_DIR_CKPT_BUSY。CP job 与 metadata job
-                              * 都会写目录检查点，并发 prepare 会把两个 sequence 写进同一槽。 */
-    BYTE dir_ckpt_owner;     /* 单飞持有者（MD_DIR_CKPT_OWNER_*）：abort 只释放自己的锁，
-                              * 防一个 job 的超时中止把另一个 job 的锁清掉。 */
-    DWORD dirty_gen;         /* Directory 变更代数：每次 update 自增 */
-    DWORD dir_ckpt_gen;      /* 本次目录检查点写入所覆盖的 dirty_gen 快照 */
+    WORD  count; /* 有效 entry 数 */
 
-    /* ── L2P 日志块（元数据写模型：只追加 + 块池轮转）──
-     * 每个 region 写进「当前日志块」的下一空槽（一 region = 一页）。块满则从
-     * **固定 L2P 日志区**取新块（NONE = 已擦净）。l2p_live 记每个日志块上还有多少
-     * region 的**最新位置**落在这里。
-     * ⚠ 归零**不等于**可回收：还要没有在飞写回的槽位预留（`slot_resv`，见下）——
-     *   否则写命令还在飞、Directory 尚未 commit，擦块就会把在飞数据连同其落点一起丢。
-     * l2p_live 同时是 `md_block_is_metadata` 的唯一动态块判据（C9：不维护第二套坐标）。 */
-    WORD l2p_live[FTL_BLOCK_TOTAL]; /* 每 gblock 的活 region 数 */
+    md_dir_ckpt_t ckpt; /* 目录检查点状态机 */
 
-    /* ── 当前写块：**每 plane 一个**（RISK-BOOT-18 的 L2，2026-11-01 收口）──
-     * 一次 region 写回 = 主副本写 plane p 的当前块、备副本写**另一个 plane** 的当前块
-     * （`md_slot_pair_append` 从每个 plane 各取一页）。这样：
-     *   · 单个 plane 的块被擦/写坏时，另一 plane 的副本仍完整 ⇒ 读回退备份并交换主备；
-     *   · 每个 plane 的块用满 64 页才换块（此前"主备同块连续两页"每个 region 吃掉
-     *     两块页、每块只能放 32 个 region，日志区一半容量被同块冗余吃掉）；
-     *   · 擦除 / 回收 / 磨损仍按 gblock 单 plane 进行，与固定元数据池的 multi-plane
-     *     镜像不同（那是"同页写所有 plane"，这里是"每个 plane 各一份独立页"）。
-     * `cur_valid[p]=false` ⇒ 该 plane 尚未分配当前块。 */
-    WORD cur_block[PLANE_NUM]; /* 当前日志块 gblock（按 plane 下标）*/
-    BYTE cur_page[PLANE_NUM];  /* 当前日志块内下一可用页 */
-    bool cur_valid[PLANE_NUM]; /* 游标是否已建立 */
-    WORD log_borrow_count;     /* 从 OP 池借用的日志块数（≤ L2P_LOG_BORROW_MAX）*/
+    /* L2P 日志块活计数（每个 gblock 上还有多少 region 的最新位置落在这里）。 */
+    WORD l2p_live[FTL_BLOCK_TOTAL];
 
-    /* ── 在飞写回的槽位预留（RISK-MD-06）──
-     * 表项 = 该次写回的主副本 PBA（备副本同块）；NAND_PBA_INVALID = 空。
-     * 语义：从 `md_slot_pair_append` 发放槽位到 `md_slot_release` 之间，该槽所在块
-     * **不得换出/回收**。只靠 `l2p_live == 0` 不够——写命令在飞时槽里的数据还没进
-     * Directory，l2p_live 看不到它，块会被当成"零活"擦掉 ⇒ 写完成再 commit 就把
-     * Directory 指向已擦页（重启 region 读失败 + 映射丢失）。 */
+    md_l2p_cur_t cur;              /* 每 plane 的当前写块游标 */
+    WORD         log_borrow_count; /* 从 OP 池借用的日志块数（≤ L2P_LOG_BORROW_MAX） */
+
+    /* 在飞写回的槽位预留（RISK-MD-06）：写命令还在飞、Directory 尚未 commit。 */
     DWORD slot_resv[MD_SLOT_RESV_MAX];
 
-    /* ── 待回收日志块位图（RAM 态，不跨重启）──
-     * commit_region 在活计数归零时置位；append_slot 换走旧当前块时若其已空也置位。
-     * 运行期擦除全部由 md_handle 的 MD_JOB_RECLAIM 异步做——append_slot 不做
-     * 同步擦除（3 ms tERASE 会击穿服务预算）。
-     * 位在"擦除在飞"期间保持置位：完成成功才清；失败保留，下轮重试。 */
-    DWORD reclaim_pending[FTL_BLOCK_TOTAL / 32U];
-    WORD  reclaim_pending_count;
-    WORD  reclaim_scan; /* 轮转起点：擦除持续失败的块不再永久挡住后续块 */
+    md_reclaim_t reclaim; /* 待回收日志块位图 + 轮转起点 */
 
-    /* 后台整理 job（回收 + 压缩，见 md_handle_t）。两个作用：
-     *   ① **抑制逐次立即回收**（搬移 victim 的最后一个活 region 时 l2p_live[victim]
-     *      归零，若就地擦掉就是**在目录检查点落盘之前**擦 victim ⇒ 掉电丢映射）；
-     *   ② **防重入 / 防抢槽**（压缩搬移要往当前块写，期间再发放槽位会打乱空槽预算）。
-     * 判据分别是 md_handle_is_compacting()（①）与 job.phase != IDLE（②）。 */
-    md_handle_t handle;
+    md_handle_t handle; /* 后台整理 job（回收 + 压缩） */
 
-    /* 目录检查点池游标（ring 写点槽位；dir_ckpt_cursor_valid=false 时尚未定位）*/
-    WORD dir_ckpt_write_idx;
-    bool dir_ckpt_cursor_valid;
-
-    /* 固定元数据分区的候选块池（BBT + shared spare；只在 md_pool_build_all 写） */
-    md_pools_t pools;
-
-    /* 拓扑信息（元数据所在芯片路由） */
-    ftl_topo_t topo;
-
-    /* allocator / total_writes：只持有指针，操作走 allocator owner API。 */
+    md_pools_t   pools; /* 固定元数据分区的候选块池 */
+    ftl_topo_t   topo;  /* 元数据所在芯片路由 */
     alc_t       *alloc;
     const DWORD *total_writes;
 } md_dir_cache_t;
@@ -1154,7 +1130,7 @@ static inline bool md_cursor_bounds_ok(const md_dir_cache_t *dir)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (dir->cur_valid[p] && ((dir->cur_block[p] >= FTL_BLOCK_TOTAL) || (dir->cur_page[p] > PAGES_PER_BLOCK)))
+        if (dir->cur.valid[p] && ((dir->cur.block[p] >= FTL_BLOCK_TOTAL) || (dir->cur.page[p] > PAGES_PER_BLOCK)))
         {
             return false;
         }

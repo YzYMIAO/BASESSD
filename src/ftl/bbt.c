@@ -277,7 +277,8 @@ void bbt_init(alc_t *alloc)
     alloc->bbt.flush_due          = 0U;
     // 清异步 job（alc_init 已零化，此处再钉一次）
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
-    alloc->bbt.handle.waiting     = false;
+    ftl_heartbeat_end(&alloc->bbt.handle.hb);
+    alloc->bbt.handle.waiting = false;
 
     // 尝试从 NAND 加载已存在的 BBT
     {
@@ -586,7 +587,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     // 当数据坏块处理（会错误弹用户 Spare、并漏掉 rebuild 标志）。
     const bool has_md_dir     = (alloc->md_dir != NULL);
     const bool is_l2p_live    = has_md_dir && (alloc->md_dir->l2p_live[gblock] != 0U);
-    const bool is_current_log = has_md_dir && (gblock < FTL_BLOCK_TOTAL) && alloc->md_dir->cur_valid[plane] && (alloc->md_dir->cur_block[plane] == gblock);
+    const bool is_current_log = has_md_dir && (gblock < FTL_BLOCK_TOTAL) && alloc->md_dir->cur.valid[plane] && (alloc->md_dir->cur.block[plane] == gblock);
     const bool borrowed_log   = is_l2p_live || is_current_log;
 
     if ((block < FTL_METADATA_AREA_END) || borrowed_log)
@@ -852,12 +853,15 @@ void bbt_handle(alc_t *alloc)
         // 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age
         if (alloc->bbt.handle.phase == BBT_JOB_IDLE)
         {
-            alloc->bbt.handle.log_ms   = 0U;
-            alloc->bbt.handle.start_ms = 0U;
+            ftl_heartbeat_end(&alloc->bbt.handle.hb);
         }
-        else if (ftl_job_heartbeat(&alloc->bbt.handle.log_ms, &alloc->bbt.handle.start_ms))
+        else if (alloc->bbt.handle.hb.active == false)
         {
-            LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, ftl_job_age_ms(&alloc->bbt.handle.start_ms));
+            ftl_heartbeat_begin(&alloc->bbt.handle.hb);
+        }
+        else if (ftl_heartbeat_due(&alloc->bbt.handle.hb))
+        {
+            LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, ftl_heartbeat_age_ms(&alloc->bbt.handle.hb));
         }
 
         if (alloc->bbt.handle.waiting == true)

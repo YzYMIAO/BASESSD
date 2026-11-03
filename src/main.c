@@ -514,14 +514,14 @@ static void ssd_ftl_stat_task(void *context, DWORD now_ms)
         const ftl_ctx_t *ftl  = ssd_ftl_die_get(die);
         const ftl_topo_t topo = ssd_ftl_die_topo(die);
 
-        LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
+        LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop);
     }
 }
 
 /*
  * 后台周期节拍：只置 flag / 补充配额，不跑业务。
  *   - L2P 写回节拍（L2P_FLUSH_INTERVAL_MS）
- *   - CP T3 到期判定（10 s，SysTick 比较；到期只置 cp->t3_due）
+ *   - CP T3 到期判定由 cp_state.next_t3_ms 直接承担（cp_handle 内比较）
  *   - BBT 起新 job 节拍（BBT_FLUSH_INTERVAL_MS）
  * 真正的执行仍由 bg_scheduler 在 ftl_service 的固定位置完成；must-run 与在飞推进
  * 不受这些 flag 影响。
@@ -553,7 +553,6 @@ static void ssd_ftl_bg_tick_task(void *context, DWORD now_ms)
 
         bg_scheduler_refill(&ftl->bg);
         ftl->l2p_flush_due = 1U;
-        cp_timer_poll(ftl->cp_handle);
 
         if (bbt_due != false)
         {

@@ -58,12 +58,6 @@ static const timer_static_task_t g_timer_task_table[] = {
 static timer_task_runtime_t g_timer_tasks[TIMER_SCHEDULER_MAX_TASKS];
 static volatile DWORD       g_timer_tick_ms;
 
-static BYTE timer_time_due(DWORD now_ms, DWORD due_ms)
-{
-    /* Signed difference makes deadline comparison work across DWORD tick wrap. */
-    return ((int32_t)(now_ms - due_ms) >= 0) ? 1U : 0U;
-}
-
 void timer_scheduler_tick(void)
 {
     /*

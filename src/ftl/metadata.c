@@ -1014,10 +1014,10 @@ static void md_boot_status_log(const md_dir_cache_t *dir)
 
     // 当前写块按 plane 打印（每 plane 一个，RISK-BOOT-18 L2）。
     LOGI(LOG_TAG_META "dir_ckpt_seq=%lu dyn=%u cur_blk=%hu/%hu live_blks=%lu count=%hu\r\n",
-         dir->dir_ckpt_sequence,
+         dir->ckpt.sequence,
          dyn,
-         (dir->cur_valid[0]) ? dir->cur_block[0] : (WORD)UINT16_MAX,
-         (PLANE_NUM > 1U && dir->cur_valid[1]) ? dir->cur_block[1] : (WORD)UINT16_MAX,
+         (dir->cur.valid[0]) ? dir->cur.block[0] : (WORD)UINT16_MAX,
+         (PLANE_NUM > 1U && dir->cur.valid[1]) ? dir->cur.block[1] : (WORD)UINT16_MAX,
          live_blocks,
          dir->count);
 }
@@ -1026,18 +1026,18 @@ static void md_boot_status_log(const md_dir_cache_t *dir)
 // Pool 新取块。
 void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
-    // 前置条件：唯一调用点 ftl_init 传 &ftl->alloc / &ftl->total_writes（调用链已保证）。
+    // 前置条件：唯一调用点 ftl_init 传 &ftl->alloc / &ftl->stats.total_writes（调用链已保证）。
     dir->alloc        = alloc;
     dir->total_writes = total_writes;
 
     s_pool_rebuilt_logged = 0U; /* DTCM NOLOAD：文件级静态必须显式复位 */
 
-    dir->dir_ckpt_sequence = 0U;
-    dir->dir_ckpt_busy     = false;
-    dir->dir_ckpt_owner    = MD_DIR_CKPT_OWNER_NONE;
-    dir->dirty             = false;
-    dir->dirty_gen         = 0U;
-    dir->dir_ckpt_gen      = 0U;
+    dir->ckpt.sequence    = 0U;
+    dir->ckpt.busy        = false;
+    dir->ckpt.owner       = MD_DIR_CKPT_OWNER_NONE;
+    dir->ckpt.dirty       = false;
+    dir->ckpt.dirty_gen   = 0U;
+    dir->ckpt.covered_gen = 0U;
 
     md_slot_reset(dir);
 
@@ -1047,12 +1047,12 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
     // 游标全部置无效：首次追加才从固定 L2P 日志区取块（绝不复用可能已编程的旧页）
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        dir->cur_block[p] = 0U;
-        dir->cur_page[p]  = 0U;
-        dir->cur_valid[p] = false;
+        dir->cur.block[p] = 0U;
+        dir->cur.page[p]  = 0U;
+        dir->cur.valid[p] = false;
     }
-    dir->dir_ckpt_write_idx    = 0U;
-    dir->dir_ckpt_cursor_valid = false;
+    dir->ckpt.write_idx    = 0U;
+    dir->ckpt.cursor_valid = false;
 
     // 待回收位图 / 后台整理 job 归零（RAM 态，不跨重启；
     // 不清 job ⇒ append_slot 永久让路）。
@@ -1121,8 +1121,8 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
     if (i < dir->count)
     {
         dir->entries[i].pba = new_pba;
-        dir->dirty          = true;
-        dir->dirty_gen++;
+        dir->ckpt.dirty     = true;
+        dir->ckpt.dirty_gen++;
         return;
     }
 
@@ -1135,8 +1135,8 @@ void md_entry_update(md_dir_cache_t *dir, metadata_type_e type, WORD id, DWORD n
         entry->id   = id;
         entry->pba  = new_pba;
         dir->count++;
-        dir->dirty = true;
-        dir->dirty_gen++;
+        dir->ckpt.dirty = true;
+        dir->ckpt.dirty_gen++;
         return;
     }
 
@@ -1171,7 +1171,7 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
         {
             continue;
         }
-        if (dir->cur_valid[plane] && (g == dir->cur_block[plane]))
+        if (dir->cur.valid[plane] && (g == dir->cur.block[plane]))
         {
             continue;
         }
@@ -1307,7 +1307,7 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
                 continue;
             }
 
-            const bool cur  = dir->cur_valid[plane] && (g == dir->cur_block[plane]);
+            const bool cur  = dir->cur.valid[plane] && (g == dir->cur.block[plane]);
             const bool live = (dir->l2p_live[g] > 0U);
 
             if (live || cur)
@@ -1514,8 +1514,8 @@ void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode
 
             // 备份副本没有额外条目结构，只更新账本并置脏。
             dir->backup_pba[region_id] = new_pba;
-            dir->dirty                 = true;
-            dir->dirty_gen++;
+            dir->ckpt.dirty            = true;
+            dir->ckpt.dirty_gen++;
         }
     }
 }
@@ -1537,7 +1537,7 @@ void md_commit_region(md_dir_cache_t *dir, WORD region_id, md_commit_mode_e mode
 // ⚠ 不动介质：换块擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦命令）。
 md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_t *dir, md_dir_ckpt_prepare_out_t *out, BYTE owner)
 {
-    if (dir->dirty == false)
+    if (dir->ckpt.dirty == false)
     {
         return MD_DIR_CKPT_CLEAN; /* 无变更早退：目录检查点每写一条都消耗池内槽位，空转会让池无谓轮转 */
     }
@@ -1547,19 +1547,19 @@ md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_t *dir, md_dir_ckpt_prepare_
     // 记录写进**同一个槽**（16 页按时间交错）⇒ 整条记录校验失败 ⇒ 开机 locate 只能
     // 回退到更旧的记录 ⇒ 目录陈旧 ⇒ 指向已回收的 L2P 日志块。同一时刻只允许一个
     // writer 处于 prepare→commit 之间。
-    if (dir->dir_ckpt_busy == true)
+    if (dir->ckpt.busy == true)
     {
         return MD_DIR_CKPT_BUSY;
     }
 
     // 记录本次目录检查点覆盖的变更代数：写入期间若有新的 commit，commit 时不得把
     // dirty 清掉（否则 on-media 目录检查点落后于 RAM Directory，旧块可能被误回收）。
-    dir->dir_ckpt_gen = dir->dirty_gen;
+    dir->ckpt.covered_gen = dir->ckpt.dirty_gen;
 
     md_dir_ckpt_ring_init(dir, &out->ring);
 
     // 游标未建立（冷启动后首次 flush）⇒ 先定位池内最新有效 record 的下一槽
-    if (dir->dir_ckpt_cursor_valid == false)
+    if (dir->ckpt.cursor_valid == false)
     {
         dir_ckpt_probe_ctx_t ctx;
         md_ring_locate_out_t loc;
@@ -1571,22 +1571,22 @@ md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_t *dir, md_dir_ckpt_prepare_
         {
             return MD_DIR_CKPT_FAILED;
         }
-        dir->dir_ckpt_sequence     = loc.sequence;
-        dir->dir_ckpt_write_idx    = loc.write_idx;
-        dir->dir_ckpt_cursor_valid = true;
+        dir->ckpt.sequence     = loc.sequence;
+        dir->ckpt.write_idx    = loc.write_idx;
+        dir->ckpt.cursor_valid = true;
     }
 
-    dir->dir_ckpt_sequence++;
-    out->idx = dir->dir_ckpt_write_idx;
-    out->seq = dir->dir_ckpt_sequence;
+    dir->ckpt.sequence++;
+    out->idx = dir->ckpt.write_idx;
+    out->seq = dir->ckpt.sequence;
 
     if (md_ring_prepare_addr(&out->ring, &dir->topo, out->idx, &out->base, &out->need_erase) != FTL_OK)
     {
         return MD_DIR_CKPT_FAILED;
     }
 
-    dir->dir_ckpt_busy  = true; /* 单飞：commit / 自己 abort 才释放 */
-    dir->dir_ckpt_owner = owner;
+    dir->ckpt.busy  = true; /* 单飞：commit / 自己 abort 才释放 */
+    dir->ckpt.owner = owner;
 
     return MD_DIR_CKPT_READY;
 }
@@ -1623,7 +1623,7 @@ void md_dir_ckpt_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_dir_c
     page->layout_version = FTL_MEDIA_LAYOUT_VERSION;
     // 填充时刻的目录代数（RISK-MD-06）：整条 record 的 16 页必须同代，否则加载侧作废
     // 整条记录。页在写的那一刻才取值 ⇒ 写入期间若有 commit，这一页与先写的页代数不同。
-    page->dirty_gen      = dir->dirty_gen;
+    page->dirty_gen      = dir->ckpt.dirty_gen;
 
     // 有效条目：本页区间与全局有效范围 [0,count) 的交。
     for (WORD k = 0U; k < n; k++)
@@ -1652,25 +1652,25 @@ void md_dir_ckpt_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_dir_c
 // `dirty_gen` 在写入期间又前进（期间有新的 commit）时保留 dirty ⇒ 下次在新槽重试整条。
 void md_dir_ckpt_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool ok)
 {
-    dir->dir_ckpt_write_idx = ((idx + 1U) % md_ring_total_records(ring));
+    dir->ckpt.write_idx = ((idx + 1U) % md_ring_total_records(ring));
 
-    if (ok && (dir->dirty_gen == dir->dir_ckpt_gen))
+    if (ok && (dir->ckpt.dirty_gen == dir->ckpt.covered_gen))
     {
-        dir->dirty = false;
+        dir->ckpt.dirty = false;
     }
 
-    dir->dir_ckpt_busy  = false; /* 单飞释放（成败都释放：残缺记录不会再被续写） */
-    dir->dir_ckpt_owner = MD_DIR_CKPT_OWNER_NONE;
+    dir->ckpt.busy  = false; /* 单飞释放（成败都释放：残缺记录不会再被续写） */
+    dir->ckpt.owner = MD_DIR_CKPT_OWNER_NONE;
 }
 
 // 释放目录检查点单飞锁：只释放自己持有的那一个（别人的超时中止不能清本 writer 的锁）。
 void md_dir_ckpt_abort(md_dir_cache_t *dir, BYTE owner)
 {
     // 只释放**自己**的锁：另一个 job 的超时中止不能把本 writer 的单飞清掉。
-    if (dir->dir_ckpt_owner == owner)
+    if (dir->ckpt.owner == owner)
     {
-        dir->dir_ckpt_busy  = false;
-        dir->dir_ckpt_owner = MD_DIR_CKPT_OWNER_NONE;
+        dir->ckpt.busy  = false;
+        dir->ckpt.owner = MD_DIR_CKPT_OWNER_NONE;
     }
 }
 
@@ -1707,7 +1707,7 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
             }
             const bool header_ok = md_dir_ckpt_header_valid(page.magic, page.chunk_count, page.layout_version);
 
-            if ((header_ok == false) || (page.sequence != dir->dir_ckpt_sequence) || (page.chunk_index != chunk))
+            if ((header_ok == false) || (page.sequence != dir->ckpt.sequence) || (page.chunk_index != chunk))
             {
                 continue; /* 该副本不可信：试另一个 plane；都失败则保留基础层的"未映射" */
             }
@@ -1765,7 +1765,7 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
 // **日志块游标不跨重启恢复**；目录检查点游标由 locate 结果恢复。
 ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
-    // 前置条件：唯一调用点传 ftl->metadata_dir / &ftl->alloc / &ftl->total_writes。
+    // 前置条件：唯一调用点传 ftl->metadata_dir / &ftl->alloc / &ftl->stats.total_writes。
     dir->alloc        = alloc;
     dir->total_writes = total_writes;
 
@@ -1788,36 +1788,36 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
     {
         const ftl_status_e status = md_ring_locate(&ring, md_dir_ckpt_record_probe, &ctx, &loc);
 
-        dir->dir_ckpt_sequence  = loc.sequence;
-        dir->dir_ckpt_write_idx = loc.write_idx;
+        dir->ckpt.sequence  = loc.sequence;
+        dir->ckpt.write_idx = loc.write_idx;
 
         // 观测口（**INFO**，随开机必打印）：目录检查点读侧结论。
         // loc=0 且 newest=65535 ⇒ 池内一条有效 record 都没有（写没落盘 / 读不回来？）。
         // loc=0 且 newest<N ⇒ 找到了，看 seq 是否与写侧对得上。
         // ⚠ 必须 INFO：本函数在 ftl_init 里跑，早于 CLI ⇒ `log level debug` 是开机后
         // 才敲的，LOGD 在此处永远看不到。
-        LOGI(LOG_TAG_META "dir_ckpt load: loc=%d newest=%hu seq=%lu\r\n", (int)status, loc.newest_idx, dir->dir_ckpt_sequence);
+        LOGI(LOG_TAG_META "dir_ckpt load: loc=%d newest=%hu seq=%lu\r\n", (int)status, loc.newest_idx, dir->ckpt.sequence);
 
         if ((status != FTL_OK) || (loc.newest_idx == UINT16_MAX))
         {
-            dir->dir_ckpt_sequence     = 0U;
-            dir->dir_ckpt_write_idx    = 0U;
-            dir->dir_ckpt_cursor_valid = false;
-            dir->dirty                 = false;
-            dir->dirty_gen             = 0U;
-            dir->dir_ckpt_gen          = 0U;
+            dir->ckpt.sequence     = 0U;
+            dir->ckpt.write_idx    = 0U;
+            dir->ckpt.cursor_valid = false;
+            dir->ckpt.dirty        = false;
+            dir->ckpt.dirty_gen    = 0U;
+            dir->ckpt.covered_gen  = 0U;
             md_boot_status_log(dir);
             return FTL_ERROR; /* 无有效目录检查点：调用者转 md_init */
         }
     }
 
-    dir->dir_ckpt_cursor_valid = true;
+    dir->ckpt.cursor_valid = true;
 
     md_load_assemble(dir, &ring, loc.newest_idx);
 
-    dir->dirty        = false;
-    dir->dirty_gen    = 0U;
-    dir->dir_ckpt_gen = 0U;
+    dir->ckpt.dirty       = false;
+    dir->ckpt.dirty_gen   = 0U;
+    dir->ckpt.covered_gen = 0U;
 
     // 由装配后的 entries 重建活计数；**日志块游标不跨重启恢复**：首次追加时从**固定
     // L2P 日志区**新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒
@@ -1825,9 +1825,9 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
     md_live_rebuild(dir);
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        dir->cur_block[p] = 0U;
-        dir->cur_page[p]  = 0U;
-        dir->cur_valid[p] = false;
+        dir->cur.block[p] = 0U;
+        dir->cur.page[p]  = 0U;
+        dir->cur.valid[p] = false;
     }
     md_reclaim_reset(dir); /* 待回收位图不跨重启（同 job：全是 RAM 态）*/
     md_handle_reset(dir);  /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
@@ -1872,7 +1872,7 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
     {
         const WORD g_cur = ftl_gblock(plane, block);
 
-        if (md_dir->cur_valid[plane] && (g_cur == md_dir->cur_block[plane]))
+        if (md_dir->cur.valid[plane] && (g_cur == md_dir->cur.block[plane]))
         {
             return true;
         }
@@ -2038,14 +2038,14 @@ void md_pool_service(ftl_ctx_t *ftl)
     md_dir_cache_t *dir     = ftl->metadata_dir;
     l2p_jrn_t      *journal = ftl->journal;
 
-    if ((alloc->pools == NULL) || (alloc->pools->dirty == false) || ftl->bg_suspend)
+    if ((alloc->pools == NULL) || (alloc->pools->dirty == false) || ftl->flags.bg_suspend)
     {
         return; /* bg_suspend：bbt --erase / format 期间 RAM 状态已不可信，不重建 */
     }
 
     // 等元数据写路径空闲：换游标可能让在飞命令的落点与新候选表不一致。
     // 单线程 superloop ⇒ 这里不会与完成回调并发；只是在下一轮再试。
-    if (ftl->cp_handle->active || ftl->flush_active || ftl->mig_handle->active || (journal->handle.phase != JRN_IDLE) || alloc->bbt.handle.waiting || md_is_busy(dir))
+    if (ftl->cp_handle->active || ftl->flush.active || ftl->mig_handle->job.active || (journal->handle.job.phase != JRN_IDLE) || alloc->bbt.handle.waiting || md_is_busy(dir))
     {
         return;
     }
@@ -2069,7 +2069,7 @@ void md_pool_service(ftl_ctx_t *ftl)
     }
 
     // 游标全部作废：下一次提交/定位会按新候选表重新扫池。
-    dir->dir_ckpt_cursor_valid            = false;
+    dir->ckpt.cursor_valid                = false;
     alloc->bbt.cursor_valid               = false;
     ftl->cp_handle->cp_state.cursor_valid = false;
 
@@ -2095,43 +2095,43 @@ void md_pool_service(ftl_ctx_t *ftl)
         bool           read_error = false;
 
         // 旧下标的失败记录先清掉，否则 jrn_resume 会把新候选误判成坏块。
-        jrn->bad_mask         = 0U;
-        jrn->pre_erased_block = JRN_BLOCK_NONE;
-        jrn->erase_fail_count = 0U;
-        jrn->erase_fail_block = JRN_BLOCK_NONE;
-        jrn->ring_full        = false; /* 新候选池可能已补回 spare */
-        (void)memset(jrn->page_buf, 0xFF, sizeof(jrn->page_buf));
+        jrn->state.bad_mask         = 0U;
+        jrn->state.pre_erased_block = JRN_BLOCK_NONE;
+        jrn->state.erase_fail_count = 0U;
+        jrn->state.erase_fail_block = JRN_BLOCK_NONE;
+        jrn->state.ring_full        = false; /* 新候选池可能已补回 spare */
+        (void)memset(jrn->job.page_buf, 0xFF, sizeof(jrn->job.page_buf));
 
         (void)jrn_page_scan_latest(journal, &latest, &read_error);
 
         // floor 取当前序号，保证 resume 不回退；merge_floor 取最近 CP 水位，
         // 阻止跨 CP 的旧条目就地合并。
-        const DWORD floor = jrn->sequence_counter;
+        const DWORD floor = jrn->state.sequence_counter;
 
         jrn_resume(journal, &latest, floor);
-        jrn->merge_floor = ftl->cp_handle->cp_state.last_journal_sequence;
+        jrn->state.merge_floor = ftl->cp_handle->cp_state.last_journal_sequence;
 
         // 环里扫不到有效页时，jrn_resume 会把写点放到第一个可用块的 page0——
         // 该块在运行期不保证已擦（与开机 fresh 的假设不同）。挂起一次换块擦除，
         // 避免对未擦页二次编程。
         if (latest.page_seq == 0U)
         {
-            jrn->target_block = jrn->current_block;
-            jrn->need_erase   = true;
+            jrn->job.target_block = jrn->state.current_block;
+            jrn->job.need_erase   = true;
         }
     }
 
     // 任一 plane 的当前 L2P 日志块若已 BAD ⇒ 该 plane 下次 append 重新分配。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (dir->cur_valid[p] && ftl_block_is_bad(&alloc->blocks[dir->cur_block[p]]))
+        if (dir->cur.valid[p] && ftl_block_is_bad(&alloc->blocks[dir->cur.block[p]]))
         {
-            dir->cur_valid[p] = false;
+            dir->cur.valid[p] = false;
         }
     }
 
     // 触发一次目录检查点提交 + Checkpoint：把 RAM 里的权威状态重新落到新候选池。
-    dir->dirty = true;
+    dir->ckpt.dirty = true;
     jrn_checkpoint_request(journal);
     bbt_dirty_note(alloc);
 
@@ -2184,17 +2184,17 @@ SSD_CODE_FAST bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD 
             return false; /* 编译期断言保证不可达 */
         }
 
-        if (dir->cur_valid[p])
+        if (dir->cur.valid[p])
         {
-            const bst_block_t *b = &alloc->blocks[dir->cur_block[p]];
+            const bst_block_t *b = &alloc->blocks[dir->cur.block[p]];
 
             if (ftl_block_is_bad(b))
             {
-                dir->cur_valid[p] = false; /* 块被标坏：游标作废，下面换块 */
+                dir->cur.valid[p] = false; /* 块被标坏：游标作废，下面换块 */
             }
         }
 
-        if ((dir->cur_valid[p] == false) || ((WORD)dir->cur_page[p] + 1U > PAGES_PER_BLOCK))
+        if ((dir->cur.valid[p] == false) || ((WORD)dir->cur.page[p] + 1U > PAGES_PER_BLOCK))
         {
             if (md_log_rotate(dir, alloc, p) == false)
             {
@@ -2274,14 +2274,14 @@ SSD_CODE_FAST bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
     // mark_all 会把它永远排除；日志区没有空闲块时就再也换不了块（死等）。
     // ⚠ 有在飞写回的槽位时不能摘身份：槽里的数据还没进 Directory，l2p_live 为 0
     //   不代表块已空（RISK-MD-06）——摘掉后它会被 mark_all 登记并擦除。
-    if (dir->cur_valid[plane] && (dir->cur_page[plane] >= PAGES_PER_BLOCK) && (dir->l2p_live[dir->cur_block[plane]] == 0U))
+    if (dir->cur.valid[plane] && (dir->cur.page[plane] >= PAGES_PER_BLOCK) && (dir->l2p_live[dir->cur.block[plane]] == 0U))
     {
-        const WORD gblock = dir->cur_block[plane];
+        const WORD gblock = dir->cur.block[plane];
 
         if (md_slot_reserved(dir, gblock) == false)
         {
             (void)md_reclaim_mark(dir, gblock);
-            dir->cur_valid[plane] = false;
+            dir->cur.valid[plane] = false;
         }
     }
 
@@ -2306,16 +2306,16 @@ SSD_CODE_FAST bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
         // 永远返回 INVALID，CP 在 CP_FLUSH_REGIONS 每 10~25ms abort 一次、写不成 Header
         // ⇒ 掉电后每次开机全量重建（实测 `free=3241 cmd=0 buf=0` 仍 stall）。
         dir->handle.compact_wanted = true;
-        LOGD(LOG_TAG_META "log area exhausted (plane=%hhu): live=%hu reclaim=%hu cur_page=%hhu — request compact\r\n", plane, md_live_block_count_get(dir), dir->reclaim_pending_count, dir->cur_page[plane]);
+        LOGD(LOG_TAG_META "log area exhausted (plane=%hhu): live=%hu reclaim=%hu cur_page=%hhu — request compact\r\n", plane, md_live_block_count_get(dir), dir->reclaim.count, dir->cur.page[plane]);
         return false;
     }
 
-    const WORD old_cur = dir->cur_block[plane];
-    const bool had_cur = dir->cur_valid[plane];
+    const WORD old_cur = dir->cur.block[plane];
+    const bool had_cur = dir->cur.valid[plane];
 
-    dir->cur_block[plane] = gblock;
-    dir->cur_page[plane]  = 0U;
-    dir->cur_valid[plane] = true;
+    dir->cur.block[plane] = gblock;
+    dir->cur.page[plane]  = 0U;
+    dir->cur.valid[plane] = true;
 
     // 旧当前块可能已被搬空（压缩只搬活 region，零活块不会成为 victim）：
     // 换走后它再也不会被追加，登记给后台回收。

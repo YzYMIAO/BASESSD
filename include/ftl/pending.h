@@ -221,25 +221,27 @@ _Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2
 /* 字段按对齐从大到小排列；_Static_assert 钉住 48B（-fshort-enums：枚举 1B）。 */
 typedef struct
 {
-    /* ── 8B / 指针 ── */
-    QWORD                  lba;             /* host 起始 LBA */
     void                  *buffer;          /* host 基缓冲 */
     volatile BYTE         *complete_flag;   /* 全部子操作完成后置 1 */
     volatile ssd_status_e *status_out;      /* 全部子操作完成后写入 agg_status */
     pending_cb_t           on_complete;     /* 全部子操作完成后调用一次 */
     void                  *on_complete_ctx; /* 回调上下文 */
+} pend_completion_t;
 
-    /* ── 4B ── */
-    DWORD total;         /* 本请求（run）LBA 总数（进度以 LBA 计） */
-    DWORD next;          /* 已下发到的 LBA 偏移（0..total） */
-    DWORD cmd_remaining; /* 同一 host 命令在本请求之后还剩的 LBA 数（0 = 命令末尾；见 ftl_io_req_t） */
+typedef struct
+{
+    QWORD             lba;        /* host 起始 LBA */
+    pend_completion_t completion; /* 完成时交付的缓冲/标志/回调 */
 
-    /* ── 2B / 1B ── */
+    DWORD total;         /* 本请求（run）LBA 总数 */
+    DWORD next;          /* 已下发到的 LBA 偏移 */
+    DWORD cmd_remaining; /* 同一 host 命令在本请求之后还剩的 LBA 数 */
+
     WORD         outstanding; /* 已下发、未完成的子操作数 */
-    BYTE         stalls;      /* 连续无进展 drain 轮数（背压预算，见 FTL_DRAIN_STALL_MAX） */
-    bool         used;        /* true: 槽位占用 */
+    BYTE         stalls;      /* 连续无进展 drain 轮数 */
+    bool         used;        /* 槽位占用 */
     pend_op_e    op;          /* PENDING_OP_READ / PENDING_OP_WRITE */
-    ssd_status_e agg_status;  /* 粘性错误：任一子操作失败 → 非 OK */
+    ssd_status_e agg_status;  /* 粘性错误 */
 } pend_group_t;
 
 _Static_assert(sizeof(pend_group_t) == 48, "pend_group_t 布局漂移（期望 48B）");

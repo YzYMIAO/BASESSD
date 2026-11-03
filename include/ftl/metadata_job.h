@@ -129,7 +129,7 @@ static inline bool md_log_block_is_idle(const md_dir_cache_t *dir, WORD g)
     {
         const BYTE p = ftl_gblock_plane(g);
 
-        if ((p < PLANE_NUM) && dir->cur_valid[p] && (g == dir->cur_block[p]))
+        if ((p < PLANE_NUM) && dir->cur.valid[p] && (g == dir->cur.block[p]))
         {
             return false; /* 该 plane 当前的写块：正在被追加 */
         }

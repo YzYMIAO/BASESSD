@@ -12,26 +12,18 @@
  * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_e / md_handle_phase_e /
  * mig_phase_e / rr_stage_e / jrn_phase_e / bbt_handle_phase_e）。
  *
- * ── 用法（每个 *_kick 的固定骨架）──
+ * 时间状态按拥有者分三类（与 `include/platform/timer.h` 的调度器同构）：
+ *   · `ftl_deadline_t` —— job 内等待/超时：绝对时刻 + armed；
+ *   · `ftl_heartbeat_t`—— job 观测心跳：start/log + active；
+ *   · `ftl_ratelimit_t`—— 日志限流：last/interval + 抑制计数。
+ * 业务结构只持有这些对象，不再裸放 `start_ms/log_ms/last_ms`。
  *
- *   if (<job 空闲>) {
- *       job.log_ms = 0U;   // 空闲：清基准（两个时间戳必须一起清）
- *       job.start_ms = 0U;
- *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms)) {
- *       LOGI("[XX] job phase=%d ... age=%lums\r\n",
- *            job.phase, ..., ftl_job_age_ms(&job.start_ms));
- *   }
- *
- * 基准由 ftl_job_heartbeat **懒初始化**（首次见到在飞时记 start）⇒ job 起点无需显式
- * 赋值。只有需要「精确到某一步」的 job（Checkpoint）才自己写 start_ms。
- *
- * ⚠ 平台时钟缺失（time_us 未注册）时 ftl_job_now_ms() 恒 0 ⇒ 心跳**永不触发**
- *   （`0 - 0 < interval`）。这是有意的取舍：心跳是纯观测，缺时钟时静默优于每轮刷屏。
- *   （与 GC 求值节拍的取舍相反——那里 0 作「尚未求值」哨兵、恒求值，因为它是**功能**，
- *   不是观测。）
+ * ⚠ 平台时钟缺失（time_us 未注册）时 ftl_job_now_ms() 恒 0 ⇒ 心跳**永不触发**。
+ *   这是有意的取舍：心跳是纯观测，缺时钟时静默优于每轮刷屏。
  */
 
 #include "platform.h"
+#include "timer.h" /* timer_time_due：全仓唯一的回绕安全时刻比较 */
 
 #include <stdint.h>
 
@@ -71,59 +63,93 @@ static inline DWORD ftl_job_now_ms(void)
     return (DWORD)(platform->time_us() / 1000U);
 }
 
-/**
- * @brief job 已运行时长（毫秒）。基准未建立（*start_ms == 0）时返回 0。
- *
- * @param start_ms job 起始时刻的毫秒基准（0 = 未建立）。
- *
- * @return 已运行毫秒；基准未建立时 0。
- */
-static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
-{
-    const DWORD start = *start_ms;
+/* ── 时间对象（业务结构只持有这些，不裸放时间戳）── */
 
-    return (start == 0U) ? 0U : (ftl_job_now_ms() - start);
+typedef DWORD ftl_time_t;
+
+/**
+ * @brief 时刻比较：now 是否已到达/越过 deadline。
+ *
+ * 复用 `timer_time_due`（有符号差 ⇒ DWORD 毫秒回绕安全），全仓不再手写
+ * `now - due >= 0`。
+ */
+static inline bool ftl_time_after(ftl_time_t now, ftl_time_t deadline)
+{
+    return timer_time_due(now, deadline);
+}
+
+/* job 内等待/超时：绝对时刻 + armed（不再用 0 当“未计时”哨兵）。 */
+typedef struct
+{
+    ftl_time_t at;
+    bool       armed;
+} ftl_deadline_t;
+
+static inline void ftl_deadline_arm(ftl_deadline_t *d, ftl_time_t now, DWORD timeout_ms)
+{
+    d->at    = now + timeout_ms;
+    d->armed = true;
+}
+
+static inline bool ftl_deadline_expired(const ftl_deadline_t *d, ftl_time_t now)
+{
+    return d->armed && ftl_time_after(now, d->at);
+}
+
+static inline void ftl_deadline_clear(ftl_deadline_t *d)
+{
+    d->armed = false;
+}
+
+/* job 观测心跳：起止显式（active），不再靠 start_ms==0 判“未开始”。 */
+typedef struct
+{
+    ftl_time_t start_ms;
+    ftl_time_t log_ms;
+    bool       active;
+} ftl_heartbeat_t;
+
+void ftl_heartbeat_begin(ftl_heartbeat_t *hb);
+bool ftl_heartbeat_due(ftl_heartbeat_t *hb);
+void ftl_heartbeat_end(ftl_heartbeat_t *hb);
+
+/**
+ * @brief job 已运行时长（毫秒）。未 active 时返回 0。
+ *
+ * @param hb 心跳对象
+ * @return 已运行毫秒；未 active 时 0。
+ */
+static inline DWORD ftl_heartbeat_age_ms(const ftl_heartbeat_t *hb)
+{
+    return (hb->active == false) ? 0U : (ftl_job_now_ms() - hb->start_ms);
 }
 
 /**
- * @brief 心跳节拍到点了吗？
+ * @brief 原始起始时刻的已运行毫秒（用于非 heartbeat 对象，如 GC 会话 / TRIM）。
  *
- * 首次见到（*start_ms == 0）只**记基准**、不打（返回 false）；此后每满
- * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 true。
- * 返回 true 时调用方打一行，age 用 ftl_job_age_ms(start_ms) 取。
- *
- * @param log_ms   上次打点时刻（进出参：到点时更新为当前时间）。
- * @param start_ms job 起始时刻（进出参：首次调用时记当前时间，之后只读）。
- *
- * @return true  到点，调用方打一行
- *         false 未到点，或首次仅记基准
+ * @param start_ms 起始时刻（0 = 未开始）
+ * @return 已运行毫秒；未开始时 0。
  */
-static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
+static inline DWORD ftl_job_age_ms(const ftl_time_t *start_ms)
 {
-    const DWORD now_ms = ftl_job_now_ms();
-
-    if (*start_ms == 0U)
-    {
-        *start_ms = now_ms;
-        *log_ms   = now_ms;
-        return false;
-    }
-
-    const DWORD interval = ((now_ms - *start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
-
-    if ((now_ms - *log_ms) < interval)
-    {
-        return false;
-    }
-
-    *log_ms = now_ms;
-    return true;
+    return (*start_ms == 0U) ? 0U : (ftl_job_now_ms() - *start_ms);
 }
+
+/* 日志限流：last/interval + 被抑制条数（无时钟时按条数兜底）。 */
+typedef struct
+{
+    ftl_time_t last_ms;
+    DWORD      interval_ms;
+    DWORD      suppressed;
+} ftl_ratelimit_t;
+
+void ftl_ratelimit_init(ftl_ratelimit_t *rl, DWORD interval_ms);
+bool ftl_ratelimit_due(ftl_ratelimit_t *rl);
 
 /**
  * @brief 只报计数的模块用的心跳（L2P cache：没有"单 job"结构）
  *
- * 节拍判据与 ftl_job_heartbeat 逐字相同，只是不维护 start_ms——在飞的是若干 cache
+ * 节拍判据与 ftl_heartbeat_due 逐字相同，只是不维护 start_ms——在飞的是若干 cache
  * line（load / flush），没有"某个 job 从哪一刻开始"可言 ⇒ 调用方只报计数，不报 age。
  * 调用方在**无在飞**时把 *log_ms 直接置 0 清基准（无 start 可清）。
  *
@@ -157,14 +183,13 @@ static inline bool ftl_job_tick(DWORD *log_ms)
  * @param last_ms        上次打印时刻（进出参；0 = 尚未打印）
  * @param count          自上次打印以来被抑制的条数（进出参；NULL = 不做条数兜底）
  * @param interval_ms    时间间隔（毫秒）
- * @param out_suppressed 放行时写入被抑制条数（可 NULL；仅在返回 true 时写）
  * @return true  本次应打印
  *         false 继续抑制
  *
  * @note 无时钟（ftl_job_now_ms() == 0）且 count == NULL ⇒ 恒 false：纯观测日志在
- *       缺时钟时静默，避免每轮刷屏（与 ftl_job_heartbeat 同取舍）。有 count 时退化
+ *       缺时钟时静默，避免每轮刷屏（与 ftl_heartbeat_due 同取舍）。有 count 时退化
  *       为「抑制满 FTL_JOB_LOG_COUNT_FALLBACK 条打一行」。
  */
-bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms, DWORD *out_suppressed);
+bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms);
 
 #endif /* FTL_JOB_H */

@@ -169,25 +169,25 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
         line->dirty_seq    = 0U;
     }
 
-    cache->clock_hand        = 0U;
-    cache->hit_count         = 0U;
-    cache->miss_count        = 0U;
-    cache->prefetch_calls    = 0U;
-    cache->prefetch_started  = 0U;
-    cache->prefetch_skipped  = 0U;
-    cache->prefetch_resident = 0U;
-    cache->prefetch_hits     = 0U;
-    cache->wal_defer_count   = 0U;
+    cache->clock_hand            = 0U;
+    cache->stats.hit_count       = 0U;
+    cache->stats.miss_count      = 0U;
+    cache->prefetch.calls        = 0U;
+    cache->prefetch.started      = 0U;
+    cache->prefetch.skipped      = 0U;
+    cache->prefetch.resident     = 0U;
+    cache->prefetch.hits         = 0U;
+    cache->stats.wal_defer_count = 0U;
 
     // 在飞计数归零：设备级 init 发生在任何命令之前
-    cache->load_inflight  = 0U;
-    cache->flush_inflight = 0U;
+    cache->inflight.load  = 0U;
+    cache->inflight.flush = 0U;
 
     // Thrashing 检测窗口：开机从「非降级」起步
-    cache->window_access = 0U;
-    cache->window_miss   = 0U;
-    cache->miss_pct      = 0U;
-    cache->thrashing     = false;
+    cache->thrash.window_access = 0U;
+    cache->thrash.window_miss   = 0U;
+    cache->thrash.miss_pct      = 0U;
+    cache->thrash.thrashing     = false;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -206,38 +206,38 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
  */
 static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
 {
-    cache->window_access++;
+    cache->thrash.window_access++;
     if (is_miss)
     {
-        cache->window_miss++;
+        cache->thrash.window_miss++;
     }
 
-    if (cache->window_access < L2P_THRASH_WINDOW)
+    if (cache->thrash.window_access < L2P_THRASH_WINDOW)
     {
         return;
     }
 
-    cache->miss_pct = ((cache->window_miss * 100U) / cache->window_access);
+    cache->thrash.miss_pct = ((cache->thrash.window_miss * 100U) / cache->thrash.window_access);
 
-    bool was_thrashing = cache->thrashing;
+    bool was_thrashing = cache->thrash.thrashing;
 
-    cache->window_access = 0U;
-    cache->window_miss   = 0U;
+    cache->thrash.window_access = 0U;
+    cache->thrash.window_miss   = 0U;
 
     // 滞回：进入 ≥90%，退出 <70%，中间保持原态
-    if (cache->miss_pct >= L2P_THRASH_ENTER_PCT)
+    if (cache->thrash.miss_pct >= L2P_THRASH_ENTER_PCT)
     {
-        cache->thrashing = true;
+        cache->thrash.thrashing = true;
     }
-    else if (cache->miss_pct < L2P_THRASH_EXIT_PCT)
+    else if (cache->thrash.miss_pct < L2P_THRASH_EXIT_PCT)
     {
-        cache->thrashing = false;
+        cache->thrash.thrashing = false;
     }
 
-    if (cache->thrashing != was_thrashing)
+    if (cache->thrash.thrashing != was_thrashing)
     {
         // 观测口：miss= 为最近窗口 miss 率；hit/miss= 为开机累计。
-        LOGI(LOG_TAG_L2P "thrash=%d miss=%hhu%% hit=%lu miss_total=%lu\r\n", cache->thrashing, cache->miss_pct, cache->hit_count, cache->miss_count);
+        LOGI(LOG_TAG_L2P "thrash=%d miss=%hhu%% hit=%lu miss_total=%lu\r\n", cache->thrash.thrashing, cache->thrash.miss_pct, cache->stats.hit_count, cache->stats.miss_count);
     }
 }
 
@@ -259,7 +259,7 @@ static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
     if (line->prefetch)
     {
         line->prefetch = false;
-        cache->prefetch_hits++;
+        cache->prefetch.hits++;
     }
 
     if (line->fresh)
@@ -268,7 +268,7 @@ static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
         return;
     }
 
-    cache->hit_count++;
+    cache->stats.hit_count++;
     l2p_access_note(cache, false);
 }
 
@@ -333,9 +333,7 @@ static DWORD s_evict_fail_n;
  */
 static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
 {
-    DWORD suppressed = 0U;
-
-    if (ftl_job_log_due(&s_evict_fail_ms, &s_evict_fail_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, &suppressed) == false)
+    if (ftl_job_log_due(&s_evict_fail_ms, &s_evict_fail_n, FTL_JOB_LOG_SLOW_INTERVAL_MS) == false)
     {
         return;
     }
@@ -370,7 +368,7 @@ static void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
         }
     }
 
-    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%hu clean=%hu dirty=%hu loading=%hu flushing=%hu suppressed=%lu\r\n", region_id, inv, clean, dirty, loading, flushing, suppressed);
+    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%hu clean=%hu dirty=%hu loading=%hu flushing=%hu\r\n", region_id, inv, clean, dirty, loading, flushing);
 }
 
 /**
@@ -429,7 +427,7 @@ static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
         // 标记为 INVALID，等待调用者重新初始化
         line->state    = L2P_CACHE_INVALID;
         line->prefetch = false;
-        cache->eviction_count++;
+        cache->stats.eviction_count++;
         return line;
     }
 
@@ -447,7 +445,7 @@ static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
             cache->clock_hand = ((idx + 1U) % L2P_CACHE_SIZE);
             line->state       = L2P_CACHE_INVALID;
             line->prefetch    = false;
-            cache->eviction_count++;
+            cache->stats.eviction_count++;
             return line;
         }
     }
@@ -477,16 +475,10 @@ static void l2p_load_fail_log(DWORD region_id, const char *cause)
 {
     // 序列门控造成的提交背压是**预期**等待（序列下一窗口收尾）：降为 5 s 一行的慢节拍，
     // 避免 host 大顺序读写 + GC 期间刷屏；其余失败仍按 1 s。
-    const bool  gated      = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
-    const DWORD interval   = (gated == true) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
-    DWORD       suppressed = 0U;
+    const bool  gated    = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
+    const DWORD interval = (gated == true) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
 
-    if (ftl_job_log_due(&s_load_fail_ms, &s_load_fail_n, interval, &suppressed) == false)
-    {
-        return;
-    }
-
-    LOGW(LOG_TAG_L2P "load start failed region=%lu cause=%s suppressed=%lu\r\n", region_id, cause, suppressed);
+    LOGW_IF(ftl_job_log_due(&s_load_fail_ms, &s_load_fail_n, interval), LOG_TAG_L2P "load start failed region=%lu cause=%s\r\n", region_id, cause);
 }
 
 // region 降级日志的限流（RISK-L2P-04 / RISK-JN-05）。
@@ -504,14 +496,7 @@ static DWORD s_degrade_n;
  */
 static void l2p_degrade_log(DWORD region_id, BYTE fail_count)
 {
-    DWORD suppressed = 0U;
-
-    if (ftl_job_log_due(&s_degrade_log_ms, &s_degrade_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, &suppressed) == false)
-    {
-        return;
-    }
-
-    LOGE(LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped (suppressed=%lu)\r\n", region_id, fail_count, suppressed);
+    LOGE_IF(ftl_job_log_due(&s_degrade_log_ms, &s_degrade_n, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped\r\n", region_id, fail_count);
 }
 
 // 内部：为 region_id 启动一次异步加载。
@@ -568,7 +553,7 @@ static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pb
     }
 
     line->state = L2P_CACHE_LOADING;
-    cache->load_inflight++;
+    cache->inflight.load++;
     return true;
 }
 
@@ -710,25 +695,25 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
 {
     ASSERT(cache != NULL);
 
-    cache->prefetch_calls++;
+    cache->prefetch.calls++;
 
     if (global_region >= L2P_GLOBAL_REGIONS)
     {
-        cache->prefetch_skipped++;
+        cache->prefetch.skipped++;
         return false;
     }
 
     // 同一 region 只允许一行；已驻留/LOADING/FLUSHING 都不再起第二条命令。
     if (l2p_line_find(cache, global_region) != NULL)
     {
-        cache->prefetch_resident++;
+        cache->prefetch.resident++;
         return true;
     }
 
     // 预取是 best-effort：不制造写回、不与 host 抢资源、不加剧 thrashing。
-    if (cache->thrashing || (cache->load_inflight >= L2P_PREFETCH_MAX_INFLIGHT) || (ftl_fc_host_budget_ok() == false))
+    if (cache->thrash.thrashing || (cache->inflight.load >= L2P_PREFETCH_MAX_INFLIGHT) || (ftl_fc_host_budget_ok() == false))
     {
-        cache->prefetch_skipped++;
+        cache->prefetch.skipped++;
         return false;
     }
 
@@ -737,17 +722,17 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
 
     if (line == NULL)
     {
-        cache->prefetch_skipped++;
+        cache->prefetch.skipped++;
         return false;
     }
 
     if (l2p_load_begin(cache, line, global_region, false, true) == false)
     {
-        cache->prefetch_skipped++;
+        cache->prefetch.skipped++;
         return false;
     }
 
-    cache->prefetch_started++;
+    cache->prefetch.started++;
     return true;
 }
 
@@ -788,7 +773,7 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
     }
 
     // miss：起异步加载，本轮给不出值
-    cache->miss_count++;
+    cache->stats.miss_count++;
     l2p_access_note(cache, true);
     (void)l2p_load_start(cache, region_id);
     return FTL_AGAIN;
@@ -816,7 +801,7 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
 
     // miss：**本函数起了加载 ⇒ 记一次 miss**（这次访问的"发现未驻留"发生在此）。
     // 随后的重试命中会被 fresh 吃掉、不计 hit ⇒ 一次访问总账 = 1 miss。
-    cache->miss_count++;
+    cache->stats.miss_count++;
     l2p_access_note(cache, true);
     (void)l2p_load_start(cache, lba_to_global_region(lba));
     return false;
@@ -927,7 +912,7 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
     {
         // miss 与逐条 l2p_read 一致：记一次 miss 并起异步加载。当前调用点已先
         // l2p_is_ready(base)，不会走到这里；保留该分支避免未来调用点永久重试。
-        cache->miss_count++;
+        cache->stats.miss_count++;
         l2p_access_note(cache, true);
         (void)l2p_load_start(cache, region_id);
         return FTL_AGAIN;
@@ -1201,11 +1186,11 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 
     if ((owner->journal != NULL) && (line->dirty_seq != 0U) && (wal_failed == false) && (jrn_persisted_seq(owner->journal) < line->dirty_seq))
     {
-        cache->wal_defer_count++;
+        cache->stats.wal_defer_count++;
         return FTL_AGAIN;
     }
 
-    if (cache->flush_inflight >= L2P_FLUSH_MAX_INFLIGHT)
+    if (cache->inflight.flush >= L2P_FLUSH_MAX_INFLIGHT)
     {
         return FTL_AGAIN; /* 共享 credit 池满：让 host I/O 先拿 FC 资源 */
     }
@@ -1257,7 +1242,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
         return FTL_AGAIN;
     }
 
-    cache->flush_inflight++;
+    cache->inflight.flush++;
     return FTL_OK;
 }
 
@@ -1266,13 +1251,13 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick)
 {
     // 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
     // ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。
-    if ((cache->flush_inflight == 0U) && (cache->load_inflight == 0U))
+    if ((cache->inflight.flush == 0U) && (cache->inflight.load == 0U))
     {
         cache->job_log_ms = 0U; /* 无在飞：清基准 */
     }
     else if (ftl_job_tick(&cache->job_log_ms))
     {
-        LOGI(LOG_TAG_L2P "job inflight load=%hhu flush=%hhu dirty=%hu\r\n", cache->load_inflight, cache->flush_inflight, l2p_dirty_count(cache));
+        LOGI(LOG_TAG_L2P "job inflight load=%hhu flush=%hhu dirty=%hu\r\n", cache->inflight.load, cache->inflight.flush, l2p_dirty_count(cache));
     }
 
     for (WORD i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
@@ -1437,8 +1422,8 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
             }
         }
 
-        ASSERT(ftl->cache->load_inflight > 0U);
-        ftl->cache->load_inflight--;
+        ASSERT(ftl->cache->inflight.load > 0U);
+        ftl->cache->inflight.load--;
     }
     else if (line->state == L2P_CACHE_FLUSHING)
     {
@@ -1505,8 +1490,8 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
             // l2p_live —— 成功时新位置已计入，失败时槽里的数据作废、无人引用（RISK-MD-06）。
             md_slot_release(ftl->metadata_dir, line->flush_pba[0], line->flush_pba[1]);
 
-            ASSERT(ftl->cache->flush_inflight > 0U);
-            ftl->cache->flush_inflight--;
+            ASSERT(ftl->cache->inflight.flush > 0U);
+            ftl->cache->inflight.flush--;
         }
     }
     else
@@ -1588,8 +1573,8 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
 void l2p_handle(l2p_cache_t *cache, BYTE die, bg_level_e level)
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
-    // 判据在模块内，主流程不读 cache->thrashing。
-    if (cache->thrashing == false)
+    // 判据在模块内，主流程不读 cache->thrash.thrashing。
+    if (cache->thrash.thrashing == false)
     {
         const BYTE max_kick = s_l2p_flush_max[level];
 

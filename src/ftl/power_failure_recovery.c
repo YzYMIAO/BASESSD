@@ -157,7 +157,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
     md_dir_cache_t           *dir = ftl->metadata_dir;
     md_dir_ckpt_prepare_out_t dir_ckpt;
 
-    dir->dirty = true; /* 空 Directory 也要落一条 record */
+    dir->ckpt.dirty = true; /* 空 Directory 也要落一条 record */
 
     if (md_dir_ckpt_prepare(dir, &dir_ckpt, MD_DIR_CKPT_OWNER_BOOT) != MD_DIR_CKPT_READY)
     {
@@ -175,7 +175,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
     for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
     {
         // 2KB 目录检查点页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。
-        md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr_buf;
+        md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
         const DWORD         dir_ckpt_page = pba_to_page(dir_ckpt.base) + chunk;
         const DWORD         addr          = pba_with_page(dir_ckpt.base, dir_ckpt_page);
 
@@ -191,7 +191,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
     // 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。
     if (ok)
     {
-        md_dir_ckpt_page_t *probe = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr_buf;
+        md_dir_ckpt_page_t *probe = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
 
         if ((ftl_sync_read_page(dir_ckpt.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != DIR_CKPT_MAGIC) || (probe->sequence != dir_ckpt.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
@@ -437,7 +437,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
         return FTL_ERROR;
     }
 
-    md_init(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
+    md_init(ftl->metadata_dir, &ftl->alloc, &ftl->stats.total_writes);
 
     // 空 Directory 必须先落目录检查点，否则下次开机 CP 存在但 Directory 加载失败。
     if (pfr_format_write_initial_dir_ckpt(ftl) != FTL_OK)
@@ -464,7 +464,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
     // 写点落错，Header 仍可能“写成功、读失败”。当场读回，避免 format 打印 done、
     // 下次开机却拒绝启动。
     {
-        cp_header_t *probe     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
+        cp_header_t *probe     = (cp_header_t *)ftl->cp_handle->hdr.hdr_buf; /* handle 常驻 2KB */
         WORD         probe_idx = UINT16_MAX;
 
         if (cp_pool_find_latest(ftl->cp_handle, probe, &probe_idx) != FTL_OK)
@@ -487,7 +487,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
     pfr_reset_blocks(ftl);
 
     // 格式化后 Directory 就是全新的「全部未映射」，之前的加载失败不再有意义。
-    ftl->md_load_failed = false;
+    ftl->flags.md_load_failed = false;
 
     return FTL_OK;
 }
@@ -511,13 +511,13 @@ static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *re
     (void)jrn_page_scan_latest(ftl->journal, &ring, &ring_read_error);
 
     // ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径）
-    cp_header_t *cp     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
+    cp_header_t *cp     = (cp_header_t *)ftl->cp_handle->hdr.hdr_buf; /* handle 常驻 2KB */
     WORD         cp_idx = UINT16_MAX;
 
     if (cp_pool_find_latest(ftl->cp_handle, cp, &cp_idx) != FTL_OK)
     {
         // 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。
-        ftl->md_load_failed = false;
+        ftl->flags.md_load_failed = false;
 
         pfr_boot_fresh_start(ftl, &ring);
 
@@ -544,7 +544,7 @@ static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *re
         // 让首个 CP 尽快提交重建后的状态并清标志。
         jrn_checkpoint_request(ftl->journal);
 
-        ftl->md_load_failed          = false;
+        ftl->flags.md_load_failed    = false;
         local_result.boot_type       = BOOT_CLEAN_START;
         local_result.cp_sequence     = cp->sequence;
         local_result.journal_entries = 0U;
@@ -556,7 +556,7 @@ static ftl_status_e pfr_boot_recovery_body(ftl_ctx_t *ftl, pfr_boot_result_t *re
     // 介质已有有效 Checkpoint，但 Directory 加载失败 ⇒ 空 Directory 会让旧 region
     // 映射整体丢失（RISK-BOOT-09）。此时没有可用的「重扫 L2P region」路径，唯一
     // 诚实的做法是拒绝启动并保留介质，由用户决定是否格式化。
-    if (ftl->md_load_failed == true)
+    if (ftl->flags.md_load_failed == true)
     {
         LOGE(LOG_TAG_META "Directory load failed but checkpoint seq=%lu exists — refuse to boot\r\n", cp->sequence);
         return FTL_ERROR;

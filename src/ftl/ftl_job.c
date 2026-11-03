@@ -12,10 +12,54 @@
 /* 无时钟（ftl_job_now_ms() == 0）时的条数兜底：抑制满这么多条放行一行。 */
 #define FTL_JOB_LOG_COUNT_FALLBACK (64U)
 
+void ftl_heartbeat_begin(ftl_heartbeat_t *hb)
+{
+    hb->start_ms = ftl_job_now_ms();
+    hb->log_ms   = hb->start_ms;
+    hb->active   = true;
+}
+
+bool ftl_heartbeat_due(ftl_heartbeat_t *hb)
+{
+    if (hb->active == false)
+    {
+        return false;
+    }
+
+    const DWORD now_ms   = ftl_job_now_ms();
+    const DWORD interval = ((now_ms - hb->start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS) ? FTL_JOB_LOG_SLOW_INTERVAL_MS : FTL_JOB_LOG_INTERVAL_MS;
+
+    if ((now_ms - hb->log_ms) < interval)
+    {
+        return false;
+    }
+
+    hb->log_ms = now_ms;
+    return true;
+}
+
+void ftl_heartbeat_end(ftl_heartbeat_t *hb)
+{
+    hb->start_ms = 0U;
+    hb->log_ms   = 0U;
+    hb->active   = false;
+}
+
+void ftl_ratelimit_init(ftl_ratelimit_t *rl, DWORD interval_ms)
+{
+    rl->last_ms     = 0U;
+    rl->interval_ms = interval_ms;
+    rl->suppressed  = 0U;
+}
+
+bool ftl_ratelimit_due(ftl_ratelimit_t *rl)
+{
+    return ftl_job_log_due(&rl->last_ms, &rl->suppressed, rl->interval_ms);
+}
+
 // 实现要点：时间优先；条数只在无时钟时兜底（有 clock 时 count 仅累计、不参与放行）。
-// 放行时先把被抑制条数写进 out_suppressed，再复位 count / last_ms —— 调用方拿到的
-// 是「本次这一行之前压掉了多少条」。
-bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms, DWORD *out_suppressed)
+// 放行时复位 count / last_ms。
+bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms)
 {
     const DWORD now_ms = ftl_job_now_ms();
     bool        due;
@@ -38,10 +82,6 @@ bool ftl_job_log_due(DWORD *last_ms, DWORD *count, DWORD interval_ms, DWORD *out
         return false;
     }
 
-    if (out_suppressed != NULL)
-    {
-        *out_suppressed = (count != NULL) ? *count : 0U;
-    }
     *last_ms = now_ms;
     if (count != NULL)
     {

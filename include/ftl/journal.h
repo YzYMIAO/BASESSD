@@ -37,6 +37,7 @@
 
 #include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* DWORD */
+#include "ftl_job.h"    /* ftl_heartbeat_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "metadata.h"    /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
@@ -132,81 +133,58 @@ typedef enum
  */
 typedef struct
 {
-    /* ── 异步刷页 job ── */
-    jrn_phase_e phase;        /* 异步刷页状态机 */
-    bool        need_erase;   /* 有**未起**的擦除：target_block 待擦（擦命令起不来时留待重试） */
-    BYTE        target_block; /* 页写成功后 current_block 的落点 */
-    BYTE        target_page;  /* 页写成功后 current_page 的落点（已做块内回绕） */
-    BYTE        from_block;   /* 起写时的 current_block（防指针回退的守卫，见 journal.c） */
-    BYTE        from_page;    /* 起写时的 current_page */
-    DWORD       waddr;        /* 在飞页地址（诊断 / 心跳） */
+    jrn_phase_e     phase;
+    bool            need_erase;
+    BYTE            target_block;
+    BYTE            target_page;
+    BYTE            from_block;
+    BYTE            from_page;
+    DWORD           waddr;
+    BYTE            page_buf[JRN_PAGE_SIZE];
+    ftl_heartbeat_t hb;
+} jrn_job_t;
 
-    /* ── 环形写游标 ── */
-    BYTE  current_block;
-    BYTE  current_page;
-    WORD  current_entry; /* 当前页已追加条数（顺序页可到 JRN_SEG_ENTRIES_PER_PAGE=508 ⇒ 不能是 BYTE） */
-    DWORD sequence_counter;
+typedef struct
+{
+    /* 当前页缓冲（跨 flush 保留，不是 job 瞬态） */
+    BYTE page_buf[JRN_PAGE_SIZE];
 
-    /* 当前页缓冲的条目类型与顺序页基准 LBA（JRN_PAGE_SEG 时有效）。
-     * base 在**首条 jrn_append_seq 时**落定，不在 jrn_seq_begin 时定：顺序流的
-     * 确认是异步的，上个序列的尾页可能在新序列 START 之后才确认——按首条确认的
-     * LBA 定基准，隐含坐标（base + 下标）才与确认顺序一致。 */
+    /* 环形写游标 */
+    BYTE            current_block;
+    BYTE            current_page;
+    WORD            current_entry;
+    DWORD           sequence_counter;
     jrn_page_kind_e page_kind;
     DWORD           page_base;
-
-    /* CP 边界：sequence < merge_floor 的旧条目**不得**被同 LBA 原地合并。
-     * 否则 CP 后的覆盖写会复用 CP 前的 sequence 却带新的 new_pba ⇒
-     * 块元数据快照 增量回放按 sequence 过滤时漏记，之后覆盖写可能撞 valid_count 下溢断言。
-     * 0 = 不设门（开机/初始化）。 */
-    DWORD merge_floor;
-
-    /* 被 journal_truncate **预擦除**、等待 flush_page 回切复用的环形块号
-     * （JRN_BLOCK_NONE = 无）。记账目的 = 同一块每圈只擦一次：truncate 擦环形
-     * 下一块后，flush_page 回切时跳过擦除。 */
-    BYTE pre_erased_block;
-
-    BYTE page_buf[JRN_PAGE_SIZE];
+    DWORD           merge_floor;
+    BYTE            pre_erased_block;
 
     bool checkpoint_needed;
     bool emergency;
 
-    /* ── 环形块坏块策略（RISK-JN-01，全部 RAM 态）──
-     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 allocator/BBT owner API 承担，
-     *                   重启后 BST BAD 会重新挡住这些块。
-     *   erase_fail_count / erase_fail_block —— 同一块连续擦除失败计数；
-     *                   达 JRN_ERASE_FAIL_MAX 即标坏并跳到下一可用块。
-     *   ring_full    —— 全部环形块不可用：journal 停止写入（不擦未擦块、不无限重试）。 */
+    /* 环形块坏块策略 */
     BYTE bad_mask;
     BYTE erase_fail_count;
     BYTE erase_fail_block;
     bool ring_full;
 
-    /* ── 持久性失败观测（全部 RAM，不随介质持久化）──
-     * 页写 / 换块擦失败时 +1 并置 pending。`write_fail_seq` 是失败时刻的
-     * sequence_counter；pending 一直阻止 victim 擦除（GC/WL/predict），直到一次
-     * Checkpoint Header 成功且其 journal_seq ≥ write_fail_seq —— 此时迁移后的
-     * L2P 已随 CP 落盘，丢掉的那条 journal 条目不再是唯一副本。
-     * ⚠ 不尝试恢复已丢条目；pending 只负责“不撒谎地说屏障已达成”。 */
+    /* 持久性失败观测 */
     DWORD write_fail_count;
     DWORD write_fail_seq;
     bool  write_fail_pending;
 
-    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
-    DWORD start_ms;
-    DWORD log_ms;
-
-    /* 本次开机提交的页写次数（观测：元数据页写放大 / 断点频率）。 */
     DWORD page_writes;
 
-    /* ── WAL 水位（RISK-L2P-09）──
-     * persisted_seq = 已**成功落盘**的条目序号上界（exclusive）。
-     * 在飞页的序号区间在 freeze 时记入 [write_page_seq, +write_entry_count)，
-     * 页写成功后推进 persisted_seq。L2P 区域写回必须等 persisted_seq ≥ 该行的
-     * dirty_seq，保证「日志先于数据」——否则掉电后会出现「映射在、valid_count 缺」，
-     * GC 可能把仍被 L2P 引用的块当空块回收（静默丢数据）。 */
+    /* WAL 水位 */
     DWORD persisted_seq;
     DWORD write_page_seq;
     WORD  write_entry_count;
+} jrn_state_t;
+
+typedef struct
+{
+    jrn_job_t   job;   /* 每 job 清零 */
+    jrn_state_t state; /* 跨 job 保留 */
 } jrn_handle_t;
 
 typedef struct l2p_jrn_s
@@ -414,7 +392,7 @@ WORD jrn_seq_room(const l2p_jrn_t *journal);
  */
 static inline DWORD jrn_page_writes(const l2p_jrn_t *journal)
 {
-    return journal->handle.page_writes;
+    return journal->handle.state.page_writes;
 }
 
 /**
@@ -480,7 +458,7 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger);
  */
 static inline bool jrn_is_idle(const l2p_jrn_t *journal)
 {
-    return journal->handle.phase == JRN_IDLE;
+    return journal->handle.job.phase == JRN_IDLE;
 }
 
 /**
@@ -491,7 +469,7 @@ static inline bool jrn_is_idle(const l2p_jrn_t *journal)
  */
 static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
 {
-    return journal->handle.sequence_counter;
+    return journal->handle.state.sequence_counter;
 }
 
 /**
@@ -506,7 +484,7 @@ static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
  */
 static inline DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
 {
-    return journal->handle.persisted_seq;
+    return journal->handle.state.persisted_seq;
 }
 
 /**
@@ -526,7 +504,7 @@ BYTE jrn_watermark_get(const l2p_jrn_t *journal);
  */
 static inline bool jrn_has_write_failure(const l2p_jrn_t *journal)
 {
-    return journal->handle.write_fail_pending;
+    return journal->handle.state.write_fail_pending;
 }
 
 /**
@@ -549,7 +527,7 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
  */
 static inline bool jrn_has_pending_entries(const l2p_jrn_t *journal)
 {
-    return journal->handle.current_entry != 0U;
+    return journal->handle.state.current_entry != 0U;
 }
 
 /**
@@ -561,7 +539,7 @@ static inline bool jrn_has_pending_entries(const l2p_jrn_t *journal)
  */
 static inline bool jrn_has_erase_pending(const l2p_jrn_t *journal)
 {
-    return journal->handle.need_erase;
+    return journal->handle.job.need_erase;
 }
 
 /**
@@ -573,7 +551,7 @@ static inline bool jrn_has_erase_pending(const l2p_jrn_t *journal)
  */
 static inline bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
 {
-    return journal->handle.checkpoint_needed;
+    return journal->handle.state.checkpoint_needed;
 }
 
 /**
@@ -585,7 +563,7 @@ static inline bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
  */
 static inline bool jrn_is_emergency(const l2p_jrn_t *journal)
 {
-    return journal->handle.emergency;
+    return journal->handle.state.emergency;
 }
 
 /**

@@ -593,7 +593,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
             if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
             {
                 // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
-                ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
+                ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
                 ftl->cache_stream.read_declines++;
                 return FTL_CACHE_READ_AGAIN;
             }
@@ -651,7 +651,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         ftl->cache_stream.read_declines++;
         if (defer == true)
         {
-            ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
+            ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
         }
         if (seq->active == true)
         {
@@ -1056,7 +1056,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
         {
             // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
-            ftl->l2p_defer = l2p_cache_any_inflight(ftl->cache);
+            ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
             ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
         }

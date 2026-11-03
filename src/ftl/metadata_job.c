@@ -113,7 +113,7 @@ bool md_reclaim_mark(md_dir_cache_t *dir, WORD g)
         return false;
     }
 
-    DWORD *word = &dir->reclaim_pending[g >> 5U];
+    DWORD *word = &dir->reclaim.bitmap[g >> 5U];
     DWORD  bit  = 1UL << (g & 31U);
 
     if ((*word & bit) != 0U)
@@ -122,7 +122,7 @@ bool md_reclaim_mark(md_dir_cache_t *dir, WORD g)
     }
 
     *word |= bit;
-    dir->reclaim_pending_count++;
+    dir->reclaim.count++;
     return true;
 }
 
@@ -141,14 +141,14 @@ static bool md_reclaim_take(md_dir_cache_t *dir, WORD *out)
     // 扫描起点，后续块仍能被回收。
     for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        const WORD  g    = ((dir->reclaim_scan + i) % FTL_BLOCK_TOTAL);
-        const DWORD word = dir->reclaim_pending[g >> 5U];
+        const WORD  g    = ((dir->reclaim.scan + i) % FTL_BLOCK_TOTAL);
+        const DWORD word = dir->reclaim.bitmap[g >> 5U];
         const DWORD bit  = 1UL << (g & 31U);
 
         if ((word & bit) != 0U)
         {
             *out              = g;
-            dir->reclaim_scan = ((g + 1U) % FTL_BLOCK_TOTAL);
+            dir->reclaim.scan = ((g + 1U) % FTL_BLOCK_TOTAL);
             return true;
         }
     }
@@ -169,15 +169,15 @@ static void md_reclaim_clear(md_dir_cache_t *dir, WORD g)
         return;
     }
 
-    DWORD *word = &dir->reclaim_pending[g >> 5U];
+    DWORD *word = &dir->reclaim.bitmap[g >> 5U];
     DWORD  bit  = 1UL << (g & 31U);
 
     if ((*word & bit) != 0U)
     {
         *word &= ~bit;
-        if (dir->reclaim_pending_count > 0U)
+        if (dir->reclaim.count > 0U)
         {
-            dir->reclaim_pending_count--;
+            dir->reclaim.count--;
         }
     }
 }
@@ -185,9 +185,9 @@ static void md_reclaim_clear(md_dir_cache_t *dir, WORD g)
 // 清空待回收位图、计数与扫描游标（格式化 / 目录重建后调用）。
 void md_reclaim_reset(md_dir_cache_t *dir)
 {
-    memset(dir->reclaim_pending, 0, sizeof(dir->reclaim_pending));
-    dir->reclaim_pending_count = 0U;
-    dir->reclaim_scan          = 0U;
+    memset(dir->reclaim.bitmap, 0, sizeof(dir->reclaim.bitmap));
+    dir->reclaim.count = 0U;
+    dir->reclaim.scan  = 0U;
 }
 
 // 全盘重扫：把所有可回收日志块登记进位图（开机 / 目录重建后）。
@@ -206,16 +206,16 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc)
 // 从当前写块取一个空槽：plane 无当前块或块已满返回 INVALID，取到即推进写指针。
 DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane)
 {
-    if ((plane >= PLANE_NUM) || (dir->cur_valid[plane] == false) || (dir->cur_page[plane] >= PAGES_PER_BLOCK))
+    if ((plane >= PLANE_NUM) || (dir->cur.valid[plane] == false) || (dir->cur.page[plane] >= PAGES_PER_BLOCK))
     {
         return NAND_PBA_INVALID;
     }
 
-    const BYTE page = dir->cur_page[plane];
+    const BYTE page = dir->cur.page[plane];
 
-    dir->cur_page[plane]++;
+    dir->cur.page[plane]++;
 
-    return md_block_page_to_pba(dir, dir->cur_block[plane], page);
+    return md_block_page_to_pba(dir, dir->cur.block[plane], page);
 }
 
 // 复位 job 状态：保留单调进度与最近错误，其余清零并重写「无」哨兵。
@@ -253,14 +253,13 @@ static DWORD s_abort_log_n;
 /**
  * @brief 判断本次中止日志是否该输出：5 s 一行；时钟缺失时每 64 次一行。
  *
- * @param out_suppressed 出参：自上次输出以来被抑制的条数
  * @return true = 本次输出
  *         false = 限流中，本次只累加抑制计数
  */
-static bool md_abort_log_is_due(DWORD *out_suppressed)
+static bool md_abort_log_is_due(void)
 {
     // 时间优先，条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
-    return ftl_job_log_due(&s_abort_log_ms, &s_abort_log_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, out_suppressed);
+    return ftl_job_log_due(&s_abort_log_ms, &s_abort_log_n, FTL_JOB_LOG_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -283,12 +282,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
     }
     else
     {
-        DWORD suppressed = 0U;
-
-        if (md_abort_log_is_due(&suppressed))
-        {
-            LOGE(LOG_TAG_META "md job abort phase=%d victim=%hu moved=%hu (victim 不擦, suppressed=%lu)\r\n", j->phase, j->victim, j->moved, suppressed);
-        }
+        LOGE_IF(md_abort_log_is_due(), LOG_TAG_META "md job abort phase=%d victim=%hu moved=%hu (victim 不擦)\r\n", j->phase, j->victim, j->moved);
     }
 
     if ((j->victim != UINT16_MAX) && (dir->l2p_live[j->victim] == 0U))
@@ -322,21 +316,18 @@ static bool md_handle_stall(md_dir_cache_t *dir)
     // 收尾（空闲守卫 1 s 兜底），不应当作提交卡死而中止 job（也会刷屏）。
     if (ftl_op_bg_submit_deferred() == true)
     {
-        j->stall_ms = 0U;
+        ftl_deadline_clear(&j->submit_deadline);
         return false;
     }
 
-    if (j->stall_ms == 0U)
+    if (j->submit_deadline.armed == false)
     {
-        j->stall_ms = now_ms;
+        ftl_deadline_arm(&j->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
         return false;
     }
-    if ((now_ms - j->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
+    if (ftl_deadline_expired(&j->submit_deadline, now_ms))
     {
-        if (ftl_job_log_due(&s_stall_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
-        {
-            LOGW(LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
-        }
+        LOGW_IF(ftl_job_log_due(&s_stall_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS);
         j->timed_out     = true;
         j->timeout_phase = j->phase;
         md_handle_abort(dir);
@@ -373,7 +364,7 @@ static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
         return FTL_AGAIN;
     }
 
-    j->stall_ms = 0U;
+    ftl_deadline_clear(&j->submit_deadline);
     return FTL_OK;
 }
 
@@ -517,7 +508,7 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
         {
             const BYTE p = ftl_gblock_plane(g);
 
-            if ((p < PLANE_NUM) && dir->cur_valid[p] && (g == dir->cur_block[p]))
+            if ((p < PLANE_NUM) && dir->cur.valid[p] && (g == dir->cur.block[p]))
             {
                 continue; /* 该 plane 的当前写块正在被追加，不搬 */
             }
@@ -579,7 +570,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     // 主/备各占一个 plane 的布局不被压缩破坏。
     const BYTE victim_plane = ftl_gblock_plane(victim);
 
-    if ((victim_plane >= PLANE_NUM) || (dir->cur_valid[victim_plane] == false))
+    if ((victim_plane >= PLANE_NUM) || (dir->cur.valid[victim_plane] == false))
     {
         return MD_COMPACT_NO_CURRENT; /* 该 plane 无当前写块：无处可搬 */
     }
@@ -591,7 +582,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     // 不预留时，在飞写落回 victim 会让实际需搬数超过预算 ⇒ md_slot_take 取不到槽 ⇒
     // 本次压缩中止（良性但白做）。预留槽把该竞态从「中止」降为「容量少两页」。
     // 代价：victim 活 region 数等于剩余槽位时本轮到不了它，换块后再来。
-    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_page[victim_plane]);
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur.page[victim_plane]);
     const WORD need_slots = (dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS);
 
     if (need_slots > free_slots)
@@ -605,10 +596,10 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->moved       = 0U;
     j->slot        = NAND_PBA_INVALID;
     j->dir_ckpt_ok = false;
-    j->stall_ms    = 0U;
-    j->phase       = MD_JOB_CP_READ;
+    ftl_deadline_clear(&j->submit_deadline);
+    j->phase = MD_JOB_CP_READ;
 
-    LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur_page[victim_plane]);
+    LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur.page[victim_plane]);
 
     return MD_COMPACT_STARTED;
 }
@@ -706,7 +697,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
         {
             // 该 plane 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
             // "启动前已在飞的前台写落回 victim"：中止是安全的（victim 不擦）。
-            LOGW(LOG_TAG_META "compact: 当前块无空槽 (plane=%hhu page=%hhu) — 中止\r\n", plane, (plane < PLANE_NUM) ? dir->cur_page[plane] : 0U);
+            LOGW(LOG_TAG_META "compact: 当前块无空槽 (plane=%hhu page=%hhu) — 中止\r\n", plane, (plane < PLANE_NUM) ? dir->cur.page[plane] : 0U);
             return MD_COMPACT_FAILED;
         }
     }
@@ -749,12 +740,12 @@ static bool md_compact_next(md_dir_cache_t *dir, const alc_t *alloc)
 
     const BYTE plane = ftl_gblock_plane(victim);
 
-    if ((plane >= PLANE_NUM) || (dir->cur_valid[plane] == false))
+    if ((plane >= PLANE_NUM) || (dir->cur.valid[plane] == false))
     {
         return false;
     }
 
-    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_page[plane]);
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur.page[plane]);
     const WORD need_slots = (dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS);
 
     if (need_slots > free_slots)
@@ -819,12 +810,15 @@ static void md_handle_step(md_dir_cache_t *dir)
     // 默认档（INFO）不打印；需要现场观测时 `log level debug`。
     if (j->phase == MD_JOB_IDLE)
     {
-        j->log_ms   = 0U;
-        j->start_ms = 0U;
+        ftl_heartbeat_end(&j->hb);
     }
-    else if (ftl_job_heartbeat(&j->log_ms, &j->start_ms))
+    else if (j->hb.active == false)
     {
-        LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu stall=%lums age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim_pending_count, j->stall_ms, ftl_job_age_ms(&j->start_ms));
+        ftl_heartbeat_begin(&j->hb);
+    }
+    else if (ftl_heartbeat_due(&j->hb))
+    {
+        LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim.count, ftl_heartbeat_age_ms(&j->hb));
     }
 
     for (;;)
@@ -840,12 +834,12 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 j->error = (int32_t)FTL_OK; /* 新 job 起点：清上一次的失败归因 */
 
-                if ((dir->reclaim_pending_count != 0U) && md_reclaim_is_eager(dir, alloc))
+                if ((dir->reclaim.count != 0U) && md_reclaim_is_eager(dir, alloc))
                 {
                     // ③→④ 契约（同压缩路径）：普通 L2P flush 在活计数归零时就登记了
                     // 回收候选，但新位置只在 RAM Directory 里。擦除前必须先把当前
                     // Directory 写成目录检查点；否则掉电后 on-media 目录检查点仍指向该块。
-                    if (dir->dirty)
+                    if (dir->ckpt.dirty)
                     {
                         j->dir_ckpt_for_reclaim = true;
                         j->victim               = UINT16_MAX;
@@ -896,7 +890,7 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 // 目录检查点落后于 Directory（登记之后、擦除之前又有 commit）⇒ 不能擦；
                 // 回 IDLE，下一轮先写目录检查点（上面的 dirty 分支）。
-                if (dir->dirty)
+                if (dir->ckpt.dirty)
                 {
                     j->phase = MD_JOB_IDLE;
                     break;
@@ -917,9 +911,9 @@ static void md_handle_step(md_dir_cache_t *dir)
                 {
                     // 计数非 0 但位图全空：计数与位图不一致（不该发生）。
                     // 清计数回 IDLE，避免每轮空转。
-                    ASSERT(dir->reclaim_pending_count == 0U);
-                    dir->reclaim_pending_count = 0U;
-                    j->phase                   = MD_JOB_IDLE;
+                    ASSERT(dir->reclaim.count == 0U);
+                    dir->reclaim.count = 0U;
+                    j->phase           = MD_JOB_IDLE;
                     break;
                 }
 
@@ -1051,7 +1045,7 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                     // 只有目录检查点确实覆盖了当前 Directory 时才允许登记新的回收候选：
                     // 否则 on-media 目录检查点仍引用「看起来已死」的块，擦了就是掉电丢映射。
-                    if (dir->dirty == false)
+                    if (dir->ckpt.dirty == false)
                     {
                         md_reclaim_mark_all(dir, alloc);
                     }
@@ -1060,7 +1054,7 @@ static void md_handle_step(md_dir_cache_t *dir)
                     {
                         j->dir_ckpt_for_reclaim = false;
                         // 写入期间又有 commit ⇒ 回 IDLE 再写一条目录检查点，不能擦。
-                        j->phase                = dir->dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
+                        j->phase                = dir->ckpt.dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
                         break;
                     }
 

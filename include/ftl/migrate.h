@@ -67,6 +67,7 @@
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_job.h"     /* ftl_deadline_t / ftl_heartbeat_t / ftl_ratelimit_t */
 #include "ftl_module.h"  /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
 #include "ftl_type.h"    /* DWORD */
 #include "gc.h"          /* gc_benefit_mode_e */
@@ -168,144 +169,132 @@ typedef struct
  *   常驻上下文而非调用栈：异步 job 的栈帧在提交命令时就已返回，数据必须活到完成
  *   回调。它是真实的 `.bss` 占用（见内存预算）。
  */
+/* 单个 job 的 transient 状态：job 起点整体 memset，不碰 state。 */
+typedef struct
+{
+    bool             active;    /* true = job 在跑（单飞行门） */
+    bool             waiting;   /* true = 有一条搬移命令在飞 */
+    bool             aborted;   /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
+    bool             decode_ok; /* 本 plane READ 解 META 成功（决定 SETTLE 是否反查 L2P） */
+    bool             write_ok;  /* 本 plane WRITE 成功（决定 SETTLE 是否改 L2P/Journal） */
+    bool             dummy_page0;
+    DWORD            dummy_pba;
+    bool             dst_allocated;
+    bool             erase_failed;
+    bool             closed_removed;
+    mig_phase_e      phase;
+    mig_kind_e       kind;
+    const char      *log_reason;
+    DWORD            log_triggers;
+    mig_post_e       post;
+    BYTE             page;
+    BYTE             plane;
+    ftl_deadline_t   submit_deadline;
+    ftl_deadline_t   external_deadline;
+    ftl_deadline_t   command_deadline;
+    bool             timed_out;
+    mig_phase_e      timeout_phase;
+    WORD             job_valid_cw;
+    super_block_t    victim;
+    DWORD            cw_bitmap[PLANE_NUM];
+    DWORD            base[PLANE_NUM];
+    DWORD            cw_lba[PLANE_NUM][CW_NUM];
+    DWORD            src[PLANE_NUM];
+    DWORD            dst[PLANE_NUM];
+    DWORD            migrated;
+    WORD             erased;
+    bool             batch_mode;
+    BYTE             batch_count;
+    BYTE             batch_outstanding;
+    bool             batch_failed;
+    bool             batch_cleanup_done;
+    DWORD            batch_jobs;
+    DWORD            batch_pages;
+    DWORD            batch_aborts;
+    mig_batch_page_t batch[MIG_BATCH_PAGES];
+    ftl_heartbeat_t  hb;
+    DWORD            last_fc_status;
+    bool             dst_high_wear;
+} mig_job_t;
+
+/* 跨 job 保留的持久状态：job 起点不清。 */
+typedef struct
+{
+    bool              nogain;
+    gc_benefit_mode_e nogain_mode;
+    ftl_time_t        nogain_ms;
+    DWORD             nogain_writes;
+    WORD              nogain_free;
+    WORD              best_valid_pct;
+    gc_benefit_mode_e last_mode;
+    DWORD             writes_last;   /* 上次求值看到的 *total_writes */
+    ftl_time_t        write_last_ms; /* total_writes 最近一次变化的时刻 */
+    bool              host_writing;  /* 最近一次 host 写流判定 */
+} mig_gc_benefit_t;
+
+typedef struct
+{
+    bool            active;
+    ftl_time_t      start_ms;
+    ftl_time_t      last_ms;
+    DWORD           jobs;
+    DWORD           moved;
+    DWORD           reclaimed;
+    DWORD           noop;
+    DWORD           aborted;
+    ftl_ratelimit_t rl;
+} mig_gc_session_t;
+
+typedef struct
+{
+    bool paused;
+    WORD fail_gblock[PLANE_NUM];
+    BYTE read_fail_streak;
+    BYTE fail_count[PLANE_NUM];
+} mig_failure_t;
+
+typedef struct
+{
+    DWORD reclaimed;
+    DWORD moved;
+    DWORD noop;
+    DWORD novictim;
+    DWORD nogain;
+} mig_counters_t;
+
+typedef struct
+{
+    mig_failure_t failure;
+
+    bool            batch_disabled;
+    bg_level_e      level;
+    bool            timers_registered;
+    ftl_ratelimit_t rl_eval;
+    DWORD           wl_last_writes;
+
+    mig_gc_benefit_t benefit;
+    mig_gc_session_t session;
+    mig_counters_t   counters;
+
+    bool    urgent_gc;
+    int32_t error;
+} mig_state_t;
+
 typedef struct mig_handle
 {
-    /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
+    /* 窄上下文：只持有实际使用的 owner 指针。 */
     alc_t       *alloc;
     l2p_jrn_t   *journal;
     l2p_cache_t *cache;
     const DWORD *total_writes;
     ftl_topo_t   topo;
 
-    bool active;                /* true = job 在跑（单飞行门） */
-    bool paused;                /* true = 系统性 victim 读失败熔断：暂停 GC/WL/predict 直到重启。
-                                 * 防「每个 victim 都读失败 ⇒ 逐个标 BAD ⇒ free 池耗尽」的死亡螺旋。
-                                 * RAM 态；重启后清，交给修复后的时序/介质重新评估。 */
-    bool        waiting;        /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
-    bool        aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
-    bool        decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
-    bool        write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
-    bool        dummy_page0;    /* true = 当前在飞命令是 page0 补零写（不结算映射） */
-    DWORD       dummy_pba;      /* page0 补零写的目标 PBA */
-    bool        dst_allocated;  /* true = 本 job 已成功分配过目的页（dst[] 有效） */
-    bool        erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
-    bool        closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
-    mig_phase_e phase;          /* 异步 job 状态机 */
-    mig_kind_e  kind;           /* victim 来源（GC / WL / predict） */
-    const char *log_reason;     /* 观测：urgent/periodic/wl/pred（静态字符串） */
-    DWORD       log_triggers;   /* 观测：GC 触发位并集 */
-    mig_post_e  post;           /* 收尾方式（FREE / RETIRE） */
-    BYTE        page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
-    BYTE        plane;          /* 当前 plane（读/写/擦各自迭代） */
-    DWORD       stall_ms;       /* 本轮连续「提交不出去」的起点（0 = 未计时） */
-    DWORD       wait_ms;        /* 等外部模块（L2P / Journal）的起点（0 = 未计时） */
-    DWORD       cmd_wait_ms;    /* 在飞命令的完成 deadline 起点（0 = 未计时） */
-    bool        timed_out;      /* true = 本次 job 因 deadline 中止 */
-    mig_phase_e timeout_phase;  /* 超时发生的 phase */
-    /* 读失败计数**按 plane 的源块**分别记（RISK-GC-01，跨 job 保留）。
-     * ⚠ 判据是「该块整块迁移成功」才清零（mig_job_finish），**不是**「读到另一页没报错」：
-     *   坏页通常在第 N 页，重试时第 0..N-1 页会先成功读一遍；按「任一页成功」清零
-     *   会让阈值永不达到 ⇒ 每轮重选同一 victim、永久 abort、容量不再增长。
-     *   两个 plane 的块号不同，故计数不能共用一个槽位（交替失败会互相冲掉）。 */
-    WORD fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
+    mig_job_t   job;
+    mig_state_t state;
 
-    WORD job_valid_cw; /* 本 job 起点 victim 的有效 CW 数（mig_job_finish 日志用） */
-
-    /* 系统性读失败熔断计数：**整块迁移成功（擦除成功）**才清零；连续 mark BAD
-     * 达到 MIG_SYSTEMIC_READ_FAIL_MAX ⇒ paused=true。 */
-    BYTE read_fail_streak;
-    BYTE fail_count[PLANE_NUM]; /* 该 plane 源块的连续读失败次数 */
-
-    super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */
-
-    DWORD cw_bitmap[PLANE_NUM];      /* 本页逐 CW 有效位（bit = plane*CW_NUM+cw） */
-    DWORD base[PLANE_NUM];           /* 本页各 plane 的页基址（CW0 的扇区 LBA） */
-    DWORD cw_lba[PLANE_NUM][CW_NUM]; /* 本页逐 CW 的扇区 LBA（未写过 = FTL_LBA_INVALID） */
-    DWORD src[PLANE_NUM];            /* 本页各 plane 的源 PBA */
-    DWORD dst[PLANE_NUM];            /* 本页各 plane 的目标 PBA（alc_super_open_alloc_pair 出参） */
-
-    /* ⚠ 源块的全局块号（BST 索引）**不缓存**在 job 里：真值是 victim.plane_blocks[plane]，
-     *   快路径（valid_total == 0 ⇒ 直接 ERASE）不经过 READ 阶段，缓存的字段在快路径下
-     *   是 0 ⇒ 擦除收尾会改块 0 的元数据。用点在 migrate.c 的
-     *   mig_present_plane_next / mig_read_complete / mig_erase_complete，
-     *   每次用 ftl_gblock() 现算。 */
-
-    DWORD migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
-    WORD  erased;   /* 本 job 已成功擦除的 plane 数（观测） */
-
-    /* ── cache program 批次（GC/WL）──
-     * 读仍逐页走 READ/READ_SETTLE；满足条件时把最多 4 页攒进 batch_buf，
-     * 一次提交 op44×(N-1) + op49。批次未结算前不启动新 job。 */
-    bool  batch_mode;         /* true = 正在收集/提交 batch */
-    bool  batch_disabled;     /* true = 本 job 禁用 batch（页面两 plane 基址不一致等） */
-    BYTE  batch_count;        /* 已收集页数（0..MIG_BATCH_PAGES） */
-    BYTE  batch_outstanding;  /* 已提交、未完成的命令数 */
-    bool  batch_failed;       /* 任一成员失败 */
-    bool  batch_cleanup_done; /* 失败后已关闭 cold SB（只做一次） */
-    DWORD batch_jobs;         /* 成功提交的批数（观测） */
-    DWORD batch_pages;        /* 成功提交的页数（观测） */
-    DWORD batch_aborts;       /* 批次失败次数（观测） */
-
-    mig_batch_page_t batch[MIG_BATCH_PAGES];
-    BYTE             batch_buf[MIG_BATCH_PAGES][PLANE_NUM][PAGE_MAIN_SIZE];
-
-    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 kind/phase/page/age */
-    DWORD start_ms;
-    DWORD log_ms;
-
-    /* 最近一次搬移读的 FC 完成状态（诊断）：abort 日志带上它，区分 ECC 不可纠 /
-     * NAND 失败 / META 不符。只写不参与决策。 */
-    DWORD last_fc_status;
-
-    /* ── 周期求值状态（GC 的 10 ms 节拍由 timer 表提供；WL 5s / predict 1s 仍在 handle 内）── */
-    bg_level_e level;             /* 本轮后台档位：mig_handle 每轮发布，mig_eval 读取 */
-    bool       timers_registered; /* timer 表注册幂等标记 */
-    DWORD      gc_log_last_ms;
-    DWORD      wl_eval_last_ms;
-    DWORD      wl_last_writes; /* 上次 WL 求值时的 *total_writes 快照：两次求值间有增长 ⇒ host 在写，WL 让路 */
-    DWORD      predict_last_ms;
-    /* 静态 WL 的目标块方向（RISK-WL-08）：true ⇒ 目的页对取**擦除最多**的空闲块
-     * （`alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`），把冷数据搬到已磨损块。GC / predict 恒 false。 */
-    bool dst_high_wear;
-
-    /* ── GC 收益判据（RISK-GC-13/14）──
-     * host_writing 用 2 s 窗口（GC_HOST_WRITE_WINDOW_MS）：USB 写约 4 KB/13 ms，
-     * 10 ms 单次采样会漏；漏判会让 GC 在写流中切到 IDLE 反复停走。 */
-    DWORD gc_writes_last;   /* 上次求值看到的 *total_writes */
-    DWORD gc_write_last_ms; /* total_writes 最近一次变化的时刻（0 = 尚未见过写） */
-    bool  host_writing;     /* 最近一次求值的 host 写流判定 */
-
-    bool              gc_nogain;         /* 最近一次空间 GC 结论：没有值得回收的 victim */
-    gc_benefit_mode_e gc_nogain_mode;    /* 产生该结论的模式 */
-    DWORD             gc_nogain_ms;      /* 结论时刻（退避用） */
-    DWORD             gc_nogain_writes;  /* 结论时的 *total_writes 快照 */
-    WORD              gc_nogain_free;    /* 结论时的 free_count 快照 */
-    WORD              gc_best_valid_pct; /* 最近一次扫描的域内最低有效率（0..100，观测） */
-    gc_benefit_mode_e gc_last_mode;      /* 最近一次实际使用的模式（观测） */
-
-    /* ── GC 会话观测（per-instance；跨 job 保留，[GC  ] end 后清零）──
-     * 一次会话 = 从首个成功启动的 GC job 起，到连续 GC_SESSION_IDLE_MS 无 GC
-     * job 活动为止。用于把「持续 GC」聚合成 start/progress/end，而不是逐 job 刷屏。 */
-    bool  gc_session_active;
-    DWORD gc_session_start_ms;
-    DWORD gc_session_last_ms; /* 最近一次 GC job 活动 */
-    DWORD gc_session_log_ms;  /* 最近一次 [GC  ] progress */
-    DWORD gc_session_jobs;
-    DWORD gc_session_moved;
-    DWORD gc_session_reclaimed;
-    DWORD gc_session_noop;
-    DWORD gc_session_aborted;
-
-    /* ── 观测计数（单调，只增不减）── */
-    DWORD   reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
-    DWORD   moved_count;     /* 累计真正搬移的 CW 数（所有 kind，诊断用） */
-    DWORD   noop_count;      /* 累计成功回收的**空** victim 数（GC） */
-    DWORD   novictim_count;  /* 触发但选不出 victim 的次数（含 no-gain） */
-    DWORD   nogain_count;    /* 其中「有候选但收益不足」的次数 */
-    bool    urgent_gc;       /* mig_gc_request_urgent 登记（被 handle 消费） */
-    int32_t error;           /* 最近一次中止的归因 */
-
-    BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
+    /* 常驻缓冲：job 间复用，不清零。 */
+    BYTE batch_buf[MIG_BATCH_PAGES][PLANE_NUM][PAGE_MAIN_SIZE];
+    BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE];
 } mig_handle_t;
 
 /**
@@ -320,7 +309,7 @@ static inline bool mig_fail_state_is_clean(const mig_handle_t *m)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        if (m->fail_gblock[plane] != UINT16_MAX)
+        if (m->state.failure.fail_gblock[plane] != UINT16_MAX)
         {
             return false;
         }
@@ -357,19 +346,20 @@ void mig_gc_request_urgent(mig_handle_t *m);
  * 语义：
  *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
  *   ② 不在飞 ⇒ 会话收尾/进展日志、紧急触发（mig_gc_request_urgent）；
- *   ③ 周期求值（GC/WL/predict）不在本函数：由 timer 表的 `mig_eval` 任务按
- *      10 ms 周期调用（见 `mig_timer_register`）。
+ *   ③ 周期求值不在本函数：GC 由 timer 表的 `mig_eval`（10 ms）、WL 由
+ *      `mig_wl_eval`（5 s）、predict 由 `mig_predict_eval`（1 s）分别驱动。
  *
  * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->level 供 mig_eval 使用
+ * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->state.level 供各 timer 任务使用
  */
 void mig_handle(mig_handle_t *m, bg_level_e level);
 
 /**
- * @brief 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）
+ * @brief GC 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）
  *
- * 语义：GC（timer 周期即节拍）→ WL 5s → predict 1s；每轮最多启动一个 job。
- * `m->level` 必须由 mig_handle 在最近一轮发布。
+ * WL / predict 已拆成独立 timer 任务（5 s / 1 s），三者按注册顺序在同一轮
+ * `timer_scheduler_poll` 内串行执行；`m->job.active` 保证每轮最多启动一个 job。
+ * `m->state.level` 必须由 mig_handle 在最近一轮发布。
  *
  * @note 时钟分配：timer 任务的 period 只决定**唤醒频率**；本函数内部的
  *       deadline/interval 一律读 `ftl_job_now_ms()`（SysTick），与
@@ -381,7 +371,9 @@ void mig_handle(mig_handle_t *m, bg_level_e level);
 void mig_eval(mig_handle_t *m);
 
 /**
- * @brief 把 mig_eval 注册进 timer 表（每实例一次；幂等）。
+ * @brief 把 GC/WL/predict 三个求值任务注册进 timer 表（每实例一次；幂等）。
+ *
+ * 注册顺序 = 同轮仲裁顺序：GC（10 ms）→ WL（5 s）→ predict（1 s）。
  *
  * @param m handle
  * @return true 已注册或本次注册成功；false timer 表满

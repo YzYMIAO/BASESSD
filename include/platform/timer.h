@@ -18,6 +18,13 @@
  * 64 槽：平台任务 + 8 个 FTL 实例 × 若干周期评估。 */
 #define TIMER_SCHEDULER_MAX_TASKS 64U
 
+/* 到期判据：有符号差 ⇒ DWORD 毫秒回绕安全（49.7 天一圈）。
+ * 全仓的绝对时刻比较复用这一条，不在各模块另写 `now - due >= 0`。 */
+static inline bool timer_time_due(DWORD now_ms, DWORD due_ms)
+{
+    return ((int32_t)(now_ms - due_ms) >= 0);
+}
+
 /*
  * Callback context is supplied by the owner. now_ms is a snapshot taken before
  * task-table iteration, so a callback should not assume it changes while it runs.

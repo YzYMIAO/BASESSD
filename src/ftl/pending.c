@@ -276,10 +276,7 @@ WORD pend_group_get_count(const pending_ctx_t *table)
 // 组 outstanding 下溢的限流日志：时间可用时 5 s 一行，缺时钟时 64 条一行。
 static void pend_note_underflow(const char *who, WORD gi)
 {
-    if (ftl_job_log_due(&s_group_underflow_log_ms, &s_group_underflow_n, FTL_JOB_LOG_SLOW_INTERVAL_MS, NULL))
-    {
-        LOGE(LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
-    }
+    LOGE_IF(ftl_job_log_due(&s_group_underflow_log_ms, &s_group_underflow_n, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
 }
 
 // 实现要点：outstanding 是「已下发、未完成」的组不变量。add 是单字段 fast path，
@@ -367,17 +364,17 @@ void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
         return;
     }
 
-    if (g->status_out != NULL)
+    if (g->completion.status_out != NULL)
     {
-        *g->status_out = g->agg_status;
+        *g->completion.status_out = g->agg_status;
     }
-    if (g->complete_flag != NULL)
+    if (g->completion.complete_flag != NULL)
     {
-        *g->complete_flag = 1U;
+        *g->completion.complete_flag = 1U;
     }
-    if (g->on_complete != NULL)
+    if (g->completion.on_complete != NULL)
     {
-        g->on_complete(g->on_complete_ctx);
+        g->completion.on_complete(g->completion.on_complete_ctx);
     }
 
     // 回调可能重入 ftl_submit_* 再申请组槽 ⇒ used 清零必须在通知之后

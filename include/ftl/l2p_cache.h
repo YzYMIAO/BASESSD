@@ -363,65 +363,59 @@ typedef const l2p_owner_t *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);
 
 typedef struct
 {
-    l2p_cache_line_t lines[L2P_CACHE_SIZE]; /* 64 × (2KB + 4B) ≈ 128 KB */
-    WORD             clock_hand;            /* CLOCK 替换指针 */
-    DWORD            hit_count;             /* 统计：命中次数（开机累计，观测用） */
-    DWORD            miss_count;            /* 统计：未命中次数（开机累计，观测用） */
-    DWORD            eviction_count;        /* 统计：被驱逐的行数（开机累计） */
-    DWORD            prefetch_calls;        /* 顺序读预取调用次数 */
-    DWORD            prefetch_started;      /* 成功起加载 / 直接置 CLEAN 的次数 */
-    DWORD            prefetch_skipped;      /* 资源/行/thrashing/越界跳过 */
-    DWORD            prefetch_resident;     /* 目标已驻留 */
-    DWORD            prefetch_hits;         /* 预取行第一次被 host 命中的次数 */
-    DWORD            wal_defer_count;       /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09 观测：
-                                             * >0 = 闸门确实生效过；持续为 0 说明 Journal 总是领先） */
-    int32_t error;                          /* 最近一次硬失败（status.error） */
+    DWORD   hit_count;       /* 命中次数（开机累计） */
+    DWORD   miss_count;      /* 未命中次数（开机累计） */
+    DWORD   eviction_count;  /* 被驱逐行数（开机累计） */
+    DWORD   wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09） */
+    int32_t error;           /* 最近一次硬失败 */
+} l2p_cache_stats_t;
 
-    /* ── Thrashing 检测窗口（阈值见文件头 L2P_THRASH_*）──
-     * 与累计 hit/miss_count 互补：累计量随开机时长渐近，反映不了**当前**行为，
-     * 降级判定必须看窗口。窗口满即结算并清零，miss_pct 保留最近一次结算结果。 */
+typedef struct
+{
+    DWORD calls;    /* 顺序读预取调用次数 */
+    DWORD started;  /* 成功起加载 / 直接置 CLEAN 的次数 */
+    DWORD skipped;  /* 资源/行/thrashing/越界跳过 */
+    DWORD resident; /* 目标已驻留 */
+    DWORD hits;     /* 预取行第一次被 host 命中的次数 */
+} l2p_prefetch_stats_t;
+
+typedef struct
+{
     DWORD window_access; /* 本窗口累计访问数（hit+miss） */
     DWORD window_miss;   /* 本窗口累计 miss 数 */
     BYTE  miss_pct;      /* 最近一次窗口结算的 miss 率（0..100） */
     bool  thrashing;     /* true = 处于 thrashing 降级态（滞回保持） */
+} l2p_thrash_t;
 
-    /* Region 级脏标记（自上次 checkpoint 以来该 region 有过写）。
-     * 与 line 级 state 互补：line DIRTY 只描述 resident 行，evict 兜底
-     * flush 后行 CLEAN/失效，但 region 的"本次周期内被改过"仍由本 bitmap
-     * 记住。Checkpoint job 以它填**本 die 的局部** region_bitmap 快照。
-     * bit 下标 = **全局** region；flush 落盘后清对应全局位。 */
+typedef struct
+{
+    BYTE load;  /* 在飞 region 加载数（观测） */
+    BYTE flush; /* 在飞 region 写回数（背压闸门，上限 L2P_FLUSH_MAX_INFLIGHT） */
+} l2p_inflight_t;
+
+typedef struct
+{
+    l2p_cache_line_t lines[L2P_CACHE_SIZE]; /* 64 × (2KB + 4B) ≈ 128 KB */
+    WORD             clock_hand;            /* CLOCK 替换指针 */
+
+    l2p_cache_stats_t    stats;
+    l2p_prefetch_stats_t prefetch;
+    l2p_thrash_t         thrash;
+
+    /* Region 级脏标记（全局 region 下标）。 */
     DWORD region_dirty_bitmap[L2P_DIRTY_BITMAP_WORDS];
 
-    /* Region 级「降级 = 映射已丢」标记（RISK-BOOT-18 的范围化恢复）。
-     * line->degraded 只随 resident 行存在，行被驱逐/重载后就没了 ⇒ host 读会把
-     * 丢失的 LBA 当“合法未映射”零填。本 bitmap 在**本次启动内**记住降级 region，
-     * 由 `l2p_is_region_degraded()` 优先查询。⚠ **它不阻止加载**：降级后 region 仍
-     * 可能被 flush 到新页（journal 回放 / host 写入），加载必须走 Directory 读回真页；
-     * 位图只决定「未映射的 LBA 报 IO_ERROR 还是零填」。
-     * ⚠ 不持久化：跨启动的丢失语义见 RISK-BOOT-20（主备副本已消除单副本失效）。
-     * bit 下标 = **全局** region。 */
+    /* Region 级「降级 = 映射已丢」标记（全局 region 下标，不持久化）。 */
     DWORD region_degraded_bitmap[L2P_DIRTY_BITMAP_WORDS];
 
-    /* 本 cache 服务的 (ch,ce)。cache 跨 LUN 共享，故不再有 lun 字段；
-     * 每条 line 的 owner LUN 由 region 经 owner_of_region 解析。 */
-    BYTE ch;
+    BYTE ch; /* 本 cache 服务的 (ch,ce)，跨 LUN 共享 */
     BYTE ce;
 
-    /* 在飞命令数。load_inflight 供观测；flush_inflight 是**背压闸门**
-     * ——每次写回占 1 条命令 + 4 个 buffer（L2P region 页 = 2KB = 4 CW），不设上限会把
-     * FC 池吃光 ⇒ host I/O 拿不到命令、全系统 FTL_AGAIN。上限见 L2P_FLUSH_MAX_INFLIGHT。
-     * ⚠ 共享 cache 下这是**全 (ch,ce) 共用的 credit 池**（主流资源模型）；
-     *   跨 LUN 公平性靠调度/后续实测，不做 per-owner 计数。 */
-    BYTE load_inflight;
-    BYTE flush_inflight;
+    l2p_inflight_t inflight;
 
-    /* 心跳基准（见 ftl_job.h）：有在飞 region（load/flush）时每满 1s 打一行计数。
-     * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
+    /* 心跳基准：有在飞 region 时每满 1s 打一行计数。 */
     DWORD job_log_ms;
 
-    /* 全局 region → owner FTL 实例（按 lba_2_* / ftl_op_route_get 解析）。
-     * load/flush/commit 用 owner 的 metadata_dir / alloc / topo，cache 自身不再持有
-     * 单一实例的依赖指针。设备级 init 注入一次，生命周期到复位。 */
     l2p_owner_fn_t owner_of_region;
     void          *owner_ctx;
 } l2p_cache_t;
@@ -751,7 +745,7 @@ void l2p_line_invalidate(l2p_cache_t *cache, WORD idx);
  */
 static inline bool l2p_has_flush_inflight(const l2p_cache_t *cache)
 {
-    return cache->flush_inflight != 0U;
+    return cache->inflight.flush != 0U;
 }
 
 /**
@@ -767,7 +761,7 @@ static inline bool l2p_has_flush_inflight(const l2p_cache_t *cache)
  */
 static inline bool l2p_cache_any_inflight(const l2p_cache_t *cache)
 {
-    return (cache->load_inflight > 0U) || (cache->flush_inflight > 0U);
+    return (cache->inflight.load > 0U) || (cache->inflight.flush > 0U);
 }
 
 #endif /* FTL_L2P_CACHE_H */
