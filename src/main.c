@@ -244,13 +244,13 @@ _Static_assert(sizeof(g_ftl_checkpoint_handle) <= BOARD_SRAM3_SIZE, "cp_handle �
 static ftl_ctx_t *g_ftl_ptrs[FTL_DIE_MAX];
 
 /* die → FTL 实例：g_ftl 与路由表都按 compact die 号索引。 */
-static ftl_ctx_t *ssd_ftl_die_get(ftl_die_id_t die)
+static ftl_ctx_t *ssd_ftl_die_get(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return &g_ftl[die];
 }
 
-static ftl_topo_t ssd_ftl_die_topo(ftl_die_id_t die)
+static ftl_topo_t ssd_ftl_die_topo(BYTE die)
 {
     ftl_topo_t topo;
 
@@ -278,7 +278,7 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region
 
     ASSERT(DIE_MAX != 0U);
 
-    const DWORD die = global_region % DIE_MAX;
+    const BYTE die = (BYTE)(global_region % DIE_MAX);
 
     ASSERT(die < DIE_MAX);
     ASSERT(g_l2p_owner[die].metadata_dir != NULL);
@@ -296,7 +296,7 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region
  * @param die 紧凑 die 号（g_die_table 给出对应 (ch,ce,lun)）
  * @return 0 成功，负值失败
  */
-static ftl_status_e ssd_ftl_boot(ftl_die_id_t die)
+static ftl_status_e ssd_ftl_boot(BYTE die)
 {
     ASSERT(die < DIE_MAX);
 
@@ -430,7 +430,7 @@ static DWORD ssd_ftl_host_lba_max(void)
 {
     DWORD cap_blocks = UINT32_MAX;
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_t *ftl              = ssd_ftl_die_get(die);
         const ftl_topo_t topo             = ssd_ftl_die_topo(die);
@@ -509,7 +509,7 @@ static void ssd_ftl_stat_task(void *context, DWORD now_ms)
 
     const DWORD uptime_ms = delay_now_ms();
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_t *ftl  = ssd_ftl_die_get(die);
         const ftl_topo_t topo = ssd_ftl_die_topo(die);
@@ -547,7 +547,7 @@ static void ssd_ftl_bg_tick_task(void *context, DWORD now_ms)
         s_bbt_last_ms = now;
     }
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ftl_ctx_t *ftl = ssd_ftl_die_get(die);
 
@@ -601,7 +601,7 @@ static void ssd_ftl_boot_all(void)
     ftl_global_init();
     ftl_op_init();
     memset(g_ftl_ptrs, 0, sizeof(g_ftl_ptrs)); /* 稀疏拓扑：缺失 die 保持 NULL */
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ftl_ctx_t *ftl = &g_ftl[die];
 
@@ -626,7 +626,7 @@ static void ssd_ftl_boot_all(void)
     }
 
     /* ② 逐 die boot */
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         if (ssd_ftl_boot(die) != FTL_OK)
         {
@@ -647,13 +647,13 @@ static void ssd_ftl_boot_all(void)
      * topo_2_die(route(die)) 必须等于 die；公式漂移会让每次 cache 操作找不到 owner。
      * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_t *owner = ftl_op_route_get_region(die);
 
         if ((owner == NULL) || (topo_2_die(owner->topo) != die))
         {
-            LOGE("[FTL ] route/die mismatch die=%hu\r\n", die);
+            LOGE("[FTL ] route/die mismatch die=%hhu\r\n", die);
             ftl_op_route_set(NULL);
             return;
         }
@@ -815,7 +815,7 @@ int main(void)
     /* FTL 周期求值（GC/WL/predict）：每实例一个 timer 任务，ctx = mig_handle。 */
     if (g_ftl_ready != 0)
     {
-        for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+        for (BYTE die = 0U; die < DIE_MAX; die++)
         {
             ftl_ctx_t *ftl = ssd_ftl_die_get(die);
 
@@ -851,7 +851,7 @@ int main(void)
             ftl_service_pump();
 
             /* ② 逐 die 后台：host 补发 + 后台调度 */
-            for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+            for (BYTE die = 0U; die < DIE_MAX; die++)
             {
                 ftl_service(ssd_ftl_die_get(die));
             }

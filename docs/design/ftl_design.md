@@ -408,6 +408,8 @@ L2P 表、目录检查点/Checkpoint/BBT/Journal 分区与块池。主机 LBA �
 Phase 2b：实例存储 `g_ftl[die]`、实例路由 `g_op_route[die]`、controller 路由
 `controller->ftl[die]`、L2P 路由、容量、介质布局版本全部按运行时 `DIE_MAX`
 （= `g_die_count`）与 `g_die_table` 索引；数组按静态上限 `FTL_DIE_MAX` 分配。
+die 号统一为 `BYTE`，`0xFF` 为无效哨兵；`_Static_assert(FTL_DIE_MAX <= 0xFF)`，
+即最多 255 个 die。该上限无实际损失：单 die BST 已 80 KiB，255 die 仅 BST 就 ~20 MiB。
 板级容量 `CH_MAX`/`CE_MAX` 来自板卡接线（`NAND_BOARD_CH_NUM`/`NAND_BOARD_CE_NUM`），
 `LUN_MAX` 来自器件头 `LUN_NUM`；运行时实际值以扫描结果为准，不写死。
 单 die 时与旧布局逐位一致（介质版本仍为 BASE，不触发重格式化）；多 die 时

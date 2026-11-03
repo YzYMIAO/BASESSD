@@ -75,14 +75,13 @@ DWORD ftl_media_layout_version(void)
         return FTL_MEDIA_LAYOUT_VERSION_BASE;
     }
 
-    /* [count_lo][count_hi][ch0][ce0][lun0][ch1]... —— 只含已分配 die。 */
-    BYTE   topo[2U + (FTL_DIE_MAX * 3U)];
-    size_t used = 2U;
+    /* [count][ch0][ce0][lun0][ch1]... —— 只含已分配 die。 */
+    BYTE   topo[1U + (FTL_DIE_MAX * 3U)];
+    size_t used = 1U;
 
-    topo[0] = (BYTE)(g_die_count & 0xFFU);
-    topo[1] = (BYTE)((g_die_count >> 8U) & 0xFFU);
+    topo[0] = g_die_count;
 
-    for (WORD die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         topo[used++] = g_die_table[die].ch;
         topo[used++] = g_die_table[die].ce;

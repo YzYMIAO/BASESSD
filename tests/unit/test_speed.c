@@ -379,7 +379,7 @@ static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[S
 
         spd_clock_start(&clock);
 
-        for (ftl_die_id_t die = 0U; (die < DIE_MAX) && ok; die++)
+        for (BYTE die = 0U; (die < DIE_MAX) && ok; die++)
         {
             const BYTE ch  = die_2_ch(die);
             const BYTE ce  = die_2_ce(die);

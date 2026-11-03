@@ -26,7 +26,7 @@ ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
     /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
     ASSERT(controller != NULL);
 
-    const DWORD die = lba_2_die(lba);
+    const BYTE die = lba_2_die(lba);
 
     /* 路由取模结果本应在 [0,DIE_MAX) 内 */
     ASSERT(die < DIE_MAX);
@@ -54,7 +54,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
      * 状态机（C1）：入口 RESET → INITIALIZING，校验结果驱动 READY/FAILED。 */
     ssd_controller_state_transition(controller, SSD_CONTROLLER_INITIALIZING);
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const BYTE ch   = die_2_ch(die);
         const BYTE ce   = die_2_ce(die);
@@ -63,14 +63,14 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
 
         if (slot == NULL)
         {
-            LOGE(LOG_TAG_CTRL "init failed: null FTL slot die=%hu ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            LOGE(LOG_TAG_CTRL "init failed: null FTL slot die=%hhu ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
             return SSD_STATUS_INVALID_ARGUMENT;
         }
         /* die 索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
         if ((slot->topo.ch != ch) || (slot->topo.ce != ce) || (slot->topo.lun != lun))
         {
-            LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hhu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
             return SSD_STATUS_INVALID_ARGUMENT;
         }
@@ -193,7 +193,7 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
             }
 
             {
-                for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+                for (BYTE die = 0U; die < DIE_MAX; die++)
                 {
                     ftl_ctx_t *fftl = controller->ftl[die];
 
@@ -227,7 +227,7 @@ static void ssd_controller_flush_service(ssd_controller_t *controller)
 
     /* 先推进**全部** present die 再判完成：某一实例未完成时直接 return 会让后面的实例
      * 永远得不到推进（多实例下 FLUSH 卡死）。 */
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ftl_ctx_t *fftl = controller->ftl[die];
 
@@ -340,7 +340,7 @@ void ssd_controller_cancel_flush(ssd_controller_t *controller)
      * 把回执写到新请求上。在飞的数据操作有自己的服务路径，不需要回滚。 */
     controller->flush_req = NULL;
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ftl_ctx_t *ftl = controller->ftl[die];
 

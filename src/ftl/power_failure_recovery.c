@@ -825,7 +825,7 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
 static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
 {
     // ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景）
-    const DWORD die = topo_2_die(ftl->topo);
+    const BYTE die = topo_2_die(ftl->topo);
 
     l2p_owner_invalidate(ftl->cache, die);
 
@@ -878,7 +878,7 @@ static void pfr_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring)
  */
 static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
 {
-    const DWORD die = topo_2_die(ftl->topo);
+    const BYTE die = topo_2_die(ftl->topo);
 
     // ① 失效本 owner 的 resident CLEAN 行中不在 CP bitmap 的 region。
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)

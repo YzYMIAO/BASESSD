@@ -52,7 +52,7 @@
 /* 静态容量（数组上限）与运行期实际 die 数（扫描后只读）。
  * FTL_DIE_MAX 只用于数组维度 / 静态断言；DIE_MAX 是运行时调度坐标。 */
 #define FTL_DIE_MAX (CH_MAX * CE_MAX * LUN_MAX)
-extern WORD g_die_count;
+extern BYTE g_die_count;
 #define DIE_MAX (g_die_count)
 
 /* ══════════════════════════════════════════════════════════════════
@@ -806,32 +806,33 @@ static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
  * die == topo_2_die(topo)，避免第二套扁平坐标（C9）。稀疏拓扑时 die 紧凑。
  * ══════════════════════════════════════════════════════════════ */
 
-/* WORD 元素 + 0xFFFF 哨兵；若 FTL_DIE_MAX 逼近 0xFFFF，改 DWORD + 0xFFFFFFFF。 */
-#define FTL_DIE_INVALID ((WORD)0xFFFFU)
-_Static_assert(FTL_DIE_MAX < FTL_DIE_INVALID, "FTL_DIE_MAX 超出 WORD 哨兵范围");
+/* BYTE 元素 + 0xFF 哨兵：最多 255 个 die（ID 0..254，255 = 无效）。
+ * 该上限对本 MCU 没有实际损失：单个 die 的 BST 已 20B × 4096 = 80 KiB，
+ * 255 个 die 仅 BST 就 ~20 MiB，远超 SRAM12 的 256 KiB。 */
+#define FTL_DIE_INVALID ((BYTE)0xFFU)
+_Static_assert(FTL_DIE_MAX <= FTL_DIE_INVALID, "FTL_DIE_MAX 超出 BYTE 哨兵范围（最多 255 个 die）");
 
-/* g_die_table 未分配尾项的 ch/ce/lun 字段值（BYTE）。 */
+/* g_die_table 未分配尾项的 ch/ce/lun 字段值（BYTE）。
+ * 与 FTL_DIE_INVALID 值相同但语义不同（C11）：一个是 die 坐标、一个是物理坐标字段。 */
 #define FTL_TOPO_FIELD_INVALID ((BYTE)0xFFU)
 
-typedef WORD ftl_die_id_t; /* 紧凑 die 号 */
-
-extern WORD       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
+extern BYTE       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
 extern ftl_topo_t g_die_table[FTL_DIE_MAX];
 
 /* die → 物理坐标：唯一分解点；未分配尾项字段为 0xFF，不得访问。 */
-static inline BYTE die_2_ch(ftl_die_id_t die)
+static inline BYTE die_2_ch(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_die_table[die].ch;
 }
 
-static inline BYTE die_2_ce(ftl_die_id_t die)
+static inline BYTE die_2_ce(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_die_table[die].ce;
 }
 
-static inline BYTE die_2_lun(ftl_die_id_t die)
+static inline BYTE die_2_lun(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_die_table[die].lun;

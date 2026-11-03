@@ -188,7 +188,7 @@ WORD ftl_op_ctx_count(void)
 // g_op_route 成为唯一持有者，避免悬垂。
 void ftl_op_route_set(ftl_ctx_t *const *route)
 {
-    for (WORD die = 0U; die < FTL_DIE_MAX; die++)
+    for (BYTE die = 0U; die < FTL_DIE_MAX; die++)
     {
         g_op_route[die] = (route != NULL) ? route[die] : NULL;
     }
@@ -204,7 +204,7 @@ ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_MAX) && (ce < CE_MAX) && (lun < LUN_MAX));
 
-    const DWORD die = chcelun_2_die(ch, ce, lun);
+    const BYTE die = chcelun_2_die(ch, ce, lun);
 
     if ((die == FTL_DIE_INVALID) || (die >= DIE_MAX))
     {
@@ -214,7 +214,7 @@ ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 }
 
 /* die → 本实例路由：唯一坐标就是 die，不再经 (ch,ce,lun) 分解。 */
-static const ftl_ctx_t *ftl_op_route_get_die(ftl_die_id_t die)
+static const ftl_ctx_t *ftl_op_route_get_die(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_op_route[die];
@@ -231,7 +231,7 @@ ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
 // 任一实例有 cache 序列未收尾（active 或 draining）；deadline 挂起判据必须把 draining 算进来。
 bool ftl_op_cache_seq_active(void)
 {
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_t *ftl = ftl_op_route_get_die(die);
 
@@ -253,7 +253,7 @@ bool ftl_op_cache_seq_active(void)
  */
 static bool ftl_op_host_groups_inflight(void)
 {
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_t *ftl = ftl_op_route_get_die(die);
 

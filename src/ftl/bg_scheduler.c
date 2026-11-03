@@ -249,7 +249,7 @@ static void bg_task_l2p_flush(ftl_ctx_t *ftl)
     ftl->l2p_flush_due = 0U;
 
     // 档位 → max_kick 的 static const 表在 l2p 模块内；thrashing 降级也在模块内判定。
-    const DWORD die = topo_2_die(ftl->topo);
+    const BYTE die = topo_2_die(ftl->topo);
 
     l2p_handle(ftl->cache, die, ftl->bg.level);
 }

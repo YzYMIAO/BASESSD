@@ -87,7 +87,7 @@ _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 6
  * @param ch/ce/lun 物理坐标
  * @return 紧凑 die 号（0..DIE_MAX-1）；越界或不存在 ⇒ FTL_DIE_INVALID
  */
-static inline DWORD chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
+static inline BYTE chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
 {
     if ((ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
     {
@@ -102,7 +102,7 @@ static inline DWORD chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
  * @param topo 通道/片选/LUN 三维坐标
  * @return 紧凑 die 号（0..DIE_MAX-1）；不存在 ⇒ FTL_DIE_INVALID
  */
-static inline DWORD topo_2_die(ftl_topo_t topo)
+static inline BYTE topo_2_die(ftl_topo_t topo)
 {
     return chcelun_2_die(topo.ch, topo.ce, topo.lun);
 }
@@ -163,7 +163,7 @@ static inline DWORD l2p_global_to_local_region(DWORD global_region)
  * @return true = 属于该实例
  *         false = 属于其他实例
  */
-static inline bool l2p_region_owned_by(DWORD global_region, DWORD die)
+static inline bool l2p_region_owned_by(DWORD global_region, BYTE die)
 {
     ASSERT(DIE_MAX != 0U);
     return (global_region % DIE_MAX) == die;
@@ -186,10 +186,10 @@ static inline bool l2p_region_owned_by(DWORD global_region, DWORD die)
  * @param lba 全局 LBA
  * @return 紧凑 die 号（region % DIE_MAX）
  */
-static inline DWORD lba_2_die(QWORD lba)
+static inline BYTE lba_2_die(QWORD lba)
 {
     ASSERT(DIE_MAX != 0U);
-    return ((lba >> L2P_REGION_SHIFT) % DIE_MAX);
+    return (BYTE)(((lba >> L2P_REGION_SHIFT) % DIE_MAX));
 }
 
 /**
@@ -350,7 +350,7 @@ struct l2p_jrn_s;
 
 typedef struct
 {
-    DWORD             die; /* 本 owner 的实例编号（global 路由键） */
+    BYTE              die; /* 本 owner 的实例编号（global 路由键） */
     md_dir_cache_t   *metadata_dir;
     alc_t            *alloc;
     ftl_topo_t        topo;
@@ -679,7 +679,7 @@ void l2p_diag_dump(void);
  * @param owner_die 本实例的 die（topo_2_die(ftl->topo)）
  * @param max_kick  本轮最多起几条（档位表见 l2p_cache.c 的 s_l2p_flush_max）
  */
-void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick);
 
 /**
  * @brief 本 owner 是否已无待落盘的 L2P 行
@@ -693,7 +693,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick);
  * @return true = 本 owner 已无待落盘或在飞的行
  *         false = 仍有 DIRTY / FLUSHING / LOADING 行
  */
-bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_die);
+bool l2p_flush_owner_idle(const l2p_cache_t *cache, BYTE owner_die);
 
 /**
  * @brief 只失效某个 owner 的行与脏位（恢复/格式化用）
@@ -706,7 +706,7 @@ bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_die);
  * @param cache     共享 cache
  * @param owner_die 本实例的 die
  */
-void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die);
+void l2p_owner_invalidate(l2p_cache_t *cache, BYTE owner_die);
 
 /**
  * @brief 全局脏位图 → 本 die 的局部 2048-bit 快照
@@ -719,7 +719,7 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die);
  * @param owner_die 本实例的 die
  * @param out       出参局部位图（L2P_LOCAL_DIRTY_WORDS 个 word）
  */
-void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
+void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, BYTE owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
 
 /**
  * @brief 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
@@ -731,7 +731,7 @@ void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_die, DWORD 
  * @param die    本实例的 owner die（topo_2_die(topo)）
  * @param level  本轮后台档位（IDLE / NORMAL / BUSY）
  */
-void l2p_handle(l2p_cache_t *cache, DWORD die, bg_level_e level);
+void l2p_handle(l2p_cache_t *cache, BYTE die, bg_level_e level);
 
 /**
  * @brief 读一行元信息（idx 越界/空行时 state == INVALID）。

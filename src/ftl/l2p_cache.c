@@ -1353,7 +1353,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 }
 
 // 按 owner 踢脏行写回：最多 max_kick 条；遇 AGAIN 立即停（闸门满/池空），硬失败行跳过。
-void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick)
+void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick)
 {
     // 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
     // ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。
@@ -1391,7 +1391,7 @@ void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_die, BYTE max_kick)
 }
 
 // 该 owner 是否没有未落定的行：DIRTY/FLUSHING/LOADING 任一存在即不空闲。
-bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_die)
+bool l2p_flush_owner_idle(const l2p_cache_t *cache, BYTE owner_die)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -1646,7 +1646,7 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
 // 共享 cache 下不能按实例重新 init：那样会抹掉别的 LUN 刚回放的 DIRTY 行和
 // 全局脏位。本函数只动本 owner 的 resident 行，并清本 owner 的全局脏位。
 // 恢复期不应有在飞命令；FLUSHING/LOADING 行重写会泄漏在飞计数 ⇒ ASSERT。
-void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die)
+void l2p_owner_invalidate(l2p_cache_t *cache, BYTE owner_die)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -1683,7 +1683,7 @@ void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_die)
 }
 
 // Checkpoint 起点调用（先快照再 flush）。DIE_MAX=1 时等价于整份位图拷贝。
-void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS])
+void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, BYTE owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS])
 {
     memset(out, 0, L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD));
 
@@ -1708,7 +1708,7 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
 };
 
 // 每轮入口：thrashing 期间不主动 flush；否则按档位踢本 owner 的脏行，再填上报。
-void l2p_handle(l2p_cache_t *cache, DWORD die, bg_level_e level)
+void l2p_handle(l2p_cache_t *cache, BYTE die, bg_level_e level)
 {
     // thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
     // 判据在模块内，主流程不读 cache->thrashing。

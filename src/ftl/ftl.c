@@ -1924,14 +1924,14 @@ void ftl_global_init(void)
  * 板级扫描（nand_scan_targets，armed 之前）只给出哪些 (ch,ce) target 存在、
  * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
  * ══════════════════════════════════════════════════════════════ */
-WORD       g_die_count;
-WORD       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
+BYTE       g_die_count;
+BYTE       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
 ftl_topo_t g_die_table[FTL_DIE_MAX];
 
 bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
 {
     memset(g_chcelun_table, 0xFF, sizeof(g_chcelun_table));
-    for (WORD die = 0U; die < FTL_DIE_MAX; die++)
+    for (BYTE die = 0U; die < FTL_DIE_MAX; die++)
     {
         g_die_table[die].ch  = FTL_TOPO_FIELD_INVALID;
         g_die_table[die].ce  = FTL_TOPO_FIELD_INVALID;
@@ -1973,7 +1973,7 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
     }
 
     /* 往返自检：die → ftl_topo_t → (ch,ce,lun) → die。 */
-    for (WORD die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const BYTE ch  = die_2_ch(die);
         const BYTE ce  = die_2_ce(die);
@@ -1986,7 +1986,7 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
     }
 
     /* 未分配的尾项必须保持无效（三个字段都 0xFF）。 */
-    for (WORD die = DIE_MAX; die < FTL_DIE_MAX; die++)
+    for (BYTE die = DIE_MAX; die < FTL_DIE_MAX; die++)
     {
         if ((g_die_table[die].ch != FTL_TOPO_FIELD_INVALID) || (g_die_table[die].ce != FTL_TOPO_FIELD_INVALID) || (g_die_table[die].lun != FTL_TOPO_FIELD_INVALID))
         {
@@ -1994,7 +1994,7 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
         }
     }
 
-    LOGI(LOG_TAG_FTL "topology: dies=%hu (max=%u)\r\n", g_die_count, (unsigned int)FTL_DIE_MAX);
+    LOGI(LOG_TAG_FTL "topology: dies=%hhu (max=%u)\r\n", g_die_count, (unsigned int)FTL_DIE_MAX);
     return true;
 }
 
@@ -2185,7 +2185,7 @@ static SSD_CODE_FAST void contract_check_handles(const ftl_ctx_t *ftl)
 static SSD_CODE_FAST void contract_check_topology(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t *topo = &ftl->topo;
-    const DWORD       die  = topo_2_die(*topo);
+    const BYTE        die  = topo_2_die(*topo);
 
     ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) && (die < DIE_MAX) && (die_2_ch(die) == topo->ch) && (die_2_ce(die) == topo->ce) && (die_2_lun(die) == topo->lun));
 
@@ -2235,7 +2235,7 @@ static SSD_CODE_FAST void contract_check_module_contexts(const ftl_ctx_t *ftl)
 static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_t *ftl)
 {
     const ftl_topo_t topo = ftl->topo;
-    const DWORD      die  = topo_2_die(topo);
+    const BYTE       die  = topo_2_die(topo);
 
     ASSERT(ftl->cache->owner_of_region != NULL);
     ASSERT(ftl_op_route_get(topo.ch, topo.ce, topo.lun) == ftl);
@@ -3328,7 +3328,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
         return true; /* 没有在飞的 flush：对调用者而言就是"已完成" */
     }
 
-    const DWORD die = topo_2_die(ftl->topo);
+    const BYTE die = topo_2_die(ftl->topo);
 
     // ① wbuf：把打开的窗口推下去，并取当前状态。
     wb_trigger_t wb_trigger;

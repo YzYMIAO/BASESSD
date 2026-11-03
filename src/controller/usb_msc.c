@@ -134,7 +134,7 @@ static bool usb_msc_take_deferred_error(void)
 {
     /* FTL 侧的迟到结论优先（RISK-CACHE-27）：早回执后写组在页编程完成时就报 OK，
      * FAIL_CACHE 要晚一条命令才到 ⇒ 那个结论只存在于 FTL 的粘性错误里。 */
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         if (ftl_take_deferred_error(g_ctrl.ftl[die]) == true)
         {

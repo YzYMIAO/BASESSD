@@ -480,8 +480,8 @@ static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence
  */
 static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
 {
-    const DWORD die     = topo_2_die(h->topo);
-    bool        pending = false;
+    const BYTE die     = topo_2_die(h->topo);
+    bool       pending = false;
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -1121,7 +1121,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     // ① 起点快照（**必须早于任何 flush**，见文件头"快照点前移"的长注释）：
     // flush 成功会清 region 脏位 ⇒ 快照必须先行；journal 水位同理。
     // 共享 cache 的脏位图是全局的；本 job 只需要本 die 的局部 2048-bit 快照。
-    const DWORD die = topo_2_die(h->topo);
+    const BYTE die = topo_2_die(h->topo);
 
     l2p_owner_bitmap_snapshot(h->cache, die, h->region_bitmap);
     h->journal_seq = jrn_sequence_get(h->journal);

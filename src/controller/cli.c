@@ -536,7 +536,7 @@ static int uart_cli_info(int argc, char *argv[])
         (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
     }
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ch  = die_2_ch(die);
         ce  = die_2_ce(die);
@@ -743,7 +743,7 @@ static int uart_cli_addr(int argc, char *argv[])
             }
         }
 
-        const DWORD        die = chcelun_2_die((BYTE)ch, (BYTE)ce, (BYTE)lun);
+        const BYTE         die = chcelun_2_die((BYTE)ch, (BYTE)ce, (BYTE)lun);
         const ftl_ctx_t   *ftl = ((die == FTL_DIE_INVALID) || (die >= DIE_MAX)) ? NULL : g_ctrl.ftl[die];
         const bst_block_t *b;
 
@@ -892,7 +892,7 @@ static int uart_cli_bbt(int argc, char *argv[])
         LOGW("bbt --erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
     }
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ftl_ctx_t *ftl = g_ctrl.ftl[die];
 
@@ -964,7 +964,7 @@ static int uart_cli_format(int argc, char *argv[])
         LOGW("format --verify: full-chip erase check enabled (erase OK = good block).\r\n");
     }
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         ch  = die_2_ch(die);
         ce  = die_2_ce(die);
@@ -1021,7 +1021,7 @@ static int uart_cli_pool(int argc, char *argv[])
 
     BYTE done = 0U;
 
-    for (ftl_die_id_t die = 0U; die < DIE_MAX; die++)
+    for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const BYTE ch  = die_2_ch(die);
         const BYTE ce  = die_2_ce(die);
