@@ -122,6 +122,10 @@ typedef struct
     DWORD              log_ms;
 } bbt_handle_t;
 
+/* BBT 后台持久化「起新 job」的节拍；在飞续跑不受此限（bbt_handle 先处理在飞态）。
+ * 由 timer 任务置 flush_due，bbt_handle 消费。 */
+#define BBT_FLUSH_INTERVAL_MS (1000U)
+
 typedef struct
 {
     DWORD        sequence;           /* 本池单调序号 */
@@ -131,6 +135,7 @@ typedef struct
     bool         format_in_progress; /* 最新 BBT record 带 FORMAT_IN_PROGRESS 标志 */
     bool         rebuild_required;   /* 最新 BBT record 带 REBUILD_REQUIRED 标志（本仓自拟） */
     DWORD        dirty_gen;          /* dirty 每次置位 +1；检测写飞行期间的新变更 */
+    BYTE         flush_due;          /* 1 = timer 节拍到，允许起新 job；在飞续跑不看它 */
     bbt_handle_t handle;             /* 异步持久化 handle */
 } bbt_state_t;
 

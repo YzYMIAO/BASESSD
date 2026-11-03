@@ -49,6 +49,7 @@
 #include "l2p_cache.h"        /* l2p_read / l2p_write */
 #include "log.h"
 #include "read_recovery.h" /* rr_record_ecc / rr_predictive_scan / rr_retire_block */
+#include "timer.h"         /* timer_scheduler_add（周期求值注册） */
 #include "wear_leveling.h" /* wl_should_trigger / wl_select_victim */
 
 #include <string.h>
@@ -396,7 +397,6 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
     l2p_cache_t *const cache                 = m->cache;
     const DWORD *const total_writes          = m->total_writes;
     const ftl_topo_t   topo                  = m->topo;
-    const DWORD        gc_eval               = m->gc_eval_last_ms;
     const DWORD        gc_log                = m->gc_log_last_ms;
     const DWORD        wl_eval               = m->wl_eval_last_ms;
     const DWORD        wl_writes             = m->wl_last_writes;
@@ -408,6 +408,8 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
     const DWORD        nogain_cnt            = m->nogain_count;
     const BYTE         read_fail_streak      = m->read_fail_streak;
     const bool         paused                = m->paused;
+    const bg_level_e   saved_level           = m->level;
+    const bool         timers_registered     = m->timers_registered;
     // 一旦某 victim 的 plane 基址不一致，batch 对整个 boot 关闭：否则每个 job 都会
     // 在同一页重复 abort（板端曾无限刷 `batch plane base mismatch`）。
     const bool batch_disabled                = m->batch_disabled;
@@ -448,7 +450,8 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
     m->cache                = cache;
     m->total_writes         = total_writes;
     m->topo                 = topo;
-    m->gc_eval_last_ms      = gc_eval;
+    m->level                = saved_level;
+    m->timers_registered    = timers_registered;
     m->gc_log_last_ms       = gc_log;
     m->wl_eval_last_ms      = wl_eval;
     m->wl_last_writes       = wl_writes;
@@ -2100,25 +2103,19 @@ void mig_gc_request_urgent(mig_handle_t *m)
 }
 
 /**
- * @brief GC 求值（自持节拍）：命中时返回 GC_TRIGGER_* 位掩码并打观测日志。
+ * @brief GC 求值：命中时返回 GC_TRIGGER_* 位掩码并打观测日志。
+ *
+ * 调用节拍由 timer 表的 10 ms 周期提供（GC_EVAL_INTERVAL_MS）；本函数不再自持节拍。
  *
  * @param m            job。
  * @param now_ms       当前时刻（0 = 无时钟）。
  * @param host_writing 出参：本轮的 host 写流判定。
  *
  * @return 非 0 —— gc_should_trigger 的触发位掩码（本轮可以尝试 GC）；
- *         0    —— 本轮未到节拍 / 无触发 / 处于 no-gain 退避。
+ *         0    —— 无触发 / 处于 no-gain 退避。
  */
 static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
 {
-    // 节拍门。0 作「尚未求值」哨兵：平台时钟缺失时 now_ms 恒 0 ⇒ 每轮求值
-    // ——GC 不能因缺时钟而停摆（与定时触发的取舍方向相反）。
-    if ((m->gc_eval_last_ms != 0U) && ((now_ms - m->gc_eval_last_ms) < GC_EVAL_INTERVAL_MS))
-    {
-        return 0U;
-    }
-    m->gc_eval_last_ms = now_ms;
-
     // host 写流判定（2 s 窗口，见 gc.h GC_HOST_WRITE_WINDOW_MS）。
     // 时钟缺失（now_ms == 0）按「在写」处理 ⇒ 收益判据 OFF，绝不卡写。
     const DWORD writes = *m->total_writes;
@@ -2212,10 +2209,13 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
     m->gc_session_aborted   = 0U;
 }
 
-// 每轮入口：在飞时推进当前 job（附带心跳），空闲时按节拍求值并尝试开新 job，最后填上报。
+// 每轮入口：只做在飞推进、会话收尾、紧急 GC。周期求值见 mig_eval（timer 表调用）。
 void mig_handle(mig_handle_t *m, bg_level_e level)
 {
     const DWORD now_ms = ftl_job_now_ms();
+
+    // 发布本轮档位：mig_eval 由 timer 表在 ftl_service 之后调用，从 handle 读取。
+    m->level = level;
 
     // ① 在飞：只服务当前 job（提交即返回）。
     if (m->active)
@@ -2260,10 +2260,30 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
         return;
     }
 
+    // 平台时钟完全缺失时 timer 任务永不到期：退回每轮求值，保证 GC 不停摆
+    // （与旧节拍「无时钟 ⇒ 每轮求值」的取舍一致）。
+    if (now_ms == 0U)
+    {
+        mig_eval(m);
+    }
+}
+
+// 周期求值（timer 表每 GC_EVAL_INTERVAL_MS 唤醒）：GC → WL 5s → predict 1s；每轮最多一个 job。
+// ⚠ 时钟分配：timer 的 now_ms（TIM6）只是唤醒节拍，不参与 FTL 时间戳；本函数内所有
+//   deadline/interval 一律读 ftl_job_now_ms()（SysTick），与 mig_handle / mig_job_* 同源。
+void mig_eval(mig_handle_t *m)
+{
+    const DWORD now_ms = ftl_job_now_ms();
+    // 与 mig_handle 的早退条件一致：在飞 / 熔断 / 紧急 GC 时不启动新工作。
+    if (m->active || m->paused || m->urgent_gc)
+    {
+        return;
+    }
+
     // ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
     // GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
     // 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。
-    if (level == BG_LEVEL_BUSY)
+    if (m->level == BG_LEVEL_BUSY)
     {
         if (m->alloc->free_count < FREE_POOL_TARGET)
         {
@@ -2305,17 +2325,43 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
 
             m->wl_last_writes = writes;
 
-            if (host_quiet && (level == BG_LEVEL_IDLE))
+            if (host_quiet && (m->level == BG_LEVEL_IDLE))
             {
                 (void)mig_wl_begin(m);
             }
         }
-        else if ((level == BG_LEVEL_IDLE) && ((m->predict_last_ms == 0U) || ((now_ms - m->predict_last_ms) >= RR_SCAN_INTERVAL_MS)))
+        else if ((m->level == BG_LEVEL_IDLE) && ((m->predict_last_ms == 0U) || ((now_ms - m->predict_last_ms) >= RR_SCAN_INTERVAL_MS)))
         {
             m->predict_last_ms = now_ms;
             (void)mig_predict_begin(m);
         }
     }
+}
+
+static void mig_eval_task(void *context, DWORD now_ms)
+{
+    (void)now_ms; /* TIM6 只负责唤醒；FTL 时间戳由 mig_eval 内部读 SysTick。 */
+    mig_eval((mig_handle_t *)context);
+}
+
+bool mig_timer_register(mig_handle_t *m)
+{
+    ASSERT(m != NULL);
+
+    if (m->timers_registered)
+    {
+        return true;
+    }
+
+    DWORD task_id;
+
+    if (!timer_scheduler_add(mig_eval_task, m, 0U, GC_EVAL_INTERVAL_MS, &task_id))
+    {
+        return false;
+    }
+
+    m->timers_registered = true;
+    return true;
 }
 
 /* ── 7. 完成服务（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）── */

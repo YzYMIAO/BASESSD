@@ -43,18 +43,26 @@
 #define FTL_JOB_LOG_SLOW_INTERVAL_MS (5000U)
 
 /**
- * @brief 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
+ * @brief 当前单调毫秒（平台 `time_ms` = SysTick/HAL tick）。平台未注册时返回 0。
  *
  * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_scheduler 的
  * GC/RR/CP 功能节拍都调用它，避免两份同语义实现漂移。
  *
- * @return 当前毫秒；平台未注册（platform 或 time_us 为空）时 0。
+ * @return 当前毫秒；平台未注册时 0。`time_ms` 未提供（旧测试夹具）时退回 `time_us/1000`。
  */
 static inline DWORD ftl_job_now_ms(void)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
 
-    if ((platform == NULL) || (platform->time_us == NULL))
+    if (platform == NULL)
+    {
+        return 0U;
+    }
+    if (platform->time_ms != NULL)
+    {
+        return platform->time_ms();
+    }
+    if (platform->time_us == NULL)
     {
         return 0U;
     }

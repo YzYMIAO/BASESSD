@@ -179,7 +179,8 @@ typedef struct
     ftl_topo_t      topo;
 
     cp_state_t cp_state;
-    DWORD      last_ms; /* 上次触发的 ms 时基（T3） */
+    DWORD      last_ms; /* 上次触发的 ms 时基（T3 基准，SysTick） */
+    BYTE       t3_due;  /* 1 = T3 定时器已到期；cp_timer_poll 置位，cp_should_start 消费 */
 
     /* 心跳 */
     DWORD start_ms;     /* job 起点（观测用） */
@@ -403,6 +404,16 @@ static inline WORD *cp_block_words_get(cp_handle_t *h)
  * @param trigger 本轮触发信息（**非空**）
  */
 void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger);
+
+/**
+ * @brief T3 定时轮询：由 timer 任务周期调用，到期时置 `t3_due`。
+ *
+ * 只做 SysTick 时间比较 + 置标志，不启动 job；job 由下一轮 `cp_handle` 消费
+ * `t3_due` 后启动。这样 10 s 的时间判定不再落在每轮热路径上。
+ *
+ * @param h CP handle（**前置条件**：实例已初始化）
+ */
+void cp_timer_poll(cp_handle_t *h);
 
 /**
  * @brief 复位 T3 定时基准（boot 恢复 / 格式化后调用）。

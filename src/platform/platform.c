@@ -6,64 +6,23 @@
 static const ssd_platform_ops_t *g_platform_ops;
 
 /*
- * stm32_platform_time_us - 系统单调微秒计数（DWT CYCCNT 累加）。
+ * stm32_platform_time_us - 系统单调微秒计数（SysTick + HAL tick）。
  *
- * CYCCNT 是 32 位、按 CPU 时钟递增，2^32 周 ≈ 8.9 s @480 MHz，不能直接当
- * 全局时钟。这里维护 64 位微秒累加器：每次取 CYCCNT 增量按核频折成微秒，
- * 余数（cycles % cycles_per_us）留到下次，避免高频调用累积截断误差。
+ * 只用 ARM 核心的 SysTick：HAL tick 给毫秒，SysTick 的 VAL/LOAD 给本毫秒
+ * 内的周期分辨率。delay_time_now_us64() 返回 64 位微秒，不存在 DWT 那种
+ * 32 位周期计数器短回绕问题。
  *
- * 增量 ≥ 2^31 cycles 时无法区分「调用间隔超过半个回绕」与「计数器被复位」
- * ⇒ 放弃本次增量、以毫秒节拍重同步（取较大值保持单调）。DWT 未就绪
- * （delay_init 尚未执行 / 使能失败）时退回毫秒节拍。
- *
- * 只在主循环上下文调用（消费方：ftl_job_now_ms 与后台调度器的墙钟兜底）；
- * 非 ISR 安全。
+ * 只在主循环上下文调用（消费方：后台调度器的墙钟兜底与 µs 级测量）；
+ * 非 ISR 安全。系统毫秒时基见 time_ms（SysTick/HAL tick）。
  */
 static QWORD platform_time_us(void)
 {
-    static QWORD s_us;
-    static DWORD s_last_cycles;
-    static DWORD s_rem_cycles;
-    static bool  s_valid;
-
-    const DWORD cycles_per_us = delay_port_core_clock_hz() / 1000000U;
-    DWORD       cycles        = 0U;
-
-    if ((cycles_per_us == 0U) || (delay_dwt_cycles_now(&cycles) == false))
-    {
-        return (QWORD)delay_port_now_ms() * 1000U;
-    }
-
-    const QWORD ms_us = (QWORD)delay_port_now_ms() * 1000U;
-
-    if (s_valid == false)
-    {
-        s_valid       = true;
-        s_last_cycles = cycles;
-        s_us          = ms_us;
-        return s_us;
-    }
-
-    const DWORD delta_cycles = cycles - s_last_cycles; /* 无符号差值：回绕安全 */
-
-    if (delta_cycles >= 0x80000000U)
-    {
-        /* 间隔超过半个回绕（或计数器被复位）：无法可信折算，重同步。 */
-        s_last_cycles = cycles;
-        s_rem_cycles  = 0U;
-        s_us          = (ms_us > s_us) ? ms_us : s_us;
-        return s_us;
-    }
-
-    s_last_cycles = cycles;
-    s_rem_cycles += delta_cycles;
-    s_us += s_rem_cycles / cycles_per_us;
-    s_rem_cycles %= cycles_per_us;
-    return s_us;
+    return delay_time_now_us64();
 }
 
 static const ssd_platform_ops_t g_stm32_platform_ops = {
     .time_us = platform_time_us,
+    .time_ms = delay_now_ms, /* SysTick/HAL tick：ARM 核心的系统毫秒时基 */
     /* log_write / memory_allocate / memory_free 暂不提供；register 只强制 time_us。 */
 };
 

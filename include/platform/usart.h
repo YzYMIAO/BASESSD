@@ -136,7 +136,7 @@ void usart_port_tx_irq_enable(void);
 /* TX 完成标志（最后一个停止位是否已离开引脚）。 */
 BYTE usart_port_tx_complete(void);
 
-/* 系统单调毫秒计数（flush 超时用）。 */
+/* 系统单调毫秒计数（flush 超时用；SysTick/HAL tick）。 */
 DWORD usart_port_now_ms(void);
 
 /* 内核内建包装：屏障 / 事件信号 / 事件等待。 */

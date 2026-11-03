@@ -3,10 +3,10 @@
  *
  * 共享逻辑在 src/platform/delay.c（跨 target 编译一次，零 CMSIS 零 HAL）。
  * 本文件只提供该文件无法自行获得的 SoC 事实：时钟频率、系统节拍，以及
- * DWT / SysTick 计数器寄存器。
+ * SysTick 计数器寄存器。
  *
- * 为什么是两个时钟而不是一个：CYCCNT 跟随内核时钟（SYSCLK），而 delay_init(0)
- * 的「读 HCLK」哨兵要的是 HCLK —— 两者在 H7 上并不相等。
+ * 只使用 ARM 核心自带的 SysTick：HAL 已把它配置为 1 ms 周期，VAL/LOAD
+ * 提供 1 ms 内的周期分辨率。DWT 是调试/跟踪单元，不作为产品时间源。
  *
  * 为什么不把 core_cm7.h 交给共享层直接用：该头需要设备头提供 IRQn_Type 与
  * __NVIC_PRIO_BITS，裸包含编译不过，所以寄存器访问留在本文件。
@@ -27,27 +27,8 @@ DWORD delay_port_core_clock_hz(void)
 
 DWORD delay_port_now_ms(void)
 {
+    /* 系统毫秒计数 = ARM 核心 SysTick 的 HAL tick（HAL_Init/HAL_RCC 配置）。 */
     return HAL_GetTick();
-}
-
-/*
- * 启用 Cortex-M7 的 DWT 周期计数器。
- *
- * 原理：先打开 CoreDebug->DEMCR 的 TRCENA 位，再打开 DWT->CTRL 的 CYCCNTENA 位。
- * 不关中断、不改 SysTick 配置。返回 true 表示硬件接受了使能位。
- */
-bool delay_port_dwt_enable(void)
-{
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0U;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-
-    return (DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U;
-}
-
-DWORD delay_port_dwt_cycles(void)
-{
-    return DWT->CYCCNT;
 }
 
 DWORD delay_port_systick_load(void)

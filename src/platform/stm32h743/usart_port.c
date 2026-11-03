@@ -221,6 +221,7 @@ BYTE usart_port_tx_complete(void)
 
 DWORD usart_port_now_ms(void)
 {
+    /* 系统毫秒计数 = ARM 核心 SysTick 的 HAL tick。 */
     return HAL_GetTick();
 }
 

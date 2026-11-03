@@ -257,12 +257,13 @@ typedef struct mig_handle
      * NAND 失败 / META 不符。只写不参与决策。 */
     DWORD last_fc_status;
 
-    /* ── handle 自持的求值节拍（docs §4.4：GC 10ms / WL 5s / predict 1s）── */
-    DWORD gc_eval_last_ms;
-    DWORD gc_log_last_ms;
-    DWORD wl_eval_last_ms;
-    DWORD wl_last_writes; /* 上次 WL 求值时的 *total_writes 快照：两次求值间有增长 ⇒ host 在写，WL 让路 */
-    DWORD predict_last_ms;
+    /* ── 周期求值状态（GC 的 10 ms 节拍由 timer 表提供；WL 5s / predict 1s 仍在 handle 内）── */
+    bg_level_e level;             /* 本轮后台档位：mig_handle 每轮发布，mig_eval 读取 */
+    bool       timers_registered; /* timer 表注册幂等标记 */
+    DWORD      gc_log_last_ms;
+    DWORD      wl_eval_last_ms;
+    DWORD      wl_last_writes; /* 上次 WL 求值时的 *total_writes 快照：两次求值间有增长 ⇒ host 在写，WL 让路 */
+    DWORD      predict_last_ms;
     /* 静态 WL 的目标块方向（RISK-WL-08）：true ⇒ 目的页对取**擦除最多**的空闲块
      * （`alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`），把冷数据搬到已磨损块。GC / predict 恒 false。 */
     bool dst_high_wear;
@@ -355,14 +356,37 @@ void mig_gc_request_urgent(mig_handle_t *m);
  *
  * 语义：
  *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
- *   ② 不在飞时，若 `load_level != BUSY`，按 handle 自持节拍评估新工作：
- *      紧急触发（mig_gc_request_urgent）→ GC 10ms → WL 5s → predict 1s；
- *   ③ 每轮最多启动一个 job（单飞行）。
+ *   ② 不在飞 ⇒ 会话收尾/进展日志、紧急触发（mig_gc_request_urgent）；
+ *   ③ 周期求值（GC/WL/predict）不在本函数：由 timer 表的 `mig_eval` 任务按
+ *      10 ms 周期调用（见 `mig_timer_register`）。
  *
  * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param level 本轮后台档位（IDLE / NORMAL / BUSY）
+ * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->level 供 mig_eval 使用
  */
 void mig_handle(mig_handle_t *m, bg_level_e level);
+
+/**
+ * @brief 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）
+ *
+ * 语义：GC（timer 周期即节拍）→ WL 5s → predict 1s；每轮最多启动一个 job。
+ * `m->level` 必须由 mig_handle 在最近一轮发布。
+ *
+ * @note 时钟分配：timer 任务的 period 只决定**唤醒频率**；本函数内部的
+ *       deadline/interval 一律读 `ftl_job_now_ms()`（SysTick），与
+ *       mig_handle / mig_job_* 使用同一时间坐标。TIM6 的 tick 不参与 FTL
+ *       时间戳。
+ *
+ * @param m handle
+ */
+void mig_eval(mig_handle_t *m);
+
+/**
+ * @brief 把 mig_eval 注册进 timer 表（每实例一次；幂等）。
+ *
+ * @param m handle
+ * @return true 已注册或本次注册成功；false timer 表满
+ */
+bool mig_timer_register(mig_handle_t *m);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 

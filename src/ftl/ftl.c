@@ -23,7 +23,7 @@
  *   步骤清单的唯一定义见 include/ftl/ftl.h 的 ftl_service() 契约。
  *
  * 文件结构（与下方分区注释一一对应）：
- *   1. 内部辅助        ftl_confirm_write / ftl_confirm_pending / ftl_confirm_service /
+ *   1. 内部辅助        ftl_confirm_write / ftl_confirm_service /
  *                      ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成分支）
  *   2. 对外接口        ftl_init / ftl_service_pump / ftl_service
  *   3. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
@@ -559,26 +559,6 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const ftl_page_desc_t *d)
 }
 
 /**
- * @brief 待入账槽 → 确认描述的唯一构造点（host 完成路径与写确认服务共用）。
- *
- * @param ftl     实例。
- * @param pending 待确认的写子操作记录。
- * @return FTL_OK / FTL_AGAIN / FTL_ERROR（见 ftl_confirm_write）。
- */
-static ftl_status_e ftl_confirm_pending(ftl_ctx_t *ftl, pend_req_t *pending)
-{
-    ftl_page_desc_t d;
-
-    d.lba       = pending->lba;
-    d.new_pba   = pending->new_pba;
-    d.new_pba1  = pending->new_pba1;
-    d.cw_bitmap = pending->cw_bitmap;
-    d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
-
-    return ftl_confirm_write(ftl, &d);
-}
-
-/**
  * @brief 覆盖/解除映射前的**常驻守卫**：L2P 指向的旧块在 BST 里 0 有效时留现场。
  *
  * 触发条件：`valid_count == 0` 却仍被 L2P 引用。此后每次覆盖写该 LBA 都会撞
@@ -716,7 +696,15 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t *ftl, fc_command_t *cmd, pend_
  */
 static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
 {
-    if (ftl_confirm_pending(ftl, pending) != FTL_AGAIN)
+    ftl_page_desc_t d;
+
+    d.lba       = pending->lba;
+    d.new_pba   = pending->new_pba;
+    d.new_pba1  = pending->new_pba1;
+    d.cw_bitmap = pending->cw_bitmap;
+    d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
+
+    if (ftl_confirm_write(ftl, &d) != FTL_AGAIN)
     {
         return false;
     }
@@ -747,16 +735,14 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    // 本轮进入时的待入账总数。限流日志必须报「同时有多少条在等」——只打扫描到的
-    // 第一条（常是 idx=0）会被误读成「只有一个 region 卡住」（RISK-HOST-05）。
-    const WORD parked = pend_confirm_get_count(&ftl->pending);
-
-    BYTE cursor = 0U;
-    BYTE index;
-
-    while (pend_confirm_find_next(&ftl->pending, &cursor, &index) == true)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        pend_req_t *pending = &ftl->pending.slots[index];
+        if (pend_confirm_is_parked(&ftl->pending, i) == false)
+        {
+            continue;
+        }
+
+        pend_req_t *pending = &ftl->pending.slots[i];
 
         if (pending->park_ms == 0U)
         {
@@ -765,7 +751,15 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
             pending->park_ms = now_ms;
         }
 
-        const ftl_status_e st = ftl_confirm_pending(ftl, pending);
+        ftl_page_desc_t d;
+
+        d.lba       = pending->lba;
+        d.new_pba   = pending->new_pba;
+        d.new_pba1  = pending->new_pba1;
+        d.cw_bitmap = pending->cw_bitmap;
+        d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
+
+        const ftl_status_e st = ftl_confirm_write(ftl, &d);
 
         if (st == FTL_AGAIN)
         {
@@ -778,21 +772,26 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
             // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
             if ((s_confirm_log_ms == 0U) || ((now_ms - s_confirm_log_ms) >= 5000U))
             {
+                // 只在真正要打日志时统计。日志必须报「同时有多少条在等」——只打
+                // 扫描到的第一条（常是 idx=0）会被误读成「只有一个 region 卡住」
+                // （RISK-HOST-05）。计数含本轮尚未结算的项。
+                const WORD parked = pend_confirm_get_count(&ftl->pending);
+
                 LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n",
                      pending->lba,
-                     index,
+                     i,
                      parked);
                 s_confirm_log_ms = now_ms;
             }
         }
         else if (st != FTL_OK)
         {
-            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, index);
+            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
         }
 
         const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
-        pend_confirm_settle(&ftl->pending, index, status);
+        pend_confirm_settle(&ftl->pending, i, status);
     }
 }
 

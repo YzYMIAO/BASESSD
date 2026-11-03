@@ -345,7 +345,7 @@ nand_result_e nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
  *
  * 相位机（Phase V，作用于队头槽）：IDLE → ISSUE → ISSUED → FETCH → IDLE
  *   ISSUE：发完命令即返回，LUN 进入 tR/tPROG/tBERS
- *   ISSUED：DWT 计时最短忙期，到点后启动配对 WAIT/FETCH
+ *   ISSUED：SysTick 计时最短忙期，到点后启动配对 WAIT/FETCH
  *   FETCH：执行 WAIT_READY + 数据 + 状态检查
  *
  * 完整状态机图见 docs/design/fc_nand_design.md §23（图 20）。
@@ -469,7 +469,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
         return NAND_DISPATCH_LUN_DONE;
     }
 
-    if ((min_us != 0U) && !delay_dwt_elapsed_us(ctx->queue->wait_start_cycles, min_us))
+    if ((min_us != 0U) && !delay_time_elapsed_us(ctx->queue->wait_start_us, min_us))
     {
         return NAND_DISPATCH_LUN_WAIT; /* 最短等待未到，下一轮再检查 */
     }
@@ -503,7 +503,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
  *     - started!=0：transaction.engine.active 为 0 说明命令已在 start() 中同步
  *       完成（如 FETCH WAIT_READY 已 ready），直接取已存的 execution_status，
  *       不再 step（nand_fc_step 对 active==0 会返回 INVALID_ARGUMENT）。
- *     - ISSUE 段完成 → task_complete + 转 ISSUED + 记 DWT 起点，不报完成。
+ *     - ISSUE 段完成 → task_complete + 转 ISSUED + 记 µs 起点，不报完成。
  * -------------------------------------------------------------------- */
 static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx_t *ctx)
 {
@@ -544,7 +544,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
         nand_dispatch_task_complete(task, result, &ctx->nand_completion);
         ctx->queue->phase = LUN_PHASE_ISSUED;
         /* 记录 tR/tPROG/tBERS 起点，供 ISSUED 块最短等待用 */
-        delay_dwt_cycles_now(&ctx->queue->wait_start_cycles);
+        (void)delay_time_now_us(&ctx->queue->wait_start_us);
         return NAND_DISPATCH_LUN_WAIT; /* 不报完成，下一轮由 ISSUED 块接管 */
     }
     return NAND_DISPATCH_LUN_DONE;

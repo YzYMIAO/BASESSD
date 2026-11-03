@@ -601,7 +601,7 @@ int ut_run_all(int argc, char *argv[])
 
 - 参数：`mode=normal`（OP 31/30）或 `mode=cache`（两 plane cache 写 49/44/48、
   cache 读 45/46/47）；
-- 计时：每块 DWT 累加，擦除单列、不计入写速度；结果只在 `--log-visible info` 显示；
+- 计时：每块 SysTick µs 累加，擦除单列、不计入写速度；结果只在 `--log-visible info` 显示；
 - **破坏性**：直接擦写 1024.. 的原始块，会破坏 live FTL 的用户映射。跑完 FC-only
   必须 CLI `format` + POR；不要和裸 `test`（含 FTL）混跑后再依赖 FTL 状态。
 - 运行：`test --list /speed/` → `test --log-visible info /speed/fc_nand_rw`。

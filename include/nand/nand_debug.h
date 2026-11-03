@@ -56,7 +56,7 @@
 #endif
 
 #ifndef NAND_DBG_TIMING
-#    define NAND_DBG_TIMING 0U /* DWT 时间戳 / 等待超时计时 */
+#    define NAND_DBG_TIMING 0U /* SysTick µs 时间戳 / 等待超时计时 */
 #endif
 
 #ifndef NAND_DBG_RES

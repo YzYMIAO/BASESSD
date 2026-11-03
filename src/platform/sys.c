@@ -26,7 +26,7 @@ void sys_init(void)
         {
         }
     }
-    delay_init(0U);
+    delay_init();
     usart_init(115200U);
     /* 使能可配置故障（MemManage/BusFault/UsageFault），避免全部升级成 HardFault。 */
     fault_init();

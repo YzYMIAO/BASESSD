@@ -8,7 +8,7 @@
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → usb_msc_init → usb_device_init
  *          → while(1) { cli_service_poll; ftl_service | fc_service;
- *                       usb_msc_task; usb_device_task; btim_scheduler_poll; }
+ *                       usb_msc_task; usb_device_task; timer_scheduler_poll; }
  * 关键约定：
  *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
  *     因此 fc_init 失败时 NAND 根本不会被初始化。
@@ -24,7 +24,6 @@
 
 #include "allocator.h"
 #include "bst.h"
-#include "btim.h"
 #include "cli.h"
 #include "controller.h"
 #include "delay.h"
@@ -35,6 +34,7 @@
 #include "metadata.h"
 #include "power_failure_recovery.h"
 #include "stack_guard.h"
+#include "timer.h"
 // #include "led.h"
 #include "fault.h"
 #include "mpu.h"
@@ -480,22 +480,23 @@ static DWORD ssd_ftl_host_lba_max(void)
 }
 
 /* --------------------------------------------------------------------
- * ssd_ftl_log_status - 周期性 [STAT] 一行摘要（每 10 s）
+ * ssd_ftl_stat_task - 周期性 [STAT] 一行摘要（timer 表每 10 s 调用）
  *
  *   只保留块分配/坏块/搬移状态；op/spare/cp/jrn/wr/dng/rrab/mode 等低频计数
  *   改由 `info` / `diag` 按需查看，避免长期占用 UART。
  *   逐事件日志只保留首次故障与状态变化（见 docs/design/logging_design.md）。
  * -------------------------------------------------------------------- */
-static void ssd_ftl_log_status(void)
+static void ssd_ftl_stat_task(void *context, DWORD now_ms)
 {
-    static DWORD last_ms;
-    const DWORD  now = HAL_GetTick();
+    (void)context;
+    (void)now_ms; /* TIM6 只负责调度；t= 是系统时间，读 SysTick。 */
 
-    if ((last_ms != 0U) && ((now - last_ms) < 10000U))
+    if (g_ftl_ready == 0)
     {
         return;
     }
-    last_ms = now;
+
+    const DWORD uptime_ms = delay_now_ms();
 
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
@@ -510,7 +511,62 @@ static void ssd_ftl_log_status(void)
                     continue;
                 }
 
-                LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ch, (now / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
+                LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->active != 0U) ? 1U : 0U), ((ftl->mig_handle->paused != 0U) ? 1U : 0U), ftl->mig_handle->moved_count, ftl->mig_handle->noop_count);
+            }
+        }
+    }
+}
+
+/*
+ * 后台周期节拍：只置 flag / 补充配额，不跑业务。
+ *   - L2P 写回节拍（L2P_FLUSH_INTERVAL_MS）
+ *   - CP T3 到期判定（10 s，SysTick 比较；到期只置 cp->t3_due）
+ *   - BBT 起新 job 节拍（BBT_FLUSH_INTERVAL_MS）
+ * 真正的执行仍由 bg_scheduler 在 ftl_service 的固定位置完成；must-run 与在飞推进
+ * 不受这些 flag 影响。
+ */
+_Static_assert(BG_TOKEN_INTERVAL_MS == L2P_FLUSH_INTERVAL_MS, "后台节拍与 token refill 周期必须一致");
+
+static void ssd_ftl_bg_tick_task(void *context, DWORD now_ms)
+{
+    (void)context;
+    (void)now_ms; /* TIM6 只负责唤醒；时间比较读 SysTick。 */
+
+    if (g_ftl_ready == 0U)
+    {
+        return;
+    }
+
+    static DWORD s_bbt_last_ms;
+    const DWORD  now     = delay_now_ms();
+    const bool   bbt_due = (s_bbt_last_ms == 0U) || ((now - s_bbt_last_ms) >= BBT_FLUSH_INTERVAL_MS);
+
+    if (bbt_due != false)
+    {
+        s_bbt_last_ms = now;
+    }
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                bg_scheduler_refill(&ftl->bg);
+                ftl->l2p_flush_due = 1U;
+                cp_timer_poll(ftl->cp_handle);
+
+                if (bbt_due != false)
+                {
+                    ftl->alloc.bbt.flush_due = 1U;
+                }
             }
         }
     }
@@ -639,19 +695,25 @@ void _init(void)
 /*
  * STM32H743 烧录自检入口。
  * Reset_Handler 已完成 C 运行时初始化；HAL_Init() 配置 SysTick 为 1 ms 节拍。
+ * 项目毫秒/微秒时基由 ARM 核心 SysTick 提供；TIM6 只驱动 timer 任务表的调度
+ * 心跳（sys_init 配置完时钟树后立即启动）。
  */
-/*
-void SysTick_Handler(void)
-{
-    HAL_IncTick();
-}
-*/
 
 int main(void)
 {
     BYTE nand_init_result;
 
     sys_init();
+
+    /*
+     * TIM6 是 timer 调度器的毫秒心跳（watchdog / [STAT] / FTL 周期评估），
+     * 必须在任务注册与首次 poll 之前运行。系统毫秒时基由 SysTick/HAL tick
+     * 提供，与 TIM6 无关；TIM6 晚启动只会推迟调度器任务的首次到期。
+     * APB1=100 MHz 且 APB1 分频=2 ⇒ TIM6 内核时钟 200 MHz；
+     * arr=1000-1、psc=200-1 ⇒ 1 ms 周期中断。
+     */
+    timer_timx_int_init(1000 - 1, 200 - 1);
+
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
     log_set_sink(stm32_uart_log_sink);
     log_set_flush_sink(stm32_uart_log_flush_sink);
@@ -731,9 +793,10 @@ int main(void)
         LOGI("[USB ] device stack ready (USB2_OTG_FS, full speed)\r\n");
     }
 
-    /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
-    btim_timx_int_init(1000 - 1, 200 - 1);
     boot_report_console();
+
+    /* 任务表与 watchdog 是否启用无关：[STAT] 等平台任务也要注册。 */
+    timer_scheduler_init();
 #if (SSD_WATCHDOG_ENABLE != 0U)
     if (!storage_wdg_init(&g_storage_wdg_config))
     {
@@ -741,14 +804,45 @@ int main(void)
     }
     else
     {
-        /* 固定任务已在 btim.c 的 g_btim_tasks 中注册；这里只启动其运行态。 */
-        btim_scheduler_init();
-        LOGI("[SYS ] btim task table ready, IWDG nominal=30s, period=100ms\r\n");
+        LOGI("[SYS ] timer task table ready, IWDG nominal=30s, period=100ms\r\n");
     }
 #else
-    btim_scheduler_init();
-    LOGI("[SYS ] btim task table ready, IWDG disabled for debug\r\n");
+    LOGI("[SYS ] timer task table ready, IWDG disabled for debug\r\n");
 #endif
+
+    DWORD stat_task_id;
+    if (!timer_scheduler_add(ssd_ftl_stat_task, NULL, 10000U, 10000U, &stat_task_id))
+    {
+        LOGE("[SYS ] stat task add failed\r\n");
+    }
+
+    /* 后台周期节拍：L2P 写回 / CP T3 / BBT 起新 job 的 flag，10 ms 一次。 */
+    DWORD bg_tick_task_id;
+    if (!timer_scheduler_add(ssd_ftl_bg_tick_task, NULL, 0U, L2P_FLUSH_INTERVAL_MS, &bg_tick_task_id))
+    {
+        LOGE("[SYS ] bg tick task add failed\r\n");
+    }
+
+    /* FTL 周期求值（GC/WL/predict）：每实例一个 timer 任务，ctx = mig_handle。 */
+    if (g_ftl_ready != 0)
+    {
+        for (BYTE ch = 0U; ch < CH_NUM; ch++)
+        {
+            for (BYTE ce = 0U; ce < CE_NUM; ce++)
+            {
+                for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+                {
+                    ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+
+                    if ((ftl != NULL) && (!mig_timer_register(ftl->mig_handle)))
+                    {
+                        LOGE("[SYS ] migrate timer register failed ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
+                    }
+                }
+            }
+        }
+    }
+
     cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
@@ -757,7 +851,7 @@ int main(void)
      *                     ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
      *                       journal / checkpoint / bbt / GC 永不推进（序 4）。
      *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
-     *   btim_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
+     *   timer_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
      *   All command parsing and scheduled storage work remain outside ISR context. */
     while (1)
     {
@@ -786,9 +880,6 @@ int main(void)
                     }
                 }
             }
-
-            /* 块相关计数每 10 s 一行，替代逐事件刷屏。 */
-            ssd_ftl_log_status();
         }
         else
         {
@@ -804,6 +895,6 @@ int main(void)
         usb_msc_task();
         usb_device_task();
 
-        btim_scheduler_poll();
+        timer_scheduler_poll();
     }
 }

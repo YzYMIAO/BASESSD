@@ -5,7 +5,7 @@
  * bg_scheduler — 工作量配额后台调度器（通用引擎 + FTL 任务表/档位策略）
  *
  * 一个模块同时承载两层内容：
- *   · 引擎：必跑任务 + 预算任务（工作量配额 + 墙钟兜底）。
+ *   · 引擎：必跑任务 + 预算任务（token bucket 配额 + 墙钟兜底）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
  *     void(ftl_ctx_t*)）+ 档位→配额映射（s_bg_level_cfg）+ 档位选择
  *     （bg_scheduler_level_select）+ 后台调度步入口（bg_scheduler_service）。
@@ -21,13 +21,21 @@
  *     ——它们是防死锁/防 host 读挂起的动作，删了系统会挂。
  *   · task_mask = 本档位允许的预算任务位集合（BG_IDLE/NORMAL/BUSY_TASKS 预设）；
  *     每个表项用 `.mask` 声明自己的位，表序只决定执行顺序。
- *   · units = 单次调用占用的**工作量单位**（≈ 本轮最多提交的条数；L2P 的具体条数
- *     由模块内 max_kick 再收一层）。配额是**确定性**的：不读时钟、与机器速度无关。
- *   · total_units = 本档位每轮配额；配额不足即截断（表序 = 优先级）。
+ *   · units = 单次调用占用的**工作量单位**（≈ 一次提交的条数；L2P 的具体条数
+ *     由模块内 max_kick 再收一层）。
+ *   · grant_units = 本档位**每个 token interval** 补充的 credit 数；credit 由
+ *     timer 任务调用 bg_scheduler_refill 补充，bg_scheduler_run 消费。must-run
+ *     不占 credit；预算任务 credit 不足即截断（表序 = 优先级）。
  *   · 时间只做**异常兜底**：单轮墙钟超过 BG_ROUND_HARD_LIMIT_US 即截断——只能在
  *     任务之间检查，不能抢占；时钟缺失时该兜底失效，靠档位掩码 + 模块内
  *     单飞行/脏位/事件门防刷屏。
  */
+
+/* Token bucket：timer 每 BG_TOKEN_INTERVAL_MS 为每个实例补 grant_units 个 credit；
+ * 上限 = grant_units × BG_TOKEN_CAP_TICKS（允许少量抖动累积，不做无限追赶）。
+ * 该值必须与后台节拍任务的实际周期一致（main.c 有 _Static_assert 钉住）。 */
+#define BG_TOKEN_INTERVAL_MS (10U)
+#define BG_TOKEN_CAP_TICKS   (4U)
 
 #include "ftl_type.h"  /* bg_level_e */
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
@@ -54,10 +62,10 @@ typedef struct
     bool           must_run; /* true = 正确性关键集：不 gate、不占配额、无条件每轮跑 */
 } bg_task_t;
 
-/* 档位 → 工作量配额（FTL 策略表，引擎不持有） */
+/* 档位 → 每个 token interval 的 credit 配额（FTL 策略表，引擎不持有） */
 typedef struct
 {
-    DWORD total_units; /* 每轮工作量配额（单位见 bg_task_t.units） */
+    DWORD grant_units; /* 每个 token interval 的 credit 数（单位见 bg_task_t.units） */
     DWORD task_mask;   /* 本档位允许的预算任务位集合（BG_TASK_*，定义见 bg_scheduler.c） */
 } bg_level_cfg_t;
 
@@ -73,21 +81,35 @@ typedef struct
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
      * 模块入口的档位就取这里，避免适配器各自再选一次档。 */
     bg_level_e level;
+    /* 预算 credit：timer 任务用 bg_scheduler_refill 补充，bg_scheduler_run 消费。
+     * must-run 不占；预算任务按表序在 credit 内执行。 */
+    DWORD credits;
 } bg_scheduler_t;
 
 /* ── 引擎接口 ── */
 
 /**
- * @brief 跑一轮：先无条件跑 must-run，再按表序在总预算内跑其余任务（**表序即优先级**，预算不足截断）。
+ * @brief 跑一轮：先无条件跑 must-run，再按表序在 sched->credits 内跑其余任务
+ *        （**表序即优先级**，credit 不足截断）。
  *
  * cfg 必须与 sched 当前档位配套（本文件 bg_scheduler_service 传 &s_bg_level_cfg[level]）。
  * 档位本身由策略层在调用前写入 sched->level（模块入口据此读本轮档位）。
  *
- * @param sched 本实例的调度器（任务表与本轮配置的发布点）。
+ * @param sched 本实例的调度器（任务表、本轮配置与 credit 的发布点）。
  * @param ftl   FTL 上下文（原样传给每个任务适配器）。
  * @param cfg   本轮档位配置（起点发布到 sched->cfg，任务从这里读本轮策略参数）。
  */
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
+
+/**
+ * @brief 补充预算 credit（timer 任务周期调用）。
+ *
+ * 按 sched->cfg->grant_units 补充，上限 grant_units × BG_TOKEN_CAP_TICKS。
+ * cfg 未发布（尚未跑过 bg_scheduler_run）时不补。
+ *
+ * @param sched 本实例的调度器
+ */
+void bg_scheduler_refill(bg_scheduler_t *sched);
 
 /* ── FTL 策略接口 ── */
 

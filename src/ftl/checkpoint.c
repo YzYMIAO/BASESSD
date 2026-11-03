@@ -1101,6 +1101,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     const ftl_topo_t      topo         = h->topo;
     const cp_state_t      cps          = h->cp_state;
     const DWORD           last         = h->last_ms;
+    const BYTE            t3_due       = h->t3_due;
     const DWORD           last_abort   = h->log_abort_ms;
     const DWORD           last_done    = h->log_done_ms;
 
@@ -1113,6 +1114,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     h->topo         = topo;
     h->cp_state     = cps;
     h->last_ms      = last;
+    h->t3_due       = t3_due; /* T3 是跨 job 的时间基准，与 last_ms 同寿命 */
     h->log_abort_ms = last_abort;
     h->log_done_ms  = last_done;
 
@@ -1764,9 +1766,10 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
     }
 
     // T3: 定时触发。
+    // 到期判定已由 cp_timer_poll（timer 任务）移到热路径外；这里只读标志。
     // ⚠ 一条 CP record 是 21 页 ⇒ 轻载下加最小 journal 增量门：定时拍到了但
     // 自上次 CP 没有足够新条目 ⇒ 不写。
-    if ((trigger->now_ms - h->last_ms) >= CP_TIME_INTERVAL_MS)
+    if (h->t3_due != 0U)
     {
         const DWORD seq  = trigger->journal_seq;
         const DWORD last = h->cp_state.last_journal_sequence;
@@ -1809,6 +1812,7 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
         if (trigger->reason != CP_REASON_EMERGENCY)
         {
             h->last_ms = trigger->now_ms;
+            h->t3_due  = 0U;
         }
     }
 }
@@ -1817,4 +1821,18 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
 void cp_timer_reset(cp_handle_t *h)
 {
     h->last_ms = 0U;
+    h->t3_due  = 0U;
+}
+
+// T3 定时轮询（timer 任务调用）：只置标志，不启动 job；SysTick 仍是时间坐标。
+void cp_timer_poll(cp_handle_t *h)
+{
+    ASSERT(h != NULL);
+
+    const DWORD now_ms = ftl_job_now_ms();
+
+    if ((now_ms != 0U) && ((now_ms - h->last_ms) >= CP_TIME_INTERVAL_MS))
+    {
+        h->t3_due = 1U;
+    }
 }

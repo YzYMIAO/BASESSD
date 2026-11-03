@@ -28,8 +28,7 @@
 #include "pending.h"
 
 #include "assertion.h"
-#include "ftl_job.h"    /* ftl_job_now_ms（confirm 待入账超时） */
-#include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS */
+#include "ftl_job.h" /* ftl_job_now_ms（confirm 待入账超时） */
 #include "log.h"
 
 #include <string.h>
@@ -244,7 +243,7 @@ static void pend_note_underflow(const char *who, WORD gi)
 
 // 实现要点：outstanding 是「已下发、未完成」的组不变量。add 是单字段 fast path，
 // 定义在 pending.h（`static inline`，H42）；本文件保留递减侧——完整完成走
-// pend_group_complete_subop*（聚合状态 + 完成通知），提交失败回滚走 drop
+// pend_group_complete_subop_multi（聚合状态 + 完成通知），提交失败回滚走 drop
 // （不触发完成通知）。任一处漏掉即 host 写组永不完成、挂死（§3.1）。
 
 // 撤销一个尚未提交的子操作：只把组在飞数 -1，不触发完成判定（由调用者决定何时结算）。
@@ -271,47 +270,43 @@ void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
 
 // 实现要点：· caller 通知字段（complete_flag / status_out / on_complete）的**唯一写点**：
 // 由 ftl_host_io_callback 在子操作簿记后调用。
+// · owners 按值传入即局部副本，遍历它安全——回调（on_complete）可能重入复用组槽，
+// 但本循环只认传入的位掩码，不受槽位变动影响。
+// · 单组完成逻辑直接展开在循环内：本函数是唯一生产入口，省一层栈帧（栈预算 2 KiB）。
 // · agg_status **粘性**：仅当 sub_status != OK 时写入，一旦失败即保留首个错误，
 // 后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
 // · outstanding-- 后交 pend_group_maybe_complete 判是否整组完成。
-void pend_group_complete_subop(pending_ctx_t *table, WORD gi, ssd_status_e sub_status)
-{
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    pend_group_t *g = &table->groups[gi];
-
-    ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误 */
-
-    if (sub_status != SSD_STATUS_OK)
-    {
-        g->agg_status = sub_status; /* 粘性：一旦失败即保留 */
-    }
-
-    // 与 drop_subop 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
-    ASSERT(g->outstanding > 0U);
-
-    if (g->outstanding > 0U)
-    {
-        g->outstanding--;
-    }
-    else
-    {
-        pend_note_underflow("complete", gi);
-    }
-
-    pend_group_maybe_complete(table, gi);
-}
-
-// 实现要点：owners 按值传入即局部副本，遍历它安全——回调（on_complete）可能重入
-// 复用组槽，但本循环只认传入的位掩码，不受槽位变动影响。
 void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_status_e sub_status)
 {
     for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
-        if ((owners & ftl_group_bit(gi)) != 0U)
+        if ((owners & ftl_group_bit(gi)) == 0U)
         {
-            pend_group_complete_subop(table, gi, sub_status);
+            continue;
         }
+
+        pend_group_t *g = &table->groups[gi];
+
+        ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误 */
+
+        if (sub_status != SSD_STATUS_OK)
+        {
+            g->agg_status = sub_status; /* 粘性：一旦失败即保留 */
+        }
+
+        // 与 drop_subop 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
+        ASSERT(g->outstanding > 0U);
+
+        if (g->outstanding > 0U)
+        {
+            g->outstanding--;
+        }
+        else
+        {
+            pend_note_underflow("complete", gi);
+        }
+
+        pend_group_maybe_complete(table, gi);
     }
 }
 
@@ -394,41 +389,6 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
     pending->park_ms    = ftl_job_now_ms();
 }
 
-// 槽是否处于待入账态：已占用且 op 已翻成 WRITE_CONFIRM。
-static bool pend_is_confirm_parked(const pend_req_t *p)
-{
-    return (p->used == true) && pend_op_is_write_confirm(p->op);
-}
-
-bool pend_confirm_find_next(const pending_ctx_t *table, BYTE *cursor, BYTE *out_index)
-{
-    ASSERT(table != NULL);
-    ASSERT(cursor != NULL);
-    ASSERT(out_index != NULL);
-
-    for (BYTE i = *cursor; i < FTL_PENDING_MAX; i++)
-    {
-        if (pend_is_confirm_parked(&table->slots[i]) == true)
-        {
-            *out_index = i;
-            *cursor    = (BYTE)(i + 1U);
-            return true;
-        }
-    }
-
-    *cursor = (BYTE)FTL_PENDING_MAX;
-    return false;
-}
-
-bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms)
-{
-    ASSERT(pending != NULL);
-
-    // park_ms == 0 = 尚未起算（懒初始化）⇒ 不判超时。平台时钟缺失时 now_ms 恒 0，
-    // 同样永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
-    return (pending->park_ms != 0U) && ((now_ms - pending->park_ms) >= FTL_GROUP_DRAIN_TIMEOUT_MS);
-}
-
 void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
 {
     ASSERT(table != NULL);
@@ -436,7 +396,7 @@ void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
 
     pend_req_t *pending = &table->slots[index];
 
-    ASSERT(pend_is_confirm_parked(pending));
+    ASSERT(pend_confirm_is_parked(table, index));
 
     // owners 必须在释放**之前**取走：组完成通知可能重入提交并复用本槽。
     const DWORD owners = pending->owners;
@@ -453,7 +413,7 @@ WORD pend_confirm_get_count(const pending_ctx_t *table)
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if (pend_is_confirm_parked(&table->slots[i]) == true)
+        if (pend_confirm_is_parked(table, i) == true)
         {
             count++;
         }

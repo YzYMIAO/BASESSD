@@ -934,7 +934,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     ├── 三档之前（must-run 正确性关键集，无条件每轮跑）
     │   ├── checkpoint_handle(ADVANCE)       ← 推进在飞 CP（每轮只推进一次）
     │   ├── rr_handle()                      ← 推进在飞 RR
-    │   ├── mig_handle()                 ← 推进在飞搬移 + 自持节拍（GC/WL/predict）
+    │   ├── mig_handle()                 ← 推进在飞搬移 + 紧急 GC（周期评估由 timer 的 mig_eval）
     │   ├── metadata_handle()                ← 目录整理
     │   ├── journal_handle(ERASE_ONLY)       ← 新环形块没擦不能写
     │   └── checkpoint_handle(EMERGENCY)     ← Journal ≥95%
@@ -952,8 +952,9 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
         └── l2p_handle(cache, dim)            ← max_kick = 1
 ```
 
-> `mig_handle` 的自持节拍：GC 10ms / WL 5s / predict 1s（仅 IDLE）；
-> `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
+> 周期评估：timer 表每 10 ms 调 `mig_eval`（GC 求值）；WL 5s / predict 1s 的间隔门仍在
+> handle 内（仅 IDLE）。`load_level == BUSY` 时只做水位 GC，不评估 WL/predict；
+> 在飞 job 由 `mig_handle` 每轮推进。写路径取不到页对时
 > `mig_gc_request_urgent()` 只登记，下一轮由 must-run 启动。
 
 > ⚠ **Phase 2.5 的开头是 `ftl_confirm_service()`**——推进**待入账**的写确认，

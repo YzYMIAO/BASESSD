@@ -6,7 +6,7 @@
  *         - 顺序推进（每 step 可消费多个 UOP）
  *         - 条件跳转（JUMP_IF_NOT_READY：70h 状态轮询循环）
  *         - 协作式让出（NOT_READY：外设忙时返回，上层稍后再 step）
- *         - 超时检测（DWT 时钟周期 + 轮询计数双保险）
+ *         - 超时检测（SysTick µs 时间 + 轮询计数双保险）
  *
  * 调用链：
  *   nand_fc_execute/start/step（nand_mt29*.c）
@@ -105,9 +105,9 @@ nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
 
 /* --------------------------------------------------------------------
  * nand_engine_wait_latch
- *   功能：一次性锁存忙等起点（DWT 时间戳 + 轮询计数清零）。
+ *   功能：一次性锁存忙等起点（SysTick µs 时间戳 + 轮询计数清零）。
  *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态（wait / jump）。
- *   返回：NAND_RESULT_OK（本次锁存成功，或之前已锁存）/ INVALID_ARGUMENT（DWT 不可用）。
+ *   返回：NAND_RESULT_OK（本次锁存成功，或之前已锁存）/ INVALID_ARGUMENT（µs 时钟不可用）。
  *   实现要点：WAIT_READY 与 JUMP_IF_NOT_READY 各持一组状态、走同一入口；
  *         失败时清 active，调用方直接返回。
  * -------------------------------------------------------------------- */
@@ -117,7 +117,7 @@ static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_
     {
         return NAND_RESULT_OK;
     }
-    if (!delay_dwt_cycles_now(&w->start_cycles))
+    if (!delay_time_now_us(&w->start_us))
     {
         state->active = 0U;
         return NAND_RESULT_INVALID_ARGUMENT;
@@ -132,8 +132,8 @@ static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_
  *   功能：忙等超时检测——轮询计数 +1 后判双条件。
  *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态；op_name —— 日志用的微指令名。
  *   返回：1 = 已超时（active 已清）；0 = 未超时。
- *   实现要点：DWT 周期预算与轮询计数任一超限即判超时（DWT 防计数单位误解，
- *         计数防 DWT 不可用/漂移）；polls 饱和递增防回绕。
+ *   实现要点：SysTick µs 预算与轮询计数任一超限即判超时（时间戳防计数单位
+ *         误解，计数防 µs 时钟不可用/漂移）；polls 饱和递增防回绕。
  * -------------------------------------------------------------------- */
 static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
 {
@@ -142,7 +142,7 @@ static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wai
         w->polls++;
     }
 
-    if (delay_dwt_elapsed_us(w->start_cycles, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
+    if (delay_time_elapsed_us(w->start_us, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
         LOGE(LOG_TAG_NAND "%s timeout op=%u polls=%u timeout_us=%u\r\n", op_name, state->request->operation, w->polls, state->timing->busy_timeout_us);
         state->active = 0U;
@@ -179,7 +179,7 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
  *   实现要点（核心状态机）：
  *     - END → 置 inactive，返回 transfer_status（命令结果）。
  *     - JUMP_IF_NOT_READY → 引擎直接处理：ready 则前进；busy 则
- *       DWT+计数双超时，未超时回跳 operand 步（70h 轮询循环）。
+ *       µs+计数双超时，未超时回跳 operand 步（70h 轮询循环）。
  *     - 其余 UOP → 查后端 handler 表执行；OK 则前进并清零 wait 状态；
  *       NOT_READY 则让出（WAIT_READY 同时做超时检测）。
  *     - 循环跑满 NAND_ENGINE_MAX_UOPS 无 END → 非法序列，报错。
@@ -234,7 +234,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
             if ((state->completion->nand_status & NAND_STATUS_READY) != 0U)
             {
                 /* NAND ready（状态字节 bit6）→ 复位本组忙等状态，推进到下一 UOP。
-                 * 复位是必需的：否则同一序列中后续 JUMP 会复用上一轮的陈旧 DWT 起点。 */
+                 * 复位是必需的：否则同一序列中后续 JUMP 会复用上一轮的陈旧 µs 起点。 */
                 state->jump.started = 0U;
                 state->jump.polls   = 0U;
                 state->uop_index++;
@@ -264,7 +264,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
          * 失配的编程错误（返回错误码会把固件 bug 伪装成 NAND 命令失败）。 */
         ASSERT(handler != NULL);
 
-        /* WAIT_READY 首次进入：记录 DWT 起点（用独立 wait 状态） */
+        /* WAIT_READY 首次进入：记录 µs 起点（用独立 wait 状态） */
         if (uop->type == NAND_UOP_WAIT_READY)
         {
             if (nand_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)

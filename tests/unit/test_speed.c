@@ -58,16 +58,16 @@ static DWORD spd_kbps_from_us(DWORD bytes, DWORD us)
 
 typedef struct
 {
-    DWORD start_cycles;
+    DWORD start_us;
     DWORD start_ms;
-    bool  dwt;
+    bool  time_valid;
 } spd_clock_t;
 
 static void spd_clock_start(spd_clock_t *clock)
 {
     memset(clock, 0, sizeof(*clock));
-    clock->dwt = delay_dwt_cycles_now(&clock->start_cycles);
-    if (!clock->dwt)
+    clock->time_valid = delay_time_now_us(&clock->start_us);
+    if (!clock->time_valid)
     {
         clock->start_ms = ftl_job_now_ms();
     }
@@ -75,9 +75,9 @@ static void spd_clock_start(spd_clock_t *clock)
 
 static DWORD spd_clock_elapsed_us(const spd_clock_t *clock)
 {
-    if (clock->dwt)
+    if (clock->time_valid)
     {
-        return delay_dwt_elapsed_cycles_us(clock->start_cycles);
+        return delay_time_since_us(clock->start_us);
     }
 
     const DWORD now = ftl_job_now_ms();

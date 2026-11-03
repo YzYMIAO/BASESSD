@@ -764,7 +764,7 @@ fc_service()
 
 #### WAIT_READY — 纯 RB# GPIO 轮询
 
-WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# GPIO 轮询 + 超时等待，不返回 NOT_READY，**不依赖引擎的 DWT 超时**。
+WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# GPIO 轮询 + 超时等待，不返回 NOT_READY，**不依赖引擎的 SysTick µs 超时**。
 
 流程（简化后）：
 1. 读 RB# GPIO：LOW → NAND busy → 1µs/步 spin-wait 直到 HIGH 或超时
@@ -777,7 +777,7 @@ WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# G
 JUMP_IF_NOT_READY 由引擎直接处理，不走 handler 表（handler 表项为 NULL）：
 
 1. 检查 `nand_status & NAND_STATUS_READY`：ready 则推进到下一 UOP
-2. busy 则检查 DWT 超时，未超时则 `uop_index -= operand` 跳回重发 70h 轮询序列
+2. busy 则检查 SysTick µs 超时，未超时则 `uop_index -= operand` 跳回重发 70h 轮询序列
 
 典型的 70h 状态轮询 4 步循环：
 
@@ -848,14 +848,14 @@ step(state)
        ├─ uop.type == JUMP_IF_NOT_READY（引擎直接处理，不经 handler）
        │    ├─ nand_status & READY bit6 → uop_index++（推进）
        │    └─ busy → wait_latch() 锁存起点 → wait_timeout() 双超时判定：
-       │         DWT elapsed > busy_timeout_us  或
+       │         SysTick µs elapsed > busy_timeout_us  或
        │         wait_polls ≥ busy_timeout_us
        │           ├─ 超时 → active=0，返回 TIMEOUT
        │           └─ 未超时 → uop_index -= operand（回跳），返回 NOT_READY
        │
        ├─ 其余 UOP → handler = backend->handlers[uop->type]
        │    ├─ handler == NULL → INVALID_ARGUMENT
-       │    └─ WAIT_READY 首次进入：wait_latch() 记录 DWT 起点（用独立 wait 状态）
+       │    └─ WAIT_READY 首次进入：wait_latch() 记录 SysTick µs 起点（用独立 wait 状态）
        │         result = handler(...)
        │           ├─ OK → uop_log_ok() 白名单日志；uop_index++，清零 wait 状态，continue
        │           ├─ NOT_READY → WAIT_READY 额外 wait_timeout() 检测；让出
@@ -864,9 +864,9 @@ step(state)
        └─ 循环跑满无 END → 非法序列
 ```
 
-**三个 static helper**（`nand_engine.c`）：`wait_latch` 一次性锁存 DWT 起点（入参指定 `wait` / `jump` 状态组）、`wait_timeout` 饱和递增计数后判双条件、`uop_log_ok` 按类型白名单打成功日志。抽出的目的是让 `step` 只留解释器骨架——END / JUMP 是控制流（不查表），其余一律走 handler 表；同时也消掉了原先 JUMP 与 WAIT_READY 两处逐字重复的锁存/超时块。
+**三个 static helper**（`nand_engine.c`）：`wait_latch` 一次性锁存 SysTick µs 起点（入参指定 `wait` / `jump` 状态组）、`wait_timeout` 饱和递增计数后判双条件、`uop_log_ok` 按类型白名单打成功日志。抽出的目的是让 `step` 只留解释器骨架——END / JUMP 是控制流（不查表），其余一律走 handler 表；同时也消掉了原先 JUMP 与 WAIT_READY 两处逐字重复的锁存/超时块。
 
-> **为什么 JUMP 与 WAIT_READY 用两组独立状态**（`wait` / `jump`，`nand_engine_wait_t`）：JUMP 回跳体会重跑若干**返回 OK** 的 UOP（70h / DELAY_US / DATA_OUT_STATUS），而引擎 OK 分支会清零 `wait`；若二者共用同一组，`jump` 的计数每轮回跳都被清零、DWT 起点也被重新锁存，双条件超时永不触发（NAND 卡忙时死循环）。`wait` 归 WAIT_READY——该 UOP 未就绪时原地重入、无前置 OK-UOP 复位，计数可正常累加。
+> **为什么 JUMP 与 WAIT_READY 用两组独立状态**（`wait` / `jump`，`nand_engine_wait_t`）：JUMP 回跳体会重跑若干**返回 OK** 的 UOP（70h / DELAY_US / DATA_OUT_STATUS），而引擎 OK 分支会清零 `wait`；若二者共用同一组，`jump` 的计数每轮回跳都被清零、SysTick µs 起点也被重新锁存，双条件超时永不触发（NAND 卡忙时死循环）。`wait` 归 WAIT_READY——该 UOP 未就绪时原地重入、无前置 OK-UOP 复位，计数可正常累加。
 
 **协作式让出**：`NOT_READY` 是"让出点"——引擎不阻塞，上层 `while(NOT_READY) step()`（同步 `nand_engine_execute`）或由 dispatch 轮询推进（异步 `start/step`）。
 
@@ -880,7 +880,7 @@ step(state)
 步 N+2: { DATA_OUT_STATUS   0U  }    ← 读状态字节（含 READY bit6 / FAIL bit0）
 步 N+3: { JUMP_IF_NOT_READY 3U  }    ← busy → uop_index -= 3 回跳 N+0
                                         ready → 推进到下一 UOP
-        （循环期间 DWT + 轮询计数双超时，超时返回 TIMEOUT）
+        （循环期间 SysTick µs + 轮询计数双超时，超时返回 TIMEOUT）
 ```
 
 读命令 30h 后的页加载、编程 10h 后的 tPROG、擦除 D0h 后的 tBERS 都靠这个循环轮询到 ready；`CHECK_FAIL` 检查 FAIL bit 失败即终止序列（图 6 的 OPERATION_FAILED 路径）。
@@ -1091,7 +1091,7 @@ nand_dispatch_lun_step(ctx)             ← 单命令推进（一次调用只处
   │                                 : 用已存的 execution_status
   │     ASYNC → WAIT（等下一轮）
   │     phase==ISSUE → task_complete → phase=ISSUED
-  │                    → 记 DWT 起点 → WAIT（LUN 仍在内部操作）
+  │                    → 记 SysTick µs 起点 → WAIT（LUN 仍在内部操作）
   │
   ├─ task_cw_chain()：CW chaining（多 CW READ）→ task_complete
   │     若 (普通读/OTP读/随机读) 且还有下一 CW：
@@ -3738,12 +3738,12 @@ ISSUE 型 OP 的 UOP 序列只包含"发命令+地址+数据+CONFIRM"，**不含
         ┌───────────────┐
         │ LUN_PHASE_ISSUE    │  发完命令+地址(+数据)+CONFIRM，立即返回
         └───────┬───────────┘  （µs 级，不阻塞总线）
-                │ step 完成 → task_complete → 记录 DWT 起点
+                │ step 完成 → task_complete → 记录 SysTick µs 起点
                 ▼
         ┌───────────────┐
         │ LUN_PHASE_ISSUED   │  LUN 内部操作中（tR 25µs / tPROG 200µs /
         └───────┬───────────┘   tBERS ~1ms）。此时 dispatch 可切其他 LUN！
-                │ min_busy_us 到点（DWT elapsed）→ pair_op 切换
+                │ min_busy_us 到点（SysTick µs elapsed）→ pair_op 切换
                 ▼
         ┌───────────────┐
         │ LUN_PHASE_FETCH    │  执行配对 WAIT/FETCH：WAIT_READY + DATA_OUT
@@ -4334,10 +4334,10 @@ fc_service() → fc_poll_internal
 [ISSUE]  （仅 ISSUE 型 OP）
   │ task_fc_start 判 nand_operation_is_issue → 置 ISSUE
   │ lun_drive 命中 ISSUE 分支：
-  │   task_complete + phase=ISSUED + delay_dwt_cycles_now() + return WAIT
+  │   task_complete + phase=ISSUED + delay_time_now_us() + return WAIT
   │   ⚠ 不报完成：LUN 还在 tR / tPROG / tBERS
   ▼
-[ISSUED] wait_start_cycles = DWT 起点
+[ISSUED] wait_start_us = SysTick µs 起点
   │ lun_step 先调 issued_advance 判 elapsed ≥ min_busy_us（tR=38µs / tPROG=700µs / tBERS=5000µs）
   │ pair_op 切换：LOAD↔FETCH / ISSUE↔WAIT / 原子 OP pair==自身则跳过
   ▼
@@ -4350,7 +4350,7 @@ fc_service() → fc_poll_internal
 相位写点/读点总表：src/nand/nand_dispatch_internal.h（nand_dispatch_lun_queue_t 注释）
 ```
 
-关键护栏：**ISSUE 段完成 ≠ 命令完成**。`lun_drive` 的 `phase == LUN_PHASE_ISSUE` 分支只做"切相位 + 记 DWT 起点 + return WAIT"，绝不下沉到 DONE 把结果当命令完成报出去；相位属于**当前队头槽**，命令出队即随 `phase=IDLE` 复位。
+关键护栏：**ISSUE 段完成 ≠ 命令完成**。`lun_drive` 的 `phase == LUN_PHASE_ISSUE` 分支只做"切相位 + 记 SysTick µs 起点 + return WAIT"，绝不下沉到 DONE 把结果当命令完成报出去；相位属于**当前队头槽**，命令出队即随 `phase=IDLE` 复位。
 
 ### 23.6 流程图：多 LUN ISSUE/WAIT/FETCH 并发时序波形（图 21）
 
@@ -4360,7 +4360,7 @@ LUN0 ──[00h..CONFIRM]──────────── ISSUED ───�
               │ 总线空闲，可切 LUN                    ▲ issued_advance 到点
 LUN1 ─────────┴──[00h..CONFIRM]──────────── ISSUED ─────────────▶ [WAIT / Dout / status]──
                                                                     ▲
-dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 段只做 DWT 比较，不占总线
+dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 段只做 SysTick µs 比较，不占总线
 设计目标：总耗时 ≈ tR + FETCH，而非 2×(tR + FETCH)
 
 ⚠ 当前 CH_NUM = CE_NUM = LUN_NUM = 1：没有第二个 LUN，相位机退化为单 LUN 顺序
@@ -5188,7 +5188,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | 图 18 | 命令生命周期状态机 | `grep -n "FC_COMMAND_STATE_\|fc_command_alloc_internal\|fc_complete_internal" include/fc/fc_internal.h src/fc/fc.c` |
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
-| 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_cycles\|min_busy_us\|delay_dwt_cycles_now" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
+| 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_us\|min_busy_us\|delay_time_now_us" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
 | 图 22 | 调度器填充轮次决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|chain_owner\|nand_dispatch_lun_free" src/fc/fc.c` |
 
 ## 附录 B：建议阅读顺序

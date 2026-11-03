@@ -14,7 +14,7 @@
 | **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.6/§25.8 → `design/ftl_design.md` ADR-15 |
 | FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
 | 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT（已重建上板）见 `design/ftl_ut_design.md`；HIL UT 未实现见 `design/known_iss.md` §1 |
-| 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/wsl_debug_environment.md` + `hardware_contract.md` |
+| 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/scheduler_design.md`（统一定时调度器计划）+ `design/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 | `design/logging_design.md`（预期/非预期 + 打印预算 + 飞行记录器）+ `design/assertion_guidelines.md` + `design/fault_capture.md` |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
 | **项目水平 / 定位评估** | `design/project_positioning.md`（对照 OpenSSD / SPDK FTL 的定性评估；不是基准报告） |
@@ -31,7 +31,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史 10，见 archive/README.md
-├── design/                    ← 活跃权威设计文档（18 个）+ known_iss/known_risks
+├── design/                    ← 活跃权威设计文档（19 个）+ known_iss/known_risks
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览

@@ -108,7 +108,7 @@ void storage_wdg_report_progress(wdg_domain_e domain);
 void storage_wdg_service(void);
 
 /*
- * 调度器任务入口：由 btim_scheduler_poll() 在主循环上下文调用。
+ * 调度器任务入口：由 timer_scheduler_poll() 在主循环上下文调用。
  * 任务实现属于看门狗模块，main.c 只负责把它装配进系统静态任务表。
  */
 void storage_watchdog_task(void *context, DWORD now_ms);
@@ -129,11 +129,12 @@ void storage_wdg_wwdg_early_wakeup(void);
 /*
  * ---- port 接口：由 src/platform/<soc>/watchdog_port.c 实现 ----
  */
-bool  watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
-bool  watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
-void  watchdog_port_iwdg_refresh(void);
-void  watchdog_port_wwdg_refresh(void);
-void  watchdog_port_wwdg_irq_handler(void);
+bool watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
+bool watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
+void watchdog_port_iwdg_refresh(void);
+void watchdog_port_wwdg_refresh(void);
+void watchdog_port_wwdg_irq_handler(void);
+/* 系统单调毫秒计数（域超时用；SysTick/HAL tick）。 */
 DWORD watchdog_port_now_ms(void);
 
 #endif /* PLATFORM_WATCHDOG_H */

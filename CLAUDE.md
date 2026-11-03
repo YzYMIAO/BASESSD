@@ -443,9 +443,21 @@ MCU 栈固定大小，深度由输入决定 = 可被输入打爆。
 ⚠ 典型缺陷是**把喂狗放在主循环顶部** ⇒ 某个慢分支卡住时循环根本没转到，狗照咬；
 喂狗点必须覆盖**最长路径**。⚠ 但别在 ISR 里喂 —— 那会把「主循环卡死」这个信号也抹掉。
 
-**H21 ISR 必须短、不阻塞、不调不可重入函数。**（华为附录）
-ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 是**纯轮询**，正合此原则）。
-不在 ISR 里调 `LOG*`（串口阻塞）、不在 ISR 里等 NAND。
+**H21 ISR 必须短、不阻塞、可重入；重活延后到主循环。**（华为附录 + 主流 ISR-safe 分级）
+- **允许**：有界、可重入、不阻塞、栈有界的操作 —— 置标志、递增计数、打时间戳、
+  读写 GPIO/ADC 等。判据是**能力**（这四条 + 不碰共享非原子状态），不是「回调一律禁止」。
+- **禁止**：`LOG*`（串口阻塞/不可重入）、`ASSERT`（失败路径 `log_flush` + 停机）、
+  动态分配、等待/轮询外设、FTL/NAND 事务，以及任何可能阻塞或非重入的调用。
+- **延后**：重活由 ISR 置「有待办」标志，主循环 / 工作队列执行（本仓 FC 是**纯轮询**，
+  数据面本就在主循环）。
+- **本仓现状**：没有 ISR-safe API 子集（没有 `...FromISR` 那一层，`ASSERT` 也会停机）
+  ⇒ 现有回调仍全部放主循环。需要 µs 级动作时，先补 ISR-safe 子集，再把该动作作为
+  例外登记；不要直接放宽整条规则。
+- **出处**（公开资料，非 §〇 出处层）：Linux top half / softirq（硬中断不睡眠，timer
+  回调在 softirq）；Zephyr `k_timer` 的 `expiry_fn` 默认在 ISR 上下文（文档要求短、
+  不可阻塞）；FreeRTOS `...FromISR` API 子集 + daemon task；AUTOSAR OS Category 1/2
+  ISR 能力分级。
+- **与 H20 配套**：喂狗仍不在 ISR —— 那会把「主循环卡死」这个信号抹掉。
 
 ### 5.2 类型与位运算（MISRA C:2012 导入，H22~H23）
 
@@ -594,7 +606,7 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
 - **同名风险**：裸名依赖 `-I` 顺序。新增头文件前必须
   `find include tests -name '<name>.h'` 查重；同名必须改名或合并，
   **不得靠 `-I` 顺序“碰巧解析”**。当前已知同名只在 platform：
-  `btim / delay / mpu / sys / usart / watchdog`（`include/platform/` 与
+  `delay / mpu / sys / usart / watchdog`（`include/platform/` 与
   `include/platform/stm32h7r3/` 各有一份），平台抽象头排在 SoC 目录之前是刻意的。
 - **机械检查**：`grep -rnE '^\s*#\s*include\s*"[^"]*/' src include tests` 应为 0。
 
@@ -906,7 +918,7 @@ FC 层已有完整判据体系：**判据 9**（配置错误的后果是静默�
 | 文档地图 | `docs/README.md` |
 | **已知残余风险登记（R11 登记处）** | `docs/design/known_risks.md`（复查模块前先读） |
 | **未实现 / 未验证设计项登记** | `docs/design/known_iss.md`（feature backlog；与 known_risks 分工见文件头） |
-| 活跃设计文档 | `docs/design/`（18 个）+ `docs/archive/`（历史/计划） |
+| 活跃设计文档 | `docs/design/`（19 个）+ `docs/archive/`（历史/计划） |
 | **`CLAUDE.md` 自身的变更史** | `docs/archive/claude_md_history.md`（日常不读） |
 | 历史归档 | `docs/archive/`（日常不读） |
 | 构建 | `make all`(debug) / `make release` / `make tests UT=FC\|FTL` |

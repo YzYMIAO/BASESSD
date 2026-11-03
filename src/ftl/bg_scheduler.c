@@ -6,7 +6,7 @@
  *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_tasks + 档位表 s_bg_level_cfg
  *     + 装配 / 选档 / 后台调度步入口。
  *
- * 语义定义（must_run / units / total_units / 墙钟兜底）见 `bg_scheduler.h` 头注，
+ * 语义定义（must_run / units / grant_units / token bucket / 墙钟兜底）见 `bg_scheduler.h` 头注，
  * 设计说明见 `docs/design/ftl_design.md §3.12`——不在此重复，避免两份漂移。
  */
 
@@ -51,14 +51,15 @@
 #define BG_NORMAL_TASKS      (BG_TASK_BUDGETED_ALL)
 #define BG_BUSY_TASKS        (BG_TASK_L2P_FLUSH)
 
-// 档位 → 工作量配额。单位见 bg_task_t.units：一次 kick ≈ 1 条命令（L2P 的具体
-// 条数由模块内 max_kick 再限）。IDLE/NORMAL 放行全部 4 个预算任务；BUSY 只放行
-// L2P 写回（1 个），即「仅 must-run + 1 flush」。档位差异由配额与各模块自有策略表
-// 共同承担，不依赖机器时钟。
+// 档位 → 每个 token interval 的 credit 配额。单位见 bg_task_t.units：一次 kick
+// ≈ 1 条命令（L2P 的具体条数由模块内 max_kick 再限）。IDLE/NORMAL 放行全部 4 个
+// 预算任务；BUSY 只放行 L2P 写回（1 个），即「仅 must-run + 1 flush」。
+// ⚠ credit 由 timer 任务按 BG_TOKEN_INTERVAL_MS 补充；实际速率 = grant_units /
+//   BG_TOKEN_INTERVAL_MS，与主循环频率无关。数值需上板按 GC/WL/host 延迟调。
 static const bg_level_cfg_t s_bg_level_cfg[BG_LEVEL_NUM] = {
-    [BG_LEVEL_IDLE]   = {.total_units = 4U,   .task_mask = BG_IDLE_TASKS},
-    [BG_LEVEL_NORMAL] = {.total_units = 4U, .task_mask = BG_NORMAL_TASKS},
-    [BG_LEVEL_BUSY]   = {.total_units = 1U,   .task_mask = BG_BUSY_TASKS},
+    [BG_LEVEL_IDLE]   = {.grant_units = 4U,   .task_mask = BG_IDLE_TASKS},
+    [BG_LEVEL_NORMAL] = {.grant_units = 4U, .task_mask = BG_NORMAL_TASKS},
+    [BG_LEVEL_BUSY]   = {.grant_units = 1U,   .task_mask = BG_BUSY_TASKS},
 };
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -83,11 +84,12 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
         }
     }
 
-    // 预算任务：按表序 + 工作量配额（表已按执行序预排序，线性扫）。
+    // 预算任务：按表序 + token bucket credit（表已按执行序预排序，线性扫）。
+    // credit 由 bg_scheduler_refill 在 timer 任务里补充；must-run 不消耗 credit。
     const ssd_platform_ops_t *platform   = ssd_platform_get();
     const bool                clock_ok   = (platform != NULL) && (platform->time_us != NULL);
     const QWORD               start_us   = (clock_ok == true) ? platform->time_us() : 0U;
-    DWORD                     units_left = cfg->total_units;
+    DWORD                     units_left = sched->credits;
 
     for (BYTE i = 0U; i < sched->task_count; i++)
     {
@@ -116,6 +118,32 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
         {
             break;
         }
+    }
+
+    // 只把实际消费后的余额写回：被掩码跳过 / credit 不足的任务不扣。
+    sched->credits = units_left;
+}
+
+// 补充预算 credit：timer 任务每 BG_TOKEN_INTERVAL_MS 调一次。
+// 上限 = grant_units × BG_TOKEN_CAP_TICKS；grant_units 是编译期 1..4 的档位值，
+// 乘法不会溢出。cfg 尚未发布（首次 bg_scheduler_run 之前）时不补。
+void bg_scheduler_refill(bg_scheduler_t *sched)
+{
+    if (sched->cfg == NULL)
+    {
+        return;
+    }
+
+    const DWORD grant = sched->cfg->grant_units;
+    const DWORD cap   = grant * BG_TOKEN_CAP_TICKS;
+
+    if (sched->credits >= (cap - grant))
+    {
+        sched->credits = cap;
+    }
+    else
+    {
+        sched->credits += grant;
     }
 }
 
@@ -160,7 +188,7 @@ static void bg_task_rr(ftl_ctx_t *ftl)
  */
 static void bg_task_migrate(ftl_ctx_t *ftl)
 {
-    // 在飞推进 + 不在飞时按 handle 自持节拍评估 GC/WL/predict。
+    // 在飞推进 + 会话收尾 + 紧急 GC；周期评估由 timer 表的 mig_eval 任务负责。
     mig_handle(ftl->mig_handle, ftl->bg.level);
 }
 
@@ -213,6 +241,13 @@ static void bg_task_cp_emergency(ftl_ctx_t *ftl)
  */
 static void bg_task_l2p_flush(ftl_ctx_t *ftl)
 {
+    // 时间节拍由 timer 任务置位；未到期不踢，避免每轮扫一遍 owner 脏位图。
+    if (ftl->l2p_flush_due == 0U)
+    {
+        return;
+    }
+    ftl->l2p_flush_due = 0U;
+
     // 档位 → max_kick 的 static const 表在 l2p 模块内；thrashing 降级也在模块内判定。
     const DWORD dim = ftl_topo_dim(ftl->topo);
 
@@ -269,7 +304,7 @@ static const bg_task_t s_bg_tasks[] = {
     { .func = bg_task_cp_emergency,   .mask = BG_TASK_CP_EMERG, .must_run = true}, /* Journal ≥95%，任何档位随时响应 */
 
   // 表 6..9 · 预算任务：本档位掩码放行且配额足够才跑。
-  // GC/WL/predict 由 migrate handle 自持节拍（docs §4.4），不单列任务。
+  // GC/WL/predict 的周期评估由 timer 表调用 mig_eval；本表只负责搬移推进与预算任务。
     {    .func = bg_task_l2p_flush,  .mask = BG_TASK_L2P_FLUSH,      .units = 1U},
     {.func = bg_task_journal_flush,  .mask = BG_TASK_JRN_FLUSH,      .units = 1U},
     {          .func = bg_task_bbt,        .mask = BG_TASK_BBT,      .units = 1U},
@@ -289,6 +324,7 @@ void bg_scheduler_init(bg_scheduler_t *sched)
     sched->task_count = (BYTE)(sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0]));
     sched->cfg        = NULL;
     sched->level      = BG_LEVEL_IDLE;
+    sched->credits    = 0U; /* 首次 refill 后才有预算任务可跑 */
 }
 
 // bg_scheduler_level_select — 负载 → 档位（纯函数，无副作用）：

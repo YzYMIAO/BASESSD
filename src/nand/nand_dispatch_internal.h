@@ -128,7 +128,7 @@ typedef struct
  * LUN 相位枚举 (Phase V multi-LUN ISSUE/WAIT/FETCH phase machine)
  *   IDLE  → ISSUE → ISSUED → FETCH → IDLE
  *   ISSUE ：发完命令立即返回，LUN 进入 tR/tPROG/tBERS
- *   ISSUED：DWT 计时最短忙期，到点后启动配对 WAIT/FETCH
+ *   ISSUED：SysTick 计时最短忙期，到点后启动配对 WAIT/FETCH
  *   FETCH ：执行 WAIT_READY + 数据 + 状态检查
  */
 #define LUN_PHASE_IDLE   (0U) /* LUN 空闲 */
@@ -171,10 +171,10 @@ typedef struct
 typedef struct
 {
     nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
-    BYTE                 head;              /* 出队游标（当前执行/待执行槽） */
-    BYTE                 count;             /* 占用槽数 */
-    BYTE                 phase;             /* 当前执行槽的 LUN_PHASE_* */
-    DWORD                wait_start_cycles; /* Phase V: ISSUE 完成时 DWT 时间戳 */
+    BYTE                 head;          /* 出队游标（当前执行/待执行槽） */
+    BYTE                 count;         /* 占用槽数 */
+    BYTE                 phase;         /* 当前执行槽的 LUN_PHASE_* */
+    DWORD                wait_start_us; /* Phase V: ISSUE 完成时 SysTick µs 时间戳 */
 } nand_dispatch_lun_queue_t;
 
 /* ======================================================================

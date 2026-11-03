@@ -171,9 +171,14 @@ static QWORD ftl_ut_time_us(void)
     return s_ut_us;
 }
 
+static DWORD ftl_ut_time_ms(void)
+{
+    return (DWORD)(s_ut_us / 1000U);
+}
+
 void ftl_ut_clock_install(void)
 {
-    static const ssd_platform_ops_t ops = {.time_us = ftl_ut_time_us};
+    static const ssd_platform_ops_t ops = {.time_us = ftl_ut_time_us, .time_ms = ftl_ut_time_ms};
 
     s_saved_ops = ssd_platform_get();
     munit_assert_not_null(s_saved_ops);

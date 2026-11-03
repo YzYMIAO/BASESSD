@@ -18,7 +18,7 @@ SoC 相关代码通过 `platform/platform.h` 约定的接口（`ssd_platform_ops
 > `time_us`；NAND 层的 **include 耦合已在 Stage 1 收敛**（`delay` / `crc` / `dma` 三个服务
 > 下沉为 `include/platform/` 下的抽象头，`src/nand/*.c` 与 `src/fc/fc_crc_engine.c` 里已无
 > `platform/<soc>/` 路径），**Stage 2 又把五个平台服务的纯逻辑搬进共享源**
-> （`btim` / `watchdog` / `fault` / `delay` / `syscalls` → `src/platform/*.c`，SoC 相关部分
+> （`timer` / `watchdog` / `fault` / `delay` / `syscalls` → `src/platform/*.c`，SoC 相关部分
 > 下沉到 `src/platform/stm32h743/*_port.c`），**Stage 2.5 再把 `usart` 拆开**（传输层 →
 > `src/platform/usart.c` + `usart_port.c`，CLI → `src/controller/cli.c`，消除平台层反向依赖
 > FTL 的倒挂），**Stage 2.6 把剩余的 `platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` /

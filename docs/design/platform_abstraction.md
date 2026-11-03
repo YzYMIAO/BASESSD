@@ -54,7 +54,7 @@
 2. 它**能被任何 target 重新实现**，或已是一份 target 无关的实现（判据 C）。
 
 「底层只留初始化 / 配置 / 查询 / 设置」是判据 A、B 的**推论**，不是额外要求。
-Stage 2 之前，`btim.c`（16 槽任务表）、`watchdog.c`（健康域状态机）就属于「逻辑可移植、
+Stage 2 之前，`timer.c`（16 槽任务表）、`watchdog.c`（健康域状态机）就属于「逻辑可移植、
 但实现留在 SoC 目录」这一类——**它们本身不违规**；违规的是**核心模块绕过抽象头直接
 include 它们**（§三 G4）。**Stage 2 起本仓改取更强立场**：纯逻辑**下沉到共享源文件**
 （§1.5），`<soc>/` 只留 port 适配 —— 这样同一份逻辑不再在两个 SoC 目录里各存一份。
@@ -113,12 +113,12 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
   （`core_cm7.h`，非厂商 HAL）。**实测该头无法单独包含** —— 它依赖设备头提供 `IRQn_Type`
   与 `__NVIC_PRIO_BITS`，裸包含编译不过。⇒ 本仓更进一步：共享 `.c` **连 CMSIS core 也不用**，
   寄存器访问全部下沉为 port 函数。具体两例：
-  `delay.c` 的 DWT/SysTick 寄存器拆成 7 个 `delay_port_*`；
+  `delay.c` 的 SysTick 寄存器拆成 5 个 `delay_port_*`；
   `syscalls.c` 的 `__get_MSP()` 换成内联汇编 `mrs %0, msp`。
   判据 D 因此按「**零 SoC 头**」执行，比原口径更严。
-- **`static` 状态迁移规则**：每个变量只能落在一个 TU。`g_btimx_handle` / `g_storage_iwdg` /
-  `g_storage_wwdg` / `g_fault_console_ready` → port；`g_btim_tick_ms` / `g_btim_tasks` /
-  `g_btim_task_table` / `g_storage_wdg_*` → 共享。
+- **`static` 状态迁移规则**：每个变量只能落在一个 TU。`g_timerx_handle` / `g_storage_iwdg` /
+  `g_storage_wwdg` / `g_fault_console_ready` → port；`g_timer_tick_ms` / `g_timer_tasks` /
+  `g_timer_task_table` / `g_storage_wdg_*` → 共享。
 - **目标文件不撞**：`patsubst` 按源路径映射 ⇒ `obj/platform/watchdog.o` 与
   `obj/platform/stm32h743/watchdog_port.o` 是两个文件。**符号不撞**的前提是旧 `<soc>` 源文件
   与 port 源文件**同一次改动内**完成增删，否则 `storage_wdg_init` 等会重复定义。
@@ -143,10 +143,10 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 | `qspi.c` | 43 | **a** | 收发空参检查（`buf==NULL\|\|datalen==0`）后转发（Stage 2.6 搬来） | — |
 | `rng.c` | 43 | **a** | DRDY 重试循环 + `rng_get_random_range` 取模映射（Stage 2.6 搬来） | — |
 | `sys.c` | 83 | **a** | 上电初始化编排（顺序即契约）+ `sys_*` 一行转发（Stage 2.6 搬来） | — |
-| `btim.c` | 202 | **a** | 16 槽任务表调度器（Stage 2 从 `<soc>` 搬来，只留 `btim_scheduler_tick()` 供 port 的 ISR 回调调） | — |
+| `timer.c` | 239 | **a** | 64 槽任务表调度器；1 ms 心跳由 timer_port 提供，ISR 只 `tick++`，到期扫描在主循环 | — |
 | `watchdog.c` | 230 | **a** | 健康域状态机 + 首故障锁存 + WWDG 窗口决策（Stage 2 搬来） | — |
 | `fault.c` | 439 | **a** | Cortex-M 故障解码 / 栈扫描 / 崩溃记录打印（Stage 2 搬来） | 见下注 |
-| `delay.c` | 279 | **a** | 毫秒/DWT 忙等逻辑（Stage 2 搬来） | — |
+| `delay.c` | 256 | **a** | 毫秒/SysTick 忙等与 µs 时间戳逻辑（Stage 2 搬来） | — |
 | `syscalls.c` | 96 | **a** | newlib `_sbrk` + 堆栈守卫（Stage 2 搬来；`mrs %0, msp` 内联汇编取 MSP） | — |
 | `makefile.mk` | 14 | t | 按 `FIRMWARE_PLATFORM` 选 `<soc>` 目录 | — |
 
@@ -163,18 +163,18 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 
 ### 2.2 `src/platform/stm32h743/`（13 个 `.c` / 1905 行）
 
-Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）。`btim.c` / `watchdog.c` /
+Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）。`timer.c` / `watchdog.c` /
 `fault.c` / `delay.c` / `syscalls.c` **已迁出**（§2.1）；`usart.c` 拆成 port（`usart_port.c`）
 + 共享传输（`src/platform/usart.c`）+ CLI（`src/controller/cli.c`，§5.3）；`platform_ops.c` /
 `crc.c` / `dma.c` / `mpu.c` / `rng.c` / `qspi.c` / `sys.c` **Stage 2.6 全部拆成共享源 + `*_port.c`**（§5.4）。
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
-| `btim_port.c` | 61 | **p** | TIM6 句柄 + 中断使能 + `btim_port_irq_handler()`；回调转 `btim_scheduler_tick()`；向量入口 `TIM6_DAC_IRQHandler` | — |
-| `watchdog_port.c` | 86 | **p** | IWDG/WWDG 句柄 + 6 个 port 函数 + 两个 HAL 回调转共享层；向量入口 `WWDG_IRQHandler` | — |
+| `timer_port.c` | 61 | **p** | TIM6 句柄 + 1 ms 更新中断；ISR 只调 `timer_scheduler_tick()`；向量入口 `TIM6_DAC_IRQHandler` | — |
+| `watchdog_port.c` | 86 | **p** | IWDG/WWDG 句柄 + 6 个 port 函数 + 两个 HAL 回调转共享层；域超时时间源读 `timer_scheduler_now_ms()`；向量入口 `WWDG_IRQHandler` | — |
 | `fault_port.c` | 220 | **p** | USART1/DMA1 轮询控制台 + 5 个 naked 异常入口 + 3 个内核异常空入口（SVC/DebugMon/PendSV）+ `fault_port_entry_c`（抓现场）+ `RCC->RSR` 复位原因解码 | — |
-| `delay_port.c` | 61 | **p** | 7 个计数器/时钟查询函数（DWT、SysTick、HCLK/SYSCLK） | — |
-| `usart_port.c` | 271 | **p** | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 向量入口 `USART1_IRQHandler` + 15 个 port 原语（寄存器/DMA/缓存/CMSIS 内建） | — |
+| `delay_port.c` | 42 | **p** | 5 个计数器/时钟查询函数（SysTick LOAD/VAL、HCLK/SYSCLK、HAL tick）；无 DWT | — |
+| `usart_port.c` | 271 | **p** | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 向量入口 `USART1_IRQHandler` + 15 个 port 原语（寄存器/DMA/缓存/CMSIS 内建）；`usart_port_now_ms()` 读 SysTick/HAL tick | — |
 | `crc_port.c` | 63 | **p** | CRC 句柄 + `HAL_CRC_Init` + `HAL_CRC_MspInit` + `__HAL_CRC_*` IDR + `HAL_CRC_Calculate` | — |
 | `dma_port.c` | 54 | **p** | DMA1_Stream0 → USART1 TX 的 HAL 配置 + `HAL_DMA_IRQHandler` + 向量入口 `DMA1_Stream0_IRQHandler` | — |
 | `mpu_port.c` | 71 | **p** | 中性参数填进 `MPU_Region_InitTypeDef` + `HAL_MPU_ConfigRegion` | — |
@@ -191,7 +191,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 
 ### 2.3 `src/platform/stm32h7r3/`
 
-全部 **(b)/(c)**（`btim.c` / `watchdog.c` 同 H743 属 **(c)**）。
+全部 **(b)/(c)**（`timer.c` / `watchdog.c` 同 H743 属 **(c)**）。
 **缺失服务**（判据 C 不成立）：`platform_ops.c`、`crc.c`、`dma.c`、`fault.c`、`nand_dma.c`、
 `qspi.c`、`rng.c`、`syscalls.c`。
 ⇒ 两个「移植」**并不对称**，H7R3 **不是** H743 的 drop-in 替换。
@@ -223,7 +223,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 | **G2** | ~~`src/platform/bsp/`（8 个 `.c`，含 124 行 `nand_loader.c`）**是死代码**，`bsp/makefile.mk` 从未被 include~~ **✅ 已删除（2026-10-12）** | `config.mk:225` `MODULES = common controller fc ftl nand platform`；`src/platform/makefile.mk` 只 include `<soc>/makefile.mk`；全仓无任何文件 include `bsp/makefile.mk` |
 | **G3** | 核心模块**直接 include `<soc>` 路径** | `src/nand/nand_fmc.c:31`、`src/nand/nand_mt29f4g08abadawp.c:26` → `platform/stm32h743/nand_dma.h`；`src/main.c:43-45` → `fault.h` / `platform_ops.h` / `stm32h7xx_hal.h` |
 | **G4** | 核心模块**以裸名 include `<soc>` 头**（靠全局 `ALL_INCS` 才编译过） | `src/fc/fc_crc_engine.c:32` → `crc.h`；`src/nand/{nand_fmc,nand_engine,nand_dispatch,nand_mt29f4g08abadawp}.c` → `delay.h`；`include/nand/nand_mt29f4g08abadawp.h:5` → `sys.h`（连带把 HAL/CMSIS 灌进所有 includer） |
-| **G5** | 纯逻辑服务被埋在 SoC 目录（**本身不违规**，但使「服务」与「驱动」难以分开复用） | `btim.h` 的 `btim_scheduler_*`；`watchdog.h` 的 `storage_wdg_*`；~~`usart.c` 的环形缓冲~~（Stage 3 已迁出） |
+| **G5** | 纯逻辑服务被埋在 SoC 目录（**本身不违规**，但使「服务」与「驱动」难以分开复用） | `timer.h` 的 `timer_scheduler_*`；`watchdog.h` 的 `storage_wdg_*`；~~`usart.c` 的环形缓冲~~（Stage 3 已迁出） |
 | **G6** | 两个 target **不对称**，抽象层无法真正换 target | §2.3 缺失服务清单 |
 | **G7** | **平台层反向依赖上层**（分层倒挂） | ~~`src/platform/stm32h743/usart.c:6` → `ftl/ftl.h`；`include/platform/stm32h743/usart.h:6` → `controller/controller.h`~~（Stage 3 已消除：CLI 移出平台层）；`nand_dma.{h,c}` → `nand/nand_config.h`（已断） |
 
@@ -233,7 +233,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 >   Stage 2 又把 `fault.h` 从 `main.c` 的 `<soc>` 路径改成裸名）⇒ **判据 A 的 grep 归零**：
 >   Stage 2.6 把 `stm32_platform_register()` 声明从 `platform_ops.h` 搬进抽象 `platform.h`，
 >   `main.c` 改 include `"platform.h"`，最后一处例外消失。
-> - **G5 已闭合**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑已搬到
+> - **G5 已闭合**：`timer` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑已搬到
 >   `src/platform/*.c`，`<soc>/` 只留 `*_port.c`；Stage 3 又把 `usart` 的传输逻辑搬到
 >   `src/platform/usart.c`；Stage 2.6 再把 `platform` / `crc` / `dma` / `mpu` / `qspi` /
 >   `rng` / `sys` 七个服务同样拆开（含只做一行转发的 `dma` / `mpu`）。
@@ -250,17 +250,17 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 include/platform/<svc>.h        ← 抽象接口：判据 B（零 HAL 类型）
     platform.h  interrupt.h
     delay.h  crc.h  dma.h  fault.h  usart.h
-    btim.h  watchdog.h  mpu.h  rng.h  qspi.h  sys.h
+    timer.h  watchdog.h  mpu.h  rng.h  qspi.h  sys.h
 src/platform/<svc>.c            ← 共享逻辑：判据 D（零 SoC 头），跨 target 编译一次
-    platform.c  btim.c  watchdog.c  fault.c  delay.c  syscalls.c  usart.c
+    platform.c  timer.c  watchdog.c  fault.c  delay.c  syscalls.c  usart.c
     crc.c  dma.c  mpu.c  qspi.c  rng.c  sys.c        ← Stage 2.6
 src/platform/<soc>/             ← 唯一实现目录（判据 A 的唯一合法出口）
     <svc>_port.c                ← port 适配：只碰 HAL/MMIO
-    btim_port.c  watchdog_port.c  fault_port.c  delay_port.c  usart_port.c
+    timer_port.c  watchdog_port.c  fault_port.c  delay_port.c  usart_port.c
     crc_port.c  dma_port.c  mpu_port.c  qspi_port.c  rng_port.c  sys_port.c
     nand_dma.c  bsp/                                ← 本身即 port（Stage 3 处理）
 include/platform/<soc>/         ← 实现头（含 HAL 类型），只有 <soc> 目录自己 include
-    btim_port.h  usart_port.h  qspi_port.h  sys_port.h（原 HAL 伞头 sys.h 改名）
+    timer_port.h  usart_port.h  qspi_port.h  sys_port.h（原 HAL 伞头 sys.h 改名）
 ```
 
 **`sys.h` 的伞头搬家（Stage 2.6）**：原 `include/platform/stm32h743/sys.h` **同时是 HAL 伞头**
@@ -283,10 +283,10 @@ port 适配放 `src/platform/<soc>/`；核心模块只 include 抽象头。
 ### 4.1 port 接口总表（判据 B：签名里不得出现任何 HAL 类型）
 
 ```c
-/* btim —— include/platform/btim.h */
-void     btim_timx_int_init(uint16_t arr, uint16_t psc);   /* 公开入口，名字被 main.c 冻结 */
-void     btim_port_irq_handler(void);
-void     btim_scheduler_tick(void);                        /* 共享入口，由 port 的 ISR 回调调 */
+/* timer —— include/platform/timer.h */
+void     timer_timx_int_init(uint16_t arr, uint16_t psc);   /* 启动 1 ms 心跳 */
+void     timer_port_irq_handler(void);
+void     timer_scheduler_tick(void);                        /* 共享入口，由 port 的 ISR 回调调 */
 
 /* watchdog —— include/platform/watchdog.h */
 bool     watchdog_port_iwdg_init(uint32_t prescaler, uint32_t reload);
@@ -426,7 +426,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 |---|---|---|
 | **Stage 0**（已交付） | 本设计文档 + 订正失实文档（§六） | 文档结论可复算 |
 | **Stage 1**（**已部分落地**，见 §5.1） | ① 在 `include/platform/` 下为 `delay.h` / `crc.h` / `dma.h` 建抽象头（只搬声明，不搬实现；`nand_dma.h` 与 UART 的 `dma.h` 合并为一份 `dma.h`）；② `src/nand/*`、`src/fc/fc_crc_engine.c` 改 include 抽象头；③ ~~删 `src/platform/bsp/` 死代码（或接线）~~ **✅ 已删除（2026-10-12）**；④ 构建侧：核心模块的 `MODULE_INCS` 移除 `platform/<soc>` 目录 | 判据 A 的 grep 归零 + `make tests` 逐字不变 |
-| **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
+| **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`timer` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
 | **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/controller/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
 | **Stage 2.6**（**已落地**，见 §5.4） | **剩余 7 服务补齐**：`platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` / `sys` 全部拆成共享源 + `*_port.c`（含只做一行转发的 `dma` / `mpu`），HAL 伞头 `sys.h` 改名 `sys_port.h` | 判据 A 归零、B/D 空、E 精确相等 + 0 warning + 上板全套通过 |
 | **Stage 2.7**（**已落地**，见 §5.5） | **ISR 分散化**：删总装 `stm32h7rsxx_it.c`，每个 ISR 搬进拥有该外设的 `*_port.c`；EXTI 死代码删除 | 0 warning + `.isr_vector` 664 B 不变 + 上板全套通过 |
@@ -457,33 +457,33 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 
 ### 5.2 Stage 2 进度（2026-10-11，只做 `stm32h743`）
 
-**范围**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务（用户拍板）。
+**范围**：`timer` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务（用户拍板）。
 `usart` 本批**不做**（1204 行、头泄漏严重、带 `ftl/ftl.h` 反依赖）—— 已由 **Stage 2.5**（§5.3）接手。
 
 **结果**：
 
 | 服务 | 共享源（新） | port 源（新） | 抽象头 |
 |---|---|---|---|
-| btim | `src/platform/btim.c` | `stm32h743/btim_port.c` | `include/platform/btim.h` |
+| timer | `src/platform/timer.c` | `stm32h743/timer_port.c` | `include/platform/timer.h` |
 | watchdog | `src/platform/watchdog.c` | `stm32h743/watchdog_port.c` | `include/platform/watchdog.h` |
 | fault | `src/platform/fault.c` | `stm32h743/fault_port.c` | `include/platform/fault.h` |
 | delay | `src/platform/delay.c` | `stm32h743/delay_port.c` | `include/platform/delay.h` |
 | syscalls | `src/platform/syscalls.c` | ——（target 无关） | ——（无公开头） |
 
-删除：`src/platform/stm32h743/{btim,watchdog,fault,delay,syscalls}.c`、
-`include/platform/stm32h743/{btim,watchdog,fault}.h`（后者必须删，否则遮蔽抽象头）。
-`include/platform/stm32h743/btim_port.h` **新增**（只放 HAL 与 `BTIM_TIMX*` 宏）。
+删除：`src/platform/stm32h743/{timer,watchdog,fault,delay,syscalls}.c`、
+`include/platform/stm32h743/{timer,watchdog,fault}.h`（后者必须删，否则遮蔽抽象头）。
+`include/platform/stm32h743/timer_port.h` 保留（只放 TIM6 句柄/宏）。
 
 **关键实测发现：`core_cm7.h` 无法单独包含。** 它依赖设备头提供 `IRQn_Type` 与
 `__NVIC_PRIO_BITS`，裸包含直接报 `unknown type name 'IRQn_Type'`。因此共享 `.c`
-**零 CMSIS 且零 HAL**（比 §1.5 的原口径更严）：`delay.c` 的 DWT/SysTick 拆成 7 个
+**零 CMSIS 且零 HAL**（比 §1.5 的原口径更严）：`delay.c` 的 SysTick 拆成 5 个
 `delay_port_*`；`syscalls.c` 的 `__get_MSP()` 换成 `__asm__ volatile("mrs %0, msp" ...)`。
 `delay.c` 的 `delay_enable_dwt()` 删除，改为 `delay_port_dwt_enable()`。
 
 **唯一改动的非平台文件**：`src/main.c:43` 的 `#include "platform/stm32h743/fault.h"`
 → `#include "fault.h"`（用户拍板，不留转发 shim）。`src/platform/stm32h743/sys.c:4`
-本来就写裸名，**零改动**。`stm32h7rsxx_it.c:189` 的 `HAL_TIM_IRQHandler(&g_btimx_handle)`
-→ `btim_port_irq_handler()`（句柄改 static 后 ISR 够不着）。另**改写 4 处注释**
+本来就写裸名，**零改动**。`stm32h7rsxx_it.c:189` 的 `HAL_TIM_IRQHandler(&g_timerx_handle)`
+→ `timer_port_irq_handler()`（句柄改 static 后 ISR 够不着）。另**改写 4 处注释**
 （`fc_crc_engine.c:24` 去掉 `<soc>` 路径字面量；`delay.h` / `delay.c` / `syscalls.c`
 去掉注释里的 `CMSIS` / `core_cm7.h` 字样）—— 判据 A/B/D 是机械 grep，**注释也算**。
 
@@ -633,7 +633,7 @@ ISR 名字由 `startup_stm32h743xx.s` 的向量表固定 ⇒ 任何 TU 定义同
 |---|---|
 | `USART1_IRQHandler` | `usart_port.c` |
 | `DMA1_Stream0_IRQHandler` | `dma_port.c` |
-| `TIM6_DAC_IRQHandler` | `btim_port.c` |
+| `TIM6_DAC_IRQHandler` | `timer_port.c` |
 | `WWDG_IRQHandler` | `watchdog_port.c` |
 | `DMA2_Stream0/1_IRQHandler` | `nand_dma.c`（`#if CONFIG_NAND_DMA` 内） |
 | `SysTick_Handler` | `sys_port.c` |
@@ -679,16 +679,16 @@ grep -rn 'platform/stm32h743' src --include=*.c --include=*.h | grep -v '^src/pl
 #   Stage 1 后：delay.h / crc.h / dma.h 已稳定解析到 include/platform/（抽象头）；
 #   仍解析到 <soc> 目录的只剩 G4 的 sys.h 与 main.c 的板级头：
 #   include/nand/nand_mt29f4g08abadawp.h:5 的 sys.h（Stage 3）、
-#   src/main.c 的 btim/mpu/sys/usart/watchdog（板级装配根，不在核心模块范围）
-#   Stage 2 起 btim.h/watchdog.h 已解析到 include/platform/ 抽象头
-grep -rnE '#include "(delay|crc|sys|usart|btim|watchdog|mpu|rng|qspi|dma)\.h"' src include \
+#   src/main.c 的 timer/mpu/sys/usart/watchdog（板级装配根，不在核心模块范围）
+#   Stage 2 起 timer.h/watchdog.h 已解析到 include/platform/ 抽象头
+grep -rnE '#include "(delay|crc|sys|usart|timer|watchdog|mpu|rng|qspi|dma)\.h"' src include \
   --include=*.c --include=*.h | grep -vE '^src/platform/|^include/platform/'
 
 # 命令 B —— 判据 B：抽象头零 HAL 类型（预期为空）
 grep -nE 'HAL_|__HAL_|stm32h7xx|CMSIS|HandleTypeDef' include/platform/*.h
 
 # 命令 C —— 判据 C：两 target 的实现对称性（对比文件清单）
-#   预期：h743 独有 btim_port.h/qspi_port.h/sys_port.h/usart_port.h（port 头）；
+#   预期：h743 独有 timer_port.h/qspi_port.h/sys_port.h/usart_port.h（port 头）；
 #   h7r3 独有 btim.h/delay.h/delay_plus.h/spi_sdnand.h/watchdog.h/sys.h（Stage 4 待收敛）
 ls include/platform/stm32h743/*.h | xargs -n1 basename | sort > /tmp/h743.txt
 ls include/platform/stm32h7r3/*.h  | xargs -n1 basename | sort > /tmp/h7r3.txt

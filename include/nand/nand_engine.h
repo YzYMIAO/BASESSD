@@ -114,13 +114,13 @@ typedef struct
     void                     *context;
 } nand_engine_backend_t;
 
-/* 忙等超时状态：started 一次性锁存 DWT 起点 start_cycles，polls 轮询计数
- * （饱和递增）；两者任一超限即判超时。 */
+/* 忙等超时状态：started 一次性锁存 SysTick 微秒起点 start_us，polls 轮询
+ * 计数（饱和递增）；两者任一超限即判超时。 */
 typedef struct
 {
-    DWORD start_cycles; /* DWT 起点 */
-    WORD  polls;        /* 轮询计数 */
-    BYTE  started;      /* 起点已锁存 */
+    DWORD start_us; /* SysTick µs 起点 */
+    WORD  polls;    /* 轮询计数 */
+    BYTE  started;  /* 起点已锁存 */
 } nand_engine_wait_t;
 
 /*

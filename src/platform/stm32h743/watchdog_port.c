@@ -61,6 +61,7 @@ void WWDG_IRQHandler(void)
 
 DWORD watchdog_port_now_ms(void)
 {
+    /* 域超时用 ARM 核心 SysTick 的 HAL tick；IWDG 硬件本身不受影响。 */
     return HAL_GetTick();
 }
 

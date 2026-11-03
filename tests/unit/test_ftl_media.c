@@ -676,7 +676,8 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     const DWORD moved0 = m->moved_count;
     const DWORD t0     = ftl_job_now_ms();
 
-    mig_handle(m, BG_LEVEL_IDLE);
+    mig_handle(m, BG_LEVEL_IDLE); /* 发布档位（并推进/收尾） */
+    mig_eval(m);                  /* timer 表的周期求值入口（内部读 ftl_job_now_ms） */
 
     munit_assert_true(m->active);
     munit_assert_int(m->kind, ==, MIG_KIND_WL);

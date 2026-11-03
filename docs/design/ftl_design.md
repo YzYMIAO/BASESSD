@@ -169,7 +169,7 @@
 
 | 术语 | 含义 |
 |---|---|
-| **bg_scheduler** | 工作量配额后台调度器：must-run 集 + 预算任务 |
+| **bg_scheduler** | token bucket 后台调度器：must-run 集 + 预算任务 |
 | **must-run** | 每轮无条件执行、不占配额的正确性关键任务 |
 | **op tag** | 完成服务函数选择器；`g_op_callbacks[]` 的下标 |
 | **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
@@ -236,7 +236,7 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 |---|---|---|
 | 主机写不丢映射 | 映射变更先入 Journal；Checkpoint 截断前 Journal 不得擦 | §3.7、§3.8 |
 | 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免 full metadata rebuild | §3.8、§3.1 |
-| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + 工作量配额；must-run 只放防死锁动作 | §3.12 |
+| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + token bucket 配额；must-run 只放防死锁动作 | §3.12 |
 | 写放大可控 | CW 级映射 + 页打包 + 只搬有效 CW + 冷热分离 | §3.11、§3.13 |
 | 容量不无声流失 | 池账本唯一闸门；坏块/退役块不得留在 Free Pool；块元数据快照 | §3.2、§3.8 |
 | 坏块不扩散 | 出厂扫描先读后擦；运行时隔离 + Spare 按 plane 补充 | §3.3 |
@@ -1604,7 +1604,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 
 ```mermaid
 flowchart TD
-    W1["mig_handle 自持节拍"] --> W2["mig_wl_begin（内部）"]
+    W1["timer: mig_eval（每 10 ms）"] --> W2["mig_wl_begin（内部 5 s 门）"]
     W2 --> W3{"间隔门 total_writes 不低于 1000"}
     W3 -- "否" --> W0["不触发"]
     W3 -- "是" --> W4{"max_free_ec 减 min_used_ec 不低于 WL_THRESHOLD"}
@@ -3248,12 +3248,13 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 由此得到两个直接结论：
 
-- **“预算”按工作量单位记，不按时间。** 一次 kick 通常 = 一条命令 ≈ 1 个 unit；
-  每档位给固定配额（IDLE/NORMAL 4、BUSY 1），配额不足即截断。L2P 一次 kick 的具体
+- **“预算”按 token bucket 记。** 一次 kick 通常 = 一条命令 ≈ 1 个 unit；每档位每
+  `BG_TOKEN_INTERVAL_MS`（10 ms）补 `grant_units` 个 credit（IDLE/NORMAL 4、BUSY 1），
+  credit 不足即截断；上限 `grant_units × BG_TOKEN_CAP_TICKS`。L2P 一次 kick 的具体
   条数由模块内档位表（`L2P_FLUSH_MAX_*`）再收一层。
-- **确定性保护靠“档位 → 允许哪些任务 / 配额几条”，不靠计时。** 时间只做单轮墙钟
-  兜底（`BG_ROUND_HARD_LIMIT_US`，只在任务之间检查、不能抢占）：机器快慢不影响
-  配额，兜底只防某个 kick 异常膨胀。
+- **确定性保护 = 档位掩码 + 固定 token 补充速率。** 每秒后台量不再随主循环频率漂移；
+  单轮墙钟兜底（`BG_ROUND_HARD_LIMIT_US`，只在任务之间检查、不能抢占）仍保留，只防
+  某个 kick 异常膨胀。
 
 #### 3.12.2 术语
 
@@ -3294,20 +3295,22 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 `bg_task_t`：`func` / `mask` / `units`（工作量单位）/ `must_run`（`bool`）。
 `bg_scheduler_t`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
 引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，模块入口
-直接读取）。
-`bg_level_cfg_t`：每轮工作量配额 / 任务掩码（预算任务位集合）。
+直接读取） / `credits`（预算 credit，由 `bg_scheduler_refill` 在 timer 任务里补充，
+`bg_scheduler_run` 消费；must-run 不占）。
+`bg_level_cfg_t`：每个 token interval 的 credit 配额（`grant_units`） / 任务掩码
+（预算任务位集合）。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
 再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
 （`BG_TASK_*`），表序不再兼职位号。加任务 = 在 `s_bg_tasks` 里插一行并给 `.mask` 新位 +
-视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`，并确认对应档位的 `total_units`
-足够容纳新任务（配额不够会被截掉）。表项数由 `_Static_assert` 在编译期
+视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`，并确认对应档位的 `grant_units`
+足够容纳新任务（credit 不够会被截掉）。表项数由 `_Static_assert` 在编译期
 锁死为 `BG_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
 **must-run 的归纳判据（6 项同一条）**：**有前台请求或在飞 job 正在等它**——不跑就死锁或
 host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
-**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的配额（must-run 不占配额）：
+**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的 credit 成本（must-run 不占 credit）：
 
 | 表序 | 任务 | 类型 | 配额（units） | 语义 |
 |---:|---|---|---:|---|
@@ -3324,7 +3327,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 **档位**：
 
-| 档位 | 条件（`bg_scheduler_level_select`） | 总配额 | 允许的预算任务 |
+| 档位 | 条件（`bg_scheduler_level_select`） | 每 10 ms credit | 允许的预算任务 |
 |---|---|---:|---|
 | IDLE | `pending == 0 && queued == 0` | 4 | 表序 6..9 全开 |
 | NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 4 | 表序 6..9 全开 |
@@ -3338,10 +3341,10 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗配额。
 2. **每个实例都要调 `ftl_service`**：漏一个，它的 Journal/CP/BBT/GC 永不推进。
-3. **must-run 不 gate、不占配额**：它们是防死锁/防 host 挂起的动作。
-4. **确定性保护靠“档位 → 掩码/条数”**，不靠 `elapsed` 计时（理由见 §3.12.1）。
-5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 墙钟兜底失效（配额仍生效，任务照常按
-   配额截断）；防刷屏靠各任务内部单飞行/事件门。
+3. **must-run 不 gate、不占 credit**：它们是防死锁/防 host 挂起的动作。
+4. **确定性保护靠“档位掩码 + 固定 token 补充速率”**，不靠每轮 `elapsed` 计时（理由见 §3.12.1）。
+5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 墙钟兜底失效（credit 仍生效，任务照常按
+   credit 截断）；防刷屏靠各任务内部单飞行/事件门。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
@@ -3353,7 +3356,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 ```text
 前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
-      cfg = { total_units = 1, task_mask = BG_TASK_L2P_FLUSH }
+      cfg = { grant_units = 1, task_mask = BG_TASK_L2P_FLUSH }
 
 ① 必跑任务（must-run，表序 0..5，全部执行，不计配额）
   cp_handle(ADVANCE)        → 在飞 CP 推进一步（没有在飞则空操作）
@@ -3364,19 +3367,19 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
   cp_handle(EMERGENCY)      → journal 未到 95% 则空操作
   ⇒ 最坏 6 次 kick，每次只提交 ≤1 条命令
 
-② 预算任务（按表序 + 工作量配额；另有 4 ms 墙钟兜底）
-  units_left = 1
+② 预算任务（按表序 + token credit；另有 4 ms 墙钟兜底）
+  credits = 1
   表序 6 L2P flush : 掩码允许、units = 1 ≤ 1 → 执行
                      l2p_handle 按档位踢 ≤ L2P_FLUSH_MAX_BUSY(1) 条写回
-                     units_left -= 1 ⇒ 0
+                     credits -= 1 ⇒ 0
   表序 7 Journal   : 掩码不含 → 跳过
   表序 8 BBT       : 掩码不含 → 跳过
   表序 9 CP 触发   : 掩码不含 → 跳过
   ⇒ 本轮实际发生：最多 6 次 must-run kick（多数是空操作）+ 1 条 L2P 写回命令
 ```
 
-对照 **IDLE** 档（host 空闲）：`total_units = 4`、四项预算任务全开 ⇒ L2P 写回、
-Journal 刷页、BBT、CP 触发各执行一次，配额用尽即截断；单轮墙钟超过 4 ms 也会兜底截断。
+对照 **IDLE** 档（host 空闲）：`grant_units = 4`、四项预算任务全开 ⇒ L2P 写回、
+Journal 刷页、BBT、CP 触发各执行一次，credit 用尽即截断；单轮墙钟超过 4 ms 也会兜底截断。
 host 空闲时后台跑满。
 
 **BUSY 档为什么只留 L2P 写回**：写回是**释放 L2P 缓存行**的唯一途径——它是写路径的
@@ -3470,7 +3473,7 @@ flowchart TB
   （`gc_read_page_with_lba` / `gc_decode_cw_lba`）。
 - **`migrate.c`（引擎）**：`mig_handle_t` 状态机；GC / 静态 WL / 预测性退役共用一台。
 - **不做**：不决定块元数据（allocator）；不决定坏块（BBT）；不做读恢复（RR）。
-- **入口**：`mig_handle`（自持节拍，内部才调 `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin`）；`mig_gc_request_urgent()` 只登记紧急原因；完成服务
+- **入口**：`mig_handle` 每轮推进在飞 job / 紧急 GC；周期评估由 timer 表的 `mig_eval`（10 ms）调用 `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin`；`mig_gc_request_urgent()` 只登记紧急原因；完成服务
   `ftl_migrate_callback`（GC 与 WL 共用）。
 
 #### 3.13.3 结构与不变量
@@ -4584,7 +4587,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["mig_handle 的自持求值（GC/WL/predict）"] --> B["选 victim"]
+    A["timer: mig_eval（GC/WL/predict）"] --> B["选 victim"]
     B --> C["mig_job_start 拷贝 victim,清 job"]
     C --> D{"valid_total 等于 0"}
     D -- "是" --> E["快到 MIG_ERASE"]
@@ -5107,7 +5110,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
 | 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务时间预算 + must-run / 每任务工作量配额 + must-run |
 | 选择 | **10 项任务表：6 must-run（不 gate、不占配额）+ 4 预算任务；三级负载→固定配额/掩码** |
-| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/工作量配额截断；时间只做单轮墙钟兜底——前台保护是确定性的（条数/掩码），不依赖计时 |
+| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/credit 截断；每秒后台量由 token bucket（10 ms 补 grant_units）固定，单轮墙钟只做异常兜底——前台保护是确定性的（掩码/补充速率） |
 | 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |

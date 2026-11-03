@@ -1373,9 +1373,9 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
     pend_group_add_subop(&table, gi);
     munit_assert_uint32(g->outstanding, ==, 2U);
 
-    pend_group_complete_subop(&table, gi, SSD_STATUS_OK);
+    pend_group_complete_subop_multi(&table, ftl_group_bit(gi), SSD_STATUS_OK);
     munit_assert_uint32(s_group_done, ==, 0U);
-    pend_group_complete_subop(&table, gi, SSD_STATUS_OK);
+    pend_group_complete_subop_multi(&table, ftl_group_bit(gi), SSD_STATUS_OK);
 
     munit_assert_uint32(s_group_done, ==, 1U);
     munit_assert_false(g->used);
@@ -1497,6 +1497,7 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     (void)data;
 
     bg_scheduler_t sched;
+    bg_level_cfg_t cfg;
     bg_level_e     level;
 
     ftl_ut_trace_begin();
@@ -1504,13 +1505,29 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     bg_scheduler_init(&sched);
 
     munit_assert_uint32(sched.task_count, ==, (DWORD)BG_TASK_COUNT);
+    munit_assert_uint32(sched.credits, ==, 0U);
+
+    /* Token bucket：每 interval 补 grant_units，饱和到 grant_units × CAP。 */
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.grant_units = 4U;
+    cfg.task_mask   = 0U;
+    sched.cfg       = &cfg;
+
+    bg_scheduler_refill(&sched);
+    munit_assert_uint32(sched.credits, ==, 4U);
+
+    for (DWORD i = 0U; i < (BG_TOKEN_CAP_TICKS + 2U); i++)
+    {
+        bg_scheduler_refill(&sched);
+    }
+    munit_assert_uint32(sched.credits, ==, (4U * BG_TOKEN_CAP_TICKS));
 
     level = bg_scheduler_level_select(ftl_ut_live());
 
     munit_assert_uint32((DWORD)level, <, (DWORD)BG_LEVEL_NUM);
 
-    ftl_ut_trace_detail("bg: task_count 0->%hhu; level_select(live)=%d; BG_TASK_COUNT=%u", sched.task_count, (int)level, (unsigned)BG_TASK_COUNT);
-    ftl_ut_trace_summary("bg: task_count 0->%hhu level=%d", sched.task_count, (int)level);
+    ftl_ut_trace_detail("bg: task_count 0->%hhu; credits 0->4->%lu; level_select(live)=%d; BG_TASK_COUNT=%u", sched.task_count, sched.credits, (int)level, (unsigned)BG_TASK_COUNT);
+    ftl_ut_trace_summary("bg: task_count 0->%hhu credits=%lu level=%d", sched.task_count, sched.credits, (int)level);
 
     return MUNIT_OK;
 }
@@ -1733,12 +1750,12 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     munit_assert_uint32(g->outstanding, ==, 2U);
 
     /* 第一个子操作失败：聚合状态立即粘滞，但组尚未完成。 */
-    pend_group_complete_subop(&table, gi, SSD_STATUS_IO_ERROR);
+    pend_group_complete_subop_multi(&table, ftl_group_bit(gi), SSD_STATUS_IO_ERROR);
     munit_assert_int(g->agg_status, ==, SSD_STATUS_IO_ERROR);
     munit_assert_uint32(s_group_done, ==, 0U);
 
     /* 第二个成功也不能把错误清掉；组只完成一次。 */
-    pend_group_complete_subop(&table, gi, SSD_STATUS_OK);
+    pend_group_complete_subop_multi(&table, ftl_group_bit(gi), SSD_STATUS_OK);
     munit_assert_uint32(s_group_done, ==, 1U);
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_IO_ERROR);
@@ -1822,13 +1839,13 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
-/* confirm_scan_skips_non_parked — 待入账遍历只命中 WRITE_CONFIRM 槽。
+/* confirm_is_parked — 待入账判别只看 WRITE_CONFIRM，不看 used。
  *
- * 覆盖：同表内一个普通 used 槽 + 一个待入账槽时，pend_confirm_find_next 跳过前者、
- *       只返回后者；结算后计数归零，普通槽不受影响。
- * 判据：若遍历用 used 而不是 op 判别，会把在飞写当待入账结算 ⇒ 组被提前完成、
+ * 覆盖：同表内一个普通 used 槽 + 一个待入账槽时，is_parked 对前者 false、后者 true；
+ *       结算后计数归零，普通槽不受影响。
+ * 判据：若判别用 used 而不是 op，会把在飞写当待入账结算 ⇒ 组被提前完成、
  *       命令随后再结算一次（重复完成）。纯 RAM。 */
-static MunitResult test_confirm_scan_skips_non_parked(const MunitParameter params[], void *data)
+static MunitResult test_confirm_is_parked(const MunitParameter params[], void *data)
 {
     (void)params;
     (void)data;
@@ -1855,7 +1872,8 @@ static MunitResult test_confirm_scan_skips_non_parked(const MunitParameter param
     g->outstanding   = 1U;
 
     /* 槽 A：普通在飞写（used 但 op 不是 WRITE_CONFIRM）。 */
-    pend_req_t *a = pend_alloc(&table);
+    pend_req_t *a     = pend_alloc(&table);
+    const WORD  idx_a = (WORD)(a - table.slots);
 
     a->lba    = FTL_UT_LBA_BASE;
     a->n_cw   = FTL_LBA_PER_PAIR;
@@ -1874,14 +1892,8 @@ static MunitResult test_confirm_scan_skips_non_parked(const MunitParameter param
     pend_confirm_park(&table, idx_b, owners);
 
     munit_assert_uint32(pend_confirm_get_count(&table), ==, 1U);
-
-    BYTE cursor = 0U;
-    BYTE hit    = 0U;
-
-    /* 遍历必须跳过 A（used 但非待入账），只命中 B。 */
-    munit_assert_true(pend_confirm_find_next(&table, &cursor, &hit));
-    munit_assert_uint32(hit, ==, idx_b);
-    munit_assert_false(pend_confirm_find_next(&table, &cursor, &hit));
+    munit_assert_false(pend_confirm_is_parked(&table, idx_a)); /* used 但不是待入账 */
+    munit_assert_true(pend_confirm_is_parked(&table, idx_b));
 
     pend_confirm_settle(&table, idx_b, SSD_STATUS_OK);
 
@@ -1890,18 +1902,16 @@ static MunitResult test_confirm_scan_skips_non_parked(const MunitParameter param
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_OK);
     munit_assert_uint32(pend_confirm_get_count(&table), ==, 0U);
+    munit_assert_false(pend_confirm_is_parked(&table, idx_a)); /* 负例：used ≠ 待入账 */
+    munit_assert_false(pend_confirm_is_parked(&table, idx_b));
 
-    /* B 已释放后，剩下的 A 仍不该被遍历命中（负例：used ≠ 待入账）。 */
-    cursor = 0U;
-    munit_assert_false(pend_confirm_find_next(&table, &cursor, &hit));
-
-    ftl_ut_trace_detail("confirm scan: parked=%hu hit=%hhu; after settle a_used=%d flag=%hhu status=%d",
-                        pend_confirm_get_count(&table),
-                        hit,
+    ftl_ut_trace_detail("confirm scan: a_parked=%d b_parked=%d; after settle a_used=%d flag=%hhu status=%d",
+                        0,
+                        0,
                         a->used,
                         flag,
                         (int)status);
-    ftl_ut_trace_summary("confirm scan: find_next skips used-non-parked; settle touches only parked");
+    ftl_ut_trace_summary("confirm scan: is_parked ignores used-non-parked; settle touches only parked");
 
     return MUNIT_OK;
 }
@@ -2062,23 +2072,23 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
 /* ══ 子套件 /ftl/pure/host/：pending / 组 / wbuf / op ctx / bg 调度（纯 RAM）══ */
 
 MunitTest g_ftl_pure_host_tests[] = {
-    {                    (char *)"host_idle",                     test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                (char *)"pending_slots",                 test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {             (char *)"group_exhaustion",              test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {          (char *)"group_complete_once",           test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {    (char *)"group_failure_aggregation",     test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {         (char *)"confirm_park_timeout",          test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {(char *)"confirm_scan_skips_non_parked", test_confirm_scan_skips_non_parked, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {             (char *)"wbuf_append_read",              test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {       (char *)"wbuf_drop_reset_owners",        test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                 (char *)"wbuf_density",                  test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
-    {                       (char *)"op_ctx",                        test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {              (char *)"op_ctx_capacity",               test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                    (char *)"bg_engine",                     test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                     (char *)"op_route",                      test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {              (char *)"bg_level_select",               test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {     (char *)"host_submit_invalid_args",      test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                                   NULL,                               NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
+    {                (char *)"host_idle",                 test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {            (char *)"pending_slots",             test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {         (char *)"group_exhaustion",          test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {      (char *)"group_complete_once",       test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {(char *)"group_failure_aggregation", test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {     (char *)"confirm_park_timeout",      test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {        (char *)"confirm_is_parked",         test_confirm_is_parked, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {         (char *)"wbuf_append_read",          test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {   (char *)"wbuf_drop_reset_owners",    test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {             (char *)"wbuf_density",              test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
+    {                   (char *)"op_ctx",                    test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {          (char *)"op_ctx_capacity",           test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                (char *)"bg_engine",                 test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                 (char *)"op_route",                  test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {          (char *)"bg_level_select",           test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    { (char *)"host_submit_invalid_args",  test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                               NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
 };
 
 /* 同 mem_fill_free：GC/WL 用例用它把 Free Pool 补到目标水位。 */

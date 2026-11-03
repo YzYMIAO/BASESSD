@@ -15,6 +15,8 @@ typedef struct
     void (*log_write)(const char *message);
     QWORD(*time_us)
     (void);
+    DWORD(*time_ms)
+    (void); /* 系统毫秒时基（SysTick/HAL tick） */
     void *(*memory_allocate)(size_t size);
     void (*memory_free)(void *memory);
 } ssd_platform_ops_t;

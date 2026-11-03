@@ -415,8 +415,13 @@ struct ftl_context
 
     /* 工作量配额后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 bg_scheduler_init 从 `ftl/bg_scheduler.c` 的静态表
-     * 装载；每轮由 bg_scheduler_service（后台调度步）选档后跑 bg_scheduler_run。 */
+     * 装载；每轮由 bg_scheduler_service（后台调度步）选档后跑 bg_scheduler_run。
+     * 预算任务的 credit 由 main.c 的 ssd_ftl_bg_tick_task 每 BG_TOKEN_INTERVAL_MS 补充。 */
     bg_scheduler_t bg;
+
+    /* 周期 flag：由 timer 任务置位，bg_scheduler 在固定位置消费。
+     * l2p_flush_due：L2P 后台写回的节拍（L2P_FLUSH_INTERVAL_MS）。 */
+    BYTE l2p_flush_due;
 
     /* 搬移 job（GC / 静态 WL / 预测性退役共用一台异步引擎，见 migrate.h）。
      * 观测计数（reclaimed / novictim）与求值节拍在 handle 里。

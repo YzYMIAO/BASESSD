@@ -78,6 +78,8 @@
 | ISS-PLAT-01 | 未实现 | 平台抽象 Stage 3：NAND 层裸 MMIO / `HAL_NAND_*` 收敛 | `platform_abstraction.md` §五 | 单独一轮；改后地址/时序类量必须上板 |
 | ISS-PLAT-02 | 待决策 | `src/platform/stm32h7r3/` 是继续维护还是废弃 | 同上 | 用户裁决；未构建平台不要顺手改 |
 | ISS-PLAT-03 | 未修 | linker `.noncacheable_buffer` 输入段漏前导点，落点随启发式漂移 | `RISK-PLAT-01` | 单独一轮：`KEEP(*(.noncacheable_buffer))` + 上板回归 DMA |
+| ISS-PLAT-04 | 已实现（Phase 0~3，2026-11-03，未上板） | **统一定时调度器 + 时间源纠正**：`btim`→`timer` 改名；一张表 `{fn, ctx, first_delay, period}`；watchdog / `[STAT]` / FTL 周期评估迁入；拆 `mig_handle` 的 advance/eval；`bg_scheduler` 降为预算子引擎。**系统时基 = ARM 核心 SysTick（ms + µs）；timer 调度器心跳 = TIM6；DWT 从产品路径删除** | `docs/design/scheduler_design.md` | Phase 0~3 已落地（改名 + 容量 64 + `add_at/set_period/task_count` + `[STAT]` 迁移 + `mig_eval` 注册）；delay/usart/watchdog/TinyUSB/FTL `time_ms` 统一到 SysTick；NAND/USB 的 DWT µs 计时改为 SysTick `LOAD/VAL`；TIM6 只驱动 timer 任务表；上板验证待做 |
+| ISS-BG-01 | 已实现（2026-11-03，未上板） | **后台节拍 flag + token bucket**：CP T3 / L2P flush / BBT 起新 job 由 10 ms timer 任务置 flag；`bg_scheduler` 预算从“每轮配额”改为“每 10 ms 补 `grant_units` credit（IDLE/NORMAL 4、BUSY 1，上限 4 个 interval）”；must-run 与在飞推进不变 | `RISK-BG-10`；`scheduler_design.md` Phase 5 | 上板测 GC/WL 吞吐与 host 写延迟；按结果调 `grant_units` / `BG_TOKEN_INTERVAL_MS`；验证 flag 消费、T3 不延迟、BBT 仍能落盘 |
 | ISS-LOG-01 | 未上板 | `logging_design.md` §5 的 9 项落地状态：`[STAT]` / `[MIG] done` 已在 2026-10-22 日志出现，其余（飞行记录器、打印预算逐项）未逐条确认 | `logging_design.md` §5/§6 | 按 §6 判据逐项打勾；未验的不要写成已验 |
 | ISS-FAULT-01 | 未验证 | `fault_capture.md` 三项手工验证：人工 BusFault、断言失败 dump、跨复位读取 `.noinit` 记录 | `fault_capture.md` §6/§9 | 烧录→拔电→上电确认无记录；再逐个注入 |
 

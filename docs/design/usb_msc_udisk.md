@@ -155,7 +155,7 @@ flowchart TD
   `ssd_controller_submit`（`cli_host_busy()` / `usb_msc_host_busy()`）。
 - `SYNCHRONIZE CACHE` 只在前序写完成后调用 `ftl_flush`（主循环上下文）。
 - 主循环顺序：`cli_service_poll` → `ftl_service_pump` + 逐实例 `ftl_service`
-  → `usb_msc_task` → `usb_device_task` → `btim_scheduler_poll`。
+  → `usb_msc_task` → `usb_device_task` → `timer_scheduler_poll`。
 
 ### 4.3 缓冲与并发
 

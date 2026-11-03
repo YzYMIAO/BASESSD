@@ -358,7 +358,7 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 12 Mbit/s 的 1.5 MB/s 是 host 侧硬顶。优化顺序与判据见 `known_risks.md` RISK-PERF-04。
 
 ⚠ `/speed/` 读数是**吞吐**（含测试图案填充/校验 CPU），不是单命令延迟；munit 的
-`[ OK ] [ 耗时 ]` 已改为「平台 ms 数回绕 + DWT 亚毫秒」（RISK-UT-05，2026-10-31 **未上板**）；历史日志里 10.7 s 附近的取模值仍按旧口径解读。速度结论始终只看行内 `*_ms`。
+`[ OK ] [ 耗时 ]` 现在只用平台 `time_us`（产品侧为 SysTick 64 位 µs；DWT 已删除，RISK-UT-05 闭合）；历史日志里 10.7 s 附近的取模值仍按旧口径解读。速度结论始终只看行内 `*_ms`。
 
 ### 7.4 解释口径
 
@@ -498,7 +498,7 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 
 ### 9.2 已做改动
 
-- `CFG_TUD_MSC_EP_BUFSIZE` 4096 → 16384；`[USB ] latency` DWT 统计；
+- `CFG_TUD_MSC_EP_BUFSIZE` 4096 → 16384；`[USB ] latency` SysTick µs 统计；
 - stack guard release 启动崩溃修复（`RISK-PLAT-04`）；
 - LFSR 8-step 查表、FC 读路径多步骤合并、FTL 确认批量化；
 - 写确认/TRIM 全异步、Journal 背压、CLI 上报错位修复、MIG 空块日志抑制。
@@ -508,7 +508,7 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 | 方案 | 收益 | 风险/成本 | 判据 |
 |---|---|---|---|
 | EP 16 → 32 KB | 5–10%（估计） | RAM +32 KB（EP + bounce）；直方图/静态断言同步。**2026-10-23 决定暂不实施**：H2testw 受 USB FS 约束，预期收益小 | 分块出现 `<=32K`；无错误；若未来实施，按 32K→64K 的边际收益再评估 |
-| FC/NAND 子段 DWT | 定位剩余 6.6 ms | 只加观测 | 子段之和解释 6.6 ms |
+| FC/NAND 子段 SysTick µs | 定位剩余 6.6 ms | 只加观测 | 子段之和解释 6.6 ms |
 | BCH 表驱动/展开 | 编解码下降 | 需 UT 负例 | 纠错结果不变 |
 | PIO 按字 / `CONFIG_NAND_DMA` | 有限 | **FMC NAND 无专用 DMA 请求**，`nand_dma.c` 是 DMA2 mem2mem，不是外设 DMA | 与 PIO 对比；时序不退化 |
 | USB 内部 DMA | 仅 `GHWCFG2.arch==internal DMA` | 当前板 `arch=0`（slave-only） | 先看启动日志，不列优化项 |

@@ -43,6 +43,10 @@
 #define L2P_FLUSH_MAX_NORMAL (4U)
 #define L2P_FLUSH_MAX_BUSY   (1U)
 
+/* L2P 后台写回节拍：timer 任务每 N ms 置 ftl->l2p_flush_due，bg_scheduler 消费。
+ * 只 gate「要不要踢一次」，具体条数仍由上面的 max_kick 与 token bucket 限。 */
+#define L2P_FLUSH_INTERVAL_MS (10U)
+
 /* 同步逃生口的自旋预算（轮）。每轮 = 一次 ftl_service_pump（推 NAND + 抽干完成）。
  * 超预算即判失败返回——兜住"命令永不到达"这类编程错误，不让同步站点死等。 */
 #define L2P_SYNC_GUARD_MAX (100000UL)

@@ -33,7 +33,7 @@
 
 #include "cli.h"
 #include "controller.h"
-#include "delay.h"      /* DWT 分段计时（submit → complete） */
+#include "delay.h"      /* SysTick µs 分段计时（submit → complete） */
 #include "device/dcd.h" /* DCD_EVENT_*：tusb.h 不导出该枚举 */
 #include "ftl.h"
 #include "log.h"
@@ -99,8 +99,8 @@ typedef struct
     DWORD                         lba;
     DWORD                         offset;
     DWORD                         length;
-    void                         *usb_buffer;    /* TinyUSB 端点缓冲（读回写目标；写只读它一次） */
-    DWORD                         submit_cycles; /* submit 起点（DWT），完成时算设备侧墙钟 */
+    void                         *usb_buffer; /* TinyUSB 端点缓冲（读回写目标；写只读它一次） */
+    DWORD                         submit_us;  /* submit 起点（SysTick µs），完成时算设备侧墙钟 */
     ssd_request_t                 request;
     BYTE                         *bounce; /* 指向本槽的 16 KiB 缓冲（见 s_bounce*） */
 } usb_msc_slot_t;
@@ -191,7 +191,7 @@ typedef struct
 
 static usb_msc_wr_hist_t s_wr_hist;
 
-/* submit → complete 的设备侧墙钟（DWT）。用来区分：
+/* submit → complete 的设备侧墙钟（SysTick µs）。用来区分：
  *   · 十几 ms：设备处理本身；
  *   · 只有几 ms：剩余时间在 USB/BOT 主机侧等待，不是 CPU/FTL。
  * 只在 `info` 打印，运行期零输出。 */
@@ -205,9 +205,9 @@ typedef struct
 
 static usb_msc_lat_t s_lat;
 
-static void usb_msc_note_latency(DWORD start_cycles)
+static void usb_msc_note_latency(DWORD start_us)
 {
-    const DWORD us = delay_dwt_elapsed_cycles_us(start_cycles);
+    const DWORD us = delay_time_since_us(start_us);
 
     s_lat.calls++;
     s_lat.total_us += us;
@@ -335,9 +335,9 @@ static usb_msc_slot_t *usb_msc_slot_alloc(bool is_write, DWORD lba)
  * 长度/对齐/范围已由 usb_msc_transfer() 在 host 入口校验（H2）；这里不再复检。 */
 static bool usb_msc_slot_submit(usb_msc_slot_t *slot)
 {
-    DWORD start_cycles = 0U;
+    DWORD start_us = 0U;
 
-    (void)delay_dwt_cycles_now(&start_cycles);
+    (void)delay_time_now_us(&start_us);
 
     ssd_request_t *request = &slot->request;
 
@@ -373,8 +373,8 @@ static bool usb_msc_slot_submit(usb_msc_slot_t *slot)
         return false;
     }
 
-    slot->submit_cycles = start_cycles;
-    slot->state         = USB_MSC_SLOT_IN_FLIGHT;
+    slot->submit_us = start_us;
+    slot->state     = USB_MSC_SLOT_IN_FLIGHT;
     return true;
 }
 
@@ -460,7 +460,7 @@ static void usb_msc_slot_complete(usb_msc_slot_t *slot)
     // 回执）；读 / flush 在完成点记录。
     if (slot->is_write == false)
     {
-        usb_msc_note_latency(slot->submit_cycles);
+        usb_msc_note_latency(slot->submit_us);
     }
 
     const bool ok = (slot->request.completion_status == SSD_STATUS_OK);
@@ -570,7 +570,7 @@ void usb_msc_task(void)
         if ((slot->is_write == true) && (slot->is_flush == false) && (slot->ack_sent == false))
         {
             slot->ack_sent = true;
-            usb_msc_note_latency(slot->submit_cycles); /* 主机可见延迟 = submit → 回执 */
+            usb_msc_note_latency(slot->submit_us); /* 主机可见延迟 = submit → 回执 */
             (void)tud_msc_async_io_done((int32_t)slot->length, false);
         }
 

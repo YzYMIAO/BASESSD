@@ -270,6 +270,7 @@ void bbt_init(alc_t *alloc)
     alloc->bbt.dirty_gen          = 0U;
     alloc->bbt.format_in_progress = false;
     alloc->bbt.rebuild_required   = false;
+    alloc->bbt.flush_due          = 0U;
     // 清异步 job（alc_init 已零化，此处再钉一次）
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
     alloc->bbt.handle.waiting     = false;
@@ -863,8 +864,15 @@ void bbt_handle(alc_t *alloc)
 
         if (alloc->bbt.dirty == false)
         {
-            break; /* ④ 无变更 */
+            alloc->bbt.flush_due = 0U; /* 无变更：清掉过期节拍 */
+            break;                     /* ④ 无变更 */
         }
+
+        if (alloc->bbt.flush_due == 0U)
+        {
+            break; /* ⑤ 节拍未到：保留 dirty，等 timer 任务置位 */
+        }
+        alloc->bbt.flush_due = 0U;
 
         bbt_probe_ctx_t ctx;
         bbt_ctx_init(alloc, &ctx);

@@ -195,7 +195,7 @@
 | `group_complete_once` | — | 多 owner 只完成一次 |
 | `group_failure_aggregation` | — | 子操作失败后 `agg_status` 粘滞，后续 OK 不清错 |
 | `confirm_park_timeout` | — | 写确认待入账：`pend_confirm_is_expired` 在 deadline 前为 false、到点为 true；`pend_confirm_settle` 释放槽并按 IO_ERROR 结算一次（RISK-HOST-05 的纯 RAM 部分） |
-| `confirm_scan_skips_non_parked` | — | 遍历只命中 `WRITE_CONFIRM` 槽：同表内普通 used 写槽被跳过，结算不影响它（负例：`used` ≠ 待入账） |
+| `confirm_is_parked` | — | 待入账判别只看 `WRITE_CONFIRM`：同表内普通 used 写槽为 false、待入账槽为 true，结算不影响普通槽（负例：`used` ≠ 待入账） |
 | `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners 与组在飞计数 |
 | `wbuf_drop_reset_owners` | — | DROP 清空页后 owners 结算一次（OK）、RESET 按 IO_ERROR 结算 |
 | `wbuf_density` | `n=1\|2\|4\|8` | pair 布局、稀疏 CW 位图（RISK-WB-03/IF-04） |
@@ -348,7 +348,7 @@
 | RISK-PEND-02 | 已闭合（2026-10-25：`group_exhaustion` 上板 85/85） | UT-P | `group_exhaustion` | 组槽耗尽 |
 | RISK-UT-01 | 已改未上板 | BUILD | 下次跑出 SKIP 的会话 | SKIP/FAIL 行格式 |
 | RISK-UT-02 | 已上板 | UT-M | `journal_barrier_cp_progress`、`trim_no_resurrection` | CP 判据已用 `cp 1->2` / `cp 2->3` 板端验证 |
-| RISK-UT-05 | 已改未上板（2026-10-31：平台 ms 数回绕 + DWT 亚毫秒） | BUILD | — | 原按 10.737 s 取模；修复后 `[ OK ] [ 耗时 ]` 与 Total 反映真实时长 |
+| RISK-UT-05 | 已闭合（2026-11-03：DWT 删除，计时改用平台 `time_us`） | BUILD | — | 原按 10.737 s 取模；现在只用 SysTick 64 位 µs，`[ OK ] [ 耗时 ]` 与 Total 反映真实时长 |
 | RISK-UT-06 | 信息 | UT-M | `bbt_persist`、`bbt_ring_reload` | 每次全量跑永久标坏 1+2 个用户块（每块 256 KiB）；反复跑会缩容量 |
 | RISK-ALLOC-09 | UT 已过（2026-10-31 板端：`free_pool_invariants`/`gc_trigger`/`gc_select_victim`）；v1.07 修复已上板 | UT-P + UT-M | `free_pool_invariants`（两本账）、`gc_trigger`（单 plane 水位）、`gc_select_victim`（饥饿偏好）、`gc_progress` | 成对分配失败/plane 失衡 |
 | RISK-ALLOC-10 | 已闭合（2026-10-31 归因 WAL） | UT-P | `l2p_wal_gate`、`journal_barrier_cp_progress` | dangling 计数 |

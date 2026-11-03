@@ -15,8 +15,9 @@
  *   **buffer 非空 ≠ 写。**
  */
 
-#include "assertion.h"  /* ASSERT（inline 组计数 fast path） */
+#include "assertion.h"  /* ASSERT（inline 组计数 fast path / 超时谓词） */
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
+#include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
 #include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_t, ssd_status_e */
 
 #include <stdint.h>
@@ -34,7 +35,7 @@
  * 一条 host 请求（一次 ftl_submit_read/write 调用）内部可拆成多条 FC 子操作
  * （每个子操作 = 一条 FC 命令 = 一个 pending 槽）。组把「本 host 请求的全部
  * 子操作」聚成一个完成单元：**通知字段（complete_flag/status_out/on_complete）
- * 只在最后一个子操作完成后触发一次**（见 pend_group_complete_subop）。
+ * 只在最后一个子操作完成后触发一次**（见 pend_group_complete_subop_multi）。
  *
  * 组容量取 pending 容量：**稳态**下一个组至少占一个槽（组不会比在飞子操作多）。
  * ⚠ 提交路径先 pend_group_alloc、后 pend_alloc ⇒ 瞬时可以「组已建、槽未分」，
@@ -72,7 +73,7 @@ typedef enum
                                    *   FC 命令已脱钩（command_id = FTL_PENDING_CMD_NONE）、
                                    *   组在飞数**不**递减（host 写组继续 pending）。
                                    *   与 READ_RECOVERY 的差别：无外部引擎，由调用者的写确认服务
-                                   *   每轮用 pend_confirm_find_next 扫描推进。
+                                   *   每轮按 pend_confirm_is_parked 扫描推进。
                                    *   ⚠ 待入账项**不可被 pend_find 撞到**：id 已置哨兵。
                                    *   术语：本仓中文名「待入账」，主流称 deferred write completion
                                    *   （DFTL 的 translation page miss 导致映射更新延后）。英文代码
@@ -203,7 +204,7 @@ _Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2
  * pend_group_t — 一条 host 请求的完成组（见文件头）
  *
  * 生命周期：pend_group_alloc 建（used=1）→ 逐个 pending 子操作完成时
- * pend_group_complete_subop 递减 outstanding → 全部完成（next==total 且
+ * pend_group_complete_subop_multi 递减 outstanding → 全部完成（next==total 且
  * outstanding==0）时 pend_group_maybe_complete 一次性发通知并置 used=0。
  *
  * ⚠ total/next 必须 DWORD：host 连续 LBA 数 count 可达 FTL_LBA_MAX（868,352，424 MiB），
@@ -416,7 +417,7 @@ WORD pend_group_get_count(const pending_ctx_t *table);
  * @brief 组在飞数增减的唯一闸门
  *
  * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走
- * pend_group_complete_subop*（聚合状态 + 递减 + 试触发）。
+ * pend_group_complete_subop_multi（聚合状态 + 递减 + 试触发）。
  *
  * add 是单字段 fast path（H42：头文件 inline）；drop / complete 带下溢策略与完成回调，
  * 定义在 `.c`。
@@ -435,23 +436,11 @@ static inline void pend_group_add_subop(pending_ctx_t *table, WORD gi)
 void pend_group_drop_subop(pending_ctx_t *table, WORD gi);
 
 /**
- * @brief 一个子操作完成：聚合状态 + 递减 + 试触发
- *
- * 由 ftl_host_io_callback 在子操作簿记后调用（caller 通知字段的唯一写点）。
- * sub_status != OK 时粘进 agg_status；outstanding-- 后试发组完成通知。
- *
- * @param table        pending 表
- * @param gi         组下标
- * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
- */
-void pend_group_complete_subop(pending_ctx_t *table, WORD gi, ssd_status_e sub_status);
-
-/**
  * @brief 一个子操作完成、归属**多个组**：逐组聚合
  *
  * 页打包写缓冲下一页可能由多个组拼成（一页 = 一次 FC 命令 = 一个 pending 槽），
  * 完成时须对**每个**贡献组各递减一次在飞数（每个组对该窗口至多贡献一次 append ⇒
- * 递增/递减数恒等）。读路径传单组位图（1<<gi），与 pend_group_complete_subop 等价。
+ * 递增/递减数恒等）。读路径传单组位图（1<<gi），走同一条逐组路径。
  *
  * @param table        pending 表
  * @param owners     贡献组位掩码（bit gi）
@@ -504,14 +493,21 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window);
 void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners);
 
 /**
- * @brief 从 cursor 起取下一个待入账槽（只读遍历，不改任何状态）。
+ * @brief 某槽是否处于待入账态（只读查询）。
  *
- * @param table      pending 表。
- * @param cursor     [in,out] 扫描起点；命中后推进到命中项之后，扫完置 FTL_PENDING_MAX。
- * @param out_index  命中的槽下标。
- * @return true 命中一个待入账槽；false 本轮扫描结束。
+ * @param table pending 表。
+ * @param index 槽下标。
+ * @return true 已占用且 op 为 WRITE_CONFIRM。
  */
-bool pend_confirm_find_next(const pending_ctx_t *table, BYTE *cursor, BYTE *out_index);
+static inline bool pend_confirm_is_parked(const pending_ctx_t *table, BYTE index)
+{
+    ASSERT(table != NULL);
+    ASSERT(index < FTL_PENDING_MAX);
+
+    const pend_req_t *pending = &table->slots[index];
+
+    return (pending->used == true) && pend_op_is_write_confirm(pending->op);
+}
 
 /**
  * @brief 待入账项是否已超过确认 deadline。
@@ -521,7 +517,14 @@ bool pend_confirm_find_next(const pending_ctx_t *table, BYTE *cursor, BYTE *out_
  * @return true 已超时；
  *         false 未超时，或尚未起算（park_ms == 0）。
  */
-bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms);
+static inline bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms)
+{
+    ASSERT(pending != NULL);
+
+    // park_ms == 0 = 尚未起算（懒初始化）⇒ 不判超时。平台时钟缺失时 now_ms 恒 0，
+    // 同样永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
+    return (pending->park_ms != 0U) && ((now_ms - pending->park_ms) >= FTL_GROUP_DRAIN_TIMEOUT_MS);
+}
 
 /**
  * @brief 结算一个待入账槽：取 owners、释放槽、按 status 聚合完成组。

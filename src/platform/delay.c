@@ -2,25 +2,17 @@
 
 #include "common.h"
 /* 本文件是**跨 target 共享**的平台源文件：不 include 任何 SoC 头，也不出现
- * HAL 类型。计数器寄存器（DWT/SysTick）与时钟查询一律经 delay_port_* 下沉到
+ * HAL 类型。SysTick 寄存器与时钟查询一律经 delay_port_* 下沉到
  * src/platform/<soc>/delay_port.c —— 内核头无法单独使用（它依赖设备头提供
- * IRQn_Type/__NVIC_PRIO_BITS），故共享层不能直接碰这些寄存器。 */
+ * IRQn_Type/__NVIC_PRIO_BITS），故共享层不能直接碰这些寄存器。
+ *
+ * 时基只用 ARM 核心自带的 SysTick：HAL 已把它配置为 1 ms 周期；
+ * ms 计数读 HAL tick，µs 在本毫秒窗口内用 (LOAD - VAL) 插值。
+ * DWT 是调试/跟踪单元，不是产品时间源，本模块不碰 DWT。 */
 
-static DWORD g_core_clock_hz;
 static bool  g_delay_initialized;
-static DWORD g_dwt_cycles_per_us;
-static bool  g_dwt_initialized;
-
-#if !DELAY_USE_DWT
 static DWORD g_systick_cycles_per_us;
-#endif
 
-static DWORD delay_resolve_clock(DWORD core_clock_hz)
-{
-    return (core_clock_hz != 0U) ? core_clock_hz : delay_port_hclk_hz();
-}
-
-#if !DELAY_USE_DWT
 static delay_status_e delay_systick_us_busy(DWORD us)
 {
     DWORD reload;
@@ -54,52 +46,51 @@ static delay_status_e delay_systick_us_busy(DWORD us)
 
     return DELAY_OK;
 }
-#endif
+
+/*
+ * 读取一致的 (ms, 本毫秒内已过周期数)。
+ *
+ * SysTick 从 LOAD 递减到 0 后重装；HAL_IncTick 与 VAL=LOAD 同相。
+ * 先读 ms、再读 VAL、再读 ms：若 ms 在两次读之间变化，重读 VAL，
+ * 避免把「上一毫秒的 VAL」配到「下一毫秒的 ms」。
+ */
+static DWORD delay_systick_read(DWORD *ms)
+{
+    const DWORD load     = delay_port_systick_load();
+    const DWORD ms_first = delay_port_now_ms();
+    DWORD       val      = delay_port_systick_value();
+
+    *ms = delay_port_now_ms();
+    if (*ms != ms_first)
+    {
+        *ms = delay_port_now_ms();
+        val = delay_port_systick_value();
+    }
+
+    return load - val;
+}
+
 /**
- * @brief 初始化高精度延时服务。
- * @param core_clock_hz CPU 内核时钟频率，单位 Hz；传入 0 自动使用
- *                      SystemCoreClock。
+ * @brief 初始化延时/微秒时间服务。
+ * @param 无。
  * @return 无。初始化结果通过 delay_is_initialized() 查询。
- * @note 应在 HAL 时钟初始化完成后调用。若后续改变 PLL、分频或进入低功耗
- *       后恢复时钟，必须重新调用 delay_reconfigure()。
- * @details 函数保存时钟频率，清零 DWT CYCCNT 并使能自由运行计数器，后续
- *          微秒延时通过读取该计数器的增量换算时间。
+ * @note SysTick 必须已由 HAL 配置为 1 ms 周期；本函数从 LOAD 反推每微秒
+ *       周期数，不依赖 HCLK/SYSCLK 的软件假设。时钟树改变后 HAL 会重新
+ *       配置 SysTick，重新调用本函数即可。
  */
 
-void delay_init(DWORD core_clock_hz)
+void delay_init(void)
 {
-    g_core_clock_hz     = delay_resolve_clock(core_clock_hz);
-    /* CYCCNT follows the Cortex-M7 core clock, not the AHB/SysTick clock. */
-    g_dwt_cycles_per_us = delay_port_core_clock_hz() / 1000000U;
-    g_dwt_initialized   = (g_dwt_cycles_per_us != 0U) && delay_port_dwt_enable();
+    const DWORD cycles_per_ms = delay_port_systick_load() + 1U;
 
-#if DELAY_USE_DWT
-    g_delay_initialized = (g_core_clock_hz != 0U) && g_dwt_initialized;
-#else
-    g_systick_cycles_per_us = g_core_clock_hz / 1000000U;
-    g_delay_initialized     = (g_systick_cycles_per_us != 0U) && (delay_port_systick_load() != 0U);
-#endif
+    g_systick_cycles_per_us = cycles_per_ms / 1000U;
+    g_delay_initialized     = (g_systick_cycles_per_us != 0U);
 }
 
-/**
- * @brief 按新的 CPU 时钟重新配置延时服务。
- * @param core_clock_hz 新的 CPU 内核时钟，单位 Hz；传入 0 使用
- *                      SystemCoreClock。
- * @return 无。
- * @note 调用期间不应有其他线程同时执行微秒延时；推荐在系统时钟切换的
- *       临界初始化阶段调用。该函数不会替应用配置 SysTick。
- */
-
-void delay_reconfigure(DWORD core_clock_hz)
-{
-    /* 动态调频、PLL 切换或从低功耗恢复后调用此函数。 */
-    delay_init(core_clock_hz);
-}
 /**
  * @brief 查询延时服务是否可用。
  * @param 无。
- * @return true 表示时钟有效且 DWT CYCCNT 已启用；false 表示尚未初始化或
- *         DWT 使能失败。
+ * @return true 表示 SysTick 已配置且速率有效；false 表示尚未初始化。
  */
 
 bool delay_is_initialized(void)
@@ -107,66 +98,74 @@ bool delay_is_initialized(void)
     return g_delay_initialized;
 }
 
-bool delay_dwt_cycles_now(DWORD *cycles)
+bool delay_time_now_us(DWORD *us)
 {
-    if ((cycles == NULL) || !g_dwt_initialized)
+    DWORD ms;
+    DWORD cycles;
+
+    if ((us == NULL) || !g_delay_initialized)
     {
         return false;
     }
-    *cycles = delay_port_dwt_cycles();
+
+    cycles = delay_systick_read(&ms);
+    *us    = (ms * 1000U) + (cycles / g_systick_cycles_per_us);
     return true;
 }
 
-bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us)
+QWORD delay_time_now_us64(void)
 {
-    QWORD timeout_cycles;
+    DWORD ms;
+    DWORD cycles;
 
-    if (!g_dwt_initialized)
-    {
-        return false;
-    }
-    timeout_cycles = (QWORD)timeout_us * g_dwt_cycles_per_us;
-    return (delay_port_dwt_cycles() - start_cycles) >= timeout_cycles;
-}
-
-DWORD delay_dwt_elapsed_cycles_us(DWORD start_cycles)
-{
-    if (!g_dwt_initialized)
+    if (!g_delay_initialized)
     {
         return 0U;
     }
 
-    const DWORD elapsed = delay_port_dwt_cycles() - start_cycles;
-
-    return elapsed / g_dwt_cycles_per_us;
+    cycles = delay_systick_read(&ms);
+    return ((QWORD)ms * 1000U) + (cycles / g_systick_cycles_per_us);
 }
+
+bool delay_time_elapsed_us(DWORD start_us, WORD timeout_us)
+{
+    DWORD now_us;
+
+    if (!delay_time_now_us(&now_us))
+    {
+        return false;
+    }
+    return (now_us - start_us) >= timeout_us;
+}
+
+DWORD delay_time_since_us(DWORD start_us)
+{
+    DWORD now_us;
+
+    if (!delay_time_now_us(&now_us))
+    {
+        return 0U;
+    }
+    return now_us - start_us;
+}
+
 /**
- * @brief 获取单次 DWT 忙等待允许的最大时长。
+ * @brief 获取单次忙等待允许的最大时长。
  * @param 无。
  * @return 最大微秒数；未初始化时返回 0。
- * @note DWT CYCCNT 是 32 位计数器。为使无符号差值在一次回绕内仍然可靠，
- *       调用者不得要求超过该上限的单次等待。长延时应拆分或使用任务延时、
- *       定时器和事件机制。
- * @details 计算公式为 UINT32_MAX * 1,000,000 / core_clock_hz，使用 64 位
- *          中间结果避免计算溢出。
+ * @note SysTick 每 1 ms 重装一次，忙等循环自己累计跨重装的周期数；上限只
+ *       取决于 `us * cycles_per_us` 是否溢出，调用者不得要求超过该上限的
+ *       单次等待。长延时应拆分或使用任务延时、定时器和事件机制。
  */
 
 DWORD delay_max_busy_us(void)
 {
-    if (!g_delay_initialized || (g_core_clock_hz == 0U))
+    if (!g_delay_initialized)
     {
         return FUNC_STATUS_SUCCESS;
     }
 
-#if DELAY_USE_DWT
-    QWORD max_us;
-    /* DWT 为 32 位自由运行计数器，等待区间必须小于一个完整回绕周期。 */
-
-    max_us = ((QWORD)UINT32_MAX * 1000000ULL) / g_core_clock_hz;
-    return (max_us > UINT32_MAX) ? UINT32_MAX : max_us;
-#else
     return UINT32_MAX / g_systick_cycles_per_us;
-#endif
 }
 /**
  * @brief 执行微秒级忙等待。
@@ -176,58 +175,22 @@ DWORD delay_max_busy_us(void)
  * @note 这是阻塞接口，会持续占用当前 CPU。只允许用于短硬件时序，禁止在
  *       中断服务函数中等待业务事件，也不建议在 RTOS 任务中长时间调用。
  *       中断仍可抢占本函数，因此实际延时可能大于请求值。
- * @details 函数把 us 转换为 CPU 周期数，向上取整后记录起始 CYCCNT；循环
- *          使用 (当前值 - 起始值) 的 DWORD 差值，因而能够正确处理一次
- *          计数器回绕。最大误差主要来自函数调用和循环本身的固定开销。
+ * @details SysTick 只有 24 位，但忙等循环按重装边界累计周期数，因此可
+ *          覆盖多次 1 ms 重装；误差主要来自函数调用和循环本身的固定开销。
  */
 
 delay_status_e delay_us_busy(DWORD us)
 {
-#if DELAY_USE_DWT
-    QWORD cycles64;
-    DWORD start;
-    DWORD cycles;
-
-    if (!g_delay_initialized)
-    {
-        return DELAY_ERR_NOT_INITIALIZED;
-    }
-    if (us == 0U)
-    {
-        return DELAY_OK;
-    }
-    if (us > delay_max_busy_us())
-    {
-        return DELAY_ERR_OUT_OF_RANGE;
-    }
-
-    cycles64 = ((QWORD)us * g_core_clock_hz + 999999ULL) / 1000000ULL;
-    if ((cycles64 == 0U) || (cycles64 > UINT32_MAX))
-    {
-        return DELAY_ERR_OUT_OF_RANGE;
-    }
-
-    cycles = cycles64;
-    start  = delay_port_dwt_cycles();
-    /* 空循环体即可：delay_port_dwt_cycles() 是外部函数，编译器不能把它提到循环外。 */
-    while ((delay_port_dwt_cycles() - start) < cycles)
-    {
-    }
-
-    return DELAY_OK;
-#else
     return delay_systick_us_busy(us);
-#endif
 }
 /**
  * @brief 执行毫秒级忙等待。
  * @param ms 延时时间，单位毫秒；0 表示立即返回。
  * @return DELAY_OK 成功；DELAY_ERR_NOT_INITIALIZED 尚未初始化；
  *         DELAY_ERR_OUT_OF_RANGE 超过计数器单次忙等待上限。
- * @note 该接口不会让出 CPU，也不会调用 RTOS 调度器。业务代码应优先使用
- *       vTaskDelay、osDelay、软件定时器或事件等待；本接口只适用于启动阶段
- *       的短暂、确定性硬件稳定时间。
- * @details 函数先用 64 位乘法检查 ms * 1000 是否越界，再委托微秒接口，避免
+ * @note 该接口不会让出 CPU，也不会调用 RTOS 调度器；只适用于启动阶段的
+ *       短暂、确定性硬件稳定时间。
+ * @details 先用 64 位乘法检查 ms * 1000 是否越界，再委托微秒接口，避免
  *          直接使用 32 位乘法造成超时截断。
  */
 
@@ -265,7 +228,8 @@ void delay_ms(DWORD ms)
  * @return 当前毫秒计数。
  * @note 计数器为 DWORD，持续运行约 49.7 天后回绕；调用者应使用
  *       delay_elapsed_ms() 进行差值比较，不要直接比较绝对大小。该计数的
- *       硬件来源由 delay_port_now_ms() 提供，本模块不定义 SysTick_Handler。
+ *       硬件来源由 delay_port_now_ms() 提供（SysTick/HAL tick），本模块
+ *       不定义 SysTick_Handler。
  */
 
 DWORD delay_now_ms(void)
