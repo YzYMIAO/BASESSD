@@ -37,10 +37,10 @@
 #include "fc_command.h"
 #include "ftl.h"              /* ftl_ctx_t（含 pending[] / cache / rr_page_scratch） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_cmd_read_data */
-#include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */
 #include "log.h"
 #include "onfi_1_0.h"
+#include "timer.h"
 
 #include <string.h>
 
@@ -168,7 +168,7 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
     // ⚠ 卡死计数在**提交成功之后**才清零（不是准备成功时）：`ftl_op_submit` 自身失败
     // （完成表满 / SQ 满）也是一轮"提交不出去"，若在此前清零则计数永远停在 1、
     // submit deadline 永不触发。
-    ftl_deadline_clear(&rr->submit_deadline);
+    timer_deadline_clear(&rr->submit_deadline);
 
     return FTL_OK;
 }
@@ -228,7 +228,7 @@ static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
  */
 static bool rr_unrec_log_is_due(void)
 {
-    return ftl_job_log_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    return log_rate_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -401,9 +401,9 @@ static void rr_job_step(rr_handle_t *rr)
                 rr->planes_recovered = 0U;
                 rr->planes_failed    = 0U;
                 rr->error            = FTL_OK;
-                rr->all_ok           = true;              /* 聚合结果：任一 plane 失败才清零 */
-                ftl_deadline_clear(&rr->submit_deadline); /* 新 job：卡死计时从头算 */
-                ftl_heartbeat_begin(&rr->hb);
+                rr->all_ok           = true;                /* 聚合结果：任一 plane 失败才清零 */
+                timer_deadline_clear(&rr->submit_deadline); /* 新 job：卡死计时从头算 */
+                log_heartbeat_begin(&rr->hb);
                 rr->stage = RR_STAGE_PLANE;
                 break;
             }
@@ -424,7 +424,7 @@ static void rr_job_step(rr_handle_t *rr)
                 {
                     // L2P region 在加载：原地等，**不计**提交卡死——
                     // 加载在飞是有确定完成时刻的进展。rr_handle 每轮会 +1，这里清零。
-                    ftl_deadline_clear(&rr->submit_deadline);
+                    timer_deadline_clear(&rr->submit_deadline);
                     return;
                 }
                 if (sel == RR_PLANE_SKIP)
@@ -536,16 +536,16 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
  */
 void rr_handle(rr_handle_t *rr)
 {
-    // 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
+    // 心跳（见 log.h / timer.h）：恢复在飞期间每满 1s 打一行 stage/age。
     // ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
     // 那段同样属于「job 卡住」，正是心跳要暴露的。
     if (rr->stage == RR_STAGE_IDLE)
     {
-        ftl_heartbeat_end(&rr->hb);
+        log_heartbeat_end(&rr->hb);
     }
-    else if (ftl_heartbeat_due(&rr->hb))
+    else if (log_heartbeat_due(&rr->hb))
     {
-        LOGI(LOG_TAG_RR "job stage=%d plane=%hhu attempt=%hhu retry=%hhu age=%lums\r\n", rr->stage, rr->plane, rr->attempt, rr->retry_count, ftl_heartbeat_age_ms(&rr->hb));
+        LOGI(LOG_TAG_RR "job stage=%d plane=%hhu attempt=%hhu retry=%hhu age=%lums\r\n", rr->stage, rr->plane, rr->attempt, rr->retry_count, log_heartbeat_age_ms(&rr->hb));
     }
 
     if (rr->waiting == false)
@@ -557,20 +557,20 @@ void rr_handle(rr_handle_t *rr)
         else
         {
             // 有 job 却没在飞 = 上轮提交失败。连续无进展超过 submit deadline ⇒ 判卡死收尾。
-            const DWORD now_ms = ftl_job_now_ms();
+            const DWORD now_ms = platform_now_ms();
 
             if (now_ms != 0U)
             {
                 // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计 deadline。
                 if (ftl_op_cache_seq_active() == true)
                 {
-                    ftl_deadline_clear(&rr->submit_deadline);
+                    timer_deadline_clear(&rr->submit_deadline);
                 }
                 else if (rr->submit_deadline.armed == false)
                 {
-                    ftl_deadline_arm(&rr->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
+                    timer_deadline_arm(&rr->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
                 }
-                else if (ftl_deadline_expired(&rr->submit_deadline, now_ms))
+                else if (timer_deadline_expired(&rr->submit_deadline, now_ms))
                 {
                     rr->error = FTL_TIMEOUT;
                     rr_job_abort(rr);

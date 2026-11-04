@@ -281,14 +281,31 @@ typedef enum
  *   ftl_op_is_in_dispatch 断言兜住。服务函数里禁止自旋泵（嵌套派发）。
  */
 
-/* ── Cache Line ── */
+/* ── 查找索引 / 数据行（SoA）──
+ *
+ * tags[] 连续存放查找元数据（region_id/state/access_count），lines[] 才放 2 KB
+ * 映射数据 + 与查找无关的完成/写回状态。查找与 CLOCK 只扫 tags[]（64 × 8 B = 512 B，
+ * 约 16 条 D-Cache line）；数据行只在命中 / 加载 / 写回时访问。
+ * 依据：DFTL 的 GTD/CMT 分层、AppL coarse_cache 的 GTD 直接索引；
+ * 具体「tags[] + lines[]」结构是本仓自拟，不是文献规定的标准形态。 */
+typedef struct
+{
+    DWORD region_id;    /* **全局** region（0..L2P_GLOBAL_REGIONS-1） */
+    WORD  access_count; /* CLOCK 访问计数 */
+    BYTE  state;        /* l2p_cache_state_e（-fshort-enums：1 B） */
+} l2p_tag_t;
+
+_Static_assert(sizeof(l2p_tag_t) == 8U, "l2p_tag_t 必须保持 8 B（64 项 = 512 B，查找只碰 ~16 条 cache line）");
+
+/* region line 查找的 hint 表：region_id → line 下标的**提示**，不是权威索引。
+ * 命中仍需用 tags[] 校验；陈旧/冲突只退化为线性扫描，不影响正确性。 */
+#define L2P_LINE_HINT_SLOTS (256U)
+_Static_assert((L2P_LINE_HINT_SLOTS & (L2P_LINE_HINT_SLOTS - 1U)) == 0U, "hint 槽数必须是 2 的幂");
+_Static_assert(L2P_CACHE_SIZE < UINT8_MAX, "hint 用 BYTE 存 line 下标，0xFF 是空槽");
 
 typedef struct
 {
-    DWORD             entries[L2P_ENTRIES_PER_REGION]; /* 512 条 PBA = 2KB */
-    DWORD             region_id;                       /* **全局** region（0..L2P_GLOBAL_REGIONS-1） */
-    l2p_cache_state_e state;                           /* 行状态 */
-    WORD              access_count;                    /* CLOCK 访问计数 */
+    DWORD entries[L2P_ENTRIES_PER_REGION]; /* 512 条 PBA = 2KB */
 
     /* 「本次加载正是为**当前这次访问**而起」（异步化的观测口径补偿）。
      * 异步后一次 miss 访问会跨两轮：第 1 轮起加载（计一次 miss）、第 2 轮重试命中。
@@ -296,8 +313,7 @@ typedef struct
      * （随机读满盘：真值 100% → 观测 50%，跌破 L2P_THRASH_EXIT_PCT=70% ⇒
      * 降级永不触发）。故：加载完成时置 1，其后**第一次**命中消费它且不计命中，
      * 一次逻辑访问在窗口里只记一次 miss。
-     * 行结构体当前 2080 B（64 行 ≈ 130 KiB）；本条与 `load_fail_count` /
-     * 双副本字段共用尾部对齐填充。 */
+     * 本条与 `load_fail_count` / 双副本字段共用尾部对齐填充。 */
     bool fresh;
 
     /* 1 = 本行最近一次加载在重试耗尽后降级为「全未映射」（映射已丢，RISK-BOOT-18）。
@@ -359,6 +375,40 @@ typedef struct
 
 typedef const l2p_owner_t *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);
 
+/* ── entry 级 CMT（Cached Mapping Table）──
+ *
+ * 写回单位：dirty 值驻留 CMT，按 translation page 合并后整页写回。
+ * region line 退化为读缓存与写回缓冲区（CLEAN/DIRTY 语义见文件内不变量）。
+ * 依据：DFTL 的 CMT + AppL `fine_cache`（dirty entry + 驱逐时整页写回）。
+ * 冷写 miss 仍先读 region 页取 old PBA；4-way 组相联只是容量/命中结构，
+ * 不是功能边界。
+ *
+ * 空槽以 `lba == FTL_LBA_INVALID` 为唯一判据（C9）。CLEAN 条目只保存有效 PBA；
+ * DIRTY 条目允许 `NAND_PBA_INVALID`（TRIM 负条目）。 */
+#define L2P_CMT_SETS (1024U)
+#define L2P_CMT_WAYS (4U)
+#define L2P_CMT_SIZE (L2P_CMT_SETS * L2P_CMT_WAYS)
+_Static_assert((L2P_CMT_SETS & (L2P_CMT_SETS - 1U)) == 0U, "L2P_CMT_SETS 必须是 2 的幂");
+_Static_assert(L2P_CMT_SIZE == 4096U, "CMT 共 4096 项（1024 set × 4 way，64 KiB）");
+
+typedef enum
+{
+    L2P_CMT_CLEAN = 0, /* 值来自 region 页，可被替换 */
+    L2P_CMT_DIRTY,     /* 值新于 region 页，必须整页写回 */
+} l2p_cmt_state_e;
+
+typedef struct
+{
+    DWORD lba;       /* 全局 LBA；FTL_LBA_INVALID = 空槽 */
+    DWORD pba;       /* 映射；DIRTY 条目允许 NAND_PBA_INVALID */
+    DWORD dirty_seq; /* DIRTY：Journal 持久化水位要求；CLEAN 为 0 */
+    WORD  stamp;     /* LRU 时间戳（访问/插入时更新） */
+    BYTE  state;     /* l2p_cmt_state_e */
+    BYTE  pad;
+} l2p_cmt_entry_t; /* 16 B × 4096 = 64 KiB */
+
+_Static_assert(sizeof(l2p_cmt_entry_t) == 16U, "l2p_cmt_entry_t 必须保持 16 B");
+
 /* ── Cache 上下文 ── */
 
 typedef struct
@@ -367,6 +417,17 @@ typedef struct
     DWORD   miss_count;      /* 未命中次数（开机累计） */
     DWORD   eviction_count;  /* 被驱逐行数（开机累计） */
     DWORD   wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09） */
+    DWORD   hint_hits;       /* region line hint 命中次数 */
+    DWORD   hint_misses;     /* hint 未命中/冲突，退回线性扫描的次数 */
+    DWORD   cmt_hits;        /* 读路径 CMT 命中次数 */
+    DWORD   cmt_misses;      /* 读路径 CMT 未命中次数（随后走 region 路径） */
+    DWORD   cmt_wr_hits;     /* 写路径命中已有 CMT 条目的 LBA 数 */
+    DWORD   cmt_wr_misses;   /* 写路径未命中 CMT、走 line/插入的 LBA 数 */
+    DWORD   cmt_dirty;       /* 当前 dirty CMT 条目数 */
+    DWORD   cmt_writebacks;  /* 含 dirty CMT 的整页写回次数 */
+    DWORD   cmt_evict_clean; /* 为新条目替换 CLEAN CMT 槽的次数 */
+    DWORD   cmt_evict_dirty; /* 因容量触发的 dirty victim 整页写回次数 */
+    DWORD   cmt_wb_defer;    /* dirty victim 写回因在飞/背压退让的次数 */
     int32_t error;           /* 最近一次硬失败 */
 } l2p_cache_stats_t;
 
@@ -395,8 +456,12 @@ typedef struct
 
 typedef struct
 {
-    l2p_cache_line_t lines[L2P_CACHE_SIZE]; /* 64 × (2KB + 4B) ≈ 128 KB */
-    WORD             clock_hand;            /* CLOCK 替换指针 */
+    l2p_cache_line_t lines[L2P_CACHE_SIZE];           /* 64 × ~2KB ≈ 133 KB（映射数据 + 写回/完成状态） */
+    l2p_tag_t        tags[L2P_CACHE_SIZE];            /* 查找索引：与 lines 同下标；region_id/state/access_count */
+    BYTE             line_hint[L2P_LINE_HINT_SLOTS];  /* region → line 下标提示；0xFF = 空；以 tags[] 校验 */
+    l2p_cmt_entry_t  cmt[L2P_CMT_SETS][L2P_CMT_WAYS]; /* entry 级写缓存（4-way） */
+    WORD             cmt_clock;                       /* LRU 时间戳发生器（回绕时右移全部 stamp） */
+    WORD             clock_hand;                      /* CLOCK 替换指针 */
 
     l2p_cache_stats_t    stats;
     l2p_prefetch_stats_t prefetch;
@@ -407,6 +472,13 @@ typedef struct
 
     /* Region 级「降级 = 映射已丢」标记（全局 region 下标，不持久化）。 */
     DWORD region_degraded_bitmap[L2P_DIRTY_BITMAP_WORDS];
+
+    /* dirty CMT 的索引/计数：bitmap 与 owner 计数都由 dirty 插入 / 整页写回
+     * 两个唯一闸门维护；`cmt_dirty` 是总数（stats 里另有观测副本）。 */
+    DWORD cmt_dirty_region_bitmap[L2P_DIRTY_BITMAP_WORDS];
+    DWORD cmt_dirty_owner[FTL_DIE_MAX];
+
+    bool cmt_enabled; /* false = boot replay：不查不填 CMT，全部走 region line */
 
     BYTE ch; /* 本 cache 服务的 (ch,ce)，跨 LUN 共享 */
     BYTE ce;
@@ -427,12 +499,57 @@ typedef struct
     l2p_cache_state_e state;     /* 行状态（枚举，不是裸 BYTE） */
 } l2p_line_info_t;
 
+/**
+ * @brief 测试一个 flat 位图位（bit = 全局 region / LBA 下标）
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标
+ * @return true = 置位
+ */
+static inline bool l2p_bitmap_test_bit(const DWORD *bitmap, DWORD bit)
+{
+    return (bitmap[bit / 32U] & (1UL << (bit & 31U))) != 0U;
+}
+
+/**
+ * @brief 该 region 是否有 dirty CMT 条目（O(1) 位图查询）
+ *
+ * @param cache  共享 cache
+ * @param region 全局 region
+ * @return true = 至少一个 dirty 条目等待整页写回
+ */
+static inline bool l2p_cmt_region_dirty(const l2p_cache_t *cache, DWORD region)
+{
+    if (region >= L2P_GLOBAL_REGIONS)
+    {
+        return false;
+    }
+    return l2p_bitmap_test_bit(cache->cmt_dirty_region_bitmap, region);
+}
+
+/**
+ * @brief 该 region 当前是否仍有未 commit 的脏数据（实时位）
+ *
+ * @param cache  共享 cache
+ * @param region 全局 region
+ * @return true = 仍有 line DIRTY 或 dirty CMT
+ */
+static inline bool l2p_region_dirty_live(const l2p_cache_t *cache, DWORD region)
+{
+    if (region >= L2P_GLOBAL_REGIONS)
+    {
+        return false;
+    }
+    return l2p_bitmap_test_bit(cache->region_dirty_bitmap, region);
+}
+
 /* ── 接口 ── */
 
 /**
  * @brief 初始化共享 cache（设备级，每个 (ch,ce) 只调一次）
  *
- * 清全局脏位图 / 所有 line / 统计 / 在飞计数；写入 (ch,ce) 与 owner 解析回调。
+ * 清全局脏位图 / 所有 line / 全部 CMT / 统计 / 在飞计数；写入 (ch,ce) 与
+ * owner 解析回调。
  * ⚠ **不能**放进逐实例的 `ftl_init`：第二个实例会把第一个实例的 line 清掉。
  * ⚠ 本函数**不解析 owner**，只保存回调；owner 在具体 load/flush 时解析。
  *
@@ -477,7 +594,8 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
 /**
  * @brief 读取**全局 LBA** 对应的 PBA 映射（**三态**）
  *
- *   hit（CLEAN / DIRTY / FLUSHING）→ *out = entry，返回 FTL_OK
+ *   先查 CMT（dirty 优先于 line；DIRTY 允许 INVALID 负条目），未命中再查 region line。
+ *   line hit（CLEAN / DIRTY / FLUSHING）→ *out = entry，返回 FTL_OK
  *   miss → CLOCK 选 victim（DIRTY 先起异步写回、LOADING/FLUSHING 跳过）、
  *          起异步加载、置 LOADING，返回 FTL_AGAIN（**本次未取到值**）
  *   正在加载（LOADING）→ 返回 FTL_AGAIN
@@ -500,7 +618,9 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
 /**
  * @brief 确保**全局 LBA** 所在 region 已在 RAM（就绪前置）
  *
- * 命中（CLEAN / DIRTY）⇒ 1；未命中 ⇒ 起异步加载并返回 0；LOADING / FLUSHING ⇒ 0。
+ * CMT 命中 ⇒ 1（不需要 line，也不需要新槽位）；line CLEAN/DIRTY 且该 LBA 有
+ * CMT 槽位（或 line DIRTY）⇒ 1；LOADING / FLUSHING ⇒ 0；无 line ⇒ 起加载并返回 0。
+ * CLEAN line 上缺失 CMT 且 set 全 dirty ⇒ 触发该 set 的 dirty victim 整页写回并返回 0。
  * 供"必须先就绪、再一次性应用多条改动"的调用者用（写确认 / 搬移收尾）：
  * 先对全部 LBA 过一遍本函数，全 1 时后续的 read/write 必不可能再返 FTL_AGAIN
  * ⇒ 一批改动**全有或全无**，重试不会重复记账。
@@ -527,14 +647,17 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
  *
  * @note 用于 cache 序列窗口末尾的断点探测：序列打开时 `l2p_read` 起的加载读会被
  * FTL 门控挡住 ⇒ 用本函数避免启动加载。
+ * ⚠ 只说明「region 行可读」；CLEAN line 的 entries 对 dirty CMT 覆盖的 LBA 可能
+ * 陈旧，取映射必须走 `l2p_read`（CMT 优先）。
  */
 bool l2p_is_resident(l2p_cache_t *cache, DWORD lba);
 
 /**
  * @brief 写入**全局 LBA** → PBA 映射（**三态**）
  *
- * 只改 cache line 并置 DIRTY + 全局 region 脏位，不写 NAND（写回由 flush 起）。
- * 行未就绪（LOADING / FLUSHING）⇒ 返回 FTL_AGAIN，**不改任何状态**。
+ * 优先写 dirty CMT（CMT 命中或 line 有空/clean CMT 槽位）；CMT 无槽位时回退为
+ * line DIRTY（容量竞态兜底，不返回 AGAIN）。只改 RAM，不写 NAND（整页写回由
+ * flush 起）。line LOADING / FLUSHING ⇒ FTL_AGAIN，**不改任何状态**。
  * 越界 ⇒ FTL_OK（no-op，与旧行为一致：越界调用点都自带范围检查）。
  *
  * @param cache cache 上下文
@@ -552,7 +675,8 @@ ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
  * `lba+0..lba+7`；全部 LBA 必须落在同一 region（页对对齐 + region 大小是
  * `FTL_LBA_PER_PAIR` 的整数倍 ⇒ 编译期几何保证，见 l2p_cache.c 的 `_Static_assert`）。
  * 语义与逐条 `l2p_read` 一致：
- * · 只处理 mask 置位的条目；每条仍调用 `l2p_hit_note`，thrashing/命中口径不变；
+ * · 逐 mask LBA 先 CMT（dirty 优先）后 line；line 缺失且 CMT 缺项 ⇒ FTL_AGAIN；
+ * · 只处理 mask 置位的条目；line hit 仍调用 `l2p_hit_note`，thrashing/命中口径不变；
  * · miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，返 FTL_AGAIN；
  *   当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
  * · 行 LOADING ⇒ FTL_AGAIN，且**不改任何状态**。
@@ -583,6 +707,57 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
  *         FTL_AGAIN 行未驻留 / LOADING / FLUSHING，稍后重试
  */
 ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
+
+/**
+ * @brief 批量写确认的就绪探针（旧值来源 + CMT 容量一次判完）
+ *
+ * 与 `l2p_is_ready` 的区别：mask 内每个 LBA 都必须有 old 来源（CMT 或 line），
+ * 且 CLEAN line 上缺失的 CMT 条目必须有 empty/clean 槽位。任一条不满足 ⇒
+ * 起加载 / 触发 dirty victim 写回并返回 false，整批不动；返回 true 后到
+ * `l2p_entries_write` 之间无泵 ⇒ 批量写入不会返 `FTL_AGAIN`。
+ *
+ * @param cache cache 上下文
+ * @param lba   页对基址（全局 LBA，FTL_LBA_PER_PAIR 对齐）
+ * @param mask  条目掩码（bit0..7 对应 lba+0..lba+7）
+ * @return true 就绪；false 已起加载/写回，下一轮重试
+ */
+bool l2p_entries_ready(l2p_cache_t *cache, DWORD lba, DWORD mask);
+
+/**
+ * @brief 开关 CMT（仅 boot journal replay 使用）
+ *
+ * false 期间 `l2p_read` / `l2p_is_ready` / `l2p_write` 全部走 region line，
+ * 不查不填 CMT；恢复后 CMT 保持为空。禁止在运行期关闭（会丢 dirty CMT）。
+ *
+ * @param cache   cache 上下文
+ * @param enabled true = 正常；false = replay 旁路
+ */
+void l2p_cmt_set_enabled(l2p_cache_t *cache, bool enabled);
+
+/**
+ * @brief 启动一个 translation page 的 CMT 整页写回
+ *
+ * 行驻留 ⇒ 合并 dirty CMT 后走 `l2p_flush_kick`；行缺失 ⇒ 起异步加载，
+ * 下一轮再由本函数合并写回。调用者（CP / 后台 flush）负责轮询 pending。
+ *
+ * @param cache  cache 上下文
+ * @param region 全局 region
+ * @return FTL_OK 已提交；FTL_AGAIN 加载/写回在飞或背压；FTL_ERROR 硬失败
+ */
+ftl_status_e l2p_region_flush_kick(l2p_cache_t *cache, DWORD region);
+
+/**
+ * @brief Checkpoint DONE 前的最终覆盖检查
+ *
+ * 每个 snapshot 置位 region 必须满足：实时脏位已清（本次 CP 已 commit），或
+ * 行已 CLEAN。否则 Header 会声称一个没落盘的 region ⇒ 调用者中止 CP。
+ *
+ * @param cache    共享 cache
+ * @param owner_die 本 CP 的 die
+ * @param snapshot  本 die 的 local 脏位快照（L2P_LOCAL_DIRTY_WORDS）
+ * @return true = 全部覆盖；false = 存在孤儿/未落盘位
+ */
+bool l2p_owner_snapshot_covered(l2p_cache_t *cache, BYTE owner_die, const DWORD snapshot[L2P_LOCAL_DIRTY_WORDS]);
 
 /* ── 同步逃生口（见文件头；服务函数禁用）── */
 
@@ -620,18 +795,24 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
  *         false = 未驻留 / 合法未映射 / 正常加载
  */
 /**
- * @brief 把 region 标记为「映射已丢」（degraded）：host 读其未映射 LBA 报 IO_ERROR。
+ * @brief 把 region 的失败页标记为「映射已丢」并精确失效其 CMT。
+ *
+ * 失败页的 dirty 条目指向编程失败的 PBA，撤销完成前读必须失败；同 region
+ * 其他 dirty 条目是更早的成功写，保留。CLEAN 条目全部失效。
  *
  * @param cache         共享 L2P cache。
  * @param global_region 全局 region 号。
+ * @param lba           失败页的页对基址（全局 LBA）。
+ * @param cw_bitmap     失败页的 CW 位图（bit0..7 对应 lba+0..lba+7）。
  */
-void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region);
+void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region, DWORD lba, DWORD cw_bitmap);
 
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 
 /**
- * @brief 起一行 DIRTY 的异步写回（提交即返回）
+ * @brief 把一个 region 的 translation page 异步写回（提交即返回）
  *
+ * 先把本 region 的 dirty CMT 合并进 line（CLEAN 行会变 DIRTY），再走：
  * ① md_slot_pair_append 一次取主/备两个空槽（块满先取新块）
  * ② ftl_async_write_page 建链主副本 + 把 entries 拷进 FC buffer 并提交
  * ③ line->state = FLUSHING；主副本成功后在完成回调里串行提交备副本
@@ -658,20 +839,24 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
 /**
  * @brief 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
  *
- * 从下标 0 起扫，最多启动 max_kick 行 DIRTY（受共享 L2P_FLUSH_MAX_INFLIGHT 闸门）；
- * 跳过不属于 owner_die 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
+ * 先按 owner 计数扫 dirty CMT（force_cmt 或 dirty 达水位才主动写回；每轮最多
+ * L2P_CMT_WB_MAX 个 region），再扫最多 max_kick 行 DIRTY（均受共享
+ * L2P_FLUSH_MAX_INFLIGHT 闸门）。跳过不属于 owner_die 的条目——一个 LUN 的
+ * 后台刷写不应替别的 LUN 做决定。
  *
  * @param cache     共享 cache
  * @param owner_die 本实例的 die（topo_2_die(ftl->topo)）
  * @param max_kick  本轮最多起几条（档位表见 l2p_cache.c 的 s_l2p_flush_max）
+ * @param force_cmt true = host FLUSH / IDLE 排空，无视水位；false = 后台，仅按水位
  */
-void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick, bool force_cmt);
 
 /**
  * @brief 本 owner 是否已无待落盘的 L2P 行
  *
- * 异步 FLUSH job 的完成判据之一：没有 DIRTY / FLUSHING / LOADING 行。
- * LOADING 一并等待：行内容尚未有效，等它落定比提前完成安全（host 侧 BOT 串行，
+ * 异步 FLUSH job 的完成判据之一：本 owner 无 dirty CMT，且没有
+ * DIRTY / FLUSHING / LOADING 行。LOADING 一并等待：行内容尚未有效，等它落定
+ * 比提前完成安全（host 侧 BOT 串行，
  * 等待有界）。
  *
  * @param cache     共享 cache

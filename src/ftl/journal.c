@@ -53,8 +53,7 @@
 #include "fc.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_JOURNAL */
 #include "log.h"
 #include "onfi_1_0.h"
 #include "ssd_compiler.h"
@@ -83,6 +82,14 @@ static DWORD s_replay_write_fail_lba;
 /* erase kick 失败日志限流（时间优先，无时钟时 64 条兜底）。 */
 static DWORD s_erase_kick_log_ms;
 static DWORD s_erase_kick_n;
+
+/* 回放工作缓冲：jrn_replay 只在开机、单线程、无重入时调用（与 checkpoint 的
+ * s_probe_hdr / s_probe_raw 同法）。放文件级 static 而不是栈上：
+ *   · replay_pages = 256 × 16 B = 4 KiB；
+ *   · 扫描/应用共用一页 2 KiB。
+ * 二者叠加会突破本仓 2 KiB 栈预算（RISK-JN-06）。 */
+static jrn_page_ref_t s_replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
+static BYTE           s_scan_page[JRN_PAGE_SIZE];
 
 /* ══════════════════════════════════════════════════════════
  * 1. 页地址辅助
@@ -844,20 +851,20 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger)
 
     if (journal->handle.job.phase != JRN_IDLE)
     {
-        // 心跳（见 ftl_job.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口
+        // 心跳（见 log.h / timer.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口
         if (journal->handle.job.hb.active == false)
         {
-            ftl_heartbeat_begin(&journal->handle.job.hb);
+            log_heartbeat_begin(&journal->handle.job.hb);
         }
-        else if (ftl_heartbeat_due(&journal->handle.job.hb))
+        else if (log_heartbeat_due(&journal->handle.job.hb))
         {
-            LOGI(LOG_TAG_JRN "job phase=%d waddr=0x%08lx age=%lums\r\n", journal->handle.job.phase, journal->handle.job.waddr, ftl_heartbeat_age_ms(&journal->handle.job.hb));
+            LOGI(LOG_TAG_JRN "job phase=%d waddr=0x%08lx age=%lums\r\n", journal->handle.job.phase, journal->handle.job.waddr, log_heartbeat_age_ms(&journal->handle.job.hb));
         }
 
         return; /* 单飞行：job 已在飞 */
     }
 
-    ftl_heartbeat_end(&journal->handle.job.hb);
+    log_heartbeat_end(&journal->handle.job.hb);
 
     if (journal->handle.job.need_erase)
     {
@@ -1049,7 +1056,7 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         {
             // 背压（池空 / 队列满 / cache 序列门控）是**预期**等待，need_erase 保留、下轮重试。
             // 限流 5 s 一行（时间优先），避免 host 大顺序写 + GC 期间刷屏。
-            LOGE_IF(ftl_job_log_due(&s_erase_kick_log_ms, &s_erase_kick_n, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.job.target_block);
+            LOGE_IF(log_rate_due(&s_erase_kick_log_ms, &s_erase_kick_n, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.job.target_block);
         }
     }
 
@@ -1189,8 +1196,10 @@ static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_seque
 
         for (BYTE page = 0U; page < PAGES_PER_BLOCK; page++)
         {
-            BYTE page_data[JRN_PAGE_SIZE];
-            memset(page_data, 0xFF, sizeof(page_data));
+            // 文件级缓冲：本函数只在开机单线程调用（见 s_replay_pages 注释）。
+            BYTE *page_data = s_scan_page;
+
+            memset(page_data, 0xFF, JRN_PAGE_SIZE);
 
             DWORD raddr = jrn_page_addr(journal, b, page);
             if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
@@ -1456,9 +1465,11 @@ static SSD_CODE_FAST void jrn_replay_note_fail(jrn_replay_ctx_t *c, BYTE reason,
 static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t *cache, const jrn_page_ref_t *page, DWORD cp_sequence, jrn_replay_ctx_t *block_ctx)
 {
     DWORD raddr = jrn_page_addr(journal, page->block, page->page);
-    BYTE  page_data[JRN_PAGE_SIZE];
 
-    memset(page_data, 0xFF, sizeof(page_data));
+    // 与 jrn_ring_scan 共用文件级扫描页：两者不会同时在用（先扫完再逐页应用）。
+    BYTE *page_data = s_scan_page;
+
+    memset(page_data, 0xFF, JRN_PAGE_SIZE);
 
     if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
@@ -1609,8 +1620,9 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
  */
 SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx)
 {
-    // JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。
-    jrn_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
+    // JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 16B → 4 KiB。
+    // 放文件级 static（开机单线程、无重入），不占 2 KiB 栈预算（RISK-JN-06）。
+    jrn_page_ref_t *const replay_pages = s_replay_pages;
 
     // 本轮回放的异常汇总（见文件内 s_replay_* 的注释）。
     s_replay_degraded_entries   = 0U;

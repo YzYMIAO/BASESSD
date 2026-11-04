@@ -48,8 +48,7 @@
 #include "fc.h"
 #include "ftl.h" /* ftl_ctx_t（服务函数要从实例取 &ftl->alloc） */
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_METADATA */
 #include "journal.h"
 #include "log.h"
 #include "metadata_job.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */

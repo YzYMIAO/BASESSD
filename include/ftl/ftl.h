@@ -19,7 +19,6 @@
 #include "bg_scheduler.h" /* 工作量配额后台调度器（ftl_ctx_t 含调度器） */
 #include "cache_batch.h"  /* cache read/write 批次的常量与对 FTL 的尝试入口 */
 #include "checkpoint.h"
-#include "ftl_job.h"  /* ftl_time_t / ftl_deadline_t */
 #include "ftl_type.h" /* ftl_io_req_t */
 #include "gc.h"
 #include "journal.h"
@@ -29,6 +28,7 @@
 #include "pending.h"
 #include "read_recovery.h"
 #include "ssd_types.h"
+#include "timer.h"
 #include "wbuf.h"
 
 #include <stdbool.h>
@@ -349,12 +349,12 @@ typedef struct
 
 typedef struct
 {
-    bool           active;
-    DWORD          lba;
-    DWORD          end;
-    DWORD          start_lba; /* 完成时 trim_lba 已到 end，不能反推 */
-    ftl_time_t     start_ms;  /* 观测 elapsed */
-    ftl_deadline_t deadline;  /* 无进展等待 deadline */
+    bool             active;
+    DWORD            lba;
+    DWORD            end;
+    DWORD            start_lba; /* 完成时 trim_lba 已到 end，不能反推 */
+    timer_time_t     start_ms;  /* 观测 elapsed */
+    timer_deadline_t deadline;  /* 无进展等待 deadline */
 } ftl_trim_job_t;
 
 struct ftl_context

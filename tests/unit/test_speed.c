@@ -8,7 +8,7 @@
  * 计时口径：
  *   · FC：每块用 SysTick µs 计时后累加（`delay_time_now_us` / `delay_time_since_us`）；
  *     擦除单独统计，不计入写速度。
- *   · FTL：用 ftl_job_now_ms()（1 ms）计整个 phase；format / flush 单列，不计入 KB/s。
+ *   · FTL：用 platform_now_ms()（1 ms）计整个 phase；format / flush 单列，不计入 KB/s。
  *
  * 输出：**每个读写用例的速度结果行**（`SPEED fc mode=…` / `SPEED ftl chunk=…`）
  * 走 `test_result()` / `ftl_ut_result()` —— 不受 `--log-visible` 限制，默认档也打印
@@ -29,10 +29,10 @@
 #include "cli.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "delay.h"
 #include "fc.h"
-#include "ftl_job.h"
 #include "l2p_cache.h"
 #include "munit.h"
 #include "ssd_types.h"
+#include "timer.h"
 
 #include <string.h>
 
@@ -70,7 +70,7 @@ static void spd_clock_start(spd_clock_t *clock)
     clock->time_valid = delay_time_now_us(&clock->start_us);
     if (!clock->time_valid)
     {
-        clock->start_ms = ftl_job_now_ms();
+        clock->start_ms = platform_now_ms();
     }
 }
 
@@ -81,7 +81,7 @@ static DWORD spd_clock_elapsed_us(const spd_clock_t *clock)
         return delay_time_since_us(clock->start_us);
     }
 
-    const DWORD now = ftl_job_now_ms();
+    const DWORD now = platform_now_ms();
 
     return (now - clock->start_ms) * 1000U;
 }
@@ -863,7 +863,7 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
 {
     DWORD next     = 0U;
     BYTE  inflight = 0U;
-    DWORD t0       = ftl_job_now_ms();
+    DWORD t0       = platform_now_ms();
     DWORD guard    = 0U;
 
     spd_ftl_slots_reset();
@@ -890,7 +890,7 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
                 if (inflight == 0U)
                 {
                     (*errors)++;
-                    *ms_out = ftl_job_now_ms() - t0;
+                    *ms_out = platform_now_ms() - t0;
                     return false;
                 }
                 break;
@@ -933,27 +933,27 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
             }
         }
 
-        if ((ftl_job_now_ms() - t0) > (DWORD)SPD_FTL_PHASE_TIMEOUT_MS)
+        if ((platform_now_ms() - t0) > (DWORD)SPD_FTL_PHASE_TIMEOUT_MS)
         {
             (*errors)++;
-            *ms_out = ftl_job_now_ms() - t0;
+            *ms_out = platform_now_ms() - t0;
             return false;
         }
         if (++guard > (DWORD)SPD_FTL_GUARD)
         {
             (*errors)++;
-            *ms_out = ftl_job_now_ms() - t0;
+            *ms_out = platform_now_ms() - t0;
             return false;
         }
     }
 
-    *ms_out = ftl_job_now_ms() - t0;
+    *ms_out = platform_now_ms() - t0;
     return true;
 }
 
 static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
 {
-    const DWORD      t0 = ftl_job_now_ms();
+    const DWORD      t0 = platform_now_ms();
     fc_debug_state_t dbg0;
 
     memset(&dbg0, 0, sizeof(dbg0));
@@ -974,7 +974,7 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
             return true;
         }
 
-        if ((ftl_job_now_ms() - t0) > 10000U)
+        if ((platform_now_ms() - t0) > 10000U)
         {
             // 排障：把「谁卡住」+ 本次等待期间填充 pass 的**增量**打出来。
             // 增量比绝对值有用：fill 不涨 ⇒ 填充没被调用；pops 不涨 ⇒ 扫描没看到命令。
@@ -1135,12 +1135,12 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     if (!s_ftl_formatted)
     {
-        const DWORD t0 = ftl_job_now_ms();
+        const DWORD t0 = platform_now_ms();
 
         ftl_ut_trace_suppress(true);
         ftl_ut_media_format();
         ftl_ut_trace_suppress(false);
-        fmt_ms          = ftl_job_now_ms() - t0;
+        fmt_ms          = platform_now_ms() - t0;
         s_ftl_formatted = true;
         ftl             = ftl_ut_live();
     }
@@ -1177,13 +1177,13 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     if (ok)
     {
-        const DWORD t0 = ftl_job_now_ms();
+        const DWORD t0 = platform_now_ms();
 
         if (!ftl_ut_flush())
         {
             errors++;
         }
-        flush_ms = ftl_job_now_ms() - t0;
+        flush_ms = platform_now_ms() - t0;
     }
 
     err_wr = errors;

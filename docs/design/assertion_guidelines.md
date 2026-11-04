@@ -1297,7 +1297,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `metadata.h` 的 `metadata_dir_busy` 的 `dir != NULL` | 其 `@return` 注释**逐字写了**「false = 空闲（**或 dir == NULL**）」 | 辨析 B |
 | `bbt.h` 的 `bbt_is_bad` / `bbt_set_bad` | **UT 逐条钉住**：`test_ftl.c:1452` `bbt_is_bad(NULL, 5U) == 0`、`:1466` `bbt_set_bad(NULL, 1U)` 不崩 | **判据 4** |
 
-另注：`ftl_job.h` 的 `ftl_job_now_ms`（`platform == NULL || platform->time_us == NULL`）**不在本族** ——
+另注：`platform_now_ms`（`platform == NULL || platform->time_us == NULL`）**不在本族** ——
 它属 §二 的「运行时/依赖态」（判据 3），保留。
 
 #### 验证状态（R1）

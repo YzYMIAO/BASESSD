@@ -55,11 +55,11 @@
 #include "fault_inject.h" /* 测试镜像专属注入点（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入） */
 #include "fc.h"
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* ftl_job_now_ms（flush 触发 CP 的定时） */
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_* */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
 #include "log.h"
 #include "pending.h"
 #include "ssd_compiler.h"
+#include "timer.h"
 #include "wbuf.h"
 
 #include <string.h>
@@ -90,62 +90,19 @@ static ftl_dangling_ent_t s_dangling[FTL_DANGLING_SLOTS];
 static void ftl_dangling_check(ftl_ctx_t *ftl, DWORD l, DWORD old_pba, WORD new_g);
 static BYTE s_dangling_next;
 
-// 非预期 dangling 的限流（1 s 一行 + 被抑制条数）。
-static DWORD s_dangling_log_ms;
-/* cache 读命令失败（ECC/CRC/EMPTY 等）的限流时间戳：window 级错误通常成片出现，
- * 1 s 一条足够定位「错在哪类页、哪个 PBA」。 */
-static DWORD s_cache_rd_err_log_ms;
-static DWORD s_dangling_suppressed;
-
-// 待入账超时日志限流（单线程 superloop；多实例共享一个时间戳即可）。
-static DWORD s_confirm_log_ms;
-
-// 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时，5 s 打一行并给出被
-// 抑制条数；平台时钟缺失时退化为 64 次一行。各类别用独立实例（互不抑制）。
-typedef struct
-{
-    DWORD ms;         /* 上次打印时刻（0 = 尚未打印） */
-    DWORD suppressed; /* 自上次打印以来被抑制的条数 */
-} ftl_log_throttle_t;
-
-/**
- * @brief 日志限流判定：到期则放行并清零抑制计数，未到期则累计后拒绝。
- *
- * @param t 该日志类别的限流状态（`ms` / `suppressed` 由本函数更新）
- * @return true  本次应打印
- *         false 继续抑制
- *
- * @note 到期判据：平台时钟可用 ⇒ 距上次打印已达 FTL_JOB_LOG_SLOW_INTERVAL_MS；
- *       时钟缺失（now_ms == 0）⇒ 抑制满 FTL_JOB_LOG_COUNT_FALLBACK 条。
- */
-static bool ftl_log_throttle_due(ftl_log_throttle_t *t)
-{
-    // 时间优先，条数只作无时钟时的兜底——否则高频事件（如门控期间的背压）一秒
-    // 撞满 64 条，日志仍会成串。
-    return ftl_job_log_due(&t->ms, &t->suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS);
-}
-
-// flush 日志限流（RISK-USB-06；host 频繁 fsync 时避免刷屏）：
-// s_flush_log_ms —— `[FTL] flush took`（正常路径）；
-// s_flush_err    —— 失败 / 超时（异常路径）。
-static DWORD              s_flush_log_ms;
-static ftl_log_throttle_t s_flush_err_log;
-
-// 降级 region 的读错误日志（RISK-BOOT-18）：一次 host 校验 / 文件系统扫描会连续
-// 读同一 region 的数百个 LBA，逐条 LOGE 会写满 UART TX 环并拖慢设备。
-static ftl_log_throttle_t s_lost_log;
-
-// no-space 归因日志：无空间是终止态，host 会持续重试 ⇒ 逐组打两行会刷屏。
-static ftl_log_throttle_t s_nospace_log;
-
-// subop 永久失败日志：host 重试同一个坏 LBA / 降级 region 会反复触发 ⇒ 同样限流。
-static ftl_log_throttle_t s_subop_fail_log;
-
-// host cache program 批次失败：host 反复重试同一坏页时每个批次都会失败 ⇒ 限流。
-static ftl_log_throttle_t s_cache_wb_fail_log;
-
-// cache 序列 draining 兜底放锁的日志限流：强制放锁是异常路径，卡死时 5s 一行即可。
-static ftl_log_throttle_t s_seq_drain_stall_log;
+// 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时按间隔打一行；
+// 时钟缺失时由 log_rate_due 按条数兜底。统一使用 log.h / timer.h 的
+// log_ratelimit_t，本文件不再保留第二套限流类型（C9）。
+static log_ratelimit_t s_dangling_log;        /* BAD 退役块的 dangling 聚合（1 s） */
+static log_ratelimit_t s_cache_rd_err_log;    /* cache 读命令失败（1 s） */
+static log_ratelimit_t s_confirm_log;         /* 待入账超时（5 s） */
+static log_ratelimit_t s_flush_log;           /* flush 正常耗时（5 s） */
+static log_ratelimit_t s_flush_err_log;       /* flush 失败 / 超时（5 s） */
+static log_ratelimit_t s_lost_log;            /* 降级 region 读错误（5 s） */
+static log_ratelimit_t s_nospace_log;         /* 无空间归因（5 s） */
+static log_ratelimit_t s_subop_fail_log;      /* subop 永久失败（5 s） */
+static log_ratelimit_t s_cache_wb_fail_log;   /* cache program 批次失败（5 s） */
+static log_ratelimit_t s_seq_drain_stall_log; /* 序列 draining 兜底放锁（5 s） */
 
 /* ── 内部辅助 ── */
 
@@ -256,7 +213,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
             return;
         }
 
-        const DWORD now_ms = ftl_job_now_ms();
+        const DWORD now_ms = platform_now_ms();
 
         if ((now_ms == 0U) || (ftl->cache_stream.seq.idle_ms == 0U))
         {
@@ -270,7 +227,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
         if ((now_ms - ftl->cache_stream.seq.idle_ms) > FTL_CACHE_SEQ_DRAIN_STALL_MS)
         {
             // 兜底放锁是异常路径（命令 1s 没排空）：必须留现场，否则真卡死时无记录。
-            LOGW_IF(ftl_log_throttle_due(&s_seq_drain_stall_log), LOG_TAG_FTL "seq drain force-clear gi=%hu outstanding=%hu age=%lums (LUN gate reopened)\r\n", gi, ftl->pending.groups[gi].outstanding, now_ms - ftl->cache_stream.seq.idle_ms);
+            LOGW_IF(log_ratelimit_due(&s_seq_drain_stall_log), LOG_TAG_FTL "seq drain force-clear gi=%hu outstanding=%hu age=%lums (LUN gate reopened)\r\n", gi, ftl->pending.groups[gi].outstanding, now_ms - ftl->cache_stream.seq.idle_ms);
 
             ftl->cache_stream.seq.draining = false;
             ftl->cache_stream.seq.idle_ms  = 0U;
@@ -294,7 +251,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_t *ftl)
         return;
     }
 
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     if ((now_ms == 0U) || (ftl->cache_stream.seq.idle_ms == 0U))
     {
@@ -409,7 +366,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const ftl_page_desc_t *d)
 
     const DWORD mask = d->cw_bitmap & ((1U << FTL_LBA_PER_PAIR) - 1U);
 
-    if ((mask != 0U) && (l2p_is_ready(ftl->cache, d->lba) == false))
+    if ((mask != 0U) && (l2p_entries_ready(ftl->cache, d->lba, mask) == false))
     {
         // 待入账超时预算按**进展**延长（RISK-HOST-05 支路 (a)）：确有 region 加载在飞 ⇒ 这次
         // 等待是有限的（加载要么完成、要么三次失败后降级），不该把后台拥塞（CP 提交被
@@ -590,7 +547,7 @@ static void ftl_dangling_check(ftl_ctx_t *ftl, DWORD l, DWORD old_pba, WORD new_
     }
 
     // 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。
-    if (ftl_job_log_due(&s_dangling_log_ms, &s_dangling_suppressed, FTL_JOB_LOG_INTERVAL_MS))
+    if (log_ratelimit_due(&s_dangling_log))
     {
         const char *old_state = ftl_block_state_name(old_st);
         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g]));
@@ -676,7 +633,7 @@ static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
     // 待入账超时预算按**进展**延长（RISK-HOST-05 支路 (a)，判据见 ftl_confirm_progress_pending）。
     if (ftl_confirm_progress_pending(ftl) == true)
     {
-        pending->park_ms = ftl_job_now_ms();
+        pending->park_ms = platform_now_ms();
     }
 
     // 待入账：命令脱钩、组在飞数不递减；待入账项存 pending 表，推进由本文件的
@@ -697,7 +654,7 @@ static bool ftl_host_io_write_ok(ftl_ctx_t *ftl, pend_req_t *pending)
  */
 static void ftl_confirm_service(ftl_ctx_t *ftl)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -734,7 +691,7 @@ static void ftl_confirm_service(ftl_ctx_t *ftl)
 
             // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
             // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
-            if (ftl_job_log_due(&s_confirm_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS))
+            if (log_ratelimit_due(&s_confirm_log))
             {
                 // 只在真正要打日志时统计。日志必须报「同时有多少条在等」——只打
                 // 扫描到的第一条（常是 idx=0）会被误读成「只有一个 region 卡住」
@@ -1200,9 +1157,9 @@ static void ftl_cache_wr_mark_failed(ftl_ctx_t *ftl, ftl_cache_page_t *pg, const
 
     // region 降级**立即**置位（不等撤销）：FAILC 之后该页的 L2P 映射还在，读会指到
     // 编程失败的页；降级位让「撤销完成前」的读也报 IO_ERROR，而不是返回可疑页内容。
-    l2p_note_region_lost(ftl->cache, lba_to_global_region(pg->lba));
+    l2p_note_region_lost(ftl->cache, lba_to_global_region(pg->lba), pg->lba, pg->cw_bitmap);
 
-    LOGE_IF(ftl_log_throttle_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr failed lba=%lu (%s) — close hot SB\r\n", pg->lba, why);
+    LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr failed lba=%lu (%s) — close hot SB\r\n", pg->lba, why);
 }
 
 /**
@@ -1414,7 +1371,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const 
     // （RISK-CACHE-19：失败序列其后页一律不确认，否则 rebuild 的 page0 捷径会被击穿）。
     if (pending->cache_gen != ftl->cache_stream.seq.gen)
     {
-        LOGW_IF(ftl_log_throttle_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr late completion lba=%lu gen=%hhu stale — drop page\r\n", page_lba, pending->cache_gen);
+        LOGW_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr late completion lba=%lu gen=%hhu stale — drop page\r\n", page_lba, pending->cache_gen);
 
         pend_release_index(&ftl->pending, idx);
         pend_group_complete_subop_multi(&ftl->pending, owners, SSD_STATUS_IO_ERROR);
@@ -1455,7 +1412,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const 
         (void)fc_cmd_status_str(status, stbuf, sizeof(stbuf));
         ftl->cache_stream.wb_aborts++;
 
-        LOGE_IF(ftl_log_throttle_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr cmd failed lba=%lu st=%s\r\n", page_lba, stbuf);
+        LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr cmd failed lba=%lu st=%s\r\n", page_lba, stbuf);
 
         ftl_cache_wr_close_sb_if_open(ftl, pending->new_pba, pending->new_pba1);
         ftl->flags.deferred_error = true;
@@ -1803,7 +1760,7 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
                 // 破坏 31h/3Fh 管线。直接报组错误；后续成员照常完成。
                 // 失败原因（NAND_FAIL/UNC/CRC/MATA/EMPTY…）只在这条 completion 上有，
                 // 限流打出来：定位「缓存读指到了什么页」不靠猜。
-                LOGE_IF(ftl_job_log_due(&s_cache_rd_err_log_ms, NULL, FTL_JOB_LOG_INTERVAL_MS), LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
+                LOGE_IF(log_ratelimit_due(&s_cache_rd_err_log), LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
                 sub_status = SSD_STATUS_IO_ERROR;
             }
             else
@@ -1858,19 +1815,20 @@ void ftl_global_init(void)
     // `ftl` 结构体内，必须显式复位。`s_dangling_next` 虽然取模后不会越界，
     // 但 `s_dangling[].lbas` 的随机残留会污染 dangling 日志聚合。
     memset(s_dangling, 0, sizeof(s_dangling));
-    s_dangling_next       = 0U;
-    s_dangling_log_ms     = 0U;
-    s_cache_rd_err_log_ms = 0U;
-    s_dangling_suppressed = 0U;
-    s_confirm_log_ms      = 0U;
-    s_flush_log_ms        = 0U;
-    s_write_retry_logged  = 0U;
-    memset(&s_flush_err_log, 0, sizeof(s_flush_err_log));
-    memset(&s_lost_log, 0, sizeof(s_lost_log));
-    memset(&s_nospace_log, 0, sizeof(s_nospace_log));
-    memset(&s_subop_fail_log, 0, sizeof(s_subop_fail_log));
-    memset(&s_cache_wb_fail_log, 0, sizeof(s_cache_wb_fail_log));
-    memset(&s_seq_drain_stall_log, 0, sizeof(s_seq_drain_stall_log));
+    s_dangling_next      = 0U;
+    s_write_retry_logged = 0U;
+
+    // NOLOAD 段不清零：限流对象的 interval 必须在这里装好（last/suppressed 归零）。
+    log_ratelimit_init(&s_dangling_log, LOG_RATE_INTERVAL_MS);
+    log_ratelimit_init(&s_cache_rd_err_log, LOG_RATE_INTERVAL_MS);
+    log_ratelimit_init(&s_confirm_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_flush_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_flush_err_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_lost_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_nospace_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_subop_fail_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_cache_wb_fail_log, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&s_seq_drain_stall_log, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2003,7 +1961,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t
     ftl->trim.end       = 0U;
     ftl->trim.start_lba = 0U;
     ftl->trim.start_ms  = 0U;
-    ftl_deadline_clear(&ftl->trim.deadline);
+    timer_deadline_clear(&ftl->trim.deadline);
 
     // ├─ 绑定外部存储（storage 数组/挂载块由 HIL 按域提供）──
     // ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须逐表 memset。
@@ -2503,7 +2461,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
                 // ⇒ 必须报错，不能把它的内容当数据返回（RISK-CACHE-28）。
                 if (ftl_cache_wr_failed_covers(ftl, l) == true)
                 {
-                    LOGE_IF(ftl_log_throttle_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: cache page failed (FAIL_CACHE) — IO_ERROR\r\n", l);
+                    LOGE_IF(log_ratelimit_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: cache page failed (FAIL_CACHE) — IO_ERROR\r\n", l);
                     return FTL_ERROR;
                 }
 
@@ -2578,7 +2536,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
             // 回放已恢复的 LBA 有有效 PBA，不会走到这里。
             if (l2p_is_region_degraded(ftl->cache, lba_to_global_region(internal_lba)))
             {
-                LOGE_IF(ftl_log_throttle_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR\r\n", internal_lba);
+                LOGE_IF(log_ratelimit_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR\r\n", internal_lba);
                 return FTL_ERROR;
             }
 
@@ -2868,7 +2826,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     // 归因：GC 已判定「无收益 victim」时，这不是普通超时，是真正的无空间
                     // （free 见底且搬不动）。打印区分行，避免与瞬态背压混淆（RISK-GC-14）。
                     // 无空间是终止态、host 会持续重试 ⇒ 用限流器，避免逐请求刷屏。
-                    if (ftl_log_throttle_due(&s_nospace_log))
+                    if (log_ratelimit_due(&s_nospace_log))
                     {
                         if (ftl->mig_handle->state.benefit.nogain)
                         {
@@ -2888,7 +2846,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
         // FTL_ERROR：永久失败 → 弃未下发者，组最终报错（已下发的照常完成）。
         // host 会重试 ⇒ 限流打印（保留首个失败位置与抑制计数）。
-        LOGE_IF(ftl_log_throttle_due(&s_subop_fail_log), LOG_TAG_FTL "subop failed gi=%hhu next=%lu/%lu\r\n", gi, g->next, g->total);
+        LOGE_IF(log_ratelimit_due(&s_subop_fail_log), LOG_TAG_FTL "subop failed gi=%hhu next=%lu/%lu\r\n", gi, g->next, g->total);
         g->agg_status = SSD_STATUS_IO_ERROR;
         g->next       = g->total;
         ftl_cache_seq_close(ftl, gi);
@@ -3247,7 +3205,7 @@ cp_trigger_t ftl_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason, bool
 {
     cp_trigger_t trigger;
 
-    trigger.now_ms            = ftl_job_now_ms();
+    trigger.now_ms            = platform_now_ms();
     trigger.total_writes      = ftl->stats.total_writes;
     trigger.journal_seq       = jrn_sequence_get(ftl->journal);
     trigger.journal_watermark = jrn_watermark_get(ftl->journal);
@@ -3265,7 +3223,7 @@ cp_trigger_t ftl_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason, bool
  */
 static void ftl_flush_kick_cp(ftl_ctx_t *ftl)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     if ((now_ms == 0U) || ((now_ms - ftl->cp_handle->cp_state.last_cp_ms) < (CP_TIME_INTERVAL_MS / 2U)))
     {
@@ -3306,7 +3264,7 @@ void ftl_flush_begin(ftl_ctx_t *ftl)
     }
 
     ftl->flush.active   = true;
-    ftl->flush.start_ms = ftl_job_now_ms();
+    ftl->flush.start_ms = platform_now_ms();
     ftl_seq_reset(ftl);
 
     // 序列必须先退出，flush 的 L2P/journal 写才不会被门控。
@@ -3348,7 +3306,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     (void)wb_handle(ftl->wbuf, &wb_trigger, &wb_status);
 
     // ② L2P：继续 kick 本 owner 的脏行（受共享 credit 池门控）。
-    l2p_owner_flush_kick(ftl->cache, die, L2P_CACHE_SIZE);
+    l2p_owner_flush_kick(ftl->cache, die, L2P_CACHE_SIZE, true);
 
     // ③ Journal：推进异步刷页 job。
     const jrn_trigger_e jrn_trigger = JRN_TRIGGER_FLUSH;
@@ -3372,7 +3330,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     const bool fail             = jrn_fail || wb_fail;
 
     // 墙钟上限：元数据侧真卡死时 host FLUSH 不能永不完成（见 FTL_FLUSH_TIMEOUT_MS）。
-    const DWORD flush_ms = ftl_job_now_ms() - ftl->flush.start_ms;
+    const DWORD flush_ms = platform_now_ms() - ftl->flush.start_ms;
     const bool  timeout  = (ftl->flush.start_ms != 0U) && (flush_ms >= FTL_FLUSH_TIMEOUT_MS);
 
     if (((wb_done && l2p_done && jrn_done && (confirm_pending == false) && (cache_wb_pending == false) && (cache_wr_active == false)) || fail || timeout) == false)
@@ -3386,18 +3344,26 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     {
         // best-effort：journal 页写/擦或 wbuf 编程持续失败。CP 成功后
         // jrn_write_failure_clear 清 journal 标志；wbuf FAILED 由下一次成功操作清。
-        LOGW_IF(ftl_log_throttle_due(&s_flush_err_log), LOG_TAG_FTL "flush: write failure pending (jrn=%d wb=%d) — complete best-effort\r\n", jrn_fail, wb_fail);
+        LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush: write failure pending (jrn=%d wb=%d) — complete best-effort\r\n", jrn_fail, wb_fail);
     }
     else if (timeout)
     {
-        LOGW_IF(ftl_log_throttle_due(&s_flush_err_log), LOG_TAG_FTL "flush timeout %lums (wb=%d l2p=%d jrn=%d) — best-effort complete\r\n", flush_ms, wb_done, l2p_done, jrn_done);
+        // dirty CMT 仍在 RAM：SYNCHRONIZE CACHE 没有真正落定，必须留下可见证据。
+        if (ftl->cache->cmt_dirty_owner[die] != 0U)
+        {
+            LOGE_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush timeout %lums with %lu dirty CMT entr(ies) — mappings not persisted\r\n", flush_ms, ftl->cache->cmt_dirty_owner[die]);
+        }
+        else
+        {
+            LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush timeout %lums (wb=%d l2p=%d jrn=%d) — best-effort complete\r\n", flush_ms, wb_done, l2p_done, jrn_done);
+        }
     }
 
     ftl_flush_kick_cp(ftl);
 
     // 耗时日志限流 5 s（单线程 superloop；多实例共享一个时间戳即可）。host 若
     // 频繁 fsync，逐次打印会刷屏。
-    LOGW_IF((ftl->flush.start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && ftl_job_log_due(&s_flush_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
+    LOGW_IF((ftl->flush.start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && log_ratelimit_due(&s_flush_log), LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
 
     return true;
 }
@@ -3418,24 +3384,24 @@ static ftl_status_e ftl_trim_defer(ftl_ctx_t *ftl, BYTE processed)
 {
     if (processed != 0U)
     {
-        ftl_deadline_clear(&ftl->trim.deadline);
+        timer_deadline_clear(&ftl->trim.deadline);
         jrn_watermark_update(ftl->journal);
         return FTL_AGAIN;
     }
 
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     if (now_ms != 0U)
     {
         if (ftl->trim.deadline.armed == false)
         {
-            ftl_deadline_arm(&ftl->trim.deadline, now_ms, FTL_TRIM_TIMEOUT_MS);
+            timer_deadline_arm(&ftl->trim.deadline, now_ms, FTL_TRIM_TIMEOUT_MS);
         }
-        else if (ftl_deadline_expired(&ftl->trim.deadline, now_ms))
+        else if (timer_deadline_expired(&ftl->trim.deadline, now_ms))
         {
             LOGE(LOG_TAG_FTL "trim: wait timeout lba=%lu\r\n", ftl->trim.lba);
             ftl->trim.active = false;
-            ftl_deadline_clear(&ftl->trim.deadline);
+            timer_deadline_clear(&ftl->trim.deadline);
             return FTL_ERROR;
         }
     }
@@ -3473,9 +3439,9 @@ ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count)
     ftl->trim.lba       = lba;
     ftl->trim.end       = lba + count;
     ftl->trim.start_lba = lba;
-    ftl->trim.start_ms  = ftl_job_now_ms();
+    ftl->trim.start_ms  = platform_now_ms();
     ftl->trim.active    = true;
-    ftl_deadline_clear(&ftl->trim.deadline);
+    timer_deadline_clear(&ftl->trim.deadline);
     ftl_seq_reset(ftl);
 
     // 与 flush 同口径：TRIM 要写 Journal/L2P，序列必须先退出。
@@ -3573,20 +3539,20 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
 
     if (processed != 0U)
     {
-        ftl_deadline_clear(&ftl->trim.deadline);
+        timer_deadline_clear(&ftl->trim.deadline);
         jrn_watermark_update(ftl->journal);
     }
 
     if (ftl->trim.lba >= ftl->trim.end)
     {
         const DWORD n       = ftl->trim.end - ftl->trim.start_lba;
-        const DWORD elapsed = (ftl->trim.start_ms != 0U) ? ftl_job_age_ms(&ftl->trim.start_ms) : 0U;
+        const DWORD elapsed = (ftl->trim.start_ms != 0U) ? timer_age_ms(&ftl->trim.start_ms) : 0U;
 
         LOGI(LOG_TAG_TRIM "done n=%lu elapsed=%lums\r\n", n, elapsed);
         ftl->trim.active    = false;
         ftl->trim.start_lba = 0U;
         ftl->trim.start_ms  = 0U;
-        ftl_deadline_clear(&ftl->trim.deadline);
+        timer_deadline_clear(&ftl->trim.deadline);
         return FTL_OK;
     }
 

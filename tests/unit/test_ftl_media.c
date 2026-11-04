@@ -11,13 +11,13 @@
 #include "checkpoint.h"
 #include "fault_inject.h" /* debug-only 注入（ISS-FTL-16） */
 #include "ftl_fc_interface.h"
-#include "ftl_job.h"
 #include "ftl_ut_common.h"
 #include "journal.h"
 #include "l2p_cache.h"
 #include "migrate.h"
 #include "munit.h"
 #include "power_failure_recovery.h"
+#include "timer.h"
 #include "wear_leveling.h"
 
 #include <stdio.h>
@@ -348,13 +348,13 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
      * 本用例锚定“CP 落盘后的 TRIM 不复活”这一明确持久化点。 */
     {
         ftl_ctx_t  *f  = ftl_ut_live();
-        const DWORD t0 = ftl_job_now_ms();
+        const DWORD t0 = platform_now_ms();
 
         jrn_checkpoint_request(f->journal);
 
         /* 等 IDLE 且「至少有一次 CP 晚于用例起点 cp0」：flush/trim 可能已经自然落过一次 CP，
          * 此时再 request 可能无事可做（序号不前进），所以基准必须取用例起点而不是 request 前。 */
-        while (((f->cp_handle->cp_state.sequence <= cp0) || (f->cp_handle->phase != CP_IDLE)) && ((ftl_job_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
+        while (((f->cp_handle->cp_state.sequence <= cp0) || (f->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
         {
             ftl_service_pump();
             ftl_service(f);
@@ -509,14 +509,14 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
         ftl_ut_trace_detail("wal order: seq_after_write=%lu persisted=%lu; all resident dirty lines <= watermark", seq_after_write, persisted);
     }
 
-    const DWORD t0 = ftl_job_now_ms();
+    const DWORD t0 = platform_now_ms();
 
     jrn_checkpoint_request(ftl->journal);
 
     /* 等「序号推进 + job 回到 IDLE」：序号在 Header prep 时就会 ++，只等序号会在 Header
      * 尚未落盘时提前退出。⚠ 下面 find_latest 会把 cp_state.sequence 覆盖为它找到的旧记录
      * 的序号，所以「先比较、后调用」，且比较基准取调用前的 cp_target（否则断言恒真）。 */
-    while (((ftl->cp_handle->cp_state.sequence <= cp0) || (ftl->cp_handle->phase != CP_IDLE)) && ((ftl_job_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
+    while (((ftl->cp_handle->cp_state.sequence <= cp0) || (ftl->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
     {
         ftl_service_pump();
         ftl_service(ftl);
@@ -579,12 +579,12 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
 
     const DWORD moved0 = ftl->mig_handle->moved_count;
     const DWORD rec0   = ftl->mig_handle->reclaimed_count;
-    const DWORD t0     = ftl_job_now_ms();
+    const DWORD t0     = platform_now_ms();
 
     mig_gc_request_urgent(ftl->mig_handle);
 
     while (((ftl->mig_handle->moved_count == moved0) && (ftl->mig_handle->reclaimed_count == rec0)) &&
-           ((ftl_job_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 2U)))
+           ((platform_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 2U)))
     {
         ftl_service_pump();
         ftl_service(ftl);
@@ -675,15 +675,15 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     m->wl_last_writes  = ftl->total_writes;
 
     const DWORD moved0 = m->moved_count;
-    const DWORD t0     = ftl_job_now_ms();
+    const DWORD t0     = platform_now_ms();
 
     mig_handle(m, BG_LEVEL_IDLE); /* 发布档位（并推进/收尾） */
-    mig_eval(m);                  /* timer 表的周期求值入口（内部读 ftl_job_now_ms） */
+    mig_eval(m);                  /* timer 表的周期求值入口（内部读 platform_now_ms） */
 
     munit_assert_true(m->active);
     munit_assert_int(m->kind, ==, MIG_KIND_WL);
 
-    while ((m->moved_count == moved0) && ((ftl_job_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 3U)))
+    while ((m->moved_count == moved0) && ((platform_now_ms() - t0) < (FTL_UT_IO_TIMEOUT_MS * 3U)))
     {
         mig_handle(m, BG_LEVEL_IDLE);
         ftl_service_pump();
@@ -1182,10 +1182,10 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
     /* ② 请求 Checkpoint：它要先刷 Journal 页，注入让该页写失败。 */
     jrn_checkpoint_request(ftl->journal);
 
-    const DWORD t0        = ftl_job_now_ms();
+    const DWORD t0        = platform_now_ms();
     bool        fail_seen = false;
 
-    while ((fail_seen == false) && ((ftl_job_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
+    while ((fail_seen == false) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
     {
         ftl_service_pump();
         ftl_service(ftl);
@@ -1208,9 +1208,9 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
     fi_reset();
     jrn_checkpoint_request(ftl->journal);
 
-    const DWORD t1 = ftl_job_now_ms();
+    const DWORD t1 = platform_now_ms();
 
-    while (jrn_has_write_failure(ftl->journal) && ((ftl_job_now_ms() - t1) < FTL_UT_IO_TIMEOUT_MS))
+    while (jrn_has_write_failure(ftl->journal) && ((platform_now_ms() - t1) < FTL_UT_IO_TIMEOUT_MS))
     {
         ftl_service_pump();
         ftl_service(ftl);

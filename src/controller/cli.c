@@ -549,6 +549,10 @@ static int uart_cli_info(int argc, char *argv[])
         (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
         (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->job.batch_jobs, ftl->mig_handle->job.batch_pages, ftl->mig_handle->job.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
 
+        /* entry 级 CMT：读/写命中率 + dirty 写回压力。 */
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] cmt hit=%lu/%lu wr=%lu/%lu dirty=%lu wb=%lu ev=%lu/%lu defer=%lu\r\n", ch, ce, lun, ftl->cache->stats.cmt_hits, ftl->cache->stats.cmt_misses, ftl->cache->stats.cmt_wr_hits, ftl->cache->stats.cmt_wr_misses, ftl->cache->stats.cmt_dirty, ftl->cache->stats.cmt_writebacks, ftl->cache->stats.cmt_evict_clean, ftl->cache->stats.cmt_evict_dirty, ftl->cache->stats.cmt_wb_defer);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
+
         /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
          * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
         const md_dir_cache_t *md  = ftl->metadata_dir;

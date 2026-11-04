@@ -1029,11 +1029,15 @@ static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr
         }
 
         // ② Journal 回放：映射写入 L2P Cache；块表可用时同步维护 valid 增量。
+        // 回放必须走 region line：PFR 随后用 l2p_line_invalidate 作废不在 CP bitmap
+        // 的 CLEAN 行；若回放把映射写进 dirty CMT，会被这里误清。回放期 CMT 全程旁路。
+        l2p_cmt_set_enabled(ftl->cache, false);
         const bool replay_ok = (jrn_replay(ftl->journal, ftl->cache, cp->journal_sequence, &entry_count, (tbl->restored != false) ? &block_ctx : NULL) == FTL_OK);
-        *out_entries         = entry_count;
-        out->replay_ok       = replay_ok;
-        out->fail_pba        = block_ctx.fail_pba;
-        out->fail_reason     = block_ctx.fail_reason;
+        l2p_cmt_set_enabled(ftl->cache, true);
+        *out_entries     = entry_count;
+        out->replay_ok   = replay_ok;
+        out->fail_pba    = block_ctx.fail_pba;
+        out->fail_reason = block_ctx.fail_reason;
 
         if (replay_ok == false)
         {

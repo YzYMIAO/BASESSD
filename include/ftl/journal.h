@@ -37,9 +37,9 @@
 
 #include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_job.h"    /* ftl_heartbeat_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
+#include "log.h"
 #include "metadata.h"    /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
 #include "nand_config.h" /* PAGE_MAIN_SIZE */
 
@@ -141,7 +141,7 @@ typedef struct
     BYTE            from_page;
     DWORD           waddr;
     BYTE            page_buf[JRN_PAGE_SIZE];
-    ftl_heartbeat_t hb;
+    log_heartbeat_t hb;
 } jrn_job_t;
 
 typedef struct

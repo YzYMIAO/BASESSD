@@ -114,4 +114,60 @@ DWORD                                       log_get_write_failure_count(void);
 #    define LOGD_IF(cond, ...) ((void)0)
 #endif
 
+/* ── 日志节拍 / 限流 ──
+ *
+ * 异步 job 卡在哪个 phase 没有阻塞调用者能看见；统一心跳把它变成一行日志。
+ * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死。限流用于「同类异常短时间内重复出现」
+ * 的场景，避免写满 UART TX 环。
+ *
+ * 时钟由 platform_now_ms() 提供（log.c 内部读取，本头不依赖平台头）。 */
+
+/* 心跳节拍：正常 job 远快于 1 s ⇒ 平时静默；超过 SLOW_AFTER 后降到 5 s/行，
+ * 既保留卡死证据，又把最坏情况压到 ~1 行/5 s。 */
+#define LOG_RATE_INTERVAL_MS      (1000U)
+#define LOG_RATE_SLOW_AFTER_MS    (5000U)
+#define LOG_RATE_SLOW_INTERVAL_MS (5000U)
+
+/* job 观测心跳：起止显式（active），不靠 start_ms == 0 判“未开始”。 */
+typedef struct
+{
+    DWORD start_ms;
+    DWORD log_ms;
+    bool  active;
+} log_heartbeat_t;
+
+void  log_heartbeat_begin(log_heartbeat_t *hb);
+bool  log_heartbeat_due(log_heartbeat_t *hb);
+void  log_heartbeat_end(log_heartbeat_t *hb);
+DWORD log_heartbeat_age_ms(const log_heartbeat_t *hb);
+
+/* 日志限流：last/interval + 被抑制条数（无时钟时按条数兜底）。 */
+typedef struct
+{
+    DWORD last_ms;
+    DWORD interval_ms;
+    DWORD suppressed;
+} log_ratelimit_t;
+
+void log_ratelimit_init(log_ratelimit_t *rl, DWORD interval_ms);
+bool log_ratelimit_due(log_ratelimit_t *rl);
+
+/**
+ * @brief 只报计数的模块用的心跳（没有“单 job”结构）
+ *
+ * @param log_ms 上次打点时刻（进出参；到点时更新为当前时间）
+ * @return true 到点，调用方打一行；false 未到点或首次仅记基准
+ */
+bool log_tick(DWORD *log_ms);
+
+/**
+ * @brief 日志限流：有时间源时按时间（首次立即放行），无时钟时按条数兜底
+ *
+ * @param last_ms     上次打印时刻（进出参；0 = 尚未打印）
+ * @param count       被抑制条数（进出参；NULL = 不做条数兜底）
+ * @param interval_ms 时间间隔（毫秒）
+ * @return true 本次应打印；false 继续抑制
+ */
+bool log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms);
+
 #endif /* LOG_H */

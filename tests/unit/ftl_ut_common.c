@@ -13,7 +13,6 @@
 #include "cli.h" /* g_ctrl */
 #include "fault_inject.h"
 #include "fc_interface.h"
-#include "ftl_job.h"
 #include "ftl_op.h"
 #include "journal.h"
 #include "metadata_job.h"
@@ -23,6 +22,7 @@
 #include "platform.h"
 #include "power_failure_recovery.h"
 #include "ssd_compiler.h"
+#include "timer.h"
 #include "wbuf.h"
 
 #include <stdbool.h>
@@ -234,7 +234,7 @@ static volatile ssd_status_e s_io_status;
  * ⚠ 返回时 `bg_suspend` 仍为 1：调用者按需恢复。 */
 void ftl_ut_quiesce(ftl_ctx_t *ftl)
 {
-    const DWORD t0 = ftl_job_now_ms();
+    const DWORD t0 = platform_now_ms();
 
     ftl->bg_suspend = 1U;
 
@@ -252,7 +252,7 @@ void ftl_ut_quiesce(ftl_ctx_t *ftl)
             return;
         }
 
-        munit_assert_uint32(ftl_job_now_ms() - t0, <, FTL_UT_IO_TIMEOUT_MS);
+        munit_assert_uint32(platform_now_ms() - t0, <, FTL_UT_IO_TIMEOUT_MS);
     }
 }
 
@@ -338,14 +338,14 @@ void ftl_ut_media_format(void)
 static bool ftl_ut_io_wait(DWORD timeout_ms)
 {
     ftl_ctx_t  *ftl = ftl_ut_live();
-    const DWORD t0  = ftl_job_now_ms();
+    const DWORD t0  = platform_now_ms();
 
     while (s_io_done == 0U)
     {
         ftl_service_pump();
         ftl_service(ftl);
 
-        if ((ftl_job_now_ms() - t0) > timeout_ms)
+        if ((platform_now_ms() - t0) > timeout_ms)
         {
             return false;
         }
@@ -400,7 +400,7 @@ bool ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
 bool ftl_ut_flush(void)
 {
     ftl_ctx_t  *ftl = ftl_ut_live();
-    const DWORD t0  = ftl_job_now_ms();
+    const DWORD t0  = platform_now_ms();
 
     ftl_flush_begin(ftl);
 
@@ -409,7 +409,7 @@ bool ftl_ut_flush(void)
         ftl_service_pump();
         ftl_service(ftl);
 
-        if ((ftl_job_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
+        if ((platform_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
         {
             return false;
         }
@@ -420,7 +420,7 @@ bool ftl_ut_flush(void)
 bool ftl_ut_trim(DWORD lba, DWORD count)
 {
     ftl_ctx_t  *ftl = ftl_ut_live();
-    const DWORD t0  = ftl_job_now_ms();
+    const DWORD t0  = platform_now_ms();
 
     if (ftl_trim_begin(ftl, lba, count) != FTL_OK)
     {
@@ -443,7 +443,7 @@ bool ftl_ut_trim(DWORD lba, DWORD count)
         ftl_service_pump();
         ftl_service(ftl);
 
-        if ((ftl_job_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
+        if ((platform_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
         {
             return false;
         }

@@ -77,8 +77,8 @@ SECTIONS
     KEEP(*release/obj/ftl/metadata_job.o(.text .text.*))
     KEEP(*release/obj/ftl/migrate.o(.text .text.*))
     KEEP(*release/obj/ftl/gc.o(.text .text.*))
-    KEEP(*release/obj/ftl/wear_leveling.o(.text .text.*))
-    KEEP(*release/obj/ftl/bg_scheduler.o(.text .text.*))
+    /* wear_leveling / bg_scheduler 是纯后台路径，放 Flash 运行；写回 CMT 让
+     * l2p_cache.o 增大后，ITCM 优先留给 host 数据面。 */
     KEEP(*release/obj/ftl/ftl_op.o(.text .text.*))
     KEEP(*release/obj/fc/fc_interface.o(.text .text.*))
     KEEP(*release/obj/fc/fc_queue.o(.text .text.*))

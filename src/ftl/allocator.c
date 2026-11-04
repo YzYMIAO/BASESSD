@@ -166,13 +166,16 @@ void alc_free_push(alc_t *alloc, WORD gblock)
 /**
  * @brief 从 Free Pool 移除一个块（唯一出池点，swap-remove）
  *
- * 不在池内是文档化 no-op；出池只校验 state == FREE，不赋新态。
+ * 出池即置 NONE（「FREE ⟺ 在池」由本闸门单点维护），随后由调用者赋目标态
+ * （OPEN / LOG / CLOSED / BAD）。不在池内是文档化 no-op，状态不变。
  *
  * @param alloc  分配器
  * @param gblock 全局块号
  */
 void alc_free_remove(alc_t *alloc, WORD gblock)
 {
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
     for (WORD i = 0U; i < alloc->free_count; i++)
     {
         if (alloc->free_blocks[i] == gblock)
@@ -190,9 +193,16 @@ void alc_free_remove(alc_t *alloc, WORD gblock)
                 }
             }
             alloc->free_blocks[i] = alloc->free_blocks[--alloc->free_count];
+
+            // 出池即脱离 FREE：目标状态由调用者在返回后赋值。若在这里保持 FREE，
+            // 「FREE ⟺ 在池」在两次调用之间不成立，漏赋态的块会永久漏账。
+            ftl_block_set_state(&alloc->blocks[gblock], FTL_BLOCK_STATE_NONE);
             return;
         }
     }
+
+    // 未命中：不在池的块不可能是 FREE，否则池账与 BST 已分叉。
+    ASSERT(ftl_block_state(&alloc->blocks[gblock]) != FTL_BLOCK_STATE_FREE);
 }
 
 /**
@@ -446,8 +456,7 @@ bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane)
             break; /* 该 plane 没有可补的空闲块 */
         }
 
-        alc_free_remove(alloc, pick);
-        ftl_block_set_state(&alloc->blocks[pick], FTL_BLOCK_STATE_NONE);
+        alc_free_remove(alloc, pick); /* 出池闸门已置 NONE */
 
         if (alc_spare_push(alloc, plane, pick) == false)
         {
@@ -755,10 +764,20 @@ void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD p
  *
  * @param alloc       分配器
  * @param temperature 温度流
+ *
+ * @note next_page == 0 时拒绝并留日志：BYTE 下溢会变成 255，而 PBA 的页域只有
+ * 6 bit（PAGES_PER_BLOCK=64）⇒ 静默落到本块最后一页，形成二次编程。
  */
 void alc_super_open_rewind_pair(alc_t *alloc, BYTE temperature)
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    ASSERT(sb->next_page > 0U);
+    if (sb->next_page == 0U)
+    {
+        LOGE(LOG_TAG_FTL "rewind without alloc_pair, ignored\r\n");
+        return;
+    }
 
     sb->next_page--;
 }

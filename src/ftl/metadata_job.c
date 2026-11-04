@@ -38,10 +38,10 @@
 #include "fc.h"
 #include "ftl.h" /* ftl_ctx_t（完成回调签名） */
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_METADATA */
 #include "log.h"
 #include "onfi_1_0.h"
+#include "timer.h"
 
 #include <string.h>
 
@@ -294,7 +294,7 @@ static DWORD s_abort_log_n;
 static bool md_abort_log_is_due(void)
 {
     // 时间优先，条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
-    return ftl_job_log_due(&s_abort_log_ms, &s_abort_log_n, FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    return log_rate_due(&s_abort_log_ms, &s_abort_log_n, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -340,7 +340,7 @@ static void md_handle_abort(md_dir_cache_t *dir)
 static bool md_handle_stall(md_dir_cache_t *dir)
 {
     md_handle_t *j      = &dir->handle;
-    const DWORD  now_ms = ftl_job_now_ms();
+    const DWORD  now_ms = platform_now_ms();
 
     if (now_ms == 0U)
     {
@@ -351,18 +351,18 @@ static bool md_handle_stall(md_dir_cache_t *dir)
     // 收尾（空闲守卫 1 s 兜底），不应当作提交卡死而中止 job（也会刷屏）。
     if (ftl_op_bg_submit_deferred() == true)
     {
-        ftl_deadline_clear(&j->submit_deadline);
+        timer_deadline_clear(&j->submit_deadline);
         return false;
     }
 
     if (j->submit_deadline.armed == false)
     {
-        ftl_deadline_arm(&j->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
+        timer_deadline_arm(&j->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
         return false;
     }
-    if (ftl_deadline_expired(&j->submit_deadline, now_ms))
+    if (timer_deadline_expired(&j->submit_deadline, now_ms))
     {
-        LOGW_IF(ftl_job_log_due(&s_stall_log_ms, NULL, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS);
+        LOGW_IF(log_rate_due(&s_stall_log_ms, NULL, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS);
         j->timed_out     = true;
         j->timeout_phase = j->phase;
         md_handle_abort(dir);
@@ -399,7 +399,7 @@ static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
         return FTL_AGAIN;
     }
 
-    ftl_deadline_clear(&j->submit_deadline);
+    timer_deadline_clear(&j->submit_deadline);
     return FTL_OK;
 }
 
@@ -631,7 +631,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->moved       = 0U;
     j->slot        = NAND_PBA_INVALID;
     j->dir_ckpt_ok = false;
-    ftl_deadline_clear(&j->submit_deadline);
+    timer_deadline_clear(&j->submit_deadline);
     j->phase = MD_JOB_CP_READ;
 
     LOGD(LOG_TAG_META "compact start victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur.page[victim_plane]);
@@ -841,19 +841,19 @@ static void md_handle_step(md_dir_cache_t *dir)
     alc_t       *alloc = dir->alloc;
     md_handle_t *j     = &dir->handle;
 
-    // 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age。
+    // 心跳（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/age。
     // 默认档（INFO）不打印；需要现场观测时 `log level debug`。
     if (j->phase == MD_JOB_IDLE)
     {
-        ftl_heartbeat_end(&j->hb);
+        log_heartbeat_end(&j->hb);
     }
     else if (j->hb.active == false)
     {
-        ftl_heartbeat_begin(&j->hb);
+        log_heartbeat_begin(&j->hb);
     }
-    else if (ftl_heartbeat_due(&j->hb))
+    else if (log_heartbeat_due(&j->hb))
     {
-        LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim.count, ftl_heartbeat_age_ms(&j->hb));
+        LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim.count, log_heartbeat_age_ms(&j->hb));
     }
 
     for (;;)

@@ -28,8 +28,8 @@
 #include "pending.h"
 
 #include "assertion.h"
-#include "ftl_job.h" /* ftl_job_now_ms（confirm 待入账超时） */
 #include "log.h"
+#include "timer.h"
 
 #include <string.h>
 
@@ -373,7 +373,7 @@ WORD pend_group_get_count(const pending_ctx_t *table)
  */
 static void pend_note_underflow(const char *who, WORD gi)
 {
-    LOGE_IF(ftl_job_log_due(&s_group_underflow_log_ms, &s_group_underflow_n, FTL_JOB_LOG_SLOW_INTERVAL_MS), LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
+    LOGE_IF(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
 }
 
 /**
@@ -540,7 +540,7 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
     pend_detach_command(table, pending);
     pending->op      = PENDING_OP_WRITE_CONFIRM;
     pending->owners  = owners;
-    pending->park_ms = ftl_job_now_ms();
+    pending->park_ms = platform_now_ms();
 }
 
 /**

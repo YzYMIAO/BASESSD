@@ -41,7 +41,6 @@
 #include "fc.h"               /* fc_command_release / fc_command_id_to_command */
 #include "ftl.h"              /* ftl_ctx_t（仅完成服务的路由断言） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
-#include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
 #include "ftl_type.h"         /* BG_LEVEL_* */
 #include "gc.h"               /* gc_select_victim / gc_decode_cw_lba */
@@ -277,9 +276,9 @@ static ftl_status_e mig_read_submit(mig_handle_t *m)
     }
 
     // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    ftl_deadline_clear(&m->job.submit_deadline);
-    ftl_deadline_clear(&m->job.external_deadline);
-    ftl_deadline_clear(&m->job.command_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.command_deadline);
     return FTL_OK;
 }
 
@@ -326,9 +325,9 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
         }
 
         // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-        ftl_deadline_clear(&m->job.submit_deadline);
-        ftl_deadline_clear(&m->job.external_deadline);
-        ftl_deadline_clear(&m->job.command_deadline);
+        timer_deadline_clear(&m->job.submit_deadline);
+        timer_deadline_clear(&m->job.external_deadline);
+        timer_deadline_clear(&m->job.command_deadline);
         return FTL_OK;
     }
 
@@ -352,9 +351,9 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
     }
 
     // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    ftl_deadline_clear(&m->job.submit_deadline);
-    ftl_deadline_clear(&m->job.external_deadline);
-    ftl_deadline_clear(&m->job.command_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.command_deadline);
     return FTL_OK;
 }
 
@@ -391,9 +390,9 @@ static ftl_status_e mig_erase_submit(mig_handle_t *m)
     }
 
     // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    ftl_deadline_clear(&m->job.submit_deadline);
-    ftl_deadline_clear(&m->job.external_deadline);
-    ftl_deadline_clear(&m->job.command_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.command_deadline);
     return FTL_OK;
 }
 
@@ -448,7 +447,7 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
     m->job.phase = (st.valid_cw == 0U) ? MIG_ERASE : MIG_READ;
 
     // 显式记 job 起点：短 job 的 elapsed 不能靠首次心跳才起算。
-    ftl_heartbeat_begin(&m->job.hb);
+    log_heartbeat_begin(&m->job.hb);
 
     // 每个真实 victim 只在 finish 打一行 move（触发/源/目的/结果）；
     // 空块（vcw==0）完全不进日志，由 GC 会话 noop= 聚合。
@@ -725,7 +724,7 @@ static bool mig_abort_log_is_due(void)
 {
     // 时间优先（1 行/5 s），条数只作无时钟时的兜底：free=1 的 abort 循环一秒能撞
     // 几十次，把 count>=64 当主判据仍会刷屏。
-    return ftl_job_log_due(&s_abort_log_ms, &s_abort_suppressed, FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    return log_rate_due(&s_abort_log_ms, &s_abort_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -755,7 +754,7 @@ static void mig_job_abort(mig_handle_t *m, const char *reason)
     if ((m->job.kind == MIG_KIND_GC) && m->state.session.active)
     {
         m->state.session.aborted++;
-        m->state.session.last_ms = ftl_job_now_ms();
+        m->state.session.last_ms = platform_now_ms();
     }
 
     m->job.aborted = true;
@@ -772,9 +771,9 @@ static void mig_job_abort(mig_handle_t *m, const char *reason)
  * @return true  —— 已越过 timeout；
  *         false —— 未超时 / 刚开始计时 / 平台时钟缺失（deadline 不生效）。
  */
-static bool mig_deadline_expired(ftl_deadline_t *d, DWORD timeout_ms)
+static bool mig_deadline_expired(timer_deadline_t *d, DWORD timeout_ms)
 {
-    const DWORD now = ftl_job_now_ms();
+    const DWORD now = platform_now_ms();
 
     if (now == 0U)
     {
@@ -782,10 +781,10 @@ static bool mig_deadline_expired(ftl_deadline_t *d, DWORD timeout_ms)
     }
     if (d->armed == false)
     {
-        ftl_deadline_arm(d, now, timeout_ms);
+        timer_deadline_arm(d, now, timeout_ms);
         return false;
     }
-    return ftl_deadline_expired(d, now);
+    return timer_deadline_expired(d, now);
 }
 
 /**
@@ -801,7 +800,7 @@ static bool mig_job_stall(mig_handle_t *m)
     // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
     if (ftl_op_bg_submit_deferred() == true)
     {
-        ftl_deadline_clear(&m->job.submit_deadline);
+        timer_deadline_clear(&m->job.submit_deadline);
         return false;
     }
 
@@ -838,7 +837,7 @@ static bool mig_job_wait(mig_handle_t *m, const char *reason)
     //   （与 mig_job_stall 的提交背压判据区分开）。
     if (ftl_op_cache_seq_active() == true)
     {
-        ftl_deadline_clear(&m->job.external_deadline);
+        timer_deadline_clear(&m->job.external_deadline);
         return false;
     }
 
@@ -1007,7 +1006,7 @@ static void mig_job_finish(mig_handle_t *m)
                 m->state.session.noop++;
             }
         }
-        m->state.session.last_ms = ftl_job_now_ms();
+        m->state.session.last_ms = platform_now_ms();
     }
 
 #if defined(DEBUG)
@@ -1020,7 +1019,7 @@ static void mig_job_finish(mig_handle_t *m)
         const WORD  src1    = (PLANE_NUM > 1U) ? mig_victim_get_gblock(m, 1U) : UINT16_MAX;
         const WORD  dst0    = mig_dst_get_gblock(m, 0U);
         const WORD  dst1    = (PLANE_NUM > 1U) ? mig_dst_get_gblock(m, 1U) : UINT16_MAX;
-        const DWORD elapsed = ftl_heartbeat_age_ms(&m->job.hb);
+        const DWORD elapsed = log_heartbeat_age_ms(&m->job.hb);
 
         LOGD(LOG_TAG_MIG "move k=%s r=%s trig=0x%02lx src0=%hu src1=%hu dst0=%hu dst1=%hu v=%hu mv=%lu t=%lums\r\n", mig_kind_name(m->job.kind), m->job.log_reason, m->job.log_triggers, src0, src1, dst0, dst1, m->job.job_valid_cw, m->job.migrated, elapsed);
     }
@@ -1032,10 +1031,10 @@ static void mig_job_finish(mig_handle_t *m)
     m->job.decode_ok      = false;
     m->job.write_ok       = false;
     m->job.closed_removed = false;
-    ftl_deadline_clear(&m->job.submit_deadline);
-    ftl_deadline_clear(&m->job.external_deadline);
-    ftl_deadline_clear(&m->job.command_deadline);
-    ftl_heartbeat_end(&m->job.hb);
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.command_deadline);
+    log_heartbeat_end(&m->job.hb);
     m->job.dummy_page0        = false;
     m->job.dummy_pba          = NAND_PBA_INVALID;
     m->job.batch_mode         = false;
@@ -1232,7 +1231,7 @@ static bool mig_batch_prepare_commit(mig_handle_t *m)
         return false;
     }
 
-    ftl_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
     return true;
 }
 
@@ -1473,7 +1472,7 @@ static bool mig_read_step(mig_handle_t *m)
             // 「选中 → 目的分配失败 → abort」（RISK-GC-14）。
             if (m->job.kind == MIG_KIND_GC)
             {
-                mig_gc_nogain_note(m, GC_BENEFIT_EMERGENCY, m->state.benefit.best_valid_pct, ftl_job_now_ms());
+                mig_gc_nogain_note(m, GC_BENEFIT_EMERGENCY, m->state.benefit.best_valid_pct, platform_now_ms());
             }
             mig_job_abort(m, "no free block");
             return false;
@@ -1540,7 +1539,7 @@ static bool mig_read_settle_step(mig_handle_t *m)
             }
         }
 
-        ftl_deadline_clear(&m->job.external_deadline); /* 等待条件解除 */
+        timer_deadline_clear(&m->job.external_deadline); /* 等待条件解除 */
 
         // 全部就绪 ⇒ 一次性算出本 plane 的位图（不会半途而废）
         m->job.cw_bitmap[plane] = 0U;
@@ -1657,7 +1656,7 @@ static bool mig_write_settle_step(mig_handle_t *m)
             return true;
         }
 
-        ftl_deadline_clear(&m->job.external_deadline); /* L2P 与 Journal 容量均已就绪 */
+        timer_deadline_clear(&m->job.external_deadline); /* L2P 与 Journal 容量均已就绪 */
 
         mig_plane_meta_commit(m, plane, m->job.cw_bitmap, m->job.cw_lba, m->job.src, m->job.dst);
 
@@ -1748,7 +1747,7 @@ static bool mig_write_batch_step(mig_handle_t *m)
     m->job.batch_outstanding  = n;
     m->job.batch_failed       = false;
     m->job.batch_cleanup_done = false;
-    ftl_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
     if (n >= 2U)
     {
         m->job.batch_jobs++;
@@ -1851,8 +1850,8 @@ static bool mig_flush_jrn_step(mig_handle_t *m)
         return true;
     }
 
-    ftl_deadline_clear(&m->job.submit_deadline);
-    ftl_deadline_clear(&m->job.external_deadline); /* 屏障达成 */
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline); /* 屏障达成 */
     m->job.phase = MIG_ERASE;
     m->job.plane = 0U;
     return false;
@@ -2009,9 +2008,9 @@ void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *ca
     {
         m->state.failure.fail_gblock[plane] = UINT16_MAX;
     }
-    ftl_ratelimit_init(&m->state.rl_eval, GC_LOG_INTERVAL_MS);
-    ftl_ratelimit_init(&m->state.session.rl, FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    ftl_heartbeat_end(&m->job.hb);
+    log_ratelimit_init(&m->state.rl_eval, GC_LOG_INTERVAL_MS);
+    log_ratelimit_init(&m->state.session.rl, LOG_RATE_SLOW_INTERVAL_MS);
+    log_heartbeat_end(&m->job.hb);
     m->state.error = FTL_OK;
 }
 
@@ -2074,7 +2073,7 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
         return 0U;
     }
 
-    LOGD_IF(ftl_ratelimit_due(&m->state.rl_eval), LOG_TAG_GC "trig=0x%02lx free=%hu op=%hu/%hu writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%hu\r\n", triggers, m->alloc->free_count, alc_op_get_count(m->alloc, 0U), alc_op_get_count(m->alloc, 1U), *m->total_writes, m->state.counters.reclaimed, m->state.counters.novictim, m->state.counters.nogain, mig_gc_mode_name(m->state.benefit.last_mode), (*host_writing ? 1U : 0U), m->state.benefit.best_valid_pct);
+    LOGD_IF(log_ratelimit_due(&m->state.rl_eval), LOG_TAG_GC "trig=0x%02lx free=%hu op=%hu/%hu writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%hu\r\n", triggers, m->alloc->free_count, alc_op_get_count(m->alloc, 0U), alc_op_get_count(m->alloc, 1U), *m->total_writes, m->state.counters.reclaimed, m->state.counters.novictim, m->state.counters.nogain, mig_gc_mode_name(m->state.benefit.last_mode), (*host_writing ? 1U : 0U), m->state.benefit.best_valid_pct);
 
     return triggers;
 }
@@ -2091,7 +2090,7 @@ static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
     {
         return;
     }
-    LOGI_IF(ftl_ratelimit_due(&m->state.session.rl), LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu\r\n", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, m->alloc->free_count);
+    LOGI_IF(log_ratelimit_due(&m->state.session.rl), LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu\r\n", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, m->alloc->free_count);
 }
 
 /**
@@ -2114,13 +2113,13 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
     // 只有真正发生了数据搬移的会话才打 end；纯空块/无搬移会话由 diag/nop 统计。
     if (m->state.session.moved != 0U)
     {
-        LOGI(LOG_TAG_GC "end jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu elapsed=%lums\r\n", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, ftl_job_age_ms(&m->state.session.start_ms));
+        LOGI(LOG_TAG_GC "end jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu elapsed=%lums\r\n", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, timer_age_ms(&m->state.session.start_ms));
     }
 
     m->state.session.active   = false;
     m->state.session.start_ms = 0U;
     m->state.session.last_ms  = 0U;
-    ftl_ratelimit_init(&m->state.session.rl, FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&m->state.session.rl, LOG_RATE_SLOW_INTERVAL_MS);
     m->state.session.jobs      = 0U;
     m->state.session.moved     = 0U;
     m->state.session.reclaimed = 0U;
@@ -2138,7 +2137,7 @@ static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
  */
 void mig_handle(mig_handle_t *m, bg_level_e level)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     // 发布本轮档位：mig_eval 由 timer 表在 ftl_service 之后调用，从 handle 读取。
     m->state.level = level;
@@ -2146,12 +2145,12 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
     // ① 在飞：只服务当前 job（提交即返回）。
     if (m->job.active)
     {
-        // 心跳（见 ftl_job.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见。
+        // 心跳（见 log.h / timer.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见。
         // ⚠ 只报「真的卡住」：单个 victim 正常 1 s 内完成，逐 victim 的 1 s 心跳在持续
         // GC 时会变成 1 行/秒。job age ≥ SLOW_AFTER 才打；之后 helper 自动降到 5 s。
-        if (ftl_heartbeat_due(&m->job.hb) && (ftl_heartbeat_age_ms(&m->job.hb) >= FTL_JOB_LOG_SLOW_AFTER_MS))
+        if (log_heartbeat_due(&m->job.hb) && (log_heartbeat_age_ms(&m->job.hb) >= LOG_RATE_SLOW_AFTER_MS))
         {
-            LOGI(LOG_TAG_MIG "job kind=%d phase=%d page=%hhu plane=%hhu aborted=%d age=%lums\r\n", m->job.kind, m->job.phase, m->job.page, m->job.plane, m->job.aborted, ftl_heartbeat_age_ms(&m->job.hb));
+            LOGI(LOG_TAG_MIG "job kind=%d phase=%d page=%hhu plane=%hhu aborted=%d age=%lums\r\n", m->job.kind, m->job.phase, m->job.page, m->job.plane, m->job.aborted, log_heartbeat_age_ms(&m->job.hb));
         }
 
         mig_job_step(m);
@@ -2203,7 +2202,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level)
  */
 void mig_eval(mig_handle_t *m)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
     // 与 mig_handle 的早退条件一致：在飞 / 熔断 / 紧急 GC 时不启动新工作。
     if (m->job.active || m->state.failure.paused || m->state.urgent_gc)
     {
@@ -2423,7 +2422,7 @@ static void mig_read_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comma
     // 逐 CW 反查 L2P 改在 MIG_READ_SETTLE（纯计算阶段，可挂起等 region 加载）
     (void)fc_command_release(cmd);
     m->job.waiting = false;
-    ftl_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
 
     if (read_ok == false)
     {
@@ -2495,7 +2494,7 @@ static void mig_write_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
 
     (void)fc_command_release(cmd);
     m->job.waiting = false;
-    ftl_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
 
     if (m->job.dummy_page0)
     {
@@ -2670,7 +2669,7 @@ static void mig_erase_complete(mig_handle_t *m, fc_command_t *cmd, const fc_comm
 
     (void)fc_command_release(cmd);
     m->job.waiting = false;
-    ftl_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.submit_deadline);
     m->job.plane = (plane + 1U);
     mig_job_step(m);
 }

@@ -22,12 +22,13 @@
  */
 
 #include "allocator.h"
-#include "ftl_job.h"    /* ftl_deadline_t / ftl_heartbeat_t / ftl_ratelimit_t */
 #include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"   /* ftl_ctx_t */
 #include "journal.h"
 #include "l2p_cache.h"
+#include "log.h"
 #include "metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
+#include "timer.h"
 
 #include <stdint.h>
 
@@ -53,7 +54,7 @@
  * 只在「有脏行却起不动」时计时——等 FLUSHING 完成算有进展，清零。
  * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。 */
 
-/* job 心跳节拍见 ftl_job.h 的 FTL_JOB_LOG_INTERVAL_MS（各 feature 统一，不再各自定义）。 */
+/* job 心跳节拍见 log.h / timer.h 的 LOG_RATE_INTERVAL_MS（各 feature 统一，不再各自定义）。 */
 
 typedef enum
 {
@@ -100,13 +101,14 @@ typedef enum
  * ⚠ 与 journal / 目录检查点 / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
 typedef struct
 {
-    DWORD      sequence;              /* 本池自己的单调序号（最新有效 record） */
-    DWORD      last_journal_sequence; /* 上一次成功 CP 的 journal 水位（T3/空转判据） */
-    WORD       write_idx;             /* 池内下一个待写槽（环形） */
-    bool       cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
-    bool       advance_next;          /* true = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
-    ftl_time_t next_t3_ms;            /* T3 下次到期时刻（绝对；由 CP 起点重装） */
-    ftl_time_t last_cp_ms;            /* 上次 CP 启动时刻（host flush 节流基准） */
+    DWORD        sequence;              /* 本池自己的单调序号（最新有效 record） */
+    DWORD        last_journal_sequence; /* 上一次成功 CP 的 journal 水位（T3/空转判据） */
+    WORD         write_idx;             /* 池内下一个待写槽（环形） */
+    bool         cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
+    bool         advance_next;          /* true = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
+    timer_time_t next_t3_ms;            /* T3 下次到期时刻（绝对；由 CP 起点重装） */
+    timer_time_t last_cp_ms;            /* 上次 CP 启动时刻（host flush 节流基准） */
+    DWORD        last_cp_writes;        /* 上次 CP 起点看到的 total_writes（T2 增量判据） */
 } cp_state_t;
 
 /*
@@ -116,13 +118,13 @@ typedef struct
  */
 typedef struct
 {
-    ftl_time_t  now_ms;
-    DWORD       total_writes;
-    DWORD       journal_seq;
-    BYTE        journal_watermark; /* 0..100 */
-    bool        emergency;         /* Journal ≥ 95% */
-    bool        force;             /* 显式请求（开机/诊断） */
-    cp_reason_e reason;            /* force 时优先用 */
+    timer_time_t now_ms;
+    DWORD        total_writes;
+    DWORD        journal_seq;
+    BYTE         journal_watermark; /* 0..100 */
+    bool         emergency;         /* Journal ≥ 95% */
+    bool         force;             /* 显式请求（开机/诊断） */
+    cp_reason_e  reason;            /* force 时优先用 */
 } cp_trigger_t;
 
 /* 目录检查点 job 的一段（②）。 */
@@ -164,14 +166,14 @@ typedef struct
 
 typedef struct
 {
-    bool           active;          /* true = job 在跑（单飞行） */
-    cp_phase_e     phase;           /* 异步 job 状态机 */
-    bool           waiting;         /* true = 有一条本 job 的命令在飞 */
-    bool           failed;          /* true = 前置步骤失败 ⇒ 中止 */
-    cp_phase_e     fail_phase;      /* 中止发生的 phase（观测） */
-    ftl_deadline_t submit_deadline; /* 提交 deadline */
-    bool           timed_out;
-    cp_phase_e     timeout_phase;
+    bool             active;          /* true = job 在跑（单飞行） */
+    cp_phase_e       phase;           /* 异步 job 状态机 */
+    bool             waiting;         /* true = 有一条本 job 的命令在飞 */
+    bool             failed;          /* true = 前置步骤失败 ⇒ 中止 */
+    cp_phase_e       fail_phase;      /* 中止发生的 phase（观测） */
+    timer_deadline_t submit_deadline; /* 提交 deadline */
+    bool             timed_out;
+    cp_phase_e       timeout_phase;
 
     /* ① job 起点快照（必须先于任何 flush）。 */
     DWORD region_bitmap[L2P_LOCAL_DIRTY_WORDS];
@@ -191,9 +193,9 @@ typedef struct
     cp_state_t cp_state;
 
     /* 心跳与限流（跨 job 保留） */
-    ftl_heartbeat_t hb;
-    ftl_ratelimit_t rl_abort;
-    ftl_ratelimit_t rl_done;
+    log_heartbeat_t hb;
+    log_ratelimit_t rl_abort;
+    log_ratelimit_t rl_done;
 } cp_handle_t;
 
 /* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
@@ -358,8 +360,8 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  * @brief 读取并校验一条 Checkpoint 记录的 块元数据快照
  *
  * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。
- * 失败（含 block_page_count == 0 的 initial CP）只表示「没有可用 块元数据快照」，
- * **不得**据此触发格式化；块元数据改走 full metadata rebuild。
+ * 失败（含 block_page_count == 0 的旧记录 / v12 前空 initial CP）只表示
+ * 「没有可用 块元数据快照」，**不得**据此触发格式化；块元数据改走 full metadata rebuild。
  *
  * @param h           Checkpoint handle
  * @param cp          最近 Header（cp_pool_find_latest 的输出）

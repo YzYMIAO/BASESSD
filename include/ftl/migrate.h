@@ -64,16 +64,17 @@
  *   反向包含会成环。ftl.h include 本文件以放置 mig_handle_t。
  */
 
-#include "allocator.h"   /* super_block_t */
-#include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
-#include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_job.h"     /* ftl_deadline_t / ftl_heartbeat_t / ftl_ratelimit_t */
-#include "ftl_module.h"  /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
-#include "ftl_type.h"    /* DWORD */
-#include "gc.h"          /* gc_benefit_mode_e */
-#include "journal.h"     /* l2p_jrn_t（端口） */
-#include "l2p_cache.h"   /* l2p_cache_t（端口） */
+#include "allocator.h"  /* super_block_t */
+#include "fc_command.h" /* fc_command_status_t（服务函数签名） */
+#include "ftl_config.h" /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
+#include "ftl_type.h"   /* DWORD */
+#include "gc.h"         /* gc_benefit_mode_e */
+#include "journal.h"    /* l2p_jrn_t（端口） */
+#include "l2p_cache.h"  /* l2p_cache_t（端口） */
+#include "log.h"
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
+#include "timer.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -189,9 +190,9 @@ typedef struct
     mig_post_e       post;
     BYTE             page;
     BYTE             plane;
-    ftl_deadline_t   submit_deadline;
-    ftl_deadline_t   external_deadline;
-    ftl_deadline_t   command_deadline;
+    timer_deadline_t submit_deadline;
+    timer_deadline_t external_deadline;
+    timer_deadline_t command_deadline;
     bool             timed_out;
     mig_phase_e      timeout_phase;
     WORD             job_valid_cw;
@@ -212,7 +213,7 @@ typedef struct
     DWORD            batch_pages;
     DWORD            batch_aborts;
     mig_batch_page_t batch[MIG_BATCH_PAGES];
-    ftl_heartbeat_t  hb;
+    log_heartbeat_t  hb;
     DWORD            last_fc_status;
     bool             dst_high_wear;
 } mig_job_t;
@@ -222,27 +223,27 @@ typedef struct
 {
     bool              nogain;
     gc_benefit_mode_e nogain_mode;
-    ftl_time_t        nogain_ms;
+    timer_time_t      nogain_ms;
     DWORD             nogain_writes;
     WORD              nogain_free;
     WORD              best_valid_pct;
     gc_benefit_mode_e last_mode;
     DWORD             writes_last;   /* 上次求值看到的 *total_writes */
-    ftl_time_t        write_last_ms; /* total_writes 最近一次变化的时刻 */
+    timer_time_t      write_last_ms; /* total_writes 最近一次变化的时刻 */
     bool              host_writing;  /* 最近一次 host 写流判定 */
 } mig_gc_benefit_t;
 
 typedef struct
 {
     bool            active;
-    ftl_time_t      start_ms;
-    ftl_time_t      last_ms;
+    timer_time_t    start_ms;
+    timer_time_t    last_ms;
     DWORD           jobs;
     DWORD           moved;
     DWORD           reclaimed;
     DWORD           noop;
     DWORD           aborted;
-    ftl_ratelimit_t rl;
+    log_ratelimit_t rl;
 } mig_gc_session_t;
 
 typedef struct
@@ -269,7 +270,7 @@ typedef struct
     bool            batch_disabled;
     bg_level_e      level;
     bool            timers_registered;
-    ftl_ratelimit_t rl_eval;
+    log_ratelimit_t rl_eval;
     DWORD           wl_last_writes;
 
     mig_gc_benefit_t benefit;
@@ -362,7 +363,7 @@ void mig_handle(mig_handle_t *m, bg_level_e level);
  * `m->state.level` 必须由 mig_handle 在最近一轮发布。
  *
  * @note 时钟分配：timer 任务的 period 只决定**唤醒频率**；本函数内部的
- *       deadline/interval 一律读 `ftl_job_now_ms()`（SysTick），与
+ *       deadline/interval 一律读 `platform_now_ms()`（SysTick），与
  *       mig_handle / mig_job_* 使用同一时间坐标。TIM6 的 tick 不参与 FTL
  *       时间戳。
  *

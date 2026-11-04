@@ -44,8 +44,7 @@
 #include "fc.h"
 #include "fc_crc_engine.h" /* FC_CRC_META_SIZE（用户区抽样判空） */
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_BBT */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_BBT */
 #include "log.h"
 #include "metadata.h" /* metadata_ring_*（BBT 池轮转原语）*/
 #include "onfi_1_0.h"
@@ -277,7 +276,7 @@ void bbt_init(alc_t *alloc)
     alloc->bbt.flush_due          = 0U;
     // 清异步 job（alc_init 已零化，此处再钉一次）
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
-    ftl_heartbeat_end(&alloc->bbt.handle.hb);
+    log_heartbeat_end(&alloc->bbt.handle.hb);
     alloc->bbt.handle.waiting = false;
 
     // 尝试从 NAND 加载已存在的 BBT
@@ -554,7 +553,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     }
 
     // 驱逐出 Free Pool —— **必须先于置 BAD**：alc_free_remove 校验「在池 ⇒ state == FREE」
-    // （allocator.h 不变量②）。块若在池里，此刻它正是 FREE；先置 BAD 再出池就会命中断言。
+    // （allocator.h 不变量②），命中后置 NONE；随后置 BAD 抹掉这个中间态。
     // 不驱逐则留下「在池却不是 FREE」的反向不一致（运行时标坏：擦除失败 / 预测性标坏）。
     // 不在池内 ⇒ no-op（alc_free_remove 的文档化契约，判据 4）。
     // 注：出厂扫描 / BBT 加载路径跑在建池之前（池还是空的）⇒ 恒 no-op，无需特判。
@@ -869,18 +868,18 @@ void bbt_handle(alc_t *alloc)
 {
     do
     {
-        // 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age
+        // 心跳（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/age
         if (alloc->bbt.handle.phase == BBT_JOB_IDLE)
         {
-            ftl_heartbeat_end(&alloc->bbt.handle.hb);
+            log_heartbeat_end(&alloc->bbt.handle.hb);
         }
         else if (alloc->bbt.handle.hb.active == false)
         {
-            ftl_heartbeat_begin(&alloc->bbt.handle.hb);
+            log_heartbeat_begin(&alloc->bbt.handle.hb);
         }
-        else if (ftl_heartbeat_due(&alloc->bbt.handle.hb))
+        else if (log_heartbeat_due(&alloc->bbt.handle.hb))
         {
-            LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, ftl_heartbeat_age_ms(&alloc->bbt.handle.hb));
+            LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, log_heartbeat_age_ms(&alloc->bbt.handle.hb));
         }
 
         if (alloc->bbt.handle.waiting == true)

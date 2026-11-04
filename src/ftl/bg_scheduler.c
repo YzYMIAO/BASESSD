@@ -12,10 +12,10 @@
 
 #include "bg_scheduler.h"
 
+#include "assertion.h"
 #include "bbt.h"
 #include "checkpoint.h"
 #include "ftl.h"
-#include "ftl_job.h" /* ftl_job_now_ms()：全仓唯一时钟换算 */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "metadata.h"
@@ -23,6 +23,7 @@
 #include "pending.h"
 #include "platform.h" /* ssd_platform_get / ssd_platform_ops_t.time_us */
 #include "read_recovery.h"
+#include "timer.h"
 
 /* ════════════════════════════════════════════════════════════════════════
  * 定义：宏与档位预算表
@@ -54,6 +55,8 @@
 // 档位 → 每个 token interval 的 credit 配额。单位见 bg_task_t.units：一次 kick
 // ≈ 1 条命令（L2P 的具体条数由模块内 max_kick 再限）。IDLE/NORMAL 放行全部 4 个
 // 预算任务；BUSY 只放行 L2P 写回（1 个），即「仅 must-run + 1 flush」。
+// ⚠ 本档位的 grant_units 必须 ≥ task_mask 中预算任务的个数：引擎按表序执行，
+//   credit 不足时从第一个放不下的任务起 break（不是轮转）⇒ 表尾任务会永久饥饿。
 // ⚠ credit 由 timer 任务按 BG_TOKEN_INTERVAL_MS 补充；实际速率 = grant_units /
 //   BG_TOKEN_INTERVAL_MS，与主循环频率无关。数值需上板按 GC/WL/host 延迟调。
 static const bg_level_cfg_t s_bg_level_cfg[BG_LEVEL_NUM] = {
@@ -383,8 +386,11 @@ void bg_scheduler_service(ftl_ctx_t *ftl)
     }
 
     const bg_level_e level = bg_scheduler_level_select(ftl);
+
     // 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。
+    ASSERT(level < BG_LEVEL_NUM);
+
     // 档位先发布到调度器：模块入口读 sched->level，不各自重选。
-    ftl->bg.level          = level;
+    ftl->bg.level = level;
     bg_scheduler_run(&ftl->bg, ftl, &s_bg_level_cfg[level]);
 }

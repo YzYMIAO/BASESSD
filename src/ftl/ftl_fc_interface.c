@@ -40,7 +40,8 @@
 #include "ftl_fc_interface.h"
 
 #include "assertion.h"
-#include "bst.h" /* ftl_pba_gblock（逐块 ECC 记账） */
+#include "bst.h"   /* ftl_pba_gblock（逐块 ECC 记账） */
+#include "delay.h" /* delay_time_now_us / delay_time_elapsed_us（真实等待上限） */
 #include "fc.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl_type.h"
@@ -495,13 +496,17 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
  *
  * @param cmd        命令
  * @param status_out 输出：完成状态（可 NULL）
- * @param timeout_us 自旋上限（0 = 默认 10ms）
+ * @param timeout_us 等待上限（真实微秒，0 = 默认 10 ms，上限 65 ms）
  * @return FTL_OK；FTL_ERROR 提交失败 / 等待超时
+ *
+ * @note 时钟不可用（`delay_time_now_us` 失败）时退化为同值的轮数兜底，不静默取消超时。
  */
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us)
 {
-    DWORD elapsed  = 0U;
-    DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
+    const DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
+    DWORD       start_us = 0U;
+    const bool  clock_ok = delay_time_now_us(&start_us);
+    DWORD       elapsed  = 0U; /* 仅时钟不可用时作轮数兜底 */
 
     // ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
     // （本函数自旋 fc_service + ftl_op_drain）= 嵌套泵，正是本次异步化要
@@ -530,9 +535,22 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
             break;
         }
 
-        // 简易超时：elapsed 递增（精确度取决于 fc_service 调用频率）
-        elapsed++;
-        if (elapsed > max_wait)
+        // 真实微秒 deadline（调用点最大 20 ms；delay_time_elapsed_us 的 timeout 是 WORD）。
+        // 时钟不可用（未初始化）时退化为轮数兜底，与旧行为一致，不静默取消超时。
+        bool expired;
+
+        if (clock_ok)
+        {
+            ASSERT(max_wait <= (DWORD)UINT16_MAX);
+            expired = delay_time_elapsed_us(start_us, (WORD)max_wait);
+        }
+        else
+        {
+            elapsed++;
+            expired = (elapsed > max_wait);
+        }
+
+        if (expired)
         {
             ftl_op_req_remove(waiter.cmd_id);
             return FTL_ERROR;

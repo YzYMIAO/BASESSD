@@ -46,3 +46,22 @@ const ssd_platform_ops_t *ssd_platform_get(void)
 {
     return g_platform_ops;
 }
+
+DWORD platform_now_ms(void)
+{
+    if (g_platform_ops == NULL)
+    {
+        return 0U;
+    }
+    if (g_platform_ops->time_ms != NULL)
+    {
+        return g_platform_ops->time_ms();
+    }
+    if (g_platform_ops->time_us == NULL)
+    {
+        return 0U;
+    }
+
+    /* QWORD µs → DWORD ms 是接口边界上的有意窄化：所有消费方都用差值。 */
+    return (DWORD)(g_platform_ops->time_us() / 1000U);
+}

@@ -32,11 +32,12 @@
 #include "bst.h"        /* rr_ecc_track_t, rr_block_health_e, bst_block_t */
 #include "fc_command.h" /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h" /* DWORD */
-#include "ftl_job.h"    /* ftl_deadline_t / ftl_heartbeat_t */
 #include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"
 #include "l2p_cache.h"
+#include "log.h"
 #include "pending.h" /* pending_ctx_t */
+#include "timer.h"
 
 #include <stdint.h>
 
@@ -121,22 +122,22 @@ typedef struct
 
 typedef struct
 {
-    rr_stage_e     stage;             /* 异步恢复状态机 */
-    bool           waiting;           /* true = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
-    BYTE           plane;             /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
-    BYTE           attempt;           /* 本 plane 已发起的读次数（1 = 首次，2 = CRC 重读） */
-    BYTE           pending_idx;       /* 被托管的 pending 槽下标（收尾据此释放） */
-    BYTE           first;             /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
-    bool           recovered;         /* 本 plane 是否恢复成功（PLANE_END 结算用） */
-    bool           all_ok;            /* true = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
-    ftl_deadline_t submit_deadline;   /* 提交 deadline（armed = 本轮已开始计时） */
-    DWORD          page_lba;          /* 本 plane 目标页的**页** LBA（META 比对用） */
-    DWORD          page;              /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
-    BYTE           retry_count;       /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
-    BYTE           planes_recovered;  /* 本次 job 恢复成功的 plane 数（观测） */
-    BYTE           planes_failed;     /* 本次 job 恢复失败的 plane 数（观测） */
-    DWORD          last_status;       /* 最近一次读完成状态（FC_CMD_STATUS_*，日志解码用） */
-    DWORD          already_bad_reads; /* host 重读已退役块的累计次数（观测） */
+    rr_stage_e       stage;             /* 异步恢复状态机 */
+    bool             waiting;           /* true = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
+    BYTE             plane;             /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
+    BYTE             attempt;           /* 本 plane 已发起的读次数（1 = 首次，2 = CRC 重读） */
+    BYTE             pending_idx;       /* 被托管的 pending 槽下标（收尾据此释放） */
+    BYTE             first;             /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
+    bool             recovered;         /* 本 plane 是否恢复成功（PLANE_END 结算用） */
+    bool             all_ok;            /* true = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
+    timer_deadline_t submit_deadline;   /* 提交 deadline（armed = 本轮已开始计时） */
+    DWORD            page_lba;          /* 本 plane 目标页的**页** LBA（META 比对用） */
+    DWORD            page;              /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
+    BYTE             retry_count;       /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
+    BYTE             planes_recovered;  /* 本次 job 恢复成功的 plane 数（观测） */
+    BYTE             planes_failed;     /* 本次 job 恢复失败的 plane 数（观测） */
+    DWORD            last_status;       /* 最近一次读完成状态（FC_CMD_STATUS_*，日志解码用） */
+    DWORD            already_bad_reads; /* host 重读已退役块的累计次数（观测） */
     /* 已退役块重读日志：每 gblock 只打一次，其余只计数（防 host 反复读同一 LBA 刷屏）。 */
     DWORD already_bad_logged[FTL_BLOCK_TOTAL / 32U];
 
@@ -151,8 +152,8 @@ typedef struct
     bool       has_owner; /* true = owner 有效（rr_trigger 登记） */
     int32_t    error;     /* 最近一次 abort 的归因 */
 
-    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 stage/age */
-    ftl_heartbeat_t hb;
+    /* 心跳基准（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 stage/age */
+    log_heartbeat_t hb;
 } rr_handle_t;
 
 /* ── 接口 ── */

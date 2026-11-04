@@ -1,6 +1,7 @@
 #ifndef PLATFORM_TIMER_H
 #define PLATFORM_TIMER_H
 
+#include "platform.h"  /* platform_now_ms：通用时基读取口 */
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stdbool.h>
@@ -23,6 +24,64 @@
 static inline bool timer_time_due(DWORD now_ms, DWORD due_ms)
 {
     return ((int32_t)(now_ms - due_ms) >= 0);
+}
+
+/* ── 通用时间对象 ──
+ * 业务结构只持有这些对象，不裸放 `start_ms / last_ms` 时间戳。 */
+
+typedef DWORD timer_time_t;
+
+/* job 内等待/超时：绝对时刻 + armed（不再用 0 当“未计时”哨兵）。 */
+typedef struct
+{
+    timer_time_t at;
+    bool         armed;
+} timer_deadline_t;
+
+/**
+ * @brief 设置 deadline：at = now + timeout_ms，并置 armed
+ *
+ * @param d          时间对象
+ * @param now        当前时刻（毫秒）
+ * @param timeout_ms 相对超时（毫秒）
+ */
+static inline void timer_deadline_arm(timer_deadline_t *d, timer_time_t now, DWORD timeout_ms)
+{
+    d->at    = now + timeout_ms;
+    d->armed = true;
+}
+
+/**
+ * @brief deadline 是否已到期（未 armed 时恒 false）
+ *
+ * @param d   时间对象
+ * @param now 当前时刻（毫秒）
+ * @return true 已到期；false 未到期 / 未 armed
+ */
+static inline bool timer_deadline_expired(const timer_deadline_t *d, timer_time_t now)
+{
+    return d->armed && timer_time_due(now, d->at);
+}
+
+/**
+ * @brief 清除 deadline（只清 armed，不改 at）
+ *
+ * @param d 时间对象
+ */
+static inline void timer_deadline_clear(timer_deadline_t *d)
+{
+    d->armed = false;
+}
+
+/**
+ * @brief 从起始时刻到现在的毫秒数（0 = 未开始）
+ *
+ * @param start_ms 起始时刻（0 = 未开始）
+ * @return 已运行毫秒；未开始时 0
+ */
+static inline DWORD timer_age_ms(const timer_time_t *start_ms)
+{
+    return (*start_ms == 0U) ? 0U : (platform_now_ms() - *start_ms);
 }
 
 /*

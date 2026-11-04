@@ -14,7 +14,7 @@
 |---|---|---|
 | 平台任务表 | `src/platform/btim.c`，表项 `{name, first_delay_ms, period_ms, callback, context}`，唯一静态任务 = watchdog 100 ms | 名为定时器，实为软件调度器；放在 `platform/` 层 |
 | FTL 后台 | `src/ftl/bg_scheduler.c`，`bg_task_t {func, mask, units, must_run}`，预算/档位驱动 | 第二套「什么时候跑什么」 |
-| 时间源 | TIM6 `g_btim_tick_ms`（btim） vs DWT `time_us`（`ftl_job_now_ms`） | 两套毫秒时基，不能混用；**DWT 现已删除**，系统时基统一为 SysTick |
+| 时间源 | TIM6 `g_btim_tick_ms`（btim） vs DWT `time_us`（`platform_now_ms`） | 两套毫秒时基，不能混用；**DWT 现已删除**，系统时基统一为 SysTick |
 | 派发点 | `btim_scheduler_poll()` 在主循环末尾；`bg_scheduler_service()` 在 `ftl_service` 内 | 两个派发点、两种顺序模型 |
 | 周期门 | `btim` 表内；FTL 侧散落在 `mig_handle` / `cp_should_start` / 各心跳 | 同一语义多套写法 |
 
@@ -160,7 +160,7 @@ typedef struct
   节拍由 timer 表提供（删除 `gc_eval_last_ms` 门）；WL 5 s / predict 1 s 的间隔门仍在
   handle 内（predict 依赖 `wl_eval_last_ms` 让位），保持原顺序语义。
 - **时钟分配（关键）**：TIM6 只决定 `mig_eval` 的**唤醒频率**；`mig_eval` 内部的
-  deadline/interval 一律读 `ftl_job_now_ms()`（SysTick）。`mig_handle` 的会话收尾/
+  deadline/interval 一律读 `platform_now_ms()`（SysTick）。`mig_handle` 的会话收尾/
   紧急 GC、`mig_job_abort/finish` 也用 SysTick ⇒ `gc_session_*` / `gc_nogain_ms` /
   `wl_eval_last_ms` / `predict_last_ms` 全部是同一时间坐标，不会出现「TIM6 写的
   时间戳拿 SysTick 去比」。
@@ -168,7 +168,7 @@ typedef struct
   ctx = `mig_handle_t*`）；`main` 在 `timer_scheduler_init()` 之后、`g_ftl_ready` 为真时
   遍历实例注册。未采用「三个独立任务」：单任务保留原 `else if` 的「每轮最多一个 job」
   与 WL/predict 让位关系，减少行为漂移；代价是表里只看到 10 ms 一行。
-- 无时钟退化：`ftl_job_now_ms() == 0` 时 `mig_handle` 直接调 `mig_eval(m)`，避免 timer
+- 无时钟退化：`platform_now_ms() == 0` 时 `mig_handle` 直接调 `mig_eval(m)`，避免 timer
   任务永不到期导致 GC 停摆（与旧「无时钟 ⇒ 每轮求值」一致；此时内部 `now_ms` 也是 0）。
 - CP T3（10 s）**本阶段不动**：`cp_handle` 有 ADVANCE/EMERGENCY/EXPLICIT/水位/写入量
   多个入口，T3 门与 `journal delta ≥64` 耦合，先保持现状，Phase 3 再评估。

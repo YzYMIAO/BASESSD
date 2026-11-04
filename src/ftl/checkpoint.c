@@ -23,7 +23,7 @@
  *
  * 文件结构：
  *   1. 内部辅助        cp_header_is_valid / cp_record_probe
- *                      （单调毫秒 / 心跳基准见 ftl_job.h）
+ *                      （单调毫秒 / 心跳基准见 log.h / timer.h）
  *   2. 异步 job        cp_job_step（static）/ cp_job_begin /
  *                      cp_handle / ftl_checkpoint_callback
  *   3. 创建/恢复       cp_pool_find_latest / cp_initial_record_write
@@ -41,11 +41,11 @@
 #include "fc.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳 + 单调毫秒（ftl_job_now_ms / ftl_heartbeat_*）*/
-#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_CHECKPOINT */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_CHECKPOINT */
 #include "log.h"
 #include "metadata.h"
 #include "onfi_1_0.h"
+#include "timer.h"
 
 #include <string.h>
 
@@ -263,7 +263,7 @@ static void cp_job_abort(cp_handle_t *h)
 
 /**
  * @brief abort 日志限流：CP 在资源饥饿时每 10~25ms 重试一次，逐次 WRN 会刷屏。
- * 每个实例每 FTL_JOB_LOG_SLOW_INTERVAL_MS 最多一行；时间戳跨 job 保留
+ * 每个实例每 LOG_RATE_SLOW_INTERVAL_MS 最多一行；时间戳跨 job 保留
  * （cp_job_begin 不重置）。
  *
  * @param h  Checkpoint handle（读并更新 rl_abort）
@@ -272,7 +272,7 @@ static void cp_job_abort(cp_handle_t *h)
 static bool cp_job_abort_log_due(cp_handle_t *h)
 {
     // 5s：CP 饥饿时每 10~25ms 重试一次，1s 一行仍偏密；卡死是持续状态，5s 足够可见。
-    return ftl_ratelimit_due(&h->rl_abort);
+    return log_ratelimit_due(&h->rl_abort);
 }
 
 /**
@@ -284,7 +284,7 @@ static bool cp_job_abort_log_due(cp_handle_t *h)
  */
 static bool cp_job_stall(cp_handle_t *h)
 {
-    const DWORD now_ms = ftl_job_now_ms();
+    const DWORD now_ms = platform_now_ms();
 
     if (now_ms == 0U)
     {
@@ -294,16 +294,16 @@ static bool cp_job_stall(cp_handle_t *h)
     // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计提交 deadline。
     if (ftl_op_bg_submit_deferred() == true)
     {
-        ftl_deadline_clear(&h->submit_deadline);
+        timer_deadline_clear(&h->submit_deadline);
         return false;
     }
 
     if (h->submit_deadline.armed == false)
     {
-        ftl_deadline_arm(&h->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
+        timer_deadline_arm(&h->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
         return false;
     }
-    if (ftl_deadline_expired(&h->submit_deadline, now_ms))
+    if (timer_deadline_expired(&h->submit_deadline, now_ms))
     {
         if (cp_job_abort_log_due(h))
         {
@@ -375,7 +375,7 @@ static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data
         return FTL_AGAIN;
     }
 
-    ftl_deadline_clear(&h->submit_deadline); /* 有命令交出去 ⇒ 卡死计时清零 */
+    timer_deadline_clear(&h->submit_deadline); /* 有命令交出去 ⇒ 卡死计时清零 */
     return FTL_OK;
 }
 
@@ -407,7 +407,7 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
         return FTL_AGAIN;
     }
 
-    ftl_deadline_clear(&h->submit_deadline); /* 有命令交出去 ⇒ 卡死计时清零 */
+    timer_deadline_clear(&h->submit_deadline); /* 有命令交出去 ⇒ 卡死计时清零 */
     return FTL_OK;
 }
 
@@ -466,92 +466,69 @@ static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence
  *         CP_FLUSH_PENDING 仍有在飞，下轮再来
  *         CP_FLUSH_FAILED  硬失败，调用者中止
  *
- * @note **不按 state == DIRTY 过滤**——异步化后脏行可能已被后台 l2p_flush_kick
- * 起了写回（state = FLUSHING）而尚未完成，它同样属于"本周期改过、必须已持久"，
- * 漏掉它就会让 Header 承诺一个还没落盘的映射。FLUSHING 行**等**它（不重复起）。
- * CLEAN 行 = 已落盘（commit 已清脏位，见 l2p_cache.c 的 ftl_l2p_callback）。
- * ⚠ 判据是**快照位图**而非实时位图：实时位图会被本次 flush 的 commit 清掉
- * （那样循环就永远看不到自己该等的行）。
+ * @note 判据是**快照位图**，但每个位的完成状态看**实时脏位**：dirty CMT 可能在
+ * 没有 resident line 的 region 里，行也可能已被后台写回并驱逐。实时脏位已清 =
+ * 本次 CP 已 commit；仍置则驱动 `l2p_region_flush_kick`（合并 CMT + line 后写回）。
+ * Header 是承诺书：DONE 前用 `l2p_owner_snapshot_covered` 再验一遍，杜绝
+ * "bit 置位但无行无 dirty" 的孤儿位被当成已持久。
  */
 static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
 {
     const BYTE die     = topo_2_die(h->topo);
     bool       pending = false;
+    BYTE       started = 0U;
 
-    for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
+    // 按 snapshot 位置驱动：dirty 可能在 line，也可能只在 CMT（无 resident line）。
+    // 实时脏位已清 = 本次 CP 已 commit（行可能已被驱逐），直接放过。
+    for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        l2p_line_info_t line;
-
-        l2p_line_get(h->cache, i, &line);
-
-        if (line.state == L2P_CACHE_INVALID)
+        if ((h->region_bitmap[local / 32U] & (1UL << (local & 31U))) == 0U)
         {
-            continue; /* 空行（region_id 无意义，脏位查询无意义） */
-        }
-        if (l2p_region_owned_by(line.region_id, die) == false)
-        {
-            continue; /* 别的 LUN 的行：由它自己的 Checkpoint 负责 */
+            continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底） */
         }
 
-        const DWORD local_region = l2p_global_to_local_region(line.region_id);
+        const DWORD global_region = (local * DIE_MAX) + die;
 
-        DWORD word = h->region_bitmap[local_region / 32U];
-        DWORD mask = (1UL << (local_region & 31U));
-        if ((word & mask) == 0U)
+        if (l2p_region_dirty_live(h->cache, global_region) == false)
         {
-            continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底，见文件头） */
+            continue; /* 已 commit */
         }
 
-        if (line.state == L2P_CACHE_CLEAN)
+        pending = true;
+
+        if (started < L2P_FLUSH_MAX_NORMAL)
         {
-            continue; /* 已落盘：本次 CP 期间由我们（或后台）写回成功，commit 已清脏位 */
-        }
-        if (line.state == L2P_CACHE_FLUSHING)
-        {
-            pending = true; /* 已提交、未落盘：等它 */
-            continue;
-        }
-        if (line.state == L2P_CACHE_DIRTY)
-        {
-            const ftl_status_e st = l2p_flush_kick(h->cache, i);
+            const ftl_status_e st = l2p_region_flush_kick(h->cache, global_region);
 
             if (st == FTL_ERROR)
             {
                 return CP_FLUSH_FAILED; /* 无依赖 / 建链失败：中止 */
             }
-            // ⚠ **FTL_AGAIN 是背压不是失败**（l2p_flush_kick 会把
-            // "取不到槽"报成 AGAIN：Free Pool 空 或 目录整理 job 在飞）。一次正常的
-            // 后台压缩不该把 Checkpoint 打回去——下轮重试即可。
-            pending = true; /* OK = 已提交；AGAIN = 背压，都还没落盘 */
-            continue;
+            // FTL_AGAIN 是背压/在飞，不是失败；下轮重试。
+            if (st == FTL_OK)
+            {
+                started++;
+            }
         }
-
-        // 只剩 LOADING：脏位已置却 entries 尚未有效 —— 不变量被破坏（脏位只由
-        // l2p_write 在行可写时置位，而 LOADING 行不可写；commit 又只在
-        // FLUSHING 行上清位）。**中止**而非放过：此刻既没在写回、也没有有效数据，
-        // 若当作"已持久"写进 Header，boot 会按 bitmap 预载这一区 ⇒ **静默丢映射**。
-        // 中止的代价只是本次 CP 不做（journal 与脏位全保留，下轮重来），方向安全。
-        LOGW(LOG_TAG_CP "region=%lu dirty but state=%d (LOADING) — abort\r\n", line.region_id, line.state);
-        return CP_FLUSH_FAILED;
     }
 
     if (pending == false)
     {
-        ftl_deadline_clear(&h->submit_deadline);
+        // Header 是承诺书：每个 snapshot 位必须已 commit 或行已 CLEAN。
+        if (l2p_owner_snapshot_covered(h->cache, die, h->region_bitmap) == false)
+        {
+            LOGW(LOG_TAG_CP "snapshot region not covered — abort\r\n");
+            return CP_FLUSH_FAILED;
+        }
+        timer_deadline_clear(&h->submit_deadline);
         return CP_FLUSH_DONE;
     }
 
-    // 有在飞写回 = 有进展（**不**计卡死轮数）：闸门满 / 提交失败都会让本轮起不动新行，
-    // 但 flush_inflight > 0 说明完成迟早会来。共享 credit 池是全局的，别的 LUN 的在飞
-    // 写回同样代表系统在推进。
-    // ⚠ 同理，**目录整理 job 在飞也算有进展**：它独占当前日志块的空槽，期间的
-    // 脏 region 一律收到 FTL_AGAIN。一次正常的压缩要走上百轮命令，若照常累计就会撞
-    // FTL_SUBMIT_TIMEOUT_MS 把 Checkpoint 打回去。
-    if (l2p_has_flush_inflight(h->cache) || md_is_busy(h->metadata_dir) || h->metadata_dir->handle.compact_wanted)
+    // 有在飞命令（含 CMT 合并加载）= 有进展。共享 credit 池是全局的，别的 LUN
+    // 的在飞写回同样代表系统在推进；目录整理 job 在飞也同理。
+    if (l2p_cache_any_inflight(h->cache) || md_is_busy(h->metadata_dir) || h->metadata_dir->handle.compact_wanted)
     {
-        // 目录整理 job 在飞 / 已登记压缩请求都算有进展：等待它腾出日志槽，
-        // 不把 CP 当成"提交不出去"打回去（否则日志区满时每 10~25ms abort 一次）。
-        ftl_deadline_clear(&h->submit_deadline);
+        timer_deadline_clear(&h->submit_deadline);
         return CP_FLUSH_PENDING;
     }
 
@@ -976,7 +953,7 @@ static void cp_job_step(cp_handle_t *h)
                 cp_header_t *cp = (cp_header_t *)h->hdr.hdr_buf;
 
                 cp_header_fill(cp, h, h->hdr.seq, h->journal_seq, h->region_bitmap);
-                cp->timestamp = ftl_job_now_ms();
+                cp->timestamp = platform_now_ms();
 
                 const DWORD        cp_size = sizeof(*cp);
                 const ftl_status_e st      = cp_write_submit(h, h->hdr.addr, cp, cp_size);
@@ -1028,15 +1005,15 @@ static void cp_job_step(cp_handle_t *h)
                     // 限流 5 s：水位触发（1024 次写）可能快于 5 s，逐条打印会在
                     // 115200 串口上刷屏（写满 4 KB TX 环后 uart_log_write 会等待）。
                     // 被跳过的 CP 不影响判据——最新序号看 `info` 的 cp= 或下一条 done。
-                    LOGD_IF(ftl_ratelimit_due(&h->rl_done), LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s\r\n", h->hdr.seq, h->journal_seq, (h->dir.skip == true) ? "skip" : "written");
+                    LOGD_IF(log_ratelimit_due(&h->rl_done), LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s\r\n", h->hdr.seq, h->journal_seq, (h->dir.skip == true) ? "skip" : "written");
                 }
 
                 h->active  = false;
                 h->phase   = CP_IDLE;
                 h->waiting = false;
                 h->failed  = false;
-                ftl_deadline_clear(&h->submit_deadline);
-                ftl_heartbeat_end(&h->hb);
+                timer_deadline_clear(&h->submit_deadline);
+                log_heartbeat_end(&h->hb);
                 return;
             }
 
@@ -1071,8 +1048,8 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     alc_t *const          alloc        = h->alloc;
     const ftl_topo_t      topo         = h->topo;
     const cp_state_t      cps          = h->cp_state;
-    const ftl_ratelimit_t rl_abort     = h->rl_abort;
-    const ftl_ratelimit_t rl_done      = h->rl_done;
+    const log_ratelimit_t rl_abort     = h->rl_abort;
+    const log_ratelimit_t rl_done      = h->rl_done;
 
     memset(h, 0, sizeof(*h));
 
@@ -1105,7 +1082,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
 
     h->active = true;
     h->phase  = CP_FLUSH_REGIONS;
-    ftl_heartbeat_begin(&h->hb);
+    log_heartbeat_begin(&h->hb);
 
     // CP 是高频元数据维护（每次水位触发），start 不逐次打；当前序号看 info 的 cp=。
     cp_job_step(h); /* 立刻推进第一步（脏区落盘可当场起异步写回） */
@@ -1124,6 +1101,7 @@ static void cp_cursor_reset(cp_state_t *cp)
     cp->write_idx             = 0U;
     cp->cursor_valid          = false;
     cp->advance_next          = false;
+    cp->last_cp_writes        = 0U;
 }
 
 /**
@@ -1423,7 +1401,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
 
     if (cp->wear_page_count == 0U)
     {
-        return false; /* initial CP / 旧记录：无磨损快照 */
+        return false; /* 旧记录 / v12 前空 initial CP：无磨损快照 */
     }
     if ((cp->wear_entry_count != FTL_BLOCK_TOTAL) || (cp->wear_entry_bytes != FTL_CHECKPOINT_WEAR_ENTRY_BYTES) || (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES) || (cp->record_pages != CP_RECORD_PAGES))
     {
@@ -1497,8 +1475,8 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
 /**
  * @brief 读取并校验 CP 记录里的块元数据快照
  *
- * block_page_count==0 是 initial CP 的「无快照」标记；快照损坏不得格式化，
- * 也不得回退旧 CP。
+ * block_page_count==0 是旧记录 / v12 前空 initial CP 的「无快照」标记（当前
+ * initial CP 含完整快照）；快照损坏不得格式化，也不得回退旧 CP。
  *
  * @param h           Checkpoint handle
  * @param cp          最近 Header
@@ -1510,7 +1488,7 @@ bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx,
 {
     if (cp->block_page_count == 0U)
     {
-        return false; /* initial CP / 旧记录：无快照 */
+        return false; /* 旧记录 / v12 前空 initial CP：无快照 */
     }
     if ((cp->block_word_count != FTL_BLOCK_TOTAL) || (cp->block_word_bytes != CP_BLOCK_WORD_BYTES) || (cp->block_page_count != CP_BLOCK_PAGES) || (cp->record_pages != CP_RECORD_PAGES))
     {
@@ -1586,10 +1564,10 @@ void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cach
     h->metadata_dir = metadata_dir;
     h->alloc        = alloc;
     h->topo         = alc_topo(alloc);
-    ftl_ratelimit_init(&h->rl_abort, FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    ftl_ratelimit_init(&h->rl_done, FTL_JOB_LOG_SLOW_INTERVAL_MS);
-    ftl_heartbeat_end(&h->hb);
-    h->cp_state.next_t3_ms = ftl_job_now_ms() + CP_TIME_INTERVAL_MS;
+    log_ratelimit_init(&h->rl_abort, LOG_RATE_SLOW_INTERVAL_MS);
+    log_ratelimit_init(&h->rl_done, LOG_RATE_SLOW_INTERVAL_MS);
+    log_heartbeat_end(&h->hb);
+    h->cp_state.next_t3_ms = platform_now_ms() + CP_TIME_INTERVAL_MS;
 }
 
 /**
@@ -1722,8 +1700,13 @@ ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
                 const WORD bad_block = failed_blocks[fi];
 
                 LOGW(LOG_TAG_CP "retire CP candidate block=%hu (write/readback failed)\r\n", bad_block);
-                bbt_mark_bad(&ftl->alloc, ftl_gblock(0U, bad_block));
-                bbt_mark_bad(&ftl->alloc, ftl_gblock(1U, bad_block));
+
+                // CP 池是 P0/P1 镜像：任一 plane 的副本写坏，同号块在各 plane 都要退役。
+                // H39：不写死 plane 下标。
+                for (BYTE p = 0U; p < PLANE_NUM; p++)
+                {
+                    bbt_mark_bad(&ftl->alloc, ftl_gblock(p, bad_block));
+                }
             }
             return FTL_OK;
         }
@@ -1750,7 +1733,7 @@ ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
  * @return true 触发；false 不触发。
  *
  * @note T1 Journal 水位（checkpoint_needed，由 jrn_watermark_update 置）；
- * T2 写入量（total_writes 整除 CP_WRITE_INTERVAL，且 >0 防开机即命中）；
+ * T2 写入量（自上次 CP 起 total_writes 增量 ≥ CP_WRITE_INTERVAL）；
  * T3 定时（elapsed_ms ≥ CP_TIME_INTERVAL_MS）。
  */
 static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
@@ -1783,8 +1766,11 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
         return true;
     }
 
-    // T2: 写入量触发
-    if ((trigger->total_writes > 0U) && ((trigger->total_writes % CP_WRITE_INTERVAL) == 0U))
+    // T2: 写入量触发（自上次 CP 起点以来的增量）。
+    // ⚠ 不能用 `total_writes % CP_WRITE_INTERVAL == 0`：total_writes 只在 host 写
+    // 确认时自增，空闲时不变；若写计数恰好停在整数倍，CP 完成后每轮都会再次命中
+    // ⇒ 空闲持续空转写 21 页 record。增量判据在无符号减法下天然处理回绕。
+    if ((trigger->total_writes - h->cp_state.last_cp_writes) >= CP_WRITE_INTERVAL)
     {
         return true;
     }
@@ -1792,7 +1778,7 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
     // T3: 定时触发（绝对到期时刻，由 CP 起点重装）。
     // ⚠ 一条 CP record 是 21 页 ⇒ 轻载下加最小 journal 增量门：定时拍到了但
     // 自上次 CP 没有足够新条目 ⇒ 不写。
-    if ((trigger->now_ms != 0U) && ftl_time_after(trigger->now_ms, h->cp_state.next_t3_ms))
+    if ((trigger->now_ms != 0U) && timer_time_due(trigger->now_ms, h->cp_state.next_t3_ms))
     {
         const DWORD seq  = trigger->journal_seq;
         const DWORD last = h->cp_state.last_journal_sequence;
@@ -1823,12 +1809,12 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
         // job 在飞时只上报、不再推进（否则一轮会被推进 3 次，行为漂移）。
         if (trigger->reason == CP_REASON_ADVANCE)
         {
-            // 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase
+            // 心跳（见 log.h / timer.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase
             // 才持续可见。判据 = 两次心跳之间 phase 不动 ⇒ 卡死。
             // ⚠ 起点在 cp_job_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。
-            if (ftl_heartbeat_due(&h->hb))
+            if (log_heartbeat_due(&h->hb))
             {
-                LOGI(LOG_TAG_CP "job phase=%d wait=%d fail=%d age=%lums\r\n", h->phase, h->waiting, h->failed, ftl_heartbeat_age_ms(&h->hb));
+                LOGI(LOG_TAG_CP "job phase=%d wait=%d fail=%d age=%lums\r\n", h->phase, h->waiting, h->failed, log_heartbeat_age_ms(&h->hb));
             }
 
             cp_job_step(h);
@@ -1836,7 +1822,12 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
     }
     else if (cp_should_start(h, trigger))
     {
-        (void)cp_job_begin(h);
+        if (cp_job_begin(h) == FTL_OK)
+        {
+            // T2 的增量基准 = 本次 job 起点快照对应的写计数（与 region / journal
+            // 快照同一 cut）。失败不更新，下一轮仍可再触发。
+            h->cp_state.last_cp_writes = trigger->total_writes;
+        }
 
         // 定时/水位触发后重装 T3 到期时刻（紧急触发不重装——它不代表周期拍点）。
         // 无论 cp_job_begin 成败都重装，否则一次失败会每轮重触发。
@@ -1855,5 +1846,5 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
  */
 void cp_timer_reset(cp_handle_t *h)
 {
-    h->cp_state.next_t3_ms = ftl_job_now_ms() + CP_TIME_INTERVAL_MS;
+    h->cp_state.next_t3_ms = platform_now_ms() + CP_TIME_INTERVAL_MS;
 }

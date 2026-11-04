@@ -12,7 +12,8 @@
  *      Closed = alc_super_closed_add /
  *      alc_super_closed_remove。标量计数（free_count / closed_sb_count）直接读；
  *      数组/边界/借出访问走 alc_op_get_count / alc_spare_get_count / alc_super_closed_get_at。
- *   ② state == FTL_BLOCK_STATE_FREE ⟺ 在 Free Pool。BAD 是终态，永不进池；
+ *   ② state == FTL_BLOCK_STATE_FREE ⟺ 在 Free Pool。进池/出池两个闸门各自维护这半边：
+ *      push 置 FREE，remove 置 NONE（目标态由调用者随后赋值）。BAD 是终态，永不进池；
  *      无归属块（固定元数据 / OP / Spare / 未初始化）为 NONE。
  *   ③ closed_sb_list 是 swap-remove 活列表：跨调用持有条目必须按值拷贝；
  *      消费方按 !is_open 过滤。
@@ -20,11 +21,11 @@
  *      运行期入口不逐次复检；init/bind 与 release 关键边界仍用 ASSERT。仅池空 / 幂等早退返回错误码。
  */
 
-#include "assertion.h"   /* ASSERT（inline 访问器与地址展开的入参检查） */
-#include "bst.h"         /* bst_block_t, FTL_BLOCK_TOTAL, ftl_gblock */
-#include "ftl_config.h"  /* DWORD, pba_make */
-#include "ftl_job.h"     /* ftl_heartbeat_t（BBT job 观测） */
-#include "ftl_type.h"    /* ftl_status_e, ftl_topo_t */
+#include "assertion.h"  /* ASSERT（inline 访问器与地址展开的入参检查） */
+#include "bst.h"        /* bst_block_t, FTL_BLOCK_TOTAL, ftl_gblock */
+#include "ftl_config.h" /* DWORD, pba_make */
+#include "ftl_type.h"   /* ftl_status_e, ftl_topo_t */
+#include "log.h"
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdbool.h>
@@ -119,7 +120,7 @@ typedef struct
     bbt_handle_phase_e phase;     /* 异步持久化状态机 */
     bool               waiting;   /* true = 有命令在飞 */
     DWORD              dirty_gen; /* 本条 record 组 header 时的 dirty 代际快照 */
-    ftl_heartbeat_t    hb;        /* job 心跳（start/log + active） */
+    log_heartbeat_t    hb;        /* job 心跳（start/log + active） */
 } bbt_handle_t;
 
 /* BBT 后台持久化「起新 job」的节拍；在飞续跑不受此限（bbt_handle 先处理在飞态）。
@@ -312,7 +313,10 @@ WORD alc_free_refill_from_op(alc_t *alloc, BYTE plane);
 void alc_free_push(alc_t *alloc, WORD gblock);
 
 /**
- * @brief 从 Free Pool 移除一个块（出池不改状态）
+ * @brief 从 Free Pool 移除一个块（出池置 NONE）
+ *
+ * 不在池内是文档化 no-op（状态不变）；命中时由本闸门把 state 置 NONE，
+ * 调用者在返回后赋目标态（OPEN / LOG / CLOSED / BAD）。
  *
  * @param alloc 分配器
  * @param gblock 全局块号。
@@ -614,6 +618,8 @@ void alc_super_prepare_wl_destination(alc_t *alloc);
  *
  * @param alloc 分配器
  * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD（须与那次 alloc 相同）。
+ *
+ * @note next_page == 0 时拒绝并留日志（BYTE 下溢会静默指向本块最后一页）。
  */
 void alc_super_open_rewind_pair(alc_t *alloc, BYTE temperature);
 

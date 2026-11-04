@@ -134,7 +134,9 @@ static bool __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
 /**
  * @brief 登记一条未决 request（cmd_id → op + ctx）
  *
- * 重复登记是编程错误（ASSERT）；CQ 满时 fc.c 强制置完成属异常但可恢复。
+ * 重复登记不会由调用链产生：命令槽位释放前 request 必已摘除（drain 先清项，
+ * 同步超时先 remove）。这里只保留 LOGW + 覆盖旧项作为不变量损坏时的现场，
+ * 不加 ASSERT（H2：内部入口默认调用者已保证）。
  *
  * @param cmd_id 命令 id
  * @param op     操作类型
@@ -172,7 +174,8 @@ ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx)
 /**
  * @brief 摘除一条 request
  *
- * 未登记由 debug ASSERT 停机。
+ * 调用链保证 cmd_id 刚登记成功（提交/批量回滚、同步超时摘项），未登记不会
+ * 出现；本函数不加 ASSERT（H2），只清项以保持幂等。
  *
  * @param cmd_id 命令 id
  */

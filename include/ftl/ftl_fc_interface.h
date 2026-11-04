@@ -425,9 +425,14 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  *
  * @param cmd         已建链的命令（本函数负责提交）
  * @param status_out  输出：完成状态（可 NULL）
- * @param timeout_us  超时微秒（0 = 默认 10ms）
+ * @param timeout_us  超时微秒（0 = 默认 10 ms；上限 65 ms——
+ *                    `delay_time_elapsed_us` 的 timeout 形参是 WORD）
  * @return FTL_OK 完成（status_out 有效）
  *         FTL_ERROR 提交失败 / 超时 / request 登记失败
+ *
+ * @note 判据是**真实微秒**（`delay_time_now_us` / `delay_time_elapsed_us`）；
+ *       时钟不可用时退化为同值轮数兜底。NAND 侧 busy 预算：擦除 tBERS 5 ms、
+ *       编程 tPROG 0.7 ms、读 tR 38 µs ⇒ `ftl_sync_erase_block` 的 20 ms 是外层兜底。
  */
 ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us);
 

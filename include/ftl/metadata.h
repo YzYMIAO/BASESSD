@@ -38,9 +38,10 @@
 
 #include "allocator.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
-#include "ftl_job.h"    /* ftl_heartbeat_t / ftl_deadline_t */
 #include "ftl_type.h"
+#include "log.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（目录检查点页打包自检）*/
+#include "timer.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -810,7 +811,7 @@ typedef struct
     WORD              reclaim_gblock;       /* 在飞擦除的块（完成时归还它）*/
     WORD              reclaim_fail_gblock;  /* 连续擦除失败计数对应的块（RISK-MD-01）*/
     BYTE              reclaim_fail_count;   /* 该块连续擦除失败次数；达上限即标坏并清位 */
-    ftl_deadline_t    submit_deadline;      /* 连续「提交不出去」deadline */
+    timer_deadline_t  submit_deadline;      /* 连续「提交不出去」deadline */
     bool              timed_out;            /* true = 本次 job 因 deadline 中止 */
     md_handle_phase_e timeout_phase;        /* 超时发生的 phase */
     WORD              dir_ckpt_idx;         /* 本目录检查点记录 的池内槽位 */
@@ -821,8 +822,8 @@ typedef struct
     DWORD             reclaimed_count;      /* 累计擦除成功并归还的日志块数（单调进度） */
     int32_t           error;                /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
-    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
-    ftl_heartbeat_t hb;
+    /* 心跳基准（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
+    log_heartbeat_t hb;
 
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
      * 服务循环，栈帧早已返回。放 job 而非栈（同 mig_handle.page_buf / rr_page_scratch）。 */

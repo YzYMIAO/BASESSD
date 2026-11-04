@@ -24,6 +24,16 @@ typedef struct
 int                       ssd_platform_register(const ssd_platform_ops_t *ops);
 const ssd_platform_ops_t *ssd_platform_get(void);
 
+/**
+ * @brief 当前单调毫秒（平台毫秒时基的统一读取口）
+ *
+ * 优先注册的 `time_ms`；缺省时退回 `time_us / 1000`；两者都没有则返回 0。
+ * 所有消费方都用差值（回绕安全，约 49.7 天一圈）。
+ *
+ * @return 当前毫秒；平台未注册 / 无时基时 0
+ */
+DWORD platform_now_ms(void);
+
 /*
  * 注册本平台的 ssd_platform_ops_t 实现表。
  * 名字被 src/main.c 冻结；实现表本身在共享 src/platform/platform.c，

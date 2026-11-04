@@ -1137,7 +1137,7 @@ DWORD ftl_media_layout_version(void);
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
 | 读恢复 | `read_recovery.c/h` | §3.14 |
 | FTL↔FC 接口 | `ftl_fc_interface.c/h`、`ftl_config.h` | §3.15 |
-| 观测性 | `ftl_job.h`、各 job 心跳 | 并入 §3.12 |
+| 观测性 | `log.h`（心跳/限流）、`timer.h`（deadline/age）、各 job 心跳 | 并入 §3.12 |
 
 <a id="s3-1" name="s3-1"></a>
 
@@ -2693,7 +2693,7 @@ pool: 0=NONE / 1=OP / 2=SPARE
 |---|---|---|
 | **T1 水位** | Journal ≥ 85% | 设 `checkpoint_needed`，后台执行 |
 | **T1 紧急** | Journal ≥ 95% | 设 `emergency`，任何档位都执行 |
-| **T2 写入量** | `total_writes % 1024 == 0` | 后台执行 |
+| **T2 写入量** | 自上次 CP 起增量 ≥ 1024 | 后台执行 |
 | **T3 定时** | 距上次 ≥ 10 s 且 Journal 增量 ≥ 64 | 后台执行（轻载不写空 CP） |
 
 #### 3.8.5 阶段与顺序契约

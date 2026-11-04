@@ -267,6 +267,17 @@ docs/reference/
 > SPIFTL/dhara/zns-tools）**未克隆**——克隆会把嵌套 `.git` 塞进本仓，污染版本库。
 > 需要时按学习文档 §附录 的 URL 单独 clone 到仓外。
 
+### AppL（DFTL fine/coarse cache，CMT 写回的出处）
+
+- repo：`https://github.com/postech-caoslab/AppL`
+- 关键文件：
+  - `algorithm/DFTL/caching/fine/fine_cache.c`：`__update_entry()` 对任意命中/插入
+    LBA 置 `DIRTY_FLAG`；`fine_update_eviction_target_translation()` 驱逐时把同一
+    translation page 的 dirty 条目合并整页写回。
+  - `algorithm/DFTL/demand_mapping.c`：冷写 `MISSR` 分支先
+    `insert_entry_from_translation()` 读 translation page，再标 dirty。
+- 用途：本仓写回 CMT 的结构依据；说明「冷写仍读页」是主流行为，不是本仓妥协。
+
 ---
 
 ## 四、怎么用这些资料
