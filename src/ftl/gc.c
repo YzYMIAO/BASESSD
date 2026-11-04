@@ -84,11 +84,18 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 
     {
         fc_command_status_t completion;
+        bool                submitted = false;
 
-        ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U);
+        const ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U, &submitted);
+
         if (ret != FTL_OK)
         {
-            (void)fc_command_release(cmd);
+            // RISK-IF-17：只有「未提交」才由调用者 release；已提交但超时时命令仍在
+            // FC/NAND，迟到完成由 ftl_op_drain 的 missing-request 分支释放。
+            if (submitted == false)
+            {
+                (void)fc_command_release(cmd);
+            }
             return FTL_ERROR;
         }
 

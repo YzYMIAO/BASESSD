@@ -820,7 +820,7 @@ static int uart_cli_stack(int argc, char *argv[])
  */
 static int uart_cli_bbt(int argc, char *argv[])
 {
-    BYTE do_erase = 0U;
+    bool do_erase = false;
 
 #ifndef NDEBUG
     /* 负例注入：bbt fault <plane> <block> —— 把指定物理块标 BAD 并触发候选池重算。
@@ -874,7 +874,7 @@ static int uart_cli_bbt(int argc, char *argv[])
             LOGW("bbt: unknown option '%s' (only --erase)\r\n", argv[1]);
             return FUNC_STATUS_ERROR;
         }
-        do_erase = 1U;
+        do_erase = true;
         LOGW("bbt --erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
     }
 
@@ -889,7 +889,7 @@ static int uart_cli_bbt(int argc, char *argv[])
         /* 擦除前先关掉本实例的后台写：擦除要跑十几秒，且擦完介质已空而 RAM 状态
          * 陈旧（CP_TIME_INTERVAL_MS=10s 的定时 checkpoint 会把旧状态写回去，
          * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过后台调度步，无清除路径。 */
-        if (do_erase != 0U)
+        if (do_erase == true)
         {
             ftl->flags.bg_suspend = 1U;
             /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
@@ -904,11 +904,18 @@ static int uart_cli_bbt(int argc, char *argv[])
                 trigger.kind = WBUF_TRIGGER_RESET;
                 (void)wb_handle(ftl->wbuf, &trigger, &status);
             }
+
+            /* 全片擦除会抹掉 BBT 池：先等在飞的 BBT 异步写完成，避免它在擦净后
+             * 又把一条 record 写回已擦空的块（RISK-BBT-20 的同类重叠）。 */
+            for (WORD spin = 0U; (ftl->alloc.bbt.handle.waiting == true) && (spin < 1000U); spin++)
+            {
+                ftl_service_pump();
+            }
         }
         bbt_print_bad_map(&ftl->alloc, do_erase);
     }
 
-    if (do_erase != 0U)
+    if (do_erase == true)
     {
         LOGW("bbt --erase: done. POWER-CYCLE NOW — the running FTL rewrites metadata if left idle.\r\n");
     }
@@ -972,6 +979,14 @@ static int uart_cli_format(int argc, char *argv[])
             memset(&trigger, 0, sizeof(trigger));
             trigger.kind = WBUF_TRIGGER_RESET;
             (void)wb_handle(ftl->wbuf, &trigger, &status);
+        }
+
+        /* 格式化会重写 BBT 池：先等在飞的 BBT 异步写完成，避免 sync save 与它
+         * 二次编程同一槽（RISK-BBT-20；bbt_save 也会拒绝这种重叠，这里把正常
+         * 路径等干净，而不是让 format 直接失败）。泵是全局的，顺便推进其它实例。 */
+        for (WORD spin = 0U; (ftl->alloc.bbt.handle.waiting == true) && (spin < 1000U); spin++)
+        {
+            ftl_service_pump();
         }
 
         if (pfr_media_format(ftl, verify) != FTL_OK)

@@ -78,6 +78,9 @@ static DWORD s_replay_degraded_entries;
 static DWORD s_replay_degraded_region;
 static DWORD s_replay_write_fail_entries;
 static DWORD s_replay_write_fail_lba;
+/* 应用遍（第二遍）页读失败数：扫描遍读成功、应用遍才失败的页同样意味着条目被漏，
+ * 必须让 jrn_replay 返错（RISK-JN-08），不能只打一行日志。 */
+static DWORD s_replay_page_read_fail;
 
 /* erase kick 失败日志限流（时间优先，无时钟时 64 条兜底）。 */
 static DWORD s_erase_kick_log_ms;
@@ -170,7 +173,10 @@ static bool jrn_ring_block_bad(const l2p_jrn_t *journal, BYTE b)
  */
 static BYTE jrn_block_next(const l2p_jrn_t *journal, BYTE from)
 {
-    for (BYTE i = 1U; i <= JOURNAL_BLOCK_COUNT; i++)
+    // ⚠ 循环上界是 `<`，**不**检查 from 自身：只剩一个可用块时选自己会擦掉
+    // 「正在写 / 持有最新页」的块（RISK-JN-07）。此时返回 NONE，由调用者置
+    // ring_full 安全停写。
+    for (BYTE i = 1U; i < JOURNAL_BLOCK_COUNT; i++)
     {
         const BYTE b = ((from + i) % JOURNAL_BLOCK_COUNT);
 
@@ -363,7 +369,8 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
 
     // 更新合并：当前页缓冲里已有同一 LBA 的条目 ⇒ 就地更新，不新增条目。
     // 回放按页序 + 页内下标应用（per-LBA last-write-wins），页内同 LBA 只保留最新
-    // new_pba 即正确；old_pba 仅首条保留（回放不读 old_pba）。
+    // new_pba 即正确；old_pba 仅首条保留（回放的块元数据增量用它做 valid_sub，
+    // 中间被覆盖的 new_pba 在运行时已 +1/−1 抵消，回放只需首条 old 与末条 new）。
     // ⚠ **不**消耗 sequence、**不**推进 current_entry：hdr_page_seq 由
     // `sequence_counter − current_entry` 反推本页首条序号，二者必须同步推进，
     // 否则页序错乱会导致回放顺序错误。
@@ -374,7 +381,7 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba)
         entry = (l2p_jrn_entry_t *)(journal->handle.job.page_buf + JRN_HEADER_SIZE + sizeof(l2p_jrn_entry_t) * i);
         // CP 边界之前的条目不得被合并：merge_floor 之后的覆盖写另起一条，
         // 否则 sequence 仍是旧的、new_pba 却是新的，块元数据 delta 回放会漏记。
-        if ((entry->lba == lba) && (entry->sequence >= journal->handle.state.merge_floor))
+        if ((entry->lba == lba) && jrn_seq_ge(entry->sequence, journal->handle.state.merge_floor))
         {
             entry->new_pba = new_pba; /* 保留首条 old_pba，更新到最新 new_pba */
             return true;
@@ -809,12 +816,19 @@ static void jrn_erase_failed(l2p_jrn_t *journal, BYTE block)
         journal->handle.state.pre_erased_block = JRN_BLOCK_NONE;
     }
 
-    const BYTE next = jrn_block_next(journal, block);
+    BYTE next = jrn_block_next(journal, block);
+
+    // 候选若是当前写块 ⇒ 不能擦（它持有最新条目）。从当前块之后继续找：环里
+    // 真正的轮转目标就是「当前块之后的第一个可用块」（RISK-JN-07）。
+    if (next == journal->handle.state.current_block)
+    {
+        next = jrn_block_next(journal, next);
+    }
 
     if (next == JRN_BLOCK_NONE)
     {
         journal->handle.state.ring_full = true;
-        LOGE(LOG_TAG_JRN "all ring blocks unusable — journal writes disabled\r\n");
+        LOGE(LOG_TAG_JRN "no other usable ring block — journal writes disabled\r\n");
         return; /* need_erase 保留：绝不能写未擦块 */
     }
 
@@ -894,7 +908,7 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq)
 {
     // CP 起点水位 ≥ 失败点 ⇒ 该 CP 在失败之后快照了脏区并把 L2P 落盘；
     // pending 可以清。否则保留，等下一次 CP。
-    if (journal->handle.state.write_fail_pending && (cp_journal_seq >= journal->handle.state.write_fail_seq))
+    if (journal->handle.state.write_fail_pending && jrn_seq_ge(cp_journal_seq, journal->handle.state.write_fail_seq))
     {
         journal->handle.state.write_fail_pending = false;
     }
@@ -1029,7 +1043,7 @@ static void jrn_write_complete(l2p_jrn_t *journal, fc_command_t *cmd, const fc_c
         // WAL 水位：本页成功落盘 ⇒ 它覆盖的序号区间全部持久化（RISK-L2P-09）。
         const DWORD next_seq = journal->handle.state.write_page_seq + (DWORD)journal->handle.state.write_entry_count;
 
-        if (next_seq > journal->handle.state.persisted_seq)
+        if (jrn_seq_after(next_seq, journal->handle.state.persisted_seq))
         {
             journal->handle.state.persisted_seq = next_seq;
         }
@@ -1251,8 +1265,9 @@ static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_seque
                 continue;
             }
 
-            // 最新页（用于恢复写指针与序号）：取 page_seq 最大者
-            if ((out_latest != NULL) && (page_seq >= out_latest->page_seq))
+            // 最新页（用于恢复写指针与序号）：取 page_seq 最大者（串行号语义，
+            // 回绕安全；entry_count == 0 表示尚未见过有效页）。
+            if ((out_latest != NULL) && ((out_latest->entry_count == 0U) || jrn_seq_after(page_seq, out_latest->page_seq)))
             {
                 out_latest->page_seq    = page_seq;
                 out_latest->base_lba    = base_lba;
@@ -1263,7 +1278,7 @@ static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_t *journal, DWORD cp_seque
             }
 
             // 需回放页：本页**最后一条**的序号已过水位 ⇒ 页内至少一条没进 L2P 表
-            if ((out_pages != NULL) && (count < capacity) && ((page_seq + entry_count) > cp_sequence))
+            if ((out_pages != NULL) && (count < capacity) && jrn_seq_after((DWORD)(page_seq + entry_count), cp_sequence))
             {
                 out_pages[count].page_seq    = page_seq;
                 out_pages[count].base_lba    = base_lba;
@@ -1307,7 +1322,9 @@ SSD_CODE_FAST bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t
         LOGW(LOG_TAG_JRN "ring scan: %hu page(s) unreadable — 判型结果不可信\r\n", read_errors);
     }
 
-    return (out != NULL) && (out->page_seq > 0U);
+    // 有效页必有 ≥1 条条目（entry_count == 0 才是「环空」）；不能用 page_seq > 0
+    // 当哨兵——序号回绕后 0 是合法值（RISK-JN-09）。
+    return (out != NULL) && (out->entry_count > 0U);
 }
 
 /**
@@ -1325,20 +1342,30 @@ SSD_CODE_FAST void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, 
     bool  pending_erase = false;
     BYTE  erase_block   = 0U;
 
-    if ((latest != NULL) && (latest->page_seq > 0U))
+    if ((latest != NULL) && (latest->entry_count > 0U))
     {
         // ⚠ 必须加 **entry_count**，不是 +1：本页占了 page_seq .. page_seq+entry_count-1
         // 共 entry_count 个序号（jrn_append 逐条 `sequence_counter++`，页头
         // `hdr_page_seq = sequence_counter − current_entry` 反推）。若只 +1，序号会
         // 退回本页内部 ⇒ 下一页的 page_seq 落进本页的序号区间，回放过滤
         // `page_seq + entry_count > cp_sequence` 会把已进 L2P 的页**重复回放**。
-        if ((latest->page_seq + latest->entry_count) > next)
+        if (jrn_seq_after((DWORD)(latest->page_seq + latest->entry_count), next))
         {
             next = latest->page_seq + latest->entry_count;
         }
 
         BYTE next_block = latest->block;
-        BYTE next_page  = (latest->page + 1U);
+        BYTE next_page  = (BYTE)(latest->page + 1U);
+
+        // RISK-JN-10：最新页之后的一页可能正是掉电时在写的白页（半编程、非空白）。
+        // 对已编程页再编程 = AND 损坏，主流做法是「绝不二次编程」⇒ 跳过它；
+        // 块尾由下面的换块路径处理（新块先擦再写）。
+        if ((next_page < PAGES_PER_BLOCK) && (jrn_page_raw_blank(jrn_page_addr(journal, latest->block, next_page)) == false))
+        {
+            LOGW(LOG_TAG_JRN "resume: skip torn page blk=%hhu page=%hhu\r\n", latest->block, next_page);
+            next_page = (BYTE)(next_page + 1U);
+        }
+
         if (next_page >= PAGES_PER_BLOCK)
         {
             next_block = jrn_block_next(journal, latest->block);
@@ -1474,6 +1501,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
     if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         LOGW(LOG_TAG_JRN "replay: page blk=%hhu page=%hhu unreadable\r\n", page->block, page->page);
+        s_replay_page_read_fail++;
         return 0U;
     }
 
@@ -1497,7 +1525,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
             // 回放严格按 (page_seq, 下标) 递增序应用，读到的就是确认时刻的旧值。
             // 只在需要记块元数据增量时读（水位之前的条目是幂等映射写，不记账）。
             entry_old_pba = NAND_PBA_INVALID;
-            if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))
+            if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && jrn_seq_ge(entry_seq, cp_sequence))
             {
                 if (l2p_read_sync(cache, entry_lba, &entry_old_pba) != FTL_OK)
                 {
@@ -1558,7 +1586,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_t *journal, l2p_cache_t
         // 块元数据增量：只对**快照之后**的条目记 valid_count。
         // 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
         // materialize 由开机恢复模块注入——journal 不反向依赖 pfr。
-        if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence) && (block_ctx->materialize != NULL) && (block_ctx->valid_add != NULL) && (block_ctx->valid_sub != NULL))
+        if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && jrn_seq_ge(entry_seq, cp_sequence) && (block_ctx->materialize != NULL) && (block_ctx->valid_add != NULL) && (block_ctx->valid_sub != NULL))
         {
             const DWORD old_pba = entry_old_pba;
             const DWORD new_pba = entry_new_pba;
@@ -1629,6 +1657,7 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DW
     s_replay_degraded_region    = UINT32_MAX;
     s_replay_write_fail_entries = 0U;
     s_replay_write_fail_lba     = FTL_LBA_INVALID;
+    s_replay_page_read_fail     = 0U;
 
     // 第一遍：扫环——收集需回放页 + 取最新页
     jrn_page_ref_t latest;
@@ -1645,7 +1674,7 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DW
             jrn_page_ref_t key = replay_pages[i];
 
             WORD n = i;
-            while ((n > 0U) && (replay_pages[n - 1U].page_seq > key.page_seq))
+            while ((n > 0U) && jrn_seq_after(replay_pages[n - 1U].page_seq, key.page_seq))
             {
                 replay_pages[n] = replay_pages[n - 1U];
                 n--;
@@ -1683,9 +1712,11 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DW
     // 读失败的页 = 可能漏回放的条目。**写态恢复已经完成**（jrn_resume 必须执行，
     // 否则写指针会回到 block0/page0 二次编程），但调用者不能把本次回放当成完整结果
     // ——应回退 full metadata rebuild（RISK-BOOT-08）。
-    if (read_errors != 0U)
+    // ⚠ 扫描遍（read_errors）与应用遍（s_replay_page_read_fail）**都要判**：
+    //   某页扫描时能读、应用时读失败同样意味着条目被漏（RISK-JN-08）。
+    if ((read_errors != 0U) || (s_replay_page_read_fail != 0U))
     {
-        LOGW(LOG_TAG_JRN "replay incomplete: %hu page(s) unreadable\r\n", read_errors);
+        LOGW(LOG_TAG_JRN "replay incomplete: %hu scan + %lu apply page(s) unreadable\r\n", read_errors, s_replay_page_read_fail);
         return FTL_ERROR;
     }
 
@@ -1729,7 +1760,7 @@ jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, 
     // ⚠ CP 的快照点在**起点**（见 checkpoint.c 的掉电安全论证），故水位判据容易不满足
     // ——即更少预擦。这是安全方向的取舍：预擦只是磨损优化，跳过它只是让
     // jrn_handle 在换块时自己异步擦（每块每圈仍只擦一次）。
-    if ((journal->handle.state.sequence_counter == 0U) || (up_to_sequence < (journal->handle.state.sequence_counter - 1U)))
+    if ((journal->handle.state.sequence_counter == 0U) || (!jrn_seq_ge(up_to_sequence, (DWORD)(journal->handle.state.sequence_counter - 1U))))
     {
         return JRN_TRUNC_NO_TRUNCATE;
     }

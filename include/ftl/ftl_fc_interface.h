@@ -364,6 +364,8 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
  * 硬件 FCC 不提供「按 CW 拷贝」寄存器，数据由固件在 desc 链上逐 CW 填。
  * 遍历界走 desc 链（链长度是 CW 数的唯一真值）；数据耗尽后剩余 CW 的 USER 区填 0xFF
  * dummy（不把上一轮残值写进 NAND）。
+ * ⚠ `length` 超过链容量时，多余的源数据**被忽略**（不报错）——调用者应保证
+ *   length 与链上 CW 数匹配（搬页数据用 L2P_REGION_SIZE / FTL_READ_USER_SIZE）。
  *
  * @param cmd     已建链的命令（desc_id 有效）
  * @param data    源数据
@@ -421,12 +423,21 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
  *   会把调用者栈帧钉住并重入完成泵。
  *
- * ⚠ **不 release 命令**——调用者要在返回后读 cmd 数据（如 ftl_cmd_read_data）才 release。
+ * ⚠ **命令归属（RISK-IF-17）由 `submitted` 出参决定，错误路径不得无条件 release**：
+ *   · 成功（FTL_OK）：命令仍归调用者，读完数据（`ftl_cmd_read_data`）后再 release。
+ *   · 失败且 `*submitted == false`（未提交）：命令从未进 FC ⇒ **调用者必须 release**。
+ *   · 失败且 `*submitted == true`（已提交但超时）：命令仍在 FC/NAND 管线，
+ *     **调用者不得 release、不得读数据**。request 表项已摘除，迟到完成走
+ *     `ftl_op_drain` 的 missing-request 分支，由 drain 在完成时释放。
+ *     若迟到完成永不发生，代价是泄漏 1 个命令槽——远优于释放仍在飞的 desc/buffer
+ *     （NAND 可能仍在 DMA 使用）或释放已被新命令复用的槽位。
  *
  * @param cmd         已建链的命令（本函数负责提交）
- * @param status_out  输出：完成状态（可 NULL）
- * @param timeout_us  超时微秒（0 = 默认 10 ms；上限 65 ms——
+ * @param status_out  输出：完成状态（可 NULL；仅 FTL_OK 时有效）
+ * @param timeout_us  超时微秒（0 = 默认 10 ms；上限 65 ms——超上限按上限处理，
  *                    `delay_time_elapsed_us` 的 timeout 形参是 WORD）
+ * @param submitted   输出（非 NULL）：本函数返回时命令是否已提交给 FC。
+ *                    见上方「命令归属」。
  * @return FTL_OK 完成（status_out 有效）
  *         FTL_ERROR 提交失败 / 超时 / request 登记失败
  *
@@ -434,7 +445,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  *       时钟不可用时退化为同值轮数兜底。NAND 侧 busy 预算：擦除 tBERS 5 ms、
  *       编程 tPROG 0.7 ms、读 tR 38 µs ⇒ `ftl_sync_erase_block` 的 20 ms 是外层兜底。
  */
-ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us);
+ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us, bool *submitted);
 
 /* ── 页级同步原语 ──
  *

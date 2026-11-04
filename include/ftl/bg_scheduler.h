@@ -43,8 +43,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* tasks[] 容量。装载表的项数不得超出——超出即越界写 tasks[] 并踩掉 task_count。
- * 装载点 s_bg_tasks 用 _Static_assert 在编译期挡住（那里同时看得见表与容量）；
+/* 任务表项数。静态表按**指针**绑定到 sched->tasks（不逐实例复制），项数必须与
+ * BG_TASK_COUNT 一致——装载点 s_bg_tasks 用 _Static_assert 在编译期挡住。
  * bg_scheduler_init 的装载数直接取表长，不接收运行期 count 参数。 */
 #define BG_TASK_COUNT (10U)
 
@@ -114,7 +114,7 @@ void bg_scheduler_refill(bg_scheduler_t *sched);
 /* ── FTL 策略接口 ── */
 
 /**
- * @brief 装载内置任务表 s_bg_tasks：拷贝到 tasks[]、置 task_count、清 cfg。
+ * @brief 绑定内置任务表 s_bg_tasks（共享只读，不逐实例复制）、置 task_count、清 cfg 与 level。
  * 表长是编译期常量（_Static_assert 保证 == BG_TASK_COUNT）⇒ 函数无表参数。
  *
  * @param sched 本实例的调度器（被写入 tasks[] / task_count，并复位 cfg 与 level）。

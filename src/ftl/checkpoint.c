@@ -1770,7 +1770,7 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
         const DWORD seq  = trigger->journal_seq;
         const DWORD last = h->cp_state.last_journal_sequence;
 
-        if ((seq >= last) && ((seq - last) >= CP_T3_MIN_JOURNAL_DELTA))
+        if (jrn_seq_after(seq, last) && ((seq - last) >= CP_T3_MIN_JOURNAL_DELTA))
         {
             return true;
         }

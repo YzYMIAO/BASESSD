@@ -145,16 +145,21 @@ typedef struct
     BYTE pages_per_record; /* 一条 record 占几页 */
 } md_pool_policy_t;
 
-// 一次池扫描的中间结果（①~③ 步）。
+// 一次池扫描的中间结果。
+//
+// 语义（RISK-BBT-18）：不再假设"第一个末槽无效的块 = 写 frontier"。引导环
+// （BBT 名义块 + shared spare）里 BAD 块/读失败块的末槽同样无效，旧假设会把
+// 真正 frontier 之后的中段 record 全部忽略。现在对**每个**非满块降序找最后
+// 一条有效 record，再与满块末条比较取全局 sequence 最大者。
 typedef struct
 {
-    WORD  cursor_block;  /* 第一个未写满的块；全满时为"最新满块之后" */
-    WORD  best_full_idx; /* 全部满块末条中 sequence 最大者（UINT16_MAX = 无）*/
-    DWORD best_full_seq;
-    WORD  cursor_last_idx; /* 游标块内最后一条有效 record（UINT16_MAX = 无）*/
-    DWORD cursor_last_seq;
-    bool  ring_full; /* 池已写满一圈 */
+    WORD  cursor_block; /* 全空池：第一个空块（写点从它的槽 0 开始）；否则 = frontier 所在块 */
+    WORD  frontier_idx; /* 池内 sequence 最大的 record 槽位（UINT16_MAX = 无有效 record）*/
+    DWORD frontier_seq; /* 该 record 的 sequence */
 } md_ring_scan_t;
+
+// md_ring_scan 用 DWORD 位图记录"末槽无效"的块 ⇒ 块数必须装进 32 位。
+_Static_assert(MD_RING_MAX_BLOCKS <= 32U, "open_blocks 位图按 32 块设计");
 
 // 分区表行号：s_md_partitions 与 pool policy 共用同一套下标。
 typedef enum
@@ -487,65 +492,102 @@ DWORD md_ring_addr(const md_ring_t *ring, const ftl_topo_t *topo, WORD record_id
 }
 
 /**
- * @brief ①~③：逐块探末条 → 找游标块 → 游标块内找末条。
+ * @brief 逐块探末条 → 每个非满块降序找末条 → 取全局 sequence 最大者。
  *
- * @param ring  池几何
+ * @param ring  池几何（block_count 已由 md_ring_geom_valid 限在 32 以内）
  * @param probe 调用方探针
  * @param ctx   探针上下文
  * @param rpb   每块 record 数
  * @param s     输出：扫描中间结果
+ *
+ * @note 判据不再是"第一个末槽无效的块 = 写 frontier"（RISK-BBT-18）：引导环里
+ *       BAD 块/读失败块的末槽同样无效，旧假设会把真正 frontier 之后的中段
+ *       record 全部忽略。代价：空块通常只付 1 次探针（末页空白），读失败的块
+ *       最多 rpb 次；只在定位（开机/冷定位）时执行。
  */
 static void md_ring_scan(const md_ring_t *ring, metadata_ring_probe_fn probe, void *ctx, WORD rpb, md_ring_scan_t *s)
 {
-    s->cursor_block    = UINT16_MAX;
-    s->best_full_idx   = UINT16_MAX;
-    s->best_full_seq   = 0U;
-    s->cursor_last_idx = UINT16_MAX;
-    s->cursor_last_seq = 0U;
-    s->ring_full       = false;
+    s->cursor_block = UINT16_MAX;
+    s->frontier_idx = UINT16_MAX;
+    s->frontier_seq = 0U;
 
-    // ① 逐块廉价探针该块**末条** record：末条有效 = 该块写满
+    // ① 逐块廉价探末条：末槽有效 ⇒ 该块本圈写满；无效 ⇒ 记入非满块集合。
+    WORD  best_full_idx = UINT16_MAX;
+    DWORD best_full_seq = 0U;
+    DWORD open_blocks   = 0U; /* bit b = 块 b 的末槽无效（block_count <= 32） */
+
     for (WORD b = 0U; b < ring->block_count; b++)
     {
-        DWORD seq = 0U;
-        WORD  idx = ((b * rpb) + (rpb - 1U));
+        const WORD idx = (WORD)((b * rpb) + (rpb - 1U));
+        DWORD      seq = 0U;
 
         if (probe(ctx, idx, false, &seq) == FTL_OK)
         {
-            if ((s->best_full_idx == UINT16_MAX) || (seq > s->best_full_seq))
+            if ((best_full_idx == UINT16_MAX) || (seq > best_full_seq))
             {
-                s->best_full_idx = idx;
-                s->best_full_seq = seq;
+                best_full_idx = idx;
+                best_full_seq = seq;
+            }
+        }
+        else
+        {
+            open_blocks |= (1UL << b);
+        }
+    }
+
+    // ② 每个非满块降序找最后一条有效 record，取全局 sequence 最大者。
+    //    全空块只记下"第一个空块"，供池空时的写点使用。
+    WORD  cursor_last_idx = UINT16_MAX;
+    DWORD cursor_last_seq = 0U;
+
+    for (WORD b = 0U; b < ring->block_count; b++)
+    {
+        if ((open_blocks & (1UL << b)) == 0U)
+        {
+            continue;
+        }
+
+        WORD  last_idx = UINT16_MAX;
+        DWORD last_seq = 0U;
+
+        for (WORD k = 0U; k < rpb; k++)
+        {
+            const WORD idx = (WORD)((b * rpb) + (rpb - 1U - k));
+            DWORD      seq = 0U;
+
+            if (probe(ctx, idx, false, &seq) == FTL_OK)
+            {
+                last_idx = idx;
+                last_seq = seq;
+                break;
+            }
+        }
+
+        if (last_idx != UINT16_MAX)
+        {
+            if (last_seq > cursor_last_seq)
+            {
+                cursor_last_idx = last_idx;
+                cursor_last_seq = last_seq;
             }
         }
         else if (s->cursor_block == UINT16_MAX)
         {
-            s->cursor_block = b; /* 第一个未写满的块 = 游标块 */
+            s->cursor_block = b; /* 全空块：池空时的写点候选 */
         }
     }
 
-    // ② 所有块都写满 ⇒ 池转满一圈：游标 = 最新块之后，且该块整体擦掉重写
-    if (s->cursor_block == UINT16_MAX)
+    // ③ 全局最新 = max(满块末条, 非满块末条)。满块末条胜出时 frontier 落在末槽，
+    //    写点由调用者按"下一块槽 0"处理。
+    if ((cursor_last_idx != UINT16_MAX) && (cursor_last_seq > best_full_seq))
     {
-        s->cursor_block = (((s->best_full_idx / rpb) + 1U) % ring->block_count);
-        s->ring_full    = true;
+        s->frontier_idx = cursor_last_idx;
+        s->frontier_seq = cursor_last_seq;
     }
-
-    // ③ 游标块内降序找最后一条有效 record（池转满时游标块本身就是满的，不参与）
-    if (s->ring_full == false)
+    else if (best_full_idx != UINT16_MAX)
     {
-        for (WORD b = 0U; b < rpb; b++)
-        {
-            WORD  idx = ((s->cursor_block * rpb) + (rpb - 1U - b));
-            DWORD seq = 0U;
-
-            if (probe(ctx, idx, false, &seq) == FTL_OK)
-            {
-                s->cursor_last_idx = idx;
-                s->cursor_last_seq = seq;
-                break;
-            }
-        }
+        s->frontier_idx = best_full_idx;
+        s->frontier_seq = best_full_seq;
     }
 }
 
@@ -631,78 +673,53 @@ SSD_CODE_FAST ftl_status_e md_ring_locate(const md_ring_t *ring, metadata_ring_p
         return FTL_ERROR;
     }
 
-    WORD rpb   = md_ring_records_per_block(ring);
-    WORD total = md_ring_total_records(ring);
+    const WORD rpb   = md_ring_records_per_block(ring);
+    const WORD total = md_ring_total_records(ring);
 
     md_ring_scan_t scan;
 
     md_ring_scan(ring, probe, ctx, rpb, &scan);
 
-    // ④ 写点 = 游标块末条的下一条（末条是块内最后一条时跨到下一块槽 0）；
-    // 游标块内无有效 record ⇒ 写点 = 游标块的槽 0
-    if (scan.cursor_last_idx == UINT16_MAX)
+    // ④ frontier 整条校验：廉价探针只验末页，多页 record 的中段损坏在这里暴露。
+    //    失败 ⇒ 全池回退，取次新的**完整** record（RISK-BBT-18 的损坏分支）。
+    DWORD full_seq = 0U;
+
+    if ((scan.frontier_idx != UINT16_MAX) && (probe(ctx, scan.frontier_idx, true, &full_seq) == FTL_OK))
     {
-        out->write_idx = (scan.cursor_block * rpb);
-    }
-    else if ((scan.cursor_last_idx % rpb) == (rpb - 1U))
-    {
-        out->write_idx = ((scan.cursor_last_idx + 1U) % total);
+        out->newest_idx = scan.frontier_idx;
+        out->sequence   = full_seq;
     }
     else
     {
-        out->write_idx = (scan.cursor_last_idx + 1U);
+        (void)md_ring_locate_fallback(probe, ctx, total, out);
     }
 
-    // 游标若落在块中间，下一槽可能是上次掉电时只写了一部分的 record。块首槽会由
-    // md_ring_prepare_addr 擦整块；块中槽则没有擦除动作，直接复用会二次编程。
-    // 保守地跳过这一槽（块内下一页仍是擦除态），代价是每次冷启动最多少用一个槽。
-    if ((out->write_idx % rpb) != 0U)
+    // ⑤ 写点由**已校验的**最新 record 推（不能沿用扫描的廉价结果：它可能没通过
+    //    整条校验，回退后的胜者是另一条）：
+    //    · 末槽 record ⇒ 该块已满，下一块槽 0（换块时 prepare 会先擦）；
+    //    · 中段 record ⇒ 下一条槽；块中槽保守跳过一槽（掉电可能留下半写页）；
+    //    · 池空 ⇒ 第一个空块的槽 0。
+    if (out->newest_idx != UINT16_MAX)
     {
-        out->write_idx = (WORD)((out->write_idx + 1U) % total);
-    }
-
-    // ⑤ 快路径候选：全部块末条中 sequence 最大者 + 游标块末条（按 seq 降序整条校验）
-    WORD  cand_idx[2];
-    DWORD cand_seq[2];
-    BYTE  cand_n = 0U;
-
-    if (scan.best_full_idx != UINT16_MAX)
-    {
-        cand_idx[cand_n] = scan.best_full_idx;
-        cand_seq[cand_n] = scan.best_full_seq;
-        cand_n++;
-    }
-    if ((scan.cursor_last_idx != UINT16_MAX) && (scan.cursor_last_idx != scan.best_full_idx))
-    {
-        cand_idx[cand_n] = scan.cursor_last_idx;
-        cand_seq[cand_n] = scan.cursor_last_seq;
-        cand_n++;
-    }
-    if ((cand_n == 2U) && (cand_seq[1] > cand_seq[0]))
-    {
-        WORD  ti = cand_idx[0];
-        DWORD ts = cand_seq[0];
-
-        cand_idx[0] = cand_idx[1];
-        cand_seq[0] = cand_seq[1];
-        cand_idx[1] = ti;
-        cand_seq[1] = ts;
-    }
-
-    for (BYTE i = 0U; i < cand_n; i++)
-    {
-        DWORD seq = 0U;
-
-        if (probe(ctx, cand_idx[i], true, &seq) == FTL_OK)
+        if ((out->newest_idx % rpb) == (rpb - 1U))
         {
-            out->newest_idx = cand_idx[i];
-            out->sequence   = seq;
-            return FTL_OK;
+            out->write_idx = (WORD)((((out->newest_idx / rpb) + 1U) % ring->block_count) * rpb);
+        }
+        else
+        {
+            WORD w = (WORD)((out->newest_idx + 1U) % total);
+
+            if ((w % rpb) != 0U)
+            {
+                w = (WORD)((w + 1U) % total);
+            }
+            out->write_idx = w;
         }
     }
-
-    // ⑥ 局部损坏时的全池回退。找不到也返回 FTL_OK（池内无有效 record）。
-    (void)md_ring_locate_fallback(probe, ctx, total, out);
+    else
+    {
+        out->write_idx = (scan.cursor_block != UINT16_MAX) ? (WORD)(scan.cursor_block * rpb) : 0U;
+    }
 
     return FTL_OK;
 }
@@ -2433,7 +2450,7 @@ void md_pool_service(ftl_ctx_t *ftl)
         // 环里扫不到有效页时，jrn_resume 会把写点放到第一个可用块的 page0——
         // 该块在运行期不保证已擦（与开机 fresh 的假设不同）。挂起一次换块擦除，
         // 避免对未擦页二次编程。
-        if (latest.page_seq == 0U)
+        if (latest.entry_count == 0U)
         {
             jrn->job.target_block = jrn->state.current_block;
             jrn->job.need_erase   = true;

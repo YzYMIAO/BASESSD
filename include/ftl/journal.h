@@ -68,7 +68,8 @@
 typedef struct
 {
     DWORD lba;      /* 逻辑地址 */
-    DWORD old_pba;  /* 更新前物理地址（回放不读；仅首条保留，供诊断） */
+    DWORD old_pba;  /* 更新前物理地址。回放的块元数据增量用它做 valid_sub
+                     * （SEG 页不落盘，回放时从 L2P 现读）；就地合并保留首条 */
     DWORD new_pba;  /* 更新后物理地址（回放按此写 L2P） */
     DWORD sequence; /* 全局单调序号（回放按 (page_seq, 页内下标) 定序） */
 } __attribute__((packed)) l2p_jrn_entry_t;
@@ -303,7 +304,7 @@ bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *o
  * 绝不能把新页写进未擦块。
  *
  * @param journal Journal
- * @param latest  jrn_page_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
+ * @param latest  jrn_page_scan_latest 的结果（NULL 或 entry_count==0 视为环空）
  * @param floor_sequence 序号下限 = Checkpoint 的 jrn_sequence_get（「下一个待分配」），
  *        兜住「环空」与「环内最新页序号反而落后」两种情形（0 会被抬到 1）
  */
@@ -333,7 +334,7 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
  *
  * @param journal Journal
  * @param lba     逻辑地址
- * @param old_pba 更新前物理地址（就地合并时保留首条，回放不读）
+ * @param old_pba 更新前物理地址（就地合并时保留首条；回放的 valid_sub 用它）
  * @param new_pba 更新后物理地址
  * @return true = 已追加 / 就地合并
  *         false = 页满 / 当前页是顺序页，本条目未写入。⚠ 返回 false 时调用者必须按
@@ -476,8 +477,8 @@ static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
  * @brief 已成功落盘的 Journal 序号上界（exclusive）
  *
  * 用途：L2P 区域写回的 WAL 次序闸门（RISK-L2P-09）——区域页只能在覆盖其映射的
- * Journal 条目落盘之后写。调用者（`l2p_flush_kick`）在 `persisted_seq < dirty_seq`
- * 时退让重试，由 Journal 服务把当前页冻结并落盘。
+ * Journal 条目落盘之后写。调用者（`l2p_flush_kick`）在 `!jrn_seq_ge(persisted, dirty)`
+ * 时退让重试（串行号语义，回绕安全），由 Journal 服务把当前页冻结并落盘。
  *
  * @param journal Journal
  * @return 已落盘条目的上界：序号 < 该值的条目均已持久化
@@ -485,6 +486,40 @@ static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
 static inline DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
 {
     return journal->handle.state.persisted_seq;
+}
+
+/* ── 序号比较（32-bit 回绕安全，串行号算术）──
+ *
+ * 页头 `page_seq` / `sequence_counter` / CP `journal_sequence` 都是 32-bit 且跨重启
+ * 单调；累计约 2 TiB host 写（2^32 条）后回绕，直接 `>` / `>=` 会在回绕点判反。
+ * 串行号语义（RFC 1982，公开资料；本仓出处层未收录）：只要**所有活值间距 < 2^31**
+ * 就比较正确——本仓活序号只有环形页（4×64×508 ≈ 13 万）、`dirty_seq`（CP 前必刷，
+ * 同受环容量约束）与 `last_journal_sequence`（一个 CP 间隔），远小于 2^31。
+ *
+ * ⚠ 凡是「两个 Journal 序号谁更新」的判断一律走这里，不写裸比较（C9：一套判据）。
+ */
+/**
+ * @brief a 在 b 之后（a 更新，且 a != b）。
+ *
+ * @param a 序号
+ * @param b 序号
+ * @return true = a 比 b 新
+ */
+static inline bool jrn_seq_after(DWORD a, DWORD b)
+{
+    return ((int32_t)(a - b) > 0);
+}
+
+/**
+ * @brief a 不早于 b（a == b 或 a 更新）。
+ *
+ * @param a 序号
+ * @param b 序号
+ * @return true = a >= b（串行号语义）
+ */
+static inline bool jrn_seq_ge(DWORD a, DWORD b)
+{
+    return ((int32_t)(a - b) >= 0);
 }
 
 /**

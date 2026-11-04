@@ -222,6 +222,43 @@ static bool l2p_cmt_lookup(l2p_cache_t *cache, DWORD lba, DWORD *out)
 }
 
 /**
+ * @brief 退役一个 dirty CMT 条目的两份计数（唯一释放闸门）
+ *
+ * `cmt_dirty_owner[die]` 与 `stats.cmt_dirty` 必须与 dirty 条目数守恒：
+ * 少计会让 `l2p_flush_owner_idle` 提前为真（FLUSH/CP 在未落盘时完成 ⇒ 重启丢映射）；
+ * 多计会让 idle 永不为真（反复等超时 / CP 中止）。原实现用 `if (n > 0) n--`
+ * 静默夹取，把账本分叉吞掉（RISK-L2P-22）——这里 debug 断言 + release 留痕。
+ *
+ * @param cache cache
+ * @param lba   即将退役的 dirty 条目 LBA
+ */
+static void l2p_cmt_dirty_release(l2p_cache_t *cache, DWORD lba)
+{
+    const BYTE owner = lba_2_die(lba);
+
+    ASSERT(cache->cmt_dirty_owner[owner] > 0U);
+    ASSERT(cache->stats.cmt_dirty > 0U);
+
+    if (cache->cmt_dirty_owner[owner] > 0U)
+    {
+        cache->cmt_dirty_owner[owner]--;
+    }
+    else
+    {
+        LOGE(LOG_TAG_L2P "cmt dirty owner underflow owner=%hhu\r\n", owner);
+    }
+
+    if (cache->stats.cmt_dirty > 0U)
+    {
+        cache->stats.cmt_dirty--;
+    }
+    else
+    {
+        LOGE(LOG_TAG_L2P "cmt dirty total underflow\r\n");
+    }
+}
+
+/**
  * @brief 清一个 CMT 槽位并结算 dirty 计数
  *
  * @param cache cache
@@ -236,16 +273,7 @@ static SSD_CODE_FAST void l2p_cmt_drop(l2p_cache_t *cache, l2p_cmt_entry_t *e)
 
     if (e->state == L2P_CMT_DIRTY)
     {
-        const BYTE owner = lba_2_die(e->lba);
-
-        if (cache->cmt_dirty_owner[owner] > 0U)
-        {
-            cache->cmt_dirty_owner[owner]--;
-        }
-        if (cache->stats.cmt_dirty > 0U)
-        {
-            cache->stats.cmt_dirty--;
-        }
+        l2p_cmt_dirty_release(cache, e->lba);
     }
 
     e->lba       = FTL_LBA_INVALID;
@@ -544,16 +572,7 @@ static SSD_CODE_FAST bool l2p_cmt_clear_region(l2p_cache_t *cache, DWORD region)
             retired = true;
             if (e->pba != NAND_PBA_INVALID)
             {
-                const BYTE owner = lba_2_die(e->lba);
-
-                if (cache->cmt_dirty_owner[owner] > 0U)
-                {
-                    cache->cmt_dirty_owner[owner]--;
-                }
-                if (cache->stats.cmt_dirty > 0U)
-                {
-                    cache->stats.cmt_dirty--;
-                }
+                l2p_cmt_dirty_release(cache, e->lba);
                 e->state     = L2P_CMT_CLEAN;
                 e->dirty_seq = 0U;
             }
@@ -850,21 +869,6 @@ static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
 }
 
 /**
- * @brief 内部查找：在 cache 中查找 region_id 对应的 line。
- *
- * ⚠ **匹配四种状态**（CLEAN / DIRTY / FLUSHING / LOADING），只排除 INVALID：
- * 异步化后 FLUSHING / LOADING 的窗口是**真实存在**的（跨多轮），若把它们当未命中，
- * 就会为同一 region 再分配一行 ⇒ 同一 region 两行分叉（一行 CLEAN 一行 DIRTY），
- * 后续读按**下标序**取第一行 ⇒ 写进另一行 ⇒ 映射静默不一致。
- * 命中后各调用者再按 state 判"能不能读/写"（见 l2p_read / write）。
- * 查找先走 `line_hint`（region→line 下标的提示），命中仍用 tags[] 校验；
- * hint 空/冲突/陈旧时退回线性扫描，因此 hint 只影响性能，不影响正确性。
- *
- * @param cache     cache 上下文
- * @param region_id 全局 region
- * @return 命中的行；NULL = 该 region 未驻留
- */
-/**
  * @brief region_id → hint 槽位
  *
  * 低位与高位混合，避免连续 region 在 256 槽里按固定步长冲突。
@@ -899,6 +903,21 @@ static SSD_CODE_FAST void l2p_line_hint_clear(l2p_cache_t *cache, WORD idx)
     }
 }
 
+/**
+ * @brief 内部查找：在 cache 中查找 region_id 对应的 line。
+ *
+ * ⚠ **匹配四种状态**（CLEAN / DIRTY / FLUSHING / LOADING），只排除 INVALID：
+ * 异步化后 FLUSHING / LOADING 的窗口是**真实存在**的（跨多轮），若把它们当未命中，
+ * 就会为同一 region 再分配一行 ⇒ 同一 region 两行分叉（一行 CLEAN 一行 DIRTY），
+ * 后续读按**下标序**取第一行 ⇒ 写进另一行 ⇒ 映射静默不一致。
+ * 命中后各调用者再按 state 判"能不能读/写"（见 l2p_read / write）。
+ * 查找先走 `line_hint`（region→line 下标的提示），命中仍用 tags[] 校验；
+ * hint 空/冲突/陈旧时退回线性扫描，因此 hint 只影响性能，不影响正确性。
+ *
+ * @param cache     cache 上下文
+ * @param region_id 全局 region
+ * @return 命中的行；NULL = 该 region 未驻留
+ */
 static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
 {
     // 先查 hint（region → line 下标）；tags[] 仍是唯一权威，命中必须再校验。
@@ -1114,8 +1133,6 @@ static SSD_CODE_FAST void l2p_degrade_log(DWORD region_id, BYTE fail_count)
     LOGE_IF(log_rate_due(&s_degrade_log_ms, &s_degrade_n, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_L2P "region %lu load failed %hu times — degrade to unmapped\r\n", region_id, fail_count);
 }
 
-// 为未驻留 region 起异步加载；未映射 ⇒ 直接置全 INVALID 的 CLEAN 行，不发 NAND 读。
-// 位置来自 Directory；命令池空 / 提交背压 ⇒ 下轮重试。
 /**
  * @brief 提交一次 region 页读：首次加载与「主副本失败 → 备份副本」共用。
  * 成功：行置 LOADING、load_inflight++、记录本次 PBA；
@@ -1169,9 +1186,46 @@ static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pb
 }
 
 /**
+ * @brief 一次加载失败的统一结算（重试预算 → 降级）
+ *
+ * 读完成失败与「Directory PBA 损坏、根本没发出读」两条路径共用：重试
+ * L2P_LOAD_RETRY_MAX 次后把行降级为全未映射 CLEAN，并置 cache 级降级位
+ * （host 读**未映射** LBA 时返回 IO_ERROR，不零填）。两条路径必须逐字同口径
+ * ——否则一条路径降级、另一条永远重试（RISK-L2P-01 / L2P-21）。
+ *
+ * @param cache cache 上下文
+ * @param line  失败的行（region_id 已设置）
+ */
+static void l2p_load_fail_settle(l2p_cache_t *cache, l2p_cache_line_t *line)
+{
+    memset(line->entries, 0xFF, sizeof(line->entries));
+    line->load_fail_count++;
+
+    if (line->load_fail_count < L2P_LOAD_RETRY_MAX)
+    {
+        l2p_line_hint_clear(cache, (WORD)(line - cache->lines));
+        L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
+        line->prefetch              = false;
+    }
+    else
+    {
+        L2P_TAG(cache, line)->state = L2P_CACHE_CLEAN;
+        line->fresh                 = true;
+        line->prefetch              = false;
+        line->degraded              = true;
+        // 记到 cache 级位图：行被驱逐/重载后仍能识别“映射已丢”。
+        l2p_bitmap_set(cache->region_degraded_bitmap, L2P_TAG(cache, line)->region_id);
+        l2p_degrade_log(L2P_TAG(cache, line)->region_id, line->load_fail_count);
+    }
+}
+
+/**
  * @brief 为一个 region 建立加载状态并提交读命令（或直接合成未映射行）。
  *
  * 未映射（主备 PBA 均为 NAND_PBA_INVALID）⇒ 不提交 NAND 读，直接置全 INVALID 的 CLEAN 行。
+ * ⚠ 「两份 PBA 都无效」与「两份 PBA 都损坏」必须分开：前者是合法未映射（零填），
+ *   后者是位置丢失（按加载失败重试/降级，host 读 IO_ERROR）——混同会静默零填
+ *   （RISK-L2P-21）。
  *
  * @param cache       cache 上下文
  * @param line        已选中的 cache 行
@@ -1179,7 +1233,7 @@ static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pb
  * @param log_failure true = 加载启动失败时打限流日志
  * @param prefetch    true = 预取加载（fresh 保持 false）
  * @return true = 已就绪（CLEAN）或读命令已提交（LOADING）
- *         false = 读命令提交失败，行回到 INVALID
+ *         false = 读命令提交失败 / PBA 损坏，行回到 INVALID 或已降级
  */
 static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD region_id, bool log_failure, bool prefetch)
 {
@@ -1211,11 +1265,36 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
     // 已恢复的映射在行驱逐后消失（host 误报 IO_ERROR，GC 还可能漏搬有效 CW）。
     // 位图只用于 host 读的「未映射 ⇒ IO_ERROR」判定（RISK-BOOT-18）。
 
-    const DWORD primary = md_entry_find(owner->metadata_dir, METADATA_TYPE_L2P_REGION, local_region);
-    const DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
+    DWORD primary = md_entry_find(owner->metadata_dir, METADATA_TYPE_L2P_REGION, local_region);
+    DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
+    bool  corrupt = false;
+
+    // Directory 是介质读回（H29）：非 INVALID 也必须过 pba_is_valid 才能进 FC
+    // （PBA 字段越界 ⇒ pba_to_ch/ce/lun 造出越界路由字段 ⇒ FC 的 suspended[][]
+    // 越界）。损坏的副本按缺失处理，并记住「曾损坏」以区分合法未映射（RISK-L2P-21）。
+    if ((primary != NAND_PBA_INVALID) && (pba_is_valid(primary) == false))
+    {
+        l2p_load_fail_log(region_id, "invalid_primary_pba");
+        primary = NAND_PBA_INVALID;
+        corrupt = true;
+    }
+    if ((backup != NAND_PBA_INVALID) && (pba_is_valid(backup) == false))
+    {
+        l2p_load_fail_log(region_id, "invalid_backup_pba");
+        backup  = NAND_PBA_INVALID;
+        corrupt = true;
+    }
 
     if ((primary == NAND_PBA_INVALID) && (backup == NAND_PBA_INVALID))
     {
+        if (corrupt == true)
+        {
+            // 位置损坏 ≠ 从未写过：按加载失败重试/降级，**不得**合成未映射行
+            // （那会让 host 读零填，映射丢失变成静默数据丢失）。
+            l2p_load_fail_settle(cache, line);
+            return false;
+        }
+
         // 未映射：该 region 从未写过，Directory 里没有它的位置。entries 已是全
         // NAND_PBA_INVALID（上面 memset），直接置 CLEAN 并返回——**不提交读命令**。
         // 主流 DRAM-less 的未映射路径同样不产生 NAND I/O；读"某个固定擦除页"会把
@@ -1227,7 +1306,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
         return true;
     }
 
-    // 主副本优先；主副本缺失（旧介质单副本 / 主副本 PBA 无效）时用备份。
+    // 主副本优先；主副本缺失/损坏（旧介质单副本 / 校验不过）时用备份。
     const bool  use_backup = (primary == NAND_PBA_INVALID);
     const DWORD pba        = use_backup ? backup : primary;
 
@@ -1270,6 +1349,13 @@ static bool l2p_load_start(l2p_cache_t *cache, DWORD region_id)
  */
 SSD_CODE_FAST bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba)
 {
+    // global_region 来自调用者（PFR 的 local×DIE_MAX+die）；越界写入 tags[] 会让
+    // 该行永远无法再被命中，只白占一行 ⇒ 运行期拒绝（H29 同口径）。
+    if (global_region >= L2P_GLOBAL_REGIONS)
+    {
+        return false;
+    }
+
     // pba 来自 Metadata Directory（介质读回，H29 不可信输入）⇒ 运行期拒绝而非 ASSERT：
     // release 下 ASSERT 裁空会让非法地址直接进同步读。
     if (pba_is_valid(pba) == false)
@@ -1301,8 +1387,11 @@ SSD_CODE_FAST bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, D
         {
             L2P_TAG(cache, line)->state                    = L2P_CACHE_CLEAN;
             cache->line_hint[l2p_hint_slot(global_region)] = (BYTE)i;
+            line->fresh                                    = false; /* 预载不是本次访问的加载 */
             line->degraded                                 = false;
             line->prefetch                                 = false;
+            line->dirty_seq                                = 0U; /* 介质内容，无 Journal 依赖 */
+            line->load_fail_count                          = 0U;
             return true;
         }
 
@@ -2254,7 +2343,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     // CP 与失败标记互相等待；此时 CP 本身就是恢复机制。
     const bool wal_failed = (owner->journal != NULL) && jrn_has_write_failure(owner->journal);
 
-    if ((owner->journal != NULL) && (line->dirty_seq != 0U) && (wal_failed == false) && (jrn_persisted_seq(owner->journal) < line->dirty_seq))
+    if ((owner->journal != NULL) && (line->dirty_seq != 0U) && (wal_failed == false) && (!jrn_seq_ge(jrn_persisted_seq(owner->journal), line->dirty_seq)))
     {
         cache->stats.wal_defer_count++;
         return FTL_AGAIN;
@@ -2573,7 +2662,9 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
                 const DWORD primary = md_entry_find(ftl->metadata_dir, METADATA_TYPE_L2P_REGION, local);
                 const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
 
-                if ((primary != NAND_PBA_INVALID) && (backup != NAND_PBA_INVALID) && (primary != backup))
+                // 交换会把两个 PBA 写进 Directory（介质事实）⇒ 非 INVALID 者必须合法，
+                // 否则坏 PBA 会被“洗白”成主副本（RISK-L2P-21）。
+                if ((primary != NAND_PBA_INVALID) && (backup != NAND_PBA_INVALID) && (pba_is_valid(primary) == true) && (pba_is_valid(backup) == true) && (primary != backup))
                 {
                     md_commit_region(ftl->metadata_dir, local, MD_COMMIT_PAIR, backup, primary);
                     LOGW(LOG_TAG_L2P "region %lu primary unreadable — backup OK\r\n", L2P_TAG(cache, line)->region_id);
@@ -2585,11 +2676,12 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
         else
         {
             // 主副本失败且存在有效的另一份 ⇒ 立即改读备份（不消耗重试预算）。
+            // 备份同样来自 Directory（H29）⇒ 非 INVALID 也要过 pba_is_valid（RISK-L2P-21）。
             const WORD  local   = l2p_global_to_local_region(L2P_TAG(cache, line)->region_id);
             const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
             bool        retried = false;
 
-            if ((line->load_use_backup == false) && (backup != NAND_PBA_INVALID) && (backup != line->load_pba))
+            if ((line->load_use_backup == false) && (backup != NAND_PBA_INVALID) && (pba_is_valid(backup) == true) && (backup != line->load_pba))
             {
                 line->load_use_backup = true;
                 retried               = l2p_load_submit(ftl->cache, line, backup, true);
@@ -2597,30 +2689,8 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
 
             if (retried == false)
             {
-                // 两份都失败：先有限次重试（置 INVALID 让下次访问重新加载），超过上限才
-                // 降级为「全未映射的 CLEAN 行」。两个极端都要避免：
-                // · 直接 CLEAN ⇒ 一次瞬态读错被永久当成“从未写过”，映射静默丢失；
-                // · 一直 INVALID ⇒ 每次访问都重读坏 region，host 永久停在 FTL_AGAIN。
-                memset(line->entries, 0xFF, sizeof(line->entries));
-                line->load_fail_count++;
-
-                if (line->load_fail_count < L2P_LOAD_RETRY_MAX)
-                {
-                    l2p_line_hint_clear(cache, (WORD)(line - cache->lines));
-                    L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
-                    line->prefetch              = false;
-                }
-                else
-                {
-                    L2P_TAG(cache, line)->state = L2P_CACHE_CLEAN;
-                    line->fresh                 = true;
-                    line->prefetch              = false;
-                    line->degraded              = true;
-                    // 记到 cache 级位图：行被驱逐/重载后仍能识别“映射已丢”
-                    // （host 读必须报 IO_ERROR，不能零填，RISK-BOOT-18）。
-                    l2p_bitmap_set(ftl->cache->region_degraded_bitmap, L2P_TAG(cache, line)->region_id);
-                    l2p_degrade_log(L2P_TAG(cache, line)->region_id, line->load_fail_count);
-                }
+                // 两份都失败：统一结算（重试上限 → 降级）。见 l2p_load_fail_settle 的契约。
+                l2p_load_fail_settle(cache, line);
             }
         }
 
@@ -2890,6 +2960,9 @@ SSD_CODE_FAST void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
     // 的 CLEAN 行，若保留 CMT 会把旧映射继续返回给 host。
     if (cache->tags[idx].state != L2P_CACHE_INVALID)
     {
+        // 契约「仅 CLEAN/INVALID」（RISK-L2P-23）：DIRTY/FLUSHING 行作废会静默丢弃
+        // 未落盘映射 —— 调用者自持下标与状态，debug 停在现场。
+        ASSERT(cache->tags[idx].state == L2P_CACHE_CLEAN);
         // 只清 CLEAN；boot replay 期 CMT 已停用，不应有 dirty 条目。
         l2p_cmt_invalidate_region(cache, cache->tags[idx].region_id, 0U, 0U, false);
     }

@@ -631,7 +631,7 @@ static pfr_plan_e pfr_boot_plan(const pfr_boot_scan_t *scan)
 
     // 判型必须用整页（page_seq + entry_count），只看页首会把「写→掉电」误判成
     // clean；环内有读失败页 ⇒ 不判 clean，保守走回放。
-    if ((scan->ring_read_error == false) && ((scan->ring.page_seq + scan->ring.entry_count) <= scan->cp->journal_sequence))
+    if ((scan->ring_read_error == false) && jrn_seq_ge(scan->cp->journal_sequence, (DWORD)(scan->ring.page_seq + scan->ring.entry_count)))
     {
         return PFR_PLAN_SNAPSHOT;
     }
@@ -682,7 +682,7 @@ static void pfr_boot_execute(ftl_ctx_t *ftl, pfr_plan_e plan, const pfr_boot_sca
     if (plan == PFR_PLAN_REPLAY)
     {
         const DWORD newest = (DWORD)scan->ring.page_seq + (DWORD)scan->ring.entry_count;
-        const DWORD gap    = (newest > scan->cp->journal_sequence) ? (newest - scan->cp->journal_sequence) : 0U;
+        const DWORD gap    = jrn_seq_after(newest, scan->cp->journal_sequence) ? (newest - scan->cp->journal_sequence) : 0U;
 
         (void)LOGW(LOG_TAG_BLK "power-failure diag: cp_seq=%lu cp_jseq=%lu ring_pseq=%lu ring_n=%hu ring_err=%d newest=%lu gap=%lu\r\n",
                    scan->cp->sequence,
@@ -1658,8 +1658,6 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
                 // 快照的 BAD 与 BBT 的并集；bad_count 只对新增项加一，
                 // 并置 dirty 让后台 bbt_handle 把并集重新落盘。
                 ftl_block_set_bad(b);
-                ftl_block_clear_valid(b);
-                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
                 alloc->bad_count++;
                 // boot 期并集：不走 bbt_mark_bad（Spare/Free Pool 尚未建），
                 // 但 dirty 必须走同一闸门，避免丢掉 dirty_gen。

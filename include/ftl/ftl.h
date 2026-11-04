@@ -145,7 +145,8 @@ typedef enum
 } ftl_cache_seq_kind_e;
 
 /* cache 写序列的未确认页 FIFO 深度：上界 = 两个在飞 chunk（2×4 页）+ 前一 chunk
- * 的尾页 + 余量。满了写路径返回 AGAIN，等完成泵结算。 */
+ * 的尾页 + 余量。环满属结构性错误（在飞页数被窗口/credit 夹住，达不到 16）⇒
+ * ftl_cache_wr_member_done 断言（RISK-CACHE-32 记录了 release 下的残余风险）。 */
 #define FTL_CACHE_SEQ_RING (16U)
 
 /* 写序列的「已编程页表」（读序列不用）。
@@ -527,6 +528,8 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  * @return FTL_OK    已受理
  *         FTL_ERROR 立即失败
  */
+ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
+
 /**
  * @brief 取走并清除「延后错误」标志（volatile write cache 语义）。
  *
@@ -538,8 +541,6 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  *       那个迟到的结论交回给控制器的唯一出口（RISK-USBC-01 的 FTL 侧对应物）。
  */
 bool ftl_take_deferred_error(ftl_ctx_t *ftl);
-
-ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
 
 /**
  * @brief 异步 FLUSH job（host SYNCHRONIZE CACHE / CLI `fl`）

@@ -376,7 +376,7 @@ DWORD alc_free_get_max_erase(const alc_t *alloc);
 /* ── 3. OP Pool ── */
 
 /**
- * @brief 各 plane OP 池剩余块数（带 plane 边界检查）。
+ * @brief 各 plane OP 池剩余块数（调用者保证 plane < PLANE_NUM）。
  *
  * @param alloc 分配器
  * @param plane 目标 plane
@@ -428,7 +428,7 @@ static inline WORD alc_op_get_at(const alc_t *alloc, BYTE plane, WORD index)
 /* ── 4. Spare Pool ── */
 
 /**
- * @brief 各 plane Spare 池剩余块数（带 plane 边界检查）。
+ * @brief 各 plane Spare 池剩余块数（调用者保证 plane < PLANE_NUM）。
  *
  * @param alloc 分配器
  * @param plane 目标 plane
@@ -649,8 +649,8 @@ static inline const super_block_t *alc_super_closed_get_at(const alc_t *alloc, W
  * @param alloc 分配器
  * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD。
  *
- * @return FTL_OK = 关闭成功
- *         FTL_ERROR = 该温度无 Open SB
+ * @return FTL_OK = 关闭成功（含「全部 plane 都不可用、不产生条目」）
+ *         FTL_ERROR = 该温度无 Open SB / closed 列表满
  */
 ftl_status_e alc_super_close(alc_t *alloc, BYTE temperature);
 
@@ -663,6 +663,10 @@ ftl_status_e alc_super_close(alc_t *alloc, BYTE temperature);
  *
  * @return 新条目在 closed_sb_list 的索引
  *         FTL_BLOCK_NO_SB = 列表满（release 兜底），条目被拒绝
+ *
+ * @note 全部 plane 都不可用（BAD / 越界）时**不追加条目**（避免 plane_count==0
+ *       的死条目泄漏列表槽，RISK-ALLOC-15），返回当前 count；调用者只应判
+ *       `== FTL_BLOCK_NO_SB`，不得把它当有效下标使用。
  */
 WORD alc_super_closed_add(alc_t *alloc, const WORD plane_blocks[PLANE_NUM], BYTE temperature);
 

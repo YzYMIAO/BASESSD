@@ -248,6 +248,13 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
     // cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
     // （见 ftl_issue_subop / wb_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT。
 
+    // 空位图必须在算 first_plane **之前**拒绝：否则 first_plane == PLANE_NUM，
+    // release 下下面的 ASSERT 全部裁空 ⇒ 读 pba[PLANE_NUM] 越界（RISK-IF-18）。
+    if (cw_bitmap == 0U)
+    {
+        return FTL_ERROR;
+    }
+
     // 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
     // 半个 pair（例如一条 512B 写只落 plane1），此时 pba[0] 按约定未初始化，
     // 拿它定段会把单 plane 命令的段定成 plane0 ⇒ 位图越段 ASSERT 或静默空链。
@@ -492,21 +499,34 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
  * @brief 同步提交并等待命令完成（仅结构性同步上下文）
  *
  * 登记栈上 waiter → 提交 SYNC_WAIT → 自旋 fc_service + ftl_op_drain 直到完成；
- * 超时摘链。不 release：调用者读完 cmd 数据后自行 release。
+ * 超时摘链。命令归属见 `ftl_sync_submit_wait` 契约（`submitted` 出参）。
  *
  * @param cmd        命令
- * @param status_out 输出：完成状态（可 NULL）
+ * @param status_out 输出：完成状态（可 NULL；仅 FTL_OK 时有效）
  * @param timeout_us 等待上限（真实微秒，0 = 默认 10 ms，上限 65 ms）
+ * @param submitted  输出（非 NULL）：返回时命令是否已提交给 FC
  * @return FTL_OK；FTL_ERROR 提交失败 / 等待超时
  *
  * @note 时钟不可用（`delay_time_now_us` 失败）时退化为同值的轮数兜底，不静默取消超时。
  */
-ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us)
+ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us, bool *submitted)
 {
-    const DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
-    DWORD       start_us = 0U;
-    const bool  clock_ok = delay_time_now_us(&start_us);
-    DWORD       elapsed  = 0U; /* 仅时钟不可用时作轮数兜底 */
+    ASSERT(submitted != NULL);
+
+    DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
+
+    // 上限 clamp：debug 停在现场，release 也必须有确定行为（不得静默截断成更短的等待）。
+    ASSERT(max_wait <= (DWORD)UINT16_MAX);
+    if (max_wait > (DWORD)UINT16_MAX)
+    {
+        max_wait = (DWORD)UINT16_MAX;
+    }
+
+    *submitted = false;
+
+    DWORD      start_us = 0U;
+    const bool clock_ok = delay_time_now_us(&start_us);
+    DWORD      elapsed  = 0U; /* 仅时钟不可用时作轮数兜底 */
 
     // ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
     // （本函数自旋 fc_service + ftl_op_drain）= 嵌套泵，正是本次异步化要
@@ -522,8 +542,10 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
     if (ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) != FTL_OK)
     {
-        return FTL_ERROR; /* 提交失败（背压/request 登记失败）——命令未提交，调用者自行 release */
+        return FTL_ERROR; /* 提交失败（背压/request 登记失败）——*submitted 保持 false，调用者负责 release */
     }
+
+    *submitted = true; /* 命令已进 FC：此后任何失败路径都不得让调用者 release */
 
     for (;;)
     {
@@ -535,13 +557,12 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
             break;
         }
 
-        // 真实微秒 deadline（调用点最大 20 ms；delay_time_elapsed_us 的 timeout 是 WORD）。
+        // 真实微秒 deadline（max_wait 已在入口 clamp 到 WORD 范围）。
         // 时钟不可用（未初始化）时退化为轮数兜底，与旧行为一致，不静默取消超时。
         bool expired;
 
         if (clock_ok)
         {
-            ASSERT(max_wait <= (DWORD)UINT16_MAX);
             expired = delay_time_elapsed_us(start_us, (WORD)max_wait);
         }
         else
@@ -552,6 +573,8 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
         if (expired)
         {
+            // request 表项摘除（栈上 waiter 不能留给迟到完成）；命令**保留**在 FC，
+            // 由 drain 的 missing-request 分支在迟到完成时释放（RISK-IF-17）。
             ftl_op_req_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
@@ -563,6 +586,33 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     }
 
     return FTL_OK;
+}
+
+/**
+ * @brief 同步提交等待 + 失败时的命令归属收尾（本文件内唯一关口）
+ *
+ * 把「提交失败 ⇒ 调用者 release / 已提交但超时 ⇒ 留给 drain release」这条规则
+ * 收在一处，避免每个 `ftl_sync_*` 各自决定（RISK-IF-17）。
+ *
+ * @param cmd        已建链命令
+ * @param status_out 完成状态（可 NULL；仅 FTL_OK 时有效）
+ * @param timeout_us 等待上限（微秒，0 = 默认）
+ * @return FTL_OK    完成；命令仍由调用者持有，读完数据后 release
+ *         FTL_ERROR 失败；**未提交**时已在内部 release，**已提交但超时**时命令留给 drain
+ */
+static ftl_status_e ftl_sync_wait_owned(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us)
+{
+    bool submitted = false;
+
+    const ftl_status_e st = ftl_sync_submit_wait(cmd, status_out, timeout_us, &submitted);
+
+    if ((st != FTL_OK) && (submitted == false))
+    {
+        (void)fc_command_release(cmd);
+    }
+    // submitted == true 且失败：命令仍在 FC/NAND，迟到完成由 drain 释放——不要碰它。
+
+    return st;
 }
 
 /* ── 5. 页级同步原语 ──
@@ -663,9 +713,8 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
     if (fc_cmd_status_has_error(completion.status))
@@ -698,9 +747,8 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
     // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
@@ -749,9 +797,8 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
 
@@ -799,9 +846,8 @@ ftl_status_e ftl_page_blank_check(DWORD pba, bool *blank)
 
     fc_command_status_t completion;
 
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
 
@@ -843,9 +889,8 @@ ftl_status_e ftl_sync_erase_block(DWORD pba)
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 20000U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 20000U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
     if (fc_cmd_status_has_error(completion.status))
@@ -877,9 +922,8 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 20000U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 20000U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
     if (fc_cmd_status_has_error(completion.status))
@@ -925,9 +969,8 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
     cmd->param.parameter3 = 0U;
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
 
@@ -1029,9 +1072,8 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
     }
 
     fc_command_status_t completion;
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
     if (fc_cmd_status_has_error(completion.status))
@@ -1156,8 +1198,15 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
     const BYTE nplanes  = ftl_cw_bitmap_plane_count(cw_bitmap);
     const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
 
+    // cache program 的 opcode 按两 plane 定尺；单 plane 会让 NAND 侧多 plane handler
+    // 无条件遍历 PLANE_NUM 行地址、凭空造出回退地址（见 ftl_cmd_validate_cw_bitmap 的
+    // 注释）。release 下也拒绝，不只 ASSERT（RISK-IF-18）。
     ASSERT((cache_op == false) || (nplanes == PLANE_NUM));
-    (void)cache_op; /* release 下 ASSERT 裁空 */
+    if ((cache_op == true) && (nplanes != PLANE_NUM))
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
 
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
 
@@ -1178,7 +1227,16 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
         }
         else
         {
-            ASSERT((pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba)));
+            const bool same_die = (pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba));
+
+            // 一条命令只能落在一个 die；跨实例 PBA 会被路由到其中一个 die，另一个
+            // plane 的地址属于别的实例 ⇒ release 下也拒绝（RISK-IF-18）。
+            ASSERT(same_die);
+            if (same_die == false)
+            {
+                (void)fc_command_release(cmd);
+                return FTL_ERROR;
+            }
         }
     }
 

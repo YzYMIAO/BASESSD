@@ -156,29 +156,6 @@ void bbt_init(alc_t *alloc);
 bool bbt_medium_has_ftl_data(alc_t *alloc);
 
 /**
- * @brief 出厂坏块扫描
- *
- * 遍历所有 Block（**跳过 Block 0**）的 Page 0，读 **spare 区首字节**（列 2048，
- * `OP_READ_COLUMN`）的**出厂坏块标记**：
- *   - 标记非 0xFF → 出厂坏块
- *   - 标记 == 0xFF → 好块
- *   - 列读失败 → 坏块（保守）
- *
- * 判据与器件手册的建 BBT 流程一致（Micron AN1819：出厂标记在每块首页的 spare 区，
- * **擦除即永久丢失**，故必须在使用该块前先读）——见 `bbt.c:bbt_probe_block_bad` 的引文。
- * 本函数**只读不擦**（do_erase=0），擦除会毁掉标记。
- *
- * ⚠ **前置条件：介质必须是空片**。用过的块 spare 首字节是 FTL 自己的数据（页编程
- *   2112B 把 CW3 尾巴 64 字节溢进备区）⇒ 扫出来的不是坏块图，而是「哪些块被写过」图，
- *   且会 bbt_save 落盘。`bbt_init` 是唯一调用者，它用 bbt_medium_has_ftl_data 把关；
- *   其他调用方必须自己保证这一点。
- *
- * @param alloc   Allocator 上下文（blocks 输出）
- * @return 检测到的坏块数
- */
-int bbt_factory_scan(alc_t *alloc);
-
-/**
  * @brief 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
  *
  * ① `bbt_dirty_note + bbt_save`：把当前 BST 坏块图（含工厂标记 / CP 快照并集）
@@ -232,21 +209,6 @@ void bbt_dirty_note(alc_t *alloc);
 ftl_status_e bbt_save(alc_t *alloc);
 
 /**
- * @brief 从 NAND BBT 池加载 BBT
- *
- * 池内轮转扫描（md_ring_locate），选 magic 正确且 sequence 最大者。
- * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
- *
- * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
- *                    alloc 由 ftl_contract_audit 证明；出参由调用者提供
- * @param bad_map     输出：bt_bitmap[512]
- * @param bad_count   输出：坏块数
- * @param sequence    输出：最新 sequence
- * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
- */
-ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
-
-/**
  * @brief BBT 后台持久化入口（typed handle；提交即返回）
  *
  * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
@@ -289,7 +251,7 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
  * 默认**只读**：对每个块读 Page 0 的 spare 首字节（**列 2048** = `PAGE_MAIN_SIZE`），
  * 非 0xFF ⇒ 出厂坏块。不写介质，可反复调用。
  *
- * ⚠ do_erase != 0 时**额外擦除本实例每个 plane 的每一个块**（含
+ * ⚠ do_erase == true 时**额外擦除本实例每个 plane 的每一个块**（含
  *   0..FTL_METADATA_AREA_END 的元数据区）⇒ 会抹掉该实例的全部 FTL 元数据与用户数据。
  *   只在专门的坏块体检时用，绝不可放进开机路径。
  *   擦除是**无条件**的：即使 ① 已判定该块坏，也照擦（"全片擦除"必须连坏块一起抹掉，
@@ -297,7 +259,7 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
  *
  * 判定（两条任一成立即坏块）：
  *   ① **擦除前**读该块 Page 0 列 2048 的 spare 首字节，非 0xFF（出厂坏块标记，x8 为 00h）；
- *   ② do_erase 非 0 且擦除命令失败（stuck-at-0 / 不可擦）。
+ *   ② do_erase == true 且擦除命令失败（stuck-at-0 / 不可擦）。
  *
  * ① 必须**先于任何 PROGRAM/ERASE** 读——器件手册（Micron AN1819）逐字：
  *   *"the bad block information is erasable and cannot be recovered once erased"*。
@@ -314,8 +276,8 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
  * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
  *
  * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
+ * @param do_erase  false = 只读（非破坏性）；true = 逐块擦除并额外判擦除失败
  */
-void bbt_print_bad_map(alc_t *alloc, BYTE do_erase);
+void bbt_print_bad_map(alc_t *alloc, bool do_erase);
 
 #endif /* FTL_BBT_H */

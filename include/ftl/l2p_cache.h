@@ -413,22 +413,21 @@ _Static_assert(sizeof(l2p_cmt_entry_t) == 16U, "l2p_cmt_entry_t 必须保持 16 
 
 typedef struct
 {
-    DWORD   hit_count;       /* 命中次数（开机累计） */
-    DWORD   miss_count;      /* 未命中次数（开机累计） */
-    DWORD   eviction_count;  /* 被驱逐行数（开机累计） */
-    DWORD   wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09） */
-    DWORD   hint_hits;       /* region line hint 命中次数 */
-    DWORD   hint_misses;     /* hint 未命中/冲突，退回线性扫描的次数 */
-    DWORD   cmt_hits;        /* 读路径 CMT 命中次数 */
-    DWORD   cmt_misses;      /* 读路径 CMT 未命中次数（随后走 region 路径） */
-    DWORD   cmt_wr_hits;     /* 写路径命中已有 CMT 条目的 LBA 数 */
-    DWORD   cmt_wr_misses;   /* 写路径未命中 CMT、走 line/插入的 LBA 数 */
-    DWORD   cmt_dirty;       /* 当前 dirty CMT 条目数 */
-    DWORD   cmt_writebacks;  /* 含 dirty CMT 的整页写回次数 */
-    DWORD   cmt_evict_clean; /* 为新条目替换 CLEAN CMT 槽的次数 */
-    DWORD   cmt_evict_dirty; /* 因容量触发的 dirty victim 整页写回次数 */
-    DWORD   cmt_wb_defer;    /* dirty victim 写回因在飞/背压退让的次数 */
-    int32_t error;           /* 最近一次硬失败 */
+    DWORD hit_count;       /* 命中次数（开机累计） */
+    DWORD miss_count;      /* 未命中次数（开机累计） */
+    DWORD eviction_count;  /* 被驱逐行数（开机累计） */
+    DWORD wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09） */
+    DWORD hint_hits;       /* region line hint 命中次数 */
+    DWORD hint_misses;     /* hint 未命中/冲突，退回线性扫描的次数 */
+    DWORD cmt_hits;        /* 读路径 CMT 命中次数 */
+    DWORD cmt_misses;      /* 读路径 CMT 未命中次数（随后走 region 路径） */
+    DWORD cmt_wr_hits;     /* 写路径命中已有 CMT 条目的 LBA 数 */
+    DWORD cmt_wr_misses;   /* 写路径未命中 CMT、走 line/插入的 LBA 数 */
+    DWORD cmt_dirty;       /* 当前 dirty CMT 条目数 */
+    DWORD cmt_writebacks;  /* 含 dirty CMT 的整页写回次数 */
+    DWORD cmt_evict_clean; /* 为新条目替换 CLEAN CMT 槽的次数 */
+    DWORD cmt_evict_dirty; /* 因容量触发的 dirty victim 整页写回次数 */
+    DWORD cmt_wb_defer;    /* dirty victim 写回因在飞/背压退让的次数 */
 } l2p_cache_stats_t;
 
 typedef struct
@@ -782,19 +781,6 @@ ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
 ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
 /**
- * @brief 该 region 是否已降级为「全未映射」（映射已丢）
- *
- * 两处消费者：
- *   · 开机恢复：journal 回放 / 块元数据 probe 据此走范围化恢复而不是全量重建；
- *   · host 读路径：未映射且 region 降级 ⇒ 返回 IO_ERROR，**不零填**
- *     （合法未映射仍是零填；RISK-BOOT-18）。
- *
- * @param cache         共享 L2P cache
- * @param global_region 全局 region（lba_to_global_region(lba)）
- * @return true = 发生过加载失败降级
- *         false = 未驻留 / 合法未映射 / 正常加载
- */
-/**
  * @brief 把 region 的失败页标记为「映射已丢」并精确失效其 CMT。
  *
  * 失败页的 dirty 条目指向编程失败的 PBA，撤销完成前读必须失败；同 region
@@ -807,6 +793,19 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
  */
 void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region, DWORD lba, DWORD cw_bitmap);
 
+/**
+ * @brief 该 region 是否已降级为「全未映射」（映射已丢）
+ *
+ * 两处消费者：
+ *   · 开机恢复：journal 回放 / 块元数据 probe 据此走范围化恢复而不是全量重建；
+ *   · host 读路径：未映射且 region 降级 ⇒ 返回 IO_ERROR，**不零填**
+ *     （合法未映射仍是零填；RISK-BOOT-18）。
+ *
+ * @param cache         共享 L2P cache
+ * @param global_region 全局 region（lba_to_global_region(lba)）
+ * @return true = 发生过加载失败降级
+ *         false = 未驻留 / 合法未映射 / 正常加载
+ */
 bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 
 /**

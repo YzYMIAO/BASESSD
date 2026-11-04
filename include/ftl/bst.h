@@ -74,7 +74,8 @@ typedef struct
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
  *   · 枚举保证互斥，非法组合不可表达；
  *   · 状态转移集中到 ftl_block_set_state，不需要手写清位掩码（漏一位编译期完全无声）。
- * BAD 是终态；bbt_mark_bad 清 valid_count / sb_id，bbt_factory_scan / bbt_init 同样清。
+ * BAD 是终态；`ftl_block_set_bad` 一并清 valid_count / sb_id（唯一 setter，
+ * 调用点不再手写三行——原先 5 处各写一遍，漏一处就是静默账本分叉）。
  * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 bst_block_t.temp。
  *
  * ⚠ 无「预擦除 / 未擦除」分级态：Free Pool 是**一个**已擦除池（GC 先擦后归还），
@@ -248,16 +249,6 @@ static inline bool ftl_block_is_bad(const bst_block_t *b)
 }
 
 /**
- * @brief 置坏块（终态）。
- *
- * @param b 块条目。
- */
-static inline void ftl_block_set_bad(bst_block_t *b)
-{
-    ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
-}
-
-/**
  * @brief 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator 的 FTL_TEMP_* 同值域）。
  * 不在本头引用 FTL_TEMP_*（避免 allocator.h 循环 include），直接用值语义；
  * **不另立 `ftl_block_temp_t` 枚举**——同值域再来一套名字就是第二套坐标（C9）。
@@ -421,6 +412,22 @@ static inline void ftl_block_clear_valid(bst_block_t *b)
 static inline void ftl_block_set_valid(bst_block_t *b, WORD valid)
 {
     b->valid_count = valid;
+}
+
+/**
+ * @brief 置坏块（终态）：同时清有效计数与 SB 归属。
+ *
+ * BAD 是状态机的**终态**：残留 `valid_count` 会让 GC/WL 误判该块可回收，
+ * 残留 `sb_id` 会让 Closed 条目指向已退役块。三件事必须同时发生 ⇒ 收进唯一
+ * setter（C2；原先 5 个调用点各写三行，漏一处就是静默账本分叉）。
+ *
+ * @param b 块条目。
+ */
+static inline void ftl_block_set_bad(bst_block_t *b)
+{
+    ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
+    ftl_block_clear_valid(b);
+    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 }
 
 #endif /* FTL_BST_H */
