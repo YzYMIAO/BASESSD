@@ -245,6 +245,39 @@ static const char *mig_gc_mode_name(gc_benefit_mode_e mode)
 /* ── 2. 提交原语 ── */
 
 /**
+ * @brief 提交一条已建好的搬移命令（读/写/擦四条路径的唯一出口）
+ *
+ * GC 与 WL 共用完成服务函数，op tag 由 kind 决定（预测性退役走 WL）。
+ * 成功才计入 `state.inflight` 并清三个 deadline；失败回滚 waiting 并把命令还池。
+ * ⚠ 新增提交点必须走本函数：inflight 与 deadline 的记账只在这里维护一份。
+ *
+ * @param m   handle
+ * @param cmd 已建链、尚未提交的命令（成功后所有权移交 op 层）
+ * @return FTL_OK 已提交；FTL_AGAIN 提交背压（命令已释放）
+ */
+static ftl_status_e mig_cmd_submit(mig_handle_t *m, fc_command_t *cmd)
+{
+    const ftl_op_id_e op = (m->job.kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
+
+    m->job.waiting = true;
+
+    if (ftl_op_submit(cmd, op, m) != FTL_OK)
+    {
+        m->job.waiting = false;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    m->state.inflight++; /* 完成回调里递减；>0 时禁止启新 job（见 migrate.h）*/
+
+    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
+    timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline);
+    timer_deadline_clear(&m->job.command_deadline);
+    return FTL_OK;
+}
+
+/**
  * @brief 提交一条 victim 页读（整页，4 CW）。数据在完成时由服务函数拷进 m->page_buf
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。
  *
@@ -263,23 +296,7 @@ static ftl_status_e mig_read_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    m->job.waiting = true;
-
-    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-    const ftl_op_id_e op = (m->job.kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
-
-    if (ftl_op_submit(cmd, op, m) != FTL_OK)
-    {
-        m->job.waiting = false;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    timer_deadline_clear(&m->job.submit_deadline);
-    timer_deadline_clear(&m->job.external_deadline);
-    timer_deadline_clear(&m->job.command_deadline);
-    return FTL_OK;
+    return mig_cmd_submit(m, cmd);
 }
 
 /**
@@ -312,23 +329,8 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
 
         m->job.dummy_page0 = true;
         m->job.dummy_pba   = pba0;
-        m->job.waiting     = true;
 
-        // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-        const ftl_op_id_e op = (m->job.kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
-
-        if (ftl_op_submit(zero_cmd, op, m) != FTL_OK)
-        {
-            m->job.waiting = false;
-            (void)fc_command_release(zero_cmd);
-            return FTL_AGAIN;
-        }
-
-        // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-        timer_deadline_clear(&m->job.submit_deadline);
-        timer_deadline_clear(&m->job.external_deadline);
-        timer_deadline_clear(&m->job.command_deadline);
-        return FTL_OK;
+        return mig_cmd_submit(m, zero_cmd);
     }
 
     fc_command_t      *cmd;
@@ -338,23 +340,7 @@ static ftl_status_e mig_write_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    m->job.waiting = true;
-
-    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-    const ftl_op_id_e op = (m->job.kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
-
-    if (ftl_op_submit(cmd, op, m) != FTL_OK)
-    {
-        m->job.waiting = false;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    timer_deadline_clear(&m->job.submit_deadline);
-    timer_deadline_clear(&m->job.external_deadline);
-    timer_deadline_clear(&m->job.command_deadline);
-    return FTL_OK;
+    return mig_cmd_submit(m, cmd);
 }
 
 /**
@@ -377,23 +363,7 @@ static ftl_status_e mig_erase_submit(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    m->job.waiting = true;
-
-    // GC 与 WL 共用同一服务函数，但 op tag 分开——日志/调试时能看出命令属于哪条路径。
-    const ftl_op_id_e op = (m->job.kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
-
-    if (ftl_op_submit(cmd, op, m) != FTL_OK)
-    {
-        m->job.waiting = false;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    // stall 计数只在提交成功后清零（提交失败 = 提交不出去 ⇒ deadline 仍需计时）。
-    timer_deadline_clear(&m->job.submit_deadline);
-    timer_deadline_clear(&m->job.external_deadline);
-    timer_deadline_clear(&m->job.command_deadline);
-    return FTL_OK;
+    return mig_cmd_submit(m, cmd);
 }
 
 /* ── 3. 启动/触发 ── */
@@ -407,8 +377,9 @@ static ftl_status_e mig_erase_submit(mig_handle_t *m)
  * @param reason 观测原因
  * @param triggers 触发计数快照。
  *
- * @note **快路径**——各 plane valid_count 之和 == 0 ⇒ 直接进 ERASE（省整块 NAND
- * 读；整块空洞 plane 的根因已由页打包写缓冲消除）。
+ * @note **快路径**——各 plane valid_count 之和 == 0 ⇒ 不读 victim、先进 FLUSH_JRN
+ * 过 F10 屏障再擦（省整块 NAND 读；整块空洞 plane 的根因已由页打包写缓冲消除）。
+ * 空块也必须过屏障：上一 job 的映射可能还在 Journal 页缓冲里（RISK-GC-18）。
  * victim 按值拷贝：closed_sb_list 在搬移期间可能被 allocator 追加/挪动，
  * 持指针会让「本 job 的 victim」随列表漂移（allocator.h 不变量③）。
  */
@@ -437,14 +408,17 @@ static void mig_job_start(mig_handle_t *m, const super_block_t *victim, mig_kind
     m->job.active         = true;
     m->state.error        = FTL_OK;
 
-    // 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。
+    // 快路径：无任何有效 CW ⇒ 无可搬移，不进 READ；仍要过 FLUSH_JRN 再擦。
     alc_super_stats_t st;
     alc_super_get_stats(m->alloc, &m->job.victim, &st);
     m->job.job_valid_cw = st.valid_cw;
     // 有有效 CW ⇒ 必然写过至少一页。写指针为 0 说明 victim 构造时漏了 next_page，
     // 后果是「一页不读就擦」= 静默丢数据。
     ASSERT((st.valid_cw == 0U) || (m->job.victim.next_page > 0U));
-    m->job.phase = (st.valid_cw == 0U) ? MIG_ERASE : MIG_READ;
+    // 空 victim 也不许直接擦：Journal 里可能还有**上一个 job** 提交的映射没落盘
+    // （上一 job 在 settle 之后 abort），擦完掉电会让回放指向已擦块。所以空块先进
+    // FLUSH_JRN（无待写条目时该阶段一步过），有有效 CW 才走正常 READ 路径。
+    m->job.phase = (st.valid_cw == 0U) ? MIG_FLUSH_JRN : MIG_READ;
 
     // 显式记 job 起点：短 job 的 elapsed 不能靠首次心跳才起算。
     log_heartbeat_begin(&m->job.hb);
@@ -558,6 +532,13 @@ static bool mig_gc_scan_is_allowed(const mig_handle_t *m, gc_benefit_mode_e mode
 static bool mig_gc_begin(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms, mig_gc_start_reason_e reason, DWORD triggers)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
+    // 上一 job 放弃但命令仍在 FC 侧 ⇒ 不能复用引擎：迟到完成会按新 job 的 phase
+    // 结算（erase 阶段会把未擦块当已擦回收）。等它回来再起新 job。
+    if (m->state.inflight != 0U)
+    {
+        return false;
+    }
+
     if (jrn_has_write_failure(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
@@ -627,6 +608,13 @@ static bool mig_gc_begin(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms, 
 static bool mig_wl_begin(mig_handle_t *m)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
+    // 上一 job 放弃但命令仍在 FC 侧 ⇒ 不能复用引擎：迟到完成会按新 job 的 phase
+    // 结算（erase 阶段会把未擦块当已擦回收）。等它回来再起新 job。
+    if (m->state.inflight != 0U)
+    {
+        return false;
+    }
+
     if (jrn_has_write_failure(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
@@ -655,7 +643,11 @@ static bool mig_wl_begin(mig_handle_t *m)
     mig_victim_from_planes(&sb, victim.plane_blocks, victim.next_page);
 
     // 目标块方向：先把 host 的 cold SB 摘掉，让 job 的第一页新开 high-wear SB。
-    alc_super_prepare_wl_destination(m->alloc);
+    // 摘不掉（closed 列表满）⇒ 放弃本次 WL：否则会续写普通 cold SB，纯写放大。
+    if (alc_super_prepare_wl_destination(m->alloc) == false)
+    {
+        return false; /* alc_super_close_live 已 LOGE 归因 */
+    }
 
     // 静态 WL 是空闲态慢过程，每个 job 一行，便于与 GC 区分。
     LOGI(LOG_TAG_WL "start free=%hu writes=%lu\r\n", m->alloc->free_count, total_writes);
@@ -676,6 +668,13 @@ static bool mig_wl_begin(mig_handle_t *m)
 static bool mig_predict_begin(mig_handle_t *m)
 {
     // 前置条件：唯一调用者 mig_handle 已在其顶部判过 active（单飞行）⇒ 不重复检查。
+    // 上一 job 放弃但命令仍在 FC 侧 ⇒ 不能复用引擎：迟到完成会按新 job 的 phase
+    // 结算（erase 阶段会把未擦块当已擦回收）。等它回来再起新 job。
+    if (m->state.inflight != 0U)
+    {
+        return false;
+    }
+
     if (jrn_has_write_failure(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
@@ -1025,6 +1024,9 @@ static void mig_job_finish(mig_handle_t *m)
     }
 #endif
 
+    // 这里只清「idle 期间仍会被读到」的字段（单飞行门、diag/status 观测）；
+    // 其余 transient 字段由下一次 mig_job_start 的整块 memset 清。
+    // 新增字段时先问：idle 期间有没有读者？有才加进本清单（否则会像 batch_* 那样漏）。
     m->job.active         = false;
     m->job.phase          = MIG_IDLE;
     m->job.waiting        = false;
@@ -1117,12 +1119,12 @@ static void mig_plane_meta_commit(mig_handle_t *m, BYTE plane, const DWORD bitma
 /* ── 5.2 cache program 批次辅助（GC/WL）── */
 
 /**
- * @brief 当前页有数据的 plane 是否共享同一页基址。pair 命令只有一个 cmd->meta，
- * 两 plane 都有数据时基址不一致会把 plane1 的 META 写错。
+ * @brief 当前页有数据的 plane 是否属于同一 pair。pair 命令只有一个 cmd->meta，
+ * 两 plane 数据属于不同 pair 时会把 plane1 的 META 写错。
  *
  * @param m job（本页 cw_bitmap / base）。
  *
- * @return true  —— 有数据的 plane 之间页基址不一致；
+ * @return true  —— 有数据的 plane 之间 pair 号不一致；
  *         false —— 一致或至多只有一个 plane 有数据。
  */
 static bool mig_page_base_has_mismatch(const mig_handle_t *m)
@@ -1136,12 +1138,19 @@ static bool mig_page_base_has_mismatch(const mig_handle_t *m)
         {
             continue;
         }
+
+        // 比较键 = **pair 号**：ftl_lba_page_base 刻意保留 LBA 的 plane 位
+        // （同一 pair 在两 plane 上恒差 CW_NUM），直接比原始值会把每个正常页
+        // 都判成不一致。pair 命令的 META 高位本来也只取 pair 号
+        // （fc 建链时逐 desc 重写低 plane/cw 位）。
+        const DWORD pair = ftl_lba_pair_base(m->job.base[p]);
+
         if (have_base == false)
         {
-            pair_base = m->job.base[p];
+            pair_base = pair;
             have_base = true;
         }
-        else if (m->job.base[p] != pair_base)
+        else if (pair != pair_base)
         {
             return true;
         }
@@ -1445,16 +1454,15 @@ static bool mig_read_step(mig_handle_t *m)
             // 攒页：数据/元数据进 batch 槽，不分配目的页、不提交写命令。
             mig_batch_store_page(m);
             m->job.batch_count++;
-            m->job.plane = 0U;
-            m->job.page++;
+
+            // 复用统一页推进：清 plane / cw_bitmap / base / decode / write。
+            // 手写 page++ 会留下上一页的 bitmap/base——某 plane 被跳过时下一轮
+            // READ_SETTLE 会把旧页重复算进本页（多写、多预留 Journal）。
+            mig_page_next(m); /* phase = MIG_READ */
 
             if ((m->job.batch_count >= MIG_BATCH_PAGES) || (m->job.page >= page_limit))
             {
                 m->job.phase = MIG_WRITE_BATCH;
-            }
-            else
-            {
-                m->job.phase = MIG_READ;
             }
             return false;
         }
@@ -1704,7 +1712,7 @@ static bool mig_write_batch_step(mig_handle_t *m)
 
     if (mig_batch_alloc_dst(m, n) == false)
     {
-        m->job.batch_aborts++;
+        m->state.counters.batch_aborts++;
         mig_job_abort(m, "batch dst alloc failed");
         return false;
     }
@@ -1738,7 +1746,7 @@ static bool mig_write_batch_step(mig_handle_t *m)
             return true;
         }
 
-        m->job.batch_aborts++;
+        m->state.counters.batch_aborts++;
         mig_job_abort(m, "batch build/submit failed");
         return false;
     }
@@ -1747,11 +1755,14 @@ static bool mig_write_batch_step(mig_handle_t *m)
     m->job.batch_outstanding  = n;
     m->job.batch_failed       = false;
     m->job.batch_cleanup_done = false;
+    m->state.inflight         = (WORD)(m->state.inflight + n); /* 每条命令各来一次完成回调 */
     timer_deadline_clear(&m->job.submit_deadline);
+    timer_deadline_clear(&m->job.external_deadline); /* 与其余提交原语同口径 */
+    timer_deadline_clear(&m->job.command_deadline);
     if (n >= 2U)
     {
-        m->job.batch_jobs++;
-        m->job.batch_pages += n;
+        m->state.counters.batch_jobs++;
+        m->state.counters.batch_pages += n;
     }
     m->job.phase = MIG_WRITE_BATCH;
     return true;
@@ -1821,20 +1832,11 @@ static bool mig_flush_jrn_step(mig_handle_t *m)
     }
 
     // F10 契约：搬移条目先落盘再擦 victim。journal 是 write-back（page_buf
-    // 攒满才 flush），不在此强制落盘，掉电落在"条目未落盘 + victim 已擦除"
-    // 窗口 ⇒ 恢复回放指向已擦除块 = 数据损坏。
-    // 无搬移条目（migrated == 0）⇒ 无需屏障，直接擦。
-    if (m->job.migrated == 0U)
-    {
-        m->job.phase = MIG_ERASE;
-        m->job.plane = 0U;
-        return false;
-    }
-
-    {
-        // typed 入口：job 空闲且有待写页 ⇒ 起异步刷页。
-        jrn_handle(m->journal, NULL);
-    }
+    // 攒满才 flush），掉电落在"条目未落盘 + victim 已擦除"窗口 ⇒ 恢复回放指向
+    // 已擦除块 = 数据损坏。
+    // ⚠ 屏障**不看本 job 的 migrated**：上一个 job 可能已提交映射后 abort，其条目
+    // 还在页缓冲里；空 victim 快路径同样要过这道闸（无条目时 jrn_handle 空转一步）。
+    jrn_handle(m->journal, NULL);
 
     if (jrn_is_idle(m->journal) == false)
     {
@@ -2212,35 +2214,20 @@ void mig_eval(mig_handle_t *m)
     // ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
     // GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
     // 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。
-    if (m->state.level == BG_LEVEL_BUSY)
+    if ((m->state.level == BG_LEVEL_BUSY) && (m->alloc->free_count >= FREE_POOL_TARGET))
     {
-        if (m->alloc->free_count < FREE_POOL_TARGET)
-        {
-            bool        host_writing = false;
-            const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
-
-            if (trig != 0U)
-            {
-                const gc_benefit_mode_e mode = mig_gc_mode_select(trig, host_writing);
-
-                (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
-            }
-        }
-
         return;
     }
 
     // ⑤ 周期评估 GC；WL/predict 由各自的 timer 任务按 5 s / 1 s 节拍进入。
+    bool        host_writing = false;
+    const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
+
+    if (trig != 0U)
     {
-        bool        host_writing = false;
-        const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
+        const gc_benefit_mode_e mode = mig_gc_mode_select(trig, host_writing);
 
-        if (trig != 0U)
-        {
-            const gc_benefit_mode_e mode = mig_gc_mode_select(trig, host_writing);
-
-            (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
-        }
+        (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
     }
 }
 
@@ -2564,7 +2551,7 @@ static void mig_write_batch_complete(mig_handle_t *m, fc_command_t *cmd, const f
         if (m->job.batch_cleanup_done == false)
         {
             (void)alc_super_close(m->alloc, FTL_TEMP_COLD);
-            m->job.batch_aborts++;
+            m->state.counters.batch_aborts++;
             m->job.batch_cleanup_done = true;
         }
 
@@ -2698,6 +2685,13 @@ void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
         LOGE(LOG_TAG_MIG "late completion cmd=%hu status=0x%02hx — released\r\n", completion->command_id, completion->status);
         (void)fc_command_release(cmd);
         return;
+    }
+
+    // 任何到达本 handle 的完成都归还一个在飞额度（含孤儿/迟到完成）。
+    // 启新 job 的门控靠它：漏减会让搬移引擎永久停摆，漏加会让迟到完成被误派发。
+    if (m->state.inflight > 0U)
+    {
+        m->state.inflight--;
     }
 
     // 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出来的归属实例，

@@ -31,7 +31,7 @@
 
 #define WL_THRESHOLD       (200U)  /* 触发差值：高擦除空闲块 − 最冷 used SB（本仓自拟，见下） */
 #define WL_MIN_WRITES      (1000U) /* 启动门：累计编程次数达到后才开始求值（一次性，不是周期）*/
-#define WL_MIN_VALID_RATIO (70U)   /* 只搬有效 **CW** ≥ 70% 的冷 Block（CW 级映射） */
+#define WL_MIN_VALID_RATIO (70U)   /* 只搬有效 **CW** ≥ 该条目容量 70% 的冷 Block（CW 级映射；单 plane 条目按自身容量算） */
 /* ⚠ WL_THRESHOLD 的出处与缩放：
  *   Linux MTD UBI 的 `MTD_UBI_WL_THRESHOLD` 默认 4096，含义是「最高与最低擦除计数
  *   的最大差值」，超过即把最冷 used PEB 搬到高擦除空闲 PEB

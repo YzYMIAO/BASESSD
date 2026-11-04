@@ -11,7 +11,7 @@
  *         migrate.c 的搬移引擎；`gc_decode_cw_lba` 是搬移读与掉电重建共用的解码入口，
  *         `gc_read_page_with_lba` 只服务掉电重建的同步路径。
  *
- * 三条触发（gc_should_trigger，位掩码）：
+ * 两条触发（gc_should_trigger，位掩码）：
  *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY。
  *   磨损维护不在 GC 触发里，由 wear_leveling 的 UBI 判据独立启动。
  *
@@ -142,7 +142,9 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
 
         if (meta_ptr == NULL)
         {
-            continue; /* 该 CW 不在链上（本入口链恒覆盖全 4 CW，防御） */
+            // 链上缺这条 CW 的 buffer ⇒ 无法证明它“没写过”。按未写处理会让它不被搬移、
+            // 随后 victim 被擦 ⇒ L2P 悬空（静默丢数据）。整页按损坏上报，调用者不擦。
+            return GC_DECODE_CORRUPT;
         }
         // meta_ptr 指向 CW buffer，CW 基址 4 字节对齐，memcpy 避免 alignment 警告
         DWORD m;

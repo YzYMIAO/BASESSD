@@ -610,8 +610,12 @@ ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode
  * 只有 `mig_wl_begin` 在 host 空闲时调用。
  *
  * @param alloc 分配器
+ * @return true  —— 当前没有 cold SB，或已成功关闭/归还；
+ *         false —— closed 列表满，关不掉：调用者必须放弃本次 WL。此时 cold SB
+ *                  仍 open，下一个分配会继续写它（普通选块），高磨损目的块根本不
+ *                  会打开，搬移退化为纯写放大。
  */
-void alc_super_prepare_wl_destination(alc_t *alloc);
+bool alc_super_prepare_wl_destination(alc_t *alloc);
 
 /**
  * @brief 撤销**紧邻的**一次 alc_super_open_alloc_pair

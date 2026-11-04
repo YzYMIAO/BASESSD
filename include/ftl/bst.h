@@ -38,9 +38,6 @@
 #include <stddef.h> /* NULL */
 #include <stdint.h>
 
-/* 每实例（每 LUN）的物理 Block 总数 = 2048 × 2 = 4096 */
-#define FTL_BLOCK_TOTAL (BLOCKS_PER_PLANE * PLANE_NUM)
-
 /* ── 预测性坏块健康状态（自 read_recovery.h 迁入，避免循环 include）── */
 typedef enum
 {

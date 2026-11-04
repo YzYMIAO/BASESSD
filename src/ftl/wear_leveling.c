@@ -83,10 +83,13 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
         return false; /* 全哨兵条目 */
     }
 
-    // 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元）。
-    const WORD min_valid_cw = (WORD)(FTL_CW_PER_SB * WL_MIN_VALID_RATIO / 100U);
+    // 门限单位是**有效 CW**，分母取**该条目自己的容量**（现存 plane × 每块 CW 数）：
+    // 快照恢复出的单 plane 条目最多只有 FTL_CW_PER_BLOCK 个 CW，用整 SB 容量
+    // 做分母会把它们全部拒之门外 ⇒ 每次快照启动后静态 WL 全程不触发。
+    const DWORD total_cw     = (DWORD)st.plane_count * FTL_CW_PER_BLOCK;
+    const DWORD min_valid_cw = (total_cw * WL_MIN_VALID_RATIO) / 100U;
 
-    if (st.valid_cw < min_valid_cw)
+    if ((DWORD)st.valid_cw < min_valid_cw)
     {
         return false; /* 太碎不值当搬 */
     }

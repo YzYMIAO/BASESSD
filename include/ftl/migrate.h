@@ -41,9 +41,9 @@
  *           GC 与静态 WL 用），`MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役
  *           （预测性退役用，见 allocator.h 不变量②）；
  *           失败（且尚未 BAD）`bbt_mark_bad`，并置 `erase_failed`：该 SB 不计入
- *           `gc_reclaimed_count`、不打印 predict 退役日志。
+ *           `state.counters.reclaimed`、不打印 predict 退役日志。
  *   · DONE  alc_super_closed_find + alc_super_closed_remove + 进展计数
- *           （gc_reclaimed_count）/ 预测命中日志。
+ *           （`state.counters.reclaimed`）/ 预测命中日志。
  *
  * ── 中止语义（数据安全约束）──
  *
@@ -56,7 +56,9 @@
  *
  * ── 单飞行 ──
  *
- * 每实例同时只允许一个 mig job（`active`）。GC / WL / predict 共用引擎：
+ * 每实例同时只允许一个 mig job（`active`）；上一个 job 放弃但命令仍在 FC 侧时
+ * `state.inflight != 0`，三个 `*_begin` 拒绝启新 job（迟到完成会按新 phase 结算）。
+ * GC / WL / predict 共用引擎：
  * 调度器任务表把 GC 求值排在 WL 之前，但两者各自受触发条件/节拍门控，**不存在**
  * 硬性的“WL 让 GC 先跑”；真正的互斥是 `active` 单飞行。
  *
@@ -209,9 +211,6 @@ typedef struct
     BYTE             batch_outstanding;
     bool             batch_failed;
     bool             batch_cleanup_done;
-    DWORD            batch_jobs;
-    DWORD            batch_pages;
-    DWORD            batch_aborts;
     mig_batch_page_t batch[MIG_BATCH_PAGES];
     log_heartbeat_t  hb;
     DWORD            last_fc_status;
@@ -261,11 +260,21 @@ typedef struct
     DWORD noop;
     DWORD novictim;
     DWORD nogain;
+
+    /* cache-program 批次诊断（跨 job 累计；放 job 里会被 job 起点 memset 清零）。 */
+    DWORD batch_jobs;   /* 已提交的批次数 */
+    DWORD batch_pages;  /* 批次内总页数 */
+    DWORD batch_aborts; /* 批次失败/中止数 */
 } mig_counters_t;
 
 typedef struct
 {
     mig_failure_t failure;
+
+    /* 已提交、尚未收到完成的命令数（跨 job 保留）。>0 时禁止启新 job：
+     * job 超时放弃后命令仍在 FC 侧，迟到完成会按新 job 的 phase 结算
+     * （erase 阶段会把未擦块当已擦回收）⇒ 必须等它回来再复用引擎。 */
+    WORD inflight;
 
     bool            batch_disabled;
     bg_level_e      level;

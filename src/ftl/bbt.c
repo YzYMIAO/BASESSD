@@ -566,6 +566,14 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     ftl_block_set_bad(&alloc->blocks[gblock]);
     ftl_block_clear_valid(&alloc->blocks[gblock]);
     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
+
+    // Closed SB 里的块被运行期标坏（host 读失败 / 擦失败 / 预测性退役）：同步把该
+    // plane 从 Closed 条目摘掉。不摘的话，条目最后一个活 plane 被搬完时
+    // mig_job_finish 按“victim 全 plane 原值”查不到它（该 plane 已是 NO_PLANE）⇒
+    // 条目永久留下、plane_count 变 0 ⇒ GC/WL 永远跳过 ⇒ Closed 列表槽泄漏到满，
+    // 之后关闭 SB 全部失败、写入报错。
+    (void)alc_super_closed_drop_plane(alloc, ftl_gblock_plane(gblock), ftl_gblock_block(gblock));
+
     alloc->bad_count++;
     bbt_dirty_note(alloc);
 

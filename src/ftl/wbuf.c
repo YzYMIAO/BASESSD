@@ -364,23 +364,24 @@ static void wb_reset(wb_handle_t *h)
 
 /**
  * @brief 无打开窗口或仍有写组会 append 本窗口时不动；否则尝试编程。
- * flush 结果不在此结算（失败留给后续触发重试）。
  *
  * @param h wbuf handle
+ * @return FTL_OK 无需编程或已提交；其余同 wb_flush（失败时缓冲原样保留，
+ *         错误由 wb_handle 锁存 ⇒ host FLUSH 可快速失败，不等墙钟超时）
  */
-static void wb_maybe_flush_idle(wb_handle_t *h)
+static ftl_status_e wb_maybe_flush_idle(wb_handle_t *h)
 {
     if (h->open == false)
     {
-        return;
+        return FTL_OK;
     }
 
     if (pend_group_has_window_pending(h->pending, h->base))
     {
-        return; /* 还有写组会把数据 append 进本窗口 → 先别 flush */
+        return FTL_OK; /* 还有写组会把数据 append 进本窗口 → 先别 flush */
     }
 
-    (void)wb_flush(h);
+    return wb_flush(h);
 }
 
 /* ── 5. typed 入口 ── */
@@ -445,7 +446,9 @@ static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
 /**
  * @brief wbuf typed 入口：按 trigger->kind 分发
  *
- * 只做分发，不承载事件逻辑；h->error 只由下一次成功 FLUSH/RESET 清除。
+ * 只做分发，不承载事件逻辑。错误锁存：任一 kind 返回 FTL_ERROR 即置位；
+ * 只有成功的 FLUSH / MAYBE_FLUSH_IDLE / RESET 清除（APPEND / DROP 的成功不代表
+ * 写路径恢复）。锁存让 host FLUSH 的 `wb_fail` 判据能快速命中，而不是等 1 s 超时。
  *
  * @param h       wbuf handle
  * @param trigger 触发描述
@@ -475,7 +478,7 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t 
             break;
 
         case WBUF_TRIGGER_MAYBE_FLUSH_IDLE:
-            wb_maybe_flush_idle(h);
+            st = wb_maybe_flush_idle(h);
             break;
 
         default:
@@ -483,7 +486,14 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t 
             break;
     }
 
-    h->error = (st == FTL_ERROR) ? FTL_ERROR : FTL_OK;
+    if (st == FTL_ERROR)
+    {
+        h->error = FTL_ERROR;
+    }
+    else if ((st == FTL_OK) && ((trigger->kind == WBUF_TRIGGER_FLUSH) || (trigger->kind == WBUF_TRIGGER_MAYBE_FLUSH_IDLE) || (trigger->kind == WBUF_TRIGGER_RESET)))
+    {
+        h->error = FTL_OK;
+    }
 
     if (out != NULL)
     {

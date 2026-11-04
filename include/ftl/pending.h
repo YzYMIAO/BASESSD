@@ -94,7 +94,7 @@ typedef enum
  *   FIRST        —— 序列首条：没有本序列的上一页，FAILC 是残留，不据此结算；
  *   INTERMEDIATE —— 中间页：FAILC 结算**上一页**，本页等下一命令；
  *   END          —— 末条（10h）：FAILC 结算上一页，FAIL/NAND_FAIL 结算本页。
- * 值域 0..3 由 ARM EABI 短枚举落为 1 B，与旧 bool 字段同宽（pend_req_t 仍 32 B）。 */
+ * 值域 0..3；`-fshort-enums` 下落为 1 B（不改变 pend_req_t 的布局）。 */
 typedef enum
 {
     PEND_CACHE_ROLE_NONE = 0, /* 非 cache program 成员（普通写 / page0 / 读） */
@@ -159,7 +159,7 @@ static inline bool pend_op_is_write_cache(BYTE op)
     return op == PENDING_OP_WRITE_CACHE;
 }
 
-/* 字段按对齐从大到小排列；_Static_assert 钉住 32B。 */
+/* 字段按对齐从大到小排列；_Static_assert 钉住 36B。 */
 typedef struct
 {
     /* ── 4B 对齐 ── */

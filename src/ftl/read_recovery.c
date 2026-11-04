@@ -51,7 +51,7 @@
 static DWORD s_rr_unrec_log_ms;
 static DWORD s_rr_unrec_suppressed;
 
-/* ── 1. 记录 / 判定 ── */
+/* ── 1. 记录（ECC 趋势 / read disturb）── */
 
 /**
  * @brief 记录一次 ECC 位数，更新趋势（只升不降）
@@ -117,7 +117,7 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
     blk->read_count++;
 }
 
-/* ── 2. 恢复路径（异步 job 状态机）──
+/* ── 2. 恢复 job（异步状态机）──
  *
  * 三级管线的**分步**实现：rr_job_step 的 stage 序列每步只提交一条命令就返回。
  *
@@ -342,7 +342,7 @@ static void rr_job_finish(rr_handle_t *rr)
 /**
  * @brief 卡死兜底：提交侧长期无进展（命令池泄漏），按恢复失败收尾。
  *
- * @param rr 实例（清零 caller 缓冲，置 error = FTL_TIMEOUT，转 FINISH）
+ * @param rr 实例（清零 caller 缓冲、聚合结果置失败，转 FINISH）
  *
  * @note **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。
  */
@@ -356,7 +356,6 @@ static void rr_job_abort(rr_handle_t *rr)
     }
 
     rr->all_ok = false;
-    rr->error  = FTL_TIMEOUT;
     rr->stage  = RR_STAGE_FINISH;
 }
 
@@ -400,7 +399,6 @@ static void rr_job_step(rr_handle_t *rr)
                 rr->recovered        = false;
                 rr->planes_recovered = 0U;
                 rr->planes_failed    = 0U;
-                rr->error            = FTL_OK;
                 rr->all_ok           = true;                /* 聚合结果：任一 plane 失败才清零 */
                 timer_deadline_clear(&rr->submit_deadline); /* 新 job：卡死计时从头算 */
                 log_heartbeat_begin(&rr->hb);
@@ -482,7 +480,7 @@ static void rr_job_step(rr_handle_t *rr)
     }
 }
 
-/* ── typed handle（端口装配 / 触发 / 上报） ── */
+/* ── 3. typed handle（端口装配 / 触发 / 上报）── */
 
 /**
  * @brief 装配 RR handle：清零、绑定 cache/alloc/scratch/pending
@@ -505,7 +503,6 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scrat
     rr->topo         = alc_topo(alloc);
     rr->page_scratch = page_scratch;
     rr->pending      = pending;
-    rr->error        = FTL_OK;
 }
 
 /**
@@ -572,7 +569,6 @@ void rr_handle(rr_handle_t *rr)
                 }
                 else if (timer_deadline_expired(&rr->submit_deadline, now_ms))
                 {
-                    rr->error = FTL_TIMEOUT;
                     rr_job_abort(rr);
                 }
             }
@@ -582,7 +578,7 @@ void rr_handle(rr_handle_t *rr)
     }
 }
 
-/* ── RR 各 stage 的完成处理（ftl_read_recovery_callback 按 rr->stage 分派）──
+/* ── 4. 完成服务（ftl_read_recovery_callback 按 rr->stage 分派）──
  *
  * 共同约定：命令的 release 与 rr_job_step 续跑**不**在这里做（见 dispatcher）——
  * 但 READ 分支必须在此把数据拷进 rr_page_scratch，因为 release 之后 desc 链失效。
@@ -593,16 +589,6 @@ void rr_handle(rr_handle_t *rr)
  *   · UNC / NAND_FAIL / TIMEOUT / MATA_ERROR ⇒ 不重试，直接按失败结算。
  *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
  *     二者都**不实现**，失败即判坏。
- */
-/**
- * @brief 处理 RR 页读完成：成功时拷数据，CRC 错误允许一次重读，其余进入结算。
- *
- * @param rr         实例（推进 stage / retry_count / last_status）
- * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
- * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
- *
- * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
- *       UNC / NAND_FAIL / TIMEOUT / MATA_ERROR 直接交 rr_settle_plane 清零 + 标坏。
  */
 /**
  * @brief 扫 desc 链判断失败是否**只有 CRC**（RR 允许再读一次的唯一情形）。
@@ -644,7 +630,14 @@ static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
 }
 
 /**
- * @brief 读命令完成：成功把页拷进 scratch 并进 PLANE_END；仅 CRC-only 允许再读一次。
+ * @brief 处理 RR 页读完成：成功时拷数据，CRC 错误允许一次重读，其余进入结算。
+ *
+ * @param rr         实例（推进 stage / retry_count / last_status）
+ * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
+ * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
+ *
+ * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
+ *       UNC / NAND_FAIL / TIMEOUT / MATA_ERROR 直接交 rr_settle_plane 清零 + 标坏。
  */
 static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -725,7 +718,7 @@ void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *compl
 
     rr_job_step(rr);
 }
-/* ── 3. 判定（块数组 / 全表扫描）── */
+/* ── 5. 判定（块健康 / 全表扫描）── */
 
 /**
  * @brief 取 ECC 趋势的健康档位
@@ -811,7 +804,7 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
     return false;
 }
 
-/* ── 4. 退役 ── */
+/* ── 6. 退役 ── */
 
 /**
  * @brief 把块置为 RETIRED（不标坏、仍可读）

@@ -572,13 +572,14 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         return FTL_CACHE_READ_DECLINED;
     }
 
-    // 新序列：预加载 L2P region（region = 512 条 entry；最多探 512 LBA）。
+    // 新序列：预加载 L2P region（一个 region = L2P_ENTRIES_PER_REGION 条 entry）。
     if (starting == true)
     {
-        // START 的探测范围只看当前 512 LBA（≤ 2 个 L2P region）；序列单段上限
-        // 128 pair = 2 个 region，预取只覆盖下一个 region，再下一个靠 lookahead
-        // 驻留检查安全降级。cache 行整 region 一条（512 entry），两行不会互相驱逐。
-        DWORD probe_end = lba + 512U;
+        // START 的探测范围只看当前一个 region 的跨度（起点不对齐时最多跨 2 个
+        // L2P region）；序列单段上限 128 pair = 2 个 region，预取只覆盖下一个
+        // region，再下一个靠 lookahead 驻留检查安全降级。cache 行整 region 一条，
+        // 两行不会互相驱逐。
+        DWORD probe_end = lba + L2P_ENTRIES_PER_REGION;
 
         if (probe_end > cmd_end)
         {

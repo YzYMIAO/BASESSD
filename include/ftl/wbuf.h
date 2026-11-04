@@ -129,8 +129,8 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_ha
  * @param trigger 触发参数（kind + 对应载荷：LBA / 数据 / CW 数 / 组号）
  * @param out     出参（可为 NULL）：非 NULL 时填本轮状态上报
  * @return FTL_OK    操作完成 / 无需操作
- *         FTL_AGAIN APPEND / FLUSH 遇到瞬态背压（缓冲保留，可重试）
- *         FTL_ERROR FLUSH 建链失败 / trigger->kind 非法
+ *         FTL_AGAIN APPEND / FLUSH / MAYBE_FLUSH_IDLE 遇到瞬态背压（缓冲保留，可重试）
+ *         FTL_ERROR FLUSH / MAYBE_FLUSH_IDLE 建链失败 / trigger->kind 非法
  */
 ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t *out);
 

@@ -59,7 +59,7 @@ extern BYTE g_die_count;
  * 一、几何量（全部由 nand_config.h 推出，不写死）
  * ══════════════════════════════════════════════════════════════════ */
 
-/* 全芯片块数（per-LUN）= 每 plane 块数 × plane 数 */
+/* 全芯片块数（per-LUN）= 每 plane 块数 × plane 数（当前 2048 × 2 = 4096） */
 #define FTL_BLOCK_TOTAL (BLOCKS_PER_PLANE * PLANE_NUM)
 
 /* 映射单元（IU）= 1 个 CW；每条 L2P 条目覆盖该 CW 的**用户数据区**。
@@ -144,9 +144,6 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
  * plane/cw 铸出（fc_command.h），页内 META 存的就是「本 CW 的扇区 LBA」。若两者
  * 不一致，写进去的 META 会指向另一个 LBA，GC 反查/读校验都会错。
  * ══════════════════════════════════════════════════════════════════ */
-
-/* 每页 CW 数 = 每页映射单元数 */
-#define FTL_CW_PER_PAGE (CW_NUM)
 
 /* 单物理块 / 单个 Super Block 的 CW 容量。
  * ⚠ `bst_block_t.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
@@ -308,6 +305,11 @@ static inline bool ftl_lba_is_pair_aligned(DWORD lba)
 #define PBA_LUN_MASK   NAND_FIELD_MASK(LUN_ADDR_WIDTH)
 #define PBA_CE_MASK    NAND_FIELD_MASK(PBA_CE_WIDTH)
 #define PBA_CH_MASK    NAND_FIELD_MASK(PBA_CH_WIDTH)
+
+/* PBA 与 LBA 的 CW 低位必须同源：`pba_make` / `pba_to_cw` 按 PBA_CW_SHIFT 打包，
+ * 而 `ftl_lba_cw` / `ftl_cw_bit` 假设 cw 在 LBA 的低 CW_WIDTH 位（bit 0 起）。
+ * 两个常量分属不同头文件，改一处不会编译报错 ⇒ 地址静默错位（§3.2 的三类量之一）。 */
+_Static_assert(PBA_CW_SHIFT == CW_WIDTH_SHIFT, "PBA 与 LBA 的 CW 低位必须同源（PBA_CW_SHIFT != CW_WIDTH_SHIFT）");
 
 /* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
 #define NAND_PBA_INVALID (0xFFFFFFFFU)

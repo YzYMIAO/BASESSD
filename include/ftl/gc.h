@@ -34,7 +34,7 @@
 
 #include <stdint.h>
 
-/* ── GC 触发位（设计 §4.4：只有**空间压力与磨损**三条）──
+/* ── GC 触发位（设计 §4.4：**空间压力**两条；磨损维护不在 GC 触发里）──
  * gc_should_trigger() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
  * 只用于调用点打日志/调参，"要不要 GC" 的判定仍是 `!= 0`。
  *
@@ -50,7 +50,8 @@
  * 旧 T5 用“全表 max/min”比较，min 可能来自从未使用的空闲块 ⇒ 比值永不收敛。 */
 
 /* ── GC 触发判定的求值节拍（由 migrate handle 自持）──
- * 判据本身是**事件**（空间压力/磨损），但求值含一次**全表扫描**，不能按主循环每轮跑。 */
+ * 判据是**事件**（空间压力）；求值本身只读 free 计数，触发后的 victim 评分扫 closed 列表，
+ * 故按节拍求值而不是主循环每轮跑。 */
 #define GC_EVAL_INTERVAL_MS (10U)
 
 /* GC 触发日志的节拍（与求值同一套时基）。
@@ -192,7 +193,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 /**
  * @brief 检查是否需要触发 GC，并返回**触发起因位掩码**
  *
- * 三条触发（设计 §4.4），可多位同时命中：
+ * 两条触发（设计 §4.4），可多位同时命中：
  *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 主动补池
  *   T4 GC_TRIGGER_EMERGENCY  free_count <= FREE_POOL_EMERGENCY      🔴 最后手段
  *   磨损均衡不属于 GC 触发：由 `wear_leveling` 的 UBI 判据（free-max vs used-min，
@@ -200,8 +201,9 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
  *
  * ⚠ T1 与 T4 同源（都是"空闲块不够"），但阈值不同：T1 是**主动**补池（还留有余量
  *   时就开工），T4 是**最后手段**（池已见底）。
- * ⚠ GC 触发求值仍需 O(FTL_BLOCK_TOTAL) 的全表极值扫描；求值点由
- *   `mig_gc_evaluate` 的节拍门（GC_EVAL_INTERVAL_MS）兜成本，不在本函数内节流。
+ * ⚠ 本函数只读 free 计数（O(PLANE_NUM)），**不做全表扫描**；O(closed 列表) 的
+ *   victim 评分在 `gc_select_victim` 里，由 `mig_gc_evaluate` 的节拍门
+ *   （GC_EVAL_INTERVAL_MS）+ no-gain 退避兜成本。
  * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `mig_gc_evaluate`（ftl.c）：
  *   **IDLE 与 NORMAL 两条后台路径都从这里过**（IDLE 据此决定是否启动补池突发，
  *   NORMAL 据此决定是否回收一个 SB）；**BUSY 不求值**（host 饿着，让路），

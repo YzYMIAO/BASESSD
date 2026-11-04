@@ -1621,7 +1621,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 1. **绝对值 + CP 快照**：每次 CP 写整份磨损快照（不是增量），读回直接覆盖 BST。
 2. **软状态**：两次 CP 之间掉电只丢一个 CP 窗口的计数，不丢用户数据；
    快照损坏只退化 WL/read-disturb 精度，**不得**触发格式化。
-3. **WL 只选 Closed 块**：跳过 Open / 含坏 plane 的 SB；有效 CW ≥ 70%；
+3. **WL 只选 Closed 块**：跳过 Open / 含坏 plane 的 SB；有效 CW ≥ **该条目自身容量**的 70%（`plane_count × FTL_CW_PER_BLOCK`，快照恢复出的单 plane 条目按单 plane 算）；
    按**平均擦除次数最少**（最冷）优先，同擦除次数下 valid_cw 多、read_count 高优先。
 4. **目标方向固定**：静态 WL 的目的页对取 **Free Pool 中擦除次数最多**的块
    （`alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`），且不允许 OP 兜底；启动前沿
@@ -1655,7 +1655,7 @@ flowchart TD
    `wear_page_crc[]`。Header 是 commit 页——它落盘才代表整条 record 有效。
    **持久化窗口 = CP 间隔**（水位/定时/强制触发）。
 3. **静态 WL 触发**（UBI 模型）：判据只有 `max_free_ec − min_used_ec ≥ WL_THRESHOLD`，
-   其中 `min_used_ec` = Closed 列表中**有效 CW ≥ 70% 且无坏 plane** 的 SB 平均擦除
+   其中 `min_used_ec` = Closed 列表中**有效 CW ≥ 自身容量 70% 且无坏 plane** 的 SB 平均擦除
    次数最小值，`max_free_ec` = Free Pool 最大擦除次数。启动门
    `total_writes ≥ WL_MIN_WRITES`，求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
    搬移不改变擦除计数 ⇒ 差值不足时必须停止（否则是纯写放大，RISK-WL-08）。
@@ -3671,19 +3671,20 @@ flowchart TB
 | `timed_out` / `timeout_phase` | 超时归因（status 上报） |
 | `fail_gblock[plane]` / `fail_count[plane]` | **每个 plane 源块**的连续读失败计数（跨 job 保留；整块迁移成功或标 BAD 才清） |
 | `read_fail_streak` / `paused` | 系统性读失败熔断计数 / 已熔断标志（跨 job 保留；整块迁移成功才清零 `RISK-GC-10`） |
+| `inflight` | 已提交、未收到完成的命令数（batch 按条计，跨 job 保留）。>0 时三个 `*_begin` 拒绝启新 job：job 超时放弃后命令仍在 FC 侧，迟到完成会按新 job 的 phase 结算（`RISK-MIG-10`） |
 | `gc_eval_last_ms` / `wl_eval_last_ms` / `predict_last_ms` | handle 自持的求值节拍 |
-| `reclaimed_count` / `novictim_count` | 单调进展计数（外部经 `migrate_*_count()` 查询） |
+| `reclaimed_count` / `novictim_count` | 单调进展计数（外部诊断直接读 `state.counters.*`；纯标量，无封装价值） |
 | `urgent_gc` | `mig_gc_request_urgent()` 的登记位 |
 | `error` | 最近一次中止归因 |
 
 **不变量**：
 
-1. **顺序**：先写新页 → 改 L2P + Journal → 等 Journal 落盘（F10）→ 擦旧块。
+1. **顺序**：先写新页 → 改 L2P + Journal → 等 Journal 落盘（F10）→ 擦旧块。**空 victim 也不跳过 F10**：上一个 job 提交的映射可能还在 Journal 页缓冲里，擦完掉电会让回放指向已擦块（`RISK-GC-18`）。
 2. **分配不到目标页 ⇒ 中止且不擦 victim**。先擦后搬会丢掉尚未搬移的有效页。
 3. **擦除失败不退役**：擦不掉的块归 BBT；同时标 RETIRED 自相矛盾。
 4. **单飞行**：每实例同时一个 migrate handle；GC/WL/predict 由调度器顺序与各自触发门控协调。
 5. **有效性唯一真值是 META + L2P 反查**：没有常驻位图；`cw_bitmap` 是本次 job 的临时结果。
-6. **源块 gblock 不缓存**：快路径（valid_total==0）不经过 READ；缓存字段会是 0。
+6. **源块 gblock 不缓存**：快路径（valid_total==0）不经过 READ（仍走 FLUSH_JRN → ERASE）；缓存字段会是 0。
    真值始终是 `victim.plane_blocks[plane]`。
 7. **完成错误即中止**：READ / WRITE 完成带 `FC_CMD_STATUS_ERROR_MASK`（或数据拷出失败）
    ⇒ 中止 job，victim 不擦。只有**擦除页**（FC 的 desc 报 `FC_CW_STATUS_EMPTY`，即整条 CW 1 比特占比 ≥99%）才允许跳过；
@@ -3820,13 +3821,13 @@ flowchart TD
    在写该 plane 的 page>0 之前先写一页零。这样 page0 屏障可满足，full rebuild 的
    「page0 空白⇒整块空白」捷径始终成立。（**cache 写序列**例外地由有序管线自证：
    page0 失败会中止其后所有页，见 §3.16.5；独立程序者仍必须走这里的两道屏障。）
-6. `MIG_FLUSH_JRN`：等 Journal job 空闲 **且 `write_fail_pending == 0`**（F10）。
+6. `MIG_FLUSH_JRN`：等 Journal job 空闲、`write_fail_pending == 0` **且页缓冲无待写条目**（F10）；空 victim 快路径也必须过这一关（`RISK-GC-18`）。
    `jrn_handle` 冲刷半满页；页写失败时 pending 会阻止擦除，直到 CP 把 L2P 落盘。
 7. `MIG_ERASE`：逐 plane 擦；成功走 `alc_bst_note_erase`（erase_count / last_pe_ts /
    clear_valid）；`post==FREE` ⇒ 归还 Free Pool；`post==RETIRE` ⇒ 出池 + `rr_retire_block`；
    擦除失败且未 BAD ⇒ `bbt_mark_bad`，置 `erase_failed`。
 8. `MIG_DONE`：移除 Closed 条目；只有擦除成功且条目确实移除才
-   内部 `reclaimed_count++`（外部经 `mig_reclaimed_count()` 读）/ 打 predict 日志；复位 job。
+   内部 `state.counters.reclaimed++`（外部诊断直接读）/ 打 predict 日志；复位 job。
 
 #### 3.13.7 失败语义
 
@@ -3839,7 +3840,7 @@ flowchart TD
 | Journal append 丢弃 / L2P 写失败 | 中止，不擦 victim | 该 CW 的映射未持久化；前一 CW 的迁移保持有效 |
 | Journal 页写失败 | 置 `write_fail_pending`，中止 F10 | pending 阻止一切 victim 擦除，直到 CP 确认 L2P 落盘 |
 | 提交侧超过 `FTL_SUBMIT_TIMEOUT_MS` 无进展 | 中止（`timed_out`） | 数据无损；命令在飞由 NAND 超时保证完成 |
-| 擦除失败 | 未 BAD 则标坏一次；`erase_failed` | 数据由 BBT/GC 处理；不计入 `mig_reclaimed_count()` |
+| 擦除失败 | 未 BAD 则标坏一次；`erase_failed` | 数据由 BBT/GC 处理；不计入 `state.counters.reclaimed` |
 | 掉电 | 最多一个孤悬块 | Journal 回放恢复映射；victim 未擦或已擦但 L2P/CP 已落盘 |
 
 #### 3.13.8 常量与出处
@@ -4970,8 +4971,8 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 2. `ftl_ctx_t` 是 device 描述符，不承载业务状态；`ftl_storage_t` 持有大数组/共享
    handle 的挂载指针（`tables` / `metadata_dir` / `journal` / `checkpoint_handle` /
    `migrate` / `wbuf` / `rr_page_scratch`），`main.c` 决定内存域。
-3. 主流程只读 status / 查询（`jrn_is_idle`、`cp_is_active`、`mig_reclaimed_count`…），
-   **不读** `*.handle.phase` / `waiting` / `active`。
+3. 主流程只读 status / 查询（`jrn_is_idle`、`cp_is_active`、migrate 的 `state.counters.*`…），
+   **不读** `*.handle.phase` / `waiting` / `active`。诊断 CLI 是唯一例外（只读、不参与控制流）。
 4. 超时四层归属：NAND/FC 操作超时在引擎；FTL 模块等待用自持 ms deadline；
    周期触发用 `last_run_ms` / `next_ms`；系统 liveness 用 IWDG（30 s，不在 ISR 喂狗）。
 5. 契约落地状态以 `known_risks.md` RISK-ARCH-10/11 与 `known_iss.md`

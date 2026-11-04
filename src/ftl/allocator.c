@@ -788,8 +788,9 @@ void alc_super_open_rewind_pair(alc_t *alloc, BYTE temperature)
  * 已写过 ⇒ 正常关闭进 Closed；未写过 ⇒ 块归还 Free Pool，不产生空 Closed 条目。
  *
  * @param alloc 分配器
+ * @return true 已摘掉（或本来就无 cold SB）；false 列表满，关不掉
  */
-void alc_super_prepare_wl_destination(alc_t *alloc)
+bool alc_super_prepare_wl_destination(alc_t *alloc)
 {
     ASSERT(alloc != NULL);
 
@@ -797,7 +798,7 @@ void alc_super_prepare_wl_destination(alc_t *alloc)
 
     if (sb->is_open == false)
     {
-        return;
+        return true;
     }
 
     if (sb->next_page == 0U)
@@ -810,12 +811,11 @@ void alc_super_prepare_wl_destination(alc_t *alloc)
             }
         }
         sb->is_open = false;
-        return;
+        return true;
     }
 
-    // 返回 void 的既有接口：列表满属结构异常，debug 由 alc_super_close_live 的 ASSERT 抓；
-    // release 下拒绝写入并打 LOG。此处没有可上抛的返回码。
-    (void)alc_super_close_live(alloc, sb);
+    // 关不掉时 cold SB 仍 open ⇒ 调用者必须放弃本次 WL（否则续写普通块）。
+    return (alc_super_close_live(alloc, sb) != FTL_BLOCK_NO_SB);
 }
 
 /* ── 7. Super Block：Closed ── */

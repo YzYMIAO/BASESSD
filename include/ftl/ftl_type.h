@@ -112,7 +112,7 @@ typedef struct
  * 位域可移植性问题）；**地址一律用 DWORD**（ftl/ftl_config.h §三.2）。
  * 具名字段访问经 pba_fields() 值语义视图（4 字节位域，仅内存内，不落介质；
  * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_t /
- * DWORD——那是 NAND 层的表示。
+ * PAA——那是 NAND 层的表示。
  */
 
 /* pending 完成回调 — 在 ftl_host_io_callback 数据拷贝 + 标志置位后调用。

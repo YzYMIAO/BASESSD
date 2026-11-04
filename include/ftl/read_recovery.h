@@ -126,7 +126,6 @@ typedef struct
     bool             waiting;           /* true = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
     BYTE             plane;             /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
     BYTE             attempt;           /* 本 plane 已发起的读次数（1 = 首次，2 = CRC 重读） */
-    BYTE             pending_idx;       /* 被托管的 pending 槽下标（收尾据此释放） */
     BYTE             first;             /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
     bool             recovered;         /* 本 plane 是否恢复成功（PLANE_END 结算用） */
     bool             all_ok;            /* true = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
@@ -150,7 +149,6 @@ typedef struct
 
     rr_owner_t owner;     /* 当前被托管的子操作 */
     bool       has_owner; /* true = owner 有效（rr_trigger 登记） */
-    int32_t    error;     /* 最近一次 abort 的归因 */
 
     /* 心跳基准（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 stage/age */
     log_heartbeat_t hb;
