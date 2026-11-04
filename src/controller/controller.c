@@ -34,6 +34,68 @@ ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
     return controller->ftl[die];
 }
 
+/**
+ * @brief Controller 最小状态机（C1）
+ *
+ * 管理 RESET → INITIALIZING → READY / FAILED 转换：
+ *   · ssd_controller_init 的槽位校验结果驱动转换：全部通过 → READY，
+ *     任一槽位缺失/拓扑不符 → FAILED（终态）；
+ *   · READY → FAILED 预留给运行时致命错误（当前无调用点）；
+ *   · 非法转换直接忽略（保持现态）。
+ *
+ * SHUTDOWN 不在枚举内（学习主控无热移除/优雅掉电退出路径）；若后续加枚举值，
+ * 只扩展本函数的转换表，不动调用方。
+ *
+ * @param controller Controller 上下文（NULL 时安全返回）
+ * @param next_state 目标状态
+ */
+void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state)
+{
+    ssd_ctrl_state_e prev_state;
+
+    if (controller == NULL)
+    {
+        return;
+    }
+
+    prev_state = controller->state;
+
+    switch (controller->state)
+    {
+        case SSD_CONTROLLER_RESET:
+            /* boot 起点：RESET → INITIALIZING（ssd_controller_init 入口） */
+            if (next_state == SSD_CONTROLLER_INITIALIZING)
+            {
+                controller->state = next_state;
+            }
+            break;
+
+        case SSD_CONTROLLER_INITIALIZING:
+            /* 槽位校验结束：全部通过 → READY；任一失败 → FAILED */
+            if ((next_state == SSD_CONTROLLER_READY) || (next_state == SSD_CONTROLLER_FAILED))
+            {
+                controller->state = next_state;
+            }
+            break;
+
+        case SSD_CONTROLLER_READY:
+            /* 运行时致命错误 → FAILED（当前无调用点，保留语义） */
+            if (next_state == SSD_CONTROLLER_FAILED)
+            {
+                controller->state = next_state;
+            }
+            break;
+
+        case SSD_CONTROLLER_FAILED:
+        default:
+            /* FAILED 为终态，不响应任何转换 */
+            break;
+    }
+
+    /* FAILED 是终态，进入即宣告 controller 不可用；在此单点留痕 */
+    LOGE_IF((prev_state != SSD_CONTROLLER_FAILED) && (controller->state == SSD_CONTROLLER_FAILED), LOG_TAG_CTRL "state -> FAILED\r\n");
+}
+
 ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die)
 {
     if ((controller == NULL) || (ftl_by_die == NULL))
@@ -117,8 +179,8 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
-    /* C1b：host IO 到来 → 后台让路（scheduler 钩子；实际预算由 ftl_service B3 判定） */
-    (void)ssd_controller_schedule(controller, 1);
+    /* 主机 IO 到来后的后台让路由 ftl_service 的档位判定（pending/groups → IDLE/
+     * NORMAL/BUSY）承担；Controller 只负责受理与拆分，不再维护调度钩子。 */
 
     /* 清零完成标志 */
     request->complete_flag     = 0U;

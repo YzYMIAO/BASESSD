@@ -15,7 +15,7 @@
 | ID | 状态 | 条目 | 来源 | 下一步 / 判据 |
 |---|---|---|---|---|
 | ISS-UT-01 | 已实现（2026-10-24 上板） | FTL UT 按 `docs/design/ftl_ut_design.md` 重建：**63 个用例函数 / 参数化 85 次运行**，`test /ftl/` 全过（61.05 s，含 format） | `docs/design/ftl_ut_design.md`；`tests/unit/ftl_ut_common.*`、`test_ftl_pure.c`、`test_ftl_media.c` | 未落地项只剩需故障注入/空白片/白盒构造的部分：M-11 真介质注入、CP 版本不符、真空白片、NAND 写擦失败注入；见设计文档 §4.5/§7 |
-| ISS-HIL-01 | 未实现 | HIL L0 纯 RAM UT 9 例（state_machine / controller / scheduler / request）；`tests/unit/test_hil.c` 与 `g_hil_*_tests[]` 均不存在 | `../archive/hil_ut_design.md` Part A / 覆盖矩阵 | 先裁决 `ssd_controller_route` / `run_end` 是否导出到 `controller.h`；再按 `munit_adapter.md` 接线 |
+| ISS-HIL-01 | 未实现 | HIL L0 纯 RAM UT 9 例（controller（含 state_machine）/ request）；`tests/unit/test_hil.c` 与 `g_hil_*_tests[]` 均不存在。⚠ 原 `scheduler.c` 优先级钩子已删除（返回值无消费者，主机/后台优先级由 `ftl_service` 档位承担）；`state_machine.c` 已并入 `controller.c` 并保留 `ssd_controller_state_transition` 导出 | `../archive/hil_ut_design.md` Part A / 覆盖矩阵 | 先裁决 `ssd_controller_route` / `run_end` 是否导出到 `controller.h`；再按 `munit_adapter.md` 接线 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例：基础读写 9、拆分/聚合/背压 4、跨重启 8、后台/水位观测 3。v0.58~v0.66 期间可能用 CLI 人工跑过，但**无逐条上板记录** | `../archive/hil_ut_design.md` Part B | 按 `usb_msc_verification.md` 的矩阵补记录；跨重启 8 例优先（`reboot_persist_*` 已修，需确认） |
 | ISS-HIL-03 | 待测试源 | CH/CE/LUN>1 后的 HIL 扩维用例（route / run_end 在 1 维下过于平凡） | `../archive/hil_ut_design.md` §3 | 等真实多实例硬件或 N=2 影子构建；勿在 1 维伪造覆盖 |
 

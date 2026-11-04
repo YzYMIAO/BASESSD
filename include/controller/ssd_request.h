@@ -25,7 +25,7 @@ typedef struct
     ssd_status_e     completion_status;
     volatile BYTE    complete_flag; /* FTL completion handler 置 1 */
     volatile DWORD   sub_remaining; /* 未完成的子请求数（Controller 拆分用） */
-    ftl_io_req_t     io;            /* 子请求复用模板（lba/buffer/pages 循环内改写） */
+    ftl_io_req_t     io;            /* 子请求复用模板（lba/buffer/count 循环内改写） */
 } ssd_request_t;
 
 #endif /* SSD_REQUEST_H */

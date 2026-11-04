@@ -1208,8 +1208,6 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     { "format",                                                                                                                                                 "format [--verify]", "ERASE all blocks + write initial metadata (destructive; --verify = full-chip erase check)", 1U,  2U,  uart_cli_format},
     {   "pool",                                                                                                                                                              "pool",                               "print fixed-metadata candidate block pools (read-only diag)", 1U,  1U,    uart_cli_pool},
 #if defined(FC_NAND_TEST_ENABLE)
-  /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
-  /* { "nand", ... }, */
     {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]",                                                                 "run munit unit test suite", 1U, 24U,    uart_cli_test},
 #endif
 };
@@ -1281,16 +1279,6 @@ static int uart_cli_log(int argc, char *argv[])
     (void)uart_log_write(updated, sizeof(updated) - 1U);
     return FUNC_STATUS_SUCCESS;
 }
-
-#if defined(FC_NAND_TEST_ENABLE)
-/* TODO: uart_cli_nand 和 uart_cli_parse_u32 待迁移用 munit test 替换 */
-#    if 0
-static int uart_cli_parse_u32(const char *text, DWORD *value)
-{
-    ...
-}
-#    endif
-#endif
 
 #if defined(FC_NAND_TEST_ENABLE)
 /*

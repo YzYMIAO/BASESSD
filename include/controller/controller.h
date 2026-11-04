@@ -72,10 +72,11 @@ void ssd_controller_service(ssd_controller_t *controller);
 /*
  * ssd_controller_cancel_flush - 放弃在飞的 FLUSH 回执（host 复位 / 拔出 / 前端换命令）
  *
- * 只清 `flush_req` 指针，**不**中止 FTL 侧的 flush job：job 会按自己的完成判据或
- * 1 s 超时收敛。这样避免「请求对象已被前端复用，controller 迟到的完成回执照样写回
- * 新请求」的竞态（USB 的在飞 `ssd_request_t` 位于 usb_msc.c 的槽对象里，
- * 调用者不得在请求完成前复用/清零它）。
+ * 摘掉 `flush_req` 回执指针，并清各实例的 flush job 标志（`ftl_flush_cancel`），
+ * 避免旧 job 在请求对象被复用后才完成、把回执写到新请求上。在飞的数据操作有各自
+ * 的异步路径，不需要回滚。
+ * ⚠ USB 的在飞 `ssd_request_t` 位于 usb_msc.c 的槽对象里，调用者不得在请求完成前
+ *   复用/清零它。
  */
 void ssd_controller_cancel_flush(ssd_controller_t *controller);
 
@@ -103,7 +104,7 @@ static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controll
 }
 
 /*
- * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）
+ * ssd_controller_state_transition - Controller 最小状态机（C1，controller.c）
  *
  * 合法转换表：RESET→INITIALIZING（boot）、INITIALIZING→READY/FAILED
  * （槽位校验结果）、READY→FAILED（运行时致命错误，预留）。
@@ -113,18 +114,5 @@ static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controll
  * @param next_state 目标状态
  */
 void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state);
-
-/*
- * ssd_controller_schedule - Controller 优先级调度钩子（C1b，scheduler.c）
- *
- * host IO 到来（ssd_controller_submit 每次提交）时调用本函数，
- * 返回 0 = 后台让路（host IO 优先）；空闲时返回 1 = 全力后台。
- * 实际后台预算由 ftl_service 的 B3 空闲度判定承担，本钩子只做观测点。
- *
- * @param controller     Controller 上下文
- * @param host_io_active 1=有 host IO 提交，0=空闲
- * @return 后台预算指示：0=最小后台，1=全力后台
- */
-int ssd_controller_schedule(ssd_controller_t *controller, int host_io_active);
 
 #endif /* SSD_CONTROLLER_H */
