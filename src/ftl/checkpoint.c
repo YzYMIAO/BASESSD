@@ -251,7 +251,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
 static void cp_job_abort(cp_handle_t *h)
 {
     // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
-    md_dir_ckpt_abort(h->metadata_dir, MD_DIR_CKPT_OWNER_CP);
+    md_dir_ckpt_write_abort(h->metadata_dir, &h->dir);
 
     if (h->failed == false)
     {
@@ -628,11 +628,7 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
 
         case CP_DIR_CKPT_WRITE:
             // 无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。
-            if (failed)
-            {
-                h->dir.ok = false;
-            }
-            h->dir.chunk = (h->dir.chunk + 1U);
+            (void)md_dir_ckpt_write_advance(&h->dir, failed);
             return;
 
         case CP_HDR_ERASE:
@@ -753,8 +749,7 @@ static void cp_job_step(cp_handle_t *h)
             {
                 // ③ 目录检查点：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
                 // 这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。
-                md_dir_ckpt_prepare_out_t dir_ckpt;
-                md_dir_ckpt_step_e        r = md_dir_ckpt_prepare(h->metadata_dir, &dir_ckpt, MD_DIR_CKPT_OWNER_CP);
+                const md_dir_ckpt_step_e r = md_dir_ckpt_write_begin(h->metadata_dir, &h->dir, MD_DIR_CKPT_OWNER_CP);
 
                 if (r == MD_DIR_CKPT_FAILED)
                 {
@@ -777,14 +772,7 @@ static void cp_job_step(cp_handle_t *h)
                     break;
                 }
 
-                h->dir.ring       = dir_ckpt.ring;
-                h->dir.base       = dir_ckpt.base;
-                h->dir.idx        = dir_ckpt.idx;
-                h->dir.seq        = dir_ckpt.seq;
-                h->dir.need_erase = dir_ckpt.need_erase;
-                h->dir.chunk      = 0U;
-                h->dir.ok         = true;
-                h->phase          = dir_ckpt.need_erase ? CP_DIR_CKPT_ERASE : CP_DIR_CKPT_WRITE;
+                h->phase = h->dir.need_erase ? CP_DIR_CKPT_ERASE : CP_DIR_CKPT_WRITE;
                 break;
             }
 
@@ -800,7 +788,7 @@ static void cp_job_step(cp_handle_t *h)
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不写 Header。
                     const bool dir_ckpt_ok = (h->dir.ok == true);
 
-                    md_dir_ckpt_commit(h->metadata_dir, &h->dir.ring, h->dir.idx, dir_ckpt_ok);
+                    md_dir_ckpt_commit(h->metadata_dir, &h->dir);
 
                     if (dir_ckpt_ok == false)
                     {
@@ -814,9 +802,8 @@ static void cp_job_step(cp_handle_t *h)
                     break;
                 }
 
-                const DWORD         dir_ckpt_page = pba_to_page(h->dir.base) + h->dir.chunk;
-                DWORD               aaddr         = pba_with_page(h->dir.base, dir_ckpt_page);
-                md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)h->hdr.hdr_buf;
+                const DWORD         aaddr = md_dir_ckpt_page_addr(h->dir.base, h->dir.chunk);
+                md_dir_ckpt_page_t *page  = (md_dir_ckpt_page_t *)h->hdr.hdr_buf;
 
                 md_dir_ckpt_page(h->metadata_dir, h->dir.seq, h->dir.chunk, page);
 

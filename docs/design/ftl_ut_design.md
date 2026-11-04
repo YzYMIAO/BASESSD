@@ -294,7 +294,7 @@
 
 | ID | 状态 | 处置 | 用例 / 流程 | 备注 |
 |---|---|---|---|---|
-| RISK-MD-06 | 已修未上板 | UT-P + BOARD | `dir_ckpt_three_step`；回收注入未落地 | 需释放日志块 + 目录检查点落盘 |
+| RISK-MD-06 | **未闭合（以 known_risks.md 为准）** | UT-P + BOARD | `dir_ckpt_three_step`；回收注入未落地 | 需释放日志块 + 目录检查点落盘 |
 | RISK-PERF-01 | 待后续 | OUT | — | 重复全表扫描 |
 | RISK-PERF-02 | 待后续 | OUT | — | 单 plane 目的写 |
 | RISK-GC-05 | 待后续 | OUT | — | GC bitmap 未实现 |

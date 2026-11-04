@@ -562,7 +562,7 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 |---|---:|---|
 | `magic` | 4 B | `DIR_CKPT_MAGIC`（"ANDIR"） |
 | `sequence` | 4 B | 同一份 Directory 的各 chunk 相同；单调递增 |
-| `chunk_index` / `chunk_count` | 2 + 2 B | 页序 / 总页数（= `DIR_CKPT_PAGE_COUNT` = 8） |
+| `chunk_index` / `chunk_count` | 2 + 2 B | 页序 / 总页数（= `DIR_CKPT_PAGE_COUNT` = 16，8 主 + 8 备） |
 | `entry_count` | 4 B | 本页有效条目数（≤ 256） |
 | `layout_version` | 4 B | 介质布局版本；不符 ⇒ 本页作废 |
 | `dirty_gen` | 4 B | 本页**填充时刻**的 Directory 代数（整条 record 要求 16 页全部相同） |
@@ -575,7 +575,7 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 一致记录（丢失的增量由 Journal 回放补回）。这消除了"混代目录被当作最新快照加载 ⇒
 两个代次的条目在复用过的页上互相碰撞（两个 region 指向同一页）"的路径。
 
-**几何**：2048 条 Directory ⇒ 8 页/record；每块 8 条 record；池 32 块 ⇒ 256 个槽位。
+**几何**：2048 条 Directory ⇒ 8 页主 + 8 页备 = 16 页/record；每块 4 条 record；池 32 块 ⇒ 128 个槽位。
 **副本**：P0+P1 镜像——同一页用 multi-plane program 写两个 plane；读侧任一副本有效。
 读取时扫池找「整条校验通过」中 sequence 最大者；任一条完整 record 都能独立重建
 整个 Directory。SRAM 常驻副本是 `md_dir_cache_t.entries[2048]`（2048 × 7 B =
@@ -1504,7 +1504,7 @@ spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含
    plane 上都非 BAD 的块组成候选表；自举期间直接扫描「名义块 + 全部 spare」，record 靠
    magic/sequence 校验，坏块/空块自然被忽略。候选表不落盘，每次开机重算。
 6. **元数据 BAD 不走用户 Spare**：`block < FTL_METADATA_AREA_END` 或
-   `l2p_live[g]/cur_metadata_block` 指向该块（从 OP 借用的 L2P 日志块）⇒ 只置
+   `l2p_live[g]` / 当前 plane 的 `cur.block[plane]` 指向该块（从 OP 借用的 L2P 日志块）⇒ 只置
    `alloc->pools->dirty`，由 `md_pool_service()` 重算候选池；Journal / L2P 日志失块
    额外置 BBT header `reserved[1]` 的 **`REBUILD_REQUIRED`**（本仓自拟），新 CP 落盘后清除。
 
@@ -1813,14 +1813,14 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `phase` | `md_handle_phase_e`（见 §3.5.8） |
 | `waiting` | 有命令在飞；完成服务函数清 |
 | `compact_wanted` | 活日志块数超水位（>64），请求压缩 |
-| `dir_ckpt_ok` / `dir_ckpt_need_erase` / `dir_ckpt_chunk` | 目录检查点分页写结果/擦除判定/页序 |
+| `dir_ckpt` | `md_dir_ckpt_write_t`（与 Checkpoint job 共用）：池几何/基址/槽位/序号/页序/写结果/擦除判定/持有者 |
 | `victim` / `region_id` / `cur_region` / `moved` | 压缩的 victim / 游标 / 当前 region / 已搬数 |
 | `reclaim_gblock` | 在飞擦除的 gblock（待回收集合在 dir 的 `reclaim_pending` 位图里） |
 | `stall_ms` | 连续提交不出去（> `FTL_SUBMIT_TIMEOUT_MS` 中止） |
 | `timed_out` / `timeout_phase` | 超时归因（status 上报） |
 | `reclaimed_count` / `error` | 单调回收计数 / 最近一次中止归因 |
 | `start_ms` / `log_ms` | 心跳基准 |
-| `dir_ckpt_idx` / `dir_ckpt_seq` / `dir_ckpt_base` / `dir_ckpt_ring` | 本目录检查点记录 的槽位/序号/基址/池几何 |
+| `cur_source` / `cur_fallback` | 压缩读的源副本 / 是否已降级读过另一副本 |
 | `slot` | 压缩搬移已取到、待写的槽 |
 | `cp_buf[L2P_REGION_SIZE]` | victim region 页搬运缓冲（必须常驻，异步读完成与写之间跨多轮） |
 
@@ -1880,8 +1880,8 @@ md_slot_pair_append
   │   ├─ md_reclaim_mark_all：把 l2p_live==0 且非当前的 LOG 块**只登记**进
   │   │                      reclaim_pending 位图（不擦；擦除由后台 job 异步做）
   │   ├─ allocator_alloc_log_block(alloc, plane) 取整块
-  │   ├─ 设置 cur_metadata_block / page=0 / cur_block_valid=1
-  │   └─ cur_metadata_plane 轮转到下一 plane
+  │   ├─ 设置 `cur.block[plane]` / `cur.page[plane]=0` / `cur.valid[plane]=true`
+  │   └─ 各 plane 的 cur.block/page/valid 独立维护
   └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN，
      等后台 job 擦完待回收块后重试）
 ```
@@ -1985,7 +1985,7 @@ region 全部被改写、最新位置都迁到别处后，这个块才没有活�
 **回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足五条：
 
 1. `l2p_live[g] == 0` **且该块上没有在飞写回的槽位预留**（`md_slot_reserved`，见下）；
-2. `g != cur_metadata_block`（已满且零活的当前块会先被摘掉当前身份）；
+2. `g` 不是任一 plane 的 `cur.block[plane]`（已满且零活的当前块会先被摘掉当前身份）；
 3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）；
 4. **`dir->dirty == false`**（on-media 目录检查点已覆盖当前 Directory；见下方 ③→④ 契约）。
 
@@ -2074,9 +2074,9 @@ Directory（`dir_ckpt_for_reclaim`），否则就是同一个掉电丢映射。
 
 | 项 | 值/行为 |
 |---|---|
-| 一条 record | `DIR_CKPT_PAGE_COUNT = 8` 页，覆盖全部 2048 条 entry |
+| 一条 record | `DIR_CKPT_PAGE_COUNT = 16` 页（8 主 + 8 备），覆盖全部 2048 条 entry |
 | 每页 | 自包含：magic + sequence + chunk_index + chunk_count + entry_count + layout_version + 256 条 entry |
-| 池 | 32 块，每块 8 条 record（64 页 / 8 页） |
+| 池 | 32 块，每块 4 条 record（64 页 / 16 页），共 128 个槽位 |
 | 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
 | 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
 | 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`dir_ckpt_for_reclaim`）；Checkpoint 前也要求 flush；不在 `md_entry_update` 里同步做 |
@@ -2085,15 +2085,15 @@ Directory（`dir_ckpt_for_reclaim`），否则就是同一个掉电丢映射。
 三段式（所有落盘站点统一）：
 
 ```text
-md_dir_ckpt_prepare(dir, &dir_ckpt)   ← dir_ckpt = {ring, base, idx, seq, need_erase}
+md_dir_ckpt_write_begin(dir, &w, owner)   ← w = {ring, base, idx, seq, need_erase, owner}
     ├─ 定位游标 + 取槽 + 自增 sequence；判定是否需先擦块
-    └─ 返回 READY / CLEAN（不脏，跳过）/ FAILED
-[metadata_dir_ckpt_erase]  ← 仅 dir_ckpt.need_erase
-md_dir_ckpt_page(dir, dir_ckpt.seq, chunk, &page) × 8   ← 纯 RAM 组页
-写 8 页（异步命令）
-md_dir_ckpt_commit(dir, &dir_ckpt.ring, dir_ckpt.idx, ok)
-    ├─ 无论成败推进游标（半编程槽不可复用）
-    └─ ok **且** dirty_gen == dir_ckpt_gen 才清 dirty；失败/过期整条作废，保留 dirty
+    └─ 返回 READY / CLEAN（不脏，跳过）/ BUSY（另一 writer 在写）/ FAILED
+[metadata_dir_ckpt_erase]  ← 仅 w.need_erase
+md_dir_ckpt_page(dir, w.seq, chunk, &page) × 16   ← 纯 RAM 组页（8 主 + 8 备）
+写 16 页（异步镜像写）
+md_dir_ckpt_commit(dir, &w)
+    ├─ 无论成败推进游标（半编程槽不可复用），并清 w.owner（之后的 abort 为 no-op）
+    └─ ok **且** dirty_gen == covered_gen 才清 dirty；失败/过期整条作废，保留 dirty
 ```
 
 **torn write**：单页损坏只让该页作废；一条 record 要求所有页 sequence 一致，
@@ -2122,7 +2122,7 @@ md_dir_ckpt_commit(dir, &dir_ckpt.ring, dir_ckpt.idx, ok)
 2. **已登记日志块**（防御分支）：扫 `entries[]` 找 `type=L2P_REGION` 且 pba 落在
    **固定区之外**的块——v10 正常介质不会出现，只用于**旧布局/损坏 Directory** 的
    兼容判定；必须带 plane 比较（同一块号在另一 plane 可能是用户数据）。
-3. **当前游标块**（防御分支）：`cur_metadata_block` 可能还没有任何 region 指向它；
+3. **当前游标块**（防御分支）：当前写块 `cur.block[plane]` 可能还没有任何 region 指向它；
    同样必须带 plane 比较。v10 起它也在固定区内，分支 1 已覆盖。
 
 漏掉 2/3 的 plane 比较会把另一 plane 的同号块一起排除——它既进不了 Free Pool，

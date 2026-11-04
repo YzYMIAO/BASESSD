@@ -127,19 +127,6 @@ typedef struct
     cp_reason_e  reason;            /* force 时优先用 */
 } cp_trigger_t;
 
-/* 目录检查点 job 的一段（②）。 */
-typedef struct
-{
-    md_ring_t ring;
-    DWORD     base;       /* record 第 0 页地址 */
-    WORD      idx;        /* 池内槽位 */
-    DWORD     seq;        /* prepare 时已自增的 sequence */
-    BYTE      chunk;      /* 下一页要写的页序 */
-    bool      ok;         /* 全部分页写成功 */
-    bool      need_erase; /* 写之前先擦 base 所在块 */
-    bool      skip;       /* Directory 无变更 ⇒ 整段跳过 */
-} cp_dir_ckpt_t;
-
 /* Header + 块元数据/磨损快照 job 的一段（③）。 */
 typedef struct
 {
@@ -179,9 +166,9 @@ typedef struct
     DWORD region_bitmap[L2P_LOCAL_DIRTY_WORDS];
     DWORD journal_seq;
 
-    cp_dir_ckpt_t dir;   /* ② 目录检查点 */
-    cp_hdr_t      hdr;   /* ③ Header + 块元数据/磨损快照 */
-    cp_trunc_t    trunc; /* ④ Journal 截断 */
+    md_dir_ckpt_write_t dir;   /* ② 目录检查点（CP/metadata 共用上下文） */
+    cp_hdr_t            hdr;   /* ③ Header + 块元数据/磨损快照 */
+    cp_trunc_t          trunc; /* ④ Journal 截断 */
 
     /* 窄上下文：跨 job 保留。 */
     l2p_cache_t    *cache;

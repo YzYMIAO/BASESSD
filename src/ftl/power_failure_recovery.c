@@ -205,54 +205,61 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
  */
 static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
 {
-    md_dir_cache_t           *dir = ftl->metadata_dir;
-    md_dir_ckpt_prepare_out_t dir_ckpt;
+    md_dir_cache_t     *dir = ftl->metadata_dir;
+    md_dir_ckpt_write_t w;
+
+    (void)memset(&w, 0, sizeof(w)); /* begin 非 READY 时上下文不可用；零值 = 未持有 */
 
     dir->ckpt.dirty = true; /* 空 Directory 也要落一条 record */
 
-    if (md_dir_ckpt_prepare(dir, &dir_ckpt, MD_DIR_CKPT_OWNER_BOOT) != MD_DIR_CKPT_READY)
+    if (md_dir_ckpt_write_begin(dir, &w, MD_DIR_CKPT_OWNER_BOOT) != MD_DIR_CKPT_READY)
     {
         return FTL_ERROR;
     }
 
-    if (dir_ckpt.need_erase && (ftl_sync_erase_block(dir_ckpt.base) != FTL_OK))
+    if (w.need_erase)
     {
-        md_dir_ckpt_abort(dir, MD_DIR_CKPT_OWNER_BOOT); /* 放弃已 prepare 的目录检查点写（清单飞锁，RISK-MD-06） */
-        return FTL_ERROR;
-    }
+        // 与运行期 CP 路径同一个口径（md_ring_prepare_write / cp_erase_submit）：
+        // 镜像池的块要所有 plane 一起擦，否则另一 plane 上残留的旧 record 会在
+        // 本 plane 读失败时被 locate 当成有效记录（seq 更小）载入。
+        const ftl_status_e est = (md_ring_plane_count(w.ring.plane_mask) > 1U) ? ftl_sync_erase_block_multi_plane(w.base) : ftl_sync_erase_block(w.base);
 
-    bool ok = true;
+        if (est != FTL_OK)
+        {
+            md_dir_ckpt_write_abort(dir, &w); /* 放弃已 prepare 的目录检查点写（清单飞锁，RISK-MD-06） */
+            return FTL_ERROR;
+        }
+    }
 
     for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
     {
         // 2KB 目录检查点页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。
-        md_dir_ckpt_page_t *page          = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
-        const DWORD         dir_ckpt_page = pba_to_page(dir_ckpt.base) + chunk;
-        const DWORD         addr          = pba_with_page(dir_ckpt.base, dir_ckpt_page);
+        md_dir_ckpt_page_t *page = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
+        const DWORD         addr = md_dir_ckpt_page_addr(w.base, chunk);
 
-        md_dir_ckpt_page(dir, dir_ckpt.seq, chunk, page);
-        if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != FTL_OK)
+        md_dir_ckpt_page(dir, w.seq, chunk, page);
+        if (ftl_sync_write_page_mirror(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != FTL_OK)
         {
-            ok = false;
+            w.ok = false;
             break;
         }
     }
 
     // 安全回读：候选池已跳过 BAD，但配置错误/候选耗尽仍可能让写点落在不可读块上；
     // 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。
-    if (ok)
+    if (w.ok)
     {
         md_dir_ckpt_page_t *probe = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
 
-        if ((ftl_sync_read_page(dir_ckpt.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != DIR_CKPT_MAGIC) || (probe->sequence != dir_ckpt.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
+        if ((ftl_sync_read_page(w.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != DIR_CKPT_MAGIC) || (probe->sequence != w.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
             LOGE(LOG_TAG_META "format: directory checkpoint readback failed — fixed metadata block may be BAD\r\n");
-            ok = false;
+            w.ok = false;
         }
     }
 
-    md_dir_ckpt_commit(dir, &dir_ckpt.ring, dir_ckpt.idx, ok);
-    return ok ? FTL_OK : FTL_ERROR;
+    md_dir_ckpt_commit(dir, &w);
+    return w.ok ? FTL_OK : FTL_ERROR;
 }
 
 /**

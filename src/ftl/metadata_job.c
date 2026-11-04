@@ -264,13 +264,14 @@ void md_handle_reset(md_dir_cache_t *dir)
     const int32_t last_error = dir->handle.error;
 
     // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
-    md_dir_ckpt_abort(dir, MD_DIR_CKPT_OWNER_MD);
+    md_dir_ckpt_write_abort(dir, &dir->handle.dir_ckpt);
 
     memset(&dir->handle, 0, sizeof(dir->handle));
     dir->handle.victim              = UINT16_MAX;
     dir->handle.reclaim_gblock      = UINT16_MAX;
     dir->handle.reclaim_fail_gblock = UINT16_MAX;
     dir->handle.slot                = NAND_PBA_INVALID;
+    dir->handle.cur_source          = NAND_PBA_INVALID;
     dir->handle.reclaimed_count     = reclaimed;
     dir->handle.error               = last_error;
 }
@@ -403,109 +404,56 @@ static ftl_status_e md_command_submit(md_dir_cache_t *dir, fc_command_t *cmd)
     return FTL_OK;
 }
 
+/* 元数据 job 的提交操作类型；五类命令共用同一个提交漏斗。 */
+typedef enum
+{
+    MD_SUBMIT_WRITE = 0,    /* 单 plane 页写（L2P region 搬移） */
+    MD_SUBMIT_WRITE_MIRROR, /* multi-plane 镜像页写（目录检查点 / CP / BBT） */
+    MD_SUBMIT_ERASE,        /* 单块擦除（日志回收 / victim 擦除） */
+    MD_SUBMIT_ERASE_MULTI,  /* multi-plane 镜像块擦除（固定元数据池换块） */
+    MD_SUBMIT_READ,         /* 页读（搬移 victim） */
+} md_submit_op_e;
+
 /**
- * @brief 提交一条异步写（搬移页 / 目录检查点分页共用）。data 在 ftl_async_write_page 内已拷进
- * FC buffer ⇒ 调用者的缓冲随即可复用。
+ * @brief 元数据 job 的唯一命令提交漏斗
  *
  * @param dir    Directory
- * @param addr   目标 PBA
- * @param data   源数据
- * @param length 写入字节数
- * @return FTL_OK    已提交
- *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
+ * @param op     操作类型
+ * @param addr   目标/源 PBA
+ * @param data   页写数据（仅 WRITE / WRITE_MIRROR）
+ * @param length 页写长度（仅 WRITE / WRITE_MIRROR）
+ * @return FTL_OK 已提交；FTL_AGAIN 命令池空/地址非法/背压；FTL_ERROR 非法 op
  */
-static ftl_status_e md_write_submit(md_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
+static ftl_status_e md_submit(md_dir_cache_t *dir, md_submit_op_e op, DWORD addr, const void *data, DWORD length)
 {
     fc_command_t *cmd = NULL;
+    ftl_status_e  st;
 
-    if (ftl_async_write_page(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
+    switch (op)
+    {
+        case MD_SUBMIT_WRITE:
+            st = ftl_async_write_page(&cmd, addr, data, length, FTL_PAGE_CFG_META());
+            break;
+        case MD_SUBMIT_WRITE_MIRROR:
+            st = ftl_async_write_page_mirror(&cmd, addr, data, length, FTL_PAGE_CFG_META());
+            break;
+        case MD_SUBMIT_ERASE:
+            st = ftl_async_erase_block(&cmd, addr);
+            break;
+        case MD_SUBMIT_ERASE_MULTI:
+            st = ftl_async_erase_block_multi_plane(&cmd, addr);
+            break;
+        case MD_SUBMIT_READ:
+            st = ftl_async_read_page(&cmd, addr, FTL_PAGE_CFG_META());
+            break;
+        default:
+            ASSERT(false); /* H7/H14：内部枚举，调用者只传字面量 */
+            return FTL_ERROR;
+    }
+
+    if (st != FTL_OK)
     {
         return FTL_AGAIN; /* 命令池空 / 地址非法 */
-    }
-
-    return md_command_submit(dir, cmd);
-}
-
-/**
- * @brief 提交一条**镜像**异步写（固定元数据池：同一页用 multi-plane 写全部 plane）。
- * 只用于目录检查点/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_write_submit。
- *
- * @param dir    Directory
- * @param addr   目标 PBA（同一 block/page 落到全部 plane）
- * @param data   源数据
- * @param length 写入字节数
- * @return FTL_OK    已提交
- *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
- */
-static ftl_status_e md_write_mirror_submit(md_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
-{
-    fc_command_t *cmd = NULL;
-
-    if (ftl_async_write_page_mirror(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
-    {
-        return FTL_AGAIN;
-    }
-
-    return md_command_submit(dir, cmd);
-}
-
-/**
- * @brief 提交一条异步擦除（日志块回收 / 目录检查点换块 / victim 擦除共用）。
- *
- * @param dir  Directory
- * @param addr 目标块 PBA（页号无意义）
- * @return FTL_OK    已提交
- *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
- */
-static ftl_status_e md_erase_submit(md_dir_cache_t *dir, DWORD addr)
-{
-    fc_command_t *cmd = NULL;
-
-    if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
-    {
-        return FTL_AGAIN;
-    }
-
-    return md_command_submit(dir, cmd);
-}
-
-/**
- * @brief 提交一条**镜像**异步擦除（固定元数据池的换块：所有 plane 一起擦）。
- *
- * @param dir  Directory
- * @param addr 目标块 PBA（各 plane 同块号）
- * @return FTL_OK    已提交
- *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
- */
-static ftl_status_e md_erase_multi_submit(md_dir_cache_t *dir, DWORD addr)
-{
-    fc_command_t *cmd = NULL;
-
-    if (ftl_async_erase_block_multi_plane(&cmd, addr) != FTL_OK)
-    {
-        return FTL_AGAIN;
-    }
-
-    return md_command_submit(dir, cmd);
-}
-
-/**
- * @brief 提交一条异步读（搬移 victim 的 region 页 → job.cp_buf）。
- * ⚠ 读的数据**留在 desc 链上** ⇒ 目标缓冲必须活到完成，ftl_cmd_read_data 必须早于
- * release —— 二者都在 ftl_metadata_callback 里，缓冲就是 job.cp_buf（job 常驻 ⇒ 稳定）。
- *
- * @param dir  Directory
- * @param addr 源 PBA（victim 上的 region 页）
- * @return FTL_OK    已提交
- *         FTL_AGAIN 命令池空 / 地址非法 / 提交背压
- */
-static ftl_status_e md_read_submit(md_dir_cache_t *dir, DWORD addr)
-{
-    fc_command_t *cmd = NULL;
-
-    if (ftl_async_read_page(&cmd, addr, FTL_PAGE_CFG_META()) != FTL_OK)
-    {
-        return FTL_AGAIN;
     }
 
     return md_command_submit(dir, cmd);
@@ -547,6 +495,11 @@ static WORD md_compact_victim_find(const md_dir_cache_t *dir, const alc_t *alloc
             {
                 continue; /* 该 plane 的当前写块正在被追加，不搬 */
             }
+        }
+
+        if (md_slot_reserved(dir, g))
+        {
+            continue; /* 有在飞快照：写完成后的 commit 会把新位置落回本块，先不选 */
         }
 
         const bst_block_t *b = &alloc->blocks[g];
@@ -630,7 +583,7 @@ static md_compact_start_e md_compact_begin(md_dir_cache_t *dir, const alc_t *all
     j->cur_region  = 0U;
     j->moved       = 0U;
     j->slot        = NAND_PBA_INVALID;
-    j->dir_ckpt_ok = false;
+    j->dir_ckpt.ok = false;
     timer_deadline_clear(&j->submit_deadline);
     j->phase = MD_JOB_CP_READ;
 
@@ -684,10 +637,12 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
             continue;
         }
 
-        j->cur_region = rid;
-        j->cur_copy   = copy;
+        j->cur_region   = rid;
+        j->cur_copy     = copy;
+        j->cur_source   = old;
+        j->cur_fallback = false;
 
-        if (md_read_submit(dir, old) != FTL_OK)
+        if (md_submit(dir, MD_SUBMIT_READ, old, NULL, 0U) != FTL_OK)
         {
             // 游标不前进：下轮重试同一 region 的同一副本
             if (md_handle_stall(dir))
@@ -700,13 +655,15 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
     }
 
     // 扫完仍找不到任何指向 victim 的 region，但账本声称 live>0 ⇒ 账本与 Directory
-    // 分叉。⚠ 绝不能就这样返回 SCANNED：caller（md_handle_step 的 `for(;;)`）会再次
-    // 选中同一个 victim（它仍是最小 live>0）⇒ **主循环永不返回**、USB 静默掉线。
-    // Directory 是权威：清零这条陈旧计数并以 LOGE 暴露（release 也拒绝空转，H14）。
+    // 分叉。不能返回 SCANNED（caller 会再次选中同一 victim 空转），也不能清零账本
+    // （若是被在飞写回刚加上去的，清零会让 CP_RECLAIM 擦掉仍在用的块）。中止本次 job，
+    // 下一轮重扫；本函数不擦任何东西。
     if (dir->l2p_live[j->victim] != 0U)
     {
-        LOGE(LOG_TAG_META "compact: victim %hu live=%hu but no directory entry — clear stale count\r\n", j->victim, dir->l2p_live[j->victim]);
-        dir->l2p_live[j->victim] = 0U;
+        // Directory 是权威，但这里**不能**直接把账清零：清零后 CP_RECLAIM 会擦块，
+        // 若计数是被在飞写回刚加上去的，就会擦掉仍在用的页。中止本次 job，下一轮重扫。
+        LOGE(LOG_TAG_META "compact: victim %hu live=%hu but no directory entry — abort (no erase)\r\n", j->victim, dir->l2p_live[j->victim]);
+        return MD_COMPACT_FAILED;
     }
 
     return MD_COMPACT_SCANNED; /* 扫描完毕 */
@@ -737,7 +694,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_t *dir)
         }
     }
 
-    if (md_write_submit(dir, j->slot, j->cp_buf, L2P_REGION_SIZE) != FTL_OK)
+    if (md_submit(dir, MD_SUBMIT_WRITE, j->slot, j->cp_buf, L2P_REGION_SIZE) != FTL_OK)
     {
         if (md_handle_stall(dir))
         {
@@ -966,7 +923,7 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                 const DWORD addr = md_block_page_to_pba(dir, g, 0U);
 
-                if (md_erase_submit(dir, addr) != FTL_OK)
+                if (md_submit(dir, MD_SUBMIT_ERASE, addr, NULL, 0U) != FTL_OK)
                 {
                     // 背压：位保持置位，下轮重试（md_handle_stall 可能已 abort，位仍保留）。
                     (void)md_handle_stall(dir);
@@ -1020,8 +977,7 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 // ③ 目录检查点：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
                 // 唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。
-                md_dir_ckpt_prepare_out_t dir_ckpt;
-                md_dir_ckpt_step_e        r = md_dir_ckpt_prepare(dir, &dir_ckpt, MD_DIR_CKPT_OWNER_MD);
+                const md_dir_ckpt_step_e r = md_dir_ckpt_write_begin(dir, &j->dir_ckpt, MD_DIR_CKPT_OWNER_MD);
 
                 if (r == MD_DIR_CKPT_FAILED)
                 {
@@ -1045,19 +1001,12 @@ static void md_handle_step(md_dir_cache_t *dir)
                     break;
                 }
 
-                j->dir_ckpt_ring       = dir_ckpt.ring;
-                j->dir_ckpt_base       = dir_ckpt.base;
-                j->dir_ckpt_idx        = dir_ckpt.idx;
-                j->dir_ckpt_seq        = dir_ckpt.seq;
-                j->dir_ckpt_need_erase = dir_ckpt.need_erase;
-                j->dir_ckpt_chunk      = 0U;
-                j->dir_ckpt_ok         = true;
-                j->phase               = dir_ckpt.need_erase ? MD_JOB_CP_DIR_CKPT_ERASE : MD_JOB_CP_DIR_CKPT_WRITE;
+                j->phase = j->dir_ckpt.need_erase ? MD_JOB_CP_DIR_CKPT_ERASE : MD_JOB_CP_DIR_CKPT_WRITE;
                 break;
             }
 
             case MD_JOB_CP_DIR_CKPT_ERASE:
-                if (md_erase_multi_submit(dir, j->dir_ckpt_base) != FTL_OK)
+                if (md_submit(dir, MD_SUBMIT_ERASE_MULTI, j->dir_ckpt.base, NULL, 0U) != FTL_OK)
                 {
                     (void)md_handle_stall(dir);
                 }
@@ -1065,31 +1014,35 @@ static void md_handle_step(md_dir_cache_t *dir)
 
             case MD_JOB_CP_DIR_CKPT_WRITE:
             {
-                if (j->dir_ckpt_chunk >= DIR_CKPT_PAGE_COUNT)
+                if (j->dir_ckpt.chunk >= DIR_CKPT_PAGE_COUNT)
                 {
                     // 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不擦 victim。
-                    md_dir_ckpt_commit(dir, &j->dir_ckpt_ring, j->dir_ckpt_idx, j->dir_ckpt_ok);
+                    md_dir_ckpt_commit(dir, &j->dir_ckpt);
 
-                    if (j->dir_ckpt_ok == false)
+                    if (j->dir_ckpt.ok == false)
                     {
-                        LOGW(LOG_TAG_META "dir_ckpt write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->dir_ckpt_idx, j->dir_ckpt_seq);
+                        LOGW(LOG_TAG_META "dir_ckpt write incomplete: idx=%hu seq=%lu (chunk 写失败)\r\n", j->dir_ckpt.idx, j->dir_ckpt.seq);
                         md_handle_abort(dir);
+                        break;
+                    }
+
+                    // 写入期间又有 commit（混代/未覆盖最新 Directory）⇒ 不能擦 victim，
+                    // 也不能登记新候选；回到 PREP 再写一条稳定记录。
+                    if (dir->ckpt.dirty)
+                    {
+                        j->phase = MD_JOB_CP_DIR_CKPT_PREP;
                         break;
                     }
 
                     // 只有目录检查点确实覆盖了当前 Directory 时才允许登记新的回收候选：
                     // 否则 on-media 目录检查点仍引用「看起来已死」的块，擦了就是掉电丢映射。
-                    if (dir->ckpt.dirty == false)
-                    {
-                        md_reclaim_mark_all(dir, alloc);
-                    }
+                    md_reclaim_mark_all(dir, alloc);
 
                     if (j->dir_ckpt_for_reclaim)
                     {
                         j->dir_ckpt_for_reclaim = false;
-                        // 写入期间又有 commit ⇒ 回 IDLE 再写一条目录检查点，不能擦。
-                        j->phase                = dir->ckpt.dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
+                        j->phase                = MD_JOB_RECLAIM; /* dirty 已在上面挡住 */
                         break;
                     }
 
@@ -1097,16 +1050,15 @@ static void md_handle_step(md_dir_cache_t *dir)
                     break;
                 }
 
-                const DWORD dir_ckpt_page = pba_to_page(j->dir_ckpt_base) + j->dir_ckpt_chunk;
-                DWORD       aaddr         = pba_with_page(j->dir_ckpt_base, dir_ckpt_page);
+                const DWORD aaddr = md_dir_ckpt_page_addr(j->dir_ckpt.base, j->dir_ckpt.chunk);
 
                 md_dir_ckpt_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 
-                md_dir_ckpt_page(dir, j->dir_ckpt_seq, j->dir_ckpt_chunk, &page);
+                md_dir_ckpt_page(dir, j->dir_ckpt.seq, j->dir_ckpt.chunk, &page);
 
                 const DWORD page_size = sizeof(page);
 
-                if (md_write_mirror_submit(dir, aaddr, &page, page_size) != FTL_OK)
+                if (md_submit(dir, MD_SUBMIT_WRITE_MIRROR, aaddr, &page, page_size) != FTL_OK)
                 {
                     (void)md_handle_stall(dir);
                 }
@@ -1133,12 +1085,9 @@ static void md_handle_step(md_dir_cache_t *dir)
 
                 const DWORD addr = md_block_page_to_pba(dir, v, 0U);
 
-                if (md_erase_submit(dir, addr) != FTL_OK)
+                if (md_submit(dir, MD_SUBMIT_ERASE, addr, NULL, 0U) != FTL_OK)
                 {
                     (void)md_handle_stall(dir);
-                }
-                else
-                {
                 }
                 return;
             }
@@ -1230,6 +1179,7 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
         {
             LOGE(LOG_TAG_META "reclaim erase failed blk=%hu x%hhu — mark BAD\r\n", j->reclaim_gblock, j->reclaim_fail_count);
             (void)bbt_mark_bad(dir->alloc, j->reclaim_gblock);
+            md_log_release(dir, j->reclaim_gblock); /* BAD 也要结算 borrow 配额 */
             md_reclaim_clear(dir, j->reclaim_gblock);
             j->reclaim_fail_count  = 0U;
             j->reclaim_fail_gblock = UINT16_MAX;
@@ -1263,19 +1213,38 @@ static void md_reclaim_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_
  */
 static void md_cp_read_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command_t *cmd, bool failed)
 {
-    if (failed == false)
+    bool read_ok = (failed == false);
+
+    if (read_ok)
     {
-        (void)ftl_cmd_read_data(cmd, j->cp_buf, L2P_REGION_SIZE);
+        read_ok = (ftl_cmd_read_data(cmd, j->cp_buf, L2P_REGION_SIZE) == FTL_OK);
     }
     (void)fc_command_release(cmd);
     j->waiting = false;
 
-    if (failed)
+    if (read_ok)
     {
-        md_handle_abort(dir);
+        j->phase = MD_JOB_CP_WRITE;
         return;
     }
-    j->phase = MD_JOB_CP_WRITE;
+
+    // 源副本读失败/数据拷贝失败：先试另一份副本（主备内容相同），
+    // 只降级一次；另一份也失败才中止。这样确定性坏页不会让 victim 永远搬不走。
+    if (j->cur_fallback == false)
+    {
+        const DWORD other = (j->cur_copy == MD_COPY_PRIMARY) ? md_backup_find(dir, j->cur_region) : md_entry_find(dir, METADATA_TYPE_L2P_REGION, j->cur_region);
+
+        if ((other != NAND_PBA_INVALID) && (other != j->cur_source))
+        {
+            if (md_submit(dir, MD_SUBMIT_READ, other, NULL, 0U) == FTL_OK)
+            {
+                j->cur_fallback = true;
+                return;
+            }
+        }
+    }
+
+    md_handle_abort(dir);
 }
 
 /**
@@ -1295,6 +1264,18 @@ static void md_cp_write_complete(md_dir_cache_t *dir, md_handle_t *j, fc_command
     if (failed)
     {
         md_handle_abort(dir);
+        return;
+    }
+
+    const DWORD current = (j->cur_copy == MD_COPY_PRIMARY) ? md_entry_find(dir, METADATA_TYPE_L2P_REGION, j->cur_region) : md_backup_find(dir, j->cur_region);
+
+    if (current != j->cur_source)
+    {
+        // 读页到写完成之间，前台写回把该副本移到了更新的位置 ⇒ 不能再拿旧页覆盖。
+        // 新槽已写但未登记，只是死页；让下一轮重新扫描当前 Directory。
+        LOGD(LOG_TAG_META "compact: region %hu copy=%d superseded (%08lx -> %08lx), skip commit\r\n", j->cur_region, (int)j->cur_copy, j->cur_source, current);
+        j->slot  = NAND_PBA_INVALID;
+        j->phase = MD_JOB_CP_READ;
         return;
     }
 
@@ -1335,7 +1316,7 @@ static void md_dir_ckpt_erase_complete(md_dir_cache_t *dir, md_handle_t *j, fc_c
 /**
  * @brief 目录检查点一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
  *
- * @param j      整理 job（waiting / dir_ckpt_chunk / dir_ckpt_ok）
+ * @param j      整理 job（waiting / dir_ckpt 共享上下文）
  * @param cmd    完成命令（本函数 release）
  * @param failed 本页写是否失败
  */
@@ -1344,11 +1325,7 @@ static void md_dir_ckpt_write_complete(md_handle_t *j, fc_command_t *cmd, bool f
     (void)fc_command_release(cmd);
     j->waiting = false;
 
-    if (failed)
-    {
-        j->dir_ckpt_ok = false; /* 整条作废（不取半条）*/
-    }
-    j->dir_ckpt_chunk = (j->dir_ckpt_chunk + 1U); /* 无论成败都往后写下一页 */
+    (void)md_dir_ckpt_write_advance(&j->dir_ckpt, failed); /* 失败整条作废，页序仍前进 */
 }
 
 /**

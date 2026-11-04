@@ -230,7 +230,7 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
 #define L2P_LOG_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
 
 /* 在飞写回的槽位预留表容量（RISK-MD-06）。
- * 每次 L2P region 写回在 `md_slot_pair_append` 取两个槽后，到 commit/失败之前占一个
+ * 每次 L2P region 写回在 `md_slot_pair_append` 取两个槽后，到 commit/失败之前占两条
  * 表项；这块**不能被换出或回收**——槽里的数据还没进 Directory，`l2p_live` 看不见它。
  * 容量按写回并发上限取；`l2p_cache.c` 用静态断言钉住
  * `MD_SLOT_RESV_MAX >= L2P_FLUSH_MAX_INFLIGHT`（两层各有自己的数，靠断言防漂移）。 */
@@ -785,6 +785,21 @@ typedef struct
     bool      need_erase; /* true = 写之前必须先擦 base 所在块 */
 } md_dir_ckpt_prepare_out_t;
 
+/* 目录检查点一次 16 页 record 的舞台（CP job 与 metadata job 共用）。
+ * 只保存 RAM 状态；页提交/擦除提交仍由各 job 用自己的命令上下文完成。 */
+typedef struct
+{
+    md_ring_t ring;
+    DWORD     base;       /* record 第 0 页地址 */
+    DWORD     seq;        /* prepare 时已自增的 sequence */
+    WORD      idx;        /* 池内槽位 */
+    BYTE      chunk;      /* 下一页要写的页序 */
+    bool      ok;         /* 全部分页写成功 */
+    bool      need_erase; /* 写之前先擦 base 所在块 */
+    bool      skip;       /* Directory 无变更 ⇒ 整段跳过（CP 用） */
+    BYTE      owner;      /* 单飞 owner（MD_DIR_CKPT_OWNER_*） */
+} md_dir_ckpt_write_t;
+
 /* 压缩搬移的副本号。 */
 typedef enum
 {
@@ -796,31 +811,27 @@ typedef enum
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
 typedef struct
 {
-    md_handle_phase_e phase;                /* 异步 job 状态机 */
-    bool              waiting;              /* 有命令在飞（完成服务函数清）*/
-    bool              compact_wanted;       /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
-    bool              dir_ckpt_ok;          /* 目录检查点分页写是否全部成功（false = 整条作废）*/
-    bool              dir_ckpt_need_erase;  /* 目录检查点写点是否需先擦块 */
-    bool              dir_ckpt_for_reclaim; /* 本次目录检查点仅为「回收前落盘」：完成后回 RECLAIM */
-    BYTE              dir_ckpt_chunk;       /* 已写的目录检查点页序 */
-    WORD              victim;               /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
-    WORD              region_id;            /* 搬移游标（下一个待查 region_id）*/
-    WORD              cur_region;           /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
-    md_copy_e         cur_copy;             /* 当前搬移的副本（主 / 备）*/
-    WORD              moved;                /* 本次压缩已搬 region 数（观测）*/
-    WORD              reclaim_gblock;       /* 在飞擦除的块（完成时归还它）*/
-    WORD              reclaim_fail_gblock;  /* 连续擦除失败计数对应的块（RISK-MD-01）*/
-    BYTE              reclaim_fail_count;   /* 该块连续擦除失败次数；达上限即标坏并清位 */
-    timer_deadline_t  submit_deadline;      /* 连续「提交不出去」deadline */
-    bool              timed_out;            /* true = 本次 job 因 deadline 中止 */
-    md_handle_phase_e timeout_phase;        /* 超时发生的 phase */
-    WORD              dir_ckpt_idx;         /* 本目录检查点记录 的池内槽位 */
-    DWORD             dir_ckpt_seq;         /* 本目录检查点记录 的序号 */
-    DWORD             dir_ckpt_base;        /* 本目录检查点记录 第 0 页地址 */
-    DWORD             slot;                 /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
-    md_ring_t         dir_ckpt_ring;        /* 目录检查点池几何（prepare 出参，commit 要用）*/
-    DWORD             reclaimed_count;      /* 累计擦除成功并归还的日志块数（单调进度） */
-    int32_t           error;                /* 最近一次中止的 FTL_*（回 IDLE 时清） */
+    md_handle_phase_e   phase;                /* 异步 job 状态机 */
+    bool                waiting;              /* 有命令在飞（完成服务函数清）*/
+    bool                compact_wanted;       /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
+    bool                dir_ckpt_for_reclaim; /* 本次目录检查点仅为「回收前落盘」：完成后回 RECLAIM */
+    WORD                victim;               /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
+    WORD                region_id;            /* 搬移游标（下一个待查 region_id）*/
+    WORD                cur_region;           /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
+    md_copy_e           cur_copy;             /* 当前搬移的副本（主 / 备）*/
+    WORD                moved;                /* 本次压缩已搬 region 数（观测）*/
+    WORD                reclaim_gblock;       /* 在飞擦除的块（完成时归还它）*/
+    WORD                reclaim_fail_gblock;  /* 连续擦除失败计数对应的块（RISK-MD-01）*/
+    BYTE                reclaim_fail_count;   /* 该块连续擦除失败次数；达上限即标坏并清位 */
+    timer_deadline_t    submit_deadline;      /* 连续「提交不出去」deadline */
+    bool                timed_out;            /* true = 本次 job 因 deadline 中止 */
+    md_handle_phase_e   timeout_phase;        /* 超时发生的 phase */
+    md_dir_ckpt_write_t dir_ckpt;             /* 目录检查点 16 页 record（CP/metadata 共用）*/
+    DWORD               slot;                 /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
+    DWORD               cur_source;           /* 当前搬移副本的源 PBA（commit 前 CAS 校验）*/
+    bool                cur_fallback;         /* true = 已因源副本读失败切到另一副本 */
+    DWORD               reclaimed_count;      /* 累计擦除成功并归还的日志块数（单调进度） */
+    int32_t             error;                /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
     /* 心跳基准（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
     log_heartbeat_t hb;
@@ -834,14 +845,15 @@ typedef struct
 /* 目录检查点的状态机（单飞 + 代数 + 游标）。 */
 typedef struct
 {
-    DWORD sequence;     /* 当前目录检查点 sequence */
-    DWORD dirty_gen;    /* Directory 变更代数：每次 update 自增 */
-    DWORD covered_gen;  /* 本次写入所覆盖的 dirty_gen 快照 */
-    WORD  write_idx;    /* 池内下一个待写槽 */
-    bool  cursor_valid; /* 游标是否已建立 */
-    bool  dirty;        /* 是否有未写回变更 */
-    bool  busy;         /* 写入单飞（RISK-MD-06） */
-    BYTE  owner;        /* 单飞持有者（MD_DIR_CKPT_OWNER_*） */
+    DWORD sequence;       /* 当前目录检查点 sequence */
+    DWORD dirty_gen;      /* Directory 变更代数：每次 update 自增 */
+    DWORD covered_gen;    /* 本次写入所覆盖的 dirty_gen 快照 */
+    WORD  write_idx;      /* 池内下一个待写槽 */
+    bool  cursor_valid;   /* 游标是否已建立 */
+    bool  dirty;          /* 是否有未写回变更 */
+    bool  busy;           /* 写入单飞（RISK-MD-06） */
+    bool  erase_required; /* 本次槽位在块首、写前需擦；abort 时据此跳过整块 */
+    BYTE  owner;          /* 单飞持有者（MD_DIR_CKPT_OWNER_*） */
 } md_dir_ckpt_t;
 
 /* 每 plane 的 L2P 日志当前写块游标。 */
@@ -851,6 +863,9 @@ typedef struct
     BYTE page[PLANE_NUM];  /* 块内下一可用页 */
     bool valid[PLANE_NUM]; /* 游标是否已建立 */
 } md_l2p_cur_t;
+
+/* 页游标用 BYTE；每块 256 页时游标会回绕到 0。 */
+_Static_assert(PAGES_PER_BLOCK < 256U, "PAGES_PER_BLOCK 超出 BYTE 页游标值域");
 
 /* 待回收日志块位图 + 轮转起点。 */
 typedef struct
@@ -992,7 +1007,7 @@ void md_slot_release(md_dir_cache_t *dir, DWORD primary, DWORD backup);
  * @brief 该 gblock 上是否有尚未 commit/失败的在飞写回槽位。
  *
  * 纯读谓词，供回收/换块判据使用（`md_log_block_is_idle` / `md_log_rotate`）。
- * 实现见 `metadata_slot.c`（非 ITCM 热路径）。
+ * 实现见 `metadata.c` 第九节（`SSD_CODE_FAST`，非 ITCM 热路径）。
  *
  * @param dir Directory cache
  * @param g   候选 gblock 编号
@@ -1195,14 +1210,57 @@ void md_dir_ckpt_abort(md_dir_cache_t *dir, BYTE owner);
 void md_dir_ckpt_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_dir_ckpt_page_t *page);
 
 /**
- * @brief 收尾：推进游标（无论成败），成功才清 dirty
+ * @brief 开始一次目录检查点 record 写入（prepare + 填充共享上下文）
  *
  * @param dir   Directory
- * @param ring  prepare 回传的池几何
- * @param idx   prepare 回传的槽位号
- * @param ok    false = 有条分页写失败（整条作废，保留 dirty）
+ * @param w     共享上下文（出参）
+ * @param owner 单飞持有者
+ * @return md_dir_ckpt_step_e（CLEAN/READY/BUSY/FAILED）
  */
-void md_dir_ckpt_commit(md_dir_cache_t *dir, const md_ring_t *ring, WORD idx, bool ok);
+md_dir_ckpt_step_e md_dir_ckpt_write_begin(md_dir_cache_t *dir, md_dir_ckpt_write_t *w, BYTE owner);
+
+/**
+ * @brief 一页写完：结算 ok/chunk，返回整条 record 是否写完
+ *
+ * @param w      共享上下文
+ * @param failed 本页是否失败
+ * @return true = 16 页已全部处理完（调用者随后 commit）；false = 还需写下一页
+ */
+bool md_dir_ckpt_write_advance(md_dir_ckpt_write_t *w, bool failed);
+
+/**
+ * @brief 中止共享上下文持有的目录检查点单飞
+ *
+ * @param dir Directory
+ * @param w   共享上下文
+ *
+ * @note 持有者有效时**先推进写游标再释放锁**：中止的那条 record 可能只写了半条，
+ *       同一槽不可复用（未擦页二次编程）。块首槽（begin 时需擦块）中止后跳到
+ *       下一块的槽 0。owner 已被 commit 清空时本函数是 no-op。
+ */
+void md_dir_ckpt_write_abort(md_dir_cache_t *dir, md_dir_ckpt_write_t *w);
+
+/**
+ * @brief record 基址 + chunk → 该 chunk 的页地址（单一转换漏斗）
+ *
+ * @param base  record 第 0 页 PBA
+ * @param chunk 页序（0..DIR_CKPT_PAGE_COUNT-1）
+ * @return 页 PBA
+ */
+static inline DWORD md_dir_ckpt_page_addr(DWORD base, BYTE chunk)
+{
+    return pba_with_page(base, pba_to_page(base) + chunk);
+}
+
+/**
+ * @brief 收尾：推进游标（无论成败），成功才清 dirty
+ *
+ * 同时清空上下文的 owner ⇒ 之后的 abort 是 no-op（不会再推进一次游标）。
+ *
+ * @param dir Directory
+ * @param w   共享上下文（begin 填充；ok == false 表示有条分页写失败，整条作废）
+ */
+void md_dir_ckpt_commit(md_dir_cache_t *dir, md_dir_ckpt_write_t *w);
 
 /**
  * @brief 从目录检查点池加载 Directory
