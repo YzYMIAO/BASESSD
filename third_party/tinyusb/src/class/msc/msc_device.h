@@ -72,7 +72,7 @@ int32_t tud_msc_read10_cb (uint8_t lun, uint32_t lba, uint32_t offset, void* buf
 int32_t tud_msc_write10_cb (uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize);
 
 // 【本仓补丁】CBW info hook (application-implemented): command start total.
-TU_ATTR_WEAK void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count);
+TU_ATTR_WEAK void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, bool fua);
 
 // Invoked when received SCSI_CMD_INQUIRY, v1, application should use v2 if possible
 // Application fill vendor id, product id and revision with string up to 8, 16, 4 characters respectively

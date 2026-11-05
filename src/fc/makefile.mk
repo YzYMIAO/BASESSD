@@ -11,8 +11,11 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/framework/munit.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
 # 速度测试：一份源、两段实现（UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择）。
 # ⚠ 只在这里添加一次——src/ftl/makefile.mk 不再添加，否则 UT=（两者）时对象重复、
-#    套件数组符号重复定义。
+#    套件数组符号重复定义。UT=HIL 时两段都不需要，不编入（否则文件顶部的
+#    spd_kbps_from_us 会成为未使用的 static → 新告警）。
+ifneq ($(strip $(UT_FC_ENABLE)$(UT_FTL_ENABLE)),)
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_speed.c
+endif
 MODULE_INCS += $(PROJECT_ROOT)/tests/framework
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 CFLAGS += -DFC_NAND_TEST_ENABLE

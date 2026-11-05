@@ -9,6 +9,8 @@
  *
  * 把 PC 的 SCSI READ(10)/WRITE(10) 映射到 controller 的 512B LBA 读写：
  *   1 LBA = 1 个 FTL 映射单元（FTL_IU_BYTES = 512B），容量 = FTL_LBA_MAX。
+ * 另支持 SYNCHRONIZE CACHE(10/16) → FLUSH、UNMAP(0x42) → 逐 range TRIM、
+ * WRITE(10) FUA（完成前不回执）。
  *
  * 协议栈（枚举、BOT 状态机、SCSI 子集）在 third_party/tinyusb；本模块只实现
  * class 回调与 controller 适配。回调运行在 usb_device_task()（主循环）上下文，
@@ -22,11 +24,15 @@
  * 由 usb_msc.c 的 _Static_assert 锁住。 */
 #define USB_MSC_BLOCK_SIZE 512U
 
-/* 清零在飞请求状态；在 usb_device_init() 之前调用一次。 */
+/**
+ * @brief 清零在飞请求状态。
+ *
+ * 在 `usb_device_init()` 之前调用一次；host queue 由 `ssd_controller_init` 初始化。
+ */
 void usb_msc_init(void);
 
-/*
- * 在主循环调用（usb_device_task() 之前）：推进在飞的 MSC 请求。
+/**
+ * @brief 在主循环调用（`usb_device_task()` 之前）：推进在飞的 MSC 请求。
  *
  * 两件事：① 请求因 CLI 占用 **host busy gate（本仓自拟：同一时刻只允许一个
  *         host 前端提交 controller）** 而排队时，gate 释放后提交；
@@ -35,18 +41,20 @@ void usb_msc_init(void);
  */
 void usb_msc_task(void);
 
-/*
- * 是否有 USB 侧 host 请求尚未完成（已提交 FTL，或等待 host busy gate）。
+/**
+ * @brief 是否有 USB 侧 host 请求尚未完成（已提交 FTL，或等待 host busy gate）。
  *
  * CLI（UART）与 USB 是两个 host 前端；同一时刻只允许一个提交 controller，
  * 避免调试命令与 PC 的文件系统操作互相插队。CLI 在提交前检查本函数。
+ *
+ * @return true = 任一 USB 槽非 FREE
  */
 bool usb_msc_host_busy(void);
 
-/*
- * 打印 WRITE(10) 数据相分块直方图（诊断，RISK-NAND-04）。
+/**
+ * @brief 打印 WRITE(10) 数据相分块直方图（诊断，RISK-NAND-04）。
  *
- * 只在 `info` 命令里调用：运行期零输出。桶 = TinyUSB 每次回调的数据相长度
+ * 只在 `stat` 命令里调用：运行期零输出。桶 = TinyUSB 每次回调的数据相长度
  * （≤ CFG_TUD_MSC_EP_BUFSIZE，当前 16 KB）。<=512B 占多数说明主机按单扇区
  * 下发；<=4K 说明仍是 4 KB 块；<=16K 说明 16 KB 端点缓冲生效。
  */

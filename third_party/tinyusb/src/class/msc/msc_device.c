@@ -220,8 +220,8 @@ TU_ATTR_WEAK void tud_msc_write10_complete_cb(uint8_t lun) {
 }
 
 /* 【本仓补丁】CBW 信息钩子：命令开始时给出总 block_count/起始 LBA；应用可覆盖。 */
-TU_ATTR_WEAK void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count) {
-  (void) lun; (void) lba; (void) block_count;
+TU_ATTR_WEAK void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, bool fua) {
+  (void) lun; (void) lba; (void) block_count; (void) fua;
 }
 
 TU_ATTR_WEAK void tud_msc_scsi_complete_cb(uint8_t lun, uint8_t const scsi_cmd[16]) {
@@ -322,7 +322,11 @@ static void proc_async_io_done(void *bytes_io) {
       // 【本仓补丁】无数据 SCSI 命令的异步完成（SYNCHRONIZE CACHE）：
       // 成功 ⇒ 进入 STATUS 阶段发 CSW；失败 ⇒ 按 SCSI 失败处理。
       if (nbytes < 0) {
-        set_sense_medium_not_present(p_msc->cbw.lun);
+        // 【本仓补丁】应用已设置 sense（deferred write error 的 MEDIUM ERROR）时不覆盖；
+        // 只有回调没给 sense 才用默认 NOT READY/0x3A。
+        if (p_msc->sense_key == 0) {
+          set_sense_medium_not_present(p_msc->cbw.lun);
+        }
         fail_scsi_op(p_msc, MSC_CSW_STATUS_FAILED);
       } else {
         p_msc->stage = MSC_STAGE_STATUS;
@@ -607,6 +611,13 @@ bool mscd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t event, uint32_t
         if ( !is_data_in(p_cbw->dir) ) {
           int32_t cb_result = tud_msc_scsi_cb(p_cbw->lun, p_cbw->command, _mscd_epbuf.buf, (uint16_t) p_msc->total_len);
 
+          // 【本仓补丁】带数据阶段的 SCSI 命令（UNMAP）也允许异步完成：
+          // 保持 pending_io，等 tud_msc_async_io_done() 到达后再进入 STATUS。
+          if (cb_result == TUD_MSC_RET_ASYNC) {
+            p_msc->pending_io = true;
+            return true;
+          }
+
           if ( cb_result < 0 ) {
             // unsupported command
             TU_LOG_DRV("  SCSI unsupported command\r\n");
@@ -865,7 +876,7 @@ static void proc_read10_cmd(mscd_interface_t* p_msc) {
 
   // 【本仓补丁】命令起点：把 CBW 的总 block_count/起始 LBA 交给应用。
   if (p_msc->xferred_len == 0U) {
-    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw));
+    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw), false);
   }
 
   // remaining bytes capped at class buffer
@@ -889,7 +900,10 @@ static void proc_read_io_data(mscd_interface_t* p_msc, int32_t nbytes) {
       case TUD_MSC_RET_ERROR:
         // error -> endpoint is stalled & status in CSW set to failed
         TU_LOG_DRV("  IO read() failed\r\n");
-        set_sense_medium_not_present(p_msc->cbw.lun);
+        // 【本仓补丁】应用已设置 sense 时不覆盖（deferred write error）。
+        if (p_msc->sense_key == 0) {
+          set_sense_medium_not_present(p_msc->cbw.lun);
+        }
         fail_scsi_op(p_msc, MSC_CSW_STATUS_FAILED);
         break;
 
@@ -915,9 +929,9 @@ static void proc_write10_cmd(mscd_interface_t* p_msc) {
     return;
   }
 
-  // 【本仓补丁】命令起点：把 CBW 的总 block_count/起始 LBA 交给应用。
+  // 【本仓补丁】命令起点：把 CBW 的总 block_count/起始 LBA 交给应用（WRITE 带 FUA）。
   if (p_msc->xferred_len == 0U) {
-    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw));
+    tud_msc_cbw_info_cb(p_cbw->lun, rdwr10_get_lba(p_cbw->command), rdwr10_get_blockcount(p_cbw), (p_cbw->command[1] & 0x08U) != 0U);
   }
 
   // remaining bytes capped at class buffer
@@ -951,7 +965,10 @@ static void proc_write_io_data(mscd_interface_t* p_msc, uint32_t xferred_bytes, 
       case TUD_MSC_RET_ERROR:
         // IO error -> failed this scsi op
         TU_LOG_DRV("  IO write() failed\r\n");
-        set_sense_medium_not_present(p_msc->cbw.lun);
+        // 【本仓补丁】应用已设置 sense 时不覆盖（deferred write error）。
+        if (p_msc->sense_key == 0) {
+          set_sense_medium_not_present(p_msc->cbw.lun);
+        }
         fail_scsi_op(p_msc, MSC_CSW_STATUS_FAILED);
         break;
 

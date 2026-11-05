@@ -18,9 +18,10 @@ BUILD_TYPE ?= debug
 
 # ----------------------------------------------------------------------------
 # 1.5 单元测试范围选择（仅 `make tests` 有意义）
-#   UT=（空）  全部：FC-NAND 三级 + FTL L0
+#   UT=（空）  全部：FC-NAND 三级 + FTL L0 + HIL 板端
 #   UT=FC      仅 FC-NAND 三级（/fc-nand/logic|data_path|lifecycle）
 #   UT=FTL     仅 FTL L0（/ftl/… 8 套件；纯 RAM、不碰 NAND）
+#   UT=HIL     仅 HIL 板端（/hil/；真 NAND/FTL，破坏性）
 # 每种取值编入**不同的测试源集合**，并落到**不同的对象目录**（见 config.mk 的 OBJ_DIR）
 # ⇒ 切换 UT 无需 make clean，也不会复用带不同 -D 的陈旧对象（否则 ut_main.o 会引用
 #   未编入的套件数组 ⇒ 链接期 undefined symbol）。
@@ -29,12 +30,15 @@ UT ?=
 ifeq ($(UT),)
     UT_FC_ENABLE  := 1
     UT_FTL_ENABLE := 1
+    UT_HIL_ENABLE := 1
 else ifeq ($(UT),FC)
     UT_FC_ENABLE  := 1
 else ifeq ($(UT),FTL)
     UT_FTL_ENABLE := 1
+else ifeq ($(UT),HIL)
+    UT_HIL_ENABLE := 1
 else
-    $(error Invalid UT=$(UT), valid values: (empty), FC, FTL)
+    $(error Invalid UT=$(UT), valid values: (empty), FC, FTL, HIL)
 endif
 
 # ----------------------------------------------------------------------------
@@ -308,7 +312,7 @@ help:
 	@echo ""
 	@echo "  Variables:"
 	@echo "    BUILD_TYPE     - debug, release, asan (default: debug)"
-	@echo "    UT             - unit test scope for 'tests': (empty)=all, FC, FTL"
+	@echo "    UT             - unit test scope for 'tests': (empty)=all, FC, FTL, HIL"
 	@echo "    FORMAT_VERIFY  - with format-image: 1 = full-chip erase check (erase OK = good block)"
 	@echo "    V=1            - Show full compile commands"
 	@echo "    CROSS_COMPILE  - Cross-compilation prefix"

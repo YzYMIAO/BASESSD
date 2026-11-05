@@ -16,7 +16,7 @@
  * 分层：
  *   - 传输层（本头 + src/platform/usart.c）—— 环形队列、非阻塞日志 sink、
  *     newlib _write 钩子、诊断计数；不含任何命令行语义。
- *   - CLI（include/controller/cli.h + src/controller/cli.c）—— 行编辑、命令表、
+ *   - CLI（include/hil/cli.h + src/hil/cli.c）—— 行编辑、命令表、
  *     wr/rd/tr/fl/info/test 等应用命令；消费本头的 uart_rx_read / uart_log_write。
  */
 

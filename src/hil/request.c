@@ -17,29 +17,40 @@
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
 ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
 
-/* ── 子请求完成回调 ──
+/**
+ * @brief 子请求完成回调：聚合状态并递减未完成 run 数。
  *
- * 由组的完成通知（pend_group_maybe_complete）调用，一次 host run 恰好一次。
- * 递减 sub_remaining 计数器，归零时置父请求 complete_flag。
+ * 由组的完成通知（pend_group_maybe_complete）调用，一次 host run 恰好一次；
+ * 归零时把 agg_status 写回 completion_status 并置 complete_flag。
+ *
+ * @param ctx 父请求（ssd_request_t *）
  */
 static void on_sub_complete(void *ctx)
 {
     ssd_request_t *req = (ssd_request_t *)ctx;
+
+    /* 聚合状态：首个非 OK 胜出。FTL 在回调前已把本 run 的状态写进
+     * completion_status；后续成功 run 会覆盖它，所以必须在这里锁存。 */
+    if ((req->completion_status != SSD_STATUS_OK) && (req->agg_status == SSD_STATUS_OK))
+    {
+        req->agg_status = req->completion_status;
+    }
 
     if (req->sub_remaining > 0U)
     {
         req->sub_remaining--;
     }
 
-    /* 所有 run 完成 → 通知 host */
+    /* 所有 run 完成 → 用聚合状态通知 host（不是最后一个 run 的状态） */
     if (req->sub_remaining == 0U)
     {
-        req->complete_flag = 1U;
+        req->completion_status = req->agg_status;
+        req->complete_flag     = 1U;
     }
 }
 
-/*
- * ssd_controller_run_end - 从 lba 起、路由到同一 FTL 实例的最长连续 run 的结束 LBA（开区间）
+/**
+ * @brief 从 lba 起、路由到同一 FTL 实例的最长连续 run 的结束 LBA（开区间）。
  *
  * 路由按 region（L2P_REGION_SHIFT 个 LBA）粒度分片 ⇒ run 只可能在 region 边界处结束，
  * 逐 region 前进即可，无需逐 LBA 试探。
@@ -77,11 +88,15 @@ QWORD ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_
     return end;
 }
 
-/*
- * ssd_split_count - 预统计拆分出的 run 段数
+/**
+ * @brief 预统计拆分出的 run 段数。
  *
  * 必须在提交前精确置位：run 的完成可能**同步**触发 on_sub_complete（如整段未映射读），
  * 计数为 0 时同步回调会把父请求提前置完成。
+ *
+ * @param controller Controller 上下文
+ * @param request    主机请求
+ * @return run 段数（>0）
  */
 static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *request)
 {
@@ -98,6 +113,19 @@ static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *reques
     return count;
 }
 
+/**
+ * @brief 按 FTL 实例边界把 host 请求拆成连续 run 并逐段提交。
+ *
+ * 部分 run 提交失败时保留已提交 run 的在飞计数，错误锁存到 agg_status；
+ * 返回值只表示「是否受理」，最终状态由 complete_flag/completion_status 回执。
+ *
+ * @param controller Controller 上下文
+ * @param request    主机请求（READ/WRITE）
+ * @return SSD_STATUS_OK               全部/部分 run 已受理
+ *         SSD_STATUS_INVALID_ARGUMENT 入参或 block_count 非法
+ *         SSD_STATUS_NOT_SUPPORTED    opcode 不是 READ/WRITE
+ *         SSD_STATUS_NO_SPACE / IO_ERROR 第一个 run 就提交失败（无在飞）
+ */
 ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 {
     QWORD        lba;
@@ -118,8 +146,10 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
     err_status = (request->opcode == SSD_REQUEST_WRITE) ? SSD_STATUS_NO_SPACE : SSD_STATUS_IO_ERROR;
 
     /* 先精确统计 run 段数（子请求可能同步完成、立即递减该计数），置位后再提交。 */
-    request->sub_remaining = ssd_split_count(controller, request);
-    if (request->sub_remaining == 0U)
+    const DWORD total_runs = ssd_split_count(controller, request);
+
+    request->sub_remaining = total_runs;
+    if (total_runs == 0U)
     {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
@@ -160,13 +190,33 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
         if (st != FTL_OK)
         {
             LOGE(LOG_TAG_CTRL "split submit failed lba=%llu count=%lu\r\n", lba, run_len);
-            request->completion_status = err_status;
-            /* 已提交的 run 仍会回调 on_sub_complete → 把计数收敛到"实际在飞数"，
-             * 避免父请求提前完成（旧实现在此处直接置 complete_flag 即此缺陷）。 */
-            request->sub_remaining     = submitted;
-            if (submitted == 0U)
+
+            /* 本 run 及其后所有 run 都不会提交 ⇒ 从计数里扣掉「未提交数」。
+             * 不能把它覆盖成 submitted：已经**同步完成**的 run 也计在 submitted 里，
+             * 覆盖会让父请求永久等待一个不会到来的回调。 */
+            const DWORD not_submitted = total_runs - submitted;
+
+            ASSERT(not_submitted <= request->sub_remaining);
+            if (not_submitted <= request->sub_remaining)
             {
-                request->complete_flag = 1U;
+                request->sub_remaining -= not_submitted;
+            }
+            else
+            {
+                /* 不应发生；release 下宁可收敛到 0（立即回执错误）也不要挂死。 */
+                request->sub_remaining = 0U;
+            }
+
+            /* 首个非 OK 胜出：后续成功 run 不得覆盖这次失败。 */
+            if (request->agg_status == SSD_STATUS_OK)
+            {
+                request->agg_status = err_status;
+            }
+
+            if (request->sub_remaining == 0U)
+            {
+                request->completion_status = request->agg_status;
+                request->complete_flag     = 1U;
             }
             request->io.cmd_remaining = chunk_remaining; /* 还原模板：见上方注释 */
             return err_status;

@@ -72,6 +72,9 @@ extern DWORD syscalls_heap_used(void);
  */
 _Static_assert(FTL_LBA_MAX_AT_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
 
+/* 行编辑状态：g_cli_line 累积当前行（不含行尾 '\n'），g_cli_length 是已收字节数。
+ * 行超过 USART_CLI_LINE_CAPACITY-1 时置 g_cli_discarding 并丢弃到下一个 '\n'
+ * —— 否则截断后的半行会被当成一条完整命令执行。 */
 static char g_cli_line[USART_CLI_LINE_CAPACITY];
 static WORD g_cli_length;
 static BYTE g_cli_discarding;
@@ -146,6 +149,9 @@ static void uart_cli_wear(int argc, char *argv[]);  /* 擦除 / read-disturb / W
 static void uart_cli_test(int argc, char *argv[]);
 #endif
 
+/**
+ * @brief 输出 CLI 提示符
+ */
 static void uart_write_prompt(void)
 {
     static const char prompt[] = "ssd> ";
@@ -153,6 +159,9 @@ static void uart_write_prompt(void)
     (void)uart_log_write(prompt, sizeof(prompt) - 1U);
 }
 
+/**
+ * @brief 打印 UART 错误/队列计数
+ */
 static void uart_print_status(void)
 {
     uart_stats_t stats;
@@ -198,21 +207,31 @@ static BYTE g_wp_inflight;
  * 非阻塞 pending 表语义；主循环的 ftl_service 完成请求）。 */
 typedef struct
 {
-    BYTE          busy;    /* 1=有未决 CLI 请求 */
-    ssd_request_t req;     /* 未决请求（controller 拆分子请求跟踪其 complete_flag） */
-    BYTE          compare; /* rd: 1=compare 模式，0=hex dump */
-    QWORD         lba;     /* 本次请求起始 LBA（结果打印用） */
-    DWORD         nblocks; /* 本次请求块数 */
+    BYTE              busy;    /* 1=有未决 CLI 请求 */
+    ssd_host_entry_t *entry;   /* HIL host queue entry（tag/owner/request） */
+    BYTE              compare; /* rd: 1=compare 模式，0=hex dump */
+    QWORD             lba;     /* 本次请求起始 LBA（结果打印用） */
+    DWORD             nblocks; /* 本次请求块数 */
 } uart_cli_pending_t;
 
 static uart_cli_pending_t g_cli_pending;
 
+/**
+ * @brief CLI 是否有未决 host 请求（含 wp 直连 FTL 的在飞组）
+ *
+ * USB 前端用本谓词让路；wp 不经过 controller，必须单独计入，否则 USB 会在
+ * wp 组仍持有 g_wp_buf 时提交 controller。
+ *
+ * @return true = g_cli_pending 有未决请求，或 wp 组仍在飞
+ */
 bool cli_host_busy(void)
 {
-    return g_cli_pending.busy != 0U;
+    return (g_cli_pending.busy != 0U) || (g_wp_inflight != 0U);
 }
 
-/* 预填 g_wr_buf pattern（.sram2_data NOLOAD，必须主动初始化） */
+/**
+ * @brief 预填 g_wr_buf 的 0x55/0xAA pattern
+ */
 static void uart_cli_pattern_init(void)
 {
     DWORD  i;
@@ -227,24 +246,39 @@ static void uart_cli_pattern_init(void)
     }
 }
 
-/* 从 g_wr_buf 对应区取期望 pattern 值（compare 模式用；前 8KB/后 8KB 两段） */
+/**
+ * @brief 取 compare 模式在给定偏移的期望 pattern 字
+ *
+ * @param byte_offset 字节偏移
+ * @return 期望 32-bit 值
+ */
 static DWORD uart_cli_expect_word(DWORD byte_offset)
 {
     return (byte_offset < (FTL_READ_USER_SIZE * CW_NUM)) ? 0x55555555U : 0xAAAAAAAAU;
 }
 
-/* CLI 诊断命令（map / pair 窗口）按 LBA 取所属 FTL 实例。
- * 复用 l2p_cache.h 的分片公式；8-LBA pair 窗口不跨 region，故按窗口基址取即可。 */
+/**
+ * @brief 按 LBA 路由到所属 FTL 实例
+ *
+ * @param lba 起始 LBA
+ * @return 实例指针；NULL = 未就绪
+ */
 static ftl_ctx_t *uart_cli_ftl_for_lba(QWORD lba)
 {
     return g_ctrl.ftl[lba_2_die(lba)];
 }
 
-/* 解析十进制/十六进制数（CLI 的全部数值入口）。成功且全部消费返回 true。
+/**
+ * @brief 解析十进制/十六进制数（CLI 的全部数值入口）。成功且全部消费返回 true。
  *
  * ⚠ 显式拒绝前导 '-'：strtoull 按标准接受它并回绕成 ULLONG_MAX，靠后续范围检查
  *   兜底只是碰巧——这里在入口就判死。ERANGE（超出 QWORD）同样拒绝，不静默取
- *   ULLONG_MAX。 */
+ *   ULLONG_MAX。
+ *
+ * @param text 输入文本
+ * @param out 解析结果出参
+ * @return true = 合法且全部消费
+ */
 static bool uart_cli_parse_uint(const char *text, QWORD *out)
 {
     char *end = NULL;
@@ -267,7 +301,13 @@ static bool uart_cli_parse_uint(const char *text, QWORD *out)
     return true;
 }
 
-/* 地址字段是 32-bit：先按 QWORD 解析，再显式拒绝超出 DWORD 的输入。 */
+/**
+ * @brief 解析 32-bit 地址
+ *
+ * @param text 输入文本
+ * @param out 解析结果出参
+ * @return true = 合法且未溢出 32 位
+ */
 static bool uart_cli_parse_dword(const char *text, DWORD *out)
 {
     QWORD value;
@@ -280,32 +320,60 @@ static bool uart_cli_parse_dword(const char *text, DWORD *out)
     return true;
 }
 
-/* wr/rd/tr/fl 的公共提交前导（唯一漏斗）：填 pending + 交给 controller。
+/**
+ * @brief wr/rd/tr/fl 的公共提交前导（唯一漏斗）：填 pending + 交给 controller。
+ *
  * host 冲突策略不在这里：dispatcher 按 UART_CLI_FLAG_BUSY 单点执行。
- * 参数已由各命令校验；失败时回滚 busy 并打印统一错误。 */
+ * 参数已由各命令校验；失败时回滚 busy 并打印统一错误。
+ *
+ * @param op 请求类型
+ * @param lba 起始 LBA
+ * @param count LBA 数
+ * @param buffer 数据缓冲
+ * @param buffer_size 缓冲容量
+ * @param compare compare 模式标志
+ * @return true = controller 已受理
+ */
 static bool uart_cli_host_submit(ssd_req_opcode_e op, QWORD lba, DWORD count, void *buffer, size_t buffer_size, BYTE compare)
 {
+    g_cli_pending.entry = ssd_host_queue_alloc(&g_ctrl.host_queue, SSD_HOST_OWNER_CLI);
+    if (g_cli_pending.entry == NULL)
+    {
+        UART_CLI_WRITE("error: host queue full\r\n");
+        return false;
+    }
+
     g_cli_pending.busy    = 1U;
     g_cli_pending.compare = compare;
     g_cli_pending.lba     = lba;
     g_cli_pending.nblocks = count;
 
-    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
-    g_cli_pending.req.opcode      = op;
-    g_cli_pending.req.start_lba   = lba;
-    g_cli_pending.req.block_count = count;
-    g_cli_pending.req.buffer      = buffer;
-    g_cli_pending.req.buffer_size = buffer_size;
+    ssd_request_t *request = &g_cli_pending.entry->request;
 
-    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    memset(request, 0, sizeof(*request));
+    request->opcode      = op;
+    request->start_lba   = lba;
+    request->block_count = count;
+    request->buffer      = buffer;
+    request->buffer_size = buffer_size;
+
+    if (ssd_controller_submit(&g_ctrl, request) != SSD_STATUS_OK)
     {
-        g_cli_pending.busy = 0U;
+        ssd_host_queue_free(&g_ctrl.host_queue, g_cli_pending.entry);
+        g_cli_pending.entry = NULL;
+        g_cli_pending.busy  = 0U;
         UART_CLI_WRITE("error: submit failed\r\n");
         return false;
     }
     return true;
 }
 
+/**
+ * @brief wr 命令：按固定 pattern 写 n 个扇区
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_wr(int argc, char *argv[])
 {
     QWORD lba;
@@ -345,6 +413,12 @@ static void uart_cli_wr(int argc, char *argv[])
     return;
 }
 
+/**
+ * @brief rd 命令：读 n 个扇区；--compare 校验 pattern
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_rd(int argc, char *argv[])
 {
     QWORD lba;
@@ -391,6 +465,12 @@ static void uart_cli_rd(int argc, char *argv[])
     return;
 }
 
+/**
+ * @brief tr 命令：TRIM 一个 LBA
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_tr(int argc, char *argv[])
 {
     QWORD lba;
@@ -416,7 +496,11 @@ static void uart_cli_tr(int argc, char *argv[])
     return;
 }
 
-/* 每组的组完成回调：只递减在飞计数，保护 g_wp_buf 不被下一次 wp 覆盖（RISK-CLI-03）。 */
+/**
+ * @brief wp 组完成回调：递减在飞计数
+ *
+ * @param ctx 回调上下文
+ */
 static void uart_cli_wp_complete(void *ctx)
 {
     (void)ctx;
@@ -427,8 +511,8 @@ static void uart_cli_wp_complete(void *ctx)
     }
 }
 
-/*
- * wp <lba> <n> <k> — 页打包写缓冲合并诊断
+/**
+ * @brief wp <lba> <n> <k> — 页打包写缓冲合并诊断
  *
  * 一次提交 k 个「同一 pair 窗口内、各 n 个连续 LBA」的小写，**直接调 ftl_submit_write
  * 绕过 g_cli_pending.busy 闸门**——该闸门让连续 `wr` 串行，而串行下 idle flush 立即触发，
@@ -440,6 +524,9 @@ static void uart_cli_wp_complete(void *ctx)
  * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k）——**主判据**；
  *       wb_handle(FLUSH) 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
  *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_wp(int argc, char *argv[])
 {
@@ -454,9 +541,10 @@ static void uart_cli_wp(int argc, char *argv[])
 
     (void)argc;
 
-    /* wp 只绕过 CLI 自己的 busy 闸门（要在飞多组），仍须让路给 USB host 请求；
-     * 上一批 wp 未走完时 g_wp_buf 仍被未下发的 run 持有 ⇒ 拒绝（RISK-CLI-03）。 */
-    if ((usb_msc_host_busy()) || (g_wp_inflight != 0U))
+    /* wp 只绕过「wp 自身」的 busy 闸门（要在飞多组），仍须让路给其他 CLI 请求
+     * 与 USB host 请求；上一批 wp 未走完时 g_wp_buf 仍被未下发的 run 持有 ⇒
+     * 拒绝（RISK-CLI-03 / RISK-CLI-08）。 */
+    if (cli_host_busy() || usb_msc_host_busy())
     {
         UART_CLI_WRITE("error: busy (USB host request / previous wp in flight)\r\n");
         return;
@@ -537,6 +625,12 @@ static void uart_cli_wp(int argc, char *argv[])
     return;
 }
 
+/**
+ * @brief fl 命令：同步 cache / L2P / journal
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_fl(int argc, char *argv[])
 {
     (void)argc;
@@ -555,6 +649,12 @@ static void uart_cli_fl(int argc, char *argv[])
 static const char *const g_controller_state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
 _Static_assert(UART_ARRAY_SIZE(g_controller_state_names) == (SSD_CONTROLLER_FAILED + 1U), "控制器状态名表必须覆盖全部状态");
 
+/**
+ * @brief info 命令：控制器 + FTL 身份/状态
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_info(int argc, char *argv[])
 {
     BYTE ch;
@@ -599,21 +699,24 @@ static void uart_cli_info(int argc, char *argv[])
     return;
 }
 
-/*
- * map <lba> — 只读诊断：打印该 LBA 的 L2P 映射与**目标块**的 BST 条目。
+/**
+ * @brief map <lba> — 只读诊断：打印该 LBA 的 L2P 映射与**目标块**的 BST 条目。
  *
- * 起因：`md_block_is_metadata` 缺 plane 掩码（v0.69 修）时，被日志块掩住的用户块
+ * 用途：block metadata 的 null-mask 必须带 plane 掩码；缺失时被日志块掩住的用户块
  * 进不了 Free Pool、也被 full metadata rebuild 跳过 ⇒ `valid_count` 恒 0，而 L2P 仍可能指向它
  * ⇒ 此后**每次**覆盖写该 LBA 都撞 `bst.h` 的 `b->valid_count > 0U` 断言。
  * 本命令把「L2P 指向谁」与「BST 怎么看那个块」摆在一起，用于在**不复现崩溃**的前提下
  * 判定现场是否已经悬空（末行 VERDICT）。
  *
  * ⚠ 判据：L2P 指向某块 ⇒ 至少该 CW 有效 ⇒ `valid_count ≥ 1` 是**不变量**；
- *   `valid_count == 0` 即悬空，与 v0.69 的 `[FTL] dangling` 守卫同一判据。
+ *   `valid_count == 0` 即悬空，与 `[FTL] dangling` 守卫同一判据。
  *   `state` 用于一次归因：BAD=坏块本不可读 / FREE=会被复用**丢数据** /
  *   LOG=判据过宽 / NONE=从未认领。
  *
  * 按 LBA 路由到所属实例（与 rd/wr 经 controller 路由到的实例一致）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_map(int argc, char *argv[])
 {
@@ -679,8 +782,8 @@ static void uart_cli_map(int argc, char *argv[])
     return;
 }
 
-/*
- * addr — PBA/PAA/gblock 的只读地址转换。
+/**
+ * @brief addr — PBA/PAA/gblock 的只读地址转换。
  *
  *   addr pba <pba>                  PBA → PAA + ch/ce/lun/plane/block/page/cw + g
  *   addr paa <paa> [ch ce]          PAA → PBA + 展开字段（默认单 chip ch=ce=0）
@@ -688,6 +791,9 @@ static void uart_cli_map(int argc, char *argv[])
  *
  * LBA → 上述字段的入口是 `map <lba>`；这里不再提供 `addr lba`，避免两套入口（C9）。
  * 所有字段展开都复用 PBA/PAA getter 与 ftl_gblock helper，不手写位运算。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_addr(int argc, char *argv[])
 {
@@ -784,8 +890,8 @@ static void uart_cli_addr(int argc, char *argv[])
     return;
 }
 
-/*
- * crash [clear] — 查看 / 清除 `.noinit` 崩溃记录。
+/**
+ * @brief crash [clear] — 查看 / 清除 `.noinit` 崩溃记录。
  *
  * 记录放 `.noinit`（NOLOAD，启动不清零）⇒ **软复位后保留**，且当前没有任何路径会自动
  * 清除它 ⇒ 一次断言会被此后每次复位反复打印成 `[FAULT] previous assert: ...`，
@@ -793,6 +899,9 @@ static void uart_cli_addr(int argc, char *argv[])
  *
  * `crash clear` 给一个**显式归零点**：清完再复位，若记录重新出现，才是真的又崩了。
  * ⚠ 掉电（POR）本来就清 `.noinit` ⇒ 断电重启后看到的记录一定是新的、无需 clear。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_crash(int argc, char *argv[])
 {
@@ -829,13 +938,16 @@ static void uart_cli_crash(int argc, char *argv[])
     return;
 }
 
-/*
- * stack — 打印栈哨兵状态（paint 区间 / 栈峰值 / 余量 / 告警）。纯只读，可反复调。
+/**
+ * @brief stack — 打印栈哨兵状态（paint 区间 / 栈峰值 / 余量 / 告警）。纯只读，可反复调。
  *
  * `peak` 是「自 stack_guard_init 起，栈最深到过哪里」，`low` 是对应地址。
  * ⚠ `peak` 只在**堆没被用过**时才是栈峰值——堆从 `dtcm_bottom` 向上长，同样会抹掉
  *   pattern。所以报告把 `dtcm_bottom` 一并打出来：`low` 贴着它 ⇒ 那是堆顶不是栈底。
  * 告警只在**首次置位**时打过 LOGI/LOGE；`hits` 持续增长说明还在踩。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_stack(int argc, char *argv[])
 {
@@ -850,8 +962,8 @@ static void uart_cli_stack(int argc, char *argv[])
 #define UART_CLI_PC_TOP      (8U)
 #define UART_CLI_PC_RAW_TAIL (64U)
 
-/*
- * pc [live] [all | top] | pc clear | pc rate [n] — PC 采样（死循环 / 跑飞定位）。
+/**
+ * @brief pc [live] [all | top] | pc clear | pc rate [n] — PC 采样（死循环 / 跑飞定位）。
  *
  * 默认打印**上一轮**（复位前）的原始 PC 序列（oldest→newest，4 个一行，最近 64 个）：
  * 一行行重复的地址就是循环；`all` 打完整 256 个，`top` 打命中次数排行。
@@ -861,6 +973,9 @@ static void uart_cli_stack(int argc, char *argv[])
  *
  * ⚠ 原始序列是**采样顺序**，不是指令顺序；紧凑循环（< rate ms 且整除）仍会混叠。
  * ⚠ 中断关闭 / 更高优先级 ISR 内的死循环采不到；.noinit 不跨 POR。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_pc(int argc, char *argv[])
 {
@@ -1048,8 +1163,8 @@ static void uart_cli_pc(int argc, char *argv[])
     UART_CLI_WRITE("resolve: arm-none-eabi-addr2line -f -C -i -e <same-elf> <pc>\r\n");
 }
 
-/*
- * bbt [erase | fault <plane> <block>] — 逐块探测并打印坏块图。
+/**
+ * @brief bbt [erase | fault <plane> <block>] — 逐块探测并打印坏块图。
  *
  * 默认**只读**：读每块 Page 0 的 spare 首字节（列 2048），非 0xFF ⇒ 出厂坏块。
  * 不写介质，可反复调用。
@@ -1061,6 +1176,9 @@ static void uart_cli_pc(int argc, char *argv[])
  *
  * 子命令严格校验：不认识就报错返回，绝不静默降级为只读。静默忽略曾两次把
  * `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条擦除命令都没发。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_bbt(int argc, char *argv[])
 {
@@ -1136,7 +1254,7 @@ static void uart_cli_bbt(int argc, char *argv[])
      * 正在擦/重写的介质上（RISK-CLI-02）。 */
     if (do_erase == true)
     {
-        if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+        if (cli_host_busy() || usb_msc_host_busy())
         {
             UART_CLI_WRITE("error: busy — wait for the host request to finish\r\n");
             return;
@@ -1189,8 +1307,8 @@ static void uart_cli_bbt(int argc, char *argv[])
 }
 
 #if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
-/*
- * format — boot 失败后的恢复格式化（破坏性）
+/**
+ * @brief format — boot 失败后的恢复格式化（破坏性）
  *
  * 用途：CP/目录检查点介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
  * （例如上一轮 bbt erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
@@ -1200,6 +1318,9 @@ static void uart_cli_bbt(int argc, char *argv[])
  * ⚠ 擦除全部用户数据与元数据；执行后必须断电重启，不能在运行中的 FTL 上继续用。
  * ⚠ 只在 debug/bench 档注册（`UART_CLI_DESTRUCTIVE_ENABLE`）；量产档走 main.c 的
  *   自动恢复路径。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_format(int argc, char *argv[])
 {
@@ -1279,11 +1400,14 @@ static void uart_cli_format(int argc, char *argv[])
 }
 #endif /* UART_CLI_DESTRUCTIVE_ENABLE */
 
-/*
- * pool — 打印固定元数据分区的候选块池（只读诊断）
+/**
+ * @brief pool — 打印固定元数据分区的候选块池（只读诊断）
  *
  * 用于验证 BBT + spare 候选池：nominal 块被标 BAD 后，候选数不变，
  * 坏块由 shared metadata spare 顶替（打印 remapped -> spare）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_pool(int argc, char *argv[])
 {
@@ -1319,12 +1443,15 @@ static void uart_cli_pool(int argc, char *argv[])
     return;
 }
 
-/*
- * q — 控制器队列 / 三池 / 背压水位（只读）。
+/**
+ * @brief q — 控制器队列 / 三池 / 背压水位（只读）。
  *
  * 对应 §26 的「队列 + 门铃 + 完成」：FC 的 SQ/HSQ/CQ 与三池是硬件 FCC 的软件替身，
  * FTL 的 pending 组/槽、L2P 在飞与 mig 在飞是上层背压。FC 统计是单例，
  * pending/在飞数按 FTL 实例分开打印。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_q(int argc, char *argv[])
 {
@@ -1356,11 +1483,14 @@ static void uart_cli_q(int argc, char *argv[])
     }
 }
 
-/*
- * cp — Checkpoint 异步 job 的现场（只读）。
+/**
+ * @brief cp — Checkpoint 异步 job 的现场（只读）。
  *
  * 第一行是状态机（phase / 等待 / 失败 / 超时 / 心跳年龄），第二行是池游标与
  * 水位（sequence 是 CP 池自己的序号，与 journal sequence 互不相干）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_cp(int argc, char *argv[])
 {
@@ -1391,12 +1521,15 @@ static void uart_cli_cp(int argc, char *argv[])
     }
 }
 
-/*
- * jrn — Journal 环形 / WAL / 水位（只读）。
+/**
+ * @brief jrn — Journal 环形 / WAL / 水位（只读）。
  *
  * 三行：写游标与水位；job 状态与环状态；坏块策略与持久性失败观测。
  * `persisted` 是 WAL 闸门用的已落盘上界（RISK-L2P-09），`wpseq/wentry` 是
  * 页缓冲里尚未落盘的一页。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_jrn(int argc, char *argv[])
 {
@@ -1430,12 +1563,15 @@ static void uart_cli_jrn(int argc, char *argv[])
     }
 }
 
-/*
- * stat — 计数类诊断（只读）。
+/**
+ * @brief stat — 计数类诊断（只读）。
  *
  * 从 `info` 拆出：info 只保留身份/状态（控制器、几何、分配器、CP/Journal 序号），
  * 计数与历史（GC/WL、预取、写回、CMT、USB 直方图）统一在这里看，避免两套视图。
  * uptime 是**本次开机**时间；跨 POR 的累计值需要额外持久记录，当前不做。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_stat(int argc, char *argv[])
 {
@@ -1470,12 +1606,15 @@ static void uart_cli_stat(int argc, char *argv[])
     usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
 }
 
-/*
- * id — 编译期配置 / 容量 / 介质版本（只读，无 NAND 访问）。
+/**
+ * @brief id — 编译期配置 / 容量 / 介质版本（只读，无 NAND 访问）。
  *
  * 与 `info` 的分工：`id` 是静态身份（构建配置 + 运行时 die 数 + 介质布局版本），
  * `info` 是实时状态。ONFI 参数页未缓存，boot 已打印过一次，这里不重读
  * （避免在 host 在飞时插 NAND 同步读）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_id(int argc, char *argv[])
 {
@@ -1497,13 +1636,16 @@ static void uart_cli_id(int argc, char *argv[])
 #define UART_CLI_ECC_BINS (7U)
 #define UART_CLI_ECC_TOP  (4U)
 
-/*
- * ecc — per-block ECC 健康（只读，E1 口径）。
+/**
+ * @brief ecc — per-block ECC 健康（只读，E1 口径）。
  *
  * 数据源是 read-recovery 已经维护的 `bst_block_t.rr`：`last_ecc` 是**最近一次读**
  * 的最大纠正 bit 数（host 读与 GC 读都经 rr_record_ecc 更新），不是终身累计；
  * 开机后没读过的块 `read_count == 0`，用 read_blocks 表示覆盖率。
  * 终身累计（纠正 bit 总和 / UNC 事件）属 E2，需新增 ftl_stats 计数，本轮不做。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_ecc(int argc, char *argv[])
 {
@@ -1622,12 +1764,15 @@ static void uart_cli_ecc(int argc, char *argv[])
 #define UART_CLI_WEAR_BINS (7U)
 #define UART_CLI_WEAR_TOP  (4U)
 
-/*
- * wear — 擦除计数 / read-disturb / WL 触发差值（只读）。
+/**
+ * @brief wear — 擦除计数 / read-disturb / WL 触发差值（只读）。
  *
  * 统计排除 BAD 块（WL 判据也不看 BAD）；固定元数据块（state=NONE）仍计入磨损。
  * WL 差值不在这里重算：`wl_ec_spread_get` 与 `wl_should_trigger` 是同一漏斗（C9），
  * 前者只给数值，后者给判定。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_wear(int argc, char *argv[])
 {
@@ -1755,14 +1900,17 @@ static void uart_cli_wear(int argc, char *argv[])
     }
 }
 
-/*
- * rdpaa — 按 PAA 读一个 NAND 页（只读诊断）
+/**
+ * @brief rdpaa — 按 PAA 读一个 NAND 页（只读诊断）
  *
  * 默认：与 FTL 数据面相同的正常配置（scrambler ON、BCH ECC、per-CW CRC；
  *       页内 META 提供 LBA，LBA 未知时由 FC 自描述读回）。
  * --raw：LDPC_RAW 裸读——不做 ECC/解扰，坏页也能拿到原始位（分析 UNC 用）。
  * 同时用 gc_read_page_with_lba 打印该页逐 CW 的 META（页内反向映射）。
  * ⚠ PAA 不含 ch/ce：本命令固定用 ch=0/ce=0（当前板单芯片）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
  */
 static void uart_cli_rdpaa(int argc, char *argv[])
 {
@@ -1818,11 +1966,21 @@ static void uart_cli_rdpaa(int argc, char *argv[])
     return;
 }
 
-/* rd 完成：compare 模式与 g_wr_buf pattern 比对，报 PASS / 首个不一致偏移 */
-static void uart_cli_rd_report(void)
+/**
+ * @brief 打印 rd 完成结果（hex dump / compare）
+ *
+ * @param status 请求完成状态；非 OK 时只报告失败，不把旧缓冲当读回数据
+ */
+static void uart_cli_rd_report(ssd_status_e status)
 {
     DWORD total_bytes = g_cli_pending.nblocks * FTL_IU_BYTES; /* n 计扇区（512B），非页 */
     DWORD offset;
+
+    if (status != SSD_STATUS_OK)
+    {
+        (void)LOGE("rd FAIL status=%d\r\n", (int)status);
+        return;
+    }
 
     if (g_cli_pending.compare == 0U)
     {
@@ -1851,36 +2009,44 @@ static void uart_cli_rd_report(void)
     UART_CLI_WRITE("rd PASS\r\n");
 }
 
-/* cli_service_poll 每轮末尾调：检查未决 CLI 请求是否被主循环 ftl_service 完成 */
+/**
+ * @brief 轮询 CLI 未决请求并在完成时打印结果
+ */
 static void uart_cli_pending_poll(void)
 {
-    if (g_cli_pending.busy == 0U)
-    {
-        return;
-    }
-    if (ssd_controller_is_complete(&g_cli_pending.req) == 0U)
+    if ((g_cli_pending.busy == 0U) || (g_cli_pending.entry == NULL))
     {
         return;
     }
 
-    switch (g_cli_pending.req.opcode)
+    ssd_request_t *request = &g_cli_pending.entry->request;
+
+    if (ssd_controller_is_complete(request) == 0U)
+    {
+        return;
+    }
+
+    switch (request->opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)LOGI("wr done lba=%llu n=%lu status=%d\r\n", g_cli_pending.lba, g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
+            (void)LOGI("wr done lba=%llu n=%lu status=%d\r\n", g_cli_pending.lba, g_cli_pending.nblocks, (int)request->completion_status);
             break;
         case SSD_REQUEST_READ:
-            uart_cli_rd_report();
+            uart_cli_rd_report(request->completion_status);
             break;
         case SSD_REQUEST_TRIM:
-            (void)LOGI("tr done lba=%llu status=%d\r\n", g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
+            (void)LOGI("tr done lba=%llu status=%d\r\n", g_cli_pending.lba, (int)request->completion_status);
             break;
         case SSD_REQUEST_FLUSH:
-            (void)LOGI("fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);
+            (void)LOGI("fl done status=%d\r\n", (int)request->completion_status);
             break;
         default:
             break;
     }
-    g_cli_pending.busy = 0U;
+
+    ssd_host_queue_free(&g_ctrl.host_queue, g_cli_pending.entry);
+    g_cli_pending.entry = NULL;
+    g_cli_pending.busy  = 0U;
 }
 
 /* ── 帮助输出用的常量 ── */
@@ -1949,7 +2115,12 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
 #endif
 };
 
-/* 命令查找：dispatcher 与 help <command> 共用（C2：唯一漏斗）。 */
+/**
+ * @brief 按名字查找命令表项
+ *
+ * @param name 命令名
+ * @return 命令描述；NULL = 未找到
+ */
 static const uart_cli_command_t *uart_cli_find(const char *name)
 {
     DWORD index;
@@ -1966,7 +2137,12 @@ static const uart_cli_command_t *uart_cli_find(const char *name)
     return NULL;
 }
 
-/* 把一组的命令名合并成一行（help 的分节摘要）。 */
+/**
+ * @brief 生成一个命令组的名字摘要行
+ *
+ * @param group_name 组名
+ * @param group 组枚举
+ */
 static void uart_cli_help_group(const char *group_name, BYTE group)
 {
     char  line[UART_CLI_HELP_LINE_CAPACITY];
@@ -1999,6 +2175,12 @@ static void uart_cli_help_group(const char *group_name, BYTE group)
     }
 }
 
+/**
+ * @brief help 命令：分组列表或单命令语法
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_help(int argc, char *argv[])
 {
     static const char *const group_names[UART_CLI_GROUP_COUNT] = {
@@ -2031,6 +2213,12 @@ static void uart_cli_help(int argc, char *argv[])
     UART_CLI_WRITE("use 'help <command>' for syntax and details\r\n");
 }
 
+/**
+ * @brief status 命令：UART 错误/队列计数
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_status(int argc, char *argv[])
 {
     (void)argc;
@@ -2039,6 +2227,12 @@ static void uart_cli_status(int argc, char *argv[])
     return;
 }
 
+/**
+ * @brief version 命令：固件控制台版本
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_version(int argc, char *argv[])
 {
     static const char version[] = "soft_ssd debug console\r\n";
@@ -2049,6 +2243,12 @@ static void uart_cli_version(int argc, char *argv[])
     return;
 }
 
+/**
+ * @brief log 命令：设置运行期日志级别
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_log(int argc, char *argv[])
 {
     static const char updated[] = "log level updated\r\n";
@@ -2087,8 +2287,8 @@ static void uart_cli_log(int argc, char *argv[])
 }
 
 #if defined(FC_NAND_TEST_ENABLE)
-/*
- * 跑 UT 期间的**项目日志**级别，默认整档关闭（LOG_OFF）。
+/**
+ * @brief 跑 UT 期间的**项目日志**级别，默认整档关闭（LOG_OFF）。
  *
  * 与 munit 的 `--log-visible` **分开**：后者控制测试自身证据（`[EV]` summary/detail），
  * 前者只控制 FTL/FC 内部日志。二者混在一起时，想看 `[EV]` 就必须同时被 boot/format/GC
@@ -2100,6 +2300,10 @@ static void uart_cli_log(int argc, char *argv[])
  *   test --log-visible info --log-project info /ftl/ ⇒ 再叠加项目 INFO 日志（排障用）
  *
  * 跑完恢复原级别（main 的默认 INFO）。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ * @return 日志级别（默认 LOG_OFF）
  */
 static log_level_e uart_cli_test_project_level(int argc, char *argv[])
 {
@@ -2132,6 +2336,12 @@ static log_level_e uart_cli_test_project_level(int argc, char *argv[])
     return level;
 }
 
+/**
+ * @brief test 命令：运行 munit 套件
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
 static void uart_cli_test(int argc, char *argv[])
 {
     const log_level_e saved = log_get_level();
@@ -2168,6 +2378,14 @@ static void uart_cli_test(int argc, char *argv[])
  * 产测或固件下载应使用独立的二进制帧协议，而不是继续扩展这个文本解析器。
  */
 #define UART_CLI_ARGC_INVALID (UINT32_MAX)
+/**
+ * @brief 按空格/Tab 分词命令行
+ *
+ * @param line 命令行缓冲
+ * @param argv 参数向量
+ * @param max_arguments 最大参数数
+ * @return 参数个数；UART_CLI_ARGC_INVALID = 超限
+ */
 static DWORD uart_cli_tokenize(char *line, char *argv[], DWORD max_arguments)
 {
     DWORD argc   = 0U;
@@ -2202,6 +2420,11 @@ static DWORD uart_cli_tokenize(char *line, char *argv[], DWORD max_arguments)
     return argc;
 }
 
+/**
+ * @brief 分词、查找命令并执行
+ *
+ * @param line 命令行缓冲
+ */
 static void uart_execute_command(char *line)
 {
     char *argv[UART_CLI_MAX_ARGUMENTS];
@@ -2236,7 +2459,7 @@ static void uart_execute_command(char *line)
     }
 
     /* 命令级 host 冲突策略的唯一执行点（wr/rd/tr/fl/rdpaa/format）。 */
-    if (UART_CLI_CMD_HAS_FLAG(command, UART_CLI_FLAG_BUSY) && ((g_cli_pending.busy != 0U) || usb_msc_host_busy()))
+    if (UART_CLI_CMD_HAS_FLAG(command, UART_CLI_FLAG_BUSY) && (cli_host_busy() || usb_msc_host_busy()))
     {
         UART_CLI_WRITE("error: busy, pending request\r\n");
         return;
@@ -2254,12 +2477,18 @@ static void uart_execute_command(char *line)
     command->handler(argc, argv);
 }
 
+/**
+ * @brief 初始化 CLI（预填固定 pattern）
+ */
 void cli_init(void)
 {
     /* g_wr_buf 落 NOLOAD SRAM2 段，上电不清零 → 主动预填 pattern */
     uart_cli_pattern_init();
 }
 
+/**
+ * @brief 主循环轮询：读取 UART、执行命令行、轮询完成
+ */
 void cli_service_poll(void)
 {
     BYTE byte;

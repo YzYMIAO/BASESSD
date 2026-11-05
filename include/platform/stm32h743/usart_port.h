@@ -3,7 +3,7 @@
 
 /*
  * stm32h743 调试串口 port 头：只放 SoC 相关的宏与句柄。
- * 传输/CLI 的抽象接口在 include/platform/usart.h 与 include/controller/cli.h。
+ * 传输/CLI 的抽象接口在 include/platform/usart.h 与 include/hil/cli.h。
  */
 
 #include "sys_port.h" /* HAL 类型：UART_HandleTypeDef、GPIOA、__HAL_RCC_* */

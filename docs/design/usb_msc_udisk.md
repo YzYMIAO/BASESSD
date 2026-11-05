@@ -41,9 +41,9 @@
 - **USB FS 12 Mbps**（不是 HS 480 Mbps）
 - **固定 424 MiB**、**512 B block**、**单 LUN**
 - SCSI 最小命令集：`INQUIRY` / `TEST UNIT READY` / `REQUEST SENSE` /
-  `READ CAPACITY(10)` / `READ(10)` / `WRITE(10)` / `SYNCHRONIZE CACHE(10)` /
-  `MODE SENSE(6)`
-- **不做** TRIM/UNMAP、removable eject、多 LUN、CD-ROM
+  `READ CAPACITY(10)` / `READ(10)` / `WRITE(10)` / `SYNCHRONIZE CACHE(10/16)` /
+  `UNMAP(0x42)` / `MODE SENSE(6)`
+- **不做** removable eject、多 LUN、CD-ROM
 
 ---
 
@@ -162,8 +162,9 @@ flowchart TD
 - **单条 SCSI 命令在飞**（BOT 串行）；但同一条 WRITE(10) 的**两个 chunk** 可以同时在飞
   —— 写路径需要 1 chunk lookahead：缓存程序序列里 chunk k 的最后一页由 chunk k+1 的
   第一条命令的 `FAIL_CACHE` 确认（`docs/design/ftl_design.md` §3.16）。
-- 两个槽（`usb_msc_slot_t`）：每槽 16 KiB bounce（0 号 AXI `.bss`、1 号 DTCM，均 CPU-only）
-  + 一个 `ssd_request_t`。bounce 必须活到该槽的 FTL 完成（FTL 可能因背压延后消费）。
+- 三个槽（`usb_msc_slot_t`）：0/1 是数据槽，各带 16 KiB bounce（AXI `.bss` / DTCM，
+  CPU-only）+ 一个 `ssd_request_t`；2 号是无 bounce 的控制槽（FLUSH/UNMAP）。
+  bounce 必须活到该槽的 FTL 完成（FTL 可能因背压延后消费）。
 - WRITE = **volatile write cache**：端点缓冲 → 拷进槽 bounce → 提交 → **立即回流控回执**
   （`tud_msc_async_io_done(length)`，**含一条命令的最后一段**）。主机因此不必等
   最后一页的 `FAIL_CACHE` 就能发下一条命令 ⇒ FTL 的设备 cache 序列可以跨 host 命令延续
@@ -173,13 +174,15 @@ flowchart TD
   已回执的写段之后失败 ⇒ 置 **deferred error**，由**下一条** READ/WRITE/FLUSH 命令的 CSW
   失败一次。`usb_msc_take_deferred_error()` **先问各 FTL 实例**（`ftl_take_deferred_error`），
   再落回控制器自己的标志——早回执后 FAILC 的结论只存在于 FTL 的粘性标志里。
-  （TinyUSB 不支持自定义 sense，这是本仓近似，见 `known_risks.md` RISK-USBC-01。）
+  （承载错误的那条命令会设置 MEDIUM ERROR / WRITE ERROR sense；TinyUSB 侧补丁保证
+  应用设置的 sense 不被默认 NOT READY 覆盖，见 `known_risks.md` RISK-USBC-01。）
   两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）。
 - 打开中的写序列会占用一个槽直到 FTL 收尾（空闲 1 s / 下一条命令 / flush 触发 padding
   END）⇒ `usb_msc_host_busy()`（CLI 用）在此期间为 true，CLI 命令需重试。
 - READ：USB 端点缓冲 → 提交到槽 bounce → 完成 → 拷回端点缓冲 → USB IN（不需要 lookahead）。
 - 主机复位/拔出时在飞槽标记 `discard`：完成后只收尾，不回写 USB 缓冲。
-- 不支持多 LUN；不支持 TRIM。
+- 不支持多 LUN；支持 SCSI UNMAP（逐 range 走 controller 的异步 TRIM，全部 range
+  完成后才回 CSW，保证与后续写的顺序）。
 
 ---
 
@@ -219,7 +222,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 | ECC | BCH 4-bit | LDPC、RAID/parity、端到端保护 |
 | 性能 | USB FS ≈ 1 MB/s | PCIe Gen4/5，GB/s，10 万~百万 IOPS |
 | 固件架构 | 裸机 superloop + 轮询 | 多核/协处理器、硬件调度器、RTOS/实时队列 |
-| 特性 | 裸块设备；v1 无 TRIM | namespace、TRIM/UNMAP、SMART、sanitize、secure erase |
+| 特性 | 裸块设备；支持 UNMAP；无 SMART/sanitize | namespace、TRIM/UNMAP、SMART、sanitize、secure erase |
 
 ### 6.1 已经对齐的部分
 
@@ -272,15 +275,16 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 ### Phase 2：MSC class + FTL adapter（**✅ rev30 已上板**）
 
-- 新增 `src/controller/usb_msc.c` / `include/controller/usb_msc.h`：
+- 新增 `src/hil/usb_msc.c` / `include/hil/usb_msc.h`：
   - `tud_msc_read10_cb` / `tud_msc_write10_cb`：登记到 `ssd_request_t`，
     提交后返回 `TUD_MSC_RET_ASYNC`；
   - `usb_msc_task()`：完成时回填 READ 数据并 `tud_msc_async_io_done()`；
   - `tud_msc_capacity_cb`：424 MiB / 512B block / `FTL_LBA_MAX`；
   - `tud_msc_inquiry_cb` / `tud_msc_start_stop_cb` / `tud_msc_test_unit_ready_cb`；
   - SCSI SYNCHRONIZE CACHE → `SSD_REQUEST_FLUSH`（`ftl_flush`，仅主循环上下文）；
+  - SCSI UNMAP → 解析参数表，逐 range 提交 `SSD_REQUEST_TRIM`；全部完成才回 CSW；
   - `tud_event_hook_cb`：总线复位/拔出时把在飞请求标记 `discard`。
-- 两个槽各带 16 KiB bounce；单条 SCSI 命令在飞，写路径两个 chunk 可同时在飞（§4.3）。
+- 0/1 是 16 KiB bounce 数据槽；2 号是无 bounce 控制槽（FLUSH/UNMAP）。
 
 ### Phase 3：主循环与仲裁（**✅ rev30 已上板**）
 
@@ -308,10 +312,10 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 | `include/platform/usb.h`（新增） | `usb_device_init` / `usb_device_task` 抽象 |
 | `src/platform/stm32h743/usb_port.c`（新增） | USB2_OTG_FS 时钟/引脚/IRQ、`tusb_time_millis_api` |
 | `src/platform/stm32h743/sys_port.c` | USB kernel clock = HSI48 |
-| `src/controller/usb_msc.c`（新增） | 描述符、MSC/SCSI 回调、异步请求状态机 |
-| `include/controller/usb_msc.h`（新增） | `usb_msc_init` / `usb_msc_task` / `usb_msc_host_busy` |
+| `src/hil/usb_msc.c`（新增） | 描述符、MSC/SCSI 回调、异步请求状态机 |
+| `include/hil/usb_msc.h`（新增） | `usb_msc_init` / `usb_msc_task` / `usb_msc_host_busy` |
 | `src/main.c` | `usb_msc_init` + `usb_device_init`；主循环 `usb_msc_task` → `usb_device_task` |
-| `src/controller/cli.c` | CLI 与 USB 共用 host busy（`cli_host_busy`） |
+| `src/hil/cli.c` | CLI 与 USB 共用 host busy（`cli_host_busy`） |
 | `docs/hardware_contract.md` | 补 USB 引脚/时钟/VBUS |
 
 ---
@@ -323,11 +327,11 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 | PA11/PA12 接线未确认 | 无原理图；也可能 PB14/PB15 | 上板枚举失败先换 AF/引脚；用万用表确认 |
 | TinyUSB MSC 异步回调 | 已改用 `TUD_MSC_RET_ASYNC` + `tud_msc_async_io_done`；主机复位时需丢弃在飞结果 | `discard` 标志 + `tud_ready()` 守卫；未上板 |
 | `ftl_flush` 非 barrier | 只 best-effort，不能承诺绝对掉电持久 | SYNCHRONIZE CACHE 只在前序写完成后调用；文档写清 |
-| WRITE(10) 的 FUA 位被忽略（**有意**，用户裁决 2026-11-01） | 主机要求「本条写必须落盘」时，本仓只把数据交给 FTL，不额外 flush | 主机 fsync 通常随后发 SYNCHRONIZE CACHE（完整屏障）；若抓包发现只发 FUA 的主机，按 `RISK-USB-05` 的要点补（末 chunk 等一次 flush，不在 SCSI 回调自旋） |
+| WRITE(10) FUA（2026-11-05 用户改判实现） | FUA 写 chunk 不回早回执，等 FTL 组完成（program + 映射确认）后才回 CSW；失败直接 CSW failed | 非 FUA 写仍是 volatile write cache 早回执；上板验证 FUA 回执延迟与断电读回（RISK-USB-05） |
 | `.noncacheable_buffer` 放置 | 链接器匹配模式漏前导点，`g_nand_channel_page_buffer` 落在可缓存 AXI RAM | **不在 USB 补丁内修**；已登记 `RISK-PLAT-01`（待决策，改地址必须上板） |
 | CLI/USB 双前端 | 无全局锁 | 共用 host busy 闸门 |
 | FS 12 Mbps | ≈1 MB/s；HS 需 ULPI，本板不可行 | v1 接受；性能另测 |
-| 无 TRIM | `ftl_trim` 逐 LBA 同步自旋，不适合 USB 回调 | v1 不做 UNMAP |
+| UNMAP 验证 | 逐 range 的异步 TRIM；多 range/顺序/主机复位未上板 | 已实现（RISK-USB-14）；**未向主机广告**（无 VPD B0/B2 / LBPME），普通 `fstrim` 可能不下发，见 RISK-USB-15 |
 | USB 中间件体积 | TinyUSB 代码/缓冲计入 flash/RAM | 实现前算预算 |
 
 ---
@@ -336,7 +340,6 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 - USB HS 480 Mbps / ULPI
 - 多 LUN / CD-ROM / removable eject
-- SCSI UNMAP/TRIM
 - 文件系统解析（U 盘由 PC 格式化，固件只暴露块设备）
 - 量产级 USB 认证 / 复合设备
 

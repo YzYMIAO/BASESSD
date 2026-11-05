@@ -10,16 +10,14 @@
 ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
 QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit);
 
-/*
- * ssd_controller_route - 按全局 LBA 路由到对应 FTL 实例
+/**
+ * @brief 按全局 LBA 路由到对应 FTL 实例（region 粒度）。
  *
- * 使用 l2p_cache.h 的 lba_2_die（region 粒度取模）选实例；后续换哈希策略
- * 只改该函数。非 static：request.c 拆分循环共用（前向声明在 request.c），
- * 不暴露进公共头。
+ * 唯一实现：controller submit 与 request split 共用；换哈希策略只改这里。
  *
  * @param controller Controller 上下文（调用者保证非 NULL）
- * @param lba        Host 全局 LBA（QWORD）
- * @return 路由到的 FTL 实例指针
+ * @param lba        host 全局 LBA
+ * @return 路由到的 FTL 实例
  */
 ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
 {
@@ -96,6 +94,17 @@ void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_stat
     LOGE_IF((prev_state != SSD_CONTROLLER_FAILED) && (controller->state == SSD_CONTROLLER_FAILED), LOG_TAG_CTRL "state -> FAILED\r\n");
 }
 
+/**
+ * @brief 初始化 Controller，按 compact die 号绑定 FTL 实例表。
+ *
+ * 只检查 present die：ftl_by_die[die] 必须非空，且实例 topo 必须与
+ * die 表分解出的 (ch,ce,lun) 一致；同时清零 host queue。
+ *
+ * @param controller Controller 上下文
+ * @param ftl_by_die die → 实例指针表（前 DIE_MAX 项有效）
+ * @return SSD_STATUS_OK               成功
+ *         SSD_STATUS_INVALID_ARGUMENT 入参非法 / 槽位缺失 / 拓扑不符
+ */
 ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die)
 {
     if ((controller == NULL) || (ftl_by_die == NULL))
@@ -108,6 +117,8 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
     controller->trim_lba     = 0U;
     controller->trim_started = false;
     controller->host_lba_max = (DWORD)FTL_LBA_MAX;
+
+    ssd_host_queue_init(&controller->host_queue);
 
     /* 稀疏拓扑 / 重复 init：先清空 die 槽，缺失项保持 NULL。 */
     memset(controller->ftl, 0, sizeof(controller->ftl));
@@ -125,7 +136,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
 
         if (slot == NULL)
         {
-            LOGE(LOG_TAG_CTRL "init failed: null FTL slot die=%hhu ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            LOGE(LOG_TAG_CTRL "init failed: null FTL slot die=%hhu ch=%hhu ce=%hhu lun=%hhu\r\n", die, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
             return SSD_STATUS_INVALID_ARGUMENT;
         }
@@ -143,6 +154,12 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
     return SSD_STATUS_OK;
 }
 
+/**
+ * @brief 查询请求是否完成。
+ *
+ * @param request 请求（NULL 视为已完成）
+ * @return 1 = 完成；0 = 未完成
+ */
 BYTE ssd_controller_is_complete(const ssd_request_t *request)
 {
     if (request == NULL)
@@ -152,6 +169,16 @@ BYTE ssd_controller_is_complete(const ssd_request_t *request)
     return request->complete_flag;
 }
 
+/**
+ * @brief host LBA 区间是否落在设备容量内。
+ *
+ * 区间为 [lba, lba + count)，count > 0。
+ *
+ * @param controller Controller 上下文
+ * @param lba        起始 LBA
+ * @param count      连续 LBA 数
+ * @return true = 完整落在 [0, host_lba_max)；false = 非法/越界
+ */
 bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, DWORD count)
 {
     /* 容量口径 = 运行时 host_lba_max（已扣实际坏块），不是编译期 FTL_LBA_MAX。
@@ -166,6 +193,19 @@ bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, 
     return (lba + count) <= max;
 }
 
+/**
+ * @brief 提交一条 host 请求（READ/WRITE/FLUSH/TRIM）。
+ *
+ * READ/WRITE 按 FTL 实例拆 run 后异步提交；FLUSH/TRIM 只登记并启动异步 job。
+ * 请求对象必须活到 complete_flag 置 1。
+ *
+ * @param controller Controller 上下文（必须 READY）
+ * @param request    主机请求
+ * @return SSD_STATUS_OK               已受理（部分 run 失败也以 OK 受理，错误异步回执）
+ *         SSD_STATUS_INVALID_ARGUMENT 状态/范围/缓冲非法
+ *         SSD_STATUS_BUSY             FLUSH/TRIM 单飞行冲突
+ *         SSD_STATUS_NOT_SUPPORTED    未知 opcode
+ */
 ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
     ssd_status_e ret;
@@ -182,9 +222,10 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
     /* 主机 IO 到来后的后台让路由 ftl_service 的档位判定（pending/groups → IDLE/
      * NORMAL/BUSY）承担；Controller 只负责受理与拆分，不再维护调度钩子。 */
 
-    /* 清零完成标志 */
+    /* 清零完成标志 / 状态聚合 */
     request->complete_flag     = 0U;
     request->completion_status = SSD_STATUS_OK;
+    request->agg_status        = SSD_STATUS_OK;
 
     /* 组装 IO 请求模板（lba/buffer 由各路径覆盖） */
     request->io.complete_flag   = &request->complete_flag;
@@ -196,6 +237,16 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
     {
         case SSD_REQUEST_READ:
         case SSD_REQUEST_WRITE:
+            /* HIL 入口统一校验 LBA 范围（H29：host 入口是不可信输入）。USB/CLI
+             * 前端也各自检查；这里再收一次，保证直接调用 controller 的测试/新前端
+             * 不会把越界 LBA 交给 FTL（FTL 只按编译期上限检查，不知道运行时容量）。 */
+            if (!ssd_controller_lba_range_ok(controller, request->start_lba, request->block_count))
+            {
+                request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
+                request->complete_flag     = 1U;
+                return SSD_STATUS_INVALID_ARGUMENT;
+            }
+
             /* 缓冲容量校验：block_count 个映射单元 × 512B 必须不超过调用者给的
              * buffer_size（CW 级映射下 1 个 LBA = 1 个 CW = 512B 扇区，不是 2KB 页）。
              * 真实隐患：wr 0 64 会写爆 CLI 的 g_wr_buf。
@@ -213,9 +264,18 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
             ret = ssd_request_split(controller, request);
             if (ret != SSD_STATUS_OK)
             {
-                request->completion_status = ret;
-                request->complete_flag     = 1U;
-                return ret;
+                if (request->sub_remaining == 0U)
+                {
+                    /* 一个 run 都没在飞：同步失败，可以立即完成。 */
+                    request->completion_status = ret;
+                    request->complete_flag     = 1U;
+                    return ret;
+                }
+
+                /* 部分 run 已在飞：请求**已受理**，不能在这里置 complete_flag
+                 * （否则调用者会释放 bounce/请求对象，而在飞 run 仍持有它）。
+                 * 错误已锁存到 agg_status，等全部 run 完成后由 on_sub_complete 回执。 */
+                return SSD_STATUS_OK;
             }
             break;
 
@@ -278,6 +338,11 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
     return request->completion_status;
 }
 
+/**
+ * @brief 推进全部 present die 的 FLUSH job；全部完成时回执 flush_req。
+ *
+ * @param controller Controller 上下文
+ */
 static void ssd_controller_flush_service(ssd_controller_t *controller)
 {
     if (controller->flush_req == NULL)
@@ -312,6 +377,12 @@ static void ssd_controller_flush_service(ssd_controller_t *controller)
     controller->flush_req                    = NULL;
 }
 
+/**
+ * @brief 以给定状态完成当前 TRIM 请求并清空 trim_req。
+ *
+ * @param controller Controller 上下文
+ * @param status     回执状态
+ */
 static void ssd_controller_trim_complete(ssd_controller_t *controller, ssd_status_e status)
 {
     controller->trim_req->completion_status = status;
@@ -320,6 +391,11 @@ static void ssd_controller_trim_complete(ssd_controller_t *controller, ssd_statu
     controller->trim_started                = false;
 }
 
+/**
+ * @brief 按 run 推进在飞 TRIM（begin/step），全部完成时回执 trim_req。
+ *
+ * @param controller Controller 上下文
+ */
 static void ssd_controller_trim_service(ssd_controller_t *controller)
 {
     if (controller->trim_req == NULL)
@@ -380,6 +456,13 @@ static void ssd_controller_trim_service(ssd_controller_t *controller)
     }
 }
 
+/**
+ * @brief 推进 Controller 的异步命令（FLUSH / TRIM）。
+ *
+ * 主循环每轮调用一次（FTL 服务之后、USB 任务之前）；无在飞命令时立即返回。
+ *
+ * @param controller Controller 上下文
+ */
 void ssd_controller_service(ssd_controller_t *controller)
 {
     if (controller == NULL)
@@ -391,6 +474,13 @@ void ssd_controller_service(ssd_controller_t *controller)
     ssd_controller_trim_service(controller);
 }
 
+/**
+ * @brief 放弃在飞的 FLUSH 回执（host 复位 / 拔出）。
+ *
+ * 摘掉 flush_req 并清各实例的 flush job 标志；在飞数据操作不回滚。
+ *
+ * @param controller Controller 上下文
+ */
 void ssd_controller_cancel_flush(ssd_controller_t *controller)
 {
     if (controller == NULL)

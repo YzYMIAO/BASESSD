@@ -3,7 +3,7 @@
  *
  * 只做 SoC 相关的事：USB2_OTG_FS 外设时钟、PA11/PA12 复用（AF10）、
  * NVIC 优先级、TinyUSB 端口初始化，以及向量表入口。
- * 协议栈与 MSC class 全部在 third_party/tinyusb；块设备映射在 src/controller/usb_msc.c。
+ * 协议栈与 MSC class 全部在 third_party/tinyusb；块设备映射在 src/hil/usb_msc.c。
  *
  * 关键约束：
  *   - USB 内核时钟由 sys_port_clock_init 的 RCC_PERIPHCLK_USB 统一选择

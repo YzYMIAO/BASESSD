@@ -20,7 +20,7 @@ SoC 相关代码通过 `platform/platform.h` 约定的接口（`ssd_platform_ops
 > `platform/<soc>/` 路径），**Stage 2 又把五个平台服务的纯逻辑搬进共享源**
 > （`timer` / `watchdog` / `fault` / `delay` / `syscalls` → `src/platform/*.c`，SoC 相关部分
 > 下沉到 `src/platform/stm32h743/*_port.c`），**Stage 2.5 再把 `usart` 拆开**（传输层 →
-> `src/platform/usart.c` + `usart_port.c`，CLI → `src/controller/cli.c`，消除平台层反向依赖
+> `src/platform/usart.c` + `usart_port.c`，CLI → `src/hil/cli.c`，消除平台层反向依赖
 > FTL 的倒挂），**Stage 2.6 把剩余的 `platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` /
 > `sys` 七个服务同样补齐**（`src/platform/<svc>.c` + `stm32h743/<svc>_port.c`，HAL 伞头
 > `sys.h` 改名 `sys_port.h`）⇒ **判据 A 的 include 耦合归零**；但 **FMC MMIO 直写与

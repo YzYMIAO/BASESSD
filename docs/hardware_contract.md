@@ -15,7 +15,7 @@ access MMIO registers directly; register access lives in
 > then moved the portable logic of five platform services (`timer` / `watchdog` / `fault` /
 > `delay` / `syscalls`) into shared sources under `src/platform/*.c`, leaving only the
 > hardware adaptation in `src/platform/stm32h743/*_port.c`. **Stage 2.5** split `usart` the
-> same way (transport → `src/platform/usart.c` + `usart_port.c`, CLI → `src/controller/cli.c`),
+> same way (transport → `src/platform/usart.c` + `usart_port.c`, CLI → `src/hil/cli.c`),
 > which also removed the platform layer's reverse dependency on FTL. **Stage 2.6** gave the
 > remaining seven services the same treatment (`platform_ops` / `crc` / `dma` / `mpu` /
 > `qspi` / `rng` / `sys` → shared `src/platform/<svc>.c` + `stm32h743/<svc>_port.c`), which

@@ -62,7 +62,7 @@ sh/debug_env.sh
 
 ---
 
-## 3. 串口 CLI（`src/controller/cli.c` 的命令表）
+## 3. 串口 CLI（`src/hil/cli.c` 的命令表）
 
 串口 = **USART1，115200 波特**（`docs/design/fc_nand_ut.md:767` 的实测口径；
 本仓**未用 RTT**）。⚠ 读串口的终端工具**本仓文档未记录** —— 不要臆造命令，按用户当前用的方式读。

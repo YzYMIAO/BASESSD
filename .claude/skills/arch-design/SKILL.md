@@ -19,7 +19,7 @@ description: 架构/分层决策 —— 新增或重构结构、判断「这件�
 
 | 行业部件 | 本项目 | 说明 |
 |---|---|---|
-| HIL | `src/main.c` + `src/controller/cli.c` + FTL 对外接口 | 命令入口、调度驱动 |
+| HIL | `src/main.c` + `src/hil/cli.c` + FTL 对外接口 | 命令入口、调度驱动 |
 | FTL | `src/ftl/` | L2P · GC · WL · Journal · Checkpoint · BBT · 缓冲调度 |
 | **FCC（硬件）** | **`src/fc/` + `src/nand/`** | ⚠ **两者合起来才等于行业的一个硬件 FCC** |
 | DRAM | `FC_BUFFER_POOL` + FTL 的 SRAM 数组 | DRAM-less：缓冲池就是「片上页缓冲」 |

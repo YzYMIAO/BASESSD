@@ -165,7 +165,7 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 
 Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）。`timer.c` / `watchdog.c` /
 `fault.c` / `delay.c` / `syscalls.c` **已迁出**（§2.1）；`usart.c` 拆成 port（`usart_port.c`）
-+ 共享传输（`src/platform/usart.c`）+ CLI（`src/controller/cli.c`，§5.3）；`platform_ops.c` /
++ 共享传输（`src/platform/usart.c`）+ CLI（`src/hil/cli.c`，§5.3）；`platform_ops.c` /
 `crc.c` / `dma.c` / `mpu.c` / `rng.c` / `qspi.c` / `sys.c` **Stage 2.6 全部拆成共享源 + `*_port.c`**（§5.4）。
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
@@ -239,7 +239,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 >   `rng` / `sys` 七个服务同样拆开（含只做一行转发的 `dma` / `mpu`）。
 > - **G7 的 nand 那一半已断**（`CONFIG_NAND_DMA` 已搬进 `include/platform/dma.h`），
 >   `usart.c` 的两处倒挂（`ftl/ftl.h` / `controller/controller.h`）**Stage 3 已消除**——
->   CLI 整体移到 `src/controller/cli.c`，平台层不再 include 上层头。
+>   CLI 整体移到 `src/hil/cli.c`，平台层不再 include 上层头。
 > - ~~**G2**（`bsp/` 死代码）~~ **✅ 已删除（2026-10-12）**；**G6**（两 target 不对称）未动。
 
 ---
@@ -427,7 +427,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 | **Stage 0**（已交付） | 本设计文档 + 订正失实文档（§六） | 文档结论可复算 |
 | **Stage 1**（**已部分落地**，见 §5.1） | ① 在 `include/platform/` 下为 `delay.h` / `crc.h` / `dma.h` 建抽象头（只搬声明，不搬实现；`nand_dma.h` 与 UART 的 `dma.h` 合并为一份 `dma.h`）；② `src/nand/*`、`src/fc/fc_crc_engine.c` 改 include 抽象头；③ ~~删 `src/platform/bsp/` 死代码（或接线）~~ **✅ 已删除（2026-10-12）**；④ 构建侧：核心模块的 `MODULE_INCS` 移除 `platform/<soc>` 目录 | 判据 A 的 grep 归零 + `make tests` 逐字不变 |
 | **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`timer` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
-| **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/controller/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
+| **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/hil/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
 | **Stage 2.6**（**已落地**，见 §5.4） | **剩余 7 服务补齐**：`platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` / `sys` 全部拆成共享源 + `*_port.c`（含只做一行转发的 `dma` / `mpu`），HAL 伞头 `sys.h` 改名 `sys_port.h` | 判据 A 归零、B/D 空、E 精确相等 + 0 warning + 上板全套通过 |
 | **Stage 2.7**（**已落地**，见 §5.5） | **ISR 分散化**：删总装 `stm32h7rsxx_it.c`，每个 ISR 搬进拥有该外设的 `*_port.c`；EXTI 死代码删除 | 0 warning + `.isr_vector` 664 B 不变 + 上板全套通过 |
 | **Stage 3**（需上板） | 把 `nand_mt29f4g08abadawp.c` 的 `HAL_NAND_MspInit` / `HAL_NAND_Init` / GPIO 与 `nand_fmc.c` 的 FMC MMIO 收进 `<soc>/`，NAND 层只留 `nand_device_t ops` 回调（`fc_nand_design.md §1` 已画出该 seam） | 上板全套通过 |
@@ -524,7 +524,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 **目标**：把平台目录里最后一块含可移植逻辑的大文件 `src/platform/stm32h743/usart.c`
 （1204 行）按同一套三层模式拆开，并**消除唯一的平台层倒挂 G7**（`usart.c` → `ftl/ftl.h`、
 `usart.h` → `controller/controller.h`）。用户拍板：**传输层 + CLI 全拆开**，CLI 落
-`src/controller/cli.c`（controller 已在 `config.mk` 的 `MODULES` 里 ⇒ 零构建配置改动）。
+`src/hil/cli.c`（controller 已在 `config.mk` 的 `MODULES` 里 ⇒ 零构建配置改动）。
 
 **结果**：
 
@@ -534,7 +534,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 | 共享传输 | `src/platform/usart.c`（新，413 行） | RX/TX 环形队列、`_write` newlib 钩子、log sink、TX 状态机、诊断计数 |
 | port | `src/platform/stm32h743/usart_port.c`（新，251 行） | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 15 个原语 |
 | port 头 | `include/platform/stm32h743/usart_port.h`（新，43 行） | `g_uart1_handle` + USART1/GPIO/时钟宏 |
-| 应用层 CLI | `src/controller/cli.c`（新，728 行）+ `include/controller/cli.h` | 行编辑、命令表、help/status/version/log/wr/rd/tr/fl/info/test |
+| 应用层 CLI | `src/hil/cli.c`（新，728 行）+ `include/hil/cli.h` | 行编辑、命令表、help/status/version/log/wr/rd/tr/fl/info/test |
 
 删除：`src/platform/stm32h743/usart.c`、`include/platform/stm32h743/usart.h`
 （后者必须删，否则遮蔽抽象头 —— 裸名 `usart.h` 的 quote-include 先搜 includer 目录）。
@@ -661,7 +661,7 @@ ISR 名字由 `startup_stm32h743xx.s` 的向量表固定 ⇒ 任何 TU 定义同
 - **不**用 vtable、**不**用弱符号做 port 绑定——一律「同名 port 函数 + 链接期解析」（§1.5）。
 - **不**把运行期 vtable 作为主机制——`ssd_platform_ops_t` 保留为**已存在的小 seam**，不扩张。
 - Stage 2 **不**拆 `usart`（1204 行、头泄漏、带 `ftl/ftl.h` 反依赖 G7）—— 已由 Stage 2.5（§5.3）
-  完成：传输层留共享、CLI 移到 `src/controller/cli.c`，G7 倒挂消除。
+  完成：传输层留共享、CLI 移到 `src/hil/cli.c`，G7 倒挂消除。
 - **不动** `src/ftl/**`、`tests/framework/**`、`ut_main.c`。
 
 ---

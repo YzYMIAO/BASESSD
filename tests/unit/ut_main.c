@@ -15,6 +15,10 @@
 
 #include "munit.h"
 
+#if defined(UT_HIL_ENABLE)
+#    include "test_hil.h"
+#endif
+
 #if defined(UT_FC_ENABLE)
 
 /* ── FC-NAND（HIL/FC 层，src/controller + src/fc） ── */
@@ -115,6 +119,11 @@ static MunitSuite g_ut_root_suite = {
                    MUNIT_SUITE_OPTION_NONE,
                    },
 #endif /* UT_FTL_ENABLE */
+
+#if defined(UT_HIL_ENABLE)
+                   /* ══ HIL 板端（真 NAND/FTL，破坏性）══ */
+                   {(char *)"/hil/", g_hil_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+#endif /* UT_HIL_ENABLE */
 
 #if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
                    /* 板端速度测试（破坏性；两条用例按 UT 范围出现） */
