@@ -38,8 +38,6 @@ typedef struct
 } nand_fmc_config_t;
 
 /* ── 后端访问器（同步路径 + 多 LUN 共享，单 bank 下与坐标无关） ── */
-const nand_phy_backend_t *nand_fmc_backend_get(void);
-
 /* ── FMC 后端实例 ──
  * 单 bank：数据/命令/地址窗口与时序对全部 LUN 一致（FMC 时序寄存器是
  * bank 级，同 bank 各 LUN 共享窗口），故无需按 (CH,CE,LUN) 分化，一个即够。 */

@@ -348,7 +348,7 @@ extern "C"
     {
         WORD  sq_used;
         WORD  hsq_used;
-        BYTE  chain_owner; /* fc_chain_owner_e */
+        BYTE  chain_owner; /* 0=NONE/1=SQ/2=HSQ（内部枚举见 fc_internal.h） */
         WORD  sq_head_id;
         WORD  sq_head_chain;
         BYTE  sq_head_op;

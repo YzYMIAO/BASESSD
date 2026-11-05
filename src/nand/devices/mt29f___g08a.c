@@ -6,7 +6,7 @@
  *   - 器件时序表与 ONFI ns → PCC 寄存器周期换算
  *   - 器件描述符：几何/时序/ID + hw_init/set_timing
  *
- * ONFI 命令序列与 UOP 引擎在 FC（src/fc/fc_onfi_1_0.c / fc_uop_engine.c）；
+ * ONFI 命令序列与 UOP 引擎在 FC（src/fc/fc_onfi_1_0.c / fc_nand_engine.c）；
  * 本文件不再执行命令，只提供 NAND 器件/PHY 事实。
  *
  * 芯片：当前封装为 Micron MT29F4G08ABADAWP，512MB SLC，

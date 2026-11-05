@@ -62,7 +62,7 @@ _Noreturn void assertion_terminate(void);
 
 /*
  * 平台上下文弱钩子：断言停机前追加打印的现场信息（如 FC 资源占用）。
- * 默认空实现；由需要的一方（如 src/fc/fc_assert_context.c）强符号覆盖。
+ * 默认空实现；由需要的一方（如 src/fc/fc.c）强符号覆盖。
  * 注意它与 crash_platform_report 是两个不同的钩子，不要合并。
  */
 void assertion_platform_context(void);

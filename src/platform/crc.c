@@ -3,7 +3,7 @@
  *
  * 只放与硬件无关的部分：外设应答自检策略（IDR 写读回环）与 crc_compute 的
  * 对齐/长度契约；寄存器动作（HAL 配置、IDR 读写、Calculate）全在
- * src/platform/<soc>/crc_port.c。上层 src/fc/fc_crc_engine.c 只调本文件的
+ * src/platform/<soc>/crc_port.c。上层 src/fc/fc_data_path.c 只调本文件的
  * crc_init() / crc_compute()。
  *
  * 配置：IEEE 802.3 CRC-32 —— 默认多项式 0x04C11DB7、INIT 0xFFFFFFFF、

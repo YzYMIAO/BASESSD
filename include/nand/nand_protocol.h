@@ -79,12 +79,12 @@ typedef struct
 } nand_command_request_t;
 
 /* 命令完成信息：nand_status = 70h 原始状态字节；
- * transfer_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
+ * execution_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
 typedef struct
 {
     BYTE nand_status; /* 70h 原始状态：OP 后的读状态（FAIL/FAILC） */
     BYTE pre_status;  /* 70h 原始状态：OP 前的读状态（RDY/ARDY/WP） */
-    BYTE transfer_status;
+    BYTE execution_status;
 } nand_command_completion_t;
 
 /* 操作时序参数：busy_timeout_us 供引擎和 PHY handler 共用超时 */

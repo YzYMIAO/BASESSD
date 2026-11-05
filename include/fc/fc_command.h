@@ -379,7 +379,7 @@ struct fc_command_t
  *
  * desc_id 的取值（fc_complete_from_nand 组装）：
  *   初值 = NAND 层透传的 failed_descriptor_id（无失败时即 FC_DESCRIPTOR_ID_INVALID）。
- *   ⚠ 该透传值实为 **flat CW 编号 n**（见 fc_nand_dispatch_tables.c 的 completion_per_cw），
+ *   ⚠ 该透传值实为 **flat CW 编号 n**（见 fc_nand_dispatch.c 的 completion_per_cw），
  *     与 desc id 不同空间——只对"哪个 CW 失败"这一含义有效，勿当 desc 下标用。
  *   Page Read 且带 desc 链时，再按链序覆盖为**首个失败 CW 的 descriptor id**，
  *   失败判据是 FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）；全链无失败位则保持初值。
@@ -412,7 +412,7 @@ struct fc_command_status_t
  * 建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
  * FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
  * ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
- * 都按 PLANE_NUM 定尺。改 plane 语义时这里与 fc_nand_dispatch_tables.c 的
+ * 都按 PLANE_NUM 定尺。改 plane 语义时这里与 fc_nand_dispatch.c 的
  * multi-plane handler 要一起动。
  */
 static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plane_first, BYTE *plane_last)

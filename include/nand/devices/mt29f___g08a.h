@@ -90,7 +90,7 @@
 
 /*
  * 初始化/高速切换入口在 FC 层：
- *   fc_nand_init() / fc_nand_enable_high_speed()（include/fc/fc_nand_interface.h）。
+ *   fc_nand_init() / fc_nand_enable_high_speed()（include/fc/fc_nand_engine.h）。
  * 本头只保留器件事实与器件的 timing-mode 观测。
  */
 

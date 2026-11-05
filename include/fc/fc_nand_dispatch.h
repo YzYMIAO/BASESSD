@@ -1,9 +1,8 @@
 #ifndef FC_NAND_DISPATCH_H
 #define FC_NAND_DISPATCH_H
 
-#include "fc_nand_interface.h"
+#include "fc_nand_engine.h"
 #include "nand_config.h"
-#include "onfi_1_0.h"
 
 #include <stdint.h>
 
@@ -45,7 +44,7 @@ typedef struct
                                      * N = multi-plane（= command->config.multi_plane）。
                                      * ⚠ 原注释写 "1 = single" 与实现不符。
                                      * ⚠ 当前 NAND 层只有 fc_nand_dispatch_scatter_page_buffer() 读它；
-                                     *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 fc_nand_dispatch_tables.c。 */
+                                     *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 fc_nand_dispatch.c。 */
     BYTE plane;                     /* 本命令目标物理 plane 索引。
                                      * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
@@ -90,8 +89,12 @@ nand_result_e fc_nand_dispatch_init(void);
 /* NAND/FMC initialisation succeeded; FC may submit media commands after this.
  * ⚠ 这不是 ONFI 的 "device ready"（R/B# / status bit 6，per-die 且瞬态）——
  *   那由引擎 WAIT_READY 现查。此闩锁表示"FMC 已由同步初始化路径移交给异步 dispatch"。
- * 闩锁本体归 NAND 层（nand_set_armed / nand_is_armed），本函数只做 FC 侧入口。 */
+ * 闩锁本体由 FC 持有（本文件 .c 的静态变量）。
+ */
 void fc_nand_dispatch_set_armed(BYTE armed);
+
+/* 查询异步路径放行闩锁（同步初始化入口用它断言 armed == 0）。 */
+BYTE fc_nand_dispatch_is_armed(void);
 
 /* Submit one pre-resolved command to its LUN FIFO (count = 1). */
 nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_request_t *request);

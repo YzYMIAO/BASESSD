@@ -9,9 +9,9 @@
  * 平台 CRC-32 抽象接口（实现在 src/platform/<soc>/crc.c，走第三方 HAL CRC 驱动）。
  *
  * 分层：实现目录是唯一持有厂商 HAL 的 CRC 句柄类型、管时钟、做外设自检的地方；
- * 上层（src/fc/fc_crc_engine.c）只决定「对哪段数据算、结果怎么判」。
+ * 上层（src/fc/fc_data_path.c）只决定「对哪段数据算、结果怎么判」。
  *
- * 刻意**不** include "sys.h"：唯一使用者 src/fc/fc_crc_engine.c 要保持零 HAL 依赖，
+ * 刻意**不** include "sys.h"：唯一使用者 src/fc/fc_data_path.c 要保持零 HAL 依赖，
  * 故本头只暴露两个裸类型签名，不泄漏任何 HAL 类型。
  *
  * 配置：IEEE 802.3 CRC-32 —— 默认多项式 0x04C11DB7、INIT 0xFFFFFFFF、

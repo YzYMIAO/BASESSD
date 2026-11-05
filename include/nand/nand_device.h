@@ -18,16 +18,6 @@
  */
 
 /*
- * 异步执行放行闩锁。
- *
- * 0 = FMC 仍归同步初始化路径独占（fc_nand_init 的 boot 命令走同步引擎）；
- * 1 = 已移交异步执行路径。器件驱动的同步入口用它断言「仅初始化阶段可调」。
- * 闩锁本体归 NAND 层所有，FC 的命令分发只负责置位。
- */
-void nand_set_armed(BYTE armed);
-BYTE nand_is_armed(void);
-
-/*
  * 板级 target 选择：把后续 NAND 命令发往 (ch,ce)。
  *
  * 当前板只有 FMC Bank3 + 单 NCE，(0,0) 有物理通路；其他坐标返回

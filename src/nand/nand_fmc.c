@@ -8,7 +8,7 @@
  *   fc_uop_engine_step() → g_nand_fmc_handlers[uop->type]() → FMC 窗口写
  *
  * 数据流（读/写）：
- *   fc_nand_* (src/fc/fc_nand_ops.c)
+ *   fc_nand_* (src/fc/fc_nand_engine.c)
  *     → fc 的 UOP 引擎 (uop 解释器)
  *     → 本文件 handler（命令/地址/数据全部走 PIO 窗口）
  *
@@ -56,14 +56,9 @@ static nand_fmc_instance_t g_nand_fmc_instance;
  *
  * @return 后端接口（handlers 为 const 表，context 指向实例内 config）
  */
-const nand_phy_backend_t *nand_fmc_backend_get(void)
-{
-    return &g_nand_fmc_instance.backend;
-}
-
 const nand_phy_backend_t *nand_phy_backend_get(void)
 {
-    return nand_fmc_backend_get();
+    return &g_nand_fmc_instance.backend;
 }
 /**
  * @brief 装配 FMC 后端单例
@@ -242,7 +237,7 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 
     (void)timing;
 
-    /* 请求由 fc_nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
     ASSERT(request->buffer != NULL);
     ASSERT(request->data_length != 0U);
 
@@ -257,7 +252,7 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
         __DMB(); /* 数据屏障：保证对 FMC 数据寄存器的连续写不被重排 */
     }
 
-    completion->transfer_status = NAND_RESULT_OK;
+    completion->execution_status = NAND_RESULT_OK;
     return NAND_RESULT_OK;
 }
 
@@ -276,7 +271,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
     (void)timing;
 
-    /* 请求由 fc_nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
     ASSERT(request->buffer != NULL);
     ASSERT(request->data_length != 0U);
 
@@ -295,7 +290,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
         LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
     }
 
-    completion->transfer_status = NAND_RESULT_OK;
+    completion->execution_status = NAND_RESULT_OK;
     return NAND_RESULT_OK;
 }
 

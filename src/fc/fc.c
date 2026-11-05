@@ -43,16 +43,11 @@
 #include "fc_internal.h"
 #include "fc_nand_dispatch.h"
 #include "fc_queue.h"
-#include "fc_scheduler.h"
 #include "log.h"
 #include "ssd_compiler.h"
 
 #include <stddef.h>
 #include <string.h>
-
-#if CONFIG_FC_RAID
-#    include "fc_raid_engine.h"
-#endif
 
 /* ══════════════════════════════════════════════════════════
  * 1. 静态资源
@@ -458,11 +453,8 @@ SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
         return result;
     }
     /* ── ④ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 fc_nand_dispatch_lun_free，无 busy 表） ── */
-    result = fc_scheduler_init(&controller->scheduler, &controller->sq, &controller->hsq);
-    if (result != FC_STATUS_OK)
-    {
-        return result;
-    }
+    controller->scheduler.sq  = &controller->sq;
+    controller->scheduler.hsq = &controller->hsq;
 
     /* ── ⑤ 本函数里唯一的 NAND 依赖：只清 NAND 侧的通道队列与 per-LUN 链状态
      *    （纯 memset，不碰 FMC 硬件）。硬件那半由 fc_nand_init() 负责，且在 main()
@@ -1356,7 +1348,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
         // 替代断言）；但 ASSERT 在 NDEBUG 下被裁空，故下面**再补一道 release 拒绝**。
         //
         // 为什么非炸不可：NAND 侧的多 plane handler **无条件遍历 PLANE_NUM** 下行地址，
-        // 既不看掩码也不看 plane_count（fc_nand_dispatch_tables.c 的 req_multi_plane_{program,
+        // 既不看掩码也不看 plane_count（fc_nand_dispatch.c 的 req_multi_plane_{program,
         // read,erase}），器件侧多 plane program 会把点名过的 plane **全部编程**。未覆盖的
         // plane 既无数据（cw_buffers[n] 恒 NULL）也无地址，只能凭空造一个——写路径于是
         // **静默**给该 plane 编一页全 0xFF（页缓冲 memset 0xFF、只填掩码内的 CW），
@@ -1613,7 +1605,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         // 2Ah/2Ch（BLOCK_LOCK / BLOCK_LOCK_TIGHT）无地址周期，纳入本分支只为把「块锁族」
         // 记在一处——对它们只是多填一个不会被下发的行地址。
         // 不置 cw_bitmap：7Ah 的状态字节走 DQ 总线直读（NAND_UOP_DATA_OUT_STATUS →
-        // completion->nand_status，不写 request->data），不经任何数据缓冲。
+        // completion->nand_status，不写 request->buffer），不经任何数据缓冲。
         request->plane                     = paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
     }
@@ -1910,7 +1902,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
             continue;
         }
         // 链锁准入：该 LUN 的填充权归另一条队列的未结束链 → 本命令回推跳过。
-        // 为什么「只让拥有者队列喂」就够：链成员在队列里连续（见 fc_scheduler.h 的
+        // 为什么「只让拥有者队列喂」就够：链成员在队列里连续（见 fc_internal.h 的
         // 前置契约），续批恒是该 LUN 在队列里最老的那几条，按序扫描必然先取到它们；
         // 后入队的同 LUN 命令都排在链后面，只会在链结束（chain_owner 清）之后才被取。
         // ⚠ **只回推、不置 suspended**——置了会把链自己的续批也一并锁死（该 LUN 从此
@@ -2126,4 +2118,26 @@ fc_status_e fc_poll_completions_internal(fc_t *controller, fc_command_status_t *
     *count = n;
 
     return (n != 0U) ? FC_STATUS_OK : FC_STATUS_QUEUE_EMPTY;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * 断言终端路径的 FC 现场补充
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * @brief 断言终端路径的 FC 现场补充：把各资源池占用与队列长度追加到日志。
+ *
+ * @note 覆盖 assertion.c 中的同名弱钩子（强符号），由 assertion_terminate 在
+ * flush 之前调用；fc_get_resource_stats 失败时静默跳过，不干扰停机路径。
+ */
+void assertion_platform_context(void)
+{
+    fc_resource_stats_t stats;
+
+    if (fc_get_resource_stats(&stats) != FC_STATUS_OK)
+    {
+        return;
+    }
+
+    LOGE(LOG_TAG_RES "cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu hsq=%hu cq=%hu\r\n", stats.command_used, FC_COMMAND_POOL_DEPTH, stats.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, stats.buffer_used, FC_BUFFER_POOL_DEPTH, stats.sq_used, stats.hsq_used, stats.cq_used);
 }

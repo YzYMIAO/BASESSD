@@ -14,7 +14,7 @@
  *   - nand_operation_map_t 结构体（命令属性 + UOP 序列 + 时序）
  *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
- * 与 fc_uop_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
+ * 与 fc_nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
  * 由 FC 的 UOP 引擎解释执行；本头保留为 NAND 协议定义，供 FC/器件共同使用。
  */
 

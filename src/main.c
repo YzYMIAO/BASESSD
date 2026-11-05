@@ -38,7 +38,7 @@
 // #include "led.h"
 #include "fault.h"
 #include "fc_nand_dispatch.h"
-#include "fc_nand_interface.h"
+#include "fc_nand_engine.h"
 #include "mpu.h"
 #include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"

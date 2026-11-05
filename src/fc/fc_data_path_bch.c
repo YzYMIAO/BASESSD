@@ -1,13 +1,13 @@
-#include "fc_bch_engine.h"
 
 #include "assertion.h"
+#include "fc_data_path.h"
 #include "ssd_compiler.h"
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-// fc_bch_engine.c — BCH ECC 引擎（纠错码）
+// fc_data_path_bch.c — BCH ECC 引擎（纠错码）
 //
 // 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
 // 内核依赖替换为标准 C；表存储改为**编译期静态结构体**（不再 malloc/free），

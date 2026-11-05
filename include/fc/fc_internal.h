@@ -19,7 +19,6 @@
 
 #include "fc.h"
 #include "fc_queue.h"
-#include "fc_scheduler.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -49,6 +48,35 @@ extern "C"
         fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
     } fc_stripe_accum_t;
 #endif /* CONFIG_FC_RAID */
+
+    /* ── 调度器状态 / 命令链描述（原 fc_scheduler.h 并入） ──
+     * 选择逻辑在 fc.c 的 fc_poll_fill；本处只放类型与状态。 */
+#define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH
+
+    typedef struct
+    {
+        fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
+        BYTE            count; /* 0=空, 1=单命令, 2+=链 */
+    } fc_scheduler_chain_t;
+
+    /* 链归属队列（per-LUN 链锁）。粒度是「哪条提交队列能喂这个 LUN」，
+     * 不是「LUN 不能用」；跨填充轮次持久。详见 fc_poll_fill_queue。 */
+    typedef enum
+    {
+        FC_CHAIN_OWNER_NONE = 0U, /* 该 LUN 上没有未结束的链 */
+        FC_CHAIN_OWNER_SQ,        /* 未结束的链在普通队列里 */
+        FC_CHAIN_OWNER_HSQ        /* 未结束的链在高优先队列里 */
+    } fc_chain_owner_e;
+
+    typedef struct
+    {
+        fc_submission_queue_t *sq;
+        fc_submission_queue_t *hsq;
+        /* 链锁：链一旦开始，该 LUN 的填充权归链所在的队列独占，直到链的 END 下发。
+         * 取值 fc_chain_owner_e。跨填充轮次持久——fc_poll_fill 的 suspended[] 每趟
+         * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。 */
+        BYTE chain_owner[CH_NUM][CE_NUM][LUN_NUM];
+    } fc_scheduler_t;
 
     /* ── 命令 / buffer 状态枚举（fc.c / fc_interface.c 共享） ── */
     typedef enum
