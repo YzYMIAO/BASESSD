@@ -37,13 +37,13 @@ typedef struct
     DWORD       expected_id; /* READ ID 的 id[1..4]（大端拼成 32 位） */
 
     nand_result_e (*hw_init)(void);
-    nand_result_e (*set_timing)(BYTE mode, DWORD fmc_hz);
+    nand_result_e (*set_timing)(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz); /* 按 target 切 ONFI mode / FMC 时序 */
 } nand_device_desc_t;
 
 /* 当前选中的器件（由 NAND_DEVICE 编译期选择）。 */
 const nand_device_desc_t *nand_device_get(void);
 
 /* NAND PHY 后端（FMC handler 表 + context），供 FC 的 UOP 引擎绑定。 */
-const nand_phy_backend_t *nand_phy_backend_get(void);
+const nand_phy_backend_t *nand_phy_backend_get(BYTE ch, BYTE ce);
 
 #endif /* NAND_DEVICE_H */

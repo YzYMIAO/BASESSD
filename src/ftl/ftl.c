@@ -98,7 +98,7 @@ static BYTE s_dangling_next;
 
 // 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时按间隔打一行；
 // 时钟缺失时由 log_rate_due 按条数兜底。统一使用 log.h / timer.h 的
-// log_ratelimit_t，本文件不再保留第二套限流类型（C9）。
+// log_ratelimit_t，本文件只保留一套限流类型（C9）。
 static log_ratelimit_t s_dangling_log;        /* BAD 退役块的 dangling 聚合（1 s） */
 static log_ratelimit_t s_cache_rd_err_log;    /* cache 读命令失败（1 s） */
 static log_ratelimit_t s_confirm_log;         /* 待入账超时（5 s） */
@@ -1442,13 +1442,15 @@ static void ftl_cache_wr_member_done(ftl_ctx_t *ftl, pend_req_t *pending, const 
         pg.state     = FTL_CACHE_PAGE_PROGRAMMED;
         pg.proven    = is_end; /* END 的 FAIL 位就是它自己的结论，不会有后继命令 */
 
-        if (ftl_cache_wr_ring_push(ftl, &pg) == false)
+        const bool wr_ring_pushed = ftl_cache_wr_ring_push(ftl, &pg);
+
+        if (wr_ring_pushed == false)
         {
             // 环满属结构性错误：环深 16 ≫ 在飞窗口（≤4 页/窗口 + 前窗尾页）。
             // release 下不能只靠 ASSERT（RISK-CACHE-32）：按 OK 结算会让这页永不确认，
             // host 已看到成功的写静默丢失。按失败中止序列 + 本组报 IO_ERROR（host 重试）。
             LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr page table full lba=%lu — abort sequence\r\n", page_lba);
-            ASSERT(false);
+            ASSERT_MSG(wr_ring_pushed, "cache-wr page table full lba=%lu", page_lba);
             ftl_cache_wr_abort(ftl);
             pend_release_index(&ftl->pending, idx);
             pend_group_complete_subop_multi(&ftl->pending, owners, SSD_STATUS_IO_ERROR);
@@ -1707,9 +1709,9 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
     {
         ssd_status_e sub_status = SSD_STATUS_OK;
 
-        // 成败判据 = **全部**错误位（UNC / CRC / MATA_ERROR / NAND_FAIL / TIMEOUT / RAID），
+        // 成败判据 = **全部**错误位（UNC / CRC / META_ERROR / NAND_FAIL / TIMEOUT / RAID），
         // 不是单看 NAND_FAIL：ECC 不可纠只置 UNC（fc_data_path.c 的 ECC 分支），
-        // 页内 META 不符只置 MATA_ERROR——两者的 NAND_FAIL 都恒清，单看它会把
+        // 页内 META 不符只置 META_ERROR——两者的 NAND_FAIL 都恒清，单看它会把
         // 「内容不可信」当成功。且 UNC 时 FC 跳过后面的解扰/修正步骤，缓冲里
         // 是**加扰垃圾**，搬给 host 就是静默数据损坏。判据见 fc_cmd_status_has_error()。
         //
@@ -1771,7 +1773,7 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
             {
                 // cache sequence 仍在同 LUN 队列里：这里启动 RR 会向同 LUN 插命令，
                 // 破坏 31h/3Fh 管线。直接报组错误；后续成员照常完成。
-                // 失败原因（NAND_FAIL/UNC/CRC/MATA/EMPTY…）只在这条 completion 上有，
+                // 失败原因（NAND_FAIL/UNC/CRC/META/EMPTY…）只在这条 completion 上有，
                 // 限流打出来：定位「缓存读指到了什么页」不靠猜。
                 LOGE_IF(log_ratelimit_due(&s_cache_rd_err_log), LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
                 sub_status = SSD_STATUS_IO_ERROR;
@@ -1853,7 +1855,7 @@ void ftl_global_init(void)
  * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
  * ══════════════════════════════════════════════════════════════ */
 BYTE       g_die_count;
-BYTE       g_chcelun_table[CH_MAX][CE_MAX][LUN_MAX];
+BYTE       g_chcelun_table[CH_NUM][CE_NUM][LUN_NUM];
 ftl_topo_t g_die_table[FTL_DIE_MAX];
 
 /**
@@ -1865,7 +1867,7 @@ ftl_topo_t g_die_table[FTL_DIE_MAX];
  * @param targets 板级物理拓扑
  * @return true 至少一个 die 且往返自检通过；false 无 die / 越界
  */
-bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
+bool ftl_topology_build(const nand_target_info_t targets[CH_NUM][CE_NUM])
 {
     memset(g_chcelun_table, 0xFF, sizeof(g_chcelun_table));
     for (BYTE die = 0U; die < FTL_DIE_MAX; die++)
@@ -1879,11 +1881,11 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
     /* 编号顺序必须与 topo_2_die 一致（ch 最快、lun 最慢）：
      * 满配矩形拓扑下 die == topo_2_die，避免出现第二套扁平坐标（C9）。
      * 稀疏拓扑时 die 紧凑。 */
-    for (BYTE lun = 0U; lun < LUN_MAX; lun++)
+    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
     {
-        for (BYTE ce = 0U; ce < CE_MAX; ce++)
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
         {
-            for (BYTE ch = 0U; ch < CH_MAX; ch++)
+            for (BYTE ch = 0U; ch < CH_NUM; ch++)
             {
                 if ((targets[ch][ce].present == 0U) || (lun >= targets[ch][ce].lun_count) || (targets[ch][ce].lun_present[lun] == 0U))
                 {
@@ -1916,7 +1918,7 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX])
         const BYTE ce  = die_2_ce(die);
         const BYTE lun = die_2_lun(die);
 
-        if ((ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX) || (g_chcelun_table[ch][ce][lun] != die))
+        if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM) || (g_chcelun_table[ch][ce][lun] != die))
         {
             return false;
         }
@@ -2520,7 +2522,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
 
             // CW 级映射的结构不变量：**物理 plane == LBA 的 plane 位**。
             // 违反 ⇒ FC 侧 desc->meta（由**物理** plane/cw 铸出）还原出的扇区 LBA 不是
-            // 这一条，读校验必挂 MATA_ERROR；且位图段（按 plane 位算）与 paa 的 plane 位
+            // 这一条，读校验必挂 META_ERROR；且位图段（按 plane 位算）与 paa 的 plane 位
             // 会分叉 ⇒ 空链。写路径由构造保证（新页从 pair 取），读路径在此拦下。
             // 属映射表损坏（旧介质格式 / bit rot），不是编程错误。
             if (pl != ftl_lba_plane(l))
@@ -2590,7 +2592,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
     // 后者按段校验位图）
     cmd->config.operation   = ftl_plane_read_op(nplanes);
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
-    cmd->config.cw          = CW_NUM - 1U;
+    cmd->config.cw_count    = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -2755,7 +2757,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     break;
 
                 default:
-                    ASSERT(false); /* H7/C7：新增枚举值必须在此显式处理 */
+                    ASSERT_DEFAULT(ftl_cache_read_result_e);
                     break;
             }
         }
@@ -2787,7 +2789,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     break;
 
                 default:
-                    ASSERT(false); /* H7/C7：新增枚举值必须在此显式处理 */
+                    ASSERT_DEFAULT(ftl_cache_write_result_e);
                     break;
             }
         }

@@ -15,6 +15,8 @@
 #include <stddef.h>
 #include <string.h>
 
+_Static_assert(OP_COUNT <= 256U, "fc_cmd_conf_t.operation is 8 bits");
+
 // 状态位名表 → "A|B|?"。位顺序按严重性/可读性排列；未知位以 "?" 占位。
 // 只写 buf，不分配资源。
 typedef struct
@@ -84,7 +86,7 @@ static const fc_status_name_t s_cw_status_names[] = {
     {      FC_CW_STATUS_FAIL,  "FAIL"},
     {       FC_CW_STATUS_UNC,   "UNC"},
     { FC_CW_STATUS_CRC_ERROR,   "CRC"},
-    {FC_CW_STATUS_MATA_ERROR,  "MATA"},
+    {FC_CW_STATUS_META_ERROR,  "META"},
     {FC_CW_STATUS_RAID_ERROR,  "RAID"},
     {     FC_CW_STATUS_EMPTY, "EMPTY"},
 };
@@ -94,7 +96,7 @@ static const fc_status_name_t s_cmd_status_names[] = {
     {FC_CMD_STATUS_FAIL_CACHE,   "FAILC"},
     {   FC_CMD_STATUS_TIMEOUT, "TIMEOUT"},
     {FC_CMD_STATUS_DATA_ERROR,    "DATA"},
-    {FC_CMD_STATUS_MATA_ERROR,    "MATA"},
+    {FC_CMD_STATUS_META_ERROR,    "META"},
     {    FC_CMD_STATUS_AREADY,    "ARDY"},
     {       FC_CMD_STATUS_RDY,     "RDY"},
     {        FC_CMD_STATUS_WP,      "WP"},
@@ -151,19 +153,16 @@ bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 /**
  * @brief 命令前置条件校验
  *
- * 只做 ASSERT，恒返回 FC_STATUS_OK；release 下断言整段裁空。
+ * 前置违反一律 ASSERT；release 下断言整段裁空（调用链保证前置）。
  *
  * @param command 命令
- * @return FC_STATUS_OK
  */
-fc_status_e fc_command_validate(const fc_command_t *command)
+void fc_command_validate(const fc_command_t *command)
 {
     ASSERT(command != NULL);
     ASSERT(command->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）
     ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(command->config.operation) == false) || (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
-    // NDEBUG 下断言整段裁空 → command 变未用形参，吞掉（同 fc_submit 的 (void)command_id;）
+    // NDEBUG 下断言整段裁空 → command 变未用形参，吞掉
     (void)command;
-
-    return FC_STATUS_OK;
 }

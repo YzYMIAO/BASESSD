@@ -14,6 +14,7 @@
  *   - LUN 位宽推导 + PAA 打包布局（[CW][PAGE][PLANE][BLOCK][LUN]）
  *   - nand_addr_t 与 PAA 访问器 / 替换函数
  *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]
+ *   - 上电扫描 target 结果（nand_target_info_t）
  *
  * 器件事实（PAGE_SIZE / PAGES_PER_BLOCK / PLANE_NUM / LUN_NUM / 地址位宽 /
  * NAND_PAA_TO_ROW / FMC / ID）在 `nand/devices/<family>.h`，由宏选择。
@@ -41,7 +42,7 @@
  * 它们不能从 NAND 器件头推出——同一颗芯片可以接 1 条或多条通道。
  * 实际存在多少 target 由 fc_nand_scan_targets() 上电扫描决定。
  *
- * LUN_MAX 来自器件头 LUN_NUM（器件属性）；运行时实际 LUN 数由 ONFI
+ * LUN_NUM 来自器件头（器件属性）；运行时实际 LUN 数由 ONFI
  * 参数页 logical_units 给出，并逐 LUN 用 78h 探测确认。
  * 构建时可用 -DNAND_BOARD_CH_NUM=... / -DNAND_BOARD_CE_NUM=... 覆盖。
  * ══════════════════════════════════════════════════════════════ */
@@ -52,11 +53,8 @@
 #    define NAND_BOARD_CE_NUM (1U)
 #endif
 
-#define CH_NUM  NAND_BOARD_CH_NUM
-#define CE_NUM  NAND_BOARD_CE_NUM
-#define CH_MAX  CH_NUM
-#define CE_MAX  CE_NUM
-#define LUN_MAX LUN_NUM
+#define CH_NUM NAND_BOARD_CH_NUM
+#define CE_NUM NAND_BOARD_CE_NUM
 
 _Static_assert(CH_NUM >= 1U, "板级通道数至少为 1");
 _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
@@ -65,7 +63,7 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
  * 一、位宽推导与软件布局
  * ══════════════════════════════════════════════════════════════ */
 
-/* LUN 位宽：由器件头的 LUN_NUM 推导（ceil-log2，最多 4 bit）。
+/* LUN 位宽：由器件头的 LUN_NUM 推导（ceil-log2，最多 6 bit）。
  * LUN_NUM 是 2 的幂时恰好相等；非 2 的幂时上位补零（值域仍由
  * paa_is_valid_* 检查）。 */
 #if LUN_NUM <= 1
@@ -78,8 +76,12 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 #    define LUN_ADDR_WIDTH (3U)
 #elif LUN_NUM <= 16
 #    define LUN_ADDR_WIDTH (4U)
+#elif LUN_NUM <= 32
+#    define LUN_ADDR_WIDTH (5U)
+#elif LUN_NUM <= 64
+#    define LUN_ADDR_WIDTH (6U)
 #else
-#    error "LUN_NUM > 16 is not supported"
+#    error "LUN_NUM > 64 is not supported by 3-byte row address"
 #endif
 
 /* CW 布局（FC 层软件选择，不是器件几何）：每页 4 个 CW，码字 528B。
@@ -108,6 +110,11 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */
 #define CW_TOTAL_MAX (CW_NUM * PLANE_NUM)
+
+/* flat CW 编号的无效哨兵：n = plane*CW_NUM + cw ∈ [0, CW_TOTAL_MAX)。
+ * 用于「没有失败 CW」这类 per-CW 结果字段；与 descriptor/command 的 0xFFFF
+ * 哨兵语义不同（C11），故独立命名。 */
+#define NAND_CW_INVALID ((WORD)CW_TOTAL_MAX)
 
 /* ══════════════════════════════════════════════════════════════
  * 二、PAA 打包布局（低位优先）
@@ -175,7 +182,7 @@ typedef struct
     WORD block; /* Block number (0..2047) */
     BYTE plane; /* Plane (0/1) */
     BYTE page;  /* Page in block (0..63) */
-    BYTE cw;    /* Code Word (0..3, 0=全部) */
+    BYTE cw;    /* Code Word 号（0..CW_NUM-1；0 = CW0，不是“全部”） */
 } nand_addr_t;
 
 static inline DWORD paa_to_page(DWORD paa)
@@ -319,11 +326,10 @@ static inline DWORD lba_to_meta(DWORD lba, DWORD plane, DWORD cw)
  * DWORD  (packed) — L2P 表存储接口用，32-bit 紧凑（**定义于 ftl/ftl_config.h**）
  *
  * 反向的 paa_from_addr() 定义在 PAA 段内；PBA 侧的构造/转换（pba_make / pba_pack /
- * pba_fields / pba_to_paa）落在 ftl/ftl_config.h §三。**v0.73 起 `nand_addr_t` 已退出
- * FTL 层** ⇒ 本文件的 addr_from_paa() 在 `src/` 下暂无调用者（保留作 NAND/FC 侧原语）。
+ * pba_fields / pba_to_paa）落在 ftl/ftl_config.h §三。
  *
- * FTL 遍历路径不再打包再拆包，而是直接用 pba_to_cmd（定义于 ftl_fc_interface.h）
- * 由 PBA 填入 FC 命令。
+ * FTL 遍历路径直接用 pba_to_cmd（定义于 ftl_fc_interface.h）由 PBA 填入 FC 命令；
+ * `addr_from_paa()` 保留为 NAND/FC 侧原语。
  * ══════════════════════════════════════════════════════════════ */
 
 /* 从 PAA + CH/CE 构造 nand_addr_t（元数据固定位置 / Directory 查找结果用） */
@@ -356,9 +362,9 @@ typedef struct
 {
     BYTE present;
     BYTE lun_count;
-    BYTE lun_present[LUN_MAX];
+    BYTE lun_present[LUN_NUM];
 } nand_target_info_t;
 
-extern nand_target_info_t g_nand_targets[CH_MAX][CE_MAX];
+extern nand_target_info_t g_nand_targets[CH_NUM][CE_NUM];
 
 #endif /* NAND_CONFIG_H */

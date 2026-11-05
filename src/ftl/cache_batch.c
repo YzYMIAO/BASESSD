@@ -379,7 +379,7 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
         }
 
         cmd->config.multi_plane = PLANE_NUM;
-        cmd->config.cw          = CW_NUM - 1U;
+        cmd->config.cw_count    = CW_NUM - 1U;
         cmd->config.crc         = FC_CRC_ENABLE;
         cmd->config.random      = FC_RANDOM_ENABLE;
         cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -629,7 +629,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     if (run_used >= FTL_CACHE_READ_MAX_RUN_PAIRS)
     {
         // 不变量：吃到上限的那一窗口必须已带 LAST 收尾 ⇒ 这里不应再看到 active。
-        ASSERT(false);
+        ASSERT_MSG(run_used < FTL_CACHE_READ_MAX_RUN_PAIRS, "cache read run over max: run=%lu", run_used);
         ftl_cache_seq_release(ftl);
         return FTL_CACHE_READ_DECLINED;
     }

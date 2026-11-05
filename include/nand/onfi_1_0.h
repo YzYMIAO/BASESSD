@@ -1,5 +1,5 @@
-#ifndef PLATFORM_STM32H743_ONFI_1_0_H
-#define PLATFORM_STM32H743_ONFI_1_0_H
+#ifndef NAND_ONFI_1_0_H
+#define NAND_ONFI_1_0_H
 
 #include "nand_protocol.h"
 
@@ -12,6 +12,7 @@
  *   - NAND 命令字节宏（NAND_CMD_* / NAND_STATUS_*）
  *   - OP_* 操作码（g_nand_operation_map 的下标）
  *   - nand_operation_map_t 结构体（命令属性 + UOP 序列 + 时序）
+ *   - ONFI 参数页结构 / 解码声明
  *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
  * 与 fc_nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
@@ -19,34 +20,35 @@
  */
 
 /* ONFI 1.0 command cycles used by the initial command set. */
-#define NAND_CMD_READ_PAGE_SETUP            0x00U
-#define NAND_CMD_READ_PAGE_CONFIRM          0x30U
-#define NAND_CMD_PROGRAM_PAGE_SETUP         0x80U
-#define NAND_CMD_PROGRAM_PAGE_CONFIRM       0x10U
-#define NAND_CMD_BLOCK_ERASE_SETUP          0x60U
-#define NAND_CMD_BLOCK_ERASE_CONFIRM        0xD0U
-#define NAND_CMD_READ_STATUS                0x70U
-#define NAND_ONFI_CMD_RESET                 0xFFU
-#define NAND_CMD_READ_ID                    0x90U
-#define NAND_CMD_READ_PARAMETER_PAGE        0xECU
-#define NAND_CMD_READ_UNIQUE_ID             0xEDU
-#define NAND_CMD_GET_FEATURES               0xEEU
-#define NAND_CMD_SET_FEATURES               0xEFU
-#define NAND_CMD_READ_STATUS_ENHANCED       0x78U
-#define NAND_CMD_RANDOM_DATA_READ           0x05U
-#define NAND_CMD_RANDOM_DATA_READ_TWO_PLANE 0x06U
-#define NAND_CMD_RANDOM_DATA_READ_END       0xE0U
-#define NAND_CMD_RANDOM_DATA_INPUT          0x85U
-#define NAND_CMD_READ_PAGE_CACHE_SEQ        0x31U
-#define NAND_CMD_READ_PAGE_CACHE_LAST       0x3FU
-#define NAND_CMD_PROGRAM_PAGE_CACHE         0x15U
-#define NAND_CMD_INTERNAL_DATA_MOVE         0x35U
-#define NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH 0x11U /* Multi-Plane 编程切换 plane */
-#define NAND_CMD_BLOCK_UNLOCK_LOW           0x23U
-#define NAND_CMD_BLOCK_UNLOCK_HIGH          0x24U
-#define NAND_CMD_BLOCK_LOCK                 0x2AU
-#define NAND_CMD_BLOCK_LOCK_TIGHT           0x2CU
-#define NAND_CMD_BLOCK_LOCK_STATUS          0x7AU
+#define NAND_CMD_READ_PAGE_SETUP      0x00U
+#define NAND_CMD_READ_PAGE_CONFIRM    0x30U
+#define NAND_CMD_PROGRAM_PAGE_SETUP   0x80U
+#define NAND_CMD_PROGRAM_PAGE_CONFIRM 0x10U
+#define NAND_CMD_BLOCK_ERASE_SETUP    0x60U
+#define NAND_CMD_BLOCK_ERASE_CONFIRM  0xD0U
+#define NAND_CMD_READ_STATUS          0x70U
+/* 前缀 ONFI_ 区分 HAL 的 NAND_CMD_RESET（两者数值相同、命名空间不同）。 */
+#define NAND_ONFI_CMD_RESET                   0xFFU
+#define NAND_CMD_READ_ID                      0x90U
+#define NAND_CMD_READ_PARAMETER_PAGE          0xECU
+#define NAND_CMD_READ_UNIQUE_ID               0xEDU
+#define NAND_CMD_GET_FEATURES                 0xEEU
+#define NAND_CMD_SET_FEATURES                 0xEFU
+#define NAND_CMD_READ_STATUS_ENHANCED         0x78U
+#define NAND_CMD_RANDOM_DATA_READ             0x05U
+#define NAND_CMD_RANDOM_DATA_READ_MULTI_PLANE 0x06U
+#define NAND_CMD_RANDOM_DATA_READ_END         0xE0U
+#define NAND_CMD_RANDOM_DATA_INPUT            0x85U
+#define NAND_CMD_READ_PAGE_CACHE_SEQ          0x31U
+#define NAND_CMD_READ_PAGE_CACHE_LAST         0x3FU
+#define NAND_CMD_PROGRAM_PAGE_CACHE           0x15U
+#define NAND_CMD_INTERNAL_DATA_MOVE           0x35U
+#define NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH   0x11U /* Multi-Plane 编程切换 plane */
+#define NAND_CMD_BLOCK_UNLOCK_LOW             0x23U
+#define NAND_CMD_BLOCK_UNLOCK_HIGH            0x24U
+#define NAND_CMD_BLOCK_LOCK                   0x2AU
+#define NAND_CMD_BLOCK_LOCK_TIGHT             0x2CU
+#define NAND_CMD_BLOCK_LOCK_STATUS            0x7AU
 
 /* 90h 的地址段取值（手册 Figure 26 / Figure 27）：
  *   00h → 5 字节厂商/器件 ID（OP_READ_ID）
@@ -92,8 +94,7 @@
  *   链、字节落 USER 缓冲；本 op 是 90h 命令、**无 desc 链**、4 字节经控制器侧暂存
  *   `g_fc_return_staging` 进 CQ 的 `param`（同 OP_GET_FEATURES / OP_READ_META）。
  *
- * 槽位 9 复用：原 OP_RANDOM_DATA_INPUT 已删除（功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE
- * 完整覆盖）⇒ 9 是唯一可安全复用的空槽（槽位 20 是墓碑，**不得复用**）。OP_COUNT 不变。
+ * 槽位 9 当前用于本操作；槽位 20 是保留空槽，不复用。
  */
 #define OP_READ_ONFI_SIGNATURE (9U)
 
@@ -172,7 +173,8 @@
 /* ═══ 2. 内部数据搬移（copy-back） ═══ */
 
 /* 操作码 9 已复用为 OP_READ_ONFI_SIGNATURE（定义见 §1，与 OP_READ_ID 同族）——
- * 原 OP_RANDOM_DATA_INPUT 的功能早已由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
+ * 本操作码用于 READ_ONFI_SIGNATURE；随机数据输入由
+ * OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 覆盖。 */
 
 /* 操作码 11 复用为 OP_READ_META（见 §3 页读 / Cache 读）。 */
 
@@ -194,7 +196,7 @@
 
 /* READ OPERATIONS */
 
-/* OP_READ_META（槽位 11，原 OP_READ_MODE 复用）
+/* OP_READ_META（复用槽位 11）
  * ----------------------------------------------------------------------------------------------
  * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< Dout1..Dout4 >-< 70 >-< Status >
  * 只读回读**指定页、指定 CW 的前 4 字节 META**（CW 布局 [META:4][CRC:4][USER:512][PARITY:8]，
@@ -328,8 +330,8 @@
  */
 #define OP_READ_FOR_INTERNAL_DATA_MOVE (19U)
 
-/* 操作码 20 已删除（原 OP_PROGRAM_FOR_INTERNAL_MOVE），
- * 与 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 功能完全重复，只保留后者。 */
+/* 操作码 20 保留为空槽，不复用；内部数据搬移统一用
+ * OP_PROGRAM_FOR_INTERNAL_DATA_MOVE。 */
 
 /* BLOCK LOCK OPERATIONS */
 /* OP_BLOCK_UNLOCK_LOW
@@ -365,7 +367,7 @@
  * < 7A >-< R1 >-< R2 >-< R3 > ~~~~ < Status >
  * ----------------------------------------------------------------------------------------------
  * ⚠ 状态字节**不走数据缓冲**：引擎直读 DQ 总线送进 completion->nand_status，FC 侧再拷进
- * CQ 的 fc_param_t param.bytes[0]（v49）。故 op 表 has_data = 0 —— 它不搬 host 数据，
+ * CQ 的 fc_param_t param.bytes[0]。故 op 表 has_data = 0 —— 它不搬 host 数据，
  * 无需 desc 链。位定义：I/O2 = Lock#（0 = 锁定，1 = 未锁）、I/O1 = LT#、I/O0 = LT（1 = 紧锁）。
  */
 #define OP_BLOCK_LOCK_STATUS (25U)
@@ -513,7 +515,7 @@
 #define OP_COUNT (50U) /* 0..49 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
-#define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */
+#define OP_TYPE_ATOMIC (0U) /* 原子 OP 码 */
 #define OP_TYPE_ISSUE  (1U) /* ISSUE 段——发完立即返回 */
 #define OP_TYPE_WAIT   (2U) /* WAIT 段——等完成，无数据 */
 #define OP_TYPE_FETCH  (3U) /* FETCH 段——等完成 + 读数据 */
@@ -652,4 +654,4 @@ typedef struct
  */
 BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info);
 
-#endif /* PLATFORM_STM32H743_ONFI_1_0_H */
+#endif /* NAND_ONFI_1_0_H */

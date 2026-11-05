@@ -11,7 +11,7 @@
  * 日志前缀：
  *   [FC]    FC 层 — submit/completion/busy
  *   [SCH]   调度器 — select/skip/chain
- *   [DSP]   Dispatch — Phase 1/2 状态机
+ *   [DSP]   Dispatch — Phase V 状态机
  *   [ENG]   Engine — uop step 逐条执行
  *   [FMC]   FMC — PIO/WAIT_READY
  *   [INI]   Init — NAND 初始化流程

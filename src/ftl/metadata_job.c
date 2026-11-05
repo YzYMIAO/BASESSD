@@ -447,7 +447,7 @@ static ftl_status_e md_submit(md_dir_cache_t *dir, md_submit_op_e op, DWORD addr
             st = ftl_async_read_page(&cmd, addr, FTL_PAGE_CFG_META());
             break;
         default:
-            ASSERT(false); /* H7/H14：内部枚举，调用者只传字面量 */
+            ASSERT_DEFAULT(md_submit_op_e);
             return FTL_ERROR;
     }
 

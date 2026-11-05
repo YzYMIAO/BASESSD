@@ -42,39 +42,46 @@
  * -------------------------------------------------------------------- */
 static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
 
-/* ── FMC 后端实例（单例）──
- * 数据/命令/地址窗口 + 时序对全部 LUN 一致：FMC 时序寄存器（PMEM/PATT）
- * 是 bank 级，同 bank 各 LUN 共享窗口，硬件层面无法按 LUN 分化。
- * backend 只读共享——handlers 是 const 表，context 指向本实例 config；
- * 每事务可变状态在 fc_uop_engine_state_t，不在 backend，故多 LUN 并发安全。 */
-static nand_fmc_instance_t g_nand_fmc_instance;
+/* ── FMC 后端实例（按 target）──
+ * 每个 (ch,ce) 一个实例；同 bank 的各 LUN 共享窗口，LUN 由 PAA 行地址表达。
+ * handlers 是 const 表，context 指向该 target 的 config；每事务可变状态在
+ * fc_uop_engine_state_t，不在 backend，故多 target 并发安全。 */
+static nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM];
 
 /**
- * @brief 取 FMC 后端单例
+ * @brief 取指定 target 的 FMC 后端
  *
- * 同步路径与 fc_nand_dispatch_task_load() 共用同一后端（单 bank 拓扑下与坐标无关）。
+ * 同步路径与 fc_nand_dispatch_task_load() 都按 (ch,ce) 取后端。
  *
- * @return 后端接口（handlers 为 const 表，context 指向实例内 config）
+ * @return 后端接口（handlers 为 const 表，context 指向该 target 的 config）
  */
-const nand_phy_backend_t *nand_phy_backend_get(void)
+const nand_phy_backend_t *nand_phy_backend_get(BYTE ch, BYTE ce)
 {
-    return &g_nand_fmc_instance.backend;
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
+    return &g_nand_fmc_instances[ch][ce].backend;
 }
 /**
- * @brief 装配 FMC 后端单例
+ * @brief 装配指定 target 的 FMC 后端
  *
- * @param config FMC 窗口指针 + 时序（按值复制进实例，故生命周期只需到调用结束）
+ * @param ch/ce 目标坐标
+ * @param config FMC 窗口指针 + R/B# 接线（按值复制进实例）
  * @return NAND_RESULT_OK
  */
+nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_config_t *config)
+{
+    /* 前置条件由调用者保证（板级/器件初始化传入 const config） */
+    ASSERT(config != NULL);
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
+
+    g_nand_fmc_instances[ch][ce].config           = *config;
+    g_nand_fmc_instances[ch][ce].backend.handlers = g_nand_fmc_handlers;
+    g_nand_fmc_instances[ch][ce].backend.context  = &g_nand_fmc_instances[ch][ce].config; /* 指向实例内持久副本 */
+    return NAND_RESULT_OK;
+}
+
 nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
 {
-    /* 前置条件由调用者保证（mt29f_hw_init 传入模块内 const config） */
-    ASSERT(config != NULL);
-
-    g_nand_fmc_instance.config           = *config;
-    g_nand_fmc_instance.backend.handlers = g_nand_fmc_handlers;
-    g_nand_fmc_instance.backend.context  = &g_nand_fmc_instance.config; /* 指向实例内持久副本，handler 据此转换合法 */
-    return NAND_RESULT_OK;
+    return nand_fmc_init_target(0U, 0U, config);
 }
 
 /**
@@ -87,7 +94,8 @@ nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
  */
 static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
-    (void)context;
+    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+
     (void)uop;
     (void)request;
     (void)completion;
@@ -99,12 +107,12 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
      * 如果第一次读到 RB#=HIGH，说明 NAND 已经 ready 或根本没 busy，
      * 直接返回 OK（极短 busy 或无 busy 均视为 ready）。
      */
-    if (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
+    if (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) == 0U)
     {
         /* RB# LOW → NAND busy，spin-wait 直到 ready */
         DWORD polls = 0U;
         FMC_LOGD("WAIT_READY start op=%hhu\r\n", request->operation);
-        while (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
+        while (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) == 0U)
         {
             polls++;
             if (polls >= timing->busy_timeout_us)
@@ -124,6 +132,31 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
 }
 
 /**
+ * @brief 地址窗口写入值的显式窄化（FMC 地址窗口是 byte 宽）
+ *
+ * @param value 32 位地址值
+ * @return 低 8 位
+ */
+static BYTE nand_fmc_address_byte(DWORD value)
+{
+    return (BYTE)value;
+}
+
+/**
+ * @brief 取 request->row[plane] 的指定字节（plane 由 UOP operand 指定）
+ *
+ * @param request 命令请求
+ * @param uop     ROW_* 微指令（operand = plane 下标）
+ * @param shift   字节偏移（0/8/16）
+ * @return 对应地址字节
+ */
+static BYTE nand_fmc_row_byte(const nand_command_request_t *request, const nand_uop_t *uop, BYTE shift)
+{
+    ASSERT(uop->operand < NAND_PLANE_MAX);
+    return nand_fmc_address_byte(request->row[uop->operand] >> shift);
+}
+
+/**
  * @brief 写命令字节（COMMAND）
  *
  * @param uop operand 即命令字节
@@ -136,7 +169,7 @@ static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop,
     (void)request;
     (void)timing;
     (void)completion;
-    *config->command = uop->operand;
+    *config->command = (BYTE)uop->operand;
     return NAND_RESULT_OK;
 }
 
@@ -154,7 +187,7 @@ static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = request->column;
+    *config->address = nand_fmc_address_byte(request->column);
     return NAND_RESULT_OK;
 }
 
@@ -170,7 +203,7 @@ static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (request->column >> 8U);
+    *config->address = nand_fmc_address_byte(request->column >> 8U);
     return NAND_RESULT_OK;
 }
 
@@ -186,7 +219,7 @@ static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = request->row[uop->operand];
+    *config->address = nand_fmc_row_byte(request, uop, 0U);
     return NAND_RESULT_OK;
 }
 
@@ -202,7 +235,7 @@ static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = (request->row[uop->operand] >> 8U);
+    *config->address = nand_fmc_row_byte(request, uop, 8U);
     return NAND_RESULT_OK;
 }
 
@@ -218,7 +251,7 @@ static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = (request->row[uop->operand] >> 16U);
+    *config->address = nand_fmc_row_byte(request, uop, 16U);
     return NAND_RESULT_OK;
 }
 

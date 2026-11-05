@@ -16,7 +16,7 @@
  *     · ③④ 两个「整段访问」入口各自显式算 fc_command_plane_span_cw_bitmap(cmd)，
  *       只有 ① 接受调用者给的部分位图（空集 / 越段会被校验函数拒绝）；
  *     · 位图是建链的**输入**，不存进命令结构体（③④ 算好后直接传参）；
- *     · config.cw 不参与建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h）。
+ *     · config.cw_count 不参与建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h）。
  *
  * 【数据搬运】
  *   ⑤ ftl_cmd_write_data() — 用户数据写入 desc 链各 CW 的 USER 区
@@ -78,7 +78,7 @@
  * @brief host 是否还有余量提交 n 个子操作。
  *
  * 逐池检查：受理本批 n 个子操作后，命令 / desc / buffer / SQ / HSQ 仍各留
- * FTL_FC_HOST_RESERVED_* 个槽位。查询失败时不阻塞前台（宁可少一次预留）。
+ * FTL_FC_HOST_RESERVED_* 个槽位。
  *
  * @param n 本批子操作数（命令 / SQ 各占 n 个槽，desc / buffer 各占 n × FTL_LBA_PER_PAIR 个）
  * @return true 余量足够；false 应背压 host 写
@@ -87,10 +87,7 @@ static inline bool ftl_fc_host_budget_ok_n(DWORD n)
 {
     fc_resource_stats_t st;
 
-    if (fc_get_resource_stats(&st) != FC_STATUS_OK)
-    {
-        return true;
-    }
+    fc_get_resource_stats(&st);
 
     const DWORD cw = n * FTL_LBA_PER_PAIR;
 
@@ -236,7 +233,7 @@ static inline BYTE ftl_cache_prog_op(BYTE j, BYTE n)
  * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
  * （Policy B）请用 ftl_cmd_setup_ppa_pair_cw()**，本函数不适用。
  *
- * @param cmd       须已设 config.operation / multi_plane / paa（config.cw 已不读）
+ * @param cmd       须已设 config.operation / multi_plane / paa（config.cw_count 不参与建链）
  * @param cw_bitmap flat 字面位图；无数据 op（ERASE / RESET / FEATURES）不读它
  * @return FTL_OK 建链成功
  *         FTL_ERROR 池空；位图 0 或越出 plane 段是编程错误 → ASSERT
@@ -278,13 +275,13 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
  *
  * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
  * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
- *   ch/ce/lun           → cmd->config 位域
+ *   ch/ce/lun           → cmd->route 字段
  *   block/plane/page/cw → cmd->paa（pba_to_paa 在 FTL 侧一次转出）
  *
  * 本入口是同步页原语与遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座，
  * 语义是「整段访问」（单一 PBA，隐含「两 plane 同 block」；Policy B 用 _pair_cw 入口）。
  * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
- * fc_submit 也会被 fc_command_validate 以 desc_id == INVALID 拒绝。
+ * fc_submit 的 fc_command_validate 会在 debug 下以 desc_id == INVALID ASSERT。
  * 无数据操作（ERASE / RESET / META / COLUMN 等）由 ftl_cmd_configure_descriptors
  * 短路为 desc_id = INVALID。
  *
@@ -306,12 +303,12 @@ static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
      * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
     ASSERT(pba_is_valid(pba));
 
-    cmd->config.ch  = pba_to_ch(pba);
-    cmd->config.ce  = pba_to_ce(pba);
-    cmd->config.lun = pba_to_lun(pba);
-    /* PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
+    cmd->route.ch  = pba_to_ch(pba);
+    cmd->route.ce  = pba_to_ce(pba);
+    cmd->route.lun = pba_to_lun(pba);
+    /* PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，调用点不在 FC 内部。
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
-    cmd->paa        = pba_to_paa(pba);
+    cmd->paa       = pba_to_paa(pba);
 
     // 位图不存进命令结构体，直接算出来当实参传。
     // 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。
@@ -322,16 +319,16 @@ static inline ftl_status_e pba_to_cmd(fc_command_t *cmd, DWORD pba)
  * @brief FC 命令 → PBA（pba_to_cmd 的逆）
  *
  * FTL 模块要回读自己下发的命令地址时用它，**不必**直接摸 cmd->paa——PAA 是 FC/器件域
- * 的表示。ch/ce 取 cmd->config 位域，其余字段由 paa_to_pba() 反重排。
+ * 的表示。ch/ce 取 cmd->route，其余字段由 paa_to_pba() 反重排。
  *
  * ⚠ 本函数与 pba_to_cmd() 是 FTL 层仅有的两处 PBA↔PAA 转换点。
  *
- * @param cmd 命令（ch/ce 取 config 位域，其余字段由 paa 反解）
+ * @param cmd 命令（ch/ce 取 route，其余字段由 paa 反解）
  * @return 该命令的行地址 PBA
  */
 static inline DWORD ftl_cmd_pba(const fc_command_t *cmd)
 {
-    return paa_to_pba(cmd->config.ch, cmd->config.ce, cmd->paa);
+    return paa_to_pba(cmd->route.ch, cmd->route.ce, cmd->paa);
 }
 
 /* 一个命令实际访问到的**全局块**及其本命令内的最大 ECC 纠正 bit 数。 */
@@ -466,7 +463,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  * CW 0..3（擦除为 0，无数据链）。
  *
  * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CMD_STATUS_ERROR_MASK 全集
- * （NAND_FAIL / FAIL_CACHE / TIMEOUT / DATA_ERROR / MATA_ERROR 任一置位即 FTL_ERROR；
+ * （NAND_FAIL / FAIL_CACHE / TIMEOUT / DATA_ERROR / META_ERROR 任一置位即 FTL_ERROR；
  * UNC/CRC/RAID 合并为 DATA_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
  * 与 ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与 spare 正是它们的
  * 返回物），成败由调用者按内容自判。
@@ -491,7 +488,7 @@ typedef struct
  * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
  * plane/cw 三位自洽校验（见 fc_data_path_meta_check）。
  * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(0) 代替：那是"本页 LBA 就是 0"，
- *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（若忽略错误位会看不出来）。 */
+ *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 META_ERROR（若忽略错误位会看不出来）。 */
 #define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN})
 
 /**

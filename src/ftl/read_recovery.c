@@ -586,7 +586,7 @@ void rr_handle(rr_handle_t *rr)
  * 读重试策略（SLC、本器件无 read-retry table）：
  *   · 无错误 ⇒ 成功；
  *   · **只有 CRC_ERROR** ⇒ 允许**一次**重读（总线/瞬态；CRC 能区分出来）；
- *   · UNC / NAND_FAIL / TIMEOUT / MATA_ERROR ⇒ 不重试，直接按失败结算。
+ *   · UNC / NAND_FAIL / TIMEOUT / META_ERROR ⇒ 不重试，直接按失败结算。
  *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
  *     二者都**不实现**，失败即判坏。
  */
@@ -637,7 +637,7 @@ static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
  * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
  *
  * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
- *       UNC / NAND_FAIL / TIMEOUT / MATA_ERROR 直接交 rr_settle_plane 清零 + 标坏。
+ *       UNC / NAND_FAIL / TIMEOUT / META_ERROR 直接交 rr_settle_plane 清零 + 标坏。
  */
 static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
@@ -653,7 +653,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     }
 
     // 命令级 DATA_ERROR 合并了 UNC/CRC/RAID，CRC-only 要回看 desc；
-    // NAND/FAILC/TIMEOUT/MATA 任意一个出现都不是 CRC-only。
+    // NAND/FAILC/TIMEOUT/META 任意一个出现都不是 CRC-only。
     const DWORD err_bits = completion->status & FC_CMD_STATUS_ERROR_MASK;
     const bool  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
 

@@ -10,8 +10,8 @@
  * ============== 写路径 (encode) ==============
  *
  * fc_data_path_encode()
- *   全自动管线：Random 加扰 → ECC 编码 → RAID XOR。
- *   FC 内部在 NAND Program 前调用，对 FTL 透明。
+ *   全自动管线：Random 加扰 → ECC 编码；跨 plane RAID parity 由
+ *   fc_data_path_generate_stripe_parity() 单独生成。
  *
  * ============== 读路径 (decode) ==============
  *
@@ -80,8 +80,8 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  *
  * @param command 已完成 NAND 读取的命令。
  *
- * @return FC_STATUS_OK       所有 CW 无不可纠错误（擦除页与 NOT_SUPPORTED 按成功处理），buffer 已解扰。
- *         FC_STATUS_IO_ERROR 存在不可纠的 CW（未解扰，需 FTL 处理）。
+ * @return FC_STATUS_OK       所有 CW 无不可纠错误（擦除页按成功处理），buffer 已解扰。
+ *         FC_STATUS_IO_ERROR 存在不可纠的 CW，或 ECC 引擎不可用（未解扰，需 FTL 处理）。
  *
  * @note 整条 CW 的 1 比特占比 ≥ 99% 的擦除页记为 FC_CW_STATUS_EMPTY 而非失败，跳过解扰 / CRC / META 校验。
  *       判据只在**解码路径**成立：RAW 读（LDPC_RAW）跳过 ECC，不能用它判断空/非空。
@@ -100,13 +100,13 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command);
  *   ① 从所有其他 CW + parity 做 RAID XOR 重建
  *   ② ECC 解码重试
  *   ③ 解扰所有 CW
- *   ④ 更新 desc->status = READY
+ *   ④ 重新检查 CRC/META 并更新 desc->status
  *
  * @param cmd           带 desc 链的命令指针。
  * @param failed_cw_idx 失败 CW 在 desc 链中的索引（0-based）。
  *
- * @return FC_STATUS_OK       恢复成功，所有 desc 置 READY。
- *         FC_STATUS_IO_ERROR 重建后 ECC 仍失败。
+ * @return FC_STATUS_OK       恢复成功，所有 desc 的 CRC/META 复查通过。
+ *         FC_STATUS_IO_ERROR 重建后 ECC 仍失败，或 CRC/META 复查失败。
  */
 fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx);
 
@@ -156,7 +156,8 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed);
  *
  * @param cw 528B CW buffer；USER 区须已完成写入与加扰。
  *
- * @return FC_STATUS_OK       编码完成（引擎返回 NOT_SUPPORTED 时也归一为 OK）。
+ * @return FC_STATUS_OK       编码完成。
+ *         FC_STATUS_NOT_SUPPORTED ECC 引擎不可用；调用方必须让写命令失败，不得静默跳过。
  *         其他 fc_status_e   ECC 引擎返回的错误码。
  */
 fc_status_e fc_data_path_ecc_encode(BYTE *cw);
@@ -168,7 +169,7 @@ fc_status_e fc_data_path_ecc_encode(BYTE *cw);
  * @param ecc_bits 出参，非 NULL 时返回纠正的 bit 数，失败时为 0；不需要时传 NULL。
  *
  * @return FC_STATUS_OK            解码成功（0 个或多个 bit 被纠正）。
- *         FC_STATUS_NOT_SUPPORTED ECC 引擎未实现，未做任何纠正。
+ *         FC_STATUS_NOT_SUPPORTED ECC 引擎不可用；调用方必须按失败处理，不得当作零纠正。
  *         FC_STATUS_IO_ERROR      不可纠。
  */
 fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
@@ -192,7 +193,7 @@ bool fc_data_path_crc_check(const BYTE *cw);
  * @param paa          本 CW 的 NAND 物理地址（plane / cw 的来源）。
  *
  * @return 0U                      两项均通过。
- *         FC_CW_STATUS_MATA_ERROR 任一不符。
+ *         FC_CW_STATUS_META_ERROR 任一不符。
  */
 DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa);
 
@@ -232,7 +233,7 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa);
  *
  * 为什么是逻辑地址而不是物理地址：GC 搬页后逻辑地址不变 ⇒ 密文不变，
  * 不需要「解扰再按新物理地址重加扰」。这是存储主控的通行做法
- * （见 docs/archive/changelog/fc_scrambler_lba_seed_v24.md 的出处）。
+ * （见 docs/design/fc_nand_design.md §5.4 的出处）。
  *
  * 粒度 = 被寻址逻辑单元：本工程一个 CW（512B 用户数据）= 一个扇区 = 一个逻辑单元，
  * 故每条 CW 用自己那条扇区 LBA 当种子。
@@ -253,9 +254,8 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta);
  * @param data   待变换的数据缓冲（原地修改）
  * @param length 数据字节数
  * @param seed   本 CW 的加扰种子（fc_random_seed_from_meta 的输出）
- * @return       FC_STATUS_OK（当前实现不会失败）
  */
-fc_status_e fc_random_transform(BYTE *data, WORD length, DWORD seed);
+void fc_random_transform(BYTE *data, WORD length, DWORD seed);
 
 /**
  * @brief 获取当前使用的加扰算法名称（调试用）。
@@ -329,24 +329,10 @@ void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BY
  */
 bool fc_bch_decode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr);
 
-/**
- * @brief 辅助函数：获取 BCH 引擎的 ECC 字节数。
- * @param bch BCH 控制句柄
- * @return ECC 字节数
- */
-unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch);
-
-/**
- * @brief 辅助函数：获取纠错能力 t。
- * @param bch BCH 控制句柄
- * @return 纠错能力（bit 数）
- */
-unsigned int fc_bch_t(const fc_bch_control_t *bch);
-
 /*
  * ECC 引擎统一接口。
  *
- * fc_ldpc_encode/fc_ldpc_decode 作为统一 ECC 入口，
+ * fc_ecc_encode/fc_ecc_decode 作为统一 ECC 入口，
  * 底层算法由编译宏选择：
  *
  *   FC_ECC_ALGO_BCH  (0) — BCH(m=13, t=4)（默认，全功能）
@@ -376,34 +362,25 @@ unsigned int fc_bch_t(const fc_bch_control_t *bch);
  */
 const char *fc_ecc_algo_name(void);
 
-typedef struct
-{
-    WORD codeword_bytes;
-    WORD parity_bytes;
-    BYTE max_iterations;
-} fc_ldpc_config_t;
-
 /**
  * @brief ECC 编码单个 CW：在 data 尾部写入 8B parity
  *
  * data_length 恒为 FC_BUFFER_DATA_SIZE（520，CW 缓冲 528B 减去 8B parity 尾区）。
  *
- * @param config      ECC 配置（当前实现未读取，可为 NULL）
  * @param data        CW 缓冲；数据区 [0, data_length) 为输入，parity 尾区
  *                    [data_length, data_length+8) 为输出
  * @param data_length 数据区字节数，∈ [8, FC_BUFFER_DATA_SIZE]
  * @return FC_STATUS_OK —— 编码成功
- *         FC_STATUS_NOT_SUPPORTED —— ECC 引擎初始化失败
+ *         FC_STATUS_NOT_SUPPORTED —— ECC 引擎初始化失败（调用方必须按失败处理）
  * @pre data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。
  */
-fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length);
+fc_status_e fc_ecc_encode(BYTE *data, WORD data_length);
 
 /**
  * @brief 解码单个 CW（data + parity 连续缓冲），成功后就地纠正数据区
  *
  * BCH 分支可选输出纠正的 bit 数；LDPC 分支不写 err_bits（入口处已置 0）。
  *
- * @param config      ECC 配置（当前实现未读取，可为 NULL）
  * @param data        CW 缓冲；数据区 [0, data_length) 与 parity 尾区
  *                    [data_length, data_length+8)
  * @param data_length 数据区字节数，∈ [8, FC_BUFFER_DATA_SIZE]
@@ -411,11 +388,11 @@ fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data
  *                    失败时为 0；无需该信息时传 NULL
  * @return FC_STATUS_OK —— 解码成功（BCH 分支已就地纠正）
  *         FC_STATUS_IO_ERROR —— 不可纠
- *         FC_STATUS_NOT_SUPPORTED —— ECC 引擎初始化失败
+ *         FC_STATUS_NOT_SUPPORTED —— ECC 引擎初始化失败（调用方必须按失败处理）
  *         FC_STATUS_INVALID_ARGUMENT —— LDPC 分支引擎未初始化
  * @pre data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。
  */
-fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits);
+fc_status_e fc_ecc_decode(BYTE *data, WORD data_length, BYTE *err_bits);
 
 /* ══════════════════════════════════════════════════════════
  * Stripe RAID 引擎
@@ -431,7 +408,7 @@ fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data
  * 打开方法：在 include/fc/fc.h 中 #define CONFIG_FC_RAID 1
  *
  * 开启后需要实现：
- *   1) 写路径：fc_poll_internal() 中 raid=ENCODE 分支分配 parity 命令、
+ *   1) 写路径：fc_core_poll() 中 raid=ENCODE 分支分配 parity 命令、
  *      调用 generate_stripe_parity()、以 Multi-Plane PROGRAM 提交
  *   2) 读路径：FTL 提交 Multi-Plane READ 读取双 Plane 数据后，
  *      ECC 失败时利用 parity CW 做 XOR 重建恢复
@@ -466,7 +443,10 @@ typedef struct
  * 在 fc_data_path.c 中定义为全局静态数组。
  */
 
-/* ── 上下文管理 ── */
+/* ── 上下文管理（预留，零生产调用）──
+ * 当前 stripe 路径使用 fc_data_path_generate_stripe_parity() 的按命令 XOR；
+ * 以下 start/accumulate/end/save/restore 为 PLANE_NUM>=4 的跨命令累积预留。
+ * 启用前必须补调用点、上板验证并在本处删除「预留」标记（P5 偏离 H5 的显式登记）。 */
 
 /**
  * @brief 初始化指定 LUN 的 RAID 上下文，清零上下文与影子缓冲。

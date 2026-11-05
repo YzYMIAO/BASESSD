@@ -27,27 +27,29 @@
  *   data/command/address 是 volatile 指针，指向 FMC NAND Bank3 内存
  *   窗口的三个别名地址（base / base|A16 / base|A17），写入即产生
  *   对应的命令/地址/数据周期。
- *   timing 内嵌 29 字段。
  */
 typedef struct
 {
-    volatile BYTE    *data;
-    volatile BYTE    *command;
-    volatile BYTE    *address;
-    nand_fmc_timing_t timing;
+    volatile BYTE *data;
+    volatile BYTE *command;
+    volatile BYTE *address;
+    GPIO_TypeDef  *rb_port; /* 本 target 的 R/B# GPIO 端口 */
+    WORD           rb_pin;  /* 本 target 的 R/B# 引脚 */
 } nand_fmc_config_t;
 
-/* ── 后端访问器（同步路径 + 多 LUN 共享，单 bank 下与坐标无关） ── */
+/* ── 后端访问器（同步路径 + dispatch 按 (ch,ce) 取） ── */
 /* ── FMC 后端实例 ──
- * 单 bank：数据/命令/地址窗口与时序对全部 LUN 一致（FMC 时序寄存器是
- * bank 级，同 bank 各 LUN 共享窗口），故无需按 (CH,CE,LUN) 分化，一个即够。 */
+ * 单 bank：数据/命令/地址窗口对同 bank 各 LUN 一致；FMC PCC 时序寄存器是
+ * bank 级。故无需按 (CH,CE,LUN) 分化，一个实例即够。 */
 typedef struct
 {
     nand_fmc_config_t  config;
     nand_phy_backend_t backend;
 } nand_fmc_instance_t;
 
-/* ── 后端初始化：填唯一实例的 config + handler 表（nand_init 调用） ── */
+/* ── 后端初始化：按 (ch,ce) 绑定一个 FMC 实例（当前板只初始化 (0,0)） ── */
+nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_config_t *config);
+/* 兼容入口：等价于 nand_fmc_init_target(0,0,...)。 */
 nand_result_e nand_fmc_init(const nand_fmc_config_t *config);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

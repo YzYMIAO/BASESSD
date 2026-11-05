@@ -14,7 +14,7 @@
  *   ① 初始化            fc_init
  *   ② 命令生命周期       fc_command_alloc / configure_descriptor / fc_submit /
  *                        fc_poll_completion / fc_command_release
- *   ③ buffer 访问       fc_buffer_alloc / release / id_to_real_buffer /
+ *   ③ buffer 访问       fc_buffer_alloc / release / get_user_data /
  *                        fc_buffer_get_base / fc_buffer_get_meta
  *   ④ 数据查询          fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
  *   ⑤ 查询工具          fc_command_id_to_command / fc_command_to_id /
@@ -131,7 +131,7 @@ extern "C"
     /**
      * @brief 提交到 SQ 或 HSQ（根据 high_priority），入队即返回。
      * 前置（违反一律 ASSERT，不返回错误码）：指针在命令池内；状态 ALLOCATED；
-     * validate 通过；desc 链所有权完整。配置错误绝不发到硬件。
+     * validate 通过；desc 链所有权完整。
      *
      * @param command 待提交命令；须在命令池内且状态 ALLOCATED。
      *
@@ -196,14 +196,13 @@ extern "C"
     fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count);
 
     /**
-     * @brief 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中）。
-     * 前置（违反一律 ASSERT）：指针落在命令池内。**幂等**——已 FREE 时直接返回 OK。
+     * @brief 释放命令及关联 Descriptor 链 + 各 CW buffer（FREE 幂等）。
      *
-     * @param command 待释放命令；须在命令池内。
+     * 指针身份是配置错误 ⇒ ASSERT；生命周期由调用链保证（未提交 / 完成项已取走）。
      *
-     * @return 恒 FC_STATUS_OK。
+     * @param command 待释放命令；指针须落在命令池内。
      */
-    fc_status_e fc_command_release(fc_command_t *command);
+    void fc_command_release(fc_command_t *command);
 
     /* ═══════ ③ buffer 访问 ═══════ */
     /**
@@ -215,13 +214,14 @@ extern "C"
     fc_buffer_id_t fc_buffer_alloc(void);
 
     /**
-     * @brief 释放 Buffer。
+     * @brief 释放上层预申请的 Buffer（尚未挂到命令上）。
      *
-     * @param buffer_id 待释放的 buffer ID；须已占用（未占用 = 配置错误 → ASSERT）。
+     * 越界 / 未占用 / 仍归属某条命令是配置错误 ⇒ ASSERT；已挂链 buffer 必须随
+     * 命令释放（fc_command_release），不能在这里释放。
      *
-     * @return 恒 FC_STATUS_OK。
+     * @param buffer_id 待释放的 buffer ID。
      */
-    fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id);
+    void fc_buffer_release(fc_buffer_id_t buffer_id);
 
     /**
      * @brief ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）。
@@ -230,7 +230,7 @@ extern "C"
      *
      * @return USER 数据区首地址（CW 基址 + FC_BUFFER_USER_OFFSET，恒非空）。
      */
-    BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
+    BYTE *fc_buffer_get_user_data(fc_buffer_id_t buffer_id);
 
     /**
      * @brief FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
@@ -334,13 +334,6 @@ extern "C"
      */
     fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id);
 
-    /**
-     * @brief 资源使用统计（测试/监控用）。
-     *
-     * @param stats 统计结果出参；须非空。
-     *
-     * @return 恒 FC_STATUS_OK。
-     */
     /* ── 诊断：队列头 / 链锁快照（只读，不改状态）──
      * 排障用：用例/运维在「FTL 回不到 idle」时打印它，看是哪个队列的头卡住、
      * 以及该 LUN 的链锁归谁（chain_owner）。生产路径不调用。 */
@@ -359,7 +352,7 @@ extern "C"
         BYTE  lun_phase;      /* NAND per-LUN FSM 相位（LUN_PHASE_*） */
         DWORD fill_calls;     /* FC 填充轮次累计调用次数 */
         DWORD fill_pops;      /* 填充轮次累计从队列 pop 的命令数 */
-        BYTE  sq_head_state;  /* SQ 头命令的状态（fc_cmd_state_e：0=FREE 1=QUEUED 2=ACTIVE 3=COMPLETED） */
+        BYTE  sq_head_state;  /* SQ 头命令的状态（fc_cmd_state_e：0=FREE 1=ALLOCATED 2=QUEUED 3=ACTIVE 4=COMPLETED） */
         WORD  sched_sq_count; /* 调度器实际扫描的 SQ 的 count（应与 sq_used 相同） */
         BYTE  sched_sq_bound; /* 1 = scheduler->sq/hsq 就绑在 controller->sq/hsq 上 */
     } fc_debug_state_t;
@@ -368,12 +361,18 @@ extern "C"
      * @brief 取队列头 / 链锁快照（只读）。
      *
      * @param out 出参；须非空。
-     *
-     * @return 恒 FC_STATUS_OK。
      */
-    fc_status_e fc_debug_state_get(fc_debug_state_t *out);
+    void fc_debug_state_get(fc_debug_state_t *out);
 
-    fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats);
+    /**
+     * @brief 资源使用统计（测试/监控用）。
+     *
+     * used 字段来自分配/释放闸门的 O(1) 计数；high 字段是历史最高占用（高水位）。
+     * debug 档会额外扫描全池校验计数与真值一致，release 档只读计数器。
+     *
+     * @param stats 统计结果出参；须非空。
+     */
+    void fc_get_resource_stats(fc_resource_stats_t *stats);
 
 #ifdef __cplusplus
 }

@@ -681,7 +681,7 @@ static void uart_cli_info(int argc, char *argv[])
         {
             continue;
         }
-        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
+        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(ch, ce), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
         /* 计数类诊断（见 `stat`）：info 只保留身份/状态，避免两套计数视图。 */
 
@@ -865,7 +865,7 @@ static void uart_cli_addr(int argc, char *argv[])
         }
         if (argc == 6)
         {
-            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
+            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
             {
                 (void)LOGE("addr: invalid ch/ce/lun\r\n");
                 return;
@@ -1460,12 +1460,8 @@ static void uart_cli_q(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    if (fc_get_resource_stats(&rs) != FC_STATUS_OK)
-    {
-        (void)LOGE("q: fc resource stats unavailable\r\n");
-        return;
-    }
-    (void)LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH);
+    fc_get_resource_stats(&rs);
+    (void)LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu hwm=%hu/%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.command_high, rs.descriptor_high, rs.buffer_high);
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
@@ -1629,7 +1625,7 @@ static void uart_cli_id(int argc, char *argv[])
     (void)LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
     (void)LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
     (void)LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
-    (void)LOGI("id media layout=v%lu timing=%hhu state=%s\r\n", ftl_media_layout_version(), nand_get_timing_mode(), state_name);
+    (void)LOGI("id media layout=v%lu timing=%hhu state=%s\r\n", ftl_media_layout_version(), nand_get_timing_mode(0U, 0U), state_name);
 }
 
 /* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */

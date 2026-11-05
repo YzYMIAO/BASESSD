@@ -6,6 +6,8 @@
  *
  * 职责分层：
  *   ① 生产断言   ASSERT / ASSUME —— 不变量检查；NDEBUG 下分别裁剪为空 / 不可达提示
+ *     生产消息    ASSERT_MSG / ASSERT_REJECT / ASSERT_REJECT_VOID / ASSERT_DEFAULT —— 判据 9 的
+ *                  「条件 + 消息 + release 返回」统一入口，NDEBUG 下零/一次判断
  *   ② 富断言集   ASSERT_*        —— 类型化比较、指针、字符串、内存，供测试文件使用
  *   ③ 失败入口   assertion_fail / assertion_failf —— 格式化 + 落记录 + 停机
  *
@@ -86,6 +88,67 @@ void assertion_platform_context(void);
 /* debug：ASSUME 与 ASSERT 同语义（检查 + 停机），release 下退化为不可达。 */
 #    define ASSUME(expression) ASSERT(expression)
 #endif
+
+/*
+ * ── 生产版「条件 + 消息」断言 / release 拒绝 ──
+ *
+ * ASSERT_MSG：debug 打印自定义消息并停机；release 完全裁空（零开销）。
+ * ASSERT_REJECT / ASSERT_REJECT_VOID：debug 同 ASSERT_MSG；release 只做一次
+ * 条件判断并返回。用于「配置错误后果是静默介质破坏」的判据 9 闸门。
+ *
+ * ⚠ 与下方富断言集（ASSERT_TRUE 等）不是一回事：富断言集是测试语义，始终生效；
+ *   本组随 NDEBUG 裁剪，生产代码只使用本组。
+ * ⚠ 条件与消息参数不得有副作用（release 下消息参数不求值；debug 下条件只求值一次）。
+ */
+#if defined(NDEBUG)
+#    define ASSERT_MSG(expression, format, ...) ((void)0)
+#    define ASSERT_REJECT(expression, ret, format, ...) \
+        do                                              \
+        {                                               \
+            if (ASSERT_UNLIKELY(!(expression)))         \
+            {                                           \
+                return (ret);                           \
+            }                                           \
+        } while (0)
+#    define ASSERT_REJECT_VOID(expression, format, ...) \
+        do                                              \
+        {                                               \
+            if (ASSERT_UNLIKELY(!(expression)))         \
+            {                                           \
+                return;                                 \
+            }                                           \
+        } while (0)
+#else
+#    define ASSERT_MSG(expression, format, ...)                             \
+        do                                                                  \
+        {                                                                   \
+            if (ASSERT_UNLIKELY(!(expression)))                             \
+            {                                                               \
+                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
+            }                                                               \
+        } while (0)
+#    define ASSERT_REJECT(expression, ret, format, ...)                     \
+        do                                                                  \
+        {                                                                   \
+            if (ASSERT_UNLIKELY(!(expression)))                             \
+            {                                                               \
+                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
+                return (ret);                                               \
+            }                                                               \
+        } while (0)
+#    define ASSERT_REJECT_VOID(expression, format, ...)                     \
+        do                                                                  \
+        {                                                                   \
+            if (ASSERT_UNLIKELY(!(expression)))                             \
+            {                                                               \
+                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
+                return;                                                     \
+            }                                                               \
+        } while (0)
+#endif
+
+/* switch 的 default 专用：debug 打印未处理的枚举类型名；release 裁空（H7/C7）。 */
+#define ASSERT_DEFAULT(type_name) ASSERT_MSG(false, "unhandled " #type_name)
 
 /*
  * ── 富断言集（重写自 munit，供测试文件使用；不随 NDEBUG 裁剪） ──

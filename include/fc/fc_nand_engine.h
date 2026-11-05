@@ -90,18 +90,18 @@ typedef struct
 } fc_nand_transaction_t;
 
 /* 同步执行一条 OP（仅初始化阶段，armed == 0）。 */
-nand_result_e fc_nand_execute(BYTE operation, const nand_command_request_t *request, nand_command_completion_t *completion);
+nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_command_request_t *request, nand_command_completion_t *completion);
 
 /* 异步执行：start 发起 + step 推进。 */
 nand_result_e fc_nand_start(fc_nand_transaction_t *transaction, BYTE operation, const nand_command_request_t *request);
 nand_result_e fc_nand_step(fc_nand_transaction_t *transaction, nand_command_completion_t *completion);
 
 /* Typed ONFI 操作 helpers。 */
-nand_result_e fc_nand_reset(nand_command_completion_t *completion);
-nand_result_e fc_nand_read_id(BYTE id[5], nand_command_completion_t *completion);
-nand_result_e fc_nand_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_command_completion_t *completion);
-nand_result_e fc_nand_set_features(BYTE feature_address, const BYTE feature_data[4], nand_command_completion_t *completion);
-nand_result_e fc_nand_read_status_enhanced(DWORD row, nand_command_completion_t *completion);
+nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_command_completion_t *completion);
+nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_command_completion_t *completion);
+nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_command_completion_t *completion);
+nand_result_e fc_nand_set_features(BYTE ch, BYTE ce, BYTE feature_address, const BYTE feature_data[4], nand_command_completion_t *completion);
+nand_result_e fc_nand_read_status_enhanced(BYTE ch, BYTE ce, DWORD row, nand_command_completion_t *completion);
 
 /* 启动流程（FC 编排，NAND 只提供 hw_init/desc/PHY）。 */
 nand_result_e fc_nand_init(void);

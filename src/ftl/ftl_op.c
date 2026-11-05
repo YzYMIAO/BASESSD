@@ -375,7 +375,7 @@ bool ftl_op_bg_submit_deferred(void)
  */
 static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
 {
-    ftl_ctx_t *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
+    ftl_ctx_t *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
 
     if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
     {
@@ -553,7 +553,7 @@ void ftl_op_drain(void)
         // 路由表由 main.c 在逐实例 boot 之前设好（见 ssd_ftl_boot_all ①：先
         // ftl_op_init 清一次、再 route_set），boot 期 full metadata rebuild 会经
         // l2p_read_sync 抽完成表；故此处解析出 NULL 只可能是编程错误。
-        ftl_ctx_t *ftl = ftl_op_route_get(cmd->config.ch, cmd->config.ce, cmd->config.lun);
+        ftl_ctx_t *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
 
         // 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
         // "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。

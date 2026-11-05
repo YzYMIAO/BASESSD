@@ -2291,16 +2291,13 @@ static SSD_CODE_FAST WORD l2p_dirty_count(const l2p_cache_t *cache)
  * 单线程 superloop 且预检与建链之间不泵 ⇒ 资源不会被别人拿走。
  *
  * @return true = 命令/描述符/buffer/SQ/HSQ 都够一次 region 页写
- *         false = 有任一资源不足或查询失败
+ *         false = 有任一资源不足
  */
 static bool l2p_flush_resources_available(void)
 {
     fc_resource_stats_t stats;
 
-    if (fc_get_resource_stats(&stats) != FC_STATUS_OK)
-    {
-        return false;
-    }
+    fc_get_resource_stats(&stats);
 
     return (stats.command_used < FC_COMMAND_POOL_DEPTH) && (stats.descriptor_used + CW_NUM <= FC_DESCRIPTOR_POOL_DEPTH) && (stats.buffer_used + CW_NUM <= FC_BUFFER_POOL_DEPTH) && (stats.sq_used < FC_SQ_DEPTH) && (stats.hsq_used < FC_HSQ_DEPTH);
 }

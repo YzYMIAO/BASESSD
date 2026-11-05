@@ -89,7 +89,7 @@ _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 6
  */
 static inline BYTE chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
 {
-    if ((ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
+    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
     {
         return FTL_DIE_INVALID;
     }

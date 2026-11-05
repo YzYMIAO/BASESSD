@@ -7,9 +7,9 @@
  * fc.h — FC 层对外接口（命令池 / 缓冲池 / 调度 / 服务入口）
  *
  * 核心资源：
- *   - Command Pool（FC_COMMAND_POOL_DEPTH=64）：命令槽位
- *   - Descriptor Pool（FC_DESCRIPTOR_POOL_DEPTH=256）：CW 描述符
- *   - Buffer Pool（FC_BUFFER_POOL_DEPTH=128）：CW 数据缓冲
+ *   - Command Pool（FC_COMMAND_POOL_DEPTH）：命令槽位
+ *   - Descriptor Pool（FC_DESCRIPTOR_POOL_DEPTH）：CW 描述符
+ *   - Buffer Pool（FC_BUFFER_POOL_DEPTH）：CW 数据缓冲
  *
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
@@ -19,7 +19,7 @@
  *
  * buffer 布局（528B CW）：
  *   [META:4][CRC:4][USER:512][PARITY:8]
- *   对外只暴露 USER 区（fc_buffer_id_to_real_buffer 返回 offset=8 处）。
+ *   对外只暴露 USER 区（fc_buffer_get_user_data 返回 offset=8 处）。
  *
  * 文件分工：
  *   fc.h（本文件）        ：类型、宏、资源池配置、功能开关、资源统计结构
@@ -31,7 +31,7 @@
  *   ① 初始化      fc_init
  *   ② 命令生命周期 fc_command_alloc / configure_descriptor / submit /
  *                  service / poll_completion / command_release
- *   ③ buffer 访问 fc_buffer_alloc / release / id_to_real_buffer / get_base / get_meta
+ *   ③ buffer 访问 fc_buffer_alloc / release / get_user_data / get_base / get_meta
  *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
  *   ⑤ 查询工具    fc_command_id_to_command / fc_command_to_id /
  *                  fc_descriptor_id_to_descriptor / fc_get_resource_stats

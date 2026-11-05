@@ -23,9 +23,9 @@
  * @param queue   队列
  * @param storage 条目存储（depth 项）
  * @param depth   容量（非 0）
- * @return FC_STATUS_OK
+ * @note 空指针 / depth=0 由 ASSERT 拦截。
  */
-fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
+void fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -35,7 +35,6 @@ fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
     queue->head    = 0U;
     queue->tail    = 0U;
     queue->count   = 0U;
-    return FC_STATUS_OK;
 }
 /**
  * @brief 初始化完成队列
@@ -43,9 +42,9 @@ fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
  * @param queue   队列
  * @param storage 条目存储（depth 项）
  * @param depth   容量（非 0）
- * @return FC_STATUS_OK
+ * @note 空指针 / depth=0 由 ASSERT 拦截。
  */
-fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
+void fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -55,7 +54,6 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
     queue->head    = 0U;
     queue->tail    = 0U;
     queue->count   = 0U;
-    return FC_STATUS_OK;
 }
 
 /**
@@ -69,8 +67,6 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  */
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
-    ASSERT(queue != NULL);
-    ASSERT(command_id != FC_COMMAND_ID_INVALID);
     if (queue->count == queue->depth)
     {
         return FC_STATUS_QUEUE_FULL;
@@ -89,7 +85,6 @@ fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
  */
 fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
 {
-    ASSERT(queue != NULL);
     ASSERT(command_id != NULL);
     if (queue->count == 0U)
     {
@@ -109,7 +104,6 @@ fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
  */
 fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
 {
-    ASSERT(queue != NULL);
     ASSERT(completion != NULL);
     if (queue->count == queue->depth)
     {
@@ -129,7 +123,6 @@ fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
  */
 fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
 {
-    ASSERT(queue != NULL);
     ASSERT(completion != NULL);
     if (queue->count == 0U)
     {
@@ -149,7 +142,6 @@ fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
  */
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset)
 {
-    ASSERT(queue != NULL);
     // 值域校验保留返回码：offset 越界返回 INVALID 哨兵（调用方按哨兵判链尾）
     if (offset >= queue->count)
     {

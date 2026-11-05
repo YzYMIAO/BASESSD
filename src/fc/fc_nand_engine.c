@@ -199,14 +199,9 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_t *state)
     /* 前置条件由调用者保证（见 fc_nand_engine.h）：active==0 后不得再调；游标字段由
      * fc_uop_engine_start 填好。fc_nand_step 已先判 active，fc_uop_engine_execute 的
      * 循环与 start 内部调用也都在 active==1 时进入。 */
+    // 三指针/表由 fc_uop_engine_start 的入口断言保证；step 只守“仍 active”这个每步都可能变的状态。
     ASSERT(state != NULL);
     ASSERT(state->active != 0U);
-    ASSERT(state->backend != NULL);
-    ASSERT(state->backend->handlers != NULL);
-    ASSERT(state->uops != NULL);
-    ASSERT(state->timing != NULL);
-    ASSERT(state->request != NULL);
-    ASSERT(state->completion != NULL);
 
     for (; state->uop_index < NAND_ENGINE_MAX_UOPS;)
     {
@@ -323,7 +318,7 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_t *state)
  * NAND 命令编排 / 初始化 / 拓扑扫描
  * ══════════════════════════════════════════════════════════ */
 
-nand_result_e fc_nand_execute(BYTE operation, const nand_command_request_t *request, nand_command_completion_t *completion)
+nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     const nand_operation_map_t *map;
     BYTE                        status;
@@ -341,7 +336,13 @@ nand_result_e fc_nand_execute(BYTE operation, const nand_command_request_t *requ
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    status = fc_uop_engine_execute(nand_phy_backend_get(), map->uops, &map->timing, request, completion);
+    const nand_result_e target_result = nand_select_target(ch, ce);
+
+    if (target_result != NAND_RESULT_OK)
+    {
+        return target_result;
+    }
+    status = fc_uop_engine_execute(nand_phy_backend_get(ch, ce), map->uops, &map->timing, request, completion);
     return status;
 }
 
@@ -368,7 +369,7 @@ nand_result_e fc_nand_start(fc_nand_transaction_t *transaction, BYTE operation, 
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    ENG_LOGD("fc_nand_start: op=%hhu col=%hu row=0x%06lX data=%p len=%hu\r\n", operation, request->column, request->row[0], (const void *)request->buffer, request->data_length);
+    ENG_LOGD("fc_nand_start: op=%hhu col=%hu row=0x%06lX data=%p len=%hu\r\n", operation, request->column, request->row[0], request->buffer, request->data_length);
 
     transaction->request           = *request;
     transaction->request.operation = operation;
@@ -417,7 +418,7 @@ nand_result_e fc_nand_step(fc_nand_transaction_t *transaction, nand_command_comp
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_reset(nand_command_completion_t *completion)
+nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_command_completion_t *completion)
 {
     nand_command_request_t request;
 
@@ -425,7 +426,7 @@ nand_result_e fc_nand_reset(nand_command_completion_t *completion)
     request.column      = 0U;
     request.buffer      = NULL;
     request.data_length = 0U;
-    return fc_nand_execute(OP_RESET, &request, completion);
+    return fc_nand_execute(ch, ce, OP_RESET, &request, completion);
 }
 
 /**
@@ -435,7 +436,7 @@ nand_result_e fc_nand_reset(nand_command_completion_t *completion)
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_id(BYTE id[5], nand_command_completion_t *completion)
+nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_command_completion_t *completion)
 {
     nand_command_request_t request;
 
@@ -444,7 +445,7 @@ nand_result_e fc_nand_read_id(BYTE id[5], nand_command_completion_t *completion)
     request.column      = 0U;
     request.buffer      = id;
     request.data_length = 5U;
-    return fc_nand_execute(OP_READ_ID, &request, completion);
+    return fc_nand_execute(ch, ce, OP_READ_ID, &request, completion);
 }
 
 /**
@@ -454,7 +455,7 @@ nand_result_e fc_nand_read_id(BYTE id[5], nand_command_completion_t *completion)
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_command_completion_t *completion)
+nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_command_completion_t *completion)
 {
     nand_command_request_t request;
 
@@ -463,7 +464,7 @@ nand_result_e fc_nand_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], 
     request.column      = 0U;
     request.buffer      = page;
     request.data_length = NAND_ONFI_PARAM_PAGE_SIZE;
-    return fc_nand_execute(OP_READ_PARAMETER_PAGE, &request, completion);
+    return fc_nand_execute(ch, ce, OP_READ_PARAMETER_PAGE, &request, completion);
 }
 
 /**
@@ -474,7 +475,7 @@ nand_result_e fc_nand_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], 
  * @param completion      输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_set_features(BYTE feature_address, const BYTE feature_data[4], nand_command_completion_t *completion)
+nand_result_e fc_nand_set_features(BYTE ch, BYTE ce, BYTE feature_address, const BYTE feature_data[4], nand_command_completion_t *completion)
 {
     nand_command_request_t request;
 
@@ -483,7 +484,7 @@ nand_result_e fc_nand_set_features(BYTE feature_address, const BYTE feature_data
     request.column      = feature_address;
     request.buffer      = (BYTE *)feature_data;
     request.data_length = 4U;
-    return fc_nand_execute(OP_SET_FEATURES, &request, completion);
+    return fc_nand_execute(ch, ce, OP_SET_FEATURES, &request, completion);
 }
 
 /**
@@ -493,7 +494,7 @@ nand_result_e fc_nand_set_features(BYTE feature_address, const BYTE feature_data
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_status_enhanced(DWORD row, nand_command_completion_t *completion)
+nand_result_e fc_nand_read_status_enhanced(BYTE ch, BYTE ce, DWORD row, nand_command_completion_t *completion)
 {
     nand_command_request_t request;
 
@@ -502,7 +503,7 @@ nand_result_e fc_nand_read_status_enhanced(DWORD row, nand_command_completion_t 
     request.row[0]      = row;
     request.buffer      = NULL;
     request.data_length = 1U;
-    return fc_nand_execute(OP_READ_STATUS_ENHANCED, &request, completion);
+    return fc_nand_execute(ch, ce, OP_READ_STATUS_ENHANCED, &request, completion);
 }
 
 /**
@@ -512,12 +513,13 @@ nand_result_e fc_nand_read_status_enhanced(DWORD row, nand_command_completion_t 
  */
 static void fc_nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
-    /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。 */
-    unsigned long capacity_mib = info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit * info->logical_units / (1024UL * 1024UL);
+    /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。
+     * 先加宽到 QWORD 再乘：32-bit 中间积会在大容量器件上回绕（H3）。 */
+    const DWORD capacity_mib = (DWORD)(((QWORD)info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit * info->logical_units) / (1024ULL * 1024ULL));
 
-    LOGI(LOG_TAG_NAND "ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n", (int)info->signature[0], (int)info->signature[1], (int)info->signature[2], (int)info->signature[3], (unsigned int)info->revision, info->model);
-    LOGI(LOG_TAG_NAND "ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n", capacity_mib, info->data_bytes_per_page, (unsigned int)info->spare_bytes_per_page, info->data_bytes_per_partial_page, (unsigned int)info->spare_bytes_per_partial_page, info->pages_per_block, info->blocks_per_unit, (unsigned int)info->logical_units, (unsigned int)info->address_cycles, (unsigned int)info->column_cycles, (unsigned int)info->row_cycles, (unsigned int)info->bits_per_cell);
-    LOGI(LOG_TAG_NAND "ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n", (unsigned int)info->ecc_bits, (unsigned int)info->programs_per_page, (unsigned int)info->tprog_max, (unsigned int)info->tbers_max, (unsigned int)info->tr_max, (unsigned int)info->tccs_min, (unsigned int)info->timing_mode_support);
+    LOGI(LOG_TAG_NAND "ONFI sig=%c%c%c%c rev=0x%04hX model=%s\r\n", info->signature[0], info->signature[1], info->signature[2], info->signature[3], info->revision, info->model);
+    LOGI(LOG_TAG_NAND "ONFI %luMiB page=%lu+%hu partial=%lu+%hu block=%lup blocks=%lu lun=%hhu addrcyc=0x%02hhX(C%hhu/R%hhu) bitcell=%hhu\r\n", capacity_mib, info->data_bytes_per_page, info->spare_bytes_per_page, info->data_bytes_per_partial_page, info->spare_bytes_per_partial_page, info->pages_per_block, info->blocks_per_unit, info->logical_units, info->address_cycles, info->column_cycles, info->row_cycles, info->bits_per_cell);
+    LOGI(LOG_TAG_NAND "ONFI ecc=%hhubit prog/pg=%hhu tprog=%hu terase=%hu tr=%hu tccs=%hu timingmodes=0x%04hX\r\n", info->ecc_bits, info->programs_per_page, info->tprog_max, info->tbers_max, info->tr_max, info->tccs_min, info->timing_mode_support);
 }
 
 /**
@@ -559,7 +561,7 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
     nand_command_completion_t completion;
     BYTE                      id[5];
     nand_result_e             result;
-    WORD                      lun_count;
+    BYTE                      lun_count;
 
     ASSERT(dev != NULL);
     ASSERT(info != NULL);
@@ -576,13 +578,13 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
     }
 
     delay_ms(1U);
-    result = fc_nand_reset(&completion);
+    result = fc_nand_reset(ch, ce, &completion);
     if (result != NAND_RESULT_OK)
     {
         return NAND_RESULT_NOT_READY;
     }
 
-    result = fc_nand_read_id(id, &completion);
+    result = fc_nand_read_id(ch, ce, id, &completion);
     if (result != NAND_RESULT_OK)
     {
         return NAND_RESULT_NOT_READY;
@@ -591,7 +593,7 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
     {
         return NAND_RESULT_NOT_READY;
     }
-    LOGI(LOG_TAG_NAND "ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
+    LOGI(LOG_TAG_NAND "ID=%02hhX %02hhX %02hhX %02hhX %02hhX\r\n", id[0], id[1], id[2], id[3], id[4]);
 
     const DWORD id_value = ((DWORD)id[1] << 24U) | ((DWORD)id[2] << 16U) | ((DWORD)id[3] << 8U) | id[4];
 
@@ -605,30 +607,30 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
         BYTE                   page[NAND_ONFI_PARAM_PAGE_SIZE];
         nand_onfi_param_info_t onfi;
 
-        result = fc_nand_read_parameter_page(page, &completion);
+        result = fc_nand_read_parameter_page(ch, ce, page, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGE(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
+            LOGE(LOG_TAG_NAND "read parameter page failed, result=0x%02hhX status=0x%02hhX\r\n", result, completion.nand_status);
             return NAND_RESULT_OPERATION_FAILED;
         }
         if (nand_onfi_parameter_page_decode(page, &onfi) == 0U)
         {
-            LOGE(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n", (unsigned int)page[0], (unsigned int)page[1], (unsigned int)page[2], (unsigned int)page[3]);
+            LOGE(LOG_TAG_NAND "parameter page signature mismatch (got %02hhX %02hhX %02hhX %02hhX)\r\n", page[0], page[1], page[2], page[3]);
             return NAND_RESULT_OPERATION_FAILED;
         }
 
         fc_nand_onfi_param_print(&onfi);
         if ((onfi.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (onfi.row_cycles != NAND_ROW_ADDR_CYCLES))
         {
-            LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n", (unsigned int)onfi.column_cycles, (unsigned int)onfi.row_cycles, (unsigned int)NAND_COLUMN_ADDR_CYCLES, (unsigned int)NAND_ROW_ADDR_CYCLES);
+            LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%hhu/R%hhu, driver C%u/R%u\r\n", onfi.column_cycles, onfi.row_cycles, NAND_COLUMN_ADDR_CYCLES, NAND_ROW_ADDR_CYCLES);
             return NAND_RESULT_INVALID_ARGUMENT;
         }
-        if ((onfi.logical_units == 0U) || (onfi.logical_units > LUN_MAX))
+        if ((onfi.logical_units == 0U) || (onfi.logical_units > LUN_NUM))
         {
-            LOGE(LOG_TAG_NAND "ONFI logical_units=%u out of range (LUN_MAX=%u)\r\n", (unsigned int)onfi.logical_units, (unsigned int)LUN_MAX);
+            LOGE(LOG_TAG_NAND "ONFI logical_units=%hhu out of range (LUN_NUM=%u)\r\n", onfi.logical_units, LUN_NUM);
             return NAND_RESULT_INVALID_ARGUMENT;
         }
-        lun_count = (WORD)onfi.logical_units;
+        lun_count = onfi.logical_units;
     }
 
     for (BYTE lun = 0U; lun < lun_count; lun++)
@@ -641,16 +643,16 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
         addr.lun = lun;
         row      = paa_to_nand_row(paa_from_addr(&addr));
 
-        result = fc_nand_read_status_enhanced(row, &completion);
+        result = fc_nand_read_status_enhanced(ch, ce, row, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGE(LOG_TAG_NAND "lun %hhu status probe failed, result=0x%02X\r\n", lun, (unsigned int)result);
+            LOGE(LOG_TAG_NAND "lun %hhu status probe failed, result=0x%02hhX\r\n", lun, result);
             return NAND_RESULT_OPERATION_FAILED;
         }
 
         status                 = completion.nand_status;
         info->lun_present[lun] = (status == NAND_STATUS_NO_RESPONSE) ? 0U : 1U;
-        LOGI(LOG_TAG_NAND "lun=%hhu status=0x%02X present=%hhu\r\n", lun, (unsigned int)status, (unsigned int)info->lun_present[lun]);
+        LOGI(LOG_TAG_NAND "lun=%hhu status=0x%02hhX present=%hhu\r\n", lun, status, info->lun_present[lun]);
     }
 
     if (info->lun_present[0] == 0U)
@@ -660,12 +662,12 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_t *info)
     }
 
     info->present   = 1U;
-    info->lun_count = (BYTE)lun_count;
+    info->lun_count = lun_count;
     return NAND_RESULT_OK;
 }
 
 /**
- * @brief 遍历 CH_MAX × CE_MAX 探测 target
+ * @brief 遍历 CH_NUM × CE_NUM 探测 target
  *
  * @return OK / NOT_READY 无 target / 错误码
  */
@@ -675,9 +677,9 @@ nand_result_e fc_nand_scan_targets(void)
 
     memset(g_nand_targets, 0, sizeof(g_nand_targets));
 
-    for (BYTE ch = 0U; ch < CH_MAX; ch++)
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
-        for (BYTE ce = 0U; ce < CE_MAX; ce++)
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
         {
             nand_target_info_t  info;
             const nand_result_e result = fc_nand_target_probe(ch, ce, &info);
@@ -690,7 +692,7 @@ nand_result_e fc_nand_scan_targets(void)
             }
             else if (result != NAND_RESULT_NOT_READY)
             {
-                LOGE(LOG_TAG_NAND "scan ch=%hhu ce=%hhu failed 0x%02X\r\n", ch, ce, (unsigned int)result);
+                LOGE(LOG_TAG_NAND "scan ch=%hhu ce=%hhu failed 0x%02hhX\r\n", ch, ce, result);
                 return result;
             }
         }
@@ -722,14 +724,14 @@ nand_result_e fc_nand_init(void)
 
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "device hw init failed: 0x%02X\r\n", (unsigned int)result);
+        LOGE(LOG_TAG_NAND "device hw init failed: 0x%02hhX\r\n", result);
         return result;
     }
 
     result = fc_nand_scan_targets();
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "target scan failed: 0x%02X\r\n", (unsigned int)result);
+        LOGE(LOG_TAG_NAND "target scan failed: 0x%02hhX\r\n", result);
         return result;
     }
 
@@ -745,7 +747,7 @@ nand_result_e fc_nand_init(void)
  * @param fmc_hz FMC 内核时钟
  * @return OK / 错误码
  */
-nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
+static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fmc_hz)
 {
 #if (CONFIG_NAND_TIMING_MODE != 0U)
     const BYTE                mode[4] = {(BYTE)CONFIG_NAND_TIMING_MODE, 0U, 0U, 0U};
@@ -771,10 +773,15 @@ nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
 
     memset(&completion, 0, sizeof(completion));
     memset(&transaction, 0, sizeof(transaction));
-    transaction.engine.backend    = nand_phy_backend_get();
+    transaction.engine.backend    = nand_phy_backend_get(ch, ce);
     transaction.engine.request    = &transaction.request;
     transaction.engine.completion = &transaction.completion;
 
+    result = nand_select_target(ch, ce);
+    if (result != NAND_RESULT_OK)
+    {
+        return result;
+    }
     result = fc_nand_start(&transaction, OP_SET_FEATURES, &request);
     while (result == NAND_RESULT_NOT_READY)
     {
@@ -786,10 +793,10 @@ nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
         return result;
     }
 
-    result = dev->set_timing((BYTE)CONFIG_NAND_TIMING_MODE, fmc_hz);
+    result = dev->set_timing(ch, ce, (BYTE)CONFIG_NAND_TIMING_MODE, fmc_hz);
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "set timing Mode %u failed: 0x%02X\r\n", CONFIG_NAND_TIMING_MODE, (unsigned int)result);
+        LOGE(LOG_TAG_NAND "set timing Mode %u failed: 0x%02hhX\r\n", CONFIG_NAND_TIMING_MODE, result);
         return result;
     }
 
@@ -799,4 +806,26 @@ nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
     LOGI(LOG_TAG_NAND "high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
     return NAND_RESULT_OK;
 #endif /* CONFIG_NAND_TIMING_MODE */
+}
+
+nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
+{
+    nand_result_e last = NAND_RESULT_OK;
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            if (g_nand_targets[ch][ce].present == 0U)
+            {
+                continue;
+            }
+            last = fc_nand_enable_high_speed_target(ch, ce, fmc_hz);
+            if (last != NAND_RESULT_OK)
+            {
+                return last;
+            }
+        }
+    }
+    return last;
 }

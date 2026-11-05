@@ -12,32 +12,28 @@
  * SQ/HSQ 只保存 FC Command Pool 的槽位编号，不复制命令内容。
  * 因而命令、Descriptor 和 CQ 上下文都能使用同一个稳定的 Command Handle 关联。
  *
- * CQ 保存每条命令的完成结果。完成项中的 command 和 failed_descriptor 用于
- * FTL 的错误分析、Read Retry 和 RAID 恢复，不能在 FTL 取走 CQ 前失效。
+ * CQ 保存每条命令的完成结果。完成项中的 command_id / failed_cw / failed_desc_id
+ * 用于 FTL 的错误分析、Read Retry 和 RAID 恢复，不能在 FTL 取走 CQ 前失效。
  *
  * storage 由 FC 内部固定提供，队列不分配也不释放内存。
  */
 
 typedef struct
 {
-    fc_command_id_t *entries;
-    WORD             depth;
-    WORD             head;
-    WORD             tail;
-    WORD             count;
+    fc_command_id_t *entries; /* 调用方提供的固定存储 */
+    WORD             depth;   /* 容量（非 0） */
+    WORD             head;    /* 出队游标 */
+    WORD             tail;    /* 入队游标 */
+    WORD             count;   /* 当前条数（0..depth） */
 } fc_submission_queue_t;
 
-/*
- * CQ 保存每条命令的完成结果。完成项中的 command 和 failed_descriptor 用于
- * FTL 的错误分析、Read Retry 和 RAID 恢复，不能在 FTL 取走 CQ 前失效。
- */
 typedef struct
 {
-    fc_command_status_t *entries;
-    WORD                 depth;
-    WORD                 head;
-    WORD                 tail;
-    WORD                 count;
+    fc_command_status_t *entries; /* 调用方提供的固定存储 */
+    WORD                 depth;   /* 容量（非 0） */
+    WORD                 head;    /* 出队游标 */
+    WORD                 tail;    /* 入队游标 */
+    WORD                 count;   /* 当前条数（0..depth） */
 } fc_completion_queue_t;
 
 /* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
@@ -49,9 +45,9 @@ typedef struct
  * @param storage 命令 ID 数组（长度 depth）
  * @param depth 容量
  *
- * @return FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
+ * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
  */
-fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
+void fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
 
 /**
  * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
@@ -60,9 +56,9 @@ fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
  * @param storage 完成项数组
  * @param depth 容量。
  *
- * @return FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
+ * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
  */
-fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth);
+void fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth);
 
 /**
  * @brief 把命令 ID 入队尾。
@@ -73,7 +69,7 @@ fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  * @return FC_STATUS_OK
  *         FC_STATUS_QUEUE_FULL（队列已满）
  *
- * @note command_id 为 FC_COMMAND_ID_INVALID（哨兵）属调用者 bug → ASSERT。
+ * @note command_id 由 fc_submit / submit_batch 的命令级校验保证非 INVALID。
  */
 fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
 

@@ -10,7 +10,7 @@
 // fc_data_path_bch.c — BCH ECC 引擎（纠错码）
 //
 // 移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic。
-// 内核依赖替换为标准 C；表存储改为**编译期静态结构体**（不再 malloc/free），
+// 内核依赖替换为标准 C；表存储为**编译期静态结构体**，
 // 因为本工程参数固定（m=13, t=4），表生命周期等于固件生命周期。
 //
 // ── 算法（BCH 码 = 有限域上的循环码）──
@@ -1341,7 +1341,7 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
     DWORD             *genpoly = s_bch.genpoly;
     struct gf_poly    *g       = (struct gf_poly *)s_bch.g_poly;
 
-    // roots 用 bitmap：8192 个根只需 256 DWORD（原实现用 32 KB 数组）。
+    // roots 用 bitmap：8192 个根只需 256 DWORD。
     memset(roots, 0, sizeof(s_bch.roots));
 
     for (i = 0; i < t; i++)
@@ -1419,10 +1419,10 @@ SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly
         0x8003,
     };
     // 静态存储只覆盖本工程固定参数（m=13, t=4）。换参数时数组尺寸必须重算，
-    // 否则 ASSERT 会在这里暴露；不要靠运行时重新分配。
-    ASSERT((m == (int)FC_BCH_M) && (t == (int)FC_BCH_T));
+    // 不要靠运行时重新分配。
     if ((m != (int)FC_BCH_M) || (t != (int)FC_BCH_T))
     {
+        ASSERT_MSG((m == (int)FC_BCH_M) && (t == (int)FC_BCH_T), "unsupported BCH params m=%d t=%d", m, t);
         return NULL;
     }
     if (prim_poly == 0)
@@ -1490,31 +1490,10 @@ void fc_bch_free(fc_bch_control_t *bch)
     {
         return;
     }
-    ASSERT(bch == &s_bch.ctl);
-    if (bch == &s_bch.ctl)
+    if (bch != &s_bch.ctl)
     {
-        memset(&s_bch, 0, sizeof(s_bch));
+        ASSERT_MSG(bch == &s_bch.ctl, "BCH free: non-singleton handle");
+        return;
     }
-}
-
-/**
- * @brief 校验字字节数
- *
- * @param bch BCH 控制句柄
- * @return 初始化时缓存的 ecc_bytes
- */
-unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch)
-{
-    return bch->ecc_bytes;
-}
-
-/**
- * @brief 纠错能力 t
- *
- * @param bch BCH 控制句柄
- * @return 初始化时缓存的 t
- */
-unsigned int fc_bch_t(const fc_bch_control_t *bch)
-{
-    return bch->t;
+    memset(&s_bch, 0, sizeof(s_bch));
 }

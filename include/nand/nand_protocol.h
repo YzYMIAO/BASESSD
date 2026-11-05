@@ -82,9 +82,9 @@ typedef struct
  * execution_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
 typedef struct
 {
-    BYTE nand_status; /* 70h 原始状态：OP 后的读状态（FAIL/FAILC） */
-    BYTE pre_status;  /* 70h 原始状态：OP 前的读状态（RDY/ARDY/WP） */
-    BYTE execution_status;
+    BYTE          nand_status; /* 70h 原始状态：OP 后的读状态（FAIL/FAILC） */
+    BYTE          pre_status;  /* 70h 原始状态：OP 前的读状态（RDY/ARDY/WP） */
+    nand_result_e execution_status;
 } nand_command_completion_t;
 
 /* 操作时序参数：busy_timeout_us 供引擎和 PHY handler 共用超时 */
@@ -102,8 +102,8 @@ typedef struct
  * 放在协议头而不是 nand_fmc.h：器件描述符需要引用它，而 FC 不能 include
  * 含 HAL 类型的 nand_fmc.h。FMC 后端再把本结构换算成 PCC 寄存器值。
  *
- * ⚠ 顺序耦合：字段顺序必须与 devices/mt29f___g08a.c 中两张时序表的 29 个
- * 初始化值一一对应（slow / fast），错一位全错。
+ * 器件时序表使用 designated initializer 按字段名赋值；字段顺序仍决定结构体
+ * 布局，但初始化不再依赖位置。
  */
 typedef struct
 {

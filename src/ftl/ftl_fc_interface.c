@@ -276,10 +276,10 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
     // cmd->paa 的 plane 位定单 plane 命令的段，给错了段就错。
     const DWORD base_pba = pba[first_plane];
 
-    cmd->config.ch  = pba_to_ch(base_pba);
-    cmd->config.ce  = pba_to_ce(base_pba);
-    cmd->config.lun = pba_to_lun(base_pba);
-    cmd->paa        = pba_to_paa(base_pba); /* PBA→PAA 在 FTL 侧一次转出 */
+    cmd->route.ch  = pba_to_ch(base_pba);
+    cmd->route.ce  = pba_to_ce(base_pba);
+    cmd->route.lun = pba_to_lun(base_pba);
+    cmd->paa       = pba_to_paa(base_pba); /* PBA→PAA 在 FTL 侧一次转出 */
 
     if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
@@ -310,7 +310,7 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
     while (did < FC_DESCRIPTOR_POOL_DEPTH)
     {
         const fc_descriptor_t *d   = fc_descriptor_id_to_descriptor(did);
-        const DWORD            pba = paa_to_pba(cmd->config.ch, cmd->config.ce, d->paa);
+        const DWORD            pba = paa_to_pba(cmd->route.ch, cmd->route.ce, d->paa);
         const WORD             gb  = ftl_pba_gblock(pba);
 
         BYTE i = 0U;
@@ -367,7 +367,7 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
         {
             return FTL_ERROR;
         }
-        BYTE *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        BYTE *buf = fc_buffer_get_user_data(descriptor->buffer_id);
 
         if (length > 0U)
         {
@@ -387,7 +387,7 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
         {
             // 数据已耗尽：本 CW 的 USER 区整体填 0xFF dummy。
             // ⚠ 长度必须是 USER 区大小——buf 是 base+FC_BUFFER_USER_OFFSET，
-            // 照旧代码用 FC_BUFFER_POOL_CW_SIZE 会越界 8B 踩到下一 CW 的 META/CRC。
+            // 直接用 FC_BUFFER_POOL_CW_SIZE 会越界 8B 踩到下一 CW 的 META/CRC。
             (void)memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
         }
 
@@ -417,18 +417,18 @@ ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWOR
     {
         fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
-        // CW 号取 desc 自带的 config.cw；plane 必须从 desc 的 PAA 解出——
+        // CW 号取 desc 自带的 cw_index；plane 必须从 desc 的 PAA 解出——
         // cw_bitmap 是 **flat 绝对编号**（bit = plane×CW_NUM + cw），
         // 只用 `1U << cw` 是 plane 盲的：plane 1 的 bits 4..7 在 bits 0..3 上全为 0，
         // 会把 plane 1 的每个 CW 都填成 0xFF（GC/WL 迁移静默丢数据）。
-        const BYTE cw    = descriptor->config.cw;
+        const BYTE cw    = descriptor->cw_index;
         const BYTE plane = paa_to_plane(descriptor->paa);
 
         if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
         {
             return FTL_ERROR;
         }
-        BYTE *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        BYTE *buf = fc_buffer_get_user_data(descriptor->buffer_id);
 
         if ((cw_bitmap & ftl_cw_bit(plane, cw)) != 0U)
         {
@@ -476,7 +476,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
         {
             return FTL_ERROR;
         }
-        BYTE *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        BYTE *buf = fc_buffer_get_user_data(descriptor->buffer_id);
         if (buf == NULL)
         {
             return FTL_ERROR;
@@ -563,7 +563,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
         }
 
         // 真实微秒 deadline（max_wait 已在入口 clamp 到 WORD 范围）。
-        // 时钟不可用（未初始化）时退化为轮数兜底，与旧行为一致，不静默取消超时。
+        // 时钟不可用（未初始化）时退化为轮数兜底，不静默取消超时。
         bool expired;
 
         if (clock_ok)
@@ -757,13 +757,13 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
         return FTL_ERROR;
     }
     // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
-    // **只认 NAND_FAIL 是错的**：DATA_ERROR / MATA_ERROR 会让本页内容不可信却照常拷出——
+    // **只认 NAND_FAIL 是错的**：DATA_ERROR / META_ERROR 会让本页内容不可信却照常拷出——
     // · DATA_ERROR（UNC/CRC/RAID）：fc_data_path_read 在任何 CW 不可纠时**提前返回**，
     //   buffer 停在 "ECC 半修正 + 未解扰" 态（步骤 2/3/4 全跳过），拷出来的是加扰垃圾；
-    // · MATA_ERROR：页内 META 与预期不符 = **读到了别的页**（或页已擦除）。
+    // · META_ERROR：页内 META 与预期不符 = **读到了别的页**（或页已擦除）。
     // 后果实例：L2P region 页读回垃圾 → l2p_cache_find_or_load 标 CLEAN → 垃圾 PBA
     // 被 flush 写回介质**永久化**，读路径再拿它当 ch/ce/lun 路由字段用。
-    // 空页也会命中 MATA_ERROR ⇒ 返回 FTL_ERROR ⇒ 调用者保持 entries
+    // 空页也会命中 META_ERROR ⇒ 返回 FTL_ERROR ⇒ 调用者保持 entries
     // 全 NAND_PBA_INVALID，与"未映射"语义一致（这正是各调用点的既有兜底分支）。
     // ⚠ 未映射的 L2P region 不在此列：Directory 条目就是 INVALID，加载路径根本不发读。
     if (fc_cmd_status_has_error(completion.status))
@@ -1157,10 +1157,10 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
 
     // 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。
     ASSERT(pba_is_valid(pba));
-    cmd->config.ch  = pba_to_ch(pba);
-    cmd->config.ce  = pba_to_ce(pba);
-    cmd->config.lun = pba_to_lun(pba);
-    cmd->paa        = pba_to_paa(pba);
+    cmd->route.ch  = pba_to_ch(pba);
+    cmd->route.ce  = pba_to_ce(pba);
+    cmd->route.lun = pba_to_lun(pba);
+    cmd->paa       = pba_to_paa(pba);
 
     if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
     {
@@ -1372,9 +1372,9 @@ ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BY
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
 
-    cmd->config.ch          = ch;
-    cmd->config.ce          = ce;
-    cmd->config.lun         = lun;
+    cmd->route.ch           = ch;
+    cmd->route.ce           = ce;
+    cmd->route.lun          = lun;
     cmd->config.operation   = OP_SET_FEATURES;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;

@@ -14,7 +14,7 @@
  * **每槽 = 一条命令**：NAND 侧看不到「链」，一条链 = 连续 N 槽。
  * FC 用 fc_nand_dispatch_submit_chain() 把整链原子批量追加（空间不足则整体拒收），
  * poll 遍历每 LUN FIFO，先进先出，每轮每 LUN 推进一条、完成一条即回一份 completion。
- * 因此每条命令各有一份 completion，链中间命令的状态不再被吞掉。
+ * 因此每条命令各有一份 completion，链中间命令的状态独立上报。
  */
 
 /*
@@ -39,12 +39,9 @@ typedef struct
     DWORD cw_bitmap;                /* 选中的 CW 集合：bit n = plane*CW_NUM + cw。
                                      * 命令 plane 集合外的位恒 0；稀疏（可只选 CW1/CW3）。
                                      * **字面位图**：0 = 空集（无 desc 的退化命令，合法；
-                                     * 擦除即空集，v28 起不再伪造 CW0 位）。 */
-    BYTE plane_count;               /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
-                                     * N = multi-plane（= command->config.multi_plane）。
-                                     * ⚠ 原注释写 "1 = single" 与实现不符。
-                                     * ⚠ 当前 NAND 层只有 fc_nand_dispatch_scatter_page_buffer() 读它；
-                                     *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 fc_nand_dispatch.c。 */
+                                     * 擦除即空集，CW0 位保持 0）。 */
+    BYTE plane_count;               /* 0 = 单 plane；N = multi-plane（= command->config.multi_plane）。
+                                     * 当前只有 scatter 读它；multi-plane handler 按 PLANE_NUM 遍历。 */
     BYTE plane;                     /* 本命令目标物理 plane 索引。
                                      * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
@@ -69,13 +66,13 @@ typedef struct
 
 typedef struct
 {
-    WORD command_id;
-    BYTE execution_status;
-    BYTE nand_status;                 /* OP 后读状态（FAIL/FAILC） */
-    BYTE pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
-    BYTE cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
-    BYTE ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
-    WORD failed_descriptor_id;
+    WORD          command_id;
+    nand_result_e execution_status;
+    BYTE          nand_status;                 /* OP 后读状态（FAIL/FAILC） */
+    BYTE          pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
+    BYTE          cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
+    BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
+    WORD          failed_cw;                   /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
 } fc_nand_dispatch_completion_t;
 
 /* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */

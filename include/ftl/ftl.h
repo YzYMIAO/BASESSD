@@ -428,10 +428,10 @@ void ftl_global_init(void);
  * 只给实际存在且 78h 探测有响应的 LUN 分配紧凑 die 号；
  * g_chcelun_table 与 g_die_table 互为逆映射。
  *
- * @param targets 板级物理拓扑（CH_MAX × CE_MAX）
+ * @param targets 板级物理拓扑（CH_NUM × CE_NUM）
  * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
  */
-bool ftl_topology_build(const nand_target_info_t targets[CH_MAX][CE_MAX]);
+bool ftl_topology_build(const nand_target_info_t targets[CH_NUM][CE_NUM]);
 
 /**
  * @brief 初始化 FTL 子系统

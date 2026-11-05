@@ -51,7 +51,7 @@
 /**
  * @brief 读一页并逐 CW 取出 META LBA
  *
- * 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集：UNC/MATA 页内容不可信。
+ * 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集：UNC/META 页内容不可信。
  *
  * @param pba    目标页 PBA
  * @param cw_lba 输出：逐 CW 的 LBA（未写过 = FTL_LBA_INVALID）
@@ -67,7 +67,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     }
 
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = CW_NUM - 1U;
+    cmd->config.cw_count    = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -99,7 +99,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
             return FTL_ERROR;
         }
 
-        // ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / MATA_ERROR
+        // ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / META_ERROR
         // 页当成功读并解析 META（重建期可能写回错误映射）。
         if (fc_cmd_status_has_error(completion.status))
         {

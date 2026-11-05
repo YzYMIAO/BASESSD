@@ -989,6 +989,18 @@ NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未�
 「静默写坏介质」。同时它让 `fc_build_dispatch_request` 从「构建不可失败」变成有**唯一**失败出口——
 函数头注释与两条派发路径的兜底注释都已同步。
 
+**统一写法（2026-11-06）**：判据 9 的「debug 断言 + release 拒绝」统一走
+`include/common/assertion.h` 新增的生产宏，不再手写失败分支：
+
+- `ASSERT_MSG(cond, fmt, ...)`：debug 打印条件/消息并停机；release 裁空。
+- `ASSERT_REJECT(cond, ret, fmt, ...)`：debug 同上；release 做一次条件判断后 `return ret`。
+- `ASSERT_REJECT_VOID(cond, fmt, ...)`：同 `ASSERT_REJECT`，用于 `void` 函数。
+- `ASSERT_DEFAULT(type)`：`switch` 的 `default` 专用，debug 打印未处理的枚举类型名；release 裁空（H7/C7）。
+
+禁止写成 `if (bad) { ASSERT(false); LOGE(...); return ...; }`：debug 下 `LOGE` 不可达
+（`assertion_fail` 是 `_Noreturn`），`ASSERT(false)` 丢掉条件表达式，且同一判断被拆成
+两条互斥的失败路径。`ASSERT_TRUE` 等富断言集仍只供测试使用，不随 `NDEBUG` 裁剪。
+
 > **判据 10：被 `ASSERT` 守的变量，在 `NDEBUG` 下可能变成 unused——编译告警是唯一的信号。**
 > `ASSERT` 展开为空后，只为它服务的局部变量（如 `const uint8_t all_planes`）会留下
 > `unused variable` 告警。**release 档的告警要单独看一眼**：它同时是「这条断言在 release 下

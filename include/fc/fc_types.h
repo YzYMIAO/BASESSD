@@ -38,12 +38,15 @@ typedef WORD fc_buffer_id_t;
 /* 资源使用统计（测试/监控用） */
 typedef struct
 {
-    WORD sq_used;
-    WORD hsq_used;
-    WORD cq_used;
-    WORD command_used;
-    WORD descriptor_used;
-    WORD buffer_used;
+    WORD sq_used;         /* SQ 当前占用条数 */
+    WORD hsq_used;        /* HSQ 当前占用条数 */
+    WORD cq_used;         /* CQ 当前占用条数 */
+    WORD command_used;    /* 命令池已分配槽位数 */
+    WORD descriptor_used; /* 描述符池已分配条目数 */
+    WORD buffer_used;     /* buffer 池已占用块数 */
+    WORD command_high;    /* 命令池历史最高占用（高水位，诊断/调参用） */
+    WORD descriptor_high; /* 描述符池历史最高占用 */
+    WORD buffer_high;     /* buffer 池历史最高占用 */
 } fc_resource_stats_t;
 
 /* 前向声明：完整定义在 fc_command.h */

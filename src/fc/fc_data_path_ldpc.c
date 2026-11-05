@@ -109,17 +109,14 @@ const char *fc_ecc_algo_name(void)
  * @brief ECC 编码统一入口：对 data[0..data_length) 编码，parity 写在其后 8B
  *
  * BCH 分支由 fc_bch_encode 生成 8B parity；LDPC 分支以 528B 完整码字为输入输出。
- * 引擎不可用时返回 NOT_SUPPORTED，由调用方按「跳过 ECC」处理。
+ * 引擎不可用时返回 NOT_SUPPORTED；调用方必须让命令失败，不得静默跳过 ECC。
  *
- * @param config      ECC 配置（当前由编译宏决定算法，未使用）
  * @param data        CW 缓冲（528B）
  * @param data_length 数据区字节数（≤ FC_BUFFER_DATA_SIZE = 520）
  * @return FC_STATUS_OK / FC_STATUS_NOT_SUPPORTED
  */
-fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length)
+fc_status_e fc_ecc_encode(BYTE *data, WORD data_length)
 {
-    (void)config;
-
     // 入参前置条件由调用者保证（fc_data_path 恒传 CW 缓冲 + FC_BUFFER_DATA_SIZE）
     ASSERT(data != NULL);
     ASSERT(data_length != 0U);
@@ -173,16 +170,13 @@ fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data
 /**
  * @brief ECC 解码统一入口：校验 data + 其后 8B parity，并原地纠正数据区
  *
- * @param config      ECC 配置（未使用）
  * @param data        CW 缓冲（528B）
  * @param data_length 数据区字节数（≤ FC_BUFFER_DATA_SIZE = 520）
  * @param err_bits    输出：纠正的 bit 数（可 NULL）
  * @return FC_STATUS_OK / FC_STATUS_NOT_SUPPORTED / FC_STATUS_IO_ERROR（不可纠）
  */
-fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits)
+fc_status_e fc_ecc_decode(BYTE *data, WORD data_length, BYTE *err_bits)
 {
-    (void)config;
-
     if (err_bits != NULL)
     {
         *err_bits = 0U;

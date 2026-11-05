@@ -7,7 +7,7 @@
  *   - 器件描述符：几何/时序/ID + hw_init/set_timing
  *
  * ONFI 命令序列与 UOP 引擎在 FC（src/fc/fc_onfi_1_0.c / fc_nand_engine.c）；
- * 本文件不再执行命令，只提供 NAND 器件/PHY 事实。
+ * 本文件只提供 NAND 器件/PHY 事实。
  *
  * 芯片：当前封装为 Micron MT29F4G08ABADAWP，512MB SLC，
  *       tRC=50ns（Mode 0）/ 20ns（Mode 5）。
@@ -24,18 +24,26 @@
 #include "nand_device.h"
 #include "nand_fmc.h"
 
-#include <stddef.h>
 #include <string.h>
 
 /* 全局 HAL NAND 句柄：生命周期从 fc_nand_init 起，供 FMC 初始化/时序更新复用 */
 static NAND_HandleTypeDef g_nand_handle;
 
 /* 当前实际生效的 ONFI timing mode（0 = 仍为低速）。[STAT] 诊断用。 */
-static BYTE s_timing_mode;
+static BYTE s_timing_mode[CH_NUM][CE_NUM];
+
+/* 低速 bring-up 的 FMC PCC 值（FMC 周期）：对 Mode0 数据手册最小值留保守余量。
+ * 不是从 AC 表推导——上电时先保证任何时序边缘都能读 ID/参数页。 */
+#define MT29F_LOW_PCC_SETUP (4U)
+#define MT29F_LOW_PCC_WAIT  (6U)
+#define MT29F_LOW_PCC_HOLD  (2U)
+#define MT29F_LOW_PCC_HIZ   (4U)
+
+#if (CONFIG_NAND_TIMING_MODE != 0U)
 
 /* --------------------------------------------------------------------
- * g_nand_timing_high — MT29F4G08 3.3V 时序（数据手册 Table 29/31）
- *   29 个值按 nand_fmc_timing_t 字段顺序初始化（顺序耦合，错一位全错）。
+ * g_nand_timing_mode0 — MT29F4G08 3.3V 时序（数据手册 Table 29/31）
+ *   29 个值按字段名初始化（designated initializer），字段重排不会错位。
  *   本表固定使用 Table 29/31 的 3.3V AC 参数；CONFIG_NAND_TIMING_MODE 只改变
  *   SET_FEATURES 的模式值（4 或 5），用于在**相同 FMC 时序**下对比两种模式。
  *   注意：Mode 4 的独立 AC 表在数据手册 Table 32（1.8V），本板 3.3V 实验不采用它。
@@ -44,39 +52,40 @@ static BYTE s_timing_mode;
  *     数据读写组  : tDH / tDS / tWC / tWH / tWP / tAR / tIR / tRC / tREA / tREH /
  *                   tRP / tRLOH / tRHOH / tRHW / tRHZ / tRR / tWHR / tWB
  *     就绪/复电组 : tCEA / tCHZ / tCLR / tCOH
- *   （Mode 0 典型值；本表被 mt29f_hw_init 低速分支的初始 config 引用）
+ *   （Mode 0 典型值；本表供 mt29f_set_timing 的 PCC 换算使用）
  * -------------------------------------------------------------------- */
-static const nand_fmc_timing_t g_nand_timing_high = {
-    70U,  /* tADL   地址→数据加载延时 */
-    5U,   /* tALH   ALE 保持 */
-    10U,  /* tALS   ALE 建立 */
-    5U,   /* tCH    CE 保持 */
-    5U,   /* tCLH   CLE 保持 */
-    10U,  /* tCLS   CLE 建立 */
-    15U,  /* tCS    CE 建立 */
-    5U,   /* tDH    数据保持 */
-    7U,   /* tDS    数据建立 */
-    20U,  /* tWC    写周期 */
-    7U,   /* tWH    WE 高电平宽度 */
-    10U,  /* tWP    WE 低电平宽度 */
-    10U,  /* tAR    ALE→RE 延时 */
-    25U,  /* tCEA   CE→输出有效（max） */
-    50U,  /* tCHZ   CE→输出高阻（max） */
-    10U,  /* tCLR   CLE→RE 延时 */
-    15U,  /* tCOH   CE 高→输出保持 */
-    0U,   /* tIR    命令→数据输出间隔（Mode0 为 0） */
-    20U,  /* tRC    读周期 */
-    16U,  /* tREA   RE→输出有效（max） */
-    7U,   /* tREH   RE 高电平宽度 */
-    15U,  /* tRHOH  RE 高→输出保持 */
-    100U, /* tRHW   RE→WE 延时 */
-    100U, /* tRHZ   RE→输出高阻（max） */
-    5U,   /* tRLOH  RE 低→输出保持 */
-    10U,  /* tRP    RE 低电平宽度 */
-    20U,  /* tRR    读命令→读命令间隔 */
-    100U, /* tWB    WE 高→busy（max） */
-    60U,  /* tWHR   状态→RE 高延时 */
+static const nand_fmc_timing_t g_nand_timing_mode0 = {
+    .t_adl_ns     = 70U,  /* 地址→数据加载延时 */
+    .t_alh_ns     = 5U,   /* ALE 保持 */
+    .t_als_ns     = 10U,  /* ALE 建立 */
+    .t_ch_ns      = 5U,   /* CE 保持 */
+    .t_clh_ns     = 5U,   /* CLE 保持 */
+    .t_cls_ns     = 10U,  /* CLE 建立 */
+    .t_cs_ns      = 15U,  /* CE 建立 */
+    .t_dh_ns      = 5U,   /* 数据保持 */
+    .t_ds_ns      = 7U,   /* 数据建立 */
+    .t_wc_ns      = 20U,  /* 写周期 */
+    .t_wh_ns      = 7U,   /* WE 高电平宽度 */
+    .t_wp_ns      = 10U,  /* WE 低电平宽度 */
+    .t_ar_ns      = 10U,  /* ALE→RE 延时 */
+    .t_cea_max_ns = 25U,  /* CE→输出有效（max） */
+    .t_chz_max_ns = 50U,  /* CE→输出高阻（max） */
+    .t_clr_ns     = 10U,  /* CLE→RE 延时 */
+    .t_coh_ns     = 15U,  /* CE 高→输出保持 */
+    .t_ir_ns      = 0U,   /* 命令→数据输出间隔（Mode0 为 0） */
+    .t_rc_ns      = 20U,  /* 读周期 */
+    .t_rea_max_ns = 16U,  /* RE→输出有效（max） */
+    .t_reh_ns     = 7U,   /* RE 高电平宽度 */
+    .t_rhoh_ns    = 15U,  /* RE 高→输出保持 */
+    .t_rhw_ns     = 100U, /* RE→WE 延时 */
+    .t_rhz_max_ns = 100U, /* RE→输出高阻（max） */
+    .t_rloh_ns    = 5U,   /* RE 低→输出保持 */
+    .t_rp_ns      = 10U,  /* RE 低电平宽度 */
+    .t_rr_ns      = 20U,  /* 读命令→读命令间隔 */
+    .t_wb_max_ns  = 100U, /* WE 高→busy（max） */
+    .t_whr_ns     = 60U,  /* 状态→RE 高延时 */
 };
+#endif /* CONFIG_NAND_TIMING_MODE */
 
 /*
  * 根据 ONFI 时序参数 nand_fmc_timing_t 和 FMC 时钟频率，
@@ -109,8 +118,8 @@ static const nand_fmc_timing_t g_nand_timing_high = {
  *   (WAIT+1) * tHCLK >= max(tWP,tRP)
  *   HOLD     * tHCLK >= max(tCH,tCLH,tALH)
  *   HiZ      * tHCLK >= max(tCS,tCLS,tALS) + (tWP - tDS)
- * 旧实现硬编码 5ns/4545ps，FMC 时钟一变就失真；现按实际 fmc_hz 算。
- * 旧实现（Mode 4 表）实测 HOLD/HiZ 各短 1 周期，命令/地址采样失败（RISK-NAND-03）。
+ * 按实际 fmc_hz 换算（不能硬编码 5ns/4545ps）。Mode 4 表实测 HOLD/HiZ 各短 1 周期
+ * 会导致命令/地址采样失败（RISK-NAND-03），故使用 Mode 0 的 3.3V AC 参数作为基准。
  */
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
 {
@@ -217,49 +226,22 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_T
 }
 #endif /* CONFIG_NAND_TIMING_MODE */
 
-/* ══════════════════════════════════════════════════════════════
- * 上电拓扑扫描：只产出“板级物理事实”（哪些 target 存在、logical_units、
- * 逐 LUN present）。紧凑 die 编号与 LUN→die 表在 FTL 层（ftl_config.h / ftl.c）。
- * ══════════════════════════════════════════════════════════════ */
-nand_target_info_t g_nand_targets[CH_MAX][CE_MAX];
-
-/* 板级物理通路表：每一项表示 (ch,ce) 有一条可寻址的 NAND target。
- * 当前板：FMC Bank3 + 单个 NCE，只有 (0,0)。多 target 板卡在此扩展，
- * 并在 nand_select_target() 里实现对应的 FMC bank / CE# GPIO 切换。
- * ⚠ 这张表是**板级事实**，不是 NAND 器件属性。 */
-typedef struct
-{
-    BYTE ch;
-    BYTE ce;
-} nand_board_target_t;
-
-static const nand_board_target_t s_board_targets[] = {
-    {0U, 0U},
-};
-
 /**
- * @brief 板级 target 选择（当前只校验通路表）
+ * @brief 装配 FMC Bank3 三窗口配置（器件/板级窗口地址）
  *
- * @param ch 目标 ch
- * @param ce 目标 ce
- * @return OK / INVALID_ARGUMENT 越界 / NOT_READY 无通路
+ * data/command/address 指向同一 FMC Bank3 的三个 A16/A17 别名窗口；
+ * 具体 GPIO/FMC 初始化由 board 层的 HAL_NAND_MspInit 完成。
+ *
+ * @param cfg 输出配置
  */
-nand_result_e nand_select_target(BYTE ch, BYTE ce)
+static void mt29f_build_fmc_config(nand_fmc_config_t *cfg)
 {
-    if ((ch >= CH_MAX) || (ce >= CE_MAX))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
-
-    for (size_t i = 0U; i < (sizeof(s_board_targets) / sizeof(s_board_targets[0])); i++)
-    {
-        if ((s_board_targets[i].ch == ch) && (s_board_targets[i].ce == ce))
-        {
-            return NAND_RESULT_OK;
-        }
-    }
-
-    return NAND_RESULT_NOT_READY;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
+    cfg->command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
+    cfg->address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
+    cfg->rb_port = NAND_RB_GPIO_PORT;
+    cfg->rb_pin  = NAND_RB_GPIO_PIN;
 }
 
 /**
@@ -277,7 +259,7 @@ static nand_result_e mt29f_hw_init(void)
     memset(&common_timing, 0, sizeof(common_timing));
     memset(&attribute_timing, 0, sizeof(attribute_timing));
 
-    s_timing_mode = 0U; /* 上电/重新初始化一律从低速开始 */
+    memset(s_timing_mode, 0, sizeof(s_timing_mode)); /* 上电/重新初始化一律从低速开始 */
 
     g_nand_handle.Instance             = FMC_NAND_DEVICE;
     g_nand_handle.Init.NandBank        = FMC_NAND_BANK3;
@@ -289,10 +271,10 @@ static nand_result_e mt29f_hw_init(void)
     g_nand_handle.Init.TARSetupTime    = 8U;
 
     /* 低速保守 PCC：Setup/Wait/Hold/HiZ 均有数据手册最小值的余量。 */
-    common_timing.SetupTime     = 4U;
-    common_timing.WaitSetupTime = 6U;
-    common_timing.HoldSetupTime = 2U;
-    common_timing.HiZSetupTime  = 4U;
+    common_timing.SetupTime     = MT29F_LOW_PCC_SETUP;
+    common_timing.WaitSetupTime = MT29F_LOW_PCC_WAIT;
+    common_timing.HoldSetupTime = MT29F_LOW_PCC_HOLD;
+    common_timing.HiZSetupTime  = MT29F_LOW_PCC_HIZ;
     attribute_timing            = common_timing;
 
     if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
@@ -300,15 +282,10 @@ static nand_result_e mt29f_hw_init(void)
         LOGE(LOG_TAG_NAND "HAL_NAND_Init failed\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI(LOG_TAG_NAND "FMC ready, R/B#=%u\r\n", (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
 
     nand_fmc_config_t fmc_config;
 
-    memset(&fmc_config, 0, sizeof(fmc_config));
-    fmc_config.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
-    fmc_config.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
-    fmc_config.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
-    fmc_config.timing  = g_nand_timing_high;
+    mt29f_build_fmc_config(&fmc_config);
 
     if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
     {
@@ -325,18 +302,19 @@ static nand_result_e mt29f_hw_init(void)
  * @param fmc_hz FMC 内核时钟（Hz）
  * @return NAND_RESULT_OK / 错误码
  */
-static nand_result_e mt29f_set_timing(BYTE mode, DWORD fmc_hz)
+static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 {
 #if (CONFIG_NAND_TIMING_MODE != 0U)
     FMC_NAND_PCC_TimingTypeDef fast_pcc;
 
     ASSERT(fmc_hz != 0U);
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
     memset(&fast_pcc, 0, sizeof(fast_pcc));
-    nand_fmc_timing_to_pcc(&g_nand_timing_high, &fast_pcc, fmc_hz);
+    nand_fmc_timing_to_pcc(&g_nand_timing_mode0, &fast_pcc, fmc_hz);
 
     const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
-    const DWORD tclr    = NS_TO_PCC_CYCLES(g_nand_timing_high.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
-    const DWORD tar     = NS_TO_PCC_CYCLES(g_nand_timing_high.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    const DWORD tclr    = NS_TO_PCC_CYCLES(g_nand_timing_mode0.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    const DWORD tar     = NS_TO_PCC_CYCLES(g_nand_timing_mode0.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
 
     LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", mode, fast_pcc.SetupTime, fast_pcc.WaitSetupTime, fast_pcc.HoldSetupTime, fast_pcc.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
 
@@ -350,22 +328,20 @@ static nand_result_e mt29f_set_timing(BYTE mode, DWORD fmc_hz)
 
     nand_fmc_config_t fast_fmc;
 
-    memset(&fast_fmc, 0, sizeof(fast_fmc));
-    fast_fmc.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
-    fast_fmc.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
-    fast_fmc.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
-    fast_fmc.timing  = g_nand_timing_high;
+    mt29f_build_fmc_config(&fast_fmc);
 
-    if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
+    if (nand_fmc_init_target(ch, ce, &fast_fmc) != NAND_RESULT_OK)
     {
         LOGE(LOG_TAG_NAND "FMC backend configure (Mode %u) failed\r\n", mode);
         return NAND_RESULT_OPERATION_FAILED;
     }
 
-    s_timing_mode = mode;
+    s_timing_mode[ch][ce] = mode;
     LOGI(LOG_TAG_NAND "FMC timing updated for Mode %u\r\n", mode);
     return NAND_RESULT_OK;
 #else
+    (void)ch;
+    (void)ce;
     (void)mode;
     (void)fmc_hz;
     return NAND_RESULT_OK;
@@ -389,49 +365,8 @@ const nand_device_desc_t *nand_device_get(void)
  *
  * @return 模式号（0 = 低速）
  */
-BYTE nand_get_timing_mode(void)
+BYTE nand_get_timing_mode(BYTE ch, BYTE ce)
 {
-    return s_timing_mode;
-}
-
-/**
- * @brief HAL 平台 MSP 回调：时钟 + GPIO 引脚复用
- *
- * 由 HAL_NAND_Init 内部调用；R/B# 上拉输入，NCE/数据总线 AF12。
- *
- * @param hnand HAL 句柄（未使用）
- */
-void HAL_NAND_MspInit(NAND_HandleTypeDef *hnand)
-{
-    GPIO_InitTypeDef gpio;
-
-    memset(&gpio, 0, sizeof(gpio));
-    (void)hnand;
-    __HAL_RCC_FMC_CLK_ENABLE();
-    __HAL_RCC_GPIOD_CLK_ENABLE();
-    __HAL_RCC_GPIOE_CLK_ENABLE();
-    __HAL_RCC_GPIOG_CLK_ENABLE();
-
-    /* R/B#：上拉输入（busy 时为低） */
-    gpio.Pin   = NAND_RB_GPIO_PIN;
-    gpio.Mode  = GPIO_MODE_INPUT;
-    gpio.Pull  = GPIO_PULLUP;
-    gpio.Speed = GPIO_SPEED_HIGH;
-    HAL_GPIO_Init(NAND_RB_GPIO_PORT, &gpio);
-
-    /* GPIOG PIN9：FMC NCE（片选，AF12） */
-    gpio.Pin       = GPIO_PIN_9;
-    gpio.Mode      = GPIO_MODE_AF_PP;
-    gpio.Pull      = GPIO_NOPULL;
-    gpio.Speed     = GPIO_SPEED_HIGH;
-    gpio.Alternate = GPIO_AF12_FMC;
-    HAL_GPIO_Init(GPIOG, &gpio);
-
-    /* GPIOD：数据总线低 8 位相关脚（AF12，由上一段 gpio 配置延续） */
-    gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_14 | GPIO_PIN_15;
-    HAL_GPIO_Init(GPIOD, &gpio);
-
-    /* GPIOE：数据总线高 8 位相关脚（AF12） */
-    gpio.Pin = GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10;
-    HAL_GPIO_Init(GPIOE, &gpio);
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
+    return s_timing_mode[ch][ce];
 }
