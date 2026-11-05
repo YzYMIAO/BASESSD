@@ -24,9 +24,10 @@
 
 #include "assertion.h"
 #include "fc_command.h"
-#include "fc_data_path.h"
+#include "fc_ecc_engine.h"
 #include "fc_internal.h"
 #include "fc_nand_dispatch.h"
+#include "fc_random_engine.h"
 #include "log.h"
 
 #include <stddef.h>

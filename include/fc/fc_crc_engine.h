@@ -14,7 +14,7 @@
  * 编码路径：先算 CRC 存到 buffer[4..8]，再走加扰 → ECC → RAID。
  * 解码路径：ECC → 解扰后，校验 CRC 与 buffer[4..8] 是否一致。
  *
- * 实现在 src/fc/fc_data_path.c；外设访问在 src/platform/stm32h743/crc.c。
+ * 实现在 src/fc/fc_crc_engine.c；外设访问在 src/platform/stm32h743/crc_port.c。
  */
 
 /* CW 内各区域偏移/大小 */

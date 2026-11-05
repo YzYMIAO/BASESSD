@@ -1,13 +1,15 @@
 
+#include "fc_ecc_engine.h"
+
 #include "assertion.h"
 #include "fc.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
-#include "fc_data_path.h"
+#include "fc_bch_engine.h"
 #include "log.h"
 
 #include <stddef.h>
 #include <string.h>
 
-// fc_data_path_ldpc.c — ECC 统一入口（BCH / QC-LDPC 按编译宏切换）+ QC-LDPC 实现
+// fc_ecc_engine.c — ECC 统一入口（BCH / QC-LDPC 按编译宏切换）+ QC-LDPC 实现
 //
 // FC_ECC_ALGO 控制编译使用 BCH 或 LDPC。
 //

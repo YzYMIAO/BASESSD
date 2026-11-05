@@ -43,6 +43,7 @@
 #include "fc_internal.h"
 #include "fc_nand_dispatch.h"
 #include "fc_queue.h"
+#include "fc_raid_engine.h"
 #include "log.h"
 #include "ssd_compiler.h"
 
