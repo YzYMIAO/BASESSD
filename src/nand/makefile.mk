@@ -1,4 +1,4 @@
-# NAND 公共接口 + 按 NAND_DEVICE 选中的器件驱动。
+# NAND 器件/协议/PHY 层 + 按 NAND_DEVICE 选中的器件驱动。
 # 器件驱动在 src/nand/devices/，不参与上面的 wildcard ⇒ 一次只编一颗。
 ifeq ($(NAND_DEVICE),MT29F___G08A)
 NAND_DEVICE_SRC := $(SRC_ROOT)/nand/devices/mt29f___g08a.c

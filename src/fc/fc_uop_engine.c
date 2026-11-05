@@ -1,5 +1,5 @@
 /*
- * nand_engine.c — UOP 微指令解释器 / 状态机
+ * fc_uop_engine.c — FC 的 UOP 微指令解释器 / 状态机
  *
  * 职责：顺序执行一条命令的 UOP 序列（nand_uop_t 数组），驱动后端
  *       硬件（本工程为 FMC）完成 NAND 操作。支持：
@@ -9,8 +9,8 @@
  *         - 超时检测（SysTick µs 时间 + 轮询计数双保险）
  *
  * 调用链：
- *   nand_fc_execute/start/step（nand_mt29*.c）
- *     → nand_engine_*（本文件）
+ *   fc_nand_execute/start/step（src/fc/fc_nand_ops.c）
+ *     → fc_uop_engine_*（本文件）
  *     → 后端 handler 表（nand_fmc.c 的 g_nand_fmc_handlers）
  *
  * 关键约定：
@@ -19,7 +19,7 @@
  *   - 单条命令 UOP 数上限 NAND_ENGINE_MAX_UOPS（64），防死循环。
  */
 
-#include "nand_engine.h"
+#include "fc_uop_engine.h"
 
 #include "assertion.h"
 #include "delay.h"
@@ -36,7 +36,7 @@
  * @brief 阻塞执行整条 UOP 序列，直到完成或出错
  *
  * 把协作式 step 循环压成 while(NOT_READY) 阻塞调用。仅供初始化阶段
- * （nand_init，armed==0）使用；运行期走 nand_engine_start/step。
+ * （nand_init，armed==0）使用；运行期走 fc_uop_engine_start/step。
  *
  * @param backend    后端 handler 表 + context
  * @param uops       UOP 序列
@@ -45,20 +45,20 @@
  * @param completion 输出：执行状态 + NAND 状态字节
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
+nand_result_e fc_uop_engine_execute(const nand_phy_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     /* 引擎上下文的 backend/request/completion 三指针随 state 固定，先绑定再 start */
-    nand_engine_state_t state;
+    fc_uop_engine_state_t state;
     memset(&state, 0, sizeof(state));
     state.backend    = backend;
     state.request    = request;
     state.completion = completion;
     BYTE result;
 
-    result = nand_engine_start(&state, uops, timing);
+    result = fc_uop_engine_start(&state, uops, timing);
     while (result == NAND_RESULT_NOT_READY)
     {
-        result = nand_engine_step(&state);
+        result = fc_uop_engine_step(&state);
     }
     return result;
 }
@@ -74,10 +74,10 @@ nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const na
  * @param timing 时序参数（busy_timeout_us 必须非 0）
  * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY / 错误码
  */
-nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
+nand_result_e fc_uop_engine_start(fc_uop_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
 {
-    /* 前置条件由调用者保证（见 nand_engine.h）：state->backend/request/completion 三指针
-     * 随事务固定（nand_dispatch_task_load / nand_fc_start 绑定），uops/timing 取自
+    /* 前置条件由调用者保证（见 fc_uop_engine.h）：state->backend/request/completion 三指针
+     * 随事务固定（fc_nand_dispatch_task_load / fc_nand_start 绑定），uops/timing 取自
      * g_nand_operation_map[operation]（调用者已判 map->uops != NULL）。 */
     ASSERT(state != NULL);
     ASSERT(state->backend != NULL);
@@ -102,7 +102,7 @@ nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
     state->completion->nand_status     = 0U;
     state->completion->pre_status      = 0U;
     state->completion->transfer_status = NAND_RESULT_OK;
-    return nand_engine_step(state);
+    return fc_uop_engine_step(state);
 }
 
 /**
@@ -114,7 +114,7 @@ nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
  * @param w     该忙等所属的超时状态
  * @return NAND_RESULT_OK（本次或此前已锁存）/ NAND_RESULT_INVALID_ARGUMENT（µs 时钟不可用，active 已清）
  */
-static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_t *w)
+static BYTE fc_uop_engine_wait_latch(fc_uop_engine_state_t *state, fc_uop_engine_wait_t *w)
 {
     if (w->started != 0U)
     {
@@ -141,7 +141,7 @@ static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_
  * @param op_name 日志用的微指令名
  * @return 1 已超时（active 已清）；0 未超时
  */
-static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
+static BYTE fc_uop_engine_wait_timeout(fc_uop_engine_state_t *state, fc_uop_engine_wait_t *w, const char *op_name)
 {
     if (w->polls < UINT16_MAX)
     {
@@ -164,7 +164,7 @@ static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wai
  *
  * @param state 引擎状态（uop_index / request / completion 供打印）
  */
-static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
+static void fc_uop_engine_uop_log_ok(const fc_uop_engine_state_t *state)
 {
     BYTE type = state->uops[state->uop_index].type;
 
@@ -184,14 +184,14 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
  * @param state 引擎状态（游标 + 超时字段）
  * @return NAND_RESULT_OK / NOT_READY（让出）/ TIMEOUT / INVALID_ARGUMENT / OPERATION_FAILED
  */
-nand_result_e nand_engine_step(nand_engine_state_t *state)
+nand_result_e fc_uop_engine_step(fc_uop_engine_state_t *state)
 {
     const nand_uop_t  *uop;
     nand_uop_handler_t handler;
     BYTE               result;
 
-    /* 前置条件由调用者保证（见 nand_engine.h）：active==0 后不得再调；游标字段由
-     * nand_engine_start 填好。nand_fc_step 已先判 active，nand_engine_execute 的
+    /* 前置条件由调用者保证（见 fc_uop_engine.h）：active==0 后不得再调；游标字段由
+     * fc_uop_engine_start 填好。fc_nand_step 已先判 active，fc_uop_engine_execute 的
      * 循环与 start 内部调用也都在 active==1 时进入。 */
     ASSERT(state != NULL);
     ASSERT(state->active != 0U);
@@ -212,7 +212,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
             return state->completion->transfer_status;
         }
 
-        /* UOP 流来自 nand_dispatch_tables.c 的静态表，type 必然 < NAND_UOP_COUNT */
+        /* UOP 流来自 fc_nand_dispatch_tables.c 的静态表，type 必然 < NAND_UOP_COUNT */
         ASSERT(uop->type < NAND_UOP_COUNT);
 
         /* ── NAND_UOP_JUMP_IF_NOT_READY：引擎直接处理的条件跳转微指令 ── */
@@ -241,11 +241,11 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
 
             /* NAND busy → 锁存起点 + 双条件超时检测（用独立 jump 状态，
              * 不被回跳体内返回 OK 的 UOP 复位） */
-            if (nand_engine_wait_latch(state, &state->jump) != NAND_RESULT_OK)
+            if (fc_uop_engine_wait_latch(state, &state->jump) != NAND_RESULT_OK)
             {
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
-            if (nand_engine_wait_timeout(state, &state->jump, "JUMP_IF_NOT_READY") != 0U)
+            if (fc_uop_engine_wait_timeout(state, &state->jump, "JUMP_IF_NOT_READY") != 0U)
             {
                 return NAND_RESULT_TIMEOUT;
             }
@@ -265,7 +265,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
         /* WAIT_READY 首次进入：记录 µs 起点（用独立 wait 状态） */
         if (uop->type == NAND_UOP_WAIT_READY)
         {
-            if (nand_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)
+            if (fc_uop_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)
             {
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
@@ -275,7 +275,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
 
         if (result == NAND_RESULT_OK)
         {
-            nand_engine_uop_log_ok(state);
+            fc_uop_engine_uop_log_ok(state);
             state->uop_index++;
             state->wait.started = 0U; /* 复位 WAIT_READY 忙等，供下一次等待重新锁存 */
             state->wait.polls   = 0U;
@@ -294,7 +294,7 @@ nand_result_e nand_engine_step(nand_engine_state_t *state)
             }
             if (uop->type == NAND_UOP_WAIT_READY)
             {
-                if (nand_engine_wait_timeout(state, &state->wait, "WAIT_READY") != 0U)
+                if (fc_uop_engine_wait_timeout(state, &state->wait, "WAIT_READY") != 0U)
                 {
                     return NAND_RESULT_TIMEOUT;
                 }

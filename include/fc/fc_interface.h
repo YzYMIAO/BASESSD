@@ -181,7 +181,7 @@ extern "C"
 
     /**
      * @brief 从 CQ 批量取完成项：最多取 max_count 条，实际条数写入 *count。
-     * **上限由调用方给**（FC 不写死任何批量常量）——常见取值是 nand_dispatch_poll
+     * **上限由调用方给**（FC 不写死任何批量常量）——常见取值是 fc_nand_dispatch_poll
      * 的推进上限 CH_NUM×CE_NUM×LUN_NUM，与单轮调度对齐；也可是任意 K。
      * 前置（违反一律 ASSERT）：completions 与 count 均非空。max_count 给多大都不会越界——
      * 循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶。

@@ -1849,7 +1849,7 @@ void ftl_global_init(void)
 /* ══════════════════════════════════════════════════════════════
  * 紧凑 die 表（扫描结果的 FTL 调度坐标）
  *
- * 板级扫描（nand_scan_targets，armed 之前）只给出哪些 (ch,ce) target 存在、
+ * 板级扫描（fc_nand_scan_targets，armed 之前）只给出哪些 (ch,ce) target 存在、
  * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
  * ══════════════════════════════════════════════════════════════ */
 BYTE       g_die_count;
@@ -2287,7 +2287,7 @@ SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_t *ftl)
 void ftl_service_pump(void)
 {
     // [pump] 推进 NAND：fc_service。
-    // 第 1 次调用即把本轮所有完成抽干（nand_dispatch_poll 全遍历 + sink 逐条消费），
+    // 第 1 次调用即把本轮所有完成抽干（fc_nand_dispatch_poll 全遍历 + sink 逐条消费），
     // 之后几次走填充轮次；预算因此封顶的是"本轮跑几次 fc_service"，不是完成条数。
     for (BYTE i = 0U; i < NAND_SUBMIT_BUDGET; i++)
     {

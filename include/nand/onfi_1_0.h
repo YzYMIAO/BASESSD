@@ -1,7 +1,7 @@
 #ifndef PLATFORM_STM32H743_ONFI_1_0_H
 #define PLATFORM_STM32H743_ONFI_1_0_H
 
-#include "nand_engine.h"
+#include "nand_protocol.h"
 
 #include <stdint.h>
 
@@ -14,8 +14,8 @@
  *   - nand_operation_map_t 结构体（命令属性 + UOP 序列 + 时序）
  *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
- * 与 nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 onfi_1_0.c），
- * 由 nand_engine 解释执行。
+ * 与 fc_uop_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
+ * 由 FC 的 UOP 引擎解释执行；本头保留为 NAND 协议定义，供 FC/器件共同使用。
  */
 
 /* ONFI 1.0 command cycles used by the initial command set. */
@@ -457,13 +457,13 @@
  * 70h轮询→00h→C1C2R1R2R3→30h→tWB→END
  * 不含 WAIT_READY(tR)，发完立即返回，LUN 进入 tR 期。
  * 由 OP_READ_PAGE_WAIT 完成等待 + 状态检查；数据留在页缓冲，
- * 随后由 nand_dispatch 的 CW 链逐 CW 用 05h/06h 取回。 */
+ * 随后由 fc_nand_dispatch 的 CW 链逐 CW 用 05h/06h 取回。 */
 #define OP_READ_PAGE_LOAD (35U)
 
 /* OP_READ_PAGE_WAIT:
  * WAIT_READY(tR)→70h轮询→CHECK_FAIL→END
  * 无数据传输。与 OP_READ_PAGE_LOAD / OP_READ_PAGE_MULTI_PLANE_LOAD 配对：
- * 完成即代表页已加载，逐 CW 取数由 nand_dispatch_task_cw_chain 接续。 */
+ * 完成即代表页已加载，逐 CW 取数由 fc_nand_dispatch_task_cw_chain 接续。 */
 #define OP_READ_PAGE_WAIT (36U)
 
 /* OP_PROGRAM_PAGE_ISSUE:

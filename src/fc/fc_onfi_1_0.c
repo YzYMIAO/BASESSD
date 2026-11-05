@@ -6,7 +6,7 @@
  *       操作表供上层查询。
  *
  * 调用链：
- *   nand_dispatch / nand_fc_*（nand_mt29*.c）
+ *   fc_nand_dispatch / fc_nand_*（FC 层）
  *     → g_nand_operation_map[op]（本文件）
  *     → uop 序列 → nand_engine（解释器）→ FMC 后端（nand_fmc.c）
  *
@@ -19,9 +19,8 @@
  * 时序余量：NAND_TIME_* 宏 = 数据手册典型值 × 余量倍率，见下方逐条注释。
  */
 
-#include "onfi_1_0.h"
-
 #include "nand_config.h"
+#include "onfi_1_0.h"
 
 #include <stddef.h>
 

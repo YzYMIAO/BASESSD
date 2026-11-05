@@ -23,7 +23,6 @@
 #include "fc_interface.h"
 
 #include "assertion.h"
-#include "dma.h" /* CONFIG_NAND_DMA：数据通路 PIO/DMA */
 #include "fc_command.h"
 #include "fc_internal.h"
 #include "fc_ldpc_engine.h"
@@ -535,7 +534,7 @@ BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
 /* ══════════════════════════════════════════════════════════
  * ④ 数据查询
  *   数据搬运已上移 FTL（见 ftl_cmd_write_data / ftl_cmd_read_data）——
- *   硬件 FCC 不提供「按 CW 拷贝数据」的寄存器，数据是固件 DMA 填的。
+ *   硬件 FCC 不提供「按 CW 拷贝数据」的寄存器，数据是固件经总线/PIO 填的。
  * ══════════════════════════════════════════════════════════ */
 
 /**
@@ -709,8 +708,8 @@ fc_status_e fc_debug_state_get(fc_debug_state_t *out)
     out->sq_used     = fc_get_sq_count(&g_fc_controller);
     out->hsq_used    = fc_get_hsq_count(&g_fc_controller);
     out->chain_owner = g_fc_controller.scheduler.chain_owner[0][0][0];
-    out->lun_used    = nand_dispatch_lun_used(0U, 0U, 0U);
-    out->lun_phase   = nand_dispatch_lun_phase(0U, 0U, 0U);
+    out->lun_used    = fc_nand_dispatch_lun_used(0U, 0U, 0U);
+    out->lun_phase   = fc_nand_dispatch_lun_phase(0U, 0U, 0U);
     fc_debug_fill_counters(&out->fill_calls, &out->fill_pops);
     out->sched_sq_count = (g_fc_controller.scheduler.sq != NULL) ? g_fc_controller.scheduler.sq->count : 0U;
     out->sched_sq_bound = ((g_fc_controller.scheduler.sq == &g_fc_controller.sq) && (g_fc_controller.scheduler.hsq == &g_fc_controller.hsq)) ? 1U : 0U;
@@ -791,11 +790,7 @@ fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
  */
 void fc_boot_report(void)
 {
-#if CONFIG_NAND_DMA
-    const char *data_path = "DMA";
-#else
-    const char *data_path = "PIO";
-#endif
+    const char *data_path = "PIO"; /* FMC NAND 无 DMA 请求线，数据面固定 PIO */
 
     LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n", FC_COMMAND_POOL_DEPTH, FC_DESCRIPTOR_POOL_DEPTH, FC_BUFFER_POOL_DEPTH, FC_SQ_DEPTH, FC_HSQ_DEPTH, FC_CQ_DEPTH);
     LOGI("[FC  ] topology ch=%d ce=%d lun=%d plane=%d raid=%s\r\n", CH_NUM, CE_NUM, LUN_NUM, PLANE_NUM, (CONFIG_FC_RAID != 0U) ? "on" : "off");

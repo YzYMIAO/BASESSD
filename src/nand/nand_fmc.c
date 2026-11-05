@@ -1,32 +1,31 @@
 /*
  * nand_fmc.c — STM32H743 FMC 控制器 NAND 后端
  *
- * 职责：将 nand_engine 发出的 UOP 微指令映射为 FMC NAND Bank3 的
- *       命令/地址/数据窗口访问，并负责 DMA / PIO 两条数据搬移路径。
+ * 职责：将 fc 的 UOP 引擎 发出的 UOP 微指令映射为 FMC NAND Bank3 的
+ *       命令/地址/数据窗口访问；数据阶段固定走 PIO（FMC NAND 无 DMA 请求线）。
  *
- * 本文件是 nand_engine 的一个 backend 实现：
- *   nand_engine_step() → g_nand_fmc_handlers[uop->type]() → FMC 窗口写
+ * 本文件是 fc 的 UOP 引擎 的一个 backend 实现：
+ *   fc_uop_engine_step() → g_nand_fmc_handlers[uop->type]() → FMC 窗口写
  *
  * 数据流（读/写）：
- *   nand_fc_* (mt29f4g08abadawp.c)
- *     → nand_engine (uop 解释器)
- *     → 本文件 handler（命令/地址走 PIO 窗口，DATA_IN/OUT 走 DMA 或 PIO）
+ *   fc_nand_* (src/fc/fc_nand_ops.c)
+ *     → fc 的 UOP 引擎 (uop 解释器)
+ *     → 本文件 handler（命令/地址/数据全部走 PIO 窗口）
  *
  * 涉及硬件外设：
  *   - FMC（Flexible Memory Controller）NAND Bank3 内存映射窗口
  *   - RB# GPIO（GPIOD PIN6，busy/ready 指示）
- *   - FMC 专用 DMA 通道（DMA_REQUEST_FMC）
  *
- * 时序来源：nand_fmc_timing_t（MT29 数据手册参数，见 nand_fmc.h / nand_mt29*.c）。
+ * 时序来源：nand_fmc_timing_t（MT29 数据手册参数，见 nand_fmc.h / devices/mt29f___g08a.c）。
  */
 
 #include "nand_fmc.h"
 
 #include "assertion.h"
 #include "delay.h"
-#include "dma.h"
 #include "log.h"
 #include "nand_debug.h"
+#include "nand_device.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -34,7 +33,7 @@
 /* --------------------------------------------------------------------
  * g_nand_fmc_handlers — UOP → handler 调度表（定义在本文件末尾）
  *   下标为 NAND_UOP_* 枚举；设计初始化器，与枚举顺序解耦。
- *   [NAND_UOP_JUMP_IF_NOT_READY] = NULL：该微指令由 nand_engine 直接
+ *   [NAND_UOP_JUMP_IF_NOT_READY] = NULL：该微指令由 fc 的 UOP 引擎 直接
  *   处理（条件跳转不经过 FMC 后端），此处刻意留空；若误以为漏实现
  *   而补 handler，会导致引擎两条跳转路径并存。
  *   新增 NAND_UOP_* 时须同步本表长度（NAND_UOP_COUNT）。
@@ -47,19 +46,24 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
  * 数据/命令/地址窗口 + 时序对全部 LUN 一致：FMC 时序寄存器（PMEM/PATT）
  * 是 bank 级，同 bank 各 LUN 共享窗口，硬件层面无法按 LUN 分化。
  * backend 只读共享——handlers 是 const 表，context 指向本实例 config；
- * 每事务可变状态在 nand_engine_state_t，不在 backend，故多 LUN 并发安全。 */
+ * 每事务可变状态在 fc_uop_engine_state_t，不在 backend，故多 LUN 并发安全。 */
 static nand_fmc_instance_t g_nand_fmc_instance;
 
 /**
  * @brief 取 FMC 后端单例
  *
- * 同步路径与 nand_dispatch_task_load() 共用同一后端（单 bank 拓扑下与坐标无关）。
+ * 同步路径与 fc_nand_dispatch_task_load() 共用同一后端（单 bank 拓扑下与坐标无关）。
  *
  * @return 后端接口（handlers 为 const 表，context 指向实例内 config）
  */
-const nand_engine_backend_t *nand_fmc_backend_get(void)
+const nand_phy_backend_t *nand_fmc_backend_get(void)
 {
     return &g_nand_fmc_instance.backend;
+}
+
+const nand_phy_backend_t *nand_phy_backend_get(void)
+{
+    return nand_fmc_backend_get();
 }
 /**
  * @brief 装配 FMC 后端单例
@@ -69,7 +73,7 @@ const nand_engine_backend_t *nand_fmc_backend_get(void)
  */
 nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
 {
-    /* 前置条件由调用者保证（nand_init 传入模块内 const config） */
+    /* 前置条件由调用者保证（mt29f_hw_init 传入模块内 const config） */
     ASSERT(config != NULL);
 
     g_nand_fmc_instance.config           = *config;
@@ -226,57 +230,27 @@ static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
 /**
  * @brief 向 NAND 写数据（DATA_IN）
  *
- * 非阻塞：可被引擎 step 循环多次调用。DMA 启动失败回退 PIO；PIO 每字节后
- * __DMB()，因为 volatile 不保证连续写 FMC 数据窗口的顺序。
+ * PIO 每字节后 __DMB()，因为 volatile 不保证连续写 FMC 数据窗口的顺序。
  *
  * @param uop operand 作 buffer 偏移（multi-plane program 第二 plane）
- * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY（DMA 进行中）
+ * @return NAND_RESULT_OK
  */
 static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     WORD                     index;
-    BYTE                     dma_ok;
 
     (void)timing;
 
-    /* 请求由 nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    /* 请求由 fc_nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
     ASSERT(request->buffer != NULL);
     ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Program 第二 Plane） */
     const BYTE *src = request->buffer + uop->operand;
 
-    /* ── DMA 路径（非阻塞中断模式） ── */
-    if (g_nand_dma_enable != 0U)
-    {
-        /* 先查完成标志 */
-        if (nand_dma_data_out_done() != 0U)
-        {
-            /* DMA 传输在之前 step 中已完成 */
-            completion->transfer_status = NAND_RESULT_OK;
-            return NAND_RESULT_OK;
-        }
-
-        /* 查 DMA 是否还在跑 */
-        if (nand_dma_is_out_busy() != 0U)
-        {
-            return NAND_RESULT_NOT_READY;
-        }
-
-        /* 首次进入：启动 DMA（memory → FMC data reg） */
-        dma_ok = nand_dma_memory_to_fmc_start_IT(config->data, src, request->data_length);
-        if (dma_ok == 0U)
-        {
-            return NAND_RESULT_NOT_READY; /* DMA 启动中 */
-        }
-
-        /* DMA 启动失败，回退 PIO */
-        nand_dma_abort_out();
-        /* fall through to PIO */
-    }
-
-    /* ── PIO 路径（默认/回退） ── */
+    /* PIO：FMC NAND 无 DMA 请求线，数据阶段逐字节写数据窗口。
+     * volatile 不保证连续写顺序，必须逐字节 DMB（H16）。 */
     for (index = 0U; index < request->data_length; index++)
     {
         *config->data = src[index];
@@ -290,64 +264,26 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 /**
  * @brief 从 NAND 读数据（DATA_OUT）
  *
- * 与 DATA_IN 对称。DMA 完成后必须 Invalidate D-Cache，否则 CPU 读到陈旧缓存。
+ * 与 DATA_IN 对称，逐字节从 FMC 数据窗口读入缓冲。
  *
  * @param uop operand 作 buffer 偏移（multi-plane read 第二 plane）
- * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY（DMA 进行中）
+ * @return NAND_RESULT_OK
  */
 static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     WORD                     index;
-    BYTE                     dma_ok;
 
     (void)timing;
 
-    /* 请求由 nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    /* 请求由 fc_nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
     ASSERT(request->buffer != NULL);
     ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Read 的第二 Plane） */
     BYTE *dst = request->buffer + uop->operand;
 
-    /* ── DMA 路径（非阻塞中断模式） ── */
-    if (g_nand_dma_enable != 0U)
-    {
-        /* 查完成标志 */
-        if (nand_dma_data_in_done() != 0U)
-        {
-            /* DMA 完成：Invalidate D-Cache 后取数据（CPU 才能看到 DMA 写入） */
-            nand_dma_cache_invalidate(dst, request->data_length);
-            if (request->operation == OP_READ_ID)
-            {
-                /* DEBUG 档：默认（log level info）不打印——同一次上电
-                 * src/nand/devices/mt29f___g08a.c 已有一条 [INF] LOG_TAG_NAND "ID=..."，字节相同。
-                 * 提到 INFO 会在用例体内抢先写 UART，粘在 munit 的结果行中间。 */
-                LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
-            }
-            completion->transfer_status = NAND_RESULT_OK;
-            return NAND_RESULT_OK;
-        }
-
-        /* 查 DMA 是否还在跑 */
-        if (nand_dma_is_in_busy() != 0U)
-        {
-            return NAND_RESULT_NOT_READY;
-        }
-
-        /* 首次进入：启动 DMA（FMC data reg → memory） */
-        dma_ok = nand_dma_fmc_to_memory_start_IT(config->data, dst, request->data_length);
-        if (dma_ok == 0U)
-        {
-            return NAND_RESULT_NOT_READY;
-        }
-
-        /* DMA 启动失败，回退 PIO */
-        nand_dma_abort_in();
-        /* fall through to PIO */
-    }
-
-    /* ── PIO 路径（默认/回退） ── */
+    /* PIO：逐字节从 FMC 数据窗口读入缓冲。 */
     for (index = 0U; index < request->data_length; index++)
     {
         dst[index] = *config->data;
@@ -355,7 +291,7 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
     if (request->operation == OP_READ_ID)
     {
-        /* 同 DMA 路径：DEBUG 档，默认 INFO 档不打印（见上）。 */
+        /* DEBUG 档，默认 INFO 档不打印。 */
         LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
     }
 

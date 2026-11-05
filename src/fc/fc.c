@@ -4,7 +4,7 @@
  * 资源模型（三池，全部静态固定，无动态内存）：
  *   - Command Pool（64）：fc_command_t，单条命令
  *   - Descriptor Pool（256）：fc_descriptor_t，一个 CW 一个描述符，next_id 串联
- *   - Buffer Pool（128）：528B CW 缓冲，DMA 直访（noncacheable 段）
+ *   - Buffer Pool（128）：528B CW 缓冲，总线直访（noncacheable 段）
  *
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
@@ -26,7 +26,7 @@
  *   10. CQ 出口         fc_poll_completion_internal、fc_poll_completions_internal
  *
  * 服务主循环（fc_poll_internal）：
- *   ① nand_dispatch_poll() 推进 NAND 层全部 LUN，每完成经 sink 当场 fc_complete_from_nand()
+ *   ① fc_nand_dispatch_poll() 推进 NAND 层全部 LUN，每完成经 sink 当场 fc_complete_from_nand()
  *   ② 无完成 → fc_poll_fill() 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）
  *      提交进 NAND per-LUN FIFO（分派 fc_poll_dispatch_single() /
  *      fc_poll_dispatch_chain()；后者内部构建 request → submit/submit_chain，
@@ -41,10 +41,10 @@
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_internal.h"
+#include "fc_nand_dispatch.h"
 #include "fc_queue.h"
 #include "fc_scheduler.h"
 #include "log.h"
-#include "nand_dispatch.h"
 #include "ssd_compiler.h"
 
 #include <stddef.h>
@@ -58,7 +58,7 @@
  * 1. 静态资源
  *
  * 静态资源区：FC 控制面固定资源，当前位于默认 .bss（AXI SRAM）。
- * 不使用动态内存。后续根据 DMA/Cache 和 Buffer Pool 设计，
+ * 不使用动态内存。后续根据 Cache 和 Buffer Pool 设计，
  * 可将各数组分别放入指定链接段。
  *
  *   池布局：
@@ -83,8 +83,8 @@
 
 static fc_command_t    g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
 static fc_descriptor_t g_fc_descriptor_pool[FC_DESCRIPTOR_POOL_DEPTH];
-// DMA 可见：放 noncacheable 段，不能被整文件 .bss → DTCM 的规则带走
-// （DMA1/2 访问不到 DTCM）。
+// 数据缓冲固定在 noncacheable 段：FMC 数据面按字节读写，避免 CPU D-Cache
+// 与总线视图不一致；也保证地址落在 DMA 可达区（DMA1/2 访问不到 DTCM）。
 static BYTE                g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE] __attribute__((section(".noncacheable_buffer")));
 static fc_command_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
 static fc_command_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
@@ -101,8 +101,8 @@ static fc_buffer_state_e   g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 // 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
 // 故这里只做提交→完成之间的中转。索引用的 command_id 是「指针 − command_pool 基址」
 // 派生出来的池内下标，恒 < FC_COMMAND_POOL_DEPTH。
-// CONFIG_NAND_DMA=1 时是 DMA 目标（READ_META / GET_FEATURES 的 4 字节返回段），
-// 同样放 noncacheable 段：DMA 写后 CPU 直接读到新值，且不进 DTCM。
+// 与 buffer pool 同放 noncacheable 段：READ_META / GET_FEATURES 的 4 字节
+// 返回段由引擎经 FMC 写回，避免 CPU 缓存与总线视图不一致。
 static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] __attribute__((section(".noncacheable_buffer")));
 
 // 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见
@@ -417,7 +417,7 @@ SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
 
     /* ── ① 清底：三池本体 + 三条队列的存储 + 命令状态位图全部归零。
      *    这些数组都是文件作用域 static（见 §1 静态资源），此处只清内容，
-     *    数组地址不变——DMA 看到的物理地址在整个固件生命周期内固定。 ── */
+     *    数组地址不变——总线看到的物理地址在整个固件生命周期内固定。 ── */
     memset(g_fc_command_pool, 0, sizeof(g_fc_command_pool));
     memset(g_fc_descriptor_pool, 0, sizeof(g_fc_descriptor_pool));
     memset(g_fc_buffer_pool, 0, sizeof(g_fc_buffer_pool));
@@ -457,7 +457,7 @@ SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
     {
         return result;
     }
-    /* ── ④ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 nand_dispatch_lun_free，无 busy 表） ── */
+    /* ── ④ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 fc_nand_dispatch_lun_free，无 busy 表） ── */
     result = fc_scheduler_init(&controller->scheduler, &controller->sq, &controller->hsq);
     if (result != FC_STATUS_OK)
     {
@@ -465,9 +465,9 @@ SSD_CODE_FAST fc_status_e fc_init_internal(fc_t *controller)
     }
 
     /* ── ⑤ 本函数里唯一的 NAND 依赖：只清 NAND 侧的通道队列与 per-LUN 链状态
-     *    （纯 memset，不碰 FMC 硬件）。硬件那半由 nand_init() 负责，且在 main()
+     *    （纯 memset，不碰 FMC 硬件）。硬件那半由 fc_nand_init() 负责，且在 main()
      *    里排在 fc_init() 之后——正因为这里不碰硬件，FC 才能先初始化。 ── */
-    if (nand_dispatch_init() != NAND_RESULT_OK)
+    if (fc_nand_dispatch_init() != NAND_RESULT_OK)
     {
         return FC_STATUS_IO_ERROR;
     }
@@ -843,7 +843,7 @@ fc_status_e fc_complete_internal(fc_t *controller, fc_command_status_t *completi
  * 非 page read 直接透传 NAND 状态。
  * - CQ 满 → 强制 COMPLETED（数据路径已跑，CQ entry 丢失是 fatal）。
  */
-static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_completion_t *nand_completion)
+static fc_status_e fc_complete_from_nand(fc_t *controller, const fc_nand_dispatch_completion_t *nand_completion)
 {
     fc_command_status_t completion;
     fc_command_t       *command;
@@ -1065,7 +1065,7 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
  * ② 配置 parity 命令的 OP 码和 PAA（plane = PLANE_NUM-1）
  * ③ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
  * ④ 构建 Multi-Plane dispatch request（plane0=data, plane1=parity）
- * ⑤ nand_dispatch_submit()
+ * ⑤ fc_nand_dispatch_submit()
  *
  * 成功时 parity 命令由 completion 路径自动释放。
  * 失败时已分配资源全部回滚 + 数据命令以 error completion 返回。
@@ -1081,13 +1081,13 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
  */
 static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc_command_id_t data_cmd_id)
 {
-    fc_command_t           *parity_cmd;
-    fc_command_id_t         parity_id;
-    nand_dispatch_request_t mp_req;
-    BYTE                    cw_count;
-    BYTE                    cw;
-    fc_descriptor_id_t      desc_id;
-    const fc_command_t     *data_ptrs[FC_STRIPE_DATA_MAX];
+    fc_command_t              *parity_cmd;
+    fc_command_id_t            parity_id;
+    fc_nand_dispatch_request_t mp_req;
+    BYTE                       cw_count;
+    BYTE                       cw;
+    fc_descriptor_id_t         desc_id;
+    const fc_command_t        *data_ptrs[FC_STRIPE_DATA_MAX];
 
     cw_count = (data_cmd->config.cw + 1U);
 
@@ -1216,8 +1216,8 @@ static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     // 注册 parity 命令到数据命令的清理映射表
     controller->stripe_parity_for_data[data_cmd_id] = parity_id;
 
-    // ⑥ nand_dispatch_submit()
-    if (nand_dispatch_submit(&mp_req) != NAND_RESULT_OK)
+    // ⑥ fc_nand_dispatch_submit()
+    if (fc_nand_dispatch_submit(&mp_req) != NAND_RESULT_OK)
     {
         controller->stripe_parity_for_data[data_cmd_id] = FC_COMMAND_ID_INVALID;
         fc_stripe_release_parity(controller, parity_id);
@@ -1229,7 +1229,7 @@ static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
 stripe_error:
     // 数据命令注 error completion，让 FTL 感知失败
     {
-        nand_dispatch_completion_t fail_comp;
+        fc_nand_dispatch_completion_t fail_comp;
 
         memset(&fail_comp, 0, sizeof(fail_comp));
         fail_comp.command_id       = data_cmd_id;
@@ -1266,7 +1266,7 @@ stripe_error:
  */
 static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 {
-    nand_dispatch_completion_t fail_comp;
+    fc_nand_dispatch_completion_t fail_comp;
 
     memset(&fail_comp, 0, sizeof(fail_comp));
     fail_comp.command_id       = command_id;
@@ -1295,7 +1295,7 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
  * （见分支内注释）。debug 档 ASSERT 停机，release 档返回 INVALID_ARGUMENT 拒绝。
  * - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  */
-static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
+static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, fc_nand_dispatch_request_t *request)
 {
     fc_descriptor_id_t desc_id          = (fc_descriptor_id_t)command->desc_id;
     BYTE               planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
@@ -1356,7 +1356,7 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
         // 替代断言）；但 ASSERT 在 NDEBUG 下被裁空，故下面**再补一道 release 拒绝**。
         //
         // 为什么非炸不可：NAND 侧的多 plane handler **无条件遍历 PLANE_NUM** 下行地址，
-        // 既不看掩码也不看 plane_count（nand_dispatch_tables.c 的 req_multi_plane_{program,
+        // 既不看掩码也不看 plane_count（fc_nand_dispatch_tables.c 的 req_multi_plane_{program,
         // read,erase}），器件侧多 plane program 会把点名过的 plane **全部编程**。未覆盖的
         // plane 既无数据（cw_buffers[n] 恒 NULL）也无地址，只能凭空造一个——写路径于是
         // **静默**给该 plane 编一页全 0xFF（页缓冲 memset 0xFF、只填掩码内的 CW），
@@ -1414,13 +1414,13 @@ static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc
  * 不再被 splittable 判定命中——LOAD/WAIT 本身已是 ISSUE/WAIT 型。
  * - 由 fc_build_dispatch_request 末尾调用；单命令与链式路径共用。
  */
-static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
+static void fc_dispatch_rewrite_operation(fc_nand_dispatch_request_t *request)
 {
     /* ── 读命令统一为「加载 + 逐 CW 取数」──
      * FC 层命令保持 WITH_DATA_OUT 语义（desc 建链、fc_is_page_read、数据路径、
      * 完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op：
-     * 整页先搬进 NAND 页缓冲，数据随后由 nand_dispatch_task_cw_chain 用
-     * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 nand_dispatch.c）。
+     * 整页先搬进 NAND 页缓冲，数据随后由 fc_nand_dispatch_task_cw_chain 用
+     * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 fc_nand_dispatch.c）。
      *
      * LUN_NUM==1：原子 WITHOUT_DATA_OUT（发 30h 后等 tR，再逐 CW 取数）。
      * LUN_NUM>1 ：LOAD（ISSUE，发完 30h 立即返回）→ WAIT（等 tR + 状态）→
@@ -1480,7 +1480,7 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  * @note 注意：本函数不做 META 预填——buffer[0..3] 的 META 由
  * fc_data_path_encode 的 Stage 0 写（两条派发路径都经 encode）。
  */
-static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
+static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, fc_nand_dispatch_request_t *request)
 {
     // Pre-resolve descriptor-chain data into a self-contained dispatch request.
     memset(request, 0, sizeof(*request));
@@ -1581,7 +1581,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         // 与 OP_READ_META 同型，但**不填 plane_paa**——列地址恒 0x20、行地址恒 0（uop 序列
         // 无 ROW 段），与介质坐标无关，故 command->paa 只用来定 plane（掩码位 = plane*CW_NUM）。
         // 4 字节落**控制器侧暂存**（同 GET_FEATURES / READ_META），完成时拷进 CQ 的 param。
-        // ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ nand_dispatch_task_load 一格
+        // ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ fc_nand_dispatch_task_load 一格
         // cw_buffers[] 都不搬 ⇒ NAND 侧拿到残留指针，DATA_OUT 写向野地址。
         request->plane                               = paa_to_plane(command->paa);
         request->cw_bitmap                           = (1UL << (request->plane * CW_NUM));
@@ -1595,7 +1595,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         // 2 位（列上限 1584），够不到 spare 区（出厂坏块标记在列 2048）。行地址仍取自
         // command->paa。4 字节落**控制器侧暂存**（同 GET_FEATURES / READ_META），完成时拷进
         // CQ 的 param。
-        // ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ nand_dispatch_task_load 一格
+        // ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ fc_nand_dispatch_task_load 一格
         // cw_buffers[] 都不搬 ⇒ NAND 侧拿到残留指针，DATA_OUT 写向野地址。
         request->plane                               = paa_to_plane(command->paa);
         request->plane_paa[request->plane]           = command->paa;
@@ -1653,7 +1653,7 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  *
  * @note page write 先 fc_data_path_encode（内含 Stage 0 写 META）。
  * - raid=ENCODE 的 page write 走 fc_stripe_submit（Multi-Plane）。
- * - 其余构建 request → nand_dispatch_submit；**构建失败与 submit 失败同路兜底**
+ * - 其余构建 request → fc_nand_dispatch_submit；**构建失败与 submit 失败同路兜底**
  * （注 NAND_FAIL 完成并返回 IO_ERROR）。构建失败只有 multi-plane 窄位图一种，
  * debug 档已在 fc_build_request_data_planes 的 ASSERT 处停机，此处只在 release 档可达。
  * - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
@@ -1661,9 +1661,9 @@ static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  */
 static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
-    fc_command_id_t         command_id = chain->ids[0U];
-    fc_command_t           *command;
-    nand_dispatch_request_t request;
+    fc_command_id_t            command_id = chain->ids[0U];
+    fc_command_t              *command;
+    fc_nand_dispatch_request_t request;
 
     // 命令刚从 SQ/HSQ 弹出：id 恒为池内铸出值，状态恒 QUEUED（fc_submit_to_queue 置位）。
     // 旧写法 return IO_ERROR 时命令已出队且未置 ACTIVE/未回推 → 永久泄漏，比停机更难查。
@@ -1698,14 +1698,14 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
         return FC_STATUS_IO_ERROR;
     }
 
-    const BYTE submit_result = nand_dispatch_submit(&request);
+    const BYTE submit_result = fc_nand_dispatch_submit(&request);
 
-    // 填充轮次（fc_poll_fill）已按 nand_dispatch_lun_free() 预留槽位，
+    // 填充轮次（fc_poll_fill）已按 fc_nand_dispatch_lun_free() 预留槽位，
     // 此处不应再遇到 NOT_READY；其余失败（设备未就绪等）才是真错误。
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
-        LOGW("fc: nand_dispatch_submit failed for op=%hhu cmd_id=%hu cw_bitmap=0x%02lX plane_count=%hhu\r\n", command->config.operation, command_id, request.cw_bitmap, request.plane_count);
+        LOGW("fc: fc_nand_dispatch_submit failed for op=%hhu cmd_id=%hu cw_bitmap=0x%02lX plane_count=%hhu\r\n", command->config.operation, command_id, request.cw_bitmap, request.plane_count);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;
     }
@@ -1724,16 +1724,16 @@ static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  *
  * @note 逐条：置 ACTIVE → page write encode（不做 META/PAA 预填，
  * 与单命令路径的既有差异，勿统一）→ 构建 requests[i]。
- * - 全部构建完成后一次 nand_dispatch_submit_chain。
+ * - 全部构建完成后一次 fc_nand_dispatch_submit_chain。
  * - 任一步失败 → 对应/整链命令注 NAND_FAIL 完成并返回 IO_ERROR。
  * - 使用者：FTL 的 cache read / cache program run（同一 (ch,ce,lun) 的连续命令）。
  */
 static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
-    BYTE                    chain_count = chain->count;
-    nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
-    BYTE                    i;
-    BYTE                    j;
+    BYTE                       chain_count = chain->count;
+    fc_nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
+    BYTE                       i;
+    BYTE                       j;
 
     for (i = 0U; i < chain_count; i++)
     {
@@ -1767,9 +1767,9 @@ static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         }
     }
 
-    const BYTE submit_result = nand_dispatch_submit_chain(reqs, chain_count);
+    const BYTE submit_result = fc_nand_dispatch_submit_chain(reqs, chain_count);
 
-    // 填充轮次已按 nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。
+    // 填充轮次已按 fc_nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
@@ -1843,7 +1843,7 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
  *
  * @return FC_STATUS_OK / IO_ERROR（提交失败，剩余命令留在队列）。
  *
- * @note **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
+ * @note **按 LUN 保序**：命令 need = 链长；fc_nand_dispatch_lun_free(lun) >= need 才取，
  * 否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
  * - **链锁准入**：该 LUN 上有未结束的链（chain_owner != NONE）且链不归本队列 →
  * 本命令回推跳过。**只回推、不置 suspended**——置了会把链自己的续批一起锁死。
@@ -1902,7 +1902,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         // 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
         // PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
         // [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因
-        // nand_dispatch_lun_free()==0 被永久回推（静默活锁），比当场停机更难定位。
+        // fc_nand_dispatch_lun_free()==0 被永久回推（静默活锁），比当场停机更难定位。
         ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
         if (suspended[ch][ce][lun] != 0U)
         {
@@ -1923,7 +1923,7 @@ static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         }
 
         need = fc_poll_chain_length(queue, cmd);
-        if (nand_dispatch_lun_free(ch, ce, lun) < need)
+        if (fc_nand_dispatch_lun_free(ch, ce, lun) < need)
         {
             // 剩余槽放不下整条链：本轮挂起该 LUN，链头回推（成员后续轮次一并回推）
             suspended[ch][ce][lun] = 1U;
@@ -2014,7 +2014,7 @@ static fc_status_e fc_poll_fill(fc_t *controller)
 }
 
 /* ── NAND 完成回调上下文 + sink ──
- * nand_dispatch_poll 每产出一条完成就调一次 fc_nand_completion_sink；每条当场消费
+ * fc_nand_dispatch_poll 每产出一条完成就调一次 fc_nand_completion_sink；每条当场消费
  * （写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），不跨条缓存。 */
 typedef struct
 {
@@ -2031,7 +2031,7 @@ typedef struct
  * @note 每条完成当场消费（写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），
  * 不跨条缓存；fc_complete_from_nand 返回非 OK 时在上下文中置 failed。
  */
-static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_completion, void *ctx)
+static void fc_nand_completion_sink(const fc_nand_dispatch_completion_t *nand_completion, void *ctx)
 {
     fc_nand_sink_ctx_t *sink_ctx = (fc_nand_sink_ctx_t *)ctx;
 
@@ -2071,7 +2071,7 @@ fc_status_e fc_poll_internal(fc_t *controller)
     sink_ctx.controller = controller;
     sink_ctx.failed     = 0U;
 
-    if (nand_dispatch_poll(fc_nand_completion_sink, &sink_ctx) != 0U)
+    if (fc_nand_dispatch_poll(fc_nand_completion_sink, &sink_ctx) != 0U)
     {
         // 完成已全部消费。只有 CQ 满（FC 侧故障）才报 IO_ERROR；
         // NAND 命令自身的失败不是故障——状态已随 completion 进了 CQ entry。

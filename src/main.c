@@ -4,7 +4,7 @@
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
- *          → nand_dispatch_set_armed(1) → stm32_platform_register
+ *          → fc_nand_dispatch_set_armed(1) → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → usb_msc_init → usb_device_init
  *          → while(1) { cli_service_poll; ftl_service | fc_service;
@@ -15,7 +15,7 @@
  *   - FC/NAND/FTL 的推进**全部在非 ISR 上下文**：没有任何中断调用
  *     fc_service / ftl_service，superloop 是唯一驱动源。
  *   - NAND 启动命令（RESET/READ_ID）在 nand_init 内绕过命令队列，
- *     直连 nand_engine_execute。
+ *     直连 FC 的同步 UOP 引擎。
  * 生命周期：ssd_ftl_boot_all 成功 → g_ftl_ready=1，主循环由 fc_service
  *          切换到 ftl_service（后者内部会先跑 fc_service）。
  * 文件结构：日志 sink 绑定 → FTL 实例存储 → ssd_ftl_boot(_all) → main()。
@@ -37,9 +37,9 @@
 #include "timer.h"
 // #include "led.h"
 #include "fault.h"
+#include "fc_nand_dispatch.h"
+#include "fc_nand_interface.h"
 #include "mpu.h"
-#include "nand_dispatch.h"
-#include "nand_fc_interface.h"
 #include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"
 #include "ssd_compiler.h"
@@ -696,7 +696,7 @@ void _init(void)
 
 int main(void)
 {
-    BYTE nand_init_result;
+    nand_result_e nand_init_result;
 
     /* 必须先于 SysTick 启动：先把上一轮的采样环快照到 prev，再开始本轮采样，
      * 否则启动期间的采样会覆盖故障现场（pc_sample.h）。 */
@@ -727,16 +727,16 @@ int main(void)
 
     /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
      *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。
-     *                             内部会调 nand_dispatch_init()（纯 memset，不碰硬件），
+     *                             内部会调 fc_nand_dispatch_init()（纯 memset，不碰硬件），
      *                             所以 FC 可以先于 NAND 硬件初始化。
-     *   ② nand_init()          —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
+     *   ② fc_nand_init()       —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
      *                             + RESET + READ_ID 校验。其 boot 命令直接走
-     *                             nand_engine_execute，绕过 fc / nand_dispatch 命令队列。
-     *   ③ set_armed(1)         —— 放行 nand_dispatch_submit / submit_chain
+     *                             FC 同步 UOP 引擎，绕过 fc / fc_nand_dispatch 命令队列。
+     *   ③ set_armed(1)         —— 放行 fc_nand_dispatch_submit / submit_chain
      *                             （此前一律返回 INVALID_ARGUMENT）。
      *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
      *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
-     *   ⑥ nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
+     *   ⑥ fc_nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
     if (fc_init() != FC_STATUS_OK)
     {
@@ -745,14 +745,14 @@ int main(void)
     else
     {
         boot_section("nand");
-        nand_init_result = nand_init();
+        nand_init_result = fc_nand_init();
         if (nand_init_result != NAND_RESULT_OK)
         {
             LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
         }
         else
         {
-            nand_dispatch_set_armed(1U);
+            fc_nand_dispatch_set_armed(1U);
             boot_report_controller();
             /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
              * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
@@ -768,7 +768,7 @@ int main(void)
 
                 sys_clock_tree_get(&clk);
 
-                const BYTE high_speed_result = nand_enable_high_speed(clk.fmc_hz);
+                const nand_result_e high_speed_result = fc_nand_enable_high_speed(clk.fmc_hz);
 
                 if (high_speed_result != NAND_RESULT_OK)
                 {

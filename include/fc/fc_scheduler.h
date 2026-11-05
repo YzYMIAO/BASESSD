@@ -1,9 +1,9 @@
 #ifndef FC_SCHEDULER_H
 #define FC_SCHEDULER_H
 
+#include "fc_nand_dispatch.h"
 #include "fc_queue.h"
 #include "nand_config.h"
-#include "nand_dispatch.h"
 
 /*
  * 调度器：HSQ 优先于普通 SQ。
@@ -13,7 +13,7 @@
  * 与 FC 提交路径同文件。
  *
  * 一个 LUN 能否接收命令，查 NAND 侧 per-LUN FIFO 的剩余槽
- * （nand_dispatch_lun_free）；填充时按此判断能否放下整条链。
+ * （fc_nand_dispatch_lun_free）；填充时按此判断能否放下整条链。
  */
 
 /* 最长命令链：与 nand_dispatch 的 per-LUN FIFO 深度一致 */

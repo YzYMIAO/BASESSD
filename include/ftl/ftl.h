@@ -423,7 +423,7 @@ void ftl_global_init(void);
 /**
  * @brief 由上电扫描结果构建紧凑 die 表（纯 RAM，不碰硬件）
  *
- * targets 由 nand_scan_targets() 在 armed 之前填好
+ * targets 由 fc_nand_scan_targets() 在 armed 之前填好
  * （present / lun_count / lun_present[]）。
  * 只给实际存在且 78h 探测有响应的 LUN 分配紧凑 die 号；
  * g_chcelun_table 与 g_die_table 互为逆映射。

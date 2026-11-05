@@ -75,8 +75,8 @@
  *     只把 SET_FEATURES 的模式值改成 4，用于和 Mode 5 同配置对比。
  * 5 = Mode 5：正式配置；AC 参数同样用 Table 29/31（3.3V）。
  *
- * 启动全程低速（nand_init + FTL boot/恢复），全部初始化完成后由
- * nand_enable_high_speed() 切到 CONFIG_NAND_TIMING_MODE 并重配 FMC 时序。
+ * 启动全程低速（fc_nand_init + FTL boot/恢复），全部初始化完成后由
+ * fc_nand_enable_high_speed() 切到 CONFIG_NAND_TIMING_MODE 并重配 FMC 时序。
  */
 #ifndef CONFIG_NAND_TIMING_MODE
 /* 3.3V 正式配置。Mode 5 运行期写后读回 UNC 的问题仍在查（RISK-NAND-06）；
@@ -89,24 +89,10 @@
 #endif
 
 /*
- * nand_init
- *   功能：低速初始化 FMC 硬件，并做拓扑扫描（RESET / READ ID / ONFI 参数页 /
- *         逐 LUN 78h）验证 NAND。
- *         启动全程保持默认 Mode 0；高速切换由 nand_enable_high_speed() 在
- *         boot 完成后单独执行。
- *   参数：无。
- * @return NAND_RESULT_OK on success; otherwise a NAND_RESULT_* failure code.
+ * 初始化/高速切换入口在 FC 层：
+ *   fc_nand_init() / fc_nand_enable_high_speed()（include/fc/fc_nand_interface.h）。
+ * 本头只保留器件事实与器件的 timing-mode 观测。
  */
-BYTE nand_init(void);
-
-/*
- * nand_enable_high_speed
- *   功能：初始化完成后切到 ONFI Mode 5 并更新 FMC 时序。
- *   参数：fmc_hz —— 当前 FMC 内核时钟（Hz，来自 sys_clock_tree_get）。
- * @return NAND_RESULT_OK（含 CONFIG_NAND_TIMING_MODE=0 的 no-op）/
- *         错误码（切换失败时保持调用前的低速状态）。
- */
-BYTE nand_enable_high_speed(DWORD fmc_hz);
 
 /*
  * nand_get_timing_mode - 当前实际生效的 ONFI timing mode（0 = 低速）

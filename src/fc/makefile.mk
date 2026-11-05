@@ -1,4 +1,4 @@
-#Flash controller front - end module.
+# Flash controller module：控制面 + 命令分发（NAND 器件/PHY 在 src/nand/）。
 MODULE_SRCS += $(wildcard $(SRC_ROOT)/fc/*.c)
 MODULE_INCS += $(INC_ROOT)/fc
 
