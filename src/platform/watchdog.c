@@ -182,6 +182,28 @@ void storage_wdg_service(void)
     watchdog_port_iwdg_refresh();
 }
 
+/* 长操作显式喂狗的节流间隔：远小于 scheduler 域超时（100 ms），又避免同步泵的
+ * 每个自旋轮次都写一次 IWDG 寄存器。 */
+#define STORAGE_WDG_KICK_INTERVAL_MS (10U)
+
+static DWORD s_last_kick_ms;
+
+void storage_wdg_kick(void)
+{
+    const DWORD now_ms = watchdog_port_now_ms();
+
+    if ((now_ms - s_last_kick_ms) < STORAGE_WDG_KICK_INTERVAL_MS)
+    {
+        return;
+    }
+    s_last_kick_ms = now_ms;
+
+    // 顺序承重：先上报再 service。长操作把主循环占住，service 的域健康检查会看到
+    // 「scheduler 很久没上报」；反过来会在第一次 kick 就 latch 超时故障并停喂。
+    storage_wdg_report_progress(STORAGE_WDG_DOMAIN_SCHEDULER);
+    storage_wdg_service();
+}
+
 void storage_watchdog_task(void *context, DWORD now_ms)
 {
     (void)context;

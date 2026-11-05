@@ -108,6 +108,17 @@ void storage_wdg_report_progress(wdg_domain_e domain);
 void storage_wdg_service(void);
 
 /*
+ * 长同步操作（CLI format / bbt --erase / 出厂扫描）的显式喂狗点。
+ *
+ * 这些操作在**主循环上下文内联执行**，期间 timer 任务不转；本函数按 ≤10 ms 节流
+ * 上报 scheduler 域并执行 Supervisor 的硬件喂狗。语义是「主循环仍在故意推进一个
+ * **已知有界**的操作」，不是「卡死了也喂」——调用点必须是有界循环/同步泵。
+ * ⚠ 只在主循环上下文调用（同步泵也可能由完成派发链进入；**绝不在 ISR**）；
+ *   未初始化或已锁存故障时为 no-op。
+ */
+void storage_wdg_kick(void);
+
+/*
  * 调度器任务入口：由 timer_scheduler_poll() 在主循环上下文调用。
  * 任务实现属于看门狗模块，main.c 只负责把它装配进系统静态任务表。
  */

@@ -46,6 +46,7 @@
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl_type.h"
 #include "onfi_1_0.h"
+#include "watchdog.h" /* storage_wdg_kick：长同步操作的有界喂狗（RISK-CLI-01） */
 
 #include <string.h>
 
@@ -549,6 +550,10 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
     for (;;)
     {
+        // 长同步操作（CLI format / bbt --erase / 出厂扫描）按自旋节拍上报进展并喂狗：
+        // 这些调用期间主循环被占住，timer 任务不转（RISK-CLI-01）。
+        storage_wdg_kick();
+
         (void)fc_service();
         ftl_op_drain();
 

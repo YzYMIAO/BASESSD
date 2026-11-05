@@ -438,8 +438,13 @@ MCU 栈固定大小，深度由输入决定 = 可被输入打爆。
 临时用 `-O0` 构建时才会重现。取证入口见 `docs/design/fault_capture.md`。
 
 **H20 看门狗：长操作必须喂狗，且喂狗点不能被慢路径饿死。**（华为附录）
-本仓 IWDG nominal 30s（`src/main.c:65-70`），**debug 档禁用**（`src/main.c:486`）；
-唯一喂狗入口 `watchdog_port_iwdg_refresh()`（`src/platform/watchdog.c:183` 调用）。
+本仓 **IWDG 当前在所有构建档都关闭**：`SSD_WATCHDOG_ENABLE` 硬编码 0（`src/main.c:56`），
+配置块（nominal 30s = `(3749+1)*256/32 kHz`）只在开关为 1 时参与编译（`src/main.c:65-85`）。
+启用与否是**待上板决策**（`docs/design/known_risks.md` RISK-CLI-01），未验证前不得改成 1。
+硬件唯一喂狗入口 `watchdog_port_iwdg_refresh()`（`src/platform/watchdog.c:182` 调用）；
+长同步操作（CLI `format` / `bbt --erase` / 出厂扫描）走 `storage_wdg_kick()`
+（`src/platform/watchdog.c`，≤10 ms 节流：先上报 scheduler 域再 service），
+调用点在 `ftl_sync_submit_wait` 的自旋泵里 —— 同步原语是这些操作的共同路径。
 ⚠ 典型缺陷是**把喂狗放在主循环顶部** ⇒ 某个慢分支卡住时循环根本没转到，狗照咬；
 喂狗点必须覆盖**最长路径**。⚠ 但别在 ISR 里喂 —— 那会把「主循环卡死」这个信号也抹掉。
 
@@ -983,7 +988,7 @@ R2 的四关是**代码语义改动**的收尾验证，不是每改一行就重�
 | 产物 | `build/firmware/<debug\|release>/` |
 | 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`，按配置分置，**切换构建无需 `make clean`** |
 | 编译器 | arm-none-eabi；`-Wall -Wextra -Wshadow -Wcast-align ...`，**无 `-Werror`**（零告警靠纪律） |
-| 运行时硬约束 | IWDG nominal 30s（`src/main.c:65-70`），**debug 档禁用**（`src/main.c:486`）；栈哨兵 `include/common/stack_guard.h` |
+| 运行时硬约束 | IWDG nominal 30s 配置（`src/main.c:65-85`），**当前所有构建档关闭**（`SSD_WATCHDOG_ENABLE` 硬编码 0，`src/main.c:56`；启用待上板，RISK-CLI-01）；长同步操作喂狗点 `storage_wdg_kick()`；栈哨兵 `include/common/stack_guard.h` |
 | 缓存维护范本 | `src/platform/stm32h743/nand_dma.c:337-357`（Clean/Invalidate + 32B 对齐） |
 | 临界区正例 | `src/platform/stm32h743/usart_port.c:241-256`（PRIMASK 保存/恢复） |
 | 故障取证入口 | `docs/design/fault_capture.md` |
