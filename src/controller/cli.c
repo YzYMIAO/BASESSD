@@ -12,21 +12,27 @@
 #include "cli.h"
 
 #include "bbt.h"
-#include "common.h"
 #include "crash.h"
+#include "delay.h"        /* delay_now_ms（stat 的本次开机时间） */
+#include "fc_interface.h" /* fc_get_resource_stats（q 的队列/三池水位） */
 #include "ftl.h"
 #include "ftl_fc_interface.h" /* ftl_sync_read_page / FTL_PAGE_CFG_DATA_ANY（rdpaa 诊断）*/
+#include "ftl_op.h"           /* ftl_op_req_count（q 的同步等待在飞数） */
 #include "gc.h"               /* gc_read_page_with_lba（rdpaa 打印页内 META）*/
 #include "l2p_cache.h"
 #include "log.h"
 #include "metadata.h"               /* md_pool_print（pool 诊断） */
+#include "pc_sample.h"              /* PC 采样环（pc 命令） */
+#include "pending.h"                /* pend_slot/group_get_count（q） */
 #include "power_failure_recovery.h" /* pfr_media_format（boot 失败后的恢复格式化） */
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
 #include "usb_msc.h"
 #include "wbuf.h"
+#include "wear_leveling.h" /* wl_ec_spread_get / WL_THRESHOLD（wear 的 WL 判据） */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +51,20 @@ extern DWORD syscalls_heap_used(void);
 #define UART_CLI_MAX_ARGUMENTS 24U
 #define UART_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
+/* uart_log_write 需要显式长度；字面量统一由本宏取 sizeof，避免手写长度与文本脱节
+ * （H4/H6：改文本忘改长度 = 静默截断，写长 = 越界读）。只用于数组/字面量实参。 */
+#define UART_CLI_WRITE(text) (void)uart_log_write((text), sizeof(text) - 1U)
+
+/* 破坏性命令（format / bbt erase）默认只在 debug/bench 档暴露：它们会擦掉
+ * 元数据与用户数据，并长时间占用主循环。量产档走 main.c 的自动恢复路径
+ * （pfr_media_check_format 判定空片/版本不符）；若确需在 release 保留手动恢复，
+ * 把本宏置 1。 */
+#if defined(NDEBUG)
+#    define UART_CLI_DESTRUCTIVE_ENABLE 0U
+#else
+#    define UART_CLI_DESTRUCTIVE_ENABLE 1U
+#endif
+
 /*
  * QWORD（host LBA）一律用 %llu；DWORD 用 %lu。完整 newlib 支持标准长度修饰符。
  * ssd_controller_t.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
@@ -57,37 +77,73 @@ static WORD g_cli_length;
 static BYTE g_cli_discarding;
 
 /*
- * 命令表把“命令字符串 -> 参数约束 -> 处理函数”的关系集中管理。
+ * 命令表把「命令字符串 -> 语法 -> 说明 -> 参数约束 -> 行为位 -> 处理函数」集中管理。
  * argc 包含命令名自身，例如 "log level debug" 被切分后 argc 为 3。
+ *
+ * handler 返回 void：失败原因由 handler 自己打印；dispatcher 只负责语法/策略，
+ * 不做返回值分派（H38）。`test` 由 munit 适配层打印结果，返回码无消费者。
  */
-typedef int (*uart_cli_handler_t)(int argc, char *argv[]);
+typedef void (*uart_cli_handler_t)(int argc, char *argv[]);
+
+/* 命令分组：只决定 `help` 的分节输出，顺序即帮助顺序。 */
+typedef enum
+{
+    UART_CLI_GROUP_SYSTEM = 0,
+    UART_CLI_GROUP_HOST_IO,
+    UART_CLI_GROUP_DIAG,
+    UART_CLI_GROUP_DESTRUCTIVE,
+    UART_CLI_GROUP_TEST,
+    UART_CLI_GROUP_COUNT
+} uart_cli_group_e;
+
+/*
+ * 命令行为位（**本仓自拟**：U-Boot 的命令表只有 repeatable 一个行为位，
+ * Zephyr 无对应字段；这里是因为调试 CLI 与 USB host 共用同一个 controller）。
+ * `flags` 用 BYTE 存 ⇒ 结构体仍 20 B（新字段填掉原 padding）；判定走
+ * UART_CLI_CMD_HAS_FLAG（H15：位语义由宏名表达）。
+ */
+#define UART_CLI_FLAG_NONE        0x00U
+#define UART_CLI_FLAG_BUSY        0x01U /* 提交前要求 controller 无在飞 host 请求 */
+#define UART_CLI_FLAG_DESTRUCTIVE 0x02U /* 量产档拒绝（当前 destructive 命令同时编译期隐藏） */
+
+#define UART_CLI_CMD_HAS_FLAG(command, flag) (((command)->flags & (flag)) != 0U)
 
 typedef struct
 {
     const char        *name;
-    const char        *usage;
-    const char        *description;
+    const char        *syntax; /* <required> / [optional] / subcommand | subcommand */
+    const char        *help;   /* 一行说明；选项只写在 syntax，不在这里 */
     BYTE               min_argc;
     BYTE               max_argc;
+    BYTE               flags; /* UART_CLI_FLAG_* 位图 */
+    BYTE               group; /* uart_cli_group_e；用 BYTE 存以保持结构体 20 B */
     uart_cli_handler_t handler;
 } uart_cli_command_t;
 
-static int uart_cli_help(int argc, char *argv[]);
-static int uart_cli_status(int argc, char *argv[]);
-static int uart_cli_version(int argc, char *argv[]);
-static int uart_cli_log(int argc, char *argv[]);
-static int uart_cli_wr(int argc, char *argv[]);
-static int uart_cli_rd(int argc, char *argv[]);
-static int uart_cli_tr(int argc, char *argv[]);
-static int uart_cli_fl(int argc, char *argv[]);
-static int uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
-static int uart_cli_info(int argc, char *argv[]);
-static int uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
-static int uart_cli_addr(int argc, char *argv[]);  /* PBA/PAA/gblock 地址字段转换（只读诊断） */
-static int uart_cli_rdpaa(int argc, char *argv[]); /* 按 PAA 读一个 NAND 页（诊断） */
-static int uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
+static void uart_cli_help(int argc, char *argv[]);
+static void uart_cli_status(int argc, char *argv[]);
+static void uart_cli_version(int argc, char *argv[]);
+static void uart_cli_log(int argc, char *argv[]);
+static void uart_cli_wr(int argc, char *argv[]);
+static void uart_cli_rd(int argc, char *argv[]);
+static void uart_cli_tr(int argc, char *argv[]);
+static void uart_cli_fl(int argc, char *argv[]);
+static void uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
+static void uart_cli_info(int argc, char *argv[]);
+static void uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
+static void uart_cli_addr(int argc, char *argv[]);  /* PBA/PAA/gblock 地址字段转换（只读诊断） */
+static void uart_cli_rdpaa(int argc, char *argv[]); /* 按 PAA 读一个 NAND 页（诊断） */
+static void uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
+static void uart_cli_pc(int argc, char *argv[]);    /* PC 采样热点（死循环定位） */
+static void uart_cli_q(int argc, char *argv[]);     /* 队列 / 三池 / 背压水位 */
+static void uart_cli_cp(int argc, char *argv[]);    /* Checkpoint job 现场 */
+static void uart_cli_jrn(int argc, char *argv[]);   /* Journal 环 / WAL / 水位 */
+static void uart_cli_stat(int argc, char *argv[]);  /* 计数类诊断（从 info 拆出） */
+static void uart_cli_id(int argc, char *argv[]);    /* 编译期配置 / 容量 / 介质版本 */
+static void uart_cli_ecc(int argc, char *argv[]);   /* per-block ECC 健康（E1） */
+static void uart_cli_wear(int argc, char *argv[]);  /* 擦除 / read-disturb / WL 差值 */
 #if defined(FC_NAND_TEST_ENABLE)
-static int uart_cli_test(int argc, char *argv[]);
+static void uart_cli_test(int argc, char *argv[]);
 #endif
 
 static void uart_write_prompt(void)
@@ -132,6 +188,10 @@ static BYTE g_wp_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 × 512B = 4KB */
 /* 每组一个完成标志/状态（wp 不等待，仅作在飞期间的写回目标，避免悬垂指针）。 */
 static volatile BYTE         g_wp_done[FTL_LBA_PER_PAIR];
 static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
+
+/* 在飞组数：wp 绕过 CLI 的 pending gate（要在飞多组），但 g_wp_buf 的切片
+ * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp（RISK-CLI-03）。 */
+static BYTE g_wp_inflight;
 
 /* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
  * cli_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
@@ -180,20 +240,25 @@ static ftl_ctx_t *uart_cli_ftl_for_lba(QWORD lba)
     return g_ctrl.ftl[lba_2_die(lba)];
 }
 
-/* 解析十进制/十六进制数。成功且全部消费返回 true；失败/残留返回 false。 */
+/* 解析十进制/十六进制数（CLI 的全部数值入口）。成功且全部消费返回 true。
+ *
+ * ⚠ 显式拒绝前导 '-'：strtoull 按标准接受它并回绕成 ULLONG_MAX，靠后续范围检查
+ *   兜底只是碰巧——这里在入口就判死。ERANGE（超出 QWORD）同样拒绝，不静默取
+ *   ULLONG_MAX。 */
 static bool uart_cli_parse_uint(const char *text, QWORD *out)
 {
     char *end = NULL;
     QWORD value;
 
-    if ((text == NULL) || (text[0] == '\0'))
+    if ((text == NULL) || (text[0] == '\0') || (text[0] == '-'))
     {
         return false;
     }
+    errno = 0;
     value = strtoull(text, &end, 0);
-    if ((end == NULL) || (*end != '\0'))
+    if ((end == NULL) || (*end != '\0') || (errno == ERANGE))
     {
-        return false; /* 有非法字符残留 */
+        return false; /* 非法字符残留 / 数值溢出 */
     }
     if (out != NULL)
     {
@@ -215,37 +280,55 @@ static bool uart_cli_parse_dword(const char *text, DWORD *out)
     return true;
 }
 
-static int uart_cli_wr(int argc, char *argv[])
+/* wr/rd/tr/fl 的公共提交前导（唯一漏斗）：填 pending + 交给 controller。
+ * host 冲突策略不在这里：dispatcher 按 UART_CLI_FLAG_BUSY 单点执行。
+ * 参数已由各命令校验；失败时回滚 busy 并打印统一错误。 */
+static bool uart_cli_host_submit(ssd_req_opcode_e op, QWORD lba, DWORD count, void *buffer, size_t buffer_size, BYTE compare)
+{
+    g_cli_pending.busy    = 1U;
+    g_cli_pending.compare = compare;
+    g_cli_pending.lba     = lba;
+    g_cli_pending.nblocks = count;
+
+    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
+    g_cli_pending.req.opcode      = op;
+    g_cli_pending.req.start_lba   = lba;
+    g_cli_pending.req.block_count = count;
+    g_cli_pending.req.buffer      = buffer;
+    g_cli_pending.req.buffer_size = buffer_size;
+
+    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    {
+        g_cli_pending.busy = 0U;
+        UART_CLI_WRITE("error: submit failed\r\n");
+        return false;
+    }
+    return true;
+}
+
+static void uart_cli_wr(int argc, char *argv[])
 {
     QWORD lba;
     QWORD n_parsed;
     DWORD n;
-    char *end = NULL;
 
     (void)argc;
 
-    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+    if ((!uart_cli_parse_uint(argv[1], &lba)) || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (n_parsed == 0U) || (n_parsed > UINT32_MAX))
     {
-        (void)uart_log_write("error: busy, pending request\r\n", 29U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: invalid lba/n\r\n");
+        return;
     }
-
-    lba = strtoull(argv[1], &end, 0);
-    if ((end == NULL) || (*end != '\0') || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (n_parsed == 0U) || (n_parsed > 0xFFFFFFFFU))
-    {
-        (void)uart_log_write("error: invalid lba/n\r\n", 22U);
-        return FUNC_STATUS_ERROR;
-    }
-    n = n_parsed;
+    n = (DWORD)n_parsed;
     if (n > UART_CLI_MAX_SECTORS)
     {
-        (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
-        return FUNC_STATUS_ERROR;
+        (void)LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
+        return;
     }
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, n))
     {
-        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba range exceeds lba_max\r\n");
+        return;
     }
 
     /* ⚠ `rd` 把读到的数据写进 g_wr_buf（同一块缓冲），会覆盖 pattern。
@@ -253,127 +336,95 @@ static int uart_cli_wr(int argc, char *argv[])
      * 表现为「写成功但内容不对」。每次 wr 重新预填，保证命令语义是「写固定 pattern」。 */
     uart_cli_pattern_init();
 
-    g_cli_pending.busy    = 1U;
-    g_cli_pending.compare = 0U;
-    g_cli_pending.lba     = lba;
-    g_cli_pending.nblocks = n;
-
-    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
-    g_cli_pending.req.opcode      = SSD_REQUEST_WRITE;
-    g_cli_pending.req.start_lba   = lba;
-    g_cli_pending.req.block_count = n;
-    g_cli_pending.req.buffer      = (void *)g_wr_buf;
-    g_cli_pending.req.buffer_size = sizeof(g_wr_buf); /* 真实缓冲容量（非 n×2KB）——
-                                                       * controller 据此拒绝会写爆 g_wr_buf 的 n */
-
-    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    if (uart_cli_host_submit(SSD_REQUEST_WRITE, lba, n, g_wr_buf, sizeof(g_wr_buf), 0U) == false)
     {
-        g_cli_pending.busy = 0U;
-        (void)uart_log_write("error: submit failed\r\n", 23U);
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
     (void)LOGI("wr submit ok lba=%llu n=%lu, waiting...\r\n", lba, n);
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
-static int uart_cli_rd(int argc, char *argv[])
+static void uart_cli_rd(int argc, char *argv[])
 {
     QWORD lba;
     QWORD n_parsed;
     DWORD n;
-    char *end = NULL;
+    BYTE  compare = 0U;
 
-    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+    if ((!uart_cli_parse_uint(argv[1], &lba)) || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (n_parsed == 0U) || (n_parsed > UINT32_MAX))
     {
-        (void)uart_log_write("error: busy, pending request\r\n", 29U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: invalid lba/n\r\n");
+        return;
     }
-
-    lba = strtoull(argv[1], &end, 0);
-    if ((end == NULL) || (*end != '\0') || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (n_parsed == 0U) || (n_parsed > 0xFFFFFFFFU))
-    {
-        (void)uart_log_write("error: invalid lba/n\r\n", 22U);
-        return FUNC_STATUS_ERROR;
-    }
-    n = n_parsed;
+    n = (DWORD)n_parsed;
     if (n > UART_CLI_MAX_SECTORS)
     {
-        (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
-        return FUNC_STATUS_ERROR;
+        (void)LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
+        return;
     }
+
+    /* 选项严格校验（同 bbt/crash/format）：拼错的 `--compare` 不能静默降级为 hex dump。 */
+    if (argc >= 4)
+    {
+        if (strcmp(argv[3], "--compare") != 0)
+        {
+            UART_CLI_WRITE("error: unknown option (only --compare)\r\n");
+            return;
+        }
+        compare = 1U;
+    }
+
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, n))
     {
-        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba range exceeds lba_max\r\n");
+        return;
     }
 
-    g_cli_pending.busy    = 1U;
-    g_cli_pending.compare = (argc >= 4) && (strcmp(argv[3], "c") == 0) ? 1U : 0U;
-    g_cli_pending.lba     = lba;
-    g_cli_pending.nblocks = n;
-
-    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
-    g_cli_pending.req.opcode      = SSD_REQUEST_READ;
-    g_cli_pending.req.start_lba   = lba;
-    g_cli_pending.req.block_count = n;
     /* 读数据覆盖 pattern；`wr` 每次会重新预填（见 uart_cli_wr），所以 rd→wr 相邻也安全。 */
-    g_cli_pending.req.buffer      = (void *)g_wr_buf;
-    g_cli_pending.req.buffer_size = sizeof(g_wr_buf); /* 真实缓冲容量（非 n×2KB），见 uart_cli_wr */
-
-    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    if (uart_cli_host_submit(SSD_REQUEST_READ, lba, n, g_wr_buf, sizeof(g_wr_buf), compare) == false)
     {
-        g_cli_pending.busy = 0U;
-        (void)uart_log_write("error: submit failed\r\n", 23U);
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
-    (void)LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, g_cli_pending.compare ? " c" : "");
-    return FUNC_STATUS_SUCCESS;
+    (void)LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, (compare != 0U) ? " --compare" : "");
+    return;
 }
 
-static int uart_cli_tr(int argc, char *argv[])
+static void uart_cli_tr(int argc, char *argv[])
 {
     QWORD lba;
 
     (void)argc;
 
-    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
-    {
-        (void)uart_log_write("error: busy, pending request\r\n", 29U);
-        return FUNC_STATUS_ERROR;
-    }
     if (!uart_cli_parse_uint(argv[1], &lba))
     {
-        (void)uart_log_write("error: invalid lba\r\n", 19U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: invalid lba\r\n");
+        return;
     }
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, 1U))
     {
-        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba range exceeds lba_max\r\n");
+        return;
     }
-
-    g_cli_pending.busy    = 1U;
-    g_cli_pending.compare = 0U;
-    g_cli_pending.lba     = lba;
-    g_cli_pending.nblocks = 1U;
-
-    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
-    g_cli_pending.req.opcode      = SSD_REQUEST_TRIM;
-    g_cli_pending.req.start_lba   = lba;
-    g_cli_pending.req.block_count = 1U;
-    g_cli_pending.req.buffer      = (void *)g_wr_buf;
-
-    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    if (uart_cli_host_submit(SSD_REQUEST_TRIM, lba, 1U, g_wr_buf, sizeof(g_wr_buf), 0U) == false)
     {
-        g_cli_pending.busy = 0U;
-        (void)uart_log_write("error: submit failed\r\n", 23U);
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
-    (void)uart_log_write("tr submit ok\r\n", 14U);
-    return FUNC_STATUS_SUCCESS;
+    UART_CLI_WRITE("tr submit ok\r\n");
+    return;
+}
+
+/* 每组的组完成回调：只递减在飞计数，保护 g_wp_buf 不被下一次 wp 覆盖（RISK-CLI-03）。 */
+static void uart_cli_wp_complete(void *ctx)
+{
+    (void)ctx;
+
+    if (g_wp_inflight > 0U)
+    {
+        g_wp_inflight--;
+    }
 }
 
 /*
@@ -390,7 +441,7 @@ static int uart_cli_tr(int argc, char *argv[])
  *       wb_handle(FLUSH) 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
  *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
  */
-static int uart_cli_wp(int argc, char *argv[])
+static void uart_cli_wp(int argc, char *argv[])
 {
     QWORD      lba;
     QWORD      n_parsed;
@@ -403,44 +454,45 @@ static int uart_cli_wp(int argc, char *argv[])
 
     (void)argc;
 
-    /* wp 只绕过 CLI 自己的 busy 闸门（要在飞多组），仍须让路给 USB host 请求。 */
-    if (usb_msc_host_busy())
+    /* wp 只绕过 CLI 自己的 busy 闸门（要在飞多组），仍须让路给 USB host 请求；
+     * 上一批 wp 未走完时 g_wp_buf 仍被未下发的 run 持有 ⇒ 拒绝（RISK-CLI-03）。 */
+    if ((usb_msc_host_busy()) || (g_wp_inflight != 0U))
     {
-        (void)uart_log_write("error: busy, USB host request\r\n", 31U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: busy (USB host request / previous wp in flight)\r\n");
+        return;
     }
 
-    if ((!uart_cli_parse_uint(argv[1], &lba)) || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (!uart_cli_parse_uint(argv[3], &k_parsed)) || (n_parsed == 0U) || (k_parsed < 2U) || (n_parsed > 0xFFFFFFFFU) || (k_parsed > 0xFFFFFFFFU))
+    if ((!uart_cli_parse_uint(argv[1], &lba)) || (!uart_cli_parse_uint(argv[2], &n_parsed)) || (!uart_cli_parse_uint(argv[3], &k_parsed)) || (n_parsed == 0U) || (k_parsed < 2U) || (n_parsed > UINT32_MAX) || (k_parsed > UINT32_MAX))
     {
-        (void)uart_log_write("error: invalid lba/n/k (need n>=1, k>=2)\r\n", 41U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: invalid lba/n/k (need n>=1, k>=2)\r\n");
+        return;
     }
-    n = n_parsed;
-    k = k_parsed;
+    n = (DWORD)n_parsed;
+    k = (DWORD)k_parsed;
     if ((QWORD)n * (QWORD)k > FTL_LBA_PER_PAIR)
     {
-        (void)uart_log_write("error: n*k must be <= 8 (one pair window)\r\n", 42U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: n*k must be <= 8 (one pair window)\r\n");
+        return;
     }
     if ((lba & (FTL_LBA_PER_PAIR - 1U)) != 0U)
     {
-        (void)uart_log_write("error: lba must be 8-aligned (pair window base)\r\n", 47U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba must be 8-aligned (pair window base)\r\n");
+        return;
     }
     const DWORD sectors = n * k;
 
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, sectors))
     {
-        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba range exceeds lba_max\r\n");
+        return;
     }
 
     /* 按窗口基址路由到所属实例（与 controller/FTL 的分片规则一致）。 */
     ftl = uart_cli_ftl_for_lba(lba);
     if (ftl == NULL)
     {
-        (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: ftl instance not ready\r\n");
+        return;
     }
 
     /* 组 i 的 n 个扇区填字节 0xA0+i（各切片不相交） */
@@ -456,76 +508,65 @@ static int uart_cli_wp(int argc, char *argv[])
         g_wp_status[i] = SSD_STATUS_OK;
     }
 
-    /* 逐组提交（不查 busy）：k 个组同时在飞 ⇒ 窗口填满时合并成 1 次编程。
-     * 各组 complete_flag/status_out 指向静态数组，完成前始终有效。 */
+    /* 逐组提交（不查 pending gate）：k 个组同时在飞 ⇒ 窗口填满时合并成 1 次编程。
+     * 各组 complete_flag/status_out 指向静态数组，完成前始终有效；on_complete
+     * 只递减在飞计数，保护 g_wp_buf（RISK-CLI-03）。 */
     for (i = 0U; i < k; i++)
     {
         ftl_io_req_t req;
 
         memset(&req, 0, sizeof(req));
-        req.lba           = lba + ((QWORD)i * (QWORD)n);
-        req.buffer        = &g_wp_buf[(i * n) * FTL_IU_BYTES];
-        req.count         = n;
-        req.complete_flag = &g_wp_done[i];
-        req.status_out    = &g_wp_status[i];
+        req.lba             = lba + ((QWORD)i * (QWORD)n);
+        req.buffer          = &g_wp_buf[(i * n) * FTL_IU_BYTES];
+        req.count           = n;
+        req.complete_flag   = &g_wp_done[i];
+        req.status_out      = &g_wp_status[i];
+        req.on_complete     = uart_cli_wp_complete;
+        req.on_complete_ctx = NULL;
 
+        g_wp_inflight++;
         if (ftl_submit_write(ftl, &req) != FTL_OK)
         {
+            g_wp_inflight--; /* 本组未建组；此前各组仍会在完成时各自递减 */
             (void)LOGE("wp: group %lu submit failed\r\n", i);
-            return FUNC_STATUS_ERROR;
+            return;
         }
     }
 
     (void)LOGI("wp submit ok lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n", lba, n, k);
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
-static int uart_cli_fl(int argc, char *argv[])
+static void uart_cli_fl(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
 
-    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+    if (uart_cli_host_submit(SSD_REQUEST_FLUSH, 0U, 1U, g_wr_buf, sizeof(g_wr_buf), 0U) == false)
     {
-        (void)uart_log_write("error: busy, pending request\r\n", 29U);
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
-    g_cli_pending.busy    = 1U;
-    g_cli_pending.compare = 0U;
-    g_cli_pending.lba     = 0U;
-    g_cli_pending.nblocks = 1U;
-
-    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
-    g_cli_pending.req.opcode      = SSD_REQUEST_FLUSH;
-    g_cli_pending.req.start_lba   = 0U;
-    g_cli_pending.req.block_count = 1U;
-    g_cli_pending.req.buffer      = (void *)g_wr_buf;
-
-    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
-    {
-        g_cli_pending.busy = 0U;
-        (void)uart_log_write("error: submit failed\r\n", 23U);
-        return FUNC_STATUS_ERROR;
-    }
-
-    (void)uart_log_write("fl submit ok\r\n", 14U);
-    return FUNC_STATUS_SUCCESS;
+    UART_CLI_WRITE("fl submit ok\r\n");
+    return;
 }
 
-static int uart_cli_info(int argc, char *argv[])
+/* 控制器状态名：info 与 id 共用（同一映射只写一处）。 */
+static const char *const g_controller_state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
+_Static_assert(UART_ARRAY_SIZE(g_controller_state_names) == (SSD_CONTROLLER_FAILED + 1U), "控制器状态名表必须覆盖全部状态");
+
+static void uart_cli_info(int argc, char *argv[])
 {
-    static const char *const state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
-    BYTE                     ch;
-    BYTE                     ce;
-    BYTE                     lun;
+    BYTE ch;
+    BYTE ce;
+    BYTE lun;
 
     (void)argc;
     (void)argv;
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
+        (void)LOGI("controller state=%s lba_max=%lu\r\n", g_controller_state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
     }
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -542,16 +583,7 @@ static int uart_cli_info(int argc, char *argv[])
         }
         (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
-        /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
-        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->stats.dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.reclaimed, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop, ftl->mig_handle->state.counters.novictim, ftl->mig_handle->job.erased, ftl->mig_handle->state.failure.read_fail_streak, ftl->mig_handle->state.benefit.last_mode, ftl->mig_handle->state.counters.nogain, alc_free_min_plane_count(&ftl->alloc));
-        /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
-         * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->state.counters.batch_jobs, ftl->mig_handle->state.counters.batch_pages, ftl->mig_handle->state.counters.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
-
-        /* entry 级 CMT：读/写命中率 + dirty 写回压力。 */
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] cmt hit=%lu/%lu wr=%lu/%lu dirty=%lu wb=%lu ev=%lu/%lu defer=%lu\r\n", ch, ce, lun, ftl->cache->stats.cmt_hits, ftl->cache->stats.cmt_misses, ftl->cache->stats.cmt_wr_hits, ftl->cache->stats.cmt_wr_misses, ftl->cache->stats.cmt_dirty, ftl->cache->stats.cmt_writebacks, ftl->cache->stats.cmt_evict_clean, ftl->cache->stats.cmt_evict_dirty, ftl->cache->stats.cmt_wb_defer);
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
+        /* 计数类诊断（见 `stat`）：info 只保留身份/状态，避免两套计数视图。 */
 
         /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
          * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
@@ -564,9 +596,7 @@ static int uart_cli_info(int argc, char *argv[])
         }
     }
 
-    usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
-
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
 /*
@@ -585,7 +615,7 @@ static int uart_cli_info(int argc, char *argv[])
  *
  * 按 LBA 路由到所属实例（与 rd/wr 经 controller 路由到的实例一致）。
  */
-static int uart_cli_map(int argc, char *argv[])
+static void uart_cli_map(int argc, char *argv[])
 {
     ftl_ctx_t         *ftl;
     const bst_block_t *b;
@@ -597,20 +627,20 @@ static int uart_cli_map(int argc, char *argv[])
 
     if (!uart_cli_parse_uint(argv[1], &lba))
     {
-        (void)uart_log_write("error: invalid lba\r\n", 19U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: invalid lba\r\n");
+        return;
     }
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, 1U))
     {
-        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: lba range exceeds lba_max\r\n");
+        return;
     }
 
     ftl = uart_cli_ftl_for_lba(lba);
     if (ftl == NULL)
     {
-        (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: ftl instance not ready\r\n");
+        return;
     }
 
     /* ⚠ CLI 上下文（不在完成派发里）：region 未驻留时自旋泵等加载完成。
@@ -623,13 +653,20 @@ static int uart_cli_map(int argc, char *argv[])
     if (pba == NAND_PBA_INVALID)
     {
         (void)LOGI("map lba=%llu -> INVALID (未映射)\r\n", lba);
-        return FUNC_STATUS_SUCCESS;
+        return;
+    }
+    // L2P 条目是介质读回（H29）：非 INVALID 也要合法，否则下面的 BST 摘要会指向
+    // 另一块、给出误导性结论（掩码字段保证下标不越界，但语义已错）。
+    if (pba_is_valid(pba) == false)
+    {
+        (void)LOGE("map lba=%llu -> invalid PBA 0x%08lx (L2P entry corrupt)\r\n", lba, pba);
+        return;
     }
 
     g = ftl_pba_gblock(pba);
     b = &ftl->alloc.blocks[g];
     (void)LOGI("map lba=%llu pba=%08lx paa=%08lx ch=%hhu ce=%hhu lun=%hhu plane=%hhu blk=%hu pg=%hhu cw=%hhu g=%hu\r\n", lba, pba, pba_to_paa(pba), pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba), g);
-    (void)LOGI("    block g=%u state=%s valid=%u sb=%u ec=%lu\r\n", g, ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
+    (void)LOGI("    block g=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", g, ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
 
     if (b->valid_count == 0U)
     {
@@ -639,7 +676,7 @@ static int uart_cli_map(int argc, char *argv[])
     {
         (void)LOGI("    VERDICT: ok —— 覆盖写安全\r\n");
     }
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
 /*
@@ -652,14 +689,14 @@ static int uart_cli_map(int argc, char *argv[])
  * LBA → 上述字段的入口是 `map <lba>`；这里不再提供 `addr lba`，避免两套入口（C9）。
  * 所有字段展开都复用 PBA/PAA getter 与 ftl_gblock helper，不手写位运算。
  */
-static int uart_cli_addr(int argc, char *argv[])
+static void uart_cli_addr(int argc, char *argv[])
 {
     DWORD value;
 
     if (argc < 3)
     {
         (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
     if (strcmp(argv[1], "pba") == 0)
@@ -667,11 +704,11 @@ static int uart_cli_addr(int argc, char *argv[])
         if ((argc != 3) || (!uart_cli_parse_dword(argv[2], &value)) || (!pba_is_valid(value)))
         {
             (void)LOGE("addr: invalid pba\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
 
         (void)LOGI("addr pba=0x%08lx paa=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba_to_paa(value), pba_to_ch(value), pba_to_ce(value), pba_to_lun(value), ftl_pba_gblock(value), pba_to_plane(value), pba_to_block(value), pba_to_page(value), pba_to_cw(value));
-        return FUNC_STATUS_SUCCESS;
+        return;
     }
 
     if (strcmp(argv[1], "paa") == 0)
@@ -682,26 +719,26 @@ static int uart_cli_addr(int argc, char *argv[])
         if ((argc != 3) && (argc != 5))
         {
             (void)LOGE("usage: addr paa <paa> [ch ce]\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
         if ((!uart_cli_parse_dword(argv[2], &value)) || (paa_is_valid_paa(value) == 0U))
         {
             (void)LOGE("addr: invalid paa\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
         if (argc == 5)
         {
             if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (ch >= CH_NUM) || (ce >= CE_NUM))
             {
                 (void)LOGE("addr: invalid ch/ce\r\n");
-                return FUNC_STATUS_ERROR;
+                return;
             }
         }
 
         const DWORD pba = paa_to_pba(ch, ce, value);
 
         (void)LOGI("addr paa=0x%08lx pba=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba, pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), ftl_pba_gblock(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba));
-        return FUNC_STATUS_SUCCESS;
+        return;
     }
 
     if (strcmp(argv[1], "g") == 0)
@@ -713,19 +750,19 @@ static int uart_cli_addr(int argc, char *argv[])
         if ((argc != 3) && (argc != 6))
         {
             (void)LOGE("usage: addr g <g> [ch ce lun]\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
         if ((!uart_cli_parse_dword(argv[2], &value)) || (value >= FTL_BLOCK_TOTAL))
         {
             (void)LOGE("addr: invalid gblock\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
         if (argc == 6)
         {
             if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_MAX) || (ce >= CE_MAX) || (lun >= LUN_MAX))
             {
                 (void)LOGE("addr: invalid ch/ce/lun\r\n");
-                return FUNC_STATUS_ERROR;
+                return;
             }
         }
 
@@ -736,15 +773,15 @@ static int uart_cli_addr(int argc, char *argv[])
         if (ftl == NULL)
         {
             (void)LOGE("addr: ftl instance not ready\r\n");
-            return FUNC_STATUS_ERROR;
+            return;
         }
         b = &ftl->alloc.blocks[value];
         (void)LOGI("addr g=%lu plane=%hhu blk=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", value, ftl_gblock_plane((WORD)value), ftl_gblock_block((WORD)value), ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
-        return FUNC_STATUS_SUCCESS;
+        return;
     }
 
     (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
-    return FUNC_STATUS_ERROR;
+    return;
 }
 
 /*
@@ -757,28 +794,28 @@ static int uart_cli_addr(int argc, char *argv[])
  * `crash clear` 给一个**显式归零点**：清完再复位，若记录重新出现，才是真的又崩了。
  * ⚠ 掉电（POR）本来就清 `.noinit` ⇒ 断电重启后看到的记录一定是新的、无需 clear。
  */
-static int uart_cli_crash(int argc, char *argv[])
+static void uart_cli_crash(int argc, char *argv[])
 {
     const crash_record_t *rec;
 
     if (argc >= 2)
     {
-        /* 选项**严格**校验（同 bbt：静默忽略拼错的子参数会让人以为"清过了"） */
+        /* 子命令**严格**校验（同 bbt：静默忽略拼错的子参数会让人以为"清过了"） */
         if (strcmp(argv[1], "clear") != 0)
         {
-            LOGW("crash: unknown option '%s' (only clear)\r\n", argv[1]);
-            return FUNC_STATUS_ERROR;
+            LOGW("crash: unknown subcommand '%s' (only clear)\r\n", argv[1]);
+            return;
         }
         crash_record_clear();
-        (void)uart_log_write("crash record cleared\r\n", 22U);
-        return FUNC_STATUS_SUCCESS;
+        UART_CLI_WRITE("crash record cleared\r\n");
+        return;
     }
 
     rec = crash_record_get();
     if (rec == NULL)
     {
-        (void)uart_log_write("crash: no record\r\n", 18U);
-        return FUNC_STATUS_SUCCESS;
+        UART_CLI_WRITE("crash: no record\r\n");
+        return;
     }
 
     (void)LOGI("crash kind=%lu line=%lu\r\n", rec->kind, rec->line);
@@ -789,7 +826,7 @@ static int uart_cli_crash(int argc, char *argv[])
         (void)LOGI("  fault kind=%lu pc=%08lx lr=%08lx sp=%08lx xpsr=%08lx\r\n", rec->fault.fault_kind, rec->fault.pc, rec->fault.lr, rec->fault.sp, rec->fault.xpsr);
         (void)LOGI("  cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx\r\n", rec->fault.cfsr, rec->fault.hfsr, rec->fault.mmfar, rec->fault.bfar);
     }
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
 /*
@@ -800,82 +837,310 @@ static int uart_cli_crash(int argc, char *argv[])
  *   pattern。所以报告把 `dtcm_bottom` 一并打出来：`low` 贴着它 ⇒ 那是堆顶不是栈底。
  * 告警只在**首次置位**时打过 LOGI/LOGE；`hits` 持续增长说明还在踩。
  */
-static int uart_cli_stack(int argc, char *argv[])
+static void uart_cli_stack(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
     stack_guard_report();
     (void)LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n", syscalls_heap_used());
-    return FUNC_STATUS_SUCCESS;
+    return;
+}
+
+/* pc 的聚合视图 top-N；原始序列默认只打最近 64 个，`pc all` 打全部。 */
+#define UART_CLI_PC_TOP      (8U)
+#define UART_CLI_PC_RAW_TAIL (64U)
+
+/*
+ * pc [live] [all | top] | pc clear | pc rate [n] — PC 采样（死循环 / 跑飞定位）。
+ *
+ * 默认打印**上一轮**（复位前）的原始 PC 序列（oldest→newest，4 个一行，最近 64 个）：
+ * 一行行重复的地址就是循环；`all` 打完整 256 个，`top` 打命中次数排行。
+ * `live` 看本轮；`clear` 归零后复现；`rate <n>` 设每 n 个 tick 采一次（窗口 256×n ms，
+ * 持久化到 .noinit，复位后沿用；`pc rate 1` 恢复 1 ms）。
+ * 反查必须用**产生该次运行的镜像**的 ELF/map（CLAUDE.md §3.3）。
+ *
+ * ⚠ 原始序列是**采样顺序**，不是指令顺序；紧凑循环（< rate ms 且整除）仍会混叠。
+ * ⚠ 中断关闭 / 更高优先级 ISR 内的死循环采不到；.noinit 不跨 POR。
+ */
+static void uart_cli_pc(int argc, char *argv[])
+{
+    bool  previous = true;
+    bool  show_all = false;
+    bool  top_view = false;
+    DWORD count;
+    DWORD rate;
+    DWORD span;
+
+    if ((argc >= 2) && (strcmp(argv[1], "clear") == 0))
+    {
+        if (argc != 2)
+        {
+            UART_CLI_WRITE("usage: pc clear\r\n");
+            return;
+        }
+        pc_sample_clear();
+        UART_CLI_WRITE("pc samples cleared (rate kept)\r\n");
+        return;
+    }
+
+    if ((argc >= 2) && (strcmp(argv[1], "rate") == 0))
+    {
+        DWORD new_rate;
+
+        if (argc == 2)
+        {
+            rate = pc_sample_rate(false);
+            (void)LOGI("pc: rate=%lu window=%lums\r\n", rate, rate * PC_SAMPLE_RING);
+            return;
+        }
+        if ((argc != 3) || (uart_cli_parse_dword(argv[2], &new_rate) == false) || (pc_sample_rate_set(new_rate) == false))
+        {
+            (void)LOGE("pc: rate must be 1..%u\r\n", PC_SAMPLE_RATE_MAX);
+            return;
+        }
+        (void)LOGI("pc: rate=%lu window=%lums (kept across reset; 'pc rate 1' restores)\r\n", new_rate, new_rate * PC_SAMPLE_RING);
+        return;
+    }
+
+    if ((argc >= 2) && (strcmp(argv[1], "live") == 0))
+    {
+        previous = false;
+        if (argc == 3)
+        {
+            if (strcmp(argv[2], "all") == 0)
+            {
+                show_all = true;
+            }
+            else if (strcmp(argv[2], "top") == 0)
+            {
+                top_view = true;
+            }
+            else
+            {
+                UART_CLI_WRITE("usage: pc [live] [all | top]\r\n");
+                return;
+            }
+        }
+        else if (argc > 3)
+        {
+            UART_CLI_WRITE("usage: pc [live] [all | top]\r\n");
+            return;
+        }
+    }
+    else if (argc == 2)
+    {
+        if (strcmp(argv[1], "all") == 0)
+        {
+            show_all = true;
+        }
+        else if (strcmp(argv[1], "top") == 0)
+        {
+            top_view = true;
+        }
+        else
+        {
+            UART_CLI_WRITE("usage: pc [live] [all | top] | pc clear | pc rate [n]\r\n");
+            return;
+        }
+    }
+    else if (argc > 2)
+    {
+        UART_CLI_WRITE("usage: pc [live] [all | top] | pc clear | pc rate [n]\r\n");
+        return;
+    }
+
+    count = pc_sample_count(previous);
+    rate  = pc_sample_rate(previous);
+    span  = count * rate;
+
+    if (count == 0U)
+    {
+        (void)LOGI("pc: no %s samples (clear, reproduce, reset, then run 'pc')\r\n", (previous == true) ? "previous-run" : "live");
+        return;
+    }
+
+    if (top_view == true)
+    {
+        DWORD top_pc[UART_CLI_PC_TOP]  = {0U};
+        DWORD top_cnt[UART_CLI_PC_TOP] = {0U};
+        BYTE  top_n                    = 0U;
+        DWORD i;
+
+        // O(n^2) 的 top-N（n <= 256）：不占栈、不排序，CLI 诊断足够。
+        for (i = 0U; i < count; i++)
+        {
+            const DWORD pc          = pc_sample_at(previous, i);
+            DWORD       occurrences = 0U;
+            bool        already_top = false;
+            BYTE        k;
+
+            for (k = 0U; k < top_n; k++)
+            {
+                if (top_pc[k] == pc)
+                {
+                    already_top = true;
+                    break;
+                }
+            }
+            if (already_top == true)
+            {
+                continue;
+            }
+
+            for (DWORD j = 0U; j < count; j++)
+            {
+                if (pc_sample_at(previous, j) == pc)
+                {
+                    occurrences++;
+                }
+            }
+
+            if ((top_n < UART_CLI_PC_TOP) || (occurrences > top_cnt[UART_CLI_PC_TOP - 1U]))
+            {
+                BYTE pos = (top_n < UART_CLI_PC_TOP) ? top_n : (UART_CLI_PC_TOP - 1U);
+
+                if (top_n < UART_CLI_PC_TOP)
+                {
+                    top_n++;
+                }
+                while ((pos > 0U) && (top_cnt[pos - 1U] < occurrences))
+                {
+                    top_cnt[pos] = top_cnt[pos - 1U];
+                    top_pc[pos]  = top_pc[pos - 1U];
+                    pos--;
+                }
+                top_cnt[pos] = occurrences;
+                top_pc[pos]  = pc;
+            }
+        }
+
+        (void)LOGI("pc[%s] samples=%lu rate=%lu span=%lums top=%hhu\r\n", (previous == true) ? "prev" : "live", count, rate, span, top_n);
+        for (i = 0U; i < top_n; i++)
+        {
+            (void)LOGI("  pc=0x%08lx count=%lu share=%lu%%\r\n", top_pc[i], top_cnt[i], (top_cnt[i] * 100U) / count);
+        }
+    }
+    else
+    {
+        const DWORD head  = pc_sample_head();
+        const DWORD start = (show_all == true || count <= UART_CLI_PC_RAW_TAIL) ? 0U : (count - UART_CLI_PC_RAW_TAIL);
+        DWORD       i;
+
+        (void)LOGI("pc[%s] samples=%lu rate=%lu span=%lums raw %s (oldest -> newest)\r\n", (previous == true) ? "prev" : "live", count, rate, span, (show_all == true) ? "all" : "last 64");
+
+        // 上一轮快照已在 init 时按时间顺序重排；本轮活跃环按 head 回绕。
+        // 4 个地址一行；最后一行不足 4 个时补 0（不会与真实地址混淆的概率可忽略）。
+        for (i = start; i < count; i += 4U)
+        {
+            DWORD addr[4] = {0U, 0U, 0U, 0U};
+
+            for (BYTE k = 0U; (k < 4U) && ((i + k) < count); k++)
+            {
+                const DWORD chrono = i + k;
+                const DWORD phys   = ((previous == true) || (count < PC_SAMPLE_RING)) ? chrono : ((head + chrono) & (PC_SAMPLE_RING - 1U));
+
+                addr[k] = pc_sample_at(previous, phys);
+            }
+            (void)LOGI("  %03lu: 0x%08lx 0x%08lx 0x%08lx 0x%08lx\r\n", i, addr[0], addr[1], addr[2], addr[3]);
+        }
+    }
+
+    UART_CLI_WRITE("resolve: arm-none-eabi-addr2line -f -C -i -e <same-elf> <pc>\r\n");
 }
 
 /*
- * bbt [--erase] — 逐块探测并打印坏块图。
+ * bbt [erase | fault <plane> <block>] — 逐块探测并打印坏块图。
  *
  * 默认**只读**：读每块 Page 0 的 spare 首字节（列 2048），非 0xFF ⇒ 出厂坏块。
  * 不写介质，可反复调用。
  *
- * ⚠ `--erase` 才是**破坏性**的：每个实例的每个块都会被擦除（含元数据区）⇒ 抹掉
- * FTL 元数据与用户数据。只在专门的坏块体检时用。
+ * 两个子命令都只在 debug/bench 档提供（release 的 usage 只列 `bbt`）：
+ *   erase —— **破坏性**：每个实例的每个块都会被擦除（含元数据区）。
+ *   fault —— 负例注入：把指定物理块标 BAD 并触发候选池重算，证明 BAD 槽被
+ *            shared metadata spare 顶替后记录仍可定位；若该块持有活元数据会丢一份副本。
+ *
+ * 子命令严格校验：不认识就报错返回，绝不静默降级为只读。静默忽略曾两次把
+ * `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条擦除命令都没发。
  */
-static int uart_cli_bbt(int argc, char *argv[])
+static void uart_cli_bbt(int argc, char *argv[])
 {
     bool do_erase = false;
 
-#ifndef NDEBUG
-    /* 负例注入：bbt fault <plane> <block> —— 把指定物理块标 BAD 并触发候选池重算。
-     * 用于证明「BAD 槽真的被 shared metadata spare 顶替，记录仍可定位」。
-     * ⚠ 若该块持有活元数据，会丢一份副本；只在 debug 档提供。 */
-    if ((argc == 4) && (strcmp(argv[1], "fault") == 0))
-    {
-        ftl_ctx_t *ftl = g_ctrl.ftl[0];
-
-        if (ftl == NULL)
-        {
-            LOGE("bbt fault: no initialized FTL instance\r\n");
-            return FUNC_STATUS_ERROR;
-        }
-
-        QWORD plane_q = 0U;
-        QWORD block_q = 0U;
-
-        if ((!uart_cli_parse_uint(argv[2], &plane_q)) || (!uart_cli_parse_uint(argv[3], &block_q)) || (plane_q >= PLANE_NUM) || (block_q >= BLOCKS_PER_PLANE))
-        {
-            LOGE("bbt fault: plane/block out of range\r\n");
-            return FUNC_STATUS_ERROR;
-        }
-
-        const BYTE plane  = (BYTE)plane_q;
-        const WORD block  = (WORD)block_q;
-        const WORD gblock = ftl_gblock(plane, block);
-
-        LOGW("bbt fault: mark gblock=%hu (plane=%hhu block=%hu) BAD (debug injection)\r\n", gblock, plane, block);
-
-        (void)bbt_mark_bad(&ftl->alloc, gblock);
-        md_pool_service(ftl); /* 元数据 job 忙时会顺延到下一轮 ftl_service */
-
-        if (ftl->alloc.pools->dirty)
-        {
-            LOGW("bbt fault: pool rebuild deferred (metadata job busy) — run 'pool' again\r\n");
-        }
-
-        md_pool_print(ftl->metadata_dir);
-        return FUNC_STATUS_SUCCESS;
-    }
-#endif
-
-    /* 选项**严格**校验：不认识就报错返回，绝不静默降级为只读。
-     * 静默忽略曾两次把 `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条
-     * 擦除命令都没发，看图的人只会以为"擦了但没生效"。 */
     if (argc >= 2)
     {
-        if (strcmp(argv[1], "--erase") != 0)
+#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
+        if (strcmp(argv[1], "erase") == 0)
         {
-            LOGW("bbt: unknown option '%s' (only --erase)\r\n", argv[1]);
-            return FUNC_STATUS_ERROR;
+            if (argc != 2)
+            {
+                LOGE("usage: bbt erase\r\n");
+                return;
+            }
+            do_erase = true;
+            LOGW("bbt erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
         }
-        do_erase = true;
-        LOGW("bbt --erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
+        else if (strcmp(argv[1], "fault") == 0)
+        {
+            if (argc != 4)
+            {
+                LOGE("usage: bbt fault <plane> <block>\r\n");
+                return;
+            }
+
+            ftl_ctx_t *ftl = g_ctrl.ftl[0];
+
+            if (ftl == NULL)
+            {
+                LOGE("bbt fault: no initialized FTL instance\r\n");
+                return;
+            }
+
+            QWORD plane_q = 0U;
+            QWORD block_q = 0U;
+
+            if ((!uart_cli_parse_uint(argv[2], &plane_q)) || (!uart_cli_parse_uint(argv[3], &block_q)) || (plane_q >= PLANE_NUM) || (block_q >= BLOCKS_PER_PLANE))
+            {
+                LOGE("bbt fault: plane/block out of range\r\n");
+                return;
+            }
+
+            const BYTE plane  = (BYTE)plane_q;
+            const WORD block  = (WORD)block_q;
+            const WORD gblock = ftl_gblock(plane, block);
+
+            LOGW("bbt fault: mark gblock=%hu (plane=%hhu block=%hu) BAD (debug injection)\r\n", gblock, plane, block);
+
+            (void)bbt_mark_bad(&ftl->alloc, gblock);
+            md_pool_service(ftl); /* 元数据 job 忙时会顺延到下一轮 ftl_service */
+
+            if (ftl->alloc.pools->dirty)
+            {
+                LOGW("bbt fault: pool rebuild deferred (metadata job busy) — run 'pool' again\r\n");
+            }
+
+            md_pool_print(ftl->metadata_dir);
+            return;
+        }
+        else
+        {
+            LOGW("bbt: unknown subcommand '%s' (erase | fault <plane> <block>)\r\n", argv[1]);
+            return;
+        }
+#else
+        (void)LOGE("bbt: subcommand '%s' disabled in this build (erase/fault are debug-only)\r\n", argv[1]);
+        return;
+#endif
+    }
+
+    /* 全片擦除会抹掉元数据：host 有在飞请求时拒绝，避免它的完成回调落到
+     * 正在擦/重写的介质上（RISK-CLI-02）。 */
+    if (do_erase == true)
+    {
+        if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+        {
+            UART_CLI_WRITE("error: busy — wait for the host request to finish\r\n");
+            return;
+        }
     }
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -917,24 +1182,28 @@ static int uart_cli_bbt(int argc, char *argv[])
 
     if (do_erase == true)
     {
-        LOGW("bbt --erase: done. POWER-CYCLE NOW — the running FTL rewrites metadata if left idle.\r\n");
+        LOGW("bbt erase: done. POWER-CYCLE NOW — the running FTL rewrites metadata if left idle.\r\n");
     }
 
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
+#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
 /*
  * format — boot 失败后的恢复格式化（破坏性）
  *
  * 用途：CP/目录检查点介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
- * （例如上一轮 bbt --erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
+ * （例如上一轮 bbt erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
  * 本命令直接对已 ftl_init 的实例执行 pfr_media_format：重落 BBT（带
  * FORMAT_IN_PROGRESS）→ 擦除 BBT 池之外的块 → 写当前版本初始 Checkpoint。
  *
  * ⚠ 擦除全部用户数据与元数据；执行后必须断电重启，不能在运行中的 FTL 上继续用。
+ * ⚠ 只在 debug/bench 档注册（`UART_CLI_DESTRUCTIVE_ENABLE`）；量产档走 main.c 的
+ *   自动恢复路径。
  */
-static int uart_cli_format(int argc, char *argv[])
+static void uart_cli_format(int argc, char *argv[])
 {
+    /* host 冲突由 dispatcher 的 UART_CLI_FLAG_BUSY 单点拒绝（RISK-CLI-02）。 */
     BYTE ch;
     BYTE ce;
     BYTE lun;
@@ -946,8 +1215,8 @@ static int uart_cli_format(int argc, char *argv[])
 
     if ((argc >= 2) && (!verify))
     {
-        (void)uart_log_write("error: unknown option (only --verify)\r\n", sizeof("error: unknown option (only --verify)\r\n") - 1U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: unknown option (only --verify)\r\n");
+        return;
     }
 
     LOGW("format: ERASING every block and writing initial metadata. Do not reset until done.\r\n");
@@ -970,7 +1239,7 @@ static int uart_cli_format(int argc, char *argv[])
             continue;
         }
 
-        /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
+        /* 格式化期间禁止后台写；与 bbt erase 同口径。 */
         ftl->flags.bg_suspend = 1U;
         {
             wb_trigger_t trigger;
@@ -991,23 +1260,24 @@ static int uart_cli_format(int argc, char *argv[])
 
         if (pfr_media_format(ftl, verify) != FTL_OK)
         {
-            LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-            return FUNC_STATUS_ERROR;
+            LOGE("format: failed ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
+            return;
         }
 
         done = 1U;
-        LOGI("format: done ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        LOGI("format: done ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
     }
 
     if (done == 0U)
     {
         LOGE("format: no initialized FTL instance\r\n");
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
     LOGW("format: done. POWER-CYCLE NOW.\r\n");
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
+#endif /* UART_CLI_DESTRUCTIVE_ENABLE */
 
 /*
  * pool — 打印固定元数据分区的候选块池（只读诊断）
@@ -1015,7 +1285,7 @@ static int uart_cli_format(int argc, char *argv[])
  * 用于验证 BBT + spare 候选池：nominal 块被标 BAD 后，候选数不变，
  * 坏块由 shared metadata spare 顶替（打印 remapped -> spare）。
  */
-static int uart_cli_pool(int argc, char *argv[])
+static void uart_cli_pool(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
@@ -1043,10 +1313,446 @@ static int uart_cli_pool(int argc, char *argv[])
     if (done == 0U)
     {
         LOGE("pool: no initialized FTL instance\r\n");
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
-    return FUNC_STATUS_SUCCESS;
+    return;
+}
+
+/*
+ * q — 控制器队列 / 三池 / 背压水位（只读）。
+ *
+ * 对应 §26 的「队列 + 门铃 + 完成」：FC 的 SQ/HSQ/CQ 与三池是硬件 FCC 的软件替身，
+ * FTL 的 pending 组/槽、L2P 在飞与 mig 在飞是上层背压。FC 统计是单例，
+ * pending/在飞数按 FTL 实例分开打印。
+ */
+static void uart_cli_q(int argc, char *argv[])
+{
+    fc_resource_stats_t rs;
+
+    (void)argc;
+    (void)argv;
+
+    if (fc_get_resource_stats(&rs) != FC_STATUS_OK)
+    {
+        (void)LOGE("q: fc resource stats unavailable\r\n");
+        return;
+    }
+    (void)LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH);
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t *ftl = g_ctrl.ftl[die];
+        const BYTE       ch  = die_2_ch(die);
+        const BYTE       ce  = die_2_ce(die);
+        const BYTE       lun = die_2_lun(die);
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+
+        (void)LOGI("q[%hhu][%hhu][%hhu] pend_slot=%hu pend_group=%hu ftl_op=%hu l2p_load=%hhu l2p_flush=%hhu mig=%hu wb_busy=%d\r\n", ch, ce, lun, pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), ftl->cache->inflight.load, ftl->cache->inflight.flush, ftl->mig_handle->state.inflight, (int)(wb_is_idle(ftl->wbuf) == false));
+    }
+}
+
+/*
+ * cp — Checkpoint 异步 job 的现场（只读）。
+ *
+ * 第一行是状态机（phase / 等待 / 失败 / 超时 / 心跳年龄），第二行是池游标与
+ * 水位（sequence 是 CP 池自己的序号，与 journal sequence 互不相干）。
+ */
+static void uart_cli_cp(int argc, char *argv[])
+{
+    const DWORD now = delay_now_ms();
+
+    (void)argc;
+    (void)argv;
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t   *ftl = g_ctrl.ftl[die];
+        const cp_handle_t *cp;
+        BYTE               ch;
+        BYTE               ce;
+        BYTE               lun;
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+        cp  = ftl->cp_handle;
+        ch  = die_2_ch(die);
+        ce  = die_2_ce(die);
+        lun = die_2_lun(die);
+
+        (void)LOGI("cp[%hhu][%hhu][%hhu] active=%d phase=%d wait=%d fail=%d/%d timed=%d/%d age=%lums\r\n", ch, ce, lun, (int)cp->active, (int)cp->phase, (int)cp->waiting, (int)cp->failed, (int)cp->fail_phase, (int)cp->timed_out, (int)cp->timeout_phase, log_heartbeat_age_ms(&cp->hb));
+        (void)LOGI("cp[%hhu][%hhu][%hhu] seq=%lu widx=%hu cursor=%d adv_next=%d jrn=%lu last_writes=%lu t3=%lu last_cp=%lu now=%lu\r\n", ch, ce, lun, cp->cp_state.sequence, cp->cp_state.write_idx, (int)cp->cp_state.cursor_valid, (int)cp->cp_state.advance_next, cp->cp_state.last_journal_sequence, cp->cp_state.last_cp_writes, cp->cp_state.next_t3_ms, cp->cp_state.last_cp_ms, now);
+    }
+}
+
+/*
+ * jrn — Journal 环形 / WAL / 水位（只读）。
+ *
+ * 三行：写游标与水位；job 状态与环状态；坏块策略与持久性失败观测。
+ * `persisted` 是 WAL 闸门用的已落盘上界（RISK-L2P-09），`wpseq/wentry` 是
+ * 页缓冲里尚未落盘的一页。
+ */
+static void uart_cli_jrn(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t   *ftl = g_ctrl.ftl[die];
+        const l2p_jrn_t   *jrn;
+        const jrn_state_t *state;
+        const jrn_job_t   *job;
+        BYTE               ch;
+        BYTE               ce;
+        BYTE               lun;
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+        jrn   = ftl->journal;
+        state = &jrn->handle.state;
+        job   = &jrn->handle.job;
+        ch    = die_2_ch(die);
+        ce    = die_2_ce(die);
+        lun   = die_2_lun(die);
+
+        (void)LOGI("jrn[%hhu][%hhu][%hhu] water=%hhu seq=%lu persisted=%lu pages=%lu page_dirty=%d wal_seq=%lu wal_entry=%hu\r\n", ch, ce, lun, jrn_watermark_get(jrn), jrn_sequence_get(jrn), jrn_persisted_seq(jrn), jrn_page_writes(jrn), (int)jrn_has_pending_entries(jrn), state->write_page_seq, state->write_entry_count);
+        (void)LOGI("jrn[%hhu][%hhu][%hhu] cur=%hhu/%hhu/%hu kind=%d phase=%d erase_pend=%d ring_full=%d ckpt=%d emerg=%d wfail=%d\r\n", ch, ce, lun, state->current_block, state->current_page, state->current_entry, (int)state->page_kind, (int)job->phase, (int)jrn_has_erase_pending(jrn), (int)state->ring_full, (int)jrn_needs_checkpoint(jrn), (int)jrn_is_emergency(jrn), (int)jrn_has_write_failure(jrn));
+        (void)LOGI("jrn[%hhu][%hhu][%hhu] bad_mask=0x%02hhx erase_fail=%hhu/%hhu wfail_cnt=%lu wfail_seq=%lu merge_floor=%lu pre_erased=%hhu\r\n", ch, ce, lun, state->bad_mask, state->erase_fail_count, state->erase_fail_block, state->write_fail_count, state->write_fail_seq, state->merge_floor, state->pre_erased_block);
+    }
+}
+
+/*
+ * stat — 计数类诊断（只读）。
+ *
+ * 从 `info` 拆出：info 只保留身份/状态（控制器、几何、分配器、CP/Journal 序号），
+ * 计数与历史（GC/WL、预取、写回、CMT、USB 直方图）统一在这里看，避免两套视图。
+ * uptime 是**本次开机**时间；跨 POR 的累计值需要额外持久记录，当前不做。
+ */
+static void uart_cli_stat(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    (void)LOGI("stat up=%lus\r\n", delay_now_ms() / 1000U);
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t *ftl = g_ctrl.ftl[die];
+        const BYTE       ch  = die_2_ch(die);
+        const BYTE       ce  = die_2_ce(die);
+        const BYTE       lun = die_2_lun(die);
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+
+        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->stats.dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.reclaimed, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop, ftl->mig_handle->state.counters.novictim, ftl->mig_handle->job.erased, ftl->mig_handle->state.failure.read_fail_streak, ftl->mig_handle->state.benefit.last_mode, ftl->mig_handle->state.counters.nogain, alc_free_min_plane_count(&ftl->alloc));
+        /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
+         * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->state.counters.batch_jobs, ftl->mig_handle->state.counters.batch_pages, ftl->mig_handle->state.counters.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
+
+        /* entry 级 CMT：读/写命中率 + dirty 写回压力。 */
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] cmt hit=%lu/%lu wr=%lu/%lu dirty=%lu wb=%lu ev=%lu/%lu defer=%lu\r\n", ch, ce, lun, ftl->cache->stats.cmt_hits, ftl->cache->stats.cmt_misses, ftl->cache->stats.cmt_wr_hits, ftl->cache->stats.cmt_wr_misses, ftl->cache->stats.cmt_dirty, ftl->cache->stats.cmt_writebacks, ftl->cache->stats.cmt_evict_clean, ftl->cache->stats.cmt_evict_dirty, ftl->cache->stats.cmt_wb_defer);
+        (void)LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
+    }
+
+    usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
+}
+
+/*
+ * id — 编译期配置 / 容量 / 介质版本（只读，无 NAND 访问）。
+ *
+ * 与 `info` 的分工：`id` 是静态身份（构建配置 + 运行时 die 数 + 介质布局版本），
+ * `info` 是实时状态。ONFI 参数页未缓存，boot 已打印过一次，这里不重读
+ * （避免在 host 在飞时插 NAND 同步读）。
+ */
+static void uart_cli_id(int argc, char *argv[])
+{
+    const QWORD host_mib = FTL_HOST_CAPACITY_BYTES / (1024U * 1024U);
+    const char *state_name;
+
+    (void)argc;
+    (void)argv;
+
+    state_name = (g_ctrl.state <= SSD_CONTROLLER_FAILED) ? g_controller_state_names[g_ctrl.state] : "?";
+
+    (void)LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
+    (void)LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
+    (void)LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
+    (void)LOGI("id media layout=v%lu timing=%hhu state=%s\r\n", ftl_media_layout_version(), nand_get_timing_mode(), state_name);
+}
+
+/* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */
+#define UART_CLI_ECC_BINS (7U)
+#define UART_CLI_ECC_TOP  (4U)
+
+/*
+ * ecc — per-block ECC 健康（只读，E1 口径）。
+ *
+ * 数据源是 read-recovery 已经维护的 `bst_block_t.rr`：`last_ecc` 是**最近一次读**
+ * 的最大纠正 bit 数（host 读与 GC 读都经 rr_record_ecc 更新），不是终身累计；
+ * 开机后没读过的块 `read_count == 0`，用 read_blocks 表示覆盖率。
+ * 终身累计（纠正 bit 总和 / UNC 事件）属 E2，需新增 ftl_stats 计数，本轮不做。
+ */
+static void uart_cli_ecc(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t *ftl                               = g_ctrl.ftl[die];
+        const BYTE       ch                                = die_2_ch(die);
+        const BYTE       ce                                = die_2_ce(die);
+        const BYTE       lun                               = die_2_lun(die);
+        WORD             bins[UART_CLI_ECC_BINS]           = {0U};
+        WORD             health_count[RR_BLOCK_DYING + 1U] = {0U};
+        WORD             read_blocks                       = 0U;
+        WORD             rising                            = 0U;
+        WORD             high                              = 0U;
+        BYTE             last_max                          = 0U;
+        WORD             top_g[UART_CLI_ECC_TOP]           = {0U};
+        BYTE             top_ecc[UART_CLI_ECC_TOP]         = {0U};
+        BYTE             top_rise[UART_CLI_ECC_TOP]        = {0U};
+        BYTE             top_health[UART_CLI_ECC_TOP]      = {0U};
+        WORD             top_rc[UART_CLI_ECC_TOP]          = {0U};
+        BYTE             top_n                             = 0U;
+        char             line[128];
+        DWORD            used = 0U;
+        BYTE             i;
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+
+        for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+        {
+            const bst_block_t      *b      = &ftl->alloc.blocks[g];
+            const rr_block_health_e health = rr_get_health(&b->rr);
+            BYTE                    hidx   = (BYTE)health;
+            BYTE                    bin;
+
+            if (hidx > (BYTE)RR_BLOCK_DYING)
+            {
+                hidx = (BYTE)RR_BLOCK_DYING;
+            }
+            health_count[hidx]++;
+
+            bin = (b->rr.last_ecc < (UART_CLI_ECC_BINS - 1U)) ? b->rr.last_ecc : (UART_CLI_ECC_BINS - 1U);
+            bins[bin]++;
+
+            if (b->read_count != 0U)
+            {
+                read_blocks++;
+            }
+            if (b->rr.last_ecc > last_max)
+            {
+                last_max = b->rr.last_ecc;
+            }
+            if (b->rr.last_ecc >= RR_ECC_HIGH_WATER)
+            {
+                high++;
+            }
+            if (b->rr.rising_count != 0U)
+            {
+                rising++;
+            }
+
+            if ((top_n < UART_CLI_ECC_TOP) || (b->rr.last_ecc > top_ecc[UART_CLI_ECC_TOP - 1U]))
+            {
+                BYTE pos = (top_n < UART_CLI_ECC_TOP) ? top_n : (UART_CLI_ECC_TOP - 1U);
+
+                if (top_n < UART_CLI_ECC_TOP)
+                {
+                    top_n++;
+                }
+                while ((pos > 0U) && (top_ecc[pos - 1U] < b->rr.last_ecc))
+                {
+                    top_ecc[pos]    = top_ecc[pos - 1U];
+                    top_rise[pos]   = top_rise[pos - 1U];
+                    top_health[pos] = top_health[pos - 1U];
+                    top_rc[pos]     = top_rc[pos - 1U];
+                    top_g[pos]      = top_g[pos - 1U];
+                    pos--;
+                }
+                top_ecc[pos]    = b->rr.last_ecc;
+                top_rise[pos]   = b->rr.rising_count;
+                top_health[pos] = hidx;
+                top_rc[pos]     = b->read_count;
+                top_g[pos]      = g;
+            }
+        }
+
+        (void)LOGI("ecc[%hhu][%hhu][%hhu] read_blocks=%hu/%hu last_max=%hhu high=%hu rising=%hu\r\n", ch, ce, lun, read_blocks, (WORD)FTL_BLOCK_TOTAL, last_max, high, rising);
+        (void)LOGI("ecc[%hhu][%hhu][%hhu] bins 0=%hu 1=%hu 2=%hu 3=%hu 4=%hu 5=%hu 6+=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
+        (void)LOGI("ecc[%hhu][%hhu][%hhu] health ok=%hu warn=%hu crit=%hu dying=%hu\r\n", ch, ce, lun, health_count[0], health_count[1], health_count[2], health_count[3]);
+
+        line[0] = '\0';
+        for (i = 0U; i < top_n; i++)
+        {
+            const int written = snprintf(&line[used], sizeof(line) - used, "%s%hu/%hhu/%hhu/%hhu/%hu", (i == 0U) ? "" : " ", top_g[i], top_ecc[i], top_rise[i], top_health[i], top_rc[i]);
+
+            if ((written < 0) || ((DWORD)written >= (sizeof(line) - used)))
+            {
+                break;
+            }
+            used += (DWORD)written;
+        }
+        if (top_n == 0U)
+        {
+            (void)snprintf(line, sizeof(line), "none");
+        }
+        (void)LOGI("ecc[%hhu][%hhu][%hhu] top g/ecc/rise/health/rc: %s\r\n", ch, ce, lun, line);
+    }
+}
+
+/* wear 的 EC 分档上边界（本仓自选的展示分档；WL_THRESHOLD=200 落在 200..499 档）。 */
+#define UART_CLI_WEAR_BINS (7U)
+#define UART_CLI_WEAR_TOP  (4U)
+
+/*
+ * wear — 擦除计数 / read-disturb / WL 触发差值（只读）。
+ *
+ * 统计排除 BAD 块（WL 判据也不看 BAD）；固定元数据块（state=NONE）仍计入磨损。
+ * WL 差值不在这里重算：`wl_ec_spread_get` 与 `wl_should_trigger` 是同一漏斗（C9），
+ * 前者只给数值，后者给判定。
+ */
+static void uart_cli_wear(int argc, char *argv[])
+{
+    static const DWORD wear_edges[UART_CLI_WEAR_BINS - 1U] = {10U, 50U, 100U, 200U, 500U, 1000U};
+
+    (void)argc;
+    (void)argv;
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_t *ftl                        = g_ctrl.ftl[die];
+        const BYTE       ch                         = die_2_ch(die);
+        const BYTE       ce                         = die_2_ce(die);
+        const BYTE       lun                        = die_2_lun(die);
+        WORD             bins[UART_CLI_WEAR_BINS]   = {0U};
+        WORD             good                       = 0U;
+        WORD             read_max                   = 0U;
+        WORD             rd_high                    = 0U;
+        DWORD            ec_sum                     = 0U;
+        DWORD            ec_min                     = UINT32_MAX;
+        DWORD            ec_max                     = 0U;
+        WORD             top_g[UART_CLI_WEAR_TOP]   = {0U};
+        DWORD            top_ec[UART_CLI_WEAR_TOP]  = {0U};
+        WORD             top_rc[UART_CLI_WEAR_TOP]  = {0U};
+        BYTE             top_ecc[UART_CLI_WEAR_TOP] = {0U};
+        BYTE             top_n                      = 0U;
+        DWORD            max_free                   = 0U;
+        DWORD            min_used                   = 0U;
+        bool             wl_valid;
+        bool             wl_trig;
+        DWORD            spread;
+        char             line[128];
+        DWORD            used = 0U;
+        BYTE             i;
+
+        if (ftl == NULL)
+        {
+            continue;
+        }
+
+        wl_valid = wl_ec_spread_get(&ftl->alloc, ftl->stats.total_writes, &max_free, &min_used);
+        wl_trig  = wl_should_trigger(&ftl->alloc, ftl->stats.total_writes);
+        spread   = (wl_valid && (max_free > min_used)) ? (max_free - min_used) : 0U;
+
+        for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+        {
+            const bst_block_t *b = &ftl->alloc.blocks[g];
+            BYTE               bin;
+
+            if (ftl_block_state(b) == FTL_BLOCK_STATE_BAD)
+            {
+                continue;
+            }
+            good++;
+            ec_sum += b->erase_count;
+            if (b->erase_count < ec_min)
+            {
+                ec_min = b->erase_count;
+            }
+            if (b->erase_count > ec_max)
+            {
+                ec_max = b->erase_count;
+            }
+            bin = 0U;
+            while ((bin < (UART_CLI_WEAR_BINS - 1U)) && (b->erase_count >= wear_edges[bin]))
+            {
+                bin++;
+            }
+            bins[bin]++;
+
+            if (b->read_count > read_max)
+            {
+                read_max = b->read_count;
+            }
+            if (b->read_count >= RR_READ_DISTURB_THRESHOLD)
+            {
+                rd_high++;
+            }
+
+            if ((top_n < UART_CLI_WEAR_TOP) || (b->erase_count > top_ec[UART_CLI_WEAR_TOP - 1U]))
+            {
+                BYTE pos = (top_n < UART_CLI_WEAR_TOP) ? top_n : (UART_CLI_WEAR_TOP - 1U);
+
+                if (top_n < UART_CLI_WEAR_TOP)
+                {
+                    top_n++;
+                }
+                while ((pos > 0U) && (top_ec[pos - 1U] < b->erase_count))
+                {
+                    top_ec[pos]  = top_ec[pos - 1U];
+                    top_rc[pos]  = top_rc[pos - 1U];
+                    top_ecc[pos] = top_ecc[pos - 1U];
+                    top_g[pos]   = top_g[pos - 1U];
+                    pos--;
+                }
+                top_ec[pos]  = b->erase_count;
+                top_rc[pos]  = b->read_count;
+                top_ecc[pos] = b->rr.last_ecc;
+                top_g[pos]   = g;
+            }
+        }
+
+        const DWORD ec_avg = (good != 0U) ? (ec_sum / good) : 0U;
+
+        (void)LOGI("wear[%hhu][%hhu][%hhu] good=%hu ec min/max/avg=%lu/%lu/%lu read_max=%hu rd_high=%hu writes=%lu\r\n", ch, ce, lun, good, (ec_min == UINT32_MAX) ? 0U : ec_min, ec_max, ec_avg, read_max, rd_high, ftl->stats.total_writes);
+        (void)LOGI("wear[%hhu][%hhu][%hhu] ec [0,10)=%hu [10,50)=%hu [50,100)=%hu [100,200)=%hu [200,500)=%hu [500,1000)=%hu [1000+)=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
+        (void)LOGI("wear[%hhu][%hhu][%hhu] wl_trig=%d valid=%d max_free=%lu min_used=%lu spread=%lu thr=%u\r\n", ch, ce, lun, (int)wl_trig, (int)wl_valid, max_free, min_used, spread, WL_THRESHOLD);
+
+        line[0] = '\0';
+        for (i = 0U; i < top_n; i++)
+        {
+            const int written = snprintf(&line[used], sizeof(line) - used, "%s%hu/%lu/%hu/%hhu", (i == 0U) ? "" : " ", top_g[i], top_ec[i], top_rc[i], top_ecc[i]);
+
+            if ((written < 0) || ((DWORD)written >= (sizeof(line) - used)))
+            {
+                break;
+            }
+            used += (DWORD)written;
+        }
+        if (top_n == 0U)
+        {
+            (void)snprintf(line, sizeof(line), "none");
+        }
+        (void)LOGI("wear[%hhu][%hhu][%hhu] hot g/ec/rc/ecc: %s\r\n", ch, ce, lun, line);
+    }
 }
 
 /*
@@ -1058,30 +1764,24 @@ static int uart_cli_pool(int argc, char *argv[])
  * 同时用 gc_read_page_with_lba 打印该页逐 CW 的 META（页内反向映射）。
  * ⚠ PAA 不含 ch/ce：本命令固定用 ch=0/ce=0（当前板单芯片）。
  */
-static int uart_cli_rdpaa(int argc, char *argv[])
+static void uart_cli_rdpaa(int argc, char *argv[])
 {
-    char *end = NULL;
-
-    const DWORD paa = strtoul(argv[1], &end, 0); /* DWORD ≡ unsigned long：同型，无强转 */
-    const bool  raw = (argc >= 3) && (strcmp(argv[2], "--raw") == 0);
+    DWORD      paa = 0U;
+    const bool raw = (argc >= 3) && (strcmp(argv[2], "--raw") == 0);
 
     if ((argc >= 3) && (!raw))
     {
-        (void)uart_log_write("error: unknown option (only --raw)\r\n", sizeof("error: unknown option (only --raw)\r\n") - 1U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: unknown option (only --raw)\r\n");
+        return;
     }
 
-    if ((end == NULL) || (*end != '\0') || (paa_is_valid_paa(paa) == 0U))
+    if ((!uart_cli_parse_dword(argv[1], &paa)) || (paa_is_valid_paa(paa) == 0U))
     {
-        (void)uart_log_write("error: bad paa\r\n", 16U);
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("error: bad paa\r\n");
+        return;
     }
 
-    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
-    {
-        (void)uart_log_write("error: busy, pending request\r\n", 29U);
-        return FUNC_STATUS_ERROR;
-    }
+    /* host 冲突由 dispatcher 的 UART_CLI_FLAG_BUSY 单点拒绝。 */
 
     /* PAA 的 cw 位对整页读无意义：清掉，固定按页基址读。 */
     const DWORD pba = pba_page(paa_to_pba(0U, 0U, paa));
@@ -1106,7 +1806,7 @@ static int uart_cli_rdpaa(int argc, char *argv[])
     if (st != FTL_OK)
     {
         LOGE("rdpaa: read failed (ECC/CRC/META?) — use --raw 取原始位\r\n");
-        return FUNC_STATUS_ERROR;
+        return;
     }
 
     /* 只 dump 前 256B（16 行）：诊断足够，且不会把串口写满。 */
@@ -1115,7 +1815,7 @@ static int uart_cli_rdpaa(int argc, char *argv[])
         (void)LOGI("%08lx: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx  %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\r\n", offset, buf[offset], buf[offset + 1U], buf[offset + 2U], buf[offset + 3U], buf[offset + 4U], buf[offset + 5U], buf[offset + 6U], buf[offset + 7U], buf[offset + 8U], buf[offset + 9U], buf[offset + 10U], buf[offset + 11U], buf[offset + 12U], buf[offset + 13U], buf[offset + 14U], buf[offset + 15U]);
     }
 
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
 /* rd 完成：compare 模式与 g_wr_buf pattern 比对，报 PASS / 首个不一致偏移 */
@@ -1148,7 +1848,7 @@ static void uart_cli_rd_report(void)
             return;
         }
     }
-    (void)uart_log_write("rd PASS\r\n", 8U);
+    UART_CLI_WRITE("rd PASS\r\n");
 }
 
 /* cli_service_poll 每轮末尾调：检查未决 CLI 请求是否被主循环 ftl_service 完成 */
@@ -1183,76 +1883,181 @@ static void uart_cli_pending_poll(void)
     g_cli_pending.busy = 0U;
 }
 
+/* ── 帮助输出用的常量 ── */
+#define UART_CLI_HELP_LINE_CAPACITY (128U)
+
 /*
- * 第一版只注册只读诊断和日志等级控制。危险操作应按产品生命周期、认证状态和权限
- * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
+ * 长语法串外提：AlignArrayOfStructures 按最长单元格对齐整表，160 字符的 test
+ * 语法留在行内会把全表撑到 200+ 列。test 的选项是 munit 适配层既有契约，原样保留。
+ *
+ * bbt 的语法随构建档切换：release 的 help 不再宣传不可用的子命令（RISK-CLI-04）。
+ */
+#define UART_CLI_SYNTAX_TEST "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]"
+#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
+#    define UART_CLI_SYNTAX_BBT "bbt [erase | fault <plane> <block>]"
+#else
+#    define UART_CLI_SYNTAX_BBT "bbt"
+#endif
+#define UART_CLI_SYNTAX_ADDR "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]"
+
+/*
+ * 命令表。约定：
+ *   · 一级命令用短词；动作/模式是裸子命令（bbt erase / crash clear / addr pba）；
+ *     修饰项用 `--全词`（--compare / --verify / --raw）。
+ *   · help 只写「动词 + 宾语」，不枚举选项（选项只出现在 syntax）。
+ *   · flags 是命令级策略，由 dispatcher 单点执行；bbt erase 的破坏性检查在
+ *     handler 内（命令级 flag 会把只读 bbt 一起拒掉）。
+ *   · 危险操作只在 debug/bench 档暴露（UART_CLI_DESTRUCTIVE_ENABLE）；量产档走
+ *     main.c 的自动恢复路径（pfr_media_check_format）。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                                                                                                              "help",                                                                         "show command list", 1U,  1U,    uart_cli_help},
-    { "status",                                                                                                                                                            "status",                                                        "show UART error and queue counters", 1U,  1U,  uart_cli_status},
-    {"version",                                                                                                                                                           "version",                                                             "show firmware console version", 1U,  1U, uart_cli_version},
-    {    "log",                                                                                                                                 "log level <error|warn|info|debug>",                                                                     "set runtime log level", 3U,  3U,     uart_cli_log},
- /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {     "wr",                                                                                                                                                      "wr <lba> <n>",                                                         "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
-    {     "rd",                                                                                                                                                  "rd <lba> <n> [c]",                                                         "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
-    {     "tr",                                                                                                                                                          "tr <lba>",                                                                              "trim one lba", 2U,  2U,      uart_cli_tr},
-    {     "fl",                                                                                                                                                                "fl",                                                         "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
-    {     "wp",                                                                                                                                                  "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
-    {   "info",                                                                                                                                                              "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
-    {    "map",                                                                                                                                                         "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
-    {   "addr",                                                                                                            "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]",                                  "translate PBA/PAA/gblock address fields (read-only diag)", 3U,  6U,    uart_cli_addr},
-    {  "rdpaa",                                                                                                                                               "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},
-    {  "crash",                                                                                                                                                     "crash [clear]",                                                       "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
-    {  "stack",                                                                                                                                                             "stack",                                        "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
-    {    "bbt",                                                                                                                             "bbt [--erase | fault <plane> <block>]",       "print factory bad block map (--erase: erase each block; fault: debug BAD injection)", 1U,  4U,     uart_cli_bbt},
-    { "format",                                                                                                                                                 "format [--verify]", "ERASE all blocks + write initial metadata (destructive; --verify = full-chip erase check)", 1U,  2U,  uart_cli_format},
-    {   "pool",                                                                                                                                                              "pool",                               "print fixed-metadata candidate block pools (read-only diag)", 1U,  1U,    uart_cli_pool},
+  /* ── 系统 ── */
+    {   "help",                         "help [command]",             "show command list or one command's syntax", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_help},
+    { "status",                                 "status",                    "show UART error and queue counters", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,  uart_cli_status},
+    {"version",                                "version",                         "show firmware console version", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM, uart_cli_version},
+    {    "log",      "log level <error|warn|info|debug>",                                 "set runtime log level", 3U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,     uart_cli_log},
+    {  "stack",                                  "stack",          "show stack guard: paint region, peak, alarms", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_stack},
+    {  "crash",                          "crash [clear]",                   "show/clear the .noinit crash record", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_crash},
+    {     "pc", "pc [live] [all|top] | clear | rate [n]", "show sampled PC sequence/hot spots (same-ELF resolve)", 1U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_pc},
+    {   "info",                                   "info",              "show controller + FTL identity and state", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_info},
+    {   "stat",                                   "stat",     "show runtime counters (uptime, GC, L2P, CMT, USB)", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_stat},
+    {     "id",                                     "id",          "show build config, capacity and media layout", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_id},
+ /* ── host I/O（模拟 NVMe 命令，经 controller 全链路）── */
+    {     "wr",                           "wr <lba> <n>",                  "write n sectors with a fixed pattern", 3U,  3U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_wr},
+    {     "rd",               "rd <lba> <n> [--compare]",         "read n sectors (--compare checks the pattern)", 3U,  4U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_rd},
+    {     "tr",                               "tr <lba>",                                          "trim one lba", 2U,  2U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_tr},
+    {     "fl",                                     "fl",                     "flush dirty L2P + journal to NAND", 1U,  1U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_fl},
+    {     "wp",                       "wp <lba> <n> <k>",                    "submit k writes in one pair window", 4U,  4U,                             UART_CLI_FLAG_NONE,     UART_CLI_GROUP_HOST_IO,      uart_cli_wp},
+ /* ── 诊断 ── */
+    {      "q",                                      "q",             "show FC queues, pools and pending backlog", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
+    {     "cp",                                     "cp",                "show checkpoint job state and sequence", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
+    {    "jrn",                                    "jrn",            "show journal ring, watermark and WAL state", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
+    {    "map",                              "map <lba>",                "print L2P mapping + target block entry", 2U,  2U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
+    {   "addr",                     UART_CLI_SYNTAX_ADDR,                       "translate PBA/PAA/gblock fields", 3U,  6U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
+    {  "rdpaa",                    "rdpaa <paa> [--raw]",           "read one NAND page by PAA (--raw: raw bits)", 2U,  3U,                             UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
+    {   "pool",                                   "pool",            "print fixed-metadata candidate block pools", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_pool},
+    {    "bbt",                      UART_CLI_SYNTAX_BBT,                           "print factory bad block map", 1U,  4U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_bbt},
+    {    "ecc",                                    "ecc", "show per-block ECC health and corrected-bit histogram", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_ecc},
+    {   "wear",                                   "wear",    "show erase/read-disturb distribution and WL spread", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_wear},
+ /* ── 破坏性（仅 debug/bench 档；量产档整行不注册）── */
+#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
+    { "format",                      "format [--verify]",           "erase all blocks and write initial metadata", 1U,  2U, UART_CLI_FLAG_BUSY | UART_CLI_FLAG_DESTRUCTIVE, UART_CLI_GROUP_DESTRUCTIVE,  uart_cli_format},
+#endif
+  /* ── 测试（munit 适配层既有语法）── */
 #if defined(FC_NAND_TEST_ENABLE)
-    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]",                                                                 "run munit unit test suite", 1U, 24U,    uart_cli_test},
+    {   "test",                     UART_CLI_SYNTAX_TEST,                             "run munit unit test suite", 1U, 24U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_TEST,    uart_cli_test},
 #endif
 };
 
-static int uart_cli_help(int argc, char *argv[])
+/* 命令查找：dispatcher 与 help <command> 共用（C2：唯一漏斗）。 */
+static const uart_cli_command_t *uart_cli_find(const char *name)
 {
     DWORD index;
 
-    (void)argc;
-    (void)argv;
     for (index = 0U; index < UART_ARRAY_SIZE(g_uart_cli_commands); index++)
     {
         const uart_cli_command_t *command = &g_uart_cli_commands[index];
 
-        (void)LOGI("%-38s %s\r\n", command->usage, command->description);
+        if (strcmp(name, command->name) == 0)
+        {
+            return command;
+        }
     }
-    return FUNC_STATUS_SUCCESS;
+    return NULL;
 }
 
-static int uart_cli_status(int argc, char *argv[])
+/* 把一组的命令名合并成一行（help 的分节摘要）。 */
+static void uart_cli_help_group(const char *group_name, BYTE group)
+{
+    char  line[UART_CLI_HELP_LINE_CAPACITY];
+    DWORD used = 0U;
+    bool  any  = false;
+    DWORD index;
+
+    for (index = 0U; index < UART_ARRAY_SIZE(g_uart_cli_commands); index++)
+    {
+        const uart_cli_command_t *command = &g_uart_cli_commands[index];
+
+        if (command->group != group)
+        {
+            continue;
+        }
+
+        const int written = snprintf(&line[used], sizeof(line) - used, "%s%s", (any == true) ? " " : "", command->name);
+        /* 截断即停：help 是诊断输出，宁缺勿越界。 */
+        if ((written < 0) || ((DWORD)written >= (sizeof(line) - used)))
+        {
+            break;
+        }
+        used += (DWORD)written;
+        any = true;
+    }
+
+    if (any == true)
+    {
+        (void)LOGI("  %-11s: %s\r\n", group_name, line);
+    }
+}
+
+static void uart_cli_help(int argc, char *argv[])
+{
+    static const char *const group_names[UART_CLI_GROUP_COUNT] = {
+        [UART_CLI_GROUP_SYSTEM]      = "system",
+        [UART_CLI_GROUP_HOST_IO]     = "host I/O",
+        [UART_CLI_GROUP_DIAG]        = "diag",
+        [UART_CLI_GROUP_DESTRUCTIVE] = "destructive",
+        [UART_CLI_GROUP_TEST]        = "test",
+    };
+    BYTE group;
+
+    if (argc >= 2)
+    {
+        const uart_cli_command_t *command = uart_cli_find(argv[1]);
+
+        if (command == NULL)
+        {
+            (void)LOGE("help: unknown command '%s'\r\n", argv[1]);
+            return;
+        }
+        (void)LOGI("usage: %s\r\n", command->syntax);
+        (void)LOGI("  %s\r\n", command->help);
+        return;
+    }
+
+    for (group = 0U; group < UART_CLI_GROUP_COUNT; group++)
+    {
+        uart_cli_help_group(group_names[group], group);
+    }
+    UART_CLI_WRITE("use 'help <command>' for syntax and details\r\n");
+}
+
+static void uart_cli_status(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
     uart_print_status();
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
-static int uart_cli_version(int argc, char *argv[])
+static void uart_cli_version(int argc, char *argv[])
 {
     static const char version[] = "soft_ssd debug console\r\n";
 
     (void)argc;
     (void)argv;
     (void)uart_log_write(version, sizeof(version) - 1U);
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
-static int uart_cli_log(int argc, char *argv[])
+static void uart_cli_log(int argc, char *argv[])
 {
     static const char updated[] = "log level updated\r\n";
 
     (void)argc;
     if (strcmp(argv[1], "level") != 0)
     {
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("usage: log level <error|warn|info|debug>\r\n");
+        return;
     }
 
     if (strcmp(argv[2], "error") == 0)
@@ -1273,11 +2078,12 @@ static int uart_cli_log(int argc, char *argv[])
     }
     else
     {
-        return FUNC_STATUS_ERROR;
+        UART_CLI_WRITE("usage: log level <error|warn|info|debug>\r\n");
+        return;
     }
 
     (void)uart_log_write(updated, sizeof(updated) - 1U);
-    return FUNC_STATUS_SUCCESS;
+    return;
 }
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -1326,12 +2132,11 @@ static log_level_e uart_cli_test_project_level(int argc, char *argv[])
     return level;
 }
 
-static int uart_cli_test(int argc, char *argv[])
+static void uart_cli_test(int argc, char *argv[])
 {
     const log_level_e saved = log_get_level();
     char             *filtered[UART_CLI_MAX_ARGUMENTS];
     int               filtered_argc = 0;
-    int               rc;
 
     log_set_level(uart_cli_test_project_level(argc, argv));
 
@@ -1353,9 +2158,8 @@ static int uart_cli_test(int argc, char *argv[])
         }
     }
 
-    rc = ut_run_all(filtered_argc, filtered);
+    (void)ut_run_all(filtered_argc, filtered); /* munit 自行打印结果；CLI 不解释返回码 */
     log_set_level(saved);
-    return rc;
 }
 #endif
 
@@ -1400,10 +2204,8 @@ static DWORD uart_cli_tokenize(char *line, char *argv[], DWORD max_arguments)
 
 static void uart_execute_command(char *line)
 {
-    static const char unknown[] = "error: unknown command\r\n";
-    char             *argv[UART_CLI_MAX_ARGUMENTS];
-    DWORD             count;
-    DWORD             index;
+    char *argv[UART_CLI_MAX_ARGUMENTS];
+    DWORD count;
 
     count = uart_cli_tokenize(line, argv, UART_CLI_MAX_ARGUMENTS);
     if (count == 0U)
@@ -1412,37 +2214,44 @@ static void uart_execute_command(char *line)
     }
     if (count == UART_CLI_ARGC_INVALID)
     {
-        (void)uart_log_write("error: too many arguments\r\n", 27U);
+        UART_CLI_WRITE("error: too many arguments\r\n");
         return;
     }
 
     const int argc = (int)count; /* count ≤ UART_CLI_MAX_ARGUMENTS，窄化安全 */
 
-    for (index = 0U; index < UART_ARRAY_SIZE(g_uart_cli_commands); index++)
+    const uart_cli_command_t *command = uart_cli_find(argv[0]);
+
+    if (command == NULL)
     {
-        const uart_cli_command_t *command = &g_uart_cli_commands[index];
-
-        if (strcmp(argv[0], command->name) != 0)
-        {
-            continue;
-        }
-
-        /* ⚠ 只有**参数个数**不合法才打 usage。handler 的返回码表示「执行失败」，
-         *   而失败原因它自己已经打过（busy / invalid lba / submit failed …）。
-         *   旧写法把两者并进同一个 `||`：handler 返回 FUNC_STATUS_ERROR(=1) 也被当成
-         *   "参数错" ⇒ `wr 0 32` 在 busy 时会紧跟一条 `usage: wr <lba> <n>`，看着像
-         *   语法错误、实际参数完全合法（wr/rd/tr/fl 四个命令的 busy 分支全中）。 */
-        if ((argc < command->min_argc) || (argc > command->max_argc))
-        {
-            (void)LOGE("usage: %s\r\n", command->usage);
-            return;
-        }
-
-        (void)command->handler(argc, argv);
+        UART_CLI_WRITE("error: unknown command\r\n");
         return;
     }
 
-    (void)uart_log_write(unknown, sizeof(unknown) - 1U);
+    /* 只有参数个数不合法才打 usage；执行失败由 handler 自己报告原因。 */
+    if ((argc < command->min_argc) || (argc > command->max_argc))
+    {
+        (void)LOGE("usage: %s\r\n", command->syntax);
+        return;
+    }
+
+    /* 命令级 host 冲突策略的唯一执行点（wr/rd/tr/fl/rdpaa/format）。 */
+    if (UART_CLI_CMD_HAS_FLAG(command, UART_CLI_FLAG_BUSY) && ((g_cli_pending.busy != 0U) || usb_msc_host_busy()))
+    {
+        UART_CLI_WRITE("error: busy, pending request\r\n");
+        return;
+    }
+
+#if (UART_CLI_DESTRUCTIVE_ENABLE == 0U)
+    /* 当前 destructive 命令用编译期隐藏；这层保证以后漏包 #if 的条目在量产档仍被拒绝。 */
+    if (UART_CLI_CMD_HAS_FLAG(command, UART_CLI_FLAG_DESTRUCTIVE))
+    {
+        (void)LOGE("error: '%s' disabled in this build (destructive)\r\n", command->name);
+        return;
+    }
+#endif
+
+    command->handler(argc, argv);
 }
 
 void cli_init(void)
@@ -1465,7 +2274,7 @@ void cli_service_poll(void)
                 continue;
             }
 
-            (void)uart_log_write("\r\n", 2U);
+            UART_CLI_WRITE("\r\n");
             if (g_cli_discarding)
             {
                 static const char too_long[] = "error: command too long\r\n";
@@ -1485,7 +2294,7 @@ void cli_service_poll(void)
             if (g_cli_length != 0U)
             {
                 g_cli_length--;
-                (void)uart_log_write("\b \b", 3U);
+                UART_CLI_WRITE("\b \b");
             }
         }
         else if ((byte >= 0x20U) && (byte <= 0x7EU))

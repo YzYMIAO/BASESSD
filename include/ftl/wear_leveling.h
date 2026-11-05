@@ -57,6 +57,21 @@ typedef struct
 /* ── 接口 ── */
 
 /**
+ * @brief 取 WL 触发判据的两个擦除计数（与 wl_should_trigger 同一漏斗）
+ *
+ * 判据：`max_free_ec − min_used_ec ≥ WL_THRESHOLD`。本函数只求值、不判定；
+ * 供 `wl_should_trigger` 与 CLI `wear` 共用，避免第二套擦除计数口径（C9）。
+ *
+ * @param alloc        分配器
+ * @param total_writes 累计编程次数（启动门：不足 WL_MIN_WRITES 不求值）
+ * @param out_max_free 出参：Free Pool 中最大擦除次数（仅返回 true 时有效）
+ * @param out_min_used 出参：最冷 used SB 的平均擦除次数（仅返回 true 时有效）
+ * @return true  求值有效（已过启动门且至少有一个 used 候选）
+ *         false 未过启动门 / 无候选
+ */
+bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used);
+
+/**
  * @brief 检查是否需要触发静态 WL（UBI 模型）
  *
  * 判据只有一条：

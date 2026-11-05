@@ -40,6 +40,7 @@
 #include "mpu.h"
 #include "nand_dispatch.h"
 #include "nand_fc_interface.h"
+#include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"
 #include "ssd_compiler.h"
 #include "stm32h7xx_hal.h"
@@ -53,7 +54,10 @@
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
 #define SSD_FIRMWARE_DEBUG_REVISION 33
-#define SSD_WATCHDOG_ENABLE         0U
+/* 全部构建档当前均为 0：健康域尚未覆盖所有最长路径（RISK-CLI-01）。长同步操作已有
+ * 显式喂狗点 storage_wdg_kick()（ftl_sync_submit_wait 的自旋泵），启用前仍需上板
+ * 验证满盘 GC / format 等路径不会触发 30 s 复位。 */
+#define SSD_WATCHDOG_ENABLE 0U
 
 /* 编译期字符串化：把版本号宏拼进开机横幅。 */
 #define SSD_STR_(x) #x
@@ -120,6 +124,15 @@ static void boot_report_banner(void)
 {
     (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
     fault_report_boot();
+
+    /* 上一轮若留有 PC 采样环，提示一条；详细序列/排行由 CLI `pc` 打印。 */
+    if (pc_sample_prev_valid())
+    {
+        const DWORD pc_count = pc_sample_count(true);
+        const DWORD pc_rate  = pc_sample_rate(true);
+
+        LOGI("[PC  ] previous-run PC samples available (%lu samples, rate=%lu, span=%lums): type 'pc' to dump\r\n", pc_count, pc_rate, pc_count * pc_rate);
+    }
 }
 
 /* system 分区：系统身份（CPU/时钟 / Cache / MPU 区域数）+ 时钟树（全部 HAL 实读）。 */
@@ -494,7 +507,7 @@ static DWORD ssd_ftl_host_lba_max(void)
  * ssd_ftl_stat_task - 周期性 [STAT] 一行摘要（timer 表每 10 s 调用）
  *
  *   只保留块分配/坏块/搬移状态；op/spare/cp/jrn/wr/dng/rrab/mode 等低频计数
- *   改由 `info` / `diag` 按需查看，避免长期占用 UART。
+ *   改由 `info` / `stat` 按需查看，避免长期占用 UART。
  *   逐事件日志只保留首次故障与状态变化（见 docs/design/logging_design.md）。
  * -------------------------------------------------------------------- */
 static void ssd_ftl_stat_task(void *context, DWORD now_ms)
@@ -685,6 +698,10 @@ int main(void)
 {
     BYTE nand_init_result;
 
+    /* 必须先于 SysTick 启动：先把上一轮的采样环快照到 prev，再开始本轮采样，
+     * 否则启动期间的采样会覆盖故障现场（pc_sample.h）。 */
+    pc_sample_init();
+
     sys_init();
 
     /*
@@ -789,7 +806,7 @@ int main(void)
         LOGI("[SYS ] timer task table ready, IWDG nominal=30s, period=100ms\r\n");
     }
 #else
-    LOGI("[SYS ] timer task table ready, IWDG disabled for debug\r\n");
+    LOGI("[SYS ] timer task table ready, IWDG disabled (SSD_WATCHDOG_ENABLE=0)\r\n");
 #endif
 
     DWORD stat_task_id;

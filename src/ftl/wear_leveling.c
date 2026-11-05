@@ -102,21 +102,9 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
     return true;
 }
 
-/**
- * @brief 判定是否应触发静态 WL（UBI 模型）。
- *
- * @param alloc        分配器。
- * @param total_writes 累计编程次数（启动门：不足 WL_MIN_WRITES 不求值）。
- *
- * @return true = 应触发；false = 不触发。
- *
- * @note 唯一判据是 `max_free_ec - min_used_ec >= WL_THRESHOLD`：
- *   e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
- *   e2 = Free Pool 中擦除次数最大的块。
- *   搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
- *   （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
- */
-bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
+// 契约见 wear_leveling.h。CLI `wear` 与 wl_should_trigger 共用本函数，
+// 避免第二套擦除计数口径（C9）。
+bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used)
 {
     // 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
     // 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。
@@ -143,7 +131,27 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
         }
     }
 
-    const DWORD max_free = alc_free_get_max_erase(alloc);
+    if (min_used == UINT32_MAX)
+    {
+        return false; /* 无可用 used 候选：判据无从比较 */
+    }
+
+    *out_max_free = alc_free_get_max_erase(alloc);
+    *out_min_used = min_used;
+    return true;
+}
+
+// 判据唯一：与 wl_ec_spread_get 同一漏斗。搬移不改变擦除计数，差值不足必须
+// 停止，否则就是纯写放大（RISK-WL-08）。
+bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
+{
+    DWORD max_free = 0U;
+    DWORD min_used = 0U;
+
+    if (wl_ec_spread_get(alloc, total_writes, &max_free, &min_used) == false)
+    {
+        return false;
+    }
 
     return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }

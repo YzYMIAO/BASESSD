@@ -9,6 +9,7 @@
 #include "sys_port.h"
 
 #include "common.h"
+#include "pc_sample.h" /* 每次 SysTick 采被中断 PC（死循环定位） */
 
 #include <string.h>
 
@@ -319,10 +320,27 @@ BYTE sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWOR
 /*
  * SysTick 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
  * HAL_Init() 把 SysTick 配成 1 ms 节拍，本文件即该向量的归属地。
+ *
+ * naked 蹦床在 C 序言之前取异常帧指针（结构同 fault_port.c 的 fault_trampoline）：
+ *   · frame[6] = 被中断上下文的 PC（硬件异常帧；FPU 扩展帧下基本帧仍在底部）；
+ *   · bit2=0 走 MSP（本仓裸机），bit2=1 走 PSP（无 RTOS，防御性支持）。
+ * C 侧仍调 HAL_IncTick() 维持系统毫秒时基，再把 PC 交给 pc_sample。
  */
-void SysTick_Handler(void)
+void sys_tick_handler_c(DWORD *frame) __attribute__((used, noinline));
+void sys_tick_handler_c(DWORD *frame)
 {
     HAL_IncTick();
+    pc_sample_on_tick(frame[6]);
+}
+
+void SysTick_Handler(void) __attribute__((naked, used));
+void SysTick_Handler(void)
+{
+    __asm volatile("tst   lr, #4                \n"
+                   "ite   eq                    \n"
+                   "mrseq r0, msp               \n"
+                   "mrsne r0, psp               \n"
+                   "b     sys_tick_handler_c    \n");
 }
 
 #ifdef USE_FULL_ASSERT
