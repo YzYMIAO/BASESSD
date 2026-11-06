@@ -5,7 +5,7 @@
  * Pending Request 表 — 跟踪异步请求的 caller 通知/回调与写回滚信息
  *
  * ftl_submit_read/write() 是非阻塞的。提交 FC 命令后，请求的完成处理
- * （读：数据写回 caller buffer；写：Journal/L2P 确认）需要 command_id → 请求
+ * （读：数据写回 caller buffer；写：Journal/L2P 确认）需要 cmd_id → 请求
  * 映射。本表逐槽记录该子操作的完成组、LBA、缓冲与新 PBA 等元数据。
  *
  * ⚠ 读写必须**显式携带**操作类型（见 pend_op_e），**不可**从 buffer 字段反推：
@@ -16,7 +16,7 @@
  */
 
 #include "assertion.h"  /* ASSERT（inline 组计数 fast path / 超时谓词） */
-#include "fc.h"         /* FC_COMMAND_POOL_DEPTH（command_id 直接索引） */
+#include "fc.h"         /* FC_COMMAND_POOL_DEPTH（cmd_id 直接索引） */
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
 #include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
 #include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_fn_t, ssd_status_e */
@@ -25,8 +25,8 @@
 
 #define FTL_PENDING_MAX (32U)
 
-/* 「本项已与 FC 命令脱钩」哨兵：Read Recovery 托管读失败的子操作时用它覆盖 command_id。
- * 理由：那条 FC 命令随即被 release，其 command_id 会被后续 fc_command_alloc **复用**；
+/* 「本项已与 FC 命令脱钩」哨兵：Read Recovery 托管读失败的子操作时用它覆盖 cmd_id。
+ * 理由：那条 FC 命令随即被 release，其 cmd_id 会被后续 fc_command_alloc **复用**；
  * 脱钩项不进入命令映射，只能按 op 查找（pend_find_op），不会被新命令误撞。
  * 0xFFFF 不可达：FC_COMMAND_POOL_DEPTH = 64（命令 id 恒 < 64）。 */
 #define FTL_PENDING_CMD_NONE (0xFFFFU)
@@ -65,13 +65,13 @@ typedef enum PENDING_OPERATION_E
     PENDING_OP_READ          = 0, /* 读：completion 把 NAND 数据写回 buffer */
     PENDING_OP_WRITE         = 1, /* 写：completion 确认 Journal + L2P（buffer 只是数据源，不再读它） */
     PENDING_OP_READ_RECOVERY = 2, /* 读失败、已**托管**给 Read Recovery job：FC 命令已脱钩
-                                   *   （command_id = FTL_PENDING_CMD_NONE）、组在飞数**不**递减
+                                   *   （cmd_id = FTL_PENDING_CMD_NONE）、组在飞数**不**递减
                                    *   —— host 读组继续 pending，等 RR 收尾时统一结算。
                                    *   完成路径不会再碰本项（op != READ/WRITE），只有 RR 引擎
                                    *   用 pend_find_op 找它、用 pend_release_index 收尾。 */
     PENDING_OP_WRITE_CONFIRM = 3, /* 写**已成功**、确认（Journal + L2P 记账）尚未完成：
                                    *   L2P region 未就绪（正在异步加载）时把本项置为**待入账**——
-                                   *   FC 命令已脱钩（command_id = FTL_PENDING_CMD_NONE）、
+                                   *   FC 命令已脱钩（cmd_id = FTL_PENDING_CMD_NONE）、
                                    *   组在飞数**不**递减（host 写组继续 pending）。
                                    *   与 READ_RECOVERY 的差别：无外部引擎，由调用者的写确认服务
                                    *   每轮按 pend_confirm_is_parked 扫描推进。
@@ -181,7 +181,7 @@ typedef struct PENDING_REQUEST_S
                     * 时才成立（RISK-HOST-05 支路 (a)，见 docs/design/assertion_guidelines）。 */
 
     /* ── 2B 对齐 ── */
-    WORD command_id; /* FC command_id */
+    WORD cmd_id; /* FC cmd_id */
 
     /* ── 1B 对齐 ── */
     BOOL              used;        /* true: 槽位占用 */
@@ -257,7 +257,7 @@ typedef struct PENDING_CONTEXT_S
 {
     pend_req_s   slots[FTL_PENDING_MAX];
     pend_group_s groups[FTL_GROUP_MAX];
-    /* command_id → slots 下标；0xFF = 未绑定。
+    /* cmd_id → slots 下标；0xFF = 未绑定。
      * 直接索引后 pend_find 不再线性扫描；脱钩项（FTL_PENDING_CMD_NONE）不登记。 */
     BYTE slot_of[FC_COMMAND_POOL_DEPTH];
 } pend_ctx_s;
@@ -297,9 +297,9 @@ typedef struct PENDING_OPERATION_VIEW_S
 void pend_init(pend_ctx_s *table);
 
 /**
- * @brief 认领一个空闲 pending 槽并绑定 command_id（**调用者就地逐字段填**）
+ * @brief 认领一个空闲 pending 槽并绑定 cmd_id（**调用者就地逐字段填**）
  *
- * 返回该槽指针，置 used=1、command_id=cmd_id，并写入 command_id → 槽下标映射；
+ * 返回该槽指针，置 used=1、cmd_id=cmd_id，并写入 cmd_id → 槽下标映射；
  * 表满返回 NULL。字段由调用者（ftl / wbuf / cache 批次的读写路径）就地逐字段赋值。
  *
  * 表满是预期内的资源结果 ⇒ 返回码（判据 3），不 ASSERT。
@@ -309,26 +309,26 @@ void pend_init(pend_ctx_s *table);
  *   否则槽位泄漏（表里多一条 used=1 的垃圾项）。各调用点均填完立刻使用。
  *
  * @param table   pending 表
- * @param cmd_id  FC command_id；必须 < FC_COMMAND_POOL_DEPTH
- * @return 空闲槽指针；NULL = 表满或 command_id 越界
+ * @param cmd_id  FC cmd_id；必须 < FC_COMMAND_POOL_DEPTH
+ * @return 空闲槽指针；NULL = 表满或 cmd_id 越界
  */
 pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id);
 
 /**
- * @brief 把已存在的 pending 槽重新绑定到新的 command_id（写重试替换命令时用）。
+ * @brief 把已存在的 pending 槽重新绑定到新的 cmd_id（写重试替换命令时用）。
  *
  * 先清除旧 id 的映射，再写新 id 的映射；槽的 used 状态不变。
  *
  * @param table   pending 表
  * @param req     已存在的 pending 项
- * @param cmd_id  新 command_id；必须 < FC_COMMAND_POOL_DEPTH
+ * @param cmd_id  新 cmd_id；必须 < FC_COMMAND_POOL_DEPTH
  */
 void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id);
 
 /**
- * @brief 把 pending 项与 FC 命令脱钩（command_id 置 FTL_PENDING_CMD_NONE）。
+ * @brief 把 pending 项与 FC 命令脱钩（cmd_id 置 FTL_PENDING_CMD_NONE）。
  *
- * 脱钩项不进入 command_id 映射，只能按 op 查找；用于 Read Recovery 托管项。
+ * 脱钩项不进入 cmd_id 映射，只能按 op 查找；用于 Read Recovery 托管项。
  *
  * @param table pending 表
  * @param req   已存在的 pending 项
@@ -354,10 +354,10 @@ static inline void pend_validate(const pend_req_s *req)
 }
 
 /**
- * @brief 按 command_id 查找本实例 pending 项（直接索引）
+ * @brief 按 cmd_id 查找本实例 pending 项（直接索引）
  *
  * @param table   pending 表
- * @param cmd_id  FC command_id
+ * @param cmd_id  FC cmd_id
  * @return 指向 pending 项的指针；NULL 未找到
  */
 pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id);
@@ -366,14 +366,14 @@ pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id);
  * @brief 移除本实例中已完成的 pending 项
  *
  * @param table     pending 表
- * @param cmd_id  FC command_id
+ * @param cmd_id  FC cmd_id
  */
 void pend_remove(pend_ctx_s *table, WORD cmd_id);
 
 /**
  * @brief 找**第一个** op 类型匹配的 pending 项（按下标升序）
  *
- * 供 Read Recovery 引擎取走被托管的子操作：那些项的 command_id 已置哨兵
+ * 供 Read Recovery 引擎取走被托管的子操作：那些项的 cmd_id 已置哨兵
  * （FTL_PENDING_CMD_NONE），按 id 查不到，只能按 op 找。
  *
  * @param table      pending 表
@@ -399,7 +399,7 @@ BOOL pend_view_op(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out);
 /**
  * @brief 按下标释放 pending 项（used=0）
  *
- * 与 pend_remove 的差别：走**下标**而非 command_id。托管项脱钩后无 id 可查，
+ * 与 pend_remove 的差别：走**下标**而非 cmd_id。托管项脱钩后无 id 可查，
  * 收尾只能靠下标。越界是调用者 bug ⇒ ASSERT。
  *
  * @param table    pending 表
@@ -499,7 +499,7 @@ BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window);
 
 /* ── write-confirm park（docs §5「Confirm → pending 服务」）──
  *
- * 待入账项就存在 pending 表里（op = WRITE_CONFIRM、command_id 已脱钩为哨兵），
+ * 待入账项就存在 pending 表里（op = WRITE_CONFIRM、cmd_id 已脱钩为哨兵），
  * 不另建第二张列表（C9）。本模块只提供表原语（遍历 / 判超时 / 结算）；
  * 数据面事务（Journal → L2P → BST ±）由调用者的写确认服务直调执行，
  * 避免把数据面事务复制进 pending 模块（C2/R9）。

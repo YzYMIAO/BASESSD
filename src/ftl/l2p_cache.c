@@ -2610,7 +2610,7 @@ void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
 
     ASSERT(line != NULL);
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。

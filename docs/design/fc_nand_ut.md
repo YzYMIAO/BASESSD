@@ -368,7 +368,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
   fc_status_t fc_poll_completions(fc_cmd_status_s *completions, uint16_t max_count, uint16_t *count);
   ```
 
-  **弹到上限或 CQ 空为止**，实际条数写入 `*count`；有取到 = `OK`，一条没取到 = `QUEUE_EMPTY`（含 `max_count==0`）。单条版 `fc_poll_completion` 原样保留，两条路径并存。
+  **弹到上限或 CQ 空为止**，实际条数写入 `*count`；有取到 = `OK`，一条没取到 = `QUEUE_EMPTY`；`max_count==0` 为 `INVALID_ARGUMENT`（release 拒绝）。单条版 `fc_poll_completion` 原样保留，两条路径并存。
 - **上限由调用方给**：`max_count` 不写死任何 FC 常量。测试里传 `batch = CH_NUM * CE_NUM * LUN_NUM`——这正是 `nand_dispatch_poll` 单次调用的推进上限（三层循环 ch→ce→lun、全遍历不早退，`nand_dispatch.c:755`）。今天 `= 1`，换多 die 器件同一份代码自动变大。
 - **拓扑无关**：`batch`（以及 `L3_STRESS_POLL_EVERY` 这类节奏常量）都是**测试侧**的编译期表达式，FC 不知道也不该知道拓扑；FC 只给机制（弹到上限/空），策略（一次收几条）留给上层。对齐行业模型：NVMe 的 SQ/CQ 由主机驱动、条目靠 CID 配对，控制器不规定主机一次收几条。
 - **配对靠 `command_id`**：`fc_cmd_status_s.command_id` 是命令的稳定身份（v15 起由命令指针派生），测试用它把完成项配回本地槽表，再取回 `fc_cmd_s*` 释放——**先 poll 后 release**，兑现「命令不得还在 CQ 里」的契约。

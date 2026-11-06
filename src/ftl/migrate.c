@@ -1185,7 +1185,7 @@ static void mig_batch_store_page(mig_handle_s *m)
 
         if (super_block_has_plane(&m->job.victim, p))
         {
-            (void)memcpy(m->batch_buf[j][p], m->page_buf[p], PAGE_MAIN_SIZE);
+            memcpy(m->batch_buf[j][p], m->page_buf[p], PAGE_MAIN_SIZE);
         }
         else
         {
@@ -2676,13 +2676,13 @@ void ftl_migrate_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
     (void)ftl;
     mig_handle_s *m = (mig_handle_s *)ctx;
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // request 表项缺失（ctx == NULL）= 重复/迟到的完成：只 release 命令，不解引用 m。
     // 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。
     if (m == NULL)
     {
-        LOGE(LOG_TAG_MIG "late completion cmd=%hu status=0x%02hx — released\r\n", completion->command_id, completion->status);
+        LOGE(LOG_TAG_MIG "late completion cmd=%hu status=0x%02hx — released\r\n", completion->cmd_id, completion->status);
         (void)fc_command_release(cmd);
         return;
     }

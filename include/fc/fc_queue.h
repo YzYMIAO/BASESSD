@@ -12,7 +12,7 @@
  * SQ/HSQ 只保存 FC Command Pool 的槽位编号，不复制命令内容。
  * 因而命令、Descriptor 和 CQ 上下文都能使用同一个稳定的 Command Handle 关联。
  *
- * CQ 保存每条命令的完成结果。完成项中的 command_id / failed_cw / failed_desc_id
+ * CQ 保存每条命令的完成结果。完成项中的 cmd_id / failed_cw / failed_desc_id
  * 用于 FTL 的错误分析、Read Retry 和 RAID 恢复，不能在 FTL 取走 CQ 前失效。
  *
  * storage 由 FC 内部固定提供，队列不分配也不释放内存。
@@ -64,25 +64,25 @@ void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, 
  * @brief 把命令 ID 入队尾。
  *
  * @param queue 队列
- * @param command_id 命令 ID，须为 FC 自铸的合法句柄
+ * @param cmd_id 命令 ID，须为 FC 自铸的合法句柄
  *
  * @return FC_STATUS_OK
  *         FC_STATUS_QUEUE_FULL（队列已满）
  *
- * @note command_id 由 fc_submit / submit_batch 的命令级校验保证非 INVALID。
+ * @note cmd_id 由 fc_submit / submit_batch 的命令级校验保证非 INVALID。
  */
-fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t command_id);
+fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t cmd_id);
 
 /**
  * @brief 从队头弹出命令 ID。
  *
  * @param queue 队列
- * @param command_id 输出
+ * @param cmd_id 输出
  *
  * @return FC_STATUS_OK
  *         FC_STATUS_QUEUE_EMPTY（队列为空）
  */
-fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *command_id);
+fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *cmd_id);
 
 /**
  * @brief Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。

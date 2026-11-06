@@ -23,7 +23,7 @@
  * nand_dispatch never calls back into FC after receiving this struct.
  *
  * ── 唯一索引空间：flat 绝对 CW 号 ──
- * n = plane * CW_NUM + cw（0 .. CW_TOTAL_MAX-1）。
+ * n = fc_cw_flat(plane, cw)（0 .. CW_TOTAL_MAX-1）。
  * cw_bitmap 的 bit n、cw_buffers[n]、completion.cw_status[n] / ecc_bit_count[n]
  * 全部用这一个编号（FC 侧的 desc 链序也按同一公式展开）。链序、plane-major
  * 密排槽位等中间坐标已全部取消。
@@ -31,7 +31,7 @@
  */
 typedef struct FC_NAND_DISPATCH_REQUEST_S
 {
-    WORD  command_id;               /* FC command pool slot for completion correlation. */
+    WORD  cmd_id;                   /* FC command pool slot for completion correlation. */
     BYTE  operation;                /* OP_* constant. */
     BYTE  ch;                       /* Channel. */
     BYTE  ce;                       /* Chip-enable. */
@@ -66,7 +66,7 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
 
 typedef struct FC_NAND_DISPATCH_COMPLETION_S
 {
-    WORD          command_id;
+    WORD          cmd_id;
     nand_result_e execution_status;
     BYTE          nand_status;                 /* OP 后读状态（FAIL/FAILC） */
     BYTE          pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
@@ -80,8 +80,9 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
 #    define FC_CW_STATUS_UNUSED (0U)
 #endif
 
-/* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware. */
-nand_result_e fc_nand_dispatch_init(void);
+/* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware.
+ * Pure software reset (memset + disarm), no failure path. */
+void fc_nand_dispatch_init(void);
 
 /* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
  * dispatch 只查询，不再提供自己的 set/is 入口。 */

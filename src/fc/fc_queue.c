@@ -62,16 +62,16 @@ void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, 
  * 入队 ID 全由 FC 自铸，传入 INVALID 哨兵即调用者 bug；只有队列满是预期结果。
  *
  * @param queue      提交队列
- * @param command_id 命令 ID（≠ FC_CMD_ID_INVALID）
+ * @param cmd_id 命令 ID（≠ FC_CMD_ID_INVALID）
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_FULL
  */
-fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t command_id)
+fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t cmd_id)
 {
     if (queue->count == queue->depth)
     {
         return FC_STATUS_QUEUE_FULL;
     }
-    queue->entries[queue->tail] = command_id;
+    queue->entries[queue->tail] = cmd_id;
     queue->tail                 = ((queue->tail + 1U) % queue->depth);
     queue->count++;
     return FC_STATUS_OK;
@@ -80,17 +80,17 @@ fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t command_
  * @brief 命令 ID 出队
  *
  * @param queue      提交队列
- * @param command_id 输出：命令 ID
+ * @param cmd_id 输出：命令 ID
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_EMPTY
  */
-fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *command_id)
+fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *cmd_id)
 {
-    ASSERT(command_id != NULL);
+    ASSERT(cmd_id != NULL);
     if (queue->count == 0U)
     {
         return FC_STATUS_QUEUE_EMPTY;
     }
-    *command_id = queue->entries[queue->head];
+    *cmd_id     = queue->entries[queue->head];
     queue->head = ((queue->head + 1U) % queue->depth);
     queue->count--;
     return FC_STATUS_OK;

@@ -682,7 +682,7 @@ void ftl_read_recovery_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completio
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
 
-    WORD      cmd_id = completion->command_id;
+    WORD      cmd_id = completion->cmd_id;
     fc_cmd_s *cmd    = fc_command_id_to_command(cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒

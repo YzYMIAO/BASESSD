@@ -123,9 +123,9 @@ typedef enum FC_BUFFER_OWN_E
 
 /* ⚠ 本头文件**不声明**“完成路由归属模块”枚举，命令对象也不携带 FTL 的完成
  * 服务函数选择器。它是 FTL 的概念（哪个功能拥有这条命令），由 FTL 的 request
- * 表按 command_id 保存（见 include/ftl/ftl_op.h）。
- * CQE（`fc_cmd_status_s`）只带 command_id / status；FTL 完成派发时用
- * command_id 取回自己的 request 表项。 */
+ * 表按 cmd_id 保存（见 include/ftl/ftl_op.h）。
+ * CQE（`fc_cmd_status_s`）只带 cmd_id / status；FTL 完成派发时用
+ * cmd_id 取回自己的 request 表项。 */
 
 /* ── ② 状态位与判定 ── */
 
@@ -377,7 +377,7 @@ struct FC_COMMAND_S
  * 命令级只给 DATA_ERROR/META_ERROR 两个聚合位。 */
 struct FC_COMMAND_STATUS_S
 {
-    WORD       command_id;     /* Completed Command Pool ID. */
+    WORD       cmd_id;         /* Completed Command Pool ID. */
     WORD       failed_cw;      /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
     WORD       failed_desc_id; /* 首个失败 CW 的 descriptor id；FC_DESC_ID_INVALID = 无。 */
     BYTE       status;         /* Command-level status; FC_CMD_STATUS_* bits. */
@@ -389,9 +389,21 @@ struct FC_COMMAND_STATUS_S
 /* ── ④ 结构内联工具 / 校验 ── */
 
 /**
+ * @brief plane/cw → flat 绝对 CW 号（plane*CW_NUM + cw）。
+ *
+ * @param plane 物理 plane 号。
+ * @param cw    plane 内 CW 号。
+ * @return flat CW 号（0 .. CW_TOTAL_MAX-1）。
+ */
+static inline BYTE fc_cw_flat(BYTE plane, BYTE cw)
+{
+    return (BYTE)((plane * CW_NUM) + cw);
+}
+
+/**
  * @brief 给出命令能触及的 plane 段 [*plane_first, *plane_last)。
  *
- * @param command     命令。
+ * @param cmd     命令。
  * @param plane_first 输出：plane 段起点（调用者保证非空）。
  * @param plane_last  输出：plane 段终点（调用者保证非空）。
  *
@@ -402,19 +414,19 @@ struct FC_COMMAND_STATUS_S
  * plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
  *
  * 放在头文件（唯一一份定义）：这是 fc_cmd_s 的结构属性——FC 侧用它做
- * 建链入口（fc.c 的 fc_command_configure_descriptor）的越段校验，
+ * 建链入口（fc_pool.c 的 fc_command_configure_descriptor）的越段校验，
  * FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
  * ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
  * 都按 PLANE_NUM 定尺。改 plane 语义时这里与 fc_nand_dispatch.c 的
  * multi-plane handler 要一起动。
  */
-static inline BYTE fc_command_plane_span(const fc_cmd_s *command, BYTE *plane_first, BYTE *plane_last)
+static inline BYTE fc_command_plane_span(const fc_cmd_s *cmd, BYTE *plane_first, BYTE *plane_last)
 {
-    const BYTE plane_count = (command->config.multi_plane > 0U) ? command->config.multi_plane : 1U;
+    const BYTE plane_count = (cmd->config.multi_plane > 0U) ? cmd->config.multi_plane : 1U;
 
     ASSERT(plane_count <= PLANE_NUM);
 
-    *plane_first = (plane_count == 1U) ? paa_to_plane(command->paa) : 0U;
+    *plane_first = (plane_count == 1U) ? paa_to_plane(cmd->paa) : 0U;
     *plane_last  = (*plane_first + plane_count);
     return plane_count;
 }
@@ -422,7 +434,7 @@ static inline BYTE fc_command_plane_span(const fc_cmd_s *command, BYTE *plane_fi
 /**
  * @brief 本命令 plane 段内**全部** CW 的 flat 位图——「整段访问」的显式写法。
  *
- * @param command 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
+ * @param cmd 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
  *
  * @return 段内每个 CW 一位置 1 的 flat 位图（bit n = plane*CW_NUM + cw）；
  *         plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF。
@@ -431,13 +443,13 @@ static inline BYTE fc_command_plane_span(const fc_cmd_s *command, BYTE *plane_fi
  * （pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。
  * ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  */
-static inline DWORD fc_command_plane_span_cw_bitmap(const fc_cmd_s *command)
+static inline DWORD fc_command_plane_span_cw_bitmap(const fc_cmd_s *cmd)
 {
     BYTE plane_first;
     BYTE plane_last;
 
-    (void)fc_command_plane_span(command, &plane_first, &plane_last);
-    return ((1U << ((plane_last - plane_first) * CW_NUM)) - 1U) << (plane_first * CW_NUM);
+    (void)fc_command_plane_span(cmd, &plane_first, &plane_last);
+    return ((1U << ((plane_last - plane_first) * CW_NUM)) - 1U) << fc_cw_flat(plane_first, 0U);
 }
 
 /**
@@ -473,7 +485,7 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
 /**
  * @brief 校验命令配置合法性。
  *
- * @param command FC 命令。
+ * @param cmd FC 命令。
  *
  * @note 实现要点（整函数转 ASSERT）：
  *   - 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是
@@ -485,7 +497,7 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
  *     （链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
  *     ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
  */
-void fc_command_validate(const fc_cmd_s *command);
+void fc_command_validate(const fc_cmd_s *cmd);
 
 /**
  * @brief 判断 flat CW 掩码在**每个 plane 上的 CW 集合是否相同**。

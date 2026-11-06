@@ -52,6 +52,9 @@
 /* 主机缓冲区（DRAM 中） */
 #define HOST_BUFFER __attribute__((section(".host_buffer")))
 
+/* AXI SRAM 非缓存缓冲段：FMC 数据面按字节访问，必须绕过 D-Cache（H17） */
+#define NONCACHEABLE_BUFFER __attribute__((section(".noncacheable_buffer")))
+
 /* ============================================================
  *  其他宏
  * ============================================================ */

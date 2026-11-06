@@ -425,12 +425,12 @@ BOOL md_pool_build_all(alc_s *alloc)
     // 避免「BBT/CP 已换、Journal 失败」的半更新状态被在飞模块读到。
     md_pools_s next;
 
-    (void)memset(&next, 0, sizeof(next));
+    memset(&next, 0, sizeof(next));
 
     // 分配顺序固定：先紧后松。BBT/Journal 的名义池最小，优先拿 spare。
     BOOL spare_used[MD_SPARE_BLOCKS_PER_PLANE];
 
-    (void)memset(spare_used, 0, sizeof(spare_used));
+    memset(spare_used, 0, sizeof(spare_used));
 
     md_pool_spec_s specs[MD_POOL_NUM];
 
@@ -2436,7 +2436,7 @@ void md_pool_service(ftl_ctx_s *ftl)
         jrn->state.erase_fail_count = 0U;
         jrn->state.erase_fail_block = JRN_BLOCK_NONE;
         jrn->state.ring_full        = false; /* 新候选池可能已补回 spare */
-        (void)memset(jrn->job.page_buf, 0xFF, sizeof(jrn->job.page_buf));
+        memset(jrn->job.page_buf, 0xFF, sizeof(jrn->job.page_buf));
 
         (void)jrn_page_scan_latest(journal, &latest, &read_error);
 

@@ -13,7 +13,7 @@
  *   - OP_* 操作码（g_nand_operation_map 的下标）
  *   - nand_op_map_s 结构体（命令属性 + UOP 序列 + 时序）
  *   - ONFI 参数页结构 / 解码声明
- *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
+ *   - 多 LUN 相位机 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
  * 与 fc_nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
  * 由 FC 的 UOP 引擎解释执行；本头保留为 NAND 协议定义，供 FC/器件共同使用。
@@ -451,9 +451,9 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
-/* ═══ 6. Phase V: ISSUE/WAIT/FETCH 拆分 ═══ */
+/* ═══ 6. 多 LUN 相位机: ISSUE/WAIT/FETCH 拆分 ═══ */
 
-/* ── Phase V: MULTI-LUN ISSUE/WAIT/FETCH 拆分 OP 码 ── */
+/* ── 多 LUN 相位机: MULTI-LUN ISSUE/WAIT/FETCH 拆分 OP 码 ── */
 
 /* OP_READ_PAGE_LOAD:
  * 70h轮询→00h→C1C2R1R2R3→30h→tWB→END
@@ -514,13 +514,17 @@
 
 #define OP_COUNT (50U) /* 0..49 inclusive */
 
-/* ── Phase V: OP 类型枚举 ── */
+/* ── 多 LUN 相位机: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原子 OP 码 */
 #define OP_TYPE_ISSUE  (1U) /* ISSUE 段——发完立即返回 */
 #define OP_TYPE_WAIT   (2U) /* WAIT 段——等完成，无数据 */
 #define OP_TYPE_FETCH  (3U) /* FETCH 段——等完成 + 读数据 */
 
-/* ═══ 7. 操作表结构 + Phase V 辅助宏 ═══ */
+/* ═══ 7. 操作表结构 + 多 LUN 相位机 辅助宏 ═══ */
+
+/* 操作分类标志：数据路径按此决定是否做 ECC 编解码/加扰。 */
+#define NAND_OP_FLAG_PAGE_READ  (1U << 0)
+#define NAND_OP_FLAG_PAGE_WRITE (1U << 1)
 
 typedef struct NAND_OPERATION_MAP_S
 {
@@ -533,6 +537,7 @@ typedef struct NAND_OPERATION_MAP_S
     BYTE              valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
     BYTE              valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
     BYTE              has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
+    BYTE              flags;                         /* NAND_OP_FLAG_*：page read/write 分类 */
     WORD              data_length;                   /* 数据传输字节数 */
     BYTE              op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
     BYTE              pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
@@ -549,11 +554,15 @@ extern const nand_op_map_s g_nand_operation_map[OP_COUNT];
  * 推荐直接读 g_nand_operation_map[op].has_data。 */
 #define nand_operation_has_data(op) ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)
 
+/* 数据路径分类：Page Read/Write 需要 ECC 编解码；其余 op 不走数据路径。 */
+#define nand_operation_is_page_read(op)  ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].flags & NAND_OP_FLAG_PAGE_READ) != 0U) : 0U)
+#define nand_operation_is_page_write(op) ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].flags & NAND_OP_FLAG_PAGE_WRITE) != 0U) : 0U)
+
 /* 返回 operation 的数据传输字节数。NO_DATA 类操作返回 0。
  * 推荐直接读 g_nand_operation_map[op].data_length。 */
 #define nand_operation_data_length(op) ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
 
-/* ── Phase V 多 LUN 辅助宏 ──
+/* ── 多 LUN 相位机 多 LUN 辅助宏 ──
  * op_type/pair_op 判定（见 nand_op_map_s）：
  *   is_issue        ：该 OP 是否 ISSUE 段（发完即返回，LUN 进入 busy）
  *   is_wait_or_fetch：该 OP 是否 WAIT/FETCH 段（等完成）

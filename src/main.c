@@ -725,8 +725,8 @@ int main(void)
     boot_report_banner();
     boot_report_system();
 
-    /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
-     *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。
+    /* ── 全系统初始化顺序（② 起为 if/else-if 级联：前一步失败会整段跳过后面的）──
+     *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC；无失败路径。
      *                             内部会调 fc_nand_dispatch_init()（纯 memset，不碰硬件），
      *                             所以 FC 可以先于 NAND 硬件初始化。
      *   ② fc_nand_init()       —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
@@ -738,42 +738,37 @@ int main(void)
      *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
      *   ⑥ fc_nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
-    if (fc_init() != FC_STATUS_OK)
+    fc_init();
+
+    boot_section("nand");
+    nand_init_result = fc_nand_init();
+    if (nand_init_result != NAND_RESULT_OK)
     {
-        LOGE("fc init failed\r\n");
+        LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
     }
     else
     {
-        boot_section("nand");
-        nand_init_result = fc_nand_init();
-        if (nand_init_result != NAND_RESULT_OK)
-        {
-            LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
-        }
-        else
-        {
-            fc_nand_engine_set_armed(1U);
-            boot_report_controller();
-            /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
-             * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
-            LOGE_IF(stm32_platform_register() != FUNC_STATUS_SUCCESS, "platform register failed; T3 timers disabled\r\n");
-            boot_section("ftl");
-            ssd_ftl_boot_all();
+        fc_nand_engine_set_armed(1U);
+        boot_report_controller();
+        /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
+         * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
+        LOGE_IF(stm32_platform_register() != FUNC_STATUS_SUCCESS, "platform register failed; T3 timers disabled\r\n");
+        boot_section("ftl");
+        ssd_ftl_boot_all();
 
-            /* ⑥ 高速模式：只有初始化（NAND + FTL boot/恢复）全部完成后才切换，
-             *    保证上电路径始终跑在保守低速时序。失败仅告警，保持低速可用。 */
-            if (g_ftl_ready != 0)
+        /* ⑥ 高速模式：只有初始化（NAND + FTL boot/恢复）全部完成后才切换，
+         *    保证上电路径始终跑在保守低速时序。失败仅告警，保持低速可用。 */
+        if (g_ftl_ready != 0)
+        {
+            sys_clock_tree_s clk;
+
+            sys_clock_tree_get(&clk);
+
+            const nand_result_e high_speed_result = fc_nand_enable_high_speed(clk.fmc_hz);
+
+            if (high_speed_result != NAND_RESULT_OK)
             {
-                sys_clock_tree_s clk;
-
-                sys_clock_tree_get(&clk);
-
-                const nand_result_e high_speed_result = fc_nand_enable_high_speed(clk.fmc_hz);
-
-                if (high_speed_result != NAND_RESULT_OK)
-                {
-                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — keep low speed\r\n", high_speed_result);
-                }
+                LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — keep low speed\r\n", high_speed_result);
             }
         }
     }

@@ -86,7 +86,7 @@ BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out)
 
     const BYTE slot = ftl_lba_pair_slot(lba);
 
-    (void)memcpy(out, &h->data[slot * FTL_IU_BYTES], FTL_IU_BYTES);
+    memcpy(out, &h->data[slot * FTL_IU_BYTES], FTL_IU_BYTES);
     return true;
 }
 
@@ -289,7 +289,7 @@ static ftl_status_e wb_append(wb_handle_s *h, WORD gi, DWORD lba, const void *bu
         const size_t dst_offset = slot * FTL_IU_BYTES;
         const size_t src_offset = k * FTL_IU_BYTES;
 
-        (void)memcpy(&h->data[dst_offset], src + src_offset, FTL_IU_BYTES);
+        memcpy(&h->data[dst_offset], src + src_offset, FTL_IU_BYTES);
         h->occupied |= wb_lba_bit(l);
     }
     h->owners |= ftl_group_bit(gi);

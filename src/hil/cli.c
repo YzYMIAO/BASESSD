@@ -1935,7 +1935,7 @@ static void uart_cli_rdpaa(int argc, char *argv[])
     /* raw 读需要 4 × 528B；静态缓冲，避免占 CLI 栈。 */
     static BYTE buf[PAGE_SIZE];
 
-    (void)memset(buf, 0, sizeof(buf));
+    memset(buf, 0, sizeof(buf));
 
     const ftl_status_e st = raw ? ftl_sync_read_page_raw(pba, buf) : ftl_sync_read_page(pba, buf, PAGE_MAIN_SIZE, FTL_PAGE_CFG_DATA_ANY());
 

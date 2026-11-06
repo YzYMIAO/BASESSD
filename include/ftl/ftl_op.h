@@ -6,22 +6,22 @@
  *
  * 提交与完成解耦：
  *   提交侧  ftl_op_submit(cmd, op, ctx)：登记 request（op + ctx）、提交，不等待。
- *   完成侧  ftl_op_drain()：循环从 CQ 取完成，用 command_id 取回 request，按
+ *   完成侧  ftl_op_drain()：循环从 CQ 取完成，用 cmd_id 取回 request，按
  *           request.op 查 g_op_callbacks[]，并把 ctx 与归属实例交回服务函数。
  *
  * 本模块是固件唯一的完成派发面：
- *   - request 表    command_id → {ctx, op}（按命令池槽位直接索引）；
+ *   - request 表    cmd_id → {ctx, op}（按命令池槽位直接索引）；
  *   - 实例路由表    (ch,ce,lun) → die → ftl_ctx_s（全局 CQ 到 per-instance 的桥）；
  *   - op 回调表     request.op → 完成服务函数；
  *   - CQ 排空       ftl_op_drain（ftl_service_pump 的完成泵步）。
  *
- * 约束：这些表都是全局单例（非 per-instance）。command_id 由 FC 全局池分配，
+ * 约束：这些表都是全局单例（非 per-instance）。cmd_id 由 FC 全局池分配，
  * CQ 是全局的，所以完成必须先路由再派发。ftl_op_init / ftl_op_route_set 必须在
  * 所有实例 boot 之前调用（见 main.c 的启动顺序）。
  *
  * request.op 的语义是“完成服务函数选择器”，不是“这是哪个功能”：
  *   - op 存在 FTL request 表里，CQE 和 FC 命令对象都不携带；完成派发用
- *     command_id 直接取回 request。
+ *     cmd_id 直接取回 request。
  *   - 同步提交的命令一律带 FTL_OP_SYNC_WAIT，因为阻塞调用方的完成处理函数就是
  *     唤醒等待者；若给同步命令打 FTL_OP_JOURNAL，服务函数与调用者会对同一份
  *     状态各推进一次。
@@ -65,7 +65,7 @@ typedef enum FTL_OPERATION_ID_E
 
 /* ── request 表 ──
  *
- * 按 FC command_id 直接索引：command_id 就是命令池槽位号，范围
+ * 按 FC cmd_id 直接索引：cmd_id 就是命令池槽位号，范围
  * 0..FC_COMMAND_POOL_DEPTH-1。每个在飞命令都有一条表项，记录其完成服务函数
  * （op）与私有状态（ctx）；CQE 不携带 op。
  */
@@ -73,13 +73,13 @@ typedef struct FTL_OPERATION_REQUEST_S
 {
     void       *ctx;     /* 该命令的私有状态（同步等待 = ftl_sync_waiter_s*；job = &job） */
     ftl_op_id_e op;      /* 完成服务函数选择器 */
-    BOOL        pending; /* true = 该 command_id 有登记项 */
+    BOOL        pending; /* true = 该 cmd_id 有登记项 */
 } ftl_op_req_s;
 
 /* request 表容量 = FC 命令池深度。
  *
- * command_id 是池槽位号，直接索引后表项数 = 池深：没有“表满”路径，也不会
- * 出现同一 command_id 两条表项。非法 command_id（>= 池深）由入口返回
+ * cmd_id 是池槽位号，直接索引后表项数 = 池深：没有“表满”路径，也不会
+ * 出现同一 cmd_id 两条表项。非法 cmd_id（>= 池深）由入口返回
  * FTL_ERROR。
  */
 #define FTL_OP_REQ_TABLE_SIZE FC_COMMAND_POOL_DEPTH
@@ -92,7 +92,7 @@ typedef void (*ftl_op_callback_fn_t)(ftl_ctx_s *ftl, const fc_cmd_status_s *comp
  * 登记进 request 表；服务函数（ftl_sync_wait_callback）在完成时回填并置 done。 */
 typedef struct FTL_SYNC_WAITER_S
 {
-    WORD            cmd_id;     /* 等待的 command_id */
+    WORD            cmd_id;     /* 等待的 cmd_id */
     BOOL            done;       /* 服务函数置 true */
     fc_cmd_status_s completion; /* 服务函数保存的完整 completion 信息 */
 } ftl_sync_waiter_s;
@@ -110,7 +110,7 @@ void ftl_op_init(void);
 /**
  * @brief 为 cmd_id 登记 request（op + 私有状态）。
  *
- * 按 command_id 直接索引；每个在飞命令都有一条表项。重复登记时覆盖旧项并打印
+ * 按 cmd_id 直接索引；每个在飞命令都有一条表项。重复登记时覆盖旧项并打印
  * LOGW。
  *
  * 前置条件（违反即编程错误，debug 由 ASSERT 停机）：op ∈ (FTL_OP_NONE,
@@ -223,7 +223,7 @@ BOOL ftl_op_bg_submit_deferred(void);
  *
  * 三步固定顺序，任一步失败都不留半登记状态：
  *   ① 序列门控：cache 写序列 active/draining 期间，非 owner 的提交被拒；
- *   ② 登记 request（op + ctx）：按 command_id 直接索引，ctx == NULL 也登记；
+ *   ② 登记 request（op + ctx）：按 cmd_id 直接索引，ctx == NULL 也登记；
  *   ③ fc_submit 下发。
  *
  * 返回 FTL_OK 只表示“已提交”，不表示完成。命令的 release 归调用者
@@ -239,7 +239,7 @@ BOOL ftl_op_bg_submit_deferred(void);
  * @param ctx 完成时交回的上下文；NULL = 无私有状态（HOST_IO / CACHE_PAD）。
  * @return FTL_OK —— 已提交；
  * @return FTL_AGAIN —— 未提交、可重试：序列门控，或 fc_submit 队列满；
- * @return FTL_ERROR —— 未提交：request 登记时 command_id 越界（池外命令指针）；
+ * @return FTL_ERROR —— 未提交：request 登记时 cmd_id 越界（池外命令指针）；
  *         op/ctx 配对违反属编程错误，由登记入口的 ASSERT 停机。
  */
 ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx);
@@ -271,7 +271,7 @@ ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op
  * @brief 完成派发（ftl_service_pump 的完成泵步）。
  *
  * 循环 fc_poll_completion() 到 CQ 抽干为止；每条完成：
- *   ① 按 command_id 取回命令与 request 表项 {ctx, op}（先清表项再回调，容许
+ *   ① 按 cmd_id 取回命令与 request 表项 {ctx, op}（先清表项再回调，容许
  *      服务函数重入登记/释放）；
  *   ② 按 op 查 g_op_callbacks[]；
  *   ③ 按命令自身的 ch/ce/lun 解析归属实例，调服务函数。

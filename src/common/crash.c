@@ -20,7 +20,7 @@ static void crash_copy(char *destination, const char *source)
         destination[0] = '\0';
         return;
     }
-    (void)strncpy(destination, source, CRASH_TEXT_CAPACITY - 1U);
+    strncpy(destination, source, CRASH_TEXT_CAPACITY - 1U);
     destination[CRASH_TEXT_CAPACITY - 1U] = '\0';
 }
 

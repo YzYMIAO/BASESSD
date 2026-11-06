@@ -28,12 +28,16 @@
  *
  * 接口分组（全部声明在 fc_interface.h）：
  *   ① 初始化      fc_init
- *   ② 命令生命周期 fc_command_alloc / configure_descriptor / submit /
- *                  service / poll_completion / command_release
+ *   ② 命令生命周期 fc_command_alloc / configure_descriptor[_with_buffer] /
+ *                  descriptor_release_head / descriptor_chain_release_all /
+ *                  submit / submit_batch / poll_completion[_s] / command_release
  *   ③ buffer 访问 fc_buffer_alloc / release / get_user_data / get_base / get_meta
- *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
+ *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_cw_bitmap /
+ *                  fc_get_cmd_ecc_max / fc_get_cmd_all_cw_empty
  *   ⑤ 查询工具    fc_command_id_to_command / fc_command_to_id /
- *                  fc_descriptor_id_to_descriptor / fc_get_resource_stats
+ *                  fc_descriptor_id_to_descriptor / fc_get_resource_stats /
+ *                  fc_debug_state_get
+ *   ⑥ 服务入口    fc_service
  */
 
 #include "fc_interface.h"

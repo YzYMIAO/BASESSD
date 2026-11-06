@@ -1386,7 +1386,7 @@ void ftl_metadata_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, vo
     (void)ftl;
     md_dir_cache_s *dir = (md_dir_cache_s *)ctx;
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，二者必须一致
     // ——不一致说明派发路由错了。

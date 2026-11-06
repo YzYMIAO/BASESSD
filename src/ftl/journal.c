@@ -1122,7 +1122,7 @@ void ftl_journal_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 journal */
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 一条命令对应一个 job：phase 只能是 WRITE / ERASE（残留完成 = 状态机破坏）。
     ASSERT((journal->handle.job.phase == JRN_WRITE) || (journal->handle.job.phase == JRN_ERASE));

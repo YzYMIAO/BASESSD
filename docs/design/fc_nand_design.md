@@ -547,13 +547,13 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 ```c
 /* 全部声明见 fc_interface.h，此处仅示意签名 */
-fc_status_t   fc_init(void);                           // 初始化所有资源池和队列
+void          fc_init(void);                           // 初始化所有资源池和队列（无失败路径）
 fc_cmd_s *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
 fc_cmd_s *fc_command_id_to_command(uint16_t id);    // ID→指针转换
 uint8_t       fc_command_to_id(const fc_cmd_s *, fc_cmd_id_t *); // 指针→ID（逆转换；返回 0=指针不在池内，如栈上的 fc_cmd_s）
 fc_desc_s *fc_descriptor_id_to_descriptor(uint16_t id);
 fc_status_t   fc_command_configure_descriptor(fc_cmd_s *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); // 逐条追加一个 CW 到链尾（**建链的唯一入口**，v17 由三层收敛而来；行地址由调用者按 plane 给出）
-fc_desc_id_t fc_descriptor_chain_release_head(fc_desc_id_t head); // 释放链头一个 desc+buffer，返回新链头
+fc_desc_id_t fc_descriptor_release_head(fc_desc_id_t desc_id); // 释放链头一个 desc+buffer，返回新链头
 fc_desc_id_t fc_descriptor_chain_release_all(fc_desc_id_t head);  // 沿链释放本命令全部 desc+buffer（非清空池），返回 INVALID
 fc_buf_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
 fc_status_t   fc_buffer_release(fc_buf_id_t id);     // 释放 Buffer
@@ -4127,7 +4127,7 @@ sys_init → log 绑定 → fc_init → nand_init
 | # | 约束 | 原因 |
 |---|------|------|
 | ① | `fc_init()` 必须先于 `nand_init()` | `fc_init_internal()` 里**唯一的 NAND 依赖**是 `nand_dispatch_init()`，它只是 memset 软件调度状态、**不碰 FMC 硬件**（见 `nand_dispatch.h`） |
-| ② | `else if` 级联：`fc_init` 失败 → `nand_init` 整段跳过 | 没有 FC 控制面，NAND 裸路径也无意义；后续 `platform_register` / `ssd_ftl_boot_all` 同样被跳过，主循环退化为裸 `fc_service()` |
+| ② | `else if` 级联从 `nand_init` 开始 | `fc_init` 无失败路径；`nand_init` 失败 → 后续 `platform_register` / `ssd_ftl_boot_all` 被跳过，主循环退化为裸 `fc_service()` |
 | ③ | `nand_dispatch_set_armed(1)` 必须在 `nand_init()` 之后 | `nand_dispatch_submit()`/`submit_chain()` 经 `nand_dispatch_enqueue()` 用 `g_nand_dispatch_armed` 门控；而 `nand_init` 内部的 RESET/READ_ID 走 `nand_fc_execute` **直连 engine**、绕过 fc/dispatch，所以初始化期间该门控必须为 0 |
 
 两个门控位的语义不要混淆：
@@ -4170,7 +4170,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
                                 ④ ssd_controller_init(&g_ctrl, g_ftl_ptrs)
                                 ⑤ g_ftl_ready = 1   ★主循环切换点
 
-  ★ if/else-if 级联：fc_init 失败 → 直接跳过 nand_init / 门控 / platform_register / FTL boot
+  ★ if/else-if 级联：fc_init 无失败路径；nand_init 失败 → 跳过门控 / platform_register / FTL boot
 ```
 
 ### 22.3 流程图：FC 控制面资源装配（图 15）
@@ -5141,7 +5141,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | `fc_init` | 复位 / 配置寄存器 | 保留 |
 | `fc_command_alloc` / `fc_command_release` | 命令槽取 / 还 | 保留 |
 | `fc_command_configure_descriptor` | 填一条描述符 | 保留（**唯一建链入口**；v17 前名 `fc_command_attach_cw`） |
-| `fc_descriptor_chain_release_head` / `fc_descriptor_chain_release_all` | 描述符链释放（下界强制 FC 持有——链在 FC 的池里） | 保留（v16 新增，建链失败的回滚入口） |
+| `fc_descriptor_release_head` / `fc_descriptor_chain_release_all` | 描述符链释放（下界强制 FC 持有——链在 FC 的池里） | 保留（v16 新增，建链失败的回滚入口） |
 | `fc_submit` | 写门铃 | 保留 |
 | `fc_service` | 控制器自跑（软件里必须显式化） | 保留 |
 | `fc_poll_completion` | 读 CQ | 保留 |

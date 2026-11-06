@@ -433,7 +433,7 @@ static BOOL bbt_probe_block_bad(alc_s *alloc, BYTE plane, WORD block, BOOL do_er
 
     // ① 出厂标记（擦除前读，擦除会永久毁掉它）。读失败 ⇒ 坏块。
     BYTE mark[4];
-    (void)memset(mark, 0xFF, sizeof(mark));
+    memset(mark, 0xFF, sizeof(mark));
 
     BOOL marked = (ftl_sync_read_column(addr, PAGE_MAIN_SIZE, mark) != FTL_OK) || (mark[0] != 0xFFU);
 
@@ -698,7 +698,7 @@ ftl_status_e bbt_save(alc_s *alloc)
     // 刚自增的值。
     bbt_header_s header;
 
-    (void)memset(&header, 0, sizeof(header));
+    memset(&header, 0, sizeof(header));
     header.magic        = BBT_MAGIC;
     header.sequence     = alloc->bbt.sequence;
     header.total_blocks = BBT_MAX_BLOCKS;
@@ -845,7 +845,7 @@ static ftl_status_e bbt_write_submit(alc_s *alloc)
     // record 格式与同步路径 bbt_save **必须逐字相同**；sequence 在 kick 起步时已自增。
     bbt_header_s header;
 
-    (void)memset(&header, 0, sizeof(header));
+    memset(&header, 0, sizeof(header));
     header.magic        = BBT_MAGIC;
     header.sequence     = alloc->bbt.sequence;
     header.total_blocks = BBT_MAX_BLOCKS;
@@ -1117,7 +1117,7 @@ void ftl_bbt_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。
     if (alloc->bbt.handle.waiting == false)

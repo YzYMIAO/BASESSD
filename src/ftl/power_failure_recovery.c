@@ -208,7 +208,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_s *ftl)
     md_dir_cache_s     *dir = ftl->metadata_dir;
     md_dir_ckpt_write_s w;
 
-    (void)memset(&w, 0, sizeof(w)); /* begin 非 READY 时上下文不可用；零值 = 未持有 */
+    memset(&w, 0, sizeof(w)); /* begin 非 READY 时上下文不可用；零值 = 未持有 */
 
     dir->ckpt.dirty = true; /* 空 Directory 也要落一条 record */
 
@@ -277,7 +277,7 @@ static void pfr_format_reset_bad_map(alc_s *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
     const md_ring_s *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
     WORD             kept     = 0U;
 
-    (void)memset(old_bad, 0, BBT_BITMAP_SIZE);
+    memset(old_bad, 0, BBT_BITMAP_SIZE);
 
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {

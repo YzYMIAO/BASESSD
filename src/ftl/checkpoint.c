@@ -588,7 +588,7 @@ void ftl_checkpoint_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
     cp_handle_s *h   = (cp_handle_s *)ctx;
-    fc_cmd_s    *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s    *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
     // 二者必须一致——不一致说明派发路由错了。

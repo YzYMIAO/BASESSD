@@ -159,11 +159,11 @@ extern "C"
      * @brief 读命令状态。
      *
      * @param controller FC 控制器。
-     * @param command_id 池内命令 ID；越界 ASSERT。
+     * @param cmd_id 池内命令 ID；越界 ASSERT。
      *
      * @return 命令状态。
      */
-    fc_cmd_state_e fc_command_state_get(const fc_ctl_s *controller, fc_cmd_id_t command_id);
+    fc_cmd_state_e fc_command_state_get(const fc_ctl_s *controller, fc_cmd_id_t cmd_id);
 
     /**
      * @brief 读 desc 的归属命令 ID。
@@ -189,51 +189,59 @@ extern "C"
      * @brief 命令状态唯一 setter：只允许状态机定义的转移。
      *
      * @param controller FC 控制器。
-     * @param command_id 命令池槽位号。
+     * @param cmd_id 命令池槽位号。
      * @param next       目标状态。
      *
-     * @note 非法转移在 debug 下 ASSERT；release 下仍写入目标值（调用链已保证前置）。
+     * @note 非法转移：debug 停机；release 拒绝写入（ASSERT_REJECT_VOID），
+     *       避免静默破坏命令状态机。
      */
-    void fc_pool_command_state_set(fc_ctl_s *controller, fc_cmd_id_t command_id, fc_cmd_state_e next);
+    void fc_pool_command_state_set(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_cmd_state_e next);
 
     /**
      * @brief 命令指针 → 池索引（唯一一份实现）。
      *
      * @param controller FC 控制器。
-     * @param command    属于本控制器命令池的命令指针。
+     * @param cmd    属于本控制器命令池的命令指针。
      *
      * @return 命令池索引。
      */
-    fc_cmd_id_t fc_pool_command_id(const fc_ctl_s *controller, const fc_cmd_s *command);
+    fc_cmd_id_t fc_pool_command_id(const fc_ctl_s *controller, const fc_cmd_s *cmd);
 
     /**
-     * @brief 提交前的一次性 desc 链校验（归属 + 唯一性 + 坐标 + buffer 占用）。
+     * @brief 提交前的一次性 desc 链完整校验（归属 + 坐标 + 唯一性 + buffer +
+     *        同 plane 行一致 + multi-plane 覆盖）。
      *
      * @param controller FC 控制器。
-     * @param command_id 命令 ID。
-     * @param command    命令。
+     * @param cmd_id 命令 ID。
+     * @param cmd    命令。
      *
-     * @return true 链完整；false 归属不符 / 链越界 / CW 重复 / buffer 未占用。
+     * @return true 链完整；false 归属不符 / 越段 / CW 重复 / buffer 未占用 /
+     *         同 plane 行地址不一致 / multi-plane 覆盖不全 / multi_plane 越界。
+     *
+     * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
      */
-    BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t command_id, const fc_cmd_s *command);
+    BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id, const fc_cmd_s *cmd);
 
     /**
      * @brief 沿命令的 desc 链归还全部 buffer，并把各 desc 的 buffer_id 抹成 INVALID。
      *
      * @param controller FC 控制器。
-     * @param command    命令。
+     * @param cmd    命令。
      *
      * @note 只动 buffer，不动 desc 链、不动命令槽位；幂等（已 INVALID 的跳过）。
      */
-    void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_s *command);
+    void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_s *cmd);
 
     /**
      * @brief 释放命令：沿链释放 desc+buffer，命令槽位回 FREE（FREE 幂等）。
      *
      * @param controller FC 控制器。
-     * @param command    命令。
+     * @param cmd    命令。
+     *
+     * @note 指针不在池内、或状态是 QUEUED/ACTIVE 时，release 下也拒绝，
+     *       不释放任何资源（守卫在碰 desc 链/buffer 之前）。
      */
-    void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_s *command);
+    void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_s *cmd);
 
 #ifdef __cplusplus
 }

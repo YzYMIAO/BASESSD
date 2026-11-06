@@ -42,12 +42,12 @@
  * @brief 全自动写管线：META 写入 → CRC → 加扰 → ECC 编码。
  * FTL 提交命令后、dispatch 前由 FC 自动调用（对 FTL 透明）。
  *
- * @param command 待编码的命令；沿其 desc 链逐 CW 执行上述步骤。
+ * @param cmd 待编码的命令；沿其 desc 链逐 CW 执行上述步骤。
  *
  * @return FC_STATUS_OK  整条 desc 链编码完成。
  *         ECC 错误码    ECC 编码失败时透传引擎返回码。
  */
-fc_status_e fc_data_path_encode(const fc_cmd_s *command);
+fc_status_e fc_data_path_encode(const fc_cmd_s *cmd);
 
 #if CONFIG_FC_RAID
 /* ── 跨 Plane Stripe RAID parity 生成（FC 内部） ── */
@@ -78,7 +78,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYT
  * buffer 停在 scrambled + ECC-corrected 状态，供 FTL 的 RAID 恢复在
  * scrambled domain 继续处理。
  *
- * @param command 已完成 NAND 读取的命令。
+ * @param cmd 已完成 NAND 读取的命令。
  *
  * @return FC_STATUS_OK       所有 CW 无不可纠错误（擦除页按成功处理），buffer 已解扰。
  *         FC_STATUS_IO_ERROR 存在不可纠的 CW，或 ECC 引擎不可用（未解扰，需 FTL 处理）。
@@ -88,7 +88,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYT
  *       仅在执行 ECC 解码的路径生效；`FC_ECC_MODE_LDPC_RAW` 跳过 ECC ⇒ 不做该识别，
  *       擦除页按 CRC/META 失败上报（RAW 读的调用方自行判空）。
  */
-fc_status_e fc_data_path_process_read(const fc_cmd_s *command);
+fc_status_e fc_data_path_process_read(const fc_cmd_s *cmd);
 
 /* ── 读路径 Stage 2：RAID 恢复（FTL 触发） ── */
 
@@ -189,7 +189,7 @@ BOOL fc_data_path_crc_check(const BYTE *cw);
  * ② command_meta 非 FC_META_UNKNOWN 时，read_meta 须等于 lba_to_meta(command_meta, plane, cw)。
  *
  * @param cw           528B CW buffer。
- * @param command_meta 本命令的 META；FC_META_UNKNOWN 时跳过第 ② 项。
+ * @param cmd_meta 本命令的 META；FC_META_UNKNOWN 时跳过第 ② 项。
  * @param paa          本 CW 的 NAND 物理地址（plane / cw 的来源）。
  *
  * @return 0U                      两项均通过。

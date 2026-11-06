@@ -2,13 +2,13 @@
  * ftl_op.c — 完成派发面：request 表 + 实例路由 + op 回调 + CQ 排空
  *
  * 模块职责（全局单例，非 per-instance）：
- *   ① request 表    command_id 映射到 {ctx, op}；
+ *   ① request 表    cmd_id 映射到 {ctx, op}；
  *   ② 实例路由表    (ch,ce,lun) 经 compact die 映射到 ftl_ctx_s；
  *   ③ 服务函数数组  request.op 映射到完成服务函数；
  *   ④ 提交          ftl_op_submit / ftl_op_submit_batch；
  *   ⑤ 派发/排空     ftl_op_drain（每条完成的派发在循环体内）。
  *
- * command_id 由 FC 全局池分配，CQ 是全局的。完成必须先按命令自身的
+ * cmd_id 由 FC 全局池分配，CQ 是全局的。完成必须先按命令自身的
  * (ch,ce,lun) 路由到实例，再按 request.op 调服务函数；这些表不能拆成 per-instance。
  *
  * 初始化顺序：ftl_op_init / ftl_op_route_set 必须在所有实例 boot 之前调用
@@ -41,7 +41,7 @@ static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *comple
 
 /* ── 1. 静态资源 ── */
 
-// request 表按 FC command_id 直接索引；容量 = 命令池深度，没有“表满”路径。
+// request 表按 FC cmd_id 直接索引；容量 = 命令池深度，没有“表满”路径。
 static ftl_op_req_s g_op_req[FTL_OP_REQ_TABLE_SIZE];
 
 // 实例路由表：按紧凑 die 号 → FTL 实例。命令完成仍带 (ch,ce,lun)，
@@ -516,17 +516,17 @@ void ftl_op_drain(void)
 
     while (fc_poll_completion(&completion) == FC_STATUS_OK)
     {
-        // command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
-        fc_cmd_s *cmd = fc_command_id_to_command(completion.command_id);
+        // cmd_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
+        fc_cmd_s *cmd = fc_command_id_to_command(completion.cmd_id);
 
         // 与上面同一个 id 索引 request 表（容量 = 命令池深度）。
-        ftl_op_req_s *req = &g_op_req[completion.command_id];
+        ftl_op_req_s *req = &g_op_req[completion.cmd_id];
 
         // 先取 {ctx,op} 并清项，再回调：服务函数可以在自己的回调里重入登记/释放
         // 表项。未登记 = 孤儿/迟到完成（如 sync wait 超时已摘项），只释放命令并留痕。
         if (req->pending == false)
         {
-            LOGE(LOG_TAG_FTL "completion without request cmd=%hu status=0x%02hx — released\r\n", completion.command_id, completion.status);
+            LOGE(LOG_TAG_FTL "completion without request cmd=%hu status=0x%02hx — released\r\n", completion.cmd_id, completion.status);
             (void)fc_command_release(cmd);
             continue;
         }
@@ -543,7 +543,7 @@ void ftl_op_drain(void)
 
         if (fn == NULL)
         {
-            LOGE(LOG_TAG_FTL "orphan request cmd=%hu op=%hhu status=0x%02hx — released\r\n", completion.command_id, op_byte, completion.status);
+            LOGE(LOG_TAG_FTL "orphan request cmd=%hu op=%hhu status=0x%02hx — released\r\n", completion.cmd_id, op_byte, completion.status);
             (void)fc_command_release(cmd);
             continue;
         }

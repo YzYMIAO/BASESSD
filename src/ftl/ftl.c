@@ -608,7 +608,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_s *ftl, fc_cmd_s *cmd, pend_req_
 
 /**
  * @brief 写成功（非 cache 中间页）：逐 CW 确认 Journal + L2P + 有效计数。
- * ⚠ region 未就绪（正在异步加载）⇒ 把本项置为**待入账**：命令脱钩（command_id 置哨兵，本命令
+ * ⚠ region 未就绪（正在异步加载）⇒ 把本项置为**待入账**：命令脱钩（cmd_id 置哨兵，本命令
  * 随即 release，id 会被复用）+ 组在飞数**不**递减（host 写组继续 pending），由
  * ftl_confirm_service 每轮推进。与读失败的托管同构（命令脱钩、组不结算），区别是推进者
  * 在本文件而非 RR 引擎。
@@ -726,7 +726,7 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
  * @brief 读失败 ⇒ **托管**给 Read Recovery job（见 read_recovery.c）：
  * · pending 项**保留**（不 pend_remove）、组在飞数**不**递减 ⇒ host 读组继续
  * pending，等 RR 收尾时统一结算；
- * · command_id 置哨兵：本命令随即 release，其 id 会被后续 fc_command_alloc 复用，
+ * · cmd_id 置哨兵：本命令随即 release，其 id 会被后续 fc_command_alloc 复用，
  * 留旧值会让新命令的完成误撞上本项；
  * · 收尾（含一律报 IO_ERROR 的语义）在 rr_job_finish 里，见该处注释。
  * ⚠ 恢复**必须**异步：本函数跑在完成泵里，当场同步跑三级恢复就是泵里再开泵（嵌套泵），
@@ -768,7 +768,7 @@ static void ftl_host_io_read_fail(ftl_ctx_s *ftl, pend_req_s *pending)
  *
  * @param ftl 实例
  * @param pending 失败的写子操作记录（提供本次分配的 new_pba / new_pba1）
- * @param completion 命令完成状态（提供 command_id，用于遍历 desc 链取逐 CW 状态）
+ * @param completion 命令完成状态（提供 cmd_id，用于遍历 desc 链取逐 CW 状态）
  */
 static void ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc_cmd_status_s *completion)
 {
@@ -777,7 +777,7 @@ static void ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc
     // 等到 GC 擦除才暴露（RISK-MIG-07）。
     DWORD bad_plane_mask = 0U;
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
     WORD      did = cmd->desc_id;
 
     while (did != FC_DESC_ID_INVALID)
@@ -835,13 +835,13 @@ static DWORD s_write_retry_logged;
  * 页缓冲；只在失败时拷一次。
  *
  * 顺序：读回数据 → 分配新页对 → 建新命令（**链序**填数）→ 提交 →
- * 成功后才更新 pending 的 command_id/new_pba（提交失败时保持旧 id，让调用者
+ * 成功后才更新 pending 的 cmd_id/new_pba（提交失败时保持旧 id，让调用者
  * 仍能按本次 completion 的 cmd_id 收尾）。
  *
  * 其他 = 无法重试，调用者按原 IO_ERROR 收尾。
  *
  * @param ftl 实例（数据拷出到 `write_retry_buf`、新页对从本实例 allocator 分配）
- * @param pending 当前写子操作记录（提交成功后原地更新 command_id / new_pba / retry_count）
+ * @param pending 当前写子操作记录（提交成功后原地更新 cmd_id / new_pba / retry_count）
  * @param old_cmd 失败的旧命令（desc 链仍持有本页数据，调用者随后才 release）
  * @return FTL_OK    已提交（同一 pending 继续在飞，组在飞数**不**递减）
  *         FTL_AGAIN 瞬态资源不足（Free/OP 耗尽、命令槽满、提交背压），本次未提交
@@ -907,7 +907,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
         return FTL_AGAIN;
     }
 
-    // 提交成功后才改 pending：失败路径仍按旧 command_id 收尾（见函数头）。
+    // 提交成功后才改 pending：失败路径仍按旧 cmd_id 收尾（见函数头）。
     pend_bind(&ftl->pending, pending, ftl_cmd_id(cmd));
     pending->new_pba  = pba[0];
     pending->new_pba1 = pba[1];
@@ -1559,7 +1559,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s 
     // 本服务函数拥有命令，下面**任何**退出路径都必须释放（H1）。必须先取再判：
     // 序列已死时的早退若直接 return，会把 command / desc 链 / buffer 一起漏掉
     // （RISK-CACHE-31 ⇒ 反复触发耗尽 FC 池）。
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 收尾页在飞期间序列被中止（盘满 abort / 失败 abort）⇒ 这条回调属于已死的序列：
     // 不能再动 allocator 的 page0/SB 记账（那会误关新块的 SB）。
@@ -1694,9 +1694,9 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
 {
     (void)ctx; /* host I/O 不登记request 表 */
 
-    // command_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
+    // cmd_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
     // ID 在池内，恒返回非空指针。
-    WORD      cmd_id = completion->command_id;
+    WORD      cmd_id = completion->cmd_id;
     fc_cmd_s *cmd    = fc_command_id_to_command(cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒

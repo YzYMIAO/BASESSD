@@ -2,7 +2,7 @@
  * pending.c — Pending Request 表 + 完成组（pend_group_s）实现
  *
  * 职责：
- *   ① 跟踪异步请求的 command_id → 请求映射，供 FC 完成回调据以做 caller 通知
+ *   ① 跟踪异步请求的 cmd_id → 请求映射，供 FC 完成回调据以做 caller 通知
  *      与写回滚簿记（ftl_host_io_callback → pend_find）；
  *   ② 实现「完成组」——把一条 host 请求拆出的多条 FC 子操作聚成一个完成单元，
  *      通知字段（complete_flag/status_out/on_complete）只在最后一个子操作完成后
@@ -41,14 +41,14 @@ static DWORD s_group_underflow_log_ms;
 static DWORD s_group_underflow_n;
 
 /**
- * @brief 清除 pending 项与 command_id 的映射
+ * @brief 清除 pending 项与 cmd_id 的映射
  *
  * @param table pending 表
- * @param req   待脱钩的请求槽；command_id 为 NONE 时跳过
+ * @param req   待脱钩的请求槽；cmd_id 为 NONE 时跳过
  */
 static void pend_unbind(pend_ctx_s *table, pend_req_s *req)
 {
-    const WORD cmd_id = req->command_id;
+    const WORD cmd_id = req->cmd_id;
     const BYTE index  = (BYTE)(req - table->slots);
 
     if ((cmd_id < FC_COMMAND_POOL_DEPTH) && (table->slot_of[cmd_id] == index))
@@ -58,7 +58,7 @@ static void pend_unbind(pend_ctx_s *table, pend_req_s *req)
 }
 
 /**
- * @brief 清空本实例的 pending 表、完成组表与 command_id 映射
+ * @brief 清空本实例的 pending 表、完成组表与 cmd_id 映射
  *
  * @param table pending 表
  */
@@ -70,11 +70,11 @@ void pend_init(pend_ctx_s *table)
 }
 
 /**
- * @brief 把已有 pending 槽绑定到新的 command_id（写重试替换命令时用）
+ * @brief 把已有 pending 槽绑定到新的 cmd_id（写重试替换命令时用）
  *
  * @param table  pending 表
  * @param req    pending 槽
- * @param cmd_id 新 command_id
+ * @param cmd_id 新 cmd_id
  */
 void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id)
 {
@@ -86,13 +86,13 @@ void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id)
     const BYTE index = (BYTE)(req - table->slots);
 
     pend_unbind(table, req);
-    ASSERT(table->slot_of[cmd_id] == 0xFF); /* 同一 command_id 不得同时绑两个槽 */
-    req->command_id        = cmd_id;
+    ASSERT(table->slot_of[cmd_id] == 0xFF); /* 同一 cmd_id 不得同时绑两个槽 */
+    req->cmd_id            = cmd_id;
     table->slot_of[cmd_id] = index;
 }
 
 /**
- * @brief 与 FC 命令脱钩：清映射并把 command_id 置哨兵
+ * @brief 与 FC 命令脱钩：清映射并把 cmd_id 置哨兵
  *
  * 脱钩项只能按 op 查找。
  *
@@ -105,16 +105,16 @@ void pend_detach_command(pend_ctx_s *table, pend_req_s *req)
     ASSERT(req != NULL);
 
     pend_unbind(table, req);
-    req->command_id = FTL_PENDING_CMD_NONE;
+    req->cmd_id = FTL_PENDING_CMD_NONE;
 }
 
 /**
- * @brief 分配一个 pending 槽并绑定 command_id
+ * @brief 分配一个 pending 槽并绑定 cmd_id
  *
  * 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
  *
  * @param table  pending 表
- * @param cmd_id 绑定的 command_id
+ * @param cmd_id 绑定的 cmd_id
  * @return 槽指针；NULL = 池满
  */
 pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id)
@@ -141,12 +141,12 @@ pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id)
 }
 
 /**
- * @brief 按 command_id 直接索引 pending 槽
+ * @brief 按 cmd_id 直接索引 pending 槽
  *
  * 映射为空 / 槽已释放 / id 不匹配都返回 NULL。
  *
  * @param table  pending 表
- * @param cmd_id command_id
+ * @param cmd_id cmd_id
  * @return 槽指针；NULL = 未找到
  */
 pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id)
@@ -165,7 +165,7 @@ pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id)
 
     pend_req_s *req = &table->slots[index];
 
-    if ((req->used == false) || (req->command_id != cmd_id))
+    if ((req->used == false) || (req->cmd_id != cmd_id))
     {
         return NULL;
     }
@@ -179,7 +179,7 @@ pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id)
  * 未找到则 no-op（幂等，供完成路径重复调用）。
  *
  * @param table  pending 表
- * @param cmd_id command_id
+ * @param cmd_id cmd_id
  */
 void pend_remove(pend_ctx_s *table, WORD cmd_id)
 {
@@ -193,7 +193,7 @@ void pend_remove(pend_ctx_s *table, WORD cmd_id)
 }
 
 /**
- * @brief 按 op 找托管项（command_id 已置 NONE）
+ * @brief 按 op 找托管项（cmd_id 已置 NONE）
  *
  * 下标升序 = FIFO，与托管顺序一致。
  *
@@ -513,7 +513,7 @@ BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window)
 
 /* ── write-confirm park（待入账列表 = pending 表里的 WRITE_CONFIRM 项）──
  *
- * 不另建一张列表：待入账项本来就在 pending 表里（op = WRITE_CONFIRM、command_id
+ * 不另建一张列表：待入账项本来就在 pending 表里（op = WRITE_CONFIRM、cmd_id
  * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。
  * 本模块只提供表原语（遍历 / 判超时 / 结算）；数据面事务由调用者的写确认服务
  * 直调执行（C2/R9：不复制 Journal→L2P→BST 顺序）。

@@ -425,7 +425,7 @@ build_fail:
     {
         if (b->pends[i] != NULL)
         {
-            pend_remove(&req->ftl->pending, b->pends[i]->command_id);
+            pend_remove(&req->ftl->pending, b->pends[i]->cmd_id);
         }
         if (b->cmds[i] != NULL)
         {

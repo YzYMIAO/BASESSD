@@ -75,7 +75,7 @@ DWORD log_vprintf(log_level_e level, const char *format, va_list args)
         const size_t      marker_offset = sizeof(message) - marker_length - 1U;
 
         g_log_truncated++;
-        (void)memcpy(&message[marker_offset], marker, marker_length);
+        memcpy(&message[marker_offset], marker, marker_length);
         message[sizeof(message) - 1U] = '\0';
         length                        = (int)(sizeof(message) - 1U);
     }

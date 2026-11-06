@@ -373,14 +373,14 @@ ftl_status_e ftl_cmd_write_data(fc_cmd_s *cmd, const void *data, DWORD length)
         {
             DWORD copy_len = (length >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : length;
 
-            (void)memcpy(buf, src, copy_len);
+            memcpy(buf, src, copy_len);
             src += copy_len;
             length -= copy_len;
 
             // 本 CW 未填满部分用 0xFF dummy 补齐
             if (copy_len < FC_BUFFER_USER_SIZE)
             {
-                (void)memset(buf + copy_len, 0xFF, (FC_BUFFER_USER_SIZE - copy_len));
+                memset(buf + copy_len, 0xFF, (FC_BUFFER_USER_SIZE - copy_len));
             }
         }
         else
@@ -388,7 +388,7 @@ ftl_status_e ftl_cmd_write_data(fc_cmd_s *cmd, const void *data, DWORD length)
             // 数据已耗尽：本 CW 的 USER 区整体填 0xFF dummy。
             // ⚠ 长度必须是 USER 区大小——buf 是 base+FC_BUFFER_USER_OFFSET，
             // 直接用 FC_BUFFER_POOL_CW_SIZE 会越界 8B 踩到下一 CW 的 META/CRC。
-            (void)memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
+            memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
         }
 
         desc_id = (fc_desc_id_t)descriptor->next_id;
@@ -437,11 +437,11 @@ ftl_status_e ftl_cmd_write_data_cw(fc_cmd_s *cmd, const BYTE *page_buf, DWORD cw
             // · 单页镜像（mirror/GC/WL）：两个 plane 共用 cw 偏移。
             const size_t slot = pair_major ? (plane * CW_NUM + cw) : cw;
 
-            (void)memcpy(buf, page_buf + (slot * FC_BUFFER_USER_SIZE), FC_BUFFER_USER_SIZE);
+            memcpy(buf, page_buf + (slot * FC_BUFFER_USER_SIZE), FC_BUFFER_USER_SIZE);
         }
         else
         {
-            (void)memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
+            memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
         }
 
         desc_id = (fc_desc_id_t)descriptor->next_id;
@@ -483,7 +483,7 @@ ftl_status_e ftl_cmd_read_data(fc_cmd_s *cmd, void *buffer, DWORD length)
         }
 
         DWORD copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
-        (void)memcpy(dst, buf, copy_len);
+        memcpy(dst, buf, copy_len);
         dst += copy_len;
         remaining -= copy_len;
 
@@ -822,7 +822,7 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
         }
         BYTE *dst = (BYTE *)buffer + (cw * FC_BUFFER_POOL_CW_SIZE);
 
-        (void)memcpy(dst, src, FC_BUFFER_USER_SIZE);
+        memcpy(dst, src, FC_BUFFER_USER_SIZE);
     }
 
     (void)fc_command_release(cmd);
@@ -982,7 +982,7 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
     // 4 字节走控制器侧暂存（同 OP_READ_META），完成时已拷进 CQ 的 param。
     // 先拷出再判错：即使页读失败，调用者仍能看到原始 4 字节用于诊断；
     // 返回 FTL_ERROR 让 BBT 按“读失败 ⇒ 坏块（保守）”处理。
-    (void)memcpy(out, completion.param.bytes, 4U);
+    memcpy(out, completion.param.bytes, 4U);
 
     if (fc_cmd_status_has_error(completion.status))
     {
@@ -1041,8 +1041,8 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
 
     if (length != PAGE_MAIN_SIZE)
     {
-        (void)memset(s_mirror_page, 0xFF, sizeof(s_mirror_page));
-        (void)memcpy(s_mirror_page, data, length);
+        memset(s_mirror_page, 0xFF, sizeof(s_mirror_page));
+        memcpy(s_mirror_page, data, length);
         page = s_mirror_page;
     }
 

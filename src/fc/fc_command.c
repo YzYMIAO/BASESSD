@@ -66,7 +66,7 @@ static const char *fc_status_str_format(const fc_status_name_s *tbl, DWORD count
         {
             buf[used++] = '|';
         }
-        (void)memcpy(&buf[used], tbl[i].name, len);
+        memcpy(&buf[used], tbl[i].name, len);
         used += len;
     }
 
@@ -142,7 +142,7 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        if (((mask >> (plane * CW_NUM)) & plane_bits) != low)
+        if (((mask >> fc_cw_flat(plane, 0U)) & plane_bits) != low)
         {
             return false;
         }
@@ -155,14 +155,14 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask)
  *
  * 前置违反一律 ASSERT；release 下断言整段裁空（调用链保证前置）。
  *
- * @param command 命令
+ * @param cmd 命令
  */
-void fc_command_validate(const fc_cmd_s *command)
+void fc_command_validate(const fc_cmd_s *cmd)
 {
-    ASSERT(command != NULL);
-    ASSERT(command->config.operation < OP_COUNT);
+    ASSERT(cmd != NULL);
+    ASSERT(cmd->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）
-    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(command->config.operation) == false) || (command->desc_id != FC_DESC_ID_INVALID));
-    // NDEBUG 下断言整段裁空 → command 变未用形参，吞掉
-    (void)command;
+    ASSERT((cmd->config.operation == OP_SET_FEATURES) || (cmd->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(cmd->config.operation) == false) || (cmd->desc_id != FC_DESC_ID_INVALID));
+    // NDEBUG 下断言整段裁空 → cmd 变未用形参，吞掉
+    (void)cmd;
 }
