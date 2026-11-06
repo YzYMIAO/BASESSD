@@ -32,7 +32,7 @@ $(foreach mod,$(MODULES),$(eval $(call BUILD_LIB_template,$(mod))))
 # Firmware-owned source files link as individual objects.  Only vendor code is
 # archived, preserving its normal on-demand static-library behavior.
 ifeq ($(BUILD_TARGET),firmware)
-ifneq ($(filter stm32h7r3 stm32h743,$(FIRMWARE_PLATFORM)),)
+ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 $(LIB_DIR)/libthird_party.a: $(THIRD_PARTY_C_OBJS)
 	@$(MKDIR) $(LIB_DIR)
 	@$(ECHO) "Archiving libthird_party.a..."
@@ -44,7 +44,7 @@ endif
 # 3. 收集所有库文件
 # ----------------------------------------------------------------------------
 ifeq ($(BUILD_TARGET),firmware)
-ifneq ($(filter stm32h7r3 stm32h743,$(FIRMWARE_PLATFORM)),)
+ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 ALL_LIBS = $(LIB_DIR)/libthird_party.a
 else
 ALL_LIBS = $(foreach mod,$(MODULES),$(LIB_DIR)/lib$(mod).a)

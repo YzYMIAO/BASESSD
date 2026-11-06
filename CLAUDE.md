@@ -337,7 +337,7 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
   `uint8/16/32/64` 别名（C9：同一语义只允许一套坐标）。
 - **不设二级地址别名**：逻辑 LBA、芯片 PAA、FTL PBA 一律直接写 `DWORD`（32-bit 地址字）。
   容量口径：32-bit LBA × 4 KiB AU = **16 TiB**，覆盖消费级容量；本仓当前 IU=512 B 时对应 2 TiB。
-- **第三方/厂商边界**（`third_party/`、CMSIS/HAL、`src/platform/stm32h7r3/`）保持其原生
+- **第三方/厂商边界**（`third_party/`、CMSIS/HAL）保持其原生
   `uint*_t`；跨边界按值传递即可（别名与 `uint*_t` 是同一类型，不需要强转）。
 - 头文件使用别名必须 `#include "ssd_types.h"`（裸名，H41）。它是 freestanding 头，只依赖
   `<stdint.h>`/`<stdbool.h>`，不会把 libc 拉进 FTL 的 include 闭包。
@@ -617,9 +617,8 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
   解析；新增头文件目录必须同步加入 `MODULE_INCS`，否则裸名解析不到。
 - **同名风险**：裸名依赖 `-I` 顺序。新增头文件前必须
   `find include tests -name '<name>.h'` 查重；同名必须改名或合并，
-  **不得靠 `-I` 顺序“碰巧解析”**。当前已知同名只在 platform：
-  `delay / mpu / sys / usart / watchdog`（`include/platform/` 与
-  `include/platform/stm32h7r3/` 各有一份），平台抽象头排在 SoC 目录之前是刻意的。
+  **不得靠 `-I` 顺序“碰巧解析”**。当前 `include/platform/` 与
+  `include/platform/stm32h743/` 无同名头；新增平台目录时仍按上述命令查重。
 - **机械检查**：`grep -rnE '^\s*#\s*include\s*"[^"]*/' src include tests` 应为 0。
 
 ### 5.7 内联函数与宏的分层（H42）
@@ -739,8 +738,7 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
   - 比较器：`cmp(a,b)` 的 `-1/0/1` 是**排序契约**，不是错误码。
   - 数学约定：BCH `deg(0) = -1`（零多项式次数无定义）；BM 内部 `pp = -1`、
     数组算法的 `first_low_index = -1` 是**局部算术/下标**，不是返回值。
-  - 第三方/厂商代码：`third_party/`、CMSIS/HAL、`tests/framework/munit`、
-    `src/platform/stm32h7r3/`（未构建的备用平台）保持上游写法。
+  - 第三方/厂商代码：`third_party/`、CMSIS/HAL、`tests/framework/munit` 保持上游写法。
 - **证据**：debug 档 DWARF 可直接核对枚举值：
   `arm-none-eabi-readelf --debug-dump=info build/firmware/debug/bin/debug.elf | grep -A1 FTL_ERROR`。
 
@@ -765,8 +763,8 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
     才看得到调用本身；先落局部变量则调用点只留名字。
   - 局部 `{0}` 与 `memset` 语义相同，但后者明确写出「整块清零」，且不会因结构体含柔性
     数组成员或后续加字段而改变初始化范围。
-- **例外**：`third_party/`、CMSIS/HAL 厂商示例、`src/platform/stm32h7r3/`（未构建的备用
-  平台）保持上游写法；只读常量表不受「逐字段赋值」约束（上面已列）。
+- **例外**：`third_party/`、CMSIS/HAL 厂商示例保持上游写法；只读常量表不受
+  「逐字段赋值」约束（上面已列）。
 
 ### 5.12 强转最小化（H48）
 
@@ -888,8 +886,7 @@ typedef union FC_PARAM_U
 
 **范围与例外**：
 
-- 适用于 `src/` + `include/` 的项目代码；`third_party/`、CMSIS/HAL、
-  `src/platform/stm32h7r3/`、`include/platform/stm32h7r3/` 保持上游写法。
+- 适用于 `src/` + `include/` 的项目代码；`third_party/`、CMSIS/HAL 保持上游写法。
 - `tests/` 暂冻结（`ISS-UT-02`）；测试内**引用生产类型**与**测试自有类型**的名字
   已随生产代码同批机械收敛，逻辑/API 仍待测试源重建；不得为改类型名回退生产代码。
 - 历史 changelog 不改写；活跃文档按 P12 在定稿时回扫。

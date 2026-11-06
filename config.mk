@@ -28,10 +28,7 @@ ifeq ($(filter $(BUILD_TARGET),$(VALID_BUILD_TARGETS)),)
     $(error Invalid BUILD_TARGET=$(BUILD_TARGET), valid values: $(VALID_BUILD_TARGETS))
 endif
 
-ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
-CPU_TYPES := cortex-m7
-LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h7r3xx_flash.ld
-else ifeq ($(FIRMWARE_PLATFORM),stm32h743)
+ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 CPU_TYPES := cortex-m7
 LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash.ld
 endif

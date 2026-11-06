@@ -8,7 +8,7 @@
 
 /*
  * 平台抽象接口。
- * 固件平台（stm32h743/stm32h7r3）提供一套实现，核心 FTL 不直接依赖操作系统或寄存器。
+ * 固件平台（stm32h743）提供一套实现，核心 FTL 不直接依赖操作系统或寄存器。
  */
 typedef struct SSD_PLATFORM_OPS_S
 {
