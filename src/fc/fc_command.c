@@ -159,7 +159,6 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask)
  */
 void fc_command_validate(const fc_cmd_s *cmd)
 {
-    ASSERT(cmd != NULL);
     ASSERT(cmd->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）
     ASSERT((cmd->config.operation == OP_SET_FEATURES) || (cmd->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(cmd->config.operation) == false) || (cmd->desc_id != FC_DESC_ID_INVALID));

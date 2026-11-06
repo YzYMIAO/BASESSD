@@ -10,7 +10,8 @@
  * 存放内容：
  *   - 池簿记状态枚举（命令 / buffer）
  *   - buffer 池的一行（一个 CW 的 528B 存储）
- *   - 池初始化、状态读写、链校验与释放原语
+ *   - 池初始化、状态写闸门、链校验与释放原语
+ *   - 状态/归属字段由调用方在已验证下标上直接读，不提供单字段 getter
  */
 
 #include "fc_interface.h"
@@ -49,35 +50,8 @@ extern "C"
      */
     void fc_pool_init(fc_ctl_s *controller);
 
-    /**
-     * @brief 读命令状态。
-     *
-     * @param controller FC 控制器。
-     * @param cmd_id 池内命令 ID；越界 ASSERT。
-     *
-     * @return 命令状态。
-     */
-    fc_cmd_state_e fc_command_state_get(const fc_ctl_s *controller, fc_cmd_id_t cmd_id);
-
-    /**
-     * @brief 读 desc 的归属命令 ID。
-     *
-     * @param controller    FC 控制器。
-     * @param descriptor_id 池内 desc ID；越界 ASSERT。
-     *
-     * @return 归属命令 ID；FC_CMD_ID_INVALID = 空闲。
-     */
-    fc_cmd_id_t fc_descriptor_owner_get(const fc_ctl_s *controller, fc_desc_id_t descriptor_id);
-
-    /**
-     * @brief 读 buffer 占用状态。
-     *
-     * @param controller FC 控制器。
-     * @param buffer_id  池内 buffer ID；越界 ASSERT。
-     *
-     * @return FC_BUFFER_STATE_OCCUPIED / FC_BUFFER_STATE_FREE。
-     */
-    fc_buf_state_e fc_buffer_state_get(const fc_ctl_s *controller, fc_buf_id_t buffer_id);
+    /* 池状态 / 归属数组由 fc.c / fc_pool.c 在已验证的下标上直接读；
+     * 状态写走下面的唯一 setter，不提供单字段 getter。 */
 
     /**
      * @brief 命令状态唯一 setter：只允许状态机定义的转移。

@@ -109,10 +109,10 @@ extern "C"
      * 坏块替换）——每个 plane 传自己的 row_paa 即可；同一 plane 的所有 CW 必须传同一 row_paa。
      * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
      * multi-plane = [0, multi_plane)）。
-     * 前置（违反一律 ASSERT，不返回错误码；唯一例外是「命令指针不在池内」——
-     * debug ASSERT，release 返回 FC_STATUS_INVALID_ARGUMENT）：命令处于 ALLOCATED；
-     * plane 落在本命令 plane 段内；CW 号 < CW_NUM；row_paa 的 plane 位 == plane。
-     * 配置错误绝不发到硬件。
+     * 前置：命令处于 ALLOCATED；plane 落在本命令 plane 段内；CW 号 < CW_NUM；
+     * row_paa 的 plane 位 == plane。命令指针不在池内、命令不在 ALLOCATED：
+     * debug 停机，release 返回 FC_STATUS_INVALID_ARGUMENT；plane/CW/row_paa 坐标
+     * 只在 debug 检查，提交边界 fc_pool_chain_validate 兜底。配置错误绝不发到硬件。
      *
      * @param cmd 目标命令；须已 ALLOCATED。
      * @param plane   CW 所在 plane；须落在本命令的 plane 段内。
@@ -121,7 +121,8 @@ extern "C"
      *
      * @return FC_STATUS_OK             建链成功。
      *         FC_STATUS_RESOURCE_EMPTY desc 或 buffer 池空——只有「申请不到」才走返回码（模仿硬件行为）。
-     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内（debug ASSERT；release 判据 9 闸门）。
+     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内 / 命令不在 ALLOCATED
+     *                                  （debug ASSERT；release 判据 9 闸门）。
      *                                  **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」是不变量，调用方沿链释放即完整回收（见下两个函数）。
      */
     fc_status_e fc_command_configure_descriptor(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa);
@@ -130,7 +131,7 @@ extern "C"
      * @brief 建链入口（**上层申请 buffer**）——与上一个的唯一差别是 buffer 从哪来。
      * 仅当 command->config.buf_own 的申请位 = 上层申请（FC_BUF_OWN_ALLOC_BY_UPPER，即 10/11）
      * 时合法：调用者须先 `fc_buffer_alloc()` 拿到 buffer_id 再传进来，FC 建链时**不申请**。
-     * buf_own = FC 申请（00/01）时必须传 FC_BUF_ID_INVALID（否则是配置错误 → ASSERT）。
+     * buf_own = FC 申请（00/01）时必须传 FC_BUF_ID_INVALID（否则 release 返回 INVALID_ARGUMENT）。
      * 其余前置与失败语义与 fc_command_configure_descriptor 一致。
      *
      * @param cmd   目标命令；须已 ALLOCATED。
@@ -141,7 +142,9 @@ extern "C"
      *
      * @return FC_STATUS_OK             建链成功。
      *         FC_STATUS_RESOURCE_EMPTY desc 池空，或 FC 申请 buffer 时 buffer 池空。
-     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内（debug ASSERT；release 判据 9 闸门）。
+     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内 / 命令不在 ALLOCATED /
+     *                                    上层 buffer ID 越界或归属不符
+     *                                    （debug ASSERT；release 判据 9 闸门）。
      */
     fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id);
 
@@ -211,7 +214,7 @@ extern "C"
      * @return FC_STATUS_OK          本轮有完成被消费，或有命令被下发。
      *         FC_STATUS_QUEUE_EMPTY 无完成且 SQ/HSQ 均为空。
      *         FC_STATUS_NOT_READY   无完成，队列非空但当前无 LUN 可下发（背压）。
-     *         FC_STATUS_IO_ERROR    CQ 满或命令下发失败。
+     *         FC_STATUS_IO_ERROR    CQ 满、时间源不可用或命令下发失败。
      */
     fc_status_e fc_service(void);
 

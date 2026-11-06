@@ -166,14 +166,10 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed)
  */
 fc_status_e fc_data_path_ecc_encode(BYTE *cw)
 {
-    fc_status_e result;
-
     ASSERT(cw != NULL);
 
-    result = fc_ecc_encode(cw, FC_BUFFER_DATA_SIZE);
-
     // 引擎不可用（NOT_SUPPORTED）必须失败：静默跳过等于关闭 ECC（C8/§3.2）。
-    return result;
+    return fc_ecc_encode(cw, FC_BUFFER_DATA_SIZE);
 }
 /**
  * @brief 对 CW 做 ECC 解码并回填纠正 bit 数

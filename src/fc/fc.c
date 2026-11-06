@@ -224,9 +224,8 @@ static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_s *cmd)
     fc_sub_queue_s   *queue  = (cmd->high_priority != 0U) ? &controller->hsq : &controller->sq;
     const fc_cmd_id_t cmd_id = fc_pool_command_id(controller, cmd);
 
-    // 重复提交会让同一命令在 SQ/HSQ 中出现两次；调用链保证 ALLOCATED。
-    ASSERT(controller->command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED);
-
+    // 重复提交由 fc_submit/fc_submit_batch 的 ALLOCATED 边界拒绝；本层是唯一入队点，
+    // 只负责 push + 状态转移。
     if (fc_submission_queue_push(queue, cmd_id) != FC_STATUS_OK)
     {
         return FC_STATUS_QUEUE_FULL;
@@ -268,7 +267,10 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
     cmd = &controller->command_pool[nand_completion->cmd_id];
     memset(&cq_entry, 0, sizeof(cq_entry));
 
-    ASSERT(controller->command_state[nand_completion->cmd_id] == FC_COMMAND_STATE_ACTIVE);
+    ASSERT_REJECT(controller->command_state[nand_completion->cmd_id] == FC_COMMAND_STATE_ACTIVE,
+                  FC_STATUS_IO_ERROR,
+                  "complete: cmd=%hu not ACTIVE",
+                  nand_completion->cmd_id);
 
     /* ── Step 1: Write back per-CW status and ECC count from NAND completion ──
      * cw_status[] 的下标是 **flat 绝对 CW 号 flat_cw = plane*CW_NUM + cw**（与请求掩码同空间），
@@ -287,7 +289,10 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
             descriptor->ecc_bits = nand_completion->ecc_bit_count[flat_cw];
             desc_id              = (fc_desc_id_t)descriptor->next_id;
         }
-        ASSERT(desc_id == FC_DESC_ID_INVALID);
+        ASSERT_REJECT(desc_id == FC_DESC_ID_INVALID,
+                      FC_STATUS_IO_ERROR,
+                      "complete: desc chain not terminated cmd=%hu",
+                      nand_completion->cmd_id);
     }
 
     /* ── Step 2: Data path processing (ECC decode + conditional descramble) ──
@@ -405,6 +410,10 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
                 desc_id = (fc_desc_id_t)desc->next_id;
                 steps++;
             }
+            ASSERT_REJECT(desc_id == FC_DESC_ID_INVALID,
+                          FC_STATUS_IO_ERROR,
+                          "complete: desc chain not terminated (aggregate) cmd=%hu",
+                          nand_completion->cmd_id);
         }
 
         if (data_path_failed == true)
@@ -459,6 +468,7 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
             // 而是 fatal 的完成丢失。保留 COMPLETED 只是避免 FC 侧命令槽永久 ACTIVE，
             // 上层必须把本轮 IO_ERROR 当系统故障处理。
             LOGE(LOG_TAG_RES "CQ full: completion lost for cmd=%hu\r\n", nand_completion->cmd_id);
+            controller->fatal = true;
             fc_pool_command_state_set(controller, nand_completion->cmd_id, FC_COMMAND_STATE_COMPLETED);
             return FC_STATUS_IO_ERROR;
         }
@@ -672,7 +682,10 @@ stripe_error:
         fail_comp.cmd_id           = data_cmd_id;
         fail_comp.execution_status = NAND_RESULT_NOT_READY;
         fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
-        (void)fc_complete_from_nand(controller, &fail_comp);
+        if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
+        {
+            controller->fatal = true;
+        }
     }
     return FC_STATUS_IO_ERROR;
 }
@@ -710,7 +723,10 @@ static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
     fail_comp.execution_status = NAND_RESULT_NOT_READY;
     fail_comp.failed_cw        = NAND_CW_INVALID;
     fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
-    (void)fc_complete_from_nand(controller, &fail_comp);
+    if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
+    {
+        controller->fatal = true;
+    }
 }
 
 /**
@@ -754,9 +770,7 @@ static fc_status_e fc_build_request_data_planes(const fc_ctl_s *controller, cons
         const BYTE       n     = fc_cw_flat(plane, paa_to_cw(desc->paa));
 
         /* 链的坐标/重复/buffer/行一致/覆盖已由 fc_pool_chain_validate 在提交边界校验；
-         * 这里只保留局部下标自检。 */
-        ASSERT((plane < PLANE_NUM) && (n < CW_TOTAL_MAX));
-        ASSERT((request->cw_bitmap & (1UL << n)) == 0UL);
+         * 这里直接按已验证的链落位，不再重复断言。 */
 
         // 带数据命令的每个 desc 都必须有 buffer；INVALID 是建链失败后的半成品，
         // 不能把 NULL 指针交给 NAND 层（release 会 memcpy(NULL)）。
@@ -1254,9 +1268,6 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
     WORD total;
     WORD k;
 
-    ASSERT(queue != NULL);
-    ASSERT(dispatched != NULL);
-
     total = queue->count;
 
     for (k = 0U; k < total; k++)
@@ -1399,32 +1410,27 @@ static fc_status_e fc_poll_fill(fc_ctl_s *controller)
     return ((scheduler->sq->count == 0U) && (scheduler->hsq->count == 0U)) ? FC_STATUS_QUEUE_EMPTY : FC_STATUS_NOT_READY;
 }
 
-/* ── NAND 完成回调上下文 + sink ──
+/* ── NAND 完成回调 ──
  * fc_nand_dispatch_poll 每产出一条完成就调一次 fc_nand_completion_sink；每条当场消费
- * （写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），不跨条缓存。 */
-typedef struct FC_NAND_SINK_CONTEXT_S
-{
-    fc_ctl_s *controller;
-    BOOL      fatal; /* fc_complete_from_nand 返回非 OK：当前仅 CQ 满，完成项未进 CQ。
-                      * NAND 命令自身的失败不置位——它随 completion → CQ entry 上报。 */
-} fc_nand_sink_ctx_s;
+ * （写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），不跨条缓存。
+ * ctx 直接传 fc_ctl_s *：fatal 是控制器级 sticky 状态，不再额外包一层 sink 结构。 */
 
 /**
  * @brief NAND 完成回调：把一条 NAND 完成当场转成 FC 完成项（含 stripe parity 清理）。
  *
  * @param nand_completion NAND 层完成项
- * @param ctx 回调上下文，实际类型为 fc_nand_sink_ctx_s *
+ * @param ctx FC 控制器（fc_ctl_s *）
  *
  * @note 每条完成当场消费（写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），
- * 不跨条缓存；fc_complete_from_nand 返回非 OK 时在上下文中置 fatal。
+ * 不跨条缓存；fc_complete_from_nand 返回非 OK 时置 controller->fatal。
  */
 static void fc_nand_completion_sink(const fc_nand_dispatch_comp_s *nand_completion, void *ctx)
 {
-    fc_nand_sink_ctx_s *sink_ctx = (fc_nand_sink_ctx_s *)ctx;
+    fc_ctl_s *controller = (fc_ctl_s *)ctx;
 
-    if (fc_complete_from_nand(sink_ctx->controller, nand_completion) != FC_STATUS_OK)
+    if (fc_complete_from_nand(controller, nand_completion) != FC_STATUS_OK)
     {
-        sink_ctx->fatal = true;
+        controller->fatal = true;
     }
 
     /* ── Stripe parity 清理 ──
@@ -1434,11 +1440,11 @@ static void fc_nand_completion_sink(const fc_nand_dispatch_comp_s *nand_completi
         fc_cmd_id_t completed_id = nand_completion->cmd_id;
         // cmd_id 是 FC 投递给 NAND 的池内 ID，fc_complete_from_nand 已断言过范围
         ASSERT(completed_id < FC_COMMAND_POOL_DEPTH);
-        if (sink_ctx->controller->stripe_parity_for_data[completed_id] != FC_CMD_ID_INVALID)
+        if (controller->stripe_parity_for_data[completed_id] != FC_CMD_ID_INVALID)
         {
-            fc_cmd_id_t parity_id                                      = sink_ctx->controller->stripe_parity_for_data[completed_id];
-            sink_ctx->controller->stripe_parity_for_data[completed_id] = FC_CMD_ID_INVALID;
-            fc_stripe_release_parity(sink_ctx->controller, parity_id);
+            fc_cmd_id_t parity_id                            = controller->stripe_parity_for_data[completed_id];
+            controller->stripe_parity_for_data[completed_id] = FC_CMD_ID_INVALID;
+            fc_stripe_release_parity(controller, parity_id);
         }
     }
 #endif /* CONFIG_FC_RAID */
@@ -1450,27 +1456,35 @@ static void fc_nand_completion_sink(const fc_nand_dispatch_comp_s *nand_completi
  * @return FC_STATUS_OK          本轮有完成被消费，或有命令被下发。
  *         FC_STATUS_QUEUE_EMPTY 无完成且 SQ/HSQ 均为空。
  *         FC_STATUS_NOT_READY   无完成，队列非空但当前无 LUN 可下发（背压）。
- *         FC_STATUS_IO_ERROR    CQ 满或命令下发失败。
+ *         FC_STATUS_IO_ERROR    CQ 满、时间源不可用或命令下发失败。
  */
 fc_status_e fc_service(void)
 {
-    fc_ctl_s          *controller = &g_fc_controller;
-    fc_status_e        result;
-    fc_nand_sink_ctx_s sink_ctx;
+    fc_ctl_s *controller = &g_fc_controller;
 
-    sink_ctx.controller = controller;
-    sink_ctx.fatal      = false;
-
-    const BYTE delivered = fc_nand_dispatch_poll(fc_nand_completion_sink, &sink_ctx);
-
-    // 完成项未能进 CQ（当前仅 CQ 满）是 fatal：先于 fill 返回，避免继续提交。
-    // NAND 命令自身的失败不是故障——状态已随 completion 进了 CQ entry。
-    if (sink_ctx.fatal == true)
+    // sticky fatal：CQ 满/时间源缺失后不再继续提交，直到 fc_init 清零。
+    if (controller->fatal == true)
     {
         return FC_STATUS_IO_ERROR;
     }
 
-    result = fc_poll_fill(controller);
+    const BYTE delivered = fc_nand_dispatch_poll(fc_nand_completion_sink, controller);
+
+    if (fc_nand_dispatch_fatal() == true)
+    {
+        controller->fatal = true;
+    }
+    if (controller->fatal == true)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+
+    const fc_status_e result = fc_poll_fill(controller);
+
+    if (controller->fatal == true)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
 
     if (delivered == 0U)
     {
@@ -1574,7 +1588,7 @@ fc_status_e fc_submit(fc_cmd_s *cmd)
 
     /* ── 校验段：提交是唯一入队边界 —— debug ASSERT + release 拒绝（判据 9）。 ── */
     ASSERT_REJECT(fc_command_to_id(cmd, &cmd_id), FC_STATUS_INVALID_ARGUMENT, "submit: command pointer not in pool");
-    ASSERT_REJECT(fc_command_state_get(&g_fc_controller, cmd_id) == FC_COMMAND_STATE_ALLOCATED,
+    ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                   FC_STATUS_INVALID_ARGUMENT,
                   "submit: cmd=%hu not ALLOCATED",
                   cmd_id);
@@ -1598,8 +1612,9 @@ fc_status_e fc_submit(fc_cmd_s *cmd)
  */
 fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
 {
-    ASSERT(cmds != NULL);
-    ASSERT(n > 0U);
+    ASSERT_REJECT((cmds != NULL) && (n > 0U),
+                  FC_STATUS_INVALID_ARGUMENT,
+                  "batch: cmds/n invalid");
 
     WORD  sq_need        = 0U;
     WORD  hsq_need       = 0U;
@@ -1623,7 +1638,7 @@ fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
         }
 
         ASSERT_REJECT(fc_command_to_id(cmd, &cmd_id), FC_STATUS_INVALID_ARGUMENT, "batch: command pointer not in pool");
-        ASSERT_REJECT(fc_command_state_get(&g_fc_controller, cmd_id) == FC_COMMAND_STATE_ALLOCATED,
+        ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                       FC_STATUS_INVALID_ARGUMENT,
                       "batch: cmd=%hu not ALLOCATED",
                       cmd_id);
@@ -1671,9 +1686,14 @@ fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
     {
         const fc_status_e st = fc_sched_submit(&g_fc_controller, cmds[i]);
 
-        // 预检通过后入队不可能失败；失败即队列不变量被破坏。
+        // 预检通过后入队不可能失败；失败即队列不变量被破坏：
+        // debug 停机；release 记 sticky fatal，不再继续半批。
         ASSERT(st == FC_STATUS_OK);
-        (void)st;
+        if (st != FC_STATUS_OK)
+        {
+            g_fc_controller.fatal = true;
+            return FC_STATUS_IO_ERROR;
+        }
     }
 
     return FC_STATUS_OK;
@@ -1706,7 +1726,7 @@ void fc_debug_state_get(fc_debug_state_s *out)
         const fc_cmd_s *cmd = fc_command_id_to_command(sq_id);
 
         out->sq_head_id    = sq_id;
-        out->sq_head_state = (BYTE)fc_command_state_get(&g_fc_controller, sq_id);
+        out->sq_head_state = (BYTE)g_fc_controller.command_state[sq_id];
         out->sq_head_chain = (WORD)cmd->config.chain;
         out->sq_head_op    = (BYTE)cmd->config.operation;
     }
@@ -1757,21 +1777,21 @@ void fc_get_resource_stats(fc_resource_stats_s *stats)
 
     for (WORD index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
-        if (fc_command_state_get(&g_fc_controller, index) != FC_COMMAND_STATE_FREE)
+        if (g_fc_controller.command_state[index] != FC_COMMAND_STATE_FREE)
         {
             command_scan++;
         }
     }
     for (WORD index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
     {
-        if (fc_descriptor_owner_get(&g_fc_controller, index) != FC_CMD_ID_INVALID)
+        if (g_fc_controller.descriptor_owner[index] != FC_CMD_ID_INVALID)
         {
             descriptor_scan++;
         }
     }
     for (WORD index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
     {
-        if (fc_buffer_state_get(&g_fc_controller, index) != FC_BUFFER_STATE_FREE)
+        if (g_fc_controller.buffer_state[index] != FC_BUFFER_STATE_FREE)
         {
             buffer_scan++;
         }

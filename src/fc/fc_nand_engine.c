@@ -109,13 +109,10 @@ nand_result_e fc_uop_engine_start(fc_uop_engine_state_s *state, const nand_uop_s
     /* 前置条件由调用者保证（见 fc_nand_engine.h）：state->backend/request/completion 三指针
      * 随事务固定（fc_nand_dispatch_task_load / fc_nand_start 绑定），uops/timing 取自
      * g_nand_operation_map[operation]（调用者已判 map->uops != NULL）。 */
-    ASSERT(state != NULL);
     ASSERT(state->backend != NULL);
     ASSERT(state->backend->handlers != NULL);
     ASSERT(state->request != NULL);
     ASSERT(state->completion != NULL);
-    ASSERT(uops != NULL);
-    ASSERT(timing != NULL);
     /* busy_timeout_us 为 0 会让忙等双条件首次即判超时（elapsed>=0 恒真），属时序表配置错误 */
     ASSERT(timing->busy_timeout_us > 0U);
 
@@ -224,7 +221,6 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
      * fc_uop_engine_start 填好。fc_nand_step 已先判 active，fc_uop_engine_execute 的
      * 循环与 start 内部调用也都在 active==1 时进入。 */
     // 三指针/表由 fc_uop_engine_start 的入口断言保证；step 只守“仍 active”这个每步都可能变的状态。
-    ASSERT(state != NULL);
     ASSERT(state->active != 0U);
 
     for (; state->uop_index < NAND_ENGINE_MAX_UOPS;)
@@ -399,8 +395,7 @@ nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const na
     transaction->request           = *request;
     transaction->request.operation = operation;
     memset(&transaction->completion, 0, sizeof(transaction->completion));
-    /* backend 由 dispatch 的任务装载处绑定；未绑定属调用者违约。 */
-    ASSERT(transaction->engine.backend != NULL);
+    /* backend 由 dispatch 的任务装载处绑定；engine_start 统一校验。 */
     result = fc_uop_engine_start(&transaction->engine, map->uops, &map->timing);
     if (result != NAND_RESULT_NOT_READY)
     {
@@ -423,7 +418,6 @@ nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completi
 
     ASSERT(transaction != NULL);
     ASSERT(completion != NULL);
-    ASSERT(transaction->engine.active != 0U);
 
     result = fc_uop_engine_step(&transaction->engine);
     if (result != NAND_RESULT_NOT_READY)

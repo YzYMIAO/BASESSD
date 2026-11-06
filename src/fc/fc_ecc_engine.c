@@ -35,7 +35,7 @@ typedef struct FC_LDPC_QC_S
 } fc_ldpc_qc_s;
 
 static fc_ldpc_qc_s *fc_ldpc_qc_init(BYTE max_iter);
-static void          fc_ldpc_qc_encode(const fc_ldpc_qc_s *qc, const BYTE *data_in, BYTE *data_out);
+static void          fc_ldpc_qc_encode(const BYTE *data_in, BYTE *data_out);
 static fc_status_e   fc_ldpc_qc_decode(fc_ldpc_qc_s *qc, BYTE *data);
 
 static fc_ldpc_qc_s *s_qc = NULL;
@@ -159,7 +159,7 @@ fc_status_e fc_ecc_encode(BYTE *data, WORD data_length)
         BYTE tmp[FC_BUFFER_POOL_CW_SIZE];
 
         memcpy(tmp, data, full_len);
-        fc_ldpc_qc_encode(g_qc, tmp, data);
+        fc_ldpc_qc_encode(tmp, data);
     }
 
     return FC_STATUS_OK;
@@ -393,20 +393,18 @@ static void qc_expand_links(void)
  *
  * 引擎未初始化时静默返回不写 data_out——调用方须保证先 init。
  *
- * @param qc      引擎句柄（校验矩阵为文件内静态表，未使用）
  * @param data_in 528B 码字缓冲（前 520B 为数据）
  * @param data_out 输出：528B 码字（数据 + parity）
+ *
+ * @note 校验矩阵为文件内静态表，不需要引擎句柄。
  */
-static void fc_ldpc_qc_encode(const fc_ldpc_qc_s *qc, const BYTE *data_in, BYTE *data_out)
+static void fc_ldpc_qc_encode(const BYTE *data_in, BYTE *data_out)
 {
     BYTE  parity[8];
     DWORD bit_pos, i;
 
-    ASSERT(qc != NULL);
     ASSERT(data_in != NULL);
     ASSERT(data_out != NULL);
-
-    (void)qc; /* qc 本实现未用（校验矩阵为文件内静态表）；NDEBUG 下断言裁空后靠它消警告 */
 
     if (g_initialized == false)
     {

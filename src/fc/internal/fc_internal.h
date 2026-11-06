@@ -108,6 +108,10 @@ extern "C"
         fc_desc_id_t descriptor_free_head;
         fc_buf_id_t  buffer_free_head;
 
+        /* 本轮/本上电周期的 sticky fatal：CQ 满（完成项丢失）、时间源不可用等
+         * 不可继续的错误。fc_service 每轮返回 IO_ERROR，直到 fc_init 清零。 */
+        BOOL fatal;
+
         /* O(1) 资源计数：只在分配/释放闸门增减；高水位用于诊断与容量调参。 */
         WORD command_used;
         WORD descriptor_used;

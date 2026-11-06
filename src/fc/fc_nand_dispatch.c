@@ -202,7 +202,7 @@ typedef struct FC_NAND_DISPATCH_LUN_QUEUE_S
 typedef void (*fc_nand_dispatch_req_handler_fn_t)(fc_nand_dispatch_task_s *task);
 
 /* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_cw。 */
-typedef void (*fc_nand_dispatch_completion_handler_fn_t)(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion);
+typedef void (*fc_nand_dispatch_completion_handler_fn_t)(fc_nand_dispatch_task_s *task, BYTE result);
 
 /* OP_COUNT 项，OP_* 直接作为下标。 */
 extern const fc_nand_dispatch_req_handler_fn_t        g_fc_nand_dispatch_req_table[OP_COUNT];
@@ -219,6 +219,9 @@ static fc_nand_dispatch_lun_queue_s g_fc_nand_dispatch_queues[CH_NUM][CE_NUM][LU
  * 本层只查询，不定义——dispatch → engine 单向依赖。 */
 /* 上次有完成产出的通道的下一个通道；下一轮从这里开始扫描，形成通道 round-robin。 */
 static BYTE s_poll_next_channel;
+/* 不可继续的调度层错误（当前：µs 时间源不可用，无法执行最短忙期等待）。
+ * fc.c 每轮 poll 后查询，转成控制器 fatal。 */
+static BOOL s_dispatch_fatal;
 
 /* 页缓冲固定在 AXI_NOCACHE（与基线一致）。
  * 板端实验：放到 DTCM 时 multi-plane program 的 handler 收到了正确的
@@ -268,7 +271,7 @@ static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_s *task, BYTE r
     task->completion.nand_status      = nand_completion->nand_status;
     task->completion.pre_status       = nand_completion->pre_status;
 
-    g_fc_nand_dispatch_completion_table[task->operation](task, result, nand_completion);
+    g_fc_nand_dispatch_completion_table[task->operation](task, result);
 }
 
 /**
@@ -350,6 +353,17 @@ void fc_nand_dispatch_init(void)
     memset(g_nand_channel_page_buffer, 0, sizeof(g_nand_channel_page_buffer));
     fc_nand_engine_set_armed(0U);
     s_poll_next_channel = 0U;
+    s_dispatch_fatal    = false;
+}
+
+/**
+ * @brief 调度层是否出现不可继续的 fatal（当前仅 µs 时间源不可用）。
+ *
+ * @return true = fatal，fc.c 应把控制器 fatal 置位并终止服务。
+ */
+BOOL fc_nand_dispatch_fatal(void)
+{
+    return s_dispatch_fatal;
 }
 
 /**
@@ -362,9 +376,7 @@ void fc_nand_dispatch_init(void)
  */
 BYTE fc_nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
 {
-    /* 唯一调用者是 fc_poll_fill，且调用前已 ASSERT 过 ch/ce/lun（同源值）。
-     * 保留防御会退化成静默活锁（越界 → 恒 0 → 该 LUN 永久挂起），断言停机更好定位。 */
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    // route 合法性由唯一生产调用者 fc_poll_fill_queue 在入口断言。
     return (NAND_DISPATCH_CHAIN_DEPTH - g_fc_nand_dispatch_queues[ch][ce][lun].count);
 }
 
@@ -378,7 +390,7 @@ BYTE fc_nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
  */
 BYTE fc_nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun)
 {
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    // 诊断查询；调用点使用固定 (0,0,0) 或已验证 route。
     return (BYTE)g_fc_nand_dispatch_queues[ch][ce][lun].count;
 }
 
@@ -392,7 +404,7 @@ BYTE fc_nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun)
  */
 BYTE fc_nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun)
 {
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    // 诊断查询；调用点使用固定 (0,0,0) 或已验证 route。
     return g_fc_nand_dispatch_queues[ch][ce][lun].phase;
 }
 
@@ -426,19 +438,27 @@ static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_req_s *requ
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    /* 入参前置条件由调用者（fc.c 提交路径）保证 */
-    ASSERT(requests != NULL);
-    ASSERT((count != 0U) && (count <= NAND_DISPATCH_CHAIN_DEPTH));
-    /* 整批逐条校验（不只 [0]）：队列按 requests[0] 的 LUN 选取，链成员必须同 LUN；
+    /* NAND dispatch 是请求的唯一入口边界：debug 停机 + release 返回 INVALID_ARGUMENT。
+     * 整批逐条校验（不只 [0]）：队列按 requests[0] 的 LUN 选取，链成员必须同 LUN；
      * 掩码上界是 completion_* 写 cw_status[n] 的前置。 */
+    ASSERT_REJECT(requests != NULL, NAND_RESULT_INVALID_ARGUMENT, "dispatch: requests NULL");
+    ASSERT_REJECT((count != 0U) && (count <= NAND_DISPATCH_CHAIN_DEPTH),
+                  NAND_RESULT_INVALID_ARGUMENT,
+                  "dispatch: count=%hhu out of range",
+                  count);
     for (i = 0U; i < count; i++)
     {
-        ASSERT(requests[i].ch < CH_NUM);
-        ASSERT(requests[i].ce < CE_NUM);
-        ASSERT(requests[i].lun < LUN_NUM);
-        ASSERT((requests[i].ch == requests[0U].ch) && (requests[i].ce == requests[0U].ce) && (requests[i].lun == requests[0U].lun));
+        ASSERT_REJECT(requests[i].ch < CH_NUM, NAND_RESULT_INVALID_ARGUMENT, "dispatch ch=%hhu", requests[i].ch);
+        ASSERT_REJECT(requests[i].ce < CE_NUM, NAND_RESULT_INVALID_ARGUMENT, "dispatch ce=%hhu", requests[i].ce);
+        ASSERT_REJECT(requests[i].lun < LUN_NUM, NAND_RESULT_INVALID_ARGUMENT, "dispatch lun=%hhu", requests[i].lun);
+        ASSERT_REJECT((requests[i].ch == requests[0U].ch) && (requests[i].ce == requests[0U].ce) && (requests[i].lun == requests[0U].lun),
+                      NAND_RESULT_INVALID_ARGUMENT,
+                      "dispatch: chain member not same target");
         ASSERT_REJECT(requests[i].operation < OP_COUNT, NAND_RESULT_INVALID_ARGUMENT, "dispatch op=%hhu out of range", requests[i].operation);
-        ASSERT((requests[i].cw_bitmap & ~(((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL);
+        ASSERT_REJECT((requests[i].cw_bitmap & ~(((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL,
+                      NAND_RESULT_INVALID_ARGUMENT,
+                      "dispatch: cw_bitmap=0x%08lX out of range",
+                      requests[i].cw_bitmap);
     }
 
     queue = &g_fc_nand_dispatch_queues[requests[0U].ch][requests[0U].ce][requests[0U].lun];
@@ -688,8 +708,13 @@ static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_drive(fc_nand_dispatc
     {
         fc_nand_dispatch_task_complete(task, result, &ctx->nand_completion);
         ctx->queue->phase = LUN_PHASE_ISSUED;
-        /* 记录 tR/tPROG/tBERS 起点，供 ISSUED 块最短等待用 */
-        (void)delay_time_now_us(&ctx->queue->wait_start_us);
+        /* 记录 tR/tPROG/tBERS 起点，供 ISSUED 块最短等待用。
+         * 时间源不可用时不能留下陈旧时间戳（ISSUED 会永等），转 dispatch fatal。 */
+        if (delay_time_now_us(&ctx->queue->wait_start_us) == false)
+        {
+            s_dispatch_fatal = true;
+            LOGE("fc: time source unavailable; dispatch fatal\r\n");
+        }
         return NAND_DISPATCH_LUN_WAIT; /* 不报完成，下一轮由 ISSUED 块接管 */
     }
     return NAND_DISPATCH_LUN_DONE;
@@ -776,9 +801,8 @@ static fc_nand_dispatch_cw_outcome_e fc_nand_dispatch_task_cw_chain(fc_nand_disp
             WORD cw_column = (cw * CW_SIZE);
 
             memset(&task->request, 0, sizeof(task->request));
-            task->request.column = cw_column;
-            task->request.row[0] = paa_to_nand_row(task->plane_paa[plane]);
-            ASSERT(task->cw_buffers[task->cw_index] != NULL);
+            task->request.column      = cw_column;
+            task->request.row[0]      = paa_to_nand_row(task->plane_paa[plane]);
             task->request.buffer      = task->cw_buffers[task->cw_index];
             task->request.data_length = CW_SIZE;
         }
@@ -922,6 +946,10 @@ BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx)
                     delivered++;
                     s_poll_next_channel = (BYTE)((channel + 1U) % CH_NUM);
                 }
+                if (s_dispatch_fatal == true)
+                {
+                    return delivered; /* 时间源缺失：不再推进其他 LUN */
+                }
             }
         }
     }
@@ -971,14 +999,12 @@ static void req_init(fc_nand_dispatch_task_s *task, WORD column, BYTE *data, WOR
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
- * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
+static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
 
-    (void)nand_completion;
     if (task->cw_bitmap == 0U)
     {
         task->completion.cw_status[0] = status;
@@ -1005,13 +1031,11 @@ static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result, const
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
- * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
+static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
 
-    (void)nand_completion;
     task->completion.cw_status[task->cw_index] = status;
     if (result != NAND_RESULT_OK)
     {
@@ -1026,14 +1050,12 @@ static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result, const 
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
- * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_single(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
+static void completion_single(fc_nand_dispatch_task_s *task, BYTE result)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
 
-    (void)nand_completion;
     if (task->cw_bitmap == 0U)
     {
         task->completion.cw_status[0] = status;
@@ -1052,14 +1074,12 @@ static void completion_single(fc_nand_dispatch_task_s *task, BYTE result, const 
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
- * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_load(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
+static void completion_load(fc_nand_dispatch_task_s *task, BYTE result)
 {
     BYTE status;
     BYTE i;
 
-    (void)nand_completion;
     if (result == NAND_RESULT_OK)
     {
         return;
@@ -1091,8 +1111,6 @@ static void req_program_page(fc_nand_dispatch_task_s *task)
     memset(page_buffer, 0xFF, PAGE_SIZE);
     for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
-        /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
-        ASSERT(task->cw_buffers[n] != NULL);
         /* 页缓冲内的偏移 = CW 号 × CW_SIZE；CW 号就是 n % CW_NUM
          * （未写到的 CW 保持上面的 0xFF 擦除态）。 */
         memcpy(&page_buffer[(n % CW_NUM) * CW_SIZE], task->cw_buffers[n], CW_SIZE);
@@ -1126,7 +1144,6 @@ static void req_read_page(fc_nand_dispatch_task_s *task)
     /* 掩码最低位 = 本 plane 第一个要访问的 CW（其缓冲由 FC 数据路径填满，恒非空） */
     cw_buffer = task->cw_buffers[fc_nand_dispatch_cw_first_or_zero(task->cw_bitmap)];
 
-    ASSERT(cw_buffer != NULL);
     req_init(task, 0U, cw_buffer, CW_SIZE);
     task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
@@ -1140,14 +1157,8 @@ static void req_read_page(fc_nand_dispatch_task_s *task)
  */
 static void req_cache_read(fc_nand_dispatch_task_s *task)
 {
-    BYTE  n;
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
-    for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
-    {
-        /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
-        ASSERT(task->cw_buffers[n] != NULL);
-    }
     memset(page_buffer, 0x00, PAGE_SIZE);
     req_init(task, 0U, page_buffer, PAGE_SIZE);
     task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
@@ -1303,8 +1314,6 @@ static void req_multi_plane_program(fc_nand_dispatch_task_s *task)
     memset(page_buffer, 0xFF, PAGE_BUFFER_SIZE);
     for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
-        /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
-        ASSERT(task->cw_buffers[n] != NULL);
         memcpy(&page_buffer[(n / CW_NUM) * PAGE_SIZE + (n % CW_NUM) * CW_SIZE], task->cw_buffers[n], CW_SIZE);
     }
 

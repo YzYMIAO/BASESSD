@@ -84,6 +84,10 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
  * Pure software reset (memset + disarm), no failure path. */
 void fc_nand_dispatch_init(void);
 
+/* 调度层 fatal 查询：当前仅 µs 时间源不可用（无法执行最短忙期等待）。
+ * fc.c 每轮 poll 后查询，非零时把控制器 fatal 置位。 */
+BOOL fc_nand_dispatch_fatal(void);
+
 /* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
  * dispatch 只查询，不再提供自己的 set/is 入口。 */
 
