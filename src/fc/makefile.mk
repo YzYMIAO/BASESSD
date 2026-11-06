@@ -1,6 +1,8 @@
 # Flash controller module：控制面 + 命令分发（NAND 器件/PHY 在 src/nand/）。
 MODULE_SRCS += $(wildcard $(SRC_ROOT)/fc/*.c)
 MODULE_INCS += $(INC_ROOT)/fc
+# FC 私有头（池 / 控制器/调度器）：不放进公共 include 目录。
+MODULE_INCS += $(SRC_ROOT)/fc/internal
 
 # FMC NAND 测试仅在显式启用时编入固件，默认产品固件不包含破坏性测试代码。
 ifeq ($(FC_NAND_TEST_ENABLE),1)

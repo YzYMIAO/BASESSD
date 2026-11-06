@@ -5,9 +5,10 @@
  * fc_interface.h — FC 对外接口声明（FTL / 主循环 / 测试 使用）
  *
  * 与 fc.h 的分工：
- *   fc.h             ：类型、宏、资源池配置、功能开关、资源统计结构
- *   fc_interface.h   ：对外函数声明（本文件）
- *   fc.c             ：全部实现（三池/生命周期/调度 + 本头声明的对外 API）
+ *   fc.h             ：公共 umbrella，只 include 公共头
+ *   fc_interface.h   ：对外 API + 公共资源池/队列/布局配置（本文件）
+ *   fc.c / fc_pool.c ：实现
+ *   私有头           ：src/fc/internal/fc_pool.h / fc_internal.h，FTL 不可见
  *
  * 对外接口分组：
  *   ① 初始化            fc_init
@@ -35,7 +36,39 @@
  */
 
 #include "fc_command.h"
-#include "nand_config.h" /* DWORD（对外函数的行地址形参） */
+#include "nand_config.h" /* DWORD / CW_SIZE */
+
+/* ── 功能特性开关 ── */
+
+/*
+ * Stripe RAID 功能使能。
+ *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_cfg_s.config.raid 固定为 NORMAL。
+ *   1 = 启用。跨 Plane RAID XOR parity generation + recovery。
+ *
+ * 当前未启用（功能代码已完成但未验证，待硬件就绪后开启）。
+ */
+#ifndef CONFIG_FC_RAID
+#    define CONFIG_FC_RAID (0U)
+#endif
+
+/* 固定资源池深度 */
+#define FC_COMMAND_POOL_DEPTH    (64U)
+#define FC_DESCRIPTOR_POOL_DEPTH (256U)
+#define FC_BUFFER_POOL_DEPTH     (128U)
+#define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
+
+/*
+ * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
+ * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
+ */
+#define FC_BUFFER_USER_OFFSET (8U)   /* USER 区域在 CW 中的偏移 */
+#define FC_BUFFER_USER_SIZE   (512U) /* 暴露给 FTL 的用户数据大小 */
+#define FC_BUFFER_DATA_SIZE   (520U) /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
+
+/* 队列深度 */
+#define FC_SQ_DEPTH  (64U)
+#define FC_HSQ_DEPTH (16U)
+#define FC_CQ_DEPTH  (64U)
 
 #ifdef __cplusplus
 extern "C"
@@ -401,6 +434,9 @@ extern "C"
      * @param stats 统计结果出参；须非空。
      */
     void fc_get_resource_stats(fc_resource_stats_s *stats);
+
+    /** @brief 开机横幅：打印 FC 固定资源池/队列深度、通道拓扑与数据通路配置（全编译期常量）。 */
+    void fc_boot_report(void);
 
 #ifdef __cplusplus
 }

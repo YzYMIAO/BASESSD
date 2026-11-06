@@ -7,8 +7,11 @@
  *   - 命令/描述符/缓冲的分配、释放、链遍历；
  *   - 池相关的公开 API（建链、命令释放、buffer 访问、链查询）。
  *
- * 提交/填充/完成调度在 fc.c；两文件共享的定义见 fc_internal.h。
+ * 提交/填充/完成调度在 fc.c；池私有契约见 fc_pool.h，控制器/调度器共享定义见
+ * fc_internal.h（两个私有头都在 src/fc/internal/）。
  */
+
+#include "fc_pool.h"
 
 #include "assertion.h"
 #include "fc_internal.h"

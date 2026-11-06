@@ -1,6 +1,7 @@
 #ifndef FC_DATA_PATH_H
 #define FC_DATA_PATH_H
 
+#include "fc_interface.h" /* CONFIG_FC_RAID */
 #include "fc_types.h"
 #include "nand_config.h" /* PLANE_NUM / DWORD */
 

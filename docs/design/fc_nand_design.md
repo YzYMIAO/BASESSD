@@ -61,9 +61,10 @@
 │  FTL / Controller / NVMe                         │  ← 上层调用者
 ├─────────────────────────────────────────────────┤
 │  FC 模块 (Flash Controller)                       │  ← 命令配置、队列、调度
-│  fc.h  ─ 对上层提供的统一接口（类型/宏，include fc_interface.h）│
-│  ├── fc_interface.h/c  对外接口声明 + 实现（薄壳，单例控制器） │
-│  ├── fc_internal.h     fc.c ↔ fc_interface.c 共享内部签名     │
+│  fc.h  ─ 公共 umbrella（只 include fc_command.h + fc_interface.h）│
+│  ├── fc_interface.h   对外 API + 公共池/队列/布局配置           │
+│  ├── src/fc/internal/fc_pool.h     池私有契约                 │
+│  ├── src/fc/internal/fc_internal.h 控制器/调度器共享定义       │
 │  ├── fc_command.c/h   命令 & Descriptor 结构定义    │
 │  ├── fc_queue.c/h     SQ / HSQ / CQ 环形队列       │
 │  ├── fc_data_path.c/h 数据路径编排（CRC→Random→ECC→RAID）│
@@ -95,7 +96,7 @@
 
 1. **固定资源池 + 空闲链表**：所有资源（Command、Descriptor、Buffer）在 .bss 中静态分配，使用空闲链表实现 O(1) 分配释放，不使用动态内存。
 2. **ID 引用代替指针**：对外暴露 16-bit 资源 ID，内部通过 ID→指针转换函数访问，避免指针悬挂和跨模块直接访问。
-3. **FC 封装内部状态**：`fc_ctl_s` 结构体定义在 `fc_internal.h`，仅 `fc.c`/`fc_interface.c` 内部可见，对外只提供函数接口。
+3. **FC 封装内部状态**：`fc_ctl_s` 结构体定义在 `src/fc/internal/fc_internal.h`，仅 `fc.c`/`fc_pool.c` 内部可见，对外只提供函数接口。
 4. **异步非阻塞**：提交命令立即返回，通过 `fc_service()` 轮询推进，`fc_poll_completion()` 获取结果。
 
 ### 流程图：分层架构与数据流总览（图 0）
@@ -111,7 +112,7 @@
 │  FC 模块（firmware 层：命令池 / desc 链 / buffer 池）          │
 │    fc_command.c     命令与 Descriptor 结构                    │
 │    fc_queue.c       SQ / HSQ / CQ 环形队列                    │
-│    fc.c / fc_internal.h 调度器状态（SQ/HSQ 绑定；填充在 fc.c）│
+│    fc.c / src/fc/internal/fc_internal.h 调度器状态（SQ/HSQ 绑定；填充在 fc.c）│
 │    fc_data_path.c   写: META→CRC→加扰→ECC→Stripe RAID        │
 │                    读: ECC→解扰→CRC→META (+ RAID 恢复)       │
 │    fc_crc/random/bch/ecc/raid_engine.c  软件引擎              │
@@ -539,11 +540,12 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 | 文件 | 内容 |
 |------|------|
-| `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
-| `include/fc/fc_interface.h` | 对外函数声明（21 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
-| `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_ctl_s` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
-| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_poll_fail_command` 四个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
-| `src/fc/fc_interface.c` | 对外函数实现（单例 `g_fc_controller`）+ **建链机制体**（v17 起 `fc_command_configure_descriptor` 在此；除建链编排外为参数校验 + 转发 internal） |
+| `include/fc/fc.h` | 公共 umbrella：只 include `fc_command.h` + `fc_interface.h`，不定义配置/函数 |
+| `include/fc/fc_interface.h` | 对外函数声明 + 公共资源池/队列/布局配置（6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
+| `src/fc/internal/fc_pool.h` | 池私有契约（状态枚举、buffer 行、池原语）——FTL 不得 include |
+| `src/fc/internal/fc_internal.h` | fc.c ↔ fc_pool.c 共享控制器/调度器定义（`fc_ctl_s`、`g_fc_controller`）——FTL 不得 include |
+| `src/fc/fc.c` | 核心实现：调度/提交/完成/服务主循环、Stripe RAID、诊断 |
+| `src/fc/fc_pool.c` | 三池、空闲链表、生命周期状态机、链校验与释放原语 |
 
 ```c
 /* 全部声明见 fc_interface.h，此处仅示意签名 */
@@ -4304,7 +4306,7 @@ nand_init()
 
   失败旁路：fc_poll_fail_command → 合成 NAND_FAIL 完成项（QUEUED → COMPLETED）
   CQ 满旁路：fc_complete_internal 强制置 COMPLETED + IO_ERROR
-  状态存储：g_fc_command_state[]（include/fc/fc_internal.h）
+  状态存储：g_fc_command_state[]（src/fc/fc_pool.c）
 ```
 
 ### 23.4 流程图：`fc_service()` 单步全景（图 19，扩展图 2）
@@ -5191,7 +5193,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | 图 15 | FC 控制面资源装配 | `grep -n "controller->command_pool\|controller->sq\|nand_dispatch_init" src/fc/fc.c src/nand/nand_dispatch.c` |
 | 图 16 | NAND 芯片初始化 | `grep -n "HAL_NAND_Init\|nand_fmc_init\|nand_fc_reset\|nand_fc_read_id" src/nand/nand_mt29f4g08abadawp.c` |
 | 图 17 | 一条命令的端到端生命周期 | `grep -n "fc_poll_dispatch_single\|nand_dispatch_submit\|fc_complete_from_nand" src/fc/fc.c src/nand/nand_dispatch.c` |
-| 图 18 | 命令生命周期状态机 | `grep -n "FC_COMMAND_STATE_\|fc_command_alloc_internal\|fc_complete_internal" include/fc/fc_internal.h src/fc/fc.c` |
+| 图 18 | 命令生命周期状态机 | `grep -n "FC_COMMAND_STATE_\|fc_command_alloc\|fc_complete_from_nand" src/fc/internal/fc_pool.h src/fc/fc_pool.c src/fc/fc.c` |
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
 | 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_us\|min_busy_us\|delay_time_now_us" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
