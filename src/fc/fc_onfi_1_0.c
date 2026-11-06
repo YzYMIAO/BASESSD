@@ -2,7 +2,7 @@
  * onfi_1_0.c — ONFI 命令集 → UOP 序列 + 操作表
  *
  * 职责：定义每类 ONFI 1.0 操作（读/写/擦除/锁/特性等）的 UOP 微指令
- *       序列（nand_uop_t 数组），并组织成 g_nand_operation_map[OP_COUNT]
+ *       序列（nand_uop_s 数组），并组织成 g_nand_operation_map[OP_COUNT]
  *       操作表供上层查询。
  *
  * 调用链：
@@ -46,7 +46,7 @@ _Static_assert(PLANE_NUM == 2U, "multi-plane uops hardcode row[0]/row[1]");
 /* ── 读页（标准，含 DATA_OUT）────────────────────────────
  * 70h 轮询空闲 → 00h+C1C2R1R2R3 → 30h → tR → DATA_OUT 整页
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_normal_read_page_uops[] = {
+static const nand_uop_s g_nand_normal_read_page_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -72,7 +72,7 @@ static const nand_uop_t g_nand_normal_read_page_uops[] = {
 /* ── 读页（不含 DATA_OUT）────────────────────────────
  * 同 read_page，但 30h+tR 后数据留在页缓冲，不输出到总线；
  * 后续由 RANDOM_DATA_READ(05h-E0h) 逐 CW 读取。 */
-static const nand_uop_t g_nand_normal_read_page_without_data_out_uops[] = {
+static const nand_uop_s g_nand_normal_read_page_without_data_out_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -97,7 +97,7 @@ static const nand_uop_t g_nand_normal_read_page_without_data_out_uops[] = {
 /* CACHE_START_SEQ：单 plane Cache 读的“启动 + 第一页输出”
  * ── 00h+地址 → 30h → tR → 31h（输出本页、预取下一页）→ Dout ──
  * 后续页用 31h（无地址），末页用 3Fh。 */
-static const nand_uop_t g_nand_cache_start_seq_uops[] = {
+static const nand_uop_s g_nand_cache_start_seq_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -125,7 +125,7 @@ static const nand_uop_t g_nand_cache_start_seq_uops[] = {
 /* ── 编程页（标准）────────────────────────────
  * 70h 轮询空闲 → 80h+C1C2R1R2R3 → DATA_IN 整页 → 10h → tWB → tPROG
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_normal_program_page_uops[] = {
+static const nand_uop_s g_nand_normal_program_page_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -151,7 +151,7 @@ static const nand_uop_t g_nand_normal_program_page_uops[] = {
 /* ── 块擦除 ────────────────────────────
  * 70h 轮询空闲 → 60h+R1R2R3 → D0h → tWB → tBERS
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_erase_block_uops[] = {
+static const nand_uop_s g_nand_erase_block_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -173,7 +173,7 @@ static const nand_uop_t g_nand_erase_block_uops[] = {
 
 /* ── 复位 ────────────────────────────
  * 上电/复位：等 R/B# → FFh → 等 R/B# → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_reset_uops[] = {
+static const nand_uop_s g_nand_reset_uops[] = {
     {       NAND_UOP_WAIT_READY,                   0U},
     {          NAND_UOP_COMMAND,  NAND_ONFI_CMD_RESET},
     {       NAND_UOP_WAIT_READY,                   0U},
@@ -188,7 +188,7 @@ static const nand_uop_t g_nand_reset_uops[] = {
  * 但命令字节不同。各序列自包含，不查 operation_map。 */
 /* ── 读参数页（ECh） / 读唯一 ID（EDh） / 读特性（EEh） ─────────
  * 70h 轮询空闲 → 命令 + C1 → tR → DATA_OUT → 70h 轮询。 */
-static const nand_uop_t g_nand_read_parameter_page_uops[] = {
+static const nand_uop_s g_nand_read_parameter_page_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -204,7 +204,7 @@ static const nand_uop_t g_nand_read_parameter_page_uops[] = {
     {              NAND_UOP_END,                           0U}
 };
 /* ── 读唯一 ID（EDh）：同参数页模板，命令值不同 ── */
-static const nand_uop_t g_nand_read_unique_id_uops[] = {
+static const nand_uop_s g_nand_read_unique_id_uops[] = {
     {          NAND_UOP_COMMAND,    NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,        NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                      0U},
@@ -220,7 +220,7 @@ static const nand_uop_t g_nand_read_unique_id_uops[] = {
     {              NAND_UOP_END,                      0U}
 };
 /* ── 读特性（EEh）：同参数页模板，命令值不同 ── */
-static const nand_uop_t g_nand_get_features_uops[] = {
+static const nand_uop_s g_nand_get_features_uops[] = {
     {          NAND_UOP_COMMAND,  NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,      NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                    0U},
@@ -244,7 +244,7 @@ static const nand_uop_t g_nand_get_features_uops[] = {
  * uop->operand）⇒ 同一个数组同时服务 90h+00h（OP_READ_ID）与 90h+20h
  * （OP_READ_ONFI_SIGNATURE）；两者只差 req builder 填的 column 与 data_length。
  */
-static const nand_uop_t g_nand_read_id_uops[] = {
+static const nand_uop_s g_nand_read_id_uops[] = {
     {NAND_UOP_WAIT_READY,               0U},
     {   NAND_UOP_COMMAND, NAND_CMD_READ_ID}, /* 90h */
     {  NAND_UOP_COLUMN_0,               0U},
@@ -253,7 +253,7 @@ static const nand_uop_t g_nand_read_id_uops[] = {
 };
 /* ── 写特性（EFh） ──────────────────────────
  * 70h 轮询空闲 → EFh+C1 → DATA_IN 4B → tPROG → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_set_features_uops[] = {
+static const nand_uop_s g_nand_set_features_uops[] = {
     {          NAND_UOP_COMMAND,  NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,      NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                    0U},
@@ -270,13 +270,13 @@ static const nand_uop_t g_nand_set_features_uops[] = {
     {              NAND_UOP_END,                    0U}
 };
 /* ── 读状态（70h）：极简——发 70h 直读状态字节 ── */
-static const nand_uop_t g_nand_read_status_uops[] = {
+static const nand_uop_s g_nand_read_status_uops[] = {
     {        NAND_UOP_COMMAND, NAND_CMD_READ_STATUS}, /* 70h */
     {NAND_UOP_DATA_OUT_STATUS,                   0U},
     {            NAND_UOP_END,                   0U}
 };
 /* ── 增强读状态（78h）：带 LUN/Plane 行地址，读指定 LUN 状态 ── */
-static const nand_uop_t g_nand_read_status_enhanced_uops[] = {
+static const nand_uop_s g_nand_read_status_enhanced_uops[] = {
     {        NAND_UOP_COMMAND, NAND_CMD_READ_STATUS_ENHANCED}, /* 78h: 指定地址读任意 LUN/Plane 状态 */
     {          NAND_UOP_ROW_0,                            0U},
     {          NAND_UOP_ROW_1,                            0U},
@@ -286,7 +286,7 @@ static const nand_uop_t g_nand_read_status_enhanced_uops[] = {
     {            NAND_UOP_END,                            0U}
 };
 /* ── 随机读（05h-E0h）：页缓冲内按列地址读单个 CW ── */
-static const nand_uop_t g_nand_random_read_uops[] = {
+static const nand_uop_s g_nand_random_read_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -307,7 +307,7 @@ static const nand_uop_t g_nand_random_read_uops[] = {
  * 与 05h 版的唯一区别：命令字节为 06h，且 E0h 前多 3 个行地址周期（plane 位在行地址里，
  * 由 paa_to_nand_row() 从 PAA 编码）。行地址取 request->row[0]（operand=0），
  * 与 g_nand_multi_plane_read_with_data_out_uops 里内联的 06h 块一致。 */
-static const nand_uop_t g_nand_random_read_multi_plane_uops[] = {
+static const nand_uop_s g_nand_random_read_multi_plane_uops[] = {
     {          NAND_UOP_COMMAND,                  NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                      NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                    0U},
@@ -329,7 +329,7 @@ static const nand_uop_t g_nand_random_read_multi_plane_uops[] = {
 };
 /* READ_PAGE_CACHE_SEQ(31h) 与 READ_PAGE_CACHE_LAST(3Fh) UOP 序列相同但命令值不同 */
 /* ── Cache 读序贯（31h）：页缓冲数据被动输出，配合 CACHE_START 管线 ── */
-static const nand_uop_t g_nand_cache_read_seq_uops[] = {
+static const nand_uop_s g_nand_cache_read_seq_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -344,7 +344,7 @@ static const nand_uop_t g_nand_cache_read_seq_uops[] = {
     {              NAND_UOP_END,                           0U}
 };
 /* ── Cache 读最后页（3Fh）：输出末页数据并关闭管线 ── */
-static const nand_uop_t g_nand_cache_read_last_uops[] = {
+static const nand_uop_s g_nand_cache_read_last_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -359,7 +359,7 @@ static const nand_uop_t g_nand_cache_read_last_uops[] = {
     {              NAND_UOP_END,                            0U}
 };
 /* ── Cache 读随机（00h+地址+31h）：Cache 管线中读指定页 ── */
-static const nand_uop_t g_nand_cache_read_random_uops[] = {
+static const nand_uop_s g_nand_cache_read_random_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -381,7 +381,7 @@ static const nand_uop_t g_nand_cache_read_random_uops[] = {
 };
 /* ── 器件扩展：Two-Plane Read Cache（MT29F4G08 datasheet p.62-63）──
  * 31h/3Fh 之后必须用 06h-E0h 分别选 P0/P1 的 cache register 输出。 */
-static const nand_uop_t g_nand_cache_start_seq_mp_uops[] = {
+static const nand_uop_s g_nand_cache_start_seq_mp_uops[] = {
     {          NAND_UOP_COMMAND,                  NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                      NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                    0U},
@@ -427,7 +427,7 @@ static const nand_uop_t g_nand_cache_start_seq_mp_uops[] = {
     {              NAND_UOP_END,                                    0U},
 };
 
-static const nand_uop_t g_nand_cache_seq_mp_uops[] = {
+static const nand_uop_s g_nand_cache_seq_mp_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_PAGE_CACHE_SEQ},
     {       NAND_UOP_WAIT_READY,                                    0U},
     {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_MULTI_PLANE},
@@ -454,7 +454,7 @@ static const nand_uop_t g_nand_cache_seq_mp_uops[] = {
     {              NAND_UOP_END,                                    0U},
 };
 
-static const nand_uop_t g_nand_cache_last_mp_uops[] = {
+static const nand_uop_s g_nand_cache_last_mp_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_PAGE_CACHE_LAST},
     {       NAND_UOP_WAIT_READY,                                    0U},
     {          NAND_UOP_COMMAND, NAND_CMD_RANDOM_DATA_READ_MULTI_PLANE},
@@ -482,7 +482,7 @@ static const nand_uop_t g_nand_cache_last_mp_uops[] = {
 };
 
 /* ── 器件扩展：Two-Plane Program Page Cache（Figure 74 中间页）── */
-static const nand_uop_t g_nand_two_plane_program_cache_uops[] = {
+static const nand_uop_s g_nand_two_plane_program_cache_uops[] = {
     {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
@@ -517,7 +517,7 @@ static const nand_uop_t g_nand_two_plane_program_cache_uops[] = {
 /* ── 器件扩展：Two-Plane Program Page Cache 末页（Figure 74，10h 收尾）──
  * 15h 只把 cache 交给阵列；上一页的编程结果在 FAILC。末页开始前先查 FAILC，
  * 结束后同时查 FAIL/FAILC。普通 op31 只查 FAIL，不能用于 cache 批次末页。 */
-static const nand_uop_t g_nand_two_plane_program_cache_end_uops[] = {
+static const nand_uop_s g_nand_two_plane_program_cache_end_uops[] = {
     {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
@@ -551,7 +551,7 @@ static const nand_uop_t g_nand_two_plane_program_cache_end_uops[] = {
 };
 
 /* ── Cache 编程（80h+地址+数据+15h）：页缓冲编程，配合 Cache 管线 ── */
-static const nand_uop_t g_nand_program_cache_uops[] = {
+static const nand_uop_s g_nand_program_cache_uops[] = {
     {          NAND_UOP_COMMAND,        NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,            NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                          0U},
@@ -574,7 +574,7 @@ static const nand_uop_t g_nand_program_cache_uops[] = {
     {              NAND_UOP_END,                          0U}
 };
 /* ── 内部搬移读（00h+地址+35h）：copy-back 源页加载，数据留页缓冲 ── */
-static const nand_uop_t g_nand_internal_read_uops[] = {
+static const nand_uop_s g_nand_internal_read_uops[] = {
     {          NAND_UOP_COMMAND,        NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,            NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                          0U},
@@ -596,7 +596,7 @@ static const nand_uop_t g_nand_internal_read_uops[] = {
     {              NAND_UOP_END,                          0U}
 };
 /* ── 内部搬移编程（85h+地址+10h）：copy-back 目标页编程（无数据输入） ── */
-static const nand_uop_t g_nand_internal_program_uops[] = {
+static const nand_uop_s g_nand_internal_program_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -619,7 +619,7 @@ static const nand_uop_t g_nand_internal_program_uops[] = {
 };
 /* BLOCK_UNLOCK_LOW(23h) 与 BLOCK_UNLOCK_HIGH(24h) 序列相同但命令值不同 */
 /* ── 块解锁低段（23h）/ 高段（24h）：行地址 + 状态确认 ── */
-static const nand_uop_t g_nand_block_unlock_low_uops[] = {
+static const nand_uop_s g_nand_block_unlock_low_uops[] = {
     {          NAND_UOP_COMMAND,      NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,          NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                        0U},
@@ -635,7 +635,7 @@ static const nand_uop_t g_nand_block_unlock_low_uops[] = {
     {              NAND_UOP_END,                        0U}
 };
 /* ── 块解锁高段（24h）：同 low，命令值不同 ── */
-static const nand_uop_t g_nand_block_unlock_high_uops[] = {
+static const nand_uop_s g_nand_block_unlock_high_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -652,7 +652,7 @@ static const nand_uop_t g_nand_block_unlock_high_uops[] = {
 };
 /* BLOCK_LOCK(2Ah) 与 BLOCK_LOCK_TIGHT(2Ch) 序列相同但命令值不同 */
 /* ── 块锁定（2Ah）：发命令 + 状态确认（无行地址） ── */
-static const nand_uop_t g_nand_block_lock_uops[] = {
+static const nand_uop_s g_nand_block_lock_uops[] = {
     {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                   0U},
@@ -665,7 +665,7 @@ static const nand_uop_t g_nand_block_lock_uops[] = {
     {              NAND_UOP_END,                   0U}
 };
 /* ── 块永久锁定（2Ch）：同 lock，命令值不同 ── */
-static const nand_uop_t g_nand_block_lock_tight_uops[] = {
+static const nand_uop_s g_nand_block_lock_tight_uops[] = {
     {          NAND_UOP_COMMAND,      NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,          NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                        0U},
@@ -678,7 +678,7 @@ static const nand_uop_t g_nand_block_lock_tight_uops[] = {
     {              NAND_UOP_END,                        0U}
 };
 /* ── 读块锁定状态（7Ah）：行地址 + 直读状态字节 ── */
-static const nand_uop_t g_nand_block_lock_status_uops[] = {
+static const nand_uop_s g_nand_block_lock_status_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -691,7 +691,7 @@ static const nand_uop_t g_nand_block_lock_status_uops[] = {
     {              NAND_UOP_END,                         0U}
 };
 /* ── OTP 锁定（80h+地址+10h）：一次性编程区锁定，无数据输入 ── */
-static const nand_uop_t g_nand_otp_lock_uops[] = {
+static const nand_uop_s g_nand_otp_lock_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -724,7 +724,7 @@ static const nand_uop_t g_nand_otp_lock_uops[] = {
  * 00h+地址(P0) → 00h+地址(P1) → 30h → tR
  * → 06h+列地址+E0h 读 P0 → 06h+列地址(plane1)+E0h 读 P1
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_multi_plane_read_with_data_out_uops[] = {
+static const nand_uop_s g_nand_multi_plane_read_with_data_out_uops[] = {
     {          NAND_UOP_COMMAND,                  NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                      NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                    0U},
@@ -774,7 +774,7 @@ static const nand_uop_t g_nand_multi_plane_read_with_data_out_uops[] = {
  * 与 g_nand_multi_plane_read_without_data_out_uops 的前半段逐条相同：
  * 两组 00h+地址 + 30h + tWB，**不含 WAIT_READY(tR)**，发完立即返回。
  * 由 OP_READ_PAGE_WAIT 收尾；数据留页缓冲，逐 CW 用 06h 取回。 */
-static const nand_uop_t g_nand_multi_plane_read_load_uops[] = {
+static const nand_uop_s g_nand_multi_plane_read_load_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -801,7 +801,7 @@ static const nand_uop_t g_nand_multi_plane_read_load_uops[] = {
 
 /* ── 多 plane 读（不含 DATA_OUT）────────────────────
  * 00h+地址(P0/P1) → 30h → tR，数据留页缓冲，后续由随机读逐 CW 取回。 */
-static const nand_uop_t g_nand_multi_plane_read_without_data_out_uops[] = {
+static const nand_uop_s g_nand_multi_plane_read_without_data_out_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -836,7 +836,7 @@ static const nand_uop_t g_nand_multi_plane_read_without_data_out_uops[] = {
  * 80h+地址+Din(P0) → 11h 切换 → 80h+地址(P1)+Din(P1)
  * → 10h → tWB → tPROG → 70h 轮询 + CHECK_FAIL。
  * 双 plane 数据在 page_buffer 拼接（P0@[0..2111]、P1@[2112..4223]）。 */
-static const nand_uop_t g_nand_multi_plane_program_uops[] = {
+static const nand_uop_s g_nand_multi_plane_program_uops[] = {
     {          NAND_UOP_COMMAND,                NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,                    NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                                  0U},
@@ -874,7 +874,7 @@ static const nand_uop_t g_nand_multi_plane_program_uops[] = {
 /* ── 多 plane 擦除 ─────────────────────────
  * 60h+行地址(P0) → 60h+行地址(P1) → D0h → tWB → tBERS
  * → 70h 轮询 + CHECK_FAIL。 */
-static const nand_uop_t g_nand_multi_plane_erase_uops[] = {
+static const nand_uop_s g_nand_multi_plane_erase_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -908,7 +908,7 @@ static const nand_uop_t g_nand_multi_plane_erase_uops[] = {
 /* ── 读页 LOAD（ISSUE 段）────────────────────
  * 70h 轮询空闲 → 00h+地址 → 30h → tWB → END。
  * 不含 WAIT_READY(tR)——LUN 进入 tR 期，由 FETCH 接续。 */
-static const nand_uop_t g_nand_read_page_load_uops[] = {
+static const nand_uop_s g_nand_read_page_load_uops[] = {
     {          NAND_UOP_COMMAND,       NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,           NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                         0U},
@@ -928,7 +928,7 @@ static const nand_uop_t g_nand_read_page_load_uops[] = {
  * WAIT_READY(tR) → 70h 轮询 + CHECK_FAIL；无 DATA_OUT。
  * LOAD / MULTI_PLANE_LOAD 的共同完成段。完成后数据仍在页缓冲，
  * 由 nand_dispatch 的 CW 链逐 CW 用 05h/06h 取回。 */
-static const nand_uop_t g_nand_read_page_wait_uops[] = {
+static const nand_uop_s g_nand_read_page_wait_uops[] = {
     {       NAND_UOP_WAIT_READY,                   0U},
     {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
@@ -941,7 +941,7 @@ static const nand_uop_t g_nand_read_page_wait_uops[] = {
 /* ── 编程页 ISSUE（ISSUE 段）───────────────────
  * 70h 轮询空闲 → 80h+地址 → DATA_IN 整页 → 10h → tWB → END。
  * 不含 WAIT_READY(tPROG)——LUN 进入 tPROG 期，由 WAIT 接续。 */
-static const nand_uop_t g_nand_program_page_issue_uops[] = {
+static const nand_uop_s g_nand_program_page_issue_uops[] = {
     {          NAND_UOP_COMMAND,          NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,              NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                            0U},
@@ -960,7 +960,7 @@ static const nand_uop_t g_nand_program_page_issue_uops[] = {
 
 /* ── 编程页 WAIT（WAIT 段）────────────────────
  * WAIT_READY(tPROG) → 70h 轮询 + CHECK_FAIL。无数据传输。 */
-static const nand_uop_t g_nand_program_page_wait_uops[] = {
+static const nand_uop_s g_nand_program_page_wait_uops[] = {
     {       NAND_UOP_WAIT_READY,                   0U},
     {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
@@ -973,7 +973,7 @@ static const nand_uop_t g_nand_program_page_wait_uops[] = {
 /* ── 擦除 ISSUE（ISSUE 段）───────────────────
  * 70h 轮询空闲 → 60h+行地址 → D0h → tWB → END。
  * 不含 WAIT_READY(tBERS)——LUN 进入 tBERS 期，由 WAIT 接续。 */
-static const nand_uop_t g_nand_erase_block_issue_uops[] = {
+static const nand_uop_s g_nand_erase_block_issue_uops[] = {
     {          NAND_UOP_COMMAND,         NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,             NAND_TIME_TWH_US},
     {  NAND_UOP_DATA_OUT_STATUS,                           0U},
@@ -989,7 +989,7 @@ static const nand_uop_t g_nand_erase_block_issue_uops[] = {
 
 /* ── 擦除 WAIT（WAIT 段）────────────────────
  * WAIT_READY(tBERS) → 70h 轮询 + CHECK_FAIL。无数据传输。 */
-static const nand_uop_t g_nand_erase_block_wait_uops[] = {
+static const nand_uop_s g_nand_erase_block_wait_uops[] = {
     {       NAND_UOP_WAIT_READY,                   0U},
     {          NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
     {         NAND_UOP_DELAY_US,     NAND_TIME_TWH_US},
@@ -1002,10 +1002,10 @@ static const nand_uop_t g_nand_erase_block_wait_uops[] = {
 /* ======================================================================
  * g_nand_operation_map — ONFI 操作表（OP_COUNT 项，OP_* 直接下标）
  *
- * 每项字段语义见 onfi_1_0.h 的 nand_operation_map_t 结构体注释；
+ * 每项字段语义见 onfi_1_0.h 的 nand_op_map_s 结构体注释；
  * uop 序列即上方各 g_nand_*_uops 数组。
  * ====================================================================== */
-const nand_operation_map_t g_nand_operation_map[OP_COUNT] = {
+const nand_op_map_s g_nand_operation_map[OP_COUNT] = {
     [OP_RESET]                                  = {                                 .operation = OP_RESET,                          .name = "RESET",                   .command_1 = NAND_ONFI_CMD_RESET,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                             .uops = g_nand_reset_uops, .timing = {NAND_TIME_TWB_US, NAND_TIME_TRST_US, NAND_TIME_TWH_US, NAND_TIME_TRST_US}},
     [OP_READ_ID]                                = {                               .operation = OP_READ_ID,                        .name = "READ_ID",                      .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,               .data_length = 5U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
     [OP_READ_PARAMETER_PAGE]                    = {                   .operation = OP_READ_PARAMETER_PAGE,            .name = "READ_PARAMETER_PAGE",          .command_1 = NAND_CMD_READ_PARAMETER_PAGE,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 1U,             .data_length = 256U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,               .uops = g_nand_read_parameter_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
@@ -1066,7 +1066,7 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] = {
  * ═══════════════════════════════════════════════════════════════════════ */
 
 /**
- * @brief 把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t
+ * @brief 把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_s
  *
  * 纯函数（零 HAL / 日志 / 硬件）。字段偏移见 onfi_1_0.h 的
  * NAND_ONFI_PARAM_OFF_*；多字节一律小端；model 串去尾部空格填充。
@@ -1075,7 +1075,7 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] = {
  * @param info 输出：解码结果
  * @return 1 签名为 "ONFI"；0 签名不符（info 仍被填满，供诊断打印）
  */
-BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info)
+BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_s *info)
 {
     BYTE i;
     BYTE signature_ok;

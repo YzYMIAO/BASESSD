@@ -18,11 +18,11 @@
 
 /* ── UART TX DMA（USART1；平台内部使用）── */
 
-BYTE uart_tx_dma_init(void);
-void uart_tx_dma_irq_handler(void);
+func_status_e uart_tx_dma_init(void);
+void          uart_tx_dma_irq_handler(void);
 
 /* port 接口：由 src/platform/<soc>/dma_port.c 实现；共享 src/platform/dma.c 只转发。 */
-BYTE dma_port_uart_tx_init(void);
-void dma_port_uart_tx_irq_handler(void);
+func_status_e dma_port_uart_tx_init(void);
+void          dma_port_uart_tx_irq_handler(void);
 
 #endif /* PLATFORM_DMA_H */

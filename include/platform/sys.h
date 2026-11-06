@@ -28,7 +28,7 @@ DWORD sys_mpu_region_count(void);
 
 /* 时钟树快照（单位 Hz）。各字段由 SoC 侧经 HAL 实读回读；共享层只转发，
  * 不解析任何 RCC 寄存器。FMC / USART1 两项是 NAND 时序与控制台波特率的基准。 */
-typedef struct
+typedef struct SYS_CLOCK_TREE_S
 {
     DWORD sysclk_hz; /* SYSCLK / CPU */
     DWORD hclk_hz;   /* AHB */
@@ -39,9 +39,9 @@ typedef struct
     DWORD fmc_hz;    /* FMC 内核时钟 */
     DWORD qspi_hz;   /* QSPI 内核时钟 */
     DWORD uart_hz;   /* USART1 内核时钟 */
-} sys_clock_tree_t;
+} sys_clock_tree_s;
 
-void sys_clock_tree_get(sys_clock_tree_t *out);
+void sys_clock_tree_get(sys_clock_tree_s *out);
 
 void sys_nvic_set_vector_table(DWORD base_address, DWORD offset);
 void sys_wfi_set(void);
@@ -51,24 +51,24 @@ void sys_msr_msp(DWORD address);
 
 /* 参数顺序：预分频、倍频、SYSCLK分频、外设输出分频；HSE=25 MHz 时传入 5,160,2,4 得到 CPU=400 MHz。
  * 返回 0 = 成功（FUNC_STATUS_SUCCESS 语义），非 0 = 失败。 */
-BYTE sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
+func_status_e sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
 
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/sys_port.c 实现；共享层只通过这些函数触碰 SoC。
  */
 
-void  sys_port_mpu_config(void);
-void  sys_port_cache_enable(void);
-BYTE  sys_port_icache_enabled(void);
-BYTE  sys_port_dcache_enabled(void);
-DWORD sys_port_mpu_region_count(void);
-void  sys_port_clock_tree_get(sys_clock_tree_t *out);
-void  sys_port_set_vector_table(DWORD base_address, DWORD offset);
-void  sys_port_wfi(void);
-void  sys_port_irq_disable(void);
-void  sys_port_irq_enable(void);
-void  sys_port_set_msp(DWORD address);
-void  sys_port_hal_init(void);
-BYTE  sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
+void          sys_port_mpu_config(void);
+void          sys_port_cache_enable(void);
+BYTE          sys_port_icache_enabled(void);
+BYTE          sys_port_dcache_enabled(void);
+DWORD         sys_port_mpu_region_count(void);
+void          sys_port_clock_tree_get(sys_clock_tree_s *out);
+void          sys_port_set_vector_table(DWORD base_address, DWORD offset);
+void          sys_port_wfi(void);
+void          sys_port_irq_disable(void);
+void          sys_port_irq_enable(void);
+void          sys_port_set_msp(DWORD address);
+void          sys_port_hal_init(void);
+func_status_e sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
 
 #endif /* PLATFORM_SYS_H */

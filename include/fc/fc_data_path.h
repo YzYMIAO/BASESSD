@@ -47,7 +47,7 @@
  * @return FC_STATUS_OK  整条 desc 链编码完成。
  *         ECC 错误码    ECC 编码失败时透传引擎返回码。
  */
-fc_status_e fc_data_path_encode(const fc_command_t *command);
+fc_status_e fc_data_path_encode(const fc_cmd_s *command);
 
 #if CONFIG_FC_RAID
 /* ── 跨 Plane Stripe RAID parity 生成（FC 内部） ── */
@@ -66,7 +66,7 @@ fc_status_e fc_data_path_encode(const fc_command_t *command);
  * @note FC 内部在 stripe 累积完成后、提交 dispatch 前自动调用。
  *       参数 / desc 链损坏的前置违反一律 ASSERT，不返回错误码。
  */
-fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[], BYTE data_count, const fc_command_t *parity_cmd);
+fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYTE data_count, const fc_cmd_s *parity_cmd);
 #endif /* CONFIG_FC_RAID */
 
 /* ── 读路径 Stage 1：ECC 解码（FC 内部，CQ push 前） ── */
@@ -88,7 +88,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  *       仅在执行 ECC 解码的路径生效；`FC_ECC_MODE_LDPC_RAW` 跳过 ECC ⇒ 不做该识别，
  *       擦除页按 CRC/META 失败上报（RAW 读的调用方自行判空）。
  */
-fc_status_e fc_data_path_process_read(const fc_command_t *command);
+fc_status_e fc_data_path_process_read(const fc_cmd_s *command);
 
 /* ── 读路径 Stage 2：RAID 恢复（FTL 触发） ── */
 
@@ -108,7 +108,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command);
  * @return FC_STATUS_OK       恢复成功，所有 desc 的 CRC/META 复查通过。
  *         FC_STATUS_IO_ERROR 重建后 ECC 仍失败，或 CRC/META 复查失败。
  */
-fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx);
+fc_status_e fc_data_path_raid_recover(const fc_cmd_s *cmd, BYTE failed_cw_idx);
 
 /* ── 单 CW 步骤原语（管线与单测共用） ──
  *
@@ -181,7 +181,7 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
  *
  * @return true = 存储值与重算值相等；false = 不相等。
  */
-bool fc_data_path_crc_check(const BYTE *cw);
+BOOL fc_data_path_crc_check(const BYTE *cw);
 
 /**
  * @brief META 读回校验，包含两项：

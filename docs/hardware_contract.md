@@ -6,7 +6,7 @@ access MMIO registers directly; register access lives in
 `src/platform/stm32h743`.
 
 > **Status note (2026-10-11).** The rule above holds for FTL / Controller / Common
-> (they use `ssd_platform_ops_t` only), but **not yet for the NAND layer**:
+> (they use `ssd_platform_ops_s` only), but **not yet for the NAND layer**:
 > `src/nand/nand_fmc.c` writes FMC windows via raw MMIO and
 > `src/nand/nand_mt29f4g08abadawp.c` defines `HAL_NAND_MspInit` / `HAL_NAND_Init`
 > directly. The NAND layer's **include coupling** did converge in Stage 1 — `delay` /

@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-typedef void (*ssd_irq_handler_t)(void *context);
+typedef void (*ssd_irq_handler_fn_t)(void *context);
 
-int  ssd_irq_register(DWORD irq, ssd_irq_handler_t handler, void *context);
+int  ssd_irq_register(DWORD irq, ssd_irq_handler_fn_t handler, void *context);
 void ssd_irq_enable(DWORD irq);
 void ssd_irq_disable(DWORD irq);
 void ssd_irq_dispatch(void);

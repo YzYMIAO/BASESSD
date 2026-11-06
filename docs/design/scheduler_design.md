@@ -13,7 +13,7 @@
 | 项 | 现状 | 问题 |
 |---|---|---|
 | 平台任务表 | `src/platform/btim.c`，表项 `{name, first_delay_ms, period_ms, callback, context}`，唯一静态任务 = watchdog 100 ms | 名为定时器，实为软件调度器；放在 `platform/` 层 |
-| FTL 后台 | `src/ftl/bg_scheduler.c`，`bg_task_t {func, mask, units, must_run}`，预算/档位驱动 | 第二套「什么时候跑什么」 |
+| FTL 后台 | `src/ftl/bg_scheduler.c`，`bg_task_s {func, mask, units, must_run}`，预算/档位驱动 | 第二套「什么时候跑什么」 |
 | 时间源 | TIM6 `g_btim_tick_ms`（btim） vs DWT `time_us`（`platform_now_ms`） | 两套毫秒时基，不能混用；**DWT 现已删除**，系统时基统一为 SysTick |
 | 派发点 | `btim_scheduler_poll()` 在主循环末尾；`bg_scheduler_service()` 在 `ftl_service` 内 | 两个派发点、两种顺序模型 |
 | 周期门 | `btim` 表内；FTL 侧散落在 `mig_handle` / `cp_should_start` / 各心跳 | 同一语义多套写法 |
@@ -165,7 +165,7 @@ typedef struct
   `wl_eval_last_ms` / `predict_last_ms` 全部是同一时间坐标，不会出现「TIM6 写的
   时间戳拿 SysTick 去比」。
 - `mig_timer_register(m)` 每实例注册**一个** `mig_eval` 任务（period = `GC_EVAL_INTERVAL_MS`，
-  ctx = `mig_handle_t*`）；`main` 在 `timer_scheduler_init()` 之后、`g_ftl_ready` 为真时
+  ctx = `mig_handle_s*`）；`main` 在 `timer_scheduler_init()` 之后、`g_ftl_ready` 为真时
   遍历实例注册。未采用「三个独立任务」：单任务保留原 `else if` 的「每轮最多一个 job」
   与 WL/predict 让位关系，减少行为漂移；代价是表里只看到 10 ms 一行。
 - 无时钟退化：`platform_now_ms() == 0` 时 `mig_handle` 直接调 `mig_eval(m)`，避免 timer
@@ -218,7 +218,7 @@ typedef struct
   `max_kick` 限制。
 - **BBT**：`bbt_handle` 的在飞路径（waiting / phase != IDLE）不变；只把「起新 job」门
   在 `alloc->bbt.flush_due` 上。无变更时清 flag。
-- **Token bucket**：`bg_scheduler_t.credits`；`bg_level_cfg_t.grant_units`（IDLE/NORMAL
+- **Token bucket**：`bg_sched_s.credits`；`bg_level_cfg_s.grant_units`（IDLE/NORMAL
   4、BUSY 1）；`BG_TOKEN_INTERVAL_MS=10`、上限 `grant_units × BG_TOKEN_CAP_TICKS(4)`。
   `bg_scheduler_run` 预算段消费 credit，must-run 不占；`BG_ROUND_HARD_LIMIT_US` 仍保留。
 - **验证**：上板看 `[GC] trig` 不高于 10 ms/次、WL/RR 仅 IDLE、H2testw 0 错误；

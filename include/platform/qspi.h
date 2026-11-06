@@ -13,20 +13,20 @@
  * SoC 侧（include/platform/<soc>/qspi_port.h）。共享层只做空参检查与转发。
  */
 
-BYTE qspi_wait_flag(DWORD flag, BYTE sta, DWORD wtime);            /* 等待某个状态 */
-BYTE qspi_init(void);                                              /* 初始化QSPI */
-BYTE qspi_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle); /* 发送命令 */
-BYTE qspi_receive(BYTE *buf, DWORD datalen);                       /* 接收数据 */
-BYTE qspi_transmit(BYTE *buf, DWORD datalen);                      /* 发送数据 */
+func_status_e qspi_wait_flag(DWORD flag, BYTE sta, DWORD wtime);            /* 等待某个状态 */
+func_status_e qspi_init(void);                                              /* 初始化QSPI */
+func_status_e qspi_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle); /* 发送命令 */
+func_status_e qspi_receive(BYTE *buf, DWORD datalen);                       /* 接收数据 */
+func_status_e qspi_transmit(BYTE *buf, DWORD datalen);                      /* 发送数据 */
 
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/qspi_port.c 实现。
  */
 
-BYTE qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime);
-BYTE qspi_port_init(void);
-BYTE qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle);
-BYTE qspi_port_receive(BYTE *buf, DWORD datalen);
-BYTE qspi_port_transmit(BYTE *buf, DWORD datalen);
+func_status_e qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime);
+func_status_e qspi_port_init(void);
+func_status_e qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle);
+func_status_e qspi_port_receive(BYTE *buf, DWORD datalen);
+func_status_e qspi_port_transmit(BYTE *buf, DWORD datalen);
 
 #endif /* PLATFORM_QSPI_H */

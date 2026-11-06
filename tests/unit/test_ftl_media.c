@@ -29,7 +29,7 @@
 static BYTE        s_wr_buf[FTL_UT_MEDIA_LBAS * FTL_IU_BYTES];
 static BYTE        s_rd_buf[FTL_UT_MEDIA_LBAS * FTL_IU_BYTES];
 static BYTE        s_zero_buf[FTL_UT_MEDIA_LBAS * FTL_IU_BYTES];
-static cp_header_t s_cp_hdr;
+static cp_header_s s_cp_hdr;
 static BYTE        s_mx_wr[FTL_UT_MATRIX_LBAS * FTL_IU_BYTES];
 static BYTE        s_mx_rd[FTL_UT_MATRIX_LBAS * FTL_IU_BYTES];
 
@@ -54,8 +54,8 @@ static DWORD media_atou(const char *s)
     return v;
 }
 
-static bool       s_media_ready;
-static ftl_ctx_t *s_media_ftl;
+static BOOL       s_media_ready;
+static ftl_ctx_s *s_media_ftl;
 
 /* 由 `ut_run_all()` 在**每次 `test` 命令开始时**调用（RISK-UT-08）：
  * 介质只在一次 `test` 内可信 —— `/fc-nand/` 下的原始块测试会擦写 live FTL 的
@@ -79,7 +79,7 @@ static MunitResult test_media_live(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
     ftl_ut_assert_clean(ftl);
@@ -109,14 +109,14 @@ static void media_teardown(void *fixture)
      * 留在最后一次泵之后，其完成会滞留 FC 的 CQ。speed 套件的 `test_setup` 不会重跑
      * `fc_init`（它用静态 inited 只初始化一次），于是它提交的第一条命令会先收到
      * 别人的完成（`command_id` 不匹配）。quiesce 会把 bg_suspend 置 1，这里恢复原值。 */
-    ftl_ctx_t *ftl   = ftl_ut_live();
-    const bool saved = ftl->bg_suspend;
+    ftl_ctx_s *ftl   = ftl_ut_live();
+    const BOOL saved = ftl->bg_suspend;
 
     ftl_ut_quiesce(ftl);
     ftl->bg_suspend = saved;
 }
 
-static void media_prepare(ftl_ctx_t *ftl)
+static void media_prepare(ftl_ctx_s *ftl)
 {
     if (!s_media_ready)
     {
@@ -149,7 +149,7 @@ static MunitResult test_format_and_roundtrip(const MunitParameter params[], void
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
     media_prepare(ftl);
@@ -181,7 +181,7 @@ static MunitResult test_cross_region_roundtrip(const MunitParameter params[], vo
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
     media_prepare(ftl);
@@ -347,7 +347,7 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
     /* 再落一次 Checkpoint：Journal-only 的 TRIM 持久化存在已知缺口（RISK-HOST-11），
      * 本用例锚定“CP 落盘后的 TRIM 不复活”这一明确持久化点。 */
     {
-        ftl_ctx_t  *f  = ftl_ut_live();
+        ftl_ctx_s  *f  = ftl_ut_live();
         const DWORD t0 = platform_now_ms();
 
         jrn_checkpoint_request(f->journal);
@@ -471,7 +471,7 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl   = ftl_ut_live();
+    ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = FTL_UT_LBA_BASE + 96U;
     const DWORD count = 8U;
     const DWORD cp0   = ftl->cp_handle->cp_state.sequence; /* 基准取写入前 */
@@ -498,7 +498,7 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
 
         for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
         {
-            const l2p_cache_line_t *line = &ftl->cache->lines[i];
+            const l2p_cache_line_s *line = &ftl->cache->lines[i];
 
             if ((line->state == L2P_CACHE_DIRTY) && (line->dirty_seq != 0U))
             {
@@ -559,7 +559,7 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl   = ftl_ut_live();
+    ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = FTL_UT_LBA_BASE + 128U;
     const DWORD count = 8U;
 
@@ -618,7 +618,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl       = ftl_ut_live();
+    ftl_ctx_s  *ftl       = ftl_ut_live();
     const DWORD base      = FTL_UT_LBA_BASE;
     const DWORD per_write = 8U;
     const DWORD pages     = (DWORD)PAGES_PER_BLOCK;
@@ -633,7 +633,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     }
     munit_assert_true(ftl_ut_flush());
 
-    alc_t *a = &ftl->alloc;
+    alc_s *a = &ftl->alloc;
 
     if (a->hot_sb.is_open)
     {
@@ -647,7 +647,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     /* 造 UBI 判据：used SB 低擦除、空闲块高擦除。 */
     for (WORD i = 0U; i < a->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_super_closed_get_at(a, i);
+        const super_block_s *sb = alc_super_closed_get_at(a, i);
 
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
@@ -669,7 +669,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
 
     ftl->total_writes = WL_MIN_WRITES;
 
-    mig_handle_t *m = ftl->mig_handle;
+    mig_handle_s *m = ftl->mig_handle;
 
     m->wl_eval_last_ms = 0U;
     m->wl_last_writes  = ftl->total_writes;
@@ -720,7 +720,7 @@ static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t *ftl     = ftl_ut_live();
+    ftl_ctx_s *ftl     = ftl_ut_live();
     DWORD      version = 0U;
 
     const cp_media_status_e st = cp_media_status_probe(ftl->cp_handle, &version);
@@ -728,7 +728,7 @@ static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void
     munit_assert_int(st, ==, CP_MEDIA_CURRENT);
     munit_assert_uint32(version, ==, (DWORD)FTL_MEDIA_LAYOUT_VERSION);
 
-    bool need_format = true;
+    BOOL need_format = true;
 
     munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_OK);
     munit_assert_false(need_format);
@@ -741,10 +741,10 @@ static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void
 
 /* BBT 池清空：多圈 ring 的 save→reload 会选到旧 record（RISK-BBT-18）。
  * 要验证“本次 save 的坏块/标志是否持久化”的用例必须先隔离这个变量。 */
-static void media_erase_bbt_pool(alc_t *a)
+static void media_erase_bbt_pool(alc_s *a)
 {
-    const md_ring_t *ring = &a->pools->bbt;
-    const ftl_topo_t topo = alc_topo(a);
+    const md_ring_s *ring = &a->pools->bbt;
+    const ftl_topo_s topo = alc_topo(a);
 
     for (WORD i = 0U; i < ring->block_count; i++)
     {
@@ -770,8 +770,8 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t *ftl = ftl_ut_live();
-    alc_t     *a   = &ftl->alloc;
+    ftl_ctx_s *ftl = ftl_ut_live();
+    alc_s     *a   = &ftl->alloc;
 
     /* format 会刻意保留旧 BBT record；多圈 ring 会让 locate 选到旧 record
      * （RISK-BBT-18），与本用例要测的“save→load 持久化”无关 ⇒ 先清池。 */
@@ -833,9 +833,9 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t       *ftl     = ftl_ut_live();
-    alc_t           *a       = &ftl->alloc;
-    const ftl_topo_t topo    = alc_topo(a);
+    ftl_ctx_s       *ftl     = ftl_ut_live();
+    alc_s           *a       = &ftl->alloc;
+    const ftl_topo_s topo    = alc_topo(a);
     DWORD            version = 0U;
 
     /* ① 模拟两阶段格式化在「BBT 已落盘、initial CP 尚未写」时掉电：
@@ -861,7 +861,7 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
     /* ③ 启动判据：带 FORMAT_IN_PROGRESS 必须“继续格式化”，不能误判成 IO_ERROR。 */
     munit_assert_int(cp_media_status_probe(ftl->cp_handle, &version), ==, CP_MEDIA_NO_RECORD);
 
-    bool need_format = false;
+    BOOL need_format = false;
 
     munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_OK);
     munit_assert_true(need_format);
@@ -901,9 +901,9 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t       *ftl     = ftl_ut_live();
-    alc_t           *a       = &ftl->alloc;
-    const ftl_topo_t topo    = alc_topo(a);
+    ftl_ctx_s       *ftl     = ftl_ut_live();
+    alc_s           *a       = &ftl->alloc;
+    const ftl_topo_s topo    = alc_topo(a);
     DWORD            version = 0U;
 
     /* ① 擦掉 CP 池，确保没有可定位的 Checkpoint record。 */
@@ -918,7 +918,7 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
     /* ② 在 CP 环 slot0/page0 的 plane0 写一页非 FF 内容。
      *    探针（cp_media_status_probe）在没有有效 record 时会裸读 slot0/page0：
      *    只要读到非 FF，就判“有介质内容但没有有效 CP” ⇒ IO_ERROR，拒绝格式化。 */
-    const md_ring_t *ring  = &a->pools->cp;
+    const md_ring_s *ring  = &a->pools->cp;
     const BYTE       plane = md_ring_plane_at(ring->plane_mask, 0U);
     const DWORD      addr  = md_ring_addr_plane(ring, &topo, 0U, 0U, plane);
     BYTE             page[FTL_IU_BYTES];
@@ -930,7 +930,7 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
     munit_assert_int(cp_media_status_probe(ftl->cp_handle, &version), ==, CP_MEDIA_IO_ERROR);
 
     /* ④ 启动决策：读坏必须拒绝格式化，不能把整片擦掉（RISK-BOOT-03）。 */
-    bool need_format = true;
+    BOOL need_format = true;
 
     munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_ERROR);
     munit_assert_false(need_format);
@@ -982,7 +982,7 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl      = ftl_ut_live();
+    ftl_ctx_s  *ftl      = ftl_ut_live();
     const DWORD lba      = FTL_UT_LBA_BASE + 4096U;
     const DWORD count    = FTL_UT_MATRIX_LBAS; /* 64 LBA = 8 页 = 2 个窗口 */
     const DWORD win_lbas = count / 2U;         /* 第一窗口 32 LBA（4 页） */
@@ -1158,7 +1158,7 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl   = ftl_ut_live();
+    ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = FTL_UT_LBA_BASE + 7000U;
     const DWORD count = FTL_UT_MATRIX_LBAS;
 
@@ -1183,7 +1183,7 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
     jrn_checkpoint_request(ftl->journal);
 
     const DWORD t0        = platform_now_ms();
-    bool        fail_seen = false;
+    BOOL        fail_seen = false;
 
     while ((fail_seen == false) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
     {
@@ -1246,8 +1246,8 @@ static MunitResult test_bbt_ring_reload(const MunitParameter params[], void *dat
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t *ftl = ftl_ut_live();
-    alc_t     *a   = &ftl->alloc;
+    ftl_ctx_s *ftl = ftl_ut_live();
+    alc_s     *a   = &ftl->alloc;
 
     media_erase_bbt_pool(a);
 
@@ -1306,7 +1306,7 @@ static MunitResult test_bbt_ring_reload(const MunitParameter params[], void *dat
  *       漂移的后果是容量无声流失或同一块被分配两次。真 NAND（非真掉电）。 */
 
 /* 一个 Super Block 占用的物理块数：退化条目的哨兵 plane 不计。 */
-static WORD media_sb_plane_count(const super_block_t *sb)
+static WORD media_sb_plane_count(const super_block_s *sb)
 {
     WORD n = 0U;
 
@@ -1326,7 +1326,7 @@ static WORD media_sb_plane_count(const super_block_t *sb)
  * 运行期由 Directory 的 l2p_live 管理。漏计它会让「重启后该块被恢复路径分类成
  * Closed」看起来像凭空多出一块 —— 账本守恒判据会误报。
  * 固定日志区（md_block_is_metadata 为真）不在此列：它本来就不进用户容量口径。 */
-static WORD media_user_log_planes(const alc_t *a)
+static WORD media_user_log_planes(const alc_s *a)
 {
     WORD sum = 0U;
 
@@ -1334,7 +1334,7 @@ static WORD media_user_log_planes(const alc_t *a)
     {
         const BYTE         plane = ftl_gblock_plane(g);
         const WORD         block = ftl_gblock_block(g);
-        const bst_block_t *b     = &a->blocks[g];
+        const bst_block_s *b     = &a->blocks[g];
 
         if (md_block_is_metadata(NULL, plane, block) || ftl_block_is_bad(b))
         {
@@ -1353,7 +1353,7 @@ static WORD media_user_log_planes(const alc_t *a)
  * 合计的物理块数。
  * 守恒判据：恢复前后这个合计必须相等 —— 漂移 = 块被漏登或重复登记。
  * 六项互斥且覆盖用户区全部好块，缺任一项都会把「合法的状态迁移」误判成漏账。 */
-static WORD media_ledger_total(const alc_t *a)
+static WORD media_ledger_total(const alc_s *a)
 {
     WORD sum = a->free_count;
 
@@ -1387,7 +1387,7 @@ static MunitResult test_boot_restore_reconcile(const MunitParameter params[], vo
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl   = ftl_ut_live();
+    ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = FTL_UT_LBA_BASE + 6000U;
     const DWORD count = FTL_UT_MEDIA_LBAS;
 
@@ -1433,7 +1433,7 @@ static MunitResult test_cache_seq_cross_block(const MunitParameter params[], voi
     ftl_ut_trace_begin();
     media_prepare(ftl_ut_live());
 
-    ftl_ctx_t  *ftl   = ftl_ut_live();
+    ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = FTL_UT_LBA_BASE + 5120U;
     const DWORD total = 1024U; /* 2 个物理 block */
     const DWORD chunk = (DWORD)FTL_UT_MATRIX_LBAS;

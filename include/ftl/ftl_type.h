@@ -1,13 +1,13 @@
 #ifndef FTL_TYPE_H
 #define FTL_TYPE_H
 
-#include "ssd_types.h" /* ssd_status_e（ftl_io_req_t 的完成状态字段） */
+#include "ssd_types.h" /* ssd_status_e（ftl_io_req_s 的完成状态字段） */
 
 #include <stdint.h>
 
 /* FTL 实例句柄的不透明类型（完整定义在 ftl.h）。模块头用它声明形参指针，
  * 避免反向 include ftl.h 形成头文件环（ftl.h 会 include 全部模块头）。 */
-typedef struct ftl_context ftl_ctx_t;
+typedef struct FTL_CONTEXT_S ftl_ctx_s;
 
 /*
  * FTL 层基础类型 —— 标量/枚举/拓扑 + 对外请求类型。
@@ -48,7 +48,7 @@ typedef struct ftl_context ftl_ctx_t;
  * （重试无意义），也**不是** FTL_ERROR（失败原因可归因到等待者）。模块的
  * `*_status_t.timeout_phase` 给出超时发生在哪一步（docs/archive/ftl_module_contracts.md §6.3）。
  */
-typedef enum
+typedef enum FTL_STATUS_E
 {
     FTL_OK      = 0U, /* 成功 */
     FTL_ERROR   = 1U, /* 永久失败（通用，不细分错误码） */
@@ -58,7 +58,7 @@ typedef enum
 
 /* 后台档位（load level）：bg_scheduler 选择并发布、typed 模块入口消费。
  * 三档决定 must-run 之外的任务条数与预算，见 bg_scheduler.h。 */
-typedef enum
+typedef enum BG_LEVEL_E
 {
     BG_LEVEL_IDLE   = 0,
     BG_LEVEL_NORMAL = 1,
@@ -69,7 +69,7 @@ typedef enum
 #define BG_LEVEL_NUM (3U)
 
 /*
- * ftl_topo_t — FTL 拓扑描述
+ * ftl_topo_s — FTL 拓扑描述
  *
  * 描述本 FTL 实例管理的芯片路由。
  *   ch/ce/lun — 本 FTL 绑定的 NAND 芯片。
@@ -86,16 +86,16 @@ typedef enum
  *   ② 本器件 LUN_ADDR_WIDTH == 0，不能声明 `lun : 0`（C11 6.7.2.1p4）——隐去该成员
  *   会打断全仓 20+ 处 `.lun`（本类型 HIL 可见，见 main.c 的 ftl_init 调用），
  *   给 `lun : 1` 兜底则是个装饰位（PBA 里根本没有 lun 位，唯一合法值是 0）；
- *   ③ 位域布局 implementation-defined（同 nand_pba_fields_t，得配开机自检）；
+ *   ③ 位域布局 implementation-defined（同 nand_pba_fields_s，得配开机自检）；
  *   ④ CH_NUM 长大后静默截断，而防它的 _Static_assert 放不进本头。
  *   ⇒ 换多 die 芯片（LUN_ADDR_WIDTH > 0）或本类型副本数显著增多时再重估。
  */
-typedef struct
+typedef struct FTL_TOPOLOGY_S
 {
     BYTE ch;
     BYTE ce;
     BYTE lun;
-} ftl_topo_t;
+} ftl_topo_s;
 
 /* ── 对外请求类型 ──
  *
@@ -103,33 +103,33 @@ typedef struct
  *   依赖图底层的目录反向 include ftl/ftl_type.h；且两文件名只差一个 s，易混。）
  *
  * 聚合对外接口的高频参数，减少形参数（如 ftl_submit_read/write 只收 2 个实参）。
- * 五张表由 HIL 独立定义、FTL 只收引用（`ftl_table_refs_t`，定义于
- * include/ftl/allocator.h —— 因其依赖 super_block_t，放此处会形成循环 include）：
- *   pending_cb_t      — pending 完成回调（Step 3 从 pending.h 迁入，打破循环 include）
- *   ftl_io_req_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
+ * 五张表由 HIL 独立定义、FTL 只收引用（`ftl_table_refs_s`，定义于
+ * include/ftl/allocator.h —— 因其依赖 super_block_s，放此处会形成循环 include）：
+ *   pending_cb_fn_t      — pending 完成回调（Step 3 从 pending.h 迁入，打破循环 include）
+ *   ftl_io_req_s  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
  * 位域可移植性问题）；**地址一律用 DWORD**（ftl/ftl_config.h §三.2）。
  * 具名字段访问经 pba_fields() 值语义视图（4 字节位域，仅内存内，不落介质；
- * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_t /
+ * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_s /
  * PAA——那是 NAND 层的表示。
  */
 
 /* pending 完成回调 — 在 ftl_host_io_callback 数据拷贝 + 标志置位后调用。
  * 定义于此（而非 pending.h），避免 pending.h ↔ ftl_type.h 循环 include。 */
-typedef void (*pending_cb_t)(void *ctx);
+typedef void (*pending_cb_fn_t)(void *ctx);
 
 /* ── 请求参数 ── */
 
 /*
- * ftl_io_req_t — 一次 FTL 读写请求的完整参数。
+ * ftl_io_req_s — 一次 FTL 读写请求的完整参数。
  *
  * 由 Controller 层构造后整体传入 ftl_submit_read / ftl_submit_write
  * （形参 (ftl, req) 共 2 个）。
  * pending 表按值嵌入本结构体（ftl->pending[i].io = *req），submit 调用期间
  * 只要求 req 有效，之后完成处理用 pending 表中的拷贝。
  */
-typedef struct
+typedef struct FTL_IO_REQUEST_S
 {
     QWORD lba;                              /* Host 逻辑地址（NVMe 协议宽度） */
     void *buffer;                           /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
@@ -142,8 +142,8 @@ typedef struct
                                              * 也**不是**开启顺序读写的开关。 */
     volatile BYTE         *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
     volatile ssd_status_e *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
-    pending_cb_t           on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */
-    void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
-} ftl_io_req_t;
+    pending_cb_fn_t        on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */
+    void                  *on_complete_ctx; /* 回调上下文（ssd_req_s*） */
+} ftl_io_req_s;
 
 #endif /* FTL_TYPE_H */

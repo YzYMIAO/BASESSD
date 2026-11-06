@@ -91,24 +91,27 @@ static inline DWORD cpu_to_be32(DWORD x)
 // cache                  —— 多项式 mod 用对数表示缓存
 // elp / poly_2t[]        —— 错误位置多项式 + 求根工作多项式
 // swap_bits              —— 输入/输出位序是否交换
-struct fc_bch_control
+
+typedef struct GF_POLY_S gf_poly_s;
+
+struct FC_BCH_CONTROL_S
 {
-    unsigned int    m;
-    unsigned int    n;
-    unsigned int    t;
-    unsigned int    ecc_bits;
-    unsigned int    ecc_bytes;
-    WORD           *a_pow_tab;
-    WORD           *a_log_tab;
-    DWORD          *mod8_tab;
-    DWORD          *ecc_buf;
-    DWORD          *ecc_buf2;
-    unsigned int   *xi_tab;
-    unsigned int   *syn;
-    int            *cache;
-    struct gf_poly *elp;
-    struct gf_poly *poly_2t[4];
-    BYTE            swap_bits;
+    unsigned int  m;
+    unsigned int  n;
+    unsigned int  t;
+    unsigned int  ecc_bits;
+    unsigned int  ecc_bytes;
+    WORD         *a_pow_tab;
+    WORD         *a_log_tab;
+    DWORD        *mod8_tab;
+    DWORD        *ecc_buf;
+    DWORD        *ecc_buf2;
+    unsigned int *xi_tab;
+    unsigned int *syn;
+    int          *cache;
+    gf_poly_s    *elp;
+    gf_poly_s    *poly_2t[4];
+    BYTE          swap_bits;
 };
 
 #define GF_M(_p)          ((_p)->m)
@@ -119,19 +122,19 @@ struct fc_bch_control
 #define BCH_ECC_MAX_WORDS DIV_ROUND_UP(BCH_MAX_M *BCH_MAX_T, 32)
 
 // GF(2^m) 上的多项式：deg = 次数，c[] = 系数（低位优先）
-struct gf_poly
+struct GF_POLY_S
 {
     unsigned int deg;
     unsigned int c[];
 };
 
-#define GF_POLY_SZ(_d) (sizeof(struct gf_poly) + ((_d) + 1U) * sizeof(unsigned int))
+#define GF_POLY_SZ(_d) (sizeof(gf_poly_s) + ((_d) + 1U) * sizeof(unsigned int))
 
-struct gf_poly_deg1
+typedef struct GF_POLY_DEG1_S
 {
-    struct gf_poly poly;
-    unsigned int   c[2];
-};
+    gf_poly_s    poly;
+    unsigned int c[2];
+} gf_poly_deg1_s;
 
 /* ── 固定存储（本工程唯一参数：m=13, t=4）────────────────────────────
  * BCH 表的生命周期 = 固件生命周期，大小编译期确定；用静态结构体而不是
@@ -144,50 +147,50 @@ struct gf_poly_deg1
 #define FC_BCH_WORDS      DIV_ROUND_UP(FC_BCH_M *FC_BCH_T, 32U)
 #define FC_BCH_ECC_DWORDS (1U + (FC_BCH_M * FC_BCH_T) + 1U) /* GF_POLY_SZ(m*t) 的 DWORD 数 */
 
-typedef struct
+typedef struct FC_BCH_STORAGE_S
 {
-    fc_bch_control_t    ctl;
-    WORD                a_pow[FC_BCH_N + 1U];
-    WORD                a_log[FC_BCH_N + 1U];
-    DWORD               mod8[FC_BCH_WORDS * 1024U];
-    DWORD               ecc_buf[FC_BCH_WORDS];
-    DWORD               ecc_buf2[FC_BCH_WORDS];
-    unsigned int        xi[FC_BCH_M];
-    unsigned int        syn[2U * FC_BCH_T];
-    int                 cache[2U * FC_BCH_T];
-    struct gf_poly_deg1 elp[FC_BCH_T + 1U];
-    DWORD               poly_2t[4U][1U + (2U * FC_BCH_T) + 1U];
-    DWORD               roots[(FC_BCH_N + 1U + 31U) / 32U]; /* 生成多项式根的 bitmap */
-    DWORD               genpoly[2U];
-    DWORD               g_poly[FC_BCH_ECC_DWORDS];
-} fc_bch_storage_t;
+    fc_bch_control_s ctl;
+    WORD             a_pow[FC_BCH_N + 1U];
+    WORD             a_log[FC_BCH_N + 1U];
+    DWORD            mod8[FC_BCH_WORDS * 1024U];
+    DWORD            ecc_buf[FC_BCH_WORDS];
+    DWORD            ecc_buf2[FC_BCH_WORDS];
+    unsigned int     xi[FC_BCH_M];
+    unsigned int     syn[2U * FC_BCH_T];
+    int              cache[2U * FC_BCH_T];
+    gf_poly_deg1_s   elp[FC_BCH_T + 1U];
+    DWORD            poly_2t[4U][1U + (2U * FC_BCH_T) + 1U];
+    DWORD            roots[(FC_BCH_N + 1U + 31U) / 32U]; /* 生成多项式根的 bitmap */
+    DWORD            genpoly[2U];
+    DWORD            g_poly[FC_BCH_ECC_DWORDS];
+} fc_bch_storage_s;
 
-static fc_bch_storage_t s_bch;
+static fc_bch_storage_s s_bch;
 
-_Static_assert(sizeof(fc_bch_storage_t) <= (48U * 1024U), "BCH static storage exceeds 48 KiB");
+_Static_assert(sizeof(fc_bch_storage_s) <= (48U * 1024U), "BCH static storage exceeds 48 KiB");
 
 /* ── 前向声明 ────────────────────────────────────────────────────── */
 
-static BYTE         swap_bits(struct fc_bch_control *bch, BYTE in);
-static void         load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src);
-static void         store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src);
-static int          modulo(struct fc_bch_control *bch, unsigned int v);
-static int          mod_s(struct fc_bch_control *bch, unsigned int v);
+static BYTE         swap_bits(struct FC_BCH_CONTROL_S *bch, BYTE in);
+static void         load_ecc8(struct FC_BCH_CONTROL_S *bch, DWORD *dst, const BYTE *src);
+static void         store_ecc8(struct FC_BCH_CONTROL_S *bch, BYTE *dst, const DWORD *src);
+static int          modulo(struct FC_BCH_CONTROL_S *bch, unsigned int v);
+static int          mod_s(struct FC_BCH_CONTROL_S *bch, unsigned int v);
 static int          deg(unsigned int poly);
-static unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b);
-static unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b);
-static unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a);
-static unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a);
-static unsigned int a_pow(struct fc_bch_control *bch, int i);
-static int          a_log(struct fc_bch_control *bch, unsigned int x);
-static int          a_ilog(struct fc_bch_control *bch, unsigned int x);
-static void         compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned int *syn);
-static bool         compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg);
-static int          find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf_poly *poly, unsigned int *roots);
-static bool         build_gf_tables(struct fc_bch_control *bch, unsigned int poly);
-static void         build_mod8_tables(struct fc_bch_control *bch, const DWORD *g);
-static bool         build_deg2_base(struct fc_bch_control *bch);
-static DWORD       *compute_generator_polynomial(struct fc_bch_control *bch);
+static unsigned int gf_div(struct FC_BCH_CONTROL_S *bch, unsigned int a, unsigned int b);
+static unsigned int gf_mul(struct FC_BCH_CONTROL_S *bch, unsigned int a, unsigned int b);
+static unsigned int gf_sqr(struct FC_BCH_CONTROL_S *bch, unsigned int a);
+static unsigned int gf_inv(struct FC_BCH_CONTROL_S *bch, unsigned int a);
+static unsigned int a_pow(struct FC_BCH_CONTROL_S *bch, int i);
+static int          a_log(struct FC_BCH_CONTROL_S *bch, unsigned int x);
+static int          a_ilog(struct FC_BCH_CONTROL_S *bch, unsigned int x);
+static void         compute_syndromes(struct FC_BCH_CONTROL_S *bch, DWORD *ecc, unsigned int *syn);
+static BOOL         compute_error_locator_polynomial(struct FC_BCH_CONTROL_S *bch, const unsigned int *syn, unsigned int *out_deg);
+static int          find_poly_roots(struct FC_BCH_CONTROL_S *bch, unsigned int k, gf_poly_s *poly, unsigned int *roots);
+static BOOL         build_gf_tables(struct FC_BCH_CONTROL_S *bch, unsigned int poly);
+static void         build_mod8_tables(struct FC_BCH_CONTROL_S *bch, const DWORD *g);
+static BOOL         build_deg2_base(struct FC_BCH_CONTROL_S *bch);
+static DWORD       *compute_generator_polynomial(struct FC_BCH_CONTROL_S *bch);
 
 /* ═══════════════════════════════════════════════════════════════════
  * 辅助函数
@@ -199,7 +202,7 @@ static DWORD       *compute_generator_polynomial(struct fc_bch_control *bch);
  * @param in  输入字节
  * @return bch->swap_bits 置位时为 bitrev8(in)，否则原样返回
  */
-static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
+static BYTE swap_bits(struct FC_BCH_CONTROL_S *bch, BYTE in)
 {
     return bch->swap_bits ? bitrev8(in) : in;
 }
@@ -215,7 +218,7 @@ static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
  * @param len  数据字节数
  * @param ecc  校验寄存器工作区（BCH_ECC_WORDS 个 DWORD，原地推进）
  */
-static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char *data, unsigned int len, DWORD *ecc)
+static void bch_encode_unaligned(struct FC_BCH_CONTROL_S *bch, const unsigned char *data, unsigned int len, DWORD *ecc)
 {
     int          i;
     const DWORD *p;
@@ -240,7 +243,7 @@ static void bch_encode_unaligned(struct fc_bch_control *bch, const unsigned char
  * @param dst 目标工作区（BCH_ECC_WORDS 个 DWORD）
  * @param src ECC 字节源（ecc_bytes 字节，末尾不足 4 字节处补零）
  */
-static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
+static void load_ecc8(struct FC_BCH_CONTROL_S *bch, DWORD *dst, const BYTE *src)
 {
     BYTE         pad[4] = {0, 0, 0, 0};
     unsigned int i, nwords = BCH_ECC_WORDS(bch) - 1;
@@ -259,7 +262,7 @@ static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
  * @param dst ECC 字节目标缓冲区（ecc_bytes 字节）
  * @param src 工作区（BCH_ECC_WORDS 个 DWORD）
  */
-static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
+static void store_ecc8(struct FC_BCH_CONTROL_S *bch, BYTE *dst, const DWORD *src)
 {
     BYTE         pad[4];
     unsigned int i, nwords = BCH_ECC_WORDS(bch) - 1;
@@ -289,7 +292,7 @@ static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
  * @param len  字节数
  * @param ecc  校验字缓冲（ecc_bytes 字节，可 NULL）
  */
-void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, BYTE *ecc)
+void fc_bch_encode(struct FC_BCH_CONTROL_S *bch, const BYTE *data, unsigned int len, BYTE *ecc)
 {
     ASSERT(bch != NULL);
     ASSERT(data != NULL);
@@ -372,7 +375,7 @@ void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
  * @param v   待归约的无符号值
  * @return 归约到 [0, n) 的结果
  */
-static inline int modulo(struct fc_bch_control *bch, unsigned int v)
+static inline int modulo(struct FC_BCH_CONTROL_S *bch, unsigned int v)
 {
     const unsigned int n = GF_N(bch);
     while (v >= n)
@@ -389,7 +392,7 @@ static inline int modulo(struct fc_bch_control *bch, unsigned int v)
  * @param v   待归约的值（调用者保证 < 2n）
  * @return 归约到 [0, n) 的结果
  */
-static inline int mod_s(struct fc_bch_control *bch, unsigned int v)
+static inline int mod_s(struct FC_BCH_CONTROL_S *bch, unsigned int v)
 {
     const unsigned int n = GF_N(bch);
     return (v < n) ? (int)v : (int)(v - n);
@@ -416,7 +419,7 @@ static inline int deg(unsigned int poly)
  * @param b   除数（GF 元素）
  * @return a/b；a 或 b 为 0 时返回 0
  */
-static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b)
+static inline unsigned int gf_div(struct FC_BCH_CONTROL_S *bch, unsigned int a, unsigned int b)
 {
     if ((a == 0U) || (b == 0U))
     {
@@ -432,7 +435,7 @@ static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, un
  * @param b   乘数（GF 元素）
  * @return a·b；任一为 0 时返回 0
  */
-static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b)
+static inline unsigned int gf_mul(struct FC_BCH_CONTROL_S *bch, unsigned int a, unsigned int b)
 {
     return (a && b) ? bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)((int)bch->a_log_tab[a] + (int)bch->a_log_tab[b]))] : 0;
 }
@@ -443,7 +446,7 @@ static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, un
  * @param a   待平方值（GF 元素）
  * @return a²；a 为 0 时返回 0
  */
-static inline unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a)
+static inline unsigned int gf_sqr(struct FC_BCH_CONTROL_S *bch, unsigned int a)
 {
     return a ? bch->a_pow_tab[(unsigned int)mod_s(bch, 2 * (int)bch->a_log_tab[a])] : 0;
 }
@@ -454,7 +457,7 @@ static inline unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a)
  * @param a   待求逆的 GF 元素
  * @return a 的乘法逆元
  */
-static inline unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a)
+static inline unsigned int gf_inv(struct FC_BCH_CONTROL_S *bch, unsigned int a)
 {
     return bch->a_pow_tab[GF_N(bch) - (unsigned int)bch->a_log_tab[a]];
 }
@@ -465,7 +468,7 @@ static inline unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a)
  * @param i   指数（可为负）
  * @return α^i
  */
-static inline unsigned int a_pow(struct fc_bch_control *bch, int i)
+static inline unsigned int a_pow(struct FC_BCH_CONTROL_S *bch, int i)
 {
     return bch->a_pow_tab[(unsigned int)modulo(bch, (unsigned int)i)];
 }
@@ -476,7 +479,7 @@ static inline unsigned int a_pow(struct fc_bch_control *bch, int i)
  * @param x   GF 元素
  * @return 满足 α^i = x 的指数 i
  */
-static inline int a_log(struct fc_bch_control *bch, unsigned int x)
+static inline int a_log(struct FC_BCH_CONTROL_S *bch, unsigned int x)
 {
     return (int)bch->a_log_tab[x];
 }
@@ -487,7 +490,7 @@ static inline int a_log(struct fc_bch_control *bch, unsigned int x)
  * @param x   GF 元素
  * @return x 的乘法逆元对应的指数
  */
-static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
+static inline int a_ilog(struct FC_BCH_CONTROL_S *bch, unsigned int x)
 {
     return mod_s(bch, GF_N(bch) - (unsigned int)bch->a_log_tab[x]);
 }
@@ -506,7 +509,7 @@ static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
  * @param ecc 校验字工作区（BCH_ECC_WORDS 个 DWORD，尾部 padding bit 会被就地清零）
  * @param syn 输出综合式数组（2t 项）
  */
-static void compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned int *syn)
+static void compute_syndromes(struct FC_BCH_CONTROL_S *bch, DWORD *ecc, unsigned int *syn)
 {
     int          i, j, s;
     unsigned int m;
@@ -552,7 +555,7 @@ static void compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned i
  * @param dst 目标多项式（容量须容纳 src->deg）
  * @param src 源多项式
  */
-static void gf_poly_copy(struct gf_poly *dst, struct gf_poly *src)
+static void gf_poly_copy(gf_poly_s *dst, gf_poly_s *src)
 {
     memcpy(dst, src, GF_POLY_SZ(src->deg));
 }
@@ -565,11 +568,11 @@ static void gf_poly_copy(struct gf_poly *dst, struct gf_poly *src)
  * @return true  成功，*out_deg 有效
  *         false σ 的次数 > t，不可纠
  */
-static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg)
+static BOOL compute_error_locator_polynomial(struct FC_BCH_CONTROL_S *bch, const unsigned int *syn, unsigned int *out_deg)
 {
     const unsigned int t = GF_T(bch), n = GF_N(bch);
     unsigned int       i, j, tmp, l, pd = 1, d = syn[0];
-    struct gf_poly    *elp = bch->elp, *pelp = bch->poly_2t[0], *elp_copy = bch->poly_2t[1];
+    gf_poly_s         *elp = bch->elp, *pelp = bch->poly_2t[0], *elp_copy = bch->poly_2t[1];
     int                k, pp = -1;
 
     memset(pelp, 0, GF_POLY_SZ(2 * t));
@@ -639,7 +642,7 @@ static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const u
  * @param nsol 期望的解个数（须等于 2^k2）
  * @return 实际解个数 nsol；无解或解个数与期望不符时返回 0
  */
-static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, unsigned int *sol, int nsol)
+static int solve_linear_system(struct FC_BCH_CONTROL_S *bch, unsigned int *rows, unsigned int *sol, int nsol)
 {
     const int    m = (int)GF_M(bch);
     unsigned int tmp, mask;
@@ -734,7 +737,7 @@ static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, u
  * @param roots 输出根数组（4 项）
  * @return 找到的根数（0..4）
  */
-static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsigned int b, unsigned int c, unsigned int *roots)
+static int find_affine4_roots(struct FC_BCH_CONTROL_S *bch, unsigned int a, unsigned int b, unsigned int c, unsigned int *roots)
 {
     int          i, j, k3;
     const int    m    = (int)GF_M(bch);
@@ -768,7 +771,7 @@ static int find_affine4_roots(struct fc_bch_control *bch, unsigned int a, unsign
  * @param roots 输出根数组（1 项）
  * @return 找到的根数（0 或 1）
  */
-static int find_poly_deg1_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
+static int find_poly_deg1_roots(struct FC_BCH_CONTROL_S *bch, gf_poly_s *poly, unsigned int *roots)
 {
     if (poly->c[0] == 0)
     {
@@ -785,7 +788,7 @@ static int find_poly_deg1_roots(struct fc_bch_control *bch, struct gf_poly *poly
  * @param roots 输出根数组（2 项）
  * @return 找到的根数（0 或 2）
  */
-static int find_poly_deg2_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
+static int find_poly_deg2_roots(struct FC_BCH_CONTROL_S *bch, gf_poly_s *poly, unsigned int *roots)
 {
     int          n = 0, i, l0 = (int)bch->a_log_tab[poly->c[0]], l1 = (int)bch->a_log_tab[poly->c[1]], l2 = (int)bch->a_log_tab[poly->c[2]];
     unsigned int u, v, r;
@@ -817,7 +820,7 @@ static int find_poly_deg2_roots(struct fc_bch_control *bch, struct gf_poly *poly
  * @param roots 输出根数组（3 项）
  * @return 找到的根数（0..3）
  */
-static int find_poly_deg3_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
+static int find_poly_deg3_roots(struct FC_BCH_CONTROL_S *bch, gf_poly_s *poly, unsigned int *roots)
 {
     int          i, n = 0;
     unsigned int a2, b2, c2, e3, tmp[4];
@@ -849,7 +852,7 @@ static int find_poly_deg3_roots(struct fc_bch_control *bch, struct gf_poly *poly
  * @param roots 输出根数组（4 项）
  * @return 找到的根数（0 或 4）
  */
-static int find_poly_deg4_roots(struct fc_bch_control *bch, struct gf_poly *poly, unsigned int *roots)
+static int find_poly_deg4_roots(struct FC_BCH_CONTROL_S *bch, gf_poly_s *poly, unsigned int *roots)
 {
     int          i, l, n = 0;
     unsigned int a, b, c, d, e = 0, f, a2, b2, c2, e4;
@@ -905,7 +908,7 @@ static int find_poly_deg4_roots(struct fc_bch_control *bch, struct gf_poly *poly
  * @param a   多项式
  * @param rep 输出对数表示数组（a->deg 项）
  */
-static void gf_poly_logrep(struct fc_bch_control *bch, const struct gf_poly *a, int *rep)
+static void gf_poly_logrep(struct FC_BCH_CONTROL_S *bch, const gf_poly_s *a, int *rep)
 {
     int i, d = (int)a->deg, l = (int)(GF_N(bch) - (unsigned int)a_log(bch, a->c[a->deg]));
     for (i = 0; i < d; i++)
@@ -921,7 +924,7 @@ static void gf_poly_logrep(struct fc_bch_control *bch, const struct gf_poly *a, 
  * @param b   除数多项式
  * @param rep b 的对数表示缓存；为 NULL 时用 bch->cache 现算
  */
-static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const struct gf_poly *b, int *rep)
+static void gf_poly_mod(struct FC_BCH_CONTROL_S *bch, gf_poly_s *a, const gf_poly_s *b, int *rep)
 {
     int                la, p, m2;
     unsigned int       i, j, *c = a->c;
@@ -965,7 +968,7 @@ static void gf_poly_mod(struct fc_bch_control *bch, struct gf_poly *a, const str
  * @param b   除数多项式
  * @param q   输出商多项式
  */
-static void gf_poly_div(struct fc_bch_control *bch, struct gf_poly *a, const struct gf_poly *b, struct gf_poly *q)
+static void gf_poly_div(struct FC_BCH_CONTROL_S *bch, gf_poly_s *a, const gf_poly_s *b, gf_poly_s *q)
 {
     if ((unsigned int)a->deg >= b->deg)
     {
@@ -987,9 +990,9 @@ static void gf_poly_div(struct fc_bch_control *bch, struct gf_poly *a, const str
  * @param b   多项式 b
  * @return 最大公因式（指向 a 或 b 的工作区）
  */
-static struct gf_poly *gf_poly_gcd(struct fc_bch_control *bch, struct gf_poly *a, struct gf_poly *b)
+static gf_poly_s *gf_poly_gcd(struct FC_BCH_CONTROL_S *bch, gf_poly_s *a, gf_poly_s *b)
 {
-    struct gf_poly *tmp;
+    gf_poly_s *tmp;
     if ((unsigned int)a->deg < b->deg)
     {
         tmp = a;
@@ -1014,7 +1017,7 @@ static struct gf_poly *gf_poly_gcd(struct fc_bch_control *bch, struct gf_poly *a
  * @param z   工作多项式（复用 poly_2t 工作区）
  * @param out 输出迹多项式
  */
-static void compute_trace_bk_mod(struct fc_bch_control *bch, int k, const struct gf_poly *f, struct gf_poly *z, struct gf_poly *out)
+static void compute_trace_bk_mod(struct FC_BCH_CONTROL_S *bch, int k, const gf_poly_s *f, gf_poly_s *z, gf_poly_s *out)
 {
     const int m = (int)GF_M(bch);
     int       i, j;
@@ -1056,9 +1059,9 @@ static void compute_trace_bk_mod(struct fc_bch_control *bch, int k, const struct
  * @param g   输出第一个因子（无法拆分时 = f）
  * @param h   输出第二个因子（无法拆分时 NULL）
  */
-static void factor_polynomial(struct fc_bch_control *bch, int k, struct gf_poly *f, struct gf_poly **g, struct gf_poly **h)
+static void factor_polynomial(struct FC_BCH_CONTROL_S *bch, int k, gf_poly_s *f, gf_poly_s **g, gf_poly_s **h)
 {
-    struct gf_poly *f2 = bch->poly_2t[0], *q = bch->poly_2t[1], *tk = bch->poly_2t[2], *z = bch->poly_2t[3], *gcd;
+    gf_poly_s *f2 = bch->poly_2t[0], *q = bch->poly_2t[1], *tk = bch->poly_2t[2], *z = bch->poly_2t[3], *gcd;
     *g = f;
     *h = NULL;
     compute_trace_bk_mod(bch, k, f, z, tk);
@@ -1069,7 +1072,7 @@ static void factor_polynomial(struct fc_bch_control *bch, int k, struct gf_poly 
         if ((unsigned int)gcd->deg < (unsigned int)f->deg)
         {
             gf_poly_div(bch, f, gcd, q);
-            *h = &((struct gf_poly_deg1 *)f)[gcd->deg].poly;
+            *h = &((gf_poly_deg1_s *)f)[gcd->deg].poly;
             gf_poly_copy(*g, gcd);
             gf_poly_copy(*h, q);
         }
@@ -1084,10 +1087,10 @@ static void factor_polynomial(struct fc_bch_control *bch, int k, struct gf_poly 
  * @param roots 输出根数组
  * @return 找到的根数
  */
-static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf_poly *poly, unsigned int *roots)
+static int find_poly_roots(struct FC_BCH_CONTROL_S *bch, unsigned int k, gf_poly_s *poly, unsigned int *roots)
 {
-    int             cnt;
-    struct gf_poly *f1, *f2;
+    int        cnt;
+    gf_poly_s *f1, *f2;
     switch (poly->deg)
     {
         case 1:
@@ -1141,7 +1144,7 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  * @param out_nerr  输出：错误 bit 数
  * @return true 可纠（含 0 错）；false 不可纠
  */
-bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr)
+BOOL fc_bch_decode(struct FC_BCH_CONTROL_S *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr)
 {
     ASSERT(bch != NULL);
     ASSERT(out_nerr != NULL);
@@ -1222,7 +1225,7 @@ bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int le
  * @return true  构建成功
  *         false 多项式次数与 m 不符，或 α 的周期不是 n（非本原多项式）
  */
-static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
+static BOOL build_gf_tables(struct FC_BCH_CONTROL_S *bch, unsigned int poly)
 {
     unsigned int       i, x = 1;
     const unsigned int k = 1U << (unsigned int)deg(poly);
@@ -1254,7 +1257,7 @@ static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
  * @param bch BCH 控制句柄
  * @param g   生成多项式（32bit 大端字数组）
  */
-static SSD_CODE_FAST void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
+static SSD_CODE_FAST void build_mod8_tables(struct FC_BCH_CONTROL_S *bch, const DWORD *g)
 {
     int       i, j, b, d;
     DWORD     data, hi, lo, *tab;
@@ -1288,7 +1291,7 @@ static SSD_CODE_FAST void build_mod8_tables(struct fc_bch_control *bch, const DW
  * @param bch BCH 控制句柄
  * @return true 成功（m 个迹映射全部找到）；false 失败
  */
-static bool build_deg2_base(struct fc_bch_control *bch)
+static BOOL build_deg2_base(struct FC_BCH_CONTROL_S *bch)
 {
     const int    m = (int)GF_M(bch);
     int          i, j, r;
@@ -1333,14 +1336,14 @@ static bool build_deg2_base(struct fc_bch_control *bch)
  *       乘积展开得系数，打包为 32bit 大端字。
  *       输出同时设 bch->ecc_bits = deg(g) = m·t。
  */
-static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
+static DWORD *compute_generator_polynomial(struct FC_BCH_CONTROL_S *bch)
 {
     const unsigned int m = GF_M(bch), t = GF_T(bch);
     int                n;
     unsigned int       i, j, r, word;
     DWORD             *roots   = s_bch.roots;
     DWORD             *genpoly = s_bch.genpoly;
-    struct gf_poly    *g       = (struct gf_poly *)s_bch.g_poly;
+    gf_poly_s         *g       = (gf_poly_s *)s_bch.g_poly;
 
     // roots 用 bitmap：8192 个根只需 256 DWORD。
     memset(roots, 0, sizeof(s_bch.roots));
@@ -1400,12 +1403,12 @@ static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
  * @param swap_bits 是否交换输入/输出位序
  * @return 引擎句柄；失败返回 NULL
  */
-SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
+SSD_CODE_FAST fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
-    bool                      err = false;
+    BOOL                      err = false;
     unsigned int              i;
     DWORD                    *genpoly;
-    fc_bch_control_t         *bch             = NULL;
+    fc_bch_control_s         *bch             = NULL;
     static const unsigned int prim_poly_tab[] = {
         0x25,
         0x43,
@@ -1446,10 +1449,10 @@ SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly
     bch->xi_tab    = s_bch.xi;
     bch->syn       = s_bch.syn;
     bch->cache     = s_bch.cache;
-    bch->elp       = (struct gf_poly *)s_bch.elp;
+    bch->elp       = (gf_poly_s *)s_bch.elp;
     for (i = 0; i < 4; i++)
     {
-        bch->poly_2t[i] = (struct gf_poly *)s_bch.poly_2t[i];
+        bch->poly_2t[i] = (gf_poly_s *)s_bch.poly_2t[i];
     }
 
     if (err == 0)
@@ -1485,7 +1488,7 @@ SSD_CODE_FAST fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly
  *
  * @param bch 引擎句柄（NULL 时无操作）
  */
-void fc_bch_free(fc_bch_control_t *bch)
+void fc_bch_free(fc_bch_control_s *bch)
 {
     if (bch == NULL)
     {

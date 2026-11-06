@@ -1,6 +1,8 @@
 #ifndef SSD_USB_MSC_H
 #define SSD_USB_MSC_H
 
+#include "ssd_types.h" /* BOOL */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -49,7 +51,7 @@ void usb_msc_task(void);
  *
  * @return true = 任一 USB 槽非 FREE
  */
-bool usb_msc_host_busy(void);
+BOOL usb_msc_host_busy(void);
 
 /**
  * @brief 打印 WRITE(10) 数据相分块直方图（诊断，RISK-NAND-04）。

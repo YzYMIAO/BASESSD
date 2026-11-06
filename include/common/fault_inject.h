@@ -49,7 +49,7 @@ void fi_cache_fail_arm(DWORD page_lba);
  * @param page_lba 本成员的页基址 LBA。
  * @return true = 本次注入，且注入点已被消费（之后同一页不再命中）
  */
-bool fi_cache_fail_take(DWORD page_lba);
+BOOL fi_cache_fail_take(DWORD page_lba);
 
 /**
  * @brief 让接下来 @p pages 次 Journal 页写按失败结算。
@@ -67,7 +67,7 @@ void fi_journal_fail_arm(DWORD pages);
  *
  * @return true = 本次失败（剩余次数 -1）
  */
-bool fi_journal_fail_take(void);
+BOOL fi_journal_fail_take(void);
 
 #else /* 产品固件（无 FC_NAND_TEST_ENABLE）：全部空实现，零运行期开销 */
 
@@ -80,7 +80,7 @@ static inline void fi_cache_fail_arm(DWORD page_lba)
     (void)page_lba;
 }
 
-static inline bool fi_cache_fail_take(DWORD page_lba)
+static inline BOOL fi_cache_fail_take(DWORD page_lba)
 {
     (void)page_lba;
     return false;
@@ -91,7 +91,7 @@ static inline void fi_journal_fail_arm(DWORD pages)
     (void)pages;
 }
 
-static inline bool fi_journal_fail_take(void)
+static inline BOOL fi_journal_fail_take(void)
 {
     return false;
 }

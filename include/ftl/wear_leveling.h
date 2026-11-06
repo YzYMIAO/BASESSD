@@ -21,9 +21,9 @@
  *     动态 WL 优先选中写入，擦除计数回升；**不退役**（退役只属于预测性退役/RR）
  */
 
-#include "allocator.h" /* alc_t（共享数据面账本，策略只读） */
+#include "allocator.h" /* alc_s（共享数据面账本，策略只读） */
 #include "nand_config.h"
-#include "ssd_types.h" /* bool */
+#include "ssd_types.h" /* BOOL */
 
 #include <stdint.h>
 
@@ -45,14 +45,14 @@
 
 /* ── WL Victim 选择结果 ── */
 
-typedef struct
+typedef struct WL_VICTIM_S
 {
-    bool  found;                   /* 是否找到 victim */
+    BOOL  found;                   /* 是否找到 victim */
     WORD  plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
     BYTE  next_page;               /* 该 SB 已编程页数上界（搬移只读 [0, next_page)） */
     WORD  valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
     DWORD read_count;              /* 各 plane read disturb 计数之和（冷块优先权重） */
-} wl_victim_t;
+} wl_victim_s;
 
 /* ── 接口 ── */
 
@@ -69,7 +69,7 @@ typedef struct
  * @return true  求值有效（已过启动门且至少有一个 used 候选）
  *         false 未过启动门 / 无候选
  */
-bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used);
+BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used);
 
 /**
  * @brief 检查是否需要触发静态 WL（UBI 模型）
@@ -85,7 +85,7 @@ bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_fre
  * @param total_writes 累计编程次数（启动门）
  * @return true 需要触发，false 不需要
  */
-bool wl_should_trigger(const alc_t *alloc, DWORD total_writes);
+BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes);
 
 /**
  * @brief 选择 WL victim Super Block
@@ -98,7 +98,7 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes);
  * @param victim 输出：选中的 victim
  * @return true 找到，false 无合适 victim
  */
-bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim);
+BOOL wl_select_victim(const alc_s *alloc, wl_victim_s *victim);
 
 /*
  * ⚠ 搬移在 `ftl/migrate.h` 的异步 job 里完成：GC 与 WL 共用同一台引擎，

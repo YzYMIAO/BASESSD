@@ -15,15 +15,15 @@
 #include <stddef.h>
 #include <string.h>
 
-_Static_assert(OP_COUNT <= 256U, "fc_cmd_conf_t.operation is 8 bits");
+_Static_assert(OP_COUNT <= 256U, "fc_cmd_cfg_s.operation is 8 bits");
 
 // 状态位名表 → "A|B|?"。位顺序按严重性/可读性排列；未知位以 "?" 占位。
 // 只写 buf，不分配资源。
-typedef struct
+typedef struct FC_STATUS_NAME_S
 {
     DWORD       bit;
     const char *name;
-} fc_status_name_t;
+} fc_status_name_s;
 /**
  * @brief 把状态位集合格式化成 "A|B|?" 文本
  *
@@ -36,7 +36,7 @@ typedef struct
  * @param buflen 缓冲长度（0 时返回空串）
  * @return buf（或 buflen 为 0 时的空串）
  */
-static const char *fc_status_str_format(const fc_status_name_t *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
+static const char *fc_status_str_format(const fc_status_name_s *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
 {
     if ((buf == NULL) || (buflen == 0U))
     {
@@ -82,7 +82,7 @@ static const char *fc_status_str_format(const fc_status_name_t *tbl, DWORD count
     return buf;
 }
 
-static const fc_status_name_t s_cw_status_names[] = {
+static const fc_status_name_s s_cw_status_names[] = {
     {      FC_CW_STATUS_FAIL,  "FAIL"},
     {       FC_CW_STATUS_UNC,   "UNC"},
     { FC_CW_STATUS_CRC_ERROR,   "CRC"},
@@ -91,7 +91,7 @@ static const fc_status_name_t s_cw_status_names[] = {
     {     FC_CW_STATUS_EMPTY, "EMPTY"},
 };
 
-static const fc_status_name_t s_cmd_status_names[] = {
+static const fc_status_name_s s_cmd_status_names[] = {
     { FC_CMD_STATUS_NAND_FAIL,    "NAND"},
     {FC_CMD_STATUS_FAIL_CACHE,   "FAILC"},
     {   FC_CMD_STATUS_TIMEOUT, "TIMEOUT"},
@@ -134,7 +134,7 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen)
  * @param mask flat 绝对 CW 位图
  * @return true 对称；false 不对称
  */
-bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
+BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 {
     const DWORD plane_bits = ((1U << CW_NUM) - 1U);
     const DWORD low        = mask & plane_bits;
@@ -157,12 +157,12 @@ bool fc_cw_bitmap_is_plane_symmetric(DWORD mask)
  *
  * @param command 命令
  */
-void fc_command_validate(const fc_command_t *command)
+void fc_command_validate(const fc_cmd_s *command)
 {
     ASSERT(command != NULL);
     ASSERT(command->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）
-    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(command->config.operation) == false) || (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
+    ASSERT((command->config.operation == OP_SET_FEATURES) || (command->config.operation == OP_GET_FEATURES) || (nand_operation_has_data(command->config.operation) == false) || (command->desc_id != FC_DESC_ID_INVALID));
     // NDEBUG 下断言整段裁空 → command 变未用形参，吞掉
     (void)command;
 }

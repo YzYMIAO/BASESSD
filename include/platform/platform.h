@@ -10,7 +10,7 @@
  * 平台抽象接口。
  * 固件平台（stm32h743/stm32h7r3）提供一套实现，核心 FTL 不直接依赖操作系统或寄存器。
  */
-typedef struct
+typedef struct SSD_PLATFORM_OPS_S
 {
     void (*log_write)(const char *message);
     QWORD(*time_us)
@@ -19,10 +19,10 @@ typedef struct
     (void); /* 系统毫秒时基（SysTick/HAL tick） */
     void *(*memory_allocate)(size_t size);
     void (*memory_free)(void *memory);
-} ssd_platform_ops_t;
+} ssd_platform_ops_s;
 
-int                       ssd_platform_register(const ssd_platform_ops_t *ops);
-const ssd_platform_ops_t *ssd_platform_get(void);
+func_status_e             ssd_platform_register(const ssd_platform_ops_s *ops);
+const ssd_platform_ops_s *ssd_platform_get(void);
 
 /**
  * @brief 当前单调毫秒（平台毫秒时基的统一读取口）
@@ -35,10 +35,10 @@ const ssd_platform_ops_t *ssd_platform_get(void);
 DWORD platform_now_ms(void);
 
 /*
- * 注册本平台的 ssd_platform_ops_t 实现表。
+ * 注册本平台的 ssd_platform_ops_s 实现表。
  * 名字被 src/main.c 冻结；实现表本身在共享 src/platform/platform.c，
  * 其中的 time_us 由 port 侧毫秒计数换算（见 src/platform/<soc>/<svc>_port.c）。
  */
-int stm32_platform_register(void);
+func_status_e stm32_platform_register(void);
 
 #endif /* SSD_PLATFORM_H */

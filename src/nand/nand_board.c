@@ -18,16 +18,16 @@
 #include <string.h>
 
 /* 上电拓扑扫描结果：板级/物理事实，不是器件属性。 */
-nand_target_info_t g_nand_targets[CH_NUM][CE_NUM];
+nand_target_info_s g_nand_targets[CH_NUM][CE_NUM];
 
 /* 板级物理通路表：每一项表示 (ch,ce) 有一条可寻址的 NAND target。 */
-typedef struct
+typedef struct NAND_BOARD_TARGET_S
 {
     BYTE ch;
     BYTE ce;
-} nand_board_target_t;
+} nand_board_target_s;
 
-static const nand_board_target_t s_board_targets[] = {
+static const nand_board_target_s s_board_targets[] = {
     {0U, 0U},
 };
 

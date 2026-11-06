@@ -1,5 +1,5 @@
 /*
- * pending.c — Pending Request 表 + 完成组（pend_group_t）实现
+ * pending.c — Pending Request 表 + 完成组（pend_group_s）实现
  *
  * 职责：
  *   ① 跟踪异步请求的 command_id → 请求映射，供 FC 完成回调据以做 caller 通知
@@ -9,10 +9,10 @@
  *      触发一次（见 pend_group_* 族）。
  *
  * 与 pending.h 的分工：
- *   pending.h —— 表结构（pend_req_t / pend_group_t）+ 容量宏 + 语义约定；
+ *   pending.h —— 表结构（pend_req_s / pend_group_s）+ 容量宏 + 语义约定；
  *   本文件     —— 两张表的增删查 + 组完成编排，无新数据结构。
  *
- * 存储：pending[] / groups[] 由 pending_ctx_t（per-instance）持有；文件级 static
+ * 存储：pending[] / groups[] 由 pend_ctx_s（per-instance）持有；文件级 static
  *   只放下溢留痕的限流时间戳，不持有表数据。
  *
  * 文件结构：
@@ -46,7 +46,7 @@ static DWORD s_group_underflow_n;
  * @param table pending 表
  * @param req   待脱钩的请求槽；command_id 为 NONE 时跳过
  */
-static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
+static void pend_unbind(pend_ctx_s *table, pend_req_s *req)
 {
     const WORD cmd_id = req->command_id;
     const BYTE index  = (BYTE)(req - table->slots);
@@ -62,7 +62,7 @@ static void pend_unbind(pending_ctx_t *table, pend_req_t *req)
  *
  * @param table pending 表
  */
-void pend_init(pending_ctx_t *table)
+void pend_init(pend_ctx_s *table)
 {
     memset(table->slots, 0, sizeof(table->slots));
     memset(table->groups, 0, sizeof(table->groups));
@@ -76,7 +76,7 @@ void pend_init(pending_ctx_t *table)
  * @param req    pending 槽
  * @param cmd_id 新 command_id
  */
-void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id)
+void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id)
 {
     ASSERT(table != NULL);
     ASSERT(req != NULL);
@@ -99,7 +99,7 @@ void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id)
  * @param table pending 表
  * @param req   待脱钩的槽
  */
-void pend_detach_command(pending_ctx_t *table, pend_req_t *req)
+void pend_detach_command(pend_ctx_s *table, pend_req_s *req)
 {
     ASSERT(table != NULL);
     ASSERT(req != NULL);
@@ -117,7 +117,7 @@ void pend_detach_command(pending_ctx_t *table, pend_req_t *req)
  * @param cmd_id 绑定的 command_id
  * @return 槽指针；NULL = 池满
  */
-pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id)
+pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id)
 {
     ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
 
@@ -149,7 +149,7 @@ pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id)
  * @param cmd_id command_id
  * @return 槽指针；NULL = 未找到
  */
-pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
+pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id)
 {
     if (cmd_id >= FC_COMMAND_POOL_DEPTH)
     {
@@ -163,7 +163,7 @@ pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
         return NULL;
     }
 
-    pend_req_t *req = &table->slots[index];
+    pend_req_s *req = &table->slots[index];
 
     if ((req->used == false) || (req->command_id != cmd_id))
     {
@@ -181,9 +181,9 @@ pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id)
  * @param table  pending 表
  * @param cmd_id command_id
  */
-void pend_remove(pending_ctx_t *table, WORD cmd_id)
+void pend_remove(pend_ctx_s *table, WORD cmd_id)
 {
-    pend_req_t *req = pend_find(table, cmd_id);
+    pend_req_s *req = pend_find(table, cmd_id);
 
     if (req != NULL)
     {
@@ -202,7 +202,7 @@ void pend_remove(pending_ctx_t *table, WORD cmd_id)
  * @param out_index 输出：槽下标
  * @return true 找到；false 无托管项
  */
-bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index)
+BOOL pend_find_op(const pend_ctx_s *table, pend_op_e op, BYTE *out_index)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -229,7 +229,7 @@ bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index)
  * @param out   输出：视图
  * @return true 找到；false 无托管项
  */
-bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
+BOOL pend_view_op(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out)
 {
     BYTE idx = 0U;
 
@@ -238,7 +238,7 @@ bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
         return false;
     }
 
-    const pend_req_t *slot = &table->slots[idx];
+    const pend_req_s *slot = &table->slots[idx];
 
     out->index  = idx;
     out->owners = slot->owners;
@@ -256,7 +256,7 @@ bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
  * @param table pending 表
  * @param index 槽下标
  */
-void pend_release_index(pending_ctx_t *table, BYTE index)
+void pend_release_index(pend_ctx_s *table, BYTE index)
 {
     ASSERT(index < FTL_PENDING_MAX);
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
@@ -273,11 +273,11 @@ void pend_release_index(pending_ctx_t *table, BYTE index)
  * @param table pending 表
  * @return true 有外部写；false 无
  */
-bool pend_has_foreign_write(const pending_ctx_t *table)
+BOOL pend_has_foreign_write(const pend_ctx_s *table)
 {
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        const pend_req_t *p = &table->slots[i];
+        const pend_req_s *p = &table->slots[i];
 
         if ((p->used == false) || (p->cache_role != PEND_CACHE_ROLE_NONE))
         {
@@ -300,7 +300,7 @@ bool pend_has_foreign_write(const pending_ctx_t *table)
  * @param table pending 表
  * @return 占用槽位数
  */
-WORD pend_slot_get_count(const pending_ctx_t *table)
+WORD pend_slot_get_count(const pend_ctx_s *table)
 {
     WORD count = 0U;
 
@@ -315,7 +315,7 @@ WORD pend_slot_get_count(const pending_ctx_t *table)
     return count;
 }
 
-/* ── 完成组（pend_group_t）── */
+/* ── 完成组（pend_group_s）── */
 
 /**
  * @brief 分配一个完成组
@@ -326,7 +326,7 @@ WORD pend_slot_get_count(const pending_ctx_t *table)
  * @param out_gi 输出：组下标
  * @return true 已分配；false 组表满
  */
-bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi)
+BOOL pend_group_alloc(pend_ctx_s *table, BYTE *out_gi)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -350,7 +350,7 @@ bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi)
  * @param table pending 表
  * @return 组数
  */
-WORD pend_group_get_count(const pending_ctx_t *table)
+WORD pend_group_get_count(const pend_ctx_s *table)
 {
     WORD count = 0U;
 
@@ -384,11 +384,11 @@ static void pend_note_underflow(const char *who, WORD gi)
  * @param table pending 表
  * @param gi    组下标
  */
-void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
+void pend_group_drop_subop(pend_ctx_s *table, WORD gi)
 {
     ASSERT(gi < FTL_GROUP_MAX);
 
-    pend_group_t *g = &table->groups[gi];
+    pend_group_s *g = &table->groups[gi];
 
     ASSERT(g->used == true);
 
@@ -414,7 +414,7 @@ void pend_group_drop_subop(pending_ctx_t *table, WORD gi)
  * @param owners     组位图
  * @param sub_status 本子操作状态
  */
-void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_status_e sub_status)
+void pend_group_complete_subop_multi(pend_ctx_s *table, DWORD owners, ssd_status_e sub_status)
 {
     for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
@@ -423,7 +423,7 @@ void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_sta
             continue;
         }
 
-        pend_group_t *g = &table->groups[gi];
+        pend_group_s *g = &table->groups[gi];
 
         ASSERT(g->used == true); /* 组已释放 = 重复完成/簿记错误 */
 
@@ -456,11 +456,11 @@ void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_sta
  * @param table pending 表
  * @param gi    组下标
  */
-void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
+void pend_group_maybe_complete(pend_ctx_s *table, WORD gi)
 {
     ASSERT(gi < FTL_GROUP_MAX);
 
-    pend_group_t *g = &table->groups[gi];
+    pend_group_s *g = &table->groups[gi];
     if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
     {
         return;
@@ -492,11 +492,11 @@ void pend_group_maybe_complete(pending_ctx_t *table, WORD gi)
  * @param window 窗口号
  * @return true 仍有未完成组
  */
-bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
+BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window)
 {
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
-        const pend_group_t *g = &table->groups[i];
+        const pend_group_s *g = &table->groups[i];
 
         if ((g->used == false) || (pend_op_is_write(g->op) == false) || (g->next >= g->total))
         {
@@ -529,11 +529,11 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window)
  * @param pending_idx pending 槽下标
  * @param owners      组位图
  */
-void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
+void pend_confirm_park(pend_ctx_s *table, WORD pending_idx, DWORD owners)
 {
     ASSERT(pending_idx < FTL_PENDING_MAX);
 
-    pend_req_t *pending = &table->slots[pending_idx];
+    pend_req_s *pending = &table->slots[pending_idx];
 
     ASSERT(pending->used == true);
 
@@ -550,12 +550,12 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners)
  * @param index  pending 槽下标
  * @param status 结算状态
  */
-void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
+void pend_confirm_settle(pend_ctx_s *table, BYTE index, ssd_status_e status)
 {
     ASSERT(table != NULL);
     ASSERT(index < FTL_PENDING_MAX);
 
-    pend_req_t *pending = &table->slots[index];
+    pend_req_s *pending = &table->slots[index];
 
     ASSERT(pend_confirm_is_parked(table, index));
 
@@ -572,7 +572,7 @@ void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status)
  * @param table pending 表
  * @return 数量
  */
-WORD pend_confirm_get_count(const pending_ctx_t *table)
+WORD pend_confirm_get_count(const pend_ctx_s *table)
 {
     ASSERT(table != NULL);
 

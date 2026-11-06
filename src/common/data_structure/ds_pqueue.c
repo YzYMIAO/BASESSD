@@ -36,7 +36,7 @@
  * 堆顶元素为最大值（由比较函数定义）。
  * 支持 O(log n) 的插入和删除操作，O(1) 的获取堆顶操作。
  */
-struct ds_pqueue_s
+struct DS_PQUEUE_S
 {
     size_t size;       /**< 当前队列中的元素个数 */
     size_t capacity;   /**< 当前队列容量 */
@@ -60,7 +60,7 @@ struct ds_pqueue_s
  * @return DS_OK 扩容成功，DS_ERR_MAX_CAPACITY 已达最大容量，
  *         DS_ERR_ALLOC 内存分配失败
  */
-static ds_Stat pqueue_expand_capacity(ds_Pqueue *pq)
+static ds_status_e pqueue_expand_capacity(ds_pqueue_s *pq)
 {
     if (pq->capacity == DS_MAX_ELEMENTS)
     {
@@ -106,9 +106,9 @@ static ds_Stat pqueue_expand_capacity(ds_Pqueue *pq)
  *
  * @note 比较函数应返回正值表示第一个元素优先级高于第二个元素
  */
-ds_Stat ds_pqueue_new(ds_Pqueue **pq, int (*cmp)(void const *, void const *))
+ds_status_e ds_pqueue_new(ds_pqueue_s **pq, int (*cmp)(void const *, void const *))
 {
-    ds_PqueueConfig conf;
+    ds_pqueue_cfg_s conf;
 
     ds_pqueue_conf_init(&conf, cmp);
     return ds_pqueue_new_conf(&conf, pq);
@@ -123,7 +123,7 @@ ds_Stat ds_pqueue_new(ds_Pqueue **pq, int (*cmp)(void const *, void const *))
  * @param[in,out] conf 需要初始化的配置结构体指针
  * @param[in]     cmp  元素比较函数指针
  */
-void ds_pqueue_conf_init(ds_PqueueConfig *conf, int (*cmp)(void const *, void const *))
+void ds_pqueue_conf_init(ds_pqueue_cfg_s *conf, int (*cmp)(void const *, void const *))
 {
     conf->capacity   = DEFAULT_CAPACITY;
     conf->exp_factor = DEFAULT_EXPANSION_FACTOR;
@@ -144,7 +144,7 @@ void ds_pqueue_conf_init(ds_PqueueConfig *conf, int (*cmp)(void const *, void co
  * @return DS_OK 创建成功，DS_ERR_INVALID_CAPACITY 容量配置无效，
  *         DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_pqueue_new_conf(ds_PqueueConfig *conf, ds_Pqueue **out)
+ds_status_e ds_pqueue_new_conf(ds_pqueue_cfg_s *conf, ds_pqueue_s **out)
 {
     float ex = 0;
 
@@ -164,7 +164,7 @@ ds_Stat ds_pqueue_new_conf(ds_PqueueConfig *conf, ds_Pqueue **out)
         return DS_ERR_INVALID_CAPACITY;
     }
 
-    ds_Pqueue *pq = conf->mem_calloc(1, sizeof(ds_Pqueue));
+    ds_pqueue_s *pq = conf->mem_calloc(1, sizeof(ds_pqueue_s));
 
     if (pq == NULL)
     {
@@ -200,7 +200,7 @@ ds_Stat ds_pqueue_new_conf(ds_PqueueConfig *conf, ds_Pqueue **out)
  *
  * @param[in] pq 要销毁的优先队列指针
  */
-void ds_pqueue_destroy(ds_Pqueue *pq)
+void ds_pqueue_destroy(ds_pqueue_s *pq)
 {
     pq->mem_free(pq->buffer);
     pq->mem_free(pq);
@@ -218,7 +218,7 @@ void ds_pqueue_destroy(ds_Pqueue *pq)
  * @note 如果队列中的元素存储在栈上，不应调用此函数，
  *       应使用 ds_pqueue_destroy() 代替
  */
-void ds_pqueue_destroy_cb(ds_Pqueue *pq, void (*cb)(void *))
+void ds_pqueue_destroy_cb(ds_pqueue_s *pq, void (*cb)(void *))
 {
     for (size_t i = 0; i < pq->size; i++)
     {
@@ -240,12 +240,12 @@ void ds_pqueue_destroy_cb(ds_Pqueue *pq, void (*cb)(void *))
  * @return DS_OK 插入成功，DS_ERR_ALLOC 扩容失败，
  *         DS_ERR_MAX_CAPACITY 已达最大容量
  */
-ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
+ds_status_e ds_pqueue_push(ds_pqueue_s *pq, void *element)
 {
     /* 如果队列已满，先扩容 */
     if (pq->size >= pq->capacity)
     {
-        ds_Stat status = pqueue_expand_capacity(pq);
+        ds_status_e status = pqueue_expand_capacity(pq);
 
         if (status != DS_OK)
         {
@@ -299,7 +299,7 @@ ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
  *
  * @return DS_OK 获取成功，DS_ERR_OUT_OF_RANGE 队列为空
  */
-ds_Stat ds_pqueue_top(ds_Pqueue *pq, void **out)
+ds_status_e ds_pqueue_top(ds_pqueue_s *pq, void **out)
 {
     if (pq->size == 0)
     {
@@ -322,7 +322,7 @@ ds_Stat ds_pqueue_top(ds_Pqueue *pq, void **out)
  *
  * @return DS_OK 移除成功，DS_ERR_OUT_OF_RANGE 队列为空
  */
-ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out)
+ds_status_e ds_pqueue_pop(ds_pqueue_s *pq, void **out)
 {
     if (pq->size == 0)
     {
@@ -360,7 +360,7 @@ ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out)
  * @param[in,out] pq    目标优先队列
  * @param[in]     index 开始调整的节点索引
  */
-void ds_pqueue_heapify(ds_Pqueue *pq, size_t index)
+void ds_pqueue_heapify(ds_pqueue_s *pq, size_t index)
 {
     if (pq->size <= 1)
     {
@@ -409,9 +409,9 @@ void ds_pqueue_heapify(ds_Pqueue *pq, size_t index)
 /**
  * @brief 获取优先队列结构体的大小
  *
- * @return 结构体 ds_Pqueue 的字节大小
+ * @return 结构体 ds_pqueue_s 的字节大小
  */
 size_t ds_pqueue_struct_size()
 {
-    return sizeof(ds_Pqueue);
+    return sizeof(ds_pqueue_s);
 }

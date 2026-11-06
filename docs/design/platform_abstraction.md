@@ -27,7 +27,7 @@
   —— **今天不成立**：`src/nand/nand_fmc.c` 直接对 FMC 窗口做 MMIO 写，
   `src/nand/nand_mt29f4g08abadawp.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init` /
   `__HAL_RCC_*_CLK_ENABLE`。
-- 真实存在的抽象 seam 是 `include/platform/platform.h` 的 `ssd_platform_ops_t`（4 个函数指针），
+- 真实存在的抽象 seam 是 `include/platform/platform.h` 的 `ssd_platform_ops_s`（4 个函数指针），
   但**只有 `time_us` 被填**；`include/platform/interrupt.h` 的 `ssd_irq_*` **零调用者**。
 
 本文件把规则补成**可机械检查**的形式（§一），把现状逐文件审计出来（§二、§三），
@@ -136,7 +136,7 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
-| `platform.c` | 45 | a | `ssd_platform_ops_t` 注册表 + `stm32_platform_register()`（Stage 2.6 从 `<soc>/platform_ops.c` 搬来，只填 `time_us`），无硬件 | — |
+| `platform.c` | 45 | a | `ssd_platform_ops_s` 注册表 + `stm32_platform_register()`（Stage 2.6 从 `<soc>/platform_ops.c` 搬来，只填 `time_us`），无硬件 | — |
 | `crc.c` | 46 | **a** | CRC 自检策略（IDR 回环 `ASSERT`）+ 对齐契约（Stage 2.6 搬来） | — |
 | `dma.c` | 19 | **a** | UART TX DMA 一行转发（Stage 2.6 搬来） | — |
 | `mpu.c` | 13 | **a** | `mpu_set_protection` 一行转发（Stage 2.6 搬来） | — |
@@ -305,7 +305,7 @@ void     fault_port_enable_configurable_faults(void);
 uint32_t fault_port_reset_flags(void);
 void     fault_port_reset_reason_text(uint32_t flags, char *buffer, uint32_t capacity);
 void     fault_port_reset_flags_clear(void);
-void     fault_report_and_halt(const fault_ctx_t *ctx);    /* 共享入口 */
+void     fault_report_and_halt(const fault_ctx_s *ctx);    /* 共享入口 */
 
 /* delay —— include/platform/delay.h */
 uint32_t delay_port_hclk_hz(void);
@@ -390,7 +390,7 @@ uint8_t  sys_port_clock_init(uint32_t plln, uint32_t pllm, uint32_t pllp, uint32
 void     usart_init(uint32_t baudrate);                       /* 共享入口，名字被 sys.c 冻结 */
 uint32_t uart_log_write(const char *data, uint32_t length);   /* 共享；失败 UART_LOG_INVALID */
 bool     uart_log_flush(uint32_t timeout_ms);                 /* 共享 */
-void     uart_get_stats(uart_stats_t *stats);                 /* 共享 */
+void     uart_get_stats(uart_stats_s *stats);                 /* 共享 */
 uint8_t  uart_rx_read(uint8_t *byte);                         /* 共享；cli.c 消费 */
 /*   ↑ 共享入口；↓ port 接口（15 个） */
 uint8_t  usart_port_hw_init(uint32_t baudrate);
@@ -516,7 +516,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 
 **未做**：`usart` 拆分（已由 Stage 2.5 接手，见 §5.3）；`h7r3`（保持冻结，§2.3 已登记）；
 `sys.c` / `mpu.c` / `crc.c` / `rng.c` / `qspi.c` / `dma.c` / `nand_dma.c` / `bsp/sdram_*` /
-`stm32h7rsxx_it.c`（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_t` 未扩张；
+`stm32h7rsxx_it.c`（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_s` 未扩张；
 `interrupt.h` 未动。
 
 ### 5.3 Stage 2.5 进度（2026-10-11，usart 拆分，只做 `stm32h743`）
@@ -530,7 +530,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 
 | 层 | 文件 | 内容 |
 |---|---|---|
-| 抽象头 | `include/platform/usart.h`（新，147 行） | 传输 API + `uart_stats_t` + 8 个共享入口 + 15 个 `usart_port_*` 接口（零 HAL） |
+| 抽象头 | `include/platform/usart.h`（新，147 行） | 传输 API + `uart_stats_s` + 8 个共享入口 + 15 个 `usart_port_*` 接口（零 HAL） |
 | 共享传输 | `src/platform/usart.c`（新，413 行） | RX/TX 环形队列、`_write` newlib 钩子、log sink、TX 状态机、诊断计数 |
 | port | `src/platform/stm32h743/usart_port.c`（新，251 行） | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 15 个原语 |
 | port 头 | `include/platform/stm32h743/usart_port.h`（新，43 行） | `g_uart1_handle` + USART1/GPIO/时钟宏 |
@@ -620,7 +620,7 @@ h7r3 单体 `usart.c` 也定义 `_write` / `uart_log_write` 等 ⇒ h7r3 解冻�
   逐字一致 ⇒ port 侧 `RCC->RSR` 解码路径与启动编排顺序未变。
 
 **未做**：不接线死代码（`rng` / `qspi` / `mpu` 拆完**仍是零调用者**，本轮只做结构对齐）；
-不拆 `nand_dma.c`（Stage 3）、不动 h7r3、不扩 `ssd_platform_ops_t`、不碰 `stm32h7rsxx_it.c` 向量表。
+不拆 `nand_dma.c`（Stage 3）、不动 h7r3、不扩 `ssd_platform_ops_s`、不碰 `stm32h7rsxx_it.c` 向量表。
 
 ### 5.5 Stage 2.7 进度（2026-10-11，ISR 分散化，只做 `stm32h743`）
 
@@ -659,7 +659,7 @@ ISR 名字由 `startup_stm32h743xx.s` 的向量表固定 ⇒ 任何 TU 定义同
 - **不**引入 `src/platform/service/` 第三层——Stage 2 的「三层」是**概念上的**（抽象头 /
   共享源 / port 源），落地**仍是两个目录**：共享源直接放 `src/platform/` 顶层。
 - **不**用 vtable、**不**用弱符号做 port 绑定——一律「同名 port 函数 + 链接期解析」（§1.5）。
-- **不**把运行期 vtable 作为主机制——`ssd_platform_ops_t` 保留为**已存在的小 seam**，不扩张。
+- **不**把运行期 vtable 作为主机制——`ssd_platform_ops_s` 保留为**已存在的小 seam**，不扩张。
 - Stage 2 **不**拆 `usart`（1204 行、头泄漏、带 `ftl/ftl.h` 反依赖 G7）—— 已由 Stage 2.5（§5.3）
   完成：传输层留共享、CLI 移到 `src/hil/cli.c`，G7 倒挂消除。
 - **不动** `src/ftl/**`、`tests/framework/**`、`ut_main.c`。

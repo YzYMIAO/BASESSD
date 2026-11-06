@@ -39,14 +39,14 @@
  */
 
 /* 每个 LUN 的 RAID 上下文 */
-typedef struct
+typedef struct FC_RAID_CONTEXT_S
 {
-    bool  active;                          /* true = RAID 序列进行中 */
+    BOOL  active;                          /* true = RAID 序列进行中 */
     BYTE  acc_buf[FC_BUFFER_POOL_CW_SIZE]; /* XOR 累加器缓冲（一个 CW 大小） */
     BYTE  processed;                       /* 已累加的 CW 数（含 START） */
     BYTE  total;                           /* 期望累加的总 CW 数 */
     DWORD start_paa;                       /* 起始 PAA（调试用） */
-} fc_raid_context_t;
+} fc_raid_ctx_s;
 
 /*
  * RAID 上下文池，每个 LUN 独立；影子缓冲用于 HSQ 打断时保存/恢复。

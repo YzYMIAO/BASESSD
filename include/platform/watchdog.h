@@ -18,7 +18,7 @@
  * 不能因为任务被调度过一次就上报。例如 NAND 域应在 R/B# 状态变化、DMA 完成
  * 或命令状态推进后上报，而不是在等待 Ready 的轮询循环中无条件上报。
  */
-typedef enum
+typedef enum WATCHDOG_DOMAIN_E
 {
     STORAGE_WDG_DOMAIN_SCHEDULER = 0,
     STORAGE_WDG_DOMAIN_HOST,
@@ -33,7 +33,7 @@ typedef enum
 /* 将某个域转换成 required_domains 使用的位图，例如 HOST | NAND | FTL。 */
 #define STORAGE_WDG_DOMAIN_MASK(domain) (1UL << (domain))
 
-typedef enum
+typedef enum WATCHDOG_FAULT_E
 {
     STORAGE_WDG_FAULT_NONE = 0,           /* 当前健康，允许继续喂 IWDG。 */
     STORAGE_WDG_FAULT_DOMAIN_TIMEOUT,     /* 一个必需域在 deadline 前没有前进。 */
@@ -47,9 +47,9 @@ typedef enum
  * 恢复请求，不会清除全局 fault，也不会恢复 IWDG 喂狗；必需域超时后仍以硬复位和
  * FTL journal/checkpoint 恢复作为一致性保障。
  */
-typedef bool (*storage_wdg_recovery_hook_t)(wdg_domain_e domain, wdg_fault_e fault);
+typedef BOOL (*storage_wdg_recovery_hook_fn_t)(wdg_domain_e domain, wdg_fault_e fault);
 
-typedef struct
+typedef struct STORAGE_WATCHDOG_CONFIG_S
 {
     /*
      * IWDG 使用 LSI。超时 = (reload + 1) * prescaler / f_LSI；必须大于最长合法
@@ -69,7 +69,7 @@ typedef struct
      * WWDG 依赖 PCLK 和严格调度节奏，因此可选。其作用是发现 Supervisor 过快或
      * 过慢运行；IWDG 仍是最终、独立时钟驱动的复位保障。
      */
-    bool  enable_wwdg;
+    BOOL  enable_wwdg;
     DWORD wwdg_prescaler;
     DWORD wwdg_counter;
     DWORD wwdg_window;
@@ -81,25 +81,25 @@ typedef struct
      */
     DWORD wwdg_refresh_min_ms;
     DWORD wwdg_refresh_max_ms;
-} storage_wdg_config_t;
+} storage_wdg_cfg_s;
 
-typedef struct
+typedef struct STORAGE_WATCHDOG_STATUS_S
 {
-    bool         initialized;                                 /* 硬件和软件状态是否已经完成初始化。 */
-    bool         iwdg_feeding;                                /* false 表示已故障锁存，不会再刷新 IWDG。 */
-    bool         wwdg_enabled;                                /* 本次配置是否启用了 WWDG。 */
-    bool         wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
+    BOOL         initialized;                                 /* 硬件和软件状态是否已经完成初始化。 */
+    BOOL         iwdg_feeding;                                /* false 表示已故障锁存，不会再刷新 IWDG。 */
+    BOOL         wwdg_enabled;                                /* 本次配置是否启用了 WWDG。 */
+    BOOL         wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
     wdg_fault_e  fault;                                       /* 首个故障原因，锁存后不被后续故障覆盖。 */
     wdg_domain_e fault_domain;                                /* 首个超时或异常关联的健康域。 */
     DWORD        last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
     DWORD        recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
-} storage_wdg_status_t;
+} storage_wdg_status_s;
 
 /* 配置 IWDG 与可选 WWDG，并以当前系统毫秒计数作为所有域的初始心跳时刻。 */
-bool storage_wdg_init(const storage_wdg_config_t *config);
+BOOL storage_wdg_init(const storage_wdg_cfg_s *config);
 
 /* 在正常 I/O 开始前注册有界的局部恢复回调。 */
-void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook);
+void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_fn_t hook);
 
 /* 在指定状态机确认前进时调用，用当前毫秒计数更新该域心跳。 */
 void storage_wdg_report_progress(wdg_domain_e domain);
@@ -125,7 +125,7 @@ void storage_wdg_kick(void);
 void storage_watchdog_task(void *context, DWORD now_ms);
 
 /* 获取状态快照，供 UART CLI、崩溃转储或遥测读取。 */
-void storage_wdg_get_status(storage_wdg_status_t *status);
+void storage_wdg_get_status(storage_wdg_status_s *status);
 
 /* WWDG_IRQHandler 调用；它只分发中断，不在 IRQ 上下文执行应用级恢复。 */
 void storage_wdg_wwdg_irq_handler(void);
@@ -140,8 +140,8 @@ void storage_wdg_wwdg_early_wakeup(void);
 /*
  * ---- port 接口：由 src/platform/<soc>/watchdog_port.c 实现 ----
  */
-bool watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
-bool watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
+BOOL watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
+BOOL watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
 void watchdog_port_iwdg_refresh(void);
 void watchdog_port_wwdg_refresh(void);
 void watchdog_port_wwdg_irq_handler(void);

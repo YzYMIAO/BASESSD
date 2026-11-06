@@ -132,7 +132,7 @@ tud_msc_read10_cb / write10_cb
 flowchart TD
     HOST["PC host"] -->|"USB Type-C / OTG_FS 12 Mbps"| PCD["TinyUSB DWC2 port + USBD core"]
     PCD -->|"tud_task() 在主循环；ISR 只做传输"| MSC["MSC class callbacks / usb_msc_task"]
-    MSC -->|"SCSI: INQUIRY / READ CAPACITY / READ(10) / WRITE(10) / SYNC CACHE"| CTRL["ssd_controller_submit / ssd_request_t"]
+    MSC -->|"SCSI: INQUIRY / READ CAPACITY / READ(10) / WRITE(10) / SYNC CACHE"| CTRL["ssd_controller_submit / ssd_req_s"]
     CTRL -->|"512B sector ↔ FTL LBA 1:1；稳定 bounce buffer"| FTL["现有 FTL / FC / NAND"]
 ```
 
@@ -162,8 +162,8 @@ flowchart TD
 - **单条 SCSI 命令在飞**（BOT 串行）；但同一条 WRITE(10) 的**两个 chunk** 可以同时在飞
   —— 写路径需要 1 chunk lookahead：缓存程序序列里 chunk k 的最后一页由 chunk k+1 的
   第一条命令的 `FAIL_CACHE` 确认（`docs/design/ftl_design.md` §3.16）。
-- 三个槽（`usb_msc_slot_t`）：0/1 是数据槽，各带 16 KiB bounce（AXI `.bss` / DTCM，
-  CPU-only）+ 一个 `ssd_request_t`；2 号是无 bounce 的控制槽（FLUSH/UNMAP）。
+- 三个槽（`usb_msc_slot_s`）：0/1 是数据槽，各带 16 KiB bounce（AXI `.bss` / DTCM，
+  CPU-only）+ 一个 `ssd_req_s`；2 号是无 bounce 的控制槽（FLUSH/UNMAP）。
   bounce 必须活到该槽的 FTL 完成（FTL 可能因背压延后消费）。
 - WRITE = **volatile write cache**：端点缓冲 → 拷进槽 bounce → 提交 → **立即回流控回执**
   （`tud_msc_async_io_done(length)`，**含一条命令的最后一段**）。主机因此不必等
@@ -276,7 +276,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 ### Phase 2：MSC class + FTL adapter（**✅ rev30 已上板**）
 
 - 新增 `src/hil/usb_msc.c` / `include/hil/usb_msc.h`：
-  - `tud_msc_read10_cb` / `tud_msc_write10_cb`：登记到 `ssd_request_t`，
+  - `tud_msc_read10_cb` / `tud_msc_write10_cb`：登记到 `ssd_req_s`，
     提交后返回 `TUD_MSC_RET_ASYNC`；
   - `usb_msc_task()`：完成时回填 READ 数据并 `tud_msc_async_io_done()`；
   - `tud_msc_capacity_cb`：424 MiB / 512B block / `FTL_LBA_MAX`；

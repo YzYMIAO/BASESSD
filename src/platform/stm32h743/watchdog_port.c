@@ -13,7 +13,7 @@
 static IWDG_HandleTypeDef g_storage_iwdg;
 static WWDG_HandleTypeDef g_storage_wwdg;
 
-bool watchdog_port_iwdg_init(DWORD prescaler, DWORD reload)
+BOOL watchdog_port_iwdg_init(DWORD prescaler, DWORD reload)
 {
     g_storage_iwdg.Instance       = IWDG1;
     g_storage_iwdg.Init.Prescaler = prescaler;
@@ -22,7 +22,7 @@ bool watchdog_port_iwdg_init(DWORD prescaler, DWORD reload)
     return HAL_IWDG_Init(&g_storage_iwdg) == HAL_OK;
 }
 
-bool watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window)
+BOOL watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window)
 {
     g_storage_wwdg.Instance       = WWDG1;
     g_storage_wwdg.Init.Prescaler = prescaler;

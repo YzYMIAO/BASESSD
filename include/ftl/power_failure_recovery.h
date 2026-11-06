@@ -22,8 +22,8 @@
  */
 
 #include "allocator.h"
-#include "checkpoint.h" /* cp_header_t */
-#include "ftl_type.h"   /* ftl_ctx_t */
+#include "checkpoint.h" /* cp_header_s */
+#include "ftl_type.h"   /* ftl_ctx_s */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "ssd_types.h"
@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 /* ── 启动类型 ── */
-typedef enum
+typedef enum PFR_BOOT_TYPE_E
 {
     BOOT_FRESH_START = 0, /* 出厂首次启动 */
     BOOT_CLEAN_START,     /* 干净关机 */
@@ -39,14 +39,14 @@ typedef enum
 } pfr_boot_type_e;
 
 /* ── 启动结果 ── */
-typedef struct
+typedef struct PFR_BOOT_RESULT_S
 {
     pfr_boot_type_e boot_type;       /* 启动类型 */
     DWORD           cp_sequence;     /* Checkpoint sequence（0 = 无） */
     DWORD           journal_entries; /* 回放的 Journal entry 数 */
-    bool            blocks_restored; /* true = 块元数据快照已加载；false = full metadata rebuild 兜底 */
-    bool            scoped;          /* true = 快照保留，但有降级 region 的旧映射丢失（范围化恢复） */
-} pfr_boot_result_t;
+    BOOL            blocks_restored; /* true = 块元数据快照已加载；false = full metadata rebuild 兜底 */
+    BOOL            scoped;          /* true = 快照保留，但有降级 region 的旧映射丢失（范围化恢复） */
+} pfr_boot_result_s;
 
 /* ── 接口 ── */
 
@@ -63,7 +63,7 @@ typedef struct
  * @param out_need_format 输出：true = 需要格式化
  * @return FTL_OK 判定完成；FTL_ERROR CP 介质读不通（未格式化）
  */
-ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format);
+ftl_status_e pfr_media_check_format(ftl_ctx_s *ftl, BOOL *out_need_format);
 
 /**
  * @brief 全量格式化（擦本实例全部块 + 复位易失元数据状态）
@@ -82,7 +82,7 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format);
  * @param verify true = 追加全片擦除体检（破坏性）
  * @return FTL_OK / FTL_ERROR
  */
-ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify);
+ftl_status_e pfr_media_format(ftl_ctx_s *ftl, BOOL verify);
 
 /**
  * @brief 主启动恢复入口
@@ -99,7 +99,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify);
  * @param result 输出：启动结果
  * @return FTL_OK 成功；FTL_ERROR 失败
  */
-ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result);
+ftl_status_e pfr_boot_recovery(ftl_ctx_s *ftl, pfr_boot_result_s *result);
 
 /**
  * @brief 按固定分区统计 BAD 块（只读 BST，不碰介质）
@@ -111,6 +111,6 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result);
  *
  * @param ftl 只读：从 BST 统计各分区（dir_ckpt/cp/bbt/journal/l2p_log/spare/data）的 BAD 块数
  */
-void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl);
+void pfr_boot_log_bad_areas(const ftl_ctx_s *ftl);
 
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

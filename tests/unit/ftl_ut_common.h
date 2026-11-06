@@ -12,7 +12,7 @@
 void ftl_ut_trace_begin(void);
 
 /* 临时压低所有 [EV] 输出（速度测试在 format 等准备阶段使用；跑完必须恢复 false）。 */
-void ftl_ut_trace_suppress(bool suppressed);
+void ftl_ut_trace_suppress(BOOL suppressed);
 
 MUNIT_PRINTF(1, 2)
 void ftl_ut_trace_summary(const char *format, ...);
@@ -26,7 +26,7 @@ MUNIT_PRINTF(1, 2)
 void ftl_ut_result(const char *format, ...);
 
 /* 活实例（g_ctrl.ftl[0]，die 0）；结构性恒非空，取不到直接断言失败。 */
-ftl_ctx_t *ftl_ut_live(void);
+ftl_ctx_s *ftl_ut_live(void);
 
 /* 按 die 重建 UT 拓扑（单 target / 单 LUN 的测试坐标）。
  * 每个套件 setup 调一次：UT 不依赖主 boot 的 die 表顺序。 */
@@ -43,8 +43,8 @@ void ftl_ut_clock_advance_ms(DWORD ms);
 #define FTL_UT_PAGES  4U
 
 void            ftl_ut_ram_init(void);
-alc_t          *ftl_ut_ram_alloc(void);
-md_dir_cache_t *ftl_ut_ram_md(void);
+alc_s          *ftl_ut_ram_alloc(void);
+md_dir_cache_s *ftl_ut_ram_md(void);
 
 /* 真 NAND 媒体夹具（破坏性）：format + 模拟重启 + 主机读写 + flush。
  * LBA 窗口固定在容量尾部，避免碰文件系统常用区。 */
@@ -60,20 +60,20 @@ md_dir_cache_t *ftl_ut_ram_md(void);
  *       最后一次泵之后，完成会滞留在 FC 的 CQ 里，污染下一个套件。
  *       ⚠ 返回时 `bg_suspend` 仍为 1，调用者负责恢复。
  */
-void ftl_ut_quiesce(ftl_ctx_t *ftl);
+void ftl_ut_quiesce(ftl_ctx_s *ftl);
 
 void ftl_ut_reboot_from_media(void);
 void ftl_ut_media_format(void);
-bool ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer);
-bool ftl_ut_host_read(DWORD lba, DWORD count, void *buffer);
-bool ftl_ut_flush(void);
-bool ftl_ut_trim(DWORD lba, DWORD count);
+BOOL ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer);
+BOOL ftl_ut_host_read(DWORD lba, DWORD count, void *buffer);
+BOOL ftl_ut_flush(void);
+BOOL ftl_ut_trim(DWORD lba, DWORD count);
 
 /* pure 套件的资源钩子：setup 重建测试自有 RAM 表；teardown 检查活实例归零。 */
 void *ftl_ut_pure_setup(const MunitParameter params[], void *data);
 void  ftl_ut_pure_teardown(void *fixture);
 
 /* 用例结束不变量：pending/group/op-ctx/FC 资源必须归零。 */
-void ftl_ut_assert_clean(ftl_ctx_t *ftl);
+void ftl_ut_assert_clean(ftl_ctx_s *ftl);
 
 #endif /* FTL_UT_COMMON_H */

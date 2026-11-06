@@ -9,12 +9,12 @@
  * 使用二叉堆（最大堆）实现的优先队列。
  * 支持 O(log n) 的插入和删除操作，O(1) 的查看堆顶操作。
  */
-typedef struct ds_pqueue_s ds_Pqueue;
+typedef struct DS_PQUEUE_S ds_pqueue_s;
 
 /**
  * @brief 优先队列配置结构体
  */
-typedef struct ds_pqueue_config_s
+typedef struct DS_PQUEUE_CONFIG_S
 {
     size_t capacity;   /**< 初始容量 */
     float  exp_factor; /**< 扩容因子 */
@@ -23,20 +23,20 @@ typedef struct ds_pqueue_config_s
     void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
     void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
     void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
-} ds_PqueueConfig;
+} ds_pqueue_cfg_s;
 
 /* 生命周期管理 */
-ds_Stat ds_pqueue_new(ds_Pqueue **pq, int (*cmp)(void const *, void const *));
-void    ds_pqueue_conf_init(ds_PqueueConfig *conf, int (*cmp)(void const *, void const *));
-ds_Stat ds_pqueue_new_conf(ds_PqueueConfig *conf, ds_Pqueue **out);
-void    ds_pqueue_destory(ds_Pqueue *pq);
-void    ds_pqueue_destory_cb(ds_Pqueue *pq, void (*cb)(void *));
+ds_status_e ds_pqueue_new(ds_pqueue_s **pq, int (*cmp)(void const *, void const *));
+void        ds_pqueue_conf_init(ds_pqueue_cfg_s *conf, int (*cmp)(void const *, void const *));
+ds_status_e ds_pqueue_new_conf(ds_pqueue_cfg_s *conf, ds_pqueue_s **out);
+void        ds_pqueue_destory(ds_pqueue_s *pq);
+void        ds_pqueue_destory_cb(ds_pqueue_s *pq, void (*cb)(void *));
 
 /* 核心操作 */
-ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element);
-ds_Stat ds_pqueue_top(ds_Pqueue *pq, void **out);
-ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out);
-void    ds_pqueue_heapify(ds_Pqueue *pq, size_t index);
+ds_status_e ds_pqueue_push(ds_pqueue_s *pq, void *element);
+ds_status_e ds_pqueue_top(ds_pqueue_s *pq, void **out);
+ds_status_e ds_pqueue_pop(ds_pqueue_s *pq, void **out);
+void        ds_pqueue_heapify(ds_pqueue_s *pq, size_t index);
 
 /* 工具 */
 size_t ds_pqueue_struct_size();

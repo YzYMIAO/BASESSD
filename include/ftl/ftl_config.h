@@ -13,7 +13,7 @@
  *        §三.2 PBA 侧：系统物理地址 `DWORD` 的位序、字段提取、与 PAA 的字段重排。
  *      LBA 与 PBA 的低 3 位 [plane:1][cw:2] 是同一套编码（编码宏在 nand_config.h）。
  *
- * ⚠ 芯片内地址 PAA（`DWORD`）与展开式地址 `nand_addr_t` **不在本文件**——它们是
+ * ⚠ 芯片内地址 PAA（`DWORD`）与展开式地址 `nand_addr_s` **不在本文件**——它们是
  *   器件域的事实，在 **nand/nand_config.h**。PBA↔PAA 的转换函数在本文件，因为 PBA 是
  *   FTL 的地址货币（`pba_to_paa()` 一次转出 PAA 才跨进 FC）。
  *
@@ -146,14 +146,14 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 单物理块 / 单个 Super Block 的 CW 容量。
- * ⚠ `bst_block_t.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
+ * ⚠ `bst_block_s.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
  *   victim 评分的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB）。两者不可混用。 */
 #define FTL_CW_PER_BLOCK (PAGES_PER_BLOCK * CW_NUM)
 #define FTL_CW_PER_SB    (PLANE_NUM * FTL_CW_PER_BLOCK)
 
 /* 一对 plane 页覆盖的 LBA 数（8 = 2 plane × 4 CW） */
 #define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
-/* cw_bitmap 是 BYTE：FTL_LBA_PER_PAIR 超过 8 会在 pend_req_t 里静默截断。 */
+/* cw_bitmap 是 BYTE：FTL_LBA_PER_PAIR 超过 8 会在 pend_req_s 里静默截断。 */
 _Static_assert(FTL_LBA_PER_PAIR <= 8U, "cw_bitmap 是 BYTE；PLANE_NUM*CW_NUM 超过 8 会静默截断");
 
 /* 一个 pair 页的 flat CW 全掩码（bit = plane*CW_NUM+cw）。
@@ -252,7 +252,7 @@ static inline DWORD ftl_lba_pair_base(DWORD lba)
  * @note pair 对齐判据只在这里定义一份；cache 序列起点、CLI pair 诊断与
  *       `ftl_confirm_write` 的窗口基址断言都走它（C9：同一语义一套判据）。
  */
-static inline bool ftl_lba_is_pair_aligned(DWORD lba)
+static inline BOOL ftl_lba_is_pair_aligned(DWORD lba)
 {
     return (lba & (FTL_LBA_PER_PAIR - 1U)) == 0U;
 }
@@ -398,7 +398,7 @@ static inline BYTE pba_to_cw(DWORD pba)
 /* ── PBA 字段视图（4 字节位域，位序与 DWORD 一致）──
  *
  * 用途 = **具名构造 / 读取 FTL 地址**。FTL 层的地址只有 DWORD 一种表示；
- * nand_addr_t 不进入 FTL（只在 pba_to_paa() 这一个跨层转换器内部出现）。
+ * nand_addr_s 不进入 FTL（只在 pba_to_paa() 这一个跨层转换器内部出现）。
  *
  * ⚠ 位域布局是 implementation-defined：本仓只跑 arm-none-eabi-gcc + 小端
  *   （config.mk 的 -mlittle-endian），该组合下位域自 LSB 起、按声明序分配 ⇒ 与
@@ -408,7 +408,7 @@ static inline BYTE pba_to_cw(DWORD pba)
  * ⚠ LUN_ADDR_WIDTH == 0 时**不能**声明 `lun : 0`（C11 6.7.2.1p4 禁止零宽位域），
  *   故用 #if 隐去；此时 CE 恰好落在 LUN 本应在的位上（PBA_CE_SHIFT == PBA_LUN_SHIFT）。
  */
-typedef struct
+typedef struct NAND_PBA_FIELDS_S
 {
     DWORD cw : CW_WIDTH;
     DWORD plane : PLANE_ADDR_WIDTH;
@@ -419,9 +419,9 @@ typedef struct
 #endif
     DWORD ce : PBA_CE_WIDTH;
     DWORD ch : PBA_CH_WIDTH;
-} nand_pba_fields_t;
+} nand_pba_fields_s;
 
-_Static_assert(sizeof(nand_pba_fields_t) == sizeof(DWORD), "PBA 字段视图必须与 DWORD 同为 4 字节");
+_Static_assert(sizeof(nand_pba_fields_s) == sizeof(DWORD), "PBA 字段视图必须与 DWORD 同为 4 字节");
 
 /* PBA 实际占用的低位位数 —— 屏蔽位域结构体尾部的填充位 */
 #define PBA_USED_BITS (PBA_CH_SHIFT + PBA_CH_WIDTH)
@@ -458,7 +458,7 @@ static inline DWORD pba_make(DWORD ch, DWORD ce, DWORD lun, DWORD block, DWORD p
  * @param f PBA 字段视图
  * @return 打包后的 PBA 字
  */
-static inline DWORD pba_pack(nand_pba_fields_t f)
+static inline DWORD pba_pack(nand_pba_fields_s f)
 {
 #if (LUN_ADDR_WIDTH > 0U)
     return pba_make(f.ch, f.ce, f.lun, f.block, f.plane, f.page, f.cw);
@@ -473,9 +473,9 @@ static inline DWORD pba_pack(nand_pba_fields_t f)
  * @param pba 系统物理地址
  * @return 解出的字段视图
  */
-static inline nand_pba_fields_t pba_fields(DWORD pba)
+static inline nand_pba_fields_s pba_fields(DWORD pba)
 {
-    nand_pba_fields_t f;
+    nand_pba_fields_s f;
 
     f.cw    = pba_to_cw(pba);
     f.plane = pba_to_plane(pba);
@@ -504,11 +504,11 @@ static inline nand_pba_fields_t pba_fields(DWORD pba)
  * @return true = 布局与 PBA_*_SHIFT 一致
  *         false = 不一致（调用者应断言）
  */
-static inline bool pba_fields_layout_matches(void)
+static inline BOOL pba_fields_layout_matches(void)
 {
     union
     {
-        nand_pba_fields_t f;
+        nand_pba_fields_s f;
         DWORD             u;
     } v;
     BYTE ok = 1U;
@@ -552,7 +552,7 @@ static inline bool pba_fields_layout_matches(void)
  */
 static inline DWORD pba_to_paa(DWORD pba)
 {
-    nand_addr_t addr;
+    nand_addr_s addr;
 
     addr.ch    = 0U;
     addr.ce    = 0U;
@@ -689,7 +689,7 @@ static inline DWORD pba_with_ce(DWORD pba, DWORD ce)
  * @param b PBA
  * @return true = 两 PBA 的页地址相同
  */
-static inline bool pba_same_page(DWORD a, DWORD b)
+static inline BOOL pba_same_page(DWORD a, DWORD b)
 {
     return pba_page(a) == pba_page(b);
 }
@@ -700,7 +700,7 @@ static inline bool pba_same_page(DWORD a, DWORD b)
  * @param pba 系统物理地址
  * @return true = 各字段均小于对应规格上限
  */
-static inline bool pba_is_valid(DWORD pba)
+static inline BOOL pba_is_valid(DWORD pba)
 {
     return (pba_to_page(pba) < PAGES_PER_BLOCK) && (pba_to_plane(pba) < PLANE_NUM) && (pba_to_block(pba) < BLOCKS_PER_PLANE) && (pba_to_lun(pba) < LUN_NUM) && (pba_to_cw(pba) < CW_NUM) && (pba_to_ch(pba) < CH_NUM) && (pba_to_ce(pba) < CE_NUM);
 }
@@ -736,7 +736,7 @@ static inline DWORD ftl_cw_plane_mask(BYTE plane)
 /**
  * @brief 单 plane 内单个 CW 的 flat 位（已左移到该 plane 的段）。
  * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
- * 所有 CW 位图（含逐 plane 保存的 `mig_handle_t.cw_bitmap[]`）都用本函数构造，
+ * 所有 CW 位图（含逐 plane 保存的 `mig_handle_s.cw_bitmap[]`）都用本函数构造，
  * 避免同一份位图出现「绝对位置、相对位判」两种写法。
  *
  * @param plane plane 号。
@@ -800,7 +800,7 @@ static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
  * 多少”；FTL 据此给实际存在的 LUN 分配紧凑 die 号，并维护两张互为逆映射的表：
  *
  *   g_chcelun_table[ch][ce][lun] → 紧凑 die 号；FTL_DIE_INVALID = 不存在
- *   g_die_table[die]             → ftl_topo_t{ch,ce,lun}；字段全 0xFF = 未分配
+ *   g_die_table[die]             → ftl_topo_s{ch,ce,lun}；字段全 0xFF = 未分配
  *
  * die 是软件调度坐标；FC/NAND 提交仍用 (ch,ce,lun)，在提交边界由 g_die_table 转换。
  *
@@ -819,7 +819,7 @@ _Static_assert(FTL_DIE_MAX <= FTL_DIE_INVALID, "FTL_DIE_MAX 超出 BYTE 哨兵�
 #define FTL_TOPO_FIELD_INVALID ((BYTE)0xFFU)
 
 extern BYTE       g_chcelun_table[CH_NUM][CE_NUM][LUN_NUM];
-extern ftl_topo_t g_die_table[FTL_DIE_MAX];
+extern ftl_topo_s g_die_table[FTL_DIE_MAX];
 
 /* die → 物理坐标：唯一分解点；未分配尾项字段为 0xFF，不得访问。 */
 static inline BYTE die_2_ch(BYTE die)

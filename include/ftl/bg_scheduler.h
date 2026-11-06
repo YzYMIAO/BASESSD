@@ -7,7 +7,7 @@
  * 一个模块同时承载两层内容：
  *   · 引擎：必跑任务 + 预算任务（token bucket 配额 + 墙钟兜底）。
  *   · FTL 策略：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
- *     void(ftl_ctx_t*)）+ 档位→配额映射（s_bg_level_cfg）+ 档位选择
+ *     void(ftl_ctx_s*)）+ 档位→配额映射（s_bg_level_cfg）+ 档位选择
  *     （bg_scheduler_level_select）+ 后台调度步入口（bg_scheduler_service）。
  * 设计见 docs/design/ftl_design.md §3.12。
  *
@@ -51,40 +51,40 @@
 /* ── 档位（负载 → 配额规模，见 bg_scheduler.c s_bg_level_cfg；
  *    bg_level_e / BG_LEVEL_NUM 在 ftl_type.h）── */
 
-/* 统一任务签名：适配器包异构 kick → void(ftl_ctx_t*) */
-typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
+/* 统一任务签名：适配器包异构 kick → void(ftl_ctx_s*) */
+typedef void (*bg_task_fn_t)(ftl_ctx_s *ftl);
 
-typedef struct
+typedef struct BG_TASK_S
 {
-    bg_task_func_t func;     /* 适配器（FTL 策略段定义） */
-    DWORD          mask;     /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；预算任务按档位 task_mask 选择 */
-    WORD           units;    /* 单次调用的工作量单位（≈ 本轮最多提交的条数） */
-    bool           must_run; /* true = 正确性关键集：不 gate、不占配额、无条件每轮跑 */
-} bg_task_t;
+    bg_task_fn_t func;     /* 适配器（FTL 策略段定义） */
+    DWORD        mask;     /* 任务位（BG_TASK_*，定义见 bg_scheduler.c）；预算任务按档位 task_mask 选择 */
+    WORD         units;    /* 单次调用的工作量单位（≈ 本轮最多提交的条数） */
+    BOOL         must_run; /* true = 正确性关键集：不 gate、不占配额、无条件每轮跑 */
+} bg_task_s;
 
 /* 档位 → 每个 token interval 的 credit 配额（FTL 策略表，引擎不持有） */
-typedef struct
+typedef struct BG_LEVEL_CONFIGURATION_S
 {
-    DWORD grant_units; /* 每个 token interval 的 credit 数（单位见 bg_task_t.units） */
+    DWORD grant_units; /* 每个 token interval 的 credit 数（单位见 bg_task_s.units） */
     DWORD task_mask;   /* 本档位允许的预算任务位集合（BG_TASK_*，定义见 bg_scheduler.c） */
-} bg_level_cfg_t;
+} bg_level_cfg_s;
 
 /* 每实例一份的后台调度器状态（任务表本身是共享只读，不逐实例复制） */
-typedef struct
+typedef struct BG_SCHEDULER_S
 {
-    const bg_task_t *tasks;      /* 指向静态任务表 s_bg_tasks（init 绑定一次） */
+    const bg_task_s *tasks;      /* 指向静态任务表 s_bg_tasks（init 绑定一次） */
     BYTE             task_count; /* 已装载的项数 */
     /* 本轮生效的档位配置，由 bg_scheduler_run 在起点发布。
      * 任务读本轮策略参数走这里，不各自反查档位表——反查是第二套读取路径，
      * 与引擎实际使用的那份配置可能不同步。 */
-    const bg_level_cfg_t *cfg;
+    const bg_level_cfg_s *cfg;
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
      * 模块入口的档位就取这里，避免适配器各自再选一次档。 */
     bg_level_e level;
     /* 预算 credit：timer 任务用 bg_scheduler_refill 补充，bg_scheduler_run 消费。
      * must-run 不占；预算任务按表序在 credit 内执行。 */
     DWORD credits;
-} bg_scheduler_t;
+} bg_sched_s;
 
 /* ── 引擎接口 ── */
 
@@ -99,7 +99,7 @@ typedef struct
  * @param ftl   FTL 上下文（原样传给每个任务适配器）。
  * @param cfg   本轮档位配置（起点发布到 sched->cfg，任务从这里读本轮策略参数）。
  */
-void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
+void bg_scheduler_run(bg_sched_s *sched, ftl_ctx_s *ftl, const bg_level_cfg_s *cfg);
 
 /**
  * @brief 补充预算 credit（timer 任务周期调用）。
@@ -109,7 +109,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_
  *
  * @param sched 本实例的调度器
  */
-void bg_scheduler_refill(bg_scheduler_t *sched);
+void bg_scheduler_refill(bg_sched_s *sched);
 
 /* ── FTL 策略接口 ── */
 
@@ -119,7 +119,7 @@ void bg_scheduler_refill(bg_scheduler_t *sched);
  *
  * @param sched 本实例的调度器（被写入 tasks[] / task_count，并复位 cfg 与 level）。
  */
-void bg_scheduler_init(bg_scheduler_t *sched);
+void bg_scheduler_init(bg_sched_s *sched);
 
 /**
  * @brief 负载 → 后台档位（纯函数）
@@ -134,7 +134,7 @@ void bg_scheduler_init(bg_scheduler_t *sched);
  *         BG_LEVEL_NORMAL 中间负载
  *         BG_LEVEL_BUSY   pending 过半池或有未决组
  */
-bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
+bg_level_e bg_scheduler_level_select(const ftl_ctx_s *ftl);
 
 /**
  * @brief [svc] 后台调度步入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
@@ -144,6 +144,6 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_t *ftl);
  *
  * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）
  */
-void bg_scheduler_service(ftl_ctx_t *ftl);
+void bg_scheduler_service(ftl_ctx_s *ftl);
 
 #endif /* FTL_BG_SCHEDULER_H */

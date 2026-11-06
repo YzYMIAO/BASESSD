@@ -25,7 +25,7 @@
 #include "ftl_fc_interface.h" /* ftl_cmd_* / ftl_plane_* */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"
-#include "migrate.h" /* mig_handle_t / mig_gc_request_urgent */
+#include "migrate.h" /* mig_handle_s / mig_gc_request_urgent */
 
 #include <string.h>
 
@@ -53,7 +53,7 @@ static BYTE wb_lba_bit(DWORD lba)
  * @param lba 全局 host LBA
  * @return true = 命中，可从缓冲直接读；false = 未命中 / 窗口未开
  */
-bool wb_has(const wb_handle_t *h, DWORD lba)
+BOOL wb_has(const wb_handle_s *h, DWORD lba)
 {
     if (h->open == false)
     {
@@ -77,7 +77,7 @@ bool wb_has(const wb_handle_t *h, DWORD lba)
  * @param out 输出 IU（调用者保证非 NULL）
  * @return true = 命中并拷出；false = 未命中（out 未写）
  */
-bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
+BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out)
 {
     if (wb_has(h, lba) == false)
     {
@@ -102,7 +102,7 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
  *                   page0 异步写屏障未满足 / 建链资源（命令 / 描述符 / 缓冲池）不足 / SQ 满
  *         FTL_ERROR 建链失败（入参、地址或命令链错误）
  */
-static ftl_status_e wb_flush(wb_handle_t *h)
+static ftl_status_e wb_flush(wb_handle_s *h)
 {
     if ((h->open == false) || (h->occupied == 0U))
     {
@@ -159,7 +159,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     // 本页覆盖的 plane 数（决定 operation 码与 plane 段）与实际 CW 数。
     const BYTE nplanes = ftl_cw_bitmap_plane_count(h->occupied);
     const BYTE n_cw    = ftl_cw_bitmap_popcount(h->occupied);
-    const bool page0   = (pba_to_page(pba[0]) == 0U);
+    const BOOL page0   = (pba_to_page(pba[0]) == 0U);
 
     // page0 补全：缺失 plane 补零，命令按 full pair 写，保证两个 plane 的 page0
     // 都非空白（page0 异步写屏障 / full rebuild 的 page0 捷径前提）。
@@ -180,8 +180,8 @@ static ftl_status_e wb_flush(wb_handle_t *h)
         write_planes = PLANE_NUM;
     }
 
-    const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(ftl_lba_page(h->base));
-    fc_command_t         *cmd = NULL;
+    const ftl_page_cfg_s *cfg = FTL_PAGE_CFG_DATA(ftl_lba_page(h->base));
+    fc_cmd_s             *cmd = NULL;
 
     ftl_status_e ret = ftl_async_write_pair_cmd(&cmd, pba, h->data, write_bitmap, ftl_plane_write_op(write_planes), cfg);
 
@@ -191,8 +191,8 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     }
 
     // 注册 pending（owners = 贡献本页的组位掩码；lba = 窗口基址；buffer 传 NULL）。
-    // 认领槽位后就地逐字段填——字段名即文档（见 pend_req_t 注释）。
-    pend_req_t *pending = pend_alloc(h->pending, ftl_cmd_id(cmd));
+    // 认领槽位后就地逐字段填——字段名即文档（见 pend_req_s 注释）。
+    pend_req_s *pending = pend_alloc(h->pending, ftl_cmd_id(cmd));
 
     if (pending == NULL)
     {
@@ -257,7 +257,7 @@ wbuf_flush_fail:
  * @return FTL_OK    已攒入（满页立即编程失败也返回 OK，留给 idle flush 重试）
  *         FTL_AGAIN 换窗口时旧页 flush 背压，本子操作未消费，需重试
  */
-static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
+static ftl_status_e wb_append(wb_handle_s *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
 {
     const DWORD window = ftl_lba_pair_base(lba);
 
@@ -315,7 +315,7 @@ static ftl_status_e wb_append(wb_handle_t *h, WORD gi, DWORD lba, const void *bu
  * @return true = 命中并已丢弃
  *         false = 不在缓冲（无打开窗口 / pair 窗口不同 / 槽位为空）
  */
-static bool wb_drop(wb_handle_t *h, DWORD lba)
+static BOOL wb_drop(wb_handle_s *h, DWORD lba)
 {
     if (wb_has(h, lba) == false)
     {
@@ -345,7 +345,7 @@ static bool wb_drop(wb_handle_t *h, DWORD lba)
  *
  * @param h wbuf handle
  */
-static void wb_reset(wb_handle_t *h)
+static void wb_reset(wb_handle_s *h)
 {
     if (h->owners != 0U)
     {
@@ -369,7 +369,7 @@ static void wb_reset(wb_handle_t *h)
  * @return FTL_OK 无需编程或已提交；其余同 wb_flush（失败时缓冲原样保留，
  *         错误由 wb_handle 锁存 ⇒ host FLUSH 可快速失败，不等墙钟超时）
  */
-static ftl_status_e wb_maybe_flush_idle(wb_handle_t *h)
+static ftl_status_e wb_maybe_flush_idle(wb_handle_s *h)
 {
     if (h->open == false)
     {
@@ -396,7 +396,7 @@ static ftl_status_e wb_maybe_flush_idle(wb_handle_t *h)
  * @param pending pending 表
  * @param migrate migrate handle
  */
-void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_handle *migrate)
+void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_HANDLE_S *migrate)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
     // （alloc / pending 为实例内嵌对象的地址，migrate 由同一审计保证）⇒ 不重复检查。
@@ -412,7 +412,7 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_ha
  * @param h   wbuf handle
  * @param out 出参：状态上报（调用者保证非 NULL）
  */
-static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
+static void wb_status_fill(const wb_handle_s *h, wb_status_s *out)
 {
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 host 补发步驱动 */
     out->base.wants_run = h->open || (h->occupied != 0U);
@@ -455,7 +455,7 @@ static void wb_status_fill(const wb_handle_t *h, wb_status_t *out)
  * @param out     可选状态上报（可为 NULL）
  * @return 各 kind 的返回语义见 wbuf.h
  */
-ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t *out)
+ftl_status_e wb_handle(wb_handle_s *h, const wb_trigger_s *trigger, wb_status_s *out)
 {
     ftl_status_e st = FTL_OK;
 

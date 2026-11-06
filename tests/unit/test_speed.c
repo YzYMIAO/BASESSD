@@ -58,13 +58,14 @@ static DWORD spd_kbps_from_us(DWORD bytes, DWORD us)
 #if defined(UT_FC_ENABLE)
 
 typedef struct
+    SPD_CLOCK_S
 {
     DWORD start_us;
     DWORD start_ms;
-    bool  time_valid;
-} spd_clock_t;
+    BOOL  time_valid;
+} spd_clock_s;
 
-static void spd_clock_start(spd_clock_t *clock)
+static void spd_clock_start(spd_clock_s *clock)
 {
     memset(clock, 0, sizeof(*clock));
     clock->time_valid = delay_time_now_us(&clock->start_us);
@@ -74,7 +75,7 @@ static void spd_clock_start(spd_clock_t *clock)
     }
 }
 
-static DWORD spd_clock_elapsed_us(const spd_clock_t *clock)
+static DWORD spd_clock_elapsed_us(const spd_clock_s *clock)
 {
     if (clock->time_valid)
     {
@@ -102,24 +103,25 @@ static DWORD spd_clock_elapsed_us(const spd_clock_t *clock)
 #    define SPD_FC_DRAIN_GUARD 20000U
 #    define SPD_FC_BYTES       ((DWORD)(SPD_FC_BLOCKS * PAGES_PER_BLOCK * PLANE_NUM * PAGE_MAIN_SIZE))
 
-typedef enum
+typedef enum SPD_FC_MODE_E
 {
     SPD_FC_MODE_NORMAL = 0,
     SPD_FC_MODE_CACHE,
 } spd_fc_mode_e;
 
 typedef struct
+    SPD_FC_SLOT_S
 {
-    fc_command_t *cmd; /* NULL = 空槽 */
-    WORD          block;
-    BYTE          page;
-    BYTE          ch;
-    BYTE          ce;
-    BYTE          lun;
-    bool          verify; /* true = 读命令，完成前要逐 desc 校验 */
-} spd_fc_slot_t;
+    fc_cmd_s *cmd; /* NULL = 空槽 */
+    WORD      block;
+    BYTE      page;
+    BYTE      ch;
+    BYTE      ce;
+    BYTE      lun;
+    BOOL      verify; /* true = 读命令，完成前要逐 desc 校验 */
+} spd_fc_slot_s;
 
-static spd_fc_slot_t s_fc_slots[FC_COMMAND_POOL_DEPTH];
+static spd_fc_slot_s s_fc_slots[FC_COMMAND_POOL_DEPTH];
 static WORD          s_fc_inflight;
 
 static DWORD spd_fc_write_op(spd_fc_mode_e mode, BYTE page)
@@ -156,11 +158,11 @@ static DWORD spd_fc_read_op(spd_fc_mode_e mode, BYTE page)
     return (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
 }
 
-static fc_command_t *spd_fc_try_build(spd_fc_mode_e mode, bool write, WORD block, BYTE page, BYTE ch, BYTE ce, BYTE lun)
+static fc_cmd_s *spd_fc_try_build(spd_fc_mode_e mode, BOOL write, WORD block, BYTE page, BYTE ch, BYTE ce, BYTE lun)
 {
-    nand_addr_t   addr;
-    fc_cmd_conf_t conf;
-    fc_command_t *cmd;
+    nand_addr_s  addr;
+    fc_cmd_cfg_s conf;
+    fc_cmd_s    *cmd;
 
     memset(&addr, 0, sizeof(addr));
     addr.ch    = ch;
@@ -192,7 +194,7 @@ static void spd_fc_slots_reset(void)
     s_fc_inflight = 0U;
 }
 
-static spd_fc_slot_t *spd_fc_slot_alloc(void)
+static spd_fc_slot_s *spd_fc_slot_alloc(void)
 {
     for (WORD i = 0U; i < (WORD)FC_COMMAND_POOL_DEPTH; i++)
     {
@@ -204,11 +206,11 @@ static spd_fc_slot_t *spd_fc_slot_alloc(void)
     return NULL;
 }
 
-static spd_fc_slot_t *spd_fc_slot_find(WORD command_id)
+static spd_fc_slot_s *spd_fc_slot_find(WORD command_id)
 {
     for (WORD i = 0U; i < (WORD)FC_COMMAND_POOL_DEPTH; i++)
     {
-        fc_command_id_t id = FC_COMMAND_ID_INVALID;
+        fc_cmd_id_t id = FC_CMD_ID_INVALID;
 
         if (s_fc_slots[i].cmd == NULL)
         {
@@ -222,9 +224,9 @@ static spd_fc_slot_t *spd_fc_slot_find(WORD command_id)
     return NULL;
 }
 
-static void spd_fc_note_peak(fc_resource_stats_t *peak)
+static void spd_fc_note_peak(fc_resource_stats_s *peak)
 {
-    fc_resource_stats_t now;
+    fc_resource_stats_s now;
 
     memset(&now, 0, sizeof(now));
     if (fc_get_resource_stats(&now) != FC_STATUS_OK)
@@ -252,15 +254,15 @@ static void spd_fc_note_peak(fc_resource_stats_t *peak)
 
 /* 读完成项：逐 desc 校验「PAA 是期望页/plane/CW」且「USER 区等于该 PAA 图案」。
  * 必须在 release 之前调用（release 会归还 buffer）。 */
-static DWORD spd_fc_verify_read(const spd_fc_slot_t *slot)
+static DWORD spd_fc_verify_read(const spd_fc_slot_s *slot)
 {
-    DWORD              errors = 0U;
-    BYTE               idx    = 0U;
-    fc_descriptor_id_t id     = (fc_descriptor_id_t)slot->cmd->desc_id;
+    DWORD        errors = 0U;
+    BYTE         idx    = 0U;
+    fc_desc_id_t id     = (fc_desc_id_t)slot->cmd->desc_id;
 
-    while ((id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        const fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(id);
+        const fc_desc_s *desc = fc_descriptor_id_to_descriptor(id);
 
         if (desc == NULL)
         {
@@ -268,7 +270,7 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_t *slot)
             break;
         }
 
-        nand_addr_t addr;
+        nand_addr_s addr;
 
         memset(&addr, 0, sizeof(addr));
         addr.ch    = slot->ch;
@@ -291,7 +293,7 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_t *slot)
             errors++;
         }
 
-        id = (fc_descriptor_id_t)desc->next_id;
+        id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 
@@ -302,16 +304,16 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_t *slot)
     return errors;
 }
 
-static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_t *peak)
+static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_s *peak)
 {
-    fc_command_status_t buf[SPD_FC_REAP_MAX];
-    WORD                n = 0U;
+    fc_cmd_status_s buf[SPD_FC_REAP_MAX];
+    WORD            n = 0U;
 
     (void)fc_poll_completions(buf, (WORD)SPD_FC_REAP_MAX, &n);
 
     for (WORD i = 0U; i < n; i++)
     {
-        spd_fc_slot_t *slot = spd_fc_slot_find((WORD)buf[i].command_id);
+        spd_fc_slot_s *slot = spd_fc_slot_find((WORD)buf[i].command_id);
 
         if (slot == NULL)
         {
@@ -343,7 +345,7 @@ static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_t *peak)
     return n;
 }
 
-static bool spd_fc_drain(DWORD *errors, fc_resource_stats_t *peak)
+static BOOL spd_fc_drain(DWORD *errors, fc_resource_stats_s *peak)
 {
     DWORD guard = 0U;
 
@@ -364,7 +366,7 @@ static bool spd_fc_drain(DWORD *errors, fc_resource_stats_t *peak)
  *   · cache 序列边界明确（FIRST..END 不跨块）；
  *   · 本块计时区间远小于 32 位 µs 回绕周期（~71.6 min），差值比较安全。
  * 池上限约 16 条 multi-plane 页命令（8 desc + 8 buf/条），块内仍会把在途顶到上限。 */
-static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out, DWORD *errors, fc_resource_stats_t *peak)
+static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out, DWORD *errors, fc_resource_stats_s *peak)
 {
     DWORD total_us = 0U;
 
@@ -372,10 +374,10 @@ static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[S
 
     for (WORD b = 0U; b < SPD_FC_BLOCKS; b++)
     {
-        spd_clock_t clock;
+        spd_clock_s clock;
         WORD        since_reap = 0U;
         DWORD       guard      = 0U;
-        bool        ok         = true;
+        BOOL        ok         = true;
 
         spd_clock_start(&clock);
 
@@ -389,8 +391,8 @@ static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[S
             {
                 for (;;)
                 {
-                    spd_fc_slot_t *slot = spd_fc_slot_alloc();
-                    fc_command_t  *cmd;
+                    spd_fc_slot_s *slot = spd_fc_slot_alloc();
+                    fc_cmd_s      *cmd;
 
                     if (slot == NULL)
                     {
@@ -460,7 +462,7 @@ static bool spd_fc_run_phase(spd_fc_mode_e mode, bool write, const WORD blocks[S
     return true;
 }
 
-static bool spd_fc_pair_is_good(const ftl_ctx_t *ftl, WORD block)
+static BOOL spd_fc_pair_is_good(const ftl_ctx_s *ftl, WORD block)
 {
     if (ftl == NULL)
     {
@@ -478,7 +480,7 @@ static bool spd_fc_pair_is_good(const ftl_ctx_t *ftl, WORD block)
 
 static WORD spd_fc_pick_blocks(WORD *out)
 {
-    const ftl_ctx_t *ftl = g_ctrl.ftl[0];
+    const ftl_ctx_s *ftl = g_ctrl.ftl[0];
     WORD             n   = 0U;
 
     /* 先按用户要求从 50% 处往上；不够再回扫 98..（避开固定元数据 0..41）。 */
@@ -501,8 +503,8 @@ static WORD spd_fc_pick_blocks(WORD *out)
 
 static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out, DWORD *errors)
 {
-    fc_cmd_conf_t conf;
-    DWORD         total_us = 0U;
+    fc_cmd_cfg_s conf;
+    DWORD        total_us = 0U;
 
     memset(&conf, 0, sizeof(conf));
     conf.operation = (DWORD)OP_ERASE_BLOCK_MULTI_PLANE;
@@ -513,8 +515,8 @@ static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out,
 
     for (WORD i = 0U; i < SPD_FC_BLOCKS; i++)
     {
-        spd_clock_t         clock;
-        fc_command_status_t status;
+        spd_clock_s     clock;
+        fc_cmd_status_s status;
 
         spd_clock_start(&clock);
         status = test_erase_block(blocks[i], TEST_PLANE_BM_ALL, &conf);
@@ -530,7 +532,7 @@ static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out,
 
 static void spd_fc_assert_pools_empty(void)
 {
-    fc_resource_stats_t stats;
+    fc_resource_stats_s stats;
 
     memset(&stats, 0, sizeof(stats));
     munit_assert_int(fc_get_resource_stats(&stats), ==, FC_STATUS_OK);
@@ -558,8 +560,8 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
-    ftl_ctx_t *ftl           = g_ctrl.ftl[0];
-    const bool saved_suspend = (ftl != NULL) ? ftl->bg_suspend : false;
+    ftl_ctx_s *ftl           = g_ctrl.ftl[0];
+    const BOOL saved_suspend = (ftl != NULL) ? ftl->bg_suspend : false;
 
     /* 原始擦写期间禁止 FTL 后台/分配器动作；测试返回后由用户 format+POR 收尾。 */
     if (ftl != NULL)
@@ -583,7 +585,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     DWORD               erase_us = 0U;
     DWORD               wr_us    = 0U;
     DWORD               rd_us    = 0U;
-    fc_resource_stats_t peak;
+    fc_resource_stats_s peak;
 
     memset(&peak, 0, sizeof(peak));
 
@@ -662,16 +664,18 @@ static MunitParameterEnum s_fc_speed_params[] = {
 #    define SPD_FTL_GUARD            2000000U
 
 typedef struct
+    SPD_FTL_REQ_S
 {
     volatile BYTE         done;
     volatile ssd_status_e status;
     DWORD                 lba;
     DWORD                 count;
     BYTE                 *buf;
-    bool                  used;
-} spd_ftl_req_t;
+    BOOL                  used;
+} spd_ftl_req_s;
 
 typedef struct
+    SPD_FTL_CACHE_S
 {
     DWORD wb_batches;
     DWORD wb_pages;
@@ -681,15 +685,15 @@ typedef struct
     DWORD rd_pairs;
     DWORD rd_declines;
     DWORD rd_fallbacks;
-} spd_ftl_cache_t;
+} spd_ftl_cache_s;
 
 /* 4 个 slot 共享 16 KiB 竞技场：normal 档每个 slot 4 KiB（chunk=8 LBA），
  * cache 档只有 slot 0 能装下 16 KiB（chunk=32 LBA）⇒ 写深度自然为 1。
  * 放 SRAM4：AXI .bss 已满、SRAM12 被生产/测试表占满。 */
 #    define SPD_FTL_ARENA_BYTES (16U * 1024U)
 static BYTE          s_ftl_arena[SPD_FTL_ARENA_BYTES] SRAM4_DATA;
-static spd_ftl_req_t s_ftl_req[SPD_FTL_SLOTS];
-static bool          s_ftl_formatted;
+static spd_ftl_req_s s_ftl_req[SPD_FTL_SLOTS];
+static BOOL          s_ftl_formatted;
 
 static BYTE spd_ftl_pattern(DWORD byte_addr)
 {
@@ -730,7 +734,7 @@ static DWORD spd_ftl_first_mismatch(DWORD lba, const BYTE *buf, DWORD count)
  *   与 munit 三层输出约定一致。 */
 static DWORD s_spd_err_prints;
 
-static void spd_ftl_note_status_error(bool write, DWORD chunk, const spd_ftl_req_t *slot)
+static void spd_ftl_note_status_error(BOOL write, DWORD chunk, const spd_ftl_req_s *slot)
 {
     if (s_spd_err_prints >= 8U)
     {
@@ -746,7 +750,7 @@ static void spd_ftl_note_status_error(bool write, DWORD chunk, const spd_ftl_req
                          (int)slot->status);
 }
 
-static void spd_ftl_note_data_error(bool write, DWORD chunk, const spd_ftl_req_t *slot, DWORD offset)
+static void spd_ftl_note_data_error(BOOL write, DWORD chunk, const spd_ftl_req_s *slot, DWORD offset)
 {
     if (s_spd_err_prints >= 8U)
     {
@@ -769,7 +773,7 @@ static void spd_ftl_note_data_error(bool write, DWORD chunk, const spd_ftl_req_t
     /* 诊断（RISK-CACHE-26）：当场问一次 L2P——映射丢了（INVALID）还是映射在但页内容为 0。
      * 只在失败路径上执行；`l2p_read` 可能触发一次加载，属可接受的代价。 */
     {
-        ftl_ctx_t *ftl = g_ctrl.ftl[0];
+        ftl_ctx_s *ftl = g_ctrl.ftl[0];
 
         if ((ftl != NULL) && (ftl->cache != NULL))
         {
@@ -787,7 +791,7 @@ static void spd_ftl_slots_reset(void)
     memset(s_ftl_req, 0, sizeof(s_ftl_req));
 }
 
-static spd_ftl_req_t *spd_ftl_slot_alloc(BYTE chunk, BYTE *out_index)
+static spd_ftl_req_s *spd_ftl_slot_alloc(BYTE chunk, BYTE *out_index)
 {
     const DWORD need = (DWORD)chunk * FTL_IU_BYTES;
 
@@ -808,9 +812,9 @@ static spd_ftl_req_t *spd_ftl_slot_alloc(BYTE chunk, BYTE *out_index)
     return NULL;
 }
 
-static bool spd_ftl_submit(ftl_ctx_t *ftl, spd_ftl_req_t *slot, DWORD lba, DWORD count, bool write)
+static BOOL spd_ftl_submit(ftl_ctx_s *ftl, spd_ftl_req_s *slot, DWORD lba, DWORD count, BOOL write)
 {
-    ftl_io_req_t req;
+    ftl_io_req_s req;
 
     slot->lba   = lba;
     slot->count = count;
@@ -832,7 +836,7 @@ static bool spd_ftl_submit(ftl_ctx_t *ftl, spd_ftl_req_t *slot, DWORD lba, DWORD
     return true;
 }
 
-static void spd_ftl_cache_get(const ftl_ctx_t *ftl, spd_ftl_cache_t *out)
+static void spd_ftl_cache_get(const ftl_ctx_s *ftl, spd_ftl_cache_s *out)
 {
     memset(out, 0, sizeof(*out));
     out->wb_batches   = ftl->cache_stream.wb_batches;
@@ -845,7 +849,7 @@ static void spd_ftl_cache_get(const ftl_ctx_t *ftl, spd_ftl_cache_t *out)
     out->rd_fallbacks = ftl->cache_stream.read_fallbacks;
 }
 
-static void spd_ftl_cache_diff(const spd_ftl_cache_t *a, const spd_ftl_cache_t *b, spd_ftl_cache_t *out)
+static void spd_ftl_cache_diff(const spd_ftl_cache_s *a, const spd_ftl_cache_s *b, spd_ftl_cache_s *out)
 {
     out->wb_batches   = b->wb_batches - a->wb_batches;
     out->wb_pages     = b->wb_pages - a->wb_pages;
@@ -859,7 +863,7 @@ static void spd_ftl_cache_diff(const spd_ftl_cache_t *a, const spd_ftl_cache_t *
 
 /* 一个读写 phase：按 chunk 拆分、最多 depth 个请求在飞；完成后立即校验并回收 slot。
  * 时间含图案 fill / 校验 CPU（全量 25 MiB 比较，量级远小于 NAND）。 */
-static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, DWORD *ms_out, DWORD *errors)
+static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, DWORD *ms_out, DWORD *errors)
 {
     DWORD next     = 0U;
     BYTE  inflight = 0U;
@@ -874,7 +878,7 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
         while ((inflight < depth) && (next < (DWORD)SPD_FTL_LBAS))
         {
             BYTE           index = 0U;
-            spd_ftl_req_t *slot  = spd_ftl_slot_alloc(chunk, &index);
+            spd_ftl_req_s *slot  = spd_ftl_slot_alloc(chunk, &index);
 
             if (slot == NULL)
             {
@@ -905,7 +909,7 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
 
         for (BYTE i = 0U; i < (BYTE)SPD_FTL_SLOTS; i++)
         {
-            spd_ftl_req_t *slot = &s_ftl_req[i];
+            spd_ftl_req_s *slot = &s_ftl_req[i];
 
             if ((!slot->used) || (slot->done == 0U))
             {
@@ -951,17 +955,17 @@ static bool spd_ftl_phase(ftl_ctx_t *ftl, bool write, DWORD chunk, BYTE depth, D
     return true;
 }
 
-static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
+static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
 {
     const DWORD      t0 = platform_now_ms();
-    fc_debug_state_t dbg0;
+    fc_debug_state_s dbg0;
 
     memset(&dbg0, 0, sizeof(dbg0));
     (void)fc_debug_state_get(&dbg0);
 
     for (;;)
     {
-        fc_resource_stats_t stats;
+        fc_resource_stats_s stats;
 
         ftl_service_pump();
         ftl_service(ftl);
@@ -978,7 +982,7 @@ static bool spd_ftl_wait_idle(ftl_ctx_t *ftl)
         {
             // 排障：把「谁卡住」+ 本次等待期间填充 pass 的**增量**打出来。
             // 增量比绝对值有用：fill 不涨 ⇒ 填充没被调用；pops 不涨 ⇒ 扫描没看到命令。
-            fc_debug_state_t dbg;
+            fc_debug_state_s dbg;
 
             memset(&dbg, 0, sizeof(dbg));
             (void)fc_debug_state_get(&dbg);
@@ -1023,7 +1027,7 @@ static void spd_ftl_teardown(void *fixture)
 }
 
 /* 等某个 LBA 的 L2P 行就绪并读映射；用于窗口诊断（会推进 load）。 */
-static bool spd_ftl_l2p_ready_read(ftl_ctx_t *ftl, DWORD lba, DWORD *out_pba)
+static BOOL spd_ftl_l2p_ready_read(ftl_ctx_s *ftl, DWORD lba, DWORD *out_pba)
 {
     DWORD guard = 0U;
 
@@ -1048,7 +1052,7 @@ static bool spd_ftl_l2p_ready_read(ftl_ctx_t *ftl, DWORD lba, DWORD *out_pba)
 
 /* cache read 失败时的窗口级诊断：打印 LBA base..base+15 的 PBA 与逐条判据，
  * 用来区分「物理布局不连续」与「cache_read_probe_pair 判据不符」。 */
-static void spd_ftl_diag_window(ftl_ctx_t *ftl, DWORD base)
+static void spd_ftl_diag_window(ftl_ctx_s *ftl, DWORD base)
 {
     DWORD pba[16];
     BYTE  invalid   = 0U;
@@ -1128,7 +1132,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     ftl_ut_trace_begin();
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     /* 首组合完整 format：确定性，并修复 FC 原始写留下的脏状态。format 时间单列。 */
     DWORD fmt_ms = 0U;
@@ -1159,12 +1163,12 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         munit_error("speed range exceeds host capacity");
     }
 
-    spd_ftl_cache_t c0;
-    spd_ftl_cache_t c1;
-    spd_ftl_cache_t cr0;
-    spd_ftl_cache_t c2;
-    spd_ftl_cache_t dw;
-    spd_ftl_cache_t dr;
+    spd_ftl_cache_s c0;
+    spd_ftl_cache_s c1;
+    spd_ftl_cache_s cr0;
+    spd_ftl_cache_s c2;
+    spd_ftl_cache_s dw;
+    spd_ftl_cache_s dr;
     DWORD           errors   = 0U;
     DWORD           err_wr   = 0U;
     DWORD           err_rd   = 0U;
@@ -1173,7 +1177,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
     DWORD           rd_ms    = 0U;
 
     spd_ftl_cache_get(ftl, &c0);
-    bool ok = spd_ftl_phase(ftl, true, chunk, depth, &wr_ms, &errors);
+    BOOL ok = spd_ftl_phase(ftl, true, chunk, depth, &wr_ms, &errors);
 
     if (ok)
     {
@@ -1207,7 +1211,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
     }
 
     const DWORD bytes       = (DWORD)SPD_FTL_BYTES;
-    const bool  rd_is_cache = (dr.rd_batches > 0U);
+    const BOOL  rd_is_cache = (dr.rd_batches > 0U);
 
     if ((rd_is_cache == false) && ok)
     {

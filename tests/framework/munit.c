@@ -49,7 +49,7 @@ typedef struct
 
 static uint64_t munit_now_us(void)
 {
-    const ssd_platform_ops_t *ops = ssd_platform_get();
+    const ssd_platform_ops_s *ops = ssd_platform_get();
 
     return ((ops != NULL) && (ops->time_us != NULL)) ? (uint64_t)ops->time_us() : 0ULL;
 }

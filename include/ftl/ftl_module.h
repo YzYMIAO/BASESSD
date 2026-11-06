@@ -13,7 +13,7 @@
  *     typed `*_handle(handle, trigger/level)` 与纯查询（仅 wbuf 的入口带可选 out）；
  *   · 主流程不窥探模块内部 phase / active / waiting / stage。
  *
- * 本头只放**跨模块共用**的类型；现仅 `wb_status_t` 仍嵌 `ftl_mod_status_t base`，
+ * 本头只放**跨模块共用**的类型；现仅 `wb_status_s` 仍嵌 `ftl_mod_status_s base`，
  * 其余模块的 handle 入口不回报状态（只做动作）。
  */
 
@@ -31,7 +31,7 @@
  *   BLOCKED  需要上层动作（水位满 / 无 victim / 配置缺口）；
  *   FAILED   本次执行遇到不可自愈错误（error 给出码）。
  */
-typedef enum
+typedef enum FTL_MODULE_STATE_E
 {
     FTL_MODULE_IDLE = 0,
     FTL_MODULE_RUNNING,
@@ -41,7 +41,7 @@ typedef enum
 } ftl_mod_state_e;
 
 /*
- * ftl_mod_status_t — status 的公共前缀（现仅 wbuf 使用）
+ * ftl_mod_status_s — status 的公共前缀（现仅 wbuf 使用）
  *
  * 字段语义：
  *   state     本轮结束后的模块状态（见上）；
@@ -51,15 +51,15 @@ typedef enum
  *   next_ms   0 = 随时可调；否则为最早下次调用时间（ms 绝对时基）；
  *   error     FTL_* / FTL_TIMEOUT；仅在 state == FAILED 时有意义。
  */
-typedef struct
+typedef struct FTL_MODULE_STATUS_S
 {
     ftl_mod_state_e state;
-    bool            critical;
-    bool            wants_run;
+    BOOL            critical;
+    BOOL            wants_run;
     DWORD           progress;
     DWORD           next_ms;
     int32_t         error;
-} ftl_mod_status_t;
+} ftl_mod_status_s;
 
 /* ── ms deadline（本仓取值，须上板标定；docs §6.3）──
  * 统一绝对 deadline，不用 rounds（rounds 随主循环速率漂移）。

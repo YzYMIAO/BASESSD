@@ -17,7 +17,7 @@
 #define PC_SAMPLE_MAGIC   (0x50435341U) /* "PCSA" */
 #define PC_SAMPLE_VERSION (2U)          /* v2：加 rate / tick_count / prev_rate */
 
-typedef struct
+typedef struct PC_SAMPLE_RECORD_S
 {
     /* 跨复位保留的有效性标记（首次上电是随机 SRAM，靠 magic 判） */
     DWORD magic;
@@ -36,12 +36,12 @@ typedef struct
     DWORD prev_rate;
     DWORD prev_count; /* 有效条目数（<= PC_SAMPLE_RING） */
     DWORD prev_ring[PC_SAMPLE_RING];
-} pc_sample_record_t;
+} pc_sample_record_s;
 
-static volatile pc_sample_record_t g_pc_sample __attribute__((section(".noinit")));
+static volatile pc_sample_record_s g_pc_sample __attribute__((section(".noinit")));
 
 /* ISR 与主循环共享：H16 要求 volatile；由 pc_sample_init 置位。 */
-static volatile bool s_pc_sample_ready;
+static volatile BOOL s_pc_sample_ready;
 
 _Static_assert((PC_SAMPLE_RING & (PC_SAMPLE_RING - 1U)) == 0U, "PC_SAMPLE_RING 必须是 2 的幂（掩码取模）");
 
@@ -135,12 +135,12 @@ void pc_sample_clear(void)
     s_pc_sample_ready = true;
 }
 
-bool pc_sample_prev_valid(void)
+BOOL pc_sample_prev_valid(void)
 {
     return (g_pc_sample.prev_valid == 1U);
 }
 
-DWORD pc_sample_count(bool previous)
+DWORD pc_sample_count(BOOL previous)
 {
     if (previous)
     {
@@ -149,7 +149,7 @@ DWORD pc_sample_count(bool previous)
     return (g_pc_sample.total < PC_SAMPLE_RING) ? g_pc_sample.total : PC_SAMPLE_RING;
 }
 
-DWORD pc_sample_at(bool previous, DWORD index)
+DWORD pc_sample_at(BOOL previous, DWORD index)
 {
     ASSERT(index < PC_SAMPLE_RING);
 
@@ -161,12 +161,12 @@ DWORD pc_sample_head(void)
     return g_pc_sample.head;
 }
 
-DWORD pc_sample_rate(bool previous)
+DWORD pc_sample_rate(BOOL previous)
 {
     return previous ? g_pc_sample.prev_rate : g_pc_sample.rate;
 }
 
-bool pc_sample_rate_set(DWORD rate)
+BOOL pc_sample_rate_set(DWORD rate)
 {
     if ((rate < 1U) || (rate > PC_SAMPLE_RATE_MAX))
     {

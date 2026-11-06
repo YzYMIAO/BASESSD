@@ -14,7 +14,7 @@
  * 器件事实见 nand/devices/mt29f___g08a.h；通用布局见 nand/nand_config.h。
  *
  * 时序来源：本文件两张静态表（slow/fast，MT29 数据手册参数）
- *   → nand_fmc_timing_t（nand_protocol.h，29 字段，顺序耦合）
+ *   → nand_fmc_timing_s（nand_protocol.h，29 字段，顺序耦合）
  *   → UOP handler 层（nand_fmc.c）与 PCC 换算（nand_fmc_timing_to_pcc）。
  */
 
@@ -54,7 +54,7 @@ static BYTE s_timing_mode[CH_NUM][CE_NUM];
  *     就绪/复电组 : tCEA / tCHZ / tCLR / tCOH
  *   （Mode 0 典型值；本表供 mt29f_set_timing 的 PCC 换算使用）
  * -------------------------------------------------------------------- */
-static const nand_fmc_timing_t g_nand_timing_mode0 = {
+static const nand_fmc_timing_s g_nand_timing_mode0 = {
     .t_adl_ns     = 70U,  /* 地址→数据加载延时 */
     .t_alh_ns     = 5U,   /* ALE 保持 */
     .t_als_ns     = 10U,  /* ALE 建立 */
@@ -88,7 +88,7 @@ static const nand_fmc_timing_t g_nand_timing_mode0 = {
 #endif /* CONFIG_NAND_TIMING_MODE */
 
 /*
- * 根据 ONFI 时序参数 nand_fmc_timing_t 和 FMC 时钟频率，
+ * 根据 ONFI 时序参数 nand_fmc_timing_s 和 FMC 时钟频率，
  * 计算 FMC PCC 硬件寄存器值。
  *
  * FMC kernel clock 由调用者传入（当前 200 MHz → tHCLK = 5 ns）。
@@ -121,7 +121,7 @@ static const nand_fmc_timing_t g_nand_timing_mode0 = {
  * 按实际 fmc_hz 换算（不能硬编码 5ns/4545ps）。Mode 4 表实测 HOLD/HiZ 各短 1 周期
  * 会导致命令/地址采样失败（RISK-NAND-03），故使用 Mode 0 的 3.3V AC 参数作为基准。
  */
-static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
 {
     ASSERT(fmc_hz != 0U);
 
@@ -234,7 +234,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi, FMC_NAND_PCC_T
  *
  * @param cfg 输出配置
  */
-static void mt29f_build_fmc_config(nand_fmc_config_t *cfg)
+static void mt29f_build_fmc_config(nand_fmc_cfg_s *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
@@ -283,7 +283,7 @@ static nand_result_e mt29f_hw_init(void)
         return NAND_RESULT_OPERATION_FAILED;
     }
 
-    nand_fmc_config_t fmc_config;
+    nand_fmc_cfg_s fmc_config;
 
     mt29f_build_fmc_config(&fmc_config);
 
@@ -326,7 +326,7 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
         return NAND_RESULT_OPERATION_FAILED;
     }
 
-    nand_fmc_config_t fast_fmc;
+    nand_fmc_cfg_s fast_fmc;
 
     mt29f_build_fmc_config(&fast_fmc);
 
@@ -348,14 +348,14 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
 
-static const nand_device_desc_t g_mt29f_desc = {
+static const nand_device_desc_s g_mt29f_desc = {
     .name        = "MT29F4G08ABADAWP",
     .expected_id = NAND_CHIP_ID,
     .hw_init     = mt29f_hw_init,
     .set_timing  = mt29f_set_timing,
 };
 
-const nand_device_desc_t *nand_device_get(void)
+const nand_device_desc_s *nand_device_get(void)
 {
     return &g_mt29f_desc;
 }

@@ -7,15 +7,15 @@
 #include <string.h>
 
 /* This filter applies before formatting, so suppressed logs consume no TX queue space. */
-static log_level_e      g_log_level = LOG_INFO;
-static log_sink_t       g_log_sink;
-static log_flush_sink_t g_log_flush_sink;
-static DWORD            g_log_truncated;
-static DWORD            g_log_write_failures;
+static log_level_e         g_log_level = LOG_INFO;
+static log_sink_fn_t       g_log_sink;
+static log_flush_sink_fn_t g_log_flush_sink;
+static DWORD               g_log_truncated;
+static DWORD               g_log_write_failures;
 
 DWORD log_write(log_level_e level, const char *message)
 {
-    const ssd_platform_ops_t *platform = ssd_platform_get();
+    const ssd_platform_ops_s *platform = ssd_platform_get();
     DWORD                     length;
     DWORD                     result;
 
@@ -108,17 +108,17 @@ log_level_e log_get_level(void)
     return g_log_level;
 }
 
-void log_set_sink(log_sink_t sink)
+void log_set_sink(log_sink_fn_t sink)
 {
     g_log_sink = sink;
 }
 
-bool log_flush(DWORD timeout_ms)
+BOOL log_flush(DWORD timeout_ms)
 {
     return (g_log_flush_sink != NULL) ? g_log_flush_sink(timeout_ms) : true;
 }
 
-void log_set_flush_sink(log_flush_sink_t sink)
+void log_set_flush_sink(log_flush_sink_fn_t sink)
 {
     g_log_flush_sink = sink;
 }
@@ -145,7 +145,7 @@ DWORD log_get_write_failure_count(void)
  *
  * @param hb 心跳对象
  */
-void log_heartbeat_begin(log_heartbeat_t *hb)
+void log_heartbeat_begin(log_heartbeat_s *hb)
 {
     hb->start_ms = platform_now_ms();
     hb->log_ms   = hb->start_ms;
@@ -160,7 +160,7 @@ void log_heartbeat_begin(log_heartbeat_t *hb)
  * @param hb 心跳对象
  * @return true 到点；false 未到点 / 未 active
  */
-bool log_heartbeat_due(log_heartbeat_t *hb)
+BOOL log_heartbeat_due(log_heartbeat_s *hb)
 {
     if (hb->active == false)
     {
@@ -186,7 +186,7 @@ bool log_heartbeat_due(log_heartbeat_t *hb)
  *
  * @param hb 心跳对象
  */
-void log_heartbeat_end(log_heartbeat_t *hb)
+void log_heartbeat_end(log_heartbeat_s *hb)
 {
     hb->start_ms = 0U;
     hb->log_ms   = 0U;
@@ -199,7 +199,7 @@ void log_heartbeat_end(log_heartbeat_t *hb)
  * @param hb 心跳对象
  * @return 已运行毫秒；未 active 时 0
  */
-DWORD log_heartbeat_age_ms(const log_heartbeat_t *hb)
+DWORD log_heartbeat_age_ms(const log_heartbeat_s *hb)
 {
     return (hb->active == false) ? 0U : (platform_now_ms() - hb->start_ms);
 }
@@ -212,7 +212,7 @@ DWORD log_heartbeat_age_ms(const log_heartbeat_t *hb)
  * @param rl          限流对象
  * @param interval_ms 时间间隔（毫秒）
  */
-void log_ratelimit_init(log_ratelimit_t *rl, DWORD interval_ms)
+void log_ratelimit_init(log_ratelimit_s *rl, DWORD interval_ms)
 {
     rl->last_ms     = 0U;
     rl->interval_ms = interval_ms;
@@ -227,7 +227,7 @@ void log_ratelimit_init(log_ratelimit_t *rl, DWORD interval_ms)
  * @param rl 限流对象
  * @return true 应打印；false 继续抑制
  */
-bool log_ratelimit_due(log_ratelimit_t *rl)
+BOOL log_ratelimit_due(log_ratelimit_s *rl)
 {
     return log_rate_due(&rl->last_ms, &rl->suppressed, rl->interval_ms);
 }
@@ -240,7 +240,7 @@ bool log_ratelimit_due(log_ratelimit_t *rl)
  * @param log_ms 上次打点时刻（进出参；到点时更新为当前时间）
  * @return true 到点；false 未到点或首次仅记基准
  */
-bool log_tick(DWORD *log_ms)
+BOOL log_tick(DWORD *log_ms)
 {
     const DWORD now_ms = platform_now_ms();
 
@@ -269,10 +269,10 @@ bool log_tick(DWORD *log_ms)
  * @param interval_ms 时间间隔（毫秒）
  * @return true 应打印；false 继续抑制
  */
-bool log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms)
+BOOL log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms)
 {
     const DWORD now_ms = platform_now_ms();
-    bool        due;
+    BOOL        due;
 
     if (now_ms != 0U)
     {

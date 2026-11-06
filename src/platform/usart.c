@@ -50,7 +50,7 @@ static volatile BYTE g_tx_dma_active;
 static BYTE          g_tx_dma_ready;
 static volatile BYTE g_tx_transport_fault;
 
-static uart_stats_t g_uart_stats;
+static uart_stats_s g_uart_stats;
 static BYTE         g_usart_ready;
 
 /* ─────────────────────────── 队列原语（供 port / CLI 调用）─────────────────────────── */
@@ -261,7 +261,7 @@ int _write(int file, char *buffer, int length)
     /* ── 慢速路径：在裸 \n 前插入 \r ── */
 #define WRITE_BUF_SIZE 512U
     static char converted[WRITE_BUF_SIZE];
-    bool        ok = true;
+    BOOL        ok = true;
     dst_len        = 0;
 
     for (src_i = 0; src_i < length; src_i++)
@@ -367,7 +367,7 @@ DWORD uart_log_write(const char *data, DWORD length)
     return written;
 }
 
-bool uart_log_flush(DWORD timeout_ms)
+BOOL uart_log_flush(DWORD timeout_ms)
 {
     DWORD start_tick;
 
@@ -411,7 +411,7 @@ bool uart_log_flush(DWORD timeout_ms)
     }
 }
 
-void uart_get_stats(uart_stats_t *stats)
+void uart_get_stats(uart_stats_s *stats)
 {
     if (stats != NULL)
     {

@@ -37,7 +37,7 @@
  * 单调递增的诊断计数。它们不在读取后自动清零，复位后才开始新的观测周期。
  * status CLI 用这些值区分“协议处理慢造成的软件队列满”和“IRQ 响应慢造成的硬件 ORE”。
  */
-typedef struct
+typedef struct UART_STATISTICS_S
 {
     DWORD rx_overflow;         /* Software RX ring was full. */
     DWORD tx_dropped;          /* New log bytes rejected because TX ring was full. */
@@ -49,7 +49,7 @@ typedef struct
     DWORD framing_errors;      /* USART FE: stop bit was invalid. */
     DWORD noise_errors;        /* USART NE: noise was detected while sampling. */
     DWORD parity_errors;       /* USART PE: received parity did not match. */
-} uart_stats_t;
+} uart_stats_s;
 
 /* 接收错误种类位掩码（中性命名，port 侧把 USART 硬件标志翻译成这些位）。 */
 #define UART_RX_ERROR_PARITY  (1U << 0)
@@ -77,9 +77,9 @@ DWORD uart_log_write(const char *data, DWORD length);
 
 /* Wait until the TX queue is empty, DMA is idle, and USART TC confirms the final stop bit left TX.
  * @return true = 已排空；false = 未就绪 / 上下文非法 / 超时。 */
-bool uart_log_flush(DWORD timeout_ms);
+BOOL uart_log_flush(DWORD timeout_ms);
 
-void uart_get_stats(uart_stats_t *stats);
+void uart_get_stats(uart_stats_s *stats);
 
 /*
  * 从 RX 软件队列取出一个字节。返回非 0 = 取到（*byte 有效），0 = 队列为空。
@@ -122,7 +122,7 @@ BYTE usart_port_hw_init(DWORD baudrate);
 void usart_port_irq_handler(void);
 
 /* TX DMA 启动：D-cache 清理 + DMA 启动 + CR3 DMAT。返回 true = 已启动。 */
-bool usart_port_tx_dma_start(const BYTE *buffer, DWORD length);
+BOOL usart_port_tx_dma_start(const BYTE *buffer, DWORD length);
 
 /* 断开 TX DMA（清 CR3 DMAT）。 */
 void usart_port_tx_dma_detach(void);

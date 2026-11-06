@@ -10,7 +10,7 @@
 
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
-struct ring_buffer_conf
+struct DS_RING_BUFFER_CONFIG_S
 {
     size_t capacity;
 
@@ -19,7 +19,7 @@ struct ring_buffer_conf
     void (*mem_free)(void *block);
 };
 
-struct ring_buffer
+struct DS_RING_BUFFER_S
 {
     size_t size, capacity;
     size_t head, tail;
@@ -30,16 +30,16 @@ struct ring_buffer
     void (*mem_free)(void *block);
 };
 
-ds_Stat cc_rbuf_new(CC_Rbuf **rbuf)
+ds_status_e cc_rbuf_new(ds_rbuf_s **rbuf)
 {
-    CC_RbufConf conf;
+    ds_rbuf_cfg_s conf;
     cc_rbuf_conf_init(&conf);
     return cc_rbuf_conf_new(&conf, rbuf);
 }
 
-ds_Stat cc_rbuf_new_with_capacity(size_t capacity, CC_Rbuf **rbuf)
+ds_status_e cc_rbuf_new_with_capacity(size_t capacity, ds_rbuf_s **rbuf)
 {
-    CC_RbufConf conf;
+    ds_rbuf_cfg_s conf;
 
     cc_rbuf_conf_init(&conf);
     /* 对外保持配置结构不透明，同时支持调用者指定缓冲容量。 */
@@ -47,14 +47,14 @@ ds_Stat cc_rbuf_new_with_capacity(size_t capacity, CC_Rbuf **rbuf)
     return cc_rbuf_conf_new(&conf, rbuf);
 }
 
-ds_Stat cc_rbuf_conf_new(CC_RbufConf *rconf, CC_Rbuf **rbuf)
+ds_status_e cc_rbuf_conf_new(ds_rbuf_cfg_s *rconf, ds_rbuf_s **rbuf)
 {
     if ((rconf == NULL) || (rbuf == NULL) || (rconf->capacity == 0U))
     {
         return DS_ERR_INVALID_CAPACITY;
     }
 
-    CC_Rbuf *ringbuf = rconf->mem_calloc(1, sizeof(CC_Rbuf));
+    ds_rbuf_s *ringbuf = rconf->mem_calloc(1, sizeof(ds_rbuf_s));
 
     if (!ringbuf)
     {
@@ -79,7 +79,7 @@ ds_Stat cc_rbuf_conf_new(CC_RbufConf *rconf, CC_Rbuf **rbuf)
     return DS_OK;
 }
 
-void cc_rbuf_conf_init(CC_RbufConf *rconf)
+void cc_rbuf_conf_init(ds_rbuf_cfg_s *rconf)
 {
     rconf->capacity   = DEFAULT_CC_RBUF_CAPACITY;
     rconf->mem_alloc  = malloc;
@@ -87,28 +87,28 @@ void cc_rbuf_conf_init(CC_RbufConf *rconf)
     rconf->mem_free   = free;
 }
 
-void cc_rbuf_destroy(CC_Rbuf *rbuf)
+void cc_rbuf_destroy(ds_rbuf_s *rbuf)
 {
     rbuf->mem_free(rbuf->buf);
     rbuf->mem_free(rbuf);
 }
 
-bool cc_rbuf_is_empty(CC_Rbuf *rbuf)
+BOOL cc_rbuf_is_empty(ds_rbuf_s *rbuf)
 {
     return (rbuf->size == 0);
 }
 
-size_t cc_rbuf_size(CC_Rbuf *rbuf)
+size_t cc_rbuf_size(ds_rbuf_s *rbuf)
 {
     return rbuf->size;
 }
 
-size_t cc_rbuf_capacity(CC_Rbuf *rbuf)
+size_t cc_rbuf_capacity(ds_rbuf_s *rbuf)
 {
     return rbuf->capacity;
 }
 
-void cc_rbuf_enqueue(CC_Rbuf *rbuf, QWORD item)
+void cc_rbuf_enqueue(ds_rbuf_s *rbuf, QWORD item)
 {
     if (rbuf->size == rbuf->capacity)
     {
@@ -125,7 +125,7 @@ void cc_rbuf_enqueue(CC_Rbuf *rbuf, QWORD item)
     rbuf->head = (rbuf->head + 1) % rbuf->capacity;
 }
 
-ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, QWORD *out)
+ds_status_e cc_rbuf_dequeue(ds_rbuf_s *rbuf, QWORD *out)
 {
     if (cc_rbuf_is_empty(rbuf))
     {
@@ -139,12 +139,12 @@ ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, QWORD *out)
     return DS_OK;
 }
 
-QWORD cc_rbuf_peek(CC_Rbuf *rbuf, int index)
+QWORD cc_rbuf_peek(ds_rbuf_s *rbuf, int index)
 {
     return rbuf->buf[index];
 }
 
 size_t cc_rbuf_struct_size()
 {
-    return sizeof(CC_Rbuf);
+    return sizeof(ds_rbuf_s);
 }

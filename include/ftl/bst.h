@@ -16,7 +16,7 @@
  *
  * 存储位置：
  *   五张表由 HIL（main.c）各自独立定义、按实例独立放置；FTL 只持有
- *   `ftl_table_refs_t`（见 allocator.h）里的指针。
+ *   `ftl_table_refs_s`（见 allocator.h）里的指针。
  *   多 LUN 前置：每实例一份表 = 每实例一组独立对象，本表代码零改动。
  *
  * 有效位（DRAM-less approach ③）：
@@ -26,7 +26,7 @@
  *   （DFTL / arXiv 1504.01666 / LeaFTL / VPFTL 同构）：逐页位图在 DRAM-less 下装不下
  *   （RAM ∝ 页数），且落 flash 后失效清位会引发大量 flash I/O ⇒ 主流不做。
  *   故本仓：
- *     · bst_block_t = 块级聚合条目（valid_count 是 **CW 级真值**），20B/块，全常驻；
+ *     · bst_block_s = 块级聚合条目（valid_count 是 **CW 级真值**），20B/块，全常驻；
  *     · 无独立位图表——GC/WL 迁移逐页读 META 反查 L2P 判定，不靠任何 RAM 位图。
  *   块级聚合（valid_count）供 GC/WL 选 victim（对齐主流 validity ratio）；逐 CW 真值现查 L2P。
  */
@@ -39,7 +39,7 @@
 #include <stdint.h>
 
 /* ── 预测性坏块健康状态（自 read_recovery.h 迁入，避免循环 include）── */
-typedef enum
+typedef enum RR_BLOCK_HEALTH_E
 {
     RR_BLOCK_HEALTHY  = 0, /* 正常 */
     RR_BLOCK_WARNING  = 1, /* ECC 上升趋势中 */
@@ -54,33 +54,33 @@ typedef enum
  * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）
  * 只需与上一次比较，8 格环形缓冲实际供给的是最老那格的值（本次一并修复）。
  * 16B → 3B，4096 块省 52KB。 */
-typedef struct
+typedef struct RR_ECC_TRACK_S
 {
     BYTE              last_ecc;     /* 最近一次读的 ECC bit 数 */
     BYTE              rising_count; /* 连续上升计数（不上升即清零） */
     rr_block_health_e health;       /* 预测性退役趋势 */
-} rr_ecc_track_t;                   /* 3B */
+} rr_ecc_track_s;                   /* 3B */
 
 /* 磨损/ECC 快照：Checkpoint 的 per-block wear 条目与 BST 之间的搬运单元。
  * 把原本 5 个同类型/异类型出参收成一个结构体，避免调用点按位置传参写反。 */
-typedef struct
+typedef struct BST_WEAR_S
 {
     DWORD          erase_count; /* 擦除次数 */
     WORD           read_count;  /* read disturb 计数 */
-    rr_ecc_track_t rr;          /* ECC 健康趋势 */
-} bst_wear_t;
+    rr_ecc_track_s rr;          /* ECC 健康趋势 */
+} bst_wear_s;
 
-/* ── bst_block_t 状态机（互斥态，枚举而非位图）──
+/* ── bst_block_s 状态机（互斥态，枚举而非位图）──
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
  *   · 枚举保证互斥，非法组合不可表达；
  *   · 状态转移集中到 ftl_block_set_state，不需要手写清位掩码（漏一位编译期完全无声）。
  * BAD 是终态；`ftl_block_set_bad` 一并清 valid_count / sb_id（唯一 setter，
  * 调用点不再手写三行——原先 5 处各写一遍，漏一处就是静默账本分叉）。
- * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 bst_block_t.temp。
+ * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 bst_block_s.temp。
  *
  * ⚠ 无「预擦除 / 未擦除」分级态：Free Pool 是**一个**已擦除池（GC 先擦后归还），
  *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
-typedef enum
+typedef enum BST_STATE_E
 {
     FTL_BLOCK_STATE_NONE    = 0U, /* 无归属：固定元数据区 / OP 池 / Spare 池 / BSS 未初始化 */
     FTL_BLOCK_STATE_FREE    = 1U, /* 在 Free Pool（已擦除） */
@@ -94,7 +94,7 @@ typedef enum
 /* 状态存于 BYTE ⇒ 值域必须装得下（枚举成员一多就会静默截断） */
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX, "bst_state_e 超出 BYTE 值域");
 
-/* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 bst_block_t 会从 20B 涨到 24B，
+/* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 bst_block_s 会从 20B 涨到 24B，
  * 4096 个块多占 16KB，多 LUN 影子构建会超 SRAM12。 */
 _Static_assert(sizeof(bst_state_e) == 1, "枚举不是 1 字节：检查 -fshort-enums");
 
@@ -124,7 +124,7 @@ _Static_assert(sizeof(bst_state_e) == 1, "枚举不是 1 字节：检查 -fshort
  *
  *   sizeof = 20B → 4096 项 = 80KB（无位图表）。
  */
-typedef struct
+typedef struct BST_BLOCK_S
 {
     /* ── 磨损 ── */
     DWORD erase_count; /* 4B  @0   擦除次数 */
@@ -138,11 +138,11 @@ typedef struct
     WORD        sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
 
     /* ── ECC 健康 ── */
-    rr_ecc_track_t rr; /* 3B  @16  ECC 健康 */
-} bst_block_t;         /* 19B → 20B（u32 对齐） */
+    rr_ecc_track_s rr; /* 3B  @16  ECC 健康 */
+} bst_block_s;         /* 19B → 20B（u32 对齐） */
 
 /* 布局守卫：字段顺序/类型漂移会让结构体悄悄变大，编译期拦住。 */
-_Static_assert(sizeof(bst_block_t) == 20, "bst_block_t 布局漂移（期望 20B）");
+_Static_assert(sizeof(bst_block_s) == 20, "bst_block_s 布局漂移（期望 20B）");
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
 
@@ -199,7 +199,7 @@ static inline WORD ftl_gblock_block(WORD g)
  *
  * `b` 是**前置条件**（调用者传入，非可空参数）：
  * 调用者一律传 `&alloc->blocks[<索引>]`，而 `blocks` 指向分配到本实例的独立数组
- * （由 `ftl_table_refs_t` 绑定，生命周期覆盖全程）⇒ 取元素地址**结构性恒非空**。
+ * （由 `ftl_table_refs_s` 绑定，生命周期覆盖全程）⇒ 取元素地址**结构性恒非空**。
  * 全仓调用点已逐一核实无一传 NULL。
  * ⇒ 指针非空由内嵌数组结构性保证，不保留 `if (b != NULL)` 恒真守卫；
  *   计数越界仍用 `ASSERT`（H14：debug 停机留现场，release 裁空 ⇒ 零开销）。 */
@@ -216,7 +216,7 @@ static inline WORD ftl_gblock_block(WORD g)
  *
  * @return 当前状态。
  */
-static inline bst_state_e ftl_block_state(const bst_block_t *b)
+static inline bst_state_e ftl_block_state(const bst_block_s *b)
 {
     return (bst_state_e)b->state;
 }
@@ -227,12 +227,12 @@ static inline bst_state_e ftl_block_state(const bst_block_t *b)
  * @param b  块条目。
  * @param st 目标状态。
  */
-static inline void ftl_block_set_state(bst_block_t *b, bst_state_e st)
+static inline void ftl_block_set_state(bst_block_s *b, bst_state_e st)
 {
     b->state = st;
 }
 
-/* ── 坏块（BST 单数据源；NAND 持久化仍走 bbt_header_t.bad_map）──
+/* ── 坏块（BST 单数据源；NAND 持久化仍走 bbt_header_s.bad_map）──
  * 坏块是状态机的**终态**，不再是独立位 ⇒ 与其余 6 态天然互斥
  * （原「BAD|RESERVED」并存不再可表达）。 */
 
@@ -243,7 +243,7 @@ static inline void ftl_block_set_state(bst_block_t *b, bst_state_e st)
  *
  * @return true = BAD。
  */
-static inline bool ftl_block_is_bad(const bst_block_t *b)
+static inline BOOL ftl_block_is_bad(const bst_block_s *b)
 {
     return ftl_block_state(b) == FTL_BLOCK_STATE_BAD;
 }
@@ -258,7 +258,7 @@ static inline bool ftl_block_is_bad(const bst_block_t *b)
  * @param b           块条目。
  * @param temperature 温度流（0=HOT / 1=COLD）。
  */
-static inline void ftl_block_set_temp(bst_block_t *b, BYTE temperature)
+static inline void ftl_block_set_temp(bst_block_s *b, BYTE temperature)
 {
     b->temp = temperature;
 }
@@ -266,13 +266,13 @@ static inline void ftl_block_set_temp(bst_block_t *b, BYTE temperature)
 /**
  * @brief 取块的温度流（0=HOT / 1=COLD）。
  *
- * ⚠ 返回值是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。
+ * ⚠ 返回值是**两值域不是真值域**，不是 BOOL（UT 逐条钉住该值域）。
  *
  * @param b 块条目。
  *
  * @return 温度流（0=HOT / 1=COLD）。
  */
-static inline BYTE ftl_block_get_temp(const bst_block_t *b)
+static inline BYTE ftl_block_get_temp(const bst_block_s *b)
 {
     return b->temp;
 }
@@ -318,7 +318,7 @@ static inline const char *ftl_block_state_name(bst_state_e st)
  *
  * @return SB 下标；FTL_BLOCK_NO_SB = 未归属。
  */
-static inline WORD ftl_block_sb_id(const bst_block_t *b)
+static inline WORD ftl_block_sb_id(const bst_block_s *b)
 {
     return b->sb_id;
 }
@@ -329,7 +329,7 @@ static inline WORD ftl_block_sb_id(const bst_block_t *b)
  * @param b     块条目。
  * @param sb_id SB 下标；FTL_BLOCK_NO_SB = 未归属。
  */
-static inline void ftl_block_set_sb(bst_block_t *b, WORD sb_id)
+static inline void ftl_block_set_sb(bst_block_s *b, WORD sb_id)
 {
     b->sb_id = sb_id;
 }
@@ -339,7 +339,7 @@ static inline void ftl_block_set_sb(bst_block_t *b, WORD sb_id)
  * CW 级映射（IU = 1 CW = 512B）下，一个物理页内 4 个 CW 各自独立有效：
  * 主机只改写其中 1 个 CW 时，同页另 3 个 CW 仍然有效。
  *
- * valid_count（在 bst_block_t 内）是**真值**，单位 **CW**，值域
+ * valid_count（在 bst_block_s 内）是**真值**，单位 **CW**，值域
  * 0 .. FTL_CW_PER_BLOCK（单物理块，当前 0..256）。每次「某 LBA 的映射
  * 指向本块某页某 CW」+1、「某 LBA 不再指向本块某页某 CW」-1，与 L2P 逐条同步。
  * SB 层的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB，当前 0..512），只用于
@@ -353,7 +353,7 @@ static inline void ftl_block_set_sb(bst_block_t *b, WORD sb_id)
  *
  * @param b 块条目。
  */
-static inline void ftl_block_add_valid(bst_block_t *b)
+static inline void ftl_block_add_valid(bst_block_s *b)
 {
     ASSERT(b->valid_count < FTL_CW_PER_BLOCK);
     b->valid_count++;
@@ -364,7 +364,7 @@ static inline void ftl_block_add_valid(bst_block_t *b)
  *
  * @param b 块条目。
  */
-static inline void ftl_block_sub_valid(bst_block_t *b)
+static inline void ftl_block_sub_valid(bst_block_s *b)
 {
     ASSERT(b->valid_count > 0U);
     b->valid_count--;
@@ -384,7 +384,7 @@ static inline void ftl_block_sub_valid(bst_block_t *b)
  *
  * @param b 块条目。
  */
-static inline void ftl_block_sub_valid_if_live(bst_block_t *b)
+static inline void ftl_block_sub_valid_if_live(bst_block_s *b)
 {
     if ((!ftl_block_is_bad(b)) && (b->valid_count > 0U))
     {
@@ -397,7 +397,7 @@ static inline void ftl_block_sub_valid_if_live(bst_block_t *b)
  *
  * @param b 块条目。
  */
-static inline void ftl_block_clear_valid(bst_block_t *b)
+static inline void ftl_block_clear_valid(bst_block_s *b)
 {
     b->valid_count = 0U;
 }
@@ -409,7 +409,7 @@ static inline void ftl_block_clear_valid(bst_block_t *b)
  * @param b     块条目。
  * @param valid 有效 CW 数（0..FTL_CW_PER_BLOCK）。
  */
-static inline void ftl_block_set_valid(bst_block_t *b, WORD valid)
+static inline void ftl_block_set_valid(bst_block_s *b, WORD valid)
 {
     b->valid_count = valid;
 }
@@ -423,7 +423,7 @@ static inline void ftl_block_set_valid(bst_block_t *b, WORD valid)
  *
  * @param b 块条目。
  */
-static inline void ftl_block_set_bad(bst_block_t *b)
+static inline void ftl_block_set_bad(bst_block_s *b)
 {
     ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
     ftl_block_clear_valid(b);

@@ -35,7 +35,7 @@ static uint8_t *g_cw_scratch = NULL;
  * （munit.c:900-926 打印前缀，:935-982 打印结果）⇒ 用例体内的第一行输出会插进
  * 结果行中间——崩溃时看到的就是 "    block=100, plane=0   [ERR] assertion failed"。
  * 由 test_trace_begin() 在每个用例开头复位。 */
-static bool s_ev_line_started = false;
+static BOOL s_ev_line_started = false;
 
 void test_trace_begin(void)
 {
@@ -56,7 +56,7 @@ void test_trace_begin(void)
     }
 }
 
-static void test_trace_emit(bool force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
+static void test_trace_emit(BOOL force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
     /* 可见性判断放在**最前面**：默认档（visible = error）连下面那个 '\n' 都不输出，
      * 于是报告格式与改造前逐字一致。force = 关键指标行（/speed 的速度）：属于"结果"，
@@ -180,11 +180,11 @@ static uint8_t test_is_multi_op(uint8_t operation)
 
 /* submit + fc_service 循环 + poll + 校验 command_id。**不 release**。
  * 5 个 helper 内部收尾用；不对外导出（用例的提交原语见头文件说明）。 */
-fc_command_status_t test_submit_wait(fc_command_t *cmd)
+fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd)
 {
-    fc_command_status_t completion = {0};
-    fc_command_id_t     expect_id  = FC_COMMAND_ID_INVALID;
-    uint8_t             completed  = 0U;
+    fc_cmd_status_s completion = {0};
+    fc_cmd_id_t     expect_id  = FC_CMD_ID_INVALID;
+    uint8_t         completed  = 0U;
 
     munit_assert_not_null(cmd);
     munit_assert_int(fc_submit(cmd), ==, FC_STATUS_OK);
@@ -213,14 +213,14 @@ fc_command_status_t test_submit_wait(fc_command_t *cmd)
  * 此刻 desc 的 USER 区是明文——逐 desc 拷回 g_source_data 槽，供调用者校验。
  * 导出供**批量**路径使用：批量读要「先捕获、再校验、最后才 release」，
  * 必须在提交-抽取循环里单独调用它（页 helper 内部收尾也走这里）。 */
-void test_capture_cmd(const fc_command_t *cmd)
+void test_capture_cmd(const fc_cmd_s *cmd)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
         uint8_t *slot = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
@@ -229,7 +229,7 @@ void test_capture_cmd(const fc_command_t *cmd)
 
         (void)memcpy(slot, user, FC_BUFFER_USER_SIZE);
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 }
@@ -317,10 +317,10 @@ uint8_t *test_cw_scratch(uint8_t idx)
  * 与 test_cmd_build 同配置校验，但**资源申请失败（命令 / desc / buffer 池空）返回 NULL**、
  * 不 abort——供压力用例「发到池满 → 抽干 CQ 腾资源 → 重试同一条」的背压闭环使用。
  * 配置错误（坐标越界 / 掩码漏 plane）仍是 ASSERT：那是调用者 bug，不是资源问题。 */
-fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config)
+fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config)
 {
-    fc_command_t *cmd;
-    uint8_t       is_multi;
+    fc_cmd_s *cmd;
+    uint8_t   is_multi;
 
     ASSERT(addr != NULL);
     ASSERT(config != NULL);
@@ -378,9 +378,9 @@ fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, ui
 }
 
 /* 接口与契约见 fc_test_common.h「只建链、不提交的原语」。 */
-fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config)
+fc_cmd_s *test_cmd_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config)
 {
-    fc_command_t *cmd = test_cmd_try_build(addr, cw_bitmap, meta, config);
+    fc_cmd_s *cmd = test_cmd_try_build(addr, cw_bitmap, meta, config);
 
     munit_assert_not_null(cmd);
     return cmd;
@@ -390,11 +390,11 @@ fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32
  *  5 个页 helper（建立在 test_cmd_build 之上）
  **************************************************************************/
 
-fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config)
+fc_cmd_status_s test_erase_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             is_multi;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         is_multi;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -422,7 +422,7 @@ fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap,
      * 不再伪造 CW0 位，completion_all_cws 的空集分支写 cw_status[0] 兜住成败。
      * multi_plane 由 test_cmd_build 按 operation 派生——它是「本命令跨几个 plane」的
      * 真实属性，填它不为任何读者，只为让命令的声明几何不撒谎。 */
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap)}, 0U, 0U, config);
+    cmd = test_cmd_build(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap)}, 0U, 0U, config);
 
     completion = test_submit_wait(cmd);
 
@@ -430,12 +430,12 @@ fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap,
     return completion;
 }
 
-fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data)
+fc_cmd_status_s test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config, uint8_t **data)
 {
-    nand_addr_t         addr;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             is_multi;
+    nand_addr_s     addr;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         is_multi;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -456,7 +456,7 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     /* meta = 本页 PBA：写读同页自然一致，且**页地址整体进了 META** ⇒「读错页」被 Pass 4 ② 抓到。
      * cw_bitmap 由 plane_bitmap 正推（test_plane_cw_bitmap），与 test_cmd_build 内部
      * 按 cmd->paa/config.multi_plane 的段推导互为交叉检查。 */
-    addr = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index};
+    addr = (nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index};
     cmd  = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), config);
 
     /* 明文 PAA 图案：填 g_source_data 槽，同时拷进各 desc 的 USER 区。
@@ -477,11 +477,11 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     return completion;
 }
 
-fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_conf_t *config, uint8_t **data)
+fc_cmd_status_s test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_cfg_s *config, uint8_t **data)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             is_multi;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         is_multi;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -502,7 +502,7 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
     /* cw_bitmap 与 test_prog_page 同口径。meta 由调用者给：普通读传**本页 PBA**
      * （与写路径一致，否则 Pass 4 ② 报错）；内部搬移用例要传**源页 PBA**——那页的
      * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_level3.c 的搬移用例）。 */
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index}, test_plane_cw_bitmap(plane_bitmap), meta, config);
+    cmd = test_cmd_build(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index}, test_plane_cw_bitmap(plane_bitmap), meta, config);
 
     /* 读前 USER 区预填 0xCC：NAND 没填满时残留可见，便于区分「读失败」与「读到真数据」。 */
     test_memset_read_buffer(cmd);
@@ -525,12 +525,12 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
     return completion;
 }
 
-void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data)
+void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data)
 {
     /* 逐页写，页间自然轮询（页 helper 内部即 submit + service 轮询 + release）。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_status_t completion = test_prog_page(block_index, plane_bitmap, page, config, NULL);
+        fc_cmd_status_s completion = test_prog_page(block_index, plane_bitmap, page, config, NULL);
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     }
@@ -544,15 +544,15 @@ void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
     }
 }
 
-void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data)
+void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data)
 {
     /* 逐页读，页间自然轮询。
      * **必须在页内校验**：g_source_data 每页都被覆写，攒到最后只剩最后一页可比。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         /* 普通读：meta 取本页 PBA（与 test_prog_page 的写口径一致）。 */
-        uint32_t            meta       = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page});
-        fc_command_status_t completion = test_read_page(block_index, plane_bitmap, page, meta, config, data);
+        uint32_t        meta       = (uint32_t)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page});
+        fc_cmd_status_s completion = test_read_page(block_index, plane_bitmap, page, meta, config, data);
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block_index, page, plane_bitmap);
@@ -572,7 +572,7 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
  *  cache 整块读写（ONFI cache 序列）
  **************************************************************************/
 
-void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data)
+void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data)
 {
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -590,8 +590,8 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
      * 这里验的是 cache 命令序列走得通、编码管线全程不串）。meta = 本页 PBA，与普通写同口径。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_cmd_conf_t       conf = *config;
-        fc_command_status_t completion;
+        fc_cmd_cfg_s    conf = *config;
+        fc_cmd_status_s completion;
 
         conf.operation = (page < (uint16_t)(PAGES_PER_BLOCK - 1U)) ? (DWORD)OP_PROGRAM_PAGE_CACHE : (DWORD)OP_NORMAL_PROGRAM_PAGE;
 
@@ -609,9 +609,9 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     }
 }
 
-void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data)
+void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s *config, uint8_t **data)
 {
-    fc_cmd_conf_t conf;
+    fc_cmd_cfg_s conf;
 
     ASSERT(config != NULL);
     ASSERT(block_index < BLOCKS_PER_PLANE);
@@ -621,7 +621,7 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
      * tLPROG 等整批完成。 */
     for (uint16_t page = 0U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
     {
-        fc_command_status_t completion;
+        fc_cmd_status_s completion;
 
         conf           = *config;
         conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
@@ -632,7 +632,7 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
     }
 
     {
-        fc_command_status_t completion;
+        fc_cmd_status_s completion;
 
         conf           = *config;
         conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
@@ -656,11 +656,11 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
  * meta 仍取 output_page 的 PBA（真正输出的那页）。
  * plane_bitmap == TEST_PLANE_BM_ALL 时 test_cmd_build 按 multi-plane op 展开两 plane；
  * scatter 由 NAND 侧按 plane*PAGE_SIZE 完成。 */
-static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t plane_bitmap, uint16_t output_page, const fc_cmd_conf_t *config)
+static fc_cmd_status_s test_read_cache_step(uint16_t block_index, uint8_t plane_bitmap, uint16_t output_page, const fc_cmd_cfg_s *config)
 {
-    nand_addr_t         addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)output_page};
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
+    nand_addr_s     addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)output_page};
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
 
     cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), config);
 
@@ -673,7 +673,7 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
 
     /* 证据明细（--log-visible debug）：命令地址页号恒为 0（31h/3Fh 无地址周期），
      * 真正输出的是 output_page——打出来才看得出「地址与 meta 刻意解耦」这件事。 */
-    test_trace_detail("cache out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", output_page, (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = output_page}), plane_bitmap, test_cw_count(cmd), completion.status);
+    test_trace_detail("cache out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", output_page, (unsigned long)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = output_page}), plane_bitmap, test_cw_count(cmd), completion.status);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return completion;
@@ -683,12 +683,12 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
  * 00h-addr-30h → tR → 31h → tRCBSY → DATA_OUT（双 plane 再补 06h P1 + DATA_OUT）。
  * 输出页 == 下发地址页；后续页由 SEQ/SEQ_MP 输出，末页由 LAST/LAST_MP 输出。
  * meta 取**本页** PBA。 */
-static fc_command_status_t test_cache_start_seq(uint16_t block_index, uint8_t plane_bitmap, uint16_t page, DWORD operation, const fc_cmd_conf_t *config)
+static fc_cmd_status_s test_cache_start_seq(uint16_t block_index, uint8_t plane_bitmap, uint16_t page, DWORD operation, const fc_cmd_cfg_s *config)
 {
-    nand_addr_t         addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page};
-    fc_cmd_conf_t       conf = *config;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
+    nand_addr_s     addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page};
+    fc_cmd_cfg_s    conf = *config;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
 
     conf.operation = operation;
 
@@ -712,18 +712,18 @@ static fc_command_status_t test_cache_start_seq(uint16_t block_index, uint8_t pl
  * RANDOM 输出的是上一页）。单看 status 只能知道「META 对不上」，看不出**实际读回了哪一页**。
  * desc->meta 在 Pass 4 被写成从介质读回的 META（= 输出页的 LBA）⇒ 直接拿它跟期望值比：
  * 失败信息里 munit 会把 actual/expected 两个数都打出来，「输出的是哪一页」一目了然。 */
-static void test_assert_read_meta(const fc_command_t *cmd, uint16_t block_index, uint8_t plane_bitmap, uint16_t page)
+static void test_assert_read_meta(const fc_cmd_s *cmd, uint16_t block_index, uint8_t plane_bitmap, uint16_t page)
 {
-    const fc_descriptor_t *desc = test_cw_desc(cmd, 0U);
+    const fc_desc_s *desc = test_cw_desc(cmd, 0U);
 
     munit_assert_not_null(desc);
-    munit_assert_uint32(desc->meta, ==, (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page}));
+    munit_assert_uint32(desc->meta, ==, (uint32_t)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page}));
 }
 
-void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data)
+void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data)
 {
-    fc_cmd_conf_t       conf;
-    fc_command_status_t completion;
+    fc_cmd_cfg_s    conf;
+    fc_cmd_status_s completion;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -771,10 +771,10 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     }
 }
 
-void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data)
+void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s *config, uint8_t **data)
 {
-    fc_cmd_conf_t       conf;
-    fc_command_status_t completion;
+    fc_cmd_cfg_s    conf;
+    fc_cmd_status_s completion;
 
     ASSERT(config != NULL);
     ASSERT(block_index < BLOCKS_PER_PLANE);
@@ -817,16 +817,16 @@ void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
 
 /* ── 两 plane 各在一个 block 的 pair 原语（Policy B 的真实形态） ──
  *
- * test_cmd_build 只能表达「两 plane 同 block」：行地址来自一个 nand_addr_t。
+ * test_cmd_build 只能表达「两 plane 同 block」：行地址来自一个 nand_addr_s。
  * 生产 FTL 的 pair 两 plane 分属不同 gblock（ftl_cmd_setup_ppa_pair_cw），
  * 这条路径此前没有单测覆盖，本原语补的就是它。
  *
  * meta 走**整对共用的 LBA 口径**（低 3 位由 desc 的 plane/cw 覆盖），不能用 PBA：
  * 一个命令只有一个 command->meta，而两 plane 的 PBA 已经不同。 */
-fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_conf_t *config)
+fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_cfg_s *config)
 {
-    fc_command_t *cmd;
-    DWORD         pba[PLANE_NUM];
+    fc_cmd_s *cmd;
+    DWORD     pba[PLANE_NUM];
 
     ASSERT(blocks != NULL);
     ASSERT(config != NULL);
@@ -837,7 +837,7 @@ fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], 
     {
         ASSERT(blocks[plane] < BLOCKS_PER_PLANE);
 
-        const nand_addr_t addr = {.ch = 0U, .ce = 0U, .lun = 0U, .block = blocks[plane], .plane = plane, .page = (uint8_t)page_index, .cw = 0U};
+        const nand_addr_s addr = {.ch = 0U, .ce = 0U, .lun = 0U, .block = blocks[plane], .plane = plane, .page = (uint8_t)page_index, .cw = 0U};
 
         pba[plane] = pba_from_addr(&addr);
     }
@@ -863,19 +863,19 @@ fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], 
 }
 
 /* 跨块 pair 的双 plane cache 编程：前 N-1 页 15h，末页 10h（与同块版本同序列）。 */
-void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config, uint8_t **data)
+void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_cfg_s *config, uint8_t **data)
 {
     ASSERT(config != NULL);
     ASSERT(blocks != NULL);
 
     for (uint16_t page = 0U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
     {
-        fc_cmd_conf_t       conf = *config;
-        fc_command_status_t completion;
+        fc_cmd_cfg_s    conf = *config;
+        fc_cmd_status_s completion;
 
         conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
 
-        fc_command_t *cmd = test_cmd_build_pair_cross_block(blocks, page, (uint32_t)page << 3, &conf);
+        fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, page, (uint32_t)page << 3, &conf);
 
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
@@ -884,12 +884,12 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
     }
 
     {
-        fc_cmd_conf_t       conf = *config;
-        fc_command_status_t completion;
+        fc_cmd_cfg_s    conf = *config;
+        fc_cmd_status_s completion;
 
         conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
 
-        fc_command_t *cmd = test_cmd_build_pair_cross_block(blocks, (uint16_t)(PAGES_PER_BLOCK - 1U), (uint32_t)(PAGES_PER_BLOCK - 1U) << 3, &conf);
+        fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, (uint16_t)(PAGES_PER_BLOCK - 1U), (uint32_t)(PAGES_PER_BLOCK - 1U) << 3, &conf);
 
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
@@ -906,15 +906,15 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
 }
 
 /* 跨块 pair 的双 plane cache 读：START_SEQ_MP → SEQ_MP ×(N-2) → LAST_MP，逐页逐 plane 校验。 */
-void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config)
+void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_cfg_s *config)
 {
     ASSERT(config != NULL);
     ASSERT(blocks != NULL);
 
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_cmd_conf_t       conf = *config;
-        fc_command_status_t completion;
+        fc_cmd_cfg_s    conf = *config;
+        fc_cmd_status_s completion;
 
         if (page == 0U)
         {
@@ -929,7 +929,7 @@ void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
             conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
         }
 
-        fc_command_t *cmd = test_cmd_build_pair_cross_block(blocks, page, (uint32_t)page << 3, &conf);
+        fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, page, (uint32_t)page << 3, &conf);
 
         test_memset_read_buffer(cmd);
         completion = test_submit_wait(cmd);
@@ -944,13 +944,13 @@ void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
     test_trace_summary("cross-block cache read: plane0 blk=%hu / plane1 blk=%hu, START_SEQ_MP + %u SEQ_MP + LAST_MP, both planes PAA-verified", blocks[0], blocks[1], (PAGES_PER_BLOCK - 2U));
 }
 
-void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_conf_t *config)
+void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_cfg_s *config)
 {
-    fc_cmd_conf_t       conf;
-    nand_addr_t         addr;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    const uint16_t      prefetched = (uint16_t)(prev_page + 1U);
+    fc_cmd_cfg_s    conf;
+    nand_addr_s     addr;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    const uint16_t  prefetched = (uint16_t)(prev_page + 1U);
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -978,17 +978,17 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     test_verify_page_paa(g_source_data, block_index, prev_page, plane_bitmap);
 
     /* ② RANDOM(addr)：输出 prev+1，预取 addr */
-    addr           = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)addr_page};
+    addr           = (nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)addr_page};
     conf           = *config;
     conf.operation = (DWORD)OP_READ_PAGE_CACHE_RANDOM;
 
-    cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), &conf);
+    cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), &conf);
 
     test_memset_read_buffer(cmd);
     completion = test_submit_wait(cmd);
     test_capture_cmd(cmd);
 
-    test_trace_detail("cache random addr=p%02hu -> out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", addr_page, prefetched, (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), plane_bitmap, test_cw_count(cmd), completion.status);
+    test_trace_detail("cache random addr=p%02hu -> out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", addr_page, prefetched, (unsigned long)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), plane_bitmap, test_cw_count(cmd), completion.status);
 
     test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1022,12 +1022,12 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
  **************************************************************************/
 
 /* 接口与契约见 fc_test_common.h「加载 / 取数两段式」。 */
-void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config)
+void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config)
 {
-    nand_addr_t         addr;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             is_multi;
+    nand_addr_s     addr;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         is_multi;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -1052,7 +1052,7 @@ void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_in
      * ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。行地址由 FC 从 command->paa 填进
      * plane_paa[]（fc_build_dispatch_request 的「无 desc 加载」分支）。meta 不参与（无数据路径）。
      * 提交后器件把目标页搬进页缓冲、**不输出到总线**——数据随后由 test_random_data_read 取回。 */
-    addr = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page_index};
+    addr = (nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page_index};
     cmd  = test_cmd_build(&addr, 0U, 0U, config);
 
     completion = test_submit_wait(cmd);
@@ -1064,12 +1064,12 @@ void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_in
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
-void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config)
+void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config)
 {
-    nand_addr_t         addr;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             is_multi;
+    nand_addr_s     addr;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         is_multi;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
@@ -1090,7 +1090,7 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
         ASSERT(test_plane_count(plane_bitmap) == 1U);
     }
 
-    addr = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page_index};
+    addr = (nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page_index};
 
     /* 整段掩码 ⇒ 单条命令由 CW 链自动遍历掩码内所有 CW（nand_dispatch.c 的 fetch 推进：
      * 每完成一个取数 op 就推进到下一个置位）。op 8/41 都在 fc_is_page_read 里 ⇒ FC 跑
@@ -1115,10 +1115,10 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
  * 从 CQ 的 param.bytes 取回。cw 由 addr 携带（test_cmd_build 对本 op 放行 addr->cw）。 */
 void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, uint8_t cw, uint8_t out[4])
 {
-    const fc_cmd_conf_t config = (fc_cmd_conf_t){.operation = (DWORD)OP_READ_META};
-    nand_addr_t         addr;
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
+    const fc_cmd_cfg_s config = (fc_cmd_cfg_s){.operation = (DWORD)OP_READ_META};
+    nand_addr_s        addr;
+    fc_cmd_s          *cmd;
+    fc_cmd_status_s    completion;
 
     ASSERT(out != NULL);
     ASSERT(plane < PLANE_NUM);
@@ -1128,7 +1128,7 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
 
     /* 无 desc 链：cw_bitmap = 0 走 ftl_cmd_needs_desc_chain 短路（has_data = 0），
      * desc_id 保持 INVALID；cw 由 pba 携带 → FC 转成列地址。 */
-    addr = (nand_addr_t){.block = block_index, .plane = plane, .page = (uint8_t)page_index, .cw = cw};
+    addr = (nand_addr_s){.block = block_index, .plane = plane, .page = (uint8_t)page_index, .cw = cw};
     cmd  = test_cmd_build(&addr, 0U, 0U, &config);
 
     completion = test_submit_wait(cmd);
@@ -1145,10 +1145,10 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
 /* 块锁族（v49）：op 21/22/23 与 op 25 的 op 表 has_data 全为 0 —— 不搬 host 数据、无 desc 链。
  * 行地址取自 cmd->paa（FC 的块锁族分支），故 block/plane 必须给对，否则命令静默打到 block 0。 */
 
-void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config)
+void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
 
     ASSERT(config != NULL);
     ASSERT((config->operation == (DWORD)OP_BLOCK_UNLOCK_LOW) || (config->operation == (DWORD)OP_BLOCK_UNLOCK_HIGH) || (config->operation == (DWORD)OP_BLOCK_LOCK));
@@ -1156,7 +1156,7 @@ void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* cw_bitmap = 0 → ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。 */
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = plane}, 0U, 0U, config);
+    cmd = test_cmd_build(&(nand_addr_s){.block = block_index, .plane = plane}, 0U, 0U, config);
 
     completion = test_submit_wait(cmd);
 
@@ -1167,18 +1167,18 @@ void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
-uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config)
+uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    uint8_t             raw;
+    fc_cmd_s       *cmd;
+    fc_cmd_status_s completion;
+    uint8_t         raw;
 
     ASSERT(config != NULL);
     ASSERT(config->operation == (DWORD)OP_BLOCK_LOCK_STATUS);
     ASSERT(plane < PLANE_NUM);
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = plane}, 0U, 0U, config);
+    cmd = test_cmd_build(&(nand_addr_s){.block = block_index, .plane = plane}, 0U, 0U, config);
 
     completion = test_submit_wait(cmd);
 
@@ -1229,14 +1229,14 @@ uint8_t test_check_paa(const uint8_t *slot, DWORD paa)
     return 1U;
 }
 
-void test_fill_user_paa(fc_command_t *cmd)
+void test_fill_user_paa(fc_cmd_s *cmd)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
         uint8_t *slot = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
@@ -1246,19 +1246,19 @@ void test_fill_user_paa(fc_command_t *cmd)
         test_fill_paa(slot, desc->paa);
         (void)memcpy(user, slot, FC_BUFFER_USER_SIZE);
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 }
 
-void test_memset_read_buffer(fc_command_t *cmd)
+void test_memset_read_buffer(fc_cmd_s *cmd)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
         uint8_t *user = fc_buffer_id_to_real_buffer(desc->buffer_id);
@@ -1266,7 +1266,7 @@ void test_memset_read_buffer(fc_command_t *cmd)
 
         (void)memset(user, 0xCC, FC_BUFFER_USER_SIZE);
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 }
@@ -1287,7 +1287,7 @@ void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t pa
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             const uint8_t *slot     = &data[((uint32_t)plane * CW_NUM + (uint32_t)cw) * FC_BUFFER_USER_SIZE];
-            DWORD          expected = paa_from_addr(&(nand_addr_t){.block = block_index, .plane = plane, .page = page_index, .cw = cw});
+            DWORD          expected = paa_from_addr(&(nand_addr_s){.block = block_index, .plane = plane, .page = page_index, .cw = cw});
 
             if (test_check_paa(slot, expected) == 0U)
             {
@@ -1315,7 +1315,7 @@ void test_verify_page_pair_paa(const uint8_t *data, const uint16_t blocks[PLANE_
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             const uint8_t *slot     = &data[((uint32_t)plane * CW_NUM + (uint32_t)cw) * FC_BUFFER_USER_SIZE];
-            DWORD          expected = paa_from_addr(&(nand_addr_t){.block = blocks[plane], .plane = plane, .page = page_index, .cw = cw});
+            DWORD          expected = paa_from_addr(&(nand_addr_s){.block = blocks[plane], .plane = plane, .page = page_index, .cw = cw});
 
             if (test_check_paa(slot, expected) == 0U)
             {
@@ -1326,14 +1326,14 @@ void test_verify_page_pair_paa(const uint8_t *data, const uint16_t blocks[PLANE_
     }
 }
 
-void test_verify_erased(const fc_command_t *cmd)
+void test_verify_erased(const fc_cmd_s *cmd)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
         uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
@@ -1348,20 +1348,20 @@ void test_verify_erased(const fc_command_t *cmd)
             }
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 }
 
-uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd)
+uint8_t test_verify_cw_status_all_success(const fc_cmd_s *cmd)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
-    uint8_t            all_ok  = 1U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
+    uint8_t      all_ok  = 1U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
         if (fc_cw_status_is_success(desc->status) == false)
@@ -1373,7 +1373,7 @@ uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd)
             all_ok = 0U;
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 
@@ -1386,13 +1386,13 @@ uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd)
 
 /* 链遍历一律带 `CW_TOTAL_MAX` 上界：链是池内 id 串起来的，正常不超过 PLANE_NUM×CW_NUM，
  * 但**成环**（next_id 指回）时哨兵永远不出现——上界把挂死换成安静的截断。 */
-fc_descriptor_t *test_cw_desc(const fc_command_t *cmd, uint8_t idx)
+fc_desc_s *test_cw_desc(const fc_cmd_s *cmd, uint8_t idx)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
 
-    for (uint8_t i = 0U; (desc_id != FC_DESCRIPTOR_ID_INVALID) && (i < CW_TOTAL_MAX); i++)
+    for (uint8_t i = 0U; (desc_id != FC_DESC_ID_INVALID) && (i < CW_TOTAL_MAX); i++)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         if (desc == NULL)
         {
             return NULL;
@@ -1401,28 +1401,28 @@ fc_descriptor_t *test_cw_desc(const fc_command_t *cmd, uint8_t idx)
         {
             return desc;
         }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
     }
     return NULL;
 }
 
-uint8_t *test_cw_user(const fc_command_t *cmd, uint8_t idx)
+uint8_t *test_cw_user(const fc_cmd_s *cmd, uint8_t idx)
 {
-    fc_descriptor_t *desc = test_cw_desc(cmd, idx);
+    fc_desc_s *desc = test_cw_desc(cmd, idx);
 
     munit_assert_not_null(desc);
     return fc_buffer_id_to_real_buffer(desc->buffer_id);
 }
 
-uint8_t *test_cw_base(const fc_command_t *cmd, uint8_t idx)
+uint8_t *test_cw_base(const fc_cmd_s *cmd, uint8_t idx)
 {
-    fc_descriptor_t *desc = test_cw_desc(cmd, idx);
+    fc_desc_s *desc = test_cw_desc(cmd, idx);
 
     munit_assert_not_null(desc);
     return fc_buffer_get_base(desc->buffer_id);
 }
 
-uint8_t test_cw_count(const fc_command_t *cmd)
+uint8_t test_cw_count(const fc_cmd_s *cmd)
 {
     uint8_t count = 0U;
 
@@ -1433,14 +1433,14 @@ uint8_t test_cw_count(const fc_command_t *cmd)
     return count;
 }
 
-uint8_t test_collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_t *cw_out)
+uint8_t test_collect_chain(const fc_cmd_s *cmd, uint8_t *plane_out, uint8_t *cw_out)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            count   = 0U;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      count   = 0U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (count < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (count < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
         munit_assert_not_null(desc);
 
@@ -1453,16 +1453,16 @@ uint8_t test_collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_t 
             cw_out[count] = (uint8_t)paa_to_cw(desc->paa);
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         count++;
     }
 
     return count;
 }
 
-uint32_t test_cw_seed(const fc_command_t *cmd, uint8_t idx)
+uint32_t test_cw_seed(const fc_cmd_s *cmd, uint8_t idx)
 {
-    fc_descriptor_t *desc = test_cw_desc(cmd, idx);
+    fc_desc_s *desc = test_cw_desc(cmd, idx);
 
     munit_assert_not_null(desc);
     return fc_random_seed_from_meta(desc->meta);

@@ -14,28 +14,28 @@
 #include <string.h>
 
 /* 和 UART CLI 命令表一样，这是产品固定功能的只读注册描述。 */
-typedef struct
+typedef struct TIMER_STATIC_TASK_S
 {
-    const char           *name;
-    DWORD                 first_delay_ms;
-    DWORD                 period_ms;
-    timer_task_callback_t callback;
-    void                 *context;
-} timer_static_task_t;
+    const char              *name;
+    DWORD                    first_delay_ms;
+    DWORD                    period_ms;
+    timer_task_callback_fn_t callback;
+    void                    *context;
+} timer_static_task_s;
 
 /*
  * 调度过程会修改下次到期时间、运行次数和使能状态，因此这些变量不能放进 const
  * 注册表。将其独立出来后，静态注册和运行时状态的边界清晰，也避免意外改写配置。
  */
-typedef struct
+typedef struct TIMER_TASK_RUNTIME_S
 {
-    timer_task_callback_t callback;
-    void                 *context;
-    DWORD                 next_due_ms;
-    DWORD                 period_ms;
-    DWORD                 runs;
-    BYTE                  enabled;
-} timer_task_runtime_t;
+    timer_task_callback_fn_t callback;
+    void                    *context;
+    DWORD                    next_due_ms;
+    DWORD                    period_ms;
+    DWORD                    runs;
+    BYTE                     enabled;
+} timer_task_runtime_s;
 
 #define TIMER_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -49,13 +49,13 @@ typedef struct
  * 未列出的槽位保持 callback=NULL，仍可由 timer_scheduler_add() 用于确实需要
  * 在运行中创建和撤销的临时任务。核心安全任务不使用动态槽位。
  */
-static const timer_static_task_t g_timer_task_table[] = {
+static const timer_static_task_s g_timer_task_table[] = {
   /* 仅 IWDG 时不需要 WWDG 的毫秒级窗口检查；100 ms 足以监督 30 s 名义超时。 */
     {"watchdog", 100U, 100U, storage_watchdog_task, NULL},
 };
 
 /* 私有运行态：前 N 项对应静态表；其余槽位保留给 timer_scheduler_add()。 */
-static timer_task_runtime_t g_timer_tasks[TIMER_SCHEDULER_MAX_TASKS];
+static timer_task_runtime_s g_timer_tasks[TIMER_SCHEDULER_MAX_TASKS];
 static volatile DWORD       g_timer_tick_ms;
 
 void timer_scheduler_tick(void)
@@ -83,8 +83,8 @@ void timer_scheduler_init(void)
 
     for (index = 0U; index < TIMER_ARRAY_SIZE(g_timer_task_table); index++)
     {
-        const timer_static_task_t *config  = &g_timer_task_table[index];
-        timer_task_runtime_t      *runtime = &g_timer_tasks[index];
+        const timer_static_task_s *config  = &g_timer_task_table[index];
+        timer_task_runtime_s      *runtime = &g_timer_tasks[index];
 
         runtime->callback    = config->callback;
         runtime->context     = config->context;
@@ -94,7 +94,7 @@ void timer_scheduler_init(void)
     }
 }
 
-bool timer_scheduler_add(timer_task_callback_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id)
+BOOL timer_scheduler_add(timer_task_callback_fn_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id)
 {
     DWORD index;
     DWORD now_ms;
@@ -129,7 +129,7 @@ bool timer_scheduler_add(timer_task_callback_t callback, void *context, DWORD fi
     return false;
 }
 
-bool timer_scheduler_add_at(timer_task_callback_t callback, void *context, DWORD first_abs_ms, DWORD period_ms, DWORD *task_id)
+BOOL timer_scheduler_add_at(timer_task_callback_fn_t callback, void *context, DWORD first_abs_ms, DWORD period_ms, DWORD *task_id)
 {
     const DWORD now_ms         = timer_scheduler_now_ms();
     // 绝对时刻已过 ⇒ 立即到期；比较走有符号差，DWORD 回绕安全。
@@ -138,7 +138,7 @@ bool timer_scheduler_add_at(timer_task_callback_t callback, void *context, DWORD
     return timer_scheduler_add(callback, context, first_delay_ms, period_ms, task_id);
 }
 
-bool timer_scheduler_enable(DWORD task_id, bool enabled)
+BOOL timer_scheduler_enable(DWORD task_id, BOOL enabled)
 {
     if (task_id >= TIMER_SCHEDULER_MAX_TASKS || g_timer_tasks[task_id].callback == NULL)
     {
@@ -149,7 +149,7 @@ bool timer_scheduler_enable(DWORD task_id, bool enabled)
     return true;
 }
 
-bool timer_scheduler_set_period(DWORD task_id, DWORD period_ms)
+BOOL timer_scheduler_set_period(DWORD task_id, DWORD period_ms)
 {
     if ((task_id >= TIMER_SCHEDULER_MAX_TASKS) || (g_timer_tasks[task_id].callback == NULL))
     {
@@ -161,7 +161,7 @@ bool timer_scheduler_set_period(DWORD task_id, DWORD period_ms)
     return true;
 }
 
-bool timer_scheduler_remove(DWORD task_id)
+BOOL timer_scheduler_remove(DWORD task_id)
 {
     /* 静态表项是产品核心配置，不能被运行时 remove() 意外删除。 */
     if ((task_id < TIMER_ARRAY_SIZE(g_timer_task_table)) || (task_id >= TIMER_SCHEDULER_MAX_TASKS))
@@ -201,7 +201,7 @@ void timer_scheduler_poll(void)
 
     for (index = 0U; index < TIMER_SCHEDULER_MAX_TASKS; index++)
     {
-        timer_task_runtime_t *task = &g_timer_tasks[index];
+        timer_task_runtime_s *task = &g_timer_tasks[index];
         DWORD                 due_ms;
 
         if ((task->callback == NULL) || (task->enabled == 0U) || !timer_time_due(now_ms, task->next_due_ms))

@@ -16,7 +16,7 @@
  *   m=8,  t=8  → ecc_bytes=8（正好填满 8B）
  */
 
-typedef struct fc_bch_control fc_bch_control_t;
+typedef struct FC_BCH_CONTROL_S fc_bch_control_s;
 
 /**
  * @brief 初始化 BCH 引擎。
@@ -28,13 +28,13 @@ typedef struct fc_bch_control fc_bch_control_t;
  * @note 本工程静态存储只覆盖 m=13 / t=4；其他参数违反前置条件
  *       （debug 下 ASSERT，release 下返回 NULL）。
  */
-fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
+fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
 
 /**
  * @brief 释放 BCH 引擎资源。
  * @param bch BCH 控制句柄（可为 NULL）
  */
-void fc_bch_free(fc_bch_control_t *bch);
+void fc_bch_free(fc_bch_control_s *bch);
 
 /**
  * @brief BCH 编码：计算 data 的 ECC 校验码。
@@ -45,7 +45,7 @@ void fc_bch_free(fc_bch_control_t *bch);
  * @note 支持增量计算：把上一段输出的 ecc 缓冲区继续作为本段输入传入；首次调用前该缓冲区必须清零。
  * @note bch / data 为空违反前置条件，一律 ASSERT。
  */
-void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BYTE *ecc);
+void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, BYTE *ecc);
 
 /**
  * @brief BCH 解码：检测并定位 data+recv_ecc 中的错误。
@@ -64,6 +64,6 @@ void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BY
  * @note errloc[i] < 8*len 为数据区错误，errloc[i] >= 8*len 为 ECC 区错误；
  *       纠正方式 data[errloc/8] ^= (1 << (errloc%8))。
  */
-bool fc_bch_decode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr);
+BOOL fc_bch_decode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr);
 
 #endif /* FC_BCH_ENGINE_H */

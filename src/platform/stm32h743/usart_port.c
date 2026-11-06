@@ -40,7 +40,7 @@ BYTE usart_port_hw_init(DWORD baudrate)
     g_uart1_handle.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
     (void)HAL_UART_Init(&g_uart1_handle);
 
-    dma_ready = uart_tx_dma_init();
+    dma_ready = (uart_tx_dma_init() == FUNC_STATUS_SUCCESS) ? 1U : 0U;
     if (dma_ready != 0U)
     {
         g_dma_handle.XferCpltCallback  = usart_tx_dma_complete_cb;
@@ -187,7 +187,7 @@ void usart_port_irq_handler(void)
 
 /* ─────────────────────────── port 原语（供共享层调用）─────────────────────────── */
 
-bool usart_port_tx_dma_start(const BYTE *buffer, DWORD length)
+BOOL usart_port_tx_dma_start(const BYTE *buffer, DWORD length)
 {
     /* TX Ring is cacheable AXI SRAM; DMA must see bytes written by the CPU before it starts. */
     SCB_CleanDCache_by_Addr((DWORD *)(uintptr_t)buffer, (int32_t)((length + 31U) & ~31U));

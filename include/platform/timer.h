@@ -21,7 +21,7 @@
 
 /* 到期判据：有符号差 ⇒ DWORD 毫秒回绕安全（49.7 天一圈）。
  * 全仓的绝对时刻比较复用这一条，不在各模块另写 `now - due >= 0`。 */
-static inline bool timer_time_due(DWORD now_ms, DWORD due_ms)
+static inline BOOL timer_time_due(DWORD now_ms, DWORD due_ms)
 {
     return ((int32_t)(now_ms - due_ms) >= 0);
 }
@@ -29,14 +29,14 @@ static inline bool timer_time_due(DWORD now_ms, DWORD due_ms)
 /* ── 通用时间对象 ──
  * 业务结构只持有这些对象，不裸放 `start_ms / last_ms` 时间戳。 */
 
-typedef DWORD timer_time_t;
+typedef DWORD timer_ms_t;
 
 /* job 内等待/超时：绝对时刻 + armed（不再用 0 当“未计时”哨兵）。 */
-typedef struct
+typedef struct TIMER_DEADLINE_S
 {
-    timer_time_t at;
-    bool         armed;
-} timer_deadline_t;
+    timer_ms_t at;
+    BOOL       armed;
+} timer_deadline_s;
 
 /**
  * @brief 设置 deadline：at = now + timeout_ms，并置 armed
@@ -45,7 +45,7 @@ typedef struct
  * @param now        当前时刻（毫秒）
  * @param timeout_ms 相对超时（毫秒）
  */
-static inline void timer_deadline_arm(timer_deadline_t *d, timer_time_t now, DWORD timeout_ms)
+static inline void timer_deadline_arm(timer_deadline_s *d, timer_ms_t now, DWORD timeout_ms)
 {
     d->at    = now + timeout_ms;
     d->armed = true;
@@ -58,7 +58,7 @@ static inline void timer_deadline_arm(timer_deadline_t *d, timer_time_t now, DWO
  * @param now 当前时刻（毫秒）
  * @return true 已到期；false 未到期 / 未 armed
  */
-static inline bool timer_deadline_expired(const timer_deadline_t *d, timer_time_t now)
+static inline BOOL timer_deadline_expired(const timer_deadline_s *d, timer_ms_t now)
 {
     return d->armed && timer_time_due(now, d->at);
 }
@@ -68,7 +68,7 @@ static inline bool timer_deadline_expired(const timer_deadline_t *d, timer_time_
  *
  * @param d 时间对象
  */
-static inline void timer_deadline_clear(timer_deadline_t *d)
+static inline void timer_deadline_clear(timer_deadline_s *d)
 {
     d->armed = false;
 }
@@ -79,7 +79,7 @@ static inline void timer_deadline_clear(timer_deadline_t *d)
  * @param start_ms 起始时刻（0 = 未开始）
  * @return 已运行毫秒；未开始时 0
  */
-static inline DWORD timer_age_ms(const timer_time_t *start_ms)
+static inline DWORD timer_age_ms(const timer_ms_t *start_ms)
 {
     return (*start_ms == 0U) ? 0U : (platform_now_ms() - *start_ms);
 }
@@ -89,7 +89,7 @@ static inline DWORD timer_age_ms(const timer_time_t *start_ms)
  * task-table iteration, so a callback should not assume it changes while it runs.
  * Callbacks execute in main/task context and may not block for long periods.
  */
-typedef void (*timer_task_callback_t)(void *context, DWORD now_ms);
+typedef void (*timer_task_callback_fn_t)(void *context, DWORD now_ms);
 
 /*
  * 按给定时基启动硬件心跳（周期中断）并开始计时。
@@ -105,19 +105,19 @@ void timer_timx_int_init(WORD arr, WORD psc);
 void timer_scheduler_init(void);
 
 /* 可选运行时注册接口：first_delay_ms 相对当前时刻；period_ms == 0 ⇒ 一次性。 */
-bool timer_scheduler_add(timer_task_callback_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id);
+BOOL timer_scheduler_add(timer_task_callback_fn_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id);
 
 /* 绝对时刻注册：first_abs_ms 早于当前时刻时按「立即到期」处理。 */
-bool timer_scheduler_add_at(timer_task_callback_t callback, void *context, DWORD first_abs_ms, DWORD period_ms, DWORD *task_id);
+BOOL timer_scheduler_add_at(timer_task_callback_fn_t callback, void *context, DWORD first_abs_ms, DWORD period_ms, DWORD *task_id);
 
 /* Enable/disable a registered task without losing its timing configuration. */
-bool timer_scheduler_enable(DWORD task_id, bool enabled);
+BOOL timer_scheduler_enable(DWORD task_id, BOOL enabled);
 
 /* 修改周期（下一次到期后生效）；period_ms == 0 将该任务改为一次性。 */
-bool timer_scheduler_set_period(DWORD task_id, DWORD period_ms);
+BOOL timer_scheduler_set_period(DWORD task_id, DWORD period_ms);
 
 /* Remove a task and return its static slot to the table. */
-bool timer_scheduler_remove(DWORD task_id);
+BOOL timer_scheduler_remove(DWORD task_id);
 
 /* 当前已注册任务数（含静态表）。 */
 WORD timer_scheduler_task_count(void);

@@ -51,10 +51,10 @@
 #include <string.h>
 
 // 页级原语的两种常量配置（文件作用域初始化器，H47 允许；局部一律逐字段赋值）。
-static const ftl_page_cfg_t s_page_cfg_raw   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
-static const ftl_page_cfg_t s_page_cfg_bch   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+static const ftl_page_cfg_s s_page_cfg_raw   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
+static const ftl_page_cfg_s s_page_cfg_bch   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
 // 判空专用：ECC 开（空/非空要靠它）、CRC/加扰/META 比对全关（与页面内容无关）。
-static const ftl_page_cfg_t s_page_cfg_blank = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN};
+static const ftl_page_cfg_s s_page_cfg_blank = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN};
 
 // 短页（< PAGE_MAIN_SIZE，如 BBT header 540 B）的补齐缓冲。单线程 superloop；
 // 数据在 ftl_async_write_page_mirror 返回前已拷进 FC buffer，调用者无需持有。
@@ -122,14 +122,14 @@ static ftl_status_e ftl_cmd_validate_cw_bitmap(DWORD bitmap, BYTE plane_first, B
  * @param cw_bitmap flat 位图（bit = plane*CW_NUM + cw）
  * @return FTL_OK；FTL_ERROR 位图越段 / 建链失败
  */
-ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap)
+ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap)
 {
     // cmd 由调用者从 fc_command_alloc() 取且已判空；此处不重复断言。
     // 唯一合法失败是**池空**（desc/buffer）——那才是返回码。
 
     if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
-        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
+        cmd->desc_id = FC_DESC_ID_INVALID;
         return FTL_OK;
     }
 
@@ -185,7 +185,7 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_command_t *cmd, DWORD cw_bitmap)
  * 可让另一 plane 的 pba 保持未初始化（见 ftl_issue_subop 的 pba 局部数组）。
  * 位图规则与 ftl_cmd_configure_descriptors 共用 ftl_cmd_validate_cw_bitmap。
  */
-static ftl_status_e ftl_cmd_build_pair_chain(fc_command_t *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
+static ftl_status_e ftl_cmd_build_pair_chain(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
 {
     BYTE plane_first;
     BYTE plane_last;
@@ -244,7 +244,7 @@ static ftl_status_e ftl_cmd_build_pair_chain(fc_command_t *cmd, const DWORD pba[
  * @param cw_bitmap flat 位图
  * @return FTL_OK；FTL_AGAIN desc/buffer 池空；FTL_ERROR 位图/建链失败
  */
-ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
+ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
 {
     // cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
     // （见 ftl_issue_subop / wb_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT。
@@ -283,7 +283,7 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
 
     if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
-        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
+        cmd->desc_id = FC_DESC_ID_INVALID;
         return FTL_OK;
     }
 
@@ -302,16 +302,16 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_
  * @param max out 容量
  * @return 实际收集的块数
  */
-BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, BYTE max)
+BYTE ftl_cmd_block_ecc_list(const fc_cmd_s *cmd, ftl_cmd_block_ecc_s *out, BYTE max)
 {
-    BYTE               count = 0U;
-    fc_descriptor_id_t did   = (fc_descriptor_id_t)cmd->desc_id;
+    BYTE         count = 0U;
+    fc_desc_id_t did   = (fc_desc_id_t)cmd->desc_id;
 
     while (did < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        const fc_descriptor_t *d   = fc_descriptor_id_to_descriptor(did);
-        const DWORD            pba = paa_to_pba(cmd->route.ch, cmd->route.ce, d->paa);
-        const WORD             gb  = ftl_pba_gblock(pba);
+        const fc_desc_s *d   = fc_descriptor_id_to_descriptor(did);
+        const DWORD      pba = paa_to_pba(cmd->route.ch, cmd->route.ce, d->paa);
+        const WORD       gb  = ftl_pba_gblock(pba);
 
         BYTE i = 0U;
 
@@ -336,7 +336,7 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
         {
             out[i].ecc_max = d->ecc_bits;
         }
-        did = (fc_descriptor_id_t)d->next_id;
+        did = (fc_desc_id_t)d->next_id;
     }
     return count;
 }
@@ -353,17 +353,17 @@ BYTE ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, B
  * @param length 源长度
  * @return FTL_OK；FTL_ERROR desc 无缓冲
  */
-ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD length)
+ftl_status_e ftl_cmd_write_data(fc_cmd_s *cmd, const void *data, DWORD length)
 {
     const BYTE *src = (const BYTE *)data;
 
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        if (descriptor->buffer_id == FC_BUF_ID_INVALID)
         {
             return FTL_ERROR;
         }
@@ -391,7 +391,7 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
             (void)memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
         }
 
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
 
     return FTL_OK;
@@ -409,13 +409,13 @@ ftl_status_e ftl_cmd_write_data(fc_command_t *cmd, const void *data, DWORD lengt
  * @param pair_major true = pair 镜像；false = 单页镜像
  * @return FTL_OK；FTL_ERROR desc 无缓冲
  */
-ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWORD cw_bitmap, bool pair_major)
+ftl_status_e ftl_cmd_write_data_cw(fc_cmd_s *cmd, const BYTE *page_buf, DWORD cw_bitmap, BOOL pair_major)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
         // CW 号取 desc 自带的 cw_index；plane 必须从 desc 的 PAA 解出——
         // cw_bitmap 是 **flat 绝对编号**（bit = plane×CW_NUM + cw），
@@ -424,7 +424,7 @@ ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWOR
         const BYTE cw    = descriptor->cw_index;
         const BYTE plane = paa_to_plane(descriptor->paa);
 
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        if (descriptor->buffer_id == FC_BUF_ID_INVALID)
         {
             return FTL_ERROR;
         }
@@ -444,7 +444,7 @@ ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWOR
             (void)memset(buf, 0xFF, FC_BUFFER_USER_SIZE);
         }
 
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
 
     return FTL_OK;
@@ -460,19 +460,19 @@ ftl_status_e ftl_cmd_write_data_cw(fc_command_t *cmd, const BYTE *page_buf, DWOR
  * @param length 请求长度
  * @return FTL_OK；FTL_ERROR 缓冲无效 / 链过短
  */
-ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
+ftl_status_e ftl_cmd_read_data(fc_cmd_s *cmd, void *buffer, DWORD length)
 {
     BYTE *dst = (BYTE *)buffer;
 
     DWORD remaining = length;
 
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
 
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining > 0U))
     {
-        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        if (descriptor->buffer_id == FC_BUF_ID_INVALID)
         {
             return FTL_ERROR;
         }
@@ -487,7 +487,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
         dst += copy_len;
         remaining -= copy_len;
 
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
 
     // 链比请求短 ⇒ 缓冲尾部未初始化；调用者会把它当有效数据用，必须报错。
@@ -510,7 +510,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
  *
  * @note 时钟不可用（`delay_time_now_us` 失败）时退化为同值的轮数兜底，不静默取消超时。
  */
-ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us, bool *submitted)
+ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DWORD timeout_us, BOOL *submitted)
 {
     ASSERT(submitted != NULL);
 
@@ -526,7 +526,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     *submitted = false;
 
     DWORD      start_us = 0U;
-    const bool clock_ok = delay_time_now_us(&start_us);
+    const BOOL clock_ok = delay_time_now_us(&start_us);
     DWORD      elapsed  = 0U; /* 仅时钟不可用时作轮数兜底 */
 
     // ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
@@ -537,7 +537,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     // 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。
     ASSERT(ftl_op_is_in_dispatch() == false);
 
-    ftl_sync_waiter_t waiter;
+    ftl_sync_waiter_s waiter;
     waiter.cmd_id = ftl_cmd_id(cmd);
     waiter.done   = false;
 
@@ -564,7 +564,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
         // 真实微秒 deadline（max_wait 已在入口 clamp 到 WORD 范围）。
         // 时钟不可用（未初始化）时退化为轮数兜底，不静默取消超时。
-        bool expired;
+        BOOL expired;
 
         if (clock_ok)
         {
@@ -605,9 +605,9 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  * @return FTL_OK    完成；命令仍由调用者持有，读完数据后 release
  *         FTL_ERROR 失败；**未提交**时已在内部 release，**已提交但超时**时命令留给 drain
  */
-static ftl_status_e ftl_sync_wait_owned(fc_command_t *cmd, fc_command_status_t *status_out, DWORD timeout_us)
+static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DWORD timeout_us)
 {
-    bool submitted = false;
+    BOOL submitted = false;
 
     const ftl_status_e st = ftl_sync_submit_wait(cmd, status_out, timeout_us, &submitted);
 
@@ -643,9 +643,9 @@ static ftl_status_e ftl_sync_wait_owned(fc_command_t *cmd, fc_command_status_t *
  * @param cfg       页配置（crc / random / ldpc / 页 LBA）
  * @return 已填好配置的命令；命令池空返回 NULL
  */
-static fc_command_t *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_t *cfg)
+static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = fc_command_alloc();
+    fc_cmd_s *cmd = fc_command_alloc();
 
     if (cmd == NULL)
     {
@@ -674,9 +674,9 @@ static fc_command_t *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_t 
  * @param cfg       页配置（crc / random / ldpc / 页 LBA）
  * @return 已建链的命令；池空或建链失败返回 NULL
  */
-static fc_command_t *ftl_sync_page_prepare(DWORD pba, BYTE operation, const ftl_page_cfg_t *cfg)
+static fc_cmd_s *ftl_sync_page_prepare(DWORD pba, BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(operation, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(operation, cfg);
 
     if (cmd == NULL)
     {
@@ -703,9 +703,9 @@ static fc_command_t *ftl_sync_page_prepare(DWORD pba, BYTE operation, const ftl_
  * @param cfg    页配置
  * @return FTL_OK；FTL_ERROR 建链/提交/完成失败
  */
-ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -717,7 +717,7 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -743,15 +743,15 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
  * @param cfg    页配置
  * @return FTL_OK；FTL_ERROR 建链/提交/完成/拷出失败
  */
-ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -793,15 +793,15 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
  */
 ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_raw;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_raw;
 
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -838,18 +838,18 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
  * @param blank 输出：全部 CW 都是擦除页
  * @return FTL_OK；FTL_ERROR 建链/提交失败
  */
-ftl_status_e ftl_page_blank_check(DWORD pba, bool *blank)
+ftl_status_e ftl_page_blank_check(DWORD pba, BOOL *blank)
 {
     ASSERT(blank != NULL);
 
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &s_page_cfg_blank);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &s_page_cfg_blank);
 
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
 
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
@@ -869,9 +869,9 @@ ftl_status_e ftl_page_blank_check(DWORD pba, bool *blank)
  * @param pba 目标页 PBA
  * @return true = 确实全 EMPTY；false = 读失败 / 非空
  */
-bool ftl_page_is_blank(DWORD pba)
+BOOL ftl_page_is_blank(DWORD pba)
 {
-    bool blank = false;
+    BOOL blank = false;
 
     // 读命令没走通 ⇒ 判"非空"（保守方向）：命令没走通时不能断言"没写过"。
     return (ftl_page_blank_check(pba, &blank) == FTL_OK) && blank;
@@ -885,15 +885,15 @@ bool ftl_page_is_blank(DWORD pba)
  */
 ftl_status_e ftl_sync_erase_block(DWORD pba)
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
 
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 20000U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -918,15 +918,15 @@ ftl_status_e ftl_sync_erase_block(DWORD pba)
  */
 ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
 
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK_MULTI_PLANE, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK_MULTI_PLANE, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 20000U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -953,14 +953,14 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
  */
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
 
     // 列 + 4 须落在页内：唯一调用者 bbt.c 传 PAGE_MAIN_SIZE（+4 ≤ PAGE_SIZE）⇒ 不重复校验。
 
     // OP_READ_COLUMN 的 has_data = 0 ⇒ pba_to_cmd 不建链、
     // 不看位图（desc_id 置 INVALID）。地址仍须落进 cmd->paa —— 但**只提供行地址**，
     // cw 位被 NAND 侧 paa_to_nand_row 丢掉；列地址由下面的 param 字节 0/1 给。
-    fc_command_t *cmd = ftl_sync_page_prepare(pba, OP_READ_COLUMN, cfg);
+    fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_READ_COLUMN, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -973,7 +973,7 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
     cmd->param.parameter2 = 0U;
     cmd->param.parameter3 = 0U;
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -1008,11 +1008,11 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
  * @param cfg     页配置
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 建链/搬数据失败
  */
-ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
 {
     ASSERT(pba_is_valid(pba));
 
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -1067,16 +1067,16 @@ ftl_status_e ftl_async_write_page_mirror(fc_command_t **out_cmd, DWORD pba, cons
  * @param cfg    页配置
  * @return FTL_OK；FTL_ERROR 任一步失败
  */
-ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd;
+    fc_cmd_s *cmd;
 
     if (ftl_async_write_page_mirror(&cmd, pba, data, length, cfg) != FTL_OK)
     {
         return FTL_ERROR; /* 同步版把背压与硬失败都压成 FTL_ERROR */
     }
 
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
@@ -1111,9 +1111,9 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
  * @param cfg     页配置
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址/建链失败
  */
-ftl_status_e ftl_async_write_page(fc_command_t **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -1147,9 +1147,9 @@ ftl_status_e ftl_async_write_page(fc_command_t **out_cmd, DWORD pba, const void 
  * @param cfg       页配置
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址/建链失败
  */
-ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -1191,9 +1191,9 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
  * @param cfg       页配置
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址/建链失败
  */
-ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(operation, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(operation, cfg);
 
     if (cmd == NULL)
     {
@@ -1201,7 +1201,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
     }
 
     const BYTE nplanes  = ftl_cw_bitmap_plane_count(cw_bitmap);
-    const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
+    const BOOL cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
 
     // cache program 的 opcode 按两 plane 定尺；单 plane 会让 NAND 侧多 plane handler
     // 无条件遍历 PLANE_NUM 行地址、凭空造出回退地址（见 ftl_cmd_validate_cw_bitmap 的
@@ -1232,7 +1232,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
         }
         else
         {
-            const bool same_die = (pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba));
+            const BOOL same_die = (pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba));
 
             // 一条命令只能落在一个 die；跨实例 PBA 会被路由到其中一个 die，另一个
             // plane 的地址属于别的实例 ⇒ release 下也拒绝（RISK-IF-18）。
@@ -1274,11 +1274,11 @@ ftl_status_e ftl_async_write_pair_cmd(fc_command_t **out_cmd, const DWORD pba[PL
  * @param pba     目标块 PBA
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址非法
  */
-ftl_status_e ftl_async_erase_block(fc_command_t **out_cmd, DWORD pba)
+ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
 
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -1303,11 +1303,11 @@ ftl_status_e ftl_async_erase_block(fc_command_t **out_cmd, DWORD pba)
  * @param pba     目标块 PBA
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址非法
  */
-ftl_status_e ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, DWORD pba)
+ftl_status_e ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const ftl_page_cfg_t *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
 
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -1333,9 +1333,9 @@ ftl_status_e ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, DWORD pba
  * @param cfg     页配置
  * @return FTL_OK；FTL_AGAIN 池空；FTL_ERROR 地址/建链失败
  */
-ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_page_cfg_t *cfg)
+ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -1364,9 +1364,9 @@ ftl_status_e ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_pa
  * @param mode         写入值
  * @return FTL_OK；FTL_AGAIN 池空
  */
-ftl_status_e ftl_async_set_features(fc_command_t **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
+ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {
-    fc_command_t *cmd = fc_command_alloc();
+    fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */

@@ -25,7 +25,7 @@
  * @param depth   容量（非 0）
  * @note 空指针 / depth=0 由 ASSERT 拦截。
  */
-void fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
+void fc_submission_queue_init(fc_sub_queue_s *queue, fc_cmd_id_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -44,7 +44,7 @@ void fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *sto
  * @param depth   容量（非 0）
  * @note 空指针 / depth=0 由 ASSERT 拦截。
  */
-void fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
+void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -62,10 +62,10 @@ void fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t 
  * 入队 ID 全由 FC 自铸，传入 INVALID 哨兵即调用者 bug；只有队列满是预期结果。
  *
  * @param queue      提交队列
- * @param command_id 命令 ID（≠ FC_COMMAND_ID_INVALID）
+ * @param command_id 命令 ID（≠ FC_CMD_ID_INVALID）
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_FULL
  */
-fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
+fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t command_id)
 {
     if (queue->count == queue->depth)
     {
@@ -83,7 +83,7 @@ fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
  * @param command_id 输出：命令 ID
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_EMPTY
  */
-fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
+fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *command_id)
 {
     ASSERT(command_id != NULL);
     if (queue->count == 0U)
@@ -102,7 +102,7 @@ fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
  * @param completion 完成项（按值复制）
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_FULL
  */
-fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
+fc_status_e fc_completion_queue_push(fc_comp_queue_s *queue, const fc_cmd_status_s *completion)
 {
     ASSERT(completion != NULL);
     if (queue->count == queue->depth)
@@ -121,7 +121,7 @@ fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
  * @param completion 输出：完成项
  * @return FC_STATUS_OK / FC_STATUS_QUEUE_EMPTY
  */
-fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
+fc_status_e fc_completion_queue_pop(fc_comp_queue_s *queue, fc_cmd_status_s *completion)
 {
     ASSERT(completion != NULL);
     if (queue->count == 0U)
@@ -138,14 +138,14 @@ fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
  *
  * @param queue  提交队列
  * @param offset 相对队首的偏移
- * @return 命令 ID；offset 越界返回 FC_COMMAND_ID_INVALID
+ * @return 命令 ID；offset 越界返回 FC_CMD_ID_INVALID
  */
-fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset)
+fc_cmd_id_t fc_submission_queue_peek(const fc_sub_queue_s *queue, WORD offset)
 {
     // 值域校验保留返回码：offset 越界返回 INVALID 哨兵（调用方按哨兵判链尾）
     if (offset >= queue->count)
     {
-        return FC_COMMAND_ID_INVALID;
+        return FC_CMD_ID_INVALID;
     }
     WORD index = ((queue->head + offset) % queue->depth);
     return queue->entries[index];

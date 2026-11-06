@@ -96,7 +96,7 @@ static DWORD sys_port_per_ck_hz(void)
  * ADC/FDCAN/SAI/SDMMC/SPI，对其余外设（含这三个）一律返回 0。故这里读各自的
  * mux 位、再用 HAL 的 PLL getter 换算 —— 只做 mux 译码，不重算 PLL 参数。
  */
-void sys_port_clock_tree_get(sys_clock_tree_t *out)
+void sys_port_clock_tree_get(sys_clock_tree_s *out)
 {
     PLL1_ClocksTypeDef pll1;
     PLL2_ClocksTypeDef pll2;
@@ -226,7 +226,7 @@ void sys_port_hal_init(void)
  *                          SDRAM SDCLK=200/2=100 MHz）
  */
 
-BYTE sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
+func_status_e sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
 {
     RCC_OscInitTypeDef       oscillator;
     RCC_ClkInitTypeDef       clocks;

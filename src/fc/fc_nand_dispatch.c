@@ -1,7 +1,7 @@
 /*
  * fc_nand_dispatch.c — NAND 命令分发器
  *
- * 职责：接收 FC 侧预解析的多命令请求（fc_nand_dispatch_request_t），
+ * 职责：接收 FC 侧预解析的多命令请求（fc_nand_dispatch_req_s），
  *       送入目标 LUN 的待处理 FIFO，由 poll 驱动 NAND 引擎执行：
  *         FC 预解析 → submit/submit_chain 入队 → poll 出队 + 执行 + 回 completion
  *
@@ -69,9 +69,9 @@ static inline BYTE fc_nand_dispatch_cw_first_or_zero(DWORD cw_bitmap)
 }
 
 /* ── dispatch task：一次预解析后的命令实例 ──
- * 由 fc_nand_dispatch_task_load() 从 fc_nand_dispatch_request_t 填充，
+ * 由 fc_nand_dispatch_task_load() 从 fc_nand_dispatch_req_s 填充，
  * poll 依此驱动 fc_nand_start/step。 */
-typedef struct
+typedef struct FC_NAND_DISPATCH_TASK_S
 {
     WORD  command_id;
     BYTE  operation;
@@ -117,7 +117,7 @@ typedef struct
      *       fc_nand_dispatch.c 里整块赋值；CW 链续读时由 fc_nand_dispatch_task_cw_chain()
      *       覆写（改用 OP_RANDOM_DATA_READ + CW 偏移列地址）。
      * 消费：fc_nand_start() —— 拷入 transaction->request 后交给引擎。 */
-    nand_command_request_t request;
+    nand_cmd_req_s request;
 
     /* 引擎侧事务状态（UOP 游标 + 三指针 + 引擎完成项）。
      * 生产：fc_nand_dispatch_task_load() 一次性绑定 engine 三指针（地址随事务固定，只绑一次）；
@@ -126,17 +126,17 @@ typedef struct
      * 消费：fc_nand_step() 推进；engine.active 判"start 内同步完成"；
      *       transaction.completion.nand_status 逐处抄进 ctx->nand_completion。
      * 这是 ISSUE 发完即返回后、tR/tPROG/tBERS 期间"记住发到哪了"的唯一载体。 */
-    fc_nand_transaction_t transaction;
+    fc_nand_txn_s transaction;
 
     /* 调度层完成项（对 FC 上报的最终结果）。
      * 生产：fc_nand_dispatch_task_load() 初始化；fc_nand_dispatch_task_complete() 写
      *       execution_status/nand_status 后按 operation 分派 completion handler 填 CW 位。
      * 消费：fc_nand_dispatch_lun_step() 在每条命令收尾时 *completion = task->completion
      *       并出队（每槽 = 一条命令 = 一份 completion）。
-     * 注意：与 transaction.completion（引擎层 nand_command_completion_t）是两个不同对象，
+     * 注意：与 transaction.completion（引擎层 nand_cmd_comp_s）是两个不同对象，
      *       仅名字撞车——本字段才是给上层的。 */
-    fc_nand_dispatch_completion_t completion;
-} fc_nand_dispatch_task_t;
+    fc_nand_dispatch_comp_s completion;
+} fc_nand_dispatch_task_s;
 
 /*
  * LUN 相位枚举 (Phase V multi-LUN ISSUE/WAIT/FETCH phase machine)
@@ -182,30 +182,30 @@ typedef struct
  *   但没有"命令已离开队列、尚未完成"的中间态了——命令从入队到完成始终留在
  *   本结构里，不存在"通道队列空 + count>0"的悬空窗口。
  */
-typedef struct
+typedef struct FC_NAND_DISPATCH_LUN_QUEUE_S
 {
-    fc_nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
+    fc_nand_dispatch_task_s tasks[NAND_DISPATCH_CHAIN_DEPTH];
     BYTE                    head;          /* 出队游标（当前执行/待执行槽） */
     BYTE                    count;         /* 占用槽数 */
     BYTE                    phase;         /* 当前执行槽的 LUN_PHASE_* */
     DWORD                   wait_start_us; /* Phase V: ISSUE 完成时 SysTick µs 时间戳 */
-} fc_nand_dispatch_lun_queue_t;
+} fc_nand_dispatch_lun_queue_s;
 
 /* ======================================================================
  * 函数指针表类型定义
  * ====================================================================== */
 
-/* 异步 request 构建 handler：用 task 的预解析数据组装 nand_command_request_t。
+/* 异步 request 构建 handler：用 task 的预解析数据组装 nand_cmd_req_s。
  * 无返回码——task 的字段在 fc_nand_dispatch_task_load() 时已全部就绪且不变量已断言，
  * 构建不存在失败路径；调用点因此可以无条件接续 fc_nand_start。 */
-typedef void (*fc_nand_dispatch_req_handler_t)(fc_nand_dispatch_task_t *task);
+typedef void (*fc_nand_dispatch_req_handler_fn_t)(fc_nand_dispatch_task_s *task);
 
 /* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_cw。 */
-typedef void (*fc_nand_dispatch_completion_handler_t)(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion);
+typedef void (*fc_nand_dispatch_completion_handler_fn_t)(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion);
 
 /* OP_COUNT 项，OP_* 直接作为下标。 */
-extern const fc_nand_dispatch_req_handler_t        g_fc_nand_dispatch_req_table[OP_COUNT];
-extern const fc_nand_dispatch_completion_handler_t g_fc_nand_dispatch_completion_table[OP_COUNT];
+extern const fc_nand_dispatch_req_handler_fn_t        g_fc_nand_dispatch_req_table[OP_COUNT];
+extern const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_table[OP_COUNT];
 
 /* ======================================================================
  * 全局状态
@@ -213,7 +213,7 @@ extern const fc_nand_dispatch_completion_handler_t g_fc_nand_dispatch_completion
 
 /* 每 LUN 待处理 FIFO：submit 按 room 追加，poll 逐条排空。
  * 每槽 = 一条命令；链 = 连续槽（由 submit_chain 原子批量追加保证）。 */
-static fc_nand_dispatch_lun_queue_t g_fc_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM];
+static fc_nand_dispatch_lun_queue_s g_fc_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM];
 /* 异步路径放行闩锁（FC 自持）：
  * 0 = 初始化/同步命令阶段；1 = 已移交异步 dispatch。
  * 消费者只有 FC 侧：fc_nand_dispatch_enqueue()（submit/submit_chain 共用漏斗）
@@ -246,7 +246,7 @@ BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] NAND_
  * @param completion 目标
  * @param command_id FC 关联键
  */
-static void fc_nand_dispatch_completion_init(fc_nand_dispatch_completion_t *completion, WORD command_id)
+static void fc_nand_dispatch_completion_init(fc_nand_dispatch_comp_s *completion, WORD command_id)
 {
     BYTE i;
 
@@ -266,7 +266,7 @@ static void fc_nand_dispatch_completion_init(fc_nand_dispatch_completion_t *comp
  * @param result         执行结果
  * @param nand_completion NAND 完成
  */
-static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion)
+static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
     task->completion.execution_status = result;
     task->completion.nand_status      = nand_completion->nand_status;
@@ -283,7 +283,7 @@ static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_t *task, BYTE r
  * @param task    目标 slot
  * @param request 预解析请求
  */
-static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_t *task, const fc_nand_dispatch_request_t *request)
+static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_nand_dispatch_req_s *request)
 {
     BYTE n;
     BYTE plane;
@@ -435,9 +435,9 @@ BYTE fc_nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun)
  * @param count    批大小
  * @return OK / INVALID_ARGUMENT 未放行 / NOT_READY 深度不足
  */
-static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_request_t *requests, BYTE count)
+static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_req_s *requests, BYTE count)
 {
-    fc_nand_dispatch_lun_queue_t *queue;
+    fc_nand_dispatch_lun_queue_s *queue;
     BYTE                          i;
 
     /* 异步路径放行闩锁：单命令与整链两个入口共用同一道门，结构上不会再分叉。
@@ -486,7 +486,7 @@ static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_request_t *
  * @param request 预解析请求
  * @return OK / INVALID_ARGUMENT / NOT_READY
  */
-nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_request_t *request)
+nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request)
 {
     return fc_nand_dispatch_enqueue(request, 1U);
 }
@@ -498,7 +498,7 @@ nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_request_t *request)
  * @param count    链长
  * @return OK / INVALID_ARGUMENT / NOT_READY
  */
-nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_request_t *requests, BYTE count)
+nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count)
 {
     return fc_nand_dispatch_enqueue(requests, count);
 }
@@ -526,40 +526,40 @@ nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_request_t *re
  * ====================================================================== */
 
 /* ── 单 LUN 单步推进结果 ── */
-typedef enum
+typedef enum FC_NAND_DISPATCH_LUN_OUTCOME_E
 {
     NAND_DISPATCH_LUN_WAIT = 0, /* 本轮无进展，调用方看下一 LUN */
     NAND_DISPATCH_LUN_DONE      /* 队头命令完成，*completion 已回填并出队 */
-} fc_nand_dispatch_lun_outcome_t;
+} fc_nand_dispatch_lun_outcome_e;
 
-/* ── 命令发起结果：req_table 构建无失败路径（见 fc_nand_dispatch_req_handler_t），
+/* ── 命令发起结果：req_table 构建无失败路径（见 fc_nand_dispatch_req_handler_fn_t），
  *    故只剩"异步待下轮 step"与"同步完成/带错完成"两种。注意 fc_nand_start 返回的
  *    INVALID_ARGUMENT/TIMEOUT/OPERATION_FAILED 不是失败出口，而是"带错误状态的完成"，
  *    必须继续走完成处理链。 ── */
-typedef enum
+typedef enum FC_NAND_DISPATCH_START_OUTCOME_E
 {
     NAND_DISPATCH_START_ASYNC = 0, /* fc_nand_start 返回 NOT_READY，待下轮 step */
     NAND_DISPATCH_START_SYNC       /* 同步完成或返回错误码，*fc_result 有效 */
-} fc_nand_dispatch_start_outcome_t;
+} fc_nand_dispatch_start_outcome_e;
 
 /* ── CW 链式续读结果（无 ERROR 出口：链内 start 错误仍走完成路径） ── */
-typedef enum
+typedef enum FC_NAND_DISPATCH_CW_OUTCOME_E
 {
     NAND_DISPATCH_CW_ASYNC = 0, /* 下一 CW 异步启动，本轮到此为止 */
     NAND_DISPATCH_CW_DONE       /* 链式续读结束 */
-} fc_nand_dispatch_cw_outcome_t;
+} fc_nand_dispatch_cw_outcome_e;
 
 /* ── 单 LUN 上下文。不缓存 task 指针——出队后旧指针失效，
  *    一律由 &queue->tasks[queue->head] 现取（head 在单步内不变）。
- *    也不缓存 ch/ce/lun：底层 task 自带这三项（见 fc_nand_dispatch_task_t），
+ *    也不缓存 ch/ce/lun：底层 task 自带这三项（见 fc_nand_dispatch_task_s），
  *    需要时经 task 取即可，本层不重复。 ── */
-typedef struct
+typedef struct FC_NAND_DISPATCH_LUN_CONTEXT_S
 {
-    fc_nand_dispatch_completion_t *completion; /* 完成输出目标 */
-    fc_nand_dispatch_lun_queue_t  *queue;
-    nand_command_completion_t      nand_completion; /* 读前必写（active==0 分支依赖同轮先写） */
-    BYTE                           result;
-} fc_nand_dispatch_lun_ctx_t;
+    fc_nand_dispatch_comp_s      *completion; /* 完成输出目标 */
+    fc_nand_dispatch_lun_queue_s *queue;
+    nand_cmd_comp_s               nand_completion; /* 读前必写（active==0 分支依赖同轮先写） */
+    BYTE                          result;
+} fc_nand_dispatch_lun_ctx_s;
 
 /**
  * @brief 发起异步 ONFI 事务并置初始相位
@@ -569,11 +569,11 @@ typedef struct
  * @param fc_result 输出：fc_nand_start 返回码
  * @return ASYNC / SYNC
  */
-static fc_nand_dispatch_start_outcome_t fc_nand_dispatch_task_fc_start(fc_nand_dispatch_lun_queue_t *queue, fc_nand_dispatch_task_t *task, BYTE *fc_result)
+static fc_nand_dispatch_start_outcome_e fc_nand_dispatch_task_fc_start(fc_nand_dispatch_lun_queue_s *queue, fc_nand_dispatch_task_s *task, BYTE *fc_result)
 {
     const nand_result_e target_result = nand_select_target(task->ch, task->ce);
     BYTE                result        = (BYTE)target_result;
-    const bool          target_ok     = (target_result == NAND_RESULT_OK);
+    const BOOL          target_ok     = (target_result == NAND_RESULT_OK);
 
     // 共享总线板卡：任务开始前选定 (ch,ce) 通路；backend 已按 target 绑定。
     // 通路失败不是“引擎异步忙”：必须走 SYNC 完成路径，否则下一轮会把
@@ -607,7 +607,7 @@ static fc_nand_dispatch_start_outcome_t fc_nand_dispatch_task_fc_start(fc_nand_d
  * @param fc_result 输出：fc_nand_start 返回码
  * @return ASYNC / SYNC
  */
-static fc_nand_dispatch_start_outcome_t fc_nand_dispatch_task_start(fc_nand_dispatch_lun_queue_t *queue, fc_nand_dispatch_task_t *task, BYTE *fc_result)
+static fc_nand_dispatch_start_outcome_e fc_nand_dispatch_task_start(fc_nand_dispatch_lun_queue_s *queue, fc_nand_dispatch_task_s *task, BYTE *fc_result)
 {
     g_fc_nand_dispatch_req_table[task->operation](task);
 
@@ -622,9 +622,9 @@ static fc_nand_dispatch_start_outcome_t fc_nand_dispatch_task_start(fc_nand_disp
  * @param ctx 单 LUN 上下文
  * @return WAIT / DONE（nand_completion 有效）
  */
-static fc_nand_dispatch_lun_outcome_t fc_nand_dispatch_issued_advance(fc_nand_dispatch_lun_ctx_t *ctx)
+static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_issued_advance(fc_nand_dispatch_lun_ctx_s *ctx)
 {
-    fc_nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
+    fc_nand_dispatch_task_s *task   = &ctx->queue->tasks[ctx->queue->head];
     WORD                     min_us = g_nand_operation_map[task->operation].min_busy_us;
     BYTE                     pair_op;
     BYTE                     result;
@@ -669,9 +669,9 @@ static fc_nand_dispatch_lun_outcome_t fc_nand_dispatch_issued_advance(fc_nand_di
  * @param ctx 单 LUN 上下文（result / nand_completion 就地更新）
  * @return WAIT / DONE
  */
-static fc_nand_dispatch_lun_outcome_t fc_nand_dispatch_lun_drive(fc_nand_dispatch_lun_ctx_t *ctx)
+static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_drive(fc_nand_dispatch_lun_ctx_s *ctx)
 {
-    fc_nand_dispatch_task_t *task = &ctx->queue->tasks[ctx->queue->head];
+    fc_nand_dispatch_task_s *task = &ctx->queue->tasks[ctx->queue->head];
     BYTE                     result;
 
     if (task->started == 0U)
@@ -742,9 +742,9 @@ static BYTE fc_nand_dispatch_is_fetch_op(BYTE operation)
  * @param ctx 单 LUN 上下文
  * @return CW_ASYNC / CW_DONE
  */
-static fc_nand_dispatch_cw_outcome_t fc_nand_dispatch_task_cw_chain(fc_nand_dispatch_lun_ctx_t *ctx)
+static fc_nand_dispatch_cw_outcome_e fc_nand_dispatch_task_cw_chain(fc_nand_dispatch_lun_ctx_s *ctx)
 {
-    fc_nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
+    fc_nand_dispatch_task_s *task   = &ctx->queue->tasks[ctx->queue->head];
     BYTE                     result = ctx->result;
 
     for (;;)
@@ -822,7 +822,7 @@ static fc_nand_dispatch_cw_outcome_t fc_nand_dispatch_task_cw_chain(fc_nand_disp
  *
  * @param task 已完成任务
  */
-static void fc_nand_dispatch_scatter_page_buffer(const fc_nand_dispatch_task_t *task)
+static void fc_nand_dispatch_scatter_page_buffer(const fc_nand_dispatch_task_s *task)
 {
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
     BYTE  n;
@@ -854,10 +854,10 @@ static void fc_nand_dispatch_scatter_page_buffer(const fc_nand_dispatch_task_t *
  * @param ctx 单 LUN 上下文
  * @return WAIT / DONE
  */
-static fc_nand_dispatch_lun_outcome_t fc_nand_dispatch_lun_step(fc_nand_dispatch_lun_ctx_t *ctx)
+static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_step(fc_nand_dispatch_lun_ctx_s *ctx)
 {
-    fc_nand_dispatch_task_t       *task;
-    fc_nand_dispatch_lun_outcome_t out;
+    fc_nand_dispatch_task_s       *task;
+    fc_nand_dispatch_lun_outcome_e out;
 
     /* ── 相位 ISSUED 预检（只判一次）── */
     if (ctx->queue->phase == LUN_PHASE_ISSUED)
@@ -901,11 +901,11 @@ static fc_nand_dispatch_lun_outcome_t fc_nand_dispatch_lun_step(fc_nand_dispatch
  * @param ctx  透传给 sink 的上下文
  * @return 本轮完成条数
  */
-BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_t sink, void *ctx)
+BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx)
 {
-    fc_nand_dispatch_completion_t completion;
-    BYTE                          delivered     = 0U;
-    const BYTE                    start_channel = s_poll_next_channel;
+    fc_nand_dispatch_comp_s completion;
+    BYTE                    delivered     = 0U;
+    const BYTE              start_channel = s_poll_next_channel;
 
     /* 回调前置条件由调用者保证（fc.c 轮询路径恒传有效 sink） */
     ASSERT(sink != NULL);
@@ -919,9 +919,9 @@ BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_t sink, void *ctx)
         {
             for (BYTE lun_idx = 0U; lun_idx < LUN_NUM; lun_idx++)
             {
-                fc_nand_dispatch_lun_queue_t  *queue = &g_fc_nand_dispatch_queues[channel][ce][lun_idx];
-                fc_nand_dispatch_lun_ctx_t     lun_ctx;
-                fc_nand_dispatch_lun_outcome_t out;
+                fc_nand_dispatch_lun_queue_s  *queue = &g_fc_nand_dispatch_queues[channel][ce][lun_idx];
+                fc_nand_dispatch_lun_ctx_s     lun_ctx;
+                fc_nand_dispatch_lun_outcome_e out;
 
                 if (queue->count == 0U)
                 {
@@ -975,7 +975,7 @@ BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_t sink, void *ctx)
  * @param data        数据缓冲
  * @param data_length 数据长度
  */
-static void req_init(fc_nand_dispatch_task_t *task, WORD column, BYTE *data, WORD data_length)
+static void req_init(fc_nand_dispatch_task_s *task, WORD column, BYTE *data, WORD data_length)
 {
     memset(&task->request, 0, sizeof(task->request));
     task->request.column      = column;
@@ -992,7 +992,7 @@ static void req_init(fc_nand_dispatch_task_t *task, WORD column, BYTE *data, WOR
  * @param result         NAND_RESULT_* 执行结果
  * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_all_cws(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion)
+static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
@@ -1026,7 +1026,7 @@ static void completion_all_cws(fc_nand_dispatch_task_t *task, BYTE result, const
  * @param result         NAND_RESULT_* 执行结果
  * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_per_cw(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion)
+static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
 
@@ -1047,7 +1047,7 @@ static void completion_per_cw(fc_nand_dispatch_task_t *task, BYTE result, const 
  * @param result         NAND_RESULT_* 执行结果
  * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_single(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion)
+static void completion_single(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
     BYTE n;
@@ -1073,7 +1073,7 @@ static void completion_single(fc_nand_dispatch_task_t *task, BYTE result, const 
  * @param result         NAND_RESULT_* 执行结果
  * @param nand_completion 底层完成信息（未使用）
  */
-static void completion_load(fc_nand_dispatch_task_t *task, BYTE result, const nand_command_completion_t *nand_completion)
+static void completion_load(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
     BYTE status;
     BYTE i;
@@ -1102,7 +1102,7 @@ static void completion_load(fc_nand_dispatch_task_t *task, BYTE result, const na
  *
  * @param task 预解析完成的任务
  */
-static void req_program_page(fc_nand_dispatch_task_t *task)
+static void req_program_page(fc_nand_dispatch_task_s *task)
 {
     BYTE  n;
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -1128,7 +1128,7 @@ static void req_program_page(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_read_page(fc_nand_dispatch_task_t *task)
+static void req_read_page(fc_nand_dispatch_task_s *task)
 {
     BYTE *cw_buffer;
 
@@ -1157,7 +1157,7 @@ static void req_read_page(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_cache_read(fc_nand_dispatch_task_t *task)
+static void req_cache_read(fc_nand_dispatch_task_s *task)
 {
     BYTE  n;
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -1177,7 +1177,7 @@ static void req_cache_read(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_erase(fc_nand_dispatch_task_t *task)
+static void req_erase(fc_nand_dispatch_task_s *task)
 {
     req_init(task, 0U, NULL, 0U);
     task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
@@ -1191,7 +1191,7 @@ static void req_erase(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_feature(fc_nand_dispatch_task_t *task)
+static void req_feature(fc_nand_dispatch_task_s *task)
 {
     req_init(task, task->feature_addr, task->cw_buffers[(task->plane * CW_NUM)], 4U);
 }
@@ -1203,7 +1203,7 @@ static void req_feature(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_meta_read(fc_nand_dispatch_task_t *task)
+static void req_meta_read(fc_nand_dispatch_task_s *task)
 {
     const BYTE plane = task->plane;
 
@@ -1218,7 +1218,7 @@ static void req_meta_read(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_read_column(fc_nand_dispatch_task_t *task)
+static void req_read_column(fc_nand_dispatch_task_s *task)
 {
     const BYTE plane = task->plane;
 
@@ -1233,7 +1233,7 @@ static void req_read_column(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_onfi_signature(fc_nand_dispatch_task_t *task)
+static void req_onfi_signature(fc_nand_dispatch_task_s *task)
 {
     req_init(task, NAND_READ_ID_ADDR_ONFI_SIGNATURE, task->cw_buffers[(task->plane * CW_NUM)], 4U);
 }
@@ -1245,7 +1245,7 @@ static void req_onfi_signature(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_single(fc_nand_dispatch_task_t *task)
+static void req_single(fc_nand_dispatch_task_s *task)
 {
     WORD data_length = g_nand_operation_map[task->operation].data_length;
 
@@ -1260,7 +1260,7 @@ static void req_single(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_random_read(fc_nand_dispatch_task_t *task)
+static void req_random_read(fc_nand_dispatch_task_s *task)
 {
     BYTE n = fc_nand_dispatch_cw_first_or_zero(task->cw_bitmap);
 
@@ -1273,7 +1273,7 @@ static void req_random_read(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_no_data(fc_nand_dispatch_task_t *task)
+static void req_no_data(fc_nand_dispatch_task_s *task)
 {
     req_init(task, 0U, NULL, 0U);
     task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
@@ -1286,7 +1286,7 @@ static void req_no_data(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_multi_plane_read(fc_nand_dispatch_task_t *task)
+static void req_multi_plane_read(fc_nand_dispatch_task_s *task)
 {
     BYTE  plane;
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -1314,7 +1314,7 @@ static void req_multi_plane_read(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_multi_plane_program(fc_nand_dispatch_task_t *task)
+static void req_multi_plane_program(fc_nand_dispatch_task_s *task)
 {
     BYTE  n, plane;
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -1343,7 +1343,7 @@ static void req_multi_plane_program(fc_nand_dispatch_task_t *task)
  *
  * @param task 预解析完成的任务
  */
-static void req_multi_plane_erase(fc_nand_dispatch_task_t *task)
+static void req_multi_plane_erase(fc_nand_dispatch_task_s *task)
 {
     BYTE plane;
 
@@ -1373,7 +1373,7 @@ static void req_multi_plane_erase(fc_nand_dispatch_task_t *task)
  *                              单 plane 与 multi-plane 共用——索引空间统一后两者同构）
  *   下标 OP_* 不连续（含 Phase V 扩展 35..43），用设计初始化器定位。
  * -------------------------------------------------------------------- */
-const fc_nand_dispatch_completion_handler_t g_fc_nand_dispatch_completion_table[OP_COUNT] = {
+const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_table[OP_COUNT] = {
     [OP_RESET]                                  = completion_single,
     [OP_READ_ID]                                = completion_single,
     [OP_READ_PARAMETER_PAGE]                    = completion_single,
@@ -1444,7 +1444,7 @@ const fc_nand_dispatch_completion_handler_t g_fc_nand_dispatch_completion_table[
  *     - req_erase          ：擦除（无数据）
  *   下标 OP_* 不连续（含 Phase V 扩展 35..43），用设计初始化器定位。
  * -------------------------------------------------------------------- */
-const fc_nand_dispatch_req_handler_t g_fc_nand_dispatch_req_table[OP_COUNT] = {
+const fc_nand_dispatch_req_handler_fn_t g_fc_nand_dispatch_req_table[OP_COUNT] = {
     [OP_RESET]                                  = req_no_data,
     [OP_READ_ID]                                = req_single,
     [OP_READ_PARAMETER_PAGE]                    = req_single,

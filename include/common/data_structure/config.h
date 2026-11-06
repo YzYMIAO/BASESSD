@@ -6,6 +6,8 @@
  */
 #define VERSION "1.0.0"
 
+#include "ssd_types.h" /* BOOL */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -56,7 +58,7 @@
  *
  * 所有函数返回的状态码，用于指示操作结果。
  */
-typedef enum ds_status_e
+typedef enum DS_STATUS_E
 {
     DS_OK = 0, /**< 操作成功 */
 
@@ -69,6 +71,6 @@ typedef enum ds_status_e
     DS_ERR_OUT_OF_RANGE     = 7, /**< 索引超出范围 */
 
     DS_ITER_END = 8, /**< 迭代器已到达末尾 */
-} ds_Stat;
+} ds_status_e;
 
 #endif /* CONFIG_H */

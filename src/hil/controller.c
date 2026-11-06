@@ -7,8 +7,8 @@
 #include <string.h>
 
 /* 外部：request.c — 按实例边界切 run / 提交子请求 */
-ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
-QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit);
+ssd_status_e ssd_request_split(ssd_ctl_s *controller, ssd_req_s *request);
+QWORD        ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
 
 /**
  * @brief 按全局 LBA 路由到对应 FTL 实例（region 粒度）。
@@ -19,7 +19,7 @@ QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWO
  * @param lba        host 全局 LBA
  * @return 路由到的 FTL 实例
  */
-ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
 {
     /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
     ASSERT(controller != NULL);
@@ -47,7 +47,7 @@ ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
  * @param controller Controller 上下文（NULL 时安全返回）
  * @param next_state 目标状态
  */
-void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state)
+void ssd_controller_state_transition(ssd_ctl_s *controller, ssd_ctrl_state_e next_state)
 {
     ssd_ctrl_state_e prev_state;
 
@@ -105,7 +105,7 @@ void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_stat
  * @return SSD_STATUS_OK               成功
  *         SSD_STATUS_INVALID_ARGUMENT 入参非法 / 槽位缺失 / 拓扑不符
  */
-ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die)
+ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by_die)
 {
     if ((controller == NULL) || (ftl_by_die == NULL))
     {
@@ -132,7 +132,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
         const BYTE ch   = die_2_ch(die);
         const BYTE ce   = die_2_ce(die);
         const BYTE lun  = die_2_lun(die);
-        ftl_ctx_t *slot = ftl_by_die[die];
+        ftl_ctx_s *slot = ftl_by_die[die];
 
         if (slot == NULL)
         {
@@ -160,7 +160,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
  * @param request 请求（NULL 视为已完成）
  * @return 1 = 完成；0 = 未完成
  */
-BYTE ssd_controller_is_complete(const ssd_request_t *request)
+BYTE ssd_controller_is_complete(const ssd_req_s *request)
 {
     if (request == NULL)
     {
@@ -179,7 +179,7 @@ BYTE ssd_controller_is_complete(const ssd_request_t *request)
  * @param count      连续 LBA 数
  * @return true = 完整落在 [0, host_lba_max)；false = 非法/越界
  */
-bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, DWORD count)
+BOOL ssd_controller_lba_range_ok(const ssd_ctl_s *controller, QWORD lba, DWORD count)
 {
     /* 容量口径 = 运行时 host_lba_max（已扣实际坏块），不是编译期 FTL_LBA_MAX。
      * lba 与 count 的上界之和 < 2^33，`QWORD` 加法不会回绕；先判起点再判终点。 */
@@ -206,7 +206,7 @@ bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, 
  *         SSD_STATUS_BUSY             FLUSH/TRIM 单飞行冲突
  *         SSD_STATUS_NOT_SUPPORTED    未知 opcode
  */
-ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
+ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
 {
     ssd_status_e ret;
 
@@ -317,7 +317,7 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
             {
                 for (BYTE die = 0U; die < DIE_MAX; die++)
                 {
-                    ftl_ctx_t *fftl = controller->ftl[die];
+                    ftl_ctx_s *fftl = controller->ftl[die];
 
                     /* present die 由 ssd_controller_init 绑满，恒非空 */
                     ASSERT(fftl != NULL);
@@ -343,20 +343,20 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
  *
  * @param controller Controller 上下文
  */
-static void ssd_controller_flush_service(ssd_controller_t *controller)
+static void ssd_controller_flush_service(ssd_ctl_s *controller)
 {
     if (controller->flush_req == NULL)
     {
         return;
     }
 
-    bool all_done = true;
+    BOOL all_done = true;
 
     /* 先推进**全部** present die 再判完成：某一实例未完成时直接 return 会让后面的实例
      * 永远得不到推进（多实例下 FLUSH 卡死）。 */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        ftl_ctx_t *fftl = controller->ftl[die];
+        ftl_ctx_s *fftl = controller->ftl[die];
 
         ASSERT(fftl != NULL);
 
@@ -383,7 +383,7 @@ static void ssd_controller_flush_service(ssd_controller_t *controller)
  * @param controller Controller 上下文
  * @param status     回执状态
  */
-static void ssd_controller_trim_complete(ssd_controller_t *controller, ssd_status_e status)
+static void ssd_controller_trim_complete(ssd_ctl_s *controller, ssd_status_e status)
 {
     controller->trim_req->completion_status = status;
     controller->trim_req->complete_flag     = 1U;
@@ -396,7 +396,7 @@ static void ssd_controller_trim_complete(ssd_controller_t *controller, ssd_statu
  *
  * @param controller Controller 上下文
  */
-static void ssd_controller_trim_service(ssd_controller_t *controller)
+static void ssd_controller_trim_service(ssd_ctl_s *controller)
 {
     if (controller->trim_req == NULL)
     {
@@ -412,7 +412,7 @@ static void ssd_controller_trim_service(ssd_controller_t *controller)
     }
 
     const QWORD run_end = ssd_controller_run_end(controller, controller->trim_lba, end);
-    ftl_ctx_t  *tftl    = ssd_controller_route(controller, controller->trim_lba);
+    ftl_ctx_s  *tftl    = ssd_controller_route(controller, controller->trim_lba);
 
     /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
     ASSERT(tftl != NULL);
@@ -463,7 +463,7 @@ static void ssd_controller_trim_service(ssd_controller_t *controller)
  *
  * @param controller Controller 上下文
  */
-void ssd_controller_service(ssd_controller_t *controller)
+void ssd_controller_service(ssd_ctl_s *controller)
 {
     if (controller == NULL)
     {
@@ -481,7 +481,7 @@ void ssd_controller_service(ssd_controller_t *controller)
  *
  * @param controller Controller 上下文
  */
-void ssd_controller_cancel_flush(ssd_controller_t *controller)
+void ssd_controller_cancel_flush(ssd_ctl_s *controller)
 {
     if (controller == NULL)
     {
@@ -494,7 +494,7 @@ void ssd_controller_cancel_flush(ssd_controller_t *controller)
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        ftl_ctx_t *ftl = controller->ftl[die];
+        ftl_ctx_s *ftl = controller->ftl[die];
 
         ASSERT(ftl != NULL);
         ftl_flush_cancel(ftl);

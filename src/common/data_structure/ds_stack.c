@@ -12,7 +12,7 @@
  * 支持 O(1) 的入栈、出栈和查看栈顶操作。
  * 当栈满时会自动扩容。
  */
-struct ds_stack_s
+struct DS_STACK_S
 {
     size_t size;       /**< 当前栈中的元素个数 */
     size_t capacity;   /**< 当前栈容量 */
@@ -33,9 +33,9 @@ struct ds_stack_s
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_stack_new(ds_Stack **out)
+ds_status_e ds_stack_new(ds_stack_s **out)
 {
-    ds_StackConfig conf;
+    ds_stack_cfg_s conf;
 
     ds_stack_conf_init(&conf);
     return ds_stack_new_conf(&conf, out);
@@ -49,7 +49,7 @@ ds_Stat ds_stack_new(ds_Stack **out)
  *
  * @param[in,out] conf 需要初始化的配置结构体指针
  */
-void ds_stack_conf_init(ds_StackConfig *conf)
+void ds_stack_conf_init(ds_stack_cfg_s *conf)
 {
     conf->capacity   = DEFAULT_CAPACITY;
     conf->exp_factor = DEFAULT_EXPANSION_FACTOR;
@@ -70,7 +70,7 @@ void ds_stack_conf_init(ds_StackConfig *conf)
  * @return DS_OK 创建成功，DS_ERR_INVALID_RANGE 容量配置无效，
  *         DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
+ds_status_e ds_stack_new_conf(ds_stack_cfg_s *conf, ds_stack_s **out)
 {
     float ex;
 
@@ -90,7 +90,7 @@ ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
         return DS_ERR_INVALID_RANGE;
     }
 
-    ds_Stack *stack = conf->mem_calloc(1, sizeof(ds_Stack));
+    ds_stack_s *stack = conf->mem_calloc(1, sizeof(ds_stack_s));
 
     if (stack == NULL)
     {
@@ -131,7 +131,7 @@ ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
  * @warning 原代码中 memcpy 复制了 stack->capacity 个元素，
  *          但实际应复制 stack->size 个元素，存在潜在越界风险
  */
-ds_Stat expand_capacity(ds_Stack *stack)
+ds_status_e expand_capacity(ds_stack_s *stack)
 {
     if (stack->capacity == DS_MAX_ELEMENTS)
     {
@@ -171,7 +171,7 @@ ds_Stat expand_capacity(ds_Stack *stack)
  *
  * @param[in] stack 要销毁的栈指针
  */
-void ds_stack_destroy(ds_Stack *stack)
+void ds_stack_destroy(ds_stack_s *stack)
 {
     stack->mem_free(stack->buffer);
     stack->mem_free(stack);
@@ -189,7 +189,7 @@ void ds_stack_destroy(ds_Stack *stack)
  * @note 如果栈中的元素存储在栈上，不应调用此函数，
  *       应使用 ds_stack_destroy() 代替
  */
-void ds_stack_destroy_cb(ds_Stack *stack, void (*cb)(void *))
+void ds_stack_destroy_cb(ds_stack_s *stack, void (*cb)(void *))
 {
     for (size_t i = 0; i < stack->size; i++)
     {
@@ -210,11 +210,11 @@ void ds_stack_destroy_cb(ds_Stack *stack, void (*cb)(void *))
  * @return DS_OK 入栈成功，DS_ERR_ALLOC 扩容失败，
  *         DS_ERR_MAX_CAPACITY 已达最大容量
  */
-ds_Stat ds_stack_push(ds_Stack *stack, void *element)
+ds_status_e ds_stack_push(ds_stack_s *stack, void *element)
 {
     if (stack->size >= stack->capacity)
     {
-        ds_Stat status = expand_capacity(stack);
+        ds_status_e status = expand_capacity(stack);
 
         if (status != DS_OK)
         {
@@ -237,7 +237,7 @@ ds_Stat ds_stack_push(ds_Stack *stack, void *element)
  *
  * @return DS_OK 查看成功，DS_ERR_OUT_OF_RANGE 栈为空
  */
-ds_Stat ds_stack_peek(ds_Stack *stack, void **out)
+ds_status_e ds_stack_peek(ds_stack_s *stack, void **out)
 {
     if (stack->size == 0)
     {
@@ -260,7 +260,7 @@ ds_Stat ds_stack_peek(ds_Stack *stack, void **out)
  *
  * @return DS_OK 出栈成功，DS_ERR_OUT_OF_RANGE 栈为空
  */
-ds_Stat ds_stack_pop(ds_Stack *stack, void **out)
+ds_status_e ds_stack_pop(ds_stack_s *stack, void **out)
 {
     if (stack->size == 0)
     {
@@ -281,7 +281,7 @@ ds_Stat ds_stack_pop(ds_Stack *stack, void **out)
  *
  * @return 栈中元素的个数
  */
-size_t ds_stack_size(ds_Stack *stack)
+size_t ds_stack_size(ds_stack_s *stack)
 {
     return stack->size;
 }
@@ -294,7 +294,7 @@ size_t ds_stack_size(ds_Stack *stack)
  * @param[in,out] stack 目标栈
  * @param[in]     fn    对每个元素执行的函数
  */
-void ds_stack_map(ds_Stack *stack, void (*fn)(void *))
+void ds_stack_map(ds_stack_s *stack, void (*fn)(void *))
 {
     for (size_t i = 0; i < stack->size; i++)
     {
@@ -318,7 +318,7 @@ void ds_stack_map(ds_Stack *stack, void (*fn)(void *))
  * @warning 原代码中 memmove 的地址计算存在潜在错误，
  *          在边界情况下可能导致访问越界
  */
-ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
+ds_status_e ds_stack_filter_mut(ds_stack_s *stack, BOOL (*pred)(void *))
 {
     if (stack->size == 0)
     {
@@ -373,16 +373,16 @@ ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
  * @return DS_OK 过滤成功，DS_ERR_OUT_OF_RANGE 栈为空，
  *         DS_ERR_ALLOC 内存分配失败
  *
- * @note 函数参数类型 int(*pred)(void*) 与 bool(*pred)(void*) 不一致，建议统一
+ * @note 函数参数类型 int(*pred)(void*) 与 BOOL(*pred)(void*) 不一致，建议统一
  */
-ds_Stat ds_stack_filter(ds_Stack *stack, int (*pred)(void *), ds_Stack **out)
+ds_status_e ds_stack_filter(ds_stack_s *stack, int (*pred)(void *), ds_stack_s **out)
 {
     if (stack->size == 0)
     {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    ds_Stack *filtered = stack->mem_calloc(1, sizeof(ds_Stack));
+    ds_stack_s *filtered = stack->mem_calloc(1, sizeof(ds_stack_s));
 
     if (filtered == NULL)
     {

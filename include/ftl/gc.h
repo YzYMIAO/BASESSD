@@ -14,7 +14,7 @@
  *   ⑤ 擦除各 Plane Block → 归还到 Free Pool
  *
  * ⚠ ②~⑤ 的执行体**不在本文件**：搬移是一个异步 job，GC 与 WL 共用同一台引擎，
- *   见 `ftl/migrate.h` / `migrate.c`（mig_handle_t + mig_gc_begin / mig_wl_begin /
+ *   见 `ftl/migrate.h` / `migrate.c`（mig_handle_s + mig_gc_begin / mig_wl_begin /
  *   mig_handle + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
  *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
@@ -26,8 +26,8 @@
  *   掉电时最多遗留"孤悬"Block，下次 GC 回收
  */
 
-#include "allocator.h"   /* alc_t, super_block_t */
-#include "fc_command.h"  /* fc_command_t（gc_decode_cw_lba 的形参） */
+#include "allocator.h"   /* alc_s, super_block_s */
+#include "fc_command.h"  /* fc_cmd_s（gc_decode_cw_lba 的形参） */
 #include "ftl_config.h"  /* DWORD */
 #include "ftl_type.h"    /* DWORD */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
@@ -72,7 +72,7 @@
 /* ── 类型 ── */
 
 /* 逐 CW META 解码结果。 */
-typedef enum
+typedef enum GC_DECODE_E
 {
     GC_DECODE_OK = 0,
     GC_DECODE_EMPTY,
@@ -81,7 +81,7 @@ typedef enum
 
 /* GC 收益判据模式（只对空间 GC T1/T4 有意义；磨损均衡走独立 WL 路径）。
  * 具体阈值是 gc.c 的内部策略参数（IDLE 80% / EMERGENCY 1%）。 */
-typedef enum
+typedef enum GC_BENEFIT_MODE_E
 {
     GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写（原水位行为） */
     GC_BENEFIT_IDLE,      /* host 不写：只接受 valid 占比不高的 victim */
@@ -90,7 +90,7 @@ typedef enum
 
 /* 选块结果：把「没有候选」与「有候选但都不值得搬」分开，后者用于 no-gain 退避与
  * NO_SPACE 判定（`RISK-GC-13/14`）。 */
-typedef enum
+typedef enum GC_SELECT_E
 {
     GC_SELECT_OK = 0,         /* 已选中，out->victim 有效 */
     GC_SELECT_NO_CANDIDATE,   /* closed 列表里没有可用候选（空 / 全 open / 全哨兵） */
@@ -98,13 +98,13 @@ typedef enum
 } gc_select_e;
 
 /* 选块出参（即使 NOT_WORTHWHILE 也填 best_valid_pct，供日志归因）。 */
-typedef struct
+typedef struct GC_SELECT_OUT_S
 {
-    const super_block_t *victim;         /* GC_SELECT_OK 时有效 */
+    const super_block_s *victim;         /* GC_SELECT_OK 时有效 */
     WORD                 best_valid_pct; /* 域内最低有效率（0..100），无候选时为 0 */
     WORD                 scanned;        /* 参与评分的候选数 */
     WORD                 eligible;       /* 通过收益判据的候选数 */
-} gc_select_out_t;
+} gc_select_out_s;
 
 /* ── 接口函数 ── */
 
@@ -147,7 +147,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
  *         （无有效数据，调用者跳过）；GC_DECODE_CORRUPT = 写过的 CW 页基址不一致
  *         （META 损坏，调用者必须按不可迁移处理，**不得**擦 victim）。
  */
-gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out);
+gc_decode_e gc_decode_cw_lba(fc_cmd_s *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out);
 
 /**
  * @brief 从 closed_sb_list 选择一个 victim Super Block
@@ -188,7 +188,7 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
  * @param out    输出：victim 指针 + 观测计数（非 NULL）
  * @return GC_SELECT_OK / GC_SELECT_NO_CANDIDATE / GC_SELECT_NOT_WORTHWHILE
  */
-gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out);
+gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out);
 
 /**
  * @brief 检查是否需要触发 GC，并返回**触发起因位掩码**
@@ -215,6 +215,6 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
  * @param alloc  Allocator 上下文；NULL ⇒ 返回 0（UT 钉住的契约，不触发）
  * @return 触发起因位掩码（GC_TRIGGER_*），0=不需要触发
  */
-DWORD gc_should_trigger(const alc_t *alloc);
+DWORD gc_should_trigger(const alc_s *alloc);
 
 #endif /* FTL_GC_H */

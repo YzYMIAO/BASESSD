@@ -29,7 +29,7 @@ void fi_cache_fail_arm(DWORD page_lba)
     s_cache_fail_lba = page_lba;
 }
 
-bool fi_cache_fail_take(DWORD page_lba)
+BOOL fi_cache_fail_take(DWORD page_lba)
 {
     if (page_lba != s_cache_fail_lba)
     {
@@ -45,7 +45,7 @@ void fi_journal_fail_arm(DWORD pages)
     s_journal_fail_left = pages;
 }
 
-bool fi_journal_fail_take(void)
+BOOL fi_journal_fail_take(void)
 {
     if (s_journal_fail_left == 0U)
     {
@@ -56,7 +56,5 @@ bool fi_journal_fail_take(void)
     return true;
 }
 
-#else /* 产品固件：没有任何注入点；本 TU 允许为空（无 -pedantic 要求）。 */
-typedef int fault_inject_release_unused_t;
-
+#else  /* 产品固件：没有任何注入点；本 TU 允许为空（无 -pedantic 要求）。 */
 #endif /* FC_NAND_TEST_ENABLE */

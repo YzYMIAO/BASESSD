@@ -56,7 +56,7 @@ fc_status_e fc_init(void)
  *
  * @return 命令指针；NULL = 命令池空
  */
-fc_command_t *fc_command_alloc(void)
+fc_cmd_s *fc_command_alloc(void)
 {
     return fc_core_command_alloc(&g_fc_controller);
 }
@@ -74,14 +74,14 @@ fc_command_t *fc_command_alloc(void)
  * @param buffer_id 上层申请的 buffer（buf_own 默认路径传 INVALID）
  * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY desc/buffer 池空
  */
-fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
+fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id)
 {
-    BYTE             plane_first;
-    BYTE             plane_last;
-    fc_descriptor_t *descriptor;
-    fc_buffer_id_t   alloc_id;
-    fc_command_id_t  command_id = FC_COMMAND_ID_INVALID;
-    DWORD            plane_cw;
+    BYTE        plane_first;
+    BYTE        plane_last;
+    fc_desc_s  *descriptor;
+    fc_buf_id_t alloc_id;
+    fc_cmd_id_t command_id = FC_CMD_ID_INVALID;
+    DWORD       plane_cw;
 
     /* ── 校验段：不得触碰任何池 ──
      * 资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，是模仿硬件的预期失败。
@@ -96,13 +96,13 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
 
     if ((command->config.buf_own & FC_BUF_OWN_ALLOC_BY_UPPER) != 0U)
     {
-        ASSERT((buffer_id != FC_BUFFER_ID_INVALID) && (buffer_id < FC_BUFFER_POOL_DEPTH));
+        ASSERT((buffer_id != FC_BUF_ID_INVALID) && (buffer_id < FC_BUFFER_POOL_DEPTH));
         ASSERT(fc_buffer_state_get(&g_fc_controller, buffer_id) == FC_BUFFER_STATE_OCCUPIED);
-        ASSERT(g_fc_controller.buffer_owner[buffer_id] == FC_COMMAND_ID_INVALID);
+        ASSERT(g_fc_controller.buffer_owner[buffer_id] == FC_CMD_ID_INVALID);
     }
     else
     {
-        ASSERT(buffer_id == FC_BUFFER_ID_INVALID);
+        ASSERT(buffer_id == FC_BUF_ID_INVALID);
     }
     (void)command_id; /* release 下 ASSERT 裁空；所有者从 descriptor_owner 取 */
 
@@ -113,8 +113,8 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
         return FC_STATUS_RESOURCE_EMPTY;
     }
 
-    const fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)(descriptor - g_fc_controller.descriptor_pool);
-    const fc_command_id_t    owner         = g_fc_controller.descriptor_owner[descriptor_id];
+    const fc_desc_id_t descriptor_id = (fc_desc_id_t)(descriptor - g_fc_controller.descriptor_pool);
+    const fc_cmd_id_t  owner         = g_fc_controller.descriptor_owner[descriptor_id];
 
     // 先把除 buffer_id 外的字段全部填好，再挂链：desc 一进链就能被任何
     // 走链的读者正确解释（paa/config/meta 均已有效，next_id 已终止）。
@@ -129,7 +129,7 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
     descriptor->config          = command->config;
     descriptor->config.cw_count = 0U; /* 命令级每-plane 数量，desc 内无意义 */
     descriptor->cw_index        = cw;
-    descriptor->next_id         = FC_DESCRIPTOR_ID_INVALID;
+    descriptor->next_id         = FC_DESC_ID_INVALID;
     descriptor->meta            = (command->meta & ~PLANE_CW_MASK) | plane_cw;
 
     fc_command_chain_append(&g_fc_controller, command, descriptor); /* 出池即挂链 */
@@ -145,7 +145,7 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
     // FC 申请（默认 00/01）：buffer 池比 desc 池小，这里是最现实的失败点。失败**不回滚**：
     // desc 已在链上、buffer_id 保持 INVALID，调用方沿链释放时自然跳过 buffer、回收 desc。
     alloc_id = fc_core_buffer_alloc(&g_fc_controller);
-    if (alloc_id == FC_BUFFER_ID_INVALID)
+    if (alloc_id == FC_BUF_ID_INVALID)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
@@ -163,18 +163,18 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
  * @param row_paa 该 plane 的行地址
  * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY 池空
  */
-fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
+fc_status_e fc_command_configure_descriptor(fc_cmd_s *command, BYTE plane, BYTE cw, DWORD row_paa)
 {
-    return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
+    return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUF_ID_INVALID);
 }
 
 /**
  * @brief 释放链头一个 desc（含其 buffer），返回新链头
  *
  * @param head 当前链头
- * @return 新链头；FC_DESCRIPTOR_ID_INVALID = 链已空
+ * @return 新链头；FC_DESC_ID_INVALID = 链已空
  */
-fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head)
+fc_desc_id_t fc_descriptor_chain_release_head(fc_desc_id_t head)
 {
     fc_core_chain_release_head(&g_fc_controller, &head);
     return head;
@@ -186,9 +186,9 @@ fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head)
  * 建链中途失败的回滚入口。
  *
  * @param head 链头
- * @return FC_DESCRIPTOR_ID_INVALID
+ * @return FC_DESC_ID_INVALID
  */
-fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
+fc_desc_id_t fc_descriptor_chain_release_all(fc_desc_id_t head)
 {
     fc_core_chain_release_all(&g_fc_controller, &head);
     return head;
@@ -202,9 +202,9 @@ fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
  * @param command 命令（ALLOCATED）
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL
  */
-fc_status_e fc_submit(fc_command_t *command)
+fc_status_e fc_submit(fc_cmd_s *command)
 {
-    fc_command_id_t command_id = FC_COMMAND_ID_INVALID;
+    fc_cmd_id_t command_id = FC_CMD_ID_INVALID;
 
     /* ── 校验段：全是调用者自铸值 ⇒ ASSERT；唯一合法失败是队列满（资源）。 ── */
     ASSERT(command != NULL);
@@ -226,21 +226,21 @@ fc_status_e fc_submit(fc_command_t *command)
  * @param n    条数
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL；FC_STATUS_INVALID_ARGUMENT 链契约违反
  */
-fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
+fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
 {
     ASSERT(cmds != NULL);
     ASSERT(n > 0U);
 
     WORD  sq_need        = 0U;
     WORD  hsq_need       = 0U;
-    bool  has_chain      = false;
-    bool  mixed_queue    = false;
+    BOOL  has_chain      = false;
+    BOOL  mixed_queue    = false;
     DWORD first_priority = 0U;
 
     for (DWORD i = 0U; i < n; i++)
     {
-        fc_command_t   *command    = cmds[i];
-        fc_command_id_t command_id = FC_COMMAND_ID_INVALID;
+        fc_cmd_s   *command    = cmds[i];
+        fc_cmd_id_t command_id = FC_CMD_ID_INVALID;
 
         ASSERT(command != NULL);
         ASSERT(fc_command_to_id(command, &command_id) == true);
@@ -311,7 +311,7 @@ fc_status_e fc_service(void)
  * @param completion 输出：完成项
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
  */
-fc_status_e fc_poll_completion(fc_command_status_t *completion)
+fc_status_e fc_poll_completion(fc_cmd_status_s *completion)
 {
     // completion 为出参前置条件
     ASSERT(completion != NULL);
@@ -326,7 +326,7 @@ fc_status_e fc_poll_completion(fc_command_status_t *completion)
  * @param count       输出：实际条数
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_EMPTY
  */
-fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
+fc_status_e fc_poll_completions(fc_cmd_status_s *completions, WORD max_count, WORD *count)
 {
     ASSERT(completions != NULL);
     ASSERT(count != NULL);
@@ -340,9 +340,9 @@ fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count
  *
  * @param command 命令；指针须落在命令池内。
  */
-void fc_command_release(fc_command_t *command)
+void fc_command_release(fc_cmd_s *command)
 {
-    fc_command_id_t command_id = FC_COMMAND_ID_INVALID;
+    fc_cmd_id_t command_id = FC_CMD_ID_INVALID;
 
     ASSERT(command != NULL);
     ASSERT(fc_command_to_id(command, &command_id) == true);
@@ -365,7 +365,7 @@ void fc_command_release(fc_command_t *command)
  * @note 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。
  */
-static bool __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
+static BOOL __attribute__((unused)) fc_buffer_is_occupied(fc_buf_id_t buffer_id)
 {
     return (buffer_id < FC_BUFFER_POOL_DEPTH) && (fc_buffer_state_get(&g_fc_controller, buffer_id) != FC_BUFFER_STATE_FREE);
 }
@@ -373,9 +373,9 @@ static bool __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_
 /**
  * @brief 分配 buffer
  *
- * @return buffer id；FC_BUFFER_ID_INVALID = 池空
+ * @return buffer id；FC_BUF_ID_INVALID = 池空
  */
-fc_buffer_id_t fc_buffer_alloc(void)
+fc_buf_id_t fc_buffer_alloc(void)
 {
     return fc_core_buffer_alloc(&g_fc_controller);
 }
@@ -387,13 +387,13 @@ fc_buffer_id_t fc_buffer_alloc(void)
  *
  * @param buffer_id buffer id
  */
-void fc_buffer_release(fc_buffer_id_t buffer_id)
+void fc_buffer_release(fc_buf_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     ASSERT(fc_buffer_state_get(&g_fc_controller, buffer_id) == FC_BUFFER_STATE_OCCUPIED);
-    ASSERT(g_fc_controller.buffer_owner[buffer_id] == FC_COMMAND_ID_INVALID);
+    ASSERT(g_fc_controller.buffer_owner[buffer_id] == FC_CMD_ID_INVALID);
 
-    const bool released = fc_core_buffer_release(&g_fc_controller, buffer_id, FC_COMMAND_ID_INVALID);
+    const BOOL released = fc_core_buffer_release(&g_fc_controller, buffer_id, FC_CMD_ID_INVALID);
 
     ASSERT(released);
     (void)released;
@@ -407,7 +407,7 @@ void fc_buffer_release(fc_buffer_id_t buffer_id)
  * @param buffer_id buffer id
  * @return USER 数据区指针
  */
-BYTE *fc_buffer_get_user_data(fc_buffer_id_t buffer_id)
+BYTE *fc_buffer_get_user_data(fc_buf_id_t buffer_id)
 {
     BYTE *base;
 
@@ -427,7 +427,7 @@ BYTE *fc_buffer_get_user_data(fc_buffer_id_t buffer_id)
  * @param buffer_id buffer id
  * @return CW 基址
  */
-BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
+BYTE *fc_buffer_get_base(fc_buf_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) == true);
     return fc_core_buffer_cw_base(&g_fc_controller, buffer_id);
@@ -448,28 +448,28 @@ BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
  * @param cw_index CW 号
  * @return 数据指针；未找到 / 无 buffer 返回 NULL
  */
-BYTE *fc_get_cmd_data_ptr(fc_command_t *command, BYTE cw_index)
+BYTE *fc_get_cmd_data_ptr(fc_cmd_s *command, BYTE cw_index)
 {
-    fc_descriptor_id_t desc_id;
+    fc_desc_id_t desc_id;
 
     // command/desc 链非空是前置条件；cw_index 不在链上仍按查询语义返回 NULL
     ASSERT(command != NULL);
-    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
+    ASSERT(command->desc_id != FC_DESC_ID_INVALID);
 
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
         if (paa_to_cw(descriptor->paa) == cw_index)
         {
-            if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+            if (descriptor->buffer_id == FC_BUF_ID_INVALID)
             {
                 return NULL;
             }
             return fc_buffer_get_user_data(descriptor->buffer_id);
         }
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
 
     return NULL;
@@ -484,23 +484,23 @@ BYTE *fc_get_cmd_data_ptr(fc_command_t *command, BYTE cw_index)
  * @param cw_index CW 号
  * @return META 指针；未找到 / 无 buffer 返回 NULL
  */
-BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
+BYTE *fc_buffer_get_meta(fc_cmd_s *command, BYTE cw_index)
 {
-    fc_descriptor_id_t did;
+    fc_desc_id_t did;
 
     // command 非空是前置条件（gc.c 传入有效命令）；未找到 CW 仍按契约返回 NULL
     ASSERT(command != NULL);
 
-    did = (fc_descriptor_id_t)command->desc_id;
+    did = (fc_desc_id_t)command->desc_id;
     for (WORD steps = 0U; (did < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
+        fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
 
         if (paa_to_cw(d->paa) == cw_index)
         {
-            return (d->buffer_id != FC_BUFFER_ID_INVALID) ? fc_core_buffer_cw_base(&g_fc_controller, d->buffer_id) : NULL;
+            return (d->buffer_id != FC_BUF_ID_INVALID) ? fc_core_buffer_cw_base(&g_fc_controller, d->buffer_id) : NULL;
         }
-        did = (fc_descriptor_id_t)d->next_id;
+        did = (fc_desc_id_t)d->next_id;
     }
     return NULL;
 }
@@ -513,24 +513,24 @@ BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
  * @param command 命令
  * @return flat 位图（bit = plane*CW_NUM + cw）
  */
-DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
+DWORD fc_get_cmd_cw_bitmap(const fc_cmd_s *command)
 {
-    fc_descriptor_id_t desc_id;
-    DWORD              mask = 0U;
+    fc_desc_id_t desc_id;
+    DWORD        mask = 0U;
 
     ASSERT(command != NULL);
 
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        const BYTE             plane      = paa_to_plane(descriptor->paa);
-        const BYTE             n          = (plane * CW_NUM + paa_to_cw(descriptor->paa));
+        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const BYTE       plane      = paa_to_plane(descriptor->paa);
+        const BYTE       n          = (plane * CW_NUM + paa_to_cw(descriptor->paa));
 
         // 与 fc_build_request_data_planes 的同源断言一致：链上的 CW 编号必须在 flat 空间内
         ASSERT(n < CW_TOTAL_MAX);
         mask |= (1U << n);
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
     return mask;
 }
@@ -543,24 +543,24 @@ DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
  * @param command 命令
  * @return true 全部 CW 都是 EMPTY；false 否则
  */
-bool fc_get_cmd_all_cw_empty(const fc_command_t *command)
+BOOL fc_get_cmd_all_cw_empty(const fc_cmd_s *command)
 {
-    fc_descriptor_id_t desc_id;
-    WORD               n = 0U;
+    fc_desc_id_t desc_id;
+    WORD         n = 0U;
 
     ASSERT(command != NULL);
 
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (n < CW_TOTAL_MAX))
     {
-        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
         if (fc_cw_status_is_empty(descriptor->status) == false)
         {
             return false;
         }
         n++;
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
 
     return (n > 0U);
@@ -574,23 +574,23 @@ bool fc_get_cmd_all_cw_empty(const fc_command_t *command)
  * @param command 命令
  * @return 最大 ECC bit 数；空链为 0
  */
-BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
+BYTE fc_get_cmd_ecc_max(const fc_cmd_s *command)
 {
-    fc_descriptor_id_t desc_id;
-    BYTE               ecc_max = 0U;
+    fc_desc_id_t desc_id;
+    BYTE         ecc_max = 0U;
 
     ASSERT(command != NULL);
 
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
         if (descriptor->ecc_bits > ecc_max)
         {
             ecc_max = descriptor->ecc_bits;
         }
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        desc_id = (fc_desc_id_t)descriptor->next_id;
     }
     return ecc_max;
 }
@@ -606,7 +606,7 @@ BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
  * @param command_id 输出：池索引
  * @return true 在池内；false 不在命令池区间（如栈上命令）
  */
-bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
+BOOL fc_command_to_id(const fc_cmd_s *command, fc_cmd_id_t *command_id)
 {
     // 层内 helper：调用者（fc_command_configure_descriptor / fc_command_release）已判过
     // command 非空，command_id 是本文件局部地址——传空是调用者编程错误。
@@ -618,11 +618,11 @@ bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
     const uintptr_t end  = base + sizeof(g_fc_controller.command_pool);
 
     if ((addr < base) || (addr >= end) ||
-        (((addr - base) % sizeof(fc_command_t)) != 0U))
+        (((addr - base) % sizeof(fc_cmd_s)) != 0U))
     {
         return false;
     }
-    *command_id = (fc_command_id_t)((addr - base) / sizeof(fc_command_t));
+    *command_id = (fc_cmd_id_t)((addr - base) / sizeof(fc_cmd_s));
     return true;
 }
 
@@ -632,7 +632,7 @@ bool fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
  * @param command_id 池内命令 ID
  * @return 命令指针
  */
-fc_command_t *fc_command_id_to_command(WORD command_id)
+fc_cmd_s *fc_command_id_to_command(WORD command_id)
 {
     // command_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
     // 任何调用者都不可能传入越界值——越界即不变量破坏，留现场。
@@ -646,7 +646,7 @@ fc_command_t *fc_command_id_to_command(WORD command_id)
  * @param descriptor_id 池内描述符 ID
  * @return 描述符指针
  */
-fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
+fc_desc_s *fc_descriptor_id_to_descriptor(WORD descriptor_id)
 {
     // descriptor_id 只来自命令 desc 链（configure_descriptors 铸出），恒在池内。
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
@@ -662,7 +662,7 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
  *
  * @param out 输出
  */
-void fc_debug_state_get(fc_debug_state_t *out)
+void fc_debug_state_get(fc_debug_state_s *out)
 {
     ASSERT(out != NULL);
 
@@ -677,11 +677,11 @@ void fc_debug_state_get(fc_debug_state_t *out)
     out->sched_sq_count = (g_fc_controller.scheduler.sq != NULL) ? g_fc_controller.scheduler.sq->count : 0U;
     out->sched_sq_bound = ((g_fc_controller.scheduler.sq == &g_fc_controller.sq) && (g_fc_controller.scheduler.hsq == &g_fc_controller.hsq)) ? 1U : 0U;
 
-    const fc_command_id_t sq_id = fc_submission_queue_peek(&g_fc_controller.sq, 0U);
+    const fc_cmd_id_t sq_id = fc_submission_queue_peek(&g_fc_controller.sq, 0U);
 
-    if (sq_id != FC_COMMAND_ID_INVALID)
+    if (sq_id != FC_CMD_ID_INVALID)
     {
-        const fc_command_t *cmd = fc_command_id_to_command(sq_id);
+        const fc_cmd_s *cmd = fc_command_id_to_command(sq_id);
 
         out->sq_head_id    = sq_id;
         out->sq_head_state = (BYTE)fc_command_state_get(&g_fc_controller, sq_id);
@@ -689,11 +689,11 @@ void fc_debug_state_get(fc_debug_state_t *out)
         out->sq_head_op    = (BYTE)cmd->config.operation;
     }
 
-    const fc_command_id_t hsq_id = fc_submission_queue_peek(&g_fc_controller.hsq, 0U);
+    const fc_cmd_id_t hsq_id = fc_submission_queue_peek(&g_fc_controller.hsq, 0U);
 
-    if (hsq_id != FC_COMMAND_ID_INVALID)
+    if (hsq_id != FC_CMD_ID_INVALID)
     {
-        const fc_command_t *cmd = fc_command_id_to_command(hsq_id);
+        const fc_cmd_s *cmd = fc_command_id_to_command(hsq_id);
 
         out->hsq_head_id    = hsq_id;
         out->hsq_head_chain = (WORD)cmd->config.chain;
@@ -706,7 +706,7 @@ void fc_debug_state_get(fc_debug_state_t *out)
  *
  * @param stats 输出
  */
-void fc_get_resource_stats(fc_resource_stats_t *stats)
+void fc_get_resource_stats(fc_resource_stats_s *stats)
 {
     // stats 为出参前置条件（调用者恒传有效指针）
     ASSERT(stats != NULL);
@@ -737,7 +737,7 @@ void fc_get_resource_stats(fc_resource_stats_t *stats)
     }
     for (WORD index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
     {
-        if (fc_descriptor_owner_get(&g_fc_controller, index) != FC_COMMAND_ID_INVALID)
+        if (fc_descriptor_owner_get(&g_fc_controller, index) != FC_CMD_ID_INVALID)
         {
             descriptor_scan++;
         }

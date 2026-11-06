@@ -15,11 +15,11 @@
  * 三级模式切换依据未决命令数（pending + 组），非"本轮提交了几条 NAND"。
  */
 
-#include "allocator.h"    /* ftl_table_refs_t, super_block_t */
-#include "bg_scheduler.h" /* 工作量配额后台调度器（ftl_ctx_t 含调度器） */
+#include "allocator.h"    /* ftl_table_refs_s, super_block_s */
+#include "bg_scheduler.h" /* 工作量配额后台调度器（ftl_ctx_s 含调度器） */
 #include "cache_batch.h"  /* cache read/write 批次的常量与对 FTL 的尝试入口 */
 #include "checkpoint.h"
-#include "ftl_type.h" /* ftl_io_req_t */
+#include "ftl_type.h" /* ftl_io_req_s */
 #include "gc.h"
 #include "journal.h"
 #include "l2p_cache.h"
@@ -121,7 +121,7 @@
 /* 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
  * （每 (ch,ce,lun) 是独立 FTL 实例；单 die 时 3392×256 = 868,352 = 424 MiB）。
  * ⚠ 这是**L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
- *   对外一律以 `ssd_controller_t.host_lba_max` 为准（RISK-CAP-03）。 */
+ *   对外一律以 `ssd_ctl_s.host_lba_max` 为准（RISK-CAP-03）。 */
 #define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * DIE_MAX)
 
 /* 静态上限版本：只用于编译期断言（运行期用 FTL_LBA_MAX）。 */
@@ -137,7 +137,7 @@ _Static_assert(FTL_LBA_MAX_AT_MAX <= L2P_GLOBAL_LBA_MAX_AT_MAX, "FTL_LBA_MAX 超
 
 /* cache 流式序列状态（per instance；读 / 写各自一套，kind 区分）。
  * start/middle/end 由 FTL 的方向 + 连续性判断决定，不依赖 FC 的额外标志。 */
-typedef enum
+typedef enum FTL_CACHE_SEQ_KIND_E
 {
     FTL_CACHE_SEQ_NONE = 0,
     FTL_CACHE_SEQ_READ,
@@ -158,15 +158,15 @@ typedef enum
  *   · 后续 FAILC 判失败时靠它撤销（RISK-CACHE-28）。
  * 环按**提交顺序**；head 是最老、尚未被弹出（= 尚未「已证明且已确认」）的页。
  * 结论的落点不是 head，而是独立的结论游标——确认可能背压滞后，head 会停在
- * 「已证明、等确认」的页上（见 ftl_cache_wr_t.pend_idx）。 */
-typedef enum
+ * 「已证明、等确认」的页上（见 ftl_cache_wr_s.pend_idx）。 */
+typedef enum FTL_CACHE_PAGE_STATE_E
 {
     FTL_CACHE_PAGE_PROGRAMMED = 0, /* 已编程；待确认（Journal→L2P→BST） */
     FTL_CACHE_PAGE_CONFIRMED,      /* 已进 L2P；等后继证明 */
     FTL_CACHE_PAGE_FAILED,         /* 后继 FAILC 判失败；等撤销（L2P 失效 + region 降级） */
 } ftl_cache_page_state_e;
 
-typedef struct
+typedef struct FTL_CACHE_PAGE_S
 {
     DWORD lba;       /* 页基址 */
     DWORD pba0;      /* plane0 的真实 PBA（Policy B 下两 plane 块号不同，不可用
@@ -174,12 +174,12 @@ typedef struct
     DWORD pba1;      /* plane1 的真实 PBA */
     BYTE  cw_bitmap; /* 本页覆盖的 CW（通常 FTL_CACHE_FULL_CW） */
     BYTE  state;     /* ftl_cache_page_state_e */
-    bool  proven;    /* 后继命令的 FAIL 结论已到、且成功（END 由自身 STATUS 证明） */
-} ftl_cache_page_t;
+    BOOL  proven;    /* 后继命令的 FAIL 结论已到、且成功（END 由自身 STATUS 证明） */
+} ftl_cache_page_s;
 
-typedef struct
+typedef struct FTL_CACHE_WR_S
 {
-    ftl_cache_page_t page[FTL_CACHE_SEQ_RING]; /* 已编程页（提交顺序） */
+    ftl_cache_page_s page[FTL_CACHE_SEQ_RING]; /* 已编程页（提交顺序） */
     BYTE             head;                     /* 队头环形下标（确认/弹出的起点） */
     BYTE             count;                    /* 已编程未证明的页数 */
 
@@ -191,10 +191,10 @@ typedef struct
      * 环形下标是绝对下标（pop 只动 head/count，不搬元素），所以不会因弹出而漂移；
      * 该页未证明前不可能被弹出。 */
     BYTE pend_idx;   /* 待结论页的 page[] 绝对下标 */
-    bool pend_valid; /* false = 没有待结论页（新序列首条 / END 页自身已证明） */
-} ftl_cache_wr_t;
+    BOOL pend_valid; /* false = 没有待结论页（新序列首条 / END 页自身已证明） */
+} ftl_cache_wr_s;
 
-typedef struct
+typedef struct FTL_CACHE_SEQ_S
 {
     ftl_cache_seq_kind_e kind;
     BYTE                 gen; /* 写序列代号：**中止时**递增。cache 成员的完成带自己的
@@ -207,20 +207,20 @@ typedef struct
                                * （RISK-CACHE-29）。 */
 
     /* ⚠ 偏离 H32（P5 留痕）：active / draining / closing 是**同一设备管线**的
-     * 互斥状态，这里沿用既有 bool 组而不是互斥枚举（改动面大且需同步全部判定点）；
+     * 互斥状态，这里沿用既有 BOOL 组而不是互斥枚举（改动面大且需同步全部判定点）；
      * 互斥性由 ftl_cache_seq_release / close_step / pad 回调三处维护。
      * 后续重构时收敛成一个状态枚举。 */
 
-    bool active;              /* true = 设备侧序列打开（START 已发、END 未发） */
-    bool draining;            /* true = 读序列已放弃但命令仍在飞：门控继续关着，
+    BOOL active;              /* true = 设备侧序列打开（START 已发、END 未发） */
+    BOOL draining;            /* true = 读序列已放弃但命令仍在飞：门控继续关着，
                                * 直到所有者组的在飞子操作归零（RISK-CACHE-14）。 */
-    bool owner_submit;        /* 序列所有者正在提交窗口（门控旁路） */
-    bool break_requested;     /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
-    bool close_requested;     /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
+    BOOL owner_submit;        /* 序列所有者正在提交窗口（门控旁路） */
+    BOOL break_requested;     /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
+    BOOL close_requested;     /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
                                * flush / 前台等待）：service 用 padding END 落下
                                * 一个收尾页，把最后一页的 FAIL_CACHE 结算掉。 */
-    bool closing;             /* padding END 已在飞：门控继续关，新的窗口等待 */
-    bool own_page0;           /* 当前 hot SB 的 page0 由**本序列**写入：允许它在确认前
+    BOOL closing;             /* padding END 已在飞：门控继续关，新的窗口等待 */
+    BOOL own_page0;           /* 当前 hot SB 的 page0 由**本序列**写入：允许它在确认前
                                * 继续写 page>0（有序管线保证 page0 失败会中止其后所有页，
                                * 见 allocator.h 的 alc_super_open_get_room_seq）。
                                * 序列开始即清、分配 page0 时置位；跨 block 续写时由新块
@@ -233,8 +233,8 @@ typedef struct
     DWORD pad_pba[PLANE_NUM]; /* padding END 页的逐 plane PBA。Policy B 下两 plane 的块号
                                * 不同 ⇒ 回调记账必须用真实地址，不能用 pba_with_plane()
                                * 从 plane0 推导（那样会漏记 plane1 的 page0 屏障）。 */
-    ftl_cache_wr_t wr;        /* 写序列的逐页确认 FIFO */
-} ftl_cache_seq_t;
+    ftl_cache_wr_s wr;        /* 写序列的逐页确认 FIFO */
+} ftl_cache_seq_s;
 
 /* 顺序流检测器（per instance × per direction）——FTL 自己判断顺序读写的状态。
  *
@@ -243,28 +243,28 @@ typedef struct
  * 即复位（flush / trim 不打断检测——它们不改变后续写的 LBA 连续性，新起点由判据
  * 自然处理）。它只决定 cache 序列**能否开启**；序列一旦打开，延续由
  * cache_stream.seq.next_lba 判定（与 host 传输段边界无关）。 */
-typedef struct
+typedef struct FTL_STREAM_DETECT_S
 {
     DWORD last_end; /* 上一请求的结束 LBA（exclusive）；FTL_LBA_INVALID = 无上一请求 */
     DWORD run;      /* 连续 LBA 累计（封顶在阈值附近，只用于判 ≥ FTL_STREAM_MIN_LBAS） */
-    bool  active;   /* true = 连续长度已达阈值（顺序流） */
-} ftl_stream_det_t;
+    BOOL  active;   /* true = 连续长度已达阈值（顺序流） */
+} ftl_stream_det_s;
 
 /* cache 流式模块状态（per instance）——顺序检测 / 读预取 / 观测计数 / 设备侧序列。
  *
  * 两个检测器**坐标不同**，不要合并：
- *   · rd / wr（ftl_stream_det_t）：按 **LBA 数**累计，flush / trim 不打断；
+ *   · rd / wr（ftl_stream_det_s）：按 **LBA 数**累计，flush / trim 不打断；
  *     判据是 cache 序列**能否开启**（FTL_STREAM_MIN_LBAS）。
  *   · prefetch_*：按 **请求次数**累计，flush / trim 时复位；
  *     只用于 L2P region 预取（FTL_SEQ_PREFETCH_MIN_RUN）。 */
-typedef struct
+typedef struct FTL_CACHE_STREAM_S
 {
     /* 设备侧 cache 读写序列（单 LUN 同时一条；跨窗口 / 跨 chunk 保持）。 */
-    ftl_cache_seq_t seq;
+    ftl_cache_seq_s seq;
 
     /* 顺序流检测：cache 序列的开启判据。 */
-    ftl_stream_det_t rd; /* 读方向 */
-    ftl_stream_det_t wr; /* 写方向 */
+    ftl_stream_det_s rd; /* 读方向 */
+    ftl_stream_det_s wr; /* 写方向 */
 
     /* 顺序读检测：只用于 L2P region 预取。 */
     DWORD prefetch_last_end;   /* 上一读请求末 LBA（exclusive） */
@@ -272,7 +272,7 @@ typedef struct
     DWORD prefetch_run_max;    /* 本次开机最大连续读长度（观测） */
     DWORD prefetch_generation; /* 每次检测更新/重置递增，防 on_complete 重入覆盖 */
     DWORD prefetch_target;     /* 本次检测算出的目标 region */
-    bool  prefetch_valid;      /* target 有效且尚未执行 */
+    BOOL  prefetch_valid;      /* target 有效且尚未执行 */
 
     /* 观测计数（不参与决策；用于性能归因）。 */
     DWORD read_batches;   /* 成功提交的读窗口数 */
@@ -289,7 +289,7 @@ typedef struct
     DWORD wb_starts;     /* 打开的写序列段数（START 计数） */
     DWORD wb_page_ends;  /* 写满一张 Journal 顺序页而主动 END 的次数（≈每 252 KiB 一次） */
     DWORD wb_pad_closes; /* padding END 有序收尾的次数（LBA 不连续 / 空闲 / flush） */
-} ftl_cache_stream_t;
+} ftl_cache_stream_s;
 
 /**
  * @brief 只清 RAM：关闭 cache 序列状态（不发任何设备命令）。
@@ -300,12 +300,12 @@ typedef struct
  *       若调用时仍有该序列的命令在飞，置 `draining` 让门控继续关到排空——否则别的组会在
  *       31h/3Fh 管线半途插命令（RISK-CACHE-14）。
  */
-void ftl_cache_seq_release(ftl_ctx_t *ftl);
+void ftl_cache_seq_release(ftl_ctx_s *ftl);
 
 /* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）──
  *
  * 早回执（RISK-CACHE-27）：页在**自身命令完成**时入表（提交时不压 pending 下标），
- * 组的完成也不等后继 FAILC。表的用途见 ftl_cache_page_t 的注释。
+ * 组的完成也不等后继 FAILC。表的用途见 ftl_cache_page_s 的注释。
  */
 /**
  * @brief 读覆盖层：该 LBA 是否有「已编程、尚未进 L2P」的页。
@@ -316,7 +316,7 @@ void ftl_cache_seq_release(ftl_ctx_t *ftl);
  *
  * @return true = 命中，读必须走 out_pba。
  */
-bool ftl_cache_wr_lookup(const ftl_ctx_t *ftl, DWORD lba, DWORD *out_pba);
+BOOL ftl_cache_wr_lookup(const ftl_ctx_s *ftl, DWORD lba, DWORD *out_pba);
 
 /**
  * @brief 该 LBA 是否落在**已判失败、尚未撤销**的 cache 页上。
@@ -326,65 +326,65 @@ bool ftl_cache_wr_lookup(const ftl_ctx_t *ftl, DWORD lba, DWORD *out_pba);
  *
  * @return true = 读该 LBA 必须报 IO_ERROR（撤销完成前 L2P 可能仍指着失败页）。
  */
-bool ftl_cache_wr_failed_covers(const ftl_ctx_t *ftl, DWORD lba);
+BOOL ftl_cache_wr_failed_covers(const ftl_ctx_s *ftl, DWORD lba);
 
-typedef struct
+typedef struct FTL_FLAGS_S
 {
-    bool deferred_error; /* RISK-CACHE-27：已回执的 cache 页后来失败，下一命令报 ERROR 一次 */
-    bool bg_suspend;     /* bbt --erase 后整体跳过 Phase 3（无清除路径，只能复位） */
-    bool md_load_failed; /* Directory 加载失败：有 CP 时拒绝启动（RISK-BOOT-09） */
-    bool l2p_defer;      /* L2P region 未就绪的背压信号：drain 不计 stall */
-} ftl_flags_t;
+    BOOL deferred_error; /* RISK-CACHE-27：已回执的 cache 页后来失败，下一命令报 ERROR 一次 */
+    BOOL bg_suspend;     /* bbt --erase 后整体跳过 Phase 3（无清除路径，只能复位） */
+    BOOL md_load_failed; /* Directory 加载失败：有 CP 时拒绝启动（RISK-BOOT-09） */
+    BOOL l2p_defer;      /* L2P region 未就绪的背压信号：drain 不计 stall */
+} ftl_flags_s;
 
-typedef struct
+typedef struct FTL_STATISTICS_S
 {
     DWORD total_writes;   /* 累计 host 编程次数 */
     DWORD dangling_total; /* L2P 指向 valid_count==0 的累计覆盖写次数 */
-} ftl_stats_t;
+} ftl_stats_s;
 
-typedef struct
+typedef struct FTL_FLUSH_JOB_S
 {
-    bool  active;
+    BOOL  active;
     DWORD start_ms; /* 耗时观测（FTL_FLUSH_SLOW_LOG_MS） */
-} ftl_flush_job_t;
+} ftl_flush_job_s;
 
-typedef struct
+typedef struct FTL_TRIM_JOB_S
 {
-    bool             active;
+    BOOL             active;
     DWORD            lba;
     DWORD            end;
     DWORD            start_lba; /* 完成时 trim_lba 已到 end，不能反推 */
-    timer_time_t     start_ms;  /* 观测 elapsed */
-    timer_deadline_t deadline;  /* 无进展等待 deadline */
-} ftl_trim_job_t;
+    timer_ms_t       start_ms;  /* 观测 elapsed */
+    timer_deadline_s deadline;  /* 无进展等待 deadline */
+} ftl_trim_job_s;
 
-struct ftl_context
+struct FTL_CONTEXT_S
 {
-    ftl_topo_t    topo;    /* 本 FTL 绑定的 NAND 芯片路由 */
-    l2p_cache_t  *cache;   /* 共享：g_l2p_cache[ch][ce] */
-    pending_ctx_t pending; /* pending / group 两张表 */
-    wb_handle_t  *wbuf;    /* 页打包写缓冲（装配挂载） */
+    ftl_topo_s   topo;    /* 本 FTL 绑定的 NAND 芯片路由 */
+    l2p_cache_s *cache;   /* 共享：g_l2p_cache[ch][ce] */
+    pend_ctx_s   pending; /* pending / group 两张表 */
+    wb_handle_s *wbuf;    /* 页打包写缓冲（装配挂载） */
 
-    ftl_table_refs_t table_refs; /* 五张表引用（按值，可审计） */
-    alc_t            alloc;      /* allocator（指针绑到 table_refs） */
+    ftl_table_refs_s table_refs; /* 五张表引用（按值，可审计） */
+    alc_s            alloc;      /* allocator（指针绑到 table_refs） */
 
-    l2p_jrn_t      *journal;      /* Journal（装配挂载） */
-    md_dir_cache_t *metadata_dir; /* Directory（装配挂载） */
-    cp_handle_t    *cp_handle;    /* Checkpoint job（装配挂载） */
+    l2p_jrn_s      *journal;      /* Journal（装配挂载） */
+    md_dir_cache_s *metadata_dir; /* Directory（装配挂载） */
+    cp_handle_s    *cp_handle;    /* Checkpoint job（装配挂载） */
 
-    ftl_flags_t flags; /* deferred_error / bg_suspend / md_load_failed / l2p_defer */
-    ftl_stats_t stats; /* total_writes / dangling_total */
+    ftl_flags_s flags; /* deferred_error / bg_suspend / md_load_failed / l2p_defer */
+    ftl_stats_s stats; /* total_writes / dangling_total */
 
-    ftl_cache_stream_t cache_stream; /* 顺序检测 / 预取 / 观测 / 序列 */
+    ftl_cache_stream_s cache_stream; /* 顺序检测 / 预取 / 观测 / 序列 */
 
-    ftl_flush_job_t flush; /* host SYNCHRONIZE CACHE / CLI fl */
-    ftl_trim_job_t  trim;  /* CLI tr */
+    ftl_flush_job_s flush; /* host SYNCHRONIZE CACHE / CLI fl */
+    ftl_trim_job_s  trim;  /* CLI tr */
 
-    bg_scheduler_t bg;
-    BYTE           l2p_flush_due; /* timer 置位，bg_scheduler 消费 */
+    bg_sched_s bg;
+    BYTE       l2p_flush_due; /* timer 置位，bg_scheduler 消费 */
 
-    mig_handle_t *mig_handle;           /* GC / WL / predict（装配挂载） */
-    rr_handle_t   read_recovery_handle; /* 异步恢复 job */
+    mig_handle_s *mig_handle;           /* GC / WL / predict（装配挂载） */
+    rr_handle_s   read_recovery_handle; /* 异步恢复 job */
     BYTE         *rr_page_scratch;      /* 恢复整页暂存（装配挂载） */
     BYTE          write_retry_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
 };
@@ -398,16 +398,16 @@ struct ftl_context
  * ftl_init 只绑定指针；数组定义在 main.c，
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
  */
-typedef struct
+typedef struct FTL_STORAGE_S
 {
-    const ftl_table_refs_t *table_refs;
-    md_dir_cache_t         *metadata_dir;
-    l2p_jrn_t              *journal;
-    cp_handle_t            *cp_handle;
-    mig_handle_t           *migrate;         /* 装配挂载：指针（不减少总 RAM） */
-    wb_handle_t            *wbuf;            /* 装配挂载 */
+    const ftl_table_refs_s *table_refs;
+    md_dir_cache_s         *metadata_dir;
+    l2p_jrn_s              *journal;
+    cp_handle_s            *cp_handle;
+    mig_handle_s           *migrate;         /* 装配挂载：指针（不减少总 RAM） */
+    wb_handle_s            *wbuf;            /* 装配挂载 */
     BYTE                   *rr_page_scratch; /* 装配挂载：FTL_READ_USER_SIZE */
-} ftl_storage_t;
+} ftl_storage_s;
 
 /* ── 接口 ── */
 
@@ -431,7 +431,7 @@ void ftl_global_init(void);
  * @param targets 板级物理拓扑（CH_NUM × CE_NUM）
  * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
  */
-bool ftl_topology_build(const nand_target_info_t targets[CH_NUM][CE_NUM]);
+BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM]);
 
 /**
  * @brief 初始化 FTL 子系统
@@ -450,7 +450,7 @@ bool ftl_topology_build(const nand_target_info_t targets[CH_NUM][CE_NUM]);
  * @return FTL_OK    成功
  *         FTL_ERROR 元数据候选池构建失败（拒绝启动）
  */
-ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
+ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s *cache, const ftl_storage_s *storage);
 
 /**
  * @brief debug-only 初始化契约自检（release 下空实现）
@@ -461,7 +461,7 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
  *
  * @param ftl FTL 上下文（非 NULL；由 ssd_ftl_boot 在 ftl_init 成功后调用）
  */
-void ftl_contract_audit(const ftl_ctx_t *ftl);
+void ftl_contract_audit(const ftl_ctx_s *ftl);
 
 /**
  * @brief 实例无关的每轮泵（superloop 每轮调一次）
@@ -495,7 +495,7 @@ void ftl_service_pump(void);
  *
  * @param ftl  FTL 上下文（**非 NULL**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
-void ftl_service(ftl_ctx_t *ftl);
+void ftl_service(ftl_ctx_s *ftl);
 
 /**
  * @brief 非阻塞提交读请求（长度任意）
@@ -514,7 +514,7 @@ void ftl_service(ftl_ctx_t *ftl);
  * @return FTL_OK    已受理
  *         FTL_ERROR 立即失败（参数非法 / LBA 越界 / 组槽满）
  */
-ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
+ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req);
 
 /**
  * @brief 非阻塞提交写请求（长度任意）
@@ -528,7 +528,7 @@ ftl_status_e ftl_submit_read(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  * @return FTL_OK    已受理
  *         FTL_ERROR 立即失败
  */
-ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
+ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req);
 
 /**
  * @brief 取走并清除「延后错误」标志（volatile write cache 语义）。
@@ -540,7 +540,7 @@ ftl_status_e ftl_submit_write(ftl_ctx_t *ftl, const ftl_io_req_t *req);
  * @note 早回执后组在页编程完成时就报 OK，FAILC 要晚一条命令才到；这条通道就是把
  *       那个迟到的结论交回给控制器的唯一出口（RISK-USBC-01 的 FTL 侧对应物）。
  */
-bool ftl_take_deferred_error(ftl_ctx_t *ftl);
+BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
 
 /**
  * @brief 异步 FLUSH job（host SYNCHRONIZE CACHE / CLI `fl`）
@@ -556,7 +556,7 @@ bool ftl_take_deferred_error(ftl_ctx_t *ftl);
  *
  * @param ftl  FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
-void ftl_flush_begin(ftl_ctx_t *ftl);
+void ftl_flush_begin(ftl_ctx_s *ftl);
 
 /**
  * @brief 推进 FLUSH job（每轮主循环调用一次）
@@ -565,7 +565,7 @@ void ftl_flush_begin(ftl_ctx_t *ftl);
  * @return true  完成（含无在飞 job 的幂等完成）
  *         false 继续下一轮
  */
-bool ftl_flush_step(ftl_ctx_t *ftl);
+BOOL ftl_flush_step(ftl_ctx_s *ftl);
 
 /**
  * @brief 放弃当前 FLUSH job（HIL 撤销回执时调用，如 host 复位）
@@ -575,7 +575,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl);
  *
  * @param ftl FTL 上下文
  */
-void ftl_flush_cancel(ftl_ctx_t *ftl);
+void ftl_flush_cancel(ftl_ctx_s *ftl);
 
 /**
  * @brief 异步取消 [lba, lba+count) 的 LBA 映射
@@ -591,7 +591,7 @@ void ftl_flush_cancel(ftl_ctx_t *ftl);
  *         FTL_AGAIN 已有 TRIM 在飞
  *         FTL_ERROR 参数非法（count == 0 或越界）
  */
-ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
+ftl_status_e ftl_trim_begin(ftl_ctx_s *ftl, DWORD lba, DWORD count);
 
 /**
  * @brief 推进 TRIM job（每次最多处理 FTL_TRIM_STEP_LBAS 条 LBA）
@@ -601,7 +601,7 @@ ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
  *         FTL_AGAIN 仍有剩余，下一轮继续
  *         FTL_ERROR 等待超时或 L2P 读失败，已中止 TRIM
  */
-ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
+ftl_status_e ftl_trim_step(ftl_ctx_s *ftl);
 
 /* ── 内部辅助（FTL 层内共用，不属于 HIL 接口）── */
 
@@ -615,8 +615,8 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
  * @return 触发快照（now_ms 取调用时刻）
  *
  * @note 后台适配器（bg_scheduler）与显式 CP（ftl_flush_kick_cp）共用——同一组字段
- *       只在单处装配，`cp_trigger_t` 加字段时不会漏改某一处。
+ *       只在单处装配，`cp_trigger_s` 加字段时不会漏改某一处。
  */
-cp_trigger_t ftl_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason, bool force);
+cp_trigger_s ftl_cp_trigger_build(const ftl_ctx_s *ftl, cp_reason_e reason, BOOL force);
 
 #endif /* FTL_SERVICE_H */

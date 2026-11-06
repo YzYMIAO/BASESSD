@@ -57,7 +57,7 @@ DWORD sys_mpu_region_count(void)
     return sys_port_mpu_region_count();
 }
 
-void sys_clock_tree_get(sys_clock_tree_t *out)
+void sys_clock_tree_get(sys_clock_tree_s *out)
 {
     sys_port_clock_tree_get(out);
 }
@@ -87,7 +87,7 @@ void sys_msr_msp(DWORD address)
     sys_port_set_msp(address);
 }
 
-BYTE sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
+func_status_e sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
 {
     return sys_port_clock_init(pll_prediv, pll_mul, sysclk_div, peripheral_div);
 }

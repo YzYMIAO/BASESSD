@@ -71,7 +71,7 @@
 /* ── 启动恢复的类型 ── */
 
 /* 恢复计划：pfr_boot_plan() 是唯一决策点，执行层只按此枚举分派。 */
-typedef enum
+typedef enum PFR_PLAN_E
 {
     PFR_PLAN_FRESH = 0,     /* 无 CP：rebuild → carve */
     PFR_PLAN_SNAPSHOT,      /* clean：快照 → probe → build_pools */
@@ -80,28 +80,28 @@ typedef enum
 } pfr_plan_e;
 
 /* 一次启动的只读扫描结果。cp 指向 cp_handle 的常驻缓冲，不复制。 */
-typedef struct
+typedef struct PFR_BOOT_SCAN_S
 {
-    const cp_header_t *cp;
+    const cp_header_s *cp;
     WORD               cp_idx;
-    jrn_page_ref_t     ring;
-    bool               has_cp;
-    bool               rebuild_required;
-    bool               ring_read_error;
-    bool               blocks_loaded;
-} pfr_boot_scan_t;
+    jrn_page_ref_s     ring;
+    BOOL               has_cp;
+    BOOL               rebuild_required;
+    BOOL               ring_read_error;
+    BOOL               blocks_loaded;
+} pfr_boot_scan_s;
 
 /* 块元数据表：显式携带「对账到哪一步」，顺序由阶段函数固定。 */
-typedef struct
+typedef struct PFR_BLOCK_TABLE_S
 {
     WORD *word; /* 指向 cp_handle->hdr.block_words（FTL_BLOCK_TOTAL 项） */
-    bool  loaded;
-    bool  restored;
-    bool  probed;
-} pfr_block_table_t;
+    BOOL  loaded;
+    BOOL  restored;
+    BOOL  probed;
+} pfr_block_table_s;
 
 /* 本次启动的唯一统计结构。计数一律 DWORD：全块扫描的理论上限 > 64K。 */
-typedef struct
+typedef struct PFR_STATISTICS_S
 {
     DWORD closed;          /* Closed 条目数（restore/probe/rebuild 合计） */
     DWORD partial;         /* rebuild 的部分写块数 */
@@ -114,44 +114,44 @@ typedef struct
     DWORD sub_zero; /* replay 中 valid_sub 减到 0 的次数 */
     WORD  sub_zero_g;
     BYTE  sub_zero_state;
-} pfr_stats_t;
+} pfr_stats_s;
 
 /* journal replay 回调上下文。 */
-typedef struct
+typedef struct PFR_REPLAY_CONTEXT_S
 {
-    ftl_ctx_t   *ftl;
-    pfr_stats_t *stats;
-} pfr_replay_ctx_t;
+    ftl_ctx_s   *ftl;
+    pfr_stats_s *stats;
+} pfr_replay_ctx_s;
 
 /* 快照阶段的失败现场（只用于 fallback 日志，不参与控制流）。 */
-typedef struct
+typedef struct PFR_LEDGER_RESULT_S
 {
-    bool  replay_ok;
-    bool  ctx_ok;
+    BOOL  replay_ok;
+    BOOL  ctx_ok;
     BYTE  fail_reason;
     DWORD fail_pba;
-} pfr_ledger_result_t;
+} pfr_ledger_result_s;
 
 /* ── 前置声明（按调用关系） ── */
 
-static void pfr_boot_carve_pools(ftl_ctx_t *ftl);
-static void pfr_refill_spare_pools(ftl_ctx_t *ftl);
-static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp);
+static void pfr_boot_carve_pools(ftl_ctx_s *ftl);
+static void pfr_refill_spare_pools(ftl_ctx_s *ftl);
+static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp);
 
-static void pfr_ledger_rebuild(ftl_ctx_t *ftl, bool reset_first, pfr_stats_t *stats);
-static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr_plan_e plan, pfr_block_table_t *tbl, pfr_stats_t *stats, pfr_ledger_result_t *out, DWORD *out_entries);
-static void pfr_ledger_finish(ftl_ctx_t *ftl, const jrn_page_ref_t *ring, DWORD floor_seq);
+static void pfr_ledger_rebuild(ftl_ctx_s *ftl, BOOL reset_first, pfr_stats_s *stats);
+static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr_plan_e plan, pfr_block_table_s *tbl, pfr_stats_s *stats, pfr_ledger_result_s *out, DWORD *out_entries);
+static void pfr_ledger_finish(ftl_ctx_s *ftl, const jrn_page_ref_s *ring, DWORD floor_seq);
 
-static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl);
-static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t *stats);
-static bool pfr_build_pools(ftl_ctx_t *ftl, const pfr_block_table_t *tbl);
-static void pfr_reset_blocks(ftl_ctx_t *ftl);
-static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_stats_t *stats);
-static void pfr_stats_report(const pfr_stats_t *stats);
+static BOOL pfr_restore_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl);
+static void pfr_probe_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl, pfr_stats_s *stats);
+static BOOL pfr_build_pools(ftl_ctx_s *ftl, const pfr_block_table_s *tbl);
+static void pfr_reset_blocks(ftl_ctx_s *ftl);
+static void pfr_rebuild_closed_sb_list(ftl_ctx_s *ftl, pfr_stats_s *stats);
+static void pfr_stats_report(const pfr_stats_s *stats);
 
-static bool pfr_materialize_pba(void *ctx, DWORD pba);
-static void pfr_valid_add(void *ctx, DWORD pba, bool *ok);
-static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok);
+static BOOL pfr_materialize_pba(void *ctx, DWORD pba);
+static void pfr_valid_add(void *ctx, DWORD pba, BOOL *ok);
+static void pfr_valid_sub(void *ctx, DWORD pba, BOOL *ok);
 
 /* ══════════════════════════════════════════════════════════════════
  * 介质布局版本 —— 开机自动格式化
@@ -166,7 +166,7 @@ static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok);
  * @param out_need_format 输出：是否需要格式化
  * @return FTL_OK；FTL_ERROR 介质不可读
  */
-ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
+ftl_status_e pfr_media_check_format(ftl_ctx_s *ftl, BOOL *out_need_format)
 {
     DWORD             media_version = 0U;
     cp_media_status_e st            = cp_media_status_probe(ftl->cp_handle, &media_version);
@@ -203,10 +203,10 @@ ftl_status_e pfr_media_check_format(ftl_ctx_t *ftl, bool *out_need_format)
  * pfr_boot_recovery 按 RISK-BOOT-09 拒绝启动。故必须先把空 Directory
  * 写成目录检查点，再写 initial Checkpoint（后者是整条 record 的 commit）。
  */
-static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
+static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_s *ftl)
 {
-    md_dir_cache_t     *dir = ftl->metadata_dir;
-    md_dir_ckpt_write_t w;
+    md_dir_cache_s     *dir = ftl->metadata_dir;
+    md_dir_ckpt_write_s w;
 
     (void)memset(&w, 0, sizeof(w)); /* begin 非 READY 时上下文不可用；零值 = 未持有 */
 
@@ -234,7 +234,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
     for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
     {
         // 2KB 目录检查点页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。
-        md_dir_ckpt_page_t *page = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
+        md_dir_ckpt_page_s *page = (md_dir_ckpt_page_s *)ftl->cp_handle->hdr.hdr_buf;
         const DWORD         addr = md_dir_ckpt_page_addr(w.base, chunk);
 
         md_dir_ckpt_page(dir, w.seq, chunk, page);
@@ -249,7 +249,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
     // 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。
     if (w.ok)
     {
-        md_dir_ckpt_page_t *probe = (md_dir_ckpt_page_t *)ftl->cp_handle->hdr.hdr_buf;
+        md_dir_ckpt_page_s *probe = (md_dir_ckpt_page_s *)ftl->cp_handle->hdr.hdr_buf;
 
         if ((ftl_sync_read_page(w.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) || (probe->magic != DIR_CKPT_MAGIC) || (probe->sequence != w.seq) || (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
@@ -272,9 +272,9 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_t *ftl)
  * @param alloc    分配器
  * @param old_bad  出参：512B 位图，旧 BAD 集（调用者用于统计 recovered）
  */
-static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE])
+static void pfr_format_reset_bad_map(alc_s *alloc, BYTE old_bad[BBT_BITMAP_SIZE])
 {
-    const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
+    const md_ring_s *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
     WORD             kept     = 0U;
 
     (void)memset(old_bad, 0, BBT_BITMAP_SIZE);
@@ -282,8 +282,8 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         const WORD block  = ftl_gblock_block(g);
-        const bool is_bad = ftl_block_is_bad(&alloc->blocks[g]);
-        const bool keep   = bbt_block_is_candidate(bbt_ring, block);
+        const BOOL is_bad = ftl_block_is_bad(&alloc->blocks[g]);
+        const BOOL keep   = bbt_block_is_candidate(bbt_ring, block);
 
         if (is_bad)
         {
@@ -329,9 +329,9 @@ static void pfr_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
  * @return FTL_OK（体检完成，个别块已标坏）
  *         FTL_ERROR = BBT 落盘失败。
  */
-static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
+static ftl_status_e pfr_format_verify_blocks(ftl_ctx_s *ftl)
 {
-    alc_t *alloc  = &ftl->alloc;
+    alc_s *alloc  = &ftl->alloc;
     DWORD  tested = 0U;
     DWORD  bad    = 0U;
 
@@ -344,8 +344,8 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
 
         // BBT 候选池保留：本轮坏块图就在里面（候选可能含 shared metadata spare）。
         {
-            const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
-            const bool       keep_bbt = bbt_block_is_candidate(bbt_ring, block);
+            const md_ring_s *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
+            const BOOL       keep_bbt = bbt_block_is_candidate(bbt_ring, block);
 
             if (keep_bbt)
             {
@@ -355,7 +355,7 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
 
         // 唯一判据：擦除命令成功。carve 假定 Free 块是空白的，擦成功即为空白。
         const DWORD epba = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
-        const bool  ok   = (ftl_sync_erase_block(epba) == FTL_OK);
+        const BOOL  ok   = (ftl_sync_erase_block(epba) == FTL_OK);
 
         tested++;
 
@@ -399,7 +399,7 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_t *ftl)
  *
  * @return false = BBT 落盘失败 —— 持久化记录仍是「格式化中」，下次开机会重新格式化（安全方向：宁可重擦，也不在半写元数据上启动）。
  */
-static bool pfr_format_end_bbt(alc_t *alloc)
+static BOOL pfr_format_end_bbt(alc_s *alloc)
 {
     alloc->bbt.format_in_progress = false;
 
@@ -422,7 +422,7 @@ static bool pfr_format_end_bbt(alc_t *alloc)
  * @param verify 是否做全片擦除体检
  * @return FTL_OK；FTL_ERROR 格式化失败
  */
-ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
+ftl_status_e pfr_media_format(ftl_ctx_s *ftl, BOOL verify)
 {
     // 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
     // 都还完整，格式化不完成、可重试。
@@ -456,7 +456,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
 
         for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
         {
-            const bool now_bad = ftl_block_is_bad(&ftl->alloc.blocks[g]);
+            const BOOL now_bad = ftl_block_is_bad(&ftl->alloc.blocks[g]);
 
             if (bbt_is_bad(old_bad, g))
             {
@@ -521,7 +521,7 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
     // 写点落错，Header 仍可能“写成功、读失败”。当场读回，避免 format 打印 done、
     // 下次开机却拒绝启动。
     {
-        cp_header_t *probe     = (cp_header_t *)ftl->cp_handle->hdr.hdr_buf; /* handle 常驻 2KB */
+        cp_header_s *probe     = (cp_header_s *)ftl->cp_handle->hdr.hdr_buf; /* handle 常驻 2KB */
         WORD         probe_idx = UINT16_MAX;
 
         if (cp_pool_find_latest(ftl->cp_handle, probe, &probe_idx) != FTL_OK)
@@ -556,10 +556,10 @@ ftl_status_e pfr_media_format(ftl_ctx_t *ftl, bool verify)
  * @param scan 输出：扫描结果
  * @return true 继续恢复；false 必须拒绝启动（有 CP 但 Directory 加载失败）
  */
-static bool pfr_boot_scan(ftl_ctx_t *ftl, pfr_boot_scan_t *scan)
+static BOOL pfr_boot_scan(ftl_ctx_s *ftl, pfr_boot_scan_s *scan)
 {
     memset(scan, 0, sizeof(*scan));
-    scan->cp = (const cp_header_t *)ftl->cp_handle->hdr.hdr_buf;
+    scan->cp = (const cp_header_s *)ftl->cp_handle->hdr.hdr_buf;
 
     // ① 扫 Journal 环形块池取最新页（只读）。三条路径都用它恢复写指针：
     // jrn_init 把写指针/序号复位到 (block0, page0)/1，而环形块并没有被擦，
@@ -567,7 +567,7 @@ static bool pfr_boot_scan(ftl_ctx_t *ftl, pfr_boot_scan_t *scan)
     (void)jrn_page_scan_latest(ftl->journal, &scan->ring, &scan->ring_read_error);
 
     // ② 找最新 Checkpoint。无有效记录 ⇒ 出厂首次启动。
-    cp_header_t *cp = (cp_header_t *)scan->cp;
+    cp_header_s *cp = (cp_header_s *)scan->cp;
 
     if (cp_pool_find_latest(ftl->cp_handle, cp, &scan->cp_idx) != FTL_OK)
     {
@@ -618,7 +618,7 @@ static bool pfr_boot_scan(ftl_ctx_t *ftl, pfr_boot_scan_t *scan)
  * @param scan 扫描结果
  * @return 恢复计划
  */
-static pfr_plan_e pfr_boot_plan(const pfr_boot_scan_t *scan)
+static pfr_plan_e pfr_boot_plan(const pfr_boot_scan_s *scan)
 {
     if (scan->has_cp == false)
     {
@@ -643,7 +643,7 @@ static pfr_plan_e pfr_boot_plan(const pfr_boot_scan_t *scan)
  *
  * @param stats 统计
  */
-static void pfr_stats_init(pfr_stats_t *stats)
+static void pfr_stats_init(pfr_stats_s *stats)
 {
     memset(stats, 0, sizeof(*stats));
     stats->first_degraded_region = UINT32_MAX;
@@ -657,11 +657,11 @@ static void pfr_stats_init(pfr_stats_t *stats)
  * @param scan   扫描结果
  * @param result 输出：启动结果
  */
-static void pfr_boot_execute(ftl_ctx_t *ftl, pfr_plan_e plan, const pfr_boot_scan_t *scan, pfr_boot_result_t *result)
+static void pfr_boot_execute(ftl_ctx_s *ftl, pfr_plan_e plan, const pfr_boot_scan_s *scan, pfr_boot_result_s *result)
 {
-    pfr_stats_t         stats;
-    pfr_block_table_t   tbl;
-    pfr_ledger_result_t led;
+    pfr_stats_s         stats;
+    pfr_block_table_s   tbl;
+    pfr_ledger_result_s led;
 
     pfr_stats_init(&stats);
     memset(&tbl, 0, sizeof(tbl));
@@ -673,9 +673,9 @@ static void pfr_boot_execute(ftl_ctx_t *ftl, pfr_plan_e plan, const pfr_boot_sca
     led.ctx_ok    = false;
     led.fail_pba  = NAND_PBA_INVALID;
 
-    bool  snapshot_kept      = false;
-    bool  request_cp         = false;
-    bool  clear_md_load_fail = false;
+    BOOL  snapshot_kept      = false;
+    BOOL  request_cp         = false;
+    BOOL  clear_md_load_fail = false;
     DWORD journal_entries    = 0U;
 
     // 诊断（RISK-MD-06）：判型所依据的现场，一次开机一行（只读）。
@@ -785,7 +785,7 @@ static void pfr_boot_execute(ftl_ctx_t *ftl, pfr_plan_e plan, const pfr_boot_sca
     result->blocks_restored = snapshot_kept;
 
     // 范围化恢复只在「快照保留」时成立；降级只丢映射，不影响 valid_count 增量。
-    const bool degraded = (plan == PFR_PLAN_REPLAY) && (jrn_replay_degraded_entries() != 0U);
+    const BOOL degraded = (plan == PFR_PLAN_REPLAY) && (jrn_replay_degraded_entries() != 0U);
 
     result->scoped = snapshot_kept && (degraded || (stats.l2p_degraded_cw != 0U));
 }
@@ -797,9 +797,9 @@ static void pfr_boot_execute(ftl_ctx_t *ftl, pfr_plan_e plan, const pfr_boot_sca
  * @param result 输出：恢复结果
  * @return FTL_OK；FTL_ERROR 恢复失败
  */
-ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result)
+ftl_status_e pfr_boot_recovery(ftl_ctx_s *ftl, pfr_boot_result_s *result)
 {
-    pfr_boot_scan_t scan;
+    pfr_boot_scan_s scan;
 
     if (pfr_boot_scan(ftl, &scan) == false)
     {
@@ -822,9 +822,9 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_t *ftl, pfr_boot_result_t *result)
  * @note 每 plane 先扣 Spare（50）、再扣 OP（10%），其余进 Free；只把 state == NONE 的块入池。
  *       full rebuild / 快照已认领的 CLOSED/LOG/RETIRED 只计入 total_blocks。
  */
-static void pfr_boot_carve_pools(ftl_ctx_t *ftl)
+static void pfr_boot_carve_pools(ftl_ctx_s *ftl)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
 
     ASSERT(alloc->free_count == 0U);
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -880,7 +880,7 @@ static void pfr_boot_carve_pools(ftl_ctx_t *ftl)
  *
  * @note Free 不足时自然停在低水位，并打一行告警（容量下降是真实结果）。
  */
-static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
+static void pfr_refill_spare_pools(ftl_ctx_s *ftl)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -903,7 +903,7 @@ static void pfr_refill_spare_pools(ftl_ctx_t *ftl)
  *                    alc_init 的 NONE 初态，传 false
  * @param stats       统计（只累加）
  */
-static void pfr_ledger_rebuild(ftl_ctx_t *ftl, bool reset_first, pfr_stats_t *stats)
+static void pfr_ledger_rebuild(ftl_ctx_s *ftl, BOOL reset_first, pfr_stats_s *stats)
 {
     if (reset_first)
     {
@@ -920,7 +920,7 @@ static void pfr_ledger_rebuild(ftl_ctx_t *ftl, bool reset_first, pfr_stats_t *st
  * @param ring      Journal 环形块池扫描结果
  * @param floor_seq Journal 序号下限（fresh=1，其余=cp->journal_sequence）
  */
-static void pfr_ledger_finish(ftl_ctx_t *ftl, const jrn_page_ref_t *ring, DWORD floor_seq)
+static void pfr_ledger_finish(ftl_ctx_s *ftl, const jrn_page_ref_s *ring, DWORD floor_seq)
 {
     pfr_refill_spare_pools(ftl);
     jrn_resume(ftl->journal, ring, floor_seq);
@@ -940,14 +940,14 @@ static void pfr_ledger_finish(ftl_ctx_t *ftl, const jrn_page_ref_t *ring, DWORD 
  *
  * 有 Journal 回放时必须在回放之后调用。
  */
-static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
+static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp)
 {
     const BYTE die = topo_2_die(ftl->topo);
 
     // ① 失效本 owner 的 resident CLEAN 行中不在 CP bitmap 的 region。
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_line_info_t line;
+        l2p_line_info_s line;
 
         l2p_line_get(ftl->cache, i, &line);
 
@@ -1007,9 +1007,9 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_t *ftl, const cp_header_t *cp)
  * @param out_entries 输出：journal 回放条数（SNAPSHOT 保持 0）
  * @return true 快照可用；false 调用者回退 full metadata rebuild
  */
-static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr_plan_e plan, pfr_block_table_t *tbl, pfr_stats_t *stats, pfr_ledger_result_t *out, DWORD *out_entries)
+static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr_plan_e plan, pfr_block_table_s *tbl, pfr_stats_s *stats, pfr_ledger_result_s *out, DWORD *out_entries)
 {
-    const cp_header_t *cp = scan->cp;
+    const cp_header_s *cp = scan->cp;
 
     // ① 块元数据快照恢复（若已加载）。第 1 遍全量校验，非法 word 不改任何状态。
     tbl->restored = (tbl->loaded != false) && pfr_restore_blocks(ftl, tbl);
@@ -1017,8 +1017,8 @@ static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr
 
     if (plan == PFR_PLAN_REPLAY)
     {
-        pfr_replay_ctx_t rctx;
-        jrn_replay_ctx_t block_ctx;
+        pfr_replay_ctx_s rctx;
+        jrn_replay_ctx_s block_ctx;
         DWORD            entry_count = 0U;
 
         memset(&block_ctx, 0, sizeof(block_ctx));
@@ -1039,7 +1039,7 @@ static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr
         // 回放必须走 region line：PFR 随后用 l2p_line_invalidate 作废不在 CP bitmap
         // 的 CLEAN 行；若回放把映射写进 dirty CMT，会被这里误清。回放期 CMT 全程旁路。
         l2p_cmt_set_enabled(ftl->cache, false);
-        const bool replay_ok = (jrn_replay(ftl->journal, ftl->cache, cp->journal_sequence, &entry_count, (tbl->restored != false) ? &block_ctx : NULL) == FTL_OK);
+        const BOOL replay_ok = (jrn_replay(ftl->journal, ftl->cache, cp->journal_sequence, &entry_count, (tbl->restored != false) ? &block_ctx : NULL) == FTL_OK);
         l2p_cmt_set_enabled(ftl->cache, true);
         *out_entries     = entry_count;
         out->replay_ok   = replay_ok;
@@ -1139,7 +1139,7 @@ static bool pfr_ledger_snapshot(ftl_ctx_t *ftl, const pfr_boot_scan_t *scan, pfr
  *
  * @param ftl 实例（只读）
  */
-void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
+void pfr_boot_log_bad_areas(const ftl_ctx_s *ftl)
 {
     // 目录检查点是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
     // 避免 `block >= 0` 的恒真比较告警。
@@ -1221,7 +1221,7 @@ void pfr_boot_log_bad_areas(const ftl_ctx_t *ftl)
  *
  * @return true = 属于固定元数据区；false = 用户数据区。
  */
-static bool pfr_block_is_fixed(WORD g)
+static BOOL pfr_block_is_fixed(WORD g)
 {
     // 必须按分区表的 plane_mask 判：分区只在 mask 覆盖的 plane 上预留，表外同号块
     // 是用户数据。不要写死 "block < 某常量"——布局随介质版本演进。
@@ -1238,7 +1238,7 @@ static bool pfr_block_is_fixed(WORD g)
  * @return true  = 条目已加入 Closed 列表；
  *         false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。
  */
-static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
+static BOOL pfr_closed_sb_add(ftl_ctx_s *ftl, WORD g, BYTE temperature)
 {
     WORD plane_blocks[PLANE_NUM];
 
@@ -1278,7 +1278,7 @@ static bool pfr_closed_sb_add(ftl_ctx_t *ftl, WORD g, BYTE temperature)
  * 这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
  * victim 的前提。
  */
-static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block)
+static BYTE pfr_scan_write_pointer(const ftl_ctx_s *ftl, BYTE plane, WORD block)
 {
     // 快路径：page 0 是擦除页 ⇒ 整块空白（顺序追加 + page0 失败即关 SB，后续页不可达）。
     // 这把空闲块扫描从 64 页降到 1 页；若将来允许 page0 失败后继续写，必须恢复全块扫描。
@@ -1338,7 +1338,7 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block)
  *
  * @param stats 本次启动的统计
  */
-static void pfr_stats_report(const pfr_stats_t *stats)
+static void pfr_stats_report(const pfr_stats_s *stats)
 {
     if (stats->l2p_read_errors != 0U)
     {
@@ -1364,9 +1364,9 @@ static void pfr_stats_report(const pfr_stats_t *stats)
  * @note Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
  * **单个物理块** 建一条 Closed 条目，另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵。
  */
-static bool pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_written, BYTE temperature, pfr_stats_t *stats)
+static BOOL pfr_close_block(ftl_ctx_s *ftl, BYTE plane, WORD block, BYTE pages_written, BYTE temperature, pfr_stats_s *stats)
 {
-    alc_t *const alloc = &ftl->alloc;
+    alc_s *const alloc = &ftl->alloc;
     const WORD   g     = ftl_gblock(plane, block);
 
     // 退化单 plane 条目的构造与快照恢复同源（C2）。列表满（结构上不应发生）⇒ 放弃本块。
@@ -1378,7 +1378,7 @@ static bool pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
     // 逐页：gc_read_page_with_lba 取 LBA + **逐 CW** l2p 反查。
     // ⚠ 只扫已写页 [0, pages_written)：写指针之后的空白页没有 META，
     // 读回来也解不出 LBA，纯白读。
-    bst_block_t *b = &alloc->blocks[g];
+    bst_block_s *b = &alloc->blocks[g];
     for (WORD page = 0U; page < pages_written; page++)
     {
         // 条目只含本 plane 的块号 ⇒ 页基址直接由 (block, plane, page) 构造。
@@ -1450,9 +1450,9 @@ static bool pfr_close_block(ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE pages_w
  *
  * @note Policy B 下两 plane 块不同号 ⇒ 按单物理块建 Closed 条目，另一 plane 记哨兵。
  */
-static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_stats_t *stats)
+static void pfr_rebuild_closed_sb_list(ftl_ctx_s *ftl, pfr_stats_s *stats)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
 
     // Policy B：**逐 plane 独立扫描**——两 plane 的块不再同号。配对只在写入时由
     // allocator 创建，之后从不被查找（multi-plane 读的两个 PBA 各自从 L2P 查；
@@ -1463,7 +1463,7 @@ static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_stats_t *stats)
         for (WORD block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
             WORD         g = ftl_gblock(plane, block);
-            bst_block_t *b = &alloc->blocks[g];
+            bst_block_s *b = &alloc->blocks[g];
 
             // ① 坏块跳过（判据与 main.c free pool 回填一致，per-plane 块号）
             if (ftl_block_is_bad(b))
@@ -1555,9 +1555,9 @@ static void pfr_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_stats_t *stats)
  * @return true  = 恢复完成；
  *         false = 快照存在非法 word / 池标签冲突 / Closed 列表满，调用者应 reset 并回退 full metadata rebuild。
  */
-static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
+static BOOL pfr_restore_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
     WORD  *words = tbl->word;
 
     // 第 1 遍：先全量校验。任何非法 word 必须在**改动任何状态之前**拒绝——
@@ -1610,7 +1610,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
         const BYTE temp  = cp_block_word_temp(w);
         const BYTE pool  = cp_block_word_pool(w);
 
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (pfr_block_is_fixed(g))
         {
@@ -1710,7 +1710,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
         {
             continue;
         }
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1741,7 +1741,7 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
         {
             continue;
         }
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b) || (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED))
         {
@@ -1767,9 +1767,9 @@ static bool pfr_restore_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl)
  * @param tbl   块表；陈旧 LOG 擦净后回写 word，结束时置 probed
  * @param stats 统计（只累加 log_blocks / closed / anomalies / l2p_* / valid_cw）
  */
-static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t *stats)
+static void pfr_probe_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl, pfr_stats_s *stats)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
     WORD  *words = tbl->word;
 
     tbl->probed   = true;
@@ -1782,7 +1782,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t
             continue;
         }
 
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1803,7 +1803,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t
 
             // 陈旧 LOG（已不被 Directory 引用）：全页判空。
             // ⚠ 不能只看 page 0——元数据游标在写失败时会跳过该页。
-            bool any = false;
+            BOOL any = false;
 
             for (BYTE page = 0U; page < PAGES_PER_BLOCK; page++)
             {
@@ -1861,7 +1861,7 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t
 
         if (ftl_page_is_blank(pba0))
         {
-            bool later_written = false;
+            BOOL later_written = false;
 
             // 同 scan_write_pointer：page0 空白时补探 page1..3（cache batch 上限）。
             for (BYTE page = 1U; page < RECOVERY_PAGE0_PROBE_PAGES; page++)
@@ -1906,9 +1906,9 @@ static void pfr_probe_blocks(ftl_ctx_t *ftl, pfr_block_table_t *tbl, pfr_stats_t
  * @return true  = 全部块归位；
  *         false = OP/Spare 池溢出或遇到非池块（调用者回退 full metadata rebuild）。
  */
-static bool pfr_build_pools(ftl_ctx_t *ftl, const pfr_block_table_t *tbl)
+static BOOL pfr_build_pools(ftl_ctx_s *ftl, const pfr_block_table_s *tbl)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
 
     ASSERT(tbl->probed);
 
@@ -1931,7 +1931,7 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const pfr_block_table_t *tbl)
             continue;
         }
 
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1996,13 +1996,13 @@ static bool pfr_build_pools(ftl_ctx_t *ftl, const pfr_block_table_t *tbl)
  *
  * @param ftl FTL 实例
  */
-static void pfr_reset_blocks(ftl_ctx_t *ftl)
+static void pfr_reset_blocks(ftl_ctx_s *ftl)
 {
-    alc_t *alloc = &ftl->alloc;
+    alc_s *alloc = &ftl->alloc;
 
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        bst_block_t *b = &alloc->blocks[g];
+        bst_block_s *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -2031,16 +2031,16 @@ static void pfr_reset_blocks(ftl_ctx_t *ftl)
  * @brief jrn_replay 的 materialize 回调：把 PBA 所属块转成「可记账」状态。
  * 池块（FREE/OP/SPARE）⇒ Closed；BAD 忽略；固定/活 LOG 块 ⇒ false（回放不一致）。
  *
- * @param ctx replay 上下文（pfr_replay_ctx_t *）
+ * @param ctx replay 上下文（pfr_replay_ctx_s *）
  * @param pba journal 条目中的物理块地址（来自介质，先校验合法性与实例归属）
  *
  * @return true  = 块已处于可记账状态（含 BAD 块可忽略）；
  *         false = PBA 非法 / 不属于本实例 / 指向固定或活 LOG 块 / 状态非法 /
  *                 Closed 列表满（回放不一致）。
  */
-static bool pfr_materialize_pba(void *ctx, DWORD pba)
+static BOOL pfr_materialize_pba(void *ctx, DWORD pba)
 {
-    ftl_ctx_t *ftl = ((pfr_replay_ctx_t *)ctx)->ftl;
+    ftl_ctx_s *ftl = ((pfr_replay_ctx_s *)ctx)->ftl;
 
     // journal 条目来自介质（H29 不可信输入）：先校验 PBA 属于本实例且字段合法，
     // 否则会把 valid_count 记到别的块，而 L2P 存下一个越界地址。
@@ -2049,7 +2049,7 @@ static bool pfr_materialize_pba(void *ctx, DWORD pba)
         return false; /* block_ctx.ok=false ⇒ 调用者回退 full metadata rebuild */
     }
 
-    alc_t     *alloc = &ftl->alloc;
+    alc_s     *alloc = &ftl->alloc;
     const WORD g     = ftl_pba_gblock(pba);
 
     if (g >= FTL_BLOCK_TOTAL || pfr_block_is_fixed(g))
@@ -2057,7 +2057,7 @@ static bool pfr_materialize_pba(void *ctx, DWORD pba)
         return false;
     }
 
-    bst_block_t *b = &alloc->blocks[g];
+    bst_block_s *b = &alloc->blocks[g];
 
     if (ftl_block_is_bad(b))
     {
@@ -2105,13 +2105,13 @@ static bool pfr_materialize_pba(void *ctx, DWORD pba)
  * @brief jrn_replay 的 valid_count 增量端口（带守卫：越界/上溢置 *ok=false）。
  * materialize 已保证该块处于可记账状态；这里只做范围检查与 BST 单数据源更新。
  *
- * @param ctx replay 上下文（pfr_replay_ctx_t *）
+ * @param ctx replay 上下文（pfr_replay_ctx_s *）
  * @param pba 物理块地址
  * @param ok  出参：块号越界或 valid_count 上溢时置 false，否则不改
  */
-static void pfr_valid_add(void *ctx, DWORD pba, bool *ok)
+static void pfr_valid_add(void *ctx, DWORD pba, BOOL *ok)
 {
-    ftl_ctx_t *ftl = ((pfr_replay_ctx_t *)ctx)->ftl;
+    ftl_ctx_s *ftl = ((pfr_replay_ctx_s *)ctx)->ftl;
 
     const WORD g = ftl_pba_gblock(pba);
 
@@ -2121,7 +2121,7 @@ static void pfr_valid_add(void *ctx, DWORD pba, bool *ok)
         return;
     }
 
-    bst_block_t *b = &ftl->alloc.blocks[g];
+    bst_block_s *b = &ftl->alloc.blocks[g];
 
     if (ftl_block_is_bad(b))
     {
@@ -2138,15 +2138,15 @@ static void pfr_valid_add(void *ctx, DWORD pba, bool *ok)
 /**
  * @brief jrn_replay 的 valid_count 递减端口（带守卫：越界/下溢置 *ok=false）。
  *
- * @param ctx replay 上下文（pfr_replay_ctx_t *）
+ * @param ctx replay 上下文（pfr_replay_ctx_s *）
  * @param pba 物理块地址
  * @param ok  出参：块号越界时置 false，否则不改（减到 0 只计数，不置 false）
  */
-static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok)
+static void pfr_valid_sub(void *ctx, DWORD pba, BOOL *ok)
 {
-    pfr_replay_ctx_t *rctx  = (pfr_replay_ctx_t *)ctx;
-    ftl_ctx_t        *ftl   = rctx->ftl;
-    pfr_stats_t      *stats = rctx->stats;
+    pfr_replay_ctx_s *rctx  = (pfr_replay_ctx_s *)ctx;
+    ftl_ctx_s        *ftl   = rctx->ftl;
+    pfr_stats_s      *stats = rctx->stats;
 
     const WORD g = ftl_pba_gblock(pba);
 
@@ -2156,7 +2156,7 @@ static void pfr_valid_sub(void *ctx, DWORD pba, bool *ok)
         return;
     }
 
-    bst_block_t *b = &ftl->alloc.blocks[g];
+    bst_block_s *b = &ftl->alloc.blocks[g];
 
     if (ftl_block_is_bad(b))
     {

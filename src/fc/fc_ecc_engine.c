@@ -26,24 +26,24 @@
 // LDPC 的真正优势在低码率（r<0.9）和软判决场景。
 
 // 全局 BCH / QC-LDPC 引擎实例（单例，首次使用惰性初始化）
-static fc_bch_control_t *g_bch = NULL;
+static fc_bch_control_s *g_bch = NULL;
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
-typedef struct
+typedef struct FC_LDPC_QC_S
 {
     BYTE initialized;
     BYTE max_iter;
-} fc_ldpc_qc_t;
+} fc_ldpc_qc_s;
 
-static fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter);
-static void          fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out);
-static fc_status_e   fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data);
+static fc_ldpc_qc_s *fc_ldpc_qc_init(BYTE max_iter);
+static void          fc_ldpc_qc_encode(const fc_ldpc_qc_s *qc, const BYTE *data_in, BYTE *data_out);
+static fc_status_e   fc_ldpc_qc_decode(fc_ldpc_qc_s *qc, BYTE *data);
 
-static fc_ldpc_qc_t *s_qc = NULL;
+static fc_ldpc_qc_s *s_qc = NULL;
 #endif
 
 // 惰性初始化的单次日志标志：成功/失败各只打印一次，避免每次编解码刷屏。
-static bool s_bch_init_failed = false;
-static bool s_bch_init_logged = false;
+static BOOL s_bch_init_failed = false;
+static BOOL s_bch_init_logged = false;
 
 /**
  * @brief 惰性初始化 BCH 引擎（m=13, t=4）
@@ -274,7 +274,7 @@ static BYTE g_col_weight[QC_N]; /* 每列权重（固定为 3） */
 static WORD g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U]; /* 每行约 198 个 */
 static WORD g_row_weight[QC_M];
 
-static bool g_initialized = false;
+static BOOL g_initialized = false;
 
 /* ── 伪随机数生成器（固定种子，保证每次编译生成相同 H） ────── */
 
@@ -397,7 +397,7 @@ static void qc_expand_links(void)
  * @param data_in 528B 码字缓冲（前 520B 为数据）
  * @param data_out 输出：528B 码字（数据 + parity）
  */
-static void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE *data_out)
+static void fc_ldpc_qc_encode(const fc_ldpc_qc_s *qc, const BYTE *data_in, BYTE *data_out)
 {
     BYTE  parity[8];
     DWORD bit_pos, i;
@@ -450,7 +450,7 @@ static void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc, const BYTE *data_in, BYTE 
  * @param data 528B 码字缓冲（原地纠正）
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR（不可纠）/ FC_STATUS_INVALID_ARGUMENT（未初始化）
  */
-static fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
+static fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_s *qc, BYTE *data)
 {
     BYTE  syndromes[QC_M];
     BYTE  col_failures[QC_N];
@@ -559,9 +559,9 @@ static fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
  * @param max_iter 最大迭代轮数，0 表示取默认 15
  * @return 引擎句柄
  */
-static fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
+static fc_ldpc_qc_s *fc_ldpc_qc_init(BYTE max_iter)
 {
-    static fc_ldpc_qc_t g_qc;
+    static fc_ldpc_qc_s g_qc;
 
     if (g_initialized)
     {

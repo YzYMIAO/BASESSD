@@ -3,7 +3,7 @@
  *
  * 模块职责（全局单例，非 per-instance）：
  *   ① request 表    command_id 映射到 {ctx, op}；
- *   ② 实例路由表    (ch,ce,lun) 经 compact die 映射到 ftl_ctx_t；
+ *   ② 实例路由表    (ch,ce,lun) 经 compact die 映射到 ftl_ctx_s；
  *   ③ 服务函数数组  request.op 映射到完成服务函数；
  *   ④ 提交          ftl_op_submit / ftl_op_submit_batch；
  *   ⑤ 派发/排空     ftl_op_drain（每条完成的派发在循环体内）。
@@ -29,7 +29,7 @@
 
 #include "assertion.h"
 #include "fc.h"               /* fc_submit / fc_poll_completion / fc_command_release */
-#include "ftl.h"              /* ftl_ctx_t */
+#include "ftl.h"              /* ftl_ctx_s */
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
 #include "l2p_cache.h"        /* die_2_ch/ce/lun（die → 坐标的唯一分解点） */
 #include "log.h"
@@ -37,16 +37,16 @@
 #include <string.h>
 
 // 服务函数定义在本文件末尾；g_op_callbacks 初始化时必须先见到它。
-static void ftl_sync_wait_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /* ── 1. 静态资源 ── */
 
 // request 表按 FC command_id 直接索引；容量 = 命令池深度，没有“表满”路径。
-static ftl_op_req_t g_op_req[FTL_OP_REQ_TABLE_SIZE];
+static ftl_op_req_s g_op_req[FTL_OP_REQ_TABLE_SIZE];
 
 // 实例路由表：按紧凑 die 号 → FTL 实例。命令完成仍带 (ch,ce,lun)，
 // 由 chcelun_2_die() 唯一漏斗转换后查表。
-static ftl_ctx_t *g_op_route[FTL_DIE_MAX];
+static ftl_ctx_s *g_op_route[FTL_DIE_MAX];
 
 // 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 → 普通变量即可。
 static BYTE g_dispatch_depth = 0U;
@@ -112,7 +112,7 @@ void ftl_op_init(void)
  * @note 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  *       否则触发 -Wunused-function）。
  */
-static bool __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
+static BOOL __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
 {
     switch (op)
     {
@@ -151,7 +151,7 @@ ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx)
     ASSERT(op < FTL_OP_COUNT);
     ASSERT((ctx != NULL) || (ftl_op_requires_ctx((BYTE)op) == false));
 
-    // cmd_id 来自 ftl_cmd_id()；池外指针会得到 FC_COMMAND_ID_INVALID (0xFFFF)。
+    // cmd_id 来自 ftl_cmd_id()；池外指针会得到 FC_CMD_ID_INVALID (0xFFFF)。
     // 登记要写 g_op_req[cmd_id]，越界即踩相邻静态表 —— release 下不能只靠 ASSERT
     // 裁空（H14），这里同时保留运行期拒绝。
     ASSERT(cmd_id < FTL_OP_REQ_TABLE_SIZE);
@@ -219,7 +219,7 @@ WORD ftl_op_req_count(void)
  *
  * @param route die → 实例表
  */
-void ftl_op_route_set(ftl_ctx_t *const *route)
+void ftl_op_route_set(ftl_ctx_s *const *route)
 {
     for (BYTE die = 0U; die < FTL_DIE_MAX; die++)
     {
@@ -237,7 +237,7 @@ void ftl_op_route_set(ftl_ctx_t *const *route)
  * @param lun 目标 lun
  * @return 实例；NULL = 未绑定
  */
-ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
+ftl_ctx_s *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
 {
     const BYTE die = chcelun_2_die(ch, ce, lun);
 
@@ -260,11 +260,11 @@ ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun)
  *
  * @return true 一致；false 不一致
  */
-bool ftl_op_route_verify(void)
+BOOL ftl_op_route_verify(void)
 {
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        const ftl_ctx_t *owner = g_op_route[die];
+        const ftl_ctx_s *owner = g_op_route[die];
 
         if ((owner == NULL) || (topo_2_die(owner->topo) != die))
         {
@@ -284,7 +284,7 @@ bool ftl_op_route_verify(void)
  * @param global_region 全局 region
  * @return 实例；NULL = 未绑定
  */
-ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
+ftl_ctx_s *ftl_op_route_get_region(DWORD global_region)
 {
     ASSERT(DIE_MAX != 0U);
 
@@ -298,11 +298,11 @@ ftl_ctx_t *ftl_op_route_get_region(DWORD global_region)
  *
  * @return true 有未收尾序列
  */
-bool ftl_op_cache_seq_active(void)
+BOOL ftl_op_cache_seq_active(void)
 {
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        const ftl_ctx_t *ftl = g_op_route[die];
+        const ftl_ctx_s *ftl = g_op_route[die];
 
         // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
         // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
@@ -322,7 +322,7 @@ bool ftl_op_cache_seq_active(void)
  *
  * @return true 应挂起
  */
-bool ftl_op_bg_submit_deferred(void)
+BOOL ftl_op_bg_submit_deferred(void)
 {
     if (ftl_op_cache_seq_active() == true)
     {
@@ -331,7 +331,7 @@ bool ftl_op_bg_submit_deferred(void)
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        const ftl_ctx_t *ftl = g_op_route[die];
+        const ftl_ctx_s *ftl = g_op_route[die];
 
         if (ftl == NULL)
         {
@@ -340,7 +340,7 @@ bool ftl_op_bg_submit_deferred(void)
 
         for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
         {
-            const pend_group_t *g = &ftl->pending.groups[gi];
+            const pend_group_s *g = &ftl->pending.groups[gi];
 
             if ((g->used == true) && ((g->outstanding != 0U) || (g->next < g->total)))
             {
@@ -373,9 +373,9 @@ bool ftl_op_bg_submit_deferred(void)
  * @return true —— 被门控拒绝；
  * @return false —— 放行。
  */
-static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
+static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
 {
-    ftl_ctx_t *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
+    ftl_ctx_s *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
 
     if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
     {
@@ -399,10 +399,10 @@ static bool ftl_op_seq_gate(const fc_command_t *cmd, ftl_op_id_e op)
  * @param ctx 服务上下文
  * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 编程错误
  */
-ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
+ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
 {
     // cmd 由调用者从 fc_command_alloc() 取得（池外指针 ftl_cmd_id() 会给
-    // FC_COMMAND_ID_INVALID，登记入口的 cmd_id 断言会拦下）。
+    // FC_CMD_ID_INVALID，登记入口的 cmd_id 断言会拦下）。
     ASSERT(cmd != NULL);
 
     if (ftl_op_seq_gate(cmd, op) == true)
@@ -441,7 +441,7 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
  * @param ctx  服务上下文
  * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 编程错误
  */
-ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_e op, void *ctx)
+ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op, void *ctx)
 {
     ASSERT(cmds != NULL);
     ASSERT(n > 0U);
@@ -500,7 +500,7 @@ ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_
  *
  * @return true 正在派发
  */
-bool ftl_op_is_in_dispatch(void)
+BOOL ftl_op_is_in_dispatch(void)
 {
     return (g_dispatch_depth != 0U);
 }
@@ -512,15 +512,15 @@ bool ftl_op_is_in_dispatch(void)
  */
 void ftl_op_drain(void)
 {
-    fc_command_status_t completion;
+    fc_cmd_status_s completion;
 
     while (fc_poll_completion(&completion) == FC_STATUS_OK)
     {
         // command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
-        fc_command_t *cmd = fc_command_id_to_command(completion.command_id);
+        fc_cmd_s *cmd = fc_command_id_to_command(completion.command_id);
 
         // 与上面同一个 id 索引 request 表（容量 = 命令池深度）。
-        ftl_op_req_t *req = &g_op_req[completion.command_id];
+        ftl_op_req_s *req = &g_op_req[completion.command_id];
 
         // 先取 {ctx,op} 并清项，再回调：服务函数可以在自己的回调里重入登记/释放
         // 表项。未登记 = 孤儿/迟到完成（如 sync wait 超时已摘项），只释放命令并留痕。
@@ -553,7 +553,7 @@ void ftl_op_drain(void)
         // 路由表由 main.c 在逐实例 boot 之前设好（见 ssd_ftl_boot_all ①：先
         // ftl_op_init 清一次、再 route_set），boot 期 full metadata rebuild 会经
         // l2p_read_sync 抽完成表；故此处解析出 NULL 只可能是编程错误。
-        ftl_ctx_t *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
+        ftl_ctx_s *ftl = ftl_op_route_get(cmd->route.ch, cmd->route.ce, cmd->route.lun);
 
         // 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
         // "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。
@@ -573,16 +573,16 @@ void ftl_op_drain(void)
  *
  * @param ftl        实例（本函数不用）。
  * @param completion FC 完成状态。
- * @param ctx        `ftl_sync_waiter_t *`；request 表保证非 NULL。
+ * @param ctx        `ftl_sync_waiter_s *`；request 表保证非 NULL。
  *
  * @note 超时后的迟到完成不会到这里：超时已把 request 表项摘掉，ftl_op_drain 走
  *       “completion without request” 分支，只 release 命令。
  */
-static void ftl_sync_wait_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
+static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
 {
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
 
-    ftl_sync_waiter_t *waiter = (ftl_sync_waiter_t *)ctx;
+    ftl_sync_waiter_s *waiter = (ftl_sync_waiter_s *)ctx;
 
     ASSERT(waiter != NULL);
 

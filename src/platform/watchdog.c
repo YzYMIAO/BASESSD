@@ -13,25 +13,25 @@
 
 #include <string.h>
 
-static storage_wdg_config_t        g_storage_wdg_config;
-static storage_wdg_status_t        g_storage_wdg_status;
-static storage_wdg_recovery_hook_t g_storage_wdg_recovery_hook;
+static storage_wdg_cfg_s              g_storage_wdg_config;
+static storage_wdg_status_s           g_storage_wdg_status;
+static storage_wdg_recovery_hook_fn_t g_storage_wdg_recovery_hook;
 /* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
 static DWORD g_storage_wdg_last_wwdg_refresh_ms;
 
-static bool storage_wdg_domain_is_valid(wdg_domain_e domain)
+static BOOL storage_wdg_domain_is_valid(wdg_domain_e domain)
 {
     /* 防止调用方传入损坏的枚举值并越界访问 per-domain 数组。 */
     return (domain < STORAGE_WDG_DOMAIN_COUNT);
 }
 
-static bool storage_wdg_elapsed(DWORD now_ms, DWORD since_ms, DWORD limit_ms)
+static BOOL storage_wdg_elapsed(DWORD now_ms, DWORD since_ms, DWORD limit_ms)
 {
     /* 毫秒计数约 49 天回绕一次；无符号减法可正确表示短时间间隔。 */
     return ((now_ms - since_ms) > limit_ms);
 }
 
-static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, wdg_domain_e *timed_out_domain)
+static BOOL storage_wdg_all_required_domains_healthy(DWORD now_ms, wdg_domain_e *timed_out_domain)
 {
     DWORD index;
 
@@ -79,7 +79,7 @@ static void storage_wdg_latch_fault(wdg_domain_e domain, wdg_fault_e fault)
     }
 }
 
-bool storage_wdg_init(const storage_wdg_config_t *config)
+BOOL storage_wdg_init(const storage_wdg_cfg_s *config)
 {
     DWORD now_ms;
     DWORD index;
@@ -124,7 +124,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
     return true;
 }
 
-void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook)
+void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_fn_t hook)
 {
     g_storage_wdg_recovery_hook = hook;
 }
@@ -218,7 +218,7 @@ void storage_watchdog_task(void *context, DWORD now_ms)
     storage_wdg_service();
 }
 
-void storage_wdg_get_status(storage_wdg_status_t *status)
+void storage_wdg_get_status(storage_wdg_status_s *status)
 {
     if (status != NULL)
     {

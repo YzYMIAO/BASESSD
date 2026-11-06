@@ -1,31 +1,31 @@
 
 #include "common.h"
 
-struct ListNode
+typedef struct LIST_NODE_S
 {
-    int              val;
-    struct ListNode *next;
-};
+    int                 val;
+    struct LIST_NODE_S *next;
+} list_node_s;
 
-static inline void free_link_list(struct ListNode *list)
+static inline void free_link_list(list_node_s *list)
 {
     while (list != NULL)
     {
-        struct ListNode *next = list->next;
+        list_node_s *next = list->next;
         free(list);
         list = next;
     }
 }
 
-bool hasCycle(struct ListNode *head)
+BOOL hasCycle(list_node_s *head)
 {
     if (head == NULL || head->next == NULL)
     {
         return false;
     }
 
-    struct ListNode *slow = head;
-    struct ListNode *fast = head->next;
+    list_node_s *slow = head;
+    list_node_s *fast = head->next;
 
     while (fast != slow)
     {
@@ -41,11 +41,11 @@ bool hasCycle(struct ListNode *head)
     return true;
 }
 
-struct ListNode *addTwoNumbers(struct ListNode *l1, struct ListNode *l2)
+list_node_s *addTwoNumbers(list_node_s *l1, list_node_s *l2)
 {
-    struct ListNode  dummy;
-    struct ListNode *tail  = &dummy;
-    int              carry = 0;
+    list_node_s  dummy;
+    list_node_s *tail  = &dummy;
+    int          carry = 0;
 
     while (l1 != NULL || l2 != NULL || carry)
     {
@@ -63,13 +63,13 @@ struct ListNode *addTwoNumbers(struct ListNode *l1, struct ListNode *l2)
             l2 = l2->next;
         }
 
-        struct ListNode *new = (struct ListNode *)malloc(sizeof(struct ListNode));
+        list_node_s *new = (list_node_s *)malloc(sizeof(list_node_s));
 
         if (new == NULL)
         {
             while (dummy.next != NULL)
             {
-                struct ListNode *next = dummy.next->next;
+                list_node_s *next = dummy.next->next;
                 free(dummy.next);
                 dummy.next = next;
             }
@@ -87,10 +87,10 @@ struct ListNode *addTwoNumbers(struct ListNode *l1, struct ListNode *l2)
     return dummy.next;
 }
 
-struct ListNode *mergeTwoLists(struct ListNode *list1, struct ListNode *list2)
+list_node_s *mergeTwoLists(list_node_s *list1, list_node_s *list2)
 {
-    struct ListNode  dummy;
-    struct ListNode *tail = &dummy;
+    list_node_s  dummy;
+    list_node_s *tail = &dummy;
 
     while (list1 != NULL || list2 != NULL)
     {
@@ -123,13 +123,13 @@ struct ListNode *mergeTwoLists(struct ListNode *list1, struct ListNode *list2)
             }
         }
 
-        struct ListNode *new = (struct ListNode *)malloc(sizeof(struct ListNode));
+        list_node_s *new = (list_node_s *)malloc(sizeof(list_node_s));
 
         if (new == NULL)
         {
             while (dummy.next != NULL)
             {
-                struct ListNode *next = dummy.next->next;
+                list_node_s *next = dummy.next->next;
                 free(dummy.next);
                 dummy.next = next;
             }
@@ -144,38 +144,32 @@ struct ListNode *mergeTwoLists(struct ListNode *list1, struct ListNode *list2)
     }
 
     return dummy.next;
+}
 
-} /**
-   * Definition for a Node.
-   * struct Node {
-   *	   int val;
-   *	   struct Node *next;
-   *	   struct Node *random;
-   * };
-   */
-struct Node
+/* 带 random 指针的链表节点。 */
+typedef struct RANDOM_LIST_NODE_S
 {
-    int          val;
-    struct Node *next;
-    struct Node *random;
-};
+    int                        val;
+    struct RANDOM_LIST_NODE_S *next;
+    struct RANDOM_LIST_NODE_S *random;
+} random_list_node_s;
 
-struct Node *copyRandomList(struct Node *head)
+random_list_node_s *copyRandomList(random_list_node_s *head)
 {
     if (head == NULL)
     {
         return NULL;
     }
 
-    for (struct Node *node = head; node != NULL; node = node->next->next)
+    for (random_list_node_s *node = head; node != NULL; node = node->next->next)
     {
-        struct Node *new_node = (struct Node *)malloc(sizeof(struct Node));
+        random_list_node_s *new_node = (random_list_node_s *)malloc(sizeof(random_list_node_s));
 
         if (new_node == NULL)
         {
-            for (struct Node *cur = head; cur != NULL; cur = cur->next)
+            for (random_list_node_s *cur = head; cur != NULL; cur = cur->next)
             {
-                struct Node *copy = cur->next;
+                random_list_node_s *copy = cur->next;
 
                 if (cur->next != NULL)
                 {
@@ -192,49 +186,49 @@ struct Node *copyRandomList(struct Node *head)
         node->next     = new_node;
     }
 
-    for (struct Node *node = head; node != NULL; node = node->next->next)
+    for (random_list_node_s *node = head; node != NULL; node = node->next->next)
     {
-        struct Node *copy = node->next;
-        copy->random      = (node->random != NULL) ? node->random->next : NULL;
+        random_list_node_s *copy = node->next;
+        copy->random             = (node->random != NULL) ? node->random->next : NULL;
     }
 
-    struct Node *copyhead = head->next;
+    random_list_node_s *copyhead = head->next;
 
-    for (struct Node *node = head; node != NULL; node = node->next)
+    for (random_list_node_s *node = head; node != NULL; node = node->next)
     {
-        struct Node *copy = node->next;
-        node->next        = node->next->next;
-        copy->next        = (copy->next != NULL) ? copy->next->next : NULL;
+        random_list_node_s *copy = node->next;
+        node->next               = node->next->next;
+        copy->next               = (copy->next != NULL) ? copy->next->next : NULL;
     }
 
     return copyhead;
 }
 
-struct ListNode *reverseBetween(struct ListNode *head, int left, int right)
+list_node_s *reverseBetween(list_node_s *head, int left, int right)
 {
     if (head == NULL || left == right)
     {
         return NULL;
     }
 
-    struct ListNode dummy;
-    dummy.next            = head;
-    struct ListNode *prev = &dummy;
+    list_node_s dummy;
+    dummy.next        = head;
+    list_node_s *prev = &dummy;
 
     for (int i = 0; i < left; i++)
     {
         prev = prev->next;
     }
 
-    struct ListNode *left_node = prev->next;
-    struct ListNode *cur       = left_node->next;
+    list_node_s *left_node = prev->next;
+    list_node_s *cur       = left_node->next;
 
     for (int i = left + 1; i <= right; i++)
     {
-        struct ListNode *next = cur->next;
-        cur->next             = prev->next;
-        prev->next            = cur;
-        cur                   = next;
+        list_node_s *next = cur->next;
+        cur->next         = prev->next;
+        prev->next        = cur;
+        cur               = next;
     }
 
     left_node->next = cur;
@@ -242,14 +236,14 @@ struct ListNode *reverseBetween(struct ListNode *head, int left, int right)
     return dummy.next;
 }
 
-struct ListNode *removeNthFromEnd(struct ListNode *head, int n)
+list_node_s *removeNthFromEnd(list_node_s *head, int n)
 {
     // 1. 使用哑节点简化边界处理
-    struct ListNode dummy;
+    list_node_s dummy;
     dummy.next = head;
 
     // 2. 快指针先走 n 步
-    struct ListNode *fast = head;
+    list_node_s *fast = head;
 
     for (int i = 0; i < n; i++)
     {
@@ -257,7 +251,7 @@ struct ListNode *removeNthFromEnd(struct ListNode *head, int n)
     }
 
     // 3. 慢指针从哑节点开始，快慢一起走
-    struct ListNode *slow = &dummy;
+    list_node_s *slow = &dummy;
 
     while (fast != NULL)
     {
@@ -266,24 +260,24 @@ struct ListNode *removeNthFromEnd(struct ListNode *head, int n)
     }
 
     // 4. 此时 slow 指向待删除节点的前一个节点
-    struct ListNode *toDelete = slow->next;
-    slow->next                = toDelete->next;
+    list_node_s *toDelete = slow->next;
+    slow->next            = toDelete->next;
     free(toDelete);
 
     return dummy.next;
 }
 
-struct ListNode *deleteDuplicates(struct ListNode *head)
+list_node_s *deleteDuplicates(list_node_s *head)
 {
     if (head == NULL)
     {
         return NULL;
     }
 
-    struct ListNode dummy;
-    dummy.next            = head;
-    dummy.val             = INT_MAX;
-    struct ListNode *prev = &dummy;
+    list_node_s dummy;
+    dummy.next        = head;
+    dummy.val         = INT_MAX;
+    list_node_s *prev = &dummy;
 
     while (prev->next != NULL && prev->next->next != NULL)
     {
@@ -293,7 +287,7 @@ struct ListNode *deleteDuplicates(struct ListNode *head)
 
             while (prev->next != NULL && prev->next->val == plicate_val)
             {
-                struct ListNode *next = prev->next->next;
+                list_node_s *next = prev->next->next;
                 free(prev->next);
                 prev->next = next;
             }
@@ -306,15 +300,15 @@ struct ListNode *deleteDuplicates(struct ListNode *head)
     return dummy.next;
 }
 
-struct ListNode *rotateRight(struct ListNode *head, int k)
+list_node_s *rotateRight(list_node_s *head, int k)
 {
     if (head == NULL || k == 0)
     {
         return head;
     }
 
-    int              len = 0;
-    struct ListNode *cur = head;
+    int          len = 0;
+    list_node_s *cur = head;
     while (cur != NULL)
     {
         len++;
@@ -326,12 +320,12 @@ struct ListNode *rotateRight(struct ListNode *head, int k)
         return head;
     }
 
-    struct ListNode dummy;
+    list_node_s dummy;
     dummy.next = head;
     dummy.val  = INT_MAX;
 
-    struct ListNode *fast = &dummy;
-    struct ListNode *slow = &dummy;
+    list_node_s *fast = &dummy;
+    list_node_s *slow = &dummy;
     for (int i = 0; i < k; i++)
     {
         fast = fast->next;
@@ -343,9 +337,9 @@ struct ListNode *rotateRight(struct ListNode *head, int k)
         slow = slow->next;
     }
 
-    struct ListNode *new_head = slow->next;
-    struct ListNode *new_tail = slow;
-    struct ListNode *old_tail = fast;
+    list_node_s *new_head = slow->next;
+    list_node_s *new_tail = slow;
+    list_node_s *old_tail = fast;
 
     dummy.next     = new_head;
     new_tail->next = NULL;
@@ -354,16 +348,16 @@ struct ListNode *rotateRight(struct ListNode *head, int k)
     return dummy.next;
 }
 
-struct ListNode *partition(struct ListNode *head, int x)
+list_node_s *partition(list_node_s *head, int x)
 {
-    struct ListNode smallhead;
-    struct ListNode largehead;
+    list_node_s smallhead;
+    list_node_s largehead;
     smallhead.next = NULL;
     largehead.next = NULL;
 
-    struct ListNode *cur        = head;
-    struct ListNode *small_tail = &smallhead; // ✅ 初始化为头节点
-    struct ListNode *large_tail = &largehead; // ✅ 初始化为头节点
+    list_node_s *cur        = head;
+    list_node_s *small_tail = &smallhead; // ✅ 初始化为头节点
+    list_node_s *large_tail = &largehead; // ✅ 初始化为头节点
 
     while (cur != NULL)
     {

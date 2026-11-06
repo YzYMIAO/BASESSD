@@ -17,7 +17,7 @@
  * 返回 false 表示控制器初始化失败，此后 usb_device_task() 仍可安全调用
  * （TinyUSB 未初始化时直接返回）。
  */
-bool usb_device_init(void);
+BOOL usb_device_init(void);
 
 /*
  * 在主循环周期调用，处理 TinyUSB 设备事件。

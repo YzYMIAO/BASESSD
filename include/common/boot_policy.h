@@ -16,13 +16,13 @@
 #define BOOT_SLOT_COUNT           2U
 #define BOOT_SLOT_NONE            UINT32_MAX
 
-typedef enum
+typedef enum BOOT_SLOT_E
 {
     BOOT_SLOT_A = 0,
     BOOT_SLOT_B = 1
 } boot_slot_e;
 
-typedef enum
+typedef enum BOOT_STATUS_E
 {
     BOOT_POLICY_OK               = 0U,
     BOOT_POLICY_INVALID_ARGUMENT = 1U,
@@ -37,7 +37,7 @@ typedef enum
  * 固件镜像头。payload_hash 覆盖紧跟镜像头的完整 payload；signature 的
  * 具体算法由产品安全方案决定，参考接口不把 ECDSA/Ed25519 固化在策略层。
  */
-typedef struct
+typedef struct BOOT_IMAGE_HEADER_S
 {
     DWORD magic;
     DWORD header_version;
@@ -54,13 +54,13 @@ typedef struct
     BYTE  payload_hash[BOOT_SHA256_SIZE];
     BYTE  signature[BOOT_SIGNATURE_SIZE];
     DWORD header_crc32;
-} boot_image_header_t;
+} boot_image_hdr_s;
 
 /*
  * A/B 启动记录应在 Flash 中保留至少两份。sequence 用于掉电后选择最新
  * 完整记录；pending_slot 只有在新固件完成自检后才会转为 active_slot。
  */
-typedef struct
+typedef struct BOOT_METADATA_S
 {
     DWORD magic;
     DWORD format_version;
@@ -71,9 +71,9 @@ typedef struct
     DWORD successful_mask;
     DWORD firmware_version[BOOT_SLOT_COUNT];
     DWORD crc32;
-} boot_metadata_t;
+} boot_metadata_s;
 
-typedef struct
+typedef struct BOOT_IMAGE_CONSTRAINTS_S
 {
     DWORD chip_id;
     DWORD hardware_revision;
@@ -81,28 +81,28 @@ typedef struct
     DWORD image_capacity;
     DWORD executable_start;
     DWORD executable_end; /* 半开区间 [start, end) */
-} boot_image_constraints_t;
+} boot_image_constraints_s;
 
 /* 返回 0 表示签名可信；非 0 表示验证失败。 */
-typedef int (*boot_signature_verify_fn)(const boot_image_header_t *header, void *context);
+typedef int (*boot_signature_verify_fn_t)(const boot_image_hdr_s *header, void *context);
 
 DWORD boot_crc32(const void *data, size_t size);
 
-void boot_image_header_finalize(boot_image_header_t *header);
-int  boot_image_validate(const boot_image_header_t *header, const boot_image_constraints_t *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn verify_signature, void *verify_context);
+void boot_image_header_finalize(boot_image_hdr_s *header);
+int  boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context);
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot, DWORD active_firmware_version);
-void boot_metadata_finalize(boot_metadata_t *metadata);
-int  boot_metadata_is_valid(const boot_metadata_t *metadata);
-int  boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, DWORD *selected_copy);
+void boot_metadata_initialize(boot_metadata_s *metadata, boot_slot_e active_slot, DWORD active_firmware_version);
+void boot_metadata_finalize(boot_metadata_s *metadata);
+int  boot_metadata_is_valid(const boot_metadata_s *metadata);
+int  boot_metadata_select_latest(const boot_metadata_s copies[2], boot_metadata_s *selected, DWORD *selected_copy);
 
 /*
  * 根据镜像验证结果选择本次槽位。函数会先扣减 pending 槽的尝试次数，调用者
  * 必须在启动镜像前将更新后的 metadata 原子地写入另一份元数据副本。
  */
-int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed);
+int boot_policy_select_slot(boot_metadata_s *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed);
 
 /* 主固件完成最低可用自检后调用，并将返回的记录写入 Flash。 */
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_e running_slot, DWORD firmware_version);
+int boot_policy_confirm_success(boot_metadata_s *metadata, boot_slot_e running_slot, DWORD firmware_version);
 
 #endif /* SSD_FIRMWARE_BOOT_POLICY_H */

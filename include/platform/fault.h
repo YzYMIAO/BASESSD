@@ -17,7 +17,7 @@
  */
 
 /* 异常种类，取值等于 IPSR 异常号。 */
-typedef enum
+typedef enum FAULT_KIND_E
 {
     FAULT_KIND_NMI        = 2,
     FAULT_KIND_HARDFAULT  = 3,
@@ -27,7 +27,7 @@ typedef enum
 } fault_kind_e;
 
 /* 捕获到的故障现场。 */
-typedef struct
+typedef struct FAULT_CONTEXT_S
 {
     DWORD kind;       /* fault_kind_e */
     DWORD sp;         /* 出错时使用的栈指针（MSP 或 PSP） */
@@ -67,7 +67,7 @@ typedef struct
      *     到底对没对齐」；帧里没有 R4~R11，这是唯一能补回来的一个。
      * 注意 handler 态的 CONTROL.FPCA 恒为 0（入异常时被清），不能用它判扩展帧。 */
     DWORD r7;
-} fault_ctx_t;
+} fault_ctx_s;
 
 /* 使能 MemManage/BusFault/UsageFault，避免全部升级成 HardFault，便于区分。 */
 void fault_init(void);
@@ -76,14 +76,14 @@ void fault_init(void);
 void fault_report_boot(void);
 
 /* 弱符号扩展点：故障捕获后、停机前调用（默认空实现）。 */
-void fault_hook(const fault_ctx_t *ctx);
+void fault_hook(const fault_ctx_s *ctx);
 
 /*
  * ---- 共享入口：由 port 侧的异常入口调用 ----
  */
 
 /* 打印现场、落崩溃记录、调用 hook，然后停机（不返回）。 */
-void fault_report_and_halt(const fault_ctx_t *ctx);
+void fault_report_and_halt(const fault_ctx_s *ctx);
 
 /*
  * ---- port 接口：由 src/platform/<soc>/fault_port.c 实现 ----

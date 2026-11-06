@@ -128,7 +128,7 @@ _Static_assert(L3_BLOCK_HI < BLOCKS_PER_PLANE, "随机窗口越过本 plane 块�
  * （见 fc_test_common.h「二」），故本宏不写这两组字段。
  * 用法：`&L3_CONF(OP_READ_ID, FC_CRC_ENABLE)`（复合字面量，可取地址）。
  * ⚠ cache helper 只取本 config 的模式位，operation 被逐步覆盖（填什么都行）。 */
-#define L3_CONF(operation_, crc_) ((const fc_cmd_conf_t){.operation = (DWORD)(operation_), .crc = (crc_), .random = FC_RANDOM_DISABLE, .ldpc = FC_ECC_MODE_LDPC_RAW, .raid = FC_RAID_MODE_NORMAL})
+#define L3_CONF(operation_, crc_) ((const fc_cmd_cfg_s){.operation = (DWORD)(operation_), .crc = (crc_), .random = FC_RANDOM_DISABLE, .ldpc = FC_ECC_MODE_LDPC_RAW, .raid = FC_RAID_MODE_NORMAL})
 
 /**************************************************************************
  *  随机地址（v1.22）
@@ -267,14 +267,14 @@ static uint8_t l3_cws_draw(const char *test, uint8_t cws[L3_CWS_MAX])
  *  期望值取 desc->paa 本身（写路径填源槽用的就是它），因此天然含 block/page 维度。
  **************************************************************************/
 
-static void verify_chain_paa(const fc_command_t *cmd)
+static void verify_chain_paa(const fc_cmd_s *cmd)
 {
     const uint8_t n = test_cw_count(cmd);
 
     for (uint8_t i = 0U; i < n; i++)
     {
-        const fc_descriptor_t *desc = test_cw_desc(cmd, i);
-        const uint8_t         *user = test_cw_user(cmd, i);
+        const fc_desc_s *desc = test_cw_desc(cmd, i);
+        const uint8_t   *user = test_cw_user(cmd, i);
 
         munit_assert_not_null(desc);
         munit_assert_not_null(user);
@@ -303,16 +303,16 @@ static void verify_chain_paa(const fc_command_t *cmd)
  * 整页不是有效码字 ⇒ CRC/META 天然置位；ECC 被跳过 ⇒ 不会出现 EMPTY。
  * 只要没有 FAIL / UNC / RAID（介质或数据路径真错误），就认为擦除态读回成立；
  * 数据全 0xFF 由 test_verify_erased 另行逐字节断言。 */
-static uint8_t verify_cw_status_erased(const fc_command_t *cmd)
+static uint8_t verify_cw_status_erased(const fc_cmd_s *cmd)
 {
-    const DWORD        allowed = FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_EMPTY;
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            idx     = 0U;
-    uint8_t            all_ok  = 1U;
+    const DWORD  allowed = FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_EMPTY;
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    uint8_t      idx     = 0U;
+    uint8_t      all_ok  = 1U;
 
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (idx < CW_TOTAL_MAX))
+    while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
         munit_assert_not_null(desc);
 
@@ -325,16 +325,16 @@ static uint8_t verify_cw_status_erased(const fc_command_t *cmd)
             all_ok = 0U;
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
     }
 
     return all_ok;
 }
 
-static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap, uint8_t erased, const fc_cmd_conf_t *config)
+static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap, uint8_t erased, const fc_cmd_cfg_s *config)
 {
-    fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = test_first_plane(plane_bitmap), .page = page}, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = test_first_plane(plane_bitmap), .page = page}), config);
+    fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = block, .plane = test_first_plane(plane_bitmap), .page = page}, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = test_first_plane(plane_bitmap), .page = page}), config);
 
     test_memset_read_buffer(cmd);
     (void)test_submit_wait(cmd);
@@ -384,17 +384,17 @@ static void read_block_verify_erased(uint16_t block, uint8_t plane_bitmap)
  *  辅助：命令结构体快照 + 逐字段差异对比
  *
  *  在 submit 前给 cmd 拍一份快照，release 前逐字段比对，把发生变化的字段打到
- *  串口——用于定位"命令提交后被谁改写"这类问题。正常生命周期内 fc_command_t
+ *  串口——用于定位"命令提交后被谁改写"这类问题。正常生命周期内 fc_cmd_s
  *  的全部字段都应保持不变，所以只要出现差异就说明有代码在命令在飞的时候动了它。
  **************************************************************************/
 
 /* 命令结构体快照 / 逐字段比对。排查"命令提交后被谁改写"时把下面整块打开。
  *
- * 注意：想直接比对 fc_cmd_conf_t 原始字的话，先确认 sizeof(fc_cmd_conf_t) == 4，
+ * 注意：想直接比对 fc_cmd_cfg_s 原始字的话，先确认 sizeof(fc_cmd_cfg_s) == 4，
  * 否则整字兜底比对不成立。
  */
 #if 0
-static void cmd_snapshot(const fc_command_t *cmd, fc_command_t *snapshot)
+static void cmd_snapshot(const fc_cmd_s *cmd, fc_cmd_s *snapshot)
 {
     *snapshot = *cmd;
 }
@@ -416,7 +416,7 @@ static void cmd_snapshot(const fc_command_t *cmd, fc_command_t *snapshot)
             LOGW("[DBG]   %-18s %-10lu -> %-10lu%s\r\n", #field, before_v, after_v, (changed != 0U) ? "  <== DIFF" : ""); \
         } while (0)
 
-static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *after, const char *tag)
+static uint32_t cmd_diff_report(const fc_cmd_s *before, const fc_cmd_s *after, const char *tag)
 {
     uint32_t diffs      = 0U;
     uint32_t checked    = 0U;
@@ -504,7 +504,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
     /* Step 1: RESET —— 无数据负载，不需要 desc 链（cw_bitmap = 0 走短路分支） */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_RESET, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_RESET, FC_CRC_ENABLE));
 
         (void)test_submit_wait(cmd);
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -513,7 +513,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     /* Step 2: READ_ID — 在 release 前验证 buffer 数据。
      * READ_ID 只返回 5 字节 ⇒ 只取 CW0（1 条 desc，位图 0x01）。 */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
 
         (void)test_submit_wait(cmd);
 
@@ -538,7 +538,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     /* Step 3: READ_PARAMETER_PAGE — 在 release 前验证 buffer 非 0xFF。
      * 参数页只看前几字节 ⇒ 只取 CW0（1 条 desc，位图 0x01）。 */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_PARAMETER_PAGE, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_PARAMETER_PAGE, FC_CRC_ENABLE));
 
         (void)test_submit_wait(cmd);
 
@@ -562,8 +562,8 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
      * ⇒ cw_bitmap = 0 走短路分支）、4 字节经控制器侧暂存 g_fc_return_staging 落 CQ 的 param。
      * 列地址 0x20 由 NAND 侧 req_onfi_signature 硬编码（手册 Figure 27）。 */
     {
-        fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_READ_ONFI_SIGNATURE, FC_CRC_ENABLE));
-        fc_command_status_t completion = test_submit_wait(cmd);
+        fc_cmd_s       *cmd        = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_READ_ONFI_SIGNATURE, FC_CRC_ENABLE));
+        fc_cmd_status_s completion = test_submit_wait(cmd);
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         munit_assert_uint8(completion.param.bytes[0], ==, 0x4FU); /* 'O' */
@@ -584,7 +584,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
      * GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba 与掩码都不看
      * ⇒ cw_bitmap = 0。feature_addr 由调用者建链后自行覆盖。 */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
 
         cmd->feature_addr = 0x01U;
 
@@ -599,7 +599,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
      *   （见「协议断言必须先查证」），硬判据只到「命令 + CW 状态全 SUCCESS」；
      *   16 字节走证据行打出，供人工比对（全 0xFF 即视为器件未实现该 ID）。 */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_UNIQUE_ID, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_UNIQUE_ID, FC_CRC_ENABLE));
 
         (void)test_submit_wait(cmd);
 
@@ -662,8 +662,8 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
  * 器件 → g_fc_return_staging（fc.c:1280 把它当 cw_buffers[0]）→ completion.param（fc.c:805）。 */
 static void l3_feature_get(uint8_t addr, uint8_t out[4])
 {
-    fc_command_t       *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
-    fc_command_status_t completion;
+    fc_cmd_s       *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
+    fc_cmd_status_s completion;
 
     cmd->feature_addr = addr;
 
@@ -678,8 +678,8 @@ static void l3_feature_get(uint8_t addr, uint8_t out[4])
  * 再作为 cw_buffers[0] 交给 NAND）。 */
 static void l3_feature_set(uint8_t addr, const uint8_t in[4])
 {
-    fc_command_t       *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_SET_FEATURES, FC_CRC_ENABLE));
-    fc_command_status_t completion;
+    fc_cmd_s       *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_SET_FEATURES, FC_CRC_ENABLE));
+    fc_cmd_status_s completion;
 
     cmd->feature_addr = addr;
     (void)memcpy(cmd->param.bytes, in, 4U);
@@ -795,13 +795,14 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
 #define L3_PRIO_SLOTS (16U)
 
 typedef struct
+    L3_PRIO_SLOT_S
 {
-    fc_command_t *cmd;
-    uint8_t       is_get; /* 1 = GET（收 param.bytes），0 = SET */
-    uint8_t       out[4]; /* GET 的读回值 */
-} l3_prio_slot_t;
+    fc_cmd_s *cmd;
+    uint8_t   is_get; /* 1 = GET（收 param.bytes），0 = SET */
+    uint8_t   out[4]; /* GET 的读回值 */
+} l3_prio_slot_s;
 
-static l3_prio_slot_t g_l3_prio_slots[L3_PRIO_SLOTS];
+static l3_prio_slot_s g_l3_prio_slots[L3_PRIO_SLOTS];
 static uint8_t        g_l3_prio_used;
 
 static void l3_prio_reset(void)
@@ -816,13 +817,13 @@ static void l3_prio_reset(void)
  * 返回槽位下标。 */
 static uint8_t l3_prio_submit(uint8_t operation, uint8_t addr, const uint8_t in[4], uint8_t priority, uint8_t chain)
 {
-    fc_cmd_conf_t conf = L3_CONF(operation, FC_CRC_ENABLE);
-    fc_command_t *cmd;
+    fc_cmd_cfg_s conf = L3_CONF(operation, FC_CRC_ENABLE);
+    fc_cmd_s    *cmd;
 
     munit_assert_uint32(g_l3_prio_used, <, L3_PRIO_SLOTS);
 
     conf.chain = (DWORD)chain;
-    cmd        = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &conf);
+    cmd        = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &conf);
 
     cmd->feature_addr  = addr;
     cmd->high_priority = (DWORD)priority; /* 提交前设——fc_submit 按它选 SQ/HSQ */
@@ -846,7 +847,7 @@ static void l3_prio_drain(void)
 
     for (uint32_t i = 0U; (outstanding != 0U) && (i < TEST_SERVICE_LOOP_MAX); i++)
     {
-        fc_command_status_t completion;
+        fc_cmd_status_s completion;
 
         (void)fc_service();
 
@@ -858,7 +859,7 @@ static void l3_prio_drain(void)
 
             for (uint8_t j = 0U; j < g_l3_prio_used; j++)
             {
-                fc_command_id_t id = FC_COMMAND_ID_INVALID;
+                fc_cmd_id_t id = FC_CMD_ID_INVALID;
 
                 if (g_l3_prio_slots[j].cmd == NULL)
                 {
@@ -995,9 +996,9 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         /* 状态字仅 1 字节 ⇒ 只取 CW0（1 条 desc）；状态查询不是 page read，
          * 数据路径不介入，nand_status 经 completion.status 返回。
          * operation 逐轮不同 ⇒ config 需可变，先按基线拷一份再改。 */
-        fc_cmd_conf_t       conf = L3_CONF(status_ops[i], FC_CRC_ENABLE);
-        fc_command_t       *cmd  = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
-        fc_command_status_t completion;
+        fc_cmd_cfg_s    conf = L3_CONF(status_ops[i], FC_CRC_ENABLE);
+        fc_cmd_s       *cmd  = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+        fc_cmd_status_s completion;
 
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1066,7 +1067,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     {
         /* 4a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
         {
-            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
+            fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = block, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
             munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -1074,7 +1075,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
 
         /* 4b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
         {
-            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = dest, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
+            fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = dest, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
             munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -1088,8 +1089,8 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
      *   反而会被 Pass 4 ② 判成「读到了别的页」。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        const uint32_t      tag        = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page});
-        fc_command_status_t completion = test_read_page(dest, TEST_PLANE_BM(plane), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+        const uint32_t  tag        = (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page});
+        fc_cmd_status_s completion = test_read_page(dest, TEST_PLANE_BM(plane), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(plane));
@@ -1409,7 +1410,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
             const uint32_t cw_bit = (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw);
-            fc_command_t  *cmd    = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page}, cw_bit, (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
+            fc_cmd_s      *cmd    = test_cmd_build(&(nand_addr_s){.block = block, .plane = plane, .page = page}, cw_bit, (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
 
             /* 证据明细（--log-visible debug）：把**实际用的 flat 位**打出来——v35 的
              * plane 盲位图缺陷（plane 1 的 CW0 写成 0x01 而非 0x10）正是靠这一类自证才能一眼看穿。 */
@@ -1565,7 +1566,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
         const uint16_t page = (uint16_t)(PAGES_PER_BLOCK / 2U);
         /* 写路径的 META 基值：prog 命令 command->meta = 本页 PBA（见 test_prog_page）。
          * 每 CW 的 META = (base & ~PLANE_CW_MASK) | plane_cw。 */
-        const uint32_t base = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page});
+        const uint32_t base = (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = (uint8_t)page});
         uint8_t        got[4];
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2：不同 CW ⇒ 不同 META */
@@ -1586,8 +1587,8 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
          * 走 gc.c 的真实消费路径：读页完成后从 CW 基址 offset 0 取 META。与上面 op 11
          * 的「无链只读」结果互为交叉检查；同一页、同一 expected 公式。 */
         {
-            fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), base, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
-            fc_command_status_t completion = test_submit_wait(cmd);
+            fc_cmd_s       *cmd        = test_cmd_build(&(nand_addr_s){.block = block, .plane = plane, .page = (uint8_t)page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), base, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
+            fc_cmd_status_s completion = test_submit_wait(cmd);
 
             munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
@@ -1644,8 +1645,8 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
  * 它就是本用例「LOCK→UNLOCK 之后块仍然完全可用」这条唯一硬判据的载体。 */
 static void lock_verify_block_usable(uint16_t block, uint8_t plane, uint16_t page)
 {
-    const uint32_t      meta = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page});
-    fc_command_status_t completion;
+    const uint32_t  meta = (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = (uint8_t)page});
+    fc_cmd_status_s completion;
 
     completion = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1661,10 +1662,10 @@ static void lock_verify_block_usable(uint16_t block, uint8_t plane, uint16_t pag
 
 static MunitResult test_block_lock_ops(const MunitParameter params[], void *data)
 {
-    fc_command_status_t erase_st;
-    uint8_t             raw_before;
-    uint8_t             raw_locked;
-    uint8_t             raw_after;
+    fc_cmd_status_s erase_st;
+    uint8_t         raw_before;
+    uint8_t         raw_locked;
+    uint8_t         raw_after;
 
     (void)params;
     (void)data;
@@ -1750,17 +1751,18 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 #define L3_STRESS_OP_READ    (1U)
 
 typedef struct
+    L3_STRESS_SLOT_S
 {
-    fc_command_t *cmd; /* NULL = 空槽 */
-    uint8_t       operation;
-    uint16_t      block;
-    uint8_t       plane_bm; /* 该命令覆盖的 plane 位图（本用例恒为 ALL） */
-    uint16_t      page;
-} l3_stress_slot_t;
+    fc_cmd_s *cmd; /* NULL = 空槽 */
+    uint8_t   operation;
+    uint16_t  block;
+    uint8_t   plane_bm; /* 该命令覆盖的 plane 位图（本用例恒为 ALL） */
+    uint16_t  page;
+} l3_stress_slot_s;
 
 /* 在途命令的登记表：容量 = 命令池（在途数不可能超过它），未用槽 cmd == NULL。
  * 完成项只带 command_id，靠它在这张表里配回命令 + 地址（CID 配对的土办法）。 */
-static l3_stress_slot_t g_l3_stress_slots[L3_STRESS_SLOTS];
+static l3_stress_slot_s g_l3_stress_slots[L3_STRESS_SLOTS];
 
 static void l3_stress_slots_reset(void)
 {
@@ -1770,7 +1772,7 @@ static void l3_stress_slots_reset(void)
     }
 }
 
-static l3_stress_slot_t *l3_stress_slot_alloc(void)
+static l3_stress_slot_s *l3_stress_slot_alloc(void)
 {
     for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
     {
@@ -1783,11 +1785,11 @@ static l3_stress_slot_t *l3_stress_slot_alloc(void)
 }
 
 /* 按 completion.command_id 找槽位（cmd 无缓存 id，v15 起由指针派生）。 */
-static l3_stress_slot_t *l3_stress_slot_find(uint16_t command_id)
+static l3_stress_slot_s *l3_stress_slot_find(uint16_t command_id)
 {
     for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
     {
-        fc_command_id_t id = FC_COMMAND_ID_INVALID;
+        fc_cmd_id_t id = FC_CMD_ID_INVALID;
 
         if (g_l3_stress_slots[i].cmd == NULL)
         {
@@ -1804,11 +1806,11 @@ static l3_stress_slot_t *l3_stress_slot_find(uint16_t command_id)
 /* 建一条压力命令（只建链、不提交）；资源不足返回 NULL（背压信号，命令已内部 release）。
  * **multi-plane 变体**：一条命令覆盖 plane_bm 里的全部 plane。PROGRAM 填源数据；
  * READ 预填 0xCC 残留哨兵（读没真发生时能一眼看出）。 */
-static fc_command_t *l3_stress_try_build(uint8_t operation, const nand_addr_t *addr, uint8_t plane_bm)
+static fc_cmd_s *l3_stress_try_build(uint8_t operation, const nand_addr_s *addr, uint8_t plane_bm)
 {
     const uint32_t cw_bm = test_plane_cw_bitmap(plane_bm);
     const uint32_t meta  = (uint32_t)pba_from_addr(addr);
-    fc_command_t  *cmd;
+    fc_cmd_s      *cmd;
 
     if (operation == L3_STRESS_OP_PROG)
     {
@@ -1832,14 +1834,14 @@ static fc_command_t *l3_stress_try_build(uint8_t operation, const nand_addr_t *a
  * 返回本次处理条数。**必须在 release 之前**捕获读回数据（release 会还 buffer）。 */
 static uint16_t l3_stress_reap(void)
 {
-    fc_command_status_t buf[L3_STRESS_BATCH];
-    uint16_t            n = 0U;
-    uint16_t            j;
+    fc_cmd_status_s buf[L3_STRESS_BATCH];
+    uint16_t        n = 0U;
+    uint16_t        j;
 
     (void)fc_poll_completions(buf, L3_STRESS_BATCH, &n);
     for (j = 0U; j < n; j++)
     {
-        l3_stress_slot_t *slot = l3_stress_slot_find((uint16_t)buf[j].command_id);
+        l3_stress_slot_s *slot = l3_stress_slot_find((uint16_t)buf[j].command_id);
 
         munit_assert_not_null(slot);
         munit_assert_uint32(buf[j].status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1875,13 +1877,13 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
             {
                 for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
                 {
-                    const nand_addr_t addr = (nand_addr_t){.ch = (uint8_t)ch, .ce = (uint8_t)ce, .lun = (uint8_t)lun, .block = block, .plane = test_first_plane(plane_bm), .page = (uint8_t)page};
+                    const nand_addr_s addr = (nand_addr_s){.ch = (uint8_t)ch, .ce = (uint8_t)ce, .lun = (uint8_t)lun, .block = block, .plane = test_first_plane(plane_bm), .page = (uint8_t)page};
                     uint8_t           sent = 0U;
 
                     while (sent == 0U)
                     {
-                        fc_command_t *cmd    = l3_stress_try_build(operation, &addr, plane_bm);
-                        uint8_t       polled = 0U;
+                        fc_cmd_s *cmd    = l3_stress_try_build(operation, &addr, plane_bm);
+                        uint8_t   polled = 0U;
 
                         if (cmd == NULL)
                         {
@@ -1894,7 +1896,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
                         }
                         else
                         {
-                            l3_stress_slot_t *slot = l3_stress_slot_alloc();
+                            l3_stress_slot_s *slot = l3_stress_slot_alloc();
 
                             munit_assert_not_null(slot);
                             slot->cmd       = cmd;
@@ -1920,7 +1922,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
                          * sub/retry = 本条下发成功 / 没发出去（池满·SQ 满）；+poll = 本轮做了 polling。
                          * 能直接看出「发到多少条时开始 retry、retry 后完成项回流把哪个池腾空」。 */
                         {
-                            fc_resource_stats_t rs;
+                            fc_resource_stats_s rs;
 
                             (void)fc_get_resource_stats(&rs);
                             test_trace_detail("p%02hu %s%s submitted=%lu drained=%lu | cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu cq=%hu", page, (sent != 0U) ? "sub  " : "retry", (polled != 0U) ? " +poll" : "      ", submitted, drained, rs.command_used, FC_COMMAND_POOL_DEPTH, rs.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, FC_BUFFER_POOL_DEPTH, rs.sq_used, rs.cq_used);
@@ -1946,7 +1948,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
     /* 收尾证据：本 phase 全部完成并 release 后，命令 / desc / buffer 三池应回到 0
      * （SQ 也应为 0）。打印而非断言——池没归零是要人看的信号，不是本用例的判据。 */
     {
-        fc_resource_stats_t rs;
+        fc_resource_stats_s rs;
 
         (void)fc_get_resource_stats(&rs);
         test_trace_summary("phase done: submitted=%lu drained=%lu | cmd=%hu desc=%hu buf=%hu sq=%hu cq=%hu (应为全 0)", submitted, drained, rs.command_used, rs.descriptor_used, rs.buffer_used, rs.sq_used, rs.cq_used);
@@ -1954,7 +1956,7 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
 }
 
 /* Phase 0 前置命令的硬判据：无错误位。 */
-static void l3_stress_expect_ok(fc_command_status_t completion)
+static void l3_stress_expect_ok(fc_cmd_status_s completion)
 {
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 }
@@ -2000,7 +2002,7 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
 
 static MunitResult test_block_lock_tight(const MunitParameter params[], void *data)
 {
-    fc_command_t *cmd;
+    fc_cmd_s *cmd;
     uint8_t       page;
 
     (void)params;
@@ -2016,7 +2018,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
     cmd->config.random    = FC_RANDOM_DISABLE;
     cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
     cmd->config.raid      = FC_RAID_MODE_NORMAL;
-    cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
+    cmd->desc_id          = FC_DESC_ID_INVALID;
     cmd->config.cw        = 0U;
 
     test_run_lifecycle(cmd);
@@ -2030,7 +2032,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
 
     cmd = read_page(BLOCK_TEST, page, 0U);
     {
-        fc_command_status_t completion;
+        fc_cmd_status_s completion;
         fc_status_t         result;
         uint32_t            service_count;
         uint8_t             completed = 0U;
@@ -2054,14 +2056,14 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
 
         /* 验证：由于 BLOCK_LOCK_TIGHT，NAND 拒绝 PROGRAM，
          * 读回数据应与预期 pattern 不同。 */
-        fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
+        fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id;
         uint8_t            cw_idx;
         uint8_t            locked = 0U;
         uint8_t           *buf;
 
         for (cw_idx = 0U; cw_idx < CW_NUM; cw_idx++)
         {
-            fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
+            fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
             if (d == NULL) break;
             buf = fc_buffer_id_to_real_buffer(d->buffer_id);
             if (buf == NULL) break;
@@ -2070,7 +2072,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
                 locked = 1U;
                 break;
             }
-            did = (fc_descriptor_id_t)d->next_id;
+            did = (fc_desc_id_t)d->next_id;
         }
 
         /* BLOCK_LOCK_TIGHT 生效：数据与写入不一致 -> 测试 PASS */
@@ -2099,7 +2101,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  * 只能经公开统计接口观测。 */
 static uint16_t l3_buf_used(void)
 {
-    fc_resource_stats_t stats;
+    fc_resource_stats_s stats;
 
     (void)fc_get_resource_stats(&stats);
     return stats.buffer_used;
@@ -2108,10 +2110,10 @@ static uint16_t l3_buf_used(void)
 /* 模式 10/11 的建链：上层先 fc_buffer_alloc()，再把 id 传进 5 参入口。
  * ⚠ 不能用 test_cmd_build —— 它走 ftl_cmd_configure_descriptors（4 参入口，即
  *   buf_own = FC 申请那条路）。此处照 test_cmd_try_build 的样子手工建。 */
-static fc_command_t *l3_buf_own_build_upper(fc_buffer_id_t buffer_id, uint8_t buf_own)
+static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, uint8_t buf_own)
 {
-    fc_command_t *cmd  = fc_command_alloc();
-    fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+    fc_cmd_s    *cmd  = fc_command_alloc();
+    fc_cmd_cfg_s conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
 
     munit_assert_not_null(cmd);
 
@@ -2122,7 +2124,7 @@ static fc_command_t *l3_buf_own_build_upper(fc_buffer_id_t buffer_id, uint8_t bu
     cmd->config.ce          = 0U;
     cmd->config.lun         = 0U;
     cmd->config.multi_plane = 0U;
-    cmd->paa                = paa_from_addr(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U});
+    cmd->paa                = paa_from_addr(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U});
     cmd->meta               = 0U;
 
     munit_assert_int(fc_command_configure_descriptor_with_buffer(cmd, 0U, 0U, cmd->paa, buffer_id), ==, FC_STATUS_OK);
@@ -2141,7 +2143,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
 
     /* ── Step 1：00（默认）——FC 申请，上层 fc_command_release 归还 ── */
     {
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
+        fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
 
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 建链即申请 */
         (void)test_submit_wait(cmd);
@@ -2152,11 +2154,11 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
 
     /* ── Step 2：01 —— FC 申请，完成时 FC 当场归还（上层只要命令状态） ── */
     {
-        fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
-        fc_command_t *cmd;
+        fc_cmd_cfg_s conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+        fc_cmd_s    *cmd;
 
         conf.buf_own = (DWORD)FC_BUF_OWN_FC_ALLOC_FC_FREE;
-        cmd          = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+        cmd          = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
 
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
         (void)test_submit_wait(cmd);
@@ -2167,10 +2169,10 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
 
     /* ── Step 3：11 —— 上层申请（先 fc_buffer_alloc），完成时 FC 归还 ── */
     {
-        fc_buffer_id_t ubuf = fc_buffer_alloc();
-        fc_command_t  *cmd;
+        fc_buf_id_t ubuf = fc_buffer_alloc();
+        fc_cmd_s   *cmd;
 
-        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUFFER_ID_INVALID);
+        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUF_ID_INVALID);
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
 
         cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_FC_FREE);
@@ -2182,10 +2184,10 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
 
     /* ── Step 4：10 —— 上层申请，上层释放（完成不归还，读法 A 的回归守卫） ── */
     {
-        fc_buffer_id_t ubuf = fc_buffer_alloc();
-        fc_command_t  *cmd;
+        fc_buf_id_t ubuf = fc_buffer_alloc();
+        fc_cmd_s   *cmd;
 
-        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUFFER_ID_INVALID);
+        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUF_ID_INVALID);
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
 
         cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE);
@@ -2197,11 +2199,11 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
 
     /* ── Step 5：建了链但**没提交** —— 模式 01 走 fc_command_release 也不泄漏 ── */
     {
-        fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
-        fc_command_t *cmd;
+        fc_cmd_cfg_s conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+        fc_cmd_s    *cmd;
 
         conf.buf_own = (DWORD)FC_BUF_OWN_FC_ALLOC_FC_FREE;
-        cmd          = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+        cmd          = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
 
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -2214,12 +2216,12 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
      * 残留影响，让本用例独立成立）。 */
     {
         const uint32_t avail = (uint32_t)FC_BUFFER_POOL_DEPTH - (uint32_t)base;
-        fc_buffer_id_t ids[FC_BUFFER_POOL_DEPTH];
+        fc_buf_id_t    ids[FC_BUFFER_POOL_DEPTH];
 
         for (uint32_t i = 0U; i < avail; i++)
         {
             ids[i] = fc_buffer_alloc();
-            munit_assert_uint32(ids[i], !=, (uint32_t)FC_BUFFER_ID_INVALID);
+            munit_assert_uint32(ids[i], !=, (uint32_t)FC_BUF_ID_INVALID);
 
             for (uint32_t j = 0U; j < i; j++)
             {

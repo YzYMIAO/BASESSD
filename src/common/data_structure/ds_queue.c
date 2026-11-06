@@ -12,7 +12,7 @@
  * 支持 O(1) 的入队和出队操作。
  * 队列容量始终保持为 2 的幂，以便使用位运算进行快速索引计算。
  */
-struct ds_queue_s
+struct DS_QUEUE_S
 {
     size_t size;     /**< 当前队列中的元素个数 */
     size_t capacity; /**< 队列容量（始终为 2 的幂） */
@@ -80,7 +80,7 @@ static INLINE size_t upper_power_two(size_t n)
  * @warning 原代码中浅拷贝分支的 memcpy 目标地址为 &buffer，
  *          这是错误的，应为 buffer（因为 buffer 本身就是指针）
  */
-static void copy_deque_buffer(ds_Queue const *const queue, void **buffer, void *(*cp)(void *))
+static void copy_deque_buffer(ds_queue_s const *const queue, void **buffer, void *(*cp)(void *))
 {
     if (cp == NULL)
     {
@@ -124,7 +124,7 @@ static void copy_deque_buffer(ds_Queue const *const queue, void **buffer, void *
  * @return DS_OK 扩容成功，DS_ERR_MAX_CAPACITY 已达最大容量，
  *         DS_ERR_ALLOC 内存分配失败
  */
-static ds_Stat queue_expand_capacity(ds_Queue *queue)
+static ds_status_e queue_expand_capacity(ds_queue_s *queue)
 {
     if (queue->capacity == MAX_POW_TWO)
     {
@@ -159,12 +159,12 @@ static ds_Stat queue_expand_capacity(ds_Queue *queue)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  *
- * @warning 原代码参数类型为 ds_Queue *queue（值传递），
- *          无法返回新创建的队列指针，应为 ds_Queue **queue
+ * @warning 原代码参数类型为 ds_queue_s *queue（值传递），
+ *          无法返回新创建的队列指针，应为 ds_queue_s **queue
  */
-ds_Stat ds_queue_new(ds_Queue **queue)
+ds_status_e ds_queue_new(ds_queue_s **queue)
 {
-    ds_QueueConfig conf;
+    ds_queue_cfg_s conf;
 
     ds_queue_conf_init(&conf);
     return ds_queue_new_conf(&conf, queue);
@@ -177,7 +177,7 @@ ds_Stat ds_queue_new(ds_Queue **queue)
  *
  * @param[in,out] conf 需要初始化的配置结构体指针
  */
-void ds_queue_conf_init(ds_QueueConfig *conf)
+void ds_queue_conf_init(ds_queue_cfg_s *conf)
 {
     conf->capacity = DEFAULT_CAPACITY;
 
@@ -200,9 +200,9 @@ void ds_queue_conf_init(ds_QueueConfig *conf)
  * @warning 原代码中 buffer 的类型为 void*，但应为 void**，
  *          这是一个严重的类型错误，已修正
  */
-ds_Stat ds_queue_new_conf(ds_QueueConfig *conf, ds_Queue **out)
+ds_status_e ds_queue_new_conf(ds_queue_cfg_s *conf, ds_queue_s **out)
 {
-    ds_Queue *queue = conf->mem_calloc(1, sizeof(ds_Queue));
+    ds_queue_s *queue = conf->mem_calloc(1, sizeof(ds_queue_s));
 
     if (queue == NULL)
     {
@@ -239,7 +239,7 @@ ds_Stat ds_queue_new_conf(ds_QueueConfig *conf, ds_Queue **out)
  *
  * @param[in] queue 要销毁的队列指针
  */
-void ds_queue_destroy(ds_Queue *queue)
+void ds_queue_destroy(ds_queue_s *queue)
 {
     queue->mem_free(queue->buffer);
     queue->mem_free(queue);
@@ -257,7 +257,7 @@ void ds_queue_destroy(ds_Queue *queue)
  * @note 如果队列中的元素存储在栈上，不应调用此函数，
  *       应使用 ds_queue_destroy() 代替
  */
-void ds_queue_destroy_cb(ds_Queue *queue, void (*cb)(void *))
+void ds_queue_destroy_cb(ds_queue_s *queue, void (*cb)(void *))
 {
     for (size_t i = 0; i < queue->size; i++)
     {
@@ -282,11 +282,11 @@ void ds_queue_destroy_cb(ds_Queue *queue, void (*cb)(void *))
  * @note 入队时 first 指针前移（无符号整数下溢自动回绕），
  *       使用位运算掩码实现环形索引计算
  */
-ds_Stat ds_queue_push(ds_Queue *queue, void *element)
+ds_status_e ds_queue_push(ds_queue_s *queue, void *element)
 {
     if (queue->size >= queue->capacity)
     {
-        ds_Stat status = queue_expand_capacity(queue);
+        ds_status_e status = queue_expand_capacity(queue);
 
         if (status != DS_OK)
         {
@@ -314,7 +314,7 @@ ds_Stat ds_queue_push(ds_Queue *queue, void *element)
  *
  * @note 出队时 last 指针前移，指向新的队尾位置
  */
-ds_Stat ds_queue_pop(ds_Queue *queue, void **out)
+ds_status_e ds_queue_pop(ds_queue_s *queue, void **out)
 {
     if (queue->size == 0)
     {
@@ -343,7 +343,7 @@ ds_Stat ds_queue_pop(ds_Queue *queue, void **out)
  *
  * @return DS_OK 查看成功，DS_ERR_OUT_OF_RANGE 队列为空
  */
-ds_Stat ds_queue_peek(ds_Queue *queue, void **out)
+ds_status_e ds_queue_peek(ds_queue_s *queue, void **out)
 {
     if (queue->size == 0)
     {
@@ -364,7 +364,7 @@ ds_Stat ds_queue_peek(ds_Queue *queue, void **out)
  * @param[in,out] queue 目标队列
  * @param[in]     fn    对每个元素执行的函数
  */
-void ds_queue_foreach(ds_Queue *queue, void (*fn)(void *))
+void ds_queue_foreach(ds_queue_s *queue, void (*fn)(void *))
 {
     for (size_t i = 0; i < queue->size; i++)
     {
@@ -380,7 +380,7 @@ void ds_queue_foreach(ds_Queue *queue, void (*fn)(void *))
  *
  * @return 队列中元素的个数
  */
-size_t ds_queue_size(ds_Queue *queue)
+size_t ds_queue_size(ds_queue_s *queue)
 {
     return queue->size;
 }

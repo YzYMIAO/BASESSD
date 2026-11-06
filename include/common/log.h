@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /* 日志等级按严重程度从高到低排列，运行时过滤比较只需一次数值比较。 */
-typedef enum
+typedef enum LOG_LEVEL_E
 {
     LOG_OFF   = -1, /* 全部静默（只供测试/产测切档用；CLI `log level` 不暴露） */
     LOG_ERROR = 0,
@@ -19,8 +19,8 @@ typedef enum
 
 /* A sink owns transport policy and returns the accepted byte count or LOG_WRITE_INVALID. */
 #define LOG_WRITE_INVALID (UINT32_MAX)
-typedef DWORD (*log_sink_t)(const char *message, DWORD length);
-typedef bool (*log_flush_sink_t)(DWORD timeout_ms);
+typedef DWORD (*log_sink_fn_t)(const char *message, DWORD length);
+typedef BOOL (*log_flush_sink_fn_t)(DWORD timeout_ms);
 
 /*
  * 运行时日志接口。sink 由已注册的平台提供，例如 firmware 的 UART 或 host 的 stderr。
@@ -32,9 +32,9 @@ __attribute__((format(printf, 2, 3))) DWORD log_printf(log_level_e level, const 
 DWORD                                       log_vprintf(log_level_e level, const char *format, va_list args);
 void                                        log_set_level(log_level_e level);
 log_level_e                                 log_get_level(void);
-void                                        log_set_sink(log_sink_t sink);
-bool                                        log_flush(DWORD timeout_ms);
-void                                        log_set_flush_sink(log_flush_sink_t sink);
+void                                        log_set_sink(log_sink_fn_t sink);
+BOOL                                        log_flush(DWORD timeout_ms);
+void                                        log_set_flush_sink(log_flush_sink_fn_t sink);
 DWORD                                       log_get_truncated_count(void);
 DWORD                                       log_get_write_failure_count(void);
 
@@ -129,28 +129,28 @@ DWORD                                       log_get_write_failure_count(void);
 #define LOG_RATE_SLOW_INTERVAL_MS (5000U)
 
 /* job 观测心跳：起止显式（active），不靠 start_ms == 0 判“未开始”。 */
-typedef struct
+typedef struct LOG_HEARTBEAT_S
 {
     DWORD start_ms;
     DWORD log_ms;
-    bool  active;
-} log_heartbeat_t;
+    BOOL  active;
+} log_heartbeat_s;
 
-void  log_heartbeat_begin(log_heartbeat_t *hb);
-bool  log_heartbeat_due(log_heartbeat_t *hb);
-void  log_heartbeat_end(log_heartbeat_t *hb);
-DWORD log_heartbeat_age_ms(const log_heartbeat_t *hb);
+void  log_heartbeat_begin(log_heartbeat_s *hb);
+BOOL  log_heartbeat_due(log_heartbeat_s *hb);
+void  log_heartbeat_end(log_heartbeat_s *hb);
+DWORD log_heartbeat_age_ms(const log_heartbeat_s *hb);
 
 /* 日志限流：last/interval + 被抑制条数（无时钟时按条数兜底）。 */
-typedef struct
+typedef struct LOG_RATELIMIT_S
 {
     DWORD last_ms;
     DWORD interval_ms;
     DWORD suppressed;
-} log_ratelimit_t;
+} log_ratelimit_s;
 
-void log_ratelimit_init(log_ratelimit_t *rl, DWORD interval_ms);
-bool log_ratelimit_due(log_ratelimit_t *rl);
+void log_ratelimit_init(log_ratelimit_s *rl, DWORD interval_ms);
+BOOL log_ratelimit_due(log_ratelimit_s *rl);
 
 /**
  * @brief 只报计数的模块用的心跳（没有“单 job”结构）
@@ -158,7 +158,7 @@ bool log_ratelimit_due(log_ratelimit_t *rl);
  * @param log_ms 上次打点时刻（进出参；到点时更新为当前时间）
  * @return true 到点，调用方打一行；false 未到点或首次仅记基准
  */
-bool log_tick(DWORD *log_ms);
+BOOL log_tick(DWORD *log_ms);
 
 /**
  * @brief 日志限流：有时间源时按时间（首次立即放行），无时钟时按条数兜底
@@ -168,6 +168,6 @@ bool log_tick(DWORD *log_ms);
  * @param interval_ms 时间间隔（毫秒）
  * @return true 本次应打印；false 继续抑制
  */
-bool log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms);
+BOOL log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms);
 
 #endif /* LOG_H */

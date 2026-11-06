@@ -61,7 +61,7 @@
  * @param cw 528B CW buffer（META + CRC + USER + ECC parity）
  * @return true 物理上从未编程
  */
-static bool fc_cw_is_blank(const BYTE *cw)
+static BOOL fc_cw_is_blank(const BYTE *cw)
 {
     DWORD ones = 0U;
 
@@ -84,25 +84,25 @@ static bool fc_cw_is_blank(const BYTE *cw)
  * @param max_count 容量上限（CW_TOTAL_MAX）
  * @return 收集到的 CW 数量
  */
-static BYTE fc_collect_decode_buffers(const fc_command_t *cmd, BYTE *buffers[], BYTE max_count)
+static BYTE fc_collect_decode_buffers(const fc_cmd_s *cmd, BYTE *buffers[], BYTE max_count)
 {
-    fc_descriptor_id_t desc_id;
-    BYTE               count = 0U;
+    fc_desc_id_t desc_id;
+    BYTE         count = 0U;
 
-    for (desc_id = (fc_descriptor_id_t)cmd->desc_id; (desc_id != FC_DESCRIPTOR_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (count < max_count);)
+    for (desc_id = (fc_desc_id_t)cmd->desc_id; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (count < max_count);)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
         // RAID 恢复要求每个 CW 都有 buffer；缺一个就无法可靠重建，整条命令判失败。
-        if (desc->buffer_id == FC_BUFFER_ID_INVALID)
+        if (desc->buffer_id == FC_BUF_ID_INVALID)
         {
             return 0U;
         }
         buffers[count] = fc_buffer_get_base(desc->buffer_id);
         count++;
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
     }
-    return (desc_id == FC_DESCRIPTOR_ID_INVALID) ? count : 0U;
+    return (desc_id == FC_DESC_ID_INVALID) ? count : 0U;
 }
 #endif /* CONFIG_FC_RAID */
 
@@ -197,7 +197,7 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
  * @param cw 已解扰的 CW buffer
  * @return true 一致；false 不一致
  */
-bool fc_data_path_crc_check(const BYTE *cw)
+BOOL fc_data_path_crc_check(const BYTE *cw)
 {
     DWORD stored_crc;
 
@@ -266,25 +266,25 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
  * @param command 写命令
  * @return FC_STATUS_OK / INVALID_ARGUMENT（buffer 缺失）/ ECC 编码错误
  */
-fc_status_e fc_data_path_encode(const fc_command_t *command)
+fc_status_e fc_data_path_encode(const fc_cmd_s *command)
 {
-    fc_descriptor_id_t desc_id;
-    BYTE              *buffer;
-    fc_status_e        result;
+    fc_desc_id_t desc_id;
+    BYTE        *buffer;
+    fc_status_e  result;
 
     // 入参前置条件由调用者保证（fc.c 写路径传入有效命令）
     ASSERT(command != NULL);
 
     // 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
     // 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历。
-    desc_id = (fc_descriptor_id_t)command->desc_id;
-    for (WORD steps = 0U; (desc_id != FC_DESCRIPTOR_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
+    desc_id = (fc_desc_id_t)command->desc_id;
+    for (WORD steps = 0U; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
         // 带数据的写命令每个 desc 都必须有 buffer；INVALID 是建链失败后的半成品，
         // 不能带着它进数据路径（fc_buffer_get_base 在 release 会越界）。
-        if (desc->buffer_id == FC_BUFFER_ID_INVALID)
+        if (desc->buffer_id == FC_BUF_ID_INVALID)
         {
             return FC_STATUS_INVALID_ARGUMENT;
         }
@@ -314,11 +314,11 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
                 return result;
             }
         }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
     }
 
     // 正常链以 INVALID 结束；跑满池深仍未结束 = 成环/链损坏，按失败返回。
-    if (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    if (desc_id != FC_DESC_ID_INVALID)
     {
         return FC_STATUS_IO_ERROR;
     }
@@ -341,26 +341,26 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
  * 链内下标由 FC 建链产生；越界、链尾、buffer 未分配一律返回 NULL，由调用方
  * 把整条 parity 任务判失败，不能带着野指针进 XOR。
  */
-static BYTE *fc_chain_buffer_at(const fc_command_t *command, BYTE index)
+static BYTE *fc_chain_buffer_at(const fc_cmd_s *command, BYTE index)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
+    fc_desc_id_t desc_id = (fc_desc_id_t)command->desc_id;
 
     for (BYTE s = 0U; s < index; s++)
     {
-        if ((desc_id == FC_DESCRIPTOR_ID_INVALID) || (desc_id >= FC_DESCRIPTOR_POOL_DEPTH))
+        if ((desc_id == FC_DESC_ID_INVALID) || (desc_id >= FC_DESCRIPTOR_POOL_DEPTH))
         {
             return NULL;
         }
-        desc_id = (fc_descriptor_id_t)fc_descriptor_id_to_descriptor(desc_id)->next_id;
+        desc_id = (fc_desc_id_t)fc_descriptor_id_to_descriptor(desc_id)->next_id;
     }
-    if ((desc_id == FC_DESCRIPTOR_ID_INVALID) || (desc_id >= FC_DESCRIPTOR_POOL_DEPTH))
+    if ((desc_id == FC_DESC_ID_INVALID) || (desc_id >= FC_DESCRIPTOR_POOL_DEPTH))
     {
         return NULL;
     }
 
-    const fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+    const fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
-    return (desc->buffer_id == FC_BUFFER_ID_INVALID) ? NULL : fc_buffer_get_base(desc->buffer_id);
+    return (desc->buffer_id == FC_BUF_ID_INVALID) ? NULL : fc_buffer_get_base(desc->buffer_id);
 }
 
 /**
@@ -374,12 +374,12 @@ static BYTE *fc_chain_buffer_at(const fc_command_t *command, BYTE index)
  * @param parity_cmd parity 命令（CW 数须与数据命令一致）
  * @return FC_STATUS_OK / ECC 编码错误
  */
-fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[], BYTE data_count, const fc_command_t *parity_cmd)
+fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYTE data_count, const fc_cmd_s *parity_cmd)
 {
-    BYTE               cw_count;
-    BYTE               cw;
-    fc_descriptor_id_t desc_id;
-    BYTE               d;
+    BYTE         cw_count;
+    BYTE         cw;
+    fc_desc_id_t desc_id;
+    BYTE         d;
 
     // 入参由 fc_stripe_submit 组装（stripe 路径），非外部输入
     ASSERT(data_cmds != NULL);
@@ -445,12 +445,12 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
     /* ── ECC 编码 parity 命令的 buffer ── */
     if (parity_cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
-        for (WORD steps = 0U; (desc_id != FC_DESCRIPTOR_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
+        desc_id = (fc_desc_id_t)parity_cmd->desc_id;
+        for (WORD steps = 0U; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
         {
-            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+            fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
 
-            if (desc->buffer_id == FC_BUFFER_ID_INVALID)
+            if (desc->buffer_id == FC_BUF_ID_INVALID)
             {
                 return FC_STATUS_INVALID_ARGUMENT;
             }
@@ -459,9 +459,9 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
             {
                 return result;
             }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
+            desc_id = (fc_desc_id_t)desc->next_id;
         }
-        if (desc_id != FC_DESCRIPTOR_ID_INVALID)
+        if (desc_id != FC_DESC_ID_INVALID)
         {
             return FC_STATUS_IO_ERROR;
         }
@@ -485,14 +485,14 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_command_t *data_cmds[],
  * @param command 读命令（CQ push 前由 FC 内部调用）
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
  */
-fc_status_e fc_data_path_process_read(const fc_command_t *command)
+fc_status_e fc_data_path_process_read(const fc_cmd_s *command)
 {
-    fc_descriptor_id_t desc_id;
-    fc_descriptor_t   *desc;
-    BYTE              *buffer;
-    fc_status_e        result;
-    BYTE               all_ok = 1U;
-    BYTE               cw;
+    fc_desc_id_t desc_id;
+    fc_desc_s   *desc;
+    BYTE        *buffer;
+    fc_status_e  result;
+    BYTE         all_ok = 1U;
+    BYTE         cw;
 
     // 入参前置条件由调用者保证（fc.c 读路径 Stage 1）
     ASSERT(command != NULL);
@@ -500,22 +500,22 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
     // 链长度即 CW 数（config.cw_count / multi_plane 不参与推导；flat 掩码下两者会分叉）
     BYTE total_desc = 0U;
     {
-        fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
+        fc_desc_id_t did = (fc_desc_id_t)command->desc_id;
 
-        while ((did != FC_DESCRIPTOR_ID_INVALID) && (did < FC_DESCRIPTOR_POOL_DEPTH) && (total_desc < CW_TOTAL_MAX))
+        while ((did != FC_DESC_ID_INVALID) && (did < FC_DESCRIPTOR_POOL_DEPTH) && (total_desc < CW_TOTAL_MAX))
         {
             total_desc++;
-            did = (fc_descriptor_id_t)fc_descriptor_id_to_descriptor(did)->next_id;
+            did = (fc_desc_id_t)fc_descriptor_id_to_descriptor(did)->next_id;
         }
         // 跑满 CW_TOTAL_MAX 仍未到链尾 = 成环/链损坏；不进入后续逐 CW 处理。
-        if (did != FC_DESCRIPTOR_ID_INVALID)
+        if (did != FC_DESC_ID_INVALID)
         {
             return FC_STATUS_IO_ERROR;
         }
     }
 
     /* ── 步骤 1: ECC 解码所有 CW ── */
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
 
     for (cw = 0U; cw < total_desc; cw++)
     {
@@ -524,11 +524,11 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
 
         // 带数据的读命令每个 desc 都必须有 buffer。INVALID 是建链失败后的半成品，
         // 不能交给 fc_buffer_get_base（release 会越界）；按不可纠上报。
-        if (desc->buffer_id == FC_BUFFER_ID_INVALID)
+        if (desc->buffer_id == FC_BUF_ID_INVALID)
         {
             desc->status = FC_CW_STATUS_UNC;
             all_ok       = 0U;
-            desc_id      = (fc_descriptor_id_t)desc->next_id;
+            desc_id      = (fc_desc_id_t)desc->next_id;
             continue;
         }
         buffer = fc_buffer_get_base(desc->buffer_id);
@@ -575,7 +575,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
             desc->status = FC_CW_STATUS_UNUSED;
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
     }
 
     if (all_ok == 0U)
@@ -589,7 +589,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
     /* ── 步骤 2：解扰 + CRC + META（合并为一次逐 CW 遍历）──
      * 顺序不可换：解扰 → CRC → META。META/CRC 在加扰区之外，先读 META 取种子
      * 不会改变结果；擦除页永远按「无 LBA」处理（RISK-GC-12）。 */
-    desc_id = (fc_descriptor_id_t)command->desc_id;
+    desc_id = (fc_desc_id_t)command->desc_id;
 
     for (cw = 0U; cw < total_desc; cw++)
     {
@@ -623,7 +623,7 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
             desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
     }
 
     return FC_STATUS_OK;
@@ -645,16 +645,16 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
  * @param failed_cw_idx 失败 CW 在 desc 链中的下标
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
  */
-fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx)
+fc_status_e fc_data_path_raid_recover(const fc_cmd_s *cmd, BYTE failed_cw_idx)
 {
-    BYTE              *buffers[CW_TOTAL_MAX];
-    BYTE               count;
-    fc_descriptor_id_t desc_id;
-    BYTE               i;
+    BYTE        *buffers[CW_TOTAL_MAX];
+    BYTE         count;
+    fc_desc_id_t desc_id;
+    BYTE         i;
 
     // 入参前置条件由调用者保证（FTL 仅在带 desc 链的命令 ECC 失败时触发）
     ASSERT(cmd != NULL);
-    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
+    ASSERT(cmd->desc_id != FC_DESC_ID_INVALID);
 
     /* ── 收集所有 buffer 指针（索引对齐 desc 链位置） ── */
     count = fc_collect_decode_buffers(cmd, buffers, CW_TOTAL_MAX);
@@ -702,14 +702,14 @@ fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_id
     }
 
     /* ── 重建后重新校验 CRC/META，不能只把 status 清零 ── */
-    bool recovered_ok = true;
+    BOOL recovered_ok = true;
 
-    desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    desc_id = (fc_desc_id_t)cmd->desc_id;
     i       = 0U;
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (i < count))
+    while ((desc_id != FC_DESC_ID_INVALID) && (i < count))
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        DWORD            cw_meta;
+        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        DWORD      cw_meta;
 
         (void)memcpy(&cw_meta, buffers[i], FC_CRC_META_SIZE);
         desc->meta     = cw_meta;
@@ -727,7 +727,7 @@ fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_id
             recovered_ok = false;
         }
 
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+        desc_id = (fc_desc_id_t)desc->next_id;
         i++;
     }
 

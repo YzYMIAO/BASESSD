@@ -11,7 +11,7 @@
  * 本头文件定义：
  *   - NAND 命令字节宏（NAND_CMD_* / NAND_STATUS_*）
  *   - OP_* 操作码（g_nand_operation_map 的下标）
- *   - nand_operation_map_t 结构体（命令属性 + UOP 序列 + 时序）
+ *   - nand_op_map_s 结构体（命令属性 + UOP 序列 + 时序）
  *   - ONFI 参数页结构 / 解码声明
  *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
@@ -204,7 +204,7 @@
  *
  * 列地址 = CW 号 × CW_SIZE：CW 由 command->paa 的 cw 字段选（PAA 原生含 cw →
  * plane_paa[] → paa_to_cw()），行地址取自同一 PAA。**无 desc 链、无 buffer 占用**
- * （has_data = 0）；4 字节落控制器侧暂存，完成时拷进 CQ 的 fc_param_t param。
+ * （has_data = 0）；4 字节落控制器侧暂存，完成时拷进 CQ 的 fc_param_u param。
  * uop 序列与 OP_NORMAL_READ_PAGE_WITH_DATA_OUT 逐字节相同（复用其数组），
  * 差别仅在输出长度 = 4（request->data_length）。
  * ----------------------------------------------------------------------------------------------
@@ -367,7 +367,7 @@
  * < 7A >-< R1 >-< R2 >-< R3 > ~~~~ < Status >
  * ----------------------------------------------------------------------------------------------
  * ⚠ 状态字节**不走数据缓冲**：引擎直读 DQ 总线送进 completion->nand_status，FC 侧再拷进
- * CQ 的 fc_param_t param.bytes[0]。故 op 表 has_data = 0 —— 它不搬 host 数据，
+ * CQ 的 fc_param_u param.bytes[0]。故 op 表 has_data = 0 —— 它不搬 host 数据，
  * 无需 desc 链。位定义：I/O2 = Lock#（0 = 锁定，1 = 未锁）、I/O1 = LT#、I/O0 = LT（1 = 紧锁）。
  */
 #define OP_BLOCK_LOCK_STATUS (25U)
@@ -505,7 +505,7 @@
  * 与 OP_READ_META 的唯一区别：**列地址不走 paa 的 cw 字段，改由命令级 param 的
  * 字节 0/1（小端）传入**（cw 只有 2 位 ⇒ 列上限 1584，够不到 spare 区）。
  * 行地址仍取自 command->paa。**无 desc 链、无 buffer 占用**（has_data = 0）；
- * 4 字节落控制器侧暂存，完成时拷进 CQ 的 fc_param_t param。
+ * 4 字节落控制器侧暂存，完成时拷进 CQ 的 fc_param_u param。
  * uop 序列与 OP_NORMAL_READ_PAGE_WITH_DATA_OUT 逐字节相同（复用其数组），
  * 差别仅在列地址来源与输出长度 = 4。
  * ----------------------------------------------------------------------------------------------
@@ -522,27 +522,27 @@
 
 /* ═══ 7. 操作表结构 + Phase V 辅助宏 ═══ */
 
-typedef struct
+typedef struct NAND_OPERATION_MAP_S
 {
-    BYTE                    operation;                     /* OP_* 码（== 数组下标） */
-    const char             *name;                          /* 可读名（日志用） */
-    BYTE                    command_1;                     /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
-    BYTE                    command_2;                     /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
-    BYTE                    address_cycles;                /* 地址周期数（列+行；多 plane 为两倍） */
-    BYTE                    data_input_cycles;             /* DATA_IN 段数（写类操作） */
-    BYTE                    valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
-    BYTE                    valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
-    BYTE                    has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
-    WORD                    data_length;                   /* 数据传输字节数 */
-    BYTE                    op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
-    BYTE                    pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
-    WORD                    min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
-    const nand_uop_t       *uops;                          /* UOP 序列（onfi_1_0.c 定义） */
-    nand_operation_timing_t timing;                        /* 操作时序参数（twb/trst/twh/busy_timeout） */
-} nand_operation_map_t;
+    BYTE              operation;                     /* OP_* 码（== 数组下标） */
+    const char       *name;                          /* 可读名（日志用） */
+    BYTE              command_1;                     /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
+    BYTE              command_2;                     /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
+    BYTE              address_cycles;                /* 地址周期数（列+行；多 plane 为两倍） */
+    BYTE              data_input_cycles;             /* DATA_IN 段数（写类操作） */
+    BYTE              valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
+    BYTE              valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
+    BYTE              has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
+    WORD              data_length;                   /* 数据传输字节数 */
+    BYTE              op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
+    BYTE              pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
+    WORD              min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
+    const nand_uop_s *uops;                          /* UOP 序列（onfi_1_0.c 定义） */
+    nand_op_timing_s  timing;                        /* 操作时序参数（twb/trst/twh/busy_timeout） */
+} nand_op_map_s;
 
 /* OP_* 可直接作为下标访问，不需要命令表扫描或操作码解析。 */
-extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
+extern const nand_op_map_s g_nand_operation_map[OP_COUNT];
 
 /* 判断 operation 是否涉及用户数据传输（即是否需要 descriptor + buffer）。
  * NO_DATA 类操作（RESET、LOCK 等）和 ERASE 返回 0。
@@ -554,7 +554,7 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 #define nand_operation_data_length(op) ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
 
 /* ── Phase V 多 LUN 辅助宏 ──
- * op_type/pair_op 判定（见 nand_operation_map_t）：
+ * op_type/pair_op 判定（见 nand_op_map_s）：
  *   is_issue        ：该 OP 是否 ISSUE 段（发完即返回，LUN 进入 busy）
  *   is_wait_or_fetch：该 OP 是否 WAIT/FETCH 段（等完成）
  *   is_splittable   ：原子 OP 且存在配对 OP（可拆分为 ISSUE+WAIT/FETCH）
@@ -615,7 +615,7 @@ static inline DWORD nand_onfi_le32(const BYTE *p)
 }
 
 /* ONFI 参数页解码结果（只含校验 / 打印用得到的字段）。 */
-typedef struct
+typedef struct NAND_ONFI_PARAMETER_INFORMATION_S
 {
     BYTE  signature[4];                          /* "ONFI" = 4F 4E 46 49 */
     WORD  revision;                              /* 版本号（小端原值） */
@@ -641,17 +641,17 @@ typedef struct
     WORD  tbers_max;
     WORD  tr_max;
     WORD  tccs_min;
-} nand_onfi_param_info_t;
+} nand_onfi_param_info_s;
 
 /*
  * nand_onfi_parameter_page_decode
- *   功能：把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t。
+ *   功能：把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_s。
  *   参数：page —— 至少 NAND_ONFI_PARAM_PAGE_SIZE 字节的原始页；
  *         info —— 输出（**无论签名是否匹配都会填满**，供诊断打印）。
  *   返回：1 = 签名是 "ONFI"；0 = 签名不符。
  *   实现要点：纯函数——零 HAL / 零日志 / 零硬件 ⇒ 可纯 RAM 单测。
  *         model 按 20 字节拷贝并补结尾 NUL（尾部空格填充**不裁剪**）。
  */
-BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info);
+BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_s *info);
 
 #endif /* NAND_ONFI_1_0_H */

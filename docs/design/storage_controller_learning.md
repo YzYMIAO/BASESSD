@@ -62,7 +62,7 @@
 |---|---|---|
 | **数据面** | 一次读写的数据从 host 缓冲 → FC 缓冲 → 加扰 → ECC → NAND，再原路返回 | `src/fc/fc_data_path.c` |
 | **控制面** | 请求排队 → 调度 → 下发起步 → 完成回收 | `src/fc/fc.c` 的 `fc_service()` / SQ/CQ / 三池 |
-| **可靠性面** | ECC 纠错、CRC 校验、RAID 恢复、坏块替换、掉电恢复 | `fc_ldpc_engine` / `ftl/` journal+checkpoint |
+| **可靠性面** | ECC 纠错、CRC 校验、RAID 恢复、坏块替换、掉电恢复 | `fc_ecc_engine` / `ftl/` journal+checkpoint |
 
 **学会的标准**：能把任意一个功能**归到「哪条主线的哪一层」**，并说清它跟上下层的接口。
 

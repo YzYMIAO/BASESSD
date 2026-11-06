@@ -29,7 +29,7 @@
  * 密排槽位等中间坐标已全部取消。
  * 行地址不参与该空间：它是 per-plane 的，走 plane_paa[plane]。
  */
-typedef struct
+typedef struct FC_NAND_DISPATCH_REQUEST_S
 {
     WORD  command_id;               /* FC command pool slot for completion correlation. */
     BYTE  operation;                /* OP_* constant. */
@@ -62,9 +62,9 @@ typedef struct
                                      * row[0]/row[1]，空 plane 不填会退化成 block0/page0。
                                      * 未使用的格为确定性零值（结构整体 {0} 初始化）。 */
     BYTE *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效；NULL = 该 CW 无数据。 */
-} fc_nand_dispatch_request_t;
+} fc_nand_dispatch_req_s;
 
-typedef struct
+typedef struct FC_NAND_DISPATCH_COMPLETION_S
 {
     WORD          command_id;
     nand_result_e execution_status;
@@ -73,7 +73,7 @@ typedef struct
     BYTE          cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
     BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
     WORD          failed_cw;                   /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
-} fc_nand_dispatch_completion_t;
+} fc_nand_dispatch_comp_s;
 
 /* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
 #ifndef FC_CW_STATUS_UNUSED
@@ -94,7 +94,7 @@ void fc_nand_dispatch_set_armed(BYTE armed);
 BYTE fc_nand_dispatch_is_armed(void);
 
 /* Submit one pre-resolved command to its LUN FIFO (count = 1). */
-nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_request_t *request);
+nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
 
 /*
  * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
@@ -104,17 +104,17 @@ nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_request_t *request)
  * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
  * 每条命令各回一份 completion（由 poll 逐条返回）。
  */
-nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_request_t *requests, BYTE count);
+nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count);
 
 /* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。 */
-typedef void (*fc_nand_dispatch_sink_t)(const fc_nand_dispatch_completion_t *completion, void *ctx);
+typedef void (*fc_nand_dispatch_sink_fn_t)(const fc_nand_dispatch_comp_s *completion, void *ctx);
 
 /*
  * 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
  * 返回本轮产出的完成条数（0 = 无完成，上限 CH_NUM×CE_NUM×LUN_NUM）。
  * 不早退——公平性依赖"每个 LUN 每轮都被走到"（见 fc_nand_dispatch.c 实现要点）。
  */
-BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_t sink, void *ctx);
+BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
 
 /*
  * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。

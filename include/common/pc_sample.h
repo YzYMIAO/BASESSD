@@ -44,14 +44,14 @@ void pc_sample_on_tick(DWORD pc);
 void pc_sample_clear(void);
 
 /* 上一轮快照是否有效（复位前有采样）。 */
-bool pc_sample_prev_valid(void);
+BOOL pc_sample_prev_valid(void);
 
 /*
  * 取有效条目数（0..PC_SAMPLE_RING）。
  *
  * @param previous true = 上一轮快照；false = 本轮活跃环
  */
-DWORD pc_sample_count(bool previous);
+DWORD pc_sample_count(BOOL previous);
 
 /*
  * 取一条 PC（0 <= index < PC_SAMPLE_RING；**物理下标**，不保证时间顺序）。
@@ -63,7 +63,7 @@ DWORD pc_sample_count(bool previous);
  * @param index    环下标
  * @return 采样到的 PC
  */
-DWORD pc_sample_at(bool previous, DWORD index);
+DWORD pc_sample_at(BOOL previous, DWORD index);
 
 /* 本轮活跃环的下一个写位置（时间序起点：total >= 环深时为 head，否则为 0）。 */
 DWORD pc_sample_head(void);
@@ -73,7 +73,7 @@ DWORD pc_sample_head(void);
  *
  * @param previous true = 上一轮使用的 rate；false = 当前 rate
  */
-DWORD pc_sample_rate(bool previous);
+DWORD pc_sample_rate(BOOL previous);
 
 /*
  * 设置本轮采样间隔（1..PC_SAMPLE_RATE_MAX）；值持久化在 .noinit，复位后沿用。
@@ -81,6 +81,6 @@ DWORD pc_sample_rate(bool previous);
  * @param rate tick 数
  * @return true = 已设置；false = 越界（未改变）
  */
-bool pc_sample_rate_set(DWORD rate);
+BOOL pc_sample_rate_set(DWORD rate);
 
 #endif /* PC_SAMPLE_H */

@@ -40,7 +40,7 @@ DWORD boot_crc32(const void *data, size_t size)
     return ~crc;
 }
 
-void boot_image_header_finalize(boot_image_header_t *header)
+void boot_image_header_finalize(boot_image_hdr_s *header)
 {
     if (header == NULL)
     {
@@ -50,10 +50,10 @@ void boot_image_header_finalize(boot_image_header_t *header)
     header->header_crc32 = boot_crc32(header, sizeof(*header));
 }
 
-static int boot_image_header_crc_is_valid(const boot_image_header_t *header)
+static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
 {
-    boot_image_header_t copy;
-    DWORD               expected;
+    boot_image_hdr_s copy;
+    DWORD            expected;
 
     copy              = *header;
     expected          = copy.header_crc32;
@@ -61,7 +61,7 @@ static int boot_image_header_crc_is_valid(const boot_image_header_t *header)
     return expected == boot_crc32(&copy, sizeof(copy));
 }
 
-int boot_image_validate(const boot_image_header_t *header, const boot_image_constraints_t *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn verify_signature, void *verify_context)
+int boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context)
 {
     DWORD image_end;
 
@@ -94,7 +94,7 @@ int boot_image_validate(const boot_image_header_t *header, const boot_image_cons
     return BOOT_POLICY_OK;
 }
 
-void boot_metadata_finalize(boot_metadata_t *metadata)
+void boot_metadata_finalize(boot_metadata_s *metadata)
 {
     if (metadata == NULL)
     {
@@ -104,7 +104,7 @@ void boot_metadata_finalize(boot_metadata_t *metadata)
     metadata->crc32 = boot_crc32(metadata, sizeof(*metadata));
 }
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot, DWORD active_firmware_version)
+void boot_metadata_initialize(boot_metadata_s *metadata, boot_slot_e active_slot, DWORD active_firmware_version)
 {
     if ((metadata == NULL) || (active_slot >= BOOT_SLOT_COUNT))
     {
@@ -124,9 +124,9 @@ void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot
     boot_metadata_finalize(metadata);
 }
 
-int boot_metadata_is_valid(const boot_metadata_t *metadata)
+int boot_metadata_is_valid(const boot_metadata_s *metadata)
 {
-    boot_metadata_t copy;
+    boot_metadata_s copy;
     DWORD           expected;
 
     if ((metadata == NULL) || (metadata->magic != BOOT_METADATA_MAGIC) || (metadata->format_version != BOOT_METADATA_VERSION) || (metadata->active_slot >= BOOT_SLOT_COUNT) || ((metadata->pending_slot != BOOT_SLOT_NONE) && (metadata->pending_slot >= BOOT_SLOT_COUNT)) || ((metadata->successful_mask & ~UINT32_C(0x3)) != 0U))
@@ -146,7 +146,7 @@ static int boot_sequence_is_newer(DWORD candidate, DWORD reference)
     return (int32_t)(candidate - reference) > 0;
 }
 
-int boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, DWORD *selected_copy)
+int boot_metadata_select_latest(const boot_metadata_s copies[2], boot_metadata_s *selected, DWORD *selected_copy)
 {
     int   valid0;
     int   valid1;
@@ -170,13 +170,13 @@ int boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t
     return BOOT_POLICY_OK;
 }
 
-static void boot_metadata_changed(boot_metadata_t *metadata)
+static void boot_metadata_changed(boot_metadata_s *metadata)
 {
     ++metadata->sequence;
     boot_metadata_finalize(metadata);
 }
 
-int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed)
+int boot_policy_select_slot(boot_metadata_s *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed)
 {
     DWORD pending;
     DWORD active;
@@ -223,7 +223,7 @@ int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[
     return BOOT_POLICY_NO_BOOTABLE_SLOT;
 }
 
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_e running_slot, DWORD firmware_version)
+int boot_policy_confirm_success(boot_metadata_s *metadata, boot_slot_e running_slot, DWORD firmware_version)
 {
     DWORD slot = running_slot;
 

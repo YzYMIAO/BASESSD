@@ -17,7 +17,7 @@
  */
 
 /* 引擎执行结果码（自定义错误体系，非 HAL/POSIX） */
-typedef enum
+typedef enum NAND_RESULT_E
 {
     NAND_RESULT_OK               = 0x00U, /* 成功 */
     NAND_RESULT_INVALID_ARGUMENT = 0xE1U, /* 参数/序列非法 */
@@ -40,7 +40,7 @@ typedef enum
  *   DELAY_US          → 延时微秒数
  *   WAIT_READY        → 不使用（等待 RB#）
  */
-typedef enum
+typedef enum NAND_UOP_TYPE_E
 {
     NAND_UOP_WAIT_READY,        /* 等待 NAND ready（RB# 轮询，超时检测） */
     NAND_UOP_COMMAND,           /* 写命令字节，operand=命令值 */
@@ -61,40 +61,40 @@ typedef enum
 } nand_uop_type_e;
 
 /* 单条微指令：类型 + 参数 */
-typedef struct
+typedef struct NAND_UOP_S
 {
     nand_uop_type_e type;
     DWORD           operand;
-} nand_uop_t;
+} nand_uop_s;
 
 /* 命令请求：列/行/数据。row 按 plane 索引（NAND_PLANE_MAX 深），
  * 单 plane 只用 row[0]，多 plane 填 row[0..plane_count-1]。 */
-typedef struct
+typedef struct NAND_COMMAND_REQUEST_S
 {
     BYTE  operation;
     WORD  column;
     DWORD row[NAND_PLANE_MAX]; /* 按 plane 索引，uop ROW handler 通过 operand 选取 */
     BYTE *buffer;
     WORD  data_length;
-} nand_command_request_t;
+} nand_cmd_req_s;
 
 /* 命令完成信息：nand_status = 70h 原始状态字节；
  * execution_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
-typedef struct
+typedef struct NAND_COMMAND_COMPLETION_S
 {
     BYTE          nand_status; /* 70h 原始状态：OP 后的读状态（FAIL/FAILC） */
     BYTE          pre_status;  /* 70h 原始状态：OP 前的读状态（RDY/ARDY/WP） */
     nand_result_e execution_status;
-} nand_command_completion_t;
+} nand_cmd_comp_s;
 
 /* 操作时序参数：busy_timeout_us 供引擎和 PHY handler 共用超时 */
-typedef struct
+typedef struct NAND_OPERATION_TIMING_S
 {
     WORD twb_us;
     WORD trst_us;
     WORD twh_us;
     WORD busy_timeout_us;
-} nand_operation_timing_t;
+} nand_op_timing_s;
 
 /*
  * FMC NAND 时序参数（29 个 WORD，单位 ns）。
@@ -105,7 +105,7 @@ typedef struct
  * 器件时序表使用 designated initializer 按字段名赋值；字段顺序仍决定结构体
  * 布局，但初始化不再依赖位置。
  */
-typedef struct
+typedef struct NAND_FMC_TIMING_S
 {
     WORD t_adl_ns;     /* 地址→数据加载延时 */
     WORD t_alh_ns;     /* ALE 保持 */
@@ -136,17 +136,17 @@ typedef struct
     WORD t_rr_ns;      /* 读命令→读命令间隔 */
     WORD t_wb_max_ns;  /* WE 高→busy（max） */
     WORD t_whr_ns;     /* 状态→RE 高延时 */
-} nand_fmc_timing_t;
+} nand_fmc_timing_s;
 
 /* UOP handler 签名：context 透传给 NAND 后端（FMC 实现） */
-typedef nand_result_e (*nand_uop_handler_t)(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+typedef nand_result_e (*nand_uop_handler_fn_t)(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion);
 
 /* NAND PHY 后端抽象：handler 表 + 透传上下文。
  * 由 NAND 层（nand_fmc.c）提供，FC 的 UOP 引擎只持有指针。 */
-typedef struct
+typedef struct NAND_PHY_BACKEND_S
 {
-    const nand_uop_handler_t *handlers;
-    void                     *context;
-} nand_phy_backend_t;
+    const nand_uop_handler_fn_t *handlers;
+    void                        *context;
+} nand_phy_backend_s;
 
 #endif /* NAND_PROTOCOL_H */

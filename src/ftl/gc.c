@@ -60,7 +60,7 @@
 ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
     // 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。
-    fc_command_t *cmd = fc_command_alloc();
+    fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -83,8 +83,8 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     }
 
     {
-        fc_command_status_t completion;
-        bool                submitted = false;
+        fc_cmd_status_s completion;
+        BOOL            submitted = false;
 
         const ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U, &submitted);
 
@@ -132,7 +132,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
  * @param page_base_out 输出：页基址
  * @return 解码结果（OK / EMPTY / FAIL）
  */
-gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out)
+gc_decode_e gc_decode_cw_lba(fc_cmd_s *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWORD *page_base_out)
 {
     const BYTE phys_plane = pba_to_plane(pba);
 
@@ -211,7 +211,7 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd, DWORD pba, DWORD cw_lba[CW_NUM],
  * @param out   输出：victim 与统计
  * @return 选择结果（OK / NO_VICTIM / NO_GAIN）
  */
-gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out)
+gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out)
 {
     ASSERT(alloc != NULL);
     ASSERT(out != NULL);
@@ -224,7 +224,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
     // 归一化基准：全表最大擦除/时间（一次扫描，与候选数无关）。
     // 退化值：无任何可统计块 ⇒ max_erase 兜底 1 防除零；max_pe_ts==0 ⇒ 时间项中性。
-    alc_bst_erase_stats_t erase_stats;
+    alc_bst_erase_stats_s erase_stats;
 
     alc_bst_get_erase_stats(alloc, &erase_stats);
 
@@ -236,10 +236,10 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     DWORD                best_cost_any  = UINT32_MAX; /* 无偏好组（仅当偏好组为空时使用） */
     WORD                 best_valid_any = (FTL_CW_PER_SB + 1U);
     WORD                 best_pct       = 101U; /* >100 = 尚未见到候选 */
-    bool                 found          = false;
-    bool                 found_any      = false;
-    const super_block_t *victim         = NULL;
-    const super_block_t *victim_any     = NULL;
+    BOOL                 found          = false;
+    BOOL                 found_any      = false;
+    const super_block_s *victim         = NULL;
+    const super_block_s *victim_any     = NULL;
 
     // plane 平衡偏好（本仓自拟，RISK-ALLOC-09）：成对条目回收后两侧各 +1；单 plane 条目
     // 只补一侧。某 plane 低于单 plane 水位且两 plane 不均衡时，优先「成对条目 + 饥饿 plane
@@ -275,7 +275,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_super_closed_get_at(alloc, i);
+        const super_block_s *sb = alc_super_closed_get_at(alloc, i);
 
         if (sb->is_open)
         {
@@ -284,7 +284,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
         // 各 plane 的聚合值（有效 CW / 磨损 / 时间）由 allocator 统一计算：
         // 有效 CW = 各 plane valid_count 之和（CW 级真实计数）；退化单 plane 条目跳过哨兵 plane。
-        alc_super_stats_t st;
+        alc_super_stats_s st;
         alc_super_get_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
@@ -337,7 +337,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
         // 偏好判定：成对条目（plane_count == PLANE_NUM）总是优先；单 plane 条目只有
         // 属于饥饿 plane 时才优先。
-        const bool preferred = ((starved >= PLANE_NUM) || (st.plane_count != 1U)) ? true : super_block_has_plane(sb, starved);
+        const BOOL preferred = ((starved >= PLANE_NUM) || (st.plane_count != 1U)) ? true : super_block_has_plane(sb, starved);
 
         // cost 相等时取有效页更少者（确定性，且退化为单维贪心）
         if (preferred == true)
@@ -386,7 +386,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
  * @param alloc 分配器
  * @return 触发位并集（0 = 不触发）
  */
-DWORD gc_should_trigger(const alc_t *alloc)
+DWORD gc_should_trigger(const alc_s *alloc)
 {
     // NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），
     // 不是静默吞（C5 判据 4）。
@@ -401,7 +401,7 @@ DWORD gc_should_trigger(const alc_t *alloc)
     // ⚠ 分配器按 **plane 成对**取块；total free 在目标线附近时可能全部落在 plane0，
     // 而 plane1 已枯竭。判据 = 总水位 **或任一 plane 低于单 plane 水位**
     // （per-plane 计数由 allocator 闸门维护，O(PLANE_NUM)）。
-    bool plane_low = false;
+    BOOL plane_low = false;
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {

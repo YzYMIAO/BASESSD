@@ -299,6 +299,7 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
 | **H47** | **本仓自定**（2026-10-20 用户要求：局部结构体声明后逐字段赋值） |
 | **H48** | **本仓自定**（2026-10-20 用户要求：优先用声明宽度 / 有界值 / 赋值转换消除强转） |
 | **H49** | **本仓自定**（2026-10-24 用户要求：命名 → 布局 → 调用链 → 封装/断言的优化顺序） |
+| **H50** | **本仓自定**（2026-11-06 用户要求：复合类型 / ID / 函数指针 / 数组的类型命名规范） |
 
 **H1 资源申请与释放必须配对。**（华为规则6.5）
 本项目最常返工的一类：三池（命令/描述符/缓冲）、op release 归属（`SYNC_WAIT` 不 release，
@@ -482,8 +483,9 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
 ### 5.3 华为规范补漏（H24~H29）
 
 **H24 命名规范。**（华为 §3）
-本仓现状即事实标准：`snake_case` 变量/函数、`PascalCase` 类型、**宏全大写 + 下划线**、
+本仓现状即事实标准：`snake_case` 变量/函数、**宏全大写 + 下划线**、
 **全局变量 `g_` 前缀**（本仓 162 个唯一名）；`static` 文件级变量 `s_` 前缀（本仓仅 2 处，弱约定）。
+**复合类型 / ID / 函数指针 / 数组的类型别名按 H50 命名**，不再使用 PascalCase 类型别名。
 禁止拼音、禁止无意义单字符名（循环变量 `i/j/k` 除外）。
 
 **H25 宏的写法。**（华为规则5.1/5.2/5.3）
@@ -537,11 +539,14 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
   保持 `uint8_t` 并注明值域同 `FTL_TEMP_*`。
 
 **H33 布尔与多态返回码。**（本仓自定）
-- 布尔一律用 C99 `bool`，**不新增** `xxx_bool_t`（同一语义的第二套类型名 = C9）。
+- 项目代码布尔一律用 `BOOL`（`include/common/ssd_types.h`，`typedef bool BOOL`，
+  **1 字节 C99 `_Bool`**；不是 Windows 的 4 字节 `int`）。
+  `bool/true/false` 只保留在 `ssd_types.h` 的 typedef、第三方/厂商边界与暂冻结的测试源中。
+  **不新增** `xxx_bool_t`（同一语义的第二套类型名 = C9）。
 - 多态返回码拆**具名枚举**；⚠ **同值反义不得共用一个通用枚举** ——
   `metadata_dir_anchor_prepare` 的 `0`（不脏 ⇒ 推进 phase）与 `md_compact_read/write` 的 `0`（背压 ⇒ return）
   同值反义，塞进一个枚举会误标。
-- **值域不是真值域的不改 bool**：计数 / 档位 / 下标索引 / 操作码 / 温度码
+- **值域不是真值域的不改 BOOL**：计数 / 档位 / 下标索引 / 操作码 / 温度码
   （`ftl_block_get_temp` 的 0=HOT / 1=COLD 是两值域，且被 UT 钉住）。
 
 **H34 入口守卫的收口判据。**（本仓自定，补充 H2 / H14 / P3）
@@ -813,6 +818,84 @@ H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可�
   静默介质破坏的守卫。新增 `ASSERT` 必须能构造失败输入（C7）。
 - **验证**：改完后用 grep 证明旧名/旧资源前缀零引用；跑 `make all` / `make release` /
   `make tests UT=FC`；涉及行为或地址/位图的改动仍按 R2 上板。
+
+### 5.14 类型命名（H50）
+
+**H50 复合类型 / ID / 函数指针 / 数组的类型别名，统一定义、统一后缀、统一缩写。**
+（本仓自定，2026-11-06 用户要求）
+
+**定义形态**：结构体 / 枚举 / 联合体必须在定义处带 `typedef` 和 tag：
+
+```c
+typedef struct FC_COMMAND_S
+{
+    ...
+} fc_cmd_s;
+
+typedef enum FC_RAID_MODE_E
+{
+    ...
+} fc_raid_mode_e;
+
+typedef union FC_PARAM_U
+{
+    ...
+} fc_param_u;
+```
+
+- **tag**：`<MODULE>_<FULL_NOUN>_S` / `_E` / `_U`，全大写；`S` = struct，`E` = enum，
+  `U` = union。tag 与 alias **不得同名**。
+- **alias**：`<module>_<abbrev>_s` / `_e` / `_u`，全小写；全称已经短（`route` / `page` /
+  `block` / `plane` / `cw` / `lba` / `pba` / `paa` / `ecc` / `raid` / `crc` / `gc` /
+  `bbt` / `entry`）不再缩写。
+- **前向声明 / 不透明类型**：头文件用 `typedef struct TAG_S alias_s;`；定义处用
+  `struct TAG_S { ... };`。自引用成员必须写 tag，不能写 alias。
+- **匿名嵌套成员**：结构体内部的匿名 struct/union 成员可以继续匿名；一旦需要独立
+  名字，按本条命名。
+
+**派生类型后缀**：
+
+| 后缀 | 用途 | 示例 |
+|---|---|---|
+| `_id_t` | 资源 ID 标量 | `fc_cmd_id_t` / `fc_desc_id_t` / `fc_buf_id_t` |
+| `_fn_t` | 函数指针 | `log_sink_fn_t` / `metadata_ring_probe_fn_t` |
+| `_arr_t` | 数组类型 | `alc_op_block_arr_t` |
+| `_t` | 其他有语义的标量 / 介质类型（必须写清单位或格式） | `timer_ms_t` / `l2p_jrn_seg_entry_t` |
+| 无后缀 | 基础宽度类型 | `BYTE/WORD/DWORD/QWORD/BOOL` |
+
+- **ID alias 的判据**：承载资源域（command / descriptor / buffer 不可混）、宽度或
+  `0xFFFF` 哨兵时保留；纯同义、无单位/宽度/格式语义的 alias 不建。
+  删除死别名 / 重复别名（如只有定义、零调用者的旧 `FuncStatus`；占位用的假别名）。
+- **统一用 `cfg`**，不再混用 `conf`：`fc_cmd_conf_t` → `fc_cmd_cfg_s`。
+- **函数指针统一用 `_fn_t`**，不再混用 `_fn` / `_callback_t` / `_handler_t` / `_func_t`。
+- **数组类型统一用 `_arr_t`**；`table` 若已表达语义可保留在名词中，但后缀用 `_arr_t`。
+
+**缩写表（新增缩写先查此表）**：
+
+| 全称 | 缩写 |
+|---|---|
+| command / configuration / descriptor / parameter | `cmd` / `cfg` / `desc` / `param` |
+| buffer / context / topology / metadata | `buf` / `ctx` / `topo` / `md` |
+| journal / statistics / address / length | `jrn` / `stats` / `addr` / `len` |
+| count / index / information / operation | `cnt` / `idx` / `info` / `op` |
+| request / response / segment / header | `req` / `rsp` / `seg` / `hdr` |
+| migrate / pending / allocator / scheduler | `mig` / `pend` / `alloc` / `sched` |
+| recovery / read recovery / watchdog / wear leveling | `rec` / `rr` / `wdg` / `wl` |
+| controller | `ctl` |
+
+**范围与例外**：
+
+- 适用于 `src/` + `include/` 的项目代码；`third_party/`、CMSIS/HAL、
+  `src/platform/stm32h7r3/`、`include/platform/stm32h7r3/` 保持上游写法。
+- `tests/` 暂冻结（`ISS-UT-02`）；测试内**引用生产类型**与**测试自有类型**的名字
+  已随生产代码同批机械收敛，逻辑/API 仍待测试源重建；不得为改类型名回退生产代码。
+- 历史 changelog 不改写；活跃文档按 P12 在定稿时回扫。
+- **改名不改语义/布局**：同一批改完必须确认 `make all` / `make release` /
+  `make tests UT=HIL` 零新告警。纯类型改名时 **release 的 `.text` / `.data` /
+  `.ssd_code_*` 段应逐字节不变**；整个 `.bin` 会因 `__DATE__`/`__TIME__` 横幅
+  时间戳不同，不能直接比整文件哈希。debug 还会因 `ASSERT` 字符串化类型名使
+  `.rodata`/`.bin` 小幅变化，但不能改变 `.text` 或运行期行为。代码段变化必须
+  停下来查（说明动到了初始化、位域或代码生成）。
 
 ### 华为条目去向
 

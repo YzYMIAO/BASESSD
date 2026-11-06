@@ -35,7 +35,7 @@
 #include "bbt.h" /* bbt_mark_bad */
 #include "fc.h"
 #include "fc_command.h"
-#include "ftl.h"              /* ftl_ctx_t（含 pending[] / cache / rr_page_scratch） */
+#include "ftl.h"              /* ftl_ctx_s（含 pending[] / cache / rr_page_scratch） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_cmd_read_data */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */
 #include "log.h"
@@ -61,9 +61,9 @@ static DWORD s_rr_unrec_suppressed;
  * @param track    ECC 趋势
  * @param ecc_bits 本次 ECC bit 数
  */
-void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
+void rr_record_ecc(rr_ecc_track_s *track, BYTE ecc_bits)
 {
-    // 层内接口：调用者一律传 &bst_block_t.rr（BST 常驻，恒非 NULL）
+    // 层内接口：调用者一律传 &bst_block_s.rr（BST 常驻，恒非 NULL）
 
     // 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数
     if (ecc_bits > track->last_ecc)
@@ -105,13 +105,13 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
  * @param gblock   全局块号
  * @param ecc_bits 本次 ECC bit 数
  */
-void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
+void rr_record_block_ecc(alc_s *alloc, WORD gblock, BYTE ecc_bits)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
     // gblock 的界内由 BST 唯一索引入口保证，此处只保留越界断言（H31）。
     ASSERT(gblock < FTL_BLOCK_TOTAL);
 
-    bst_block_t *blk = &alloc->blocks[gblock];
+    bst_block_s *blk = &alloc->blocks[gblock];
 
     rr_record_ecc(&blk->rr, ecc_bits);
     blk->read_count++;
@@ -146,9 +146,9 @@ void rr_record_block_ecc(alc_t *alloc, WORD gblock, BYTE ecc_bits)
  *         FTL_AGAIN 命令池空，或完成表 / SQ 满（命令已 release，可下轮重试）
  *         FTL_ERROR 入参、地址或建链失败
  */
-static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cfg_t *cfg)
+static ftl_status_e rr_read_submit(rr_handle_s *rr, DWORD pba, const ftl_page_cfg_s *cfg)
 {
-    fc_command_t *cmd;
+    fc_cmd_s *cmd;
 
     const ftl_status_e st = ftl_async_read_page(&cmd, pba, cfg);
     if (st != FTL_OK)
@@ -188,7 +188,7 @@ static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cf
  * RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
  * 头扫，先清 page/page_lba/first）。
  */
-static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
+static rr_plane_step_e rr_select_plane(rr_handle_s *rr)
 {
     rr->page     = NAND_PBA_INVALID;
     rr->page_lba = 0U;
@@ -226,7 +226,7 @@ static rr_plane_step_e rr_select_plane(rr_handle_t *rr)
  * @return true  本次输出
  *         false 限流中，本次只累加抑制计数
  */
-static bool rr_unrec_log_is_due(void)
+static BOOL rr_unrec_log_is_due(void)
 {
     return log_rate_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
 }
@@ -240,7 +240,7 @@ static bool rr_unrec_log_is_due(void)
  * 可能只覆盖页内部分 CW ⇒ 必须按各 CW 的真实偏移（ftl_lba_cw）搬回，
  * 否则整段错位。
  */
-static void rr_settle_plane(rr_handle_t *rr)
+static void rr_settle_plane(rr_handle_s *rr)
 {
     for (BYTE k = 0U; k < rr->owner.n_cw; k++)
     {
@@ -272,8 +272,8 @@ static void rr_settle_plane(rr_handle_t *rr)
         const DWORD fail_paa = pba_to_paa(fail_pba);
         const WORD  gblock   = ftl_pba_gblock(fail_pba);
 
-        bst_block_t *const blk         = &rr->alloc->blocks[gblock];
-        const bool         already_bad = ftl_block_is_bad(blk);
+        bst_block_s *const blk         = &rr->alloc->blocks[gblock];
+        const BOOL         already_bad = ftl_block_is_bad(blk);
 
         // 读（含 CRC 重读）失败 ⇒ 页面已损坏提升为块级不可靠。
         // XOR/RAID 恢复未实现（CONFIG_FC_RAID=0）⇒ 块退役。
@@ -321,7 +321,7 @@ static void rr_settle_plane(rr_handle_t *rr)
  *
  * @note owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。
  */
-static void rr_job_finish(rr_handle_t *rr)
+static void rr_job_finish(rr_handle_s *rr)
 {
     const ssd_status_e status = (rr->all_ok) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
@@ -346,7 +346,7 @@ static void rr_job_finish(rr_handle_t *rr)
  *
  * @note **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。
  */
-static void rr_job_abort(rr_handle_t *rr)
+static void rr_job_abort(rr_handle_s *rr)
 {
     LOGE(LOG_TAG_RR "submit stalled, abort lba=%lu\r\n", rr->owner.lba);
 
@@ -368,7 +368,7 @@ static void rr_job_abort(rr_handle_t *rr)
  * return（stage 原地不动，等完成服务函数改写）；提交失败（背压）同样
  * return，stage 不变 ⇒ 下轮 rr_handle 再试同一 stage（幂等）。
  */
-static void rr_job_step(rr_handle_t *rr)
+static void rr_job_step(rr_handle_s *rr)
 {
     for (;;)
     {
@@ -380,7 +380,7 @@ static void rr_job_step(rr_handle_t *rr)
                 // 被托管的读子操作。都没有就空闲退出。
                 if (rr->has_owner == false)
                 {
-                    pend_op_view_t view;
+                    pend_op_view_s view;
 
                     if (pend_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view) == false)
                     {
@@ -451,7 +451,7 @@ static void rr_job_step(rr_handle_t *rr)
 
             case RR_STAGE_READ:
             {
-                const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(rr->page_lba);
+                const ftl_page_cfg_s *cfg = FTL_PAGE_CFG_DATA(rr->page_lba);
                 const ftl_status_e    st  = rr_read_submit(rr, rr->page, cfg);
 
                 // FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；FTL_AGAIN = 背压 ⇒
@@ -493,7 +493,7 @@ static void rr_job_step(rr_handle_t *rr)
  * @param page_scratch 整页暂存
  * @param pending      pending 表
  */
-void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scratch, pending_ctx_t *pending)
+void rr_init(rr_handle_s *rr, l2p_cache_s *cache, alc_s *alloc, BYTE *page_scratch, pend_ctx_s *pending)
 {
     // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
     // （cache / alloc / rr_page_scratch / pending 均为实例内嵌对象的地址）⇒ 不重复检查。
@@ -513,7 +513,7 @@ void rr_init(rr_handle_t *rr, l2p_cache_t *cache, alc_t *alloc, BYTE *page_scrat
  * @param rr    handle
  * @param owner 托管子操作
  */
-void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
+void rr_trigger(rr_handle_s *rr, const rr_owner_s *owner)
 {
     // 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
     // 当前 job 结束后由 pending 端口的 take 领走。
@@ -531,7 +531,7 @@ void rr_trigger(rr_handle_t *rr, const rr_owner_t *owner)
  *
  * @param rr handle
  */
-void rr_handle(rr_handle_t *rr)
+void rr_handle(rr_handle_s *rr)
 {
     // 心跳（见 log.h / timer.h）：恢复在飞期间每满 1s 打一行 stage/age。
     // ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
@@ -599,14 +599,14 @@ void rr_handle(rr_handle_t *rr)
  *
  * @note 命令级 DATA_ERROR 把 UNC/CRC/RAID 合并成一位；要判 CRC-only 必须回看 desc。
  */
-static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
+static BOOL rr_desc_failure_is_crc_only(const fc_cmd_s *cmd)
 {
-    bool any = false;
+    BOOL any = false;
     WORD did = cmd->desc_id;
 
-    while (did != FC_DESCRIPTOR_ID_INVALID)
+    while (did != FC_DESC_ID_INVALID)
     {
-        const fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
 
         if (d == NULL)
         {
@@ -639,7 +639,7 @@ static bool rr_desc_failure_is_crc_only(const fc_command_t *cmd)
  * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
  *       UNC / NAND_FAIL / TIMEOUT / META_ERROR 直接交 rr_settle_plane 清零 + 标坏。
  */
-static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
+static void rr_read_complete(rr_handle_s *rr, fc_cmd_s *cmd, const fc_cmd_status_s *completion)
 {
     rr->retry_count = rr->attempt;
     rr->last_status = completion->status; /* 收尾日志解码用 */
@@ -655,7 +655,7 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
     // 命令级 DATA_ERROR 合并了 UNC/CRC/RAID，CRC-only 要回看 desc；
     // NAND/FAILC/TIMEOUT/META 任意一个出现都不是 CRC-only。
     const DWORD err_bits = completion->status & FC_CMD_STATUS_ERROR_MASK;
-    const bool  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
+    const BOOL  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
 
     if (crc_only && (rr->attempt < 2U))
     {
@@ -675,20 +675,20 @@ static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_comman
  *
  * @param ftl        实例
  * @param completion FC 完成状态
- * @param ctx        rr_handle_t *
+ * @param ctx        rr_handle_s *
  */
-void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_read_recovery_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
 
-    WORD          cmd_id = completion->command_id;
-    fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
+    WORD      cmd_id = completion->command_id;
+    fc_cmd_s *cmd    = fc_command_id_to_command(cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。
 
-    rr_handle_t *rr = (rr_handle_t *)ctx;
+    rr_handle_s *rr = (rr_handle_s *)ctx;
     ASSERT(rr == &ftl->read_recovery_handle);
 
     // request 表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
@@ -728,7 +728,7 @@ void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *compl
  * @param track ECC 趋势（可 NULL）
  * @return 健康档位
  */
-rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
+rr_block_health_e rr_get_health(const rr_ecc_track_s *track)
 {
     if (track == NULL)
     {
@@ -747,13 +747,13 @@ rr_block_health_e rr_get_health(const rr_ecc_track_t *track)
  * @param gblock 输出：命中的全局块号
  * @return true 命中；false 无候选
  */
-bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
+BOOL rr_predictive_scan(const alc_s *alloc, WORD *gblock)
 {
     // 层内接口：唯一调用者 mig_predict_begin 传 rr->alloc 与局部 gblock
 
     for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        const bst_block_t *b = &alloc->blocks[i];
+        const bst_block_s *b = &alloc->blocks[i];
 
         // 预测性退役只针对 Closed 块：Open 还在写、Free 没数据、Retired/Bad 已出局
         if (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED)
@@ -774,8 +774,8 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
                 continue; /* 状态与闭链表不一致（不应发生）：不拿它冒险 */
             }
 
-            const super_block_t *sb       = alc_super_closed_get_at(alloc, sb_id);
-            bool                 bad_peer = false;
+            const super_block_s *sb       = alc_super_closed_get_at(alloc, sb_id);
+            BOOL                 bad_peer = false;
 
             for (BYTE p = 0U; p < PLANE_NUM; p++)
             {
@@ -813,12 +813,12 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
  *
  * @param b 块条目
  */
-void rr_retire_block(bst_block_t *b)
+void rr_retire_block(bst_block_s *b)
 {
     // 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->alloc.blocks[gblock]
 
     // 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
-    // ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 bst_block_t*，拿不到 gblock）——
+    // ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 bst_block_s*，拿不到 gblock）——
     // 只置 RETIRED 挡不住分配：alc_free_find_block 的判据是
     // Free Pool **数组**（只跳过 is_bad），留在池里的退役块照样会被选中。
     // 由 migrate.c 的 MIG_ERASE RETIRE 分支调 alc_free_remove 完成。
@@ -840,7 +840,7 @@ void rr_retire_block(bst_block_t *b)
  * @param alloc  分配器
  * @param gblock 全局块号
  */
-void rr_retire_block_at(alc_t *alloc, WORD gblock)
+void rr_retire_block_at(alc_s *alloc, WORD gblock)
 {
     // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号。
     ASSERT(gblock < FTL_BLOCK_TOTAL);

@@ -24,8 +24,8 @@
 // g_raid_ctx[LUN_NUM]   — 每个 LUN 的 RAID 上下文
 // g_raid_shadow[LUN_NUM] — 影子缓冲（HSQ 打断 save/restore）
 
-static fc_raid_context_t g_raid_ctx[LUN_NUM];
-static fc_raid_context_t g_raid_shadow[LUN_NUM];
+static fc_raid_ctx_s g_raid_ctx[LUN_NUM];
+static fc_raid_ctx_s g_raid_shadow[LUN_NUM];
 
 /**
  * @brief 清空该 LUN 的 RAID 上下文与影子缓冲
@@ -37,8 +37,8 @@ void fc_raid_init_ctx(BYTE lun)
     // 前置条件由调用者保证（fc.c 按 LUN_NUM 循环传入）
     ASSERT(lun < LUN_NUM);
 
-    memset(&g_raid_ctx[lun], 0, sizeof(fc_raid_context_t));
-    memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_context_t));
+    memset(&g_raid_ctx[lun], 0, sizeof(fc_raid_ctx_s));
+    memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_ctx_s));
 }
 
 /**
@@ -56,7 +56,7 @@ fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
     ASSERT(cw_buffer != NULL);
     ASSERT(total != 0U);
 
-    fc_raid_context_t *ctx = &g_raid_ctx[lun];
+    fc_raid_ctx_s *ctx = &g_raid_ctx[lun];
 
     if (ctx->active == true)
     {
@@ -87,7 +87,7 @@ fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
     ASSERT(lun < LUN_NUM);
     ASSERT(cw_buffer != NULL);
 
-    fc_raid_context_t *ctx = &g_raid_ctx[lun];
+    fc_raid_ctx_s *ctx = &g_raid_ctx[lun];
 
     if (ctx->active == false)
     {
@@ -126,7 +126,7 @@ fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
     ASSERT(lun < LUN_NUM);
     ASSERT(parity_buffer != NULL);
 
-    fc_raid_context_t *ctx = &g_raid_ctx[lun];
+    fc_raid_ctx_s *ctx = &g_raid_ctx[lun];
 
     if (ctx->active == false)
     {

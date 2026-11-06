@@ -6,7 +6,7 @@
  *   ① 异常入口蹦床：naked asm，必须在任何 C 序言之前确定出错栈并抓现场；
  *   ② 轮询控制台：直接操作 USART1/DMA1_Stream0 寄存器；
  *   ③ 故障/复位状态寄存器：SCB->SHCSR 使能、RCC->RSR 复位原因解码；
- *   ④ 把现场填成 fault_ctx_t 后转交共享层的 fault_report_and_halt()。
+ *   ④ 把现场填成 fault_ctx_s 后转交共享层的 fault_report_and_halt()。
  */
 
 #include "fault.h"
@@ -146,7 +146,7 @@ void fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity)
 void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7) __attribute__((used, noinline));
 void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7)
 {
-    fault_ctx_t ctx;
+    fault_ctx_s ctx;
 
     ctx.kind       = __get_IPSR();
     ctx.sp         = (uintptr_t)frame;

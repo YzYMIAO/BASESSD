@@ -9,11 +9,11 @@
  * 支持 O(log n) 的插入、删除和查找操作。
  * 键值对按键的顺序排列，支持有序遍历。
  */
-struct ds_rbtree_table_s
+struct DS_RBTREE_S
 {
-    size_t  size;     /**< 树中键值对的数量 */
-    RBnode *root;     /**< 根节点指针 */
-    RBnode *sentinel; /**< 哨兵节点（表示空节点，所有叶子节点指向它） */
+    size_t            size;     /**< 树中键值对的数量 */
+    ds_rbtree_node_s *root;     /**< 根节点指针 */
+    ds_rbtree_node_s *sentinel; /**< 哨兵节点（表示空节点，所有叶子节点指向它） */
 
     int (*cmp)(void const *key1, void const *key2);  /**< 键比较函数指针 */
     void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
@@ -29,9 +29,9 @@ struct ds_rbtree_table_s
  * @param[in,out] table 红黑树表
  * @param[in,out] x     旋转轴心节点
  */
-static void rotate_right(ds_RBtree *table, RBnode *x)
+static void rotate_right(ds_rbtree_s *table, ds_rbtree_node_s *x)
 {
-    RBnode *y = x->left;
+    ds_rbtree_node_s *y = x->left;
 
     /* 将 y 的右子树挂接到 x 的左子树 */
     x->left = y->right;
@@ -71,9 +71,9 @@ static void rotate_right(ds_RBtree *table, RBnode *x)
  * @param[in,out] table 红黑树表
  * @param[in,out] x     旋转轴心节点
  */
-static void rotate_left(ds_RBtree *table, RBnode *x)
+static void rotate_left(ds_rbtree_s *table, ds_rbtree_node_s *x)
 {
-    RBnode *y = x->right;
+    ds_rbtree_node_s *y = x->right;
 
     /* 将 y 的左子树挂接到 x 的右子树 */
     x->right = y->left;
@@ -113,9 +113,9 @@ static void rotate_left(ds_RBtree *table, RBnode *x)
  *
  * @return 子树中最小的节点（最左节点），如果子树为空则返回哨兵节点
  */
-static RBnode *tree_min(ds_RBtree const *const table, RBnode *n)
+static ds_rbtree_node_s *tree_min(ds_rbtree_s const *const table, ds_rbtree_node_s *n)
 {
-    RBnode *s = table->sentinel;
+    ds_rbtree_node_s *s = table->sentinel;
 
     if (n == s)
     {
@@ -138,9 +138,9 @@ static RBnode *tree_min(ds_RBtree const *const table, RBnode *n)
  *
  * @return 子树中最大的节点（最右节点），如果子树为空则返回哨兵节点
  */
-static RBnode *tree_max(ds_RBtree const *const table, RBnode *n)
+static ds_rbtree_node_s *tree_max(ds_rbtree_s const *const table, ds_rbtree_node_s *n)
 {
-    RBnode *s = table->sentinel;
+    ds_rbtree_node_s *s = table->sentinel;
 
     if (n == s)
     {
@@ -165,7 +165,7 @@ static RBnode *tree_max(ds_RBtree const *const table, RBnode *n)
  *
  * @return x 的后继节点，如果 x 是最大节点则返回哨兵节点
  */
-static RBnode *get_successor_node(ds_RBtree const *const table, RBnode *x)
+static ds_rbtree_node_s *get_successor_node(ds_rbtree_s const *const table, ds_rbtree_node_s *x)
 {
     if (x == NULL)
     {
@@ -179,7 +179,7 @@ static RBnode *get_successor_node(ds_RBtree const *const table, RBnode *x)
     }
 
     /* 否则向上查找，直到找到第一个作为左子树的祖先 */
-    RBnode *y = x->parent;
+    ds_rbtree_node_s *y = x->parent;
 
     while (y != table->sentinel && x == y->right)
     {
@@ -200,7 +200,7 @@ static RBnode *get_successor_node(ds_RBtree const *const table, RBnode *x)
  *
  * @return x 的前驱节点，如果 x 是最小节点则返回哨兵节点
  */
-static RBnode *get_predecessor_node(ds_RBtree const *const table, RBnode *x)
+static ds_rbtree_node_s *get_predecessor_node(ds_rbtree_s const *const table, ds_rbtree_node_s *x)
 {
     if (x == NULL)
     {
@@ -214,7 +214,7 @@ static RBnode *get_predecessor_node(ds_RBtree const *const table, RBnode *x)
     }
 
     /* 否则向上查找，直到找到第一个作为右子树的祖先 */
-    RBnode *y = x->parent;
+    ds_rbtree_node_s *y = x->parent;
 
     while (y != table->sentinel && x == y->left)
     {
@@ -235,7 +235,7 @@ static RBnode *get_predecessor_node(ds_RBtree const *const table, RBnode *x)
  * @param[in]     u     被替换的节点
  * @param[in,out] v     替换节点
  */
-static void transplant(ds_RBtree *table, RBnode *u, RBnode *v)
+static void transplant(ds_rbtree_s *table, ds_rbtree_node_s *u, ds_rbtree_node_s *v)
 {
     if (u->parent == table->sentinel)
     {
@@ -263,12 +263,12 @@ static void transplant(ds_RBtree *table, RBnode *u, RBnode *v)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  *
- * @warning 原代码参数类型为 ds_RBtree *table（值传递），
- *          无法返回新创建的表指针，应为 ds_RBtree **table
+ * @warning 原代码参数类型为 ds_rbtree_s *table（值传递），
+ *          无法返回新创建的表指针，应为 ds_rbtree_s **table
  */
-ds_Stat ds_rbtree_new(ds_RBtree **table, int (*comper)(const void *, const void *))
+ds_status_e ds_rbtree_new(ds_rbtree_s **table, int (*comper)(const void *, const void *))
 {
-    ds_rbTreeConfig conf;
+    ds_rbtree_cfg_s conf;
 
     ds_rbtree_conf_init(&conf);
     conf.cmp = comper;
@@ -282,7 +282,7 @@ ds_Stat ds_rbtree_new(ds_RBtree **table, int (*comper)(const void *, const void 
  *
  * @param[in,out] conf 需要初始化的配置结构体指针
  */
-void ds_rbtree_conf_init(ds_rbTreeConfig *conf)
+void ds_rbtree_conf_init(ds_rbtree_cfg_s *conf)
 {
     conf->cmp        = NULL;
     conf->mem_free   = free;
@@ -301,16 +301,16 @@ void ds_rbtree_conf_init(ds_rbTreeConfig *conf)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_rbtree_new_conf(ds_rbTreeConfig *conf, ds_RBtree **out)
+ds_status_e ds_rbtree_new_conf(ds_rbtree_cfg_s *conf, ds_rbtree_s **out)
 {
-    ds_RBtree *table = conf->mem_calloc(1, sizeof(ds_RBtree));
+    ds_rbtree_s *table = conf->mem_calloc(1, sizeof(ds_rbtree_s));
 
     if (table == NULL)
     {
         return DS_ERR_ALLOC;
     }
 
-    RBnode *sentinel = conf->mem_calloc(1, sizeof(RBnode));
+    ds_rbtree_node_s *sentinel = conf->mem_calloc(1, sizeof(ds_rbtree_node_s));
 
     if (sentinel == NULL)
     {
@@ -338,9 +338,9 @@ ds_Stat ds_rbtree_new_conf(ds_rbTreeConfig *conf, ds_RBtree **out)
  * @param[in,out] table 红黑树表
  * @param[in,out] z     新插入的节点
  */
-static void rebalance_after_insert(ds_RBtree *table, RBnode *z)
+static void rebalance_after_insert(ds_rbtree_s *table, ds_rbtree_node_s *z)
 {
-    RBnode *y;
+    ds_rbtree_node_s *y;
 
     /* 当父节点为红色时需要调整 */
     while (z->parent->color == RB_RED)
@@ -415,9 +415,9 @@ static void rebalance_after_insert(ds_RBtree *table, RBnode *z)
  * @param[in,out] table 红黑树表
  * @param[in,out] x     需要调整的节点
  */
-static void rebalance_after_delete(ds_RBtree *table, RBnode *x)
+static void rebalance_after_delete(ds_rbtree_s *table, ds_rbtree_node_s *x)
 {
-    RBnode *w;
+    ds_rbtree_node_s *w;
 
     while (x != table->root && x->color == RB_BLACK)
     {
@@ -510,10 +510,10 @@ static void rebalance_after_delete(ds_RBtree *table, RBnode *x)
  *
  * @return 找到的节点指针，未找到则返回 NULL
  */
-static RBnode *get_tree_node_by_key(ds_RBtree *table, void *key)
+static ds_rbtree_node_s *get_tree_node_by_key(ds_rbtree_s *table, void *key)
 {
-    RBnode *n = table->root;
-    RBnode *s = table->sentinel;
+    ds_rbtree_node_s *n = table->root;
+    ds_rbtree_node_s *s = table->sentinel;
 
     int cmp;
 
@@ -549,10 +549,10 @@ static RBnode *get_tree_node_by_key(ds_RBtree *table, void *key)
  *
  * @return DS_OK 插入成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_rbtree_add(ds_RBtree *table, void *key, void *val)
+ds_status_e ds_rbtree_add(ds_rbtree_s *table, void *key, void *val)
 {
-    RBnode *y = table->sentinel;
-    RBnode *x = table->root;
+    ds_rbtree_node_s *y = table->sentinel;
+    ds_rbtree_node_s *x = table->root;
 
     /* 查找插入位置 */
     while (x != table->sentinel)
@@ -577,7 +577,7 @@ ds_Stat ds_rbtree_add(ds_RBtree *table, void *key, void *val)
     }
 
     /* 创建新节点 */
-    RBnode *new = table->mem_calloc(1, sizeof(RBnode));
+    ds_rbtree_node_s *new = table->mem_calloc(1, sizeof(ds_rbtree_node_s));
 
     if (new == NULL)
     {
@@ -624,7 +624,7 @@ ds_Stat ds_rbtree_add(ds_RBtree *table, void *key, void *val)
  * @param[in,out] table 红黑树表
  * @param[in,out] n     当前节点
  */
-static void tree_destroy(ds_RBtree *table, RBnode *n)
+static void tree_destroy(ds_rbtree_s *table, ds_rbtree_node_s *n)
 {
     if (n == table->sentinel)
     {
@@ -645,7 +645,7 @@ static void tree_destroy(ds_RBtree *table, RBnode *n)
  *
  * @param[in] table 要销毁的表指针
  */
-void ds_rbtree_destroy(ds_RBtree *table)
+void ds_rbtree_destroy(ds_rbtree_s *table)
 {
     tree_destroy(table, table->root);
 
@@ -659,10 +659,10 @@ void ds_rbtree_destroy(ds_RBtree *table)
  * @param[in,out] table 红黑树表
  * @param[in,out] z     要移除的节点
  */
-static void remove_node(ds_RBtree *table, RBnode *z)
+static void remove_node(ds_rbtree_s *table, ds_rbtree_node_s *z)
 {
-    RBnode *x;
-    RBnode *y = z;
+    ds_rbtree_node_s *x;
+    ds_rbtree_node_s *y = z;
 
     char y_color = z->color;
 
@@ -721,9 +721,9 @@ static void remove_node(ds_RBtree *table, RBnode *z)
  *
  * @return DS_OK 移除成功，DS_ERR_KEY_NOT_FOUND 键不存在
  */
-ds_Stat ds_rbtree_remove(ds_RBtree *table, void *key, void **out)
+ds_status_e ds_rbtree_remove(ds_rbtree_s *table, void *key, void **out)
 {
-    RBnode *node = get_tree_node_by_key(table, key);
+    ds_rbtree_node_s *node = get_tree_node_by_key(table, key);
 
     if (node == NULL)
     {
@@ -747,14 +747,14 @@ ds_Stat ds_rbtree_remove(ds_RBtree *table, void *key, void **out)
  *
  * @return DS_OK 移除成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_remove_first(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_remove_first(ds_rbtree_s *table, void **out)
 {
     if (table->size == 0)
     {
         return DS_ERR_KEY_NOT_FOUND;
     }
 
-    RBnode *node = tree_min(table, table->root);
+    ds_rbtree_node_s *node = tree_min(table, table->root);
 
     if (out != NULL)
     {
@@ -773,14 +773,14 @@ ds_Stat ds_rbtree_remove_first(ds_RBtree *table, void **out)
  *
  * @return DS_OK 移除成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_remove_last(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_remove_last(ds_rbtree_s *table, void **out)
 {
     if (table->size == 0)
     {
         return DS_ERR_KEY_NOT_FOUND;
     }
 
-    RBnode *node = tree_max(table, table->root);
+    ds_rbtree_node_s *node = tree_max(table, table->root);
 
     if (out != NULL)
     {
@@ -796,7 +796,7 @@ ds_Stat ds_rbtree_remove_last(ds_RBtree *table, void **out)
  *
  * @param[in,out] table 目标红黑树表
  */
-void ds_rbtree_remove_all(ds_RBtree *table)
+void ds_rbtree_remove_all(ds_rbtree_s *table)
 {
     tree_destroy(table, table->root);
     table->size = 0;
@@ -812,9 +812,9 @@ void ds_rbtree_remove_all(ds_RBtree *table)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 键不存在
  */
-ds_Stat ds_rbtree_get(ds_RBtree *table, void *key, void **out)
+ds_status_e ds_rbtree_get(ds_rbtree_s *table, void *key, void **out)
 {
-    RBnode *node = get_tree_node_by_key(table, key);
+    ds_rbtree_node_s *node = get_tree_node_by_key(table, key);
 
     if (node == NULL)
     {
@@ -833,9 +833,9 @@ ds_Stat ds_rbtree_get(ds_RBtree *table, void *key, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_get_first_value(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_get_first_value(ds_rbtree_s *table, void **out)
 {
-    RBnode *node = tree_min(table, table->root);
+    ds_rbtree_node_s *node = tree_min(table, table->root);
 
     if (node == table->sentinel)
     {
@@ -854,9 +854,9 @@ ds_Stat ds_rbtree_get_first_value(ds_RBtree *table, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_get_last_value(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_get_last_value(ds_rbtree_s *table, void **out)
 {
-    RBnode *node = tree_max(table, table->root);
+    ds_rbtree_node_s *node = tree_max(table, table->root);
 
     if (node == table->sentinel)
     {
@@ -875,9 +875,9 @@ ds_Stat ds_rbtree_get_last_value(ds_RBtree *table, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_get_first_key(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_get_first_key(ds_rbtree_s *table, void **out)
 {
-    RBnode *node = tree_min(table, table->root);
+    ds_rbtree_node_s *node = tree_min(table, table->root);
 
     if (node == table->sentinel)
     {
@@ -896,9 +896,9 @@ ds_Stat ds_rbtree_get_first_key(ds_RBtree *table, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 表为空
  */
-ds_Stat ds_rbtree_get_last_key(ds_RBtree *table, void **out)
+ds_status_e ds_rbtree_get_last_key(ds_rbtree_s *table, void **out)
 {
-    RBnode *node = tree_max(table, table->root);
+    ds_rbtree_node_s *node = tree_max(table, table->root);
 
     if (node == table->sentinel)
     {
@@ -918,10 +918,10 @@ ds_Stat ds_rbtree_get_last_key(ds_RBtree *table, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 键不存在或没有后继
  */
-ds_Stat ds_rbtree_get_greater_then(ds_RBtree *table, void *key, void **out)
+ds_status_e ds_rbtree_get_greater_then(ds_rbtree_s *table, void *key, void **out)
 {
-    RBnode *n = get_tree_node_by_key(table, key);
-    RBnode *s = get_successor_node(table, n);
+    ds_rbtree_node_s *n = get_tree_node_by_key(table, key);
+    ds_rbtree_node_s *s = get_successor_node(table, n);
 
     if (n == NULL && s == NULL)
     {
@@ -941,10 +941,10 @@ ds_Stat ds_rbtree_get_greater_then(ds_RBtree *table, void *key, void **out)
  *
  * @return DS_OK 查找成功，DS_ERR_KEY_NOT_FOUND 键不存在或没有前驱
  */
-ds_Stat ds_rbtree_get_lesser_then(ds_RBtree *table, void *key, void **out)
+ds_status_e ds_rbtree_get_lesser_then(ds_rbtree_s *table, void *key, void **out)
 {
-    RBnode *n = get_tree_node_by_key(table, key);
-    RBnode *s = get_predecessor_node(table, n);
+    ds_rbtree_node_s *n = get_tree_node_by_key(table, key);
+    ds_rbtree_node_s *s = get_predecessor_node(table, n);
 
     if (n == NULL && s == NULL)
     {
@@ -962,7 +962,7 @@ ds_Stat ds_rbtree_get_lesser_then(ds_RBtree *table, void *key, void **out)
  *
  * @return 键值对的数量
  */
-size_t ds_rbtree_size(ds_RBtree *table)
+size_t ds_rbtree_size(ds_rbtree_s *table)
 {
     return table->size;
 }
@@ -970,11 +970,11 @@ size_t ds_rbtree_size(ds_RBtree *table)
 /**
  * @brief 获取红黑树表结构体的大小
  *
- * @return 结构体 ds_RBtree 的字节大小
+ * @return 结构体 ds_rbtree_s 的字节大小
  */
 size_t ds_rbtree_struct_size()
 {
-    return sizeof(ds_RBtree);
+    return sizeof(ds_rbtree_s);
 }
 
 /**
@@ -985,9 +985,9 @@ size_t ds_rbtree_struct_size()
  *
  * @return true 键存在，false 键不存在
  */
-bool ds_rbtree_contains_key(ds_RBtree *table, void *key)
+BOOL ds_rbtree_contains_key(ds_rbtree_s *table, void *key)
 {
-    RBnode *node = get_tree_node_by_key(table, key);
+    ds_rbtree_node_s *node = get_tree_node_by_key(table, key);
 
     if (node == NULL)
     {
@@ -1005,10 +1005,10 @@ bool ds_rbtree_contains_key(ds_RBtree *table, void *key)
  *
  * @return 值在表中出现的次数
  */
-size_t ds_rbtree_contains_value(ds_RBtree *table, void *val)
+size_t ds_rbtree_contains_value(ds_rbtree_s *table, void *val)
 {
-    RBnode *node  = tree_min(table, table->root);
-    size_t  count = 0;
+    ds_rbtree_node_s *node  = tree_min(table, table->root);
+    size_t            count = 0;
 
     while (node != table->sentinel)
     {
@@ -1031,9 +1031,9 @@ size_t ds_rbtree_contains_value(ds_RBtree *table, void *val)
  * @param[in,out] table 目标红黑树表
  * @param[in]     fn    对每个键执行的函数
  */
-void ds_rbtree_foreach_key(ds_RBtree *table, void (*fn)(void *))
+void ds_rbtree_foreach_key(ds_rbtree_s *table, void (*fn)(void *))
 {
-    RBnode *node = tree_min(table, table->root);
+    ds_rbtree_node_s *node = tree_min(table, table->root);
 
     while (node != table->sentinel)
     {
@@ -1050,9 +1050,9 @@ void ds_rbtree_foreach_key(ds_RBtree *table, void (*fn)(void *))
  * @param[in,out] table 目标红黑树表
  * @param[in]     fn    对每个值执行的函数
  */
-void ds_rbtree_foreach_value(ds_RBtree *table, void (*fn)(void *))
+void ds_rbtree_foreach_value(ds_rbtree_s *table, void (*fn)(void *))
 {
-    RBnode *node = tree_min(table, table->root);
+    ds_rbtree_node_s *node = tree_min(table, table->root);
 
     while (node != table->sentinel)
     {

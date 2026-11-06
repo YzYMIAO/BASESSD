@@ -35,7 +35,7 @@ static const BYTE s_hil_zero[HIL_IO_LBAS * FTL_IU_BYTES];
 static BYTE       s_hil_edge_buf[HIL_IO_LBAS * FTL_IU_BYTES];
 
 /* 拓扑不符用例的假实例：只用于 ssd_controller_init 的 topo 校验，不碰硬件。 */
-static ftl_ctx_t s_hil_bad_ftl;
+static ftl_ctx_s s_hil_bad_ftl;
 
 /* ══════════════════════════════════════════════════════════════════
  * 夹具
@@ -51,7 +51,7 @@ static DWORD hil_lba_base(void)
 }
 
 /* 泵主循环的 HIL 相关部分，直到 request 完成或超时。 */
-static bool hil_wait(const ssd_request_t *req, DWORD timeout_ms)
+static BOOL hil_wait(const ssd_req_s *req, DWORD timeout_ms)
 {
     const DWORD t0 = platform_now_ms();
 
@@ -76,15 +76,15 @@ static bool hil_wait(const ssd_request_t *req, DWORD timeout_ms)
 /* 排空 FTL/FC 在飞资源；bg_suspend 恢复原值（与 /ftl/media/ 同口径）。 */
 static void hil_quiesce(void)
 {
-    ftl_ctx_t  *ftl   = g_ctrl.ftl[0];
-    const bool  saved = ftl->flags.bg_suspend;
+    ftl_ctx_s  *ftl   = g_ctrl.ftl[0];
+    const BOOL  saved = ftl->flags.bg_suspend;
     const DWORD t0    = platform_now_ms();
 
     ftl->flags.bg_suspend = 1U;
 
     for (;;)
     {
-        fc_resource_stats_t rs;
+        fc_resource_stats_s rs;
 
         ftl_service_pump();
         for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -122,7 +122,7 @@ static void hil_teardown(void *fixture)
     hil_quiesce();
 }
 
-static void hil_req_init(ssd_request_t *req, ssd_req_opcode_e opcode, QWORD lba, DWORD count, void *buffer, size_t buffer_size)
+static void hil_req_init(ssd_req_s *req, ssd_req_opcode_e opcode, QWORD lba, DWORD count, void *buffer, size_t buffer_size)
 {
     memset(req, 0, sizeof(*req));
     req->opcode      = opcode;
@@ -141,7 +141,7 @@ static MunitResult test_hil_state_machine(const MunitParameter params[], void *d
     (void)params;
     (void)data;
 
-    ssd_controller_t c;
+    ssd_ctl_s c;
 
     memset(&c, 0, sizeof(c));
 
@@ -170,7 +170,7 @@ static MunitResult test_hil_init_ready(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
-    ssd_controller_t c;
+    ssd_ctl_s c;
 
     memset(&c, 0, sizeof(c));
     munit_assert_int(ssd_controller_init(&c, g_ctrl.ftl), ==, SSD_STATUS_OK);
@@ -185,8 +185,8 @@ static MunitResult test_hil_init_missing_slot(const MunitParameter params[], voi
     (void)params;
     (void)data;
 
-    ssd_controller_t c;
-    ftl_ctx_t       *route[FTL_DIE_MAX];
+    ssd_ctl_s  c;
+    ftl_ctx_s *route[FTL_DIE_MAX];
 
     munit_assert_uint32(DIE_MAX, >, 0U);
 
@@ -204,8 +204,8 @@ static MunitResult test_hil_init_topo_mismatch(const MunitParameter params[], vo
     (void)params;
     (void)data;
 
-    ssd_controller_t c;
-    ftl_ctx_t       *route[FTL_DIE_MAX];
+    ssd_ctl_s  c;
+    ftl_ctx_s *route[FTL_DIE_MAX];
 
     munit_assert_uint32(DIE_MAX, >, 0U);
 
@@ -227,8 +227,8 @@ static MunitResult test_hil_host_queue(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
-    ssd_host_queue_t  q;
-    ssd_host_entry_t *entries[SSD_HOST_QUEUE_DEPTH];
+    ssd_host_queue_s  q;
+    ssd_host_entry_s *entries[SSD_HOST_QUEUE_DEPTH];
 
     ssd_host_queue_init(&q);
     munit_assert_uint8(ssd_host_queue_used(&q), ==, 0U);
@@ -279,9 +279,9 @@ static MunitResult test_hil_submit_not_ready(const MunitParameter params[], void
     (void)params;
     (void)data;
 
-    ssd_controller_t c;
-    ssd_request_t    req;
-    BYTE             buf[FTL_IU_BYTES];
+    ssd_ctl_s c;
+    ssd_req_s req;
+    BYTE      buf[FTL_IU_BYTES];
 
     memset(&c, 0, sizeof(c));
     hil_req_init(&req, SSD_REQUEST_READ, 0U, 1U, buf, sizeof(buf));
@@ -300,8 +300,8 @@ static MunitResult test_hil_submit_edges(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
-    ssd_request_t req;
-    BYTE         *buf = s_hil_edge_buf;
+    ssd_req_s req;
+    BYTE     *buf = s_hil_edge_buf;
 
     /* buffer_size 不足：在 split 之前拒绝 */
     hil_req_init(&req, SSD_REQUEST_WRITE, 0U, HIL_IO_LBAS, buf, sizeof(s_hil_edge_buf) - 1U);
@@ -337,8 +337,8 @@ static MunitResult test_hil_write_read_roundtrip(const MunitParameter params[], 
     (void)params;
     (void)data;
 
-    ssd_request_t req;
-    const DWORD   lba = hil_lba_base();
+    ssd_req_s   req;
+    const DWORD lba = hil_lba_base();
 
     for (DWORD i = 0U; i < (DWORD)sizeof(s_hil_wr); i++)
     {
@@ -366,7 +366,7 @@ static MunitResult test_hil_flush_job(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ssd_request_t req;
+    ssd_req_s req;
 
     hil_req_init(&req, SSD_REQUEST_FLUSH, 0U, 0U, NULL, 0U);
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
@@ -382,8 +382,8 @@ static MunitResult test_hil_flush_busy(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
-    ssd_request_t req1;
-    ssd_request_t req2;
+    ssd_req_s req1;
+    ssd_req_s req2;
 
     hil_req_init(&req1, SSD_REQUEST_FLUSH, 0U, 0U, NULL, 0U);
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req1), ==, SSD_STATUS_OK);
@@ -405,8 +405,8 @@ static MunitResult test_hil_trim_job(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ssd_request_t req;
-    const DWORD   lba = hil_lba_base();
+    ssd_req_s   req;
+    const DWORD lba = hil_lba_base();
 
     for (DWORD i = 0U; i < (DWORD)sizeof(s_hil_wr); i++)
     {

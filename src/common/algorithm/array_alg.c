@@ -122,7 +122,7 @@ int **threeSum(int *nums, int numsSize, int *returnSize, int **returnColumnSizes
     // 2. 冒泡排序
     for (int i = 0; i < numsSize - 1; i++)
     {
-        bool swapped = false;
+        BOOL swapped = false;
 
         for (int j = 0; j < numsSize - 1 - i; j++)
         {
@@ -801,7 +801,7 @@ int maxProfit_all(int *prices, int pricesSize)
     return max_profit;
 }
 
-bool canJump(int *nums, int numsSize)
+BOOL canJump(int *nums, int numsSize)
 {
     if (nums == NULL || numsSize == 0)
     {

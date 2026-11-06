@@ -227,8 +227,8 @@ static void fault_dump_stack(DWORD sp)
         }
         value = *(const volatile DWORD *)(uintptr_t)address;
 
-        const bool in_flash = (value >= FAULT_FLASH_BEGIN) && (value < FAULT_FLASH_END);
-        const bool in_itcm  = (value >= FAULT_ITCM_CODE_BEGIN) && (value < FAULT_ITCM_END) && ((value & 1U) != 0U);
+        const BOOL in_flash = (value >= FAULT_FLASH_BEGIN) && (value < FAULT_FLASH_END);
+        const BOOL in_itcm  = (value >= FAULT_ITCM_CODE_BEGIN) && (value < FAULT_ITCM_END) && ((value & 1U) != 0U);
 
         if ((in_flash == true) || (in_itcm == true))
         {
@@ -278,12 +278,12 @@ static void fault_dump_frame_raw(DWORD sp)
  * @return true = ITCM / Flash / AXI SRAM / D2D3 SRAM 内，可读；
  *         false = 不在已知映射内（跳过读取，避免故障处理器再触发一次故障）。
  */
-static bool fault_code_readable(DWORD address)
+static BOOL fault_code_readable(DWORD address)
 {
-    const bool in_itcm  = (address < FAULT_ITCM_END);
-    const bool in_flash = (address >= FAULT_FLASH_BEGIN) && (address < FAULT_FLASH_END);
-    const bool in_axi   = (address >= 0x24000000U) && (address < 0x24080000U);
-    const bool in_d2d3  = (address >= 0x30000000U) && (address < 0x38010000U);
+    const BOOL in_itcm  = (address < FAULT_ITCM_END);
+    const BOOL in_flash = (address >= FAULT_FLASH_BEGIN) && (address < FAULT_FLASH_END);
+    const BOOL in_axi   = (address >= 0x24000000U) && (address < 0x24080000U);
+    const BOOL in_d2d3  = (address >= 0x30000000U) && (address < 0x38010000U);
 
     return in_itcm || in_flash || in_axi || in_d2d3;
 }
@@ -330,7 +330,7 @@ static void fault_dump_code(DWORD pc)
     }
 }
 
-static void fault_dump_ctx(const fault_ctx_t *ctx)
+static void fault_dump_ctx(const fault_ctx_s *ctx)
 {
     fault_puts("\r\n=== CPU FAULT ===\r\n");
     fault_puts("kind   : ");
@@ -412,7 +412,7 @@ static void fault_dump_ctx(const fault_ctx_t *ctx)
 
 /* ─────────────────────── 崩溃记录打印（断言/开机共用） ─────────────────────── */
 
-static void fault_dump_record(const crash_record_t *record)
+static void fault_dump_record(const crash_record_s *record)
 {
     if (record == NULL)
     {
@@ -463,9 +463,9 @@ static void fault_dump_record(const crash_record_t *record)
  * 由 port 侧的异常入口调用：ctx 已由 port 从硬件压栈帧与故障状态寄存器填好。
  * 不返回（打印 + 落记录 + hook + 停机）。
  */
-void fault_report_and_halt(const fault_ctx_t *ctx)
+void fault_report_and_halt(const fault_ctx_s *ctx)
 {
-    crash_fault_record_t record;
+    crash_fault_record_s record;
 
     fault_port_console_init();
     fault_dump_ctx(ctx);
@@ -500,7 +500,7 @@ void fault_report_boot(void)
 {
     char                  reason[64];
     DWORD                 flags  = fault_port_reset_flags();
-    const crash_record_t *record = crash_record_get();
+    const crash_record_s *record = crash_record_get();
 
     fault_port_reset_reason_text(flags, reason, sizeof(reason));
 
@@ -527,14 +527,14 @@ void fault_report_boot(void)
 }
 
 /* 强符号：覆盖 common/crash.c 的弱默认，让断言路径也走同一份轮询 dump。 */
-void crash_platform_report(const crash_record_t *record)
+void crash_platform_report(const crash_record_s *record)
 {
     fault_port_console_init();
     fault_dump_record(record);
     fault_port_console_drain();
 }
 
-__attribute__((weak)) void fault_hook(const fault_ctx_t *ctx)
+__attribute__((weak)) void fault_hook(const fault_ctx_s *ctx)
 {
     (void)ctx;
 }

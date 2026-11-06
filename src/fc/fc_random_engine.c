@@ -103,16 +103,16 @@ static WORD fc_lfsr_step8(WORD lfsr, BYTE *out)
 // out  = out_lo[lo]  ^ out_hi[hi]
 // next = next_lo[lo] ^ next_hi[hi]
 // 4 张 256 项表约 1.5 KB；每字节 2 次查表 + 2 次异或，替代 8 次移位。
-typedef struct
+typedef struct FC_LFSR_TABLE_S
 {
     BYTE out_lo[256];
     BYTE out_hi[256];
     WORD next_lo[256];
     WORD next_hi[256];
-} fc_lfsr_tab_t;
+} fc_lfsr_tab_s;
 
-static fc_lfsr_tab_t s_lfsr_tab;
-static bool          s_lfsr_tab_ready = false;
+static fc_lfsr_tab_s s_lfsr_tab;
+static BOOL          s_lfsr_tab_ready = false;
 
 /**
  * @brief 构造 LFSR 的 4 张查表（低/高字节各一组 out/next）。

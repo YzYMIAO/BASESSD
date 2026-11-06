@@ -50,7 +50,7 @@
  * 却选不出」会让 WL 每轮空转（C2 / C9）：跳过 Open、跳过含坏 plane、
  * 跳过全哨兵条目、要求有效 CW ≥ WL_MIN_VALID_RATIO。
  */
-static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_super_stats_t *out_stats, DWORD *out_ec)
+static BOOL wl_candidate_get(const alc_s *alloc, const super_block_s *sb, alc_super_stats_s *out_stats, DWORD *out_ec)
 {
     if (sb->is_open)
     {
@@ -75,7 +75,7 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
         }
     }
 
-    alc_super_stats_t st;
+    alc_super_stats_s st;
 
     alc_super_get_stats(alloc, sb, &st);
     if (st.plane_count == 0U)
@@ -104,7 +104,7 @@ static bool wl_candidate_get(const alc_t *alloc, const super_block_t *sb, alc_su
 
 // 契约见 wear_leveling.h。CLI `wear` 与 wl_should_trigger 共用本函数，
 // 避免第二套擦除计数口径（C9）。
-bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used)
+BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used)
 {
     // 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
     // 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。
@@ -118,7 +118,7 @@ bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_fre
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb    = alc_super_closed_get_at(alloc, i);
+        const super_block_s *sb    = alc_super_closed_get_at(alloc, i);
         DWORD                sb_ec = 0U;
 
         if (wl_candidate_get(alloc, sb, NULL, &sb_ec) == false)
@@ -143,7 +143,7 @@ bool wl_ec_spread_get(const alc_t *alloc, DWORD total_writes, DWORD *out_max_fre
 
 // 判据唯一：与 wl_ec_spread_get 同一漏斗。搬移不改变擦除计数，差值不足必须
 // 停止，否则就是纯写放大（RISK-WL-08）。
-bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
+BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes)
 {
     DWORD max_free = 0U;
     DWORD min_used = 0U;
@@ -169,17 +169,17 @@ bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
  *   有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）。
  *   ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
  */
-bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
+BOOL wl_select_victim(const alc_s *alloc, wl_victim_s *victim)
 {
-    wl_victim_t best;
+    wl_victim_s best;
     memset(&best, 0, sizeof(best));
 
     DWORD best_ec = UINT32_MAX;
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_super_closed_get_at(alloc, i);
-        alc_super_stats_t    st;
+        const super_block_s *sb = alc_super_closed_get_at(alloc, i);
+        alc_super_stats_s    st;
         DWORD                sb_ec = 0U;
 
         if (wl_candidate_get(alloc, sb, &st, &sb_ec) == false)

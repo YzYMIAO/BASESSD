@@ -8,7 +8,7 @@
  *   FC 对外 API（fc_interface.h 的函数）固定使用单例控制器 g_fc_controller，在
  *   fc_interface.c 中实现；池管理/生命周期/服务主循环等真正逻辑在 fc.c 中以 static
  *   实现。本头只在这两个文件间共享：
- *     - fc_t 控制器结构定义 + g_fc_controller 单例
+ *     - fc_ctl_s 控制器结构定义 + g_fc_controller 单例
  *     - fc.c 的池/链原语与内部函数声明（供 fc_interface.c 的对外 API 与建链入口调用）
  *   FTL/上层不得 include 本头（用 fc_interface.h / fc.h 即可）。
  *
@@ -29,33 +29,33 @@ extern "C"
      * 选择逻辑在 fc.c 的 fc_poll_fill；本处只放类型与状态。 */
 #define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH
 
-    typedef struct
+    typedef struct FC_SCHEDULER_CHAIN_S
     {
-        fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
-        BYTE            count; /* 0=空, 1=单命令, 2+=链 */
-    } fc_scheduler_chain_t;
+        fc_cmd_id_t ids[FC_SCHEDULER_CHAIN_MAX];
+        BYTE        count; /* 0=空, 1=单命令, 2+=链 */
+    } fc_sched_chain_s;
 
     /* 链归属队列（per-LUN 链锁）。粒度是「哪条提交队列能喂这个 LUN」，
      * 不是「LUN 不能用」；跨填充轮次持久。详见 fc_poll_fill_queue。 */
-    typedef enum
+    typedef enum FC_CHAIN_OWNER_E
     {
         FC_CHAIN_OWNER_NONE = 0U, /* 该 LUN 上没有未结束的链 */
         FC_CHAIN_OWNER_SQ,        /* 未结束的链在普通队列里 */
         FC_CHAIN_OWNER_HSQ        /* 未结束的链在高优先队列里 */
     } fc_chain_owner_e;
 
-    typedef struct
+    typedef struct FC_SCHEDULER_S
     {
-        fc_submission_queue_t *sq;
-        fc_submission_queue_t *hsq;
+        fc_sub_queue_s *sq;
+        fc_sub_queue_s *hsq;
         /* 链锁：链一旦开始，该 LUN 的填充权归链所在的队列独占，直到链的 END 下发。
          * 取值 fc_chain_owner_e。跨填充轮次持久——fc_poll_fill 的 suspended[] 每趟
          * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。 */
         fc_chain_owner_e chain_owner[CH_NUM][CE_NUM][LUN_NUM];
-    } fc_scheduler_t;
+    } fc_sched_s;
 
     /* ── ② 命令 / buffer 状态枚举（fc.c / fc_interface.c 共享） ── */
-    typedef enum
+    typedef enum FC_COMMAND_STATE_E
     {
         FC_COMMAND_STATE_FREE = 0U, /* 空闲 */
         FC_COMMAND_STATE_ALLOCATED, /* 已分配（可配置 desc/buffer） */
@@ -64,11 +64,11 @@ extern "C"
         FC_COMMAND_STATE_COMPLETED  /* 完成项已入 CQ（可释放） */
     } fc_cmd_state_e;
 
-    typedef enum
+    typedef enum FC_BUFFER_STATE_E
     {
         FC_BUFFER_STATE_FREE     = 0U, /* 未占用 */
         FC_BUFFER_STATE_OCCUPIED = 1U, /* 已分配给某条命令 */
-    } fc_buffer_state_e;
+    } fc_buf_state_e;
 
 #if CONFIG_FC_RAID
 /* ── RAID 预留类型（条件编译）──
@@ -76,7 +76,7 @@ extern "C"
  * 当前 PLANE_NUM=2，FC_STRIPE_DATA_MAX=1，单命令即满 stripe，
  * fc_stripe_submit() 在 fc_core_poll() 中直接处理，不经过 accumulator。
  *
- * fc_stripe_accum_t 和 stripe_accum[] 为 PLANE_NUM>=4 预留扩展：
+ * fc_stripe_accum_s 和 stripe_accum[] 为 PLANE_NUM>=4 预留扩展：
  * 当需要跨多次 fc_service() 调用积累多条数据命令后统一提交 parity 时，
  * 由 fc_poll_stripe_accumulate()（待实现）管理。 */
 
@@ -84,41 +84,41 @@ extern "C"
 #    define FC_STRIPE_DATA_MAX ((PLANE_NUM - 1U))
 
     /* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
-    typedef struct
+    typedef struct FC_STRIPE_ACCUM_S
     {
-        bool            active;                       /* true = 积累中 */
-        BYTE            ch, ce, lun;                  /* 目标 LUN */
-        BYTE            count;                        /* 已积累的数据命令数 */
-        fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
-        fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
-    } fc_stripe_accum_t;
+        BOOL        active;                       /* true = 积累中 */
+        BYTE        ch, ce, lun;                  /* 目标 LUN */
+        BYTE        count;                        /* 已积累的数据命令数 */
+        fc_cmd_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
+        fc_cmd_id_t parity_id;                    /* 已分配的 parity 命令 ID */
+    } fc_stripe_accum_s;
 #endif /* CONFIG_FC_RAID */
 
     /* ── ③ FC 控制器：命令状态机 + 三池引用 + 队列/调度器 ──
      * 仅内部实现可见；对外通过 fc_interface.h 的 API 访问。
      * 队列头尾/计数直接读 sq/hsq/cq 字段（没有独立的寄存器影子结构）。 */
-    typedef struct fc_t
+    typedef struct FC_CONTROLLER_S
     {
-        fc_submission_queue_t sq;
-        fc_submission_queue_t hsq;
-        fc_completion_queue_t cq;
-        fc_scheduler_t        scheduler;
-        fc_command_t         *command_pool;
-        fc_descriptor_t      *descriptor_pool;
+        fc_sub_queue_s  sq;
+        fc_sub_queue_s  hsq;
+        fc_comp_queue_s cq;
+        fc_sched_s      scheduler;
+        fc_cmd_s       *command_pool;
+        fc_desc_s      *descriptor_pool;
         BYTE(*buffer_pool)
         [FC_BUFFER_POOL_CW_SIZE];
-        fc_command_id_t   *descriptor_owner;
-        fc_cmd_state_e    *command_state;
-        fc_command_id_t   *command_free_next;
-        WORD              *descriptor_free_next;
-        WORD              *buffer_free_next;
-        fc_buffer_state_e *buffer_state;
+        fc_cmd_id_t    *descriptor_owner;
+        fc_cmd_state_e *command_state;
+        fc_cmd_id_t    *command_free_next;
+        WORD           *descriptor_free_next;
+        WORD           *buffer_free_next;
+        fc_buf_state_e *buffer_state;
         /* buffer 归属：OCCUPIED 时必须等于持有它的命令 ID；上层预申请但尚未
-         * 挂到命令时为 FC_COMMAND_ID_INVALID。释放闸门用它拒绝双释放/在飞释放。 */
-        fc_command_id_t *buffer_owner;
-        fc_command_id_t  command_free_head;
-        WORD             descriptor_free_head;
-        WORD             buffer_free_head;
+         * 挂到命令时为 FC_CMD_ID_INVALID。释放闸门用它拒绝双释放/在飞释放。 */
+        fc_cmd_id_t *buffer_owner;
+        fc_cmd_id_t  command_free_head;
+        WORD         descriptor_free_head;
+        WORD         buffer_free_head;
 
         /* O(1) 资源计数：只在分配/释放闸门增减；高水位用于诊断与容量调参。 */
         WORD command_used;
@@ -130,13 +130,13 @@ extern "C"
 
         /* ── Stripe RAID 积累状态 ── */
 #if CONFIG_FC_RAID
-        fc_stripe_accum_t stripe_accum[LUN_NUM];                         /* 每 LUN stripe 积累 */
-        fc_command_id_t   stripe_parity_for_data[FC_COMMAND_POOL_DEPTH]; /* 数据命令 ID → parity 命令 ID 映射 */
+        fc_stripe_accum_s stripe_accum[LUN_NUM];                         /* 每 LUN stripe 积累 */
+        fc_cmd_id_t       stripe_parity_for_data[FC_COMMAND_POOL_DEPTH]; /* 数据命令 ID → parity 命令 ID 映射 */
 #endif                                                                   /* CONFIG_FC_RAID */
-    } fc_t;
+    } fc_ctl_s;
 
     /* 全局单例控制器：在 fc.c 中定义，fc_interface.c 引用 */
-    extern fc_t g_fc_controller;
+    extern fc_ctl_s g_fc_controller;
 
     /* ══════════════════════════════════════════════════════════
      * ④ 内部实现（fc.c 定义，fc_interface.c 经此调用）
@@ -151,7 +151,7 @@ extern "C"
      * @return FC_STATUS_OK        初始化成功。
      *         FC_STATUS_IO_ERROR  NAND 派发层初始化失败。
      */
-    fc_status_e fc_core_init(fc_t *controller);
+    fc_status_e fc_core_init(fc_ctl_s *controller);
 
     /**
      * @brief 从空闲链表分配命令槽位，置 ALLOCATED。
@@ -160,7 +160,7 @@ extern "C"
      *
      * @return 命令指针；命令池空时返回 NULL。
      */
-    fc_command_t *fc_core_command_alloc(fc_t *controller);
+    fc_cmd_s *fc_core_command_alloc(fc_ctl_s *controller);
 
     /* ── 池/链原语（跨文件：建链入口在 fc_interface.c）──
      * fc_command_configure_descriptor（fc_interface.c 的公共入口）用这两个原语编排
@@ -179,7 +179,7 @@ extern "C"
      *
      * @return 描述符指针；描述符池空时返回 NULL。
      */
-    fc_descriptor_t *fc_core_descriptor_alloc(fc_t *controller, fc_command_t *command);
+    fc_desc_s *fc_core_descriptor_alloc(fc_ctl_s *controller, fc_cmd_s *command);
 
     /**
      * @brief 把已填好的 descriptor 追加到命令 desc 链尾（空链则本条即链头，前驱置 chain=MORE）。
@@ -189,7 +189,7 @@ extern "C"
      * @param command    目标命令。
      * @param descriptor 待追加的描述符。
      */
-    void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor);
+    void fc_command_chain_append(fc_ctl_s *controller, fc_cmd_s *command, fc_desc_s *descriptor);
 
     /**
      * @brief 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED。
@@ -200,7 +200,7 @@ extern "C"
      * @return FC_STATUS_OK         入队成功。
      *         FC_STATUS_QUEUE_FULL 目标队列满。
      */
-    fc_status_e fc_core_submit(fc_t *controller, fc_command_t *command);
+    fc_status_e fc_core_submit(fc_ctl_s *controller, fc_cmd_s *command);
 
     /**
      * @brief 服务主循环单步（推进 NAND + 调度提交）——fc_service 的转发目标。
@@ -212,7 +212,7 @@ extern "C"
      *         FC_STATUS_NOT_READY   无完成，队列非空但当前无 LUN 可下发。
      *         FC_STATUS_IO_ERROR    CQ 满或命令下发失败。
      */
-    fc_status_e fc_core_poll(fc_t *controller);
+    fc_status_e fc_core_poll(fc_ctl_s *controller);
 
     /**
      * @brief 从 CQ 取一条完成项。
@@ -223,7 +223,7 @@ extern "C"
      * @return FC_STATUS_OK          取到一条完成项。
      *         FC_STATUS_QUEUE_EMPTY CQ 为空。
      */
-    fc_status_e fc_core_poll_completion(fc_t *controller, fc_command_status_t *completion);
+    fc_status_e fc_core_poll_completion(fc_ctl_s *controller, fc_cmd_status_s *completion);
 
     /**
      * @brief 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
@@ -237,7 +237,7 @@ extern "C"
      * @return FC_STATUS_OK          取到 ≥1 条。
      *         FC_STATUS_QUEUE_EMPTY 一条没取到。
      */
-    fc_status_e fc_core_poll_completions(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count);
+    fc_status_e fc_core_poll_completions(fc_ctl_s *controller, fc_cmd_status_s *completions, WORD max_count, WORD *count);
 
     /**
      * @brief 释放命令全部资源（desc 链 + buffer + command 槽位）；FREE 幂等。
@@ -245,7 +245,7 @@ extern "C"
      * @param controller FC 控制器。
      * @param command    待释放命令；须属于本控制器的命令池。
      */
-    void fc_core_command_release(fc_t *controller, fc_command_t *command);
+    void fc_core_command_release(fc_ctl_s *controller, fc_cmd_s *command);
 
     /**
      * @brief 释放链头那一个 desc（含其 buffer），*head 前移到后继；*head 越界（空链）无操作。
@@ -253,37 +253,37 @@ extern "C"
      * @param controller FC 控制器。
      * @param head       链头 ID 的入出参。
      */
-    void fc_core_chain_release_head(fc_t *controller, fc_descriptor_id_t *head);
+    void fc_core_chain_release_head(fc_ctl_s *controller, fc_desc_id_t *head);
 
     /**
-     * @brief 沿链释放全部 desc + buffer，*head 置 FC_DESCRIPTOR_ID_INVALID。
+     * @brief 沿链释放全部 desc + buffer，*head 置 FC_DESC_ID_INVALID。
      *
      * @param controller FC 控制器。
      * @param head       链头 ID 的入出参。
      */
-    void fc_core_chain_release_all(fc_t *controller, fc_descriptor_id_t *head);
+    void fc_core_chain_release_all(fc_ctl_s *controller, fc_desc_id_t *head);
 
     /**
      * @brief 从空闲链表分配一个 buffer 槽位并置占用（归属先记为未挂链）。
      *
      * @param controller FC 控制器。
      *
-     * @return buffer ID；buffer 池空时返回 FC_BUFFER_ID_INVALID。
+     * @return buffer ID；buffer 池空时返回 FC_BUF_ID_INVALID。
      *
-     * @note 分配后 owner = FC_COMMAND_ID_INVALID；建链入口把它改成所属命令 ID。
+     * @note 分配后 owner = FC_CMD_ID_INVALID；建链入口把它改成所属命令 ID。
      */
-    fc_buffer_id_t fc_core_buffer_alloc(fc_t *controller);
+    fc_buf_id_t fc_core_buffer_alloc(fc_ctl_s *controller);
 
     /**
      * @brief 释放 buffer（校验归属 → 状态清零 → 挂回空闲链表头）。
      *
      * @param controller FC 控制器。
      * @param buffer_id  待释放的 buffer ID。
-     * @param owner      期望归属：命令 ID；上层预申请未挂链时为 FC_COMMAND_ID_INVALID。
+     * @param owner      期望归属：命令 ID；上层预申请未挂链时为 FC_CMD_ID_INVALID。
      *
      * @return true = 已释放；false = 未占用或归属不符（release 档拒绝，不破坏空闲链）。
      */
-    bool fc_core_buffer_release(fc_t *controller, fc_buffer_id_t buffer_id, fc_command_id_t owner);
+    BOOL fc_core_buffer_release(fc_ctl_s *controller, fc_buf_id_t buffer_id, fc_cmd_id_t owner);
 
     /**
      * @brief 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
@@ -294,7 +294,7 @@ extern "C"
      *
      * @return CW 基址指针（恒非空）。
      */
-    BYTE *fc_core_buffer_cw_base(fc_t *controller, fc_buffer_id_t buffer_id);
+    BYTE *fc_core_buffer_cw_base(fc_ctl_s *controller, fc_buf_id_t buffer_id);
 
     /**
      * @brief 命令 ID → 指针（薄壳校验与便利函数使用）。
@@ -304,7 +304,7 @@ extern "C"
      *
      * @return 命令指针（恒非空；越界为调用者错误）。
      */
-    fc_command_t *fc_core_command_by_id(fc_t *controller, WORD command_id);
+    fc_cmd_s *fc_core_command_by_id(fc_ctl_s *controller, WORD command_id);
 
     /**
      * @brief 描述符 ID → 指针（薄壳校验与便利函数使用）。
@@ -314,7 +314,7 @@ extern "C"
      *
      * @return 描述符指针（恒非空；越界为调用者错误）。
      */
-    fc_descriptor_t *fc_core_descriptor_by_id(fc_t *controller, WORD descriptor_id);
+    fc_desc_s *fc_core_descriptor_by_id(fc_ctl_s *controller, WORD descriptor_id);
 
     /**
      * @brief 指针 → 命令池索引（**唯一一份实现**；前置条件：command 属于 controller->command_pool）。
@@ -324,7 +324,7 @@ extern "C"
      *
      * @return 命令池索引。
      */
-    fc_command_id_t fc_core_command_id(const fc_t *controller, const fc_command_t *command);
+    fc_cmd_id_t fc_core_command_id(const fc_ctl_s *controller, const fc_cmd_s *command);
 
     /**
      * @brief 提交前一次性校验 desc 链：归属 + CW 唯一性 + 坐标 + buffer 占用。
@@ -335,7 +335,7 @@ extern "C"
      *
      * @return true = 链完整；false = 归属不符 / 链越界 / CW 重复 / buffer 未占用。
      */
-    bool fc_core_chain_validate(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
+    BOOL fc_core_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t command_id, const fc_cmd_s *command);
 
     /*
      * 资源统计读取器（fc_get_resource_stats 使用）。
@@ -350,7 +350,7 @@ extern "C"
      *
      * @return fc_cmd_state_e 状态值。
      */
-    fc_cmd_state_e fc_command_state_get(const fc_t *controller, fc_command_id_t command_id);
+    fc_cmd_state_e fc_command_state_get(const fc_ctl_s *controller, fc_cmd_id_t command_id);
 
     /**
      * @brief 读描述符的归属命令 ID。
@@ -358,9 +358,9 @@ extern "C"
      * @param controller    FC 控制器。
      * @param descriptor_id 池内描述符 ID。
      *
-     * @return 归属命令 ID；空闲描述符为 FC_COMMAND_ID_INVALID。
+     * @return 归属命令 ID；空闲描述符为 FC_CMD_ID_INVALID。
      */
-    fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, WORD descriptor_id);
+    fc_cmd_id_t fc_descriptor_owner_get(const fc_ctl_s *controller, WORD descriptor_id);
 
     /**
      * @brief 读 buffer 占用状态。
@@ -370,7 +370,7 @@ extern "C"
      *
      * @return FC_BUFFER_STATE_OCCUPIED / FC_BUFFER_STATE_FREE。
      */
-    fc_buffer_state_e fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
+    fc_buf_state_e fc_buffer_state_get(const fc_ctl_s *controller, fc_buf_id_t buffer_id);
 
     /**
      * @brief 读填充轮次的累计计数（诊断「命令在 SQ 却不下发」）。

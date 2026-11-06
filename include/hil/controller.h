@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 /* Controller 生命周期（最小状态机；FAILED 为终态）。 */
-typedef enum
+typedef enum SSD_CTRL_STATE_E
 {
     SSD_CONTROLLER_RESET = 0,    /* 上电初值 */
     SSD_CONTROLLER_INITIALIZING, /* 槽位/拓扑校验中 */
@@ -16,35 +16,35 @@ typedef enum
     SSD_CONTROLLER_FAILED        /* 终态：初始化失败或运行时致命错误 */
 } ssd_ctrl_state_e;
 
-typedef struct
+typedef struct SSD_CONTROLLER_S
 {
     ssd_ctrl_state_e state; /* 当前生命周期状态 */
 
     /* FTL 实例路由表：按紧凑 die 号索引，指向该 die 的 FTL 实例。
      * 数组容量用静态上界 FTL_DIE_MAX；实际有效项 = DIE_MAX（扫描结果）。 */
-    ftl_ctx_t *ftl[FTL_DIE_MAX];
+    ftl_ctx_s *ftl[FTL_DIE_MAX];
 
     /* 在飞的 FLUSH 请求（NULL = 无）。FLUSH 是异步命令：submit 只登记并启动
      * 各实例的 flush job，完成由 ssd_controller_service 每轮推进后置
-     * complete_flag。调用者的 ssd_request_t 必须活到完成（USB/CLI 都是静态对象）。 */
-    ssd_request_t *flush_req;
+     * complete_flag。调用者的 ssd_req_s 必须活到完成（USB/CLI 都是静态对象）。 */
+    ssd_req_s *flush_req;
 
     /* 在飞的 TRIM 请求（NULL = 无）。TRIM 现在是异步命令：submit 只登记范围，
      * ssd_controller_service 每轮按 run 推进 ftl_trim_step；完成时置 complete_flag。
      * trim_lba 是当前未处理的全局 LBA；trim_started = 当前 run 已调用 begin。 */
-    ssd_request_t *trim_req;
-    QWORD          trim_lba;
-    bool           trim_started;
+    ssd_req_s *trim_req;
+    QWORD      trim_lba;
+    BOOL       trim_started;
 
     /* 主机可见 LBA 上限（HIL 容量口径）。默认 = FTL_LBA_MAX；开机时按实际
      * 坏块扣减（本仓自拟的容量折中：主流是固定容量 + OP 吸收坏块，不动态缩容）。
      * ⚠ 这是**运行时**上限，L2P 表仍按编译期 FTL_LBA_MAX 定尺寸。 */
     DWORD host_lba_max;
 
-    /* HIL 主机请求队列（tag 表）：USB MSC / UART CLI 的 ssd_request_t 都从这里取。
+    /* HIL 主机请求队列（tag 表）：USB MSC / UART CLI 的 ssd_req_s 都从这里取。
      * 见 host_queue.h；BOT 下没有 SQ/CQ/doorbell，这里只做归属与生命周期。 */
-    ssd_host_queue_t host_queue;
-} ssd_controller_t;
+    ssd_host_queue_s host_queue;
+} ssd_ctl_s;
 
 /**
  * @brief 初始化 Controller，按 compact die 号绑定 FTL 实例表。
@@ -58,7 +58,7 @@ typedef struct
  * @return SSD_STATUS_OK               成功
  *         SSD_STATUS_INVALID_ARGUMENT 入参非法 / 槽位缺失 / 拓扑不符
  */
-ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const *ftl_by_die);
+ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by_die);
 
 /**
  * @brief 提交一条 host 请求（READ/WRITE/FLUSH/TRIM）。
@@ -73,7 +73,7 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller, ftl_ctx_t *const 
  *         SSD_STATUS_BUSY             FLUSH/TRIM 已有在飞请求
  *         SSD_STATUS_NOT_SUPPORTED    未知 opcode
  */
-ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request);
 
 /**
  * @brief 查询请求是否完成。
@@ -81,7 +81,7 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
  * @param request 请求（NULL 视为已完成）
  * @return 1 = 完成；0 = 未完成
  */
-BYTE ssd_controller_is_complete(const ssd_request_t *request);
+BYTE ssd_controller_is_complete(const ssd_req_s *request);
 
 /**
  * @brief 推进 Controller 自己的异步命令（FLUSH / TRIM）。
@@ -97,7 +97,7 @@ BYTE ssd_controller_is_complete(const ssd_request_t *request);
  *
  * @param controller Controller 上下文
  */
-void ssd_controller_service(ssd_controller_t *controller);
+void ssd_controller_service(ssd_ctl_s *controller);
 
 /**
  * @brief 放弃在飞的 FLUSH 回执（host 复位 / 拔出 / 前端换命令）。
@@ -107,10 +107,10 @@ void ssd_controller_service(ssd_controller_t *controller);
  * 的异步路径，不需要回滚。
  *
  * @param controller Controller 上下文
- * @note USB 的在飞 `ssd_request_t` 位于 host queue entry 中，调用者不得在请求
+ * @note USB 的在飞 `ssd_req_s` 位于 host queue entry 中，调用者不得在请求
  *       完成前复用/清零它。
  */
-void ssd_controller_cancel_flush(ssd_controller_t *controller);
+void ssd_controller_cancel_flush(ssd_ctl_s *controller);
 
 /**
  * @brief host LBA 区间是否落在设备容量内。
@@ -124,7 +124,7 @@ void ssd_controller_cancel_flush(ssd_controller_t *controller);
  * @return true  区间完整落在 [0, host_lba_max)
  *         false count == 0 / 越界
  */
-bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, DWORD count);
+BOOL ssd_controller_lba_range_ok(const ssd_ctl_s *controller, QWORD lba, DWORD count);
 
 /**
  * @brief 主机可见 LBA 上限（0 = 未初始化 ⇒ 编译期上限）。
@@ -135,7 +135,7 @@ bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, 
  * @param controller Controller 上下文（可 NULL）
  * @return 运行时 host LBA 上限；未初始化时返回 FTL_LBA_MAX
  */
-static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controller)
+static inline DWORD ssd_controller_host_lba_max(const ssd_ctl_s *controller)
 {
     return ((controller != NULL) && (controller->host_lba_max != 0U)) ? controller->host_lba_max : (DWORD)FTL_LBA_MAX;
 }
@@ -150,6 +150,6 @@ static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controll
  * @param controller Controller 上下文（NULL 时安全返回）
  * @param next_state 目标状态
  */
-void ssd_controller_state_transition(ssd_controller_t *controller, ssd_ctrl_state_e next_state);
+void ssd_controller_state_transition(ssd_ctl_s *controller, ssd_ctrl_state_e next_state);
 
 #endif /* SSD_CONTROLLER_H */

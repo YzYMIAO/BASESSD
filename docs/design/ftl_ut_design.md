@@ -20,7 +20,7 @@
    - **pure（RAM）**：测模块内部功能与不变量。真 NAND 只能打到正常路径，池闸门、组槽耗尽、同 LBA 合并、L2P 三态、Directory 主备提交等分支必须在 RAM 里构造。
    - **media（真 NAND）**：测跨模块契约与恢复路径，走 FTL host API + 真实 FC/NAND 完成。
 3. **模拟规模小、结构体同型**：pure 用例使用生产数组/结构体，只填少量状态（8 gblock、4 页、2~4 cache 行），不引入第二套编译期几何。
-4. **不新增生产 seam**：只用现有 `time_us`、`l2p_owner_fn_t`、`metadata_ring_probe_fn`、`jrn_replay_ctx_t`；待入账用例直接测 `pend_confirm_*` 纯原语（谓词实参带 `now_ms`），不注入 handler。
+4. **不新增生产 seam**：只用现有 `time_us`、`l2p_owner_fn_t`、`metadata_ring_probe_fn_t`、`jrn_replay_ctx_s`；待入账用例直接测 `pend_confirm_*` 纯原语（谓词实参带 `now_ms`），不注入 handler。
 5. **证据分级**：默认只打用例名 + 结果；`--log-visible info` 打简单前后对比（输入→输出关键值），
    `--log-visible debug` 打完整对比（逐项 inputs/outputs）；项目日志由 `--log-project` 单独控制，
    测试期间默认静默。证据必须能回答「断言比较的是哪两个值」，否则通过也不能服人（C8）。
@@ -72,7 +72,7 @@
 
 ### 3.1 活实例
 
-- `ftl_ut_live()` 返回 `g_ctrl.ftl[0]`（die 0；`extern ssd_controller_t g_ctrl`）。`ftl_ctx_t` 约 287 KB，无法复制。
+- `ftl_ut_live()` 返回 `g_ctrl.ftl[0]`（die 0；`extern ssd_ctl_s g_ctrl`）。`ftl_ctx_s` 约 287 KB，无法复制。
 - 每个套件 setup 调 `ftl_ut_topology_init()`：用 `g_nand_targets` 重建 die 表，
   UT 不依赖主 boot 留下的表顺序；route/reboot 也按 die 索引。
 - pure 用例**不 reset 活实例的 allocator/metadata**；使用测试自有对象。
@@ -86,8 +86,8 @@
 | `s_ut_free[FTL_BLOCK_TOTAL]` | 0x2000 = 8 KB | SRAM12 | 只填 0..7 |
 | `s_ut_closed[SUPER_BLOCK_LIST_MAX]` | 0x8000 = 32 KB | SRAM12 | 只填前 4 条 |
 | `s_ut_op[PLANE_NUM]` / `s_ut_spare[PLANE_NUM]` | 0x330 / 0xC8 | SRAM12 | 只填前 2 项 |
-| `s_ut_md`（`md_dir_cache_t`） | 0x83D8 ≈ 33 KB | AXI `.bss` | 只填 2~3 个 region |
-| `s_ut_alloc`（`alc_t`） | 0x56C ≈ 1.4 KB | AXI `.bss` | 指向上面各表 |
+| `s_ut_md`（`md_dir_cache_s`） | 0x83D8 ≈ 33 KB | AXI `.bss` | 只填 2~3 个 region |
+| `s_ut_alloc`（`alc_s`） | 0x56C ≈ 1.4 KB | AXI `.bss` | 指向上面各表 |
 | **合计** | **≈ 155 KB** | | 链接期区域溢出即为硬门禁 |
 
 若链接放不下：退回借用活实例的表 + 小状态，不缩减数组尺寸（结构体必须与生产同型）。
@@ -95,7 +95,7 @@
 
 ### 3.3 伪时钟
 
-- 复用 `ssd_platform_register` / `ssd_platform_ops_t.time_us`；保存原 ops，用例 teardown 恢复。
+- 复用 `ssd_platform_register` / `ssd_platform_ops_s.time_us`；保存原 ops，用例 teardown 恢复。
 - 仅 pure 时间策略用例（bg 调度、pending park 超时、GC/WL 节拍）安装；真 NAND I/O 一律用真实时钟。
 
 ### 3.4 结束不变量

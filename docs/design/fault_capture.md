@@ -48,7 +48,7 @@ fault_handler_c(frame, exc_return)          [src/platform/stm32h743/fault.c]
       └─ weak fault_hook() → while(1) 停机
 
 ASSERT/ASSUME 失败 (assertion_fail) ─┐
-munit 断言失败 → abort() 重定向 ──────┴─→ 同一 crash_record_t + 同一 dump 格式
+munit 断言失败 → abort() 重定向 ──────┴─→ 同一 crash_record_s + 同一 dump 格式
                                           （先 flush 异步日志，再轮询 dump）
 
 开机：fault_report_boot() → RCC->RSR 复位原因 + 上次崩溃记录（走异步日志）
@@ -58,9 +58,9 @@ munit 断言失败 → abort() 重定向 ──────┴─→ 同一 cras
 
 | 文件 | 角色 |
 |------|------|
-| `include/platform/stm32h743/fault.h` | `fault_kind_t`、`fault_ctx_t`、`fault_init/fault_report_boot/fault_hook` 声明 |
+| `include/platform/stm32h743/fault.h` | `fault_kind_t`、`fault_ctx_s`、`fault_init/fault_report_boot/fault_hook` 声明 |
 | `src/platform/stm32h743/fault.c` | 5 个 naked 入口 + 蹦床 + 主处理 + 轮询控制台 + 解码 + 开机报告 |
-| `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_t`、`crash_record_t`、`crash_platform_report()` |
+| `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_s`、`crash_record_s`、`crash_platform_report()` |
 | `src/common/crash.c` | `.noinit` 记录存储 + 校验和 + 弱默认 `crash_platform_report()`（空实现，host 安全） |
 | `include/common/assertion.h` | 生产断言 `ASSERT`/`ASSUME` + 富断言集 `ASSERT_*` + 失败入口声明 |
 | `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `crash_platform_report` → 停机）；固件 `abort()` 重定向 |
@@ -228,7 +228,7 @@ dump 完 `for(;;)`，**不主动复位**：
 ### 5.8 扩展点
 
 ```c
-void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
+void fault_hook(const fault_ctx_s *ctx);   /* 弱符号，默认空实现 */
 ```
 
 捕获到故障、落完记录、停机之前调用。留给上层接：复位前落 Flash、点亮故障灯、喂最后的看门狗等。

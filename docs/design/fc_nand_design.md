@@ -33,13 +33,13 @@
 > - **v17 (2026-10-08)**: **建链收敛——三层接力 → 一条公共入口**。`fc_command_attach_cw`（公共壳）→ `fc_command_attach_cw_internal`（段校验）→ `fc_command_configure_descriptor_internal`（机制体）三层合并为**唯一一条** `fc_command_configure_descriptor`（**单数**），实现在 `src/fc/fc_interface.c`；后两条删除，`fc.c` 只留池/链原语（`fc_descriptor_alloc_internal` / `fc_command_chain_append` 去 `static` 进 `fc_internal.h`）。Stripe RAID parity 建链改调公共入口。校验全部前置于出池，非法实参不污染池子（§2.9、§2.10、§25.4；changelog `fc_build_chain_convergence_v17.md`）
 > - **v23 (2026-10-08)**: **FTL 建链收敛为「单一掩码旋钮」**。`param.cw_mask == 0` 重定义为「**本命令 plane 段内的全部 CW**」（v7~v22 是"每 plane 连续 `0..config.cw`"），两个建链入口（`ftl_cmd_configure_descriptors` / `ftl_cmd_setup_ppa_pair`）共用唯一定义处 `ftl_cmd_resolve_cw_mask()`；`config.cw` 自此退出建链（读者只剩 FC 内 RAID stripe 的 `cw_count`），`sync_page_prepare` 的 `cw` 死参数删除；掩码越段由 `FTL_ERROR` 改 `ASSERT`（§2.10、§25.2、§25.4；changelog `ftl_cw_mask_single_knob_v23.md`）
 > - **v24 (2026-10-08)**: **地址布局统一（LBA / PBA / PAA）+ 加扰器对齐存储主控**。三套地址各自定位：**PAA** 是芯片地址（MT29F4G08 的 BA6/PA 规则决定，**一个字节都没动**）、**PBA** 是系统物理地址、**LBA** 是逻辑地址；PBA 与 LBA 改为**逐位同构**的 `[ch:ce:lun:block:page:plane:cw]`（plane 在 page 之下），PAA 保持 `[cw:page:plane:block:lun]` 不动。于是建链时 `desc->paa` 与 `desc->meta` 用**同一个公式**（基值不同）算出。加扰种子由物理地址 PAA 改为**本 CW 的逻辑地址**（`desc->meta`，即扇区 LBA），并**删除 `FC_RANDOM_SEED_STRATEGY` 三选一旋钮**；加扰范围由 `[0,520)` 收窄到 `[8,520)`，**META/CRC 保持明文**，使读路径能从页内明文 META 自举出种子（GC / 掉电重建不再需要为取种子而改）。顺带修掉 LFSR 抽头错误（状态空间坍缩到周期 63，见 §21.3.5）（§2.2、§2.3、§2.9、§21.3.5；changelog `fc_scrambler_lba_seed_v24.md`）
-> - **v27 (2026-10-09)**: **`cw_mask` → `cw_bitmap`，并取消「0 = 段内全部」重载**。字段改名（FC 侧 `fc_command_t.param.cw_bitmap`、NAND 侧 `nand_dispatch_request_t.cw_bitmap`，以及 `fc_get_cmd_cw_bitmap` / `fc_cw_bitmap_is_plane_symmetric` / `ftl_cmd_resolve_cw_bitmap` / `nand_dispatch_cw_first`/`_next` 形参）——名字叫 bitmap 就必须**逐位字面**：置 1 的位 = 要访问的 CW，**全 0 = 一个都不访问**（v23~v26 的「0 = 本命令 plane 段内的全部 CW」取消）。代价是「生产者忘填」与「有意访问 0 个 CW」不可区分，唯一拦网是 `ftl_cmd_resolve_cw_bitmap()` 的两条 ASSERT（release 下被裁掉 ⇒ 忘填 = 静默空操作）。故新增 `fc_command_plane_span_cw_bitmap(cmd)` 作为「整段访问」的**显式**写法，三个整段入口（`addr_to_cmd` / `ftl_cmd_setup_ppa` / `ftl_cmd_setup_ppa_pair`）各自调用它填位图（须在 `cmd->pba` 与 `config.multi_plane` 都写好之后）；只有 `ftl_cmd_configure_descriptors()` 接受调用者给的部分位图。顺带消除「两层 0 方向相反」：SQ 请求集、CQ 失败集、NAND 请求集三处现在**同口径**（0 = 空集）（§2.2、§2.10、§25.2、§25.4；changelog `fc_cw_bitmap_literal_v27.md`）
-> - **v28 (2026-10-09)**: **CW 集合退出命令结构体——改为建链形参**。删除 `fc_param_t.cw_bitmap` 这个联合体视图：SQ 侧（请求集）改作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的**形参**（它是建链的输入、读者只有 FTL，没有留在命令里被回读的理由），CQ 侧（失败集）**整个删除**——上层要定位失败 CW，遍历 desc 链 OR 各 `desc->status` 即可（FC 不再代为派生）。`fc_command_status_t.param` **保留**（GET_FEATURES 的寄存器回读仍走它）。顺带删掉擦除的**假 CW 位**（v7~v27 给 ERASE 伪造一个 CW0 位，只为让 completion 有格可写）——擦除请求位图自此是**合法空集**，由 `completion_all_cws` 的空集分支写 `cw_status[0]` 兜住（§2.2、§25.4；changelog `fc_cw_bitmap_param_v28.md`）
+> - **v27 (2026-10-09)**: **`cw_mask` → `cw_bitmap`，并取消「0 = 段内全部」重载**。字段改名（FC 侧 `fc_cmd_s.param.cw_bitmap`、NAND 侧 `nand_dispatch_request_t.cw_bitmap`，以及 `fc_get_cmd_cw_bitmap` / `fc_cw_bitmap_is_plane_symmetric` / `ftl_cmd_resolve_cw_bitmap` / `nand_dispatch_cw_first`/`_next` 形参）——名字叫 bitmap 就必须**逐位字面**：置 1 的位 = 要访问的 CW，**全 0 = 一个都不访问**（v23~v26 的「0 = 本命令 plane 段内的全部 CW」取消）。代价是「生产者忘填」与「有意访问 0 个 CW」不可区分，唯一拦网是 `ftl_cmd_resolve_cw_bitmap()` 的两条 ASSERT（release 下被裁掉 ⇒ 忘填 = 静默空操作）。故新增 `fc_command_plane_span_cw_bitmap(cmd)` 作为「整段访问」的**显式**写法，三个整段入口（`addr_to_cmd` / `ftl_cmd_setup_ppa` / `ftl_cmd_setup_ppa_pair`）各自调用它填位图（须在 `cmd->pba` 与 `config.multi_plane` 都写好之后）；只有 `ftl_cmd_configure_descriptors()` 接受调用者给的部分位图。顺带消除「两层 0 方向相反」：SQ 请求集、CQ 失败集、NAND 请求集三处现在**同口径**（0 = 空集）（§2.2、§2.10、§25.2、§25.4；changelog `fc_cw_bitmap_literal_v27.md`）
+> - **v28 (2026-10-09)**: **CW 集合退出命令结构体——改为建链形参**。删除 `fc_param_u.cw_bitmap` 这个联合体视图：SQ 侧（请求集）改作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的**形参**（它是建链的输入、读者只有 FTL，没有留在命令里被回读的理由），CQ 侧（失败集）**整个删除**——上层要定位失败 CW，遍历 desc 链 OR 各 `desc->status` 即可（FC 不再代为派生）。`fc_cmd_status_s.param` **保留**（GET_FEATURES 的寄存器回读仍走它）。顺带删掉擦除的**假 CW 位**（v7~v27 给 ERASE 伪造一个 CW0 位，只为让 completion 有格可写）——擦除请求位图自此是**合法空集**，由 `completion_all_cws` 的空集分支写 `cw_status[0]` 兜住（§2.2、§25.4；changelog `fc_cw_bitmap_param_v28.md`）
 >   （v14~v16、v18~v22、v25~v26 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
 > - **v33 (2026-10-10)**: **CRC 引擎改走 STM32H743 HAL 驱动**（changelog `fc_crc_hal_driver_v33.md`）。原 `fc_crc_engine.c` 裸写外设寄存器，`FC_CRC_BASE` 写成了 **ADC3** 的 `0x58026000`（真值 `0x58024C00`）⇒ IDR 自检不过 ⇒ `g_crc_ready = 0`（「失败静默继续」）⇒ `fc_crc_compute()` 恒返 0 ⇒ **CRC 校验自始恒通过**。改为新增平台层 `src/platform/stm32h743/crc.{h,c}` 唯一持有 `CRC_HandleTypeDef`（地址由 CMSIS 宏保证）、管时钟、做 IDR 写读回环自检（失败转 `ASSERT`，删除 `g_crc_ready` 静默降级路径）；`src/fc/fc_crc_engine.c` 只留「对哪 512B 算、结果怎么判」，`src/fc/` 保持零 HAL 依赖。**介质格式变更**：此前写入的 CW 里 CRC 字段恒为 0，改后是真值。⚠ 两坑：`stm32h7xx_hal_crc_ex.c` 必须同编（`HAL_CRC_Init` 无条件调 `HAL_CRCEx_Polynomial_Set`）、`ASSERT(HAL_CRC_Init(...))` 在 release 下会把初始化整个裁掉（须先求值再断言）
-> - **v47 (2026-10-11)**: **`fc_command_t.pba` → `.paa`——PBA 退出 FC 层**。SQ 里的 PBA 会经 FC 接口一路带到 FC-NAND 层，而 FC 层在 10+ 处 `pba_to_paa()` 现场转换——PBA 与 PAA **位序不同**（`pba_to_paa` 是真正的字段重排），每处转换都是一次静默算错地址的机会。改为：**FTL 在自己的空间组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`**；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。建链入口 `fc_command_configure_descriptor()` 一并改收 `DWORD row_paa`（FC 层最后一个收 PBA 的地方）；`desc->paa` 由 `paa_with_cw(paa_with_plane(row_paa, plane), cw)` 造出（PAA 的 plane 与 cw **不相邻**，v24 的 plane_cw 掩码技巧只在 LBA/PBA 空间有效），`desc->meta` 仍是 LBA 公式、不变。FTL 侧 `ftl_paa_gblock(cmd->paa)` 与旧 `ftl_pba_gblock(cmd->pba)` **逐位等价**（`bst.h` 里前者本就是后者的展开）。**PAA 无 ch/ce ⇒ 路由一律走 `config.ch/ce/lun`**（生产路径与测试本就如此，本版把它写死为结构不变式）。RAID 段（`#if CONFIG_FC_RAID`，恒关）一并机械改 PAA、**无法编译验证**。用例数不变（仍 53）；`make clean && make tests` 0 warning 0 error、链接 225212 B；固件 166708 B（§2.3.1、§6.1；changelog `fc_command_paa_v47.md`）
-> - **v52 (2026-10-11)**: **链锁——链未结束期间该 LUN 的填充权归链所在提交队列独占**。补上一处真实缺口：链长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`）时被 `fc_poll_chain_length` 截成多批、分多次填充 pass 下发，而 `fc_poll_fill` 的 `suspended[]` 每趟 `memset` 清零 ⇒ **批与批之间无跨 pass 状态**，另一条提交队列（HSQ/SQ）的命令可插进链的已下发部分与未下发部分之间。`fc_scheduler_t` 新增跨 pass 持久的 `uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM]`（取值 `fc_chain_owner_t` NONE/SQ/HSQ），`fc_poll_fill_queue` 加 `owner` 形参、三处规则：**准入**（`chain_owner != NONE && != 本队列` → 回推跳过，**不置 suspended**，否则把链自己的续批一并锁死）/ **更新**（下发成功后看**批尾** `chain.ids[need-1].config.chain`——`MORE` ⇒ 锁继续转本队列、`END` ⇒ 解锁）/ **失败清锁**（整链注 `NAND_FAIL` 时清，免留残锁）。锁的粒度是「**哪条提交队列能喂这个 LUN**」而非「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列一律回推，直到链 END 下发。与既有「共享 `suspended` 防优先级倒挂」**正交**。**对生产路径零影响**：FTL 全仓恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE ⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变（§2.7、§16.9、§23.7、§23.9；changelog `fc_chain_priority_lock_v52.md`）
-> - **v53 (2026-10-11)**: **命令级 buffer 归属位域 `fc_cmd_conf_t.buf_own : 2`——谁申请 / 谁释放**。用户要一个 2-bit 旋钮表达「这条命令的数据 buffer 由谁申请、由谁归还」，把上层（FTL）频繁的 buffer 申请/释放动作按需**下沉到 FC 层**。编码：**bit1 = 申请方**（0 = FC 申请，1 = 上层申请）、**bit0 = 释放方**（0 = 上层释放，1 = FC 释放），四档 `00` FC申请/上层释放 / `01` FC申请/FC释放 / `10` 上层申请/上层释放 / `11` 上层申请/FC释放。**编码刻意让 `00` = 今天的生产行为**（`fc_cmd_conf_t` 是 32 bit，取原 `reserved : 3` 中的 2 bit 放新字段，命令出池 `(fc_command_t){0}` 清零即得默认 `00`）⇒ **`src/ftl/**` 一行不动**。**机制**：建链机制体改名 `fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, buffer_id)`（5 参，上层申请时由调用者 `fc_buffer_alloc()` 后传入），原 4 参入口退化为 `_with_buffer(..., FC_BUFFER_ID_INVALID)` 薄包装（FTL 两个调用点 / RAID parity / 既有单测零改动）；`fc_complete_from_nand` 在 Step 3 组装完 CQ 条目之后、`fc_complete_internal` 之前加 **Step 4**——`buf_own` 释放位 = FC 释放（`01`/`11`）时沿 desc 链归还全部 buffer 并把各 desc 的 `buffer_id` 抹成 `FC_BUFFER_ID_INVALID`（**幂等**：随后的 `fc_command_release` 自然跳过，不双重归还；命令没走到完成就释放则 buffer 仍有效、链释放照常归还 ⇒ 不泄漏）。**释放原语一行不改**（读法 A）：「上层释放」= 上层调 `fc_command_release`，它恒归还链上所有未归还的 buffer，不管谁申请的——`10` 与 `00` 的差别**只在谁调 `fc_buffer_alloc()`**。RAID parity（`#if CONFIG_FC_RAID`，恒关、无法编译验证）补一行 `parity_cmd->config.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE`（parity 是 FC 内部命令，不继承 data_cmd 的归属）。用例数 **56 → 57**（Level 3 新增 `buf_own_release`，四档账目闭合 + 空闲链完整性守卫）；`make clean && make tests` 0 warning 0 error、`.bin` **238980 B**（§12.10、§13.3.1；changelog `fc_buf_own_v53.md`）
+> - **v47 (2026-10-11)**: **`fc_cmd_s.pba` → `.paa`——PBA 退出 FC 层**。SQ 里的 PBA 会经 FC 接口一路带到 FC-NAND 层，而 FC 层在 10+ 处 `pba_to_paa()` 现场转换——PBA 与 PAA **位序不同**（`pba_to_paa` 是真正的字段重排），每处转换都是一次静默算错地址的机会。改为：**FTL 在自己的空间组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`**；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。建链入口 `fc_command_configure_descriptor()` 一并改收 `DWORD row_paa`（FC 层最后一个收 PBA 的地方）；`desc->paa` 由 `paa_with_cw(paa_with_plane(row_paa, plane), cw)` 造出（PAA 的 plane 与 cw **不相邻**，v24 的 plane_cw 掩码技巧只在 LBA/PBA 空间有效），`desc->meta` 仍是 LBA 公式、不变。FTL 侧 `ftl_paa_gblock(cmd->paa)` 与旧 `ftl_pba_gblock(cmd->pba)` **逐位等价**（`bst.h` 里前者本就是后者的展开）。**PAA 无 ch/ce ⇒ 路由一律走 `config.ch/ce/lun`**（生产路径与测试本就如此，本版把它写死为结构不变式）。RAID 段（`#if CONFIG_FC_RAID`，恒关）一并机械改 PAA、**无法编译验证**。用例数不变（仍 53）；`make clean && make tests` 0 warning 0 error、链接 225212 B；固件 166708 B（§2.3.1、§6.1；changelog `fc_command_paa_v47.md`）
+> - **v52 (2026-10-11)**: **链锁——链未结束期间该 LUN 的填充权归链所在提交队列独占**。补上一处真实缺口：链长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`）时被 `fc_poll_chain_length` 截成多批、分多次填充 pass 下发，而 `fc_poll_fill` 的 `suspended[]` 每趟 `memset` 清零 ⇒ **批与批之间无跨 pass 状态**，另一条提交队列（HSQ/SQ）的命令可插进链的已下发部分与未下发部分之间。`fc_sched_s` 新增跨 pass 持久的 `uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM]`（取值 `fc_chain_owner_t` NONE/SQ/HSQ），`fc_poll_fill_queue` 加 `owner` 形参、三处规则：**准入**（`chain_owner != NONE && != 本队列` → 回推跳过，**不置 suspended**，否则把链自己的续批一并锁死）/ **更新**（下发成功后看**批尾** `chain.ids[need-1].config.chain`——`MORE` ⇒ 锁继续转本队列、`END` ⇒ 解锁）/ **失败清锁**（整链注 `NAND_FAIL` 时清，免留残锁）。锁的粒度是「**哪条提交队列能喂这个 LUN**」而非「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列一律回推，直到链 END 下发。与既有「共享 `suspended` 防优先级倒挂」**正交**。**对生产路径零影响**：FTL 全仓恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE ⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变（§2.7、§16.9、§23.7、§23.9；changelog `fc_chain_priority_lock_v52.md`）
+> - **v53 (2026-10-11)**: **命令级 buffer 归属位域 `fc_cmd_cfg_s.buf_own : 2`——谁申请 / 谁释放**。用户要一个 2-bit 旋钮表达「这条命令的数据 buffer 由谁申请、由谁归还」，把上层（FTL）频繁的 buffer 申请/释放动作按需**下沉到 FC 层**。编码：**bit1 = 申请方**（0 = FC 申请，1 = 上层申请）、**bit0 = 释放方**（0 = 上层释放，1 = FC 释放），四档 `00` FC申请/上层释放 / `01` FC申请/FC释放 / `10` 上层申请/上层释放 / `11` 上层申请/FC释放。**编码刻意让 `00` = 今天的生产行为**（`fc_cmd_cfg_s` 是 32 bit，取原 `reserved : 3` 中的 2 bit 放新字段，命令出池 `(fc_cmd_s){0}` 清零即得默认 `00`）⇒ **`src/ftl/**` 一行不动**。**机制**：建链机制体改名 `fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, buffer_id)`（5 参，上层申请时由调用者 `fc_buffer_alloc()` 后传入），原 4 参入口退化为 `_with_buffer(..., FC_BUFFER_ID_INVALID)` 薄包装（FTL 两个调用点 / RAID parity / 既有单测零改动）；`fc_complete_from_nand` 在 Step 3 组装完 CQ 条目之后、`fc_complete_internal` 之前加 **Step 4**——`buf_own` 释放位 = FC 释放（`01`/`11`）时沿 desc 链归还全部 buffer 并把各 desc 的 `buffer_id` 抹成 `FC_BUFFER_ID_INVALID`（**幂等**：随后的 `fc_command_release` 自然跳过，不双重归还；命令没走到完成就释放则 buffer 仍有效、链释放照常归还 ⇒ 不泄漏）。**释放原语一行不改**（读法 A）：「上层释放」= 上层调 `fc_command_release`，它恒归还链上所有未归还的 buffer，不管谁申请的——`10` 与 `00` 的差别**只在谁调 `fc_buffer_alloc()`**。RAID parity（`#if CONFIG_FC_RAID`，恒关、无法编译验证）补一行 `parity_cmd->config.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE`（parity 是 FC 内部命令，不继承 data_cmd 的归属）。用例数 **56 → 57**（Level 3 新增 `buf_own_release`，四档账目闭合 + 空闲链完整性守卫）；`make clean && make tests` 0 warning 0 error、`.bin` **238980 B**（§12.10、§13.3.1；changelog `fc_buf_own_v53.md`）
 > - **2026-10-09（协议查证，非代码版本）**: **multi-plane 不在 ONFI 1.0 里**。逐字读 ONFI 1.0（Rev 1.0, 2006-12-28）Table 14 命令集：cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧。顺带逐字核对了 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）的 Table 7 Two-Plane Command Set / §Two-Plane Addressing，并发现两处待办：① 「two-plane 命令族要求 on-die ECC 关闭（Note 4）」的出处对不上（该 PDF 全文无 `on-die`）；② 器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表缺此 op（§25.6 前置约束 3、§25.8 风险 2 与风险 8）
 
 > - **2026-10-23（器件扩展 + UT）**: **two-plane cache 读写落地 NAND/FC 层**——新增
@@ -66,11 +66,12 @@
 │  ├── fc_internal.h     fc.c ↔ fc_interface.c 共享内部签名     │
 │  ├── fc_command.c/h   命令 & Descriptor 结构定义    │
 │  ├── fc_queue.c/h     SQ / HSQ / CQ 环形队列       │
-│  ├── fc_scheduler.c/h HSQ 优先调度器               │
-│  ├── fc_data_path.c/h 数据路径编排（Random→LDPC→RAID）│
-│  ├── fc_random_engine 加扰/解扰引擎                │
-│  ├── fc_ldpc_engine   LDPC 编解码引擎              │
-│  ├── fc_raid_engine   RAID XOR 引擎               │
+│  ├── fc_data_path.c/h 数据路径编排（CRC→Random→ECC→RAID）│
+│  ├── fc_crc_engine.c/h CRC-32 引擎                 │
+│  ├── fc_random_engine.c/h 加扰/解扰引擎            │
+│  ├── fc_bch_engine.c/h BCH 编解码算法              │
+│  ├── fc_ecc_engine.c/h ECC 统一入口 + QC-LDPC      │
+│  ├── fc_raid_engine.c/h RAID XOR 引擎              │
 │  └── fc.c             核心：资源池、生命周期、服务主循环     │
 ├─────────────────────────────────────────────────┤
 │  NAND Dispatch (调度桥接层)                        │
@@ -94,7 +95,7 @@
 
 1. **固定资源池 + 空闲链表**：所有资源（Command、Descriptor、Buffer）在 .bss 中静态分配，使用空闲链表实现 O(1) 分配释放，不使用动态内存。
 2. **ID 引用代替指针**：对外暴露 16-bit 资源 ID，内部通过 ID→指针转换函数访问，避免指针悬挂和跨模块直接访问。
-3. **FC 封装内部状态**：`fc_t` 结构体定义在 `fc_internal.h`，仅 `fc.c`/`fc_interface.c` 内部可见，对外只提供函数接口。
+3. **FC 封装内部状态**：`fc_ctl_s` 结构体定义在 `fc_internal.h`，仅 `fc.c`/`fc_interface.c` 内部可见，对外只提供函数接口。
 4. **异步非阻塞**：提交命令立即返回，通过 `fc_service()` 轮询推进，`fc_poll_completion()` 获取结果。
 
 ### 流程图：分层架构与数据流总览（图 0）
@@ -104,16 +105,16 @@
 │  FTL / Controller / NVMe  （上层调用者）                      │
 │    alloc → 配参 → configure_descriptors → submit → poll      │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ fc_command_t*（ID 引用，非裸指针）
+                           │ fc_cmd_s*（ID 引用，非裸指针）
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  FC 模块（firmware 层：命令池 / desc 链 / buffer 池）          │
 │    fc_command.c     命令与 Descriptor 结构                    │
 │    fc_queue.c       SQ / HSQ / CQ 环形队列                    │
-│    fc_scheduler.c   调度器状态（SQ/HSQ 绑定；填充轮次在 fc.c）│
+│    fc.c / fc_internal.h 调度器状态（SQ/HSQ 绑定；填充在 fc.c）│
 │    fc_data_path.c   写: META→CRC→加扰→ECC→Stripe RAID        │
 │                    读: ECC→解扰→CRC→META (+ RAID 恢复)       │
-│    fc_random/ldpc/raid/crc_engine.c  软件引擎                 │
+│    fc_crc/random/bch/ecc/raid_engine.c  软件引擎              │
 └──────────────┬──────────────────────────────────────────────┘
                │ nand_dispatch_request_t（预解析，字段穿越防火墙）
                ▼
@@ -152,8 +153,8 @@
 
 | 资源池 | 容量 | 元素大小 | 用途 |
 |--------|------|----------|------|
-| Command Pool | 64 | `fc_command_t` | 命令控制块 |
-| Descriptor Pool | 256 | `fc_descriptor_t` | 数据描述符（每 CW 一个） |
+| Command Pool | 64 | `fc_cmd_s` | 命令控制块 |
+| Descriptor Pool | 256 | `fc_desc_s` | 数据描述符（每 CW 一个） |
 | Buffer Pool | 128 | 528 字节（= PAGE_SIZE / 4） | 数据缓冲区（CW 内部布局见 §5.3） |
 
 Buffer Pool 内部每个 CW（528 字节）分层管理：
@@ -189,7 +190,7 @@ RAID XOR 使用 `FC_BUFFER_POOL_CW_SIZE(528)`，读全 CW。
 - 256 个 Descriptor：每个 Command 最多 4 个 CW，64 × 4 = 256
 - 128 个 Buffer：至少支持与 Descriptor 1:2 的比例，确保读写并发
 
-池外还有若干**旁路簿记数组**（`fc_t` 里存指针，本体是 `fc.c` 的 static 数组）：
+池外还有若干**旁路簿记数组**（`fc_ctl_s` 里存指针，本体是 `fc.c` 的 static 数组）：
 
 | 数组 | 尺寸 | 用途 |
 |------|------|------|
@@ -216,10 +217,10 @@ RAID XOR 使用 `FC_BUFFER_POOL_CW_SIZE(528)`，读全 CW。
 > 唯一新增约束是**校验段整体前置于出池**——非法实参在分配任何 desc 之前就返回，
 > 故「污染池子」的可能被进一步排除。详见 `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 
-### 2.2 命令结构 (fc_command_t)
+### 2.2 命令结构 (fc_cmd_s)
 
 ```c
-struct fc_command_t {
+struct fc_cmd_s {
     DWORD desc_id    : 16;     // 首个 Descriptor ID；0xFFFF=无 Descriptor
     DWORD high_priority : 1;  // 0=SQ, 1=HSQ
     DWORD module     : 4;     // 完成回调路由（HOST_IO/FTL/GC/READ_RECOVERY/METADATA/BBT/CHECKPOINT/WEAR_LEVELING）
@@ -227,15 +228,15 @@ struct fc_command_t {
     DWORD reserved1  : 3;     // 保留（未来命令控制扩展）
     DWORD meta;              // META 值，当前传 LBA（Host 逻辑地址），未来可扩展
     DWORD paa;                 // 物理地址（操作相关）
-    fc_cmd_conf_t config;      // 操作配置（见下文）
-    fc_param_t    param;       // 4 字节联合体（见下）：仅 FEATURES=内联数据 parameter0..3（v28 起无 cw_bitmap 视图）
+    fc_cmd_cfg_s config;      // 操作配置（见下文）
+    fc_param_u    param;       // 4 字节联合体（见下）：仅 FEATURES=内联数据 parameter0..3（v28 起无 cw_bitmap 视图）
 };
 ```
 
 > **字段变更说明**：
 > - `feature_addr:8` 取代原 `reserved1:11` 中的 8 位，专用于 SET/GET_FEATURES 的寄存器地址（通过 COLUMN_0 uop 发送）。
 > - `parameter0..3` 从 `DWORD : 8`（位域）改为 `uint8_t`（纯字节），原因是 SET/GET_FEATURES 内联路径需要取 `&parameter0` 地址作为 buffer 指针。位域不能取地址，故以 4 字节空间换地址能力。Command Pool（64 条）总量增加 256 字节。
-> - **v7**：4 个散装字节合并为 `fc_param_t` 联合体（`parameter0..3` / `bytes[4]` / `cw_bitmap`），SQ 与 CQ 共用。
+> - **v7**：4 个散装字节合并为 `fc_param_u` 联合体（`parameter0..3` / `bytes[4]` / `cw_bitmap`），SQ 与 CQ 共用。
 >   `cw_bitmap` 是 flat CW 位图（bit `n = plane*CW_NUM + cw`）。
 >   ⚠ **SQ 提交后不可变**：命令配置完即算完成，运行期返回值一律走 CQ（见 §25）。
 > - **v27**：`cw_mask` 改名 `cw_bitmap`（**两层同改**：FC 的 `param.cw_bitmap` 与 NAND 的
@@ -253,17 +254,17 @@ struct fc_command_t {
 >   派生的 ID 喂给 `nand_dispatch_request_t.command_id` 与 CQ 的 `command_id`，上层要回命令指针走
 >   `fc_command_id_to_command()`。见 `docs/archive/changelog/fc_command_identity_convergence.md`。
 
-`fc_param_t` 联合体：
+`fc_param_u` 联合体：
 
 ```c
 typedef union {
     struct { uint8_t parameter0, parameter1, parameter2, parameter3; };
     uint8_t  bytes[4];  // 内联数据的字节视图
     // v28：删除 `uint32_t cw_bitmap` 视图——CW 集合是建链的输入（形参），不是命令的属性。
-} fc_param_t;
+} fc_param_u;
 ```
 
-命令配置位域 `fc_cmd_conf_t`（32-bit 位打包）：
+命令配置位域 `fc_cmd_cfg_s`（32-bit 位打包）：
 
 | 字段 | 位宽 | 说明 |
 |------|------|------|
@@ -279,12 +280,12 @@ typedef union {
 | chain | 1 | 链式命令标志（0=结束, 1=后续还有） |
 | page_type | 2 | 页类型（0=LP, 1=MP, 2=UP, 3=TP） |
 
-### 2.3 描述符结构 (fc_descriptor_t)
+### 2.3 描述符结构 (fc_desc_s)
 
 ```c
-struct fc_descriptor_t {
+struct fc_desc_s {
     DWORD paa;               // 芯片物理地址 PAA（paa_with_cw(paa_with_plane(row_paa, plane), cw)，v47）
-    fc_cmd_conf_t config;    // 继承命令配置，config.cw 表示当前 CW 索引
+    fc_cmd_cfg_s config;    // 继承命令配置，config.cw 表示当前 CW 索引
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
     DWORD meta;              // 本 CW 的**扇区 LBA**（v24）；读后存放 NAND 读回的 META 值。
@@ -295,7 +296,7 @@ struct fc_descriptor_t {
 
 #### 2.3.1 三套地址空间（v24 定稿，v47 分界调整）
 
-同一颗芯片上有三套地址，**位序刻意不同**，各司其职（PAA 与展开式 `nand_addr_t`
+同一颗芯片上有三套地址，**位序刻意不同**，各司其职（PAA 与展开式 `nand_addr_s`
 定义于 `include/nand/nand_config.h`；**PBA 定义于 `include/ftl/ftl_config.h` §三.2**）：
 
 | | 低位优先布局 | 用途 | 谁定义 |
@@ -304,7 +305,7 @@ struct fc_descriptor_t {
 | **PBA** | `[cw:2][plane:1][page:6][block:11][lun][ce:2][ch:2]` | **系统物理地址**——**FTL 内部**地址；在 FTL 侧 `pba_to_paa()` 转出后交 FC | 本工程自定 |
 | **LBA** | `[ch:ce:lun:block:page:plane:cw]` | **逻辑地址**——主机寻址单位 = 512 B 扇区 | 本工程自定 |
 
-- **v47 分界**：**FTL 交 LBA + PAA**（PBA 在 FTL 侧转出），`fc_command_t.paa` 是 FC 层唯一的物理地址字段——`src/fc/**` 里不再出现 `pba_to_paa()` / `pba_to_*()`。PBA 带 ch/ce，而 FC 的路由本就独立走 `config.ch/ce/lun`（见 `fc_build_dispatch_request`），两套编码并存只会制造静默算错地址的机会。
+- **v47 分界**：**FTL 交 LBA + PAA**（PBA 在 FTL 侧转出），`fc_cmd_s.paa` 是 FC 层唯一的物理地址字段——`src/fc/**` 里不再出现 `pba_to_paa()` / `pba_to_*()`。PBA 带 ch/ce，而 FC 的路由本就独立走 `config.ch/ce/lun`（见 `fc_build_dispatch_request`），两套编码并存只会制造静默算错地址的机会。
 - **PBA 与 LBA 逐位同构**（除 PBA 多出的 cw 字段语义：LBA 里 cw 也是低 2 位）。这是 v24 的核心收益（v47 起只在 FTL 侧有效）：LBA 空间里两个值可用**同一个公式**造出，只是基值不同——
   ```c
   const uint32_t plane_cw = ((uint32_t)plane << PLANE_CW_SHIFT) | cw;
@@ -316,7 +317,7 @@ struct fc_descriptor_t {
   ```
   代价：v24「一条公式造两个值」的便利消失，换来 FC 层内 PBA 归零。
 - **为什么 PBA 的 plane 在 page 之下**（与 PAA 相反）：FTL 的页号 `internal_lba` 里 plane 就是最低位（`ftl.c` 的 `l2p_cache_read(internal_lba + 1)` 取 plane1）。取 `LBA >> CW_WIDTH` 必须**逐位等于**今天的 `internal_lba`，否则 plane1 会变成 `internal_lba + 64`，L2P 编号、journal / checkpoint 的页号、所有 `+1` 约定全要改。选 `[page][plane]` 而不是跟 PAA 的 `[plane][page]` 就是**为了这一点**。
-- **PAA 布局不动**：`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 保持原样，`paa_make` 的全部调用点字段值逐位不变（v25 只把形参序换成 `nand_addr_t` 具名字段，见 §6.2）。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
+- **PAA 布局不动**：`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 保持原样，`paa_make` 的全部调用点字段值逐位不变（v25 只把形参序换成 `nand_addr_s` 具名字段，见 §6.2）。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
 - **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用（PAA 不共用），所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，步骤 4 才能拿它做自洽校验。
 
 设计决策：
@@ -389,15 +390,15 @@ FC_CMD_STATUS_WP         // (1<<7) 70h WP（0=protected，1=not protected）
 - **FTL 侧**：一律用 `fc_cmd_status_has_error()`（`FC_CMD_STATUS_ERROR_MASK`）判成败；
   要具体数据路径类别时读 `desc_id` 指向的 desc 状态（RR 的 CRC-only 判据即如此）。
 
-### 2.5 完成状态 (fc_command_status_t)
+### 2.5 完成状态 (fc_cmd_status_s)
 
 ```c
-struct fc_command_status_t {
+struct fc_cmd_status_s {
     DWORD command_id : 16;  // 完成命令的 Pool ID
     DWORD desc_id    : 16;  // 首个失败 CW 的 descriptor id；0xFFFF = 无失败
     DWORD status     : 8;   // 命令级状态（FC_CMD_STATUS_*）
     DWORD reserved   : 24;  // 保留
-    fc_param_t param;       // 命令级返回段：仅 GET_FEATURES=寄存器值 bytes（v28 起无失败位图视图）
+    fc_param_u param;       // 命令级返回段：仅 GET_FEATURES=寄存器值 bytes（v28 起无失败位图视图）
 };
 ```
 
@@ -445,8 +446,8 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 |---|---|---|
 | **A. 介质 / ECC** | `fc_data_path.c:543` | `process_read` 步骤 1 有 CW 不可纠 ⇒ **短路**返回（步骤 2/3/4 全没跑） |
 | | `fc_data_path.c:692` | `raid_recover`：RAID 重建后 ECC 仍失败 ⇒ 硬件不可恢复 |
-| | `fc_ldpc_engine.c:170` | BCH 找不到 ≤ t 的解 |
-| | `fc_ldpc_qc_engine.c:331` | LDPC 迭代到不动点仍不收敛 |
+| | `fc_ecc_engine.c:170` | BCH 找不到 ≤ t 的解 |
+| | `fc_ecc_engine.c:331` | LDPC 迭代到不动点仍不收敛 |
 | **B. NAND 驱动** | `fc.c:1365` / `:1421` | `nand_dispatch_submit` 非 OK ⇒ 命令根本没提交下去 |
 | | `fc.c:1038` | RAID stripe 提交失败：先给数据命令**合成**一条 `NAND_FAIL` completion 让 FTL 感知，再返回 |
 | **C. FC 基础设施** | `fc.c:817` | **CQ 满**——数据路径已处理、desc 已更新，但 CQ entry 塞不进去 ⇒ 上层永远看不到这条完成（注释称 "fatal 级系统背压错误"） |
@@ -481,7 +482,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 
 队列实现：环形 FIFO，存储 Command Handle 或 Completion 结构体。队列存储由 FC 内部静态数组提供。
 
-### 2.7 调度器 (fc_scheduler_t)
+### 2.7 调度器 (fc_sched_s)
 
 **v8（per-LUN FIFO，2026-10-06）**：调度规则改为「填充轮次」——`fc_poll_fill()`（在 `src/fc/fc.c`）
 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进 NAND 侧 per-LUN FIFO：
@@ -495,7 +496,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
   HSQ 命令之前下发，优先级倒挂。
 - **链锁（v52）**：一条链可能长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`），被拆成
   多批、分多次填充轮次下发。批与批之间若无跨轮次状态，另一条队列的命令就会插进链的
-  「已下发部分」与「还没下发的部分」之间。故 `fc_scheduler_t` 持有一张**跨轮次持久**的
+  「已下发部分」与「还没下发的部分」之间。故 `fc_sched_s` 持有一张**跨轮次持久**的
   per-LUN `chain_owner[ch][ce][lun]`（取值 `fc_chain_owner_t`：NONE / SQ / HSQ）：
   链一旦开始，该 LUN 的**填充权归链所在的那条提交队列独占**，直到链的 END 下发。规则三处
   （`fc_poll_fill_queue`）：**准入**——`chain_owner != NONE && != 本队列` 的命令回推跳过
@@ -510,7 +511,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
   `FC_CHAIN_END`（见 §23.9）⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变。详见
   `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
 
-`fc_scheduler_t` 只剩 `{sq, hsq, chain_owner[][][]}`（v8 删到 `{sq, hsq}`，v52 加回链锁表）；
+`fc_sched_s` 只剩 `{sq, hsq, chain_owner[][][]}`（v8 删到 `{sq, hsq}`，v52 加回链锁表）；
 旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
 与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
 表达。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
@@ -520,7 +521,7 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 曾有一套 `fc_registers_t` 影子结构（`config`/`status`/三对 head-tail/`interrupt_*`），
 由 `fc_register_queue_state()` 在 11 个点刷新，"模拟硬件寄存器风格"。**v10 整体删除**：
 
-- 10 个字段里 6 个（三对 head/tail）与 `fc_t` 的 `sq`/`hsq`/`cq` 字段**逐字节重复**；
+- 10 个字段里 6 个（三对 head/tail）与 `fc_ctl_s` 的 `sq`/`hsq`/`cq` 字段**逐字节重复**；
   3 个（`config`、`interrupt_enable`、`interrupt_status`）**全仓零读零写**；
   只剩 `status` 是派生量，缓存着 controller 里已有的信息。
 - 全仓无任何读者。
@@ -540,33 +541,33 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 |------|------|
 | `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
 | `include/fc/fc_interface.h` | 对外函数声明（21 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
-| `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_t` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
+| `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_ctl_s` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
 | `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_poll_fail_command` 四个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
 | `src/fc/fc_interface.c` | 对外函数实现（单例 `g_fc_controller`）+ **建链机制体**（v17 起 `fc_command_configure_descriptor` 在此；除建链编排外为参数校验 + 转发 internal） |
 
 ```c
 /* 全部声明见 fc_interface.h，此处仅示意签名 */
 fc_status_t   fc_init(void);                           // 初始化所有资源池和队列
-fc_command_t *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
-fc_command_t *fc_command_id_to_command(uint16_t id);    // ID→指针转换
-uint8_t       fc_command_to_id(const fc_command_t *, fc_command_id_t *); // 指针→ID（逆转换；返回 0=指针不在池内，如栈上的 fc_command_t）
-fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t id);
-fc_status_t   fc_command_configure_descriptor(fc_command_t *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); // 逐条追加一个 CW 到链尾（**建链的唯一入口**，v17 由三层收敛而来；行地址由调用者按 plane 给出）
-fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head); // 释放链头一个 desc+buffer，返回新链头
-fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head);  // 沿链释放本命令全部 desc+buffer（非清空池），返回 INVALID
-fc_buffer_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
-fc_status_t   fc_buffer_release(fc_buffer_id_t id);     // 释放 Buffer
-uint8_t      *fc_buffer_id_to_real_buffer(fc_buffer_id_t); // ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）
-uint8_t      *fc_buffer_get_base(fc_buffer_id_t);       // ID→指针，返回 CW 基址（META 开头，FC 数据路径内部使用）
-uint8_t      *fc_buffer_get_meta(fc_command_t *, uint8_t cw_index); // 指定 CW 的 META 指针（地址校验）
-uint8_t      *fc_get_cmd_data_ptr(fc_command_t *cmd, uint8_t cw_index);     // 指定 CW 的 USER 指针
-uint32_t      fc_get_cmd_cw_bitmap(const fc_command_t *cmd);                // 从 desc 链重建 flat CW 位图
-uint8_t       fc_get_cmd_ecc_max(const fc_command_t *cmd);                  // 命令级聚合 ECC（链上最大 ecc_bits）
-fc_status_t   fc_submit(fc_command_t *cmd);             // 提交到 SQ 或 HSQ（根据 high_priority）
+fc_cmd_s *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
+fc_cmd_s *fc_command_id_to_command(uint16_t id);    // ID→指针转换
+uint8_t       fc_command_to_id(const fc_cmd_s *, fc_cmd_id_t *); // 指针→ID（逆转换；返回 0=指针不在池内，如栈上的 fc_cmd_s）
+fc_desc_s *fc_descriptor_id_to_descriptor(uint16_t id);
+fc_status_t   fc_command_configure_descriptor(fc_cmd_s *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); // 逐条追加一个 CW 到链尾（**建链的唯一入口**，v17 由三层收敛而来；行地址由调用者按 plane 给出）
+fc_desc_id_t fc_descriptor_chain_release_head(fc_desc_id_t head); // 释放链头一个 desc+buffer，返回新链头
+fc_desc_id_t fc_descriptor_chain_release_all(fc_desc_id_t head);  // 沿链释放本命令全部 desc+buffer（非清空池），返回 INVALID
+fc_buf_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
+fc_status_t   fc_buffer_release(fc_buf_id_t id);     // 释放 Buffer
+uint8_t      *fc_buffer_id_to_real_buffer(fc_buf_id_t); // ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）
+uint8_t      *fc_buffer_get_base(fc_buf_id_t);       // ID→指针，返回 CW 基址（META 开头，FC 数据路径内部使用）
+uint8_t      *fc_buffer_get_meta(fc_cmd_s *, uint8_t cw_index); // 指定 CW 的 META 指针（地址校验）
+uint8_t      *fc_get_cmd_data_ptr(fc_cmd_s *cmd, uint8_t cw_index);     // 指定 CW 的 USER 指针
+uint32_t      fc_get_cmd_cw_bitmap(const fc_cmd_s *cmd);                // 从 desc 链重建 flat CW 位图
+uint8_t       fc_get_cmd_ecc_max(const fc_cmd_s *cmd);                  // 命令级聚合 ECC（链上最大 ecc_bits）
+fc_status_t   fc_submit(fc_cmd_s *cmd);             // 提交到 SQ 或 HSQ（根据 high_priority）
 fc_status_t   fc_service(void);                         // 调度执行（上层 while(1) 轮询）
-fc_status_t   fc_poll_completion(fc_command_status_t *); // 从 CQ 取完成项
-fc_status_t   fc_command_release(fc_command_t *cmd);    // 释放命令 + Descriptor 链 + 各 CW buffer
-fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统计
+fc_status_t   fc_poll_completion(fc_cmd_status_s *); // 从 CQ 取完成项
+fc_status_t   fc_command_release(fc_cmd_s *cmd);    // 释放命令 + Descriptor 链 + 各 CW buffer
+fc_status_t   fc_get_resource_stats(fc_resource_stats_s *); // 资源使用统计
 ```
 
 > **移除**：`fc_real_buffer_to_buffer_id()`（指针→ID 反向转换）——FC 数据引用统一走 buffer_id，无调用者，连同其 internal 一并删除。`fc_descriptor_alloc()`（孤儿声明）同步删除。
@@ -596,7 +597,7 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
 ### 2.10 命令生命周期
 
 ```
-1. fc_command_alloc()           → 获取 fc_command_t*
+1. fc_command_alloc()           → 获取 fc_cmd_s*
 2. 上层配置 command 字段         → 设置 operation/ch/ce/lun/ldpc/random/raid 等（**v23 起 config.cw 与建链无关**）
 3. 建 desc 链（v13：策略层在 FTL）
    · ftl_cmd_configure_descriptors(cmd, cw_bitmap) → 按**形参** cw_bitmap 展开 N 条 fc_command_configure_descriptor()，申请 N 个 Descriptor + Buffer 并串联
@@ -889,15 +890,15 @@ step(state)
 
 实现全部 15 个 UOP handler，通过函数指针表挂载到 `nand_engine_backend_t`。
 
-硬件访问方式：通过 `nand_fmc_config_t` 配置的 volatile 指针访问 FMC 的 Command/Address/Data 窗口：
+硬件访问方式：通过 `nand_fmc_cfg_s` 配置的 volatile 指针访问 FMC 的 Command/Address/Data 窗口：
 
 ```c
 typedef struct {
     volatile uint8_t *data;     // FMC 数据窗口地址
     volatile uint8_t *command;  // FMC 命令窗口地址
     volatile uint8_t *address;  // FMC 地址窗口地址
-    nand_fmc_timing_t timing;  // FMC 时序参数
-} nand_fmc_config_t;
+    nand_fmc_timing_s timing;  // FMC 时序参数
+} nand_fmc_cfg_s;
 ```
 
 #### DATA_IN / DATA_OUT — PIO/DMA 双模
@@ -934,7 +935,7 @@ DATA_IN（CPU→FMC→NAND，PROGRAM 方向）和 DATA_OUT（NAND→FMC→CPU，
          ▲
          │ handler 通过三个 volatile 窗口访问 FMC：
          │   *config->data / *config->command / *config->address
-         └── 上下文 nand_fmc_config_t（Phase V 已数组化 per (ch,ce,lun)）
+         └── 上下文 nand_fmc_cfg_s（Phase V 已数组化 per (ch,ce,lun)）
 
 WAIT_READY handler 细节（图 6 与之共用超时字段）：
   读 RB# GPIO
@@ -961,9 +962,9 @@ typedef struct {
     uint8_t  address_cycles;    // 地址周期数
     uint8_t  data_input_cycles; // 数据输入周期
     uint8_t  valid_while_*_busy; // 并发约束
-    const nand_uop_t *uops;     // UOP 序列
-    nand_operation_timing_t timing; // 超时参数
-} nand_operation_map_t;
+    const nand_uop_s *uops;     // UOP 序列
+    nand_op_timing_s timing; // 超时参数
+} nand_op_map_s;
 ```
 
 `OP_*` 常量直接作为 `g_nand_operation_map[OP_COUNT]` 数组下标，O(1) 查表。
@@ -1002,8 +1003,8 @@ typedef struct {
 // engine.request / engine.completion 由 nand_dispatch_task_load 一次性绑定到下面两个存储体
 typedef struct {
     nand_engine_state_t engine;
-    nand_command_request_t request;
-    nand_command_completion_t completion;
+    nand_cmd_req_s request;
+    nand_cmd_comp_s completion;
 } nand_fc_transaction_t;
 ```
 
@@ -1181,7 +1182,7 @@ typedef struct {
 } nand_dispatch_completion_t;
 ```
 
-FC 通过 `fc_complete_from_nand()` 将 `nand_dispatch_completion_t` 聚合进 `fc_command_status_t` 写入 CQ
+FC 通过 `fc_complete_from_nand()` 将 `nand_dispatch_completion_t` 聚合进 `fc_cmd_status_s` 写入 CQ
 （CQ 只带命令级聚合 status + `param` 返回段），同时逐 CW 回写 descriptor 的 status 和 ecc_bits
 （聚合 ECC 走 `fc_get_cmd_ecc_max()`）。
 
@@ -1367,8 +1368,8 @@ descriptor / 链：
 | `fc_data_path_meta_write(cw, meta)` | 写 Stage 0 | `memcpy(cw, &meta, 4)` |
 | `fc_data_path_crc_write(cw)` | 写 Stage 1a | `fc_crc_compute(cw + 8)` → 写 `cw[4..8)` |
 | `fc_data_path_scramble(cw, seed)` | 写 Stage 1b / 读步骤 2 | `fc_random_transform(cw + 8, 512, seed)`；自反 ⇒ 加解扰同一函数 |
-| `fc_data_path_ecc_encode(cw)` | 写 Stage 2 | `fc_ldpc_encode(&FC_DATA_PATH_LDPC_CFG, cw, 520)` |
-| `fc_data_path_ecc_decode(cw, &ecc_bits)` | 读步骤 1 | `fc_ldpc_decode(...)` |
+| `fc_data_path_ecc_encode(cw)` | 写 Stage 2 | `fc_ecc_encode(&FC_DATA_PATH_LDPC_CFG, cw, 520)` |
+| `fc_data_path_ecc_decode(cw, &ecc_bits)` | 读步骤 1 | `fc_ecc_decode(...)` |
 | `fc_data_path_crc_check(cw)` | 读步骤 3 | 1 = 重算值 == `cw[4..8)` |
 | `fc_data_path_meta_check(cw, command_meta, paa)` | 读步骤 4 | `FC_CW_STATUS_MATA_ERROR` 或 0 |
 
@@ -1500,9 +1501,9 @@ PAA bit layout (uint32_t, 低位优先):
 - BLOCK（11 bit）：Plane 内块号（0~2047）
 - LUN（0 bit）：当前单 LUN，预留扩展
 
-**注意**：Channel 和 CE 不在 PAA 内——它们属于命令级路由信息，保存在 `fc_cmd_conf_t` 的 ch/ce 字段中。
+**注意**：Channel 和 CE 不在 PAA 内——它们属于命令级路由信息，保存在 `fc_cmd_cfg_s` 的 ch/ce 字段中。
 
-**v47 起 `fc_command_t.paa` 是 FC 层唯一的物理地址字段**：PBA（带 ch/ce）不跨进 FC——FTL 在自己的空间里组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。凡需要行地址的地方（erase / Feature / READ_META / 单 plane 数据 / 无 desc 加载）都从 `command->paa` 取，逐 plane 换 plane 位改用 `paa_with_plane()`。
+**v47 起 `fc_cmd_s.paa` 是 FC 层唯一的物理地址字段**：PBA（带 ch/ce）不跨进 FC——FTL 在自己的空间里组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。凡需要行地址的地方（erase / Feature / READ_META / 单 plane 数据 / 无 desc 加载）都从 `command->paa` 取，逐 plane 换 plane 位改用 `paa_with_plane()`。
 
 ### 6.2 内联函数
 
@@ -1511,17 +1512,17 @@ static inline uint32_t paa_to_page(DWORD paa);
 static inline uint32_t paa_to_plane(DWORD paa);
 static inline uint32_t paa_to_block(DWORD paa);
 static inline uint32_t paa_to_lun(DWORD paa);
-static inline DWORD paa_from_addr(const nand_addr_t *addr);  // 展开地址 → PAA
-static inline uint8_t    paa_is_valid_addr(const nand_addr_t *addr);
+static inline DWORD paa_from_addr(const nand_addr_s *addr);  // 展开地址 → PAA
+static inline uint8_t    paa_is_valid_addr(const nand_addr_s *addr);
 static inline uint32_t   paa_to_nand_row(DWORD paa);         // 转换为 NAND 行地址
 ```
 
-**构造入口一律走 `nand_addr_t` 具名字段**（v25）：`paa_from_addr()` / `pba_from_addr()` 是展开 → 打包，
-`addr_from_paa()` / `addr_from_pba()` 是打包 → 展开。PAA / PBA / LBA 三套地址都以 `nand_addr_t` 为
+**构造入口一律走 `nand_addr_s` 具名字段**（v25）：`paa_from_addr()` / `pba_from_addr()` 是展开 → 打包，
+`addr_from_paa()` / `addr_from_pba()` 是打包 → 展开。PAA / PBA / LBA 三套地址都以 `nand_addr_s` 为
 唯一构造入口，不再有位置形参版本——七个同型小整数按位置传参写反了仍落在合法值域内（`page<64`、
 `plane<2`、`block<2048`），会静默算出错地址；具名字段把这类错误变成编译错误。
 （v25 前为 5 形参 `paa_make(page, plane, block, lun, cw)` / 7 形参
-`pba_make(ch, ce, page, plane, block, lun, cw)`，字段顺序与 `nand_addr_t` 恰好相反。）
+`pba_make(ch, ce, page, plane, block, lun, cw)`，字段顺序与 `nand_addr_s` 恰好相反。）
 
 `paa_to_nand_row()` 将 PAA 转换为 MT29F4G08 的三周期行地址编码：PA[5:0]→bit[5:0]、BA6(Plane)→bit[6]、BA[17:7]→bit[17:7]。
 
@@ -1562,8 +1563,8 @@ static inline uint32_t   paa_to_nand_row(DWORD paa);         // 转换为 NAND �
 | `src/nand/bad_block.c` | ✅ 已删除 | 桩文件 |
 | `src/nand/ecc.c` | ✅ 已删除 | 桩文件 |
 | `src/nand/nand_command.c` | ✅ 已删除 | 桩文件，所有 ONFI 命令编码已在 `onfi_1_0.c` 实现 |
-| `src/nand/nand_timing.c` | ✅ 已删除 | 桩文件，时序参数已在 `nand_operation_map_t.timing` 中 |
-| `fc_ldpc_engine` | ✅ 已完成 | BCH(m=13, t=4) 编码/解码；QC-LDPC 硬判决编码/解码（可选） |
+| `src/nand/nand_timing.c` | ✅ 已删除 | 桩文件，时序参数已在 `nand_op_map_s.timing` 中 |
+| `fc_ecc_engine` | ✅ 已完成 | BCH(m=13, t=4) 编码/解码；QC-LDPC 硬判决编码/解码（可选） |
 | `fc_raid_engine` | ✅ 已完成 | per-LUN START/ACCUMULATE/END 序列；fc_raid_recover 静态恢复 |
 | `fc_data_path` | ✅ 已完成 | 写路径：Random→ECC→RAID；读路径：ECC→条件解扰（FC 内部）/ RAID 恢复（FTL 触发） |
 
@@ -1576,7 +1577,7 @@ static inline uint32_t   paa_to_nand_row(DWORD paa);         // 转换为 NAND �
 | 缺少 Main/Spare 分离 | 已添加 `PAGE_MAIN_SIZE` / `PAGE_SPARE_SIZE` 宏 | ✅ 已解决 |
 | `nand_device_t` 遗留 | 与 FTL 模拟路径共存，未来 FTL 迁移到 FC 接口后可移除 | 📝 已文档化 |
 | 双向头文件依赖 | `nand_dispatch.h` **不再 include 任何 `fc/` 头**（2026-10-14 清掉一处零使用的 `fc/fc_types.h` 残留）；FC 在 submit 时预解析 Descriptor 链，nand_dispatch 不再回调 FC | ✅ 已解决 |
-| `fc_command_handle` 编译 bug | `fc.c` 内部类型已统一为 `fc_command_id_t` | ✅ 已解决 |
+| `fc_command_handle` 编译 bug | `fc.c` 内部类型已统一为 `fc_cmd_id_t` | ✅ 已解决 |
 | 死代码 `flash_controller/` | 模块已删除 | ✅ 已解决 |
 | 桩文件清理 | `bad_block.c`, `ecc.c`, `nand_command.c`, `nand_timing.c` 已删除 | ✅ 已解决 |
 | 双完成结构转换 | `fc_complete_from_nand()` 简化为直接字段拷贝 | ✅ 已解决 |
@@ -1645,7 +1646,7 @@ make clean && make tests
 1. **为什么用空闲链表而非遍历查找** — 企业级实现，O(1) 分配，避免 Pool 深度扩大时性能退化。
 2. **为什么 Buffer 与 Descriptor 解耦** — UNC 发生时可以释放 buffer 供其他任务使用，只保留 descriptor 信息做错误处理。
 3. **为什么 Command 中 CW 字段是"数量减一"** — 0 表示 1 个 CW，节省位宽。Descriptor 中 CW 是"当前索引"，用途不同。
-4. **为什么 PAA 不含 Channel/CE** — 通道和片选是命令级路由信息（`fc_cmd_conf_t.ch/ce`），PAA 只编码芯片内物理地址。
+4. **为什么 PAA 不含 Channel/CE** — 通道和片选是命令级路由信息（`fc_cmd_cfg_s.ch/ce`），PAA 只编码芯片内物理地址。
 5. **为什么数据 ≤ 4B 不分配 Descriptor** — GET_FEATURES 等命令返回值小，复用 Command 的 4 字节 parameter 字段避免浪费资源。
 6. **为什么 command_module 字段放在 FC 而非 FTL** — CQ 中的完成项需要路由到正确的回调，由 FC 原样返回提交时的 module 值。
 
@@ -1684,7 +1685,7 @@ typedef enum {
 | 1 | FuncStatus 语义统一 | `0U`/`1U` → `FUNC_STATUS_SUCCESS`/`FUNC_STATUS_ERROR` | ✅ |
 | 2 | command_handle → command_id | 统一命名 | ✅ |
 | 3 | fc_command_configure_descriptors | 合并 descriptor 分配+配置为单接口（v13 上移 FTL，见 §26） | ✅ |
-| 4 | paa_from_addr() | PAA 地址合成函数（由 `nand_addr_t` 具名字段打包；v25 前为 5 形参 `paa_make`） | ✅ |
+| 4 | paa_from_addr() | PAA 地址合成函数（由 `nand_addr_s` 具名字段打包；v25 前为 5 形参 `paa_make`） | ✅ |
 | 5 | 条件判断宏封装 | 复合条件拆为独立命名宏 | ✅ |
 | 6 | 资源 ID 双向查询 | 每种资源提供 id↔指针 双向转换函数 | ✅ |
 | 7 | 冗余 NULL 检查移除 | 内部函数移除 controller/command 等 NULL 检查 | ✅ |
@@ -1695,12 +1696,12 @@ typedef enum {
 
 **旧接口：**
 ```c
-fc_descriptor_id_t fc_command_descriptors_alloc(fc_command_t *command, uint8_t cw_count);
+fc_desc_id_t fc_command_descriptors_alloc(fc_cmd_s *command, uint8_t cw_count);
 ```
 
 **新接口（一次完成分配+配置）：**
 ```c
-fc_status_t fc_command_configure_descriptors(fc_command_t *command);
+fc_status_t fc_command_configure_descriptors(fc_cmd_s *command);
 ```
 内部根据 `command->config.cw` 自动计算需要的 descriptor 数量，分配 descriptor 链+buffer 并串联链表。
 
@@ -1867,11 +1868,11 @@ FC 内部维护静态 Buffer Pool，所有数据 buffer 通过 16-bit ID 对外�
 ```c
 typedef struct {
     uint32_t         paa;
-    fc_cmd_conf_t    config;
+    fc_cmd_cfg_s    config;
     uint16_t         buffer_id : 16;  // ← 指向 FC 内部 Buffer Pool
     uint16_t         next_id   : 16;
     uint8_t          status    : 8;
-} fc_descriptor_t;
+} fc_desc_s;
 ```
 
 **相关接口（4 个）：**
@@ -1888,17 +1889,17 @@ typedef struct {
 
 ```c
 // ① 分配 command + desc 链 + buffer
-fc_command_t *cmd = fc_command_alloc();
+fc_cmd_s *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_PROGRAM;
 cmd->config.cw = 1;   // 2 个 CW
 cmd->paa = target_paa;
 fc_command_configure_descriptors(cmd);   // 自动分配 desc 链 + buffer
 
 // ② FTL 将数据写入 buffer（需遍历 desc 链）
-fc_descriptor_id_t desc_id = cmd->desc_id;
+fc_desc_id_t desc_id = cmd->desc_id;
 uint8_t cw = 0;
 while (desc_id != FC_DESCRIPTOR_ID_INVALID && cw <= cmd->config.cw) {
-    fc_descriptor_t *desc   = fc_descriptor_id_to_descriptor(desc_id);
+    fc_desc_s *desc   = fc_descriptor_id_to_descriptor(desc_id);
     uint8_t         *buffer = fc_buffer_id_to_real_buffer(desc->buffer_id);
     memcpy(buffer, my_data + cw * CW_SIZE, CW_SIZE);
     desc_id = desc->next_id;
@@ -1934,11 +1935,11 @@ FC 不再管理数据 buffer，Descriptor 中直接用指针指向数据位置�
 ```c
 typedef struct {
     uint32_t         paa;
-    fc_cmd_conf_t    config;
+    fc_cmd_cfg_s    config;
     uint8_t         *data_ptr;    // ← 直接指向 SRAM/SDRAM 地址
     uint16_t         next_id : 16;
     uint8_t          status  : 8;
-} fc_descriptor_t;
+} fc_desc_s;
 ```
 
 **删除的接口（4 个）：**
@@ -1957,14 +1958,14 @@ uint8_t *buf = ftl_buf_alloc();           // FTL 自己的分配器
 memcpy(buf, my_data, CW_SIZE);
 
 // ② 分配 command + desc 链（不分配 buffer）
-fc_command_t *cmd = fc_command_alloc();
+fc_cmd_s *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_PROGRAM;
 cmd->config.cw = 1;
 cmd->paa = target_paa;
 fc_command_configure_descriptors(cmd);    // 只分配 desc，不分配 buffer
 
 // ③ FTL 直接指定地址
-fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(cmd->desc_id);
+fc_desc_s *desc = fc_descriptor_id_to_descriptor(cmd->desc_id);
 desc->data_ptr = buf;                     // ← 直接给地址
 
 // ④ 提交
@@ -2043,7 +2044,7 @@ Descriptor 同时支持 buffer_id 和 data_ptr，通过标志位选择使用哪�
 ```c
 typedef struct {
     uint32_t         paa;
-    fc_cmd_conf_t    config;
+    fc_cmd_cfg_s    config;
     
     union {
         uint8_t     *data_ptr;    // FTL 直接指定地址（零拷贝）
@@ -2053,7 +2054,7 @@ typedef struct {
     uint16_t         next_id : 16;
     uint8_t          status  : 8;
     uint8_t          own_buf : 1;  // 0=FC Pool, 1=FTL 自己提供
-} fc_descriptor_t;
+} fc_desc_s;
 ```
 
 #### 12.6.2 适用场景
@@ -2085,14 +2086,14 @@ typedef struct {
 
 ```c
 // 新增接口：一次写入命令关联的所有 CW 数据
-fc_status_t fc_write_cmd_data(fc_command_t *cmd,
+fc_status_t fc_write_cmd_data(fc_cmd_s *cmd,
                                const uint8_t *data,
                                uint16_t length);
 // 内部校验 length == (cmd->config.cw + 1) * CW_SIZE
 // 自动遍历 desc 链：buffer_id → pointer → memcpy
 
 // 新增接口：获取指定 CW 的数据指针（读操作使用）
-uint8_t *fc_get_cmd_data_ptr(fc_command_t *cmd, uint8_t cw_index);
+uint8_t *fc_get_cmd_data_ptr(fc_cmd_s *cmd, uint8_t cw_index);
 // 遍历 desc 链找到第 cw_index 个 desc
 // 返回 buffer_id → real_buffer
 ```
@@ -2104,7 +2105,7 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *cmd, uint8_t cw_index);
 **写操作：**
 
 ```c
-fc_command_t *cmd = fc_command_alloc();
+fc_cmd_s *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_PROGRAM;
 cmd->config.cw = 3;                  // 4 个 CW
 cmd->paa = target_paa;
@@ -2119,7 +2120,7 @@ fc_submit(cmd);
 **读操作：**
 
 ```c
-fc_command_t *cmd = fc_command_alloc();
+fc_cmd_s *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_READ;
 cmd->config.cw = 3;
 cmd->paa = target_paa;
@@ -2129,7 +2130,7 @@ fc_submit(cmd);
 // ... fc_service() 循环 ...
 
 fc_poll_completion(&completion);
-fc_command_t *done = fc_command_id_to_command(completion.command_id);
+fc_cmd_s *done = fc_command_id_to_command(completion.command_id);
 
 // 一行获取数据指针，FTL 直接读取
 uint8_t *data = fc_get_cmd_data_ptr(done, 0);   // 第 0 个 CW 的数据
@@ -2213,8 +2214,8 @@ DWORD buf_own : 2; /* fc_buf_own_t：bit1 = 申请方（0 = FC，1 = 上层）�
 | `10` | 上层 | 上层 | 上层把控数据场景 |
 | `11` | 上层 | **FC** | 写命令等场景，只要命令状态 |
 
-**为什么 `00` 必须是默认值**：`fc_cmd_conf_t` 恰好 32 bit，新字段从原 `reserved : 3` 里取 2 bit
-（剩 `reserved : 1`），命令出池整体清零（`(fc_command_t){0}`）⇒ 未显式设置者恒为 `00`。
+**为什么 `00` 必须是默认值**：`fc_cmd_cfg_s` 恰好 32 bit，新字段从原 `reserved : 3` 里取 2 bit
+（剩 `reserved : 1`），命令出池整体清零（`(fc_cmd_s){0}`）⇒ 未显式设置者恒为 `00`。
 而 `00` 正是今天的行为（FC 建链时申请、上层 `fc_command_release` 时归还）⇒ **生产路径逐字不变、
 `src/ftl/**` 一行不动**。这是本方案能上板验证的前提。
 
@@ -2261,7 +2262,7 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 
 这条边界是 **FC firmware 与 NAND 硬件引擎之间的防火墙**。FC 内部处理 firmware 层面的功能（数据加扰/解扰、LDPC 编解码、RAID XOR 编解码），只有 NAND 硬件引擎真正需要的字段才跨越 dispatch 边界。
 
-核心问题：`fc_command_t` / `fc_descriptor_t` / `fc_cmd_conf_t` 中的所有控制位和状态位，哪些应该跨越 dispatch 边界进入 NAND 硬件，哪些应该留在 FC firmware 内部处理？
+核心问题：`fc_cmd_s` / `fc_desc_s` / `fc_cmd_cfg_s` 中的所有控制位和状态位，哪些应该跨越 dispatch 边界进入 NAND 硬件，哪些应该留在 FC firmware 内部处理？
 
 ### 13.2 边界设计原则
 
@@ -2274,7 +2275,7 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 
 ### 13.3 字段级贯穿映射
 
-#### 13.3.1 fc_cmd_conf_t → Dispatch Request
+#### 13.3.1 fc_cmd_cfg_s → Dispatch Request
 
 | 字段 | 位宽 | 过 Dispatch？ | 理由 |
 |------|------|-------------|------|
@@ -2293,7 +2294,7 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 | `buf_own` | 2 | **❌ 不过**（v53） | buffer 归属（谁申请 / 谁归还）是**纯 FC 侧资源策略**，硬件只看到一个已经解析成指针的 `cw_buffers[n]`（见 §13.3.2） |
 | `reserved` | 1 | — | 保留 |
 
-#### 13.3.2 fc_descriptor_t → Dispatch Request
+#### 13.3.2 fc_desc_s → Dispatch Request
 
 | 字段 | 过 Dispatch？ | 理由 |
 |------|-------------|------|
@@ -2304,16 +2305,16 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 | `ecc_bits` | **❌ 不过** | 同 status，是回写字段 |
 | `config.cw` | **→ 编码进 `n`**（`n % CW_NUM`） | desc 的 CW 号由 PAA 携带，落位时编入 flat 号 n |
 
-#### 13.3.3 Dispatch Completion → fc_command_status_t
+#### 13.3.3 Dispatch Completion → fc_cmd_status_s
 
 | Dispatch Completion 字段 | 回写目标 | 说明 |
 |------------------------|---------|------|
-| `command_id` | `fc_command_status_t.command_id` | CQ 条目标识 |
+| `command_id` | `fc_cmd_status_s.command_id` | CQ 条目标识 |
 | `execution_status` | 驱动层处理 | NAND_RESULT_OK/TIMEOUT/NAND_FAIL |
 | `nand_status` | `nand_dispatch_completion_t`保留 | 70h 状态值，供 FC 调试 |
-| `cw_status[CW_TOTAL_MAX]` | 聚合 OR → `fc_command_status_t.status` **+** 回写 `fc_descriptor_t.status` | CQ 只带命令级聚合，per-CW 细节留 desc 链 |
-| `ecc_bit_count[CW_TOTAL_MAX]` | 只回写 `fc_descriptor_t.ecc_bits`（聚合走 `fc_get_cmd_ecc_max`） | v7 起 CQ 不再携带 per-CW ECC |
-| `failed_descriptor_id` | → `fc_command_status_t.desc_id` | 定位错误 Descriptor |
+| `cw_status[CW_TOTAL_MAX]` | 聚合 OR → `fc_cmd_status_s.status` **+** 回写 `fc_desc_s.status` | CQ 只带命令级聚合，per-CW 细节留 desc 链 |
+| `ecc_bit_count[CW_TOTAL_MAX]` | 只回写 `fc_desc_s.ecc_bits`（聚合走 `fc_get_cmd_ecc_max`） | v7 起 CQ 不再携带 per-CW ECC |
+| `failed_descriptor_id` | → `fc_cmd_status_s.desc_id` | 定位错误 Descriptor |
 
 ### 13.4 关键设计决策详解
 
@@ -2367,7 +2368,7 @@ NAND 硬件 LDPC 解码完成
                 ▼
        fc_complete_from_nand()
                 │
-                └──→ fc_descriptor_t.ecc_bits   → Descriptor 回写（v7 起 CQ 不再带 per-CW ECC）
+                └──→ fc_desc_s.ecc_bits   → Descriptor 回写（v7 起 CQ 不再带 per-CW ECC）
                                                  FTL 走 fc_get_cmd_ecc_max() 取全链最大值
 ```
 
@@ -2410,7 +2411,7 @@ while (desc_id < FC_DESCRIPTOR_POOL_DEPTH) {
 主流完成项只带 CID/status；命令类型/完成服务函数由固件 request context 保存。
 本仓对应地：
 
-- `fc_command_t` 与 `fc_command_status_t` 都**不携带** FTL 的 `ftl_op_id_e`；
+- `fc_cmd_s` 与 `fc_cmd_status_s` 都**不携带** FTL 的 `ftl_op_id_e`；
 - FTL 在 `ftl_op_submit()` 时按 `command_id` 直接索引自己的 request 表，
   保存 `{ctx, op}`；
 - `ftl_op_drain()` 收到 CQE 后用 `command_id` 取 request，再按 `op` 查
@@ -2493,7 +2494,7 @@ nand_dispatch_completion_t（command_id / execution_status / nand_status /
   │     fc_is_page_read() → fc_data_path_process_read()   ← 图 5
   │     （即使 IO_ERROR，已解码的 desc status 已更新）
   │
-  ├─ Step 3：组装 fc_command_status_t（12B CQ 条目）
+  ├─ Step 3：组装 fc_cmd_status_s（12B CQ 条目）
   │     command_id = nand completion 的 command_id
   │     desc_id    = failed_descriptor_id（初值；实为 flat CW 编号）
   │                 Page Read 再覆盖为首个**失败** CW 的 desc_id
@@ -2524,8 +2525,8 @@ nand_dispatch_completion_t（command_id / execution_status / nand_status /
 
 | 结构 | 变更 | 单条大小 | 数量 | 总量变化 |
 |------|------|---------|------|---------|
-| `fc_command_status_t` | 8B → 12B（+4B） | 12B | 64 | +256B |
-| `fc_descriptor_t` | 12B → 16B（+4B） | 16B | 256 | +1KB |
+| `fc_cmd_status_s` | 8B → 12B（+4B） | 12B | 64 | +256B |
+| `fc_desc_s` | 12B → 16B（+4B） | 16B | 256 | +1KB |
 | `nand_dispatch_completion_t` | 新增 `ecc_bit_count[CW_TOTAL_MAX]` | +8B | — | +8B |
 | `nand_dispatch_request_t` | 新增 `page_type`（占位已有 reserved） | 0B | — | 0B |
 | **合计** | | | | **约 +1.3KB** |
@@ -2555,14 +2556,14 @@ SET_FEATURES（0xEF）和 GET_FEATURES（0xEE）是 ONFI 协议中读写 NAND �
 - **SET_FEATURES**：发送 1 字节寄存器地址（COLUMN_0）→ 4 字节参数数据
 - **GET_FEATURES**：发送 1 字节寄存器地址（COLUMN_0）→ 回读 4 字节参数数据
 
-原始实现中，即使 SET/GET_FEATURES 只传输 ≤5 字节，也分配了完整的 descriptor + buffer（528 字节），浪费了有限的 SRAM 资源池。优化目标是消除这次无谓的分配，让命令通过 `fc_command_t` 内部字段直接承载这 5 字节信息。
+原始实现中，即使 SET/GET_FEATURES 只传输 ≤5 字节，也分配了完整的 descriptor + buffer（528 字节），浪费了有限的 SRAM 资源池。优化目标是消除这次无谓的分配，让命令通过 `fc_cmd_s` 内部字段直接承载这 5 字节信息。
 
 ### 14.2 数据结构变更
 
-在 `fc_command_t` 中：
+在 `fc_cmd_s` 中：
 
 1. **`feature_addr:8`** — 从原 `reserved1:11` 中划分 8 位，存储 NAND 寄存器地址。FC → nand_dispatch 传递后，由 COLUMN_0 uop 发送 `(uint8_t)request->column`，即此值。
-2. **`parameter[0..3]` 由 `DWORD : 8` → `uint8_t`** — 位域不能取地址，但内联路径需要一个可取地址的 4 字节落点作为 buffer 指针。改为纯字节后增加了 ~4 字节/command，Command Pool 总量 +256 字节。**v7** 起这 4 个字节并入 `fc_param_t param` 联合体（见 §2.2）。
+2. **`parameter[0..3]` 由 `DWORD : 8` → `uint8_t`** — 位域不能取地址，但内联路径需要一个可取地址的 4 字节落点作为 buffer 指针。改为纯字节后增加了 ~4 字节/command，Command Pool 总量 +256 字节。**v7** 起这 4 个字节并入 `fc_param_u param` 联合体（见 §2.2）。
 
 ### 14.3 数据流追踪
 
@@ -2695,9 +2696,9 @@ desc_id = FC_DESCRIPTOR_ID_INVALID，自动跳过回写。GET_FEATURES 的返回
 | 阶段 | 方案 | 问题 |
 |------|------|------|
 | 原始方案 | 分配 desc + buffer（528B）传递 5 字节 | 浪费资源 |
-| 内联方案 v1 | `fc_command_t.reserved1:11` → `feature_addr:8`；保留 `DWORD parameter : 8` | 位域不可取地址，读回数据无法送达 |
+| 内联方案 v1 | `fc_cmd_s.reserved1:11` → `feature_addr:8`；保留 `DWORD parameter : 8` | 位域不可取地址，读回数据无法送达 |
 | 内联方案 v2 | parameter 改为 `uint8_t`；buffer 直接指向 `&command->parameter0`；去掉 task.parameter 重定向 | 读回数据正确落入 command，但提交后仍在写 SQ |
-| 内联方案 v3（最终） | parameter 并入 `fc_param_t`；buffer 指向控制器级暂存 `g_fc_return_staging[command_id]`；返回值经 CQ 的 `param` 交回 | 读回数据正确且不违反「SQ 不可变」 |
+| 内联方案 v3（最终） | parameter 并入 `fc_param_u`；buffer 指向控制器级暂存 `g_fc_return_staging[command_id]`；返回值经 CQ 的 `param` 交回 | 读回数据正确且不违反「SQ 不可变」 |
 
 ---
 
@@ -2762,9 +2763,9 @@ if (op == OP_NORMAL_PROGRAM_PAGE || op == OP_OTP_DATA_PROGRAM || ...) {
 g_nand_dispatch_req_table[task->operation](task);
 ```
 
-### 15.6 `nand_operation_map_t` 协议属性增强
+### 15.6 `nand_op_map_s` 协议属性增强
 
-`nand_operation_map_t` 新增两个协议属性字段（它们是 ONFI 协议属性，不是 dispatch 策略）：
+`nand_op_map_s` 新增两个协议属性字段（它们是 ONFI 协议属性，不是 dispatch 策略）：
 
 ```c
 typedef struct {
@@ -2772,7 +2773,7 @@ typedef struct {
     uint8_t  has_data;     /* 操作是否需要数据传输 */
     uint16_t data_length;  /* 数据传输字节数（0 = 无数据） */
     // ...
-} nand_operation_map_t;
+} nand_op_map_s;
 ```
 
 对应删除两个独立函数 `nand_operation_has_data()` 和 `nand_operation_data_length()`，改为宏直接查表：
@@ -2854,7 +2855,7 @@ result = handler(state->backend->context, uop, ...);
 
 ### 15.12 RANDOM_DATA_READ 的数据传输长度说明
 
-RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码本身决定，而是由 FMC 硬件产生的 RE# 时钟脉冲数控制。`nand_operation_map_t.data_length` 中记录的值不是命令的"固有属性"，而是**传输长度的默认值**，通过 `nand_fc_request_t.data_length` 传递给 FMC 层作为 DMA/RE# 脉冲计数器：
+RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码本身决定，而是由 FMC 硬件产生的 RE# 时钟脉冲数控制。`nand_op_map_s.data_length` 中记录的值不是命令的"固有属性"，而是**传输长度的默认值**，通过 `nand_fc_request_t.data_length` 传递给 FMC 层作为 DMA/RE# 脉冲计数器：
 
 ```c
 [OP_RANDOM_DATA_READ] = {
@@ -3009,9 +3010,9 @@ typedef struct {
 #define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH /* = 4U，与 dispatch 链缓冲深度一致 */
 
 typedef struct {
-    fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
+    fc_cmd_id_t ids[FC_SCHEDULER_CHAIN_MAX];
     uint8_t         count;  /* 0=空, 1=单命令, 2+=链 */
-} fc_scheduler_chain_t;
+} fc_sched_chain_s;
 ```
 
 `nand_dispatch_task_t` 新增 `ce` 和 `lun` 字段（此前只有 `ch`，单 CE/LUN 时代硬编码），供后续多 CE/LUN 使用。
@@ -3079,7 +3080,7 @@ while (1) {
 `fc_scheduler_select_chain()` 取代原有的 `fc_scheduler_select()` 成为 FC 的主入口：
 
 ```c
-fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_chain_t *chain)
+fc_status_t fc_scheduler_select_chain(fc_sched_s *scheduler, fc_sched_chain_s *chain)
 {
     /* Phase 1: HSQ 优先 — HSQ 命令不参与链 */
     if (HSQ 非空) {
@@ -3123,7 +3124,7 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
 | `include/nand/nand_dispatch.h` | 新增 `NAND_DISPATCH_CHAIN_DEPTH`、`nand_dispatch_submit_chain()` 声明 |
 | `src/nand/nand_dispatch_internal.h` | 新增 `task.ce/lun`、`nand_dispatch_lun_chain_t` |
 | `src/nand/nand_dispatch.c` | `g_nand_dispatch_tasks[][][]` → `g_nand_dispatch_chains[][][].tasks[]`；新增 `nand_dispatch_task_load()`；`submit()` 改用 chain；新增 `submit_chain()`；`poll()` Phase 1 chain 推进 + Phase 2 出队适配 |
-| `include/fc/fc_scheduler.h` | 新增 `FC_SCHEDULER_CHAIN_MAX`、`fc_scheduler_chain_t`、`fc_scheduler_select_chain()` |
+| `include/fc/fc_scheduler.h` | 新增 `FC_SCHEDULER_CHAIN_MAX`、`fc_sched_chain_s`、`fc_scheduler_select_chain()` |
 | `src/fc/fc_scheduler.c` | 新增 `fc_scheduler_select_chain()` 链识别 + 整链弹出 |
 | `include/fc/fc_queue.h` | 新增 `fc_submission_queue_peek()`、`fc_submission_queue_pop_n()` |
 | `src/fc/fc_queue.c` | 实现 `peek()`、`pop_n()` |
@@ -3151,7 +3152,7 @@ fc_command_submit(&command_C);
 > ⚠ **「HSQ 在整个链执行期间无法插入」这句到 v52 才真正成立**。链长 ≤ `FC_SCHEDULER_CHAIN_MAX`（4）
 > 时，整条链一批进 FIFO，`nand_dispatch_submit_chain` 保证一批内原子，确实插不进；但**链长 > 4**
 > 时会被拆成多批、分多次填充轮次下发，而 v51 及以前**批与批之间无锁** ⇒ HSQ 可插在批边界上。
-> v52 新增跨轮次持久的 per-LUN 链锁（`fc_scheduler_t.chain_owner`，见 §2.7）补上这段：
+> v52 新增跨轮次持久的 per-LUN 链锁（`fc_sched_s.chain_owner`，见 §2.7）补上这段：
 > 链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发。
 
 ### 16.10 与 Phase D (函数指针表) 的关系
@@ -3232,7 +3233,7 @@ select_chain(scheduler, chain)
 
 MT29F4G08ABADAWP 支持 2 Plane 操作（Multi-Plane READ/PROGRAM/ERASE），但现有架构将 `cw_paa/buffers` 设计为平面一维数组 `[CW_NUM]`(4)，无法支持 Multi-Plane 场景中 `CW_NUM × PLANE_NUM = 8` 的 CW 总数。
 
-同时，`nand_command_request_t.row` 为单值 `uint32_t`，Multi-Plane 操作需要发送两组行地址（Plane 0 和 Plane 1），而地址周期中的 plane bit 差异仅在于 BA6。
+同时，`nand_cmd_req_s.row` 为单值 `uint32_t`，Multi-Plane 操作需要发送两组行地址（Plane 0 和 Plane 1），而地址周期中的 plane bit 差异仅在于 BA6。
 
 > **注（Phase E 之后的修订）**：Phase E 引入 `[PLANE_NUM][CW_NUM]` 时，第一维在**单 plane** 命令下仍恒取 `[0]`（"第几组槽位"语义），只有 multi-plane 命令按物理 plane 落位。后续修订把第一维统一为**物理 plane 索引**：新增 `nand_dispatch_request_t.plane` / `nand_dispatch_task_t.plane`，单 plane 命令按 `command->paa` 的 plane 落位到 `cws[plane][*]` / `cw_paa[plane][*]`。
 > **再后续（v9）**：二维 `cws[PLANE_NUM][CW_NUM]` 整体删除，改为**一维 flat 索引** `cw_mask` + `cw_buffers[n]`（`n = plane*CW_NUM + cw`），行地址拆到 per-plane 的 `plane_paa[PLANE_NUM]`。§17.2 起的方案对比/结构/代码均为 Phase E 历史记录，未随该修订重写，看当前实现请读 §25.11。
@@ -3263,7 +3264,7 @@ uint8_t cw_status[CW_TOTAL_MAX];      // 8 个（vs 原有 4 个）
 uint8_t ecc_bit_count[CW_TOTAL_MAX];
 ```
 
-`fc_cmd_conf_t.cw` 位宽不变（仍为 2 位，最大表示 4 CW/plane），Multi-Plane 通过独立 OP 码区分。
+`fc_cmd_cfg_s.cw` 位宽不变（仍为 2 位，最大表示 4 CW/plane），Multi-Plane 通过独立 OP 码区分。
 
 ### 17.3 行地址数组重构
 
@@ -3476,7 +3477,7 @@ NORMAL_PROGRAM_PAGE 虽然也是单页操作，但 NAND 不支持 80h 后逐个 
 | 文件 | 说明 |
 |------|------|
 | `include/nand/nand_config.h` | 新增 `NAND_PLANE_MAX`、`CW_TOTAL_MAX`、`PAGE_BUFFER_SIZE` |
-| `include/nand/nand_engine.h` | `nand_command_request_t.row` → `row[NAND_PLANE_MAX]` |
+| `include/nand/nand_engine.h` | `nand_cmd_req_s.row` → `row[NAND_PLANE_MAX]` |
 | `include/nand/nand_fc_interface.h` | `nand_fc_request_t.row` → `row[NAND_PLANE_MAX]` |
 | `include/nand/onfi_1_0.h` | 新增 5 个 Multi-Plane OP 码 + `NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH`；拆读 OP 码为 WITH/WITHOUT_DATA_OUT 双版本；`OP_COUNT` 从 32 → 35 |
 | `src/nand/onfi_1_0.c` | 新增 5 组 uop 序列 + 映射表 5 项 |
@@ -3572,7 +3573,7 @@ for (channel = 0; channel < CH_NUM; channel++)
 
 FC 命令包含通道字段：
 ```c
-// fc_cmd_conf_t
+// fc_cmd_cfg_s
 DWORD ch  : 2;   /* 目标通道号 */
 DWORD ce  : 2;   /* 目标片选号 */
 DWORD lun : 2;   /* 目标 LUN 号 */
@@ -3620,7 +3621,7 @@ FMC 总线 (地址/数据/控制线共用)
 
 | 改动项 | 说明 | 工作量 |
 |--------|------|--------|
-| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | ⚠️ 原 `g_nand_fmc_instances[CH][CE][LUN]` 已**移除**：同 bank 各 LUN 窗口/时序同值，N 份拷贝零载荷。多通道需 **per-通道 base 表**（非 N 份同值 config） |
+| `nand_fmc_cfg_s` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | ⚠️ 原 `g_nand_fmc_instances[CH][CE][LUN]` 已**移除**：同 bank 各 LUN 窗口/时序同值，N 份拷贝零载荷。多通道需 **per-通道 base 表**（非 N 份同值 config） |
 | `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | ⚠️ 已收敛为**单例共享** `g_nand_fmc_instance`（backend 只读，多 LUN 并发共享安全）；多通道需 per-通道 handler/context |
 | ~~`nand_fmc_exec_wait_ready` 多实例~~ | **已不需要**：WAIT_READY 为纯 GPIO 轮询，无中断资源依赖 | — |
 | DMA 资源化 | 每通道独立 DMA Stream 或排队传输 | 中 |
@@ -3770,7 +3771,7 @@ LUN 1:                                                   ← FETCH(Dout)
 总耗时 ≈ tR + FETCH，而非 2×(tR+FETCH)
 ```
 
-配对 OP 码（`nand_operation_map_t.pair_op`）：LOAD↔FETCH、ISSUE↔WAIT；原子 OP 的 pair_op 取自身（不切分）。多 LUN 场景 `fc_build_dispatch_request()` 在填完 request 后自动把 splittable 命令拆成 ISSUE（`nand_operation_is_splittable`），单命令与链式两条路径共用这一处转换。
+配对 OP 码（`nand_op_map_s.pair_op`）：LOAD↔FETCH、ISSUE↔WAIT；原子 OP 的 pair_op 取自身（不切分）。多 LUN 场景 `fc_build_dispatch_request()` 在填完 request 后自动把 splittable 命令拆成 ISSUE（`nand_operation_is_splittable`），单命令与链式两条路径共用这一处转换。
 
 ### 17.10 设计演进
 
@@ -3783,7 +3784,7 @@ LUN 1:                                                   ← FETCH(Dout)
 | v5 | 第一维单 plane 恒 `[0]`，名不副实（"槽位"vs"plane 索引"），单 plane 打 plane 1 时依赖无断言守卫的隐式约定 | 第一维统一为物理 plane 索引：新增 `plane` 字段贯穿 request→task，单 plane 命令落位 `cws[plane][*]`；`plane_count` 语义不变 |
 | v6 | 读命令只能读"前 N 个 CW"（`config.cw` 是"CW 数减一"），表达不了 `{0,1,3}` 这种子集，读恢复只能重读整页 | 加 CW 掩码：建链按掩码置位逐 CW 建 desc；**链槽位与 CW 号解耦**（CW 号一律 `paa_to_cw(desc->paa)`）；读路径统一为「加载进页缓冲 + 逐 CW 取数」，新增 `OP_RANDOM_DATA_READ_MULTI_PLANE`；完成项暴露失败掩码。详见 §25 |
 | v9 | 掩码是 flat 的，但掩码下游仍是"plane 分桶 + 每 plane 密排槽位"的第二套坐标（`cw_count[]` / `cws[plane][slot]` / `slot_to_plane_cw()` 走减），两套坐标必须靠"链序 == plane-major"的隐式不变量对齐，且空 plane 需回填槽位 0 的 PAA 才不误寻址 | **索引空间统一为 flat 绝对 CW 号 `n = plane*CW_NUM + cw`**：`cw_mask` / `cw_buffers[n]` / `cw_status[n]` 同空间，`cw_count[]`、`cws[][]`、`cw_paa[][]`、`slot_to_plane_cw()` 全删；行地址拆到 `plane_paa[PLANE_NUM]`（per-plane，与掩码解耦）。详见 §25.11 |
-| v7 | v6 的 `cw_mask : 4` 是"CW 号掩码**广播到每个 plane**"，多 plane 读恢复只能重读失败并集；且 GET_FEATURES 把 NAND 读缓冲指向命令自身、结果原地回填进 SQ | ① 掩码改 **flat 绝对编号**（`fc_param_t.cw_mask`，bit `n = plane*CW_NUM + cw`，覆盖 8 位），两 plane 子集可不同，回填即最小重读集；`cw_count` 标量 → `cw_count[PLANE_NUM]`，链长度一律以 desc 链为真值，`config.cw` 不再回写。② CQ 重做为"命令级聚合状态 + 命令级返回段（`fc_param_t`）"：删 `ecc_bit0..3` / `failed_cw_mask`，GET_FEATURES 值经控制器级 `g_fc_return_staging` 中转进 CQ，SQ 提交后不被写。详见 §25 |
+| v7 | v6 的 `cw_mask : 4` 是"CW 号掩码**广播到每个 plane**"，多 plane 读恢复只能重读失败并集；且 GET_FEATURES 把 NAND 读缓冲指向命令自身、结果原地回填进 SQ | ① 掩码改 **flat 绝对编号**（`fc_param_u.cw_mask`，bit `n = plane*CW_NUM + cw`，覆盖 8 位），两 plane 子集可不同，回填即最小重读集；`cw_count` 标量 → `cw_count[PLANE_NUM]`，链长度一律以 desc 链为真值，`config.cw` 不再回写。② CQ 重做为"命令级聚合状态 + 命令级返回段（`fc_param_u`）"：删 `ecc_bit0..3` / `failed_cw_mask`，GET_FEATURES 值经控制器级 `g_fc_return_staging` 中转进 CQ，SQ 提交后不被写。详见 §25 |
 
 ---
 
@@ -3825,7 +3826,7 @@ Table 29/31 的 3.3V 参数重算。
 
 ```c
 // src/nand/devices/mt29f___g08a.c
-static const nand_fmc_timing_t g_nand_timing_high = {
+static const nand_fmc_timing_s g_nand_timing_high = {
     70U, 5U, 10U, ...   /* Table 29/31, 3.3V */
 };
 ```
@@ -3835,7 +3836,7 @@ static const nand_fmc_timing_t g_nand_timing_high = {
 ### 19.4 ONFI → FMC 换算
 
 ```c
-static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi,
                                     FMC_NAND_PCC_TimingTypeDef *pcc,
                                     DWORD fmc_hz);
 ```
@@ -4186,7 +4187,7 @@ g_fc_hsq_storage[16]     ───▶ controller->hsq   ◀─ config.high_prior
 g_fc_cq_storage[64]      ───▶ controller->cq    ◀─ fc_complete_internal → FTL ftl_op_drain
 ```
 
-要点：三池与队列存储都是**文件作用域静态数组**，地址在链接期固定；`fc_t` 只存指向它们的**指针**。因此三池的 DMA 物理地址在 `fc_init` 之后恒定不变——这是"先 `memset` 归零、后挂指针"这一顺序的原因。
+要点：三池与队列存储都是**文件作用域静态数组**，地址在链接期固定；`fc_ctl_s` 只存指向它们的**指针**。因此三池的 DMA 物理地址在 `fc_init` 之后恒定不变——这是"先 `memset` 归零、后挂指针"这一顺序的原因。
 
 ### 22.4 流程图：NAND 芯片初始化（图 16）
 
@@ -4441,7 +4442,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 >
 > 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
-> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充轮次下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨轮次持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
+> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充轮次下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_sched_s` 加了一张跨轮次持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
 
 > 🔁 **v-streaming 更新（2026-10-30，P1 读流式，未上板）**：上面的「FTL 恒 `FC_CHAIN_END`
 > ⇒ 运行时 `chain_owner` 恒 NONE」**不再成立**。FTL cache read / cache program 把一条 run
@@ -4485,7 +4486,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 但改动前的 FC 表达不了这件事：
 
-- `fc_cmd_conf_t.cw : 2` 的语义是 **"CW 数减一"**，只能表达"前 N 个 CW"，表达不了 `{0,1,3}`。
+- `fc_cmd_cfg_s.cw : 2` 的语义是 **"CW 数减一"**，只能表达"前 N 个 CW"，表达不了 `{0,1,3}`。
 - 建链处单 plane 的 CW 号是 `paa_to_cw(command->paa) + index`——从命令 PAA 的 CW 位起**连续递增**。
 - 读路径把 `column` 写死 0，靠首个 `00h-30h` 的 DATA_OUT 取 CW0，再用 `05h-列-E0h` 续读 CW1..3；而 `paa_to_nand_row()` **丢掉 CW 位**，命令 PAA 里的 CW 是被静默忽略的。
 
@@ -4495,7 +4496,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 | # | 决策 | 取值 |
 |---|------|------|
-| 1 | 位图入口 | **建链形参 `cw_bitmap`**（v28 起；v13~v27 是 `fc_command_t.param.cw_bitmap` 字段）：**flat 32 位位图**，bit `n = plane * CW_NUM + cw`，覆盖 `CW_TOTAL_MAX = 8` 位。绝对编号，不是"每 plane 各自的低 4 位" |
+| 1 | 位图入口 | **建链形参 `cw_bitmap`**（v28 起；v13~v27 是 `fc_cmd_s.param.cw_bitmap` 字段）：**flat 32 位位图**，bit `n = plane * CW_NUM + cw`，覆盖 `CW_TOTAL_MAX = 8` 位。绝对编号，不是"每 plane 各自的低 4 位" |
 | 2 | 读流程 | **严格统一**：所有读命令都拆成「加载进 cache」+「按 bitmap 逐 CW `05h/06h-E0h`」，**CW0 也走逐 CW 取**（不与加载融合） |
 | 3 | 范围与输出 | 单 plane + 多 plane 一并支持；失败 CW 位图一并从 FC 暴露（同为 flat 编号，可与请求位图求交集） |
 
@@ -4581,7 +4582,7 @@ return bitmap;
 `fc_build_dispatch_request` 的落位位图一律走 desc 链（v9 前是 `cw_count`，同一个道理）。
 `config.cw` 本身**不回写**——保持调用者原值，不伪造一个误导性的数；当前唯一的生产读者是 FC 内 RAID
 stripe 的 `cw_count`（`fc.c` 的 `fc_stripe_submit` / parity 建链，默认不编译）。
-`fc_descriptor_t.config.cw` 语义不变 = 本 desc 在 plane 内是第几个 CW。
+`fc_desc_s.config.cw` 语义不变 = 本 desc 在 plane 内是第几个 CW。
 
 链序为 **plane-major**（先 plane 0 的全部置位 CW，再 plane 1）——这只是 desc 的**建立顺序**，
 v9 起不再被任何消费点当作坐标使用（落位按 `n` 独立进行，链序无关紧要）。`fc_cw_mask_popcount`
@@ -4597,17 +4598,17 @@ v11 把机制抽成独立原语，公开给上层：
 
 ```c
 /* 机制层：分配一个 desc + buffer、填 PAA/config/meta、挂到命令 desc 链尾。 */
-fc_status_t fc_command_attach_cw_internal(fc_t *c, fc_command_t *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); /* fc.c */
-fc_status_t fc_command_attach_cw(fc_command_t *cmd, uint8_t plane, uint8_t cw, DWORD row_paa);                  /* 公共入口 */
+fc_status_t fc_command_attach_cw_internal(fc_ctl_s *c, fc_cmd_s *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); /* fc.c */
+fc_status_t fc_command_attach_cw(fc_cmd_s *cmd, uint8_t plane, uint8_t cw, DWORD row_paa);                  /* 公共入口 */
 ```
 
 拆开后，上层可以**自己算集合**（例如同页内只读 `{plane0:CW0, plane0:CW3, plane1:CW1}`）：
 
 ```c
-fc_command_t *cmd = fc_command_alloc();
+fc_cmd_s *cmd = fc_command_alloc();
 /* 填 config；各 plane 传自己的行地址（此处同页，故只有 plane 位不同） */
-DWORD row0 = paa_from_addr(&(nand_addr_t){.lun = lun, .block = block, .plane = 0, .page = page});
-DWORD row1 = paa_from_addr(&(nand_addr_t){.lun = lun, .block = block, .plane = 1, .page = page});
+DWORD row0 = paa_from_addr(&(nand_addr_s){.lun = lun, .block = block, .plane = 0, .page = page});
+DWORD row1 = paa_from_addr(&(nand_addr_s){.lun = lun, .block = block, .plane = 1, .page = page});
 fc_command_attach_cw(cmd, 0, 0, row0);
 fc_command_attach_cw(cmd, 0, 3, row0);
 fc_command_attach_cw(cmd, 1, 1, row1);
@@ -4718,7 +4719,7 @@ FC 的对外函数按"硬件 FCC 寄存器表"判据过了一遍（见 §26）�
 v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（产出给 NAND 的 `nand_dispatch_request_t` 逐字节不变）：
 
 1. **plane 段规则合并为一份**。`fc_command_plane_span` 上移到 `include/fc/fc_command.h` 作 `static inline`
-   （它只读 `command->config.multi_plane` / `command->paa`，不碰 `fc_t`，故不受"FTL 看不到 `fc_t`"约束），
+   （它只读 `command->config.multi_plane` / `command->paa`，不碰 `fc_ctl_s`，故不受"FTL 看不到 `fc_ctl_s`"约束），
    FC 的越段校验与 FTL 的掩码展开**共用同一份定义**；`ftl_cmd_plane_span`（`ftl_fc_interface.h`）删除。
    改 plane 语义（`PLANE_NUM` / BA6 含义 / 单 plane 起点）从此只需动一处。
    ⚠ FC 侧的越段校验（`fc_command_attach_cw_internal` 里 `plane` 不在 `[first, last)` 返回 `INVALID_ARGUMENT`）
@@ -4760,7 +4761,7 @@ v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（
 - `fc.c` 只留池/链原语：`fc_descriptor_alloc_internal` / `fc_command_chain_append` 去 `static`
   并声明进 `include/fc/fc_internal.h`（附「分配后必须立刻挂链」契约）。
 - Stripe RAID parity 建链改调公共入口 `fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_row)`
-  （该路径由此硬绑单例 `g_fc_controller`——当前全仓只有一个 `fc_t` 实例，多实例时须改回 `controller` 参数化入口）。
+  （该路径由此硬绑单例 `g_fc_controller`——当前全仓只有一个 `fc_ctl_s` 实例，多实例时须改回 `controller` 参数化入口）。
 
 详见 `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 
@@ -4803,7 +4804,7 @@ v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
 2. **名字与语义不符**：字段叫 mask 时"0 = 全部"勉强说得通（位掩码的常见重载），但它逐位表达的是
    **集合**，与 NAND 层的同名字段口径不一致。
 
-**改动**：字段改名 **`cw_bitmap`**（FC 侧 `fc_command_t.param.cw_bitmap`、NAND 侧
+**改动**：字段改名 **`cw_bitmap`**（FC 侧 `fc_cmd_s.param.cw_bitmap`、NAND 侧
 `nand_dispatch_request_t.cw_bitmap`），语义统一为**字面位图**：置 1 的位 = 要访问的 CW，
 **全 0 = 一个都不访问**。v23~v26 的重载取消。
 
@@ -4847,11 +4848,11 @@ release 下会被裁掉 ⇒ 忘填的代价是**编译期无声、release 下静
 |---|---|---|
 | SQ 请求集 | `cmd->param.cw_bitmap` 字段 | **形参** `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` |
 | CQ 失败集 | `completion.param.cw_bitmap`（`fc_complete_from_nand` 聚合） | **删除**；上层遍历 desc 链自取 |
-| `fc_param_t` | `parameter0..3` / `bytes[4]` / `cw_bitmap` | `parameter0..3` / `bytes[4]`（仅 FEATURES 内联数据） |
-| `fc_command_status_t.param` | 失败位图 / FEATURES 回读 | **保留**（仅 FEATURES 回读） |
+| `fc_param_u` | `parameter0..3` / `bytes[4]` / `cw_bitmap` | `parameter0..3` / `bytes[4]`（仅 FEATURES 内联数据） |
+| `fc_cmd_status_s.param` | 失败位图 / FEATURES 回读 | **保留**（仅 FEATURES 回读） |
 | ERASE 请求位图 | 伪造 CW0 位（给 completion 一格写 status） | **合法空集**，由 `completion_all_cws` 空集分支写 `cw_status[0]` |
 
-`ftl_cmd_resolve_cw_bitmap()` 的首参由 `const fc_command_t *cmd` 改为 `uint32_t bitmap`——
+`ftl_cmd_resolve_cw_bitmap()` 的首参由 `const fc_cmd_s *cmd` 改为 `uint32_t bitmap`——
 它现在校验的是**调用者给的值**，与命令结构体无关。
 
 **擦除假位的来龙去脉**：v7 起 FC 给无数据的 ERASE 请求硬置一个 CW0 位（`fc.c` 的 ERASE 分支），
@@ -4955,7 +4956,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 
 | 文件 | 改动 |
 |------|------|
-| `include/fc/fc_command.h` | v6：`fc_command_t` 加 `cw_mask:4`；`fc_command_status_t` 加 `failed_cw_mask:4`。**v7**：删 `cw_mask:4` / `parameter0..3` → `fc_param_t param`；删 CQ 的 `ecc_bit0..3` / `failed_cw_mask` → `fc_param_t param`；新增 `fc_cw_mask_is_plane_symmetric()` |
+| `include/fc/fc_command.h` | v6：`fc_cmd_s` 加 `cw_mask:4`；`fc_cmd_status_s` 加 `failed_cw_mask:4`。**v7**：删 `cw_mask:4` / `parameter0..3` → `fc_param_u param`；删 CQ 的 `ecc_bit0..3` / `failed_cw_mask` → `fc_param_u param`；新增 `fc_cw_mask_is_plane_symmetric()` |
 | `src/fc/fc.c` | v6：新增 `fc_cw_mask_popcount`；建链按 mask 枚举 + `config.cw` 回写；desc 配置签名 `index`→`(plane, cw)`；读 op 转换；`fc_complete_from_nand` 按 CW 号折叠 + 填 `failed_cw_mask`。**v7**：建链掩码改 flat + 逐 plane 展开 + 不回写；`fc_command_descriptor_count` 改走链；新增 `g_fc_return_staging` + `fc_get_cmd_ecc_max` 调用；`fc_build_dispatch_request` 每 plane 填槽位 0 + 删 `request->parameter[]`；`fc_stripe_submit` 加对称性 ASSERT + `cw_count[p]`。**v11**：新增 `fc_command_plane_span` / `fc_command_cw_attached` / `fc_command_chain_append` / `fc_command_attach_cw_internal`；`fc_command_configure_descriptors_internal` 内层循环改调机制原语（删局部 `previous` 与内联串链）。**v12**：`fc_command_configure_descriptor_internal` / `fc_command_attach_cw_internal` 增 `row_paa` 形参；`fc_build_request_data_planes` 的 `plane_paa[]` 改为从 desc 链推导 + 同 plane 行地址一致性 ASSERT。**v17**：删 `fc_command_configure_descriptor_internal` / `fc_command_attach_cw_internal` / `fc_command_cw_attached`（均搬去 `fc_interface.c` 并入 `fc_command_configure_descriptor`）；`fc_descriptor_alloc_internal` / `fc_command_chain_append` 去 `static` 并进 `fc_internal.h`；RAID parity 建链改调公共入口 |
 | `src/fc/fc_data_path.c` | v6：Pass 4 META 校验改用 `paa_to_cw(desc->paa)`。**v7**：`fc_data_path_process_read` 链长走链；stripe parity 加对称性 ASSERT |
 | `src/fc/fc_interface.c` | **v7**：`fc_write_cmd_data` / `fc_read_cmd_data` / `fc_get_cmd_data_ptr` / `fc_buffer_get_meta` 循环界改走链；`fc_get_cmd_data_ptr` 按 CW 号匹配；新增 `fc_get_cmd_ecc_max()`。**v11**：新增公共入口 `fc_command_attach_cw()`（薄壳：身份 + `ALLOCATED` 校验 → 转 internal）。**v12**：薄壳签名同步增 `row_paa`。**v17**：建链三层合并——`fc_command_attach_cw` 与两个 `_internal` 收敛为 `fc_command_configure_descriptor`（机制体落此文件，校验前置于出池）；新增 static `fc_command_cw_attached` |

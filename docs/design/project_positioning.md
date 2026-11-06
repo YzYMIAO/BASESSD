@@ -23,7 +23,7 @@
 | 介质 | MT29F4G08，SLC，512 MiB 裸容量 / 424 MiB 用户容量 | `include/nand/devices/mt29f___g08a.h`、`include/ftl/ftl.h:83` |
 | 拓扑 | 1 CH × 1 CE × 1 LUN，2 plane，64 页/块，2048 块/plane | `mt29f___g08a.h:35-37`、`ftl_config.h:22-26` |
 | 主机接口 | USB FS 12 Mbps，实测约 843/889 KB/s | `docs/design/usb_msc_udisk.md`、`docs/design/testing_guide.md` |
-| ECC | BCH(m=13, t=4) 默认；QC-LDPC 硬判决实验性 | `include/fc/fc_ldpc_engine.h:14-29` |
+| ECC | BCH(m=13, t=4) 默认；QC-LDPC 硬判决实验性 | `include/fc/fc_ecc_engine.h:14-29` |
 | RAID | `CONFIG_FC_RAID=0`，未启用 | `include/fc/fc.h:51-52` |
 | 掉电保护 | Journal + Checkpoint + 版本化；**无电容**，acked 写容忍丢最后一页 | `docs/design/ftl_design.md` §7 |
 | 代码量 | FTL + FC 约 4 万行（不含平台 / USB / 测试） | `wc -l src/ftl src/fc include/ftl include/fc` |

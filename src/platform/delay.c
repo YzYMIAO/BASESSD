@@ -10,7 +10,7 @@
  * ms 计数读 HAL tick，µs 在本毫秒窗口内用 (LOAD - VAL) 插值。
  * DWT 是调试/跟踪单元，不是产品时间源，本模块不碰 DWT。 */
 
-static bool  g_delay_initialized;
+static BOOL  g_delay_initialized;
 static DWORD g_systick_cycles_per_us;
 
 static delay_status_e delay_systick_us_busy(DWORD us)
@@ -93,12 +93,12 @@ void delay_init(void)
  * @return true 表示 SysTick 已配置且速率有效；false 表示尚未初始化。
  */
 
-bool delay_is_initialized(void)
+BOOL delay_is_initialized(void)
 {
     return g_delay_initialized;
 }
 
-bool delay_time_now_us(DWORD *us)
+BOOL delay_time_now_us(DWORD *us)
 {
     DWORD ms;
     DWORD cycles;
@@ -127,7 +127,7 @@ QWORD delay_time_now_us64(void)
     return ((QWORD)ms * 1000U) + (cycles / g_systick_cycles_per_us);
 }
 
-bool delay_time_elapsed_us(DWORD start_us, WORD timeout_us)
+BOOL delay_time_elapsed_us(DWORD start_us, WORD timeout_us)
 {
     DWORD now_us;
 
@@ -162,7 +162,7 @@ DWORD delay_max_busy_us(void)
 {
     if (!g_delay_initialized)
     {
-        return FUNC_STATUS_SUCCESS;
+        return 0U;
     }
 
     return UINT32_MAX / g_systick_cycles_per_us;
@@ -248,7 +248,7 @@ DWORD delay_now_ms(void)
  * @details 该函数只读时钟，不阻塞、不等待，也不会清除或修改任何定时器。
  */
 
-bool delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms)
+BOOL delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms)
 {
     return (delay_now_ms() - start_ms) >= timeout_ms;
 }

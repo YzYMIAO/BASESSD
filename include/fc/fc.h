@@ -43,7 +43,7 @@
 
 /*
  * Stripe RAID 功能使能。
- *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_conf_t.config.raid 固定为 NORMAL。
+ *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_cfg_s.config.raid 固定为 NORMAL。
  *   1 = 启用。跨 Plane RAID XOR parity generation + recovery。
  *
  * 当前未启用（功能代码已完成但未验证，待硬件就绪后开启）。

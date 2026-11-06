@@ -14,7 +14,7 @@
  *     跨 TU 内联。
  */
 
-#include "metadata.h" /* md_dir_cache_t / md_handle_t / PAGES_PER_BLOCK / alc_t */
+#include "metadata.h" /* md_dir_cache_s / md_handle_s / PAGES_PER_BLOCK / alc_s */
 
 /* ── 待回收日志块位图 ── */
 
@@ -26,14 +26,14 @@
  * @return true = 本次新置位并计数
  *         false = g 越界或该位已置位
  */
-bool md_reclaim_mark(md_dir_cache_t *dir, WORD g);
+BOOL md_reclaim_mark(md_dir_cache_s *dir, WORD g);
 
 /**
  * @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。
  *
  * @param dir Directory
  */
-void md_reclaim_reset(md_dir_cache_t *dir);
+void md_reclaim_reset(md_dir_cache_s *dir);
 
 /**
  * @brief 扫描全池，把"已无引用、非当前写块、确实是 LOG"的块登记进待回收位图。
@@ -42,7 +42,7 @@ void md_reclaim_reset(md_dir_cache_t *dir);
  * @param dir   Directory
  * @param alloc 分配器（读 BST 判 LOG 身份）
  */
-void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc);
+void md_reclaim_mark_all(md_dir_cache_s *dir, const alc_s *alloc);
 
 /* ── 写指针 ── */
 
@@ -56,7 +56,7 @@ void md_reclaim_mark_all(md_dir_cache_t *dir, const alc_t *alloc);
  *
  * @note 取到位置后**立即推进** cur_page[plane]：写失败时该页可能已半编程、不可复用。
  */
-DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane);
+DWORD md_slot_take(md_dir_cache_s *dir, BYTE plane);
 
 /* ── job 状态 ── */
 
@@ -69,7 +69,7 @@ DWORD md_slot_take(md_dir_cache_t *dir, BYTE plane);
  *
  * @param dir Directory
  */
-void md_handle_reset(md_dir_cache_t *dir);
+void md_handle_reset(md_dir_cache_s *dir);
 
 /**
  * @brief 整理 job 是否空闲（无回收/压缩在跑）。
@@ -78,7 +78,7 @@ void md_handle_reset(md_dir_cache_t *dir);
  * @return true = job 处于 IDLE
  *         false = 有 job 在跑
  */
-static inline bool md_handle_is_idle(const md_dir_cache_t *dir)
+static inline BOOL md_handle_is_idle(const md_dir_cache_s *dir)
 {
     return dir->handle.phase == MD_JOB_IDLE;
 }
@@ -94,7 +94,7 @@ static inline bool md_handle_is_idle(const md_dir_cache_t *dir)
  * @return true = phase 落在 CP_READ..CP_RECLAIM
  *         false = 其他 phase
  */
-static inline bool md_handle_is_compacting(const md_dir_cache_t *dir)
+static inline BOOL md_handle_is_compacting(const md_dir_cache_s *dir)
 {
     return (dir->handle.phase >= MD_JOB_CP_READ) && (dir->handle.phase <= MD_JOB_CP_RECLAIM);
 }
@@ -112,7 +112,7 @@ static inline bool md_handle_is_compacting(const md_dir_cache_t *dir)
  *       数据还没进 Directory，`l2p_live` 看不到；此时擦块会把在飞数据连同落点一起
  *       丢掉，commit 后 Directory 指向已擦页（RISK-MD-06）。
  */
-static inline bool md_log_block_is_idle(const md_dir_cache_t *dir, WORD g)
+static inline BOOL md_log_block_is_idle(const md_dir_cache_s *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
     {

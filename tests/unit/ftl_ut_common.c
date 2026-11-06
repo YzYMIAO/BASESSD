@@ -34,8 +34,8 @@
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* munit 打印用例前缀时不带换行；第一条证据行需要先给它收尾。 */
-static bool s_ev_line_started = false;
-static bool s_ev_suppressed   = false;
+static BOOL s_ev_line_started = false;
+static BOOL s_ev_suppressed   = false;
 
 void ftl_ut_trace_begin(void)
 {
@@ -44,12 +44,12 @@ void ftl_ut_trace_begin(void)
     s_ev_line_started = false;
 }
 
-void ftl_ut_trace_suppress(bool suppressed)
+void ftl_ut_trace_suppress(BOOL suppressed)
 {
     s_ev_suppressed = suppressed;
 }
 
-static void ftl_ut_trace_emit(bool force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
+static void ftl_ut_trace_emit(BOOL force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
     if (s_ev_suppressed || ((force == false) && !munit_log_visible(level)))
     {
@@ -99,9 +99,9 @@ void ftl_ut_result(const char *format, ...)
  * §2 活实例
  * ══════════════════════════════════════════════════════════════════════ */
 
-ftl_ctx_t *ftl_ut_live(void)
+ftl_ctx_s *ftl_ut_live(void)
 {
-    ftl_ctx_t *ftl = g_ctrl.ftl[0];
+    ftl_ctx_s *ftl = g_ctrl.ftl[0];
 
     munit_assert_not_null(ftl);
     return ftl;
@@ -109,7 +109,7 @@ ftl_ctx_t *ftl_ut_live(void)
 
 void ftl_ut_topology_init(void)
 {
-    static bool s_topology_ready = false;
+    static BOOL s_topology_ready = false;
 
     if (s_topology_ready)
     {
@@ -126,20 +126,20 @@ void ftl_ut_topology_init(void)
  * §2b 测试自有 RAM 表（结构体与生产同型，只填小状态）
  * ══════════════════════════════════════════════════════════════════════ */
 
-static bst_block_t             s_ut_blocks[FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD                    s_ut_free[FTL_BLOCK_TOTAL] SRAM12_DATA;
-static alc_op_block_table_t    s_ut_op[PLANE_NUM] SRAM12_DATA;
-static alc_spare_block_table_t s_ut_spare[PLANE_NUM] SRAM12_DATA;
-static super_block_t           s_ut_closed[SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+static bst_block_s           s_ut_blocks[FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD                  s_ut_free[FTL_BLOCK_TOTAL] SRAM12_DATA;
+static alc_op_block_arr_t    s_ut_op[PLANE_NUM] SRAM12_DATA;
+static alc_spare_block_arr_t s_ut_spare[PLANE_NUM] SRAM12_DATA;
+static super_block_s         s_ut_closed[SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 
-static ftl_table_refs_t s_ut_refs;
-static alc_t            s_ut_alloc;
-static md_dir_cache_t   s_ut_md;
+static ftl_table_refs_s s_ut_refs;
+static alc_s            s_ut_alloc;
+static md_dir_cache_s   s_ut_md;
 static DWORD            s_ut_total_writes;
 
 void ftl_ut_ram_init(void)
 {
-    ftl_ctx_t *live = ftl_ut_live();
+    ftl_ctx_s *live = ftl_ut_live();
 
     memset(s_ut_blocks, 0, sizeof(s_ut_blocks));
     memset(s_ut_free, 0, sizeof(s_ut_free));
@@ -164,12 +164,12 @@ void ftl_ut_ram_init(void)
     s_ut_alloc.pools  = &s_ut_md.pools;
 }
 
-alc_t *ftl_ut_ram_alloc(void)
+alc_s *ftl_ut_ram_alloc(void)
 {
     return &s_ut_alloc;
 }
 
-md_dir_cache_t *ftl_ut_ram_md(void)
+md_dir_cache_s *ftl_ut_ram_md(void)
 {
     return &s_ut_md;
 }
@@ -179,7 +179,7 @@ md_dir_cache_t *ftl_ut_ram_md(void)
  * ══════════════════════════════════════════════════════════════════════ */
 
 static QWORD                     s_ut_us;
-static const ssd_platform_ops_t *s_saved_ops;
+static const ssd_platform_ops_s *s_saved_ops;
 
 static QWORD ftl_ut_time_us(void)
 {
@@ -193,7 +193,7 @@ static DWORD ftl_ut_time_ms(void)
 
 void ftl_ut_clock_install(void)
 {
-    static const ssd_platform_ops_t ops = {.time_us = ftl_ut_time_us, .time_ms = ftl_ut_time_ms};
+    static const ssd_platform_ops_s ops = {.time_us = ftl_ut_time_us, .time_ms = ftl_ut_time_ms};
 
     s_saved_ops = ssd_platform_get();
     munit_assert_not_null(s_saved_ops);
@@ -232,7 +232,7 @@ static volatile ssd_status_e s_io_status;
  * ⚠ 必须在 ftl_init 前做：否则旧 CP/Journal 的迟到完成会在新实例上触发
  *    `h->waiting != 0` 断言（checkpoint.c:587）。
  * ⚠ 返回时 `bg_suspend` 仍为 1：调用者按需恢复。 */
-void ftl_ut_quiesce(ftl_ctx_t *ftl)
+void ftl_ut_quiesce(ftl_ctx_s *ftl)
 {
     const DWORD t0 = platform_now_ms();
 
@@ -240,7 +240,7 @@ void ftl_ut_quiesce(ftl_ctx_t *ftl)
 
     for (;;)
     {
-        fc_resource_stats_t rs;
+        fc_resource_stats_s rs;
 
         ftl_service_pump();
 
@@ -259,7 +259,7 @@ void ftl_ut_quiesce(ftl_ctx_t *ftl)
 /* 重新绑定 FTL。ftl_init 会 memset 整个上下文 ⇒ 先把 storage 指针拷出来。 */
 void ftl_ut_reboot_from_media(void)
 {
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_quiesce(ftl);
 
@@ -270,26 +270,26 @@ void ftl_ut_reboot_from_media(void)
     nand_dispatch_set_armed(1U); /* fc_init 会复位置位；与 FC UT 的 test_setup 同做法 */
     ftl_op_init();
 
-    static struct ftl_context *s_route[FTL_DIE_MAX];
+    static struct FTL_CONTEXT_S *s_route[FTL_DIE_MAX];
 
     memset(s_route, 0, sizeof(s_route));
     s_route[0] = ftl;
     ftl_op_route_set(s_route);
 
-    const ftl_topo_t       topo  = ftl->topo;
-    l2p_cache_t           *cache = ftl->cache;
-    const ftl_table_refs_t refs  = ftl->table_refs;
-    md_dir_cache_t        *md    = ftl->metadata_dir;
-    l2p_jrn_t             *jrn   = ftl->journal;
-    cp_handle_t           *cp    = ftl->cp_handle;
-    mig_handle_t          *mig   = ftl->mig_handle;
-    wb_handle_t           *wb    = ftl->wbuf;
+    const ftl_topo_s       topo  = ftl->topo;
+    l2p_cache_s           *cache = ftl->cache;
+    const ftl_table_refs_s refs  = ftl->table_refs;
+    md_dir_cache_s        *md    = ftl->metadata_dir;
+    l2p_jrn_s             *jrn   = ftl->journal;
+    cp_handle_s           *cp    = ftl->cp_handle;
+    mig_handle_s          *mig   = ftl->mig_handle;
+    wb_handle_s           *wb    = ftl->wbuf;
     BYTE                  *rr    = ftl->rr_page_scratch;
 
     const l2p_owner_fn_t owner_fn  = cache->owner_of_region;
     void                *owner_ctx = cache->owner_ctx;
 
-    ftl_storage_t st;
+    ftl_storage_s st;
 
     memset(&st, 0, sizeof(st));
     st.table_refs      = &refs;
@@ -305,7 +305,7 @@ void ftl_ut_reboot_from_media(void)
 
     ftl_ut_trace_detail("reboot: ftl_init ok (cp_waiting=%d cp_phase=%d)", (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
 
-    pfr_boot_result_t result;
+    pfr_boot_result_s result;
 
     memset(&result, 0, sizeof(result));
     munit_assert_int(pfr_boot_recovery(ftl, &result), ==, FTL_OK);
@@ -315,9 +315,9 @@ void ftl_ut_reboot_from_media(void)
 
 void ftl_ut_media_format(void)
 {
-    ftl_ctx_t   *ftl = ftl_ut_live();
-    wb_trigger_t trigger;
-    wb_status_t  status;
+    ftl_ctx_s   *ftl = ftl_ut_live();
+    wb_trigger_s trigger;
+    wb_status_s  status;
 
     ftl_ut_quiesce(ftl);
 
@@ -335,9 +335,9 @@ void ftl_ut_media_format(void)
     ftl_ut_trace_summary("media: formatted, free=%hu op=%hu", ftl->alloc.free_count, ftl->alloc.op_count[0]);
 }
 
-static bool ftl_ut_io_wait(DWORD timeout_ms)
+static BOOL ftl_ut_io_wait(DWORD timeout_ms)
 {
-    ftl_ctx_t  *ftl = ftl_ut_live();
+    ftl_ctx_s  *ftl = ftl_ut_live();
     const DWORD t0  = platform_now_ms();
 
     while (s_io_done == 0U)
@@ -353,10 +353,10 @@ static bool ftl_ut_io_wait(DWORD timeout_ms)
     return s_io_status == SSD_STATUS_OK;
 }
 
-bool ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
+BOOL ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
 {
-    ftl_ctx_t   *ftl = ftl_ut_live();
-    ftl_io_req_t req;
+    ftl_ctx_s   *ftl = ftl_ut_live();
+    ftl_io_req_s req;
 
     memset(&req, 0, sizeof(req));
     s_io_done   = 0U;
@@ -375,10 +375,10 @@ bool ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
     return ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
 }
 
-bool ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
+BOOL ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
 {
-    ftl_ctx_t   *ftl = ftl_ut_live();
-    ftl_io_req_t req;
+    ftl_ctx_s   *ftl = ftl_ut_live();
+    ftl_io_req_s req;
 
     memset(&req, 0, sizeof(req));
     s_io_done   = 0U;
@@ -397,9 +397,9 @@ bool ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
     return ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
 }
 
-bool ftl_ut_flush(void)
+BOOL ftl_ut_flush(void)
 {
-    ftl_ctx_t  *ftl = ftl_ut_live();
+    ftl_ctx_s  *ftl = ftl_ut_live();
     const DWORD t0  = platform_now_ms();
 
     ftl_flush_begin(ftl);
@@ -417,9 +417,9 @@ bool ftl_ut_flush(void)
     return true;
 }
 
-bool ftl_ut_trim(DWORD lba, DWORD count)
+BOOL ftl_ut_trim(DWORD lba, DWORD count)
 {
-    ftl_ctx_t  *ftl = ftl_ut_live();
+    ftl_ctx_s  *ftl = ftl_ut_live();
     const DWORD t0  = platform_now_ms();
 
     if (ftl_trim_begin(ftl, lba, count) != FTL_OK)
@@ -477,9 +477,9 @@ void ftl_ut_pure_teardown(void *fixture)
  * §4 用例结束不变量
  * ══════════════════════════════════════════════════════════════════════ */
 
-void ftl_ut_assert_clean(ftl_ctx_t *ftl)
+void ftl_ut_assert_clean(ftl_ctx_s *ftl)
 {
-    fc_resource_stats_t rs;
+    fc_resource_stats_s rs;
 
     munit_assert_not_null(ftl);
     munit_assert_not_null(ftl->cache);
@@ -496,7 +496,7 @@ void ftl_ut_assert_clean(ftl_ctx_t *ftl)
      * （只读快照；munit_errorf 会带出这行），否则只有一句 count!=0 无法定位。 */
     if (ftl_op_req_count() != 0U)
     {
-        fc_debug_state_t dbg;
+        fc_debug_state_s dbg;
 
         memset(&dbg, 0, sizeof(dbg));
         (void)fc_debug_state_get(&dbg);

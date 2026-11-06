@@ -5,7 +5,7 @@
  * journal.h — L2P 增量日志：页/条目格式 + 环形状态 + API
  *
  * 职责：
- *   定义 Journal 的磁盘/内存布局（页头、条目、环形状态 l2p_jrn_t）与对外 API。
+ *   定义 Journal 的磁盘/内存布局（页头、条目、环形状态 l2p_jrn_s）与对外 API。
  *   实现见 src/ftl/journal.c。
  *
  * 与 checkpoint.h 的分工：
@@ -35,7 +35,7 @@
  *   jrn_seq_ready + jrn_append_seq（顺序流映射页，见下）。
  */
 
-#include "allocator.h"  /* alc_t（持续擦除失败 → bbt_mark_bad） */
+#include "allocator.h"  /* alc_s（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* DWORD */
 #include "ftl_type.h"
 #include "l2p_cache.h"
@@ -51,7 +51,7 @@
 /* Journal 页大小 = 一页主区（由 nand_config.h 推出）*/
 #define JRN_PAGE_SIZE (PAGE_MAIN_SIZE)
 
-/* 「无预擦除块」哨兵（truncate 预擦除记账，见 l2p_jrn_t） */
+/* 「无预擦除块」哨兵（truncate 预擦除记账，见 l2p_jrn_s） */
 #define JRN_BLOCK_NONE (0xFFU)
 
 /* Journal Page Header
@@ -65,14 +65,14 @@
 #define JRN_MAGIC_SEG   (0x4745534AUL) /* "JSEG"：顺序流映射页（4B 条目，LBA = base_lba + 下标） */
 
 /* 一条 L2P 更新：lba 的映射从 old_pba 变为 new_pba（16B，packed 无填充） */
-typedef struct
+typedef struct L2P_JOURNAL_ENTRY_S
 {
     DWORD lba;      /* 逻辑地址 */
     DWORD old_pba;  /* 更新前物理地址。回放的块元数据增量用它做 valid_sub
                      * （SEG 页不落盘，回放时从 L2P 现读）；就地合并保留首条 */
     DWORD new_pba;  /* 更新后物理地址（回放按此写 L2P） */
     DWORD sequence; /* 全局单调序号（回放按 (page_seq, 页内下标) 定序） */
-} __attribute__((packed)) l2p_jrn_entry_t;
+} __attribute__((packed)) l2p_jrn_entry_s;
 
 /* 顺序流映射页的一条：只存 new_pba；lba = base_lba + 页内下标，
  * sequence = page_seq + 页内下标（两条坐标都由位置隐式给出，故不落盘）。 */
@@ -80,13 +80,13 @@ typedef DWORD l2p_jrn_seg_entry_t;
 
 /* 每页条目数 = (页主区 − 页头) ÷ 条目大小，向下取整。
  * ⚠ 必须推导：条目 16B 时 128 条 ⇒ 16 + 128×16 = 2064 > 2048，
- *   第 127 条会写出 page_buf 之外（踩到 l2p_jrn_t 的后续字段）。*/
-#define JRN_ENTRIES_PER_PAGE     ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_entry_t))
+ *   第 127 条会写出 page_buf 之外（踩到 l2p_jrn_s 的后续字段）。*/
+#define JRN_ENTRIES_PER_PAGE     ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_entry_s))
 #define JRN_SEG_ENTRIES_PER_PAGE ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / sizeof(l2p_jrn_seg_entry_t))
 
 /* 当前页缓冲的条目类型。页型由**本页第一条 append 的调用方**决定：
  * 顺序流的确认走 jrn_append_seq（顺序页），其余一律走 jrn_append（LBA 显式页）。 */
-typedef enum
+typedef enum JOURNAL_PAGE_KIND_E
 {
     JRN_PAGE_LBA = 0, /* 页头 JRN_MAGIC，16B 条目 */
     JRN_PAGE_SEG = 1, /* 页头 JRN_MAGIC_SEG，4B 条目（base_lba 由首条 append 落定） */
@@ -101,7 +101,7 @@ typedef enum
  * 单飞行：phase != JRN_IDLE 时不再起新页写（否则两条写会争同一个页地址）。
  * 页满且 job 忙 ⇒ **任何上下文都不做同步回退**；后续追加丢弃 + LOGE，
  * 整页留给 jrn_handle 下轮刷。需要不丢条目的调用者先用 jrn_reserve 预留。 */
-typedef enum
+typedef enum JOURNAL_PHASE_E
 {
     JRN_IDLE = 0, /* 无在飞 */
     JRN_WRITE,    /* 页写命令在飞 */
@@ -116,7 +116,7 @@ typedef enum
  *   md_compact_step_e / Checkpoint flush 步进结果共用一套名字
  *   （那两处的 FAILED 都要求 abort）。
  */
-typedef enum
+typedef enum JOURNAL_TRUNCATE_STEP_E
 {
     JRN_TRUNC_ALREADY     = 0U, /* 无需擦（该块已预擦过）*/
     JRN_TRUNC_NEEDS_ERASE = 1U, /* 需擦 out_addr / out_block */
@@ -124,28 +124,28 @@ typedef enum
 } jrn_truncate_step_e;
 
 /*
- * jrn_handle_t — 本模块的**执行状态**（FSM / 写游标 / 持久性失败观测）
+ * jrn_handle_s — 本模块的**执行状态**（FSM / 写游标 / 持久性失败观测）
  *
- * 归属：`l2p_jrn_t.handle`（per-instance）。共享账本（L2P cache / BST /
- * allocator）不在这里；需要它们时走 `l2p_jrn_t` 里的端口。
+ * 归属：`l2p_jrn_s.handle`（per-instance）。共享账本（L2P cache / BST /
+ * allocator）不在这里；需要它们时走 `l2p_jrn_s` 里的端口。
  *
  * 主流程**不读**本结构的 phase / 游标 / 失败位：只走查询接口
  * （docs/archive/ftl_module_contracts.md §4.2）。
  */
-typedef struct
+typedef struct JOURNAL_JOB_S
 {
     jrn_phase_e     phase;
-    bool            need_erase;
+    BOOL            need_erase;
     BYTE            target_block;
     BYTE            target_page;
     BYTE            from_block;
     BYTE            from_page;
     DWORD           waddr;
     BYTE            page_buf[JRN_PAGE_SIZE];
-    log_heartbeat_t hb;
-} jrn_job_t;
+    log_heartbeat_s hb;
+} jrn_job_s;
 
-typedef struct
+typedef struct JOURNAL_STATE_S
 {
     /* 当前页缓冲（跨 flush 保留，不是 job 瞬态） */
     BYTE page_buf[JRN_PAGE_SIZE];
@@ -160,19 +160,19 @@ typedef struct
     DWORD           merge_floor;
     BYTE            pre_erased_block;
 
-    bool checkpoint_needed;
-    bool emergency;
+    BOOL checkpoint_needed;
+    BOOL emergency;
 
     /* 环形块坏块策略 */
     BYTE bad_mask;
     BYTE erase_fail_count;
     BYTE erase_fail_block;
-    bool ring_full;
+    BOOL ring_full;
 
     /* 持久性失败观测 */
     DWORD write_fail_count;
     DWORD write_fail_seq;
-    bool  write_fail_pending;
+    BOOL  write_fail_pending;
 
     DWORD page_writes;
 
@@ -180,33 +180,33 @@ typedef struct
     DWORD persisted_seq;
     DWORD write_page_seq;
     WORD  write_entry_count;
-} jrn_state_t;
+} jrn_state_s;
 
-typedef struct
+typedef struct JOURNAL_HANDLE_S
 {
-    jrn_job_t   job;   /* 每 job 清零 */
-    jrn_state_t state; /* 跨 job 保留 */
-} jrn_handle_t;
+    jrn_job_s   job;   /* 每 job 清零 */
+    jrn_state_s state; /* 跨 job 保留 */
+} jrn_handle_s;
 
-typedef struct l2p_jrn_s
+typedef struct L2P_JOURNAL_S
 {
-    ftl_topo_t topo; /* 目标 NAND 芯片路由 */
+    ftl_topo_s topo; /* 目标 NAND 芯片路由 */
 
     /* 坏块查询/标坏只走 allocator 的 owner API（持续擦除失败 → 标坏）。
      * journal 不直接读写 allocator 的 BST/BBT 内部字段。 */
-    alc_t *alloc;
+    alc_s *alloc;
 
     /* 环形块候选列表（ring 下标 → 物理块号）。由 jrn_init 从
      * alloc->pools->jrn 复制；固定 JOURNAL_BLOCK_COUNT 项，缺额由 shared
      * metadata spare 补足（凑不齐则池构建失败，不进入运行期）。 */
     WORD blocks[JOURNAL_BLOCK_COUNT];
 
-    /* 异步刷页 job / 环形写游标 / 失败观测（见 jrn_handle_t） */
-    jrn_handle_t handle;
-} l2p_jrn_t;
+    /* 异步刷页 job / 环形写游标 / 失败观测（见 jrn_handle_s） */
+    jrn_handle_s handle;
+} l2p_jrn_s;
 
 /* Journal 环形页引用：位置 + 页序号 + 页型 + 条目数（jrn_page_scan_latest 出参） */
-typedef struct
+typedef struct JOURNAL_PAGE_REF_S
 {
     DWORD           page_seq;    /* 页头记录的**首条**条目序号 */
     DWORD           base_lba;    /* JRN_PAGE_SEG：本页首条条目的 LBA（其余页型为 0） */
@@ -214,7 +214,7 @@ typedef struct
     BYTE            page;        /* 块内页号 */
     WORD            entry_count; /* 本页条目数（顺序页可到 508 ⇒ WORD） */
     jrn_page_kind_e kind;        /* 页型（回放按页型解析条目） */
-} jrn_page_ref_t;
+} jrn_page_ref_s;
 
 /*
  * jrn_trigger_e — 本轮调用的意图
@@ -223,7 +223,7 @@ typedef struct
  * ERASE_ONLY  只补换块擦除，不起页写（must-run：新环形块没擦过就不能写，但
  *             host 饱和档要让路给前台）。
  */
-typedef enum
+typedef enum JOURNAL_TRIGGER_E
 {
     JRN_TRIGGER_FLUSH = 0,
     JRN_TRIGGER_ERASE_ONLY,
@@ -243,7 +243,7 @@ typedef enum
  */
 /* 回放记账失败的原因码：`ok=false` 是个布尔，分不出是哪一条守卫挂的。
  * 开机只打一次（错误路径，无 I/O），供定位「首次违反的是哪条不变量」。 */
-typedef enum
+typedef enum JOURNAL_REPLAY_FAIL_E
 {
     JRN_REPLAY_FAIL_NONE = 0,    /* 未失败 */
     JRN_REPLAY_FAIL_L2P_READ,    /* 顺序页取 old PBA 失败（l2p_read_sync）*/
@@ -253,16 +253,17 @@ typedef enum
     JRN_REPLAY_FAIL_VALID_SUB,   /* valid_count−1 守卫失败（越界 / 下溢）*/
 } jrn_replay_fail_e;
 
-typedef struct
+typedef struct JOURNAL_REPLAY_CONTEXT_S
 {
-    bool (*materialize)(void *ctx, DWORD pba);
-    void (*valid_add)(void *ctx, DWORD pba, bool *ok);
-    void (*valid_sub)(void *ctx, DWORD pba, bool *ok);
+    BOOL(*materialize)
+    (void *ctx, DWORD pba);
+    void (*valid_add)(void *ctx, DWORD pba, BOOL *ok);
+    void (*valid_sub)(void *ctx, DWORD pba, BOOL *ok);
     void *ctx; /* 调用者自持（PFR 传 &g_ftl[...]） */
-    bool  ok;
+    BOOL  ok;
     BYTE  fail_reason; /* jrn_replay_fail_e：**首次**失败的原因（后续不覆盖）*/
     DWORD fail_pba;    /* 首次失败时正在记账的 PBA（NAND_PBA_INVALID = 无）*/
-} jrn_replay_ctx_t;
+} jrn_replay_ctx_s;
 
 /**
  * @brief 初始化 Journal：记录拓扑、绑定 allocator、复位写指针与序号
@@ -271,7 +272,7 @@ typedef struct
  * @param topo    目标 NAND 芯片路由（ch/ce/lun）
  * @param alloc   allocator；取环形块候选池，擦除持续失败时经其 owner API 标坏
  */
-void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
+void jrn_init(l2p_jrn_s *journal, ftl_topo_s topo, alc_s *alloc);
 
 /**
  * @brief 只读扫环，取**最新页**（最大 page_seq）。
@@ -286,7 +287,7 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
  * @return true = 环非空（*out 有效）
  *         false = 环空（全部擦除 / 无有效页）
  */
-bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error);
+BOOL jrn_page_scan_latest(const l2p_jrn_s *journal, jrn_page_ref_s *out, BOOL *out_read_error);
 
 /**
  * @brief 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
@@ -308,7 +309,7 @@ bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *o
  * @param floor_sequence 序号下限 = Checkpoint 的 jrn_sequence_get（「下一个待分配」），
  *        兜住「环空」与「环内最新页序号反而落后」两种情形（0 会被抬到 1）
  */
-void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence);
+void jrn_resume(l2p_jrn_s *journal, const jrn_page_ref_s *latest, DWORD floor_sequence);
 
 /**
  * @brief 非阻塞预留当前页的 entries 个槽位（16 B 通用页的调用者用）。
@@ -326,7 +327,7 @@ void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_se
  * @return true = 已预留
  *         false = 背压 / 页型不符（已起刷页）
  */
-bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
+BOOL jrn_reserve(l2p_jrn_s *journal, WORD entries);
 
 /**
  * @brief 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
@@ -342,7 +343,7 @@ bool jrn_reserve(l2p_jrn_t *journal, WORD entries);
  *               GC/WL / TRIM / wbuf 写确认先用 jrn_reserve 预留，故其页满分支结构性
  *               不可达；**cache 顺序写确认不走本函数**（走 jrn_append_seq）。
  */
-bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
+BOOL jrn_append(l2p_jrn_s *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
 
 /* ── 顺序流映射页（JRN_PAGE_SEG；docs/design/ftl_design.md §3.16 / §3.7.3）──
  *
@@ -371,9 +372,9 @@ bool jrn_append(l2p_jrn_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
  *       直接在同一页继续追加。这样一张 JSEG 页可以覆盖多条 host 命令的连续写入
  *       （最多 63 pair ≈ 252 KiB），元数据落盘频率按页而不是按命令。
  *       否则旧页只起**异步**刷页（jrn_freeze），刷出后页缓冲归零并切到新顺序页。
- *       基准 LBA 仍由首条 append 落定（见 jrn_handle_t）。
+ *       基准 LBA 仍由首条 append 落定（见 jrn_handle_s）。
  */
-bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need);
+BOOL jrn_seq_begin(l2p_jrn_s *journal, DWORD lba, WORD need);
 
 /**
  * @brief 当前顺序页还能追加多少条（非顺序页 / 页未打开 = 0）。
@@ -383,7 +384,7 @@ bool jrn_seq_begin(l2p_jrn_t *journal, DWORD lba, WORD need);
  * @param journal Journal
  * @return 剩余条目数（0..JRN_SEG_ENTRIES_PER_PAGE）
  */
-WORD jrn_seq_room(const l2p_jrn_t *journal);
+WORD jrn_seq_room(const l2p_jrn_s *journal);
 
 /**
  * @brief 本次开机已提交的 Journal 页写次数（观测：页写放大 / 断点频率）。
@@ -391,7 +392,7 @@ WORD jrn_seq_room(const l2p_jrn_t *journal);
  * @param journal Journal
  * @return 页写命令累计提交数
  */
-static inline DWORD jrn_page_writes(const l2p_jrn_t *journal)
+static inline DWORD jrn_page_writes(const l2p_jrn_s *journal)
 {
     return journal->handle.state.page_writes;
 }
@@ -408,7 +409,7 @@ static inline DWORD jrn_page_writes(const l2p_jrn_t *journal)
  *       **不能**做隐式坐标校验（那会把每条有未确认页的窗口误判成断裂）。
  *       坐标校验在确认路径的 jrn_seq_ready 做。
  */
-bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries);
+BOOL jrn_seq_reserve(l2p_jrn_s *journal, WORD entries);
 
 /**
  * @brief 顺序页确认前检查：页型 / 隐式坐标 / 容量（host 写确认路径动账前调用）。
@@ -422,7 +423,7 @@ bool jrn_seq_reserve(l2p_jrn_t *journal, WORD entries);
  * @note 坐标与容量必须在追加**之前**判掉：部分追加后再失败会让重试从页首重发，
  *       与隐式下标冲突。确认按提交顺序到达，故 current_entry 就是本批的位置。
  */
-bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries);
+BOOL jrn_seq_ready(l2p_jrn_s *journal, DWORD lba, WORD entries);
 
 /**
  * @brief 顺序页追加一条：lba 必须等于 current 页的 base_lba + 已追加条数。
@@ -436,7 +437,7 @@ bool jrn_seq_ready(l2p_jrn_t *journal, DWORD lba, WORD entries);
  * @return true = 已追加
  *         false = 环不可用 / 页型或隐式坐标不符（调用者待入账，由刷页后重试恢复）
  */
-bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
+BOOL jrn_append_seq(l2p_jrn_s *journal, DWORD lba, DWORD new_pba);
 
 /* ── 模块 handle（typed 入口，docs/archive/ftl_module_contracts.md §3.3 / §4.2）── */
 
@@ -446,7 +447,7 @@ bool jrn_append_seq(l2p_jrn_t *journal, DWORD lba, DWORD new_pba);
  * @param journal  Journal；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger  本轮意图（NULL 视作 FLUSH）
  */
-void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger);
+void jrn_handle(l2p_jrn_s *journal, const jrn_trigger_e *trigger);
 
 /* ── 查询（替代外部直读 handle 字段）── */
 
@@ -457,7 +458,7 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger);
  * @return true = phase 为 JRN_IDLE
  *         false = 页写或换块擦除在飞
  */
-static inline bool jrn_is_idle(const l2p_jrn_t *journal)
+static inline BOOL jrn_is_idle(const l2p_jrn_s *journal)
 {
     return journal->handle.job.phase == JRN_IDLE;
 }
@@ -468,7 +469,7 @@ static inline bool jrn_is_idle(const l2p_jrn_t *journal)
  * @param journal Journal
  * @return sequence_counter 当前值
  */
-static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
+static inline DWORD jrn_sequence_get(const l2p_jrn_s *journal)
 {
     return journal->handle.state.sequence_counter;
 }
@@ -483,7 +484,7 @@ static inline DWORD jrn_sequence_get(const l2p_jrn_t *journal)
  * @param journal Journal
  * @return 已落盘条目的上界：序号 < 该值的条目均已持久化
  */
-static inline DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
+static inline DWORD jrn_persisted_seq(const l2p_jrn_s *journal)
 {
     return journal->handle.state.persisted_seq;
 }
@@ -505,7 +506,7 @@ static inline DWORD jrn_persisted_seq(const l2p_jrn_t *journal)
  * @param b 序号
  * @return true = a 比 b 新
  */
-static inline bool jrn_seq_after(DWORD a, DWORD b)
+static inline BOOL jrn_seq_after(DWORD a, DWORD b)
 {
     return ((int32_t)(a - b) > 0);
 }
@@ -517,7 +518,7 @@ static inline bool jrn_seq_after(DWORD a, DWORD b)
  * @param b 序号
  * @return true = a >= b（串行号语义）
  */
-static inline bool jrn_seq_ge(DWORD a, DWORD b)
+static inline BOOL jrn_seq_ge(DWORD a, DWORD b)
 {
     return ((int32_t)(a - b) >= 0);
 }
@@ -528,7 +529,7 @@ static inline bool jrn_seq_ge(DWORD a, DWORD b)
  * @param journal Journal
  * @return 0..100（全局已用条目 / 全环条目容量）
  */
-BYTE jrn_watermark_get(const l2p_jrn_t *journal);
+BYTE jrn_watermark_get(const l2p_jrn_s *journal);
 
 /**
  * @brief 持久性失败 pending 是否置位。
@@ -537,7 +538,7 @@ BYTE jrn_watermark_get(const l2p_jrn_t *journal);
  * @return true = 有条目已丢，等 Checkpoint 兜底
  *         false = 无持久性失败
  */
-static inline bool jrn_has_write_failure(const l2p_jrn_t *journal)
+static inline BOOL jrn_has_write_failure(const l2p_jrn_s *journal)
 {
     return journal->handle.state.write_fail_pending;
 }
@@ -551,7 +552,7 @@ static inline bool jrn_has_write_failure(const l2p_jrn_t *journal)
  * @param journal        Journal
  * @param cp_journal_seq 本次 CP 的 journal 水位（起点快照）
  */
-void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
+void jrn_write_failure_clear(l2p_jrn_s *journal, DWORD cp_journal_seq);
 
 /**
  * @brief 页缓冲里是否有未落盘条目。
@@ -560,7 +561,7 @@ void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
  * @return true = current_entry 非 0
  *         false = 页缓冲为空
  */
-static inline bool jrn_has_pending_entries(const l2p_jrn_t *journal)
+static inline BOOL jrn_has_pending_entries(const l2p_jrn_s *journal)
 {
     return journal->handle.state.current_entry != 0U;
 }
@@ -572,7 +573,7 @@ static inline bool jrn_has_pending_entries(const l2p_jrn_t *journal)
  * @return true = need_erase 置位
  *         false = 无待偿擦除
  */
-static inline bool jrn_has_erase_pending(const l2p_jrn_t *journal)
+static inline BOOL jrn_has_erase_pending(const l2p_jrn_s *journal)
 {
     return journal->handle.job.need_erase;
 }
@@ -584,7 +585,7 @@ static inline bool jrn_has_erase_pending(const l2p_jrn_t *journal)
  * @return true = checkpoint_needed 置位
  *         false = 未置位
  */
-static inline bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
+static inline BOOL jrn_needs_checkpoint(const l2p_jrn_s *journal)
 {
     return journal->handle.state.checkpoint_needed;
 }
@@ -596,7 +597,7 @@ static inline bool jrn_needs_checkpoint(const l2p_jrn_t *journal)
  * @return true = emergency 置位
  *         false = 未置位
  */
-static inline bool jrn_is_emergency(const l2p_jrn_t *journal)
+static inline BOOL jrn_is_emergency(const l2p_jrn_s *journal)
 {
     return journal->handle.state.emergency;
 }
@@ -607,7 +608,7 @@ static inline bool jrn_is_emergency(const l2p_jrn_t *journal)
  * @param journal  Journal
  * @param sequence 新的 merge_floor；sequence 小于它的旧条目不得被同 LBA 原地合并
  */
-void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence);
+void jrn_merge_floor_set(l2p_jrn_s *journal, DWORD sequence);
 
 /**
  * @brief 按当前写位置重算并置位 CP 水位标志。
@@ -616,7 +617,7 @@ void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence);
  *
  * @param journal Journal
  */
-void jrn_watermark_update(l2p_jrn_t *journal);
+void jrn_watermark_update(l2p_jrn_s *journal);
 
 /**
  * @brief 强制请求一次 Checkpoint（元数据失块后的恢复动作）
@@ -625,7 +626,7 @@ void jrn_watermark_update(l2p_jrn_t *journal);
  *
  * @param journal Journal
  */
-void jrn_checkpoint_request(l2p_jrn_t *journal);
+void jrn_checkpoint_request(l2p_jrn_s *journal);
 
 /**
  * @brief 全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
@@ -645,7 +646,7 @@ void jrn_checkpoint_request(l2p_jrn_t *journal);
  * @note out_entries **不能**由 journal 的 RAM 写指针反推：末尾 jrn_resume 把落点放到
  *       最新页之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
  */
-ftl_status_e jrn_replay(l2p_jrn_t *journal, l2p_cache_t *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_t *block_ctx);
+ftl_status_e jrn_replay(l2p_jrn_s *journal, l2p_cache_s *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_s *block_ctx);
 
 /**
  * @brief 最近一次 jrn_replay 命中「降级 L2P region」的条目数（只读诊断 / 启动结果）。
@@ -677,7 +678,7 @@ DWORD jrn_replay_degraded_entries(void);
  *         JRN_TRUNC_ALREADY = 无需擦（水位 OK，该块已预擦过）；
  *         JRN_TRUNC_NO_TRUNCATE = 不截断（水位不满足）——**调用者不得据此复位水位标志**
  */
-jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, DWORD *out_addr, BYTE *out_block);
+jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_s *journal, DWORD up_to_sequence, DWORD *out_addr, BYTE *out_block);
 
 /**
  * @brief 截断 Journal 的**第二步**：记账 + 复位水位标志
@@ -694,6 +695,6 @@ jrn_truncate_step_e jrn_truncate_plan(l2p_jrn_t *journal, DWORD up_to_sequence, 
  * @param erased_block 刚擦成功的环形块号（jrn_truncate_plan 的回传值）；
  *                     JRN_BLOCK_NONE = 本次未擦
  */
-void jrn_truncate_commit(l2p_jrn_t *journal, BYTE erased_block);
+void jrn_truncate_commit(l2p_jrn_s *journal, BYTE erased_block);
 
 #endif /* FTL_JOURNAL_H */

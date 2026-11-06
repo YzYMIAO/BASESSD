@@ -15,7 +15,7 @@
 #include "log.h"
 
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
-ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
 
 /**
  * @brief 子请求完成回调：聚合状态并递减未完成 run 数。
@@ -23,11 +23,11 @@ ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
  * 由组的完成通知（pend_group_maybe_complete）调用，一次 host run 恰好一次；
  * 归零时把 agg_status 写回 completion_status 并置 complete_flag。
  *
- * @param ctx 父请求（ssd_request_t *）
+ * @param ctx 父请求（ssd_req_s *）
  */
 static void on_sub_complete(void *ctx)
 {
-    ssd_request_t *req = (ssd_request_t *)ctx;
+    ssd_req_s *req = (ssd_req_s *)ctx;
 
     /* 聚合状态：首个非 OK 胜出。FTL 在回调前已把本 run 的状态写进
      * completion_status；后续成功 run 会覆盖它，所以必须在这里锁存。 */
@@ -60,9 +60,9 @@ static void on_sub_complete(void *ctx)
  * @param lba_limit  上界（开区间）
  * @return 本 run 的结束 LBA（> lba，<= lba_limit）
  */
-QWORD ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit)
+QWORD ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit)
 {
-    ftl_ctx_t *ftl = ssd_controller_route(controller, lba);
+    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
     QWORD      end = lba + 1U;
 
     /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
@@ -98,7 +98,7 @@ QWORD ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_
  * @param request    主机请求
  * @return run 段数（>0）
  */
-static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *request)
+static DWORD ssd_split_count(ssd_ctl_s *controller, ssd_req_s *request)
 {
     QWORD lba     = request->start_lba;
     QWORD lba_end = request->start_lba + request->block_count;
@@ -126,7 +126,7 @@ static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *reques
  *         SSD_STATUS_NOT_SUPPORTED    opcode 不是 READ/WRITE
  *         SSD_STATUS_NO_SPACE / IO_ERROR 第一个 run 就提交失败（无在飞）
  */
-ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
+ssd_status_e ssd_request_split(ssd_ctl_s *controller, ssd_req_s *request)
 {
     QWORD        lba;
     QWORD        lba_end;
@@ -172,7 +172,7 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
     {
         QWORD        run_end = ssd_controller_run_end(controller, lba, lba_end);
         DWORD        run_len = (run_end - lba);
-        ftl_ctx_t   *ftl     = ssd_controller_route(controller, lba);
+        ftl_ctx_s   *ftl     = ssd_controller_route(controller, lba);
         ftl_status_e st;
 
         /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */

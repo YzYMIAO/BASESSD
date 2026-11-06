@@ -49,7 +49,7 @@
  *
  * @return true = 两类资源都够；false = 至少一类不足（调用者应拒绝或降级）。
  */
-static bool cache_batch_budget_ok(const ftl_ctx_t *ftl, DWORD n)
+static BOOL cache_batch_budget_ok(const ftl_ctx_s *ftl, DWORD n)
 {
     ASSERT(ftl != NULL);
 
@@ -67,7 +67,7 @@ static bool cache_batch_budget_ok(const ftl_ctx_t *ftl, DWORD n)
  * @param remain 本组剩余 LBA 数（走到这里时 = 请求结束 - lba）
  * @return 命令结束 LBA（exclusive）
  */
-static DWORD cache_batch_cmd_end(const pend_group_t *g, DWORD lba, DWORD remain)
+static DWORD cache_batch_cmd_end(const pend_group_s *g, DWORD lba, DWORD remain)
 {
     return lba + remain + g->cmd_remaining;
 }
@@ -75,23 +75,23 @@ static DWORD cache_batch_cmd_end(const pend_group_t *g, DWORD lba, DWORD remain)
 /* ── cache read ── */
 
 // cache read 一次调用的公共参数；避免内部 helper 逐个传 6 个实参。
-typedef struct
+typedef struct CACHE_READ_REQUEST_S
 {
-    ftl_ctx_t *ftl;
+    ftl_ctx_s *ftl;
     WORD       gi;
     DWORD      lba;
     void      *buffer;
     DWORD      max_pairs; /* 本窗口上限（min(remain, 资源)） */
     DWORD     *used;
-} cache_read_req_t;
+} cache_read_req_s;
 
 // 构建中的命令/pending 集合；只在 cache_read_submit 内使用。
-typedef struct
+typedef struct CACHE_READ_BUILD_S
 {
-    fc_command_t *cmds[FTL_CACHE_READ_MAX_PAIRS];
-    pend_req_t   *pends[FTL_CACHE_READ_MAX_PAIRS];
-    DWORD         n_pairs;
-} cache_read_build_t;
+    fc_cmd_s   *cmds[FTL_CACHE_READ_MAX_PAIRS];
+    pend_req_s *pends[FTL_CACHE_READ_MAX_PAIRS];
+    DWORD       n_pairs;
+} cache_read_build_s;
 
 /**
  * @brief 校验一个 pair 的 L2P 映射、plane/拓扑与页内一致性。
@@ -104,7 +104,7 @@ typedef struct
  * @return true = 该 pair 可整对 cache 读；false = 不可（wbuf 未落盘 / 未映射 /
  *         拓扑不符 / 非同一页）。
  */
-static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_pba[PLANE_NUM], bool *defer)
+static BOOL cache_read_probe_pair(const ftl_ctx_s *ftl, DWORD base, DWORD pair_pba[PLANE_NUM], BOOL *defer)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -138,15 +138,15 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
             return false;
         }
 
-        const bool pba_ok = (st == FTL_OK) && (p != NAND_PBA_INVALID) && pba_is_valid(p);
+        const BOOL pba_ok = (st == FTL_OK) && (p != NAND_PBA_INVALID) && pba_is_valid(p);
         if (pba_ok == false)
         {
             return false;
         }
 
         const BYTE pl         = pba_to_plane(p);
-        const bool same_plane = (pl < PLANE_NUM) && (pl == ftl_lba_plane(l));
-        const bool same_topo  = (pba_to_ch(p) == ftl->topo.ch) && (pba_to_ce(p) == ftl->topo.ce) && (pba_to_lun(p) == ftl->topo.lun);
+        const BOOL same_plane = (pl < PLANE_NUM) && (pl == ftl_lba_plane(l));
+        const BOOL same_topo  = (pba_to_ch(p) == ftl->topo.ch) && (pba_to_ce(p) == ftl->topo.ce) && (pba_to_lun(p) == ftl->topo.lun);
 
         if ((same_plane == false) || (same_topo == false))
         {
@@ -155,8 +155,8 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
 
         if (pair_pba[pl] != NAND_PBA_INVALID)
         {
-            const bool same_page  = pba_same_page(pair_pba[pl], p);
-            const bool same_block = (pba_to_block(pair_pba[pl]) == pba_to_block(p));
+            const BOOL same_page  = pba_same_page(pair_pba[pl], p);
+            const BOOL same_block = (pba_to_block(pair_pba[pl]) == pba_to_block(p));
 
             if ((same_page == false) || (same_block == false))
             {
@@ -180,7 +180,7 @@ static bool cache_read_probe_pair(const ftl_ctx_t *ftl, DWORD base, DWORD pair_p
  * @note 序列打开时不能调 `l2p_read`：它起的加载读会被 FTL 门控挡住（同通道门控），
  *       本函数因此只查驻留状态。驻留 = CLEAN/DIRTY/FLUSHING，`l2p_read` 不会再起加载。
  */
-static bool cache_read_pair_resident(const ftl_ctx_t *ftl, DWORD base)
+static BOOL cache_read_pair_resident(const ftl_ctx_s *ftl, DWORD base)
 {
     for (BYTE k = 0U; k < FTL_LBA_PER_PAIR; k++)
     {
@@ -208,7 +208,7 @@ static bool cache_read_pair_resident(const ftl_ctx_t *ftl, DWORD base)
  *
  * @return true = 可以用 SEQ(46h) 继续；false = 必须在上一对用 LAST(47h) 收尾。
  */
-static bool cache_read_pair_contiguous(const DWORD prev[PLANE_NUM], const DWORD next[PLANE_NUM])
+static BOOL cache_read_pair_contiguous(const DWORD prev[PLANE_NUM], const DWORD next[PLANE_NUM])
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -247,7 +247,7 @@ static bool cache_read_pair_contiguous(const DWORD prev[PLANE_NUM], const DWORD 
  * @note lookahead 只用纯驻留探针 `l2p_is_resident()`；**不能** `l2p_read`——
  * 序列打开时它起的加载读会被 FTL 门控挡住，造成死锁。
  */
-static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool *defer, bool *run_ended)
+static DWORD cache_read_collect(const cache_read_req_s *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL *defer, BOOL *run_ended)
 {
     const DWORD max_pairs = req->max_pairs;
 
@@ -268,7 +268,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
 
         // 两 plane 必须都有效且页号相同：这是 multi-plane 命令的器件约束
         // （ONFI 3.2 / Micron datasheet 要求同一页地址），不是本仓的特化。
-        bool complete = true;
+        BOOL complete = true;
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
             if (pair_pba[p] == NAND_PBA_INVALID)
@@ -324,7 +324,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
         else
         {
             DWORD look_pba[PLANE_NUM];
-            bool  look_defer = false;
+            BOOL  look_defer = false;
 
             if (cache_read_probe_pair(req->ftl, next_base, look_pba, &look_defer) == false)
             {
@@ -351,7 +351,7 @@ static DWORD cache_read_collect(const cache_read_req_t *req, DWORD pba[FTL_CACHE
  *
  * @return true = 全部命令与 pending 建好；false = 建链或 pending 不足，已回滚。
  */
-static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool start_seq, bool end_seq)
+static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL start_seq, BOOL end_seq)
 {
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
@@ -362,7 +362,7 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
             goto build_fail;
         }
 
-        fc_command_t *cmd = b->cmds[i];
+        fc_cmd_s *cmd = b->cmds[i];
 
         // 单页尾（续序列的最后一个 pair）也走 LAST；新序列不允许单页（调用者保证 ≥2）。
         if ((i == (b->n_pairs - 1U)) && (end_seq == true))
@@ -404,7 +404,7 @@ static bool cache_read_build(cache_read_build_t *b, const cache_read_req_t *req,
             goto build_fail;
         }
 
-        pend_req_t *pending = b->pends[i];
+        pend_req_s *pending = b->pends[i];
 
         pending->owners     = ftl_group_bit(req->gi);
         pending->op         = PENDING_OP_READ_CACHE;
@@ -445,9 +445,9 @@ build_fail:
  * @return FTL_CACHE_READ_OK 整批已提交；FTL_CACHE_READ_AGAIN 建链失败或整批入队遇
  *         瞬态背压（全批回滚，可下轮重试）；FTL_CACHE_READ_ERROR 永久提交失败。
  */
-static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DWORD n_pairs, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], bool start_seq, bool end_seq)
+static ftl_cache_read_result_e cache_read_submit(const cache_read_req_s *req, DWORD n_pairs, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL start_seq, BOOL end_seq)
 {
-    cache_read_build_t b;
+    cache_read_build_s b;
 
     memset(&b, 0, sizeof(b));
     b.n_pairs = n_pairs;
@@ -467,7 +467,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
     // 整条 run 原子入队：FC 的 chain 机制要求链成员在同一队列**连续**入队；
     // 逐条提交在资源不足时会留下半条链（前半已入队、后半没进），链语义被破坏。
     // 序列所有者通道：门控对本批旁路（其他提交会被延迟并置 break_requested）。
-    const bool owner_prev = req->ftl->cache_stream.seq.owner_submit;
+    const BOOL owner_prev = req->ftl->cache_stream.seq.owner_submit;
 
     req->ftl->cache_stream.seq.owner_submit = true;
     const ftl_status_e submit_status        = ftl_op_submit_batch(b.cmds, b.n_pairs, FTL_OP_HOST_IO, NULL);
@@ -509,7 +509,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_t *req, DW
  * @param used   输出：消费的 LBA 数
  * @return OK / DECLINED / AGAIN / ERROR
  */
-ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
+ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);
     ASSERT(used != NULL);
@@ -524,8 +524,8 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         return FTL_CACHE_READ_DECLINED;
     }
 
-    const pend_group_t *g   = &ftl->pending.groups[gi];
-    ftl_cache_seq_t    *seq = &ftl->cache_stream.seq;
+    const pend_group_s *g   = &ftl->pending.groups[gi];
+    ftl_cache_seq_s    *seq = &ftl->cache_stream.seq;
 
     // 续序列：方向与接续点必须一致（host 传输段边界不是断点）。
     // 上下文不同 / 续接点不一致（乱序、空洞）⇒ 这条序列已不可能由本组续；若仍
@@ -552,7 +552,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     const DWORD cmd_end = cache_batch_cmd_end(g, lba, remain);
 
     // 新序列至少 2 个 pair；**续序列允许 1 个 pair 的尾巴**（单条 LAST 收尾）。
-    const bool starting = (seq->active == false);
+    const BOOL starting = (seq->active == false);
 
     // 同写路径：起点未 pair 对齐的 host 段不开序列（跨段续接点必然对不上）。
     if ((starting == true) && (ftl_lba_is_pair_aligned((DWORD)g->lba) == false))
@@ -646,7 +646,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         return FTL_CACHE_READ_DECLINED;
     }
 
-    cache_read_req_t req;
+    cache_read_req_s req;
 
     req.ftl       = ftl;
     req.gi        = gi;
@@ -656,8 +656,8 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     req.used      = used;
 
     DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM];
-    bool  defer     = false;
-    bool  run_ended = false;
+    BOOL  defer     = false;
+    BOOL  run_ended = false;
     DWORD collected = cache_read_collect(&req, pba, &defer, &run_ended);
 
     if (collected < min_pairs)
@@ -684,7 +684,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
     const DWORD tail_lbas    = cmd_end - after;
     // 命令边界**不是**断点：序列跨 host 命令保持打开（START 只在 LBA 流头）。
     // 断点 = 物理/region 不连续 / D4 / 命令尾不足一对。
-    bool end_seq             = ((run_ended == true) || (seq->break_requested == true) ||
+    BOOL end_seq             = ((run_ended == true) || (seq->break_requested == true) ||
                     ((remain_after > 0U) && (remain_after < FTL_LBA_PER_PAIR)) ||
                     ((tail_lbas > 0U) && (tail_lbas < FTL_LBA_PER_PAIR)));
 
@@ -713,7 +713,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
         end_seq = true;
     }
 
-    const bool                    start_seq = (starting == true);
+    const BOOL                    start_seq = (starting == true);
     const ftl_cache_read_result_e r         = cache_read_submit(&req, n, pba, start_seq, end_seq);
 
     if (r == FTL_CACHE_READ_OK)
@@ -759,15 +759,15 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
  */
 
 // 一个写窗口的构建上下文；只在 ftl_cache_write_try 内使用。
-typedef struct
+typedef struct CACHE_WR_BUILD_S
 {
-    fc_command_t *cmds[FTL_CACHE_WRITE_MAX_PAGES];
-    DWORD         pba[FTL_CACHE_WRITE_MAX_PAGES][PLANE_NUM];
-    BYTE          pend_idx[FTL_CACHE_WRITE_MAX_PAGES];
-    BYTE          n_cmd;
-    BYTE          n_alloc;
-    BYTE          n_pend;
-} cache_wr_build_t;
+    fc_cmd_s *cmds[FTL_CACHE_WRITE_MAX_PAGES];
+    DWORD     pba[FTL_CACHE_WRITE_MAX_PAGES][PLANE_NUM];
+    BYTE      pend_idx[FTL_CACHE_WRITE_MAX_PAGES];
+    BYTE      n_cmd;
+    BYTE      n_alloc;
+    BYTE      n_pend;
+} cache_wr_build_s;
 
 /**
  * @brief 撤销尚未提交的写窗口：释放命令/pending + 归还已分配的页对。
@@ -775,7 +775,7 @@ typedef struct
  * @param ftl 实例。
  * @param b   构建上下文（按 n_cmd / n_pend / n_alloc 逐项回收）。
  */
-static void cache_wr_discard(ftl_ctx_t *ftl, cache_wr_build_t *b)
+static void cache_wr_discard(ftl_ctx_s *ftl, cache_wr_build_s *b)
 {
     for (BYTE i = 0U; i < b->n_cmd; i++)
     {
@@ -811,7 +811,7 @@ static void cache_wr_discard(ftl_ctx_t *ftl, cache_wr_build_t *b)
  *
  * @return FTL_OK；FTL_AGAIN（页对 / pending / 资源不足，已回滚）；其他建链错误。
  */
-static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const void *buffer, BYTE n_pages, bool start_seq, bool end_seq, cache_wr_build_t *b)
+static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const void *buffer, BYTE n_pages, BOOL start_seq, BOOL end_seq, cache_wr_build_s *b)
 {
     for (BYTE j = 0U; j < n_pages; j++)
     {
@@ -840,7 +840,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
 
         const DWORD           page_lba = lba + ((DWORD)j * FTL_LBA_PER_PAIR);
         const BYTE           *src      = (const BYTE *)buffer + ((DWORD)j * FTL_LBA_PER_PAIR * FTL_IU_BYTES);
-        const ftl_page_cfg_t *cfg      = FTL_PAGE_CFG_DATA(ftl_lba_page(page_lba));
+        const ftl_page_cfg_s *cfg      = FTL_PAGE_CFG_DATA(ftl_lba_page(page_lba));
 
         BYTE              op;
         pend_cache_role_e role;
@@ -876,7 +876,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
         // 窗口只是一条更长序列的一段：断点末条 END，否则 MORE。
         b->cmds[j]->config.chain = (j + 1U < n_pages) ? FC_CHAIN_MORE : ((end_seq == true) ? FC_CHAIN_END : FC_CHAIN_MORE);
 
-        pend_req_t *pending = pend_alloc(&ftl->pending, ftl_cmd_id(b->cmds[j]));
+        pend_req_s *pending = pend_alloc(&ftl->pending, ftl_cmd_id(b->cmds[j]));
 
         if (pending == NULL)
         {
@@ -917,7 +917,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
  * @param used   输出：消费的 LBA 数
  * @return OK / DECLINED / AGAIN / ERROR
  */
-ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
+ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);
     ASSERT(used != NULL);
@@ -933,8 +933,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         return FTL_CACHE_WRITE_DECLINED;
     }
 
-    const pend_group_t *g   = &ftl->pending.groups[gi];
-    ftl_cache_seq_t    *seq = &ftl->cache_stream.seq;
+    const pend_group_s *g   = &ftl->pending.groups[gi];
+    ftl_cache_seq_s    *seq = &ftl->cache_stream.seq;
 
     // 本 host 命令的结束（= 本请求之后仍属于同一命令的 LBA 也在内）：只用于 END 落点。
     const DWORD cmd_end = cache_batch_cmd_end(g, lba, remain);
@@ -962,7 +962,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         return FTL_CACHE_WRITE_DECLINED; /* FTL 顺序流检测器未判为顺序写 */
     }
 
-    const bool starting = (seq->active == false);
+    const BOOL starting = (seq->active == false);
 
     // 序列只在 **pair 对齐的 host 段**上开启：段长（16 KiB = 32 LBA）是 pair 的整数倍，
     // 命令起点的对齐相位整条命令不变。起点未对齐时，序列的 next_lba（pair 对齐）与
@@ -1160,8 +1160,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
     const DWORD after     = lba + (n_pages * FTL_LBA_PER_PAIR);
     const DWORD tail_lbas = cmd_end - after;
     // 页满断点：本窗口 + 在飞页之后，顺序页再也放不下一个 pair ⇒ 主动 END。
-    const bool page_end   = ((page_usable - (n_pages * FTL_LBA_PER_PAIR)) < FTL_LBA_PER_PAIR);
-    bool       end_seq    = ((seq->break_requested == true) || (page_end == true) ||
+    const BOOL page_end   = ((page_usable - (n_pages * FTL_LBA_PER_PAIR)) < FTL_LBA_PER_PAIR);
+    BOOL       end_seq    = ((seq->break_requested == true) || (page_end == true) ||
                     ((tail_lbas > 0U) && (tail_lbas < FTL_LBA_PER_PAIR)));
 
     // 跨 block 续写准入：本窗口吃完当前 SB 时，下一个窗口必须开得出新块。否则序列会停在
@@ -1194,7 +1194,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         }
     }
 
-    cache_wr_build_t b;
+    cache_wr_build_s b;
 
     memset(&b, 0, sizeof(b));
 
@@ -1212,7 +1212,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba,
         ftl->cache_stream.seq.wr_inflight = (BYTE)(ftl->cache_stream.seq.wr_inflight + b.n_pend);
 
         // 序列所有者通道：门控对本批旁路（其他提交会被延迟并置 break_requested）。
-        const bool owner_prev = ftl->cache_stream.seq.owner_submit;
+        const BOOL owner_prev = ftl->cache_stream.seq.owner_submit;
 
         ftl->cache_stream.seq.owner_submit = true;
         st                                 = ftl_op_submit_batch(b.cmds, b.n_cmd, FTL_OP_HOST_IO, NULL);

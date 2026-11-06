@@ -21,7 +21,7 @@ static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
  * @param       wtime: 等待时间
  * @retval      0, 等待成功; 1, 等待失败.
  */
-BYTE qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
+func_status_e qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
 {
     BYTE flagsta = 0;
 
@@ -52,7 +52,7 @@ BYTE qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
  * @param       无
  * @retval      0, 成功; 1, 失败.
  */
-BYTE qspi_port_init(void)
+func_status_e qspi_port_init(void)
 {
     g_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
     g_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
@@ -148,7 +148,7 @@ void HAL_QSPI_MspInit(QSPI_HandleTypeDef *hqspi)
  * @param       dmcycle: 空指令周期数
  * @retval      无
  */
-BYTE qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
+func_status_e qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
 {
     QSPI_CommandTypeDef qspi_command_handle;
 
@@ -241,7 +241,7 @@ BYTE qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
  * @retval      0, 成功; 其他, 错误代码.
  * @note        空参检查在共享 src/platform/qspi.c。
  */
-BYTE qspi_port_receive(BYTE *buf, DWORD datalen)
+func_status_e qspi_port_receive(BYTE *buf, DWORD datalen)
 {
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Receive(&g_qspi_handle, buf, 5000) == HAL_OK)
@@ -261,7 +261,7 @@ BYTE qspi_port_receive(BYTE *buf, DWORD datalen)
  * @retval      0, 成功; 其他, 错误代码.
  * @note        空参检查在共享 src/platform/qspi.c。
  */
-BYTE qspi_port_transmit(BYTE *buf, DWORD datalen)
+func_status_e qspi_port_transmit(BYTE *buf, DWORD datalen)
 {
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Transmit(&g_qspi_handle, buf, 5000) == HAL_OK)

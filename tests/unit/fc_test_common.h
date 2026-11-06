@@ -13,9 +13,9 @@
  *  一、5 个页 helper
  * ══════════════════════════════════════════════════════════════════════
  *
- *   fc_command_status_t test_erase_block(block, plane_bitmap, config);
- *   fc_command_status_t test_prog_page  (block, plane_bitmap, page, config, &data);
- *   fc_command_status_t test_read_page  (block, plane_bitmap, page, config, &data);
+ *   fc_cmd_status_s test_erase_block(block, plane_bitmap, config);
+ *   fc_cmd_status_s test_prog_page  (block, plane_bitmap, page, config, &data);
+ *   fc_cmd_status_s test_read_page  (block, plane_bitmap, page, config, &data);
  *   void                test_prog_block (block, plane_bitmap, config, &data);
  *   void                test_read_block (block, plane_bitmap, config, &data);
  *
@@ -24,7 +24,7 @@
  *   fc_command_alloc → 拷 config → 定 pba → 建链 → 搬数据
  *     → fc_submit → fc_service 轮询 → 取完成 → fc_command_release
  *
- * 返回 fc_command_status_t（= CQ 完成项，聚合 status / param 都在里面）。
+ * 返回 fc_cmd_status_s（= CQ 完成项，聚合 status / param 都在里面）。
  * 要检查每 CW 细节请在 release 之前由 helper 内部做（见「校验」）。
  *
  * 不走页路径的用例（RESET / READ_ID / GET_FEATURES / cache 序列 / 内部搬移 /
@@ -36,7 +36,7 @@
  *  二、config 由调用者给，multi_plane 由 operation 派生
  * ══════════════════════════════════════════════════════════════════════
  *
- * config 类型就是 fc_command_t.config 的类型 fc_cmd_conf_t（fc_command.h），
+ * config 类型就是 fc_cmd_s.config 的类型 fc_cmd_cfg_s（fc_command.h），
  * 不是新造的类型。`test_cmd_build` 做 `cmd->config = *config` 后**只覆盖**几个
  * 字段：ch/ce/lun（取自 addr），以及
  *
@@ -190,13 +190,13 @@ void  test_tear_down(void *fixture);                              /* free(g_sour
  * idx < CW_TOTAL_MAX（8）；越界 ASSERT。 */
 uint8_t *test_cw_scratch(uint8_t idx);
 
-/* nand_addr_t → DWORD（页 PBA）。
+/* nand_addr_s → DWORD（页 PBA）。
  *
  * v0.73 把 FTL 层地址全面 PBA 化时**删掉了生产的 `pba_from_addr()`**（它把
- * nand_addr_t 拖进 FTL 闭包）。但 FC 层的货币仍是 nand_addr_t，而页 helper 要拿
+ * nand_addr_s 拖进 FTL 闭包）。但 FC 层的货币仍是 nand_addr_s，而页 helper 要拿
  * 「本页 PBA」当 meta ⇒ 测试侧保留同名薄壳。**逐位等价**：pba_make 就是旧函数那七个
  * 字段按同一组 PBA_*_SHIFT 打包，`addr->cw` 传 0 时即页 PBA。 */
-static inline DWORD pba_from_addr(const nand_addr_t *addr)
+static inline DWORD pba_from_addr(const nand_addr_s *addr)
 {
     return pba_make(addr->ch, addr->ce, addr->lun, addr->block, addr->plane, addr->page, addr->cw);
 }
@@ -205,7 +205,7 @@ static inline DWORD pba_from_addr(const nand_addr_t *addr)
  * buffer 级用例（数据路径单测）与不走页 helper 的命令（RESET / READ_ID /
  * GET_FEATURES / cache 序列 / 内部搬移 / RANDOM_DATA_READ）用它拿一条**已建好
  * desc 链、尚未提交**的命令，之后自行调 fc_data_path_* 或提交。
- *   · 地址走 nand_addr_t（block/plane/page + ch/ce/lun）。addr->cw **必须为 0**——
+ *   · 地址走 nand_addr_s（block/plane/page + ch/ce/lun）。addr->cw **必须为 0**——
  *     链上每条 desc 的 CW 由 cw_bitmap 逐位铸出，地址里不带。
  *   · operation 与全部模式位走 config（const，可传 static 常量）。
  *   · **multi_plane 由 operation 派生**（三个 MULTI 变体 op ⇒ PLANE_NUM，其余 ⇒ 0），
@@ -215,12 +215,12 @@ static inline DWORD pba_from_addr(const nand_addr_t *addr)
  *     ftl_cmd_needs_desc_chain 短路，desc_id 置 INVALID。
  *   ⚠ 返回的命令**未提交**。写命令别先手工 fc_data_path_encode 再提交（FC 会再编一次，
  *     见「五」）。 */
-fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);
+fc_cmd_s *test_cmd_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config);
 
 /* 与 test_cmd_build 同配置校验，但**资源申请失败返回 NULL**（不 abort）——供压力用例
  * 「发到池满 → 抽干 CQ 腾资源 → 重试同一条」的背压闭环使用。失败时命令已整条 release
  * （沿链回收 desc/buffer + 归还命令槽），调用者拿到 NULL 即可，无需再释放。 */
-fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);
+fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config);
 
 /* ── 内联用例用的低层原语 ──
  * 需要**自己拿着命令**做事的用例（Level 3 的 READ_ID / GET_FEATURES / cache 序列 /
@@ -242,25 +242,25 @@ uint8_t test_plane_count(uint8_t plane_bitmap);
 
 /* 提交 + 轮询到完成，**命令仍归调用者**（返回 CQ 完成项）。
  * 用毕调用者自己 fc_command_release()——本函数不释放。 */
-fc_command_status_t test_submit_wait(fc_command_t *cmd);
+fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd);
 
 /* ── 7 个页 helper（建立在 test_cmd_build 之上） ──
  * 内部 alloc / 建链 / 搬数据 / 提交 / 轮询 / 拷回 / 释放，命令不交回调用者。
  * 返回 CQ 完成项；`data` 为出参（可传 NULL），读回 / 写下的明文在 g_source_data 里。 */
 
-fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config);
+fc_cmd_status_s test_erase_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config);
 
-fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data);
+fc_cmd_status_s test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config, uint8_t **data);
 
 /* meta 是本命令**声明的页 PBA**。普通读传本页 PBA（pba_from_addr(本页地址)）；
  * 内部搬移用例传**源页** PBA——目标块那页的 META 是源页写入时铸的。 */
-fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_conf_t *config, uint8_t **data);
+fc_cmd_status_s test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_cfg_s *config, uint8_t **data);
 
 /* 遍历整块：逐页调对应页 helper（页间自然轮询）。
  * test_read_block 逐页读并在**页内**校验 PAA 图案（否则 g_source_data 只剩最后一页可比）；
  * 擦除态（全 0xFF）的整块校验不由它承担——用例自己循环 test_read_page + 逐槽比 0xFFFFFFFF。 */
-void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
-void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
+void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data);
+void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data);
 
 /* ── cache 整块读写（ONFI cache + 器件 two-plane 扩展）──
  * 两层依据别混：
@@ -293,20 +293,20 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
  *
  * 两者都是**同步**的（逐条 submit → 轮询 → 释放）⇒ cache 的流水线收益在本夹具里测不到；
  * 这里验的是**数据正确性**：cache 命令序列走得通、META / CRC / 加扰 / ECC 全程不串。 */
-void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
-void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
-void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
-void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
+void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data);
+void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cfg_s *config, uint8_t **data);
+void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s *config, uint8_t **data);
+void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s *config, uint8_t **data);
 
 /* 跨块 pair 版：两 plane 各在一个 block（Policy B 的真实形态，生产 FTL 恒如此）。
  *   与上面同块版的差别只有地址来源：行地址逐 plane 取 blocks[plane]（走
  *   ftl_cmd_setup_ppa_pair_cw，与生产同一个建链入口），故 meta 只能取整对共用的
  *   LBA 口径（一个命令只有一个 command->meta）。
  *   覆盖点：05h-E0h 的 plane 选择与 31h 预取推进在「两 plane 不同块」下是否仍按页 +1。 */
-fc_command_t *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_conf_t *config);
-void          test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config, uint8_t **data);
-void          test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_conf_t *config);
-void          test_verify_page_pair_paa(const uint8_t *data, const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint8_t plane_bitmap);
+fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_cfg_s *config);
+void      test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_cfg_s *config, uint8_t **data);
+void      test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], const fc_cmd_cfg_s *config);
+void      test_verify_page_pair_paa(const uint8_t *data, const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint8_t plane_bitmap);
 
 /* test_read_cache_random：cache 读的「随机跳页」入口——OP_READ_PAGE_CACHE_RANDOM（00h-addr-31h）。
  *
@@ -322,7 +322,7 @@ void          test_verify_page_pair_paa(const uint8_t *data, const uint16_t bloc
  *   prev_page / addr_page 都不得是块尾；addr 不能等于 prev+1，否则③④会重复。
  *   ② 的 meta 取 **prev+1** 的 PBA；后续按实际输出页取 meta。
  *   31h 可以跨 block，但不能跨 die/LUN（datasheet）。 */
-void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_conf_t *config);
+void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_cfg_s *config);
 
 /* ── 加载 / 取数两段式（v45） ──
  * 把生产读路径「先加载、再逐 CW 取数」拆成**两条可独立下发的 FC 命令**：
@@ -338,8 +338,8 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
  * 两段必须**紧邻**：加载与取数是两条独立命令，中间若有别的命令碰器件页缓冲，取数会读到错页。
  * 多 plane 段（op 29/41）plane_bitmap 必须 == TEST_PLANE_BM_ALL；单 plane 段（op 33/8）必须
  * 恰一个 plane（05h 无 plane 位，06h 按行地址 plane 位选页缓冲）。 */
-void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config);
-void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config);
+void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config);
+void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config);
 
 /* ── META 只读回读（v46） ──
  * test_read_meta：op 11（OP_READ_META，自带 00h-30h 页加载 + 4 字节输出），**不带 desc 链**
@@ -355,8 +355,8 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
  *   位定义（MT29F4G08 手册）：I/O2 = Lock#（0 = 锁定，1 = 未锁）、I/O1 = LT#、I/O0 = LT（1 = 紧锁）。
  * 两者都按 (block, plane) 设 cmd->paa —— FC 的块锁族分支据此算行地址（23h/24h/7Ah 带 3 个
  * 地址周期），给错会静默打到 block 0。 */
-void    test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config);
-uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config);
+void    test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config);
+uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config);
 
 /* ── 数据搬运 / 校验 ── */
 
@@ -368,30 +368,30 @@ uint8_t test_check_paa(const uint8_t *slot, DWORD paa);
 /* 活链版（内联用例用）：
  * test_fill_user_paa —— 逐 desc 填槽 + 拷进 desc 的 USER 区（写路径的「搬数据」那一步）；
  * test_memset_read_buffer —— 逐 desc 把 USER 区预填 0xCC（读路径的残留哨兵）。 */
-void test_fill_user_paa(fc_command_t *cmd);
-void test_memset_read_buffer(fc_command_t *cmd);
+void test_fill_user_paa(fc_cmd_s *cmd);
+void test_memset_read_buffer(fc_cmd_s *cmd);
 
 /* 读路径收尾（批量路径用）：FC 已原地解码，逐 desc 把 USER 区拷回 g_source_data 槽。
  * 页 helper（test_read_page 等）内部收尾也走它；批量读须在 release 前显式调用，
  * 之后再用 test_verify_page_paa 校验。 */
-void test_capture_cmd(const fc_command_t *cmd);
+void test_capture_cmd(const fc_cmd_s *cmd);
 
 /* 按 (block, page, plane_bitmap) 逐槽校验 data 里的 PAA 图案——页 helper 的读回判据。 */
 void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t page_index, uint8_t plane_bitmap);
 
 /* 活链版：逐 desc 断言 USER 区全 0xFF（擦除态） / 每 CW 的 status == FC_CW_STATUS_UNUSED（成功）。 */
-void    test_verify_erased(const fc_command_t *cmd);
-uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd);
+void    test_verify_erased(const fc_cmd_s *cmd);
+uint8_t test_verify_cw_status_all_success(const fc_cmd_s *cmd);
 
 /* ── desc 链小工具（内联用例用） ── */
 
-fc_descriptor_t *test_cw_desc(const fc_command_t *cmd, uint8_t idx); /* 链上第 idx 条；越界 NULL */
-uint8_t         *test_cw_user(const fc_command_t *cmd, uint8_t idx); /* 第 idx 条的 USER 区（512B） */
-uint8_t         *test_cw_base(const fc_command_t *cmd, uint8_t idx); /* 第 idx 条的 528B CW 基址 */
-uint8_t          test_cw_count(const fc_command_t *cmd);             /* 链长 */
-uint8_t          test_collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_t *cw_out);
-uint32_t         test_cw_seed(const fc_command_t *cmd, uint8_t idx); /* 该 CW 的加扰种子（= META 派生） */
-uint8_t          test_check_pattern(const uint8_t *buffer, uint16_t length, uint8_t pattern);
+fc_desc_s *test_cw_desc(const fc_cmd_s *cmd, uint8_t idx); /* 链上第 idx 条；越界 NULL */
+uint8_t   *test_cw_user(const fc_cmd_s *cmd, uint8_t idx); /* 第 idx 条的 USER 区（512B） */
+uint8_t   *test_cw_base(const fc_cmd_s *cmd, uint8_t idx); /* 第 idx 条的 528B CW 基址 */
+uint8_t    test_cw_count(const fc_cmd_s *cmd);             /* 链长 */
+uint8_t    test_collect_chain(const fc_cmd_s *cmd, uint8_t *plane_out, uint8_t *cw_out);
+uint32_t   test_cw_seed(const fc_cmd_s *cmd, uint8_t idx); /* 该 CW 的加扰种子（= META 派生） */
+uint8_t    test_check_pattern(const uint8_t *buffer, uint16_t length, uint8_t pattern);
 
 /* ── 证据打印（evidence logging）──
  *

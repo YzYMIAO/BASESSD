@@ -11,7 +11,7 @@
  * 见 docs/archive/debug_sbrk_heap_stack_20261004.md。）
  * volatile：记录在本轮只写不读，靠它阻止编译器把写优化掉。
  */
-static volatile crash_record_t g_crash_record __attribute__((section(".noinit")));
+static volatile crash_record_s g_crash_record __attribute__((section(".noinit")));
 
 static void crash_copy(char *destination, const char *source)
 {
@@ -111,7 +111,7 @@ void crash_record_abort(void)
     crash_commit();
 }
 
-void crash_record_fault(const crash_fault_record_t *fault)
+void crash_record_fault(const crash_fault_record_s *fault)
 {
     if (fault == NULL)
     {
@@ -130,7 +130,7 @@ void crash_record_fault(const crash_fault_record_t *fault)
     crash_commit();
 }
 
-const crash_record_t *crash_record_get(void)
+const crash_record_s *crash_record_get(void)
 {
     if ((g_crash_record.magic != CRASH_MAGIC) || (g_crash_record.version != CRASH_VERSION))
     {
@@ -140,7 +140,7 @@ const crash_record_t *crash_record_get(void)
     {
         return NULL;
     }
-    return (const crash_record_t *)&g_crash_record;
+    return (const crash_record_s *)&g_crash_record;
 }
 
 void crash_record_clear(void)
@@ -149,7 +149,7 @@ void crash_record_clear(void)
 }
 
 /* 弱默认：host/非固件构建下无轮询控制台，静默即可。 */
-__attribute__((weak)) void crash_platform_report(const crash_record_t *record)
+__attribute__((weak)) void crash_platform_report(const crash_record_s *record)
 {
     (void)record;
 }

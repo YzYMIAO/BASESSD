@@ -10,7 +10,7 @@
 #include "common.h"
 #include "delay.h"
 
-BYTE rng_init(void)
+func_status_e rng_init(void)
 {
     WORD retry = 0;
 

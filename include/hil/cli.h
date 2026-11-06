@@ -14,7 +14,7 @@
  */
 
 /* main.c 定义的 controller 路由表；CLI 命令经它 ssd_controller_submit 驱动 FTL 全链路。 */
-extern ssd_controller_t g_ctrl;
+extern ssd_ctl_s g_ctrl;
 
 /**
  * @brief 初始化 CLI：预填 g_wr_buf 固定 pattern。
@@ -32,7 +32,7 @@ void cli_init(void);
  *
  * @return true = `g_cli_pending` 有未决请求，或 wp 组仍在飞
  */
-bool cli_host_busy(void);
+BOOL cli_host_busy(void);
 
 /**
  * @brief 在主循环周期调用：回显、组装一行并执行 CLI。

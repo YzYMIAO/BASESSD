@@ -37,7 +37,7 @@
 
 ### 2.2 写轨迹飞行记录器
 
-`alc_t` 内 64 条环形记录（`alc_trace_t`：seq/lba/pba/plane/block/page/cw/kind）。
+`alc_s` 内 64 条环形记录（`alc_trace_s`：seq/lba/pba/plane/block/page/cw/kind）。
 
 - `kind=0` 写确认成功；`1` program fail；`2` GC 写。
 - 首次 UNC（好块）或 program-fail 时 `alc_trace_dump(lba,pba)`：
@@ -137,7 +137,7 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 | GC 系统性读失败熔断（`MIG_SYSTEMIC_READ_FAIL_MAX=8`） | 已改、未上板（RISK-GC-10） |
 | `info` 增加 `diag[...] dng/rrab/mig/streak` | 已改、未上板 |
 | 只对**真正搬了数据**的 victim 打 `[MIG ] move ...`（`migrated==0` 不打印；aborted 不打） | 已改、未上板 |
-| 统一 `log_ratelimit_t` 抽象 | 未做（现有各类节流已覆盖；后续收敛；见 RISK-LOG-02） |
+| 统一 `log_ratelimit_s` 抽象 | 未做（现有各类节流已覆盖；后续收敛；见 RISK-LOG-02） |
 
 ## 6. 验证判据
 

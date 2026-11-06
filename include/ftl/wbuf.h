@@ -28,10 +28,10 @@
  *   只持有 allocator / pending 表 / migrate handle 三个窄指针，调用它们的 owner API。
  */
 
-#include "allocator.h"  /* alc_t */
+#include "allocator.h"  /* alc_s */
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_e */
-#include "ftl_module.h" /* ftl_mod_status_t */
-#include "pending.h"    /* pend_req_t（端口出参类型） */
+#include "ftl_module.h" /* ftl_mod_status_s */
+#include "pending.h"    /* pend_req_s（端口出参类型） */
 #include "ssd_types.h"  /* ssd_status_e */
 
 #include <stdbool.h>
@@ -40,7 +40,7 @@
 /* ── 类型 ── */
 
 /* 触发类型（wb_handle 的事件）。 */
-typedef enum
+typedef enum WB_TRIGGER_KIND_E
 {
     WBUF_TRIGGER_APPEND = 0,       /* 把窗口内 n 个 CW 攒进缓冲 */
     WBUF_TRIGGER_FLUSH,            /* 把当前缓冲页编程到 NAND */
@@ -49,8 +49,8 @@ typedef enum
     WBUF_TRIGGER_MAYBE_FLUSH_IDLE, /* 无后续 append 时编程 */
 } wb_trigger_kind_e;
 
-/* 观测状态（wb_status_t.state）。 */
-typedef enum
+/* 观测状态（wb_status_s.state）。 */
+typedef enum WB_STATE_E
 {
     WBUF_STATE_IDLE = 0,
     WBUF_STATE_OPEN,   /* 持有一个窗口，尚未 flush */
@@ -58,11 +58,11 @@ typedef enum
 } wb_state_e;
 
 /* ── 写缓冲状态（handle）── */
-typedef struct
+typedef struct WB_HANDLE_S
 {
     BYTE  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
     BYTE  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
-    bool  open;                                  /* true = 正持有某窗口 */
+    BOOL  open;                                  /* true = 正持有某窗口 */
     DWORD base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
     DWORD owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
 
@@ -72,13 +72,13 @@ typedef struct
     int32_t error;
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
-    alc_t             *alloc;
-    pending_ctx_t     *pending;
-    struct mig_handle *migrate;
-} wb_handle_t;
+    alc_s                   *alloc;
+    pend_ctx_s              *pending;
+    struct MIGRATE_HANDLE_S *migrate;
+} wb_handle_s;
 
 /* 触发参数。 */
-typedef struct
+typedef struct WB_TRIGGER_S
 {
     wb_trigger_kind_e kind;
 
@@ -86,20 +86,20 @@ typedef struct
     const void *data; /* APPEND：数据源（n × FTL_IU_BYTES） */
     BYTE        n;    /* APPEND：CW 数 */
     WORD        gi;   /* APPEND：贡献组号 */
-} wb_trigger_t;
+} wb_trigger_s;
 
 /* 状态上报。 */
-typedef struct
+typedef struct WB_STATUS_S
 {
-    ftl_mod_status_t base;
+    ftl_mod_status_s base;
 
     wb_state_e state;
-    bool       open;
+    BOOL       open;
     BYTE       occupied;
     DWORD      owners;
     DWORD      flushed_pages;
     DWORD      drop_count;
-} wb_status_t;
+} wb_status_s;
 
 /* ── 接口 ── */
 
@@ -113,7 +113,7 @@ typedef struct
  *                无后台迁移器时（纯 RAM 单测）只做背压，不登记 GC。生产路径由
  *                `ftl.c` 绑定真实 handle，不传 NULL。
  */
-void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_handle *migrate);
+void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_HANDLE_S *migrate);
 
 /**
  * @brief 事件驱动入口（docs §4.8）
@@ -132,7 +132,7 @@ void wb_init(wb_handle_t *h, alc_t *alloc, pending_ctx_t *pending, struct mig_ha
  *         FTL_AGAIN APPEND / FLUSH / MAYBE_FLUSH_IDLE 遇到瞬态背压（缓冲保留，可重试）
  *         FTL_ERROR FLUSH / MAYBE_FLUSH_IDLE 建链失败 / trigger->kind 非法
  */
-ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t *out);
+ftl_status_e wb_handle(wb_handle_s *h, const wb_trigger_s *trigger, wb_status_s *out);
 
 /* ── 查询（读路径；只判不取） ── */
 
@@ -144,7 +144,7 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, wb_status_t 
  * @return true = 命中当前窗口的有效槽位
  *         false = 未命中（无打开窗口 / pair 窗口不同 / 槽位为空）
  */
-bool wb_has(const wb_handle_t *h, DWORD lba);
+BOOL wb_has(const wb_handle_s *h, DWORD lba);
 
 /**
  * @brief 从缓冲读取一个 IU 的数据。
@@ -155,7 +155,7 @@ bool wb_has(const wb_handle_t *h, DWORD lba);
  * @return true = 命中并已拷贝 FTL_IU_BYTES 字节
  *         false = 未命中（out 不被写）
  */
-bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
+BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out);
 
 /**
  * @brief wbuf 是否完全空闲（无打开窗口、无未编程数据）。
@@ -164,7 +164,7 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
  * @param h wbuf handle
  * @return true = 完全空闲；false = 仍有打开窗口或未编程数据
  */
-static inline bool wb_is_idle(const wb_handle_t *h)
+static inline BOOL wb_is_idle(const wb_handle_s *h)
 {
     return (!h->open) && (h->occupied == 0U);
 }

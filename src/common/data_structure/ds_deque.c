@@ -10,7 +10,7 @@
  * 使用环形缓冲区实现的双端队列，支持在两端进行高效的插入和删除操作。
  * 队列容量始终保持为 2 的幂，以便使用位运算进行快速索引计算。
  */
-struct ds_deque_s
+struct DS_DEQUE_S
 {
     size_t size;     /**< 当前队列中的元素个数 */
     size_t capacity; /**< 队列容量（始终为 2 的幂） */
@@ -78,7 +78,7 @@ static INLINE size_t upper_power_two(size_t n)
  * @warning 原代码中 memcpy 的目标地址为 &buffer，这是错误的，
  *          应为 buffer（因为 buffer 本身就是指针）
  */
-static void copy_deque_buffer(ds_Deque const *const deque, void **buffer, void *(*cp)(void *))
+static void copy_deque_buffer(ds_deque_s const *const deque, void **buffer, void *(*cp)(void *))
 {
     if (cp == NULL)
     {
@@ -123,7 +123,7 @@ static void copy_deque_buffer(ds_Deque const *const deque, void **buffer, void *
  *
  * @return DS_OK 查找成功，DS_ERR_OUT_OF_RANGE 未找到该元素
  */
-ds_Stat ds_deque_index_of(ds_Deque *deque, void *element, size_t *index)
+ds_status_e ds_deque_index_of(ds_deque_s *deque, void *element, size_t *index)
 {
     for (size_t i = 0; i < deque->size; i++)
     {
@@ -146,7 +146,7 @@ ds_Stat ds_deque_index_of(ds_Deque *deque, void *element, size_t *index)
  * @param[in,out] deque 目标双端队列
  * @param[in]     fn    对每个元素执行的函数
  */
-void ds_deque_foreach(ds_Deque *deque, void (*fn)(void *))
+void ds_deque_foreach(ds_deque_s *deque, void (*fn)(void *))
 {
     for (size_t i = 0; i < deque->size; i++)
     {
@@ -166,7 +166,7 @@ void ds_deque_foreach(ds_Deque *deque, void (*fn)(void *))
  * @return DS_OK 扩容成功，DS_ERR_OUT_OF_RANGE 已达最大容量，
  *         DS_ERR_ALLOC 内存分配失败
  */
-static ds_Stat deque_expand_capacity(ds_Deque *deque)
+static ds_status_e deque_expand_capacity(ds_deque_s *deque)
 {
     if (deque->capacity == MAX_POW_TWO)
     {
@@ -202,9 +202,9 @@ static ds_Stat deque_expand_capacity(ds_Deque *deque)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_deque_new(ds_Deque **out)
+ds_status_e ds_deque_new(ds_deque_s **out)
 {
-    ds_DequeConfig dc;
+    ds_deque_cfg_s dc;
 
     ds_deque_conf_init(&dc);
     return ds_deque_new_conf(&dc, out);
@@ -217,7 +217,7 @@ ds_Stat ds_deque_new(ds_Deque **out)
  *
  * @param[in,out] conf 需要初始化的配置结构体指针
  */
-void ds_deque_conf_init(ds_DequeConfig *conf)
+void ds_deque_conf_init(ds_deque_cfg_s *conf)
 {
     conf->capacity = DEFAULT_CAPACITY;
 
@@ -237,9 +237,9 @@ void ds_deque_conf_init(ds_DequeConfig *conf)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_deque_new_conf(ds_DequeConfig *conf, ds_Deque **out)
+ds_status_e ds_deque_new_conf(ds_deque_cfg_s *conf, ds_deque_s **out)
 {
-    ds_Deque *deque = conf->mem_calloc(1, sizeof(ds_Deque));
+    ds_deque_s *deque = conf->mem_calloc(1, sizeof(ds_deque_s));
 
     if (deque == NULL)
     {
@@ -276,7 +276,7 @@ ds_Stat ds_deque_new_conf(ds_DequeConfig *conf, ds_Deque **out)
  *
  * @param[in] deque 要销毁的队列指针
  */
-void ds_deque_destory(ds_Deque *deque)
+void ds_deque_destory(ds_deque_s *deque)
 {
     deque->mem_free(deque->buffer);
     deque->mem_free(deque);
@@ -294,7 +294,7 @@ void ds_deque_destory(ds_Deque *deque)
  * @note 如果队列中的元素存储在栈上，不应调用此函数，
  *       应使用 ds_deque_destory() 代替
  */
-void ds_deque_destory_cb(ds_Deque *deque, void (*cb)(void *))
+void ds_deque_destory_cb(ds_deque_s *deque, void (*cb)(void *))
 {
     ds_deque_remove_all_cb(deque, cb);
     ds_deque_destory(deque);
@@ -310,7 +310,7 @@ void ds_deque_destory_cb(ds_Deque *deque, void (*cb)(void *))
  *
  * @return DS_OK 添加成功，DS_ERR_ALLOC 扩容失败
  */
-ds_Stat ds_deque_add(ds_Deque *deque, void *element)
+ds_status_e ds_deque_add(ds_deque_s *deque, void *element)
 {
     return ds_deque_add_last(deque, element);
 }
@@ -327,7 +327,7 @@ ds_Stat ds_deque_add(ds_Deque *deque, void *element)
  *
  * @note 使用无符号整数下溢和位运算掩码实现环形索引计算
  */
-ds_Stat ds_deque_add_first(ds_Deque *deque, void *element)
+ds_status_e ds_deque_add_first(ds_deque_s *deque, void *element)
 {
     if (deque->size == deque->capacity && deque_expand_capacity(deque) != DS_OK)
     {
@@ -351,7 +351,7 @@ ds_Stat ds_deque_add_first(ds_Deque *deque, void *element)
  *
  * @return DS_OK 添加成功，DS_ERR_ALLOC 扩容失败
  */
-ds_Stat ds_deque_add_last(ds_Deque *deque, void *element)
+ds_status_e ds_deque_add_last(ds_deque_s *deque, void *element)
 {
     if (deque->size == deque->capacity && deque_expand_capacity(deque) != DS_OK)
     {
@@ -379,7 +379,7 @@ ds_Stat ds_deque_add_last(ds_Deque *deque, void *element)
  * @note 该函数采用二分优化策略，选择移动元素较少的一侧进行移动，
  *       以减少内存复制开销
  */
-ds_Stat ds_deque_add_at(ds_Deque *deque, void *element, size_t index)
+ds_status_e ds_deque_add_at(ds_deque_s *deque, void *element, size_t index)
 {
     if (index >= deque->size)
     {
@@ -494,7 +494,7 @@ ds_Stat ds_deque_add_at(ds_Deque *deque, void *element, size_t index)
  * @warning 原代码中使用 deque->buffer[index] 而非 phy_index 获取元素，
  *          这是一个严重的 Bug，已修正为使用物理索引
  */
-ds_Stat ds_deque_replace_at(ds_Deque *deque, void *element, size_t index, void **out)
+ds_status_e ds_deque_replace_at(ds_deque_s *deque, void *element, size_t index, void **out)
 {
     if (index >= deque->size)
     {
@@ -522,11 +522,11 @@ ds_Stat ds_deque_replace_at(ds_Deque *deque, void *element, size_t index, void *
  *
  * @return DS_OK 移除成功，DS_ERR_VALUE_NOT_FOUND 未找到该元素
  */
-ds_Stat ds_deque_remove(ds_Deque *deque, void *element)
+ds_status_e ds_deque_remove(ds_deque_s *deque, void *element)
 {
     size_t index = 0;
 
-    ds_Stat status = ds_deque_index_of(deque, element, &index);
+    ds_status_e status = ds_deque_index_of(deque, element, &index);
 
     if (status != DS_OK)
     {
@@ -544,7 +544,7 @@ ds_Stat ds_deque_remove(ds_Deque *deque, void *element)
  *
  * @return DS_OK 移除成功，DS_ERR_OUT_OF_RANGE 队列为空
  */
-ds_Stat ds_deque_remove_first(ds_Deque *deque, void **out)
+ds_status_e ds_deque_remove_first(ds_deque_s *deque, void **out)
 {
     if (deque->size == 0)
     {
@@ -571,7 +571,7 @@ ds_Stat ds_deque_remove_first(ds_Deque *deque, void **out)
  *
  * @return DS_OK 移除成功，DS_ERR_OUT_OF_RANGE 队列为空
  */
-ds_Stat ds_deque_remove_last(ds_Deque *deque, void **out)
+ds_status_e ds_deque_remove_last(ds_deque_s *deque, void **out)
 {
     if (deque->size == 0)
     {
@@ -602,7 +602,7 @@ ds_Stat ds_deque_remove_last(ds_Deque *deque, void **out)
  *
  * @note 该函数采用二分优化策略，选择移动元素较少的一侧进行移动
  */
-ds_Stat ds_deque_remove_at(ds_Deque *deque, size_t index, void **out)
+ds_status_e ds_deque_remove_at(ds_deque_s *deque, size_t index, void **out)
 {
     if (index >= deque->size)
     {
@@ -699,7 +699,7 @@ ds_Stat ds_deque_remove_at(ds_Deque *deque, size_t index, void **out)
  *
  * @param[in,out] deque 目标双端队列
  */
-void ds_deque_remove_all(ds_Deque *deque)
+void ds_deque_remove_all(ds_deque_s *deque)
 {
     deque->first = 0;
     deque->last  = 0;
@@ -715,7 +715,7 @@ void ds_deque_remove_all(ds_Deque *deque)
  * @param[in,out] deque 目标双端队列
  * @param[in]     cb    释放单个元素数据的回调函数
  */
-void ds_deque_remove_all_cb(ds_Deque *deque, void (*cb)(void *))
+void ds_deque_remove_all_cb(ds_deque_s *deque, void (*cb)(void *))
 {
     ds_deque_foreach(deque, cb);
     ds_deque_remove_all(deque);
@@ -730,7 +730,7 @@ void ds_deque_remove_all_cb(ds_Deque *deque, void (*cb)(void *))
  *
  * @return DS_OK 获取成功，DS_ERR_OUT_OF_RANGE 索引超出范围
  */
-ds_Stat ds_deque_get_at(ds_Deque *deque, size_t index, void **out)
+ds_status_e ds_deque_get_at(ds_deque_s *deque, size_t index, void **out)
 {
     if (index >= deque->size)
     {
@@ -754,7 +754,7 @@ ds_Stat ds_deque_get_at(ds_Deque *deque, size_t index, void **out)
  * @warning 原代码中 get_first 返回的是队尾元素（使用 size-1），
  *          这是严重的逻辑错误，已修正为返回队首元素（索引0）
  */
-ds_Stat ds_deque_get_first(ds_Deque *deque, void **out)
+ds_status_e ds_deque_get_first(ds_deque_s *deque, void **out)
 {
     /* 原代码错误地使用了 deque->size - 1（获取的是队尾），已修正为 0 */
     return ds_deque_get_at(deque, 0, out);
@@ -771,7 +771,7 @@ ds_Stat ds_deque_get_first(ds_Deque *deque, void **out)
  * @warning 原代码中 get_last 返回的是队首元素（索引0），
  *          这是严重的逻辑错误，已修正为返回队尾元素（使用 size-1）
  */
-ds_Stat ds_deque_get_last(ds_Deque *deque, void **out)
+ds_status_e ds_deque_get_last(ds_deque_s *deque, void **out)
 {
     /* 原代码错误地使用了 0（获取的是队首），已修正为 deque->size - 1 */
     return ds_deque_get_at(deque, deque->size - 1, out);
@@ -790,9 +790,9 @@ ds_Stat ds_deque_get_last(ds_Deque *deque, void **out)
  *
  * @note 浅拷贝只复制指针，不复制指针指向的数据
  */
-ds_Stat ds_deque_copy_shallow(ds_Deque *deque, ds_Deque **out)
+ds_status_e ds_deque_copy_shallow(ds_deque_s *deque, ds_deque_s **out)
 {
-    ds_Deque *copy = deque->mem_calloc(1, sizeof(ds_Deque));
+    ds_deque_s *copy = deque->mem_calloc(1, sizeof(ds_deque_s));
 
     if (copy == NULL)
     {
@@ -834,9 +834,9 @@ ds_Stat ds_deque_copy_shallow(ds_Deque *deque, ds_Deque **out)
  *
  * @return DS_OK 复制成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_deque_copy_deeep(ds_Deque *deque, void *(*cp)(void *), ds_Deque **out)
+ds_status_e ds_deque_copy_deeep(ds_deque_s *deque, void *(*cp)(void *), ds_deque_s **out)
 {
-    ds_Deque *copy = deque->mem_calloc(1, sizeof(ds_Deque));
+    ds_deque_s *copy = deque->mem_calloc(1, sizeof(ds_deque_s));
 
     if (copy == NULL)
     {
@@ -876,7 +876,7 @@ ds_Stat ds_deque_copy_deeep(ds_Deque *deque, void *(*cp)(void *), ds_Deque **out
  *
  * @return DS_OK 裁剪成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_deque_trim_capacity(ds_Deque *deque)
+ds_status_e ds_deque_trim_capacity(ds_deque_s *deque)
 {
     if (deque->size == deque->capacity)
     {
@@ -915,7 +915,7 @@ ds_Stat ds_deque_trim_capacity(ds_Deque *deque)
  *
  * @param[in,out] deque 目标双端队列
  */
-void ds_deque_reverse(ds_Deque *deque)
+void ds_deque_reverse(ds_deque_s *deque)
 {
     size_t phy_c = deque->capacity - 1;
 
@@ -938,7 +938,7 @@ void ds_deque_reverse(ds_Deque *deque)
  *
  * @return 元素在队列中出现的次数
  */
-size_t ds_deque_contains(ds_Deque *deque, void *element)
+size_t ds_deque_contains(ds_deque_s *deque, void *element)
 {
     size_t count = 0;
 
@@ -966,9 +966,9 @@ size_t ds_deque_contains(ds_Deque *deque, void *element)
  *
  * @return 满足相等条件的元素个数
  *
- * @note 函数返回值类型应为 size_t，而不是 ds_Stat
+ * @note 函数返回值类型应为 size_t，而不是 ds_status_e
  */
-ds_Stat ds_deque_contains_value(ds_Deque *deque, void *element, int (*cmper)(void const *, void const *))
+ds_status_e ds_deque_contains_value(ds_deque_s *deque, void *element, int (*cmper)(void const *, void const *))
 {
     size_t count = 0;
 
@@ -982,7 +982,7 @@ ds_Stat ds_deque_contains_value(ds_Deque *deque, void *element, int (*cmper)(voi
         }
     }
 
-    return count; /* 注意：返回值类型应为 size_t，但函数声明为 ds_Stat，存在类型不匹配 */
+    return count; /* 注意：返回值类型应为 size_t，但函数声明为 ds_status_e，存在类型不匹配 */
 }
 
 /**
@@ -992,7 +992,7 @@ ds_Stat ds_deque_contains_value(ds_Deque *deque, void *element, int (*cmper)(voi
  *
  * @return 队列中元素的个数
  */
-size_t ds_deque_size(ds_Deque const *const deque)
+size_t ds_deque_size(ds_deque_s const *const deque)
 {
     return deque->size;
 }
@@ -1006,7 +1006,7 @@ size_t ds_deque_size(ds_Deque const *const deque)
  *
  * @warning 原代码错误地返回了 deque->size，而非 deque->capacity，已修正
  */
-size_t ds_deque_capacity(ds_Deque const *const deque)
+size_t ds_deque_capacity(ds_deque_s const *const deque)
 {
     return deque->capacity; /* 原代码错误地返回了 deque->size，已修正 */
 }
@@ -1022,7 +1022,7 @@ size_t ds_deque_capacity(ds_Deque const *const deque)
  *
  * @note 直接修改返回的缓冲区可能导致队列状态不一致
  */
-const void *const *ds_deque_get_buffer(ds_Deque const *const deque)
+const void *const *ds_deque_get_buffer(ds_deque_s const *const deque)
 {
     return (const void *const *)deque->buffer;
 }
@@ -1040,7 +1040,7 @@ const void *const *ds_deque_get_buffer(ds_Deque const *const deque)
  * @note 此实现在遍历过程中调用 ds_deque_remove_at()，每次删除都会移动元素，
  *       时间复杂度较高（O(n²)），在需要频繁过滤的场景下应考虑更高效的实现
  */
-ds_Stat ds_deque_fiter_mut(ds_Deque *deque, bool (*pred)(void const *))
+ds_status_e ds_deque_fiter_mut(ds_deque_s *deque, BOOL (*pred)(void const *))
 {
     if (deque->size == 0)
     {
@@ -1072,14 +1072,14 @@ ds_Stat ds_deque_fiter_mut(ds_Deque *deque, bool (*pred)(void const *))
  * @return DS_OK 过滤成功，DS_ERR_OUT_OF_RANGE 队列为空，
  *         DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_deque_filter(ds_Deque *deque, bool (*pred)(void const *), ds_Deque **out)
+ds_status_e ds_deque_filter(ds_deque_s *deque, BOOL (*pred)(void const *), ds_deque_s **out)
 {
     if (deque->size == 0)
     {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    ds_Deque *filtered = deque->mem_calloc(1, sizeof(ds_Deque));
+    ds_deque_s *filtered = deque->mem_calloc(1, sizeof(ds_deque_s));
 
     if (filtered == NULL)
     {

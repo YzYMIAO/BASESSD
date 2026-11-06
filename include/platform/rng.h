@@ -14,7 +14,7 @@
  */
 
 /* 初始化 RNG；返回 0 = 成功（FUNC_STATUS_SUCCESS），非 0 = 失败。 */
-BYTE rng_init(void);
+func_status_e rng_init(void);
 
 /* 取一个 32 位随机数。 */
 DWORD rng_get_random_num(void);

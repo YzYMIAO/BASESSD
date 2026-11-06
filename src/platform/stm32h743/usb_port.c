@@ -33,7 +33,7 @@ DWORD tusb_time_millis_api(void)
     return HAL_GetTick();
 }
 
-bool usb_device_init(void)
+BOOL usb_device_init(void)
 {
     /* dwc2_clock_init() 在 STM32 端口里是空实现，外设时钟必须由应用打开。 */
     __HAL_RCC_USB2_OTG_FS_CLK_ENABLE();
@@ -60,7 +60,7 @@ bool usb_device_init(void)
     rh_init.speed = TUSB_SPEED_FULL;
 
     /* dcd_init 内部会打开 NVIC 并使能全局中断。 */
-    const bool ok = tusb_rhport_init(USB_PORT_RHPORT, &rh_init);
+    const BOOL ok = tusb_rhport_init(USB_PORT_RHPORT, &rh_init);
 
     /* GHWCFG2.arch[2:0]：0 = slave-only，1 = external DMA，2 = internal DMA。
      * 本仓走 slave/PIO；这一行用于在板端确认该芯片的 OTG_FS 到底有没有

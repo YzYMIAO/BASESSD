@@ -3,7 +3,7 @@
 #include "common.h"
 #include "delay.h"
 
-static const ssd_platform_ops_t *g_platform_ops;
+static const ssd_platform_ops_s *g_platform_ops;
 
 /*
  * stm32_platform_time_us - 系统单调微秒计数（SysTick + HAL tick）。
@@ -20,18 +20,18 @@ static QWORD platform_time_us(void)
     return delay_time_now_us64();
 }
 
-static const ssd_platform_ops_t g_stm32_platform_ops = {
+static const ssd_platform_ops_s g_stm32_platform_ops = {
     .time_us = platform_time_us,
     .time_ms = delay_now_ms, /* SysTick/HAL tick：ARM 核心的系统毫秒时基 */
     /* log_write / memory_allocate / memory_free 暂不提供；register 只强制 time_us。 */
 };
 
-int stm32_platform_register(void)
+func_status_e stm32_platform_register(void)
 {
     return ssd_platform_register(&g_stm32_platform_ops);
 }
 
-int ssd_platform_register(const ssd_platform_ops_t *ops)
+func_status_e ssd_platform_register(const ssd_platform_ops_s *ops)
 {
     if ((ops == NULL) || (ops->time_us == NULL))
     {
@@ -42,7 +42,7 @@ int ssd_platform_register(const ssd_platform_ops_t *ops)
     return FUNC_STATUS_SUCCESS;
 }
 
-const ssd_platform_ops_t *ssd_platform_get(void)
+const ssd_platform_ops_s *ssd_platform_get(void)
 {
     return g_platform_ops;
 }

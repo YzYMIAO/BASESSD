@@ -19,7 +19,7 @@
 #include "fc.h"         /* FC_COMMAND_POOL_DEPTH（command_id 直接索引） */
 #include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
 #include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
-#include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_t, ssd_status_e */
+#include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_fn_t, ssd_status_e */
 
 #include <stdint.h>
 
@@ -31,7 +31,7 @@
  * 0xFFFF 不可达：FC_COMMAND_POOL_DEPTH = 64（命令 id 恒 < 64）。 */
 #define FTL_PENDING_CMD_NONE (0xFFFFU)
 
-/* ── 完成组（pend_group_t）──
+/* ── 完成组（pend_group_s）──
  *
  * 一条 host 请求（一次 ftl_submit_read/write 调用）内部可拆成多条 FC 子操作
  * （每个子操作 = 一条 FC 命令 = 一个 pending 槽）。组把「本 host 请求的全部
@@ -45,7 +45,7 @@
 #define FTL_GROUP_MAX (FTL_PENDING_MAX)
 
 /**
- * @brief 组 gi 在 owners 位掩码里的位（pend_req_t.owners / pend_group_t 的约定）。
+ * @brief 组 gi 在 owners 位掩码里的位（pend_req_s.owners / pend_group_s 的约定）。
  * 组号由 pend_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 DWORD 位宽。
  * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。
  *
@@ -60,7 +60,7 @@ static inline DWORD ftl_group_bit(WORD gi)
 
 /* ── 操作类型：完成路径的判别依据 ──
  * 必须由 submit 侧显式给出，**不可**从 buffer 字段反推（见文件头 ⚠）。 */
-typedef enum
+typedef enum PENDING_OPERATION_E
 {
     PENDING_OP_READ          = 0, /* 读：completion 把 NAND 数据写回 buffer */
     PENDING_OP_WRITE         = 1, /* 写：completion 确认 Journal + L2P（buffer 只是数据源，不再读它） */
@@ -94,8 +94,8 @@ typedef enum
  *   FIRST        —— 序列首条：没有本序列的上一页，FAILC 是残留，不据此结算；
  *   INTERMEDIATE —— 中间页：FAILC 结算**上一页**，本页等下一命令；
  *   END          —— 末条（10h）：FAILC 结算上一页，FAIL/NAND_FAIL 结算本页。
- * 值域 0..3；`-fshort-enums` 下落为 1 B（不改变 pend_req_t 的布局）。 */
-typedef enum
+ * 值域 0..3；`-fshort-enums` 下落为 1 B（不改变 pend_req_s 的布局）。 */
+typedef enum PENDING_CACHE_ROLE_E
 {
     PEND_CACHE_ROLE_NONE = 0, /* 非 cache program 成员（普通写 / page0 / 读） */
     PEND_CACHE_ROLE_FIRST,
@@ -104,7 +104,7 @@ typedef enum
 } pend_cache_role_e;
 
 /* ── op 谓词（判别一律走这里，调用点不裸比枚举值）──
- * 形参取 BYTE：pend_req_t.op / pend_group_t.op 都是 BYTE 字段。
+ * 形参取 BYTE：pend_req_s.op / pend_group_s.op 都是 BYTE 字段。
  *
  * 语义：
  *   is_read / is_write —— **活跃**子操作，完成路径按它们分派（拷数据 / 确认记账）。
@@ -118,7 +118,7 @@ typedef enum
  *
  * @return true = 读类活跃子操作。
  */
-static inline bool pend_op_is_read(BYTE op)
+static inline BOOL pend_op_is_read(BYTE op)
 {
     return (op == PENDING_OP_READ) || (op == PENDING_OP_READ_CACHE);
 }
@@ -130,7 +130,7 @@ static inline bool pend_op_is_read(BYTE op)
  *
  * @return true = 写类活跃子操作。
  */
-static inline bool pend_op_is_write(BYTE op)
+static inline BOOL pend_op_is_write(BYTE op)
 {
     return (op == PENDING_OP_WRITE) || (op == PENDING_OP_WRITE_PAGE0);
 }
@@ -142,7 +142,7 @@ static inline bool pend_op_is_write(BYTE op)
  *
  * @return true = WRITE_CONFIRM（命令已脱钩，由写确认服务推进）。
  */
-static inline bool pend_op_is_write_confirm(BYTE op)
+static inline BOOL pend_op_is_write_confirm(BYTE op)
 {
     return op == PENDING_OP_WRITE_CONFIRM;
 }
@@ -154,13 +154,13 @@ static inline bool pend_op_is_write_confirm(BYTE op)
  *
  * @return true = WRITE_CACHE。
  */
-static inline bool pend_op_is_write_cache(BYTE op)
+static inline BOOL pend_op_is_write_cache(BYTE op)
 {
     return op == PENDING_OP_WRITE_CACHE;
 }
 
 /* 字段按对齐从大到小排列；_Static_assert 钉住 36B。 */
-typedef struct
+typedef struct PENDING_REQUEST_S
 {
     /* ── 4B 对齐 ── */
     DWORD owners;   /* ★ 贡献本子操作的**组位掩码**（bit gi = ftl_group_bit(gi)）。读恒单组；
@@ -184,7 +184,7 @@ typedef struct
     WORD command_id; /* FC command_id */
 
     /* ── 1B 对齐 ── */
-    bool              used;        /* true: 槽位占用 */
+    BOOL              used;        /* true: 槽位占用 */
     pend_op_e         op;          /* 完成路径判别（读/写），见文件头 ⚠ */
     BYTE              n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
     BYTE              cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
@@ -193,16 +193,16 @@ typedef struct
     BYTE              cache_gen;   /* cache program 成员所属**写序列代号**：完成时与
                                     * `cache_stream.seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
                                     * 取代，本页不得确认映射（迟到完成，RISK-CACHE-19） */
-} pend_req_t;
+} pend_req_s;
 
-_Static_assert(sizeof(pend_req_t) == 36, "pend_req_t 布局漂移（期望 36B）");
+_Static_assert(sizeof(pend_req_s) == 36, "pend_req_s 布局漂移（期望 36B）");
 
 /* pending 只有 new_pba/new_pba1 两个 plane 字段：维度一旦 >2，必须显式改结构，
  * 不能靠 `pba[0]/pba[1]` 静默漏掉新增 plane（H39）。 */
-_Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2 需扩展结构");
+_Static_assert(PLANE_NUM == 2U, "pend_req_s 固定两 plane 字段；PLANE_NUM>2 需扩展结构");
 
 /*
- * pend_group_t — 一条 host 请求的完成组（见文件头）
+ * pend_group_s — 一条 host 请求的完成组（见文件头）
  *
  * 生命周期：pend_group_alloc 建（used=1）→ 逐个 pending 子操作完成时
  * pend_group_complete_subop_multi 递减 outstanding → 全部完成（next==total 且
@@ -219,19 +219,19 @@ _Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2
  *   消费几个 LBA 也由它决定。这样"怎么拆"不外泄给调用者。
  */
 /* 字段按对齐从大到小排列；_Static_assert 钉住 48B（-fshort-enums：枚举 1B）。 */
-typedef struct
+typedef struct PENDING_COMPLETION_S
 {
     void                  *buffer;          /* host 基缓冲 */
     volatile BYTE         *complete_flag;   /* 全部子操作完成后置 1 */
     volatile ssd_status_e *status_out;      /* 全部子操作完成后写入 agg_status */
-    pending_cb_t           on_complete;     /* 全部子操作完成后调用一次 */
+    pending_cb_fn_t        on_complete;     /* 全部子操作完成后调用一次 */
     void                  *on_complete_ctx; /* 回调上下文 */
-} pend_completion_t;
+} pend_comp_s;
 
-typedef struct
+typedef struct PENDING_GROUP_S
 {
-    QWORD             lba;        /* host 起始 LBA */
-    pend_completion_t completion; /* 完成时交付的缓冲/标志/回调 */
+    QWORD       lba;        /* host 起始 LBA */
+    pend_comp_s completion; /* 完成时交付的缓冲/标志/回调 */
 
     DWORD total;         /* 本请求（run）LBA 总数 */
     DWORD next;          /* 已下发到的 LBA 偏移 */
@@ -239,28 +239,28 @@ typedef struct
 
     WORD         outstanding; /* 已下发、未完成的子操作数 */
     BYTE         stalls;      /* 连续无进展 drain 轮数 */
-    bool         used;        /* 槽位占用 */
+    BOOL         used;        /* 槽位占用 */
     pend_op_e    op;          /* PENDING_OP_READ / PENDING_OP_WRITE */
     ssd_status_e agg_status;  /* 粘性错误 */
-} pend_group_t;
+} pend_group_s;
 
-_Static_assert(sizeof(pend_group_t) == 48, "pend_group_t 布局漂移（期望 48B）");
+_Static_assert(sizeof(pend_group_s) == 48, "pend_group_s 布局漂移（期望 48B）");
 
 /*
- * pending_ctx_t — pending / group 两张表的 owner 上下文
+ * pend_ctx_s — pending / group 两张表的 owner 上下文
  *
- * 从 ftl_ctx_t 中提取出来，让需要 pending 的模块（RR / wbuf）只拿这一个
- * owner 上下文，而不是整个 FTL 上下文。两张表仍内嵌在 ftl_ctx_t 中、常驻不拷贝；
- * 模块只持有 `pending_ctx_t *`，所有访问走 pending.c 的 owner API。
+ * 从 ftl_ctx_s 中提取出来，让需要 pending 的模块（RR / wbuf）只拿这一个
+ * owner 上下文，而不是整个 FTL 上下文。两张表仍内嵌在 ftl_ctx_s 中、常驻不拷贝；
+ * 模块只持有 `pend_ctx_s *`，所有访问走 pending.c 的 owner API。
  */
-typedef struct
+typedef struct PENDING_CONTEXT_S
 {
-    pend_req_t   slots[FTL_PENDING_MAX];
-    pend_group_t groups[FTL_GROUP_MAX];
+    pend_req_s   slots[FTL_PENDING_MAX];
+    pend_group_s groups[FTL_GROUP_MAX];
     /* command_id → slots 下标；0xFF = 未绑定。
      * 直接索引后 pend_find 不再线性扫描；脱钩项（FTL_PENDING_CMD_NONE）不登记。 */
     BYTE slot_of[FC_COMMAND_POOL_DEPTH];
-} pending_ctx_t;
+} pend_ctx_s;
 
 /**
  * @brief 是否有**非 cache 序列**的写在飞或待入账（wbuf / GC/WL 的普通写确认）。
@@ -272,29 +272,29 @@ typedef struct
  * @return true = 至少一条 WRITE / WRITE_PAGE0 / WRITE_CONFIRM 且 cache_role==NONE
  *         false = 没有普通写确认
  */
-bool pend_has_foreign_write(const pending_ctx_t *table);
+BOOL pend_has_foreign_write(const pend_ctx_s *table);
 
 /*
- * pend_op_view_t — 按 op 查找一个 pending 槽的只读视图
+ * pend_op_view_s — 按 op 查找一个 pending 槽的只读视图
  *
  * `pend_view_op` 只拷贝字段、**不释放槽**；槽的释放仍由调用者在收尾时走
  * `pend_release_index`。RR 在领取被托管的读子操作时使用。
  */
-typedef struct
+typedef struct PENDING_OPERATION_VIEW_S
 {
     BYTE  index;  /* 槽下标（释放时用） */
     DWORD owners; /* 贡献组位掩码 */
     void *buffer; /* 子操作缓冲 */
     DWORD lba;    /* 子操作起始 LBA */
     BYTE  n_cw;   /* 子操作覆盖的 CW 数 */
-} pend_op_view_t;
+} pend_op_view_s;
 
 /**
  * @brief 清空 pending / group 两张表（per-instance）
  *
- * @param table  pending 表（由 ftl_ctx_t 内嵌持有）
+ * @param table  pending 表（由 ftl_ctx_s 内嵌持有）
  */
-void pend_init(pending_ctx_t *table);
+void pend_init(pend_ctx_s *table);
 
 /**
  * @brief 认领一个空闲 pending 槽并绑定 command_id（**调用者就地逐字段填**）
@@ -312,7 +312,7 @@ void pend_init(pending_ctx_t *table);
  * @param cmd_id  FC command_id；必须 < FC_COMMAND_POOL_DEPTH
  * @return 空闲槽指针；NULL = 表满或 command_id 越界
  */
-pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id);
+pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id);
 
 /**
  * @brief 把已存在的 pending 槽重新绑定到新的 command_id（写重试替换命令时用）。
@@ -323,7 +323,7 @@ pend_req_t *pend_alloc(pending_ctx_t *table, WORD cmd_id);
  * @param req     已存在的 pending 项
  * @param cmd_id  新 command_id；必须 < FC_COMMAND_POOL_DEPTH
  */
-void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id);
+void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id);
 
 /**
  * @brief 把 pending 项与 FC 命令脱钩（command_id 置 FTL_PENDING_CMD_NONE）。
@@ -333,7 +333,7 @@ void pend_bind(pending_ctx_t *table, pend_req_t *req, WORD cmd_id);
  * @param table pending 表
  * @param req   已存在的 pending 项
  */
-void pend_detach_command(pending_ctx_t *table, pend_req_t *req);
+void pend_detach_command(pend_ctx_s *table, pend_req_s *req);
 
 /**
  * @brief 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
@@ -346,7 +346,7 @@ void pend_detach_command(pending_ctx_t *table, pend_req_t *req);
  *
  * @param req 已填好的 pending 项。
  */
-static inline void pend_validate(const pend_req_t *req)
+static inline void pend_validate(const pend_req_s *req)
 {
     (void)req; /* release（NDEBUG）下 ASSERT 被裁空 ⇒ 形参无引用 */
     ASSERT(req->owners != 0U);
@@ -360,7 +360,7 @@ static inline void pend_validate(const pend_req_t *req)
  * @param cmd_id  FC command_id
  * @return 指向 pending 项的指针；NULL 未找到
  */
-pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id);
+pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id);
 
 /**
  * @brief 移除本实例中已完成的 pending 项
@@ -368,7 +368,7 @@ pend_req_t *pend_find(pending_ctx_t *table, WORD cmd_id);
  * @param table     pending 表
  * @param cmd_id  FC command_id
  */
-void pend_remove(pending_ctx_t *table, WORD cmd_id);
+void pend_remove(pend_ctx_s *table, WORD cmd_id);
 
 /**
  * @brief 找**第一个** op 类型匹配的 pending 项（按下标升序）
@@ -381,7 +381,7 @@ void pend_remove(pending_ctx_t *table, WORD cmd_id);
  * @param out_index  输出：命中项的下标（仅返回 1 时有效）
  * @return true 找到，false 无
  */
-bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index);
+BOOL pend_find_op(const pend_ctx_s *table, pend_op_e op, BYTE *out_index);
 
 /**
  * @brief 按 op 取一个 pending 槽的只读视图（不释放槽）
@@ -394,7 +394,7 @@ bool pend_find_op(const pending_ctx_t *table, pend_op_e op, BYTE *out_index);
  * @param out    输出视图（非空；仅返回 true 时有效）
  * @return true 找到，false 无
  */
-bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out);
+BOOL pend_view_op(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out);
 
 /**
  * @brief 按下标释放 pending 项（used=0）
@@ -405,7 +405,7 @@ bool pend_view_op(const pending_ctx_t *table, pend_op_e op, pend_op_view_t *out)
  * @param table    pending 表
  * @param index  pending 槽下标（0..FTL_PENDING_MAX-1）
  */
-void pend_release_index(pending_ctx_t *table, BYTE index);
+void pend_release_index(pend_ctx_s *table, BYTE index);
 
 /**
  * @brief 本实例当前未决（占用）的 pending 项数
@@ -416,9 +416,9 @@ void pend_release_index(pending_ctx_t *table, BYTE index);
  * @param table  pending 表
  * @return 占用槽位数（0..FTL_PENDING_MAX）
  */
-WORD pend_slot_get_count(const pending_ctx_t *table);
+WORD pend_slot_get_count(const pend_ctx_s *table);
 
-/* ── 完成组 API（pend_group_t）── */
+/* ── 完成组 API（pend_group_s）── */
 
 /**
  * @brief 申请一个空闲完成组槽（used=1，字段清零）
@@ -427,7 +427,7 @@ WORD pend_slot_get_count(const pending_ctx_t *table);
  * @param out_gi  输出：组下标（0..FTL_GROUP_MAX-1；仅返回 true 时有效）
  * @return true 成功；false = 组槽满
  */
-bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi);
+BOOL pend_group_alloc(pend_ctx_s *table, BYTE *out_gi);
 
 /**
  * @brief 当前占用（未完成）的组数
@@ -438,7 +438,7 @@ bool pend_group_alloc(pending_ctx_t *table, BYTE *out_gi);
  * @param table  pending 表
  * @return 占用组数（0..FTL_GROUP_MAX）
  */
-WORD pend_group_get_count(const pending_ctx_t *table);
+WORD pend_group_get_count(const pend_ctx_s *table);
 
 /**
  * @brief 组在飞数增减的唯一闸门
@@ -452,7 +452,7 @@ WORD pend_group_get_count(const pending_ctx_t *table);
  * @param table  pending 表
  * @param gi   组下标（0..FTL_GROUP_MAX-1；组必须 used）
  */
-static inline void pend_group_add_subop(pending_ctx_t *table, WORD gi)
+static inline void pend_group_add_subop(pend_ctx_s *table, WORD gi)
 {
     ASSERT(gi < FTL_GROUP_MAX);
     ASSERT(table->groups[gi].used == true);
@@ -460,7 +460,7 @@ static inline void pend_group_add_subop(pending_ctx_t *table, WORD gi)
     table->groups[gi].outstanding++;
 }
 
-void pend_group_drop_subop(pending_ctx_t *table, WORD gi);
+void pend_group_drop_subop(pend_ctx_s *table, WORD gi);
 
 /**
  * @brief 一个子操作完成、归属**多个组**：逐组聚合
@@ -473,7 +473,7 @@ void pend_group_drop_subop(pending_ctx_t *table, WORD gi);
  * @param owners     贡献组位掩码（bit gi）
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
-void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_status_e sub_status);
+void pend_group_complete_subop_multi(pend_ctx_s *table, DWORD owners, ssd_status_e sub_status);
 
 /**
  * @brief 若组已全部下发且全部完成则发通知并释放槽
@@ -484,7 +484,7 @@ void pend_group_complete_subop_multi(pending_ctx_t *table, DWORD owners, ssd_sta
  * @param table pending 表
  * @param gi    组下标
  */
-void pend_group_maybe_complete(pending_ctx_t *table, WORD gi);
+void pend_group_maybe_complete(pend_ctx_s *table, WORD gi);
 
 /**
  * @brief 是否还有写组的下一个 LBA 落在指定 pair 窗口
@@ -495,7 +495,7 @@ void pend_group_maybe_complete(pending_ctx_t *table, WORD gi);
  * @param window pair 窗口基址
  * @return true 有写组的 next 落在本窗口
  */
-bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window);
+BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window);
 
 /* ── write-confirm park（docs §5「Confirm → pending 服务」）──
  *
@@ -517,7 +517,7 @@ bool pend_group_has_window_pending(const pending_ctx_t *table, DWORD window);
  * @param pending_idx 该子操作的 pending 槽下标。
  * @param owners      贡献本子操作的组位掩码。
  */
-void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners);
+void pend_confirm_park(pend_ctx_s *table, WORD pending_idx, DWORD owners);
 
 /**
  * @brief 某槽是否处于待入账态（只读查询）。
@@ -526,12 +526,12 @@ void pend_confirm_park(pending_ctx_t *table, WORD pending_idx, DWORD owners);
  * @param index 槽下标。
  * @return true 已占用且 op 为 WRITE_CONFIRM。
  */
-static inline bool pend_confirm_is_parked(const pending_ctx_t *table, BYTE index)
+static inline BOOL pend_confirm_is_parked(const pend_ctx_s *table, BYTE index)
 {
     ASSERT(table != NULL);
     ASSERT(index < FTL_PENDING_MAX);
 
-    const pend_req_t *pending = &table->slots[index];
+    const pend_req_s *pending = &table->slots[index];
 
     return (pending->used == true) && pend_op_is_write_confirm(pending->op);
 }
@@ -544,7 +544,7 @@ static inline bool pend_confirm_is_parked(const pending_ctx_t *table, BYTE index
  * @return true 已超时；
  *         false 未超时，或尚未起算（park_ms == 0）。
  */
-static inline bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_ms)
+static inline BOOL pend_confirm_is_expired(const pend_req_s *pending, DWORD now_ms)
 {
     ASSERT(pending != NULL);
 
@@ -563,7 +563,7 @@ static inline bool pend_confirm_is_expired(const pend_req_t *pending, DWORD now_
  * @note 顺序不变量在本函数内维护：owners 必须在释放**之前**取走 —— 组完成通知
  *       可能重入提交并复用本槽。
  */
-void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status);
+void pend_confirm_settle(pend_ctx_s *table, BYTE index, ssd_status_e status);
 
 /**
  * @brief 当前待入账项数（日志用：必须报「同时有多少条在等」）。
@@ -571,6 +571,6 @@ void pend_confirm_settle(pending_ctx_t *table, BYTE index, ssd_status_e status);
  * @param table pending 表。
  * @return 待入账项数。
  */
-WORD pend_confirm_get_count(const pending_ctx_t *table);
+WORD pend_confirm_get_count(const pend_ctx_s *table);
 
 #endif /* FTL_PENDING_H */

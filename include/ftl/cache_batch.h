@@ -24,7 +24,7 @@
  */
 
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR */
-#include "ftl_type.h"   /* ftl_ctx_t */
+#include "ftl_type.h"   /* ftl_ctx_s */
 #include "ssd_types.h"
 
 /* ── cache read ──
@@ -50,7 +50,7 @@
  * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展（RISK-CACHE-20）。 */
 #define FTL_CACHE_READ_MAX_RUN_PAIRS (128U)
 
-typedef enum
+typedef enum FTL_CACHE_READ_RESULT_E
 {
     FTL_CACHE_READ_DECLINED = 0, /* 条件不满足：调用者回退普通读 */
     FTL_CACHE_READ_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
@@ -72,7 +72,7 @@ typedef enum
  *         FTL_CACHE_READ_OK 已提交；FTL_CACHE_READ_AGAIN 资源/加载瞬态，本轮停止；
  *         FTL_CACHE_READ_ERROR 永久错误，组报 IO_ERROR。
  */
-ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
+ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 /* ── cache program ──
  * 窗口页数上限 = host 单次写传输 16 KiB / 4 KiB 页 = 4（CFG_TUD_MSC_EP_BUFSIZE）。
@@ -80,7 +80,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, v
  * 不是 NAND FIFO 深度。 */
 #define FTL_CACHE_WRITE_MAX_PAGES (4U)
 
-typedef enum
+typedef enum FTL_CACHE_WRITE_RESULT_E
 {
     FTL_CACHE_WRITE_DECLINED = 0, /* 条件不满足：调用者回退 wbuf */
     FTL_CACHE_WRITE_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
@@ -111,6 +111,6 @@ typedef enum
  *       续接（44/48h 每条自带地址，见 `docs/reference/datasheet_mt29f_cache_ops.md`
  *       §5/§6）；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
  */
-ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
+ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 #endif /* FTL_CACHE_BATCH_H */

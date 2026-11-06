@@ -13,7 +13,7 @@
  * **一条 record = 1 页**，块满换池内下一块并先擦）——池首块/块数由
  * ftl/metadata.h 按几何推导（「固定元数据区布局」）。
  * bad_map 覆盖全部 FTL_BLOCK_TOTAL 个 Block（NAND 持久化格式，保持不变）。
- * RAM 运行时坏块位统一存于 bst_block_t.state（Block State Table 单数据源），
+ * RAM 运行时坏块位统一存于 bst_block_s.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
  *
  * 写模型与目录检查点 / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）：
@@ -43,7 +43,7 @@
  * 只能靠全量重建数据页 META 兜底。成功重建后清除。 */
 #define BBT_FLAG_REBUILD_REQUIRED (1UL)
 
-typedef struct
+typedef struct BBT_HEADER_S
 {
     DWORD magic;                        /* BBT_MAGIC */
     DWORD sequence;                     /* 单调递增，最新有效 */
@@ -51,10 +51,10 @@ typedef struct
     DWORD bad_count;                    /* 坏块数 */
     DWORD reserved[3];                  /* [0] = FORMAT_IN_PROGRESS；[1] = REBUILD_REQUIRED；其余写 0 */
     BYTE  bad_map[BBT_BITMAP_SIZE];     /* 4096 bit = 512B */
-} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，页完整性由 FC 保证）*/
+} __attribute__((packed)) bbt_header_s; /* 4+4+4+4+12+512 = 540B（无独立 CRC，页完整性由 FC 保证）*/
 
-_Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
-_Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
+_Static_assert(sizeof(bbt_header_s) == 540U, "BBT header 布局漂移（期望 540B）");
+_Static_assert(sizeof(bbt_header_s) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
 
 /* ── bitmap / 候选块原语 ── */
 
@@ -65,7 +65,7 @@ _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得�
  * @param block    Block 编号
  * @return true 坏块，false 好块
  */
-static inline bool bbt_is_bad(const BYTE *bad_map, WORD block)
+static inline BOOL bbt_is_bad(const BYTE *bad_map, WORD block)
 {
     ASSERT(block < BBT_MAX_BLOCKS);
 
@@ -108,7 +108,7 @@ static inline void bbt_set_bad(BYTE *bad_map, WORD block)
  * @param block 物理块号（plane 内块号）
  * @return true 属于候选池，false 不属于
  */
-static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
+static inline BOOL bbt_block_is_candidate(const md_ring_s *ring, WORD block)
 {
     if ((ring != NULL) && (ring->block_count >= 2U))
     {
@@ -138,7 +138,7 @@ static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
  * @note 加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
  *       坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
  */
-void bbt_init(alc_t *alloc);
+void bbt_init(alc_s *alloc);
 
 /**
  * @brief 介质固定元数据区里是否已有合法的 FTL 页
@@ -153,7 +153,7 @@ void bbt_init(alc_t *alloc);
  * @return true = 至少一页是合法 FTL 页（介质已格式化过）
  *         false = 空片
  */
-bool bbt_medium_has_ftl_data(alc_t *alloc);
+BOOL bbt_medium_has_ftl_data(alc_s *alloc);
 
 /**
  * @brief 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
@@ -174,12 +174,12 @@ bool bbt_medium_has_ftl_data(alc_t *alloc);
  * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK；FTL_ERROR = ① 的 BBT save 失败（未擦用户块，可重试）。
  */
-ftl_status_e bbt_format_erase(alc_t *alloc);
+ftl_status_e bbt_format_erase(alc_s *alloc);
 
 /**
  * @brief 运行时标记坏块
  *
- * ① bst_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
+ * ① bst_block_s.state 置 BAD + 清有效页位图（BST 单数据源）
  * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_handle 攒批执行
  *
  * @param alloc  Allocator 上下文
@@ -187,7 +187,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc);
  * @return FTL_OK（含“已经是 BAD”的幂等早退）；FTL_ERROR 参数非法 / 越界。
  *         ⚠ 已 BAD 时**不重复** `bad_count++`、不重复消耗 Spare、不重复置 dirty。
  */
-ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
+ftl_status_e bbt_mark_bad(alc_s *alloc, WORD gblock);
 
 /**
  * @brief 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
@@ -196,7 +196,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
  *
  * @param alloc Allocator 上下文（dirty / dirty_gen 在 alloc->bbt）
  */
-void bbt_dirty_note(alc_t *alloc);
+void bbt_dirty_note(alc_s *alloc);
 
 /**
  * @brief 将 BBT 追加写入 NAND BBT 池
@@ -206,7 +206,7 @@ void bbt_dirty_note(alc_t *alloc);
  * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，per-instance）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 池定位 / prepare / 写失败。
  */
-ftl_status_e bbt_save(alc_t *alloc);
+ftl_status_e bbt_save(alc_s *alloc);
 
 /**
  * @brief BBT 后台持久化入口（typed handle；提交即返回）
@@ -228,7 +228,7 @@ ftl_status_e bbt_save(alc_t *alloc);
  *
  * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  */
-void bbt_handle(alc_t *alloc);
+void bbt_handle(alc_s *alloc);
 
 /**
  * @brief 从**指定 plane 的** Spare Pool 补充 Free Pool
@@ -243,7 +243,7 @@ void bbt_handle(alc_t *alloc);
  * @param plane  坏块所属 plane（取同 plane 的替换块）
  * @return FTL_OK 补充成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）
  */
-ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
+ftl_status_e bbt_spare_refill(alc_s *alloc, BYTE plane);
 
 /**
  * @brief 逐块探测并打印坏块图（**诊断用**）
@@ -278,6 +278,6 @@ ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
  * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param do_erase  false = 只读（非破坏性）；true = 逐块擦除并额外判擦除失败
  */
-void bbt_print_bad_map(alc_t *alloc, bool do_erase);
+void bbt_print_bad_map(alc_s *alloc, BOOL do_erase);
 
 #endif /* FTL_BBT_H */

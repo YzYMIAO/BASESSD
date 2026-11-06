@@ -123,9 +123,9 @@ static uint32_t l2_rand(const char *test, const char *tag)
  * （test_cmd_build 断言 cw == 0，见 fc_test_common.c:308）。
  *
  * 就地 emit 一条 test_trace_detail（debug 档）——一处覆盖全部用例，不必每个用例体各写一行。 */
-static nand_addr_t l2_addr_draw(const char *test, uint8_t plane)
+static nand_addr_s l2_addr_draw(const char *test, uint8_t plane)
 {
-    const nand_addr_t addr = {
+    const nand_addr_s addr = {
         .lun   = 0U,
         .block = (uint16_t)(l2_rand(test, "block") % (uint32_t)BLOCKS_PER_PLANE),
         .plane = plane,
@@ -152,9 +152,9 @@ static nand_addr_t l2_addr_draw(const char *test, uint8_t plane)
  *
  * 地址由调用者传（v1.25 起不再是固定页，见「本层地址抽样」段）：命令的 **pba 与 meta 同源**
  * ——两者都从 addr 派生。改造前调用者传的 meta 就是同一个固定地址的 PBA，故这里是等价替换。 */
-static fc_command_t *l2_cmd(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
+static fc_cmd_s *l2_cmd(const nand_addr_s *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
 {
-    fc_cmd_conf_t config = {0};
+    fc_cmd_cfg_s config = {0};
 
     ASSERT(addr != NULL);
 
@@ -170,7 +170,7 @@ static fc_command_t *l2_cmd(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t
  * 共享夹具的 test_verify_cw_status_all_success 只看 SUCCESS 位，而
  * descriptor 成功 = FC_CW_STATUS_UNUSED(0)；CRC_ERROR / MATA_ERROR 单独置位
  * 而不被发现；本层的正向用例要的是"干净读回"，故单独加这条更严的判据。 */
-static void l2_verify_all_ready(const fc_command_t *cmd)
+static void l2_verify_all_ready(const fc_cmd_s *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
@@ -179,13 +179,13 @@ static void l2_verify_all_ready(const fc_command_t *cmd)
 }
 
 /* 逐 desc 与源表比对，返回是否**完全一致**（不 assert——供「应当不同」的用例取反）。 */
-static uint8_t l2_user_matches_source(const fc_command_t *cmd)
+static uint8_t l2_user_matches_source(const fc_cmd_s *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        const fc_descriptor_t *desc   = test_cw_desc(cmd, i);
-        const uint8_t         *buf    = test_cw_user(cmd, i);
-        const uint8_t         *expect = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
+        const fc_desc_s *desc   = test_cw_desc(cmd, i);
+        const uint8_t   *buf    = test_cw_user(cmd, i);
+        const uint8_t   *expect = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
 
         for (uint16_t j = 0U; j < FC_BUFFER_USER_SIZE; j++)
         {
@@ -200,7 +200,7 @@ static uint8_t l2_user_matches_source(const fc_command_t *cmd)
 
 /* ── 编码产物自证（见文件头「产物自证」） ── */
 
-static void l2_verify_meta_written(const fc_command_t *cmd)
+static void l2_verify_meta_written(const fc_cmd_s *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
@@ -220,13 +220,13 @@ static void l2_verify_meta_written(const fc_command_t *cmd)
 
 /* ⚠ 必须拿**源槽**（明文）算 CRC，不能拿 desc 的 USER 区——random=ON 时那里已被加扰，
  *   而 CRC 是对加扰**之前**的明文算的（fc_crc_engine.h 头注）。 */
-static void l2_verify_crc_written(const fc_command_t *cmd)
+static void l2_verify_crc_written(const fc_cmd_s *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        const fc_descriptor_t *desc   = test_cw_desc(cmd, i);
-        const uint8_t         *plain  = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
-        uint32_t               stored = 0U;
+        const fc_desc_s *desc   = test_cw_desc(cmd, i);
+        const uint8_t   *plain  = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
+        uint32_t         stored = 0U;
 
         (void)memcpy(&stored, test_cw_base(cmd, i) + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
         munit_assert_uint32(stored, ==, fc_crc_compute(plain));
@@ -244,7 +244,7 @@ static void l2_verify_crc_written(const fc_command_t *cmd)
  * 判据取"非全 0"而不是"等于某个期望值"：parity 是 BCH 生成多项式的余式，期望值得
  * 另写一份编码器才算得出；而"整段全 0"正是"根本没编码"的指纹（未初始化 / 擦除态）。
  * 哨兵思想与 meta / crc 两条一致，只是判据更弱——够用即可。 */
-static void l2_verify_parity_nonzero(const fc_command_t *cmd)
+static void l2_verify_parity_nonzero(const fc_cmd_s *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
@@ -267,10 +267,10 @@ static void l2_verify_parity_nonzero(const fc_command_t *cmd)
 /* buffer 级往返：建链 → 填明文 → encode → process_read → 校验。
  * **不提交**——FC 提交时会自己再跑一遍 encode / process_read，重复编码会让用例空转。
  * 返回链上的 CW 数，供调用者打证据摘要（避免调用者按位图 popcount 反推）。 */
-static uint8_t l2_buffer_round_trip(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
+static uint8_t l2_buffer_round_trip(const nand_addr_s *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
 {
-    fc_command_t *cmd      = l2_cmd(addr, cw_bitmap, random_mode, crc_mode);
-    uint8_t       cw_count = test_cw_count(cmd);
+    fc_cmd_s *cmd      = l2_cmd(addr, cw_bitmap, random_mode, crc_mode);
+    uint8_t   cw_count = test_cw_count(cmd);
 
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -308,14 +308,15 @@ static uint8_t l2_buffer_round_trip(const nand_addr_t *addr, uint32_t cw_bitmap,
  *
  * 区域内的偏移仍由框架 PRNG 取（运行器打印 seed，失败可 --seed 原样重放）。 */
 typedef struct
+    L2_CRC_CASE_S
 {
     const char *name;
     uint32_t    lo; /* 注入字节区间 [lo, hi)（CW 内偏移） */
     uint32_t    hi;
     uint8_t     expect_ok; /* 1 = 注入后 CRC 仍通过（该区域不在 CRC 覆盖内） */
-} l2_crc_case_t;
+} l2_crc_case_s;
 
-static const l2_crc_case_t l2_crc_cases[] = {
+static const l2_crc_case_s l2_crc_cases[] = {
     {     "user-1",  FC_CRC_USER_OFFSET, FC_CRC_USER_OFFSET + FC_BUFFER_USER_SIZE, 0U},
     {"crc-field-1",    FC_CRC_META_SIZE,     FC_CRC_META_SIZE + FC_CRC_FIELD_SIZE, 0U},
     {     "meta-1",                  0U,                         FC_CRC_META_SIZE, 1U},
@@ -336,7 +337,7 @@ static MunitParameterEnum l2_crc_params[] = {
 /* 按 munit 的 `case` 形参名在场景表里查行；表外名字返回 NULL（调用者断言非 NULL）。
  * 本文件五张场景表（crc / ecc / enc / rt / bm）各配一份同形 helper：munit 的 parameters
  * 只传字符串，行索引靠名字查回来，避免"名字数组"与"场景表"两处错位。 */
-static const l2_crc_case_t *l2_crc_case_find(const char *name)
+static const l2_crc_case_s *l2_crc_case_find(const char *name)
 {
     uint32_t i;
 
@@ -370,7 +371,7 @@ static const l2_crc_case_t *l2_crc_case_find(const char *name)
  * 步骤级**不原地解码**，故直接翻回来即可，不依赖"解码不改 buffer"这类假设。 */
 static MunitResult test_crc_step_detect(const MunitParameter params[], void *data)
 {
-    const l2_crc_case_t *c  = l2_crc_case_find(munit_parameters_get(params, "case"));
+    const l2_crc_case_s *c  = l2_crc_case_find(munit_parameters_get(params, "case"));
     uint8_t             *cw = test_cw_scratch(0U);
     uint32_t             off;
     uint32_t             bit;
@@ -380,7 +381,7 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
     test_trace_begin();
 
     /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
-    const nand_addr_t addr = l2_addr_draw("crc_step_detect", 0U);
+    const nand_addr_s addr = l2_addr_draw("crc_step_detect", 0U);
 
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
@@ -417,11 +418,12 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
  * 字节内反序会得到另一套游程分布，两处必须用同一约定。 */
 
 typedef struct
+    L2_BIT01_S
 {
     uint32_t hist[2][16]; /* hist[b][k] = 长度 k+1 的游程个数；k=15 表示 >=16（钳位） */
     uint32_t ones;        /* 1 的总个数 */
     uint32_t runs;        /* 游程总数（= 两个 hist 之和） */
-} l2_bit01_t;
+} l2_bit01_s;
 
 /* 游程长度 → 桶号。>=16 全部钳进第 15 桶——**不能丢弃**：全 0xFF 的明文就一个
  * 长度 4096 的游程、PAA 重复的明文有 128 个 >=16 的 0 游程，正是加扰要治的病。 */
@@ -441,7 +443,7 @@ static uint8_t l2_run_bucket(uint32_t run)
  *
  * 随机数据每步 1/2 概率翻转 ⇒ 段数 ≈ 位数的一半（2048）、平均段长 2（几何分布 P(len=k)=2^-k）；
  * 推导与判据盲区见 fc_nand_ut.md §5.6，「目标 = 独立」见 fc_nand_design.md §5.4。 */
-static void l2_bit01_analyze(const uint8_t *data, uint16_t len, l2_bit01_t *st)
+static void l2_bit01_analyze(const uint8_t *data, uint16_t len, l2_bit01_s *st)
 {
     uint16_t i;
     uint8_t  k;
@@ -488,13 +490,13 @@ static void l2_bit01_analyze(const uint8_t *data, uint16_t len, l2_bit01_t *st)
 
 /* 平均游程 ×100 = 总位数 × 100 ÷ 段数（整数比较，避开浮点与 %f）。
  * 随机数据每步 1/2 概率翻转 ⇒ 平均段长 = 2.00（推导见 fc_nand_ut.md §5.6）。 */
-static uint32_t l2_bit01_mean_x100(const l2_bit01_t *st, uint16_t len)
+static uint32_t l2_bit01_mean_x100(const l2_bit01_s *st, uint16_t len)
 {
     return (st->runs == 0U) ? 0U : (((uint32_t)len * 8U * 100U) / st->runs);
 }
 
 /* 与"恰好一半"的偏离量（bit 数）。 */
-static uint32_t l2_bit01_bias(const l2_bit01_t *st, uint16_t len)
+static uint32_t l2_bit01_bias(const l2_bit01_s *st, uint16_t len)
 {
     const uint32_t half = (uint32_t)len * 4U;
 
@@ -502,7 +504,7 @@ static uint32_t l2_bit01_bias(const l2_bit01_t *st, uint16_t len)
 }
 
 /* 把统计结果打成日志（上板后照这个分布收紧阈值）。只打非空的桶。 */
-static void l2_bit01_log(const char *tag, const l2_bit01_t *st, uint16_t len)
+static void l2_bit01_log(const char *tag, const l2_bit01_s *st, uint16_t len)
 {
     uint8_t k;
 
@@ -555,7 +557,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         uint8_t *plain         = test_cw_scratch(1U);
         /* 取一个完整合法地址：meta 直接取它的 PBA——低 3 位天然是 plane/cw，
          * 与建链时 desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw 同构。 */
-        const nand_addr_t addr = {
+        const nand_addr_s addr = {
             .lun   = 0U,
             .block = (uint16_t)munit_rand_int_range(0, BLOCKS_PER_PLANE - 1),
             .plane = (uint8_t)munit_rand_int_range(0, PLANE_NUM - 1),
@@ -565,8 +567,8 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         const DWORD    paa  = paa_from_addr(&addr);
         const uint32_t meta = (uint32_t)pba_from_addr(&addr);
         const uint32_t seed = fc_random_seed_from_meta(meta);
-        l2_bit01_t     before;
-        l2_bit01_t     after;
+        l2_bit01_s     before;
+        l2_bit01_s     after;
 
         /* 明文：常量图案，或本 CW 的 PAA 重复（后者是真实写路径的图案） */
         if (kind == 2U)
@@ -657,7 +659,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
 /* 造一块"写路径形态"的 CW：META + USER(PAA 明文) + CRC + ECC。
  * 不含加扰——加扰是正交的一步（见 test_scramble_whiten），ECC 覆盖整个 data[0..520)，
  * 与 USER 区是否已加扰无关。ref 非 NULL 时留一份基准副本（比对用）。 */
-static void l2_ecc_cw_build(const nand_addr_t *addr, uint8_t *cw, uint8_t *ref)
+static void l2_ecc_cw_build(const nand_addr_s *addr, uint8_t *cw, uint8_t *ref)
 {
     ASSERT(addr != NULL);
 
@@ -724,23 +726,24 @@ static void l2_ecc_flip(uint8_t *cw, uint32_t lo, uint32_t hi, uint32_t k)
  * 覆盖面：干净 / META / CRC 字段 / USER / k=2..t 的整数据区 / parity 单侧 k=1 与
  * k=t / 数据+parity 混合 / 超能力边界。CRC 字段单列是因为它**自身也被 ECC 保护**——
  * 若 ECC 修不好 CRC 字段，Pass 3 的 CRC 校验会跟着把这一页判错。 */
-typedef enum
+typedef enum L2_ECC_EXPECT_E
 {
     L2_ECC_EXACT,
     L2_ECC_BOUND
-} l2_ecc_expect_t;
+} l2_ecc_expect_e;
 
 typedef struct
+    L2_ECC_CASE_S
 {
     const char     *name;
     uint32_t        d_lo; /* 数据区注入区间（bit）；d_k == 0 时不参与 */
     uint32_t        d_hi;
     uint32_t        d_k; /* 数据区注入 bit 数 */
     uint32_t        p_k; /* parity 区注入 bit 数 */
-    l2_ecc_expect_t expect;
-} l2_ecc_case_t;
+    l2_ecc_expect_e expect;
+} l2_ecc_case_s;
 
-static const l2_ecc_case_t l2_ecc_cases[] = {
+static const l2_ecc_case_s l2_ecc_cases[] = {
     {   "clean",             0U, L2_ECC_DATA_BITS, 0U, 0U, L2_ECC_EXACT},
     {  "meta-1",             0U, L2_ECC_META_BITS, 1U, 0U, L2_ECC_EXACT},
     {   "crc-1",  L2_ECC_CRC_LO,    L2_ECC_CRC_HI, 1U, 0U, L2_ECC_EXACT},
@@ -780,7 +783,7 @@ static MunitParameterEnum l2_ecc_params[] = {
 };
 
 /* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
-static const l2_ecc_case_t *l2_ecc_case_find(const char *name)
+static const l2_ecc_case_s *l2_ecc_case_find(const char *name)
 {
     uint32_t i;
 
@@ -820,7 +823,7 @@ static const l2_ecc_case_t *l2_ecc_case_find(const char *name)
  * ecc_bits 预置 0xAA 当哨兵——证明解码**确实写了**它，而不是"恰好为 0"（哨兵取 0 就分不开）。 */
 static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 {
-    const l2_ecc_case_t *c        = l2_ecc_case_find(munit_parameters_get(params, "case"));
+    const l2_ecc_case_s *c        = l2_ecc_case_find(munit_parameters_get(params, "case"));
     uint8_t             *cw       = test_cw_scratch(0U);
     uint8_t             *ref      = test_cw_scratch(1U);
     uint8_t             *inj      = test_cw_scratch(2U); /* 仅 BOUND 用：注入后、解码前的快照 */
@@ -833,7 +836,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
     test_trace_begin();
 
     /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
-    const nand_addr_t addr = l2_addr_draw("ecc_step", 0U);
+    const nand_addr_s addr = l2_addr_draw("ecc_step", 0U);
 
     munit_assert_true(c != NULL); /* 只有 --param case 传了表外的名字才会是 NULL */
     total = c->d_k + c->p_k;      /* 期望纠正数 = 数据区注入数 + parity 区注入数 */
@@ -922,6 +925,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
  **************************************************************************/
 
 typedef struct
+    L2_ENC_CASE_S
 {
     const char *name;
     uint32_t    cw_bitmap;
@@ -929,9 +933,9 @@ typedef struct
     uint8_t     crc_mode;
     uint8_t     n_cw;         /* 期望链上 desc 数 */
     uint8_t     expect_plain; /* 1 = encode 后 USER 区仍等于明文 */
-} l2_enc_case_t;
+} l2_enc_case_s;
 
-static const l2_enc_case_t l2_enc_cases[] = {
+static const l2_enc_case_s l2_enc_cases[] = {
     {"random-off-4cw", L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE, CW_NUM, 1U},
     { "random-on-4cw", L2_BM_PLANE0_ALL,  FC_RANDOM_ENABLE, FC_CRC_ENABLE, CW_NUM, 0U},
     {     "single-cw",            0x01U, FC_RANDOM_DISABLE, FC_CRC_ENABLE,     1U, 1U},
@@ -955,7 +959,7 @@ static MunitParameterEnum l2_enc_params[] = {
 };
 
 /* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
-static const l2_enc_case_t *l2_enc_case_find(const char *name)
+static const l2_enc_case_s *l2_enc_case_find(const char *name)
 {
     uint32_t i;
 
@@ -991,15 +995,15 @@ static const l2_enc_case_t *l2_enc_case_find(const char *name)
  * n_cw 一并钉住：建链几何错（多 / 少一条 desc）会先在这里露头。 */
 static MunitResult test_encode(const MunitParameter params[], void *data)
 {
-    const l2_enc_case_t *c;
-    fc_command_t        *enc;
+    const l2_enc_case_s *c;
+    fc_cmd_s            *enc;
 
     (void)data;
 
     test_trace_begin();
 
     /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
-    const nand_addr_t addr = l2_addr_draw("encode", 0U);
+    const nand_addr_s addr = l2_addr_draw("encode", 0U);
 
     c = l2_enc_case_find(munit_parameters_get(params, "case"));
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
@@ -1033,8 +1037,8 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
 
     test_trace_begin();
 
-    const nand_addr_t addr = l2_addr_draw("encode_crc_disabled", 0U);
-    fc_command_t     *enc  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
+    const nand_addr_s addr = l2_addr_draw("encode_crc_disabled", 0U);
+    fc_cmd_s         *enc  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
 
     munit_assert_uint32(test_cw_count(enc), ==, CW_NUM);
 
@@ -1093,14 +1097,15 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
  * 会把 case 名带进报错，且 `--param case single-cw` 能单跑（补 munit_parameters_get
  * 换来的能力）。 */
 typedef struct
+    L2_RT_CASE_S
 {
     const char *name;
     uint32_t    cw_bitmap;
     uint8_t     random_mode;
     uint8_t     crc_mode;
-} l2_rt_case_t;
+} l2_rt_case_s;
 
-static const l2_rt_case_t l2_rt_cases[] = {
+static const l2_rt_case_s l2_rt_cases[] = {
     { "random-on-4cw", L2_BM_PLANE0_ALL,  FC_RANDOM_ENABLE, FC_CRC_ENABLE},
     {"random-off-4cw", L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE},
     {     "single-cw",            0x01U,  FC_RANDOM_ENABLE, FC_CRC_ENABLE},
@@ -1123,7 +1128,7 @@ static MunitParameterEnum l2_rt_params[] = {
 };
 
 /* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
-static const l2_rt_case_t *l2_rt_case_find(const char *name)
+static const l2_rt_case_s *l2_rt_case_find(const char *name)
 {
     uint32_t i;
 
@@ -1155,7 +1160,7 @@ static const l2_rt_case_t *l2_rt_case_find(const char *name)
  *   用例空转（见文件头「全部用例都是 buffer 级」）。 */
 static MunitResult test_process_read_ok(const MunitParameter params[], void *data)
 {
-    const l2_rt_case_t *c = l2_rt_case_find(munit_parameters_get(params, "case"));
+    const l2_rt_case_s *c = l2_rt_case_find(munit_parameters_get(params, "case"));
     uint8_t             cw_count;
 
     (void)data;
@@ -1163,7 +1168,7 @@ static MunitResult test_process_read_ok(const MunitParameter params[], void *dat
     test_trace_begin();
 
     /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
-    const nand_addr_t addr = l2_addr_draw("process_read_ok", 0U);
+    const nand_addr_s addr = l2_addr_draw("process_read_ok", 0U);
 
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
     cw_count = l2_buffer_round_trip(&addr, c->cw_bitmap, c->random_mode, c->crc_mode);
@@ -1188,8 +1193,8 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
 
     test_trace_begin();
 
-    const nand_addr_t addr = l2_addr_draw("process_read_unc", 0U);
-    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    const nand_addr_s addr = l2_addr_draw("process_read_unc", 0U);
+    fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -1241,8 +1246,8 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
     test_trace_begin();
 
     /* 0x05 = plane0 的 CW0 | CW2 */
-    const nand_addr_t addr = l2_addr_draw("process_read_masked_chain", 0U);
-    fc_command_t     *cmd  = l2_cmd(&addr, 0x05U, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    const nand_addr_s addr = l2_addr_draw("process_read_masked_chain", 0U);
+    fc_cmd_s         *cmd  = l2_cmd(&addr, 0x05U, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
     munit_assert_uint32(test_cw_count(cmd), ==, 2U);
 
@@ -1283,8 +1288,8 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
 
     test_trace_begin();
 
-    const nand_addr_t addr = l2_addr_draw("process_read_mata_error", 0U);
-    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    const nand_addr_s addr = l2_addr_draw("process_read_mata_error", 0U);
+    fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -1298,7 +1303,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
      *   bit 2 的 plane 位上，被整段擦除，MATA_ERROR 恒不置位）。PBA 里 block 是**最高**
      *   字段，改它不动低 3 位——正是本用例要的「低位同、高位异」。环移保证 block 必变。 */
     {
-        nand_addr_t tampered = addr;
+        nand_addr_s tampered = addr;
 
         tampered.block = (uint16_t)((addr.block + 1U) % (uint32_t)BLOCKS_PER_PLANE);
         cmd->meta      = (DWORD)pba_from_addr(&tampered);
@@ -1336,8 +1341,8 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
 
     test_trace_begin();
 
-    const nand_addr_t addr = l2_addr_draw("process_read_crc_error", 0U);
-    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
+    const nand_addr_s addr = l2_addr_draw("process_read_crc_error", 0U);
+    fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
 
     test_fill_user_paa(cmd);
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
@@ -1373,8 +1378,8 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
 
     test_trace_begin();
 
-    const nand_addr_t addr = l2_addr_draw("process_read_ldpc_raw", 0U);
-    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    const nand_addr_s addr = l2_addr_draw("process_read_ldpc_raw", 0U);
+    fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     cmd->config.ldpc = FC_ECC_MODE_LDPC_RAW;
     test_fill_user_paa(cmd);
@@ -1437,10 +1442,10 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *      "救回来了"与"没把别的 CW 弄坏"要一起成立
  *
  * 两个用例共用本函数，只差 random_mode / failed_idx。 */
-static void do_raid_recover_test(const nand_addr_t *addr, uint8_t random_mode, uint8_t failed_idx)
+static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, uint8_t failed_idx)
 {
-    fc_command_t *cmd   = l2_cmd(addr, L2_BM_PLANE0_ALL, random_mode, FC_CRC_ENABLE);
-    uint8_t       count = test_cw_count(cmd);
+    fc_cmd_s *cmd   = l2_cmd(addr, L2_BM_PLANE0_ALL, random_mode, FC_CRC_ENABLE);
+    uint8_t   count = test_cw_count(cmd);
 
     munit_assert_uint32(count, >=, 3U);
     munit_assert_uint32(failed_idx, <, count);
@@ -1481,7 +1486,7 @@ static MunitResult test_raid_recover_no_random(const MunitParameter params[], vo
     (void)data;
 
     {
-        const nand_addr_t addr = l2_addr_draw("raid_recover_no_random", 0U);
+        const nand_addr_s addr = l2_addr_draw("raid_recover_no_random", 0U);
 
         do_raid_recover_test(&addr, FC_RANDOM_DISABLE, 1U);
     }
@@ -1506,11 +1511,11 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 
     /* data 与 parity 两条命令**必须同一地址**（下面把 data 的 desc->meta 同步给 parity），
      * 故只抽一次，两处都传同一个 &addr。 */
-    const nand_addr_t addr = l2_addr_draw("generate_stripe_parity", 0U);
+    const nand_addr_s addr = l2_addr_draw("generate_stripe_parity", 0U);
 
     /* 分配数据命令（4 CW, random=ON, raid=NORMAL — encode 里不做 XOR） */
-    fc_command_t *data_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
-    uint8_t       cw_cnt   = test_cw_count(data_cmd);
+    fc_cmd_s *data_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    uint8_t   cw_cnt   = test_cw_count(data_cmd);
 
     munit_assert_uint32(cw_cnt, ==, 4U);
 
@@ -1524,7 +1529,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     munit_assert_int(fc_data_path_encode(data_cmd), ==, FC_STATUS_OK);
 
     /* 分配 parity 命令（同 CW 数，random=OFF） */
-    fc_command_t *parity_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    fc_cmd_s *parity_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     munit_assert_uint32(test_cw_count(parity_cmd), ==, cw_cnt);
 
@@ -1536,7 +1541,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 
     /* 调用 generate_stripe_parity — XOR 数据命令 CW 到 parity buffer + ECC 编码 parity */
     {
-        const fc_command_t *data_ptrs[1U]; /* PLANE_NUM=2 → 1 条数据命令 */
+        const fc_cmd_s *data_ptrs[1U]; /* PLANE_NUM=2 → 1 条数据命令 */
         data_ptrs[0U] = data_cmd;
         munit_assert_int(fc_data_path_generate_stripe_parity(data_ptrs, 1U, parity_cmd), ==, FC_STATUS_OK);
     }
@@ -1613,14 +1618,14 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
  **************************************************************************/
 
 /* 整段访问用的两种 config：multi-plane 变体（段 = [0,2)）/ 单 plane 变体（段 = [plane,+1)）。 */
-static const fc_cmd_conf_t L2_PROG_MULTI = {
+static const fc_cmd_cfg_s L2_PROG_MULTI = {
     .operation = (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE,
     .crc       = FC_CRC_ENABLE,
     .random    = FC_RANDOM_ENABLE,
     .ldpc      = FC_ECC_MODE_BCH,
 };
 
-static const fc_cmd_conf_t L2_PROG_SINGLE = {
+static const fc_cmd_cfg_s L2_PROG_SINGLE = {
     .operation = (DWORD)OP_NORMAL_PROGRAM_PAGE,
     .crc       = FC_CRC_ENABLE,
     .random    = FC_RANDOM_ENABLE,
@@ -1636,17 +1641,18 @@ static const uint8_t l2_bm_span_plane[]  = {0U, 0U, 0U, 0U, 1U, 1U, 1U, 1U};
 static const uint8_t l2_bm_span_cw[]     = {0U, 1U, 2U, 3U, 0U, 1U, 2U, 3U};
 
 typedef struct
+    L2_BM_CASE_S
 {
-    const char          *name;
-    uint8_t              addr_plane; /* 段内 plane（配合 conf 决定段 = [plane, plane+1) 或 [0,2)） */
-    uint32_t             bitmap;     /* flat 绝对编号位图（v27 起字面量，0 = 空集） */
-    const fc_cmd_conf_t *conf;
-    uint8_t              n;         /* 期望链上 desc 数 */
-    const uint8_t       *plane_exp; /* 期望链：逐 desc 的 plane */
-    const uint8_t       *cw_exp;    /* 期望链：逐 desc 的 cw */
-} l2_bm_case_t;
+    const char         *name;
+    uint8_t             addr_plane; /* 段内 plane（配合 conf 决定段 = [plane, plane+1) 或 [0,2)） */
+    uint32_t            bitmap;     /* flat 绝对编号位图（v27 起字面量，0 = 空集） */
+    const fc_cmd_cfg_s *conf;
+    uint8_t             n;         /* 期望链上 desc 数 */
+    const uint8_t      *plane_exp; /* 期望链：逐 desc 的 plane */
+    const uint8_t      *cw_exp;    /* 期望链：逐 desc 的 cw */
+} l2_bm_case_s;
 
-static const l2_bm_case_t l2_bm_cases[] = {
+static const l2_bm_case_s l2_bm_cases[] = {
   /* 0x29 = plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） */
     {      "flat-mixed", 0U, 0x29U,  &L2_PROG_MULTI, 3U, l2_bm_mixed_plane, l2_bm_mixed_cw},
  /* 0xF0 = 只选 plane 1 的 4 个 CW（绝对编号，不是 0x0F）→ 4 条 desc 全在 plane 1。
@@ -1675,7 +1681,7 @@ static MunitParameterEnum l2_bm_params[] = {
 };
 
 /* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
-static const l2_bm_case_t *l2_bm_case_find(const char *name)
+static const l2_bm_case_s *l2_bm_case_find(const char *name)
 {
     uint32_t i;
 
@@ -1713,8 +1719,8 @@ static const l2_bm_case_t *l2_bm_case_find(const char *name)
  * detail 逐条打 (plane, cw)——flat 编号下 plane 1 的 CW0 是 bit 4 这件事，打出来才看得见。 */
 static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 {
-    const l2_bm_case_t *c;
-    fc_command_t       *cmd;
+    const l2_bm_case_s *c;
+    fc_cmd_s           *cmd;
     uint8_t             plane_out[CW_TOTAL_MAX];
     uint8_t             cw_out[CW_TOTAL_MAX];
     uint8_t             n;
@@ -1729,7 +1735,7 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 
     /* plane 由场景表钉死（那正是本条用例的判据，不能随机）；block / page 抽样。 */
     {
-        const nand_addr_t addr = l2_addr_draw("cw_bitmap", c->addr_plane);
+        const nand_addr_s addr = l2_addr_draw("cw_bitmap", c->addr_plane);
 
         cmd = test_cmd_build(&addr, c->bitmap, (uint32_t)pba_from_addr(&addr), c->conf);
     }

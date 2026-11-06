@@ -11,9 +11,4 @@
 #include <string.h>
 #include <time.h>
 
-typedef enum
-{
-    FUNC_STATUS_SUCCESS = 0,
-    FUNC_STATUS_ERROR   = !FUNC_STATUS_SUCCESS
-} FuncStatus;
 #endif

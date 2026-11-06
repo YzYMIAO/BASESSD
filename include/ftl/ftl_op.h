@@ -11,7 +11,7 @@
  *
  * 本模块是固件唯一的完成派发面：
  *   - request 表    command_id → {ctx, op}（按命令池槽位直接索引）；
- *   - 实例路由表    (ch,ce,lun) → die → ftl_ctx_t（全局 CQ 到 per-instance 的桥）；
+ *   - 实例路由表    (ch,ce,lun) → die → ftl_ctx_s（全局 CQ 到 per-instance 的桥）；
  *   - op 回调表     request.op → 完成服务函数；
  *   - CQ 排空       ftl_op_drain（ftl_service_pump 的完成泵步）。
  *
@@ -39,14 +39,14 @@
  *     NULL，全系统 FTL_AGAIN。
  */
 
-#include "fc.h"          /* fc_command_t / fc_command_status_t / FC_COMMAND_POOL_DEPTH */
+#include "fc.h"          /* fc_cmd_s / fc_cmd_status_s / FC_COMMAND_POOL_DEPTH */
 #include "ftl_type.h"    /* DWORD / ftl_status_e */
 #include "nand_config.h" /* CH_NUM / CE_NUM / LUN_NUM（路由表维度） */
 
 #include <stdint.h>
 
 /* 完成服务函数选择器。每一项 = 一个 g_op_callbacks[] 槽 = 一个"功能"。 */
-typedef enum
+typedef enum FTL_OPERATION_ID_E
 {
     FTL_OP_NONE = 0,      /* 未标记：派发时判为孤儿（release + LOGE），正常不应出现 */
     FTL_OP_SYNC_WAIT,     /* 唤醒同步等待者（所有 ftl_sync_* 用） */
@@ -69,12 +69,12 @@ typedef enum
  * 0..FC_COMMAND_POOL_DEPTH-1。每个在飞命令都有一条表项，记录其完成服务函数
  * （op）与私有状态（ctx）；CQE 不携带 op。
  */
-typedef struct
+typedef struct FTL_OPERATION_REQUEST_S
 {
-    void       *ctx;     /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
+    void       *ctx;     /* 该命令的私有状态（同步等待 = ftl_sync_waiter_s*；job = &job） */
     ftl_op_id_e op;      /* 完成服务函数选择器 */
-    bool        pending; /* true = 该 command_id 有登记项 */
-} ftl_op_req_t;
+    BOOL        pending; /* true = 该 command_id 有登记项 */
+} ftl_op_req_s;
 
 /* request 表容量 = FC 命令池深度。
  *
@@ -84,18 +84,18 @@ typedef struct
  */
 #define FTL_OP_REQ_TABLE_SIZE FC_COMMAND_POOL_DEPTH
 
-typedef void (*ftl_op_callback_fn_t)(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+typedef void (*ftl_op_callback_fn_t)(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *
  * 由同步原语在自己栈上持有，经 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)
  * 登记进 request 表；服务函数（ftl_sync_wait_callback）在完成时回填并置 done。 */
-typedef struct
+typedef struct FTL_SYNC_WAITER_S
 {
-    WORD                cmd_id;     /* 等待的 command_id */
-    bool                done;       /* 服务函数置 true */
-    fc_command_status_t completion; /* 服务函数保存的完整 completion 信息 */
-} ftl_sync_waiter_t;
+    WORD            cmd_id;     /* 等待的 command_id */
+    BOOL            done;       /* 服务函数置 true */
+    fc_cmd_status_s completion; /* 服务函数保存的完整 completion 信息 */
+} ftl_sync_waiter_s;
 
 /* ── 初始化 / request 表 ── */
 
@@ -157,7 +157,7 @@ WORD ftl_op_req_count(void);
  *
  * @param route die → 实例指针表（长度 FTL_DIE_MAX）；NULL = 清空。
  */
-void ftl_op_route_set(ftl_ctx_t *const *route);
+void ftl_op_route_set(ftl_ctx_s *const *route);
 
 /**
  * @brief 按 (ch,ce,lun) 取实例。
@@ -168,7 +168,7 @@ void ftl_op_route_set(ftl_ctx_t *const *route);
  * @return 实例指针；
  * @return NULL —— 稀疏拓扑空洞或未设置。
  */
-ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun);
+ftl_ctx_s *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun);
 
 /**
  * @brief 校验 g_op_route 与 g_die_table 的往返一致性。
@@ -179,7 +179,7 @@ ftl_ctx_t *ftl_op_route_get(BYTE ch, BYTE ce, BYTE lun);
  * @return true —— 全部一致；
  * @return false —— 任一项缺失或不匹配。
  */
-bool ftl_op_route_verify(void);
+BOOL ftl_op_route_verify(void);
 
 /**
  * @brief 按全局 L2P region 取 owner 实例。
@@ -193,7 +193,7 @@ bool ftl_op_route_verify(void);
  * @param global_region 全局 L2P region 号。
  * @return owner 实例。
  */
-ftl_ctx_t *ftl_op_route_get_region(DWORD global_region);
+ftl_ctx_s *ftl_op_route_get_region(DWORD global_region);
 
 /**
  * @brief 是否有任何实例的 cache 流式序列处于打开状态。
@@ -206,7 +206,7 @@ ftl_ctx_t *ftl_op_route_get_region(DWORD global_region);
  *       “序列门控造成的预期等待”与“真的提交不出去”。多 LUN 下是保守判据：
  *       只会延后中止，不会漏判。
  */
-bool ftl_op_cache_seq_active(void);
+BOOL ftl_op_cache_seq_active(void);
 
 /**
  * @brief 后台 job 的提交被拒是否属于预期等待（挂起提交 deadline 用）。
@@ -214,7 +214,7 @@ bool ftl_op_cache_seq_active(void);
  * @return true —— cache 序列打开，或主机组仍在飞；
  * @return false —— 不属于预期等待。
  */
-bool ftl_op_bg_submit_deferred(void);
+BOOL ftl_op_bg_submit_deferred(void);
 
 /* ── 提交 ── */
 
@@ -242,7 +242,7 @@ bool ftl_op_bg_submit_deferred(void);
  * @return FTL_ERROR —— 未提交：request 登记时 command_id 越界（池外命令指针）；
  *         op/ctx 配对违反属编程错误，由登记入口的 ASSERT 停机。
  */
-ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
+ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx);
 
 /**
  * @brief 批量版本：n 条命令共用同一 op ID / ctx，全进或全不进。
@@ -263,7 +263,7 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
  * @return FTL_ERROR —— 未提交：request 登记失败（cmd_id 越界）或链契约违反
  *         （已回滚）。
  */
-ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_e op, void *ctx);
+ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op, void *ctx);
 
 /* ── 派发 / 排空 ── */
 
@@ -296,7 +296,7 @@ void ftl_op_drain(void);
  * @return true —— 在派发内；
  * @return false —— 不在派发内。
  */
-bool ftl_op_is_in_dispatch(void);
+BOOL ftl_op_is_in_dispatch(void);
 
 /* ── 各模块的完成服务函数（由 g_op_callbacks[] 引用）── */
 
@@ -309,7 +309,7 @@ bool ftl_op_is_in_dispatch(void);
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief cache 写序列 padding END（本仓自拟） 的完成服务函数（定义在 ftl.c）。
@@ -322,12 +322,12 @@ void ftl_host_io_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文（当前恒 NULL）。
  */
-void ftl_cache_pad_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief Journal 刷页 job 的完成服务函数（定义在 journal.c）。
  *
- * 由 g_op_callbacks[FTL_OP_JOURNAL] 引用；ctx = `l2p_jrn_t *`（= ftl->journal），
+ * 由 g_op_callbacks[FTL_OP_JOURNAL] 引用；ctx = `l2p_jrn_s *`（= ftl->journal），
  * 服务函数按 job.phase 推进状态机（页写完成 → 推进写指针 / 起换块擦除；擦完成 → 收尾）。
  * 每条命令自己 fc_command_release。
  *
@@ -335,12 +335,12 @@ void ftl_cache_pad_callback(ftl_ctx_t *ftl, const fc_command_status_t *completio
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_journal_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_journal_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief Read Recovery job 的完成服务函数（定义在 read_recovery.c）。
  *
- * 由 g_op_callbacks[FTL_OP_READ_RECOVERY] 引用；ctx = `rr_handle_t *`（= &ftl->read_recovery_handle）。
+ * 由 g_op_callbacks[FTL_OP_READ_RECOVERY] 引用；ctx = `rr_handle_s *`（= &ftl->read_recovery_handle）。
  * 服务函数按 job.stage 推进（切读重试模式 / 重试读 / 恢复默认模式 / 邻居读），终态
  * 释放被托管的 pending 槽并让 host 读组结算。每条命令自己 fc_command_release。
  *
@@ -348,13 +348,13 @@ void ftl_journal_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_read_recovery_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief 搬移 job（GC / 静态 WL / 预测性退役）的完成服务函数（定义在 migrate.c）。
  *
  * 由 g_op_callbacks[FTL_OP_GC] 与 [FTL_OP_WL] 共同引用（同一台引擎，靠 job.kind
- * 区分 victim 来源、job.post 区分收尾）；ctx = `mig_handle_t *`（= ftl->mig_handle）。
+ * 区分 victim 来源、job.post 区分收尾）；ctx = `mig_handle_s *`（= ftl->mig_handle）。
  * 服务函数按 job.phase 推进（读完成 → 解 META + 反查 L2P；写完成 → 改 L2P/Journal +
  * 迁移有效计数；擦完成 → 归还/退役/标坏），每条命令自己 fc_command_release。
  *
@@ -362,12 +362,12 @@ void ftl_read_recovery_callback(ftl_ctx_t *ftl, const fc_command_status_t *compl
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_migrate_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief L2P region 加载 / 写回的完成服务函数（定义在 l2p_cache.c）。
  *
- * 由 g_op_callbacks[FTL_OP_L2P] 引用；ctx = `l2p_cache_line_t *`（提交时传的行指针）。
+ * 由 g_op_callbacks[FTL_OP_L2P] 引用；ctx = `l2p_cache_line_s *`（提交时传的行指针）。
  * 服务函数按 line->state 收尾：
  *   · LOADING  → 成功把整页 region 拷进 line->entries（须早于 release：读的数据在
  *                desc 链上），置 CLEAN；失败同样置 CLEAN（entries 保持全 INVALID = 未映射）。
@@ -379,12 +379,12 @@ void ftl_migrate_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion,
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief Checkpoint job 的完成服务函数（定义在 checkpoint.c）。
  *
- * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `cp_handle_t *`（= ftl->cp_handle）。
+ * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `cp_handle_s *`（= ftl->cp_handle）。
  * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
  * 注意：与 ftl_migrate_callback 的差别：本函数不推进状态机（不调 cp_handle）——
  *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
@@ -394,12 +394,12 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_checkpoint_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief BBT 持久化 job 的完成服务函数（定义在 bbt.c）。
  *
- * 由 g_op_callbacks[FTL_OP_BBT] 引用；ctx = `alc_t *`（= &ftl->alloc，
+ * 由 g_op_callbacks[FTL_OP_BBT] 引用；ctx = `alc_s *`（= &ftl->alloc，
  * 即命令的实例归属；形参 ftl 不用）。服务函数按 alloc->bbt.handle.phase 收尾：
  *   · ERASE 成功 → 起写 record；失败 → 游标不推进、dirty 保留；
  *   · WRITE 完成 → 无论成败都推进池游标（半编程槽不可复用），成功清 dirty。
@@ -409,12 +409,12 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_bbt_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 /**
  * @brief L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata_job.c）。
  *
- * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `md_dir_cache_t *`
+ * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `md_dir_cache_s *`
  * （模块上下文；服务函数内部取 `&dir->handle`）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
  *   · RECLAIM     → 成功清待回收位 + alc_free_push；失败保留位，下轮重试；
@@ -430,6 +430,6 @@ void ftl_bbt_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
  * @param completion FC 完成状态。
  * @param ctx 提交时登记的上下文。
  */
-void ftl_metadata_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx);
+void ftl_metadata_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
 
 #endif /* FTL_OP_H */

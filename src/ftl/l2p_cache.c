@@ -50,7 +50,7 @@
 #include "bst.h" /* ftl_block_state / ftl_block_state_name（降级现场诊断，RISK-MD-06） */
 #include "fc.h"
 #include "fc_interface.h" /* fc_get_resource_stats（写回前的资源预检） */
-#include "ftl.h"          /* ftl_ctx_t / ftl_service_pump（同步逃生口用） */
+#include "ftl.h"          /* ftl_ctx_s / ftl_service_pump（同步逃生口用） */
 #include "ftl_fc_interface.h"
 #include "ftl_op.h"   /* ftl_op_submit / ftl_op_is_in_dispatch */
 #include "ftl_type.h" /* BG_LEVEL_* / BG_LEVEL_NUM（档位 → max_kick 表） */
@@ -62,13 +62,13 @@
 #include <string.h>
 
 /* 行指针 → 同下标的查找元数据。region_id/state/access_count 只在 tags[] 里存放
- * （C9：不得在 l2p_cache_line_t 里保留第二份）。查找/CLOCK 只碰 tags[]，
+ * （C9：不得在 l2p_cache_line_s 里保留第二份）。查找/CLOCK 只碰 tags[]，
  * 数据行只在命中 / 加载 / 写回时访问。 */
 #define L2P_TAG(cache, line) (&(cache)->tags[(WORD)((line) - (cache)->lines)])
 
 /* CMT 的容量 victim 需要先看目标 region 的行是否在飞；查找实现位于第 3 节。 */
-static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id);
-static void              l2p_cmt_drop(l2p_cache_t *cache, l2p_cmt_entry_t *e);
+static l2p_cache_line_s *l2p_line_find(l2p_cache_s *cache, DWORD region_id);
+static void              l2p_cmt_drop(l2p_cache_s *cache, l2p_cmt_entry_s *e);
 
 // 页内批量 API 的几何前提：一个 pair（FTL_LBA_PER_PAIR 个 LBA）必须完整落在同一
 // L2P region 内（base 对齐 ⇒ base..base+7 同 region），否则批量读写会跨 region。
@@ -149,7 +149,7 @@ static WORD l2p_cmt_set(DWORD lba)
  * @param cache cache
  * @param e     被访问 / 插入的条目
  */
-static void l2p_cmt_touch(l2p_cache_t *cache, l2p_cmt_entry_t *e)
+static void l2p_cmt_touch(l2p_cache_s *cache, l2p_cmt_entry_s *e)
 {
     if (cache->cmt_clock == UINT16_MAX)
     {
@@ -175,13 +175,13 @@ static void l2p_cmt_touch(l2p_cache_t *cache, l2p_cmt_entry_t *e)
  * @param touch true = 命中时更新 LRU
  * @return 条目指针；NULL = 未命中
  */
-static l2p_cmt_entry_t *l2p_cmt_find(l2p_cache_t *cache, DWORD lba, bool touch)
+static l2p_cmt_entry_s *l2p_cmt_find(l2p_cache_s *cache, DWORD lba, BOOL touch)
 {
     const WORD set = l2p_cmt_set(lba);
 
     for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
     {
-        l2p_cmt_entry_t *e = &cache->cmt[set][way];
+        l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
         if (e->lba == lba)
         {
@@ -203,9 +203,9 @@ static l2p_cmt_entry_t *l2p_cmt_find(l2p_cache_t *cache, DWORD lba, bool touch)
  * @param out   输出 PBA
  * @return true 命中；false 未命中
  */
-static bool l2p_cmt_lookup(l2p_cache_t *cache, DWORD lba, DWORD *out)
+static BOOL l2p_cmt_lookup(l2p_cache_s *cache, DWORD lba, DWORD *out)
 {
-    l2p_cmt_entry_t *e = l2p_cmt_find(cache, lba, true);
+    l2p_cmt_entry_s *e = l2p_cmt_find(cache, lba, true);
 
     if (e == NULL)
     {
@@ -232,7 +232,7 @@ static bool l2p_cmt_lookup(l2p_cache_t *cache, DWORD lba, DWORD *out)
  * @param cache cache
  * @param lba   即将退役的 dirty 条目 LBA
  */
-static void l2p_cmt_dirty_release(l2p_cache_t *cache, DWORD lba)
+static void l2p_cmt_dirty_release(l2p_cache_s *cache, DWORD lba)
 {
     const BYTE owner = lba_2_die(lba);
 
@@ -264,7 +264,7 @@ static void l2p_cmt_dirty_release(l2p_cache_t *cache, DWORD lba)
  * @param cache cache
  * @param e     槽位（空槽时无动作）
  */
-static SSD_CODE_FAST void l2p_cmt_drop(l2p_cache_t *cache, l2p_cmt_entry_t *e)
+static SSD_CODE_FAST void l2p_cmt_drop(l2p_cache_s *cache, l2p_cmt_entry_s *e)
 {
     if (e->lba == FTL_LBA_INVALID)
     {
@@ -290,13 +290,13 @@ static SSD_CODE_FAST void l2p_cmt_drop(l2p_cache_t *cache, l2p_cmt_entry_t *e)
  * @param lba   全局 LBA
  * @return true 可更新/插入；false set 的 4 路全是 DIRTY
  */
-static bool l2p_cmt_room(const l2p_cache_t *cache, DWORD lba)
+static BOOL l2p_cmt_room(const l2p_cache_s *cache, DWORD lba)
 {
     const WORD set = l2p_cmt_set(lba);
 
     for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
     {
-        const l2p_cmt_entry_t *e = &cache->cmt[set][way];
+        const l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
         if ((e->lba == lba) || (e->lba == FTL_LBA_INVALID) || (e->state == L2P_CMT_CLEAN))
         {
@@ -313,9 +313,9 @@ static bool l2p_cmt_room(const l2p_cache_t *cache, DWORD lba)
  * @param lba   全局 LBA
  * @return 槽位；NULL = 4 路全 DIRTY（调用者需触发整页写回）
  */
-static l2p_cmt_entry_t *l2p_cmt_claim(l2p_cache_t *cache, DWORD lba)
+static l2p_cmt_entry_s *l2p_cmt_claim(l2p_cache_s *cache, DWORD lba)
 {
-    l2p_cmt_entry_t *e = l2p_cmt_find(cache, lba, false);
+    l2p_cmt_entry_s *e = l2p_cmt_find(cache, lba, false);
 
     if (e != NULL)
     {
@@ -327,7 +327,7 @@ static l2p_cmt_entry_t *l2p_cmt_claim(l2p_cache_t *cache, DWORD lba)
     e = NULL;
     for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
     {
-        l2p_cmt_entry_t *cand = &cache->cmt[set][way];
+        l2p_cmt_entry_s *cand = &cache->cmt[set][way];
 
         if (cand->lba == FTL_LBA_INVALID)
         {
@@ -366,9 +366,9 @@ static l2p_cmt_entry_t *l2p_cmt_claim(l2p_cache_t *cache, DWORD lba)
  * @param seq   Journal 序号（WAL 水位）
  * @return true 已写入；false 无槽位（调用者走 line 回退）
  */
-static bool l2p_cmt_install_dirty(l2p_cache_t *cache, DWORD lba, DWORD pba, DWORD seq)
+static BOOL l2p_cmt_install_dirty(l2p_cache_s *cache, DWORD lba, DWORD pba, DWORD seq)
 {
-    l2p_cmt_entry_t *e = l2p_cmt_claim(cache, lba);
+    l2p_cmt_entry_s *e = l2p_cmt_claim(cache, lba);
 
     if (e == NULL)
     {
@@ -404,14 +404,14 @@ static bool l2p_cmt_install_dirty(l2p_cache_t *cache, DWORD lba, DWORD pba, DWOR
  * @param lba   全局 LBA
  * @param pba   新值
  */
-static void l2p_cmt_update_clean(l2p_cache_t *cache, DWORD lba, DWORD pba)
+static void l2p_cmt_update_clean(l2p_cache_s *cache, DWORD lba, DWORD pba)
 {
     if (cache->cmt_enabled == false)
     {
         return;
     }
 
-    l2p_cmt_entry_t *e = l2p_cmt_find(cache, lba, false);
+    l2p_cmt_entry_s *e = l2p_cmt_find(cache, lba, false);
 
     if (e != NULL)
     {
@@ -454,7 +454,7 @@ static void l2p_cmt_update_clean(l2p_cache_t *cache, DWORD lba, DWORD pba)
  * @param lba   全局 LBA
  * @return true 可写；false 已触发写回 / 无可写回 victim，调用者下轮重试
  */
-static SSD_CODE_FAST bool l2p_cmt_make_room(l2p_cache_t *cache, DWORD lba)
+static SSD_CODE_FAST BOOL l2p_cmt_make_room(l2p_cache_s *cache, DWORD lba)
 {
     if (l2p_cmt_room(cache, lba))
     {
@@ -465,12 +465,12 @@ static SSD_CODE_FAST bool l2p_cmt_make_room(l2p_cache_t *cache, DWORD lba)
     // 跳过已有加载/写回在飞的 region，尝试同 set 的其他 dirty way——
     // 否则一个在飞的 victim 会把 host 写一直卡在容量检查上。
     const WORD             set           = l2p_cmt_set(lba);
-    const l2p_cmt_entry_t *victim        = NULL;
+    const l2p_cmt_entry_s *victim        = NULL;
     DWORD                  victim_region = 0U;
 
     for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
     {
-        const l2p_cmt_entry_t *e = &cache->cmt[set][way];
+        const l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
         if ((e->lba == FTL_LBA_INVALID) || (e->state != L2P_CMT_DIRTY))
         {
@@ -478,7 +478,7 @@ static SSD_CODE_FAST bool l2p_cmt_make_room(l2p_cache_t *cache, DWORD lba)
         }
 
         const DWORD             region = lba_to_global_region(e->lba);
-        const l2p_cache_line_t *line   = l2p_line_find(cache, region);
+        const l2p_cache_line_s *line   = l2p_line_find(cache, region);
 
         if ((line != NULL) && ((L2P_TAG(cache, line)->state == L2P_CACHE_LOADING) || (L2P_TAG(cache, line)->state == L2P_CACHE_FLUSHING)))
         {
@@ -509,17 +509,17 @@ static SSD_CODE_FAST bool l2p_cmt_make_room(l2p_cache_t *cache, DWORD lba)
  * @param cache cache
  * @param line  目标行
  */
-static SSD_CODE_FAST void l2p_cmt_merge_region(l2p_cache_t *cache, l2p_cache_line_t *line)
+static SSD_CODE_FAST void l2p_cmt_merge_region(l2p_cache_s *cache, l2p_cache_line_s *line)
 {
     const DWORD region = L2P_TAG(cache, line)->region_id;
     DWORD       seq    = line->dirty_seq;
-    bool        found  = false;
+    BOOL        found  = false;
 
     for (WORD set = 0U; set < L2P_CMT_SETS; set++)
     {
         for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
         {
-            const l2p_cmt_entry_t *e = &cache->cmt[set][way];
+            const l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
             if ((e->lba == FTL_LBA_INVALID) || (e->state != L2P_CMT_DIRTY) || (lba_to_global_region(e->lba) != region))
             {
@@ -554,15 +554,15 @@ static SSD_CODE_FAST void l2p_cmt_merge_region(l2p_cache_t *cache, l2p_cache_lin
  * @param region 全局 region
  * @return true = 本 region 至少 retire 了一个 dirty 条目
  */
-static SSD_CODE_FAST bool l2p_cmt_clear_region(l2p_cache_t *cache, DWORD region)
+static SSD_CODE_FAST BOOL l2p_cmt_clear_region(l2p_cache_s *cache, DWORD region)
 {
-    bool retired = false;
+    BOOL retired = false;
 
     for (WORD set = 0U; set < L2P_CMT_SETS; set++)
     {
         for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
         {
-            l2p_cmt_entry_t *e = &cache->cmt[set][way];
+            l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
             if ((e->lba == FTL_LBA_INVALID) || (e->state != L2P_CMT_DIRTY) || (lba_to_global_region(e->lba) != region))
             {
@@ -595,15 +595,15 @@ static SSD_CODE_FAST bool l2p_cmt_clear_region(l2p_cache_t *cache, DWORD region)
  * @param cw_bitmap     失败页 CW 位图（仅 selective==true 时使用）
  * @param selective     true = 只清失败页 LBA 范围的 dirty；false = 保留全部 dirty
  */
-static SSD_CODE_FAST void l2p_cmt_invalidate_region(l2p_cache_t *cache, DWORD region, DWORD lba, DWORD cw_bitmap, bool selective)
+static SSD_CODE_FAST void l2p_cmt_invalidate_region(l2p_cache_s *cache, DWORD region, DWORD lba, DWORD cw_bitmap, BOOL selective)
 {
-    bool any_dirty = false;
+    BOOL any_dirty = false;
 
     for (WORD set = 0U; set < L2P_CMT_SETS; set++)
     {
         for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
         {
-            l2p_cmt_entry_t *e = &cache->cmt[set][way];
+            l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
             if ((e->lba == FTL_LBA_INVALID) || (lba_to_global_region(e->lba) != region))
             {
@@ -642,13 +642,13 @@ static SSD_CODE_FAST void l2p_cmt_invalidate_region(l2p_cache_t *cache, DWORD re
  * @param cache     cache
  * @param owner_die owner die
  */
-static SSD_CODE_FAST void l2p_cmt_invalidate_owner(l2p_cache_t *cache, BYTE owner_die)
+static SSD_CODE_FAST void l2p_cmt_invalidate_owner(l2p_cache_s *cache, BYTE owner_die)
 {
     for (WORD set = 0U; set < L2P_CMT_SETS; set++)
     {
         for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
         {
-            l2p_cmt_entry_t *e = &cache->cmt[set][way];
+            l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
             if ((e->lba != FTL_LBA_INVALID) && (lba_2_die(e->lba) == owner_die))
             {
@@ -674,7 +674,7 @@ static SSD_CODE_FAST void l2p_cmt_invalidate_owner(l2p_cache_t *cache, BYTE owne
  *
  * @note 共享 cache 的所有 metadata I/O 都以 owner 的目录/分配器为准。
  */
-static const l2p_owner_t *l2p_owner_get(const l2p_cache_t *cache, DWORD global_region)
+static const l2p_owner_s *l2p_owner_get(const l2p_cache_s *cache, DWORD global_region)
 {
     return cache->owner_of_region(cache->owner_ctx, global_region);
 }
@@ -694,7 +694,7 @@ static const l2p_owner_t *l2p_owner_get(const l2p_cache_t *cache, DWORD global_r
  * @param owner_of_region region → owner 解析回调
  * @param owner_ctx       回调上下文
  */
-SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
+SSD_CODE_FAST void l2p_init(l2p_cache_s *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
 {
     ASSERT(cache != NULL);
     ASSERT(owner_of_region != NULL);
@@ -711,7 +711,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_cache_line_t *line = &cache->lines[i];
+        l2p_cache_line_s *line = &cache->lines[i];
 
         // 全部 entry 填 NAND_PBA_INVALID
         memset(line->entries, 0xFF, sizeof(line->entries));
@@ -728,7 +728,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
     {
         for (BYTE way = 0U; way < L2P_CMT_WAYS; way++)
         {
-            l2p_cmt_entry_t *e = &cache->cmt[set][way];
+            l2p_cmt_entry_s *e = &cache->cmt[set][way];
 
             e->lba       = FTL_LBA_INVALID;
             e->pba       = NAND_PBA_INVALID;
@@ -781,7 +781,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
  * @param cache   cache
  * @param enabled true = 正常；false = replay 旁路（不查不填 CMT）
  */
-SSD_CODE_FAST void l2p_cmt_set_enabled(l2p_cache_t *cache, bool enabled)
+SSD_CODE_FAST void l2p_cmt_set_enabled(l2p_cache_s *cache, BOOL enabled)
 {
     cache->cmt_enabled = enabled;
 }
@@ -800,7 +800,7 @@ SSD_CODE_FAST void l2p_cmt_set_enabled(l2p_cache_t *cache, bool enabled)
  * @param cache   cache 上下文
  * @param is_miss true = 本次访问未命中
  */
-static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
+static void l2p_access_note(l2p_cache_s *cache, BOOL is_miss)
 {
     cache->thrash.window_access++;
     if (is_miss)
@@ -815,7 +815,7 @@ static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
 
     cache->thrash.miss_pct = ((cache->thrash.window_miss * 100U) / cache->thrash.window_access);
 
-    bool was_thrashing = cache->thrash.thrashing;
+    BOOL was_thrashing = cache->thrash.thrashing;
 
     cache->thrash.window_access = 0U;
     cache->thrash.window_miss   = 0U;
@@ -846,7 +846,7 @@ static void l2p_access_note(l2p_cache_t *cache, bool is_miss)
  * @param cache cache 上下文
  * @param line  命中的 cache 行
  */
-static void l2p_hit_note(l2p_cache_t *cache, l2p_cache_line_t *line)
+static void l2p_hit_note(l2p_cache_s *cache, l2p_cache_line_s *line)
 {
     L2P_TAG(cache, line)->access_count = 1U;
 
@@ -887,7 +887,7 @@ static WORD l2p_hint_slot(DWORD region_id)
  * @param cache cache
  * @param idx   line 下标
  */
-static SSD_CODE_FAST void l2p_line_hint_clear(l2p_cache_t *cache, WORD idx)
+static SSD_CODE_FAST void l2p_line_hint_clear(l2p_cache_s *cache, WORD idx)
 {
     if (idx >= L2P_CACHE_SIZE)
     {
@@ -918,7 +918,7 @@ static SSD_CODE_FAST void l2p_line_hint_clear(l2p_cache_t *cache, WORD idx)
  * @param region_id 全局 region
  * @return 命中的行；NULL = 该 region 未驻留
  */
-static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
+static l2p_cache_line_s *l2p_line_find(l2p_cache_s *cache, DWORD region_id)
 {
     // 先查 hint（region → line 下标）；tags[] 仍是唯一权威，命中必须再校验。
     const WORD slot = l2p_hint_slot(region_id);
@@ -926,7 +926,7 @@ static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
 
     if (hint < L2P_CACHE_SIZE)
     {
-        const l2p_tag_t *tag = &cache->tags[hint];
+        const l2p_tag_s *tag = &cache->tags[hint];
 
         if ((tag->region_id == region_id) && (tag->state != L2P_CACHE_INVALID))
         {
@@ -939,7 +939,7 @@ static l2p_cache_line_t *l2p_line_find(l2p_cache_t *cache, DWORD region_id)
     // hint 空/冲突/陈旧：退回线性扫描，命中后顺手修正 hint。
     for (WORD idx = 0U; idx < L2P_CACHE_SIZE; idx++)
     {
-        const l2p_tag_t *tag = &cache->tags[idx];
+        const l2p_tag_s *tag = &cache->tags[idx];
 
         if ((tag->region_id == region_id) && (tag->state != L2P_CACHE_INVALID))
         {
@@ -963,7 +963,7 @@ static DWORD s_evict_fail_n;
  * @param cache     cache 上下文
  * @param region_id 触发驱逐失败的全局 region
  */
-static SSD_CODE_FAST void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD region_id)
+static SSD_CODE_FAST void l2p_evict_fail_log(const l2p_cache_s *cache, DWORD region_id)
 {
     if (log_rate_due(&s_evict_fail_ms, &s_evict_fail_n, LOG_RATE_SLOW_INTERVAL_MS) == false)
     {
@@ -1010,14 +1010,14 @@ static SSD_CODE_FAST void l2p_evict_fail_log(const l2p_cache_t *cache, DWORD reg
  * @param flush_dirty true = 遇 DIRTY 行先起异步写回再继续扫描；false = 跳过 DIRTY
  * @return 选中的行；NULL = 当前没有可驱逐行（全在飞 / 脏行都刚起了写回）
  */
-static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
+static l2p_cache_line_s *l2p_line_evict(l2p_cache_s *cache, BOOL flush_dirty)
 {
     WORD start = cache->clock_hand;
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         const WORD idx = ((start + i) % L2P_CACHE_SIZE);
-        l2p_tag_t *tag = &cache->tags[idx];
+        l2p_tag_s *tag = &cache->tags[idx];
 
         if ((tag->state == L2P_CACHE_FLUSHING) || (tag->state == L2P_CACHE_LOADING))
         {
@@ -1071,7 +1071,7 @@ static l2p_cache_line_t *l2p_line_evict(l2p_cache_t *cache, bool flush_dirty)
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         const WORD idx = ((cache->clock_hand + i) % L2P_CACHE_SIZE);
-        l2p_tag_t *tag = &cache->tags[idx];
+        l2p_tag_s *tag = &cache->tags[idx];
 
         if ((tag->state == L2P_CACHE_CLEAN) && (tag->access_count == 0U))
         {
@@ -1109,7 +1109,7 @@ static SSD_CODE_FAST void l2p_load_fail_log(DWORD region_id, const char *cause)
 {
     // 序列门控造成的提交背压是**预期**等待（序列下一窗口收尾）：降为 5 s 一行的慢节拍，
     // 避免 host 大顺序读写 + GC 期间刷屏；其余失败仍按 1 s。
-    const bool  gated    = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
+    const BOOL  gated    = ((strcmp(cause, "submit_backpressure") == 0) && (ftl_op_cache_seq_active() == true));
     const DWORD interval = (gated == true) ? LOG_RATE_SLOW_INTERVAL_MS : LOG_RATE_INTERVAL_MS;
 
     LOGW_IF(log_rate_due(&s_load_fail_ms, &s_load_fail_n, interval), LOG_TAG_L2P "load start failed region=%lu cause=%s\r\n", region_id, cause);
@@ -1145,10 +1145,10 @@ static SSD_CODE_FAST void l2p_degrade_log(DWORD region_id, BYTE fail_count)
  * @return true = 读命令已提交、行进入 LOADING
  *         false = 未提交，行回到 INVALID
  */
-static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pba, bool log_failure)
+static BOOL l2p_load_submit(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD pba, BOOL log_failure)
 {
-    fc_command_t *cmd      = NULL;
-    const WORD    line_idx = (WORD)(line - cache->lines);
+    fc_cmd_s  *cmd      = NULL;
+    const WORD line_idx = (WORD)(line - cache->lines);
 
     line->load_pba = pba;
 
@@ -1196,7 +1196,7 @@ static bool l2p_load_submit(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD pb
  * @param cache cache 上下文
  * @param line  失败的行（region_id 已设置）
  */
-static void l2p_load_fail_settle(l2p_cache_t *cache, l2p_cache_line_t *line)
+static void l2p_load_fail_settle(l2p_cache_s *cache, l2p_cache_line_s *line)
 {
     memset(line->entries, 0xFF, sizeof(line->entries));
     line->load_fail_count++;
@@ -1235,9 +1235,9 @@ static void l2p_load_fail_settle(l2p_cache_t *cache, l2p_cache_line_t *line)
  * @return true = 已就绪（CLEAN）或读命令已提交（LOADING）
  *         false = 读命令提交失败 / PBA 损坏，行回到 INVALID 或已降级
  */
-static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD region_id, bool log_failure, bool prefetch)
+static BOOL l2p_load_begin(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD region_id, BOOL log_failure, BOOL prefetch)
 {
-    const l2p_owner_t *owner        = l2p_owner_get(cache, region_id);
+    const l2p_owner_s *owner        = l2p_owner_get(cache, region_id);
     DWORD              local_region = l2p_global_to_local_region(region_id);
     const WORD         line_idx     = (WORD)(line - cache->lines);
 
@@ -1267,7 +1267,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
 
     DWORD primary = md_entry_find(owner->metadata_dir, METADATA_TYPE_L2P_REGION, local_region);
     DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
-    bool  corrupt = false;
+    BOOL  corrupt = false;
 
     // Directory 是介质读回（H29）：非 INVALID 也必须过 pba_is_valid 才能进 FC
     // （PBA 字段越界 ⇒ pba_to_ch/ce/lun 造出越界路由字段 ⇒ FC 的 suspended[][]
@@ -1307,7 +1307,7 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
     }
 
     // 主副本优先；主副本缺失/损坏（旧介质单副本 / 校验不过）时用备份。
-    const bool  use_backup = (primary == NAND_PBA_INVALID);
+    const BOOL  use_backup = (primary == NAND_PBA_INVALID);
     const DWORD pba        = use_backup ? backup : primary;
 
     line->load_use_backup = use_backup;
@@ -1323,9 +1323,9 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
  * @return true = 加载已起（或未映射直接 CLEAN）
  *         false = 无可驱逐行 / 提交失败
  */
-static bool l2p_load_start(l2p_cache_t *cache, DWORD region_id)
+static BOOL l2p_load_start(l2p_cache_s *cache, DWORD region_id)
 {
-    l2p_cache_line_t *line = l2p_line_evict(cache, true);
+    l2p_cache_line_s *line = l2p_line_evict(cache, true);
 
     if (line == NULL)
     {
@@ -1347,7 +1347,7 @@ static bool l2p_load_start(l2p_cache_t *cache, DWORD region_id)
  * @param pba           该 region 的 PBA
  * @return true 已载入；false 无空行 / 读失败
  */
-SSD_CODE_FAST bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba)
+SSD_CODE_FAST BOOL l2p_region_preload(l2p_cache_s *cache, DWORD global_region, DWORD pba)
 {
     // global_region 来自调用者（PFR 的 local×DIE_MAX+die）；越界写入 tags[] 会让
     // 该行永远无法再被命中，只白占一行 ⇒ 运行期拒绝（H29 同口径）。
@@ -1371,7 +1371,7 @@ SSD_CODE_FAST bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, D
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_cache_line_t *line = &cache->lines[i];
+        l2p_cache_line_s *line = &cache->lines[i];
 
         if (L2P_TAG(cache, line)->state != L2P_CACHE_INVALID)
         {
@@ -1413,7 +1413,7 @@ SSD_CODE_FAST bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, D
  * @param global_region 全局 region
  * @return true 已驻留或已起加载；false 跳过
  */
-bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
+BOOL l2p_region_prefetch(l2p_cache_s *cache, DWORD global_region)
 {
     ASSERT(cache != NULL);
 
@@ -1440,7 +1440,7 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
     }
 
     // 预取只选 INVALID/CLEAN，遇 DIRTY 跳过且不 kick 写回。
-    l2p_cache_line_t *line = l2p_line_evict(cache, false);
+    l2p_cache_line_s *line = l2p_line_evict(cache, false);
 
     if (line == NULL)
     {
@@ -1470,7 +1470,7 @@ bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region)
  * @param out   输出：PBA
  * @return FTL_OK；FTL_AGAIN 加载在飞；FTL_ERROR 越界/硬失败
  */
-ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
+ftl_status_e l2p_read(l2p_cache_s *cache, DWORD lba, DWORD *out)
 {
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
     {
@@ -1503,7 +1503,7 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
     DWORD region_id = lba_to_global_region(lba);
     WORD  entry_idx = lba_to_entry(lba);
 
-    l2p_cache_line_t *line = l2p_line_find(cache, region_id);
+    l2p_cache_line_s *line = l2p_line_find(cache, region_id);
     if (line != NULL)
     {
         if (L2P_TAG(cache, line)->state == L2P_CACHE_LOADING)
@@ -1541,7 +1541,7 @@ ftl_status_e l2p_read(l2p_cache_t *cache, DWORD lba, DWORD *out)
  * @param lba   全局 LBA
  * @return true 行可读写；false 未驻留 / 在飞
  */
-bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
+BOOL l2p_is_ready(l2p_cache_s *cache, DWORD lba)
 {
     // lba 是 host 输入：越界按数据错误处理（write no-op / read FTL_ERROR），不做断言。
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
@@ -1550,7 +1550,7 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
     }
 
     const DWORD       region = lba_to_global_region(lba);
-    l2p_cache_line_t *line   = l2p_line_find(cache, region);
+    l2p_cache_line_s *line   = l2p_line_find(cache, region);
 
     if (line != NULL)
     {
@@ -1602,7 +1602,7 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba)
  * @param lba   全局 LBA
  * @return true 驻留；false 未驻留 / 加载中
  */
-bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
+BOOL l2p_is_resident(l2p_cache_s *cache, DWORD lba)
 {
     ASSERT(cache != NULL);
 
@@ -1611,7 +1611,7 @@ bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
         return false;
     }
 
-    const l2p_cache_line_t *line = l2p_line_find(cache, lba_to_global_region(lba));
+    const l2p_cache_line_s *line = l2p_line_find(cache, lba_to_global_region(lba));
 
     if (line == NULL)
     {
@@ -1633,9 +1633,9 @@ bool l2p_is_resident(l2p_cache_t *cache, DWORD lba)
  * @param line      目标行
  * @param region_id 全局 region（用于解析 owner 的 Journal）
  */
-static DWORD l2p_dirty_seq_get(l2p_cache_t *cache, DWORD region_id)
+static DWORD l2p_dirty_seq_get(l2p_cache_s *cache, DWORD region_id)
 {
-    const l2p_owner_t *owner = l2p_owner_get(cache, region_id);
+    const l2p_owner_s *owner = l2p_owner_get(cache, region_id);
 
     return ((owner != NULL) && (owner->journal != NULL)) ? jrn_sequence_get(owner->journal) : 0U;
 }
@@ -1647,7 +1647,7 @@ static DWORD l2p_dirty_seq_get(l2p_cache_t *cache, DWORD region_id)
  * @param line      目标行
  * @param region_id 全局 region（用于解析 owner 的 Journal）
  */
-static void l2p_note_dirty_seq(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD region_id)
+static void l2p_note_dirty_seq(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD region_id)
 {
     line->dirty_seq = l2p_dirty_seq_get(cache, region_id);
 }
@@ -1663,7 +1663,7 @@ static void l2p_note_dirty_seq(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD
  * @param pba   新 PBA
  * @return FTL_OK；FTL_AGAIN 加载在飞；FTL_ERROR 硬失败
  */
-ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
+ftl_status_e l2p_write(l2p_cache_s *cache, DWORD lba, DWORD pba)
 {
     // lba 是 host 输入：越界按数据错误处理（no-op），不做断言。
     if ((QWORD)lba >= L2P_GLOBAL_LBA_MAX)
@@ -1672,7 +1672,7 @@ ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
     }
 
     const DWORD       region_id = lba_to_global_region(lba);
-    l2p_cache_line_t *line      = l2p_line_find(cache, region_id);
+    l2p_cache_line_s *line      = l2p_line_find(cache, region_id);
 
     if ((line != NULL) && ((L2P_TAG(cache, line)->state == L2P_CACHE_LOADING) || (L2P_TAG(cache, line)->state == L2P_CACHE_FLUSHING)))
     {
@@ -1764,7 +1764,7 @@ ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba)
  * @param out   输出：PBA 数组
  * @return FTL_OK；FTL_AGAIN 行在飞；FTL_ERROR 越界
  */
-ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[])
+ftl_status_e l2p_entries_read(l2p_cache_s *cache, DWORD lba, DWORD mask, DWORD out[])
 {
     mask &= ((1U << FTL_LBA_PER_PAIR) - 1U);
 
@@ -1780,7 +1780,7 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
     const DWORD region_id = lba_to_global_region(lba);
     const WORD  base_idx  = lba_to_entry(lba);
 
-    l2p_cache_line_t *line = l2p_line_find(cache, region_id);
+    l2p_cache_line_s *line = l2p_line_find(cache, region_id);
 
     for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
     {
@@ -1793,7 +1793,7 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
 
         if (cache->cmt_enabled != false)
         {
-            const l2p_cmt_entry_t *e = l2p_cmt_find(cache, l, true);
+            const l2p_cmt_entry_s *e = l2p_cmt_find(cache, l, true);
 
             if (e != NULL)
             {
@@ -1813,7 +1813,7 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
             return FTL_AGAIN;
         }
 
-        l2p_hit_note(cache, (l2p_cache_line_t *)line);
+        l2p_hit_note(cache, (l2p_cache_line_s *)line);
         out[bit] = line->entries[base_idx + bit];
     }
 
@@ -1831,7 +1831,7 @@ ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD o
  * @param pba   新 PBA 数组
  * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 越界
  */
-ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[])
+ftl_status_e l2p_entries_write(l2p_cache_s *cache, DWORD lba, DWORD mask, const DWORD pba[])
 {
     mask &= ((1U << FTL_LBA_PER_PAIR) - 1U);
 
@@ -1847,7 +1847,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
     const DWORD region_id = lba_to_global_region(lba);
     const WORD  base_idx  = lba_to_entry(lba);
 
-    l2p_cache_line_t *line = l2p_line_find(cache, region_id);
+    l2p_cache_line_s *line = l2p_line_find(cache, region_id);
 
     if ((line != NULL) && ((L2P_TAG(cache, line)->state == L2P_CACHE_LOADING) || (L2P_TAG(cache, line)->state == L2P_CACHE_FLUSHING)))
     {
@@ -1880,7 +1880,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
     }
 
     // 第一遍只判定：无 line 且 CMT 缺项 ⇒ 起加载；CLEAN line 上缺槽 ⇒ 整批 line 回退。
-    bool need_line_fallback = false;
+    BOOL need_line_fallback = false;
 
     for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
     {
@@ -1925,7 +1925,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
             }
 
             const DWORD      l = lba + bit;
-            l2p_cmt_entry_t *e = l2p_cmt_find(cache, l, false);
+            l2p_cmt_entry_s *e = l2p_cmt_find(cache, l, false);
 
             l2p_hit_note(cache, line);
             line->entries[base_idx + bit] = pba[bit];
@@ -1959,8 +1959,8 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
         return FTL_OK;
     }
 
-    bool line_written  = false;
-    bool dirty_written = false;
+    BOOL line_written  = false;
+    BOOL dirty_written = false;
 
     for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
     {
@@ -2027,7 +2027,7 @@ ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const 
  * @param mask  条目掩码
  * @return true = 整批可写；false = 已起加载/写回，下一轮重试
  */
-bool l2p_entries_ready(l2p_cache_t *cache, DWORD lba, DWORD mask)
+BOOL l2p_entries_ready(l2p_cache_s *cache, DWORD lba, DWORD mask)
 {
     mask &= ((1U << FTL_LBA_PER_PAIR) - 1U);
 
@@ -2041,7 +2041,7 @@ bool l2p_entries_ready(l2p_cache_t *cache, DWORD lba, DWORD mask)
     }
 
     const DWORD       region = lba_to_global_region(lba);
-    l2p_cache_line_t *line   = l2p_line_find(cache, region);
+    l2p_cache_line_s *line   = l2p_line_find(cache, region);
 
     if ((line != NULL) && ((L2P_TAG(cache, line)->state == L2P_CACHE_LOADING) || (L2P_TAG(cache, line)->state == L2P_CACHE_FLUSHING)))
     {
@@ -2109,7 +2109,7 @@ bool l2p_entries_ready(l2p_cache_t *cache, DWORD lba, DWORD mask)
  * @param cache cache 上下文（可为 NULL）
  * @param owner owner 实例（可为 NULL；非空时推进其 metadata_dir 的 job）
  */
-static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
+static void l2p_sync_pump(l2p_cache_s *cache, const l2p_owner_s *owner)
 {
     ASSERT(ftl_op_is_in_dispatch() == false);
 
@@ -2131,10 +2131,10 @@ static void l2p_sync_pump(l2p_cache_t *cache, const l2p_owner_t *owner)
  * @param out   输出：PBA
  * @return FTL_OK；FTL_ERROR 越界 / 超时 / 硬失败
  */
-SSD_CODE_FAST ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out)
+SSD_CODE_FAST ftl_status_e l2p_read_sync(l2p_cache_s *cache, DWORD lba, DWORD *out)
 {
     DWORD              guard = L2P_SYNC_GUARD_MAX;
-    const l2p_owner_t *owner = NULL;
+    const l2p_owner_s *owner = NULL;
 
     if ((QWORD)lba < L2P_GLOBAL_LBA_MAX)
     {
@@ -2164,10 +2164,10 @@ SSD_CODE_FAST ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *o
  * @param pba   新 PBA
  * @return FTL_OK；FTL_ERROR 越界 / 超时 / 硬失败
  */
-SSD_CODE_FAST ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba)
+SSD_CODE_FAST ftl_status_e l2p_write_sync(l2p_cache_s *cache, DWORD lba, DWORD pba)
 {
     DWORD              guard = L2P_SYNC_GUARD_MAX;
-    const l2p_owner_t *owner = NULL;
+    const l2p_owner_s *owner = NULL;
 
     if ((QWORD)lba < L2P_GLOBAL_LBA_MAX)
     {
@@ -2199,7 +2199,7 @@ SSD_CODE_FAST ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD p
  *       判失败时，把该页 LBA 从 L2P 作废，再用本标记让读**可见地失败**，而不是零填。
  *       CLEAN CMT 全部失效；DIRTY 只清失败页 LBA 范围（其余是同 region 更早的成功写）。
  */
-SSD_CODE_FAST void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region, DWORD lba, DWORD cw_bitmap)
+SSD_CODE_FAST void l2p_note_region_lost(l2p_cache_s *cache, DWORD global_region, DWORD lba, DWORD cw_bitmap)
 {
     if ((cache == NULL) || (global_region >= L2P_GLOBAL_REGIONS))
     {
@@ -2217,7 +2217,7 @@ SSD_CODE_FAST void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region,
     // 注意：CLEAN line 不持有 dirty，只有 DIRTY/FLUSHING/LOADING line 需要保留位。
     if (l2p_cmt_region_dirty(cache, global_region) == false)
     {
-        const l2p_cache_line_t *line = l2p_line_find(cache, global_region);
+        const l2p_cache_line_s *line = l2p_line_find(cache, global_region);
 
         const BYTE state = (line != NULL) ? L2P_TAG(cache, line)->state : L2P_CACHE_INVALID;
 
@@ -2237,7 +2237,7 @@ SSD_CODE_FAST void l2p_note_region_lost(l2p_cache_t *cache, DWORD global_region,
  * @param global_region 全局 region
  * @return true 已降级；false 未降级 / 越界
  */
-bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region)
+BOOL l2p_is_region_degraded(const l2p_cache_s *cache, DWORD global_region)
 {
     if ((cache == NULL) || (global_region >= L2P_GLOBAL_REGIONS))
     {
@@ -2252,7 +2252,7 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region)
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        const l2p_cache_line_t *line = &cache->lines[i];
+        const l2p_cache_line_s *line = &cache->lines[i];
 
         if ((L2P_TAG(cache, line)->state != L2P_CACHE_INVALID) && (L2P_TAG(cache, line)->region_id == global_region))
         {
@@ -2271,7 +2271,7 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region)
  * @param cache cache 上下文
  * @return 脏位图全部 word 的置位总数
  */
-static SSD_CODE_FAST WORD l2p_dirty_count(const l2p_cache_t *cache)
+static SSD_CODE_FAST WORD l2p_dirty_count(const l2p_cache_s *cache)
 {
     WORD count = 0U;
 
@@ -2293,9 +2293,9 @@ static SSD_CODE_FAST WORD l2p_dirty_count(const l2p_cache_t *cache)
  * @return true = 命令/描述符/buffer/SQ/HSQ 都够一次 region 页写
  *         false = 有任一资源不足
  */
-static bool l2p_flush_resources_available(void)
+static BOOL l2p_flush_resources_available(void)
 {
-    fc_resource_stats_t stats;
+    fc_resource_stats_s stats;
 
     fc_get_resource_stats(&stats);
 
@@ -2313,9 +2313,9 @@ static bool l2p_flush_resources_available(void)
  * @param line_idx 行下标
  * @return FTL_OK；FTL_AGAIN 背压；FTL_ERROR 地址/建链硬失败
  */
-SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
+SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
 {
-    l2p_cache_line_t *line = &cache->lines[line_idx];
+    l2p_cache_line_s *line = &cache->lines[line_idx];
 
     // CMT dirty 合并到本行后再走原有 WAL/双副本流程；CLEAN line 因此变 DIRTY。
     if ((L2P_TAG(cache, line)->state == L2P_CACHE_CLEAN) || (L2P_TAG(cache, line)->state == L2P_CACHE_DIRTY))
@@ -2333,12 +2333,12 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     }
 
     // 映射页属于哪个 owner die 由全局 region 解析；写回必须落到 owner 的目录/分配器。
-    const l2p_owner_t *owner = l2p_owner_get(cache, L2P_TAG(cache, line)->region_id);
+    const l2p_owner_s *owner = l2p_owner_get(cache, L2P_TAG(cache, line)->region_id);
 
     // WAL 次序（RISK-L2P-09）：Journal 条目未落盘前不能写区域页，否则 valid_count
     // 会低于映射。Journal 写失败时放行（RISK-L2P-10）：失败页条目已丢，继续退让会让
     // CP 与失败标记互相等待；此时 CP 本身就是恢复机制。
-    const bool wal_failed = (owner->journal != NULL) && jrn_has_write_failure(owner->journal);
+    const BOOL wal_failed = (owner->journal != NULL) && jrn_has_write_failure(owner->journal);
 
     if ((owner->journal != NULL) && (line->dirty_seq != 0U) && (wal_failed == false) && (!jrn_seq_ge(jrn_persisted_seq(owner->journal), line->dirty_seq)))
     {
@@ -2377,7 +2377,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
 
     // 建链 + 把 entries 拷进 FC buffer（写的数据在 prepare 时就 memcpy 走了 ⇒
     // 提交后 line->entries 可自由改写，这正是"可读"而不"可写"的由来）。
-    fc_command_t      *cmd          = NULL;
+    fc_cmd_s          *cmd          = NULL;
     const ftl_status_e build_status = ftl_async_write_page(&cmd, region_addr[0], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
     if (build_status != FTL_OK)
     {
@@ -2409,12 +2409,12 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
  * @param region 全局 region
  * @return FTL_OK 已提交；FTL_AGAIN 加载/写回在飞或背压；FTL_ERROR 硬失败
  */
-SSD_CODE_FAST ftl_status_e l2p_region_flush_kick(l2p_cache_t *cache, DWORD region)
+SSD_CODE_FAST ftl_status_e l2p_region_flush_kick(l2p_cache_s *cache, DWORD region)
 {
-    l2p_cache_line_t *line = l2p_line_find(cache, region);
+    l2p_cache_line_s *line = l2p_line_find(cache, region);
 
-    const bool cmt_dirty  = l2p_cmt_region_dirty(cache, region);
-    const bool live_dirty = l2p_region_dirty_live(cache, region);
+    const BOOL cmt_dirty  = l2p_cmt_region_dirty(cache, region);
+    const BOOL live_dirty = l2p_region_dirty_live(cache, region);
 
     if (line != NULL)
     {
@@ -2478,7 +2478,7 @@ SSD_CODE_FAST ftl_status_e l2p_region_flush_kick(l2p_cache_t *cache, DWORD regio
  * @param owner_die owner die
  * @param max_kick  本轮最多提交条数
  */
-SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE max_kick, bool force_cmt)
+SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_s *cache, BYTE owner_die, BYTE max_kick, BOOL force_cmt)
 {
     // 心跳（见 log.h / timer.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
     // ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。
@@ -2511,7 +2511,7 @@ SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE
                 continue;
             }
 
-            const l2p_cache_line_t *line = l2p_line_find(cache, region);
+            const l2p_cache_line_s *line = l2p_line_find(cache, region);
 
             if ((line != NULL) && ((L2P_TAG(cache, line)->state == L2P_CACHE_LOADING) || (L2P_TAG(cache, line)->state == L2P_CACHE_FLUSHING)))
             {
@@ -2536,7 +2536,7 @@ SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE
 
     for (WORD i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
     {
-        const l2p_cache_line_t *line = &cache->lines[i];
+        const l2p_cache_line_s *line = &cache->lines[i];
 
         // 只刷自己的行：共享 cache 里别的 LUN 的行由它们自己的 CP/flush 处理。
         if ((L2P_TAG(cache, line)->state != L2P_CACHE_DIRTY) || (l2p_region_owned_by(L2P_TAG(cache, line)->region_id, owner_die) == false))
@@ -2567,7 +2567,7 @@ SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_t *cache, BYTE owner_die, BYTE
  * @param owner_die owner die
  * @return true 空闲；false 仍有未落定行
  */
-SSD_CODE_FAST bool l2p_flush_owner_idle(const l2p_cache_t *cache, BYTE owner_die)
+SSD_CODE_FAST BOOL l2p_flush_owner_idle(const l2p_cache_s *cache, BYTE owner_die)
 {
     if (cache->cmt_dirty_owner[owner_die] != 0U)
     {
@@ -2576,7 +2576,7 @@ SSD_CODE_FAST bool l2p_flush_owner_idle(const l2p_cache_t *cache, BYTE owner_die
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        const l2p_cache_line_t *line = &cache->lines[i];
+        const l2p_cache_line_s *line = &cache->lines[i];
 
         if (l2p_region_owned_by(L2P_TAG(cache, line)->region_id, owner_die) == false)
         {
@@ -2601,16 +2601,16 @@ SSD_CODE_FAST bool l2p_flush_owner_idle(const l2p_cache_t *cache, BYTE owner_die
  *
  * @param ftl        完成派发解析出的实例
  * @param completion FC 完成状态
- * @param ctx        l2p_cache_t *
+ * @param ctx        l2p_cache_s *
  */
-void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
 {
-    l2p_cache_line_t *line  = (l2p_cache_line_t *)ctx;
-    l2p_cache_t      *cache = ftl->cache;
+    l2p_cache_line_s *line  = (l2p_cache_line_s *)ctx;
+    l2p_cache_s      *cache = ftl->cache;
 
     ASSERT(line != NULL);
 
-    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
+    fc_cmd_s *cmd = fc_command_id_to_command(completion->command_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。
@@ -2676,7 +2676,7 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
             // 备份同样来自 Directory（H29）⇒ 非 INVALID 也要过 pba_is_valid（RISK-L2P-21）。
             const WORD  local   = l2p_global_to_local_region(L2P_TAG(cache, line)->region_id);
             const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
-            bool        retried = false;
+            BOOL        retried = false;
 
             if ((line->load_use_backup == false) && (backup != NAND_PBA_INVALID) && (pba_is_valid(backup) == true) && (backup != line->load_pba))
             {
@@ -2710,8 +2710,8 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
         // 主副本成功 ⇒ 提交备份副本（此时只有这一条命令在飞，不额外占 credit）。
         if ((line->flush_fail == false) && (copy == 0U) && (line->flush_issued == 1U))
         {
-            fc_command_t *cmd2 = NULL;
-            ftl_status_e  st   = ftl_async_write_page(&cmd2, line->flush_pba[1], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
+            fc_cmd_s    *cmd2 = NULL;
+            ftl_status_e st   = ftl_async_write_page(&cmd2, line->flush_pba[1], line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
 
             if (st == FTL_OK)
             {
@@ -2788,11 +2788,11 @@ void ftl_l2p_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, voi
  * @param cache     cache
  * @param owner_die owner die
  */
-SSD_CODE_FAST void l2p_owner_invalidate(l2p_cache_t *cache, BYTE owner_die)
+SSD_CODE_FAST void l2p_owner_invalidate(l2p_cache_s *cache, BYTE owner_die)
 {
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_cache_line_t *line = &cache->lines[i];
+        l2p_cache_line_s *line = &cache->lines[i];
 
         if (L2P_TAG(cache, line)->state == L2P_CACHE_INVALID)
         {
@@ -2837,7 +2837,7 @@ SSD_CODE_FAST void l2p_owner_invalidate(l2p_cache_t *cache, BYTE owner_die)
  * @param owner_die owner die
  * @param out       输出：本 die 的局部位图
  */
-SSD_CODE_FAST void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, BYTE owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS])
+SSD_CODE_FAST void l2p_owner_bitmap_snapshot(const l2p_cache_s *cache, BYTE owner_die, DWORD out[L2P_LOCAL_DIRTY_WORDS])
 {
     memset(out, 0, L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD));
 
@@ -2860,7 +2860,7 @@ SSD_CODE_FAST void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, BYTE owne
  * @param snapshot  本 die 的局部脏位快照
  * @return true = 每个 snapshot 位都已 commit 或行已 CLEAN；false = 有未落盘位
  */
-SSD_CODE_FAST bool l2p_owner_snapshot_covered(l2p_cache_t *cache, BYTE owner_die, const DWORD snapshot[L2P_LOCAL_DIRTY_WORDS])
+SSD_CODE_FAST BOOL l2p_owner_snapshot_covered(l2p_cache_s *cache, BYTE owner_die, const DWORD snapshot[L2P_LOCAL_DIRTY_WORDS])
 {
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
@@ -2876,7 +2876,7 @@ SSD_CODE_FAST bool l2p_owner_snapshot_covered(l2p_cache_t *cache, BYTE owner_die
             continue; /* 本次 CP 已 commit（行可能已被驱逐/重载） */
         }
 
-        const l2p_cache_line_t *line = l2p_line_find(cache, global);
+        const l2p_cache_line_s *line = l2p_line_find(cache, global);
 
         if ((line != NULL) && (L2P_TAG(cache, line)->state != L2P_CACHE_CLEAN))
         {
@@ -2912,11 +2912,11 @@ static const BYTE s_l2p_flush_max[BG_LEVEL_NUM] = {
  * @param die   目标 die
  * @param level 本轮后台档位
  */
-SSD_CODE_FAST void l2p_handle(l2p_cache_t *cache, BYTE die, bg_level_e level)
+SSD_CODE_FAST void l2p_handle(l2p_cache_s *cache, BYTE die, bg_level_e level)
 {
     const BYTE max_kick  = s_l2p_flush_max[level];
     // IDLE 档没有 host 写压力：把 dirty CMT 排空，既降低掉电窗口，也不与前台抢带宽。
-    const bool force_cmt = (level == BG_LEVEL_IDLE);
+    const BOOL force_cmt = (level == BG_LEVEL_IDLE);
 
     l2p_owner_flush_kick(cache, die, max_kick, force_cmt);
 }
@@ -2930,7 +2930,7 @@ SSD_CODE_FAST void l2p_handle(l2p_cache_t *cache, BYTE die, bg_level_e level)
  * @param idx   行下标
  * @param out   输出：行信息
  */
-SSD_CODE_FAST void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out)
+SSD_CODE_FAST void l2p_line_get(const l2p_cache_s *cache, WORD idx, l2p_line_info_s *out)
 {
     if (idx >= L2P_CACHE_SIZE)
     {
@@ -2951,7 +2951,7 @@ SSD_CODE_FAST void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_inf
  * @param cache cache
  * @param idx   行下标
  */
-SSD_CODE_FAST void l2p_line_invalidate(l2p_cache_t *cache, WORD idx)
+SSD_CODE_FAST void l2p_line_invalidate(l2p_cache_s *cache, WORD idx)
 {
     // 行作废时其 region 的 CMT 条目也必须失效：PFR 用本函数作废不在 CP bitmap
     // 的 CLEAN 行，若保留 CMT 会把旧映射继续返回给 host。

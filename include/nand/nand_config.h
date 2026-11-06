@@ -12,9 +12,9 @@
  *   - 按 makefile 的 NAND_DEVICE 宏选择器件头（几何/拓扑/位宽/行编码/ID）
  *   - CW 布局（CW_NUM / CW_SIZE / PAGE_BUFFER_SIZE / NAND_PLANE_MAX）
  *   - LUN 位宽推导 + PAA 打包布局（[CW][PAGE][PLANE][BLOCK][LUN]）
- *   - nand_addr_t 与 PAA 访问器 / 替换函数
+ *   - nand_addr_s 与 PAA 访问器 / 替换函数
  *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]
- *   - 上电扫描 target 结果（nand_target_info_t）
+ *   - 上电扫描 target 结果（nand_target_info_s）
  *
  * 器件事实（PAGE_SIZE / PAGES_PER_BLOCK / PLANE_NUM / LUN_NUM / 地址位宽 /
  * NAND_PAA_TO_ROW / FMC / ID）在 `nand/devices/<family>.h`，由宏选择。
@@ -97,7 +97,7 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
  * FTL cache batch 的批次上限按它派生（cache_batch.h），不要另写 4。 */
 #define NAND_DISPATCH_CHAIN_DEPTH (4U)
 
-/* 行地址数组深度（nand_command_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
+/* 行地址数组深度（nand_cmd_req_s.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
  *   PLANE_NUM      —— 当前器件实际 plane 数，是数据模型的"宽度"，
  *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / plane_paa 的长度 /
  *                     FTL 的 valid_map[] 与 plane_blocks[]。
@@ -157,7 +157,7 @@ _Static_assert((1U << CW_WIDTH) == CW_NUM, "CW_WIDTH 与 CW_NUM 不一致");
 #define NAND_ROW_ADDR_CYCLES    ((NAND_ROW_ADDR_BITS + 7U) / 8U)
 
 /* ══════════════════════════════════════════════════════════════
- * nand_addr_t — 展开式地址（具名字段）
+ * nand_addr_s — 展开式地址（具名字段）
  *
  * 三套打包地址（PAA / PBA / LBA）都以它为**唯一的构造入口**：
  *   paa_from_addr() / pba_from_addr()   展开 → 打包
@@ -174,7 +174,7 @@ _Static_assert((1U << CW_WIDTH) == CW_NUM, "CW_WIDTH 与 CW_NUM 不一致");
  * 而 C11 6.7.2.1p4 规定 0 宽位域不得有声明符 ⇒ 具名 `lun : 0` 直接编译不过。
  * ══════════════════════════════════════════════════════════════ */
 
-typedef struct
+typedef struct NAND_ADDRESS_S
 {
     BYTE ch;    /* Channel */
     BYTE ce;    /* Chip Enable */
@@ -183,7 +183,7 @@ typedef struct
     BYTE plane; /* Plane (0/1) */
     BYTE page;  /* Page in block (0..63) */
     BYTE cw;    /* Code Word 号（0..CW_NUM-1；0 = CW0，不是“全部”） */
-} nand_addr_t;
+} nand_addr_s;
 
 static inline DWORD paa_to_page(DWORD paa)
 {
@@ -208,14 +208,14 @@ static inline DWORD paa_to_lun(DWORD paa)
 /* 由展开地址构造 PAA（芯片内地址）。
  * ⚠ PAA 不含 CH/CE —— 片选是命令级信息，不属于芯片内地址，
  *   故本函数**忽略 addr->ch / addr->ce**。 */
-static inline DWORD paa_from_addr(const nand_addr_t *addr)
+static inline DWORD paa_from_addr(const nand_addr_s *addr)
 {
     return ((DWORD)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) | ((DWORD)(addr->page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) | ((DWORD)(addr->plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) | ((DWORD)(addr->block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) | ((DWORD)(addr->lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
 }
 
-/* 展开地址的各字段是否在芯片规格范围内（nand_addr_t 版本）。
+/* 展开地址的各字段是否在芯片规格范围内（nand_addr_s 版本）。
  * 打包版本见下方 paa_is_valid_paa()。 */
-static inline BYTE paa_is_valid_addr(const nand_addr_t *addr)
+static inline BYTE paa_is_valid_addr(const nand_addr_s *addr)
 {
     return ((addr->page < PAGES_PER_BLOCK) && (addr->plane < PLANE_NUM) && (addr->block < BLOCKS_PER_PLANE) && (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
 }
@@ -322,7 +322,7 @@ static inline DWORD lba_to_meta(DWORD lba, DWORD plane, DWORD cw)
 /* ══════════════════════════════════════════════════════════════
  * 打包地址 → 展开地址 的转换器（PAA 侧）
  *
- * nand_addr_t（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
+ * nand_addr_s（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
  * DWORD  (packed) — L2P 表存储接口用，32-bit 紧凑（**定义于 ftl/ftl_config.h**）
  *
  * 反向的 paa_from_addr() 定义在 PAA 段内；PBA 侧的构造/转换（pba_make / pba_pack /
@@ -332,10 +332,10 @@ static inline DWORD lba_to_meta(DWORD lba, DWORD plane, DWORD cw)
  * `addr_from_paa()` 保留为 NAND/FC 侧原语。
  * ══════════════════════════════════════════════════════════════ */
 
-/* 从 PAA + CH/CE 构造 nand_addr_t（元数据固定位置 / Directory 查找结果用） */
-static inline nand_addr_t addr_from_paa(BYTE ch, BYTE ce, DWORD paa)
+/* 从 PAA + CH/CE 构造 nand_addr_s（元数据固定位置 / Directory 查找结果用） */
+static inline nand_addr_s addr_from_paa(BYTE ch, BYTE ce, DWORD paa)
 {
-    nand_addr_t addr;
+    nand_addr_s addr;
 
     addr.ch    = ch;
     addr.ce    = ce;
@@ -358,13 +358,13 @@ static inline nand_addr_t addr_from_paa(BYTE ch, BYTE ce, DWORD paa)
  *
  * 紧凑 die 编号与 LUN→die 表在 FTL 层（ftl_config.h）。
  * ══════════════════════════════════════════════════════════════ */
-typedef struct
+typedef struct NAND_TARGET_INFORMATION_S
 {
     BYTE present;
     BYTE lun_count;
     BYTE lun_present[LUN_NUM];
-} nand_target_info_t;
+} nand_target_info_s;
 
-extern nand_target_info_t g_nand_targets[CH_NUM][CE_NUM];
+extern nand_target_info_s g_nand_targets[CH_NUM][CE_NUM];
 
 #endif /* NAND_CONFIG_H */

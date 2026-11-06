@@ -16,7 +16,7 @@
  *   - FMC（Flexible Memory Controller）NAND Bank3 内存映射窗口
  *   - RB# GPIO（GPIOD PIN6，busy/ready 指示）
  *
- * 时序来源：nand_fmc_timing_t（MT29 数据手册参数，见 nand_fmc.h / devices/mt29f___g08a.c）。
+ * 时序来源：nand_fmc_timing_s（MT29 数据手册参数，见 nand_fmc.h / devices/mt29f___g08a.c）。
  */
 
 #include "nand_fmc.h"
@@ -40,13 +40,13 @@
  *   表定义放在各 handler 之后：handler 定义即声明，省掉 12 条长签名
  *   前向声明，也就无需 __attribute__((used))。
  * -------------------------------------------------------------------- */
-static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
+static const nand_uop_handler_fn_t g_nand_fmc_handlers[NAND_UOP_COUNT];
 
 /* ── FMC 后端实例（按 target）──
  * 每个 (ch,ce) 一个实例；同 bank 的各 LUN 共享窗口，LUN 由 PAA 行地址表达。
  * handlers 是 const 表，context 指向该 target 的 config；每事务可变状态在
- * fc_uop_engine_state_t，不在 backend，故多 target 并发安全。 */
-static nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM];
+ * fc_uop_engine_state_s，不在 backend，故多 target 并发安全。 */
+static nand_fmc_instance_s g_nand_fmc_instances[CH_NUM][CE_NUM];
 
 /**
  * @brief 取指定 target 的 FMC 后端
@@ -55,7 +55,7 @@ static nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM];
  *
  * @return 后端接口（handlers 为 const 表，context 指向该 target 的 config）
  */
-const nand_phy_backend_t *nand_phy_backend_get(BYTE ch, BYTE ce)
+const nand_phy_backend_s *nand_phy_backend_get(BYTE ch, BYTE ce)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM));
     return &g_nand_fmc_instances[ch][ce].backend;
@@ -67,7 +67,7 @@ const nand_phy_backend_t *nand_phy_backend_get(BYTE ch, BYTE ce)
  * @param config FMC 窗口指针 + R/B# 接线（按值复制进实例）
  * @return NAND_RESULT_OK
  */
-nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_config_t *config)
+nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *config)
 {
     /* 前置条件由调用者保证（板级/器件初始化传入 const config） */
     ASSERT(config != NULL);
@@ -79,7 +79,7 @@ nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_config_t *co
     return NAND_RESULT_OK;
 }
 
-nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
+nand_result_e nand_fmc_init(const nand_fmc_cfg_s *config)
 {
     return nand_fmc_init_target(0U, 0U, config);
 }
@@ -92,9 +92,9 @@ nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
  * @param timing 取其 busy_timeout_us 作超时（轮询计次兼作微秒）
  * @return NAND_RESULT_OK / NAND_RESULT_TIMEOUT
  */
-static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)uop;
     (void)request;
@@ -150,7 +150,7 @@ static BYTE nand_fmc_address_byte(DWORD value)
  * @param shift   字节偏移（0/8/16）
  * @return 对应地址字节
  */
-static BYTE nand_fmc_row_byte(const nand_command_request_t *request, const nand_uop_t *uop, BYTE shift)
+static BYTE nand_fmc_row_byte(const nand_cmd_req_s *request, const nand_uop_s *uop, BYTE shift)
 {
     ASSERT(uop->operand < NAND_PLANE_MAX);
     return nand_fmc_address_byte(request->row[uop->operand] >> shift);
@@ -162,9 +162,9 @@ static BYTE nand_fmc_row_byte(const nand_command_request_t *request, const nand_
  * @param uop operand 即命令字节
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)request;
     (void)timing;
@@ -180,9 +180,9 @@ static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop,
  *
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)uop;
     (void)timing;
@@ -196,9 +196,9 @@ static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop
  *
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)uop;
     (void)timing;
@@ -213,9 +213,9 @@ static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop
  * @param uop operand 作 row[] 的 plane 下标（multi-plane 时两个 plane 分两段写）
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)timing;
     (void)completion;
@@ -229,9 +229,9 @@ static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
  * @param uop operand 作 row[] 的 plane 下标
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)timing;
     (void)completion;
@@ -245,9 +245,9 @@ static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
  * @param uop operand 作 row[] 的 plane 下标
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
 
     (void)timing;
     (void)completion;
@@ -263,10 +263,10 @@ static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
  * @param uop operand 作 buffer 偏移（multi-plane program 第二 plane）
  * @return NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    WORD                     index;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
+    WORD                  index;
 
     (void)timing;
 
@@ -297,10 +297,10 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
  * @param uop operand 作 buffer 偏移（multi-plane read 第二 plane）
  * @return NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    WORD                     index;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
+    WORD                  index;
 
     (void)timing;
 
@@ -334,10 +334,10 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
  *
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    BYTE                     status;
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
+    BYTE                  status;
 
     (void)uop;
     (void)timing;
@@ -356,7 +356,7 @@ static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop
  *
  * @return NAND_RESULT_OK / NAND_RESULT_OPERATION_FAILED
  */
-static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
     (void)context;
     (void)uop;
@@ -373,7 +373,7 @@ static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *u
  *
  * @return NAND_RESULT_OK / NAND_RESULT_OPERATION_FAILED
  */
-static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
     (void)context;
     (void)uop;
@@ -392,7 +392,7 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
  * @param uop operand 即延时微秒数
  * @return 恒 NAND_RESULT_OK
  */
-static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
     (void)context;
     (void)request;
@@ -406,7 +406,7 @@ static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop
  * g_nand_fmc_handlers — UOP → handler 调度表
  *   说明与注意事项见文件开头的前向声明处。
  * -------------------------------------------------------------------- */
-static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] = {
+static const nand_uop_handler_fn_t g_nand_fmc_handlers[NAND_UOP_COUNT] = {
     [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
     [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
     [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,

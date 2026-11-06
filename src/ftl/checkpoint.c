@@ -29,7 +29,7 @@
  *   3. 创建/恢复       cp_pool_find_latest / cp_initial_record_write
  *   4. 触发/上报       cp_should_start / cp_handle
  *
- * 游标/序号是 **per-instance**（ftl_ctx_t.cp，见 cp_state_t）——
+ * 游标/序号是 **per-instance**（ftl_ctx_s.cp，见 cp_state_s）——
  * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
@@ -50,14 +50,14 @@
 #include <string.h>
 
 // 池扫描用的 Header 暂存：单线程 superloop 串行调用，放文件级 static（AXI .bss），
-// 避免 `cp_record_probe` 每次在栈上放 2 KB 的 cp_header_t。
-static cp_header_t s_probe_hdr;
+// 避免 `cp_record_probe` 每次在栈上放 2 KB 的 cp_header_s。
+static cp_header_s s_probe_hdr;
 static BYTE        s_probe_raw[PAGE_SIZE];
 
 /* ── 内部定义（仅本编译单元使用）── */
 
 // cp_regions_flush 一步的结果（调用点按具名值分派，不写数值魔法）。
-typedef enum
+typedef enum CP_FLUSH_STEP_E
 {
     CP_FLUSH_PENDING = 0U, /* 仍有脏行在飞：调用者 return，下轮再来 */
     CP_FLUSH_DONE    = 1U, /* 全部 region 已持久：推进 phase */
@@ -79,28 +79,28 @@ typedef enum
 #define CP_WEAR_HEALTH_SHIFT (4U)
 #define CP_WEAR_HEALTH_MASK  (0x03U)
 
-typedef struct
+typedef struct CP_WEAR_ENTRY_S
 {
     DWORD erase_count;                     /* 4 B */
     WORD  read_count;                      /* 2 B */
     BYTE  last_ecc;                        /* 1 B */
     BYTE  flags;                           /* 1 B：rising_count | health */
-} __attribute__((packed)) cp_wear_entry_t; /* 8 B */
+} __attribute__((packed)) cp_wear_entry_s; /* 8 B */
 
-_Static_assert(sizeof(cp_wear_entry_t) == FTL_CHECKPOINT_WEAR_ENTRY_BYTES, "磨损快照条目尺寸必须与 metadata.h 的页几何一致");
-_Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == PAGE_MAIN_SIZE, "磨损快照页必须恰好装满一页主区");
+_Static_assert(sizeof(cp_wear_entry_s) == FTL_CHECKPOINT_WEAR_ENTRY_BYTES, "磨损快照条目尺寸必须与 metadata.h 的页几何一致");
+_Static_assert((sizeof(cp_wear_entry_s) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == PAGE_MAIN_SIZE, "磨损快照页必须恰好装满一页主区");
 
 // T3 定时的最小 journal 增量：一条 CP record 是 21 页，加此门后轻载下不会每个
 // 定时拍都写一条 record（数值为本仓经验值）。
 #define CP_T3_MIN_JOURNAL_DELTA (64U)
 
 // 池扫描上下文（cp_record_probe 的回调上下文）。
-typedef struct
+typedef struct CHECKPOINT_PROBE_CONTEXT_S
 {
-    ftl_topo_t topo;
-    md_ring_t  ring;
-    bool       any_version; /* true = 只校验 magic（格式化判据探针），不校验 layout_version */
-} checkpoint_probe_ctx_t;
+    ftl_topo_s topo;
+    md_ring_s  ring;
+    BOOL       any_version; /* true = 只校验 magic（格式化判据探针），不校验 layout_version */
+} checkpoint_probe_ctx_s;
 
 /* ── 内部辅助 ── */
 
@@ -109,7 +109,7 @@ typedef struct
  * 池几何由 ftl/metadata.h 推导；sequence 与写游标是**本池自己的**（与 journal /
  * 目录检查点 / BBT 的 sequence 互不相干），开机由 cp_pool_find_latest 恢复。
  *
- * 游标/序号是 per-instance 的 h->cp_state（cp_state_t）：file-scope static 在多实例
+ * 游标/序号是 per-instance 的 h->cp_state（cp_state_s）：file-scope static 在多实例
  * 下会互相覆盖。 */
 
 /**
@@ -118,7 +118,7 @@ typedef struct
  * @param alloc  allocator（取其 pools->cp 候选表；可为 NULL）
  * @param ring   输出：初始化后的 Checkpoint 环
  */
-static void cp_ring_init(const alc_t *alloc, md_ring_t *ring)
+static void cp_ring_init(const alc_s *alloc, md_ring_s *ring)
 {
     if ((alloc != NULL) && (alloc->pools != NULL))
     {
@@ -144,7 +144,7 @@ static void cp_ring_init(const alc_t *alloc, md_ring_t *ring)
  * @param hdr  待校验的 Header
  * @return true = magic / 版本 / sequence 均有效；false = 无效（含 sequence 0 或 UINT32_MAX）
  */
-static bool cp_header_is_valid(const cp_header_t *hdr)
+static BOOL cp_header_is_valid(const cp_header_s *hdr)
 {
     if (hdr->magic != CP_MAGIC)
     {
@@ -166,18 +166,18 @@ static bool cp_header_is_valid(const cp_header_t *hdr)
 }
 
 /**
- * @brief Checkpoint record 探针（见 metadata_ring_probe_fn）。
+ * @brief Checkpoint record 探针（见 metadata_ring_probe_fn_t）。
  * full 与廉价探针等价（一条 record 只有一页），故忽略。
  *
- * @param ctx           探针上下文（checkpoint_probe_ctx_t *）
+ * @param ctx           探针上下文（checkpoint_probe_ctx_s *）
  * @param record_idx    待探测的记录槽位
  * @param full          是否完整探测（本池恒等价，忽略）
  * @param out_sequence  输出：命中记录的 sequence
  * @return FTL_OK 命中；FTL_ERROR 无镜像 plane 可读 / 校验不符
  */
-static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
+static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, BOOL full, DWORD *out_sequence)
 {
-    checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
+    checkpoint_probe_ctx_s *c = (checkpoint_probe_ctx_s *)ctx;
 
     (void)full;
 
@@ -188,7 +188,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
     {
         const BYTE   plane = md_ring_plane_at(c->ring.plane_mask, pi);
         DWORD        addr  = md_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
-        cp_header_t *hdr   = &s_probe_hdr;
+        cp_header_s *hdr   = &s_probe_hdr;
 
         if (ftl_sync_read_page(addr, hdr, sizeof(*hdr), FTL_PAGE_CFG_META()) != FTL_OK)
         {
@@ -248,7 +248,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  *
  * @param h  Checkpoint handle
  */
-static void cp_job_abort(cp_handle_t *h)
+static void cp_job_abort(cp_handle_s *h)
 {
     // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
     md_dir_ckpt_write_abort(h->metadata_dir, &h->dir);
@@ -269,7 +269,7 @@ static void cp_job_abort(cp_handle_t *h)
  * @param h  Checkpoint handle（读并更新 rl_abort）
  * @return true = 到点可打印；false = 仍在限流窗口内
  */
-static bool cp_job_abort_log_due(cp_handle_t *h)
+static BOOL cp_job_abort_log_due(cp_handle_s *h)
 {
     // 5s：CP 饥饿时每 10~25ms 重试一次，1s 一行仍偏密；卡死是持续状态，5s 足够可见。
     return log_ratelimit_due(&h->rl_abort);
@@ -282,7 +282,7 @@ static bool cp_job_abort_log_due(cp_handle_t *h)
  * @param h  Checkpoint handle（读/更新 stall_ms、timed_out）
  * @return true = 已中止本次 job；false = 未到 deadline 或时钟缺失
  */
-static bool cp_job_stall(cp_handle_t *h)
+static BOOL cp_job_stall(cp_handle_s *h)
 {
     const DWORD now_ms = platform_now_ms();
 
@@ -307,7 +307,7 @@ static bool cp_job_stall(cp_handle_t *h)
     {
         if (cp_job_abort_log_due(h))
         {
-            fc_resource_stats_t rs;
+            fc_resource_stats_s rs;
 
             (void)fc_get_resource_stats(&rs);
             LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%d free=%hu cmd=%hu buf=%hu\r\n", (now_ms - h->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS, h->phase, h->alloc->free_count, rs.command_used, rs.buffer_used);
@@ -328,7 +328,7 @@ static bool cp_job_stall(cp_handle_t *h)
  * @param st  提交/建链的返回码
  * @return true = 调用者必须 return；false = 提交成功，可继续推进
  */
-static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
+static BOOL cp_command_result_handle(cp_handle_s *h, ftl_status_e st)
 {
     if (st == FTL_OK)
     {
@@ -355,9 +355,9 @@ static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
  * @param length  写入长度（字节）
  * @return FTL_OK 已提交；FTL_AGAIN 背压；FTL_ERROR 建链失败
  */
-static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data, DWORD length)
+static ftl_status_e cp_write_submit(cp_handle_s *h, DWORD addr, const void *data, DWORD length)
 {
-    fc_command_t *cmd;
+    fc_cmd_s *cmd;
 
     const ftl_status_e st = ftl_async_write_page_mirror(&cmd, addr, data, length, FTL_PAGE_CFG_META());
 
@@ -387,9 +387,9 @@ static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data
  * @param addr  待擦块的基地址（PBA）
  * @return FTL_OK 已提交；FTL_AGAIN 背压；FTL_ERROR 建链失败
  */
-static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
+static ftl_status_e cp_erase_submit(cp_handle_s *h, DWORD addr)
 {
-    fc_command_t *cmd;
+    fc_cmd_s *cmd;
 
     const ftl_status_e st = ftl_async_erase_block_multi_plane(&cmd, addr);
 
@@ -421,7 +421,7 @@ static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
  * @param journal_seq   本次 job 起点的 journal 水位
  * @param region_bitmap region 快照位图（可为 NULL = 无快照）
  */
-static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence, DWORD journal_seq, const DWORD *region_bitmap)
+static void cp_header_fill(cp_header_s *cp, const cp_handle_s *h, DWORD sequence, DWORD journal_seq, const DWORD *region_bitmap)
 {
     memset(cp, 0, sizeof(*cp));
 
@@ -472,10 +472,10 @@ static void cp_header_fill(cp_header_t *cp, const cp_handle_t *h, DWORD sequence
  * Header 是承诺书：DONE 前用 `l2p_owner_snapshot_covered` 再验一遍，杜绝
  * "bit 置位但无行无 dirty" 的孤儿位被当成已持久。
  */
-static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
+static cp_flush_step_e cp_regions_flush(cp_handle_s *h)
 {
     const BYTE die     = topo_2_die(h->topo);
-    bool       pending = false;
+    BOOL       pending = false;
     BYTE       started = 0U;
 
     // 按 snapshot 位置驱动：dirty 可能在 line，也可能只在 CMT（无 resident line）。
@@ -547,7 +547,7 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
  * @param h       Checkpoint handle
  * @param failed  Header 写命令是否失败
  */
-static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
+static void cp_hdr_write_complete(cp_handle_s *h, BOOL failed)
 {
     h->cp_state.write_idx = ((h->hdr.idx + 1U) % md_ring_total_records(&h->hdr.ring));
 
@@ -581,14 +581,14 @@ static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
  *
  * @param ftl        完成派发解析出的实例（必须与 ctx 一致）
  * @param completion FC 完成状态
- * @param ctx        cp_handle_t *
+ * @param ctx        cp_handle_s *
  */
-void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_checkpoint_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
 {
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
-    cp_handle_t  *h   = (cp_handle_t *)ctx;
-    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
+    cp_handle_s *h   = (cp_handle_s *)ctx;
+    fc_cmd_s    *cmd = fc_command_id_to_command(completion->command_id);
 
     // 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
     // 二者必须一致——不一致说明派发路由错了。
@@ -605,7 +605,7 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
         return;
     }
 
-    const bool failed = fc_cmd_status_has_error(completion->status);
+    const BOOL failed = fc_cmd_status_has_error(completion->status);
 
     // 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
     // cp_job_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。
@@ -717,7 +717,7 @@ void ftl_checkpoint_callback(ftl_ctx_t *ftl, const fc_command_status_t *completi
  * 由 cp_handle 下轮重试同一阶段（幂等）；连续 FTL_SUBMIT_TIMEOUT_MS
  * 轮无进展 ⇒ 中止（failed=1，走 CP_DONE 且**不**写 Header / 不截断）。
  */
-static void cp_job_step(cp_handle_t *h)
+static void cp_job_step(cp_handle_s *h)
 {
     for (;;)
     {
@@ -786,7 +786,7 @@ static void cp_job_step(cp_handle_t *h)
                 {
                     // 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                     // 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不写 Header。
-                    const bool dir_ckpt_ok = (h->dir.ok == true);
+                    const BOOL dir_ckpt_ok = (h->dir.ok == true);
 
                     md_dir_ckpt_commit(h->metadata_dir, &h->dir);
 
@@ -803,7 +803,7 @@ static void cp_job_step(cp_handle_t *h)
                 }
 
                 const DWORD         aaddr = md_dir_ckpt_page_addr(h->dir.base, h->dir.chunk);
-                md_dir_ckpt_page_t *page  = (md_dir_ckpt_page_t *)h->hdr.hdr_buf;
+                md_dir_ckpt_page_s *page  = (md_dir_ckpt_page_s *)h->hdr.hdr_buf;
 
                 md_dir_ckpt_page(h->metadata_dir, h->dir.seq, h->dir.chunk, page);
 
@@ -822,8 +822,8 @@ static void cp_job_step(cp_handle_t *h)
 
                 if (h->cp_state.cursor_valid == false)
                 {
-                    md_ring_locate_out_t   loc;
-                    checkpoint_probe_ctx_t probe_ctx;
+                    md_ring_locate_out_s   loc;
+                    checkpoint_probe_ctx_s probe_ctx;
 
                     probe_ctx.topo        = h->topo;
                     probe_ctx.ring        = h->hdr.ring;
@@ -843,7 +843,7 @@ static void cp_job_step(cp_handle_t *h)
 
                 h->hdr.idx = h->cp_state.write_idx;
 
-                bool need_erase = false;
+                BOOL need_erase = false;
                 if (md_ring_prepare_addr(&h->hdr.ring, &h->topo, h->hdr.idx, &h->hdr.addr, &need_erase) != FTL_OK)
                 {
                     cp_job_abort(h);
@@ -937,7 +937,7 @@ static void cp_job_step(cp_handle_t *h)
             case CP_HDR_WRITE:
             {
                 // 2KB Header 页常驻 handle，避免运行期 CP 路径的 2KB 栈帧。
-                cp_header_t *cp = (cp_header_t *)h->hdr.hdr_buf;
+                cp_header_s *cp = (cp_header_s *)h->hdr.hdr_buf;
 
                 cp_header_fill(cp, h, h->hdr.seq, h->journal_seq, h->region_bitmap);
                 cp->timestamp = platform_now_ms();
@@ -1021,7 +1021,7 @@ static void cp_job_step(cp_handle_t *h)
  * @param h  Checkpoint handle
  * @return FTL_OK 已启动（可能停在某个提交阶段）；FTL_AGAIN 上一次 job 仍在跑（单飞行）
  */
-static ftl_status_e cp_job_begin(cp_handle_t *h)
+static ftl_status_e cp_job_begin(cp_handle_s *h)
 {
     if (h->active == true)
     {
@@ -1029,14 +1029,14 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     }
 
     // 窄上下文与池游标跨 job 保留；其余执行状态整体复位。
-    l2p_cache_t *const    cache        = h->cache;
-    l2p_jrn_t *const      journal      = h->journal;
-    md_dir_cache_t *const metadata_dir = h->metadata_dir;
-    alc_t *const          alloc        = h->alloc;
-    const ftl_topo_t      topo         = h->topo;
-    const cp_state_t      cps          = h->cp_state;
-    const log_ratelimit_t rl_abort     = h->rl_abort;
-    const log_ratelimit_t rl_done      = h->rl_done;
+    l2p_cache_s *const    cache        = h->cache;
+    l2p_jrn_s *const      journal      = h->journal;
+    md_dir_cache_s *const metadata_dir = h->metadata_dir;
+    alc_s *const          alloc        = h->alloc;
+    const ftl_topo_s      topo         = h->topo;
+    const cp_state_s      cps          = h->cp_state;
+    const log_ratelimit_s rl_abort     = h->rl_abort;
+    const log_ratelimit_s rl_done      = h->rl_done;
 
     memset(h, 0, sizeof(*h));
 
@@ -1079,9 +1079,9 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
 /**
  * @brief 复位本实例的 CP 池游标/序号（找不到有效 record 时保持 0/无效）。
  *
- * @param cp  本实例的 cp_state_t（池游标/序号）
+ * @param cp  本实例的 cp_state_s（池游标/序号）
  */
-static void cp_cursor_reset(cp_state_t *cp)
+static void cp_cursor_reset(cp_state_s *cp)
 {
     cp->sequence              = 0U;
     cp->last_journal_sequence = 0U;
@@ -1101,17 +1101,17 @@ static void cp_cursor_reset(cp_state_t *cp)
  * @param out_record_idx 输出：该 Header 的池内槽位（可 NULL）
  * @return FTL_OK 找到；FTL_ERROR 无有效 CP / 重读失败
  */
-ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_record_idx)
+ftl_status_e cp_pool_find_latest(cp_handle_s *h, cp_header_s *cp, WORD *out_record_idx)
 {
     // 复位本实例池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始）
     cp_cursor_reset(&h->cp_state);
 
-    checkpoint_probe_ctx_t probe_ctx;
+    checkpoint_probe_ctx_s probe_ctx;
     cp_ring_init(h->alloc, &probe_ctx.ring);
     probe_ctx.topo        = h->topo;
     probe_ctx.any_version = false;
 
-    md_ring_locate_out_t loc;
+    md_ring_locate_out_s loc;
 
     if (md_ring_locate(&probe_ctx.ring, cp_record_probe, &probe_ctx, &loc) != FTL_OK)
     {
@@ -1130,7 +1130,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
 
     // 重读胜者（locate 只返回序号，Header 本体要再读一次）。
     // 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。
-    bool found = false;
+    BOOL found = false;
     for (BYTE pi = 0U; pi < md_ring_plane_count(probe_ctx.ring.plane_mask); pi++)
     {
         const BYTE plane = md_ring_plane_at(probe_ctx.ring.plane_mask, pi);
@@ -1177,14 +1177,14 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
  * @param out_layout_version 输出：读到的 CP layout_version（可 NULL）
  * @return CP_MEDIA_CURRENT / NO_RECORD / VERSION_MISMATCH / IO_ERROR
  */
-cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_version)
+cp_media_status_e cp_media_status_probe(cp_handle_s *h, DWORD *out_layout_version)
 {
-    checkpoint_probe_ctx_t ctx;
+    checkpoint_probe_ctx_s ctx;
     cp_ring_init(h->alloc, &ctx.ring);
     ctx.topo        = h->topo;
     ctx.any_version = true; /* 只校验 magic：版本不符也要能定位出来 */
 
-    md_ring_locate_out_t loc;
+    md_ring_locate_out_s loc;
 
     if (md_ring_locate(&ctx.ring, cp_record_probe, &ctx, &loc) != FTL_OK)
     {
@@ -1199,7 +1199,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
         {
             const BYTE   plane = md_ring_plane_at(ctx.ring.plane_mask, pi);
             DWORD        addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, loc.newest_idx, 0U, plane);
-            cp_header_t *hdr   = &s_probe_hdr; /* 文件级 scratch，避免 2KB 栈帧 */
+            cp_header_s *hdr   = &s_probe_hdr; /* 文件级 scratch，避免 2KB 栈帧 */
 
             if (ftl_sync_read_page(addr, hdr, sizeof(*hdr), FTL_PAGE_CFG_META()) != FTL_OK)
             {
@@ -1235,13 +1235,13 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
     // ⚠ 判空走 `ftl_page_blank_check`（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比），
     //   不是「RAW 读数 FF」——RAW 读跳过 ECC，也没把 META/CRC/parity 交给 FTL（RISK-IF-15）。
     // ⚠ 不要只用 bbt_medium_has_ftl_data 判空：它对“空片”和“总线读死”都返回 false。
-    bool cmd_ok      = false;
-    bool any_written = false;
+    BOOL cmd_ok      = false;
+    BOOL any_written = false;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         const DWORD addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
-        bool        blank = false;
+        BOOL        blank = false;
 
         if (ftl_page_blank_check(addr, &blank) != FTL_OK)
         {
@@ -1278,11 +1278,11 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  * @param md_dir Directory（动态 LOG 块身份；可 NULL）
  * @param words  输出：FTL_BLOCK_TOTAL 个编码 word
  */
-void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD words[FTL_BLOCK_TOTAL])
+void cp_block_snapshot(const alc_s *alloc, const md_dir_cache_s *md_dir, WORD words[FTL_BLOCK_TOTAL])
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        const bst_block_t *blk = &alloc->blocks[g];
+        const bst_block_s *blk = &alloc->blocks[g];
 
         WORD valid = blk->valid_count;
         BYTE st    = (BYTE)ftl_block_state(blk);
@@ -1334,9 +1334,9 @@ void cp_block_snapshot(const alc_t *alloc, const md_dir_cache_t *md_dir, WORD wo
  * @param page_index 磨损页号（0..FTL_CHECKPOINT_WEAR_PAGES-1）
  * @param page       输出：一页主区
  */
-void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE])
+void cp_wear_page_build(const alc_s *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE])
 {
-    cp_wear_entry_t *entries = (cp_wear_entry_t *)page;
+    cp_wear_entry_s *entries = (cp_wear_entry_s *)page;
 
     for (WORD i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
     {
@@ -1344,7 +1344,7 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
 
         if (g < FTL_BLOCK_TOTAL)
         {
-            bst_wear_t wear;
+            bst_wear_s wear;
 
             alc_bst_get_wear(alloc, g, &wear);
 
@@ -1381,7 +1381,7 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
  * @param record_idx 该 Header 的池内槽位
  * @return true 已加载并回填；false 无快照 / 损坏
  */
-bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
+BOOL cp_wear_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx)
 {
     // 读缓冲复用 cp_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。
     ASSERT(h->active == false);
@@ -1396,7 +1396,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
         return false;
     }
 
-    md_ring_t ring;
+    md_ring_s ring;
     cp_ring_init(h->alloc, &ring);
 
     // 开机路径专用：CP job 未在跑（入口 ASSERT），可复用它的页缓冲作读缓冲。
@@ -1404,7 +1404,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
 
     for (BYTE p = 0U; p < FTL_CHECKPOINT_WEAR_PAGES; p++)
     {
-        bool loaded = false;
+        BOOL loaded = false;
 
         for (BYTE pi = 0U; pi < md_ring_plane_count(ring.plane_mask); pi++)
         {
@@ -1422,7 +1422,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
                 continue;
             }
 
-            const cp_wear_entry_t *entries = (const cp_wear_entry_t *)page;
+            const cp_wear_entry_s *entries = (const cp_wear_entry_s *)page;
 
             for (WORD i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
             {
@@ -1433,7 +1433,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
                     break;
                 }
 
-                bst_wear_t wear;
+                bst_wear_s wear;
 
                 wear.erase_count     = entries[i].erase_count;
                 wear.read_count      = entries[i].read_count;
@@ -1471,7 +1471,7 @@ bool cp_wear_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx)
  * @param block_words 输出：FTL_BLOCK_TOTAL 个 word
  * @return true 已加载且 CRC 通过；false 无快照 / 损坏
  */
-bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx, WORD block_words[FTL_BLOCK_TOTAL])
+BOOL cp_block_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx, WORD block_words[FTL_BLOCK_TOTAL])
 {
     if (cp->block_page_count == 0U)
     {
@@ -1483,7 +1483,7 @@ bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx,
         return false;
     }
 
-    md_ring_t ring;
+    md_ring_s ring;
     cp_ring_init(h->alloc, &ring);
 
     // 镜像池：整条快照从**同一个 plane** 读（不在 plane 间拼页）；该副本读失败或
@@ -1493,7 +1493,7 @@ bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx,
         const BYTE plane = md_ring_plane_at(ring.plane_mask, pi);
 
         BYTE fail_page = 0U;
-        bool ok        = true;
+        BOOL ok        = true;
 
         for (BYTE p = 0U; p < CP_BLOCK_PAGES; p++)
         {
@@ -1537,7 +1537,7 @@ bool cp_block_table_load(cp_handle_t *h, const cp_header_t *cp, WORD record_idx,
  * @param metadata_dir Directory
  * @param alloc        allocator（同时作为本实例拓扑来源）
  */
-void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cache_t *metadata_dir, alc_t *alloc)
+void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cache_s *metadata_dir, alc_s *alloc)
 {
     ASSERT(h != NULL);
     ASSERT(cache != NULL);
@@ -1568,9 +1568,9 @@ void cp_init(cp_handle_t *h, l2p_cache_t *cache, l2p_jrn_t *journal, md_dir_cach
  * @param cp     已填充的 Header（commit 页，最后写）
  * @return true = Header 与快照页均已落盘并通过回读校验；false = 任一步写/回读失败
  */
-static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *ring, WORD slot, const WORD *words, const cp_header_t *cp)
+static BOOL cp_initial_record_write_checked(ftl_ctx_s *ftl, const md_ring_s *ring, WORD slot, const WORD *words, const cp_header_s *cp)
 {
-    cp_handle_t *h = ftl->cp_handle;
+    cp_handle_s *h = ftl->cp_handle;
 
     for (BYTE p = 1U; p <= CP_BLOCK_PAGES; p++)
     {
@@ -1618,7 +1618,7 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
         return false;
     }
 
-    cp_header_t *rb  = &s_probe_hdr;
+    cp_header_s *rb  = &s_probe_hdr;
     ftl_status_e rst = ftl_sync_read_page(hdr_addr, rb, sizeof(*rb), FTL_PAGE_CFG_META());
 
     return (rst == FTL_OK) && (rb->magic == CP_MAGIC) && (rb->sequence == cp->sequence) && (rb->layout_version == FTL_MEDIA_LAYOUT_VERSION);
@@ -1633,15 +1633,15 @@ static bool cp_initial_record_write_checked(ftl_ctx_t *ftl, const md_ring_t *rin
  * @param ftl FTL 实例
  * @return FTL_OK；FTL_ERROR 任一分页写失败（不写 Header，无有效 record）
  */
-ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
+ftl_status_e cp_initial_record_write(ftl_ctx_s *ftl)
 {
-    cp_handle_t *h     = ftl->cp_handle;
+    cp_handle_s *h     = ftl->cp_handle;
     WORD        *words = cp_block_words_get(h);
 
     // 完整 per-block metadata snapshot：与 carve 后的池归属一致（由调用者先 carve）。
     cp_block_snapshot(&ftl->alloc, ftl->metadata_dir, words);
 
-    md_ring_t ring;
+    md_ring_s ring;
     cp_ring_init(h->alloc, &ring);
 
     // 磨损快照与 CRC 先组好；每个候选块的 wear 内容相同。
@@ -1653,7 +1653,7 @@ ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
         h->hdr.wear_page_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
     }
 
-    cp_header_t *cp = (cp_header_t *)h->hdr.hdr_buf;
+    cp_header_s *cp = (cp_header_s *)h->hdr.hdr_buf;
 
     cp_header_fill(cp, h, 1U, 0U, NULL);
 
@@ -1723,7 +1723,7 @@ ftl_status_e cp_initial_record_write(ftl_ctx_t *ftl)
  * T2 写入量（自上次 CP 起 total_writes 增量 ≥ CP_WRITE_INTERVAL）；
  * T3 定时（elapsed_ms ≥ CP_TIME_INTERVAL_MS）。
  */
-static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
+static BOOL cp_should_start(const cp_handle_s *h, const cp_trigger_s *trigger)
 {
     // 触发原因决定本轮**允许**评估哪些带门。
     // ADVANCE   —— must-run 表首只推进在飞 job，不评估启动；
@@ -1788,7 +1788,7 @@ static bool cp_should_start(const cp_handle_t *h, const cp_trigger_t *trigger)
  * @param h       handle
  * @param trigger 本轮触发信息（非空）
  */
-void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
+void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger)
 {
     if (h->active == true)
     {
@@ -1831,7 +1831,7 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger)
  *
  * @param h Checkpoint handle
  */
-void cp_timer_reset(cp_handle_t *h)
+void cp_timer_reset(cp_handle_s *h)
 {
     h->cp_state.next_t3_ms = platform_now_ms() + CP_TIME_INTERVAL_MS;
 }

@@ -53,12 +53,12 @@ static MunitParameterEnum s_bbt_plane_params[] = {
 };
 
 static WORD             s_cp_words[FTL_BLOCK_TOTAL];
-static l2p_cache_line_t s_l2p_line_saved;
+static l2p_cache_line_s s_l2p_line_saved;
 static DWORD            s_l2p_bitmap_saved[L2P_LOCAL_DIRTY_WORDS];
 static BYTE             s_cp_page[PAGE_MAIN_SIZE];
 
 /* 把每个 plane 的前 n 个块放进 Free Pool（测试自有表，plane 内块号 0..n-1）。 */
-static void mem_fill_free(alc_t *a, WORD n)
+static void mem_fill_free(alc_s *a, WORD n)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -71,7 +71,7 @@ static void mem_fill_free(alc_t *a, WORD n)
 
 /* per-plane 空闲计数的总和。它是 `free_count` 的**第二本账**（RISK-ALLOC-09 引入），
  * 两个量必须恒等 —— 漂移即「成对分配失败」的前兆，且编译期完全无声。 */
-static WORD mem_plane_free_sum(const alc_t *a)
+static WORD mem_plane_free_sum(const alc_s *a)
 {
     WORD sum = 0U;
 
@@ -132,7 +132,7 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     munit_assert_uint32(a->free_count, ==, 0U);
 
@@ -154,7 +154,7 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
         for (WORD i = 0U; i < 4U; i++)
         {
             const WORD         g = ftl_gblock(p, i);
-            const bst_block_t *b = &a->blocks[g];
+            const bst_block_s *b = &a->blocks[g];
 
             munit_assert_uint32(ftl_block_state(b), ==, FTL_BLOCK_STATE_FREE);
             munit_assert_uint32(ftl_block_sb_id(b), ==, FTL_BLOCK_NO_SB);
@@ -204,7 +204,7 @@ static MunitResult test_super_block_open_close(const MunitParameter params[], vo
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     mem_fill_free(a, 2U);
 
@@ -279,7 +279,7 @@ static MunitResult test_closed_list_add_drop(const MunitParameter params[], void
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     WORD blocks[PLANE_NUM];
 
@@ -318,8 +318,8 @@ static MunitResult test_valid_count_guard(const MunitParameter params[], void *d
 
     ftl_ut_trace_begin();
 
-    alc_t       *a = ftl_ut_ram_alloc();
-    bst_block_t *b = &a->blocks[ftl_gblock(0U, 0U)];
+    alc_s       *a = ftl_ut_ram_alloc();
+    bst_block_s *b = &a->blocks[ftl_gblock(0U, 0U)];
 
     ftl_block_add_valid(b);
     ftl_block_add_valid(b);
@@ -354,7 +354,7 @@ static MunitResult test_op_spare_pools(const MunitParameter params[], void *data
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     /* OP：per-plane 独立计数 + 容量上限。 */
     munit_assert_true(alc_op_push(a, 0U, ftl_gblock(0U, 0U)));
@@ -400,8 +400,8 @@ static MunitResult test_erase_stats(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    alc_t       *a = ftl_ut_ram_alloc();
-    bst_block_t *b = &a->blocks[ftl_gblock(0U, 2U)];
+    alc_s       *a = ftl_ut_ram_alloc();
+    bst_block_s *b = &a->blocks[ftl_gblock(0U, 2U)];
 
     ftl_block_add_valid(b);
     b->read_count = 7U;
@@ -434,7 +434,7 @@ static MunitResult test_bbt_mark_bad(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     const BYTE plane = (BYTE)(munit_parameters_get(params, "plane")[0] - '0');
     const WORD g     = ftl_gblock(plane, 200U);
@@ -485,7 +485,7 @@ static MunitResult test_bbt_metadata_bad(const MunitParameter params[], void *da
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     const WORD g = ftl_gblock(0U, JOURNAL_BLOCK0);
 
@@ -561,7 +561,7 @@ static MunitResult test_alloc_spare_full_refill_none(const MunitParameter params
 
     ftl_ut_trace_begin();
 
-    alc_t     *a     = ftl_ut_ram_alloc();
+    alc_s     *a     = ftl_ut_ram_alloc();
     const BYTE plane = 0U;
 
     for (WORD i = 0U; i < (WORD)FTL_SPARE_POOL_PER_PLANE; i++)
@@ -616,7 +616,7 @@ static MunitResult test_metadata_idle(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
 
@@ -641,7 +641,7 @@ static MunitResult test_ring_geometry(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    md_ring_t ring;
+    md_ring_s ring;
 
     ftl_ut_trace_begin();
     memset(&ring, 0, sizeof(ring));
@@ -683,7 +683,7 @@ static MunitResult test_directory_commit(const MunitParameter params[], void *da
 
     ftl_ut_trace_begin();
 
-    md_dir_cache_t *dir = ftl_ut_ram_md();
+    md_dir_cache_s *dir = ftl_ut_ram_md();
 
     munit_assert_uint32(md_entry_find(dir, METADATA_TYPE_L2P_REGION, 0U), ==, NAND_PBA_INVALID);
 
@@ -731,7 +731,7 @@ static MunitResult test_journal_append(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
-    l2p_jrn_t journal;
+    l2p_jrn_s journal;
 
     ftl_ut_trace_begin();
     memset(&journal, 0, sizeof(journal));
@@ -772,8 +772,8 @@ static MunitResult test_cp_encoders(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    alc_t          *a = ftl_ut_ram_alloc();
-    md_dir_cache_t *d = ftl_ut_ram_md();
+    alc_s          *a = ftl_ut_ram_alloc();
+    md_dir_cache_s *d = ftl_ut_ram_md();
 
     const WORD word = cp_block_word_pack((WORD)CP_BLOCK_WORD_MAX_VALID, (BYTE)FTL_BLOCK_STATE_BAD, 1U, CP_BLOCK_POOL_SPARE);
 
@@ -836,7 +836,7 @@ static MunitResult test_cp_encoders(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-static ftl_status_e ring_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
+static ftl_status_e ring_probe(void *ctx, WORD record_idx, BOOL full, DWORD *out_sequence)
 {
     (void)full;
 
@@ -862,8 +862,8 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    md_ring_t            ring;
-    md_ring_locate_out_t out;
+    md_ring_s            ring;
+    md_ring_locate_out_s out;
     WORD                 written;
 
     ftl_ut_trace_begin();
@@ -906,14 +906,14 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     (void)params;
     (void)data;
 
-    md_dir_ckpt_prepare_out_t prep;
-    md_dir_ckpt_page_t        page;
-    static md_dir_ckpt_page_t s_dir_ckpt_page;
+    md_dir_ckpt_prepare_out_s prep;
+    md_dir_ckpt_page_s        page;
+    static md_dir_ckpt_page_s s_dir_ckpt_page;
 
     ftl_ut_trace_begin();
 
-    alc_t          *a = ftl_ut_ram_alloc();
-    md_dir_cache_t *d = ftl_ut_ram_md();
+    alc_s          *a = ftl_ut_ram_alloc();
+    md_dir_cache_s *d = ftl_ut_ram_md();
 
     munit_assert_true(md_pool_build_all(a));
 
@@ -964,8 +964,8 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
 
     ftl_ut_trace_begin();
 
-    alc_t          *a = ftl_ut_ram_alloc();
-    md_dir_cache_t *d = ftl_ut_ram_md();
+    alc_s          *a = ftl_ut_ram_alloc();
+    md_dir_cache_s *d = ftl_ut_ram_md();
 
     const WORD g0 = md_log_alloc(d, a, 0U);
 
@@ -1006,13 +1006,13 @@ static MunitResult test_cp_init_timer(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    cp_handle_t h;
+    cp_handle_s h;
 
     ftl_ut_trace_begin();
 
-    alc_t          *a = ftl_ut_ram_alloc();
-    md_dir_cache_t *d = ftl_ut_ram_md();
-    ftl_ctx_t      *f = ftl_ut_live();
+    alc_s          *a = ftl_ut_ram_alloc();
+    md_dir_cache_s *d = ftl_ut_ram_md();
+    ftl_ctx_s      *f = ftl_ut_live();
 
     memset(&h, 0, sizeof(h));
     cp_init(&h, f->cache, f->journal, d, a);
@@ -1047,7 +1047,7 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
 
     ftl_ut_trace_begin();
 
-    md_dir_cache_t *d = ftl_ut_ram_md();
+    md_dir_cache_s *d = ftl_ut_ram_md();
 
     d->handle.error = FTL_ERROR;
 
@@ -1074,7 +1074,7 @@ static MunitResult test_journal_write_fail_clear(const MunitParameter params[], 
     (void)params;
     (void)data;
 
-    l2p_jrn_t journal;
+    l2p_jrn_s journal;
 
     ftl_ut_trace_begin();
 
@@ -1115,7 +1115,7 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
 
     ftl_ut_trace_begin();
 
-    md_dir_cache_t *d       = ftl_ut_ram_md();
+    md_dir_cache_s *d       = ftl_ut_ram_md();
     const WORD      victim  = ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 5U));
     const WORD      pending = d->reclaim_pending_count;
 
@@ -1162,7 +1162,7 @@ static MunitResult test_journal_truncate_idempotent(const MunitParameter params[
 
     ftl_ut_trace_begin();
 
-    l2p_jrn_t journal;
+    l2p_jrn_s journal;
     DWORD     addr  = 0U;
     BYTE      block = JRN_BLOCK_NONE;
 
@@ -1245,7 +1245,7 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
 
@@ -1272,13 +1272,13 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    pending_ctx_t table;
+    pend_ctx_s table;
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
     pend_init(&table);
 
-    pend_req_t *slots[FTL_PENDING_MAX];
+    pend_req_s *slots[FTL_PENDING_MAX];
 
     for (WORD i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -1313,8 +1313,8 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
-    pending_ctx_t table;
-    BYTE          gi[FTL_GROUP_MAX];
+    pend_ctx_s table;
+    BYTE       gi[FTL_GROUP_MAX];
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
@@ -1351,8 +1351,8 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
     (void)params;
     (void)data;
 
-    pending_ctx_t table;
-    BYTE          gi = 0U;
+    pend_ctx_s table;
+    BYTE       gi = 0U;
 
     ftl_ut_trace_begin();
     memset(&table, 0, sizeof(table));
@@ -1361,7 +1361,7 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
 
     munit_assert_true(pend_group_alloc(&table, &gi));
 
-    pend_group_t *g = &table.groups[gi];
+    pend_group_s *g = &table.groups[gi];
 
     g->total         = 2U;
     g->next          = 2U;
@@ -1398,12 +1398,12 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
-    wb_handle_t   h;
-    pending_ctx_t table;
-    BYTE          gi = 0U;
-    BYTE          src[FTL_IU_BYTES];
-    BYTE          out[FTL_IU_BYTES];
-    wb_trigger_t  tr;
+    wb_handle_s  h;
+    pend_ctx_s   table;
+    BYTE         gi = 0U;
+    BYTE         src[FTL_IU_BYTES];
+    BYTE         out[FTL_IU_BYTES];
+    wb_trigger_s tr;
 
     ftl_ut_trace_begin();
     memset(&h, 0, sizeof(h));
@@ -1498,8 +1498,8 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    bg_scheduler_t sched;
-    bg_level_cfg_t cfg;
+    bg_sched_s     sched;
+    bg_level_cfg_s cfg;
     bg_level_e     level;
 
     ftl_ut_trace_begin();
@@ -1584,9 +1584,9 @@ static MunitResult test_op_route(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    struct ftl_context *route[FTL_DIE_MAX];
-    ftl_ctx_t          *live  = ftl_ut_live();
-    ftl_ctx_t          *saved = ftl_op_route_get(0U, 0U, 0U);
+    struct FTL_CONTEXT_S *route[FTL_DIE_MAX];
+    ftl_ctx_s            *live  = ftl_ut_live();
+    ftl_ctx_s            *saved = ftl_op_route_get(0U, 0U, 0U);
 
     ftl_ut_trace_begin();
 
@@ -1620,8 +1620,8 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
     (void)params;
     (void)data;
 
-    ftl_ctx_t  *f = ftl_ut_live();
-    pend_req_t *slots[FTL_PENDING_MAX];
+    ftl_ctx_s  *f = ftl_ut_live();
+    pend_req_s *slots[FTL_PENDING_MAX];
 
     ftl_ut_trace_begin();
 
@@ -1670,12 +1670,12 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
 {
     (void)data;
 
-    BYTE          src[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
-    BYTE          out[FTL_IU_BYTES];
-    wb_handle_t   h;
-    pending_ctx_t table;
-    BYTE          gi = 0U;
-    const BYTE    n  = (BYTE)(munit_parameters_get(params, "n")[0] - '0');
+    BYTE        src[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
+    BYTE        out[FTL_IU_BYTES];
+    wb_handle_s h;
+    pend_ctx_s  table;
+    BYTE        gi = 0U;
+    const BYTE  n  = (BYTE)(munit_parameters_get(params, "n")[0] - '0');
 
     ftl_ut_trace_begin();
 
@@ -1690,7 +1690,7 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
         src[i] = (BYTE)(i & 0xFFU);
     }
 
-    wb_trigger_t tr;
+    wb_trigger_s tr;
 
     memset(&tr, 0, sizeof(tr));
     tr.kind = WBUF_TRIGGER_APPEND;
@@ -1729,7 +1729,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
 
     ftl_ut_trace_begin();
 
-    pending_ctx_t         table;
+    pend_ctx_s            table;
     BYTE                  gi     = 0U;
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
@@ -1738,7 +1738,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     pend_init(&table);
     munit_assert_true(pend_group_alloc(&table, &gi));
 
-    pend_group_t *g = &table.groups[gi];
+    pend_group_s *g = &table.groups[gi];
 
     g->total         = 2U;
     g->next          = 2U;
@@ -1782,7 +1782,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
 
     ftl_ut_trace_begin();
 
-    pending_ctx_t         table;
+    pend_ctx_s            table;
     BYTE                  gi     = 0U;
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
@@ -1791,8 +1791,8 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     pend_init(&table);
     munit_assert_true(pend_group_alloc(&table, &gi));
 
-    pend_group_t *g      = &table.groups[gi];
-    pend_req_t   *p      = pend_alloc(&table, 0U);
+    pend_group_s *g      = &table.groups[gi];
+    pend_req_s   *p      = pend_alloc(&table, 0U);
     const WORD    idx    = (WORD)(p - table.slots);
     const DWORD   owners = ftl_group_bit(gi);
 
@@ -1854,7 +1854,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
 
     ftl_ut_trace_begin();
 
-    pending_ctx_t         table;
+    pend_ctx_s            table;
     BYTE                  gi     = 0U;
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
@@ -1863,7 +1863,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     pend_init(&table);
     munit_assert_true(pend_group_alloc(&table, &gi));
 
-    pend_group_t *g      = &table.groups[gi];
+    pend_group_s *g      = &table.groups[gi];
     const DWORD   owners = ftl_group_bit(gi);
 
     g->op            = PENDING_OP_WRITE;
@@ -1874,7 +1874,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     g->outstanding   = 1U;
 
     /* 槽 A：普通在飞写（used 但 op 不是 WRITE_CONFIRM）。 */
-    pend_req_t *a     = pend_alloc(&table, 0U);
+    pend_req_s *a     = pend_alloc(&table, 0U);
     const WORD  idx_a = (WORD)(a - table.slots);
 
     a->lba    = FTL_UT_LBA_BASE;
@@ -1884,7 +1884,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     pend_validate(a);
 
     /* 槽 B：待入账。 */
-    pend_req_t *b     = pend_alloc(&table, 1U);
+    pend_req_s *b     = pend_alloc(&table, 1U);
     const WORD  idx_b = (WORD)(b - table.slots);
 
     b->lba    = FTL_UT_LBA_BASE;
@@ -1931,11 +1931,11 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
 
     ftl_ut_trace_begin();
 
-    wb_handle_t   h;
-    pending_ctx_t table;
-    BYTE          gi = 0U;
-    BYTE          src[2U * FTL_IU_BYTES];
-    wb_trigger_t  tr;
+    wb_handle_s  h;
+    pend_ctx_s   table;
+    BYTE         gi = 0U;
+    BYTE         src[2U * FTL_IU_BYTES];
+    wb_trigger_s tr;
 
     memset(&h, 0, sizeof(h));
     memset(&table, 0, sizeof(table));
@@ -1945,7 +1945,7 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
 
     volatile BYTE         flag   = 0U;
     volatile ssd_status_e status = SSD_STATUS_OK;
-    pend_group_t         *g      = &table.groups[gi];
+    pend_group_s         *g      = &table.groups[gi];
 
     g->total         = 0U;
     g->next          = 0U;
@@ -1987,7 +1987,7 @@ static MunitResult test_wbuf_drop_reset_owners(const MunitParameter params[], vo
     volatile ssd_status_e status2 = SSD_STATUS_OK;
 
     munit_assert_true(pend_group_alloc(&table, &gi2));
-    pend_group_t *g2 = &table.groups[gi2];
+    pend_group_s *g2 = &table.groups[gi2];
 
     g2->total         = 0U;
     g2->next          = 0U;
@@ -2031,9 +2031,9 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
 
     ftl_ut_trace_begin();
 
-    ftl_ctx_t   *ftl = ftl_ut_live();
+    ftl_ctx_s   *ftl = ftl_ut_live();
     BYTE         buf[FTL_IU_BYTES];
-    ftl_io_req_t req;
+    ftl_io_req_s req;
 
     const WORD slots0  = pend_slot_get_count(&ftl->pending);
     const WORD groups0 = pend_group_get_count(&ftl->pending);
@@ -2094,7 +2094,7 @@ MunitTest g_ftl_pure_host_tests[] = {
 };
 
 /* 同 mem_fill_free：GC/WL 用例用它把 Free Pool 补到目标水位。 */
-static void io_fill_free(alc_t *a, WORD n)
+static void io_fill_free(alc_s *a, WORD n)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -2116,12 +2116,12 @@ static MunitResult test_policy_entry(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    ftl_ctx_t *ftl = ftl_ut_live();
+    ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
 
     const DWORD triggers = gc_should_trigger(&ftl->alloc);
-    const bool  wl       = wl_should_trigger(&ftl->alloc, ftl->total_writes);
+    const BOOL  wl       = wl_should_trigger(&ftl->alloc, ftl->total_writes);
 
     munit_assert_uint32(triggers & ~(GC_TRIGGER_WATERMARK | GC_TRIGGER_EMERGENCY), ==, 0U);
     munit_assert_uint32(ftl->cache->load_inflight, ==, 0U);
@@ -2146,7 +2146,7 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     munit_assert_uint32(gc_should_trigger(NULL), ==, 0U);
 
@@ -2207,11 +2207,11 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
 
     WORD            blocks_a[PLANE_NUM];
     WORD            blocks_b[PLANE_NUM];
-    gc_select_out_t out;
+    gc_select_out_s out;
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -2326,11 +2326,11 @@ static MunitResult test_wl_trigger_and_victim(const MunitParameter params[], voi
     (void)data;
 
     WORD        blocks[PLANE_NUM];
-    wl_victim_t victim;
+    wl_victim_s victim;
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     /* 启动门以下不触发。 */
     munit_assert_false(wl_should_trigger(a, WL_MIN_WRITES - 1U));
@@ -2393,7 +2393,7 @@ static MunitResult test_rr_health(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    rr_ecc_track_t track;
+    rr_ecc_track_s track;
 
     ftl_ut_trace_begin();
 
@@ -2438,7 +2438,7 @@ static MunitResult test_rr_predictive_retire(const MunitParameter params[], void
 
     ftl_ut_trace_begin();
 
-    alc_t     *a = ftl_ut_ram_alloc();
+    alc_s     *a = ftl_ut_ram_alloc();
     const WORD g = ftl_gblock(0U, 300U);
 
     WORD blocks[PLANE_NUM];
@@ -2480,11 +2480,11 @@ static MunitResult test_wl_victim_threshold(const MunitParameter params[], void 
     (void)data;
 
     WORD        blocks[PLANE_NUM];
-    wl_victim_t victim;
+    wl_victim_s victim;
 
     ftl_ut_trace_begin();
 
-    alc_t *a = ftl_ut_ram_alloc();
+    alc_s *a = ftl_ut_ram_alloc();
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -2525,7 +2525,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
 
     ftl_ut_trace_begin();
 
-    fc_command_t *cmd = fc_command_alloc();
+    fc_cmd_s *cmd = fc_command_alloc();
 
     munit_assert_not_null(cmd);
 
@@ -2617,8 +2617,8 @@ static MunitResult test_l2p_resident_states(const MunitParameter params[], void 
 
     ftl_ut_trace_begin();
 
-    ftl_ctx_t   *f      = ftl_ut_live();
-    l2p_cache_t *c      = f->cache;
+    ftl_ctx_s   *f      = ftl_ut_live();
+    l2p_cache_s *c      = f->cache;
     const DWORD  lba    = 0U;
     const DWORD  region = lba_to_global_region(lba);
     const WORD   entry  = lba_to_entry(lba);
@@ -2649,7 +2649,7 @@ static MunitResult test_l2p_resident_states(const MunitParameter params[], void 
         idx = 0U;
     }
 
-    l2p_cache_line_t *line = &c->lines[idx];
+    l2p_cache_line_s *line = &c->lines[idx];
 
     memcpy(&s_l2p_line_saved, line, sizeof(*line));
     memcpy(s_l2p_bitmap_saved, c->region_dirty_bitmap, sizeof(s_l2p_bitmap_saved));
@@ -2698,9 +2698,9 @@ static MunitResult test_l2p_resident_states(const MunitParameter params[], void 
     return MUNIT_OK;
 }
 
-static l2p_owner_t s_fake_owner;
+static l2p_owner_s s_fake_owner;
 
-static const l2p_owner_t *l2p_fake_owner_fn(void *ctx, DWORD global_region)
+static const l2p_owner_s *l2p_fake_owner_fn(void *ctx, DWORD global_region)
 {
     (void)ctx;
     (void)global_region;
@@ -2721,8 +2721,8 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
 
     ftl_ut_trace_begin();
 
-    ftl_ctx_t   *f = ftl_ut_live();
-    l2p_cache_t *c = f->cache;
+    ftl_ctx_s   *f = ftl_ut_live();
+    l2p_cache_s *c = f->cache;
 
     /* 纯测试不做 NAND 写回：若存在脏/在飞行，跳过（不在 pure 层制造 I/O）。 */
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -2798,10 +2798,10 @@ static MunitResult test_l2p_wal_gate(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    ftl_ctx_t   *f = ftl_ut_live();
-    l2p_cache_t *c = f->cache;
+    ftl_ctx_s   *f = ftl_ut_live();
+    l2p_cache_s *c = f->cache;
 
-    l2p_jrn_t journal;
+    l2p_jrn_s journal;
 
     memset(&journal, 0, sizeof(journal));
     jrn_init(&journal, f->topo, ftl_ut_ram_alloc());
@@ -2819,8 +2819,8 @@ static MunitResult test_l2p_wal_gate(const MunitParameter params[], void *data)
     c->owner_ctx              = NULL;
 
     /* 借第 0 行做实验，结束后原样还原（活实例的行属于开机加载的 region，不能留脏）。 */
-    l2p_cache_line_t *line = &c->lines[0];
-    l2p_cache_line_t  saved;
+    l2p_cache_line_s *line = &c->lines[0];
+    l2p_cache_line_s  saved;
     const BYTE        saved_inflight = c->flush_inflight;
 
     memcpy(&saved, line, sizeof(saved));

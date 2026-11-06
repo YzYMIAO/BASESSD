@@ -17,7 +17,7 @@
  * LOAD/VAL 在 1 ms 窗口内插值。DWT 是调试/跟踪单元，不作为产品时间源。
  */
 
-typedef enum
+typedef enum DELAY_STATUS_E
 {
     DELAY_OK = 0,
     DELAY_ERR_NOT_INITIALIZED,
@@ -26,15 +26,15 @@ typedef enum
 
 /* SysTick 已由 HAL 配置为 1 ms；本函数从 LOAD 反推每微秒周期数。 */
 void delay_init(void);
-bool delay_is_initialized(void);
+BOOL delay_is_initialized(void);
 
 /*
  * 非阻塞微秒时间接口（SysTick VAL/LOAD）。
  * 32-bit 微秒时间戳约 71.6 min 回绕；超时与差值一律用无符号差值比较。
  * NAND 的单次 tR/tPROG/tBERS 均远小于该范围。
  */
-bool delay_time_now_us(DWORD *us);
-bool delay_time_elapsed_us(DWORD start_us, WORD timeout_us);
+BOOL delay_time_now_us(DWORD *us);
+BOOL delay_time_elapsed_us(DWORD start_us, WORD timeout_us);
 /* 从 start_us 到当前的微秒数（未初始化时返回 0；用于分段计时）。 */
 DWORD delay_time_since_us(DWORD start_us);
 /* 64-bit 单调微秒时间（FTL / 平台长时轴；未初始化时返回 0）。 */
@@ -51,7 +51,7 @@ void delay_ms(DWORD ms);
 
 /* 毫秒计数的回绕安全超时工具。 */
 DWORD delay_now_ms(void);
-bool  delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms);
+BOOL  delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms);
 
 /*
  * ---- port 接口：由 src/platform/<soc>/delay_port.c 实现 ----
