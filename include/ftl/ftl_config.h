@@ -796,7 +796,7 @@ static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
 /* ══════════════════════════════════════════════════════════════
  * 紧凑 die 表（扫描结果的 FTL 调度坐标）
  *
- * 板级扫描（fc_nand_scan_targets）只给出“哪些 (ch,ce) target 存在、logical_units
+ * 板级 target 扫描只给出“哪些 (ch,ce) target 存在、logical_units
  * 多少”；FTL 据此给实际存在的 LUN 分配紧凑 die 号，并维护两张互为逆映射的表：
  *
  *   g_chcelun_table[ch][ce][lun] → 紧凑 die 号；FTL_DIE_INVALID = 不存在

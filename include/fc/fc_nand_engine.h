@@ -8,12 +8,13 @@
 #include <stdint.h>
 
 /*
- * fc_nand_engine.h — FC 的 NAND 命令引擎与命令接口
+ * fc_nand_engine.h — FC 的 NAND 命令引擎（异步事务 + 初始化/拓扑）
  *
- * 合并自原 fc_nand_engine.h + fc_nand_engine.h：
- *   - UOP 微指令解释器（引擎游标/等待状态）；
- *   - 一条 ONFI 命令的异步事务；
- *   - 同步/异步执行入口、typed helpers、初始化与拓扑扫描。
+ * 对外只暴露：
+ *   - UOP 引擎游标/等待状态与 start/step；
+ *   - 一条 ONFI 命令的异步事务（fc_nand_txn_s）；
+ *   - 异步放行闩锁与初始化/高速切换入口。
+ * 同步阻塞执行、typed ONFI helpers、target 探测只在本文件内使用（static）。
  *
  * 依赖方向：FC 本头 → nand_protocol.h / onfi_1_0.h；NAND 不 include 本头。
  */
@@ -47,19 +48,18 @@ typedef struct FC_UOP_ENGINE_STATE_S
 } fc_uop_engine_state_s;
 
 /**
- * @brief 阻塞式执行整条 UOP 序列，直到完成或出错。
+ * @brief 置/清异步路径放行闩锁（0 = 同步初始化；1 = 异步 dispatch）。
  *
- * @deprecated 仅用于初始化阶段的同步调用（fc_nand_init）。
- * 运行时用 fc_uop_engine_start + fc_uop_engine_step 非阻塞推进。
- *
- * @param backend     NAND PHY 后端
- * @param uops        UOP 序列
- * @param timing      时序参数
- * @param request     命令请求
- * @param completion  完成信息出参
- * @return NAND_RESULT_OK 或错误码
+ * @param armed 非 0 放行。
  */
-nand_result_e fc_uop_engine_execute(const nand_phy_backend_s *backend, const nand_uop_s *uops, const nand_op_timing_s *timing, const nand_cmd_req_s *request, nand_cmd_comp_s *completion);
+void fc_nand_engine_set_armed(BYTE armed);
+
+/**
+ * @brief 查询异步路径放行闩锁。
+ *
+ * @return 1 = 已放行；0 = 同步初始化阶段。
+ */
+BYTE fc_nand_engine_is_armed(void);
 
 /**
  * @brief 复位引擎游标并立即推进一步（异步事务发起）。
@@ -89,26 +89,12 @@ typedef struct FC_NAND_TRANSACTION_S
     nand_cmd_comp_s       completion;
 } fc_nand_txn_s;
 
-/* 同步执行一条 OP（仅初始化阶段，armed == 0）。 */
-nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_cmd_req_s *request, nand_cmd_comp_s *completion);
-
 /* 异步执行：start 发起 + step 推进。 */
 nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const nand_cmd_req_s *request);
 nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completion);
 
-/* Typed ONFI 操作 helpers。 */
-nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_cmd_comp_s *completion);
-nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_cmd_comp_s *completion);
-nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion);
-nand_result_e fc_nand_set_features(BYTE ch, BYTE ce, BYTE feature_address, const BYTE feature_data[4], nand_cmd_comp_s *completion);
-nand_result_e fc_nand_read_status_enhanced(BYTE ch, BYTE ce, DWORD row, nand_cmd_comp_s *completion);
-
 /* 启动流程（FC 编排，NAND 只提供 hw_init/desc/PHY）。 */
 nand_result_e fc_nand_init(void);
 nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz);
-
-/* 拓扑扫描。 */
-nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *info);
-nand_result_e fc_nand_scan_targets(void);
 
 #endif /* FC_NAND_ENGINE_H */

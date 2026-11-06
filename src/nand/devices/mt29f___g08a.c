@@ -287,7 +287,7 @@ static nand_result_e mt29f_hw_init(void)
 
     mt29f_build_fmc_config(&fmc_config);
 
-    if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
+    if (nand_fmc_init_target(0U, 0U, &fmc_config) != NAND_RESULT_OK)
     {
         LOGE(LOG_TAG_NAND "FMC backend configure failed\r\n");
         return NAND_RESULT_OPERATION_FAILED;
@@ -348,11 +348,14 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
 
+static BYTE mt29f_get_timing_mode(BYTE ch, BYTE ce);
+
 static const nand_device_desc_s g_mt29f_desc = {
-    .name        = "MT29F4G08ABADAWP",
-    .expected_id = NAND_CHIP_ID,
-    .hw_init     = mt29f_hw_init,
-    .set_timing  = mt29f_set_timing,
+    .name            = "MT29F4G08ABADAWP",
+    .expected_id     = NAND_CHIP_ID,
+    .hw_init         = mt29f_hw_init,
+    .set_timing      = mt29f_set_timing,
+    .get_timing_mode = mt29f_get_timing_mode,
 };
 
 const nand_device_desc_s *nand_device_get(void)
@@ -361,11 +364,11 @@ const nand_device_desc_s *nand_device_get(void)
 }
 
 /**
- * @brief 当前 NAND 时序模式
+ * @brief 当前 NAND 时序模式（器件内部实现，经 nand_device.h 的通用接口暴露）
  *
  * @return 模式号（0 = 低速）
  */
-BYTE nand_get_timing_mode(BYTE ch, BYTE ce)
+static BYTE mt29f_get_timing_mode(BYTE ch, BYTE ce)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM));
     return s_timing_mode[ch][ce];

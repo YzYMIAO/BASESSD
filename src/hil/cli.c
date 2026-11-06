@@ -14,6 +14,7 @@
 #include "bbt.h"
 #include "crash.h"
 #include "delay.h"        /* delay_now_ms（stat 的本次开机时间） */
+#include "fc.h"           /* 池/队列深度等模块常量（内含 fc_interface.h） */
 #include "fc_interface.h" /* fc_get_resource_stats（q 的队列/三池水位） */
 #include "ftl.h"
 #include "ftl_fc_interface.h" /* ftl_sync_read_page / FTL_PAGE_CFG_DATA_ANY（rdpaa 诊断）*/
@@ -22,6 +23,7 @@
 #include "l2p_cache.h"
 #include "log.h"
 #include "metadata.h"               /* md_pool_print（pool 诊断） */
+#include "nand_device.h"            /* nand_get_timing_mode（通用器件查询） */
 #include "pc_sample.h"              /* PC 采样环（pc 命令） */
 #include "pending.h"                /* pend_slot/group_get_count（q） */
 #include "power_failure_recovery.h" /* pfr_media_format（boot 失败后的恢复格式化） */

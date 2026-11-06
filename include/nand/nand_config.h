@@ -40,7 +40,7 @@
  *
  * CH_NUM / CE_NUM 是**板卡接线**属性：几个 NAND 通道、每通道几个片选。
  * 它们不能从 NAND 器件头推出——同一颗芯片可以接 1 条或多条通道。
- * 实际存在多少 target 由 fc_nand_scan_targets() 上电扫描决定。
+ * 实际存在多少 target 由 FC 初始化阶段的上电 target 扫描决定。
  *
  * LUN_NUM 来自器件头（器件属性）；运行时实际 LUN 数由 ONFI
  * 参数页 logical_units 给出，并逐 LUN 用 78h 探测确认。

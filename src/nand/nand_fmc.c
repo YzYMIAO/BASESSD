@@ -79,11 +79,6 @@ nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *confi
     return NAND_RESULT_OK;
 }
 
-nand_result_e nand_fmc_init(const nand_fmc_cfg_s *config)
-{
-    return nand_fmc_init_target(0U, 0U, config);
-}
-
 /**
  * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
  *

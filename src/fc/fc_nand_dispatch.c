@@ -18,8 +18,8 @@
  *     poll 遍历每 LUN FIFO 先进先出，每轮每 LUN 推进一条，完成一条即回一份 completion。
  *   - 相位机（Phase V）：IDLE → ISSUE → ISSUED → FETCH → IDLE（per-LUN，作用于队头槽）。
  *
- * 对外接口：fc_nand_dispatch_init / submit / submit_chain / poll / set_armed /
- *           is_armed / lun_free。
+ * 对外接口：fc_nand_dispatch_init / submit / submit_chain / poll / lun_free。
+ * 异步放行闩锁的置位/查询在 fc_nand_engine.h（引擎执行模式）。
  */
 
 #include "fc_nand_dispatch.h"
@@ -214,12 +214,8 @@ extern const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_complet
 /* 每 LUN 待处理 FIFO：submit 按 room 追加，poll 逐条排空。
  * 每槽 = 一条命令；链 = 连续槽（由 submit_chain 原子批量追加保证）。 */
 static fc_nand_dispatch_lun_queue_s g_fc_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM];
-/* 异步路径放行闩锁（FC 自持）：
- * 0 = 初始化/同步命令阶段；1 = 已移交异步 dispatch。
- * 消费者只有 FC 侧：fc_nand_dispatch_enqueue()（submit/submit_chain 共用漏斗）
- * 与 fc_nand_execute()（同步初始化入口的契约断言）。没有 NAND 读者，
- * 所以状态与置位/查询都放在 FC，不跨层。 */
-static BYTE g_fc_nand_dispatch_armed;
+/* 异步放行闩锁由 fc_nand_engine.c 持有（它表达引擎的执行模式）。
+ * 本层只查询，不定义——dispatch → engine 单向依赖。 */
 /* 上次有完成产出的通道的下一个通道；下一轮从这里开始扫描，形成通道 round-robin。 */
 static BYTE s_poll_next_channel;
 
@@ -289,6 +285,9 @@ static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_n
     BYTE plane;
 
     fc_nand_dispatch_completion_init(&task->completion, request->command_id);
+    /* 事务状态整体清零：task slot 会被后续命令复用，target 校验失败时
+     * fc_nand_start 不会被调用，不能让上一条命令的 completion/active 残留下来。 */
+    memset(&task->transaction, 0, sizeof(task->transaction));
     task->command_id                    = request->command_id;
     task->ch                            = request->ch;
     task->ce                            = request->ce;
@@ -301,8 +300,9 @@ static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_n
     task->started                       = 0U;
     task->feature_addr                  = request->feature_addr;
     task->column                        = request->column;
-    /* 绑定 NAND PHY 后端（单 bank 全 LUN 共享）+ 引擎上下文三指针（只在此绑一次） */
-    task->transaction.engine.backend    = nand_phy_backend_get(request->ch, request->ce);
+    /* 引擎上下文三指针：request/completion 指向本 slot 内持久存储；backend 在启动时
+     * 由 task_fc_start 经 nand_target_get 一次取得（通路校验 + backend 不可分）。 */
+    task->transaction.engine.backend    = NULL;
     task->transaction.engine.request    = &task->transaction.request;
     task->transaction.engine.completion = &task->transaction.completion;
     /* 当前 CW = 掩码最低位：直接下发的取数 op（OP_RANDOM_DATA_READ）靠它定位自己那一位，
@@ -348,29 +348,9 @@ nand_result_e fc_nand_dispatch_init(void)
     /* DTCM/非缓存段都不由启动代码清零；各 builder 虽会先 memset，这里仍显式清零，
      * 避免任何未来路径读到上电残留。 */
     memset(g_nand_channel_page_buffer, 0, sizeof(g_nand_channel_page_buffer));
-    g_fc_nand_dispatch_armed = 0U;
-    s_poll_next_channel      = 0U;
+    fc_nand_engine_set_armed(0U);
+    s_poll_next_channel = 0U;
     return NAND_RESULT_OK;
-}
-
-/**
- * @brief 置/清异步路径放行闩锁（归一化到 0/1）
- *
- * @param armed 非 0 放行
- */
-void fc_nand_dispatch_set_armed(BYTE armed)
-{
-    g_fc_nand_dispatch_armed = (armed != 0U) ? 1U : 0U;
-}
-
-/**
- * @brief 查询异步路径放行闩锁
- *
- * @return 1 = 已放行；0 = 未放行
- */
-BYTE fc_nand_dispatch_is_armed(void)
-{
-    return g_fc_nand_dispatch_armed;
 }
 
 /**
@@ -442,7 +422,7 @@ static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_req_s *requ
 
     /* 异步路径放行闩锁：单命令与整链两个入口共用同一道门，结构上不会再分叉。
      * 未放行是运行时状态（非调用者编程错误）→ 保留返回码，不转 ASSERT。 */
-    if (g_fc_nand_dispatch_armed == 0U)
+    if (fc_nand_engine_is_armed() == 0U)
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
@@ -571,13 +551,15 @@ typedef struct FC_NAND_DISPATCH_LUN_CONTEXT_S
  */
 static fc_nand_dispatch_start_outcome_e fc_nand_dispatch_task_fc_start(fc_nand_dispatch_lun_queue_s *queue, fc_nand_dispatch_task_s *task, BYTE *fc_result)
 {
-    const nand_result_e target_result = nand_select_target(task->ch, task->ce);
-    BYTE                result        = (BYTE)target_result;
-    const BOOL          target_ok     = (target_result == NAND_RESULT_OK);
+    const nand_phy_backend_s *backend       = NULL;
+    const nand_result_e       target_result = nand_target_get(task->ch, task->ce, &backend);
+    BYTE                      result        = (BYTE)target_result;
+    const BOOL                target_ok     = (target_result == NAND_RESULT_OK);
 
-    // 共享总线板卡：任务开始前选定 (ch,ce) 通路；backend 已按 target 绑定。
+    // 共享总线板卡：任务开始前一次取得「通路 + backend」。
     // 通路失败不是“引擎异步忙”：必须走 SYNC 完成路径，否则下一轮会把
     // engine.active==0 误判成成功完成。
+    task->transaction.engine.backend = (target_ok == true) ? backend : NULL;
     if (target_ok == true)
     {
         result = fc_nand_start(&task->transaction, task->operation, &task->request);

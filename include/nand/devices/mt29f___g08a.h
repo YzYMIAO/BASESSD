@@ -91,14 +91,7 @@
 /*
  * 初始化/高速切换入口在 FC 层：
  *   fc_nand_init() / fc_nand_enable_high_speed()（include/fc/fc_nand_engine.h）。
- * 本头只保留器件事实与器件的 timing-mode 观测。
+ * 本头只保留器件事实；timing-mode 观测经 nand_device.h 的通用接口。
  */
-
-/*
- * nand_get_timing_mode - 指定 target 当前实际生效的 ONFI timing mode（0 = 低速）
- *
- * 用于 [STAT] 心跳与 `info`：切换失败时仍返回 0，不撒谎。
- */
-BYTE nand_get_timing_mode(BYTE ch, BYTE ce);
 
 #endif /* NAND_DEVICE_MT29F_G08A_H */

@@ -1851,7 +1851,7 @@ void ftl_global_init(void)
 /* ══════════════════════════════════════════════════════════════
  * 紧凑 die 表（扫描结果的 FTL 调度坐标）
  *
- * 板级扫描（fc_nand_scan_targets，armed 之前）只给出哪些 (ch,ce) target 存在、
+ * 板级 target 扫描（armed 之前）只给出哪些 (ch,ce) target 存在、
  * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
  * ══════════════════════════════════════════════════════════════ */
 BYTE       g_die_count;

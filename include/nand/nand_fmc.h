@@ -47,9 +47,10 @@ typedef struct NAND_FMC_INSTANCE_S
     nand_phy_backend_s backend;
 } nand_fmc_instance_s;
 
+/* ── PHY 后端访问器：NAND 内部使用；FC 经 nand_target_get() 取，不得直接调用 ── */
+const nand_phy_backend_s *nand_phy_backend_get(BYTE ch, BYTE ce);
+
 /* ── 后端初始化：按 (ch,ce) 绑定一个 FMC 实例（当前板只初始化 (0,0)） ── */
 nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *config);
-/* 兼容入口：等价于 nand_fmc_init_target(0,0,...)。 */
-nand_result_e nand_fmc_init(const nand_fmc_cfg_s *config);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

@@ -402,7 +402,7 @@ struct FC_COMMAND_STATUS_S
  * plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
  *
  * 放在头文件（唯一一份定义）：这是 fc_cmd_s 的结构属性——FC 侧用它做
- * 建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
+ * 建链入口（fc.c 的 fc_command_configure_descriptor）的越段校验，
  * FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
  * ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
  * 都按 PLANE_NUM 定尺。改 plane 语义时这里与 fc_nand_dispatch.c 的

@@ -50,6 +50,7 @@
  */
 
 #include "assertion.h"
+#include "fc.h" /* 池/队列深度等模块常量（fc.h 内含 fc_interface.h） */
 #include "fc_interface.h"
 #include "ftl_config.h" /* DWORD, pba_to_paa */
 #include "ftl_type.h"

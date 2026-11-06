@@ -7,8 +7,7 @@
  * 与 fc.h 的分工：
  *   fc.h             ：类型、宏、资源池配置、功能开关、资源统计结构
  *   fc_interface.h   ：对外函数声明（本文件）
- *   fc_interface.c   ：对外函数实现（单例 g_fc_controller；建链机制体在此）
- *   fc_internal.h    ：fc.c ↔ fc_interface.c 共享的内部签名（FTL 不得 include）
+ *   fc.c             ：全部实现（三池/生命周期/调度 + 本头声明的对外 API）
  *
  * 对外接口分组：
  *   ① 初始化            fc_init
@@ -31,7 +30,7 @@
  *   「数据搬运」由 FTL 做（fc_command_configure_descriptor + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
  */
 
-#include "fc.h"
+#include "fc_command.h"
 #include "nand_config.h" /* DWORD（对外函数的行地址形参） */
 
 #ifdef __cplusplus
@@ -39,7 +38,7 @@ extern "C"
 {
 #endif
 
-    /* fc_resource_stats_s 定义在 fc.h（本头 include 之） */
+    /* fc_resource_stats_s 定义在 fc_types.h（经 fc_command.h 引入） */
 
     /* ═══════ ① 初始化 ═══════ */
     /**
@@ -341,7 +340,7 @@ extern "C"
     {
         WORD  sq_used;
         WORD  hsq_used;
-        BYTE  chain_owner; /* 0=NONE/1=SQ/2=HSQ（内部枚举见 fc_internal.h） */
+        BYTE  chain_owner; /* 0=NONE / 1=SQ / 2=HSQ */
         WORD  sq_head_id;
         WORD  sq_head_chain;
         BYTE  sq_head_op;
@@ -352,7 +351,7 @@ extern "C"
         BYTE  lun_phase;      /* NAND per-LUN FSM 相位（LUN_PHASE_*） */
         DWORD fill_calls;     /* FC 填充轮次累计调用次数 */
         DWORD fill_pops;      /* 填充轮次累计从队列 pop 的命令数 */
-        BYTE  sq_head_state;  /* SQ 头命令的状态（fc_cmd_state_e：0=FREE 1=ALLOCATED 2=QUEUED 3=ACTIVE 4=COMPLETED） */
+        BYTE  sq_head_state;  /* SQ 头命令的状态：0=FREE 1=ALLOCATED 2=QUEUED 3=ACTIVE 4=COMPLETED */
         WORD  sched_sq_count; /* 调度器实际扫描的 SQ 的 count（应与 sq_used 相同） */
         BYTE  sched_sq_bound; /* 1 = scheduler->sq/hsq 就绑在 controller->sq/hsq 上 */
     } fc_debug_state_s;

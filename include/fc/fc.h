@@ -24,8 +24,7 @@
  * 文件分工：
  *   fc.h（本文件）        ：类型、宏、资源池配置、功能开关、资源统计结构
  *   fc_interface.h        ：对外函数声明（本文件 include 之，二者合一对外）
- *   fc_interface.c        ：对外函数实现（单例 g_fc_controller；建链机制体在此）
- *   fc_internal.h         ：fc.c ↔ fc_interface.c 共享的内部签名（FTL 不得 include）
+ *   fc.c                  ：全部实现（三池/生命周期/调度/数据面编排 + 对外 API）
  *
  * 接口分组（全部声明在 fc_interface.h）：
  *   ① 初始化      fc_init

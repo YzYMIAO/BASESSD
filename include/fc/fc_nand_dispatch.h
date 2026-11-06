@@ -83,15 +83,8 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
 /* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware. */
 nand_result_e fc_nand_dispatch_init(void);
 
-/* NAND/FMC initialisation succeeded; FC may submit media commands after this.
- * ⚠ 这不是 ONFI 的 "device ready"（R/B# / status bit 6，per-die 且瞬态）——
- *   那由引擎 WAIT_READY 现查。此闩锁表示"FMC 已由同步初始化路径移交给异步 dispatch"。
- * 闩锁本体由 FC 持有（本文件 .c 的静态变量）。
- */
-void fc_nand_dispatch_set_armed(BYTE armed);
-
-/* 查询异步路径放行闩锁（同步初始化入口用它断言 armed == 0）。 */
-BYTE fc_nand_dispatch_is_armed(void);
+/* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
+ * dispatch 只查询，不再提供自己的 set/is 入口。 */
 
 /* Submit one pre-resolved command to its LUN FIFO (count = 1). */
 nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
@@ -99,7 +92,7 @@ nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
 /*
  * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
  * requests[0..count-1] 必须在同一 ch/ce/lun。
- * 异步路径未放行（fc_nand_dispatch_set_armed 之前）返回 INVALID_ARGUMENT。
+ * 异步路径未放行（fc_nand_engine_set_armed(1) 之前）返回 INVALID_ARGUMENT。
  * LUN FIFO 剩余深度不足整链时返回 NOT_READY，无副作用。
  * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
  * 每条命令各回一份 completion（由 poll 逐条返回）。

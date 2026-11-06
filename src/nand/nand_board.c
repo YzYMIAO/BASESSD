@@ -9,6 +9,7 @@
  * 扩展 target 表，并在 nand_select_target() 中实现 FMC bank / CE# GPIO 切换。
  */
 
+#include "assertion.h"
 #include "log.h"
 #include "nand_config.h"
 #include "nand_device.h"
@@ -44,7 +45,7 @@ static const nand_board_target_s s_board_targets[] = {
  * @note 多 target 板卡需要在这里切换 FMC bank / CE# GPIO；当前单 bank 单 NCE，
  *       本函数只做通路校验。
  */
-nand_result_e nand_select_target(BYTE ch, BYTE ce)
+static nand_result_e nand_select_target(BYTE ch, BYTE ce)
 {
     if ((ch >= CH_NUM) || (ce >= CE_NUM))
     {
@@ -60,6 +61,51 @@ nand_result_e nand_select_target(BYTE ch, BYTE ce)
     }
 
     return NAND_RESULT_NOT_READY;
+}
+
+/**
+ * @brief 取指定 target 的 NAND 执行入口：通路校验 + PHY backend 一次完成
+ *
+ * @param ch      通道号。
+ * @param ce      片选号。
+ * @param backend 出参：通路存在时写入 PHY backend。
+ *
+ * @return NAND_RESULT_OK / INVALID_ARGUMENT / NOT_READY。
+ *
+ * @note 通路选择与 backend 获取必须成对发生，所以收成一个入口；调用点不再
+ *       分别调用 nand_select_target / nand_phy_backend_get。
+ */
+nand_result_e nand_target_get(BYTE ch, BYTE ce, const nand_phy_backend_s **backend)
+{
+    ASSERT(backend != NULL);
+
+    const nand_result_e result = nand_select_target(ch, ce);
+
+    if (result != NAND_RESULT_OK)
+    {
+        return result;
+    }
+
+    *backend = nand_phy_backend_get(ch, ce);
+    ASSERT(*backend != NULL);
+    return NAND_RESULT_OK;
+}
+
+/**
+ * @brief 通用器件查询：指定 target 当前生效的 ONFI timing mode
+ *
+ * @param ch 通道号。
+ * @param ce 片选号。
+ *
+ * @return 模式号（0 = 低速）。
+ */
+BYTE nand_get_timing_mode(BYTE ch, BYTE ce)
+{
+    const nand_device_desc_s *dev = nand_device_get();
+
+    ASSERT(dev != NULL);
+    ASSERT(dev->get_timing_mode != NULL);
+    return dev->get_timing_mode(ch, ce);
 }
 
 /**

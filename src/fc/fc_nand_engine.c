@@ -23,7 +23,6 @@
 
 #include "assertion.h"
 #include "delay.h"
-#include "fc_nand_dispatch.h"
 #include "log.h"
 #include "nand_config.h"
 #include "nand_debug.h"
@@ -38,6 +37,31 @@
 /* 无器件/无响应时 DQ 总线读到全 1（浮空）；78h 状态字节用它判 LUN 不存在。 */
 #define NAND_STATUS_NO_RESPONSE (0xFFU)
 
+/* 异步路径放行闩锁：0 = 初始化/同步命令阶段；1 = 已移交异步 dispatch。
+ * 放在引擎侧：它表达的是「引擎当前允许阻塞执行还是异步推进」的执行模式，
+ * 调度器只查询它。这样 dispatch 单向依赖 engine，engine 不再反向 include dispatch。 */
+static BYTE s_engine_armed;
+
+/**
+ * @brief 置/清异步路径放行闩锁（归一化到 0/1）
+ *
+ * @param armed 非 0 放行。
+ */
+void fc_nand_engine_set_armed(BYTE armed)
+{
+    s_engine_armed = (armed != 0U) ? 1U : 0U;
+}
+
+/**
+ * @brief 查询异步路径放行闩锁
+ *
+ * @return 1 = 已放行；0 = 同步初始化阶段。
+ */
+BYTE fc_nand_engine_is_armed(void)
+{
+    return s_engine_armed;
+}
+
 /**
  * @brief 阻塞执行整条 UOP 序列，直到完成或出错
  *
@@ -51,7 +75,7 @@
  * @param completion 输出：执行状态 + NAND 状态字节
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_uop_engine_execute(const nand_phy_backend_s *backend, const nand_uop_s *uops, const nand_op_timing_s *timing, const nand_cmd_req_s *request, nand_cmd_comp_s *completion)
+static nand_result_e fc_uop_engine_execute(const nand_phy_backend_s *backend, const nand_uop_s *uops, const nand_op_timing_s *timing, const nand_cmd_req_s *request, nand_cmd_comp_s *completion)
 {
     /* 引擎上下文的 backend/request/completion 三指针随 state 固定，先绑定再 start */
     fc_uop_engine_state_s state;
@@ -318,17 +342,18 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
  * NAND 命令编排 / 初始化 / 拓扑扫描
  * ══════════════════════════════════════════════════════════ */
 
-nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_cmd_req_s *request, nand_cmd_comp_s *completion)
+static nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_cmd_req_s *request, nand_cmd_comp_s *completion)
 {
-    const nand_op_map_s *map;
-    BYTE                 status;
+    const nand_op_map_s      *map;
+    const nand_phy_backend_s *backend;
+    BYTE                      status;
 
     ASSERT(operation < OP_COUNT);
     ASSERT(request != NULL);
     ASSERT(completion != NULL);
     /* 同步入口契约：仅初始化阶段（armed==0）可调。放行后必须走
      * fc_nand_start/step 异步路径——此处阻塞式执行会卡住整个调度器。 */
-    ASSERT(fc_nand_dispatch_is_armed() == 0U);
+    ASSERT(fc_nand_engine_is_armed() == 0U);
 
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
@@ -336,13 +361,13 @@ nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_cmd_r
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    const nand_result_e target_result = nand_select_target(ch, ce);
+    const nand_result_e target_result = nand_target_get(ch, ce, &backend);
 
     if (target_result != NAND_RESULT_OK)
     {
         return target_result;
     }
-    status = fc_uop_engine_execute(nand_phy_backend_get(ch, ce), map->uops, &map->timing, request, completion);
+    status = fc_uop_engine_execute(backend, map->uops, &map->timing, request, completion);
     return status;
 }
 
@@ -418,7 +443,7 @@ nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completi
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_cmd_comp_s *completion)
+static nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_cmd_comp_s *completion)
 {
     nand_cmd_req_s request;
 
@@ -436,7 +461,7 @@ nand_result_e fc_nand_reset(BYTE ch, BYTE ce, nand_cmd_comp_s *completion)
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_cmd_comp_s *completion)
+static nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_cmd_comp_s *completion)
 {
     nand_cmd_req_s request;
 
@@ -455,7 +480,7 @@ nand_result_e fc_nand_read_id(BYTE ch, BYTE ce, BYTE id[5], nand_cmd_comp_s *com
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion)
+static nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion)
 {
     nand_cmd_req_s request;
 
@@ -468,33 +493,13 @@ nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_
 }
 
 /**
- * @brief 写 Feature 寄存器（同步）
- *
- * @param feature_address 寄存器地址（复用 column）
- * @param feature_data    4 字节值
- * @param completion      输出：完成状态
- * @return NAND_RESULT_OK / 错误码
- */
-nand_result_e fc_nand_set_features(BYTE ch, BYTE ce, BYTE feature_address, const BYTE feature_data[4], nand_cmd_comp_s *completion)
-{
-    nand_cmd_req_s request;
-
-    ASSERT(feature_data != NULL);
-    memset(&request, 0, sizeof(request));
-    request.column      = feature_address;
-    request.buffer      = (BYTE *)feature_data;
-    request.data_length = 4U;
-    return fc_nand_execute(ch, ce, OP_SET_FEATURES, &request, completion);
-}
-
-/**
  * @brief 78h READ STATUS ENHANCED（同步）
  *
  * @param row        行地址（含 LUN/plane 位）
  * @param completion 输出：完成状态
  * @return NAND_RESULT_OK / 错误码
  */
-nand_result_e fc_nand_read_status_enhanced(BYTE ch, BYTE ce, DWORD row, nand_cmd_comp_s *completion)
+static nand_result_e fc_nand_read_status_enhanced(BYTE ch, BYTE ce, DWORD row, nand_cmd_comp_s *completion)
 {
     nand_cmd_req_s request;
 
@@ -555,7 +560,7 @@ static BYTE fc_nand_id_is_blank(const BYTE id[5])
  * @param info 输出：target 信息
  * @return OK / NOT_READY 无器件 / INVALID_ARGUMENT / OPERATION_FAILED
  */
-nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *info)
+static nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *info)
 {
     const nand_device_desc_s *dev = nand_device_get();
     nand_cmd_comp_s           completion;
@@ -567,18 +572,12 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *info)
     ASSERT(info != NULL);
     memset(info, 0, sizeof(*info));
 
-    result = nand_select_target(ch, ce);
+    delay_ms(1U);
+    result = fc_nand_reset(ch, ce, &completion);
     if (result == NAND_RESULT_INVALID_ARGUMENT)
     {
         return result;
     }
-    if (result != NAND_RESULT_OK)
-    {
-        return NAND_RESULT_NOT_READY;
-    }
-
-    delay_ms(1U);
-    result = fc_nand_reset(ch, ce, &completion);
     if (result != NAND_RESULT_OK)
     {
         return NAND_RESULT_NOT_READY;
@@ -671,7 +670,7 @@ nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *info)
  *
  * @return OK / NOT_READY 无 target / 错误码
  */
-nand_result_e fc_nand_scan_targets(void)
+static nand_result_e fc_nand_scan_targets(void)
 {
     BYTE present = 0U;
 
@@ -755,7 +754,8 @@ static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fm
     nand_cmd_comp_s           completion;
     fc_nand_txn_s             transaction;
     nand_result_e             result;
-    const nand_device_desc_s *dev = nand_device_get();
+    const nand_device_desc_s *dev     = nand_device_get();
+    const nand_phy_backend_s *backend = NULL;
 
     ASSERT(dev != NULL);
     ASSERT(dev->set_timing != NULL);
@@ -772,16 +772,17 @@ static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fm
     request.data_length = 4U;
 
     memset(&completion, 0, sizeof(completion));
-    memset(&transaction, 0, sizeof(transaction));
-    transaction.engine.backend    = nand_phy_backend_get(ch, ce);
-    transaction.engine.request    = &transaction.request;
-    transaction.engine.completion = &transaction.completion;
-
-    result = nand_select_target(ch, ce);
+    result = nand_target_get(ch, ce, &backend);
     if (result != NAND_RESULT_OK)
     {
         return result;
     }
+
+    memset(&transaction, 0, sizeof(transaction));
+    transaction.engine.backend    = backend;
+    transaction.engine.request    = &transaction.request;
+    transaction.engine.completion = &transaction.completion;
+
     result = fc_nand_start(&transaction, OP_SET_FEATURES, &request);
     while (result == NAND_RESULT_NOT_READY)
     {
