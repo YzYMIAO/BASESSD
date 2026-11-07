@@ -254,7 +254,7 @@ static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  * @note Step 1：把 nand_completion 的 per-CW status/ecc_bits 写回 desc。
  * - Step 2：Page Read 命令做 data path（ECC 解码 + 条件解扰）。
  * - Step 3：组装完成项——page read 从 desc 读 ECC 解码后状态
- * （聚合 status + 前 4 CW ECC + 首个失败 CW 的 failed_desc_id，见 FC_CW_STATUS_ERROR_MASK），
+ * （聚合 status + 前 4 CW ECC；失败坐标由 desc 链派生），
  * 非 page read 直接透传 NAND 状态。
  * - CQ 满 → 强制 COMPLETED（数据路径已跑，CQ entry 丢失是 fatal）。
  */
@@ -323,10 +323,8 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
     /* ── Step 3: Populate completion entry ──
      * CQ 只带命令级聚合：status + 返回段 param。per-CW ECC 只留在 desc 链，
      * 聚合 ECC 走 fc_get_cmd_ecc_max()（须在 fc_command_release() 前调用）。 */
-    cq_entry.cmd_id         = cmd->cmd_id;
-    cq_entry.failed_cw      = nand_completion->failed_cw;
-    cq_entry.failed_desc_id = FC_DESC_ID_INVALID;
-    cq_entry.status         = 0U;
+    cq_entry.cmd_id = cmd->cmd_id;
+    cq_entry.status = 0U;
     /* param 已由上面的整体 memset 清零；仅 GET_FEATURES / OP_READ_META /
      * OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填。 */
 
@@ -388,9 +386,8 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
             // **不只 page read**：program 的 desc 也要拿到 FAIL，否则 FTL 的程序失败
             // 平面归因只能回退 plane0（ftl.c 的 bad_plane_mask）。
             // 失败类别（UNC/CRC/META/RAID）只留在 desc；命令级只保留 DATA_ERROR/META。
-            fc_desc_id_t desc_id    = (fc_desc_id_t)cmd->desc_id;
-            BYTE         found_fail = 0U;
-            BYTE         steps      = 0U;
+            fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+            BYTE         steps   = 0U;
 
             while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < CW_TOTAL_MAX))
             {
@@ -413,11 +410,6 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
                 {
                     cmd_status |= FC_CMD_STATUS_DATA_ERROR;
                 }
-                if ((found_fail == 0U) && fc_cw_status_has_error(desc->status))
-                {
-                    cq_entry.failed_desc_id = desc_id;
-                    found_fail              = 1U;
-                }
                 desc_id = (fc_desc_id_t)desc->next_id;
                 steps++;
             }
@@ -437,19 +429,14 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
         // nand_completion->nand_status（NAND_UOP_DATA_OUT_STATUS），不经数据缓冲 ⇒ 只能从这里取。
         if (cmd->config.operation == OP_BLOCK_LOCK_STATUS)
         {
-            cq_entry.param.bytes[0] = nand_completion->nand_status;
+            cq_entry.param.parameter0 = nand_completion->nand_status;
         }
         // GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN：引擎把
         // 寄存器值 / 页内 META / 器件 ONFI 签名 / 按列读的 4 字节写进控制器侧暂存，拷进 CQ
         // 返回段（都用 4 字节暂存 g_fc_return_staging）。
         else if ((cmd->config.operation == OP_GET_FEATURES) || (cmd->config.operation == OP_READ_META) || (cmd->config.operation == OP_READ_ONFI_SIGNATURE) || (cmd->config.operation == OP_READ_COLUMN))
         {
-            BYTE i;
-
-            for (i = 0U; i < 4U; i++)
-            {
-                cq_entry.param.bytes[i] = g_fc_return_staging[nand_completion->cmd_id][i];
-            }
+            memcpy(&cq_entry.param.value, g_fc_return_staging[nand_completion->cmd_id], 4U);
         }
 
         cq_entry.status = cmd_status;
@@ -634,9 +621,9 @@ static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_id_t data_cmd_i
     memset(&mp_req, 0, sizeof(mp_req));
     mp_req.cmd_id      = data_cmd_id; /* 完成路由回数据命令 */
     mp_req.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
-    mp_req.ch          = data_cmd->route.ch;
-    mp_req.ce          = data_cmd->route.ce;
-    mp_req.lun         = data_cmd->route.lun;
+    mp_req.ch          = data_cmd->ch;
+    mp_req.ce          = data_cmd->ce;
+    mp_req.lun         = data_cmd->lun;
     mp_req.plane_count = PLANE_NUM;
     mp_req.plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
     mp_req.page_type   = data_cmd->config.page_type;
@@ -735,7 +722,6 @@ static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
     memset(&fail_comp, 0, sizeof(fail_comp));
     fail_comp.cmd_id           = cmd_id;
     fail_comp.execution_status = NAND_RESULT_NOT_READY;
-    fail_comp.failed_cw        = NAND_CW_INVALID;
     fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
     if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
     {
@@ -900,9 +886,9 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
     memset(request, 0, sizeof(*request));
     request->cmd_id       = cmd->cmd_id;
     request->operation    = cmd->config.operation;
-    request->ch           = cmd->route.ch;
-    request->ce           = cmd->route.ce;
-    request->lun          = cmd->route.lun;
+    request->ch           = cmd->ch;
+    request->ce           = cmd->ce;
+    request->lun          = cmd->lun;
     request->page_type    = cmd->config.page_type;
     request->feature_addr = cmd->feature_addr;
 
@@ -964,7 +950,7 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
         fc_request_use_staging(request, paa_to_plane(cmd->paa), cmd_id);
         if (cmd->config.operation == OP_SET_FEATURES)
         {
-            memcpy(g_fc_return_staging[cmd_id], cmd->param.bytes, 4U);
+            memcpy(g_fc_return_staging[cmd_id], &cmd->param.value, 4U);
         }
         else
         {
@@ -999,7 +985,7 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
         // ⚠ 必须有这一支：否则位图空集 ⇒ task_load 不搬 cw_buffers[] ⇒ DATA_OUT 写野地址。
         fc_request_use_staging(request, paa_to_plane(cmd->paa), cmd_id);
         request->plane_paa[request->plane] = cmd->paa;
-        request->column                    = (cmd->param.bytes[0] | (cmd->param.bytes[1] << 8U));
+        request->column                    = (WORD)((WORD)cmd->param.parameter0 | ((WORD)cmd->param.parameter1 << 8U));
         memset(g_fc_return_staging[cmd_id], 0, 4U);
     }
     else if ((cmd->config.operation == OP_BLOCK_UNLOCK_LOW) || (cmd->config.operation == OP_BLOCK_UNLOCK_HIGH) || (cmd->config.operation == OP_BLOCK_LOCK) || (cmd->config.operation == OP_BLOCK_LOCK_TIGHT) || (cmd->config.operation == OP_BLOCK_LOCK_STATUS))
@@ -1257,9 +1243,9 @@ static BYTE fc_poll_chain_length(const fc_ctl_s *controller, const fc_sub_queue_
         // 不同 LUN 的成员算进本链**——否则 fill 会按链头 LUN 选队列，把错目标
         // 的命令塞进同一条 per-LUN FIFO。截断在链头/已确认前缀处，剩余命令
         // 留在队列，由下一轮独立处理。
-        const BOOL same_target = (next->route.ch == head->route.ch) && (next->route.ce == head->route.ce) && (next->route.lun == head->route.lun);
+        const BOOL same_target = (next->ch == head->ch) && (next->ce == head->ce) && (next->lun == head->lun);
 
-        ASSERT_MSG(same_target, "chain target mismatch: head ch/ce/lun=%hhu/%hhu/%hhu next=%hhu/%hhu/%hhu", head->route.ch, head->route.ce, head->route.lun, next->route.ch, next->route.ce, next->route.lun);
+        ASSERT_MSG(same_target, "chain target mismatch: head ch/ce/lun=%hhu/%hhu/%hhu next=%hhu/%hhu/%hhu", head->ch, head->ce, head->lun, next->ch, next->ce, next->lun);
         if (same_target == false)
         {
             break;
@@ -1319,9 +1305,9 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
         fc_fill_pops_inc();
         cmd = fc_command_id_to_command(id);
 
-        ch  = cmd->route.ch;
-        ce  = cmd->route.ce;
-        lun = cmd->route.lun;
+        ch  = cmd->ch;
+        ce  = cmd->ce;
+        lun = cmd->lun;
         // 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
         // PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
         // [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因

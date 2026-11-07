@@ -7,19 +7,19 @@
 #include "ssd_types.h"   /* DWORD（命令/描述符位域的 32 位字） */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* 位域/位移宽度契约：这些量改变时必须在同一提交里改位宽，否则会静默截断。
  * - fc_cmd_cfg_s.cw_count  : 2 bit
  * - fc_desc_s.cw_index: 2 bit
  * - fc_cmd_cfg_s.multi_plane: 3 bit
- * - ch/ce/lun               : fc_route_s 的 BYTE 字段
+ * - ch/ce/lun               : ch:2 / ce:2 / lun:4
  * - fc_cmd_cfg_s.operation : 8 bit
  * - flat CW 位图            : 1UL << n，n 必须 < 32
  */
 _Static_assert(CW_NUM <= 4U, "fc_cmd_cfg_s.cw_count / fc_desc_s.cw_index are 2 bits");
 _Static_assert(PLANE_NUM <= 7U, "fc_cmd_cfg_s.multi_plane is 3 bits");
-_Static_assert((CH_NUM <= 255U) && (CE_NUM <= 255U) && (LUN_NUM <= 255U), "fc_route_s ch/ce/lun are BYTE fields");
 _Static_assert(CW_TOTAL_MAX < 32U, "flat CW bitmap must fit a DWORD shift");
 
 /*
@@ -43,7 +43,7 @@ _Static_assert(CW_TOTAL_MAX < 32U, "flat CW bitmap must fit a DWORD shift");
  *
  * 分界：**FTL 交 LBA + PAA（PBA 在 FTL 侧 `pba_to_paa()` 一次转出），
  * FC 层只认 PAA 喂 NAND**。PBA 不跨进 FC——它带 ch/ce，而 FC 的路由本就独立走
- * `route.ch/ce/lun`（见 fc_build_dispatch_request），两套编码并存只会制造静默算错地址的机会。
+ * `cmd->ch/ce/lun`（见 fc_build_dispatch_request），两套编码并存只会制造静默算错地址的机会。
  * ⚠ 代价：PBA 与 LBA 同构时「`desc->paa` 与 `desc->meta` 用同一个 plane_cw 公式」的便利消失——
  * PAA 的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），建链改用
  * `paa_with_plane()` / `paa_with_cw()`；`PLANE_CW_MASK` 技巧只在 LBA/PBA 空间有效。
@@ -157,8 +157,7 @@ typedef enum FC_BUFFER_OWN_E
 #define FC_CW_STATUS_EMPTY (1U << 7)
 
 /* 「失败位」的规范集合：descriptor 的五个错误位。
- * 它是**首个失败 CW** 判定的唯一定义（fc_complete_from_nand 用它挑 failed_desc_id）；
- * 其余消费方一律经 `fc_cw_status_has_error()`。 */
+ * 判「CW 是否失败」时一律经 `fc_cw_status_has_error()` 或本集合。 */
 #define FC_CW_STATUS_ERROR_MASK (FC_CW_STATUS_FAIL | FC_CW_STATUS_RAID_ERROR | FC_CW_STATUS_META_ERROR | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC)
 
 /* ── command 状态（命令级） ── */
@@ -240,154 +239,98 @@ static inline BOOL fc_cmd_status_is_success(DWORD status)
 
 /* ── ③ 命令 / 描述符 / CQ 结构 ── */
 
-/* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
-/* 命令目标路由：与 operation/数据路径配置分开，字段宽度不挤 32-bit 配置字。
- * BYTE 支持 CH/CE/LUN > 4；数组上界仍由 CH_NUM/CE_NUM/LUN_NUM 决定。 */
-typedef struct FC_ROUTE_S
-{
-    BYTE ch;  /* NAND channel number. */
-    BYTE ce;  /* NAND chip-enable number. */
-    BYTE lun; /* NAND LUN number. */
-} fc_route_s;
-
+/* 命令级操作配置：operation 与数据路径开关统一放在这里。 */
 typedef struct FC_COMMAND_CONFIG_S
 {
-    DWORD operation : 8;   /* ONFI operation macro (OP_*). */
-    DWORD cw_count  : 2;   /* Command: 每-plane CW 数减一（RAID stripe 用）。
-                            * 建链不读它：链长只由建链形参 cw_bitmap 的置位数决定。
-                            * Descriptor 内本字段无意义，CW 下标见 fc_desc_s.cw_index。 */
+    DWORD operation   : 8; /* ONFI operation macro (OP_*). */
+    DWORD cw_count    : 2; /* 每-plane CW 数减一；仅 RAID stripe 使用。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
-    DWORD ldpc        : 2; /* fc_ecc_mode_e: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
-    DWORD raid        : 3; /* fc_raid_mode_e: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
+    DWORD ldpc        : 2; /* fc_ecc_mode_e. */
+    DWORD raid        : 3; /* fc_raid_mode_e. */
     DWORD random      : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
     DWORD chain       : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
-    DWORD page_type   : 2; /* fc_page_type_e: LP/MP/UP/TP. */
-    DWORD multi_plane : 3; /* 0=single; N=N-plane。总 desc 数以 desc 链长度为真值，不由本字段推导。 */
-    DWORD buf_own     : 2; /* fc_buf_own_e：本命令数据 buffer 的归属（bit1=申请方 0=FC 1=上层；
-                            *                 bit0=释放方 0=上层 1=FC）。默认 0 = 既有行为。 */
-    DWORD reserved : 7;    /* Reserved for future configuration. */
+    DWORD page_type   : 2; /* fc_page_type_e. */
+    DWORD multi_plane : 3; /* 0 = 单 plane；N = N-plane。 */
+    DWORD buf_own     : 2; /* fc_buf_own_e：buffer 申请方/释放方。 */
+    DWORD reserved    : 7; /* 位域补齐，必须为 0。 */
 } fc_cmd_cfg_s;
 
-/*
- * 单 CW 描述符：物理地址 + 配置 + 缓冲 ID + 链 ID + 状态 + ECC 信息。
- * 一条命令的 desc 链 = 本次要访问的 CW 逐条排列（plane-major），next_id 串联；
- * 0xFFFF 终止。**链长度即真值**：uniform 命令 = multi_plane × 每-plane CW 数，
- * flat 掩码命令 = 掩码置位数。凡需要"这条命令有几个 CW / 每 plane 几个"一律走链。
- */
-typedef struct FC_DESCRIPTOR_S
-{
-    DWORD paa;                   /* 本 CW 的**芯片内地址（PAA）**；建链时由 row_paa + plane/cw 造出
-                                  * （`paa_with_cw(paa_with_plane(row_paa, plane), cw)`），
-                                  * 直接喂 NAND 请求。与 command->paa 同空间（都是 PAA）。 */
-    fc_cmd_cfg_s config;         /* Copy of Command configuration; config.cw_count 在本结构内无效。 */
-    DWORD        buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
-    DWORD        next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
-    DWORD        meta;           /* 本 CW 的**扇区 LBA**：建链时由 command->meta 的高位 +
-                                  * 本 desc 的 plane/cw 造出（见 fc_command_configure_descriptor）；
-                                  * 加扰种子取自它，读后存放 NAND 读回的 META 值。 */
+_Static_assert(sizeof(fc_cmd_cfg_s) == 4U, "fc_cmd_cfg_s size changed");
+_Static_assert(CH_NUM <= 4U, "ch is 2 bits");
+_Static_assert(CE_NUM <= 4U, "ce is 2 bits");
+_Static_assert(LUN_NUM <= 16U, "lun is 4 bits");
 
-    /* 注意：meta 的高位来自 command->meta（本命令的扇区 LBA），低 3 位
-     * [plane][cw] 由本 desc 决定——两者同一套编码（PLANE_CW_MASK）。 */
-    DWORD cw_index : 2;  /* 本 desc 在 plane 内的 CW 下标（0..CW_NUM-1）。 */
-    DWORD status   : 8;  /* CW status, using FC_CW_STATUS_* bits. */
-    DWORD ecc_bits : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
-    DWORD reserved : 14; /* Reserved for future per-descriptor state. */
-} fc_desc_s;
-
-/*
- * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。只有一种解释：
- *   parameter0..3 / bytes[4]：SET_FEATURES 的内联数据（SQ）/ GET_FEATURES 读回的寄存器值（CQ）
- * 小端（Cortex-M7）下 parameter0 是最低字节。
- *
- * 本联合体**不设** `DWORD cw_bitmap` 视图（flat CW 位图，bit n = plane*CW_NUM + cw）：
- * 请求集与失败集都是**派生量**，不常驻命令结构体：
- *   · 请求集：读者只有 FTL，且它是**建链的输入** ⇒ 由 ftl_cmd_configure_descriptors()
- *     的形参承载。
- *   · 失败集：读者只有上层，上层遍历 desc 链 OR 各 desc->status 即可 ⇒
- *     FC 不代为聚合（见 fc_complete_from_nand）。
- *
- * ⚠ 别与 NAND 层的 request->cw_bitmap 混淆：那是 **NAND 真正访问的集合**，
- *   由 FC 按 desc 链重新铸出（fc_build_request_data_planes）；本联合体与它无关。
- */
+/* 4 字节内联参数 / 返回段：byte 视图用于命令参数，word 视图用于整体读写。
+ * Cortex-M7 小端：parameter0 是最低字节。 */
 typedef union FC_PARAMETER_U
 {
     struct
     {
-        BYTE parameter0; /* Command parameter byte 0. */
-        BYTE parameter1; /* Command parameter byte 1. */
-        BYTE parameter2; /* Command parameter byte 2. */
-        BYTE parameter3; /* Command parameter byte 3. */
+        BYTE parameter0;
+        BYTE parameter1;
+        BYTE parameter2;
+        BYTE parameter3;
     };
-    BYTE bytes[4]; /* 内联数据的字节视图。 */
+    DWORD value;
 } fc_param_u;
 
-/*
- * SQ 命令：被 FC 持有直至完成。desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
- *
- * 命令池 ID 显式保存在 `cmd_id`：分配时写入槽位号，释放时在原槽位上恢复同一个
- * 槽位号；FREE 状态是否可操作由 `command_state` 判定。NAND dispatch 请求与 CQE
- * 使用同一个 ID，不再由指针反推。
- *
- * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
- */
+_Static_assert(sizeof(fc_param_u) == 4U, "fc_param_u size changed");
 
-/* command->meta 的「本命令无已知 LBA」哨兵。
- *
- * 数据命令的 meta 是本命令的**扇区 LBA**；FC 侧 步骤 4 用它交叉校验读回的页内 META
- * （读到了别的页 ⇒ META_ERROR）。但 GC / 掉电重建**不知道** LBA——正是要从页内 META
- * 读回来，故它们把 meta 置成本哨兵，FC 跳过「读错页」那一项校验（META 自洽性仍校验）。
- * 不用 0 当哨兵：0 是合法的扇区 LBA（页 0 / plane 0 / CW 0）。 */
+/* 单 CW 描述符：物理地址 + 命令配置副本 + buffer/链 ID + 状态。
+ * 命令级配置副本保留给命令泛化/错误恢复回填。 */
+typedef struct FC_DESCRIPTOR_S
+{
+    DWORD        paa;    /* 本 CW 的 PAA。 */
+    fc_cmd_cfg_s config; /* 命令级配置副本；错误恢复上下文。 */
+    DWORD        buffer_id : 16;
+    DWORD        next_id   : 16; /* 0xFFFF = 链尾。 */
+    DWORD        meta;           /* 本 CW 的扇区 LBA。 */
+
+    DWORD cw_index : 2;
+    DWORD status   : 8; /* FC_CW_STATUS_* bits. */
+    DWORD ecc_bits : 8;
+    DWORD reserved : 14; /* 位域补齐，必须为 0。 */
+} fc_desc_s;
+
+_Static_assert(sizeof(fc_desc_s) == 20U, "fc_desc_s size changed");
+
+/* command->meta 的「本命令无已知 LBA」哨兵。0 是合法 LBA，不能当哨兵。 */
 #define FC_META_UNKNOWN (0xFFFFFFFFU)
 
+/* 命令上下文。身份/路由在前，配置/地址/参数在后。 */
 typedef struct FC_COMMAND_S
 {
-    DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
-    DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
-    DWORD meta;               /* META 值（本命令的**扇区 LBA**），写入各 CW buffer[0..3]。
-                               * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
-                               * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
-    DWORD paa;                /* 本命令的**芯片内地址（PAA）**，由 FTL 在边界处
-                               * `pba_to_paa()` 转好后交来。
-                               * 数据命令的逐 CW 行地址仍走 desc 链（Policy B：两 plane 可不同块）；
-                               * 本字段供单 plane / 擦除 / Feature / READ_META 等无逐 CW 地址的
-                               * 命令取行地址，以及 fc_command_plane_span 定 plane 段。
-                               * ⚠ 路由（ch/ce/lun）**不在 PAA 里**——一律走 route。 */
-    fc_route_s   route;       /* 目标 (ch,ce,lun)；与 config 分离，不占 32-bit 配置位域。 */
-    fc_cmd_cfg_s config;      /* Operation, CW and data-path configuration. */
-    fc_param_u   param;       /* 仅 FEATURES 命令使用：SET_FEATURES 的内联数据 / GET_FEATURES 的读回值
-                               * （param.bytes）。「本命令访问哪些 CW」**不在命令里**——
-                               * 它由 FTL 在建链时作形参交给 ftl_cmd_configure_descriptors()。 */
-    fc_cmd_id_t cmd_id;       /* 本命令在 command_pool 中的槽位号；槽位生命周期内恒定。 */
+    /* identity */
+    DWORD cmd_id  : 16; /* command_pool 槽位号；FREE 状态仍保留。 */
+    DWORD desc_id : 16; /* 首个 descriptor ID；0xFFFF = 无。 */
+
+    /* control / route */
+    DWORD high_priority : 1;
+    DWORD feature_addr  : 8;
+    DWORD ch            : 2;
+    DWORD ce            : 2;
+    DWORD lun           : 4;
+    DWORD reserved      : 15; /* 位域补齐，必须为 0。 */
+
+    fc_cmd_cfg_s config;
+    DWORD        paa;
+    DWORD        meta;
+    fc_param_u   param;
 } fc_cmd_s;
 
-/* cmd_id 为 WORD；结构体按 4 字节对齐，总大小 28 B（64 槽共 1792 B）。 */
-_Static_assert(sizeof(fc_cmd_s) == 28U, "fc_cmd_s size changed");
+_Static_assert(sizeof(fc_cmd_s) == 24U, "fc_cmd_s size changed");
 
-/* CQ 完成项：命令级状态 + 命令级返回段。
- * Per-CW 细节（status/ecc_bits）只留在 descriptor 链中，聚合 ECC 用 fc_get_cmd_ecc_max()；
- * 命令级 status 用 FC_CMD_STATUS_* 位（NAND_FAIL=0x01、FAIL_CACHE=0x02、TIMEOUT=0x04…）。
- * RDY/AREADY/WP 是 NAND 器件状态位，也在 status 里，但**不参与成败判定**——
- * 成败只看 FC_CMD_STATUS_ERROR_MASK。
- *
- * 失败坐标分两个字段，不共用：
- *   failed_cw      —— NAND 层透传的 **flat CW 编号 n**（plane*CW_NUM+cw）；
- *                     无失败为 NAND_CW_INVALID。只说明「哪个 CW」，不能当 desc 下标。
- *   failed_desc_id —— Page Read 带 desc 链时，按链序找到的**首个失败 CW 的 descriptor id**；
- *                     无失败为 FC_DESC_ID_INVALID。失败判据是
- *                     FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）。
- * FTL 要具体数据路径类别（UNC/CRC/RAID/META）时，用 failed_desc_id 读 desc->status；
- * 命令级只给 DATA_ERROR/META_ERROR 两个聚合位。 */
+/* CQ 完成项：命令身份 + 命令级状态 + 返回段。 */
 typedef struct FC_COMMAND_STATUS_S
 {
-    WORD       cmd_id;         /* Completed Command Pool ID. */
-    WORD       failed_cw;      /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
-    WORD       failed_desc_id; /* 首个失败 CW 的 descriptor id；FC_DESC_ID_INVALID = 无。 */
-    BYTE       status;         /* Command-level status; FC_CMD_STATUS_* bits. */
-    BYTE       reserved;       /* Reserved. */
-    fc_param_u param;          /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
-                                * （失败 CW 的定位走 desc 链，不在此聚合）。 */
+    DWORD      cmd_id   : 16;
+    DWORD      status   : 8;
+    DWORD      reserved : 8; /* 位域补齐，必须为 0。 */
+    fc_param_u param;
 } fc_cmd_status_s;
+
+_Static_assert(sizeof(fc_cmd_status_s) == 8U, "fc_cmd_status_s size changed");
+_Static_assert(offsetof(fc_cmd_status_s, param) == 4U, "param offset changed");
 
 /* ── ④ 结构内联工具 / 校验 ── */
 

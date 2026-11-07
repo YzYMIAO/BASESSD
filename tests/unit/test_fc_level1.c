@@ -21,7 +21,7 @@
  *     不再属 Level 1 纯逻辑范畴——相关用例移至 Level 2/3。
  *   - fc_command_validate 的负向守卫全部转 ASSERT（v20）；param.cw_bitmap 的读者
  *     是 FTL，FC 侧不再校验（v13）。负向用例随之删除，只留正向冒烟。
- *   - fc_cmd_s 不再携带 command_id（v15），ID 由指针派生。
+ *   - fc_cmd_s 通过 cmd_id 携带命令池槽位号。
  *   - 删除 5 条用例（2026-10-08），判据统一为「被测代码还有没有生产调用者」：
  *       status_init_pool_cmd / status_init_stack_cmd / status_set_cw_valid
  *         —— fc_command_status_init / _set_cw 自 2026-09-20 起零生产调用者
@@ -74,7 +74,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     {
         cmd.config.operation = op;
         cmd.desc_id          = 0U;
-        munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+        fc_command_validate(&cmd);
     }
 
     /* 证据（--log-visible info）：遍历范围本身就是判据——按 operation 分类的那条断言
@@ -88,7 +88,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
  * test_command_validate_set_get_no_desc
  *   功能：确认 SET/GET_FEATURES 在**没有** desc 链时仍被放行。
  *   测什么：desc_id = INVALID 时，两个 FEATURES 操作都返回 FC_STATUS_OK。
- *   设计思路：这两条操作的数据走 SQ/CQ 的 param.bytes 内联段，不经 NAND 数据
+ *   设计思路：这两条操作的数据走 SQ/CQ 的 param.value 内联段，不经 NAND 数据
  *         路径，所以「有数据的操作必须有 desc 链」那条断言必须对它们短路。
  *         用例就是钉住这个短路分支——它一旦被改坏（例如断言的布尔条件顺序
  *         调整、或 nand_operation_has_data 的分类变了），FEATURES 会在提交时
@@ -108,10 +108,10 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     cmd.desc_id = FC_DESC_ID_INVALID;
 
     cmd.config.operation = OP_SET_FEATURES;
-    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+    fc_command_validate(&cmd);
 
     cmd.config.operation = OP_GET_FEATURES;
-    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+    fc_command_validate(&cmd);
 
     /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
     test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%hX）时仍放行——数据走 param 内联段", FC_DESC_ID_INVALID);
@@ -152,7 +152,7 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     fc_sub_queue_s q;
     fc_cmd_id_t    val;
 
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
+    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
     munit_assert_int(fc_submission_queue_push(&q, 0x01U), ==, FC_STATUS_OK);
     munit_assert_int(fc_submission_queue_push(&q, 0x02U), ==, FC_STATUS_OK);
@@ -197,7 +197,7 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     fc_cmd_id_t    val;
     uint16_t       i;
 
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
+    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
     {
@@ -245,7 +245,7 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     fc_sub_queue_s q;
     uint16_t       i;
 
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
+    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
     {
@@ -287,7 +287,7 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
 
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
+    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
     munit_assert_int(fc_submission_queue_push(&q, 0x01U), ==, FC_STATUS_OK);
     munit_assert_int(fc_submission_queue_push(&q, 0x02U), ==, FC_STATUS_OK);
@@ -325,7 +325,7 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
 
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
+    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
     munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, FC_CMD_ID_INVALID);
 
     /* 证据（--log-visible info）：fc.c 链打包正是靠这个哨兵判链尾。 */
@@ -363,7 +363,7 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     fc_cmd_status_s storage[TEST_CQ_DEPTH];
     fc_comp_queue_s q;
 
-    munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
+    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
     munit_assert_uint32(q.depth, ==, TEST_CQ_DEPTH);
     munit_assert_uint32(q.count, ==, 0U);
 
@@ -376,10 +376,10 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
 /* --------------------------------------------------------------------
  * test_cqueue_push_pop
  *   功能：验证 CQ 的 FIFO 顺序与整项拷贝。
- *   测什么：push 两条（command_id = 0x01 / 0x02）后逐条 pop，断言 command_id
+ *   测什么：push 两条（cmd_id = 0x01 / 0x02）后逐条 pop，断言 cmd_id
  *         顺序一致；再 pop 一次断言 QUEUE_EMPTY。
  *   设计思路：CQ 存的是 fc_cmd_status_s **整体**而不是句柄，所以顺序之外
- *         还隐含「拷贝而非引用」——用两个不同的 command_id 区分，顺序错了
+ *         还隐含「拷贝而非引用」——用两个不同的 cmd_id 区分，顺序错了
  *         立刻可见。语义与 SQ 相同但存储类型不同（结构体 vs 16 位 ID），
  *         拷贝路径是另一段代码，不能靠 SQ 的用例代为覆盖。
  * -------------------------------------------------------------------- */
@@ -395,24 +395,24 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     fc_cmd_status_s entry  = {0};
     fc_cmd_status_s popped = {0};
 
-    munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
+    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
 
-    entry.command_id = 0x01U;
-    entry.status     = FC_CMD_STATUS_RDY;
+    entry.cmd_id = 0x01U;
+    entry.status = FC_CMD_STATUS_RDY;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
 
-    entry.command_id = 0x02U;
+    entry.cmd_id = 0x02U;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
 
     munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_OK);
-    munit_assert_uint32(popped.command_id, ==, 0x01U);
+    munit_assert_uint32(popped.cmd_id, ==, 0x01U);
 
     munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_OK);
-    munit_assert_uint32(popped.command_id, ==, 0x02U);
+    munit_assert_uint32(popped.cmd_id, ==, 0x02U);
 
     munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_QUEUE_EMPTY);
 
-    /* 证据（--log-visible info）：CQ 存整项而非句柄，用两个不同 command_id 区分
+    /* 证据（--log-visible info）：CQ 存整项而非句柄，用两个不同 cmd_id 区分
      * ⇒ 顺序错或拷贝错立刻可见。 */
     test_trace_summary("CQ push 0x01/0x02（整项拷贝）-> pop 顺序一致 -> EMPTY (depth=%u)", TEST_CQ_DEPTH);
 
@@ -439,18 +439,18 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     fc_comp_queue_s q;
     uint16_t        i;
 
-    munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
+    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
 
     fc_cmd_status_s entry = {0};
     entry.status          = FC_CMD_STATUS_RDY;
 
     for (i = 0U; i < TEST_CQ_DEPTH; i++)
     {
-        entry.command_id = (fc_cmd_id_t)i;
+        entry.cmd_id = (fc_cmd_id_t)i;
         munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
     }
 
-    entry.command_id = 0xFFU;
+    entry.cmd_id = 0xFFU;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_QUEUE_FULL);
 
     /* 证据（--log-visible info）：CQ 满在 fc_complete_from_nand() 里是 fatal

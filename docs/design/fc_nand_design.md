@@ -414,7 +414,7 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
   OR 各 `desc->status` 即可（desc 链完整保留到 `fc_command_release()`）；CQ 只给命令级
   `status` 与 `desc_id`（首个失败 CW）。
 - **SQ 不可变**：GET_FEATURES 的寄存器值经控制器级暂存 `g_fc_return_staging[command_id]` 中转进
-  CQ 的 `param.bytes`；SQ 命令体提交后不再被写。
+  CQ 的 `param.value`；SQ 命令体提交后不再被写。
 
 ### FC 返回码 (fc_status_t)
 
@@ -2473,7 +2473,6 @@ nand_dispatch_completion_t (跨边界字段):
 │ nand_status    │ 70h 状态寄存器值                          │
 │ cw_status[8]   │ 每 CW 完成状态（下标 = flat 绝对 CW 号 n）│
 │ ecc_bit_c[8]   │ 每 CW ECC 纠正比特数（0~255），同下标空间 │
-│ failed_desc_id │ 失败 Descriptor ID                       │
 └────────────────┴─────────────────────────────────────────┘
 ```
 
@@ -2483,7 +2482,7 @@ nand_dispatch_completion_t (跨边界字段):
 
 ```text
 nand_dispatch_completion_t（command_id / execution_status / nand_status /
-                            cw_status[8] / ecc_bit_count[8] / failed_desc_id）
+                            cw_status[8] / ecc_bit_count[8]）
   │
   ├─ Step 1：回写 descriptor（双重交付之一）
   │     command->desc_id != INVALID 时：
@@ -2504,7 +2503,7 @@ nand_dispatch_completion_t（command_id / execution_status / nand_status /
   │     module     = command->module（直接路由，无需查命令）
   │     Page Read → 走链全链 OR status（v28：不再聚合失败位图，上层遍历链自取）
   │                 聚合 ECC 走 fc_get_cmd_ecc_max()（全链最大值）
-  │     GET_FEATURES → param.bytes = g_fc_return_staging[command_id]
+  │     GET_FEATURES → param.value = g_fc_return_staging[command_id]
   │     （其余非 Page Read → 透传 NAND 状态；param 恒 0）
   │
   └─ Step 4：fc_complete_internal → CQ 入队
@@ -2571,13 +2570,13 @@ SET_FEATURES（0xEF）和 GET_FEATURES（0xEE）是 ONFI 协议中读写 NAND �
 
 > **v7 变更**：buffer 不再指向 `&command->parameter0`（那会让提交后的命令体被写，违反「SQ 不可变」）。
 > 改为指向控制器级暂存 `g_fc_return_staging[command_id]`（按命令池槽位索引的 4 字节中转），返回值最终经
-> CQ 的 `param.bytes` 交回上层。
+> CQ 的 `param.value` 交回上层。
 
 ```
 SET_FEATURES:
 ─────────────
 command->feature_addr ──► request.feature_addr ──► task.feature_addr ──► nand_fc_request_t.column (= 0x01)
-command->param.bytes  ──► memcpy → g_fc_return_staging[command_id]
+&command->param.value  ──► memcpy → g_fc_return_staging[command_id]
                                 │ (cw_buffers[plane*CW_NUM] = g_fc_return_staging[command_id]，feature 无 PAA 故 plane 恒 0)
                                 ▼
                            NAND 从暂存读取 4 字节发送至寄存器
@@ -2590,7 +2589,7 @@ command->feature_addr ──► (同上) ──► column (= 0x01)
                            NAND 回写 4 字节写入暂存
                                 │
                                 ▼
-                           fc_complete_from_nand → completion.param.bytes → CQ
+                           fc_complete_from_nand → completion.param.value → CQ
                                 │
                                 ▼
                            测试 / FTL 从 CQ 条目读取
@@ -2639,7 +2638,7 @@ else if ((command->config.operation == OP_SET_FEATURES) ||
      * v7：buffer 指向控制器级暂存，不指向 command（SQ 提交后不可写）。 */
     request.cw_bitmap                           = 1UL << (request->plane * CW_NUM);
     request.cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
-    if (SET) memcpy(g_fc_return_staging[command_id], command->param.bytes, 4U);
+    if (SET) memcpy(g_fc_return_staging[command_id], &command->param.value, 4U);
     else     memset(g_fc_return_staging[command_id], 0, 4U);
 }
 ```
@@ -2662,13 +2661,13 @@ task->request = (nand_fc_request_t){.column = (uint16_t)task->feature_addr, .row
 > **说明**：此处 `cw_buffers[task->plane * CW_NUM]` 已经通过 `nand_dispatch_task_load()` 从
 > `request.cw_buffers[plane*CW_NUM]`（即 `g_fc_return_staging[command_id]`）拷贝，指向控制器级暂存。
 > feature 寄存器是 die 级、无 plane 语义，`command->paa` 从不设置，故 plane 恒 0。GET_FEATURES 的回写
-> 数据经此通道写入暂存，再由 `fc_complete_from_nand` 拷进 CQ 的 `param.bytes`。
+> 数据经此通道写入暂存，再由 `fc_complete_from_nand` 拷进 CQ 的 `param.value`。
 
 #### 完成路径 — 无 desc 回写，但有返回段搬运
 
 `fc_complete_from_nand()` 检查 desc_id 后才执行 descriptor 回写循环。SET/GET_FEATURES 的
 desc_id = FC_DESCRIPTOR_ID_INVALID，自动跳过回写。GET_FEATURES 的返回值从
-`g_fc_return_staging[command_id]` 拷入 `completion.param.bytes`（SQ 命令体保持不被写）。
+`g_fc_return_staging[command_id]` 拷入 `completion.param.value`（SQ 命令体保持不被写）。
 
 ### 14.5 读回路径演进（v7 更新）
 
@@ -4938,7 +4937,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 - **CQ 不再携带 per-CW ECC**（`ecc_bit0..3` 已删除）。per-CW `ecc_bits` 只留在 descriptor 链；
   命令级聚合 ECC 走 `fc_get_cmd_ecc_max()`——**取全链最大值**（含两 plane）。旧实现只取 plane 0，
   在 plane 0 为空的 flat 位图下会恒为 0，是错的而非保守的。
-- GET_FEATURES 的寄存器值经控制器级暂存 `g_fc_return_staging[command_id]` 拷进 `completion.param.bytes`；
+- GET_FEATURES 的寄存器值经控制器级暂存 `g_fc_return_staging[command_id]` 拷进 `completion.param.value`；
   SQ 命令体提交后不再被写（见 `fc_command.h`「SQ 不可变」）。
 
 ### 25.8 风险

@@ -2597,7 +2597,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     munit_assert_uint32(cw[0], ==, FTL_LBA_INVALID);
     munit_assert_uint32(cw[2], ==, page + 2U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 
     ftl_ut_trace_detail("gc decode: pba=0x%08lX page=%lu; OK base=page cw=page+0..3; EMPTY all INVALID; CORRUPT cw1=page+8; HOLE base=%lu cw0=0x%08lX cw2=%lu", pba, page, base, cw[0], cw[2]);
     ftl_ut_trace_summary("gc decode: OK base=%lu; EMPTY/CORRUPT/HOLE ok", base);

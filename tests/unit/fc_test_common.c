@@ -205,7 +205,7 @@ fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd)
 
     /* cmd 无缓存 id（v15 起由指针派生）；completion 里的是建链时算好的快照。 */
     munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-    munit_assert_uint32(completion.command_id, ==, expect_id);
+    munit_assert_uint32(completion.cmd_id, ==, expect_id);
 
     return completion;
 }
@@ -225,7 +225,7 @@ void test_capture_cmd(const fc_cmd_s *cmd)
         munit_assert_not_null(desc);
 
         uint8_t *slot = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
-        uint8_t *user = fc_buffer_id_to_real_buffer(desc->buffer_id);
+        uint8_t *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
         (void)memcpy(slot, user, FC_BUFFER_USER_SIZE);
@@ -356,13 +356,13 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32
     }
     (void)cmd_id;
 
-    /* 照 ftl_cmd_setup_ppa 的口径：地址信息既进 paa，也镜像进 config.ch/ce/lun。
+    /* 照 ftl_cmd_setup_ppa 的口径：地址信息既进 paa，也镜像进 ch/ce/lun。
      * v47：FTL 侧边界会 pba_to_paa 后赋给 cmd->paa，本夹具照抄（paa_from_addr 忽略
      * ch/ce——上面三行已把 ch/ce/lun 镜像进 config，无拓扑损失）。 */
     cmd->config             = *config;
-    cmd->config.ch          = (DWORD)addr->ch;
-    cmd->config.ce          = (DWORD)addr->ce;
-    cmd->config.lun         = (DWORD)addr->lun;
+    cmd->ch                 = (DWORD)addr->ch;
+    cmd->ce                 = (DWORD)addr->ce;
+    cmd->lun                = (DWORD)addr->lun;
     cmd->config.multi_plane = (is_multi != 0U) ? (DWORD)PLANE_NUM : 0U;
     cmd->paa                = paa_from_addr(addr);
     cmd->meta               = meta;
@@ -429,7 +429,7 @@ fc_cmd_status_s test_erase_block(uint16_t block_index, uint8_t plane_bitmap, con
 
     completion = test_submit_wait(cmd);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return completion;
 }
 
@@ -476,7 +476,7 @@ fc_cmd_status_s test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint1
     /* 证据明细（--log-visible debug）：这条命令实际写了哪一页 / 几个 CW / 什么状态。 */
     test_trace_detail("prog p%02hu PBA=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page_index, (unsigned long)pba_from_addr(&addr), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return completion;
 }
 
@@ -524,7 +524,7 @@ fc_cmd_status_s test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint1
      * 内部搬移 = 源页 PBA），它是 Pass 4 ② 比对 META 的基准。 */
     test_trace_detail("read p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page_index, (unsigned long)meta, plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return completion;
 }
 
@@ -678,7 +678,7 @@ static fc_cmd_status_s test_read_cache_step(uint16_t block_index, uint8_t plane_
      * 真正输出的是 output_page——打出来才看得出「地址与 meta 刻意解耦」这件事。 */
     test_trace_detail("cache out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", output_page, (unsigned long)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = output_page}), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return completion;
 }
 
@@ -705,7 +705,7 @@ static fc_cmd_status_s test_cache_start_seq(uint16_t block_index, uint8_t plane_
 
     test_trace_detail("cache start p%02hu op=%lu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page, operation, (unsigned long)pba_from_addr(&addr), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return completion;
 }
 
@@ -851,9 +851,9 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint
     (void)cmd_id;
 
     cmd->config             = *config;
-    cmd->config.ch          = 0U;
-    cmd->config.ce          = 0U;
-    cmd->config.lun         = 0U;
+    cmd->ch                 = 0U;
+    cmd->ce                 = 0U;
+    cmd->lun                = 0U;
     cmd->config.multi_plane = (DWORD)PLANE_NUM;
     cmd->meta               = lba_meta;
 
@@ -885,7 +885,7 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+        fc_command_release(cmd->cmd_id);
     }
 
     {
@@ -899,7 +899,7 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+        fc_command_release(cmd->cmd_id);
     }
 
     test_trace_summary("cross-block cache prog: plane0 blk=%hu / plane1 blk=%hu, %u x 15h + 1 x 10h = %d pairs", blocks[0], blocks[1], (PAGES_PER_BLOCK - 1U), PAGES_PER_BLOCK);
@@ -943,7 +943,7 @@ void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_pair_paa(g_source_data, blocks, page, TEST_PLANE_BM_ALL);
 
-        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+        fc_command_release(cmd->cmd_id);
     }
 
     test_trace_summary("cross-block cache read: plane0 blk=%hu / plane1 blk=%hu, START_SEQ_MP + %u SEQ_MP + LAST_MP, both planes PAA-verified", blocks[0], blocks[1], (PAGES_PER_BLOCK - 2U));
@@ -998,7 +998,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, prefetched, plane_bitmap);
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 
     /* ③ SEQ(31h)：输出 RANDOM 预取的 addr，预取 addr+1 */
     conf           = *config;
@@ -1066,7 +1066,7 @@ void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_in
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 }
 
 void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config)
@@ -1113,11 +1113,11 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, page_index, plane_bitmap);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 }
 
 /* META 只读回读（OP_READ_META，v46）：无 desc 链，回读指定页、指定 CW 的前 4 字节 META，
- * 从 CQ 的 param.bytes 取回。cw 由 addr 携带（test_cmd_build 对本 op 放行 addr->cw）。 */
+ * 从 CQ 的 param.value 取回。cw 由 addr 携带（test_cmd_build 对本 op 放行 addr->cw）。 */
 void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, uint8_t cw, uint8_t out[4])
 {
     const fc_cmd_cfg_s config = (fc_cmd_cfg_s){.operation = (DWORD)OP_READ_META};
@@ -1138,13 +1138,13 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
 
     completion = test_submit_wait(cmd);
 
-    (void)memcpy(out, completion.param.bytes, 4U);
+    (void)memcpy(out, &completion.param.value, 4U);
 
     test_trace_detail("read_meta b=%hu plane=%hhu p=%hu cw=%hhu status=0x%hX meta=%02hhX%02hhX%02hhX%02hhX", block_index, plane, page_index, cw, completion.status, out[0], out[1], out[2], out[3]);
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 }
 
 /* 块锁族（v49）：op 21/22/23 与 op 25 的 op 表 has_data 全为 0 —— 不搬 host 数据、无 desc 链。
@@ -1169,7 +1169,7 @@ void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 }
 
 uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config)
@@ -1187,15 +1187,15 @@ uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd
 
     completion = test_submit_wait(cmd);
 
-    /* 状态字节不经数据缓冲：引擎直读 DQ 总线 → nand_status → FC 拷进 CQ param.bytes[0]。
+    /* 状态字节不经数据缓冲：引擎直读 DQ 总线 → nand_status → FC 拷进 CQ param.parameter0。
      * ⚠ 必须在 fc_command_release **之前**取。 */
-    raw = completion.param.bytes[0];
+    raw = completion.param.parameter0;
 
     test_trace_detail("lock_status b=%hu plane=%hhu raw=0x%02hhX lock#=%u lt#=%u lt=%u status=0x%hX", block_index, plane, raw, ((raw >> 2) & 1U), ((raw >> 1) & 1U), (raw & 1U), completion.status);
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
 
     return raw;
 }
@@ -1245,7 +1245,7 @@ void test_fill_user_paa(fc_cmd_s *cmd)
         munit_assert_not_null(desc);
 
         uint8_t *slot = test_source_slot((uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa));
-        uint8_t *user = fc_buffer_id_to_real_buffer(desc->buffer_id);
+        uint8_t *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
         test_fill_paa(slot, desc->paa);
@@ -1266,7 +1266,7 @@ void test_memset_read_buffer(fc_cmd_s *cmd)
         fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
-        uint8_t *user = fc_buffer_id_to_real_buffer(desc->buffer_id);
+        uint8_t *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
         (void)memset(user, 0xCC, FC_BUFFER_USER_SIZE);
@@ -1341,7 +1341,7 @@ void test_verify_erased(const fc_cmd_s *cmd)
         fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
-        uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
+        uint8_t *buf = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(buf);
 
         for (uint16_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
@@ -1416,7 +1416,7 @@ uint8_t *test_cw_user(const fc_cmd_s *cmd, uint8_t idx)
     fc_desc_s *desc = test_cw_desc(cmd, idx);
 
     munit_assert_not_null(desc);
-    return fc_buffer_id_to_real_buffer(desc->buffer_id);
+    return fc_buffer_get_user_data(desc->buffer_id);
 }
 
 uint8_t *test_cw_base(const fc_cmd_s *cmd, uint8_t idx)

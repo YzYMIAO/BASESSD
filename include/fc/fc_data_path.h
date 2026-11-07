@@ -104,12 +104,12 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id);
  *   ④ 重新检查 CRC/META 并更新 desc->status
  *
  * @param cmd_id         带 desc 链的命令 ID。
- * @param failed_cw_idx 失败 CW 在 desc 链中的索引（0-based）。
+ * @param error_cw_index 错误 CW 在 desc 链中的索引（0-based）。
  *
  * @return FC_STATUS_OK       恢复成功，所有 desc 的 CRC/META 复查通过。
  *         FC_STATUS_IO_ERROR 重建后 ECC 仍失败，或 CRC/META 复查失败。
  */
-fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx);
+fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE error_cw_index);
 
 /* ── 单 CW 步骤原语（管线与单测共用） ──
  *

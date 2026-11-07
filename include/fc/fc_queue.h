@@ -12,8 +12,8 @@
  * SQ/HSQ 只保存 FC Command Pool 的槽位编号，不复制命令内容。
  * 因而命令、Descriptor 和 CQ 上下文都能使用同一个稳定的 Command Handle 关联。
  *
- * CQ 保存每条命令的完成结果。完成项中的 cmd_id / failed_cw / failed_desc_id
- * 用于 FTL 的错误分析、Read Retry 和 RAID 恢复，不能在 FTL 取走 CQ 前失效。
+ * CQ 保存每条命令的完成结果。完成项中的 cmd_id / status / param 用于
+ * FTL 的完成派发与错误分析；失败 CW 坐标由 desc 链上的 per-CW 状态派生。
  *
  * storage 由 FC 内部固定提供，队列不分配也不释放内存。
  */

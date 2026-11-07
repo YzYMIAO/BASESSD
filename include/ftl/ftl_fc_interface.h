@@ -130,7 +130,7 @@ static inline WORD ftl_cmd_id(const fc_cmd_s *cmd)
  * @brief 该操作是否需要 desc 链（即是否携带数据）
  *
  * NO_DATA 操作（ERASE / RESET / LOCK 等）无数据负载；SET/GET_FEATURES 用内联
- * param.bytes + feature_addr。两者都不建链（desc_id 保持 INVALID）。
+ * param.value + feature_addr。两者都不建链（desc_id 保持 INVALID）。
  * 与 fc_command_validate 的接受条件对齐：只有 has_data 且非 FEATURES 的操作
  * 才要求 desc_id 有效。
  *
@@ -274,7 +274,7 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM]
  *
  * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
  * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
- *   ch/ce/lun           → cmd->route 字段
+ *   ch/ce/lun           → cmd->ch / cmd->ce / cmd->lun
  *   block/plane/page/cw → cmd->paa（pba_to_paa 在 FTL 侧一次转出）
  *
  * 本入口是同步页原语与遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座，
@@ -302,12 +302,12 @@ static inline ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba)
      * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
     ASSERT(pba_is_valid(pba));
 
-    cmd->route.ch  = pba_to_ch(pba);
-    cmd->route.ce  = pba_to_ce(pba);
-    cmd->route.lun = pba_to_lun(pba);
+    cmd->ch  = pba_to_ch(pba);
+    cmd->ce  = pba_to_ce(pba);
+    cmd->lun = pba_to_lun(pba);
     /* PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，调用点不在 FC 内部。
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
-    cmd->paa       = pba_to_paa(pba);
+    cmd->paa = pba_to_paa(pba);
 
     // 位图不存进命令结构体，直接算出来当实参传。
     // 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。
@@ -318,7 +318,7 @@ static inline ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba)
  * @brief FC 命令 → PBA（pba_to_cmd 的逆）
  *
  * FTL 模块要回读自己下发的命令地址时用它，**不必**直接摸 cmd->paa——PAA 是 FC/器件域
- * 的表示。ch/ce 取 cmd->route，其余字段由 paa_to_pba() 反重排。
+ * 的表示。ch/ce 取 cmd->ch / cmd->ce，其余字段由 paa_to_pba() 反重排。
  *
  * ⚠ 本函数与 pba_to_cmd() 是 FTL 层仅有的两处 PBA↔PAA 转换点。
  *
@@ -327,7 +327,7 @@ static inline ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba)
  */
 static inline DWORD ftl_cmd_pba(const fc_cmd_s *cmd)
 {
-    return paa_to_pba(cmd->route.ch, cmd->route.ce, cmd->paa);
+    return paa_to_pba(cmd->ch, cmd->ce, cmd->paa);
 }
 
 /* 一个命令实际访问到的**全局块**及其本命令内的最大 ECC 纠正 bit 数。 */
@@ -761,8 +761,8 @@ ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE l
  * ——cw 只有 2 位（列上限 1584），够不到 spare 区。出厂坏块标记在 **spare 首字节 = 列
  * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 pba 的 block/plane/page。
  *
- * 列地址经 FC 命令的 `param.bytes[0..1]`（小端）下传（见 fc_build_dispatch_request 的
- * OP_READ_COLUMN 分支），结果经 CQ 的 `param.bytes[0..3]` 回。
+ * 列地址经 FC 命令的 `param.parameter0/1`（小端）下传（见 fc_build_dispatch_request 的
+ * OP_READ_COLUMN 分支），结果经 CQ 的 `param.value` 回。
  *
  * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏块的 spare 也要拿到，
  * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。

@@ -644,10 +644,10 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
  * 重建后 ECC 重试仍失败即硬件不可恢复；成功后解扰全 CW 并重新检查 CRC/META。
  *
  * @param cmd_id        读命令 ID
- * @param failed_cw_idx 失败 CW 在 desc 链中的下标
+ * @param error_cw_index 错误 CW 在 desc 链中的下标
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
  */
-fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx)
+fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE error_cw_index)
 {
     BYTE        *buffers[CW_TOTAL_MAX];
     BYTE         count;
@@ -662,7 +662,7 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx)
     count = fc_collect_decode_buffers(cmd, buffers, CW_TOTAL_MAX);
 
     // 收集失败（INVALID buffer/链损坏）或 index 越界时不能进 XOR。
-    if ((count == 0U) || (failed_cw_idx >= count))
+    if ((count == 0U) || (error_cw_index >= count))
     {
         return FC_STATUS_IO_ERROR;
     }
@@ -673,8 +673,8 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx)
 
         // XOR 所有非 failed 的 CW（均为 ECC-corrected + scrambled），
         // 重建结果与被恢复 CW 处于 same scrambled domain。
-        fc_raid_recover(recovered, buffers, count, failed_cw_idx, FC_BUFFER_POOL_CW_SIZE);
-        memcpy(buffers[failed_cw_idx], recovered, FC_BUFFER_POOL_CW_SIZE);
+        fc_raid_recover(recovered, buffers, count, error_cw_index, FC_BUFFER_POOL_CW_SIZE);
+        memcpy(buffers[error_cw_index], recovered, FC_BUFFER_POOL_CW_SIZE);
     }
 
     /* ── ECC 重试 ── */
@@ -682,7 +682,7 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx)
     {
         fc_status_e ecc_result;
 
-        ecc_result = fc_data_path_ecc_decode(buffers[failed_cw_idx], NULL);
+        ecc_result = fc_data_path_ecc_decode(buffers[error_cw_index], NULL);
         if (ecc_result != FC_STATUS_OK)
         {
             // RAID 重建后 ECC 仍失败/引擎不可用 → 硬件层面不可恢复

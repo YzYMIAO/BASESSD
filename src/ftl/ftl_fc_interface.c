@@ -276,10 +276,10 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM]
     // cmd->paa 的 plane 位定单 plane 命令的段，给错了段就错。
     const DWORD base_pba = pba[first_plane];
 
-    cmd->route.ch  = pba_to_ch(base_pba);
-    cmd->route.ce  = pba_to_ce(base_pba);
-    cmd->route.lun = pba_to_lun(base_pba);
-    cmd->paa       = pba_to_paa(base_pba); /* PBA→PAA 在 FTL 侧一次转出 */
+    cmd->ch  = pba_to_ch(base_pba);
+    cmd->ce  = pba_to_ce(base_pba);
+    cmd->lun = pba_to_lun(base_pba);
+    cmd->paa = pba_to_paa(base_pba); /* PBA→PAA 在 FTL 侧一次转出 */
 
     if (ftl_cmd_needs_desc_chain(cmd) == false)
     {
@@ -310,7 +310,7 @@ BYTE ftl_cmd_block_ecc_list(const fc_cmd_s *cmd, ftl_cmd_block_ecc_s *out, BYTE 
     while (did < FC_DESCRIPTOR_POOL_DEPTH)
     {
         const fc_desc_s *d   = fc_descriptor_id_to_descriptor(did);
-        const DWORD      pba = paa_to_pba(cmd->route.ch, cmd->route.ce, d->paa);
+        const DWORD      pba = paa_to_pba(cmd->ch, cmd->ce, d->paa);
         const WORD       gb  = ftl_pba_gblock(pba);
 
         BYTE i = 0U;
@@ -985,7 +985,7 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
     // 4 字节走控制器侧暂存（同 OP_READ_META），完成时已拷进 CQ 的 param。
     // 先拷出再判错：即使页读失败，调用者仍能看到原始 4 字节用于诊断；
     // 返回 FTL_ERROR 让 BBT 按“读失败 ⇒ 坏块（保守）”处理。
-    memcpy(out, completion.param.bytes, 4U);
+    memcpy(out, &completion.param.value, 4U);
 
     if (fc_cmd_status_has_error(completion.status))
     {
@@ -1160,10 +1160,10 @@ ftl_status_e ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *
 
     // 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。
     ASSERT(pba_is_valid(pba));
-    cmd->route.ch  = pba_to_ch(pba);
-    cmd->route.ce  = pba_to_ce(pba);
-    cmd->route.lun = pba_to_lun(pba);
-    cmd->paa       = pba_to_paa(pba);
+    cmd->ch  = pba_to_ch(pba);
+    cmd->ce  = pba_to_ce(pba);
+    cmd->lun = pba_to_lun(pba);
+    cmd->paa = pba_to_paa(pba);
 
     if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
     {
@@ -1378,9 +1378,9 @@ ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE l
 
     (void)cmd_id; /* 本函数只交出命令对象；句柄由调用方从 cmd->cmd_id 取 */
 
-    cmd->route.ch           = ch;
-    cmd->route.ce           = ce;
-    cmd->route.lun          = lun;
+    cmd->ch                 = ch;
+    cmd->ce                 = ce;
+    cmd->lun                = lun;
     cmd->config.operation   = OP_SET_FEATURES;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;

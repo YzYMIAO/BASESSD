@@ -86,8 +86,7 @@ typedef struct FC_NAND_DISPATCH_TASK_S
                         * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
     BYTE cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
                         * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
-                        * 消费：completion_per_cw 用它当下标写 cw_status[n]，
-                        *   并把它作为 failed_cw 上报。 */
+                        * 消费：completion_per_cw 用它当下标写 cw_status[n]。 */
     BYTE plane_count;  /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
                         * 见 fc_nand_dispatch.h 同名字段的完整说明。 */
     BYTE plane;        /* 本命令目标物理 plane 索引。
@@ -201,7 +200,7 @@ typedef struct FC_NAND_DISPATCH_LUN_QUEUE_S
  * 构建不存在失败路径；调用点因此可以无条件接续 fc_nand_start。 */
 typedef void (*fc_nand_dispatch_req_handler_fn_t)(fc_nand_dispatch_task_s *task);
 
-/* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_cw。 */
+/* Completion 策略 handler：根据不同操作类型设置 cw_status。 */
 typedef void (*fc_nand_dispatch_completion_handler_fn_t)(fc_nand_dispatch_task_s *task, BYTE result);
 
 /* OP_COUNT 项，OP_* 直接作为下标。 */
@@ -250,8 +249,7 @@ static void fc_nand_dispatch_completion_init(fc_nand_dispatch_comp_s *completion
     BYTE i;
 
     memset(completion, 0, sizeof(*completion));
-    completion->cmd_id    = cmd_id;
-    completion->failed_cw = NAND_CW_INVALID;
+    completion->cmd_id = cmd_id;
     for (i = 0U; i < CW_TOTAL_MAX; i++)
     {
         completion->cw_status[i] = FC_CW_STATUS_UNUSED;
@@ -1008,26 +1006,16 @@ static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result)
     if (task->cw_bitmap == 0U)
     {
         task->completion.cw_status[0] = status;
-        if (result != NAND_RESULT_OK)
-        {
-            task->completion.failed_cw = NAND_CW_INVALID;
-        }
         return;
     }
     for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         task->completion.cw_status[n] = status;
     }
-    if (result != NAND_RESULT_OK)
-    {
-        task->completion.failed_cw = NAND_CW_INVALID;
-    }
 }
 
 /**
  * @brief 仅标记当前处理的 CW（READ/CACHE_READ 类）
- *
- * 失败时 failed_cw 上报当前 CW 的 flat 下标。
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
@@ -1037,10 +1025,6 @@ static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result)
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
 
     task->completion.cw_status[task->cw_index] = status;
-    if (result != NAND_RESULT_OK)
-    {
-        task->completion.failed_cw = task->cw_index;
-    }
 }
 
 /**
@@ -1089,7 +1073,6 @@ static void completion_load(fc_nand_dispatch_task_s *task, BYTE result)
     {
         task->completion.cw_status[i] = status;
     }
-    task->completion.failed_cw = NAND_CW_INVALID;
 }
 
 /* ======================================================================

@@ -279,7 +279,7 @@ static uint8_t l2_buffer_round_trip(const nand_addr_s *addr, uint32_t cw_bitmap,
     l2_verify_all_ready(cmd);
     munit_assert_uint8(l2_user_matches_source(cmd), ==, 1U);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return cw_count;
 }
 
@@ -1025,7 +1025,7 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
     l2_verify_crc_written(enc); /* CRC 对明文算 ⇒ 与 USER 是否已加扰无关 */
     l2_verify_parity_nonzero(enc);
 
-    munit_assert_int(fc_command_release(enc->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(enc->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1063,7 +1063,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
      * ⇒ 读侧 Pass 3 整个跳过。打出来才看得出"关闭"是真的没写，而不是写了个 0。 */
     test_trace_summary("crc disabled: %hhu CW, [4,8) 全 0xFFFFFFFF（哨兵原样保留）", test_cw_count(enc));
 
-    munit_assert_int(fc_command_release(enc->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(enc->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1226,7 +1226,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
      * 对照组干净"——而那正是这条用例的全部意义。 */
     test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰", (FC_BUFFER_DATA_SIZE / 8U));
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1274,7 +1274,7 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
      * 「链位 0,1 ↔ cw 0,2 不同」——打出来才看得出 Pass 4 用的是 paa_to_cw 而非链走位。 */
     test_trace_summary("masked_chain bm=0x05: 链位0->cw0, 链位1->cw2（不同）, 往返一致");
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1313,7 +1313,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
 
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
-        munit_assert_uint32(test_cw_desc(cmd, i)->status & FC_CW_STATUS_MATA_ERROR, !=, 0U);
+        munit_assert_uint32(test_cw_desc(cmd, i)->status & FC_CW_STATUS_META_ERROR, !=, 0U);
     }
 
     /* 数据本身没错（种子从页内 META 自举），错的只是"这一页是谁" */
@@ -1324,7 +1324,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
      *   把两个数打出来，正是为了让"篡改真的落在了掩码之上"一眼可查。 */
     test_trace_summary("mata_error: 声明 PBA=0x%08lX vs 页内 META=0x%08lX（低 3 位同、高位异）-> 逐 CW MATA_ERROR, 数据仍一致", (unsigned long)cmd->meta, (unsigned long)test_cw_desc(cmd, 0U)->meta);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1365,7 +1365,7 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
      * 两个数打出来才说明 CRC_ERROR 是"真的比出来了"，而不是碰巧置位。 */
     test_trace_summary("crc_error: 写时关 CRC 留哨兵 0x%08lX, 读时开 CRC -> 逐 CW CRC_ERROR", (unsigned long)sentinel);
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1405,7 +1405,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
     /* 证据（--log-visible info）：RAW 模式跳过 ECC 编解码，parity 区应原样保留 0xAA 哨兵。 */
     test_trace_summary("ldpc_raw: parity 区原样保留 0xAA（%u B/CW x %hhu CW）, 数据原样往返", (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), test_cw_count(cmd));
 
-    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1435,20 +1435,20 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *   ① 4 个 CW 的 USER 区各填**不同** pattern —— 相同 pattern 下"XOR 还原"与"根本没动"
  *      分不开
  *   ② encode —— META / CRC / ECC 都写齐（RAID XOR **不在** encode 里做，fc_data_path.c:191）
- *   ③ 把 failed_idx 那条 CW 的**整 528B** 翻成 0xFF —— 远超 BCH 能力 ⇒ 必然不可纠，
+ *   ③ 把 error_idx 那条 CW 的**整 528B** 翻成 0xFF —— 远超 BCH 能力 ⇒ 必然不可纠，
  *      保证走的是"XOR 重建"而不是"ECC 顺手纠回来"（后者会让用例假过）
- *   ④ fc_data_path_raid_recover(cmd->cmd_id, failed_idx)：XOR 重建 → ECC 重试 → 解扰
+ *   ④ fc_data_path_raid_recover(cmd->cmd_id, error_idx)：XOR 重建 → ECC 重试 → 解扰
  *   ⑤ 断言**全部** CW 的 USER 区都回到各自 pattern —— 不只被救的那条：
  *      "救回来了"与"没把别的 CW 弄坏"要一起成立
  *
- * 两个用例共用本函数，只差 random_mode / failed_idx。 */
-static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, uint8_t failed_idx)
+ * 两个用例共用本函数，只差 random_mode / error_idx。 */
+static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, uint8_t error_idx)
 {
     fc_cmd_s *cmd   = l2_cmd(addr, L2_BM_PLANE0_ALL, random_mode, FC_CRC_ENABLE);
     uint8_t   count = test_cw_count(cmd);
 
     munit_assert_uint32(count, >=, 3U);
-    munit_assert_uint32(failed_idx, <, count);
+    munit_assert_uint32(error_idx, <, count);
 
     /* 不同 CW 填不同 pattern（USER 数据区 512B） */
     for (uint8_t i = 0U; i < count; i++)
@@ -1460,14 +1460,14 @@ static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, u
     munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 破坏指定 CW（全 CW 528B 翻转，使 ECC 不可纠） */
-    uint8_t *failed_base = test_cw_base(cmd, failed_idx);
+    uint8_t *failed_base = test_cw_base(cmd, error_idx);
     for (uint16_t j = 0U; j < FC_BUFFER_POOL_CW_SIZE; j++)
     {
         failed_base[j] ^= 0xFF;
     }
 
     /* raid_recover：XOR 重建 + ECC 重试 + 解扰 */
-    munit_assert_int(fc_data_path_raid_recover(cmd->cmd_id, failed_idx), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_raid_recover(cmd->cmd_id, error_idx), ==, FC_STATUS_OK);
 
     /* 验证：全部 CW USER 数据区恢复原始 pattern */
     for (uint8_t i = 0U; i < count; i++)
@@ -1478,7 +1478,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, u
     fc_command_release(cmd->cmd_id);
 }
 
-/* 退化 stripe 恢复：random=OFF（唯一成立的档，见节头）配 failed_idx = 1（中间那条 CW，
+/* 退化 stripe 恢复：random=OFF（唯一成立的档，见节头）配 error_idx = 1（中间那条 CW，
  * 不是链首 / 链尾）。断言在 do_raid_recover_test 里。 */
 static MunitResult test_raid_recover_no_random(const MunitParameter params[], void *data)
 {
@@ -1550,7 +1550,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
      * ECC 解码 + 解扰 → 与原始 pattern 一致。
      *
      * buffers[] 数组：[CW0, CW1, CW2, CW3, parity_CW0, parity_CW1, parity_CW2, parity_CW3]
-     * XOR 重建时传入所有 CW 和 parity CW，fc_raid_recover 会跳过 failed_idx 并 XOR 其余。
+     * XOR 重建时传入所有 CW 和 parity CW，fc_raid_recover 会跳过 error_idx 并 XOR 其余。
      */
     {
         uint8_t *buffers[CW_TOTAL_MAX];
@@ -1657,7 +1657,7 @@ static const l2_bm_case_s l2_bm_cases[] = {
   * 会被 test_cmd_build 的「逐 plane 覆盖」断言挡下——那正是静默编程未覆盖 plane 的形态。 */
     {     "plane1-only", 1U, 0xF0U, &L2_PROG_SINGLE, 4U,    l2_bm_p1_plane,    l2_bm_p1_cw},
  /* 0xFF = 整段 → 8 条 desc，钉住「段内每个 plane × 每个 CW 都有一条」这条不变量。
-  * ⚠ 位图必须显式给（v27 起 0 是空集，不再展开）；config.cw 不参与推导（v23 起）。 */
+  * ⚠ 位图必须显式给（v27 起 0 是空集，不再展开）；config.cw_count 不参与推导（v23 起）。 */
     {"span-multi-plane", 0U, 0xFFU,  &L2_PROG_MULTI, 8U,  l2_bm_span_plane,  l2_bm_span_cw},
 };
 
@@ -1707,7 +1707,7 @@ static const l2_bm_case_s *l2_bm_case_find(const char *name)
  *   ① 位图是 **flat 绝对编号**（bit n = plane*CW_NUM + cw）。"plane1-only = 0xF0" 这一行
  *      钉的就是"plane 1 的 CW0 是 bit 4 而不是 bit 0"——写成 0x0F 会越段。
  *   ② 链序是 **plane-major**（同 plane 内 cw 升序），与场景表数组一一对应。
- *   ③ `config.cw` **不回写**：v23 起它连建链都不参与，是纯残留字段 ⇒ 三条场景同判据 0。
+ *   ③ `config.cw_count` **不回写**：v23 起它连建链都不参与，是纯残留字段 ⇒ 三条场景同判据 0。
  *
  * ⚠ 位图必须**显式**给（v27 起 0 是空集，不再展开）；multi-plane 行的位图必须**逐 plane
  *   覆盖**，否则会被 test_cmd_build 的断言挡下——那正是"静默编程未覆盖 plane"的形态。
@@ -1737,8 +1737,8 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
         cmd = test_cmd_build(&addr, c->bitmap, (uint32_t)pba_from_addr(&addr), c->conf);
     }
 
-    /* config.cw 不回写（v23 起它连建链都不参与，纯残留字段）——三条场景同判据。 */
-    munit_assert_uint32(cmd->config.cw, ==, 0U);
+    /* config.cw_count 不回写（v23 起它连建链都不参与，纯残留字段）——三条场景同判据。 */
+    munit_assert_uint32(cmd->config.cw_count, ==, 0U);
 
     n = test_collect_chain(cmd, plane_out, cw_out);
     munit_assert_uint32(n, ==, c->n);

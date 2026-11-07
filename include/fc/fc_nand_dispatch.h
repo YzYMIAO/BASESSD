@@ -72,7 +72,6 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
     BYTE          pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
     BYTE          cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
     BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
-    WORD          failed_cw;                   /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
 } fc_nand_dispatch_comp_s;
 
 /* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
