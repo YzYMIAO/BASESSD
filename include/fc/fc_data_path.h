@@ -190,7 +190,7 @@ BOOL fc_data_path_crc_check(const BYTE *cw);
  * ② command_meta 非 FC_META_UNKNOWN 时，read_meta 须等于 lba_to_meta(command_meta, plane, cw)。
  *
  * @param cw           528B CW buffer。
- * @param cmd_meta 本命令的 META；FC_META_UNKNOWN 时跳过第 ② 项。
+ * @param command_meta 本命令的 META；FC_META_UNKNOWN 时跳过第 ② 项。
  * @param paa          本 CW 的 NAND 物理地址（plane / cw 的来源）。
  *
  * @return 0U                      两项均通过。

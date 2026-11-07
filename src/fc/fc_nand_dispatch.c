@@ -42,8 +42,7 @@
 
 /* ── CW 掩码遍历 ──
  * flat CW 掩码（bit n = plane*CW_NUM + cw）是"哪些 CW 要访问"的唯一依据，
- * 也是推进顺序的唯一依据。两个小工具只在本文件内使用，
- * 故放头文件里 inline（无外部链接、无未使用告警）。 */
+ * 也是推进顺序的唯一依据。两个小工具只在本文件内使用，故放本文件 `static inline`。 */
 
 /* mask 中 ≥ n 的第一个置位的绝对编号；没有则返回 CW_TOTAL_MAX（哨兵，越界即"到头"）。
  * 用法：`for (k = fc_nand_dispatch_cw_next(mask, 0U); k < CW_TOTAL_MAX; k = fc_nand_dispatch_cw_next(mask, k + 1U))`。 */
@@ -178,9 +177,9 @@ typedef struct FC_NAND_DISPATCH_TASK_S
  * count 只表示本任务 CW 计数，不兼作链深/忙标志；NAND 侧看不到「链」，
  * 逐条完成、逐条出队。poll 遍历每 LUN 每轮只推进一次，完成一条即回一份 completion。
  *
- * 注意：count 仍是"LUN 忙"的唯一判据（poll 只靠 count!=0 判断该 LUN 有在途任务）；
- *   但没有"命令已离开队列、尚未完成"的中间态了——命令从入队到完成始终留在
- *   本结构里，不存在"通道队列空 + count>0"的悬空窗口。
+ * 注意：count 是“LUN 忙”的唯一判据（poll 只靠 count != 0 判断该 LUN 有在途任务）。
+ * 命令从入队到完成始终留在本结构里；不存在“命令已离开队列、尚未完成”的中间态，
+ * 也不存在“队列空 + count > 0”的悬空窗口。
  */
 typedef struct FC_NAND_DISPATCH_LUN_QUEUE_S
 {
@@ -236,24 +235,21 @@ BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] NONCA
  * 辅助函数
  * ====================================================================== */
 
+_Static_assert(FC_CW_STATUS_UNUSED == 0U, "completion_init relies on the unused status being zero");
+
 /**
- * @brief 初始化一个 completion 结构（全清零 + 哨兵）
+ * @brief 初始化一个 completion 结构（全清零 + 命令关联键）
  *
- * cw_status 全量预置 FC_CW_STATUS_UNUSED，避免脏数据。
+ * `FC_CW_STATUS_UNUSED` 当前为 0，memset 已把它写入全部 CW 槽位；不另做
+ * 逐槽赋值，避免“清零后又写一遍 0”的伪工作。
  *
  * @param completion 目标
  * @param cmd_id FC 关联键
  */
 static void fc_nand_dispatch_completion_init(fc_nand_dispatch_comp_s *completion, WORD cmd_id)
 {
-    BYTE i;
-
     memset(completion, 0, sizeof(*completion));
     completion->cmd_id = cmd_id;
-    for (i = 0U; i < CW_TOTAL_MAX; i++)
-    {
-        completion->cw_status[i] = FC_CW_STATUS_UNUSED;
-    }
 }
 
 /**
@@ -275,7 +271,7 @@ static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_s *task, BYTE r
 /**
  * @brief 把 FC 预解析 request 搬到 LUN FIFO 的 task slot
  *
- * 只搬掩码内的 cw_buffers；掩码外保持 slot 残留（消费点保证不读）。
+ * 先把所有 cw_buffers 置 NULL，再搬掩码内的项；掩码外由消费点保证不读。
  *
  * @param task    目标 slot
  * @param request 预解析请求
@@ -283,7 +279,6 @@ static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_s *task, BYTE r
 static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_nand_dispatch_req_s *request)
 {
     BYTE n;
-    BYTE plane;
 
     fc_nand_dispatch_completion_init(&task->completion, request->cmd_id);
     /* 事务状态整体清零：task slot 会被后续命令复用，target 校验失败时
@@ -310,28 +305,20 @@ static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_n
      * 加载型 op 靠它定首次取数的起点。空掩码（退化命令）退化为 0，保证
      * completion_per_cw 的下标不越界。 */
     task->cw_index                      = fc_nand_dispatch_cw_first_or_zero(request->cw_bitmap);
-    /* 先清空全部指针，再搬掩码内的 CW buffer：掩码外的格必须显式 NULL，
-     * 不能留上一条命令的残留（新增 op 误读即野指针）。 */
-    for (n = 0U; n < CW_TOTAL_MAX; n++)
-    {
-        task->cw_buffers[n] = NULL;
-    }
+    /* 先把所有指针置 NULL，再搬掩码内的 CW buffer。掩码外的格是确定性 NULL，
+     * 不会沿用到上一条命令的指针；空掩码（擦除/无数据 op）因此留下全 NULL。 */
+    memset(task->cw_buffers, 0, sizeof(task->cw_buffers));
     for (n = fc_nand_dispatch_cw_next(request->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(request->cw_bitmap, (n + 1U)))
     {
         task->cw_buffers[n] = request->cw_buffers[n];
     }
-    for (plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        task->plane_paa[plane] = request->plane_paa[plane];
-    }
+    memcpy(task->plane_paa, request->plane_paa, sizeof(task->plane_paa));
     /* 单 plane 有效行的归属由生产者保证，此处不做逐项复核：掩码位 n 由 desc 的 PAA 本身
      * 算出（见 fc_build_request_data_planes），"在 n 位写了 buffer"与
      * "该 desc 的 plane/cw 位是 n"是同一条表达式。真正可能错位的情形（desc plane 位
      * 与 cmd->paa 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
      * 校验（越段 → ASSERT）拦下，不会走到这里。
-     * ⚠ 擦除位图为空 ⇒ 上面这个循环一格都不搬，cw_buffers[] 保持上一次占用
-     * 该 slot 的残留值。擦除路径不读 cw_buffers[]（req_erase 只用 plane_paa），故安全；
-     * 但"空掩码 = 无 buffer 可读"这条契约**依赖消费点真的不读**——新增无数据 op 时注意。 */
+     * 擦除位图为空 ⇒ cw_buffers[] 全为 NULL；擦除路径不读它（req_erase 只用 plane_paa）。 */
 }
 
 /* ======================================================================
@@ -991,9 +978,9 @@ static void req_init(fc_nand_dispatch_task_s *task, WORD column, BYTE *data, WOR
 }
 
 /**
- * @brief 把统一状态写入任务的全部选中 CW（PROGRAM/ERASE 类）
+ * @brief 把统一状态写入任务的全部选中 CW（整页读/编程/擦除/ISSUE/WAIT 等）
  *
- * 掩码为空时写 cw_status[0]（ERASE 的位图合法为空集）。
+ * 掩码为空时写 cw_status[0]（无 CW 概念或 ERASE 的合法空集）。
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
@@ -1015,7 +1002,7 @@ static void completion_all_cws(fc_nand_dispatch_task_s *task, BYTE result)
 }
 
 /**
- * @brief 仅标记当前处理的 CW（READ/CACHE_READ 类）
+ * @brief 仅标记当前处理的 CW（逐 CW 取数链）
  *
  * @param task           正在收尾的任务
  * @param result         NAND_RESULT_* 执行结果
@@ -1025,30 +1012,6 @@ static void completion_per_cw(fc_nand_dispatch_task_s *task, BYTE result)
     BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
 
     task->completion.cw_status[task->cw_index] = status;
-}
-
-/**
- * @brief 单次原子操作的默认完成策略
- *
- * 掩码为空时写 cw_status[0]（RESET/STATUS 等无 CW 概念）；非空时逐位置位。
- *
- * @param task           正在收尾的任务
- * @param result         NAND_RESULT_* 执行结果
- */
-static void completion_single(fc_nand_dispatch_task_s *task, BYTE result)
-{
-    BYTE status = (result == NAND_RESULT_OK) ? FC_CW_STATUS_UNUSED : FC_CW_STATUS_FAIL;
-    BYTE n;
-
-    if (task->cw_bitmap == 0U)
-    {
-        task->completion.cw_status[0] = status;
-        return;
-    }
-    for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
-    {
-        task->completion.cw_status[n] = status;
-    }
 }
 
 /**
@@ -1069,7 +1032,7 @@ static void completion_load(fc_nand_dispatch_task_s *task, BYTE result)
         return;
     }
     status = FC_CW_STATUS_FAIL;
-    for (i = 0U; i < (CW_NUM * PLANE_NUM); i++)
+    for (i = 0U; i < CW_TOTAL_MAX; i++)
     {
         task->completion.cw_status[i] = status;
     }
@@ -1114,9 +1077,8 @@ static void req_read_page(fc_nand_dispatch_task_s *task)
 {
     BYTE *cw_buffer;
 
-    /* 空掩码 = 无 desc 的「纯加载」op（如 op 33 直接下发）：uop 无 DATA_OUT，data 不被读，
-     * 且 cw_buffers[] 是上一次占用该 slot 的残留值（见本文件 task 结构契约注释）
-     * ⇒ 显式置 NULL/0，不把残留指针挂到请求上。 */
+    /* 空掩码 = 无 desc 的「纯加载」op（如 op 33 直接下发）：uop 无 DATA_OUT，data 不被读；
+     * task_load 已把 cw_buffers[] 全清为 NULL，这里仍显式置 NULL/0，保持请求自描述。 */
     if (task->cw_bitmap == 0U)
     {
         req_init(task, 0U, NULL, 0U);
@@ -1338,33 +1300,35 @@ static void req_multi_plane_erase(fc_nand_dispatch_task_s *task)
 /* --------------------------------------------------------------------
  * completion 表 g_fc_nand_dispatch_completion_table
  *   每个 OP 的完成策略选择依据（与 onfi_1_0.h 的 OP 语义对应）：
- *     - completion_single    ：无 CW 概念（RESET/ID/STATUS/FEATURES/内部搬移/块锁/META 回读等）
- *     - completion_per_cw    ：逐 CW 独立状态（普通读/OTP 读/单 plane CACHE_SEQ/RANDOM/LAST）
- *     - completion_load      ：加载型 op 不写状态，失败时刷满
- *                              （WITHOUT_DATA_OUT 两种 + 多 LUN 相位机 的 LOAD/WAIT）
- *     - completion_all_cws   ：所有选中 CW 同状态（编程/擦除/ISSUE/WAIT/CACHE_START_SEQ，
- *                              单 plane 与 multi-plane 共用——索引空间统一后两者同构）
- *   下标 OP_* 不连续（含 多 LUN 相位机 扩展 35..43），用设计初始化器定位。
+ *     - completion_all_cws   ：所有选中 CW 同状态；空掩码写 cw_status[0]。
+ *                              用于无 CW 概念（RESET/ID/STATUS/FEATURES/块锁/META 回读等）、
+ *                              编程/擦除、整页 cache 读、ISSUE/WAIT 段。
+ *     - completion_per_cw    ：逐 CW 独立状态（普通读 / OTP 读的随机取数链）。
+ *     - completion_load      ：加载型 op 成功不写状态，失败时刷满
+ *                              （WITHOUT_DATA_OUT 两种 + 多 LUN 相位机的 LOAD/WAIT）。
+ *   下标 OP_* 不连续（含多 LUN 相位机扩展 35..43），用设计初始化器定位。
  * -------------------------------------------------------------------- */
 const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_table[OP_COUNT] = {
-    [OP_RESET]                                  = completion_single,
-    [OP_READ_ID]                                = completion_single,
-    [OP_READ_PARAMETER_PAGE]                    = completion_single,
-    [OP_READ_UNIQUE_ID]                         = completion_single,
-    [OP_GET_FEATURES]                           = completion_single,
-    [OP_SET_FEATURES]                           = completion_single,
-    [OP_READ_STATUS]                            = completion_single,
-    [OP_READ_STATUS_ENHANCED]                   = completion_single,
+    [OP_RESET]                                  = completion_all_cws,
+    [OP_READ_ID]                                = completion_all_cws,
+    [OP_READ_PARAMETER_PAGE]                    = completion_all_cws,
+    [OP_READ_UNIQUE_ID]                         = completion_all_cws,
+    [OP_GET_FEATURES]                           = completion_all_cws,
+    [OP_SET_FEATURES]                           = completion_all_cws,
+    [OP_READ_STATUS]                            = completion_all_cws,
+    [OP_READ_STATUS_ENHANCED]                   = completion_all_cws,
     [OP_RANDOM_DATA_READ]                       = completion_per_cw,
     [OP_RANDOM_DATA_READ_MULTI_PLANE]           = completion_per_cw,
-    [OP_READ_ONFI_SIGNATURE]                    = completion_single,
-    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_single,
-    [OP_READ_META]                              = completion_single,
+    [OP_READ_ONFI_SIGNATURE]                    = completion_all_cws,
+    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_all_cws,
+    [OP_READ_META]                              = completion_all_cws,
     [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_per_cw,
     [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = completion_load,
-    [OP_READ_PAGE_CACHE_SEQ]                    = completion_per_cw,
-    [OP_READ_PAGE_CACHE_RANDOM]                 = completion_per_cw,
-    [OP_READ_PAGE_CACHE_LAST]                   = completion_per_cw,
+    /* 单 plane cache 读同样整页读入 page_buffer 后 scatter 到所有选中 CW；
+     * 完成状态必须覆盖整组 CW，不能只标最低位那一个。 */
+    [OP_READ_PAGE_CACHE_SEQ]                    = completion_all_cws,
+    [OP_READ_PAGE_CACHE_RANDOM]                 = completion_all_cws,
+    [OP_READ_PAGE_CACHE_LAST]                   = completion_all_cws,
     [OP_READ_PAGE_CACHE_START_SEQ]              = completion_all_cws,
     [OP_TWO_PLANE_PROGRAM_CACHE]                = completion_all_cws,
     [OP_TWO_PLANE_PROGRAM_CACHE_END]            = completion_all_cws,
@@ -1375,13 +1339,13 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_NORMAL_PROGRAM_PAGE]                    = completion_all_cws,
     [OP_PROGRAM_PAGE_CACHE]                     = completion_all_cws,
     [OP_ERASE_BLOCK]                            = completion_all_cws,
-    [OP_READ_FOR_INTERNAL_DATA_MOVE]            = completion_single,
-    [OP_BLOCK_UNLOCK_LOW]                       = completion_single,
-    [OP_BLOCK_UNLOCK_HIGH]                      = completion_single,
-    [OP_BLOCK_LOCK]                             = completion_single,
-    [OP_BLOCK_LOCK_TIGHT]                       = completion_single,
-    [OP_BLOCK_LOCK_STATUS]                      = completion_single,
-    [OP_OTP_DATA_LOCK]                          = completion_single,
+    [OP_READ_FOR_INTERNAL_DATA_MOVE]            = completion_all_cws,
+    [OP_BLOCK_UNLOCK_LOW]                       = completion_all_cws,
+    [OP_BLOCK_UNLOCK_HIGH]                      = completion_all_cws,
+    [OP_BLOCK_LOCK]                             = completion_all_cws,
+    [OP_BLOCK_LOCK_TIGHT]                       = completion_all_cws,
+    [OP_BLOCK_LOCK_STATUS]                      = completion_all_cws,
+    [OP_OTP_DATA_LOCK]                          = completion_all_cws,
     [OP_OTP_DATA_PROGRAM]                       = completion_all_cws,
     [OP_OTP_DATA_READ]                          = completion_per_cw,
     [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = completion_load,
@@ -1397,7 +1361,7 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_PROGRAM_PAGE_WAIT]                      = completion_all_cws,
     [OP_ERASE_BLOCK_ISSUE]                      = completion_all_cws,
     [OP_ERASE_BLOCK_WAIT]                       = completion_all_cws,
-    [OP_READ_COLUMN]                            = completion_single,
+    [OP_READ_COLUMN]                            = completion_all_cws,
 };
 
 /* --------------------------------------------------------------------

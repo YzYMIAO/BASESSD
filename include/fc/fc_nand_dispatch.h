@@ -41,7 +41,9 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
                                      * **字面位图**：0 = 空集（无 desc 的退化命令，合法；
                                      * 擦除即空集，CW0 位保持 0）。 */
     BYTE plane_count;               /* 0 = 单 plane；N = multi-plane（= command->config.multi_plane）。
-                                     * 当前只有 scatter 读它；multi-plane handler 按 PLANE_NUM 遍历。 */
+                                     * scatter 读它决定 plane 偏移；CW 取数链也读它选择
+                                     * OP_RANDOM_DATA_READ_MULTI_PLANE；multi-plane handler 仍按
+                                     * PLANE_NUM 遍历。 */
     BYTE plane;                     /* 本命令目标物理 plane 索引。
                                      * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
@@ -60,7 +62,7 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
                                      * FC 为命令 plane 集合内**每个** plane 填一条，即使该 plane
                                      * 一个 CW 都没选中（如只读 plane1）——多 plane op 的 uop 硬编码
                                      * row[0]/row[1]，空 plane 不填会退化成 block0/page0。
-                                     * 未使用的格为确定性零值（结构整体 {0} 初始化）。 */
+                                     * 未使用的格为确定性零值（生产者用 memset 初始化 request）。 */
     BYTE *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效；NULL = 该 CW 无数据。 */
 } fc_nand_dispatch_req_s;
 
@@ -71,7 +73,7 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
     BYTE          nand_status;                 /* OP 后读状态（FAIL/FAILC） */
     BYTE          pre_status;                  /* OP 前读状态（RDY/ARDY/WP） */
     BYTE          cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
-    BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
+    BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上；由 FC 数据路径解码后回填。 */
 } fc_nand_dispatch_comp_s;
 
 /* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
@@ -103,8 +105,10 @@ nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
  */
 nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count);
 
-/* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。 */
-typedef void (*fc_nand_dispatch_sink_fn_t)(const fc_nand_dispatch_comp_s *completion, void *ctx);
+/* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。
+ * completion 可写：FC 数据路径在回调内把实际 ECC 纠正数回填到 ecc_bit_count[]，
+ * 供完成消费者按 CW 读取；dispatch 本身不产生 ECC 计数。 */
+typedef void (*fc_nand_dispatch_sink_fn_t)(fc_nand_dispatch_comp_s *completion, void *ctx);
 
 /*
  * 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
@@ -115,7 +119,8 @@ BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
 
 /*
  * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- * 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界是调用者编程错误（断言）。
+ * 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界由上层填充循环在入口保证，
+ * 本函数不重复断言。
  */
 BYTE fc_nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun);
 

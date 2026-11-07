@@ -251,14 +251,15 @@ static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  *
  * @return FC_STATUS_OK / IO_ERROR（CQ 满强制 COMPLETED 防泄漏）。
  *
- * @note Step 1：把 nand_completion 的 per-CW status/ecc_bits 写回 desc。
+ * @note Step 1：把 nand_completion 的 per-CW status 写回 desc；ecc_bits 先采用完成项输入，
+ * page read 随后由数据路径的实际解码结果覆盖。
  * - Step 2：Page Read 命令做 data path（ECC 解码 + 条件解扰）。
- * - Step 3：组装完成项——page read 从 desc 读 ECC 解码后状态
- * （聚合 status + 前 4 CW ECC；失败坐标由 desc 链派生），
+ * - Step 3：组装完成项——page read 从 desc 聚合状态和实际 ECC 计数
+ * （失败坐标由 desc 链派生），并把 desc->ecc_bits 回填到 completion.ecc_bit_count[]；
  * 非 page read 直接透传 NAND 状态。
  * - CQ 满 → 强制 COMPLETED（数据路径已跑，CQ entry 丢失是 fatal）。
  */
-static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dispatch_comp_s *nand_completion)
+static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_comp_s *nand_completion)
 {
     fc_cmd_status_s cq_entry;
     fc_cmd_s       *cmd;
@@ -396,6 +397,9 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
                 // （flat 掩码读），不能拿链序 steps 直接当索引。
                 const BYTE flat_cw = fc_cw_flat(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
 
+                // ECC 纠正 bit 数的生产者是 FC 数据路径（Step 2 已写入 desc->ecc_bits）；
+                // 这里按同一 flat 下标回填完成项，NAND dispatch 不产生该字段。
+                nand_completion->ecc_bit_count[flat_cw] = desc->ecc_bits;
                 desc->status |= nand_completion->cw_status[flat_cw];
 
                 if ((desc->status & FC_CW_STATUS_FAIL) != 0U)
@@ -714,16 +718,34 @@ stripe_error:
  * @param cmd_id 失败命令。
  *
  * @note request 构建失败 / submit 失败共用；execution_status 用
- * NOT_READY 表示"未能提交"，cw_status[0] 置 FC_CW_STATUS_FAIL。
+ * NOT_READY 表示"未能提交"。失败位必须按命令实际的 flat CW 集合落位；
+ * 固定写 cw_status[0] 对 plane1 / CW>0 的命令会被完成回填静默丢弃。
  */
 static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
     fc_nand_dispatch_comp_s fail_comp;
+    const DWORD             cw_bitmap = fc_get_cmd_cw_bitmap(cmd_id);
 
     memset(&fail_comp, 0, sizeof(fail_comp));
     fail_comp.cmd_id           = cmd_id;
     fail_comp.execution_status = NAND_RESULT_NOT_READY;
-    fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
+
+    if (cw_bitmap == 0U)
+    {
+        // 无 desc 的命令没有 per-CW 坐标；保留一个命令级失败落点。
+        fail_comp.cw_status[0] = FC_CW_STATUS_FAIL;
+    }
+    else
+    {
+        for (BYTE n = 0U; n < CW_TOTAL_MAX; n++)
+        {
+            if ((cw_bitmap & (1UL << n)) != 0U)
+            {
+                fail_comp.cw_status[n] = FC_CW_STATUS_FAIL;
+            }
+        }
+    }
+
     if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
     {
         controller->fatal = true;
@@ -1444,7 +1466,7 @@ static fc_status_e fc_poll_fill(fc_ctl_s *controller)
  * @note 每条完成当场消费（写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），
  * 不跨条缓存；fc_complete_from_nand 返回非 OK 时置 controller->fatal。
  */
-static void fc_nand_completion_sink(const fc_nand_dispatch_comp_s *nand_completion, void *ctx)
+static void fc_nand_completion_sink(fc_nand_dispatch_comp_s *nand_completion, void *ctx)
 {
     fc_ctl_s *controller = (fc_ctl_s *)ctx;
 

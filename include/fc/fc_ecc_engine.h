@@ -17,11 +17,11 @@
  *
  * CW 布局：[META:4][CRC:4][USER:512][PARITY:8] = 528B
  *
- * 运行时 ldpc 位域：
- *   ldpc=0 → BCH
- *   ldpc=1 → LDPC hard
- *   ldpc=2 → LDPC soft（stub）
- *   ldpc=3 → LDPC raw（stub）
+ * 运行时 ldpc 位域（命令配置）：
+ *   ldpc=0 → normal（当前编译引擎按 FC_ECC_ALGO 选择；本仓默认 BCH）
+ *   ldpc=1 → LDPC hard（未完整支持）
+ *   ldpc=2 → LDPC soft（未完整支持）
+ *   ldpc=3 → raw（跳过 ECC 解码）
  */
 #define FC_ECC_ALGO_BCH  (0U)
 #define FC_ECC_ALGO_LDPC (1U)

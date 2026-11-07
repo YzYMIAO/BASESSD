@@ -385,7 +385,7 @@ static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req,
         cmd->config.cw_count    = CW_NUM - 1U;
         cmd->config.crc         = FC_CRC_ENABLE;
         cmd->config.random      = FC_RANDOM_ENABLE;
-        cmd->config.ldpc        = FC_ECC_MODE_BCH;
+        cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
         // 整条 run 是一条 FC chain：只有末条 END。FC 据此在跨填充轮次续批时
         // 锁住该 LUN，另一队列（HSQ/SQ）的命令回推，序列不会被劈开。
         cmd->config.chain       = (i + 1U < b->n_pairs) ? FC_CHAIN_MORE : ((end_seq == true) ? FC_CHAIN_END : FC_CHAIN_MORE);

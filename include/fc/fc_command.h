@@ -55,10 +55,10 @@ _Static_assert(CW_TOTAL_MAX < 32U, "flat CW bitmap must fit a DWORD shift");
 /* ECC 解码模式（配置写入 fc_cmd_cfg_s.ldpc） */
 typedef enum FC_ECC_MODE_E
 {
-    FC_ECC_MODE_BCH       = 0U, /* BCH encode/decode */
-    FC_ECC_MODE_LDPC_HARD = 1U, /* LDPC hard-decision */
-    FC_ECC_MODE_LDPC_SOFT = 2U, /* LDPC soft-decision */
-    FC_ECC_MODE_LDPC_RAW  = 3U, /* LDPC raw (no decode) */
+    FC_ECC_MODE_NORMAL    = 0U, /* 正常纠错；当前编译引擎为 BCH */
+    FC_ECC_MODE_LDPC_HARD = 1U, /* LDPC hard-decision；未完整支持 */
+    FC_ECC_MODE_LDPC_SOFT = 2U, /* LDPC soft-decision；未完整支持 */
+    FC_ECC_MODE_LDPC_RAW  = 3U, /* raw，跳过 ECC 解码 */
 } fc_ecc_mode_e;
 
 /* RAID 模式（配置写入 fc_cmd_cfg_s.raid） */
@@ -434,9 +434,10 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
  * @param cmd FC 命令。
  *
  * @note 实现要点（整函数转 ASSERT）：
- *   - 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——全是
- *     **调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的
+ *   - 前置违反——operation ≥ OP_COUNT / 数据操作无 desc 链——全是**调用者 bug**：
+ *     `operation` 全仓都是 FTL 的硬编码常量（见 ftl_fc_interface.c 的
  *     sync_page_prepare 实参），**从不是 host 输入**；release 下断言裁空，由调用链保证。
+ *     `cmd` 指针非空同样由调用者保证（本函数不重复守）。
  *   - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要 buffer；
  *     data_input_cycles>0 只是其子集。
  *   - **不校验 CW 集合**（集合不在命令里）：它是 FTL 的建链输入，FC 只认 desc 链

@@ -51,10 +51,10 @@
 #include <string.h>
 
 // 页级原语的两种常量配置（文件作用域初始化器，H47 允许；局部一律逐字段赋值）。
-static const ftl_page_cfg_s s_page_cfg_raw   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
-static const ftl_page_cfg_s s_page_cfg_bch   = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+static const ftl_page_cfg_s s_page_cfg_raw    = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
+static const ftl_page_cfg_s s_page_cfg_normal = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_NORMAL, 0U};
 // 判空专用：ECC 开（空/非空要靠它）、CRC/加扰/META 比对全关（与页面内容无关）。
-static const ftl_page_cfg_s s_page_cfg_blank = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN};
+static const ftl_page_cfg_s s_page_cfg_blank  = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_NORMAL, FTL_LBA_UNKNOWN};
 
 // 短页（< PAGE_MAIN_SIZE，如 BBT header 540 B）的补齐缓冲。单线程 superloop；
 // 数据在 ftl_async_write_page_mirror 返回前已拷进 FC buffer，调用者无需持有。
@@ -885,7 +885,7 @@ BOOL ftl_page_is_blank(DWORD pba)
  */
 ftl_status_e ftl_sync_erase_block(DWORD pba)
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
 
     fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK, cfg);
     if (cmd == NULL)
@@ -918,7 +918,7 @@ ftl_status_e ftl_sync_erase_block(DWORD pba)
  */
 ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
 
     fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_ERASE_BLOCK_MULTI_PLANE, cfg);
     if (cmd == NULL)
@@ -953,7 +953,7 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
  */
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
 
     // 列 + 4 须落在页内：唯一调用者 bbt.c 传 PAGE_MAIN_SIZE（+4 ≤ PAGE_SIZE）⇒ 不重复校验。
 
@@ -1272,7 +1272,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
  */
 ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
 
     fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK, cfg);
     if (cmd == NULL)
@@ -1301,7 +1301,7 @@ ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
  */
 ftl_status_e ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_bch;
+    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
 
     fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, cfg);
     if (cmd == NULL)
@@ -1374,7 +1374,7 @@ ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE l
     cmd->config.operation   = OP_SET_FEATURES;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->meta               = 0U;

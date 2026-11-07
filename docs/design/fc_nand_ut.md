@@ -139,7 +139,7 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 |---|---|---|
 | `random` | `FC_RANDOM_ENABLE(0)` / `FC_RANDOM_DISABLE(1)` | 是否加扰/解扰 |
 | `crc` | `FC_CRC_ENABLE(0)` / `FC_CRC_DISABLE(1)` | encode 是否写 CRC 字段、读侧 步骤 3 是否校验 |
-| `ldpc` | `FC_ECC_MODE_BCH(0)` / `FC_ECC_MODE_LDPC_RAW(3)` | LDPC_RAW 时两端都跳过 ECC |
+| `ldpc` | `FC_ECC_MODE_NORMAL(0)` / `FC_ECC_MODE_LDPC_RAW(3)` | LDPC_RAW 时两端都跳过 ECC |
 | `multi_plane` + `cw_bitmap` | `0` + 单 plane 段位图 / `2` + 双 plane 段位图 | desc 链的 CW 集合与几何（v27：位图是**字面**的，0 = 空集，整段须显式给；v28：位图作 `ftl_cmd_configure_descriptors()` 的**实参**，不再是命令字段） |
 | `cw` | 0 (1CW) / 3 (4CW) | desc 链长度，多 CW 边界 |
 | ECC 结果 | 全部成功 / 有 UNC | process_read 是否走解扰 |

@@ -2597,7 +2597,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     cmd->config.cw_count    = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     // 本命令的**窗口基址**（扇区 LBA，低 3 位清零）：FC 侧 desc->meta =

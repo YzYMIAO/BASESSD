@@ -71,7 +71,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     cmd->config.cw_count    = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;

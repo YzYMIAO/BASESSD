@@ -271,7 +271,10 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
                 return NAND_RESULT_TIMEOUT;
             }
 
-            /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读） */
+            /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读）。
+             * operand 是静态 UOP 表的回跳距离；超过当前游标会让 WORD 下溢并越界读表，
+             * 这里由引擎自己守，不能依赖上层（上层只保证 uops 表非空）。 */
+            ASSERT(uop->operand <= state->uop_index);
             state->uop_index -= uop->operand;
             return NAND_RESULT_NOT_READY;
         }

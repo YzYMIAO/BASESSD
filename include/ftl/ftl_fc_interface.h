@@ -472,7 +472,7 @@ typedef struct FTL_PAGE_CONFIGURATION_S
 {
     BYTE  crc;    /* FC_CRC_ENABLE / FC_CRC_DISABLE */
     BYTE  random; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE */
-    BYTE  ldpc;   /* FC_ECC_MODE_BCH / FC_ECC_MODE_LDPC_RAW */
+    BYTE  ldpc;   /* FC_ECC_MODE_NORMAL / FC_ECC_MODE_LDPC_RAW；0 = normal，不是“BCH 模式” */
     DWORD lba;    /* META 源：**页** LBA（建链时 << CW_WIDTH 成扇区 LBA）；元数据页传 0 */
 } ftl_page_cfg_s;
 
@@ -481,14 +481,14 @@ typedef struct FTL_PAGE_CONFIGURATION_S
  * 故 0xFFFFFFFF 不可能是一个真实页 LBA。 */
 #define FTL_LBA_UNKNOWN (0xFFFFFFFFUL)
 
-#define FTL_PAGE_CFG_META()    (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U})
-#define FTL_PAGE_CFG_DATA(lba) (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (lba)})
+#define FTL_PAGE_CFG_META()    (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_NORMAL, 0U})
+#define FTL_PAGE_CFG_DATA(lba) (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_NORMAL, (lba)})
 /* 数据页但**页 LBA 未知**（Read Recovery 的邻近页辅助读）：CRC/加扰照常开，但命令的
  * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
  * plane/cw 三位自洽校验（见 fc_data_path_meta_check）。
  * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(0) 代替：那是"本页 LBA 就是 0"，
  *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 META_ERROR（若忽略错误位会看不出来）。 */
-#define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, FTL_LBA_UNKNOWN})
+#define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_s){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_NORMAL, FTL_LBA_UNKNOWN})
 
 /**
  * @brief 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。
