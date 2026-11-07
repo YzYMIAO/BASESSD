@@ -350,7 +350,9 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
         // FAILC 只在 cache program 的**中间页/末页**有意义；首页(49h)与非 cache op
         // 的状态字节里 bit1 可能是上一批残留，不能映射（与 CHECK_FAIL_CACHE 的
         // 分 op 判据一致：FIRST 只查 FAIL）。
-        const BOOL failc_valid = (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE) || (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
+        // 单 plane cache 没有独立 FIRST 变体；该 op 已改为 CHECK_FAIL_CACHE，
+        // 故这里同步映射 FAILC，调用者负责保证首页没有上一批残留。
+        const BOOL failc_valid = (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE) || (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE_END) || (cmd->config.operation == OP_PROGRAM_PAGE_CACHE);
 
         if ((post_is_70h == true) && (failc_valid == true) && ((post_status & NAND_STATUS_FAILC) != 0U))
         {

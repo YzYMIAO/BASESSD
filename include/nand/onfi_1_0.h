@@ -15,7 +15,7 @@
  *   - ONFI 参数页结构 / 解码声明
  *   - 多 LUN 相位机 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
  *
- * 与 fc_nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 fc_onfi_1_0.c），
+ * 与 fc_nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 onfi_1_0.c），
  * 由 FC 的 UOP 引擎解释执行；本头保留为 NAND 协议定义，供 FC/器件共同使用。
  */
 
@@ -309,7 +309,10 @@
 
 /* OP_PROGRAM_PAGE_CACHE
  * ----------------------------------------------------------------------------------------------
- * < 80 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din1 >-< Dinn >-< 15 >
+ * < 70 >-< Status >-< 80 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din1 >-< Dinn >-< 15 >-tWB->-tCBSY->-< 70 >-< Status >
+ *
+ * 单 plane cache 编程；15h 只表示当前页进入 cache/阵列，上一页 cache 结果在 FAILC。
+ * 本 op 没有独立 FIRST 变体：中间页查 FAIL|FAILC，首页调用者必须保证 FAILC 不是上一批残留。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_PROGRAM_PAGE_CACHE (17U)
@@ -543,7 +546,8 @@ typedef struct NAND_OPERATION_MAP_S
     BYTE              pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
     WORD              min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
     const nand_uop_s *uops;                          /* UOP 序列（onfi_1_0.c 定义） */
-    nand_op_timing_s  timing;                        /* 操作时序参数（twb/trst/twh/busy_timeout） */
+    nand_op_timing_s  timing;                        /* twb/twh/tadl 由 NAND_UOP_DELAY_TIMING 消费；
+                                                      * busy_timeout 供引擎/FMC 忙等超时 */
 } nand_op_map_s;
 
 /* OP_* 可直接作为下标访问，不需要命令表扫描或操作码解析。 */

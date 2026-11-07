@@ -37,7 +37,7 @@ typedef enum NAND_RESULT_E
  *   DATA_OUT_STATUS   → 不使用（直读 DQ）
  *   JUMP_IF_NOT_READY → 回跳步数（NAND busy 时回跳重新执行 70h 轮询）
  *   CHECK_FAIL        → 不使用（检查上一步读到的状态字节）
- *   DELAY_US          → 延时微秒数
+ *   DELAY_TIMING      → timing 字段选择（NAND_TIMING_TWB/TWH/TADL）
  *   WAIT_READY        → 不使用（等待 RB#）
  */
 typedef enum NAND_UOP_TYPE_E
@@ -55,10 +55,19 @@ typedef enum NAND_UOP_TYPE_E
     NAND_UOP_JUMP_IF_NOT_READY, /* 条件跳转：busy 则回跳 operand 步 */
     NAND_UOP_CHECK_FAIL,        /* 检查状态字节 FAIL 位 */
     NAND_UOP_CHECK_FAIL_CACHE,  /* 检查 FAIL + FAILC（cache program 当前/上一页） */
-    NAND_UOP_DELAY_US,          /* 固定微秒延时，operand=延时微秒数 */
+    NAND_UOP_DELAY_TIMING,      /* 按当前 op 的 timing 表延时，operand=NAND_TIMING_* */
     NAND_UOP_END,               /* 序列结束 */
     NAND_UOP_COUNT,             /* 枚举数量（数组长度用） */
 } nand_uop_type_e;
+
+/* NAND_UOP_DELAY_TIMING 的字段选择器；时序值来自当前 op 的 nand_op_timing_s。 */
+typedef enum NAND_TIMING_FIELD_E
+{
+    NAND_TIMING_TWB = 0U, /* 命令/确认后到 R/B# 拉低 */
+    NAND_TIMING_TWH,      /* 70h/78h 后到状态字节有效 */
+    NAND_TIMING_TADL,     /* 11h 切换 plane 后的地址锁存延时 */
+    NAND_TIMING_FIELD_COUNT,
+} nand_timing_field_e;
 
 /* 单条微指令：类型 + 参数 */
 typedef struct NAND_UOP_S
@@ -87,12 +96,13 @@ typedef struct NAND_COMMAND_COMPLETION_S
     nand_result_e execution_status;
 } nand_cmd_comp_s;
 
-/* 操作时序参数：busy_timeout_us 供引擎和 PHY handler 共用超时 */
+/* 操作时序参数：twb/twh/tadl 由 NAND_UOP_DELAY_TIMING 消费；
+ * busy_timeout_us 供引擎/FMC 忙等超时使用。 */
 typedef struct NAND_OPERATION_TIMING_S
 {
     WORD twb_us;
-    WORD trst_us;
     WORD twh_us;
+    WORD tadl_us;
     WORD busy_timeout_us;
 } nand_op_timing_s;
 

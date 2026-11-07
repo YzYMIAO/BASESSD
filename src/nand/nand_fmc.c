@@ -82,7 +82,8 @@ nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *confi
 /**
  * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
  *
- * tWB 已由上游 DELAY_US 保证，此处只做纯 spin-wait；首读即 HIGH 视为 ready。
+ * tWB 已由上游 NAND_UOP_DELAY_TIMING/NAND_TIMING_TWB 保证，此处只做纯 spin-wait；
+ * 首读即 HIGH 视为 ready。
  *
  * @param timing 取其 busy_timeout_us 作超时（轮询计次兼作微秒）
  * @return NAND_RESULT_OK / NAND_RESULT_TIMEOUT
@@ -96,7 +97,7 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *u
     (void)completion;
 
     /*
-     * RB# GPIO 轮询：NAND 已由前面的 DELAY_US 保证过 tWB 窗口，
+     * RB# GPIO 轮询：NAND 已由前面的 DELAY_TIMING 保证过 tWB 窗口，
      * handler 不再包含 tWB 保护，仅做纯 spin-wait。
      *
      * 如果第一次读到 RB#=HIGH，说明 NAND 已经 ready 或根本没 busy，
@@ -382,18 +383,44 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
 }
 
 /**
- * @brief 固定微秒延时（DELAY_US，用于 tWB / tWHR 等 ONFI 时序）
+ * @brief 按当前 op 的 timing 表执行固定微秒延时
  *
- * @param uop operand 即延时微秒数
- * @return 恒 NAND_RESULT_OK
+ * `operand` 是 `nand_timing_field_e`，不是微秒数；实际值来自
+ * `g_nand_operation_map[request->operation].timing`，由引擎把该表的指针传入。
+ *
+ * @param uop operand = NAND_TIMING_TWB / TWH / TADL
+ * @param timing 当前操作的时序表
+ * @return NAND_RESULT_OK / NAND_RESULT_INVALID_ARGUMENT（字段越界）
  */
-static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
+static nand_result_e nand_fmc_exec_delay_timing(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
+    WORD delay_us_value;
+
     (void)context;
     (void)request;
-    (void)timing;
     (void)completion;
-    delay_us(uop->operand);
+
+    ASSERT(timing != NULL);
+    ASSERT(uop->operand < NAND_TIMING_FIELD_COUNT);
+
+    switch ((nand_timing_field_e)uop->operand)
+    {
+        case NAND_TIMING_TWB:
+            delay_us_value = timing->twb_us;
+            break;
+        case NAND_TIMING_TWH:
+            delay_us_value = timing->twh_us;
+            break;
+        case NAND_TIMING_TADL:
+            delay_us_value = timing->tadl_us;
+            break;
+        default:
+            ASSERT_DEFAULT(nand_timing_field_e);
+            return NAND_RESULT_INVALID_ARGUMENT;
+    }
+
+    ASSERT(delay_us_value != 0U);
+    delay_us(delay_us_value);
     return NAND_RESULT_OK;
 }
 
@@ -415,5 +442,5 @@ static const nand_uop_handler_fn_t g_nand_fmc_handlers[NAND_UOP_COUNT] = {
     [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
     [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
     [NAND_UOP_CHECK_FAIL_CACHE]  = nand_fmc_exec_check_fail_cache,
-    [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
+    [NAND_UOP_DELAY_TIMING]      = nand_fmc_exec_delay_timing,
 };
