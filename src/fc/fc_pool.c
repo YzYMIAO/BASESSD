@@ -28,7 +28,6 @@
 #include "fc_internal.h"
 #include "ssd_compiler.h"
 
-#include <stdint.h>
 #include <string.h>
 
 /* ── 三池本体 ──
@@ -45,9 +44,6 @@ static fc_desc_id_t       g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
 static fc_buf_id_t        g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
 static fc_buf_state_e     g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 static fc_cmd_id_t        g_fc_buffer_owner[FC_BUFFER_POOL_DEPTH];
-
-/* 指针 → 池索引的安全区间检查（fc_command_to_id 的唯一边界实现）：
- * 用整数区间判断，池外指针（如栈上命令）不会触发指针相减 UB。 */
 
 /**
  * @brief 初始化三池本体、簿记数组与空闲链表（不碰队列/调度器/硬件）
@@ -561,17 +557,12 @@ static void fc_pool_chain_append(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_de
 /**
  * @brief 分配命令槽位（清零 + desc_id=INVALID + 写入槽位号）
  *
- * @param cmd_id 出参：新命令的池槽位号；失败时写 FC_CMD_ID_INVALID。
- *
  * @return 命令指针；NULL = 命令池空
  */
-fc_cmd_s *fc_command_alloc(fc_cmd_id_t *cmd_id)
+fc_cmd_s *fc_command_alloc(void)
 {
     fc_ctl_s   *controller = &g_fc_controller;
     fc_cmd_id_t index;
-
-    ASSERT(cmd_id != NULL);
-    *cmd_id = FC_CMD_ID_INVALID;
 
     index = controller->command_free_head;
     if (index == FC_CMD_ID_INVALID)
@@ -590,7 +581,6 @@ fc_cmd_s *fc_command_alloc(fc_cmd_id_t *cmd_id)
         controller->command_high = controller->command_used;
     }
 
-    *cmd_id = index;
     return &controller->command_pool[index];
 }
 
@@ -707,13 +697,12 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_id_t cmd_id, BYTE
     // 行地址取自实参 row_paa（每 plane 独立，Policy B 两 plane 可不同块）。
     // desc->meta —— LBA 空间：plane/cw 低 3 位相邻（PLANE_CW_MASK 有效），
     // 高位取自 cmd->meta（本命令扇区 LBA）。
-    plane_cw                    = (plane << PLANE_CW_SHIFT) | cw;
-    descriptor->paa             = paa_with_cw(paa_with_plane(row_paa, plane), cw);
-    descriptor->config          = cmd->config;
-    descriptor->config.cw_count = 0U; /* 命令级每-plane 数量，desc 内无意义 */
-    descriptor->cw_index        = cw;
-    descriptor->next_id         = FC_DESC_ID_INVALID;
-    descriptor->meta            = (cmd->meta & ~PLANE_CW_MASK) | plane_cw;
+    plane_cw             = (plane << PLANE_CW_SHIFT) | cw;
+    descriptor->paa      = paa_with_cw(paa_with_plane(row_paa, plane), cw);
+    descriptor->config   = cmd->config; /* 命令级配置副本；错误恢复时原样回填 */
+    descriptor->cw_index = cw;
+    descriptor->next_id  = FC_DESC_ID_INVALID;
+    descriptor->meta     = (cmd->meta & ~PLANE_CW_MASK) | plane_cw;
 
     fc_pool_chain_append(&g_fc_controller, cmd_id, descriptor); /* 出池即挂链 */
 
@@ -1012,59 +1001,6 @@ BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id)
 }
 
 /* ── ID / 指针转换 ── */
-
-/**
- * @brief 命令指针 → 池索引（带 controller 参数；区间检查的唯一实现）
- *
- * @param controller FC 控制器。
- * @param cmd    待检查的指针（可来自池外）。
- * @param cmd_id 输出：池内索引。
- *
- * @return true 在池内且对齐；false 否则。
- *
- * @note 用整数区间判断，池外指针（如栈上命令）不会触发指针相减 UB。
- */
-static BOOL fc_pool_command_to_id(const fc_ctl_s *controller, const fc_cmd_s *cmd, fc_cmd_id_t *cmd_id)
-{
-    ASSERT(controller != NULL);
-    ASSERT(cmd != NULL);
-    ASSERT(cmd_id != NULL);
-
-    const uintptr_t base = (uintptr_t)controller->command_pool;
-    const uintptr_t addr = (uintptr_t)cmd;
-    const uintptr_t end  = base + (sizeof(fc_cmd_s) * FC_COMMAND_POOL_DEPTH);
-
-    if ((addr < base) || (addr >= end) ||
-        (((addr - base) % sizeof(fc_cmd_s)) != 0U))
-    {
-        return false;
-    }
-
-    const fc_cmd_id_t index = (fc_cmd_id_t)((addr - base) / sizeof(fc_cmd_s));
-
-    // 字段与槽位地址必须一致；不一致说明生命周期写点漏了 memset 后的恢复。
-    // release 也必须拒绝，不能把漂移的 ID 写进状态机/队列。
-    if (cmd->cmd_id != index)
-    {
-        return false;
-    }
-
-    *cmd_id = index;
-    return true;
-}
-
-/**
- * @brief 命令指针 → 池索引（单例入口）
- *
- * @param cmd    命令指针。
- * @param cmd_id 输出：池索引。
- *
- * @return true 在池内；false 不在池内（如栈上命令）。
- */
-BOOL fc_command_to_id(const fc_cmd_s *cmd, fc_cmd_id_t *cmd_id)
-{
-    return fc_pool_command_to_id(&g_fc_controller, cmd, cmd_id);
-}
 
 /**
  * @brief 命令 ID → 命令指针

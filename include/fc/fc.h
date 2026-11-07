@@ -12,7 +12,7 @@
  *   - Buffer Pool（FC_BUFFER_POOL_DEPTH）：CW 数据缓冲
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_alloc() → 填 config/参数；句柄取 cmd->cmd_id → 逐条
  *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
  *   → fc_submit(cmd_id) → fc_service()（后台推进）→ fc_poll_completion() 取完成
@@ -35,9 +35,8 @@
  *   ③ buffer 访问 fc_buffer_alloc / release / get_user_data / get_base / get_meta
  *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_cw_bitmap /
  *                  fc_get_cmd_ecc_max / fc_get_cmd_all_cw_empty
- *   ⑤ 查询工具    fc_command_id_to_command / fc_command_to_id /
- *                  fc_descriptor_id_to_descriptor / fc_get_resource_stats /
- *                  fc_debug_state_get
+ *   ⑤ 查询工具    fc_command_id_to_command / fc_descriptor_id_to_descriptor /
+ *                  fc_get_resource_stats / fc_debug_state_get
  *   ⑥ 服务入口    fc_service
  */
 

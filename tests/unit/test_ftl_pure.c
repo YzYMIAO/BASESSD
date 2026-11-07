@@ -2525,11 +2525,9 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
 
     ftl_ut_trace_begin();
 
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
 
     munit_assert_not_null(cmd);
-    (void)cmd_id;
 
     const DWORD pba  = pba_make(0U, 0U, 0U, 5U, 0U, 1U, 0U);
     const DWORD page = 4000U; /* CW_NUM 对齐 */

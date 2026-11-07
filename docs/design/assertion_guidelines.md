@@ -158,7 +158,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 | 文件 | 转换点 |
 |---|---|
-| `fc_interface.c` | `fc_command_to_id` 两处 NULL（入参/出参前置条件，调用者已判）、`fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
+| `fc_interface.c` | `fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
 | `fc.c` | `fc_stripe_release_parity` 的 `parity_id` 越界、完成路径 `completed_id` 的冗余范围检查（`fc_complete_from_nand` 已断言） |
 
 顶层生命周期入口（`fc_command_configure_descriptor`/`fc_submit`/`fc_command_release`，v13 前第一项为 `fc_command_configure_descriptors`，v13~v16 为 `fc_command_attach_cw`）的句柄校验**保留返回码**（有文档契约），理由见 §七。
@@ -321,7 +321,7 @@ v17 后该机制体即 `fc_command_configure_descriptor`，见 §十一附 2）�
 | 守卫 | 改动前 | 改动后 |
 |---|---|---|
 | `command != NULL` | `ASSERT` | 不变 |
-| 指针身份（`fc_command_to_id`）/ 生命周期（`ALLOCATED`） | `return INVALID_ARGUMENT` | **`ASSERT`** |
+| 指针身份（命令对象由 `cmd_id` 表征）/ 生命周期（`ALLOCATED`） | `return INVALID_ARGUMENT` | **`ASSERT`** |
 | plane 段 / CW 范围 | `return INVALID_ARGUMENT` | **`ASSERT`** |
 | 重复 n（`fc_command_cw_attached`） | `ASSERT` | 不变 |
 | `paa_to_plane(row_paa) == plane` | `ASSERT` | 不变 |

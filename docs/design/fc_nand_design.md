@@ -552,7 +552,6 @@ FC_STATUS_RESOURCE_EMPTY   =  7    ← 状态类
 void          fc_init(void);                           // 初始化所有资源池和队列（无失败路径）
 fc_cmd_s *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
 fc_cmd_s *fc_command_id_to_command(uint16_t id);    // ID→指针转换
-uint8_t       fc_command_to_id(const fc_cmd_s *, fc_cmd_id_t *); // 指针→ID（逆转换；返回 0=指针不在池内，如栈上的 fc_cmd_s）
 fc_desc_s *fc_descriptor_id_to_descriptor(uint16_t id);
 fc_status_t   fc_command_configure_descriptor(fc_cmd_s *cmd, uint8_t plane, uint8_t cw, DWORD row_paa); // 逐条追加一个 CW 到链尾（**建链的唯一入口**，v17 由三层收敛而来；行地址由调用者按 plane 给出）
 fc_desc_id_t fc_descriptor_release_head(fc_desc_id_t desc_id); // 释放链头一个 desc+buffer，返回新链头
@@ -5150,7 +5149,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | `fc_get_cmd_data_ptr` | 读第 n 条描述符取缓冲地址 | 保留 |
 | `fc_get_cmd_cw_bitmap` | 读描述符链（v13 新增，仅供 RAID 断言；v13~v26 名 `fc_get_cmd_cw_mask`） | 保留 |
 | `fc_get_cmd_ecc_max` | 完成聚合寄存器（ECC 纠错计数） | 保留 |
-| `fc_command_id_to_command` / `fc_command_to_id` / `fc_descriptor_id_to_descriptor` | ID↔指针（软件模拟必需；ID 由指针派生，见 §2.2） | 保留 |
+| `fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` | ID→指针（软件模拟必需；命令 ID 由 `fc_cmd_s.cmd_id` 携带） | 保留 |
 | `fc_get_resource_stats` | 状态寄存器 | 保留 |
 | ~~`fc_command_configure_descriptors`~~ | **无此寄存器**（描述符链是固件填的） | **v13 上移 FTL** |
 | ~~`fc_write_cmd_data` / `fc_read_cmd_data`~~ | **无此寄存器**（数据是固件 DMA 搬的） | **v13 上移 FTL** |

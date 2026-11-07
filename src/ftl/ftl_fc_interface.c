@@ -645,15 +645,12 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
  */
 static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
 
     if (cmd == NULL)
     {
         return NULL;
     }
-
-    (void)cmd_id; /* 本 helper 只返回命令对象；调用方通过 cmd->cmd_id 取句柄 */
 
     cmd->config.operation   = operation;
     cmd->config.crc         = cfg->crc;
@@ -969,12 +966,8 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
         return FTL_ERROR;
     }
 
-    // 列地址走命令级 param 的字节 0/1（小端）——FC 侧解出后落进 request->column。
-    // 字节 2/3 本 op 不用，显式清 0 保持 param 确定性。
-    cmd->param.parameter0 = column;
-    cmd->param.parameter1 = (column >> 8U);
-    cmd->param.parameter2 = 0U;
-    cmd->param.parameter3 = 0U;
+    // 列地址占 param 低 16 bit（小端）；高 16 bit 为 0。
+    cmd->param.value = column;
 
     fc_cmd_status_s completion;
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
@@ -1369,14 +1362,11 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
  */
 ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
-
-    (void)cmd_id; /* 本函数只交出命令对象；句柄由调用方从 cmd->cmd_id 取 */
 
     cmd->ch                 = ch;
     cmd->ce                 = ce;
@@ -1389,10 +1379,7 @@ ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE l
     cmd->config.chain       = FC_CHAIN_END;
     cmd->meta               = 0U;
     cmd->feature_addr       = feature_addr;
-    cmd->param.parameter0   = mode;
-    cmd->param.parameter1   = 0U;
-    cmd->param.parameter2   = 0U;
-    cmd->param.parameter3   = 0U;
+    cmd->param.value        = mode; /* 内联数据低字节；高 24 bit 为 0 */
 
     *out_cmd = cmd;
     return FTL_OK;

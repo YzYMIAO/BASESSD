@@ -858,14 +858,11 @@ static void l3_prio_drain(void)
 
             for (uint8_t j = 0U; j < g_l3_prio_used; j++)
             {
-                fc_cmd_id_t id = FC_CMD_ID_INVALID;
-
                 if (g_l3_prio_slots[j].cmd == NULL)
                 {
                     continue;
                 }
-                munit_assert_uint32(fc_command_to_id(g_l3_prio_slots[j].cmd, &id), ==, 1U);
-                if (id == completion.cmd_id)
+                if (g_l3_prio_slots[j].cmd->cmd_id == completion.cmd_id)
                 {
                     if (g_l3_prio_slots[j].is_get != 0U)
                     {
@@ -1788,13 +1785,11 @@ static l3_stress_slot_s *l3_stress_slot_find(uint16_t cmd_id)
 {
     for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
     {
-        fc_cmd_id_t id = FC_CMD_ID_INVALID;
-
         if (g_l3_stress_slots[i].cmd == NULL)
         {
             continue;
         }
-        if ((fc_command_to_id(g_l3_stress_slots[i].cmd, &id) != 0U) && ((uint16_t)id == cmd_id))
+        if (g_l3_stress_slots[i].cmd->cmd_id == cmd_id)
         {
             return &g_l3_stress_slots[i];
         }
@@ -2001,17 +1996,15 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
 
 static MunitResult test_block_lock_tight(const MunitParameter params[], void *data)
 {
-    fc_cmd_s   *cmd;
-    fc_cmd_id_t cmd_id;
-    uint8_t     page;
+    fc_cmd_s *cmd;
+    uint8_t   page;
 
     (void)params;
     (void)data;
 
     /* Phase 1: 执行 BLOCK_LOCK_TIGHT -- 永久锁定整片 NAND */
-    cmd = fc_command_alloc(&cmd_id);
+    cmd = fc_command_alloc();
     munit_assert_not_null(cmd);
-    (void)cmd_id;
     cmd->config.operation = OP_BLOCK_LOCK_TIGHT;
     cmd->ch        = 0U;
     cmd->ce        = 0U;
@@ -2113,12 +2106,10 @@ static uint16_t l3_buf_used(void)
  *   buf_own = FC 申请那条路）。此处照 test_cmd_try_build 的样子手工建。 */
 static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, uint8_t buf_own)
 {
-    fc_cmd_id_t  cmd_id;
-    fc_cmd_s    *cmd  = fc_command_alloc(&cmd_id);
+    fc_cmd_s    *cmd  = fc_command_alloc();
     fc_cmd_cfg_s conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
 
     munit_assert_not_null(cmd);
-    (void)cmd_id;
 
     conf.buf_own = (DWORD)buf_own;
     cmd->config  = conf;

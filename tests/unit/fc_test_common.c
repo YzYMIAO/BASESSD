@@ -203,8 +203,8 @@ fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd)
 
     munit_assert_uint32(completed, ==, 1U);
 
-    /* cmd 无缓存 id（v15 起由指针派生）；completion 里的是建链时算好的快照。 */
-    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
+    /* 命令 ID 由命令对象携带；completion 里的是建链时算好的快照。 */
+    expect_id = cmd->cmd_id;
     munit_assert_uint32(completion.cmd_id, ==, expect_id);
 
     return completion;
@@ -320,9 +320,8 @@ uint8_t *test_cw_scratch(uint8_t idx)
  * 配置错误（坐标越界 / 掩码漏 plane）仍是 ASSERT：那是调用者 bug，不是资源问题。 */
 fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config)
 {
-    fc_cmd_s   *cmd;
-    fc_cmd_id_t cmd_id;
-    uint8_t     is_multi;
+    fc_cmd_s *cmd;
+    uint8_t   is_multi;
 
     ASSERT(addr != NULL);
     ASSERT(config != NULL);
@@ -349,12 +348,11 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32
         }
     }
 
-    cmd = fc_command_alloc(&cmd_id);
+    cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return NULL; /* 命令池空 */
     }
-    (void)cmd_id;
 
     /* 照 ftl_cmd_setup_ppa 的口径：地址信息既进 paa，也镜像进 ch/ce/lun。
      * v47：FTL 侧边界会 pba_to_paa 后赋给 cmd->paa，本夹具照抄（paa_from_addr 忽略
@@ -828,9 +826,8 @@ void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s 
  * 一个命令只有一个 command->meta，而两 plane 的 PBA 已经不同。 */
 fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_cfg_s *config)
 {
-    fc_cmd_s   *cmd;
-    fc_cmd_id_t cmd_id;
-    DWORD       pba[PLANE_NUM];
+    fc_cmd_s *cmd;
+    DWORD     pba[PLANE_NUM];
 
     ASSERT(blocks != NULL);
     ASSERT(config != NULL);
@@ -846,9 +843,8 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint
         pba[plane] = pba_from_addr(&addr);
     }
 
-    cmd = fc_command_alloc(&cmd_id);
+    cmd = fc_command_alloc();
     munit_assert_not_null(cmd);
-    (void)cmd_id;
 
     cmd->config             = *config;
     cmd->ch                 = 0U;

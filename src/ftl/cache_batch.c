@@ -357,12 +357,13 @@ static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req,
 
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
-        b->cmds[i] = fc_command_alloc(&cmd_ids[i]);
+        b->cmds[i] = fc_command_alloc();
 
         if (b->cmds[i] == NULL)
         {
             goto build_fail;
         }
+        cmd_ids[i] = b->cmds[i]->cmd_id;
 
         fc_cmd_s *cmd = b->cmds[i];
 

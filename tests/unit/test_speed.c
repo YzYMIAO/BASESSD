@@ -210,13 +210,11 @@ static spd_fc_slot_s *spd_fc_slot_find(WORD command_id)
 {
     for (WORD i = 0U; i < (WORD)FC_COMMAND_POOL_DEPTH; i++)
     {
-        fc_cmd_id_t id = FC_CMD_ID_INVALID;
-
         if (s_fc_slots[i].cmd == NULL)
         {
             continue;
         }
-        if ((fc_command_to_id(s_fc_slots[i].cmd, &id) != 0U) && ((WORD)id == command_id))
+        if (s_fc_slots[i].cmd->cmd_id == command_id)
         {
             return &s_fc_slots[i];
         }

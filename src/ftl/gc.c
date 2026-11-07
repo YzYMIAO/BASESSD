@@ -60,12 +60,12 @@
 ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
     // 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN;
     }
+    const fc_cmd_id_t cmd_id = cmd->cmd_id;
 
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
     cmd->config.cw_count    = CW_NUM - 1U;

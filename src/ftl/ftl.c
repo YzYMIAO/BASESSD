@@ -876,14 +876,14 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
         }
     }
 
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
 
     if (cmd == NULL)
     {
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return FTL_AGAIN;
     }
+    const fc_cmd_id_t cmd_id = cmd->cmd_id;
 
     cmd->config = old_cmd->config;
     cmd->meta   = pending->lba;
@@ -2583,12 +2583,12 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     }
 
     // 分配 FC 命令槽（池空 = 瞬态）
-    fc_cmd_id_t cmd_id;
-    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
+    fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN;
     }
+    const fc_cmd_id_t cmd_id = cmd->cmd_id;
 
     // 配置命令头（multi_plane 决定 plane 段，必须早于 ftl_cmd_setup_ppa_pair_cw——
     // 后者按段校验位图）

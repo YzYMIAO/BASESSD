@@ -20,13 +20,12 @@
  *                        fc_buffer_get_base / fc_buffer_get_meta
  *   ④ 数据查询          fc_get_cmd_data_ptr / fc_get_cmd_cw_bitmap /
  *                        fc_get_cmd_ecc_max / fc_get_cmd_all_cw_empty
- *   ⑤ 查询工具          fc_command_id_to_command / fc_command_to_id /
- *                        fc_descriptor_id_to_descriptor / fc_get_resource_stats /
- *                        fc_debug_state_get
+ *   ⑤ 查询工具          fc_command_id_to_command / fc_descriptor_id_to_descriptor /
+ *                        fc_get_resource_stats / fc_debug_state_get
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_alloc() → 填 config/参数；句柄取 cmd->cmd_id → 逐条
  *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
  *   → fc_submit(cmd_id) → fc_service()（后台推进）
@@ -90,13 +89,11 @@ extern "C"
 
     /* ═══════ ② 命令生命周期 ═══════ */
     /**
-     * @brief 申请一个命令槽位。
-     *
-     * @param cmd_id 出参：新命令的池槽位号；失败时写 FC_CMD_ID_INVALID。
+     * @brief 申请一个命令槽位。命令句柄 = 返回对象的 `cmd_id` 字段。
      *
      * @return 命令指针（供调用者填 config/route/paa）；命令池空时返回 NULL。
      */
-    fc_cmd_s *fc_command_alloc(fc_cmd_id_t *cmd_id);
+    fc_cmd_s *fc_command_alloc(void);
 
     /**
      * @brief 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
@@ -375,19 +372,6 @@ extern "C"
      * @return 命令指针（恒非空）。
      */
     fc_cmd_s *fc_command_id_to_command(fc_cmd_id_t cmd_id);
-
-    /**
-     * @brief 指针→ID 转换（fc_command_id_to_command 的逆）。返回 0 = command 不在命令池内
-     * （例如栈上的 fc_cmd_s），*cmd_id 未定义。
-     * ⚠ 先校验指针是否落在命令池且按元素对齐，再读取 `fc_cmd_s.cmd_id`；
-     * 池外指针不会解引用命令对象。
-     *
-     * @param cmd    命令指针。
-     * @param cmd_id ID 出参；返回 1 时写入。
-     *
-     * @return true = command 在命令池内；false = 不在池内。
-     */
-    BOOL fc_command_to_id(const fc_cmd_s *cmd, fc_cmd_id_t *cmd_id);
 
     /**
      * @brief ID→指针转换。前置条件：descriptor_id 为命令 desc 链中的池内 ID。

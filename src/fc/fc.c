@@ -8,7 +8,7 @@
  *                                （私有头在 src/fc/internal/，FTL 不可见）。
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_alloc() → 填 config/参数；句柄取 cmd->cmd_id → 逐条
  *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   → fc_submit(cmd_id) → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release(cmd_id) 回收。
@@ -547,11 +547,12 @@ static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_id_t data_cmd_i
     ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_id)));
 
     // ① 分配 parity cmd
-    parity_cmd = fc_command_alloc(&parity_id);
+    parity_cmd = fc_command_alloc();
     if (parity_cmd == NULL)
     {
         goto stripe_error;
     }
+    parity_id = parity_cmd->cmd_id;
 
     // ② 配置 parity cmd
     parity_cmd->config           = data_cmd->config;
