@@ -590,7 +590,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_s *ftl, fc_cmd_s *cmd, pend_req_
     // Read Recovery：逐 plane 记录 ECC 与 read disturb，用于预测性退役。
     // ⚠ 不能只记 `ftl_cmd_pba()` 的首个 desc：一个 multi-plane 子操作在 Policy B 下
     // 覆盖**两个独立块**，第二块的趋势会漏记（RISK-HOST-02）。
-    // ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。
+    // ⚠ 须在 fc_command_release(cmd->cmd_id) 之前调用——desc 释放后失效。
     ftl_cmd_block_ecc_s blocks[PLANE_NUM];
     const BYTE          nblocks = ftl_cmd_block_ecc_list(cmd, blocks, PLANE_NUM);
 
@@ -876,7 +876,8 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
         }
     }
 
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_id_t cmd_id;
+    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
 
     if (cmd == NULL)
     {
@@ -895,20 +896,20 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
     }
     if (st != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return st;
     }
 
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return FTL_AGAIN;
     }
 
     // 提交成功后才改 pending：失败路径仍按旧 cmd_id 收尾（见函数头）。
-    pend_bind(&ftl->pending, pending, ftl_cmd_id(cmd));
+    pend_bind(&ftl->pending, pending, cmd_id);
     pending->new_pba  = pba[0];
     pending->new_pba1 = pba[1];
     pending->retry_count++;
@@ -1524,7 +1525,7 @@ static SSD_CODE_FAST ftl_status_e ftl_cache_pad_submit(ftl_ctx_s *ftl)
 
     if (sub_st != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return sub_st;
     }
@@ -1567,7 +1568,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s 
     {
         if (cmd != NULL)
         {
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
         }
         return;
     }
@@ -1647,7 +1648,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s 
     // 本服务函数拥有命令。
     if (cmd != NULL)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
     }
 }
 
@@ -1724,7 +1725,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
             // cache program 成员：中间页/末页/失败均由 batch 上下文结算；
             // 不走透明重试（op44 不能回读重发），也不走普通写失败分支（不按 plane 标坏）。
             ftl_cache_wr_member_done(ftl, pending, completion);
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             return;
         }
 
@@ -1762,7 +1763,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
                 // 普通写 / page0 写：完成后确认映射（cache program 成员已在上面分流）。
                 if (ftl_host_io_write_ok(ftl, pending))
                 {
-                    (void)fc_command_release(cmd);
+                    (void)fc_command_release(cmd->cmd_id);
                     return;
                 }
             }
@@ -1781,7 +1782,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
             else
             {
                 ftl_host_io_read_fail(ftl, pending);
-                (void)fc_command_release(cmd);
+                (void)fc_command_release(cmd->cmd_id);
                 return;
             }
         }
@@ -1793,7 +1794,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
             // 在飞数），由新命令的完成继续推进；失败 ⇒ 走原 IO_ERROR 收尾。
             if ((pending->op != PENDING_OP_WRITE_PAGE0) && (pending->retry_count < FTL_WRITE_RETRY_MAX) && (ftl_write_retry(ftl, pending, cmd) == FTL_OK))
             {
-                (void)fc_command_release(cmd);
+                (void)fc_command_release(cmd->cmd_id);
                 return;
             }
 
@@ -1812,7 +1813,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
         pend_group_complete_subop_multi(&ftl->pending, owners, sub_status);
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /* ── 对外接口 ── */
@@ -2582,7 +2583,8 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     }
 
     // 分配 FC 命令槽（池空 = 瞬态）
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_id_t cmd_id;
+    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -2608,17 +2610,17 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     ftl_status_e ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, cw_bitmap);
     if (ret != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd_id);
         return ret; /* FTL_AGAIN（池空，瞬态）/ FTL_ERROR 原样上抛 */
     }
 
     // 注册 pending 子操作（必须早于 submit，避免竞态）。读：owners = 单组位、写专用字段传
     // INVALID、cw_bitmap 传 0；lba 传**全局** LBA（L2P/Journal/META 均按全局索引）。
-    pend_req_s *pending = pend_alloc(&ftl->pending, ftl_cmd_id(cmd));
+    pend_req_s *pending = pend_alloc(&ftl->pending, cmd_id);
 
     if (pending == NULL)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd_id);
         return FTL_AGAIN; /* pending 表满：瞬态 */
     }
 
@@ -2641,8 +2643,8 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     // 提交（tag = HOST_IO；ctx 传 NULL —— 私有状态在 pending 表）
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
-        pend_remove(&ftl->pending, ftl_cmd_id(cmd));
-        (void)fc_command_release(cmd);
+        pend_remove(&ftl->pending, cmd_id);
+        (void)fc_command_release(cmd_id);
         pend_group_drop_subop(&ftl->pending, gi);
         return FTL_AGAIN; /* SQ 满：瞬态 */
     }

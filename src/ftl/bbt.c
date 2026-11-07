@@ -874,7 +874,7 @@ static ftl_status_e bbt_write_submit(alc_s *alloc)
     }
     if (ftl_op_submit(cmd, FTL_OP_BBT, alloc) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -973,7 +973,7 @@ void bbt_handle(alc_s *alloc)
         }
         if (ftl_op_submit(cmd, FTL_OP_BBT, alloc) != FTL_OK)
         {
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             return;
         }
         alloc->bbt.handle.phase   = BBT_JOB_ERASE;
@@ -1055,7 +1055,7 @@ static void bbt_erase_complete(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_status_
 
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = false;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -1064,7 +1064,7 @@ static void bbt_erase_complete(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_status_
     alloc->bbt.handle.phase   = BBT_JOB_WRITE;
     alloc->bbt.handle.waiting = false;
     (void)bbt_write_submit(alloc);
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /**
@@ -1099,7 +1099,7 @@ static void bbt_write_complete(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_status_
 
     alloc->bbt.handle.phase   = BBT_JOB_IDLE;
     alloc->bbt.handle.waiting = false;
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /**
@@ -1123,7 +1123,7 @@ void ftl_bbt_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
     if (alloc->bbt.handle.waiting == false)
     {
         LOGE(LOG_TAG_BBT "orphan completion phase=%d — ignored\r\n", alloc->bbt.handle.phase);
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -1141,7 +1141,7 @@ void ftl_bbt_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
         LOGE(LOG_TAG_BBT "unexpected completion phase=%d\r\n", alloc->bbt.handle.phase);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = false;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
     }
 }
 

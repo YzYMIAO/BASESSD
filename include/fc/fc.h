@@ -12,10 +12,11 @@
  *   - Buffer Pool（FC_BUFFER_POOL_DEPTH）：CW 数据缓冲
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
+ *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
- *   → fc_submit() → fc_service()（后台推进）→ fc_poll_completion() 取完成
- *   → fc_command_release() 回收。
+ *   → fc_submit(cmd_id) → fc_service()（后台推进）→ fc_poll_completion() 取完成
+ *   → fc_command_release(cmd_id) 回收。
  *
  * buffer 布局（528B CW）：
  *   [META:4][CRC:4][USER:512][PARITY:8]

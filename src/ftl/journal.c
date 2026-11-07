@@ -706,7 +706,7 @@ static BOOL jrn_freeze(l2p_jrn_s *journal)
 
     if (ftl_op_submit(cmd, FTL_OP_JOURNAL, journal) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return false;
     }
 
@@ -763,7 +763,7 @@ static BOOL jrn_erase_start(l2p_jrn_s *journal)
     }
     if (ftl_op_submit(cmd, FTL_OP_JOURNAL, journal) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return false;
     }
 
@@ -1052,7 +1052,7 @@ static void jrn_write_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_s
     if (failed)
     {
         // 写都没成，不在此起换块擦除：need_erase 保留给 jrn_handle 下轮处理。
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -1074,7 +1074,7 @@ static void jrn_write_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_s
         }
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /**
@@ -1104,7 +1104,7 @@ static void jrn_erase_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_s
         journal->handle.state.erase_fail_block = JRN_BLOCK_NONE;
     }
     journal->handle.job.phase = JRN_IDLE;
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /**
@@ -1141,7 +1141,7 @@ void ftl_journal_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
         // 卡在非 IDLE，后续 flush 再也起不来（命令还不回收就是池泄漏）。
         LOGE(LOG_TAG_JRN "unexpected completion phase=%d\r\n", journal->handle.job.phase);
         journal->handle.job.phase = JRN_IDLE;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
     }
 }
 

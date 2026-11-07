@@ -2525,9 +2525,11 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
 
     ftl_ut_trace_begin();
 
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_id_t cmd_id;
+    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
 
     munit_assert_not_null(cmd);
+    (void)cmd_id;
 
     const DWORD pba  = pba_make(0U, 0U, 0U, 5U, 0U, 1U, 0U);
     const DWORD page = 4000U; /* CW_NUM 对齐 */
@@ -2536,7 +2538,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
 
     for (BYTE c = 0U; c < CW_NUM; c++)
     {
-        munit_assert_int(fc_command_configure_descriptor(cmd, 0U, c, pba_to_paa(pba)), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_configure_descriptor(cmd->cmd_id, 0U, c, pba_to_paa(pba)), ==, FC_STATUS_OK);
     }
 
     DWORD cw[CW_NUM];
@@ -2545,7 +2547,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     /* OK：四个 CW 同页基址。 */
     for (BYTE c = 0U; c < CW_NUM; c++)
     {
-        BYTE *meta = fc_buffer_get_meta(cmd, c);
+        BYTE *meta = fc_buffer_get_meta(cmd->cmd_id, c);
         DWORD v    = page + c;
 
         munit_assert_not_null(meta);
@@ -2561,7 +2563,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     /* EMPTY：全 0xFFFFFFFF。 */
     for (BYTE c = 0U; c < CW_NUM; c++)
     {
-        BYTE *meta = fc_buffer_get_meta(cmd, c);
+        BYTE *meta = fc_buffer_get_meta(cmd->cmd_id, c);
         DWORD v    = FTL_LBA_INVALID;
 
         memcpy(meta, &v, sizeof(v));
@@ -2571,7 +2573,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     /* CORRUPT：CW1 落在另一页基址。 */
     for (BYTE c = 0U; c < CW_NUM; c++)
     {
-        BYTE *meta = fc_buffer_get_meta(cmd, c);
+        BYTE *meta = fc_buffer_get_meta(cmd->cmd_id, c);
         DWORD v    = page + c;
 
         if (c == 1U)
@@ -2585,7 +2587,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     /* 空洞：只有 CW2 写过。 */
     for (BYTE c = 0U; c < CW_NUM; c++)
     {
-        BYTE *meta = fc_buffer_get_meta(cmd, c);
+        BYTE *meta = fc_buffer_get_meta(cmd->cmd_id, c);
         DWORD v    = (c == 2U) ? (page + 2U) : FTL_LBA_INVALID;
 
         memcpy(meta, &v, sizeof(v));
@@ -2595,7 +2597,7 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     munit_assert_uint32(cw[0], ==, FTL_LBA_INVALID);
     munit_assert_uint32(cw[2], ==, page + 2U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 
     ftl_ut_trace_detail("gc decode: pba=0x%08lX page=%lu; OK base=page cw=page+0..3; EMPTY all INVALID; CORRUPT cw1=page+8; HOLE base=%lu cw0=0x%08lX cw2=%lu", pba, page, base, cw[0], cw[2]);
     ftl_ut_trace_summary("gc decode: OK base=%lu; EMPTY/CORRUPT/HOLE ok", base);

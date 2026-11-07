@@ -184,12 +184,13 @@ check-build-cfg:
 	printf '%s\n' "$$cfg" > "$(BIN_DIR)/.build_cfg"
 
 .PHONY: all
-# format 作为 all 的前置目标：每次构建先强制格式化（format 是 .PHONY，恒执行）。
-# 串行 make 下 format 先于编译跑；干净树时 clang-format 不改 mtime（零开销、不触发
-# 重编译），有未格式化改动时先改盘再编译，保证产物与源码一致。
-# 注意：本工程按串行 make 构建；若用 -j，format 会与编译并发，需改为在编译规则上
-# 挂 order-only 前置（见 rules_common.mk）。
-all: check-build-cfg format $(ANALYSIS_FILES)
+# format / types-check 作为 all 的前置目标（均为 .PHONY，恒执行）：
+#   format      —— 每次构建先强制格式化，保证产物与源码一致；
+#   types-check —— H50 正向不变量检查（公共完整类型必须定义处 typedef 等）。
+# 串行 make 下二者先于编译跑；干净树时 clang-format 不改 mtime（零开销、不触发
+# 重编译）。注意：本工程按串行 make 构建；若用 -j，format 会与编译并发，需改为在
+# 编译规则上挂 order-only 前置（见 rules_common.mk）。
+all: check-build-cfg format types-check $(ANALYSIS_FILES)
 
 .PHONY: reall
 reall: clean all
@@ -236,6 +237,20 @@ format-check:
 # 查看实际使用的 clang-format 版本。
 format-version:
 	@$(CLANG_FORMAT) --version
+
+# ============================================================================
+# H50 复合类型定义形态检查
+# ============================================================================
+PYTHON ?= python3
+TYPES_CHECK := $(PROJECT_ROOT)/tools/check_types.py
+
+.PHONY: types-check
+types-check:
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(PYTHON)"; \
+		exit 1; \
+	}
+	@$(PYTHON) $(TYPES_CHECK) --root $(PROJECT_ROOT)
 
 # ============================================================================
 # 信息目标

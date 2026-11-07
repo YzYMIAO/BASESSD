@@ -53,7 +53,7 @@
 #include "fc_command.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
-#include "fc_ldpc_engine.h"
+#include "fc_ecc_engine.h"
 #include "fc_random_engine.h"
 #include "fc_test_common.h"
 #include "munit.h"
@@ -273,13 +273,13 @@ static uint8_t l2_buffer_round_trip(const nand_addr_s *addr, uint32_t cw_bitmap,
     uint8_t   cw_count = test_cw_count(cmd);
 
     test_fill_user_paa(cmd);
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
 
     l2_verify_all_ready(cmd);
     munit_assert_uint8(l2_user_matches_source(cmd), ==, 1U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return cw_count;
 }
 
@@ -1012,7 +1012,7 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
     munit_assert_uint32(test_cw_count(enc), ==, c->n_cw);
 
     test_fill_user_paa(enc);
-    munit_assert_int(fc_data_path_encode(enc), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(enc->cmd_id), ==, FC_STATUS_OK);
 
     /* random=ON ⇒ encode 后 USER 区应已不是明文（[0,8) 是 META + CRC，不属于 USER 区）。
      * 这条是自证：fixture 一旦退化（例如 seed 恒 0 使 keystream 整片为 0），
@@ -1025,7 +1025,7 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
     l2_verify_crc_written(enc); /* CRC 对明文算 ⇒ 与 USER 是否已加扰无关 */
     l2_verify_parity_nonzero(enc);
 
-    munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(enc->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1049,7 +1049,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
         (void)memset(test_cw_base(enc, i) + FC_CRC_META_SIZE, 0xFF, FC_CRC_FIELD_SIZE);
     }
 
-    munit_assert_int(fc_data_path_encode(enc), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(enc->cmd_id), ==, FC_STATUS_OK);
 
     /* META 与 CRC 是两件独立的事：关 CRC 不影响 Stage 0 */
     l2_verify_meta_written(enc);
@@ -1063,7 +1063,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
      * ⇒ 读侧 Pass 3 整个跳过。打出来才看得出"关闭"是真的没写，而不是写了个 0。 */
     test_trace_summary("crc disabled: %hhu CW, [4,8) 全 0xFFFFFFFF（哨兵原样保留）", test_cw_count(enc));
 
-    munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(enc->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1197,7 +1197,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 破坏 CW1 */
     {
@@ -1210,7 +1210,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     }
 
     /* process_read 应返回 IO_ERROR（不解扰） */
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_IO_ERROR);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_IO_ERROR);
 
     /* 验证 desc status：CW1 为 UNC，其余为 READY（Pass 1 是**赋值**，错误位不会残留） */
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
@@ -1226,7 +1226,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
      * 对照组干净"——而那正是这条用例的全部意义。 */
     test_trace_summary("unc: 破坏 CW1（%u 处 x 8B 步长）-> process_read=IO_ERROR, cw1=UNC 其余 READY, Pass 2 未解扰", (FC_BUFFER_DATA_SIZE / 8U));
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1264,8 +1264,8 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
     }
 
     test_fill_user_paa(cmd);
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
 
     l2_verify_all_ready(cmd);
     munit_assert_uint8(l2_user_matches_source(cmd), ==, 1U);
@@ -1274,7 +1274,7 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
      * 「链位 0,1 ↔ cw 0,2 不同」——打出来才看得出 Pass 4 用的是 paa_to_cw 而非链走位。 */
     test_trace_summary("masked_chain bm=0x05: 链位0->cw0, 链位1->cw2（不同）, 往返一致");
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1292,7 +1292,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
     fc_cmd_s         *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 页内 META 此刻是「命令声明的页」| plane_cw（encode Stage 0 写的）。把**命令声明的页**
      * 换成**同 page / 同 plane、block 环移一格**的那一页：低 3 位（plane/cw）不变 ⇒ 自洽
@@ -1309,7 +1309,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
         cmd->meta      = (DWORD)pba_from_addr(&tampered);
     }
 
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
 
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
@@ -1324,7 +1324,7 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
      *   把两个数打出来，正是为了让"篡改真的落在了掩码之上"一眼可查。 */
     test_trace_summary("mata_error: 声明 PBA=0x%08lX vs 页内 META=0x%08lX（低 3 位同、高位异）-> 逐 CW MATA_ERROR, 数据仍一致", (unsigned long)cmd->meta, (unsigned long)test_cw_desc(cmd, 0U)->meta);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1349,12 +1349,12 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
     {
         (void)memcpy(test_cw_base(cmd, i) + FC_CRC_META_SIZE, &sentinel, FC_CRC_FIELD_SIZE);
     }
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 读侧打开 CRC → stored 哨兵与重算值必不相等 */
     cmd->config.crc = FC_CRC_ENABLE;
 
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
 
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
@@ -1365,7 +1365,7 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
      * 两个数打出来才说明 CRC_ERROR 是"真的比出来了"，而不是碰巧置位。 */
     test_trace_summary("crc_error: 写时关 CRC 留哨兵 0x%08lX, 读时开 CRC -> 逐 CW CRC_ERROR", (unsigned long)sentinel);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1390,14 +1390,14 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
         (void)memset(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, 0xAA, FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE);
     }
 
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
     {
         munit_assert_uint32(test_check_pattern(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, (uint16_t)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0xAAU), ==, 1U);
     }
 
-    munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
 
     l2_verify_all_ready(cmd);
     munit_assert_uint8(l2_user_matches_source(cmd), ==, 1U);
@@ -1405,7 +1405,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
     /* 证据（--log-visible info）：RAW 模式跳过 ECC 编解码，parity 区应原样保留 0xAA 哨兵。 */
     test_trace_summary("ldpc_raw: parity 区原样保留 0xAA（%u B/CW x %hhu CW）, 数据原样往返", (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), test_cw_count(cmd));
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return MUNIT_OK;
 }
 
@@ -1437,7 +1437,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *   ② encode —— META / CRC / ECC 都写齐（RAID XOR **不在** encode 里做，fc_data_path.c:191）
  *   ③ 把 failed_idx 那条 CW 的**整 528B** 翻成 0xFF —— 远超 BCH 能力 ⇒ 必然不可纠，
  *      保证走的是"XOR 重建"而不是"ECC 顺手纠回来"（后者会让用例假过）
- *   ④ fc_data_path_raid_recover(cmd, failed_idx)：XOR 重建 → ECC 重试 → 解扰
+ *   ④ fc_data_path_raid_recover(cmd->cmd_id, failed_idx)：XOR 重建 → ECC 重试 → 解扰
  *   ⑤ 断言**全部** CW 的 USER 区都回到各自 pattern —— 不只被救的那条：
  *      "救回来了"与"没把别的 CW 弄坏"要一起成立
  *
@@ -1457,7 +1457,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, u
     }
 
     /* encode：META + CRC + 加扰? + ECC（RAID 不在 encode 里做，见 fc_data_path.c:191） */
-    munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 破坏指定 CW（全 CW 528B 翻转，使 ECC 不可纠） */
     uint8_t *failed_base = test_cw_base(cmd, failed_idx);
@@ -1467,7 +1467,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, u
     }
 
     /* raid_recover：XOR 重建 + ECC 重试 + 解扰 */
-    munit_assert_int(fc_data_path_raid_recover(cmd, failed_idx), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_raid_recover(cmd->cmd_id, failed_idx), ==, FC_STATUS_OK);
 
     /* 验证：全部 CW USER 数据区恢复原始 pattern */
     for (uint8_t i = 0U; i < count; i++)
@@ -1475,7 +1475,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, uint8_t random_mode, u
         munit_assert_uint32(test_check_pattern(test_cw_user(cmd, i), FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
     }
 
-    fc_command_release(cmd);
+    fc_command_release(cmd->cmd_id);
 }
 
 /* 退化 stripe 恢复：random=OFF（唯一成立的档，见节头）配 failed_idx = 1（中间那条 CW，
@@ -1526,7 +1526,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     }
 
     /* encode 数据命令：META → CRC → Random → ECC */
-    munit_assert_int(fc_data_path_encode(data_cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_data_path_encode(data_cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 分配 parity 命令（同 CW 数，random=OFF） */
     fc_cmd_s *parity_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
@@ -1541,9 +1541,8 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 
     /* 调用 generate_stripe_parity — XOR 数据命令 CW 到 parity buffer + ECC 编码 parity */
     {
-        const fc_cmd_s *data_ptrs[1U]; /* PLANE_NUM=2 → 1 条数据命令 */
-        data_ptrs[0U] = data_cmd;
-        munit_assert_int(fc_data_path_generate_stripe_parity(data_ptrs, 1U, parity_cmd), ==, FC_STATUS_OK);
+        const fc_cmd_id_t data_ids[1U] = {data_cmd->cmd_id}; /* PLANE_NUM=2 → 1 条数据命令 */
+        munit_assert_int(fc_data_path_generate_stripe_parity(data_ids, 1U, parity_cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /*
@@ -1575,20 +1574,18 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
         }
 
         /* ECC 解码 + 解扰后验证数据 CW0~CW3（parity CW 不验证，它们存储 XOR 结果） */
-        const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
-
         for (uint8_t i = 0U; i < cw_cnt; i++)
         {
             uint8_t *base = buffers[i];
 
-            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
+            munit_assert_int(fc_ecc_decode(base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
             (void)fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, test_cw_seed(data_cmd, i));
             munit_assert_uint32(test_check_pattern(test_cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i)), ==, 1U);
         }
     }
 
-    fc_command_release(data_cmd);
-    fc_command_release(parity_cmd);
+    fc_command_release(data_cmd->cmd_id);
+    fc_command_release(parity_cmd->cmd_id);
     return MUNIT_OK;
 }
 
@@ -1760,7 +1757,7 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
         test_trace_detail("  desc[%hhu] plane=%hhu cw=%hhu", i, plane_out[i], cw_out[i]);
     }
 
-    fc_command_release(cmd);
+    fc_command_release(cmd->cmd_id);
     return MUNIT_OK;
 }
 

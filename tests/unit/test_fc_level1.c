@@ -33,7 +33,6 @@
 
 #include "fc_command.h"
 #include "fc_queue.h"
-#include "fc_scheduler.h"
 #include "fc_test_common.h" /* 只为证据打印原语 test_trace_*（本文件不碰 NAND / 池） */
 #include "munit.h"
 #include "onfi_1_0.h"
@@ -474,41 +473,6 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
 #define SCHED_Q_DEPTH (16U)
 
-/* --------------------------------------------------------------------
- * test_scheduler_init
- *   功能：验证 fc_scheduler_init 绑定 SQ / HSQ 两个队列指针。
- *   测什么：用两个栈上队列 init 调度器，断言 scheduler.sq / .hsq 指向传入对象。
- *   设计思路：断言**指针相等**而不是断言内部状态，是因为「不复制队列、只持有
- *         引用」正是它的契约——队列存储由调用方提供（见 fc_queue.h 头注）。
- *         若实现改成按值拷贝，指针断言会立刻失败，而状态断言可能仍然通过。
- *         生产调用点是 fc.c 的 fc_init_internal（init 时一次）。
- * -------------------------------------------------------------------- */
-static MunitResult test_scheduler_init(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    test_trace_begin();
-
-    fc_cmd_id_t    sq_storage[SCHED_Q_DEPTH];
-    fc_cmd_id_t    hsq_storage[SCHED_Q_DEPTH];
-    fc_sub_queue_s sq, hsq;
-    fc_sched_s     scheduler;
-
-    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
-    fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
-
-    munit_assert_int(fc_scheduler_init(&scheduler, &sq, &hsq), ==, FC_STATUS_OK);
-
-    munit_assert_ptr_equal(scheduler.sq, &sq);
-    munit_assert_ptr_equal(scheduler.hsq, &hsq);
-
-    /* 证据（--log-visible info）：断言的是**指针相等**——契约是「不复制队列、只持引用」。 */
-    test_trace_summary("scheduler init: sq=%p hsq=%p（持有引用，不拷贝；depth=%u）", (void *)scheduler.sq, (void *)scheduler.hsq, SCHED_Q_DEPTH);
-
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  Part 4: ONFI 参数页解码（手册 Table 11）
  *
@@ -663,9 +627,6 @@ MunitTest g_fc_logic_tests[] = {
     {             "cqueue_init",                      test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "cqueue_push_pop",                  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "cqueue_overflow",                  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-
- /* Part 3: fc_scheduler */
-    {          "scheduler_init",                   test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* Part 4: ONFI 参数页解码 */
     {  "onfi_param_page_decode",       test_onfi_parameter_page_decode, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

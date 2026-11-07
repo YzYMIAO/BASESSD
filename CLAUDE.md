@@ -849,10 +849,21 @@ typedef union FC_PARAM_U
 - **alias**：`<module>_<abbrev>_s` / `_e` / `_u`，全小写；全称已经短（`route` / `page` /
   `block` / `plane` / `cw` / `lba` / `pba` / `paa` / `ecc` / `raid` / `crc` / `gc` /
   `bbt` / `entry`）不再缩写。
-- **前向声明 / 不透明类型**：头文件用 `typedef struct TAG_S alias_s;`；定义处用
-  `struct TAG_S { ... };`。自引用成员必须写 tag，不能写 alias。
+- **前向声明 / 不透明类型**：头文件可先写 `typedef struct TAG_S alias_s;`。
+  **公共完整类型**在定义处仍按上面的形态写 `typedef struct TAG_S { ... } alias_s;`
+  （C11 允许同类型 typedef 重复声明）；仅**真正 opaque**（定义只在 `.c`、
+  头文件只暴露指针）允许定义处写 `struct TAG_S { ... };`。自引用成员必须写 tag，
+  不能写 alias。
 - **匿名嵌套成员**：结构体内部的匿名 struct/union 成员可以继续匿名；一旦需要独立
   名字，按本条命名。
+- **机械检查**：`make types-check`（`tools/check_types.py`）是**正向不变量检查**，
+  不是旧名 grep。它检查：
+  - `include/**/*.h` 不得有裸 `struct/enum/union TAG` 定义；
+  - 定义处 typedef 形态、tag/alias 后缀与 kind 匹配；
+  - 前向 typedef 必须有定义；
+  - `.c` 裸定义只允许“有前向 typedef 的真正 opaque 类型”。
+  输出 `types-check: OK` 才算过；例外必须能逐条解释，不得靠放宽规则通过。
+  ⚠ 该检查已挂入 `make all`，类型 / 命名改动必须同时看它和编译结果。
 
 **派生类型后缀**：
 
@@ -1024,6 +1035,19 @@ R2 的四关是**代码语义改动**的收尾验证，不是每改一行就重�
 - **分工**：R11 管缺陷登记（不能延后）；H6 管**代码内注释**（当场改）；本条管 `docs/`
   下的设计 / 接口**文档**（可延后、定稿批量）。`CLAUDE.md` 与其变更史不受本条约束。
 
+**P13 机械规范化的完成判据。**（用户 2026-11-07）
+
+- **不得**用「旧名 grep = 0 / 编译通过」证明全仓改名或类型规范化完成。旧名消失只证明
+  改名覆盖了旧对象，不证明目标形态成立；编译只证明没编坏。
+- 必须用**正向不变量检查器**证明目标形态：H50 用 `make types-check`；其他规范化同理
+  （命名 / 位宽 / 哨兵 / 前向声明各有自己的检查式）。
+- **全仓规范化提交必须给覆盖率**：对象总数 / 符合目标形态数 / 例外清单。没有覆盖率表，
+  不得声称“全仓完成”。
+- **规则有例外时先消除歧义并按 R11 登记**，不得选择“能让当前代码通过”的宽松解释。
+- **检查器必须有区分力**（C7）：先构造一个必然失败的负例，确认检查器报错，再宣称通过。
+- **类型 / 命名 / 布局类改动**收尾除 `make all` / `make release` 外，还必须跑对应检查器；
+  检查器失败时不得用编译通过覆盖它。
+
 ---
 
 ## 七、建议 S —— 风格偏好
@@ -1070,7 +1094,8 @@ R2 的四关是**代码语义改动**的收尾验证，不是每改一行就重�
 | 活跃设计文档 | `docs/design/`（19 个）+ `docs/archive/`（历史/计划） |
 | **`CLAUDE.md` 自身的变更史** | `docs/archive/claude_md_history.md`（日常不读） |
 | 历史归档 | `docs/archive/`（日常不读） |
-| 构建 | `make all`(debug) / `make release` / `make tests UT=FC\|FTL\|HIL` |
+| 构建 | `make all`(debug，含 `types-check`) / `make release` / `make tests UT=FC\|FTL\|HIL` |
+| 类型形态检查 | `make types-check`（H50 正向不变量；`tools/check_types.py`） |
 | 产物 | `build/firmware/<debug\|release>/` |
 | 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`，按配置分置，**切换构建无需 `make clean`** |
 | 编译器 | arm-none-eabi；`-Wall -Wextra -Wshadow -Wcast-align ...`，**无 `-Werror`**（零告警靠纪律） |

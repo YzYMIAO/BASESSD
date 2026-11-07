@@ -8,9 +8,10 @@
  *                                （私有头在 src/fc/internal/，FTL 不可见）。
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
- *   → fc_submit() → fc_service()（后台推进）
- *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
+ *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
+ *   → fc_submit(cmd_id) → fc_service()（后台推进）
+ *   → fc_poll_completion() 取完成 → fc_command_release(cmd_id) 回收。
  *   （掩码建链与数据搬运在 FTL 侧：ftl_cmd_configure_descriptors / ftl_cmd_write_data）
  *
  * 文件结构（按职责分区，函数定义顺序即依赖顺序）：
@@ -85,8 +86,8 @@ static fc_cmd_status_s g_fc_cq_storage[FC_CQ_DEPTH];
 // GET/SET_FEATURES 的 4 字节内联数据暂存，按 cmd_id（= 命令池槽位号）索引。
 // 为什么需要：SQ 命令提交后不可写（见 fc_command.h「SQ 不可变」），而引擎需要一个
 // 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
-// 故这里只做提交→完成之间的中转。索引用的 cmd_id 是「指针 − command_pool 基址」
-// 派生出来的池内下标，恒 < FC_COMMAND_POOL_DEPTH。
+// 故这里只做提交→完成之间的中转。索引用的 cmd_id 是命令池槽位号，
+// 恒 < FC_COMMAND_POOL_DEPTH。
 // 与 buffer pool 同放 noncacheable 段：READ_META / GET_FEATURES 的 4 字节
 // 返回段由引擎经 FMC 写回，避免 CPU 缓存与总线视图不一致。
 static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] NONCACHEABLE_BUFFER;
@@ -216,13 +217,16 @@ SSD_CODE_FAST void fc_init(void)
  * @brief 命令入队（按 high_priority 选 HSQ/SQ），状态置 QUEUED
  *
  * @param controller FC 控制器
- * @param cmd    命令
+ * @param cmd_id 命令 ID
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL
  */
-static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_s *cmd)
+static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
-    fc_sub_queue_s   *queue  = (cmd->high_priority != 0U) ? &controller->hsq : &controller->sq;
-    const fc_cmd_id_t cmd_id = fc_pool_command_id(controller, cmd);
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    fc_cmd_s       *cmd   = &controller->command_pool[cmd_id];
+    fc_sub_queue_s *queue = (cmd->high_priority != 0U) ? &controller->hsq : &controller->sq;
+    ASSERT(cmd->cmd_id == cmd_id);
 
     // 重复提交由 fc_submit/fc_submit_batch 的 ALLOCATED 边界拒绝；本层是唯一入队点，
     // 只负责 push + 状态转移。
@@ -267,6 +271,13 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
     cmd = &controller->command_pool[nand_completion->cmd_id];
     memset(&cq_entry, 0, sizeof(cq_entry));
 
+    // 完成项来自 NAND 层，ID 必须回到同一个命令对象；不一致说明调度/完成关联错位。
+    ASSERT_REJECT(cmd->cmd_id == nand_completion->cmd_id,
+                  FC_STATUS_IO_ERROR,
+                  "complete: cmd=%hu field cmd_id=%hu mismatch",
+                  nand_completion->cmd_id,
+                  cmd->cmd_id);
+
     ASSERT_REJECT(controller->command_state[nand_completion->cmd_id] == FC_COMMAND_STATE_ACTIVE,
                   FC_STATUS_IO_ERROR,
                   "complete: cmd=%hu not ACTIVE",
@@ -302,7 +313,7 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
     // 不要进 ECC 解码路径，直接按失败 completion 上报。
     if ((nand_operation_is_page_read(cmd->config.operation) == true) && (nand_completion->execution_status != NAND_RESULT_NOT_READY))
     {
-        const fc_status_e data_result = fc_data_path_process_read(cmd);
+        const fc_status_e data_result = fc_data_path_process_read(cmd->cmd_id);
 
         // process_read 失败（UNC / ECC 引擎不可用 / buffer 缺失 / 链损坏）都必须
         // 反映到命令级状态，不能只看 desc->status 是否被填过。
@@ -312,7 +323,7 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
     /* ── Step 3: Populate completion entry ──
      * CQ 只带命令级聚合：status + 返回段 param。per-CW ECC 只留在 desc 链，
      * 聚合 ECC 走 fc_get_cmd_ecc_max()（须在 fc_command_release() 前调用）。 */
-    cq_entry.cmd_id         = nand_completion->cmd_id;
+    cq_entry.cmd_id         = cmd->cmd_id;
     cq_entry.failed_cw      = nand_completion->failed_cw;
     cq_entry.failed_desc_id = FC_DESC_ID_INVALID;
     cq_entry.status         = 0U;
@@ -451,7 +462,7 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, const fc_nand_dis
      * 顺带覆盖 CQ 满强制 COMPLETED 的 fatal 分支。 */
     if ((cmd->config.buf_own & FC_BUF_OWN_FREE_BY_FC) != 0U)
     {
-        fc_pool_command_release_buffers(controller, cmd);
+        fc_pool_command_release_buffers(controller, cmd->cmd_id);
     }
 
     {
@@ -504,7 +515,7 @@ static void fc_stripe_release_parity(fc_ctl_s *controller, fc_cmd_id_t parity_id
 
     // 与 fc_pool_command_release 完全同义（desc 链 + buffer + 命令槽位），
     // 直接复用，不另写拷贝。parity 未单独提交，状态应为 ALLOCATED。
-    fc_pool_command_release(controller, &controller->command_pool[parity_id]);
+    fc_pool_command_release(controller, parity_id);
 }
 
 /**
@@ -527,30 +538,33 @@ static void fc_stripe_release_parity(fc_ctl_s *controller, fc_cmd_id_t parity_id
  *
  * @note 仅处理 PLANE_NUM=2 场景（单数据命令 + 单 parity 命令）。
  */
-static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_s *data_cmd, fc_cmd_id_t data_cmd_id)
+static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_id_t data_cmd_id)
 {
+    ASSERT(data_cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    fc_cmd_s *data_cmd = &controller->command_pool[data_cmd_id];
+    ASSERT(data_cmd->cmd_id == data_cmd_id);
     fc_cmd_s              *parity_cmd;
     fc_cmd_id_t            parity_id;
     fc_nand_dispatch_req_s mp_req;
     BYTE                   cw_count;
     BYTE                   cw;
     fc_desc_id_t           desc_id;
-    const fc_cmd_s        *data_ptrs[FC_STRIPE_DATA_MAX];
+    fc_cmd_id_t            data_ids[FC_STRIPE_DATA_MAX];
 
     cw_count = (data_cmd->config.cw_count + 1U);
 
     // RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
     // flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
     // 掩码由 **desc 链重建**（链是 CW 集合的唯一真值，不回读 FTL 的输入字段）。
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd)));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_id)));
 
     // ① 分配 parity cmd
-    parity_cmd = fc_command_alloc();
+    parity_cmd = fc_command_alloc(&parity_id);
     if (parity_cmd == NULL)
     {
         goto stripe_error;
     }
-    parity_id = fc_pool_command_id(controller, parity_cmd);
 
     // ② 配置 parity cmd
     parity_cmd->config           = data_cmd->config;
@@ -584,7 +598,7 @@ static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_s *data_cmd, fc
             if (fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_paa) != FC_STATUS_OK)
             {
                 // 回滚半成品：fc_pool_command_release 一次做完 desc 链 + buffer + 命令槽位。
-                fc_pool_command_release(controller, parity_cmd);
+                fc_pool_command_release(controller, parity_id);
                 goto stripe_error;
             }
         }
@@ -609,8 +623,8 @@ static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_s *data_cmd, fc
     }
 
     // ④ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
-    data_ptrs[0U] = data_cmd;
-    if (fc_data_path_generate_stripe_parity(data_ptrs, 1U, parity_cmd) != FC_STATUS_OK)
+    data_ids[0U] = data_cmd_id;
+    if (fc_data_path_generate_stripe_parity(data_ids, 1U, parity_id) != FC_STATUS_OK)
     {
         fc_stripe_release_parity(controller, parity_id);
         goto stripe_error;
@@ -738,7 +752,7 @@ static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  * multi_plane 越界（循环上界保护）。
  *
  * @param controller FC 控制器
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @param request 输出（header 已填、全零）。
  *
  * @return FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT / FC_STATUS_IO_ERROR（链损坏/成环）。
@@ -748,8 +762,13 @@ static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  * 链长度即 CW 数（popcount）；plane_paa[] 是 per-plane 行地址，Policy B 下各 plane
  * 可以指向不同 block/page。只由 fc_build_dispatch_request 的“带数据命令”分支调用。
  */
-static fc_status_e fc_build_request_data_planes(const fc_ctl_s *controller, const fc_cmd_s *cmd, fc_nand_dispatch_req_s *request)
+static fc_status_e fc_build_request_data_planes(const fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_nand_dispatch_req_s *request)
 {
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    const fc_cmd_s *cmd = &controller->command_pool[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
+
     // 带数据命令必须有 desc 链；无链的 has_data 命令（READ_STATUS 等）由引擎内部
     // 直接发 70h/78h，不应走 FC 提交路径。
     if (cmd->desc_id == FC_DESC_ID_INVALID)
@@ -843,7 +862,7 @@ static void fc_request_use_staging(fc_nand_dispatch_req_s *request, BYTE plane, 
  * @brief 由一条已 ACTIVE 的命令构建自包含的 NAND dispatch 请求。
  *
  * @param controller FC 控制器
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @param cmd_id 命令 ID
  * @param request 输出请求。
  *
@@ -867,11 +886,19 @@ static void fc_request_use_staging(fc_nand_dispatch_req_s *request, BYTE plane, 
  * @note 本函数不做 META 预填——buffer[0..3] 的 META 由 fc_data_path_encode 的
  * Stage 0 写（两条派发路径都经 encode）。
  */
-static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_s *cmd, fc_cmd_id_t cmd_id, fc_nand_dispatch_req_s *request)
+static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_nand_dispatch_req_s *request)
 {
+    ASSERT_REJECT(cmd_id < FC_COMMAND_POOL_DEPTH,
+                  FC_STATUS_IO_ERROR,
+                  "build request: cmd=%hu out of range",
+                  cmd_id);
+
+    fc_cmd_s *cmd = &controller->command_pool[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
+
     // Pre-resolve descriptor-chain data into a self-contained dispatch request.
     memset(request, 0, sizeof(*request));
-    request->cmd_id       = cmd_id;
+    request->cmd_id       = cmd->cmd_id;
     request->operation    = cmd->config.operation;
     request->ch           = cmd->route.ch;
     request->ce           = cmd->route.ce;
@@ -990,7 +1017,7 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_s *cmd
     }
     else if (nand_operation_has_data(cmd->config.operation))
     {
-        const fc_status_e build_result = fc_build_request_data_planes(controller, cmd, request);
+        const fc_status_e build_result = fc_build_request_data_planes(controller, cmd_id, request);
         if (build_result != FC_STATUS_OK)
         {
             // 失败（无 desc 链 / buffer INVALID / multi_plane 越界 / 链成环）交给
@@ -1076,13 +1103,14 @@ static fc_status_e fc_poll_dispatch_single(fc_ctl_s *controller, const fc_sched_
      * fc_pool_command_state_set 的转移表唯一判定，这里不重复断言。 */
     fc_pool_command_state_set(controller, cmd_id, FC_COMMAND_STATE_ACTIVE);
     fc_cmd_s *cmd = &controller->command_pool[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
 
     const BOOL is_write = nand_operation_is_page_write(cmd->config.operation) == true;
 
     /* ── 2. 写路径编码：Random 加扰 → ECC（RAID XOR 在 stripe 路径）── */
     if (is_write == true)
     {
-        const fc_status_e encode_result = fc_data_path_encode(cmd);
+        const fc_status_e encode_result = fc_data_path_encode(cmd_id);
 
         if (encode_result != FC_STATUS_OK)
         {
@@ -1095,12 +1123,12 @@ static fc_status_e fc_poll_dispatch_single(fc_ctl_s *controller, const fc_sched_
 #if CONFIG_FC_RAID
     if ((is_write == true) && (cmd->config.raid == FC_RAID_MODE_ENCODE))
     {
-        return fc_stripe_submit(controller, cmd, cmd_id);
+        return fc_stripe_submit(controller, cmd_id);
     }
 #endif
 
     /* ── 4. 构建自包含 request 并提交 ── */
-    const fc_status_e build_result = fc_build_dispatch_request(controller, cmd, cmd_id, &request);
+    const fc_status_e build_result = fc_build_dispatch_request(controller, cmd_id, &request);
     if (build_result != FC_STATUS_OK)
     {
         LOGW("fc: build request failed for op=%hhu cmd_id=%hu status=%d\r\n", cmd->config.operation, cmd_id, build_result);
@@ -1151,13 +1179,14 @@ static fc_status_e fc_poll_dispatch_chain(fc_ctl_s *controller, const fc_sched_c
     /* ── 2. 逐条 encode + 构建 request ── */
     for (i = 0U; i < chain_count; i++)
     {
-        const fc_cmd_id_t cmd_id   = chain->ids[i];
-        fc_cmd_s         *cmd      = &controller->command_pool[cmd_id];
-        const BOOL        is_write = nand_operation_is_page_write(cmd->config.operation) == true;
+        const fc_cmd_id_t cmd_id = chain->ids[i];
+        fc_cmd_s         *cmd    = &controller->command_pool[cmd_id];
+        ASSERT(cmd->cmd_id == cmd_id);
+        const BOOL is_write = nand_operation_is_page_write(cmd->config.operation) == true;
 
         if (is_write == true)
         {
-            const fc_status_e encode_result = fc_data_path_encode(cmd);
+            const fc_status_e encode_result = fc_data_path_encode(cmd_id);
 
             if (encode_result != FC_STATUS_OK)
             {
@@ -1166,7 +1195,7 @@ static fc_status_e fc_poll_dispatch_chain(fc_ctl_s *controller, const fc_sched_c
             }
         }
 
-        const fc_status_e build_result = fc_build_dispatch_request(controller, cmd, cmd_id, &reqs[i]);
+        const fc_status_e build_result = fc_build_dispatch_request(controller, cmd_id, &reqs[i]);
         if (build_result != FC_STATUS_OK)
         {
             LOGW("fc: build request failed for cmd_id=%hu (chain %hhu/%hhu) status=%d\r\n", cmd_id, i, chain_count, build_result);
@@ -1200,8 +1229,12 @@ static fc_status_e fc_poll_dispatch_chain(fc_ctl_s *controller, const fc_sched_c
  * - 否则 peek 后续，收集同一 (ch,ce,lun) 的连续命令，直到 chain==END 或链满。
  * - 只 peek 不消耗——真正弹出在 fc_poll_fill_queue 里，链放不下时可原样留在队列。
  */
-static BYTE fc_poll_chain_length(const fc_sub_queue_s *queue, const fc_cmd_s *head)
+static BYTE fc_poll_chain_length(const fc_ctl_s *controller, const fc_sub_queue_s *queue, fc_cmd_id_t head_id)
 {
+    ASSERT(head_id < FC_COMMAND_POOL_DEPTH);
+
+    const fc_cmd_s *head = &controller->command_pool[head_id];
+    ASSERT(head->cmd_id == head_id);
     BYTE need = 1U;
 
     if (head->config.chain == FC_CHAIN_END)
@@ -1314,7 +1347,7 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
             continue;
         }
 
-        need = fc_poll_chain_length(queue, cmd);
+        need = fc_poll_chain_length(controller, queue, id);
         if (fc_nand_dispatch_lun_free(ch, ce, lun) < need)
         {
             // 剩余槽放不下整条链：本轮挂起该 LUN，链头回推（成员后续轮次一并回推）
@@ -1579,26 +1612,30 @@ void assertion_platform_context(void)
  *
  * 配置错误一律 ASSERT；唯一合法失败是队列满。
  *
- * @param cmd 命令（ALLOCATED）
+ * @param cmd_id 命令 ID（ALLOCATED）
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL
  */
-fc_status_e fc_submit(fc_cmd_s *cmd)
+fc_status_e fc_submit(fc_cmd_id_t cmd_id)
 {
-    fc_cmd_id_t cmd_id = FC_CMD_ID_INVALID;
-
     /* ── 校验段：提交是唯一入队边界 —— debug ASSERT + release 拒绝（判据 9）。 ── */
-    ASSERT_REJECT(fc_command_to_id(cmd, &cmd_id), FC_STATUS_INVALID_ARGUMENT, "submit: command pointer not in pool");
+    ASSERT_REJECT(cmd_id < FC_COMMAND_POOL_DEPTH,
+                  FC_STATUS_INVALID_ARGUMENT,
+                  "submit: cmd=%hu out of range",
+                  cmd_id);
     ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                   FC_STATUS_INVALID_ARGUMENT,
                   "submit: cmd=%hu not ALLOCATED",
                   cmd_id);
+
+    fc_cmd_s *cmd = &g_fc_controller.command_pool[cmd_id];
+
     fc_command_validate(cmd);
-    ASSERT_REJECT(fc_pool_chain_validate(&g_fc_controller, cmd_id, cmd) != 0U,
+    ASSERT_REJECT(fc_pool_chain_validate(&g_fc_controller, cmd_id) != 0U,
                   FC_STATUS_INVALID_ARGUMENT,
                   "submit: chain invalid cmd=%hu",
                   cmd_id);
 
-    return fc_sched_submit(&g_fc_controller, cmd);
+    return fc_sched_submit(&g_fc_controller, cmd_id);
 }
 
 /**
@@ -1610,11 +1647,11 @@ fc_status_e fc_submit(fc_cmd_s *cmd)
  * @param n    条数
  * @return FC_STATUS_OK；FC_STATUS_QUEUE_FULL；FC_STATUS_INVALID_ARGUMENT 链契约违反
  */
-fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
+fc_status_e fc_submit_batch(const fc_cmd_id_t cmd_ids[], DWORD n)
 {
-    ASSERT_REJECT((cmds != NULL) && (n > 0U),
+    ASSERT_REJECT((cmd_ids != NULL) && (n > 0U),
                   FC_STATUS_INVALID_ARGUMENT,
-                  "batch: cmds/n invalid");
+                  "batch: cmd_ids/n invalid");
 
     WORD  sq_need        = 0U;
     WORD  hsq_need       = 0U;
@@ -1624,26 +1661,31 @@ fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
 
     for (DWORD i = 0U; i < n; i++)
     {
-        fc_cmd_s   *cmd    = cmds[i];
-        fc_cmd_id_t cmd_id = FC_CMD_ID_INVALID;
+        const fc_cmd_id_t cmd_id = cmd_ids[i];
 
-        // 批内重复：此时所有命令都还是 ALLOCATED，同一指针出现两次会双双通过
-        // 校验；提交阶段会把同一 ID 入队两次（第二次状态 setter 拒绝但 push 已发生）。
+        // 批内重复：同一 ID 出现两次会双双通过校验；提交阶段会把同一 ID
+        // 入队两次（第二次状态 setter 拒绝但 push 已发生）。
         for (DWORD j = 0U; j < i; j++)
         {
-            ASSERT_REJECT(cmds[j] != cmd,
+            ASSERT_REJECT(cmd_ids[j] != cmd_id,
                           FC_STATUS_INVALID_ARGUMENT,
                           "batch: duplicate command at index %lu",
                           i);
         }
 
-        ASSERT_REJECT(fc_command_to_id(cmd, &cmd_id), FC_STATUS_INVALID_ARGUMENT, "batch: command pointer not in pool");
+        ASSERT_REJECT(cmd_id < FC_COMMAND_POOL_DEPTH,
+                      FC_STATUS_INVALID_ARGUMENT,
+                      "batch: cmd=%hu out of range",
+                      cmd_id);
         ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                       FC_STATUS_INVALID_ARGUMENT,
                       "batch: cmd=%hu not ALLOCATED",
                       cmd_id);
+
+        fc_cmd_s *cmd = &g_fc_controller.command_pool[cmd_id];
+
         fc_command_validate(cmd);
-        ASSERT_REJECT(fc_pool_chain_validate(&g_fc_controller, cmd_id, cmd) != 0U,
+        ASSERT_REJECT(fc_pool_chain_validate(&g_fc_controller, cmd_id) != 0U,
                       FC_STATUS_INVALID_ARGUMENT,
                       "batch: chain invalid cmd=%hu",
                       cmd_id);
@@ -1684,7 +1726,7 @@ fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n)
 
     for (DWORD i = 0U; i < n; i++)
     {
-        const fc_status_e st = fc_sched_submit(&g_fc_controller, cmds[i]);
+        const fc_status_e st = fc_sched_submit(&g_fc_controller, cmd_ids[i]);
 
         // 预检通过后入队不可能失败；失败即队列不变量被破坏：
         // debug 停机；release 记 sticky fatal，不再继续半批。

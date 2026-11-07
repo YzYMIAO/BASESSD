@@ -1169,7 +1169,7 @@ static BOOL l2p_load_submit(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD pb
 
     if (ftl_op_submit(cmd, FTL_OP_L2P, line) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         l2p_line_hint_clear(cache, line_idx);
         L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
         line->prefetch              = false;
@@ -2392,7 +2392,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
 
     if (ftl_op_submit(cmd, FTL_OP_L2P, line) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         L2P_TAG(cache, line)->state = L2P_CACHE_DIRTY;                        /* 回滚：行仍脏，下轮重试 */
         md_slot_release(owner->metadata_dir, region_addr[0], region_addr[1]); /* 无命令在飞 ⇒ 释放预留（RISK-MD-06）*/
         return FTL_AGAIN;
@@ -2726,7 +2726,7 @@ void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
             {
                 if (cmd2 != NULL)
                 {
-                    (void)fc_command_release(cmd2);
+                    (void)fc_command_release(cmd2->cmd_id);
                 }
                 line->flush_fail = true;
             }
@@ -2775,7 +2775,7 @@ void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
         LOGE(LOG_TAG_L2P "unexpected completion state=%d\r\n", L2P_TAG(cache, line)->state);
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 }
 
 /* ── 8. 恢复辅助 ── */

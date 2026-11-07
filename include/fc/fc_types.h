@@ -10,7 +10,7 @@
  *
  * FC（Flash Controller）层负责：命令池/Descriptor 链/缓冲池管理、
  * SQ/CQ 调度、ECC/CRC/RAID 数据路径。本头文件是 FC 层的最小依赖集
- * （状态码 + 资源 ID + 前向声明），被其余 fc_*.h 引用。
+ * （状态码 + 资源 ID + 资源统计），被其余 fc_*.h 引用。
  */
 
 /* FC 层状态码：0 = 成功，其余为具名错误/资源码（全部非负） */
@@ -48,10 +48,5 @@ typedef struct FC_RESOURCE_STATISTICS_S
     WORD descriptor_high; /* 描述符池历史最高占用 */
     WORD buffer_high;     /* buffer 池历史最高占用 */
 } fc_resource_stats_s;
-
-/* 前向声明：完整定义在 fc_command.h */
-typedef struct FC_COMMAND_S        fc_cmd_s;
-typedef struct FC_DESCRIPTOR_S     fc_desc_s;
-typedef struct FC_COMMAND_STATUS_S fc_cmd_status_s;
 
 #endif /* FC_TYPES_H */

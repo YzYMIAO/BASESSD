@@ -274,7 +274,7 @@ typedef struct FC_COMMAND_CONFIG_S
  * 0xFFFF 终止。**链长度即真值**：uniform 命令 = multi_plane × 每-plane CW 数，
  * flat 掩码命令 = 掩码置位数。凡需要"这条命令有几个 CW / 每 plane 几个"一律走链。
  */
-struct FC_DESCRIPTOR_S
+typedef struct FC_DESCRIPTOR_S
 {
     DWORD paa;                   /* 本 CW 的**芯片内地址（PAA）**；建链时由 row_paa + plane/cw 造出
                                   * （`paa_with_cw(paa_with_plane(row_paa, plane), cw)`），
@@ -292,7 +292,7 @@ struct FC_DESCRIPTOR_S
     DWORD status   : 8;  /* CW status, using FC_CW_STATUS_* bits. */
     DWORD ecc_bits : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
     DWORD reserved : 14; /* Reserved for future per-descriptor state. */
-};
+} fc_desc_s;
 
 /*
  * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。只有一种解释：
@@ -324,10 +324,9 @@ typedef union FC_PARAMETER_U
 /*
  * SQ 命令：被 FC 持有直至完成。desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
  *
- * **本结构刻意不携带自己的命令池 ID**：ID 由「指针 − command_pool 基址」导出
- * （fc_command_to_id / fc_command_id_to_command 互为逆）。缓存的副本会在
- * fc_command_release 把结构体整体清零时失效，派生值不会；而指针本来就在调用者手里，
- * 再存一份只会带来"两份真值不一致"的机会。
+ * 命令池 ID 显式保存在 `cmd_id`：分配时写入槽位号，释放时在原槽位上恢复同一个
+ * 槽位号；FREE 状态是否可操作由 `command_state` 判定。NAND dispatch 请求与 CQE
+ * 使用同一个 ID，不再由指针反推。
  *
  * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
  */
@@ -340,7 +339,7 @@ typedef union FC_PARAMETER_U
  * 不用 0 当哨兵：0 是合法的扇区 LBA（页 0 / plane 0 / CW 0）。 */
 #define FC_META_UNKNOWN (0xFFFFFFFFU)
 
-struct FC_COMMAND_S
+typedef struct FC_COMMAND_S
 {
     DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
@@ -359,7 +358,11 @@ struct FC_COMMAND_S
     fc_param_u   param;       /* 仅 FEATURES 命令使用：SET_FEATURES 的内联数据 / GET_FEATURES 的读回值
                                * （param.bytes）。「本命令访问哪些 CW」**不在命令里**——
                                * 它由 FTL 在建链时作形参交给 ftl_cmd_configure_descriptors()。 */
-};
+    fc_cmd_id_t cmd_id;       /* 本命令在 command_pool 中的槽位号；槽位生命周期内恒定。 */
+} fc_cmd_s;
+
+/* cmd_id 为 WORD；结构体按 4 字节对齐，总大小 28 B（64 槽共 1792 B）。 */
+_Static_assert(sizeof(fc_cmd_s) == 28U, "fc_cmd_s size changed");
 
 /* CQ 完成项：命令级状态 + 命令级返回段。
  * Per-CW 细节（status/ecc_bits）只留在 descriptor 链中，聚合 ECC 用 fc_get_cmd_ecc_max()；
@@ -375,7 +378,7 @@ struct FC_COMMAND_S
  *                     FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）。
  * FTL 要具体数据路径类别（UNC/CRC/RAID/META）时，用 failed_desc_id 读 desc->status；
  * 命令级只给 DATA_ERROR/META_ERROR 两个聚合位。 */
-struct FC_COMMAND_STATUS_S
+typedef struct FC_COMMAND_STATUS_S
 {
     WORD       cmd_id;         /* Completed Command Pool ID. */
     WORD       failed_cw;      /* flat CW 编号；NAND_CW_INVALID = 无失败 CW。 */
@@ -384,7 +387,7 @@ struct FC_COMMAND_STATUS_S
     BYTE       reserved;       /* Reserved. */
     fc_param_u param;          /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
                                 * （失败 CW 的定位走 desc 链，不在此聚合）。 */
-};
+} fc_cmd_status_s;
 
 /* ── ④ 结构内联工具 / 校验 ── */
 

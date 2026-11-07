@@ -259,17 +259,17 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
  * 四步只依赖本 CW 的 buffer，故合并为一次 desc 链遍历；先加扰再 ECC。
  * 跨命令 stripe parity 由 fc_data_path_generate_stripe_parity() 负责。
  *
- * @param cmd 写命令
+ * @param cmd_id 写命令 ID
  * @return FC_STATUS_OK / INVALID_ARGUMENT（buffer 缺失）/ ECC 编码错误
  */
-fc_status_e fc_data_path_encode(const fc_cmd_s *cmd)
+fc_status_e fc_data_path_encode(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     BYTE        *buffer;
     fc_status_e  result;
 
-    // 入参前置条件由调用者保证（fc.c 写路径传入有效命令）
-    ASSERT(cmd != NULL);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     // 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
     // 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历。
@@ -370,24 +370,30 @@ static BYTE *fc_chain_buffer_at(const fc_cmd_s *cmd, BYTE index)
  * @param parity_cmd parity 命令（CW 数须与数据命令一致）
  * @return FC_STATUS_OK / ECC 编码错误
  */
-fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYTE data_count, const fc_cmd_s *parity_cmd)
+fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_id_t data_cmd_ids[], BYTE data_count, fc_cmd_id_t parity_id)
 {
-    BYTE         cw_count;
-    BYTE         cw;
-    fc_desc_id_t desc_id;
-    BYTE         d;
+    BYTE            cw_count;
+    BYTE            cw;
+    fc_desc_id_t    desc_id;
+    BYTE            d;
+    const fc_cmd_s *data_cmds[PLANE_NUM];
 
     // 入参由 fc_stripe_submit 组装（stripe 路径），非外部输入
-    ASSERT(data_cmds != NULL);
-    ASSERT(data_cmds[0] != NULL);
-    ASSERT(parity_cmd != NULL);
-    ASSERT(data_count != 0U);
+    ASSERT(data_cmd_ids != NULL);
+    ASSERT(data_count > 0U);
+    ASSERT(data_count <= PLANE_NUM);
+
+    for (d = 0U; d < data_count; d++)
+    {
+        data_cmds[d] = fc_command_id_to_command(data_cmd_ids[d]);
+    }
+    const fc_cmd_s *parity_cmd = fc_command_id_to_command(parity_id);
 
     // RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容。
     // 掩码由 **desc 链重建**（链是 CW 集合的唯一真值，不回读 FTL 的输入字段）——
     // parity 链此时已在 fc_stripe_submit ③ 挂好，故重建结果即其真实访问集合。
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmds[0])));
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(parity_cmd)));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_ids[0])));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(parity_id)));
 
     // parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
     // 故 config.cw_count+1 即**每-plane** CW 数）
@@ -478,10 +484,10 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_s *data_cmds[], BYT
  * 任一 CW 不可纠即返回 IO_ERROR 且不解扰，供 FTL RAID 在 scrambled domain
  * 恢复。擦除页（1 占比 ≥ 99%）置 EMPTY，不算失败。
  *
- * @param cmd 读命令（CQ push 前由 FC 内部调用）
+ * @param cmd_id 读命令 ID（CQ push 前由 FC 内部调用）
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
  */
-fc_status_e fc_data_path_process_read(const fc_cmd_s *cmd)
+fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     fc_desc_s   *desc;
@@ -490,8 +496,8 @@ fc_status_e fc_data_path_process_read(const fc_cmd_s *cmd)
     BYTE         all_ok = 1U;
     BYTE         cw;
 
-    // 入参前置条件由调用者保证（fc.c 读路径 Stage 1）
-    ASSERT(cmd != NULL);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     // 链长度即 CW 数（config.cw_count / multi_plane 不参与推导；flat 掩码下两者会分叉）
     BYTE total_desc = 0U;
@@ -637,19 +643,19 @@ fc_status_e fc_data_path_process_read(const fc_cmd_s *cmd)
  *
  * 重建后 ECC 重试仍失败即硬件不可恢复；成功后解扰全 CW 并重新检查 CRC/META。
  *
- * @param cmd           读命令
+ * @param cmd_id        读命令 ID
  * @param failed_cw_idx 失败 CW 在 desc 链中的下标
  * @return FC_STATUS_OK / FC_STATUS_IO_ERROR
  */
-fc_status_e fc_data_path_raid_recover(const fc_cmd_s *cmd, BYTE failed_cw_idx)
+fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE failed_cw_idx)
 {
     BYTE        *buffers[CW_TOTAL_MAX];
     BYTE         count;
     fc_desc_id_t desc_id;
     BYTE         i;
 
-    // 入参前置条件由调用者保证（FTL 仅在带 desc 链的命令 ECC 失败时触发）
-    ASSERT(cmd != NULL);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
     ASSERT(cmd->desc_id != FC_DESC_ID_INVALID);
 
     /* ── 收集所有 buffer 指针（索引对齐 desc 链位置） ── */

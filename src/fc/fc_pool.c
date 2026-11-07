@@ -46,9 +46,8 @@ static fc_buf_id_t        g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
 static fc_buf_state_e     g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 static fc_cmd_id_t        g_fc_buffer_owner[FC_BUFFER_POOL_DEPTH];
 
-/* 指针 → 池索引的安全区间检查（fc_command_to_id 与 fc_pool_command_release 共用）：
+/* 指针 → 池索引的安全区间检查（fc_command_to_id 的唯一边界实现）：
  * 用整数区间判断，池外指针（如栈上命令）不会触发指针相减 UB。 */
-static BOOL fc_pool_command_to_id(const fc_ctl_s *controller, const fc_cmd_s *cmd, fc_cmd_id_t *cmd_id);
 
 /**
  * @brief 初始化三池本体、簿记数组与空闲链表（不碰队列/调度器/硬件）
@@ -80,7 +79,8 @@ void fc_pool_init(fc_ctl_s *controller)
 
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
-        controller->command_free_next[index] = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_cmd_id_t)(index + 1U) : FC_CMD_ID_INVALID;
+        controller->command_pool[index].cmd_id = (fc_cmd_id_t)index;
+        controller->command_free_next[index]   = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_cmd_id_t)(index + 1U) : FC_CMD_ID_INVALID;
     }
     for (index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
     {
@@ -160,7 +160,7 @@ void fc_pool_command_state_set(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_cmd_
  * 出池即自洽：next_id/buffer_id 显式置哨兵。
  *
  * @param controller FC 控制器
- * @param cmd_id 归属命令 ID（调用方已用 fc_command_to_id 校验）
+ * @param cmd_id 归属命令 ID（公共入口已校验范围/状态）
  * @return desc 指针；NULL = desc 池空
  */
 static fc_desc_s *fc_pool_descriptor_alloc(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
@@ -301,7 +301,7 @@ static void fc_pool_chain_release_all(fc_ctl_s *controller, fc_desc_id_t head)
  * @brief 沿命令的 desc 链归还**全部 buffer**，并把各 desc 的 buffer_id 抹成 FC_BUF_ID_INVALID（**幂等**：已 INVALID 的跳过）。
  *
  * @param controller FC 控制器
- * @param cmd 命令。
+ * @param cmd_id 命令 ID。
  *
  * @note 只动 buffer，**不动 desc 链、不动命令槽位**——它们仍由
  * fc_command_release 回收。唯一调用者：fc_complete_from_nand 在
@@ -310,10 +310,14 @@ static void fc_pool_chain_release_all(fc_ctl_s *controller, fc_desc_id_t head)
  * 从而不双重归还；命令若没走到完成就释放，buffer 仍有效，链释放照常归还
  * ⇒ 不泄漏。归属语义见 fc_buf_own_e。
  */
-void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_s *cmd)
+void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
-    const fc_cmd_id_t cmd_id  = fc_pool_command_id(controller, cmd);
-    fc_desc_id_t      desc_id = (fc_desc_id_t)cmd->desc_id;
+    ASSERT(controller != NULL);
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    fc_cmd_s    *cmd     = &controller->command_pool[cmd_id];
+    fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
+    ASSERT(cmd->cmd_id == cmd_id);
 
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
@@ -340,15 +344,21 @@ void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_s *cmd)
  *
  * @param controller FC 控制器
  * @param cmd_id 命令 ID
- * @param cmd    命令
+ * @param cmd_id 命令 ID
  * @return true 链完整；false 归属不符 / 越段 / CW 重复 / buffer 未占用 /
  *         同 plane 行地址不一致 / multi-plane 覆盖不全 / multi_plane 越界。
  *
  * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
  *       链在提交后冻结，故校验一次即可覆盖 dispatch 阶段。
  */
-BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id, const fc_cmd_s *cmd)
+BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
+    ASSERT(controller != NULL);
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    const fc_cmd_s *cmd = &controller->command_pool[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
+
     fc_desc_id_t descriptor_id = (fc_desc_id_t)cmd->desc_id;
     DWORD        seen          = 0U;
     WORD         count         = 0U;
@@ -473,18 +483,18 @@ BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id, cons
  * debug 下 ASSERT。release 下由 FTL 的 submitted/drain 契约保证。
  *
  * @param controller FC 控制器
- * @param cmd    命令
+ * @param cmd_id 命令 ID
  */
-void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_s *cmd)
+void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
-    fc_cmd_id_t    cmd_id = FC_CMD_ID_INVALID;
-    fc_cmd_state_e state;
+    ASSERT(controller != NULL);
+    ASSERT_REJECT_VOID(cmd_id < FC_COMMAND_POOL_DEPTH,
+                       "cmd release: id=%hu out of range",
+                       cmd_id);
 
-    /* 指针身份/区间是调用者 bug；release 下也必须拒绝，不能对池外指针做指针减法。 */
-    ASSERT_REJECT_VOID(fc_pool_command_to_id(controller, cmd, &cmd_id),
-                       "cmd release: pointer not in pool");
-
-    state = controller->command_state[cmd_id];
+    fc_cmd_s      *cmd   = &controller->command_pool[cmd_id];
+    fc_cmd_state_e state = controller->command_state[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
 
     if (state == FC_COMMAND_STATE_FREE)
     {
@@ -502,6 +512,8 @@ void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_s *cmd)
 
     ASSERT(controller->command_used > 0U);
     memset(&controller->command_pool[cmd_id], 0, sizeof(controller->command_pool[cmd_id]));
+    /* memset 会清掉 cmd_id；槽位号在 FREE 状态仍保留，是否可操作由 command_state 判定。 */
+    controller->command_pool[cmd_id].cmd_id = cmd_id;
     fc_pool_command_state_set(controller, cmd_id, FC_COMMAND_STATE_FREE);
     controller->command_free_next[cmd_id] = controller->command_free_head;
     controller->command_free_head         = cmd_id;
@@ -514,13 +526,17 @@ void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_s *cmd)
  * 空链即链头；前驱 chain 置 MORE，末条保持 END。调用者保证 desc 自洽。
  *
  * @param controller FC 控制器
- * @param cmd    命令
+ * @param cmd_id 命令 ID
  * @param descriptor 待挂 desc
  */
-static void fc_pool_chain_append(fc_ctl_s *controller, fc_cmd_s *cmd, fc_desc_s *descriptor)
+static void fc_pool_chain_append(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_desc_s *descriptor)
 {
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    fc_cmd_s          *cmd    = &controller->command_pool[cmd_id];
     const fc_desc_id_t new_id = (fc_desc_id_t)(descriptor - controller->descriptor_pool);
-    fc_desc_id_t       tail   = (fc_desc_id_t)cmd->desc_id;
+    ASSERT(cmd->cmd_id == cmd_id);
+    fc_desc_id_t tail = (fc_desc_id_t)cmd->desc_id;
 
     if (tail == FC_DESC_ID_INVALID)
     {
@@ -543,33 +559,39 @@ static void fc_pool_chain_append(fc_ctl_s *controller, fc_cmd_s *cmd, fc_desc_s 
 }
 
 /**
- * @brief 分配命令槽位（清零 + desc_id=INVALID）
+ * @brief 分配命令槽位（清零 + desc_id=INVALID + 写入槽位号）
  *
- * 不清 cmd_id——结构体无此字段，ID 由指针派生。
+ * @param cmd_id 出参：新命令的池槽位号；失败时写 FC_CMD_ID_INVALID。
  *
  * @return 命令指针；NULL = 命令池空
  */
-fc_cmd_s *fc_command_alloc(void)
+fc_cmd_s *fc_command_alloc(fc_cmd_id_t *cmd_id)
 {
     fc_ctl_s   *controller = &g_fc_controller;
-    fc_cmd_id_t cmd_id;
+    fc_cmd_id_t index;
 
-    cmd_id = controller->command_free_head;
-    if (cmd_id == FC_CMD_ID_INVALID)
+    ASSERT(cmd_id != NULL);
+    *cmd_id = FC_CMD_ID_INVALID;
+
+    index = controller->command_free_head;
+    if (index == FC_CMD_ID_INVALID)
     {
         return NULL;
     }
-    ASSERT_REJECT(controller->command_state[cmd_id] == FC_COMMAND_STATE_FREE, NULL, "cmd alloc: cmd=%hu state=%d", cmd_id, controller->command_state[cmd_id]);
-    controller->command_free_head = controller->command_free_next[cmd_id];
-    memset(&controller->command_pool[cmd_id], 0, sizeof(controller->command_pool[cmd_id]));
-    controller->command_pool[cmd_id].desc_id = FC_DESC_ID_INVALID;
-    fc_pool_command_state_set(controller, cmd_id, FC_COMMAND_STATE_ALLOCATED);
+    ASSERT_REJECT(controller->command_state[index] == FC_COMMAND_STATE_FREE, NULL, "cmd alloc: cmd=%hu state=%d", index, controller->command_state[index]);
+    controller->command_free_head = controller->command_free_next[index];
+    memset(&controller->command_pool[index], 0, sizeof(controller->command_pool[index]));
+    controller->command_pool[index].desc_id = FC_DESC_ID_INVALID;
+    controller->command_pool[index].cmd_id  = index;
+    fc_pool_command_state_set(controller, index, FC_COMMAND_STATE_ALLOCATED);
     controller->command_used++;
     if (controller->command_used > controller->command_high)
     {
         controller->command_high = controller->command_used;
     }
-    return &controller->command_pool[cmd_id];
+
+    *cmd_id = index;
+    return &controller->command_pool[index];
 }
 
 /**
@@ -603,23 +625,22 @@ fc_buf_id_t fc_buffer_alloc(void)
  * @brief 建链入口：分配 desc、填 PAA/config/meta、挂链、按需分配 buffer
  *
  * 失败不回滚：已分配的 desc 都在链上，调用方沿链释放即完整回收。合法
- * 失败是资源池空（RESOURCE_EMPTY）；命令指针不在池内则 debug ASSERT、
+ * 失败是资源池空（RESOURCE_EMPTY）；命令 ID 越界或状态不对则 debug ASSERT、
  * release 返回 INVALID_ARGUMENT。
  *
- * @param cmd   命令（ALLOCATED 且 plane 段/掩码已设好）
+ * @param cmd_id 命令 ID（ALLOCATED 且 plane 段/掩码已设好）
  * @param plane     plane 号
  * @param cw        CW 号
  * @param row_paa   该 plane 的行地址（PAA）
  * @param buffer_id 上层申请的 buffer（buf_own 默认路径传 INVALID）
  * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY desc/buffer 池空；
- *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内 / 命令不在 ALLOCATED /
+ *         FC_STATUS_INVALID_ARGUMENT 命令 ID 越界 / 命令不在 ALLOCATED /
  *         上层 buffer ID 越界或归属不符
  */
-fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id)
+fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_id_t cmd_id, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id)
 {
     fc_desc_s  *descriptor;
     fc_buf_id_t alloc_id;
-    fc_cmd_id_t cmd_id = FC_CMD_ID_INVALID;
     DWORD       plane_cw;
 #ifndef NDEBUG
     BYTE plane_first;
@@ -628,15 +649,18 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plan
 
     /* ── 校验段：不得触碰任何池 ──
      * 资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，是模仿硬件的预期失败。
-     * 指针不在池内、生命周期不对、上层 buffer 越界/归属不符：debug ASSERT；
+     * ID 越界、生命周期不对、上层 buffer 越界/归属不符：debug ASSERT；
      * release 拒绝并返回 INVALID_ARGUMENT（判据 9 闸门，避免把坏 owner/越界 ID
      * 写进 desc）。坐标错误只在 debug 检查，提交边界 fc_pool_chain_validate 兜底。 */
-    ASSERT_REJECT(fc_command_to_id(cmd, &cmd_id), FC_STATUS_INVALID_ARGUMENT, "configure descriptor: cmd pointer not in pool");
+    ASSERT_REJECT(cmd_id < FC_COMMAND_POOL_DEPTH, FC_STATUS_INVALID_ARGUMENT, "configure descriptor: cmd=%hu out of range", cmd_id);
     ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                   FC_STATUS_INVALID_ARGUMENT,
                   "configure descriptor: cmd=%hu state=%d not ALLOCATED",
                   cmd_id,
                   g_fc_controller.command_state[cmd_id]);
+
+    fc_cmd_s *cmd = &g_fc_controller.command_pool[cmd_id];
+    ASSERT(cmd->cmd_id == cmd_id);
 
 #ifndef NDEBUG
     (void)fc_command_plane_span(cmd, &plane_first, &plane_last);
@@ -691,7 +715,7 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plan
     descriptor->next_id         = FC_DESC_ID_INVALID;
     descriptor->meta            = (cmd->meta & ~PLANE_CW_MASK) | plane_cw;
 
-    fc_pool_chain_append(&g_fc_controller, cmd, descriptor); /* 出池即挂链 */
+    fc_pool_chain_append(&g_fc_controller, cmd_id, descriptor); /* 出池即挂链 */
 
     // 上层申请（buf_own 10/11）：buffer 由调用者 fc_buffer_alloc 好并传进来，无失败路径。
     if ((cmd->config.buf_own & FC_BUF_OWN_ALLOC_BY_UPPER) != 0U)
@@ -716,16 +740,16 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plan
 /**
  * @brief 建链入口（FC 申请 buffer 的默认路径）
  *
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @param plane   plane 号
  * @param cw      CW 号
  * @param row_paa 该 plane 的行地址
  * @return FC_STATUS_OK；FC_STATUS_RESOURCE_EMPTY 池空；
- *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内
+ *         FC_STATUS_INVALID_ARGUMENT 命令 ID 越界
  */
-fc_status_e fc_command_configure_descriptor(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa)
+fc_status_e fc_command_configure_descriptor(fc_cmd_id_t cmd_id, BYTE plane, BYTE cw, DWORD row_paa)
 {
-    return fc_command_configure_descriptor_with_buffer(cmd, plane, cw, row_paa, FC_BUF_ID_INVALID);
+    return fc_command_configure_descriptor_with_buffer(cmd_id, plane, cw, row_paa, FC_BUF_ID_INVALID);
 }
 
 /**
@@ -756,14 +780,14 @@ fc_desc_id_t fc_descriptor_chain_release_all(fc_desc_id_t head)
 /**
  * @brief 释放命令槽位（FREE 幂等）
  *
- * @note 指针不在池内/在飞释放由 fc_pool_command_release 的 release 守卫拒绝；
+ * @note ID 越界/在飞释放由 fc_pool_command_release 的 release 守卫拒绝；
  *       本函数只负责单例入口。
  *
- * @param cmd 命令；指针须落在命令池内。
+ * @param cmd_id 命令 ID；须为池内槽位。
  */
-void fc_command_release(fc_cmd_s *cmd)
+void fc_command_release(fc_cmd_id_t cmd_id)
 {
-    fc_pool_command_release(&g_fc_controller, cmd);
+    fc_pool_command_release(&g_fc_controller, cmd_id);
 }
 
 /**
@@ -819,16 +843,16 @@ BYTE *fc_buffer_get_base(fc_buf_id_t buffer_id)
  *
  * 按 paa_to_cw 匹配，不是链走位（flat CW 掩码下两者会分叉）。
  *
- * @param cmd  命令
+ * @param cmd_id 命令 ID
  * @param cw_index CW 号
  * @return 数据指针；未找到 / 无 buffer 返回 NULL
  */
-BYTE *fc_get_cmd_data_ptr(fc_cmd_s *cmd, BYTE cw_index)
+BYTE *fc_get_cmd_data_ptr(fc_cmd_id_t cmd_id, BYTE cw_index)
 {
     fc_desc_id_t desc_id;
 
     // cmd/desc 链非空是前置条件；cw_index 不在链上仍按查询语义返回 NULL
-    ASSERT(cmd != NULL);
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
     ASSERT(cmd->desc_id != FC_DESC_ID_INVALID);
 
     /* 同 fc_buffer_get_meta：cw_index 不带 plane，multi-plane 下无法唯一定位；
@@ -863,16 +887,16 @@ BYTE *fc_get_cmd_data_ptr(fc_cmd_s *cmd, BYTE cw_index)
  *
  * 按 paa_to_cw(desc->paa) 匹配，不是链走位。
  *
- * @param cmd  命令
+ * @param cmd_id 命令 ID
  * @param cw_index CW 号
  * @return META 指针；未找到 / 无 buffer 返回 NULL
  */
-BYTE *fc_buffer_get_meta(fc_cmd_s *cmd, BYTE cw_index)
+BYTE *fc_buffer_get_meta(fc_cmd_id_t cmd_id, BYTE cw_index)
 {
     fc_desc_id_t did;
 
-    // cmd 非空是前置条件（gc.c 传入有效命令）；未找到 CW 仍按契约返回 NULL
-    ASSERT(cmd != NULL);
+    // cmd_id 是池内句柄；未找到 CW 仍按契约返回 NULL
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     /* cw_index 不带 plane：multi-plane 命令同一 CW 号在两个 plane 各有一条 desc，
      * 本函数只能返回链序第一个匹配。release 下宁可返回 NULL，也不静默交出错 plane
@@ -902,15 +926,15 @@ BYTE *fc_buffer_get_meta(fc_cmd_s *cmd, BYTE cw_index)
  *
  * 链是 CW 集合的唯一真值；须在 fc_command_release 之前调用。
  *
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @return flat 位图（bit = plane*CW_NUM + cw）
  */
-DWORD fc_get_cmd_cw_bitmap(const fc_cmd_s *cmd)
+DWORD fc_get_cmd_cw_bitmap(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     DWORD        mask = 0U;
 
-    ASSERT(cmd != NULL);
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
@@ -932,15 +956,15 @@ DWORD fc_get_cmd_cw_bitmap(const fc_cmd_s *cmd)
  *
  * 空链按「非空」处理（没有 CW 就没有证据）；只对读命令 + 已完成命令有意义。
  *
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @return true 全部 CW 都是 EMPTY；false 否则
  */
-BOOL fc_get_cmd_all_cw_empty(const fc_cmd_s *cmd)
+BOOL fc_get_cmd_all_cw_empty(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     WORD         n = 0U;
 
-    ASSERT(cmd != NULL);
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (n < CW_TOTAL_MAX))
@@ -963,15 +987,15 @@ BOOL fc_get_cmd_all_cw_empty(const fc_cmd_s *cmd)
  *
  * 须在 fc_command_release 之前调用。
  *
- * @param cmd 命令
+ * @param cmd_id 命令 ID
  * @return 最大 ECC bit 数；空链为 0
  */
-BYTE fc_get_cmd_ecc_max(const fc_cmd_s *cmd)
+BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     BYTE         ecc_max = 0U;
 
-    ASSERT(cmd != NULL);
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
@@ -988,23 +1012,6 @@ BYTE fc_get_cmd_ecc_max(const fc_cmd_s *cmd)
 }
 
 /* ── ID / 指针转换 ── */
-
-/**
- * @brief 命令指针 → 池索引（指针 − 池基址）
- *
- * 前置：command 属于本控制器命令池。
- *
- * @param controller FC 控制器
- * @param cmd    命令指针
- * @return 池索引
- */
-fc_cmd_id_t fc_pool_command_id(const fc_ctl_s *controller, const fc_cmd_s *cmd)
-{
-    ASSERT(controller != NULL);
-    ASSERT(cmd != NULL);
-
-    return (fc_cmd_id_t)(cmd - controller->command_pool);
-}
 
 /**
  * @brief 命令指针 → 池索引（带 controller 参数；区间检查的唯一实现）
@@ -1032,7 +1039,17 @@ static BOOL fc_pool_command_to_id(const fc_ctl_s *controller, const fc_cmd_s *cm
     {
         return false;
     }
-    *cmd_id = (fc_cmd_id_t)((addr - base) / sizeof(fc_cmd_s));
+
+    const fc_cmd_id_t index = (fc_cmd_id_t)((addr - base) / sizeof(fc_cmd_s));
+
+    // 字段与槽位地址必须一致；不一致说明生命周期写点漏了 memset 后的恢复。
+    // release 也必须拒绝，不能把漂移的 ID 写进状态机/队列。
+    if (cmd->cmd_id != index)
+    {
+        return false;
+    }
+
+    *cmd_id = index;
     return true;
 }
 
@@ -1060,6 +1077,7 @@ fc_cmd_s *fc_command_id_to_command(fc_cmd_id_t cmd_id)
     // cmd_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
     // 任何调用者都不可能传入越界值——越界即不变量破坏，留现场。
     ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+    ASSERT(g_fc_controller.command_pool[cmd_id].cmd_id == cmd_id);
     return &g_fc_controller.command_pool[cmd_id];
 }
 

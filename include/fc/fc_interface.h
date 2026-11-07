@@ -26,10 +26,11 @@
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
+ *   fc_command_alloc(&cmd_id) → 填 config/参数 → 逐条
+ *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
- *   → fc_submit() → fc_service()（后台推进）
- *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
+ *   → fc_submit(cmd_id) → fc_service()（后台推进）
+ *   → fc_poll_completion() 取完成 → fc_command_release(cmd_id) 回收。
  *
  * 边界：FC = 硬件 FCC 的软件替身。**不含策略**——「访问哪些 CW」由 FTL 决定，
  *   「数据搬运」由 FTL 做（fc_command_configure_descriptor + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
@@ -91,9 +92,11 @@ extern "C"
     /**
      * @brief 申请一个命令槽位。
      *
-     * @return 命令指针；命令池空时返回 NULL。
+     * @param cmd_id 出参：新命令的池槽位号；失败时写 FC_CMD_ID_INVALID。
+     *
+     * @return 命令指针（供调用者填 config/route/paa）；命令池空时返回 NULL。
      */
-    fc_cmd_s *fc_command_alloc(void);
+    fc_cmd_s *fc_command_alloc(fc_cmd_id_t *cmd_id);
 
     /**
      * @brief 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
@@ -110,22 +113,22 @@ extern "C"
      * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
      * multi-plane = [0, multi_plane)）。
      * 前置：命令处于 ALLOCATED；plane 落在本命令 plane 段内；CW 号 < CW_NUM；
-     * row_paa 的 plane 位 == plane。命令指针不在池内、命令不在 ALLOCATED：
+     * row_paa 的 plane 位 == plane。命令 ID 越界、命令不在 ALLOCATED：
      * debug 停机，release 返回 FC_STATUS_INVALID_ARGUMENT；plane/CW/row_paa 坐标
      * 只在 debug 检查，提交边界 fc_pool_chain_validate 兜底。配置错误绝不发到硬件。
      *
-     * @param cmd 目标命令；须已 ALLOCATED。
+     * @param cmd_id 目标命令 ID；须已 ALLOCATED。
      * @param plane   CW 所在 plane；须落在本命令的 plane 段内。
      * @param cw      CW 号；须 < CW_NUM。
      * @param row_paa 该 plane 的行地址（PAA）；其 plane 位必须等于 plane。
      *
      * @return FC_STATUS_OK             建链成功。
      *         FC_STATUS_RESOURCE_EMPTY desc 或 buffer 池空——只有「申请不到」才走返回码（模仿硬件行为）。
-     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内 / 命令不在 ALLOCATED
+     *         FC_STATUS_INVALID_ARGUMENT 命令 ID 越界 / 命令不在 ALLOCATED
      *                                  （debug ASSERT；release 判据 9 闸门）。
      *                                  **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」是不变量，调用方沿链释放即完整回收（见下两个函数）。
      */
-    fc_status_e fc_command_configure_descriptor(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa);
+    fc_status_e fc_command_configure_descriptor(fc_cmd_id_t cmd_id, BYTE plane, BYTE cw, DWORD row_paa);
 
     /**
      * @brief 建链入口（**上层申请 buffer**）——与上一个的唯一差别是 buffer 从哪来。
@@ -134,7 +137,7 @@ extern "C"
      * buf_own = FC 申请（00/01）时必须传 FC_BUF_ID_INVALID（否则 release 返回 INVALID_ARGUMENT）。
      * 其余前置与失败语义与 fc_command_configure_descriptor 一致。
      *
-     * @param cmd   目标命令；须已 ALLOCATED。
+     * @param cmd_id    目标命令 ID；须已 ALLOCATED。
      * @param plane     CW 所在 plane；须落在本命令的 plane 段内。
      * @param cw        CW 号；须 < CW_NUM。
      * @param row_paa   该 plane 的行地址（PAA）；其 plane 位必须等于 plane。
@@ -142,11 +145,11 @@ extern "C"
      *
      * @return FC_STATUS_OK             建链成功。
      *         FC_STATUS_RESOURCE_EMPTY desc 池空，或 FC 申请 buffer 时 buffer 池空。
-     *         FC_STATUS_INVALID_ARGUMENT 命令指针不在池内 / 命令不在 ALLOCATED /
+     *         FC_STATUS_INVALID_ARGUMENT 命令 ID 越界 / 命令不在 ALLOCATED /
      *                                    上层 buffer ID 越界或归属不符
      *                                    （debug ASSERT；release 判据 9 闸门）。
      */
-    fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_s *cmd, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id);
+    fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_id_t cmd_id, BYTE plane, BYTE cw, DWORD row_paa, fc_buf_id_t buffer_id);
 
     /**
      * @brief 释放链头那一个 desc（含其 buffer），返回新链头；空链（desc_id 越界）原样返回。
@@ -179,13 +182,13 @@ extern "C"
      * （归属 / plane 段 / CW 唯一 / buffer 占用 / 行一致 / multi-plane 覆盖）。
      * 违反时 debug ASSERT；release 返回 FC_STATUS_INVALID_ARGUMENT（判据 9 闸门）。
      *
-     * @param cmd 待提交命令；须在命令池内且状态 ALLOCATED。
+     * @param cmd_id 待提交命令 ID；须在池内且状态 ALLOCATED。
      *
      * @return FC_STATUS_OK         入队成功。
      *         FC_STATUS_QUEUE_FULL 目标队列满（资源，模仿硬件行为）。
-     *         FC_STATUS_INVALID_ARGUMENT 指针/状态/链校验失败（release）。
+     *         FC_STATUS_INVALID_ARGUMENT ID/状态/链校验失败（release）。
      */
-    fc_status_e fc_submit(fc_cmd_s *cmd);
+    fc_status_e fc_submit(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 批量提交：n 条命令要么全进 SQ/HSQ，要么一条都不进。
@@ -197,16 +200,16 @@ extern "C"
      * 这是流式序列的中间窗口；FTL 的序列状态负责在 run_end 发 `FC_CHAIN_END`，
      * `chain_owner` 跨窗口保留。
      *
-     * @param cmds 命令指针数组，长度为 n；批内指针须**互不相同**。
-     * @param n    命令条数；须 > 0。
+     * @param cmd_ids 命令 ID 数组，长度为 n；批内 ID 须**互不相同**。
+     * @param n       命令条数；须 > 0。
      *
      * @return FC_STATUS_OK               全部入队。
      *         FC_STATUS_QUEUE_FULL       SQ 或 HSQ 余量不足（一条都不入队）。
      *         FC_STATUS_INVALID_ARGUMENT 批内含 chain 成员但优先级不一致；
-     *                                    批内有重复命令指针；或某条命令的指针/
+     *                                    批内有重复命令 ID；或某条命令的 ID/
      *                                    状态/链校验失败（release）。
      */
-    fc_status_e fc_submit_batch(fc_cmd_s *const cmds[], DWORD n);
+    fc_status_e fc_submit_batch(const fc_cmd_id_t cmd_ids[], DWORD n);
 
     /**
      * @brief 调度执行（上层 while(1) 轮询调用）。
@@ -249,12 +252,12 @@ extern "C"
     /**
      * @brief 释放命令及关联 Descriptor 链 + 各 CW buffer（FREE 幂等）。
      *
-     * 指针不在池内、或命令仍在飞（QUEUED/ACTIVE）：debug ASSERT；release 由池闸门
+     * ID 越界、或命令仍在飞（QUEUED/ACTIVE）：debug ASSERT；release 由池闸门
      * 拒绝，不释放任何资源。生命周期由调用链保证（未提交 / 完成项已取走）。
      *
-     * @param cmd 待释放命令；指针须落在命令池内。
+     * @param cmd_id 待释放命令 ID；须为池内槽位。
      */
-    void fc_command_release(fc_cmd_s *cmd);
+    void fc_command_release(fc_cmd_id_t cmd_id);
 
     /* ═══════ ③ buffer 访问 ═══════ */
     /**
@@ -303,13 +306,13 @@ extern "C"
      *   desc，本接口无法用它唯一定位 ⇒ release 返回 NULL（debug ASSERT）；
      *   multi-plane 的逐 CW 读取请沿 desc 链遍历。
      *
-     * @param cmd  命令；须非空。
+     * @param cmd_id 命令 ID；须为池内槽位。
      * @param cw_index CW 号。
      *
      * @return META 字段指针（4 字节）；链上无该 CW、该 desc 没有 buffer，
-     *         或 cmd 为 multi-plane 时返回 NULL。
+     *         或命令为 multi-plane 时返回 NULL。
      */
-    BYTE *fc_buffer_get_meta(fc_cmd_s *cmd, BYTE cw_index);
+    BYTE *fc_buffer_get_meta(fc_cmd_id_t cmd_id, BYTE cw_index);
 
     /* ═══════ ④ 数据查询 ═══════ */
     /**
@@ -319,34 +322,34 @@ extern "C"
      *   desc，本接口无法用它唯一定位 ⇒ release 返回 NULL（debug ASSERT）；
      *   multi-plane 的逐 CW 读取请沿 desc 链遍历（如 ftl_cmd_read_data）。
      *
-     * @param cmd  命令；须非空且 desc 链非空。
+     * @param cmd_id 命令 ID；须为池内槽位且 desc 链非空。
      * @param cw_index CW 号。
      *
      * @return 该 CW 的 USER 数据指针；不在链上、该 desc 无 buffer，
-     *         或 cmd 为 multi-plane 时返回 NULL。
+     *         或命令为 multi-plane 时返回 NULL。
      */
-    BYTE *fc_get_cmd_data_ptr(fc_cmd_s *cmd, BYTE cw_index);
+    BYTE *fc_get_cmd_data_ptr(fc_cmd_id_t cmd_id, BYTE cw_index);
 
     /**
      * @brief 从 desc 链重建命令的 flat CW 掩码（bit n = plane*CW_NUM + cw；无 desc 时 0）。
      * **链是 CW 集合的唯一真值**——FC 内没有掩码输入，需要"掩码形状"的
      * 判定（如 RAID 的 plane 对称性）一律走这里按链重建。
      *
-     * @param cmd 命令；须非空。
+     * @param cmd_id 命令 ID；须为池内槽位。
      *
      * @return flat CW 掩码；无 desc 时为 0。
      */
-    DWORD fc_get_cmd_cw_bitmap(const fc_cmd_s *cmd);
+    DWORD fc_get_cmd_cw_bitmap(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 命令级聚合 ECC：desc 链上所有 CW 的 ecc_bits 最大值。
      * 须在 fc_command_release() 之前调用（desc 释放后失效）。
      *
-     * @param cmd 命令；须非空。
+     * @param cmd_id 命令 ID；须为池内槽位。
      *
      * @return desc 链上所有 CW 的 ecc_bits 最大值；无 desc 时为 0。
      */
-    BYTE fc_get_cmd_ecc_max(const fc_cmd_s *cmd);
+    BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 命令读到的所有 CW 是否都是**擦除页**（desc 链上每个 CW 都是 FC_CW_STATUS_EMPTY）。
@@ -355,13 +358,13 @@ extern "C"
      * parity 是否写成）只有 FC 看得见，FTL 只拿得到 USER 区。
      * 须在 fc_command_release() 之前调用（desc 释放后失效）。
      *
-     * @param cmd 命令；须非空，且是读命令（写命令的 desc 状态不表示介质内容）。
+     * @param cmd_id 命令 ID；须为池内槽位，且是读命令（写命令的 desc 状态不表示介质内容）。
      *
      * @return true  = 链上每个 CW 都判为擦除页
      *         false = 至少一个 CW 不是（含解码成功 / UNC / 读失败），
      *                 或 desc 链为空（没有 CW 就没有证据）
      */
-    BOOL fc_get_cmd_all_cw_empty(const fc_cmd_s *cmd);
+    BOOL fc_get_cmd_all_cw_empty(fc_cmd_id_t cmd_id);
 
     /* ═══════ ⑤ 查询工具 ═══════ */
     /**
@@ -376,8 +379,8 @@ extern "C"
     /**
      * @brief 指针→ID 转换（fc_command_id_to_command 的逆）。返回 0 = command 不在命令池内
      * （例如栈上的 fc_cmd_s），*cmd_id 未定义。
-     * ⚠ 命令 ID 由「指针 − command_pool 基址」导出，**不是 fc_cmd_s 的字段**
-     * （见 fc_command.h）——命令释放、结构体整体清零之后，本函数依然能算出 ID。
+     * ⚠ 先校验指针是否落在命令池且按元素对齐，再读取 `fc_cmd_s.cmd_id`；
+     * 池外指针不会解引用命令对象。
      *
      * @param cmd    命令指针。
      * @param cmd_id ID 出参；返回 1 时写入。

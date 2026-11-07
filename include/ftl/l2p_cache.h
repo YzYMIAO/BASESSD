@@ -362,15 +362,15 @@ typedef struct L2P_CACHE_LINE_S
  */
 /* 前向声明：owner 端口需要 Journal 的 WAL 水位（RISK-L2P-09 的区域写回闸门）。
  * 不 include journal.h——journal.h 反向 include 本头，会成环。 */
-struct L2P_JOURNAL_S;
+typedef struct L2P_JOURNAL_S l2p_jrn_s;
 
 typedef struct L2P_OWNER_S
 {
-    BYTE                  die; /* 本 owner 的实例编号（global 路由键） */
-    md_dir_cache_s       *metadata_dir;
-    alc_s                *alloc;
-    ftl_topo_s            topo;
-    struct L2P_JOURNAL_S *journal; /* 本 die 的 Journal：区域写回前查 WAL 水位（可为 NULL：纯 RAM 夹具） */
+    BYTE            die; /* 本 owner 的实例编号（global 路由键） */
+    md_dir_cache_s *metadata_dir;
+    alc_s          *alloc;
+    ftl_topo_s      topo;
+    l2p_jrn_s      *journal; /* 本 die 的 Journal：区域写回前查 WAL 水位（可为 NULL：纯 RAM 夹具） */
 } l2p_owner_s;
 
 typedef const l2p_owner_s *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);

@@ -352,7 +352,7 @@ static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap
 
     test_trace_detail("read p%02hu bm=0x%02hhX cw=%hhu %s", page, plane_bitmap, test_cw_count(cmd), (erased != 0U) ? "all-0xFF" : "PAA-verified");
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 /**************************************************************************
@@ -507,7 +507,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_RESET, FC_CRC_ENABLE));
 
         (void)test_submit_wait(cmd);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* Step 2: READ_ID — 在 release 前验证 buffer 数据。
@@ -532,7 +532,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
             id_bytes[i] = buf[i]; /* 留作证据：把**实读到的 5 字节**打出来，而不是只报"成功" */
         }
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* Step 3: READ_PARAMETER_PAGE — 在 release 前验证 buffer 非 0xFF。
@@ -554,7 +554,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
             onfi_bytes[i] = buf[i];
         }
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* Step 4: READ_ONFI_SIGNATURE (90h + 地址 20h) — 与 Step 3 的 EC 路径**同名不同路**：
@@ -576,7 +576,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
             sig_bytes[i] = completion.param.bytes[i];
         }
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* Step 5: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
@@ -590,7 +590,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
         munit_assert_uint32(test_submit_wait(cmd).status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* Step 6: READ_UNIQUE_ID (EDh) — 与参数页共用同一 UOP 模板，只换命令字节；
@@ -614,7 +614,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
             uid_bytes[i] = buf[i];
         }
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     /* 证据摘要（--log-visible info）：六条命令的**实读字节**。
@@ -671,7 +671,7 @@ static void l3_feature_get(uint8_t addr, uint8_t out[4])
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     (void)memcpy(out, completion.param.bytes, 4U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 /* SET_FEATURES(addr, 4 字节)。写入值取自 cmd->param.bytes（fc.c:1283 在派发时拷进暂存，
@@ -687,7 +687,7 @@ static void l3_feature_set(uint8_t addr, const uint8_t in[4])
     completion = test_submit_wait(cmd);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 /**************************************************************************
@@ -832,7 +832,7 @@ static uint8_t l3_prio_submit(uint8_t operation, uint8_t addr, const uint8_t in[
         (void)memcpy(cmd->param.bytes, in, 4U);
     }
 
-    munit_assert_int(fc_submit(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
 
     g_l3_prio_slots[g_l3_prio_used].cmd    = cmd;
     g_l3_prio_slots[g_l3_prio_used].is_get = (operation == (uint8_t)OP_GET_FEATURES) ? 1U : 0U;
@@ -872,7 +872,7 @@ static void l3_prio_drain(void)
                     {
                         (void)memcpy(g_l3_prio_slots[j].out, completion.param.bytes, 4U);
                     }
-                    munit_assert_int(fc_command_release(g_l3_prio_slots[j].cmd), ==, FC_STATUS_OK);
+                    munit_assert_int(fc_command_release(g_l3_prio_slots[j].cmd->cmd_id), ==, FC_STATUS_OK);
                     g_l3_prio_slots[j].cmd = NULL;
                     outstanding--;
                     matched = 1U;
@@ -1007,7 +1007,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
          * op_idx = 项目 op 表下标，onfi = 真正发到线上的命令字节（0x70 / 0x78）。 */
         test_trace_summary("READ_STATUS op_idx=%hhu onfi=0x%02hhX -> completion.status=0x%hX", status_ops[i], status_cmds[i], completion.status);
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -1070,7 +1070,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
             fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = block, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
-            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+            munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         }
 
         /* 4b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
@@ -1078,7 +1078,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
             fc_cmd_s *cmd = test_cmd_build(&(nand_addr_s){.block = dest, .plane = plane, .page = page}, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), (uint32_t)pba_from_addr(&(nand_addr_s){.block = block, .plane = plane, .page = page}), &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
-            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+            munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         }
     }
 
@@ -1425,7 +1425,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              * plane 段内其余 CW 一起查（那些槽这次没被填过）⇒ 用 verify_chain_paa。 */
             verify_chain_paa(cmd);
 
-            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+            munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         }
     }
 
@@ -1543,7 +1543,7 @@ static MunitResult test_block_load_fetch(const MunitParameter params[], void *da
  *    - 回读值 == FC 写路径写入的 META（每 CW 的 META = (command->meta & ~PLANE_CW_MASK)
  *      | plane_cw，见 fc_interface.c:197；prog 的 command->meta = 本页 PBA）
  *    - **链内 META 复核（v1.36）**：另走一条**普通读**（有 desc 链），读回后从 CW 基址
- *      offset 0 经 `fc_buffer_get_meta(cmd, cw)` 取 META，与上面 op 11 的结果逐位一致——
+ *      offset 0 经 `fc_buffer_get_meta(cmd->cmd_id, cw)` 取 META，与上面 op 11 的结果逐位一致——
  *      这正是 gc.c 的真实消费路径（读页 → get_meta(cmd,0) → 4 字节扇区地址 → >> CW_WIDTH）。
  *      两条路径互为交叉检查：一条「无链只读回读」，一条「链内 buffer」。
  *
@@ -1595,7 +1595,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
             for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2 */
             {
                 const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PLANE_CW_SHIFT) | (uint32_t)cw;
-                uint8_t       *meta_ptr = fc_buffer_get_meta(cmd, cw);
+                uint8_t       *meta_ptr = fc_buffer_get_meta(cmd->cmd_id, cw);
                 uint32_t       got_meta;
 
                 munit_assert_not_null(meta_ptr);
@@ -1609,9 +1609,9 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
             /* 契约：cw_index 不在链上 → NULL（本命令只覆盖该 plane 的 CW 0..CW_NUM-1，
              * 传 CW_NUM 必然落空）。 */
-            munit_assert_null(fc_buffer_get_meta(cmd, (uint8_t)CW_NUM));
+            munit_assert_null(fc_buffer_get_meta(cmd->cmd_id, (uint8_t)CW_NUM));
 
-            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+            munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         }
     }
 
@@ -1850,7 +1850,7 @@ static uint16_t l3_stress_reap(void)
             test_capture_cmd(slot->cmd);
             test_verify_page_paa(g_source_data, slot->block, slot->page, slot->plane_bm);
         }
-        munit_assert_int(fc_command_release(slot->cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(slot->cmd->cmd_id), ==, FC_STATUS_OK);
         slot->cmd = NULL;
     }
     return n;
@@ -1889,10 +1889,10 @@ static void l3_stress_stream(uint8_t operation, uint16_t block)
                         {
                             /* 池满：本页还没发出去，本轮只 polling */
                         }
-                        else if (fc_submit(cmd) != FC_STATUS_OK)
+                        else if (fc_submit(cmd->cmd_id) != FC_STATUS_OK)
                         {
                             /* SQ 满：还命令，本页还没发出去 */
-                            (void)fc_command_release(cmd);
+                            (void)fc_command_release(cmd->cmd_id);
                         }
                         else
                         {
@@ -2002,15 +2002,17 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
 
 static MunitResult test_block_lock_tight(const MunitParameter params[], void *data)
 {
-    fc_cmd_s *cmd;
-    uint8_t       page;
+    fc_cmd_s   *cmd;
+    fc_cmd_id_t cmd_id;
+    uint8_t     page;
 
     (void)params;
     (void)data;
 
     /* Phase 1: 执行 BLOCK_LOCK_TIGHT -- 永久锁定整片 NAND */
-    cmd = fc_command_alloc();
+    cmd = fc_command_alloc(&cmd_id);
     munit_assert_not_null(cmd);
+    (void)cmd_id;
     cmd->config.operation = OP_BLOCK_LOCK_TIGHT;
     cmd->config.ch        = 0U;
     cmd->config.ce        = 0U;
@@ -2039,7 +2041,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
 
         munit_assert_not_null(cmd);
 
-        result = fc_submit(cmd);
+        result = fc_submit(cmd->cmd_id);
         munit_assert_int(result, ==, FC_STATUS_OK);
 
         for (service_count = 0U; service_count < TEST_SERVICE_LOOP_MAX; service_count++)
@@ -2112,10 +2114,12 @@ static uint16_t l3_buf_used(void)
  *   buf_own = FC 申请那条路）。此处照 test_cmd_try_build 的样子手工建。 */
 static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, uint8_t buf_own)
 {
-    fc_cmd_s    *cmd  = fc_command_alloc();
+    fc_cmd_id_t  cmd_id;
+    fc_cmd_s    *cmd  = fc_command_alloc(&cmd_id);
     fc_cmd_cfg_s conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
 
     munit_assert_not_null(cmd);
+    (void)cmd_id;
 
     conf.buf_own = (DWORD)buf_own;
     cmd->config  = conf;
@@ -2127,7 +2131,7 @@ static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, uint8_t buf_own)
     cmd->paa                = paa_from_addr(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U});
     cmd->meta               = 0U;
 
-    munit_assert_int(fc_command_configure_descriptor_with_buffer(cmd, 0U, 0U, cmd->paa, buffer_id), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_configure_descriptor_with_buffer(cmd->cmd_id, 0U, 0U, cmd->paa, buffer_id), ==, FC_STATUS_OK);
 
     return cmd;
 }
@@ -2148,7 +2152,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 建链即申请 */
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 00 完成不自动归还 */
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         munit_assert_uint32(l3_buf_used(), ==, base); /* release 归还 */
     }
 
@@ -2163,7 +2167,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, base); /* 01 完成即归还 */
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         munit_assert_uint32(l3_buf_used(), ==, base); /* 幂等：不双重归还 */
     }
 
@@ -2178,7 +2182,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_FC_FREE);
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, base); /* 11 完成即由 FC 归还上层的 buffer */
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         munit_assert_uint32(l3_buf_used(), ==, base);
     }
 
@@ -2193,7 +2197,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE);
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 10 完成不归还 */
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         munit_assert_uint32(l3_buf_used(), ==, base); /* release 恒归还链上未归还的 buffer */
     }
 
@@ -2206,7 +2210,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         cmd          = test_cmd_build(&(nand_addr_s){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
 
         munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
         munit_assert_uint32(l3_buf_used(), ==, base);
     }
 

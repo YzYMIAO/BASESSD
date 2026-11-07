@@ -41,7 +41,7 @@
  *      ⇒ ch/ce/lun 只能显式给（完成派发的实例路由键）。
  *
  * 【命令身份】
- *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（由指针派生，见 fc_command.h）。
+ *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（读命令对象的 cmd_id，见 fc_command.h）。
  *
  * 为什么这些在本层：FC 定位为**硬件 FCC 的软件替身**——只提供槽位/描述符/
  * 队列/数据路径，不含策略。而「访问哪些 CW」（掩码枚举）与「数据怎么搬」（拷贝）
@@ -112,20 +112,18 @@ static inline BOOL ftl_fc_host_budget_ok(void)
 /**
  * @brief 命令指针 → FC 命令池 ID。
  *
- * fc_cmd_s 里**没有** cmd_id 字段：ID 由「指针 − command_pool 基址」导出
- * （见 fc_command.h）。本层调用者手里的 cmd 恒来自 fc_command_alloc()，故 ID 必然有效；
- * 池外指针（栈上的 fc_cmd_s）得到 FC_CMD_ID_INVALID——那是编程错误，
- * 调用方（pending_add / sync_wait）会因查不到而失败，不会静默串命令。
+ * 命令池 ID 保存在 fc_cmd_s.cmd_id（见 fc_command.h）。本层调用者手里的 cmd
+ * 恒来自 fc_command_alloc()，故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
+ * FC_CMD_ID_INVALID——那是编程错误，调用方（pending_add / sync_wait）会因查不到
+ * 而失败，不会静默串命令。
  *
  * @param cmd 命令指针（本层调用者恒来自 fc_command_alloc()）
  * @return FC 命令池 ID；池外指针返回 FC_CMD_ID_INVALID
  */
 static inline WORD ftl_cmd_id(const fc_cmd_s *cmd)
 {
-    fc_cmd_id_t cmd_id = FC_CMD_ID_INVALID;
-
-    (void)fc_command_to_id(cmd, &cmd_id);
-    return cmd_id;
+    ASSERT(cmd != NULL);
+    return cmd->cmd_id;
 }
 
 /**

@@ -353,9 +353,11 @@ static DWORD cache_read_collect(const cache_read_req_s *req, DWORD pba[FTL_CACHE
  */
 static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL start_seq, BOOL end_seq)
 {
+    fc_cmd_id_t cmd_ids[FTL_CACHE_READ_MAX_PAIRS];
+
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
-        b->cmds[i] = fc_command_alloc();
+        b->cmds[i] = fc_command_alloc(&cmd_ids[i]);
 
         if (b->cmds[i] == NULL)
         {
@@ -397,7 +399,7 @@ static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req,
 
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
-        b->pends[i] = pend_alloc(&req->ftl->pending, ftl_cmd_id(b->cmds[i]));
+        b->pends[i] = pend_alloc(&req->ftl->pending, cmd_ids[i]);
 
         if (b->pends[i] == NULL)
         {
@@ -429,7 +431,7 @@ build_fail:
         }
         if (b->cmds[i] != NULL)
         {
-            (void)fc_command_release(b->cmds[i]);
+            (void)fc_command_release(b->cmds[i]->cmd_id);
         }
     }
     return false;
@@ -479,7 +481,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_s *req, DW
         for (DWORD i = 0U; i < b.n_pairs; i++)
         {
             pend_remove(&req->ftl->pending, ftl_cmd_id(b.cmds[i]));
-            (void)fc_command_release(b.cmds[i]);
+            (void)fc_command_release(b.cmds[i]->cmd_id);
             pend_group_drop_subop(&req->ftl->pending, req->gi);
         }
 
@@ -781,7 +783,7 @@ static void cache_wr_discard(ftl_ctx_s *ftl, cache_wr_build_s *b)
     {
         if (b->cmds[i] != NULL)
         {
-            (void)fc_command_release(b->cmds[i]);
+            (void)fc_command_release(b->cmds[i]->cmd_id);
         }
     }
 
@@ -1229,7 +1231,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
             }
             for (BYTE j = 0U; j < b.n_cmd; j++)
             {
-                (void)fc_command_release(b.cmds[j]);
+                (void)fc_command_release(b.cmds[j]->cmd_id);
             }
             for (BYTE j = 0U; j < b.n_alloc; j++)
             {

@@ -264,7 +264,7 @@ static ftl_status_e mig_cmd_submit(mig_handle_s *m, fc_cmd_s *cmd)
     if (ftl_op_submit(cmd, op, m) != FTL_OK)
     {
         m->job.waiting = false;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_AGAIN;
     }
 
@@ -1256,7 +1256,7 @@ static void mig_batch_release_cmds(fc_cmd_s *cmds[], BYTE n)
     {
         if (cmds[k] != NULL)
         {
-            (void)fc_command_release(cmds[k]);
+            (void)fc_command_release(cmds[k]->cmd_id);
         }
     }
 }
@@ -2387,7 +2387,7 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
         if (dr == GC_DECODE_OK)
         {
             const WORD gsrc = ftl_gblock(plane, m->job.victim.plane_blocks[plane]);
-            const BYTE ecc  = fc_get_cmd_ecc_max(cmd);
+            const BYTE ecc  = fc_get_cmd_ecc_max(cmd->cmd_id);
 
             // B4：搬移读记录 ECC 趋势 + read disturb 计数（预测性退役闭环）。
             // 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。
@@ -2407,7 +2407,7 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
     }
 
     // 逐 CW 反查 L2P 改在 MIG_READ_SETTLE（纯计算阶段，可挂起等 region 加载）
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     m->job.waiting = false;
     timer_deadline_clear(&m->job.submit_deadline);
 
@@ -2479,7 +2479,7 @@ static void mig_write_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
 {
     const BOOL write_ok = (fc_cmd_status_is_success(completion->status));
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     m->job.waiting = false;
     timer_deadline_clear(&m->job.submit_deadline);
 
@@ -2532,7 +2532,7 @@ static void mig_write_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
  */
 static void mig_write_batch_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_status_s *completion)
 {
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
 
     m->job.last_fc_status = completion->status;
 
@@ -2654,7 +2654,7 @@ static void mig_erase_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
         m->job.closed_removed = true;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     m->job.waiting = false;
     timer_deadline_clear(&m->job.submit_deadline);
     m->job.plane = (plane + 1U);
@@ -2683,7 +2683,7 @@ void ftl_migrate_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
     if (m == NULL)
     {
         LOGE(LOG_TAG_MIG "late completion cmd=%hu status=0x%02hx — released\r\n", completion->cmd_id, completion->status);
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -2703,7 +2703,7 @@ void ftl_migrate_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
     if ((m->job.active == false) || (m->job.waiting == false))
     {
         LOGW(LOG_TAG_MIG "orphan completion phase=%d active=%d waiting=%d — ignored\r\n", m->job.phase, m->job.active, m->job.waiting);
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -2733,7 +2733,7 @@ void ftl_migrate_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
         default:
             // 不该发生：一条命令对应一个提交阶段（READ / WRITE / ERASE）。
             LOGE(LOG_TAG_MIG "unexpected completion phase=%d\r\n", m->job.phase);
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             m->job.waiting = false;
             mig_job_abort(m, "unexpected completion");
             mig_job_step(m);

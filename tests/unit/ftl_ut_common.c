@@ -13,11 +13,12 @@
 #include "cli.h" /* g_ctrl */
 #include "fault_inject.h"
 #include "fc_interface.h"
+#include "fc_nand_dispatch.h"
+#include "fc_nand_engine.h"
 #include "ftl_op.h"
 #include "journal.h"
 #include "metadata_job.h"
 #include "migrate.h"
-#include "nand_dispatch.h"
 #include "pending.h"
 #include "platform.h"
 #include "power_failure_recovery.h"
@@ -236,7 +237,7 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
 {
     const DWORD t0 = platform_now_ms();
 
-    ftl->bg_suspend = 1U;
+    ftl->flags.bg_suspend = 1U;
 
     for (;;)
     {
@@ -267,7 +268,7 @@ void ftl_ut_reboot_from_media(void)
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
     (void)fc_init();
-    nand_dispatch_set_armed(1U); /* fc_init 会复位置位；与 FC UT 的 test_setup 同做法 */
+    fc_nand_engine_set_armed(1U); /* fc_init 会复位置位；与 FC UT 的 test_setup 同做法 */
     ftl_op_init();
 
     static struct FTL_CONTEXT_S *s_route[FTL_DIE_MAX];
@@ -325,7 +326,7 @@ void ftl_ut_media_format(void)
     memset(&status, 0, sizeof(status));
     trigger.kind = WBUF_TRIGGER_RESET;
 
-    ftl->bg_suspend = 1U;
+    ftl->flags.bg_suspend = 1U;
     (void)wb_handle(ftl->wbuf, &trigger, &status);
 
     munit_assert_int(pfr_media_format(ftl, false), ==, FTL_OK);
@@ -531,13 +532,13 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_uint32(rs.descriptor_used, ==, 0U);
     munit_assert_uint32(rs.buffer_used, ==, 0U);
 
-    munit_assert_false(ftl->mig_handle->active);
-    munit_assert_false(ftl->mig_handle->waiting);
+    munit_assert_false(ftl->mig_handle->job.active);
+    munit_assert_false(ftl->mig_handle->job.waiting);
     munit_assert_false(ftl->cp_handle->active);
     munit_assert_false(ftl->cp_handle->waiting);
     munit_assert_true(md_handle_is_idle(ftl->metadata_dir));
     munit_assert_true(jrn_is_idle(ftl->journal));
     munit_assert_true(wb_is_idle(ftl->wbuf));
-    munit_assert_uint32(ftl->cache->load_inflight, ==, 0U);
-    munit_assert_uint32(ftl->cache->flush_inflight, ==, 0U);
+    munit_assert_uint32(ftl->cache->inflight.load, ==, 0U);
+    munit_assert_uint32(ftl->cache->inflight.flush, ==, 0U);
 }

@@ -358,7 +358,7 @@ typedef struct FTL_TRIM_JOB_S
     timer_deadline_s deadline;  /* 无进展等待 deadline */
 } ftl_trim_job_s;
 
-struct FTL_CONTEXT_S
+typedef struct FTL_CONTEXT_S
 {
     ftl_topo_s   topo;    /* 本 FTL 绑定的 NAND 芯片路由 */
     l2p_cache_s *cache;   /* 共享：g_l2p_cache[ch][ce] */
@@ -387,7 +387,7 @@ struct FTL_CONTEXT_S
     rr_handle_s   read_recovery_handle; /* 异步恢复 job */
     BYTE         *rr_page_scratch;      /* 恢复整页暂存（装配挂载） */
     BYTE          write_retry_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES];
-};
+} ftl_ctx_s;
 
 /**
  * @brief 描述符的外部存储

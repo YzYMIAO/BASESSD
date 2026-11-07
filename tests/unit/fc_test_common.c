@@ -6,8 +6,9 @@
 
 #include "fc_test_common.h"
 
+#include "fc_nand_dispatch.h"
+#include "fc_nand_engine.h"
 #include "fc_random_engine.h"
-#include "nand_dispatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,7 +188,7 @@ fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd)
     uint8_t         completed  = 0U;
 
     munit_assert_not_null(cmd);
-    munit_assert_int(fc_submit(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
 
     for (uint32_t i = 0U; i < TEST_SERVICE_LOOP_MAX; i++)
     {
@@ -256,7 +257,7 @@ void *test_setup(const MunitParameter params[], void *user_data)
 
     /* 异步 dispatch 放行闩锁（main.c 在 NAND 初始化后已置 1，此处幂等重申）。
      * 本套件走 fc_service() → nand_fc_start/step 异步路径，闩锁必须为 1。 */
-    nand_dispatch_set_armed(1U);
+    fc_nand_engine_set_armed(1U);
 
     if (g_source_data == NULL)
     {
@@ -319,8 +320,9 @@ uint8_t *test_cw_scratch(uint8_t idx)
  * 配置错误（坐标越界 / 掩码漏 plane）仍是 ASSERT：那是调用者 bug，不是资源问题。 */
 fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_cfg_s *config)
 {
-    fc_cmd_s *cmd;
-    uint8_t   is_multi;
+    fc_cmd_s   *cmd;
+    fc_cmd_id_t cmd_id;
+    uint8_t     is_multi;
 
     ASSERT(addr != NULL);
     ASSERT(config != NULL);
@@ -347,11 +349,12 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32
         }
     }
 
-    cmd = fc_command_alloc();
+    cmd = fc_command_alloc(&cmd_id);
     if (cmd == NULL)
     {
         return NULL; /* 命令池空 */
     }
+    (void)cmd_id;
 
     /* 照 ftl_cmd_setup_ppa 的口径：地址信息既进 paa，也镜像进 config.ch/ce/lun。
      * v47：FTL 侧边界会 pba_to_paa 后赋给 cmd->paa，本夹具照抄（paa_from_addr 忽略
@@ -370,7 +373,7 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, uint32_t cw_bitmap, uint32
     {
         /* 建链中途失败（desc / buffer 池空）：不就地回滚，整条 release 沿链回收
          * 已挂的 desc/buffer + 归还命令槽，再向上报「建不出来」。 */
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return NULL;
     }
 
@@ -426,7 +429,7 @@ fc_cmd_status_s test_erase_block(uint16_t block_index, uint8_t plane_bitmap, con
 
     completion = test_submit_wait(cmd);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return completion;
 }
 
@@ -473,7 +476,7 @@ fc_cmd_status_s test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint1
     /* 证据明细（--log-visible debug）：这条命令实际写了哪一页 / 几个 CW / 什么状态。 */
     test_trace_detail("prog p%02hu PBA=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page_index, (unsigned long)pba_from_addr(&addr), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return completion;
 }
 
@@ -521,7 +524,7 @@ fc_cmd_status_s test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint1
      * 内部搬移 = 源页 PBA），它是 Pass 4 ② 比对 META 的基准。 */
     test_trace_detail("read p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page_index, (unsigned long)meta, plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return completion;
 }
 
@@ -675,7 +678,7 @@ static fc_cmd_status_s test_read_cache_step(uint16_t block_index, uint8_t plane_
      * 真正输出的是 output_page——打出来才看得出「地址与 meta 刻意解耦」这件事。 */
     test_trace_detail("cache out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", output_page, (unsigned long)pba_from_addr(&(nand_addr_s){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = output_page}), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return completion;
 }
 
@@ -702,7 +705,7 @@ static fc_cmd_status_s test_cache_start_seq(uint16_t block_index, uint8_t plane_
 
     test_trace_detail("cache start p%02hu op=%lu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hX", page, operation, (unsigned long)pba_from_addr(&addr), plane_bitmap, test_cw_count(cmd), completion.status);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     return completion;
 }
 
@@ -825,8 +828,9 @@ void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_cfg_s 
  * 一个命令只有一个 command->meta，而两 plane 的 PBA 已经不同。 */
 fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint16_t page_index, uint32_t lba_meta, const fc_cmd_cfg_s *config)
 {
-    fc_cmd_s *cmd;
-    DWORD     pba[PLANE_NUM];
+    fc_cmd_s   *cmd;
+    fc_cmd_id_t cmd_id;
+    DWORD       pba[PLANE_NUM];
 
     ASSERT(blocks != NULL);
     ASSERT(config != NULL);
@@ -842,8 +846,9 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint
         pba[plane] = pba_from_addr(&addr);
     }
 
-    cmd = fc_command_alloc();
+    cmd = fc_command_alloc(&cmd_id);
     munit_assert_not_null(cmd);
+    (void)cmd_id;
 
     cmd->config             = *config;
     cmd->config.ch          = 0U;
@@ -854,7 +859,7 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const uint16_t blocks[PLANE_NUM], uint
 
     if (ftl_cmd_setup_ppa_pair_cw(cmd, pba, test_plane_cw_bitmap(TEST_PLANE_BM_ALL)) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         munit_errorf("pair chain build failed (page=%hu)", page_index);
         return NULL;
     }
@@ -880,7 +885,7 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     {
@@ -894,7 +899,7 @@ void test_prog_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     test_trace_summary("cross-block cache prog: plane0 blk=%hu / plane1 blk=%hu, %u x 15h + 1 x 10h = %d pairs", blocks[0], blocks[1], (PAGES_PER_BLOCK - 1U), PAGES_PER_BLOCK);
@@ -938,7 +943,7 @@ void test_read_block_cache_multi_plane_pair(const uint16_t blocks[PLANE_NUM], co
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_pair_paa(g_source_data, blocks, page, TEST_PLANE_BM_ALL);
 
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
     }
 
     test_trace_summary("cross-block cache read: plane0 blk=%hu / plane1 blk=%hu, START_SEQ_MP + %u SEQ_MP + LAST_MP, both planes PAA-verified", blocks[0], blocks[1], (PAGES_PER_BLOCK - 2U));
@@ -993,7 +998,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, prefetched, plane_bitmap);
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* ③ SEQ(31h)：输出 RANDOM 预取的 addr，预取 addr+1 */
     conf           = *config;
@@ -1061,7 +1066,7 @@ void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_in
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_cfg_s *config)
@@ -1108,7 +1113,7 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, page_index, plane_bitmap);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 /* META 只读回读（OP_READ_META，v46）：无 desc 链，回读指定页、指定 CW 的前 4 字节 META，
@@ -1139,7 +1144,7 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 /* 块锁族（v49）：op 21/22/23 与 op 25 的 op 表 has_data 全为 0 —— 不搬 host 数据、无 desc 链。
@@ -1164,7 +1169,7 @@ void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 }
 
 uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_cfg_s *config)
@@ -1190,7 +1195,7 @@ uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
-    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(fc_command_release(cmd->cmd_id), ==, FC_STATUS_OK);
 
     return raw;
 }

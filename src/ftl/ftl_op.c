@@ -419,7 +419,7 @@ ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
     }
 
     // 回滚登记，命令仍归调用者。
-    if (fc_submit(cmd) != FC_STATUS_OK)
+    if (fc_submit(cmd->cmd_id) != FC_STATUS_OK)
     {
         ftl_op_req_remove(cmd_id);
         return FTL_AGAIN;
@@ -445,12 +445,16 @@ ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op
 {
     ASSERT(cmds != NULL);
     ASSERT(n > 0U);
+    ASSERT(n <= FC_COMMAND_POOL_DEPTH);
+
+    fc_cmd_id_t cmd_ids[FC_COMMAND_POOL_DEPTH];
 
     // 逐个命令都是调用者已配置好的池内命令；先在本函数入口断言，避免
     // seq_gate 先解引用空元素。fc_submit_batch 的同类断言在其后，来不及兜。
     for (DWORD i = 0U; i < n; i++)
     {
         ASSERT(cmds[i] != NULL);
+        cmd_ids[i] = cmds[i]->cmd_id;
 
         if (ftl_op_seq_gate(cmds[i], op) == true)
         {
@@ -475,7 +479,7 @@ ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op
         added++;
     }
 
-    const fc_status_e submit_status = fc_submit_batch(cmds, n);
+    const fc_status_e submit_status = fc_submit_batch(cmd_ids, n);
 
     if (submit_status != FC_STATUS_OK)
     {
@@ -527,7 +531,7 @@ void ftl_op_drain(void)
         if (req->pending == false)
         {
             LOGE(LOG_TAG_FTL "completion without request cmd=%hu status=0x%02hx — released\r\n", completion.cmd_id, completion.status);
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             continue;
         }
 
@@ -544,7 +548,7 @@ void ftl_op_drain(void)
         if (fn == NULL)
         {
             LOGE(LOG_TAG_FTL "orphan request cmd=%hu op=%hhu status=0x%02hx — released\r\n", completion.cmd_id, op_byte, completion.status);
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             continue;
         }
 

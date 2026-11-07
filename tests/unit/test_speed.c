@@ -229,10 +229,7 @@ static void spd_fc_note_peak(fc_resource_stats_s *peak)
     fc_resource_stats_s now;
 
     memset(&now, 0, sizeof(now));
-    if (fc_get_resource_stats(&now) != FC_STATUS_OK)
-    {
-        return;
-    }
+    fc_get_resource_stats(&now);
 
 #    define SPD_FC_MAX_FIELD(field)      \
         do                               \
@@ -282,7 +279,7 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_s *slot)
         addr.cw    = (BYTE)paa_to_cw(desc->paa);
 
         const DWORD expected = paa_from_addr(&addr);
-        const BYTE *user     = fc_buffer_id_to_real_buffer(desc->buffer_id);
+        const BYTE *user     = fc_buffer_get_user_data(desc->buffer_id);
 
         if (desc->paa != expected)
         {
@@ -313,7 +310,7 @@ static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_s *peak)
 
     for (WORD i = 0U; i < n; i++)
     {
-        spd_fc_slot_s *slot = spd_fc_slot_find((WORD)buf[i].command_id);
+        spd_fc_slot_s *slot = spd_fc_slot_find((WORD)buf[i].cmd_id);
 
         if (slot == NULL)
         {
@@ -329,10 +326,7 @@ static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_s *peak)
         {
             (*errors) += spd_fc_verify_read(slot);
         }
-        if (fc_command_release(slot->cmd) != FC_STATUS_OK)
-        {
-            (*errors)++;
-        }
+        fc_command_release(slot->cmd->cmd_id);
         slot->cmd = NULL;
 
         if (s_fc_inflight != 0U)
@@ -410,7 +404,7 @@ static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[S
                     cmd = spd_fc_try_build(mode, write, blocks[b], page, ch, ce, lun);
                     if (cmd != NULL)
                     {
-                        if (fc_submit(cmd) == FC_STATUS_OK)
+                        if (fc_submit(cmd->cmd_id) == FC_STATUS_OK)
                         {
                             slot->cmd    = cmd;
                             slot->block  = blocks[b];
@@ -430,7 +424,7 @@ static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[S
                             }
                             break; /* 本页已提交 */
                         }
-                        (void)fc_command_release(cmd);
+                        (void)fc_command_release(cmd->cmd_id);
                     }
 
                     (void)fc_service();
@@ -535,7 +529,7 @@ static void spd_fc_assert_pools_empty(void)
     fc_resource_stats_s stats;
 
     memset(&stats, 0, sizeof(stats));
-    munit_assert_int(fc_get_resource_stats(&stats), ==, FC_STATUS_OK);
+    fc_get_resource_stats(&stats);
     munit_assert_uint32(stats.sq_used, ==, 0U);
     munit_assert_uint32(stats.hsq_used, ==, 0U);
     munit_assert_uint32(stats.cq_used, ==, 0U);
@@ -561,12 +555,12 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     test_trace_begin();
 
     ftl_ctx_s *ftl           = g_ctrl.ftl[0];
-    const BOOL saved_suspend = (ftl != NULL) ? ftl->bg_suspend : false;
+    const BOOL saved_suspend = (ftl != NULL) ? ftl->flags.bg_suspend : false;
 
     /* 原始擦写期间禁止 FTL 后台/分配器动作；测试返回后由用户 format+POR 收尾。 */
     if (ftl != NULL)
     {
-        ftl->bg_suspend = true;
+        ftl->flags.bg_suspend = true;
     }
 
     WORD       blocks[SPD_FC_BLOCKS];
@@ -576,7 +570,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     {
         if (ftl != NULL)
         {
-            ftl->bg_suspend = saved_suspend;
+            ftl->flags.bg_suspend = saved_suspend;
         }
         munit_errorf("only %hu good block pairs found (need %u)", good, SPD_FC_BLOCKS);
     }
@@ -595,7 +589,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
         (void)spd_fc_drain(&errors, &peak);
         if (ftl != NULL)
         {
-            ftl->bg_suspend = saved_suspend;
+            ftl->flags.bg_suspend = saved_suspend;
         }
         munit_errorf("fc speed write phase did not drain (errors=%lu)", errors);
     }
@@ -606,7 +600,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
         (void)spd_fc_drain(&errors, &peak);
         if (ftl != NULL)
         {
-            ftl->bg_suspend = saved_suspend;
+            ftl->flags.bg_suspend = saved_suspend;
         }
         munit_errorf("fc speed read phase did not drain (errors=%lu)", errors);
     }
@@ -614,7 +608,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
 
     if (ftl != NULL)
     {
-        ftl->bg_suspend = saved_suspend;
+        ftl->flags.bg_suspend = saved_suspend;
     }
 
     const DWORD bytes   = (DWORD)SPD_FC_BYTES;
@@ -973,7 +967,7 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
         memset(&stats, 0, sizeof(stats));
         (void)fc_get_resource_stats(&stats);
 
-        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->active) && (!ftl->mig_handle->waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->load_inflight == 0U) && (ftl->cache->flush_inflight == 0U))
+        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->job.active) && (!ftl->mig_handle->job.waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U))
         {
             return true;
         }

@@ -156,7 +156,7 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap)
             {
                 continue;
             }
-            if (fc_command_configure_descriptor(cmd, plane, cw, row_paa) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd->cmd_id, plane, cw, row_paa) != FC_STATUS_OK)
             {
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
@@ -219,7 +219,7 @@ static ftl_status_e ftl_cmd_build_pair_chain(fc_cmd_s *cmd, const DWORD pba[PLAN
             {
                 continue;
             }
-            const fc_status_e st = fc_command_configure_descriptor(cmd, plane, cw, row_paa);
+            const fc_status_e st = fc_command_configure_descriptor(cmd->cmd_id, plane, cw, row_paa);
             if (st != FC_STATUS_OK)
             {
                 // 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放
@@ -613,7 +613,7 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
 
     if ((st != FTL_OK) && (submitted == false))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
     }
     // submitted == true 且失败：命令仍在 FC/NAND，迟到完成由 drain 释放——不要碰它。
 
@@ -645,12 +645,15 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
  */
 static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_id_t cmd_id;
+    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
 
     if (cmd == NULL)
     {
         return NULL;
     }
+
+    (void)cmd_id; /* 本 helper 只返回命令对象；调用方通过 cmd->cmd_id 取句柄 */
 
     cmd->config.operation   = operation;
     cmd->config.crc         = cfg->crc;
@@ -685,7 +688,7 @@ static fc_cmd_s *ftl_sync_page_prepare(DWORD pba, BYTE operation, const ftl_page
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return NULL;
     }
 
@@ -713,7 +716,7 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
 
     if ((data != NULL) && (length > 0U) && (ftl_cmd_write_data(cmd, data, length) != FTL_OK))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -724,11 +727,11 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
     }
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -768,17 +771,17 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
     // ⚠ 未映射的 L2P region 不在此列：Directory 条目就是 INVALID，加载路径根本不发读。
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
     if ((buffer != NULL) && (length > 0U) && (ftl_cmd_read_data(cmd, buffer, length) != FTL_OK))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -813,11 +816,11 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
     // 会让调用者看到空洞，故必须报错。
     for (BYTE cw = 0U; cw < CW_NUM; cw++)
     {
-        const BYTE *src = fc_get_cmd_data_ptr(cmd, cw);
+        const BYTE *src = fc_get_cmd_data_ptr(cmd->cmd_id, cw);
 
         if (src == NULL)
         {
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             return FTL_ERROR;
         }
         BYTE *dst = (BYTE *)buffer + (cw * FC_BUFFER_POOL_CW_SIZE);
@@ -825,7 +828,7 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
         memcpy(dst, src, FC_BUFFER_USER_SIZE);
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -857,9 +860,9 @@ ftl_status_e ftl_page_blank_check(DWORD pba, BOOL *blank)
     }
 
     // 不看 completion.status：擦除页在 FC 里不是错误位（FC_CW_STATUS_EMPTY）。
-    *blank = fc_get_cmd_all_cw_empty(cmd);
+    *blank = fc_get_cmd_all_cw_empty(cmd->cmd_id);
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -900,11 +903,11 @@ ftl_status_e ftl_sync_erase_block(DWORD pba)
     }
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -933,11 +936,11 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba)
     }
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -986,11 +989,11 @@ ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
 
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -1033,7 +1036,7 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
 
     if (st != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return st; /* FTL_AGAIN 池空 / FTL_ERROR 建链失败 */
     }
 
@@ -1048,7 +1051,7 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
 
     if (ftl_cmd_write_data_cw(cmd, page, bitmap, false) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1083,11 +1086,11 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
     }
     if (fc_cmd_status_has_error(completion.status))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
 }
 
@@ -1121,13 +1124,13 @@ ftl_status_e ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *dat
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
     if ((data != NULL) && (length > 0U) && (ftl_cmd_write_data(cmd, data, length) != FTL_OK))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1164,13 +1167,13 @@ ftl_status_e ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *
 
     if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
     if (ftl_cmd_write_data_cw(cmd, page_buf, cw_bitmap, false) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1209,7 +1212,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
     ASSERT((cache_op == false) || (nplanes == PLANE_NUM));
     if ((cache_op == true) && (nplanes != PLANE_NUM))
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1239,7 +1242,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
             ASSERT(same_die);
             if (same_die == false)
             {
-                (void)fc_command_release(cmd);
+                (void)fc_command_release(cmd->cmd_id);
                 return FTL_ERROR;
             }
         }
@@ -1250,14 +1253,14 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
 
         if (st != FTL_OK)
         {
-            (void)fc_command_release(cmd);
+            (void)fc_command_release(cmd->cmd_id);
             return st; /* FTL_AGAIN（desc/buffer 池空，瞬态）/ FTL_ERROR */
         }
     }
 
     if (ftl_cmd_write_data_cw(cmd, pair_buf, cw_bitmap, true) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1286,7 +1289,7 @@ ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1315,7 +1318,7 @@ ftl_status_e ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1343,7 +1346,7 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_ERROR;
     }
 
@@ -1366,11 +1369,14 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
  */
 ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_id_t cmd_id;
+    fc_cmd_s   *cmd = fc_command_alloc(&cmd_id);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
+
+    (void)cmd_id; /* 本函数只交出命令对象；句柄由调用方从 cmd->cmd_id 取 */
 
     cmd->route.ch           = ch;
     cmd->route.ce           = ce;

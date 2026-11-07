@@ -371,7 +371,7 @@ static ftl_status_e cp_write_submit(cp_handle_s *h, DWORD addr, const void *data
     if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, h) != FTL_OK)
     {
         h->waiting = false;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_AGAIN;
     }
 
@@ -403,7 +403,7 @@ static ftl_status_e cp_erase_submit(cp_handle_s *h, DWORD addr)
     if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, h) != FTL_OK)
     {
         h->waiting = false;
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return FTL_AGAIN;
     }
 
@@ -601,7 +601,7 @@ void ftl_checkpoint_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
     if (h->waiting == false)
     {
         LOGE(LOG_TAG_CP "unexpected completion phase=%d (no command in flight)\r\n", h->phase);
-        (void)fc_command_release(cmd);
+        (void)fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -609,7 +609,7 @@ void ftl_checkpoint_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
 
     // 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
     // cp_job_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。
-    (void)fc_command_release(cmd);
+    (void)fc_command_release(cmd->cmd_id);
     h->waiting = false;
 
     switch ((cp_phase_e)h->phase)
