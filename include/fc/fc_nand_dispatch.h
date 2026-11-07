@@ -48,8 +48,9 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
                                      * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
                                      *   （onfi_1_0.c），plane 维从 0 起。 */
-    BYTE page_type : 2;             /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
-    BYTE reserved  : 6;             /* Reserved for future data-path bits. */
+    BYTE page_type : 2;             /* LP/MP/UP/TP — LDPC decode threshold 预留。
+                                     * 当前无读者；LDPC 分支未编译（RISK-DP-15）。 */
+    BYTE reserved : 6;              /* Reserved for future data-path bits. */
     BYTE feature_addr;              /* Feature register addr for SET/GET_FEATURES (column).
                                      * 内联数据不走本结构：FC 把 cw_buffers[plane*CW_NUM] 指向
                                      * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
@@ -115,7 +116,7 @@ typedef void (*fc_nand_dispatch_sink_fn_t)(fc_nand_dispatch_comp_s *completion, 
  * 返回本轮产出的完成条数（0 = 无完成，上限 CH_NUM×CE_NUM×LUN_NUM）。
  * 不早退——公平性依赖"每个 LUN 每轮都被走到"（见 fc_nand_dispatch.c 实现要点）。
  */
-BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
+DWORD fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
 
 /*
  * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。

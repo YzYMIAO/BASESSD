@@ -82,11 +82,11 @@ nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *confi
 /**
  * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
  *
- * tWB 已由上游 NAND_UOP_DELAY_TIMING/NAND_TIMING_TWB 保证，此处只做纯 spin-wait；
- * 首读即 HIGH 视为 ready。
+ * 非阻塞: RB# LOW 时只观察一次并让出，由 fc UOP 引擎的 wait_timeout 计时。
+ * 每次让出前 delay 1 us，避免同步初始化路径退化成纯忙转。
  *
- * @param timing 取其 busy_timeout_us 作超时（轮询计次兼作微秒）
- * @return NAND_RESULT_OK / NAND_RESULT_TIMEOUT
+ * @param timing 不使用（超时由引擎按 busy_timeout_us 统一判定）
+ * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY
  */
 static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
@@ -94,37 +94,18 @@ static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *u
 
     (void)uop;
     (void)request;
+    (void)timing;
     (void)completion;
 
-    /*
-     * RB# GPIO 轮询：NAND 已由前面的 DELAY_TIMING 保证过 tWB 窗口，
-     * handler 不再包含 tWB 保护，仅做纯 spin-wait。
-     *
-     * 如果第一次读到 RB#=HIGH，说明 NAND 已经 ready 或根本没 busy，
-     * 直接返回 OK（极短 busy 或无 busy 均视为 ready）。
-     */
-    if (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) == 0U)
+    /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
+    if (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) != 0U)
     {
-        /* RB# LOW → NAND busy，spin-wait 直到 ready */
-        DWORD polls = 0U;
-        FMC_LOGD("WAIT_READY start op=%hhu\r\n", request->operation);
-        while (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) == 0U)
-        {
-            polls++;
-            if (polls >= timing->busy_timeout_us)
-            {
-                /* 轮询计数兼作超时微秒（每次迭代 delay_us(1)） */
-                return NAND_RESULT_TIMEOUT;
-            }
-            delay_us(1U);
-        }
-        FMC_LOGD("WAIT_READY done op=%hhu polls=%lu\r\n", request->operation, polls);
         return NAND_RESULT_OK;
     }
 
-    /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
-    FMC_LOGD("WAIT_READY immediate op=%hhu\r\n", request->operation);
-    return NAND_RESULT_OK;
+    /* RB# LOW → 让出给调度器/其他 LUN；下一次 step 再检查。 */
+    delay_us(1U);
+    return NAND_RESULT_NOT_READY;
 }
 
 /**
@@ -144,12 +125,59 @@ static BYTE nand_fmc_address_byte(DWORD value)
  * @param request 命令请求
  * @param uop     ROW_* 微指令（operand = plane 下标）
  * @param shift   字节偏移（0/8/16）
- * @return 对应地址字节
+ * @param out     输出：对应地址字节
+ * @return true = operand 在 row[] 范围内；false = plane 下标越界
  */
-static BYTE nand_fmc_row_byte(const nand_cmd_req_s *request, const nand_uop_s *uop, BYTE shift)
+static BOOL nand_fmc_row_byte(const nand_cmd_req_s *request, const nand_uop_s *uop, BYTE shift, BYTE *out)
 {
-    ASSERT(uop->operand < NAND_PLANE_MAX);
-    return nand_fmc_address_byte(request->row[uop->operand] >> shift);
+    if (uop->operand >= NAND_PLANE_MAX)
+    {
+        return false;
+    }
+
+    *out = nand_fmc_address_byte(request->row[uop->operand] >> shift);
+    return true;
+}
+
+/**
+ * @brief 检查 DATA_IN/OUT 的 buffer/长度是否落在页缓冲逻辑范围内
+ *
+ * `nand_cmd_req_s` 不带 buffer 容量；这里用 PAGE_BUFFER_SIZE 作上限。
+ * 实际分配由 fc_nand_dispatch 的 req_* 构建层保证，本检查拦住 UOP 表改错
+ * 造成的 operand 越界和长度溢出。
+ *
+ * @param request 命令请求
+ * @param uop     DATA_IN/OUT 微指令（operand = buffer 偏移）
+ * @return true = 范围合法；false = buffer 为空、长度为 0 或越界
+ */
+static BOOL nand_fmc_data_range_is_valid(const nand_cmd_req_s *request, const nand_uop_s *uop)
+{
+    if ((request->buffer == NULL) || (request->data_length == 0U))
+    {
+        return false;
+    }
+
+    if (uop->operand > (DWORD)PAGE_BUFFER_SIZE)
+    {
+        return false;
+    }
+
+    return ((DWORD)request->data_length <= ((DWORD)PAGE_BUFFER_SIZE - uop->operand));
+}
+
+/**
+ * @brief 写 FMC 命令/地址窗口并在写后等待写缓冲排空
+ *
+ * FMC 命令/地址窗口写进入 STM32H743 AXI write buffer；连续写同一窗口
+ * 可能被合并或重排。写后 DMB 保证本次周期先到达 FMC，再执行下一条 UOP。
+ *
+ * @param window FMC command/address 窗口
+ * @param value  窗口字节
+ */
+static void nand_fmc_write_window(volatile BYTE *window, BYTE value)
+{
+    *window = value;
+    __DMB();
 }
 
 /**
@@ -165,7 +193,7 @@ static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_s *uop,
     (void)request;
     (void)timing;
     (void)completion;
-    *config->command = (BYTE)uop->operand;
+    nand_fmc_write_window(config->command, (BYTE)uop->operand);
     return NAND_RESULT_OK;
 }
 
@@ -183,7 +211,9 @@ static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_s *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = nand_fmc_address_byte(request->column);
+
+    const BYTE address_byte = nand_fmc_address_byte(request->column);
+    nand_fmc_write_window(config->address, address_byte);
     return NAND_RESULT_OK;
 }
 
@@ -199,7 +229,9 @@ static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_s *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = nand_fmc_address_byte(request->column >> 8U);
+
+    const BYTE address_byte = nand_fmc_address_byte(request->column >> 8U);
+    nand_fmc_write_window(config->address, address_byte);
     return NAND_RESULT_OK;
 }
 
@@ -215,7 +247,11 @@ static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_s *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = nand_fmc_row_byte(request, uop, 0U);
+
+    BYTE       address_byte = 0U;
+    const BOOL row_ok       = nand_fmc_row_byte(request, uop, 0U, &address_byte);
+    ASSERT_REJECT(row_ok, NAND_RESULT_INVALID_ARGUMENT, "ROW_0: plane out of range");
+    nand_fmc_write_window(config->address, address_byte);
     return NAND_RESULT_OK;
 }
 
@@ -231,7 +267,11 @@ static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_s *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = nand_fmc_row_byte(request, uop, 8U);
+
+    BYTE       address_byte = 0U;
+    const BOOL row_ok       = nand_fmc_row_byte(request, uop, 8U, &address_byte);
+    ASSERT_REJECT(row_ok, NAND_RESULT_INVALID_ARGUMENT, "ROW_1: plane out of range");
+    nand_fmc_write_window(config->address, address_byte);
     return NAND_RESULT_OK;
 }
 
@@ -247,7 +287,11 @@ static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_s *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = nand_fmc_row_byte(request, uop, 16U);
+
+    BYTE       address_byte = 0U;
+    const BOOL row_ok       = nand_fmc_row_byte(request, uop, 16U, &address_byte);
+    ASSERT_REJECT(row_ok, NAND_RESULT_INVALID_ARGUMENT, "ROW_2: plane out of range");
+    nand_fmc_write_window(config->address, address_byte);
     return NAND_RESULT_OK;
 }
 
@@ -266,9 +310,10 @@ static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_s *uop,
 
     (void)timing;
 
-    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
-    ASSERT(request->buffer != NULL);
-    ASSERT(request->data_length != 0U);
+    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度；
+     * UOP 表改错时 release 也要拒绝，不能越界读写页缓冲。 */
+    const BOOL data_range_ok = nand_fmc_data_range_is_valid(request, uop);
+    ASSERT_REJECT(data_range_ok, NAND_RESULT_INVALID_ARGUMENT, "DATA_IN: buffer/length out of range");
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Program 第二 Plane） */
     const BYTE *src = request->buffer + uop->operand;
@@ -300,9 +345,10 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_s *uop
 
     (void)timing;
 
-    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
-    ASSERT(request->buffer != NULL);
-    ASSERT(request->data_length != 0U);
+    /* 请求由 fc_nand_dispatch.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度；
+     * UOP 表改错时 release 也要拒绝，不能越界读写页缓冲。 */
+    const BOOL data_range_ok = nand_fmc_data_range_is_valid(request, uop);
+    ASSERT_REJECT(data_range_ok, NAND_RESULT_INVALID_ARGUMENT, "DATA_OUT: buffer/length out of range");
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Read 的第二 Plane） */
     BYTE *dst = request->buffer + uop->operand;
@@ -315,8 +361,10 @@ static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_s *uop
 
     if (request->operation == OP_READ_ID)
     {
+        /* READ_ID 固定回 5 字节；短缓冲不打印，避免 debug 日志越界。 */
+        ASSERT_REJECT(request->data_length >= 5U, NAND_RESULT_INVALID_ARGUMENT, "READ_ID: data_length < 5");
         /* DEBUG 档，默认 INFO 档不打印。 */
-        LOGD(LOG_TAG_NAND "READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
+        LOGD(LOG_TAG_NAND "READ_ID data=%02hhX %02hhX %02hhX %02hhX %02hhX buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
     }
 
     completion->execution_status = NAND_RESULT_OK;
@@ -365,7 +413,8 @@ static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_s *u
  * @brief cache program 状态检查：FAIL 与上一页 FAILC 同查（CHECK_FAIL_CACHE）
  *
  * 只查 FAIL 会把中间页失败当成功，末页 10h 再确认映射 = 静默坏数据。
- * 首页（CACHE_FIRST）无本批上一页，FAILC 可能是上一批残留，故只查 FAIL。
+ * 批次首页（OP_TWO_PLANE_PROGRAM_CACHE_FIRST / OP_PROGRAM_PAGE_CACHE_FIRST）
+ * 无本批上一页，FAILC 可能是上一批残留，故只查 FAIL。
  *
  * @return NAND_RESULT_OK / NAND_RESULT_OPERATION_FAILED
  */
@@ -375,9 +424,9 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
     (void)uop;
     (void)timing;
 
-    /* 首页之前没有本批的 cache 页：FAILC 可能残留上一批结果，只查 FAIL。
+    /* 批次首页之前没有本批的 cache 页：FAILC 可能残留上一批结果，只查 FAIL。
      * 其余 cache 页必须同时查 FAILC（上一页 cache program 的成败）。 */
-    const BYTE bad = (request->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) ? NAND_STATUS_FAIL : (BYTE)(NAND_STATUS_FAIL | NAND_STATUS_FAILC);
+    const BYTE bad = ((request->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) || (request->operation == OP_PROGRAM_PAGE_CACHE_FIRST)) ? NAND_STATUS_FAIL : (BYTE)(NAND_STATUS_FAIL | NAND_STATUS_FAILC);
 
     return ((completion->nand_status & bad) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
 }
@@ -390,7 +439,7 @@ static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uo
  *
  * @param uop operand = NAND_TIMING_TWB / TWH / TADL
  * @param timing 当前操作的时序表
- * @return NAND_RESULT_OK / NAND_RESULT_INVALID_ARGUMENT（字段越界）
+ * @return NAND_RESULT_OK / NAND_RESULT_INVALID_ARGUMENT（字段越界或值为 0）
  */
 static nand_result_e nand_fmc_exec_delay_timing(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
 {
@@ -408,8 +457,8 @@ static nand_result_e nand_fmc_exec_delay_timing(void *context, const nand_uop_s 
         case NAND_TIMING_TWB:
             delay_us_value = timing->twb_us;
             break;
-        case NAND_TIMING_TWH:
-            delay_us_value = timing->twh_us;
+        case NAND_TIMING_TWHR:
+            delay_us_value = timing->twhr_us;
             break;
         case NAND_TIMING_TADL:
             delay_us_value = timing->tadl_us;
@@ -419,7 +468,10 @@ static nand_result_e nand_fmc_exec_delay_timing(void *context, const nand_uop_s 
             return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    ASSERT(delay_us_value != 0U);
+    ASSERT_REJECT(delay_us_value != 0U,
+                  NAND_RESULT_INVALID_ARGUMENT,
+                  "delay timing: field=%lu value=0",
+                  uop->operand);
     delay_us(delay_us_value);
     return NAND_RESULT_OK;
 }

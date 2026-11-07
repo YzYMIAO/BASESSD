@@ -347,11 +347,9 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
         {
             cmd_status |= FC_CMD_STATUS_NAND_FAIL;
         }
-        // FAILC 只在 cache program 的**中间页/末页**有意义；首页(49h)与非 cache op
+        // FAILC 只在 cache program 的**中间页/末页**有意义；首页（49 与 50）与非 cache op
         // 的状态字节里 bit1 可能是上一批残留，不能映射（与 CHECK_FAIL_CACHE 的
         // 分 op 判据一致：FIRST 只查 FAIL）。
-        // 单 plane cache 没有独立 FIRST 变体；该 op 已改为 CHECK_FAIL_CACHE，
-        // 故这里同步映射 FAILC，调用者负责保证首页没有上一批残留。
         const BOOL failc_valid = (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE) || (cmd->config.operation == OP_TWO_PLANE_PROGRAM_CACHE_END) || (cmd->config.operation == OP_PROGRAM_PAGE_CACHE);
 
         if ((post_is_70h == true) && (failc_valid == true) && ((post_status & NAND_STATUS_FAILC) != 0U))
@@ -884,7 +882,7 @@ static void fc_request_use_staging(fc_nand_dispatch_req_s *request, BYTE plane, 
  *
  * @note 填充顺序：公共头（operation / ch-ce-lun / page_type / feature_addr）→
  * 按 op 类别填 cw_bitmap / cw_buffers[] / plane_paa[]（细节见各分支注释）→
- * 末尾做 operation 改写（读语义 + 可拆写/擦 → ISSUE）。
+ * 末尾做 operation 改写（可拆写/擦 → ISSUE；读语义由 dispatch task_load 统一）。
  *
  * 全局不变量：
  * - 索引空间唯一：n = fc_cw_flat(plane, cw)；cw_bitmap 的 bit n、cw_buffers[n]、
@@ -946,7 +944,7 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
         // —— op 表里 has_data = 0（host 侧无数据搬运），故 ftl_cmd_needs_desc_chain 不要求链。
         // 数据随后由**独立的** op 8（05h-E0h）/ op 41（06h-E0h）命令带 desc 链取回。
         // ⚠ 生产读路径**不走这里**：FC 命令恒为 op 12/30（has_data=1，走下面的 data_planes 分支
-        // 建好链与位图），op 33/29 只作为末尾读语义改写的**目标**出现。
+        // 建好链与位图），op 33/29 只作为 dispatch task_load 读改写的**目标**出现。
         // 本分支只服务「命令本身就是 33/29」的直接下发（测试用）。
         // 行地址取自 cmd->paa（无 desc 可用）：单 plane 取本 plane；多 plane 逐 plane 补 plane 位。
         if (cmd->config.operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT)
@@ -1046,23 +1044,9 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
         // （引擎 WAIT_READY 内部直接用 70h/78h uop）。
     }
 
-    /* ── 下发前改写 operation（两段，顺序不能反）──
-     * 1) 读语义：FC 命令保持 WITH_DATA_OUT（desc 建链、数据路径、完成判定都用它），
-     *    下发给 NAND 的改成“加载型”：
-     *    - 多 LUN：LOAD（ISSUE，发完 30h 立即返回）→ 相位机接续 WAIT/FETCH；
-     *    - 单 LUN：原子 WITHOUT_DATA_OUT（30h 后等 tR，再逐 CW 取数）。
-     * 2) 写/擦：多 LUN 下把可拆原子 op 改成 ISSUE，WAIT/FETCH 由相位机接续。
-     *    读改写后的 LOAD/WAIT 已是 ISSUE/WAIT 型，不会再命中 splittable；
-     *    所以必须先读改写、再拆写/擦，顺序不能反。 */
-    if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
-    {
-        request->operation = (LUN_NUM > 1U) ? OP_READ_PAGE_LOAD : OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
-    }
-    else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
-    {
-        request->operation = (LUN_NUM > 1U) ? OP_READ_PAGE_MULTI_PLANE_LOAD : OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
-    }
-
+    /* ── 下发前改写 operation：只处理多 LUN 的写/擦拆分 ──
+     * 读语义（WITH_DATA_OUT → WITHOUT/LOAD）由 dispatch 的 task_load 统一改写，
+     * FC 提交路径与直接 dispatch 路径共用同一入口，避免两套 read 改写漂移。 */
     if ((LUN_NUM > 1U) && nand_operation_is_splittable(request->operation))
     {
         request->operation = nand_operation_to_issue(request->operation);
@@ -1512,7 +1496,7 @@ fc_status_e fc_service(void)
         return FC_STATUS_IO_ERROR;
     }
 
-    const BYTE delivered = fc_nand_dispatch_poll(fc_nand_completion_sink, controller);
+    const DWORD delivered = fc_nand_dispatch_poll(fc_nand_completion_sink, controller);
 
     if (fc_nand_dispatch_fatal() == true)
     {

@@ -63,9 +63,9 @@ typedef enum NAND_UOP_TYPE_E
 /* NAND_UOP_DELAY_TIMING 的字段选择器；时序值来自当前 op 的 nand_op_timing_s。 */
 typedef enum NAND_TIMING_FIELD_E
 {
-    NAND_TIMING_TWB = 0U, /* 命令/确认后到 R/B# 拉低 */
-    NAND_TIMING_TWH,      /* 70h/78h 后到状态字节有效 */
-    NAND_TIMING_TADL,     /* 11h 切换 plane 后的地址锁存延时 */
+    NAND_TIMING_TWB = 0U, /* 命令/确认后到 R/B# 拉低（tWB） */
+    NAND_TIMING_TWHR,     /* 70h/78h 后到状态字节有效（tWHR） */
+    NAND_TIMING_TADL,     /* 最后地址周期到首个数据输入（tADL） */
     NAND_TIMING_FIELD_COUNT,
 } nand_timing_field_e;
 
@@ -101,7 +101,7 @@ typedef struct NAND_COMMAND_COMPLETION_S
 typedef struct NAND_OPERATION_TIMING_S
 {
     WORD twb_us;
-    WORD twh_us;
+    WORD twhr_us;
     WORD tadl_us;
     WORD busy_timeout_us;
 } nand_op_timing_s;

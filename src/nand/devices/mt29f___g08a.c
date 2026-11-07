@@ -13,13 +13,15 @@
  *       tRC=50ns（Mode 0）/ 20ns（Mode 5）。
  * 器件事实见 nand/devices/mt29f___g08a.h；通用布局见 nand/nand_config.h。
  *
- * 时序来源：本文件两张静态表（slow/fast，MT29 数据手册参数）
+ * 时序来源：一张 3.3V Mode 5 AC 表（MT29 数据手册 Table 29/31）
+ *   + 低速 bring-up 的 MT29F_LOW_PCC_* 常量
  *   → nand_fmc_timing_s（nand_protocol.h，29 字段，顺序耦合）
  *   → UOP handler 层（nand_fmc.c）与 PCC 换算（nand_fmc_timing_to_pcc）。
  */
 
 #include "assertion.h"
 #include "log.h"
+#include "nand_board.h"
 #include "nand_config.h"
 #include "nand_device.h"
 #include "nand_fmc.h"
@@ -38,23 +40,25 @@ static BYTE s_timing_mode[CH_NUM][CE_NUM];
 #define MT29F_LOW_PCC_WAIT  (6U)
 #define MT29F_LOW_PCC_HOLD  (2U)
 #define MT29F_LOW_PCC_HIZ   (4U)
+#define MT29F_LOW_TCLR      (8U)
+#define MT29F_LOW_TAR       (8U)
 
 #if (CONFIG_NAND_TIMING_MODE != 0U)
 
 /* --------------------------------------------------------------------
- * g_nand_timing_mode0 — MT29F4G08 3.3V 时序（数据手册 Table 29/31）
+ * g_nand_timing_3v3_mode5 — MT29F4G08 3.3V Mode 5 时序（Table 29/31）
  *   29 个值按字段名初始化（designated initializer），字段重排不会错位。
- *   本表固定使用 Table 29/31 的 3.3V AC 参数；CONFIG_NAND_TIMING_MODE 只改变
- *   SET_FEATURES 的模式值（4 或 5），用于在**相同 FMC 时序**下对比两种模式。
+ *   本表固定使用 Table 29/31 的 3.3V Mode 5 AC 参数；CONFIG_NAND_TIMING_MODE
+ *   只改变 SET_FEATURES 的模式值（4 或 5），用于在**相同 FMC 时序**下对比两种模式。
  *   注意：Mode 4 的独立 AC 表在数据手册 Table 32（1.8V），本板 3.3V 实验不采用它。
+ *   低速 bring-up 不使用本表，而使用 MT29F_LOW_PCC_* 常量。
  *   按组划分：
  *     地址锁存组  : tADL / tALH / tALS / tCS / tCH / tCLH / tCLS
  *     数据读写组  : tDH / tDS / tWC / tWH / tWP / tAR / tIR / tRC / tREA / tREH /
  *                   tRP / tRLOH / tRHOH / tRHW / tRHZ / tRR / tWHR / tWB
  *     就绪/复电组 : tCEA / tCHZ / tCLR / tCOH
- *   （Mode 0 典型值；本表供 mt29f_set_timing 的 PCC 换算使用）
  * -------------------------------------------------------------------- */
-static const nand_fmc_timing_s g_nand_timing_mode0 = {
+static const nand_fmc_timing_s g_nand_timing_3v3_mode5 = {
     .t_adl_ns     = 70U,  /* 地址→数据加载延时 */
     .t_alh_ns     = 5U,   /* ALE 保持 */
     .t_als_ns     = 10U,  /* ALE 建立 */
@@ -72,7 +76,7 @@ static const nand_fmc_timing_s g_nand_timing_mode0 = {
     .t_chz_max_ns = 50U,  /* CE→输出高阻（max） */
     .t_clr_ns     = 10U,  /* CLE→RE 延时 */
     .t_coh_ns     = 15U,  /* CE 高→输出保持 */
-    .t_ir_ns      = 0U,   /* 命令→数据输出间隔（Mode0 为 0） */
+    .t_ir_ns      = 0U,   /* 命令→数据输出间隔 */
     .t_rc_ns      = 20U,  /* 读周期 */
     .t_rea_max_ns = 16U,  /* RE→输出有效（max） */
     .t_reh_ns     = 7U,   /* RE 高电平宽度 */
@@ -119,7 +123,8 @@ static const nand_fmc_timing_s g_nand_timing_mode0 = {
  *   HOLD     * tHCLK >= max(tCH,tCLH,tALH)
  *   HiZ      * tHCLK >= max(tCS,tCLS,tALS) + (tWP - tDS)
  * 按实际 fmc_hz 换算（不能硬编码 5ns/4545ps）。Mode 4 表实测 HOLD/HiZ 各短 1 周期
- * 会导致命令/地址采样失败（RISK-NAND-03），故使用 Mode 0 的 3.3V AC 参数作为基准。
+ * 会导致命令/地址采样失败（RISK-NAND-03），故使用 Table 29/31 的 3.3V Mode 5 AC
+ * 参数作为基准。
  */
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
 {
@@ -227,21 +232,21 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_T
 #endif /* CONFIG_NAND_TIMING_MODE */
 
 /**
- * @brief 装配 FMC Bank3 三窗口配置（器件/板级窗口地址）
+ * @brief 填充低速保守 PCC（Setup/Wait/Hold/HiZ 均留数据手册最小值余量）
  *
- * data/command/address 指向同一 FMC Bank3 的三个 A16/A17 别名窗口；
- * 具体 GPIO/FMC 初始化由 board 层的 HAL_NAND_MspInit 完成。
- *
- * @param cfg 输出配置
+ * @param common    输出：common memory 时序
+ * @param attribute 输出：attribute memory 时序
  */
-static void mt29f_build_fmc_config(nand_fmc_cfg_s *cfg)
+static void mt29f_fill_low_pcc(FMC_NAND_PCC_TimingTypeDef *common, FMC_NAND_PCC_TimingTypeDef *attribute)
 {
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
-    cfg->command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
-    cfg->address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
-    cfg->rb_port = NAND_RB_GPIO_PORT;
-    cfg->rb_pin  = NAND_RB_GPIO_PIN;
+    memset(common, 0, sizeof(*common));
+    memset(attribute, 0, sizeof(*attribute));
+
+    common->SetupTime     = MT29F_LOW_PCC_SETUP;
+    common->WaitSetupTime = MT29F_LOW_PCC_WAIT;
+    common->HoldSetupTime = MT29F_LOW_PCC_HOLD;
+    common->HiZSetupTime  = MT29F_LOW_PCC_HIZ;
+    *attribute            = *common;
 }
 
 /**
@@ -256,10 +261,9 @@ static nand_result_e mt29f_hw_init(void)
     FMC_NAND_PCC_TimingTypeDef common_timing;
     FMC_NAND_PCC_TimingTypeDef attribute_timing;
 
-    memset(&common_timing, 0, sizeof(common_timing));
-    memset(&attribute_timing, 0, sizeof(attribute_timing));
-
     memset(s_timing_mode, 0, sizeof(s_timing_mode)); /* 上电/重新初始化一律从低速开始 */
+
+    mt29f_fill_low_pcc(&common_timing, &attribute_timing);
 
     g_nand_handle.Instance             = FMC_NAND_DEVICE;
     g_nand_handle.Init.NandBank        = FMC_NAND_BANK3;
@@ -267,15 +271,8 @@ static nand_result_e mt29f_hw_init(void)
     g_nand_handle.Init.MemoryDataWidth = FMC_NAND_PCC_MEM_BUS_WIDTH_8;
     g_nand_handle.Init.EccComputation  = FMC_NAND_ECC_DISABLE;
     g_nand_handle.Init.ECCPageSize     = FMC_NAND_ECC_PAGE_SIZE_512BYTE;
-    g_nand_handle.Init.TCLRSetupTime   = 8U;
-    g_nand_handle.Init.TARSetupTime    = 8U;
-
-    /* 低速保守 PCC：Setup/Wait/Hold/HiZ 均有数据手册最小值的余量。 */
-    common_timing.SetupTime     = MT29F_LOW_PCC_SETUP;
-    common_timing.WaitSetupTime = MT29F_LOW_PCC_WAIT;
-    common_timing.HoldSetupTime = MT29F_LOW_PCC_HOLD;
-    common_timing.HiZSetupTime  = MT29F_LOW_PCC_HIZ;
-    attribute_timing            = common_timing;
+    g_nand_handle.Init.TCLRSetupTime   = MT29F_LOW_TCLR;
+    g_nand_handle.Init.TARSetupTime    = MT29F_LOW_TAR;
 
     if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
     {
@@ -283,20 +280,20 @@ static nand_result_e mt29f_hw_init(void)
         return NAND_RESULT_OPERATION_FAILED;
     }
 
-    nand_fmc_cfg_s fmc_config;
+    const nand_result_e board_result = nand_board_init_all_targets();
 
-    mt29f_build_fmc_config(&fmc_config);
-
-    if (nand_fmc_init_target(0U, 0U, &fmc_config) != NAND_RESULT_OK)
+    if (board_result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "FMC backend configure failed\r\n");
-        return NAND_RESULT_OPERATION_FAILED;
+        LOGE(LOG_TAG_NAND "board target init failed: 0x%02hhX\r\n", board_result);
+        return board_result;
     }
     return NAND_RESULT_OK;
 }
 
 /**
- * @brief SET_FEATURES 成功后按 mode/fmc_hz 重配 FMC 时序与后端
+ * @brief 按 mode/fmc_hz 重配 FMC 时序与后端
+ *
+ * mode == 0 时恢复 hw_init 的低速 PCC；非 0 时按 ONFI 时序表换算。
  *
  * @param mode   已生效的 ONFI timing mode
  * @param fmc_hz FMC 内核时钟（Hz）
@@ -305,35 +302,52 @@ static nand_result_e mt29f_hw_init(void)
 static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 {
 #if (CONFIG_NAND_TIMING_MODE != 0U)
-    FMC_NAND_PCC_TimingTypeDef fast_pcc;
+    FMC_NAND_PCC_TimingTypeDef common_timing;
+    FMC_NAND_PCC_TimingTypeDef attribute_timing;
+    DWORD                      tclr;
+    DWORD                      tar;
 
-    ASSERT(fmc_hz != 0U);
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
-    memset(&fast_pcc, 0, sizeof(fast_pcc));
-    nand_fmc_timing_to_pcc(&g_nand_timing_mode0, &fast_pcc, fmc_hz);
+    ASSERT_REJECT(fmc_hz != 0U, NAND_RESULT_INVALID_ARGUMENT, "set timing: fmc_hz=0");
+    ASSERT_REJECT((ch < CH_NUM) && (ce < CE_NUM), NAND_RESULT_INVALID_ARGUMENT, "set timing: ch/ce out of range");
+    ASSERT_REJECT((mode == 0U) || (mode == 4U) || (mode == 5U), NAND_RESULT_INVALID_ARGUMENT, "set timing: invalid mode");
 
-    const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
-    const DWORD tclr    = NS_TO_PCC_CYCLES(g_nand_timing_mode0.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
-    const DWORD tar     = NS_TO_PCC_CYCLES(g_nand_timing_mode0.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    if (mode == 0U)
+    {
+        /* 回滚低速：恢复 hw_init 的保守 PCC，而不是继续使用高速表。 */
+        mt29f_fill_low_pcc(&common_timing, &attribute_timing);
+        tclr = MT29F_LOW_TCLR;
+        tar  = MT29F_LOW_TAR;
+    }
+    else
+    {
+        FMC_NAND_PCC_TimingTypeDef fast_pcc;
 
-    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", mode, fast_pcc.SetupTime, fast_pcc.WaitSetupTime, fast_pcc.HoldSetupTime, fast_pcc.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
+        memset(&fast_pcc, 0, sizeof(fast_pcc));
+        nand_fmc_timing_to_pcc(&g_nand_timing_3v3_mode5, &fast_pcc, fmc_hz);
+        common_timing    = fast_pcc;
+        attribute_timing = fast_pcc;
+
+        const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
+        tclr                = NS_TO_PCC_CYCLES(g_nand_timing_3v3_mode5.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+        tar                 = NS_TO_PCC_CYCLES(g_nand_timing_3v3_mode5.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+
+        LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n", mode, common_timing.SetupTime, common_timing.WaitSetupTime, common_timing.HoldSetupTime, common_timing.HiZSetupTime, tclr, tar, fmc_hz, tclk_ps);
+    }
 
     g_nand_handle.Init.TCLRSetupTime = tclr;
     g_nand_handle.Init.TARSetupTime  = tar;
-    if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
+    if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
     {
         LOGE(LOG_TAG_NAND "HAL_NAND_Init (Mode %u) failed\r\n", mode);
         return NAND_RESULT_OPERATION_FAILED;
     }
 
-    nand_fmc_cfg_s fast_fmc;
+    const nand_result_e board_result = nand_board_init_target(ch, ce);
 
-    mt29f_build_fmc_config(&fast_fmc);
-
-    if (nand_fmc_init_target(ch, ce, &fast_fmc) != NAND_RESULT_OK)
+    if (board_result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "FMC backend configure (Mode %u) failed\r\n", mode);
-        return NAND_RESULT_OPERATION_FAILED;
+        LOGE(LOG_TAG_NAND "board target configure (Mode %u) failed: 0x%02hhX\r\n", mode, board_result);
+        return board_result;
     }
 
     s_timing_mode[ch][ce] = mode;
@@ -348,7 +362,7 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
 
-static BYTE mt29f_get_timing_mode(BYTE ch, BYTE ce);
+static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode);
 
 static const nand_device_desc_s g_mt29f_desc = {
     .name            = "MT29F4G08ABADAWP",
@@ -366,10 +380,16 @@ const nand_device_desc_s *nand_device_get(void)
 /**
  * @brief 当前 NAND 时序模式（器件内部实现，经 nand_device.h 的通用接口暴露）
  *
- * @return 模式号（0 = 低速）
+ * @param ch   通道号
+ * @param ce   片选号
+ * @param mode 输出：模式号（0 = 低速）
+ * @return OK / INVALID_ARGUMENT
  */
-static BYTE mt29f_get_timing_mode(BYTE ch, BYTE ce)
+static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
 {
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
-    return s_timing_mode[ch][ce];
+    ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "get timing mode: mode NULL");
+    ASSERT_REJECT((ch < CH_NUM) && (ce < CE_NUM), NAND_RESULT_INVALID_ARGUMENT, "get timing mode: ch/ce out of range");
+
+    *mode = s_timing_mode[ch][ce];
+    return NAND_RESULT_OK;
 }

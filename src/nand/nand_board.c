@@ -6,8 +6,10 @@
  *   本文件              这块板上有哪些 (ch,ce)、R/B# 与 NCE/数据总线的 GPIO。
  *
  * 当前板：FMC Bank3 + 单个 NCE，只有 (0,0) 有物理通路。多 target 板卡在这里
- * 扩展 target 表，并在 nand_select_target() 中实现 FMC bank / CE# GPIO 切换。
+ * 扩展 target 表，并在 nand_board_select_target() 中实现 FMC bank / CE# GPIO 切换。
  */
+
+#include "nand_board.h"
 
 #include "assertion.h"
 #include "log.h"
@@ -22,15 +24,57 @@
 nand_target_info_s g_nand_targets[CH_NUM][CE_NUM];
 
 /* 板级物理通路表：每一项表示 (ch,ce) 有一条可寻址的 NAND target。 */
-typedef struct NAND_BOARD_TARGET_S
-{
-    BYTE ch;
-    BYTE ce;
-} nand_board_target_s;
-
 static const nand_board_target_s s_board_targets[] = {
-    {0U, 0U},
+    {0U, 0U, 0U},
 };
+
+/* 当前板共享 FMC Bank3；同 bank target 不能并发。 */
+#define NAND_BOARD_BANK_MAX (16U)
+
+/* 0 = 空闲；非 0 = target 索引 + 1。 */
+static WORD s_bank_owner[NAND_BOARD_BANK_MAX];
+
+size_t nand_board_target_count(void)
+{
+    return sizeof(s_board_targets) / sizeof(s_board_targets[0]);
+}
+
+const nand_board_target_s *nand_board_target_at(size_t index)
+{
+    if (index >= nand_board_target_count())
+    {
+        return NULL;
+    }
+    return &s_board_targets[index];
+}
+
+/* 按 (ch,ce) 查 board target；找到时可选返回数组下标。 */
+static const nand_board_target_s *nand_board_find_target(BYTE ch, BYTE ce, size_t *index)
+{
+    for (size_t i = 0U; i < nand_board_target_count(); i++)
+    {
+        if ((s_board_targets[i].ch == ch) && (s_board_targets[i].ce == ce))
+        {
+            if (index != NULL)
+            {
+                *index = i;
+            }
+            return &s_board_targets[i];
+        }
+    }
+    return NULL;
+}
+
+/* 当前板的 FMC Bank3 三窗口 + R/B# 接线；多 target 板在此按 target 取值。 */
+static void nand_board_build_fmc_config(nand_fmc_cfg_s *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
+    cfg->command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
+    cfg->address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
+    cfg->rb_port = NAND_RB_GPIO_PORT;
+    cfg->rb_pin  = NAND_RB_GPIO_PIN;
+}
 
 /**
  * @brief 板级 target 选择（校验 (ch,ce) 是否在物理通路表内）
@@ -45,22 +89,125 @@ static const nand_board_target_s s_board_targets[] = {
  * @note 多 target 板卡需要在这里切换 FMC bank / CE# GPIO；当前单 bank 单 NCE，
  *       本函数只做通路校验。
  */
-static nand_result_e nand_select_target(BYTE ch, BYTE ce)
+nand_result_e nand_board_select_target(BYTE ch, BYTE ce)
 {
     if ((ch >= CH_NUM) || (ce >= CE_NUM))
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    for (size_t i = 0U; i < (sizeof(s_board_targets) / sizeof(s_board_targets[0])); i++)
+    for (size_t i = 0U; i < nand_board_target_count(); i++)
     {
         if ((s_board_targets[i].ch == ch) && (s_board_targets[i].ce == ce))
         {
+            /* 当前单 bank 单 NCE 无需切硬件；多 target 板在此切 NCE/FMC bank。 */
             return NAND_RESULT_OK;
         }
     }
 
     return NAND_RESULT_NOT_READY;
+}
+
+nand_result_e nand_board_acquire_target(BYTE ch, BYTE ce)
+{
+    size_t                     index  = 0U;
+    const nand_board_target_s *target = nand_board_find_target(ch, ce, &index);
+
+    if (target == NULL)
+    {
+        return NAND_RESULT_INVALID_ARGUMENT;
+    }
+    if (target->bank >= NAND_BOARD_BANK_MAX)
+    {
+        return NAND_RESULT_INVALID_ARGUMENT;
+    }
+
+    const WORD owner = (WORD)(index + 1U);
+
+    if ((s_bank_owner[target->bank] == 0U) || (s_bank_owner[target->bank] == owner))
+    {
+        s_bank_owner[target->bank] = owner;
+        return NAND_RESULT_OK;
+    }
+    return NAND_RESULT_NOT_READY;
+}
+
+void nand_board_release_target(BYTE ch, BYTE ce)
+{
+    size_t                     index  = 0U;
+    const nand_board_target_s *target = nand_board_find_target(ch, ce, &index);
+
+    if ((target == NULL) || (target->bank >= NAND_BOARD_BANK_MAX))
+    {
+        return;
+    }
+
+    const WORD owner = (WORD)(index + 1U);
+
+    if (s_bank_owner[target->bank] == owner)
+    {
+        s_bank_owner[target->bank] = 0U;
+    }
+}
+
+void nand_board_ownership_reset(void)
+{
+    memset(s_bank_owner, 0, sizeof(s_bank_owner));
+}
+
+/**
+ * @brief 按 (ch,ce) 装配并初始化该 target 的 PHY 后端
+ *
+ * @param ch 目标通道
+ * @param ce 目标片选
+ * @return OK / NOT_READY（target 不在板上）/ 错误码
+ */
+nand_result_e nand_board_init_target(BYTE ch, BYTE ce)
+{
+    const nand_result_e select_result = nand_board_select_target(ch, ce);
+
+    if (select_result != NAND_RESULT_OK)
+    {
+        return select_result;
+    }
+
+    nand_fmc_cfg_s cfg;
+
+    nand_board_build_fmc_config(&cfg);
+    return nand_fmc_init_target(ch, ce, &cfg);
+}
+
+/**
+ * @brief 初始化板上全部 target 的 PHY 后端
+ *
+ * @return OK / NOT_READY（无 target）/ 错误码
+ */
+nand_result_e nand_board_init_all_targets(void)
+{
+    memset(s_bank_owner, 0, sizeof(s_bank_owner));
+
+    if (nand_board_target_count() == 0U)
+    {
+        return NAND_RESULT_NOT_READY;
+    }
+
+    for (size_t i = 0U; i < nand_board_target_count(); i++)
+    {
+        const nand_board_target_s *target = nand_board_target_at(i);
+
+        if (target == NULL)
+        {
+            return NAND_RESULT_INVALID_ARGUMENT;
+        }
+
+        const nand_result_e result = nand_board_init_target(target->ch, target->ce);
+
+        if (result != NAND_RESULT_OK)
+        {
+            return result;
+        }
+    }
+    return NAND_RESULT_OK;
 }
 
 /**
@@ -73,13 +220,13 @@ static nand_result_e nand_select_target(BYTE ch, BYTE ce)
  * @return NAND_RESULT_OK / INVALID_ARGUMENT / NOT_READY。
  *
  * @note 通路选择与 backend 获取必须成对发生，所以收成一个入口；调用点不再
- *       分别调用 nand_select_target / nand_phy_backend_get。
+ *       分别调用 nand_board_select_target / nand_phy_backend_get。
  */
 nand_result_e nand_target_get(BYTE ch, BYTE ce, const nand_phy_backend_s **backend)
 {
-    ASSERT(backend != NULL);
+    ASSERT_REJECT(backend != NULL, NAND_RESULT_INVALID_ARGUMENT, "target get: backend NULL");
 
-    const nand_result_e result = nand_select_target(ch, ce);
+    const nand_result_e result = nand_board_select_target(ch, ce);
 
     if (result != NAND_RESULT_OK)
     {
@@ -87,25 +234,35 @@ nand_result_e nand_target_get(BYTE ch, BYTE ce, const nand_phy_backend_s **backe
     }
 
     *backend = nand_phy_backend_get(ch, ce);
-    ASSERT(*backend != NULL);
+    ASSERT_REJECT(*backend != NULL, NAND_RESULT_INVALID_ARGUMENT, "target get: backend missing");
+    ASSERT_REJECT((*backend)->handlers != NULL, NAND_RESULT_NOT_READY, "target get: target not initialized");
     return NAND_RESULT_OK;
 }
 
 /**
  * @brief 通用器件查询：指定 target 当前生效的 ONFI timing mode
  *
- * @param ch 通道号。
- * @param ce 片选号。
- *
- * @return 模式号（0 = 低速）。
+ * @param ch   通道号。
+ * @param ce   片选号。
+ * @param mode 输出：timing mode（0 = 低速）。
+ * @return OK / INVALID_ARGUMENT / NOT_READY。
  */
-BYTE nand_get_timing_mode(BYTE ch, BYTE ce)
+nand_result_e nand_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
 {
+    ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "timing mode: mode NULL");
+
+    const nand_result_e select_result = nand_board_select_target(ch, ce);
+
+    if (select_result != NAND_RESULT_OK)
+    {
+        return select_result;
+    }
+
     const nand_device_desc_s *dev = nand_device_get();
 
-    ASSERT(dev != NULL);
-    ASSERT(dev->get_timing_mode != NULL);
-    return dev->get_timing_mode(ch, ce);
+    ASSERT_REJECT(dev != NULL, NAND_RESULT_INVALID_ARGUMENT, "timing mode: device NULL");
+    ASSERT_REJECT(dev->get_timing_mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "timing mode: callback NULL");
+    return dev->get_timing_mode(ch, ce, mode);
 }
 
 /**

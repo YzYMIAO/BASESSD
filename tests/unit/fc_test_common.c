@@ -442,7 +442,7 @@ fc_cmd_status_s test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint1
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
-    ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
+    ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE_FIRST) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -587,6 +587,8 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     /* 前 PAGES_PER_BLOCK-1 页走 cache 编程（80h-addr-data-15h）：15h 确认后设备把 cache 寄存器里
      * 的数据编入阵列、同时腾出 cache 寄存器接下一页。末页必须用普通编程（10h）收尾——15h 编的是
      * 「当前 cache 内容」，没有末页的 10h 就没有最后一页真正落盘。
+     * 首页用 OP_PROGRAM_PAGE_CACHE_FIRST：本批还没有上一页，只查 FAIL；若用中间页 op，
+     * 上一批残留的 FAILC 会把好页误判失败。
      * 每页仍由 test_prog_page 提交 + 轮询到完成 ⇒ 命令间完全串行（cache 的流水线收益测不到，
      * 这里验的是 cache 命令序列走得通、编码管线全程不串）。meta = 本页 PBA，与普通写同口径。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
@@ -594,7 +596,7 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
         fc_cmd_cfg_s    conf = *config;
         fc_cmd_status_s completion;
 
-        conf.operation = (page < (uint16_t)(PAGES_PER_BLOCK - 1U)) ? (DWORD)OP_PROGRAM_PAGE_CACHE : (DWORD)OP_NORMAL_PROGRAM_PAGE;
+        conf.operation = (page == 0U) ? (DWORD)OP_PROGRAM_PAGE_CACHE_FIRST : ((page < (uint16_t)(PAGES_PER_BLOCK - 1U)) ? (DWORD)OP_PROGRAM_PAGE_CACHE : (DWORD)OP_NORMAL_PROGRAM_PAGE);
 
         completion = test_prog_page(block_index, plane_bitmap, page, &conf, NULL);
 

@@ -683,7 +683,21 @@ static void uart_cli_info(int argc, char *argv[])
         {
             continue;
         }
-        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%hhu free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, nand_get_timing_mode(ch, ce), ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
+
+        BYTE                timing_mode = 0U;
+        char                mode_text[4];
+        const nand_result_e timing_result = nand_get_timing_mode(ch, ce, &timing_mode);
+
+        if (timing_result == NAND_RESULT_OK)
+        {
+            (void)snprintf(mode_text, sizeof(mode_text), "%hhu", timing_mode);
+        }
+        else
+        {
+            (void)snprintf(mode_text, sizeof(mode_text), "?");
+        }
+
+        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%s free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, mode_text, ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
         /* 计数类诊断（见 `stat`）：info 只保留身份/状态，避免两套计数视图。 */
 
@@ -1627,7 +1641,21 @@ static void uart_cli_id(int argc, char *argv[])
     (void)LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
     (void)LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
     (void)LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
-    (void)LOGI("id media layout=v%lu timing=%hhu state=%s\r\n", ftl_media_layout_version(), nand_get_timing_mode(0U, 0U), state_name);
+
+    BYTE                timing_mode = 0U;
+    char                mode_text[4];
+    const nand_result_e timing_result = nand_get_timing_mode(0U, 0U, &timing_mode);
+
+    if (timing_result == NAND_RESULT_OK)
+    {
+        (void)snprintf(mode_text, sizeof(mode_text), "%hhu", timing_mode);
+    }
+    else
+    {
+        (void)snprintf(mode_text, sizeof(mode_text), "?");
+    }
+
+    (void)LOGI("id media layout=v%lu timing=%s state=%s\r\n", ftl_media_layout_version(), mode_text, state_name);
 }
 
 /* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */

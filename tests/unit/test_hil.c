@@ -231,9 +231,6 @@ static MunitResult test_hil_host_queue(const MunitParameter params[], void *data
     ssd_host_entry_s *entries[SSD_HOST_QUEUE_DEPTH];
 
     ssd_host_queue_init(&q);
-    munit_assert_uint8(ssd_host_queue_used(&q), ==, 0U);
-    munit_assert_true(ssd_host_queue_owner_idle(&q, SSD_HOST_OWNER_USB));
-    munit_assert_true(ssd_host_queue_owner_idle(&q, SSD_HOST_OWNER_CLI));
 
     for (BYTE i = 0U; i < SSD_HOST_QUEUE_DEPTH; i++)
     {
@@ -241,13 +238,9 @@ static MunitResult test_hil_host_queue(const MunitParameter params[], void *data
         munit_assert_not_null(entries[i]);
         munit_assert_uint8(entries[i]->tag, ==, i);
     }
-    munit_assert_uint8(ssd_host_queue_used(&q), ==, SSD_HOST_QUEUE_DEPTH);
-    munit_assert_false(ssd_host_queue_owner_idle(&q, SSD_HOST_OWNER_USB));
-    munit_assert_true(ssd_host_queue_owner_idle(&q, SSD_HOST_OWNER_CLI));
     munit_assert_ptr_null(ssd_host_queue_alloc(&q, SSD_HOST_OWNER_CLI));
 
     ssd_host_queue_free(&q, entries[0]);
-    munit_assert_uint8(ssd_host_queue_used(&q), ==, (SSD_HOST_QUEUE_DEPTH - 1U));
     munit_assert_not_null(ssd_host_queue_alloc(&q, SSD_HOST_OWNER_CLI));
 
     return MUNIT_OK;

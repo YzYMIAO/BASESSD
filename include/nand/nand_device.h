@@ -37,14 +37,14 @@ nand_result_e nand_target_get(BYTE ch, BYTE ce, const nand_phy_backend_s **backe
 /* 器件生命周期/查询函数原型（H50：函数指针统一 _fn_t）。 */
 typedef nand_result_e (*nand_hw_init_fn_t)(void);
 typedef nand_result_e (*nand_set_timing_fn_t)(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz);
-typedef BYTE (*nand_timing_mode_fn_t)(BYTE ch, BYTE ce);
+typedef nand_result_e (*nand_timing_mode_fn_t)(BYTE ch, BYTE ce, BYTE *mode);
 
 /*
  * 器件描述符：FC 初始化/时序切换所需的器件事实与硬件生命周期入口。
  *
  * hw_init         —— HAL/FMC/GPIO 初始化 + FMC 后端实例配置（只在启动时调用）；
- * set_timing      —— SET_FEATURES 成功后按 mode/fmc_hz 重配 FMC 时序与后端；
- * get_timing_mode —— 指定 target 当前生效的 ONFI timing mode。
+ * set_timing      —— 按 mode/fmc_hz 重配 FMC 时序与后端（mode 0 = 低速）；
+ * get_timing_mode —— 指定 target 当前生效的 ONFI timing mode（status + 出参）。
  */
 typedef struct NAND_DEVICE_DESCRIPTOR_S
 {
@@ -59,7 +59,14 @@ typedef struct NAND_DEVICE_DESCRIPTOR_S
 /* 当前选中的器件（由 NAND_DEVICE 编译期选择）。 */
 const nand_device_desc_s *nand_device_get(void);
 
-/* 通用器件查询：HIL/诊断只依赖这个接口，不感知具体器件头。 */
-BYTE nand_get_timing_mode(BYTE ch, BYTE ce);
+/**
+ * @brief 通用器件查询：指定 target 当前生效的 ONFI timing mode
+ *
+ * @param ch   通道号
+ * @param ce   片选号
+ * @param mode 输出：timing mode
+ * @return OK / INVALID_ARGUMENT / NOT_READY
+ */
+nand_result_e nand_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode);
 
 #endif /* NAND_DEVICE_H */

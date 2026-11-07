@@ -312,10 +312,19 @@
  * < 70 >-< Status >-< 80 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din1 >-< Dinn >-< 15 >-tWB->-tCBSY->-< 70 >-< Status >
  *
  * 单 plane cache 编程；15h 只表示当前页进入 cache/阵列，上一页 cache 结果在 FAILC。
- * 本 op 没有独立 FIRST 变体：中间页查 FAIL|FAILC，首页调用者必须保证 FAILC 不是上一批残留。
+ * 本 op 用于批次中间页：查 FAIL|FAILC；批次首页用 OP_PROGRAM_PAGE_CACHE_FIRST，
+ * 只查 FAIL，避免上一批残留的 FAILC 把好页误判失败。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_PROGRAM_PAGE_CACHE (17U)
+
+/* OP_PROGRAM_PAGE_CACHE_FIRST（单 plane cache 批次首页，槽位 50）
+ * ----------------------------------------------------------------------------------------------
+ * 与 OP_PROGRAM_PAGE_CACHE 共用同一条 80h-地址-数据-15h UOP 序列；FMC 在 CHECK_FAIL_CACHE
+ * 处按 operation 区分：本 op 只查 FAIL，后续页回到 OP_PROGRAM_PAGE_CACHE 查 FAIL|FAILC。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_PROGRAM_PAGE_CACHE_FIRST (50U)
 
 /* ERASE OPERATIONS */
 /* OP_ERASE_BLOCK
@@ -515,7 +524,7 @@
  */
 #define OP_READ_COLUMN (42U)
 
-#define OP_COUNT (50U) /* 0..49 inclusive */
+#define OP_COUNT (51U) /* 0..50 inclusive */
 
 /* ── 多 LUN 相位机: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原子 OP 码 */

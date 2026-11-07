@@ -89,12 +89,44 @@ typedef struct FC_NAND_TRANSACTION_S
     nand_cmd_comp_s       completion;
 } fc_nand_txn_s;
 
-/* 异步执行：start 发起 + step 推进。 */
+/**
+ * @brief 发起一条异步 ONFI 事务
+ *
+ * @param transaction 事务对象；engine.backend 必须由调用者按 target 预先绑定
+ * @param operation   OP_*
+ * @param request     命令参数（字符串/缓冲生命周期须覆盖到事务完成）
+ * @return OK（start 内完成）/ NOT_READY（需 fc_nand_step）/ 错误码
+ *
+ * @note transaction->engine.request/completion 由本函数统一绑定；
+ *       调用者不再需要手工绑定这两个指针。
+ */
 nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const nand_cmd_req_s *request);
+
+/**
+ * @brief 推进一条异步事务
+ *
+ * @param transaction 已 start 且仍 active 的事务
+ * @param completion  输出：本次完成时的执行状态 + NAND 状态
+ * @return NOT_READY（继续 poll）/ 完成结果
+ */
 nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completion);
 
-/* 启动流程（FC 编排，NAND 只提供 hw_init/desc/PHY）。 */
+/**
+ * @brief FC 侧 NAND 初始化：器件 hw_init + 拓扑扫描（同步阶段）
+ *
+ * @return OK / 错误码
+ */
 nand_result_e fc_nand_init(void);
+
+/**
+ * @brief 把所有 present target 切到 CONFIG_NAND_TIMING_MODE
+ *
+ * @param fmc_hz FMC 内核时钟（Hz）；0 时使用实现侧 fallback
+ * @return OK / 错误码
+ *
+ * @note 失败时尝试把 target 回滚到低速；回滚失败只记录，调用者不得继续假设
+ *       “低速仍有效”。
+ */
 nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz);
 
 #endif /* FC_NAND_ENGINE_H */

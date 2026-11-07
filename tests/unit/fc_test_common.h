@@ -285,8 +285,8 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_cf
  *   LAST_MP          -> 输出 pairN-1。
  *   每条输出命令内部用 `06h P0 E0h` / `06h P1 E0h` 分别选两个 plane 的 cache register。
  *
- * test_prog_block_cache：单 plane：前 N-1 页 OP_PROGRAM_PAGE_CACHE（80h-15h），
- *   末页 OP_NORMAL_PROGRAM_PAGE（10h）。
+ * test_prog_block_cache：单 plane：首页 OP_PROGRAM_PAGE_CACHE_FIRST，中间页
+ *   OP_PROGRAM_PAGE_CACHE（80h-15h），末页 OP_NORMAL_PROGRAM_PAGE（10h）。
  * test_prog_block_cache_multi_plane：双 plane：前 N-1 页 OP_TWO_PLANE_PROGRAM_CACHE
  *   （80h-11h-80h-15h），末页 OP_PROGRAM_PAGE_MULTI_PLANE（80h-11h-80h-10h）。
  *   末页的 10h 是 batch 结束判据（tLPROG），不是可选的“排空”。

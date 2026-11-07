@@ -109,12 +109,15 @@ nand_result_e fc_uop_engine_start(fc_uop_engine_state_s *state, const nand_uop_s
     /* 前置条件由调用者保证（见 fc_nand_engine.h）：state->backend/request/completion 三指针
      * 随事务固定（fc_nand_dispatch_task_load / fc_nand_start 绑定），uops/timing 取自
      * g_nand_operation_map[operation]（调用者已判 map->uops != NULL）。 */
-    ASSERT(state->backend != NULL);
-    ASSERT(state->backend->handlers != NULL);
-    ASSERT(state->request != NULL);
-    ASSERT(state->completion != NULL);
+    ASSERT_REJECT(state != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: state NULL");
+    ASSERT_REJECT(uops != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: uops NULL");
+    ASSERT_REJECT(timing != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: timing NULL");
+    ASSERT_REJECT(state->backend != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: backend NULL");
+    ASSERT_REJECT(state->backend->handlers != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: handlers NULL");
+    ASSERT_REJECT(state->request != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: request NULL");
+    ASSERT_REJECT(state->completion != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine start: completion NULL");
     /* busy_timeout_us 为 0 会让忙等双条件首次即判超时（elapsed>=0 恒真），属时序表配置错误 */
-    ASSERT(timing->busy_timeout_us > 0U);
+    ASSERT_REJECT(timing->busy_timeout_us > 0U, NAND_RESULT_INVALID_ARGUMENT, "engine start: busy_timeout=0");
 
     state->uops                         = uops;
     state->timing                       = timing;
@@ -177,7 +180,7 @@ static BYTE fc_uop_engine_wait_timeout(fc_uop_engine_state_s *state, fc_uop_engi
 
     if (delay_time_elapsed_us(w->start_us, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
-        LOGE(LOG_TAG_NAND "%s timeout op=%u polls=%u timeout_us=%u\r\n", op_name, state->request->operation, w->polls, state->timing->busy_timeout_us);
+        LOGE(LOG_TAG_NAND "%s timeout op=%hhu polls=%hu timeout_us=%hu\r\n", op_name, state->request->operation, w->polls, state->timing->busy_timeout_us);
         state->active = 0U;
         return 1U;
     }
@@ -220,8 +223,14 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
     /* 前置条件由调用者保证（见 fc_nand_engine.h）：active==0 后不得再调；游标字段由
      * fc_uop_engine_start 填好。fc_nand_step 已先判 active，fc_uop_engine_execute 的
      * 循环与 start 内部调用也都在 active==1 时进入。 */
-    // 三指针/表由 fc_uop_engine_start 的入口断言保证；step 只守“仍 active”这个每步都可能变的状态。
-    ASSERT(state->active != 0U);
+    ASSERT_REJECT(state != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: state NULL");
+    ASSERT_REJECT(state->active != 0U, NAND_RESULT_INVALID_ARGUMENT, "engine step: inactive");
+    ASSERT_REJECT(state->uops != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: uops NULL");
+    ASSERT_REJECT(state->backend != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: backend NULL");
+    ASSERT_REJECT(state->backend->handlers != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: handlers NULL");
+    ASSERT_REJECT(state->request != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: request NULL");
+    ASSERT_REJECT(state->completion != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: completion NULL");
+    ASSERT_REJECT(state->timing != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: timing NULL");
 
     for (; state->uop_index < NAND_ENGINE_MAX_UOPS;)
     {
@@ -234,7 +243,7 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
         }
 
         /* UOP 流来自 fc_nand_dispatch.c 的静态表，type 必然 < NAND_UOP_COUNT */
-        ASSERT(uop->type < NAND_UOP_COUNT);
+        ASSERT_REJECT(uop->type < NAND_UOP_COUNT, NAND_RESULT_INVALID_ARGUMENT, "engine step: uop type out of range");
 
         /* ── NAND_UOP_JUMP_IF_NOT_READY：引擎直接处理的条件跳转微指令 ── */
         if (uop->type == NAND_UOP_JUMP_IF_NOT_READY)
@@ -250,7 +259,7 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
             {
                 state->completion->pre_status = state->completion->nand_status;
             }
-            if ((state->completion->nand_status & NAND_STATUS_READY) != 0U)
+            if (bit_mask_any(state->completion->nand_status, NAND_STATUS_READY) != 0U)
             {
                 /* NAND ready（状态字节 bit6）→ 复位本组忙等状态，推进到下一 UOP。
                  * 复位是必需的：否则同一序列中后续 JUMP 会复用上一轮的陈旧 µs 起点。 */
@@ -274,7 +283,11 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
             /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读）。
              * operand 是静态 UOP 表的回跳距离；超过当前游标会让 WORD 下溢并越界读表，
              * 这里由引擎自己守，不能依赖上层（上层只保证 uops 表非空）。 */
-            ASSERT(uop->operand <= state->uop_index);
+            ASSERT_REJECT(uop->operand <= state->uop_index,
+                          NAND_RESULT_INVALID_ARGUMENT,
+                          "engine step: JUMP operand=%lu index=%hu",
+                          uop->operand,
+                          state->uop_index);
             state->uop_index -= uop->operand;
             return NAND_RESULT_NOT_READY;
         }
@@ -284,16 +297,7 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
         /* 控制流 UOP（JUMP_IF_NOT_READY / END）已在上方拦截，不会走到查表；
          * 其余类型的 handler 表覆盖枚举全部非控制流项，查得 NULL 即表与枚举
          * 失配的编程错误（返回错误码会把固件 bug 伪装成 NAND 命令失败）。 */
-        ASSERT(handler != NULL);
-
-        /* WAIT_READY 首次进入：记录 µs 起点（用独立 wait 状态） */
-        if (uop->type == NAND_UOP_WAIT_READY)
-        {
-            if (fc_uop_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)
-            {
-                return NAND_RESULT_INVALID_ARGUMENT;
-            }
-        }
+        ASSERT_REJECT(handler != NULL, NAND_RESULT_INVALID_ARGUMENT, "engine step: missing uop handler");
 
         result = handler(state->backend->context, uop, state->request, state->timing, state->completion);
 
@@ -314,10 +318,16 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
             }
             if ((state->request->operation == OP_NORMAL_PROGRAM_PAGE) && ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
             {
-                ENG_LOGD("program pending uop=%u status=0x%02X wait=%u\r\n", state->uop_index, state->completion->nand_status, state->debug_polls);
+                ENG_LOGD("program pending uop=%hu status=0x%02hhX wait=%hu\r\n", state->uop_index, state->completion->nand_status, state->debug_polls);
             }
             if (uop->type == NAND_UOP_WAIT_READY)
             {
+                /* 首次观察到 NOT_READY 时才锁存 µs 起点；RB# 一开始就 HIGH 的
+                 * 立即成功路径不需要时间源。 */
+                if (fc_uop_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)
+                {
+                    return NAND_RESULT_INVALID_ARGUMENT;
+                }
                 if (fc_uop_engine_wait_timeout(state, &state->wait, "WAIT_READY") != 0U)
                 {
                     return NAND_RESULT_TIMEOUT;
@@ -341,18 +351,28 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
  * NAND 命令编排 / 初始化 / 拓扑扫描
  * ══════════════════════════════════════════════════════════ */
 
+/**
+ * @brief 同步执行一条 NAND 操作（仅初始化阶段）
+ *
+ * @param ch         目标通道
+ * @param ce         目标片选
+ * @param operation  OP_*
+ * @param request    命令参数
+ * @param completion 输出：执行状态 + NAND 状态
+ * @return OK / 错误码
+ */
 static nand_result_e fc_nand_execute(BYTE ch, BYTE ce, BYTE operation, const nand_cmd_req_s *request, nand_cmd_comp_s *completion)
 {
     const nand_op_map_s      *map;
     const nand_phy_backend_s *backend;
     BYTE                      status;
 
-    ASSERT(operation < OP_COUNT);
-    ASSERT(request != NULL);
-    ASSERT(completion != NULL);
+    ASSERT_REJECT(operation < OP_COUNT, NAND_RESULT_INVALID_ARGUMENT, "sync execute: operation out of range");
+    ASSERT_REJECT(request != NULL, NAND_RESULT_INVALID_ARGUMENT, "sync execute: request NULL");
+    ASSERT_REJECT(completion != NULL, NAND_RESULT_INVALID_ARGUMENT, "sync execute: completion NULL");
     /* 同步入口契约：仅初始化阶段（armed==0）可调。放行后必须走
      * fc_nand_start/step 异步路径——此处阻塞式执行会卡住整个调度器。 */
-    ASSERT(fc_nand_engine_is_armed() == 0U);
+    ASSERT_REJECT(fc_nand_engine_is_armed() == 0U, NAND_RESULT_INVALID_ARGUMENT, "sync execute after armed");
 
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
@@ -383,9 +403,10 @@ nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const na
     const nand_op_map_s *map;
     BYTE                 result;
 
-    ASSERT(transaction != NULL);
-    ASSERT(operation < OP_COUNT);
-    ASSERT(request != NULL);
+    ASSERT_REJECT(transaction != NULL, NAND_RESULT_INVALID_ARGUMENT, "nand start: transaction NULL");
+    ASSERT_REJECT(operation < OP_COUNT, NAND_RESULT_INVALID_ARGUMENT, "nand start: operation out of range");
+    ASSERT_REJECT(request != NULL, NAND_RESULT_INVALID_ARGUMENT, "nand start: request NULL");
+    ASSERT_REJECT(transaction->engine.backend != NULL, NAND_RESULT_INVALID_ARGUMENT, "nand start: backend NULL");
 
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
@@ -397,8 +418,10 @@ nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const na
 
     transaction->request           = *request;
     transaction->request.operation = operation;
+    /* request/completion 由本函数统一绑定；backend 仍由调用者按 target 绑定。 */
+    transaction->engine.request    = &transaction->request;
+    transaction->engine.completion = &transaction->completion;
     memset(&transaction->completion, 0, sizeof(transaction->completion));
-    /* backend 由 dispatch 的任务装载处绑定；engine_start 统一校验。 */
     result = fc_uop_engine_start(&transaction->engine, map->uops, &map->timing);
     if (result != NAND_RESULT_NOT_READY)
     {
@@ -419,8 +442,9 @@ nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completi
 {
     BYTE result;
 
-    ASSERT(transaction != NULL);
-    ASSERT(completion != NULL);
+    ASSERT_REJECT(transaction != NULL, NAND_RESULT_INVALID_ARGUMENT, "nand step: transaction NULL");
+    ASSERT_REJECT(completion != NULL, NAND_RESULT_INVALID_ARGUMENT, "nand step: completion NULL");
+    ASSERT_REJECT(transaction->engine.active != 0U, NAND_RESULT_INVALID_ARGUMENT, "nand step: inactive");
 
     result = fc_uop_engine_step(&transaction->engine);
     if (result != NAND_RESULT_NOT_READY)
@@ -428,7 +452,7 @@ nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completi
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
         completion->pre_status       = transaction->completion.pre_status;
-        ENG_LOGD("complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
+        ENG_LOGD("complete, op=%hhu result=0x%02hhX status=0x%02hhX\r\n", transaction->request.operation, result, completion->nand_status);
         transaction->engine.active = 0U;
     }
     return result;
@@ -735,10 +759,52 @@ nand_result_e fc_nand_init(void)
     return NAND_RESULT_OK;
 }
 
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+/**
+ * @brief 通过 SET_FEATURES 01h 设置 ONFI timing mode
+ *
+ * @param backend 已选中的 target 后端
+ * @param mode    ONFI timing mode（0 = 低速）
+ * @return OK / 错误码
+ */
+static nand_result_e fc_nand_set_timing_mode(const nand_phy_backend_s *backend, BYTE mode)
+{
+    BYTE            mode_bytes[4];
+    nand_cmd_req_s  request;
+    nand_cmd_comp_s completion;
+    fc_nand_txn_s   transaction;
+    nand_result_e   result;
+
+    ASSERT(backend != NULL);
+
+    mode_bytes[0] = mode;
+    mode_bytes[1] = 0U;
+    mode_bytes[2] = 0U;
+    mode_bytes[3] = 0U;
+
+    memset(&request, 0, sizeof(request));
+    request.column      = 0x01U; /* ONFI timing mode feature address */
+    request.buffer      = mode_bytes;
+    request.data_length = 4U;
+
+    memset(&completion, 0, sizeof(completion));
+    memset(&transaction, 0, sizeof(transaction));
+    transaction.engine.backend = backend;
+
+    result = fc_nand_start(&transaction, OP_SET_FEATURES, &request);
+    while (result == NAND_RESULT_NOT_READY)
+    {
+        result = fc_nand_step(&transaction, &completion);
+    }
+    return result;
+}
+#endif /* CONFIG_NAND_TIMING_MODE */
+
 /**
  * @brief boot 完成后切到 CONFIG_NAND_TIMING_MODE 并更新 FMC 时序
  *
- * armed 已置位，用 fc_nand_start/step 推进 SET_FEATURES；失败保持低速。
+ * armed 已置位，用 fc_nand_start/step 推进 SET_FEATURES。FMC 重配失败时
+ * 先恢复低速 FMC，再把 NAND SET_FEATURES 回 Mode 0；回滚失败只记录，不宣称低速。
  *
  * @param fmc_hz FMC 内核时钟
  * @return OK / 错误码
@@ -746,10 +812,6 @@ nand_result_e fc_nand_init(void)
 static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fmc_hz)
 {
 #if (CONFIG_NAND_TIMING_MODE != 0U)
-    const BYTE                mode[4] = {(BYTE)CONFIG_NAND_TIMING_MODE, 0U, 0U, 0U};
-    nand_cmd_req_s            request;
-    nand_cmd_comp_s           completion;
-    fc_nand_txn_s             transaction;
     nand_result_e             result;
     const nand_device_desc_s *dev     = nand_device_get();
     const nand_phy_backend_s *backend = NULL;
@@ -763,53 +825,92 @@ static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fm
         fmc_hz = 200000000U;
     }
 
-    memset(&request, 0, sizeof(request));
-    request.column      = 0x01U; /* ONFI timing mode feature address */
-    request.buffer      = (BYTE *)mode;
-    request.data_length = 4U;
-
-    memset(&completion, 0, sizeof(completion));
     result = nand_target_get(ch, ce, &backend);
     if (result != NAND_RESULT_OK)
     {
         return result;
     }
 
-    memset(&transaction, 0, sizeof(transaction));
-    transaction.engine.backend    = backend;
-    transaction.engine.request    = &transaction.request;
-    transaction.engine.completion = &transaction.completion;
-
-    result = fc_nand_start(&transaction, OP_SET_FEATURES, &request);
-    while (result == NAND_RESULT_NOT_READY)
-    {
-        result = fc_nand_step(&transaction, &completion);
-    }
+    result = fc_nand_set_timing_mode(backend, (BYTE)CONFIG_NAND_TIMING_MODE);
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02hhX status=0x%02hhX\r\n", CONFIG_NAND_TIMING_MODE, result, transaction.completion.nand_status);
+        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02hhX\r\n", CONFIG_NAND_TIMING_MODE, result);
         return result;
     }
 
     result = dev->set_timing(ch, ce, (BYTE)CONFIG_NAND_TIMING_MODE, fmc_hz);
     if (result != NAND_RESULT_OK)
     {
-        LOGE(LOG_TAG_NAND "set timing Mode %u failed: 0x%02hhX\r\n", CONFIG_NAND_TIMING_MODE, result);
+        LOGE(LOG_TAG_NAND "set timing Mode %u failed: 0x%02hhX; rolling back\r\n", CONFIG_NAND_TIMING_MODE, result);
+
+        /* 先把 FMC 恢复到低速，再用低速 FMC 把 NAND feature 回 Mode 0。 */
+        const nand_result_e fmc_rollback = dev->set_timing(ch, ce, 0U, fmc_hz);
+        if (fmc_rollback != NAND_RESULT_OK)
+        {
+            LOGE(LOG_TAG_NAND "FMC rollback to Mode 0 failed: 0x%02hhX\r\n", fmc_rollback);
+        }
+
+        const nand_result_e nand_rollback = fc_nand_set_timing_mode(backend, 0U);
+        if (nand_rollback != NAND_RESULT_OK)
+        {
+            LOGE(LOG_TAG_NAND "NAND rollback to Mode 0 failed: 0x%02hhX\r\n", nand_rollback);
+        }
+
         return result;
     }
 
     LOGI(LOG_TAG_NAND "switched NAND to ONFI Mode %u\r\n", CONFIG_NAND_TIMING_MODE);
     return NAND_RESULT_OK;
 #else
+    (void)ch;
+    (void)ce;
+    (void)fmc_hz;
     LOGI(LOG_TAG_NAND "high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
     return NAND_RESULT_OK;
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
 
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+/**
+ * @brief 把单个 target 回滚到低速（FMC 低 PCC + NAND Mode 0）
+ *
+ * @param ch      目标通道
+ * @param ce      目标片选
+ * @param fmc_hz FMC 内核时钟
+ * @return OK / 错误码
+ */
+static nand_result_e fc_nand_enable_low_speed_target(BYTE ch, BYTE ce, DWORD fmc_hz)
+{
+    const nand_device_desc_s *dev     = nand_device_get();
+    const nand_phy_backend_s *backend = NULL;
+    nand_result_e             result;
+
+    ASSERT(dev != NULL);
+    ASSERT(dev->set_timing != NULL);
+
+    if (fmc_hz == 0U)
+    {
+        fmc_hz = 200000000U;
+    }
+
+    result = nand_target_get(ch, ce, &backend);
+    if (result != NAND_RESULT_OK)
+    {
+        return result;
+    }
+
+    result = dev->set_timing(ch, ce, 0U, fmc_hz);
+    if (result != NAND_RESULT_OK)
+    {
+        return result;
+    }
+
+    return fc_nand_set_timing_mode(backend, 0U);
+}
+#endif /* CONFIG_NAND_TIMING_MODE */
+
 nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
 {
-    nand_result_e last = NAND_RESULT_OK;
-
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
         for (BYTE ce = 0U; ce < CE_NUM; ce++)
@@ -818,12 +919,34 @@ nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
             {
                 continue;
             }
-            last = fc_nand_enable_high_speed_target(ch, ce, fmc_hz);
-            if (last != NAND_RESULT_OK)
+
+            const nand_result_e result = fc_nand_enable_high_speed_target(ch, ce, fmc_hz);
+            if (result == NAND_RESULT_OK)
             {
-                return last;
+                continue;
             }
+
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+            /* 前面 target 可能已经切到高速；失败时把全部 present target 拉回低速。 */
+            LOGE(LOG_TAG_NAND "high-speed failed at ch=%hhu ce=%hhu; rolling back all targets\r\n", ch, ce);
+            for (BYTE rb_ch = 0U; rb_ch < CH_NUM; rb_ch++)
+            {
+                for (BYTE rb_ce = 0U; rb_ce < CE_NUM; rb_ce++)
+                {
+                    if (g_nand_targets[rb_ch][rb_ce].present == 0U)
+                    {
+                        continue;
+                    }
+                    const nand_result_e rb_result = fc_nand_enable_low_speed_target(rb_ch, rb_ce, fmc_hz);
+                    if (rb_result != NAND_RESULT_OK)
+                    {
+                        LOGE(LOG_TAG_NAND "low-speed rollback failed ch=%hhu ce=%hhu result=0x%02hhX\r\n", rb_ch, rb_ce, rb_result);
+                    }
+                }
+            }
+#endif
+            return result;
         }
     }
-    return last;
+    return NAND_RESULT_OK;
 }

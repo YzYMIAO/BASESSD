@@ -757,7 +757,8 @@ int main(void)
         ssd_ftl_boot_all();
 
         /* ⑥ 高速模式：只有初始化（NAND + FTL boot/恢复）全部完成后才切换，
-         *    保证上电路径始终跑在保守低速时序。失败仅告警，保持低速可用。 */
+         *    保证上电路径始终跑在保守低速时序。失败仅告警；engine 会尝试回滚，
+         *    但回滚失败不代表低速仍有效。 */
         if (g_ftl_ready != 0)
         {
             sys_clock_tree_s clk;
@@ -768,7 +769,7 @@ int main(void)
 
             if (high_speed_result != NAND_RESULT_OK)
             {
-                LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — keep low speed\r\n", high_speed_result);
+                LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — rollback attempted; check NAND/FMC mode\r\n", high_speed_result);
             }
         }
     }

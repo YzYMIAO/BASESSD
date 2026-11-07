@@ -30,6 +30,7 @@
 #include "fc_nand_engine.h"
 #include "fc_types.h"
 #include "log.h"
+#include "nand_board.h"
 #include "nand_config.h"
 #include "nand_debug.h"
 #include "nand_device.h"
@@ -68,6 +69,54 @@ static inline BYTE fc_nand_dispatch_cw_first_or_zero(DWORD cw_bitmap)
     return (n < CW_TOTAL_MAX) ? n : 0U;
 }
 
+/* 单 plane 命令的完整页位图：该 plane 的全部 CW。 */
+static BOOL fc_nand_dispatch_bitmap_is_full_single(DWORD cw_bitmap, BYTE plane)
+{
+    const DWORD full = ((1UL << CW_NUM) - 1UL) << (plane * CW_NUM);
+
+    return (cw_bitmap == full);
+}
+
+/* 多 plane 命令的完整页位图：全部 plane × 全部 CW。 */
+static BOOL fc_nand_dispatch_bitmap_is_full_multi(DWORD cw_bitmap)
+{
+    return (cw_bitmap == ((1UL << (PLANE_NUM * CW_NUM)) - 1UL));
+}
+
+/* ── 按位图选择读路径 ──
+ * 非稀疏（完整页）且单 LUN：保留 WITH_DATA_OUT，30h 后直接整页 Dout。
+ * 稀疏，或多 LUN：改成加载型，数据由后续 05h-E0h / 06h-E0h 逐 CW 取。
+ * UOP 表本身不拆；这里只决定用哪个 op 进入引擎。 */
+static BYTE fc_nand_dispatch_select_read_op(BYTE operation, DWORD cw_bitmap, BYTE plane, BYTE plane_count)
+{
+    switch (operation)
+    {
+        case OP_NORMAL_READ_PAGE_WITH_DATA_OUT:
+            if ((LUN_NUM == 1U) && (fc_nand_dispatch_bitmap_is_full_single(cw_bitmap, plane) == true))
+            {
+                return operation;
+            }
+            return (LUN_NUM > 1U) ? OP_READ_PAGE_LOAD : OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+
+        case OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT:
+            if ((LUN_NUM == 1U) && (plane_count > 0U) && (fc_nand_dispatch_bitmap_is_full_multi(cw_bitmap) == true))
+            {
+                return operation;
+            }
+            return (LUN_NUM > 1U) ? OP_READ_PAGE_MULTI_PLANE_LOAD : OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
+
+        case OP_OTP_DATA_READ:
+            if ((LUN_NUM == 1U) && (fc_nand_dispatch_bitmap_is_full_single(cw_bitmap, plane) == true))
+            {
+                return operation;
+            }
+            return (LUN_NUM > 1U) ? OP_READ_PAGE_LOAD : OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+
+        default:
+            return operation;
+    }
+}
+
 /* ── dispatch task：一次预解析后的命令实例 ──
  * 由 fc_nand_dispatch_task_load() 从 fc_nand_dispatch_req_s 填充，
  * poll 依此驱动 fc_nand_start/step。 */
@@ -78,26 +127,27 @@ typedef struct FC_NAND_DISPATCH_TASK_S
     BYTE  ch;            /* Channel — needed for page_buffer access. */
     BYTE  ce;            /* Chip-enable — needed for routing. */
     BYTE  lun;           /* LUN — needed for routing. */
-    BYTE  page_type : 2; /* Copy from dispatch request for LDPC engine. */
+    BYTE  page_type : 2; /* Copy from dispatch request; 当前无读者，LDPC decode threshold 预留。 */
     BYTE  reserved  : 6;
-    DWORD cw_bitmap;   /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
-                        * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
-                        * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
-    BYTE cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
-                        * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
-                        * 消费：completion_per_cw 用它当下标写 cw_status[n]。 */
-    BYTE plane_count;  /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
-                        * 见 fc_nand_dispatch.h 同名字段的完整说明。 */
-    BYTE plane;        /* 本命令目标物理 plane 索引。
-                        * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
-                        *   scatter 一律读 plane_paa[plane]。
-                        * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
-                        * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
-                        *   memset），漏赋值会读到上一条命令的残值。 */
-    BYTE started;      /* 0=未启动；1=已 fc_nand_start（含 start 内同步完成） */
-    BYTE feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
-    WORD column;       /* **显式列地址**（仅 OP_READ_COLUMN 用，见 fc_nand_dispatch.h 同名字段）。
-                        * 其余 op 恒 0；req_read_column 直接把它当列地址，不从 paa 的 cw 推。 */
+    DWORD cw_bitmap;      /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
+                           * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
+                           * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
+    BYTE cw_index;        /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
+                           * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
+                           * 消费：completion_per_cw 用它当下标写 cw_status[n]。 */
+    BYTE plane_count;     /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
+                           * 见 fc_nand_dispatch.h 同名字段的完整说明。 */
+    BYTE plane;           /* 本命令目标物理 plane 索引。
+                           * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
+                           *   scatter 一律读 plane_paa[plane]。
+                           * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
+                           * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
+                           *   memset），漏赋值会读到上一条命令的残值。 */
+    BYTE started;         /* 0=未启动；1=已 fc_nand_start（含 start 内同步完成） */
+    BYTE target_acquired; /* 1 = 本任务持有 target 所属 bank 的 ownership */
+    BYTE feature_addr;    /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
+    WORD column;          /* **显式列地址**（仅 OP_READ_COLUMN 用，见 fc_nand_dispatch.h 同名字段）。
+                           * 其余 op 恒 0；req_read_column 直接把它当列地址，不从 paa 的 cw 推。 */
 
     /* Pre-resolved per-CW data（定容数组，容量 = 硬件上限 CW_TOTAL_MAX = PLANE_NUM×CW_NUM）。
      * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_bitmap 的 bit 号、
@@ -288,12 +338,18 @@ static void fc_nand_dispatch_task_load(fc_nand_dispatch_task_s *task, const fc_n
     task->ch                            = request->ch;
     task->ce                            = request->ce;
     task->lun                           = request->lun;
-    task->operation                     = request->operation;
+    /* 非稀疏单 LUN 整页读保留 WITH_DATA_OUT；稀疏/多 LUN 读改成加载型，
+     * 选中 CW 由后续 05h/06h 随机读取回。 */
+    task->operation                     = fc_nand_dispatch_select_read_op(request->operation,
+                                                      request->cw_bitmap,
+                                                      request->plane,
+                                                      request->plane_count);
     task->page_type                     = request->page_type;
     task->cw_bitmap                     = request->cw_bitmap;
     task->plane_count                   = request->plane_count;
     task->plane                         = request->plane;
     task->started                       = 0U;
+    task->target_acquired               = 0U;
     task->feature_addr                  = request->feature_addr;
     task->column                        = request->column;
     /* 引擎上下文三指针：request/completion 指向本 slot 内持久存储；backend 在启动时
@@ -336,6 +392,7 @@ void fc_nand_dispatch_init(void)
     /* DTCM/非缓存段都不由启动代码清零；各 builder 虽会先 memset，这里仍显式清零，
      * 避免任何未来路径读到上电残留。 */
     memset(g_nand_channel_page_buffer, 0, sizeof(g_nand_channel_page_buffer));
+    nand_board_ownership_reset();
     fc_nand_engine_set_armed(0U);
     s_poll_next_channel = 0U;
     s_dispatch_fatal    = false;
@@ -440,6 +497,14 @@ static nand_result_e fc_nand_dispatch_enqueue(const fc_nand_dispatch_req_s *requ
                       NAND_RESULT_INVALID_ARGUMENT,
                       "dispatch: chain member not same target");
         ASSERT_REJECT(requests[i].operation < OP_COUNT, NAND_RESULT_INVALID_ARGUMENT, "dispatch op=%hhu out of range", requests[i].operation);
+        ASSERT_REJECT(g_fc_nand_dispatch_req_table[requests[i].operation] != NULL,
+                      NAND_RESULT_INVALID_ARGUMENT,
+                      "dispatch op=%hhu has no request handler",
+                      requests[i].operation);
+        ASSERT_REJECT(g_fc_nand_dispatch_completion_table[requests[i].operation] != NULL,
+                      NAND_RESULT_INVALID_ARGUMENT,
+                      "dispatch op=%hhu has no completion handler",
+                      requests[i].operation);
         ASSERT_REJECT((requests[i].cw_bitmap & ~(((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL,
                       NAND_RESULT_INVALID_ARGUMENT,
                       "dispatch: cw_bitmap=0x%08lX out of range",
@@ -523,7 +588,8 @@ typedef enum FC_NAND_DISPATCH_LUN_OUTCOME_E
 typedef enum FC_NAND_DISPATCH_START_OUTCOME_E
 {
     NAND_DISPATCH_START_ASYNC = 0, /* fc_nand_start 返回 NOT_READY，待下轮 step */
-    NAND_DISPATCH_START_SYNC       /* 同步完成或返回错误码，*fc_result 有效 */
+    NAND_DISPATCH_START_SYNC,      /* 同步完成或返回错误码，*fc_result 有效 */
+    NAND_DISPATCH_START_WAIT       /* target/bank 被占用，本任务尚未启动 */
 } fc_nand_dispatch_start_outcome_e;
 
 /* ── CW 链式续读结果（无 ERROR 出口：链内 start 错误仍走完成路径） ── */
@@ -545,20 +611,57 @@ typedef struct FC_NAND_DISPATCH_LUN_CONTEXT_S
     BYTE                          result;
 } fc_nand_dispatch_lun_ctx_s;
 
+/* 释放本任务持有的 target/bank ownership；幂等。 */
+static void fc_nand_dispatch_target_release(fc_nand_dispatch_task_s *task)
+{
+    if (task->target_acquired != 0U)
+    {
+        nand_board_release_target(task->ch, task->ce);
+        task->target_acquired = 0U;
+    }
+}
+
 /**
  * @brief 发起异步 ONFI 事务并置初始相位
  *
  * @param queue     所属 LUN FIFO
  * @param task      目标任务
  * @param fc_result 输出：fc_nand_start 返回码
- * @return ASYNC / SYNC
+ * @return ASYNC / SYNC / WAIT
  */
 static fc_nand_dispatch_start_outcome_e fc_nand_dispatch_task_fc_start(fc_nand_dispatch_lun_queue_s *queue, fc_nand_dispatch_task_s *task, BYTE *fc_result)
 {
-    const nand_phy_backend_s *backend       = NULL;
-    const nand_result_e       target_result = nand_target_get(task->ch, task->ce, &backend);
-    BYTE                      result        = (BYTE)target_result;
-    const BOOL                target_ok     = (target_result == NAND_RESULT_OK);
+    const nand_phy_backend_s *backend = NULL;
+    nand_result_e             acquire_result;
+    nand_result_e             target_result;
+    BYTE                      result;
+    BOOL                      target_ok;
+
+    /* 首次启动先取得 target/bank ownership；配对 WAIT/FETCH 复用已持有的 ownership。 */
+    if (task->target_acquired == 0U)
+    {
+        acquire_result = nand_board_acquire_target(task->ch, task->ce);
+
+        if (acquire_result == NAND_RESULT_NOT_READY)
+        {
+            *fc_result = (BYTE)NAND_RESULT_NOT_READY;
+            return NAND_DISPATCH_START_WAIT;
+        }
+        if (acquire_result != NAND_RESULT_OK)
+        {
+            task->transaction.engine.backend = NULL;
+            result                           = (BYTE)acquire_result;
+            task->started                    = 1U;
+            queue->phase                     = (nand_operation_is_issue(task->operation) != 0U) ? LUN_PHASE_ISSUE : LUN_PHASE_FETCH;
+            *fc_result                       = result;
+            return NAND_DISPATCH_START_SYNC;
+        }
+        task->target_acquired = 1U;
+    }
+
+    target_result = nand_target_get(task->ch, task->ce, &backend);
+    result        = (BYTE)target_result;
+    target_ok     = (target_result == NAND_RESULT_OK);
 
     // 共享总线板卡：任务开始前一次取得「通路 + backend」。
     // 通路失败不是“引擎异步忙”：必须走 SYNC 完成路径，否则下一轮会把
@@ -578,6 +681,9 @@ static fc_nand_dispatch_start_outcome_e fc_nand_dispatch_task_fc_start(fc_nand_d
         queue->phase = LUN_PHASE_FETCH;
     }
     *fc_result = result;
+
+    /* ownership 统一由 lun_step 在命令完成/失败时释放；sync start 之后仍可能
+     * 进入 cw_chain 续读（例如加载型 op 同步完成后继续 05/06），不能提前放锁。 */
     if (target_ok == false)
     {
         return NAND_DISPATCH_START_SYNC;
@@ -637,7 +743,7 @@ static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_issued_advance(fc_nand_di
         task->operation = pair_op;
     }
 
-    if (fc_nand_dispatch_task_start(ctx->queue, task, &result) == NAND_DISPATCH_START_ASYNC)
+    if (fc_nand_dispatch_task_start(ctx->queue, task, &result) != NAND_DISPATCH_START_SYNC)
     {
         return NAND_DISPATCH_LUN_WAIT;
     }
@@ -662,7 +768,7 @@ static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_drive(fc_nand_dispatc
 
     if (task->started == 0U)
     {
-        if (fc_nand_dispatch_task_start(ctx->queue, task, &result) == NAND_DISPATCH_START_ASYNC)
+        if (fc_nand_dispatch_task_start(ctx->queue, task, &result) != NAND_DISPATCH_START_SYNC)
         {
             return NAND_DISPATCH_LUN_WAIT;
         }
@@ -768,11 +874,6 @@ static fc_nand_dispatch_cw_outcome_e fc_nand_dispatch_task_cw_chain(fc_nand_disp
             }
             task->cw_index = n;
         }
-        else if (((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (task->operation == OP_OTP_DATA_READ)) && ((n = fc_nand_dispatch_cw_next(task->cw_bitmap, (task->cw_index + 1U))) != CW_TOTAL_MAX))
-        {
-            /* 标准语义：最低位那个 CW 已由加载 op 的 DATA_OUT 取回，其余逐 CW 随机读 */
-            task->cw_index = n;
-        }
         else
         {
             break;
@@ -817,7 +918,7 @@ static void fc_nand_dispatch_scatter_page_buffer(const fc_nand_dispatch_task_s *
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
     BYTE  n;
 
-    if ((task->operation == OP_READ_PAGE_CACHE_START_SEQ) || (task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) || (task->operation == OP_READ_PAGE_CACHE_LAST))
+    if ((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (task->operation == OP_OTP_DATA_READ) || (task->operation == OP_READ_PAGE_CACHE_START_SEQ) || (task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) || (task->operation == OP_READ_PAGE_CACHE_LAST))
     {
         for (n = fc_nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX; n = fc_nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
         {
@@ -872,7 +973,15 @@ static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_step(fc_nand_dispatch
         return NAND_DISPATCH_LUN_WAIT;
     }
 
-    fc_nand_dispatch_scatter_page_buffer(task);
+    /* 失败时 page buffer 可能是半页/未初始化数据，不往 CW buffer 搬；
+     * 完成状态已经由 task_complete 标成失败。 */
+    if (ctx->result == NAND_RESULT_OK)
+    {
+        fc_nand_dispatch_scatter_page_buffer(task);
+    }
+
+    /* 队头命令的所有 NAND 事务已结束：释放 target/bank ownership。 */
+    fc_nand_dispatch_target_release(task);
 
     /* ── 队头命令完成：回填 completion、出队、复位相位 ── */
     *ctx->completion = task->completion;
@@ -891,10 +1000,10 @@ static fc_nand_dispatch_lun_outcome_e fc_nand_dispatch_lun_step(fc_nand_dispatch
  * @param ctx  透传给 sink 的上下文
  * @return 本轮完成条数
  */
-BYTE fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx)
+DWORD fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx)
 {
     fc_nand_dispatch_comp_s completion;
-    BYTE                    delivered     = 0U;
+    DWORD                   delivered     = 0U;
     const BYTE              start_channel = s_poll_next_channel;
 
     /* 回调前置条件由调用者保证（fc.c 轮询路径恒传有效 sink） */
@@ -1076,6 +1185,16 @@ static void req_program_page(fc_nand_dispatch_task_s *task)
 static void req_read_page(fc_nand_dispatch_task_s *task)
 {
     BYTE *cw_buffer;
+
+    /* 非稀疏单 LUN 的整页 direct：整页 Dout 到 page buffer，完成后再 scatter。 */
+    if ((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (task->operation == OP_OTP_DATA_READ))
+    {
+        BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+
+        req_init(task, 0U, page_buffer, PAGE_SIZE);
+        task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
+        return;
+    }
 
     /* 空掩码 = 无 desc 的「纯加载」op（如 op 33 直接下发）：uop 无 DATA_OUT，data 不被读；
      * task_load 已把 cw_buffers[] 全清为 NULL，这里仍显式置 NULL/0，保持请求自描述。 */
@@ -1322,7 +1441,7 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_READ_ONFI_SIGNATURE]                    = completion_all_cws,
     [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_all_cws,
     [OP_READ_META]                              = completion_all_cws,
-    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_per_cw,
+    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_all_cws,
     [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = completion_load,
     /* 单 plane cache 读同样整页读入 page_buffer 后 scatter 到所有选中 CW；
      * 完成状态必须覆盖整组 CW，不能只标最低位那一个。 */
@@ -1338,6 +1457,7 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_READ_PAGE_CACHE_LAST_MP]                = completion_all_cws,
     [OP_NORMAL_PROGRAM_PAGE]                    = completion_all_cws,
     [OP_PROGRAM_PAGE_CACHE]                     = completion_all_cws,
+    [OP_PROGRAM_PAGE_CACHE_FIRST]               = completion_all_cws,
     [OP_ERASE_BLOCK]                            = completion_all_cws,
     [OP_READ_FOR_INTERNAL_DATA_MOVE]            = completion_all_cws,
     [OP_BLOCK_UNLOCK_LOW]                       = completion_all_cws,
@@ -1347,7 +1467,7 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_BLOCK_LOCK_STATUS]                      = completion_all_cws,
     [OP_OTP_DATA_LOCK]                          = completion_all_cws,
     [OP_OTP_DATA_PROGRAM]                       = completion_all_cws,
-    [OP_OTP_DATA_READ]                          = completion_per_cw,
+    [OP_OTP_DATA_READ]                          = completion_all_cws,
     [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = completion_load,
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = completion_all_cws,
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = completion_all_cws,
@@ -1409,6 +1529,7 @@ const fc_nand_dispatch_req_handler_fn_t g_fc_nand_dispatch_req_table[OP_COUNT] =
     [OP_READ_PAGE_CACHE_LAST_MP]                = req_multi_plane_read,
     [OP_NORMAL_PROGRAM_PAGE]                    = req_program_page,
     [OP_PROGRAM_PAGE_CACHE]                     = req_program_page,
+    [OP_PROGRAM_PAGE_CACHE_FIRST]               = req_program_page,
     [OP_ERASE_BLOCK]                            = req_erase,
     [OP_READ_FOR_INTERNAL_DATA_MOVE]            = req_no_data,
     [OP_BLOCK_UNLOCK_LOW]                       = req_no_data,

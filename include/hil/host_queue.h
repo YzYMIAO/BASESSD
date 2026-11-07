@@ -72,21 +72,4 @@ ssd_host_entry_s *ssd_host_queue_alloc(ssd_host_queue_s *queue, ssd_host_owner_e
  */
 void ssd_host_queue_free(ssd_host_queue_s *queue, ssd_host_entry_s *entry);
 
-/**
- * @brief 当前占用数。
- *
- * @param queue 队列
- * @return 0..SSD_HOST_QUEUE_DEPTH
- */
-BYTE ssd_host_queue_used(const ssd_host_queue_s *queue);
-
-/**
- * @brief 某前端是否没有占用任何 entry。
- *
- * @param queue 队列
- * @param owner 前端（USB / CLI）
- * @return true = 该 owner 的 entry 数为 0
- */
-BOOL ssd_host_queue_owner_idle(const ssd_host_queue_s *queue, ssd_host_owner_e owner);
-
 #endif /* SSD_HOST_QUEUE_H */
