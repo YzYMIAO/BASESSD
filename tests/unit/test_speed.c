@@ -177,7 +177,7 @@ static fc_cmd_s *spd_fc_try_build(spd_fc_mode_e mode, BOOL write, WORD block, BY
     conf.operation = write ? spd_fc_write_op(mode, page) : spd_fc_read_op(mode, page);
     conf.crc       = FC_CRC_ENABLE;
     conf.random    = FC_RANDOM_ENABLE;
-    conf.ldpc      = FC_ECC_MODE_BCH;
+    conf.ldpc      = FC_ECC_MODE_NORMAL;
     conf.raid      = FC_RAID_MODE_NORMAL;
 
     cmd = test_cmd_try_build(&addr, test_plane_cw_bitmap(TEST_PLANE_BM_ALL), pba_from_addr(&addr), &conf);
@@ -502,7 +502,7 @@ static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out,
     conf.operation = (DWORD)OP_ERASE_BLOCK_MULTI_PLANE;
     conf.crc       = FC_CRC_ENABLE;
     conf.random    = FC_RANDOM_ENABLE;
-    conf.ldpc      = FC_ECC_MODE_BCH;
+    conf.ldpc      = FC_ECC_MODE_NORMAL;
     conf.raid      = FC_RAID_MODE_NORMAL;
 
     for (WORD i = 0U; i < SPD_FC_BLOCKS; i++)

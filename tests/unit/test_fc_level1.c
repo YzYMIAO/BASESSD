@@ -1,34 +1,25 @@
 /*
- * test_fc_level1.c — Level 1 纯逻辑测试：fc_command + fc_queue + fc_scheduler
+ * test_fc_level1.c — Level 1 纯逻辑测试：fc_command + fc_queue
  *
- * 共 12 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
+ * 共 11 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
  * 不依赖任何池，每个用例自带全部夹具（栈上队列 / 栈上命令）。
  *
  * 覆盖范围：
  *   Part 1  fc_command_validate  —— 合法输入放行（冒烟性质，见下）
  *   Part 2  fc_submission_queue  —— SQ 环形 FIFO：顺序 / 回绕 / 满 / peek
  *   Part 2b fc_completion_queue  —— CQ 环形 FIFO：初始化 / 顺序 / 满
- *   Part 3  fc_scheduler         —— init 绑定 SQ/HSQ
  *   Part 4  ONFI 参数页解码       —— 合成页喂纯函数，逐字段断言（手册 Table 11）
  *
  * 链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
  * 的 nand_operation_has_data() 宏引用；以及 fc_test_common.o 的证据打印原语
  * test_trace_*（`--log-visible info|debug` 才输出，默认零字节）。
  *
- * 历史注（v8 / v13 / v15 / v20 / 2026-10-08）：
+ * 范围说明：
  *   - 调度器的选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）
- *     已搬进 fc.c 的 static fc_poll_fill，只能经 fc_service() 触达（会推真 NAND），
- *     不再属 Level 1 纯逻辑范畴——相关用例移至 Level 2/3。
- *   - fc_command_validate 的负向守卫全部转 ASSERT（v20）；param.cw_bitmap 的读者
- *     是 FTL，FC 侧不再校验（v13）。负向用例随之删除，只留正向冒烟。
- *   - fc_cmd_s 通过 cmd_id 携带命令池槽位号。
- *   - 删除 5 条用例（2026-10-08），判据统一为「被测代码还有没有生产调用者」：
- *       status_init_pool_cmd / status_init_stack_cmd / status_set_cw_valid
- *         —— fc_command_status_init / _set_cw 自 2026-09-20 起零生产调用者
- *            （CQ 完成项改由 fc_complete_from_nand() 内联组装），函数连同用例一并删除；
- *       pop_n —— fc_submission_queue_pop_n 零生产调用者（调度器走逐条 pop）；
- *       empty_full —— 断言集是 peek_empty ∪ overflow 的子集，零增量覆盖。
- *     随之删除 setup_fc_suite（其唯一用途是给 status_init 两条用例初始化命令池）。
+ *     在 fc.c 的 static fc_poll_fill 里，只能经 fc_service() 触达（会推真 NAND）
+ *     ⇒ 其覆盖属 Level 2/3，不在本文件。
+ *   - fc_command_validate 的负向守卫全部是 ASSERT；param.cw_bitmap 的读者是 FTL，
+ *     FC 侧不校验 ⇒ 本文件只留正向冒烟。
  */
 
 #include "fc_command.h"
@@ -37,22 +28,22 @@
 #include "munit.h"
 #include "onfi_1_0.h"
 
-/**************************************************************************
+/*************************************************************************
  *  Part 1: fc_command 测试
  *
- *  只覆盖 fc_command_validate 的**正向**面。v20 起该函数三条守卫
- *  （command==NULL / operation>=OP_COUNT / 数据操作无 desc 链）全转 ASSERT，
- *  函数体只剩 `return FC_STATUS_OK`，因此这里的断言是**恒真**的——用例的性质
- *  从「验证返回值」转为「冒烟」：用合法输入把内层断言跑一遍，拦住以后有人
- *  加了过严的断言。这一层是否值得保留，取决于内层断言是否还会变。
+ *  只覆盖 fc_command_validate 的**正向**面。该函数三条守卫
+ *  （command==NULL / operation>=OP_COUNT / 数据操作无 desc 链）全为 ASSERT，
+ *  函数体只剩 `return FC_STATUS_OK` ⇒ 返回值的判据恒真（C7），本层用例的价值
+ *  是**冒烟内层断言**：用合法输入走一遍，拦住以后有人加了过严的断言。
+ *  因此这里把返回值显式丢弃（H30），真正的判据是「调用有没有触发内层 ASSERT」。
  *
- *  注：v13 起 param.cw_bitmap 的读者是 FTL，FC 侧不再校验它。
+ *  注：param.cw_bitmap 的读者是 FTL，FC 侧不校验它。
  **************************************************************************/
 
-/* --------------------------------------------------------------------
+/**
  * test_command_validate_op_range
  *   功能：确认 fc_command_validate 对全部合法 operation 放行。
- *   测什么：op 遍历 0 .. OP_COUNT-1，每次都断言返回 FC_STATUS_OK。
+ *   测什么：op 遍历 0 .. OP_COUNT-1，每个 op 走一次 fc_command_validate。
  *   设计思路：返回值这一维已不可能失败（见 Part 1 头注），真实价值是冒烟——
  *         遍历**全部** op 而非抽一个，是因为「数据操作必须有 desc 链」那条断言
  *         是按 operation 分类的，抽一个样本覆盖不到分类边界。
@@ -65,16 +56,18 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     (void)params;
     (void)data;
 
-    fc_cmd_s cmd = {0};
+    fc_cmd_s cmd;
+
+    (void)memset(&cmd, 0, sizeof(cmd));
 
     test_trace_begin();
 
-    /* 合法 OP：0 .. OP_COUNT-1 恒 OK（非法 OP 现由 ASSERT 拦截，不再是返回码） */
-    for (uint8_t op = 0U; op < OP_COUNT; op++)
+    /* 合法 OP：0 .. OP_COUNT-1 由内层 ASSERT 放行；返回值恒真，显式丢弃（H30） */
+    for (BYTE op = 0U; op < OP_COUNT; op++)
     {
         cmd.config.operation = op;
         cmd.desc_id          = 0U;
-        fc_command_validate(&cmd);
+        (void)fc_command_validate(&cmd);
     }
 
     /* 证据（--log-visible info）：遍历范围本身就是判据——按 operation 分类的那条断言
@@ -84,7 +77,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_command_validate_set_get_no_desc
  *   功能：确认 SET/GET_FEATURES 在**没有** desc 链时仍被放行。
  *   测什么：desc_id = INVALID 时，两个 FEATURES 操作都返回 FC_STATUS_OK。
@@ -101,17 +94,19 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     (void)params;
     (void)data;
 
-    fc_cmd_s cmd = {0};
+    fc_cmd_s cmd;
+
+    (void)memset(&cmd, 0, sizeof(cmd));
 
     test_trace_begin();
 
     cmd.desc_id = FC_DESC_ID_INVALID;
 
     cmd.config.operation = OP_SET_FEATURES;
-    fc_command_validate(&cmd);
+    (void)fc_command_validate(&cmd);
 
     cmd.config.operation = OP_GET_FEATURES;
-    fc_command_validate(&cmd);
+    (void)fc_command_validate(&cmd);
 
     /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
     test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%hX）时仍放行——数据走 param 内联段", FC_DESC_ID_INVALID);
@@ -119,7 +114,7 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     return MUNIT_OK;
 }
 
-/**************************************************************************
+/*************************************************************************
  *  Part 2: fc_submission_queue 测试
  *
  *  测试环形 FIFO 的核心操作：push / pop / peek，以及边界条件：空、满、环绕。
@@ -131,7 +126,7 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
 
 #define TEST_Q_DEPTH (8U)
 
-/* --------------------------------------------------------------------
+/**
  * test_queue_push_pop
  *   功能：验证 SQ 的 FIFO 顺序（先进先出）。
  *   测什么：连 push 3 条后逐条 pop，断言出队顺序与入队一致；再 pop 一次
@@ -173,7 +168,7 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_queue_wrap_around
  *   功能：验证环形缓冲 head / tail 的回绕。
  *   测什么：填满 8 条 → pop 1 条（head 前进到 1）→ 再 push 1 条（tail 回绕到 0）
@@ -195,7 +190,7 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
     fc_cmd_id_t    val;
-    uint16_t       i;
+    WORD           i;
 
     fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
@@ -225,7 +220,7 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_queue_overflow
  *   功能：验证满队列的背压语义。
  *   测什么：填满 8 条 → 再 push 断言 QUEUE_FULL → pop 一条 → push 断言恢复 OK。
@@ -243,7 +238,7 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
 
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
-    uint16_t       i;
+    WORD           i;
 
     fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
 
@@ -266,7 +261,7 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_queue_peek
  *   功能：验证 peek 按偏移随机访问、且**不消耗**队列。
  *   测什么：push 3 条后 peek(0) 连查两次、再查 peek(1) / peek(2)，
@@ -305,7 +300,7 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_queue_peek_empty
  *   功能：验证空队列 peek 的哨兵返回。
  *   测什么：刚 init 的队列 peek(0) 断言 FC_CMD_ID_INVALID。
@@ -334,7 +329,7 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/**************************************************************************
+/*************************************************************************
  *  Part 2b: fc_completion_queue 测试
  *
  *  CQ 存 fc_cmd_status_s（整项拷贝），FIFO 语义与 SQ 相同，但存储类型
@@ -344,7 +339,7 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
 
 #define TEST_CQ_DEPTH (8U)
 
-/* --------------------------------------------------------------------
+/**
  * test_cqueue_init
  *   功能：验证 CQ 初始化的字段落位。
  *   测什么：init 后断言 depth 被记录、count == 0。
@@ -373,7 +368,7 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_cqueue_push_pop
  *   功能：验证 CQ 的 FIFO 顺序与整项拷贝。
  *   测什么：push 两条（cmd_id = 0x01 / 0x02）后逐条 pop，断言 cmd_id
@@ -419,7 +414,7 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_cqueue_overflow
  *   功能：验证 CQ 满时的背压。
  *   测什么：填满 TEST_CQ_DEPTH 条 → 再 push 断言 QUEUE_FULL。
@@ -437,7 +432,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
     fc_cmd_status_s storage[TEST_CQ_DEPTH];
     fc_comp_queue_s q;
-    uint16_t        i;
+    WORD            i;
 
     fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
 
@@ -460,20 +455,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
-/**************************************************************************
- *  Part 3: fc_scheduler 测试
- *
- *  v8 后调度器只剩 fc_scheduler_init —— 绑定 SQ/HSQ 两个队列指针，纯 stack
- *  操作，零初始化依赖。
- *
- *  选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）已搬进
- *  fc.c 的 static fc_poll_fill，只能经 fc_service() 触达（会推真 NAND）——
- *  其覆盖属 Level 2/3，不在本文件。
- **************************************************************************/
-
-#define SCHED_Q_DEPTH (16U)
-
-/**************************************************************************
+/*************************************************************************
  *  Part 4: ONFI 参数页解码（手册 Table 11）
  *
  *  nand_onfi_parameter_page_decode() 是**纯函数**——零 HAL / 零日志 / 零硬件，
@@ -481,22 +463,22 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
  *  给死的值」（MT29F4G08ABADAWP 列），不是从代码反推的值。
  **************************************************************************/
 
-/* 小端写入（合成参数页用；解码侧的小端读取在 onfi_1_0.h）。 */
-static void test_put_le16(uint8_t *p, uint16_t value)
+/** 小端写入（合成参数页用；解码侧的小端读取在 onfi_1_0.h）。 */
+static void test_put_le16(BYTE *p, WORD value)
 {
-    p[0] = (uint8_t)(value & 0xFFU);
-    p[1] = (uint8_t)((value >> 8U) & 0xFFU);
+    p[0] = value & 0xFFU;
+    p[1] = (value >> 8U) & 0xFFU;
 }
 
-static void test_put_le32(uint8_t *p, uint32_t value)
+static void test_put_le32(BYTE *p, DWORD value)
 {
-    p[0] = (uint8_t)(value & 0xFFU);
-    p[1] = (uint8_t)((value >> 8U) & 0xFFU);
-    p[2] = (uint8_t)((value >> 16U) & 0xFFU);
-    p[3] = (uint8_t)((value >> 24U) & 0xFFU);
+    p[0] = value & 0xFFU;
+    p[1] = (value >> 8U) & 0xFFU;
+    p[2] = (value >> 16U) & 0xFFU;
+    p[3] = value >> 24U;
 }
 
-/* --------------------------------------------------------------------
+/**
  * test_onfi_parameter_page_decode
  *   功能：纯函数 nand_onfi_parameter_page_decode() 的字段解码验证。
  *   测什么：合成一张按手册 Table 11（MT29F4G08ABADAWP 列）取值的 256 字节参数页，
@@ -507,9 +489,9 @@ static void test_put_le32(uint8_t *p, uint32_t value)
 static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[], void *data)
 {
     static const char      model[] = "MT29F4G08ABADAWP";
-    uint8_t                page[NAND_ONFI_PARAM_PAGE_SIZE];
+    BYTE                   page[NAND_ONFI_PARAM_PAGE_SIZE];
     nand_onfi_param_info_s info;
-    uint16_t               i; /* 需装下 0..255 的整页计数（uint8_t 会让 i<PAGE_SIZE 恒真） */
+    WORD                   i; /* 需装下 0..255 的整页计数（BYTE 会让 i<PAGE_SIZE 恒真） */
 
     (void)params;
     (void)data;
@@ -534,9 +516,9 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
     {
         page[NAND_ONFI_PARAM_OFF_MODEL + i] = 0x20U;
     }
-    for (i = 0U; i < (uint8_t)(sizeof(model) - 1U); i++)
+    for (i = 0U; i < (BYTE)(sizeof(model) - 1U); i++)
     {
-        page[NAND_ONFI_PARAM_OFF_MODEL + i] = (uint8_t)model[i];
+        page[NAND_ONFI_PARAM_OFF_MODEL + i] = (BYTE)model[i];
     }
 
     page[NAND_ONFI_PARAM_OFF_MANUFACTURER_ID] = 0x2CU;
@@ -587,7 +569,7 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
     munit_assert_uint16(info.tccs_min, ==, 100U);
 
     /* 证据（--log-visible info）：把解出的关键字段打出来。 */
-    test_trace_summary("ONFI param decode: model=%s page=%lu+%u block=%lup blocks=%lu ecc=%ubit timingmodes=0x%04X", info.model, (unsigned long)info.data_bytes_per_page, (unsigned int)info.spare_bytes_per_page, (unsigned long)info.pages_per_block, (unsigned long)info.blocks_per_unit, (unsigned int)info.ecc_bits, (unsigned int)info.timing_mode_support);
+    test_trace_summary("ONFI param decode: model=%s page=%lu+%hu block=%lup blocks=%lu ecc=%hhubit timingmodes=0x%04hX", info.model, info.data_bytes_per_page, info.spare_bytes_per_page, info.pages_per_block, info.blocks_per_unit, info.ecc_bits, info.timing_mode_support);
 
     /* 破坏签名 → 返回 0，但字段仍被填满（解码函数如实报「签名不符」）。 */
     page[NAND_ONFI_PARAM_OFF_SIGNATURE] = 0x00U;
@@ -597,16 +579,14 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
     return MUNIT_OK;
 }
 
-/**************************************************************************
+/*************************************************************************
  *  套件定义
  *
  *  单个子套件 logic，挂在 /fc-nand/ 根套件下，与 Level 2（data_path）/
  *  Level 3（lifecycle）一致——**一个文件一个套件**。
- *  原先按模块切成的 command / queue / scheduler 三个子套件已合并：合并后
- *  command 只剩 2 条、scheduler 只剩 1 条，过滤粒度已细到等于「单跑一条用例」，
- *  而 Level 1 全部 12 条都是纯 RAM 微秒级，按模块过滤省不出任何东西。
- *  真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），那由根套件的
- *  Level 1/2/3 三层保住。
+ *  不按 command / queue 拆子套件：11 条全是纯 RAM 微秒级，按模块过滤省不出
+ *  任何东西。真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），
+ *  那由根套件的 Level 1/2/3 三层保住。
  *
  *  套件不需要 setup/teardown——Level 1 全部用例自带夹具，零全局状态。
  **************************************************************************/
