@@ -603,6 +603,24 @@ ftl_status_e ftl_trim_begin(ftl_ctx_s *ftl, DWORD lba, DWORD count);
  */
 ftl_status_e ftl_trim_step(ftl_ctx_s *ftl);
 
+/**
+ * @brief 打印 FTL 各模块的关键现场（allocator / pending / cache seq / CP / MIG /
+ *        metadata / Journal / wbuf）。
+ *
+ * @param module NULL / "all" = 全部；否则只打印指定模块：
+ *               alloc / pend / seq / cache / jrn / cp / mig / md / wb。
+ * @return true = 参数合法并已输出；false = 未知模块。
+ *
+ * @note 只读、标量快照，供 CLI `ftl_ctx` 与断言终端路径使用；不调用会断言的池扫描。
+ *       断言路径由 `ftl_assert_context()` 弱钩子调用（见 common/assertion.c）。
+ */
+BOOL ftl_debug_dump(const char *module);
+
+/**
+ * @brief 断言终端的 FTL 现场钩子（强符号覆盖 assertion.c 的弱默认）。
+ */
+void ftl_assert_context(void);
+
 /* ── 内部辅助（FTL 层内共用，不属于 HIL 接口）── */
 
 /**

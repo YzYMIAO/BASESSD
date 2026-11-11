@@ -135,18 +135,19 @@ static void uart_cli_tr(int argc, char *argv[]);
 static void uart_cli_fl(int argc, char *argv[]);
 static void uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
 static void uart_cli_info(int argc, char *argv[]);
-static void uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
-static void uart_cli_addr(int argc, char *argv[]);  /* PBA/PAA/gblock 地址字段转换（只读诊断） */
-static void uart_cli_rdpaa(int argc, char *argv[]); /* 按 PAA 读一个 NAND 页（诊断） */
-static void uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
-static void uart_cli_pc(int argc, char *argv[]);    /* PC 采样热点（死循环定位） */
-static void uart_cli_q(int argc, char *argv[]);     /* 队列 / 三池 / 背压水位 */
-static void uart_cli_cp(int argc, char *argv[]);    /* Checkpoint job 现场 */
-static void uart_cli_jrn(int argc, char *argv[]);   /* Journal 环 / WAL / 水位 */
-static void uart_cli_stat(int argc, char *argv[]);  /* 计数类诊断（从 info 拆出） */
-static void uart_cli_id(int argc, char *argv[]);    /* 编译期配置 / 容量 / 介质版本 */
-static void uart_cli_ecc(int argc, char *argv[]);   /* per-block ECC 健康（E1） */
-static void uart_cli_wear(int argc, char *argv[]);  /* 擦除 / read-disturb / WL 差值 */
+static void uart_cli_map(int argc, char *argv[]);     /* L2P 映射 + 目标块 BST 条目（只读诊断） */
+static void uart_cli_addr(int argc, char *argv[]);    /* PBA/PAA/gblock 地址字段转换（只读诊断） */
+static void uart_cli_rdpaa(int argc, char *argv[]);   /* 按 PAA 读一个 NAND 页（诊断） */
+static void uart_cli_crash(int argc, char *argv[]);   /* .noinit 崩溃记录查看/清除 */
+static void uart_cli_pc(int argc, char *argv[]);      /* PC 采样热点（死循环定位） */
+static void uart_cli_q(int argc, char *argv[]);       /* 队列 / 三池 / 背压水位 */
+static void uart_cli_cp(int argc, char *argv[]);      /* Checkpoint job 现场 */
+static void uart_cli_jrn(int argc, char *argv[]);     /* Journal 环 / WAL / 水位 */
+static void uart_cli_ftl_ctx(int argc, char *argv[]); /* FTL 模块关键现场（可过滤） */
+static void uart_cli_stat(int argc, char *argv[]);    /* 计数类诊断（从 info 拆出） */
+static void uart_cli_id(int argc, char *argv[]);      /* 编译期配置 / 容量 / 介质版本 */
+static void uart_cli_ecc(int argc, char *argv[]);     /* per-block ECC 健康（E1） */
+static void uart_cli_wear(int argc, char *argv[]);    /* 擦除 / read-disturb / WL 差值 */
 #if defined(FC_NAND_TEST_ENABLE)
 static void uart_cli_test(int argc, char *argv[]);
 #endif
@@ -1576,6 +1577,26 @@ static void uart_cli_jrn(int argc, char *argv[])
 }
 
 /**
+ * @brief ftl_ctx [module] — 打印 FTL 各模块关键现场（只读）。
+ *
+ * 不带参数 = 全部；带缩写只打印对应模块：
+ *   alloc / pend / seq / cache / jrn / cp / mig / md / wb。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
+static void uart_cli_ftl_ctx(int argc, char *argv[])
+{
+    const char *module = (argc >= 2) ? argv[1] : NULL;
+
+    if (ftl_debug_dump(module) == false)
+    {
+        (void)LOGI("error: unknown FTL module '%s' (alloc|pend|seq|cache|jrn|cp|mig|md|wb)\r\n",
+                   (module != NULL) ? module : "(null)");
+    }
+}
+
+/**
  * @brief stat — 计数类诊断（只读）。
  *
  * 从 `info` 拆出：info 只保留身份/状态（控制器、几何、分配器、CP/Journal 序号），
@@ -2104,40 +2125,41 @@ static void uart_cli_pending_poll(void)
  */
 static const uart_cli_cmd_s g_uart_cli_commands[] = {
   /* ── 系统 ── */
-    {   "help",                         "help [command]",             "show command list or one command's syntax", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_help},
-    { "status",                                 "status",                    "show UART error and queue counters", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,  uart_cli_status},
-    {"version",                                "version",                         "show firmware console version", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM, uart_cli_version},
-    {    "log",      "log level <error|warn|info|debug>",                                 "set runtime log level", 3U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,     uart_cli_log},
-    {  "stack",                                  "stack",          "show stack guard: paint region, peak, alarms", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_stack},
-    {  "crash",                          "crash [clear]",                   "show/clear the .noinit crash record", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_crash},
-    {     "pc", "pc [live] [all|top] | clear | rate [n]", "show sampled PC sequence/hot spots (same-ELF resolve)", 1U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_pc},
-    {   "info",                                   "info",              "show controller + FTL identity and state", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_info},
-    {   "stat",                                   "stat",     "show runtime counters (uptime, GC, L2P, CMT, USB)", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_stat},
-    {     "id",                                     "id",          "show build config, capacity and media layout", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_id},
+    {   "help",                         "help [command]",                "show command list or one command's syntax", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_help},
+    { "status",                                 "status",                       "show UART error and queue counters", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,  uart_cli_status},
+    {"version",                                "version",                            "show firmware console version", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM, uart_cli_version},
+    {    "log",      "log level <error|warn|info|debug>",                                    "set runtime log level", 3U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,     uart_cli_log},
+    {  "stack",                                  "stack",             "show stack guard: paint region, peak, alarms", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_stack},
+    {  "crash",                          "crash [clear]",                      "show/clear the .noinit crash record", 1U,  2U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_crash},
+    {     "pc", "pc [live] [all|top] | clear | rate [n]",    "show sampled PC sequence/hot spots (same-ELF resolve)", 1U,  3U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_pc},
+    {   "info",                                   "info",                 "show controller + FTL identity and state", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_info},
+    {   "stat",                                   "stat",        "show runtime counters (uptime, GC, L2P, CMT, USB)", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_stat},
+    {     "id",                                     "id",             "show build config, capacity and media layout", 1U,  1U,                             UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_id},
  /* ── host I/O（模拟 NVMe 命令，经 controller 全链路）── */
-    {     "wr",                           "wr <lba> <n>",                  "write n sectors with a fixed pattern", 3U,  3U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_wr},
-    {     "rd",               "rd <lba> <n> [--compare]",         "read n sectors (--compare checks the pattern)", 3U,  4U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_rd},
-    {     "tr",                               "tr <lba>",                                          "trim one lba", 2U,  2U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_tr},
-    {     "fl",                                     "fl",                     "flush dirty L2P + journal to NAND", 1U,  1U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_fl},
-    {     "wp",                       "wp <lba> <n> <k>",                    "submit k writes in one pair window", 4U,  4U,                             UART_CLI_FLAG_NONE,     UART_CLI_GROUP_HOST_IO,      uart_cli_wp},
+    {     "wr",                           "wr <lba> <n>",                     "write n sectors with a fixed pattern", 3U,  3U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_wr},
+    {     "rd",               "rd <lba> <n> [--compare]",            "read n sectors (--compare checks the pattern)", 3U,  4U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_rd},
+    {     "tr",                               "tr <lba>",                                             "trim one lba", 2U,  2U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_tr},
+    {     "fl",                                     "fl",                        "flush dirty L2P + journal to NAND", 1U,  1U,                             UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_fl},
+    {     "wp",                       "wp <lba> <n> <k>",                       "submit k writes in one pair window", 4U,  4U,                             UART_CLI_FLAG_NONE,     UART_CLI_GROUP_HOST_IO,      uart_cli_wp},
  /* ── 诊断 ── */
-    {      "q",                                      "q",             "show FC queues, pools and pending backlog", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
-    {     "cp",                                     "cp",                "show checkpoint job state and sequence", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
-    {    "jrn",                                    "jrn",            "show journal ring, watermark and WAL state", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
-    {    "map",                              "map <lba>",                "print L2P mapping + target block entry", 2U,  2U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
-    {   "addr",                     UART_CLI_SYNTAX_ADDR,                       "translate PBA/PAA/gblock fields", 3U,  6U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
-    {  "rdpaa",                    "rdpaa <paa> [--raw]",           "read one NAND page by PAA (--raw: raw bits)", 2U,  3U,                             UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
-    {   "pool",                                   "pool",            "print fixed-metadata candidate block pools", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_pool},
-    {    "bbt",                      UART_CLI_SYNTAX_BBT,                           "print factory bad block map", 1U,  4U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_bbt},
-    {    "ecc",                                    "ecc", "show per-block ECC health and corrected-bit histogram", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_ecc},
-    {   "wear",                                   "wear",    "show erase/read-disturb distribution and WL spread", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_wear},
+    {      "q",                                      "q",                "show FC queues, pools and pending backlog", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
+    {     "cp",                                     "cp",                   "show checkpoint job state and sequence", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
+    {    "jrn",                                    "jrn",               "show journal ring, watermark and WAL state", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
+    {"ftl_ctx",                       "ftl_ctx [module]", "dump FTL context (alloc|pend|seq|cache|jrn|cp|mig|md|wb)", 1U,  2U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG, uart_cli_ftl_ctx},
+    {    "map",                              "map <lba>",                   "print L2P mapping + target block entry", 2U,  2U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
+    {   "addr",                     UART_CLI_SYNTAX_ADDR,                          "translate PBA/PAA/gblock fields", 3U,  6U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
+    {  "rdpaa",                    "rdpaa <paa> [--raw]",              "read one NAND page by PAA (--raw: raw bits)", 2U,  3U,                             UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
+    {   "pool",                                   "pool",               "print fixed-metadata candidate block pools", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_pool},
+    {    "bbt",                      UART_CLI_SYNTAX_BBT,                              "print factory bad block map", 1U,  4U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_bbt},
+    {    "ecc",                                    "ecc",    "show per-block ECC health and corrected-bit histogram", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_ecc},
+    {   "wear",                                   "wear",       "show erase/read-disturb distribution and WL spread", 1U,  1U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_wear},
  /* ── 破坏性（仅 debug/bench 档；量产档整行不注册）── */
 #if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
-    { "format",                      "format [--verify]",           "erase all blocks and write initial metadata", 1U,  2U, UART_CLI_FLAG_BUSY | UART_CLI_FLAG_DESTRUCTIVE, UART_CLI_GROUP_DESTRUCTIVE,  uart_cli_format},
+    { "format",                      "format [--verify]",              "erase all blocks and write initial metadata", 1U,  2U, UART_CLI_FLAG_BUSY | UART_CLI_FLAG_DESTRUCTIVE, UART_CLI_GROUP_DESTRUCTIVE,  uart_cli_format},
 #endif
   /* ── 测试（munit 适配层既有语法）── */
 #if defined(FC_NAND_TEST_ENABLE)
-    {   "test",                     UART_CLI_SYNTAX_TEST,                             "run munit unit test suite", 1U, 24U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_TEST,    uart_cli_test},
+    {   "test",                     UART_CLI_SYNTAX_TEST,                                "run munit unit test suite", 1U, 24U,                             UART_CLI_FLAG_NONE,        UART_CLI_GROUP_TEST,    uart_cli_test},
 #endif
 };
 

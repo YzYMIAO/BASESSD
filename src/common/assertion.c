@@ -69,9 +69,13 @@ _Noreturn void assertion_fail_u64(const char *expression_a, const char *op, cons
 
 /* ── ④ 终端路径 ── */
 
+/* 由 FTL 强符号覆盖；此处先声明，避免调用点隐式声明。 */
+__attribute__((weak)) void ftl_assert_context(void);
+
 _Noreturn void assertion_terminate(void)
 {
     assertion_platform_context();
+    ftl_assert_context();
     (void)log_flush(ASSERTION_FLUSH_TIMEOUT_MS);
     crash_platform_report(crash_record_get());
 
@@ -88,6 +92,11 @@ _Noreturn void assertion_terminate(void)
 /* ── ⑤ 平台上下文弱钩子（默认空；由 FC 等模块强符号覆盖） ── */
 
 __attribute__((weak)) void assertion_platform_context(void)
+{
+}
+
+/* FTL 现场弱钩子：固件链接 ftl.c 时由强符号覆盖；无 FTL 的构建保持空实现。 */
+__attribute__((weak)) void ftl_assert_context(void)
 {
 }
 

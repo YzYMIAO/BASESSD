@@ -63,6 +63,7 @@
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
 #include "log.h"
+#include "metadata_job.h"
 #include "pending.h"
 #include "ssd_compiler.h"
 #include "timer.h"
@@ -2832,7 +2833,7 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
             // 没有它，读窗口一次占满 FC 池时后续窗口的预算等待会被误判成卡死。
             const BOOL rd_inflight    = (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_READ) && (ftl->cache_stream.seq.owner_gi == gi) && (g->outstanding > 0U);
             // 序列正在有序收尾（padding END 已提交或在途）：这是确定性进展，等它完成。
-            const BOOL seq_closing    = (ftl->cache_stream.seq.closing == true) || (ftl->cache_stream.seq.close_requested == true);
+            const BOOL seq_closing    = (ftl->cache_stream.seq.closing == true) || (ftl->cache_stream.seq.close_requested == true) || (ftl->cache_stream.seq.break_requested == true) || (ftl->cache_stream.seq.draining == true);
             // Journal 页写 / 换块擦在飞：NAND 命令有超时 ⇒ 必有完成，属确定性等待。
             // 少这一条，序列边界触发的页刷若跨过 8 轮预算，正常的写会被误判成卡死。
             const BOOL jrn_inflight   = (jrn_is_idle(ftl->journal) == false) || (ftl->journal->handle.job.need_erase == true);
@@ -2842,7 +2843,12 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
             // 搬移引擎：job 在飞，或 job 已 abort 但命令仍在 FC 侧（新 job 被 inflight 门控
             // 拒绝）——后者同样是确定性等待（NAND 保证每条命令有完成），不能计成卡死。
             const BOOL mig_inflight   = (ftl->mig_handle->job.active == true) || (ftl->mig_handle->state.inflight != 0U);
-            const BOOL bg_progress    = (ftl->flags.l2p_defer == true) || mig_inflight || other_seq || wr_ring_pending || rd_inflight || seq_closing || jrn_inflight || confirm_parked;
+            /* wbuf 有打开窗口/页在飞也是**确定性进展**：它必然由 NAND 编程超时或
+             * 后续 flush 收尾。speed 的 drain 循环远快于 600 µs tPROG，漏掉这一项
+             * 会在 8 轮内把「wbuf 正在编程」误判成 IO_ERROR（板端 stall 现场
+             * `wb_busy=1 cmd=2 desc=8 buf=8`）。 */
+            const BOOL wb_busy        = (wb_is_idle(ftl->wbuf) == false);
+            const BOOL bg_progress    = (ftl->flags.l2p_defer == true) || mig_inflight || other_seq || wr_ring_pending || rd_inflight || seq_closing || jrn_inflight || confirm_parked || wb_busy;
 
             if (bg_progress == false)
             {
@@ -3582,4 +3588,228 @@ ftl_status_e ftl_trim_step(ftl_ctx_s *ftl)
     }
 
     return FTL_AGAIN;
+}
+
+/* ── 诊断：FTL 各模块关键现场（CLI `ftl_ctx` / 断言终端）── */
+
+/* 模块缩写过滤器：NULL / "all" = 全部；未知返回 false。 */
+typedef struct FTL_DBG_FILTER_S
+{
+    BOOL all;
+    BOOL alloc;
+    BOOL pend;
+    BOOL seq;
+    BOOL cache;
+    BOOL jrn;
+    BOOL cp;
+    BOOL mig;
+    BOOL md;
+    BOOL wb;
+} ftl_dbg_filter_s;
+
+static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
+{
+    if ((module == NULL) || (strcmp(module, "all") == 0))
+    {
+        memset(flt, 0, sizeof(*flt));
+        flt->all = true;
+        return true;
+    }
+
+    memset(flt, 0, sizeof(*flt));
+    if (strcmp(module, "alloc") == 0)
+    {
+        flt->alloc = true;
+    }
+    else if (strcmp(module, "pend") == 0)
+    {
+        flt->pend = true;
+    }
+    else if (strcmp(module, "seq") == 0)
+    {
+        flt->seq = true;
+    }
+    else if (strcmp(module, "cache") == 0)
+    {
+        flt->cache = true;
+    }
+    else if (strcmp(module, "jrn") == 0)
+    {
+        flt->jrn = true;
+    }
+    else if (strcmp(module, "cp") == 0)
+    {
+        flt->cp = true;
+    }
+    else if (strcmp(module, "mig") == 0)
+    {
+        flt->mig = true;
+    }
+    else if (strcmp(module, "md") == 0)
+    {
+        flt->md = true;
+    }
+    else if (strcmp(module, "wb") == 0)
+    {
+        flt->wb = true;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 打印 FTL 各模块的关键现场（可按模块缩写过滤）。
+ *
+ * @param module NULL / "all" = 全部；alloc / pend / seq / cache / jrn / cp / mig / md / wb。
+ * @return true = 参数合法并已输出；false = 未知模块。
+ *
+ * @note 只读标量快照，不调用会断言的池扫描；CLI `ftl_ctx` 与断言终端共用。
+ */
+BOOL ftl_debug_dump(const char *module)
+{
+    ftl_dbg_filter_s flt;
+
+    if (ftl_dbg_filter_init(module, &flt) == false)
+    {
+        return false;
+    }
+
+    if (flt.all)
+    {
+        LOGW(LOG_TAG_FTL "DBG req=%hu die_max=%hhu\r\n", ftl_op_req_count(), DIE_MAX);
+    }
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_s *f = &g_ftl[die];
+
+        if ((f->cache == NULL) || (f->journal == NULL) || (f->metadata_dir == NULL))
+        {
+            continue;
+        }
+
+        if (flt.all || flt.alloc)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu alloc free=%hu bad=%hu closed=%hu op=%hu/%hu spare=%hu/%hu hot=%d/%hhu/%hhu cold=%d/%hhu\r\n",
+                 die,
+                 f->alloc.free_count,
+                 f->alloc.bad_count,
+                 f->alloc.closed_sb_count,
+                 alc_op_get_count(&f->alloc, 0U),
+                 alc_op_get_count(&f->alloc, 1U),
+                 alc_spare_get_count(&f->alloc, 0U),
+                 alc_spare_get_count(&f->alloc, 1U),
+                 (int)f->alloc.hot_sb.is_open,
+                 f->alloc.hot_sb.next_page,
+                 f->alloc.hot_sb.page0_programmed,
+                 (int)f->alloc.cold_sb.is_open,
+                 f->alloc.cold_sb.next_page);
+        }
+        if (flt.all || flt.pend)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu pend slot=%hu group=%hu req=%hu\r\n",
+                 die,
+                 pend_slot_get_count(&f->pending),
+                 pend_group_get_count(&f->pending),
+                 ftl_op_req_count());
+
+            for (BYTE gi = 0U; gi < (BYTE)FTL_GROUP_MAX; gi++)
+            {
+                const pend_group_s *g = &f->pending.groups[gi];
+
+                if (g->used == false)
+                {
+                    continue;
+                }
+                LOGW(LOG_TAG_FTL "DBG d=%hhu g=%hhu op=%d lba=%lu next=%lu/%lu out=%hu stalls=%hhu agg=%d\r\n",
+                     die,
+                     gi,
+                     (int)g->op,
+                     (DWORD)g->lba,
+                     g->next,
+                     g->total,
+                     g->outstanding,
+                     g->stalls,
+                     (int)g->agg_status);
+            }
+        }
+        if (flt.all || flt.seq)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu seq kind=%d act=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu close=%d/%d\r\n",
+                 die,
+                 (int)f->cache_stream.seq.kind,
+                 (int)f->cache_stream.seq.active,
+                 f->cache_stream.seq.owner_gi,
+                 f->cache_stream.seq.next_lba,
+                 f->cache_stream.seq.wr.count,
+                 f->cache_stream.seq.wr_inflight,
+                 f->cache_stream.seq.wr.head,
+                 (int)f->cache_stream.seq.close_requested,
+                 (int)f->cache_stream.seq.closing);
+        }
+        if (flt.all || flt.cache)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu cache load=%hhu flush=%hhu cmt=%lu flags def=%d bg=%d l2p=%d md=%d\r\n",
+                 die,
+                 f->cache->inflight.load,
+                 f->cache->inflight.flush,
+                 f->cache->stats.cmt_dirty,
+                 (int)f->flags.deferred_error,
+                 (int)f->flags.bg_suspend,
+                 (int)f->flags.l2p_defer,
+                 (int)f->flags.md_load_failed);
+        }
+        if (flt.all || flt.jrn)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu jrn seq=%lu water=%hhu idle=%d pend=%d emerg=%d\r\n",
+                 die,
+                 jrn_sequence_get(f->journal),
+                 jrn_watermark_get(f->journal),
+                 (int)jrn_is_idle(f->journal),
+                 (int)jrn_has_pending_entries(f->journal),
+                 (int)jrn_is_emergency(f->journal));
+        }
+        if (flt.all || flt.cp)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu cp act=%d/%d ph=%d\r\n",
+                 die,
+                 (int)f->cp_handle->active,
+                 (int)f->cp_handle->waiting,
+                 (int)f->cp_handle->phase);
+        }
+        if (flt.all || flt.mig)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n",
+                 die,
+                 (int)f->mig_handle->job.active,
+                 (int)f->mig_handle->job.waiting,
+                 (int)f->mig_handle->job.phase);
+        }
+        if (flt.all || flt.md)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n",
+                 die,
+                 (int)md_handle_is_idle(f->metadata_dir),
+                 (int)f->metadata_dir->handle.phase);
+        }
+        if (flt.all || flt.wb)
+        {
+            LOGW(LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n",
+                 die,
+                 (int)f->wbuf->open,
+                 f->wbuf->base,
+                 f->wbuf->occupied,
+                 f->wbuf->owners,
+                 (int)f->wbuf->error);
+        }
+    }
+    return true;
+}
+
+void ftl_assert_context(void)
+{
+    (void)ftl_debug_dump(NULL);
 }

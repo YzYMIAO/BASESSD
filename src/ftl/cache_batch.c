@@ -1137,6 +1137,15 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
     {
         if (starting == false)
         {
+            /* 没有可下发数据页时不能只返回 AGAIN：确认 FIFO 满（wr.count+inflight 达
+             * FTL_CACHE_SEQ_RING）或 Journal 顺序页无空间后，旧页的 FAILC 证明必须靠
+             * **后续 cache 命令 / padding END** 推进；只等完成泵会形成环形等待——
+             * 组等 ring 空，ring 等下一命令，idle guard 又因组仍 issuing 不请求收尾。
+             * 这里显式请求 padding END，让旧页走完证明后组再继续。 */
+            if (n_pages == 0U)
+            {
+                seq->close_requested = true;
+            }
             ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN; /* 确认 FIFO 满：等完成泵结算 */
         }
