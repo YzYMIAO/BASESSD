@@ -2133,14 +2133,6 @@ typedef struct L3_STRESS_SLOT_S
  * 完成项只带 cmd_id，靠它在这张表里配回命令 + 地址（CID 配对的土办法）。 */
 static l3_stress_slot_s g_l3_stress_slots[L3_STRESS_SLOTS];
 
-static void l3_stress_slots_reset(void)
-{
-    for (WORD i = 0U; i < L3_STRESS_SLOTS; i++)
-    {
-        g_l3_stress_slots[i].cmd = NULL;
-    }
-}
-
 static l3_stress_slot_s *l3_stress_slot_alloc(void)
 {
     for (WORD i = 0U; i < L3_STRESS_SLOTS; i++)
@@ -2234,7 +2226,10 @@ static void l3_stress_stream(BYTE operation, WORD block)
     DWORD      guard      = 0U;
     WORD       since_poll = 0U;
 
-    l3_stress_slots_reset();
+    for (WORD i = 0U; i < L3_STRESS_SLOTS; i++)
+    {
+        g_l3_stress_slots[i].cmd = NULL;
+    }
 
     for (WORD ch = 0U; ch < CH_NUM; ch++)
     {
@@ -2332,12 +2327,6 @@ static void l3_stress_stream(BYTE operation, WORD block)
     }
 }
 
-/** Phase 0 前置命令的硬判据：无错误位。 */
-static void l3_stress_expect_ok(fc_cmd_status_s completion)
-{
-    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-}
-
 static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -2349,7 +2338,9 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
     test_trace_summary("mixed_pipeline block=%hu ch=%d ce=%d lun=%d plane=%d page=%d batch=%hu poll_every=%u", block, CH_NUM, CE_NUM, LUN_NUM, PLANE_NUM, PAGES_PER_BLOCK, L3_STRESS_BATCH, L3_STRESS_POLL_EVERY);
 
     /* ── Phase 0：整块擦净（multi-plane 一次覆盖两个 plane）——给 Phase 1 一个干净起点 ── */
-    l3_stress_expect_ok(test_erase_block(block, TEST_PLANE_BM_ALL, L3_CFG(s_l3_cfg_erase_block_multi_plane, FC_CRC_ENABLE)));
+    const fc_cmd_status_s erase_status = test_erase_block(block, TEST_PLANE_BM_ALL, L3_CFG(s_l3_cfg_erase_block_multi_plane, FC_CRC_ENABLE));
+
+    munit_assert_uint32(erase_status.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     /* ── Phase 1：流式写完整块（遍历 ch→ce→lun→page，multi-plane 命令），写完全部抽空 ── */
     l3_stress_stream(L3_STRESS_OP_PROG, block);

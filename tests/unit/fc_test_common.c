@@ -782,15 +782,6 @@ static fc_cmd_status_s test_cache_start_seq(WORD block_index, BYTE plane_bitmap,
  * RANDOM 输出的是上一页）。单看 status 只能知道「META 对不上」，看不出**实际读回了哪一页**。
  * desc->meta 在 Pass 4 被写成从介质读回的 META（= 输出页的 LBA）⇒ 直接拿它跟期望值比：
  * 失败信息里 munit 会把 actual/expected 两个数都打出来，「输出的是哪一页」一目了然。 */
-static void test_assert_read_meta(const fc_cmd_s *cmd, WORD block_index, BYTE plane_bitmap, WORD page)
-{
-    const fc_desc_s *desc     = test_cw_desc(cmd, 0U);
-    DWORD            expected = test_page_pba(block_index, plane_bitmap, page);
-
-    munit_assert_not_null(desc);
-    munit_assert_uint32(desc->meta, ==, expected);
-}
-
 void test_read_block_cache(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg_s *config, BYTE **data)
 {
     fc_cmd_cfg_s    conf;
@@ -1071,7 +1062,13 @@ void test_read_cache_random(WORD block_index, BYTE plane_bitmap, WORD prev_page,
 
     test_trace_detail("cache random addr=p%02hu -> out=p%02hu declared_meta=0x%08lX bm=0x%02hhX cw=%hhu status=0x%hhX", addr_page, prefetched, meta, plane_bitmap, test_cw_count(cmd), completion.status);
 
-    test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
+    {
+        const fc_desc_s *desc     = test_cw_desc(cmd, 0U);
+        const DWORD      expected = test_page_pba(block_index, plane_bitmap, prefetched);
+
+        munit_assert_not_null(desc);
+        munit_assert_uint32(desc->meta, ==, expected);
+    }
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, prefetched, plane_bitmap);
     fc_command_release(cmd->cmd_id);

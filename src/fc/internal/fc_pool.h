@@ -73,8 +73,8 @@ extern "C"
      * @param cmd_id     命令 ID。
      *
      * @return true 链完整；false 归属不符 / 越段 / CW 重复 / buffer 未占用 /
-     *         同 plane 行地址不一致 / multi-plane 覆盖不全 / multi_plane 越界 /
-     *         cmd->paa 的 plane 越界。
+     *         同 plane 行地址不一致 / **数据命令** multi-plane 覆盖不全 /
+     *         multi_plane 越界 / cmd->paa 的 plane 越界。
      *
      * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
      */

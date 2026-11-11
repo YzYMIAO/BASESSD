@@ -36,7 +36,7 @@ Level 2: Data Path ──── 需 fc_init() 初始化池，无 NAND 硬件
     └── flat CW 位图建链几何（cw_bitmap_*，走 FTL 建链入口）
 
 Level 3: FC Lifecycle ── 真实 NAND 硬件执行
-    └── 15 个 block 级场景（init / feature / 链锁 / status / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读 / 加载取数 / META 回读 / 块锁 / 背压流水线 / buffer 归属）
+    └── 19 个 block 级场景（init / feature / 链锁 / status / 下发失败归因 / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读 / 显式列读 / 加载取数 / META 回读 / 块锁 / 背压流水线 / buffer 归属）
 ```
 
 > **适配说明（v1.8）**：本层测试在 v13~v21 的接口/策略收敛后做过一轮适配，见 §7 修订历史与 `docs/archive/changelog/fc_ut_adapt_v13_v21.md`。要点：
@@ -50,7 +50,7 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 
 **测试目标**：`fc_command.c`、`fc_queue.c`、`fc_scheduler.c` 中的纯逻辑函数，以及 `nand/onfi_1_0.c` 的**纯解码函数**（`nand_onfi_parameter_page_decode`，v1.38）。全部用例自带夹具（栈上队列 / 栈上命令 / 栈上参数页），不依赖任何硬件、动态内存或资源池。
 
-> **用例性质说明**：`validate_*` 两条是**冒烟**而非返回值验证——`fc_command_validate` v20 起函数体只剩 `return FC_STATUS_OK`，断言恒真；它们的价值是用合法输入把内层 ASSERT 跑一遍，拦住「以后有人加了过严的断言」。其余 10 条是真正的行为验证。
+> **用例性质说明**：`validate_*` 两条是**冒烟**而非返回值验证——`fc_command_validate` v20 起函数体只剩 `return FC_STATUS_OK`，断言恒真；它们的价值是用合法输入把内层 ASSERT 跑一遍，拦住「以后有人加了过严的断言」。其余 9 条是真正的行为验证。
 
 | 测试函数 | 被测函数 | 验证点 |
 |---|---|---|
@@ -64,10 +64,9 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 | `test_cqueue_init` | fc_completion_queue_init | depth 记录正确、count == 0 |
 | `test_cqueue_push_pop` | fc_completion_queue push/pop | FIFO 顺序 + 整项拷贝 |
 | `test_cqueue_overflow` | fc_completion_queue_push | 满队列返回 QUEUE_FULL |
-| `test_scheduler_init` | `fc_scheduler_init` | sq / hsq 指针绑定（断言指针相等 = 只持引用不拷贝） |
-| `test_onfi_parameter_page_decode` | `nand_onfi_parameter_page_decode` | **Part 4（v1.38）**：栈上按手册 Table 11 合成 256B 参数页 → 逐字段断言（签名/版本/型号串/几何/ECC 位数/时序模式位图）；再破坏签名，断言如实返回 0 而字段仍填满 |
+| `test_onfi_parameter_page_decode` | `nand_onfi_parameter_page_decode` | 栈上按手册 Table 11 合成 256B 参数页 → 逐字段断言（签名/版本/型号串/几何/ECC 位数/时序模式位图）；再破坏签名，断言如实返回 0 而字段仍填满 |
 
-**共计 12 个测试函数。**（合并前按模块分 command 2 + queue 8 + scheduler 1，现统一挂在单个 `logic` 套件下，见 §3；`test_onfi_parameter_page_decode` 是 v1.38 加入的**唯一非 FC 层**用例——纯 ONFI 协议解码，零硬件）
+**共计 11 个测试函数。**（统一挂在单个 `logic` 套件下，见 §3；`test_onfi_parameter_page_decode` 是**唯一非 FC 层**用例——纯 ONFI 协议解码，零硬件）
 
 ### 2.2 Level 2 — 数据路径测试
 
@@ -100,9 +99,10 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 
 ### Level 2 地址抽样（v1.25）
 
-**13 条用例**（`crc_step_detect` / `ecc_step` / `encode` / `encode_crc_disabled` / `process_read_ok` /
-`process_read_unc` / `process_read_masked_chain` / `process_read_mata_error` / `process_read_crc_error` /
-`process_read_ldpc_raw` / `raid_recover_no_random` / `generate_stripe_parity` / `cw_bitmap`）的地址
+**14 条用例**（`crc_step_detect` / `ecc_step` / `encode` / `encode_crc_disabled` / `process_read_ok` /
+`process_read_unc` / `process_read_ecc_max` / `process_read_masked_chain` / `process_read_meta_error` /
+`process_read_crc_error` / `process_read_ldpc_raw` / `raid_recover_no_random` / `generate_stripe_parity` /
+`cw_bitmap`）的地址
 **在用例体内按种子抽**，与 §2.3 的 Level 3 同法（`l2_hash` / `l2_rand` / `l2_addr_draw`）。
 取代此前的固定地址 `TEST_BLOCK`(100) / `TEST_PAGE`(32) / plane 0（经 `L2_META` / `L2_PAA` / `l2_cmd`，
 本版删掉前两个宏）。
@@ -118,19 +118,19 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
   `l2_rand = munit_rand_uint32() ^ l2_hash(用例名) ^ l2_hash(用途标签)`。
 - **⚠ 抽样必须过一道终混**（v1.25 的真正修正）：只做 XOR 会撞——`l2_hash` 是 DJB2（`h = h*33 + c`），
   而 `33 ≡ 1 (mod 32)` ⇒ **低 5 位只等于各字符之和 mod 32**，抽样又 `% 2048` / `% 64`（截低位用），
-  两个哈希只要低位相同就必然撞。实测 `h("process_read_mata_error") = 0xE9E586CA` 与
+  两个哈希只要低位相同就必然撞。实测 `h("process_read_meta_error") = 0xE9E586CA` 与
   `h("process_read_ldpc_raw") = 0x0A6286CA` 的 XOR = `0xE3870000`（低 16 位全 0）⇒ 四条种子下逐位同址。
   修法：`l2_rand` 末尾加一道 murmur3 `fmix32` 终混。⚠ Level 3 的 `l3_rand` 结构相同，但实测六条无碰撞，
   **本轮不动**（动它会改 v40 已验证的 seed→地址映射）。
 - **参数化用例的 case 同址是刻意的**：盐只有用例名、PRNG 每次 `exec` 重置 ⇒ 参数化用例
   （`crc_step_detect` / `ecc_step` / `encode` / `process_read_ok` / `cw_bitmap`）**各 case 抽到同一地址**。
   case 之间变的本来就不是地址，同址反而把变量隔离干净。
-- **三处特殊**：① `process_read_mata_error` 的篡改目标是 `(addr.block + 1) % BLOCKS_PER_PLANE`——
+- **三处特殊**：① `process_read_meta_error` 的篡改目标是 `(addr.block + 1) % BLOCKS_PER_PLANE`——
   与命令**同 page / 同 plane、异 block**（PBA 里 block 是最高字段，改它不动低 3 位，正是本条要的
   「低 3 位同、高位异」，见 v34 的坑）；② `cw_bitmap` 的 plane 必须 = 场景表的 `addr_plane`（判据，不能随机）
   ⇒ 只随机 block / page；③ `generate_stripe_parity` 的 data 与 parity 两条命令**必须同址**（用例体把 data 的
   `desc->meta` 同步给 parity）⇒ 抽一次两处共用。
-- **不加用例**：用例数仍 **51**；这批用例多数带 `MUNIT_TEST_OPTION_SINGLE_ITERATION`（`munit.c:765-767`
+- **本条只改取址方式，不增用例**；这批用例多数带 `MUNIT_TEST_OPTION_SINGLE_ITERATION`（`munit.c:765-767`
   把迭代数硬压成 1）⇒ `--iterations N` 对它们无效，用例体内抽样是**唯一**的加量杠杆。
 
 ### 参数组合
@@ -155,8 +155,9 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 | `encode_crc_disabled` | crc=off, 4CW | encode 不写 CRC 字段（哨兵保留）；读侧 步骤 3 跳过 → 全 READY |
 | `process_read_ok` | **参数化** 3 case | `l2_buffer_round_trip`：encode → process_read → 全 READY + 原文恢复；三条断言全在 helper 内 ⇒ 参数化，见下 |
 | `process_read_unc` | random=on, 4CW, CW1 损坏 | 返回 IO_ERROR；desc status CW1=UNC, 其余=READY |
-| `process_read_masked_chain` | random=on, **单 plane 段**, mask=0x05 | 链位 0,1 ↔ CW 0,2；**专钉 步骤 4 用 `paa_to_cw(desc->paa)` 而非链走位**——若改用链走位，第 2 条会假报 MATA_ERROR |
-| `process_read_mata_error` | random=off, 4CW, encode 后改 `cmd->meta` | 返回值仍 OK，但每个 CW 置 `MATA_ERROR`（步骤 4） |
+| `process_read_ecc_max` | random=on, 4CW；三段（干净 / CW0 1bit+CW1 2bit / CW0 整段破坏+CW2 1bit） | **ECC 计数生效**：逐 CW `ecc_bits` = 0/0/0/0、1/2/0/0（并复核 USER 回到 PAA 明文）；命令级 `fc_get_cmd_ecc_max` = 0、2；UNC 段命令返回 IO_ERROR，失败 CW 不写计数、成功 CW2 仍记 1 ⇒ 聚合 1 |
+| `process_read_masked_chain` | random=on, **单 plane 段**, mask=0x05 | 链位 0,1 ↔ CW 0,2；**专钉 步骤 4 用 `paa_to_cw(desc->paa)` 而非链走位**——若改用链走位，第 2 条会假报 META_ERROR |
+| `process_read_meta_error` | random=off, 4CW, encode 后改 `cmd->meta` | 返回值仍 OK，但每个 CW 置 `META_ERROR`（步骤 4） |
 | `process_read_crc_error` | crc 写关读开, 4CW, [4,8) 预置哨兵 | 返回值仍 OK，但每个 CW 置 `CRC_ERROR`（步骤 3）；ECC 未扰动，触发确定 |
 | `process_read_ldpc_raw` | ldpc=LDPC_RAW, 4CW | 两端跳过 ECC，数据原样往返，全 READY |
 
@@ -251,9 +252,9 @@ BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉
 验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调
 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 后直接走链核对。
 
-**共计 12 个测试函数（默认构建）——其中 `crc_step_detect` / `ecc_step` / `encode` /
-`process_read_ok` / `cw_bitmap` 五条是参数化，展开后实际跑 31 个用例。（CONFIG_FC_RAID=1 时
-额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 14 个）**
+**共计 13 个测试函数（默认构建）——其中 `crc_step_detect` / `ecc_step` / `encode` /
+`process_read_ok` / `cw_bitmap` 五条是参数化，展开后实际跑 32 个用例。（CONFIG_FC_RAID=1 时
+额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 15 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
@@ -285,11 +286,11 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **裸页 config**：本文件用 `L3_CONF(operation, crc)` 复合字面量给出「裸页」形态——与改造前 `program_page` / `read_page` / `erase_block` 字段逐字一致（**不加扰** + **LDPC RAW** + **不 RAID**；crc 逐处给，裸页读写沿用池默认的 `FC_CRC_ENABLE`，cache 与 multi-plane 路径显式 `FC_CRC_DISABLE`）。`ch/ce/lun` 由 `test_cmd_build` 从 addr 覆盖，`multi_plane` 由 operation 派生。
 - **不走页 helper 的命令**（READ_ID / GET_FEATURES / 状态查询 / 内部搬移 / RANDOM_DATA_READ）用夹具的三件零件自己拼：`test_cmd_build()`（建链）+ `test_submit_wait()`（提交轮询，**命令仍归调用者**）+ `fc_command_release()`；平面段位图用 `test_plane_cw_bitmap(plane_bitmap)` 正推，`addr.plane` 用 `test_first_plane(plane_bitmap)`。
 - **读回校验分两档**：整段读用 `test_verify_page_paa(data, block, page, plane_bitmap)`（按地址**重算**期望，覆盖段内全部 CW）；部分掩码读（如 RANDOM_DATA_READ 只抽 1 个 CW）用本文件的 `verify_chain_paa(cmd)`（只看**链上实际有的** desc，期望取 `desc->paa`）——此时段内其余 CW 的源槽根本没被这次读填过。
-- **擦除页的判据只能是逐 CW `FC_CW_STATUS_EMPTY` / 成功 = 0**：擦除页 META = 0xFF…，步骤 4 ① 自洽必然不过 ⇒ 该 CW 带 `MATA_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 `EMPTY`/`UNUSED`），不能用 `test_read_block` 的聚合判据。
+- **擦除页的判据只能是逐 CW `FC_CW_STATUS_EMPTY` / 成功 = 0**：擦除页 META = 0xFF…，步骤 4 ① 自洽必然不过 ⇒ 该 CW 带 `META_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 `EMPTY`/`UNUSED`），不能用 `test_read_block` 的聚合判据。
 
 #### 随机地址与种子（v1.22）
 
-10 条地址相关用例（`internal_data_move` / `block_erase_verify` / `block_write_read` / `block_cache_ops` / `block_multi_plane` / `block_random_data` / `block_load_fetch` / `block_read_meta` / `block_lock_ops` / `mixed_pipeline`）**在用例体内**抽地址，**不挂 `MunitParameterEnum`**——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口，只能写死几个候选值（v1.15 就是 `100`/`104` 两档）。
+14 条地址相关用例（`internal_data_move` / `block_erase_verify` / `block_write_read` / `block_cache_ops` / `block_cache_multi_plane` / `block_cache_multi_plane_cross_block` / `block_multi_plane` / `block_random_data` / `block_load_fetch` / `block_read_meta` / `read_column` / `block_lock_ops` / `fail_cw_attribution` / `mixed_pipeline`）**在用例体内**抽地址，**不挂 `MunitParameterEnum`**——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口，只能写死几个候选值（v1.15 就是 `100`/`104` 两档）。
 
 **窗口**（`test_fc_level3.c` 顶部，**编译期**从 `BLOCKS_PER_PLANE` 算出，不写死数字）：
 
@@ -316,7 +317,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 **复现契约 = (seed, 用例名, 第几次抽样)**：reseed 是**每用例一次**，故复现单条用例**不需要**重放其它用例。`runner.seed` 一次运行一个值（默认由 `time(NULL)` 派生、开场打印 `Running test suite with seed 0x…`，`--seed N` 可复现）；抽到的值一律经 `test_trace_summary` 打出来（`--log-visible info`），否则有 seed 也对不上是哪个块。
 
-**覆盖旋钮是 `--iterations N`**（不是参数表）：六条随机化行用 `MUNIT_TEST_OPTION_NONE`（**保留**，别换成 `SINGLE_ITERATION`——`munit.c:765-767` 会把迭代数硬压成 1，旋钮就锁死了）。`test --iterations 20 /fc-nand/lifecycle/` ⇒ 六条随机化用例的**用例体各跑 20 次**（各抽 20 组地址）。
+**覆盖旋钮是 `--iterations N`**（不是参数表）：13 条随机化行用 `MUNIT_TEST_OPTION_NONE`（**保留**，别换成 `SINGLE_ITERATION`——`munit.c:765-767` 会把迭代数硬压成 1，旋钮就锁死了）；`fail_cw_attribution` 虽抽块地址，但属**一次注入即可闭合**的确定性用例，固定 `SINGLE_ITERATION`。`test --iterations 20 /fc-nand/lifecycle/` ⇒ 13 条随机化用例的**用例体各跑 20 次**（各抽 20 组地址）。
 
 ⚠ **报告里的条数不变**：`--iterations` 只乘**用例体**，不乘**条目**——`munit_test_runner_exec` 在 `do{…}while(++i<iterations)` 里逐次累加的是**局部** `report.successful`（`munit.c:803`），而 `runner->report.successful++` 在调用点**每条只加一次**（`munit.c:989`）⇒ 仍打 `9 of 9`。上板实测（2026-10-11，seed `0x5a4f21e4`）：`--iterations 5` 打 `9 of 9`，但 `internal_data_move` 打了 5 组 `[EV] move …`、总耗时 522 ms → 2.61 s；且单条打印的 `[ N ms ]` 变成**每次迭代的平均值**（`munit.c:981` 的 `report.wall_clock / report.successful`），故九条的单条时间几乎逐字不变（`internal_data_move` 144.93 → 144.83 ms）。**判断加量有没有生效看总耗时，不要看条数。**
 
@@ -326,7 +327,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 **`internal_data_move` 的 Step 5 按源坐标比对**：copyback 搬的是源页内容——`READ_FOR_INTERNAL_DATA_MOVE` / `PROGRAM_FOR_INTERNAL_DATA_MOVE` 都**不是** page read/write，数据路径不介入、不重铸 ⇒ 目标页的 USER 仍是**源块坐标**的 PAA。故 Step 5 逐页 `test_read_page(dest, …, tag, …)` + `test_verify_page_paa(g_source_data, src, page, …)`（期望取**源块**），**不能**用 `test_read_block(dest)`——后者按入参 block 重算期望（`fc_test_common.c:644-675`）。数据路径侧照常通过：META 低 3 位 = plane/cw（源/目标同 plane、同 cw 枚举）、META 与命令 meta **同页** ⇒ 步骤 4 两项都过；CRC 因 USER 原样搬过而一致。⚠ **v34 起 meta 是页 PBA**：读命令声明的 `tag` 必须是**源页 PBA**——META 存的是「内容的身份」而非「内容现在在哪」，搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块；声明目标页 PBA 反而会被 步骤 4 ② 判成「读到了别的页」。
 
-#### 测试用例（16 个，其中 11 条地址随机化）
+#### 测试用例（19 个，其中 14 条地址随机化）
 
 > **2026-10-23 上板**：`test /fc-nand/` **56/56**（3 skipped，928.61 ms）；新增 `/speed/fc_nand_rw` 2 次运行（破坏性，未上板），不计入该基线；
 > `block_cache_ops` 62.16 ms、`block_cache_multi_plane` 114.91 ms，均 OK。
@@ -337,6 +338,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `feature_write_read` | GET_FEATURES ×4 → 01h 读-改-写回环 | Feature 写进去的值读得回来（见下） |
 | `chain_priority_lock` | SQ 8 命令链（前 7 MORE / 末条 END）+ 同 LUN HSQ 命令 | **链锁**：链未结束期间该 LUN 的填充权归链所在队列独占——HSQ 插不进链（终值 = HSQ 写的值）；对照 Step 2 证明 HSQ 平时**能**插队（见下） |
 | `status_query` | READ_STATUS / READ_STATUS_ENHANCED | 状态查询生命周期 + CW status |
+| `fail_cw_attribution` | 关闭放行闩锁后提交（多 plane 编程 0x0FF / 无 desc 擦除）| **下发失败兜底的 per-CW 归因**：命令级 NAND_FAIL；8 条 desc **逐条** FAIL（不是只落 cw_status[0]）；无 desc 命令走 `cw_bitmap == 0` 分支仍报 NAND_FAIL |
 | `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
 | `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
 | `block_write_read` | PROGRAM → READ 全 block | 写读数据一致 |
@@ -346,11 +348,12 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 抽页集/列集后随机列读，验证列地址解码 |
 | `block_load_fetch` | LOAD(33/29，无 desc) → FETCH(8/41，带 desc) | 加载/取数两段式显式下发：单 plane（33→8）+ 双 plane（29→41）逐 CW PAA 一致 |
 | `block_read_meta` | ERASE → PROGRAM → READ_META(11) ×2 CW；+ **普通读 → `fc_buffer_get_meta` 复核（v1.36）** | 无 desc 只读回读 CW 前 4 字节 META，与编程时写入的 PBA 逐字节一致（CW0 / CW2）；**链内 META 复核**：普通读完成后经 `fc_buffer_get_meta(cmd, cw)` 从 CW 基址 offset 0 取 META，与 op 11 结果逐位一致（gc.c 的真实消费路径），且不在链上的 CW 号返回 NULL |
+| `read_column` | ERASE → READ_COLUMN(col 2048) → PROGRAM（USER 每槽唯一图案）→ READ_COLUMN(col 16 / 20 / 2048 / 2052) | **显式列读**（无 desc 链，列地址走命令 param 小端）：擦除页列 2048 = 全 FF（弱证据）；编程后列 16/20 = CW0 USER[8]/USER[12]、列 2048/2052 = CW3 USER[456]/USER[460]，期望值带 CW 号与偏移 ⇒ 列地址按 CW 边界解码，且**精确到 4 字节偏移**（不是恒取 CW0 或按 CW 粗粒度取整） |
 | `block_lock_ops` | LOCK_STATUS(25) → LOCK(23) → LOCK_STATUS → ERASE(证据) → UNLOCK_LOW(21) + UNLOCK_HIGH(22) → LOCK_STATUS → ERASE/PROGRAM/READ | 块锁族（**不含**永久锁 24）走通且**可逆**：各 op 无错误位，锁序列后块仍完全可用；「LOCK 是否真挡住擦除」「状态字节怎么变」只打印证据、不断言 |
 | `mixed_pipeline` | 整块先写后读（**流式提交 / 池满即抽干**）：Phase 0 multi-plane 擦块 → Phase 1 流式 PROGRAM 全块 64 页 → Phase 2 流式 READ 全块并逐 CW 校验 | **背压闭环**：连续下发不等完成，每成功下发 4 条（或本条失败）才 polling + 取 CQ，在途命令顶到池上限 ⇒ 建链失败 ⇒ 抽 CQ 腾资源 ⇒ **重试同一条**；每条完成项按 `command_id` 配回槽位、无错误位、READ 逐页一致；两 phase 收尾三池归零 |
 | `buf_own_release` | `OP_READ_ID` 单 CW 链 × 四档 `buf_own`（00 默认 / 01 / 10 / 11）+ 「建链未提交」+ 空闲链完整性守卫 | **资源账闭合**：`fc_get_resource_stats().buffer_used` 的增量——00 建链 +1、完成仍 +1、release 回基线；01/11 完成即回基线且再 release 幂等；10 完成仍 +1、release 回基线（读法 A 回归守卫）；建链未提交也不泄漏；连续申请满池 id 两两不同（抓双重释放造成的重复入链）（见下） |
 
-> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不随机化**（保持 `SINGLE_ITERATION` + `NULL`）；`chain_priority_lock` 也是**固定脚本**（feature 地址 `01h` 不参与抽样），用 `MUNIT_TEST_OPTION_NONE` 但体内不抽地址；`buf_own_release` 同样**固定**（只验资源账，地址恒 `block 0 / plane 0 / page 0`，介质内容不参与）；其余 10 条**在用例体内**抽地址（见上「随机地址与种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
+> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不随机化**（保持 `SINGLE_ITERATION` + `NULL`）；`chain_priority_lock` 也是**固定脚本**（feature 地址 `01h` 不参与抽样），用 `MUNIT_TEST_OPTION_NONE` 但体内不抽地址；`buf_own_release` 同样**固定**（只验资源账，地址恒 `block 0 / plane 0 / page 0`，介质内容不参与）；其余 14 条**在用例体内**抽地址（见上「随机地址与种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
 >
 > `block_lock_tight`（紧锁定，不可逆锁死整片 NAND）实现保留但以 `#if 0` 隔开、不注册。
 
@@ -422,7 +425,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 #### OP 覆盖参考表（附录）
 
-下表列出各 OP 是否有 NAND 状态机前置依赖（`standalone=❌` 表示独立执行时 NAND 可能返回错误，需前置 READ/PROGRAM）。当前 15 个用例各自准备前置状态，不直接依赖本表。
+下表列出各 OP 是否有 NAND 状态机前置依赖（`standalone=❌` 表示独立执行时 NAND 可能返回错误，需前置 READ/PROGRAM）。当前 19 个用例各自准备前置状态，不直接依赖本表。
 
 > **v1.27 起 op 33/29/8/41 被直接点名**：`block_load_fetch` 用 `test_load_page()`（op 33/29，**不带 desc**）显式加载页缓冲，再用 `test_random_data_read()`（op 8/41，带 desc）取数。此前这四个 op 只在生产读路径里**间接**跑到（rewrite + CW 链），现有了直接下发的用例。注意本表的 `standalone` 列描述的是**器件前置依赖**（op 8/41 取数前必须有加载 ⇒ 仍 ❌），与本用例「先加载、再取数」的两段式一致，不因被点名而改变。
 >
@@ -498,7 +501,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 ## 3. 测试套件组织
 
 ```c
-/* test_fc_level1.c — 单个子套件 logic，共 12 个测试，全部零 setup */
+/* test_fc_level1.c — 单个子套件 logic，共 11 个测试，全部零 setup */
 
 static MunitTest g_fc_logic_tests[] = {
   /* Part 1: fc_command */
@@ -552,10 +555,10 @@ static MunitSuite g_fc_nand_suite = {
 > 描述性命名的风格。
 
 ```c
-/* test_fc_level2.c — data_path 子套件，共 12 个测试（CONFIG_FC_RAID=1 时 14 个） */
+/* test_fc_level2.c — data_path 子套件，共 13 个测试（CONFIG_FC_RAID=1 时 15 个） */
 extern MunitTest g_fc_data_path_tests[];
 
-/* test_fc_level3.c — lifecycle 子套件，15 个 block 级场景用例 */
+/* test_fc_level3.c — lifecycle 子套件，19 个 block 级场景用例 */
 extern MunitTest g_fc_lifecycle_tests[];
 ```
 
@@ -685,9 +688,9 @@ tests/
 │   ├── ut_main.h          # 入口声明（供 usart.c 包含）
 │   ├── fc_test_common.c   # Level 2/3 共享夹具（setup/teardown、test_cmd_build、源数据表、页 helper）
 │   ├── fc_test_common.h   # 夹具对外声明（含「调了哪些原语 = 开了哪些功能」的步骤级契约）
-│   ├── test_fc_level1.c   # Level 1: 12 个测试（logic 单套件）
-│   ├── test_fc_level2.c   # Level 2: 12 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
-│   └── test_fc_level3.c   # Level 3: 15 个 block 级场景（真实 NAND）
+│   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
+│   ├── test_fc_level2.c   # Level 2: 13 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
+│   └── test_fc_level3.c   # Level 3: 19 个场景（真实 NAND）
 ```
 
 > 注：测试全部随 `make tests`（FC_NAND_TEST_ENABLE=1）编入固件、在 STM32H743 上经
@@ -748,7 +751,7 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
 - **什么时候参数化**：不同**分支 / 期望**才参数化；同一断言、不同输入用迭代（`--iterations N`）。
   判据见 `assertion_guidelines.md` §二十三。
 - **随机化参数化（v1.15）**：`--single` 让每个参数枚举按种子**随机挑一个值**（salt = 用例名哈希，`munit.c:1198`），`--seed N` 复现上一轮；不加 `--single` 走全组合枚举。**Level 2 的参数化用例**（`case=…`）走这条路。
-- **用例体内随机（v1.22，与上一条并存）**：**Level 3 的 6 条地址相关用例**改在**用例体内**抽地址——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口（见 §2.3「随机地址与种子」）。机制：`l3_rand(test, tag) = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`。
+- **用例体内随机（v1.22，与上一条并存）**：**Level 3 的 14 条地址相关用例**改在**用例体内**抽地址——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口（见 §2.3「随机地址与种子」）。机制：`l3_rand(test, tag) = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`。
   ⚠ **必须自带 salt**：munit 在每次 `exec` 前把 PRNG 重置回 `runner->seed`（`munit.c:774`），而导出的 `munit_rand_int_range` / `munit_rand_uint32` **不带 salt**（带 salt 的 `munit_rand_at_most` 是 `static`，`munit.c:503`）⇒ 直接调用的话，**用例体内的第一次抽样在所有用例之间取值完全相同**。这不是「不能调 `munit_rand_*`」，而是「调了必须自己加盐」。Level 2 的 `test_scramble_whiten` / `test_crc_step_detect` 直接用 `munit_rand_int_range` 是因为**只有那一条用例在抽**，撞不上（v1.25 起 Level 2 的 13 条地址相关用例也改走带盐的用例体内抽样，见 §2.2「Level 2 地址抽样」）。
 
 ### 5.5 证据打印（v1.18）
@@ -765,11 +768,11 @@ MUNIT_PRINTF(1, 2) void test_trace_summary(const char *format, ...);  /* INFO：
 MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG：逐页 / 逐 CW 明细 */
 ```
 
-- `test_trace_begin()` **每用例显式调一次**，不挂 `test_setup`——Level 1 的 12 条用例
+- `test_trace_begin()` **每用例显式调一次**，不挂 `test_setup`——Level 1 的 11 条用例
   `setup == NULL`，靠 setup 会漏。它只做两件事：复位行首标志、在可见时先补一个换行（见下）。
 - `test_trace_summary` 打**摘要**（页数、字节数、实读字节、回环的每一步）；
   `test_trace_detail` 打**明细**（夹具的逐页 prog/read、`verify_chain_paa` 的逐 desc）。
-  共享夹具里的明细让 Level 3 全部 9 条用例自动获得逐页证据。
+  共享夹具里的明细让 Level 3 全部 19 条用例自动获得逐页证据。
 
 #### 开关：munit 的 `--log-visible info|debug`，**不用**项目自己的 `log.h`
 

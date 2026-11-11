@@ -26,6 +26,7 @@
 
 #include "assertion.h"
 #include "fc_internal.h"
+#include "onfi_1_0.h"
 #include "ssd_compiler.h"
 
 #include <string.h>
@@ -340,9 +341,9 @@ void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  *
  * @param controller FC 控制器
  * @param cmd_id 命令 ID
- * @param cmd_id 命令 ID
  * @return true 链完整；false 归属不符 / 越段 / CW 重复 / buffer 未占用 /
- *         同 plane 行地址不一致 / multi-plane 覆盖不全 / multi_plane 越界。
+ *         同 plane 行地址不一致 / **数据命令** multi-plane 覆盖不全 /
+ *         multi_plane 越界。
  *
  * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
  *       链在提交后冻结，故校验一次即可覆盖 dispatch 阶段。
@@ -441,18 +442,24 @@ BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id)
     }
 
     /*
-     * multi-plane：NAND 侧 handler 会无条件遍历整段 plane，缺一个 plane 就拿不到它的
-     * 行地址/数据，只能退化成 block0/page0 或全 0xFF 编程——必须在这里拒绝。
+     * multi-plane：带 host 数据搬运的命令由 dispatch 逐 plane 从 desc 链取行地址/数据，
+     * 缺一个 plane 只能退化成 block0/page0 或全 0xFF 编程——必须在这里拒绝。
+     * 无 host 数据搬运的 multi-plane 命令（multi-plane 擦除 / 纯加载）按契约**不建
+     * desc 链**（见 fc_build_dispatch_request 的对应分支），行地址由 cmd->paa 逐 plane
+     * 派生，没有 desc 可作覆盖判据；此处只校验下面通用链检查已覆盖的平面跨度。
      * 单 plane：链只能落在 paa_to_plane(cmd->paa) 那一个 plane，且行地址必须与
      * cmd->paa 一致（block/page/lun 三项）。
      */
     if (cmd->config.multi_plane > 0U)
     {
-        const BYTE all_planes = (BYTE)((1U << cmd->config.multi_plane) - 1U);
-
-        if ((planes_with_desc & all_planes) != all_planes)
+        if (nand_operation_has_data(cmd->config.operation) != 0U)
         {
-            return false;
+            const BYTE all_planes = (BYTE)((1U << cmd->config.multi_plane) - 1U);
+
+            if ((planes_with_desc & all_planes) != all_planes)
+            {
+                return false;
+            }
         }
     }
     else if (planes_with_desc != 0U)

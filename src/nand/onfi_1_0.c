@@ -534,7 +534,11 @@ static const nand_uop_s g_nand_two_plane_program_cache_uops[] = {
     {            NAND_UOP_ROW_2,                                  0U},
     {     NAND_UOP_DELAY_TIMING,                    NAND_TIMING_TADL},
     {          NAND_UOP_DATA_IN,                                  0U},
-    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
+    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
+  /* 11h 后器件保持 R/B# 高 tWB 再拉低进入 tDBSY dummy busy：先等 tWB 确保 busy 已生效，
+  * 再轮询 R/B# 回高（读引脚，不发 70h，避免打断两组 plane 的分组命令流）。 */
+    {     NAND_UOP_DELAY_TIMING,                     NAND_TIMING_TWB},
+    {       NAND_UOP_WAIT_READY,                                  0U},
     {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
     {         NAND_UOP_COLUMN_0,                                  0U},
     {         NAND_UOP_COLUMN_1,                                  0U},
@@ -571,7 +575,11 @@ static const nand_uop_s g_nand_two_plane_program_cache_end_uops[] = {
     {            NAND_UOP_ROW_2,                                  0U},
     {     NAND_UOP_DELAY_TIMING,                    NAND_TIMING_TADL},
     {          NAND_UOP_DATA_IN,                                  0U},
-    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH},
+    {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
+  /* 11h 后器件保持 R/B# 高 tWB 再拉低进入 tDBSY dummy busy：先等 tWB 确保 busy 已生效，
+  * 再轮询 R/B# 回高（读引脚，不发 70h，避免打断两组 plane 的分组命令流）。 */
+    {     NAND_UOP_DELAY_TIMING,                     NAND_TIMING_TWB},
+    {       NAND_UOP_WAIT_READY,                                  0U},
     {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP},
     {         NAND_UOP_COLUMN_0,                                  0U},
     {         NAND_UOP_COLUMN_1,                                  0U},
@@ -897,8 +905,15 @@ static const nand_uop_s g_nand_multi_plane_program_uops[] = {
     {            NAND_UOP_ROW_2,                                  0U},
     {     NAND_UOP_DELAY_TIMING,                    NAND_TIMING_TADL},
     {          NAND_UOP_DATA_IN,                                  0U}, /* Plane 0 全页: buffer[0..2111] */
-  /* ③ 11h 切换 plane + 地址 + Din (Plane 1) */
+  /* ③ 11h 切换 plane + 第二组地址 + Din (Plane 1) */
     {          NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
+  /* 11h 后器件保持 R/B# 高 tWB 再拉低进入 tDBSY dummy busy，之后才接受下一条 80h
+  * （器件时序图：11h → RDY↓(tWB) → tDBSY → 下一命令）。先等 tWB 确保 busy 已生效，
+  * 再轮询 R/B# 回高；读引脚而不发 70h，避免在两段 plane 的地址之间插入额外总线命令。
+  * 缺这段等待时双 plane 编程会整页丢失（链上首个读即 META 错），只编 plane 0 正常。
+  * tADL 语义本身按 Table 29 Note 2 放在每组地址→数据之间，与本段互不替代。 */
+    {     NAND_UOP_DELAY_TIMING,                     NAND_TIMING_TWB},
+    {       NAND_UOP_WAIT_READY,                                  0U},
     {          NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP}, /* 80h: Plane 1 地址周期 */
     {         NAND_UOP_COLUMN_0,                                  0U},
     {         NAND_UOP_COLUMN_1,                                  0U},
