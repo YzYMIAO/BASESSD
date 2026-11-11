@@ -54,7 +54,8 @@
 ├── docs/design/
 │   └── wsl_debug_environment.md   # ⬅ 本文档
 └── build/firmware/debug/bin/
-    └── debug.elf                  # 调试 ELF
+    ├── debug.elf                  # 产品调试 ELF（make all）
+    └── debug_ut.elf               # UT 调试 ELF（make tests）
 ```
 
 ---
@@ -187,8 +188,9 @@ cd ~/projects/soft_ssd
 ./sh/debug_env.sh
 # 会自动：杀残留 → 启动 JLink(Windows弹出窗口) → 启动 socat → 验证链路
 
-# VS Code：按 F5 开始调试
-#   → 自动烧录 debug.elf → 停在 main()
+# VS Code：按 F5 开始调试（按所选配置烧对应产物）
+#   → debug 配置烧 debug.elf / debug_ut.elf → 停在 main()
+#   → release 配置只烧录/运行（strip 后无符号，不停 main）
 #   → 按 F5 继续运行
 ```
 
@@ -435,56 +437,38 @@ wait $SOCAT_PID
 
 ### 6.1 launch.json
 
+实际配置见 `.vscode/launch.json`（8 条 = 4 种产物 × 外部 / WSL 自启两种起法）：
+
+| 编号 | 用途 | 产物 | 构建命令 |
+|---|---|---|---|
+| ①② | UT / 逻辑调试 | `build/firmware/debug/bin/debug_ut.elf` | `make tests UT=...` |
+| ③④ | 产品调试 | `build/firmware/debug/bin/debug.elf` | `make all` |
+| ⑤⑥ | 发布 / 速度（UT） | `build/firmware/release/bin/release_ut.elf` | `make tests BUILD_TYPE=release UT=...` |
+| ⑦⑧ | 发布（产品） | `build/firmware/release/bin/release.elf` | `make release` |
+
+奇数号 = 外部 JLink（先跑 `sh/debug_env.sh`，连 `localhost:2331`）；偶数号 = VS Code
+通过 `serverpath` 自启 Windows JLink。代表配置（① UT 调试）：
+
 ```json
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Debug STM32H743II (WSL → Win JLink)",
-      "cwd": "${workspaceFolder}",
-      "type": "cortex-debug",
-      "request": "launch",
-      "servertype": "external",
-
-      "device": "STM32H743II",
-      "gdbTarget": "localhost:2331",
-      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
-      "gdbPath": "/usr/bin/gdb-multiarch",
-
-      "runToEntryPoint": "main",
-
-      "preLaunchCommands": [
-        "monitor reset halt",
-        "load",
-        "monitor reset"
-      ],
-
-      "postLaunchCommands": [
-        "monitor halt"
-      ],
-
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
-      "armToolchainPath": "/usr/bin"
-    },
-    {
-      "name": "Debug STM32H743II (WSL-only JLink)",
-      "cwd": "${workspaceFolder}",
-      "type": "cortex-debug",
-      "request": "launch",
-      "servertype": "jlink",
-      "device": "STM32H743II",
-      "interface": "swd",
-      "serialNumber": "602717758",
-      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
-      "gdbPath": "/usr/bin/gdb-multiarch",
-      "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
-      "runToEntryPoint": "main",
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
-    }
-  ]
+  "name": "① UT/逻辑调试 · debug_ut · 外部 JLink 2331",
+  "cwd": "${workspaceFolder}",
+  "type": "cortex-debug",
+  "request": "launch",
+  "servertype": "external",
+  "device": "STM32H743II",
+  "gdbTarget": "localhost:2331",
+  "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut.elf",
+  "gdbPath": "/usr/bin/gdb-multiarch",
+  "runToEntryPoint": "main",
+  "preLaunchCommands": ["monitor reset halt", "load", "monitor reset"],
+  "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+  "armToolchainPath": "/usr/bin"
 }
 ```
+
+⚠ release 产物链接时带 `-s`（剥符号），不能设 `runToEntryPoint` / 打断点；
+`load` 只依赖 program header，烧录本身正常。
 
 ### 6.2 关键字段说明
 
@@ -495,8 +479,8 @@ wait $SOCAT_PID
 | `gdbPath` | `"/usr/bin/gdb-multiarch"` | WSL 上的 GDB（非 arm-none-eabi-gdb） |
 | `armToolchainPath` | `"/usr/bin"` | 让 cortex-debug 找到 arm 工具链 |
 | `runToEntryPoint` | `"main"` | 停在 main() 入口 |
-| `preLaunchCommands` | `reset halt → load → reset` | 自动烧录 |
-| `postLaunchCommands` | `halt` | 烧录后暂停 |
+| `preLaunchCommands` | `reset halt → load → reset` | 自动烧录并复位运行 |
+| `executable` | `${workspaceFolder}/build/firmware/<type>/bin/<artifact>.elf` | 按用途选 `debug_ut.elf` / `debug.elf` / `release_ut.elf` / `release.elf` |
 
 ---
 

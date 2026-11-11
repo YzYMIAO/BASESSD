@@ -68,14 +68,30 @@ endif
 NAND_DEVICE_DEFAULT := MT29F___G08A
 NAND_DEVICE         ?= $(NAND_DEVICE_DEFAULT)
 
-OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(FORMAT_OBJ_SUFFIX)
-LIB_DIR   := $(BUILD_DIR)/lib$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(FORMAT_OBJ_SUFFIX)
-BIN_DIR   := $(BUILD_DIR)/bin
-DEP_DIR   := $(BUILD_DIR)/dep$(FORMAT_OBJ_SUFFIX)
+# debug 优化档同样改变编译结果。本工程没有「CFLAGS 变化 ⇒ 重编译」依赖，
+# 若对象目录只按 BUILD_TYPE/UT 分置，`make tests DEBUG_OPT=-O0` 会复用 -O2 的
+# 陈旧 .o，链接出来的仍是 -O2 镜像（编译期无声）。非默认档在目录名上加后缀：
+#   obj_ut_O0 / obj_ut_FC_O0 / ...
+DEBUG_OPT ?= -O2
+ifeq ($(BUILD_TYPE),debug)
+    ifneq ($(DEBUG_OPT),-O2)
+        OBJ_OPT_SUFFIX := _$(subst -,,$(DEBUG_OPT))
+    endif
+endif
 
-# 目标文件命名
-APP_NAME = $(BUILD_TYPE)$(APP_SUFFIX)
-TARGET   := $(BIN_DIR)/$(APP_NAME)
+OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
+LIB_DIR   := $(BUILD_DIR)/lib$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
+BIN_DIR   := $(BUILD_DIR)/bin
+DEP_DIR   := $(BUILD_DIR)/dep$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
+
+# 目标文件命名：产品与 UT 分名（主流构建系统把测试程序与产品程序分成不同 target，
+# 例如 Automake 的 bin_PROGRAMS vs check_PROGRAMS，不复用同一产物名）。
+# UT 由 FC_NAND_TEST_ENABLE 标记 ⇒ 产物名加 _ut：
+#   make all                              → debug.elf / release.elf（产品）
+#   make tests UT=...                     → debug_ut.elf
+#   make tests BUILD_TYPE=release UT=...  → release_ut.elf
+# 两套产物可同时存在，launch 配置按路径锁定用途，不再依赖「最后一条构建」。
+TARGET   := $(BIN_DIR)/$(BUILD_TYPE)$(if $(FC_NAND_TEST_ENABLE),_ut)
 
 
 # ----------------------------------------------------------------------------
@@ -171,15 +187,13 @@ ifeq ($(BUILD_TYPE), debug)
     # -O2：debug 档只保留「断言生效 + 无 NDEBUG + 完整符号」，不再用 -O0 换调试便利
     # （断点仍可用；局部变量可能被优化掉）。与 release 的差别收敛为 NDEBUG 与代码放置。
     # ⚠ 需要 -O0 对照（排查时序敏感缺陷）时显式覆盖：`make tests DEBUG_OPT=-O0`；
+    #   对象目录会加 _O0 后缀（见 §2 的 OBJ_OPT_SUFFIX），不会复用 -O2 的 .o。
     #   默认值不变，避免「临时改回来的那一次忘了还原」。
-    DEBUG_OPT  ?= -O2
     OPT_FLAGS   = $(DEBUG_OPT) -g3 -ggdb3
     DBG_FLAGS   = -DDEBUG -D_DEBUG
-    APP_SUFFIX  = _debug
 else ifeq ($(BUILD_TYPE), release)
     OPT_FLAGS   = -O2 -DNDEBUG
-    DBG_FLAGS   = 
-    APP_SUFFIX  = _release
+    DBG_FLAGS   =
 else
     $(error Unknown BUILD_TYPE: $(BUILD_TYPE). Use debug, release, or asan)
 endif

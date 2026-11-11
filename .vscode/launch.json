@@ -2,15 +2,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      // 命名规则：<用途> · <镜像> · <JLink 起法>
-      //   用途  UT/调试 = 烧完停在 main，可打断点、可看源码（需要源码符号）
-      //         烧录     = 只 load + reset，不提供源码级调试（release 已剥符号）
-      //   镜像  debug   = build/firmware/debug/bin/debug.elf   ← `make all` / `make tests`
-      //         release = build/firmware/release/bin/release.elf ← `make release`
-      //         ⚠ 同一路径只保留**最后一条构建**：跑全量 UT 前先 `make tests`。
-      //   JLink 外部    = 你自己先起 JLinkGDBServer（监听 2331），这里只连
-      //         WSL自启 = VS Code 通过 serverpath 拉起 Windows 的 JLinkGDBServer
-      "name": "① UT/调试 · debug 镜像 · 外部 JLink 2331",
+      // 命名规则：<用途> · <产物> · <JLink 起法>
+      // 产物名由「构建档 + 是否编入 UT」决定（config.mk §目标文件命名）：
+      //   debug_ut   = `make tests UT=...`              debug -O2 + ASSERT + 符号
+      //   debug      = `make all`                       debug -O2 + ASSERT + 符号（产品）
+      //   release_ut = `make tests BUILD_TYPE=release UT=...`  release -O2 + NDEBUG（带 test 命令）
+      //   release    = `make release`                   release -O2 + NDEBUG（产品，无 test 命令）
+      // 产品与 UT 产物**可以同时存在**（对象目录也已按 _ut / 优化档分置），launch 按路径锁定用途。
+      // ⚠ -O0 只在排查汇编级/时序缺陷时临时用：`make tests DEBUG_OPT=-O0`
+      //   → 对象目录切到 obj_ut_*_O0，产物仍是 debug_ut.elf（不会复用 -O2 的 .o）。
+      // JLink 外部   = 你自己先起 JLinkGDBServer（监听 2331），这里只连
+      //      WSL自启 = VS Code 通过 serverpath 拉起 Windows 的 JLinkGDBServer
+      "name": "① UT/逻辑调试 · debug_ut · 外部 JLink 2331",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -20,9 +23,55 @@
 
       "gdbTarget": "localhost:2331",
 
-      // debug 镜像 = `make all`（产品）或 `make tests`（全量 UT，FC + FTL 全编入），
-      // -O0、ASSERT 生效、有完整源码符号 ⇒ 可打断点。
-      // **同一路径只保留最后一条构建**：跑 UT 前务必 `make tests` 重新生成一次。
+      // UT/逻辑调试：ASSERT 生效、有完整符号 ⇒ 停 main，可打断点/看源码。
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+
+      "runToEntryPoint": "main",
+
+      "preLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset"
+      ],
+
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+
+      "armToolchainPath": "/usr/bin"
+    },
+    {
+      "name": "② UT/逻辑调试 · debug_ut · WSL 自启 JLink",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "jlink",
+
+      "device": "STM32H743II",
+      "interface": "swd",
+      "serialNumber": "602717758",
+
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "armToolchainPath": "/usr/bin",
+      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+
+      "runToEntryPoint": "main",
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+    },
+    {
+      // 产品调试：不带 UT 运行态，用于排查正式路径（USB / host I/O / FTL 后台）。
+      "name": "③ 产品调试 · debug · 外部 JLink 2331",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "external",
+
+      "device": "STM32H743II",
+
+      "gdbTarget": "localhost:2331",
+
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
@@ -35,16 +84,12 @@
         "monitor reset"
       ],
 
-      "postLaunchCommands": [
-        "monitor halt"
-      ],
-
       "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
     {
-      "name": "② UT/调试 · debug 镜像 · WSL 自启 JLink",
+      "name": "④ 产品调试 · debug · WSL 自启 JLink",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -54,9 +99,6 @@
       "interface": "swd",
       "serialNumber": "602717758",
 
-      // debug 镜像 = `make all`（产品）或 `make tests`（全量 UT，FC + FTL 全编入），
-      // -O0、ASSERT 生效、有完整源码符号 ⇒ 可打断点。
-      // **同一路径只保留最后一条构建**：跑 UT 前务必 `make tests` 重新生成一次。
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
@@ -65,16 +107,60 @@
 
       "runToEntryPoint": "main",
       "svdFile": "${workspaceFolder}/STM32H743xI.svd"
-    }
-,
+    },
     // ─────────────────────────────────────────────────────────────────────
-    // release 镜像专用：**只烧录**，不做源码级调试。
-    // 原因：release 档链接带 `-s`（剥符号表）⇒ `runToEntryPoint: main` / 断点都不可用；
-    // 但 cortex-debug 的 `load` 只依赖 program header，烧录本身没问题。
-    // 用途：烧 `make release` 的产品固件，或 `make tests BUILD_TYPE=release` 的 UT 镜像
-    //       （两者都落在同一路径 build/firmware/release/bin/release.elf，最后一条构建决定内容）。
+    // release 镜像：**只烧录/运行**，不做源码级调试。
+    // release = -O2 -DNDEBUG，ASSERT 裁空；链接带 `-s`（剥符号表）⇒
+    // `runToEntryPoint: main` / 断点都不可用。cortex-debug 的 `load` 只依赖
+    // program header，烧录本身没问题。
     {
-      "name": "③ 烧录 · release 镜像 · 外部 JLink 2331",
+      // 发布/速度（UT）：带 test 命令，用于 /speed/ 与 release 全量 UT。
+      "name": "⑤ 发布/速度(UT) · release_ut · 外部 JLink 2331",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "external",
+
+      "device": "STM32H743II",
+
+      "gdbTarget": "localhost:2331",
+
+      "executable": "${workspaceFolder}/build/firmware/release/bin/release_ut.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+
+      "preLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset"
+      ],
+
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+
+      "armToolchainPath": "/usr/bin"
+    },
+    {
+      "name": "⑥ 发布/速度(UT) · release_ut · WSL 自启 JLink",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "jlink",
+
+      "device": "STM32H743II",
+      "interface": "swd",
+      "serialNumber": "602717758",
+
+      "executable": "${workspaceFolder}/build/firmware/release/bin/release_ut.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "armToolchainPath": "/usr/bin",
+      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+    },
+    {
+      // 发布/产品：`make release` 产物，无 test 命令；用于正式板与 H2testw。
+      "name": "⑦ 发布(产品) · release · 外部 JLink 2331",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -94,16 +180,12 @@
         "monitor reset"
       ],
 
-      "postLaunchCommands": [
-        "monitor halt"
-      ],
-
       "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
     {
-      "name": "④ 烧录 · release 镜像 · WSL 自启 JLink",
+      "name": "⑧ 发布(产品) · release · WSL 自启 JLink",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",

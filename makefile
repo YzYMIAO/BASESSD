@@ -172,16 +172,19 @@ format-image:
 # ============================================================================
 # 主目标
 # ============================================================================
-# 共用 bin 路径时，正常镜像 / 开卡镜像 / 体检镜像的 ELF/BIN **不能互相复用**：
-# 记录上次构建的 (FORMAT_ON_BOOT/FORMAT_VERIFY)；配置切换时删掉旧输出，强制重链。
+# 正常镜像 / 开卡镜像 / 体检镜像的 ELF/BIN **不能互相复用**：
+# 记录每个产物上次构建的 (FORMAT_ON_BOOT/FORMAT_VERIFY)；配置切换时删掉旧输出，强制重链。
+# ⚠ 记录文件必须按 $(TARGET) 分置：产品与 UT 共用 BIN_DIR，若共用一份记录，
+#   先 `make format-image`（debug.elf）再 `make tests`（debug_ut.elf）会把记录改成
+#   0/0，之后的 `make all` 看不出 debug.elf 仍是开卡镜像。
 .PHONY: check-build-cfg
 check-build-cfg:
 	@$(MKDIR) $(BIN_DIR)
 	@cfg="$(FORMAT_ON_BOOT)/$(FORMAT_VERIFY)"; \
-	if [ -f "$(TARGET).elf" ] && { [ ! -f "$(BIN_DIR)/.build_cfg" ] || [ "$$(cat "$(BIN_DIR)/.build_cfg")" != "$$cfg" ]; }; then \
+	if [ -f "$(TARGET).elf" ] && { [ ! -f "$(TARGET).build_cfg" ] || [ "$$(cat "$(TARGET).build_cfg")" != "$$cfg" ]; }; then \
 		rm -f "$(TARGET).elf" "$(TARGET).bin" "$(TARGET).map" "$(TARGET).lst" "$(TARGET).sym" "$(TARGET).size"; \
 	fi; \
-	printf '%s\n' "$$cfg" > "$(BIN_DIR)/.build_cfg"
+	printf '%s\n' "$$cfg" > "$(TARGET).build_cfg"
 
 .PHONY: all
 # format / types-check 作为 all 的前置目标（均为 .PHONY，恒执行）：

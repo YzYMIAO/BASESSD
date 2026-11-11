@@ -55,10 +55,13 @@ sh/debug_env.sh
 手动分步（脚本失败时）见 `docs/design/wsl_debug_environment.md` §4.3。
 另一条路：`sh/flash.jlink`（JLink Commander 脚本，`loadfile ... .elf` + `r` + `g`），
 ⚠ 该文件在 `.gitignore` 里，是本机路径。
-⚠ **跑 UT 时 `launch.json` 的 `executable` 必须指到
-  `build/firmware/debug/bin/debug.elf`**：`make tests` 的产物在 `debug/`，而 `release/`
-  镜像没有 `test` 命令（`RISK-PLAT-05`）。普通 release 调试再改回
-  `build/firmware/release/bin/release.elf`（当前 `.vscode/launch.json` 已置为 debug）。
+⚠ **产物名锁定用途，产品与 UT 不再共用路径**（`config.mk §目标文件命名`）：
+`make tests UT=...`（debug）→ `build/firmware/debug/bin/debug_ut.elf`；
+`make tests BUILD_TYPE=release UT=...` → `build/firmware/release/bin/release_ut.elf`；
+`make all` → `build/firmware/debug/bin/debug.elf`（产品）；
+`make release` → `build/firmware/release/bin/release.elf`（产品，无 `test` 命令）。
+⚠ 需要 -O0 时用 `make tests DEBUG_OPT=-O0`，对象目录自动切到 `obj_ut_*_O0`
+（不会复用 -O2 的 .o），产物仍是 `debug_ut.elf`。
 
 ---
 

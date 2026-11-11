@@ -10,7 +10,7 @@
  *
  * SysTick（1 ms）采样**被中断上下文**的 PC，写入 .noinit 环形缓冲。复位后
  * `pc_sample_init` 把上一轮的环快照到 prev，CLI `pc` 打印 top-N；再用**同一镜像**的
- * `debug.map` / `arm-none-eabi-addr2line` 反查函数与行号。
+ * `.map`（`debug.map` / `debug_ut.map`）/ `arm-none-eabi-addr2line` 反查函数与行号。
  *
  * 与 fault 机制的分工：fault 只在 NMI/HardFault/… 产生现场；本模块覆盖**没有异常**
  * 的死循环 / 忙等。`fault` 的 96 词栈扫描给候选返回地址，本模块给「PC 停在哪」。
