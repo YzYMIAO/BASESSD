@@ -29,6 +29,9 @@
 #include "cli.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "delay.h"
 #include "fc.h"
+#include "fc_interface.h"
+#include "fc_nand_dispatch.h"
+#include "fc_nand_engine.h"
 #include "l2p_cache.h"
 #include "munit.h"
 #include "ssd_types.h"
@@ -648,11 +651,10 @@ static MunitParameterEnum s_fc_speed_params[] = {
 #    define SPD_FTL_BLOCKS           100U
 #    define SPD_FTL_LBAS_PER_BLOCK   512U /* 1 gblock = 2 plane × 64 page × 4 CW × 512 B */
 #    define SPD_FTL_LBAS             (SPD_FTL_BLOCKS * SPD_FTL_LBAS_PER_BLOCK)
-#    define SPD_FTL_LBA_BASE         0U
 #    define SPD_FTL_BYTES            ((DWORD)(SPD_FTL_LBAS * FTL_IU_BYTES))
 #    define SPD_FTL_SLOTS            4U
 #    define SPD_FTL_CHUNK_MAX        32U
-#    define SPD_FTL_PHASE_TIMEOUT_MS 180000U
+#    define SPD_FTL_PHASE_TIMEOUT_MS 30000U
 #    define SPD_FTL_GUARD            2000000U
 
 typedef struct
@@ -686,6 +688,10 @@ typedef struct
 static BYTE          s_ftl_arena[SPD_FTL_ARENA_BYTES] SRAM4_DATA;
 static spd_ftl_req_s s_ftl_req[SPD_FTL_SLOTS];
 static BOOL          s_ftl_formatted;
+/* 每次 `test` 由 munit seed 选一个 8 对齐起点；固定 0..51199 会反复压在
+ * 同一段逻辑地址上，既不能区分「这一段有问题」与「写路径有问题」，也会掩盖
+ * 某些区域特有的失败。seed 固定时可重放。 */
+static DWORD s_spd_ftl_lba_base;
 
 static BYTE spd_ftl_pattern(DWORD byte_addr)
 {
@@ -853,6 +859,67 @@ static void spd_ftl_cache_diff(const spd_ftl_cache_s *a, const spd_ftl_cache_s *
     out->rd_fallbacks = b->rd_fallbacks - a->rd_fallbacks;
 }
 
+/* 失败时的 FTL 现场：pending 组 / cache 序列 / wbuf。只在超时路径调用。 */
+static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
+{
+    const ftl_cache_seq_s *seq = &ftl->cache_stream.seq;
+
+    ftl_ut_trace_summary("SPEED dump %s: seq kind=%d act=%d drain=%d brk=%d close=%d closing=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu pend_idx=%hhu/%d wb(open=%d base=%lu occ=0x%02hhX owners=0x%08lX) pend(s/g)=%hu/%hu",
+                         why,
+                         (int)seq->kind,
+                         (int)seq->active,
+                         (int)seq->draining,
+                         (int)seq->break_requested,
+                         (int)seq->close_requested,
+                         (int)seq->closing,
+                         seq->owner_gi,
+                         seq->next_lba,
+                         seq->wr.count,
+                         seq->wr_inflight,
+                         seq->wr.head,
+                         seq->wr.pend_idx,
+                         (int)seq->wr.pend_valid,
+                         (int)ftl->wbuf->open,
+                         ftl->wbuf->base,
+                         ftl->wbuf->occupied,
+                         ftl->wbuf->owners,
+                         pend_slot_get_count(&ftl->pending),
+                         pend_group_get_count(&ftl->pending));
+
+    fc_resource_stats_s rs;
+
+    memset(&rs, 0, sizeof(rs));
+    (void)fc_get_resource_stats(&rs);
+    ftl_ut_trace_summary("SPEED dump fc: cmd=%hu desc=%hu buf=%hu sq=%hu hsq=%hu cq=%hu armed=%hhu fatal=%hhu",
+                         rs.command_used,
+                         rs.descriptor_used,
+                         rs.buffer_used,
+                         rs.sq_used,
+                         rs.hsq_used,
+                         rs.cq_used,
+                         fc_nand_engine_is_armed(),
+                         (BYTE)fc_nand_dispatch_fatal());
+
+    for (BYTE gi = 0U; gi < (BYTE)FTL_GROUP_MAX; gi++)
+    {
+        const pend_group_s *g = &ftl->pending.groups[gi];
+
+        if (g->used == false)
+        {
+            continue;
+        }
+        ftl_ut_trace_summary("SPEED dump group=%hhu op=%d lba=%lu next=%lu/%lu outstanding=%hu stalls=%hhu agg=%d",
+                             gi,
+                             (int)g->op,
+                             (DWORD)g->lba,
+                             g->next,
+                             g->total,
+                             g->outstanding,
+                             g->stalls,
+                             (int)g->agg_status);
+    }
+}
+
 /* 一个读写 phase：按 chunk 拆分、最多 depth 个请求在飞；完成后立即校验并回收 slot。
  * 时间含图案 fill / 校验 CPU（全量 25 MiB 比较，量级远小于 NAND）。 */
 static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, DWORD *ms_out, DWORD *errors)
@@ -879,9 +946,9 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
 
             if (write)
             {
-                spd_ftl_fill(SPD_FTL_LBA_BASE + next, slot->buf, chunk);
+                spd_ftl_fill(s_spd_ftl_lba_base + next, slot->buf, chunk);
             }
-            if (!spd_ftl_submit(ftl, slot, SPD_FTL_LBA_BASE + next, chunk, write))
+            if (!spd_ftl_submit(ftl, slot, s_spd_ftl_lba_base + next, chunk, write))
             {
                 if (inflight == 0U)
                 {
@@ -896,8 +963,24 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
             inflight++;
         }
 
+        /* 与生产主循环一致：timer 表补 bg_scheduler credit，否则长写序列在
+         * credit 耗尽后 group 不再被补发（chunk=32 曾出现 fill_delta 有值、pop=0）。 */
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
+
+        /* CP/MIG 在飞时显式推进：speed 循环不能只等 bg_scheduler；否则 CP active
+         * 会占住 FC 资源，host 写组停在 pending（chunk=32 诊断 cp=1/0）。 */
+        if (ftl->cp_handle->active != 0U)
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, 0);
+
+            cp_handle(ftl->cp_handle, &trigger);
+        }
+        if (ftl->mig_handle->job.active != 0U)
+        {
+            mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
+        }
 
         for (BYTE i = 0U; i < (BYTE)SPD_FTL_SLOTS; i++)
         {
@@ -931,6 +1014,33 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
 
         if ((platform_now_ms() - t0) > (DWORD)SPD_FTL_PHASE_TIMEOUT_MS)
         {
+            ftl_ut_trace_summary("SPEED phase timeout: wr=%d chunk=%lu next=%lu inflight=%hhu errors=%lu free=%hu bad=%hu closed=%hu wb_idle=%d bg=%d seq=%hhu/%hhu cache=%hhu/%hhu pend(s/g)=%hu/%hu cp=%d/%d mig=%d/%d jrn=%lu/%hhu/%d/%d pend_j=%d",
+                                 (int)write,
+                                 chunk,
+                                 next,
+                                 inflight,
+                                 *errors,
+                                 ftl->alloc.free_count,
+                                 ftl->alloc.bad_count,
+                                 ftl->alloc.closed_sb_count,
+                                 (int)wb_is_idle(ftl->wbuf),
+                                 (int)ftl->flags.bg_suspend,
+                                 ftl->cache_stream.seq.wr.count,
+                                 ftl->cache_stream.seq.wr_inflight,
+                                 ftl->cache->inflight.load,
+                                 ftl->cache->inflight.flush,
+                                 pend_slot_get_count(&ftl->pending),
+                                 pend_group_get_count(&ftl->pending),
+                                 (int)ftl->cp_handle->active,
+                                 (int)ftl->cp_handle->waiting,
+                                 (int)ftl->mig_handle->job.active,
+                                 (int)ftl->mig_handle->job.waiting,
+                                 jrn_sequence_get(ftl->journal),
+                                 jrn_watermark_get(ftl->journal),
+                                 (int)jrn_is_emergency(ftl->journal),
+                                 (int)jrn_is_idle(ftl->journal),
+                                 (int)jrn_has_pending_entries(ftl->journal));
+            spd_ftl_dump(ftl, "phase");
             (*errors)++;
             *ms_out = platform_now_ms() - t0;
             return false;
@@ -959,8 +1069,20 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
     {
         fc_resource_stats_s stats;
 
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
+
+        if (ftl->cp_handle->active != 0U)
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, 0);
+
+            cp_handle(ftl->cp_handle, &trigger);
+        }
+        if (ftl->mig_handle->job.active != 0U)
+        {
+            mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
+        }
 
         memset(&stats, 0, sizeof(stats));
         (void)fc_get_resource_stats(&stats);
@@ -996,6 +1118,27 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
                                  dbg.hsq_head_chain,
                                  (unsigned)dbg.hsq_head_op,
                                  ftl_op_req_count());
+            ftl_ut_trace_summary("SPEED idle state: free=%hu bad=%hu closed=%hu bg=%d seq=%hhu/%hhu cache=%hhu/%hhu pend(s/g)=%hu/%hu cp=%d/%d mig=%d/%d jrn=%lu/%hhu/%d/%d pend_j=%d",
+                                 ftl->alloc.free_count,
+                                 ftl->alloc.bad_count,
+                                 ftl->alloc.closed_sb_count,
+                                 (int)ftl->flags.bg_suspend,
+                                 ftl->cache_stream.seq.wr.count,
+                                 ftl->cache_stream.seq.wr_inflight,
+                                 ftl->cache->inflight.load,
+                                 ftl->cache->inflight.flush,
+                                 pend_slot_get_count(&ftl->pending),
+                                 pend_group_get_count(&ftl->pending),
+                                 (int)ftl->cp_handle->active,
+                                 (int)ftl->cp_handle->waiting,
+                                 (int)ftl->mig_handle->job.active,
+                                 (int)ftl->mig_handle->job.waiting,
+                                 jrn_sequence_get(ftl->journal),
+                                 jrn_watermark_get(ftl->journal),
+                                 (int)jrn_is_emergency(ftl->journal),
+                                 (int)jrn_is_idle(ftl->journal),
+                                 (int)jrn_has_pending_entries(ftl->journal));
+            spd_ftl_dump(ftl, "idle");
             return false;
         }
     }
@@ -1032,6 +1175,7 @@ static BOOL spd_ftl_l2p_ready_read(ftl_ctx_s *ftl, DWORD lba, DWORD *out_pba)
             return st == FTL_OK;
         }
 
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
@@ -1139,6 +1283,10 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         fmt_ms          = platform_now_ms() - t0;
         s_ftl_formatted = true;
         ftl             = ftl_ut_live();
+        ftl_ut_trace_summary("SPEED ftl: media formatted free=%hu bad=%hu closed=%hu",
+                             ftl->alloc.free_count,
+                             ftl->alloc.bad_count,
+                             ftl->alloc.closed_sb_count);
     }
     else
     {
@@ -1150,10 +1298,18 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         ftl_ut_trace_summary("SPEED isolation: reboot from media before chunk=%lu", chunk);
     }
 
-    if (((QWORD)SPD_FTL_LBA_BASE + SPD_FTL_LBAS) > (QWORD)ssd_controller_host_lba_max(&g_ctrl))
+    const DWORD host_max = ssd_controller_host_lba_max(&g_ctrl);
+
+    if (host_max < (SPD_FTL_LBAS + 8U))
     {
         munit_error("speed range exceeds host capacity");
     }
+
+    /* 8 对齐随机起点；`span` 为可用的起点上限，范围 [base, base+51200)。 */
+    const DWORD span = host_max - SPD_FTL_LBAS;
+
+    s_spd_ftl_lba_base = (DWORD)munit_rand_int_range(0, (int)span) & ~7U;
+    ftl_ut_trace_summary("SPEED ftl: lba base=%lu range=%u host_max=%lu", s_spd_ftl_lba_base, SPD_FTL_LBAS, host_max);
 
     spd_ftl_cache_s c0;
     spd_ftl_cache_s c1;
@@ -1207,7 +1363,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     if ((rd_is_cache == false) && ok)
     {
-        spd_ftl_diag_window(ftl, SPD_FTL_LBA_BASE); /* 证据：为什么没走 cache 读 */
+        spd_ftl_diag_window(ftl, s_spd_ftl_lba_base); /* 证据：为什么没走 cache 读 */
     }
 
     ftl_ut_trace_detail("SPEED ftl chunk=%lu depth=%hhu wb(b/p/d/a)=%lu/%lu/%lu/%lu rd(b/p/d/f)=%lu/%lu/%lu/%lu",
@@ -1240,7 +1396,14 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
                          err_wr,
                          err_rd);
 
-    /* 判据**只判「跑不跑得完」**：失败明细与背压计数都已在上面一行给出。 */
+    /* 速度用例不能把写/读错误当成绩：非零 err 说明数据路径已失败。 */
+    if ((err_wr != 0U) || (err_rd != 0U))
+    {
+        ftl_ut_trace_summary("SPEED ftl chunk=%lu depth=%hhu: errors wr=%lu rd=%lu — speed sample invalid", chunk, depth, err_wr, err_rd);
+        return MUNIT_FAIL;
+    }
+
+    /* 只剩「跑不跑得完」作为 phase 级判据。 */
     if (!ok)
     {
         ftl_ut_trace_summary("SPEED ftl chunk=%lu depth=%hhu: phase did not drain (err 总=%lu)", chunk, depth, errors);
@@ -1265,12 +1428,15 @@ static MunitParameterEnum s_ftl_speed_params[] = {
  * ══════════════════════════════════════════════════════════════════════ */
 
 #if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
+/* ⚠ 顺序：FTL 必须排在 FC 之前。fc_nand_rw 直接擦写 per-plane 块 1024..，
+ * 会破坏 live FTL 的块；同一次上电内再跑 FTL speed，即使重新 format 也可能
+ * 受 FC 测试留下的介质状态影响。先跑 FTL（自己会 format），最后跑 FC。 */
 MunitTest g_speed_tests[] = {
-#    if defined(UT_FC_ENABLE)
-    {(char *)"fc_nand_rw",    test_fc_speed_mp,    test_setup,   test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_fc_speed_params},
-#    endif
 #    if defined(UT_FTL_ENABLE)
     {    (char *)"ftl_rw", test_ftl_speed_host, spd_ftl_setup, spd_ftl_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_ftl_speed_params},
+#    endif
+#    if defined(UT_FC_ENABLE)
+    {(char *)"fc_nand_rw",    test_fc_speed_mp,    test_setup,   test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_fc_speed_params},
 #    endif
     {                NULL,                NULL,          NULL,             NULL,             MUNIT_TEST_OPTION_NONE,               NULL},
 };
