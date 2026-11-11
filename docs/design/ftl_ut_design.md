@@ -340,7 +340,7 @@
 | RISK-ARCH-06 | 已闭合（2026-10-25：`/ftl/` 85/85 + H2testw 415 MB 回归） | UT-M + BOARD | media 回归 | 真 POR 人工 |
 | RISK-USB-02 | 待上板 | BOARD | — | 拔线/复位/重枚举 |
 | RISK-USB-05 | 不实现（用户裁决） | BOARD | — | 主机 fsync 走 SYNCHRONIZE CACHE；若抓包见 FUA 再恢复 |
-| RISK-PLAT-07 | 信息/待决策 | BUILD | §6 构建顺序 | 共用 `debug.elf`，最后一次构建生效 |
+| RISK-PLAT-07 | 已改、未上板（2026-11-11） | BUILD | §6 构建顺序 | 产品/UT 已分名（`debug.elf` vs `debug_ut.elf`）；`UT=FC` 与 `UT=FTL` 仍共用 `debug_ut.elf`，最后一次 UT 构建生效 |
 | RISK-NAND-04 | 已闭合（2026-10-25） | BOARD | — | USB 写 200 KB/s 已消除（release -O2 H2testw 843/889 KB/s） |
 | RISK-NAND-05 | 待定位 | BOARD | — | 物理介质失效 |
 | RISK-NAND-06 | 待定位 | UT-M 部分 + BOARD | `format_and_roundtrip`、`gc_progress` | 全片 re-scan 人工 |
@@ -366,12 +366,16 @@
 
 ## 6. 运行流程
 
-1. 编译：`make tests UT=FTL`（生成 `build/firmware/debug/bin/debug.{elf,bin}`）。
-   ⚠ **测试镜像必须是最后一次构建**：所有配置共用同一 `debug.elf`/`debug.bin`，
-   `make all` / `make release` / `make tests UT=FC` 都会覆盖它；烧 FTL UT 前必须让
-   `make tests UT=FTL` 是最后一次链接。静态库已按配置分目录（`lib_ut_FTL`）。
-   症状对照：`test` 命令不存在 ⇒ 无 UT 定义；`test /ftl/` 打 `NO test run` ⇒ 镜像里是
-   FC-only 套件。两者都先查构建顺序与横幅时间戳（`RISK-PLAT-05`、`RISK-PLAT-07`）。
+1. 编译：`make tests UT=FTL`（生成 `build/firmware/debug/bin/debug_ut.{elf,bin}`）。
+   产品与 UT 产物已分名：`make all` → `debug.elf`，`make tests BUILD_TYPE=release UT=...`
+   → `release_ut.elf`，互不覆盖（`config.mk §目标文件命名`）。
+   ⚠ **UT 套件之间仍共用同一产物**：`UT=FTL` 与 `UT=FC` 都写 `debug_ut.elf`（套件由
+   `-DUT_*` 决定），烧 FTL UT 前必须让 `make tests UT=FTL` 是最后一次 UT 链接；
+   静态库已按配置分目录（`lib_ut_FTL`）。若需要 FC/FTL 两个镜像同时存在，用
+   `make tests`（UT 为空，编入全部套件），运行时用 `test /fc-nand/`、`test /ftl/` 过滤。
+   症状对照：`test` 命令不存在 ⇒ 烧了产品镜像；`test /ftl/` 打 `NO test run` ⇒ 镜像里是
+   FC-only 套件（最后一条 UT 构建是 `UT=FC`）。两者都先查产物路径与横幅时间戳
+   （`RISK-PLAT-05`、`RISK-PLAT-07`）。
 2. 烧写：JLink（见 `.claude/skills/board-run/SKILL.md`）；核对横幅时间戳。
 3. pure：`test --list` → `test /ftl/pure/`（可只跑子套件）。
 4. media：拔 USB → `test /ftl/media/`（破坏性，内部先 `format`）。

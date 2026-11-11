@@ -26,7 +26,6 @@
 #include "timer.h"
 #include "wbuf.h"
 
-#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -35,14 +34,14 @@
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* munit 打印用例前缀时不带换行；第一条证据行需要先给它收尾。 */
-static BOOL s_ev_line_started = false;
-static BOOL s_ev_suppressed   = false;
+static BOOL s_ev_line_started = 0;
+static BOOL s_ev_suppressed   = 0;
 
 void ftl_ut_trace_begin(void)
 {
     /* 只复位状态；第一条可见证据由 ftl_ut_trace_emit 负责换行。
      * 不在这里提前写 '\n'：否则无证据的用例也会把 munit 的 [ OK ] 顶到下一行。 */
-    s_ev_line_started = false;
+    s_ev_line_started = 0;
 }
 
 void ftl_ut_trace_suppress(BOOL suppressed)
@@ -52,20 +51,20 @@ void ftl_ut_trace_suppress(BOOL suppressed)
 
 static void ftl_ut_trace_emit(BOOL force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
-    if (s_ev_suppressed || ((force == false) && !munit_log_visible(level)))
+    if (s_ev_suppressed || ((force == 0) && !munit_log_visible(level)))
     {
         return;
     }
 
     if (!s_ev_line_started)
     {
-        fputc('\n', MUNIT_OUTPUT_FILE);
-        s_ev_line_started = true;
+        (void)fputc('\n', MUNIT_OUTPUT_FILE);
+        s_ev_line_started = 1;
     }
 
-    fputs(tag, MUNIT_OUTPUT_FILE);
+    (void)fputs(tag, MUNIT_OUTPUT_FILE);
     (void)vfprintf(MUNIT_OUTPUT_FILE, format, ap);
-    fputc('\n', MUNIT_OUTPUT_FILE);
+    (void)fputc('\n', MUNIT_OUTPUT_FILE);
     (void)fflush(MUNIT_OUTPUT_FILE);
 }
 
@@ -74,7 +73,7 @@ void ftl_ut_trace_summary(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    ftl_ut_trace_emit(false, MUNIT_LOG_INFO, "[EV] ", format, ap);
+    ftl_ut_trace_emit(0, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 
@@ -83,7 +82,7 @@ void ftl_ut_trace_detail(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    ftl_ut_trace_emit(false, MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    ftl_ut_trace_emit(0, MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
     va_end(ap);
 }
 
@@ -92,7 +91,7 @@ void ftl_ut_result(const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    ftl_ut_trace_emit(true, MUNIT_LOG_INFO, "[EV] ", format, ap);
+    ftl_ut_trace_emit(1, MUNIT_LOG_INFO, "[EV] ", format, ap);
     va_end(ap);
 }
 
@@ -110,7 +109,7 @@ ftl_ctx_s *ftl_ut_live(void)
 
 void ftl_ut_topology_init(void)
 {
-    static BOOL s_topology_ready = false;
+    static BOOL s_topology_ready = 0;
 
     if (s_topology_ready)
     {
@@ -120,7 +119,7 @@ void ftl_ut_topology_init(void)
     /* 用上电扫描结果重建，而不是依赖主 boot 留下的表；与生产建表同一入口。 */
     munit_assert_true(ftl_topology_build(g_nand_targets));
     munit_assert_uint32(DIE_MAX, >, 0U);
-    s_topology_ready = true;
+    s_topology_ready = 1;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -135,8 +134,10 @@ static super_block_s         s_ut_closed[SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 
 static ftl_table_refs_s s_ut_refs;
 static alc_s            s_ut_alloc;
-static md_dir_cache_s   s_ut_md;
-static DWORD            s_ut_total_writes;
+/* md_dir_cache_s 约 33 KB；AXI_RAM 已被生产 FTL 的 cache/CMT 占满，
+ * 测试自有副本放 AXI_NOCACHE（无 DMA 访问，只是借空间）。 */
+static md_dir_cache_s s_ut_md NONCACHEABLE_BUFFER;
+static DWORD                  s_ut_total_writes;
 
 void ftl_ut_ram_init(void)
 {
@@ -226,6 +227,16 @@ void ftl_ut_clock_advance_ms(DWORD ms)
  * §3b 真 NAND 媒体夹具（破坏性）
  * ══════════════════════════════════════════════════════════════════════ */
 
+/* 运行期容量尾窗起点：host_lba_max 已扣实际坏块，不能再用编译期 FTL_LBA_MAX
+ * （否则尾窗会落到主机可见容量之外，RISK-UT-22）。 */
+DWORD ftl_ut_lba_base(void)
+{
+    const DWORD max = ssd_controller_host_lba_max(&g_ctrl);
+
+    munit_assert_uint32(max, >, FTL_UT_LBA_WINDOW);
+    return (DWORD)((max - FTL_UT_LBA_WINDOW) & ~(DWORD)(FTL_LBA_PER_PAIR - 1U));
+}
+
 static volatile BYTE         s_io_done;
 static volatile ssd_status_e s_io_status;
 
@@ -244,11 +255,30 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
         fc_resource_stats_s rs;
 
         ftl_service_pump();
+        /* bg_suspend 只阻止**新**后台任务；这里仍要让已起 job 走完 CPU 阶段，
+         * 否则 media teardown 的 assert_clean 会在 CP/MIG 仍 active 时失败。 */
+        ftl_service(ftl);
+
+        if (ftl->cp_handle->active != 0)
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, 0);
+
+            cp_handle(ftl->cp_handle, &trigger);
+        }
+        if (ftl->mig_handle->job.active != 0)
+        {
+            mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
+        }
+        md_handle(ftl->metadata_dir);
+        jrn_handle(ftl->journal, NULL);
+        ftl_service_pump();
 
         memset(&rs, 0, sizeof(rs));
         (void)fc_get_resource_stats(&rs);
 
-        if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U))
+        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U);
+
+        if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && jobs_idle)
         {
             return;
         }
@@ -264,7 +294,7 @@ void ftl_ut_reboot_from_media(void)
 
     ftl_ut_quiesce(ftl);
 
-    ftl_ut_trace_detail("reboot: quiesced (req=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: quiesced (req=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), ftl->cp_handle->waiting, ftl->cp_handle->phase);
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
     (void)fc_init();
@@ -304,14 +334,14 @@ void ftl_ut_reboot_from_media(void)
     munit_assert_int(ftl_init(ftl, topo, cache, &st), ==, FTL_OK);
     l2p_init(cache, topo.ch, topo.ce, owner_fn, owner_ctx);
 
-    ftl_ut_trace_detail("reboot: ftl_init ok (cp_waiting=%d cp_phase=%d)", (int)ftl->cp_handle->waiting, (int)ftl->cp_handle->phase);
+    ftl_ut_trace_detail("reboot: ftl_init ok (cp_waiting=%d cp_phase=%d)", ftl->cp_handle->waiting, ftl->cp_handle->phase);
 
     pfr_boot_result_s result;
 
     memset(&result, 0, sizeof(result));
     munit_assert_int(pfr_boot_recovery(ftl, &result), ==, FTL_OK);
 
-    ftl_ut_trace_detail("reboot: recovered type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", result.boot_type, result.cp_sequence, result.journal_entries, (int)result.blocks_restored, (int)result.scoped);
+    ftl_ut_trace_detail("reboot: recovered type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", result.boot_type, result.cp_sequence, result.journal_entries, result.blocks_restored, result.scoped);
 }
 
 void ftl_ut_media_format(void)
@@ -329,7 +359,7 @@ void ftl_ut_media_format(void)
     ftl->flags.bg_suspend = 1U;
     (void)wb_handle(ftl->wbuf, &trigger, &status);
 
-    munit_assert_int(pfr_media_format(ftl, false), ==, FTL_OK);
+    munit_assert_int(pfr_media_format(ftl, 0), ==, FTL_OK);
 
     ftl_ut_reboot_from_media();
 
@@ -343,15 +373,42 @@ static BOOL ftl_ut_io_wait(DWORD timeout_ms)
 
     while (s_io_done == 0U)
     {
+        /* 与生产主循环一致：timer 表补 bg_scheduler credit，CP/Journal/L2P 后台
+         * 任务才能推进。漏掉它时长时间的写序列会因 credit 耗尽而停摆。 */
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
         if ((platform_now_ms() - t0) > timeout_ms)
         {
-            return false;
+            return 0;
         }
     }
     return s_io_status == SSD_STATUS_OK;
+}
+
+/* host I/O 失败时把「为什么」打出来：只给一个 0 无法区分
+ * submit 拒绝 / 等待超时 / 组报错 / deferred error。默认只在 debug 档可见。 */
+static void ftl_ut_trace_io_fail(const char *op, DWORD lba, DWORD count, int submit_st, BOOL waited)
+{
+    ftl_ctx_s *f = ftl_ut_live();
+
+    ftl_ut_trace_detail("host %s FAIL lba=%lu count=%lu submit=%d wait=%d done=%hhu status=%d deferred=%d free=%hu jrn=%lu/%lu wr=%hhu/%hhu flush=%hhu/%hhu",
+                        op,
+                        lba,
+                        count,
+                        submit_st,
+                        waited,
+                        s_io_done,
+                        s_io_status,
+                        f->flags.deferred_error,
+                        f->alloc.free_count,
+                        jrn_sequence_get(f->journal),
+                        jrn_persisted_seq(f->journal),
+                        f->cache_stream.seq.wr.count,
+                        f->cache_stream.seq.wr_inflight,
+                        f->cache->inflight.flush,
+                        f->cache->inflight.load);
 }
 
 BOOL ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
@@ -369,11 +426,21 @@ BOOL ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
     req.complete_flag = &s_io_done;
     req.status_out    = &s_io_status;
 
-    if (ftl_submit_write(ftl, &req) != FTL_OK)
+    const ftl_status_e submit = ftl_submit_write(ftl, &req);
+
+    if (submit != FTL_OK)
     {
-        return false;
+        ftl_ut_trace_io_fail("write", lba, count, submit, 0);
+        return 0;
     }
-    return ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
+
+    const BOOL ok = ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
+
+    if (ok == 0)
+    {
+        ftl_ut_trace_io_fail("write", lba, count, submit, 1);
+    }
+    return ok;
 }
 
 BOOL ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
@@ -391,11 +458,21 @@ BOOL ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
     req.complete_flag = &s_io_done;
     req.status_out    = &s_io_status;
 
-    if (ftl_submit_read(ftl, &req) != FTL_OK)
+    const ftl_status_e submit = ftl_submit_read(ftl, &req);
+
+    if (submit != FTL_OK)
     {
-        return false;
+        ftl_ut_trace_io_fail("read", lba, count, submit, 0);
+        return 0;
     }
-    return ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
+
+    const BOOL ok = ftl_ut_io_wait(FTL_UT_IO_TIMEOUT_MS);
+
+    if (ok == 0)
+    {
+        ftl_ut_trace_io_fail("read", lba, count, submit, 1);
+    }
+    return ok;
 }
 
 BOOL ftl_ut_flush(void)
@@ -407,15 +484,16 @@ BOOL ftl_ut_flush(void)
 
     while (!ftl_flush_step(ftl))
     {
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
         if ((platform_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
         {
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
 BOOL ftl_ut_trim(DWORD lba, DWORD count)
@@ -425,7 +503,7 @@ BOOL ftl_ut_trim(DWORD lba, DWORD count)
 
     if (ftl_trim_begin(ftl, lba, count) != FTL_OK)
     {
-        return false;
+        return 0;
     }
 
     for (;;)
@@ -434,19 +512,20 @@ BOOL ftl_ut_trim(DWORD lba, DWORD count)
 
         if (st == FTL_OK)
         {
-            return true;
+            return 1;
         }
         if (st != FTL_AGAIN)
         {
-            return false;
+            return 0;
         }
 
+        timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
         if ((platform_now_ms() - t0) > FTL_UT_IO_TIMEOUT_MS)
         {
-            return false;
+            return 0;
         }
     }
 }
@@ -505,7 +584,7 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
                      ftl_op_req_count(),
                      dbg.sq_used,
                      dbg.hsq_used,
-                     (unsigned)dbg.chain_owner,
+                     dbg.chain_owner,
                      dbg.lun_used,
                      dbg.lun_phase,
                      dbg.sched_sq_count,
@@ -513,10 +592,10 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
                      dbg.sq_head_id,
                      dbg.sq_head_state,
                      dbg.sq_head_chain,
-                     (unsigned)dbg.sq_head_op,
+                     dbg.sq_head_op,
                      dbg.hsq_head_id,
                      dbg.hsq_head_chain,
-                     (unsigned)dbg.hsq_head_op,
+                     dbg.hsq_head_op,
                      dbg.fill_calls,
                      dbg.fill_pops);
     }
@@ -541,4 +620,9 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_true(wb_is_idle(ftl->wbuf));
     munit_assert_uint32(ftl->cache->inflight.load, ==, 0U);
     munit_assert_uint32(ftl->cache->inflight.flush, ==, 0U);
+    /* 写序列的页表 / 在飞成员 / dirty CMT 是跨用例污染的主要来源：teardown 必须
+     * 证明它们已排空，否则下一用例可能读到旧页或被序列门控拒绝。 */
+    munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.wr_inflight, ==, 0U);
+    munit_assert_uint32(ftl->cache->stats.cmt_dirty, ==, 0U);
 }
