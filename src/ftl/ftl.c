@@ -2583,6 +2583,13 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
         return FTL_AGAIN;
     }
 
+    // host 读也必须走预算：否则读突发会把给后台留的命令/buffer 吃光，
+    // CP/收尾命令申请不到槽 ⇒ confirm park timeout（RISK-HOST-18）。
+    if (ftl_fc_host_budget_ok() == false)
+    {
+        return FTL_AGAIN;
+    }
+
     // 分配 FC 命令槽（池空 = 瞬态）
     fc_cmd_s *cmd = fc_command_alloc();
     if (cmd == NULL)

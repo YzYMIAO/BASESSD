@@ -64,15 +64,19 @@
  * 一个 4KB host 子操作最多占 FTL_LBA_PER_PAIR（8）个 desc/buffer；FC buffer 池只有
  * 128 ⇒ 16 个在飞 host 写就能吃满。后台（CP 的 region flush / GC 的搬移 / journal 页）
  * 此时拿不到命令与 buffer ⇒ CP 无法写 Header / 块表 ⇒ 掉电后每次开机都走全量重建
- * （RISK-CP-04 / RISK-WL-07）。这里让 host 写在池接近满时先背压，保留 2 个 pair 规模
+ * （RISK-CP-04 / RISK-WL-07）。这里让 host 写在池接近满时先背压，保留 4 个 pair 规模
  * 的后台资源。
+ *
+ * ⚠ 2026-11-12 板端 H2testw：池曾被 host cache 写吃成 `cmd=0 buf=0`，CP/META/L2P
+ * 全部提交失败 ⇒ confirm park timeout + 已回执写丢失（RISK-HOST-18）。因此预算
+ * 从 2 pair 提到 4 pair，并且 **cache 写序列也必须走本检查**（此前只有 wbuf 路径调）。
  *
  * 判据：host 的**下一次**子操作之后，各池仍至少剩 RESERVED 个槽位。
  * ⚠ 只约束 host 路径；后台路径（CP/GC/journal）直接走各自的 async 原语，不经过本检查。 */
-#define FTL_FC_HOST_RESERVED_CMDS (4U)
-#define FTL_FC_HOST_RESERVED_DESC (2U * FTL_LBA_PER_PAIR)
-#define FTL_FC_HOST_RESERVED_BUFS (2U * FTL_LBA_PER_PAIR)
-#define FTL_FC_HOST_RESERVED_SQ   (4U)
+#define FTL_FC_HOST_RESERVED_CMDS (8U)
+#define FTL_FC_HOST_RESERVED_DESC (4U * FTL_LBA_PER_PAIR)
+#define FTL_FC_HOST_RESERVED_BUFS (4U * FTL_LBA_PER_PAIR)
+#define FTL_FC_HOST_RESERVED_SQ   (8U)
 #define FTL_FC_HOST_RESERVED_HSQ  (2U)
 
 /**

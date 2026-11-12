@@ -308,9 +308,13 @@ static BOOL cp_job_stall(cp_handle_s *h)
         if (cp_job_abort_log_due(h))
         {
             fc_resource_stats_s rs;
+            WORD                opc[FTL_OP_COUNT];
 
             (void)fc_get_resource_stats(&rs);
+            ftl_op_req_counts(opc);
             LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%d free=%hu cmd=%hu buf=%hu\r\n", (now_ms - h->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS, h->phase, h->alloc->free_count, rs.command_used, rs.buffer_used);
+            LOGW(LOG_TAG_CP "held ops: host=%hu l2p=%hu cp=%hu md=%hu gc=%hu wl=%hu\r\n", opc[FTL_OP_HOST_IO], opc[FTL_OP_L2P], opc[FTL_OP_CHECKPOINT], opc[FTL_OP_METADATA], opc[FTL_OP_GC], opc[FTL_OP_WL]);
+            LOGW(LOG_TAG_CP "held ops: jrn=%hu pad=%hu bbt=%hu rr=%hu sync=%hu\r\n", opc[FTL_OP_JOURNAL], opc[FTL_OP_CACHE_PAD], opc[FTL_OP_BBT], opc[FTL_OP_READ_RECOVERY], opc[FTL_OP_SYNC_WAIT]);
         }
         h->timed_out     = true;
         h->timeout_phase = h->phase;

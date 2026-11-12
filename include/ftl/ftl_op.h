@@ -144,6 +144,13 @@ void ftl_op_req_remove(WORD cmd_id);
  */
 WORD ftl_op_req_count(void);
 
+/**
+ * @brief 按 op 类型统计未决 request 数（诊断：池被吃光时看持有者）。
+ *
+ * @param out 长度 `FTL_OP_COUNT` 的数组；本函数先清零再填各 op 的 pending 数。
+ */
+void ftl_op_req_counts(WORD out[FTL_OP_COUNT]);
+
 /* ── 实例路由 ── */
 
 /**

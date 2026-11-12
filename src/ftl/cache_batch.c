@@ -353,6 +353,13 @@ static DWORD cache_read_collect(const cache_read_req_s *req, DWORD pba[FTL_CACHE
  */
 static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL start_seq, BOOL end_seq)
 {
+    // host cache 读也走同一预算：否则 NTFS 元数据读会吃掉给后台留的命令/buffer，
+    // 与写路径一样把池打成 cmd=0/buf=0（RISK-HOST-18）。false ⇒ 调用者按 AGAIN 重试。
+    if (ftl_fc_host_budget_ok_n(b->n_pairs) == false)
+    {
+        return false;
+    }
+
     fc_cmd_id_t cmd_ids[FTL_CACHE_READ_MAX_PAIRS];
 
     for (DWORD i = 0U; i < b->n_pairs; i++)
@@ -816,6 +823,14 @@ static void cache_wr_discard(ftl_ctx_s *ftl, cache_wr_build_s *b)
  */
 static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const void *buffer, BYTE n_pages, BOOL start_seq, BOOL end_seq, cache_wr_build_s *b)
 {
+    // host 写给后台留资源：wbuf 路径已有同一预算检查，cache 写序列此前漏了。
+    // 持续顺序写会把 FC 命令/desc/buffer 吃成 cmd=0/buf=0 ⇒ CP/META/L2P 无法提交
+    // ⇒ confirm park timeout + 已回执写丢失（RISK-HOST-18）。页留在组里，下轮重试。
+    if (ftl_fc_host_budget_ok_n(n_pages) == false)
+    {
+        return FTL_AGAIN;
+    }
+
     for (BYTE j = 0U; j < n_pages; j++)
     {
         const ftl_status_e alc_st = alc_super_open_alloc_pair(&ftl->alloc, ALC_SUPER_ALLOC_HOT, b->pba[j]);

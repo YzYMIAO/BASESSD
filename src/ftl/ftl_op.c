@@ -210,6 +210,26 @@ WORD ftl_op_req_count(void)
     return count;
 }
 
+void ftl_op_req_counts(WORD out[FTL_OP_COUNT])
+{
+    ASSERT(out != NULL);
+
+    memset(out, 0, FTL_OP_COUNT * sizeof(out[0]));
+
+    for (WORD i = 0U; i < FTL_OP_REQ_TABLE_SIZE; i++)
+    {
+        if (g_op_req[i].pending == true)
+        {
+            const ftl_op_id_e op = g_op_req[i].op;
+
+            if ((op > FTL_OP_NONE) && (op < FTL_OP_COUNT))
+            {
+                out[op]++;
+            }
+        }
+    }
+}
+
 /* ── 4. 实例路由 ── */
 
 /**
@@ -379,7 +399,10 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
 
     if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
     {
-        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_READ_RECOVERY))
+        // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
+        // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR（RISK-HOST-18）。
+        // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
+        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_READ_RECOVERY) || (op == FTL_OP_L2P))
         {
             ftl->cache_stream.seq.break_requested = true;
         }
