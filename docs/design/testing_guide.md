@@ -479,6 +479,22 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 判据：`map` 得到的 `pba/paa/g/plane/blk/pg/cw` 必须与 `addr` 反查一致；
 三者不一致说明日志/命令中的地址口径分叉，按缺陷登记（C9）。
 
+### 8.7 测试运行产物（`build/test-results/`）
+
+原始串口日志与运行元数据放 `build/test-results/`（`build/` 已被 `.gitignore` 整目录忽略），**不放 `tests/`**：`tests/` 只放测试源码（R4），生成物混入会让 `git status` 变脏。
+
+每轮一个目录：
+
+```text
+build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
+  run.log      # 串口终端工具的 log（原始输出）
+  meta.txt     # commit / 镜像横幅时间戳 / 命令 / 结果 / 备注
+```
+
+用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 创建目录并生成 `meta.txt`；脚本打印路径，把串口终端工具的日志目录指到它即可。
+
+`meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 = 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。报告引用结论时抄这四行；原始日志不进版本库，需要长期留证的结论写本文件 §7 或 `docs/design/known_risks.md`。
+
 ---
 
 ## 9. 吞吐优化记录（USB MSC）

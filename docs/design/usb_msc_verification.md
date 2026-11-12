@@ -195,7 +195,14 @@ Get-Volume | Where-Object DriveType -eq 'Removable' | Format-Table DriveLetter,F
 powershell -NoProfile -File .\usb_verify.ps1 -Step format
 ```
 
-或 Windows 磁盘管理：初始化 MBR → 新建简单卷 → FAT32 → 分配盘符。
+⚠ **不要用磁盘管理**：固件 `format` 后介质是 partitionless，磁盘管理把它显示成合成的 `offset=0` RAW「主分区」，「删除卷」返回「不支持这个请求」⇒ 无法走「新建简单卷」。需要手建分区时用管理员 `diskpart`：
+```text
+select disk N
+clean
+create partition primary
+exit
+```
+然后在分区上格式化（`format fs=fat32 quick label=SOFTSSD`，或资源管理器右键格式化）。
 
 **期望**：
 
@@ -218,7 +225,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step format
 powershell -NoProfile -File .\usb_rebuild_mbr.ps1
 ```
 
-它会对 `\\.\PhysicalDriveN` 前 1MB 写零、重建 MBR、再格式化为 FAT32。
+它会对 `\\.\PhysicalDriveN` 前 1MB 写零、重建 MBR、再按 `-FileSystem`（默认 NTFS）格式化；要 FAT32 用 `-FileSystem FAT32`。
 
 ---
 
@@ -343,11 +350,12 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 | 症状 | 先查什么 | 动作 |
 |---|---|---|
 | Windows 完全看不到盘 | 串口是否有 `[USB ] mounted`；设备管理器有无未知设备 | 无 mounted：查 PA11/PA12、HSI48、VBUS sensing；有 mounted 无磁盘：查 SCSI 容量/inquiry |
-| 能看到盘，格式化失败 | 串口 `[USB ] unsupported SCSI opcode=0xXX` | 记录 opcode；补对应 SCSI 命令（`0x91` = SYNCHRONIZE CACHE(16)、`0x2F` = VERIFY(10)、`0x42` = UNMAP） |
-| **卷可用空间只有一半**（如 219/427 MB）；「删除卷」报「不支持该请求」且串口**没有** SCSI opcode 日志 | 旧 FAT / 卷状态残留（多次测试后 Windows 侧缓存），固件侧 `free` 正常、`rd` 读回为未映射零 | 固件 CLI `format` → 断电重启 → Windows `diskpart clean` → 新建卷 → FAT 快速格式化；实测恢复 **425 MB 可用 / 共 425 MB**（2026-10-22） |
+| 能看到盘，格式化失败 | ① 串口 `[USB ] unsupported SCSI opcode=0xXX`；② `Get-Partition` 的 `Offset`（0 = partitionless 超级软盘）；③ 真分区上 `Format-Volume`/diskpart 是否在 **0%** 报 `ERROR_NOT_SUPPORTED` / `ERROR_INSUFFICIENT_BUFFER` | ① 有 opcode ⇒ 记录并补对应 SCSI 命令（`0x91` = SYNCHRONIZE CACHE(16)、`0x2F` = VERIFY(10)、`0x42` = UNMAP）；② `Offset=0` ⇒ 先 `diskpart clean → create partition primary`（真实 MBR，offset=64KiB）再格式化：FAT32 只在真分区上可用，超级软盘上 FAT16 可用、FAT32 失败；③ 真分区上 FAT32 仍失败 ⇒ 查 Windows 累积更新（KB5132688/KB5132061），回滚后恢复（2026-11-12 验证） |
+| **卷可用空间只有一半**（如 219/427 MB）；「删除卷」报「不支持该请求」且串口**没有** SCSI opcode 日志 | 旧 FAT / 卷状态残留（多次测试后 Windows 侧缓存），固件侧 `free` 正常、`rd` 读回为未映射零 | 固件 CLI `format` → 断电重启 → `usb_verify.ps1 -Step format`（内置 `diskpart clean` + NTFS）；实测恢复 **425 MB 可用 / 共 425 MB**（2026-10-22，当时用 FAT） |
+| 固件 `format` 后 Windows 显示 `offset=0` 分区 /「无法格式化」 | `Get-Partition` 的 `Offset`；资源管理器里的文件系统选项 | 介质是 partitionless（无分区表），Windows 合成为 `offset=0` 的 RAW「主分区」，磁盘管理「删除卷」返回「不支持这个请求」⇒ **纯 GUI 无法建分区**。处理：管理员 `diskpart clean → create partition primary` 后在分区上格式化 FAT32（2026-11-12 验证；同一介质 raw 读写、FAT16 全盘 H2testw 0 错误）。详见 RISK-USBC-02 |
 | 格式化失败且串口有 `[MIG] ... victim read failed` 风暴 | `RISK-MIG-02` | 先 CLI `format` + 断电；仍复现则修 predictive 失败计数/黑名单 |
 | 重插后哈希不一致 | V05 的 2KB 块指纹 | 若块 1=块 0：`RISK-WB-06`（pair 镜像填装）；确认 rev 已含 `ftl_cmd_write_data_pair_cw` |
-| 分区表 offset 异常 / Logical 分区 / Not enough capacity | `Get-Partition` 的 Offset/MbrType | 跑 `usb_rebuild_mbr.ps1` |
+| 分区表 offset 异常 / Logical 分区 / Not enough capacity | `Get-Partition` 的 Offset/MbrType | 跑 `usb_verify.ps1 -Step format`（内置 `diskpart clean`，失败自动 raw 清零前 1MB 重试）；只需重建 MBR 时用 `usb_rebuild_mbr.ps1 -DiskNumber N` |
 | `Write-VolumeCache` 拒绝访问 | 是否普通窗口 | 改用 Windows“安全删除硬件”后再拔插 |
 | WSL `lsblk` 看不到 | 是否在 WSL 里 | 用 Windows 原生，或 `usbipd-win` attach |
 | 串口反复 `[MIG] kind=1` | 是否 WL 在收敛 | 观察是否自行停止；长时间不停按 WL 活锁单独排查 |

@@ -50,6 +50,8 @@
 #define USB_SCSI_SYNCHRONIZE_CACHE_10 0x35U
 #define USB_SCSI_SYNCHRONIZE_CACHE_16 0x91U
 #define USB_SCSI_UNMAP                0x42U
+#define USB_SCSI_MODE_SELECT_6        0x15U
+#define USB_SCSI_MODE_SELECT_10       0x55U
 
 /* SCSI UNMAP 参数表最多收多少个 range；超过拒绝（ILLEGAL REQUEST）。
  * 16 × 16B = 256B，足够覆盖文件系统的常见 discard 批量。 */
@@ -1233,6 +1235,88 @@ void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
 }
 
 /**
+ * @brief 填 MODE SENSE page 0x08（Caching），返回字节数。
+ *
+ * WCE=0：对主机宣称无 write cache。主机若看到 WCE=1，会在格式化前用 MODE SELECT
+ * 设置缓存页；本仓只接受、不应用 mode parameter list，保持 WCE=0 让主机走简单路径
+ * （与“不提供 caching page”的既有行为等效）。
+ */
+static DWORD usb_msc_mode_page_caching(BYTE *page)
+{
+    page[0] = 0x08U;
+    page[1] = 0x12U;
+    memset(&page[2], 0, 18U);
+    page[2] = 0x00U; /* WCE = 0 */
+    return 20U;
+}
+
+/**
+ * @brief 填 MODE SENSE page 0x1C（Informational Exceptions Control），返回字节数。
+ *
+ * 全部为 0：不主动上报 IE（DEXCPT=0 / LOGERR=0 / MRIE=0）。
+ */
+static DWORD usb_msc_mode_page_ie(BYTE *page)
+{
+    page[0] = 0x1CU;
+    page[1] = 0x0AU;
+    memset(&page[2], 0, 10U);
+    return 12U;
+}
+
+/**
+ * @brief MODE SENSE(6) 应用响应（TinyUSB 补丁）。
+ *
+ * Windows 的格式化流程会查询 caching（0x08）与 informational exceptions（0x1C）
+ * mode page；TinyUSB 内建响应不含任何 page。这里按 SCSI 规范返回最小合法页：
+ * WCE=0（无写缓存）、IE 全关。
+ *
+ * @note 不是「Windows 无法完成格式化」的根因：根因是主机对 partitionless 介质
+ *       （超级软盘布局）的处理，见 RISK-USBC-02。
+ *
+ * @param lun 逻辑单元（本仓恒 0）
+ * @param page 请求的 mode page（CDB[2] & 0x3F）
+ * @param buffer 响应缓冲
+ * @param bufsize 缓冲容量
+ * @return >0 = 响应字节数；0 = 交给 TinyUSB 内建空响应
+ */
+int32_t tud_msc_mode_sense_cb(BYTE lun, BYTE page, BYTE *buffer, WORD bufsize)
+{
+    if ((lun != 0U) || (buffer == NULL) || (bufsize < 4U))
+    {
+        return 0;
+    }
+
+    DWORD n = 0U;
+
+    switch (page)
+    {
+        case 0x08U:
+            n = usb_msc_mode_page_caching(&buffer[4]);
+            break;
+        case 0x1CU:
+            n = usb_msc_mode_page_ie(&buffer[4]);
+            break;
+        case 0x3FU:
+            n += usb_msc_mode_page_caching(&buffer[4 + n]);
+            n += usb_msc_mode_page_ie(&buffer[4 + n]);
+            break;
+        default:
+            return 0;
+    }
+
+    if ((4U + n) > bufsize)
+    {
+        return 0;
+    }
+
+    buffer[0] = (BYTE)((4U + n) - 1U); /* mode data length = total - 1 */
+    buffer[1] = 0U;                    /* medium type */
+    buffer[2] = 0U;                    /* device-specific: not write protected */
+    buffer[3] = 0U;                    /* block descriptor length */
+    return (int32_t)(4U + n);
+}
+
+/**
  * @brief TinyUSB START STOP UNIT 回调
  *
  * @param lun 逻辑单元（本仓恒 0）
@@ -1284,6 +1368,14 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
             return TUD_MSC_RET_ERROR;
         }
         return usb_msc_unmap_parse(lun, (const BYTE *)buffer, bufsize);
+    }
+
+    /* MODE SELECT(6/10)：主机可能在格式化前设置 mode page。本仓没有可配置的
+     * mode page（WCE 恒 0、无 IE），参数表接受并忽略；回 ILLEGAL REQUEST 只会
+     * 让主机把设备当作不支持该命令。 */
+    if ((scsi_cmd[0] == USB_SCSI_MODE_SELECT_6) || (scsi_cmd[0] == USB_SCSI_MODE_SELECT_10))
+    {
+        return 0;
     }
 
     if ((scsi_cmd[0] != USB_SCSI_SYNCHRONIZE_CACHE_10) && (scsi_cmd[0] != USB_SCSI_SYNCHRONIZE_CACHE_16))

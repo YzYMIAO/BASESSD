@@ -823,9 +823,9 @@ static void cache_wr_discard(ftl_ctx_s *ftl, cache_wr_build_s *b)
  */
 static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const void *buffer, BYTE n_pages, BOOL start_seq, BOOL end_seq, cache_wr_build_s *b)
 {
-    // host 写给后台留资源：wbuf 路径已有同一预算检查，cache 写序列此前漏了。
-    // 持续顺序写会把 FC 命令/desc/buffer 吃成 cmd=0/buf=0 ⇒ CP/META/L2P 无法提交
-    // ⇒ confirm park timeout + 已回执写丢失（RISK-HOST-18）。页留在组里，下轮重试。
+    // host 写给后台留资源：持续顺序写会把 FC 命令/desc/buffer 吃成 cmd=0/buf=0
+    // ⇒ CP/META/L2P 无法提交 ⇒ confirm park timeout + 已回执写丢失
+    // （RISK-HOST-18）。页留在组里，下轮重试。
     if (ftl_fc_host_budget_ok_n(n_pages) == false)
     {
         return FTL_AGAIN;

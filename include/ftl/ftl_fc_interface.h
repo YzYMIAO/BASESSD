@@ -67,9 +67,9 @@
  * （RISK-CP-04 / RISK-WL-07）。这里让 host 写在池接近满时先背压，保留 4 个 pair 规模
  * 的后台资源。
  *
- * ⚠ 2026-11-12 板端 H2testw：池曾被 host cache 写吃成 `cmd=0 buf=0`，CP/META/L2P
- * 全部提交失败 ⇒ confirm park timeout + 已回执写丢失（RISK-HOST-18）。因此预算
- * 从 2 pair 提到 4 pair，并且 **cache 写序列也必须走本检查**（此前只有 wbuf 路径调）。
+ * ⚠ **所有 host 路径**（含 cache 读/写与 wbuf）都必须走本检查：host 突发能把命令/
+ * desc/buffer 吃成 `cmd=0/buf=0`，使 CP/META/L2P 无法提交 ⇒ confirm park timeout
+ * + 已回执写丢失（RISK-HOST-18）。预算取 4 pair，保证后台始终有提交配额。
  *
  * 判据：host 的**下一次**子操作之后，各池仍至少剩 RESERVED 个槽位。
  * ⚠ 只约束 host 路径；后台路径（CP/GC/journal）直接走各自的 async 原语，不经过本检查。 */

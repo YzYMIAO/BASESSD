@@ -8,18 +8,19 @@
       · Get-Partition 显示 offset=0 / Type=Logical / MbrType 异常；
       · Windows 磁盘管理能看见盘，但无法删除/重建分区。
 
-    为什么不能只靠 Clear-Disk：
+    为什么不能只靠 Clear-Disk / New-Partition：
       异常 MBR（例如分区项从 LBA 0 开始、或 extended/EBR 残留）会让 Windows
-      的存储栈保留陈旧分区对象；本脚本直接对 \\.\PhysicalDriveN 的前 1MB 写零，
-      连 MBR + 所有 EBR 一起清掉，再走正常的 Initialize-Disk / New-Partition。
+      的存储栈保留陈旧分区对象；PowerShell 的 New-Partition 会报
+      “Not enough available capacity”。diskpart clean 能清掉缓存布局，是实测
+      可用的路径；若仍失败，再对 \\.\PhysicalDriveN 前 1MB 写零（覆盖 MBR+EBR）。
 
     流程：
       1. 校验目标确实是 SOFTSSD / 429MiB / USB（防误伤 NVMe）；
       2. dump 当前 MBR（前 512B 的分区表项）；
-      3. 删除缓存分区对象 + Clear-Disk；
-      4. raw 写零前 1MB，并读回确认（这一步同时验证 host 写是否真的到达设备）；
-      5. Initialize-Disk(MBR) → New-Partition → Format-Volume(FAT32)；
-      6. dump 新 MBR。
+      3. diskpart：clean → create partition primary → format → assign
+         （默认 NTFS；FAT32/exFAT 在部分 Windows 构建上 0% 失败）；
+      4. 若 diskpart 失败：raw 写零前 1MB → 再走一次 diskpart；
+      5. dump 新 MBR 并回读卷信息。
 
     ⚠ 破坏性：会清空整块 U 盘。需要管理员权限。
     ⚠ 只用于 soft_ssd 的 U 盘；不要对系统盘执行。
@@ -49,7 +50,12 @@
 
 [CmdletBinding()]
 param(
-    [int]$DiskNumber = -1
+    [int]$DiskNumber = -1,
+
+    # 默认 NTFS：FAT32/exFAT 在 Windows 10 25H2 build 26200 上实测在 0% 失败
+    # （ERROR_NOT_SUPPORTED / ERROR_INSUFFICIENT_BUFFER），NTFS 可用。
+    [ValidateSet('NTFS', 'FAT32', 'exFAT')]
+    [string]$FileSystem = 'NTFS'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -136,6 +142,41 @@ function Show-Mbr {
     "  signature=0x$($Buf[510].ToString('X2')) 0x$($Buf[511].ToString('X2'))"
 }
 
+<#
+    用 diskpart 走已验证可用的恢复路径：
+      clean → create partition primary → format fs=<FileSystem> quick → assign。
+    PowerShell 的 Clear-Disk / New-Partition 在异常 MBR（offset 0 / Logical）下
+    会报“Not enough available capacity”，而 diskpart clean 能清掉 Windows 的
+    缓存布局。格式化默认 NTFS（FAT32/exFAT 在部分 Windows 构建上 0% 失败）。
+#>
+function Invoke-DiskpartRepair {
+    param([int]$Number, [string]$Fs)
+
+    $script = Join-Path $env:TEMP ("softssd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
+
+    @(
+        "select disk $Number",
+        "clean",
+        "create partition primary",
+        "format fs=$($Fs.ToLowerInvariant()) quick label=$VolumeLabel",
+        "assign",
+        "exit"
+    ) | Set-Content -Path $script -Encoding ASCII
+
+    try {
+        $output = & diskpart /s $script 2>&1
+    }
+    finally {
+        Remove-Item $script -Force -ErrorAction SilentlyContinue
+    }
+
+    $output | ForEach-Object { "  $_" }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "diskpart failed (exit $LASTEXITCODE)"
+    }
+}
+
 try {
     if (-not (Test-IsElevated)) {
         throw 'usb_rebuild_mbr requires an elevated PowerShell (Run as administrator)'
@@ -147,51 +188,45 @@ try {
 
     Show-Mbr -Buf (Read-Mbr -Number $disk.Number) -Title 'MBR before:'
 
-    # 先让 Windows 忘掉缓存分区对象；某些异常 MBR 下只 Clear-Disk 不够。
-    Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | ForEach-Object {
-        "Removing cached partition $($_.PartitionNumber)"
-        Remove-Partition -DiskNumber $disk.Number -PartitionNumber $_.PartitionNumber `
-            -Confirm:$false -ErrorAction SilentlyContinue
+    # 先走 diskpart 路径：clean 清掉 Windows 缓存的幽灵分区，再建分区/格式化。
+    # 若仍失败，raw 写零前 1MB（覆盖 MBR/EBR）后重试一次。
+    try {
+        Invoke-DiskpartRepair -Number $disk.Number -Fs $FileSystem
+    }
+    catch {
+        "diskpart path failed: $($_.Exception.Message)"
+        "Falling back to raw zero + retry..."
+
+        $path = "\\.\PhysicalDrive$($disk.Number)"
+        $fs   = [IO.File]::Open($path, [IO.FileMode]::Open,
+                                [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+        $zero = New-Object byte[] (1024 * 1024)
+        $fs.Write($zero, 0, $zero.Length)
+        $fs.Flush($true)
+        $fs.Close()
+
+        Start-Sleep -Seconds 1
+        Update-HostStorageCache
+
+        Show-Mbr -Buf (Read-Mbr -Number $disk.Number) -Title 'MBR after zero:'
+
+        Invoke-DiskpartRepair -Number $disk.Number -Fs $FileSystem
     }
 
-    Clear-Disk -Number $disk.Number -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
-
-    # 原始写零前 1MB：
-    #   · 覆盖 MBR（LBA 0）与所有可能的 EBR / 对齐保留区；
-    #   · 读回 signature=0x00 0x00 就是“host 写确实到达设备”的证据。
-    $path = "\\.\PhysicalDrive$($disk.Number)"
-    $fs   = [IO.File]::Open($path, [IO.FileMode]::Open,
-                            [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
-    $zero = New-Object byte[] (1024 * 1024)
-    $fs.Write($zero, 0, $zero.Length)
-    $fs.Flush($true)
-    $fs.Close()
-
     Start-Sleep -Seconds 1
     Update-HostStorageCache
 
-    Show-Mbr -Buf (Read-Mbr -Number $disk.Number) -Title 'MBR after zero:'
-
-    # 从干净的 MBR 开始，Windows 才会按标准对齐创建主分区。
-    Initialize-Disk -Number $disk.Number -PartitionStyle MBR -Confirm:$false -ErrorAction SilentlyContinue
-
-    $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
-
-    Start-Sleep -Seconds 1
-    Update-HostStorageCache
-
-    $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
-    "New partition: offset=$($partition.Offset) size=$($partition.Size) type=$($partition.Type) letter=$($partition.DriveLetter)"
-
-    if ([string]::IsNullOrEmpty($partition.DriveLetter)) {
-        throw 'new partition has no drive letter'
+    $partition = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (($null -eq $partition) -or [string]::IsNullOrEmpty($partition.DriveLetter)) {
+        throw 'formatted disk has no drive letter'
     }
 
     Show-Mbr -Buf (Read-Mbr -Number $disk.Number) -Title 'MBR after create:'
 
-    # FAT32：与 usb_verify.ps1 -Step format 的口径一致。
-    $volume = Format-Volume -DriveLetter $partition.DriveLetter -FileSystem FAT32 `
-        -NewFileSystemLabel $VolumeLabel -Confirm:$false -Force
+    $volume = Get-Volume -DriveLetter $partition.DriveLetter
+    if (($null -eq $volume) -or ($volume.FileSystem -ne $FileSystem)) {
+        throw "format did not produce $FileSystem (got '$($volume.FileSystem)')"
+    }
 
     "Formatted: $($volume.DriveLetter): $($volume.FileSystem) size=$($volume.Size)"
     'RESULT=PASS'
@@ -201,7 +236,7 @@ catch {
     "ERROR: $($_.Exception.Message)"
     'RESULT=FAIL'
     "LOG=$LogFile"
-    exit 1
+    throw
 }
 finally {
     Stop-Transcript | Out-Null

@@ -100,7 +100,12 @@ param(
 
     [string]$DriveLetter = '',
 
-    [int]$PatternBlocks = 8
+    [int]$PatternBlocks = 8,
+
+    # format 步骤的文件系统。默认 NTFS：FAT32/exFAT 在 Windows 10 25H2 build 26200 上
+    # 实测在 0% 失败（ERROR_NOT_SUPPORTED / ERROR_INSUFFICIENT_BUFFER）。
+    [ValidateSet('NTFS', 'FAT32', 'exFAT')]
+    [string]$FileSystem = 'NTFS'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,6 +134,41 @@ function Test-IsElevated {
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+<#
+    用 diskpart 走已验证可用的恢复路径：
+      clean → create partition primary → format fs=<FileSystem> quick → assign。
+    PowerShell 的 Clear-Disk / New-Partition 在异常 MBR（offset 0 / Logical）下
+    会报“Not enough available capacity”，而 diskpart clean 能清掉 Windows 的
+    缓存布局。格式化默认 NTFS（FAT32/exFAT 在部分 Windows 构建上 0% 失败）。
+#>
+function Invoke-DiskpartRepair {
+    param([int]$Number, [string]$Fs)
+
+    $script = Join-Path $env:TEMP ("softssd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
+
+    @(
+        "select disk $Number",
+        "clean",
+        "create partition primary",
+        "format fs=$($Fs.ToLowerInvariant()) quick label=$VolumeLabel",
+        "assign",
+        "exit"
+    ) | Set-Content -Path $script -Encoding ASCII
+
+    try {
+        $output = & diskpart /s $script 2>&1
+    }
+    finally {
+        Remove-Item $script -Force -ErrorAction SilentlyContinue
+    }
+
+    $output | ForEach-Object { "  $_" }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "diskpart failed (exit $LASTEXITCODE)"
+    }
 }
 
 <#
@@ -290,11 +330,12 @@ try {
         }
 
         # ── format：破坏性，需管理员 ──────────────────────────────────────
-        # 验证：host 写出的 MBR / 分区表 / FAT 引导扇区能被设备保存并读回。
-        # 步骤与手工验证过的顺序一致：
-        #   删分区 → Clear-Disk → Initialize MBR → New-Partition → Format FAT32。
-        # 若 New-Partition 报 “Not enough available capacity” 或分区表异常
-        # （offset 0 / Logical），改用 usb_rebuild_mbr.ps1（raw 清零前 1MB）。
+        # 验证：host 写出的 MBR / 分区表 / 引导扇区能被设备保存并读回。
+        # 恢复路径已收敛：diskpart clean → create partition primary →
+        # format fs=<FileSystem> quick → assign；失败再 raw 清零前 1MB 重试。
+        # 原因：Clear-Disk / New-Partition 在异常 MBR 下报
+        # “Not enough available capacity”；FAT32/exFAT 在部分 Windows 构建上
+        # 0% 失败，NTFS 已验证可用（默认）。
         'format' {
             if (-not (Test-IsElevated)) {
                 throw 'format requires an elevated PowerShell (Run as administrator)'
@@ -302,38 +343,40 @@ try {
 
             $disk = Show-DiskState
 
-            # 先删掉缓存中的分区对象；某些异常 MBR 下 Clear-Disk 单独不够。
-            'Removing existing partitions...'
-            Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | ForEach-Object {
-                "  remove partition $($_.PartitionNumber) offset=$($_.Offset) size=$($_.Size)"
-                Remove-Partition -DiskNumber $disk.Number -PartitionNumber $_.PartitionNumber `
-                    -Confirm:$false -ErrorAction SilentlyContinue
+            # diskpart 路径优先；失败再 raw 清零前 1MB 重试。
+            try {
+                Invoke-DiskpartRepair -Number $disk.Number -Fs $FileSystem
+            }
+            catch {
+                "diskpart path failed: $($_.Exception.Message)"
+                "Falling back to raw zero + retry..."
+
+                $path = "\\.\PhysicalDrive$($disk.Number)"
+                $fs   = [IO.File]::Open($path, [IO.FileMode]::Open,
+                                        [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+                $zero = New-Object byte[] (1024 * 1024)
+                $fs.Write($zero, 0, $zero.Length)
+                $fs.Flush($true)
+                $fs.Close()
+
+                Start-Sleep -Seconds 1
+                Update-HostStorageCache
+
+                Invoke-DiskpartRepair -Number $disk.Number -Fs $FileSystem
             }
 
-            # Clear-Disk 失败不中止：后续 raw MBR 重建是更强的手段（见配套脚本）。
-            Clear-Disk -Number $disk.Number -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
             Update-HostStorageCache
 
-            Initialize-Disk -Number $disk.Number -PartitionStyle MBR -Confirm:$false -ErrorAction SilentlyContinue
-
-            # -UseMaximumSize 会按 Windows 的对齐策略放置分区；AssignDriveLetter
-            # 让后续 Format-Volume 有明确目标。
-            $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
-
-            Start-Sleep -Seconds 1
-            Update-HostStorageCache
-
-            $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
-
-            if ([string]::IsNullOrEmpty($partition.DriveLetter)) {
-                throw 'new partition has no drive letter (try tools/usb_verify/usb_rebuild_mbr.ps1)'
+            $partition = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (($null -eq $partition) -or [string]::IsNullOrEmpty($partition.DriveLetter)) {
+                throw 'formatted disk has no drive letter'
             }
 
-            # FAT32：429 MiB 下 Windows 也可以选 FAT16/FAT；这里固定 FAT32，
-            # 便于与 Linux mkfs.vfat 的测试口径对齐。
-            $volume = Format-Volume -DriveLetter $partition.DriveLetter -FileSystem FAT32 `
-                -NewFileSystemLabel $VolumeLabel -Confirm:$false -Force
+            $volume = Get-Volume -DriveLetter $partition.DriveLetter
+            if (($null -eq $volume) -or ($volume.FileSystem -ne $FileSystem)) {
+                throw "format did not produce $FileSystem (got '$($volume.FileSystem)')"
+            }
 
             "Formatted: $($volume.DriveLetter): $($volume.FileSystem) size=$($volume.Size)"
             "LOG=$LogFile"

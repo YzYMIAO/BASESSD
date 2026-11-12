@@ -92,6 +92,8 @@ UT 过滤串坑：
 - `--log-visible debug` 是阻塞式 UART（≈11.5 KB/s），**只对单条用例开**，且开了之后 `[ N ms ]` 不可信。
 - ⚠ 别用 `--log-fatal info`（与 `--log-visible` 共用取值解析，会让每条日志 `abort()`）。
 
+**运行日志落盘**：每轮用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 建 `build/test-results/<ts>_<build>_<target>/`，把串口终端工具的 log 写进 `run.log`；`meta.txt` 自动记录 commit 与镜像横幅时间戳。约定见 `docs/design/testing_guide.md §8.7`。
+
 ---
 
 ## 4. 判定——先质疑证据（CLAUDE.md §3.3 / P6）

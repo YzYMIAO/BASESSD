@@ -81,6 +81,20 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step format
 
 默认自动找 `SOFTSSD / 429MiB / USB` 盘；也可以显式指定 `-DiskNumber 2`。
 
+格式化路径已收敛为一条命令，内部按实测可用的顺序执行：
+
+```
+diskpart clean → create partition primary → format fs=<FileSystem> quick → assign
+```
+
+- 默认 **NTFS**：FAT32 / exFAT 在 Windows 10 25H2 build 26200.9974（2026-11-11 KB5132688/KB5132061 后）实测在 0% 失败
+  （`ERROR_NOT_SUPPORTED` / `ERROR_INSUFFICIENT_BUFFER`），所以脚本不再默认 FAT32。
+  需要别的文件系统时显式传 `-FileSystem FAT32|exFAT`。
+- 若 `clean/create` 仍失败（异常 MBR / `Not enough available capacity`），脚本会自动
+  raw 清零前 1MB 再重试；等价于单独运行 `usb_rebuild_mbr.ps1`。
+- 介质被固件 `format` 擦干净后，Windows 可能仍缓存旧的“幽灵分区”；这条磁盘清理
+  路径会一并清掉，不需要手工判断 `Get-Partition`。
+
 ### 3. 写入测试数据
 
 普通窗口即可：

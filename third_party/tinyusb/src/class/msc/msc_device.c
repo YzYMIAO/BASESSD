@@ -32,6 +32,11 @@ TU_ATTR_WEAK uint32_t tud_msc_inquiry2_cb(uint8_t lun, scsi_inquiry_resp_t *inqu
   (void) lun; (void) inquiry_resp; (void) bufsize;
   return 0;
 }
+// 【本仓补丁】MODE SENSE(6) 应用回调：默认 0 = 使用内建空响应。
+TU_ATTR_WEAK int32_t tud_msc_mode_sense_cb(uint8_t lun, uint8_t page, uint8_t* buffer, uint16_t bufsize) {
+  (void) lun; (void) page; (void) buffer; (void) bufsize;
+  return 0;
+}
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF
@@ -820,6 +825,13 @@ static int32_t proc_builtin_scsi(uint8_t lun, uint8_t const scsi_cmd[16], uint8_
     }
 
     case SCSI_CMD_MODE_SENSE_6: {
+      // 【本仓补丁】先问应用；返回 >0 表示应用提供了完整响应（含 mode page）。
+      int32_t app_resplen = tud_msc_mode_sense_cb(lun, scsi_cmd[2] & 0x3F, buffer, (uint16_t) bufsize);
+      if (app_resplen > 0) {
+        resplen = app_resplen;
+        break;
+      }
+
       scsi_mode_sense6_resp_t mode_resp = {
         .data_len = 3,
         .medium_type = 0,

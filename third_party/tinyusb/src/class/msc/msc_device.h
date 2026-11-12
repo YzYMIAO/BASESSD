@@ -83,6 +83,10 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 // Return length of inquiry response, typically sizeof(scsi_inquiry_resp_t) (36 bytes), can be longer if included vendor data.
 uint32_t tud_msc_inquiry2_cb(uint8_t lun, scsi_inquiry_resp_t *inquiry_resp, uint32_t bufsize);
 
+// 【本仓补丁】MODE SENSE(6) 应用回调：返回 >0 = 完整响应字节数；0 = 用内建空响应。
+// Windows 格式化会查询 caching（0x08）/ IE（0x1C）page；应用侧按 SCSI 规范返回最小合法页。
+int32_t tud_msc_mode_sense_cb(uint8_t lun, uint8_t page, uint8_t* buffer, uint16_t bufsize);
+
 // Invoked when received Test Unit Ready command.
 // return true allowing host to read/write this LUN e.g SD card inserted
 bool tud_msc_test_unit_ready_cb(uint8_t lun);
