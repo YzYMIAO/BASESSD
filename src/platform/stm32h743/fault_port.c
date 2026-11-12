@@ -10,6 +10,7 @@
  */
 
 #include "fault.h"
+#include "fault_shell.h"
 #include "stm32h7xx_hal.h"
 
 #define FAULT_CONSOLE   USART1
@@ -72,6 +73,12 @@ void fault_port_enable_configurable_faults(void)
     SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk | SCB_SHCSR_BUSFAULTENA_Msk | SCB_SHCSR_USGFAULTENA_Msk;
     __DSB();
     __ISB();
+}
+
+/* SSD_FAULT_ACTION_RESET 的强符号覆盖：打印现场后复位。 */
+void fault_platform_reset(void)
+{
+    NVIC_SystemReset();
 }
 
 /* ────────────────────────────── 复位原因 ────────────────────────────── */

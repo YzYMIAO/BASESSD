@@ -17,6 +17,7 @@
 #include "assertion.h"
 
 #include "crash.h"
+#include "fault_shell.h"
 #include "log.h"
 
 #include <stdarg.h>
@@ -80,10 +81,17 @@ _Noreturn void assertion_terminate(void)
     crash_platform_report(crash_record_get());
 
 #if defined(SSD_FIRMWARE_BUILD)
+#    if (SSD_FAULT_ACTION == SSD_FAULT_ACTION_SHELL)
+    /* 保留只读现场：不恢复业务、不刷新看门狗；由用户在 shell 里查询。 */
+    fault_shell_run();
+#    elif (SSD_FAULT_ACTION == SSD_FAULT_ACTION_RESET)
+    fault_platform_reset();
+#    else
     /* 运行中的 IWDG 会把这里变成一次有界、可诊断的复位。 */
     for (;;)
     {
     }
+#    endif
 #else
     abort();
 #endif

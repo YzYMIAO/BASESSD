@@ -1325,3 +1325,41 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
   即判据 10 形态，非本轮引入）。
 - **未上板**。按用户定调「**重构完再上版验证**」，本轮**不**上板。
 - **未提交、未推送**（R3）。
+
+---
+
+## 二十九、故障 shell（`SSD_FAULT_ACTION`，2026-11-12）
+
+断言仍然 fail-fast：**不恢复业务**、不跑 FTL/NAND、不喂狗。区别只在停机后的处置，
+由编译期宏选择：
+
+| 模式 | 行为 | 默认 |
+|---|---|---|
+| `SSD_FAULT_ACTION_HALT` | 打印记录后死循环（接调试器看现场） | **所有构建** |
+| `SSD_FAULT_ACTION_SHELL` | 进入只读故障 shell（诊断用，opt-in） | 否 |
+| `SSD_FAULT_ACTION_RESET` | 打印后 `NVIC_SystemReset` | 否 |
+
+打开 shell：`make ... CFLAGS_EXTRA=-DSSD_FAULT_ACTION=1`（0/1/2）。
+默认 HALT 与主流「停机 + 调试器」一致；shell 只作为调试器不可用时的兜底。
+⚠ 对象目录不包含 `CFLAGS_EXTRA` 的哈希：切换模式后先 `touch src/common/assertion.c
+src/common/fault_shell.c`（或 `make clean`），否则会复用旧 `.o`、模式不生效。
+
+### 只读边界（必须遵守）
+
+- 白名单：`ftl_ctx [module]` / `crash` / `stack` / `pc` / `help`。
+- **禁止**任何写操作、分配、NAND 访问、后台任务推进、喂看门狗。
+- 不走主 CLI（主 CLI 会调业务逻辑），单独最小解析器。
+- 输出走 `fault_port_putc`（轮询 USART）+ `log_set_sink` 重定向；
+  **不走异步日志环** —— 断言路径已经关掉 TX DMA/TXE，走环会丢输出。
+- 输入走 `uart_rx_read`（USART IRQ 生产者）。
+- 防御式读取：断言后指针可能已损坏，dump 函数必须容忍 NULL/边界。
+
+### 为什么不是简单 `while(1)`
+
+`while(1)` 与现有 `for(;;)` 行为相同，仍然无法查询现场。SHELL 模式是在
+「停业务」与「保留现场」之间取平衡；release 默认 HALT，需要现场时单独出镜像。
+
+### 验证状态
+
+`make all` / `make release` / `make tests UT=FTL` 均 0 warning；debug/UT 镜像含
+`FAULT SHELL` 字符串，release 不含。**未上板**（R1）。
