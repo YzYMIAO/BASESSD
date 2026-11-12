@@ -234,7 +234,7 @@ DWORD ftl_ut_lba_base(void)
     const DWORD max = ssd_controller_host_lba_max(&g_ctrl);
 
     munit_assert_uint32(max, >, FTL_UT_LBA_WINDOW);
-    return (DWORD)((max - FTL_UT_LBA_WINDOW) & ~(DWORD)(FTL_LBA_PER_PAIR - 1U));
+    return (DWORD)((max - FTL_UT_LBA_WINDOW) & ~(FTL_LBA_PER_PAIR - 1U));
 }
 
 static volatile BYTE         s_io_done;
@@ -274,7 +274,7 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
         ftl_service_pump();
 
         memset(&rs, 0, sizeof(rs));
-        (void)fc_get_resource_stats(&rs);
+        fc_get_resource_stats(&rs);
 
         const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U);
 
@@ -297,7 +297,7 @@ void ftl_ut_reboot_from_media(void)
     ftl_ut_trace_detail("reboot: quiesced (req=%hu cp_waiting=%d cp_phase=%d)", ftl_op_req_count(), ftl->cp_handle->waiting, ftl->cp_handle->phase);
 
     /* 模拟 POR：FC 池/CQ 与派发旁表都回到开机状态，杜绝旧命令的迟到完成。 */
-    (void)fc_init();
+    fc_init();
     fc_nand_engine_set_armed(1U); /* fc_init 会复位置位；与 FC UT 的 test_setup 同做法 */
     ftl_op_init();
 
@@ -420,7 +420,7 @@ BOOL ftl_ut_host_write(DWORD lba, DWORD count, const void *buffer)
     s_io_done   = 0U;
     s_io_status = SSD_STATUS_IO_ERROR;
 
-    req.lba           = (QWORD)lba;
+    req.lba           = lba;
     req.buffer        = (void *)buffer;
     req.count         = count;
     req.complete_flag = &s_io_done;
@@ -452,7 +452,7 @@ BOOL ftl_ut_host_read(DWORD lba, DWORD count, void *buffer)
     s_io_done   = 0U;
     s_io_status = SSD_STATUS_IO_ERROR;
 
-    req.lba           = (QWORD)lba;
+    req.lba           = lba;
     req.buffer        = buffer;
     req.count         = count;
     req.complete_flag = &s_io_done;
@@ -569,8 +569,8 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_not_null(ftl->mig_handle);
     munit_assert_not_null(ftl->wbuf);
 
-    munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, 0U);
-    munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(pend_slot_get_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(pend_group_get_count(&ftl->pending), ==, 0U);
 
     /* ctx 残留 = 有能力登记却没被派发的命令留在队列里。这里把「谁卡住」一并打出来
      * （只读快照；munit_errorf 会带出这行），否则只有一句 count!=0 无法定位。 */
@@ -579,7 +579,7 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
         fc_debug_state_s dbg;
 
         memset(&dbg, 0, sizeof(dbg));
-        (void)fc_debug_state_get(&dbg);
+        fc_debug_state_get(&dbg);
         munit_errorf("ftl teardown leaked op req=%hu | sq=%hu hsq=%hu owner=%hhu lun=%hhu/%hhu sched_sq=%hu bound=%hhu | sq_head=%hu st=%hhu chain=%hhu op=%hhu | hsq_head=%hu chain=%hhu op=%hhu | fill=%lu/%lu",
                      ftl_op_req_count(),
                      dbg.sq_used,
@@ -600,10 +600,10 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
                      dbg.fill_pops);
     }
 
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     memset(&rs, 0, sizeof(rs));
-    (void)fc_get_resource_stats(&rs);
+    fc_get_resource_stats(&rs);
     munit_assert_uint32(rs.sq_used, ==, 0U);
     munit_assert_uint32(rs.hsq_used, ==, 0U);
     munit_assert_uint32(rs.cq_used, ==, 0U);

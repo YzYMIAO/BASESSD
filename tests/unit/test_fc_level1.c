@@ -58,7 +58,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
 
     fc_cmd_s cmd;
 
-    (void)memset(&cmd, 0, sizeof(cmd));
+    memset(&cmd, 0, sizeof(cmd));
 
     test_trace_begin();
 
@@ -67,7 +67,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     {
         cmd.config.operation = op;
         cmd.desc_id          = 0U;
-        (void)fc_command_validate(&cmd);
+        fc_command_validate(&cmd);
     }
 
     /* 证据（--log-visible info）：遍历范围本身就是判据——按 operation 分类的那条断言
@@ -96,17 +96,17 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
 
     fc_cmd_s cmd;
 
-    (void)memset(&cmd, 0, sizeof(cmd));
+    memset(&cmd, 0, sizeof(cmd));
 
     test_trace_begin();
 
     cmd.desc_id = FC_DESC_ID_INVALID;
 
     cmd.config.operation = OP_SET_FEATURES;
-    (void)fc_command_validate(&cmd);
+    fc_command_validate(&cmd);
 
     cmd.config.operation = OP_GET_FEATURES;
-    (void)fc_command_validate(&cmd);
+    fc_command_validate(&cmd);
 
     /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
     test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%hX）时仍放行——数据走 param 内联段", FC_DESC_ID_INVALID);
@@ -516,9 +516,9 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
     {
         page[NAND_ONFI_PARAM_OFF_MODEL + i] = 0x20U;
     }
-    for (i = 0U; i < (BYTE)(sizeof(model) - 1U); i++)
+    for (i = 0U; i < (sizeof(model) - 1U); i++)
     {
-        page[NAND_ONFI_PARAM_OFF_MODEL + i] = (BYTE)model[i];
+        page[NAND_ONFI_PARAM_OFF_MODEL + i] = model[i];
     }
 
     page[NAND_ONFI_PARAM_OFF_MANUFACTURER_ID] = 0x2CU;

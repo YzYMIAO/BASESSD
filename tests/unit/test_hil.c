@@ -186,7 +186,7 @@ static void hil_quiesce(void)
         timer_scheduler_poll();
 
         memset(&rs, 0, sizeof(rs));
-        (void)fc_get_resource_stats(&rs);
+        fc_get_resource_stats(&rs);
 
         if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (g_ctrl.flush_req == NULL) && (g_ctrl.trim_req == NULL) && hil_ftl_idle(ftl))
         {
@@ -202,13 +202,13 @@ static void hil_quiesce(void)
     if (timed_out)
     {
         hil_trace_detail("quiesce timeout: cp=%d/%d mig=%d/%d md=%d jrn=%d wb=%d wr=%hhu/%hhu load=%hhu flush=%hhu op=%hu req=%d/%d",
-                         (int)ftl->cp_handle->active,
-                         (int)ftl->cp_handle->waiting,
-                         (int)ftl->mig_handle->job.active,
-                         (int)ftl->mig_handle->job.waiting,
-                         (int)md_handle_is_idle(ftl->metadata_dir),
-                         (int)jrn_is_idle(ftl->journal),
-                         (int)wb_is_idle(ftl->wbuf),
+                         ftl->cp_handle->active,
+                         ftl->cp_handle->waiting,
+                         ftl->mig_handle->job.active,
+                         ftl->mig_handle->job.waiting,
+                         md_handle_is_idle(ftl->metadata_dir),
+                         jrn_is_idle(ftl->journal),
+                         wb_is_idle(ftl->wbuf),
                          ftl->cache_stream.seq.wr.count,
                          ftl->cache_stream.seq.wr_inflight,
                          ftl->cache->inflight.load,
@@ -309,7 +309,7 @@ static MunitResult test_hil_init_ready(const MunitParameter params[], void *data
     memset(&c, 0, sizeof(c));
     munit_assert_int(ssd_controller_init(&c, g_ctrl.ftl), ==, SSD_STATUS_OK);
     munit_assert_int(c.state, ==, SSD_CONTROLLER_READY);
-    munit_assert_uint32(c.host_lba_max, ==, (DWORD)FTL_LBA_MAX);
+    munit_assert_uint32(c.host_lba_max, ==, FTL_LBA_MAX);
 
     hil_trace_detail("init: state=%d host_lba_max=%lu (compile-time FTL_LBA_MAX)", c.state, c.host_lba_max);
     hil_trace_summary("hil init: READY, lba_max=%lu", c.host_lba_max);
@@ -438,14 +438,14 @@ static MunitResult test_hil_lba_range_ok(const MunitParameter params[], void *da
     const DWORD max = ssd_controller_host_lba_max(&g_ctrl);
 
     munit_assert_uint32(max, >, 0U);
-    munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, (QWORD)0U, 0U));
-    munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, (QWORD)max, 1U));
+    munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, 0U, 0U));
+    munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, max, 1U));
 
     if (max >= 2U)
     {
-        munit_assert_true(ssd_controller_lba_range_ok(&g_ctrl, (QWORD)0U, 1U));
-        munit_assert_true(ssd_controller_lba_range_ok(&g_ctrl, (QWORD)(max - 1U), 1U));
-        munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, (QWORD)(max - 1U), 2U));
+        munit_assert_true(ssd_controller_lba_range_ok(&g_ctrl, 0U, 1U));
+        munit_assert_true(ssd_controller_lba_range_ok(&g_ctrl, (max - 1U), 1U));
+        munit_assert_false(ssd_controller_lba_range_ok(&g_ctrl, (max - 1U), 2U));
     }
 
     hil_trace_detail("lba range: max=%lu; count=0 / lba=max / [max-1,2) rejected; [0,1) and [max-1,1) accepted", max);
@@ -511,7 +511,7 @@ static MunitResult test_hil_submit_edges(const MunitParameter params[], void *da
     munit_assert_uint8(req.complete_flag, ==, 1U);
 
     /* 越界 LBA：HIL 入口统一拒绝（不再依赖前端） */
-    hil_req_init(&req, SSD_REQUEST_READ, (QWORD)ssd_controller_host_lba_max(&g_ctrl), 1U, buf, sizeof(s_hil_edge_buf));
+    hil_req_init(&req, SSD_REQUEST_READ, ssd_controller_host_lba_max(&g_ctrl), 1U, buf, sizeof(s_hil_edge_buf));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_INVALID_ARGUMENT);
     munit_assert_uint8(req.complete_flag, ==, 1U);
 
@@ -569,25 +569,25 @@ static MunitResult test_hil_write_read_roundtrip(const MunitParameter params[], 
     ssd_req_s   req;
     const DWORD lba = hil_lba_base();
 
-    for (DWORD i = 0U; i < (DWORD)sizeof(s_hil_wr); i++)
+    for (DWORD i = 0U; i < sizeof(s_hil_wr); i++)
     {
         s_hil_wr[i] = (BYTE)((i * 13U) + 0x5AU);
     }
 
-    hil_req_init(&req, SSD_REQUEST_WRITE, (QWORD)lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
+    hil_req_init(&req, SSD_REQUEST_WRITE, lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
     munit_assert_uint32(req.sub_remaining, ==, 0U);
 
     memset(s_hil_rd, 0, sizeof(s_hil_rd));
-    hil_req_init(&req, SSD_REQUEST_READ, (QWORD)lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
+    hil_req_init(&req, SSD_REQUEST_READ, lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
     munit_assert_memory_equal(sizeof(s_hil_wr), s_hil_wr, s_hil_rd);
 
-    hil_trace_detail("write/read: lba=%lu count=%u bytes=%lu sub_remaining=%lu status=%d; memory equal", lba, HIL_IO_LBAS, (DWORD)sizeof(s_hil_wr), req.sub_remaining, req.completion_status);
+    hil_trace_detail("write/read: lba=%lu count=%u bytes=%u sub_remaining=%lu status=%d; memory equal", lba, HIL_IO_LBAS, sizeof(s_hil_wr), req.sub_remaining, req.completion_status);
     hil_trace_summary("hil io: write->read byte-equal lba=%lu count=%u", lba, HIL_IO_LBAS);
 
     return MUNIT_OK;
@@ -606,12 +606,12 @@ static MunitResult test_hil_write_flush_readback(const MunitParameter params[], 
     ssd_req_s   req;
     const DWORD lba = hil_lba_base();
 
-    for (DWORD i = 0U; i < (DWORD)sizeof(s_hil_wr); i++)
+    for (DWORD i = 0U; i < sizeof(s_hil_wr); i++)
     {
         s_hil_wr[i] = (BYTE)((i * 29U) + 0xA5U);
     }
 
-    hil_req_init(&req, SSD_REQUEST_WRITE, (QWORD)lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
+    hil_req_init(&req, SSD_REQUEST_WRITE, lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
@@ -623,13 +623,13 @@ static MunitResult test_hil_write_flush_readback(const MunitParameter params[], 
     munit_assert_ptr_null(g_ctrl.flush_req);
 
     memset(s_hil_rd, 0, sizeof(s_hil_rd));
-    hil_req_init(&req, SSD_REQUEST_READ, (QWORD)lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
+    hil_req_init(&req, SSD_REQUEST_READ, lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
     munit_assert_memory_equal(sizeof(s_hil_wr), s_hil_wr, s_hil_rd);
 
-    hil_trace_detail("write/flush/read: lba=%lu count=%u bytes=%lu; flush_req cleared; memory equal", lba, HIL_IO_LBAS, (DWORD)sizeof(s_hil_wr));
+    hil_trace_detail("write/flush/read: lba=%lu count=%u bytes=%u; flush_req cleared; memory equal", lba, HIL_IO_LBAS, sizeof(s_hil_wr));
     hil_trace_summary("hil flush persist: lba=%lu count=%u byte-equal", lba, HIL_IO_LBAS);
 
     return MUNIT_OK;
@@ -703,24 +703,24 @@ static MunitResult test_hil_trim_job(const MunitParameter params[], void *data)
     ssd_req_s   req;
     const DWORD lba = hil_lba_base();
 
-    for (DWORD i = 0U; i < (DWORD)sizeof(s_hil_wr); i++)
+    for (DWORD i = 0U; i < sizeof(s_hil_wr); i++)
     {
         s_hil_wr[i] = (BYTE)((i * 7U) + 0x3CU);
     }
 
-    hil_req_init(&req, SSD_REQUEST_WRITE, (QWORD)lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
+    hil_req_init(&req, SSD_REQUEST_WRITE, lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
 
-    hil_req_init(&req, SSD_REQUEST_TRIM, (QWORD)lba, HIL_IO_LBAS, NULL, 0U);
+    hil_req_init(&req, SSD_REQUEST_TRIM, lba, HIL_IO_LBAS, NULL, 0U);
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
     munit_assert_ptr_null(g_ctrl.trim_req);
 
     memset(s_hil_rd, 0xFF, sizeof(s_hil_rd));
-    hil_req_init(&req, SSD_REQUEST_READ, (QWORD)lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
+    hil_req_init(&req, SSD_REQUEST_READ, lba, HIL_IO_LBAS, s_hil_rd, sizeof(s_hil_rd));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_OK);
     munit_assert_true(hil_wait(&req, HIL_IO_TIMEOUT_MS));
     munit_assert_int(req.completion_status, ==, SSD_STATUS_OK);
@@ -746,10 +746,10 @@ static MunitResult test_hil_trim_busy(const MunitParameter params[], void *data)
     ssd_req_s   req2;
     const DWORD lba = hil_lba_base();
 
-    hil_req_init(&req1, SSD_REQUEST_TRIM, (QWORD)lba, HIL_IO_LBAS, NULL, 0U);
+    hil_req_init(&req1, SSD_REQUEST_TRIM, lba, HIL_IO_LBAS, NULL, 0U);
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req1), ==, SSD_STATUS_OK);
 
-    hil_req_init(&req2, SSD_REQUEST_TRIM, (QWORD)(lba + HIL_IO_LBAS), HIL_IO_LBAS, NULL, 0U);
+    hil_req_init(&req2, SSD_REQUEST_TRIM, (lba + HIL_IO_LBAS), HIL_IO_LBAS, NULL, 0U);
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req2), ==, SSD_STATUS_BUSY);
     munit_assert_uint8(req2.complete_flag, ==, 1U);
     munit_assert_int(req2.completion_status, ==, SSD_STATUS_BUSY);

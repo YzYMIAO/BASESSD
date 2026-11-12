@@ -119,7 +119,7 @@ static MunitResult test_address_roundtrip(const MunitParameter params[], void *d
     munit_assert_uint32(pba_to_block(pba), ==, 7U);
     munit_assert_uint32(pba_to_page(pba), ==, 3U);
     munit_assert_uint32(pba_to_cw(pba), ==, 2U);
-    munit_assert_uint32(ftl_gblock(1U, 7U), ==, (DWORD)BLOCKS_PER_PLANE + 7U);
+    munit_assert_uint32(ftl_gblock(1U, 7U), ==, BLOCKS_PER_PLANE + 7U);
 
     ftl_ut_trace_detail("addr: in lba=make(page_base=1236,cw=1) pba=make(plane=1,block=7,page=3,cw=2); out page_base=%lu cw=%hhu plane=%hhu pba.plane=%hhu pba.block=%hu pba.page=%hhu pba.cw=%hhu gblock(1,7)=%hu", ftl_lba_page_base(lba), ftl_lba_cw(lba), ftl_lba_plane(lba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba), ftl_gblock(1U, 7U));
     ftl_ut_trace_summary("addr: lba 0x%08lX -> page_base=%lu cw=%hhu plane=%hhu | pba 0x%08lX -> gblock=%hu", lba, ftl_lba_page_base(lba), ftl_lba_cw(lba), ftl_lba_plane(lba), pba, ftl_gblock(1U, 7U));
@@ -145,19 +145,19 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
 
     alc_s *a = ftl_ut_ram_alloc();
 
-    munit_assert_uint32(a->free_count, ==, 0U);
+    munit_assert_uint16(a->free_count, ==, 0U);
 
     mem_fill_free(a, 4U);
 
-    munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS));
+    munit_assert_uint16(a->free_count, ==, (FTL_UT_BLOCKS));
 
     /* per-plane 账与 flat 池必须同步（唯一闸门 alc_free_push/remove 维护两本账）。 */
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        munit_assert_uint32(alc_free_get_count(a, p), ==, 4U);
+        munit_assert_uint16(alc_free_get_count(a, p), ==, 4U);
     }
-    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
-    munit_assert_uint32(alc_free_min_plane_count(a), ==, 4U);
+    munit_assert_uint16(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint16(alc_free_min_plane_count(a), ==, 4U);
 
     /* state == FREE ⟺ 在池；SB 归属已清。 */
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -174,27 +174,27 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
 
     /* 出池即脱离 FREE：目标状态由调用者赋值；保持 FREE 会让「FREE ⟺ 在池」不成立。 */
     alc_free_remove(a, ftl_gblock(0U, 1U));
-    munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS - 1U));
+    munit_assert_uint16(a->free_count, ==, (FTL_UT_BLOCKS - 1U));
     munit_assert_uint32(ftl_block_state(&a->blocks[ftl_gblock(0U, 1U)]), ==, FTL_BLOCK_STATE_NONE);
 
     /* 出池必须**只从所属 plane** 扣账：扣错 side 会让计数漂移，成对分配随后失败。 */
-    munit_assert_uint32(alc_free_get_count(a, 0U), ==, 3U);
-    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 4U);
-    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
-    munit_assert_uint32(alc_free_min_plane_count(a), ==, 3U);
+    munit_assert_uint16(alc_free_get_count(a, 0U), ==, 3U);
+    munit_assert_uint16(alc_free_get_count(a, 1U), ==, 4U);
+    munit_assert_uint16(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint16(alc_free_min_plane_count(a), ==, 3U);
 
     /* OP refill：把 OP 块归还 Free Pool（LIFO，per-plane）。 */
     munit_assert_true(alc_op_push(a, 1U, ftl_gblock(1U, 4U)));
     const WORD refilled = alc_free_refill_from_op(a, 1U);
 
     munit_assert_uint32(refilled, ==, ftl_gblock(1U, 4U));
-    munit_assert_uint32(a->free_count, ==, (DWORD)(FTL_UT_BLOCKS));
+    munit_assert_uint16(a->free_count, ==, (FTL_UT_BLOCKS));
     munit_assert_uint32(a->op_count[1], ==, 0U);
 
     /* refill 回到**借用它的那个 plane**（per-plane 池是 LIFO），两本账仍同步。 */
-    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 5U);
-    munit_assert_uint32(mem_plane_free_sum(a), ==, a->free_count);
-    munit_assert_uint32(alc_free_min_plane_count(a), ==, 3U);
+    munit_assert_uint16(alc_free_get_count(a, 1U), ==, 5U);
+    munit_assert_uint16(mem_plane_free_sum(a), ==, a->free_count);
+    munit_assert_uint16(alc_free_min_plane_count(a), ==, 3U);
 
     ftl_ut_trace_detail("free pool: fill=%u blocks; remove g=%hu; refill from op1 -> g=%hu; op1=%hu; removed block state=%d; plane0=%hu plane1=%hu fpmin=%hu", FTL_UT_BLOCKS, ftl_gblock(0U, 1U), refilled, a->op_count[1], ftl_block_state(&a->blocks[ftl_gblock(0U, 1U)]), alc_free_get_count(a, 0U), alc_free_get_count(a, 1U), alc_free_min_plane_count(a));
     ftl_ut_trace_summary("free pool: 0 -> %u (fill) -> %u (remove) -> %hu (refill g%hu); fpmin=%hu", FTL_UT_BLOCKS, (FTL_UT_BLOCKS - 1U), a->free_count, refilled, alc_free_min_plane_count(a));
@@ -370,15 +370,15 @@ static MunitResult test_op_spare_pools(const MunitParameter params[], void *data
     /* OP：per-plane 独立计数 + 容量上限。 */
     munit_assert_true(alc_op_push(a, 0U, ftl_gblock(0U, 0U)));
     munit_assert_true(alc_op_push(a, 1U, ftl_gblock(1U, 0U)));
-    munit_assert_uint32(alc_op_get_count(a, 0U), ==, 1U);
-    munit_assert_uint32(alc_op_get_count(a, 1U), ==, 1U);
+    munit_assert_uint16(alc_op_get_count(a, 0U), ==, 1U);
+    munit_assert_uint16(alc_op_get_count(a, 1U), ==, 1U);
 
     while (alc_op_push(a, 0U, ftl_gblock(0U, 0U)))
     {
         /* 填满到容量上限 */
     }
-    munit_assert_uint32(alc_op_get_count(a, 0U), ==, (DWORD)FTL_OP_BLOCKS_PER_PLANE);
-    munit_assert_uint32(alc_op_get_count(a, 1U), ==, 1U);
+    munit_assert_uint16(alc_op_get_count(a, 0U), ==, FTL_OP_BLOCKS_PER_PLANE);
+    munit_assert_uint16(alc_op_get_count(a, 1U), ==, 1U);
 
     /* Spare：LIFO 弹出。 */
     const WORD g = ftl_gblock(1U, 3U);
@@ -388,7 +388,7 @@ static MunitResult test_op_spare_pools(const MunitParameter params[], void *data
     WORD out = 0U;
     munit_assert_true(alc_spare_pop(a, 1U, &out));
     munit_assert_uint32(out, ==, g);
-    munit_assert_uint32(alc_spare_get_count(a, 1U), ==, 0U);
+    munit_assert_uint16(alc_spare_get_count(a, 1U), ==, 0U);
     munit_assert_false(alc_spare_pop(a, 1U, &out));
 
     ftl_ut_trace_detail("op/spare: op0=%hu/%u op1=%hu/%u; spare1 push g=%hu pop g=%hu -> count=%hu; pop on empty=%d", alc_op_get_count(a, 0U), FTL_OP_BLOCKS_PER_PLANE, alc_op_get_count(a, 1U), FTL_OP_BLOCKS_PER_PLANE, g, out, alc_spare_get_count(a, 1U), 0);
@@ -461,21 +461,21 @@ static MunitResult test_bbt_mark_bad(const MunitParameter params[], void *data)
     munit_assert_true(ftl_block_is_bad(&a->blocks[g]));
     munit_assert_uint32(a->blocks[g].valid_count, ==, 0U);
     munit_assert_uint32(ftl_block_sb_id(&a->blocks[g]), ==, FTL_BLOCK_NO_SB);
-    munit_assert_uint32(a->bad_count, ==, 1U);
+    munit_assert_uint16(a->bad_count, ==, 1U);
     munit_assert_uint32(a->bbt.dirty_gen, ==, gen0 + 1U);
 
     /* Spare 第一道替换：弹出同 plane 块补 Free Pool。 */
-    munit_assert_uint32(alc_spare_get_count(a, plane), ==, 0U);
-    munit_assert_uint32(a->free_count, ==, 1U);
+    munit_assert_uint16(alc_spare_get_count(a, plane), ==, 0U);
+    munit_assert_uint16(a->free_count, ==, 1U);
     munit_assert_uint32(a->free_blocks[0], ==, spare);
     munit_assert_uint32(ftl_block_state(&a->blocks[spare]), ==, FTL_BLOCK_STATE_FREE);
 
     /* 幂等：重复标坏不再计数/弹 Spare/推进 dirty_gen。 */
     munit_assert_int(bbt_mark_bad(a, g), ==, FTL_OK);
-    munit_assert_uint32(a->bad_count, ==, 1U);
+    munit_assert_uint16(a->bad_count, ==, 1U);
     munit_assert_uint32(a->bbt.dirty_gen, ==, gen0 + 1U);
-    munit_assert_uint32(alc_spare_get_count(a, plane), ==, 0U);
-    munit_assert_uint32(a->free_count, ==, 1U);
+    munit_assert_uint16(alc_spare_get_count(a, plane), ==, 0U);
+    munit_assert_uint16(a->free_count, ==, 1U);
 
     ftl_ut_trace_detail("bbt[plane=%hhu]: g=%hu spare=%hu; bad 0->%hu dirty_gen %lu->%lu; spare %u->%hu; free 0->%hu; idempotent re-mark keeps bad=%hu gen=%lu", plane, g, spare, a->bad_count, gen0, a->bbt.dirty_gen, 1U, alc_spare_get_count(a, plane), a->free_count, a->bad_count, a->bbt.dirty_gen);
     ftl_ut_trace_summary("bbt[plane=%hhu]: bad 0->%hu, dirty_gen %lu->%lu, spare 1->%hu, free 0->%hu (re-mark idempotent)", plane, a->bad_count, gen0, a->bbt.dirty_gen, alc_spare_get_count(a, plane), a->free_count);
@@ -509,8 +509,8 @@ static MunitResult test_bbt_metadata_bad(const MunitParameter params[], void *da
     /* 元数据日志块丢失 ⇒ 候选池重算 + 下次开机 full rebuild；不弹用户 Spare。 */
     munit_assert_true(a->pools->dirty);
     munit_assert_true(a->bbt.rebuild_required);
-    munit_assert_uint32(alc_spare_get_count(a, 0U), ==, 0U);
-    munit_assert_uint32(a->bad_count, ==, 1U);
+    munit_assert_uint16(alc_spare_get_count(a, 0U), ==, 0U);
+    munit_assert_uint16(a->bad_count, ==, 1U);
 
     ftl_ut_trace_detail("bbt metadata bad: g=%hu state JOURNAL; pools.dirty 0->%d rebuild_required 0->%d bad 0->%hu spare0=%hu", g, a->pools->dirty, a->bbt.rebuild_required, a->bad_count, alc_spare_get_count(a, 0U));
     ftl_ut_trace_summary("bbt metadata bad: g=%hu -> pools.dirty=%d rebuild_required=%d bad=0->%hu", g, a->pools->dirty, a->bbt.rebuild_required, a->bad_count);
@@ -575,23 +575,23 @@ static MunitResult test_alloc_spare_full_refill_none(const MunitParameter params
     alc_s     *a     = ftl_ut_ram_alloc();
     const BYTE plane = 0U;
 
-    for (WORD i = 0U; i < (WORD)FTL_SPARE_POOL_PER_PLANE; i++)
+    for (WORD i = 0U; i < FTL_SPARE_POOL_PER_PLANE; i++)
     {
         munit_assert_true(alc_spare_push(a, plane, ftl_gblock(plane, i)));
     }
-    munit_assert_uint32(alc_spare_get_count(a, plane), ==, (DWORD)FTL_SPARE_POOL_PER_PLANE);
-    munit_assert_false(alc_spare_push(a, plane, ftl_gblock(plane, (WORD)FTL_SPARE_POOL_PER_PLANE)));
+    munit_assert_uint16(alc_spare_get_count(a, plane), ==, FTL_SPARE_POOL_PER_PLANE);
+    munit_assert_false(alc_spare_push(a, plane, ftl_gblock(plane, FTL_SPARE_POOL_PER_PLANE)));
 
     /* 清空 Spare 后 refill：Free Pool 也为空 ⇒ 无候选可补，返回 0。 */
-    for (WORD i = 0U; i < (WORD)FTL_SPARE_POOL_PER_PLANE; i++)
+    for (WORD i = 0U; i < FTL_SPARE_POOL_PER_PLANE; i++)
     {
         WORD out = 0U;
 
         munit_assert_true(alc_spare_pop(a, plane, &out));
     }
-    munit_assert_uint32(alc_spare_get_count(a, plane), ==, 0U);
+    munit_assert_uint16(alc_spare_get_count(a, plane), ==, 0U);
     munit_assert_false(alc_spare_refill_from_free(a, plane));
-    munit_assert_uint32(alc_spare_get_count(a, plane), ==, 0U);
+    munit_assert_uint16(alc_spare_get_count(a, plane), ==, 0U);
 
     ftl_ut_trace_detail("spare: cap=%u; push on full=0; after pop-all count=%hu; refill_from_free(empty)=0", FTL_SPARE_POOL_PER_PLANE, alc_spare_get_count(a, plane));
     ftl_ut_trace_summary("spare: 0->%u (full) -> 0 (pop) ; refill with empty free=0", FTL_SPARE_POOL_PER_PLANE);
@@ -666,16 +666,16 @@ static MunitResult test_ring_geometry(const MunitParameter params[], void *data)
     ring.pages_per_record = 1U;
     ring.plane_mask       = 0x03U;
 
-    munit_assert_uint32(md_ring_records_per_block(&ring), ==, (DWORD)PAGES_PER_BLOCK);
-    munit_assert_uint32(md_ring_total_records(&ring), ==, (DWORD)(4U * PAGES_PER_BLOCK));
+    munit_assert_uint16(md_ring_records_per_block(&ring), ==, PAGES_PER_BLOCK);
+    munit_assert_uint16(md_ring_total_records(&ring), ==, (4U * PAGES_PER_BLOCK));
     munit_assert_true(md_ring_has_block(&ring, 5U));
     munit_assert_false(md_ring_has_block(&ring, 7U));
-    munit_assert_uint32(md_ring_plane_count(ring.plane_mask), ==, (DWORD)PLANE_NUM);
-    munit_assert_uint32(md_ring_plane_at(ring.plane_mask, 0U), ==, 0U);
-    munit_assert_uint32(md_ring_plane_at(ring.plane_mask, 1U), ==, 1U);
-    munit_assert_uint32(md_ring_plane_at(ring.plane_mask, (BYTE)PLANE_NUM), ==, (DWORD)PLANE_NUM);
+    munit_assert_uint8(md_ring_plane_count(ring.plane_mask), ==, PLANE_NUM);
+    munit_assert_uint8(md_ring_plane_at(ring.plane_mask, 0U), ==, 0U);
+    munit_assert_uint8(md_ring_plane_at(ring.plane_mask, 1U), ==, 1U);
+    munit_assert_uint8(md_ring_plane_at(ring.plane_mask, PLANE_NUM), ==, PLANE_NUM);
 
-    ftl_ut_trace_detail("ring: 4 blocks, 1 page/record, mask=0x%02hhX -> records/block=%hu total=%hu has(5)=%d has(7)=%d planes=%hhu at(0)=%hhu at(1)=%hhu at(NUM)=%hhu", ring.plane_mask, md_ring_records_per_block(&ring), md_ring_total_records(&ring), md_ring_has_block(&ring, 5U), md_ring_has_block(&ring, 7U), md_ring_plane_count(ring.plane_mask), md_ring_plane_at(ring.plane_mask, 0U), md_ring_plane_at(ring.plane_mask, 1U), md_ring_plane_at(ring.plane_mask, (BYTE)PLANE_NUM));
+    ftl_ut_trace_detail("ring: 4 blocks, 1 page/record, mask=0x%02hhX -> records/block=%hu total=%hu has(5)=%d has(7)=%d planes=%hhu at(0)=%hhu at(1)=%hhu at(NUM)=%hhu", ring.plane_mask, md_ring_records_per_block(&ring), md_ring_total_records(&ring), md_ring_has_block(&ring, 5U), md_ring_has_block(&ring, 7U), md_ring_plane_count(ring.plane_mask), md_ring_plane_at(ring.plane_mask, 0U), md_ring_plane_at(ring.plane_mask, 1U), md_ring_plane_at(ring.plane_mask, PLANE_NUM));
     ftl_ut_trace_summary("ring: 4x1 -> records/block=%hu total=%hu; mask 0x%02hhX -> planes=%hhu", md_ring_records_per_block(&ring), md_ring_total_records(&ring), ring.plane_mask, md_ring_plane_count(ring.plane_mask));
 
     return MUNIT_OK;
@@ -699,7 +699,7 @@ static MunitResult test_directory_commit(const MunitParameter params[], void *da
     munit_assert_uint32(md_entry_find(dir, METADATA_TYPE_L2P_REGION, 0U), ==, NAND_PBA_INVALID);
 
     const DWORD p0 = pba_make(0U, 0U, 0U, L2P_LOG_BLOCK0, 0U, 0U, 0U);
-    const DWORD p1 = pba_make(0U, 0U, 0U, (WORD)(L2P_LOG_BLOCK0 + 1U), 0U, 0U, 0U);
+    const DWORD p1 = pba_make(0U, 0U, 0U, (L2P_LOG_BLOCK0 + 1U), 0U, 0U, 0U);
 
     md_commit_region(dir, 0U, MD_COMMIT_PRIMARY, p0, NAND_PBA_INVALID);
 
@@ -711,21 +711,21 @@ static MunitResult test_directory_commit(const MunitParameter params[], void *da
 
     munit_assert_uint32(md_entry_find(dir, METADATA_TYPE_L2P_REGION, 0U), ==, p1);
     munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, L2P_LOG_BLOCK0)), ==, 0U);
-    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 1U))), ==, 1U);
+    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 1U))), ==, 1U);
 
     /* 主备同批：两份都计入 live，dirty 置位。 */
-    const DWORD p2 = pba_make(0U, 0U, 0U, (WORD)(L2P_LOG_BLOCK0 + 2U), 0U, 0U, 0U);
-    const DWORD p3 = pba_make(0U, 0U, 0U, (WORD)(L2P_LOG_BLOCK0 + 3U), 0U, 0U, 0U);
+    const DWORD p2 = pba_make(0U, 0U, 0U, (L2P_LOG_BLOCK0 + 2U), 0U, 0U, 0U);
+    const DWORD p3 = pba_make(0U, 0U, 0U, (L2P_LOG_BLOCK0 + 3U), 0U, 0U, 0U);
 
     md_commit_region(dir, 1U, MD_COMMIT_PAIR, p2, p3);
 
     munit_assert_uint32(md_entry_find(dir, METADATA_TYPE_L2P_REGION, 1U), ==, p2);
     munit_assert_uint32(md_backup_find(dir, 1U), ==, p3);
-    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 2U))), ==, 1U);
-    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 3U))), ==, 1U);
+    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 2U))), ==, 1U);
+    munit_assert_uint32(md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 3U))), ==, 1U);
     munit_assert_true(dir->ckpt.dirty);
 
-    ftl_ut_trace_detail("directory: r0 primary 0x%08lX -> 0x%08lX; r1 pair 0x%08lX/0x%08lX; live log0=%hu log1=%hu log2=%hu log3=%hu dirty=%d gen=%lu", p0, p1, p2, p3, md_live_count_get(dir, ftl_gblock(0U, L2P_LOG_BLOCK0)), md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 1U))), md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 2U))), md_live_count_get(dir, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 3U))), dir->ckpt.dirty, dir->ckpt.dirty_gen);
+    ftl_ut_trace_detail("directory: r0 primary 0x%08lX -> 0x%08lX; r1 pair 0x%08lX/0x%08lX; live log0=%hu log1=%hu log2=%hu log3=%hu dirty=%d gen=%lu", p0, p1, p2, p3, md_live_count_get(dir, ftl_gblock(0U, L2P_LOG_BLOCK0)), md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 1U))), md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 2U))), md_live_count_get(dir, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 3U))), dir->ckpt.dirty, dir->ckpt.dirty_gen);
     ftl_ut_trace_summary("directory: r0 primary 0x%08lX->0x%08lX; r1 pair 0x%08lX/0x%08lX; dirty=%d gen=%lu", p0, p1, p2, p3, dir->ckpt.dirty, dir->ckpt.dirty_gen);
 
     return MUNIT_OK;
@@ -786,18 +786,18 @@ static MunitResult test_cp_encoders(const MunitParameter params[], void *data)
     alc_s          *a = ftl_ut_ram_alloc();
     md_dir_cache_s *d = ftl_ut_ram_md();
 
-    const WORD word = cp_block_word_pack((WORD)CP_BLOCK_WORD_MAX_VALID, (BYTE)FTL_BLOCK_STATE_BAD, 1U, CP_BLOCK_POOL_SPARE);
+    const WORD word = cp_block_word_pack(CP_BLOCK_WORD_MAX_VALID, FTL_BLOCK_STATE_BAD, 1U, CP_BLOCK_POOL_SPARE);
 
-    munit_assert_uint32(cp_block_word_valid(word), ==, (DWORD)CP_BLOCK_WORD_MAX_VALID);
-    munit_assert_uint32(cp_block_word_state(word), ==, (DWORD)FTL_BLOCK_STATE_BAD);
-    munit_assert_uint32(cp_block_word_temp(word), ==, 1U);
-    munit_assert_uint32(cp_block_word_pool(word), ==, (DWORD)CP_BLOCK_POOL_SPARE);
+    munit_assert_uint16(cp_block_word_valid(word), ==, CP_BLOCK_WORD_MAX_VALID);
+    munit_assert_uint8(cp_block_word_state(word), ==, FTL_BLOCK_STATE_BAD);
+    munit_assert_uint8(cp_block_word_temp(word), ==, 1U);
+    munit_assert_uint8(cp_block_word_pool(word), ==, CP_BLOCK_POOL_SPARE);
 
     /* 快照：CLOSED/有效计数/温度 + OP/Spare 池标签 + Directory 权威 LOG。 */
     const WORD g0          = ftl_gblock(0U, 0U);
     const WORD g_op        = ftl_gblock(0U, 50U);
     const WORD g_sp        = ftl_gblock(0U, 60U);
-    const WORD g_log_block = (WORD)(L2P_LOG_BLOCK0 + 5U);
+    const WORD g_log_block = (L2P_LOG_BLOCK0 + 5U);
     const WORD g_log       = ftl_gblock(0U, g_log_block);
 
     ftl_block_set_state(&a->blocks[g0], FTL_BLOCK_STATE_CLOSED);
@@ -812,13 +812,13 @@ static MunitResult test_cp_encoders(const MunitParameter params[], void *data)
 
     cp_block_snapshot(a, d, s_cp_words);
 
-    munit_assert_uint32(cp_block_word_state(s_cp_words[g0]), ==, (DWORD)FTL_BLOCK_STATE_CLOSED);
-    munit_assert_uint32(cp_block_word_valid(s_cp_words[g0]), ==, 100U);
-    munit_assert_uint32(cp_block_word_temp(s_cp_words[g0]), ==, (DWORD)FTL_TEMP_COLD);
-    munit_assert_uint32(cp_block_word_pool(s_cp_words[g_op]), ==, (DWORD)CP_BLOCK_POOL_OP);
-    munit_assert_uint32(cp_block_word_pool(s_cp_words[g_sp]), ==, (DWORD)CP_BLOCK_POOL_SPARE);
-    munit_assert_uint32(cp_block_word_state(s_cp_words[g_log]), ==, (DWORD)FTL_BLOCK_STATE_LOG);
-    munit_assert_uint32(cp_block_word_pool(s_cp_words[g_log]), ==, (DWORD)CP_BLOCK_POOL_NONE);
+    munit_assert_uint8(cp_block_word_state(s_cp_words[g0]), ==, FTL_BLOCK_STATE_CLOSED);
+    munit_assert_uint16(cp_block_word_valid(s_cp_words[g0]), ==, 100U);
+    munit_assert_uint8(cp_block_word_temp(s_cp_words[g0]), ==, FTL_TEMP_COLD);
+    munit_assert_uint8(cp_block_word_pool(s_cp_words[g_op]), ==, CP_BLOCK_POOL_OP);
+    munit_assert_uint8(cp_block_word_pool(s_cp_words[g_sp]), ==, CP_BLOCK_POOL_SPARE);
+    munit_assert_uint8(cp_block_word_state(s_cp_words[g_log]), ==, FTL_BLOCK_STATE_LOG);
+    munit_assert_uint8(cp_block_word_pool(s_cp_words[g_log]), ==, CP_BLOCK_POOL_NONE);
 
     /* 磨损页：erase/read/last_ecc/flags 的字节布局。 */
     a->blocks[g0].erase_count     = 7U;
@@ -857,7 +857,7 @@ static ftl_status_e ring_probe(void *ctx, WORD record_idx, BOOL full, DWORD *out
     {
         return FTL_ERROR;
     }
-    *out_sequence = (DWORD)record_idx + 1U;
+    *out_sequence = record_idx + 1U;
     return FTL_OK;
 }
 
@@ -902,9 +902,9 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
     written = rpb;
     memset(&out, 0, sizeof(out));
     munit_assert_int(md_ring_locate(&ring, ring_probe, &written, &out), ==, FTL_OK);
-    munit_assert_uint32(out.newest_idx, ==, (DWORD)(rpb - 1U));
-    munit_assert_uint32(out.sequence, ==, (DWORD)rpb);
-    munit_assert_uint32(out.write_idx, ==, (DWORD)rpb);
+    munit_assert_uint32(out.newest_idx, ==, (rpb - 1U));
+    munit_assert_uint32(out.sequence, ==, rpb);
+    munit_assert_uint32(out.write_idx, ==, rpb);
 
     const WORD block_write = out.write_idx;
 
@@ -967,19 +967,19 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     memset(&page, 0, sizeof(page));
     md_dir_ckpt_page(d, w.seq, 0U, &page);
 
-    munit_assert_uint32(page.magic, ==, (DWORD)DIR_CKPT_MAGIC);
+    munit_assert_uint32(page.magic, ==, DIR_CKPT_MAGIC);
     munit_assert_uint32(page.sequence, ==, w.seq);
     munit_assert_uint32(page.chunk_index, ==, 0U);
-    munit_assert_uint32(page.chunk_count, ==, (DWORD)DIR_CKPT_PAGE_COUNT);
+    munit_assert_uint32(page.chunk_count, ==, DIR_CKPT_PAGE_COUNT);
 
     BOOL done = 0;
 
-    for (BYTE i = 0U; i < (BYTE)DIR_CKPT_PAGE_COUNT; i++)
+    for (BYTE i = 0U; i < DIR_CKPT_PAGE_COUNT; i++)
     {
         done = md_dir_ckpt_write_advance(&w, 0);
     }
     munit_assert_true(done);
-    munit_assert_uint32(w.chunk, ==, (DWORD)DIR_CKPT_PAGE_COUNT);
+    munit_assert_uint32(w.chunk, ==, DIR_CKPT_PAGE_COUNT);
     munit_assert_true(w.ok);
 
     md_dir_ckpt_commit(d, &w);
@@ -987,8 +987,8 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     munit_assert_false(d->ckpt.dirty);
     munit_assert_uint32(d->ckpt.sequence, ==, w.seq);
     munit_assert_false(d->ckpt.busy);
-    munit_assert_uint32(w.owner, ==, (DWORD)MD_DIR_CKPT_OWNER_NONE);
-    munit_assert_uint32(d->ckpt.write_idx, ==, (DWORD)((w.idx + 1U) % md_ring_total_records(&w.ring)));
+    munit_assert_uint32(w.owner, ==, MD_DIR_CKPT_OWNER_NONE);
+    munit_assert_uint16(d->ckpt.write_idx, ==, ((w.idx + 1U) % md_ring_total_records(&w.ring)));
 
     /* dirty_gen 竞态：begin 后 Directory 又有新 commit ⇒ 本 record 已落后，commit 必须保留 dirty。 */
     d->ckpt.dirty       = 1;
@@ -997,7 +997,7 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     memset(&w, 0, sizeof(w));
     munit_assert_int(md_dir_ckpt_write_begin(d, &w, MD_DIR_CKPT_OWNER_BOOT), ==, MD_DIR_CKPT_READY);
     d->ckpt.dirty_gen = 11U; /* 写入期间的新变更 */
-    for (BYTE i = 0U; i < (BYTE)DIR_CKPT_PAGE_COUNT; i++)
+    for (BYTE i = 0U; i < DIR_CKPT_PAGE_COUNT; i++)
     {
         (void)md_dir_ckpt_write_advance(&w, 0);
     }
@@ -1005,7 +1005,7 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     munit_assert_true(d->ckpt.dirty);
 
     ftl_ut_trace_detail("dir_ckpt: seq=%lu idx=%hu chunks=%hu; commit dirty=0; race dirty_gen 10->11 keeps dirty=1", w.seq, w.idx, w.chunk);
-    ftl_ut_trace_summary("dir_ckpt: write-session %lu chunks; commit advances idx; dirty_gen race keeps dirty", (DWORD)DIR_CKPT_PAGE_COUNT);
+    ftl_ut_trace_summary("dir_ckpt: write-session %u chunks; commit advances idx; dirty_gen race keeps dirty", DIR_CKPT_PAGE_COUNT);
 
     return MUNIT_OK;
 }
@@ -1033,7 +1033,7 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
 
     const WORD g1 = md_log_alloc(d, a, 0U);
 
-    munit_assert_uint32(g1, ==, ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 1U)));
+    munit_assert_uint32(g1, ==, ftl_gblock(0U, (L2P_LOG_BLOCK0 + 1U)));
 
     md_log_release(d, g0);
     munit_assert_uint32(ftl_block_state(&a->blocks[g0]), ==, FTL_BLOCK_STATE_NONE);
@@ -1083,16 +1083,16 @@ static MunitResult test_cp_init_timer(const MunitParameter params[], void *data)
     munit_assert_false(h.active);
     munit_assert_false(h.waiting);
     munit_assert_int(h.phase, ==, CP_IDLE);
-    munit_assert_uint32(h.cp_state.next_t3_ms, ==, (DWORD)(1000U + CP_TIME_INTERVAL_MS));
+    munit_assert_uint32(h.cp_state.next_t3_ms, ==, (1000U + CP_TIME_INTERVAL_MS));
 
     /* reset 重新装订到期时刻，而不是清 0 或保留旧值。 */
     h.cp_state.next_t3_ms = 42U;
     ftl_ut_clock_set_ms(2000U);
     cp_timer_reset(&h);
 
-    munit_assert_uint32(h.cp_state.next_t3_ms, ==, (DWORD)(2000U + CP_TIME_INTERVAL_MS));
+    munit_assert_uint32(h.cp_state.next_t3_ms, ==, (2000U + CP_TIME_INTERVAL_MS));
 
-    ftl_ut_trace_detail("cp init: active=%d waiting=%d phase=%d; t3 init=%lu reset=%lu", h.active, h.waiting, h.phase, (DWORD)(1000U + CP_TIME_INTERVAL_MS), h.cp_state.next_t3_ms);
+    ftl_ut_trace_detail("cp init: active=%d waiting=%d phase=%d; t3 init=%u reset=%lu", h.active, h.waiting, h.phase, (1000U + CP_TIME_INTERVAL_MS), h.cp_state.next_t3_ms);
     ftl_ut_trace_summary("cp init: phase=%d; T3 re-armed at now+%u ms", h.phase, CP_TIME_INTERVAL_MS);
 
     ftl_ut_clock_restore();
@@ -1186,7 +1186,7 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
     ftl_ut_trace_begin();
 
     md_dir_cache_s *d       = ftl_ut_ram_md();
-    const WORD      victim  = ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 5U));
+    const WORD      victim  = ftl_gblock(0U, (L2P_LOG_BLOCK0 + 5U));
     const WORD      pending = d->reclaim.count;
 
     /* 构造「压缩写阶段取不到空槽」⇒ md_compact_write 返回 FAILED ⇒ md_handle_abort。
@@ -1319,11 +1319,11 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, 0U);
-    munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, 0U);
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(pend_slot_get_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(pend_group_get_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
     munit_assert_true(wb_is_idle(ftl->wbuf));
-    munit_assert_uint32(ftl->bg.task_count, ==, (DWORD)BG_TASK_COUNT);
+    munit_assert_uint32(ftl->bg.task_count, ==, BG_TASK_COUNT);
 
     ftl_ut_trace_detail("host idle: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), wb_is_idle(ftl->wbuf), ftl->bg.task_count);
     ftl_ut_trace_summary("host: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), wb_is_idle(ftl->wbuf), ftl->bg.task_count);
@@ -1352,18 +1352,18 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
 
     for (WORD i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        slots[i] = pend_alloc(&table, (WORD)i);
+        slots[i] = pend_alloc(&table, i);
         munit_assert_not_null(slots[i]);
     }
 
     munit_assert_null(pend_alloc(&table, 0U));
-    munit_assert_uint32(pend_slot_get_count(&table), ==, (DWORD)FTL_PENDING_MAX);
+    munit_assert_uint16(pend_slot_get_count(&table), ==, FTL_PENDING_MAX);
 
     /* 按 command_id 查找/移除；移除后槽位可再分配。 */
     munit_assert_ptr_equal(pend_find(&table, 0U), slots[0]);
     pend_remove(&table, 0U);
     munit_assert_null(pend_find(&table, 0U));
-    munit_assert_uint32(pend_slot_get_count(&table), ==, (DWORD)(FTL_PENDING_MAX - 1U));
+    munit_assert_uint16(pend_slot_get_count(&table), ==, (FTL_PENDING_MAX - 1U));
     munit_assert_not_null(pend_alloc(&table, 0U));
 
     ftl_ut_trace_detail("pending: alloc 0->%u (full); alloc-on-full=NULL; remove id=0 -> count=%u; realloc ok", FTL_PENDING_MAX, FTL_PENDING_MAX - 1U);
@@ -1403,7 +1403,7 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
     munit_assert_false(pend_group_alloc(&table, &extra));
     munit_assert_uint32(table.groups[gi[0]].total, ==, 7U);
     munit_assert_true(table.groups[gi[0]].used);
-    munit_assert_uint32(pend_group_get_count(&table), ==, (DWORD)FTL_GROUP_MAX);
+    munit_assert_uint16(pend_group_get_count(&table), ==, FTL_GROUP_MAX);
 
     ftl_ut_trace_detail("group: alloc 0->%u (max); extra alloc=0; group[%hhu].total 7->%lu used=%d count=%hu", FTL_GROUP_MAX, gi[0], table.groups[gi[0]].total, table.groups[gi[0]].used, pend_group_get_count(&table));
     ftl_ut_trace_summary("group: alloc %u (full) -> extra=0; group0 total stays %lu", FTL_GROUP_MAX, table.groups[gi[0]].total);
@@ -1448,7 +1448,7 @@ static MunitResult test_group_complete_once(const MunitParameter params[], void 
 
     munit_assert_uint32(s_group_done, ==, 1U);
     munit_assert_false(g->used);
-    munit_assert_uint32(pend_group_get_count(&table), ==, 0U);
+    munit_assert_uint16(pend_group_get_count(&table), ==, 0U);
 
     ftl_ut_trace_detail("group: outstanding 2->1->0; done 0->0->%lu; groups 1->%hu; used=%d", s_group_done, pend_group_get_count(&table), g->used);
     ftl_ut_trace_summary("group: outstanding 2->0; done 0->%lu; groups 1->%hu", s_group_done, pend_group_get_count(&table));
@@ -1485,7 +1485,7 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
 
     for (WORD i = 0U; i < FTL_IU_BYTES; i++)
     {
-        src[i] = (BYTE)(i & 0xFFU);
+        src[i] = (i & 0xFFU);
     }
 
     memset(&tr, 0, sizeof(tr));
@@ -1505,7 +1505,7 @@ static MunitResult test_wbuf_append_read(const MunitParameter params[], void *da
 
     for (WORD i = 0U; i < FTL_IU_BYTES; i++)
     {
-        src2[i] = (BYTE)(0xA5U ^ (i & 0xFFU));
+        src2[i] = (0xA5U ^ (i & 0xFFU));
     }
     tr.lba  = 5U;
     tr.data = src2;
@@ -1540,16 +1540,16 @@ static MunitResult test_op_ctx(const MunitParameter params[], void *data)
 
     ftl_ut_trace_begin();
 
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
     munit_assert_int(ftl_op_req_add(60U, FTL_OP_HOST_IO, &ctx_token), ==, FTL_OK);
-    munit_assert_uint32(ftl_op_req_count(), ==, 1U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 1U);
 
     ftl_op_req_remove(60U);
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     ftl_op_req_add(61U, FTL_OP_HOST_IO, &ctx_token);
     ftl_op_req_remove(61U);
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     ftl_ut_trace_detail("op request: add(60) -> count=1; remove(60) -> count=0; add(61)+remove(61) -> count=%hu", ftl_op_req_count());
     ftl_ut_trace_summary("op request: count 0->1 (add 60) ->0 (remove) ->0 (add 61 + remove)");
@@ -1576,7 +1576,7 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     memset(&sched, 0, sizeof(sched));
     bg_scheduler_init(&sched);
 
-    munit_assert_uint32(sched.task_count, ==, (DWORD)BG_TASK_COUNT);
+    munit_assert_uint32(sched.task_count, ==, BG_TASK_COUNT);
     munit_assert_uint32(sched.credits, ==, 0U);
 
     /* Token bucket：每 interval 补 grant_units，饱和到 grant_units × CAP。 */
@@ -1596,7 +1596,7 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
 
     level = bg_scheduler_level_select(ftl_ut_live());
 
-    munit_assert_uint32((DWORD)level, <, (DWORD)BG_LEVEL_NUM);
+    munit_assert_uint32(level, <, BG_LEVEL_NUM);
 
     ftl_ut_trace_detail("bg: task_count 0->%hhu; credits 0->4->%lu; level_select(live)=%d; BG_TASK_COUNT=%u", sched.task_count, sched.credits, level, BG_TASK_COUNT);
     ftl_ut_trace_summary("bg: task_count 0->%hhu credits=%lu level=%d", sched.task_count, sched.credits, level);
@@ -1619,23 +1619,23 @@ static MunitResult test_op_ctx_capacity(const MunitParameter params[], void *dat
 
     ftl_ut_trace_begin();
 
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     for (WORD i = 0U; i < FTL_OP_REQ_TABLE_SIZE; i++)
     {
         munit_assert_int(ftl_op_req_add(i, FTL_OP_HOST_IO, &ctx_token), ==, FTL_OK);
     }
-    munit_assert_uint32(ftl_op_req_count(), ==, (DWORD)FTL_OP_REQ_TABLE_SIZE);
+    munit_assert_uint16(ftl_op_req_count(), ==, FTL_OP_REQ_TABLE_SIZE);
 
     /* 同 cmd_id 覆盖而不是追加：容量仍为 64。 */
     munit_assert_int(ftl_op_req_add(0U, FTL_OP_HOST_IO, &ctx_token), ==, FTL_OK);
-    munit_assert_uint32(ftl_op_req_count(), ==, (DWORD)FTL_OP_REQ_TABLE_SIZE);
+    munit_assert_uint16(ftl_op_req_count(), ==, FTL_OP_REQ_TABLE_SIZE);
 
     for (WORD i = 0U; i < FTL_OP_REQ_TABLE_SIZE; i++)
     {
         ftl_op_req_remove(i);
     }
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     ftl_ut_trace_detail("op request: count 0->%u (fill); same-id add(0) -> count=%u; remove all -> count=%hu", FTL_OP_REQ_TABLE_SIZE, FTL_OP_REQ_TABLE_SIZE, ftl_op_req_count());
     ftl_ut_trace_summary("op request: count 0->%u (fill) -> %u (same-id) -> 0 (remove)", FTL_OP_REQ_TABLE_SIZE, FTL_OP_REQ_TABLE_SIZE);
@@ -1699,14 +1699,14 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
 
     for (WORD i = 0U; i < 8U; i++)
     {
-        slots[i] = pend_alloc(&f->pending, (WORD)i);
+        slots[i] = pend_alloc(&f->pending, i);
         munit_assert_not_null(slots[i]);
     }
     munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_NORMAL);
 
     for (WORD i = 8U; i < 17U; i++)
     {
-        slots[i] = pend_alloc(&f->pending, (WORD)i);
+        slots[i] = pend_alloc(&f->pending, i);
         munit_assert_not_null(slots[i]);
     }
     munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_BUSY);
@@ -1755,9 +1755,9 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
     munit_assert_true(pend_group_alloc(&table, &gi));
     wb_init(&h, ftl_ut_ram_alloc(), &table, NULL);
 
-    for (WORD i = 0U; i < (WORD)(n * FTL_IU_BYTES); i++)
+    for (WORD i = 0U; i < (n * FTL_IU_BYTES); i++)
     {
-        src[i] = (BYTE)(i & 0xFFU);
+        src[i] = (i & 0xFFU);
     }
 
     wb_trigger_s tr;
@@ -1831,7 +1831,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     munit_assert_uint32(s_group_done, ==, 1U);
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_IO_ERROR);
-    munit_assert_uint32(pend_group_get_count(&table), ==, 0U);
+    munit_assert_uint16(pend_group_get_count(&table), ==, 0U);
 
     ftl_ut_trace_detail("group failure: sub1=IO_ERROR -> agg=%d; sub2=OK -> agg=%d; done=%lu flag=%hu status=%d groups=%hu", SSD_STATUS_IO_ERROR, g->agg_status, s_group_done, flag, status, pend_group_get_count(&table));
     ftl_ut_trace_summary("group: IO_ERROR sticky across OK subop; done once, status=IO_ERROR");
@@ -1867,8 +1867,8 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     const DWORD   owners = ftl_group_bit(gi);
 
     g->op                       = PENDING_OP_WRITE;
-    g->total                    = (DWORD)FTL_LBA_PER_PAIR;
-    g->next                     = (DWORD)FTL_LBA_PER_PAIR;
+    g->total                    = FTL_LBA_PER_PAIR;
+    g->next                     = FTL_LBA_PER_PAIR;
     g->completion.status_out    = &status;
     g->completion.complete_flag = &flag;
     g->outstanding              = 1U;
@@ -1879,7 +1879,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     pend_validate(p); /* owners/n_cw 的 [BOUND] 不变量（pend_alloc 契约） */
     pend_confirm_park(&table, idx, owners);
     munit_assert_true(pend_op_is_write_confirm(p->op));
-    munit_assert_uint32(pend_confirm_get_count(&table), ==, 1U);
+    munit_assert_uint16(pend_confirm_get_count(&table), ==, 1U);
 
     /* 待入账时刻显式给定：超时判据只吃 park_ms，不依赖板端开机时钟。 */
     p->park_ms = 1000U;
@@ -1892,7 +1892,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     munit_assert_true(p->used);
     munit_assert_true(g->used);
     munit_assert_uint32(flag, ==, 0U);
-    munit_assert_uint32(pend_slot_get_count(&table), ==, 1U);
+    munit_assert_uint16(pend_slot_get_count(&table), ==, 1U);
 
     /* 到期结算一次：释放槽 + 组按 IO_ERROR 完成。 */
     pend_confirm_settle(&table, idx, SSD_STATUS_IO_ERROR);
@@ -1901,7 +1901,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     munit_assert_false(g->used);
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_IO_ERROR);
-    munit_assert_uint32(pend_confirm_get_count(&table), ==, 0U);
+    munit_assert_uint16(pend_confirm_get_count(&table), ==, 0U);
 
     ftl_ut_trace_detail("confirm park: t=1099 expired=0; t=1100 settle -> flag=%hhu status=%d",
                         flag,
@@ -1937,8 +1937,8 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     const DWORD   owners = ftl_group_bit(gi);
 
     g->op                       = PENDING_OP_WRITE;
-    g->total                    = (DWORD)FTL_LBA_PER_PAIR;
-    g->next                     = (DWORD)FTL_LBA_PER_PAIR;
+    g->total                    = FTL_LBA_PER_PAIR;
+    g->next                     = FTL_LBA_PER_PAIR;
     g->completion.status_out    = &status;
     g->completion.complete_flag = &flag;
     g->outstanding              = 1U;
@@ -1963,7 +1963,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     pend_validate(b);
     pend_confirm_park(&table, idx_b, owners);
 
-    munit_assert_uint32(pend_confirm_get_count(&table), ==, 1U);
+    munit_assert_uint16(pend_confirm_get_count(&table), ==, 1U);
 
     const BOOL a_parked = pend_confirm_is_parked(&table, idx_a);
     const BOOL b_parked = pend_confirm_is_parked(&table, idx_b);
@@ -1977,7 +1977,7 @@ static MunitResult test_confirm_is_parked(const MunitParameter params[], void *d
     munit_assert_false(b->used);
     munit_assert_uint32(flag, ==, 1U);
     munit_assert_int(status, ==, SSD_STATUS_OK);
-    munit_assert_uint32(pend_confirm_get_count(&table), ==, 0U);
+    munit_assert_uint16(pend_confirm_get_count(&table), ==, 0U);
     munit_assert_false(pend_confirm_is_parked(&table, idx_a)); /* 负例：used ≠ 待入账 */
     munit_assert_false(pend_confirm_is_parked(&table, idx_b));
 
@@ -2135,9 +2135,9 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
     munit_assert_int(ftl_submit_read(NULL, &req), ==, FTL_ERROR);
 
     /* 非法参数必须在分配任何池资源之前拒绝。 */
-    munit_assert_uint32(pend_slot_get_count(&ftl->pending), ==, slots0);
-    munit_assert_uint32(pend_group_get_count(&ftl->pending), ==, groups0);
-    munit_assert_uint32(ftl_op_req_count(), ==, 0U);
+    munit_assert_uint16(pend_slot_get_count(&ftl->pending), ==, slots0);
+    munit_assert_uint16(pend_group_get_count(&ftl->pending), ==, groups0);
+    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     ftl_ut_trace_detail("submit invalid: count=0, buffer=NULL, lba=FTL_LBA_MAX+1, ftl=NULL -> all ERROR; slots %hu->%hu groups %hu->%hu req=0", slots0, pend_slot_get_count(&ftl->pending), groups0, pend_group_get_count(&ftl->pending));
     ftl_ut_trace_summary("host submit: invalid args rejected before resource allocation");
@@ -2221,26 +2221,26 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
 
     /* 补到 TARGET 以上：不再触发。 */
     mem_fill_free(a, 32U);
-    munit_assert_uint32(a->free_count, >=, (DWORD)FREE_POOL_TARGET);
+    munit_assert_uint16(a->free_count, >=, FREE_POOL_TARGET);
     munit_assert_uint32(gc_should_trigger(a), ==, 0U);
 
     /* per-plane 水位（RISK-ALLOC-09）：**总水位仍在 TARGET 之上**，但把 plane1 抽到
      * 低于单 plane 水位 ⇒ 必须触发。只判 total 的实现会在这里返回 0，接着成对分配
      * 在低水位无声失败 —— 这条是把「两本账」与「一本总账」区分开的负例。 */
-    for (WORD i = 0U; i < (WORD)(32U - (FREE_POOL_PLANE_LOW - 1U)); i++)
+    for (WORD i = 0U; i < (32U - (FREE_POOL_PLANE_LOW - 1U)); i++)
     {
         alc_free_remove(a, ftl_gblock(1U, i));
     }
-    munit_assert_uint32(a->free_count, >=, (DWORD)FREE_POOL_TARGET);
-    munit_assert_uint32(alc_free_get_count(a, 1U), ==, (DWORD)(FREE_POOL_PLANE_LOW - 1U));
-    munit_assert_uint32(alc_free_min_plane_count(a), ==, (DWORD)(FREE_POOL_PLANE_LOW - 1U));
+    munit_assert_uint16(a->free_count, >=, FREE_POOL_TARGET);
+    munit_assert_uint16(alc_free_get_count(a, 1U), ==, (FREE_POOL_PLANE_LOW - 1U));
+    munit_assert_uint16(alc_free_min_plane_count(a), ==, (FREE_POOL_PLANE_LOW - 1U));
 
     const DWORD trig_plane_low = gc_should_trigger(a);
 
     munit_assert_uint32((trig_plane_low & GC_TRIGGER_WATERMARK), !=, 0U);
 
     /* 掉到 TARGET 以下（仍高于紧急线）：只命中 WATERMARK。 */
-    while (a->free_count >= (WORD)FREE_POOL_TARGET)
+    while (a->free_count >= FREE_POOL_TARGET)
     {
         alc_free_remove(a, a->free_blocks[0]);
     }
@@ -2289,7 +2289,7 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         ftl_block_set_valid(&a->blocks[ftl_gblock(p, 0U)], 10U);
-        ftl_block_set_valid(&a->blocks[ftl_gblock(p, 1U)], (WORD)(FTL_CW_PER_BLOCK - 8U));
+        ftl_block_set_valid(&a->blocks[ftl_gblock(p, 1U)], (FTL_CW_PER_BLOCK - 8U));
     }
 
     const char       *mode_s = munit_parameters_get(params, "mode");
@@ -2338,14 +2338,14 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
     munit_assert_uint32(alc_super_closed_add(a, blocks_c, FTL_TEMP_HOT), !=, FTL_BLOCK_NO_SB);
     ftl_block_set_valid(&a->blocks[ftl_gblock(0U, 6U)], 4U);
 
-    munit_assert_uint32(alc_free_get_count(a, 1U), ==, 2U);
-    munit_assert_uint32(alc_free_min_plane_count(a), ==, 2U);
+    munit_assert_uint16(alc_free_get_count(a, 1U), ==, 2U);
+    munit_assert_uint16(alc_free_min_plane_count(a), ==, 2U);
 
     memset(&out, 0, sizeof(out));
     munit_assert_int(gc_select_victim(a, mode, &out), ==, GC_SELECT_OK);
     munit_assert_not_null(out.victim);
     munit_assert_uint32(out.victim->plane_blocks[0], ==, 0U);
-    munit_assert_uint32(out.victim->plane_blocks[1], !=, (DWORD)FTL_BLOCK_NO_PLANE);
+    munit_assert_uint32(out.victim->plane_blocks[1], !=, FTL_BLOCK_NO_PLANE);
 
     const WORD victim_pref = out.victim->plane_blocks[0];
 
@@ -2448,7 +2448,7 @@ static MunitResult test_wl_trigger_and_victim(const MunitParameter params[], voi
     memset(&victim, 0, sizeof(victim));
     munit_assert_true(wl_select_victim(a, &victim));
     munit_assert_true(victim.found);
-    munit_assert_uint32(victim.valid_cw, ==, (DWORD)(PLANE_NUM * 200U));
+    munit_assert_uint32(victim.valid_cw, ==, (PLANE_NUM * 200U));
     munit_assert_uint32(victim.plane_blocks[0], ==, 0U);
     munit_assert_uint32(victim.plane_blocks[1], ==, 1U);
 
@@ -2524,7 +2524,7 @@ static MunitResult test_rr_predictive_retire(const MunitParameter params[], void
 
     munit_assert_true(alc_super_closed_add(a, blocks, FTL_TEMP_COLD) < a->closed_sb_count);
 
-    rr_record_block_ecc(a, g, (BYTE)RR_ECC_MAX);
+    rr_record_block_ecc(a, g, RR_ECC_MAX);
 
     munit_assert_int(rr_get_health(&a->blocks[g].rr), ==, RR_BLOCK_DYING);
 
@@ -2733,7 +2733,7 @@ static WORD cmt_line_take(l2p_cache_s *c, DWORD region)
 {
     const WORD idx = l2p_line_slot_free(c);
 
-    munit_assert_uint32(idx, <, (DWORD)L2P_CACHE_SIZE);
+    munit_assert_uint32(idx, <, L2P_CACHE_SIZE);
     memset(&c->lines[idx], 0, sizeof(c->lines[idx]));
     memset(&c->tags[idx], 0, sizeof(c->tags[idx]));
     c->tags[idx].region_id = region;
@@ -2776,7 +2776,7 @@ static MunitResult test_l2p_resident_states(const MunitParameter params[], void 
     {
         idx = l2p_line_slot_free(c);
     }
-    munit_assert_uint32(idx, <, (DWORD)L2P_CACHE_SIZE);
+    munit_assert_uint32(idx, <, L2P_CACHE_SIZE);
 
     l2p_cache_line_s *line = &c->lines[idx];
     l2p_tag_s         saved_tag;
@@ -2797,7 +2797,7 @@ static MunitResult test_l2p_resident_states(const MunitParameter params[], void 
     munit_assert_int(l2p_read(c, lba, &out), ==, FTL_OK);
     munit_assert_uint32(out, ==, 0x11111U);
     munit_assert_int(l2p_write(c, lba, 0x22222U), ==, FTL_OK);
-    munit_assert_uint32(c->tags[idx].state, ==, (DWORD)L2P_CACHE_DIRTY);
+    munit_assert_uint32(c->tags[idx].state, ==, L2P_CACHE_DIRTY);
 
     c->tags[idx].state = L2P_CACHE_FLUSHING;
     munit_assert_int(l2p_read(c, lba, &out), ==, FTL_OK);
@@ -2925,7 +2925,7 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
     memcpy(c->region_dirty_bitmap, s_l2p_bitmap_saved, sizeof(s_l2p_bitmap_saved));
     c->cmt_enabled = saved_cmt;
 
-    ftl_ut_trace_detail("l2p miss: region=%lu lba=%lu; read AGAIN->OK unmapped=0x%08lX; write 0x66666 -> read 0x%lX", region, lba, (DWORD)NAND_PBA_INVALID, out);
+    ftl_ut_trace_detail("l2p miss: region=%lu lba=%lu; read AGAIN->OK unmapped=0x%08X; write 0x66666 -> read 0x%lX", region, lba, NAND_PBA_INVALID, out);
     ftl_ut_trace_summary("l2p miss: lba=%lu read AGAIN->OK unmapped; write 0x66666 -> read 0x%lX", lba, out);
 
     return MUNIT_OK;
@@ -3052,7 +3052,7 @@ static MunitResult test_l2p_cmt_write_readback(const MunitParameter params[], vo
     {
         idx = l2p_line_slot_free(c);
     }
-    munit_assert_uint32(idx, <, (DWORD)L2P_CACHE_SIZE);
+    munit_assert_uint32(idx, <, L2P_CACHE_SIZE);
 
     l2p_cache_line_s *line = &c->lines[idx];
     l2p_cache_line_s  saved_line;
@@ -3075,7 +3075,7 @@ static MunitResult test_l2p_cmt_write_readback(const MunitParameter params[], vo
     /* ① CLEAN 行写入：dirty 只进 CMT，line 仍是旧值。 */
     munit_assert_int(l2p_write(c, lba, 0x22222U), ==, FTL_OK);
     munit_assert_uint32(c->stats.cmt_dirty, ==, 1U);
-    munit_assert_uint32(c->tags[idx].state, ==, (DWORD)L2P_CACHE_CLEAN);
+    munit_assert_uint32(c->tags[idx].state, ==, L2P_CACHE_CLEAN);
     munit_assert_uint32(line->entries[entry], ==, 0x11111U);
 
     const DWORD dirty_after_write = c->stats.cmt_dirty;
@@ -3091,7 +3091,7 @@ static MunitResult test_l2p_cmt_write_readback(const MunitParameter params[], vo
     /* ③ flush_kick 先合并：line 变成新值 + DIRTY；dirty CMT 尚未 retire。 */
     c->inflight.flush = L2P_FLUSH_MAX_INFLIGHT;
     munit_assert_int(l2p_flush_kick(c, idx), ==, FTL_AGAIN);
-    munit_assert_uint32(c->tags[idx].state, ==, (DWORD)L2P_CACHE_DIRTY);
+    munit_assert_uint32(c->tags[idx].state, ==, L2P_CACHE_DIRTY);
     munit_assert_uint32(line->entries[entry], ==, 0x22222U);
     munit_assert_uint32(c->stats.cmt_dirty, ==, 1U);
     munit_assert_true(l2p_cmt_region_dirty(c, region));
@@ -3157,7 +3157,7 @@ static MunitResult test_cache_wr_lookup(const MunitParameter params[], void *dat
     wr->page[0].lba       = 0U;
     wr->page[0].pba0      = p0;
     wr->page[0].pba1      = p1;
-    wr->page[0].cw_bitmap = (BYTE)FTL_CACHE_FULL_CW;
+    wr->page[0].cw_bitmap = FTL_CACHE_FULL_CW;
     wr->page[0].state     = FTL_CACHE_PAGE_PROGRAMMED;
     wr->page[0].proven    = 0;
 
@@ -3236,13 +3236,13 @@ static MunitResult test_l2p_cmt_capacity_evict(const MunitParameter params[], vo
     const DWORD evict0 = c->stats.cmt_evict_dirty;
 
     munit_assert_int(l2p_write(c, lba, 0x22222U), ==, FTL_OK);
-    munit_assert_uint32(c->tags[target_line].state, ==, (DWORD)L2P_CACHE_DIRTY);
+    munit_assert_uint32(c->tags[target_line].state, ==, L2P_CACHE_DIRTY);
     munit_assert_uint32(c->lines[target_line].entries[entry], ==, 0x22222U);
     munit_assert_uint32(c->stats.cmt_evict_dirty, ==, evict0 + 1U);
 
     for (BYTE w = 0U; w < L2P_CMT_WAYS; w++)
     {
-        munit_assert_uint32(c->cmt[set][w].state, ==, (DWORD)L2P_CMT_DIRTY);
+        munit_assert_uint32(c->cmt[set][w].state, ==, L2P_CMT_DIRTY);
     }
 
     c->inflight.flush = saved_inflight;
@@ -3301,11 +3301,11 @@ static MunitResult test_l2p_cmt_multi_region_merge(const MunitParameter params[]
 
     munit_assert_int(l2p_flush_kick(c, (int)line0), ==, FTL_AGAIN);
     munit_assert_uint32(c->lines[line0].entries[0], ==, 0x7000U);
-    munit_assert_uint32(c->tags[line0].state, ==, (DWORD)L2P_CACHE_DIRTY);
+    munit_assert_uint32(c->tags[line0].state, ==, L2P_CACHE_DIRTY);
     munit_assert_uint32(c->lines[line1].entries[0], ==, 0x222U);
-    munit_assert_uint32(c->tags[line1].state, ==, (DWORD)L2P_CACHE_CLEAN);
-    munit_assert_uint32(c->cmt[0][0].state, ==, (DWORD)L2P_CMT_DIRTY);
-    munit_assert_uint32(c->cmt[512][0].state, ==, (DWORD)L2P_CMT_DIRTY);
+    munit_assert_uint32(c->tags[line1].state, ==, L2P_CACHE_CLEAN);
+    munit_assert_uint32(c->cmt[0][0].state, ==, L2P_CMT_DIRTY);
+    munit_assert_uint32(c->cmt[512][0].state, ==, L2P_CMT_DIRTY);
 
     c->inflight.flush = saved_inflight;
     cmt_line_give(c, line0);
@@ -3375,7 +3375,7 @@ static MunitResult test_l2p_cmt_entries_fallback(const MunitParameter params[], 
     const DWORD evict0 = c->stats.cmt_evict_dirty;
 
     munit_assert_int(l2p_entries_write(c, 0U, 0xFFU, pbas), ==, FTL_OK);
-    munit_assert_uint32(c->tags[target_line].state, ==, (DWORD)L2P_CACHE_DIRTY);
+    munit_assert_uint32(c->tags[target_line].state, ==, L2P_CACHE_DIRTY);
     for (BYTE i = 0U; i < FTL_LBA_PER_PAIR; i++)
     {
         munit_assert_uint32(c->lines[target_line].entries[i], ==, pbas[i]);
@@ -3385,7 +3385,7 @@ static MunitResult test_l2p_cmt_entries_fallback(const MunitParameter params[], 
     {
         for (BYTE w = 0U; w < L2P_CMT_WAYS; w++)
         {
-            munit_assert_uint32(c->cmt[s][w].state, ==, (DWORD)L2P_CMT_DIRTY);
+            munit_assert_uint32(c->cmt[s][w].state, ==, L2P_CMT_DIRTY);
         }
     }
 
@@ -3439,9 +3439,9 @@ static MunitResult test_l2p_cmt_line_invalidate(const MunitParameter params[], v
     c->cmt_dirty_region_bitmap[0] |= 0x1UL;
 
     l2p_line_invalidate(c, line);
-    munit_assert_uint32(c->cmt[0][0].lba, ==, (DWORD)FTL_LBA_INVALID);
+    munit_assert_uint32(c->cmt[0][0].lba, ==, FTL_LBA_INVALID);
     munit_assert_uint32(c->cmt[256][0].lba, ==, 256U);
-    munit_assert_uint32(c->cmt[256][0].state, ==, (DWORD)L2P_CMT_DIRTY);
+    munit_assert_uint32(c->cmt[256][0].state, ==, L2P_CMT_DIRTY);
 
     cmt_line_give(c, line);
     c->cmt[0][0]   = s_cmt_saved[0];

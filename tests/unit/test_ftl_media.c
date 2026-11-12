@@ -48,7 +48,7 @@ static DWORD media_atou(const char *s)
 
     while ((*s >= '0') && (*s <= '9'))
     {
-        v = (v * 10U) + (DWORD)(*s - '0');
+        v = (v * 10U) + (*s - '0');
         s++;
     }
     return v;
@@ -137,7 +137,7 @@ static void media_fill_wr(DWORD lba, DWORD count)
 {
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        s_media_buf[i] = (BYTE)((lba * 31U + i * 7U) & 0xFFU);
+        s_media_buf[i] = ((lba * 31U + i * 7U) & 0xFFU);
     }
 }
 
@@ -145,7 +145,7 @@ static void media_assert_wr(DWORD lba, DWORD count)
 {
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        munit_assert_uint8(s_media_buf[i], ==, (BYTE)((lba * 31U + i * 7U) & 0xFFU));
+        munit_assert_uint8(s_media_buf[i], ==, ((lba * 31U + i * 7U) & 0xFFU));
     }
 }
 
@@ -153,7 +153,7 @@ static void media_fill_failc(DWORD count, BYTE tag, DWORD start)
 {
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        s_io_buf[i] = (BYTE)((tag * 61U + (start + i) * 13U) & 0xFFU);
+        s_io_buf[i] = ((tag * 61U + (start + i) * 13U) & 0xFFU);
     }
 }
 
@@ -161,7 +161,7 @@ static void media_assert_failc(DWORD count, BYTE tag, DWORD start)
 {
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        munit_assert_uint8(s_io_buf[i], ==, (BYTE)((tag * 61U + (start + i) * 13U) & 0xFFU));
+        munit_assert_uint8(s_io_buf[i], ==, ((tag * 61U + (start + i) * 13U) & 0xFFU));
     }
 }
 
@@ -258,7 +258,7 @@ static MunitResult test_host_io_matrix(const MunitParameter params[], void *data
 
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        s_io_buf[i] = (BYTE)((lba * 17U + i * 13U) & 0xFFU);
+        s_io_buf[i] = ((lba * 17U + i * 13U) & 0xFFU);
     }
 
     munit_assert_true(ftl_ut_host_write(lba, count, s_io_buf));
@@ -266,7 +266,7 @@ static MunitResult test_host_io_matrix(const MunitParameter params[], void *data
     munit_assert_true(ftl_ut_host_read(lba, count, s_io_buf));
     for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
     {
-        munit_assert_uint8(s_io_buf[i], ==, (BYTE)((lba * 17U + i * 13U) & 0xFFU));
+        munit_assert_uint8(s_io_buf[i], ==, ((lba * 17U + i * 13U) & 0xFFU));
     }
 
     ftl_ut_trace_detail("matrix: off=%lu lba=%lu count=%lu bytes=%lu; byte-equal", off, lba, count, count * FTL_IU_BYTES);
@@ -297,7 +297,7 @@ static MunitResult test_host_io_random(const MunitParameter params[], void *data
 
         for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
         {
-            s_io_buf[i] = (BYTE)((round * 37U + i * 11U) & 0xFFU);
+            s_io_buf[i] = ((round * 37U + i * 11U) & 0xFFU);
         }
 
         munit_assert_true(ftl_ut_host_write(lba, count, s_io_buf));
@@ -305,7 +305,7 @@ static MunitResult test_host_io_random(const MunitParameter params[], void *data
         munit_assert_true(ftl_ut_host_read(lba, count, s_io_buf));
         for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
         {
-            munit_assert_uint8(s_io_buf[i], ==, (BYTE)((round * 37U + i * 11U) & 0xFFU));
+            munit_assert_uint8(s_io_buf[i], ==, ((round * 37U + i * 11U) & 0xFFU));
         }
 
         ftl_ut_trace_detail("random io: round=%hhu lba=%lu count=%lu", round, lba, count);
@@ -615,8 +615,8 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
     ftl_ctx_s  *ftl       = ftl_ut_live();
     const DWORD base      = ftl_ut_lba_base() + 128U;
     const DWORD per_write = FTL_LBA_PER_PAIR;
-    const DWORD pages     = (DWORD)PAGES_PER_BLOCK;
-    const DWORD sb_lbas   = (DWORD)PAGES_PER_BLOCK * FTL_LBA_PER_PAIR;
+    const DWORD pages     = PAGES_PER_BLOCK;
+    const DWORD sb_lbas   = PAGES_PER_BLOCK * FTL_LBA_PER_PAIR;
     const DWORD trim_lbas = sb_lbas / 8U;
 
     /* 从空白介质开始，保证 closed 列表里的 victim 就是刚写满的 SB。 */
@@ -733,7 +733,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     ftl_ctx_s  *ftl       = ftl_ut_live();
     const DWORD base      = ftl_ut_lba_base();
     const DWORD per_write = FTL_LBA_PER_PAIR;
-    const DWORD pages     = (DWORD)PAGES_PER_BLOCK;
+    const DWORD pages     = PAGES_PER_BLOCK;
 
     /* 写满一个 SB（64 页 × 8 LBA = 512 LBA），保证 WL victim 的有效 CW ≥70%。 */
     for (DWORD page = 0U; page < pages; page++)
@@ -819,7 +819,7 @@ static MunitResult test_wl_progress(const MunitParameter params[], void *data)
     /* WL 搬移同样通过 CMT 更新 L2P；flush 后再交给 teardown。 */
     munit_assert_true(ftl_ut_flush());
 
-    ftl_ut_trace_detail("wl: writes=%lu sb=%lu pages x %lu LBA; erase used=100 free=400; moved %lu->%lu; lba=%lu read byte-equal", (DWORD)WL_MIN_WRITES, pages, per_write, moved0, m->state.counters.moved, check_lba);
+    ftl_ut_trace_detail("wl: writes=%u sb=%lu pages x %lu LBA; erase used=100 free=400; moved %lu->%lu; lba=%lu read byte-equal", WL_MIN_WRITES, pages, per_write, moved0, m->state.counters.moved, check_lba);
     ftl_ut_trace_summary("media: WL moved %lu->%lu CW (delta %lu)", moved0, m->state.counters.moved, m->state.counters.moved - moved0);
 
     return MUNIT_OK;
@@ -846,14 +846,14 @@ static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void
     const cp_media_status_e st = cp_media_status_probe(ftl->cp_handle, &version);
 
     munit_assert_int(st, ==, CP_MEDIA_CURRENT);
-    munit_assert_uint32(version, ==, (DWORD)FTL_MEDIA_LAYOUT_VERSION);
+    munit_assert_uint32(version, ==, FTL_MEDIA_LAYOUT_VERSION);
 
     BOOL need_format = 1;
 
     munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_OK);
     munit_assert_false(need_format);
 
-    ftl_ut_trace_detail("cp probe: status=%d version=%lu (layout=%lu); need_format 1->%d", st, version, (DWORD)FTL_MEDIA_LAYOUT_VERSION, need_format);
+    ftl_ut_trace_detail("cp probe: status=%d version=%lu (layout=%lu); need_format 1->%d", st, version, FTL_MEDIA_LAYOUT_VERSION, need_format);
     ftl_ut_trace_summary("media: cp probe status=%d version=%lu no format needed", st, version);
 
     return MUNIT_OK;
@@ -897,7 +897,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
      * （RISK-BBT-18），与本用例要测的“save→load 持久化”无关 ⇒ 先清池。 */
     media_erase_bbt_pool(a);
 
-    munit_assert_uint32(a->free_count, >, 0U);
+    munit_assert_uint16(a->free_count, >, 0U);
 
     WORD g = FTL_GBLOCK_INVALID;
 
@@ -909,7 +909,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
             break;
         }
     }
-    munit_assert_uint32(g, !=, (DWORD)FTL_GBLOCK_INVALID);
+    munit_assert_uint32(g, !=, FTL_GBLOCK_INVALID);
 
     munit_assert_int(bbt_mark_bad(a, g), ==, FTL_OK);
     munit_assert_true(ftl_block_is_bad(&a->blocks[g]));
@@ -972,7 +972,7 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
     /* ② 擦掉 Checkpoint 池，制造“无有效 CP record”。 */
     for (WORD block = 0U; block < CHECKPOINT_POOL_BLOCKS; block++)
     {
-        const WORD  pb  = (WORD)(CHECKPOINT_BLOCK0 + block);
+        const WORD  pb  = (CHECKPOINT_BLOCK0 + block);
         const DWORD pba = pba_make(topo.ch, topo.ce, topo.lun, pb, 0U, 0U, 0U);
 
         munit_assert_int(ftl_sync_erase_block_multi_plane(pba), ==, FTL_OK);
@@ -1029,7 +1029,7 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
     /* ① 擦掉 CP 池，确保没有可定位的 Checkpoint record。 */
     for (WORD block = 0U; block < CHECKPOINT_POOL_BLOCKS; block++)
     {
-        const WORD  pb  = (WORD)(CHECKPOINT_BLOCK0 + block);
+        const WORD  pb  = (CHECKPOINT_BLOCK0 + block);
         const DWORD pba = pba_make(topo.ch, topo.ce, topo.lun, pb, 0U, 0U, 0U);
 
         munit_assert_int(ftl_sync_erase_block_multi_plane(pba), ==, FTL_OK);
@@ -1113,7 +1113,7 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
     {
         arm_page = (BYTE)media_atou(arm_s);
     }
-    confirmed = (DWORD)(arm_page - 1U) * FTL_LBA_PER_PAIR;
+    confirmed = (arm_page - 1U) * FTL_LBA_PER_PAIR;
 
     /* 让本用例从**新开的 SB** 起步：room=64 ⇒ 窗口固定 4 页（END 只落在 page7），
      * 「命令 K ⇒ page K-1」的页号映射才是确定的（块尾 1~2 页窗口会让 END 提前、
@@ -1135,7 +1135,7 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
     /* ② 新内容 + 注入：令 arm_page 的完成带 FAIL_CACHE。 */
     media_fill_failc(count, 2U, 0U);
 
-    const DWORD arm_lba = lba + ((DWORD)arm_page * FTL_LBA_PER_PAIR);
+    const DWORD arm_lba = lba + (arm_page * FTL_LBA_PER_PAIR);
 
     fi_cache_fail_arm(arm_lba);
 
@@ -1364,8 +1364,8 @@ static MunitResult test_bbt_ring_reload(const MunitParameter params[], void *dat
         g2 = g;
         break;
     }
-    munit_assert_uint32(g1, !=, (DWORD)FTL_GBLOCK_INVALID);
-    munit_assert_uint32(g2, !=, (DWORD)FTL_GBLOCK_INVALID);
+    munit_assert_uint32(g1, !=, FTL_GBLOCK_INVALID);
+    munit_assert_uint32(g2, !=, FTL_GBLOCK_INVALID);
 
     munit_assert_int(bbt_mark_bad(a, g1), ==, FTL_OK);
     munit_assert_int(bbt_save(a), ==, FTL_OK);
@@ -1529,7 +1529,7 @@ static MunitResult test_cache_seq_cross_block(const MunitParameter params[], voi
     ftl_ctx_s  *ftl   = ftl_ut_live();
     const DWORD lba   = ftl_ut_lba_base() + 5120U;
     const DWORD total = 1024U; /* 2 个物理 block */
-    const DWORD chunk = (DWORD)FTL_UT_MATRIX_LBAS;
+    const DWORD chunk = FTL_UT_MATRIX_LBAS;
 
     for (DWORD r = 0U; r < (total / chunk); r++)
     {
@@ -1587,8 +1587,8 @@ static MunitResult test_cache_early_ack_read_visible(const MunitParameter params
     media_prepare(ftl_ut_live());
 
     ftl_ctx_s  *ftl   = ftl_ut_live();
-    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW / 4U)) & ~(DWORD)(FTL_LBA_PER_PAIR - 1U);
-    const DWORD count = (DWORD)FTL_STREAM_MIN_LBAS;
+    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW / 4U)) & ~(FTL_LBA_PER_PAIR - 1U);
+    const DWORD count = FTL_STREAM_MIN_LBAS;
 
     /* 旧数据：给读覆盖层一个可区分的旧映射。 */
     media_fill_failc(count, 8U, 0U);
@@ -1641,8 +1641,8 @@ static MunitResult test_cache_early_ack_flush_barrier(const MunitParameter param
     media_prepare(ftl_ut_live());
 
     ftl_ctx_s  *ftl   = ftl_ut_live();
-    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW * 3U / 8U)) & ~(DWORD)(FTL_LBA_PER_PAIR - 1U);
-    const DWORD count = (DWORD)FTL_STREAM_MIN_LBAS;
+    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW * 3U / 8U)) & ~(FTL_LBA_PER_PAIR - 1U);
+    const DWORD count = FTL_STREAM_MIN_LBAS;
 
     /* 旧映射：flush 后取 PBA，作为「flush 必须换到新 PBA」的基准。 */
     media_fill_failc(count, 14U, 0U);
@@ -1702,7 +1702,7 @@ static MunitResult test_cache_failc_undo_read_error(const MunitParameter params[
     media_prepare(ftl_ut_live());
 
     ftl_ctx_s  *ftl   = ftl_ut_live();
-    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW / 2U)) & ~(DWORD)(L2P_ENTRIES_PER_REGION - 1U);
+    const DWORD lba   = (ftl_ut_lba_base() + (FTL_UT_LBA_WINDOW / 2U)) & ~(L2P_ENTRIES_PER_REGION - 1U);
     const DWORD count = FTL_UT_MATRIX_LBAS;
 
     /* 旧内容，保证失败页/同批未确认页有可区分的旧映射。 */
@@ -1757,7 +1757,7 @@ static MunitResult test_cache_cmt_writeback_retire(const MunitParameter params[]
 
     ftl_ctx_s   *ftl   = ftl_ut_live();
     l2p_cache_s *c     = ftl->cache;
-    const DWORD  lba   = (ftl_ut_lba_base() + 1024U) & ~(DWORD)(FTL_LBA_PER_PAIR - 1U);
+    const DWORD  lba   = (ftl_ut_lba_base() + 1024U) & ~(FTL_LBA_PER_PAIR - 1U);
     const DWORD  count = FTL_LBA_PER_PAIR;
 
     media_fill_failc(count, 15U, 0U);
@@ -1783,7 +1783,7 @@ static MunitResult test_cache_cmt_writeback_retire(const MunitParameter params[]
         {
             DWORD map = NAND_PBA_INVALID;
 
-            munit_assert_uint32(e->state, ==, (DWORD)L2P_CMT_CLEAN);
+            munit_assert_uint32(e->state, ==, L2P_CMT_CLEAN);
             munit_assert_true(pba_is_valid(e->pba));
             munit_assert_int(l2p_read_sync(c, lba + i, &map), ==, FTL_OK);
             munit_assert_uint32(e->pba, ==, map);
@@ -1806,7 +1806,7 @@ static MunitResult test_cache_cmt_writeback_retire(const MunitParameter params[]
             }
         }
         munit_assert_int(l2p_read_sync(c, lba + i, &map), ==, FTL_OK);
-        munit_assert_uint32(map, ==, (DWORD)NAND_PBA_INVALID);
+        munit_assert_uint32(map, ==, NAND_PBA_INVALID);
     }
 
     ftl_ut_trace_detail("cmt retire: lba=%lu count=%lu; valid entries CLEAN after flush; trim negative entries dropped", lba, count);

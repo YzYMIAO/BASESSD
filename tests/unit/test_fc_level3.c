@@ -185,7 +185,7 @@ static const fc_cmd_cfg_s s_l3_cfg_block_unlock_high[2] = {
 /** 需要运行时改 operation / chain / buf_own 的用例：先取基线，再逐字段改。 */
 static void l3_cfg_init(fc_cmd_cfg_s *conf, DWORD operation, DWORD crc)
 {
-    (void)memset(conf, 0, sizeof(*conf));
+    memset(conf, 0, sizeof(*conf));
     conf->operation = operation;
     conf->crc       = crc;
     conf->random    = FC_RANDOM_DISABLE;
@@ -215,7 +215,7 @@ static DWORD l3_hash(const char *s)
 
     for (; *s != '\0'; s++)
     {
-        h = (h << 5U) + h + (DWORD)(BYTE)*s;
+        h = (h << 5U) + h + (BYTE)*s;
     }
 
     return h;
@@ -232,7 +232,7 @@ static DWORD l3_rand(const char *test, const char *tag)
 /** 窗口内抽一个块号（闭区间 [L3_BLOCK_LO, L3_BLOCK_HI]）。tag 区分同一用例内的不同用途。 */
 static WORD l3_block_in_window(const char *test, const char *tag)
 {
-    const DWORD span = (DWORD)(L3_BLOCK_HI - L3_BLOCK_LO) + 1U;
+    const DWORD span = (L3_BLOCK_HI - L3_BLOCK_LO) + 1U;
 
     return (WORD)(L3_BLOCK_LO + (WORD)(l3_rand(test, tag) % span));
 }
@@ -245,7 +245,7 @@ static WORD l3_block_draw(const char *test)
 /** 抽一个 plane。 */
 static BYTE l3_plane_draw(const char *test)
 {
-    return (BYTE)(l3_rand(test, "plane") % (DWORD)PLANE_NUM);
+    return (BYTE)(l3_rand(test, "plane") % PLANE_NUM);
 }
 
 /** 抽内部搬移的目标块：同窗口，撞上源块就**环移一格**（不额外抽 ⇒ 抽样次数固定，
@@ -286,7 +286,7 @@ static BYTE l3_arr_contains(const BYTE *arr, BYTE n, BYTE v)
 
 static BYTE l3_pages_draw(const char *test, BYTE pages[L3_PAGES_MAX])
 {
-    const BYTE n = (BYTE)(L3_PAGES_MIN + (l3_rand(test, "npages") % (DWORD)(L3_PAGES_MAX - L3_PAGES_MIN + 1U)));
+    const BYTE n = (BYTE)(L3_PAGES_MIN + (l3_rand(test, "npages") % (L3_PAGES_MAX - L3_PAGES_MIN + 1U)));
 
     for (BYTE i = 0U; i < n; i++)
     {
@@ -294,7 +294,7 @@ static BYTE l3_pages_draw(const char *test, BYTE pages[L3_PAGES_MAX])
 
         do
         {
-            page = (BYTE)(l3_rand(test, "page") % (DWORD)PAGES_PER_BLOCK);
+            page = (BYTE)(l3_rand(test, "page") % PAGES_PER_BLOCK);
         } while (l3_arr_contains(pages, i, page) != 0U);
 
         pages[i] = page;
@@ -305,7 +305,7 @@ static BYTE l3_pages_draw(const char *test, BYTE pages[L3_PAGES_MAX])
 
 static BYTE l3_cws_draw(const char *test, BYTE cws[L3_CWS_MAX])
 {
-    const BYTE n = (BYTE)(L3_CWS_MIN + (l3_rand(test, "ncws") % (DWORD)(L3_CWS_MAX - L3_CWS_MIN + 1U)));
+    const BYTE n = (BYTE)(L3_CWS_MIN + (l3_rand(test, "ncws") % (L3_CWS_MAX - L3_CWS_MIN + 1U)));
 
     for (BYTE i = 0U; i < n; i++)
     {
@@ -313,7 +313,7 @@ static BYTE l3_cws_draw(const char *test, BYTE cws[L3_CWS_MAX])
 
         do
         {
-            cw = (BYTE)(l3_rand(test, "cw") % (DWORD)CW_NUM);
+            cw = (BYTE)(l3_rand(test, "cw") % CW_NUM);
         } while (l3_arr_contains(cws, i, cw) != 0U);
 
         cws[i] = cw;
@@ -348,7 +348,7 @@ static void verify_chain_paa(const fc_cmd_s *cmd)
 
         /* 证据明细（--log-visible debug）：逐条 desc 打出它自己声明的 plane / cw /
          * PAA——「链槽位与 CW 号解耦」这件事只有打出来才看得见。 */
-        test_trace_detail("chain[%hhu] plane=%lu cw=%hu PAA=0x%08lX USER==PAA", i, paa_to_plane(desc->paa), paa_to_cw(desc->paa), desc->paa);
+        test_trace_detail("chain[%hhu] plane=%hhu cw=%hhu PAA=0x%08lX USER==PAA", i, paa_to_plane(desc->paa), paa_to_cw(desc->paa), desc->paa);
     }
 }
 
@@ -387,7 +387,7 @@ static BYTE verify_cw_status_erased(const fc_cmd_s *cmd)
             char stbuf[32];
 
             (void)fc_cw_status_str(desc->status, stbuf, sizeof(stbuf));
-            munit_errorf("chain[%hhu] plane=%lu cw=%hu status=%s: erased-page read has unexpected error bits (allowed CRC|META|EMPTY)", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), stbuf);
+            munit_errorf("chain[%hhu] plane=%hhu cw=%hhu status=%s: erased-page read has unexpected error bits (allowed CRC|META|EMPTY)", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), stbuf);
             all_ok = 0U;
         }
 
@@ -404,7 +404,7 @@ static void read_page_verify(WORD block, WORD page, BYTE plane_bitmap, BYTE eras
     fc_cmd_s   *cmd;
     DWORD       meta;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page;
@@ -456,7 +456,7 @@ static void read_block_verify_erased(WORD block, BYTE plane_bitmap)
     /* 证据摘要（--log-visible info）：页数 + 逐槽比过的字节数。
      * 调用方负责「先写 PAA 图案、再擦」——本函数只把擦除后的 USER 区判成全 0xFF；
      * 写在前，才使这条判据能区分「擦除清掉了旧数据」与「读回了未写过的空白块」。 */
-    const DWORD user_bytes = (DWORD)PAGES_PER_BLOCK * (DWORD)test_plane_count(plane_bitmap) * CW_NUM * FC_BUFFER_USER_SIZE;
+    const DWORD user_bytes = PAGES_PER_BLOCK * test_plane_count(plane_bitmap) * CW_NUM * FC_BUFFER_USER_SIZE;
 
     test_trace_summary("erased block=%hu bm=0x%02hhX: %d pages, %lu B all 0xFF (逐 CW SUCCESS)", block, plane_bitmap, PAGES_PER_BLOCK, user_bytes);
 }
@@ -608,7 +608,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     /* 证据摘要（--log-visible info）：六条命令的**实读字节**。
      * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名 / 唯一 ID 才说明 NAND 真的答了话。
      * PARAM_PAGE 与 SIG 是**同一份签名的两条路径**（ECh 走 desc 链落 USER / 90h+20h 走 CQ param）。 */
-    test_trace_summary("RESET ok; READ_ID=%02hhX %02hhX %02hhX %02hhX %02hhX; PARAM_PAGE=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c); GET_FEATURES(0x01) ok; SIG(90h+20h)=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c)", id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3], id_bytes[4], onfi_bytes[0], onfi_bytes[1], onfi_bytes[2], onfi_bytes[3], (char)onfi_bytes[0], (char)onfi_bytes[1], (char)onfi_bytes[2], (char)onfi_bytes[3], sig_bytes[0], sig_bytes[1], sig_bytes[2], sig_bytes[3], (char)sig_bytes[0], (char)sig_bytes[1], (char)sig_bytes[2], (char)sig_bytes[3]);
+    test_trace_summary("RESET ok; READ_ID=%02hhX %02hhX %02hhX %02hhX %02hhX; PARAM_PAGE=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c); GET_FEATURES(0x01) ok; SIG(90h+20h)=%02hhX %02hhX %02hhX %02hhX (%c%c%c%c)", id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3], id_bytes[4], onfi_bytes[0], onfi_bytes[1], onfi_bytes[2], onfi_bytes[3], onfi_bytes[0], onfi_bytes[1], onfi_bytes[2], onfi_bytes[3], sig_bytes[0], sig_bytes[1], sig_bytes[2], sig_bytes[3], sig_bytes[0], sig_bytes[1], sig_bytes[2], sig_bytes[3]);
 
     test_trace_summary("UNIQUE_ID(16B)=%02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX", uid_bytes[0], uid_bytes[1], uid_bytes[2], uid_bytes[3], uid_bytes[4], uid_bytes[5], uid_bytes[6], uid_bytes[7], uid_bytes[8], uid_bytes[9], uid_bytes[10], uid_bytes[11], uid_bytes[12], uid_bytes[13], uid_bytes[14], uid_bytes[15]);
 
@@ -658,7 +658,7 @@ static void l3_feature_get(BYTE addr, BYTE out[4])
 
     completion = test_submit_wait(cmd);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-    (void)memcpy(out, &completion.param.value, 4U);
+    memcpy(out, &completion.param.value, 4U);
 
     fc_command_release(cmd->cmd_id);
 }
@@ -671,7 +671,7 @@ static void l3_feature_set(BYTE addr, const BYTE in[4])
     fc_cmd_status_s completion;
 
     cmd->feature_addr = addr;
-    (void)memcpy(&cmd->param.value, in, 4U);
+    memcpy(&cmd->param.value, in, 4U);
 
     completion = test_submit_wait(cmd);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -795,7 +795,7 @@ static BYTE           g_l3_prio_used;
 
 static void l3_prio_reset(void)
 {
-    (void)memset(g_l3_prio_slots, 0, sizeof(g_l3_prio_slots));
+    memset(g_l3_prio_slots, 0, sizeof(g_l3_prio_slots));
     g_l3_prio_used = 0U;
 }
 
@@ -808,7 +808,7 @@ static BYTE l3_prio_submit(BYTE operation, BYTE addr, const BYTE in[4], BYTE pri
     fc_cmd_cfg_s conf;
     fc_cmd_s    *cmd;
 
-    l3_cfg_init(&conf, (DWORD)operation, (DWORD)FC_CRC_ENABLE);
+    l3_cfg_init(&conf, operation, FC_CRC_ENABLE);
 
     munit_assert_uint32(g_l3_prio_used, <, L3_PRIO_SLOTS);
 
@@ -817,15 +817,15 @@ static BYTE l3_prio_submit(BYTE operation, BYTE addr, const BYTE in[4], BYTE pri
 
     cmd->feature_addr  = addr;
     cmd->high_priority = priority; /* 提交前设——fc_submit 按它选 SQ/HSQ */
-    if ((operation == (BYTE)OP_SET_FEATURES) && (in != NULL))
+    if ((operation == OP_SET_FEATURES) && (in != NULL))
     {
-        (void)memcpy(&cmd->param.value, in, 4U);
+        memcpy(&cmd->param.value, in, 4U);
     }
 
     munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
 
     g_l3_prio_slots[g_l3_prio_used].cmd    = cmd;
-    g_l3_prio_slots[g_l3_prio_used].is_get = (operation == (BYTE)OP_GET_FEATURES) ? 1U : 0U;
+    g_l3_prio_slots[g_l3_prio_used].is_get = (operation == OP_GET_FEATURES) ? 1U : 0U;
     return g_l3_prio_used++;
 }
 
@@ -857,7 +857,7 @@ static void l3_prio_drain(void)
                 {
                     if (g_l3_prio_slots[j].is_get != 0U)
                     {
-                        (void)memcpy(g_l3_prio_slots[j].out, &completion.param.value, 4U);
+                        memcpy(g_l3_prio_slots[j].out, &completion.param.value, 4U);
                     }
                     fc_command_release(g_l3_prio_slots[j].cmd->cmd_id);
                     g_l3_prio_slots[j].cmd = NULL;
@@ -897,17 +897,17 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
 
     /* ── Step 1：SQ 单命令基线 ── */
     l3_prio_reset();
-    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, (BYTE)FC_CHAIN_END);
-    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, (BYTE)FC_CHAIN_END);
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, FC_CHAIN_END);
+    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, FC_CHAIN_END);
     l3_prio_drain();
     munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]);
     test_trace_summary("step1 SQ 基线: set(%02hhX) -> get 读回 %02hhX", x[0], g_l3_prio_slots[sq_get].out[0]);
 
     /* ── Step 2：HSQ 真会插队（set1(y) 抢在 SQ 的 set0(x) 之前落盘） ── */
     l3_prio_reset();
-    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, (BYTE)FC_CHAIN_END);
-    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, (BYTE)FC_CHAIN_END);
-    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, (BYTE)FC_CHAIN_END);
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, FC_CHAIN_END);
+    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, FC_CHAIN_END);
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, FC_CHAIN_END);
     l3_prio_drain();
     munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]); /* y 先落、被 x 覆盖 ⇒ 读回 x */
     l3_feature_get(L3_FEATURE_TIMING_MODE, final);
@@ -918,7 +918,7 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
     l3_prio_reset();
     for (BYTE k = 0U; k < 8U; k++)
     {
-        const BYTE chain_bit = (k < 7U) ? (BYTE)FC_CHAIN_MORE : (BYTE)FC_CHAIN_END;
+        const BYTE chain_bit = (k < 7U) ? FC_CHAIN_MORE : FC_CHAIN_END;
 
         if ((k % 2U) == 0U)
         {
@@ -934,8 +934,8 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
     (void)fc_service();
 
     /* 链没结束就往 HSQ 投同 LUN 的 set(y)/get(y) —— 链锁必须把它们挡到链尾之后。 */
-    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, (BYTE)FC_CHAIN_END);
-    hsq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 1U, (BYTE)FC_CHAIN_END);
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, FC_CHAIN_END);
+    hsq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 1U, FC_CHAIN_END);
 
     l3_prio_drain();
 
@@ -973,7 +973,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
 {
     /* ⚠ OP_READ_STATUS 是**本项目 op 表的下标**（onfi_1_0.h:107 = 6），不是线上命令字节。
      * 证据里两个都要打——只打下标会被读成「ONFI 命令 0x06」，那是误导。 */
-    static const BYTE status_ops[2]  = {(BYTE)OP_READ_STATUS, (BYTE)OP_READ_STATUS_ENHANCED};
+    static const BYTE status_ops[2]  = {OP_READ_STATUS, OP_READ_STATUS_ENHANCED};
     static const BYTE status_cmds[2] = {NAND_CMD_READ_STATUS, NAND_CMD_READ_STATUS_ENHANCED};
 
     (void)params;
@@ -989,7 +989,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         fc_cmd_cfg_s conf;
         fc_cmd_s    *cmd;
 
-        l3_cfg_init(&conf, (DWORD)status_ops[i], (DWORD)FC_CRC_ENABLE);
+        l3_cfg_init(&conf, status_ops[i], FC_CRC_ENABLE);
         cmd = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
         fc_cmd_status_s completion;
 
@@ -1034,7 +1034,7 @@ static fc_cmd_status_s l3_submit_with_disarmed_engine(fc_cmd_s *cmd)
     fc_cmd_status_s completion;
     BYTE            completed = 0U;
 
-    (void)memset(&completion, 0, sizeof(completion));
+    memset(&completion, 0, sizeof(completion));
 
     munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
     fc_nand_engine_set_armed(0U);
@@ -1067,10 +1067,10 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
 
     test_trace_begin();
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block;
     addr.plane = 0U;
-    addr.page  = (BYTE)(PAGES_PER_BLOCK / 2U);
+    addr.page  = (PAGES_PER_BLOCK / 2U);
 
     /* ① 多 plane 编程：8 条 desc，flat 位图 0x0FF */
     {
@@ -1078,8 +1078,8 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
         fc_cmd_s       *cmd;
         fc_cmd_status_s completion;
 
-        (void)memset(&config, 0, sizeof(config));
-        config.operation = (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE;
+        memset(&config, 0, sizeof(config));
+        config.operation = OP_PROGRAM_PAGE_MULTI_PLANE;
         config.random    = FC_RANDOM_DISABLE;
         config.crc       = FC_CRC_ENABLE;
         config.ldpc      = FC_ECC_MODE_LDPC_RAW;
@@ -1089,7 +1089,7 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_NAND_FAIL, !=, 0U);
         munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, cw_bitmap);
-        munit_assert_uint32(test_cw_count(cmd), ==, (DWORD)(PLANE_NUM * CW_NUM));
+        munit_assert_uint8(test_cw_count(cmd), ==, (PLANE_NUM * CW_NUM));
 
         for (BYTE i = 0U; i < test_cw_count(cmd); i++)
         {
@@ -1106,8 +1106,8 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
         fc_cmd_s       *cmd;
         fc_cmd_status_s completion;
 
-        (void)memset(&config, 0, sizeof(config));
-        config.operation = (DWORD)OP_ERASE_BLOCK_MULTI_PLANE;
+        memset(&config, 0, sizeof(config));
+        config.operation = OP_ERASE_BLOCK_MULTI_PLANE;
         config.random    = FC_RANDOM_DISABLE;
         config.crc       = FC_CRC_DISABLE;
         config.ldpc      = FC_ECC_MODE_LDPC_RAW;
@@ -1184,7 +1184,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
             fc_cmd_s   *cmd;
             DWORD       meta;
 
-            (void)memset(&src, 0, sizeof(src));
+            memset(&src, 0, sizeof(src));
             src.block = block;
             src.plane = plane;
             src.page  = page;
@@ -1203,13 +1203,13 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
             fc_cmd_s   *cmd;
             DWORD       meta;
 
-            (void)memset(&src, 0, sizeof(src));
+            memset(&src, 0, sizeof(src));
             src.block = block;
             src.plane = plane;
             src.page  = page;
             meta      = pba_from_addr(&src);
 
-            (void)memset(&dest_addr, 0, sizeof(dest_addr));
+            memset(&dest_addr, 0, sizeof(dest_addr));
             dest_addr.block = dest;
             dest_addr.plane = plane;
             dest_addr.page  = page;
@@ -1232,7 +1232,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         DWORD           tag;
         fc_cmd_status_s completion;
 
-        (void)memset(&src, 0, sizeof(src));
+        memset(&src, 0, sizeof(src));
         src.block = block;
         src.plane = plane;
         src.page  = page;
@@ -1248,7 +1248,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
      * 这一句是本用例的核心判据——「按源块坐标比」而不是按目标块，打出来才看得出
      * Step 5 的期望值取对了（错取目标坐标会静默判成"数据错"，或更糟：恒真通过）。
      * plane / src / dest 都是抽出来的 ⇒ 必须打出来，否则有 seed 也对不上是哪个块。 */
-    const DWORD user_bytes = (DWORD)PAGES_PER_BLOCK * CW_NUM * FC_BUFFER_USER_SIZE;
+    const DWORD user_bytes = PAGES_PER_BLOCK * CW_NUM * FC_BUFFER_USER_SIZE;
 
     test_trace_summary("move plane=%hhu block=%hu -> dest=%hu (src≠dest): %d pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", plane, block, dest, PAGES_PER_BLOCK, CW_NUM, user_bytes);
 
@@ -1381,8 +1381,8 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
      * 随后一条 31h 输出 32（这才证明跳页真的生效），最后 3Fh 收尾。
      * 详见 test_read_cache_random（fc_test_common.h / .c）。 */
     {
-        const WORD prev_page = (WORD)(PAGES_PER_BLOCK / 4U); /* 16 */
-        const WORD addr_page = (WORD)(PAGES_PER_BLOCK / 2U); /* 32 */
+        const WORD prev_page = (PAGES_PER_BLOCK / 4U); /* 16 */
+        const WORD addr_page = (PAGES_PER_BLOCK / 2U); /* 32 */
 
         test_read_cache_random(block, TEST_PLANE_BM(plane), prev_page, addr_page, L3_CFG(s_l3_cfg_read_page_cache_random, FC_CRC_DISABLE));
     }
@@ -1564,7 +1564,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             DWORD       meta;
             fc_cmd_s   *cmd;
 
-            (void)memset(&addr, 0, sizeof(addr));
+            memset(&addr, 0, sizeof(addr));
             addr.block = block;
             addr.plane = plane;
             addr.page  = page;
@@ -1668,7 +1668,7 @@ static MunitResult test_block_load_fetch(const MunitParameter params[], void *da
     test_prog_block(block, TEST_PLANE_BM(plane), L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_ENABLE), NULL);
 
     {
-        const WORD page = (WORD)(PAGES_PER_BLOCK / 2U);
+        const WORD page = (PAGES_PER_BLOCK / 2U);
 
         /* 加载：op 33，**不带 desc** —— 器件只把该页搬进页缓冲、不输出。 */
         test_load_page(block, TEST_PLANE_BM(plane), page, L3_CFG(s_l3_cfg_normal_read_page_without_data_out, FC_CRC_ENABLE));
@@ -1681,7 +1681,7 @@ static MunitResult test_block_load_fetch(const MunitParameter params[], void *da
     test_prog_block(block_mp, TEST_PLANE_BM_ALL, L3_CFG(s_l3_cfg_program_page_multi_plane, FC_CRC_DISABLE), NULL);
 
     {
-        const WORD page = (WORD)(PAGES_PER_BLOCK / 2U);
+        const WORD page = (PAGES_PER_BLOCK / 2U);
 
         /* 加载：op 29（multi-plane），**不带 desc**。 */
         test_load_page(block_mp, TEST_PLANE_BM_ALL, page, L3_CFG(s_l3_cfg_read_page_multi_plane_without_data_out, FC_CRC_DISABLE));
@@ -1735,14 +1735,14 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
     test_prog_block(block, TEST_PLANE_BM(plane), L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_ENABLE), NULL);
 
     {
-        const WORD  page = (WORD)(PAGES_PER_BLOCK / 2U);
+        const WORD  page = (PAGES_PER_BLOCK / 2U);
         nand_addr_s addr;
         DWORD       base;
         BYTE        got[4];
 
         /* 写路径的 META 基值：prog 命令 command->meta = 本页 PBA（见 test_prog_page）。
          * 每 CW 的 META = (base & ~PLANE_CW_MASK) | plane_cw。 */
-        (void)memset(&addr, 0, sizeof(addr));
+        memset(&addr, 0, sizeof(addr));
         addr.block = block;
         addr.plane = plane;
         addr.page  = page;
@@ -1750,7 +1750,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
         for (BYTE cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2：不同 CW ⇒ 不同 META */
         {
-            const DWORD expected = (base & ~PLANE_CW_MASK) | ((DWORD)plane << PLANE_CW_SHIFT) | (DWORD)cw;
+            const DWORD expected = (base & ~PLANE_CW_MASK) | ((DWORD)plane << PLANE_CW_SHIFT) | cw;
             DWORD       got_meta;
 
             test_read_meta(block, plane, page, cw, got);
@@ -1770,7 +1770,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
             fc_cmd_s       *cmd;
             fc_cmd_status_s completion;
 
-            (void)memset(&read_addr, 0, sizeof(read_addr));
+            memset(&read_addr, 0, sizeof(read_addr));
             read_addr.block = block;
             read_addr.plane = plane;
             read_addr.page  = page;
@@ -1782,7 +1782,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
             for (BYTE cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2 */
             {
-                const DWORD expected = (base & ~PLANE_CW_MASK) | ((DWORD)plane << PLANE_CW_SHIFT) | (DWORD)cw;
+                const DWORD expected = (base & ~PLANE_CW_MASK) | ((DWORD)plane << PLANE_CW_SHIFT) | cw;
                 BYTE       *meta_ptr = fc_buffer_get_meta(cmd->cmd_id, cw);
                 DWORD       got_meta;
 
@@ -1797,7 +1797,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
             /* 契约：cw_index 不在链上 → NULL（本命令只覆盖该 plane 的 CW 0..CW_NUM-1，
              * 传 CW_NUM 必然落空）。 */
-            munit_assert_null(fc_buffer_get_meta(cmd->cmd_id, (BYTE)CW_NUM));
+            munit_assert_null(fc_buffer_get_meta(cmd->cmd_id, CW_NUM));
 
             fc_command_release(cmd->cmd_id);
         }
@@ -1836,7 +1836,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
  * 偏移只占低 9 bit（0..508），与 cw 字段不重叠。 */
 static DWORD l3_user_pattern_word(WORD cw, WORD user_offset)
 {
-    return (DWORD)0xA5C00000UL | ((DWORD)cw << 16U) | (DWORD)user_offset;
+    return 0xA5C00000UL | ((DWORD)cw << 16U) | (DWORD)user_offset;
 }
 
 /** 编程一页，各 CW 的 USER 区按 4 字节槽填 l3_user_pattern_word。
@@ -1853,13 +1853,13 @@ static fc_cmd_status_s l3_prog_page_pattern(WORD block, BYTE plane, WORD page)
     ASSERT(block < BLOCKS_PER_PLANE);
     ASSERT(page < PAGES_PER_BLOCK);
 
-    (void)memset(&config, 0, sizeof(config));
-    config.operation = (DWORD)OP_NORMAL_PROGRAM_PAGE;
+    memset(&config, 0, sizeof(config));
+    config.operation = OP_NORMAL_PROGRAM_PAGE;
     config.crc       = FC_CRC_ENABLE;
     config.random    = FC_RANDOM_DISABLE;
     config.ldpc      = FC_ECC_MODE_LDPC_RAW;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block;
     addr.plane = plane;
     addr.page  = (BYTE)page;
@@ -1875,7 +1875,7 @@ static fc_cmd_status_s l3_prog_page_pattern(WORD block, BYTE plane, WORD page)
         for (WORD off = 0U; off < FC_BUFFER_USER_SIZE; off += 4U)
         {
             const DWORD word = l3_user_pattern_word(cw, off);
-            (void)memcpy(user + off, &word, sizeof(word));
+            memcpy(user + off, &word, sizeof(word));
         }
     }
 
@@ -1896,13 +1896,13 @@ static void l3_read_column(WORD block, BYTE plane, WORD page, WORD column, BYTE 
     ASSERT(plane < PLANE_NUM);
     ASSERT(block < BLOCKS_PER_PLANE);
     ASSERT(page < PAGES_PER_BLOCK);
-    ASSERT((DWORD)column + 4U <= (DWORD)PAGE_SIZE); /* 先加宽再判，避免 WORD 回绕（H3） */
+    ASSERT((DWORD)column + 4U <= PAGE_SIZE); /* 先加宽再判，避免 WORD 回绕（H3） */
 
-    (void)memset(&config, 0, sizeof(config));
-    config.operation = (DWORD)OP_READ_COLUMN;
+    memset(&config, 0, sizeof(config));
+    config.operation = OP_READ_COLUMN;
     config.ldpc      = FC_ECC_MODE_LDPC_RAW;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block;
     addr.plane = plane;
     addr.page  = (BYTE)page;
@@ -1915,7 +1915,7 @@ static void l3_read_column(WORD block, BYTE plane, WORD page, WORD column, BYTE 
 
     completion = test_submit_wait(cmd);
 
-    (void)memcpy(out, &completion.param.value, 4U);
+    memcpy(out, &completion.param.value, 4U);
 
     test_trace_detail("read_column b=%hu plane=%hhu p=%hu col=%hu status=0x%hhX data=%02hhX%02hhX%02hhX%02hhX", block, plane, page, column, completion.status, out[0], out[1], out[2], out[3]);
 
@@ -1928,7 +1928,7 @@ static MunitResult test_read_column(const MunitParameter params[], void *data)
 {
     const BYTE      plane = l3_plane_draw("read_column");
     const WORD      block = l3_block_draw("read_column");
-    const BYTE      page  = (BYTE)(l3_rand("read_column", "page") % (DWORD)PAGES_PER_BLOCK);
+    const BYTE      page  = (BYTE)(l3_rand("read_column", "page") % PAGES_PER_BLOCK);
     BYTE            got[4];
     fc_cmd_status_s completion;
     DWORD           erased_word;
@@ -1967,7 +1967,7 @@ static MunitResult test_read_column(const MunitParameter params[], void *data)
     cw3_word = l3_le_word(got);
     munit_assert_uint32(cw3_word, ==, l3_user_pattern_word(3U, 456U));
 
-    l3_read_column(block, plane, page, (WORD)(PAGE_MAIN_SIZE + 4U), got);
+    l3_read_column(block, plane, page, (PAGE_MAIN_SIZE + 4U), got);
     cw3_next = l3_le_word(got);
     munit_assert_uint32(cw3_next, ==, l3_user_pattern_word(3U, 460U));
     munit_assert_uint32(cw3_next, !=, cw3_word);
@@ -2007,7 +2007,7 @@ static void lock_verify_block_usable(WORD block, BYTE plane, WORD page)
     nand_addr_s addr;
     DWORD       meta;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block;
     addr.plane = plane;
     addr.page  = page;
@@ -2038,7 +2038,7 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 
     const BYTE plane = l3_plane_draw("block_lock_ops");
     const WORD block = l3_block_draw("block_lock_ops");
-    const WORD page  = (WORD)(PAGES_PER_BLOCK / 2U);
+    const WORD page  = (PAGES_PER_BLOCK / 2U);
 
     test_trace_begin();
 
@@ -2200,7 +2200,7 @@ static WORD l3_stress_reap(void)
     (void)fc_poll_completions(buf, L3_STRESS_BATCH, &n);
     for (j = 0U; j < n; j++)
     {
-        l3_stress_slot_s *slot = l3_stress_slot_find((WORD)buf[j].cmd_id);
+        l3_stress_slot_s *slot = l3_stress_slot_find(buf[j].cmd_id);
 
         munit_assert_not_null(slot);
         munit_assert_uint32(buf[j].status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -2242,7 +2242,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
                     nand_addr_s addr;
                     BYTE        sent = 0U;
 
-                    (void)memset(&addr, 0, sizeof(addr));
+                    memset(&addr, 0, sizeof(addr));
                     addr.ch    = ch;
                     addr.ce    = ce;
                     addr.lun   = lun;
@@ -2262,7 +2262,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
                         else if (fc_submit(cmd->cmd_id) != FC_STATUS_OK)
                         {
                             /* SQ 满：还命令，本页还没发出去 */
-                            (void)fc_command_release(cmd->cmd_id);
+                            fc_command_release(cmd->cmd_id);
                         }
                         else
                         {
@@ -2296,7 +2296,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
                             const char         *sent_tag   = (sent != 0U) ? "sub  " : "retry";
                             const char         *polled_tag = (polled != 0U) ? " +poll" : "      ";
 
-                            (void)fc_get_resource_stats(&rs);
+                            fc_get_resource_stats(&rs);
                             test_trace_detail("p%02hu %s%s submitted=%lu drained=%lu | cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu cq=%hu", page, sent_tag, polled_tag, submitted, drained, rs.command_used, FC_COMMAND_POOL_DEPTH, rs.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, FC_BUFFER_POOL_DEPTH, rs.sq_used, rs.cq_used);
                         }
 
@@ -2322,7 +2322,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
     {
         fc_resource_stats_s rs;
 
-        (void)fc_get_resource_stats(&rs);
+        fc_get_resource_stats(&rs);
         test_trace_summary("phase done: submitted=%lu drained=%lu | cmd=%hu desc=%hu buf=%hu sq=%hu cq=%hu (应为全 0)", submitted, drained, rs.command_used, rs.descriptor_used, rs.buffer_used, rs.sq_used, rs.cq_used);
     }
 }
@@ -2374,7 +2374,7 @@ static WORD l3_buf_used(void)
 {
     fc_resource_stats_s stats;
 
-    (void)fc_get_resource_stats(&stats);
+    fc_get_resource_stats(&stats);
     return stats.buffer_used;
 }
 
@@ -2386,11 +2386,11 @@ static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, BYTE buf_own)
     fc_cmd_s    *cmd = fc_command_alloc();
     fc_cmd_cfg_s conf;
 
-    l3_cfg_init(&conf, (DWORD)OP_READ_ID, (DWORD)FC_CRC_ENABLE);
+    l3_cfg_init(&conf, OP_READ_ID, FC_CRC_ENABLE);
 
     munit_assert_not_null(cmd);
 
-    conf.buf_own = (DWORD)buf_own;
+    conf.buf_own = buf_own;
     cmd->config  = conf;
 
     cmd->ch                 = 0U;
@@ -2430,7 +2430,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         fc_cmd_cfg_s conf;
         fc_cmd_s    *cmd;
 
-        l3_cfg_init(&conf, (DWORD)OP_READ_ID, (DWORD)FC_CRC_ENABLE);
+        l3_cfg_init(&conf, OP_READ_ID, FC_CRC_ENABLE);
 
         conf.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE;
         cmd          = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
@@ -2447,10 +2447,10 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         fc_buf_id_t ubuf = fc_buffer_alloc();
         fc_cmd_s   *cmd;
 
-        munit_assert_uint32(ubuf, !=, (DWORD)FC_BUF_ID_INVALID);
+        munit_assert_uint32(ubuf, !=, FC_BUF_ID_INVALID);
         munit_assert_uint32(l3_buf_used(), ==, (base + 1U));
 
-        cmd = l3_buf_own_build_upper(ubuf, (BYTE)FC_BUF_OWN_UPPER_ALLOC_FC_FREE);
+        cmd = l3_buf_own_build_upper(ubuf, FC_BUF_OWN_UPPER_ALLOC_FC_FREE);
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, base); /* 11 完成即由 FC 归还上层的 buffer */
         fc_command_release(cmd->cmd_id);
@@ -2462,10 +2462,10 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         fc_buf_id_t ubuf = fc_buffer_alloc();
         fc_cmd_s   *cmd;
 
-        munit_assert_uint32(ubuf, !=, (DWORD)FC_BUF_ID_INVALID);
+        munit_assert_uint32(ubuf, !=, FC_BUF_ID_INVALID);
         munit_assert_uint32(l3_buf_used(), ==, (base + 1U));
 
-        cmd = l3_buf_own_build_upper(ubuf, (BYTE)FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE);
+        cmd = l3_buf_own_build_upper(ubuf, FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE);
         (void)test_submit_wait(cmd);
         munit_assert_uint32(l3_buf_used(), ==, (base + 1U)); /* 10 完成不归还 */
         fc_command_release(cmd->cmd_id);
@@ -2477,7 +2477,7 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
         fc_cmd_cfg_s conf;
         fc_cmd_s    *cmd;
 
-        l3_cfg_init(&conf, (DWORD)OP_READ_ID, (DWORD)FC_CRC_ENABLE);
+        l3_cfg_init(&conf, OP_READ_ID, FC_CRC_ENABLE);
 
         conf.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE;
         cmd          = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
@@ -2492,21 +2492,21 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
      * 申请次数 = 池深 − 基线（本用例正常时基线为 0；用增量写是为了不受前面用例的
      * 残留影响，让本用例独立成立）。 */
     {
-        const DWORD avail = (DWORD)FC_BUFFER_POOL_DEPTH - (DWORD)base;
+        const DWORD avail = FC_BUFFER_POOL_DEPTH - base;
         fc_buf_id_t ids[FC_BUFFER_POOL_DEPTH];
 
         for (DWORD i = 0U; i < avail; i++)
         {
             ids[i] = fc_buffer_alloc();
-            munit_assert_uint32(ids[i], !=, (DWORD)FC_BUF_ID_INVALID);
+            munit_assert_uint32(ids[i], !=, FC_BUF_ID_INVALID);
 
             for (DWORD j = 0U; j < i; j++)
             {
-                munit_assert_uint32(ids[i], !=, (DWORD)ids[j]);
+                munit_assert_uint32(ids[i], !=, ids[j]);
             }
         }
 
-        munit_assert_uint32(l3_buf_used(), ==, (DWORD)FC_BUFFER_POOL_DEPTH);
+        munit_assert_uint32(l3_buf_used(), ==, FC_BUFFER_POOL_DEPTH);
 
         for (DWORD i = 0U; i < avail; i++)
         {

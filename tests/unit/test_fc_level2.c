@@ -91,7 +91,7 @@ static DWORD l2_hash(const char *s)
 
     for (; *s != '\0'; s++)
     {
-        h = (h << 5U) + h + (DWORD)(BYTE)*s;
+        h = (h << 5U) + h + (BYTE)*s;
     }
 
     return h;
@@ -126,11 +126,11 @@ static nand_addr_s l2_addr_draw(const char *test, BYTE plane)
 {
     nand_addr_s addr;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     /* `% N` 的取值已在 [0, N) 内，赋值转换即那次显式窄化（H48 ②）。 */
-    addr.block = l2_rand(test, "block") % (DWORD)BLOCKS_PER_PLANE;
+    addr.block = l2_rand(test, "block") % BLOCKS_PER_PLANE;
     addr.plane = plane;
-    addr.page  = l2_rand(test, "page") % (DWORD)PAGES_PER_BLOCK;
+    addr.page  = l2_rand(test, "page") % PAGES_PER_BLOCK;
     addr.cw    = 0U;
 
     test_trace_detail("addr block=%hu page=%hhu plane=%hhu", addr.block, addr.page, addr.plane);
@@ -158,8 +158,8 @@ static fc_cmd_s *l2_cmd(const nand_addr_s *addr, DWORD cw_bitmap, BYTE random_mo
 
     ASSERT(addr != NULL);
 
-    (void)memset(&config, 0, sizeof(config));
-    config.operation = (DWORD)OP_NORMAL_PROGRAM_PAGE;
+    memset(&config, 0, sizeof(config));
+    config.operation = OP_NORMAL_PROGRAM_PAGE;
     config.random    = random_mode;
     config.crc       = crc_mode;
     config.ldpc      = FC_ECC_MODE_NORMAL;
@@ -186,7 +186,7 @@ static BYTE l2_user_matches_source(const fc_cmd_s *cmd)
     {
         const fc_desc_s *desc   = test_cw_desc(cmd, i);
         const BYTE      *buf    = test_cw_user(cmd, i);
-        const BYTE      *expect = test_source_slot((BYTE)paa_to_plane(desc->paa), (BYTE)paa_to_cw(desc->paa));
+        const BYTE      *expect = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
 
         for (WORD j = 0U; j < FC_BUFFER_USER_SIZE; j++)
         {
@@ -207,7 +207,7 @@ static void l2_verify_meta_written(const fc_cmd_s *cmd)
     {
         DWORD stored = 0U;
 
-        (void)memcpy(&stored, test_cw_base(cmd, i), FC_CRC_META_SIZE);
+        memcpy(&stored, test_cw_base(cmd, i), FC_CRC_META_SIZE);
         munit_assert_uint32(stored, ==, test_cw_desc(cmd, i)->meta);
 
         /* 证据（--log-visible info）：把**介质上真实写下的值**打出来。
@@ -226,10 +226,10 @@ static void l2_verify_crc_written(const fc_cmd_s *cmd)
     for (BYTE i = 0U; i < test_cw_count(cmd); i++)
     {
         const fc_desc_s *desc   = test_cw_desc(cmd, i);
-        const BYTE      *plain  = test_source_slot((BYTE)paa_to_plane(desc->paa), (BYTE)paa_to_cw(desc->paa));
+        const BYTE      *plain  = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
         DWORD            stored = 0U;
 
-        (void)memcpy(&stored, test_cw_base(cmd, i) + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
+        memcpy(&stored, test_cw_base(cmd, i) + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
         munit_assert_uint32(stored, ==, fc_crc_compute(plain));
 
         /* 证据（--log-visible info）：介质上的 CRC 字段 vs 明文重算值。
@@ -252,14 +252,14 @@ static void l2_verify_parity_nonzero(const fc_cmd_s *cmd)
         const BYTE *base = test_cw_base(cmd, i);
 
         /* test_check_pattern 返回 1 表示"整段都是该 pattern"⇒ 断言 == 0 即"非全 0" */
-        munit_assert_uint8(test_check_pattern(base + FC_BUFFER_DATA_SIZE, (WORD)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0x00U), ==, 0U);
+        munit_assert_uint8(test_check_pattern(base + FC_BUFFER_DATA_SIZE, (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0x00U), ==, 0U);
 
         /* 证据（--log-visible info）：parity 区首 4 字节的实际值（Stage 2 真写了）。 */
         if (i == 0U)
         {
             DWORD head = 0U;
 
-            (void)memcpy(&head, base + FC_BUFFER_DATA_SIZE, sizeof(head));
+            memcpy(&head, base + FC_BUFFER_DATA_SIZE, sizeof(head));
             test_trace_summary("parity written: %hhu CW, cw0[520..524)=0x%08lX != 0 (Stage 2 真写了)", test_cw_count(cmd), head);
         }
     }
@@ -393,7 +393,7 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
     /* 残留哨兵：未写到的字节应能看见 0xCC，避免"其实没写"被当成通过 */
-    (void)memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE);
+    memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE);
 
     /* META 与 PAA 同源（都是抽到的那一页）；PAA 非零 ⇒ USER 区填出来不是一片 0，
      * "根本没写"与"写了 0"分得开。低 3 位 = plane/cw = 0，与 meta_check 的自洽校验一致。 */
@@ -409,10 +409,10 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
     test_trace_summary("case=%s inject cw[%lu] bit %lu", c->name, off, bit);
 
     /* 步骤级没有原地解码，直接翻回来即可——不依赖任何"解码不改 buffer"假设 */
-    cw[off] ^= (BYTE)(1U << bit);
+    cw[off] ^= (1U << bit);
     munit_assert_uint8(fc_data_path_crc_check(cw), ==, c->expect_ok);
 
-    cw[off] ^= (BYTE)(1U << bit);
+    cw[off] ^= (1U << bit);
     munit_assert_uint8(fc_data_path_crc_check(cw), ==, 1U); /* 还原 ⇒ 必通过 */
 
     return MUNIT_OK;
@@ -456,20 +456,20 @@ static void l2_bit01_analyze(const BYTE *data, WORD len, l2_bit01_s *st)
     BYTE  cur;
     DWORD run;
 
-    (void)memset(st, 0, sizeof(*st));
+    memset(st, 0, sizeof(*st));
     if (len == 0U)
     {
         return;
     }
 
-    cur = (BYTE)((data[0] >> 7U) & 1U);
+    cur = ((data[0] >> 7U) & 1U);
     run = 0U;
 
     for (i = 0U; i < len; i++)
     {
         for (k = 0U; k < 8U; k++)
         {
-            const BYTE b = (BYTE)((data[i] >> (7U - k)) & 1U);
+            const BYTE b = ((data[i] >> (7U - k)) & 1U);
 
             if (b != 0U)
             {
@@ -514,7 +514,7 @@ static void l2_bit01_log(const char *tag, const l2_bit01_s *st, WORD len)
 {
     BYTE k;
 
-    test_trace_summary("%s: ones=%lu/%lu runs=%lu mean_x100=%lu", tag, st->ones, ((DWORD)len * 8U), st->runs, l2_bit01_mean_x100(st, len));
+    test_trace_summary("%s: ones=%lu/%u runs=%lu mean_x100=%lu", tag, st->ones, (len * 8U), st->runs, l2_bit01_mean_x100(st, len));
 
     for (k = 0U; k < 16U; k++)
     {
@@ -583,9 +583,9 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         }
         else
         {
-            (void)memset(cw + FC_CRC_USER_OFFSET, (kind == 0U) ? 0x00 : 0xFF, FC_BUFFER_USER_SIZE);
+            memset(cw + FC_CRC_USER_OFFSET, (kind == 0U) ? 0x00 : 0xFF, FC_BUFFER_USER_SIZE);
         }
-        (void)memcpy(plain, cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE);
+        memcpy(plain, cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE);
 
         l2_bit01_analyze(plain, FC_BUFFER_USER_SIZE, &before);
 
@@ -593,7 +593,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
         if (kind < 2U)
         {
             munit_assert_uint32(before.runs, ==, 1U);
-            munit_assert_uint32(before.ones, ==, (kind == 0U) ? 0U : ((DWORD)FC_BUFFER_USER_SIZE * 8U));
+            munit_assert_uint32(before.ones, ==, (kind == 0U) ? 0U : (FC_BUFFER_USER_SIZE * 8U));
         }
 
         fc_data_path_scramble(cw, seed);
@@ -669,7 +669,7 @@ static void l2_ecc_cw_build(const nand_addr_s *addr, BYTE *cw, BYTE *ref)
 {
     ASSERT(addr != NULL);
 
-    (void)memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE); /* 残留哨兵：没被写到的字节可见 */
+    memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE); /* 残留哨兵：没被写到的字节可见 */
     fc_data_path_meta_write(cw, pba_from_addr(addr));
     test_fill_paa(cw + FC_CRC_USER_OFFSET, paa_from_addr(addr));
     fc_data_path_crc_write(cw);
@@ -677,7 +677,7 @@ static void l2_ecc_cw_build(const nand_addr_s *addr, BYTE *cw, BYTE *ref)
 
     if (ref != NULL)
     {
-        (void)memcpy(ref, cw, FC_BUFFER_POOL_CW_SIZE);
+        memcpy(ref, cw, FC_BUFFER_POOL_CW_SIZE);
     }
 }
 
@@ -709,7 +709,7 @@ static void l2_ecc_flip(BYTE *cw, DWORD lo, DWORD hi, DWORD k)
             }
         } while (dup != 0U);
 
-        cw[pos[i] / 8U] ^= (BYTE)(1U << (pos[i] % 8U));
+        cw[pos[i] / 8U] ^= (1U << (pos[i] % 8U));
         test_trace_detail("  flip bit %lu (cw[%lu] bit %lu)", pos[i], (pos[i] / 8U), (pos[i] % 8U));
     }
 }
@@ -852,7 +852,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
      * ref 比永远不等。EXACT 用不到 inj。 */
     if (c->expect == L2_ECC_BOUND)
     {
-        (void)memcpy(inj, cw, FC_BUFFER_POOL_CW_SIZE);
+        memcpy(inj, cw, FC_BUFFER_POOL_CW_SIZE);
     }
 
     /* ③ 被测：唯一一次解码调用，就地纠错并回报纠正位数 */
@@ -888,7 +888,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
      *   p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c:182），parity 字节
      *   **不回写**，只能比数据区 520B。 */
     munit_assert_int(status, ==, FC_STATUS_OK);
-    munit_assert_uint8(ecc_bits, ==, (BYTE)total);
+    munit_assert_uint8(ecc_bits, ==, total);
     munit_assert_memory_equal((c->p_k == 0U) ? FC_BUFFER_POOL_CW_SIZE : FC_BUFFER_DATA_SIZE, cw, ref);
 
     return MUNIT_OK;
@@ -983,7 +983,7 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
     enc = l2_cmd(&addr, c->cw_bitmap, c->random_mode, c->crc_mode);
-    munit_assert_uint32(test_cw_count(enc), ==, c->n_cw);
+    munit_assert_uint8(test_cw_count(enc), ==, c->n_cw);
 
     test_fill_user_paa(enc);
     munit_assert_int(fc_data_path_encode(enc->cmd_id), ==, FC_STATUS_OK);
@@ -1014,13 +1014,13 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
     const nand_addr_s addr = l2_addr_draw("encode_crc_disabled", 0U);
     fc_cmd_s         *enc  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
 
-    munit_assert_uint32(test_cw_count(enc), ==, CW_NUM);
+    munit_assert_uint8(test_cw_count(enc), ==, CW_NUM);
 
     test_fill_user_paa(enc);
     for (BYTE i = 0U; i < test_cw_count(enc); i++)
     {
         /* 哨兵：确认 encode 在 CRC 关闭时确实没碰 [4,8) */
-        (void)memset(test_cw_base(enc, i) + FC_CRC_META_SIZE, 0xFF, FC_CRC_FIELD_SIZE);
+        memset(test_cw_base(enc, i) + FC_CRC_META_SIZE, 0xFF, FC_CRC_FIELD_SIZE);
     }
 
     munit_assert_int(fc_data_path_encode(enc->cmd_id), ==, FC_STATUS_OK);
@@ -1312,7 +1312,7 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
     const nand_addr_s addr = l2_addr_draw("process_read_masked_chain", 0U);
     fc_cmd_s         *cmd  = l2_cmd(&addr, 0x05U, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
-    munit_assert_uint32(test_cw_count(cmd), ==, 2U);
+    munit_assert_uint8(test_cw_count(cmd), ==, 2U);
 
     /* 链几何：plane 0 的 CW0 与 CW2（链位 0,1 与 CW 号 0,2 不同） */
     {
@@ -1368,7 +1368,7 @@ static MunitResult test_process_read_meta_error(const MunitParameter params[], v
     {
         nand_addr_s tampered = addr;
 
-        tampered.block = (WORD)((addr.block + 1U) % (DWORD)BLOCKS_PER_PLANE);
+        tampered.block = ((addr.block + 1U) % BLOCKS_PER_PLANE);
         cmd->meta      = pba_from_addr(&tampered);
     }
 
@@ -1410,7 +1410,7 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
     test_fill_user_paa(cmd);
     for (BYTE i = 0U; i < test_cw_count(cmd); i++)
     {
-        (void)memcpy(test_cw_base(cmd, i) + FC_CRC_META_SIZE, &sentinel, FC_CRC_FIELD_SIZE);
+        memcpy(test_cw_base(cmd, i) + FC_CRC_META_SIZE, &sentinel, FC_CRC_FIELD_SIZE);
     }
     munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
@@ -1450,14 +1450,14 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
     /* 哨兵：RAW 跳过 ECC 编码 ⇒ parity 区应原样保留 */
     for (BYTE i = 0U; i < test_cw_count(cmd); i++)
     {
-        (void)memset(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, 0xAA, FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE);
+        memset(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, 0xAA, FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE);
     }
 
     munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     for (BYTE i = 0U; i < test_cw_count(cmd); i++)
     {
-        munit_assert_uint32(test_check_pattern(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, (WORD)(FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0xAAU), ==, 1U);
+        munit_assert_uint32(test_check_pattern(test_cw_base(cmd, i) + FC_BUFFER_DATA_SIZE, (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE), 0xAAU), ==, 1U);
     }
 
     munit_assert_int(fc_data_path_process_read(cmd->cmd_id), ==, FC_STATUS_OK);
@@ -1516,7 +1516,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, BYTE random_mode, BYTE
     /* 不同 CW 填不同 pattern（USER 数据区 512B） */
     for (BYTE i = 0U; i < count; i++)
     {
-        (void)memset(test_cw_user(cmd, i), (BYTE)(0x10U + i), FC_BUFFER_USER_SIZE);
+        memset(test_cw_user(cmd, i), (0x10U + i), FC_BUFFER_USER_SIZE);
     }
 
     /* encode：META + CRC + 加扰? + ECC（RAID 不在 encode 里做，见 fc_data_path.c:191） */
@@ -1535,7 +1535,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, BYTE random_mode, BYTE
     /* 验证：全部 CW USER 数据区恢复原始 pattern */
     for (BYTE i = 0U; i < count; i++)
     {
-        munit_assert_uint32(test_check_pattern(test_cw_user(cmd, i), FC_BUFFER_USER_SIZE, (BYTE)(0x10U + i)), ==, 1U);
+        munit_assert_uint32(test_check_pattern(test_cw_user(cmd, i), FC_BUFFER_USER_SIZE, (0x10U + i)), ==, 1U);
     }
 
     fc_command_release(cmd->cmd_id);
@@ -1589,7 +1589,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     /* 不同 CW 填不同 pattern */
     for (BYTE i = 0U; i < cw_cnt; i++)
     {
-        (void)memset(test_cw_user(data_cmd, i), (BYTE)(0x20U + i), FC_BUFFER_USER_SIZE);
+        memset(test_cw_user(data_cmd, i), (0x20U + i), FC_BUFFER_USER_SIZE);
     }
 
     /* encode 数据命令：META → CRC → Random → ECC */
@@ -1598,7 +1598,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     /* 分配 parity 命令（同 CW 数，random=OFF） */
     fc_cmd_s *parity_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
-    munit_assert_uint32(test_cw_count(parity_cmd), ==, cw_cnt);
+    munit_assert_uint8(test_cw_count(parity_cmd), ==, cw_cnt);
 
     /* 同步 parity desc 的 META（模拟 fc_stripe_submit 中的行为） */
     for (BYTE i = 0U; i < cw_cnt; i++)
@@ -1627,17 +1627,17 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             buffers[i]          = test_cw_base(data_cmd, i);
             buffers[cw_cnt + i] = test_cw_base(parity_cmd, i);
         }
-        BYTE total_count = (BYTE)(cw_cnt + cw_cnt); /* 8 */
+        BYTE total_count = (cw_cnt + cw_cnt); /* 8 */
 
         /* 清空数据命令 CW0，模拟丢失 */
-        (void)memset(buffers[0U], 0, FC_BUFFER_POOL_CW_SIZE);
+        memset(buffers[0U], 0, FC_BUFFER_POOL_CW_SIZE);
 
         /* RAID XOR 重建 CW0：传入所有 CW（含 parity） */
         {
             BYTE recovered[FC_BUFFER_POOL_CW_SIZE];
 
             fc_raid_recover(recovered, buffers, total_count, 0U, FC_BUFFER_POOL_CW_SIZE);
-            (void)memcpy(buffers[0U], recovered, FC_BUFFER_POOL_CW_SIZE);
+            memcpy(buffers[0U], recovered, FC_BUFFER_POOL_CW_SIZE);
         }
 
         /* ECC 解码 + 解扰后验证数据 CW0~CW3（parity CW 不验证，它们存储 XOR 结果） */
@@ -1646,8 +1646,8 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             BYTE *base = buffers[i];
 
             munit_assert_int(fc_ecc_decode(base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
-            (void)fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, test_cw_seed(data_cmd, i));
-            munit_assert_uint32(test_check_pattern(test_cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (BYTE)(0x20U + i)), ==, 1U);
+            fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, test_cw_seed(data_cmd, i));
+            munit_assert_uint32(test_check_pattern(test_cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (0x20U + i)), ==, 1U);
         }
     }
 
@@ -1682,14 +1682,14 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 
 /* 整段访问用的两种 config：multi-plane 变体（段 = [0,2)）/ 单 plane 变体（段 = [plane,+1)）。 */
 static const fc_cmd_cfg_s L2_PROG_MULTI = {
-    .operation = (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE,
+    .operation = OP_PROGRAM_PAGE_MULTI_PLANE,
     .crc       = FC_CRC_ENABLE,
     .random    = FC_RANDOM_ENABLE,
     .ldpc      = FC_ECC_MODE_NORMAL,
 };
 
 static const fc_cmd_cfg_s L2_PROG_SINGLE = {
-    .operation = (DWORD)OP_NORMAL_PROGRAM_PAGE,
+    .operation = OP_NORMAL_PROGRAM_PAGE,
     .crc       = FC_CRC_ENABLE,
     .random    = FC_RANDOM_ENABLE,
     .ldpc      = FC_ECC_MODE_NORMAL,

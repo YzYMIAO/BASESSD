@@ -147,7 +147,7 @@ static DWORD test_page_pba(WORD block_index, BYTE plane_bitmap, WORD page_index)
 {
     nand_addr_s addr;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page_index;
@@ -183,17 +183,17 @@ static BYTE test_is_multi_op(BYTE operation)
 {
     switch (operation)
     {
-        case (BYTE)OP_PROGRAM_PAGE_MULTI_PLANE:
-        case (BYTE)OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT:
-        case (BYTE)OP_ERASE_BLOCK_MULTI_PLANE:
-        case (BYTE)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT: /* 多 plane 加载 */
-        case (BYTE)OP_RANDOM_DATA_READ_MULTI_PLANE:           /* 06h-E0h 多 plane 取数 */
-        case (BYTE)OP_TWO_PLANE_PROGRAM_CACHE:                /* Figure 74：双 plane cache 写 */
-        case (BYTE)OP_TWO_PLANE_PROGRAM_CACHE_END:            /* Figure 74：末页 10h 收尾 */
-        case (BYTE)OP_TWO_PLANE_PROGRAM_CACHE_FIRST:          /* Figure 74：首页（只查 FAIL） */
-        case (BYTE)OP_READ_PAGE_CACHE_START_SEQ_MP:           /* 双 plane cache 读首 pair */
-        case (BYTE)OP_READ_PAGE_CACHE_SEQ_MP:                 /* 双 plane cache 读顺序 pair */
-        case (BYTE)OP_READ_PAGE_CACHE_LAST_MP:                /* 双 plane cache 读末 pair */
+        case OP_PROGRAM_PAGE_MULTI_PLANE:
+        case OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT:
+        case OP_ERASE_BLOCK_MULTI_PLANE:
+        case OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT: /* 多 plane 加载 */
+        case OP_RANDOM_DATA_READ_MULTI_PLANE:           /* 06h-E0h 多 plane 取数 */
+        case OP_TWO_PLANE_PROGRAM_CACHE:                /* Figure 74：双 plane cache 写 */
+        case OP_TWO_PLANE_PROGRAM_CACHE_END:            /* Figure 74：末页 10h 收尾 */
+        case OP_TWO_PLANE_PROGRAM_CACHE_FIRST:          /* Figure 74：首页（只查 FAIL） */
+        case OP_READ_PAGE_CACHE_START_SEQ_MP:           /* 双 plane cache 读首 pair */
+        case OP_READ_PAGE_CACHE_SEQ_MP:                 /* 双 plane cache 读顺序 pair */
+        case OP_READ_PAGE_CACHE_LAST_MP:                /* 双 plane cache 读末 pair */
             return 1U;
         default:
             return 0U;
@@ -245,11 +245,11 @@ void test_capture_cmd(const fc_cmd_s *cmd)
         fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
-        BYTE *slot = test_source_slot((BYTE)paa_to_plane(desc->paa), (BYTE)paa_to_cw(desc->paa));
+        BYTE *slot = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
         BYTE *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
-        (void)memcpy(slot, user, FC_BUFFER_USER_SIZE);
+        memcpy(slot, user, FC_BUFFER_USER_SIZE);
 
         desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
@@ -272,7 +272,7 @@ void *test_setup(const MunitParameter params[], void *user_data)
 
     if (inited == 0U)
     {
-        (void)fc_init();
+        fc_init();
         inited = 1U;
     }
 
@@ -282,14 +282,14 @@ void *test_setup(const MunitParameter params[], void *user_data)
 
     if (g_source_data == NULL)
     {
-        const DWORD slots = (DWORD)CW_NUM * (DWORD)PLANE_NUM;
+        const DWORD slots = CW_NUM * PLANE_NUM;
 
         g_source_data = (BYTE *)malloc((size_t)FC_BUFFER_USER_SIZE * slots);
         munit_assert_not_null(g_source_data);
 
         /* 内容**不在这里填**：槽内容 = 各 CW 自己的 PAA，只有建链之后才知道。
          * 写路径（test_fill_user_paa）负责填。此处只清零，让「没写过」可辨认。 */
-        (void)memset(g_source_data, 0x00, (size_t)FC_BUFFER_USER_SIZE * slots);
+        memset(g_source_data, 0x00, (size_t)FC_BUFFER_USER_SIZE * slots);
     }
 
     if (g_cw_scratch == NULL)
@@ -298,7 +298,7 @@ void *test_setup(const MunitParameter params[], void *user_data)
         munit_assert_not_null(g_cw_scratch);
 
         /* 同样不预填：步骤级用例自己决定写什么（未写处应可见残留） */
-        (void)memset(g_cw_scratch, 0x00, (size_t)CW_TOTAL_MAX * FC_BUFFER_POOL_CW_SIZE);
+        memset(g_cw_scratch, 0x00, (size_t)CW_TOTAL_MAX * FC_BUFFER_POOL_CW_SIZE);
     }
 
     return NULL;
@@ -364,7 +364,7 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD met
      * ⇒ 地址里带 cw 只会让调用者以为它有效。断言 0 把这个误解挡在建链之前。
      * **例外**：OP_READ_META 无 desc 链，其 cw 就是列选择器（paa.cw → 列地址），
      * 必须允许携带。 */
-    ASSERT((addr->cw == 0U) || (config->operation == (DWORD)OP_READ_META));
+    ASSERT((addr->cw == 0U) || (config->operation == OP_READ_META));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
 
@@ -389,10 +389,10 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD met
      * FTL 侧边界会 pba_to_paa 后赋给 cmd->paa，本夹具照抄（paa_from_addr 忽略
      * ch/ce——上面三行已把 ch/ce/lun 镜像进 config，无拓扑损失）。 */
     cmd->config             = *config;
-    cmd->ch                 = (DWORD)addr->ch;
-    cmd->ce                 = (DWORD)addr->ce;
-    cmd->lun                = (DWORD)addr->lun;
-    cmd->config.multi_plane = (is_multi != 0U) ? (DWORD)PLANE_NUM : 0U;
+    cmd->ch                 = addr->ch;
+    cmd->ce                 = addr->ce;
+    cmd->lun                = addr->lun;
+    cmd->config.multi_plane = (is_multi != 0U) ? PLANE_NUM : 0U;
     cmd->paa                = paa_from_addr(addr);
     cmd->meta               = meta;
 
@@ -402,7 +402,7 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD met
     {
         /* 建链中途失败（desc / buffer 池空）：不就地回滚，整条 release 沿链回收
          * 已挂的 desc/buffer + 归还命令槽，再向上报「建不出来」。 */
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return NULL;
     }
 
@@ -440,7 +440,7 @@ fc_cmd_status_s test_erase_block(WORD block_index, BYTE plane_bitmap, const fc_c
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (BYTE)~TEST_PLANE_BM_ALL) == 0U); /* 不含段外 plane */
     ASSERT(block_index < BLOCKS_PER_PLANE);
-    ASSERT((config->operation == (DWORD)OP_ERASE_BLOCK) || (config->operation == (DWORD)OP_ERASE_BLOCK_MULTI_PLANE));
+    ASSERT((config->operation == OP_ERASE_BLOCK) || (config->operation == OP_ERASE_BLOCK_MULTI_PLANE));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
@@ -462,7 +462,7 @@ fc_cmd_status_s test_erase_block(WORD block_index, BYTE plane_bitmap, const fc_c
      * 不伪造 CW0 位，completion_all_cws 的空集分支写 cw_status[0] 兜住成败。
      * multi_plane 由 test_cmd_build 按 operation 派生——它是「本命令跨几个 plane」的
      * 真实属性，填它不为任何读者，只为让命令的声明几何不撒谎。 */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
 
@@ -485,7 +485,7 @@ fc_cmd_status_s test_prog_page(WORD block_index, BYTE plane_bitmap, WORD page_in
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (BYTE)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
-    ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE_FIRST) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
+    ASSERT((config->operation == OP_NORMAL_PROGRAM_PAGE) || (config->operation == OP_PROGRAM_PAGE_MULTI_PLANE) || (config->operation == OP_PROGRAM_PAGE_CACHE) || (config->operation == OP_PROGRAM_PAGE_CACHE_FIRST) || (config->operation == OP_TWO_PLANE_PROGRAM_CACHE) || (config->operation == OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
@@ -500,7 +500,7 @@ fc_cmd_status_s test_prog_page(WORD block_index, BYTE plane_bitmap, WORD page_in
     /* meta = 本页 PBA：写读同页自然一致，且**页地址整体进了 META** ⇒「读错页」被 Pass 4 ② 抓到。
      * cw_bitmap 由 plane_bitmap 正推（test_plane_cw_bitmap），与 test_cmd_build 内部
      * 按 cmd->paa/config.multi_plane 的段推导互为交叉检查。 */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page_index;
@@ -536,7 +536,7 @@ fc_cmd_status_s test_read_page(WORD block_index, BYTE plane_bitmap, WORD page_in
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (BYTE)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
-    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT));
+    ASSERT((config->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (config->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
@@ -551,7 +551,7 @@ fc_cmd_status_s test_read_page(WORD block_index, BYTE plane_bitmap, WORD page_in
     /* cw_bitmap 与 test_prog_page 同口径。meta 由调用者给：普通读传**本页 PBA**
      * （与写路径一致，否则 Pass 4 ② 报错）；内部搬移用例要传**源页 PBA**——那页的
      * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_level3.c 的搬移用例）。 */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page_index;
@@ -590,7 +590,7 @@ void test_prog_block(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg_s *co
     }
 
     /* 证据摘要（--log-visible info）：证明「真的写了这么多」。 */
-    const WORD cw_per_page = (WORD)(test_plane_count(plane_bitmap) * CW_NUM);
+    const WORD cw_per_page = (test_plane_count(plane_bitmap) * CW_NUM);
 
     test_trace_summary("prog block=%hu bm=0x%02hhX: %d pages x %hu CW x %u B", block_index, plane_bitmap, PAGES_PER_BLOCK, cw_per_page, FC_BUFFER_USER_SIZE);
 
@@ -616,7 +616,7 @@ void test_read_block(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg_s *co
 
     /* 证据摘要（--log-visible info）：页数 + **逐槽比过的字节数**——这是「读回真的
      * 与写入一致」的实证（判据是每个 CW 的 USER 区等于该 CW 自己的 PAA）。 */
-    const DWORD user_bytes = (DWORD)PAGES_PER_BLOCK * (DWORD)test_plane_count(plane_bitmap) * CW_NUM * FC_BUFFER_USER_SIZE;
+    const DWORD user_bytes = (DWORD)PAGES_PER_BLOCK * test_plane_count(plane_bitmap) * CW_NUM * FC_BUFFER_USER_SIZE;
 
     test_trace_summary("read block=%hu bm=0x%02hhX: %d pages PAA-verified, %lu B compared", block_index, plane_bitmap, PAGES_PER_BLOCK, user_bytes);
 
@@ -653,7 +653,7 @@ void test_prog_block_cache(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg
         fc_cmd_cfg_s    conf = *config;
         fc_cmd_status_s completion;
 
-        conf.operation = (page == 0U) ? (DWORD)OP_PROGRAM_PAGE_CACHE_FIRST : ((page < (WORD)(PAGES_PER_BLOCK - 1U)) ? (DWORD)OP_PROGRAM_PAGE_CACHE : (DWORD)OP_NORMAL_PROGRAM_PAGE);
+        conf.operation = (page == 0U) ? OP_PROGRAM_PAGE_CACHE_FIRST : ((page < (PAGES_PER_BLOCK - 1U)) ? OP_PROGRAM_PAGE_CACHE : OP_NORMAL_PROGRAM_PAGE);
 
         completion = test_prog_page(block_index, plane_bitmap, page, &conf, NULL);
 
@@ -679,12 +679,12 @@ void test_prog_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
     /* 前 PAGES_PER_BLOCK-1 页：Two-Plane Program Page Cache（80h-11h-80h-15h）；
      * 末页：OP_TWO_PLANE_PROGRAM_CACHE_END（80h-11h-80h-10h + FAILC 检查），
      * tLPROG 等整批完成。 */
-    for (WORD page = 0U; page < (WORD)(PAGES_PER_BLOCK - 1U); page++)
+    for (WORD page = 0U; page < (PAGES_PER_BLOCK - 1U); page++)
     {
         fc_cmd_status_s completion;
 
         conf           = *config;
-        conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+        conf.operation = (page == 0U) ? OP_TWO_PLANE_PROGRAM_CACHE_FIRST : OP_TWO_PLANE_PROGRAM_CACHE;
 
         completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, page, &conf, NULL);
 
@@ -695,9 +695,9 @@ void test_prog_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
         fc_cmd_status_s completion;
 
         conf           = *config;
-        conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
+        conf.operation = OP_TWO_PLANE_PROGRAM_CACHE_END;
 
-        completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, (WORD)(PAGES_PER_BLOCK - 1U), &conf, NULL);
+        completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, (PAGES_PER_BLOCK - 1U), &conf, NULL);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     }
 
@@ -722,7 +722,7 @@ static fc_cmd_status_s test_read_cache_step(WORD block_index, BYTE plane_bitmap,
     fc_cmd_s       *cmd;
     fc_cmd_status_s completion;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = output_page;
@@ -755,7 +755,7 @@ static fc_cmd_status_s test_cache_start_seq(WORD block_index, BYTE plane_bitmap,
     fc_cmd_s       *cmd;
     fc_cmd_status_s completion;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block     = block_index;
     addr.plane     = test_first_plane(plane_bitmap);
     addr.page      = page;
@@ -795,16 +795,16 @@ void test_read_block_cache(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* ① START_SEQ（00h-addr-30h + 31h）：输出 page 0，并预取 page 1。 */
-    completion = test_cache_start_seq(block_index, plane_bitmap, 0U, (DWORD)OP_READ_PAGE_CACHE_START_SEQ, config);
+    completion = test_cache_start_seq(block_index, plane_bitmap, 0U, OP_READ_PAGE_CACHE_START_SEQ, config);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, 0U, plane_bitmap);
 
     /* ② SEQ（31h）：第 i 次输出 page i、预取 page i+1；
      *    最后一次 SEQ 输出 page PAGES-2、预取 page PAGES-1，留给 LAST。 */
     conf           = *config;
-    conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ;
+    conf.operation = OP_READ_PAGE_CACHE_SEQ;
 
-    for (WORD page = 1U; page < (WORD)(PAGES_PER_BLOCK - 1U); page++)
+    for (WORD page = 1U; page < (PAGES_PER_BLOCK - 1U); page++)
     {
         completion = test_read_cache_step(block_index, plane_bitmap, page, &conf);
 
@@ -814,9 +814,9 @@ void test_read_block_cache(WORD block_index, BYTE plane_bitmap, const fc_cmd_cfg
 
     /* ③ LAST（3Fh）：输出 data register 里的最后一页（PAGES_PER_BLOCK-1）。 */
     {
-        const WORD last_page = (WORD)(PAGES_PER_BLOCK - 1U);
+        const WORD last_page = (PAGES_PER_BLOCK - 1U);
 
-        conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST;
+        conf.operation = OP_READ_PAGE_CACHE_LAST;
 
         completion = test_read_cache_step(block_index, plane_bitmap, last_page, &conf);
 
@@ -842,15 +842,15 @@ void test_read_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* ① START_SEQ_MP：输出 page0 pair，预取 page1 pair */
-    completion = test_cache_start_seq(block_index, TEST_PLANE_BM_ALL, 0U, (DWORD)OP_READ_PAGE_CACHE_START_SEQ_MP, config);
+    completion = test_cache_start_seq(block_index, TEST_PLANE_BM_ALL, 0U, OP_READ_PAGE_CACHE_START_SEQ_MP, config);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, 0U, TEST_PLANE_BM_ALL);
 
     /* ② SEQ_MP：输出 page1..page62（每步两 plane 都校验） */
     conf           = *config;
-    conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
+    conf.operation = OP_READ_PAGE_CACHE_SEQ_MP;
 
-    for (WORD page = 1U; page < (WORD)(PAGES_PER_BLOCK - 1U); page++)
+    for (WORD page = 1U; page < (PAGES_PER_BLOCK - 1U); page++)
     {
         completion = test_read_cache_step(block_index, TEST_PLANE_BM_ALL, page, &conf);
 
@@ -860,9 +860,9 @@ void test_read_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
 
     /* ③ LAST_MP：输出 page63 pair */
     {
-        const WORD last_page = (WORD)(PAGES_PER_BLOCK - 1U);
+        const WORD last_page = (PAGES_PER_BLOCK - 1U);
 
-        conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST_MP;
+        conf.operation = OP_READ_PAGE_CACHE_LAST_MP;
 
         completion = test_read_cache_step(block_index, TEST_PLANE_BM_ALL, last_page, &conf);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -901,7 +901,7 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const WORD blocks[PLANE_NUM], WORD pag
 
         ASSERT(blocks[plane] < BLOCKS_PER_PLANE);
 
-        (void)memset(&addr, 0, sizeof(addr));
+        memset(&addr, 0, sizeof(addr));
         addr.block = blocks[plane];
         addr.plane = plane;
         addr.page  = page_index;
@@ -916,12 +916,12 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const WORD blocks[PLANE_NUM], WORD pag
     cmd->ch                 = 0U;
     cmd->ce                 = 0U;
     cmd->lun                = 0U;
-    cmd->config.multi_plane = (DWORD)PLANE_NUM;
+    cmd->config.multi_plane = PLANE_NUM;
     cmd->meta               = lba_meta;
 
     if (ftl_cmd_setup_ppa_pair_cw(cmd, pba, test_plane_cw_bitmap(TEST_PLANE_BM_ALL)) != FTL_OK)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         munit_errorf("pair chain build failed (page=%hu)", page_index);
         return NULL;
     }
@@ -935,12 +935,12 @@ void test_prog_block_cache_multi_plane_pair(const WORD blocks[PLANE_NUM], const 
     ASSERT(config != NULL);
     ASSERT(blocks != NULL);
 
-    for (WORD page = 0U; page < (WORD)(PAGES_PER_BLOCK - 1U); page++)
+    for (WORD page = 0U; page < (PAGES_PER_BLOCK - 1U); page++)
     {
         fc_cmd_cfg_s    conf = *config;
         fc_cmd_status_s completion;
 
-        conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+        conf.operation = (page == 0U) ? OP_TWO_PLANE_PROGRAM_CACHE_FIRST : OP_TWO_PLANE_PROGRAM_CACHE;
 
         fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, page, (DWORD)page << 3, &conf);
 
@@ -954,9 +954,9 @@ void test_prog_block_cache_multi_plane_pair(const WORD blocks[PLANE_NUM], const 
         fc_cmd_cfg_s    conf = *config;
         fc_cmd_status_s completion;
 
-        conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
+        conf.operation = OP_TWO_PLANE_PROGRAM_CACHE_END;
 
-        fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, (WORD)(PAGES_PER_BLOCK - 1U), (DWORD)(PAGES_PER_BLOCK - 1U) << 3, &conf);
+        fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, (PAGES_PER_BLOCK - 1U), (PAGES_PER_BLOCK - 1U) << 3, &conf);
 
         test_fill_user_paa(cmd);
         completion = test_submit_wait(cmd);
@@ -985,15 +985,15 @@ void test_read_block_cache_multi_plane_pair(const WORD blocks[PLANE_NUM], const 
 
         if (page == 0U)
         {
-            conf.operation = (DWORD)OP_READ_PAGE_CACHE_START_SEQ_MP;
+            conf.operation = OP_READ_PAGE_CACHE_START_SEQ_MP;
         }
-        else if (page == (WORD)(PAGES_PER_BLOCK - 1U))
+        else if (page == (PAGES_PER_BLOCK - 1U))
         {
-            conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST_MP;
+            conf.operation = OP_READ_PAGE_CACHE_LAST_MP;
         }
         else
         {
-            conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
+            conf.operation = OP_READ_PAGE_CACHE_SEQ_MP;
         }
 
         fc_cmd_s *cmd = test_cmd_build_pair_cross_block(blocks, page, (DWORD)page << 3, &conf);
@@ -1029,7 +1029,7 @@ void test_read_cache_random(WORD block_index, BYTE plane_bitmap, WORD prev_page,
     ASSERT(prev_page < PAGES_PER_BLOCK);
     ASSERT(addr_page < PAGES_PER_BLOCK);
     ASSERT(prefetched < PAGES_PER_BLOCK);
-    ASSERT((WORD)(addr_page + 1U) < PAGES_PER_BLOCK);
+    ASSERT((addr_page + 1U) < PAGES_PER_BLOCK);
     /* START_SEQ 已预取 prev+1；RANDOM 的地址页若要和新输出区分，不能等于 prev+1。 */
     ASSERT(addr_page != prefetched);
 
@@ -1041,17 +1041,17 @@ void test_read_cache_random(WORD block_index, BYTE plane_bitmap, WORD prev_page,
      * 地址页只进 data register，输出始终落后一页。 */
 
     /* ① START_SEQ：输出 prev，预取 prev+1 */
-    completion = test_cache_start_seq(block_index, plane_bitmap, prev_page, (DWORD)OP_READ_PAGE_CACHE_START_SEQ, config);
+    completion = test_cache_start_seq(block_index, plane_bitmap, prev_page, OP_READ_PAGE_CACHE_START_SEQ, config);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, prev_page, plane_bitmap);
 
     /* ② RANDOM(addr)：输出 prev+1，预取 addr */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block     = block_index;
     addr.plane     = test_first_plane(plane_bitmap);
     addr.page      = addr_page;
     conf           = *config;
-    conf.operation = (DWORD)OP_READ_PAGE_CACHE_RANDOM;
+    conf.operation = OP_READ_PAGE_CACHE_RANDOM;
     meta           = test_page_pba(block_index, plane_bitmap, prefetched);
 
     cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), meta, &conf);
@@ -1075,7 +1075,7 @@ void test_read_cache_random(WORD block_index, BYTE plane_bitmap, WORD prev_page,
 
     /* ③ SEQ(31h)：输出 RANDOM 预取的 addr，预取 addr+1 */
     conf           = *config;
-    conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ;
+    conf.operation = OP_READ_PAGE_CACHE_SEQ;
 
     completion = test_read_cache_step(block_index, plane_bitmap, addr_page, &conf);
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1083,9 +1083,9 @@ void test_read_cache_random(WORD block_index, BYTE plane_bitmap, WORD prev_page,
 
     /* ④ LAST(3Fh)：输出 addr+1 */
     {
-        const WORD next_page = (WORD)(addr_page + 1U);
+        const WORD next_page = (addr_page + 1U);
 
-        conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST;
+        conf.operation = OP_READ_PAGE_CACHE_LAST;
 
         completion = test_read_cache_step(block_index, plane_bitmap, next_page, &conf);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
@@ -1121,7 +1121,7 @@ void test_load_page(WORD block_index, BYTE plane_bitmap, WORD page_index, const 
     ASSERT((plane_bitmap & (BYTE)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
     ASSERT(page_index < PAGES_PER_BLOCK);
-    ASSERT((config->operation == (DWORD)OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) || (config->operation == (DWORD)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT));
+    ASSERT((config->operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) || (config->operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
@@ -1139,7 +1139,7 @@ void test_load_page(WORD block_index, BYTE plane_bitmap, WORD page_index, const 
      * ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。行地址由 FC 从 command->paa 填进
      * plane_paa[]（fc_build_dispatch_request 的「无 desc 加载」分支）。meta 不参与（无数据路径）。
      * 提交后器件把目标页搬进页缓冲、**不输出到总线**——数据随后由 test_random_data_read 取回。 */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page_index;
@@ -1175,7 +1175,7 @@ void test_random_data_read(WORD block_index, BYTE plane_bitmap, WORD page_index,
     ASSERT((plane_bitmap & (BYTE)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
     ASSERT(page_index < PAGES_PER_BLOCK);
-    ASSERT((config->operation == (DWORD)OP_RANDOM_DATA_READ) || (config->operation == (DWORD)OP_RANDOM_DATA_READ_MULTI_PLANE));
+    ASSERT((config->operation == OP_RANDOM_DATA_READ) || (config->operation == OP_RANDOM_DATA_READ_MULTI_PLANE));
 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
@@ -1189,7 +1189,7 @@ void test_random_data_read(WORD block_index, BYTE plane_bitmap, WORD page_index,
         ASSERT(test_plane_count(plane_bitmap) == 1U);
     }
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);
     addr.page  = page_index;
@@ -1230,10 +1230,10 @@ void test_read_meta(WORD block_index, BYTE plane, WORD page_index, BYTE cw, BYTE
 
     /* 无 desc 链：cw_bitmap = 0 走 ftl_cmd_needs_desc_chain 短路（has_data = 0），
      * desc_id 保持 INVALID；cw 由 pba 携带 → FC 转成列地址。 */
-    (void)memset(&config, 0, sizeof(config));
-    config.operation = (DWORD)OP_READ_META;
+    memset(&config, 0, sizeof(config));
+    config.operation = OP_READ_META;
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = plane;
     addr.page  = page_index;
@@ -1243,7 +1243,7 @@ void test_read_meta(WORD block_index, BYTE plane, WORD page_index, BYTE cw, BYTE
 
     completion = test_submit_wait(cmd);
 
-    (void)memcpy(out, &completion.param.value, 4U);
+    memcpy(out, &completion.param.value, 4U);
 
     test_trace_detail("read_meta b=%hu plane=%hhu p=%hu cw=%hhu status=0x%hhX meta=%02hhX%02hhX%02hhX%02hhX", block_index, plane, page_index, cw, completion.status, out[0], out[1], out[2], out[3]);
 
@@ -1268,12 +1268,12 @@ void test_block_lock_cmd(WORD block_index, BYTE plane, const fc_cmd_cfg_s *confi
     fc_cmd_status_s completion;
 
     ASSERT(config != NULL);
-    ASSERT((config->operation == (DWORD)OP_BLOCK_UNLOCK_LOW) || (config->operation == (DWORD)OP_BLOCK_UNLOCK_HIGH) || (config->operation == (DWORD)OP_BLOCK_LOCK));
+    ASSERT((config->operation == OP_BLOCK_UNLOCK_LOW) || (config->operation == OP_BLOCK_UNLOCK_HIGH) || (config->operation == OP_BLOCK_LOCK));
     ASSERT(plane < PLANE_NUM);
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* cw_bitmap = 0 → ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。 */
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = plane;
 
@@ -1304,11 +1304,11 @@ BYTE test_block_lock_status(WORD block_index, BYTE plane, const fc_cmd_cfg_s *co
     BYTE            raw;
 
     ASSERT(config != NULL);
-    ASSERT(config->operation == (DWORD)OP_BLOCK_LOCK_STATUS);
+    ASSERT(config->operation == OP_BLOCK_LOCK_STATUS);
     ASSERT(plane < PLANE_NUM);
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
-    (void)memset(&addr, 0, sizeof(addr));
+    memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = plane;
 
@@ -1341,7 +1341,7 @@ void test_fill_paa(BYTE *slot, DWORD paa)
      * 但没必要依赖这一点）。 */
     for (DWORD i = 0U; i < (FC_BUFFER_USER_SIZE / 4U); i++)
     {
-        (void)memcpy(&slot[4U * i], &paa, sizeof(paa));
+        memcpy(&slot[4U * i], &paa, sizeof(paa));
     }
 }
 
@@ -1353,7 +1353,7 @@ BYTE test_check_paa(const BYTE *slot, DWORD paa)
 
     for (DWORD i = 0U; i < (FC_BUFFER_USER_SIZE / 4U); i++)
     {
-        (void)memcpy(&word, &slot[4U * i], sizeof(word));
+        memcpy(&word, &slot[4U * i], sizeof(word));
 
         if (word != paa)
         {
@@ -1373,12 +1373,12 @@ void test_fill_user_paa(fc_cmd_s *cmd)
         fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
         munit_assert_not_null(desc);
 
-        BYTE *slot = test_source_slot((BYTE)paa_to_plane(desc->paa), (BYTE)paa_to_cw(desc->paa));
+        BYTE *slot = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
         BYTE *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
         test_fill_paa(slot, desc->paa);
-        (void)memcpy(user, slot, FC_BUFFER_USER_SIZE);
+        memcpy(user, slot, FC_BUFFER_USER_SIZE);
 
         desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
@@ -1398,7 +1398,7 @@ void test_memset_read_buffer(fc_cmd_s *cmd)
         BYTE *user = fc_buffer_get_user_data(desc->buffer_id);
         munit_assert_not_null(user);
 
-        (void)memset(user, 0xCC, FC_BUFFER_USER_SIZE);
+        memset(user, 0xCC, FC_BUFFER_USER_SIZE);
 
         desc_id = (fc_desc_id_t)desc->next_id;
         idx++;
@@ -1424,7 +1424,7 @@ void test_verify_page_paa(const BYTE *data, WORD block_index, WORD page_index, B
             const BYTE *slot = &data[((DWORD)plane * CW_NUM + (DWORD)cw) * FC_BUFFER_USER_SIZE];
             DWORD       expected;
 
-            (void)memset(&addr, 0, sizeof(addr));
+            memset(&addr, 0, sizeof(addr));
             addr.block = block_index;
             addr.plane = plane;
             addr.page  = page_index;
@@ -1460,7 +1460,7 @@ static void test_verify_page_pair_paa(const BYTE *data, const WORD blocks[PLANE_
             const BYTE *slot = &data[((DWORD)plane * CW_NUM + (DWORD)cw) * FC_BUFFER_USER_SIZE];
             DWORD       expected;
 
-            (void)memset(&addr, 0, sizeof(addr));
+            memset(&addr, 0, sizeof(addr));
             addr.block = blocks[plane];
             addr.plane = plane;
             addr.page  = page_index;
@@ -1493,7 +1493,7 @@ void test_verify_erased(const fc_cmd_s *cmd)
         {
             if (buf[i] != 0xFFU)
             {
-                munit_errorf("chain[%hhu] plane=%lu cw=%hu offset=%hu: got 0x%02hhX expected 0xFF (erased)", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), i, buf[i]);
+                munit_errorf("chain[%hhu] plane=%hhu cw=%hhu offset=%hu: got 0x%02hhX expected 0xFF (erased)", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), i, buf[i]);
                 return;
             }
         }
@@ -1519,7 +1519,7 @@ BYTE test_verify_cw_status_all_success(const fc_cmd_s *cmd)
             char stbuf[32];
 
             (void)fc_cw_status_str(desc->status, stbuf, sizeof(stbuf));
-            munit_errorf("chain[%hhu] plane=%lu cw=%hu status=%s expected FC_CW_STATUS_UNUSED", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), stbuf);
+            munit_errorf("chain[%hhu] plane=%hhu cw=%hhu status=%s expected FC_CW_STATUS_UNUSED", idx, paa_to_plane(desc->paa), paa_to_cw(desc->paa), stbuf);
             all_ok = 0U;
         }
 
@@ -1596,11 +1596,11 @@ BYTE test_collect_chain(const fc_cmd_s *cmd, BYTE *plane_out, BYTE *cw_out)
 
         if (plane_out != NULL)
         {
-            plane_out[count] = (BYTE)paa_to_plane(desc->paa);
+            plane_out[count] = paa_to_plane(desc->paa);
         }
         if (cw_out != NULL)
         {
-            cw_out[count] = (BYTE)paa_to_cw(desc->paa);
+            cw_out[count] = paa_to_cw(desc->paa);
         }
 
         desc_id = (fc_desc_id_t)desc->next_id;

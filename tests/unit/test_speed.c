@@ -131,34 +131,34 @@ static DWORD spd_fc_write_op(spd_fc_mode_e mode, BYTE page)
 {
     if (mode == SPD_FC_MODE_NORMAL)
     {
-        return (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE;
+        return OP_PROGRAM_PAGE_MULTI_PLANE;
     }
     if (page == 0U)
     {
-        return (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST;
+        return OP_TWO_PLANE_PROGRAM_CACHE_FIRST;
     }
-    if (page == (BYTE)(PAGES_PER_BLOCK - 1U))
+    if (page == (PAGES_PER_BLOCK - 1U))
     {
-        return (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
+        return OP_TWO_PLANE_PROGRAM_CACHE_END;
     }
-    return (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+    return OP_TWO_PLANE_PROGRAM_CACHE;
 }
 
 static DWORD spd_fc_read_op(spd_fc_mode_e mode, BYTE page)
 {
     if (mode == SPD_FC_MODE_NORMAL)
     {
-        return (DWORD)OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
+        return OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
     }
     if (page == 0U)
     {
-        return (DWORD)OP_READ_PAGE_CACHE_START_SEQ_MP;
+        return OP_READ_PAGE_CACHE_START_SEQ_MP;
     }
-    if (page == (BYTE)(PAGES_PER_BLOCK - 1U))
+    if (page == (PAGES_PER_BLOCK - 1U))
     {
-        return (DWORD)OP_READ_PAGE_CACHE_LAST_MP;
+        return OP_READ_PAGE_CACHE_LAST_MP;
     }
-    return (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
+    return OP_READ_PAGE_CACHE_SEQ_MP;
 }
 
 static fc_cmd_s *spd_fc_try_build(spd_fc_mode_e mode, BOOL write, WORD block, BYTE page, BYTE ch, BYTE ce, BYTE lun)
@@ -199,7 +199,7 @@ static void spd_fc_slots_reset(void)
 
 static spd_fc_slot_s *spd_fc_slot_alloc(void)
 {
-    for (WORD i = 0U; i < (WORD)FC_COMMAND_POOL_DEPTH; i++)
+    for (WORD i = 0U; i < FC_COMMAND_POOL_DEPTH; i++)
     {
         if (s_fc_slots[i].cmd == NULL)
         {
@@ -211,7 +211,7 @@ static spd_fc_slot_s *spd_fc_slot_alloc(void)
 
 static spd_fc_slot_s *spd_fc_slot_find(WORD command_id)
 {
-    for (WORD i = 0U; i < (WORD)FC_COMMAND_POOL_DEPTH; i++)
+    for (WORD i = 0U; i < FC_COMMAND_POOL_DEPTH; i++)
     {
         if (s_fc_slots[i].cmd == NULL)
         {
@@ -276,8 +276,8 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_s *slot)
         addr.lun   = slot->lun;
         addr.block = slot->block;
         addr.page  = slot->page;
-        addr.plane = (BYTE)paa_to_plane(desc->paa);
-        addr.cw    = (BYTE)paa_to_cw(desc->paa);
+        addr.plane = paa_to_plane(desc->paa);
+        addr.cw    = paa_to_cw(desc->paa);
 
         const DWORD expected = paa_from_addr(&addr);
         const BYTE *user     = fc_buffer_get_user_data(desc->buffer_id);
@@ -295,7 +295,7 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_s *slot)
         idx++;
     }
 
-    if (idx != (BYTE)(PLANE_NUM * CW_NUM))
+    if (idx != (PLANE_NUM * CW_NUM))
     {
         errors++; /* 链长不对：没拿到预期 8 个 CW */
     }
@@ -307,11 +307,11 @@ static WORD spd_fc_reap(DWORD *errors, fc_resource_stats_s *peak)
     fc_cmd_status_s buf[SPD_FC_REAP_MAX];
     WORD            n = 0U;
 
-    (void)fc_poll_completions(buf, (WORD)SPD_FC_REAP_MAX, &n);
+    (void)fc_poll_completions(buf, SPD_FC_REAP_MAX, &n);
 
     for (WORD i = 0U; i < n; i++)
     {
-        spd_fc_slot_s *slot = spd_fc_slot_find((WORD)buf[i].cmd_id);
+        spd_fc_slot_s *slot = spd_fc_slot_find(buf[i].cmd_id);
 
         if (slot == NULL)
         {
@@ -382,7 +382,7 @@ static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[S
             const BYTE ce  = die_2_ce(die);
             const BYTE lun = die_2_lun(die);
 
-            for (BYTE page = 0U; (page < (BYTE)PAGES_PER_BLOCK) && ok; page++)
+            for (BYTE page = 0U; (page < PAGES_PER_BLOCK) && ok; page++)
             {
                 for (;;)
                 {
@@ -417,7 +417,7 @@ static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[S
                             s_fc_inflight++;
                             since_reap++;
 
-                            if (since_reap >= (WORD)SPD_FC_REAP_EVERY)
+                            if (since_reap >= SPD_FC_REAP_EVERY)
                             {
                                 (void)fc_service();
                                 (void)spd_fc_reap(errors, peak);
@@ -425,7 +425,7 @@ static BOOL spd_fc_run_phase(spd_fc_mode_e mode, BOOL write, const WORD blocks[S
                             }
                             break; /* 本页已提交 */
                         }
-                        (void)fc_command_release(cmd->cmd_id);
+                        fc_command_release(cmd->cmd_id);
                     }
 
                     (void)fc_service();
@@ -463,7 +463,7 @@ static BOOL spd_fc_pair_is_good(const ftl_ctx_s *ftl, WORD block)
     {
         return true;
     }
-    for (BYTE plane = 0U; plane < (BYTE)PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         if (ftl_block_is_bad(&ftl->alloc.blocks[ftl_gblock(plane, block)]))
         {
@@ -479,14 +479,14 @@ static WORD spd_fc_pick_blocks(WORD *out)
     WORD             n   = 0U;
 
     /* 先按用户要求从 50% 处往上；不够再回扫 98..（避开固定元数据 0..41）。 */
-    for (WORD block = (WORD)SPD_FC_BLOCK_START; (block < (WORD)BLOCKS_PER_PLANE) && (n < SPD_FC_BLOCKS); block++)
+    for (WORD block = SPD_FC_BLOCK_START; (block < BLOCKS_PER_PLANE) && (n < SPD_FC_BLOCKS); block++)
     {
         if (spd_fc_pair_is_good(ftl, block))
         {
             out[n++] = block;
         }
     }
-    for (WORD block = 98U; (block < (WORD)SPD_FC_BLOCK_START) && (n < SPD_FC_BLOCKS); block++)
+    for (WORD block = 98U; (block < SPD_FC_BLOCK_START) && (n < SPD_FC_BLOCKS); block++)
     {
         if (spd_fc_pair_is_good(ftl, block))
         {
@@ -502,7 +502,7 @@ static void spd_fc_erase_blocks(const WORD blocks[SPD_FC_BLOCKS], DWORD *us_out,
     DWORD        total_us = 0U;
 
     memset(&conf, 0, sizeof(conf));
-    conf.operation = (DWORD)OP_ERASE_BLOCK_MULTI_PLANE;
+    conf.operation = OP_ERASE_BLOCK_MULTI_PLANE;
     conf.crc       = FC_CRC_ENABLE;
     conf.random    = FC_RANDOM_ENABLE;
     conf.ldpc      = FC_ECC_MODE_NORMAL;
@@ -567,7 +567,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     WORD       blocks[SPD_FC_BLOCKS];
     const WORD good = spd_fc_pick_blocks(blocks);
 
-    if (good != (WORD)SPD_FC_BLOCKS)
+    if (good != SPD_FC_BLOCKS)
     {
         if (ftl != NULL)
         {
@@ -612,7 +612,7 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
         ftl->flags.bg_suspend = saved_suspend;
     }
 
-    const DWORD bytes   = (DWORD)SPD_FC_BYTES;
+    const DWORD bytes   = SPD_FC_BYTES;
     const DWORD wr_kbps = spd_kbps_from_us(bytes, wr_us);
     const DWORD rd_kbps = spd_kbps_from_us(bytes, rd_us);
 
@@ -695,7 +695,7 @@ static DWORD s_spd_ftl_lba_base;
 
 static BYTE spd_ftl_pattern(DWORD byte_addr)
 {
-    return (BYTE)(((byte_addr * 131U) ^ (byte_addr >> 7U) ^ (byte_addr >> 15U)) & 0xFFU);
+    return (((byte_addr * 131U) ^ (byte_addr >> 7U) ^ (byte_addr >> 15U)) & 0xFFU);
 }
 
 static void spd_ftl_fill(DWORD lba, BYTE *buf, DWORD count)
@@ -745,7 +745,7 @@ static void spd_ftl_note_status_error(BOOL write, DWORD chunk, const spd_ftl_req
                          chunk,
                          slot->lba,
                          slot->count,
-                         (int)slot->status);
+                         slot->status);
 }
 
 static void spd_ftl_note_data_error(BOOL write, DWORD chunk, const spd_ftl_req_s *slot, DWORD offset)
@@ -779,7 +779,7 @@ static void spd_ftl_note_data_error(BOOL write, DWORD chunk, const spd_ftl_req_s
             const DWORD        lba = slot->lba + (offset / FTL_IU_BYTES);
             const ftl_status_e st  = l2p_read(ftl->cache, lba, &pba);
 
-            ftl_ut_trace_summary("SPEED err#%lu L2P view lba=%lu -> st=%d pba=%08lX (INVALID=0x%08lX)", s_spd_err_prints, lba, (int)st, pba, (DWORD)NAND_PBA_INVALID);
+            ftl_ut_trace_summary("SPEED err#%lu L2P view lba=%lu -> st=%d pba=%08lX (INVALID=0x%08X)", s_spd_err_prints, lba, st, pba, NAND_PBA_INVALID);
         }
     }
 }
@@ -791,13 +791,13 @@ static void spd_ftl_slots_reset(void)
 
 static spd_ftl_req_s *spd_ftl_slot_alloc(BYTE chunk, BYTE *out_index)
 {
-    const DWORD need = (DWORD)chunk * FTL_IU_BYTES;
+    const DWORD need = chunk * FTL_IU_BYTES;
 
-    for (BYTE i = 0U; i < (BYTE)SPD_FTL_SLOTS; i++)
+    for (BYTE i = 0U; i < SPD_FTL_SLOTS; i++)
     {
-        const DWORD offset = (DWORD)i * need;
+        const DWORD offset = i * need;
 
-        if ((!s_ftl_req[i].used) && ((offset + need) <= (DWORD)SPD_FTL_ARENA_BYTES))
+        if ((!s_ftl_req[i].used) && ((offset + need) <= SPD_FTL_ARENA_BYTES))
         {
             s_ftl_req[i].used   = true;
             s_ftl_req[i].done   = 0U;
@@ -866,20 +866,20 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
 
     ftl_ut_trace_summary("SPEED dump %s: seq kind=%d act=%d drain=%d brk=%d close=%d closing=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu pend_idx=%hhu/%d wb(open=%d base=%lu occ=0x%02hhX owners=0x%08lX) pend(s/g)=%hu/%hu",
                          why,
-                         (int)seq->kind,
-                         (int)seq->active,
-                         (int)seq->draining,
-                         (int)seq->break_requested,
-                         (int)seq->close_requested,
-                         (int)seq->closing,
+                         seq->kind,
+                         seq->active,
+                         seq->draining,
+                         seq->break_requested,
+                         seq->close_requested,
+                         seq->closing,
                          seq->owner_gi,
                          seq->next_lba,
                          seq->wr.count,
                          seq->wr_inflight,
                          seq->wr.head,
                          seq->wr.pend_idx,
-                         (int)seq->wr.pend_valid,
-                         (int)ftl->wbuf->open,
+                         seq->wr.pend_valid,
+                         ftl->wbuf->open,
                          ftl->wbuf->base,
                          ftl->wbuf->occupied,
                          ftl->wbuf->owners,
@@ -889,8 +889,8 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
     fc_resource_stats_s rs;
 
     memset(&rs, 0, sizeof(rs));
-    (void)fc_get_resource_stats(&rs);
-    ftl_ut_trace_summary("SPEED dump fc: cmd=%hu desc=%hu buf=%hu sq=%hu hsq=%hu cq=%hu armed=%hhu fatal=%hhu",
+    fc_get_resource_stats(&rs);
+    ftl_ut_trace_summary("SPEED dump fc: cmd=%hu desc=%hu buf=%hu sq=%hu hsq=%hu cq=%hu armed=%hhu fatal=%d",
                          rs.command_used,
                          rs.descriptor_used,
                          rs.buffer_used,
@@ -898,9 +898,9 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
                          rs.hsq_used,
                          rs.cq_used,
                          fc_nand_engine_is_armed(),
-                         (BYTE)fc_nand_dispatch_fatal());
+                         fc_nand_dispatch_fatal());
 
-    for (BYTE gi = 0U; gi < (BYTE)FTL_GROUP_MAX; gi++)
+    for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
         const pend_group_s *g = &ftl->pending.groups[gi];
 
@@ -910,13 +910,13 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
         }
         ftl_ut_trace_summary("SPEED dump group=%hhu op=%d lba=%lu next=%lu/%lu outstanding=%hu stalls=%hhu agg=%d",
                              gi,
-                             (int)g->op,
+                             g->op,
                              (DWORD)g->lba,
                              g->next,
                              g->total,
                              g->outstanding,
                              g->stalls,
-                             (int)g->agg_status);
+                             g->agg_status);
     }
 }
 
@@ -932,9 +932,9 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
     spd_ftl_slots_reset();
     s_spd_err_prints = 0U;
 
-    while ((next < (DWORD)SPD_FTL_LBAS) || (inflight != 0U))
+    while ((next < SPD_FTL_LBAS) || (inflight != 0U))
     {
-        while ((inflight < depth) && (next < (DWORD)SPD_FTL_LBAS))
+        while ((inflight < depth) && (next < SPD_FTL_LBAS))
         {
             BYTE           index = 0U;
             spd_ftl_req_s *slot  = spd_ftl_slot_alloc(chunk, &index);
@@ -982,7 +982,7 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
             mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
         }
 
-        for (BYTE i = 0U; i < (BYTE)SPD_FTL_SLOTS; i++)
+        for (BYTE i = 0U; i < SPD_FTL_SLOTS; i++)
         {
             spd_ftl_req_s *slot = &s_ftl_req[i];
 
@@ -1012,10 +1012,10 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
             }
         }
 
-        if ((platform_now_ms() - t0) > (DWORD)SPD_FTL_PHASE_TIMEOUT_MS)
+        if ((platform_now_ms() - t0) > SPD_FTL_PHASE_TIMEOUT_MS)
         {
             ftl_ut_trace_summary("SPEED phase timeout: wr=%d chunk=%lu next=%lu inflight=%hhu errors=%lu free=%hu bad=%hu closed=%hu wb_idle=%d bg=%d seq=%hhu/%hhu cache=%hhu/%hhu pend(s/g)=%hu/%hu cp=%d/%d mig=%d/%d jrn=%lu/%hhu/%d/%d pend_j=%d",
-                                 (int)write,
+                                 write,
                                  chunk,
                                  next,
                                  inflight,
@@ -1023,29 +1023,29 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
                                  ftl->alloc.free_count,
                                  ftl->alloc.bad_count,
                                  ftl->alloc.closed_sb_count,
-                                 (int)wb_is_idle(ftl->wbuf),
-                                 (int)ftl->flags.bg_suspend,
+                                 wb_is_idle(ftl->wbuf),
+                                 ftl->flags.bg_suspend,
                                  ftl->cache_stream.seq.wr.count,
                                  ftl->cache_stream.seq.wr_inflight,
                                  ftl->cache->inflight.load,
                                  ftl->cache->inflight.flush,
                                  pend_slot_get_count(&ftl->pending),
                                  pend_group_get_count(&ftl->pending),
-                                 (int)ftl->cp_handle->active,
-                                 (int)ftl->cp_handle->waiting,
-                                 (int)ftl->mig_handle->job.active,
-                                 (int)ftl->mig_handle->job.waiting,
+                                 ftl->cp_handle->active,
+                                 ftl->cp_handle->waiting,
+                                 ftl->mig_handle->job.active,
+                                 ftl->mig_handle->job.waiting,
                                  jrn_sequence_get(ftl->journal),
                                  jrn_watermark_get(ftl->journal),
-                                 (int)jrn_is_emergency(ftl->journal),
-                                 (int)jrn_is_idle(ftl->journal),
-                                 (int)jrn_has_pending_entries(ftl->journal));
+                                 jrn_is_emergency(ftl->journal),
+                                 jrn_is_idle(ftl->journal),
+                                 jrn_has_pending_entries(ftl->journal));
             spd_ftl_dump(ftl, "phase");
             (*errors)++;
             *ms_out = platform_now_ms() - t0;
             return false;
         }
-        if (++guard > (DWORD)SPD_FTL_GUARD)
+        if (++guard > SPD_FTL_GUARD)
         {
             (*errors)++;
             *ms_out = platform_now_ms() - t0;
@@ -1063,7 +1063,7 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
     fc_debug_state_s dbg0;
 
     memset(&dbg0, 0, sizeof(dbg0));
-    (void)fc_debug_state_get(&dbg0);
+    fc_debug_state_get(&dbg0);
 
     for (;;)
     {
@@ -1085,7 +1085,7 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
         }
 
         memset(&stats, 0, sizeof(stats));
-        (void)fc_get_resource_stats(&stats);
+        fc_get_resource_stats(&stats);
 
         if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->job.active) && (!ftl->mig_handle->job.waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U))
         {
@@ -1099,11 +1099,11 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
             fc_debug_state_s dbg;
 
             memset(&dbg, 0, sizeof(dbg));
-            (void)fc_debug_state_get(&dbg);
+            fc_debug_state_get(&dbg);
             ftl_ut_trace_summary("SPEED idle timeout: sq=%hu hsq=%hu owner=%hhu lun_used=%hhu lun_phase=%hhu fill_delta=%lu/%lu sq_head=%hu st=%hhu chain=%hu op=%hhu sched_sq=%hu bound=%hhu hsq_head=%hu chain=%hu op=%hhu req=%hu",
                                  dbg.sq_used,
                                  dbg.hsq_used,
-                                 (unsigned)dbg.chain_owner,
+                                 dbg.chain_owner,
                                  dbg.lun_used,
                                  dbg.lun_phase,
                                  dbg.fill_calls - dbg0.fill_calls,
@@ -1111,33 +1111,33 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
                                  dbg.sq_head_id,
                                  dbg.sq_head_state,
                                  dbg.sq_head_chain,
-                                 (unsigned)dbg.sq_head_op,
+                                 dbg.sq_head_op,
                                  dbg.sched_sq_count,
                                  dbg.sched_sq_bound,
                                  dbg.hsq_head_id,
                                  dbg.hsq_head_chain,
-                                 (unsigned)dbg.hsq_head_op,
+                                 dbg.hsq_head_op,
                                  ftl_op_req_count());
             ftl_ut_trace_summary("SPEED idle state: free=%hu bad=%hu closed=%hu bg=%d seq=%hhu/%hhu cache=%hhu/%hhu pend(s/g)=%hu/%hu cp=%d/%d mig=%d/%d jrn=%lu/%hhu/%d/%d pend_j=%d",
                                  ftl->alloc.free_count,
                                  ftl->alloc.bad_count,
                                  ftl->alloc.closed_sb_count,
-                                 (int)ftl->flags.bg_suspend,
+                                 ftl->flags.bg_suspend,
                                  ftl->cache_stream.seq.wr.count,
                                  ftl->cache_stream.seq.wr_inflight,
                                  ftl->cache->inflight.load,
                                  ftl->cache->inflight.flush,
                                  pend_slot_get_count(&ftl->pending),
                                  pend_group_get_count(&ftl->pending),
-                                 (int)ftl->cp_handle->active,
-                                 (int)ftl->cp_handle->waiting,
-                                 (int)ftl->mig_handle->job.active,
-                                 (int)ftl->mig_handle->job.waiting,
+                                 ftl->cp_handle->active,
+                                 ftl->cp_handle->waiting,
+                                 ftl->mig_handle->job.active,
+                                 ftl->mig_handle->job.waiting,
                                  jrn_sequence_get(ftl->journal),
                                  jrn_watermark_get(ftl->journal),
-                                 (int)jrn_is_emergency(ftl->journal),
-                                 (int)jrn_is_idle(ftl->journal),
-                                 (int)jrn_has_pending_entries(ftl->journal));
+                                 jrn_is_emergency(ftl->journal),
+                                 jrn_is_idle(ftl->journal),
+                                 jrn_has_pending_entries(ftl->journal));
             spd_ftl_dump(ftl, "idle");
             return false;
         }
@@ -1264,7 +1264,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
 
     /* 槽缓冲 16 KiB（SRAM4）⇒ chunk × depth ≤ 16 KiB：8×4 / 16×2 / 32×1。
      * 深度是**测试夹具的约束**，不是对 FTL 路径的要求。 */
-    const BYTE depth = (BYTE)((DWORD)SPD_FTL_ARENA_BYTES / (chunk * FTL_IU_BYTES));
+    const BYTE depth = (BYTE)(SPD_FTL_ARENA_BYTES / (chunk * FTL_IU_BYTES));
 
     ftl_ut_trace_begin();
 
@@ -1358,7 +1358,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         errors++;
     }
 
-    const DWORD bytes       = (DWORD)SPD_FTL_BYTES;
+    const DWORD bytes       = SPD_FTL_BYTES;
     const BOOL  rd_is_cache = (dr.rd_batches > 0U);
 
     if ((rd_is_cache == false) && ok)

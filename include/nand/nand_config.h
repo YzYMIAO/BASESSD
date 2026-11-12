@@ -185,22 +185,46 @@ typedef struct NAND_ADDRESS_S
     BYTE cw;    /* Code Word 号（0..CW_NUM-1；0 = CW0，不是“全部”） */
 } nand_addr_s;
 
-static inline DWORD paa_to_page(DWORD paa)
+/**
+ * @brief PAA → page 号（字段自然宽度，与 nand_addr_s.page 一致）
+ *
+ * @param paa 芯片内物理地址（PAA）
+ * @return page 号（0..PAGES_PER_BLOCK-1）
+ */
+static inline BYTE paa_to_page(DWORD paa)
 {
     return (paa >> PAA_PAGE_SHIFT) & PAA_PAGE_MASK;
 }
 
-static inline DWORD paa_to_plane(DWORD paa)
+/**
+ * @brief PAA → plane 号（字段自然宽度，与 nand_addr_s.plane 一致）
+ *
+ * @param paa 芯片内物理地址（PAA）
+ * @return plane 号（0..PLANE_NUM-1）
+ */
+static inline BYTE paa_to_plane(DWORD paa)
 {
     return (paa >> PAA_PLANE_SHIFT) & PAA_PLANE_MASK;
 }
 
-static inline DWORD paa_to_block(DWORD paa)
+/**
+ * @brief PAA → plane 内块号（字段自然宽度，与 nand_addr_s.block 一致）
+ *
+ * @param paa 芯片内物理地址（PAA）
+ * @return 块号（0..BLOCKS_PER_PLANE-1）
+ */
+static inline WORD paa_to_block(DWORD paa)
 {
     return (paa >> PAA_BLOCK_SHIFT) & PAA_BLOCK_MASK;
 }
 
-static inline DWORD paa_to_lun(DWORD paa)
+/**
+ * @brief PAA → LUN 号（字段自然宽度，与 nand_addr_s.lun 一致）
+ *
+ * @param paa 芯片内物理地址（PAA）
+ * @return LUN 号（0..LUN_NUM-1）
+ */
+static inline BYTE paa_to_lun(DWORD paa)
 {
     return (paa >> PAA_LUN_SHIFT) & PAA_LUN_MASK;
 }
@@ -226,7 +250,13 @@ static inline DWORD paa_to_nand_row(DWORD paa)
     return NAND_PAA_TO_ROW(paa);
 }
 
-static inline WORD paa_to_cw(DWORD paa)
+/**
+ * @brief PAA → CW 号（字段自然宽度，与 nand_addr_s.cw 一致）
+ *
+ * @param paa 芯片内物理地址（PAA）
+ * @return CW 号（0..CW_NUM-1）
+ */
+static inline BYTE paa_to_cw(DWORD paa)
 {
     return ((paa >> CW_WIDTH_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
 }
