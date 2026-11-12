@@ -424,6 +424,11 @@ static BOOL pfr_format_end_bbt(alc_s *alloc)
  */
 ftl_status_e pfr_media_format(ftl_ctx_s *ftl, BOOL verify)
 {
+    // 格式化是破坏性控制路径：先丢弃残留 cache 序列并强制打开门控。否则
+    // active/draining 会让 SYNC_WAIT 的擦写提交被 `ftl_op_seq_gate` 拒绝，
+    // 整片格式化退化为 4096 次同步超时（每次约 20 ms）。
+    ftl_cache_seq_discard(ftl);
+
     // 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
     // 都还完整，格式化不完成、可重试。
     if (bbt_format_erase(&ftl->alloc) != FTL_OK)

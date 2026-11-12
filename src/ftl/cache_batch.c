@@ -913,6 +913,12 @@ static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const voi
         pending->cache_role  = role;
         pending->cache_gen   = ftl->cache_stream.seq.gen;
         pending->retry_count = 0U;
+
+        // 本命令的 FAIL_CACHE 指向**提交序前一页**：窗口内 j>0 用 j-1；窗口首页在
+        // 延续序列时指向上一窗口最后一页（LBA 相邻）。FIRST（op49）前无本序列页，
+        // 其 FAILC 只能是上一序列残留 ⇒ 不建结论。
+        pending->verdict_valid = (((j > 0U) || (start_seq == false)) && (page_lba >= FTL_LBA_PER_PAIR));
+        pending->verdict_lba   = (page_lba >= FTL_LBA_PER_PAIR) ? (page_lba - FTL_LBA_PER_PAIR) : 0U;
         pend_validate(pending);
 
         b->pend_idx[j] = (BYTE)(pending - ftl->pending.slots);
@@ -965,6 +971,15 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
             /* 读序列占用设备管线：写组等它收尾（门控会挡住普通写），不能回退。 */
             return FTL_CACHE_WRITE_AGAIN;
         }
+
+        // `closing` = padding END 已在器件管线里，它就是序列末端：再挂数据窗口会排在
+        // pad 之后，末页永远等不到后继 FAIL_CACHE ⇒ 确认步判「无结论」并撤销已编程页
+        // （RISK-CACHE-37）。等 pad 完成、序列真正关闭后再以新序列续写。
+        if (seq->closing == true)
+        {
+            return FTL_CACHE_WRITE_AGAIN; /* 进展由 seq_closing 表达，不计 stall */
+        }
+
         if (seq->next_lba != lba)
         {
             // 续接点不一致：本序列不能再由本窗口续。**不能 abort**——设备序列已

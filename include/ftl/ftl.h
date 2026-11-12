@@ -46,9 +46,9 @@
  * 超过该值即打一行 WRN。用于观察主机看到的 flush 延迟；job 本身不阻塞主循环。 */
 #define FTL_FLUSH_SLOW_LOG_MS (10U)
 
-/* 异步 FLUSH job 的墙钟上限。超时按 best-effort 完成（状态仍报 OK）并打 WRN。
- * 旧同步路径由 `L2P_SYNC_GUARD_MAX` 隐式限定循环次数；改成异步后必须显式给上限，
- * 否则元数据侧真卡死时 host FLUSH 永不完成（SCSI 超时 → BOT reset recovery）。
+/* 异步 FLUSH job 的**无进展**上限：只要 wbuf / L2P / journal / 写确认仍在推进，
+ * 就按进展续期；连续 1 s 没有任何推进才判超时。超时按 best-effort 完成并打 WRN；
+ * 若有未确认写页，同时置 deferred_error（不能对 host 宣称成功，H14/RISK-CACHE-18）。
  * 1 s 远小于主机 SCSI/BOT 超时，又能覆盖正常的满盘 flush。 */
 #define FTL_FLUSH_TIMEOUT_MS (1000U)
 
@@ -144,9 +144,11 @@ typedef enum FTL_CACHE_SEQ_KIND_E
     FTL_CACHE_SEQ_WRITE,
 } ftl_cache_seq_kind_e;
 
-/* cache 写序列的未确认页 FIFO 深度：上界 = 两个在飞 chunk（2×4 页）+ 前一 chunk
- * 的尾页 + 余量。环满属结构性错误（在飞页数被窗口/credit 夹住，达不到 16）⇒
- * ftl_cache_wr_member_done 断言（RISK-CACHE-32 记录了 release 下的残余风险）。 */
+/* cache 写序列的未确认页 FIFO 深度。
+ *
+ * 提交侧按 `wr.count + wr_inflight` clamp 到空闲槽（cache_wr_try 的 ring_free），
+ * 正常运行下 push 不会溢出；环满仍按结构性错误处理（member_done 断言 + abort，
+ * RISK-CACHE-32）。 */
 #define FTL_CACHE_SEQ_RING (16U)
 
 /* 写序列的「已编程页表」（读序列不用）。
@@ -157,8 +159,7 @@ typedef enum FTL_CACHE_SEQ_KIND_E
  *   · 读路径靠它把 LBA 指到刚编程的页（此时 L2P 可能还没确认）；
  *   · 后续 FAILC 判失败时靠它撤销（RISK-CACHE-28）。
  * 环按**提交顺序**；head 是最老、尚未被弹出（= 尚未「已证明且已确认」）的页。
- * 结论的落点不是 head，而是独立的结论游标——确认可能背压滞后，head 会停在
- * 「已证明、等确认」的页上（见 ftl_cache_wr_s.pend_idx）。 */
+ * 结论落点**按 LBA 绑定**，不按入表顺序（见 ftl_cache_wr_s.verdict）。 */
 typedef enum FTL_CACHE_PAGE_STATE_E
 {
     FTL_CACHE_PAGE_PROGRAMMED = 0, /* 已编程；待确认（Journal→L2P→BST） */
@@ -177,21 +178,25 @@ typedef struct FTL_CACHE_PAGE_S
     BOOL  proven;    /* 后继命令的 FAIL 结论已到、且成功（END 由自身 STATUS 证明） */
 } ftl_cache_page_s;
 
+/* cache 写序列的「待落结论」：FAIL_CACHE 按**页 LBA** 绑定，不依赖完成顺序。
+ *
+ * 每条 cache program 命令的 FAIL_CACHE 指的是**提交序前一页**（B 页命令判 A 页）。
+ * 建链时把 A 的 LBA 记进 B 的 pending 槽；完成时按 LBA 找页落结论。若 A 还没入表
+ * （完成顺序反转），先存进本表，A 入表时消费——因此完成顺序不再影响正确性。 */
+typedef struct FTL_CACHE_VERDICT_S
+{
+    DWORD lba;   /* 结论指向的页 LBA */
+    BOOL  ok;    /* true = 编程成功；false = FAIL_CACHE */
+    BOOL  valid; /* false = 空槽 */
+} ftl_cache_verdict_s;
+
 typedef struct FTL_CACHE_WR_S
 {
-    ftl_cache_page_s page[FTL_CACHE_SEQ_RING]; /* 已编程页（提交顺序） */
-    BYTE             head;                     /* 队头环形下标（确认/弹出的起点） */
-    BYTE             count;                    /* 已编程未证明的页数 */
-
-    /* 结论游标：**下一条 cache 命令的 FAIL_CACHE 结论落在哪一页**。
-     *
-     * 不能用 head 代替：结论按页序到达，而确认（Journal→L2P）可能背压滞后，
-     * head 会停在「已证明、等确认」的页上；此时再用 head 承接新结论，会让该页
-     * 被重复证明、而真正待证的页永远等不到结论（环排不空 ⇒ flush 超时）。
-     * 环形下标是绝对下标（pop 只动 head/count，不搬元素），所以不会因弹出而漂移；
-     * 该页未证明前不可能被弹出。 */
-    BYTE pend_idx;   /* 待结论页的 page[] 绝对下标 */
-    BOOL pend_valid; /* false = 没有待结论页（新序列首条 / END 页自身已证明） */
+    ftl_cache_page_s    page[FTL_CACHE_SEQ_RING];    /* 已编程页（提交顺序） */
+    BYTE                head;                        /* 队头环形下标（确认/弹出的起点） */
+    BYTE                count;                       /* 已编程未证明的页数 */
+    BYTE                verdict_next;                /* 待落结论表的轮转下标 */
+    ftl_cache_verdict_s verdict[FTL_CACHE_SEQ_RING]; /* 页尚未入表时的暂存结论 */
 } ftl_cache_wr_s;
 
 typedef struct FTL_CACHE_SEQ_S
@@ -211,29 +216,31 @@ typedef struct FTL_CACHE_SEQ_S
      * 互斥性由 ftl_cache_seq_release / close_step / pad 回调三处维护。
      * 后续重构时收敛成一个状态枚举。 */
 
-    BOOL active;              /* true = 设备侧序列打开（START 已发、END 未发） */
-    BOOL draining;            /* true = 读序列已放弃但命令仍在飞：门控继续关着，
-                               * 直到所有者组的在飞子操作归零（RISK-CACHE-14）。 */
-    BOOL owner_submit;        /* 序列所有者正在提交窗口（门控旁路） */
-    BOOL break_requested;     /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
-    BOOL close_requested;     /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
-                               * flush / 前台等待）：service 用 padding END 落下
-                               * 一个收尾页，把最后一页的 FAIL_CACHE 结算掉。 */
-    BOOL closing;             /* padding END 已在飞：门控继续关，新的窗口等待 */
-    BOOL own_page0;           /* 当前 hot SB 的 page0 由**本序列**写入：允许它在确认前
-                               * 继续写 page>0（有序管线保证 page0 失败会中止其后所有页，
-                               * 见 allocator.h 的 alc_super_open_get_room_seq）。
-                               * 序列开始即清、分配 page0 时置位；跨 block 续写时由新块
-                               * 的分配重新置位（新 SB 的 page0 同样由本序列写）。 */
-    WORD  owner_gi;           /* 最近持有序列的组（窗口记账 / 门控归因） */
-    DWORD next_lba;           /* 续序列的判据：下一个 host 数据段必须从这里开始 */
-    DWORD idle_ms;            /* 所有者组已释放/已发完后等待下一段的起点 */
-    DWORD run_pairs;          /* 读序列本段已提交的 pair 数（跨 block 续接的让步上限，
-                               * 见 cache_batch.h 的 FTL_CACHE_READ_MAX_RUN_PAIRS） */
-    DWORD pad_pba[PLANE_NUM]; /* padding END 页的逐 plane PBA。Policy B 下两 plane 的块号
-                               * 不同 ⇒ 回调记账必须用真实地址，不能用 pba_with_plane()
-                               * 从 plane0 推导（那样会漏记 plane1 的 page0 屏障）。 */
-    ftl_cache_wr_s wr;        /* 写序列的逐页确认 FIFO */
+    BOOL active;                      /* true = 设备侧序列打开（START 已发、END 未发） */
+    BOOL draining;                    /* true = 读序列已放弃但命令仍在飞：门控继续关着，
+                                       * 直到所有者组的在飞子操作归零（RISK-CACHE-14）。 */
+    BOOL owner_submit;                /* 序列所有者正在提交窗口（门控旁路） */
+    BOOL break_requested;             /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
+    BOOL close_requested;             /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
+                                       * flush / 前台等待）：service 用 padding END 落下
+                                       * 一个收尾页，把最后一页的 FAIL_CACHE 结算掉。 */
+    BOOL closing;                     /* padding END 已在飞：门控继续关，续写窗口被拒（等 pad 完成） */
+    BOOL own_page0;                   /* 当前 hot SB 的 page0 由**本序列**写入：允许它在确认前
+                                       * 继续写 page>0（有序管线保证 page0 失败会中止其后所有页，
+                                       * 见 allocator.h 的 alc_super_open_get_room_seq）。
+                                       * 序列开始即清、分配 page0 时置位；跨 block 续写时由新块
+                                       * 的分配重新置位（新 SB 的 page0 同样由本序列写）。 */
+    WORD  owner_gi;                   /* 最近持有序列的组（窗口记账 / 门控归因） */
+    DWORD next_lba;                   /* 续序列的判据：下一个 host 数据段必须从这里开始 */
+    DWORD idle_ms;                    /* 所有者组已释放/已发完后等待下一段的起点 */
+    DWORD run_pairs;                  /* 读序列本段已提交的 pair 数（跨 block 续接的让步上限，
+                                       * 见 cache_batch.h 的 FTL_CACHE_READ_MAX_RUN_PAIRS） */
+    DWORD pad_pba[PLANE_NUM];         /* padding END 页的逐 plane PBA。Policy B 下两 plane 的块号
+                                       * 不同 ⇒ 回调记账必须用真实地址，不能用 pba_with_plane()
+                                       * 从 plane0 推导（那样会漏记 plane1 的 page0 屏障）。 */
+    DWORD          pad_verdict_lba;   /* padding END 的 FAIL_CACHE 指向的页 LBA（提交时确定） */
+    BOOL           pad_verdict_valid; /* false = pad 前面没有数据页（无结论可落） */
+    ftl_cache_wr_s wr;                /* 写序列的逐页确认 FIFO */
 } ftl_cache_seq_s;
 
 /* 顺序流检测器（per instance × per direction）——FTL 自己判断顺序读写的状态。
@@ -302,6 +309,18 @@ typedef struct FTL_CACHE_STREAM_S
  */
 void ftl_cache_seq_release(ftl_ctx_s *ftl);
 
+/**
+ * @brief 破坏性控制路径（format）丢弃 cache 序列并强制打开门控。
+ *
+ * @param ftl 实例。
+ *
+ * @note 与 `ftl_cache_seq_release` 的差别：release 对读序列在飞会保留
+ *       `draining`（RISK-CACHE-14 的管线保护）；格式化不需要这条保护，且
+ *       `active/draining` 会让 `ftl_op_seq_gate` 拒绝 SYNC_WAIT 的擦写提交，
+ *       使整片格式化退化为每次 20 ms 超时。未证明页按失败结算，不产生静默映射。
+ */
+void ftl_cache_seq_discard(ftl_ctx_s *ftl);
+
 /* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）──
  *
  * 早回执（RISK-CACHE-27）：页在**自身命令完成**时入表（提交时不压 pending 下标），
@@ -345,7 +364,9 @@ typedef struct FTL_STATISTICS_S
 typedef struct FTL_FLUSH_JOB_S
 {
     BOOL  active;
-    DWORD start_ms; /* 耗时观测（FTL_FLUSH_SLOW_LOG_MS） */
+    DWORD start_ms;         /* 总耗时观测（FTL_FLUSH_SLOW_LOG_MS） */
+    DWORD last_progress_ms; /* 最近一次观察到元数据推进的时刻（按进展续期） */
+    DWORD progress;         /* 上一次的推进签名；变化即刷新 last_progress_ms */
 } ftl_flush_job_s;
 
 typedef struct FTL_TRIM_JOB_S

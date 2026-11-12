@@ -175,10 +175,12 @@ typedef struct PENDING_REQUEST_S
     /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
      *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
      *   提交时快照会让两条 journal 都指向最初映射（链断）。 */
-    DWORD park_ms; /* WRITE_CONFIRM 待入账**预算起点**（ms；内部字段，外部不要读）。
-                    * 语义 = 「最近一次确知有进展的时刻」：确认 handler 在其依赖确实在飞
-                    * （region 加载 / Journal 页写）时刷新它，超时判据因此只在**无进展**
-                    * 时才成立（RISK-HOST-05 支路 (a)，见 docs/design/assertion_guidelines）。 */
+    DWORD park_ms;     /* WRITE_CONFIRM 待入账**预算起点**（ms；内部字段，外部不要读）。
+                        * 语义 = 「最近一次确知有进展的时刻」：确认 handler 在其依赖确实在飞
+                        * （region 加载 / Journal 页写）时刷新它，超时判据因此只在**无进展**
+                        * 时才成立（RISK-HOST-05 支路 (a)，见 docs/design/assertion_guidelines）。 */
+    DWORD verdict_lba; /* cache program：本命令的 FAIL_CACHE 指向哪一页（提交序前一页）的
+                        * LBA。完成时按 LBA 落结论，不依赖完成顺序（见 ftl.h 结论表）。 */
 
     /* ── 2B 对齐 ── */
     WORD cmd_id; /* FC cmd_id */
@@ -193,9 +195,10 @@ typedef struct PENDING_REQUEST_S
     BYTE              cache_gen;   /* cache program 成员所属**写序列代号**：完成时与
                                     * `cache_stream.seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
                                     * 取代，本页不得确认映射（迟到完成，RISK-CACHE-19） */
+    BOOL verdict_valid;            /* cache program：本命令是否携带 FAIL_CACHE 结论 */
 } pend_req_s;
 
-_Static_assert(sizeof(pend_req_s) == 36, "pend_req_s 布局漂移（期望 36B）");
+_Static_assert(sizeof(pend_req_s) == 40, "pend_req_s 布局漂移（期望 40B）");
 
 /* pending 只有 new_pba/new_pba1 两个 plane 字段：维度一旦 >2，必须显式改结构，
  * 不能靠 `pba[0]/pba[1]` 静默漏掉新增 plane（H39）。 */
