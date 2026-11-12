@@ -864,7 +864,7 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
 {
     const ftl_cache_seq_s *seq = &ftl->cache_stream.seq;
 
-    ftl_ut_trace_summary("SPEED dump %s: seq kind=%d act=%d drain=%d brk=%d close=%d closing=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu pend_idx=%hhu/%d wb(open=%d base=%lu occ=0x%02hhX owners=0x%08lX) pend(s/g)=%hu/%hu",
+    ftl_ut_trace_summary("SPEED dump %s: seq kind=%d act=%d drain=%d brk=%d close=%d closing=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu verdict_next=%hhu wb(open=%d base=%lu occ=0x%02hhX owners=0x%08lX) pend(s/g)=%hu/%hu",
                          why,
                          seq->kind,
                          seq->active,
@@ -877,8 +877,7 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
                          seq->wr.count,
                          seq->wr_inflight,
                          seq->wr.head,
-                         seq->wr.pend_idx,
-                         seq->wr.pend_valid,
+                         seq->wr.verdict_next,
                          ftl->wbuf->open,
                          ftl->wbuf->base,
                          ftl->wbuf->occupied,
@@ -1379,7 +1378,9 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
                         dr.rd_fallbacks);
     /* 结果行**只留速度**（默认档可见）；路径 / 原始计时 / 校验计数属于诊断，
      * 放到 gated 的 summary（`--log-visible info/debug` 才打印）。 */
-    ftl_ut_result("SPEED ftl chunk=%lu  WR=%lu KB/s  RD=%lu KB/s", chunk, spd_kbps_from_us(bytes, wr_ms * 1000U), spd_kbps_from_us(bytes, rd_ms * 1000U));
+    /* 结果行默认可见：带上 LBA 起点与错误计数——不同 seed / 不同套件顺序下
+     * 起点不同，速度数字不可比，失败时也要能直接看出是写错还是读错。 */
+    ftl_ut_result("SPEED ftl chunk=%lu base=%lu  WR=%lu KB/s  RD=%lu KB/s  err(wr=%lu rd=%lu)", chunk, s_spd_ftl_lba_base, spd_kbps_from_us(bytes, wr_ms * 1000U), spd_kbps_from_us(bytes, rd_ms * 1000U), err_wr, err_rd);
     ftl_ut_trace_summary("SPEED ftl chunk=%lu detail: depth=%hhu rd_path=%s wb(b/d)=%lu/%lu rd(b/d/f)=%lu/%lu/%lu wr_ms=%lu flush_ms=%lu rd_ms=%lu fmt_ms=%lu err(wr=%lu rd=%lu)",
                          chunk,
                          depth,
