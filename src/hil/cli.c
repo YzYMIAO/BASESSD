@@ -1214,6 +1214,7 @@ static void uart_cli_bbt(int argc, char *argv[])
             do_erase = true;
             LOGW("bbt erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
         }
+#    if defined(FC_NAND_TEST_ENABLE)
         else if (strcmp(argv[1], "fault") == 0)
         {
             if (argc != 4)
@@ -1256,9 +1257,10 @@ static void uart_cli_bbt(int argc, char *argv[])
             md_pool_print(ftl->metadata_dir);
             return;
         }
+#    endif /* FC_NAND_TEST_ENABLE */
         else
         {
-            LOGW("bbt: unknown subcommand '%s' (erase | fault <plane> <block>)\r\n", argv[1]);
+            LOGW("bbt: unknown subcommand '%s'\r\n", argv[1]);
             return;
         }
 #else
