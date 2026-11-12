@@ -563,3 +563,51 @@
 | RISK-WL-07 | 已闭合（2026-11-12 上板验证） | #### RISK-WL-07 host 写时 WL 占住 migrate 引擎  - **后果**：USB BOT 串行 ⇒ 两条命令之间 `pending` 掉到 0，`bg_scheduler_level_select` 判成 IDLE/NORMAL，`mig_handle` 只在 BUSY 让路 ⇒ WL 照常启动。实测单个 WL job age 4~7s（3 pages/s），期间 GC 起不来、命令槽被分走，CP 持续 `submit stalled phase=1`，H2testw 写速降到 78 KB/s。 - **缓解**：WL 启动三重门：① 两次 5s 求值之间 `*total_writes` 未增长；② `load_level == BG_LEVEL_IDLE`；③ `free_count > FREE_POOL_TARGET`。已启动的 WL job 不强行 ab |
 | RISK-CR-02 | 已闭合（2026-11-12 上板验证） | #### RISK-CR-02 die→(ch,ce,lun) 分解未板验  - **后果**：`ftl_op_route_get_region` 的 die→(ch,ce,lun) 分解改走 `die_2_ch/ce/lun`，与 `lba_2_*` 收敛为同一套公式；坐标属「编译期无声的三类量」。 - **缓解**：分解式与原手写式逐字同值；新增三个 `static inline` 纯函数（H42）。 - **下一步**：**必须上板**：跑一遍读写 + `map <lba>`。 - **证据**：`include/ftl/l2p_cache.h` / `src/ftl/ftl_op.c`。 - **历史/验证**：   - （日期未记录）坐标公式统一 → 未上板 |
 | RISK-NANDP-09 | 已闭合（2026-11-11 上板验证） | #### RISK-NANDP-09 FMC 命令/地址窗口写缺少 __DMB  - **后果**：连续 5 个地址周期是对同一 `address` 窗口的连续 store；STM32H743 AXI write buffer 可能合并连续 STRB ⇒ 命令或地址字节被合并/重排 ⇒ NAND 收到错误地址或缺周期，可能读写错页/块（静默介质破坏）。`DATA_IN` 已每字节加 `__DMB`。 - **缓解**：唯一入口 `nand_fmc_write_window()`（写后 `__DMB()`）；`COMMAND`、`COLUMN_0/1`、`ROW_0/1/2` 全部走它；`DATA_OUT` 读方向不加。 - **下一步**：上板用非零 block/page、plane1、multi-plane/cache 全量写读回归，确认地址/命令序列。 - **证据**：`src/na |
+
+---
+## 2026-11-13 闭合：cache 写序列结论丢失（RISK-CACHE-33 / 34 / 35 / 37）
+
+#### RISK-CACHE-33 padding END 早于数据成员排空
+
+- **后果**：写序列收尾时 `ftl_cache_seq_close_step` 未等 `wr_inflight` 归零就提交 padding END：pad 先完成并把序列置为非活动，随后迟到的数据成员完成把页推进页表——该页没有后继 `FAIL_CACHE` 可证明，永久卡住队头 ⇒ flush 1 s 超时、teardown 断言。触发条件：`/speed/ftl_rw` chunk=16（depth=2）在数据页仍编程时进入 flush。
+- **缓解**：① `ftl_cache_seq_close_step` 在 `seq->wr_inflight != 0` 时直接返回，等所有数据成员完成并进页表后再提交 pad；② flush 超时改为**按进展续期**（wbuf/L2P/journal/确认任一推进就刷新 deadline，连续 1 s 无进展才算 stalled）；③ 真超时且仍有未确认写页时置 `deferred_error`（host 下一条命令如实报 IO_ERROR），不静默成功；日志限流，一行。
+- **下一步**：上板跑 `test /speed/ftl_rw --log-project warning`，确认无 `cache-wr push into inactive seq` / `flush timeout`、`wr.count` 归零；再跑全量 `test` 回归。
+- **证据**：`src/ftl/ftl.c:ftl_cache_seq_close_step` / `ftl_cache_wr_ring_push` / `ftl_flush_step` 超时日志。
+- **历史/验证**：
+  - 2026-11-13 板端定位：16 条 `cache-wr push into inactive seq` + `flush timeout 1000ms (wb=1 l2p=1 jrn=1) seq(act=0 wr=1/0)` → 修复 → 编译通过，未上板
+  - 2026-11-13 二修：flush 改按进展续期 + 超时置 deferred_error；删除误报的 push 日志 → 编译通过，未上板
+  - 2026-11-13 上板闭合：`test` 全量 **98/98**、`/speed/ftl_rw` 3/3（`err(wr=0 rd=0)`，chunk=32 `WR=3130 / RD=3195 KB/s`）；同批确认根因为 RISK-CACHE-37（padding END 在飞时续写窗口）
+
+#### RISK-CACHE-34 pad 收尾漏掉未证明的 head
+
+- **后果**：`ftl_cache_pad_callback` 的 stray 循环从 `k=1` 开始，默认 head 已被 pad 的 FAIL_CACHE 证明；但 `take_verdict()` 证明的是**结论游标页**（最近入表页），不一定是 head。若 head 因完成/入表顺序错位没拿到自己的 FAILC，它既不被证明也不被判失败 ⇒ 永久卡在队头（`st=PROGRAMMED proven=0`）⇒ confirm_step 不前进 ⇒ flush 连续 1 s 零进展后超时，teardown 断言。
+- **缓解**：① stray 循环覆盖 `k=0..count-1`，只跳过本次被 pad 证明的 `verdict_page`；② `ftl_cache_wr_confirm_step` 增加安全网：写序列已关闭、无在飞、无收尾请求时，`proven==false` 的页**不可能再等到 FAILC**，直接 `mark_failed` 走撤销并弹出（否则页表永久钉住、flush 无进展超时）。 ③ **结构性修法**：FAIL_CACHE 结论改为**按页 LBA 绑定**——建链时把「提交序前一页」的 LBA 记进 pending 槽（`verdict_lba/verdict_valid`），完成时按 LBA 落结论；页尚未入表则暂存进页表 `verdict[]`，入表时消费。删除全局 `pend_idx/pend_valid`，完成顺序反转不再丢结论。
+- **下一步**：上板跑全量 `test`（同 seed 才能复现同一 LBA 起点），断言后看故障 shell 自动 dump 的 `DBG … wr-fail lba=… why=… st=… cascade=…`：`why` 直接指认 5 条判失败路径之一。判据：无 `flush stalled`、chunk=8/16/32 全 `[ OK ]`、`wr.count` 归零。
+- **证据**：`src/ftl/ftl.c:ftl_cache_pad_callback`（stray 循环）/ `ftl_cache_wr_take_verdict`。
+- **历史/验证**：
+  - 2026-11-13 板端：`flush stalled 1003ms (no progress 1000ms) with 1 unconfirmed write page(s)` + `seq head lba=802840 st=1 proven=0` → 修复 → 编译通过，未上板
+  - 2026-11-13 二修（安全网）：`seq kind=0 act=0 drain=0 wr=1/0` 下 pad 不会被提交，stray 循环不执行；改为 confirm_step 对「无未来结论」的页直接判失败 → 编译通过，未上板
+  - 2026-11-13 三修（结构性）：结论按 LBA 绑定 + 暂存表；删除全局游标；test_speed 诊断行随字段移除同步 → 编译通过，未上板
+  - 2026-11-13 全量回归复现（同类未闭合）：`test` 全量跑完 media 后 `/speed/ftl_rw chunk=32` 在写阶段约 231 ms 中止（`WR=110822 KB/s RD=0 KB/s` —— 110 MB/s 物理不可能，写阶段未跑完），teardown `cmt_dirty=1632`。同 seed 单跑该套件通过（`WR=3063 KB/s`）；两次运行 **LBA 起点不同**（`test_ftl_media.c` 也消耗共享的 munit RNG 流）⇒ 不是回退，是同一类「页丢结论」在不同起点/边界被触发。判别结论：01:35 构建与 01:17 构建的唯一功能差异是 `ftl_cache_seq_discard`（只走 `pfr_media_format`，其后紧跟 `ftl_init` 整块清零）⇒ 到不了 chunk=32。取证加固：`ftl_cache_fail_s.last_fail` 粘滞记录第一次写页失败（lba/why/status/ms/cascade），`ftl_debug_dump` 打印，`fault_shell_run` 进 shell 自动全量 dump；`/speed` 结果行默认带 `base=` 与 `err(wr/rd)` → 编译通过，未上板
+  - 2026-11-13 上板闭合：`test` 全量 **98/98**、`/speed/ftl_rw` 3/3（`err(wr=0 rd=0)`，chunk=32 `WR=3130 / RD=3195 KB/s`）；同批确认根因为 RISK-CACHE-37（padding END 在飞时续写窗口）
+
+#### RISK-CACHE-35 残留 cache 序列门控拒绝格式化同步擦写
+
+- **后果**：`pfr_media_format` 的逐块同步擦除走 `ftl_op_submit`（`SYNC_WAIT`）；若 cache 序列仍 `active/draining`，`ftl_op_seq_gate` 拒绝所有非 owner 提交 ⇒ 每次擦除只能等约 20 ms 同步超时。4096 块 ≈ 82 s，表现为格式化长时间无输出（`test` 占用 CLI 主循环，`ftl_ctx` 也无法执行）。
+- **缓解**：`pfr_media_format` 入口调用 `ftl_cache_seq_discard(ftl)`：丢弃残留序列、强制打开门控；未证明页按失败结算，不产生静默映射。
+- **下一步**：上板跑 `test /ftl/media/e2e/format_and_roundtrip`，应在 ~21 s 内完成；再跑全量 `test`。
+- **证据**：`src/ftl/power_failure_recovery.c:pfr_media_format`；`src/ftl/ftl.c:ftl_cache_seq_discard`；`src/ftl/ftl_op.c:ftl_op_seq_gate`。
+- **历史/验证**：
+  - 2026-11-13 板端：speed 3/3 后直接跑全量 `test`，`format_and_roundtrip` >60 s 无输出（quiesce 5 s 上限未触发）→ 加 `ftl_cache_seq_discard` → 编译通过，未上板
+  - 2026-11-13 上板闭合：`test` 全量 **98/98**、`/speed/ftl_rw` 3/3（`err(wr=0 rd=0)`，chunk=32 `WR=3130 / RD=3195 KB/s`）；同批确认根因为 RISK-CACHE-37（padding END 在飞时续写窗口）
+
+#### RISK-CACHE-37 padding END 在飞时续写窗口
+
+- **后果**：`ftl_cache_seq_close_step` 提交 padding END 后 `closing = true`，但 `active` 仍为真；`ftl_cache_write_try` 的续序列判定只看 `next_lba`，于是**新数据窗口排在 pad 之后**提交。pad 完成即把序列置为 `NONE`（且不升 `gen`），新窗口的最后一页再没有后继 `FAIL_CACHE` 可证明 ⇒ 确认步判 `no verdict`，把已编程成功的页当失败撤销 ⇒ `deferred_error` ⇒ host 下一条命令失败、写阶段中止、flush 不执行（teardown `cmt_dirty != 0`）。触发条件：pad 在飞期间恰好有同一 LBA 流的下一条 host 请求（持续顺序写）。
+- **缓解**：`ftl_cache_write_try` 在 `seq->closing == true` 时返回 `FTL_CACHE_WRITE_AGAIN`（等 pad 完成、序列真正关闭后再以新序列续写）；`seq_closing` 已计入 `bg_progress`，等待不计 stall。
+- **下一步**：上板回归 `/speed/ftl_rw` 三档 + 全量 `test`；判据：无 `no verdict` / `deferred write error`，三档 `err(wr=0 rd=0)`，teardown `cmt_dirty == 0`。若仍失败，看 `DBG wr-fail … why=` 与 `DBG seq-close by=`。
+- **证据**：`src/ftl/cache_batch.c:ftl_cache_write_try`；`src/ftl/ftl.c:ftl_cache_seq_close_step` / `ftl_cache_pad_callback` / `ftl_cache_wr_confirm_step`。
+- **历史/验证**：
+  - 2026-11-13 板端（02:09 镜像，`/speed/ftl_rw chunk=32`，`base=495392`）：`seq-close by=pad kind=2 act=1 wr=1/4 next=497664`，2 ms 后 `wr-fail lba=497656 why=no verdict`（pad 之后提交的窗口末页）→ 加 `closing` 门控 → 编译通过，未上板
+  - 2026-11-13 上板闭合：`test` 全量 **98/98**、`/speed/ftl_rw` 3/3（`err(wr=0 rd=0)`，chunk=32 `WR=3130 / RD=3195 KB/s`）；同批确认根因为 RISK-CACHE-37（padding END 在飞时续写窗口）
+

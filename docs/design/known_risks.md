@@ -2666,6 +2666,7 @@
 | RISK-CACHE-30 | 待上板 | padding 收尾把已证明未确认页误判失败 | 未上板 |
 | RISK-CACHE-31 | 待上板 | padding 回调早退分支泄漏 FC 命令 | 未上板 |
 | RISK-CACHE-32 | 待上板 | 环满在 release 下静默丢已回执写 | 未上板 |
+| RISK-CACHE-36 | 待上板 | 干净释放写序列时不看在飞成员，迟到完成把未证明页推进死序列 | 2026-11-13 常规回归通过（残余：组级失败+在飞成员负例未注入） |
 | RISK-USBC-01 | 待上板 | deferred error 以下一条命令失败近似，非标准 sense | 2026-10-31 被动触发一次 |
 | RISK-USBC-03 | 待定位 | USB 盘间歇报无介质，主机侧已止血 | 2026-11-12 主机侧止血 |
 
@@ -2777,6 +2778,18 @@
 - **历史/验证**：
   - 2026-11-05 环满改 abort + IO_ERROR → 未上板
 
+
+#### RISK-CACHE-36 干净释放写序列不看 `wr_inflight`
+
+- **后果**：`ftl_cache_seq_release` 只按页表（`has_unproven`）判断「能否干净清除」。而页在**完成时**才入表（早回执）⇒ 组级失败若正好落在一个窗口的命令全部在飞、页表为空时，会**干净清除**序列：`kind=NONE`、不升 `gen`。随后完成的命令按 `gen` 匹配把页推进页表，这批页永远等不到后继 `FAIL_CACHE`：确认步只能判 `no verdict` 并把**已编程成功的页**当失败撤销 ⇒ 置 `deferred_error` ⇒ host 下一条命令失败、写阶段中止、flush 不执行（teardown `cmt_dirty != 0`）。与 RISK-CACHE-19「失败序列其后页一律不确认」直接矛盾——那条语义靠 `abort` 升 `gen` 实现，而该路径绕过了 `abort`。
+- **缓解**：① `ftl_cache_seq_release` / `ftl_cache_seq_discard` 的判据加上 `wr_inflight != 0`：有成员在飞一律走 `ftl_cache_wr_abort`（升 `gen` ⇒ 迟到完成丢弃本页并按 IO_ERROR 结算组）；② 确认步的安全网不再要求 `kind == WRITE`——`wr_inflight != 0` 时一律等（在飞成员的 FAILC 仍可能证明该页）。
+- **下一步**：上板回归 `/speed/ftl_rw` 三档 + 全量 `test`。若仍失败，看故障 shell 的 `DBG … seq-close by=… wr=…` 判定是哪个路径关的序列（release/abort/pad/discard），并确认组级失败的触发点（`subop failed` / `drain stalled`，两者都受 5 s 限流）。
+- **证据**：`src/ftl/ftl.c:ftl_cache_seq_release` / `ftl_cache_wr_abort` / `ftl_cache_wr_confirm_step` / `ftl_cache_fail_note`。
+- **历史/验证**：
+  - 2026-11-13 板端现场（02:00 镜像，`/speed/ftl_rw chunk=32`，`base=495392`）：`wr-fail lba=497632 why=no verdict`，快照 `ctx kind=0 act=0 clos=0/0 wr=1/3`（页表 1 页、**3 条命令仍在飞**）⇒ 序列在命令在飞时被干净清除。修复 + 加粘滞现场（`last_fail` 含页表快照、`last_close` 含关闭路径）→ 编译通过，未上板
+  - 2026-11-13 板端（02:09 镜像）复现：`seq-close by=pad` 且关闭时 `wr_inflight=4` ⇒ 实际触发路径是 **RISK-CACHE-37**（pad 在飞时续写窗口），本条判据保留为同族防护（组级失败+在飞成员的正确结算）
+
+
 #### RISK-USBC-01 deferred error 的近似
 
 - **后果**：已提前回执的写段后来失败时，本仓让下一条 READ/WRITE/FLUSH 命令直接失败一次（承载错误的那条命令会设置 MEDIUM ERROR / WRITE ERROR sense；仍不是 CHECK CONDITION + REQUEST SENSE 形态）。与公开 SCSI 语义（CHECK CONDITION + deferred sense）不同：主机拿不到失败 LBA/异常类别（本仓出处层无 SPC/SBC 原文，具体 ASC 不作断言），FS 只能整条命令重试；若下一条是读，读被失败一次。
@@ -2801,6 +2814,10 @@
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
+| RISK-CACHE-33 | 2026-11-13 | padding END 早于数据成员排空，迟到完成卡死队头 | `docs/archive/known_risks_batches.md` |
+| RISK-CACHE-34 | 2026-11-13 | pad 收尾漏掉未证明的 head（根因实为 RISK-CACHE-37） | `docs/archive/known_risks_batches.md` |
+| RISK-CACHE-35 | 2026-11-13 | 残留 cache 序列门控拒绝格式化同步擦写 | `docs/archive/known_risks_batches.md` |
+| RISK-CACHE-37 | 2026-11-13 | padding END 在飞时续写窗口，新窗口末页永无 FAIL_CACHE | `docs/archive/known_risks_batches.md` |
 | RISK-USBC-02 | 2026-11-12 | 固件 format 后 Windows 非 NTFS 格式化失败（非代码问题） | `docs/archive/known_risks_batches.md` |
 
 ---
