@@ -484,13 +484,17 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 | USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ✅ 2026-10-22 全盘 H2testw（GC/CP 覆盖） |
 | USB-V08 | 写过程中掉电 | 写 32–64MB 中途拔电，重启后挂载并读回 | 卷可挂载；已写入部分哈希一致；无 `[FTL] dangling` | ⬜ 待测（`known_iss` ISS-USB-01） |
 | USB-V09 | 吞吐基线 | `dd`/H2testw 记录顺序写读 | 与 RISK-NAND-04 的瓶颈结论一致 | ⬜ 待测（`known_iss` ISS-USB-02） |
+| FTL-V01 | `RISK-MD-06` 回收前目录检查点 | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`dir_ckpt_seq > cp_seq` | ⬜ 待测 |
+| FTL-V02 | `RISK-MIG-02` predictive 活锁 | 观察串口 `[MIG] abort kind=2 ... victim read failed` | 不应反复重选同一 victim；坏块应被隔离 | ⬜ 待测 |
 
 > USB-V01/V02 的 `429 MiB / 449,839,104` 是 **rev30 历史证据**；当前 v12 期望为
 > **424 MiB / 444,596,224**（0 坏块）或按 `[CAP]` 动态值，见 B.5 与 `known_iss.md`。
-| USB-V08 | 写过程中掉电 | 写临时文件时断板子电源，重启重挂载 | 盘能重新挂载；FTL journal/CP 恢复；损坏范围可解释 | ⬜ 待测 |
-| USB-V09 | 吞吐 | 大文件复制 / `dd` 计时 | USB FS 预期 ~1 MB/s 量级；记录实测 | ⬜ 待测 |
-| FTL-V01 | `RISK-MD-06` 回收前目录检查点 | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`dir_ckpt_seq > cp_seq` | ⬜ 待测 |
-| FTL-V02 | `RISK-MIG-02` predictive 活锁 | 观察串口 `[MIG] abort kind=2 ... victim read failed` | 不应反复重选同一 victim；坏块应被隔离 | ⬜ 待测 |
+>
+> 2026-11-13 rev33 复验（debug 镜像 `18:38:28`，固件 `format` + POR，41 个出厂坏块 ⇒
+> `[CAP] lba_max=854528`）：`inspect` = 437,518,336 B / 512+512 字节扇区 / BusType=USB；
+> `format` 走 `diskpart clean → create partition primary → NTFS` 成功（437,448,704 B）；
+> `write` `SRC_HASH==DST_HASH`、`FLUSH_OK`；拔插后 `check` **`RESULT=PASS`**。
+> 对应 USB-V01~V06 正常路径无回归；V08（写中掉电）/ V09（吞吐）仍未测。
 
 ---
 

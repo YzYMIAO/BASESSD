@@ -135,7 +135,7 @@
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
-| ISS-UT-02 | 2026-11-13 | FC/NAND 测试源同步；`test /fc-nand/` 61 OK + 3 SKIP（预期 SKIP） | `docs/archive/known_iss_batches.md` |
+| ISS-UT-02 | 2026-11-13 | FC/NAND 测试源同步；`test` 全套 61 OK + 3 SKIP（`/fc-nand/` 59 OK + 3 SKIP，预期 SKIP） | `docs/archive/known_iss_batches.md` |
 | ISS-UT-04 | 2026-11-11 | FTL 测试源按当前 API 同步，`test /ftl/` 100/100 | `docs/archive/known_iss_batches.md` |
 | ISS-UT-05 | 2026-11-11 | FTL UT 覆盖缺口补齐，`test /ftl/` 95/95 | `docs/archive/known_iss_batches.md` |
 

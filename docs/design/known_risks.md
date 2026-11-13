@@ -193,11 +193,11 @@
 | RISK-GC-06 | 待上板 | WL 5s 节拍/CLOSED 门控/valid_count 上界/三态未板验 | 2026-11-12 常规回归通过（/ftl/ 100/100 + H2testw）；残余：WL 5s 节拍直接断言 |
 | RISK-GC-10 | 待上板 | 系统性 victim 读失败无熔断，好块成批标 BAD | 未上板 |
 | RISK-GC-14 | 待上板 | no-gain 判据依赖 total_writes/free 快照 | 2026-10-23 阈值重基线 |
-| RISK-GC-15 | 待上板 | BUSY 档挡掉 urgent GC，free 掉到 1 才急救 | 已上板（free=64 未触发） |
-| RISK-GC-16 | 待上板 | T5 磨损 GC 用全表 max/min，永不收敛 | 已上板 |
+| RISK-GC-15 | 待上板 | BUSY 档挡掉 urgent GC，free 掉到 1 才急救 | 2026-11-12 常规回归通过（H2testw GC 触发；残余：free<32 水位直接断言） |
 | RISK-GC-17 | 待上板 | cache-program batch 页基址误判，batch 永久禁用 | 2026-11-04 编译通过 |
 | RISK-GC-18 | 待上板 | 空 victim 快路径绕过 Journal 持久性闸门 | 2026-11-04 编译通过 |
 | RISK-GC-19 | 待上板 | 解码缺 meta 的 CW 被静默当未写，静默丢数据 | 2026-11-04 编译通过 |
+| RISK-GC-20 | 待定位 | 满盘启动后 idle GC 把 free 从 29 拖到 0（会话被 format 打断） | 2026-11-13 板端观测 |
 | RISK-MIG-01 | 待上板 | 等待命令丢失/卡住时永久 active | 未上板 |
 | RISK-MIG-02 | 待上板 | predictive 迁移活锁（同 GC-07 修法） | 未上板 |
 | RISK-MIG-03 | 待上板 | 标 BAD 后 L2P 仍指向该块，valid_count 回绕 | rev32 上板观测 |
@@ -301,16 +301,9 @@
 - **下一步**：继续写至 free<32 观察水位 GC。
 - **证据**：`src/ftl/migrate.c:mig_handle`；`include/ftl/allocator.h:FREE_POOL_TARGET`；`src/hil/cli.c:diag`。
 - **历史/验证**：
+  - 2026-11-12 H2testw 触发 GC（free<32）→ 常规回归通过；残余：水位直接断言
   - 已上板（free=64 未触发 T1，符合 target=32）→ 待上板（残余场景）
 
-#### RISK-GC-16 T5 磨损 GC 永不收敛
-
-- **后果**：T5 用「全表 max/min」作比值，min 可能来自从未使用的空闲块 ⇒ 永不收敛；H2testw 期间 GC 持续运行，`free` 从 3388 被搬到 64 后仍不停，读写速度下降。
-- **缓解**：T5 从 `gc_should_trigger` 移除；磨损维护改由 `wear_leveling` 的 UBI 判据（`max_free_ec − min_used_ec ≥ WL_THRESHOLD`）在 host 空闲时独立启动；`mig_wl_begin` 增加 `[WL] start` 行。
-- **下一步**：空闲态观察 `[WL] start`。
-- **证据**：`src/ftl/gc.c:gc_should_trigger`；`src/ftl/migrate.c:mig_wl_begin`。
-- **历史/验证**：
-  - 已上板复跑 H2testw（无 T5/无 GC，843/889 KB/s）；空闲态 `[WL] start` 未观测 → 待上板
 
 #### RISK-GC-17 cache-program batch 页基址误判
 
@@ -338,6 +331,15 @@
 - **证据**：`src/ftl/gc.c:gc_decode_cw_lba`；`include/fc/fc_interface.h:254`。
 - **历史/验证**：
   - 2026-11-04 修复 → 编译通过，未上板
+
+#### RISK-GC-20 满盘启动 idle GC 把 free 拖到 0
+
+- **后果**：满盘重启（`restore closed=3322 free=29`、无 host I/O）后 `[GC] start reason=periodic trig=0x01 mode=idle free=29`；随后 `progress jobs=30/71/108 moved=6668/16691/25899 rec=29/70/107`，`free` 21→1→0（`STAT t=23s free=0`、`mv=30155`）。若迁移目标页继续消耗 free 而 victim 归还滞后，`free=0` 时 CP/journal/host 写都拿不到成对块 ⇒ 启动后设备无写能力。
+- **缓解**：无专门守卫；本次会话被用户 `format` 打断，未观察到 GC 自行收敛或停手。
+- **下一步**：复现同一状态（H2testw 写满 → POR，**不执行 format**），观察 `[GC] progress/end` 与 `free` 是否回到 ≥32、是否出现 `no space` / 写失败；若停在 0 则按缺陷处理（GC 迁移需预留目标页/在 free 低于阈值时暂停）。
+- **证据**：板端 2026-11-13 19:47:35 镜像串口日志（`GC start`/`progress`/`STAT` 行，`docs/design/known_risks.md` 本条）；`src/ftl/migrate.c:mig_handle` / `src/ftl/gc.c:gc_should_trigger`。
+- **历史/验证**：
+  - 2026-11-13 19:47:35 `debug_ut` 满盘重启：free 29→0、mv=30155、rec=107，会话被 `format` 打断 → 待定位
 
 #### RISK-MIG-01 等待命令丢失/卡住
 
@@ -609,6 +611,7 @@
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-GC-07 | 2026-11-12 | 2/3 容量触发 GC/CP 活锁（读成功清 fail_count） | `docs/archive/known_risks_batches.md` |
+| RISK-GC-16 | 2026-11-13 | T5 磨损 GC 已从 `gc_should_trigger` 移除，磨损交给 WL UBI 判据 | `docs/archive/known_risks_batches.md` |
 
 ---
 
@@ -618,21 +621,21 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-BBT-01 | 待上板 | 运行时标坏的幂等 / 持久化 / Spare 记账未板验 | 2026-10-25 上板通过 |
+| RISK-BBT-01 | 待上板 | 运行时标坏的幂等 / 持久化 / Spare 记账未板验 | 2026-11-13 板端 `bbt fault` 注入：幂等 + 持久化 + Spare 记账通过；残余：写飞行中再标坏 |
 | RISK-BBT-02 | 待上板 | 工厂扫描对列读失败页的判坏行为未实测 | 未上板 |
 | RISK-BBT-03 | 待上板 | 格式化擦除与 BBT save 间掉电丢失工厂坏块图 | 未上板 |
 | RISK-BBT-04 | 待后续 | BBT header 无布局版本字段，格式演进无法识别 | 未上板 |
 | RISK-BBT-05 | 待上板 | 元数据区为空时可能误判空片并重扫 | 未上板 |
 | RISK-BBT-06 | 待后续 | BBT 回调不保存 command_id，重复完成可能错配 phase | 2026-10-19 代码核对 |
 | RISK-BBT-07 | 待上板 | CP 快照并集的 BAD 不补 Spare 池 | 未上板 |
-| RISK-BBT-10 | 待测试源 | kick / factory-scan / format_erase 缺单测 | 2026-10-25 上板通过 |
+| RISK-BBT-10 | 待后续 | kick / factory-scan / format_erase 缺单测 | 2026-11-13 代码核对 |
 | RISK-BBT-12 | 待上板 | 固定元数据池无 BAD 跳过/替换 | 未上板 |
 | RISK-BBT-13 | 待上板 | 固定元数据分区无法按 BBT 重映射 | 未上板 |
 | RISK-BBT-14 | 待上板 | FORMAT_IN_PROGRESS 提交点过早 | 未上板 |
 | RISK-BBT-15 | 待上板 | 运行期元数据块变坏，候选池/游标不更新 | 未上板 |
 | RISK-BBT-16 | 待上板 | 全片体检可能恢复边缘坏块 | 未上板 |
 | RISK-BBT-17 | 待上板 | BBT 候选池判断散落多处，易误擦 / 误留 | 未上板 |
-| RISK-BBT-18 | 待上板 | 多圈 BBT ring 新写 record 后 reload 选到上一条 | 2026-10-31 上板通过 |
+| RISK-BBT-18 | 待上板 | 多圈 BBT ring 新写 record 后 reload 选到上一条 | 2026-11-11 常规回归通过（/ftl/ 95/95 含 bbt_ring_reload；残余：多圈 + BAD 读失败） |
 | RISK-BBT-19 | 待上板 | BBT ring 块擦除失败导致持久化永久 livelock | 未上板 |
 | RISK-BBT-20 | 待上板 | 同步 bbt_save 与异步 job / 并发标坏无协议 | 未上板 |
 | RISK-BBT-21 | 待上板 | 出厂扫描跳过 Block 0 的器件依据无出处 | 未上板 |
@@ -646,6 +649,8 @@
 - **下一步**：注入擦失败 / RR 标坏后重启，核对 `bad_count` / `spare_count` / BBT 位一致；BBT 写飞行期间再标坏，下一次 save 必须包含新块。
 - **证据**：`src/ftl/bbt.c:bbt_mark_bad` / `bbt_write_submit` / `ftl_bbt_callback`；`src/ftl/ftl_op.c` `ftl_bbt_callback` 派发表。
 - **历史/验证**：
+  - 2026-11-13 板端（`debug_ut` 19:47:35）`format` + POR 后注入 `bbt fault 0 2000`：`info bad=41→42`，`free` 保持 3351（`alc_free_remove` −1、`bbt_spare_refill` 补 1 ⇒ Spare 记账生效）；**重复注入同一块** `bad` 仍 42（幂等）；POR 后 `[BLK] bad areas data=42`、`info bad=42`、`free=3350`、`[CAP] plane_usable_min 1669→1668 / lba_max 854528→854016` ⇒ 持久化生效。⚠ `bbt` 命令打印的是 probe 图（全 FF），**不是 BAD 图**，不能当判据；判据用 `info` + boot `bad areas`。残余：写飞行中再标坏未覆盖
+  - 2026-11-11 /ftl/ 95/95（bbt_mark_bad/bbt_persist）→ 常规回归通过；写飞行中再标坏未覆盖
   - 2026-10-25 板端 `bbt_mark_bad` / `bbt_persist` clean-pool 通过 → 写飞行中再标坏的路径未覆盖
   - （日期未记录）`bbt_mark_bad` 改为幂等 + 引入 `dirty_gen` → 未上板
 
@@ -710,6 +715,7 @@
 - **下一步**：补 factory-scan / format-in-progress 注入用例（测试源由用户维护，R4）。
 - **证据**：`tests/unit/test_ftl_pure.c` / `tests/unit/test_ftl_media.c`；`docs/design/ftl_ut_design.md` §4.1。
 - **历史/验证**：
+  - 2026-11-13 测试源已同步；kick/factory-scan/format_erase 仍缺单测 → 待后续
   - 2026-10-25 `format_in_progress_resume` 覆盖 `FORMAT_IN_PROGRESS` 恢复 → 上板通过
   - （日期未记录）BBT 用例入库 → `kick` / `scan_factory` / `format_erase` 仍未覆盖
 
@@ -729,6 +735,7 @@
 - **下一步**：上板判据 = 多圈 + 一个读失败 BAD 块后 save→load 必须载入最新；clean / 多圈两条 UT 都要过。
 - **证据**：`src/ftl/metadata.c:md_ring_scan` / `md_ring_locate`；`src/ftl/bbt.c:bbt_ring_init` / `bbt_record_probe` / `bbt_load` / `bbt_save`；`tests/unit/test_ftl_media.c`。
 - **历史/验证**：
+  - 2026-11-11 /ftl/ 95/95（bbt_ring_reload）→ 常规回归通过；多圈 + BAD 读失败未覆盖
   - 2026-11-05 `md_ring_scan` 改为「末槽无效块各自降序找最后有效 record + 全局最大 sequence」，写点由已校验胜者推 → 逻辑模型 BBT-18 场景返回 seq=1103、多圈重启模型 500 次无回归；未上板
   - 2026-10-31 板端 UT `bbt_ring_reload` 两次 save 场景通过 → 多圈未覆盖
   - 2026-10-24 板端 `test /ftl/media/e2e/bbt_persist`：seq 1383→1384、reload 1383；同日 21:29 `format_in_progress_resume` 也读不回 → 复现
@@ -1489,7 +1496,7 @@
 | RISK-IF-03 | 待上板 | 同步原语忽略数据搬运返回值，短链读静默返回 OK | 未上板 |
 | RISK-IF-04 | 待上板 | plane1 迁移 / wbuf 稀疏页 / 越段位图 / 迟到完成未板验 | 2026-11-12 常规回归通过（media 30/30 + H2testw）；残余：wbuf 稀疏页/越段位图/迟到完成负例 |
 | RISK-IF-06 | 待决策 | chain 派发路径不处理 RAID stripe encode | — |
-| RISK-IF-07 | 待上板 | 批次 chain 混优先级或末条 MORE 无 END 会错乱/锁死 | 正常路径上板（2026-10-30） |
+| RISK-IF-07 | 待上板 | 批次 chain 混优先级或末条 MORE 无 END 会错乱/锁死 | 2026-11-13 Mode 0 `/fc-nand/` 62/62，`chain_priority_lock` OK；残余：混优先级/wild-chain 负例 |
 | RISK-IF-08 | 待上板 | page-read 聚合忽略 NAND 结果位，TIMEOUT 可静默返回陈旧数据 | 未上板 |
 | RISK-IF-09 | 待上板 | 放弃序列只清 RAM 不发设备 LAST | 未上板 |
 | RISK-IF-10 | 信息 | 被放弃的 MORE 链尾占住 chain_owner（现状单队列不成立） | 2026-11-04 复核 |
@@ -1556,6 +1563,7 @@
 - **下一步**：读/写流式窗口跨 chunk 的 END、D4 断点、wild-chain 负例。
 - **证据**：`src/fc/fc_interface.c:fc_submit_batch`；`src/ftl/ftl_op.c` 门控；`src/ftl/cache_batch.c:cache_read_submit`；`include/ftl/ftl.h:ftl_cache_seq_s`。
 - **历史/验证**：
+  - 2026-11-13 Mode 0 `/fc-nand/` 62/62，`chain_priority_lock` OK → 链锁路径验证；残余：混优先级/wild-chain 负例
   - 2026-10-30 5.2 万窗口、全盘 0 错误；跨 chunk 链正常 → 正常路径上板
   - 混优先级 / wild-chain 负例未注入
 
@@ -1674,6 +1682,7 @@
 | RISK-HOST-14 | 待上板 | 拔线后门控环形等待导致读回 MATA（根因已改，死锁路径未验） | 2026-11-01 无回归 |
 | RISK-HOST-16 | 待上板 | 「无进展时长」预算实际未生效（死赋值） | 2026-11-05 编译通过 |
 | RISK-HOST-17 | 待上板 | host queue entry 生命周期，漏 release/重复 release | 2026-11-05 代码复核 |
+| RISK-HOST-18 | 信息 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；用户裁决接受） | 2026-11-13 403/416 通过，无 timeout |
 
 ### 详情
 
@@ -1800,11 +1809,21 @@
 - **历史/验证**：
   - 2026-11-05 复核：`q` 未输出 hostq，观测路径待补 → 未上板
 
-### 已闭合（详情见 archive）
+#### RISK-HOST-18 H2testw 近满盘 confirm park timeout（原闭合后复现）
 
-| ID | 日期 | 一句话 | 归档 |
-|---|---|---|---|
-| RISK-HOST-18 | 2026-11-12 | H2testw 近满盘确认超时/已回执写丢失（FC 预算修复后 406/420 MB 0 错误） | `docs/archive/known_risks_batches.md` |
+- **后果**：近满盘写时 `[ERR] confirm park timeout` → 已早回执的写按 IO_ERROR 结算 → USB 报 deferred error；主机侧表现为 H2testw `Code 1006`（卷被外部更改）。2026-11-12 首轮曾丢 756 KB 已确认数据；2026-11-13 复现这一轮 H2testw **未报 DATA LOST**（`Only 403 of 417 MByte tested`），但写路径同样中断。
+- **缓解**：已落地（2026-11-12）：host 预算 4 pair（8 cmd / 32 desc / 32 buf / 8 SQ）、`cache_wr_build` 入口预算检查、`ftl_op_seq_gate` 对 `FTL_OP_L2P` 置 `break_requested`、CP stall 日志带 held-ops 分布。本轮日志显示这些仍在生效：无 `cmd=0 buf=0`、无 `submit stalled`。
+- **下一步**：**用户裁决（2026-11-13）：以第 4 次 H2testw 通过为准，不再追**。临时诊断插桩已按用户要求移除（`s_confirm_again_reason` + 超时 `ftl_drain_stall_dump`，2026-11-13）；若再复现，先把这段只读诊断加回来再抓一次，按新证据重开。不要盲改。
+- **证据**：`src/ftl/ftl.c:ftl_confirm_service / ftl_confirm_write / ftl_confirm_progress_pending`；`src/ftl/ftl_op.c:ftl_op_seq_gate`；`src/ftl/l2p_cache.c:l2p_load_start`；板端 2026-11-13 18:38:52 镜像串口日志；同表 `RISK-HOST-05`（上游三支未定的通用条目）。
+- **历史/验证**：
+  - 2026-11-13 18:38:52（`debug_ut.elf`，UT=FC 构建）H2testw：写到 403/417 MB 时 `error 0x18b00000 Code 1006`；串口 `[L2P] load start failed region=0 cause=submit_backpressure`（free=723 时）、`confirm park timeout lba=301184 parked=6`（free=33）、两条 `write chunk failed after ack ... deferred`；`ftl_ctx`：free=33、bad=41、closed=1658、op=204/204（OP 未动）、spare=50/50、pend=0、seq act=0、jrn water=54 idle=1；`nop` 27→81（GC 无可回收 victim，all-valid 数据）→ **复现**，上游分支未定
+  - 2026-11-13 同一次 H2testw Verify：**390/417 MB，`Test finished without errors`，读 888 KB/s** ⇒ 已写入数据无损坏、无 DATA LOST；中断只发生在写阶段末尾（403→390 差额来自被中止的最后一个文件）
+  - 2026-11-13 产品 `debug.elf`（横幅 18:38:28，非 UT）复现：`error 0x14a00000 Code 1006`、403/417 MB；`confirm park timeout lba=803840 parked=8`，失败时 **free=595**（远未写满）、`[CP] job phase=1 age=2000ms`；早先 t=32s 已有 `[CP] submit stalled 10ms — abort phase=2 free=3349 cmd=1 buf=8` + `held ops: md=1` ⇒ **排除 UT 构建差异、排除容量/格式化**；失败点是资源/门控竞态，与 free 水位无关
+  - 2026-11-13 19:47:17 诊断镜像（`s_confirm_again_reason` + 超时 dump）同一产品档 **H2testw 通过**：free 75 → GC `trig=0x01 free=31` → 回收 3593 页、12 SB、19.4 s，free 稳定在 29；全程**无** `confirm park timeout`（诊断未触发）⇒ 间歇性竞态；⚠ 插桩本身会改变代码布局/时序，通过一次不能证明修复。GC 收在 free=29（< target 32）且 `nop=4` 后不再启动，属 `RISK-GC-14` 的 no-gain 挂起（设计行为，非本轮故障）
+  - 2026-11-13 第 4 次 H2testw（`bbt fault` 后再跑）：**403/416 MB，`Test finished without errors`**，写 945 / 读 885 KB/s，串口无 `confirm park timeout` / `write chunk failed`；累计 2 次失败 + 2 次通过 → 按用户裁决以通过为准，状态转 `信息`
+  - 2026-11-13 代码对比 `574b8e7..HEAD`：`ftl_op.c`（seq gate）/ `l2p_cache.c`（加载）/ `pending.c` 均 **0 diff**，`ftl_fc_interface.h` 仅注释 ⇒ HOST-18 的修复代码未被改坏。行为差异只有 122aaf7（USB MODE SENSE 宣称 WCE=0）与 155cf9a（cache 写序列 verdict/pad/closing + flush 无进展超时）；本轮日志无 `cache-wr failed` / `flush stalled`，新分支未触发 ⇒ 仍是同一潜伏时序竞态，不是已定位的新回归
+  - 空间假说已排除：2026-11-12 通过时结束 `free=23`，本轮失败时 `free=33`，且 OP 池 408 块未动 ⇒ 不是「真的写满」
+  - 2026-11-12 18:04:36 镜像 H2testw 406/420 MB 通过 → 当时闭合（详情见 `docs/archive/known_risks_batches.md`）；仅一次通过，不代表边界稳定
 
 ---
 
@@ -2348,7 +2367,7 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-ALLOC-09 | 待上板 | 低 free 时成对分配失败导致写路径永久 stall（plane 不平衡） | 2026-10-31 上板通过（生路） |
+| RISK-ALLOC-09 | 待上板 | 低 free 时成对分配失败导致写路径永久 stall（plane 不平衡） | 2026-11-12 常规回归通过（/ftl/ + H2testw；残余：ISS-FTL-17 结构根治） |
 | RISK-ALLOC-06 | 待后续 | `ftl_gblock` 无入参契约，哨兵可截断成合法 gblock | 未上板 |
 | RISK-ALLOC-12 | 待上板 | 出池后 state 仍为 FREE，漏赋新态时块永久漏账 | 未上板 |
 | RISK-ALLOC-13 | 待上板 | `alc_super_open_rewind_pair` 无下溢守卫，`next_page--` 掩码成页 63 | 未上板 |
@@ -2367,6 +2386,7 @@
 - **下一步**：断电视角另测；观察 `op=204/0`（plane 1 OP 耗尽、free 10/20 仍不平衡，偏好阈值 4 才生效）与 `mv=0`（victim 全是空块，ISS-FTL-18）；板端走 format→POR、GC 压力、重启恢复。
 - **证据**：`src/ftl/allocator.c` `alc_super_open` / `alc_free_find_block` / `alc_free_push`；`src/ftl/power_failure_recovery.c` `pfr_closed_sb_add`；`src/ftl/migrate.c` `mig_job_finish`；`src/ftl/cache_batch.c` `cache_wr_build`。
 - **历史/验证**：
+  - 2026-11-12 /ftl/ 95/95 + H2testw → 常规回归通过；结构根治仍待 ISS-FTL-17
   - 2026-10-31 20:13 镜像板端：同场景 `free` 跌破 32（稳态 30~32）后 H2testw 写不中断（239 MB 时 894 KB/s）、`fpmin=10`、`nop` 持续增长 → 生路验收通过；观察 `op=204/0`、`dng=2`、`mv=0`
   - 2026-10-31 修前板端：`drain stalled gi=0 next=0/32`、`free=264 sb_open=0 np=64 p0=03`、`nop=54→671`、`mv=0`；H2testw offset 0x13000000 Code 1392 → 复现
 
@@ -2549,7 +2569,6 @@
 | RISK-UT-04 | 信息 | FC 速度测试擦写 live FTL 的 per-plane 块 | 2026-10-24 上板确认 |
 | RISK-UT-06 | 信息 | 每次跑 /ftl/media 永久标坏 3 个用户块 | 2026-11-11 上板实测 |
 | RISK-UT-10 | 信息 | L3 随机块窗口与 live FTL 块池冲突 | 2026-11-11 上板（UT 镜像） |
-| RISK-UT-12 | 待后续 | chain_priority_lock 断言早于 feature 还原 | 2026-11-11 编译通过（板端 SKIP） |
 | RISK-UT-13 | 信息 | teardown 不收在途资源，longjmp 后泄漏 | 未上板 |
 | RISK-UT-14 | 信息 | level1 两条 validate 用例不含断言 | 2026-11-11 复查确认 |
 | RISK-UT-25 | 信息 | test /ftl/ 后 BAD 计数多 3 个 | 2026-11-11 上板对比 |
@@ -2586,15 +2605,6 @@
   - 2026-11-11 判定：接受（UT 镜像专属，非产品路径） → 信息
   - 2026-11-11 板端 `/fc-nand/` 59/59（只证 FC 命令成功） → 上板
 
-#### RISK-UT-12 chain_priority_lock 断言早于 feature 还原
-
-- **后果**：Step 3 断言 `g_l3_prio_slots[hsq_get].out[0] == y[0]`（`:850`）排在还原 01h 原值（`:854`）之前；断言失败经 munit longjmp 跳过还原 ⇒ 器件停在非默认 timing mode 直到断电，同 power cycle 后续用例仍按默认 FMC 时序发命令 ⇒ 级联失败/时序错乱。用例头注释（`:686`）声称「还原排在断言之前」，与代码不符（H6）。
-- **缓解**：高速度构建（`CONFIG_NAND_TIMING_MODE != 0`）下该用例 `MUNIT_SKIP`，不执行；Mode 0 构建可触发。restore 排在断言之前（读终值 → 还原 → 复读 → 断言）；`make tests UT=FC` 通过。
-- **下一步**：需专门的 Mode 0 构建跑 `/fc-nand/lifecycle/chain_priority_lock` 才能闭合；按 R8 不临时改 `CONFIG_NAND_TIMING_MODE` 验证。
-- **证据**：`tests/unit/test_fc_level3.c:850-858:test_chain_priority_lock`。
-- **历史/验证**：
-  - 2026-11-11 板端 rev=33 Mode 5 档 `MUNIT_SKIP`，修复未执行 → 待后续
-  - 2026-11-11 `make tests UT=FC` 通过 → 编译通过
 
 #### RISK-UT-13 teardown 不收在途资源，longjmp 后泄漏
 
@@ -2628,6 +2638,7 @@
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-UT-01 | 2026-11-11 | munit SKIP/FAIL 行不闭合方括号与换行 | `docs/archive/known_risks_batches.md` |
+| RISK-UT-12 | 2026-11-13 | Mode 0 `/fc-nand/` 62/62，`chain_priority_lock` OK；断言前已还原 feature | `docs/archive/known_risks_batches.md` |
 | RISK-UT-05 | 2026-11-03 | DWT 32 位回绕使 munit 计时按 10.737 s 取模 | `docs/archive/known_risks_batches.md` |
 | RISK-UT-09 | 2026-11-01 | media_ledger_total 漏计用户区借用日志块 | `docs/archive/known_risks_batches.md` |
 | RISK-UT-11 | 2026-11-11 | block_erase_verify 判据无区分力（缺写后擦） | `docs/archive/known_risks_batches.md` |
@@ -2807,6 +2818,7 @@
 - **下一步**：复现窗口开串口抓 `g_ctrl.state` 与 SCSI trace，区分「主机未发 READ CAPACITY」与「固件返回 NOT READY」；止血（主机侧）= 管理员删 F: 盘符，或跑 `tools/usb_verify/usb_rebuild_mbr.ps1` 重建分区并格式化（同时修越界 MBR）。
 - **证据**：`src/hil/usb_msc.c:1212`（test_unit_ready）/ `:1224`（capacity）/ `src/hil/controller.h:138`；主机 `Get-Disk`/`Get-Partition`/`Get-Volume` 采样 2026-11-12 21:06:04–21:08:21；同表 RISK-USBC-02。
 - **历史/验证**：
+  - 2026-11-13 rev33（debug `18:38:28`）固件 `format` + POR 后：`diskpart clean/create/format`、写入、拔插后校验均正常，两次枚举无 Size=0；本轮**未做 30 s 采样**，不能判定间歇无介质消失 → 待定位
   - 2026-11-12 21:11 主机侧摘掉 F: 盘符 → 异常采样 7/54 → 0/30（止血）
   - 2026-11-12 21:06–21:08 采样：30 s 内 7/54 次 Size=0/RAW → 待定位
 
@@ -3010,7 +3022,6 @@
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
 | RISK-CTRL-01 | 待上板 | 多 run 请求中途失败时父请求提前完成、错误被覆盖 | 未上板 |
-| RISK-CTRL-02 | 待上板 | HIL 入口未校验 LBA 范围，越界交给 FTL | 未上板 |
 | RISK-CTRL-03 | 待决策 | `ssd_controller_init` 稀疏拓扑注释与实现相反 | 未上板 |
 | RISK-CTRL-04 | 待后续 | HIL submit 未校验 buffer NULL，FTL 兜底但状态分类错误 | 未上板 |
 
@@ -3025,14 +3036,6 @@
 - **历史/验证**：
   - 2026-11-05 聚合状态 + 失败计数扣减 + 受理语义修正 → 未上板
 
-#### RISK-CTRL-02 HIL 入口缺 LBA 范围校验
-
-- **后果**：`ssd_controller_submit` 对 READ / WRITE 只校验 `buffer_size`，范围校验依赖 USB / CLI 前端；直接调用 controller 的测试或新前端可把运行时越界 LBA 交给 FTL（FTL 只按编译期上限检查，不知道运行时容量）。
-- **缓解**：submit 中对 READ / WRITE 先调 `ssd_controller_lba_range_ok`，越界返回 `INVALID_ARGUMENT` 并置 complete；`test_hil submit_edges` 覆盖越界。
-- **下一步**：上板跑 `/hil/`；越界请求返回 INVALID。
-- **证据**：`src/hil/controller.c` `ssd_controller_submit`；`tests/unit/test_hil.c` `test_hil_submit_edges`。
-- **历史/验证**：
-  - 2026-11-05 入口增加范围校验 → 未上板
 
 #### RISK-CTRL-03 稀疏拓扑注释与实现相反
 
@@ -3055,6 +3058,12 @@
   - 2026-11-13 读码判定 → 未上板
 
 ---
+
+### 已闭合（详情见 archive）
+
+| ID | 日期 | 一句话 | 归档 |
+|---|---|---|---|
+| RISK-CTRL-02 | 2026-11-13 | HIL 入口 LBA 范围校验；`lba_range_ok`/`submit_edges` 上板通过 | `docs/archive/known_risks_batches.md` |
 
 ## 2AE. HIL 主机前端 / host queue
 
@@ -3100,7 +3109,6 @@
 | RISK-POOL-06 | 待上板 | 单字段双语义，失败坐标字段无读者 | 未上板 |
 | RISK-POOL-07 | 待上板 | 内部 API 后缀 / 命名不合 H49 | 未上板 |
 | RISK-POOL-08 | 待上板 | FC 注释承载变更史与版本号 | 未上板 |
-| RISK-POOL-11 | 待上板 | 链校验把无 desc 的 multi-plane 擦除判非法 | 2026-11-11 上板复现 |
 
 ### 详情
 
@@ -3177,21 +3185,13 @@
 - **历史/验证**：
   - 2026-11-06 注释收口（H37 / S6）→ 未上板
 
-#### RISK-POOL-11 链校验误拒无 desc 的 multi-plane 擦除
-
-- **后果**：`fc_pool_chain_validate` 对 `config.multi_plane > 0` 无条件要求 `planes_with_desc == all_planes`，但 multi-plane 擦除 / 纯加载按契约不建 desc 链（`ftl_cmd_needs_desc_chain` 为 false，dispatch 从 `cmd->paa` 逐 plane 派生行地址）⇒ `planes_with_desc=0` 必然判 false。debug 档 `ASSERT: submit: chain invalid` 停机；release 档返回 `FC_STATUS_INVALID_ARGUMENT` ⇒ 所有 multi-plane 擦除经 `fc_submit` 失败（GC / migrate / `ftl_sync_page_erase`），功能不可用但非静默写坏。
-- **缓解**：覆盖校验改为只对 `nand_operation_has_data(op)` 的 multi-plane 数据命令生效；无数据命令仍走通用逐 desc 坐标 / 归属 / 行一致检查，平面跨度由 `fc_command_plane_span` 与 `cmd->paa` 校验。
-- **下一步**：上板跑 `/fc-nand/lifecycle/fail_cw_attribution`（② 无 desc 擦除）+ `/fc-nand/lifecycle/block_multi_plane` + FTL 擦除回归；负例：multi-plane **数据**命令缺 plane desc 仍须拒绝。
-- **证据**：`src/fc/fc_pool.c` `fc_pool_chain_validate`；`src/fc/fc.c` `fc_build_dispatch_request` 的 `OP_ERASE_BLOCK_MULTI_PLANE` 分支；`src/ftl/ftl_fc_interface.c` `ftl_sync_page_erase`；`tests/unit/test_fc_level3.c` `test_fail_cw_attribution` ②。
-- **历史/验证**：
-  - 2026-11-11 覆盖校验按数据 / 无数据命令分流 → 未上板
-  - 2026-11-11 板端 `fail_cw_attribution` ② 首次触发 `submit: chain invalid` → 上板复现
 
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-POOL-10 | 2026-11-07 | `fc_command_to_id` 池上界误用指针宽度，接口已删除 | `docs/archive/known_risks_batches.md` |
+| RISK-POOL-11 | 2026-11-13 | 无 desc multi-plane 擦除链校验已分流；`fail_cw_attribution`/`block_multi_plane` 上板通过 | `docs/archive/known_risks_batches.md` |
 
 **已判定为有意设计（重访时先读契约）**：
 
@@ -3227,7 +3227,7 @@
 | RISK-DP-18 | 待上板 | random read UOP 缺 CHECK_FAIL，中间 CW 失败被吞 | 未上板 |
 | RISK-DP-19 | 待上板 | 单 plane cache 读 UOP 缺 CHECK_FAIL | 未上板 |
 | RISK-DP-20 | 待上板 | cache 编程首页 FAILC 误报，误判好页失败 | 未上板 |
-| RISK-DP-21 | 待上板 | 参数页/唯一 ID/GET_FEATURES 的 FAIL 被当成成功 | 未上板 |
+| RISK-DP-21 | 待上板 | 参数页/唯一 ID/GET_FEATURES 的 FAIL 被当成成功 | 2026-11-13 Mode 0 `init_sequence` OK（正常路径）；残余：FAIL 注入 |
 | RISK-DP-22 | 待上板 | WAIT_READY 后端阻塞，引擎协作让出路径未生效 | 未上板 |
 | RISK-DP-23 | 待上板 | fc_nand_start 依赖调用者预绑定 engine 指针，契约未声明 | 未上板 |
 | RISK-DP-24 | 待上板 | 高速模式失败后没有回滚到低速 | 未上板 |
@@ -3425,6 +3425,7 @@
 - **下一步**：上板/负例：参数页读注入 FAIL，确认 target probe 失败；正向开机扫描回归。`OP_READ_ID` 仍按原设计不查 70h。
 - **证据**：`src/nand/onfi_1_0.c:g_nand_read_parameter_page_uops / g_nand_read_unique_id_uops / g_nand_get_features_uops`；`src/fc/fc_nand_engine.c:fc_nand_execute`。
 - **历史/验证**：
+  - 2026-11-13 Mode 0 `init_sequence` OK（参数页/唯一 ID/GET_FEATURES 正常路径）；FAIL 注入未做
   - 2026-11-07 修复：三个同步读 UOP 末尾补 `CHECK_FAIL` → 未上板
 
 #### RISK-DP-22 WAIT_READY 后端阻塞
@@ -3496,7 +3497,7 @@
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-DP-30 | 2026-11-11 | multi-plane 编程误删 `11h` 后 1µs 延时致读回 META 错，补 TWB+WAIT_READY 后 `/fc-nand/` 59/59 全绿 | `docs/archive/known_risks_batches.md` |
-| RISK-DP-29 | 2026-11-13 | 三条新增 FC-NAND UT 覆盖上板通过（61 OK + 3 SKIP） | `docs/archive/known_risks_batches.md` |
+| RISK-DP-29 | 2026-11-13 | 三条新增 FC-NAND UT 覆盖上板通过（`test` 61 OK + 3 SKIP） | `docs/archive/known_risks_batches.md` |
 
 ---
 
@@ -3518,7 +3519,6 @@
 | RISK-SCH-10 | 待上板 | 合成失败完成项忽略 CQ 满，FTL 等不到完成 | 未上板 |
 | RISK-SCH-11 | 待上板 | 完成侧不变量只有 debug ASSERT，release 继续写 CQ | 未上板 |
 | RISK-SCH-12 | 待上板 | fc_submit_batch 入参/提交不变量只有 debug ASSERT | 未上板 |
-| RISK-SCH-13 | 待上板 | 合成失败完成项固定写 cw_status[0]，plane1/CW>0 归因丢失 | 未上板 |
 
 ### 详情
 
@@ -3630,16 +3630,13 @@
 - **历史/验证**：
   - 2026-11-07 修复：入口改 `ASSERT_REJECT`，提交失败置 fatal → 未上板
 
-#### RISK-SCH-13 合成失败完成项固定写 cw_status[0]
 
-- **后果**：`fc_poll_fail_command`（encode/build/submit 失败兜底）只标 flat CW 0；命令只访问 plane1 或 CW>0 时，该位对不上任何 desc，desc 级失败归因丢失，FTL 的 `bad_plane_mask` 只能回退 `pending->new_pba`，可能漏标/错标 plane。
-- **缓解**：`fc_poll_fail_command` 用 `fc_get_cmd_cw_bitmap(cmd_id)` 按实际 flat CW 集合布 `FAIL`；仅无 desc 命令回退 `[0]`；`fc_complete_from_nand` 仍按 desc 的 flat 下标聚合。
-- **下一步**：上板/负例：plane1-only 或 CW>0 命令分别注入 encode/build 失败，确认对应 desc 全部为 `FAIL`、FTL 的 `bad_plane_mask` 指向正确 plane。
-- **证据**：`src/fc/fc.c:fc_poll_fail_command / fc_complete_from_nand`；`src/ftl/ftl.c:ftl_host_io_write_fail`。
-- **历史/验证**：
-  - 2026-11-07 修复：按实际 flat CW 集合布 `FAIL` → 未上板
+### 已闭合（详情见 archive）
 
----
+| ID | 日期 | 一句话 | 归档 |
+|---|---|---|---|
+| RISK-SCH-13 | 2026-11-13 | 合成失败按实际 flat CW 集合布 FAIL；`fail_cw_attribution` 0x0FF 上板通过 | `docs/archive/known_risks_batches.md` |
+
 ## 2AI. NAND 器件 / PHY
 
 ### 索引
@@ -3660,7 +3657,6 @@
 | RISK-NANDP-13 | 待上板 | timing 查询/设置 release 无边界，越界会写坏状态 | 未上板 |
 | RISK-NANDP-14 | 待上板 | 多条 busy 启动命令缺 tWB，WAIT_READY 提前返回读到旧数据 | 未上板 |
 | RISK-NANDP-15 | 待上板 | 首次 RESET timeout 500µs 小于 datasheet 1ms，冷启动可能误判 | 未上板 |
-| RISK-NANDP-16 | 待上板 | tADL 位置错误；11h 后 1µs 实为 plane 切换等待 | 2026-11-11 上板通过 |
 | RISK-NANDP-17 | 待上板 | tR timeout 38µs 小于 tR_ECC 70µs，启用内部 ECC 会提前超时 | 未上板 |
 | RISK-NANDP-18 | 信息 | 01h timing mode 的 tITC 1µs 已被 700µs timeout 覆盖 | — |
 
@@ -3794,16 +3790,6 @@
 - **历史/验证**：
   - 2026-11-07 改 1100µs + FFh 后 `TWB` → 未上板
 
-#### RISK-NANDP-16 tADL 放置位置错误
-
-- **后果**：`tADL` 原放在 `11h` 后，MT29F4G08 Table 29 Note 2 定义为“最后一个地址周期的 WE# 上升沿 → 第一个数据输入的 WE# 上升沿”；单 plane program 无 `tADL`、多 plane/cache program 只在 `11h` 后延时 ⇒ 地址→数据之间没有延时，数据输入可能早于 `tADL`，编程数据/地址采样不可靠。板端二分结论：`tADL` 移到地址→数据之间无害；但删掉 `11h` 后那 1µs 会使双 plane 编程整页丢失（`block_multi_plane` 首读即 META）⇒ 该 1µs 是 `11h` 切 plane 后器件需要的切换等待，**不能删**。
-- **缓解**：`TADL` 在每组 `ROW_2` 之后、`DATA_IN` 之前（`g_nand_normal_program_page_uops`、`g_nand_program_cache_uops`、`g_nand_program_page_issue_uops`、`g_nand_multi_plane_program_uops`、`g_nand_two_plane_program_cache_uops`、`g_nand_two_plane_program_cache_end_uops`）；`11h` 后延时删除；对应 op 的 `timing.tadl_us` 设为 `NAND_TIME_TADL_US`（1µs > 70ns）。`g_nand_set_features_uops` 的地址→数据也补 `TADL`；三张双 plane 表的 `11h` 后等待改为 `DELAY_TIMING NAND_TIMING_TWB` + `WAIT_READY`（先等 tWB 确保 busy 已生效，再轮询 R/B# 引脚回高；不插 70h，避免在两段 plane 地址之间插入总线命令）⇒ 独立 timing 字段不再需要。
-- **下一步**：重跑 `block_cache_multi_plane` / `block_cache_multi_plane_cross_block` 确认 cache 双 plane 写恢复；已绿：`block_multi_plane`、`block_cache_multi_plane`、`block_cache_multi_plane_cross_block`；仍待回归：normal program / SET_FEATURES / H2testw 写校验、整页 `WITH_DATA_OUT` 读表（RISK-DP-30）。datasheet 已确认 `EFh` 在 `DATA_IN` 后 busy `tFEAT`（max 1µs），`TWB` 已补，`OP_SET_FEATURES` 的 700µs timeout 覆盖。
-- **证据**：`src/nand/onfi_1_0.c` 上述 UOP 数组与 `g_nand_operation_map`（`OP_NORMAL_PROGRAM_PAGE` / `OP_PROGRAM_PAGE_CACHE` / `OP_PROGRAM_PAGE_CACHE_FIRST` / `OP_PROGRAM_PAGE_ISSUE` / `OP_OTP_DATA_PROGRAM` / `OP_*MULTI_PLANE*`）；MT29F4G08 Table 29 Note 2；RISK-DP-30。
-- **历史/验证**：
-  - 2026-11-11 轮询版上板：`/fc-nand/` 59/59 全绿（3 skip），含 `block_multi_plane` 92.24 ms、`block_cache_multi_plane` 80.52 ms、`block_cache_multi_plane_cross_block` 80.50 ms（debug_ut 横幅 12:56:46）
-  - 2026-11-11 板端二分：`tADL` 移地址→数据无害；删 `11h` 后 1µs 致双 plane 整页丢失 → 加回
-  - 2026-11-07 按 Table 29 移动 `TADL`、双 plane 表改 TWB + WAIT_READY → 未上板
 
 #### RISK-NANDP-17 on-die ECC 未启用时的 tR timeout 边界
 
@@ -3829,6 +3815,7 @@
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-NANDP-09 | 2026-11-11 | 命令/地址窗口写缺 __DMB，字节可能被合并重排 | `docs/archive/known_risks_batches.md` |
+| RISK-NANDP-16 | 2026-11-13 | tADL/11h 等待：Mode 0 `/fc-nand/` 62/62（含 SET_FEATURES/cache/multi-plane）+ H2testw 通过 | `docs/archive/known_risks_batches.md` |
 
 ---
 

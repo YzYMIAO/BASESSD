@@ -1,6 +1,6 @@
 # FC-NAND 单元测试设计（板端）
 
-> 状态：2026-11-13 13:37:20 镜像；`test /fc-nand/` **61 OK + 3 SKIP（64 次运行）**，
+> 状态：2026-11-13 13:37:20 镜像；`test` 全套 **61 OK + 3 SKIP（64 次运行）**；其中 `/fc-nand/` **59 OK + 3 SKIP**、`/speed/fc_nand_rw` **2 OK**，
 > 总 27.95 s。3 条 SKIP 是 Mode 5 下的按设计跳过，不是失败（见 §6.4）。
 > 范围：`src/fc/` + `src/nand/` 的 FC-NAND 层。FTL UT 见 `docs/design/ftl_ut_design.md`；
 > HIL UT 见 `docs/design/hil_ut_design.md`。
@@ -44,7 +44,7 @@
 5. **负例必须能红**：非法 opcode、越界、UNC/CRC/META 错误、池满、链锁等必须有明确判据。
 6. **真 NAND 安全模型**：Level 3 与 `/speed/fc_nand_rw` 会擦写原始块，破坏 live FTL 映射；
    FC-only 跑完必须 `format` + POR，不能与裸 `test`/FTL 状态混用。
-7. **状态如实**：61 OK + 3 SKIP 是正常路径回归，不等于全部 OP/错误路径/多 target 已覆盖；
+7. **状态如实**：61 OK + 3 SKIP（含 `/speed`）是正常路径回归，不等于全部 OP/错误路径/多 target 已覆盖；
    剩余项见 §7（R1）。
 
 ---
@@ -443,6 +443,19 @@ Mode 5 下 `CONFIG_NAND_TIMING_MODE != 0`，以下 3 条按设计 SKIP（不是�
 
 它们依赖「启动低速、运行高速」的自洽性；Mode 0 构建仍会执行。
 
+**2026-11-13 Mode 0 已验证**：
+
+```text
+make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
+```
+
+- 启动日志出现 `high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)`。
+- `test /fc-nand/` → **62/62，0 SKIP，823.49 ms**；三条 SKIP 用例均 OK。
+- ⚠ `CFLAGS_EXTRA` 不参与对象目录命名，切换 Mode 0/Mode 5 必须 `make clean`；Mode 0 是专项回归，跑完恢复默认 Mode 5。
+- 跑完 Live 映射已被原始块擦写破坏（见 §1 原则 6）。下次启动出现
+  `[L2P] region N primary unreadable — backup OK` 属预期回退，不代表新缺陷；
+  继续做 H2testw 前必须 `format` + POR。
+
 ---
 
 ## 7. 不覆盖项
@@ -506,6 +519,7 @@ Mode 5 下 `CONFIG_NAND_TIMING_MODE != 0`，以下 3 条按设计 SKIP（不是�
 
 | 日期 | 镜像横幅 | 命令 | 结果 | 证据 |
 |---|---|---|---|---|
-| 2026-11-13 | 13:37:20 | `test`（无过滤串） | `/fc-nand/` 61 OK + 3 SKIP（64 runs），27.95 s；`/speed/fc_nand_rw` normal 3685/3555 KB/s、cache 4340/3614 KB/s | `docs/design/known_iss.md` ISS-UT-02（已闭合） |
+| 2026-11-13 | 13:37:20 | `test`（无过滤串，Mode 5） | `test` 全套 61 OK + 3 SKIP（64 runs；`/fc-nand/` 59 OK + 3 SKIP + `/speed/fc_nand_rw` 2 OK），27.95 s；`/speed/fc_nand_rw` normal 3685/3555 KB/s、cache 4340/3614 KB/s | `docs/design/known_iss.md` ISS-UT-02（已闭合） |
+| 2026-11-13 | 18:36:56 | `test /fc-nand/`（Mode 0 专项） | **62/62，0 SKIP，823.49 ms** | Mode 0 串口日志 |
 
-> 3 条 SKIP 见 §6.4；seed `0x5a4f21e4`。
+> 3 条 SKIP 见 §6.4；seed `0x5a4f21e4`。Mode 0 是专项回归（`CONFIG_NAND_TIMING_MODE=0`），不是默认档。

@@ -623,5 +623,51 @@
 
 - **原状态**：待上板（三条新增覆盖已落地，未板端执行）
 - **原文**：`fail_cw_attribution` 关放行闩锁合成 dispatch 下发失败，断言 flat 位图与全部选中 desc == `FC_CW_STATUS_FAIL`；`process_read_ecc_max` 断言干净/能力内/UNC 三段 `desc->ecc_bits` 与 `fc_get_cmd_ecc_max` 聚合；`read_column` 直接下发 `OP_READ_COLUMN`，覆盖列地址跨 CW 切分、4 字节偏移与 spare 区读。
-- **上板记录**：2026-11-13 13:37:20 镜像 `test` → `/fc-nand/` **61 OK + 3 SKIP**，三条用例均 OK；总 27.95 s，seed `0x5a4f21e4`。
+- **上板记录**：2026-11-13 13:37:20 镜像 `test` → **61 OK + 3 SKIP**（`/fc-nand/` 59 OK + 3 SKIP），三条用例均 OK；总 27.95 s，seed `0x5a4f21e4`。
 - **归档原因**：三条覆盖已上板通过；后续随 FC API/测试源变化做常规回归。
+
+## 2026-11-13 UT 收口新增已闭合
+
+### RISK-GC-16 T5 磨损 GC 永不收敛
+
+- **原状态**：待上板
+- **原文**：T5 用「全表 max/min」作比值，min 可能来自从未使用的空闲块 ⇒ 永不收敛；H2testw 期间 GC 持续运行，`free` 从 3388 被搬到 64 后仍不停。
+- **闭合原因**：T5 已从 `gc_should_trigger` 移除；磨损维护由 `wear_leveling` 的 UBI 判据接管。T5 失效模式本身不再存在；WL 行为由 `RISK-WL-04` 跟踪。
+- **证据**：`src/ftl/gc.c:gc_should_trigger`；`src/ftl/migrate.c:mig_wl_begin`。
+
+### RISK-POOL-11 链校验误拒无 desc 的 multi-plane 擦除
+
+- **原状态**：待上板（2026-11-11 板端复现 `submit: chain invalid`）
+- **原文**：`fc_pool_chain_validate` 对 multi-plane 无条件要求 `planes_with_desc == all_planes`，而 multi-plane 擦除/纯加载按契约不建 desc 链。
+- **闭合原因**：覆盖校验改为只对 `nand_operation_has_data(op)` 的 multi-plane 数据命令生效；2026-11-13 `/fc-nand/` 中 `fail_cw_attribution`（无 desc 擦除）与 `block_multi_plane` 均通过。
+- **证据**：`src/fc/fc_pool.c:fc_pool_chain_validate`；`src/fc/fc.c:fc_build_dispatch_request`；`tests/unit/test_fc_level3.c:test_fail_cw_attribution`。
+
+### RISK-SCH-13 合成失败完成项固定写 cw_status[0]
+
+- **原状态**：待上板
+- **原文**：`fc_poll_fail_command` 只标 flat CW 0；命令访问 plane1 或 CW>0 时 desc 级失败归因丢失。
+- **闭合原因**：改为按 `fc_get_cmd_cw_bitmap(cmd_id)` 的实际 flat CW 集合布 FAIL；2026-11-13 `/fc-nand/` 中 `fail_cw_attribution` 用 bm=0x0FF 断言全部选中 desc FAIL，上板通过。
+- **证据**：`src/fc/fc.c:fc_poll_fail_command / fc_complete_from_nand`；`tests/unit/test_fc_level3.c:test_fail_cw_attribution`。
+
+### RISK-CTRL-02 HIL 入口缺 LBA 范围校验
+
+- **原状态**：待上板
+- **原文**：`ssd_controller_submit` 对 READ/WRITE 只校验 `buffer_size`，范围校验依赖 USB/CLI 前端；直接调用 controller 的测试或新前端可把运行时越界 LBA 交给 FTL。
+- **闭合原因**：submit 已调 `ssd_controller_lba_range_ok` 并在越界时返回 `INVALID_ARGUMENT` + `complete_flag`；2026-11-13 `/hil/` 15/15 上板通过，`lba_range_ok` 与 `submit_edges` 均覆盖越界。
+- **证据**：`src/hil/controller.c:ssd_controller_submit`；`tests/unit/test_hil.c:test_hil_lba_range_ok / test_hil_submit_edges`。
+
+## 2026-11-13 Mode 0 UT 收口新增已闭合
+
+### RISK-UT-12 chain_priority_lock 断言早于 feature 还原
+
+- **原状态**：待后续（Mode 5 下 SKIP，修复未执行）
+- **原文**：Step 3 断言排在还原 01h 原值之前；断言失败经 longjmp 跳过还原，器件停在非默认 timing mode。
+- **闭合原因**：restore 已排在断言之前；2026-11-13 Mode 0 构建（`CONFIG_NAND_TIMING_MODE=0`，横幅 18:36:56）跑 `/fc-nand/` **62/62，0 SKIP**，`chain_priority_lock` OK。
+- **证据**：`tests/unit/test_fc_level3.c:test_chain_priority_lock`；Mode 0 串口日志。
+
+### RISK-NANDP-16 tADL 位置错误
+
+- **原状态**：待上板
+- **原文**：`tADL` 原放在 `11h` 后；删掉 `11h` 后 1µs 会使双 plane 编程整页丢失。
+- **闭合原因**：`TADL` 移到地址→数据之间、`11h` 后改 TWB+WAIT_READY；2026-11-13 Mode 0 `/fc-nand/` **62/62，0 SKIP**（含 `init_sequence`/`feature_write_read`/`block_multi_plane`/cache 双 plane），2026-11-12 H2testw 371/419 MB 0 错误。
+- **证据**：`src/nand/onfi_1_0.c` 相关 UOP 数组；`tests/unit/test_fc_level3.c`；Mode 0 串口日志。
