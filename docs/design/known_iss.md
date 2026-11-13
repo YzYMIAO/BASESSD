@@ -81,7 +81,7 @@
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
 | ISS-UT-01 | 部分实现 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过 |
-| ISS-HIL-01 | 部分实现 | HIL UT 15 例已上板；剩余 buffer NULL/TRIM 越界/跨重启/多 run | 2026-11-11 上板通过 |
+| ISS-HIL-01 | 部分实现 | HIL UT 15 例已上板；剩余 buffer NULL/TRIM 越界/跨重启/多 run | 2026-11-13 上板通过 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例无逐条上板记录 | 未上板 |
 | ISS-UT-02 | 待上板 | FC/NAND 测试源已同步，未跑全套 | 2026-11-10 编译通过 |
 | ISS-HIL-03 | 待硬件 | CH/CE/LUN>1 的 HIL 扩维用例 | 未上板 |
@@ -101,12 +101,13 @@
 
 #### ISS-HIL-01 HIL 板端 UT
 
-- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` + `g_hil_tests[]`（`make tests UT=HIL`）共 **15 例**。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、NULL、未知 opcode）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
-- **影响**：未覆盖 buffer NULL、TRIM 越界、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）。这些是 HIL 契约的剩余缺口。
-- **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL、TRIM 越界、跨重启、多 run / USB 槽矩阵。
-- **来源**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`src/hil/makefile.mk` / `src/fc/makefile.mk` / `makefile`（`UT=HIL`）
+- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` + `g_hil_tests[]`（`make tests UT=HIL`）共 **15 例**。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
+- **影响**：未覆盖 buffer NULL、TRIM 越界、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）。这些是 HIL 契约的剩余缺口；测试设计见 `docs/design/hil_ut_design.md`。
+- **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL（见 `RISK-CTRL-04`）、TRIM 越界、跨重启、多 run / USB 槽矩阵。跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。
+- **来源**：`docs/design/hil_ut_design.md`；`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`src/hil/makefile.mk` / `src/fc/makefile.mk` / `makefile`（`UT=HIL`）
 - **关联**：`RISK-UT-34`、`ISS-HIL-02`、`ISS-HIL-03`
 - **历史/验证**：
+  - 2026-11-13 13:21:29 镜像 `test /hil/` → 15/15，0 skip，10.56 ms（seed `0x5a4f21e4`）
   - 2026-11-11 22:32:57 `test /hil/ --log-visible debug` → 15/15，0 skip，8.99 ms
   - 2026-11-11 22:14:53 `test /hil/` → 12/12，0 skip
   - 2026-11-11 22:25:23 15 例跑到 `write_flush_readback` 时用例体通过、teardown `timed_out`（只泵 `ftl_service`，未推进 CP/Journal）

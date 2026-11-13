@@ -3012,6 +3012,7 @@
 | RISK-CTRL-01 | 待上板 | 多 run 请求中途失败时父请求提前完成、错误被覆盖 | 未上板 |
 | RISK-CTRL-02 | 待上板 | HIL 入口未校验 LBA 范围，越界交给 FTL | 未上板 |
 | RISK-CTRL-03 | 待决策 | `ssd_controller_init` 稀疏拓扑注释与实现相反 | 未上板 |
+| RISK-CTRL-04 | 待后续 | HIL submit 未校验 buffer NULL，FTL 兜底但状态分类错误 | 未上板 |
 
 ### 详情
 
@@ -3041,6 +3042,17 @@
 - **证据**：`include/hil/controller.h:52-54`；`src/hil/controller.c:121-142`；`ssd_controller_flush_service` 的 `ASSERT(fftl != NULL)`。
 - **历史/验证**：
   - 2026-11-05 审视判定为注释 / 实现分叉，未改 → 待决策
+
+#### RISK-CTRL-04 HIL submit 未校验 buffer NULL
+
+- **后果**：`ssd_controller_submit` 的 READ/WRITE 分支只校验 `buffer_size`，不校验 `request->buffer == NULL`；NULL buffer 会进入 `ssd_request_split`，`request->io.buffer = (BYTE *)NULL + offset`。单 run（offset=0）通常仍为 NULL，由 `ftl_submit_common` 的 `req->buffer == NULL` 兜底，但 controller 会返回 `SSD_STATUS_NO_SPACE` / `IO_ERROR` 而不是 `INVALID_ARGUMENT`；多 run（offset>0）会得到非 NULL 小地址，FTL 不再拦截，存在踩踏风险。当前单 die 下多 run 不可达。
+- **缓解**：FTL 入口 `ftl_submit_common` 有 NULL 兜底；HIL `submit_edges` 已覆盖 buffer_size 不足，未覆盖 NULL。
+- **下一步**：在 controller READ/WRITE 入口加 `request->buffer == NULL` → `INVALID_ARGUMENT` + `complete_flag=1`；`test_hil_submit_edges` 补 NULL buffer 负例；上板判据 = 返回 `INVALID_ARGUMENT` 且不进入 FTL。
+- **证据**：`src/hil/controller.c` `ssd_controller_submit`；`src/hil/request.c:184`；`src/ftl/ftl.c` `ftl_submit_common`；`docs/design/hil_ut_design.md` §6。
+- **历史/验证**：
+  - 2026-11-13 设计文档补记：HIL UT 设计见 `docs/design/hil_ut_design.md`；本轮不改代码
+  - 2026-11-13 用户裁决：留以后检验 → 本轮不修
+  - 2026-11-13 读码判定 → 未上板
 
 ---
 
@@ -3893,7 +3905,7 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：`is_complete`、NULL、队列账本、flush 持久化 | 2026-11-11 上板通过 |
+| RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：`is_complete`、NULL、队列账本、flush 持久化 | 2026-11-13 上板通过 |
 
 ### 详情
 
@@ -3901,9 +3913,12 @@
 
 - **后果**：① `ssd_controller_is_complete` 未测（NULL 视为完成、flag 0/1）；② 状态机未测 NULL 守卫与 `READY->INITIALIZING` 非法转换；③ `host_queue` 未断言 owner / `used` / 释放后 request 清零，只测 tag 与表满；④ `submit` 未测 NULL controller/request、buffer NULL、TRIM BUSY/越界；⑤ 真实 I/O 只有 4 条，`write_read_roundtrip` 不 flush，flush 后持久化/跨重启未覆盖。后果：HIL 入口守卫、队列账本、flush 语义回归无判据；15/15 全绿不代表这些路径正确。
 - **缓解**：已补 `is_complete`、状态机 NULL、host_queue owner/used/释放、submit NULL、TRIM BUSY、`write_flush_readback`，总数 15 例。
-- **下一步**：上板跑 15 例；后续再补 buffer NULL / TRIM 越界 / 可做的跨重启。多 run/USB 槽留待多 die / PC 主机矩阵。
-- **证据**：`tests/unit/test_hil.c` `test_hil_is_complete` / `test_hil_trim_busy` / `test_hil_write_flush_readback` 等；`include/hil/controller.h:84`；`src/hil/host_queue.c:35-72`。
+- **下一步**：上板跑 15 例；后续再补 buffer NULL / TRIM 越界 / 可做的跨重启。buffer NULL 见 `RISK-CTRL-04`；TRIM 越界可直接加用例；跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。多 run/USB 槽留待多 die / PC 主机矩阵。**2026-11-13 用户决定：以上剩余缺口留以后检验，本轮不补用例**；测试设计见 `docs/design/hil_ut_design.md`。
+- **证据**：`tests/unit/test_hil.c` `test_hil_is_complete` / `test_hil_trim_busy` / `test_hil_write_flush_readback` 等；`include/hil/controller.h:84`；`src/hil/host_queue.c:35-72`；`docs/design/hil_ut_design.md` §6。
 - **历史/验证**：
+  - 2026-11-13 设计文档补记：HIL UT 设计见 `docs/design/hil_ut_design.md`；本轮不补用例
+  - 2026-11-13 用户裁决：以上剩余缺口留以后检验 → 本轮不补
+  - 2026-11-13 13:21:29 镜像 `test /hil/` → 15/15，0 skip，10.56 ms（seed `0x5a4f21e4`）；残余缺口不变
   - 2026-11-11 补 6 类用例至 15 例 → 上板 15/15 通过（剩余覆盖缺口）
 
 ### 已闭合（详情见 archive）
