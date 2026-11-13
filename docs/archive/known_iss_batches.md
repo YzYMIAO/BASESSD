@@ -49,3 +49,10 @@
 - **重估触发**：抓包发现只发 FUA、不发 SYNCHRONIZE CACHE 的主机。
 - **来源**：`RISK-USB-05`
 - **归档原因**：用户 2026-11-01 明确不实现。
+
+### ISS-UT-02 FC/NAND 测试源同步
+
+- **原状态**：待上板（测试源已同步）
+- **原文**：FC/NAND 测试源已按 R4 同步：`make tests UT=FC` / `UT=HIL` 通过，新增 3 条用例（`fail_cw_attribution` / `read_column` / `process_read_ecc_max`，见 `RISK-DP-29`）。原有报错（`test_speed` / `fc_test_common` / level1 / level3 / 数据路径头拆分 / 返回值与字段改名）已全部消除。
+- **上板记录**：2026-11-13 13:37:20 镜像 `test` → `/fc-nand/` **61 OK + 3 SKIP**（`init_sequence` / `feature_write_read` / `chain_priority_lock` 因 FC 已初始化按设计跳过），总 27.95 s，seed `0x5a4f21e4`；`/speed/fc_nand_rw` normal 3685/3555 KB/s、cache 4340/3614 KB/s。
+- **归档原因**：测试源同步与全套上板均完成；后续只随 FC API/测试源变化做常规回归。

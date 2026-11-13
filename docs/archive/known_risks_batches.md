@@ -618,3 +618,10 @@
 - **原状态**：信息（既有债，2026-10-31）
 - **原文**：`docs/design/ftl_api_usage.md` 的非 Journal 分节仍用旧 API 名（`l2p_cache_read` / `l2p_cache_write` / `journal_init` / `journal_append` 等，现名见 `include/ftl/*.h`）。后果：读文档写代码会对不上签名（编译期即可发现，不是静默）。缓解：本次已把 Journal 分节改为「权威定义在 journal.h + 页格式表」，并修正 `journal.c` 同步调用计数行；其余分节按模块逐个收敛（H37 的落地节奏）。重访触发：任何一次改到这些分节的接口文档。证据：`docs/design/ftl_api_usage.md` §2.3 / §3；`include/ftl/ftl.h` / `journal.h`。
 - **闭合原因**：用户 2026-11-13 决定删除 `docs/design/ftl_api_usage.md`，不再维护；API 以 `include/ftl/*.h` 的函数契约与 `docs/design/ftl_design.md` §5.1 的模块契约为准。
+
+### RISK-DP-29 新增 FC-NAND UT 覆盖
+
+- **原状态**：待上板（三条新增覆盖已落地，未板端执行）
+- **原文**：`fail_cw_attribution` 关放行闩锁合成 dispatch 下发失败，断言 flat 位图与全部选中 desc == `FC_CW_STATUS_FAIL`；`process_read_ecc_max` 断言干净/能力内/UNC 三段 `desc->ecc_bits` 与 `fc_get_cmd_ecc_max` 聚合；`read_column` 直接下发 `OP_READ_COLUMN`，覆盖列地址跨 CW 切分、4 字节偏移与 spare 区读。
+- **上板记录**：2026-11-13 13:37:20 镜像 `test` → `/fc-nand/` **61 OK + 3 SKIP**，三条用例均 OK；总 27.95 s，seed `0x5a4f21e4`。
+- **归档原因**：三条覆盖已上板通过；后续随 FC API/测试源变化做常规回归。

@@ -77,6 +77,7 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | `wsl_debug_history.md` | WSL 调试环境 §8 历史问题 | 主文件保留 §7 当前排障 |
 | `testing_guide_itcm_ab.md` | testing_guide §9.4 ITCM/DTCM A/B 细节 | 主文件保留当前结论 |
 | `testing_guide_results_history.md` | testing_guide §7.1/§7.2/§7.5/§9.1~§9.3 实测数据 | 主文件保留当前结论 |
+| `fc_nand_ut_pre_refactor_20261113.md` | 重构前 FC-NAND UT 设计（含版本史/旧板端证据） | 主文档已按 FTL UT 骨架重写 |
 | `known_iss_batches.md` | known_iss 已闭合/不实现条目原文 | 主文件保留索引表 |
 
 ## 边界

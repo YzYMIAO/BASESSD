@@ -83,7 +83,6 @@
 | ISS-UT-01 | 部分实现 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过 |
 | ISS-HIL-01 | 部分实现 | HIL UT 15 例已上板；剩余 buffer NULL/TRIM 越界/跨重启/多 run | 2026-11-13 上板通过 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例无逐条上板记录 | 未上板 |
-| ISS-UT-02 | 待上板 | FC/NAND 测试源已同步，未跑全套 | 2026-11-10 编译通过 |
 | ISS-HIL-03 | 待硬件 | CH/CE/LUN>1 的 HIL 扩维用例 | 未上板 |
 
 ### 详情
@@ -122,16 +121,6 @@
 - **历史/验证**：
   - （日期未记录）v0.58~v0.66 期间可能用 CLI 人工跑过 → 无逐条记录
 
-#### ISS-UT-02 FC/NAND 测试源同步
-
-- **当前事实**：FC/NAND 测试源已按 R4 同步：`make tests UT=FC` / `UT=HIL` 通过（只证链接），新增 3 条用例（`fail_cw_attribution` / `read_column` / `process_read_ecc_max`，见 `RISK-DP-29`）。原有报错（`test_speed` / `fc_test_common` / level1 / level3 / 数据路径头拆分 / 返回值与字段改名）已全部消除。FTL 测试源已由 `ISS-UT-04/05` 同步。
-- **影响**：链接通过不等于板端行为正确；`/fc-nand/` 全套与 `/hil/` 尚未上板。
-- **下一步 / 判据**：上板跑 `/fc-nand/` 全套与 `/hil/`；测试源按 R4 由用户维护。
-- **来源**：`tests/unit/` FC/NAND 测试源
-- **关联**：`ISS-UT-04`、`ISS-UT-05`、`RISK-DP-29`
-- **历史/验证**：
-  - 2026-11-10 测试源同步 → `make tests UT=FC` / `UT=HIL` 编译通过，未上板
-
 #### ISS-HIL-03 HIL 扩维用例
 
 - **当前事实**：CH/CE/LUN>1 后的 HIL 扩维用例（route / run_end 在 1 维下过于平凡）尚未编写。
@@ -146,6 +135,7 @@
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
+| ISS-UT-02 | 2026-11-13 | FC/NAND 测试源同步；`test /fc-nand/` 61 OK + 3 SKIP（预期 SKIP） | `docs/archive/known_iss_batches.md` |
 | ISS-UT-04 | 2026-11-11 | FTL 测试源按当前 API 同步，`test /ftl/` 100/100 | `docs/archive/known_iss_batches.md` |
 | ISS-UT-05 | 2026-11-11 | FTL UT 覆盖缺口补齐，`test /ftl/` 95/95 | `docs/archive/known_iss_batches.md` |
 

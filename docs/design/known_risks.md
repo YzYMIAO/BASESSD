@@ -2561,7 +2561,7 @@
 - **后果**：`/speed/fc_nand_rw` 用 FC 公共接口对原始块做 multi-plane 擦写，FTL 的 RAM 映射/日志区可能指向这些块。测试期间 FTL 主循环被 CLI 阻塞、`bg_suspend=1`，不会并发分配；但测试返回后 FTL 状态可能已失效。跑完 FC-only 直接交给 host/USB 可能读到旧映射或写失败。
 - **缓解**：测试 summary 打印 "raw blocks destroyed — run format + POR"；文档要求 FC-only 后 `format` + POR；完整 `/` 运行由 `/speed/ftl_rw` 的 format 修复。同一上电周期内连跑多条 `test` 时，media 套件在每条 `test` 内首次必格式化一次（`RISK-UT-08`）。
 - **下一步**：任何改变 FC 速度测试块范围/是否擦写的改动都要重新评估；不要把它并入默认的 `test /ftl/` 流程。
-- **证据**：`tests/unit/test_speed.c:test_fc_speed_mp`；`docs/design/fc_nand_ut.md` §4.1.1。
+- **证据**：`tests/unit/test_speed.c:test_fc_speed_mp`；`docs/design/fc_nand_ut.md` §4.4。
 - **历史/验证**：
   - 2026-11-01 media 套件改为每条 `test` 复位 → 已上板（release -O2 全量 156/156）
   - 2026-10-24 23:13 上板确认风险可见（信息）
@@ -3235,7 +3235,6 @@
 | RISK-DP-26 | 待上板 | 带 DATA_OUT 的稀疏 CW 读首输出读错 CW | 2026-11-07 编译通过 |
 | RISK-DP-27 | 待后续 | LDPC 解码栈占用 4.2KB，超 2KiB 栈预算 | 2026-11-07 代码核对 |
 | RISK-DP-28 | 待后续 | CRC 初始化失败在 release 下静默，校验恒通过 | 2026-11-07 代码核对 |
-| RISK-DP-29 | 待上板 | 新增 FC-NAND UT 覆盖尚未在板端执行 | 2026-11-10 编译通过 |
 
 ### 详情
 
@@ -3492,20 +3491,12 @@
   - 2026-11-07 审视：CRC 初始化只有 ASSERT → 待后续，release 仍无守卫
   - （日期未记录）CRC 基址修正 → debug 档 IDR 回环可用
 
-#### RISK-DP-29 新增 FC-NAND UT 覆盖尚未在板端执行
-
-- **后果**：`fail_cw_attribution` 用 `fc_nand_engine_set_armed(0)` 关闩锁合成 dispatch 下发失败，断言 `fc_get_cmd_cw_bitmap` 的 flat 位图与全部选中 desc == `FC_CW_STATUS_FAIL`（多 plane 编程 + 无 desc 擦除，覆盖 RISK-SCH-13）；`process_read_ecc_max` 断言干净 / 能力内 / UNC 三段 `desc->ecc_bits` 与 `fc_get_cmd_ecc_max` 聚合（覆盖 RISK-DP-13）；`read_column` 直接下发 `OP_READ_COLUMN`，覆盖列地址跨 CW 切分、4 字节偏移与 spare 区读。
-- **缓解**：测试源已落地；`make all` / `make release` / `make tests UT=FC` / `make tests UT=HIL` 通过，`make tests` 只证链接不证正确（R2）。
-- **下一步**：上板跑 `/fc-nand/lifecycle/fail_cw_attribution`、`/fc-nand/data_path/process_read_ecc_max`、`/fc-nand/lifecycle/read_column`；三条均过且 INFO 证据行与断言一致才可改状态。若红，先查 `fc_poll_fail_command` 的 flat 位图取法、`fc_data_path_process_read` 的 `ecc_bits` 回填、`OP_READ_COLUMN` 的列解码。
-- **证据**：`tests/unit/test_fc_level3.c:test_fail_cw_attribution / test_read_column`；`tests/unit/test_fc_level2.c:test_process_read_ecc_max`；RISK-DP-13；RISK-SCH-13。
-- **历史/验证**：
-  - 2026-11-10 新增三条 FC-NAND UT 覆盖 → `make tests` 链接通过，未上板
-
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-DP-30 | 2026-11-11 | multi-plane 编程误删 `11h` 后 1µs 延时致读回 META 错，补 TWB+WAIT_READY 后 `/fc-nand/` 59/59 全绿 | `docs/archive/known_risks_batches.md` |
+| RISK-DP-29 | 2026-11-13 | 三条新增 FC-NAND UT 覆盖上板通过（61 OK + 3 SKIP） | `docs/archive/known_risks_batches.md` |
 
 ---
 

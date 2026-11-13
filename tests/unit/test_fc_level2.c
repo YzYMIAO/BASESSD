@@ -448,7 +448,7 @@ static BYTE l2_run_bucket(DWORD run)
  * ⚠ 循环**后**必须再补一次结算——最后一段没有后继，不补则段数恒少 1（游程编码的经典 off-by-one）。
  *
  * 随机数据每步 1/2 概率翻转 ⇒ 段数 ≈ 位数的一半（2048）、平均段长 2（几何分布 P(len=k)=2^-k）；
- * 推导与判据盲区见 fc_nand_ut.md §5.6，「目标 = 独立」见 fc_nand_design.md §5.4。 */
+ * 推导与判据盲区见 fc_nand_ut.md §2.4.7，「目标 = 独立」见 fc_nand_design.md §5.4。 */
 static void l2_bit01_analyze(const BYTE *data, WORD len, l2_bit01_s *st)
 {
     WORD  i;
@@ -495,7 +495,7 @@ static void l2_bit01_analyze(const BYTE *data, WORD len, l2_bit01_s *st)
 }
 
 /** 平均游程 ×100 = 总位数 × 100 ÷ 段数（整数比较，避开浮点与 %f）。
- * 随机数据每步 1/2 概率翻转 ⇒ 平均段长 = 2.00（推导见 fc_nand_ut.md §5.6）。 */
+ * 随机数据每步 1/2 概率翻转 ⇒ 平均段长 = 2.00（推导见 fc_nand_ut.md §2.4.7）。 */
 static DWORD l2_bit01_mean_x100(const l2_bit01_s *st, WORD len)
 {
     return (st->runs == 0U) ? 0U : (((DWORD)len * 8U * 100U) / st->runs);
@@ -527,7 +527,7 @@ static void l2_bit01_log(const char *tag, const l2_bit01_s *st, WORD len)
 
 /** 加扰白化：三种偏置输入 → 加扰 → 统计游程 → 解扰 → 自反。
  *
- * 理论依据（详见 fc_nand_design.md §5.4 / fc_nand_ut.md §5.6）：
+ * 理论依据（详见 fc_nand_design.md §5.4 / fc_nand_ut.md §2.4.7）：
  *   加扰的目标是让输出**统计独立**——P(bit=1 | 全部历史) = 1/2，**不是**「0/1 各占一半」这种
  *   无条件均衡，更**不是**「下一位尽量和当前相反」。`0101…` 满足均衡却最不随机（翻转率 100%、
  *   段数 = 4096 = 完美交替）。随机数据每步 1/2 概率翻转 ⇒ 段数 ≈ 位数的一半（≈2048）、
