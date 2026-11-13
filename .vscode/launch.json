@@ -202,6 +202,57 @@
       "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
 
       "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+    },
+    {
+      // ⚠ 临时配置：Mode 0 UT 专项（CONFIG_NAND_TIMING_MODE=0）。
+      // 产物由 `make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"` 生成；
+      // 用完切回 ①②，不要把这个路径当成默认 debug_ut.elf。
+      "name": "⑨ UT/Mode0 临时 · debug_ut_mode0 · 外部 JLink 2331",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "external",
+
+      "device": "STM32H743II",
+
+      "gdbTarget": "localhost:2331",
+
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut_mode0.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+
+      "runToEntryPoint": "main",
+
+      "preLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset"
+      ],
+
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+
+      "armToolchainPath": "/usr/bin"
+    },
+    {
+      // ⚠ 临时配置：Mode 0 UT 专项（CONFIG_NAND_TIMING_MODE=0）。
+      "name": "⑩ UT/Mode0 临时 · debug_ut_mode0 · WSL 自启 JLink",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "jlink",
+
+      "device": "STM32H743II",
+      "interface": "swd",
+      "serialNumber": "602717758",
+
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut_mode0.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "armToolchainPath": "/usr/bin",
+      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+
+      "runToEntryPoint": "main",
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     }
   ]
 }
