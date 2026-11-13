@@ -3966,9 +3966,13 @@
 
 - **RISK-DOC-02（已改，2026-10-31，原为注释表述不准）**：`src/ftl/cache_batch.c:243-244` 写「同 block 是本仓的保守选择（不跨块），跨块直接回退普通读——不是器件强制」。**前半正确**：datasheet 原文「The READ PAGE CACHE SEQUENTIAL (31h) command **can be used to cross block boundaries** ... Do not issue 31h to cross die (LUN) boundaries」（本地摘录 `docs/reference/datasheet_mt29f_cache_ops.md` §2）⇒ 同 block 确实是本仓保守选择，不是器件强制。**后半不准**：断点后 drain 循环 `continue`（`src/ftl/ftl.c:2151-2154`），剩余 LBA 会**重新 START 一条 cache read**，不是回退普通读（只有下一次 START 条件不满足时才回退）。**失败场景**：只在维护者按注释误解"跨 block 必须回退普通读"时把行为描述错，不影响数据正确性（判据本身保守且安全）。已改（2026-10-31）：这两行注释已改为「46h 无地址、由器件自增；31h 可跨 block（同 die，禁止跨 die/LUN）」并把断点后行为写清楚；跨 block 续读的实现登记为 RISK-CACHE-20。证据：`src/ftl/cache_batch.c:283-284`、`src/nand/onfi_1_0.c:1028-1030`、`src/ftl/ftl.c:2151-2154`、`docs/reference/datasheet_mt29f_cache_ops.md`。
 
-- **RISK-DOC-01（信息，2026-10-31，**既有债**，非本次引入）**：`docs/design/ftl_api_usage.md` 的非 Journal 分节仍用旧 API 名（`l2p_cache_read` / `l2p_cache_write` / `journal_init` / `journal_append` 等，现名见 `include/ftl/*.h`）。后果：读文档写代码会对不上签名（编译期即可发现，不是静默）。缓解：本次已把 **Journal 分节**改为"权威定义在 journal.h + 页格式表"，并修正 `journal.c` 同步调用计数行；其余分节按模块逐个收敛（H37 的落地节奏）。重访触发：任何一次改到这些分节的接口文档。证据：`docs/design/ftl_api_usage.md` §2.3 / §3；`include/ftl/ftl.h` / `journal.h`。
 
 ## 已闭合
 
-> 各模块末尾的「已闭合」表是唯一索引；完整详情已移入 `docs/archive/known_risks_batches.md`（2026-11-12 结构化重写时搬迁）。
+> 各模块末尾的「已闭合」表 + 本文末尾的全局表是唯一索引；完整详情已移入
+> `docs/archive/known_risks_batches.md`（历史批次 2026-11-12 搬迁；新条目追加到文末）。
 > 重开时按新条目重新登记，不复活旧 ID。
+
+| ID | 日期 | 一句话 | 归档 |
+|---|---|---|---|
+| RISK-DOC-01 | 2026-11-13 | 删除 ftl_api_usage.md，API 以 include/ftl/*.h 为准 | docs/archive/known_risks_batches.md |

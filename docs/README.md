@@ -9,7 +9,7 @@
 | 任务 | 读（按序） |
 |---|---|
 | FTL 改动 / 新功能 | `design/ftl_design.md`（主设计）→ `design/ftl_revision_history.md`（逐版本决策史）→ `design/known_iss.md`（未实现项）→ `design/known_risks.md`（风险） |
-| FTL 对外接口 | `design/ftl_api_usage.md`（API 权威；历史契约见 `archive/ftl_host_interface.md`） |
+| FTL 对外接口 | `include/ftl/*.h`（函数契约在头文件）+ `design/ftl_design.md` §5.1（模块契约/调用约束）；历史契约见 `archive/ftl_host_interface.md` |
 | FC-NAND 层改动 | `design/fc_nand_design.md`（§26 行业对照 = 判据） |
 | **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.6/§25.8 → `design/ftl_design.md` ADR-15 |
 | FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
@@ -31,7 +31,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史 10，见 archive/README.md
-├── design/                    ← 活跃权威设计文档（19 个）+ known_iss/known_risks
+├── design/                    ← 活跃权威设计文档（18 个）+ known_iss/known_risks
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览

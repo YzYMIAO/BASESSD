@@ -60,7 +60,7 @@
 
 | 想知道 | 读 |
 |---|---|
-| **FTL 对外接口**（`ftl_init` / `ftl_submit_*` / 调用约束 / 接口级 UT 设计） | [`ftl_api_usage.md`](ftl_api_usage.md) + [`../archive/ftl_host_interface.md`](../archive/ftl_host_interface.md) |
+| **FTL 对外接口**（`ftl_init` / `ftl_submit_*` / 调用约束 / 接口级 UT 设计） | `include/ftl/*.h`（函数契约）+ 本文 §5.1（模块契约）+ [`../archive/ftl_host_interface.md`](../archive/ftl_host_interface.md)（历史契约） |
 | 逐版本决策史 | [`ftl_revision_history.md`](ftl_revision_history.md) |
 | 多 LUN / 共享 cache / 内存域 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md) |
 | CW 级映射的来由与介质布局 | [`../archive/cw_level_mapping_design.md`](../archive/cw_level_mapping_design.md) |

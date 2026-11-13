@@ -1,8 +1,8 @@
 # known_risks 历史批次归档
 
-> **已冻结（2026-11-12）**：风险详情已按模块合并回 `docs/design/known_risks.md`
-> （索引 + 详情块 + 各模块已闭合表）。本文件仅作历史对照（含 2026-10-24 之前的批次叙事），
-> 不再新增或维护条目；新条目一律登记到 `known_risks.md`。
+> **历史批次冻结（2026-11-12）**：风险详情已按模块合并回 `docs/design/known_risks.md`
+> （索引 + 详情块 + 各模块已闭合表）。本文件的历史批次**不再重写**；
+> 新闭合条目的详情只追加到文末「新增已闭合」分节（只追加，不改写）。
 
 
 > 从 `docs/design/known_risks.md` 移出的历史批次，保留追溯，不再作为当前风险表使用。
@@ -611,3 +611,10 @@
   - 2026-11-13 板端（02:09 镜像，`/speed/ftl_rw chunk=32`，`base=495392`）：`seq-close by=pad kind=2 act=1 wr=1/4 next=497664`，2 ms 后 `wr-fail lba=497656 why=no verdict`（pad 之后提交的窗口末页）→ 加 `closing` 门控 → 编译通过，未上板
   - 2026-11-13 上板闭合：`test` 全量 **98/98**、`/speed/ftl_rw` 3/3（`err(wr=0 rd=0)`，chunk=32 `WR=3130 / RD=3195 KB/s`）；同批确认根因为 RISK-CACHE-37（padding END 在飞时续写窗口）
 
+## 2026-11-13 新增已闭合
+
+### RISK-DOC-01 ftl_api_usage.md 旧 API 名（已闭合 2026-11-13）
+
+- **原状态**：信息（既有债，2026-10-31）
+- **原文**：`docs/design/ftl_api_usage.md` 的非 Journal 分节仍用旧 API 名（`l2p_cache_read` / `l2p_cache_write` / `journal_init` / `journal_append` 等，现名见 `include/ftl/*.h`）。后果：读文档写代码会对不上签名（编译期即可发现，不是静默）。缓解：本次已把 Journal 分节改为「权威定义在 journal.h + 页格式表」，并修正 `journal.c` 同步调用计数行；其余分节按模块逐个收敛（H37 的落地节奏）。重访触发：任何一次改到这些分节的接口文档。证据：`docs/design/ftl_api_usage.md` §2.3 / §3；`include/ftl/ftl.h` / `journal.h`。
+- **闭合原因**：用户 2026-11-13 决定删除 `docs/design/ftl_api_usage.md`，不再维护；API 以 `include/ftl/*.h` 的函数契约与 `docs/design/ftl_design.md` §5.1 的模块契约为准。
