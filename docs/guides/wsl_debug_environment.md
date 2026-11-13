@@ -51,7 +51,7 @@
 │   └── launch.json                # VS Code 调试配置
 ├── sh/
 │   └── debug_env.sh               # 一键启动脚本
-├── docs/design/
+├── docs/guides/
 │   └── wsl_debug_environment.md   # ⬅ 本文档
 └── build/firmware/debug/bin/
     ├── debug.elf                  # 产品调试 ELF（make all）

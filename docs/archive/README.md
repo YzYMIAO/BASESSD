@@ -76,10 +76,11 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | `ut_revision_history.md` | `munit_adapter.md` §4 / `fc_nand_ut.md` §7 修订史 | 主文件改为指针 |
 | `wsl_debug_history.md` | WSL 调试环境 §8 历史问题 | 主文件保留 §7 当前排障 |
 | `testing_guide_itcm_ab.md` | testing_guide §9.4 ITCM/DTCM A/B 细节 | 主文件保留当前结论 |
+| `testing_guide_results_history.md` | testing_guide §7.1/§7.2/§7.5/§9.1~§9.3 实测数据 | 主文件保留当前结论 |
 | `known_iss_batches.md` | known_iss 已闭合/不实现条目原文 | 主文件保留索引表 |
 
 ## 边界
 
-- 活跃权威设计文档一律在 **`../design/`**（14 个活跃 + `known_iss.md` / `known_risks.md`），不要往这里放。
+- 活跃权威设计文档一律在 **`../design/`**（13 个活跃 + `known_iss.md` / `known_risks.md`），不要往这里放。
 - 新增「已落地变更」的记录：若只是单版本落地/上板记录，直接放这里 `changelog/`；
   若是对当前设计仍有约束力的决策，进 `../design/` 对应文档。
