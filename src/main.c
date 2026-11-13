@@ -508,7 +508,7 @@ static DWORD ssd_ftl_host_lba_max(void)
  *
  *   只保留块分配/坏块/搬移状态；op/spare/cp/jrn/wr/dng/rrab/mode 等低频计数
  *   改由 `info` / `stat` 按需查看，避免长期占用 UART。
- *   逐事件日志只保留首次故障与状态变化（见 docs/design/logging_design.md）。
+ *   逐事件日志只保留首次故障与状态变化（见 docs/design/fault_capture.md §10）。
  * -------------------------------------------------------------------- */
 static void ssd_ftl_stat_task(void *context, DWORD now_ms)
 {

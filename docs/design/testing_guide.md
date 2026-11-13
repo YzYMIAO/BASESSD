@@ -1,7 +1,7 @@
 # 存储主控 / 软 SSD 测试指南（2026-10-22）
 
 > 定位：从板端 NAND/FC 到主机 USB 的**分层测试流程、工具、性能方法、当前实测**。
-> 配套：`docs/design/usb_msc_udisk.md`（USB 架构）、`docs/design/usb_msc_verification.md`
+> 配套：`docs/design/usb_msc.md` Part A（USB 架构）、`docs/design/usb_msc.md` Part B
 > （上板验证手册）、`docs/design/known_risks.md`（残余风险）、
 > `docs/design/fc_nand_ut.md`（FC UT）。
 >
@@ -541,33 +541,14 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 > 16→32 KB 的一半；代价是 TinyUSB EP + bounce 共再 +64 KB AXI_RAM。主机簇大小
 > 64 KB 不需要 EP=64 KB 才正确——32 KB 会把它拆成两个数据相，语义不变。
 
-### 9.4 ITCM / DTCM（2026-10-23，正常路径已上板；压力/掉电未覆盖）
+### 9.4 ITCM / DTCM（当前结论）
 
-| 项 | 当前值 | 判据 |
-|---|---|---|
-| `.ssd_code_high`（ITCM） | release 61,344 B / debug 57,168 B / 64 KB | VMA `0x00000000`；启动复制后 USB/NAND 正常；debug 余量 8,368 B（2026-10-30）。**逐函数下放**：boot-only 的 `ftl_init` / `ftl_contract_audit` / `contract_check_*` / `l2p_init` / `fc_init_internal` / `fc_bch_init` / `build_mod8_tables` 标 `SSD_CODE_FAST`（内部 Flash），不占 ITCM |
-| `.dtcm_data` | release 67,832 B / 128 KB | 预留 20 KB stack；交换版：BCH 进 DTCM、`g_ftl_md` 回 SRAM4 |
-| DTCM 内容 | 整对象放置：`ftl.o`（`g_ftl`/`g_ftl_wbuf`/`g_ftl_journal`）、`fc.o`（命令池+描述符池+SQ/HSQ/CQ+簿记）、`nand_dispatch.o`（dispatch queues）、`fc_bch_engine.o`（BCH 静态表） | 均为 CPU-only；**NAND 页缓冲不放 DTCM** |
-| SRAM4 内容 | `metadata.o` 的 `g_ftl_md`（33,752 B，NOLOAD，init 时 memset） | 回到 TCM 之前的基线域；基线 843/889 已验证 |
-| ITCM 内容 | 公共集（debug/release）：`ftl.o`、`l2p_cache.o`、`wbuf.o`、`pending.o`、`cache_batch.o`、`fc.o`、`fc_data_path.o`、`fc_bch_engine.o`、`nand_dispatch.o`、`nand_fmc.o`（对象内可用 `SSD_CODE_FAST` 逐函数下放）。release 额外集：`allocator.o`、`journal.o`、`metadata.o`、`metadata_job.o`、`migrate.o`、`gc.o`、`wear_leveling.o`、`bg_scheduler.o`、`ftl_op.o`、`fc_interface.o`、`fc_queue.o`、`fc_command.o`、`nand_engine.o` | 用对象路径 `*release/obj/...` 做 build-type 选择，不是 C 预处理器；debug 对象在 `debug/obj/`，不匹配额外集。超过 64 KB 或出现 relocation truncated 时按目标文件收窄 |
-| 板端 A/B | 基线 843/889 KB/s；TCM 版（release ITCM 29,728 B）840/885 KB/s；当前 release ITCM 61,632 B（板端结果为重构前 61,384 B 镜像）+ BCH↔md 交换版 **843/887 KB/s**，`info avg=4171us`、`cw=24906/99624/7891/0`、`bad=0`、`mig=0/0`、`gcm=0`，H2testw 415/423 MB 无错误 | 与 840/885 差 +3/+2 KB/s，属测量抖动；本次未触发 GC/迁移，额外 ITCM 集收益未覆盖 |
-| BCH/堆 A/B | 旧实现 BCH 需 41 KB 表 + 32 KB roots 的 DTCM 堆；TCM 版只剩约 67 KB 堆，疑似初始化失败并静默跳过 ECC | 启动日志应出现 `[FC ] BCH ready: static tables, no heap`；写速恢复 ≥843 KB/s |
-| BCH↔md 交换（正常路径已上板） | BCH 42,656 B → DTCM；`g_ftl_md` 33,752 B → SRAM4；DTCM 67,832 B，free≈63 KB | 2026-10-23 boot `BCH ready` + 恢复 + H2testw 415/423 MB 0 错误（843/887 KB/s）通过；压力/掉电仍按 RISK-TCM-04 |
-| 页缓冲域 A/B | 页缓冲放 DTCM：multi-plane handler 数据正确但 NAND 读回全 FF，`format` 全候选失败；放 AXI_NOCACHE：`format` 成功且 H2testw 415/423 MB 通过（840/885 KB/s） | 页缓冲必须 AXI_NOCACHE；不得再条件放 DTCM |
-| ITCM 收益判据 | H2testw 是 USB FS（12 Mbit/s 链路，实测 843/887 KB/s 已接近可用带宽）+ NAND tPROG 约束下的顺序负载；本次 `mig=0/0`、`gcm=0`，额外 ITCM 模块基本未执行 | **不能用 H2testw 判断 ITCM 收益**；用 BCH/metadata/GC CPU-bound 微基准，或填盘后随机覆盖触发 GC 再 A/B |
-
-⚠ `DTCM_DATA` / `.dtcm_data` 是 NOLOAD：`g_ftl` 必须在 `ftl_init` 入口全量 memset；
-其余候选 handle 已有显式 memset。H743 startup 原先不复制 `.ssd_code_high`，本版已补
-`__ssd_code_high_load_start/start/end` 复制循环。
-
-⚠ DMA/NAND 页缓冲：`g_fc_buffer_pool` / `g_fc_return_staging` / `g_nand_channel_page_buffer`
-恒在 `.noncacheable_buffer`（`AXI_NOCACHE`，`0x24060000..0x24080000`）。
-**页缓冲放 DTCM 会静默破坏 multi-plane program**（NAND 读回全 FF），已由板端 A/B 证实；
-不得再按 `CONFIG_NAND_DMA` 条件把它放回 DTCM。
-
-**不建议**为了跑分提前回 CSW 或跨 BOT 命令合并写：会破坏掉电语义。
-
----
+- `.ssd_code_high`：release 61,344 B / debug 57,168 B / 64 KB；debug 余量 8,368 B（2026-10-30）。
+- `.dtcm_data`：release 67,832 B / 128 KB；预留 20 KB stack。
+- `g_ftl_md` 放 SRAM4；BCH 静态表放 DTCM；**页缓冲必须在 AXI_NOCACHE，不得放 DTCM**。
+- **不能用 H2testw 判断 ITCM 收益**（USB FS / NAND tPROG 约束）；用 CPU-bound 微基准或
+  填盘后随机覆盖触发 GC 再 A/B。
+- 详细 A/B 记录见 `docs/archive/testing_guide_itcm_ab.md`。
 
 ## 10. 当前限制与未闭合
 
@@ -589,3 +570,135 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 - 未做 512 B 随机（真正小于 CW 的碎片）与 partial-page 专项；
 - `RISK-HOST-07/08/09/10`、`RISK-L2P-06`、`RISK-NAND-04` 见
   `docs/design/known_risks.md`。
+
+---
+
+## 11. 负例执行清单（可执行）
+
+> 来源：原独立文档 `negative_test_plan.md`，已归档到 `docs/archive/negative_test_plan.md`。
+> 目的：把 `docs/design/known_risks.md` 里「待上板」的负例判据整理成可逐条执行的清单。
+> **未上板前不得勾选**（R1）。
+
+> 目的：把 `docs/design/known_risks.md` 里「待上板」的负例判据整理成可逐条执行的清单。
+> 每条都给出：风险 ID、触发方式、期望、证据。**未上板前不得勾选**（R1）。
+>
+> 当前硬件：无程控电源 / USB 继电器 ⇒ 掉电与拔线只能手动，无法自动化与大批量。
+> 已有能力：测试镜像的固件注入钩子（`FC_NAND_TEST_ENABLE`）+ 串口 CLI + H2testw/`/speed`/UT。
+
+---
+
+### 11.0 前置条件
+
+| 项 | 要求 |
+|---|---|
+| 测试镜像 | `make tests UT=FTL`（或 `UT=FC` / `UT=HIL`）——只有 `make tests` 定义 `FC_NAND_TEST_ENABLE` |
+| 注入钩子 | `fault_inject.c/h` 与 `bbt fault` **只在测试镜像存在**；产品 debug/release 均不编入 |
+| 串口 | USART1 115200，`log level debug`（按需） |
+| 主机 | H2testw（全盘写读）、`/speed`（FTL/FC 压测） |
+| 判据取证 | 串口原始日志 + `info` / `ftl_ctx` 输出 + H2testw 报告 |
+
+> ⚠ 注入类用例必须在**测试镜像**上跑；产品镜像跑不出这些路径（钩子不存在）。
+> ⚠ `bbt fault` 会永久标坏块（写 BBT），跑完建议 `format --verify` 恢复介质。
+
+---
+
+### 11.1 NAND 写失败 / program fail
+
+- [ ] **RISK-HOST-06** 写重试
+  - 触发：`bbt fault <plane> <block>` 标坏即将写入的 data 块，再 `wr` 同一区域。
+  - 期望：串口出现 `[FTL] write retry`，host 写仍成功；第二次失败如实 `IO_ERROR`。
+  - 证据：串口行 + `info` 的 `bad` 增长。
+- [ ] **RISK-CACHE-30/31/32** cache program 失败/撤销
+  - 触发：`fi_cache_fail_arm <lba>`（测试镜像），写该 LBA 后读回。
+  - 期望：失败页及其后页不确认映射、之前页已确认；无 `pad: stray page`；`cache_failc_abort` 类 UT 同步通过。
+  - 证据：串口 + `/ftl/media/` 结果。
+- [ ] **RISK-IF-08** NAND 读超时/FAIL 归因
+  - 触发：注入单页读失败（`fi_*` 或 `bbt fault` 后读）。
+  - 期望：命令状态带 `TIMEOUT`/`FAIL_CACHE`，FTL 不进成功路径。
+
+### 11.2 Journal / Checkpoint 失败
+
+- [ ] **RISK-JN-01/04/07/08/10** Journal 擦/写失败与撕裂页
+  - 触发：`fi_journal_fail_arm <pages>`，写满一个环形块后复跑。
+  - 期望：`[JRN] erase kick failed` 有界；`resume: skip torn page`；不二次编程；回放不完整时回退 full rebuild。
+  - 证据：串口 + 重启后 `boot type=` / `journal_entries=`。
+- [ ] **RISK-CP-04/05/07** CP 提交饥饿 / abort 幂等 / flush 屏障
+  - 触发：持续 H2testw 写 + 观察 `[CP] submit stalled`；`fl` 后立即断电（见 §11.3）。
+  - 期望：`abort at phase=1`（不是 12）、1s 限流；断电重启 `find latest` + restore，非 full rebuild。
+- [ ] **RISK-HOST-05/16** confirm park timeout
+  - 触发：满盘 + GC 压力（H2testw 写至 free 低位），开 `--log-project info`。
+  - 期望：无 `confirm park timeout`；若有，`parked=`/`fc=` 能定位。
+
+### 11.3 掉电（手动，当前无硬件）
+
+> 步骤：H2testw 写到 `free` 低位（或指定 MB）→ **直接断板子供电**（不是拔 USB 线）→ 上电 → H2testw verify / `rd` 读回。
+
+- [ ] **RISK-MD-06** 恢复路径丢映射（最高优先）
+  - 步骤：`format` → 全量 `test`（制造多代写）→ `/speed/ftl_rw` 写 25 MiB → 第 4 次重启前断电。
+  - 期望：无 `region … degraded` / `mapping lost` / `fallback`；`info` 的 `closed` 对账一致。
+  - 证据：开机完整日志 + `info`。
+- [ ] **RISK-BOOT-15/18/22/23** 启动恢复/格式化中断
+  - 步骤：格式化过程中（BBT save 后 / erase 中 / initial CP 前）断电；再上电。
+  - 期望：能继续格式化或 `restored`；不出现 `refuse to format`。
+- [ ] **RISK-CP-07** SYNCHRONIZE CACHE 屏障
+  - 步骤：H2testw 写完后安全弹出（触发 fsync）→ 断电 → 上电 verify。
+  - 期望：0 错误、无尺寸缺口。
+- [ ] **RISK-HOST-14** 拔线/中止后的门控环形等待
+  - 步骤：写到接近满盘 → 拔 USB（不断电）→ 重插 → 读回/校验。
+  - 期望：`drain stalled` 快速触发并自愈；无 `dirty=64` 持续刷屏。
+
+### 11.4 拔线 / 总线复位（手动或 `devcon`）
+
+- [ ] **RISK-USBC-01/03、RISK-MSC-02** USB 中止/异步完成
+  - 触发：读写过程中手动拔线；或 Windows `devcon disable/enable "USB\VID_0483&PID_5720*"`（逻辑断开）。
+  - 期望：无死命令、无残留 CSW；重插后正常挂载；`pending_io` 不永久为真。
+- [ ] **RISK-USB-10/13** 同 LBA 连写 / 两写槽时读
+  - 触发：连续两次写同一 LBA（间隔 < FTL 完成）；两 chunk 在飞时立刻读。
+  - 期望：两条命令都完成；读不报 I/O error。
+
+### 11.5 坏块 / 读失败 / 超时
+
+- [ ] **RISK-BBT-01/11/15/17/19/20** BBT 幂等/持久化/擦失败
+  - 触发：`bbt fault` + 重启；`format --verify`；写飞行中再标坏。
+  - 期望：`bad_count`/`spare_count`/BBT 位一致；`old_bad/recovered/new_bad` 合理；无 livelock。
+- [ ] **RISK-GC-01/07/10、RISK-MIG-02/07** victim 读失败与熔断
+  - 触发：`bbt fault` 标坏 victim plane 后触发 GC；H2testw 写到 2/3。
+  - 期望：3 次失败后换候选；连续 8 个 victim 失败熔断；不成批标坏、不活锁。
+- [ ] **RISK-RR-02/04** RR 恢复/预测
+  - 触发：坏页读（`fi_*` 或 `bbt fault`）+ 可恢复/不可恢复两种。
+  - 期望：可恢复返回成功；单 plane 不可恢复整体 IO_ERROR；含 BAD plane 的 SB 被跳过。
+
+### 11.6 压力 / 背压 / 超时
+
+- [ ] **RISK-GC-06/14、RISK-WL-07、RISK-CP-04** 满盘 GC/WL/CP
+  - 触发：H2testw 写满 + `/speed`；观察 `[GC]`/`[WL]`/`[CP]`。
+  - 期望：写速稳定、无 `submit stalled` 刷屏、无 `confirm park timeout`；WL 不在 host 写期间占引擎。
+- [ ] **RISK-IF-09/10/12/13** 流式序列/门控
+  - 触发：大顺序读写 + 中途中止；观察 `d4=`/`mig=`/`rrab=`。
+  - 期望：放弃序列不饿死后台；链尾不占 `chain_owner`。
+
+---
+
+### 11.7 目前缺硬件导致的覆盖缺口
+
+| 场景 | 现状 | 自动化方案（后续） |
+|---|---|---|
+| 真实掉电 | 手动断板子供电，次数有限 | USB 继电器 / YKUSH / 程控电源 + 脚本 |
+| 真实拔线 | 手动拔插 | 同上（切 VBUS） |
+| 大批量掉电组合 | 无法批量 | 继电器 + H2testw/`/speed` 脚本循环 |
+| 总线复位 | `devcon` 逻辑复位可部分替代 | USB 协议分析仪（Beagle/LUNA） |
+
+> 主机侧 `dm-flakey` / `dm-dust` / `scsi_debug` 只测**主机块层**，不是本设备的 FTL，
+> 不能作为上板证据（R4）。
+
+---
+
+### 11.8 记录模板
+
+每条执行后回填：
+
+```text
+RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 | 结论（通过/失败/未复现）| 证据（日志行）
+```
+
+结果写回 `known_risks.md` 对应条目的「历史/验证」行；通过的按 `docs/design/known_risks.md` §0.4 判定是否 `已闭合`。

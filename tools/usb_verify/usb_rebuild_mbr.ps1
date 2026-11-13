@@ -38,7 +38,7 @@
 
     日志：%TEMP%\softssd_usb_rebuild_mbr.log
 
-    配套文档：docs/design/usb_msc_verification.md（USB-V03 / 故障排查）。
+    配套文档：docs/design/usb_msc.md Part B（USB-V03 / 故障排查）。
 
 .EXAMPLE
     # 管理员 PowerShell

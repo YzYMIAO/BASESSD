@@ -10,7 +10,8 @@ docs/archive/
 ├── README.md          ← 本文件
 ├── changelog/         ← 原 docs/changelog/：FC / FTL 各版本逐版本落地记录（70 个）
 ├── <dated 6 个>       ← 原 docs/design/ 的一次性阶段文档
-└── <计划/历史 10 个>   ← 2026-10-22 文档重组移入（见下节）
+├── <计划/历史 10 个>   ← 2026-10-22 文档重组移入（见下节）
+└── <2026-11-13 重构归档> ← UT 修订史 / 断言历史轮次 / 设计讨论 / 合并后的原文档
 ```
 
 ## changelog/（原 `docs/changelog/`，2026-10-15 移入）
@@ -56,8 +57,29 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | `ftl_ut_munit.md` | FTL L0 UT 设计与用例清单 | UT 冻结状态进 `known_iss` ISS-UT-01；全文保留 |
 | `claude_md_history.md` | `CLAUDE.md` 规则变更史 | 纯历史 |
 
+## 2026-11-13 重构归档
+
+> 本轮把一次性评估、纯修订史、已合并的诊断/调度/USB 文档移入 archive；活跃设计文档
+> 相应缩减，正文不在这里复制。
+
+| 文件 | 原位置 / 内容 | 处置 |
+|---|---|---|
+| `project_positioning_20261029.md` | 项目水平定位评估（一次性，2026-10-29） | 结论摘要并入 `storage_controller_learning.md` §6.1 |
+| `negative_test_plan.md` | 可执行负例清单 | 并入 `testing_guide.md` §11 |
+| `logging_design.md` | 日志设计 | 并入 `fault_capture.md` §10 |
+| `scheduler_design.md` | 统一定时调度器设计 | 并入 `platform_abstraction.md` §8 |
+| `usb_msc_udisk.md` / `usb_msc_verification.md` | USB 设计与上板验证 | 合并为 `usb_msc.md` Part A/B |
+| `assertion_rounds.md` | 断言规范 §八~§二十三 历史落地轮次 | 主文件保留标题与指针 |
+| `fc_design_discussions.md` | FC §11/§14~§16 设计讨论与重构记录 | 主文件保留标题与指针 |
+| `fc_nand_status_history.md` | FC §8/§9 状态/待完善项历史表 | 主文件改为指针 |
+| `ftl_design_verification_history.md` | FTL §7.1 历史未验证状态 | 主文件改为指针 |
+| `ut_revision_history.md` | `munit_adapter.md` §4 / `fc_nand_ut.md` §7 修订史 | 主文件改为指针 |
+| `wsl_debug_history.md` | WSL 调试环境 §8 历史问题 | 主文件保留 §7 当前排障 |
+| `testing_guide_itcm_ab.md` | testing_guide §9.4 ITCM/DTCM A/B 细节 | 主文件保留当前结论 |
+| `known_iss_batches.md` | known_iss 已闭合/不实现条目原文 | 主文件保留索引表 |
+
 ## 边界
 
-- 活跃权威设计文档一律在 **`../design/`**（17 个，含 `ftl_revision_history.md`），不要往这里放。
+- 活跃权威设计文档一律在 **`../design/`**（14 个活跃 + `known_iss.md` / `known_risks.md`），不要往这里放。
 - 新增「已落地变更」的记录：若只是单版本落地/上板记录，直接放这里 `changelog/`；
   若是对当前设计仍有约束力的决策，进 `../design/` 对应文档。

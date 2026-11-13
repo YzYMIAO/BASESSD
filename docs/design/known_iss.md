@@ -115,8 +115,8 @@
 
 - **当前事实**：HIL L2 验收 24 例：基础读写 9、拆分/聚合/背压 4、跨重启 8、后台/水位观测 3。v0.58~v0.66 期间可能用 CLI 人工跑过，但**无逐条上板记录**。
 - **影响**：没有逐条记录就不能声称 L2 验收覆盖。
-- **下一步 / 判据**：按 `docs/design/usb_msc_verification.md` 的矩阵补记录；跨重启 8 例优先（`reboot_persist_*` 已修，需确认）。
-- **来源**：`docs/archive/hil_ut_design.md` Part B；`docs/design/usb_msc_verification.md`
+- **下一步 / 判据**：按 `docs/design/usb_msc.md` Part B 的矩阵补记录；跨重启 8 例优先（`reboot_persist_*` 已修，需确认）。
+- **来源**：`docs/archive/hil_ut_design.md` Part B；`docs/design/usb_msc.md` Part B
 - **关联**：`ISS-HIL-01`
 - **历史/验证**：
   - （日期未记录）v0.58~v0.66 期间可能用 CLI 人工跑过 → 无逐条记录
@@ -505,7 +505,7 @@
 - **当前事实**：未验证。
 - **影响**：写中断电后的卷可挂载性/哈希一致性没有板端证据。
 - **下一步 / 判据**：写 32–64 MB 中拔电，重启后卷可挂载、哈希一致。
-- **来源**：`docs/design/usb_msc_verification.md` §8
+- **来源**：`docs/design/usb_msc.md` Part B §B.8
 - **关联**：`RISK-CACHE-18`、`RISK-BOOT-*`
 - **历史/验证**：
   - （无板端记录）
@@ -515,7 +515,7 @@
 - **当前事实**：未验证。
 - **影响**：没有可复现的 USB 吞吐基线。
 - **下一步 / 判据**：记录顺序写/读、4K 随机；与 `RISK-NAND-04` 的瓶颈定位合并。
-- **来源**：`docs/design/usb_msc_verification.md` §8
+- **来源**：`docs/design/usb_msc.md` Part B §B.8
 - **关联**：`RISK-NAND-04`
 - **历史/验证**：
   - （无板端记录）
@@ -525,7 +525,7 @@
 - **当前事实**：多分区/第二分区（>128 MB）写满 + 校验未验证；历史 rev33 第二分区失败见 `RISK-MIG-07`。
 - **影响**：第二分区容量/映射可能仍有问题。
 - **下一步 / 判据**：v12 介质上重跑；与全盘 H2testw 分开记录。
-- **来源**：`docs/design/usb_msc_verification.md` §8；`RISK-MIG-07`
+- **来源**：`docs/design/usb_msc.md` Part B §B.8；`RISK-MIG-07`
 - **关联**：`RISK-MIG-07`
 - **历史/验证**：
   - （无板端记录）
@@ -549,7 +549,7 @@
 | ISS-PLAT-04 | 待上板 | 统一定时调度器已实现未上板 | 2026-11-03 编译通过 |
 | ISS-BG-01 | 待上板 | 后台节拍 flag + token bucket 已实现未上板 | 2026-11-03 编译通过 |
 | ISS-TOP-01 | 待上板 | NAND 拓扑扫描 + FTL die 表已实现未上板 | 2026-11-03 编译通过 |
-| ISS-LOG-01 | 待上板 | `logging_design.md` §5 的 9 项未逐条确认 | 未上板 |
+| ISS-LOG-01 | 待上板 | `fault_capture.md` §10.5 的 9 项未逐条确认 | 未上板 |
 | ISS-FAULT-01 | 待上板 | `fault_capture.md` 三项手工验证未做 | 未上板 |
 | ISS-FAULT-02 | 待上板 | PC 采样器已实现未上板 | 2026-11-05 编译通过 |
 
@@ -579,8 +579,8 @@
 
 - **当前事实**：`btim`→`timer` 改名；一张表 `{fn, ctx, first_delay, period}`；watchdog / `[STAT]` / FTL 周期评估迁入；拆 `mig_handle` 的 advance/eval；`bg_scheduler` 降为预算子引擎。系统时基 = ARM 核心 SysTick（ms + µs）；timer 调度器心跳 = TIM6；DWT 从产品路径删除。Phase 0~3 已落地（改名 + 容量 64 + `add_at/set_period/task_count` + `[STAT]` 迁移 + `mig_eval` 注册）；delay/usart/watchdog/TinyUSB/FTL `time_ms` 统一到 SysTick；NAND/USB 的 DWT µs 计时改为 SysTick `LOAD/VAL`；TIM6 只驱动 timer 任务表。
 - **影响**：未上板验证，时间源/调度行为没有板端证据。
-- **下一步 / 判据**：上板验证 timebase/调度；见 `docs/design/scheduler_design.md`。
-- **来源**：`docs/design/scheduler_design.md`
+- **下一步 / 判据**：上板验证 timebase/调度；见 `docs/design/platform_abstraction.md` §8。
+- **来源**：`docs/design/platform_abstraction.md` §8
 - **关联**：`ISS-BG-01`、`RISK-UT-05`
 - **历史/验证**：
   - 2026-11-03 Phase 0~3 落地 → 编译通过，未上板
@@ -590,7 +590,7 @@
 - **当前事实**：CP T3 / L2P flush / BBT 起新 job 由 10 ms timer 任务置 flag；`bg_scheduler` 预算从「每轮配额」改为「每 10 ms 补 `grant_units` credit（IDLE/NORMAL 4、BUSY 1，上限 4 个 interval）」；must-run 与在飞推进不变。
 - **影响**：GC/WL 吞吐与 host 写延迟未上板测量。
 - **下一步 / 判据**：上板测 GC/WL 吞吐与 host 写延迟；按结果调 `grant_units` / `BG_TOKEN_INTERVAL_MS`；验证 flag 消费、T3 不延迟、BBT 仍能落盘。
-- **来源**：`RISK-BG-10`；`docs/design/scheduler_design.md` Phase 5
+- **来源**：`RISK-BG-10`；`docs/design/platform_abstraction.md` §8.5
 - **关联**：`RISK-BG-10`、`ISS-PLAT-04`
 - **历史/验证**：
   - 2026-11-03 落地 → 编译通过，未上板
@@ -605,12 +605,12 @@
 - **历史/验证**：
   - 2026-11-03 Phase 1/2a/2b 落地 → 编译通过，未上板
 
-#### ISS-LOG-01 `logging_design.md` §5 落地状态
+#### ISS-LOG-01 `fault_capture.md` §10.5 落地状态
 
 - **当前事实**：`[STAT]` / `[MIG] done` 已在 2026-10-22 日志出现，其余（飞行记录器、打印预算逐项）未逐条确认。
 - **影响**：不能声称 logging 设计已全部落地。
-- **下一步 / 判据**：按 `docs/design/logging_design.md` §6 判据逐项打勾；未验的不要写成已验。
-- **来源**：`docs/design/logging_design.md` §5/§6
+- **下一步 / 判据**：按 `docs/design/fault_capture.md` §10.6 判据逐项打勾；未验的不要写成已验。
+- **来源**：`docs/design/fault_capture.md` §10.5/§10.6
 - **关联**：`RISK-LOG-*`
 - **历史/验证**：
   - 2026-10-22 `[STAT]` / `[MIG] done` 出现 → 其余未确认

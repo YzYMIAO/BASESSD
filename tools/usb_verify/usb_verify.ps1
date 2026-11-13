@@ -71,8 +71,8 @@
       · %TEMP%\softssd_usb_verify_state.json（write 生成，check 读取）
 
     配套文档：
-      · docs/design/usb_msc_verification.md（步骤/判据/故障排查）
-      · docs/design/usb_msc_udisk.md（方案/取舍）
+      · docs/design/usb_msc.md Part B（步骤/判据/故障排查）
+      · docs/design/usb_msc.md Part A（方案/取舍）
       · docs/design/known_risks.md（RISK-WB-06 / RISK-USB-01）
 
 .EXAMPLE

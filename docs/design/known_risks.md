@@ -3,7 +3,7 @@
 > **用途**：记录「暂不修 / 待上板 / 待测试源 / 待决策」的风险与判定结论，避免重复分析。
 > **登记是硬约束（`CLAUDE.md` R11）**：缺陷与判定结论一经得出，当场登记；只在对话里说 = 未完成。
 > 说不出失败场景/后果的归 `CLAUDE.md` §七 S，不进本表。
-> **负例执行清单**：`docs/design/negative_test_plan.md`（按场景列出注入钩子、步骤与判据）。
+> **负例执行清单**：`docs/design/testing_guide.md` §11（按场景列出注入钩子、步骤与判据）。
 
 ## 0. 文档规则
 
@@ -2278,7 +2278,7 @@
 - **后果**：TinyUSB 内建的 INQUIRY 不返回 VPD B0/B2，READ CAPACITY(10) 也不带 LBPME/LBPRZ。Linux `sd` 只有在设备广告 thin provisioning 后才会下发 UNMAP；当前 0x42 已能解析，但普通 `fstrim`/`blkdiscard` 可能直接报 "discard not supported"，永远走不到本路径。
 - **缓解**：RISK-USB-14 的 handler/异步路径；主机若强制发 0x42 则可用。
 - **下一步**：上板抓包确认主机是否发 0x42；若不发，扩展 TinyUSB：READ CAPACITY(16) 置 LBPME/LBPRZ，或实现 VPD B0/B2（需 SPC/SBC 原文，R12）。
-- **证据**：`src/hil/usb_msc.c:tud_msc_scsi_cb`；`third_party/tinyusb/src/class/msc/msc_device.c` INQUIRY/READ CAPACITY；`docs/design/usb_msc_udisk.md`。
+- **证据**：`src/hil/usb_msc.c:tud_msc_scsi_cb`；`third_party/tinyusb/src/class/msc/msc_device.c` INQUIRY/READ CAPACITY；`docs/design/usb_msc.md` Part A。
 - **历史/验证**：
   - 2026-11-05 判定：未广告 → 待决策
 
@@ -2857,7 +2857,7 @@
 - **后果**：timer 调度器心跳只需周期中断，TIM6（basic）足够；系统 ms/µs 时基由 ARM 核心 SysTick 提供。若将来要求超过 SysTick 1 ms 窗口的 32-bit µs 时间戳，当前设计没有独立硬件计数器。⚠「基本定时器 / 通用定时器」是 STM32 器件分类（RM0433），不是存储主控架构判据；`docs/reference/` 没有「SSD 主控只有基本定时器」的出处，不得写成行业标准（§〇 / R12）。
 - **缓解**：`delay_time_now_us64` 用 HAL tick 扩展毫秒，不受 1 ms 窗口限制；NAND 忙期还有 SysTick µs + 轮询计数双保险（`nand_engine.c`）。
 - **下一步**：重访触发 = 需要不依赖 SysTick 的 32-bit µs 自由计数器，或 SysTick 在目标平台不可用；届时把 T2/T5 作为独立设计项评估，不顺手改现有 TIM6 心跳。
-- **证据**：`docs/design/scheduler_design.md` §4.1；`src/platform/timer.c`；`src/platform/stm32h743/timer_port.c`；`include/platform/delay.h` `delay_time_*`；`src/nand/nand_engine.c`。
+- **证据**：`docs/design/platform_abstraction.md` §8.4；`src/platform/timer.c`；`src/platform/stm32h743/timer_port.c`；`include/platform/delay.h` `delay_time_*`；`src/nand/nand_engine.c`。
 - **历史/验证**：
   - 2026-11-03 判定 TIM6 心跳足够，T2/T5 仅在需要独立 µs 计数器时评估 → 信息归档
 
