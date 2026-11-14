@@ -127,6 +127,22 @@
     （`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）均已执行并通过。
     覆盖账：**M 36 / N 13（11 条 FC negative 待 UT=FC + HIL 2 条部分）/ K 129 /
     待判定 110**。下一步：`make tests BUILD_TYPE=release UT=FC` 跑 `/fc-nand/negative/`。
+  - 2026-11-14 待决策 4 条裁决并落地：
+    HOST-06 保持早回执 + deferred（不重发 cache-program 成员）；WB-08 删除不可达
+    `WBUF_STATE_FAILED`（错误经 `base.error` 上报、flush 超时兜底）；SCH-01 在
+    `fc_submit_batch` 增加 ch/ce/lun 一致性 release 预检 + 负例
+    `batch_cross_target_reject`；SCH-09 保持内部 ASSERT（H2，公共入口保证）。
+    前三条相关风险（HOST-06/WB-08/SCH-09）已闭合归档；SCH-01 已由
+    release UT=FC **10/10** 板端验证并闭合（负例 `batch_cross_target_reject`）。
+    WB-08 的 wbuf 状态删除后，release UT=FTL 全量回归 **39/39、0 SKIP、194.29 s**
+    （flush 相关：alloc_fail 6.01 s / data_write 6.01 s，超时兜底符合预期）。
+    覆盖账：**M 49 / N 5 / K 233 / 待判定 0 / 待决策 5 / 待定位 8**。
+  - 2026-11-14 待判定项清零：110 条逐条落定——K 102（主机侧矩阵 / 人工掉电 /
+    长压测 / 白盒不可达 / 触发不可确定性构造）、N 3（GC-02 完成态写失败、
+    L2P-02 命令池耗尽、HOST-12 组表耗尽），均给出 seam/触发/断言但**未写用例**；
+    待决策 4（HOST-06 / WB-08 / SCH-01 / SCH-09 的契约或 release 守卫）、
+    待定位 1（BG-01 风险描述与实现不符）。覆盖账：M 47 / N 5 / K 231 /
+    待决策 9 / 待定位 8 / 待测试源 1 / 待后续 1 = 302。
   - 2026-11-14 风险文档收敛：40 条有板端负例证据的 `待上板` 风险移入各模块
     「已闭合」表，原文整体归档到 `docs/archive/known_risks_batches.md`
     §2026-11-14 负例框架收口（第二批）；7 条保留并写明残余

@@ -1234,3 +1234,63 @@
 
 
 > 闭合（2026-11-14）：负例 `nand_timing_bounds` 板端通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+## 2026-11-14 待决策项裁决（3 条闭合）
+
+> 下列风险由用户裁决后闭合；原文整体保留、不改写。
+
+#### RISK-HOST-06 写 program fail 直接返回 IO_ERROR
+
+- **后果**：坏块被标 BAD 后本页数据未重发，H2testw 等 host 会看到一次写失败。
+- **缓解**：从失败命令的 desc 链读回本页，分配新页对、重建命令并重发一次（`FTL_WRITE_RETRY_MAX=1`）；同一 pending 保持，组在飞数不递减。
+- **下一步**：debug `bbt fault` 人为标坏即将写入的 data 块，`[FTL] write retry` 出现且 host 写仍成功；第二次失败仍如实 IO_ERROR。
+- **证据**：`src/ftl/ftl.c:ftl_write_retry` / `ftl_host_io_callback`；`include/ftl/pending.h:retry_count`；`include/ftl/ftl.h:FTL_WRITE_RETRY_MAX`。
+- **历史/验证**：
+  - 2026-10-21 写重试路径落地 → 未上板
+
+
+> 闭合（2026-11-14，用户裁决）：保持早回执 + deferred error；cache-program 成员失败即中止序列、不重发（op44/48 不能回读），普通写仍走透明重试。行为即契约，非缺陷。
+
+#### RISK-WB-08 WBUF_STATE_FAILED 不可达
+
+- **后果**：`wb_handle` 每次调用都执行 `h->error = (st == FTL_ERROR) ? FTL_ERROR : FTL_OK`，而 flush 步唯一带 out 的调用是 `MAYBE_FLUSH_IDLE`，其分支不设置 `st` ⇒ idle flush 撞上永久错误（建链失败 / closed 列表满）后，下一次 flush 步立刻把 error 清回 OK ⇒ `ftl_flush_step` 的 `wb_fail` 恒假，host FLUSH 只能等 1s 超时后 best-effort 收尾，而不是快速失败。文档「error 只由下一次成功 FLUSH/RESET 清除」与实现不符。
+- **缓解**：`wb_maybe_flush_idle` 改返回 `ftl_status_e` 并在 switch 里赋给 `st`；错误锁存改为「任一 kind 返回 FTL_ERROR 置位，只有成功的 FLUSH / MAYBE_FLUSH_IDLE / RESET 清除（APPEND/DROP 成功不清）」。
+- **下一步**：构造建链永久失败（closed 列表满或注入），确认 host FLUSH 快速返回失败而不是 1s 超时。
+- **证据**：`src/ftl/wbuf.c:448/477-486`；`src/ftl/ftl.c:3306-3329/2223`。
+- **历史/验证**：
+  - 2026-11-04 错误锁存改为成功 FLUSH 才清 → 编译通过，未上板
+
+---
+
+
+> 闭合（2026-11-14，用户裁决）：删除不可达的 `WBUF_STATE_FAILED`；错误经 `wb_status_s.base.error` 上报，FLUSH 由自身超时兜底。契约与实现一致。
+> 板端回归（2026-11-14）：release UT=FTL `/ftl/media/negative/` **39/39、0 SKIP、194.29 s**；
+> flush 相关用例在 wbuf 持续失败时走 1 s 超时兜底（alloc_fail / data_write 各 6.01 s）。
+
+#### RISK-SCH-09 fc_request_use_staging 没有平面/下标守卫
+
+- **后果**：`plane = paa_to_plane(cmd->paa)` 直接用于 `fc_cw_flat` 和 `cw_buffers[cw0]`。单 plane 命令在提交边界由 `fc_pool_chain_validate` 的 plane_span 拒绝越界；但若 staging 类命令（FEATURES/META/ONFI/COLUMN）被误配 `multi_plane > 0`，plane_span 从 0 起、不校验 `cmd->paa` 的 plane，release 下可越界写 request。
+- **缓解**：helper 加 `ASSERT(plane < PLANE_NUM)` / `ASSERT(cw0 < CW_TOTAL_MAX)` / `ASSERT(cmd_id < DEPTH)`；提交边界 `fc_pool_chain_validate` 对**所有**命令校验 `paa_to_plane(cmd->paa) < PLANE_NUM`（release 拒绝）。
+- **下一步**：构造「staging op + multi_plane>0 + 非法 paa plane」负例，确认 release 在提交边界拒绝；上板回归 FEATURES/META/COLUMN/ONFI。
+- **证据**：`src/fc/fc.c:fc_request_use_staging`；`src/fc/fc_pool.c:fc_pool_chain_validate`；`include/fc/fc_command.h:fc_command_plane_span`。
+- **历史/验证**：
+  - 2026-11-06 修复：helper 断言 + 提交边界校验 plane → 未上板
+
+
+> 闭合（2026-11-14，用户裁决）：staging 为内部 helper，保持 debug ASSERT（H2 内部免检）；公共建链入口保证 plane/cw0/cmd_id 合法。
+
+## 2026-11-14 负例补齐（SCH-01 闭合）
+
+#### RISK-SCH-01 链成员跨目标只在 debug 拦截
+
+- **后果**：`fc_poll_chain_length` 发现下一成员 ch/ce/lun 与链头不同，release 下仍把它算进链，随后按链头 LUN 选 FIFO，错目标命令被塞进同一条 per-LUN 队列。
+- **缓解**：target 不一致时 debug `ASSERT_MSG`；release 截断在已确认前缀，剩余成员留在队列下一轮独立处理；`fc_nand_dispatch_enqueue` 的同 LUN 断言仍保留。
+- **下一步**：上板/负例构造跨 LUN 链；确认不执行错 LUN、命令各自失败/重试。
+- **证据**：`src/fc/fc.c:fc_poll_chain_length`；`src/fc/fc_nand_dispatch.c:fc_nand_dispatch_enqueue`。
+- **历史/验证**：
+  - 2026-11-06 修复：release 截断跨 target 链，剩余成员下一轮独立处理 → 未上板
+
+
+> 闭合（2026-11-14）：用户裁决补 release 预检。`fc_submit_batch` 校验批内 ch/ce/lun 一致，
+> 不一致返回 `INVALID_ARGUMENT`；负例 `batch_cross_target_reject` 在 release UT=FC 板端
+> **10/10** 通过。单 target 板（CH/CE/LUN=1）用 ch 越界值模拟不同 target，验证的是比较逻辑。

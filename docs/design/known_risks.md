@@ -1547,7 +1547,6 @@
 | RISK-HOST-01 | 待上板 | host 读成败只看 NAND_FAIL，UNC/MATA 被当成功 | 2026-11-14 上板通过（负例；残余：META_ERROR 未单验） |
 | RISK-HOST-03 | 待上板 | 短链读返回值被丢弃，未初始化缓冲交给 host | 未上板 |
 | RISK-HOST-05 | 待定位 | confirm park timeout = host 写失败，上游三支未定 | 2026-10-31 上板复现 |
-| RISK-HOST-06 | 待上板 | 写 program fail 直接返回 IO_ERROR，未重发 | 未上板 |
 | RISK-HOST-07 | 待上板 | 停泊确认路径重入，oldp 陈旧/映射分叉 | 未上板 |
 | RISK-HOST-08 | 待上板 | TRIM 已异步；CLI 诊断与 CP 冷启动 locate 仍同步 | 部分上板（2026-10-22） |
 | RISK-HOST-09 | 待后续 | TRIM 命中 wbuf 未编程 LBA 时不失效旧映射 | — |
@@ -1590,15 +1589,6 @@
   - 2026-10-31 23:47 cache 写压测复现：`lba=22512/50672`，前置 `[CP] submit stalled` + `[JRN] erase kick failed` ⇒ 支路 (a) 稳定可达
   - 2026-10-21 H2testw 确认支路 (a)：`region=568 cause=no_evictable` 与 `confirm park timeout` 同窗口，CP 卡在 phase=1
   - 2026-10-21 rev33 命中 `load start failed cause=no_evictable` 瞬态，同窗口无 confirm timeout
-
-#### RISK-HOST-06 写 program fail 直接返回 IO_ERROR
-
-- **后果**：坏块被标 BAD 后本页数据未重发，H2testw 等 host 会看到一次写失败。
-- **缓解**：从失败命令的 desc 链读回本页，分配新页对、重建命令并重发一次（`FTL_WRITE_RETRY_MAX=1`）；同一 pending 保持，组在飞数不递减。
-- **下一步**：debug `bbt fault` 人为标坏即将写入的 data 块，`[FTL] write retry` 出现且 host 写仍成功；第二次失败仍如实 IO_ERROR。
-- **证据**：`src/ftl/ftl.c:ftl_write_retry` / `ftl_host_io_callback`；`include/ftl/pending.h:retry_count`；`include/ftl/ftl.h:FTL_WRITE_RETRY_MAX`。
-- **历史/验证**：
-  - 2026-10-21 写重试路径落地 → 未上板
 
 #### RISK-HOST-07 停泊确认路径重入
 
@@ -1655,6 +1645,7 @@
 |---|---|---|---|
 | RISK-HOST-02 | 2026-11-14 | multi-plane 读只记首个 desc 的块，第二块漏记 ECC/read_count | `docs/archive/known_risks_batches.md` |
 | RISK-HOST-17 | 2026-11-14 | host queue entry 生命周期，漏 release/重复 release | `docs/archive/known_risks_batches.md` |
+| RISK-HOST-06 | 2026-11-14 | 写 program fail 直接返回 IO_ERROR，未重发 | `docs/archive/known_risks_batches.md` |
 
 - **后果**：主机中途拔线后，L2P 64 行全脏 ⇒ 写路径需未驻留 region ⇒ `l2p_load_start()` 失败但 4 个调用点全部 `(void)` 丢弃 ⇒ 上层仍返 `FTL_AGAIN` ⇒ `l2p_defer` 被置 true（实际无加载在飞）⇒ `bg_progress` 把 `l2p_defer` 算作进展 ⇒ stall 永不累加、序列永不关闭 ⇒ `ftl_op_seq_gate` 拒绝一切后台提交 ⇒ 脏行永远排不出去，环闭合。宿主侧表现为重枚举后读回 MATA、H2testw Code 1392、`Only 191 of 423 MB tested`。
 - **缓解**：新增 `l2p_cache_any_inflight()`（纯谓词），`l2p_defer` 的 4 个置位点改为按在飞计数派生；`cache_batch.c` 三处「序列收尾」不再借 `l2p_defer` 表达进展（`seq_closing` 已在 `bg_progress`）。加载启动失败不再被当进展 ⇒ stall 检测恢复区分力 ⇒ 组超时上报 IO_ERROR、序列关闭、门控打开。
@@ -1782,7 +1773,6 @@
 | RISK-WB-03 | 待上板 | 模块抽出 + 位运算收敛 + 日志降级，wbuf 是写路径核心 | 未上板 |
 | RISK-WB-04 | 待上板 | 组在飞数原由多处手工维护，漏减挂死 host 写 | 未上板 |
 | RISK-WB-07 | 待定位 | wbuf 半页卡死，后续写全被拒、组永不推进 | 2026-11-01 复现 |
-| RISK-WB-08 | 待上板 | WBUF_STATE_FAILED 不可达，错误锁存契约与实现矛盾 | 2026-11-04 编译通过 |
 
 ### 详情
 
@@ -1822,16 +1812,11 @@
 - **历史/验证**：
   - 2026-11-01 02:00 normal 档写深度 2 复现 → 待定位
 
-#### RISK-WB-08 WBUF_STATE_FAILED 不可达
+### 已闭合（详情见 archive）
 
-- **后果**：`wb_handle` 每次调用都执行 `h->error = (st == FTL_ERROR) ? FTL_ERROR : FTL_OK`，而 flush 步唯一带 out 的调用是 `MAYBE_FLUSH_IDLE`，其分支不设置 `st` ⇒ idle flush 撞上永久错误（建链失败 / closed 列表满）后，下一次 flush 步立刻把 error 清回 OK ⇒ `ftl_flush_step` 的 `wb_fail` 恒假，host FLUSH 只能等 1s 超时后 best-effort 收尾，而不是快速失败。文档「error 只由下一次成功 FLUSH/RESET 清除」与实现不符。
-- **缓解**：`wb_maybe_flush_idle` 改返回 `ftl_status_e` 并在 switch 里赋给 `st`；错误锁存改为「任一 kind 返回 FTL_ERROR 置位，只有成功的 FLUSH / MAYBE_FLUSH_IDLE / RESET 清除（APPEND/DROP 成功不清）」。
-- **下一步**：构造建链永久失败（closed 列表满或注入），确认 host FLUSH 快速返回失败而不是 1s 超时。
-- **证据**：`src/ftl/wbuf.c:448/477-486`；`src/ftl/ftl.c:3306-3329/2223`。
-- **历史/验证**：
-  - 2026-11-04 错误锁存改为成功 FLUSH 才清 → 编译通过，未上板
-
----
+| ID | 日期 | 一句话 | 归档 |
+|---|---|---|---|
+| RISK-WB-08 | 2026-11-14 | WBUF_STATE_FAILED 不可达，错误锁存契约与实现矛盾 | `docs/archive/known_risks_batches.md` |
 
 ## 2J. FTL service 与后台调度器（`ftl.c` + `bg_scheduler.c/h`）
 
@@ -3315,29 +3300,20 @@
 | RISK-SCH-07 | 2026-11-14 | fc_submit_batch 不拒绝批内重复命令指针 | `docs/archive/known_risks_batches.md` |
 | RISK-SCH-08 | 2026-11-14 | fc_get_cmd_data_ptr 的 cw_index 不含 plane | `docs/archive/known_risks_batches.md` |
 | RISK-SCH-12 | 2026-11-14 | fc_submit_batch 入参/提交不变量只有 debug ASSERT | `docs/archive/known_risks_batches.md` |
+| RISK-SCH-09 | 2026-11-14 | staging helper 无 plane/cw0/cmd_id 范围守卫 | `docs/archive/known_risks_batches.md` |
+| RISK-SCH-01 | 2026-11-14 | 链成员跨目标：`fc_submit_batch` 增加 ch/ce/lun release 预检 + 负例 | `docs/archive/known_risks_batches.md` |
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-SCH-01 | 待上板 | 链成员跨目标只在 debug 拦截，release 仍按链头 LUN 入队 | 未上板 |
 | RISK-SCH-02 | 待上板 | fc_core_poll 只在无完成时填充，持续完成下提交延迟 | 未上板 |
 | RISK-SCH-03 | 待决策 | CQ 满会丢完成项，FTL 永远收不到命令 | 2026-11-06 代码核对 |
 | RISK-SCH-04 | 信息 | 路由字段越界在 release 会越界访问 suspended 数组 | 2026-11-06 代码核对 |
 | RISK-SCH-05 | 待上板 | fill_pops 少计链成员 pop，链长 N 少计 N-1 | 未上板 |
 | RISK-SCH-06 | 待上板 | 断言终端路径再次断言，递归覆盖原始现场 | 未上板 |
-| RISK-SCH-09 | 待上板 | staging helper 无 plane/cw0/cmd_id 范围守卫 | 未上板 |
 | RISK-SCH-10 | 待上板 | 合成失败完成项忽略 CQ 满，FTL 等不到完成 | 未上板 |
 | RISK-SCH-11 | 待上板 | 完成侧不变量只有 debug ASSERT，release 继续写 CQ | 未上板 |
 
 ### 详情
-
-#### RISK-SCH-01 链成员跨目标只在 debug 拦截
-
-- **后果**：`fc_poll_chain_length` 发现下一成员 ch/ce/lun 与链头不同，release 下仍把它算进链，随后按链头 LUN 选 FIFO，错目标命令被塞进同一条 per-LUN 队列。
-- **缓解**：target 不一致时 debug `ASSERT_MSG`；release 截断在已确认前缀，剩余成员留在队列下一轮独立处理；`fc_nand_dispatch_enqueue` 的同 LUN 断言仍保留。
-- **下一步**：上板/负例构造跨 LUN 链；确认不执行错 LUN、命令各自失败/重试。
-- **证据**：`src/fc/fc.c:fc_poll_chain_length`；`src/fc/fc_nand_dispatch.c:fc_nand_dispatch_enqueue`。
-- **历史/验证**：
-  - 2026-11-06 修复：release 截断跨 target 链，剩余成员下一轮独立处理 → 未上板
 
 #### RISK-SCH-02 fc_core_poll 只在无完成时填充
 
@@ -3383,15 +3359,6 @@
 - **证据**：`src/fc/fc.c:assertion_platform_context / fc_get_resource_stats`；`src/common/assertion.c:assertion_terminate`。
 - **历史/验证**：
   - 2026-11-06 修复：钩子直接读 `g_fc_controller` 计数 → 未上板
-
-#### RISK-SCH-09 fc_request_use_staging 没有平面/下标守卫
-
-- **后果**：`plane = paa_to_plane(cmd->paa)` 直接用于 `fc_cw_flat` 和 `cw_buffers[cw0]`。单 plane 命令在提交边界由 `fc_pool_chain_validate` 的 plane_span 拒绝越界；但若 staging 类命令（FEATURES/META/ONFI/COLUMN）被误配 `multi_plane > 0`，plane_span 从 0 起、不校验 `cmd->paa` 的 plane，release 下可越界写 request。
-- **缓解**：helper 加 `ASSERT(plane < PLANE_NUM)` / `ASSERT(cw0 < CW_TOTAL_MAX)` / `ASSERT(cmd_id < DEPTH)`；提交边界 `fc_pool_chain_validate` 对**所有**命令校验 `paa_to_plane(cmd->paa) < PLANE_NUM`（release 拒绝）。
-- **下一步**：构造「staging op + multi_plane>0 + 非法 paa plane」负例，确认 release 在提交边界拒绝；上板回归 FEATURES/META/COLUMN/ONFI。
-- **证据**：`src/fc/fc.c:fc_request_use_staging`；`src/fc/fc_pool.c:fc_pool_chain_validate`；`include/fc/fc_command.h:fc_command_plane_span`。
-- **历史/验证**：
-  - 2026-11-06 修复：helper 断言 + 提交边界校验 plane → 未上板
 
 #### RISK-SCH-10 合成失败完成项忽略 CQ 满
 
