@@ -48,8 +48,10 @@
 #include "journal.h"
 
 #include "assertion.h"
-#include "bbt.h"          /* bbt_mark_bad（环形块持续擦除失败） */
-#include "fault_inject.h" /* 测试镜像专属注入点（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入） */
+#include "bbt.h" /* bbt_mark_bad（环形块持续擦除失败） */
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "fault_inject.h" /* 测试镜像专属注入点；生产构建整段裁掉（宏隔离） */
+#endif
 #include "fc.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
@@ -723,7 +725,7 @@ static BOOL jrn_freeze(l2p_jrn_s *journal)
 
     // 换块与逐页 flush 都不打 INFO：JRN 是高频元数据维护，序号看 info 的 jrn=；
     // 只有真正错误（写失败/擦失败/环满）才输出。
-    // 记录本页的序号区间：页写成功后用它推进 WAL 水位（RISK-L2P-09）。
+    // 记录本页的序号区间：页写成功后用它推进 WAL 水位。
     journal->handle.state.write_page_seq    = journal->handle.state.sequence_counter - journal->handle.state.current_entry;
     journal->handle.state.write_entry_count = journal->handle.state.current_entry;
 
@@ -1019,11 +1021,15 @@ static void jrn_write_failure_note(l2p_jrn_s *journal)
  */
 static void jrn_write_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_status_s *completion)
 {
-    // 测试镜像专属注入（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入）：把本次页写按失败结算，用于验证「失败页不推进
-    // persisted_seq ⇒ L2P 区域写回被 WAL 闸门挡住」与 write_fail_pending 的恢复路径。
-    // 先求值再合成（H28：有副作用的调用不放进表达式）。
+    // 测试镜像专属注入：把本次页写按失败结算，用于验证「失败页不推进 persisted_seq
+    // ⇒ L2P 区域写回被 WAL 闸门挡住」与 write_fail_pending 的恢复路径。
+    // 生产构建整段裁掉（宏隔离）；先求值再合成（H28）。
+#if defined(FC_NAND_TEST_ENABLE)
     const BOOL injected = fi_journal_fail_take();
-    const BOOL failed   = fc_cmd_status_has_error(completion->status) || injected;
+#else
+    const BOOL injected = false;
+#endif
+    const BOOL failed = fc_cmd_status_has_error(completion->status) || injected;
 
     if (failed)
     {
@@ -1040,7 +1046,7 @@ static void jrn_write_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_s
 
     if (failed == false)
     {
-        // WAL 水位：本页成功落盘 ⇒ 它覆盖的序号区间全部持久化（RISK-L2P-09）。
+        // WAL 水位：本页成功落盘 ⇒ 它覆盖的序号区间全部持久化。
         const DWORD next_seq = journal->handle.state.write_page_seq + (DWORD)journal->handle.state.write_entry_count;
 
         if (jrn_seq_after(next_seq, journal->handle.state.persisted_seq))
@@ -1552,7 +1558,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_s *journal, l2p_cache_s
                 applied++;
 
                 // 基线若是“降级后的空表”，该 region 的旧映射已不可信：快照结果
-                // 不能算 restored（RISK-L2P-04）。
+                // 不能算 restored。
                 const DWORD global_region = lba_to_global_region(entry_lba);
 
                 if (l2p_is_region_degraded(cache, global_region))

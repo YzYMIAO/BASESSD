@@ -477,7 +477,7 @@ static inline DWORD jrn_sequence_get(const l2p_jrn_s *journal)
 /**
  * @brief 已成功落盘的 Journal 序号上界（exclusive）
  *
- * 用途：L2P 区域写回的 WAL 次序闸门（RISK-L2P-09）——区域页只能在覆盖其映射的
+ * 用途：L2P 区域写回的 WAL 次序闸门——区域页只能在覆盖其映射的
  * Journal 条目落盘之后写。调用者（`l2p_flush_kick`）在 `!jrn_seq_ge(persisted, dirty)`
  * 时退让重试（串行号语义，回绕安全），由 Journal 服务把当前页冻结并落盘。
  *

@@ -1540,7 +1540,7 @@ static void uart_cli_cp(int argc, char *argv[])
  * @brief jrn — Journal 环形 / WAL / 水位（只读）。
  *
  * 三行：写游标与水位；job 状态与环状态；坏块策略与持久性失败观测。
- * `persisted` 是 WAL 闸门用的已落盘上界（RISK-L2P-09），`wpseq/wentry` 是
+ * `persisted` 是 WAL 闸门用的已落盘上界，`wpseq/wentry` 是
  * 页缓冲里尚未落盘的一页。
  *
  * @param argc 参数个数（含命令名）

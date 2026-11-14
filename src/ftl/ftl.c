@@ -58,7 +58,9 @@
 #include "bbt.h"
 #include "cache_batch.h"
 #include "checkpoint.h"
-#include "fault_inject.h" /* 测试镜像专属注入点（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入） */
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "fault_inject.h" /* 测试镜像专属注入点；生产构建整段裁掉（宏隔离） */
+#endif
 #include "fc.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
@@ -1506,10 +1508,11 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
     ASSERT(ftl->cache_stream.seq.wr_inflight > 0U);
     ftl->cache_stream.seq.wr_inflight--;
 
-    // 测试镜像专属注入（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入）：在本条 cache program 命令的完成上伪造 FAIL_CACHE。
+#if defined(FC_NAND_TEST_ENABLE)
+    // 测试镜像专属注入：在本条 cache program 命令的完成上伪造 FAIL_CACHE。
     // 器件语义 = 第 N 条命令的 70h 状态报**上一页**的结论（op44/op48 映射，op49 首页
-    // 不映射）⇒ 注入到某页的完成 = 判它的**前一页**失败。release 下 fi_* 是空实现，
-    // 产品固件里它是空实现，这里的拷贝被优化掉（H14：不付运行期开销）。
+    // 不映射）⇒ 注入到某页的完成 = 判它的**前一页**失败。
+    // 生产构建整段裁掉：连 completion 拷贝都不存在（宏隔离，H14）。
     fc_cmd_status_s completion_used = *completion;
 
     if (fi_cache_fail_take(page_lba))
@@ -1517,6 +1520,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
         completion_used.status |= FC_CMD_STATUS_FAIL_CACHE; /* 常量落在 8 位字段内（H48 ②） */
     }
     completion = &completion_used;
+#endif
 
     // 迟到完成：所属写序列已中止 / 已被新序列取代（代号不符）⇒ 本页不确认映射
     // （失败序列其后页一律不确认，否则 rebuild 的 page0 捷径会被击穿）。
@@ -2613,6 +2617,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
         // · 同 plane 但换了页 —— 一条命令每 plane 只能一个页，装不下
         // · 非法 PBA / 物理 plane ≠ LBA 的 plane 位 —— 映射表损坏 → FTL_ERROR
         BYTE k;
+        BOOL l2p_again = false; /* 本轮是否因 L2P 值不可用而中断（≠ 未映射） */
 
         for (k = 0U; k < n; k++)
         {
@@ -2645,7 +2650,8 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
                     // 此时若宣称"在飞"，drain 的 stall 检测会永久失效，形成环形等待
                     // 。主流判据 = 队列/完成模型：没有在飞命令就没有确定完成时刻。
                     ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
-                    break; /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
+                    l2p_again            = true; /* 值不可用：不得按「未映射」处理 */
+                    break;                       /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
                 }
             }
 
@@ -2695,9 +2701,11 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
 
         if (k == 0U)
         {
-            // 首 LBA 未就绪（region 在加载）⇒ 本轮无进展，返背压等加载完成。
+            // 首 LBA 的值不可用（region 加载在飞，**或加载启动失败**）⇒ 本轮无进展，返背压。
             // ⚠ 必须**先**判这一条：把"还不知道"当成"未映射"会给 host 填一页零。
-            if (ftl->flags.l2p_defer == true)
+            // 启动失败时没有在飞命令（l2p_defer=false），但它同样不是未映射；持续无进展
+            // 由 drain 的 FTL_DRAIN_STALL_MAX 结算成 IO_ERROR，而不是零填。
+            if (l2p_again == true)
             {
                 return FTL_AGAIN;
             }

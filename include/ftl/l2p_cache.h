@@ -322,7 +322,7 @@ typedef struct L2P_CACHE_LINE_S
      * **返回 IO_ERROR** 而不是零填。每次 load_start / 加载成功清零；降级时置 1。 */
     BOOL degraded;
 
-    /* 本 region 连续加载失败次数（RISK-L2P-01）。
+    /* 本 region 连续加载失败次数。
      * 失败后先置 INVALID 重试，达到 L2P_LOAD_RETRY_MAX 才降级为「全未映射的
      * CLEAN 行」——既不每次访问都重读坏 region（活锁），也不把一次瞬态读错
      * 永久当成「从未写过」。换 region 时由 load_start 清零。
@@ -342,7 +342,7 @@ typedef struct L2P_CACHE_LINE_S
     DWORD load_pba;        /* 在飞/最近一次加载的 PBA */
     BOOL  load_use_backup; /* true = 当前这次读的是备份副本 */
 
-    /* 本行映射所依赖的 Journal 序号上界（WAL 次序，RISK-L2P-09）：
+    /* 本行映射所依赖的 Journal 序号上界（WAL 次序）：
      * 每次映射更新（jrn_append 之后）记录当时的 sequence_counter；区域写回
      * （l2p_flush_kick）要求 Journal 的持久化水位 ≥ 它，保证「日志先于数据」。
      * 0 = 无依赖（新加载 / 恢复生成的行）。 */
@@ -360,7 +360,7 @@ typedef struct L2P_CACHE_LINE_S
  * FTL 实例（owner die）。端口只暴露**共享服务的最小集**，不返回整个 ftl_context。
  * 回调由设备级 init 注入（main.c），内部复用 lba_2_* + ftl_op_route_get。
  */
-/* 前向声明：owner 端口需要 Journal 的 WAL 水位（RISK-L2P-09 的区域写回闸门）。
+/* 前向声明：owner 端口需要 Journal 的 WAL 水位（区域写回闸门）。
  * 不 include journal.h——journal.h 反向 include 本头，会成环。 */
 typedef struct L2P_JOURNAL_S l2p_jrn_s;
 
@@ -416,7 +416,7 @@ typedef struct L2P_CACHE_STATISTICS_S
     DWORD hit_count;       /* 命中次数（开机累计） */
     DWORD miss_count;      /* 未命中次数（开机累计） */
     DWORD eviction_count;  /* 被驱逐行数（开机累计） */
-    DWORD wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数（RISK-L2P-09） */
+    DWORD wal_defer_count; /* 区域写回被 WAL 次序闸门退让的次数 */
     DWORD hint_hits;       /* region line hint 命中次数 */
     DWORD hint_misses;     /* hint 未命中/冲突，退回线性扫描的次数 */
     DWORD cmt_hits;        /* 读路径 CMT 命中次数 */

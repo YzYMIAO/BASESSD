@@ -618,7 +618,7 @@ static md_compact_step_e md_compact_read(md_dir_cache_s *dir)
 
         // Directory 是介质读回（H29）：非 INVALID 的 PBA 必须过 pba_is_valid 才能
         // 进 FC（越界路由字段会让 FC 的 suspended[][] 越界）。损坏副本按缺失处理，
-        // 交给前台加载路径去降级（RISK-L2P-21）。
+        // 交给前台加载路径去降级。
         if ((primary != NAND_PBA_INVALID) && (pba_is_valid(primary) == false))
         {
             LOGE(LOG_TAG_META "compact: region %hu primary PBA invalid (0x%08lx) — treated as missing\r\n", rid, primary);
@@ -1250,7 +1250,6 @@ static void md_cp_read_complete(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *c
         const DWORD other = (j->cur_copy == MD_COPY_PRIMARY) ? md_backup_find(dir, j->cur_region) : md_entry_find(dir, METADATA_TYPE_L2P_REGION, j->cur_region);
 
         // 另一份同样来自 Directory（H29）：非 INVALID 也要过 pba_is_valid 才能进 FC
-        // （RISK-L2P-21）。
         if ((other != NAND_PBA_INVALID) && (pba_is_valid(other) == true) && (other != j->cur_source))
         {
             if (md_submit(dir, MD_SUBMIT_READ, other, NULL, 0U) == FTL_OK)

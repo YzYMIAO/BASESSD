@@ -357,7 +357,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
     owner.metadata_dir = ftl->metadata_dir;
     owner.alloc        = &ftl->alloc;
     owner.topo         = ftl->topo;
-    owner.journal      = ftl->journal; /* WAL 水位闸门（RISK-L2P-09） */
+    owner.journal      = ftl->journal; /* WAL 水位闸门 */
     g_l2p_owner[die]   = owner;
 
     /* debug-only：初始化契约自检。必须在 owner 登记之后、任何 cache 访问之前——
