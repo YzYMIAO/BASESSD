@@ -3270,8 +3270,9 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
 
     if (pend_group_alloc(&ftl->pending, &gi) == false)
     {
+        // 组表满是**瞬态资源**（H38）：上层据此排队重试，不能报永久失败。
         LOGE(LOG_TAG_FTL "%s: no free group slot\r\n", label);
-        return FTL_ERROR;
+        return FTL_AGAIN;
     }
     pend_group_s *g      = &ftl->pending.groups[gi];
     g->op                = op;
