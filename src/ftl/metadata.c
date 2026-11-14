@@ -147,7 +147,7 @@ typedef struct METADATA_POOL_POLICY_S
 
 // 一次池扫描的中间结果。
 //
-// 语义（RISK-BBT-18）：不再假设"第一个末槽无效的块 = 写 frontier"。引导环
+// 语义：不再假设"第一个末槽无效的块 = 写 frontier"。引导环
 // （BBT 名义块 + shared spare）里 BAD 块/读失败块的末槽同样无效，旧假设会把
 // 真正 frontier 之后的中段 record 全部忽略。现在对**每个**非满块降序找最后
 // 一条有效 record，再与满块末条比较取全局 sequence 最大者。
@@ -187,7 +187,7 @@ static const md_partition_s s_md_partitions[] = {
     {     "Checkpoint", CHECKPOINT_BLOCK0,   CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK,                   FTL_CHECKPOINT_TABLE_BYTES},
     {            "BBT",         BBT_BLOCK,          BBT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,                  PAGES_PER_BLOCK,                          FTL_BBT_TABLE_BYTES},
     {        "Journal",    JOURNAL_BLOCK0,      JOURNAL_BLOCK_COUNT, METADATA_MIRROR_PLANE_MASK,                               1U,                      FTL_JOURNAL_TABLE_BYTES},
- // L2P region 日志区：固定预留（RISK-MD-07/CAP-02）。redundancy 填 1（不是 record 池）；
+ // L2P region 日志区：固定预留（/CAP-02）。redundancy 填 1（不是 record 池）；
   // table_bytes = region 数 × 每个 region 的 2 KB。
     {        "L2P log",    L2P_LOG_BLOCK0, L2P_LOG_BLOCKS_PER_PLANE, METADATA_MIRROR_PLANE_MASK,                               1U, (L2P_REGIONS_PER_INSTANCE * L2P_REGION_SIZE)},
 };
@@ -500,7 +500,7 @@ DWORD md_ring_addr(const md_ring_s *ring, const ftl_topo_s *topo, WORD record_id
  * @param rpb   每块 record 数
  * @param s     输出：扫描中间结果
  *
- * @note 判据不再是"第一个末槽无效的块 = 写 frontier"（RISK-BBT-18）：引导环里
+ * @note 判据不再是"第一个末槽无效的块 = 写 frontier"：引导环里
  *       BAD 块/读失败块的末槽同样无效，旧假设会把真正 frontier 之后的中段
  *       record 全部忽略。代价：空块通常只付 1 次探针（末页空白），读失败的块
  *       最多 rpb 次；只在定位（开机/冷定位）时执行。
@@ -681,7 +681,7 @@ SSD_CODE_FAST ftl_status_e md_ring_locate(const md_ring_s *ring, metadata_ring_p
     md_ring_scan(ring, probe, ctx, rpb, &scan);
 
     // ④ frontier 整条校验：廉价探针只验末页，多页 record 的中段损坏在这里暴露。
-    //    失败 ⇒ 全池回退，取次新的**完整** record（RISK-BBT-18 的损坏分支）。
+    //    失败 ⇒ 全池回退，取次新的**完整** record（损坏分支）。
     DWORD full_seq = 0U;
 
     if ((scan.frontier_idx != UINT16_MAX) && (probe(ctx, scan.frontier_idx, true, &full_seq) == FTL_OK))
@@ -891,7 +891,7 @@ static ftl_status_e md_dir_ckpt_record_probe_full(const dir_ckpt_probe_ctx_s *c,
     {
         const BYTE plane      = md_ring_plane_at(c->ring->plane_mask, pi);
         DWORD      seq        = 0U;
-        DWORD      dgen       = 0U; /* 本 record 主半的目录代数（RISK-MD-06：必须全条一致）*/
+        DWORD      dgen       = 0U; /* 本 record 主半的目录代数（必须全条一致）*/
         BOOL       primary_ok = true;
 
         for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
@@ -943,7 +943,7 @@ static ftl_status_e md_dir_ckpt_record_probe_full(const dir_ckpt_probe_ctx_s *c,
 
             if (backup == false)
             {
-                // 整条记录的页间一致性（RISK-MD-06）：同一 sequence 下，各页还必须是**同一
+                // 整条记录的页间一致性：同一 sequence 下，各页还必须是**同一
                 // 目录代数**。写入期间目录更新过 ⇒ 早写的页是旧代、晚写的是新代，这种
                 // "混代记录"在媒体上看起来完全合法；被当作最新目录加载时，不同代次的
                 // 条目会在复用过的页上互相碰撞（两个 region 指向同一页）。这里整条作废，
@@ -1138,7 +1138,7 @@ static void md_boot_status_log(const md_dir_cache_s *dir)
 
     const unsigned dyn = (live_blocks != 0U) ? 1U : 0U;
 
-    // 当前写块按 plane 打印（每 plane 一个，RISK-BOOT-18 L2）。
+    // 当前写块按 plane 打印（每 plane 一个，L2）。
     LOGI(LOG_TAG_META "dir_ckpt_seq=%lu dyn=%u cur_blk=%hu/%hu live_blks=%lu count=%hu\r\n",
          dir->ckpt.sequence,
          dyn,
@@ -1308,7 +1308,7 @@ void md_entry_update(md_dir_cache_s *dir, md_type_e type, WORD id, DWORD new_pba
  *（回收 / 压缩在 metadata_job.c；本区只维护写指针与 Directory 登记）
  * ══════════════════════════════════════════════════════════════════ */
 
-/* ── 固定 L2P 日志区：分配 / 归还 / 开机恢复（RISK-MD-07 / RISK-CAP-02）── */
+/* ── 固定 L2P 日志区：分配 / 归还 / 开机恢复── */
 
 /**
  * @brief 在固定 L2P 日志区分配一块「已擦净、空闲」的块并标 LOG
@@ -1347,7 +1347,7 @@ WORD md_log_alloc(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
     }
 
     // 固定区无空闲块：从 **OP 池**有界借用动态日志块（L2P_LOG_BORROW_MAX）。
-    // 不借则压缩没有目标块、CP 永远拿不到槽（RISK-MD-08）。借出的块由 l2p_live /
+    // 不借则压缩没有目标块、CP 永远拿不到槽。借出的块由 l2p_live /
     // md_block_is_metadata 动态识别，擦空后由 md_log_release 回 OP 池。
     if (dir->log_borrow_count < L2P_LOG_BORROW_MAX)
     {
@@ -1417,7 +1417,7 @@ void md_log_release(md_dir_cache_s *dir, WORD gblock)
 /**
  * @brief 固定 L2P 日志区的空闲块数（state == NONE 且非 BAD）
  *
- * 压缩触发的主判据：按 free 水位压，而不是等 live 接近上限（RISK-MD-08）。
+ * 压缩触发的主判据：按 free 水位压，而不是等 live 接近上限。
  *
  * @param alloc 分配器
  * @return 空闲块数
@@ -1510,7 +1510,7 @@ void md_log_area_restore(md_dir_cache_s *dir, alc_s *alloc)
 
             // 非活块：Directory 不引用它 ⇒ **一律登记回收**，擦完由后台 md_log_release 置 NONE。
             // ⚠ 不读介质判「是否已擦净」：块状态不该由页面内容反推——FTL 只看得见
-            // USER 512B，判不出「编程过没有」（RISK-IF-15）。擦除是幂等的，多擦一次
+            // USER 512B，判不出「编程过没有」。擦除是幂等的，多擦一次
             // 只花 P/E；而判错一次就是在未擦页上编程 = 静默介质损坏。
             // 擦除按空闲水位**懒执行**（metadata_job.c 的 MD_JOB_RECLAIM 门控），
             // 所以开机不会把整个日志区重擦一遍。
@@ -1569,7 +1569,7 @@ void md_log_area_restore(md_dir_cache_s *dir, alc_s *alloc)
 
 /**
  * @brief 单个 PBA 的账本迁移：旧位置 -1、新位置 +1、旧块归零则登记回收。
- * 主/备副本共用（RISK-BOOT-18 的 L2 双副本）。
+ * 主/备副本共用（L2 双副本）。
  *
  * @param dir     Directory cache（输出：l2p_live 账本）
  * @param old     旧位置 PBA（NAND_PBA_INVALID = 未映射）
@@ -1582,7 +1582,7 @@ static void md_region_copy_commit(md_dir_cache_s *dir, DWORD old, DWORD new_pba)
     // 旧位置必须真的可能是 L2P region 槽位：只排除非日志固定区（0..L2P_LOG_BLOCK0−1）。
     // 目录检查点条目来自介质（H29），损坏条目可能指向目录检查点/CP/BBT/Journal ⇒ 跳过。
     // ⚠ **不能**用 `md_block_is_metadata(NULL, ...)`：L2P 日志区是固定分区，会被一起
-    // 排除 ⇒ 旧位置的活计数永不递减、`l2p_live` 只增不减（RISK-MD-13）。
+    // 排除 ⇒ 旧位置的活计数永不递减、`l2p_live` 只增不减。
     if ((old != NAND_PBA_INVALID) && (pba_to_plane(old) < PLANE_NUM) && (pba_to_block(old) >= L2P_LOG_BLOCK0))
     {
         WORD g = ftl_pba_gblock(old);
@@ -1737,7 +1737,7 @@ md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_s *dir, md_dir_ckpt_prepare_
         return MD_DIR_CKPT_CLEAN; /* 无变更早退：目录检查点每写一条都消耗池内槽位，空转会让池无谓轮转 */
     }
 
-    // 单飞（RISK-MD-06）：CP job 与 metadata job 都会写目录检查点，两者共享
+    // 单飞：CP job 与 metadata job 都会写目录检查点，两者共享
     // `dir_ckpt_sequence` / `dir_ckpt_write_idx`。并发 prepare 会把两个不同 sequence 的
     // 记录写进**同一个槽**（16 页按时间交错）⇒ 整条记录校验失败 ⇒ 开机 locate 只能
     // 回退到更旧的记录 ⇒ 目录陈旧 ⇒ 指向已回收的 L2P 日志块。同一时刻只允许一个
@@ -1826,7 +1826,7 @@ void md_dir_ckpt_page(const md_dir_cache_s *dir, DWORD seq, BYTE chunk, md_dir_c
     page->chunk_count    = DIR_CKPT_PAGE_COUNT;
     page->entry_count    = n;
     page->layout_version = FTL_MEDIA_LAYOUT_VERSION;
-    // 填充时刻的目录代数（RISK-MD-06）：整条 record 的 16 页必须同代，否则加载侧作废
+    // 填充时刻的目录代数：整条 record 的 16 页必须同代，否则加载侧作废
     // 整条记录。页在写的那一刻才取值 ⇒ 写入期间若有 commit，这一页与先写的页代数不同。
     page->dirty_gen      = dir->ckpt.dirty_gen;
 
@@ -1996,7 +1996,7 @@ static SSD_CODE_FAST void md_load_assemble(md_dir_cache_s *dir, const md_ring_s 
 {
     md_dir_ckpt_page_s page;
     const BYTE         plane_count = md_ring_plane_count(ring->plane_mask);
-    DWORD              dgen        = 0U; /* chunk 0 主半的目录代数（RISK-MD-06）*/
+    DWORD              dgen        = 0U; /* chunk 0 主半的目录代数*/
     BOOL               dgen_set    = false;
 
     for (BYTE chunk = 0U; chunk < DIR_CKPT_PAGE_COUNT; chunk++)
@@ -2021,7 +2021,7 @@ static SSD_CODE_FAST void md_load_assemble(md_dir_cache_s *dir, const md_ring_s 
                 continue; /* 该副本不可信：试另一个 plane；都失败则保留基础层的"未映射" */
             }
 
-            // 防御性二次校验（RISK-MD-06）：主半各页必须同代。探针已整条校验过，
+            // 防御性二次校验：主半各页必须同代。探针已整条校验过，
             // 这里再挡一次 —— 混代页宁可不加载（回落"未映射"），也不能把两个代次的
             // 条目拼成一份目录。
             if (backup == false)
@@ -2478,7 +2478,7 @@ void md_pool_service(ftl_ctx_s *ftl)
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * 九、L2P region 写回槽位账本（RISK-MD-06）
+ * 九、L2P region 写回槽位账本
  *
  * ⚠ 本节的函数**全部标 `SSD_CODE_FAST`（内部 Flash）**：本文件其余部分整份进
  *   `.ssd_code_high`（ITCM，64 KB 硬上限），而这里每次 2 KiB 写回只调一次、
@@ -2647,7 +2647,7 @@ SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
     // 该 plane 的当前块已写满且无活 region：先从"当前写块"身份上摘下来，否则
     // mark_all 会把它永远排除；日志区没有空闲块时就再也换不了块（死等）。
     // ⚠ 有在飞写回的槽位时不能摘身份：槽里的数据还没进 Directory，l2p_live 为 0
-    //   不代表块已空（RISK-MD-06）——摘掉后它会被 mark_all 登记并擦除。
+    //   不代表块已空——摘掉后它会被 mark_all 登记并擦除。
     if (dir->cur.valid[plane] && (dir->cur.page[plane] >= PAGES_PER_BLOCK) && (dir->l2p_live[dir->cur.block[plane]] == 0U))
     {
         const WORD gblock = dir->cur.block[plane];
@@ -2693,7 +2693,7 @@ SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
 
     // 旧当前块可能已被搬空（压缩只搬活 region，零活块不会成为 victim）：
     // 换走后它再也不会被追加，登记给后台回收。
-    // ⚠ 有在飞写回槽位时不能登记（RISK-MD-06）：槽里的数据还没进 Directory。
+    // ⚠ 有在飞写回槽位时不能登记：槽里的数据还没进 Directory。
     if (had_cur && (dir->l2p_live[old_cur] == 0U) && (md_slot_reserved(dir, old_cur) == false))
     {
         (void)md_reclaim_mark(dir, old_cur);
@@ -2702,7 +2702,7 @@ SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
     // 抗碎片：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好够把多个稀疏
     // victim 一次搬空。触发判据是**元数据空间水位**（live 日志块数），不是用户
     // Free Pool——旧实现只在 free≤32 时压，运行期大部分时间不压，日志碎片从理想
-    // 32 块一路涨到上千块，把用户容量吃光（RISK-MD-07 / RISK-CAP-02）。
+    // 32 块一路涨到上千块，把用户容量吃光。
     // 只**登记请求**，本次不发放槽位：调用者收到 NAND_PBA_INVALID 返回 FTL_AGAIN，
     // 下轮重试；若 job 已起则继续让路直到压缩走完。
     if (md_live_block_count_get(dir) > L2P_LOG_COMPACT_TRIGGER)

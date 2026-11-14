@@ -198,7 +198,7 @@ static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, BOOL full, DWOR
  * @brief 介质固定元数据区里是否已有合法 FTL 页
  *
  * 只读；只在 bbt_load 失败时调用，用于区分空片与已格式化介质。判空走解码
- * 路径（RISK-IF-15），不能用 RAW 读。
+ * 路径，不能用 RAW 读。
  *
  * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）
  * @return true 已格式化过；false 空片
@@ -225,7 +225,7 @@ BOOL bbt_medium_has_ftl_data(alc_s *alloc)
     }
 
     // 固定元数据区被擦、用户区仍有数据：只查元数据区会把介质误判为空片，
-    // 随后的出厂扫描会覆盖已失效的坏块图（RISK-BBT-05）。抽样用户区 Page 0，
+    // 随后的出厂扫描会覆盖已失效的坏块图。抽样用户区 Page 0，
     // 用 `ftl_page_is_blank` 判「是否从未编程」——抽样而不是全扫：本函数只在
     // BBT 载入失败时执行，全扫 4096 块 × 一次 NAND 读在开机路径上不可接受。
     // 残留风险：用户数据恰好全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质
@@ -358,7 +358,7 @@ static void bbt_factory_scan(alc_s *alloc)
     alloc->bbt.dirty = false;
 
     // 逐块扫描（**含 Block 0**）：不再假设「出厂首块必有效」——该假设没有仓内
-    // 原文出处（RISK-BBT-21）。多付 1 次列读换掉一个无依据的器件断言；若 Block 0
+    // 原文出处。多付 1 次列读换掉一个无依据的器件断言；若 Block 0
     // 确有出厂坏块标记，它会像其它块一样被标坏，由 shared spare 补位。
     for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
@@ -652,7 +652,7 @@ ftl_status_e bbt_save(alc_s *alloc)
     }
 
     // 同步路径与异步 job 共用同一个 write_idx / sequence：在飞时再写会二次编程同一槽
-    // （RISK-BBT-20）。启动路径没有在飞 job；运行期只有 CLI format 能撞上——debug 停在
+    // 。启动路径没有在飞 job；运行期只有 CLI format 能撞上——debug 停在
     // 现场，release 拒绝本次 save（调用者按失败处理，job 完成后再试）。
     // 这里同时复用了 H14 的口径：后果是静默介质破坏（两条 record 互相 AND），
     // 所以 ASSERT 之外必须有运行期拒绝。
@@ -690,7 +690,7 @@ ftl_status_e bbt_save(alc_s *alloc)
 
     // 快照本条 record 的 dirty 代际：同步写的等待泵里可能派发完成回调并再次标坏
     // （host 写失败），那条 record 不含新块 ⇒ 不能清 dirty（与异步路径
-    // bbt_write_complete 对称，RISK-BBT-20）。
+    // bbt_write_complete 对称）。
     const DWORD gen = alloc->bbt.dirty_gen;
 
     // record 格式与异步路径 bbt_write_submit **必须逐字相同**（两条写路径共用同一个
@@ -887,7 +887,7 @@ static ftl_status_e bbt_write_submit(alc_s *alloc)
  * @brief BBT 后台持久化入口（提交即返回）
  *
  * 单飞行；换块先异步擦再写。sequence 在起步时自增，续跑不再自增；擦失败 ⇒
- * 标坏该 ring 块并重建候选池（RISK-BBT-19），dirty 保留等下一次 kick。
+ * 标坏该 ring 块并重建候选池，dirty 保留等下一次 kick。
  *
  * @param alloc Allocator 上下文
  */
@@ -1034,7 +1034,7 @@ static BOOL bbt_ring_block_mark_bad(alc_s *alloc)
 /**
  * @brief 擦完成的服务函数
  *
- * 成功 ⇒ 起写 record；失败 ⇒ 标坏该 ring 块并回 IDLE（RISK-BBT-19：永久重试同一块
+ * 成功 ⇒ 起写 record；失败 ⇒ 标坏该 ring 块并回 IDLE（永久重试同一块
  * 会让 dirty 永不落盘）。
  *
  * @param alloc      Allocator 上下文
@@ -1047,7 +1047,7 @@ static void bbt_erase_complete(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_status_
     {
         LOGE(LOG_TAG_BBT "ring block erase failed status=0x%02x — 标坏该块并重建候选池\r\n", completion->status);
 
-        // 擦不掉的 ring 块不能重试（RISK-BBT-19）：标坏两个镜像 plane ⇒
+        // 擦不掉的 ring 块不能重试：标坏两个镜像 plane ⇒
         // pools->dirty ⇒ md_pool_service 重建候选池；下一次 job 在新池上重新定位。
         // 若重建也凑不齐（metadata 区耗尽），md_pool_service 会置 rebuild_required 并
         // 在日志里显性化，不会静默循环。

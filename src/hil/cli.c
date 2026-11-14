@@ -202,7 +202,7 @@ static volatile BYTE         g_wp_done[FTL_LBA_PER_PAIR];
 static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
 
 /* 在飞组数：wp 绕过 CLI 的 pending gate（要在飞多组），但 g_wp_buf 的切片
- * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp（RISK-CLI-03）。 */
+ * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp。 */
 static BYTE g_wp_inflight;
 
 /* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
@@ -546,7 +546,7 @@ static void uart_cli_wp(int argc, char *argv[])
 
     /* wp 只绕过「wp 自身」的 busy 闸门（要在飞多组），仍须让路给其他 CLI 请求
      * 与 USB host 请求；上一批 wp 未走完时 g_wp_buf 仍被未下发的 run 持有 ⇒
-     * 拒绝（RISK-CLI-03 / RISK-CLI-08）。 */
+     * 拒绝。 */
     if (cli_host_busy() || usb_msc_host_busy())
     {
         UART_CLI_WRITE("error: busy (USB host request / previous wp in flight)\r\n");
@@ -601,7 +601,7 @@ static void uart_cli_wp(int argc, char *argv[])
 
     /* 逐组提交（不查 pending gate）：k 个组同时在飞 ⇒ 窗口填满时合并成 1 次编程。
      * 各组 complete_flag/status_out 指向静态数组，完成前始终有效；on_complete
-     * 只递减在飞计数，保护 g_wp_buf（RISK-CLI-03）。 */
+     * 只递减在飞计数，保护 g_wp_buf。 */
     for (i = 0U; i < k; i++)
     {
         ftl_io_req_s req;
@@ -1270,7 +1270,7 @@ static void uart_cli_bbt(int argc, char *argv[])
     }
 
     /* 全片擦除会抹掉元数据：host 有在飞请求时拒绝，避免它的完成回调落到
-     * 正在擦/重写的介质上（RISK-CLI-02）。 */
+     * 正在擦/重写的介质上。 */
     if (do_erase == true)
     {
         if (cli_host_busy() || usb_msc_host_busy())
@@ -1308,7 +1308,7 @@ static void uart_cli_bbt(int argc, char *argv[])
             }
 
             /* 全片擦除会抹掉 BBT 池：先等在飞的 BBT 异步写完成，避免它在擦净后
-             * 又把一条 record 写回已擦空的块（RISK-BBT-20 的同类重叠）。 */
+             * 又把一条 record 写回已擦空的块（同类重叠）。 */
             for (WORD spin = 0U; (ftl->alloc.bbt.handle.waiting == true) && (spin < 1000U); spin++)
             {
                 ftl_service_pump();
@@ -1343,7 +1343,7 @@ static void uart_cli_bbt(int argc, char *argv[])
  */
 static void uart_cli_format(int argc, char *argv[])
 {
-    /* host 冲突由 dispatcher 的 UART_CLI_FLAG_BUSY 单点拒绝（RISK-CLI-02）。 */
+    /* host 冲突由 dispatcher 的 UART_CLI_FLAG_BUSY 单点拒绝。 */
     BYTE ch;
     BYTE ce;
     BYTE lun;
@@ -1391,7 +1391,7 @@ static void uart_cli_format(int argc, char *argv[])
         }
 
         /* 格式化会重写 BBT 池：先等在飞的 BBT 异步写完成，避免 sync save 与它
-         * 二次编程同一槽（RISK-BBT-20；bbt_save 也会拒绝这种重叠，这里把正常
+         * 二次编程同一槽（bbt_save 也会拒绝这种重叠，这里把正常
          * 路径等干净，而不是让 format 直接失败）。泵是全局的，顺便推进其它实例。 */
         for (WORD spin = 0U; (ftl->alloc.bbt.handle.waiting == true) && (spin < 1000U); spin++)
         {
@@ -1638,7 +1638,7 @@ static void uart_cli_stat(int argc, char *argv[])
         (void)LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
     }
 
-    usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
+    usb_msc_io_stats_print(); /* WRITE(10) 分块直方图 */
 }
 
 /**
@@ -2105,7 +2105,7 @@ static void uart_cli_pending_poll(void)
  * 长语法串外提：AlignArrayOfStructures 按最长单元格对齐整表，160 字符的 test
  * 语法留在行内会把全表撑到 200+ 列。test 的选项是 munit 适配层既有契约，原样保留。
  *
- * bbt 的语法随构建档切换：release 的 help 不再宣传不可用的子命令（RISK-CLI-04）。
+ * bbt 的语法随构建档切换：release 的 help 不再宣传不可用的子命令。
  */
 #define UART_CLI_SYNTAX_TEST "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]"
 #if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
@@ -2397,6 +2397,15 @@ static void uart_cli_test(int argc, char *argv[])
     const log_level_e saved = log_get_level();
     char             *filtered[UART_CLI_MAX_ARGUMENTS];
     int               filtered_argc = 0;
+
+    // UT 假定宿主与后台都静止：host 在飞请求会插进 FC 队列，pure teardown 的
+    // `ftl_op_req_count()==0` 断言必红（现场 sq_head_op=0x31 是 host 的 cache 读）。
+    // 运行前要求操作者拔 USB；这里至少拦住「请求正在飞」这一种。
+    if ((cli_host_busy() == true) || (usb_msc_host_busy() == true))
+    {
+        UART_CLI_WRITE("error: host I/O in flight — unplug USB / stop host access before 'test'\r\n");
+        return;
+    }
 
     log_set_level(uart_cli_test_project_level(argc, argv));
 

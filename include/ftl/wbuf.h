@@ -37,6 +37,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* 取不到目的页对的兜底上限：连续失败超过该时长即判真无块，按 FTL_ERROR 结算
+ * host 写，避免 host 命令永远等（USB BOT 超时 → 设备消失）。按容量上界，
+ * 正常卷写满时 free+OP 仍有余量，触发说明真的无块可用（或 OP 被异常耗尽）。 */
+#define WBUF_ALLOC_STALL_TIMEOUT_MS (1000U)
+
 /* ── 类型 ── */
 
 /* 触发类型（wb_handle 的事件）。 */
@@ -70,6 +75,11 @@ typedef struct WB_HANDLE_S
     DWORD   flushed_pages;
     DWORD   drop_count;
     int32_t error;
+
+    /* 取不到页对的首次时刻（0 = 本期未失败）。连续失败超过
+     * `WBUF_ALLOC_STALL_TIMEOUT_MS` ⇒ 判真无块，按 FTL_ERROR 结算 host 写，
+     * 避免 host 命令永远等（USB BOT 超时/设备消失）。 */
+    DWORD alloc_fail_ms;
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
     alc_s                   *alloc;

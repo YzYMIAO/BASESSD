@@ -79,7 +79,7 @@
  * fc_nand_enable_high_speed() 切到 CONFIG_NAND_TIMING_MODE 并重配 FMC 时序。
  */
 #ifndef CONFIG_NAND_TIMING_MODE
-/* 3.3V 正式配置。Mode 5 运行期写后读回 UNC 的问题仍在查（RISK-NAND-06）；
+/* 3.3V 正式配置。Mode 5 运行期写后读回 UNC 的问题仍在查；
  * 对照实验可改 0（低速）或 4（Mode 4），但改完必须重新上板验证，不得默认切换。 */
 #    define CONFIG_NAND_TIMING_MODE (5U)
 #endif

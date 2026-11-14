@@ -228,7 +228,7 @@ void ftl_ut_clock_advance_ms(DWORD ms)
  * ══════════════════════════════════════════════════════════════════════ */
 
 /* 运行期容量尾窗起点：host_lba_max 已扣实际坏块，不能再用编译期 FTL_LBA_MAX
- * （否则尾窗会落到主机可见容量之外，RISK-UT-22）。 */
+ * （否则尾窗会落到主机可见容量之外）。 */
 DWORD ftl_ut_lba_base(void)
 {
     const DWORD max = ssd_controller_host_lba_max(&g_ctrl);

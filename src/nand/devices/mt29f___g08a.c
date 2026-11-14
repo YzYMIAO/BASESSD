@@ -123,7 +123,7 @@ static const nand_fmc_timing_s g_nand_timing_3v3_mode5 = {
  *   HOLD     * tHCLK >= max(tCH,tCLH,tALH)
  *   HiZ      * tHCLK >= max(tCS,tCLS,tALS) + (tWP - tDS)
  * 按实际 fmc_hz 换算（不能硬编码 5ns/4545ps）。Mode 4 表实测 HOLD/HiZ 各短 1 周期
- * 会导致命令/地址采样失败（RISK-NAND-03），故使用 Table 29/31 的 3.3V Mode 5 AC
+ * 会导致命令/地址采样失败，故使用 Table 29/31 的 3.3V Mode 5 AC
  * 参数作为基准。
  */
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)

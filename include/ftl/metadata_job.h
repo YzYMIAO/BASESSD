@@ -110,7 +110,7 @@ static inline BOOL md_handle_is_compacting(const md_dir_cache_s *dir)
  *
  * @note 在飞槽位（`md_slot_reserved`）必须挡住：写命令发出到 commit 之间，槽里的
  *       数据还没进 Directory，`l2p_live` 看不到；此时擦块会把在飞数据连同落点一起
- *       丢掉，commit 后 Directory 指向已擦页（RISK-MD-06）。
+ *       丢掉，commit 后 Directory 指向已擦页。
  */
 static inline BOOL md_log_block_is_idle(const md_dir_cache_s *dir, WORD g)
 {

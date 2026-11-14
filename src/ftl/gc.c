@@ -46,18 +46,6 @@
 #define GC_VICTIM_MAX_VALID_PCT   (80U) /* 空闲补池：valid 占比 > 80% 视为无收益 */
 #define GC_EMERGENCY_MIN_GAIN_PCT (1U)  /* 紧急水位：可回收占比 < 1% 视为无收益 */
 
-/* GC 工作区预留：目的 SB 需要一个 **pair**（每 plane 一块），搬移期间这块空间
- * 先被占用、victim 擦除后才归还。预留 2 个 pair 覆盖「当前 job + host/CP 余量」。
- *
- * 出处：SPDK FTL（CSAL）在 device formation 时把 spare 块从可用地址空间扣掉，
- * 专供 GC 缓冲（`docs/reference/README.md` A4 / `docs/reference/pages/spdk_ftl.html`）。
- * 判据按**最饿 plane 的 free**计算（不含 OP）：OP 是 GC 的兜底工作区，若把它算进
- * 可自由消耗的空间，GC 会把 free 抽到 0 并饿死 CP/L2P/host（满盘 boot GC 现场）。
- *
- * 低于该预留时只允许回收**空块**（不需要目的页）；搬 valid 数据会继续消耗 free，
- * 让 host/CP/L2P 拿不到块。 */
-#define GC_RESERVE_PAIRS (2U)
-
 /* ── 1. 共用原语 ── */
 
 /**
@@ -103,7 +91,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 
         if (ret != FTL_OK)
         {
-            // RISK-IF-17：只有「未提交」才由调用者 release；已提交但超时时命令仍在
+            // 只有「未提交」才由调用者 release；已提交但超时时命令仍在
             // FC/NAND，迟到完成由 ftl_op_drain 的 missing-request 分支释放。
             if (submitted == false)
             {
@@ -254,7 +242,7 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
     const super_block_s *victim         = NULL;
     const super_block_s *victim_any     = NULL;
 
-    // plane 平衡偏好（本仓自拟，RISK-ALLOC-09）：成对条目回收后两侧各 +1；单 plane 条目
+    // plane 平衡偏好（本仓自拟）：成对条目回收后两侧各 +1；单 plane 条目
     // 只补一侧。某 plane 低于单 plane 水位且两 plane 不均衡时，优先「成对条目 + 饥饿 plane
     // 的单条目」，避免 GC 把空闲块堆到一侧导致成对分配失败。
     BYTE starved = PLANE_NUM; /* == PLANE_NUM ⇒ 两 plane 持平，无偏好 */
@@ -283,19 +271,6 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
         if ((fmin == fmax) || (fmin >= FREE_POOL_PLANE_LOW))
         {
             starved = PLANE_NUM;
-        }
-    }
-
-    // 工作区是否够搬 valid 数据：按**最饿 plane 的 free** 判定（成对分配要求每 plane
-    // 各有一块；OP 只能由 GC 目的页兜底，不能当成可自由消耗的余量）。
-    BOOL relocate_ok = true;
-
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
-    {
-        if (alc_free_get_count(alloc, p) < GC_RESERVE_PAIRS)
-        {
-            relocate_ok = false;
-            break;
         }
     }
 
@@ -334,15 +309,10 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
             best_pct = pct;
         }
 
-        // 工作区低于预留：只允许回收空块（不需要目的页）。搬 valid 数据会继续
-        // 消耗 GC 自己的工作区，free/OP 抽干后每个 job 只能 abort。
-        if ((relocate_ok == false) && (valid_cw != 0U))
-        {
-            continue;
-        }
-
-        // 低水位净收益闸门：净增 < 1 块不搬（见 under_pressure 的说明）。
-        if (under_pressure == true)
+        // 低水位净收益闸门：多 plane 条目净增 < 1 块不搬（见 under_pressure 的说明）。
+        // 单 plane 条目例外：它是恢复路径的退化产物，搬走 valid 只能换来净增 0，
+        // 但回收它能把 plane 恢复成可再分配的块；低水位下拒绝它会让 GC「有候选却不干活」。
+        if ((under_pressure == true) && (st.plane_count > 1U))
         {
             const DWORD dst_blocks = ((valid_cw + FTL_CW_PER_BLOCK - 1U) / FTL_CW_PER_BLOCK);
 

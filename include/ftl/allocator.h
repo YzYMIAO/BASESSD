@@ -53,7 +53,7 @@ typedef enum ALC_SUPER_ALLOCATOR_MODE_E
 #define FREE_POOL_EMERGENCY (8U)
 
 /* 单 plane 空闲水位（本仓自拟）。成对分配要求「每个 plane 各一块」——只看总水位会出现
- * 「free=264 但一侧为 0」的分配失败（板端 2026-10-31 RISK-ALLOC-09）。任一 plane 低于
+ * 「free=264 但一侧为 0」的分配失败（板端 2026-10-31）。任一 plane 低于
  * 该值即视为饥饿，触发 GC 并让 victim 选择优先回收该 plane。
  * 取 4：够一次成对分配 + GC 目的页对 + CP/journal 的短时余量；经验值，不是行业标准。 */
 #define FREE_POOL_PLANE_LOW (4U)
@@ -341,7 +341,7 @@ static inline WORD alc_free_get_count(const alc_s *alloc, BYTE plane)
 /**
  * @brief 最饥渴 plane 的空闲块数（成对分配真正可用的余量）
  *
- * 总 `free_count` 不能代表成对分配能力——一侧为空即无法分配（RISK-ALLOC-09）。
+ * 总 `free_count` 不能代表成对分配能力——一侧为空即无法分配。
  * 诊断 / 水位判据都看这个值；只用它做观测，不替代 per-plane 判定。
  *
  * @param alloc 分配器
@@ -579,7 +579,7 @@ alc_super_pba_state_e alc_super_open_get_pba_state(const alc_s *alloc, BYTE temp
  *
  * 用途：写序列跨 block 续写的准入——吃完当前 SB 之前必须确认下一个 SB 开得出来，
  * 否则序列会停在「有打开的设备序列、没有可提交的数据页」，门控挡住 GC、padding END
- * 也无页可分配（RISK-CACHE-15 的盘满例外会中止一条已回执的序列）。
+ * 也无页可分配（盘满例外会中止一条已回执的序列）。
  *
  * @param alloc 分配器
  * @param mode  与即将使用的 `alc_super_open_alloc_pair` 相同的策略
@@ -665,7 +665,7 @@ ftl_status_e alc_super_close(alc_s *alloc, BYTE temperature);
  *         FTL_BLOCK_NO_SB = 列表满（release 兜底），条目被拒绝
  *
  * @note 全部 plane 都不可用（BAD / 越界）时**不追加条目**（避免 plane_count==0
- *       的死条目泄漏列表槽，RISK-ALLOC-15），返回当前 count；调用者只应判
+ *       的死条目泄漏列表槽），返回当前 count；调用者只应判
  *       `== FTL_BLOCK_NO_SB`，不得把它当有效下标使用。
  */
 WORD alc_super_closed_add(alc_s *alloc, const WORD plane_blocks[PLANE_NUM], BYTE temperature);
@@ -683,7 +683,7 @@ void alc_super_closed_remove(alc_s *alloc, WORD closed_idx);
  *
  * GC/WL/predict 逐 plane 擦 victim。若擦完一个 plane 后 job 中止，旧条目仍引用
  * 已归还 Free Pool 的块；该块被重新分配并再次 Closed 后会被旧条目误认
- * （RISK-GC-04）。擦完即摘除，条目只在仍有未处理 plane 时存在。
+ * 。擦完即摘除，条目只在仍有未处理 plane 时存在。
  *
  * @param alloc  分配器
  * @param plane  plane 号
@@ -783,7 +783,7 @@ static inline void alc_bst_get_wear(const alc_s *alloc, WORD gblock, bst_wear_s 
  * @brief BBT 状态谓词
  *
  * 纯 getter：不检查值域、不隐藏数组，但跨模块读的是 allocator 的 BBT 子状态，
- * 按 RISK-ALLOC-03 的判定保留访问器；放头文件 static inline，避免每次调用跨 TU。
+ * 按 的判定保留访问器；放头文件 static inline，避免每次调用跨 TU。
  *
  * @param alloc 分配器
  * @return true = 最新 BBT record 带 FORMAT_IN_PROGRESS 标志。

@@ -420,7 +420,7 @@ BOOL alc_spare_pop(alc_s *alloc, BYTE plane, WORD *out_gblock)
 {
     // 池内被运行期标坏的块直接丢弃（与 alc_free_refill_from_op 同口径）：
     // 返回一个 BAD 块会让调用者 alc_free_push 静默丢弃它，表面成功、实际没补到
-    // 块（RISK-ALLOC-16）。
+    // 块。
     while (alloc->spare_count[plane] != 0U)
     {
         alloc->spare_count[plane]--;
@@ -491,7 +491,7 @@ BOOL alc_spare_refill_from_free(alc_s *alloc, BYTE plane)
  *
  * why：写序列跨 block 续写时，必须在**吃完当前 SB 之前**确认下一个开得出来。
  * 否则序列会停在「设备序列已打开、没有可提交的数据页」——序列门控挡住 GC，
- * padding END 也无页可分配（RISK-CACHE-15 的盘满例外会中止一条**已回执**的序列）。
+ * padding END 也无页可分配（盘满例外会中止一条**已回执**的序列）。
  *
  * @param alloc 分配器
  * @param mode  与即将使用的 `alc_super_open_alloc_pair` 相同的策略
@@ -852,10 +852,10 @@ BOOL alc_super_prepare_wl_destination(alc_s *alloc)
  *         FTL_BLOCK_NO_SB = 列表满，条目被拒绝
  *
  * @note live 标志与列表副本必须在同一函数内完成——只改副本会让 Open SB
- * 继续被分配、或被重复关闭（RISK-ALLOC-01）。调用者必须检查失败码；列表满
+ * 继续被分配、或被重复关闭。调用者必须检查失败码；列表满
  * 属结构异常，不能静默吞掉。
  * @note 全部 plane 都不可用（BAD / 越界）时不追加条目（避免 plane_count==0 的
- * 死条目泄漏列表槽，RISK-ALLOC-15），返回当前 count —— 调用者只判 `== NO_SB`。
+ * 死条目泄漏列表槽），返回当前 count —— 调用者只判 `== NO_SB`。
  */
 static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb)
 {
@@ -906,7 +906,7 @@ static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb)
 
     // 全部 plane 都已被过滤（BAD / 越界）：没有可回收的块，**不产生条目**。
     // 追加会让 plane_count==0 的条目永远选不中、也永远没人移除 ⇒ closed 列表槽
-    // 泄漏（RISK-ALLOC-15）。SB 仍算已关闭；返回当前 count，调用者只与
+    // 泄漏。SB 仍算已关闭；返回当前 count，调用者只与
     // FTL_BLOCK_NO_SB 比较（此时返回值不是有效下标）。
     {
         BOOL any_plane = false;
@@ -1067,7 +1067,7 @@ void alc_super_closed_remove(alc_s *alloc, WORD closed_idx)
  * @brief 从 Closed 条目摘除一个已擦除/已标坏的 plane 块
  *
  * GC/WL/predict 逐 plane 擦 victim。擦完即摘除，条目只在仍有未处理 plane 时
- * 存在（RISK-GC-04）；本函数只同步 Closed 条目与 sb_id，不碰池。
+ * 存在；本函数只同步 Closed 条目与 sb_id，不碰池。
  *
  * @param alloc 分配器
  * @param plane plane 号

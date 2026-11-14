@@ -46,7 +46,7 @@
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl_type.h"
 #include "onfi_1_0.h"
-#include "watchdog.h" /* storage_wdg_kick：长同步操作的有界喂狗（RISK-CLI-01） */
+#include "watchdog.h" /* storage_wdg_kick：长同步操作的有界喂狗 */
 
 #include <string.h>
 
@@ -250,7 +250,7 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM]
     // （见 ftl_issue_subop / wb_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT。
 
     // 空位图必须在算 first_plane **之前**拒绝：否则 first_plane == PLANE_NUM，
-    // release 下下面的 ASSERT 全部裁空 ⇒ 读 pba[PLANE_NUM] 越界（RISK-IF-18）。
+    // release 下下面的 ASSERT 全部裁空 ⇒ 读 pba[PLANE_NUM] 越界。
     if (cw_bitmap == 0U)
     {
         return FTL_ERROR;
@@ -551,7 +551,7 @@ ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DW
     for (;;)
     {
         // 长同步操作（CLI format / bbt --erase / 出厂扫描）按自旋节拍上报进展并喂狗：
-        // 这些调用期间主循环被占住，timer 任务不转（RISK-CLI-01）。
+        // 这些调用期间主循环被占住，timer 任务不转。
         storage_wdg_kick();
 
         (void)fc_service();
@@ -579,7 +579,7 @@ ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DW
         if (expired)
         {
             // request 表项摘除（栈上 waiter 不能留给迟到完成）；命令**保留**在 FC，
-            // 由 drain 的 missing-request 分支在迟到完成时释放（RISK-IF-17）。
+            // 由 drain 的 missing-request 分支在迟到完成时释放。
             ftl_op_req_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
@@ -597,7 +597,7 @@ ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DW
  * @brief 同步提交等待 + 失败时的命令归属收尾（本文件内唯一关口）
  *
  * 把「提交失败 ⇒ 调用者 release / 已提交但超时 ⇒ 留给 drain release」这条规则
- * 收在一处，避免每个 `ftl_sync_*` 各自决定（RISK-IF-17）。
+ * 收在一处，避免每个 `ftl_sync_*` 各自决定。
  *
  * @param cmd        已建链命令
  * @param status_out 完成状态（可 NULL；仅 FTL_OK 时有效）
@@ -785,7 +785,7 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
 /**
  * @brief 同步 RAW 读（跳过 ECC）
  *
- * 刻意不判 NAND 失败：坏页也交出原始数据；不是判空手段（RISK-IF-15）。
+ * 刻意不判 NAND 失败：坏页也交出原始数据；不是判空手段。
  *
  * @param pba    目标页 PBA
  * @param buffer 输出：每 CW 的 USER 512B
@@ -1201,7 +1201,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
 
     // cache program 的 opcode 按两 plane 定尺；单 plane 会让 NAND 侧多 plane handler
     // 无条件遍历 PLANE_NUM 行地址、凭空造出回退地址（见 ftl_cmd_validate_cw_bitmap 的
-    // 注释）。release 下也拒绝，不只 ASSERT（RISK-IF-18）。
+    // 注释）。release 下也拒绝，不只 ASSERT。
     ASSERT((cache_op == false) || (nplanes == PLANE_NUM));
     if ((cache_op == true) && (nplanes != PLANE_NUM))
     {
@@ -1231,7 +1231,7 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
             const BOOL same_die = (pba_to_ch(pba[p]) == pba_to_ch(first_pba)) && (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) && (pba_to_lun(pba[p]) == pba_to_lun(first_pba));
 
             // 一条命令只能落在一个 die；跨实例 PBA 会被路由到其中一个 die，另一个
-            // plane 的地址属于别的实例 ⇒ release 下也拒绝（RISK-IF-18）。
+            // plane 的地址属于别的实例 ⇒ release 下也拒绝。
             ASSERT(same_die);
             if (same_die == false)
             {

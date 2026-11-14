@@ -768,7 +768,7 @@ static void spd_ftl_note_data_error(BOOL write, DWORD chunk, const spd_ftl_req_s
                          slot->buf[offset],
                          expected);
 
-    /* 诊断（RISK-CACHE-26）：当场问一次 L2P——映射丢了（INVALID）还是映射在但页内容为 0。
+    /* 诊断：当场问一次 L2P——映射丢了（INVALID）还是映射在但页内容为 0。
      * 只在失败路径上执行；`l2p_read` 可能触发一次加载，属可接受的代价。 */
     {
         ftl_ctx_s *ftl = g_ctrl.ftl[0];

@@ -427,7 +427,7 @@ ftl_status_e cp_initial_record_write(ftl_ctx_s *ftl);
 /**
  * @brief 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。
  * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
- * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
+ * 也按 LOG 编码（否则下次开机快照校验整份失败）。
  * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。
  *
  * @param alloc   allocator（BST 与 OP/Spare 池归属的来源）

@@ -26,6 +26,7 @@
 #include "l2p_cache.h"
 #include "migrate.h"
 #include "pending.h"
+#include "timer.h" /* platform_now_ms（后台让行超时） */
 #include "wbuf.h"
 
 #include <string.h>
@@ -122,11 +123,11 @@ static BOOL cache_read_probe_pair(const ftl_ctx_s *ftl, DWORD base, DWORD pair_p
         }
         if (ftl_cache_wr_lookup(ftl, l, &wr_pba) == true)
         {
-            return false; /* 已编程未确认（RISK-CACHE-27）：真值不在 L2P，走普通读 */
+            return false; /* 已编程未确认：真值不在 L2P，走普通读 */
         }
         if (ftl_cache_wr_failed_covers(ftl, l) == true)
         {
-            return false; /* 已判失败未撤销（RISK-CACHE-28）：交给普通读报 IO_ERROR */
+            return false; /* 已判失败未撤销：交给普通读报 IO_ERROR */
         }
 
         DWORD              p  = NAND_PBA_INVALID;
@@ -354,7 +355,7 @@ static DWORD cache_read_collect(const cache_read_req_s *req, DWORD pba[FTL_CACHE
 static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req, DWORD pba[FTL_CACHE_READ_MAX_PAIRS][PLANE_NUM], BOOL start_seq, BOOL end_seq)
 {
     // host cache 读也走同一预算：否则 NTFS 元数据读会吃掉给后台留的命令/buffer，
-    // 与写路径一样把池打成 cmd=0/buf=0（RISK-HOST-18）。false ⇒ 调用者按 AGAIN 重试。
+    // 与写路径一样把池打成 cmd=0/buf=0。false ⇒ 调用者按 AGAIN 重试。
     if (ftl_fc_host_budget_ok_n(b->n_pairs) == false)
     {
         return false;
@@ -519,6 +520,35 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_s *req, DW
  * @param used   输出：消费的 LBA 数
  * @return OK / DECLINED / AGAIN / ERROR
  */
+/**
+ * @brief 后台让行：host 此刻是否必须暂缓开新序列
+ *
+ * 后台（L2P 加载等）被门控拒绝时置 `yield_pending`，host 连续流不能立刻开新窗口
+ * 把门控重新占住，否则后台会一直被拒到调用者超时。超时（后台自身提交不出去）
+ * 则忽略让行，避免后台故障饿死 host。
+ *
+ * @param seq cache 序列状态
+ * @return true = 本轮不要开新序列
+ */
+static BOOL cache_seq_yielded(ftl_cache_seq_s *seq)
+{
+    if (seq->yield_pending == false)
+    {
+        return false;
+    }
+
+    const DWORD now_ms = platform_now_ms();
+
+    if ((now_ms != 0U) && (seq->yield_ms != 0U) && ((now_ms - seq->yield_ms) > FTL_CACHE_SEQ_YIELD_MAX_MS))
+    {
+        seq->yield_pending = false;
+        seq->yield_ms      = 0U;
+        return false;
+    }
+
+    return true;
+}
+
 ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used)
 {
     ASSERT(ftl != NULL);
@@ -563,6 +593,11 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, v
 
     // 新序列至少 2 个 pair；**续序列允许 1 个 pair 的尾巴**（单条 LAST 收尾）。
     const BOOL starting = (seq->active == false);
+
+    if ((starting == true) && (cache_seq_yielded(seq) == true))
+    {
+        return FTL_CACHE_READ_AGAIN; /* 后台让行：本轮不开新序列，也不退回普通读抢门控 */
+    }
 
     // 同写路径：起点未 pair 对齐的 host 段不开序列（跨段续接点必然对不上）。
     if ((starting == true) && (ftl_lba_is_pair_aligned((DWORD)g->lba) == false))
@@ -616,7 +651,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, v
 
             if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
             {
-                // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
+                // 只认**在飞命令**（启动失败 ≠ 有进展）
                 ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
                 ftl->cache_stream.read_declines++;
                 return FTL_CACHE_READ_AGAIN;
@@ -681,7 +716,7 @@ ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, v
         {
             // 续窗口连第一个 pair 都收不到：无法给已打开的序列发 LAST。
             // 放弃序列状态，下轮以新 START 重来（设备侧未收尾的序列由 START 重置，
-            // RISK-IF-09）。不放弃的话普通读会被门控永久挡回。
+            // ）。不放弃的话普通读会被门控永久挡回。
             ftl_cache_seq_release(ftl);
         }
         return (defer == true) ? FTL_CACHE_READ_AGAIN : FTL_CACHE_READ_DECLINED;
@@ -825,7 +860,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const voi
 {
     // host 写给后台留资源：持续顺序写会把 FC 命令/desc/buffer 吃成 cmd=0/buf=0
     // ⇒ CP/META/L2P 无法提交 ⇒ confirm park timeout + 已回执写丢失
-    // （RISK-HOST-18）。页留在组里，下轮重试。
+    // 。页留在组里，下轮重试。
     if (ftl_fc_host_budget_ok_n(n_pages) == false)
     {
         return FTL_AGAIN;
@@ -844,7 +879,7 @@ static ftl_status_e cache_wr_build(ftl_ctx_s *ftl, WORD gi, DWORD lba, const voi
 
             cache_wr_discard(ftl, b);
             /* H38：永久失败（如 Closed 列表满）不能伪装成瞬态，否则 drain 会重试到 stall
-             * 才报 IO_ERROR（板端 RISK-ALLOC-09 的次生现象）。 */
+             * 才报 IO_ERROR（板端 的次生现象）。 */
             return (alc_st == FTL_AGAIN) ? FTL_AGAIN : FTL_ERROR;
         }
         b->n_alloc++;
@@ -974,7 +1009,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
 
         // `closing` = padding END 已在器件管线里，它就是序列末端：再挂数据窗口会排在
         // pad 之后，末页永远等不到后继 FAIL_CACHE ⇒ 确认步判「无结论」并撤销已编程页
-        // （RISK-CACHE-37）。等 pad 完成、序列真正关闭后再以新序列续写。
+        // 。等 pad 完成、序列真正关闭后再以新序列续写。
         if (seq->closing == true)
         {
             return FTL_CACHE_WRITE_AGAIN; /* 进展由 seq_closing 表达，不计 stall */
@@ -996,6 +1031,12 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
     }
 
     const BOOL starting = (seq->active == false);
+
+    if ((starting == true) && (cache_seq_yielded(seq) == true))
+    {
+        ftl->cache_stream.wb_declines++;
+        return FTL_CACHE_WRITE_AGAIN; /* 后台让行：本轮不开新序列 */
+    }
 
     // 序列只在 **pair 对齐的 host 段**上开启：段长（16 KiB = 32 LBA）是 pair 的整数倍，
     // 命令起点的对齐相位整条命令不变。起点未对齐时，序列的 next_lba（pair 对齐）与
@@ -1114,7 +1155,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
 
         if ((s0 == FTL_AGAIN) || (s1 == FTL_AGAIN))
         {
-            // 只认**在飞命令**（启动失败 ≠ 有进展，见 RISK-HOST-14）
+            // 只认**在飞命令**（启动失败 ≠ 有进展）
             ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
             ftl->cache_stream.wb_declines++;
             return FTL_CACHE_WRITE_AGAIN;
@@ -1208,7 +1249,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
 
     // 跨 block 续写准入：本窗口吃完当前 SB 时，下一个窗口必须开得出新块。否则序列会停在
     // 「设备序列打开、没有可提交的数据页」——门控挡住 GC，padding END 也无页可分配
-    // （RISK-CACHE-15 的盘满例外会中止一条**已回执**的序列）。此时按旧语义在本窗口
+    // （盘满例外会中止一条**已回执**的序列）。此时按旧语义在本窗口
     // 最后一页 END，把设备序列关掉再让 GC 跑。
     if ((n_pages == room) && (alc_super_can_open(&ftl->alloc, ALC_SUPER_ALLOC_HOT) == false))
     {
@@ -1286,7 +1327,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
     }
 
     // 页在**完成**时进入「已编程页表」（ftl_cache_wr_member_done，早回执）——
-    // 提交时**不**压 pending 下标：页在完成时入表（RISK-CACHE-27）。
+    // 提交时**不**压 pending 下标：页在完成时入表。
 
     if ((end_seq == true) && (seq->break_requested == true))
     {

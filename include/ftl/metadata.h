@@ -77,7 +77,7 @@
  *
  * ── L2P region 日志区（为什么固定预留）──
  * L2P 表本体 = L2P_REGIONS_PER_INSTANCE × 2 KB = 4 MiB（= 32 块）；每个 region 存
- * **主 + 备两份副本**（RISK-BOOT-18 的 L2）⇒ 活数据 64 块 = 8 MiB；日志区再留 **1×**
+ * **主 + 备两份副本**（L2）⇒ 活数据 64 块 = 8 MiB；日志区再留 **1×**
  * 工作余量（current 块 / 压缩目标 / 坏块），共 L2P_LOG_BLOCKS_TOTAL = 96 块 = 12 MiB，
  * 平均每 plane L2P_LOG_BLOCKS_PER_PLANE = 48 块。该区与目录检查点/CP/BBT/Journal 一样
  * 属于**固定预留**；固定区满时从 **OP 池**有界借用（`L2P_LOG_BORROW_MAX=8`，借还闭环、
@@ -85,7 +85,7 @@
  * 依据：主流主控把元数据放在独立预留区/独立介质（SPDK FTL 的 nvcache + band tail
  * metadata；spare 在 device formation 时从 surfaced capacity 扣除），不让元数据
  * 日志与用户数据动态争抢同一个空闲池。本仓旧做法（动态从 Free Pool 取 LOG 块）
- * 已被 RISK-MD-07 / RISK-CAP-02 证明会把容量吃光。
+ * 已被证明会把容量吃光。
  *
  * ⚠ **固定分区只预留 plane_mask 里的 plane**：`md_block_is_metadata()` 同时比较
  *   (plane & plane_mask)。目录检查点/CP/BBT/Journal 在 P1 都有元数据（镜像或交错）；
@@ -123,7 +123,7 @@
  * 一份完整 Directory = 一条 record = DIR_CKPT_PAGE_COUNT 页（chunk）。
  * 池内每块装 DIR_CKPT_RECORDS_PER_BLOCK 条 record；块满换池内下一块（**先擦后写**）。*/
 #define DIR_CKPT_ENTRIES_PER_PAGE (256U)
-/* 一份 Directory 分**主/备两半**（RISK-BOOT-18 的 L2 冗余）：
+/* 一份 Directory 分**主/备两半**（L2 冗余）：
  * chunk 0..PRIMARY-1 = 主 PBA（md_entry_s.pba），chunk PRIMARY..COUNT-1 = 备份 PBA
  * （md_entry_s.pba 承载 backup_pba[id]）。主半必须是**完整、同 sequence** 才算一条有效
  * record；备份半按页 best-effort（缺页只让对应 region 暂无双副本，不废整条记录）。 */
@@ -192,18 +192,18 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
  * 磨损计数在 Checkpoint 快照内，不占独立块。 */
 #define FTL_METADATA_BLOCK_END (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)
 
-/* ── L2P region 日志区（固定预留，RISK-MD-07 / RISK-CAP-02）──
+/* ── L2P region 日志区（固定预留）──
  * 理想块数 = ceil(region 数 / 每块页数)（每页一个 region）；预留 2×（current /
  * 压缩目标 / 坏块余量），按 plane 均分。该区是固定元数据的一部分：
  *   · 固定区为主；满时从 OP 池有界借用（L2P_LOG_BORROW_MAX），不动 Free Pool；
  *   · 容量公式用 FTL_METADATA_AREA_END 扣掉它；
  *   · 恢复/重建时按固定分区跳过（md_block_is_metadata 分区表已含它）。 */
 #define L2P_LOG_IDEAL_BLOCKS ((L2P_REGIONS_PER_INSTANCE + PAGES_PER_BLOCK - 1U) / PAGES_PER_BLOCK)
-/* 每个 region 的**副本数**（RISK-BOOT-18 的 L2）：主 + 备。
+/* 每个 region 的**副本数**（L2）：主 + 备。
  * 活数据 = COPIES × ideal；日志区取 (COPIES+1) × ideal（多一份工作余量：
  * current 块 / 压缩目标 / 坏块）。 */
 #define L2P_REGION_COPIES (2U)
-/* 主/备各占**一个 plane** 的当前块（RISK-BOOT-18 L2）⇒ 副本数不得超过 plane 数。 */
+/* 主/备各占**一个 plane** 的当前块（L2）⇒ 副本数不得超过 plane 数。 */
 _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_NUM（副本无法分 plane）");
 #define L2P_LOG_BLOCKS_TOTAL     (3U * L2P_LOG_IDEAL_BLOCKS) /* 96 = 2 份活数据 + 1 份余量 */
 #define L2P_LOG_BLOCKS_PER_PLANE (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
@@ -213,12 +213,12 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
  * ⚠ 不额外留 25% 碎片余量：固定日志区 3× ideal（96 块），活数据 = 2× ideal（64 块），
  *   越过 64 块即压缩，余量整 1× ideal（32 块）。一旦压缩跟不上，日志区会被吃满
  *   ⇒ md_log_rotate 无空闲块、append_slot 永远 INVALID ⇒ CP 写不成 Header、
- *   掉电后每次全量重建（RISK-CP-06 / RISK-MD-08 / RISK-MD-11）。 */
+ *   掉电后每次全量重建。 */
 #define L2P_LOG_COMPACT_TRIGGER (L2P_LOG_IDEAL_BLOCKS * L2P_REGION_COPIES) /* 64：两份活数据的理想水位 */
 
 /* 压缩的**主判据**：空闲日志块低于此水位就启动压缩（不论 live 数）。
  * 固定区 96 块；保留 8 块 ≈ 8×256 = 2048 个槽位，足够一轮把多个稀疏 victim
- * 搬空。free 触发比 live 触发早，保证压缩永远有目标块（RISK-MD-08）。 */
+ * 搬空。free 触发比 live 触发早，保证压缩永远有目标块。 */
 #define L2P_LOG_FREE_WATERMARK (8U)
 
 /* 固定日志区满时，允许从 **OP 池**动态借用的日志块上限（总块数）。
@@ -229,7 +229,7 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
 /* L2P 日志区末尾（= shared metadata spare 起点）。 */
 #define L2P_LOG_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
 
-/* 在飞写回的槽位预留表容量（RISK-MD-06）。
+/* 在飞写回的槽位预留表容量。
  * 每次 L2P region 写回在 `md_slot_pair_append` 取两个槽后，到 commit/失败之前占两条
  * 表项；这块**不能被换出或回收**——槽里的数据还没进 Directory，`l2p_live` 看不见它。
  * 容量按写回并发上限取；`l2p_cache.c` 用静态断言钉住
@@ -290,7 +290,7 @@ static inline BOOL ftl_is_l2p_log_gblock(WORD g)
  * （或介质上根本没有当前版本的 Checkpoint）⇒ pfr_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (14U) /* v14：目录检查点页头 +dirty_gen（整条记录的页间一致性校验，RISK-MD-06） */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (14U) /* v14：目录检查点页头 +dirty_gen（整条记录的页间一致性校验） */
 
 /*
  * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
@@ -410,7 +410,7 @@ typedef struct METADATA_DIRECTORY_CKPT_PAGE_S
     WORD       chunk_count;                                                                                                       /* = DIR_CKPT_PAGE_COUNT */
     DWORD      entry_count;                                                                                                       /* 本 chunk 有效 entry 数 */
     DWORD      layout_version;                                                                                                    /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
-    DWORD      dirty_gen;                                                                                                         /* 本页**填充时刻**的 Directory 代数（RISK-MD-06）*/
+    DWORD      dirty_gen;                                                                                                         /* 本页**填充时刻**的 Directory 代数*/
     md_entry_s entries[METADATA_DIR_ENTRIES_PER_PAGE];                                                                            /* 256 × 7 = 1792B */
     BYTE       padding[PAGE_MAIN_SIZE - METADATA_DIR_CKPT_HEADER_BYTES - (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
 } md_dir_ckpt_page_s;
@@ -424,7 +424,7 @@ typedef struct METADATA_DIRECTORY_CKPT_HEADER_S
     WORD  chunk_count;
     DWORD entry_count;
     DWORD layout_version;
-    DWORD dirty_gen; /* 填充时刻的 Directory 代数：整条记录要求 16 页**全部相同**（RISK-MD-06）*/
+    DWORD dirty_gen; /* 填充时刻的 Directory 代数：整条记录要求 16 页**全部相同***/
 } md_dir_ckpt_hdr_s;
 
 /* 一页必须装得下：头 24B + 每页条目（无独立 CRC，页完整性由 FC 的 per-CW CRC + ECC 保证）
@@ -772,7 +772,7 @@ typedef enum METADATA_DIRECTORY_CKPT_STEP_E
     MD_DIR_CKPT_READY  = 1U, /* 出参全部有效，可以写目录检查点 */
     MD_DIR_CKPT_FAILED = 2U, /* 定位/取槽失败：调用者中止 job */
     MD_DIR_CKPT_BUSY   = 3U, /* 另一个 writer（CP job / metadata job）正在写目录检查点：
-                              * 背压重试，**不推进 sequence、不取槽**（RISK-MD-06） */
+                              * 背压重试，**不推进 sequence、不取槽** */
 } md_dir_ckpt_step_e;
 
 /* md_dir_ckpt_prepare 的输出：READY 时全部有效。 */
@@ -821,7 +821,7 @@ typedef struct METADATA_HANDLE_S
     md_copy_e           cur_copy;             /* 当前搬移的副本（主 / 备）*/
     WORD                moved;                /* 本次压缩已搬 region 数（观测）*/
     WORD                reclaim_gblock;       /* 在飞擦除的块（完成时归还它）*/
-    WORD                reclaim_fail_gblock;  /* 连续擦除失败计数对应的块（RISK-MD-01）*/
+    WORD                reclaim_fail_gblock;  /* 连续擦除失败计数对应的块*/
     BYTE                reclaim_fail_count;   /* 该块连续擦除失败次数；达上限即标坏并清位 */
     timer_deadline_s    submit_deadline;      /* 连续「提交不出去」deadline */
     BOOL                timed_out;            /* true = 本次 job 因 deadline 中止 */
@@ -851,7 +851,7 @@ typedef struct METADATA_DIRECTORY_CKPT_S
     WORD  write_idx;      /* 池内下一个待写槽 */
     BOOL  cursor_valid;   /* 游标是否已建立 */
     BOOL  dirty;          /* 是否有未写回变更 */
-    BOOL  busy;           /* 写入单飞（RISK-MD-06） */
+    BOOL  busy;           /* 写入单飞 */
     BOOL  erase_required; /* 本次槽位在块首、写前需擦；abort 时据此跳过整块 */
     BYTE  owner;          /* 单飞持有者（MD_DIR_CKPT_OWNER_*） */
 } md_dir_ckpt_s;
@@ -878,7 +878,7 @@ typedef struct METADATA_RECLAIM_S
 typedef struct MD_DIRECTORY_CACHE_S
 {
     md_entry_s entries[METADATA_DIR_ENTRIES];
-    /* L2P region 的第二份副本 PBA（RISK-BOOT-18 的 L2）。 */
+    /* L2P region 的第二份副本 PBA（L2）。 */
     DWORD backup_pba[METADATA_DIR_ENTRIES];
     WORD  count; /* 有效 entry 数 */
 
@@ -890,7 +890,7 @@ typedef struct MD_DIRECTORY_CACHE_S
     md_l2p_cur_s cur;              /* 每 plane 的当前写块游标 */
     WORD         log_borrow_count; /* 从 OP 池借用的日志块数（≤ L2P_LOG_BORROW_MAX） */
 
-    /* 在飞写回的槽位预留（RISK-MD-06）：写命令还在飞、Directory 尚未 commit。 */
+    /* 在飞写回的槽位预留：写命令还在飞、Directory 尚未 commit。 */
     DWORD slot_resv[MD_SLOT_RESV_MAX];
 
     md_reclaim_s reclaim; /* 待回收日志块位图 + 轮转起点 */
@@ -958,7 +958,7 @@ WORD md_live_count_get(const md_dir_cache_s *dir, WORD gblock);
 void md_entry_update(md_dir_cache_s *dir, md_type_e type, WORD id, DWORD new_pba);
 
 /**
- * @brief 一次预留**两个连续槽**（主/备副本，RISK-BOOT-18 的 L2）
+ * @brief 一次预留**两个连续槽**（主/备副本，的 L2）
  *
  * **只取槽，不登记**：调用方先往返回的地址写 region 页，两份都写成功后再调
  * md_commit_region(MD_COMMIT_PAIR) 登记（写失败则位置不变，槽被跳过——已编程页不可复用）。
@@ -1023,7 +1023,7 @@ BOOL md_slot_reserved(const md_dir_cache_s *dir, WORD g);
  */
 void md_slot_reset(md_dir_cache_s *dir);
 
-/* ── 固定 L2P 日志区（RISK-MD-07 / RISK-CAP-02）──
+/* ── 固定 L2P 日志区──
  * 这 64 个 gblock 是**固定预留**的元数据区：只由 metadata 模块在
  * [L2P_LOG_BLOCK0, FTL_METADATA_AREA_END) 内部分配/归还，不经过 allocator 的
  * Free/OP/Spare 池。块状态约定：
@@ -1040,7 +1040,7 @@ void md_slot_reset(md_dir_cache_s *dir);
  *
  * 活块与当前写块置 LOG；非活块**一律**置 LOG + 登记回收（后台擦除后由 md_log_release
  * 置 NONE）——**不读介质判「是否已擦净」**：FTL 只看得见 USER 512B，判不出
- * 「编程过没有」（RISK-IF-15），判错就是在未擦页上编程。擦除按空闲水位懒执行
+ * 「编程过没有」，判错就是在未擦页上编程。擦除按空闲水位懒执行
  * （`md_reclaim_is_eager`），开机只补到水位，不会把日志区重擦一遍。
  */
 void md_log_area_restore(md_dir_cache_s *dir, alc_s *alloc);
@@ -1060,7 +1060,7 @@ void md_log_area_restore(md_dir_cache_s *dir, alc_s *alloc);
 WORD md_log_alloc(md_dir_cache_s *dir, alc_s *alloc, BYTE plane);
 
 /**
- * @brief 换**指定 plane** 的当前写块（每 plane 一个当前块，RISK-BOOT-18 L2）
+ * @brief 换**指定 plane** 的当前写块（每 plane 一个当前块，L2）
  *
  * 两个调用者：
  *   · 追加路径（md_slot_pair_append）：该 plane 的当前块写满/无游标时换块；
@@ -1135,7 +1135,7 @@ typedef enum METADATA_COMMIT_MODE_E
  */
 void md_commit_region(md_dir_cache_s *dir, WORD region_id, md_commit_mode_e mode, DWORD new_primary, DWORD new_backup);
 
-/* ── 第二副本（RISK-BOOT-18 的 L2）── */
+/* ── 第二副本（L2）── */
 /**
  * @brief 每 plane 的当前写块游标是否在界内（纯读；上板自检用）。
  *
@@ -1181,7 +1181,7 @@ static inline DWORD md_backup_find(const md_dir_cache_s *dir, WORD region_id)
  * @return md_dir_ckpt_step_e：MD_DIR_CKPT_READY 需要写（出参全部有效）；
  *         MD_DIR_CKPT_CLEAN 无需写（dir 不脏）；MD_DIR_CKPT_FAILED 失败（定位失败）
  */
-/* 目录检查点单飞持有者（RISK-MD-06）：abort 只释放**自己**的锁。 */
+/* 目录检查点单飞持有者：abort 只释放**自己**的锁。 */
 #define MD_DIR_CKPT_OWNER_NONE (0U)
 #define MD_DIR_CKPT_OWNER_CP   (1U) /* Checkpoint job（CP_DIR_CKPT_*） */
 #define MD_DIR_CKPT_OWNER_MD   (2U) /* metadata 整理 job（MD_JOB_CP_DIR_CKPT_*） */
@@ -1195,7 +1195,7 @@ md_dir_ckpt_step_e md_dir_ckpt_prepare(md_dir_cache_s *dir, md_dir_ckpt_prepare_
  * @param dir 目录。
  *
  * @note 供 job 的中止 / 复位路径调用：prepare 之后没走到 commit 就放弃时，必须清
- *       单飞标志，否则另一个 writer 永远拿不到锁（RISK-MD-06）。
+ *       单飞标志，否则另一个 writer 永远拿不到锁。
  */
 void md_dir_ckpt_abort(md_dir_cache_s *dir, BYTE owner);
 

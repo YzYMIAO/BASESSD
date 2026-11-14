@@ -97,7 +97,7 @@ static ftl_dangling_entry_s s_dangling[FTL_DANGLING_SLOTS];
 static void ftl_dangling_check(ftl_ctx_s *ftl, DWORD l, DWORD old_pba, WORD new_g);
 static BYTE s_dangling_next;
 
-// 日志限流（RISK-USB-06）：同一类异常在短时间内重复出现时按间隔打一行；
+// 日志限流：同一类异常在短时间内重复出现时按间隔打一行；
 // 时钟缺失时由 log_rate_due 按条数兜底。统一使用 log.h / timer.h 的
 // log_ratelimit_s，本文件只保留一套限流类型（C9）。
 static log_ratelimit_s s_dangling_log;        /* BAD 退役块的 dangling 聚合（1 s） */
@@ -126,14 +126,14 @@ static void ftl_cache_wr_verdict_store(ftl_ctx_s *ftl, DWORD lba, BOOL ok);
  *
  * @param ftl 实例。
  *
- * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（RISK-IF-09，待上板确认）。
+ * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（待上板确认）。
  *       本函数与 idle 守卫不在每 I/O 热路径上，放内部 Flash，不占 ITCM。
  */
 void SSD_CODE_FAST ftl_cache_seq_release(ftl_ctx_s *ftl)
 {
     // 判据必须含 `wr_inflight`：页在完成时才入表（早回执），组级失败可能正好落在窗口
     // 命令全在飞、页表为空时。此时干净清除（不升 gen）会让迟到完成把未证明页推进死
-    // 序列；abort 升 gen 后迟到完成被丢弃、并按 IO_ERROR 结算组（RISK-CACHE-19/36）。
+    // 序列；abort 升 gen 后迟到完成被丢弃、并按 IO_ERROR 结算组。
     if ((ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_WRITE) &&
         ((ftl->cache_stream.seq.wr_inflight != 0U) || (ftl_cache_wr_has_unproven(ftl) == true)))
     {
@@ -142,7 +142,7 @@ void SSD_CODE_FAST ftl_cache_seq_release(ftl_ctx_s *ftl)
     }
 
     // 序列被放弃时要分清「命令还在飞」与「已经排空」：前者必须继续关着门控，
-    // 否则别的组会在 31h/3Fh 管线半途插命令（RISK-CACHE-14）；后者才真正放开。
+    // 否则别的组会在 31h/3Fh 管线半途插命令；后者才真正放开。
     // 判据只数**序列自己拥有**的读子操作：读失败托管给 RR 的那一项已脱钩
     // （PENDING_OP_READ_RECOVERY），不占设备读管线。把它算成在飞会让 draining
     // 永远关着门，而 RR 的恢复读又被同一道门挡住 ⇒ 组永不完成，形成死锁。
@@ -179,6 +179,8 @@ void SSD_CODE_FAST ftl_cache_seq_discard(ftl_ctx_s *ftl)
     ftl->cache_stream.seq.closing         = false;
     ftl->cache_stream.seq.own_page0       = false;
     ftl->cache_stream.seq.idle_ms         = 0U;
+    ftl->cache_stream.seq.yield_pending   = false;
+    ftl->cache_stream.seq.yield_ms        = 0U;
     ftl_cache_wr_verdict_clear(ftl);
 }
 
@@ -314,7 +316,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
         }
         else
         {
-            ftl_cache_seq_release(ftl); /* 读序列放弃不发 LAST（RISK-IF-09） */
+            ftl_cache_seq_release(ftl); /* 读序列放弃不发 LAST */
         }
     }
 }
@@ -322,7 +324,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
 static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi);
 
 /**
- * @brief 待入账的依赖是否**确实有待推进的工作**（RISK-HOST-05 / RISK-HOST-16 的判据）。
+ * @brief 待入账的依赖是否**确实有待推进的工作**。
  *
  * @param ftl 实例。
  * @return true = 至少一项有确定完成时刻的工作在推进：L2P region 加载 / region 写回 /
@@ -410,7 +412,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
     if ((mask != 0U) && (l2p_entries_ready(ftl->cache, d->lba, mask) == false))
     {
         // 返回 AGAIN 交由待入账重试：预算是否延长由 `ftl_confirm_service` 按
-        // 「确有可推进的工作」判定（RISK-HOST-05 / RISK-HOST-16）。加载**起不动**
+        // 「确有可推进的工作」判定。加载**起不动**
         // （`load_inflight==0`）时该判据不成立 ⇒ 仍保留 100 ms 的有界失败。
         return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
     }
@@ -447,7 +449,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
     {
         // 第三处 AGAIN：行在就绪检查之后变成 FLUSHING（写回在飞）⇒ 批量读被拒。
         // 预算延长同样由 `ftl_confirm_service` 判定（`flush_inflight > 0` 会命中），
-        // 否则 100 ms 到期把一次**有限**的写回等待结算成 host 写失败（RISK-HOST-05）。
+        // 否则 100 ms 到期把一次**有限**的写回等待结算成 host 写失败。
         return FTL_AGAIN;
     }
 
@@ -625,7 +627,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_s *ftl, fc_cmd_s *cmd, pend_req_
 
     // Read Recovery：逐 plane 记录 ECC 与 read disturb，用于预测性退役。
     // ⚠ 不能只记 `ftl_cmd_pba()` 的首个 desc：一个 multi-plane 子操作在 Policy B 下
-    // 覆盖**两个独立块**，第二块的趋势会漏记（RISK-HOST-02）。
+    // 覆盖**两个独立块**，第二块的趋势会漏记。
     // ⚠ 须在 fc_command_release(cmd->cmd_id) 之前调用——desc 释放后失效。
     ftl_cmd_block_ecc_s blocks[PLANE_NUM];
     const BYTE          nblocks = ftl_cmd_block_ecc_list(cmd, blocks, PLANE_NUM);
@@ -718,7 +720,7 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
 
         if (st == FTL_AGAIN)
         {
-            // 预算按「无进展时长」计（RISK-HOST-05 / RISK-HOST-16）：确有完成源在推进
+            // 预算按「无进展时长」计：确有完成源在推进
             // （region 加载或写回在飞、Journal 页写或换块擦、任一非待入账 pending 项）⇒
             // 刷新起点；全都没有才是结构性卡死，让 100 ms 到期暴露成一次写失败。
             if (ftl_confirm_progress_pending(ftl) == true)
@@ -738,7 +740,7 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
             {
                 // 只在真正要打日志时统计。日志必须报「同时有多少条在等」——只打
                 // 扫描到的第一条（常是 idx=0）会被误读成「只有一个 region 卡住」
-                // （RISK-HOST-05）。计数含本轮尚未结算的项。
+                // 。计数含本轮尚未结算的项。
                 const WORD parked = pend_confirm_get_count(&ftl->pending);
 
                 LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n",
@@ -810,7 +812,7 @@ static void ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc
 {
     // 失败 plane 掩码：逐 desc 取 CW 状态 + desc->paa 的 plane。
     // FC 把 NAND per-CW FAIL 并进 desc（program 与 read 都并），plane1 的失败不再
-    // 等到 GC 擦除才暴露（RISK-MIG-07）。
+    // 等到 GC 擦除才暴露。
     DWORD bad_plane_mask = 0U;
 
     fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
@@ -960,11 +962,11 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
 
 /* ── host cache program 序列（PENDING_OP_WRITE_CACHE）──
  *
- * 早回执（RISK-CACHE-27）：页在**自身命令完成**时就算「已编程」——
+ * 早回执：页在**自身命令完成**时就算「已编程」——
  *   ① 立刻结算它的子操作（组完成 ⇒ host 看到完成），不再等下一命令的 FAILC；
  *   ② 页面进入「已编程页表」（`cache_stream.seq.wr`），等后继 FAILC 证明；
  *   ③ 证明之前读该 LBA 走页表覆盖（指到刚编程的 PBA，见 ftl_cache_wr_lookup）；
- *   ④ 证明失败 ⇒ 撤销映射 + 标记 region degraded + 粘性错误（RISK-CACHE-28）。
+ *   ④ 证明失败 ⇒ 撤销映射 + 标记 region degraded + 粘性错误。
  *
  * 确认（Journal→L2P→BST）与组完成解耦：由 ftl_cache_wr_confirm_step() 每轮按序推进。
  */
@@ -1205,7 +1207,7 @@ BOOL ftl_cache_wr_lookup(const ftl_ctx_s *ftl, DWORD lba, DWORD *out_pba)
  *
  * @note 用 ftl_cache_wr_find 的同一条扫描规则（从新到旧、第一个覆盖项定论）。
  *       失败页在撤销完成前仍留在环里，而它的 L2P 映射可能还指向编程失败的页
- *       ⇒ 这一层必须在 l2p_read 之前拦下（RISK-CACHE-28）。
+ *       ⇒ 这一层必须在 l2p_read 之前拦下。
  */
 BOOL ftl_cache_wr_failed_covers(const ftl_ctx_s *ftl, DWORD lba)
 {
@@ -1242,7 +1244,7 @@ static void ftl_cache_wr_close_sb_if_open(ftl_ctx_s *ftl, DWORD pba0, DWORD pba1
  * @param why 失败来源（日志用：FAIL_CACHE / abort / pad …）。
  *
  * @note 撤销（L2P 作废）交给 confirm_step：它可能要等 Journal 容量，不能在这里同步做。
- *       region 降级**立即**置位，让撤销完成前的读也报 IO_ERROR（RISK-CACHE-28）。
+ *       region 降级**立即**置位，让撤销完成前的读也报 IO_ERROR。
  *       `cache_wb_aborts` 按**命令级中止**计一次（member_done 的错误分支），这里不计，
  *       否则一条 FAILC 会同时经「结论落点失败」与「本命令中止」记两笔。
  */
@@ -1356,7 +1358,7 @@ static ftl_status_e ftl_cache_wr_undo_page(ftl_ctx_s *ftl, const ftl_cache_page_
         (void)wst;
 
         // 解除映射也要过守卫：count 已为 0 时运行期静默夹住，但 journal 已记账
-        // ⇒ 下次开机回放 `pfr_valid_sub` 判下溢、整份块元数据快照作废（RISK-MD-06）。
+        // ⇒ 下次开机回放 `pfr_valid_sub` 判下溢、整份块元数据快照作废。
         ftl_dangling_check(ftl, l, old, FTL_GBLOCK_INVALID);
         ftl_block_sub_valid_if_live(&ftl->alloc.blocks[ftl_pba_gblock(old)]);
     }
@@ -1419,7 +1421,7 @@ static void ftl_cache_wr_confirm_step(ftl_ctx_s *ftl)
         {
             // 未来结论只可能来自后继命令的 FAILC 或 padding END；都没有时判失败并撤销，
             // 否则页表排不空（flush 只能无进展超时）。`wr_inflight` 独立于 kind：序列已被
-            // 释放（kind 清空）时，在飞成员的 FAILC 仍可能证明本页（RISK-CACHE-36）。
+            // 释放（kind 清空）时，在飞成员的 FAILC 仍可能证明本页。
             const ftl_cache_seq_s *seq             = &ftl->cache_stream.seq;
             const BOOL             may_get_verdict = (seq->wr_inflight != 0U) ||
                                          ((seq->kind == FTL_CACHE_SEQ_WRITE) &&
@@ -1445,7 +1447,7 @@ static void ftl_cache_wr_confirm_step(ftl_ctx_s *ftl)
  *
  * @note 只处理仍在本序列页表里的页：**器件已证明**的页保留（数据有效，交给确认路径），
  *       已判失败的页不重复记账。在飞成员（尚未进页表的命令）由完成入口的序列代号
- *       守卫丢弃（RISK-CACHE-19：失败序列其后页一律不确认）。代号在这里递增，
+ *       守卫丢弃（失败序列其后页一律不确认）。代号在这里递增，
  *       是本函数与迟到完成的唯一分界。
  */
 static void ftl_cache_wr_abort(ftl_ctx_s *ftl)
@@ -1482,13 +1484,13 @@ static void ftl_cache_wr_abort(ftl_ctx_s *ftl)
 }
 
 /**
- * @brief cache program 成员的完成入口（早回执，RISK-CACHE-27）。
+ * @brief cache program 成员的完成入口（早回执）。
  *
  * 命令 i 完成时：
  *  1. 代号不符（序列已中止 / 已被新序列取代）⇒ 迟到完成：只按 IO_ERROR 结算组，不碰页表；
  *  2. 状态带 FAIL_CACHE ⇒ **结论游标页**（= page i-1）判失败；否则该页被证明成功；
  *  3. 状态带 NAND 级错误 **或** FAIL_CACHE ⇒ 序列中止：本页不入表、按 IO_ERROR 结算，
- *     未证明页一律不确认（RISK-CACHE-19），器件已证明的页保留；
+ *     未证明页一律不确认，器件已证明的页保留；
  *  4. 否则本页已编程 ⇒ 入表 + **立即结算子操作**（组完成 ⇒ host 早回执）。
  *
  * @note 找不到 pending 的迟到完成由调用者兜底（本函数只处理仍登记在序列里的页）。
@@ -1517,7 +1519,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
     completion = &completion_used;
 
     // 迟到完成：所属写序列已中止 / 已被新序列取代（代号不符）⇒ 本页不确认映射
-    // （RISK-CACHE-19：失败序列其后页一律不确认，否则 rebuild 的 page0 捷径会被击穿）。
+    // （失败序列其后页一律不确认，否则 rebuild 的 page0 捷径会被击穿）。
     if (pending->cache_gen != ftl->cache_stream.seq.gen)
     {
         LOGW_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr late completion lba=%lu gen=%hhu stale — drop page\r\n", page_lba, pending->cache_gen);
@@ -1543,12 +1545,12 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
 
     // 2) 序列中止：① 本命令自身编程失败；② 本命令的 FAILC 判了前一页失败。
     //    为什么 FAILC 也要中止：器件级 FAIL_CACHE 表示**缓存程序管线**里上一页没编程
-    //    成功，后续页还在同一条可疑管线上；RISK-CACHE-19 依赖「任一错误 ⇒ 其后页一律
+    //    成功，后续页还在同一条可疑管线上；依赖「任一错误 ⇒ 其后页一律
     //    不确认」（rebuild 的「page0 空白 ⇒ 整块空白」捷径），继续写下去会击穿它。
     //    本页不入表、按 IO_ERROR 结算组；控制器已提交即回执，失败由 deferred error
     //    在下一条命令上报。
     //    `verdict_valid == false` 说明本命令是第一页（first，前无本序列的页）：器件对
-    //    op49 不映射 FAILC（RISK-IF-11），此时该位只能是上一序列的残留 ⇒ 忽略。
+    //    op49 不映射 FAILC，此时该位只能是上一序列的残留 ⇒ 忽略。
     if ((own_fail == true) || (verdict_failed == true))
     {
         char stbuf[48];
@@ -1593,7 +1595,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
         if (wr_ring_pushed == false)
         {
             // 环满属结构性错误：环深 16 ≫ 在飞窗口（≤4 页/窗口 + 前窗尾页）。
-            // release 下不能只靠 ASSERT（RISK-CACHE-32）：按 OK 结算会让这页永不确认，
+            // release 下不能只靠 ASSERT：按 OK 结算会让这页永不确认，
             // host 已看到成功的写静默丢失。按失败中止序列 + 本组报 IO_ERROR（host 重试）。
             LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr page table full lba=%lu — abort sequence\r\n", page_lba);
             ASSERT_MSG(wr_ring_pushed, "cache-wr page table full lba=%lu", page_lba);
@@ -1708,7 +1710,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s 
 
     // 本服务函数拥有命令，下面**任何**退出路径都必须释放（H1）。必须先取再判：
     // 序列已死时的早退若直接 return，会把 command / desc 链 / buffer 一起漏掉
-    // （RISK-CACHE-31 ⇒ 反复触发耗尽 FC 池）。
+    // （⇒ 反复触发耗尽 FC 池）。
     fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
 
     // 收尾页在飞期间序列被中止（盘满 abort / 失败 abort）⇒ 这条回调属于已死的序列：
@@ -1735,7 +1737,7 @@ void SSD_CODE_FAST ftl_cache_pad_callback(ftl_ctx_s *ftl, const fc_cmd_status_s 
         {
             // ⚠ 逐 plane 用 submit 时记下的**真实**地址：Policy B 下两 plane 的块可能
             // 不同，用 pba_with_plane(pad_pba[0], 1) 推导会把 plane1 的 page0 屏障
-            // 漏记（RISK-CACHE-24 实测：`p0=01` ⇒ wbuf 永久 AGAIN）。
+            // 漏记（实测：`p0=01` ⇒ wbuf 永久 AGAIN）。
             for (BYTE p = 0U; p < PLANE_NUM; p++)
             {
                 alc_super_open_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, seq->pad_pba[p]);
@@ -2197,7 +2199,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     }
 
     // ├─ Journal ──
-    // 持续擦除失败的环形块要标进 BBT（RISK-JN-01）；journal 只持有 allocator 指针，
+    // 持续擦除失败的环形块要标进 BBT；journal 只持有 allocator 指针，
     // 通过 allocator/bbt 的 owner API 查询与标坏，不直接改其内部字段。
     jrn_init(ftl->journal, ftl->topo, &ftl->alloc);
 
@@ -2214,7 +2216,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
 
         // 失败时仍建空 Directory（空片首启 / 格式化路径需要），但把失败状态留给
         // pfr_boot_recovery：介质若已有有效 Checkpoint，空 Directory = 映射整体丢失
-        // ⇒ 必须拒绝启动（RISK-BOOT-09）。
+        // ⇒ 必须拒绝启动。
         ftl->flags.md_load_failed = (md_ret != FTL_OK) ? 1U : 0U;
 
         if (md_ret != FTL_OK)
@@ -2476,7 +2478,7 @@ void ftl_service(ftl_ctx_s *ftl)
     ftl_confirm_service(ftl);
 
     // [svc] cache 序列确认：推进 cache 写序列的「已编程页表」——按序确认（Journal→L2P→BST）、
-    // 撤销失败页、弹出已证明页（RISK-CACHE-27/28）。组早已完成，这里只做元数据记账。
+    // 撤销失败页、弹出已证明页。组早已完成，这里只做元数据记账。
     ftl_cache_wr_confirm_step(ftl);
 
     // [svc] host 补发：下发各组的待补发子操作。完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），
@@ -2623,11 +2625,11 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
             }
 
             // cache 写序列里**已编程、尚未确认**的页：L2P 仍是旧映射，必须读刚编程的
-            // 页（RISK-CACHE-27）。命中即用它的 PBA，跳过 L2P。
+            // 页。命中即用它的 PBA，跳过 L2P。
             if (ftl_cache_wr_lookup(ftl, l, &p) == false)
             {
                 // 已判失败、撤销还没走完的页：L2P 可能仍指着编程失败的 PBA
-                // ⇒ 必须报错，不能把它的内容当数据返回（RISK-CACHE-28）。
+                // ⇒ 必须报错，不能把它的内容当数据返回。
                 if (ftl_cache_wr_failed_covers(ftl, l) == true)
                 {
                     LOGE_IF(log_ratelimit_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: cache page failed (FAIL_CACHE) — IO_ERROR\r\n", l);
@@ -2641,7 +2643,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
                 {
                     // ⚠ 「进展」只认**在飞命令**：加载可能**启动失败**（无空闲行 / 提交被拒），
                     // 此时若宣称"在飞"，drain 的 stall 检测会永久失效，形成环形等待
-                    // （RISK-HOST-14）。主流判据 = 队列/完成模型：没有在飞命令就没有确定完成时刻。
+                    // 。主流判据 = 队列/完成模型：没有在飞命令就没有确定完成时刻。
                     ftl->flags.l2p_defer = l2p_cache_any_inflight(ftl->cache);
                     break; /* 本子操作到此为止；已凑到的 k 个 LBA 照常下发 */
                 }
@@ -2701,7 +2703,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
             }
 
             // 降级 L2P region 的未映射不是「合法未映射」：该范围的旧映射已经丢失，
-            // 必须报 IO_ERROR，不能零填（静默丢数据，RISK-BOOT-18）。
+            // 必须报 IO_ERROR，不能零填（静默丢数据）。
             // 回放已恢复的 LBA 有有效 PBA，不会走到这里。
             if (l2p_is_region_degraded(ftl->cache, lba_to_global_region(internal_lba)))
             {
@@ -2731,7 +2733,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     }
 
     // host 读也必须走预算：否则读突发会把给后台留的命令/buffer 吃光，
-    // CP/收尾命令申请不到槽 ⇒ confirm park timeout（RISK-HOST-18）。
+    // CP/收尾命令申请不到槽 ⇒ confirm park timeout。
     if (ftl_fc_host_budget_ok() == false)
     {
         return FTL_AGAIN;
@@ -2835,7 +2837,7 @@ static void ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
         memset(&rs, 0, sizeof(rs));
         (void)fc_get_resource_stats(&rs);
 
-        // per-plane 最小空闲块数（RISK-ALLOC-09：成对分配看的是最饿的那个 plane）。
+        // per-plane 最小空闲块数（成对分配看的是最饿的那个 plane）。
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
             const WORD c = alc_free_get_count(&ftl->alloc, p);
@@ -2973,7 +2975,7 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
             // · L2P region 加载在飞（l2p_defer）：NAND 层 wait/jump 超时保证命令必有完成；
             // · 搬移 job 在飞（GC / WL / slow-death）：它自己带 ms deadline，且 wbuf 在
             // Free Pool 空时正是靠它补池。一次回收要数百 ms，8 轮预算远不够，
-            // 计进来会把正常等待判成 IO_ERROR（RISK-GC-09）。
+            // 计进来会把正常等待判成 IO_ERROR。
             // 真卡死（命令丢失 / 搬移超时不退）由各自 deadline 与 NAND 超时兜底。
             // · 别的组持有 cache 设备序列：本组被序列门控挡回是**确定性等待**
             //   （所有者每轮都在推进），不能累计成「卡死」。
@@ -2988,6 +2990,8 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
             const BOOL rd_inflight    = (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_READ) && (ftl->cache_stream.seq.owner_gi == gi) && (g->outstanding > 0U);
             // 序列正在有序收尾（padding END 已提交或在途）：这是确定性进展，等它完成。
             const BOOL seq_closing    = (ftl->cache_stream.seq.closing == true) || (ftl->cache_stream.seq.close_requested == true) || (ftl->cache_stream.seq.break_requested == true) || (ftl->cache_stream.seq.draining == true);
+            // host 正在给后台让行：后台提交成功或 20ms 超时后必然恢复，属确定性等待。
+            const BOOL seq_yield      = (ftl->cache_stream.seq.yield_pending == true);
             // Journal 页写 / 换块擦在飞：NAND 命令有超时 ⇒ 必有完成，属确定性等待。
             // 少这一条，序列边界触发的页刷若跨过 8 轮预算，正常的写会被误判成卡死。
             const BOOL jrn_inflight   = (jrn_is_idle(ftl->journal) == false) || (ftl->journal->handle.job.need_erase == true);
@@ -3002,14 +3006,14 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
              * 会在 8 轮内把「wbuf 正在编程」误判成 IO_ERROR（板端 stall 现场
              * `wb_busy=1 cmd=2 desc=8 buf=8`）。 */
             const BOOL wb_busy        = (wb_is_idle(ftl->wbuf) == false);
-            const BOOL bg_progress    = (ftl->flags.l2p_defer == true) || mig_inflight || other_seq || wr_ring_pending || rd_inflight || seq_closing || jrn_inflight || confirm_parked || wb_busy;
+            const BOOL bg_progress    = (ftl->flags.l2p_defer == true) || mig_inflight || other_seq || wr_ring_pending || rd_inflight || seq_closing || seq_yield || jrn_inflight || confirm_parked || wb_busy;
 
             if (bg_progress == false)
             {
                 if (++g->stalls > FTL_DRAIN_STALL_MAX)
                 {
                     // 归因：GC 已判定「无收益 victim」时，这不是普通超时，是真正的无空间
-                    // （free 见底且搬不动）。打印区分行，避免与瞬态背压混淆（RISK-GC-14）。
+                    // （free 见底且搬不动）。打印区分行，避免与瞬态背压混淆。
                     // 无空间是终止态、host 会持续重试 ⇒ 用限流器，避免逐请求刷屏。
                     if (log_ratelimit_due(&s_nospace_log))
                     {
@@ -3208,9 +3212,9 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
         return FTL_ERROR;
     }
 
-    // volatile write cache 的**延后错误**（RISK-CACHE-27）：上一次已回执的写后来被判
+    // volatile write cache 的**延后错误**：上一次已回执的写后来被判
     // 失败 ⇒ 用**下一条**命令承载这个结论（主机看到该命令失败一次），与控制器层
-    // `usb_msc_take_deferred_error` 同口径（RISK-USBC-01）。
+    // `usb_msc_take_deferred_error` 同口径。
     if (ftl->flags.deferred_error == true)
     {
         ftl->flags.deferred_error = false;
@@ -3274,7 +3278,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
 
     // 序列延续只看 **LBA 连续性**（与 host 传输段边界 / 命令身份无关）：方向不同或
     // 接续点不一致 ⇒ 上一序列不可能再由本请求续。
-    //   读序列：直接放弃（不发 LAST，RISK-IF-09）；
+    //   读序列：直接放弃（不发 LAST）；
     //   写序列：设备侧没有数据页可 END ⇒ 由 service 用 **padding END** 有序收尾
     //          （不能 abort：未确认页已经对 host 提前回执，abort 会丢已确认数据）。
     if (ftl->cache_stream.seq.active == true)
@@ -3504,7 +3508,7 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
     const BOOL confirm_pending  = pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL);
     // 早回执后 cache 页的等待对象变了：组早已完成，flush 要等**已编程页表**排空
     // （每页都已被后继/收尾证明、且已确认进 L2P），否则 SYNCHRONIZE CACHE 会在
-    // 「未证明」窗口里提前回执（RISK-CACHE-18 的屏障语义）。
+    // 「未证明」窗口里提前回执（屏障语义）。
     // 页在**完成时**才进页表 ⇒ 屏障必须同时看「在飞成员」：控制器可能已对写段
     // 提前回执（BOT 串行下 SYNCHRONIZE CACHE 紧接着到来），此时命令还在 NAND 里编程。
     const BOOL cache_wb_pending = (ftl->cache_stream.seq.wr.count != 0U) || (ftl->cache_stream.seq.wr_inflight != 0U);
@@ -3559,7 +3563,7 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
         const BOOL wr_pending = (ftl->cache_stream.seq.wr.count != 0U) || (ftl->cache_stream.seq.wr_inflight != 0U);
 
         // 已回执的写映射未确认时，不能让 host 把这次 FLUSH 当成成功（H14 /
-        // RISK-CACHE-18）：置 deferred_error，由下一条命令如实上报 IO_ERROR。
+        // ）：置 deferred_error，由下一条命令如实上报 IO_ERROR。
         if (wr_pending == true)
         {
             ftl->flags.deferred_error = true;
@@ -3699,7 +3703,7 @@ ftl_status_e ftl_trim_step(ftl_ctx_s *ftl)
         // 落盘，无映射变更需记。缓冲的内部不变量（清空 ⇒ 结算 owners）由 wb_handle(DROP)
         // 收口。
         // ⚠ 这里不清旧 L2P 映射：当前依赖 Controller 串行化（TRIM 时该 LBA 没有未完成
-        // 写）。若将来并发 TRIM，drop 后旧映射仍可读 ⇒ 见 RISK-HOST-09。
+        // 写）。若将来并发 TRIM，drop 后旧映射仍可读 ⇒ 。
         if (wb_has(ftl->wbuf, l))
         {
             wb_trigger_s trigger;

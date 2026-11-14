@@ -33,6 +33,7 @@
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
 #include "l2p_cache.h"        /* die_2_ch/ce/lun（die → 坐标的唯一分解点） */
 #include "log.h"
+#include "timer.h" /* platform_now_ms（后台让行超时） */
 
 #include <string.h>
 
@@ -436,7 +437,7 @@ BOOL ftl_op_bg_submit_deferred(void)
  * 返回 true，由 ftl_op_submit* 折成 FTL_AGAIN。
  *
  * @note draining = 窗口已提交完但命令仍在飞：门控必须继续关到排空，否则器件侧
- *       的 31h/3Fh 管线会被别的提交劈开（RISK-CACHE-14）。
+ *       的 31h/3Fh 管线会被别的提交劈开。
  * @note 断点请求策略（docs/design/ftl_design.md §3.16.5）：前台/同步/恢复类被挡
  *       时置 break_requested，请求下一窗口 END；后台元数据只等待、不请求断点。
  *       顺序序列占用 plane cache 寄存器期间，Journal/L2P/GC/WL/CP/元数据目录
@@ -455,7 +456,7 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
     if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
     {
         // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
-        // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR（RISK-HOST-18）。
+        // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR。
         // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
         // ⚠ FTL_OP_READ_RECOVERY **不能**置 break_requested：它恢复的正是本序列
         // 自己的读组。置断点会触发 close_step → ftl_cache_seq_release 重算
@@ -464,10 +465,40 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
         {
             ftl->cache_stream.seq.break_requested = true;
         }
+
+        // L2P 加载是前台的确定依赖（写确认 / GC 搬移）：只请求断点不够，host 连续流
+        // 会在下一个窗口立刻重新占住门控，加载反复被拒直到调用者超时。这里再置
+        // yield_pending，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
+        // 时钟缺失（now == 0）时不置：host 端无法判断超时，宁可放弃让行也不锁死。
+        if (op == FTL_OP_L2P)
+        {
+            const DWORD now_ms = platform_now_ms();
+
+            if ((now_ms != 0U) && (ftl->cache_stream.seq.yield_pending == false))
+            {
+                ftl->cache_stream.seq.yield_pending = true;
+                ftl->cache_stream.seq.yield_ms      = now_ms;
+            }
+        }
         return true;
     }
 
     return false;
+}
+
+/**
+ * @brief 后台让行达成：清 yield_pending
+ *
+ * 只认 L2P 提交成功：让行就是为一个被拒的 L2P 加载而要的，别的后台/前台提交
+ * （尤其 CACHE_PAD / HOST_IO）可能抢在它前面，不能替它清标志。
+ */
+static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
+{
+    if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl->cache_stream.seq.yield_pending == true))
+    {
+        ftl->cache_stream.seq.yield_pending = false;
+        ftl->cache_stream.seq.yield_ms      = 0U;
+    }
 }
 
 /**
@@ -506,6 +537,7 @@ ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
         return FTL_AGAIN;
     }
 
+    ftl_op_seq_yield_clear(ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun), op);
     return FTL_OK;
 }
 
@@ -573,6 +605,7 @@ ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op
         return (submit_status == FC_STATUS_QUEUE_FULL) ? FTL_AGAIN : FTL_ERROR;
     }
 
+    ftl_op_seq_yield_clear(ftl_op_route_get(cmds[0]->ch, cmds[0]->ce, cmds[0]->lun), op);
     return FTL_OK;
 }
 

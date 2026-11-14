@@ -10,7 +10,7 @@
  *     遍历 desc 链：ECC 解码 → 更新 desc->status。
  *     全部成功才解扰；有失败则保持加扰（供 RAID XOR 在 scrambled domain 恢复）。
  *     **擦除页单独识别**（整条 CW 的 1 比特占比 ≥ 99% ⇒ FC_CW_STATUS_EMPTY）：它不是读错误，
- *     跳过解扰/CRC/META 校验；否则 GC 读到半写块的空洞页会把整块误标坏（RISK-GC-11）。
+ *     跳过解扰/CRC/META 校验；否则 GC 读到半写块的空洞页会把整块误标坏。
  *
  *   Stage 2: fc_data_path_raid_recover()
  *     FTL 从 CQ 拿到 completion 后检查 desc 链，当发现 status=UNC
@@ -590,7 +590,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
 
     /* ── 步骤 2：解扰 + CRC + META（合并为一次逐 CW 遍历）──
      * 顺序不可换：解扰 → CRC → META。META/CRC 在加扰区之外，先读 META 取种子
-     * 不会改变结果；擦除页永远按「无 LBA」处理（RISK-GC-12）。 */
+     * 不会改变结果；擦除页永远按「无 LBA」处理。 */
     desc_id = (fc_desc_id_t)cmd->desc_id;
 
     for (cw = 0U; cw < total_desc; cw++)

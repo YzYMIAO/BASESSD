@@ -47,7 +47,7 @@
  * 口径：128 pair = 512 KiB 数据，按实测顺序读 ~887 KB/s 约 0.58 s 一段；与写侧
  * Journal 顺序页配额（63 pair ≈ 0.29 s）同一量级的让步节奏。太小则 START 数回升，
  * 太大则 GC/CP 在长顺序读期间得不到窗口。
- * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展（RISK-CACHE-20）。 */
+ * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展。 */
 #define FTL_CACHE_READ_MAX_RUN_PAIRS (128U)
 
 typedef enum FTL_CACHE_READ_RESULT_E

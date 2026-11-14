@@ -49,7 +49,7 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
                                      *   （onfi_1_0.c），plane 维从 0 起。 */
     BYTE page_type : 2;             /* LP/MP/UP/TP — LDPC decode threshold 预留。
-                                     * 当前无读者；LDPC 分支未编译（RISK-DP-15）。 */
+                                     * 当前无读者；LDPC 分支未编译。 */
     BYTE reserved : 6;              /* Reserved for future data-path bits. */
     BYTE feature_addr;              /* Feature register addr for SET/GET_FEATURES (column).
                                      * 内联数据不走本结构：FC 把 cw_buffers[plane*CW_NUM] 指向

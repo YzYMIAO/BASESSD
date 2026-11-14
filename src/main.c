@@ -54,7 +54,7 @@
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
 #define SSD_FIRMWARE_DEBUG_REVISION 33
-/* 全部构建档当前均为 0：健康域尚未覆盖所有最长路径（RISK-CLI-01）。长同步操作已有
+/* 全部构建档当前均为 0：健康域尚未覆盖所有最长路径。长同步操作已有
  * 显式喂狗点 storage_wdg_kick()（ftl_sync_submit_wait 的自旋泵），启用前仍需上板
  * 验证满盘 GC / format 等路径不会触发 30 s 复位。 */
 #define SSD_WATCHDOG_ENABLE 0U
@@ -429,7 +429,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
  *
  * 本仓自拟的容量折中：主流量产 SSD 的容量在出厂固定，坏块由 OP 吸收、不在
  * 运行期缩容；本仓的二手片没有可信出厂坏块表，OP/Spare 也只会越用越少，
- * 容量口径（本仓自拟的动态折中；主流量产是固定容量 + OP 吸收坏块，见 RISK-CAP-03）：
+ * 容量口径（本仓自拟的动态折中；主流量产是固定容量 + OP 吸收坏块）：
  *   1. 每 plane 只统计**好**的、非固定元数据的块（`>= FTL_METADATA_AREA_END`）；
  *   2. 扣掉 OP 与 Spare 两个预留池的目标块数；
  *   3. **取 plane 最小值**再乘 PLANE_NUM —— Super Block 需要每 plane 一块，
@@ -673,7 +673,7 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
-    /* ③.5 主机可见容量：按实际坏块扣减（RISK-CAP-03，本仓自拟的容量折中）。
+    /* ③.5 主机可见容量：按实际坏块扣减（本仓自拟的容量折中）。
      * 必须在 USB 枚举之前设置——main 继续往下才初始化 USB 设备栈。 */
     g_ctrl.host_lba_max = ssd_ftl_host_lba_max();
 

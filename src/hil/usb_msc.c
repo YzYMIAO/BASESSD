@@ -163,7 +163,7 @@ static BOOL s_deferred_write_error;
  */
 static BOOL usb_msc_take_deferred_error(BYTE lun)
 {
-    /* FTL 侧的迟到结论优先（RISK-CACHE-27）：早回执后写组在页编程完成时就报 OK，
+    /* FTL 侧的迟到结论优先：早回执后写组在页编程完成时就报 OK，
      * FAIL_CACHE 要晚一条命令才到 ⇒ 那个结论只存在于 FTL 的粘性错误里。 */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
@@ -205,7 +205,7 @@ void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, BOOL f
     }
 }
 
-/* WRITE(10) 数据相分块直方图（RISK-NAND-04 取证）。
+/* WRITE(10) 数据相分块直方图（取证）。
  *
  * TinyUSB 按 CFG_TUD_MSC_EP_BUFSIZE 分块回调，桶值就是本次数据相长度：
  * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导）；<=4K 说明每块 4 KB；
@@ -1271,7 +1271,7 @@ static DWORD usb_msc_mode_page_ie(BYTE *page)
  * WCE=0（无写缓存）、IE 全关。
  *
  * @note 不是「Windows 无法完成格式化」的根因：根因是主机对 partitionless 介质
- *       （超级软盘布局）的处理，见 RISK-USBC-02。
+ *       （超级软盘布局）的处理。
  *
  * @param lun 逻辑单元（本仓恒 0）
  * @param page 请求的 mode page（CDB[2] & 0x3F）

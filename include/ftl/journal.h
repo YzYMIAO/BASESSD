@@ -652,7 +652,7 @@ ftl_status_e jrn_replay(l2p_jrn_s *journal, l2p_cache_s *cache, DWORD cp_sequenc
  * @brief 最近一次 jrn_replay 命中「降级 L2P region」的条目数（只读诊断 / 启动结果）。
  *
  * 非 0 表示该 region 未被 Journal 覆盖的旧映射已丢。该计数只作诊断；
- * 范围化恢复不据它回退全量重建（RISK-BOOT-18）。调用前须已有一次 jrn_replay。
+ * 范围化恢复不据它回退全量重建。调用前须已有一次 jrn_replay。
  *
  * @return 命中降级 region 的条目数（0 = 未命中）
  */

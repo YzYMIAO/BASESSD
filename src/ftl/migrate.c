@@ -58,7 +58,7 @@
 // page0 补零写的全零页（.bss，零初始化；单线程 superloop 共享）。
 static BYTE s_zero_page[PAGE_MAIN_SIZE];
 
-// abort 日志限流（RISK-MIG-05）：上一行日志的时刻 + 本窗口内被抑制的条数。
+// abort 日志限流：上一行日志的时刻 + 本窗口内被抑制的条数。
 static DWORD s_abort_log_ms;
 static DWORD s_abort_suppressed;
 
@@ -76,7 +76,7 @@ static void mig_job_step(mig_handle_s *m);
  *
  * `next_page` **必须**一起带过来：它是该块已编程页数的上界，搬移只读 [0, next_page)。
  * 半写块（提前关闭 / GC 目的块）的空洞页物理上是擦除态，读回来 ECC 必失败；
- * 不按写指针截断就会把空洞当成「victim 读失败」并误标坏块（RISK-GC-11）。
+ * 不按写指针截断就会把空洞当成「victim 读失败」并误标坏块。
  * temperature 不参与搬移决策，保持 memset 的默认值。
  *
  * @param sb           出参：组装出的 victim 视图（先整体清零，再填 plane_blocks 与 next_page）。
@@ -379,7 +379,7 @@ static ftl_status_e mig_erase_submit(mig_handle_s *m)
  *
  * @note **快路径**——各 plane valid_count 之和 == 0 ⇒ 不读 victim、先进 FLUSH_JRN
  * 过 F10 屏障再擦（省整块 NAND 读；整块空洞 plane 的根因已由页打包写缓冲消除）。
- * 空块也必须过屏障：上一 job 的映射可能还在 Journal 页缓冲里（RISK-GC-18）。
+ * 空块也必须过屏障：上一 job 的映射可能还在 Journal 页缓冲里。
  * victim 按值拷贝：closed_sb_list 在搬移期间可能被 allocator 追加/挪动，
  * 持指针会让「本 job 的 victim」随列表漂移（allocator.h 不变量③）。
  */
@@ -429,7 +429,7 @@ static void mig_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind
 }
 
 /**
- * @brief 按触发位与 host 写流选收益判据模式（RISK-GC-13）。
+ * @brief 按触发位与 host 写流选收益判据模式。
  * 磨损均衡不在 GC 触发里，由独立 WL 路径处理，不在这里判 OFF。
  *
  * @param triggers     gc_should_trigger 返回的触发位掩码。
@@ -712,7 +712,7 @@ static BOOL mig_predict_begin(mig_handle_s *m)
 /* ── 4. 收尾 ── */
 
 /**
- * @brief abort 日志限流（RISK-MIG-05）：坏块介质上 GC 会反复选中不可读 victim、每次
+ * @brief abort 日志限流：坏块介质上 GC 会反复选中不可读 victim、每次
  * 重试都 abort；逐次 WRN 会把有效进展淹没。5 s 一行（时钟缺失时 64 次一行）；
  * `mark BAD` 仍逐块 LOGE（每个坏块只发生一次，是真正的结论）。
  *
@@ -870,7 +870,7 @@ static void mig_page_next(mig_handle_s *m)
 }
 
 /**
- * @brief 目标页失败处置（RISK-GC-02）：
+ * @brief 目标页失败处置：
  * - 命令从未提交（建链失败 / stall 超时）且本页对没有任何 plane 编程 ⇒ rewind；
  * - 命令已提交/可能半编程，或前序 plane 已编程 ⇒ 立即关闭 Cold SB。
  * 绝不能在同一个 Open SB 上继续写下一页。
@@ -924,7 +924,7 @@ static void mig_job_finish(mig_handle_s *m)
         // 整块迁移成功 ⇒ 该块的历史读失败只是瞬态，清零。
         // 只在**整个 job 完成**时清（所有已编程页都读过），不能在单页读成功或
         // 单 plane 擦成功时清：坏页之后的页永远读不到，按单页成功清零会让标坏阈值
-        // 永不触发（RISK-GC-07）；逐 plane 清零会让系统性熔断永不触发（RISK-GC-10）。
+        // 永不触发；逐 plane 清零会让系统性熔断永不触发。
         m->state.failure.read_fail_streak = 0U;
         for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
@@ -1044,7 +1044,7 @@ static void mig_job_finish(mig_handle_s *m)
     m->job.batch_outstanding  = 0U;
     m->job.batch_failed       = false;
     m->job.batch_cleanup_done = false;
-    // fail_gblock[] / fail_count[] 跨 job 保留（RISK-GC-01/07）：只在本 job 正常完成
+    // fail_gblock[] / fail_count[] 跨 job 保留：只在本 job 正常完成
     // （上方整块迁移成功）或该 plane 标 BAD 时清零，不在这里无条件清。
 }
 
@@ -1365,7 +1365,7 @@ static BOOL mig_batch_alloc_dst(mig_handle_s *m, BYTE n)
 static BOOL mig_read_step(mig_handle_s *m)
 {
     // 只读该块**已编程**的页 [0, next_page)。空洞页物理上是擦除态，读它只会得到
-    // BLANK；跳过它们既省命令，也不给「把空洞误判成坏块」留窗口（RISK-GC-11）。
+    // BLANK；跳过它们既省命令，也不给「把空洞误判成坏块」留窗口。
     // next_page == 0 只可能来自异常路径（正常 victim 至少写过 1 页）：保守按整块扫，
     // 读数由 FC 的擦除页识别兜底。
     BYTE page_limit = m->job.victim.next_page;
@@ -1469,7 +1469,7 @@ static BOOL mig_read_step(mig_handle_s *m)
 
         // 成对分配目标页（Cold 流）。池耗尽 ⇒ 中止（不擦 victim，源数据仍在、
         // L2P 未动，下轮 GC 再来）——**不得**先擦后搬。
-        // 静态 WL 走 high-wear 变体：目标取擦除最多的空闲块（RISK-WL-08）。
+        // 静态 WL 走 high-wear 变体：目标取擦除最多的空闲块。
         const alc_super_alloc_mode_e dst_mode = m->job.dst_high_wear ? ALC_SUPER_ALLOC_COLD_HIGH_WEAR : ALC_SUPER_ALLOC_COLD;
         const ftl_status_e           dst_st   = alc_super_open_alloc_pair(m->alloc, dst_mode, m->job.dst);
 
@@ -1477,7 +1477,7 @@ static BOOL mig_read_step(mig_handle_s *m)
         {
             // 满盘且选出的 victim 也换不到目的页 ⇒ 与「无收益 victim」同义：
             // 没有可回收的空间。必须置 no-gain，否则写路径会一直重试
-            // 「选中 → 目的分配失败 → abort」（RISK-GC-14）。
+            // 「选中 → 目的分配失败 → abort」。
             if (m->job.kind == MIG_KIND_GC)
             {
                 mig_gc_nogain_note(m, GC_BENEFIT_EMERGENCY, m->state.benefit.best_valid_pct, platform_now_ms());
@@ -1541,7 +1541,7 @@ static BOOL mig_read_settle_step(mig_handle_s *m)
             if (l2p_is_ready(m->cache, m->job.cw_lba[plane][cw]) == false)
             {
                 // 加载在飞不计提交卡死，但**必须**计入独立的等待上限：
-                // 加载永久卡住时 job 否则永不中止（RISK-MIG-01）。
+                // 加载永久卡住时 job 否则永不中止。
                 (void)mig_job_wait(m, "l2p load timeout");
                 return true;
             }
@@ -1841,7 +1841,7 @@ static BOOL mig_flush_jrn_step(mig_handle_s *m)
     if (jrn_is_idle(m->journal) == false)
     {
         // 有命令在飞不计提交卡死，但计入独立的等待上限：Journal job 永久卡住时
-        // job 否则永不中止（RISK-MIG-01）。
+        // job 否则永不中止。
         (void)mig_job_wait(m, "journal flush timeout");
         return true;
     }
@@ -2363,7 +2363,7 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
     // 读失败与“空页”必须分开：前者页上可能仍有有效数据，擦 victim 会永久丢数据；
     // 后者（无错误 + META 全 FF）只是从未写过的 CW，跳过本页即可。
     // ⚠ 失败原因必须保留到日志：FC 状态错 / 短链读 / META 页基址损坏是三种不同的
-    // 故障源，合并成一个 read_ok=false 会让 mark BAD 无法归因（RISK-MIG-06）。
+    // 故障源，合并成一个 read_ok=false 会让 mark BAD 无法归因。
     BOOL        read_ok = true;
     const char *cause   = "";
 
@@ -2414,7 +2414,7 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
     if (read_ok == false)
     {
         // [待上板] 读错误 ⇒ 中止，victim 不擦。空页（decode false）不在此列。
-        // 同一源块连续失败达上限 ⇒ 标 BAD 并摘除其 Closed plane（RISK-GC-01）：
+        // 同一源块连续失败达上限 ⇒ 标 BAD 并摘除其 Closed plane：
         // 否则每轮 GC 都重选同一 victim、永久 abort，容量不再增长。
         // 其他 plane 仍可迁移；数据不因标坏而丢失（坏块本来就读不回来）。
         // ⚠ 计数按 **plane 的源块**分开：同一 victim 的两个 plane 块号不同，共用
@@ -2431,7 +2431,7 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
         if (m->state.failure.fail_count[plane] >= MIG_VICTIM_READ_FAIL_MAX)
         {
             // gblk 是全局块号（plane*BLOCKS_PER_PLANE+block）；与 abort 行的
-            // g0/g1 同一坐标（RISK-MIG-06）。
+            // g0/g1 同一坐标。
             LOGW(LOG_TAG_MIG "victim read failed gblk=%hu x%hhu cause=%s — mark BAD\r\n", gsrc, m->state.failure.fail_count[plane], cause);
             (void)bbt_mark_bad(m->alloc, gsrc);
             if (alc_super_closed_drop_plane(m->alloc, plane, m->job.victim.plane_blocks[plane]))
@@ -2454,11 +2454,11 @@ static void mig_read_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_statu
             }
         }
 
-        mig_job_abort(m, cause); /* 三种原因直传日志，见 RISK-MIG-06 */
+        mig_job_abort(m, cause); /* 三种原因直传日志 */
     }
     else
     {
-        // 单页读成功**不**清零失败计数（RISK-GC-07）：坏页之前的页每轮都会成功读一遍，
+        // 单页读成功**不**清零失败计数：坏页之前的页每轮都会成功读一遍，
         // 若按单页成功清零，第 2 次重试永远从 0 开始 ⇒ MIG_VICTIM_READ_FAIL_MAX 不可达。
         // 计数只在整个 job 完成（mig_job_finish）或该块标 BAD 时清。
         m->job.phase = MIG_READ_SETTLE;
@@ -2505,7 +2505,7 @@ static void mig_write_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
     {
         // [待上板] 写错误 ⇒ 中止，victim 不擦。
         // 命令已提交，目的页可能已半编程 ⇒ 不能 rewind；立即关闭 Cold SB
-        // （RISK-GC-02）。关闭后失败页留在 SB 尾部，下一次 GC 换新的目的块；
+        // 。关闭后失败页留在 SB 尾部，下一次 GC 换新的目的块；
         // 目的块可能已有成功迁移的页，**不能**标 BAD，旧块的已写页仍可读。
         mig_dst_fail_cleanup(m, true);
         mig_job_abort(m, "write failed");
@@ -2603,7 +2603,7 @@ static void mig_erase_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
         {
             // ⚠ 不在这里清 `read_fail_streak`：擦除是**逐 plane** 的，一个 victim
             // 常常一侧 plane 健康（读完→擦成功）另一侧读失败；在此清零会让熔断
-            // 计数每个 job 都归零，阈值永不触发（RISK-GC-10）。清零只在
+            // 计数每个 job 都归零，阈值永不触发。清零只在
             // mig_job_finish 的「整块迁移成功」分支。
 
             // 擦除成功：统一走 allocator 的擦除记账（含 !bad 断言 + 清 valid）。
@@ -2647,7 +2647,7 @@ static void mig_erase_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
     }
 
     // 逐 plane 摘除已处理的块：擦完后该块已归还 Free Pool（或已标坏），旧 Closed 条目
-    // 不得继续引用它——否则块被重新分配并再次 Closed 后会被旧条目误认（RISK-GC-04）。
+    // 不得继续引用它——否则块被重新分配并再次 Closed 后会被旧条目误认。
     // 条目在最后一个 plane 摘除时自动移除。
     if (alc_super_closed_drop_plane(m->alloc, plane, m->job.victim.plane_blocks[plane]))
     {

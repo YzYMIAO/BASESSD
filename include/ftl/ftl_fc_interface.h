@@ -64,12 +64,12 @@
  * 一个 4KB host 子操作最多占 FTL_LBA_PER_PAIR（8）个 desc/buffer；FC buffer 池只有
  * 128 ⇒ 16 个在飞 host 写就能吃满。后台（CP 的 region flush / GC 的搬移 / journal 页）
  * 此时拿不到命令与 buffer ⇒ CP 无法写 Header / 块表 ⇒ 掉电后每次开机都走全量重建
- * （RISK-CP-04 / RISK-WL-07）。这里让 host 写在池接近满时先背压，保留 4 个 pair 规模
+ * 。这里让 host 写在池接近满时先背压，保留 4 个 pair 规模
  * 的后台资源。
  *
  * ⚠ **所有 host 路径**（含 cache 读/写与 wbuf）都必须走本检查：host 突发能把命令/
  * desc/buffer 吃成 `cmd=0/buf=0`，使 CP/META/L2P 无法提交 ⇒ confirm park timeout
- * + 已回执写丢失（RISK-HOST-18）。预算取 4 pair，保证后台始终有提交配额。
+ * + 已回执写丢失。预算取 4 pair，保证后台始终有提交配额。
  *
  * 判据：host 的**下一次**子操作之后，各池仍至少剩 RESERVED 个槽位。
  * ⚠ 只约束 host 路径；后台路径（CP/GC/journal）直接走各自的 async 原语，不经过本检查。 */
@@ -346,7 +346,7 @@ typedef struct FTL_COMMAND_BLOCK_ECC_S
  *
  * 一个 multi-plane 子操作在 Policy B 下覆盖**两个独立块**；host 读成功后的
  * read_count / ECC 趋势记账必须逐块进行，只记 `ftl_cmd_pba()` 的首个 desc 会漏掉
- * 第二个 plane（RISK-HOST-02）。本函数遍历 desc 链、按 gblock 去重、取每块内
+ * 第二个 plane。本函数遍历 desc 链、按 gblock 去重、取每块内
  * ECC 最大值——desc 链布局与 PBA→PAA 转换都留在本层（H13）。
  *
  * @param cmd 已完成、且尚未 release 的命令（desc 链仍有效）
@@ -423,7 +423,7 @@ ftl_status_e ftl_cmd_read_data(fc_cmd_s *cmd, void *buffer, DWORD length);
  *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
  *   会把调用者栈帧钉住并重入完成泵。
  *
- * ⚠ **命令归属（RISK-IF-17）由 `submitted` 出参决定，错误路径不得无条件 release**：
+ * ⚠ **命令归属由 `submitted` 出参决定，错误路径不得无条件 release**：
  *   · 成功（FTL_OK）：命令仍归调用者，读完数据（`ftl_cmd_read_data`）后再 release。
  *   · 失败且 `*submitted == false`（未提交）：命令从未进 FC ⇒ **调用者必须 release**。
  *   · 失败且 `*submitted == true`（已提交但超时）：命令仍在 FC/NAND 管线，
@@ -525,7 +525,7 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
  * ⚠ 刻意**不判定 NAND 失败**——诊断 dump / 出厂坏块探针要拿到原始位。
  * ⚠ **不能用来判空**：LDPC_RAW 跳过 ECC，且本层拿不到 META/CRC/parity，
  *   「RAW 读 + 数 FF」判不出「编程过没有」——判空用 `ftl_page_is_blank`
- *   / `ftl_page_blank_check`（解码路径 + FC 的 CW 状态位）。见 RISK-IF-15。
+ *   / `ftl_page_blank_check`（解码路径 + FC 的 CW 状态位）。。
  *
  * @param pba    目标页 PBA
  * @param buffer 输出缓冲（须 >= PAGE_SIZE，按 CW 槽位排布）
@@ -541,7 +541,7 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer);
  * 依据是 ECC 是否成码字 + 整条 528B CW 的 1 比特占比 + parity 是否写成。
  * ⇒ FTL 不需要、也**不应该**自己拿 USER 区字节去猜（FC 只向 FTL 暴露 USER 512B）。
  * ⚠ 不要用 `ftl_sync_read_page_raw()` + 数 FF 实现本判据：RAW 读跳过 ECC，
- *   空/非空的证据全被跳过（RISK-IF-15）。
+ *   空/非空的证据全被跳过。
  *
  * 读命令没走通 ⇒ 一律返回 false（判“非空”，保守方向）。
  * 判据与 full rebuild / BBT 探针 / Journal 扫页 / L2P 日志区恢复共用（C2：唯一实现）。

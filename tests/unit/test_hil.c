@@ -7,9 +7,9 @@
  *
  * ⚠ 运行前拔掉 USB。本套件**不 format**：写读/flush/trim 固定用容量尾部的一个
  *   8-LBA 窗口（不碰文件系统常用区）；重复运行只是覆盖同一窗口。
- * ⚠ 单 die 无法构造多 run 拆分 / 跨实例部分失败（RISK-CTRL-01）；USB 槽状态机
+ * ⚠ 单 die 无法构造多 run 拆分 / 跨实例部分失败；USB 槽状态机
  *   （flush 槽 / read BUSY / 0x91 / 相同写匹配）由 PC 主机侧矩阵覆盖，
- *   见 docs/design/known_risks.md RISK-USB-09..13。
+ *   见 docs/design/known_risks.md ..13。
  * ⚠ 本套件不注入、不 mock：所有路径走生产 FTL/NAND；只复用主 boot 建好的实例。
  */
 

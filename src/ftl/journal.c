@@ -48,7 +48,7 @@
 #include "journal.h"
 
 #include "assertion.h"
-#include "bbt.h"          /* bbt_mark_bad（环形块持续擦除失败，RISK-JN-01） */
+#include "bbt.h"          /* bbt_mark_bad（环形块持续擦除失败） */
 #include "fault_inject.h" /* 测试镜像专属注入点（ISS-FTL-16，FC_NAND_TEST_ENABLE 下编入） */
 #include "fc.h"
 #include "ftl.h"
@@ -60,7 +60,7 @@
 
 #include <string.h>
 
-// 同一环形块连续擦除失败多少次后判为不可用（RISK-JN-01）。
+// 同一环形块连续擦除失败多少次后判为不可用。
 // 3 次覆盖瞬态擦除失败；持续失败只能来自物理坏块。继续重试没有意义：环只有
 // JOURNAL_BLOCK_COUNT 块，必须标坏并跳过，否则 journal 永久停在 need_erase。
 #define JRN_ERASE_FAIL_MAX (3U)
@@ -79,7 +79,7 @@ static DWORD s_replay_degraded_region;
 static DWORD s_replay_write_fail_entries;
 static DWORD s_replay_write_fail_lba;
 /* 应用遍（第二遍）页读失败数：扫描遍读成功、应用遍才失败的页同样意味着条目被漏，
- * 必须让 jrn_replay 返错（RISK-JN-08），不能只打一行日志。 */
+ * 必须让 jrn_replay 返错，不能只打一行日志。 */
 static DWORD s_replay_page_read_fail;
 
 /* erase kick 失败日志限流（时间优先，无时钟时 64 条兜底）。 */
@@ -90,7 +90,7 @@ static DWORD s_erase_kick_n;
  * s_probe_hdr / s_probe_raw 同法）。放文件级 static 而不是栈上：
  *   · replay_pages = 256 × 16 B = 4 KiB；
  *   · 扫描/应用共用一页 2 KiB。
- * 二者叠加会突破本仓 2 KiB 栈预算（RISK-JN-06）。 */
+ * 二者叠加会突破本仓 2 KiB 栈预算。 */
 static jrn_page_ref_s s_replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
 static BYTE           s_scan_page[JRN_PAGE_SIZE];
 
@@ -174,7 +174,7 @@ static BOOL jrn_ring_block_bad(const l2p_jrn_s *journal, BYTE b)
 static BYTE jrn_block_next(const l2p_jrn_s *journal, BYTE from)
 {
     // ⚠ 循环上界是 `<`，**不**检查 from 自身：只剩一个可用块时选自己会擦掉
-    // 「正在写 / 持有最新页」的块（RISK-JN-07）。此时返回 NONE，由调用者置
+    // 「正在写 / 持有最新页」的块。此时返回 NONE，由调用者置
     // ring_full 安全停写。
     for (BYTE i = 1U; i < JOURNAL_BLOCK_COUNT; i++)
     {
@@ -773,7 +773,7 @@ static BOOL jrn_erase_start(l2p_jrn_s *journal)
 }
 
 /**
- * @brief 记录一次环形块擦除失败；同一块连续失败达上限即标坏并跳过（RISK-JN-01）。
+ * @brief 记录一次环形块擦除失败；同一块连续失败达上限即标坏并跳过。
  *
  * @param journal Journal
  * @param block 失败的环形块。
@@ -819,7 +819,7 @@ static void jrn_erase_failed(l2p_jrn_s *journal, BYTE block)
     BYTE next = jrn_block_next(journal, block);
 
     // 候选若是当前写块 ⇒ 不能擦（它持有最新条目）。从当前块之后继续找：环里
-    // 真正的轮转目标就是「当前块之后的第一个可用块」（RISK-JN-07）。
+    // 真正的轮转目标就是「当前块之后的第一个可用块」。
     if (next == journal->handle.state.current_block)
     {
         next = jrn_block_next(journal, next);
@@ -1152,14 +1152,14 @@ void ftl_journal_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
 /**
  * @brief 空片页判定：格式化后的 Journal 环形块是擦除页，带 META/CRC 校验的读会失败；
  * 用 `ftl_page_is_blank` 走解码路径判（ECC 是否成码字 + 整条 CW 的 1 比特占比）。
- * 只有**非空且读失败**的页才是真正不可信的页（RISK-BOOT-08）。
+ * 只有**非空且读失败**的页才是真正不可信的页。
  *
  * @param addr 待判页的 NAND 地址
  * @return true = 该页从未编程（空页）
  *         false = 已编程，或读命令没走通
  *
  * @note 不用 RAW 读 + 数 FF：RAW 读刻意跳过 ECC（判空依据全被跳过），
- *       且只交出 USER 512B，看不出 META/CRC/parity 是否写成（RISK-IF-15）。
+ *       且只交出 USER 512B，看不出 META/CRC/parity 是否写成。
  */
 static SSD_CODE_FAST BOOL jrn_page_raw_blank(DWORD addr)
 {
@@ -1297,7 +1297,7 @@ static SSD_CODE_FAST WORD jrn_ring_scan(const l2p_jrn_s *journal, DWORD cp_seque
     }
 
     // 读失败的页 = 看不到的条目。调用者必须据此决定是否还能信任回放结果
-    // （RISK-BOOT-08：不能静默当「无更多条目」）。
+    // （不能静默当「无更多条目」）。
     return read_errors;
 }
 
@@ -1323,7 +1323,7 @@ SSD_CODE_FAST BOOL jrn_page_scan_latest(const l2p_jrn_s *journal, jrn_page_ref_s
     }
 
     // 有效页必有 ≥1 条条目（entry_count == 0 才是「环空」）；不能用 page_seq > 0
-    // 当哨兵——序号回绕后 0 是合法值（RISK-JN-09）。
+    // 当哨兵——序号回绕后 0 是合法值。
     return (out != NULL) && (out->entry_count > 0U);
 }
 
@@ -1357,7 +1357,7 @@ SSD_CODE_FAST void jrn_resume(l2p_jrn_s *journal, const jrn_page_ref_s *latest, 
         BYTE next_block = latest->block;
         BYTE next_page  = (BYTE)(latest->page + 1U);
 
-        // RISK-JN-10：最新页之后的一页可能正是掉电时在写的白页（半编程、非空白）。
+        // 最新页之后的一页可能正是掉电时在写的白页（半编程、非空白）。
         // 对已编程页再编程 = AND 损坏，主流做法是「绝不二次编程」⇒ 跳过它；
         // 块尾由下面的换块路径处理（新块先擦再写）。
         if ((next_page < PAGES_PER_BLOCK) && (jrn_page_raw_blank(jrn_page_addr(journal, latest->block, next_page)) == false))
@@ -1559,7 +1559,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_s *journal, l2p_cache_s
                 {
                     // 降级基线只丢「该 region 未被 Journal 覆盖的旧映射」，**不影响**
                     // valid_count 增量（old/new PBA 都来自条目本身）⇒ 不再让整份
-                    // 块元数据快照失效（RISK-BOOT-18 的范围化恢复）。
+                    // 块元数据快照失效（范围化恢复）。
                     // 丢失的映射由 host 读路径按 IO_ERROR 暴露（不能静默返回零）。
                     s_replay_degraded_entries++;
                     if (s_replay_degraded_region == UINT32_MAX)
@@ -1649,7 +1649,7 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_s *journal, l2p_cache_s
 SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_s *journal, l2p_cache_s *cache, DWORD cp_sequence, DWORD *out_entries, jrn_replay_ctx_s *block_ctx)
 {
     // JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 16B → 4 KiB。
-    // 放文件级 static（开机单线程、无重入），不占 2 KiB 栈预算（RISK-JN-06）。
+    // 放文件级 static（开机单线程、无重入），不占 2 KiB 栈预算。
     jrn_page_ref_s *const replay_pages = s_replay_pages;
 
     // 本轮回放的异常汇总（见文件内 s_replay_* 的注释）。
@@ -1711,9 +1711,9 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_s *journal, l2p_cache_s *cache, DW
 
     // 读失败的页 = 可能漏回放的条目。**写态恢复已经完成**（jrn_resume 必须执行，
     // 否则写指针会回到 block0/page0 二次编程），但调用者不能把本次回放当成完整结果
-    // ——应回退 full metadata rebuild（RISK-BOOT-08）。
+    // ——应回退 full metadata rebuild。
     // ⚠ 扫描遍（read_errors）与应用遍（s_replay_page_read_fail）**都要判**：
-    //   某页扫描时能读、应用时读失败同样意味着条目被漏（RISK-JN-08）。
+    //   某页扫描时能读、应用时读失败同样意味着条目被漏。
     if ((read_errors != 0U) || (s_replay_page_read_fail != 0U))
     {
         LOGW(LOG_TAG_JRN "replay incomplete: %hu scan + %lu apply page(s) unreadable\r\n", read_errors, s_replay_page_read_fail);

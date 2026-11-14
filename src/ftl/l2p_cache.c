@@ -47,7 +47,7 @@
 #include "l2p_cache.h"
 
 #include "assertion.h"
-#include "bst.h" /* ftl_block_state / ftl_block_state_name（降级现场诊断，RISK-MD-06） */
+#include "bst.h" /* ftl_block_state / ftl_block_state_name（降级现场诊断） */
 #include "fc.h"
 #include "fc_interface.h" /* fc_get_resource_stats（写回前的资源预检） */
 #include "ftl.h"          /* ftl_ctx_s / ftl_service_pump（同步逃生口用） */
@@ -77,7 +77,7 @@ _Static_assert((L2P_ENTRIES_PER_REGION % FTL_LBA_PER_PAIR) == 0U, "FTL_LBA_PER_P
 _Static_assert((FTL_LBA_PER_PAIR & (FTL_LBA_PER_PAIR - 1U)) == 0U, "FTL_LBA_PER_PAIR 必须是 2 的幂（掩码/页基址依赖）");
 _Static_assert(FTL_LBA_PER_PAIR < 32U, "1U << FTL_LBA_PER_PAIR 会溢出 DWORD");
 
-// 在飞快照位容量必须覆盖写回并发上限（RISK-MD-06）：每个在飞写回占一个表项，
+// 在飞快照位容量必须覆盖写回并发上限：每个在飞写回占一个表项，
 // 表满时 `md_slot_pair_append` 只能按背压拒绝——不能出现"取到槽却登记不上"。
 _Static_assert(MD_SLOT_RESV_MAX >= (L2P_FLUSH_MAX_INFLIGHT * L2P_REGION_COPIES), "MD_SLOT_RESV_MAX 小于「写回并发上限 × 副本数」");
 
@@ -706,7 +706,7 @@ SSD_CODE_FAST void l2p_init(l2p_cache_s *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
 
     // 全局 Region 级脏标记：开机全清（F4）
     memset(cache->region_dirty_bitmap, 0, sizeof(cache->region_dirty_bitmap));
-    // 降级标记是 RAM 态（RISK-BOOT-18）：开机全清，本次启动内由加载失败置位。
+    // 降级标记是 RAM 态：开机全清，本次启动内由加载失败置位。
     memset(cache->region_degraded_bitmap, 0, sizeof(cache->region_degraded_bitmap));
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -1091,7 +1091,7 @@ static l2p_cache_line_s *l2p_line_evict(l2p_cache_s *cache, BOOL flush_dirty)
 //
 // 覆盖「拿不到命令 / 提交背压」两种失败（"无行可驱逐"由 l2p_evict_fail_log
 // 带现场计数打印）。持续失败时 confirm park 会超时并让 host 写失败，没有日志
-// 就没有线索（RISK-HOST-05）。1 s 一行；时钟缺失时 64 次一行，避免刷屏。
+// 就没有线索。1 s 一行；时钟缺失时 64 次一行，避免刷屏。
 /* ══════════════════════════════════════════════════════════
  * 4. 加载
  * ══════════════════════════════════════════════════════════ */
@@ -1115,7 +1115,7 @@ static SSD_CODE_FAST void l2p_load_fail_log(DWORD region_id, const char *cause)
     LOGW_IF(log_rate_due(&s_load_fail_ms, &s_load_fail_n, interval), LOG_TAG_L2P "load start failed region=%lu cause=%s\r\n", region_id, cause);
 }
 
-// region 降级日志的限流（RISK-L2P-04 / RISK-JN-05）。
+// region 降级日志的限流（RISK-L2P-04 /）。
 //
 // 一次 full metadata rebuild 可能让大量 region 同时降级；逐 region 打 LOGE 会
 // 写满 UART TX 环并拖慢重建。5 s 一行 + suppressed 计数；时钟缺失时 64 次一行。
@@ -1263,7 +1263,7 @@ static BOOL l2p_load_begin(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD reg
     // **部分**旧映射丢了，region 页本身仍可能有效——journal 回放或 host 写入后
     // CP 会把它 flush 到新页，Directory 已指向新位置。整行短路成 INVALID 会让
     // 已恢复的映射在行驱逐后消失（host 误报 IO_ERROR，GC 还可能漏搬有效 CW）。
-    // 位图只用于 host 读的「未映射 ⇒ IO_ERROR」判定（RISK-BOOT-18）。
+    // 位图只用于 host 读的「未映射 ⇒ IO_ERROR」判定。
 
     DWORD primary = md_entry_find(owner->metadata_dir, METADATA_TYPE_L2P_REGION, local_region);
     DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
@@ -2195,7 +2195,7 @@ SSD_CODE_FAST ftl_status_e l2p_write_sync(l2p_cache_s *cache, DWORD lba, DWORD p
  * @param lba           失败页的页对基址（全局 LBA）。
  * @param cw_bitmap     失败页的 CW 位图（bit0..7 对应 lba+0..lba+7）。
  *
- * @note 唯一调用者是 cache 写序列的失败撤销（RISK-CACHE-28）：已回执的页被器件 FAILC
+ * @note 唯一调用者是 cache 写序列的失败撤销：已回执的页被器件 FAILC
  *       判失败时，把该页 LBA 从 L2P 作废，再用本标记让读**可见地失败**，而不是零填。
  *       CLEAN CMT 全部失效；DIRTY 只清失败页 LBA 范围（其余是同 region 更早的成功写）。
  */
@@ -2383,7 +2383,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
     {
         // 命令池空是瞬态背压（FTL_AGAIN）；只有地址/建链的硬失败才是 FTL_ERROR。
         // 混淆二者会让 cp_regions_flush 中止 Checkpoint（H38）。
-        // 两槽已烧、没有命令在飞 ⇒ 立刻释放槽位预留，否则该块永久不可回收（RISK-MD-06）。
+        // 两槽已烧、没有命令在飞 ⇒ 立刻释放槽位预留，否则该块永久不可回收。
         md_slot_release(owner->metadata_dir, region_addr[0], region_addr[1]);
         return build_status;
     }
@@ -2394,7 +2394,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
     {
         (void)fc_command_release(cmd->cmd_id);
         L2P_TAG(cache, line)->state = L2P_CACHE_DIRTY;                        /* 回滚：行仍脏，下轮重试 */
-        md_slot_release(owner->metadata_dir, region_addr[0], region_addr[1]); /* 无命令在飞 ⇒ 释放预留（RISK-MD-06）*/
+        md_slot_release(owner->metadata_dir, region_addr[0], region_addr[1]); /* 无命令在飞 ⇒ 释放预留*/
         return FTL_AGAIN;
     }
 
@@ -2762,7 +2762,7 @@ void ftl_l2p_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *c
             }
 
             // 终态（commit 或失败）已定：释放槽位预留。此后该块的回收判据回到
-            // l2p_live —— 成功时新位置已计入，失败时槽里的数据作废、无人引用（RISK-MD-06）。
+            // l2p_live —— 成功时新位置已计入，失败时槽里的数据作废、无人引用。
             md_slot_release(ftl->metadata_dir, line->flush_pba[0], line->flush_pba[1]);
 
             ASSERT(ftl->cache->inflight.flush > 0U);

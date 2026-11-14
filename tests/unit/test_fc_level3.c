@@ -102,7 +102,7 @@
  *
  * ⚠ 窗口只保证避开**固定**区：跑 UT 时 FTL 是活的（src/main.c 无条件 ssd_ftl_boot_all()，
  *   test 命令从主循环的 uart_service_poll() 进来），free / OP / spare 池覆盖整片 device
- *   ⇒ **动态** L2P region 块（≥32 的任意块）与 FTL 用户数据块**拦不住**（RISK-UT-10）。 */
+ *   ⇒ **动态** L2P region 块（≥32 的任意块）与 FTL 用户数据块**拦不住**。 */
 #define L3_BLOCK_LO ((WORD)(BLOCKS_PER_PLANE * 30U / 100U)) /* 2048 ⇒ 614 */
 #define L3_BLOCK_HI ((WORD)(BLOCKS_PER_PLANE * 70U / 100U)) /* 2048 ⇒ 1433 */
 

@@ -763,7 +763,7 @@ static void cp_job_step(cp_handle_s *h)
                 if (r == MD_DIR_CKPT_BUSY)
                 {
                     // 另一个 writer（metadata job）正在写目录检查点：背压重试同一阶段
-                    // （RISK-MD-06：不推进 sequence、不取槽）。
+                    // （不推进 sequence、不取槽）。
                     (void)cp_job_stall(h);
                     return;
                 }
@@ -1237,7 +1237,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_s *h, DWORD *out_layout_versio
     // · 读到擦除页        ⇒ 再看固定元数据区是否已写过：空片 ⇒ NO_RECORD；
     // 其它元数据已写 ⇒ IO_ERROR（CP 缺失，不自动擦片）
     // ⚠ 判空走 `ftl_page_blank_check`（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比），
-    //   不是「RAW 读数 FF」——RAW 读跳过 ECC，也没把 META/CRC/parity 交给 FTL（RISK-IF-15）。
+    //   不是「RAW 读数 FF」——RAW 读跳过 ECC，也没把 META/CRC/parity 交给 FTL。
     // ⚠ 不要只用 bbt_medium_has_ftl_data 判空：它对“空片”和“总线读死”都返回 false。
     BOOL cmd_ok      = false;
     BOOL any_written = false;
@@ -1276,7 +1276,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_s *h, DWORD *out_layout_versio
  * @brief 把 BST + OP/Spare 池归属编码成块元数据快照
  *
  * 与 region_bitmap / journal_seq 在同一协作点取定；动态 LOG 块以 Directory
- * 为准（RISK-BOOT-15）。
+ * 为准。
  *
  * @param alloc  allocator（BST 与池归属来源）
  * @param md_dir Directory（动态 LOG 块身份；可 NULL）
@@ -1294,7 +1294,7 @@ void cp_block_snapshot(const alc_s *alloc, const md_dir_cache_s *md_dir, WORD wo
 
         // Directory 是动态 LOG 块身份的唯一权威：它不属 allocator 池，合法编码是
         // LOG + no-pool。若 BST 因历史路径停在 NONE，照实编码会让下一次开机的
-        // 第 1 遍校验判为非法并拒绝**整份**快照（RISK-BOOT-15）⇒ 每次冷启动全盘 rebuild。
+        // 第 1 遍校验判为非法并拒绝**整份**快照⇒ 每次冷启动全盘 rebuild。
         // BAD 是终态，不得被 LOG 覆盖。
         if ((md_dir != NULL) && (ftl_block_is_bad(blk) == false) && (md_live_count_get(md_dir, g) > 0U))
         {

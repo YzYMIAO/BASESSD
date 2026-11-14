@@ -34,7 +34,7 @@
 #include "metadata_job.h"
 
 #include "assertion.h"
-#include "bbt.h" /* bbt_mark_bad（持续擦除失败标坏，RISK-MD-01） */
+#include "bbt.h" /* bbt_mark_bad（持续擦除失败标坏） */
 #include "fc.h"
 #include "ftl.h" /* ftl_ctx_s（完成回调签名） */
 #include "ftl_fc_interface.h"
@@ -47,13 +47,13 @@
 
 // 提交 deadline：连续提交不出去超过 FTL_SUBMIT_TIMEOUT_MS 即中止 job（同 CP/MIG/RR）。
 
-// 同一块连续擦除失败多少次后标坏（RISK-MD-01）。
+// 同一块连续擦除失败多少次后标坏。
 // 3 次覆盖瞬态擦除失败（忙/超时）；持续失败只能来自物理坏块，继续重试没有意义：
 // 保留回收位会让该块永久占着轮转队列、每次后台都白付一次擦除命令。
 #define MD_RECLAIM_FAIL_MAX (3U)
 
 // 压缩空槽预算为「扫描期间可能落回 victim 的前台 region 写」预留的槽位数。
-// 一条前台 flush 现在**双副本占两个槽**（RISK-BOOT-18 L2）⇒ 预留 2；见 md_compact_begin。
+// 一条前台 flush 现在**双副本占两个槽**（L2）⇒ 预留 2；见 md_compact_begin。
 #define MD_COMPACT_RESERVED_SLOTS (L2P_REGION_COPIES)
 
 /* ══════════════════════════════════════════════════════════════════
@@ -732,7 +732,7 @@ static md_compact_step_e md_compact_write(md_dir_cache_s *dir)
  * @note victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
  * 更大的更装不下 ⇒ 直接结束本轮压缩，交给目录检查点/回收。
  * 一次新生块可退多个稀疏块（每个 victim 约 1–2 个活 region），这是把
- * live_log_blocks 从上千块收敛到理想值的关键（RISK-MD-07）。
+ * live_log_blocks 从上千块收敛到理想值的关键。
  */
 static BOOL md_compact_next(md_dir_cache_s *dir, const alc_s *alloc)
 {
@@ -776,7 +776,7 @@ static BOOL md_compact_next(md_dir_cache_s *dir, const alc_s *alloc)
  * @brief 待回收队列是否该**立即**擦（懒擦门控）。
  *
  * 开机时 `md_log_area_restore` 把日志区**全部**非活块登记为回收候选（不读介质判空，
- * 见 RISK-IF-15），其中多数本来就是擦除态。若立即全擦，等于每次开机白付几十次
+ *），其中多数本来就是擦除态。若立即全擦，等于每次开机白付几十次
  * P/E；而其中只有「空闲块不足水位」的那部分才是真需要补的。
  *
  * @param dir   Directory
@@ -786,7 +786,7 @@ static BOOL md_compact_next(md_dir_cache_s *dir, const alc_s *alloc)
  *         false = 候选留在队列里，等水位降下来再擦
  *
  * @note 借用块例外：从 OP 池借来的日志块占用有上限的借用配额（L2P_LOG_BORROW_MAX），
- *       必须擦完归还，否则压缩再也拿不到目标块（RISK-MD-08）。
+ *       必须擦完归还，否则压缩再也拿不到目标块。
  */
 static BOOL md_reclaim_is_eager(const md_dir_cache_s *dir, const alc_s *alloc)
 {
@@ -964,7 +964,7 @@ static void md_handle_step(md_dir_cache_s *dir)
                 }
                 // 本 victim 已搬空。当前块还有空槽、且还有能装下的稀疏 victim ⇒ 继续搬
                 // 下一个（一次新生块退多个块）。旧实现“一个 rotation 只压一个”会让
-                // 碎片稳态停在 live≈N，日志区永远收不回来（RISK-MD-07）。
+                // 碎片稳态停在 live≈N，日志区永远收不回来。
                 if (md_compact_next(dir, alloc))
                 {
                     break; /* phase 已置 CP_READ，循环继续 */
@@ -1001,7 +1001,7 @@ static void md_handle_step(md_dir_cache_s *dir)
                 }
                 if (r == MD_DIR_CKPT_BUSY)
                 {
-                    // 另一个 writer（CP job）正在写目录检查点：背压重试（RISK-MD-06）。
+                    // 另一个 writer（CP job）正在写目录检查点：背压重试。
                     (void)md_handle_stall(dir);
                     return;
                 }
@@ -1180,7 +1180,7 @@ static void md_reclaim_complete(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *c
 
     if (failed)
     {
-        // 同一块连续失败计数；达上限即标坏并清回收位（RISK-MD-01）。
+        // 同一块连续失败计数；达上限即标坏并清回收位。
         // 否则该块会被无限重试——数据安全但每次后台白付一条擦除命令，
         // 且坏块永远不会进入 BBT。
         if (j->reclaim_fail_gblock != j->reclaim_gblock)

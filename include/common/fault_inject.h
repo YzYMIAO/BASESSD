@@ -7,7 +7,7 @@
  *
  * 目的：让「注入类」验证不需要真 NAND 失败也能重复跑 —— `ftl_ut_design.md §5`
  * 的 `FI-NA` 档。当前收口 2 个注入点（cache program 完成、Journal 页写完成），
- * 覆盖 `RISK-CACHE-19` / `RISK-CACHE-24` / `RISK-JN-03` / `RISK-L2P-09` 的失败侧。
+ * 覆盖 `` / `` / `` / `RISK-L2P-09` 的失败侧。
  *
  * 契约：
  *   · **只在测试镜像里存在**：开关是 `FC_NAND_TEST_ENABLE`（只有 `make tests` 定义），

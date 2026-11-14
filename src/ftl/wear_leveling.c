@@ -142,7 +142,7 @@ BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_fre
 }
 
 // 判据唯一：与 wl_ec_spread_get 同一漏斗。搬移不改变擦除计数，差值不足必须
-// 停止，否则就是纯写放大（RISK-WL-08）。
+// 停止，否则就是纯写放大。
 BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes)
 {
     DWORD max_free = 0U;
@@ -167,7 +167,7 @@ BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes)
  * @note 排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
  *   （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
  *   有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）。
- *   ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
+ *   ⚠ 不按「低擦除区」过滤：低区阈值在低磨损量下恒真。
  */
 BOOL wl_select_victim(const alc_s *alloc, wl_victim_s *victim)
 {

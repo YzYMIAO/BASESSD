@@ -43,7 +43,7 @@ extern "C"
  * 事件由 USB ISR 入队、由 tud_task() 在主循环出队。同步 FLUSH 在 SCSI 回调里
  * 自旋数十 ms，窗口内主循环不抽队列 ⇒ 16 会溢出。溢出后 TU_ASSERT 只在接了
  * 调试器时停机（TU_BREAKPOINT 读 DHCSR），**无调试器时静默丢事件**。
- * 64 是异步 FLUSH 落地前的余量，不是根治（RISK-USB-06）。 */
+ * 64 是异步 FLUSH 落地前的余量，不是根治。 */
 #define CFG_TUD_TASK_QUEUE_SZ 64
 
 /* PA9 已用作 USART1_TX，不能同时做 OTG_FS_VBUS。 */

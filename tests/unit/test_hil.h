@@ -12,7 +12,7 @@
  * 经 controller 的真实读写/flush/trim。
  *
  * ⚠ 单 die 当前无法构造多 run 拆分 / 跨实例部分失败；USB 槽状态机由 PC
- *   主机侧矩阵覆盖（见 docs/design/known_risks.md RISK-USB-09..13）。
+ *   主机侧矩阵覆盖（见 docs/design/known_risks.md ..13）。
  */
 
 extern MunitTest g_hil_tests[];

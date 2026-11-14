@@ -90,7 +90,7 @@
  * ⚠ 平台时钟缺失（now_ms == 0）时 deadline 不生效——退化为「无超时」；本板
  *   `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。 */
 
-/* ── 同一 victim 块连续读失败多少次后标坏（RISK-GC-01）──
+/* ── 同一 victim 块连续读失败多少次后标坏──
  * 持续读失败（ECC 不可纠 / META 基址损坏）时 GC 会每轮重选同一 victim 并 abort，
  * 容量不再增长。3 次覆盖瞬态读错；超过即标 BAD 并从 Closed 条目摘除该 plane，
  * 让 GC 换下一个候选。源块的其他 plane 仍可迁移，数据不丢。 */
@@ -107,7 +107,7 @@
 /* cache program 批次最多 4 页（= NAND per-LUN FIFO 深度）。 */
 #define MIG_BATCH_PAGES (4U)
 
-/* ── 目的页写失败（RISK-GC-02）──
+/* ── 目的页写失败──
  * 目的页写失败**不能**把整块标 BAD：该冷 SB 可能已有成功迁移的页，L2P 正指向它们。
  * 正确处置是**立即**关闭这个 Cold SB：失败页可能已半编程，不能 rewind；关闭后
  * 下一次 GC 从 Free Pool 取新的目的块，已写成功的页仍可读，残留页由 GC 正常回收。

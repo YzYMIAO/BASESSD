@@ -91,7 +91,7 @@ BYTE ssd_controller_is_complete(const ssd_req_s *request);
  * TRIM 请求按 run 逐段调用 ftl_trim_begin/step，全部完成时置 complete_flag。
  * 无在飞命令时立即返回。
  *
- * 为什么需要它：FLUSH 不能在 host 回调里同步自旋（RISK-USB-06），但又必须由
+ * 为什么需要它：FLUSH 不能在 host 回调里同步自旋，但又必须由
  * HIL 的完成通道回执；FTL 侧拆成 ftl_flush_begin/step 后，这个「每轮推进 +
  * 完成回执」的职责归 Controller（HIL）。
  *

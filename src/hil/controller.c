@@ -303,7 +303,7 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
             break;
 
         case SSD_REQUEST_FLUSH:
-            /* FLUSH 是**异步命令**（RISK-USB-06）：提交只登记请求并启动各实例的
+            /* FLUSH 是**异步命令**：提交只登记请求并启动各实例的
              * flush job，立即返回；完成由 ssd_controller_service 每轮推进后置
              * complete_flag。这样 host 回调（tud_task 内）不再自旋，USB 事件
              * 队列不会被饿死。单飞行：同类请求已有一条在飞时返回 BUSY。 */

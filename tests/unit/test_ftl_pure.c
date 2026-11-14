@@ -80,7 +80,7 @@ static void mem_fill_free(alc_s *a, WORD n)
     }
 }
 
-/* per-plane 空闲计数的总和。它是 `free_count` 的**第二本账**（RISK-ALLOC-09 引入），
+/* per-plane 空闲计数的总和。它是 `free_count` 的**第二本账**，
  * 两个量必须恒等 —— 漂移即「成对分配失败」的前兆，且编译期完全无声。 */
 static WORD mem_plane_free_sum(const alc_s *a)
 {
@@ -131,7 +131,7 @@ static MunitResult test_address_roundtrip(const MunitParameter params[], void *d
  *
  * 覆盖：入池/出池只维护池数组；state==FREE ⟺ 在池；出池即脱离 FREE（state=NONE，
  *       否则两次调用之间不变量不成立）；OP refill 按 plane LIFO 归还；per-plane 计数
- *       （RISK-ALLOC-09 的第二本账）与 flat 池恒同步、出池/归还只动所属 plane。
+ *       （第二本账）与 flat 池恒同步、出池/归还只动所属 plane。
  * 判据：free_count 与池内条目始终同步，refill 后 op_count 归零；两本账一旦漂移，
  *       成对分配会在低水位无声失败（编译期不可见）。
  * 备注：FTL_BLOCK_STATE_FREE 会说谎（allocator_init 早于目录加载），选块以池为准。 */
@@ -927,7 +927,7 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
  *       advance 逐页推进并结算 ok；commit 推进 write_idx、释放单飞。
  *       另覆盖 dirty_gen 竞态：写入期间 Directory 又有新 commit 时，commit 不得清 dirty。
  * 判据：任何一步漏掉都会让重启后的目录检查点与 Directory 序号不一致（恢复选错记录）；
- *       dirty 被提前清掉 ⇒ on-media 检查点落后于 RAM Directory（RISK-MD-06）。
+ *       dirty 被提前清掉 ⇒ on-media 检查点落后于 RAM Directory。
  * 备注：纯 RAM；冷启动 locate 在这里用有效游标跳过。 */
 
 static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void *data)
@@ -1038,7 +1038,7 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
     md_log_release(d, g0);
     munit_assert_uint32(ftl_block_state(&a->blocks[g0]), ==, FTL_BLOCK_STATE_NONE);
 
-    // 每 plane 一个当前写块（RISK-BOOT-18 L2）：逐 plane 换块并校验各自的游标，
+    // 每 plane 一个当前写块（L2）：逐 plane 换块并校验各自的游标，
     // 不写死 plane 下标（H39）。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -1102,8 +1102,8 @@ static MunitResult test_cp_init_timer(const MunitParameter params[], void *data)
 /* md_status_error — 固定 metadata 错误采样的当前语义。
  *
  * 覆盖：handle.error 置 FTL_ERROR 后调用 md_handle；进入 IDLE 时 error 被清，采样
- *       得到 FTL_OK（RISK-MD-17）。
- * 判据：这是有意语义还是待修缺陷由 RISK-MD-17 跟踪；若将来改为粘滞错误，本用例
+ *       得到 FTL_OK。
+ * 判据：这是有意语义还是待修缺陷由 跟踪；若将来改为粘滞错误，本用例
  *       会先红，避免行为变化无人发现。纯 RAM。 */
 
 static MunitResult test_md_status_error(const MunitParameter params[], void *data)
@@ -1119,10 +1119,10 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
 
     md_handle(d);
 
-    /* 当前语义：进入 IDLE 时清 error ⇒ 采样看不到上一次 abort（RISK-MD-17）。 */
+    /* 当前语义：进入 IDLE 时清 error ⇒ 采样看不到上一次 abort。 */
     munit_assert_int(d->handle.error, ==, FTL_OK);
 
-    ftl_ut_trace_detail("md handle.error FTL_ERROR -> sampled=%ld (IDLE clears; RISK-MD-17)", d->handle.error);
+    ftl_ut_trace_detail("md handle.error FTL_ERROR -> sampled=%ld (IDLE clears; )", d->handle.error);
     ftl_ut_trace_summary("md handle.error FTL_ERROR -> sampled=%ld (IDLE clears)", d->handle.error);
 
     return MUNIT_OK;
@@ -1176,7 +1176,7 @@ static MunitResult test_journal_write_fail_clear(const MunitParameter params[], 
  * 覆盖：构造「压缩写阶段取不到空槽」使 md_compact_write 返回 FAILED，触发
  *       md_handle_abort；victim 仍有活 region。
  * 判据：abort 只回 IDLE、清 victim/moved，**不得**把 victim 登记进回收位图或擦除
- *       （否则活映射被静默丢掉，RISK-MD-06/16、BOOT-02）。纯 RAM。 */
+ *       （否则活映射被静默丢掉，、BOOT-02）。纯 RAM。 */
 
 static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], void *data)
 {
@@ -1193,7 +1193,7 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
      * victim 仍有活 region：abort 只回 IDLE，不得把它登记进回收位图（更不得擦除）。 */
     d->l2p_live[victim] = 3U;
 
-    // 无当前写块（每 plane 一个，RISK-BOOT-18 L2）⇒ md_compact_write 取不到槽。
+    // 无当前写块（每 plane 一个，L2）⇒ md_compact_write 取不到槽。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         d->cur.valid[p] = 0;
@@ -1375,7 +1375,7 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
 /* group_exhaustion — 组槽满时的拒绝语义。
  *
  * 覆盖：填满 FTL_GROUP_MAX 后额外 alloc 必须返回 0；已有组的字段不得被覆盖
- *       （RISK-PEND-02）。
+ *       。
  * 判据：覆盖会在飞组的完成回调永远不触发，host 请求悬挂。纯 RAM。 */
 
 static MunitResult test_group_exhaustion(const MunitParameter params[], void *data)
@@ -1399,7 +1399,7 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
 
     BYTE extra = 0xFFU;
 
-    /* 组槽满：必须返回 0，且不得覆盖已有组（RISK-PEND-02）。 */
+    /* 组槽满：必须返回 0，且不得覆盖已有组。 */
     munit_assert_false(pend_group_alloc(&table, &extra));
     munit_assert_uint32(table.groups[gi[0]].total, ==, 7U);
     munit_assert_true(table.groups[gi[0]].used);
@@ -1839,7 +1839,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     return MUNIT_OK;
 }
 
-/* confirm_park_timeout — 写确认待入账的超时判据与结算原语（RISK-HOST-05 的纯 RAM 部分）。
+/* confirm_park_timeout — 写确认待入账的超时判据与结算原语（纯 RAM 部分）。
  *
  * 覆盖：pend_confirm_is_expired 在 deadline 前为 0、到点（==）为 1；
  *       pend_confirm_settle 释放槽、按 IO_ERROR 结算组一次；待入账计数随结算归零。
@@ -2198,7 +2198,7 @@ static MunitResult test_policy_entry(const MunitParameter params[], void *data)
  *
  * 覆盖：空池必命中 EMERGENCY；补到 FREE_POOL_TARGET 以上不触发；跌破 TARGET 但高于
  *       紧急线时只命中 WATERMARK；**总水位达标但单 plane 低于 FREE_POOL_PLANE_LOW**
- *       时仍命中 WATERMARK（RISK-ALLOC-09）。
+ *       时仍命中 WATERMARK。
  * 判据：水位是 GC 唯一的入口闸门；空池不触发会让写路径永久 FTL_AGAIN。纯 RAM。 */
 
 static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
@@ -2224,7 +2224,7 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
     munit_assert_uint16(a->free_count, >=, FREE_POOL_TARGET);
     munit_assert_uint32(gc_should_trigger(a), ==, 0U);
 
-    /* per-plane 水位（RISK-ALLOC-09）：**总水位仍在 TARGET 之上**，但把 plane1 抽到
+    /* per-plane 水位：**总水位仍在 TARGET 之上**，但把 plane1 抽到
      * 低于单 plane 水位 ⇒ 必须触发。只判 total 的实现会在这里返回 0，接着成对分配
      * 在低水位无声失败 —— 这条是把「两本账」与「一本总账」区分开的负例。 */
     for (WORD i = 0U; i < (32U - (FREE_POOL_PLANE_LOW - 1U)); i++)
@@ -2257,7 +2257,7 @@ static MunitResult test_gc_trigger(const MunitParameter params[], void *data)
  *
  * 覆盖：① 两个 CLOSED SB 的有效 CW 分别为 10 与 248：三种 benefit 模式下都必须选
  *       有效数据更少的那一个，并回报 best_valid_pct/scanned/eligible；
- *       ② 单 plane 空闲失衡时（RISK-ALLOC-09）优先「成对条目 + 饥饿 plane 的单条目」
+ *       ② 单 plane 空闲失衡时优先「成对条目 + 饥饿 plane 的单条目」
  *       —— 有效页最少的富-plane 单条目不得被优先；
  *       ③ 偏好组为空时必须回退到普通贪心，不得报无候选。
  * 判据：选错 victim 会把写放大推到极高，且回收后 plane 失衡会让成对分配失败。纯 RAM。 */
@@ -2318,7 +2318,7 @@ static MunitResult test_gc_select_victim(const MunitParameter params[], void *da
     munit_assert_uint32(scanned1, >=, 2U);
     munit_assert_uint32(eligible1, >=, 1U);
 
-    /* ── ② 饥饿 plane 偏好（RISK-ALLOC-09）：单 plane 条目在富 plane 上时不得优先 ──
+    /* ── ② 饥饿 plane 偏好：单 plane 条目在富 plane 上时不得优先 ──
      * free 池：plane0 = 4、plane1 = 2 ⇒ plane1 饥饿（< FREE_POOL_PLANE_LOW）。
      * 再放一个**有效页最少**的单 plane CLOSED 条目（只在 plane0，block 6）：
      * 朴素贪心会选它（cost 最低），但回收它只补富 plane ⇒ 必须选成对条目 a。 */
@@ -3135,7 +3135,7 @@ static MunitResult test_l2p_cmt_write_readback(const MunitParameter params[], vo
  * 覆盖：PROGRAMMED 页按 (plane,cw) 返回真实 PBA；CONFIRMED/FAILED 不返回 PBA；
  *       FAILED 由 `ftl_cache_wr_failed_covers` 拦成 IO_ERROR 的依据。
  * 判据：读覆盖层若把 plane/cw 或页状态判错，host 读会在「未确认页」读到旧 PBA
- *       或编程失败页（RISK-CACHE-27/28）。纯 RAM，不改介质。 */
+ *       或编程失败页。纯 RAM，不改介质。 */
 
 static MunitResult test_cache_wr_lookup(const MunitParameter params[], void *data)
 {

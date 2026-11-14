@@ -89,7 +89,7 @@ typedef enum GC_BENEFIT_MODE_E
 } gc_benefit_mode_e;
 
 /* 选块结果：把「没有候选」与「有候选但都不值得搬」分开，后者用于 no-gain 退避与
- * NO_SPACE 判定（`RISK-GC-13/14`）。 */
+ * NO_SPACE 判定（``）。 */
 typedef enum GC_SELECT_E
 {
     GC_SELECT_OK = 0,         /* 已选中，out->victim 有效 */

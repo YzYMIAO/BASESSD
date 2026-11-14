@@ -200,7 +200,7 @@ ftl_status_e pfr_media_check_format(ftl_ctx_s *ftl, BOOL *out_need_format)
  *
  * @note `md_init` 只复位 RAM；不落盘的话下次开机
  * md_load 失败，而 initial Checkpoint（seq=1）存在 ⇒
- * pfr_boot_recovery 按 RISK-BOOT-09 拒绝启动。故必须先把空 Directory
+ * pfr_boot_recovery 按 拒绝启动。故必须先把空 Directory
  * 写成目录检查点，再写 initial Checkpoint（后者是整条 record 的 commit）。
  */
 static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_s *ftl)
@@ -226,7 +226,7 @@ static ftl_status_e pfr_format_write_initial_dir_ckpt(ftl_ctx_s *ftl)
 
         if (est != FTL_OK)
         {
-            md_dir_ckpt_write_abort(dir, &w); /* 放弃已 prepare 的目录检查点写（清单飞锁，RISK-MD-06） */
+            md_dir_ckpt_write_abort(dir, &w); /* 放弃已 prepare 的目录检查点写（清单飞锁） */
             return FTL_ERROR;
         }
     }
@@ -319,7 +319,7 @@ static void pfr_format_reset_bad_map(alc_s *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
  * · 编程 / 读失败由运行期覆盖：host 写失败 → `ftl_write_retry` 换块重发一次 →
  * 仍失败则 `ftl_host_io_write_fail` 标坏；读失败 → RR 标坏。两条路径均已上板。
  * · 写/读体检只覆盖**单 plane 顺序写**，测不到运行期的 pair 写路径，它的
- * 「通过」不能证明运行期没问题（RISK-NAND-06），收益与耗时不成比例。
+ * 「通过」不能证明运行期没问题，收益与耗时不成比例。
  * ⚠ 调用前由 pfr_format_reset_bad_map 清空非 BBT 池的 BAD 集 ⇒ 本函数重新评估
  * **所有**非 BBT-pool 块（包括 BST 中标记为 BAD 的块）：擦除成功即 recovered。
  * BBT 池跳过（本轮坏块 record 在里面）；体检后所有块保持擦净状态。
@@ -590,7 +590,7 @@ static BOOL pfr_boot_scan(ftl_ctx_s *ftl, pfr_boot_scan_s *scan)
     }
 
     // ④ 有 CP 但 Directory 加载失败 ⇒ 空 Directory 会让旧 region 映射整体丢失
-    // （RISK-BOOT-09）。没有可用的重扫 L2P region 路径，唯一诚实的做法是拒绝
+    // 。没有可用的重扫 L2P region 路径，唯一诚实的做法是拒绝
     // 启动并保留介质，由用户决定是否格式化。
     if (ftl->flags.md_load_failed == true)
     {
@@ -683,7 +683,7 @@ static void pfr_boot_execute(ftl_ctx_s *ftl, pfr_plan_e plan, const pfr_boot_sca
     BOOL  clear_md_load_fail = false;
     DWORD journal_entries    = 0U;
 
-    // 诊断（RISK-MD-06）：判型所依据的现场，一次开机一行（只读）。
+    // 诊断：判型所依据的现场，一次开机一行（只读）。
     if (plan == PFR_PLAN_REPLAY)
     {
         const DWORD newest = (DWORD)scan->ring.page_seq + (DWORD)scan->ring.entry_count;
@@ -1057,7 +1057,7 @@ static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr
             out->ctx_ok = false;
         }
 
-        // ③ 一致性守卫（RISK-MD-06）：目录引用的用户块，valid_count 必须 > 0。
+        // ③ 一致性守卫：目录引用的用户块，valid_count 必须 > 0。
         // 判据是现成账本 l2p_live（每块被目录引用的 region 数），O(FTL_BLOCK_TOTAL)，无 I/O。
         if (tbl->restored)
         {
@@ -1095,7 +1095,7 @@ static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr
             }
         }
 
-        // 回放期「减到 0 被跳过」的现场（RISK-MD-06）：非 0 才打一行。
+        // 回放期「减到 0 被跳过」的现场：非 0 才打一行。
         if (stats->sub_zero != 0U)
         {
             const bst_state_e zst = (stats->sub_zero_g < FTL_BLOCK_TOTAL) ? ftl_block_state(&ftl->alloc.blocks[stats->sub_zero_g]) : FTL_BLOCK_STATE_NONE;
@@ -1265,7 +1265,7 @@ static BOOL pfr_closed_sb_add(ftl_ctx_s *ftl, WORD g, BYTE temperature)
 // 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank（C2：唯一实现；
 // full rebuild / BBT 探针 / Journal 扫页 / 元数据日志区恢复共用）。
 // 它是**解码路径**判据（FC 判 ECC 是否成码字 + 整条 CW 的 1 比特占比），
-// 不是「RAW 读数 FF」——RAW 读刻意跳过 ECC，没有判空依据（RISK-IF-15）。
+// 不是「RAW 读数 FF」——RAW 读刻意跳过 ECC，没有判空依据。
 
 /**
  * @brief 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
@@ -1278,7 +1278,7 @@ static BOOL pfr_closed_sb_add(ftl_ctx_s *ftl, WORD g, BYTE temperature)
  *         PAGES_PER_BLOCK = 全写满**或存在 hole**（空白页之后又有写过的页）。
  *
  * @note 存在 hole 时不能把第一个空白页当上界——那会把 hole 之后的页漏出 valid_count
- * （RISK-BOOT-06），故返回全块让调用者逐页反查。
+ * ，故返回全块让调用者逐页反查。
  * ⚠ 代价：存在 hole 的块要扫完全部页（正常部分写块仍在第一个空白页停止）。
  * 这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
  * victim 的前提。
@@ -1413,21 +1413,21 @@ static BOOL pfr_close_block(ftl_ctx_s *ftl, BYTE plane, WORD block, BYTE pages_w
             if (l2p_read_sync(ftl->cache, cw_lba[cw], &cur) != FTL_OK)
             {
                 // 读失败 ⇒ 该 CW 无法确认有效；valid_count 会少算。计数向上传播：
-                // 启动快照路径据此回退 full metadata rebuild（RISK-BOOT-11），full metadata rebuild 路径至少可见。
+                // 启动快照路径据此回退 full metadata rebuild，full metadata rebuild 路径至少可见。
                 stats->l2p_read_errors++;
                 continue;
             }
 
             // 读成功也可能来自“重试耗尽 → 降级为全未映射”：返回值同样是 OK + INVALID。
             // 降级只丢**该 region 未被 Journal 覆盖的旧映射**，不影响 valid_count 增量
-            // ⇒ 计入 l2p_degraded_cw 并继续，不再据此回退全量重建（RISK-BOOT-18）；
+            // ⇒ 计入 l2p_degraded_cw 并继续，不再据此回退全量重建；
             // 丢失的映射由 host 读路径按 IO_ERROR 暴露。
             const DWORD global_region = lba_to_global_region(cw_lba[cw]);
 
             if (l2p_is_region_degraded(ftl->cache, global_region))
             {
                 // 降级 = 映射已丢（范围化恢复接受它）；只有真正的读失败才计入
-                // l2p_read_errors 并回退全量重建（RISK-BOOT-18）。
+                // l2p_read_errors 并回退全量重建。
                 stats->l2p_degraded_cw++;
                 if (stats->first_degraded_region == UINT32_MAX)
                 {
@@ -1486,7 +1486,7 @@ static void pfr_rebuild_closed_sb_list(ftl_ctx_s *ftl, pfr_stats_s *stats)
             // **必须显式写 LOG**，不能留 NONE。`cp_block_snapshot()` 只按
             // BST state + OP/Spare 池归属编码块表；NONE 且无池标签会被下一次开机的
             // `pfr_restore_blocks()` 第 1 遍 判为非法并拒绝**整份**快照
-            // ⇒ 又走全盘 build，形成每次冷启动都 rebuild 的循环（RISK-BOOT-15）。
+            // ⇒ 又走全盘 build，形成每次冷启动都 rebuild 的循环。
             // Directory 是动态 LOG 块身份的唯一权威，这里按它落 state。
             if (md_block_is_metadata(ftl->metadata_dir, plane, block))
             {
@@ -1598,7 +1598,7 @@ static BOOL pfr_restore_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl)
         }
         // live 动态 LOG 块例外：它不属任何 allocator 池，full rebuild 留下的
         // word 就是 NONE/no-pool。Directory 是身份的唯一权威 ⇒ 放行；第 3 遍 会把它
-        // 修正为 LOG（RISK-BOOT-15 的自愈路径，避免为一处旧快照做全盘 rebuild）。
+        // 修正为 LOG（自愈路径，避免为一处旧快照做全盘 rebuild）。
         if ((st == FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE) && (md_live_count_get(ftl->metadata_dir, g) == 0U))
         {
             LOGE(LOG_TAG_BLK "g=%hu NONE with no pool tag\r\n", g);
@@ -1723,7 +1723,7 @@ static BOOL pfr_restore_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl)
         }
         if (md_live_count_get(ftl->metadata_dir, g) > 0U)
         {
-            // NONE = full rebuild 留下的 NONE/no-pool（RISK-BOOT-15 自愈路径，
+            // NONE = full rebuild 留下的 NONE/no-pool（自愈路径，
             // 可能上百块，不逐块告警）；其他非 LOG 状态才是真冲突，留痕一次。
             const BYTE prev = ftl_block_state(b);
 
@@ -2171,7 +2171,7 @@ static void pfr_valid_sub(void *ctx, DWORD pba, BOOL *ok)
     {
         // 与运行期 `ftl_block_sub_valid_if_live`（bst.h）**同口径**：计数已为 0 ⇒
         // 无可减，跳过。原来这里判硬失败，等于把「一条陈旧映射」升级成「整份块元数据
-        // 快照作废 ⇒ full rebuild ⇒ 丢映射」（RISK-MD-06 的放大器）。
+        // 快照作废 ⇒ full rebuild ⇒ 丢映射」（放大器）。
         // 真正该作废快照的是「目录仍引用该块」那种，由回放后的不变量守卫判定。
         if (stats->sub_zero == 0U)
         {

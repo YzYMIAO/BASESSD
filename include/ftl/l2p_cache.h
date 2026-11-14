@@ -316,7 +316,7 @@ typedef struct L2P_CACHE_LINE_S
      * 本条与 `load_fail_count` / 双副本字段共用尾部对齐填充。 */
     BOOL fresh;
 
-    /* 1 = 本行最近一次加载在重试耗尽后降级为「全未映射」（映射已丢，RISK-BOOT-18）。
+    /* 1 = 本行最近一次加载在重试耗尽后降级为「全未映射」（映射已丢）。
      * 开机恢复与 host 读路径据此区分「合法未映射」与「读不出来被迫当未映射」：
      * 后者 probe 计入 `l2p_degraded_cw`（范围化恢复，不回退全量重建），host 读
      * **返回 IO_ERROR** 而不是零填。每次 load_start / 加载成功清零；降级时置 1。 */
@@ -330,7 +330,7 @@ typedef struct L2P_CACHE_LINE_S
      *   通常会复用同一 INVALID 行，仍能达到上限；这是用 1B/行换「不做全 region 计数表」。 */
     BYTE load_fail_count;
 
-    /* ── 双副本写回（RISK-BOOT-18 的 L2）──
+    /* ── 双副本写回（L2）──
      * 串行写：先主副本；主成功后提交备份副本。两份都成功才 commit（原子）；任一失败
      * 都保持 DIRTY、不登记新位置（旧 pair 仍是 Directory 真值，槽位作废）。 */
     DWORD flush_pba[L2P_REGION_COPIES]; /* 0=主 / 1=备 */
@@ -338,7 +338,7 @@ typedef struct L2P_CACHE_LINE_S
     BYTE  flush_done;                   /* 已完成副数 */
     BOOL  flush_fail;                   /* true = 任一副本失败 ⇒ 不提交 */
 
-    /* 本次加载读的是哪一份（主备回退，RISK-BOOT-18 的 L2）。 */
+    /* 本次加载读的是哪一份（主备回退，的 L2）。 */
     DWORD load_pba;        /* 在飞/最近一次加载的 PBA */
     BOOL  load_use_backup; /* true = 当前这次读的是备份副本 */
 
@@ -799,7 +799,7 @@ void l2p_note_region_lost(l2p_cache_s *cache, DWORD global_region, DWORD lba, DW
  * 两处消费者：
  *   · 开机恢复：journal 回放 / 块元数据 probe 据此走范围化恢复而不是全量重建；
  *   · host 读路径：未映射且 region 降级 ⇒ 返回 IO_ERROR，**不零填**
- *     （合法未映射仍是零填；RISK-BOOT-18）。
+ *     （合法未映射仍是零填）。
  *
  * @param cache         共享 L2P cache
  * @param global_region 全局 region（lba_to_global_region(lba)）
@@ -937,7 +937,7 @@ static inline BOOL l2p_has_flush_inflight(const l2p_cache_s *cache)
  *
  * 主流判据是「进展 = 已提交命令的完成」（队列/完成模型）：只有真在飞的命令才有
  * 确定完成时刻。用"我刚才想加载"当进展，会让卡死检测永久失效——本仓曾因此形成
- * 环形等待（RISK-HOST-14）：加载启动失败 → 声称在飞 → drain 不计 stall →
+ * 环形等待：加载启动失败 → 声称在飞 → drain 不计 stall →
  * 组永不结束 → 序列门控永不打开 → 脏行永远排不出去。
  *
  * @param cache L2P cache

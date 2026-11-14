@@ -178,7 +178,7 @@ typedef struct PENDING_REQUEST_S
     DWORD park_ms;     /* WRITE_CONFIRM 待入账**预算起点**（ms；内部字段，外部不要读）。
                         * 语义 = 「最近一次确知有进展的时刻」：确认 handler 在其依赖确实在飞
                         * （region 加载 / Journal 页写）时刷新它，超时判据因此只在**无进展**
-                        * 时才成立（RISK-HOST-05 支路 (a)，见 docs/design/assertion_guidelines）。 */
+                        * 时才成立（支路 (a)，见 docs/design/assertion_guidelines）。 */
     DWORD verdict_lba; /* cache program：本命令的 FAIL_CACHE 指向哪一页（提交序前一页）的
                         * LBA。完成时按 LBA 落结论，不依赖完成顺序（见 ftl.h 结论表）。 */
 
@@ -194,7 +194,7 @@ typedef struct PENDING_REQUEST_S
     BYTE              retry_count; /* 写失败后已重试次数（透明重试；见 ftl_host_io_callback） */
     BYTE              cache_gen;   /* cache program 成员所属**写序列代号**：完成时与
                                     * `cache_stream.seq.gen` 比对，不一致 ⇒ 序列已中止/已被新序列
-                                    * 取代，本页不得确认映射（迟到完成，RISK-CACHE-19） */
+                                    * 取代，本页不得确认映射（迟到完成） */
     BOOL verdict_valid;            /* cache program：本命令是否携带 FAIL_CACHE 结论 */
 } pend_req_s;
 

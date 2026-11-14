@@ -151,7 +151,7 @@ typedef enum FC_BUFFER_OWN_E
 /* 空页（erased page）：ECC 解码失败 **且** 整条 CW（META+CRC+USER+ECC，528B）的
  * 1 比特占比 ≥ 99%（判据与阈值推导见 fc_data_path.c 的 fc_cw_is_blank）。
  * 擦除页不是合法 BCH 码字 ⇒ 解码必然报 UNC；若不单独识别，GC 读到半写块的空洞页
- * 就会把整块当坏块退役（RISK-GC-11）。**不属于 FC_CW_STATUS_ERROR_MASK**：
+ * 就会把整块当坏块退役。**不属于 FC_CW_STATUS_ERROR_MASK**：
  * 「页从未编程」是介质的合法状态，不是读错误。
  * ⚠ 判据只在**解码路径**成立：RAW 读（LDPC_RAW）跳过 ECC，不产生本状态。 */
 #define FC_CW_STATUS_EMPTY (1U << 7)

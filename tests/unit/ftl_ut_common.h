@@ -111,7 +111,7 @@ md_dir_cache_s *ftl_ut_ram_md(void);
 
 /* 真 NAND 媒体夹具（破坏性）：format + 模拟重启 + 主机读写 + flush。
  * LBA 窗口固定在**运行期**容量尾部（host_lba_max 已扣实际坏块；不能用编译期
- * FTL_LBA_MAX，见 RISK-UT-22），避免碰文件系统常用区。 */
+ * FTL_LBA_MAX），避免碰文件系统常用区。 */
 #define FTL_UT_LBA_WINDOW    8192U
 #define FTL_UT_IO_TIMEOUT_MS 5000U
 

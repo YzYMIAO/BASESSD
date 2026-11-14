@@ -42,13 +42,13 @@
 
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
-/* 异步 FLUSH job 的耗时告警阈值（RISK-USB-06）：从 `ftl_flush_begin` 到完成
+/* 异步 FLUSH job 的耗时告警阈值：从 `ftl_flush_begin` 到完成
  * 超过该值即打一行 WRN。用于观察主机看到的 flush 延迟；job 本身不阻塞主循环。 */
 #define FTL_FLUSH_SLOW_LOG_MS (10U)
 
 /* 异步 FLUSH job 的**无进展**上限：只要 wbuf / L2P / journal / 写确认仍在推进，
  * 就按进展续期；连续 1 s 没有任何推进才判超时。超时按 best-effort 完成并打 WRN；
- * 若有未确认写页，同时置 deferred_error（不能对 host 宣称成功，H14/RISK-CACHE-18）。
+ * 若有未确认写页，同时置 deferred_error（不能对 host 宣称成功，H14/）。
  * 1 s 远小于主机 SCSI/BOT 超时，又能覆盖正常的满盘 flush。 */
 #define FTL_FLUSH_TIMEOUT_MS (1000U)
 
@@ -57,7 +57,7 @@
  * 预算取 8——正常背压在下轮 ftl_service 抽干完成后即恢复，连续 8 轮无进展属异常。
  * ⚠ 「有确定完成时刻的后台进展」不计入：L2P region 加载在飞、搬移 job（GC/WL）
  *   在飞时清零/不累加——否则一次数百 ms 的正常回收会被 8 轮预算判成 IO_ERROR
- *   （RISK-GC-09）。 */
+ *   。 */
 #define FTL_DRAIN_STALL_MAX (8U)
 
 /* cache 序列跨 chunk 等待下一 chunk 的上限：超过即关闭序列状态，避免门控永久
@@ -67,6 +67,11 @@
 /* 窗口已提交、命令却迟迟不排空的兜底：超过即强制放开 LUN 门控（异常路径，留 WRN）。
  * 与 IDLE_MS 理由不同——那是「等 host 下一段」，这是「等器件命令完成」，故分开命名。 */
 #define FTL_CACHE_SEQ_DRAIN_STALL_MS (1000U)
+
+/* 后台让行的最长 host 暂停：后台被门控拒绝后置 yield_pending，host 暂不开新序列，
+ * 让后台在本轮提交。后台若因别的原因一直提交不出去，超过本值即忽略让行、恢复 host，
+ * 防止后台故障把 host 饿死。取 20 ms：一个 16 KiB 窗口在 940 KB/s 下约 17 ms。 */
+#define FTL_CACHE_SEQ_YIELD_MAX_MS (20U)
 
 /* 顺序流检测阈值（本仓自定，FTL 自判）：同一方向连续 LBA 累计达到 64 条
  * （32 KiB = 两个 16 KiB host 传输段）才认为进入顺序流，允许开 cache 序列。
@@ -110,9 +115,9 @@
  * 当前几何：3392 × 64 × 4 = 868,352 LBA = 424 MiB（不是 512/437 MiB）。
  *
  * ⚠ L2P 日志区必须计入：它是**固定预留**的元数据区（4 MiB 表本体 × 2 份副本
- *   = 8 MiB，再留 1× 工作余量 = 12 MiB = 96 gblocks，RISK-BOOT-18 的 L2）。
+ *   = 8 MiB，再留 1× 工作余量 = 12 MiB = 96 gblocks，的 L2）。
  *   若从 Free Pool 动态分配且不扣容量，日志碎片会吃掉用户容量（实测可达 1076 块 /
- *   134 MiB），导致容量未满就写失败（RISK-MD-07 / RISK-CAP-02）。
+ *   134 MiB），导致容量未满就写失败。
  * ⚠ shared metadata spare 也必须计入：它是固定元数据分区的坏块替换池
  *   （BBT + sparing 的主流形态，见 metadata.h）。
  */
@@ -121,7 +126,7 @@
 /* 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
  * （每 (ch,ce,lun) 是独立 FTL 实例；单 die 时 3392×256 = 868,352 = 424 MiB）。
  * ⚠ 这是**L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
- *   对外一律以 `ssd_ctl_s.host_lba_max` 为准（RISK-CAP-03）。 */
+ *   对外一律以 `ssd_ctl_s.host_lba_max` 为准。 */
 #define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * DIE_MAX)
 
 /* 静态上限版本：只用于编译期断言（运行期用 FTL_LBA_MAX）。 */
@@ -148,16 +153,16 @@ typedef enum FTL_CACHE_SEQ_KIND_E
  *
  * 提交侧按 `wr.count + wr_inflight` clamp 到空闲槽（cache_wr_try 的 ring_free），
  * 正常运行下 push 不会溢出；环满仍按结构性错误处理（member_done 断言 + abort，
- * RISK-CACHE-32）。 */
+ *）。 */
 #define FTL_CACHE_SEQ_RING (16U)
 
 /* 写序列的「已编程页表」（读序列不用）。
  *
  * 缓存程序是流水线：第 i 页的编程结论由**第 i+1 条命令**的 FAIL_CACHE 给出，
- * END（10h）的 FAIL 给出最后一页的结论。早回执（RISK-CACHE-27）把**组完成**从
+ * END（10h）的 FAIL 给出最后一页的结论。早回执把**组完成**从
  * 「等到 FAILC」提前到「本页命令完成」，因此本表要在窗口内记住每页的落点：
  *   · 读路径靠它把 LBA 指到刚编程的页（此时 L2P 可能还没确认）；
- *   · 后续 FAILC 判失败时靠它撤销（RISK-CACHE-28）。
+ *   · 后续 FAILC 判失败时靠它撤销。
  * 环按**提交顺序**；head 是最老、尚未被弹出（= 尚未「已证明且已确认」）的页。
  * 结论落点**按 LBA 绑定**，不按入表顺序（见 ftl_cache_wr_s.verdict）。 */
 typedef enum FTL_CACHE_PAGE_STATE_E
@@ -209,7 +214,7 @@ typedef struct FTL_CACHE_SEQ_S
     BYTE wr_inflight;         /* 已下发、尚未完成的 cache 写成员数（提交时 +，完成时 -）。
                                * 页在**完成时**才进页表，只看 wr.count 会漏掉仍在编程
                                * 的页：flush 屏障与「开新序列」都必须等它归零
-                               * （RISK-CACHE-29）。 */
+                               * 。 */
 
     /* ⚠ 偏离 H32（P5 留痕）：active / draining / closing 是**同一设备管线**的
      * 互斥状态，这里沿用既有 BOOL 组而不是互斥枚举（改动面大且需同步全部判定点）；
@@ -218,10 +223,14 @@ typedef struct FTL_CACHE_SEQ_S
 
     BOOL active;                      /* true = 设备侧序列打开（START 已发、END 未发） */
     BOOL draining;                    /* true = 读序列已放弃但命令仍在飞：门控继续关着，
-                                       * 直到所有者组的在飞子操作归零（RISK-CACHE-14）。 */
+                                       * 直到所有者组的在飞子操作归零。 */
     BOOL owner_submit;                /* 序列所有者正在提交窗口（门控旁路） */
     BOOL break_requested;             /* 非所有者提交被门控拒绝 ⇒ 请 service 收尾序列 */
-    BOOL close_requested;             /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
+    BOOL yield_pending;               /* 后台（L2P 加载等）被门控拒绝 ⇒ host 不得立刻开新
+                                       * 序列，保证后台在本轮拿到一次提交机会；由 L2P
+                                       * 提交成功或 `yield_ms` 超时清除。 */
+    DWORD yield_ms;                   /* yield_pending 置位时刻（超时兜底，防饿死 host） */
+    BOOL  close_requested;            /* 写序列需要**有序收尾**（下一段 LBA 不连续 / 空闲 /
                                        * flush / 前台等待）：service 用 padding END 落下
                                        * 一个收尾页，把最后一页的 FAIL_CACHE 结算掉。 */
     BOOL closing;                     /* padding END 已在飞：门控继续关，续写窗口被拒（等 pad 完成） */
@@ -303,9 +312,9 @@ typedef struct FTL_CACHE_STREAM_S
  *
  * @param ftl 实例。
  *
- * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（RISK-IF-09，待上板确认）。
+ * @note 设备侧未收 LAST 的缓存序列由随后的新命令终止（待上板确认）。
  *       若调用时仍有该序列的命令在飞，置 `draining` 让门控继续关到排空——否则别的组会在
- *       31h/3Fh 管线半途插命令（RISK-CACHE-14）。
+ *       31h/3Fh 管线半途插命令。
  */
 void ftl_cache_seq_release(ftl_ctx_s *ftl);
 
@@ -315,7 +324,7 @@ void ftl_cache_seq_release(ftl_ctx_s *ftl);
  * @param ftl 实例。
  *
  * @note 与 `ftl_cache_seq_release` 的差别：release 对读序列在飞会保留
- *       `draining`（RISK-CACHE-14 的管线保护）；格式化不需要这条保护，且
+ *       `draining`（管线保护）；格式化不需要这条保护，且
  *       `active/draining` 会让 `ftl_op_seq_gate` 拒绝 SYNC_WAIT 的擦写提交，
  *       使整片格式化退化为每次 20 ms 超时。未证明页按失败结算，不产生静默映射。
  */
@@ -323,7 +332,7 @@ void ftl_cache_seq_discard(ftl_ctx_s *ftl);
 
 /* ── cache 写序列（FTL 内部；cache_batch.c 与 ftl.c 共用）──
  *
- * 早回执（RISK-CACHE-27）：页在**自身命令完成**时入表（提交时不压 pending 下标），
+ * 早回执：页在**自身命令完成**时入表（提交时不压 pending 下标），
  * 组的完成也不等后继 FAILC。表的用途见 ftl_cache_page_s 的注释。
  */
 /**
@@ -349,9 +358,9 @@ BOOL ftl_cache_wr_failed_covers(const ftl_ctx_s *ftl, DWORD lba);
 
 typedef struct FTL_FLAGS_S
 {
-    BOOL deferred_error; /* RISK-CACHE-27：已回执的 cache 页后来失败，下一命令报 ERROR 一次 */
+    BOOL deferred_error; /* 已回执的 cache 页后来失败，下一命令报 ERROR 一次 */
     BOOL bg_suspend;     /* bbt --erase 后整体跳过 Phase 3（无清除路径，只能复位） */
-    BOOL md_load_failed; /* Directory 加载失败：有 CP 时拒绝启动（RISK-BOOT-09） */
+    BOOL md_load_failed; /* Directory 加载失败：有 CP 时拒绝启动 */
     BOOL l2p_defer;      /* L2P region 未就绪的背压信号：drain 不计 stall */
 } ftl_flags_s;
 
@@ -559,7 +568,7 @@ ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req);
  *         host 命令上上报一次错误（控制器 `usb_msc_take_deferred_error` 消费）。
  *
  * @note 早回执后组在页编程完成时就报 OK，FAILC 要晚一条命令才到；这条通道就是把
- *       那个迟到的结论交回给控制器的唯一出口（RISK-USBC-01 的 FTL 侧对应物）。
+ *       那个迟到的结论交回给控制器的唯一出口（FTL 侧对应物）。
  */
 BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
 
@@ -568,7 +577,7 @@ BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
  *
  * 主流形态：FLUSH 是**排队命令**，提交即返回，完成由 HIL 的完成通道
  * （本仓 `complete_flag` / `status_out`，见 docs/archive/ftl_host_interface.md A.1）
- * 通知；不允许在 host 回调里自旋——那段时间主循环无法服务 USB 事件（RISK-USB-06）。
+ * 通知；不允许在 host 回调里自旋——那段时间主循环无法服务 USB 事件。
  *
  * 用法：HIL 提交 FLUSH 时调 begin（幂等）；此后每轮主循环调 step，返回 true = 完成。
  * 完成 = wbuf 无未编程数据 + 本 owner 的 L2P 无 DIRTY/FLUSHING/LOADING +

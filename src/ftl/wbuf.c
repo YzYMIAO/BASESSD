@@ -26,6 +26,7 @@
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"
 #include "migrate.h" /* mig_handle_s / mig_gc_request_urgent */
+#include "timer.h"   /* platform_now_ms（取不到页对的兜底计时） */
 
 #include <string.h>
 
@@ -136,15 +137,41 @@ static ftl_status_e wb_flush(wb_handle_s *h)
 
     if (alc_st != FTL_OK)
     {
+        // H38：永久失败（如 Closed 列表满）原样上报，不能伪装成瞬态重试。
+        if (alc_st != FTL_AGAIN)
+        {
+            return alc_st;
+        }
+
         // migrate 是本模块的**可选端口**：纯 RAM 单测用 wb_init(..., NULL) 隔离
         // 后台迁移器，此时只做背压，不登记紧急 GC（见 wbuf.h wb_init 契约）。
-        if ((alc_st == FTL_AGAIN) && (h->migrate != NULL))
+        if (h->migrate != NULL)
         {
             mig_gc_request_urgent(h->migrate);
         }
-        // H38：永久失败（如 Closed 列表满）原样上报，不能伪装成瞬态重试。
+
+        // 兜底：连续取不到页对超过上限 ⇒ 判真无块，按 FTL_ERROR 结算 host 写。
+        // 没有它时 `wb_busy` 会被 drain 当成“有进展”，组无限重试 ⇒ host 命令永不
+        // 完成 ⇒ USB BOT 超时/设备消失（无界挂起）。
+        const DWORD now_ms = platform_now_ms();
+
+        if (now_ms != 0U)
+        {
+            if (h->alloc_fail_ms == 0U)
+            {
+                h->alloc_fail_ms = now_ms;
+            }
+            else if ((now_ms - h->alloc_fail_ms) > WBUF_ALLOC_STALL_TIMEOUT_MS)
+            {
+                h->alloc_fail_ms = 0U;
+                LOGE(LOG_TAG_FTL "wbuf: no block for %lums — fail host write (free=%hu)\r\n", (unsigned long)WBUF_ALLOC_STALL_TIMEOUT_MS, h->alloc->free_count);
+                return FTL_ERROR;
+            }
+        }
         return alc_st;
     }
+
+    h->alloc_fail_ms = 0U; /* 取到页对：清兜底计时 */
 
     // page0 异步写屏障：page>0 的写必须等同一 plane 的 page0 成功完成。
     for (BYTE p = 0U; p < PLANE_NUM; p++)

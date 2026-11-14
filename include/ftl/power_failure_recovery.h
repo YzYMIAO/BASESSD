@@ -106,7 +106,7 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_s *ftl, pfr_boot_result_s *result);
  *
  * 在每个实例 boot 完成、BAD 集合（BBT + CP 快照并集）已确定后调用一次。
  * 目的：区分坏块落在数据区还是元数据区——后者由固定元数据区候选块池 + shared metadata
- * spare 吸收（`RISK-BBT-12/13`）；本行是验证「元数据区是否开始出现 BAD」的基线。
+ * spare 吸收（``）；本行是验证「元数据区是否开始出现 BAD」的基线。
  * ⚠ 这是**开机基线**：运行期新增的 BAD 不在此行体现（下一次开机才计入）。
  *
  * @param ftl 只读：从 BST 统计各分区（dir_ckpt/cp/bbt/journal/l2p_log/spare/data）的 BAD 块数

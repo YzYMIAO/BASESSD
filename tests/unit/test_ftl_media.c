@@ -57,7 +57,7 @@ static DWORD media_atou(const char *s)
 static BOOL       s_media_ready;
 static ftl_ctx_s *s_media_ftl;
 
-/* 由 `ut_run_all()` 在**每次 `test` 命令开始时**调用（RISK-UT-08）：
+/* 由 `ut_run_all()` 在**每次 `test` 命令开始时**调用：
  * 介质只在一次 `test` 内可信 —— `/fc-nand/` 下的原始块测试会擦写 live FTL 的
  * 元数据块，而且 `s_media_ready` 是进程级 static（同一个上电周期里第二条 `test`
  * 命令会继承上一条的状态）。不复位 ⇒ media 套件在一份被改写过、又不重新格式化的
@@ -355,7 +355,7 @@ static MunitResult test_flush_reboot_readback(const MunitParameter params[], voi
  *
  * 覆盖：① 写→flush→trim→flush→强制一次 CP（等 IDLE 且序号超过用例起点）→读 0 →
  *       模拟重启 → 仍读 0；② 另一段**不强制 CP**，只 flush 后重启 → 仍不得复活
- *       （TRIM 的失效条目必须已随 Journal 页落盘，RISK-HOST-11 的 WAL 侧判据）。
+ *       （TRIM 的失效条目必须已随 Journal 页落盘，的 WAL 侧判据）。
  * 判据：TRIM 只活在 RAM/未持久化的 Journal 里，重启后旧映射复活 = 已删除的数据回来。
  * 备注：CP 基准取写入前——flush/trim 自身可能已触发 CP，取请求前会把已推进当没推进。 */
 
@@ -382,7 +382,7 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
     /* TRIM 的失效走 Journal；持久化需要一次 FLUSH（host 的 SYNCHRONIZE CACHE 语义）。 */
     munit_assert_true(ftl_ut_flush());
 
-    /* 再落一次 Checkpoint：Journal-only 的 TRIM 持久化存在已知缺口（RISK-HOST-11），
+    /* 再落一次 Checkpoint：Journal-only 的 TRIM 持久化存在已知缺口，
      * 本用例锚定“CP 落盘后的 TRIM 不复活”这一明确持久化点。 */
     {
         ftl_ctx_s  *f  = ftl_ut_live();
@@ -426,7 +426,7 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
     /* ── 第二段：不额外强制 CP，只靠 flush ──
      * 上一段锚定的是「CP 落盘后不复活」这一确定点；本段不再 request CP，只 flush：
      * trim 的失效条目必须已随 Journal 页落盘，回放要能把它应用回来。
-     * 若这里复活，说明 trim 仍只活在 RAM/未持久化的 Journal 里（RISK-HOST-11）。
+     * 若这里复活，说明 trim 仍只活在 RAM/未持久化的 Journal 里。
      * ⚠ 只保证「本用例不 request CP」；后台按水位自然触发的 CP 不排除。 */
     {
         const DWORD lba2 = lba + 64U;
@@ -501,7 +501,7 @@ static MunitResult test_preload_region_zero_and_high(const MunitParameter params
  * 覆盖：写→flush 后 journal 无 pending；显式 request CP 后序号推进、phase 回 IDLE，
  *       且 on-media Header 的 sequence 等于目标；重启后数据一致。
  * 判据：序号在 Header prep 时就 ++，只等序号会在 Header 未落盘时提前退出；
- *       find_latest 会覆盖 cp_state.sequence，所以先取 cp_target 再调用（RISK-UT-02）。
+ *       find_latest 会覆盖 cp_state.sequence，所以先取 cp_target 再调用。
  * 备注：真 NAND。 */
 
 static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[], void *data)
@@ -859,7 +859,7 @@ static MunitResult test_cp_probe_clean_media(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
-/* BBT 池清空：多圈 ring 的 save→reload 会选到旧 record（RISK-BBT-18）。
+/* BBT 池清空：多圈 ring 的 save→reload 会选到旧 record。
  * 要验证“本次 save 的坏块/标志是否持久化”的用例必须先隔离这个变量。 */
 static void media_erase_bbt_pool(alc_s *a)
 {
@@ -880,7 +880,7 @@ static void media_erase_bbt_pool(alc_s *a)
  * 覆盖：标坏一个空闲块 → bbt_save（dirty 清零、sequence 推进）→ 模拟重启并走
  *       生产 bbt_init → 坏块仍在。
  * 判据：坏块图丢失会把已知坏块当可用块写，首次上板才炸。
- * 备注：先清 BBT 池隔离「多圈 ring 选中旧 record」的 RISK-BBT-18；真 NAND。 */
+ * 备注：先清 BBT 池隔离「多圈 ring 选中旧 record」的 ；真 NAND。 */
 
 static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
 {
@@ -894,7 +894,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
     alc_s     *a   = &ftl->alloc;
 
     /* format 会刻意保留旧 BBT record；多圈 ring 会让 locate 选到旧 record
-     * （RISK-BBT-18），与本用例要测的“save→load 持久化”无关 ⇒ 先清池。 */
+     * ，与本用例要测的“save→load 持久化”无关 ⇒ 先清池。 */
     media_erase_bbt_pool(a);
 
     munit_assert_uint16(a->free_count, >, 0U);
@@ -942,7 +942,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
  * 覆盖：写一条 FORMAT_IN_PROGRESS 的 BBT record（用更大 sequence 保证 bootstrap 扫描
  *       选中）+ 擦 CP 池 ⇒ 探针 NO_RECORD、需要格式化；重启后标志恢复；完整 format
  *       的提交点写 initial CP 并清标志。
- * 判据：标志丢失 + 无 CP 会被判成「损坏」而拒绝启动或误格式化（RISK-BOOT-04/17/22）。
+ * 判据：标志丢失 + 无 CP 会被判成「损坏」而拒绝启动或误格式化。
  * 备注：不擦 BBT 载体——失败路径上擦 spare 会丢坏块图；bbt_save 在 dirty=0 时是空操作。 */
 
 static MunitResult test_format_in_progress_resume(const MunitParameter params[], void *data)
@@ -961,7 +961,7 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
     /* ① 模拟两阶段格式化在「BBT 已落盘、initial CP 尚未写」时掉电：
      *    写一条带 FORMAT_IN_PROGRESS 的 BBT record，并用**更大的 sequence** 让它
      *    在真实开机 bootstrap 扫描中胜出（旧 record 可能留在已移出候选池的 spare 上，
-     *    RISK-BBT-18 / BOOT-22）。不擦 BBT 载体：失败路径上擦 spare 会丢坏块图。
+     *    / BOOT-22）。不擦 BBT 载体：失败路径上擦 spare 会丢坏块图。
      *    ⚠ bbt_save 在 dirty==0 时直接返回 OK（不写盘），必须同时置 dirty。 */
     a->bbt.sequence           = 0xFFFFFF00U; /* 新 record 必须是最新（见上） */
     a->bbt.cursor_valid       = 0U;          /* 让 save 重新定位 write_idx */
@@ -1011,7 +1011,7 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
  * 覆盖：擦 CP 池后在 slot0/page0 写非 FF 页 ⇒ 探针 IO_ERROR（不是 NO_RECORD）；
  *       pfr_media_check_format 返回 FTL_ERROR 且 need_format=0；最后完整 format 恢复。
  * 判据：介质有内容但没有有效 CP 时格式化会擦掉用户数据；必须拒绝并把决定权交给用户
- *       （RISK-BOOT-03）。真 NAND。 */
+ *       。真 NAND。 */
 
 static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], void *data)
 {
@@ -1049,7 +1049,7 @@ static MunitResult test_cp_corrupt_refuse_format(const MunitParameter params[], 
     /* ③ 判据：无有效 record + 非 FF 内容 ⇒ CP_MEDIA_IO_ERROR（不是 NO_RECORD）。 */
     munit_assert_int(cp_media_status_probe(ftl->cp_handle, &version), ==, CP_MEDIA_IO_ERROR);
 
-    /* ④ 启动决策：读坏必须拒绝格式化，不能把整片擦掉（RISK-BOOT-03）。 */
+    /* ④ 启动决策：读坏必须拒绝格式化，不能把整片擦掉。 */
     BOOL need_format = 1;
 
     munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_ERROR);
@@ -1073,7 +1073,7 @@ static MunitParameterEnum s_failc_params[]     = {
     {         NULL,               NULL},
 };
 
-/* cache_failc_abort — cache program 成员的 FAIL_CACHE 中止与回滚（RISK-CACHE-19）。
+/* cache_failc_abort — cache program 成员的 FAIL_CACHE 中止与回滚。
  *
  * 覆盖（参数 arm = **携带 FAILC 的命令**所对应的页序号）：
  *   命令 K 的 FAILC 结算的是**上一页**（page K-1），所以
@@ -1081,12 +1081,12 @@ static MunitParameterEnum s_failc_params[]     = {
  *   arm=2   —— page1 失败 ⇒ 已确认 LBA = 8（之前页已确认）；
  *   last    —— END 的 FAILC = page6 失败 ⇒ 已确认 LBA = 48。
  *   三种情况都必须：组报 IO_ERROR、`cache_wb_aborts` 恰好 +1、已确认前缀 = 新数据、
- *   **失败页的 LBA 读 IO_ERROR**（RISK-CACHE-28）、同批未确认页保留旧映射。
+ *   **失败页的 LBA 读 IO_ERROR**、同批未确认页保留旧映射。
  *   ⚠ 不断言「序列已关闭」：中止后同一条 host 命令的剩余 LBA 会合法地重新开一条
  *   序列，结束时 `cache_stream.seq.active` 可能为真。
  * 判据：失败页之后的页若被确认，rebuild 会引用一个 page0 未落盘的块 ⇒ 静默丢数据。
  * 备注：注入点在 FTL 层（`ftl_cache_wr_member_done`），验证的是 FTL 策略；器件
- *       FAILC 归属与 7Ah 状态字节仍须上板（RISK-IF-11）。真 NAND。 */
+ *       FAILC 归属与 7Ah 状态字节仍须上板。真 NAND。 */
 
 static MunitResult test_cache_failc_abort(const MunitParameter params[], void *data)
 {
@@ -1148,12 +1148,12 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
     /* 只有被注入的那一条命令能触发中止：多一条说明有迟到的完成又走了失败路径。 */
     munit_assert_uint32(aborts, ==, 1U);
 
-    /* 延后上报（RISK-CACHE-28 / USBC-01）：失败结论由**下一条**命令承载、且只报一次。
+    /* 延后上报（/ USBC-01）：失败结论由**下一条**命令承载、且只报一次。
      * ⚠ 必须先取走：否则下一条 `ftl_submit_*` 会被粘性错误挡掉，掩盖后面的读判据。 */
     munit_assert_true(ftl_take_deferred_error(ftl));
     munit_assert_false(ftl_take_deferred_error(ftl));
 
-    /* ③ 新语义（RISK-CACHE-28）：
+    /* ③ 新语义：
      *    · 已确认前缀（pages 0..K-2）= 新数据；
      *    · **失败页**（page K-1）的 LBA 读必须报 **IO_ERROR**（撤销 + region 降级；
      *      不能返回旧数据，更不能返回编程失败页的内容）；
@@ -1184,7 +1184,7 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
     }
 
     /* ④ 重启后：已确认前缀的映射要落盘后才可见（先 flush）；失败页的 **region 降级位
-     *    不持久**（RISK-CACHE-28 的已知边界）⇒ 那些 LBA 变成未映射、读回全零；
+     *    不持久**（已知边界）⇒ 那些 LBA 变成未映射、读回全零；
      *    同批未确认页的旧映射不受影响。 */
     munit_assert_true(ftl_ut_flush());
     ftl_ut_reboot_from_media();
@@ -1322,14 +1322,14 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
     return MUNIT_OK;
 }
 
-/* bbt_ring_reload — 多圈 BBT ring 必须选中**最新** record（RISK-BBT-18）。
+/* bbt_ring_reload — 多圈 BBT ring 必须选中**最新** record。
  *
  * 覆盖：清空 BBT 池 → 标坏 g1 + save → 标坏 g2 + save（两条 record）→ 模拟重启走
  *       生产 bbt_init → g1、g2 都必须仍为 BAD（载入的是后一条 record）。
  * 判据：环形池重载若选到旧 record，最近标出的坏块会「复活」并被写入。
  * 备注：`bbt_persist` 刻意先擦池来隔离本项；这里保留多条 record 并断言载入最新
  *       的那条（若 ring 定位选旧 record，g2 会在重启后「复活」）。⚠ 标坏持久化且
- *       format 不清除 ⇒ **每次运行永久消耗 2 块**（RISK-UT-06）。真 NAND。 */
+ *       format 不清除 ⇒ **每次运行永久消耗 2 块**。真 NAND。 */
 
 static MunitResult test_bbt_ring_reload(const MunitParameter params[], void *data)
 {
@@ -1575,7 +1575,7 @@ static MunitResult test_cache_seq_cross_block(const MunitParameter params[], voi
  *
  * 覆盖：先写旧数据并 flush，再写新数据（cache 序列，组在页编程完成时完成），
  *       不 flush 直接读同一段 ⇒ 必须逐字节等于新数据；随后 flush + 模拟重启再读仍一致。
- * 判据：若读覆盖层失效，读走旧 L2P 映射 ⇒ 读到旧数据，本用例必须红（RISK-CACHE-27）。
+ * 判据：若读覆盖层失效，读走旧 L2P 映射 ⇒ 读到旧数据，本用例必须红。
  * 备注：真 NAND。 */
 
 static MunitResult test_cache_early_ack_read_visible(const MunitParameter params[], void *data)
@@ -1629,7 +1629,7 @@ static MunitResult test_cache_early_ack_read_visible(const MunitParameter params
  *
  * 覆盖：写一段新数据后 `ftl_flush_begin/step`；完成前页表仍有未证明页，完成后
  *       `wr.count==0` / `wr_inflight==0`，L2P 指向新 PBA，重启读回一致。
- * 判据：flush 提前完成 ⇒ 掉电窗口内「已回执未确认」的页没有屏障（RISK-CACHE-29）。
+ * 判据：flush 提前完成 ⇒ 掉电窗口内「已回执未确认」的页没有屏障。
  * 备注：真 NAND。 */
 
 static MunitResult test_cache_early_ack_flush_barrier(const MunitParameter params[], void *data)
@@ -1690,7 +1690,7 @@ static MunitResult test_cache_early_ack_flush_barrier(const MunitParameter param
  *
  * 覆盖：FAILC 注入后下一条 host 命令只报一次 `deferred_error`；失败页 LBA 读 IO_ERROR；
  *       同 region 未映射 LBA 也 IO_ERROR（region 粒度降级）；清注入后新写落盘，页表排空。
- * 判据：失败页不能返回旧数据/编程失败页内容；deferred 不能重复上报（RISK-CACHE-28）。
+ * 判据：失败页不能返回旧数据/编程失败页内容；deferred 不能重复上报。
  * 备注：真 NAND；与 `cache_failc_abort` 共用注入点，但聚焦「同 region / 环排空」。 */
 
 static MunitResult test_cache_failc_undo_read_error(const MunitParameter params[], void *data)
