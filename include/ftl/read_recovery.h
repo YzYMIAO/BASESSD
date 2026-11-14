@@ -99,10 +99,15 @@ typedef enum RR_PLANE_STEP_E
     RR_PLANE_WAIT  = 2U, /* region 尚未就绪（加载在飞）：调用者原地等，不计卡死 */
 } rr_plane_step_e;
 
-/* 提交 deadline：连续提交不出去超过 `FTL_SUBMIT_TIMEOUT_MS` 即判卡死，
+/* 提交 deadline：连续提交不出去超过 `RR_SUBMIT_TIMEOUT_MS` 即判卡死，
  * 按恢复失败收尾。⚠ 只兜「提交侧」——命令一旦在飞，NAND 层自身的 wait/jump 超时保证
  * 它必有完成（超时置 FC_CMD_STATUS_TIMEOUT），故不在飞时强拆 job。
- * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。 */
+ * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。
+ *
+ * 取 1 s 而非 `FTL_SUBMIT_TIMEOUT_MS`（10 ms）：只有「序列没有任何真实进展」
+ * 时才计时（见 ftl_op_cache_seq_progressing），正常写流/序列边界会在 1 s 内推进；
+ * 1 s 仍提交不出去说明恢复读被结构性挡住，必须让 host 读有界失败而不是挂死。 */
+#define RR_SUBMIT_TIMEOUT_MS (1000U)
 
 /*
  * rr_owner_s — 被托管读子操作的身份（docs §4.5）

@@ -46,6 +46,18 @@
 #define GC_VICTIM_MAX_VALID_PCT   (80U) /* 空闲补池：valid 占比 > 80% 视为无收益 */
 #define GC_EMERGENCY_MIN_GAIN_PCT (1U)  /* 紧急水位：可回收占比 < 1% 视为无收益 */
 
+/* GC 工作区预留：目的 SB 需要一个 **pair**（每 plane 一块），搬移期间这块空间
+ * 先被占用、victim 擦除后才归还。预留 2 个 pair 覆盖「当前 job + host/CP 余量」。
+ *
+ * 出处：SPDK FTL（CSAL）在 device formation 时把 spare 块从可用地址空间扣掉，
+ * 专供 GC 缓冲（`docs/reference/README.md` A4 / `docs/reference/pages/spdk_ftl.html`）。
+ * 判据按**最饿 plane 的 free**计算（不含 OP）：OP 是 GC 的兜底工作区，若把它算进
+ * 可自由消耗的空间，GC 会把 free 抽到 0 并饿死 CP/L2P/host（满盘 boot GC 现场）。
+ *
+ * 低于该预留时只允许回收**空块**（不需要目的页）；搬 valid 数据会继续消耗 free，
+ * 让 host/CP/L2P 拿不到块。 */
+#define GC_RESERVE_PAIRS (2U)
+
 /* ── 1. 共用原语 ── */
 
 /**
@@ -274,6 +286,26 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
         }
     }
 
+    // 工作区是否够搬 valid 数据：按**最饿 plane 的 free** 判定（成对分配要求每 plane
+    // 各有一块；OP 只能由 GC 目的页兜底，不能当成可自由消耗的余量）。
+    BOOL relocate_ok = true;
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        if (alc_free_get_count(alloc, p) < GC_RESERVE_PAIRS)
+        {
+            relocate_ok = false;
+            break;
+        }
+    }
+
+    // 低水位下按**块**计净收益：搬移 valid 数据要占用 ceil(valid_cw / CW_PER_BLOCK)
+    // 个目的块，回收 plane_count 个块；净增 < 1 块就不搬（会让 GC 只搬不收，
+    // free 原地踏步甚至下降）。空 victim（valid_cw==0）天然净增 plane_count 块。
+    // 只在 free 已到 target 以下时启用：无空间压力时 GC 本就不该被触发，
+    // 此时保留调用者给的收益模式语义（UT 直接调 select 的既有契约）。
+    const BOOL under_pressure = (alloc->free_count <= FREE_POOL_TARGET);
+
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
         const super_block_s *sb = alc_super_closed_get_at(alloc, i);
@@ -300,6 +332,24 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
         if (pct < best_pct)
         {
             best_pct = pct;
+        }
+
+        // 工作区低于预留：只允许回收空块（不需要目的页）。搬 valid 数据会继续
+        // 消耗 GC 自己的工作区，free/OP 抽干后每个 job 只能 abort。
+        if ((relocate_ok == false) && (valid_cw != 0U))
+        {
+            continue;
+        }
+
+        // 低水位净收益闸门：净增 < 1 块不搬（见 under_pressure 的说明）。
+        if (under_pressure == true)
+        {
+            const DWORD dst_blocks = ((valid_cw + FTL_CW_PER_BLOCK - 1U) / FTL_CW_PER_BLOCK);
+
+            if ((DWORD)st.plane_count <= dst_blocks)
+            {
+                continue;
+            }
         }
 
         /* ── 收益判据（先过滤，再评分）── */

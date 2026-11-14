@@ -558,14 +558,16 @@ void rr_handle(rr_handle_s *rr)
 
             if (now_ms != 0U)
             {
-                // cache 序列打开时被门控拒绝是预期等待（序列下一窗口收尾），不计 deadline。
-                if (ftl_op_cache_seq_active() == true)
+                // 只有序列**仍在推进**时，门控拒绝才是预期等待（下一窗口会收尾）。
+                // 序列只剩被托管的恢复项时不算进展：deadline 必须计时，否则恢复读
+                // 被结构性挡住时 host 读会无限挂起。
+                if (ftl_op_cache_seq_progressing() == true)
                 {
                     timer_deadline_clear(&rr->submit_deadline);
                 }
                 else if (rr->submit_deadline.armed == false)
                 {
-                    timer_deadline_arm(&rr->submit_deadline, now_ms, FTL_SUBMIT_TIMEOUT_MS);
+                    timer_deadline_arm(&rr->submit_deadline, now_ms, RR_SUBMIT_TIMEOUT_MS);
                 }
                 else if (timer_deadline_expired(&rr->submit_deadline, now_ms))
                 {

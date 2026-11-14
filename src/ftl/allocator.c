@@ -500,6 +500,7 @@ BOOL alc_spare_refill_from_free(alc_s *alloc, BYTE plane)
  */
 BOOL alc_super_can_open(const alc_s *alloc, alc_super_alloc_mode_e mode)
 {
+    // 与 alc_super_open 同口径：除静态 WL 外，free 不足时都可以从 OP 补。
     const BOOL allow_op = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -547,8 +548,12 @@ BOOL alc_super_can_open(const alc_s *alloc, alc_super_alloc_mode_e mode)
 static BOOL alc_super_open(alc_s *alloc, super_block_s *sb, alc_super_alloc_mode_e mode)
 {
     const BYTE temperature = (mode == ALC_SUPER_ALLOC_HOT) ? FTL_TEMP_HOT : FTL_TEMP_COLD;
-    const BOOL high_wear   = (mode == ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
-    const BOOL allow_op    = (high_wear == false);
+    // free 在某 plane 先耗尽时从该 plane 的 OP 池补一块：成对分配要求每 plane 各一块，
+    // 只看总 free 会在两侧不均时永久失败（host 写窗口 flush 不出去 ⇒ USB 超时）。
+    // OP 是设备 formation 时从 host 可用空间扣掉的余量，所有分配路径都可在 free 不足时
+    // 使用；GC 的低水位按块净收益闸门负责防止无收益搬移把 OP 抽干。
+    // 静态 WL 例外：OP 块的擦除次数不受该策略控制，不能借。
+    const BOOL allow_op    = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
     WORD       gblock[PLANE_NUM];
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -560,7 +565,7 @@ static BOOL alc_super_open(alc_s *alloc, super_block_s *sb, alc_super_alloc_mode
         }
         if (gblock[plane] == FTL_GBLOCK_INVALID)
         {
-            return false; /* high_wear 路径不允许 OP 兜底：OP 块的擦除次数不受本策略控制 */
+            return false;
         }
     }
 

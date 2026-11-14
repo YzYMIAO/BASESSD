@@ -336,6 +336,61 @@ BOOL ftl_op_cache_seq_active(void)
 }
 
 /**
+ * @brief 打开的 cache 序列是否仍有真实进展
+ *
+ * 只看序列所有者组：仍在发子操作，或有 READ/WRITE 类型的在飞命令。托管给 RR 的项
+ * 命令已脱钩，不算进展。
+ *
+ * @return true 有进展；false 无序列 / 序列只剩等待恢复项
+ */
+BOOL ftl_op_cache_seq_progressing(void)
+{
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_s *ftl = g_op_route[die];
+
+        if ((ftl == NULL) || ((ftl->cache_stream.seq.active == false) && (ftl->cache_stream.seq.draining == false)))
+        {
+            continue;
+        }
+
+        const WORD gi = ftl->cache_stream.seq.owner_gi;
+
+        if (gi >= FTL_GROUP_MAX)
+        {
+            continue;
+        }
+
+        const pend_group_s *g = &ftl->pending.groups[gi];
+
+        if (g->used == false)
+        {
+            continue;
+        }
+        if (g->next < g->total)
+        {
+            return true; /* 所有者仍在下发 */
+        }
+        if ((pend_group_has_op(&ftl->pending, gi, PENDING_OP_READ) == true) ||
+            (pend_group_has_op(&ftl->pending, gi, PENDING_OP_WRITE) == true) ||
+            (pend_group_has_op(&ftl->pending, gi, PENDING_OP_WRITE_CONFIRM) == true))
+        {
+            return true; /* 有真实命令/确认在推进：都有确定完成点或 100ms 超时 */
+        }
+
+        // 序列正在有序收尾（已请求 padding END / END 已在飞）：等它完成，不算结构性卡死。
+        // ⚠ 不看 break_requested：它只是“请求下一窗口收尾”，若请求一直未被兑现，
+        // 继续把它当进展会让 deadline 永远被清掉。
+        if ((ftl->cache_stream.seq.close_requested == true) || (ftl->cache_stream.seq.closing == true))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * @brief 后台提交是否应挂起 deadline
  *
  * 主机空闲后本判据自动为假；真正的卡死仍会被 deadline 暴露。
@@ -402,7 +457,10 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
         // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
         // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR（RISK-HOST-18）。
         // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
-        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_READ_RECOVERY) || (op == FTL_OP_L2P))
+        // ⚠ FTL_OP_READ_RECOVERY **不能**置 break_requested：它恢复的正是本序列
+        // 自己的读组。置断点会触发 close_step → ftl_cache_seq_release 重算
+        // draining，把刚放开的门控立刻重新关上，恢复读永远提交不进来。
+        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_L2P))
         {
             ftl->cache_stream.seq.break_requested = true;
         }

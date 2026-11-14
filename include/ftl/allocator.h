@@ -40,8 +40,8 @@
  * 合在一个闭枚举里，避免 `temperature` 与 `high_wear` 组合出非法状态。 */
 typedef enum ALC_SUPER_ALLOCATOR_MODE_E
 {
-    ALC_SUPER_ALLOC_HOT            = 0, /* HOT SB；动态 WL 取擦除最少；允许 OP 兜底 */
-    ALC_SUPER_ALLOC_COLD           = 1, /* COLD SB；动态 WL 取擦除最少；允许 OP 兜底 */
+    ALC_SUPER_ALLOC_HOT            = 0, /* HOT SB（host 数据）；取擦除最少；允许 OP 兜底 */
+    ALC_SUPER_ALLOC_COLD           = 1, /* COLD SB（GC/WL 目的）；取擦除最少；允许 OP 兜底 */
     ALC_SUPER_ALLOC_COLD_HIGH_WEAR = 2, /* COLD SB；取擦除最多；禁止 OP 兜底（静态 WL） */
 } alc_super_alloc_mode_e;
 

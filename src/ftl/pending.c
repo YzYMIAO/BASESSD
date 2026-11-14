@@ -366,6 +366,34 @@ WORD pend_group_get_count(const pend_ctx_s *table)
 }
 
 /**
+ * @brief 组 gi 是否还有指定类型的在飞子操作
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ * @param op    子操作类型
+ * @return true = 至少一个该类型的 used 槽位属于本组
+ */
+BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const DWORD bit = ftl_group_bit(gi);
+
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        const pend_req_s *req = &table->slots[i];
+
+        if ((req->used == true) && ((req->owners & bit) != 0U) && (req->op == op))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * @brief 组 outstanding 下溢的限流日志
  *
  * @param who 触发者（静态字符串，日志用）

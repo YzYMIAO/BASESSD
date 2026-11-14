@@ -444,6 +444,20 @@ BOOL pend_group_alloc(pend_ctx_s *table, BYTE *out_gi);
 WORD pend_group_get_count(const pend_ctx_s *table);
 
 /**
+ * @brief 组 gi 是否还有指定类型的在飞子操作
+ *
+ * 读序列的 drain 判据用它：托管给 Read Recovery 的子操作（PENDING_OP_READ_RECOVERY）
+ * 命令已脱钩、不占设备 read pipeline，不能再让读序列停在 draining，否则恢复读
+ * 会被同一道门挡住、组永不完成。
+ *
+ * @param table pending 表
+ * @param gi    组下标（0..FTL_GROUP_MAX-1）
+ * @param op    子操作类型（如 PENDING_OP_READ）
+ * @return true = 至少一个该类型的 used 槽位属于本组
+ */
+BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op);
+
+/**
  * @brief 组在飞数增减的唯一闸门
  *
  * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走

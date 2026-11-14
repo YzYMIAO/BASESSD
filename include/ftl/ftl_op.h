@@ -216,6 +216,19 @@ ftl_ctx_s *ftl_op_route_get_region(DWORD global_region);
 BOOL ftl_op_cache_seq_active(void);
 
 /**
+ * @brief 打开的 cache 序列是否仍有「真实进展」（而非只剩被托管的恢复项）。
+ *
+ * 判据按序列所有者组：仍在下发子操作（next < total），或有 READ/WRITE/待确认
+ * 类型的条目在推进，或序列已进入有序收尾（padding END 请求/在飞）。已托管给
+ * Read Recovery 的项（PENDING_OP_READ_RECOVERY）命令已脱钩，不算进展——否则
+ * 序列会以「还有在飞」为由无限挂起别人的提交 deadline。
+ *
+ * @return true —— 至少一个序列在推进；门控拒绝属于预期等待。
+ * @return false —— 没有序列，或序列只剩等待恢复项：调用者应正常计时。
+ */
+BOOL ftl_op_cache_seq_progressing(void);
+
+/**
  * @brief 后台 job 的提交被拒是否属于预期等待（挂起提交 deadline 用）。
  *
  * @return true —— cache 序列打开，或主机组仍在飞；

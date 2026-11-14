@@ -143,8 +143,12 @@ void SSD_CODE_FAST ftl_cache_seq_release(ftl_ctx_s *ftl)
 
     // 序列被放弃时要分清「命令还在飞」与「已经排空」：前者必须继续关着门控，
     // 否则别的组会在 31h/3Fh 管线半途插命令（RISK-CACHE-14）；后者才真正放开。
+    // 判据只数**序列自己拥有**的读子操作：读失败托管给 RR 的那一项已脱钩
+    // （PENDING_OP_READ_RECOVERY），不占设备读管线。把它算成在飞会让 draining
+    // 永远关着门，而 RR 的恢复读又被同一道门挡住 ⇒ 组永不完成，形成死锁。
     const WORD gi        = ftl->cache_stream.seq.owner_gi;
-    const BOOL in_flight = (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_READ) && (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) && (ftl->pending.groups[gi].outstanding != 0U);
+    const BOOL in_flight = (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_READ) && (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) &&
+                           (pend_group_has_op(&ftl->pending, gi, PENDING_OP_READ) == true);
 
     ftl->cache_stream.seq.kind     = FTL_CACHE_SEQ_NONE;
     ftl->cache_stream.seq.active   = false;
@@ -237,10 +241,12 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
 {
     // 排空守卫：窗口已提交、命令仍在飞 ⇒ 门控继续关着，直到所有者组的在飞子操作
     // 归零（或 1 s 兜底：命令卡死时不能把 LUN 永久锁死；放锁时留 WRN 现场）。
+    // 与 ftl_cache_seq_release 同口径：RR 托管的读子操作已脱钩，不算序列在飞。
     if (ftl->cache_stream.seq.draining == true)
     {
         const WORD gi        = ftl->cache_stream.seq.owner_gi;
-        const BOOL in_flight = (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) && (ftl->pending.groups[gi].outstanding != 0U);
+        const BOOL in_flight = (gi < FTL_GROUP_MAX) && (ftl->pending.groups[gi].used == true) &&
+                               (pend_group_has_op(&ftl->pending, gi, PENDING_OP_READ) == true);
 
         if (in_flight == false)
         {
