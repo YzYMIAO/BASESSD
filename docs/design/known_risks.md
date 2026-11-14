@@ -197,7 +197,6 @@
 | RISK-GC-17 | 待上板 | cache-program batch 页基址误判，batch 永久禁用 | 2026-11-04 编译通过 |
 | RISK-GC-18 | 待上板 | 空 victim 快路径绕过 Journal 持久性闸门 | 2026-11-04 编译通过 |
 | RISK-GC-19 | 待上板 | 解码缺 meta 的 CW 被静默当未写，静默丢数据 | 2026-11-04 编译通过 |
-| RISK-GC-20 | 待定位 | 满盘启动后 idle GC 把 free 从 29 拖到 0（会话被 format 打断） | 2026-11-13 板端观测 |
 | RISK-MIG-01 | 待上板 | 等待命令丢失/卡住时永久 active | 未上板 |
 | RISK-MIG-02 | 待上板 | predictive 迁移活锁（同 GC-07 修法） | 未上板 |
 | RISK-MIG-03 | 待上板 | 标 BAD 后 L2P 仍指向该块，valid_count 回绕 | rev32 上板观测 |
@@ -220,6 +219,7 @@
 | RISK-RR-03 | 待上板 | ECC 健康状态可降级（CRITICAL→WARNING） | 未上板 |
 | RISK-RR-04 | 待上板 | 预测巡检命中含 BAD plane 的 SB，migrate 卡死 | 未上板 |
 | RISK-RR-05 | 待上板 | SLC 无 read-retry table 却做 8 次重试 + 邻居辅助 | 2026-10-21 修复 |
+| RISK-RR-06 | 待上板 | RR 重试读被 read sequence draining 挡住，host 读组永不完成 | 2026-11-13/14 两次掉电测试均未触发 RR；修复未执行 |
 | RISK-WL-10 | 待上板 | 静态 WL 快照恢复后从不触发（分母用整 SB） | 2026-11-04 编译通过 |
 | RISK-WL-11 | 待上板 | WL 目的准备失败静默退化为普通分配 | 2026-11-04 编译通过 |
 | RISK-ALLOC-14 | 待上板 | 运行期标 BAD 让 Closed 条目永久卡死 | 2026-11-04 编译通过 |
@@ -331,15 +331,6 @@
 - **证据**：`src/ftl/gc.c:gc_decode_cw_lba`；`include/fc/fc_interface.h:254`。
 - **历史/验证**：
   - 2026-11-04 修复 → 编译通过，未上板
-
-#### RISK-GC-20 满盘启动 idle GC 把 free 拖到 0
-
-- **后果**：满盘重启（`restore closed=3322 free=29`、无 host I/O）后 `[GC] start reason=periodic trig=0x01 mode=idle free=29`；随后 `progress jobs=30/71/108 moved=6668/16691/25899 rec=29/70/107`，`free` 21→1→0（`STAT t=23s free=0`、`mv=30155`）。若迁移目标页继续消耗 free 而 victim 归还滞后，`free=0` 时 CP/journal/host 写都拿不到成对块 ⇒ 启动后设备无写能力。
-- **缓解**：无专门守卫；本次会话被用户 `format` 打断，未观察到 GC 自行收敛或停手。
-- **下一步**：复现同一状态（H2testw 写满 → POR，**不执行 format**），观察 `[GC] progress/end` 与 `free` 是否回到 ≥32、是否出现 `no space` / 写失败；若停在 0 则按缺陷处理（GC 迁移需预留目标页/在 free 低于阈值时暂停）。
-- **证据**：板端 2026-11-13 19:47:35 镜像串口日志（`GC start`/`progress`/`STAT` 行，`docs/design/known_risks.md` 本条）；`src/ftl/migrate.c:mig_handle` / `src/ftl/gc.c:gc_should_trigger`。
-- **历史/验证**：
-  - 2026-11-13 19:47:35 `debug_ut` 满盘重启：free 29→0、mv=30155、rec=107，会话被 `format` 打断 → 待定位
 
 #### RISK-MIG-01 等待命令丢失/卡住
 
@@ -532,6 +523,18 @@
 - **历史/验证**：
   - （日期未记录）修复 → 未上板
 
+#### RISK-RR-06 RR 重试读与 read sequence draining 互锁
+
+- **后果**：host 读组卡死：`g=0 lba=189184 next=32/32 out=1`，`[RR] job stage=2 attempt=1 retry=0` 每秒重复、`seq drain force-clear … outstanding=1` 反复出现；`ftl_ctx` 显示 `seq kind=1(READ) act=0 drain=1`，而 `q` 显示 **`cmd=0/64 desc=0/256 buf=0/128`（used=0）**、`l2p_load=0 l2p_flush=0`、`mig=0` ⇒ **不是资源枯竭**。后果：主机读超时/拿不到数据，H2testw 记为 DATA LOST（`Found 0xFF`），但**数据本身完好**（同 LBA 用 `rd` 可读对，见 `RISK-BOOT-30`）。
+- **代码级死锁链（静态确认）**：① 读子操作失败 ⇒ `ftl_host_io_read_fail` 把 pending 项改成 `PENDING_OP_READ_RECOVERY`、命令脱钩，但**组 outstanding 不递减**；② `ftl_cache_seq_release` 用「owner 组 outstanding != 0」判 `in_flight` ⇒ `draining = true`（把 RR 托管的子操作算成序列自己的在飞命令）；③ `ftl_op_seq_gate` 对 `FTL_OP_READ_RECOVERY` 返回 true **并置 `break_requested`**；④ `ftl_cache_seq_close_step` 见 READ + `break_requested` 就调 `ftl_cache_seq_release` ⇒ 再次 `draining = in_flight = true`。⇒ **gate 拒绝的副作用把刚被 watchdog 清掉的 draining 立刻置回**，RR 永远提交不出去（`cmd` used 恒 0 与「每次分配后 release」一致）。watchdog 的 1 s force-clear 无法打断该环。
+- **缓解**：已改（2026-11-13，未上板）：① 新增 `pend_group_has_op(table, gi, op)`（`src/ftl/pending.c`），`ftl_cache_seq_release` / `ftl_cache_seq_idle_guard` 的 `in_flight` 改为只数 `PENDING_OP_READ`，RR 托管项不再把序列锁在 draining；② `ftl_op_seq_gate` 对 `FTL_OP_READ_RECOVERY` 不再置 `break_requested`（消除「拒绝→断点→release→重开 draining」的环）。RR 仍会在真实读序列 active 时被挡，等其释放/排空后自然放行。③ 加固兜底：新增 `ftl_op_cache_seq_progressing()`（序列所有者已释放 / 只剩托管项时不算进展），`rr_handle` 只在**真在推进**时清 submit deadline；否则按 `RR_SUBMIT_TIMEOUT_MS = 1 s` 计时，到期 `rr_job_abort` 按失败结算，保证 host 读有界完成而不是挂死。
+- **下一步**：上板判据：坏页读失败后 RR 在 ≤1 s 内提交恢复读，host 读组要么恢复、要么按 IO_ERROR 结算，不再出现 `outstanding=1` + `stage=2` 长驻；`seq drain force-clear` 不应再周期性出现。复现路径：写满 → 掉电重启 → Verify（命中坏页触发 RR）。
+- **证据**：板端 2026-11-13 19:47:17 串口（`[RR]` / `seq drain force-clear` / `q` / `ftl_ctx`）；`src/ftl/read_recovery.c:rr_read_submit`（`ftl_op_submit(..., FTL_OP_READ_RECOVERY, rr)`）；`src/ftl/ftl_op.c:ftl_op_seq_gate`（READ_RECOVERY 被挡并置 break_requested）；`src/ftl/ftl.c:seq drain force-clear`；`src/ftl/pending.c` 组 outstanding。
+- **历史/验证**：
+  - 2026-11-13 复现：两次只读 Verify 在不同 offset 失败（6.1 MB / 15.5 MB），同窗口 `out=1` 组与 RR stage=2 长期不动 → 静态确认死锁链
+  - 2026-11-13 修复落地（`pending.c` / `ftl.c` / `ftl_op.c` / `read_recovery.c`）：死锁链 + RR submit deadline 加固；`make all` / `make release` / `make tests UT=FTL` 零告警
+  - 2026-11-13 21:26:30 镜像已上板；本轮启动后无读失败，**RR 路径未触发**（盘上 FS 已被上次读挂死破坏，Verify 无法进行）→ 待复现
+
 #### RISK-RR-05 对无 retry table 的 SLC 做 8 次重试
 
 - **后果**：`SET_FEATURES(0x89)` 在 MT29F4G08 是保留地址（空操作），Stage 1 只是把同一页读 8 遍；Stage 2 读邻居页也无法恢复目标页。坏页读失败要白跑 10 次 NAND 读，校验速度被拖到写速度以下（实测 verify 195 KB/s vs write 290 KB/s）。
@@ -612,6 +615,7 @@
 |---|---|---|---|
 | RISK-GC-07 | 2026-11-12 | 2/3 容量触发 GC/CP 活锁（读成功清 fail_count） | `docs/archive/known_risks_batches.md` |
 | RISK-GC-16 | 2026-11-13 | T5 磨损 GC 已从 `gc_should_trigger` 移除，磨损交给 WL UBI 判据 | `docs/archive/known_risks_batches.md` |
+| RISK-GC-20 | 2026-11-14 | GC 低水位按块净收益 + free-only 预留；板端写满/掉电均通过 | `docs/archive/known_risks_batches.md` |
 
 ---
 
@@ -852,6 +856,7 @@
 | RISK-BOOT-25 | 待定位 | 重启后整段覆盖写触发大量 dangling | 2026-11-01 复现 |
 | RISK-BOOT-26 | 待上板 | 恢复统计 WORD 回绕导致快照被错误接受 | 2026-11-04 编译通过 |
 | RISK-BOOT-28 | 待上板 | block_words 隐式 in/out，恢复顺序只靠注释 | 2026-11-04 编译通过 |
+| RISK-BOOT-30 | 待上板 | Verify 报 1.3 MB 数据丢失，实为读路径瞬时错读（数据完好） | 2026-11-14 两次掉电未复现；随 `RISK-RR-06` 一起验证 |
 | RISK-MD-14 | 待上板 | 双副本账本/Anchor 原子性 | v0.90 |
 | RISK-MD-15 | 待上板 | 副本感知压缩（主/备逐副本搬移） | v0.90 |
 | RISK-MD-16 | 待上板 | victim region 页读失败 ⇒ 压缩每轮同页中止 | 2026-11-04 编译通过 |
@@ -1064,6 +1069,18 @@
 - **证据**：`src/ftl/power_failure_recovery.c:pfr_block_table_s` / `pfr_ledger_snapshot` / `pfr_build_pools`。
 - **历史/验证**：
   - 2026-11-04 修复 → 编译通过，未上板
+
+#### RISK-BOOT-30 Verify 报数据丢失，实为读路径瞬时错读
+
+- **后果**：H2testw 写+校验通过后，再跑 Verify 中途断电；上电 Verify 报 **401.6 MB OK / 1.3 MB DATA LOST（2676 sectors）**，首错文件 offset `0x624000`，`Expected 0x624000 / Found 0xFFFF...`。但按该 offset 换算到宿主 **LBA 23904** 后回读：`map` 有正确映射（PBA 0x3F070、CLOSED、valid=196），`rdpaa 0x3f038` **read=ok**、`cw_lba = 0x5d60..0x5d63`（= LBA 23904..23907），`rd 23904 8` 首 8 字节 **`00 40 62 00 …` = 0x624000**，与 H2testw 的 Expected 完全一致 ⇒ **数据没有丢，是那次 Verify 的读路径把有效数据当成 `0xFF` 返回，且没有报错**。后果比丢映射更严重：主机可在无错误状态下收到全 FF 的脏数据（静默错读）。
+- **缓解**：无。当时设备正处掉电重启后的 GC 风暴/活锁窗口（`free=1`、`[RR] stage=2` 重试、`seq drain force-clear gi=0 outstanding=1`，见 `RISK-GC-20`）；现在同一 LBA 用 CLI 读正常，说明是资源/时序相关的瞬态条件。
+- **下一步**：① 在当前活锁状态**再跑一次 H2testw Verify**：若通过 ⇒ 错读只发生在 GC 风暴峰值窗口，按「读路径在 L2P 加载失败/资源枯竭时返回 FF 且状态 OK」查；若仍报同一区间 ⇒ 有稳定复现，边跑边抓 `q`（cmd/desc/buf 计数）与 `ftl_ctx`。② 定位读路径中「L2P 未驻留且加载提交失败」的分支：确认它返回错误码还是回填 `0xFF`；重点看 cache 读序列的放弃/强制放行路径（`ftl_cache_seq_release` / `seq drain force-clear`）。
+- **证据**：板端 2026-11-13 19:47:17 产品镜像串口；H2testw 1.3 输出（Expected 0x624000）；`map/rdpaa/rd` 输出；`src/ftl/cache_batch.c` cache 读序列；`src/ftl/l2p_cache.c:l2p_load_start / l2p_entries_ready`；`src/ftl/ftl.c:seq drain force-clear`；同窗口 `RISK-GC-20`。
+- **历史/验证**：
+  - 2026-11-13 首次现象：上电 Verify 报 1.3 MB corrupted；初判为掉电丢映射，后经 `map`/`rdpaa`/`rd` 回读证实数据完好 → 改判为**读路径瞬时静默错读**，待定位
+  - 2026-11-13 同窗口：`seq drain force-clear gi=0 outstanding=1 age=1001ms`、`[RR] job stage=2 … attempt=1`、boot GC `free=29→1` 活锁
+  - 2026-11-13 22:49:55 镜像复测：满盘（`free=8`）状态下 **Verify 中途拔 USB 断电 → 上电 → 再 Verify**：boot `type=1 cp_seq=169 journal_entries=0 anomalies=0 free=8 op=402`，**无 GC churn**、无读挂死，第二次 Verify **`Test finished without errors`，读 887 KB/s** ⇒ 掉电路径通过，1.3 MB 丢失未复现。⚠ 本轮无读失败，RR 路径未触发
+  - 2026-11-14 **写阶段**掉电：`format` + POR 后写到 ~170 MB 拔电；上电 `boot type=2 cp_seq=83 journal_entries=6656 anomalies=0 free=1854`，回放后 Verify 已写部分 **0 错误（884 KB/s）** ⇒ 写泄漏尾部之外无数据损坏
 
 #### RISK-MD-14 双副本账本/Anchor 原子性
 
@@ -1332,7 +1349,7 @@
 |---|---|---|---|
 | RISK-CP-01 | 待上板 | journal 预擦失败仍记 pre_erased_block，回切时跳过擦除 | 未上板 |
 | RISK-CP-02 | 待上板 | checkpoint 回调缺 waiting 守卫，迟到完成会按当前 phase 重走 | 未上板 |
-| RISK-CP-03 | 待上板 | 状态机改动未板验：错误传播 / 游标复位 / 水位条目化 | 2026-11-12 常规回归通过（/ftl/ + H2testw）；残余：各 phase 掉电、85%/95% 触发点 |
+| RISK-CP-03 | 待上板 | 状态机改动未板验：错误传播 / 游标复位 / 水位条目化 | 2026-11-14 写阶段掉电回放通过（6656 条、anomalies=0）；残余：各 phase 定点掉电、85%/95% 触发点 |
 | RISK-CP-04 | 待定位 | host 写流下 CP 提交饥饿，submit stalled 后 abort | 2026-11-12 上板复现 |
 | RISK-CP-05 | 待上板 | abort 被调两次，fail_phase 被覆盖为 CP_DONE + 日志刷屏 | 未上板 |
 | RISK-CP-10 | 待上板 | T2 触发无 latch，写计数停在整数倍时 CP 空转 | 2026-11-04 编译通过 |
@@ -1365,6 +1382,7 @@
 - **下一步**：正常 CP、各 phase 掉电、journal 回切、85%/95% 触发点。
 - **证据**：`src/ftl/checkpoint.c`。
 - **历史/验证**：
+  - 2026-11-14 写阶段掉电：`format` + POR 后 H2testw 写到 ~170 MB 拔电；上电 `boot type=2 cp_seq=83 journal_entries=6656 anomalies=0 free=1854`，`power-failure diag gap=6208`、`L2P borrow=1`；随后 Verify **`Test finished without errors`，读 884 KB/s** ⇒ journal 回放 + CP 快照恢复在写中断电场景通过
   - （日期未记录）上述三处改动 → 未上板
 
 #### RISK-CP-04 持续写流下 CP 提交饥饿
@@ -1824,6 +1842,13 @@
   - 2026-11-13 代码对比 `574b8e7..HEAD`：`ftl_op.c`（seq gate）/ `l2p_cache.c`（加载）/ `pending.c` 均 **0 diff**，`ftl_fc_interface.h` 仅注释 ⇒ HOST-18 的修复代码未被改坏。行为差异只有 122aaf7（USB MODE SENSE 宣称 WCE=0）与 155cf9a（cache 写序列 verdict/pad/closing + flush 无进展超时）；本轮日志无 `cache-wr failed` / `flush stalled`，新分支未触发 ⇒ 仍是同一潜伏时序竞态，不是已定位的新回归
   - 空间假说已排除：2026-11-12 通过时结束 `free=23`，本轮失败时 `free=33`，且 OP 池 408 块未动 ⇒ 不是「真的写满」
   - 2026-11-12 18:04:36 镜像 H2testw 406/420 MB 通过 → 当时闭合（详情见 `docs/archive/known_risks_batches.md`）；仅一次通过，不代表边界稳定
+
+
+### 已闭合（详情见 archive）
+
+| ID | 日期 | 一句话 | 归档 |
+|---|---|---|---|
+| RISK-HOST-19 | 2026-11-14 | 低 free 写时 host 不能借 OP 导致 wbuf 卡死；回退后写满通过 | `docs/archive/known_risks_batches.md` |
 
 ---
 

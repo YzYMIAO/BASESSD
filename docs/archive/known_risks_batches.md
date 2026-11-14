@@ -671,3 +671,29 @@
 - **原文**：`tADL` 原放在 `11h` 后；删掉 `11h` 后 1µs 会使双 plane 编程整页丢失。
 - **闭合原因**：`TADL` 移到地址→数据之间、`11h` 后改 TWB+WAIT_READY；2026-11-13 Mode 0 `/fc-nand/` **62/62，0 SKIP**（含 `init_sequence`/`feature_write_read`/`block_multi_plane`/cache 双 plane），2026-11-12 H2testw 371/419 MB 0 错误。
 - **证据**：`src/nand/onfi_1_0.c` 相关 UOP 数组；`tests/unit/test_fc_level3.c`；Mode 0 串口日志。
+
+## 2026-11-14 Batch 2A 收口新增已闭合
+
+### RISK-GC-20 满盘启动 idle GC 抽干 free/OP 后每 job 都 abort
+
+- **原状态**：待上板（第一版修复在 `free+OP` 判据上失效）
+- **原文**：满盘重启后 `[GC] start reason=periodic mode=idle free=29`；GC 持续搬 valid 数据（`moved=212060 rec=846`），`free` 29→1→0；随后 `free=1 op=24/0`，每个新 job 拿不到成对目标块，`no free block` abort 循环（该原因不打日志），设备只剩读能力。
+- **闭合原因**：
+  1. GC 低水位**按块计净收益**：`free <= FREE_POOL_TARGET` 时，victim 必须满足 `plane_count > ceil(valid_cw / FTL_CW_PER_BLOCK)`（净增 ≥1 块）才搬；空 victim 始终允许；无压力时保留原收益模式语义。
+  2. 工作区预留 `GC_RESERVE_PAIRS = 2` 按**最饿 plane 的 free** 判定（不含 OP）。
+  3. OP 仍是所有分配路径共用的余量（曾试过只允许 GC 用 OP，导致 `RISK-HOST-19` 的 wbuf 卡死，已回退）；OP 消耗由净收益闸门约束。
+- **板端证据**：
+  - 2026-11-13 21:26:30 镜像复位（旧状态 `free=1 op=24/0`）：`GC start trig=0x09 free=4 → end jobs=30 moved=88 rec=30 noop=28 abort=0`，`free 1→32`；
+  - 2026-11-13 22:49:55 镜像写满 H2testw：**949/887 KB/s 0 错误**，`GC start free=30 → end jobs=1 moved=3 rec=1 abort=0`；
+  - 2026-11-14 满盘掉电重启（`free=8 op=402`）：**无 GC churn**，`free` 稳定，Verify 通过。
+- **残余**：WL（`mig_wl_begin`）不受该预留约束，触发条件 `erase spread ≥200`，短测难达到；已在 `RISK-GC-20` 关闭前记录于主表历史。
+- **证据**：`src/ftl/gc.c:gc_select_victim / GC_RESERVE_PAIRS / under_pressure`；`src/ftl/allocator.c:alc_super_open`；`docs/reference/README.md` A4（SPDK CSAL GC 缓冲）。
+
+### RISK-HOST-19 低 free 满盘写时 wbuf 拿不到成对块，host 写永不完成
+
+- **原状态**：待上板（根因已定位并回退）
+- **原文**：H2testw 写到 413 MiB（`free=14`）时 host 写命令永不完成，USB BOT 超时 → `Code 433`。现场：`wb open=1 base=584 occ=0xFF own=0x3`、两个写组 `next=8/8 out=1`、`free=14 op=204/203 hot=0`、`fc cmd/desc/buf` 全空。根因：当时把「只允许 GC 用 OP」当成结构改动，host 路径无法在 plane 不均时补块，`alc_super_open_alloc_pair(HOT)` 永久失败，wbuf 永远 flush 不出去。（当时误判为「固件挂死」；实际主循环在跑，CLI 因 host 请求 pending 报 busy。）
+- **闭合原因**：回退为 `allow_op = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`，除静态 WL 外所有分配路径都可在 free 不足时从 OP 补；plane 不均时 host 写窗口可正常完成。
+- **板端证据**：2026-11-13 22:49:55 镜像写满 H2testw **949/887 KB/s，`Test finished without errors`**；`free 3350→8`，GC 仅 1 个收益 job，host 写不再卡死。
+- **残余**：若 `free + OP` 真正耗尽，host 写组仍会无限重试（`wb_busy` 计为进展、无 deadline）；按容量上界（854,016 LBA ÷ 256 CW/block = 3336 blocks，free+OP 远大于此）本测试不可达，后续可补「无进展超时 → 有界 IO_ERROR」。
+- **证据**：`src/ftl/allocator.c:alc_super_open / alc_super_can_open`；`src/ftl/wbuf.c` 分配失败路径；板端 `ftl_ctx`/`q` 现场与 H2testw 输出。
