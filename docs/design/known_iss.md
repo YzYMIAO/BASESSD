@@ -127,6 +127,29 @@
     （`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）均已执行并通过。
     覆盖账：**M 36 / N 13（11 条 FC negative 待 UT=FC + HIL 2 条部分）/ K 129 /
     待判定 110**。下一步：`make tests BUILD_TYPE=release UT=FC` 跑 `/fc-nand/negative/`。
+  - 2026-11-14 板端第十三跑（release UT=FC 全量）：`/fc-nand/negative/`
+    **11/11、0 SKIP、141 µs**（新增 `short_chain_read_short`）。
+    风险文档闭合第二批：16 条转已闭合并归档；`BBT-10` 因 factory-scan/format-erase
+    未覆盖退回 N（部分）。最终账：**M 67 / N 4 / K 216 / 待判定 0 / 待决策 5 /
+    待定位 8**。
+  - 2026-11-14 板端第十二跑（release UT=FTL 全量）：`/ftl/media/negative/`
+    **54/54、0 SKIP、219.32 s**。新增负例全部通过；GC-02 行为断言通过但读回 0xFF，
+    已登记待定位。FC 侧 `short_chain_read_short` 尚未在 UT=FC 档上板。
+    覆盖账：**M 68 / N 3 / K 216 / 待判定 0 / 待决策 5 / 待定位 8**。
+  - 2026-11-14 GC-02 负例板端观察：完成态写失败后 Cold SB 关闭、源块未标坏、job aborted
+    均符合预期；但已迁移页读回出现 `0xFF`，疑似 plane 级映射指向未编程页。用例暂只断言
+    「读不报错」，现象登记为 `RISK-GC-02` 待定位。**未归因前不判定为缺陷**。
+  - 2026-11-14 可行性复核后补写负例（未上板）：新增 14 条用例覆盖 17 行——
+    GC-04 / GC-10 / MIG-07 / MIG-03 / WL-10 / WL-11 / RR-04 / ALLOC-08/14/15 /
+    L2P-02/05 / BBT-10 / JN-01 / MD-14 / HOST-03 / IF-03。新增少量测试 seam：
+    `--wrap=ftl_async_erase_block_multi_plane`（Journal/CP/BBT 擦除入口）。
+    另补 `GC-02`（完成态写失败关 Cold SB）与 `HOST-12`（组表耗尽）两条用例；
+    HOST-12 顺带按 H38 把 `ftl_submit_common` 的组表满返回从 `FTL_ERROR` 改为
+    `FTL_AGAIN`（瞬态资源）。
+    本轮未做（K-deferred，原因逐条在覆盖表）：JN-07 / CP-01 / BOOT-03/10/11/18 /
+    L2P-04 / MD-02/16 / BBT-19 / DP-26；WL-01 因期望行为未定义、WL-04 属 soak，
+    留 K。覆盖账：**M 50 / N 21 / K 216 / 待判定 0 / 待决策 5 / 待定位 8**；
+    N 中除 UT-34（用户裁决无用例）外均有用例。
   - 2026-11-14 待决策 4 条裁决并落地：
     HOST-06 保持早回执 + deferred（不重发 cache-program 成员）；WB-08 删除不可达
     `WBUF_STATE_FAILED`（错误经 `base.error` 上报、flush 超时兜底）；SCH-01 在

@@ -516,20 +516,19 @@ src include` 确认没有现成入口。
 `gc_erase_fail_bounded`）。其中 2 个 H 类由既有用例覆盖：`FI_CACHE_FAIL` →
 `cache_failc_abort`，`FI_JOURNAL_WRITE_FAIL` → `journal_write_fail_wal_stall`。
 
-**用例**：`/ftl/media/negative/` **39** 条 + `/fc-nand/negative/` **9** 条 + HIL
+**用例**：`/ftl/media/negative/` **54** 条 + `/fc-nand/negative/` **11** 条 + HIL
 `trim_edges`（HIL 共 16 条）。**2026-11-14 板端两档全绿**：
-debug UT=FTL `36/36 + 3 SKIP`（200.10 s）、**release UT=FTL `39/39 + 0 SKIP`（186.77 s；WB-08 后回归 194.29 s）**
-——3 条 release-only（`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）
-已在 release 档验证。**release UT=FC：`/fc-nand/negative/` 9/9、0 SKIP、129 µs**。
+debug UT=FTL `36/36 + 3 SKIP`、**release UT=FTL `54/54 + 0 SKIP`（219.32 s）**、
+**release UT=FC `11/11 + 0 SKIP`（141 µs）**。
 
 **风险（302 条）**：
 
 | 处置 | 数量 | 说明 |
 |---|---|---|
-| 已覆盖 M | **49** | 41 条由 2026-11-14 两套 UT 转 M（含 HOST-06 裁决与 SCH-01）；其余为既有板端证据 |
-| 可覆盖 N · 已写用例（未上板） | **2** | `RISK-IF-18`（2/4）、`RISK-UT-34`（buffer NULL 留以后） |
-| 可覆盖 N · 未写（已判定可构造） | **3** | `GC-02` / `L2P-02` / `HOST-12` |
-| 明确不覆盖 K | **233** | 主机侧矩阵 / 人工掉电窗口 / 长压测 / 白盒与夹具不可达 / 触发不可确定性构造 / 用户裁决无失败模式 |
+| 已覆盖 M | **67** | 58 条由 2026-11-14 两套 UT + 新增负例转 M；其余为既有板端证据 |
+| 可覆盖 N · 已写用例（未上板） | **4** | `GC-02`（读回 0xFF 待定位）、`IF-18`（2/4）、`BBT-10`（kick 已验，factory-scan/format-erase 未覆盖）、`UT-34`（用户裁决） |
+| 可覆盖 N · 无用例（用户裁决） | **1** | `RISK-UT-34`：buffer NULL 按裁决留以后；其余契约已由既有 HIL 覆盖 |
+| 明确不覆盖 K | **216** | 主机侧矩阵 / 人工掉电窗口 / 长压测 / 白盒与夹具不可达 / 触发不可确定性构造 / 用户裁决无失败模式 |
 | 待判定 | **0** | 110 条已于 2026-11-14 全部落定 |
 | 待决策 / 待定位 | **5 / 8** | 剩余契约裁决 / 风险描述需重审 |
 | 待定位 / 待决策 / 待测试源 / 待后续 | **7 / 5 / 1 / 1** | 非负例可解项 |

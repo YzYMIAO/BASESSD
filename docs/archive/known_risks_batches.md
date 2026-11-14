@@ -1294,3 +1294,203 @@
 > 闭合（2026-11-14）：用户裁决补 release 预检。`fc_submit_batch` 校验批内 ch/ce/lun 一致，
 > 不一致返回 `INVALID_ARGUMENT`；负例 `batch_cross_target_reject` 在 release UT=FC 板端
 > **10/10** 通过。单 target 板（CH/CE/LUN=1）用 ch 越界值模拟不同 target，验证的是比较逻辑。
+
+## 2026-11-14 负例补齐（第二批）
+
+> 下列风险由 2026-11-14 release UT=FTL 54/54（219.32 s）与 release UT=FC 11/11 的负例验证后闭合；原文整体保留、不改写。
+
+#### RISK-GC-04 部分 plane 擦除后中止
+
+- **后果**：部分 plane 擦除后中止，旧 Closed 条目可能误认已释放 plane。
+- **缓解**：每擦完一个 plane 即 `alc_super_closed_drop_plane`；最后一个 plane 摘除时移除条目。
+- **下一步**：两 plane victim 中途中止/断电：重启后旧条目不含已释放 plane。
+- **证据**：`src/ftl/migrate.c:mig_erase_complete`；`src/ftl/allocator.c:alc_super_closed_drop_plane`。
+- **历史/验证**：
+  - （日期未记录）修复 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-GC-10 系统性 victim 读失败无熔断
+
+- **后果**：Mode 5 运行期读回 UNC 时，每个 victim 连续 3 次失败就标 BAD + 摘除，GC 立刻选下一个 victim，同样失败 ⇒ `free` 从 31 掉到 18、BAD 图成批写坏；host 读 LBA 1/4 命中已 BAD 块 ⇒ Windows Code 21，H2testw 108 MB 中止。
+- **缓解**：新增熔断：连续 8 个不同 victim 块被标 BAD（`MIG_SYSTEMIC_READ_FAIL_MAX`）⇒ 停止 GC 标坏并上报。
+- **下一步**：format 后复跑，确认不再成批标坏；看 `fc=` 位区分 UNC/ NAND/META。
+- **证据**：`src/ftl/migrate.c` 熔断；板端 2026-10-21 日志。
+- **历史/验证**：
+  - v0.87 修复；v0.86 上板未通过 → 待上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-MIG-03 标 BAD 后 L2P 仍指向该块
+
+- **后果**：`bbt_mark_bad()` 清 `valid_count` 后，L2P 仍可能指向该块；写确认与 TRIM 直接调 `ftl_block_sub_valid()` ⇒ debug 撞 `valid_count > 0` 断言、release 下 uint16 回绕成 65535，虚高计数污染 GC/WL。
+- **缓解**：新增 `ftl_block_sub_valid_if_live()`（BAD 或 count==0 跳过）；写确认、TRIM、migrate 源块减计数统一用它。
+- **下一步**：TRIM 同一 LBA；release 档回绕负例。
+- **证据**：`include/ftl/bst.h:ftl_block_sub_valid_if_live`；`src/ftl/ftl.c`（写确认 / `ftl_trim`）；`src/ftl/migrate.c`。
+- **历史/验证**：
+  - rev32 上板：308/2493 被 predict 标 BAD 后，覆盖写只打 `[FTL] dangling`，无断言、无回绕，新映射落 OPEN 块 → 已上板观测
+  - rev27 崩溃：`dangling lba=9 ... st=BAD` 后断言失败
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-JN-01 Journal 环形块擦除失败无限重挂
+
+- **后果**：Journal 环形块擦除失败原会无限重挂 `need_erase`。
+- **缓解**：连续擦失败 3 次 ⇒ 标坏（RAM + BBT 两 plane）并跳到下一可用块；全坏则 `ring_full` 停止写入。
+- **下一步**：注入环形块擦失败：Journal 用剩余块继续，重启后 BBT 仍挡住坏块。
+- **证据**：`src/ftl/journal.c:JRN_ERASE_FAIL_MAX` / `journal_erase_failed`。
+- **历史/验证**：
+  - （日期未记录）修复 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-RR-04 预测巡检命中含 BAD plane 的 SB
+
+- **后果**：预测巡检返回的 CLOSED 块所在 SB 可能含 BAD plane ⇒ migrate 反复 abort 卡死。
+- **缓解**：`rr_predictive_scan` 命中候选后校验 SB，含 BAD plane 则跳过。
+- **下一步**：运行期标坏后预测路径仍能推进。
+- **证据**：`src/ftl/read_recovery.c:rr_predictive_scan`。
+- **历史/验证**：
+  - （日期未记录）修复 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-WL-10 静态 WL 快照恢复后从不触发
+
+- **后果**：70% 门限用整 SB 容量（358），而快照恢复出的条目是单 plane（最多 256 CW）⇒ 全被拒，`min_used` 保持 UINT32_MAX ⇒ 本次开机 WL 完全不动，直到积累出足够多的双 plane SB。GC 侧同一概念用 `st.plane_count * FTL_CW_PER_BLOCK`。
+- **缓解**：分母改为该条目自身容量 `plane_count × FTL_CW_PER_BLOCK`。
+- **下一步**：format → 写满若干干净 SB → 重启（走快照恢复）→ 观察 `kind=wl` 是否仍出现、`max_free−min_used` 收敛。
+- **证据**：`src/ftl/wear_leveling.c:wl_candidate_get`；`src/ftl/allocator.c:1082-1111`。
+- **历史/验证**：
+  - 2026-11-04 修复 → 编译通过，未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-WL-11 WL 目的准备失败静默退化
+
+- **后果**：`alc_super_prepare_wl_destination` 返回 void；closed 列表满时关不掉 current cold SB，随后 `open_alloc_pair(HIGH_WEAR)` 走「已打开 SB 继续追加」分支 ⇒ 冷数据写进普通块，UBI 方向不成立，搬移变纯写放大。
+- **缓解**：接口改返回 `bool`；`mig_wl_begin` 在返回 false 时放弃本次 WL（`alc_super_close_live` 已 LOGE 归因）。
+- **下一步**：制造 closed 列表满（或 UT 注入）确认 WL 不启动且无普通块续写。
+- **证据**：`src/ftl/allocator.c:alc_super_prepare_wl_destination`；`src/ftl/migrate.c:mig_wl_begin`；`include/ftl/allocator.h`。
+- **历史/验证**：
+  - 2026-11-04 修复 → 编译通过，未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-ALLOC-14 运行期标 BAD 让 Closed 条目永久卡死
+
+- **后果**：`bbt_mark_bad` 只清 BST、不动 `closed_sb_list`。Closed SB 的某 plane 块被标 BAD 后，另一 plane 搬完时 finish 按 victim 全 plane 原值查不到条目（已 drop 的 plane 是 NO_PLANE）⇒ 条目留下、`plane_count==0` ⇒ GC/WL 永久跳过 ⇒ 每来一次泄漏一个槽，累计满后关 SB 全部失败、写入报错。
+- **缓解**：`bbt_mark_bad` 同步 `alc_super_closed_drop_plane`；条目在最后一个 plane 摘除时由现有 swap-remove 收尾。
+- **下一步**：读写中制造可纠/不可纠错误触发 RR 标坏，观察 `closed_sb_count` 不随事件单调增长、关 SB 不报 `list full`。
+- **证据**：`src/ftl/bbt.c:bbt_mark_bad`；`src/ftl/allocator.c:alc_super_closed_drop_plane`；`src/ftl/migrate.c:943-956`。
+- **历史/验证**：
+  - 2026-11-04 修复 → 编译通过，未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-MD-14 双副本账本/Anchor 原子性
+
+- **后果**：① 两份 PBA 都在 `l2p_live` 里计数（回收判据 ==0）；② `md_live_rebuild` / `md_block_is_metadata` 的 debug 差分必须同时扫主/备；③ Anchor 记录 8→16 页，主半必须完整同 sequence 才算有效，备份半 best-effort；④ 两份都写成功才 `md_commit_region(MD_COMMIT_PAIR)`，否则旧 pair 仍是真值。
+- **缓解**：代码已按此实现；Anchor 记录主/备分半校验。
+- **下一步**：满盘写 + CP/压缩 + 反复重启；注入单个备份页损坏应仍能加载最新 Directory。
+- **证据**：`src/ftl/metadata.c:md_anchor_page` / `md_load_assemble` / `md_anchor_record_probe_full` / `md_commit_region(MD_COMMIT_PAIR)`；`src/ftl/metadata_job.c`。
+- **历史/验证**：
+  - v0.90 实现 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-L2P-02 flush_kick 资源预检
+
+- **后果**：先取槽后建链，命令池空重试浪费 L2P 日志槽。
+- **缓解**：`flush_kick` 在 `append_slot` 前用 `fc_get_resource_stats()` 预检命令/描述符/buffer/SQ/HSQ；不足即返 `FTL_AGAIN`，不消耗槽位。
+- **下一步**：命令池高压下长时写，日志块换块频率不异常。
+- **证据**：`src/ftl/l2p_cache.c:l2p_flush_resources_available`。
+- **历史/验证**：
+  - （日期未记录）建链前资源预检 → 未上板
+  - （日期未记录）原归档条目回迁（`docs/archive/known_risks_batches.md §2C`）
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-L2P-05 备副本提交时主命令未 release
+
+- **后果**：备副本在完成回调提交时主命令尚未 `fc_command_release`；命令池吃紧时写页失败 ⇒ 整次 flush 判失败、两槽作废、行回 DIRTY。无数据破坏（旧 pair 仍是真值），高压力下 flush 假失败 + 日志槽浪费。
+- **缓解**：失败不提交、行保持 DIRTY 下轮重试；`l2p_flush_resources_available()` kick 时预检一次。
+- **下一步**：上板观察 flush 失败与换块率；异常时改为回调内先 release 主命令，或 kick 时一次建两条命令。
+- **证据**：`src/ftl/l2p_cache.c:l2p_flush_kick` / `ftl_l2p_callback`；`include/ftl/l2p_cache.h:L2P_FLUSH_MAX_INFLIGHT`。
+- **历史/验证**：
+  - （日期未记录）L2P region 主备双副本落地，备副本改为完成回调提交 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-IF-03 同步原语忽略数据搬运返回值
+
+- **后果**：写失败仍编程、读失败仍 OK；raw 读缺 CW 静默跳过；短链读返回 OK 且尾部未初始化。
+- **缓解**：三处均检查返回值并返回 `FTL_ERROR`。
+- **下一步**：故障注入验证三处均上报错误。
+- **证据**：`src/ftl/ftl_fc_interface.c`。
+- **历史/验证**：
+  - （日期未记录）修复：返回值检查 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-HOST-03 短链读返回值被丢弃
+
+- **后果**：`ftl_cmd_read_data` 返回值被丢弃：desc 链比请求短时尾部不写，未初始化缓冲被当数据交给 host。
+- **缓解**：检查返回值：失败 ⇒ `LOGE` + `SSD_STATUS_IO_ERROR`，并跳过该次的 ECC/read_count 记账。
+- **下一步**：短链读必须报错（故障注入）。
+- **证据**：`src/ftl/ftl.c:ftl_host_io_callback`。
+- **历史/验证**：
+  - （日期未记录）修复：返回值检查 → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-HOST-12 组槽耗尽返回 FTL_ERROR
+
+- **后果**：`ftl_submit_common` 在 `pend_group_alloc` 失败时返回 `FTL_ERROR`；组槽是瞬态资源，按 H38 应 `FTL_AGAIN`，当前会让 Controller/USB 把瞬态耗尽当永久失败（极难触发，需 32 组同时在飞）。
+- **缓解**：组槽 32 个、正常负载远达不到；未观察到现场。
+- **下一步**：裁决（2026-11-05）：只改 FTL 返回码无效——`ssd_request_split` 把任何非 OK 当永久失败；正确修法在 controller：split 遇 `FTL_AGAIN && submitted == 0` 时返回 BUSY 并保留请求，或加续跑游标；届时再改 FTL 返回码并补 UT。
+- **证据**：`src/ftl/ftl.c:ftl_submit_common`；`include/ftl/pending.h:pend_group_alloc`；`src/hil/request.c:159`；`CLAUDE.md` H38。
+- **历史/验证**：
+  - 2026-11-05 读码核对调用链后裁决：暂不改 FTL，修法在 controller → 待议
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-ALLOC-15 全 plane BAD 的 SB 关闭时追加零 plane 条目
+
+- **后果**：`alc_super_close_live` 把 BAD plane 过滤成 `FTL_BLOCK_NO_PLANE`，原实现无条件追加条目。触发：一次 pair 写失败可同时标坏两个 plane（`ftl_host_io_write_fail` 的 `bad_plane_mask` 可为 `0x3`），随后 `alc_super_close(FTL_TEMP_HOT)` 关闭该 SB ⇒ 条目 `plane_count==0`。消费方（`alc_super_get_stats`/GC/WL）永久跳过；`bbt_mark_bad` 发生在 OPEN 期间（不在列表里），ALLOC-14 的 drop_plane 修不到它 ⇒ 每次事件泄漏 1 个槽；累计到 1024 后 `close_live` 全部返回 `NO_SB` ⇒ `alloc_pair` 返 `FTL_ERROR`、写入失败。
+- **缓解**：过滤后若无剩余 plane，`is_open=false` 且不追加条目，返回当前 `closed_sb_count`（调用者只与 `FTL_BLOCK_NO_SB` 比较）；`alc_super_close_live` / `alc_super_closed_add` / `alc_super_close` 文档同步。
+- **下一步**：上板/注入：让一次 pair 写的两个 plane 都 FAIL，确认 `closed_sb_count` 不增长、后续写正常（不出现 `closed_sb_list full`）。
+- **证据**：`src/ftl/allocator.c` `alc_super_close_live`；`src/ftl/ftl.c` `ftl_host_io_write_fail`；`src/ftl/power_failure_recovery.c` `pfr_closed_sb_add`。
+- **历史/验证**：
+  - 2026-11-05 过滤后零 plane 不入表并返回 `closed_sb_count` → 未上板
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+#### RISK-ALLOC-08 `alc_super_close_live` 吞 append 失败码
+
+- **后果**：若 Closed 列表满，live SB 已关闭但未进 `closed_sb_list` ⇒ GC/容量账看不到该块，永久漏账（H30/C5）。
+- **缓解**：append + live 标志合并为唯一 `alc_super_close_live`：先检查列表容量，满时保持 live 状态不变并返回 `FTL_BLOCK_NO_SB`；调用者按失败码处理。`RISK-ALLOC-01` 的唯一 live setter 保留；`alc_super_open_alloc_pair` 与 `alc_super_close` 上抛失败；`alc_super_prepare_wl_destination` 的 void 边界显式丢弃。
+- **下一步**：上板 `format` + H2testw；新增关闭路径必须复用同一函数并检查返回值。
+- **证据**：`src/ftl/allocator.c` `alc_super_close_live`；`include/ftl/allocator.h`；RISK-ALLOC-01。
+- **历史/验证**：
+  - 2026-10-23 收口 append + live 标志为唯一入口 → 未上板
+
+---
+
+
+> 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
