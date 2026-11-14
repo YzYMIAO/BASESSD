@@ -3525,8 +3525,7 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
     const BOOL l2p_done         = l2p_flush_owner_idle(ftl->cache, die);
     const BOOL jrn_done         = jrn_is_idle(ftl->journal) && (jrn_has_pending_entries(ftl->journal) == false);
     const BOOL jrn_fail         = jrn_has_write_failure(ftl->journal);
-    const BOOL wb_fail          = (wb_status.state == WBUF_STATE_FAILED);
-    const BOOL fail             = jrn_fail || wb_fail;
+    const BOOL fail             = jrn_fail;
 
     // 无进展上限：wbuf / L2P / journal / 写确认任一项在推进就续期；连续 1 s 没有任何
     // 推进才判超时（满盘 flush 的正常时长可以超过 1 s，见 FTL_FLUSH_TIMEOUT_MS）。
@@ -3562,9 +3561,9 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
 
     if (fail)
     {
-        // best-effort：journal 页写/擦或 wbuf 编程持续失败。CP 成功后
-        // jrn_write_failure_clear 清 journal 标志；wbuf FAILED 由下一次成功操作清。
-        LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush: write failure pending (jrn=%d wb=%d) — complete best-effort\r\n", jrn_fail, wb_fail);
+        // best-effort：journal 页写/擦持续失败。CP 成功后
+        // jrn_write_failure_clear 清 journal 标志。
+        LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush: journal write failure pending — complete best-effort\r\n");
     }
     else if (timeout)
     {

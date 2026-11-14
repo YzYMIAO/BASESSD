@@ -447,12 +447,9 @@ static void wb_status_fill(const wb_handle_s *h, wb_status_s *out)
     out->base.next_ms   = 0U;
     out->base.error     = h->error;
 
-    if (h->error != FTL_OK)
-    {
-        out->state      = WBUF_STATE_FAILED;
-        out->base.state = FTL_MODULE_FAILED;
-    }
-    else if (h->open)
+    /* 硬失败不作为独立状态：flush 是 best-effort，失败由 `base.error` 与
+     * 上层的 deferred error 表达；下一次成功的 FLUSH/RESET 自然清除。 */
+    if (h->open)
     {
         out->state      = WBUF_STATE_OPEN;
         out->base.state = FTL_MODULE_RUNNING;
@@ -475,7 +472,8 @@ static void wb_status_fill(const wb_handle_s *h, wb_status_s *out)
  *
  * 只做分发，不承载事件逻辑。错误锁存：任一 kind 返回 FTL_ERROR 即置位；
  * 只有成功的 FLUSH / MAYBE_FLUSH_IDLE / RESET 清除（APPEND / DROP 的成功不代表
- * 写路径恢复）。锁存让 host FLUSH 的 `wb_fail` 判据能快速命中，而不是等 1 s 超时。
+ * 写路径恢复），经 `wb_status_s.base.error` 上报。不设独立失败状态：FLUSH 继续
+ * 尝试把窗口推下去，由 flush 自身的超时兜底。
  *
  * @param h       wbuf handle
  * @param trigger 触发描述

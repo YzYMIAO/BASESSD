@@ -58,8 +58,7 @@ typedef enum WB_TRIGGER_KIND_E
 typedef enum WB_STATE_E
 {
     WBUF_STATE_IDLE = 0,
-    WBUF_STATE_OPEN,   /* 持有一个窗口，尚未 flush */
-    WBUF_STATE_FAILED, /* 最近一次操作硬失败 */
+    WBUF_STATE_OPEN, /* 持有一个窗口，尚未 flush */
 } wb_state_e;
 
 /* ── 写缓冲状态（handle）── */

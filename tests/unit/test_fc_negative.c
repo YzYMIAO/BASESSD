@@ -346,6 +346,47 @@ static MunitResult test_nand_timing_bounds(const MunitParameter params[], void *
 #endif
 }
 
+/* batch_cross_target_reject — 链成员跨 target 必须整批拒绝（SCH-01）。
+ *
+ * 覆盖：`fc_submit_batch` 的 ch/ce/lun 一致性预检。
+ * 判据：release 返回 `FC_STATUS_INVALID_ARGUMENT`，两条命令仍可释放。
+ * 备注：本板 `CH_NUM = CE_NUM = LUN_NUM = 1`，真实跨 target 不可构造；这里把
+ *       第二条命令的 ch 置为越界值模拟「不同 target」，只验证比较逻辑。
+ *       debug 下 ASSERT_REJECT 停机 ⇒ `MUNIT_SKIP`。 */
+
+static MunitResult test_batch_cross_target_reject(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+#if !defined(NDEBUG)
+    return MUNIT_SKIP;
+#else
+    fc_cmd_s   *a = fc_command_alloc();
+    fc_cmd_s   *b = fc_command_alloc();
+    fc_cmd_id_t ids[2];
+
+    munit_assert_ptr_not_null(a);
+    munit_assert_ptr_not_null(b);
+
+    a->config.operation = (BYTE)OP_RESET;
+    a->config.chain     = FC_CHAIN_END;
+    b->config.operation = (BYTE)OP_RESET;
+    b->config.chain     = FC_CHAIN_END;
+    b->ch               = (BYTE)CH_NUM; /* 单 target 板：越界值模拟不同 target */
+
+    ids[0] = a->cmd_id;
+    ids[1] = b->cmd_id;
+
+    munit_assert_int(fc_submit_batch(ids, 2U), ==, FC_STATUS_INVALID_ARGUMENT);
+
+    fc_command_release(a->cmd_id);
+    fc_command_release(b->cmd_id);
+
+    return MUNIT_OK;
+#endif
+}
+
 /* ══ 子套件 /fc-nand/negative/：FC 边界负例（release UT 生效）══ */
 
 MunitTest g_fc_negative_tests[] = {
@@ -353,6 +394,7 @@ MunitTest g_fc_negative_tests[] = {
     {    (char *)"nand_start_unbound_txn",     test_nand_start_unbound_txn, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         (char *)"stats_consistency",          test_stats_consistency, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {          (char *)"batch_arg_guards",           test_batch_arg_guards, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { (char *)"batch_cross_target_reject",  test_batch_cross_target_reject, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {      (char *)"iface_release_guards",       test_iface_release_guards, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {   (char *)"in_flight_release_guard",    test_in_flight_release_guard, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {(char *)"data_ptr_single_plane_only", test_data_ptr_single_plane_only, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

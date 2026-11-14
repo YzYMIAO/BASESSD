@@ -1653,6 +1653,9 @@ fc_status_e fc_submit_batch(const fc_cmd_id_t cmd_ids[], DWORD n)
     BOOL  has_chain      = false;
     BOOL  mixed_queue    = false;
     DWORD first_priority = 0U;
+    BYTE  first_ch       = 0U;
+    BYTE  first_ce       = 0U;
+    BYTE  first_lun      = 0U;
 
     for (DWORD i = 0U; i < n; i++)
     {
@@ -1685,13 +1688,26 @@ fc_status_e fc_submit_batch(const fc_cmd_id_t cmd_ids[], DWORD n)
                       "batch: chain invalid cmd=%hu",
                       cmd_id);
 
+        // 一条链只能落在一个 target：链成员跨 ch/ce/lun 会被 dispatcher 按链头
+        // 路由，其余成员静默打到别的实例。release 也必须拒绝（H14）。
         if (i == 0U)
         {
+            first_ch       = (BYTE)cmd->ch;
+            first_ce       = (BYTE)cmd->ce;
+            first_lun      = (BYTE)cmd->lun;
             first_priority = cmd->high_priority;
         }
-        else if (cmd->high_priority != first_priority)
+        else
         {
-            mixed_queue = true;
+            ASSERT_REJECT((cmd->ch == first_ch) && (cmd->ce == first_ce) && (cmd->lun == first_lun),
+                          FC_STATUS_INVALID_ARGUMENT,
+                          "batch: mixed target (ch/ce/lun) at index %lu",
+                          i);
+
+            if (cmd->high_priority != first_priority)
+            {
+                mixed_queue = true;
+            }
         }
 
         has_chain = (has_chain == true) || (cmd->config.chain == FC_CHAIN_MORE);
