@@ -1701,6 +1701,7 @@
 | RISK-HOST-16 | 待上板 | 「无进展时长」预算实际未生效（死赋值） | 2026-11-05 编译通过 |
 | RISK-HOST-17 | 待上板 | host queue entry 生命周期，漏 release/重复 release | 2026-11-05 代码复核 |
 | RISK-HOST-18 | 信息 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；用户裁决接受） | 2026-11-13 403/416 通过，无 timeout |
+| RISK-HOST-22 | 待上板 | host 写取不到页对时无界重试，USB 命令可能永久挂起 | 2026-11-14 兜底已实现，未上板 |
 
 ### 详情
 
@@ -1738,6 +1739,7 @@
 - **下一步**：复现时取判据：debug 档 `[L2P] load copy failed` / 心跳；`info` 的 free/op/bad 与 FC 资源；有无 `region ... degrade`。修法候选：失败原因分级限流、超时日志带条数+首个 LBA、预算按后台进展动态判定。
 - **证据**：`src/ftl/pending.c:pend_confirm_settle`；`src/ftl/ftl.c:ftl_confirm_service` / `ftl_confirm_write`；`src/ftl/l2p_cache.c:l2p_line_evict` / `l2p_load_start` / `l2p_flush_kick`；`include/ftl/ftl_module.h:FTL_GROUP_DRAIN_TIMEOUT_MS`。
 - **历史/验证**：
+  - 2026-11-14 08:30:32 镜像写满 H2testw：两处 `confirm park timeout`（`lba=676936 parked=8` @free=1148；`lba=296064 parked=6` @free=20/GC 刚启动），均伴随 `write chunk failed after ack … deferred`，但 H2testw 最终 0 错误、掉电后 Verify 也通过（主机重试吸收）。失败时刻附近**没有** `load start failed` 日志（上一次在 40 s 前），因此更可能走 CMT/`FLUSHING` 支路而非 (a) 加载门控；让行机制针对的正是 (a)，对这条无效
   - 2026-11-01 release UT 在 degraded 介质上命中一次 `confirm park timeout lba=40448`（RISK-MD-06 下游症状，非独立复现）
   - 2026-10-31 23:47 cache 写压测复现：`lba=22512/50672`，前置 `[CP] submit stalled` + `[JRN] erase kick failed` ⇒ 支路 (a) 稳定可达
   - 2026-10-21 H2testw 确认支路 (a)：`region=568 cause=no_evictable` 与 `confirm park timeout` 同窗口，CP 卡在 phase=1
@@ -1843,6 +1845,15 @@
   - 空间假说已排除：2026-11-12 通过时结束 `free=23`，本轮失败时 `free=33`，且 OP 池 408 块未动 ⇒ 不是「真的写满」
   - 2026-11-12 18:04:36 镜像 H2testw 406/420 MB 通过 → 当时闭合（详情见 `docs/archive/known_risks_batches.md`）；仅一次通过，不代表边界稳定
 
+
+#### RISK-HOST-22 host 写取不到页对时无界重试
+
+- **后果**：若 `free + OP` 真正耗尽，`wb_flush` 取不到页对返回 `FTL_AGAIN`，页留在 wbuf；drain 把 `wb_busy` 计为进展 ⇒ 写组无限重试，host 写命令永不完成 → USB BOT 超时/设备消失（与 `RISK-HOST-19` 同表现，根因不同）。
+- **缓解**：wbuf 记录首次分配失败时刻 `alloc_fail_ms`；连续超过 `WBUF_ALLOC_STALL_TIMEOUT_MS = 1 s` 时返回 `FTL_ERROR`，把 host 写有界结算为 IO_ERROR；分配成功即清零。
+- **下一步**：按容量上界正常写满不会触发；需要注入/构造 `free + OP` 同时耗尽（当前无 CLI 注入点）验证 1 s 后返回有界失败。
+- **证据**：`src/ftl/wbuf.c:wb_flush`；`include/ftl/wbuf.h:WBUF_ALLOC_STALL_TIMEOUT_MS / wb_handle_s.alloc_fail_ms`。
+- **历史/验证**：
+  - 2026-11-14 实现兜底计时，`make all` / `make release` / `make tests UT=FTL` 零告警 → 未上板
 
 ### 已闭合（详情见 archive）
 
@@ -2597,6 +2608,7 @@
 | RISK-UT-13 | 信息 | teardown 不收在途资源，longjmp 后泄漏 | 未上板 |
 | RISK-UT-14 | 信息 | level1 两条 validate 用例不含断言 | 2026-11-11 复查确认 |
 | RISK-UT-25 | 信息 | test /ftl/ 后 BAD 计数多 3 个 | 2026-11-11 上板对比 |
+| RISK-UT-37 | 信息 | UT 失败 abort 路径的 MemManage 记录（用户裁决不关注） | 2026-11-14 用户裁决 |
 
 ### 详情
 
@@ -2658,6 +2670,16 @@
 - **历史/验证**：
   - 2026-11-11 20:22:43 板端对比 `test /ftl/` 与 media-only → 复现 +3，判定不追
 
+#### RISK-UT-37 UT 失败后的 abort/teardown 路径触发 MemManage
+
+- **后果**：一次 UT 失败（teardown leak → munit abort）之后，下一次复位启动打印 `[ERR] [FAULT] previous crash: MemManage PC=0x2400038c LR=0x24000b09 CFSR=0x00000001`。用当前 `debug_ut.elf` 符号解：PC 落在 `_sdata`、LR 落在 `s_ftl_speed_chunks` 附近（AXI 数据区），CFSR bit0 = IACCVIOL ⇒ **CPU 从数据段取指**。干净介质上 `test /ftl/` 95/95 通过时不复现。后果：UT 失败时板子可能不是干净停机，而是二次故障，干扰对首个失败的判读（`.noinit` 记录只有断电才清，容易与旧记录混淆）。
+- **缓解**：无。UT 入口已加 host 在飞请求拒绝，减少因 host 流量触发 teardown 失败的机会（这是本次失败的前置条件，但不是 MemManage 的直接解释）。**用户裁决（2026-11-14）：不关注，不再追查**；仅保留记录备查，不作为阻断项。
+- **下一步**：无（用户裁决不追）。若将来 UT 失败后板子行为异常并影响判读，再按本条的取证方法重开。
+- **证据**：板端 2026-11-14 09:13:22 复位日志；`arm-none-eabi-addr2line -e build/firmware/debug/bin/debug_ut.elf 0x2400038c 0x24000b09`（`_sdata`）；`src/common/fault_port.c` / `src/common/assertion.c` / munit 适配层。
+- **历史/验证**：
+  - 2026-11-14 首次观测：host I/O 污染导致 `address_roundtrip` teardown 失败（munit abort）后，下一次复位报上述 MemManage → 待定位
+
+
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
@@ -2694,7 +2716,7 @@
 | RISK-CACHE-15 | 待上板 | 无数据 END 缺失，padding 页盘满例外未验 | 2026-10-31 上板（正常路径） |
 | RISK-CACHE-16 | 待上板 | 跨命令序列 + VWC 早回执，USB 端到端未跑 | 2026-11-01 上板（UT 156/156） |
 | RISK-CACHE-18 | 待上板 | 提前回执扩大掉电暴露窗口，VWC 窗口未量化 | 2026-10-31 上板（flush 屏障） |
-| RISK-CACHE-23 | 待议 | 持续写期间后台 CP 被序列门控饿死 | 2026-10-31 上板观察 |
+| RISK-CACHE-23 | 待上板 | 持续写期间后台 CP/L2P 被序列门控饿死 | 2026-11-14 让行机制已实现，未上板 |
 | RISK-CACHE-26 | 待定位 | cache 写压测 1536 LBA 读回全 0 | 2026-11-01 上板复现 |
 | RISK-CACHE-27 | 待上板 | 早回执后读路径缺覆盖层，写完立刻读回旧数据 | 2026-11-01 上板（FTL/UT 层） |
 | RISK-CACHE-28 | 待上板 | FAILC 撤销按 region 粒度降级，跨重启丢失 | 2026-11-01 上板（三档注入） |
@@ -2743,10 +2765,13 @@
 #### RISK-CACHE-23 持续 host 写期间后台 CP 被序列门控饿死
 
 - **后果**：持续 host 写期间，写序列 `active` 时门控拒绝非所有者提交，后台不置 `break_requested`；序列在 Journal 配额处结束时 drain 立刻接手同一 host 命令剩余 LBA，门控空窗只有 µs 级（仅当配额恰落在大块边界时约 18 ms）⇒ Checkpoint 推进很慢（后台让步窗口过小），掉电恢复点较旧；不是死锁。元数据收效变慢。
-- **缓解**：CP 自带 1 s 心跳可见；序列门控不改。
-- **下一步**：重访触发：RISK-CACHE-22 归因后若指向 Journal/元数据回收，本项优先；可选方案：must-run 后台在连续被拒 N ms 后允许请求一次断点（`ftl_op_seq_gate_breaks` 加年龄条件），或序列结束后空出让位一轮（实现项与判据见 `known_iss.md` ISS-FTL-14）。
-- **证据**：`src/ftl/ftl_op.c:ftl_op_seq_gate`；`src/ftl/checkpoint.c:cp_job_step`；板端 `[CP] job phase=8` 日志。
+- **缓解**：已实现「让行」机制（2026-11-14，未上板）：门控拒绝 `FTL_OP_L2P` 时除置 `break_requested` 外再置 `seq.yield_pending`（记 `yield_ms`）；host 的写/读路径在**开新序列**前检查 `cache_seq_yielded()`，让行期间返回 `AGAIN/DECLINED`，保证被拒的 L2P 加载在序列收尾后的下一轮拿到一次提交机会；`ftl_op_submit` 在 L2P 提交成功时清标志；超过 `FTL_CACHE_SEQ_YIELD_MAX_MS = 20 ms` 自动放弃让行，防止后台故障饿死 host。drain 的 `bg_progress` 把 `yield_pending` 计为确定性等待，避免误判 stall。
+- **下一步**：板端满盘写验证：`[MIG] abort … l2p load timeout` 应消失或显著减少，CP `phase=8/9` 推进加快；同时确认写吞吐无明显回退（让行会暂停 host 一个窗口）。若吞吐损失明显，改为「连续被拒 N 次/超过 N ms 才让行一次」的年龄条件。
+- **证据**：`src/ftl/ftl_op.c:ftl_op_seq_gate / ftl_op_seq_yield_clear`；`src/ftl/cache_batch.c:cache_seq_yielded`；`src/ftl/ftl.c:bg_progress`；`src/ftl/checkpoint.c:cp_job_step`。
 - **历史/验证**：
+  - 2026-11-14 08:30:32 镜像写满 H2testw 板端验证：低水位 `GC start free=30` 后 `[GC] end jobs=3 moved=24 rec=3 noop=2 **abort=0**`，全程**无** `[MIG] abort … l2p load timeout`（同一场景上一版必现）；写满 0 错误，掉电后 Verify 通过。⚠ 同期仍出现 2 次 `confirm park timeout`（见 `RISK-HOST-05`，附近无加载失败日志，属另一支路）
+  - 2026-11-14 实现让行机制（`yield_pending` + 20 ms 上限），`make all` / `make release` / `make tests UT=FTL` 零告警 → 上板验证通过（MIG L2P 饥饿路径）
+  - 2026-11-13 满盘写实测 `[MIG] abort kind=gc … — l2p load timeout`（GC 的 L2P 加载被写序列饿死，50 ms 等待超时）→ 复现饥饿
   - 2026-10-31 上板观察：t=80 s 起 `phase=8`（WEAR_WRITE）持续 460 s、心跳 `age=1000~2003ms`、`cp=100`；上一失败运行的 `closed=1896`/`dir_ckpt seq=458` 下次开机正常恢复 → 实测为慢，非死锁
 
 #### RISK-CACHE-26 cache 写压测 1536 LBA 读回全 0
