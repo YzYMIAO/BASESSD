@@ -20,9 +20,11 @@ LDFLAGS += -Wl,--wrap=ftl_op_submit -Wl,--wrap=ftl_op_submit_batch
 LDFLAGS += -Wl,--wrap=ftl_async_read_page -Wl,--wrap=ftl_async_write_page
 LDFLAGS += -Wl,--wrap=ftl_async_write_page_cw -Wl,--wrap=ftl_async_write_pair_cmd
 LDFLAGS += -Wl,--wrap=ftl_async_erase_block
+LDFLAGS += -Wl,--wrap=ftl_async_erase_block_multi_plane
 LDFLAGS += -Wl,--wrap=ftl_async_write_page_mirror -Wl,--wrap=ftl_sync_write_page_mirror
 LDFLAGS += -Wl,--wrap=ftl_sync_read_page
 LDFLAGS += -Wl,--wrap=alc_super_open_alloc_pair
+LDFLAGS += -Wl,--wrap=gc_select_victim
 # 速度测试：一份源、两段实现（UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择）。
 # ⚠ 只在这里添加一次——src/ftl/makefile.mk 不再添加，否则 UT=（两者）时对象重复、
 #    套件数组符号重复定义。UT=HIL 时两段都不需要，不编入（否则文件顶部的

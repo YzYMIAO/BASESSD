@@ -387,6 +387,34 @@ static MunitResult test_batch_cross_target_reject(const MunitParameter params[],
 #endif
 }
 
+/* short_chain_read_short — 短链读必须返回错误，不能把未初始化缓冲交给上层（HOST-03 / IF-03）。
+ *
+ * 覆盖：`ftl_cmd_read_data` 在 desc 链只覆盖 1 个 CW、请求 4 KiB 时。
+ * 判据：返回 `FTL_ERROR`（链比请求短）。
+ * 备注：FC 夹具建 1-CW 读命令，不提交；release/debug 均可运行。 */
+
+static MunitResult test_short_chain_read_short(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    static BYTE  buf[PAGE_MAIN_SIZE];
+    nand_addr_s  addr;
+    fc_cmd_cfg_s cfg;
+
+    memset(&addr, 0, sizeof(addr));
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.operation = (BYTE)OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+
+    fc_cmd_s *cmd = test_cmd_build(&addr, 1U << 0, FC_META_UNKNOWN, &cfg);
+
+    munit_assert_int(ftl_cmd_read_data(cmd, buf, PAGE_MAIN_SIZE), ==, FTL_ERROR);
+
+    fc_command_release(cmd->cmd_id);
+
+    return MUNIT_OK;
+}
+
 /* ══ 子套件 /fc-nand/negative/：FC 边界负例（release UT 生效）══ */
 
 MunitTest g_fc_negative_tests[] = {
@@ -400,5 +428,6 @@ MunitTest g_fc_negative_tests[] = {
     {(char *)"data_ptr_single_plane_only", test_data_ptr_single_plane_only, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {      (char *)"cw_write_plane1_only",       test_cw_write_plane1_only, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {        (char *)"nand_timing_bounds",         test_nand_timing_bounds, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    (char *)"short_chain_read_short",     test_short_chain_read_short, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {                                NULL,                            NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

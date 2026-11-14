@@ -53,6 +53,7 @@ typedef enum FI_FAULT_E
     FI_SEQ_GATE_STARVE,    /* 序列门控拒绝，模拟后台被饿死（key 未用） */
     FI_FC_STATUS_DATA,     /* 仅 DATA 命令的 FC 完成状态注入（key = opcode 或 FI_KEY_ANY） */
     FI_FC_STATUS_PLANE,    /* 按 plane 的 FC 完成状态注入（key = plane，arg = status 位） */
+    FI_FC_STATUS_PBA,      /* 按命令目标 PBA 的 FC 完成状态注入（key = PBA，arg = status 位） */
     FI_FAULT_NUM
 } fi_fault_e;
 

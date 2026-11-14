@@ -13,6 +13,8 @@
  * 设计：docs/design/negative_test_framework.md §2.1 / §5。
  */
 
+#include "fi_wrap.h"
+
 #include "fault_inject.h"
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -22,6 +24,9 @@
 #    include "fc.h"
 #    include "ftl_fc_interface.h"
 #    include "ftl_op.h"
+#    include "gc.h"
+
+#    include <string.h>
 
 /* ── __real_* 原型（必须与被 wrap 的函数签名逐字一致）── */
 
@@ -32,12 +37,45 @@ ftl_status_e __real_ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba
 ftl_status_e __real_ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba);
+ftl_status_e __real_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba);
 ftl_status_e __real_ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx);
 ftl_status_e __real_ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op, void *ctx);
 fc_status_e  __real_fc_poll_completion(fc_cmd_status_s *completion);
 fc_status_e  __real_fc_poll_completions(fc_cmd_status_s *completions, WORD max_count, WORD *count);
 ftl_status_e __real_alc_super_open_alloc_pair(alc_s *alloc, alc_super_alloc_mode_e mode, DWORD out[PLANE_NUM]);
+
+/* ── 强制 GC victim（测试侧确定性）── */
+
+gc_select_e __real_gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out);
+
+static const super_block_s *s_forced_victim;
+
+void fi_wrap_gc_force_victim(const super_block_s *victim)
+{
+    s_forced_victim = victim;
+}
+
+void fi_wrap_reset(void)
+{
+    s_forced_victim = NULL;
+}
+
+gc_select_e __wrap_gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out)
+{
+    if (s_forced_victim != NULL)
+    {
+        memset(out, 0, sizeof(*out));
+        out->victim         = s_forced_victim;
+        out->scanned        = 1U;
+        out->eligible       = 1U;
+        out->best_valid_pct = 0U;
+        s_forced_victim     = NULL; /* 一次性 */
+        return GC_SELECT_OK;
+    }
+
+    return __real_gc_select_victim(alloc, mode, out);
+}
 
 /**
  * @brief 是否数据页配置（random 使能 = 用户数据；禁用 = 元数据）。
@@ -156,6 +194,18 @@ ftl_status_e __wrap_ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
     return __real_ftl_async_erase_block(out_cmd, pba);
 }
 
+ftl_status_e __wrap_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
+{
+    const BYTE plane = pba_to_plane(pba);
+
+    if (fi_take_at(FI_MIG_ERASE_FAIL, plane) == true)
+    {
+        return FTL_ERROR;
+    }
+
+    return __real_ftl_async_erase_block_multi_plane(out_cmd, pba);
+}
+
 ftl_status_e __wrap_ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg)
 {
     if ((fi_data_page(cfg) == false) && (fi_take_at(FI_L2P_LOAD_FAIL, pba) == true))
@@ -257,6 +307,18 @@ static void fi_fc_status_apply(fc_cmd_status_s *completion)
 
         inj = 0U;
         if (fi_take_ex(FI_FC_STATUS_PLANE, plane, &inj) == true)
+        {
+            completion->status |= (inj & 0xFFU);
+        }
+    }
+
+    /* 按命令目标 PBA 精确注入：多 plane/后台并发时只命中指定块（如 Journal 换块擦）。 */
+    if (cmd != NULL)
+    {
+        const DWORD pba = paa_to_pba((BYTE)cmd->ch, (BYTE)cmd->ce, cmd->paa);
+
+        inj = 0U;
+        if (fi_take_ex(FI_FC_STATUS_PBA, pba, &inj) == true)
         {
             completion->status |= (inj & 0xFFU);
         }
