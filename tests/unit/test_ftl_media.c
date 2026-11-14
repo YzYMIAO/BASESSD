@@ -527,7 +527,7 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
 
     munit_assert_false(jrn_has_pending_entries(ftl->journal));
 
-    /* WAL 次序（RISK-L2P-09）：flush 必须把本次写的 Journal 条目全部落盘
+    /* WAL 次序：flush 必须把本次写的 Journal 条目全部落盘
      * （`persisted_seq` 追上写入时的序号），且**驻留 dirty 行的写入序号都不高于**
      * 该水位。区域页先于覆盖它的 Journal 条目落盘，掉电后就会出现「映射在、
      * valid_count 缺」→ 计数漂移 → GC 误回收活块（区域页先于 Journal 落盘会让 valid_count 与映射分叉）。
@@ -1238,7 +1238,7 @@ static MunitResult test_cache_failc_abort(const MunitParameter params[], void *d
  *       清除、数据可读。
  * 判据：失败页的条目已丢，`persisted_seq` 永远追不上；若 WAL 闸门在失败窗口继续退让，
  *       CP 的区域落盘被永久挡住，而清除失败标记的唯一途径是「CP 完成」⇒ 死锁
- *       （RISK-L2P-10，由本用例暴露并修复）。⚠ 这里不断言闸门退让——那是
+ *       ⚠ 这里不断言闸门退让——那是
  *       `l2p_wal_gate`（纯 RAM）的覆盖。真 NAND。 */
 
 static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params[], void *data)
@@ -1293,7 +1293,7 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
 
     /* ③ 放开注入：Checkpoint **必须能完成**并清除失败标记。
      *    ⚠ 这里刻意**不**断言区域写回被 WAL 闸门挡住：Journal 页写失败时闸门必须
-     *    放行（RISK-L2P-10）。失败页的条目已丢、`persisted_seq` 永远追不上，
+     *    放行。失败页的条目已丢、`persisted_seq` 永远追不上，
      *    若闸门继续退让，CP 的区域落盘会被永久挡住，而清除失败标记的唯一途径
      *    正是「CP 完成」⇒ 死锁。本段就是这条死锁的回归判据。 */
     fi_reset();

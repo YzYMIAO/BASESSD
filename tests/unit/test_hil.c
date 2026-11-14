@@ -690,6 +690,36 @@ static MunitResult test_hil_flush_busy(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
+/* trim_edges — TRIM 入口非法范围必须拒绝，且不得登记异步请求。
+ *
+ * 覆盖：OOB LBA / count=0 → INVALID_ARGUMENT、complete_flag=1、`trim_req` 保持 NULL。
+ * 判据：非法范围若被登记，`ssd_controller_service` 会拿越界 LBA 推进或永远收不了尾。 */
+
+static MunitResult test_hil_trim_edges(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ssd_req_s req;
+
+    hil_req_init(&req, SSD_REQUEST_TRIM, ssd_controller_host_lba_max(&g_ctrl), 1U, NULL, 0U);
+    munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_INVALID_ARGUMENT);
+    munit_assert_uint8(req.complete_flag, ==, 1U);
+    munit_assert_int(req.completion_status, ==, SSD_STATUS_INVALID_ARGUMENT);
+    munit_assert_ptr_null(g_ctrl.trim_req);
+
+    hil_req_init(&req, SSD_REQUEST_TRIM, hil_lba_base(), 0U, NULL, 0U);
+    munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_INVALID_ARGUMENT);
+    munit_assert_uint8(req.complete_flag, ==, 1U);
+    munit_assert_int(req.completion_status, ==, SSD_STATUS_INVALID_ARGUMENT);
+    munit_assert_ptr_null(g_ctrl.trim_req);
+
+    hil_trace_detail("trim edges: OOB / count=0 -> INVALID_ARGUMENT, complete_flag=1, trim_req not registered");
+    hil_trace_summary("hil trim: invalid range rejected at entry");
+
+    return MUNIT_OK;
+}
+
 /* trim_job — 经 controller 的真实 TRIM。
  *
  * 覆盖：写 4 LBA → TRIM → trim_req 清空，回读全零。
@@ -781,6 +811,7 @@ MunitTest g_hil_tests[] = {
     {           (char *)"flush_job",            test_hil_flush_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {          (char *)"flush_busy",           test_hil_flush_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {            (char *)"trim_job",             test_hil_trim_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          (char *)"trim_edges",           test_hil_trim_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {           (char *)"trim_busy",            test_hil_trim_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {                          NULL,                          NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

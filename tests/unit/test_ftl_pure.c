@@ -1375,7 +1375,6 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
 /* group_exhaustion — 组槽满时的拒绝语义。
  *
  * 覆盖：填满 FTL_GROUP_MAX 后额外 alloc 必须返回 0；已有组的字段不得被覆盖
- *       。
  * 判据：覆盖会在飞组的完成回调永远不触发，host 请求悬挂。纯 RAM。 */
 
 static MunitResult test_group_exhaustion(const MunitParameter params[], void *data)
@@ -2931,7 +2930,7 @@ static MunitResult test_l2p_miss_unmapped_evict(const MunitParameter params[], v
     return MUNIT_OK;
 }
 
-/* l2p_wal_gate — L2P 区域写回必须等 Journal 落盘（WAL 次序，RISK-L2P-09）。
+/* l2p_wal_gate — L2P 区域写回必须等 Journal 落盘（WAL 次序）。
  *
  * 覆盖：dirty 行的 `dirty_seq` 高于 Journal 的 `persisted_seq` ⇒ `l2p_flush_kick`
  *       退让（FTL_AGAIN、`stats.wal_defer_count` +1、不提交任何写）；水位追上后闸门放行。

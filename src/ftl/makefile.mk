@@ -11,6 +11,8 @@ ifeq ($(UT_FTL_ENABLE),1)
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ftl_ut_common.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl_pure.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl_media.c
+# 负例（故障注入）：链接期 wrap 在 src/fc/makefile.mk，生产源码零改动。
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_negative.c
 CFLAGS += -DUT_FTL_ENABLE
 endif
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit

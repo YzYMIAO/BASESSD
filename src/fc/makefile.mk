@@ -11,6 +11,18 @@ ifeq ($(FC_NAND_TEST_ENABLE),1)
 #    ut_run_all；摘掉它会在链接期出现 undefined symbol。
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/framework/munit.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
+# 故障注入：链接期 wrap（生产源码零改动）+ 宏隔离的静态缝 hook。
+# 只有跨 TU 调用会被 wrap；未武装时 __wrap_* 原样转发 __real_*。
+# 设计：docs/design/negative_test_framework.md §2.1 / §5。
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/fi_wrap.c
+LDFLAGS += -Wl,--wrap=fc_poll_completion -Wl,--wrap=fc_poll_completions
+LDFLAGS += -Wl,--wrap=ftl_op_submit -Wl,--wrap=ftl_op_submit_batch
+LDFLAGS += -Wl,--wrap=ftl_async_read_page -Wl,--wrap=ftl_async_write_page
+LDFLAGS += -Wl,--wrap=ftl_async_write_page_cw -Wl,--wrap=ftl_async_write_pair_cmd
+LDFLAGS += -Wl,--wrap=ftl_async_erase_block
+LDFLAGS += -Wl,--wrap=ftl_async_write_page_mirror -Wl,--wrap=ftl_sync_write_page_mirror
+LDFLAGS += -Wl,--wrap=ftl_sync_read_page
+LDFLAGS += -Wl,--wrap=alc_super_open_alloc_pair
 # 速度测试：一份源、两段实现（UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择）。
 # ⚠ 只在这里添加一次——src/ftl/makefile.mk 不再添加，否则 UT=（两者）时对象重复、
 #    套件数组符号重复定义。UT=HIL 时两段都不需要，不编入（否则文件顶部的
@@ -33,6 +45,7 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level1.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level2.c
 # Level 3: 全链路测试
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level3.c
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_negative.c
 CFLAGS += -DUT_FC_ENABLE
 endif
 endif

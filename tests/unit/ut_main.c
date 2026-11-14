@@ -32,6 +32,9 @@ extern MunitTest g_fc_data_path_tests[];
 /* Level 3: 全链路测试 */
 extern MunitTest g_fc_lifecycle_tests[];
 
+/* 负例（release UT 生效；debug 下 MUNIT_SKIP） */
+extern MunitTest g_fc_negative_tests[];
+
 #endif /* UT_FC_ENABLE */
 
 #if defined(UT_FTL_ENABLE)
@@ -46,6 +49,9 @@ extern MunitTest g_ftl_pure_io_tests[];
 /* test_ftl_media.c：每次 `test` 命令开始时复位「介质已格式化」状态 */
 extern void      ftl_ut_media_session_reset(void);
 extern MunitTest g_ftl_media_e2e_tests[];
+
+/* test_negative.c：故障注入负例（真 NAND，破坏性） */
+extern MunitTest g_negative_tests[];
 
 #endif /* UT_FTL_ENABLE */
 
@@ -76,6 +82,9 @@ static MunitSuite g_ut_root_suite = {
 
                    /* Level 3 */
                    {(char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+
+                   /* 负例 */
+                   {(char *)"negative/", g_fc_negative_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
@@ -108,6 +117,7 @@ static MunitSuite g_ut_root_suite = {
                    NULL,
                    (MunitSuite[]){
                    {(char *)"e2e/", g_ftl_media_e2e_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"negative/", g_negative_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
                    1,
