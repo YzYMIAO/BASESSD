@@ -81,6 +81,7 @@
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
 | ISS-UT-01 | 部分实现 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过 |
+| ISS-UT-06 | 部分实现 | 负例框架 + 48 条负例已写完；debug FTL 档 13/14 通过后暴露 teardown 夹具缺口（已修，待重跑） | 2026-11-14 上板部分通过 |
 | ISS-HIL-01 | 部分实现 | HIL UT 15 例已上板；剩余 buffer NULL/TRIM 越界/跨重启/多 run | 2026-11-13 上板通过 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例无逐条上板记录 | 未上板 |
 | ISS-HIL-03 | 待硬件 | CH/CE/LUN>1 的 HIL 扩维用例 | 未上板 |
@@ -97,6 +98,127 @@
 - **历史/验证**：
   - 2026-11-11 21:44:15 `test /ftl/ --log-visible debug` → 95/95，0 skip，235.63 s
   - 2026-10-24 FTL UT 重建并上板 → 85 次运行全过
+
+#### ISS-UT-06 负例框架与注入用例
+
+- **当前事实**：`include/common/fault_inject.h` / `src/common/fault_inject.c` 提供按次数 + key 的故障表与 `fi_hits()` 命中计数；`tests/unit/fi_wrap.c` 用 `-Wl,--wrap` 注入 FC/FTL 边界故障（生产源码零改动）。`/ftl/media/negative/` **39 例**、`/fc-nand/negative/` **9 例**、HIL 共 16 例（含 `trim_edges`）。302 条风险逐条判定：**M 7 / N 43（全部已写用例）/ K 129 / 待判定 109**（见 `docs/design/negative_coverage.md`）。第一批 9 例 2026-11-14 板端 **9/9 通过，46.56 s**；其余已写、**未上板**。
+- **影响**：用例覆盖的是 FTL↔FC 边界 + CQ 出口的 seam，不代表风险列表覆盖完成。FC 引擎级注入（70h/7Ah/R-B）、Directory 读失败、cache 序列组失败、掉电类仍未实现。
+- **下一步 / 判据**：上板跑第二批（14 例全量）+ HIL 16 例；按设计 §9.2 补齐 N/K 逐条判定；FC 引擎级注入先补 §5.2 的 H 类偏离。每批交付「用例 + 覆盖表 + 上板证据」，不得以通过数代表覆盖。
+- **来源**：`docs/design/negative_test_framework.md`；`tests/unit/fi_wrap.c`、`tests/unit/test_negative.c`
+- **关联**：`ISS-UT-01`、`RISK-UT-*`
+- **历史/验证**：
+  - 2026-11-14 板端第四跑：`gc_batch_program_fail` 单跑通过（hits=1/aborted=1/cold 关闭）；
+    全量首例 `alloc_fail_bounded` 用例体通过、teardown 断言 `cmt_dirty==0` 失败（472）。
+    判定：host FLUSH 是 best-effort——wbuf FAILED 或超时时仍返回 true，但 L2P 脏行可能
+    未写回（映射已在 Journal，掉电可回放，故不是介质破坏）。原 teardown 只靠 flush
+    排空，属**时机依赖**。修正：teardown 在 `cmt_dirty != 0` 时显式强制一次 CP 把脏
+    region 落盘，再做断言。**修正后未重跑**。
+  - 2026-11-14 板端第十一跑（release UT=FC 重跑）：`/fc-nand/negative/`
+    **9/9 通过、0 SKIP、129 µs**。覆盖账收口为 **M 47 / N 2 / K 129 / 待判定 110**；
+    剩余 N = `RISK-IF-18`（2/4：跨 die 记 K、sync-wait 上限未覆盖）+
+    `RISK-UT-34`（buffer NULL 按用户裁决留以后、跨重启待做）。
+  - 2026-11-14 板端第十跑（release UT=FC）：前 4 条通过；`iface_release_guards` 的
+    「跨 die pair」分支断言失败——本板 `LUN_NUM = CH_NUM = CE_NUM = 1`，PBA 的
+    lun/ch/ce 位宽为 0，换 LUN 编码不出不同地址 ⇒ **该分支在本板不可构造（K 类硬件缺口）**。
+    已从用例移除该腿并注明；RISK-IF-18 由 M 退回 N（部分：空位图 + 单 plane cache-op
+    已验证）。重建 release UT=FC（18:31:34），待重跑。
+  - 2026-11-14 板端第九跑（release UT=FTL 全量）：`test /ftl/media/negative/`
+    **39/39 通过、0 SKIP、186.77 s**。先前 debug 档跳过的 3 条 release-only 用例
+    （`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）均已执行并通过。
+    覆盖账：**M 36 / N 13（11 条 FC negative 待 UT=FC + HIL 2 条部分）/ K 129 /
+    待判定 110**。下一步：`make tests BUILD_TYPE=release UT=FC` 跑 `/fc-nand/negative/`。
+  - 2026-11-14 风险文档收敛：40 条有板端负例证据的 `待上板` 风险移入各模块
+    「已闭合」表，原文整体归档到 `docs/archive/known_risks_batches.md`
+    §2026-11-14 负例框架收口（第二批）；7 条保留并写明残余
+    （MD-06 / BBT-01 / CP-05 / IF-01 / IF-04 / HOST-01 / CR-05）。
+  - 2026-11-14 板端第八跑（debug UT=FTL 全量）：`test /ftl/media/negative/`
+    **36/36 通过、3 SKIP、200.10 s**。3 条 SKIP 是 release-only（`op_req_table_guard` /
+    `pend_table_guard` / `alloc_rewind_underflow`，debug 下对应 ASSERT 会停机）。
+    覆盖账：M 33 / N 16（3 条 media release-only + 9 条 FC negative + HIL 2 条部分）/
+    K 129 / 待判定 110。同轮审计发现 5 条 N 行引用了**不存在的用例名**
+    （GC-02/MIG-01/JN-09/GC-17/DP-25）：4 条改为实际用例名并上板转 M；GC-02
+    （完成态写失败关 Cold SB）无对应用例，降为待判定。**release UT=FTL 与 UT=FC 未跑**。
+  - 2026-11-14 板端第七跑（`iface_sparse_page` 单跑诊断）：前置判据证明只有 LBA0/2
+    有映射、其余 INVALID，读回 slot1/3 全零——**FTL 稀疏读行为正确**。红的原因是
+    用例零检查循环写成 `2 * FTL_IU_BYTES`，把 LBA2 的合法数据一起算进零断言
+    （失败值 4 = tag2 首字节）。修正为逐洞 1 个 IU；同时保留前置「只有写入 LBA
+    有映射」断言，并把数据图案改为区分 CW 位移（原 `i*17` 有 512B 周期）。
+    **修正后未重跑**。
+  - 2026-11-14 板端第六跑：`l2p_flush_backpressure` 断言 `flush==false` 失败（实测 true，
+    `hits=3501`）。判定：**用例断言错，非产品缺陷** —— host FLUSH 的语义是「journal
+    持久 + 尽力写回 L2P」；L2P 写回被门控拒绝时返回 true 是设计行为（映射已在 journal，
+    掉电可回放），CP 之后才把脏 region 落盘。断言改为设计口径：注入到达、耗时 ≤ UT 超时
+    上界、恢复后 `inflight.flush==0` / `cmt_dirty==0` / 数据可读。**未上板**。
+  - 2026-11-14 板端第五跑：`gc_batch_program_fail` 通过（1.00 s）；`gc_l2p_load_wait_timeout`
+    已能命中注入（hits=3321 / aborted=1 / 51 ms），但恢复调用踩到
+    `neg_run_gc` 的入参断言 `job.active == false`。根因：`neg_run_gc` 在观察到
+    `job.aborted` 时立即返回，此时等待中的命令可能仍在飞。修正：`neg_run_gc` 的契约改为
+    **只在 job 真正 inactive 后返回**；一轮内完成的快路径 job 用
+    `moved+reclaimed+noop` / `novictim` 计数区分「起了 job」与「无候选」。**未上板**。
+  - 2026-11-14 结构性收敛（不再逐条打补丁）：所有 media 负例统一生命周期
+    `neg_prepare → arrange(neg_lba/neg_gc_pick_victim) → arm/act/assert(含 fi_hits) →
+    teardown(neg_drain_to_clean)`。新增/统一了 5 个底座 helper：
+    `neg_wait_cp_idle` / `neg_cp_force`（CP 泵）、`neg_restore_knobs`（CMT/bg_suspend/
+    mig 熔断与 batch 闩锁复位）、`neg_drain_to_clean`（flush → CP 排空脏 CMT → quiesce）、
+    `neg_gc_pick_victim`（确定性 victim 形态）、`neg_lba`（LBA 窗口上界断言）。
+    去掉了 7 处复制的 CP 泵循环；6 条早期用例补 `fi_hits`（C8：证明注入到达）；
+    `md_alias` 的 LBA 从窗口外（+10240）收回窗口内（+3264）。**未上板**。
+  - 2026-11-14 主动审计剩余未跑用例（同一类「前提依赖动态状态」问题）并一起修正：
+    ① GC 相关用例统一走 `neg_gc_pick_victim`——先搬走空/单 plane 候选，直到成本排序
+       选出的 victim 有有效数据（batch 用例还要求成对整块）；
+    ② batch 用例补 Cold SB 余量与 `batch_disabled` 复位；
+    ③ GC L2P 等待用例先 flush + 清空驻留行，保证反查真的触发 region 加载；
+    ④ BBT 标坏用例先 quiesce、排除 Open SB 正在用的块，并恢复 `bg_suspend`；
+    ⑤ `FI_FC_STATUS_PLANE` 只在 `random == FC_RANDOM_ENABLE` 的数据命令上生效，
+       避免 0 号 plane 的 Journal/L2P 元数据写被误伤。
+    以上均未上板。
+  - 2026-11-14 板端 debug UT=FTL 第三跑：`gc_read_unc_marks_bad` 修正后通过（bad 46→47）；
+    全量跑到 `gc_batch_program_fail` 时 `fi_hits(FI_FC_STATUS)==0`。定位：该用例假设 GC
+    一定走 cache-program 批，但 batch 受三个动态条件约束——victim 必须是成对条目、
+    Cold SB 余量 ≥`MIG_BATCH_PAGES`、`batch_disabled==false`（跨 job 保留）。修正：循环
+    搬走空/单 plane 候选直到选出「成对且有数据」的 victim，补足 Cold 余量、显式重置
+    `batch_disabled` 后再注入。仍待下一轮板端确认。
+  - 2026-11-14 板端 debug UT=FTL 第二跑：`gc_erase_fail_bounded` 修正后单跑通过；
+    全量跑到 `gc_read_unc_marks_bad` 时 `marked` 断言失败。定位：victim 按成本排序 +
+    每 plane 仅一个失败槽，连续 3 次同一 gsrc 不保证；用例改为预置 2 次失败后注入 1 次，
+    验证第 3 次触发 `bbt_mark_bad` 的真实路径（残余风险登记在 `RISK-GC-01`）。
+  - 2026-11-14 板端 debug UT=FTL 首跑：前 14 例中 13 例 OK；
+    `gc_erase_fail_bounded` **用例体通过**，在 teardown `ftl_ut_assert_clean` 的
+    `cache->stats.cmt_dirty == 0` 断言失败（实测 8）。判定：**测试夹具缺口，非生产缺陷** ——
+    用例末尾成功 GC 通过 `l2p_write` 留下 dirty CMT，本身是合法空闲态（CP 会回写），
+    原 teardown 未 flush。修正：`neg_teardown` 在 quiesce 前统一 `ftl_ut_flush()` 排空；
+    `cmt_dirty` 断言保留，真泄漏仍会红。**修正后未重跑**。
+  - 2026-11-14 10:2x 板端首跑：`alloc_fail_bounded` OK（5.01 s）；`l2p_load_fail_bounded` 断言失败 ——
+    读路径先命中 CMT（掉电回放的映射），注入的 region 加载根本没发生。修正：用例用
+    `l2p_cmt_set_enabled(false)` 走回放旁路强制 region 加载；同时补 `ftl_async_write_pair_cmd`
+    wrap（host 写不走 `_cw`，原 `data_write_fail_bounded` 同样命中不了）、CP 中止现场改为
+    **推进中**记录（CP_DONE 会清 `failed`）、门控用例改为「非阻塞受理 + 持续拒绝不完成」。
+    修正后仅编译通过，**未上板**。
+  - 2026-11-14 全量静态复核（未跑板）又发现同类问题并修正：host 数据读在 `ftl_issue_subop`
+    **内联建链**、不走 `ftl_async_read_page`（读失败注入补到 `ftl_op_submit`）；8 LBA = 两
+    plane ⇒ host 读是 **multi-plane** opcode（FC 状态注入的 key 改对）；门控拒绝还要覆盖
+    `ftl_op_submit_batch`（cache program 批次）；RR 的 `planes_recovered` 是**本 job** 计数、
+    不能跨 job 比大小；FC 状态用例改为**一次性**注入 + RR 恢复成功（持续注入会让
+    `rr_settle_plane` 把好块标坏，每跑一次烧一块）。
+  - 2026-11-14 板端第 2 次失败（`l2p_load_fail_bounded` 同一断言）：根因是 reboot 后
+    **journal 回放把映射写进 region line 并置 DIRTY**；`l2p_line_invalidate` 只接受
+    CLEAN，作废被跳过 ⇒ 读命中缓存行，L2P 加载注入走不到。用例改为**不 reboot**
+    （flush 后行必为 CLEAN），并把 `neg_drop_l2p_cache` 改成「遇到非 CLEAN 行即失败」
+    的前提守卫。修正后仅编译通过，未上板。
+  - 2026-11-14 板端第 3 次运行：`l2p_load_fail_bounded` 仍失败，但这次**用例没错**——
+    注入确实生效、路径也走到了；失败原因在生产代码：`ftl_issue_subop` 在加载**启动失败**
+    时把 `l2p_defer` 判为 false，随后按「未映射」零填并消费该 LBA（`RISK-L2P-24`）。
+    已改为 `k==0` 时按 `l2p_again` 返 `FTL_AGAIN`；用例期望不变。六关编译通过，未上板。
+  - 2026-11-14 板端第 4 次运行（`11:14:13` 镜像）：**7/9 通过** —— `alloc` / `l2p`
+    （生产缺陷修复生效）/ `data_read` / `data_write` / `rr` / `fc_status`（`planes_recovered=2`）/
+    `seq_gate` 全 OK；`cp_abort_phase` 失败原因是**用例观察窗口**：`cp_job_step` 的 `for(;;)`
+    使首次 `cp_handle` 调用内就完成「推进到 HDR_WRITE → 中止」，而 `failed` 在其后的
+    service 被 CP_DONE 清掉 ⇒ 只检查循环内会漏。已改为调用后立刻取现场；`bbt` 未跑到。
+  - 2026-11-14 板端最终（`11:32:21` 镜像）：`test /ftl/media/negative/` **9/9，0 skip，46.56 s**；
+    `bad` 前后均为 45（本套件不烧块）；`free=3347→3339`（写测试的正常消耗）⇒ 负例框架与
+    9 条注入用例板端验证通过。`cp_abort_phase` 的最终修正是「持续注入 + 10 ms deadline」，
+    生产语义登记为 `RISK-CP-13`（信息）。
+  - 2026-11-14 六关编译通过（`make all` / `release` / `tests` ×4 配置），零新告警；未上板
 
 #### ISS-HIL-01 HIL 板端 UT
 
