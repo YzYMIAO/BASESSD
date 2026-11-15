@@ -1,6 +1,9 @@
 #include "fc_crc_engine.h"
 
 #include "assertion.h"
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "fault_inject.h"
+#endif
 #include "crc.h"
 
 #include <stddef.h>
@@ -33,6 +36,13 @@ DWORD fc_crc_compute(const BYTE *user_data)
 {
     // user_data 前置条件由调用者保证
     ASSERT(user_data != NULL);
+
+#if defined(FC_NAND_TEST_ENABLE)
+    if (fi_take(FI_CRC_COMPUTE_FAIL) == true)
+    {
+        return 0U;
+    }
+#endif
 
     return crc_compute(user_data, FC_CRC_USER_SIZE);
 }

@@ -490,6 +490,20 @@ typedef struct Munit_Suite_s
 /* 重新播种（运行器自己用；用例一般不需要） */
 void munit_rand_seed(uint32_t seed);
 
+/* 返回最近一次 `munit_rand_seed` 的种子。
+ * 用途：用例需要**独立于全局 PRNG 消耗历史**的可复现随机量时（例如速度测试的
+ * LBA 起点），用它给本地序列播种：同 seed ⇒ 同结果，且不受前面用例抽了多少次影响。 */
+uint32_t munit_seed_get(void);
+
+/* 可选的平台随机种子源（弱符号）。测试侧实现后，munit 用它替代 `time(NULL)`
+ * 生成运行种子；未实现时回退 `time(NULL)`。裸机上 `time()` 通常无后端
+ * （返回 -1 ⇒ 种子恒定），此时用 SysTick 滴答、RNG 外设等提供变化。 */
+#if defined(__GNUC__)
+uint32_t munit_platform_seed(void) __attribute__((weak));
+#else
+uint32_t munit_platform_seed(void);
+#endif
+
 /* 均匀 32 位随机数 */
 uint32_t munit_rand_uint32(void);
 

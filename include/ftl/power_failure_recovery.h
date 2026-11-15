@@ -113,4 +113,11 @@ ftl_status_e pfr_boot_recovery(ftl_ctx_s *ftl, pfr_boot_result_s *result);
  */
 void pfr_boot_log_bad_areas(const ftl_ctx_s *ftl);
 
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：扫一个物理块的写指针（BOOT-06 hole 判据）。
+ */
+BYTE pfr_test_scan_write_pointer(const ftl_ctx_s *ftl, BYTE plane, WORD block);
+#endif
+
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

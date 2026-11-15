@@ -111,7 +111,7 @@ static BYTE fc_collect_decode_buffers(const fc_cmd_s *cmd, BYTE *buffers[], BYTE
  *
  * 每个函数只碰一块 528B 的裸 CW buffer（[META:4][CRC:4][USER:512][ECC:8]），
  * 不认识 command / descriptor / 链。下面的 encode / process_read 是这些步骤的
- * 编排；单测（Level 2）直接调它们，于是「调了哪些步骤」= 「开了哪些功能」。
+ * 编排；单测（data_path）直接调它们，于是「调了哪些步骤」= 「开了哪些功能」。
  * ══════════════════════════════════════════════════════════ */
 
 /**

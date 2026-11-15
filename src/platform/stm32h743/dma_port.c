@@ -12,8 +12,26 @@
 
 DMA_HandleTypeDef g_dma_handle;
 
+/* UART TX DMA 只初始化一次。重入 DeInit 会中止在飞传输：完成中断不再到来，
+ * 共享 TX 状态机的 `active` 永远不会清零，环形缓冲写满后 uart_log_write()
+ * 永久等在事件上 —— 控制台静默失效，且没有任何错误码暴露。 */
+static BYTE s_uart_tx_dma_initialized;
+
+/**
+ * @brief 初始化 USART1 TX DMA（DMA1_Stream0）
+ *
+ * 幂等：已成功初始化时直接返回成功，不重配在用的流。
+ *
+ * @return FUNC_STATUS_SUCCESS 已就绪（本次初始化成功或此前已成功）；
+ *         FUNC_STATUS_ERROR HAL_DMA_DeInit/Init 失败。
+ */
 func_status_e dma_port_uart_tx_init(void)
 {
+    if (s_uart_tx_dma_initialized != 0U)
+    {
+        return FUNC_STATUS_SUCCESS;
+    }
+
     __HAL_RCC_DMA1_CLK_ENABLE();
     g_dma_handle.Instance                 = DMA1_Stream0;
     g_dma_handle.Init.Request             = DMA_REQUEST_USART1_TX;
@@ -36,6 +54,7 @@ func_status_e dma_port_uart_tx_init(void)
     __HAL_LINKDMA(&g_uart1_handle, hdmatx, g_dma_handle);
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 4U, 0U);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+    s_uart_tx_dma_initialized = 1U;
     return FUNC_STATUS_SUCCESS;
 }
 

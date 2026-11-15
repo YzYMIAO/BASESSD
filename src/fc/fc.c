@@ -478,6 +478,29 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
     }
 }
 
+#if defined(FC_NAND_TEST_ENABLE)
+fc_status_e fc_test_complete_nonactive(void)
+{
+    fc_cmd_s *cmd = fc_command_alloc();
+
+    if (cmd == NULL)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+
+    fc_nand_dispatch_comp_s completion;
+
+    memset(&completion, 0, sizeof(completion));
+    completion.cmd_id           = cmd->cmd_id;
+    completion.execution_status = NAND_RESULT_OK;
+
+    const fc_status_e st = fc_complete_from_nand(&g_fc_controller, &completion);
+
+    fc_command_release(cmd->cmd_id);
+    return st;
+}
+#endif
+
 /* ══════════════════════════════════════════════════════════
  * 5. Stripe RAID 辅助函数
  *

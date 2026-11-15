@@ -150,4 +150,17 @@ BYTE fc_nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun);
  */
 BYTE fc_nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun);
 
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：按 operation 调用 dispatch 的 completion 策略，填充 CW 状态。
+ *
+ * @param operation OP_* 操作码
+ * @param cw_bitmap flat CW 位图
+ * @param cw_status 输出：CW_TOTAL_MAX 项，调用前由本函数清 UNUSED
+ *
+ * @note 只验证 completion 策略表映射；不提交 NAND、不碰硬件。
+ */
+void fc_nand_dispatch_test_completion(BYTE operation, DWORD cw_bitmap, BYTE cw_status[CW_TOTAL_MAX]);
+#endif
+
 #endif /* FC_NAND_DISPATCH_H */

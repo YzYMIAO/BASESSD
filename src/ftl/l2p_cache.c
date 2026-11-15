@@ -775,6 +775,25 @@ SSD_CODE_FAST void l2p_init(l2p_cache_s *cache, BYTE ch, BYTE ce, l2p_owner_fn_t
     cache->thrash.thrashing     = false;
 }
 
+static BOOL l2p_owner_flush_ready(const l2p_cache_s *cache, BYTE owner_die, BOOL force_cmt);
+
+#if defined(FC_NAND_TEST_ENABLE)
+void l2p_test_cmt_dirty_release(l2p_cache_s *cache, DWORD lba)
+{
+    l2p_cmt_dirty_release(cache, lba);
+}
+
+BOOL l2p_test_cmt_room(const l2p_cache_s *cache, DWORD lba)
+{
+    return l2p_cmt_room(cache, lba);
+}
+
+BOOL l2p_test_owner_flush_ready(const l2p_cache_s *cache, BYTE owner_die, BOOL force_cmt)
+{
+    return l2p_owner_flush_ready(cache, owner_die, force_cmt);
+}
+#endif
+
 /**
  * @brief 开关 CMT（仅 boot journal replay 使用）
  *
@@ -1343,29 +1362,29 @@ static BOOL l2p_load_start(l2p_cache_s *cache, DWORD region_id)
  *
  * @param cache         cache
  * @param global_region 全局 region
- * @param pba           该 region 的 PBA
- * @return true 已载入；false 无空行 / 读失败
+ * @param primary       主副本 PBA
+ * @param backup        备份副本 PBA（NAND_PBA_INVALID = 无）
+ * @return FTL_OK 已载入/已降级；FTL_AGAIN 无空行；FTL_ERROR 地址非法/提交层失败
  */
-SSD_CODE_FAST BOOL l2p_region_preload(l2p_cache_s *cache, DWORD global_region, DWORD pba)
+SSD_CODE_FAST ftl_status_e l2p_region_preload(l2p_cache_s *cache, DWORD global_region, DWORD primary, DWORD backup)
 {
     // global_region 来自调用者（PFR 的 local×DIE_MAX+die）；越界写入 tags[] 会让
     // 该行永远无法再被命中，只白占一行 ⇒ 运行期拒绝（H29 同口径）。
     if (global_region >= L2P_GLOBAL_REGIONS)
     {
-        return false;
+        return FTL_ERROR;
     }
 
-    // pba 来自 Metadata Directory（介质读回，H29 不可信输入）⇒ 运行期拒绝而非 ASSERT：
-    // release 下 ASSERT 裁空会让非法地址直接进同步读。
-    if (pba_is_valid(pba) == false)
+    // PBA 来自 Metadata Directory（介质读回，H29 不可信输入）⇒ 运行期拒绝而非 ASSERT。
+    if ((pba_is_valid(primary) == false) && (pba_is_valid(backup) == false))
     {
-        return false;
+        return FTL_ERROR;
     }
 
     // 已有驻留行（journal 回放的 DIRTY / 已预载）⇒ 维持「一 region 一行」。
     if (l2p_line_find(cache, global_region) != NULL)
     {
-        return true;
+        return FTL_OK;
     }
 
     for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -1382,25 +1401,71 @@ SSD_CODE_FAST BOOL l2p_region_preload(l2p_cache_s *cache, DWORD global_region, D
         l2p_line_hint_clear(cache, i);
         L2P_TAG(cache, line)->region_id = global_region;
 
-        if (ftl_sync_read_page(pba, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
+        BOOL completion_failed = false;
+
+        // 主/备交替重试：完成态错误可按 L2P 加载重试语义收敛，提交层硬失败
+        // （completion.status == 0 的 FTL_ERROR）则绝不能降级掩盖。
+        for (BYTE attempt = 0U; attempt < L2P_LOAD_RETRY_MAX; attempt++)
         {
-            L2P_TAG(cache, line)->state                    = L2P_CACHE_CLEAN;
-            cache->line_hint[l2p_hint_slot(global_region)] = (BYTE)i;
-            line->fresh                                    = false; /* 预载不是本次访问的加载 */
-            line->degraded                                 = false;
-            line->prefetch                                 = false;
-            line->dirty_seq                                = 0U; /* 介质内容，无 Journal 依赖 */
-            line->load_fail_count                          = 0U;
-            return true;
+            const BOOL  use_primary = ((attempt & 1U) == 0U) || (pba_is_valid(backup) == false);
+            const DWORD pba         = use_primary ? primary : backup;
+
+            if (pba_is_valid(pba) == false)
+            {
+                continue;
+            }
+
+            fc_cmd_status_s comp;
+
+            memset(&comp, 0, sizeof(comp));
+
+            if (ftl_sync_read_page_status(pba, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(), &comp) == FTL_OK)
+            {
+                L2P_TAG(cache, line)->state                    = L2P_CACHE_CLEAN;
+                cache->line_hint[l2p_hint_slot(global_region)] = (BYTE)i;
+                line->fresh                                    = false; /* 预载不是本次访问的加载 */
+                line->degraded                                 = false;
+                line->prefetch                                 = false;
+                line->dirty_seq                                = 0U; /* 介质内容，无 Journal 依赖 */
+                line->load_fail_count                          = 0U;
+                return FTL_OK;
+            }
+
+            if (fc_cmd_status_has_error(comp.status) == false)
+            {
+                /* 建链/提交层失败（没有 CQE 错误位）：快照位置不可信，交给 PFR 回退。 */
+                L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
+                line->degraded              = false;
+                line->prefetch              = false;
+                return FTL_ERROR;
+            }
+
+            completion_failed = true;
         }
 
-        L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
-        line->degraded              = false;
-        line->prefetch              = false;
-        return false;
+        if (completion_failed == false)
+        {
+            L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
+            line->degraded              = false;
+            line->prefetch              = false;
+            return FTL_ERROR;
+        }
+
+        /* 主/备都持续完成态失败：按范围化恢复降级为全 INVALID CLEAN 行。
+         * 该 region 的旧映射丢失，但其它 region 的快照仍可用。 */
+        memset(line->entries, 0xFF, sizeof(line->entries));
+        L2P_TAG(cache, line)->state                    = L2P_CACHE_CLEAN;
+        cache->line_hint[l2p_hint_slot(global_region)] = (BYTE)i;
+        line->fresh                                    = false;
+        line->degraded                                 = true;
+        line->prefetch                                 = false;
+        line->dirty_seq                                = 0U;
+        line->load_fail_count                          = L2P_LOAD_RETRY_MAX;
+        l2p_bitmap_set(cache->region_degraded_bitmap, global_region);
+        return FTL_OK;
     }
 
-    return false; /* 无 INVALID 行（全 DIRTY/在飞）：交给懒加载 */
+    return FTL_AGAIN; /* 无 INVALID 行（全 DIRTY/在飞）：交给懒加载 */
 }
 
 /**
@@ -2477,6 +2542,17 @@ SSD_CODE_FAST ftl_status_e l2p_region_flush_kick(l2p_cache_s *cache, DWORD regio
  * @param owner_die owner die
  * @param max_kick  本轮最多提交条数
  */
+/**
+ * @brief 判断本轮是否允许启动 CMT 整页写回（**不含 thrashing 门**）。
+ *
+ * thrashing 只作观测/预取判据，不得挡住必需的写回；L2P-17 的回归点就在这里。
+ */
+static BOOL l2p_owner_flush_ready(const l2p_cache_s *cache, BYTE owner_die, BOOL force_cmt)
+{
+    return ((cache->cmt_enabled != false) && (cache->cmt_dirty_owner[owner_die] > 0U) && (cache->inflight.flush < L2P_FLUSH_MAX_INFLIGHT) &&
+            (force_cmt || (cache->stats.cmt_dirty >= L2P_CMT_WB_WATERMARK)));
+}
+
 SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_s *cache, BYTE owner_die, BYTE max_kick, BOOL force_cmt)
 {
     // 心跳（见 log.h / timer.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
@@ -2492,7 +2568,7 @@ SSD_CODE_FAST void l2p_owner_flush_kick(l2p_cache_s *cache, BYTE owner_die, BYTE
 
     // CMT dirty 是写缓存占用，优先按 translation page 整页写回。按 owner 计数
     // O(1) 判空；写回在飞/资源不足时本轮停手，由完成回调释放 credit。
-    if ((cache->cmt_enabled != false) && (cache->cmt_dirty_owner[owner_die] > 0U) && (cache->inflight.flush < L2P_FLUSH_MAX_INFLIGHT) && (force_cmt || (cache->stats.cmt_dirty >= L2P_CMT_WB_WATERMARK)))
+    if (l2p_owner_flush_ready(cache, owner_die, force_cmt) != false)
     {
         // 强制路径（host FLUSH / IDLE 排空）可以吃满 flush credit；后台只起 2 个。
         const BYTE wb_budget = (force_cmt != false) ? L2P_FLUSH_MAX_NORMAL : L2P_CMT_WB_MAX;

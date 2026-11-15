@@ -26,4 +26,14 @@ void fi_wrap_gc_force_victim(const super_block_s *victim);
  */
 void fi_wrap_reset(void);
 
+/**
+ * @brief 放行一条被 FI_COMPLETION_HOLD 扣住的完成（下一轮 poll 投递）。
+ */
+void fi_wrap_release_held(void);
+
+/**
+ * @brief 当前被扣住的完成条数。
+ */
+DWORD fi_wrap_held_count(void);
+
 #endif /* FI_WRAP_H */

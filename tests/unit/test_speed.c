@@ -2,8 +2,8 @@
  * test_speed.c — 板端速度测试（FC 裸块 / FTL host API）
  *
  * 两条用例：
- *   /speed/fc_nand_rw —— FC 公共接口异步读写 100 个块（两档：normal/cache）
- *   /speed/ftl_rw     —— FTL host API 读写 100 gblock（两档：normal/cache）
+ *   /bench/speed/fc_nand_rw —— FC 公共接口异步读写 100 个块（两档：normal/cache）
+ *   /bench/speed/ftl_rw     —— FTL host API 读写 100 gblock（两档：normal/cache）
  *
  * 计时口径：
  *   · FC：每块用 SysTick µs 计时后累加（`delay_time_now_us` / `delay_time_since_us`）；
@@ -54,10 +54,6 @@ static DWORD spd_kbps_from_us(DWORD bytes, DWORD us)
     return (DWORD)(((QWORD)bytes * 1000000U) / ((QWORD)1024U * us));
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * §2 FC-NAND 裸块速度
- * ══════════════════════════════════════════════════════════════════════ */
-
 #if defined(UT_FC_ENABLE)
 
 typedef struct
@@ -90,6 +86,10 @@ static DWORD spd_clock_elapsed_us(const spd_clock_s *clock)
     return (now - clock->start_ms) * 1000U;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * §2 FC-NAND 裸块速度
+ * ══════════════════════════════════════════════════════════════════════ */
+
 #    include "bst.h"
 #    include "fc.h"
 #    include "fc_command.h"
@@ -98,6 +98,9 @@ static DWORD spd_clock_elapsed_us(const spd_clock_s *clock)
 #    include "ftl_config.h"
 #    include "nand_config.h"
 #    include "onfi_1_0.h"
+#    if defined(UT_FTL_ENABLE)
+#        include "ftl_ut_common.h" /* ftl_ut_quiesce：全量 `test` 的速度测量前隔离 */
+#    endif
 
 #    define SPD_FC_BLOCKS      100U
 #    define SPD_FC_BLOCK_START (BLOCKS_PER_PLANE / 2U) /* 用户要求：BLOCK_NUM/2 起步 */
@@ -540,6 +543,48 @@ static void spd_fc_assert_pools_empty(void)
     munit_assert_uint32(s_fc_inflight, ==, 0U);
 }
 
+/* 速度测量的隔离属于 setup 职责：
+ *   ① 排空前序套件留下的 FTL 在飞 job（全量 `test` 里速度用例排在 FTL media /
+ *      negative 之后；只置 bg_suspend 挡不住已经在飞的 CP/Journal/migrate/wbuf/
+ *      cache 完成，它们会在计时窗口里共享 CQ/CPU）；
+ *   ② 计时窗口内冻结后台，teardown 恢复调用前的值。
+ * 原始擦写会破坏 live FTL 映射，测试返回后仍由用户 format+POR 收尾。 */
+static BOOL s_fc_speed_suspend_saved;
+
+static void *spd_fc_speed_setup(const MunitParameter params[], void *data)
+{
+    ftl_ctx_s *ftl = g_ctrl.ftl[0];
+
+    if (ftl != NULL)
+    {
+        s_fc_speed_suspend_saved = ftl->flags.bg_suspend;
+#    if defined(UT_FTL_ENABLE)
+        /* 必须在 test_setup() 的 fc_init() 之前排空：fc_init 会清空 FC 池/CQ，
+         * 在飞 FTL job 的命令一旦被清掉就再也等不到完成。 */
+        ftl_ut_quiesce(ftl);
+#    endif
+    }
+
+    void *fixture = test_setup(params, data);
+
+    if (ftl != NULL)
+    {
+        ftl->flags.bg_suspend = true;
+    }
+    return fixture;
+}
+
+static void spd_fc_speed_teardown(void *fixture)
+{
+    ftl_ctx_s *ftl = g_ctrl.ftl[0];
+
+    if (ftl != NULL)
+    {
+        ftl->flags.bg_suspend = s_fc_speed_suspend_saved;
+    }
+    test_tear_down(fixture);
+}
+
 static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
 {
     (void)data;
@@ -555,24 +600,11 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
-    ftl_ctx_s *ftl           = g_ctrl.ftl[0];
-    const BOOL saved_suspend = (ftl != NULL) ? ftl->flags.bg_suspend : false;
-
-    /* 原始擦写期间禁止 FTL 后台/分配器动作；测试返回后由用户 format+POR 收尾。 */
-    if (ftl != NULL)
-    {
-        ftl->flags.bg_suspend = true;
-    }
-
     WORD       blocks[SPD_FC_BLOCKS];
     const WORD good = spd_fc_pick_blocks(blocks);
 
     if (good != SPD_FC_BLOCKS)
     {
-        if (ftl != NULL)
-        {
-            ftl->flags.bg_suspend = saved_suspend;
-        }
         munit_errorf("only %hu good block pairs found (need %u)", good, SPD_FC_BLOCKS);
     }
 
@@ -588,10 +620,6 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     if (!spd_fc_run_phase(mode, true, blocks, &wr_us, &errors, &peak))
     {
         (void)spd_fc_drain(&errors, &peak);
-        if (ftl != NULL)
-        {
-            ftl->flags.bg_suspend = saved_suspend;
-        }
         munit_errorf("fc speed write phase did not drain (errors=%lu)", errors);
     }
     spd_fc_assert_pools_empty();
@@ -599,18 +627,9 @@ static MunitResult test_fc_speed_mp(const MunitParameter params[], void *data)
     if (!spd_fc_run_phase(mode, false, blocks, &rd_us, &errors, &peak))
     {
         (void)spd_fc_drain(&errors, &peak);
-        if (ftl != NULL)
-        {
-            ftl->flags.bg_suspend = saved_suspend;
-        }
         munit_errorf("fc speed read phase did not drain (errors=%lu)", errors);
     }
     spd_fc_assert_pools_empty();
-
-    if (ftl != NULL)
-    {
-        ftl->flags.bg_suspend = saved_suspend;
-    }
 
     const DWORD bytes   = SPD_FC_BYTES;
     const DWORD wr_kbps = spd_kbps_from_us(bytes, wr_us);
@@ -1149,7 +1168,20 @@ static void *spd_ftl_setup(const MunitParameter params[], void *data)
     (void)data;
 
     ftl_ut_topology_init();
-    (void)ftl_ut_live();
+
+    ftl_ctx_s *ftl           = ftl_ut_live();
+    /* 计时前先排空前序套件留下的在飞 job；`ftl_ut_quiesce` 会把 bg_suspend
+     * 置 1，测完这一档要恢复常规后台语义（否则测的就不是正常 host 路径）。 */
+    const BOOL saved_suspend = ftl->flags.bg_suspend;
+
+    ftl_ut_quiesce(ftl);
+    ftl->flags.bg_suspend = saved_suspend;
+
+    /* 每一档 chunk 都从**新格式化**的介质开始。只 format 首档时，后两档在
+     * 上一档刚写过的同一 LBA 区间上覆写，写阶段的 invalid/GC 债务取决于前序
+     * 档位（实测 chunk=32 写速在 1939~2727 KB/s 之间漂），而读阶段还会与
+     * 残留下的后台 GC 争 CPU。format 时间记在 fmt_ms、不计入 KB/s。 */
+    s_ftl_formatted = false;
     return NULL;
 }
 
@@ -1222,9 +1254,9 @@ static void spd_ftl_diag_window(ftl_ctx_s *ftl, DWORD base)
     ftl_ut_trace_summary("DIAG ftl window=%lu invalid=%hhu wb=%hhu plane=%hhu topo=%hhu pba=%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX,%08lX", base, invalid, wb_hit, plane_bad, topo_bad, pba[0], pba[1], pba[2], pba[3], pba[4], pba[5], pba[6], pba[7], pba[8], pba[9], pba[10], pba[11], pba[12], pba[13], pba[14], pba[15]);
 }
 
-/* ftl_rw — FTL host API 的 25 MiB 顺序读写速度（/speed/ftl_rw）。
+/* ftl_rw — FTL host API 的 25 MiB 顺序读写速度（/bench/speed/ftl_rw）。
  *
- * 定位（与 /speed/fc_nand_rw 的分工）：
+ * 定位（与 /bench/speed/fc_nand_rw 的分工）：
  *   · FC 套件**直接选**器件读写方式（normal / cache）⇒ 给出速度的**上下限**；
  *   · 本套件只规定**主机请求形态**（chunk × 深度），走哪条内部路径由 FTL **自适应**
  *     决定 —— 不强制、不因路径不同判失败；结果里同时报告实际路径的计数。
@@ -1304,10 +1336,20 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
         munit_error("speed range exceeds host capacity");
     }
 
-    /* 8 对齐随机起点；`span` 为可用的起点上限，范围 [base, base+51200)。 */
+    /* 8 对齐随机起点；`span` 为可用的起点上限，范围 [base, base+51200)。
+     *
+     * 用**本地序列**（以本次运行的 seed 为输入）而不是 `munit_rand_int_range()`：
+     * munit 的全局 PRNG 在同一条测试里会被前面的用例/参数展开消耗，单独跑 speed
+     * 与跑到全量末尾时抽到的起点不同（实测同一打印 seed 下单测 base=708928、
+     * 全量 base=443704），两次测量根本不是同一 LBA 窗口。
+     * 本地播种保留 munit 的契约：同 seed ⇒ 同 base（可重放），换 seed ⇒ 换窗口。 */
     const DWORD span = host_max - SPD_FTL_LBAS;
+    DWORD       rng  = munit_seed_get() ^ 0x5A4F21E4U;
 
-    s_spd_ftl_lba_base = (DWORD)munit_rand_int_range(0, (int)span) & ~7U;
+    rng ^= rng << 13U;
+    rng ^= rng >> 17U;
+    rng ^= rng << 5U;
+    s_spd_ftl_lba_base = (rng % (span + 1U)) & ~7U;
     ftl_ut_trace_summary("SPEED ftl: lba base=%lu range=%u host_max=%lu", s_spd_ftl_lba_base, SPD_FTL_LBAS, host_max);
 
     spd_ftl_cache_s c0;
@@ -1380,7 +1422,7 @@ static MunitResult test_ftl_speed_host(const MunitParameter params[], void *data
      * 放到 gated 的 summary（`--log-visible info/debug` 才打印）。 */
     /* 结果行默认可见：带上 LBA 起点与错误计数——不同 seed / 不同套件顺序下
      * 起点不同，速度数字不可比，失败时也要能直接看出是写错还是读错。 */
-    ftl_ut_result("SPEED ftl chunk=%lu base=%lu  WR=%lu KB/s  RD=%lu KB/s  err(wr=%lu rd=%lu)", chunk, s_spd_ftl_lba_base, spd_kbps_from_us(bytes, wr_ms * 1000U), spd_kbps_from_us(bytes, rd_ms * 1000U), err_wr, err_rd);
+    ftl_ut_result("SPEED ftl chunk=%lu depth=%hhu base=%lu  WR=%lu KB/s  RD=%lu KB/s  err(wr=%lu rd=%lu)", chunk, depth, s_spd_ftl_lba_base, spd_kbps_from_us(bytes, wr_ms * 1000U), spd_kbps_from_us(bytes, rd_ms * 1000U), err_wr, err_rd);
     ftl_ut_trace_summary("SPEED ftl chunk=%lu detail: depth=%hhu rd_path=%s wb(b/d)=%lu/%lu rd(b/d/f)=%lu/%lu/%lu wr_ms=%lu flush_ms=%lu rd_ms=%lu fmt_ms=%lu err(wr=%lu rd=%lu)",
                          chunk,
                          depth,
@@ -1424,7 +1466,7 @@ static MunitParameterEnum s_ftl_speed_params[] = {
 #endif /* UT_FTL_ENABLE */
 
 /* ══════════════════════════════════════════════════════════════════════
- * §4 套件注册：/speed/fc_nand_rw 与 /speed/ftl_rw
+ * §4 套件注册：/bench/speed/fc_nand_rw 与 /bench/speed/ftl_rw
  * 两段实现由 UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择；UT=（both）时两条并列。
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -1434,11 +1476,11 @@ static MunitParameterEnum s_ftl_speed_params[] = {
  * 受 FC 测试留下的介质状态影响。先跑 FTL（自己会 format），最后跑 FC。 */
 MunitTest g_speed_tests[] = {
 #    if defined(UT_FTL_ENABLE)
-    {    (char *)"ftl_rw", test_ftl_speed_host, spd_ftl_setup, spd_ftl_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_ftl_speed_params},
+    {    (char *)"ftl_rw", test_ftl_speed_host,      spd_ftl_setup,      spd_ftl_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_ftl_speed_params},
 #    endif
 #    if defined(UT_FC_ENABLE)
-    {(char *)"fc_nand_rw",    test_fc_speed_mp,    test_setup,   test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_fc_speed_params},
+    {(char *)"fc_nand_rw",    test_fc_speed_mp, spd_fc_speed_setup, spd_fc_speed_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_fc_speed_params},
 #    endif
-    {                NULL,                NULL,          NULL,             NULL,             MUNIT_TEST_OPTION_NONE,               NULL},
+    {                NULL,                NULL,               NULL,                  NULL,             MUNIT_TEST_OPTION_NONE,               NULL},
 };
 #endif

@@ -343,16 +343,33 @@ static uint32_t munit_rand_from_state(uint32_t state)
     return res;
 }
 
+static uint32_t s_munit_seed;
+
 void munit_rand_seed(uint32_t seed)
 {
     uint32_t state = munit_rand_next_state(seed + MUNIT_PRNG_INCREMENT);
     munit_atomic_store(&munit_rand_state, state);
+    s_munit_seed = seed;
 }
 
+uint32_t munit_seed_get(void)
+{
+    return s_munit_seed;
+}
+
+/* 平台种子源（弱符号，声明在 munit.h）：未实现时回退 time(NULL)。 */
 static uint32_t munit_rand_generate_seed(void)
 {
     uint32_t seed, state;
-    seed = (uint32_t)time(NULL);
+
+    if (munit_platform_seed != NULL)
+    {
+        seed = munit_platform_seed();
+    }
+    else
+    {
+        seed = (uint32_t)time(NULL);
+    }
 
     state = munit_rand_next_state(seed + MUNIT_PRNG_INCREMENT);
     return munit_rand_from_state(state);

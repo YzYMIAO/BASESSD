@@ -21,8 +21,14 @@ LDFLAGS += -Wl,--wrap=ftl_async_read_page -Wl,--wrap=ftl_async_write_page
 LDFLAGS += -Wl,--wrap=ftl_async_write_page_cw -Wl,--wrap=ftl_async_write_pair_cmd
 LDFLAGS += -Wl,--wrap=ftl_async_erase_block
 LDFLAGS += -Wl,--wrap=ftl_async_erase_block_multi_plane
+LDFLAGS += -Wl,--wrap=ftl_sync_erase_block_multi_plane
 LDFLAGS += -Wl,--wrap=ftl_async_write_page_mirror -Wl,--wrap=ftl_sync_write_page_mirror
 LDFLAGS += -Wl,--wrap=ftl_sync_read_page
+LDFLAGS += -Wl,--wrap=ftl_sync_read_page_status
+LDFLAGS += -Wl,--wrap=ftl_sync_read_column
+LDFLAGS += -Wl,--wrap=fc_data_path_encode
+LDFLAGS += -Wl,--wrap=fc_data_path_process_read
+LDFLAGS += -Wl,--wrap=delay_time_now_us
 LDFLAGS += -Wl,--wrap=alc_super_open_alloc_pair
 LDFLAGS += -Wl,--wrap=gc_select_victim
 # 速度测试：一份源、两段实现（UT_FC_ENABLE / UT_FTL_ENABLE 预处理选择）。
@@ -36,17 +42,17 @@ MODULE_INCS += $(PROJECT_ROOT)/tests/framework
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 CFLAGS += -DFC_NAND_TEST_ENABLE
 
-# FC-NAND 三级测试源 + 共享夹具：UT 为空（全部）或 UT=FC 时编入。
-# UT=FTL 时整体摘除 —— 这三级会真写 NAND（破坏性），且是镜像体积的主要来源。
+# FC-NAND 测试源 + 共享夹具：UT 为空（全部）或 UT=FC 时编入。
+# UT=FTL 时整体摘除 —— lifecycle 会真写 NAND（破坏性），且是镜像体积的主要来源。
 ifeq ($(UT_FC_ENABLE),1)
-# 共享夹具：setup/teardown + 读写擦 helper（Level 2 / Level 3 共用）
+# 共享夹具：setup/teardown + 读写擦 helper（data_path / lifecycle 共用）
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/fc_test_common.c
-# Level 1: 纯逻辑测试
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level1.c
-# Level 2: 数据路径测试
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level2.c
-# Level 3: 全链路测试
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level3.c
+# pure: 纯 RAM 测试
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_pure.c
+# data_path: 数据路径测试
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_data_path.c
+# lifecycle: 全链路测试
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_lifecycle.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_negative.c
 CFLAGS += -DUT_FC_ENABLE
 endif

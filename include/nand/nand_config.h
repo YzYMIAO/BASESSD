@@ -135,7 +135,10 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 #define PAA_BLOCK_SHIFT (PAA_PLANE_SHIFT + PLANE_ADDR_WIDTH)
 #define PAA_LUN_SHIFT   (PAA_BLOCK_SHIFT + BLOCK_ADDR_WIDTH)
 
-#define NAND_FIELD_MASK(width) ((width) == 0U ? 0UL : ((1UL << (width)) - 1UL))
+#include "field_mask.h"
+
+/* NAND 层保留既有名字；唯一定义已下沉 common/field_mask.h（BIT-01）。 */
+#define NAND_FIELD_MASK(width) SSD_FIELD_MASK(width)
 #define PAA_PAGE_MASK          NAND_FIELD_MASK(PAGE_ADDR_WIDTH)
 #define PAA_PLANE_MASK         NAND_FIELD_MASK(PLANE_ADDR_WIDTH)
 #define PAA_BLOCK_MASK         NAND_FIELD_MASK(BLOCK_ADDR_WIDTH)

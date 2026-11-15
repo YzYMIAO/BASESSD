@@ -9,7 +9,7 @@
  *     生产消息    ASSERT_MSG / ASSERT_REJECT / ASSERT_REJECT_VOID / ASSERT_DEFAULT —— 判据 9 的
  *                  「条件 + 消息 + release 返回」统一入口，NDEBUG 下零/一次判断
  *   ② 富断言集   ASSERT_*        —— 类型化比较、指针、字符串、内存，供测试文件使用
- *   ③ 失败入口   assertion_fail / assertion_failf —— 格式化 + 落记录 + 停机
+ *   ③ 失败入口   assertion_fail / assertion_failf —— 格式化 + 落记录 + 现场终端
  *
  * 依赖边界：本头只依赖 C 标准头（stdint/string/inttypes），**不**引入 log.h、
  * 不引入任何 munit/FC/业务头。格式化在 .c 里完成，宏只负责取值与比较。
@@ -44,28 +44,36 @@
 #    define ASSERT_UNREACHABLE()        ((void)0)
 #endif
 
-/* ── 失败入口（均不返回：落崩溃记录 → 日志 → 停机） ── */
+/* ── 失败入口（均不返回：落崩溃记录 → 日志 → 现场终端） ── */
 
-_Noreturn void assertion_fail(const char *expression, const char *file, int line);
+_Noreturn void assertion_fail(const char *expression, const char *function, const char *file, int line);
 
-ASSERTION_PRINTF(3, 4)
-_Noreturn void assertion_failf(const char *file, int line, const char *format, ...);
+ASSERTION_PRINTF(4, 5)
+_Noreturn void assertion_failf(const char *function, const char *file, int line, const char *format, ...);
 
 /*
  * 64 位专用入口：直接十进制拆解（assertion.c），不依赖库的 %ll 实现，
  * 也便于把「a op b」两个操作数与比较符一并打出。
  */
-_Noreturn void assertion_fail_i64(const char *expression_a, const char *op, const char *expression_b, int64_t a, int64_t b, const char *file, int line);
-_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *file, int line);
+_Noreturn void assertion_fail_i64(const char *expression_a, const char *op, const char *expression_b, int64_t a, int64_t b, const char *function, const char *file, int line);
+_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *function, const char *file, int line);
 
-/* ── 终端路径：flush → 平台上下文 → 崩溃记录 dump → 停机 ── */
+/* ── 终端路径：flush → 平台上下文 → 断言现场终端 ── */
 
 _Noreturn void assertion_terminate(void);
 
+/**
+ * @brief 断言/abort 后的现场终端：在调用者栈上循环运行正常 CLI。
+ *
+ * @note 不推进 FTL/FC 后台任务，失败状态保持冻结；只做命令行解析与已同步完成的
+ *       命令，便于在串口分析现场。栈不展开，调试器仍可看到断言点的调用链。
+ * @note 弱默认实现是 `for (;;) {}`；有 HIL CLI 的镜像由 cli.c 提供强符号。
+ */
+_Noreturn void assertion_console_run(void);
+
 /*
- * 平台上下文弱钩子：断言停机前追加打印的现场信息（如 FC 资源占用）。
+ * 平台上下文弱钩子：断言终端前追加打印的现场信息（如 FC 资源占用）。
  * 默认空实现；由需要的一方（如 src/fc/fc.c）强符号覆盖。
- * 注意它与 crash_platform_report 是两个不同的钩子，不要合并。
  */
 void assertion_platform_context(void);
 
@@ -76,13 +84,13 @@ void assertion_platform_context(void);
 #    define ASSERT(expression) ((void)0)
 #    define ASSUME(expression) ASSERT_UNREACHABLE()
 #else
-#    define ASSERT(expression)                                   \
-        do                                                       \
-        {                                                        \
-            if (ASSERT_UNLIKELY(!(expression)))                  \
-            {                                                    \
-                assertion_fail(#expression, __FILE__, __LINE__); \
-            }                                                    \
+#    define ASSERT(expression)                                             \
+        do                                                                 \
+        {                                                                  \
+            if (ASSERT_UNLIKELY(!(expression)))                            \
+            {                                                              \
+                assertion_fail(#expression, __func__, __FILE__, __LINE__); \
+            }                                                              \
         } while (0)
 
 /* debug：ASSUME 与 ASSERT 同语义（检查 + 停机），release 下退化为不可达。 */
@@ -119,31 +127,31 @@ void assertion_platform_context(void);
             }                                           \
         } while (0)
 #else
-#    define ASSERT_MSG(expression, format, ...)                             \
-        do                                                                  \
-        {                                                                   \
-            if (ASSERT_UNLIKELY(!(expression)))                             \
-            {                                                               \
-                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
-            }                                                               \
+#    define ASSERT_MSG(expression, format, ...)                                       \
+        do                                                                            \
+        {                                                                             \
+            if (ASSERT_UNLIKELY(!(expression)))                                       \
+            {                                                                         \
+                assertion_failf(__func__, __FILE__, __LINE__, format, ##__VA_ARGS__); \
+            }                                                                         \
         } while (0)
-#    define ASSERT_REJECT(expression, ret, format, ...)                     \
-        do                                                                  \
-        {                                                                   \
-            if (ASSERT_UNLIKELY(!(expression)))                             \
-            {                                                               \
-                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
-                return (ret);                                               \
-            }                                                               \
+#    define ASSERT_REJECT(expression, ret, format, ...)                               \
+        do                                                                            \
+        {                                                                             \
+            if (ASSERT_UNLIKELY(!(expression)))                                       \
+            {                                                                         \
+                assertion_failf(__func__, __FILE__, __LINE__, format, ##__VA_ARGS__); \
+                return (ret);                                                         \
+            }                                                                         \
         } while (0)
-#    define ASSERT_REJECT_VOID(expression, format, ...)                     \
-        do                                                                  \
-        {                                                                   \
-            if (ASSERT_UNLIKELY(!(expression)))                             \
-            {                                                               \
-                assertion_failf(__FILE__, __LINE__, format, ##__VA_ARGS__); \
-                return;                                                     \
-            }                                                               \
+#    define ASSERT_REJECT_VOID(expression, format, ...)                               \
+        do                                                                            \
+        {                                                                             \
+            if (ASSERT_UNLIKELY(!(expression)))                                       \
+            {                                                                         \
+                assertion_failf(__func__, __FILE__, __LINE__, format, ##__VA_ARGS__); \
+                return;                                                               \
+            }                                                                         \
         } while (0)
 #endif
 
@@ -166,34 +174,34 @@ void assertion_platform_context(void);
  * 支持：完整 newlib 自带，无需额外链接钩子。
  */
 
-#define ASSERT_TRUE(expression)                                                 \
-    do                                                                          \
-    {                                                                           \
-        if (ASSERT_UNLIKELY(!(expression)))                                     \
-        {                                                                       \
-            assertion_failf(__FILE__, __LINE__, "%s is not true", #expression); \
-        }                                                                       \
+#define ASSERT_TRUE(expression)                                                           \
+    do                                                                                    \
+    {                                                                                     \
+        if (ASSERT_UNLIKELY(!(expression)))                                               \
+        {                                                                                 \
+            assertion_failf(__func__, __FILE__, __LINE__, "%s is not true", #expression); \
+        }                                                                                 \
     } while (0)
 
-#define ASSERT_FALSE(expression)                                                 \
-    do                                                                           \
-    {                                                                            \
-        if (ASSERT_UNLIKELY(!!(expression)))                                     \
-        {                                                                        \
-            assertion_failf(__FILE__, __LINE__, "%s is not false", #expression); \
-        }                                                                        \
+#define ASSERT_FALSE(expression)                                                           \
+    do                                                                                     \
+    {                                                                                      \
+        if (ASSERT_UNLIKELY(!!(expression)))                                               \
+        {                                                                                  \
+            assertion_failf(__func__, __FILE__, __LINE__, "%s is not false", #expression); \
+        }                                                                                  \
     } while (0)
 
 /* 类型化比较：T 为取值类型，fmt 为 printf 格式；prefix/suffix 用于字符等特殊展示。 */
-#define ASSERT_TYPE_FULL(prefix, suffix, T, fmt, a, op, b)                                                                                                                  \
-    do                                                                                                                                                                      \
-    {                                                                                                                                                                       \
-        T assertion_tmp_a_ = (a);                                                                                                                                           \
-        T assertion_tmp_b_ = (b);                                                                                                                                           \
-        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                                                                                       \
-        {                                                                                                                                                                   \
-            assertion_failf(__FILE__, __LINE__, "%s %s %s (" prefix "%" fmt suffix " %s " prefix "%" fmt suffix ")", #a, #op, #b, assertion_tmp_a_, #op, assertion_tmp_b_); \
-        }                                                                                                                                                                   \
+#define ASSERT_TYPE_FULL(prefix, suffix, T, fmt, a, op, b)                                                                                                                            \
+    do                                                                                                                                                                                \
+    {                                                                                                                                                                                 \
+        T assertion_tmp_a_ = (a);                                                                                                                                                     \
+        T assertion_tmp_b_ = (b);                                                                                                                                                     \
+        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                                                                                                 \
+        {                                                                                                                                                                             \
+            assertion_failf(__func__, __FILE__, __LINE__, "%s %s %s (" prefix "%" fmt suffix " %s " prefix "%" fmt suffix ")", #a, #op, #b, assertion_tmp_a_, #op, assertion_tmp_b_); \
+        }                                                                                                                                                                             \
     } while (0)
 
 #define ASSERT_TYPE(T, fmt, a, op, b) ASSERT_TYPE_FULL("", "", T, fmt, a, op, b)
@@ -215,26 +223,26 @@ void assertion_platform_context(void);
 #define ASSERT_INT32(a, op, b)  ASSERT_TYPE(int32_t, "li", a, op, b)
 #define ASSERT_UINT32(a, op, b) ASSERT_TYPE(DWORD, "lu", a, op, b)
 
-#define ASSERT_INT64(a, op, b)                                                                       \
-    do                                                                                               \
-    {                                                                                                \
-        int64_t assertion_tmp_a_ = (a);                                                              \
-        int64_t assertion_tmp_b_ = (b);                                                              \
-        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                \
-        {                                                                                            \
-            assertion_fail_i64(#a, #op, #b, assertion_tmp_a_, assertion_tmp_b_, __FILE__, __LINE__); \
-        }                                                                                            \
+#define ASSERT_INT64(a, op, b)                                                                                 \
+    do                                                                                                         \
+    {                                                                                                          \
+        int64_t assertion_tmp_a_ = (a);                                                                        \
+        int64_t assertion_tmp_b_ = (b);                                                                        \
+        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                          \
+        {                                                                                                      \
+            assertion_fail_i64(#a, #op, #b, assertion_tmp_a_, assertion_tmp_b_, __func__, __FILE__, __LINE__); \
+        }                                                                                                      \
     } while (0)
 
-#define ASSERT_UINT64(a, op, b)                                                                      \
-    do                                                                                               \
-    {                                                                                                \
-        QWORD assertion_tmp_a_ = (a);                                                                \
-        QWORD assertion_tmp_b_ = (b);                                                                \
-        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                \
-        {                                                                                            \
-            assertion_fail_u64(#a, #op, #b, assertion_tmp_a_, assertion_tmp_b_, __FILE__, __LINE__); \
-        }                                                                                            \
+#define ASSERT_UINT64(a, op, b)                                                                                \
+    do                                                                                                         \
+    {                                                                                                          \
+        QWORD assertion_tmp_a_ = (a);                                                                          \
+        QWORD assertion_tmp_b_ = (b);                                                                          \
+        if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                          \
+        {                                                                                                      \
+            assertion_fail_u64(#a, #op, #b, assertion_tmp_a_, assertion_tmp_b_, __func__, __FILE__, __LINE__); \
+        }                                                                                                      \
     } while (0)
 
 #define ASSERT_FLOAT(a, op, b)  ASSERT_TYPE(float, "f", a, op, b)
@@ -254,62 +262,62 @@ void assertion_platform_context(void);
         const double assertion_tmp_diff_ = ((assertion_tmp_a_ - assertion_tmp_b_) < 0) ? -(assertion_tmp_a_ - assertion_tmp_b_) : (assertion_tmp_a_ - assertion_tmp_b_); \
         if (ASSERT_UNLIKELY(assertion_tmp_diff_ > 1e-##precision))                                                                                                       \
         {                                                                                                                                                                \
-            assertion_failf(__FILE__, __LINE__, "%s == %s (%0." #precision "g == %0." #precision "g)", #a, #b, assertion_tmp_a_, assertion_tmp_b_);                      \
+            assertion_failf(__func__, __FILE__, __LINE__, "%s == %s (%0." #precision "g == %0." #precision "g)", #a, #b, assertion_tmp_a_, assertion_tmp_b_);            \
         }                                                                                                                                                                \
     } while (0)
 
-#define ASSERT_STRING_EQUAL(a, b)                                                                                                  \
-    do                                                                                                                             \
-    {                                                                                                                              \
-        const char *assertion_tmp_a_ = (a);                                                                                        \
-        const char *assertion_tmp_b_ = (b);                                                                                        \
-        if (ASSERT_UNLIKELY(strcmp(assertion_tmp_a_, assertion_tmp_b_) != 0))                                                      \
-        {                                                                                                                          \
-            assertion_failf(__FILE__, __LINE__, "string %s == %s (\"%s\" == \"%s\")", #a, #b, assertion_tmp_a_, assertion_tmp_b_); \
-        }                                                                                                                          \
+#define ASSERT_STRING_EQUAL(a, b)                                                                                                            \
+    do                                                                                                                                       \
+    {                                                                                                                                        \
+        const char *assertion_tmp_a_ = (a);                                                                                                  \
+        const char *assertion_tmp_b_ = (b);                                                                                                  \
+        if (ASSERT_UNLIKELY(strcmp(assertion_tmp_a_, assertion_tmp_b_) != 0))                                                                \
+        {                                                                                                                                    \
+            assertion_failf(__func__, __FILE__, __LINE__, "string %s == %s (\"%s\" == \"%s\")", #a, #b, assertion_tmp_a_, assertion_tmp_b_); \
+        }                                                                                                                                    \
     } while (0)
 
-#define ASSERT_STRING_NOT_EQUAL(a, b)                                                                                              \
-    do                                                                                                                             \
-    {                                                                                                                              \
-        const char *assertion_tmp_a_ = (a);                                                                                        \
-        const char *assertion_tmp_b_ = (b);                                                                                        \
-        if (ASSERT_UNLIKELY(strcmp(assertion_tmp_a_, assertion_tmp_b_) == 0))                                                      \
-        {                                                                                                                          \
-            assertion_failf(__FILE__, __LINE__, "string %s != %s (\"%s\" == \"%s\")", #a, #b, assertion_tmp_a_, assertion_tmp_b_); \
-        }                                                                                                                          \
+#define ASSERT_STRING_NOT_EQUAL(a, b)                                                                                                        \
+    do                                                                                                                                       \
+    {                                                                                                                                        \
+        const char *assertion_tmp_a_ = (a);                                                                                                  \
+        const char *assertion_tmp_b_ = (b);                                                                                                  \
+        if (ASSERT_UNLIKELY(strcmp(assertion_tmp_a_, assertion_tmp_b_) == 0))                                                                \
+        {                                                                                                                                    \
+            assertion_failf(__func__, __FILE__, __LINE__, "string %s != %s (\"%s\" == \"%s\")", #a, #b, assertion_tmp_a_, assertion_tmp_b_); \
+        }                                                                                                                                    \
     } while (0)
 
-#define ASSERT_MEMORY_EQUAL(size, a, b)                                                                               \
+#define ASSERT_MEMORY_EQUAL(size, a, b)                                                                                         \
+    do                                                                                                                          \
+    {                                                                                                                           \
+        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                                                  \
+        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                                                  \
+        const size_t         assertion_tmp_size_ = (size);                                                                      \
+        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) != 0))                              \
+        {                                                                                                                       \
+            size_t assertion_tmp_pos_;                                                                                          \
+            for (assertion_tmp_pos_ = 0; assertion_tmp_pos_ < assertion_tmp_size_; assertion_tmp_pos_++)                        \
+            {                                                                                                                   \
+                if (assertion_tmp_a_[assertion_tmp_pos_] != assertion_tmp_b_[assertion_tmp_pos_])                               \
+                {                                                                                                               \
+                    assertion_failf(__func__, __FILE__, __LINE__, "memory %s == %s, at offset %u", #a, #b, assertion_tmp_pos_); \
+                    break;                                                                                                      \
+                }                                                                                                               \
+            }                                                                                                                   \
+        }                                                                                                                       \
+    } while (0)
+
+#define ASSERT_MEMORY_NOT_EQUAL(size, a, b)                                                                           \
     do                                                                                                                \
     {                                                                                                                 \
         const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                                        \
         const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                                        \
         const size_t         assertion_tmp_size_ = (size);                                                            \
-        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) != 0))                    \
+        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) == 0))                    \
         {                                                                                                             \
-            size_t assertion_tmp_pos_;                                                                                \
-            for (assertion_tmp_pos_ = 0; assertion_tmp_pos_ < assertion_tmp_size_; assertion_tmp_pos_++)              \
-            {                                                                                                         \
-                if (assertion_tmp_a_[assertion_tmp_pos_] != assertion_tmp_b_[assertion_tmp_pos_])                     \
-                {                                                                                                     \
-                    assertion_failf(__FILE__, __LINE__, "memory %s == %s, at offset %u", #a, #b, assertion_tmp_pos_); \
-                    break;                                                                                            \
-                }                                                                                                     \
-            }                                                                                                         \
+            assertion_failf(__func__, __FILE__, __LINE__, "memory %s != %s (%u bytes)", #a, #b, assertion_tmp_size_); \
         }                                                                                                             \
-    } while (0)
-
-#define ASSERT_MEMORY_NOT_EQUAL(size, a, b)                                                                 \
-    do                                                                                                      \
-    {                                                                                                       \
-        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                              \
-        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                              \
-        const size_t         assertion_tmp_size_ = (size);                                                  \
-        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) == 0))          \
-        {                                                                                                   \
-            assertion_failf(__FILE__, __LINE__, "memory %s != %s (%u bytes)", #a, #b, assertion_tmp_size_); \
-        }                                                                                                   \
     } while (0)
 
 #endif /* ASSERTION_H */

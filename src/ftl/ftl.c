@@ -1696,6 +1696,13 @@ static SSD_CODE_FAST ftl_status_e ftl_cache_pad_submit(ftl_ctx_s *ftl)
     return FTL_OK;
 }
 
+#if defined(FC_NAND_TEST_ENABLE)
+ftl_status_e ftl_cache_test_pad_submit(ftl_ctx_s *ftl)
+{
+    return ftl_cache_pad_submit(ftl);
+}
+#endif
+
 /**
  * @brief padding 收尾页完成服务
  *

@@ -43,7 +43,8 @@
 
 #include "assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
 #include "fc.h"        /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
-#include "ftl_type.h"  /* DWORD —— CW 级地址辅助的形参/返回类型 */
+#include "field_mask.h"
+#include "ftl_type.h" /* DWORD —— CW 级地址辅助的形参/返回类型 */
 #include "nand_config.h"
 
 #include <stddef.h>
@@ -299,12 +300,12 @@ static inline BOOL ftl_lba_is_pair_aligned(DWORD lba)
 #define PBA_CH_SHIFT    (PBA_CE_SHIFT + PBA_CE_WIDTH)
 
 /* PBA 掩码 */
-#define PBA_PLANE_MASK NAND_FIELD_MASK(PLANE_ADDR_WIDTH)
-#define PBA_PAGE_MASK  NAND_FIELD_MASK(PAGE_ADDR_WIDTH)
-#define PBA_BLOCK_MASK NAND_FIELD_MASK(BLOCK_ADDR_WIDTH)
-#define PBA_LUN_MASK   NAND_FIELD_MASK(LUN_ADDR_WIDTH)
-#define PBA_CE_MASK    NAND_FIELD_MASK(PBA_CE_WIDTH)
-#define PBA_CH_MASK    NAND_FIELD_MASK(PBA_CH_WIDTH)
+#define PBA_PLANE_MASK SSD_FIELD_MASK(PLANE_ADDR_WIDTH)
+#define PBA_PAGE_MASK  SSD_FIELD_MASK(PAGE_ADDR_WIDTH)
+#define PBA_BLOCK_MASK SSD_FIELD_MASK(BLOCK_ADDR_WIDTH)
+#define PBA_LUN_MASK   SSD_FIELD_MASK(LUN_ADDR_WIDTH)
+#define PBA_CE_MASK    SSD_FIELD_MASK(PBA_CE_WIDTH)
+#define PBA_CH_MASK    SSD_FIELD_MASK(PBA_CH_WIDTH)
 
 /* PBA 与 LBA 的 CW 低位必须同源：`pba_make` / `pba_to_cw` 按 PBA_CW_SHIFT 打包，
  * 而 `ftl_lba_cw` / `ftl_cw_bit` 假设 cw 在 LBA 的低 CW_WIDTH 位（bit 0 起）。
@@ -392,7 +393,7 @@ static inline BYTE pba_to_plane(DWORD pba)
  */
 static inline BYTE pba_to_cw(DWORD pba)
 {
-    return ((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
+    return ((pba >> PBA_CW_SHIFT) & SSD_FIELD_MASK(CW_WIDTH));
 }
 
 /* ── PBA 字段视图（4 字节位域，位序与 DWORD 一致）──
@@ -425,7 +426,7 @@ _Static_assert(sizeof(nand_pba_fields_s) == sizeof(DWORD), "PBA 字段视图必�
 
 /* PBA 实际占用的低位位数 —— 屏蔽位域结构体尾部的填充位 */
 #define PBA_USED_BITS (PBA_CH_SHIFT + PBA_CH_WIDTH)
-#define PBA_USED_MASK NAND_FIELD_MASK(PBA_USED_BITS)
+#define PBA_USED_MASK SSD_FIELD_MASK(PBA_USED_BITS)
 
 /* 维度必须装得进 PBA 位宽；PBA 本身必须装进 32 位（NAND_PBA_INVALID 才有空余）。 */
 _Static_assert(CH_NUM <= (1U << PBA_CH_WIDTH), "CH_NUM 超出 PBA_CH_WIDTH");
@@ -449,7 +450,7 @@ _Static_assert(PBA_USED_BITS <= 32U, "PBA 编码超出 32 位");
  */
 static inline DWORD pba_make(DWORD ch, DWORD ce, DWORD lun, DWORD block, DWORD plane, DWORD page, DWORD cw)
 {
-    return ((DWORD)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) | ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) | ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
+    return ((DWORD)(cw & SSD_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) | ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) | ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) | ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) | ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) | ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) | ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
 /**
@@ -600,7 +601,7 @@ static inline DWORD pba_page(DWORD pba)
  */
 static inline DWORD pba_with_cw(DWORD pba, DWORD cw)
 {
-    return (pba & ~NAND_FIELD_MASK(CW_WIDTH)) | ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
+    return (pba & ~SSD_FIELD_MASK(CW_WIDTH)) | ((cw & SSD_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
 }
 
 /**

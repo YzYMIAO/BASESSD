@@ -231,9 +231,9 @@ socat TCP-LISTEN:2331,reuseaddr,fork TCP:$WINDOWS_IP:2331 &
 test
 
 # 分层运行（套件名**必须带尾斜杠**）
-test /fc-nand/logic/          # Level 1（11 条：command + queue + cqueue + scheduler）
-test /fc-nand/data_path/      # Level 2
-test /fc-nand/lifecycle/      # Level 3（地址随机化：--iterations N 是覆盖旋钮）
+test /fc-nand/pure/          # pure（11 条：command + queue + cqueue + scheduler）
+test /fc-nand/data_path/      # data_path
+test /fc-nand/lifecycle/      # lifecycle（地址随机化：--iterations N 是覆盖旋钮）
 
 # 其他
 test --list                    # 列出所有套件

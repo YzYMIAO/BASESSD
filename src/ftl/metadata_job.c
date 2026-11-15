@@ -538,6 +538,13 @@ static WORD md_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc
  * victim ⇒ 实际需搬数超过本预算 ⇒ md_compact_write 取不到槽 ⇒ 中止。已登记 region
  * 指向新页、victim 不擦，无数据损失，只是本次压缩重来。
  */
+#if defined(FC_NAND_TEST_ENABLE)
+WORD md_test_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc)
+{
+    return md_compact_victim_find(dir, alloc);
+}
+#endif
+
 static md_compact_start_e md_compact_begin(md_dir_cache_s *dir, const alc_s *alloc)
 {
     md_handle_s *j = &dir->handle;
@@ -591,6 +598,13 @@ static md_compact_start_e md_compact_begin(md_dir_cache_s *dir, const alc_s *all
 
     return MD_COMPACT_STARTED;
 }
+
+#if defined(FC_NAND_TEST_ENABLE)
+md_compact_start_e md_test_compact_begin(md_dir_cache_s *dir, const alc_s *alloc)
+{
+    return md_compact_begin(dir, alloc);
+}
+#endif
 
 /**
  * @brief 从 job.region_id 起找 victim 上**下一个**仍有引用的 region，发起异步读。

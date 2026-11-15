@@ -244,6 +244,27 @@ static volatile ssd_status_e s_io_status;
  * ⚠ 必须在 ftl_init 前做：否则旧 CP/Journal 的迟到完成会在新实例上触发
  *    `h->waiting != 0` 断言（checkpoint.c:587）。
  * ⚠ 返回时 `bg_suspend` 仍为 1：调用者按需恢复。 */
+/**
+ * @brief 把「已到期但还没启动」的后台 CP 在 fixture 里落定
+ *
+ * quiesce 只排空**已在飞** job；boot/journal 回放可能留下 journal > CP 的到期状态。
+ * 不在这里落定，任何长泵 `timer_scheduler_poll + ftl_service` 的用例都会在测试内部
+ * 把 CP 拉起来 → metadata 日志轮转 → reclaim 擦除命令在飞，污染「FC 池回到基线」类判据。
+ * 用非 force 的 TIMER 触发走 T1/T2/T3：真到期才起；随后的 quiesce 把 CP 及其
+ * 派生出的 md reclaim 一并推进到空闲。
+ *
+ * @param ftl 活实例
+ */
+void ftl_ut_settle_background(ftl_ctx_s *ftl)
+{
+    ftl_ut_quiesce(ftl);
+
+    const cp_trigger_s due = ftl_cp_trigger_build(ftl, CP_REASON_TIMER, false);
+
+    cp_handle(ftl->cp_handle, &due);
+    ftl_ut_quiesce(ftl);
+}
+
 void ftl_ut_quiesce(ftl_ctx_s *ftl)
 {
     const DWORD t0 = platform_now_ms();
@@ -288,7 +309,14 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
 }
 
 /* 重新绑定 FTL。ftl_init 会 memset 整个上下文 ⇒ 先把 storage 指针拷出来。 */
-void ftl_ut_reboot_from_media(void)
+static pfr_boot_result_s s_last_boot_result;
+
+const pfr_boot_result_s *ftl_ut_last_boot_result(void)
+{
+    return &s_last_boot_result;
+}
+
+ftl_status_e ftl_ut_try_reboot_from_media(pfr_boot_result_s *out)
 {
     ftl_ctx_s *ftl = ftl_ut_live();
 
@@ -339,9 +367,35 @@ void ftl_ut_reboot_from_media(void)
     pfr_boot_result_s result;
 
     memset(&result, 0, sizeof(result));
-    munit_assert_int(pfr_boot_recovery(ftl, &result), ==, FTL_OK);
+    const ftl_status_e boot_status = pfr_boot_recovery(ftl, &result);
 
-    ftl_ut_trace_detail("reboot: recovered type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", result.boot_type, result.cp_sequence, result.journal_entries, result.blocks_restored, result.scoped);
+    s_last_boot_result = result;
+    if (out != NULL)
+    {
+        *out = result;
+    }
+
+    ftl_ut_trace_detail("reboot: status=%ld type=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d", (long)boot_status, result.boot_type, result.cp_sequence, result.journal_entries, result.blocks_restored, result.scoped);
+    return boot_status;
+}
+
+void ftl_ut_reboot_from_media(void)
+{
+    pfr_boot_result_s result;
+
+    munit_assert_int(ftl_ut_try_reboot_from_media(&result), ==, FTL_OK);
+}
+
+void ftl_ut_isolated_begin(void)
+{
+    ftl_ut_media_format();
+    fi_reset();
+}
+
+void ftl_ut_isolated_end(void)
+{
+    fi_reset();
+    ftl_ut_media_format();
 }
 
 void ftl_ut_media_format(void)
@@ -534,14 +588,50 @@ BOOL ftl_ut_trim(DWORD lba, DWORD count)
  * §3c pure 套件资源钩子
  * ══════════════════════════════════════════════════════════════════════ */
 
+/* pure 用例共用 live FTL 的 L2P cache，但套件默认「行是空的」：需要空行构造
+ * 三态/CMT 用例。上一条 `test` 命令（尤其 /bench/speed/ftl_rw 写 3×25 MiB）
+ * 会留下 64 个 CLEAN 常驻行，跨命令跑 `test` 时就会撞 `idx < 64`。
+ * 只作废 CLEAN 行：这一步纯 RAM，不碰介质、不弄脏 Directory。DIRTY 行代表
+ * 未落盘映射，不得在这里 flush/作废——flush 会更新 Directory，把「目录脏」
+ * 这个后台 CP 触发点泄漏给后面的 negative/pure 用例（`ftl_service` 一旦被泵
+ * 就会起 metadata 检查点 → reclaim 命令在飞 → `command_used` 判据假红）。 */
+static void ftl_ut_pure_l2p_lines_clear(ftl_ctx_s *ftl)
+{
+    l2p_cache_s *cache = ftl->cache;
+
+    for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        l2p_line_info_s info;
+
+        l2p_line_get(cache, i, &info);
+        if (info.state == L2P_CACHE_CLEAN)
+        {
+            l2p_line_invalidate(cache, i);
+        }
+    }
+}
+
+static BOOL s_pure_bg_saved;
+
 void *ftl_ut_pure_setup(const MunitParameter params[], void *data)
 {
     (void)params;
     (void)data;
 
     ftl_ut_topology_init();
-    (void)ftl_ut_live();
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+
+    s_pure_bg_saved = ftl->flags.bg_suspend;
+
+    /* 与 negative/pure 同口径：先排空在飞 job 并落定 boot 遗留的到期 CP；
+     * 随后整个用例期间冻结后台——pure 用例不应被调度器按当时水位自行起的
+     * CP/压缩/reclaim 干扰，否则结果取决于上一条命令/上次上电留下的状态。 */
+    ftl_ut_settle_background(ftl);
+    ftl->flags.bg_suspend = true;
+
     ftl_ut_ram_init();
+    ftl_ut_pure_l2p_lines_clear(ftl);
     fi_reset(); /* 注入状态是进程级的：漏一次复位会静默污染后续用例 */
     return NULL;
 }
@@ -550,7 +640,10 @@ void ftl_ut_pure_teardown(void *fixture)
 {
     (void)fixture;
 
-    ftl_ut_assert_clean(ftl_ut_live());
+    ftl_ctx_s *ftl = ftl_ut_live();
+
+    ftl->flags.bg_suspend = s_pure_bg_saved;
+    ftl_ut_assert_clean(ftl);
 }
 
 /* ══════════════════════════════════════════════════════════════════════

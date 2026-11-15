@@ -428,6 +428,13 @@ static void mig_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind
     mig_job_step(m);
 }
 
+#if defined(FC_NAND_TEST_ENABLE)
+void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e kind, const char *reason, DWORD triggers)
+{
+    mig_job_start(m, victim, kind, reason, triggers);
+}
+#endif
+
 /**
  * @brief 按触发位与 host 写流选收益判据模式。
  * 磨损均衡不在 GC 触发里，由独立 WL 路径处理，不在这里判 OFF。

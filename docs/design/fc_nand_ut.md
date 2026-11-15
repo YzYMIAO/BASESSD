@@ -1,6 +1,6 @@
 # FC-NAND 单元测试设计（板端）
 
-> 状态：2026-11-13 13:37:20 镜像；`test` 全套 **61 OK + 3 SKIP（64 次运行）**；其中 `/fc-nand/` **59 OK + 3 SKIP**、`/speed/fc_nand_rw` **2 OK**，
+> 状态：2026-11-13 13:37:20 镜像；`test` 全套 **61 OK + 3 SKIP（64 次运行）**；其中 `/fc-nand/` **59 OK + 3 SKIP**、`/bench/speed/fc_nand_rw` **2 OK**，
 > 总 27.95 s。3 条 SKIP 是 Mode 5 下的按设计跳过，不是失败（见 §6.4）。
 > 范围：`src/fc/` + `src/nand/` 的 FC-NAND 层。FTL UT 见 `docs/design/ftl_ut_design.md`；
 > HIL UT 见 `docs/design/hil_ut_design.md`。
@@ -16,7 +16,7 @@
 
 | 信息 | 唯一事实源 | 本文怎么引用 |
 |---|---|---|
-| 用例是否存在、参数是什么 | 本文 §4 + `tests/unit/test_fc_level1.c` / `test_fc_level2.c` / `test_fc_level3.c` | §4 只写契约与覆盖点 |
+| 用例是否存在、参数是什么 | 本文 §4 + `tests/unit/test_fc_pure.c` / `test_fc_data_path.c` / `test_fc_lifecycle.c` | §4 只写契约与覆盖点 |
 | 风险状态、历史、是否闭合 | `docs/design/known_risks.md` | §5 只写 `RISK-ID → 用例` 映射，**不写状态词** |
 | 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §7 只给链接 |
 | 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §9 只留最近快照 |
@@ -33,18 +33,18 @@
 1. **只在目标板跑**（`CLAUDE.md` R4）：`make tests UT=FC` 生成镜像，串口 CLI `test`
    执行；不做 host 模拟。
 2. **三层按依赖面分**：
-   - **logic**：零硬件依赖，纯函数测试，栈上夹具、零 `fc_init()`；
+   - **pure**：零硬件依赖，纯函数测试，栈上夹具、零 `fc_init()`；
    - **data_path**：需 `fc_init()` 初始化资源池，但不碰 NAND；在 buffer 层做 round-trip；
    - **lifecycle**：真实 NAND 执行完整命令生命周期（alloc → configure → submit → service →
      poll → release）。
-3. **测试源与生产同仓**：`tests/unit/test_fc_level*.c` 与 `fc_test_common.*`；不建 mock
+3. **测试源与生产同仓**：`tests/unit/test_fc_{pure,data_path,lifecycle}.c` 与 `fc_test_common.*`；不建 mock
    FTL、不绕过 FC 公共 API。
 4. **一个用例只钉一个契约**：判据必须能回答「断言比较的是哪两个值」；没有区分力的
    断言不算覆盖（C7 / C8）。
 5. **负例必须能红**：非法 opcode、越界、UNC/CRC/META 错误、池满、链锁等必须有明确判据。
-6. **真 NAND 安全模型**：Level 3 与 `/speed/fc_nand_rw` 会擦写原始块，破坏 live FTL 映射；
+6. **真 NAND 安全模型**：lifecycle 与 `/bench/speed/fc_nand_rw` 会擦写原始块，破坏 live FTL 映射；
    FC-only 跑完必须 `format` + POR，不能与裸 `test`/FTL 状态混用。
-7. **状态如实**：61 OK + 3 SKIP（含 `/speed`）是正常路径回归，不等于全部 OP/错误路径/多 target 已覆盖；
+7. **状态如实**：61 OK + 3 SKIP（含 `/bench/speed`）是正常路径回归，不等于全部 OP/错误路径/多 target 已覆盖；
    剩余项见 §7（R1）。
 
 ---
@@ -55,17 +55,17 @@
 
 | 层 | 根套件 | 环境 | 内容 | 破坏性 |
 |---|---|---|---|---|
-| **L1 logic** | `/fc-nand/logic/` | 栈上夹具，零硬件 | command / queue / completion queue / ONFI 参数页解码 | 否 |
-| **L2 data_path** | `/fc-nand/data_path/` | `fc_init()` 池，无 NAND | 13 条 / 32 runs（RAID=1 时 15 条 / 34 runs）：CRC / ECC / 加扰 / encode / process_read / cw_bitmap | 否（只碰 buffer） |
-| **L3 lifecycle** | `/fc-nand/lifecycle/` | 真 NAND | 19 个 block 级场景（命令生命周期 / cache / multi-plane / META / 列读 / 块锁 / 背压） | 是 |
-| **PERF** | `/speed/fc_nand_rw` | 真 NAND | FC 原始块 25 MiB 读写，normal/cache 两档 | 是 |
+| **pure** | `/fc-nand/pure/` | 栈上夹具，零硬件 | command / queue / completion queue / ONFI 参数页解码 | 否 |
+| **data_path** | `/fc-nand/data_path/` | `fc_init()` 池，无 NAND | 13 条 / 32 runs（RAID=1 时 15 条 / 34 runs）：CRC / ECC / 加扰 / encode / process_read / cw_bitmap | 否（只碰 buffer） |
+| **lifecycle** | `/fc-nand/lifecycle/` | 真 NAND | 27 个 block 级场景（命令生命周期 / cache / multi-plane / META / 列读 / 块锁 / 背压） | 是 |
+| **PERF** | `/bench/speed/fc_nand_rw` | 真 NAND | FC 原始块 25 MiB 读写，normal/cache 两档 | 是 |
 
 ```text
 /fc-nand/
-  logic/       11 条：command / submission queue / completion queue / ONFI decode
+  pure/        11 条：command / submission queue / completion queue / ONFI decode
   data_path/   13 条（RAID=1 时 15 条）：步骤级 + 管线级 + cw_bitmap
-  lifecycle/   19 条：真实 NAND 命令生命周期
-/speed/
+  lifecycle/   27 条：真实 NAND 命令生命周期
+/bench/speed/
   fc_nand_rw   1 条，normal / cache 两档
 ```
 
@@ -78,25 +78,25 @@
 | 技术 | 判据 | 本仓落点 |
 |---|---|---|
 | **Directed / contract** | 一个状态机/接口契约一条用例 | `init_sequence`、`status_query`、`block_write_read` |
-| **Negative** | 非法输入/错误路径必须被拒绝或置错误位 | `process_read_unc`、`process_read_crc_error`、`process_read_meta_error`、`fail_cw_attribution` |
-| **Boundary / parameterized** | 边界值成组覆盖，不写死单点 | `crc_step_detect`、`ecc_step`、`encode`、`process_read_ok`、`cw_bitmap` |
-| **Seeded random** | 地址由 `(seed, 用例名, 抽样序号)` 决定，可复现 | Level 2 地址抽样、Level 3 14 条随机化用例 |
-| **Fault injection** | 注入点 → 预期错误位/返回值 | `crc_step_detect` / `ecc_step` 的 bit 注入；`fail_cw_attribution` 关放行闩锁 |
+| **Negative** | 非法输入/错误路径必须被拒绝或置错误位 | `dp_process_read_unc`、`dp_process_read_crc_error`、`dp_process_read_meta_error`、`fail_cw_attribution` |
+| **Boundary / parameterized** | 边界值成组覆盖，不写死单点 | `dp_crc_step_detect`、`dp_ecc_step`、`dp_encode`、`dp_process_read_ok`、`dp_cw_bitmap` |
+| **Seeded random** | 地址由 `(seed, 用例名, 抽样序号)` 决定，可复现 | data_path 地址抽样、lifecycle 14 条随机化用例 |
+| **Fault injection** | 注入点 → 预期错误位/返回值 | `dp_crc_step_detect` / `dp_ecc_step` 的 bit 注入；`fail_cw_attribution` 关放行闩锁 |
 | **Reboot / crash point** | 真 POR 后映射/账本一致 | **不在 FC UT**；见 `ftl_ut_design.md` / `known_risks` |
-| **Stress / perf** | 只作基准，不作功能通过率 | `mixed_pipeline`（背压）；`/speed/fc_nand_rw` |
+| **Stress / perf** | 只作基准，不作功能通过率 | `mixed_pipeline`（背压）；`/bench/speed/fc_nand_rw` |
 
 ### 2.3 覆盖模型（CP-*）
 
 | 覆盖点 | 要覆盖什么 | 典型用例 |
 |---|---|---|
-| `CP-LOGIC` | 命令校验、SQ/CQ FIFO/回绕/满、ONFI 参数页解码 | `validate_*`、`push_pop`、`wrap_around`、`cqueue_*`、`onfi_param_page_decode` |
-| `CP-DP` | CRC / ECC / 加扰 / 编解码管线的数据变换 | `crc_step_detect`、`ecc_step`、`scramble_whiten`、`encode`、`process_read_*` |
-| `CP-CHAIN` | desc 链几何、flat CW 位图、plane 展开 | `cw_bitmap`、`encode`、`process_read_masked_chain` |
+| `CP-LOGIC` | 命令校验、SQ/CQ FIFO/回绕/满、ONFI 参数页解码 | `cmd_validate_*`、`sq_push_pop`、`sq_wrap_around`、`cq_*`、`onfi_param_page_decode` |
+| `CP-DP` | CRC / ECC / 加扰 / 编解码管线的数据变换 | `dp_crc_step_detect`、`dp_ecc_step`、`dp_scramble_whiten`、`dp_encode`、`dp_process_read_*` |
+| `CP-CHAIN` | desc 链几何、flat CW 位图、plane 展开 | `cw_bitmap`、`dp_encode`、`dp_process_read_masked_chain` |
 | `CP-OP` | 命令生命周期、完成项 CID 配对、状态字 | `init_sequence`、`status_query`、`mixed_pipeline` |
 | `CP-MEDIA` | 真 NAND 擦/写/读/cache/multi-plane/META/列读/块锁 | `block_*`、`read_column`、`internal_data_move` |
-| `CP-ERR` | UNC / CRC / META / FAIL_CACHE / 下发失败归因 | `process_read_*`、`fail_cw_attribution` |
+| `CP-ERR` | UNC / CRC / META / FAIL_CACHE / 下发失败归因 | `dp_process_read_*`、`fail_cw_attribution` |
 | `CP-CONC` | 链锁、批量提交/收取、池满背压 | `chain_priority_lock`、`mixed_pipeline` |
-| `CP-LEDGER` | command / descriptor / buffer 三池归零、CQ 空 | 每个 Level 2/3 用例的 teardown |
+| `CP-LEDGER` | command / descriptor / buffer 三池归零、CQ 空 | 每个 data_path/lifecycle 用例的 teardown |
 
 > `CP-*` 是**本仓自拟**的功能覆盖点，不是代码覆盖率；裸机目标上不以行覆盖作为主指标。
 
@@ -104,16 +104,16 @@
 
 #### 2.4.1 地址抽样与复现契约
 
-Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽的窗口），而是在用例体内
+data_path / lifecycle 的地址不挂 `MunitParameterEnum`（表达不了几百宽的窗口），而是在用例体内
 按种子抽：
 
-- **窗口**：Level 3 写介质，block ∈ `[BLOCKS_PER_PLANE*30/100, BLOCKS_PER_PLANE*70/100]`
+- **窗口**：lifecycle 写介质，block ∈ `[BLOCKS_PER_PLANE*30/100, BLOCKS_PER_PLANE*70/100]`
   避开固定元数据区，page/CW 按用例抽，plane 可由 `l3_plane_draw` 抽或由 multi-plane op
-  派生；Level 2 不写介质，使用整段 `[0, BLOCKS_PER_PLANE)` / `[0, PAGES_PER_BLOCK)`，
+  派生；data_path 不写介质，使用整段 `[0, BLOCKS_PER_PLANE)` / `[0, PAGES_PER_BLOCK)`，
   plane 由调用者钉死。
 - **盐**：`munit_rand_*` 每次 exec 前重置回 `runner->seed`，且不带 salt ⇒ 必须
-  `rand ^ hash(用例名) ^ hash(用途标签)`；Level 2 的 `l2_rand` 末尾加 murmur3 `fmix32`
-  终混（DJB2 低位退化）；Level 3 的 `l3_rand` 当前不加（实测无碰撞），但复现契约相同。
+  `rand ^ hash(用例名) ^ hash(用途标签)`；data_path 的 `l2_rand` 末尾加 murmur3 `fmix32`
+  终混（DJB2 低位退化）；lifecycle 的 `l3_rand` 当前不加（实测无碰撞），但复现契约相同。
 - **复现契约 = (seed, 用例名, 第几次抽样)**；抽到的值必须经 `test_trace_detail` /
   `test_trace_summary` 打出，否则有 seed 也对不上地址。
 - **覆盖旋钮是 `--iterations N`**：`MUNIT_TEST_OPTION_NONE` 的用例才会被乘；`SINGLE_ITERATION`
@@ -124,8 +124,8 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 - **不同分支 / 不同期望 → 参数化**（每个 case 独立 setup/teardown，运行器打印 `case=…`）；
 - **同一断言、不同输入 → 迭代**（`--iterations N` 或函数内循环）。
 
-实例：`encode` / `process_read_ok` 三条断言集相同、只有期望不同 ⇒ 参数化；
-`scramble_whiten` 三种输入走同一组断言 ⇒ 函数内迭代。
+实例：`dp_encode` / `dp_process_read_ok` 三条断言集相同、只有期望不同 ⇒ 参数化；
+`dp_scramble_whiten` 三种输入走同一组断言 ⇒ 函数内迭代。
 
 #### 2.4.3 步骤级 vs 管线级
 
@@ -165,9 +165,9 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 - **buffer 归属**（`buf_own_release`）：`buf_own:2` 四档 00/01/10/11；判据 =
   `fc_get_resource_stats().buffer_used` 增量；建链未提交也不泄漏；满池 id 两两不同。
 
-#### 2.4.7 游程统计判据（`scramble_whiten`）
+#### 2.4.7 游程统计判据（`dp_scramble_whiten`）
 
-`scramble_whiten` 的判据建立在「随机数据的游程该长什么样」之上；统计方法与概率推导如下，
+`dp_scramble_whiten` 的判据建立在「随机数据的游程该长什么样」之上；统计方法与概率推导如下，
 既解释阈值来源，也标出判据的**盲区**：
 
 - **统计**：一趟流式扫描，维护 `cur`/`run`；段切换时结算 `hist[cur][桶]`；循环后必须补收尾
@@ -185,13 +185,13 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 
 ## 3. 夹具与隔离
 
-### 3.1 Level 1
+### 3.1 pure
 
 - 全部栈上夹具：栈上队列 / 栈上命令 / 栈上 ONFI 参数页；零 `fc_init()`、零资源池。
-- `validate_op_range` / `validate_set_get_no_desc` 是**冒烟**：把合法输入送进内层 ASSERT，
+- `cmd_validate_op_range` / `cmd_validate_set_get_no_desc` 是**冒烟**：把合法输入送进内层 ASSERT，
   拦住「以后加了过严断言」。
 
-### 3.2 Level 2
+### 3.2 data_path
 
 - `test_setup` / `test_tear_down` 初始化/回收 FC 资源池；不碰 NAND。
 - `g_bch` 是全局状态，`fc_ecc_init_bch` 只在首次分配时初始化，跨用例持续存在；不要在
@@ -200,9 +200,9 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
   释放统一走 `fc_command_release()`（它沿 desc 链把 desc + buffer 一起还池；不要再手动
   `fc_buffer_release`）。
 
-### 3.3 Level 3
+### 3.3 lifecycle
 
-- `test_setup` / `test_tear_down` + `setup_level3()` 重申 `fc_nand_engine_set_armed(1U)`。
+- `test_setup` / `test_tear_down` （`test_setup` 内重申 `fc_nand_engine_set_armed(1U)`）。
 - 建链走 FTL 策略层 `ftl_cmd_configure_descriptors()`；释放统一 `fc_command_release()`。
 - 地址约定：`ch=0 ce=0 lun=0`，page=0..63，plane 0/1；block/plane 在用例体内随机抽，
   窗口见 §2.4.1；内部搬移目标块另抽且 `src ≠ dest`。
@@ -212,7 +212,7 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 
 ### 3.4 结束不变量（INV-*）
 
-每个 Level 2/3 用例 teardown 至少检查：
+每个 data_path/lifecycle 用例 teardown 至少检查：
 
 - `INV-POOL`：command / descriptor / buffer 三池 `used == 0`；
 - `INV-CQ`：CQ 空、无未取完成项；
@@ -243,53 +243,54 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
   `FC_CW_STATUS_UNUSED`。
 - **断言失败现场保留**：裸机断言后卡在 `while(1)`，不会继续后续测试；一个 test 函数只验
   一个行为。
-- **生命周期插桩**：`test_fc_level3.c` 的 `run_lifecycle` 上方 `#if 0` 块（cmd 快照/差异
+- **生命周期插桩**：`test_fc_lifecycle.c` 的 `run_lifecycle` 上方 `#if 0` 块（cmd 快照/差异
   打印）默认不编译；排查池泄漏时再打开。
 
 ---
 
 ## 4. 用例清单
 
-> 首列是 `test --list` 里的用例名；对应测试函数名为 `test_<name>`。
+> 首列是 `test --list` 里的用例名（稳定 ID）；测试函数名以 `test_` 开头，
+> 不要求与用例名逐字相同。
 > 本表只写**契约 / 覆盖点 / RISK**；具体断言值与负例写在测试源注释里。
 
-### 4.1 `/fc-nand/logic/`（11 条）
+### 4.1 `/fc-nand/pure/`（11 条）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
-| `validate_op_range` | — | 0..`OP_COUNT-1` 全部合法（冒烟，钉住内层 ASSERT）；`CP-LOGIC` | — |
-| `validate_set_get_no_desc` | — | SET/GET_FEATURES 无 desc 链的内联例外；`CP-LOGIC` | — |
-| `push_pop` | — | SQ FIFO 顺序；`CP-LOGIC` | — |
-| `wrap_around` | — | SQ head/tail 回绕后 FIFO 正确；`CP-LOGIC` | — |
-| `overflow` | — | 满队列 `QUEUE_FULL`，pop 后恢复；`CP-LOGIC` | — |
-| `peek` | — | 按偏移 peek，连查不消耗；`CP-LOGIC` | — |
-| `peek_empty` | — | 空队列 offset 越界返回 INVALID；`CP-LOGIC` | — |
-| `cqueue_init` | — | CQ depth 记录、count=0；`CP-LOGIC` | — |
-| `cqueue_push_pop` | — | CQ FIFO + 整项拷贝；`CP-LOGIC` | — |
-| `cqueue_overflow` | — | CQ 满 `QUEUE_FULL`；`CP-LOGIC` | — |
+| `cmd_validate_op_range` | — | 0..`OP_COUNT-1` 全部合法（冒烟，钉住内层 ASSERT）；`CP-LOGIC` | — |
+| `cmd_validate_set_get_no_desc` | — | SET/GET_FEATURES 无 desc 链的内联例外；`CP-LOGIC` | — |
+| `sq_push_pop` | — | SQ FIFO 顺序；`CP-LOGIC` | — |
+| `sq_wrap_around` | — | SQ head/tail 回绕后 FIFO 正确；`CP-LOGIC` | — |
+| `sq_overflow` | — | 满队列 `QUEUE_FULL`，pop 后恢复；`CP-LOGIC` | — |
+| `sq_peek` | — | 按偏移 peek，连查不消耗；`CP-LOGIC` | — |
+| `sq_peek_empty` | — | 空队列 offset 越界返回 INVALID；`CP-LOGIC` | — |
+| `cq_init` | — | CQ depth 记录、count=0；`CP-LOGIC` | — |
+| `cq_push_pop` | — | CQ FIFO + 整项拷贝；`CP-LOGIC` | — |
+| `cq_overflow` | — | CQ 满 `QUEUE_FULL`；`CP-LOGIC` | — |
 | `onfi_param_page_decode` | — | 合成 256B 参数页逐字段解码；坏签名返回 0 但字段仍填满；`CP-LOGIC` | — |
 
 ### 4.2 `/fc-nand/data_path/`（13 条；RAID=1 时 15 条）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
-| `crc_step_detect` | `case=user-1/crc-field-1/meta-1/parity-1` | CRC 覆盖边界：user/CRC 字段必检出，META/parity 必不检出（负例）；`CP-DP` | — |
-| `scramble_whiten` | — | 全 0x00/0xFF/PAA 重复三种输入的白化度 + 自反性；`CP-DP` | — |
-| `ecc_step` | `case=clean/meta-1/crc-1/user-1/data-2/data-3/data-4/parity-1/parity-4/mixed-4/beyond-5` | BCH t=4 精确纠正；`beyond-5` 只钉「失败原子 / 纠正数 ≤ t」；`CP-DP` | `RISK-DP-13` |
-| `encode` | `case=random-off-4cw/random-on-4cw/single-cw` | 编码产物：cw 数 / META / CRC / parity；random=ON 自证加扰发生；`CP-DP` | — |
-| `encode_crc_disabled` | — | CRC 关：encode 不写 CRC 字段，读侧步骤 3 跳过；`CP-DP` | — |
-| `process_read_ok` | `case=random-on-4cw/random-off-4cw/single-cw` | encode → process_read → 全 READY + 原文恢复；`CP-DP` | — |
-| `process_read_unc` | — | CW1 损坏：IO_ERROR，CW1=UNC，其余 READY；`CP-ERR` | — |
-| `process_read_ecc_max` | — | 三段（干净 / 1+2bit / 整段破坏+1bit）：逐 CW `ecc_bits` 与命令级 `fc_get_cmd_ecc_max` 聚合；`CP-ERR` | `RISK-DP-29` |
-| `process_read_masked_chain` | — | mask=0x05：步骤 4 用 `paa_to_cw(desc->paa)` 而非链走位；`CP-CHAIN` | — |
-| `process_read_meta_error` | — | 改 `cmd->meta`：返回 OK 但逐 CW `META_ERROR`；`CP-ERR` | — |
-| `process_read_crc_error` | — | CRC 写关读开 + 哨兵：逐 CW `CRC_ERROR`；`CP-ERR` | — |
-| `process_read_ldpc_raw` | — | `LDPC_RAW`：两端跳过 ECC，数据原样往返；`CP-DP` | `RISK-DP-15` |
-| `cw_bitmap` | `case=flat-mixed/plane1-only/span-multi-plane` | flat CW 位图 → desc 链几何（plane/cw 展开与链序）；`CP-CHAIN` | — |
-| `raid_recover_no_random` | — | 无加扰 RAID 恢复（仅 `CONFIG_FC_RAID=1` 编译）；`CP-DP` | `RISK-DP-05` |
-| `generate_stripe_parity` | — | 跨命令 stripe XOR parity（仅 RAID=1）；`CP-DP` | `RISK-DP-05` |
+| `dp_crc_step_detect` | `case=user-1/crc-field-1/meta-1/parity-1` | CRC 覆盖边界：user/CRC 字段必检出，META/parity 必不检出（负例）；`CP-DP` | — |
+| `dp_scramble_whiten` | — | 全 0x00/0xFF/PAA 重复三种输入的白化度 + 自反性；`CP-DP` | — |
+| `dp_ecc_step` | `case=clean/meta-1/crc-1/user-1/data-2/data-3/data-4/parity-1/parity-4/mixed-4/beyond-5` | BCH t=4 精确纠正；`beyond-5` 只钉「失败原子 / 纠正数 ≤ t」；`CP-DP` | `RISK-DP-13` |
+| `dp_encode` | `case=random-off-4cw/random-on-4cw/single-cw` | 编码产物：cw 数 / META / CRC / parity；random=ON 自证加扰发生；`CP-DP` | — |
+| `dp_encode_crc_disabled` | — | CRC 关：encode 不写 CRC 字段，读侧步骤 3 跳过；`CP-DP` | — |
+| `dp_process_read_ok` | `case=random-on-4cw/random-off-4cw/single-cw` | encode → process_read → 全 READY + 原文恢复；`CP-DP` | — |
+| `dp_process_read_unc` | — | CW1 损坏：IO_ERROR，CW1=UNC，其余 READY；`CP-ERR` | — |
+| `dp_process_read_ecc_max` | — | 三段（干净 / 1+2bit / 整段破坏+1bit）：逐 CW `ecc_bits` 与命令级 `fc_get_cmd_ecc_max` 聚合；`CP-ERR` | `RISK-DP-29` |
+| `dp_process_read_masked_chain` | — | mask=0x05：步骤 4 用 `paa_to_cw(desc->paa)` 而非链走位；`CP-CHAIN` | — |
+| `dp_process_read_meta_error` | — | 改 `cmd->meta`：返回 OK 但逐 CW `META_ERROR`；`CP-ERR` | — |
+| `dp_process_read_crc_error` | — | CRC 写关读开 + 哨兵：逐 CW `CRC_ERROR`；`CP-ERR` | — |
+| `dp_process_read_ldpc_raw` | — | `LDPC_RAW`：两端跳过 ECC，数据原样往返；`CP-DP` | `RISK-DP-15` |
+| `dp_cw_bitmap` | `case=flat-mixed/plane1-only/span-multi-plane` | flat CW 位图 → desc 链几何（plane/cw 展开与链序）；`CP-CHAIN` | — |
+| `dp_raid_recover_no_random` | — | 无加扰 RAID 恢复（仅 `CONFIG_FC_RAID=1` 编译）；`CP-DP` | `RISK-DP-05` |
+| `dp_generate_stripe_parity` | — | 跨命令 stripe XOR parity（仅 RAID=1）；`CP-DP` | `RISK-DP-05` |
 
-### 4.3 `/fc-nand/lifecycle/`（19 条）
+### 4.3 `/fc-nand/lifecycle/`（27 条）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
@@ -297,11 +298,18 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 | `feature_write_read` | — | 四个 Feature 地址 GET；01h 读-改-写回环；`CP-OP` | `RISK-NANDP-08` |
 | `chain_priority_lock` | — | SQ 8 命令链 + HSQ 插入：链未结束 HSQ 插不进来；`CP-CONC` | `RISK-IF-07` |
 | `status_query` | — | READ_STATUS / READ_STATUS_ENHANCED 生命周期 + CW status；`CP-OP` | — |
+| `completion_late_delivered` | — | D2 seam：`FI_COMPLETION_LATE` 压一条完成，下一轮 poll 投递；`CP-CONC` | — |
+| `completion_drop_bounded` | — | D2 seam：`FI_COMPLETION_DROP` 丢完成，有限轮询内不投递且命令可 release；`CP-ERR` | — |
+| `engine_fail_all_cws` | — | D2 seam：`FI_FC_ENGINE_FAIL` 在策略表前失败，链上全部选中 CW 标 FAIL；`CP-ERR` | — |
+| `engine_timeout_sets_status` | — | D2 seam：`FI_FC_ENGINE_FAIL` arg=TIMEOUT，命令状态带 `FC_CMD_STATUS_TIMEOUT`；`CP-ERR` | `RISK-IF-08` |
+| `engine_fail_param_page` | — | D2 seam：参数页读 FAIL 让命令失败；`CP-ERR` | `RISK-DP-21` |
+| `engine_fail_random_read` | — | D2 seam：多 CW random read 中间 FAIL 必须上报；`CP-ERR` | `RISK-DP-18` |
 | `fail_cw_attribution` | — | 关放行闩锁：命令级 NAND_FAIL，8 条 desc 逐条 FAIL；无 desc 命令走空位图分支；`CP-ERR` | `RISK-DP-29` |
 | `internal_data_move` | — | 源块 → 目标块 copyback，64 页逐字节一致（期望取源坐标）；`CP-MEDIA` | — |
 | `block_erase_verify` | — | 擦除后逐页全 0xFF（prog→erase 判据有区分力）；`CP-MEDIA` | — |
 | `block_write_read` | — | 整块 PROGRAM → READ 数据一致；`CP-MEDIA` | — |
 | `block_cache_ops` | — | 单 plane cache 读管线（31h 序列 + RANDOM）；写侧 15h/10h；`CP-MEDIA` | `RISK-DP-19` |
+| `sparse_data_out_read` | — | 稀疏 CW1/CW2 直接 `WITH_DATA_OUT` 读：逐槽 PAA 验证，走 WITHOUT/LOAD 分流；`CP-CHAIN` | `RISK-DP-26` |
 | `block_cache_multi_plane` | — | 双 plane cache 读写；06h P0/P1 分别输出；两 plane pattern 独立校验；`CP-MEDIA` | — |
 | `block_cache_multi_plane_cross_block` | — | 双 plane cache 跨 block 续读；`CP-MEDIA` | `RISK-DP-19` |
 | `block_multi_plane` | — | MP_ERASE → MP_PROGRAM → MP_READ；两 plane 独立 pattern；`CP-MEDIA` | `RISK-DP-06` |
@@ -315,7 +323,7 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 
 > `block_lock_tight`（紧锁定）实现保留但 `#if 0`、不注册；OTP 族当前无用例。
 
-### 4.4 `/speed/fc_nand_rw`（1 条，2 档）
+### 4.4 `/bench/speed/fc_nand_rw`（1 条，2 档）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
@@ -376,7 +384,7 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 | 41 | `OP_RANDOM_DATA_READ_MULTI_PLANE` | ❌ | 多 Plane 页缓冲随机读单 CW（06h-E0h） |
 | 42 | `OP_READ_COLUMN` | ✅ | 按**显式列地址**（SQ `param.bytes[0..1]`）读 4 字节；够得到列 2048 的 spare 区（无 desc、写 CQ `param`） |
 
-> 当前 `OP_COUNT = 51`（0..50）；槽位 20 是墓碑，不复用。`validate_op_range` 覆盖 0..50。
+> 当前 `OP_COUNT = 51`（0..50）；槽位 20 是墓碑，不复用。`cmd_validate_op_range` 覆盖 0..50。
 
 ---
 
@@ -388,12 +396,12 @@ Level 2 / Level 3 的地址不挂 `MunitParameterEnum`（表达不了几百宽�
 | RISK | 处置 | 用例 / 流程 |
 |---|---|---|
 | `RISK-IF-07` | UT-FC + BOARD | `chain_priority_lock`；读流式 trace 复核 |
-| `RISK-DP-13` | UT-FC | `ecc_step`、`process_read_ecc_max` |
-| `RISK-DP-15` | 不覆盖 | LDPC 完整解码；只测 `process_read_ldpc_raw` 的跳过路径 |
+| `RISK-DP-13` | UT-FC | `dp_ecc_step`、`dp_process_read_ecc_max` |
+| `RISK-DP-15` | 不覆盖 | LDPC 完整解码；只测 `dp_process_read_ldpc_raw` 的跳过路径 |
 | `RISK-DP-27` | 不覆盖 | LDPC 解码栈超 2 KiB；见 §7 |
 | `RISK-DP-28` | 不覆盖 | CRC 初始化失败 release 静默；见 §7 |
 | `RISK-NANDP-01` / `RISK-NANDP-04` / `RISK-NANDP-05` | 不覆盖 | 多 target / 每 target 初始化 / timing 共享；见 §7 |
-| `RISK-NANDP-03` | BOARD | Mode 5 运行期 UNC；`/speed/fc_nand_rw` 只观测 |
+| `RISK-NANDP-03` | BOARD | Mode 5 运行期 UNC；`/bench/speed/fc_nand_rw` 只观测 |
 
 ---
 
@@ -413,17 +421,17 @@ make tests UT=FC
 
 ```text
 test --list
-test /fc-nand/logic/                 # 纯逻辑，安全
+test /fc-nand/pure/                 # 纯逻辑，安全
 test /fc-nand/data_path/             # 只碰 buffer，安全
 test /fc-nand/lifecycle/             # 真 NAND，破坏性
 test --log-visible info --iterations 5 /fc-nand/lifecycle/
-test --log-visible info /speed/fc_nand_rw   # 破坏性，单独跑
+test --log-visible info /bench/speed/fc_nand_rw   # 破坏性，单独跑
 test                                  # 全套；不加过滤串才是全套
 ```
 
 - 过滤串约束：套件名带尾斜杠；`/fc-nand/` 由 `ut_run_all()` 展开为全部叶子套件，可正常使用。
 - `--seed N` 复现；`--iterations N` 只乘 `MUNIT_TEST_OPTION_NONE` 的用例。
-- Level 3 跑完必须 `format` + POR，恢复 live FTL 状态。
+- lifecycle 跑完必须 `format` + POR，恢复 live FTL 状态。
 
 ### 6.3 日志与证据
 
@@ -460,19 +468,19 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 
 ## 7. 不覆盖项
 
-- `CONFIG_FC_RAID=0`：`raid_recover_no_random` / `generate_stripe_parity` 不编译；RAID 恢复
+- `CONFIG_FC_RAID=0`：`dp_raid_recover_no_random` / `dp_generate_stripe_parity` 不编译；RAID 恢复
   路径没有当前构建的 UT 判据。
-- LDPC 完整解码：`process_read_ldpc_raw` 只测「跳过 ECC」的编排，不证明 LDPC 算法；
+- LDPC 完整解码：`dp_process_read_ldpc_raw` 只测「跳过 ECC」的编排，不证明 LDPC 算法；
   `RISK-DP-15` / `RISK-DP-27` 仍未闭合。
 - CRC 初始化失败的 release 静默路径：`RISK-DP-28`。
 - 多 target / 多 LUN / per-bank 初始化：`RISK-NANDP-01/04/05`；当前板单 target。
 - Mode 0 专项：Mode 5 下 3 条 SKIP；需要 Mode 0 构建单独回归。
 - OTP 族、`block_lock_tight`、真 POR、长时 soak、USB/HIL/FTL 行为：不在 FC UT。
-- 性能：`/speed/fc_nand_rw` 是基准，不作功能通过率。
+- 性能：`/bench/speed/fc_nand_rw` 是基准，不作功能通过率。
 
-### 7.1 `ecc_step` 的覆盖边界
+### 7.1 `dp_ecc_step` 的覆盖边界
 
-`ecc_step` 验的是 **BCH(m=13, t=4) 的实现**，不是「算法对不对」——≤t 个错的唯一译码由代数
+`dp_ecc_step` 验的是 **BCH(m=13, t=4) 的实现**，不是「算法对不对」——≤t 个错的唯一译码由代数
 保证；测试守的是 BM/Chien/Forney、位翻转落点、`errloc` 映射、parity 布局。当前形态全绿只应
 读作「在这些抽样下没复现出实现 bug」。六处缺口：
 
@@ -519,7 +527,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 
 | 日期 | 镜像横幅 | 命令 | 结果 | 证据 |
 |---|---|---|---|---|
-| 2026-11-13 | 13:37:20 | `test`（无过滤串，Mode 5） | `test` 全套 61 OK + 3 SKIP（64 runs；`/fc-nand/` 59 OK + 3 SKIP + `/speed/fc_nand_rw` 2 OK），27.95 s；`/speed/fc_nand_rw` normal 3685/3555 KB/s、cache 4340/3614 KB/s | `docs/design/known_iss.md` ISS-UT-02（已闭合） |
+| 2026-11-13 | 13:37:20 | `test`（无过滤串，Mode 5） | `test` 全套 61 OK + 3 SKIP（64 runs；`/fc-nand/` 59 OK + 3 SKIP + `/bench/speed/fc_nand_rw` 2 OK），27.95 s；`/bench/speed/fc_nand_rw` normal 3685/3555 KB/s、cache 4340/3614 KB/s | `docs/design/known_iss.md` ISS-UT-02（已闭合） |
 | 2026-11-13 | 18:36:56 | `test /fc-nand/`（Mode 0 专项） | **62/62，0 SKIP，823.49 ms** | Mode 0 串口日志 |
 
 > 3 条 SKIP 见 §6.4；seed `0x5a4f21e4`。Mode 0 是专项回归（`CONFIG_NAND_TIMING_MODE=0`），不是默认档。

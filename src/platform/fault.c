@@ -53,21 +53,6 @@ static void fault_puts(const char *text)
     }
 }
 
-/* 定长上限的打印：崩溃记录里的文本来自 .noinit，理论上可能没有终止符。 */
-static void fault_puts_n(const char *text, DWORD capacity)
-{
-    DWORD index;
-
-    for (index = 0U; index < capacity; index++)
-    {
-        if (text[index] == '\0')
-        {
-            break;
-        }
-        fault_port_putc(text[index]);
-    }
-}
-
 static void fault_hex32(DWORD value)
 {
     static const char digits[] = "0123456789abcdef";
@@ -410,53 +395,6 @@ static void fault_dump_ctx(const fault_ctx_s *ctx)
     fault_dump_stack(ctx->sp);
 }
 
-/* ─────────────────────── 崩溃记录打印（断言/开机共用） ─────────────────────── */
-
-static void fault_dump_record(const crash_record_s *record)
-{
-    if (record == NULL)
-    {
-        fault_puts("crash  : no record\r\n");
-        return;
-    }
-
-    fault_puts("\r\n=== CRASH RECORD ===\r\n");
-    if (record->kind == CRASH_KIND_FAULT)
-    {
-        fault_puts("kind   : FAULT ");
-        fault_puts(fault_kind_name(record->fault.fault_kind));
-        fault_puts("\r\n");
-        fault_puts("PC     : ");
-        fault_hex32(record->fault.pc);
-        fault_puts("\r\n");
-        fault_puts("LR     : ");
-        fault_hex32(record->fault.lr);
-        fault_puts("\r\n");
-        fault_puts("SP     : ");
-        fault_hex32(record->fault.sp);
-        fault_puts("\r\n");
-        fault_puts("xPSR   : ");
-        fault_hex32(record->fault.xpsr);
-        fault_puts("\r\n");
-        fault_decode_hfsr(record->fault.hfsr);
-        fault_decode_cfsr(record->fault.cfsr, record->fault.mmfar, record->fault.bfar);
-    }
-    else
-    {
-        fault_puts("kind   : ");
-        fault_puts((record->kind == CRASH_KIND_ABORT) ? "ABORT\r\n" : "ASSERT\r\n");
-        fault_puts("expr   : ");
-        fault_puts_n(record->expression, CRASH_TEXT_CAPACITY);
-        fault_puts("\r\n");
-        fault_puts("file   : ");
-        fault_puts_n(record->file, CRASH_TEXT_CAPACITY);
-        fault_port_putc(':');
-        fault_dec(record->line);
-        fault_puts("\r\n");
-    }
-    fault_puts("====================\r\n");
-}
-
 /* ────────────────────────────── 共享入口 ────────────────────────────── */
 
 /*
@@ -524,14 +462,6 @@ void fault_report_boot(void)
 
     /* 报告完再清标志，下次复位才看得出真实原因。 */
     fault_port_reset_flags_clear();
-}
-
-/* 强符号：覆盖 common/crash.c 的弱默认，让断言路径也走同一份轮询 dump。 */
-void crash_platform_report(const crash_record_s *record)
-{
-    fault_port_console_init();
-    fault_dump_record(record);
-    fault_port_console_drain();
 }
 
 __attribute__((weak)) void fault_hook(const fault_ctx_s *ctx)

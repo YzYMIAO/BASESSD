@@ -1504,6 +1504,15 @@ static SSD_CODE_FAST DWORD jrn_page_replay_apply(l2p_jrn_s *journal, l2p_cache_s
 
     memset(page_data, 0xFF, JRN_PAGE_SIZE);
 
+#if defined(FC_NAND_TEST_ENABLE)
+    /* D2/JN-08：只打应用遍，模拟“扫描可读、应用遍读失败”的瞬态。 */
+    if (fi_take(FI_JRN_REPLAY_APPLY_FAIL) == true)
+    {
+        s_replay_page_read_fail++;
+        return 0U;
+    }
+#endif
+
     if (ftl_sync_read_page(raddr, page_data, JRN_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         LOGW(LOG_TAG_JRN "replay: page blk=%hhu page=%hhu unreadable\r\n", page->block, page->page);

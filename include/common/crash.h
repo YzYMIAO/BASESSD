@@ -51,10 +51,4 @@ void                  crash_record_fault(const crash_fault_record_s *fault);
 const crash_record_s *crash_record_get(void);
 void                  crash_record_clear(void);
 
-/*
- * 平台崩溃上报钩子（弱符号）。默认空实现；固件平台用轮询 UART 覆盖，
- * 把记录打印成统一 dump。断言路径与故障处理器共用它。
- */
-void crash_platform_report(const crash_record_s *record);
-
 #endif /* CRASH_H */

@@ -1494,3 +1494,16 @@
 
 
 > 闭合（2026-11-14）：对应负例已上板通过；覆盖明细见 `docs/design/negative_coverage.md`。
+
+## 2026-11-14 D0 小修后闭合（信息）
+
+D0 中 6 条经小操作后从活动风险索引闭合：
+
+| ID | 结论 | 证据 |
+|---|---|---|
+| RISK-BOOT-28 | `block_words` in/out 顺序已写入契约注释 | `include/ftl/checkpoint.h:141` |
+| RISK-DOC-03 | `ftl.c` 注释回扫，无代码分叉 | `src/ftl/ftl.c` |
+| RISK-CLI-04 | release `bbt` usage 不再宣传禁用子命令 | `src/hil/cli.c` |
+| RISK-CLI-05 | `rd`/`bbt` 新语法已同步文档 | `src/hil/cli.c` / 文档 |
+| RISK-NANDP-11 | timing 表命名已为 3.3V Mode5 口径 | `src/nand/devices/mt29f___g08a.c` |
+| RISK-BUILD-02 | launch 配置与 `debug_ut.elf` / `release_ut.elf` 产物名已核对 | `.vscode/launch.json` |

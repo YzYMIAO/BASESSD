@@ -1212,6 +1212,8 @@ void alc_bst_get_erase_stats(const alc_s *alloc, alc_bst_erase_stats_s *out)
 
         // 跳过 BAD 与 NONE：NONE 的 erase_count 不随擦除累加，计入会把 erase_min
         // 永久钉在 0。
+        // RETIRED 保留为**物理磨损**：它不再被分配，但不参与 WL 触发/容量判断
+        // （WL 用 alc_free_get_max_erase + Closed 统计）；本函数只服务 GC 归一化/诊断。
         if (ftl_block_is_bad(blk) || (ftl_block_state(blk) == FTL_BLOCK_STATE_NONE))
         {
             continue;

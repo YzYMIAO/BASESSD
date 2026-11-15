@@ -22,6 +22,7 @@
 #include "l2p_cache.h"
 #include "metadata.h"
 #include "metadata_job.h"
+#include "migrate.h"
 #include "munit.h"
 #include "pending.h"
 #include "read_recovery.h"
@@ -53,6 +54,12 @@ static const char        *s_bbt_plane_values[] = {"0", "1", NULL};
 static MunitParameterEnum s_bbt_plane_params[] = {
     {(char *)"plane", s_bbt_plane_values},
     {           NULL,               NULL}
+};
+
+static const char        *s_reclaim_kind_values[] = {"fixed", "borrowed", NULL};
+static MunitParameterEnum s_reclaim_kind_params[] = {
+    {(char *)"kind", s_reclaim_kind_values},
+    {          NULL,                  NULL}
 };
 
 static WORD             s_cp_words[FTL_BLOCK_TOTAL];
@@ -93,7 +100,7 @@ static WORD mem_plane_free_sum(const alc_s *a)
     return sum;
 }
 
-/* address_roundtrip — LBA/PBA 地址编码往返。
+/* pba_roundtrip — LBA/PBA 地址编码往返。
  *
  * 覆盖：LBA 的 page_base/cw/plane 拆分、PBA 的 plane/block/page/cw 拆分、
  *       ftl_gblock(plane, block) 的 plane-major 全局编号。
@@ -127,7 +134,7 @@ static MunitResult test_address_roundtrip(const MunitParameter params[], void *d
     return MUNIT_OK;
 }
 
-/* free_pool_invariants — Free Pool 账本不变量。
+/* alloc_free_pool_invariants — Free Pool 账本不变量。
  *
  * 覆盖：入池/出池只维护池数组；state==FREE ⟺ 在池；出池即脱离 FREE（state=NONE，
  *       否则两次调用之间不变量不成立）；OP refill 按 plane LIFO 归还；per-plane 计数
@@ -202,7 +209,7 @@ static MunitResult test_free_pool_invariants(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
-/* super_block_open_close — Super Block 开/关与 rewind（参数 mode=hot/cold/high_wear）。
+/* alloc_super_open_close — Super Block 开/关与 rewind（参数 mode=hot/cold/high_wear）。
  *
  * 覆盖：开 SB 时两 plane 各取同页号 PBA、块进 OPEN；rewind 后重取必须得到同一页
  *       （不烧块）；close 后两 plane 块进 CLOSED 且记录 sb_id；closed 条目可摘除。
@@ -276,7 +283,7 @@ static MunitResult test_super_block_open_close(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
-/* closed_list_add_drop — Closed SB 列表按 plane 摘除。
+/* alloc_closed_list_add_drop — Closed SB 列表按 plane 摘除。
  *
  * 覆盖：加一个两 plane 的 closed 条目；只摘 plane0 时条目保留（另一 plane 仍有活
  *       数据），两个 plane 都摘掉才释放条目。
@@ -316,7 +323,7 @@ static MunitResult test_closed_list_add_drop(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
-/* valid_count_guard — 有效 CW 记账与 BAD 降级。
+/* alloc_valid_count_guard — 有效 CW 记账与 BAD 降级。
  *
  * 覆盖：valid_count 连续 +1；sub_if_live 在健康态减 1；块置 BAD 后继续 sub 必须无效。
  * 判据：BAD 块不得再记账——uint16 回绕会变成 65535，直接污染 GC 有效率与 WL 判据。
@@ -351,7 +358,7 @@ static MunitResult test_valid_count_guard(const MunitParameter params[], void *d
     return MUNIT_OK;
 }
 
-/* op_spare_pools — OP / Spare 两池的 per-plane 计数与边界。
+/* alloc_op_spare_pools — OP / Spare 两池的 per-plane 计数与边界。
  *
  * 覆盖：OP 每个 plane 独立计数并填到 FTL_OP_BLOCKS_PER_PLANE 上限；Spare 是 LIFO，
  *       空池 pop 必须返回 0。
@@ -397,7 +404,7 @@ static MunitResult test_op_spare_pools(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* erase_stats — 擦除后的块统计复位。
+/* alloc_erase_stats — 擦除后的块统计复位。
  *
  * 覆盖：alc_bst_note_erase 使 erase_count+1、记录 last_pe_ts、valid_count/read_count
  *       清零、state 置 OPEN。
@@ -431,7 +438,7 @@ static MunitResult test_erase_stats(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* bbt_mark_bad — 标坏的完整后果（参数 plane=0/1）。
+/* alloc_bbt_mark_bad — 标坏的完整后果（参数 plane=0/1）。
  *
  * 覆盖：BST 置 BAD、清 valid/sb_id、bad_count 与 dirty_gen 推进；同 plane Spare 弹
  *       一块补 Free Pool；重复标坏保持幂等。
@@ -483,7 +490,7 @@ static MunitResult test_bbt_mark_bad(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* bbt_metadata_bad — 元数据块丢失的降级路径。
+/* alloc_bbt_metadata_bad — 元数据块丢失的降级路径。
  *
  * 覆盖：标坏元数据日志块（JOURNAL_BLOCK0）时不弹用户 Spare，而是置 pools.dirty
  *       让候选池重算，并置 rebuild_required 要求下次开机全量重建。
@@ -518,7 +525,7 @@ static MunitResult test_bbt_metadata_bad(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* cw_masks — CW flat 位图工具。
+/* pba_cw_masks — CW flat 位图工具。
  *
  * 覆盖：ftl_cw_bit 的绝对编号（plane*CW_NUM+cw）、span/plane 掩码、
  *       popcount/plane_count、NAND_FIELD_MASK。
@@ -602,21 +609,21 @@ static MunitResult test_alloc_spare_full_refill_none(const MunitParameter params
 /* ══ 子套件 /ftl/pure/mem/：allocator / BST / BBT / CW 位图（纯 RAM）══ */
 
 MunitTest g_ftl_pure_mem_tests[] = {
-    {           (char *)"address_roundtrip",            test_address_roundtrip, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {        (char *)"free_pool_invariants",         test_free_pool_invariants, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {      (char *)"super_block_open_close",       test_super_block_open_close, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_alloc_mode_params},
-    {        (char *)"closed_list_add_drop",         test_closed_list_add_drop, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {           (char *)"valid_count_guard",            test_valid_count_guard, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {              (char *)"op_spare_pools",               test_op_spare_pools, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {                    (char *)"cw_masks",                     test_cw_masks, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {                 (char *)"erase_stats",                  test_erase_stats, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
-    {                (char *)"bbt_mark_bad",                 test_bbt_mark_bad, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_bbt_plane_params},
-    {            (char *)"bbt_metadata_bad",             test_bbt_metadata_bad, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {               (char *)"pba_roundtrip",            test_address_roundtrip, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {  (char *)"alloc_free_pool_invariants",         test_free_pool_invariants, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {      (char *)"alloc_super_open_close",       test_super_block_open_close, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_alloc_mode_params},
+    {  (char *)"alloc_closed_list_add_drop",         test_closed_list_add_drop, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {     (char *)"alloc_valid_count_guard",            test_valid_count_guard, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {        (char *)"alloc_op_spare_pools",               test_op_spare_pools, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {                (char *)"pba_cw_masks",                     test_cw_masks, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {           (char *)"alloc_erase_stats",                  test_erase_stats, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
+    {          (char *)"alloc_bbt_mark_bad",                 test_bbt_mark_bad, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,  s_bbt_plane_params},
+    {      (char *)"alloc_bbt_metadata_bad",             test_bbt_metadata_bad, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
     {(char *)"alloc_spare_full_refill_none", test_alloc_spare_full_refill_none, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                NULL},
     {                                  NULL,                              NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,                NULL},
 };
 
-/* metadata_idle — metadata job 的启动基线。
+/* md_idle — metadata job 的启动基线。
  *
  * 覆盖：metadata_dir 句柄存在、md_handle_is_idle 为真、live block 计数为 0。
  * 判据：live block 泄漏会让后续 reclaim 误判（把别人的块当自己的）；先钉住初始态。
@@ -640,7 +647,7 @@ static MunitResult test_metadata_idle(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* ring_geometry — md_ring 的记录数/块包含/plane 掩码几何。
+/* md_ring_geometry — md_ring 的记录数/块包含/plane 掩码几何。
  *
  * 覆盖：records_per_block = PAGES_PER_BLOCK / pages_per_record；total_records =
  *       block_count × records_per_block；has_block 只认环内块；plane_at 越界返回
@@ -681,7 +688,7 @@ static MunitResult test_ring_geometry(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* directory_commit — Directory 的 primary/pair 提交账本。
+/* md_directory_commit — Directory 的 primary/pair 提交账本。
  *
  * 覆盖：primary 覆盖写要把旧位置 live 计数 -1、新位置 +1；PAIR 提交两份副本都计入
  *       live 并置 dirty；entry/backup 查询分别返回两份 PBA。
@@ -731,7 +738,7 @@ static MunitResult test_directory_commit(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* journal_append — Journal 基本生命周期。
+/* md_journal_append — Journal 基本生命周期。
  *
  * 覆盖：init 后 idle、sequence 从 1 起（0 保留为「无序号」）；reserve + append 推进
  *       序号并置 pending；未到水位时 needs_checkpoint 为假。
@@ -768,7 +775,7 @@ static MunitResult test_journal_append(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* cp_encoders — Checkpoint 编码器与磨损页字节布局。
+/* md_cp_encoders — Checkpoint 编码器与磨损页字节布局。
  *
  * 覆盖：block word 的 valid/state/temp/pool 位段打包解包；快照写入 CLOSED/有效数/
  *       温度、OP/Spare 池标签，以及由 Directory 权威判定的 LOG 状态；磨损页固定
@@ -861,7 +868,7 @@ static ftl_status_e ring_probe(void *ctx, WORD record_idx, BOOL full, DWORD *out
     return FTL_OK;
 }
 
-/* ring_locate — md_ring_locate 用 probe 回调定位最新记录。
+/* md_ring_locate — md_ring_locate 用 probe 回调定位最新记录。
  *
  * 覆盖：中段 record（written=5 → idx=4、seq=5）⇒ 下一条槽若不在块首，**保守跳过一槽**
  *       （掉电可能留下半写页），write_idx=6；块末 record（written=rpb）⇒ 下一块槽 0；
@@ -921,7 +928,7 @@ static MunitResult test_ring_locate(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* dir_ckpt_three_step — 目录检查点的 write-session（begin → page/advance → commit）。
+/* md_dir_ckpt_three_step — 目录检查点的 write-session（begin → page/advance → commit）。
  *
  * 覆盖：begin 分配序号/槽位并建立单飞；page 填 magic/sequence/chunk 头；
  *       advance 逐页推进并结算 ok；commit 推进 write_idx、释放单飞。
@@ -1010,7 +1017,7 @@ static MunitResult test_dir_ckpt_three_step(const MunitParameter params[], void 
     return MUNIT_OK;
 }
 
-/* log_alloc_rotate_release — 元数据日志块的分配/释放/轮转。
+/* md_log_alloc_rotate_release — 元数据日志块的分配/释放/轮转。
  *
  * 覆盖：md_log_alloc 依次取 L2P log 区块并置 LOG 状态；release 归还为 NONE；
  *       rotate 切到新块且页游标归零。
@@ -1054,7 +1061,7 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
     return MUNIT_OK;
 }
 
-/* cp_init_timer — Checkpoint 句柄初始态与 T3 定时器重装。
+/* md_cp_init_timer — Checkpoint 句柄初始态与 T3 定时器重装。
  *
  * 覆盖：cp_init 后 active/waiting=0、phase=IDLE；cp_init 与 cp_timer_reset 都把
  *       `cp_state.next_t3_ms` 重装为「当前时刻 + CP_TIME_INTERVAL_MS」。
@@ -1128,7 +1135,7 @@ static MunitResult test_md_status_error(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
-/* journal_write_fail_clear — Journal 写失败标记的清除条件。
+/* md_journal_write_fail_clear — Journal 写失败标记的清除条件。
  *
  * 覆盖：write_fail_seq=5 时，clear(cp=4) 保留 pending，clear(cp=5) 才清除；
  *       needs_checkpoint 由显式 request 置位。
@@ -1218,7 +1225,7 @@ static MunitResult test_md_abort_keeps_victim(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
-/* journal_truncate_idempotent — Journal 截断计划/提交的幂等性。
+/* md_journal_truncate_idempotent — Journal 截断计划/提交的幂等性。
  *
  * 覆盖：counter=0 防下溢不截断；水位不足不截断；足够时返回环形下一块；
  *       commit 记录 pre_erased 并清 checkpoint/emergency；重复 plan 返回 ALREADY；
@@ -1280,21 +1287,177 @@ static MunitResult test_journal_truncate_idempotent(const MunitParameter params[
 
 /* ══ 子套件 /ftl/pure/md/：metadata / Journal / Checkpoint / 目录检查点（纯 RAM）══ */
 
+/* md_reclaim_erase_fail — 日志块连续擦失败必须有界标坏并结算 borrow（MD-01 / MD-22）。
+ *
+ * 覆盖：`md_reclaim_complete` 收到第 3 次擦除失败完成态；参数 kind=fixed（固定日志块）
+ *       / borrowed（从 OP 借来的日志块）。
+ * 判据：① 前两次失败只累计、不标坏；② 第 3 次 `bbt_mark_bad`、清 reclaim 位、
+ *       失败计数归零、phase 回 IDLE（不再无限重试）；③ borrowed 块的
+ *       `log_borrow_count` 必须 -1，fixed 块不变。
+ * 备注：直接用 `ftl_metadata_callback` 喂失败完成态，不依赖真 NAND 擦失败；RAM 夹具。 */
+
+static MunitResult test_md_reclaim_erase_fail(const MunitParameter params[], void *data)
+{
+    (void)data;
+
+    const char     *kind     = munit_parameters_get(params, "kind");
+    const BOOL      borrowed = (strcmp(kind, "borrowed") == 0);
+    ftl_ctx_s      *live     = ftl_ut_live();
+    md_dir_cache_s *d        = ftl_ut_ram_md();
+
+    munit_assert_not_null(kind);
+    munit_assert_not_null(live);
+    munit_assert_not_null(d);
+    munit_assert_int(d->handle.phase, ==, MD_JOB_IDLE);
+
+    ftl_ut_trace_begin();
+
+    md_dir_cache_s *saved_md = live->metadata_dir;
+
+    live->metadata_dir = d; /* callback 的实例归属断言 */
+
+    const WORD g = (borrowed == true) ? (WORD)(FTL_METADATA_AREA_END + 10U) : ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 5U));
+
+    d->alloc->blocks[g].state = FTL_BLOCK_STATE_NONE;
+    ftl_block_clear_valid(&d->alloc->blocks[g]);
+    d->l2p_live[g]      = (borrowed == true) ? 1U : 0U;
+    d->log_borrow_count = (borrowed == true) ? 1U : 0U;
+
+    const WORD bad0 = d->alloc->bad_count;
+
+    munit_assert_true(md_reclaim_mark(d, g));
+    munit_assert_uint16(d->reclaim.count, ==, 1U);
+
+    d->handle.reclaim_fail_gblock = UINT16_MAX;
+    d->handle.reclaim_fail_count  = 0U;
+
+    for (BYTE i = 0U; i < 3U; i++)
+    {
+        fc_cmd_s       *cmd = fc_command_alloc();
+        fc_cmd_status_s st;
+
+        munit_assert_not_null(cmd);
+        memset(&st, 0, sizeof(st));
+        st.cmd_id = cmd->cmd_id;
+        st.status = FC_CMD_STATUS_NAND_FAIL;
+
+        d->handle.phase          = MD_JOB_RECLAIM;
+        d->handle.waiting        = true;
+        d->handle.reclaim_gblock = g;
+
+        ftl_metadata_callback(live, &st, d);
+
+        munit_assert_false(d->handle.waiting);
+        munit_assert_int(d->handle.phase, ==, MD_JOB_IDLE);
+
+        if (i < 2U)
+        {
+            munit_assert_uint8(d->handle.reclaim_fail_count, ==, (BYTE)(i + 1U));
+            munit_assert_false(ftl_block_is_bad(&d->alloc->blocks[g]));
+            munit_assert_uint16(d->alloc->bad_count, ==, bad0);
+        }
+    }
+
+    munit_assert_true(ftl_block_is_bad(&d->alloc->blocks[g]));
+    munit_assert_uint16(d->alloc->bad_count, ==, (WORD)(bad0 + 1U));
+    munit_assert_uint8(d->handle.reclaim_fail_count, ==, 0U);
+    munit_assert_uint16(d->handle.reclaim_fail_gblock, ==, UINT16_MAX);
+    munit_assert_uint16(d->reclaim.count, ==, 0U);
+    munit_assert_uint32((d->reclaim.bitmap[g >> 5U] & (1UL << (g & 31U))), ==, 0U);
+    munit_assert_uint16(d->log_borrow_count, ==, 0U);
+
+    live->metadata_dir = saved_md;
+
+    ftl_ut_trace_detail("md reclaim: kind=%s g=%hu fail=3 -> BAD, reclaim=%hu borrow=%hu", kind, g, d->reclaim.count, d->log_borrow_count);
+    ftl_ut_trace_summary("md reclaim: kind=%s g=%hu 3 failures -> BAD, bit clear, borrow settled", kind, g);
+
+    return MUNIT_OK;
+}
+
+/* md_cp_read_fail_no_reclaim — 压缩 victim 读失败中止时不得把仍有活映射的块登记回收（MD-16）。
+ *
+ * 覆盖：`ftl_metadata_callback` 在 `MD_JOB_CP_READ` 收到失败完成态，且另一份副本
+ *       不存在 ⇒ `md_cp_read_complete` 走 abort。
+ * 判据：`l2p_live[victim] > 0` 时 victim 不得进入 reclaim 位图（否则下一轮会擦掉
+ *       仍有映射的块）；phase 回 IDLE、victim 清零。
+ * 备注：直接喂失败完成态，不依赖真 NAND；RAM Directory。 */
+
+static MunitResult test_md_cp_read_fail_no_reclaim(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s      *live = ftl_ut_live();
+    md_dir_cache_s *d    = ftl_ut_ram_md();
+
+    munit_assert_not_null(live);
+    munit_assert_not_null(d);
+
+    md_dir_cache_s *saved_md = live->metadata_dir;
+
+    live->metadata_dir = d;
+
+    const WORD victim = ftl_gblock(0U, (WORD)(L2P_LOG_BLOCK0 + 7U));
+
+    d->l2p_live[victim] = 1U;
+    d->reclaim.count    = 0U;
+
+    d->handle.phase        = MD_JOB_CP_READ;
+    d->handle.waiting      = true;
+    d->handle.victim       = victim;
+    d->handle.cur_region   = 0U;
+    d->handle.cur_copy     = MD_COPY_PRIMARY;
+    d->handle.cur_source   = NAND_PBA_INVALID;
+    d->handle.cur_fallback = false;
+
+    /* 备份副本不存在 ⇒ 无法 fallback，只能 abort。 */
+    d->backup_pba[0] = NAND_PBA_INVALID;
+    memset(&d->entries[0], 0, sizeof(d->entries[0]));
+    d->entries[0].type = METADATA_TYPE_L2P_REGION;
+    d->entries[0].id   = 0U;
+    d->entries[0].pba  = NAND_PBA_INVALID;
+
+    fc_cmd_s       *cmd = fc_command_alloc();
+    fc_cmd_status_s st;
+
+    munit_assert_not_null(cmd);
+    memset(&st, 0, sizeof(st));
+    st.cmd_id = cmd->cmd_id;
+    st.status = FC_CMD_STATUS_DATA_ERROR;
+
+    ftl_metadata_callback(live, &st, d);
+
+    munit_assert_int(d->handle.phase, ==, MD_JOB_IDLE);
+    munit_assert_false(d->handle.waiting);
+    munit_assert_uint16(d->handle.victim, ==, UINT16_MAX);
+    munit_assert_uint16(d->reclaim.count, ==, 0U);
+    munit_assert_uint16(d->l2p_live[victim], ==, 1U);
+
+    live->metadata_dir = saved_md;
+
+    ftl_ut_trace_detail("md cp read fail: victim=%hu live=1 -> abort, reclaim=%hu", victim, d->reclaim.count);
+    ftl_ut_trace_summary("md cp read fail: abort keeps live victim out of reclaim");
+
+    return MUNIT_OK;
+}
+
 MunitTest g_ftl_pure_md_tests[] = {
-    {              (char *)"metadata_idle",               test_metadata_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"ring_geometry",               test_ring_geometry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"directory_commit",            test_directory_commit, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"journal_append",              test_journal_append, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                (char *)"ring_locate",                 test_ring_locate, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"dir_ckpt_three_step",         test_dir_ckpt_three_step, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   (char *)"log_alloc_rotate_release",    test_log_alloc_rotate_release, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"cp_init_timer",               test_cp_init_timer, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"md_status_error",             test_md_status_error, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   (char *)"journal_write_fail_clear",    test_journal_write_fail_clear, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      (char *)"md_abort_keeps_victim",       test_md_abort_keeps_victim, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {(char *)"journal_truncate_idempotent", test_journal_truncate_idempotent, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                (char *)"cp_encoders",                 test_cp_encoders, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                                 NULL,                             NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                       (char *)"md_idle",               test_metadata_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {              (char *)"md_ring_geometry",               test_ring_geometry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {           (char *)"md_directory_commit",            test_directory_commit, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {             (char *)"md_journal_append",              test_journal_append, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {                (char *)"md_ring_locate",                 test_ring_locate, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {        (char *)"md_dir_ckpt_three_step",         test_dir_ckpt_three_step, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {   (char *)"md_log_alloc_rotate_release",    test_log_alloc_rotate_release, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {              (char *)"md_cp_init_timer",               test_cp_init_timer, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {               (char *)"md_status_error",             test_md_status_error, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {   (char *)"md_journal_write_fail_clear",    test_journal_write_fail_clear, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {         (char *)"md_abort_keeps_victim",       test_md_abort_keeps_victim, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {    (char *)"md_cp_read_fail_no_reclaim",  test_md_cp_read_fail_no_reclaim, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {         (char *)"md_reclaim_erase_fail",       test_md_reclaim_erase_fail, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_reclaim_kind_params},
+    {(char *)"md_journal_truncate_idempotent", test_journal_truncate_idempotent, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {                (char *)"md_cp_encoders",                 test_cp_encoders, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
+    {                                    NULL,                             NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,                  NULL},
 };
 
 static DWORD s_group_done;
@@ -1331,7 +1494,7 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* pending_slots — pending 槽表的满/查找/移除/再分配。
+/* pend_slots — pending 槽表的满/查找/移除/再分配。
  *
  * 覆盖：alloc 到 FTL_PENDING_MAX 后返回 NULL；按 command_id 查找/移除；移除后槽位
  *       可再次分配。
@@ -1372,7 +1535,7 @@ static MunitResult test_pending_slots(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* group_exhaustion — 组槽满时的拒绝语义。
+/* pend_group_exhaustion — 组槽满时的拒绝语义。
  *
  * 覆盖：填满 FTL_GROUP_MAX 后额外 alloc 必须返回 0；已有组的字段不得被覆盖
  * 判据：覆盖会在飞组的完成回调永远不触发，host 请求悬挂。纯 RAM。 */
@@ -1410,7 +1573,7 @@ static MunitResult test_group_exhaustion(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* group_complete_once — 组完成只通知一次。
+/* pend_group_complete_once — 组完成只通知一次。
  *
  * 覆盖：两个子操作 outstanding 2→0；只有最后一个完成时回调一次、释放组槽。
  * 判据：早完成或重复通知会让上层把同一请求结算两次（buffer 归属错乱）。纯 RAM。 */
@@ -1785,7 +1948,7 @@ static MunitResult test_wbuf_density(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
-/* group_failure_aggregation — 组内子操作失败的状态聚合。
+/* pend_group_failure_aggregation — 组内子操作失败的状态聚合。
  *
  * 覆盖：第一个子操作 IO_ERROR 后 agg_status 立即粘滞；第二个子操作 OK 不能清零；
  *       组只完成一次，status_out/complete_flag 反映失败。
@@ -1838,7 +2001,7 @@ static MunitResult test_group_failure_aggregation(const MunitParameter params[],
     return MUNIT_OK;
 }
 
-/* confirm_park_timeout — 写确认待入账的超时判据与结算原语（纯 RAM 部分）。
+/* pend_confirm_park_timeout — 写确认待入账的超时判据与结算原语（纯 RAM 部分）。
  *
  * 覆盖：pend_confirm_is_expired 在 deadline 前为 0、到点（==）为 1；
  *       pend_confirm_settle 释放槽、按 IO_ERROR 结算组一次；待入账计数随结算归零。
@@ -1910,7 +2073,7 @@ static MunitResult test_confirm_park_timeout(const MunitParameter params[], void
     return MUNIT_OK;
 }
 
-/* confirm_is_parked — 待入账判别只看 WRITE_CONFIRM，不看 used。
+/* pend_confirm_is_parked — 待入账判别只看 WRITE_CONFIRM，不看 used。
  *
  * 覆盖：同表内一个普通 used 槽 + 一个待入账槽时，is_parked 对前者 0、后者 1；
  *       结算后计数归零，普通槽不受影响。
@@ -2147,26 +2310,26 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
 /* ══ 子套件 /ftl/pure/host/：pending / 组 / wbuf / op ctx / bg 调度（纯 RAM）══ */
 
 MunitTest g_ftl_pure_host_tests[] = {
-    {                (char *)"host_idle",                 test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {            (char *)"pending_slots",             test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {         (char *)"group_exhaustion",          test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {      (char *)"group_complete_once",       test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {(char *)"group_failure_aggregation", test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {     (char *)"confirm_park_timeout",      test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {        (char *)"confirm_is_parked",         test_confirm_is_parked, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {         (char *)"wbuf_append_read",          test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {   (char *)"wbuf_drop_reset_owners",    test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {             (char *)"wbuf_density",              test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
-    {                   (char *)"op_ctx",                    test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {          (char *)"op_ctx_capacity",           test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                (char *)"bg_engine",                 test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                 (char *)"op_route",                  test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {          (char *)"bg_level_select",           test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    { (char *)"host_submit_invalid_args",  test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
-    {                               NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
+    {                     (char *)"host_idle",                 test_host_idle, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                    (char *)"pend_slots",             test_pending_slots, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {         (char *)"pend_group_exhaustion",          test_group_exhaustion, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {      (char *)"pend_group_complete_once",       test_group_complete_once, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {(char *)"pend_group_failure_aggregation", test_group_failure_aggregation, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {     (char *)"pend_confirm_park_timeout",      test_confirm_park_timeout, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {        (char *)"pend_confirm_is_parked",         test_confirm_is_parked, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {              (char *)"wbuf_append_read",          test_wbuf_append_read, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {        (char *)"wbuf_drop_reset_owners",    test_wbuf_drop_reset_owners, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                  (char *)"wbuf_density",              test_wbuf_density, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_wbuf_n_params},
+    {                        (char *)"op_ctx",                    test_op_ctx, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {               (char *)"op_ctx_capacity",           test_op_ctx_capacity, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                     (char *)"bg_engine",                 test_bg_engine, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                      (char *)"op_route",                  test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {               (char *)"bg_level_select",           test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {      (char *)"host_submit_invalid_args",  test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {                                    NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
 };
 
-/* policy_entry — GC/WL 策略入口的空盘基线。
+/* gc_policy_entry — GC/WL 策略入口的空盘基线。
  *
  * 覆盖：活实例上 gc_should_trigger 只返回 watermark/emergency 位，wl_should_trigger
  *       返回合法布尔值，L2P load_inflight=0。
@@ -2670,6 +2833,33 @@ static MunitResult test_gc_decode_cw_lba(const MunitParameter params[], void *da
     munit_assert_uint32(cw[0], ==, FTL_LBA_INVALID);
     munit_assert_uint32(cw[2], ==, page + 2U);
 
+    /* 缺 CW 的读链：CW1 没有 desc/buffer ⇒ meta 指针为 NULL。
+     * 必须整页报 CORRUPT，不能把 CW1 当“未写过”跳过——否则 victim 随后被擦，
+     * L2P 仍指向该 CW ⇒ 静默丢数据（GC-19）。 */
+    fc_cmd_s *sparse = fc_command_alloc();
+
+    munit_assert_not_null(sparse);
+    sparse->paa = pba_to_paa(pba);
+
+    for (BYTE c = 0U; c < CW_NUM; c++)
+    {
+        if (c == 1U)
+        {
+            continue;
+        }
+        munit_assert_int(fc_command_configure_descriptor(sparse->cmd_id, 0U, c, pba_to_paa(pba)), ==, FC_STATUS_OK);
+
+        BYTE *meta = fc_buffer_get_meta(sparse->cmd_id, c);
+        DWORD v    = page + c;
+
+        munit_assert_not_null(meta);
+        memcpy(meta, &v, sizeof(v));
+    }
+
+    munit_assert_ptr_null(fc_buffer_get_meta(sparse->cmd_id, 1U));
+    munit_assert_int(gc_decode_cw_lba(sparse, pba, cw, &base), ==, GC_DECODE_CORRUPT);
+
+    fc_command_release(sparse->cmd_id);
     fc_command_release(cmd->cmd_id);
 
     ftl_ut_trace_detail("gc decode: pba=0x%08lX page=%lu; OK base=page cw=page+0..3; EMPTY all INVALID; CORRUPT cw1=page+8; HOLE base=%lu cw0=0x%08lX cw2=%lu", pba, page, base, cw[0], cw[2]);
@@ -3455,8 +3645,68 @@ static MunitResult test_l2p_cmt_line_invalidate(const MunitParameter params[], v
 
 /* ══ 子套件 /ftl/pure/io/：GC / WL / RR / L2P（纯 RAM）══ */
 
+/* mig_eval_fake_clock — 周期求值必须读 SysTick 坐标，而不是 timer 回调快照（PLAT-10）。
+ *
+ * 覆盖：`mig_eval` 内 `platform_now_ms()` 与 `*m->total_writes` 变化时刻的记录。
+ * 判据：伪时钟设为 12345、写计数变化后调用 `mig_eval`，`write_last_ms` 必须
+ *       等于 12345；若实现误用 TIM6 传入值，这里会落成别的坐标。
+ * 备注：把 alloc 临时置 NULL（`gc_should_trigger(NULL) == 0` 是公开契约），
+ *       只验证时间坐标，不启动 GC；所有 live 字段原样恢复。 */
+
+static MunitResult test_mig_eval_fake_clock(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s    *ftl = ftl_ut_live();
+    mig_handle_s *m   = ftl->mig_handle;
+
+    munit_assert_not_null(m);
+    munit_assert_not_null(m->alloc);
+    munit_assert_not_null(m->total_writes);
+
+    alc_s           *saved_alloc  = m->alloc;
+    const DWORD     *saved_writes = m->total_writes;
+    const DWORD      base         = *saved_writes;
+    const DWORD      saved_last   = m->state.benefit.writes_last;
+    const timer_ms_t saved_ms     = m->state.benefit.write_last_ms;
+
+    ftl_ut_trace_begin();
+    ftl_ut_clock_install();
+    ftl_ut_clock_set_ms(12345U);
+
+    DWORD writes = base + 1U;
+
+    m->alloc                       = NULL; /* gc_should_trigger(NULL) == 0 */
+    m->total_writes                = &writes;
+    m->state.benefit.writes_last   = base;
+    m->state.benefit.write_last_ms = 0U;
+    m->state.level                 = BG_LEVEL_IDLE;
+    m->state.failure.paused        = false;
+    m->state.urgent_gc             = false;
+    m->job.active                  = false;
+
+    mig_eval(m);
+
+    munit_assert_uint32(m->state.benefit.writes_last, ==, writes);
+    munit_assert_uint32(m->state.benefit.write_last_ms, ==, 12345U);
+
+    m->alloc                       = saved_alloc;
+    m->total_writes                = saved_writes;
+    m->state.benefit.writes_last   = saved_last;
+    m->state.benefit.write_last_ms = saved_ms;
+
+    ftl_ut_clock_restore();
+
+    ftl_ut_trace_detail("mig clock: fake now=12345, writes %lu->%lu, write_last_ms=%lu", base, writes, m->state.benefit.write_last_ms);
+    ftl_ut_trace_summary("mig clock: mig_eval uses platform_now_ms, not timer snapshot");
+
+    return MUNIT_OK;
+}
+
 MunitTest g_ftl_pure_io_tests[] = {
-    {              (char *)"policy_entry",               test_policy_entry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
+    {           (char *)"gc_policy_entry",               test_policy_entry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
+    {       (char *)"mig_eval_fake_clock",        test_mig_eval_fake_clock, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {                (char *)"gc_trigger",                 test_gc_trigger, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},
     {          (char *)"gc_select_victim",           test_gc_select_victim, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_gc_mode_params},
     {          (char *)"gc_decode_cw_lba",           test_gc_decode_cw_lba, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,             NULL},

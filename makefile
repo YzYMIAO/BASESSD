@@ -186,6 +186,30 @@ check-build-cfg:
 	fi; \
 	printf '%s\n' "$$cfg" > "$(TARGET).build_cfg"
 
+.PHONY: check-nocache
+# PLAT-01：DMA 页缓冲必须落在 AXI_NOCACHE 段（0x24060000..0x24080000）。
+check-nocache:
+	@elf=$(TARGET).elf; \
+	line=$$($(SIZE) -A "$$elf" | grep -w '.noncacheable_buffer' | head -1); \
+	[ -n "$$line" ] || { echo "check-nocache: .noncacheable_buffer missing"; exit 1; }; \
+	size=$$(echo "$$line" | awk '{print $$2}'); addr=$$(echo "$$line" | awk '{print $$3}'); \
+	python3 -c "import sys; a=int('$$addr',0); n=int('$$size',0); sys.exit(0 if (a>=0x24060000 and a<0x24080000 and n>0) else 1)" || { \
+		echo "check-nocache: bad placement addr=$$addr size=$$size"; exit 1; }; \
+	echo "check-nocache: OK (addr=$$addr size=$$size)"
+
+.PHONY: check-opt
+# BUILD-01：非默认 DEBUG_OPT 必须落到独立对象目录并带对应 -O 标志。
+# 只做 make -n（不编译），防止「-O0 构建静默复用 -O2 对象」再次发生。
+check-opt:
+	@out=$$($(MAKE) -n --no-print-directory tests UT=FC DEBUG_OPT=-O0 2>&1) || { \
+		echo "check-opt: make -n failed"; echo "$$out"; exit 1; }; \
+	echo "$$out" | grep -q 'obj_ut_FC_O0' || { echo "check-opt: missing obj_ut_FC_O0"; exit 1; }; \
+	echo "$$out" | grep -q -- ' -O0' || { echo "check-opt: missing -O0 in compile flags"; exit 1; }; \
+	out=$$($(MAKE) -n --no-print-directory tests UT=FC DEBUG_OPT=-O2 2>&1) || { \
+		echo "check-opt: make -n (default) failed"; echo "$$out"; exit 1; }; \
+	echo "$$out" | grep -q 'obj_ut_FC_O2' && { echo "check-opt: default -O2 must not use _O2 suffix"; exit 1; }; \
+	echo "check-opt: OK (DEBUG_OPT affects object dir and compile flags)"
+
 .PHONY: all
 # format / types-check 作为 all 的前置目标（均为 .PHONY，恒执行）：
 #   format      —— 每次构建先强制格式化，保证产物与源码一致；

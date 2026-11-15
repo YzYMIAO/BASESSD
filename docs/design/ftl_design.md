@@ -5253,7 +5253,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 背景 | 多个提交者（host / GC / metadata）竞争有限的命令/描述符/缓冲/pending 资源 |
 | 选项 | ① 直接返回错误 ② 内部重试队列 ③ 动态 budget ④ 主机级 doorbell 流控 |
 | 选择 | **①：pending 表满/资源不足即返回 `FTL_AGAIN` 或 `FTL_ERROR`** |
-| 理由 | 零额外 SRAM；资源回滚路径完整；本仓 host 是 UART CLI（两段式等待），不需要 doorbell；内部重试队列与 DRAM-less 目标冲突 |
+| 理由 | 零额外 SRAM；资源回滚路径完整；本仓 host 是 UART CLI（handler 自带泵的同步等待），不需要 doorbell；内部重试队列与 DRAM-less 目标冲突 |
 | 主流 | 消费级 DRAM-less 常见；企业级会用 credit/动态 budget |
 | 代价 | 无优先级/公平性；极端竞争下 host 可能看到错误 |
 | 重估触发 | 多 LUN 并发导致 pending 经常打满；或接入 NVMe host |
@@ -5354,7 +5354,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | Cache Program 仅限 host 16 KiB / GC 全 pair 批次 | 小请求、静态 WL、跨块边界仍走普通 multi-plane | 15h 中间页不确认；失败关闭目的 SB；掉电注入未做（见 `known_risks` RISK-CACHE-02） |
 | N=4 未就绪 | SRAM12/3/4 装不下 4 实例 | 需要表瘦身或 SDRAM；N=2 已能链接 |
 | SDRAM 未启用 | 无外置大缓冲 | 链接脚本无 SDRAM 段；`sdram_init` 无调用点 |
-| 无 NVMe host / RTOS | host 入口是 UART CLI | 有意不实现；学习主控的两段式等待足够 |
+| 无 NVMe host / RTOS | host 入口是 UART CLI | 有意不实现；学习主控的同步等待足够 |
 
 **读恢复**
 

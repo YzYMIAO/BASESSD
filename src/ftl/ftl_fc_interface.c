@@ -743,8 +743,13 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
  * @param cfg    页配置
  * @return FTL_OK；FTL_ERROR 建链/提交/完成/拷出失败
  */
-ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg)
+static ftl_status_e ftl_sync_read_page_impl(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out)
 {
+    if (completion_out != NULL)
+    {
+        memset(completion_out, 0, sizeof(*completion_out));
+    }
+
     fc_cmd_s *cmd = ftl_sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
@@ -755,6 +760,11 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
     if (ftl_sync_wait_owned(cmd, &completion, 0U) != FTL_OK)
     {
         return FTL_ERROR;
+    }
+
+    if (completion_out != NULL)
+    {
+        *completion_out = completion;
     }
     // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
     // **只认 NAND_FAIL 是错的**：DATA_ERROR / META_ERROR 会让本页内容不可信却照常拷出——
@@ -780,6 +790,16 @@ ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl
 
     (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;
+}
+
+ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg)
+{
+    return ftl_sync_read_page_impl(pba, buffer, length, cfg, NULL);
+}
+
+ftl_status_e ftl_sync_read_page_status(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out)
+{
+    return ftl_sync_read_page_impl(pba, buffer, length, cfg, completion_out);
 }
 
 /**

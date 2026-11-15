@@ -147,9 +147,3 @@ void crash_record_clear(void)
 {
     g_crash_record.magic = 0U;
 }
-
-/* 弱默认：host/非固件构建下无轮询控制台，静默即可。 */
-__attribute__((weak)) void crash_platform_report(const crash_record_s *record)
-{
-    (void)record;
-}

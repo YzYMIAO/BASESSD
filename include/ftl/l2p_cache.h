@@ -570,11 +570,17 @@ void l2p_init(l2p_cache_s *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  *
  * @param cache         共享 cache
  * @param global_region 全局 region（local × DIE_MAX + die）
- * @param pba           Directory 给出的 region 页物理地址
- * @return true = 已驻留或预载成功
- *         false = 无 INVALID 行 / 读失败
+ * @param primary       Directory 给出的主副本 PBA
+ * @param backup        备份副本 PBA（NAND_PBA_INVALID = 无）
+ * @return FTL_OK    已驻留 / 预载成功 / 两份副本都完成态失败后降级
+ *         FTL_AGAIN 无 INVALID 行（缓存满，交给懒加载）
+ *         FTL_ERROR 地址非法 / 提交层硬失败（调用者应计入快照不可信）
+ *
+ * @note 完成态错误（DATA_ERROR/NAND_FAIL 等）会在主/备之间重试；持续失败则把
+ *       行降级为全 INVALID CLEAN 并置 `region_degraded_bitmap`，返回 FTL_OK。
+ *       调用者用 `l2p_is_region_degraded()` 区分“正常预载”与“范围化降级”。
  */
-BOOL l2p_region_preload(l2p_cache_s *cache, DWORD global_region, DWORD pba);
+ftl_status_e l2p_region_preload(l2p_cache_s *cache, DWORD global_region, DWORD primary, DWORD backup);
 
 /**
  * @brief 顺序读 best-effort 预取一个 region（非阻塞）
@@ -732,6 +738,20 @@ BOOL l2p_entries_ready(l2p_cache_s *cache, DWORD lba, DWORD mask);
  * @param enabled true = 正常；false = replay 旁路
  */
 void l2p_cmt_set_enabled(l2p_cache_s *cache, BOOL enabled);
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：驱动唯一 dirty 计数释放闸门（L2P-22 负例）。
+ */
+void l2p_test_cmt_dirty_release(l2p_cache_s *cache, DWORD lba);
+/**
+ * @brief 测试专用：查询 CMT set 是否还有可无写回插入的槽位（L2P-16）。
+ */
+BOOL l2p_test_cmt_room(const l2p_cache_s *cache, DWORD lba);
+/**
+ * @brief 测试专用：查询 CMT 写回闸门（不含 thrashing）。
+ */
+BOOL l2p_test_owner_flush_ready(const l2p_cache_s *cache, BYTE owner_die, BOOL force_cmt);
+#endif
 
 /**
  * @brief 启动一个 translation page 的 CMT 整页写回

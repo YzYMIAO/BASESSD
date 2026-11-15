@@ -136,7 +136,7 @@ typedef struct PFR_LEDGER_RESULT_S
 
 static void pfr_boot_carve_pools(ftl_ctx_s *ftl);
 static void pfr_refill_spare_pools(ftl_ctx_s *ftl);
-static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp);
+static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp, pfr_stats_s *stats);
 
 static void pfr_ledger_rebuild(ftl_ctx_s *ftl, BOOL reset_first, pfr_stats_s *stats);
 static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr_plan_e plan, pfr_block_table_s *tbl, pfr_stats_s *stats, pfr_ledger_result_s *out, DWORD *out_entries);
@@ -945,7 +945,7 @@ static void pfr_ledger_finish(ftl_ctx_s *ftl, const jrn_page_ref_s *ring, DWORD 
  *
  * 有 Journal 回放时必须在回放之后调用。
  */
-static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp)
+static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp, pfr_stats_s *stats)
 {
     const BYTE die = topo_2_die(ftl->topo);
 
@@ -988,11 +988,26 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp)
             continue; /* 未映射：无页可预载，懒加载合成全 INVALID 行 */
         }
 
-        const DWORD global = (local * DIE_MAX) + die;
+        const DWORD        global = (local * DIE_MAX) + die;
+        const DWORD        backup = md_backup_find(ftl->metadata_dir, local);
+        const ftl_status_e st     = l2p_region_preload(ftl->cache, global, addr, backup);
 
-        if (l2p_region_preload(ftl->cache, global, addr) == false)
+        if (st == FTL_ERROR)
         {
-            LOGW(LOG_TAG_BLK "preload region %lu failed\r\n", local);
+            /* 提交层/地址硬失败 = 快照里的 L2P 位置不可信；向上传播，
+             * 由 pfr_ledger_snapshot 回退 full metadata rebuild（RISK-BOOT-11）。 */
+            stats->l2p_read_errors++;
+            LOGW(LOG_TAG_BLK "preload region %lu hard-failed — snapshot not trustworthy\r\n", local);
+        }
+        else if (st == FTL_AGAIN)
+        {
+            LOGW(LOG_TAG_BLK "preload region %lu skipped: no cache line\r\n", local);
+        }
+        else if (l2p_is_region_degraded(ftl->cache, global) != false)
+        {
+            /* 主备完成态都失败：范围化恢复保留快照，旧映射丢失（RISK-BOOT-18）。 */
+            stats->l2p_degraded_cw++;
+            LOGW(LOG_TAG_BLK "preload region %lu degraded — snapshot kept\r\n", local);
         }
     }
 }
@@ -1015,6 +1030,17 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp)
 static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr_plan_e plan, pfr_block_table_s *tbl, pfr_stats_s *stats, pfr_ledger_result_s *out, DWORD *out_entries)
 {
     const cp_header_s *cp = scan->cp;
+
+    /* Journal 扫描读失败 ⇒ replay 的判定依据不可信（可能把损坏页当成“无更多
+     * 条目”）。不能继续声称快照 restored，必须回退 full metadata rebuild
+     *（RISK-BOOT-08）。 */
+    if (scan->ring_read_error != false)
+    {
+        LOGW(LOG_TAG_BLK "journal scan read error — snapshot untrusted, fallback rebuild\r\n");
+        out->replay_ok = false;
+        out->ctx_ok    = false;
+        return false;
+    }
 
     // ① 块元数据快照恢复（若已加载）。第 1 遍全量校验，非法 word 不改任何状态。
     tbl->restored = (tbl->loaded != false) && pfr_restore_blocks(ftl, tbl);
@@ -1109,11 +1135,11 @@ static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr
         }
 
         // ④ 按 CP region_bitmap 局部加载（F4）：跳过 DIRTY 回放行，非 bitmap 区懒加载。
-        pfr_boot_apply_region_bitmap(ftl, cp);
+        pfr_boot_apply_region_bitmap(ftl, cp, stats);
     }
     else if (tbl->restored)
     {
-        pfr_boot_apply_region_bitmap(ftl, cp);
+        pfr_boot_apply_region_bitmap(ftl, cp, stats);
     }
 
     if ((tbl->restored == false) || (out->ctx_ok == false))
@@ -1337,6 +1363,13 @@ static BYTE pfr_scan_write_pointer(const ftl_ctx_s *ftl, BYTE plane, WORD block)
 
     return first_blank;
 }
+
+#if defined(FC_NAND_TEST_ENABLE)
+BYTE pfr_test_scan_write_pointer(const ftl_ctx_s *ftl, BYTE plane, WORD block)
+{
+    return pfr_scan_write_pointer(ftl, plane, block);
+}
+#endif
 
 /**
  * @brief 汇总打印 L2P 扫描异常（有计数时才打，避免扫描期逐块刷 UART）

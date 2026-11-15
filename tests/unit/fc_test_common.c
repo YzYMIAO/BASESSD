@@ -6,9 +6,11 @@
 
 #include "fc_test_common.h"
 
+#include "fault_inject.h"
 #include "fc_nand_dispatch.h"
 #include "fc_nand_engine.h"
 #include "fc_random_engine.h"
+#include "fi_wrap.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,7 +65,7 @@ void test_trace_begin(void)
 static void test_trace_emit(BOOL force, MunitLogLevel level, const char *tag, const char *format, va_list ap)
 {
     /* 可见性判断放在**最前面**：默认档（visible = error）连下面那个 '\n' 都不输出，
-     * 于是报告格式保持原样。force = 关键指标行（/speed 的速度）：属于"结果"，
+     * 于是报告格式保持原样。force = 关键指标行（/bench/speed 的速度）：属于"结果"，
      * 不受档位过滤。 */
     if ((force == 0U) && !munit_log_visible(level))
     {
@@ -276,6 +278,11 @@ void *test_setup(const MunitParameter params[], void *user_data)
         inited = 1U;
     }
 
+    /* 注入状态是进程级的：每个 FC 用例都从干净状态开始（D2 seam 会武装
+     * completion drop/late 等跨 poll 状态，漏复位会静默污染下一条用例）。 */
+    fi_reset();
+    fi_wrap_reset();
+
     /* 异步 dispatch 放行闩锁（main.c 在 NAND 初始化后已置 1，此处幂等重申）。
      * 本套件走 fc_service() → nand_fc_start/step 异步路径，闩锁必须为 1。 */
     fc_nand_engine_set_armed(1U);
@@ -304,9 +311,28 @@ void *test_setup(const MunitParameter params[], void *user_data)
     return NULL;
 }
 
+void fc_ut_assert_clean(void)
+{
+    fc_resource_stats_s rs;
+
+    memset(&rs, 0, sizeof(rs));
+    fc_get_resource_stats(&rs);
+
+    munit_assert_uint16(rs.sq_used, ==, 0U);
+    munit_assert_uint16(rs.hsq_used, ==, 0U);
+    munit_assert_uint16(rs.cq_used, ==, 0U);
+    munit_assert_uint16(rs.command_used, ==, 0U);
+    munit_assert_uint16(rs.descriptor_used, ==, 0U);
+    munit_assert_uint16(rs.buffer_used, ==, 0U);
+}
+
 void test_tear_down(void *fixture)
 {
     (void)fixture;
+
+    /* 每条用例结束时资源池必须归零；漏 release 在这里当场暴露，
+     * 不留给下一条用例继承脏池。 */
+    fc_ut_assert_clean();
 
     if (g_source_data != NULL)
     {
@@ -550,7 +576,7 @@ fc_cmd_status_s test_read_page(WORD block_index, BYTE plane_bitmap, WORD page_in
 
     /* cw_bitmap 与 test_prog_page 同口径。meta 由调用者给：普通读传**本页 PBA**
      * （与写路径一致，否则 Pass 4 ② 报错）；内部搬移用例要传**源页 PBA**——那页的
-     * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_level3.c 的搬移用例）。 */
+     * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_lifecycle.c 的搬移用例）。 */
     memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
     addr.plane = test_first_plane(plane_bitmap);

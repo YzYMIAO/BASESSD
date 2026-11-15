@@ -278,6 +278,14 @@ typedef struct FI_SLOT_S
 | `FI_MIG_WRITE_FAIL` | **W** | `ftl_async_write_page_cw` + `ftl_async_write_pair_cmd`（DATA 类；后者是 host 写 / cache program 批次） | 次数 / plane | 目的 SB 关闭/回滚、无泄漏 |
 | `FI_RR_READ_FAIL` | **W** | `ftl_async_read_page`（RR 调用点） | 次数 / plane | RR 有界失败、组按 IO_ERROR 结算 |
 | `FI_SEQ_GATE_STARVE` | **W** | `ftl_op_submit` + `ftl_op_submit_batch` 强制返回 `FTL_AGAIN` | — | 组被持续拒绝时不完成；放开后同一组完成 |
+| `FI_FC_ENGINE_FAIL` | **H**（D2） | `src/fc/fc_nand_dispatch.c:fc_nand_dispatch_task_complete`，在策略表前把 result 改为 `NAND_RESULT_OPERATION_FAILED` | NAND opcode | completion 带错误位；completion 策略把选中 CW 全部标 FAIL |
+| `FI_COMPLETION_DROP` | **W**（D2） | `fc_poll_completion`，消费 real 后不投递 | NAND opcode | 调用者只能走超时/丢完成路径；`fi_hits>0` |
+| `FI_COMPLETION_LATE` | **W**（D2） | `fc_poll_completion`，把完成暂存到下一轮 | NAND opcode | 本轮 `QUEUE_EMPTY`，下一轮返回同一 cmd_id/status |
+| `FI_READ_COLUMN_FAIL` | **W**（D2） | `ftl_sync_read_column` | PBA | BBT 工厂扫描/列读走失败分支 |
+| `FI_PLANE_STATUS` | **H**（D2） | `fc_nand_dispatch_task_complete`，按 plane 覆盖 `cw_status` | plane（arg = status 位） | 单 plane 写/完成失败只影响该 plane 的 CW |
+| `FI_DATA_PATH_ENCODE_FAIL` | **W**（D2） | `fc_data_path_encode` | 次数 | 写命令在提交 NAND 前失败 |
+| `FI_DATA_PATH_READ_FAIL` | **W**（D2） | `fc_data_path_process_read` | 次数 | 读命令按错误完成，不交付未校验数据 |
+| `FI_CLOCK_NOW_FAIL` | **W**（D2） | `delay_time_now_us` | 次数 | 时基失败路径（IST 让出/超时） |
 
 > ⚠ **host 数据读不走 `ftl_async_read_page`**：`ftl_issue_subop` 内联建链后直接
 > `ftl_op_submit(op==FTL_OP_HOST_IO)`。读失败注入因此挂两处（async + submit）；
@@ -299,6 +307,8 @@ typedef struct FI_SLOT_S
   b. 不调用 real 直接返回故障码（如 `ftl_async_*` 提前返回 `FTL_ERROR`）——
      此时必须保证没有分配资源（否则泄漏）；
 - wrapper 的状态来自 `fi_arm*`，用例结束 `fi_reset()`；
+- `FI_COMPLETION_DROP` / `FI_COMPLETION_LATE` 是**刻意的完成投递抑制**，不属于
+  「静默丢弃返回值」：命中由 `fi_hits` 证明，且只影响测试镜像；normal 路径仍原样投递。
 - wrapper 只在 UT 构建链接（`tests/unit/fi_wrap.c` + `-Wl,--wrap`），产品构建不存在。
 
 ### 5.1 HIL 负例（无 hook）
@@ -323,8 +333,10 @@ FC 自身的状态解码（desc → FAIL_CACHE 归属、`7Ah` 状态、R/B 超�
   `fc_nand_dispatch_comp_s` / 完成项（若可以，不新增生产代码）；
 - **评估结论（已做）**：该夹具只提供 `test_submit_wait` / `test_prog_page` 等
   「真 NAND 驱动」入口，没有可注入的完成/引擎 seam ⇒ 零生产改动做不了；
-- 没有新增 test-only completion API：本阶段 FC 解码负例计入「未覆盖」，
-  不得用 FTL 侧状态注入冒充。要做时按 H 类宏隔离新增，并在本表补一行。
+- **D2 已补**：`FI_FC_ENGINE_FAIL`（H 类，dispatch 完成策略前）、
+  `FI_COMPLETION_DROP` / `FI_COMPLETION_LATE`（W 类，CQ 出口）；另有
+  `fc_nand_dispatch_test_completion()` 测试 API 只驱动 completion 策略表，
+  不提交 NAND。后续 FC 解码负例必须复用这些 seam，不得用 FTL 侧状态注入冒充。
 >
 > 引擎级注入（真正伪造 NAND 状态字节、7Ah、R/B 超时）不在此表：它们属于
 > FC-NAND UT 的 case 构造（测试侧 fake engine），不改生产源码。
@@ -351,15 +363,15 @@ FC 自身的状态解码（desc → FAIL_CACHE 归属、`7Ah` 状态、R/B 超�
 
 ### 6.1 用例命名与放置
 
-- 用例**主键 = 现有测试函数名**（与 `ftl_ut_design.md` / `fc_nand_ut.md` /
+- 用例**主键 = munit 用例名**（稳定 ID；测试函数名以 `test_` 开头，二者不要求逐字相同；与 `ftl_ut_design.md` / `fc_nand_ut.md` /
   `hil_ut_design.md` 的清单一致），不引入 `NEG-*` 独立编号；
 - 放置：FTL pure 放 `/ftl/pure/` 对应模块套件；media/e2e 放 `/ftl/media/e2e/`；
-  **注入负例放 `/ftl/media/negative/`（`tests/unit/test_negative.c`）**；
-  FC 放 `logic` / `lifecycle` 套件；HIL 放 `/hil/` 套件；
+  **注入负例放 `/ftl/negative/`（`tests/unit/test_negative_pure.c` + `test_negative_media.c`）**；
+  FC 放 `pure` / `lifecycle` 套件；HIL 放 `/hil/` 套件；
 - **测试代码注释不得写 RISK 编号**（用户规则）：风险映射只维护在本文 §11 与
   `docs/design/known_risks.md`，测试代码只写「故障 / 预期 / 判据」。
 
-**当前落地用例**（`/ftl/media/negative/`，均需真 NAND）：`alloc_fail_bounded` /
+**当前落地用例**（`/ftl/negative/media/{gc,l2p,meta,boot,if}/` 真 NAND 49 条；`/ftl/negative/pure/` RAM/纯函数 42 条）：`alloc_fail_bounded` /
 `l2p_load_fail_bounded` / `data_read_fail_bounded` / `data_write_fail_bounded` /
 `rr_read_fail_bounded` / `fc_status_nand_fail` / `seq_gate_starve` /
 `cp_abort_phase` / `bbt_write_fail` / `gc_read_fail_bounded` / `gc_write_fail_bounded` /
@@ -516,8 +528,8 @@ src include` 确认没有现成入口。
 `gc_erase_fail_bounded`）。其中 2 个 H 类由既有用例覆盖：`FI_CACHE_FAIL` →
 `cache_failc_abort`，`FI_JOURNAL_WRITE_FAIL` → `journal_write_fail_wal_stall`。
 
-**用例**：`/ftl/media/negative/` **54** 条 + `/fc-nand/negative/` **11** 条 + HIL
-`trim_edges`（HIL 共 16 条）。**2026-11-14 板端两档全绿**：
+**用例**：`/ftl/negative/` **91** 条（pure 42 + media 49） + `/fc-nand/negative/` **24** 条 + HIL
+`trim_edges`（HIL 共 17 条）。**2026-11-14 板端两档全绿**：
 debug UT=FTL `36/36 + 3 SKIP`、**release UT=FTL `54/54 + 0 SKIP`（219.32 s）**、
 **release UT=FC `11/11 + 0 SKIP`（141 µs）**。
 

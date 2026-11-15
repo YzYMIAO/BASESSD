@@ -27,6 +27,16 @@
  *         false = g 越界或该位已置位
  */
 BOOL md_reclaim_mark(md_dir_cache_s *dir, WORD g);
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：查压缩 victim 选择（跳过在飞槽位/当前块）。
+ */
+WORD md_test_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc);
+/**
+ * @brief 测试专用：跑压缩启动预算（含 reserved slots）。
+ */
+md_compact_start_e md_test_compact_begin(md_dir_cache_s *dir, const alc_s *alloc);
+#endif
 
 /**
  * @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。

@@ -11,6 +11,7 @@
 
 #include "cli.h"
 
+#include "assertion.h"
 #include "bbt.h"
 #include "crash.h"
 #include "delay.h"        /* delay_now_ms（stat 的本次开机时间） */
@@ -27,10 +28,12 @@
 #include "pc_sample.h"              /* PC 采样环（pc 命令） */
 #include "pending.h"                /* pend_slot/group_get_count（q） */
 #include "power_failure_recovery.h" /* pfr_media_format（boot 失败后的恢复格式化） */
+#include "runtime.h"                /* ssd_runtime_pump：CLI 同步等待命令自带泵 */
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
 #include "usb_msc.h"
+#include "watchdog.h" /* storage_wdg_kick：长同步命令的有界喂狗 */
 #include "wbuf.h"
 #include "wear_leveling.h" /* wl_ec_spread_get / WL_THRESHOLD（wear 的 WL 判据） */
 
@@ -152,6 +155,10 @@ static void uart_cli_wear(int argc, char *argv[]);    /* 擦除 / read-disturb /
 static void uart_cli_test(int argc, char *argv[]);
 #endif
 
+/* 同步命令自带泵：在 handler 内推进后台服务，直到本命令完成。 */
+static void uart_cli_wait_host(void);
+static void uart_cli_wait_wp(void);
+
 /**
  * @brief 输出 CLI 提示符
  */
@@ -205,9 +212,8 @@ static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
  * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp。 */
 static BYTE g_wp_inflight;
 
-/* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
- * cli_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
- * 非阻塞 pending 表语义；主循环的 ftl_service 完成请求）。 */
+/* wr/rd/tr/fl 的 pending 记录：handler 提交后在本函数内用 ssd_runtime_pump
+ * 自旋等待完成（同步语义），完成后由 uart_cli_pending_poll 打印并释放。 */
 typedef struct UART_CLI_PENDING_S
 {
     BYTE              busy;    /* 1=有未决 CLI 请求 */
@@ -413,6 +419,7 @@ static void uart_cli_wr(int argc, char *argv[])
     }
 
     (void)LOGI("wr submit ok lba=%llu n=%lu, waiting...\r\n", lba, n);
+    uart_cli_wait_host();
     return;
 }
 
@@ -465,6 +472,7 @@ static void uart_cli_rd(int argc, char *argv[])
     }
 
     (void)LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, (compare != 0U) ? " --compare" : "");
+    uart_cli_wait_host();
     return;
 }
 
@@ -496,6 +504,7 @@ static void uart_cli_tr(int argc, char *argv[])
     }
 
     UART_CLI_WRITE("tr submit ok\r\n");
+    uart_cli_wait_host();
     return;
 }
 
@@ -540,6 +549,7 @@ static void uart_cli_wp(int argc, char *argv[])
     DWORD      k;
     DWORD      i;
     DWORD      j;
+    BOOL       failed = false;
     ftl_ctx_s *ftl;
 
     (void)argc;
@@ -620,11 +630,19 @@ static void uart_cli_wp(int argc, char *argv[])
         {
             g_wp_inflight--; /* 本组未建组；此前各组仍会在完成时各自递减 */
             (void)LOGE("wp: group %lu submit failed\r\n", i);
-            return;
+            failed = true;
+            break;
         }
     }
 
-    (void)LOGI("wp submit ok lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n", lba, n, k);
+    /* 失败也要等已提交的组走完：它们仍持有 g_wp_buf 的切片。 */
+    uart_cli_wait_wp();
+    if (failed)
+    {
+        return;
+    }
+
+    (void)LOGI("wp done lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n", lba, n, k);
     return;
 }
 
@@ -645,6 +663,7 @@ static void uart_cli_fl(int argc, char *argv[])
     }
 
     UART_CLI_WRITE("fl submit ok\r\n");
+    uart_cli_wait_host();
     return;
 }
 
@@ -2098,6 +2117,36 @@ static void uart_cli_pending_poll(void)
     g_cli_pending.busy  = 0U;
 }
 
+/**
+ * @brief 同步等待当前 CLI host 请求完成；handler 自带后台泵。
+ *
+ * @note 泵的是运行时服务（FTL/FC/controller/USB/timer），不是 CLI 解析器，
+ *       因此不会重入命令 handler。完成打印与释放仍由 uart_cli_pending_poll 负责。
+ */
+static void uart_cli_wait_host(void)
+{
+    while (g_cli_pending.busy != 0U)
+    {
+        ssd_runtime_pump();
+        uart_cli_pending_poll();
+        storage_wdg_kick();
+    }
+}
+
+/**
+ * @brief 同步等待 wp 的全部在飞组完成。
+ *
+ * @note 组完成回调只递减 g_wp_inflight；FTL 推进由 ssd_runtime_pump 负责。
+ */
+static void uart_cli_wait_wp(void)
+{
+    while (g_wp_inflight != 0U)
+    {
+        ssd_runtime_pump();
+        storage_wdg_kick();
+    }
+}
+
 /* ── 帮助输出用的常量 ── */
 #define UART_CLI_HELP_LINE_CAPACITY (128U)
 
@@ -2603,6 +2652,32 @@ void cli_service_poll(void)
         }
     }
 
-    /* 两段式完成轮询：wr/rd/tr/fl 已提交到 controller，主循环 ftl_service 完成后在此报告 */
+    /* 兜底完成轮询：同步命令已在 handler 内等待完成；这里只处理异常残留。 */
     uart_cli_pending_poll();
+}
+
+/**
+ * @brief 断言/abort 后的现场终端：在调用者栈上循环运行正常 CLI。
+ *
+ * @note 不推进 FTL/FC 后台任务，失败状态保持冻结；命令解析、只读诊断和自带泵的
+ *       命令（如 format）仍可用。断言点的调用栈保留在下方，调试器可继续回溯。
+ * @note 本函数是 assertion.c 弱钩子的强符号；弱默认只做死循环。
+ */
+_Noreturn void assertion_console_run(void)
+{
+    /* 断言可能发生在 uart_execute_command 内部：外层 cli_service_poll 还没执行到
+     * 「清 g_cli_length」那一步。若把残留状态带进现场循环，UART 里剩余的 CR/LF
+     * 会把同一条命令再提交一次（板端现象：test 断言后自动重跑整套用例）。 */
+    g_cli_length     = 0U;
+    g_cli_discarding = 0U;
+    g_cli_line[0]    = '\0';
+
+    log_set_level(LOG_INFO);
+    UART_CLI_WRITE("\r\n[ASSERT] console active; FTL/FC background frozen\r\n");
+    uart_write_prompt();
+
+    for (;;)
+    {
+        cli_service_poll();
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * test_negative.c — /ftl/media/negative/：故障注入负例（真 NAND，破坏性）
+ * test_negative_media.c — /ftl/negative/media/{gc,l2p,meta,boot,if}/：故障注入负例（真 NAND，破坏性）
  *
  * 设计：docs/design/negative_test_framework.md。
  *
@@ -47,6 +47,7 @@
 #include "timer.h"
 #include "wear_leveling.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* 「持续武装」的剩余次数：用例期间不允许耗尽，否则被注入的路径会自行恢复，
@@ -66,11 +67,18 @@ static DWORD neg_lba(DWORD offset)
 /* 8 LBA = 一个 pair 窗口（两 plane 各 4 CW）⇒ host 读建成一条 multi-plane 读命令。 */
 #define NEG_HOST_READ_OP OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT
 
+static const char        *s_boot_fail_kind_values[] = {"probe_load", "scoped_degrade", "journal_scan", "journal_apply", NULL};
+static MunitParameterEnum s_boot_fail_kind_params[] = {
+    {(char *)"kind", s_boot_fail_kind_values},
+    {          NULL,                    NULL}
+};
+
 /* 单缓冲：期望值由 neg_byte 现场重算，读回直接覆盖源数据（AXI_RAM 在 combined UT
  * 构建里已接近上限，缓冲区放到 SRAM4）。 */
 static SRAM4_DATA BYTE s_neg_buf[NEG_LBAS * FTL_IU_BYTES];
 
 static BOOL s_neg_ready;
+static BOOL s_destructive_active;
 
 /* 按 LBA 生成可复算的数据 pattern（写读两侧用同一公式，不保留第二份期望缓冲）。 */
 /* ⚠ 图案必须能区分 **CW 位移**：纯 `off * k`（k 为奇数）的周期是 256B，位移 512B
@@ -114,6 +122,20 @@ static void neg_assert_tag(DWORD lba, DWORD count, const BYTE *buf, BYTE tag)
 }
 
 /* 一次 `test` 命令内只格式化一次：负例套件可单独跑，不依赖 media 套件先跑。 */
+/* 隔离会话的 teardown 兜底：用例断言失败 longjmp 时 isolated_end 不会执行，
+ * teardown 依据本标志强制 format，避免同一 test 命令后续用例踩半破坏介质。 */
+static void neg_isolated_begin(void)
+{
+    s_destructive_active = true;
+    ftl_ut_isolated_begin();
+}
+
+static void neg_isolated_end(void)
+{
+    ftl_ut_isolated_end();
+    s_destructive_active = false;
+}
+
 static void neg_prepare(void)
 {
     if (s_neg_ready == false)
@@ -121,6 +143,18 @@ static void neg_prepare(void)
         ftl_ut_media_format();
         s_neg_ready = true;
     }
+}
+
+/**
+ * @brief 每条 `test` 命令开始时复位负例介质会话。
+ *
+ * @note `s_neg_ready` 是进程级 static；不重置会让上一条失败的 `test` 命令留下
+ *       半完成介质，下一条命令的 `neg_prepare` 误以为已格式化而跳过。由
+ *       ut_main.c 的 `ut_run_all` 在命令入口调用。
+ */
+void ftl_ut_negative_session_reset(void)
+{
+    s_neg_ready = false;
 }
 
 /* 失校/失败后的恢复动作：先取走延后错误（粘性错误会挡住下一条 submit），
@@ -181,6 +215,14 @@ static DWORD neg_wait_cp_idle(ftl_ctx_s *ftl, DWORD max_steps)
     {
         timer_scheduler_poll();
         ftl_service_pump();
+
+        /* 不依赖后台调度器是否被 bg_suspend 挡住：显式推进在飞 CP。 */
+        if (ftl->cp_handle->active == true)
+        {
+            const cp_trigger_s advance = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, 0);
+
+            cp_handle(ftl->cp_handle, &advance);
+        }
         ftl_service(ftl);
         steps++;
     }
@@ -233,6 +275,41 @@ static void neg_restore_knobs(ftl_ctx_s *ftl)
         ftl->mig_handle->state.failure.fail_count[p]  = 0U;
         ftl->mig_handle->state.failure.fail_gblock[p] = FTL_GBLOCK_INVALID;
     }
+}
+
+/**
+ * @brief 只把 Journal 页缓冲刷到 NAND，不触发 CP（保持 journal > CP 水位）。
+ *
+ * @param ftl 实例
+ *
+ * @note host FLUSH 会顺带 kick CP（`ftl_flush_kick_cp`），不能用来制造 replay 场景；
+ *       这里直接推进 `jrn_handle(FLUSH)` + NAND 完成泵。
+ */
+static void neg_journal_flush_only(ftl_ctx_s *ftl)
+{
+    const BOOL suspend0 = ftl->flags.bg_suspend;
+
+    /* 禁止后台 CP 在这段窗口里把 journal 覆盖进 CP 水位。 */
+    ftl->flags.bg_suspend = true;
+
+    for (DWORD i = 0U; i < 200000U; i++)
+    {
+        jrn_trigger_e trigger = JRN_TRIGGER_FLUSH;
+
+        jrn_handle(ftl->journal, &trigger);
+        timer_scheduler_poll();
+        ftl_service_pump();
+        ftl_service(ftl);
+
+        if ((jrn_is_idle(ftl->journal) != false) && (jrn_has_pending_entries(ftl->journal) == false))
+        {
+            ftl->flags.bg_suspend = suspend0;
+            return;
+        }
+    }
+
+    ftl->flags.bg_suspend = suspend0;
+    munit_assert_true(false);
 }
 
 /**
@@ -466,6 +543,7 @@ static void *neg_setup(const MunitParameter params[], void *data)
     fi_wrap_reset();
     neg_prepare();
     fi_reset();
+    s_destructive_active = false;
     return NULL;
 }
 
@@ -477,8 +555,34 @@ static void neg_teardown(void *fixture)
     fi_reset();
     fi_wrap_reset();
 
+    if (s_destructive_active)
+    {
+        neg_isolated_end();
+        s_destructive_active = false;
+    }
+
     neg_drain_to_clean(ftl_ut_live());
     ftl_ut_assert_clean(ftl_ut_live());
+}
+
+/**
+ * @brief 需要“该区域从未写过”的用例的 per-test setup。
+ *
+ * @note munit 的 MunitSuite 没有 setup/tear_down 指针，只有 MunitTest 有；
+ *       因此把隔离前置挂到测试数组的 setup 上，而不是在每个测试体里手写
+ *       neg_isolated_begin()。
+ */
+static void *neg_isolated_setup(const MunitParameter params[], void *data)
+{
+    (void)neg_setup(params, data);
+    neg_isolated_begin();
+    return NULL;
+}
+
+static void neg_isolated_teardown(void *fixture)
+{
+    neg_isolated_end();
+    neg_teardown(fixture);
 }
 
 /* alloc_fail_bounded — 分配持续失败时写/flush 必须有界失败，放开后恢复。
@@ -495,7 +599,6 @@ static MunitResult test_alloc_fail_bounded(const MunitParameter params[], void *
     const DWORD lba = neg_lba(0U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
 
@@ -539,7 +642,6 @@ static MunitResult test_l2p_load_fail_bounded(const MunitParameter params[], voi
     const DWORD lba = neg_lba(4096U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -602,7 +704,6 @@ static MunitResult test_data_read_fail_bounded(const MunitParameter params[], vo
     const DWORD lba = neg_lba(128U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -651,7 +752,6 @@ static MunitResult test_data_write_fail_bounded(const MunitParameter params[], v
     const DWORD lba = neg_lba(256U);
 
     ftl_ut_trace_begin();
-    neg_prepare(); /* 首次跑会 format：账本基线必须取在它之后 */
 
     const WORD free0 = ftl->alloc.free_count;
 
@@ -702,7 +802,6 @@ static MunitResult test_rr_read_fail_bounded(const MunitParameter params[], void
     const DWORD lba = neg_lba(384U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -749,7 +848,6 @@ static MunitResult test_fc_status_nand_fail(const MunitParameter params[], void 
     const DWORD lba = neg_lba(512U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -789,7 +887,6 @@ static MunitResult test_seq_gate_starve(const MunitParameter params[], void *dat
     const DWORD lba = neg_lba(640U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_drain_to_clean(ftl); /* quiesce + 放开后台 */
 
@@ -895,7 +992,6 @@ static MunitResult test_cp_abort_phase(const MunitParameter params[], void *data
     ftl_ctx_s *ftl = ftl_ut_live();
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     munit_assert_true(ftl_ut_flush());
 
@@ -946,7 +1042,6 @@ static MunitResult test_cp_dir_ckpt_abort(const MunitParameter params[], void *d
     const DWORD lba = neg_lba(7168U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -979,6 +1074,13 @@ static MunitResult test_cp_dir_ckpt_abort(const MunitParameter params[], void *d
 
     /* 半写的槽必须被消费：恢复 CP 不能在同一槽上二次编程。 */
     munit_assert_uint16(ftl->metadata_dir->ckpt.write_idx, !=, widx_before);
+
+    /* 先把 CP abort 期间被唤醒的 metadata 整理 job 跑到 idle：它和 CP 共用
+     * 目录检查点单飞锁；不等它，恢复 CP 会在 PREP 拿到 BUSY 并再次中止，
+     * fail_phase 仍是 PREP 而不是 CP_IDLE。
+     * quiesce 会保留 bg_suspend=1；恢复 CP 需要后台 CP 任务推进，故手动放开。 */
+    ftl_ut_quiesce(ftl);
+    ftl->flags.bg_suspend = false;
 
     /* 恢复 CP 必须完整收尾（新 job 起点清零 fail_phase）。 */
     DWORD steps = 0U;
@@ -1018,7 +1120,6 @@ static MunitResult test_bbt_write_fail(const MunitParameter params[], void *data
     alc_s     *alloc = &ftl->alloc;
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_drain_to_clean(ftl);
 
@@ -1068,7 +1169,6 @@ static MunitResult test_gc_read_fail_bounded(const MunitParameter params[], void
     const DWORD lba = neg_lba(2048U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_make_closed_victim(lba);
     neg_gc_pick_victim(ftl, false);
@@ -1123,7 +1223,6 @@ static MunitResult test_gc_write_fail_bounded(const MunitParameter params[], voi
     const DWORD lba = neg_lba(2560U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
     neg_gc_pick_victim(ftl, false);
 
@@ -1175,7 +1274,6 @@ static MunitResult test_gc_erase_fail_bounded(const MunitParameter params[], voi
     const DWORD lba = neg_lba(3072U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     const WORD bad0 = ftl->alloc.bad_count;
@@ -1229,7 +1327,6 @@ static MunitResult test_l2p_read_error_degrades(const MunitParameter params[], v
     const DWORD lba = neg_lba(6144U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1289,66 +1386,6 @@ static MunitResult test_l2p_read_error_degrades(const MunitParameter params[], v
     return MUNIT_OK;
 }
 
-/* journal_seq_serial_compare — 32-bit 序号回绕处必须按串行号语义比较（JN-09）。
- *
- * 覆盖：`jrn_seq_after` / `jrn_seq_ge` 在回绕边界的真值。
- * 判据：活值间距 < 2^31（RFC 1982）；裸 `>` 会在 0xFFFFFFFF→0 处判反。
- * 备注：纯函数，不碰介质/实例。 */
-
-static MunitResult test_journal_seq_serial_compare(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_trace_begin();
-
-    munit_assert_true(jrn_seq_after(1U, 0U));
-    munit_assert_true(jrn_seq_after(0U, 0xFFFFFFFFU)); /* 回绕后 0 比 max 新 */
-    munit_assert_true(jrn_seq_after(0x10U, 0xFFFFFFF0U));
-    munit_assert_false(jrn_seq_after(0xFFFFFFF0U, 0x10U));
-    munit_assert_true(jrn_seq_ge(5U, 5U));
-    munit_assert_false(jrn_seq_ge(4U, 5U));
-    munit_assert_false(jrn_seq_ge(0xFFFFFFF0U, 0x10U));
-
-    ftl_ut_trace_summary("neg: journal serial compare handles 32-bit wrap");
-    return MUNIT_OK;
-}
-
-/* rr_ecc_monotonic — ECC 健康状态只升级不回落（RR-03）。
- *
- * 覆盖：`rr_record_ecc` 的 rising 门与 health=max。
- * 判据：连续上升触发 WARNING；单次高 ECC 触发 CRITICAL；之后再喂低 ECC 上升序列，
- *       不得把 CRITICAL 打回 WARNING。 */
-
-static MunitResult test_rr_ecc_monotonic(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    rr_ecc_track_s t;
-
-    ftl_ut_trace_begin();
-    memset(&t, 0, sizeof(t));
-
-    for (BYTE i = 0U; i < RR_ECC_RISING_THRESHOLD; i++)
-    {
-        rr_record_ecc(&t, (BYTE)(i + 1U));
-    }
-    munit_assert_int(t.health, >=, RR_BLOCK_WARNING);
-
-    rr_record_ecc(&t, RR_ECC_HIGH_WATER);
-    munit_assert_int(t.health, ==, RR_BLOCK_CRITICAL);
-
-    for (BYTE i = 1U; i <= RR_ECC_RISING_THRESHOLD; i++)
-    {
-        rr_record_ecc(&t, i);
-    }
-    munit_assert_int(t.health, ==, RR_BLOCK_CRITICAL);
-
-    ftl_ut_trace_summary("neg: RR ECC health monotonic up (no downgrade)");
-    return MUNIT_OK;
-}
-
 /* gc_read_unc_marks_bad — 同一 victim 连续读失败达上限必须标 BAD 并摘除 Closed plane（GC-01）。
  *
  * 覆盖：预选 GC victim 并预置「前 2 次同块读失败」，再对数据读持续注入 DATA_ERROR。
@@ -1368,7 +1405,6 @@ static MunitResult test_gc_read_unc_marks_bad(const MunitParameter params[], voi
     const WORD  bad0 = ftl->alloc.bad_count;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     const super_block_s *victim = neg_gc_pick_victim(ftl, false);
@@ -1446,7 +1482,6 @@ static MunitResult test_gc_batch_program_fail(const MunitParameter params[], voi
     const WORD  bad0 = a->bad_count;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     /* 选一个**成对且有有效数据**的候选：单 plane victim 不走 cache-program 批，
@@ -1509,7 +1544,6 @@ static MunitResult test_gc_l2p_load_wait_timeout(const MunitParameter params[], 
     const DWORD lba = neg_lba(5120U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
     neg_gc_pick_victim(ftl, false);
 
@@ -1559,7 +1593,6 @@ static MunitResult test_flush_reports_journal_error(const MunitParameter params[
     const DWORD lba = neg_lba(2944U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1605,7 +1638,6 @@ static MunitResult test_rr_mixed_plane_fail(const MunitParameter params[], void 
     const DWORD lba = neg_lba(5632U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1656,7 +1688,6 @@ static MunitResult test_l2p_cmt_read_priority(const MunitParameter params[], voi
     const DWORD lba = neg_lba(6400U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill_tag(lba, NEG_LBAS, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1694,7 +1725,6 @@ static MunitResult test_l2p_idle_drain(const MunitParameter params[], void *data
     const DWORD t0  = platform_now_ms();
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1733,7 +1763,6 @@ static MunitResult test_l2p_flush_backpressure(const MunitParameter params[], vo
     const DWORD lba = neg_lba(1024U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1786,7 +1815,6 @@ static MunitResult test_boot_corrupt_cp_restore(const MunitParameter params[], v
     const DWORD lba = neg_lba(7680U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1808,6 +1836,27 @@ static MunitResult test_boot_corrupt_cp_restore(const MunitParameter params[], v
     munit_assert_int(ftl_sync_write_page(addr, junk, sizeof(junk), FTL_PAGE_CFG_META()), ==, FTL_OK);
 
     ftl_ut_reboot_from_media();
+
+    /* BOOT-02：full rebuild 后不得出现「同一块既是 Free 池成员又是 Closed 条目」。 */
+    for (WORD si = 0U; si < ftl->alloc.closed_sb_count; si++)
+    {
+        const super_block_s *sb = &ftl->alloc.closed_sb_list[si];
+
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            if (super_block_has_plane(sb, p) == false)
+            {
+                continue;
+            }
+
+            const WORD g = ftl_gblock(p, sb->plane_blocks[p]);
+
+            for (WORD fi = 0U; fi < ftl->alloc.free_count; fi++)
+            {
+                munit_assert_uint16(ftl->alloc.free_blocks[fi], !=, g);
+            }
+        }
+    }
 
     memset(s_neg_buf, 0, sizeof(s_neg_buf));
     munit_assert_true(ftl_ut_host_read(lba, NEG_LBAS, s_neg_buf));
@@ -1837,7 +1886,6 @@ static MunitResult test_boot_no_rebuild_loop(const MunitParameter params[], void
     const DWORD lba = neg_lba(7936U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1872,7 +1920,6 @@ static MunitResult test_boot_degraded_reload(const MunitParameter params[], void
     const DWORD lba = neg_lba(2304U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill_tag(lba, NEG_LBAS, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -1924,7 +1971,9 @@ static MunitResult test_iface_sparse_page(const MunitParameter params[], void *d
     const DWORD lba = neg_lba(1536U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
+
+    /* 稀疏页断言要求该 region 的其它 CW **从未映射**；跑完整套件时前面用例
+     * 可能已经写过同一 region ⇒ 必须从隔离格式化基线开始。 */
 
     neg_fill_tag(lba, 1U, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, 1U, s_neg_buf));
@@ -1987,7 +2036,6 @@ static MunitResult test_blank_ff_trim_rewrite(const MunitParameter params[], voi
     const DWORD lba = ftl_ut_lba_base() & ~511U;
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill_tag(lba, NEG_LBAS, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -2011,110 +2059,6 @@ static MunitResult test_blank_ff_trim_rewrite(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
-/* iface_pair_cmd_guards — 空位图建链必须拒绝，不得越界读 pba[PLANE_NUM]（IF-18）。
- *
- * 覆盖：`ftl_cmd_setup_ppa_pair_cw(cmd, pba, 0)`。
- * 判据：返回 `FTL_ERROR`；命令槽位随后可正常释放。
- * 备注：这是 release 运行期拒绝（非 ASSERT）；debug 同样返回。 */
-
-static MunitResult test_iface_pair_cmd_guards(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_trace_begin();
-    neg_prepare();
-
-    fc_cmd_s *cmd = fc_command_alloc();
-
-    munit_assert_ptr_not_null(cmd);
-
-    DWORD pba[PLANE_NUM];
-
-    memset(pba, 0, sizeof(pba));
-
-    munit_assert_int(ftl_cmd_setup_ppa_pair_cw(cmd, pba, 0U), ==, FTL_ERROR);
-
-    fc_command_release(cmd->cmd_id);
-
-    ftl_ut_trace_summary("neg: empty cw bitmap rejected before first_plane");
-    return MUNIT_OK;
-}
-
-/* op_req_table_guard — 完成派发 request 表的非法 id / 重复登记（CR-04）。
- *
- * 覆盖：`ftl_op_req_add` 越界 cmd_id、同一 id 重复登记。
- * 判据：越界返回 `FTL_ERROR`（不写表）；重复登记覆盖旧项、计数不增（不漏账）。
- * 备注：debug 下越界 ASSERT 先停机 ⇒ `MUNIT_SKIP`。要求表起始为空（quiesce 后）。 */
-
-static MunitResult test_op_req_table_guard(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-#if !defined(NDEBUG)
-    return MUNIT_SKIP;
-#else
-    BYTE dummy = 0U;
-
-    ftl_ut_trace_begin();
-    neg_prepare();
-
-    const WORD base = ftl_op_req_count();
-
-    munit_assert_uint16(base, ==, 0U); /* 前提：系统 idle，id 0 未被占用 */
-
-    munit_assert_int(ftl_op_req_add((WORD)FTL_OP_REQ_TABLE_SIZE, FTL_OP_HOST_IO, &dummy), ==, FTL_ERROR);
-
-    munit_assert_int(ftl_op_req_add(0U, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
-    munit_assert_int(ftl_op_req_add(0U, FTL_OP_HOST_IO, &dummy), ==, FTL_OK);
-    munit_assert_uint16(ftl_op_req_count(), ==, 1U);
-
-    ftl_op_req_remove(0U);
-    munit_assert_uint16(ftl_op_req_count(), ==, 0U);
-    ftl_op_req_remove(0U); /* 幂等 */
-
-    ftl_ut_trace_summary("neg: op request table rejects OOB id, overwrite counts once");
-    return MUNIT_OK;
-#endif
-}
-
-/* pend_table_guard — pending 表越界 id / 释放后按 id 查询（CR-05）。
- *
- * 覆盖：`pend_find` / `pend_alloc` 越界 cmd_id；分配→查找→摘除→再查找。
- * 判据：越界返回 NULL 且不越界写；摘除后按 id 查不到已释放槽；重复摘除幂等。
- * 备注：`pend_bind` 双绑定在 release 无运行期拒绝（仅 debug ASSERT），不在此断言。 */
-
-static MunitResult test_pend_table_guard(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-#if !defined(NDEBUG)
-    return MUNIT_SKIP;
-#else
-    pend_ctx_s *table = &ftl_ut_live()->pending;
-
-    ftl_ut_trace_begin();
-    neg_prepare();
-
-    munit_assert_ptr_null(pend_find(table, (WORD)FC_COMMAND_POOL_DEPTH));
-    munit_assert_ptr_null(pend_alloc(table, (WORD)FC_COMMAND_POOL_DEPTH));
-
-    pend_req_s *req = pend_alloc(table, 0U);
-
-    munit_assert_ptr_not_null(req);
-    munit_assert_ptr_equal(pend_find(table, 0U), req);
-
-    pend_remove(table, 0U);
-    munit_assert_ptr_null(pend_find(table, 0U));
-    pend_remove(table, 0U); /* 幂等 */
-
-    ftl_ut_trace_summary("neg: pending table rejects OOB id, released slot unreachable");
-    return MUNIT_OK;
-#endif
-}
-
 /* host_read_multiplane_stats — 一个 multi-plane 读必须给**两个**块都记 ECC/read disturb（HOST-02）。
  *
  * 覆盖：8 LBA 读（跨两 plane 两个块），读前后比较各 gblock 的 read_count。
@@ -2130,7 +2074,6 @@ static MunitResult test_host_read_multiplane_stats(const MunitParameter params[]
     const DWORD lba = neg_lba(2816U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill_tag(lba, NEG_LBAS, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -2177,7 +2120,6 @@ static MunitResult test_md_alias_full_rebuild_repro(const MunitParameter params[
     const DWORD lba = neg_lba(3264U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     for (BYTE gen = 1U; gen <= 3U; gen++)
     {
@@ -2215,7 +2157,6 @@ static MunitResult test_bbt_mark_bad_idempotent(const MunitParameter params[], v
     alc_s     *a   = &ftl->alloc;
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     /* 后台 job 可能在飞（BBT 保存互斥）；同时保证选块期间池不被分配。 */
     neg_drain_to_clean(ftl);
@@ -2274,402 +2215,6 @@ static MunitResult test_bbt_mark_bad_idempotent(const MunitParameter params[], v
     return MUNIT_OK;
 }
 
-/* alloc_rewind_underflow — next_page == 0 时 rewind 不得下溢成 63（ALLOC-13）。
- *
- * 覆盖：未分配页对的 SB 上调 `alc_super_open_rewind_pair`。
- * 判据：`next_page` 保持 0（不递减回绕）。
- * 备注：debug 下入口 ASSERT 停机 ⇒ `MUNIT_SKIP`。 */
-
-static MunitResult test_alloc_rewind_underflow(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-#if !defined(NDEBUG)
-    return MUNIT_SKIP;
-#else
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->hot_sb.next_page = 0U;
-    a->hot_sb.is_open   = true;
-
-    alc_super_open_rewind_pair(a, FTL_TEMP_HOT);
-
-    munit_assert_uint8(a->hot_sb.next_page, ==, 0U);
-
-    return MUNIT_OK;
-#endif
-}
-
-/* alloc_spare_skip_bad — Spare 池里的 BAD 块必须跳过（ALLOC-16）。
- *
- * 覆盖：两个 Spare，尾部（先弹出）标 BAD。
- * 判据：pop 返回前一个好块，`spare_count` 递减到 0；不把 BAD 块当替换块交出去。
- * 备注：RAM 分配器夹具，不动真介质。 */
-
-static MunitResult test_alloc_spare_skip_bad(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->blocks[0].state = FTL_BLOCK_STATE_FREE;
-    a->blocks[1].state = FTL_BLOCK_STATE_FREE;
-
-    a->spare_blocks[0][0] = 0U;
-    a->spare_blocks[0][1] = 1U;
-    a->spare_count[0]     = 2U;
-
-    ftl_block_set_bad(&a->blocks[1]); /* 栈顶先弹：必须是坏块 */
-
-    WORD out = FTL_GBLOCK_INVALID;
-
-    munit_assert_true(alc_spare_pop(a, 0U, &out));
-    munit_assert_uint16(out, ==, 0U);
-    munit_assert_uint16(a->spare_count[0], ==, 0U);
-
-    ftl_ut_trace_summary("neg: spare pop skips runtime-bad block");
-    return MUNIT_OK;
-}
-
-/* wl_erase_resets_read_count — 擦除必须清零 read disturb 计数（WL-02）。
- *
- * 覆盖：置 read_count 后调 `alc_bst_note_erase`。
- * 判据：read_count 归零、erase_count +1、last_pe_ts 更新；趋势字段保留。
- * 备注：RAM 分配器夹具。 */
-
-static MunitResult test_wl_erase_resets_read_count(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->blocks[5].state      = FTL_BLOCK_STATE_FREE;
-    a->blocks[5].read_count = 1234U;
-    a->blocks[5].rr.health  = 7U;
-
-    const DWORD e0 = a->blocks[5].erase_count;
-
-    alc_bst_note_erase(a, 5U, 4242U);
-
-    munit_assert_uint16(a->blocks[5].read_count, ==, 0U);
-    munit_assert_uint32(a->blocks[5].erase_count, ==, e0 + 1U);
-    munit_assert_uint32(a->blocks[5].last_pe_ts, ==, 4242U);
-    munit_assert_uint8(a->blocks[5].rr.health, ==, 7U);
-
-    ftl_ut_trace_summary("neg: erase resets read disturb, keeps ECC trend");
-    return MUNIT_OK;
-}
-
-/* wl_skip_bad_plane — 含 BAD plane 的 Closed SB 不得被静态 WL 选中（WL-03）。
- *
- * 覆盖：RAM 分配器里造一个 plane1 块变坏的 Closed 条目，调 `wl_select_victim`。
- * 判据：对照（两块都健康）选中；标坏 plane1 后返回 false。选中会 migrate 读失败并
- *       每轮重选，WL 永久卡死。
- * 备注：RAM 夹具，不动真介质。 */
-
-static MunitResult test_wl_skip_bad_plane(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    memset(&a->closed_sb_list[0], 0, sizeof(a->closed_sb_list[0]));
-    a->closed_sb_list[0].is_open   = false;
-    a->closed_sb_list[0].next_page = (BYTE)PAGES_PER_BLOCK;
-    a->closed_sb_count             = 1U;
-
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
-    {
-        a->closed_sb_list[0].plane_blocks[p] = 0U;
-
-        const WORD g = ftl_gblock(p, 0U);
-
-        a->blocks[g].state       = FTL_BLOCK_STATE_CLOSED;
-        a->blocks[g].valid_count = (WORD)FTL_CW_PER_BLOCK;
-    }
-
-    wl_victim_s victim;
-
-    memset(&victim, 0, sizeof(victim));
-    munit_assert_true(wl_select_victim(a, &victim)); /* 对照：健康条目可选 */
-
-    ftl_block_set_bad(&a->blocks[ftl_gblock(1U, 0U)]);
-
-    memset(&victim, 0, sizeof(victim));
-    munit_assert_false(wl_select_victim(a, &victim));
-
-    ftl_ut_trace_summary("neg: WL victim selection skips SB with BAD plane");
-    return MUNIT_OK;
-}
-
-/* alloc_closed_list_full — Closed 列表满时关闭 SB 必须失败且保持 live（ALLOC-08）。
- *
- * 覆盖：`alc_super_close` 在 `closed_sb_count == SUPER_BLOCK_LIST_MAX` 时。
- * 判据：返回 `FTL_ERROR`；`is_open` 不变、计数不增（不丢活 SB）。
- * 备注：`alc_super_close_live` 入口只有 debug ASSERT，release 才走运行期拒绝 ⇒
- *       `MUNIT_SKIP`。RAM 分配器夹具。 */
-
-static MunitResult test_alloc_closed_list_full(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-#if !defined(NDEBUG)
-    return MUNIT_SKIP;
-#else
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->closed_sb_count        = SUPER_BLOCK_LIST_MAX;
-    a->hot_sb.is_open         = true;
-    a->hot_sb.plane_blocks[0] = 0U;
-    a->hot_sb.plane_blocks[1] = 0U;
-
-    munit_assert_int(alc_super_close(a, FTL_TEMP_HOT), ==, FTL_ERROR);
-    munit_assert_true(a->hot_sb.is_open);
-    munit_assert_uint16(a->closed_sb_count, ==, SUPER_BLOCK_LIST_MAX);
-
-    return MUNIT_OK;
-#endif
-}
-
-/* alloc_closed_plane_bad_drop — 运行期标坏要同步摘除 Closed 条目的 plane（ALLOC-14）。
- *
- * 覆盖：`bbt_mark_bad` 对 Closed SB 的一个 plane 块。
- * 判据：该 plane 从条目摘除（`FTL_BLOCK_NO_PLANE`）、条目仍在；另一 plane 不受影响。
- * 备注：RAM 分配器夹具，不动真介质。 */
-
-static MunitResult test_alloc_closed_plane_bad_drop(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    memset(&a->closed_sb_list[0], 0, sizeof(a->closed_sb_list[0]));
-    a->closed_sb_list[0].is_open         = false;
-    a->closed_sb_list[0].plane_blocks[0] = 2U;
-    a->closed_sb_list[0].plane_blocks[1] = 3U;
-    a->closed_sb_count                   = 1U;
-
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
-    {
-        const WORD g = ftl_gblock(p, a->closed_sb_list[0].plane_blocks[p]);
-
-        a->blocks[g].state = FTL_BLOCK_STATE_CLOSED;
-        ftl_block_set_sb(&a->blocks[g], 0U);
-    }
-
-    munit_assert_int(bbt_mark_bad(a, ftl_gblock(0U, 2U)), ==, FTL_OK);
-
-    munit_assert_uint16(a->closed_sb_list[0].plane_blocks[0], ==, FTL_BLOCK_NO_PLANE);
-    munit_assert_uint16(a->closed_sb_list[0].plane_blocks[1], ==, 3U);
-
-    return MUNIT_OK;
-}
-
-/* alloc_close_bad_pair_no_entry — 全 plane BAD 的 SB 关闭不得产生零 plane 条目（ALLOC-15）。
- *
- * 覆盖：两个 plane 块都 BAD 时 `alc_super_close`。
- * 判据：`closed_sb_count` 不增（不产生永远选不中的死条目）；SB 仍算关闭。
- * 备注：RAM 分配器夹具。 */
-
-static MunitResult test_alloc_close_bad_pair_no_entry(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->hot_sb.is_open         = true;
-    a->hot_sb.plane_blocks[0] = 4U;
-    a->hot_sb.plane_blocks[1] = 5U;
-
-    ftl_block_set_bad(&a->blocks[ftl_gblock(0U, 4U)]);
-    ftl_block_set_bad(&a->blocks[ftl_gblock(1U, 5U)]);
-
-    const WORD before = a->closed_sb_count;
-
-    munit_assert_int(alc_super_close(a, FTL_TEMP_HOT), ==, FTL_OK);
-    munit_assert_uint16(a->closed_sb_count, ==, before);
-    munit_assert_false(a->hot_sb.is_open);
-
-    return MUNIT_OK;
-}
-
-/* wl_destination_prepare_fail — closed 列表满时 WL 目的准备失败不得退化为普通分配（WL-11）。
- *
- * 覆盖：`alc_super_prepare_wl_destination` 在列表满时。
- * 判据：返回 false；live cold SB 保持打开（调用者必须放弃本次 WL）。
- * 备注：入口只有 debug ASSERT，release 才走运行期拒绝 ⇒ `MUNIT_SKIP`。 */
-
-static MunitResult test_wl_destination_prepare_fail(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-#if !defined(NDEBUG)
-    return MUNIT_SKIP;
-#else
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    a->closed_sb_count         = SUPER_BLOCK_LIST_MAX;
-    a->cold_sb.is_open         = true;
-    a->cold_sb.next_page       = 1U; /* 非空 ⇒ 走 close_live，列表满才会失败 */
-    a->cold_sb.plane_blocks[0] = 0U;
-    a->cold_sb.plane_blocks[1] = 0U;
-
-    munit_assert_false(alc_super_prepare_wl_destination(a));
-    munit_assert_true(a->cold_sb.is_open);
-
-    return MUNIT_OK;
-#endif
-}
-
-/* wl_snapshot_entry_trigger — 快照恢复的单 plane 条目也要能触发静态 WL（WL-10）。
- *
- * 覆盖：`wl_ec_spread_get` / `wl_should_trigger` 的分母按条目自身容量。
- * 判据：free 高擦除块 − 最冷 used SB ≥ WL_THRESHOLD 时触发。
- * 备注：RAM 分配器夹具；用于钉住「分母用整 SB 容量」的回归。 */
-
-static MunitResult test_wl_snapshot_entry_trigger(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    alc_free_push(a, ftl_gblock(0U, 5U));
-    alc_free_push(a, ftl_gblock(1U, 5U));
-    a->blocks[ftl_gblock(0U, 5U)].erase_count = 500U;
-    a->blocks[ftl_gblock(1U, 5U)].erase_count = 500U;
-
-    memset(&a->closed_sb_list[0], 0, sizeof(a->closed_sb_list[0]));
-    a->closed_sb_list[0].is_open         = false;
-    a->closed_sb_list[0].next_page       = (BYTE)PAGES_PER_BLOCK;
-    a->closed_sb_list[0].plane_blocks[0] = 6U;
-    a->closed_sb_list[0].plane_blocks[1] = FTL_BLOCK_NO_PLANE;
-    a->closed_sb_count                   = 1U;
-
-    const WORD g = ftl_gblock(0U, 6U);
-
-    a->blocks[g].state       = FTL_BLOCK_STATE_CLOSED;
-    a->blocks[g].erase_count = 100U;
-    a->blocks[g].valid_count = (WORD)FTL_CW_PER_BLOCK;
-
-    DWORD max_free = 0U;
-    DWORD min_used = 0U;
-
-    munit_assert_true(wl_ec_spread_get(a, WL_MIN_WRITES, &max_free, &min_used));
-    munit_assert_uint32((max_free - min_used), >=, WL_THRESHOLD);
-    munit_assert_true(wl_should_trigger(a, WL_MIN_WRITES));
-
-    return MUNIT_OK;
-}
-
-/* rr_predictive_skip_bad_plane — 预测巡检必须跳过含 BAD plane 的 SB（RR-04）。
- *
- * 覆盖：两个 Closed 条目都达到预测阈值，第一个含 BAD plane。
- * 判据：返回第二个条目，不被坏 plane 卡死。
- * 备注：RAM 分配器夹具。 */
-
-static MunitResult test_rr_predictive_skip_bad_plane(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    ftl_ut_ram_init();
-
-    alc_s *a = ftl_ut_ram_alloc();
-
-    memset(a->closed_sb_list, 0, 2U * sizeof(a->closed_sb_list[0]));
-
-    a->closed_sb_list[0].is_open         = false;
-    a->closed_sb_list[0].plane_blocks[0] = 10U;
-    a->closed_sb_list[0].plane_blocks[1] = 10U;
-    a->closed_sb_list[1].is_open         = false;
-    a->closed_sb_list[1].plane_blocks[0] = 11U;
-    a->closed_sb_list[1].plane_blocks[1] = 11U;
-    a->closed_sb_count                   = 2U;
-
-    for (BYTE s = 0U; s < 2U; s++)
-    {
-        for (BYTE p = 0U; p < PLANE_NUM; p++)
-        {
-            const WORD g = ftl_gblock(p, a->closed_sb_list[s].plane_blocks[p]);
-
-            a->blocks[g].state       = FTL_BLOCK_STATE_CLOSED;
-            a->blocks[g].valid_count = 1U;
-            a->blocks[g].rr.health   = RR_BLOCK_CRITICAL;
-            a->blocks[g].rr.last_ecc = 8U;
-            ftl_block_set_sb(&a->blocks[g], s);
-        }
-    }
-
-    ftl_block_set_bad(&a->blocks[ftl_gblock(1U, 10U)]);
-
-    WORD gblock = FTL_GBLOCK_INVALID;
-
-    munit_assert_true(rr_predictive_scan(a, &gblock));
-    munit_assert_uint16(gblock, ==, ftl_gblock(0U, 11U));
-
-    return MUNIT_OK;
-}
-
-/* mig_block_sub_valid_no_wrap — BAD / 已零计数块做减计数必须不下溢（MIG-03）。
- *
- * 覆盖：`ftl_block_sub_valid_if_live`。
- * 判据：BAD 或 count==0 时不变；正常块 −1；0 处不回绕成 0xFFFF。
- * 备注：纯函数，不碰介质。 */
-
-static MunitResult test_mig_block_sub_valid_no_wrap(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    bst_block_s b;
-
-    memset(&b, 0, sizeof(b));
-
-    b.state       = FTL_BLOCK_STATE_CLOSED;
-    b.valid_count = 0U;
-    ftl_block_sub_valid_if_live(&b);
-    munit_assert_uint16(b.valid_count, ==, 0U);
-
-    b.state       = FTL_BLOCK_STATE_BAD;
-    b.valid_count = 5U;
-    ftl_block_sub_valid_if_live(&b);
-    munit_assert_uint16(b.valid_count, ==, 5U);
-
-    b.state       = FTL_BLOCK_STATE_CLOSED;
-    b.valid_count = 3U;
-    ftl_block_sub_valid_if_live(&b);
-    munit_assert_uint16(b.valid_count, ==, 2U);
-
-    return MUNIT_OK;
-}
-
 /* gc_partial_plane_erase_abort — 部分 plane 擦除后中止，旧条目不得引用已释放 plane（GC-04）。
  *
  * 覆盖：成对 victim 的 plane0 擦成功、plane1 擦除提交失败。
@@ -2687,7 +2232,6 @@ static MunitResult test_gc_partial_plane_erase_abort(const MunitParameter params
     const WORD  bad0 = ftl->alloc.bad_count;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     const super_block_s *v = neg_gc_pick_victim(ftl, true);
@@ -2746,7 +2290,6 @@ static MunitResult test_gc_systemic_read_fuse(const MunitParameter params[], voi
     const WORD  bad0 = ftl->alloc.bad_count;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     const super_block_s *v = neg_gc_pick_victim(ftl, false);
@@ -2799,7 +2342,6 @@ static MunitResult test_bbt_kick_candidates(const MunitParameter params[], void 
     alc_s     *a   = &ftl->alloc;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_drain_to_clean(ftl);
 
     const DWORD seq0 = a->bbt.sequence;
@@ -2823,12 +2365,14 @@ static MunitResult test_bbt_kick_candidates(const MunitParameter params[], void 
     return MUNIT_OK;
 }
 
-/* journal_ring_erase_fail — 环形块连续擦失败必须有界标坏并跳过（JN-01）。
+/* journal_ring_erase_fail — 环形块连续擦失败必须标坏；3 块坏后安全停写（JN-01 / JN-07）。
  *
- * 覆盖：`jrn_erase_start` + `jrn_erase_failed`（多 plane 擦除，经 wrap 注入）。
- * 判据：同一块连续 `JRN_ERASE_FAIL_MAX` 次失败后置 bad_mask、两 plane 标 BAD、
- *       失败计数清零；journal 未进入 ring_full（还有其它块可用）。
- * 备注：会烧掉 1 个 Journal 环形块（2 个 plane 块）。 */
+ * 覆盖：`jrn_erase_failed` + `jrn_block_next` 在只剩当前写块时的行为。
+ * 判据：① 每块连续 `JRN_ERASE_FAIL_MAX` 次失败后置 bad_mask、两 plane 标 BAD、
+ *       失败计数清零；② 前 1~2 块坏时 ring_full 仍为 false；③ 3 块坏后必须置
+ *       ring_full，且当前写块不被擦/不被标坏（否则会擦掉持有最新条目的块）。
+ * 备注：只验证路径；结束时还原全部 BST/BBT/Journal RAM 状态并 reboot，不烧真实
+ *       Journal 候选块。 */
 
 static MunitResult test_journal_ring_erase_fail(const MunitParameter params[], void *data)
 {
@@ -2840,75 +2384,91 @@ static MunitResult test_journal_ring_erase_fail(const MunitParameter params[], v
     alc_s     *a   = &ftl->alloc;
 
     ftl_ut_trace_begin();
-    neg_prepare();
-    neg_drain_to_clean(ftl);
 
-    const BYTE cur    = j->handle.state.current_block;
-    BYTE       target = (BYTE)((cur + 1U) % JOURNAL_BLOCK_COUNT);
+    /* 本用例要求 4 个 Journal 候选块全部健康；单跑时上一用例可能留下 BAD
+     * （尤其失败断言后 teardown 没跑），因此用隔离格式化建立确定基线。 */
 
-    for (BYTE k = 0U; (k < JOURNAL_BLOCK_COUNT) && ((j->handle.state.bad_mask & (1U << target)) != 0U); k++)
-    {
-        target = (BYTE)((target + 1U) % JOURNAL_BLOCK_COUNT);
-    }
-    munit_assert_uint8((j->handle.state.bad_mask & (1U << target)), ==, 0U);
+    const BYTE cur = j->handle.state.current_block;
 
     /* 快照：本次 BAD 只允许留在 RAM 供断言，结束后必须还原，否则会把 Journal
      * 候选块永久烧掉（重复跑会让候选 < 4，下次 boot 直接拒绝启动）。 */
-    const WORD g0 = ftl_gblock(0U, j->blocks[target]);
-    const WORD g1 = ftl_gblock(1U, j->blocks[target]);
+    bst_block_s snaps[JOURNAL_BLOCK_COUNT][PLANE_NUM];
 
-    const bst_block_s snap0    = a->blocks[g0];
-    const bst_block_s snap1    = a->blocks[g1];
-    const WORD        bad0     = a->bad_count;
-    const BOOL        dirty0   = a->bbt.dirty;
-    const DWORD       gen0     = a->bbt.dirty_gen;
-    const BOOL        rebuild0 = a->bbt.rebuild_required;
-    const BOOL        pools_d0 = (a->pools != NULL) ? a->pools->dirty : false;
-    const BYTE        mask0    = j->handle.state.bad_mask;
-    const BYTE        failblk0 = j->handle.state.erase_fail_block;
-    const BYTE        failcnt0 = j->handle.state.erase_fail_count;
-    const BYTE        target0  = j->handle.job.target_block;
-    const BOOL        need0    = j->handle.job.need_erase;
+    for (BYTE b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    {
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            snaps[b][p] = a->blocks[ftl_gblock(p, j->blocks[b])];
+        }
+    }
+
+    const WORD  bad0     = a->bad_count;
+    const BOOL  dirty0   = a->bbt.dirty;
+    const DWORD gen0     = a->bbt.dirty_gen;
+    const BOOL  rebuild0 = a->bbt.rebuild_required;
+    const BOOL  pools_d0 = (a->pools != NULL) ? a->pools->dirty : false;
+    const BYTE  mask0    = j->handle.state.bad_mask;
+    const BYTE  failblk0 = j->handle.state.erase_fail_block;
+    const BYTE  failcnt0 = j->handle.state.erase_fail_count;
+    const BYTE  target0  = j->handle.job.target_block;
+    const BOOL  need0    = j->handle.job.need_erase;
+    const BOOL  full0    = j->handle.state.ring_full;
 
     munit_assert_true(jrn_is_idle(j));
-
-    j->handle.job.target_block = target;
-    j->handle.job.need_erase   = true;
-
-    /* 必须注入**完成态**擦除失败：提交层失败只会保留 need_erase 重试，不走 mark BAD。
-     * 按目标 PBA 精确注入，避免后台 CP/BBT 的 multi-plane 擦除把注入吃掉。 */
-    const DWORD erase_pba = pba_make(j->topo.ch, j->topo.ce, j->topo.lun, j->blocks[target], 0U, 0U, 0U);
-    const DWORD hits0     = fi_hits(FI_FC_STATUS_PBA);
-
-    fi_arm_ex(FI_FC_STATUS_PBA, erase_pba, 3U, FC_CMD_STATUS_NAND_FAIL);
-
-    jrn_trigger_e t = JRN_TRIGGER_ERASE_ONLY;
+    munit_assert_uint8(j->handle.state.ring_full, ==, false);
+    munit_assert_uint8(mask0, ==, 0U); /* 前提：本次开始前没有坏 ring 块 */
 
     ftl->flags.bg_suspend = 1U; /* 禁止后台 BBT 把本次 dirty 写进 NAND */
 
-    for (DWORD i = 0U; i < 1000U; i++)
+    BYTE marked = 0U;
+
+    /* FI_* 每个 fault 只有一个槽：逐块 fi_arm_ex 会互相覆盖，最后只有一块
+     * 被武装（板端现象：只标坏 1 块）。这里用 FI_KEY_ANY 持续失败，让
+     * jrn_erase_failed 按 3 次失败逐个标坏、跳到下一块。 */
+    fi_arm_ex(FI_FC_STATUS_PBA, FI_KEY_ANY, NEG_STUCK, FC_CMD_STATUS_NAND_FAIL);
+
+    j->handle.job.target_block = (BYTE)((cur + 1U) % JOURNAL_BLOCK_COUNT);
+    j->handle.job.need_erase   = true;
+
+    const DWORD hits0 = fi_hits(FI_FC_STATUS_PBA);
+
+    jrn_trigger_e t = JRN_TRIGGER_ERASE_ONLY;
+
+    for (DWORD i = 0U; (i < 5000U) && (j->handle.state.ring_full == false); i++)
     {
         jrn_handle(j, &t);
         timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
+    }
 
-        if ((j->handle.state.bad_mask & (1U << target)) != 0U)
+    for (BYTE b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    {
+        if ((BYTE)((cur + 1U + b) % JOURNAL_BLOCK_COUNT) != cur)
         {
-            break;
+            munit_assert_uint8((j->handle.state.bad_mask & (1U << ((cur + 1U + b) % JOURNAL_BLOCK_COUNT))), !=, 0U);
+            marked++;
         }
     }
 
-    ftl_ut_trace_detail("jrn erase: hits=%lu bad_mask=0x%02x failcnt=%hhu ring_full=%d target=%hhu", fi_hits(FI_FC_STATUS_PBA) - hits0, j->handle.state.bad_mask, j->handle.state.erase_fail_count, (int)j->handle.state.ring_full, target);
-
-    munit_assert_uint8((j->handle.state.bad_mask & (1U << target)), !=, 0U);
+    munit_assert_uint32(fi_hits(FI_FC_STATUS_PBA), >, hits0);
     munit_assert_uint8(j->handle.state.erase_fail_count, ==, 0U);
-    munit_assert_false(j->handle.state.ring_full);
-    munit_assert_uint16(a->bad_count, ==, (WORD)(bad0 + (WORD)PLANE_NUM));
+    munit_assert_uint16(a->bad_count, ==, (WORD)(bad0 + ((WORD)marked * PLANE_NUM)));
+
+    munit_assert_uint8(marked, ==, (BYTE)(JOURNAL_BLOCK_COUNT - 1U));
+    munit_assert_uint8(j->handle.state.bad_mask, ==, (BYTE)(((1U << JOURNAL_BLOCK_COUNT) - 1U) & ~(1U << cur)));
+    munit_assert_true(j->handle.state.ring_full);
+    munit_assert_uint8((j->handle.state.bad_mask & (1U << cur)), ==, 0U);
 
     /* 还原本次 BAD（只验证路径，不消耗真实 Journal 候选块）。 */
-    a->blocks[g0]           = snap0;
-    a->blocks[g1]           = snap1;
+    for (BYTE b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    {
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            a->blocks[ftl_gblock(p, j->blocks[b])] = snaps[b][p];
+        }
+    }
+
     a->bad_count            = bad0;
     a->bbt.dirty            = dirty0;
     a->bbt.dirty_gen        = gen0;
@@ -2921,6 +2481,7 @@ static MunitResult test_journal_ring_erase_fail(const MunitParameter params[], v
     j->handle.state.bad_mask         = mask0;
     j->handle.state.erase_fail_block = failblk0;
     j->handle.state.erase_fail_count = failcnt0;
+    j->handle.state.ring_full        = full0;
     j->handle.job.target_block       = target0;
     j->handle.job.need_erase         = need0;
     j->handle.job.phase              = JRN_IDLE;
@@ -2930,13 +2491,17 @@ static MunitResult test_journal_ring_erase_fail(const MunitParameter params[], v
 
     ftl_ut_reboot_from_media(); /* 清 Journal 运行态，且 NAND 上没有本次 dirty */
 
+    ftl_ut_trace_summary("jrn ring: 3 bad blocks -> ring_full, current block untouched");
+
     return MUNIT_OK;
 }
 
-/* l2p_pool_starve_flush — 命令池耗尽时 flush 必须有界且不泄漏槽（L2P-02 / L2P-05）。
+/* l2p_pool_starve_flush — 命令池耗尽时 flush / CP 必须有界且不泄漏槽（L2P-02 / L2P-05 / CP-04）。
  *
- * 覆盖：占满 FC 命令池后 flush（L2P 区域写回 / 备副本提交都拿不到命令）。
- * 判据：flush 在 UT 超时内返回；释放命令并恢复后 CMT 排空、数据可读。
+ * 覆盖：占满 FC 命令池后 flush（L2P 区域写回 / 备副本提交都拿不到命令），并在
+ *       池仍满时显式 force 一次 CP。
+ * 判据：flush 与 CP 都在 UT 超时内返回（CP 不无限等命令槽）；释放命令并恢复后
+ *       CMT 排空、数据可读。
  * 备注：不检查 flush 返回值真假（best-effort 语义）。 */
 
 static MunitResult test_l2p_pool_starve_flush(const MunitParameter params[], void *data)
@@ -2948,7 +2513,6 @@ static MunitResult test_l2p_pool_starve_flush(const MunitParameter params[], voi
     const DWORD lba = neg_lba(3456U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill(lba, NEG_LBAS, s_neg_buf);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -2968,7 +2532,15 @@ static MunitResult test_l2p_pool_starve_flush(const MunitParameter params[], voi
     const BOOL  flushed = ftl_ut_flush();
     const DWORD elapsed = platform_now_ms() - t0;
 
-    ftl_ut_trace_detail("l2p pool starve: held=%lu flush=%d elapsed=%lums", n, flushed, elapsed);
+    /* CP-04：命令池被 host 写占满时，CP 提交必须**有界失败**而不是无限等槽。
+     * 这里在池仍占满时显式 force 一次 CP；max_steps 是上界，卡死会让断言变红。 */
+    DWORD      cp_steps = 0U;
+    const BOOL cp_done  = neg_cp_force(ftl, 200U, &cp_steps);
+
+    ftl_ut_trace_detail("l2p pool starve: held=%lu flush=%d elapsed=%lums cp_done=%d cp_steps=%lu cp_failed=%d", n, flushed, elapsed, cp_done, cp_steps, ftl->cp_handle->failed);
+
+    munit_assert_uint32(cp_steps, <, 200U);
+    munit_assert_false(ftl->cp_handle->active);
 
     for (DWORD i = 0U; i < n; i++)
     {
@@ -3002,7 +2574,6 @@ static MunitResult test_md_backup_copy_corrupt(const MunitParameter params[], vo
     const DWORD lba = neg_lba(3456U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     neg_fill_tag(lba, NEG_LBAS, s_neg_buf, 1U);
     munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
@@ -3050,7 +2621,6 @@ static MunitResult test_gc_write_complete_fail_closes_cold(const MunitParameter 
     const WORD  bad0 = ftl->alloc.bad_count;
 
     ftl_ut_trace_begin();
-    neg_prepare();
     neg_make_closed_victim(lba);
 
     /* 把 victim 前 62 页作废，只留最后 2 页有效：保证至少还能再写一页
@@ -3147,7 +2717,6 @@ static MunitResult test_host_group_exhaustion(const MunitParameter params[], voi
     const DWORD base = neg_lba(0U);
 
     ftl_ut_trace_begin();
-    neg_prepare();
 
     /* 先让该 region 在 Directory 里有 PBA：从未写过的 region 在 l2p_load_begin
      * 会直接合成「全未映射 CLEAN 行」而不发 NAND 读（注入永远不命中）。 */
@@ -3225,62 +2794,705 @@ static MunitResult test_host_group_exhaustion(const MunitParameter params[], voi
     return MUNIT_OK;
 }
 
-/* ══ 子套件 /ftl/media/negative/：注入负例（真 NAND，破坏性）══ */
+/* ══ 子套件 /ftl/negative/media/：注入负例（真 NAND，破坏性）══ */
 
-MunitTest g_negative_tests[] = {
+/* ══ /ftl/negative/media/ 子套件：按模块定向跑（同一文件、五个数组）══ */
+
+/* mig_read_success_keeps_fail_count — 单页读成功不得清零按 plane 的失败计数（MIG-02）。
+ *
+ * 覆盖：victim 的 plane0 预置 1 次历史失败，plane1 预置 `MAX-1`；只给 plane1 注入
+ *       DATA_ERROR 完成态。
+ * 判据：① plane1 达阈值标 BAD；② plane0 的读成功路径不得把它的 fail_count 清零——
+ *       否则坏页之后的页每轮成功读一遍，阈值永远不可达、同一 victim 永久活锁。
+ * 备注：victim 成对且 plane0 先读；不依赖真实坏页。 */
+
+static MunitResult test_mig_read_success_keeps_fail_count(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s  *ftl  = ftl_ut_live();
+    const DWORD lba  = neg_lba(3904U);
+    const WORD  bad0 = ftl->alloc.bad_count;
+
+    ftl_ut_trace_begin();
+    neg_make_closed_victim(lba);
+
+    const super_block_s *victim = neg_gc_pick_victim(ftl, false);
+    BYTE                 p0     = PLANE_NUM;
+    BYTE                 p1     = PLANE_NUM;
+    WORD                 g0     = FTL_GBLOCK_INVALID;
+    WORD                 g1     = FTL_GBLOCK_INVALID;
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        if (super_block_has_plane(victim, p) == false)
+        {
+            continue;
+        }
+        if (p0 == PLANE_NUM)
+        {
+            p0 = p;
+            g0 = ftl_gblock(p, victim->plane_blocks[p]);
+        }
+        p1 = p;
+        g1 = ftl_gblock(p, victim->plane_blocks[p]);
+    }
+
+    munit_assert_uint8(p0, <, PLANE_NUM);
+    munit_assert_uint8(p1, <, PLANE_NUM);
+    munit_assert_uint8(p0, !=, p1);
+
+    ftl->mig_handle->state.failure.fail_gblock[p0] = g0;
+    ftl->mig_handle->state.failure.fail_count[p0]  = 1U;
+    ftl->mig_handle->state.failure.fail_gblock[p1] = g1;
+    ftl->mig_handle->state.failure.fail_count[p1]  = (BYTE)(MIG_VICTIM_READ_FAIL_MAX - 1U);
+
+    const DWORD hits0 = fi_hits(FI_FC_STATUS_PLANE);
+
+    fi_arm_ex(FI_FC_STATUS_PLANE, p1, NEG_STUCK, FC_CMD_STATUS_DATA_ERROR);
+
+    munit_assert_true(neg_run_gc(ftl, 200000U));
+
+    munit_assert_uint32(fi_hits(FI_FC_STATUS_PLANE), >, hits0);
+    munit_assert_uint16(ftl->alloc.bad_count, ==, (WORD)(bad0 + 1U));
+    munit_assert_true(ftl_block_is_bad(&ftl->alloc.blocks[g1]));
+    munit_assert_uint8(ftl->mig_handle->state.failure.fail_count[p0], ==, 1U);
+    munit_assert_uint8(ftl->mig_handle->state.failure.fail_count[p1], ==, 0U);
+
+    fi_reset();
+
+    ftl_ut_trace_detail("mig fail-count: p0=%hhu count0=1 kept; p1=%hhu hit -> BAD; bad=%hu->%hu", p0, p1, bad0, ftl->alloc.bad_count);
+    ftl_ut_trace_summary("mig fail-count: success on p0 does not clear count, p1 marks BAD");
+
+    return MUNIT_OK;
+}
+
+/* host_write_plane_fail — 单 plane 写失败只标对应 plane 的块（MIG-09）。
+ *
+ * 覆盖：`FI_PLANE_STATUS` 在多 plane 写完成上只覆盖 plane1 的 CW 状态。
+ * 判据：`fi_hits>0`；新增 BAD 恰好 1 块且属于 plane1；plane0 块不被误标。
+ * 备注：完成态注入，不依赖真实 NAND 编程失败；写后 drain 恢复。 */
+
+static MunitResult test_host_write_plane_fail(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s  *ftl  = ftl_ut_live();
+    const DWORD lba  = neg_lba(512U);
+    const WORD  bad0 = ftl->alloc.bad_count;
+    BYTE        was_bad[FTL_BLOCK_TOTAL];
+
+    ftl_ut_trace_begin();
+
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        was_bad[g] = ftl_block_is_bad(&ftl->alloc.blocks[g]);
+    }
+
+    neg_fill(lba, NEG_LBAS, s_neg_buf);
+
+    const DWORD hits0 = fi_hits(FI_PLANE_STATUS);
+
+    fi_arm_ex(FI_PLANE_STATUS, 1U, 1U, FC_CW_STATUS_FAIL);
+
+    /* host 写是 early-ack：程序/完成可能发生在 wbuf flush（drain 内）之后。
+     * 注入必须先活到 drain 完成，不能在写函数返回后立刻 fi_reset。 */
+    (void)ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf);
+    neg_drain_to_clean(ftl);
+
+    /* 先取命中数再 fi_reset：reset 会清零 hits，原写法断言恒为 0。 */
+    const DWORD hits = fi_hits(FI_PLANE_STATUS);
+
+    fi_reset();
+    munit_assert_uint32(hits, >, hits0);
+
+    WORD new_bad       = 0U;
+    WORD new_bad_plane = 0xFFFFU;
+
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        if ((was_bad[g] == 0U) && (ftl_block_is_bad(&ftl->alloc.blocks[g]) != false))
+        {
+            new_bad++;
+            new_bad_plane = ftl_gblock_plane(g);
+        }
+    }
+
+    munit_assert_uint16(new_bad, ==, 1U);
+    munit_assert_uint8(new_bad_plane, ==, 1U);
+    munit_assert_uint16(ftl->alloc.bad_count, ==, (WORD)(bad0 + 1U));
+
+    ftl_ut_trace_summary("neg: plane1 write failure marks only plane1 block (new_bad=%hu plane=%hu)", new_bad, new_bad_plane);
+    return MUNIT_OK;
+}
+
+MunitTest g_negative_media_gc_tests[] = {
     {                (char *)"alloc_fail_bounded",                 test_alloc_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"l2p_load_fail_bounded",              test_l2p_load_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"data_read_fail_bounded",             test_data_read_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"data_write_fail_bounded",            test_data_write_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"rr_read_fail_bounded",               test_rr_read_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {               (char *)"fc_status_nand_fail",                test_fc_status_nand_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                   (char *)"seq_gate_starve",                    test_seq_gate_starve, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                    (char *)"cp_abort_phase",                     test_cp_abort_phase, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                 (char *)"cp_dir_ckpt_abort",                  test_cp_dir_ckpt_abort, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                    (char *)"bbt_write_fail",                     test_bbt_write_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {              (char *)"gc_read_fail_bounded",               test_gc_read_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"gc_write_fail_bounded",              test_gc_write_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"gc_erase_fail_bounded",              test_gc_erase_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"l2p_read_error_degrades",            test_l2p_read_error_degrades, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"journal_seq_serial_compare",         test_journal_seq_serial_compare, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                  (char *)"rr_ecc_monotonic",                   test_rr_ecc_monotonic, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"gc_read_unc_marks_bad",              test_gc_read_unc_marks_bad, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { (char *)"mig_read_success_keeps_fail_count",  test_mig_read_success_keeps_fail_count, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {             (char *)"host_write_plane_fail",              test_host_write_plane_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"gc_batch_program_fail",              test_gc_batch_program_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {          (char *)"gc_l2p_load_wait_timeout",           test_gc_l2p_load_wait_timeout, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       (char *)"flush_reports_journal_error",        test_flush_reports_journal_error, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {               (char *)"rr_mixed_plane_fail",                test_rr_mixed_plane_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"l2p_cmt_read_priority",              test_l2p_cmt_read_priority, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                    (char *)"l2p_idle_drain",                     test_l2p_idle_drain, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"l2p_flush_backpressure",             test_l2p_flush_backpressure, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"boot_corrupt_cp_restore",            test_boot_corrupt_cp_restore, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"boot_no_rebuild_loop",               test_boot_no_rebuild_loop, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"boot_degraded_reload",               test_boot_degraded_reload, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                 (char *)"iface_sparse_page",                  test_iface_sparse_page, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"blank_ff_trim_rewrite",              test_blank_ff_trim_rewrite, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"iface_pair_cmd_guards",              test_iface_pair_cmd_guards, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                (char *)"op_req_table_guard",                 test_op_req_table_guard, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                  (char *)"pend_table_guard",                   test_pend_table_guard, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"host_read_multiplane_stats",         test_host_read_multiplane_stats, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       (char *)"md_alias_full_rebuild_repro",        test_md_alias_full_rebuild_repro, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"bbt_mark_bad_idempotent",            test_bbt_mark_bad_idempotent, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"alloc_rewind_underflow",             test_alloc_rewind_underflow, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              (char *)"alloc_spare_skip_bad",               test_alloc_spare_skip_bad, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"wl_erase_resets_read_count",         test_wl_erase_resets_read_count, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                 (char *)"wl_skip_bad_plane",                  test_wl_skip_bad_plane, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"alloc_closed_list_full",             test_alloc_closed_list_full, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       (char *)"alloc_closed_plane_bad_drop",        test_alloc_closed_plane_bad_drop, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     (char *)"alloc_close_bad_pair_no_entry",      test_alloc_close_bad_pair_no_entry, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       (char *)"wl_destination_prepare_fail",        test_wl_destination_prepare_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         (char *)"wl_snapshot_entry_trigger",          test_wl_snapshot_entry_trigger, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      (char *)"rr_predictive_skip_bad_plane",       test_rr_predictive_skip_bad_plane, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       (char *)"mig_block_sub_valid_no_wrap",        test_mig_block_sub_valid_no_wrap, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {      (char *)"gc_partial_plane_erase_abort",       test_gc_partial_plane_erase_abort, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {             (char *)"gc_systemic_read_fuse",              test_gc_systemic_read_fuse, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {               (char *)"bbt_kick_candidates",                test_bbt_kick_candidates, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"journal_ring_erase_fail",            test_journal_ring_erase_fail, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"l2p_pool_starve_flush",              test_l2p_pool_starve_flush, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"md_backup_copy_corrupt",             test_md_backup_copy_corrupt, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {(char *)"gc_write_complete_fail_closes_cold", test_gc_write_complete_fail_closes_cold, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             (char *)"host_group_exhaustion",              test_host_group_exhaustion, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {                                        NULL,                                    NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+};
+
+MunitTest g_negative_media_l2p_tests[] = {
+    {  (char *)"l2p_load_fail_bounded",   test_l2p_load_fail_bounded, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {(char *)"l2p_read_error_degrades", test_l2p_read_error_degrades, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  (char *)"l2p_cmt_read_priority",   test_l2p_cmt_read_priority, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         (char *)"l2p_idle_drain",          test_l2p_idle_drain, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { (char *)"l2p_flush_backpressure",  test_l2p_flush_backpressure, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  (char *)"l2p_pool_starve_flush",   test_l2p_pool_starve_flush, neg_setup, neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                             NULL,                         NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+};
+
+/* bbt_ring_erase_fail_advances — BBT ring 擦失败必须标坏并作废游标，不得原地重试（BBT-19）。
+ *
+ * 覆盖：`ftl_bbt_callback` 收到 `BBT_JOB_ERASE` 的失败完成态。
+ * 判据：① 目标 ring 块按 plane_mask 全部标 BAD；② `bbt.cursor_valid=false`（下次
+ *       job 必须重新定位到新池）；③ phase 回 IDLE、waiting 清零（不会无限重试同一块）。
+ * 备注：直接喂失败完成态，不依赖真擦失败；结束时还原 BST/BBT RAM 状态并 reboot，
+ *       不向 NAND 写 BBT record。 */
+
+static MunitResult test_bbt_ring_erase_fail_advances(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl  = ftl_ut_live();
+    alc_s     *a    = &ftl->alloc;
+    md_ring_s *ring = &a->pools->bbt;
+
+    ftl_ut_trace_begin();
+    neg_drain_to_clean(ftl);
+
+    munit_assert_uint16(ring->block_count, >=, 2U);
+    munit_assert_int(a->bbt.handle.phase, ==, BBT_JOB_IDLE);
+
+    const WORD rpb   = md_ring_records_per_block(ring);
+    const WORD total = md_ring_total_records(ring);
+
+    munit_assert_uint16(rpb, >, 0U);
+    munit_assert_uint16(total, >, 0U);
+
+    const WORD write_idx0 = 0U; /* 块边界：该槽对应 ring.blocks[0] */
+    const WORD block      = ring->blocks[0];
+
+    bst_block_s snaps[PLANE_NUM];
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        snaps[p] = a->blocks[ftl_gblock(p, block)];
+    }
+
+    const WORD  bad0     = a->bad_count;
+    const BOOL  dirty0   = a->bbt.dirty;
+    const DWORD gen0     = a->bbt.dirty_gen;
+    const BOOL  rebuild0 = a->bbt.rebuild_required;
+    const BOOL  cur0     = a->bbt.cursor_valid;
+    const WORD  idx0     = a->bbt.write_idx;
+    const BOOL  pools_d0 = (a->pools != NULL) ? a->pools->dirty : false;
+
+    fc_cmd_s       *cmd = fc_command_alloc();
+    fc_cmd_status_s st;
+
+    munit_assert_not_null(cmd);
+    memset(&st, 0, sizeof(st));
+    st.cmd_id = cmd->cmd_id;
+    st.status = FC_CMD_STATUS_NAND_FAIL;
+
+    a->bbt.write_idx        = write_idx0;
+    a->bbt.handle.phase     = BBT_JOB_ERASE;
+    a->bbt.handle.waiting   = true;
+    a->bbt.handle.dirty_gen = a->bbt.dirty_gen;
+
+    ftl_bbt_callback(ftl, &st, a);
+
+    munit_assert_int(a->bbt.handle.phase, ==, BBT_JOB_IDLE);
+    munit_assert_false(a->bbt.handle.waiting);
+    munit_assert_false(a->bbt.cursor_valid);
+    munit_assert_uint16(a->bad_count, ==, (WORD)(bad0 + PLANE_NUM));
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        munit_assert_true(ftl_block_is_bad(&a->blocks[ftl_gblock(p, block)]));
+    }
+
+    /* 还原（只验证 RAM 状态机；失败路径不写 NAND record）。 */
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        a->blocks[ftl_gblock(p, block)] = snaps[p];
+    }
+
+    a->bad_count            = bad0;
+    a->bbt.dirty            = dirty0;
+    a->bbt.dirty_gen        = gen0;
+    a->bbt.rebuild_required = rebuild0;
+    a->bbt.cursor_valid     = cur0;
+    a->bbt.write_idx        = idx0;
+    a->bbt.handle.phase     = BBT_JOB_IDLE;
+    a->bbt.handle.waiting   = false;
+    if (a->pools != NULL)
+    {
+        a->pools->dirty = pools_d0;
+    }
+
+    fi_reset();
+    ftl_ut_reboot_from_media();
+
+    ftl_ut_trace_detail("bbt erase fail: ring blk=%hu write_idx=%hu -> BAD x%hhu, cursor invalid", block, write_idx0, (BYTE)PLANE_NUM);
+    ftl_ut_trace_summary("bbt erase fail: marks ring block BAD and invalidates cursor (no livelock)");
+
+    return MUNIT_OK;
+}
+
+/* bbt_ring_reload_latest — BBT ring 多圈写后 reload 必须选最新 sequence（BBT-18）。 */
+static MunitResult test_bbt_ring_reload_latest(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+    alc_s     *a   = &ftl->alloc;
+
+    ftl_ut_trace_begin();
+    neg_drain_to_clean(ftl);
+
+    const WORD total = md_ring_total_records(&a->pools->bbt);
+
+    munit_assert_uint16(total, >=, 2U);
+
+    const WORD bad0     = a->bad_count;
+    DWORD      last_seq = a->bbt.sequence;
+
+    /* 多写一圈+2 条，强制 ring 轮转。 */
+    for (WORD i = 0U; i < (WORD)(total + 2U); i++)
+    {
+        bbt_dirty_note(a);
+        munit_assert_int(bbt_save(a), ==, FTL_OK);
+        last_seq = a->bbt.sequence;
+    }
+
+    ftl_ut_reboot_from_media();
+
+    munit_assert_uint32(a->bbt.sequence, >=, last_seq);
+    munit_assert_uint16(a->bad_count, ==, bad0);
+
+    ftl_ut_trace_summary("bbt ring reload: %hu records written, seq=%lu retained", total, a->bbt.sequence);
+    return MUNIT_OK;
+}
+
+/* bbt_metadata_empty_user_data_kept — 元数据区全空但用户区有数据时不得判空片（BBT-05）。 */
+static MunitResult test_bbt_metadata_empty_user_data_kept(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+    BYTE       page[PAGE_MAIN_SIZE];
+
+    memset(page, 0x3C, sizeof(page));
+
+    /* 用户区抽样点写一页，再擦掉全部固定元数据。 */
+    const WORD start = FTL_METADATA_AREA_END;
+    const WORD span  = (WORD)(BLOCKS_PER_PLANE - start);
+    WORD       step  = (WORD)(span / 8U);
+    if (step == 0U)
+    {
+        step = 1U;
+    }
+
+    const DWORD upba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, start, 0U, 0U, 0U);
+    munit_assert_int(ftl_sync_write_page(upba, page, sizeof(page), FTL_PAGE_CFG_DATA(0U)), ==, FTL_OK);
+
+    for (WORD block = 0U; block < FTL_METADATA_AREA_END; block++)
+    {
+        const DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, 0U, 0U, 0U);
+        (void)ftl_sync_erase_block_multi_plane(pba);
+    }
+
+    munit_assert_true(bbt_medium_has_ftl_data(&ftl->alloc));
+
+    return MUNIT_OK;
+}
+
+/* bbt_format_verify_runs — format --verify 路径必须可执行且保留 BBT 池（BBT-16）。 */
+static MunitResult test_bbt_format_verify_runs(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+
+    munit_assert_int(pfr_media_format(ftl, true), ==, FTL_OK);
+
+    return MUNIT_OK;
+}
+
+/* jrn_resume_cross_block_erase_fail — resume 跨块擦失败必须保留 need_erase，首次写不得落未擦页（BOOT-10）。 */
+static MunitResult test_jrn_resume_cross_block_erase_fail(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+    l2p_jrn_s *j   = ftl->journal;
+
+    const BYTE cur0  = j->handle.state.current_block;
+    const BYTE page0 = j->handle.state.current_page;
+    const BOOL need0 = j->handle.job.need_erase;
+    const BOOL full0 = j->handle.state.ring_full;
+
+    jrn_page_ref_s latest;
+
+    memset(&latest, 0, sizeof(latest));
+    latest.block       = cur0;
+    latest.page        = (BYTE)(PAGES_PER_BLOCK - 1U);
+    latest.entry_count = 1U;
+
+    j->handle.job.need_erase  = false;
+    j->handle.state.ring_full = false;
+
+    /* resume 的跨块擦是**同步**擦：注入必须在 resume 之前武装，否则擦已经成功。 */
+    const DWORD hits0 = fi_hits(FI_MIG_ERASE_FAIL);
+
+    fi_arm(FI_MIG_ERASE_FAIL, NEG_STUCK);
+    jrn_resume(j, &latest, 0U);
+
+    munit_assert_uint32(fi_hits(FI_MIG_ERASE_FAIL), >, hits0);
+    munit_assert_true(j->handle.job.need_erase);
+
+    /* 擦除提交失败：need_erase 必须保留，不能放行首次写。 */
+    ftl->flags.bg_suspend = 1U;
+
+    jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
+    jrn_handle(j, &trigger);
+
+    munit_assert_true(j->handle.job.need_erase);
+
+    fi_reset();
+    ftl->flags.bg_suspend = false;
+
+    j->handle.state.current_block = cur0;
+    j->handle.state.current_page  = page0;
+    j->handle.job.need_erase      = need0;
+    j->handle.state.ring_full     = full0;
+    j->handle.job.phase           = JRN_IDLE;
+
+    return MUNIT_OK;
+}
+
+MunitTest g_negative_media_meta_tests[] = {
+    {(char *)"jrn_resume_cross_block_erase_fail", test_jrn_resume_cross_block_erase_fail,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"bbt_format_verify_runs",            test_bbt_format_verify_runs, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {(char *)"bbt_metadata_empty_user_data_kept", test_bbt_metadata_empty_user_data_kept, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"bbt_ring_reload_latest",            test_bbt_ring_reload_latest,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                   (char *)"cp_abort_phase",                    test_cp_abort_phase,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                (char *)"cp_dir_ckpt_abort",                 test_cp_dir_ckpt_abort,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                   (char *)"bbt_write_fail",                    test_bbt_write_fail,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      (char *)"flush_reports_journal_error",       test_flush_reports_journal_error,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      (char *)"md_alias_full_rebuild_repro",       test_md_alias_full_rebuild_repro,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          (char *)"bbt_mark_bad_idempotent",           test_bbt_mark_bad_idempotent,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              (char *)"bbt_kick_candidates",               test_bbt_kick_candidates,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"bbt_ring_erase_fail_advances",      test_bbt_ring_erase_fail_advances,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          (char *)"journal_ring_erase_fail",           test_journal_ring_erase_fail, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"md_backup_copy_corrupt",            test_md_backup_copy_corrupt,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                                       NULL,                                   NULL,               NULL,                  NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+};
+
+/* boot_read_fail_policy — 启动期读失败的归因：probe 真读失败回退全量重建，降级只丢范围（BOOT-08/11/18/L2P-04）。
+ *
+ * 覆盖（参数 kind）：
+ *   · probe_load：L2P 主/备副本**提交层**读失败 ⇒ probe 的 l2p_read_errors 非 0，
+ *     `blocks_restored=false`（快照作废、全量重建）；
+ *   · scoped_degrade：主/备副本**完成态**持续 DATA_ERROR ⇒ L2P 重试后降级为
+ *     全未映射，probe 计入 degraded、快照保留 ⇒ `blocks_restored=true && scoped=true`；
+ *   · journal_scan：Journal 扫描页读失败 ⇒ 回放不完整，回退全量重建。
+ * 判据：启动结果的 `blocks_restored/scoped` 与失败类型对应；不得把降级误报成完整
+ *       restored，也不得把 probe 真读失败静默当成成功。
+ * 备注：注入键均为精确 PBA；boot 后先断言 fi_hits 证明注入到达。 */
+
+static MunitResult test_boot_read_fail_policy(const MunitParameter params[], void *data)
+{
+    (void)data;
+
+    const char *kind = munit_parameters_get(params, "kind");
+    ftl_ctx_s  *ftl  = ftl_ut_live();
+    const DWORD lba  = neg_lba(4608U);
+
+    munit_assert_not_null(kind);
+
+    ftl_ut_trace_begin();
+
+    const DWORD lba_keep = neg_lba(1536U);
+
+    neg_fill(lba, NEG_LBAS, s_neg_buf);
+    munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
+    neg_fill(lba_keep, NEG_LBAS, s_neg_buf);
+    munit_assert_true(ftl_ut_host_write(lba_keep, NEG_LBAS, s_neg_buf));
+    munit_assert_true(ftl_ut_flush());
+    neg_wait_cp_idle(ftl, 200000U);
+
+    /* CP 的 region_bitmap 只快照「起点时脏」的 region；先 flush 再 CP 会让 bitmap
+     * 为空 ⇒ boot 不预载任何 L2P region，probe_load/scoped_degrade 的注入永远不命中。
+     * 因此再写一笔同一 region，保持它在下一次 CP 起点时是脏的。 */
+    neg_fill(lba, NEG_LBAS, s_neg_buf);
+    munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
+
+    const DWORD region = lba_to_global_region(lba);
+    const WORD  local  = l2p_global_to_local_region(region);
+
+    /* host 写是 early-ack：它在数据落盘 / L2P 映射提交之前就返回。CP 起点只快照
+     * 此刻 `region_dirty_bitmap` 已置位的 region；若直接 force CP，-O2 时序下映射
+     * 尚未提交 ⇒ 快照为空 ⇒ boot 不预载 ⇒ 下面的注入永远不命中（hits==0）。
+     * 先泵到实时脏位建立，并在 CP 后确认快照真的包含该 region（前置判据，C7）。 */
+    for (DWORD i = 0U; (i < 200000U) && !l2p_region_dirty_live(ftl->cache, region); i++)
+    {
+        timer_scheduler_poll();
+        ftl_service_pump();
+        ftl_service(ftl);
+    }
+    munit_assert_true(l2p_region_dirty_live(ftl->cache, region));
+
+    /* L2P 回写的 WAL 次序闸门要求覆盖该映射的 Journal 条目已落盘；先把 Journal
+     * 页推出去（不动 L2P 脏位），再 force CP。否则 CP 的 flush 阶段可能因闸门
+     * 等待而中止（neg_cp_force 只看 active，失败时同样返回 true）。 */
+    neg_journal_flush_only(ftl);
+    munit_assert_true(neg_cp_force(ftl, 200000U, NULL));
+    const BOOL  cp_failed_before = ftl->cp_handle->failed;
+    const DWORD cp_fail_phase    = (DWORD)ftl->cp_handle->fail_phase;
+
+    if (cp_failed_before)
+    {
+        printf("\r\n[DIAG] CP failed phase=%lu region=%lu dirty=%d snapshot=0x%08lX\r\n", cp_fail_phase, region, l2p_region_dirty_live(ftl->cache, region), ftl->cp_handle->region_bitmap[local / 32U]);
+    }
+    munit_assert_false(cp_failed_before);
+    munit_assert_uint32(ftl->cp_handle->region_bitmap[local / 32U] & (1UL << (local % 32U)), !=, 0U);
+
+    const DWORD prim = md_entry_find(ftl->metadata_dir, METADATA_TYPE_L2P_REGION, local);
+    const DWORD back = md_backup_find(ftl->metadata_dir, local);
+
+    munit_assert_true(pba_is_valid(prim));
+    munit_assert_true(pba_is_valid(back));
+
+    DWORD hits_before = 0U;
+
+    if (strcmp(kind, "probe_load") == 0)
+    {
+        /* 主/备副本必须**同时**失败才会进入 probe 的 l2p_read_errors 路径；
+         * fi_arm_at 每个 fault 只有一个槽，连续两次会互相覆盖 ⇒ 用双 key API。 */
+        hits_before = fi_hits(FI_L2P_LOAD_FAIL);
+        fi_arm_ex2(FI_L2P_LOAD_FAIL, prim, back, 3U, 0U);
+    }
+    else if (strcmp(kind, "scoped_degrade") == 0)
+    {
+        hits_before = fi_hits(FI_FC_STATUS_PBA);
+        fi_arm_ex2(FI_FC_STATUS_PBA, prim, back, NEG_STUCK, FC_CMD_STATUS_DATA_ERROR);
+    }
+    else if (strcmp(kind, "journal_scan") == 0)
+    {
+        hits_before = fi_hits(FI_L2P_LOAD_FAIL);
+
+        /* 任意一个 Journal 环块读失败就足以让 scan 记 ring_read_error；只钉一个
+         * key 即可，不能循环 fi_arm_at（后一次会覆盖前一次）。 */
+        const DWORD jpba = pba_make(ftl->journal->topo.ch, ftl->journal->topo.ce, ftl->journal->topo.lun, ftl->journal->blocks[0], 0U, 0U, 0U);
+
+        fi_arm_at(FI_L2P_LOAD_FAIL, jpba, 1U);
+    }
+    else
+    {
+        munit_assert_string_equal(kind, "journal_apply");
+
+        /* CP 后再写一笔，制造 journal > CP 水位 ⇒ boot 走 replay。
+         * host 写是 early-ack，Journal 页仍在页缓冲；用 journal-only flush 落盘，
+         * 不能走 host FLUSH（它会顺带 kick CP，把 journal 覆盖进 CP 水位）。 */
+        neg_fill(lba, NEG_LBAS, s_neg_buf);
+        munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
+        neg_journal_flush_only(ftl);
+
+        hits_before = fi_hits(FI_JRN_REPLAY_APPLY_FAIL);
+        fi_arm(FI_JRN_REPLAY_APPLY_FAIL, 1U);
+    }
+
+    ftl_ut_reboot_from_media();
+
+    const pfr_boot_result_s *r = ftl_ut_last_boot_result();
+
+    munit_assert_not_null(r);
+
+    const DWORD hits = (strcmp(kind, "scoped_degrade") == 0)  ? (fi_hits(FI_FC_STATUS_PBA) - hits_before)
+                       : (strcmp(kind, "journal_apply") == 0) ? (fi_hits(FI_JRN_REPLAY_APPLY_FAIL) - hits_before)
+                                                              : (fi_hits(FI_L2P_LOAD_FAIL) - hits_before);
+
+    if (hits == 0U)
+    {
+        /* 注入没到达：把 boot 走了哪条恢复路径、目标 region 当前行状态一次打全，
+         * 区分「preload 未发读」与「读了但 key 不匹配」。 */
+        DWORD line_state = 0xFFFFFFFFUL;
+
+        for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
+        {
+            l2p_line_info_s info;
+
+            l2p_line_get(ftl->cache, i, &info);
+            if ((info.state != L2P_CACHE_INVALID) && (info.region_id == region))
+            {
+                line_state = (DWORD)info.state;
+                break;
+            }
+        }
+
+        printf("\r\n[DIAG] boot_read_fail kind=%s prim=0x%08lX back=0x%08lX hits=%lu boot=%d cp_seq=%lu jrn=%lu restored=%d scoped=%d degraded=%d line=%lu cp_failed=%d phase=%lu\r\n", kind, prim, back, hits, (int)r->boot_type, r->cp_sequence, r->journal_entries, r->blocks_restored, r->scoped, l2p_is_region_degraded(ftl->cache, region), line_state, cp_failed_before, cp_fail_phase);
+    }
+
+    munit_assert_uint32(hits, >, 0U);
+
+    if (strcmp(kind, "probe_load") == 0)
+    {
+        munit_assert_false(r->blocks_restored);
+    }
+    else if (strcmp(kind, "scoped_degrade") == 0)
+    {
+        munit_assert_true(r->blocks_restored);
+        munit_assert_true(r->scoped);
+        munit_assert_true(l2p_is_region_degraded(ftl->cache, region));
+    }
+    else
+    {
+        munit_assert_false(r->blocks_restored);
+    }
+
+    fi_reset();
+
+    /* boot 后另一 LBA 仍可读（回退重建路径不能把整盘映射丢掉）。 */
+    memset(s_neg_buf, 0, sizeof(s_neg_buf));
+    munit_assert_true(ftl_ut_host_read(lba_keep, NEG_LBAS, s_neg_buf));
+    neg_assert_data(lba_keep, NEG_LBAS, s_neg_buf);
+
+    ftl_ut_trace_detail("boot read-fail: kind=%s hits=%lu restored=%d scoped=%d degraded=%d", kind, hits, r->blocks_restored, r->scoped, l2p_is_region_degraded(ftl->cache, region));
+    ftl_ut_trace_summary("boot read-fail: kind=%s -> restored=%d scoped=%d", kind, r->blocks_restored, r->scoped);
+
+    return MUNIT_OK;
+}
+
+/* boot_md_load_fail_refuses — 有效 CP 但 Directory 全部不可读时必须拒绝启动（BOOT-09）。 */
+static MunitResult test_boot_md_load_fail_refuses(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s  *ftl = ftl_ut_live();
+    const DWORD lba = neg_lba(1024U);
+
+    ftl_ut_trace_begin();
+
+    neg_fill(lba, NEG_LBAS, s_neg_buf);
+    munit_assert_true(ftl_ut_host_write(lba, NEG_LBAS, s_neg_buf));
+    munit_assert_true(ftl_ut_flush());
+    munit_assert_true(neg_cp_force(ftl, 200000U, NULL));
+
+    md_ring_s  ring  = ftl->metadata_dir->pools.dir_ckpt;
+    const WORD total = md_ring_total_records(&ring);
+    BYTE       junk[PAGE_MAIN_SIZE];
+
+    memset(junk, 0x5A, sizeof(junk));
+
+    for (WORD rec = 0U; rec < total; rec++)
+    {
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            const DWORD pba = md_ring_addr_plane(&ring, &ftl->topo, rec, 0U, p);
+
+            if (pba_is_valid(pba))
+            {
+                munit_assert_int(ftl_sync_write_page(pba, junk, sizeof(junk), FTL_PAGE_CFG_META()), ==, FTL_OK);
+            }
+        }
+    }
+
+    pfr_boot_result_s result;
+
+    memset(&result, 0, sizeof(result));
+    munit_assert_int(ftl_ut_try_reboot_from_media(&result), !=, FTL_OK);
+    munit_assert_true(ftl_ut_live()->flags.md_load_failed);
+
+    return MUNIT_OK;
+}
+
+/* boot_page0_hole_counts_full_block — page0 空白但 page1 有数据必须按整块处理（BOOT-06）。 */
+static MunitResult test_boot_page0_hole_counts_full_block(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl   = ftl_ut_live();
+    const BYTE plane = 0U;
+    const WORD block = (WORD)(FTL_METADATA_AREA_END + 100U);
+    BYTE       page[PAGE_MAIN_SIZE];
+
+    memset(page, 0x3C, sizeof(page));
+
+    const DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 1U, 0U);
+
+    munit_assert_int(ftl_sync_write_page(pba, page, sizeof(page), FTL_PAGE_CFG_DATA(0U)), ==, FTL_OK);
+
+    munit_assert_uint8(pfr_test_scan_write_pointer(ftl, plane, block), ==, PAGES_PER_BLOCK);
+
+    return MUNIT_OK;
+}
+
+/* boot_cp_read_fail_refuses_format — CP 读失败必须拒绝格式化，不能擦整片（BOOT-03）。 */
+static MunitResult test_boot_cp_read_fail_refuses_format(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s *ftl = ftl_ut_live();
+
+    /* CP 探测可能先走 locate 再重读 Header；用「任意 META 读失败」覆盖这条链，
+     * 不能只钉 cp_handle->hdr.addr（它不一定等于 probe 实际读的镜像页）。 */
+    const DWORD hits0 = fi_hits(FI_L2P_LOAD_FAIL);
+
+    fi_arm(FI_L2P_LOAD_FAIL, NEG_STUCK);
+
+    BOOL need_format = false;
+    munit_assert_int(pfr_media_check_format(ftl, &need_format), ==, FTL_ERROR);
+    munit_assert_uint32(fi_hits(FI_L2P_LOAD_FAIL), >, hits0);
+
+    fi_reset();
+
+    return MUNIT_OK;
+}
+
+MunitTest g_negative_media_boot_tests[] = {
+    { (char *)"boot_cp_read_fail_refuses_format",  test_boot_cp_read_fail_refuses_format, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {(char *)"boot_page0_hole_counts_full_block", test_boot_page0_hole_counts_full_block, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {        (char *)"boot_md_load_fail_refuses",         test_boot_md_load_fail_refuses, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {          (char *)"boot_corrupt_cp_restore",           test_boot_corrupt_cp_restore,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {             (char *)"boot_no_rebuild_loop",              test_boot_no_rebuild_loop,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {             (char *)"boot_degraded_reload",              test_boot_degraded_reload,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,                    NULL},
+    {            (char *)"boot_read_fail_policy",             test_boot_read_fail_policy,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, s_boot_fail_kind_params},
+    {                                       NULL,                                   NULL,               NULL,                  NULL,             MUNIT_TEST_OPTION_NONE,                    NULL},
+};
+
+MunitTest g_negative_media_if_tests[] = {
+    {    (char *)"data_read_fail_bounded",     test_data_read_fail_bounded,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   (char *)"data_write_fail_bounded",    test_data_write_fail_bounded,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      (char *)"rr_read_fail_bounded",       test_rr_read_fail_bounded,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       (char *)"fc_status_nand_fail",        test_fc_status_nand_fail,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"seq_gate_starve",            test_seq_gate_starve,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       (char *)"rr_mixed_plane_fail",        test_rr_mixed_plane_fail,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         (char *)"iface_sparse_page",          test_iface_sparse_page, neg_isolated_setup, neg_isolated_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"blank_ff_trim_rewrite",      test_blank_ff_trim_rewrite,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {(char *)"host_read_multiplane_stats", test_host_read_multiplane_stats,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"host_group_exhaustion",      test_host_group_exhaustion,          neg_setup,          neg_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                                NULL,                            NULL,               NULL,                  NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

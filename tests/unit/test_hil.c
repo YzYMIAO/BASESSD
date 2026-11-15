@@ -1,5 +1,5 @@
 /*
- * test_hil.c — /hil/：HIL 板端 UT（真 NAND/FTL，无 mock）
+ * test_hil.c — /hil/{contract,io}/：HIL 板端 UT（真 NAND/FTL，无 mock）
  *
  * 覆盖 HIL 能被固件直接驱动的部分：
  *   · controller 状态机 / init（缺槽、拓扑不符）/ LBA 范围 / submit 边界
@@ -17,6 +17,7 @@
 
 #include "cli.h" /* g_ctrl（main.c 定义） */
 #include "controller.h"
+#include "dma.h"
 #include "fc_interface.h" /* fc_get_resource_stats（teardown 排空判据） */
 #include "ftl.h"
 #include "ftl_op.h" /* ftl_op_req_count */
@@ -796,16 +797,33 @@ static MunitResult test_hil_trim_busy(const MunitParameter params[], void *data)
 
 /* ══ 子套件 /hil/ ══ */
 
-MunitTest g_hil_tests[] = {
-    {       (char *)"state_machine",        test_hil_state_machine, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"init_ready",           test_hil_init_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   (char *)"init_missing_slot",    test_hil_init_missing_slot, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  (char *)"init_topo_mismatch",   test_hil_init_topo_mismatch, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"host_queue",           test_hil_host_queue, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"lba_range_ok",         test_hil_lba_range_ok, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    (char *)"submit_not_ready",     test_hil_submit_not_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"submit_edges",         test_hil_submit_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         (char *)"is_complete",          test_hil_is_complete, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+/* ══ 子套件 /hil/contract/（契约）与 /hil/io/（真实 I/O）══ */
+
+/* hil_uart_dma_init_returns — UART TX DMA 初始化返回值语义必须正确（PLAT-13）。 */
+static MunitResult test_hil_uart_dma_init_returns(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    munit_assert_int(dma_port_uart_tx_init(), ==, FUNC_STATUS_SUCCESS);
+    return MUNIT_OK;
+}
+
+MunitTest g_hil_contract_tests[] = {
+    {(char *)"uart_dma_init_returns", test_hil_uart_dma_init_returns, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        (char *)"state_machine",         test_hil_state_machine, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"init_ready",            test_hil_init_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    (char *)"init_missing_slot",     test_hil_init_missing_slot, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   (char *)"init_topo_mismatch",    test_hil_init_topo_mismatch, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"host_queue",            test_hil_host_queue, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         (char *)"lba_range_ok",          test_hil_lba_range_ok, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"submit_not_ready",      test_hil_submit_not_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         (char *)"submit_edges",          test_hil_submit_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          (char *)"is_complete",           test_hil_is_complete, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                           NULL,                           NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+};
+
+MunitTest g_hil_io_tests[] = {
     {(char *)"write_read_roundtrip", test_hil_write_read_roundtrip, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {(char *)"write_flush_readback", test_hil_write_flush_readback, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {           (char *)"flush_job",            test_hil_flush_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

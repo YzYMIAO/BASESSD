@@ -7,8 +7,7 @@
  *          → fc_nand_engine_set_armed(1) → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → usb_msc_init → usb_device_init
- *          → while(1) { cli_service_poll; ftl_service | fc_service;
- *                       usb_msc_task; usb_device_task; timer_scheduler_poll; }
+ *          → while(1) { stack_guard_check; cli_service_poll; ssd_runtime_pump; }
  * 关键约定：
  *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
  *     因此 fc_init 失败时 NAND 根本不会被初始化。
@@ -33,6 +32,7 @@
 #include "log.h"
 #include "metadata.h"
 #include "power_failure_recovery.h"
+#include "runtime.h"
 #include "stack_guard.h"
 #include "timer.h"
 // #include "led.h"
@@ -694,6 +694,42 @@ void _init(void)
  * 心跳（sys_init 配置完时钟树后立即启动）。
  */
 
+/**
+ * @brief 推进一次后台服务：FTL/FC → controller → USB → timer。
+ *
+ * @note 主循环和需要同步等待完成的 CLI 命令共用本函数；顺序必须保持
+ *       controller 在 USB 之前，USB 前端同一轮才能看到 complete_flag。
+ * @note 不解析 CLI、不调用 cli_service_poll —— 避免命令 handler 重入解析器。
+ */
+void ssd_runtime_pump(void)
+{
+    if (g_ftl_ready)
+    {
+        /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
+        ftl_service_pump();
+
+        /* ② 逐 die 后台：host 补发 + 后台调度 */
+        for (BYTE die = 0U; die < DIE_MAX; die++)
+        {
+            ftl_service(ssd_ftl_die_get(die));
+        }
+    }
+    else
+    {
+        (void)fc_service();
+    }
+
+    /* Controller 自己的异步命令（FLUSH / TRIM）：每轮推进 + 完成回执。
+     * 必须在 USB 任务之前——USB 前端同一轮就能看到 complete_flag。 */
+    ssd_controller_service(&g_ctrl);
+
+    /* USB：先让 MSC 前端检查在飞请求（提交/回填），再让协议栈处理事件。 */
+    usb_msc_task();
+    usb_device_task();
+
+    timer_scheduler_poll();
+}
+
 int main(void)
 {
     nand_result_e nand_init_result;
@@ -836,13 +872,14 @@ int main(void)
 
     cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──
-     *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
-     *   g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
-     *                     再对**每个**实例调 ftl_service()（host 补发 / 后台调度）。
-     *                     ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
-     *                       journal / checkpoint / bbt / GC 永不推进（序 4）。
-     *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
-     *   timer_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
+     *   cli_service_poll() —— CLI 解析（含 `test` 单元测试入口）。
+     *   ssd_runtime_pump() —— 后台服务统一入口，顺序与 CLI 同步命令共用：
+     *     g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着。
+     *     g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
+     *                       再对**每个**实例调 ftl_service()（host 补发 / 后台调度）。
+     *                       ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
+     *                         journal / checkpoint / bbt / GC 永不推进（序 4）。
+     *     controller → USB → timer_scheduler_poll 的先后顺序见 ssd_runtime_pump()。
      *   All command parsing and scheduled storage work remain outside ISR context. */
     while (1)
     {
@@ -851,31 +888,6 @@ int main(void)
          * 放在循环**最前**：上一轮（含 CLI 命令 / FTL 后台）若踩了栈，这里先报。 */
         stack_guard_check();
         cli_service_poll();
-        if (g_ftl_ready)
-        {
-            /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
-            ftl_service_pump();
-
-            /* ② 逐 die 后台：host 补发 + 后台调度 */
-            for (BYTE die = 0U; die < DIE_MAX; die++)
-            {
-                ftl_service(ssd_ftl_die_get(die));
-            }
-        }
-        else
-        {
-            (void)fc_service();
-        }
-
-        /* Controller 自己的异步命令（FLUSH / TRIM）：每轮推进 + 完成回执。
-         * 必须在 USB 任务之前——USB 前端同一轮就能看到 complete_flag。 */
-        ssd_controller_service(&g_ctrl);
-
-        /* USB：先让 MSC 前端检查在飞请求（提交/回填），再让协议栈处理事件
-         * （tud_msc_async_io_done 会在这里把数据/CSW 发出去）。两者都非阻塞。 */
-        usb_msc_task();
-        usb_device_task();
-
-        timer_scheduler_poll();
+        ssd_runtime_pump();
     }
 }

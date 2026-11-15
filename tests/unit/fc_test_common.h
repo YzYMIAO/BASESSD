@@ -2,7 +2,7 @@
 #define FC_TEST_COMMON_H
 
 /*
- * fc_test_common.h — FC-NAND 单元测试共享夹具（Level 2 / Level 3 共用）
+ * fc_test_common.h — FC-NAND 单元测试共享夹具（data_path / lifecycle 共用）
  *
  * 本模块只做两件事：
  *   ① 把「测试用的读写擦」塌缩成 5 个按语义命名的页 helper；
@@ -28,7 +28,7 @@
  * 要检查每 CW 细节请在 release 之前由 helper 内部做（见「校验」）。
  *
  * 不走页路径的用例（RESET / READ_ID / GET_FEATURES / cache 序列 / 内部搬移 /
- * RANDOM_DATA_READ，以及 Level 2 的 buffer 级用例）走下面的 `test_cmd_build()`——
+ * RANDOM_DATA_READ，以及 data_path 的 buffer 级用例）走下面的 `test_cmd_build()`——
  * 它只建链、不提交，调用者拿到命令后自行 `fc_data_path_*` 或提交。
  * 5 个页 helper 本身就建立在它之上。
  *
@@ -130,7 +130,7 @@
  *   页 helper 一律取 `meta = pba_from_addr(本页地址)` —— 写读同页自然一致，
  *   且**页地址整体进了 META**，于是「读错页」会被 Pass 4 抓到。
  *   ⚠ 唯一例外是 test_read_page：meta 提成了形参，因为**内部搬移**要让读命令声明
- *     **源页** PBA（那页的 META 随数据一起搬到了目标块）。详见 test_fc_level3.c。
+ *     **源页** PBA（那页的 META 随数据一起搬到了目标块）。详见 test_fc_lifecycle.c。
  *
  *   内联用例想跳过 Pass 4 ② 可传 FC_META_UNKNOWN（不知道页身份的路径）。
  *   ⚠ 写路径不能用 FC_META_UNKNOWN——Stage 0 会把它原样写进 NAND，
@@ -154,7 +154,7 @@
 #define TEST_PLANE_BM(p)  ((BYTE)(1U << (p)))
 #define TEST_PLANE_BM_ALL ((BYTE)((1U << PLANE_NUM) - 1U))
 
-#define TEST_BLOCK      (100U) /* 主测试块（与 Level 3 的 BLOCK_TEST 一致） */
+#define TEST_BLOCK      (100U) /* 主测试块（与 lifecycle 的 BLOCK_TEST 一致） */
 #define TEST_BLOCK_DEST (102U) /* 内部搬移 / 目标块 */
 #define TEST_PAGE       (32U)  /* 单页用例的默认页；非 0 使加扰种子非 0 */
 
@@ -229,7 +229,7 @@ fc_cmd_s *test_cmd_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD meta, c
 fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD meta, const fc_cmd_cfg_s *config);
 
 /* ── 内联用例用的低层原语 ──
- * 需要**自己拿着命令**做事的用例（Level 3 的 READ_ID / GET_FEATURES / cache 序列 /
+ * 需要**自己拿着命令**做事的用例（lifecycle 的 READ_ID / GET_FEATURES / cache 序列 /
  * 内部搬移 / RANDOM_DATA_READ 等）走 test_cmd_build() 建链，再用这里的零件提交 /
  * 校验 / 释放。页 helper 只是把「建链 → 搬数据 → 提交 → 轮询 → 校验 → 释放」打包
  * 好；形态对不上时（如「擦除页的聚合 status 必然带 META_ERROR，只能在 release 前
@@ -434,7 +434,7 @@ BYTE       test_check_pattern(const BYTE *buffer, WORD length, BYTE pattern);
  *   test_trace_summary() —— MUNIT_LOG_INFO：这条用例证明了什么（汇总量）。
  *   test_trace_detail()  —— MUNIT_LOG_DEBUG：逐页 / 逐 CW 明细。
  *   test_result()        —— **总是输出**（不看 `--log-visible`）：基准类用例的关键指标
- *                           （`/speed` 的读/写 KB/s）。它属于"测试结果"而不是诊断 ——
+ *                           （`/bench/speed` 的读/写 KB/s）。它属于"测试结果"而不是诊断 ——
  *                           默认档只报 `[ OK ]` 看不到速度并不合理。
  *
  * ⚠ 消息自带换行与 `[EV] ` 前缀，**调用者不要自己加 \n**。
@@ -446,6 +446,14 @@ BYTE       test_check_pattern(const BYTE *buffer, WORD length, BYTE pattern);
  *   对应 default/info/debug 三档）：**内容不丢**，被折断的行在下一行续完。读日志时别
  *   把这种折行当成截断；要看明细请单跑一条用例
  *   （`test --log-visible debug /fc-nand/lifecycle/block_write_read`）。 */
+
+/**
+ * @brief FC 资源池/队列归零断言（每用例 teardown 调用）。
+ *
+ * @note 用于把「漏 release / 漏 pop」在当条用例结束时抓住，而不是让下一条
+ *       用例继承脏池后偶发失败。
+ */
+void fc_ut_assert_clean(void);
 
 void test_trace_begin(void);
 

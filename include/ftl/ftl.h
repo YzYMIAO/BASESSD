@@ -317,6 +317,12 @@ typedef struct FTL_CACHE_STREAM_S
  *       31h/3Fh 管线半途插命令。
  */
 void ftl_cache_seq_release(ftl_ctx_s *ftl);
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：驱动 padding END 提交（CACHE-15 盘满例外）。
+ */
+ftl_status_e ftl_cache_test_pad_submit(ftl_ctx_s *ftl);
+#endif
 
 /**
  * @brief 破坏性控制路径（format）丢弃 cache 序列并强制打开门控。

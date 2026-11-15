@@ -13,7 +13,20 @@
  * 套件数组（`g_ftl_*_tests` 等）而链接失败。本文件是两层测试的**唯一耦合点**。
  */
 
+#include "delay.h"
 #include "munit.h"
+#include "ssd_types.h"
+
+/* munit 的平台种子源（弱符号钩子）：裸机没有 wall-clock（newlib `time()` 返回 -1
+ * ⇒ 种子恒定），用 SysTick 单调 µs 提供每次运行的变化。取高低 32 位异或，避免
+ * 只依赖低位。种子会打印在 "Running test suite with seed ..." 行里，`--seed` 可
+ * 覆盖以原样重放。 */
+uint32_t munit_platform_seed(void)
+{
+    const QWORD us = delay_time_now_us64();
+
+    return (uint32_t)(us ^ (us >> 32));
+}
 
 #if defined(UT_HIL_ENABLE)
 #    include "test_hil.h"
@@ -23,13 +36,13 @@
 
 /* ── FC-NAND（HIL/FC 层，src/controller + src/fc） ── */
 
-/* Level 1: 纯逻辑测试 */
-extern MunitTest g_fc_logic_tests[];
+/* pure: 纯 RAM 测试 */
+extern MunitTest g_fc_pure_tests[];
 
-/* Level 2: 数据路径测试 */
+/* data_path: 数据路径测试 */
 extern MunitTest g_fc_data_path_tests[];
 
-/* Level 3: 全链路测试 */
+/* lifecycle: 全链路测试 */
 extern MunitTest g_fc_lifecycle_tests[];
 
 /* 负例（release UT 生效；debug 下 MUNIT_SKIP） */
@@ -50,13 +63,21 @@ extern MunitTest g_ftl_pure_io_tests[];
 extern void      ftl_ut_media_session_reset(void);
 extern MunitTest g_ftl_media_e2e_tests[];
 
-/* test_negative.c：故障注入负例（真 NAND，破坏性） */
-extern MunitTest g_negative_tests[];
+/* test_negative_media.c：负例介质会话也必须按 `test` 命令复位。 */
+extern void ftl_ut_negative_session_reset(void);
+
+/* 故障注入负例：pure 不碰介质；media 真 NAND、破坏性 */
+extern MunitTest g_negative_pure_tests[];
+extern MunitTest g_negative_media_gc_tests[];
+extern MunitTest g_negative_media_l2p_tests[];
+extern MunitTest g_negative_media_meta_tests[];
+extern MunitTest g_negative_media_boot_tests[];
+extern MunitTest g_negative_media_if_tests[];
 
 #endif /* UT_FTL_ENABLE */
 
 #if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
-/* 速度测试（test_speed.c）：/speed/fc_nand_rw 与 /speed/ftl_rw 由 UT 范围决定。 */
+/* 速度测试（test_speed.c）：/bench/speed/fc_nand_rw 与 /bench/speed/ftl_rw 由 UT 范围决定。 */
 extern MunitTest g_speed_tests[];
 #endif
 
@@ -74,13 +95,13 @@ static MunitSuite g_ut_root_suite = {
                    (char *)"/fc-nand/",
                    NULL,
                    (MunitSuite[]){
-                   /* Level 1 */
-                   {(char *)"logic/", g_fc_logic_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   /* pure */
+                   {(char *)"pure/", g_fc_pure_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-                   /* Level 2 */
+                   /* data_path */
                    {(char *)"data_path/", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-                   /* Level 3 */
+                   /* lifecycle */
                    {(char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                    /* 负例 */
@@ -117,7 +138,30 @@ static MunitSuite g_ut_root_suite = {
                    NULL,
                    (MunitSuite[]){
                    {(char *)"e2e/", g_ftl_media_e2e_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                   {(char *)"negative/", g_negative_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
+                   {
+                   (char *)"negative/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"pure/", g_negative_pure_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {
+                   (char *)"media/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"gc/", g_negative_media_gc_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"l2p/", g_negative_media_l2p_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"meta/", g_negative_media_meta_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"boot/", g_negative_media_boot_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"if/", g_negative_media_if_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
                    1,
@@ -132,12 +176,22 @@ static MunitSuite g_ut_root_suite = {
 
 #if defined(UT_HIL_ENABLE)
                    /* ══ HIL 板端（真 NAND/FTL，破坏性）══ */
-                   {(char *)"/hil/", g_hil_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {
+                   (char *)"/hil/",
+                   NULL,
+                   (MunitSuite[]){
+                   {(char *)"contract/", g_hil_contract_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"io/", g_hil_io_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                   },
+                   1,
+                   MUNIT_SUITE_OPTION_NONE,
+                   },
 #endif /* UT_HIL_ENABLE */
 
 #if defined(UT_FC_ENABLE) || defined(UT_FTL_ENABLE)
                    /* 板端速度测试（破坏性；两条用例按 UT 范围出现） */
-                   {(char *)"/speed/", g_speed_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                   {(char *)"/bench/speed/", g_speed_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 #endif
                    {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                    },
@@ -199,6 +253,7 @@ int ut_run_all(int argc, char *argv[])
     /* 介质状态只在本条 `test` 命令内有效：FC 原始块测试 / 上一条命令都会改变它，
      * 媒体套件必须重新格式化一次。 */
     ftl_ut_media_session_reset();
+    ftl_ut_negative_session_reset();
 #endif
 
     g_ut_leaf_count = 0U;

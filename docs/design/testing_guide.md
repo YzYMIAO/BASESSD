@@ -517,7 +517,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 > 每条都给出：风险 ID、触发方式、期望、证据。**未上板前不得勾选**（R1）。
 >
 > 当前硬件：无程控电源 / USB 继电器 ⇒ 掉电与拔线只能手动，无法自动化与大批量。
-> 已有能力：测试镜像的固件注入钩子（`FC_NAND_TEST_ENABLE`）+ 串口 CLI + H2testw/`/speed`/UT。
+> 已有能力：测试镜像的固件注入钩子（`FC_NAND_TEST_ENABLE`）+ 串口 CLI + H2testw/`/bench/speed`/UT。
 
 ---
 
@@ -528,7 +528,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | 测试镜像 | `make tests UT=FTL`（或 `UT=FC` / `UT=HIL`）——只有 `make tests` 定义 `FC_NAND_TEST_ENABLE` |
 | 注入钩子 | `fault_inject.c/h` 与 `bbt fault` **只在测试镜像存在**；产品 debug/release 均不编入 |
 | 串口 | USART1 115200，`log level debug`（按需） |
-| 主机 | H2testw（全盘写读）、`/speed`（FTL/FC 压测） |
+| 主机 | H2testw（全盘写读）、`/bench/speed`（FTL/FC 压测） |
 | 判据取证 | 串口原始日志 + `info` / `ftl_ctx` 输出 + H2testw 报告 |
 
 > ⚠ 注入类用例必须在**测试镜像**上跑；产品镜像跑不出这些路径（钩子不存在）。
@@ -568,7 +568,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 > 步骤：H2testw 写到 `free` 低位（或指定 MB）→ **直接断板子供电**（不是拔 USB 线）→ 上电 → H2testw verify / `rd` 读回。
 
 - [ ] **RISK-MD-06** 恢复路径丢映射（最高优先）
-  - 步骤：`format` → 全量 `test`（制造多代写）→ `/speed/ftl_rw` 写 25 MiB → 第 4 次重启前断电。
+  - 步骤：`format` → 全量 `test`（制造多代写）→ `/bench/speed/ftl_rw` 写 25 MiB → 第 4 次重启前断电。
   - 期望：无 `region … degraded` / `mapping lost` / `fallback`；`info` 的 `closed` 对账一致。
   - 证据：开机完整日志 + `info`。
 - [ ] **RISK-BOOT-15/18/22/23** 启动恢复/格式化中断
@@ -605,7 +605,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 ### 11.6 压力 / 背压 / 超时
 
 - [ ] **RISK-GC-06/14、RISK-WL-07、RISK-CP-04** 满盘 GC/WL/CP
-  - 触发：H2testw 写满 + `/speed`；观察 `[GC]`/`[WL]`/`[CP]`。
+  - 触发：H2testw 写满 + `/bench/speed`；观察 `[GC]`/`[WL]`/`[CP]`。
   - 期望：写速稳定、无 `submit stalled` 刷屏、无 `confirm park timeout`；WL 不在 host 写期间占引擎。
 - [ ] **RISK-IF-09/10/12/13** 流式序列/门控
   - 触发：大顺序读写 + 中途中止；观察 `d4=`/`mig=`/`rrab=`。
@@ -619,7 +619,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 |---|---|---|
 | 真实掉电 | 手动断板子供电，次数有限 | USB 继电器 / YKUSH / 程控电源 + 脚本 |
 | 真实拔线 | 手动拔插 | 同上（切 VBUS） |
-| 大批量掉电组合 | 无法批量 | 继电器 + H2testw/`/speed` 脚本循环 |
+| 大批量掉电组合 | 无法批量 | 继电器 + H2testw/`/bench/speed` 脚本循环 |
 | 总线复位 | `devcon` 逻辑复位可部分替代 | USB 协议分析仪（Beagle/LUNA） |
 
 > 主机侧 `dm-flakey` / `dm-dust` / `scsi_debug` 只测**主机块层**，不是本设备的 FTL，

@@ -153,9 +153,15 @@ _Static_assert(sizeof(bst_block_s) == 20, "bst_block_s 布局漂移（期望 20B
  * @param block 该 plane 内的块号。
  *
  * @return 全局块号。
+ *
+ * @note 前置条件：plane < PLANE_NUM 且 block < BLOCKS_PER_PLANE。
+ *       传入 FTL_BLOCK_NO_PLANE / UINT16_MAX 等哨兵会截断成看似合法的 gblock；
+ *       调用者必须先判 super_block_has_plane()，本 helper 不做运行期哨兵检查。
  */
 static inline WORD ftl_gblock(BYTE plane, WORD block)
 {
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(block < BLOCKS_PER_PLANE);
     return (plane * BLOCKS_PER_PLANE + block);
 }
 

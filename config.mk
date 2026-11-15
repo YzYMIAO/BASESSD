@@ -30,7 +30,13 @@ endif
 
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 CPU_TYPES := cortex-m7
+ifeq ($(FC_NAND_TEST_ENABLE),1)
+# UT 镜像把测试自有大缓冲放到 SRAM 尾部，避免全量套件溢出 AXI_RAM/AXI_NOCACHE；
+# 生产镜像保持原布局。
+LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash_ut.ld
+else
 LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash.ld
+endif
 endif
 # ----------------------------------------------------------------------------
 # 2. 目录结构（统一使用绝对路径）

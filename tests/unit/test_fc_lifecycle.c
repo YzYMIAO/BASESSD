@@ -1,5 +1,5 @@
 /*
- * test_fc_level3.c — Level 3 FC 全链路测试：Block 级数据完整性 + 多场景组合验证
+ * test_fc_lifecycle.c — FC 全链路测试（真 NAND）：Block 级数据完整性 + 多场景组合验证
  *
  * 测试场景：
  *   1. 初始化序列：RESET → READ_ID → READ_PARAMETER_PAGE → GET_FEATURES
@@ -23,7 +23,7 @@
  *     munit.c:503）⇒ 用例体内的**第一次**抽样在所有用例之间取值完全相同（六条会撞在同一个
  *     块上、整轮只有一个 plane）。故本文件的 l3_rand 把 `hash(用例名) ^ hash(用途标签)`
  *     异或进每次抽样：前者让用例之间互异，后者让同一用例内各用途互异。
- *     机制与 Level 2 的 test_scramble_whiten / test_crc_step_detect 同路（那两处直接用
+ *     机制与 data_path 的 test_scramble_whiten / test_crc_step_detect 同路（那两处直接用
  *     munit_rand_int_range，因为只有一条用例在抽，撞不上）。
  *   ⚠ 复现契约 = (seed, 用例名, 第几次抽样)：reseed 是**每用例一次**，故复现单条用例
  *     不需要重放其它用例。抽到的值必须经 test_trace_summary 打出来（INFO 档），否则
@@ -50,15 +50,18 @@
  *   ssd> test --seed 0x<上一轮打印的> /fc-nand/lifecycle/            # 复现同一组地址
  */
 
+#include "fault_inject.h"
 #include "fc.h"
 #include "fc_command.h"
 #include "fc_nand_engine.h"
 #include "fc_queue.h"
 #include "fc_test_common.h"
+#include "ftl_config.h"
 #include "ftl_fc_interface.h"
 #include "log.h"
 #include "munit.h"
 #include "nand_config.h"
+#include "nand_device.h"
 #include "onfi_1_0.h"
 
 #include <string.h>
@@ -79,7 +82,7 @@
  *  夹具
  *
  *  setup / teardown、读写擦原语、源数据比对、desc 链小工具全部来自共享模块
- *  fc_test_common（Level 2 / Level 3 共用一份，见 tests/unit/fc_test_common.h）。
+ *  fc_test_common（data_path / lifecycle 共用一份，见 tests/unit/fc_test_common.h）。
  *  本文件只保留 block 级与场景级的薄封装。
  *
  *  三条**有意**的设计约束：
@@ -109,7 +112,7 @@
 _Static_assert(L3_BLOCK_LO < L3_BLOCK_HI, "随机窗口为空");
 _Static_assert(L3_BLOCK_HI < BLOCKS_PER_PLANE, "随机窗口越过本 plane 块数");
 
-/* ── Level 3 的「裸页」config ──
+/* ── lifecycle 的「裸页」config ──
  *   不加扰（FC_RANDOM_DISABLE）、LDPC RAW（不做 ECC）、不 RAID。
  * crc 逐处给：池清零后的默认 FC_CRC_ENABLE == 0 ⇒ 不显式给也是**开**；
  * cache 与 multi-plane 路径显式关 CRC（纯 RAW 比对）。
@@ -277,7 +280,7 @@ static BYTE l3_arr_contains(const BYTE *arr, BYTE n, BYTE v)
 
 /* 抽 n 个**互不重复**的页（n ∈ [2,8]，页 ∈ [0, PAGES_PER_BLOCK)）与 CW（n ∈ [1,4]）。
  * 个数也随机（不止位置）：只随机位置会把探针规模钉在参数表的几个候选值上。
- * 拒绝采样，与 Level 2 的 l2_ecc_flip（test_fc_level2.c:638-653）同形。
+ * 拒绝采样，与 data_path 的 l2_ecc_flip（test_fc_data_path.c:638-653）同形。
  * 上限 8×4 = 32 个探针 ⇒ **板上耗时上界**。 */
 #define L3_PAGES_MIN (2U)
 #define L3_PAGES_MAX (8U)
@@ -438,7 +441,7 @@ static void read_page_verify(WORD block, WORD page, BYTE plane_bitmap, BYTE eras
 /**************************************************************************
  *  辅助：擦除态整块读回验证
  *
- *  ⚠ 只有它留在 Level 3：夹具的 test_read_block 用聚合 status 错误掩码当判据，
+ *  ⚠ 只有它留在 lifecycle：夹具的 test_read_block 用聚合 status 错误掩码当判据，
  *     而擦除页 META=0xFF… ⇒ 数据路径 Pass 4 ① 不过 ⇒ 该 CW 带 META_ERROR ⇒
  *     聚合判据必然失败（见 fc_test_common.h「擦除页只能逐 CW 查 SUCCESS」）。
  *     故这里只能自己循环，逐页走 read_page_verify(erased=1)。
@@ -2551,29 +2554,350 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
  *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
  *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
  *  ⚠ --iterations 是 **runner 级全局量**，且 runner->suite **恒指根套件**（munit.c:1359）
- *    ⇒ 子套件自己的 iterations 字段无效，**别去改 ut_main.c**（改了会把 Level 1/2 也乘 N）。
- *    它按调用范围生效：只跑 /fc-nand/lifecycle/ 就只乘 Level 3。
+ *    ⇒ 子套件自己的 iterations 字段无效，**别去改 ut_main.c**（改了会把 pure/data_path 也乘 N）。
+ *    它按调用范围生效：只跑 /fc-nand/lifecycle/ 就只乘 lifecycle。
  **************************************************************************/
 
+/* sparse_data_out_read — 稀疏 CW 的直接 WITH_DATA_OUT 读必须取到选中 CW（DP-26）。
+ *
+ * 覆盖：`OP_NORMAL_READ_PAGE_WITH_DATA_OUT` + 稀疏 flat 位图（只选 CW1/CW2）。
+ * 判据：FC 必须把稀疏位图分流到 WITHOUT/LOAD + 05h/06h 取数，而不是先做一次
+ *       DATA_OUT；否则首输出会固定读 CW0，CW1/CW2 的数据错。逐槽 PAA 比对。
+ * 备注：写侧先按整页 PAA 图案编程；本用例只碰 buffer + 真 NAND 读。 */
+
+static MunitResult test_sparse_data_out_read(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    const BYTE plane     = l3_plane_draw("sparse_data_out_read");
+    const WORD block     = l3_block_draw("sparse_data_out_read");
+    const BYTE bm_planes = TEST_PLANE_BM(plane);
+
+    test_prog_page(block, bm_planes, 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+
+    nand_addr_s addr;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.block = block;
+    addr.plane = plane;
+    addr.page  = 0U;
+
+    const DWORD cw_bitmap = ftl_cw_bit(plane, 1U) | ftl_cw_bit(plane, 2U);
+    fc_cmd_s   *cmd       = test_cmd_build(&addr, cw_bitmap, pba_from_addr(&addr), L3_CFG(s_l3_cfg_normal_read_page_with_data_out, FC_CRC_DISABLE));
+
+    test_memset_read_buffer(cmd);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
+    munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, cw_bitmap);
+
+    test_capture_cmd(cmd);
+
+    for (BYTE cw = 1U; cw <= 2U; cw++)
+    {
+        nand_addr_s slot_addr = addr;
+
+        slot_addr.cw = cw;
+
+        const BYTE *slot = test_source_slot(plane, cw);
+
+        munit_assert_uint8(test_check_paa(slot, paa_from_addr(&slot_addr)), ==, 1U);
+    }
+
+    test_trace_summary("sparse DATA_OUT: plane=%hhu block=%hu cw=1/2 selected, per-slot PAA verified", plane, block);
+
+    fc_command_release(cmd->cmd_id);
+    return MUNIT_OK;
+}
+
+/* completion_late_delivered — D2 seam：迟到完成必须在下一轮 poll 投递（IF-02/17 等）。
+ *
+ * 覆盖：`FI_COMPLETION_LATE` 在 `fc_poll_completion` 出口压住第一条完成，下一轮才返回。
+ * 判据：注入命中（`fi_hits>0`），命令仍能完成且 cmd_id/status 正确——证明「迟到」不是
+ *       「丢失」，用于构造超时后迟到完成的负例。
+ * 备注：READ_STATUS 无数据路径，只验证完成通道。 */
+
+static MunitResult test_completion_late_delivered(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_cmd_cfg_s conf;
+
+    l3_cfg_init(&conf, OP_READ_STATUS, FC_CRC_ENABLE);
+
+    fc_cmd_s *cmd = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
+
+    const DWORD hits0 = fi_hits(FI_COMPLETION_LATE);
+
+    fi_arm_at(FI_COMPLETION_LATE, OP_READ_STATUS, 1U);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(fi_hits(FI_COMPLETION_LATE), >, hits0);
+    munit_assert_uint32(completion.cmd_id, ==, cmd->cmd_id);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
+
+    fc_command_release(cmd->cmd_id);
+
+    test_trace_summary("d2 seam: late completion delivered on next poll, hits=%lu", fi_hits(FI_COMPLETION_LATE) - hits0);
+
+    return MUNIT_OK;
+}
+
+/* engine_fail_all_cws — D2 seam：dispatch 执行结果失败必须覆盖全部选中 CW（DP-18/19）。
+ *
+ * 覆盖：`FI_FC_ENGINE_FAIL` 在 completion 策略之前把 NAND 结果改为失败。
+ * 判据：completion 带错误位，链上每条选中 desc 都 has_error；不是只标最低位 CW。
+ * 备注：先编程一页保证读链有效；注入点在实际 NAND 完成之后、策略表之前。 */
+
+static MunitResult test_engine_fail_all_cws(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    const BYTE plane = l3_plane_draw("engine_fail_all_cws");
+    const WORD block = l3_block_draw("engine_fail_all_cws");
+
+    test_prog_page(block, TEST_PLANE_BM(plane), 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+
+    nand_addr_s addr;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.block = block;
+    addr.plane = plane;
+    addr.page  = 0U;
+
+    fc_cmd_s *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), pba_from_addr(&addr), L3_CFG(s_l3_cfg_normal_read_page_with_data_out, FC_CRC_DISABLE));
+
+    test_memset_read_buffer(cmd);
+
+    const DWORD hits0 = fi_hits(FI_FC_ENGINE_FAIL);
+
+    fi_arm_at(FI_FC_ENGINE_FAIL, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 1U);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(fi_hits(FI_FC_ENGINE_FAIL), >, hits0);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, !=, 0U);
+
+    BYTE checked = 0U;
+
+    for (fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id; did != FC_DESC_ID_INVALID; did = (fc_desc_id_t)fc_descriptor_id_to_descriptor(did)->next_id)
+    {
+        const fc_desc_s *desc = fc_descriptor_id_to_descriptor(did);
+
+        munit_assert_true(fc_cw_status_has_error(desc->status));
+        checked++;
+    }
+
+    /* 本用例构造的是**单 plane** 命令（cw bitmap 只覆盖抽中的 plane）：
+     * 链上只有该 plane 的 CW_NUM 条 desc。要覆盖两 plane 需另建 multi-plane 命令。 */
+    munit_assert_uint8(checked, ==, (BYTE)CW_NUM);
+
+    fc_command_release(cmd->cmd_id);
+
+    test_trace_summary("d2 seam: engine fail marks %hhu CW FAIL, hits=%lu", checked, fi_hits(FI_FC_ENGINE_FAIL) - hits0);
+
+    return MUNIT_OK;
+}
+
+/* completion_drop_bounded — D2 seam：丢完成时调用者必须能走有界超时（MIG-10/IF-17）。
+ *
+ * 覆盖：`FI_COMPLETION_DROP` 在 `fc_poll_completion` 出口丢弃一条完成。
+ * 判据：注入命中；有限轮询内不再返回该 cmd_id；命令仍可 release，池不泄漏。
+ * 备注：只验证 seam 可达与资源可回收；超时后的迟到完成矩阵由后续 D2 用例覆盖。 */
+
+static MunitResult test_completion_drop_bounded(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_cmd_cfg_s conf;
+
+    l3_cfg_init(&conf, OP_READ_STATUS, FC_CRC_ENABLE);
+
+    fc_cmd_s *cmd = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
+
+    const DWORD hits0 = fi_hits(FI_COMPLETION_DROP);
+
+    fi_arm_at(FI_COMPLETION_DROP, OP_READ_STATUS, 1U);
+
+    munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
+
+    BYTE got = 0U;
+
+    for (DWORD i = 0U; i < 1000U; i++)
+    {
+        fc_cmd_status_s completion;
+
+        memset(&completion, 0, sizeof(completion));
+        (void)fc_service();
+
+        if ((fc_poll_completion(&completion) == FC_STATUS_OK) && (completion.cmd_id == cmd->cmd_id))
+        {
+            got = 1U;
+            break;
+        }
+    }
+
+    munit_assert_uint32(fi_hits(FI_COMPLETION_DROP), >, hits0);
+    munit_assert_uint8(got, ==, 0U);
+
+    fc_command_release(cmd->cmd_id);
+
+    test_trace_summary("d2 seam: completion drop consumed once, no delivery, command releasable");
+
+    return MUNIT_OK;
+}
+
+/* engine_timeout_sets_status — NAND TIMEOUT 必须进入命令状态（IF-08）。 */
+static MunitResult test_engine_timeout_sets_status(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    const BYTE plane = l3_plane_draw("engine_timeout_sets_status");
+    const WORD block = l3_block_draw("engine_timeout_sets_status");
+
+    test_prog_page(block, TEST_PLANE_BM(plane), 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+
+    nand_addr_s addr;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.block = block;
+    addr.plane = plane;
+
+    fc_cmd_s *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), pba_from_addr(&addr), L3_CFG(s_l3_cfg_normal_read_page_with_data_out, FC_CRC_DISABLE));
+
+    test_memset_read_buffer(cmd);
+    fi_arm_ex(FI_FC_ENGINE_FAIL, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 1U, NAND_RESULT_TIMEOUT);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_TIMEOUT, !=, 0U);
+
+    fc_command_release(cmd->cmd_id);
+    return MUNIT_OK;
+}
+
+/* engine_fail_param_page — 参数页读 FAIL 必须让命令失败（DP-21）。 */
+static MunitResult test_engine_fail_param_page(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_cmd_cfg_s conf;
+
+    l3_cfg_init(&conf, OP_READ_PARAMETER_PAGE, FC_CRC_ENABLE);
+
+    fc_cmd_s *cmd = test_cmd_build(&s_l3_zero_addr, 0x01U, 0U, &conf);
+
+    fi_arm_at(FI_FC_ENGINE_FAIL, OP_READ_PARAMETER_PAGE, 1U);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(fi_hits(FI_FC_ENGINE_FAIL), >, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, !=, 0U);
+
+    fc_command_release(cmd->cmd_id);
+    return MUNIT_OK;
+}
+
+/* engine_fail_random_read — 多 CW random read 中间失败必须上报（DP-18）。 */
+static MunitResult test_engine_fail_random_read(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    const BYTE plane = l3_plane_draw("engine_fail_random_read");
+    const WORD block = l3_block_draw("engine_fail_random_read");
+
+    test_prog_page(block, TEST_PLANE_BM(plane), 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+
+    nand_addr_s addr;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.block = block;
+    addr.plane = plane;
+
+    fc_cmd_s *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(TEST_PLANE_BM(plane)), pba_from_addr(&addr), L3_CFG(s_l3_cfg_random_data_read, FC_CRC_DISABLE));
+
+    test_memset_read_buffer(cmd);
+    fi_arm_at(FI_FC_ENGINE_FAIL, OP_RANDOM_DATA_READ, 1U);
+
+    const fc_cmd_status_s completion = test_submit_wait(cmd);
+
+    munit_assert_uint32(fi_hits(FI_FC_ENGINE_FAIL), >, 0U);
+    munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, !=, 0U);
+
+    fc_command_release(cmd->cmd_id);
+    return MUNIT_OK;
+}
+
+/* timing_rollback_on_set_timing_fail — 高速切换时 set_timing 失败必须回滚低速（DP-24）。
+ *
+ * 覆盖：`FI_NAND_TIMING_FAIL` 让 `dev->set_timing(Mode5)` 失败。
+ * 判据：`fc_nand_enable_high_speed()` 返回错误；rollback 后 `nand_get_timing_mode()==0`，
+ *       后续 IO 仍走低速。 */
+static MunitResult test_timing_rollback_on_set_timing_fail(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    const DWORD hits0 = fi_hits(FI_NAND_TIMING_FAIL);
+
+    fi_arm(FI_NAND_TIMING_FAIL, 1U);
+
+    munit_assert_int(fc_nand_enable_high_speed(0U), !=, NAND_RESULT_OK);
+    munit_assert_uint32(fi_hits(FI_NAND_TIMING_FAIL), >, hits0);
+
+    BYTE mode = 0xFFU;
+
+    munit_assert_int(nand_get_timing_mode(0U, 0U, &mode), ==, NAND_RESULT_OK);
+    munit_assert_uint8(mode, ==, 0U);
+
+    /* 用例刻意把器件留在 Mode 0（回滚语义）。必须在返回前恢复高速度：
+     * 否则 Mode 0 会泄漏给同一 `test` 命令里的所有后续套件——NAND 总线按低速
+     * 时序跑，读路径 dispatch 时间约 +17%（写受编程时间支配几乎不变），
+     * 表现为「全量末尾的 speed 比单测慢」。 */
+    fi_reset();
+    munit_assert_int(fc_nand_enable_high_speed(0U), ==, NAND_RESULT_OK);
+    munit_assert_int(nand_get_timing_mode(0U, 0U, &mode), ==, NAND_RESULT_OK);
+    munit_assert_uint8(mode, ==, 5U);
+
+    return MUNIT_OK;
+}
+
 MunitTest g_fc_lifecycle_tests[] = {
-    {                      "init_sequence",                       test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                 "feature_write_read",                  test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                "chain_priority_lock",                 test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                       "status_query",                        test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                "fail_cw_attribution",                 test_fail_cw_attribution, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                 "internal_data_move",                  test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                 "block_erase_verify",                  test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                   "block_write_read",                    test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                    "block_cache_ops",                     test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {            "block_cache_multi_plane",             test_block_cache_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {"block_cache_multi_plane_cross_block", test_block_cache_multi_plane_cross_block, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                  "block_multi_plane",                   test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                  "block_random_data",                   test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                   "block_load_fetch",                    test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                    "block_read_meta",                     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                        "read_column",                         test_read_column, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                     "block_lock_ops",                      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                     "mixed_pipeline",                      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                    "buf_own_release",                     test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {                                 NULL,                                     NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {(char *)"timing_rollback_on_set_timing_fail",  test_timing_rollback_on_set_timing_fail, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        (char *)"engine_timeout_sets_status",          test_engine_timeout_sets_status, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {            (char *)"engine_fail_param_page",              test_engine_fail_param_page, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"engine_fail_random_read",             test_engine_fail_random_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                             "init_sequence",                       test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                        "feature_write_read",                  test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                       "chain_priority_lock",                 test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                              "status_query",                        test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"completion_drop_bounded",             test_completion_drop_bounded, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         (char *)"completion_late_delivered",           test_completion_late_delivered, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                       "fail_cw_attribution",                 test_fail_cw_attribution, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {               (char *)"engine_fail_all_cws",                 test_engine_fail_all_cws, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                        "internal_data_move",                  test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                        "block_erase_verify",                  test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                          "block_write_read",                    test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                           "block_cache_ops",                     test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {              (char *)"sparse_data_out_read",                test_sparse_data_out_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                   "block_cache_multi_plane",             test_block_cache_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {       "block_cache_multi_plane_cross_block", test_block_cache_multi_plane_cross_block, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                         "block_multi_plane",                   test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                         "block_random_data",                   test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                          "block_load_fetch",                    test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                           "block_read_meta",                     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                               "read_column",                         test_read_column, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                            "block_lock_ops",                      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                            "mixed_pipeline",                      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                           "buf_own_release",                     test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                                        NULL,                                     NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

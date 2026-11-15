@@ -22,6 +22,16 @@ func_status_e uart_tx_dma_init(void);
 void          uart_tx_dma_irq_handler(void);
 
 /* port 接口：由 src/platform/<soc>/dma_port.c 实现；共享 src/platform/dma.c 只转发。 */
+
+/**
+ * @brief 初始化 USART1 TX DMA（DMA1_Stream0）
+ *
+ * 幂等：已成功初始化时直接返回成功，不重配在用的流。运行期重入会中止在飞
+ * 传输，控制台 TX 状态机因等不到完成中断而永久阻塞。
+ *
+ * @return FUNC_STATUS_SUCCESS 已就绪（本次初始化成功或此前已成功）；
+ *         FUNC_STATUS_ERROR HAL_DMA_DeInit/Init 失败。
+ */
 func_status_e dma_port_uart_tx_init(void);
 void          dma_port_uart_tx_irq_handler(void);
 

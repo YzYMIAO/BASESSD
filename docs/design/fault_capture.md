@@ -60,11 +60,12 @@ munit 断言失败 → abort() 重定向 ──────┴─→ 同一 cras
 |------|------|
 | `include/platform/stm32h743/fault.h` | `fault_kind_t`、`fault_ctx_s`、`fault_init/fault_report_boot/fault_hook` 声明 |
 | `src/platform/stm32h743/fault.c` | 5 个 naked 入口 + 蹦床 + 主处理 + 轮询控制台 + 解码 + 开机报告 |
-| `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_s`、`crash_record_s`、`crash_platform_report()` |
-| `src/common/crash.c` | `.noinit` 记录存储 + 校验和 + 弱默认 `crash_platform_report()`（空实现，host 安全） |
+| `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_s`、`crash_record_s` |
+| `src/common/crash.c` | `.noinit` 记录存储 + 校验和 |
 | `include/common/assertion.h` | 生产断言 `ASSERT`/`ASSUME` + 富断言集 `ASSERT_*` + 失败入口声明 |
-| `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `crash_platform_report` → 停机）；固件 `abort()` 重定向 |
-| `src/fc/fc_assert_context.c` | 覆盖弱钩子 `assertion_platform_context()`，停机前追加 `[RES]` FC 资源快照 |
+| `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `assertion_console_run` 现场 CLI）；固件 `abort()` 重定向 |
+| `src/hil/cli.c` | 覆盖弱钩子 `assertion_console_run()`：正常 CLI 循环，不推进 FTL/FC 后台泵 |
+| `src/fc/fc_assert_context.c` | 覆盖弱钩子 `assertion_platform_context()`，进入现场 CLI 前追加 `[RES]` FC 资源快照 |
 | `linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
 | `src/platform/stm32h743/sys.c` | `sys_init()` 末尾调 `fault_init()` |
 | `src/platform/stm32h743/stm32h7rsxx_it.c` | 删除 5 个裸 `while(1)` 处理器（改由 fault.c 提供） |
@@ -208,7 +209,10 @@ FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,x
 
 > 构建产物确认：`.noinit 248 0x20000000`（248 B = 5×4 + 96 + 96 + 9×4）。
 
-### 5.6 停机语义
+### 5.6 异常停机语义
+
+仅 CPU 异常（HardFault/MemManage/BusFault/UsageFault）走这里；ASSERT/abort 走
+`assertion_console_run()` 的现场 CLI，不复位也不接管轮询控制台。
 
 dump 完 `for(;;)`，**不主动复位**：
 
@@ -248,7 +252,7 @@ void fault_hook(const fault_ctx_s *ctx);   /* 弱符号，默认空实现 */
    stack  : candidate return addresses
      0x2001fxxx -> 0x0800xxxx
    ```
-3. **触发断言**：构造一次 munit 断言失败，确认失败消息**完整打出**后再停机（验证 flush 修复），并出现 `=== CRASH RECORD === kind : ASSERT`。
+3. **触发断言**：构造一次 munit 断言失败，确认失败消息**完整打出**，随后出现 `[ASSERT] console active; FTL/FC background frozen` 与正常 CLI 提示符；在 CLI 里敲 `crash` 应能读到 `kind: ASSERT` 的 `.noinit` 记录。断言路径不再打印 `=== CRASH RECORD ===`（那是 CPU 异常路径的轮询 dump）。
 4. **跨复位**：触发一次故障后软复位（`NVIC_SystemReset()` 或调试器 reset），开机应打印 `[ERR] [FAULT] previous crash: ...`。
 5. **回归**：`make tests` 三套 FC-NAND 套件（command/queue/scheduler/data_path/lifecycle）正常跑完 —— rebuild 套件已删除（见下）。**已上板验证**：59/59 全通过，无 HardFault。
 

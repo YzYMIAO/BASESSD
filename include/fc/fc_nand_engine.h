@@ -128,5 +128,11 @@ nand_result_e fc_nand_init(void);
  *       “低速仍有效”。
  */
 nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz);
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：调用参数页读取路径（用于 ONFI 读失败注入）。
+ */
+nand_result_e fc_nand_test_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion);
+#endif
 
 #endif /* FC_NAND_ENGINE_H */

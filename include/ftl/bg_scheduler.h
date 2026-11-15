@@ -146,4 +146,15 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_s *ftl);
  */
 void bg_scheduler_service(ftl_ctx_s *ftl);
 
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：只做选档 + 发布 cfg，不跑任务表。
+ *
+ * @param ftl FTL 上下文。
+ *
+ * @note 用于验证档位配置的单源发布；不产生在飞命令，避免污染 teardown。
+ */
+void bg_test_publish(ftl_ctx_s *ftl);
+#endif
+
 #endif /* FTL_BG_SCHEDULER_H */

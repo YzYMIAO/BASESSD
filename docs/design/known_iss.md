@@ -101,12 +101,16 @@
 
 #### ISS-UT-06 负例框架与注入用例
 
-- **当前事实**：`include/common/fault_inject.h` / `src/common/fault_inject.c` 提供按次数 + key 的故障表与 `fi_hits()` 命中计数；`tests/unit/fi_wrap.c` 用 `-Wl,--wrap` 注入 FC/FTL 边界故障（生产源码零改动）。`/ftl/media/negative/` **39 例**、`/fc-nand/negative/` **9 例**、HIL 共 16 例（含 `trim_edges`）。302 条风险逐条判定：**M 7 / N 43（全部已写用例）/ K 129 / 待判定 109**（见 `docs/design/negative_coverage.md`）。第一批 9 例 2026-11-14 板端 **9/9 通过，46.56 s**；其余已写、**未上板**。
+- **当前事实**：`include/common/fault_inject.h` / `src/common/fault_inject.c` 提供按次数 + key 的故障表与 `fi_hits()` 命中计数；`tests/unit/fi_wrap.c` 用 `-Wl,--wrap` 注入 FC/FTL 边界故障（生产源码零改动）。`/ftl/negative/` **91 例**（pure 42 / media 49）、`/fc-nand/negative/` **24 例**、HIL 共 17 例（含 `trim_edges`）。302 条风险逐条判定：**M 67 / N 85 / K 81 / 信息 47 / 已闭合 7 / 待判定 0 / 待决策 5 / 待定位 8 / 待测试源 1 / 待后续 1**（见 `docs/design/negative_coverage.md`）。拆分前已写用例均已上板：release UT=FTL `/ftl/negative/` **54/54、0 SKIP、219.32 s**，release UT=FC `/fc-nand/negative/` **11/11、0 SKIP、129 µs**；D1/D2 已全量转 N；D3 41 条 N（2 条 K：BBT-21 / SCH-06）；D0 47 条信息 + 6 条已闭合，D5 WL-01 已闭合；新增用例均未上板。
 - **影响**：用例覆盖的是 FTL↔FC 边界 + CQ 出口的 seam，不代表风险列表覆盖完成。FC 引擎级注入（70h/7Ah/R-B）、Directory 读失败、cache 序列组失败、掉电类仍未实现。
-- **下一步 / 判据**：上板跑第二批（14 例全量）+ HIL 16 例；按设计 §9.2 补齐 N/K 逐条判定；FC 引擎级注入先补 §5.2 的 H 类偏离。每批交付「用例 + 覆盖表 + 上板证据」，不得以通过数代表覆盖。
-- **来源**：`docs/design/negative_test_framework.md`；`tests/unit/fi_wrap.c`、`tests/unit/test_negative.c`
+- **2026-11-14 已补**：`test_negative_media.c` 增加 `s_destructive_active`；`neg_teardown` 在用例断言失败 longjmp 后仍会执行 `ftl_ut_isolated_end()`（format + reboot），避免同一 `test` 命令的后续用例从半破坏介质起步。该路径**未上板**；板端仍建议破坏性套件单独跑并在命令后手动 `format` + POR。
+- **下一步 / 判据**：上板跑第二批（14 例全量）+ HIL 17 例；按设计 §9.2 补齐 N/K 逐条判定；FC 引擎级注入先补 §5.2 的 H 类偏离。每批交付「用例 + 覆盖表 + 上板证据」，不得以通过数代表覆盖。
+- **来源**：`docs/design/negative_test_framework.md`；`tests/unit/fi_wrap.c`、`tests/unit/test_negative_pure.c`、`tests/unit/test_negative_media.c`
 - **关联**：`ISS-UT-01`、`RISK-UT-*`
 - **历史/验证**：
+  - 2026-11-14 D2 seam 框架：`FI_FC_ENGINE_FAIL`（dispatch 完成策略前，arg 可选 TIMEOUT）、`FI_COMPLETION_DROP/LATE`（CQ 出口）、`FI_READ_COLUMN_FAIL`（列读 PBA）、`FI_PLANE_STATUS`（按 plane 覆盖 cw_status）、`FI_DATA_PATH_ENCODE_FAIL/READ_FAIL`、`FI_CLOCK_NOW_FAIL`、`fc_nand_dispatch_test_completion()` 测试 API；自定义 UOP 表用 `fc_uop_engine_start/step` 直接构造。证明用例：engine/late/drop/hold/read-column/plane/data-path/clock/uop/CP-duplicate/sync-timeout/cache-pad 等 20+ 条。三关构建零新告警，**未上板**；D2 23 条均已有 N 级用例/证明（部分为 seam 级，工厂扫描/HAL/init 的完整业务判据仍待板）。
+  - 2026-11-14 D1 批次（17 条）落地：新增/扩展 `md_reclaim_erase_fail`、`gc_decode_cw_lba`、`mig_read_success_keeps_fail_count`、`journal_ring_erase_fail`、`bbt_ring_erase_fail_advances`、`boot_read_fail_policy`、`l2p_pool_starve_flush`、`mig_eval_fake_clock`、`cache_read_completion_all_cws`、`sparse_data_out_read`、`md_cp_read_fail_no_reclaim` 与 `make check-opt`；ARCH-09 合并到现有 4 条 boot 用例。覆盖账 17 行改为 N（已写/未上板）。三关构建零新告警，**全部未上板**。
+  - 2026-11-14 UT 树重构 P0~P4 落地：FC `test_fc_level{1,2,3}.c` → `test_fc_{pure,data_path,lifecycle}.c`（套件 `/fc-nand/pure/`）；FTL 负例拆 `test_negative_pure.c`（16 条，不 format）与 `test_negative_media.c`（38 条，真 NAND），套件路径 `/ftl/negative/pure/`、`/ftl/negative/media/{gc,l2p,meta,boot,if}/`；HIL 拆 `/hil/contract/` + `/hil/io/`；测速改 `/bench/speed/`。此前板端记录中的 `/ftl/media/negative/` 是拆分前的历史路径。重构后 pure 套件的轻量 setup（不 format）、媒体子套件、HIL 子套件与 speed 路径**均未上板**；16 条用例体未改，仍以拆分前 54/54 那次板端运行为准。
   - 2026-11-14 板端第四跑：`gc_batch_program_fail` 单跑通过（hits=1/aborted=1/cold 关闭）；
     全量首例 `alloc_fail_bounded` 用例体通过、teardown 断言 `cmt_dirty==0` 失败（472）。
     判定：host FLUSH 是 best-effort——wbuf FAILED 或超时时仍返回 true，但 L2P 脏行可能
@@ -127,6 +131,13 @@
     （`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）均已执行并通过。
     覆盖账：**M 36 / N 13（11 条 FC negative 待 UT=FC + HIL 2 条部分）/ K 129 /
     待判定 110**。下一步：`make tests BUILD_TYPE=release UT=FC` 跑 `/fc-nand/negative/`。
+  - 2026-11-14 UT 测试树评估：新增 `docs/design/ut_tree_restructure.md`（评估时未实施；P0+P1 随后已落地，见本文件上条）。
+    结论：P0 改 FC level1/2/3 命名为 pure/data_path/lifecycle；P1 把 FTL 负例拆
+    pure/media（纯 RAM 用例不再依赖 format）；P2 按 gc/l2p/meta/boot/if 拆子套件；
+    P3 HIL 拆 contract/io。建议在写 D1/D2 用例前先做 P0+P1。
+  - 2026-11-14 K 类逐条评估：新增 `docs/design/negative_deferred_eval.md`，
+    把 216 条 K 拆成 D1 可做（17）/ D2 缺 seam（23）/ D3 缺夹具（43）/
+    D5 待裁决（1）/ D4 不划算（69）/ D0 非负例（63）。建议按 D1→D2→D3 排期。
   - 2026-11-14 板端第十三跑（release UT=FC 全量）：`/fc-nand/negative/`
     **11/11、0 SKIP、141 µs**（新增 `short_chain_read_short`）。
     风险文档闭合第二批：16 条转已闭合并归档；`BBT-10` 因 factory-scan/format-erase
@@ -261,7 +272,7 @@
 
 #### ISS-HIL-01 HIL 板端 UT
 
-- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` + `g_hil_tests[]`（`make tests UT=HIL`）共 **15 例**。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
+- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` 导出 `g_hil_contract_tests[]` + `g_hil_io_tests[]`（`make tests UT=HIL`），拆前套件 `/hil/` 共 **16 个注册用例**（contract 9 / io 7）；拆分后套件 `/hil/contract/` + `/hil/io/`，**未上板**。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
 - **影响**：未覆盖 buffer NULL、TRIM 越界、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）。这些是 HIL 契约的剩余缺口；测试设计见 `docs/design/hil_ut_design.md`。
 - **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL（见 `RISK-CTRL-04`）、TRIM 越界、跨重启、多 run / USB 槽矩阵。跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。
 - **来源**：`docs/design/hil_ut_design.md`；`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`src/hil/makefile.mk` / `src/fc/makefile.mk` / `makefile`（`UT=HIL`）
@@ -466,7 +477,7 @@
 
 - **当前事实**：固件侧实测零改写，原因未闭合。
 - **影响**：op 映射与日志口径不一致，排障时会误导。
-- **下一步 / 判据**：插桩停在 `tests/unit/test_fc_level3.c`；未出结论前不改 op 映射。
+- **下一步 / 判据**：插桩停在 `tests/unit/test_fc_lifecycle.c`；未出结论前不改 op 映射。
 - **来源**：`docs/archive/ftl_optimization_plan.md` §8.5
 - **关联**：`RISK-NAND-*`
 - **历史/验证**：

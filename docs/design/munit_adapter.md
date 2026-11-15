@@ -118,7 +118,7 @@ int ut_run_fixed(void)
 
 ### 2.3 命令行选项
 
-通过在 UART 串口输入（如 `ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range`）可以传递以下选项：
+通过在 UART 串口输入（如 `ssd> test --seed 0x1234 /fc-nand/pure/cmd_validate_op_range`）可以传递以下选项：
 
 | 选项 | 用途 |
 |---|---|
@@ -202,8 +202,8 @@ munit 的 `MUNIT_OUTPUT_FILE`（默认 stdout）自动走此路径。
 UART CLI 框架（`uart_cli_tokenize()` + `uart_execute_command()`）负责将串口输入切分为 args，注册 `test` 命令后直接调用 `munit_suite_main`：
 
 ```
-ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range
-  → argv = {"test", "--seed", "0x1234", "/fc-nand/logic/validate_op_range"}
+ssd> test --seed 0x1234 /fc-nand/pure/cmd_validate_op_range
+  → argv = {"test", "--seed", "0x1234", "/fc-nand/pure/cmd_validate_op_range"}
   → munit_suite_main(&g_fc_nand_suite, NULL, 4, argv)
 ```
 
@@ -219,23 +219,30 @@ v1.2 起 `munit.c` 不再内联项目专有逻辑，`munit_errorf_ex` 只做上�
               → assertion_terminate():
                   assertion_platform_context() ← 弱钩子：FC 追加 [RES] 资源快照
                   log_flush(1000ms)        ← 关键：把异步 UART 队列排空
-                  crash_platform_report()  ← 平台轮询 UART dump 同一份记录
-                  while(1) 挂起
+                  assertion_console_run()  ← cli.c 强符号
+                      → while (1) { cli_service_poll(); }
+                        本次 test 停止，其余用例不继续，CLI 保持可用
 ```
 
-裸机没有 fork。断言失败后 CPU 进入 `while(1)` 循环，保留完整寄存器/堆栈现场，供 JTAG/SWD 调试器检查。
+裸机没有 fork。断言失败后**不接管故障控制台、不复位**：当前调用栈原样保留，
+JTAG/SWD 仍可回溯；正常 UART 上进入现场 CLI，可以继续敲命令分析。`wr/rd/tr/fl/wp`
+的 handler 自带 `ssd_runtime_pump()` 同步等待，`format`/`test` 原本自带同步泵 ⇒
+这些命令在现场 CLI 里也能独立跑完。若 assert 发生在 FTL/FC 内部，storage 命令的泵
+会重入失败状态，可能二次断言——恢复仍需复位/重新初始化。测试夹具可能停在半途。
 
-**为什么必须先 flush**：`fprintf(stderr, ...)` 经 `_write()` 落到 UART 的**异步** TX 环形队列，由 DMA/USART 中断慢慢排出。早期实现打印完直接 `while(1)`，中断停了、队列再也不会被排空 —— 失败信息留在队列里发不出去，现场看起来就是"断函数却什么都没打印"。现在 `assertion_terminate()` 先 `log_flush()` 把队列排空再停机，这条信息才不会丢。
+**为什么必须先 flush**：`fprintf(stderr, ...)` 经 `_write()` 落到 UART 的**异步** TX 环形队列，由 DMA/USART 中断慢慢排出。如果先进入 CLI 循环再 flush，失败信息可能混在后续输出里；`assertion_terminate()` 先 `log_flush()` 把队列排空，断言文本和现场日志的顺序才稳定。
 
-**为什么走 `abort()` 重定向**：这样 `munit.c` 能保持近上游（只调标准 `abort()`），而项目专有的 flush + 崩溃记录 + dump 全部收敛到断言设施 `src/common/assertion.c` 的固件 `abort()` 覆盖里，两者双向无牵扯。
+**为什么走 `abort()` 重定向**：这样 `munit.c` 能保持近上游（只调标准 `abort()`），而项目专有的 flush + 崩溃记录 + 现场终端全部收敛到断言设施 `src/common/assertion.c` 的固件 `abort()` 覆盖里，两者双向无牵扯。
 
-**崩溃记录**：`crash_platform_report()` 由 `src/platform/stm32h743/fault.c` 提供强符号（弱默认在 `src/common/crash.c` 里是空实现，host 构建安全）。它关掉 TX DMA/中断、独占 UART 轮询输出，因此**必须在 flush 之后**调用。详见 `docs/design/fault_capture.md`。
+**与 CPU 异常的区别**：轮询 UART 接管（`fault_port_console_init`、关 TX DMA/中断）只属于
+`platform/fault.c` 的 HardFault/MemManage/BusFault/UsageFault 路径；断言路径不走它。
+崩溃记录仍写 `.noinit`，复位后由 `[FAULT] previous ...` 报告，或当场用 CLI `crash` 查看。
 
 **`[RES]` FC 资源快照**：原内联在 `munit.c` 里（反向依赖 `fc_get_resource_stats`）。v1.2 迁到 `src/fc/fc_assert_context.c`，覆盖断言设施的弱钩子 `assertion_platform_context()`——依赖方向变为 FC → assertion。
 
 ### 3.4 无 fork 隔离的约束
 
-因为没有 fork，一个测试的断言失败会挂死整个固件，无法跳过该测试继续执行后续测试。因此推荐：
+因为没有 fork，一个测试的断言失败会中止当前 `test` 命令：断言现场终端接管正常 CLI，失败用例的 `teardown` 不会执行，夹具可能留下半完成状态。后续用例需要重新发起 `test`，必要时先 `format`/复位。因此推荐：
 - **一个测试函数只验证一个行为**
 - 测试间不共享可变全局状态
 - setup/teardown 必须正确回收资源

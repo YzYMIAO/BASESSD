@@ -118,7 +118,7 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE error_cw_index);
  * （[META:4][CRC:4][USER:512][ECC:8]），不碰 command / descriptor / 链。
  *
  * 拆出来的目的：让「调了哪些步骤」直接等于「开了哪些功能」。
- * 单测（tests/unit/test_fc_level2.c）拿一块 buffer 调这些原语就能验算法本身，
+ * 单测（tests/unit/test_fc_data_path.c）拿一块 buffer 调这些原语就能验算法本身，
  * 不必建链、也不必用 config 位去组合出「只开 CRC」这类状态。
  *
  * ⚠ 提交出去的命令**绝不能再手工调**这些原语——FC 自己会跑整条管线

@@ -28,6 +28,9 @@
 #include "delay.h"
 #include "fc_command.h"
 #include "fc_nand_engine.h"
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "fault_inject.h"
+#endif
 #include "fc_types.h"
 #include "log.h"
 #include "nand_board.h"
@@ -311,11 +314,46 @@ static void fc_nand_dispatch_completion_init(fc_nand_dispatch_comp_s *completion
  */
 static void fc_nand_dispatch_task_complete(fc_nand_dispatch_task_s *task, BYTE result, const nand_cmd_comp_s *nand_completion)
 {
-    task->completion.execution_status = result;
+    BYTE effective = result;
+
+#if defined(FC_NAND_TEST_ENABLE)
+    /* D2 共享 seam：在 completion 策略之前把本次 NAND 执行结果改为失败。
+     * 只按 opcode 键；completion 表会据此把选中 CW 全部标 FAIL（引擎级，不是 CQ 出口）。 */
+    DWORD result_arg = 0U;
+
+    if (fi_take_ex(FI_FC_ENGINE_FAIL, task->operation, &result_arg) == true)
+    {
+        effective = (result_arg != 0U) ? (BYTE)result_arg : (BYTE)NAND_RESULT_OPERATION_FAILED;
+    }
+#endif
+
+    task->completion.execution_status = effective;
     task->completion.nand_status      = nand_completion->nand_status;
     task->completion.pre_status       = nand_completion->pre_status;
 
-    g_fc_nand_dispatch_completion_table[task->operation](task, result);
+    g_fc_nand_dispatch_completion_table[task->operation](task, effective);
+
+#if defined(FC_NAND_TEST_ENABLE)
+    /* D2 seam：按 plane 覆盖完成状态。用于 host 写失败“只标 plane0”一类负例：
+     * 命令级 result 仍为成功，但指定 plane 的 cw_status 置失败位。 */
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        DWORD arg = 0U;
+
+        if (fi_take_ex(FI_PLANE_STATUS, p, &arg) == true)
+        {
+            const BYTE st = (arg != 0U) ? (BYTE)arg : (BYTE)FC_CW_STATUS_FAIL;
+
+            for (BYTE n = 0U; n < CW_TOTAL_MAX; n++)
+            {
+                if (((task->cw_bitmap & (1UL << n)) != 0U) && ((n / CW_NUM) == p))
+                {
+                    task->completion.cw_status[n] = st;
+                }
+            }
+        }
+    }
+#endif
 }
 
 /**
@@ -1483,6 +1521,26 @@ const fc_nand_dispatch_completion_handler_fn_t g_fc_nand_dispatch_completion_tab
     [OP_ERASE_BLOCK_WAIT]                       = completion_all_cws,
     [OP_READ_COLUMN]                            = completion_all_cws,
 };
+
+#if defined(FC_NAND_TEST_ENABLE)
+void fc_nand_dispatch_test_completion(BYTE operation, DWORD cw_bitmap, BYTE cw_status[CW_TOTAL_MAX])
+{
+    fc_nand_dispatch_task_s task;
+
+    memset(&task, 0, sizeof(task));
+    task.operation = operation;
+    task.cw_bitmap = cw_bitmap;
+
+    for (BYTE i = 0U; i < CW_TOTAL_MAX; i++)
+    {
+        cw_status[i] = FC_CW_STATUS_UNUSED;
+    }
+
+    g_fc_nand_dispatch_completion_table[operation](&task, (BYTE)NAND_RESULT_OPERATION_FAILED);
+
+    memcpy(cw_status, task.completion.cw_status, sizeof(task.completion.cw_status));
+}
+#endif
 
 /* --------------------------------------------------------------------
  * req 表 g_fc_nand_dispatch_req_table

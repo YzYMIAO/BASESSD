@@ -341,6 +341,12 @@ static inline BOOL mig_fail_state_is_clean(const mig_handle_s *m)
  * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
  */
 void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes);
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：直接启动一个搬移 job（GC-18 等状态机负例）。
+ */
+void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e kind, const char *reason, DWORD triggers);
+#endif
 
 /**
  * @brief 登记一次紧急 GC 请求（写路径分配不到页对）。

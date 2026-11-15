@@ -5,6 +5,7 @@
 #include "ftl.h"
 #include "metadata.h"
 #include "munit.h"
+#include "power_failure_recovery.h"
 
 #include <stdarg.h>
 
@@ -45,7 +46,7 @@ void ftl_ut_trace_detail(const char *format, ...);
  *
  * @param format printf 格式。
  *
- * @note 只用于 `/speed` 结果与失败现场；普通证据用 summary/detail。
+ * @note 只用于 `/bench/speed/` 结果与失败现场；普通证据用 summary/detail。
  */
 MUNIT_PRINTF(1, 2)
 void ftl_ut_result(const char *format, ...);
@@ -134,9 +135,46 @@ DWORD ftl_ut_lba_base(void);
 void ftl_ut_quiesce(ftl_ctx_s *ftl);
 
 /**
+ * @brief 落定「已到期但尚未启动」的后台 CP，再排空（fixture setup 用）
+ *
+ * quiesce 只排空在飞 job；boot/journal 回放会留下 journal > CP 的到期状态。
+ * 不在 setup 里落定，长时间泵 timer/ftl_service 的用例会在测试内部起 CP →
+ * metadata 日志轮转 → reclaim 命令在飞，污染「FC 池回到基线」类判据。
+ *
+ * @param ftl 活实例
+ * @note 返回时 `bg_suspend` 仍为 1（同 ftl_ut_quiesce），调用者负责恢复。
+ */
+void ftl_ut_settle_background(ftl_ctx_s *ftl);
+
+/**
  * @brief 模拟一次掉电重启（quiesce → fc_init → ftl_init → boot recovery）。
  */
 void ftl_ut_reboot_from_media(void);
+
+/**
+ * @brief 最近一次 `ftl_ut_reboot_from_media()` 的 PFR 启动结果。
+ *
+ * @return 启动结果快照（boot_type / blocks_restored / scoped 等）。
+ */
+const pfr_boot_result_s *ftl_ut_last_boot_result(void);
+
+/**
+ * @brief 模拟重启但不要求启动成功（供 BOOT 拒绝启动负例）。
+ *
+ * @param out 启动结果；失败时也填（best-effort）
+ * @return pfr_boot_recovery 的返回码
+ */
+ftl_status_e ftl_ut_try_reboot_from_media(pfr_boot_result_s *out);
+
+/**
+ * @brief D3 隔离会话开始：格式化介质并复位注入，保证破坏性用例从干净介质起步。
+ */
+void ftl_ut_isolated_begin(void);
+
+/**
+ * @brief D3 隔离会话结束：再次格式化介质，避免破坏性状态污染后续用例。
+ */
+void ftl_ut_isolated_end(void);
 
 /**
  * @brief 完整格式化当前介质并重启 FTL。

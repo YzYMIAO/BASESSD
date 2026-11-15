@@ -432,4 +432,13 @@ extern "C"
 }
 #endif
 
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：对 ALLOCATED 命令喂完成，验证完成侧 ACTIVE 守卫（SCH-11）。
+ *
+ * @return fc_complete_from_nand 的返回码
+ */
+fc_status_e fc_test_complete_nonactive(void);
+#endif
+
 #endif /* FC_INTERFACE_H */

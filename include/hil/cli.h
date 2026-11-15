@@ -38,6 +38,9 @@ BOOL cli_host_busy(void);
  * @brief 在主循环周期调用：回显、组装一行并执行 CLI。
  *
  * 末尾轮询未决的 controller 请求并打印结果。**绝不能在 ISR 中调用**。
+ *
+ * @note `wr/rd/tr/fl/wp` 的 handler 自带 `ssd_runtime_pump()` 同步等待，命令
+ *       完成前不会返回；因此 CLI 命令在断言现场终端里也能独立跑完。
  */
 void cli_service_poll(void);
 

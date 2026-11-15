@@ -1,5 +1,5 @@
 /*
- * test_fc_level1.c — Level 1 纯逻辑测试：fc_command + fc_queue
+ * test_fc_pure.c — pure 纯 RAM 测试：fc_command + fc_queue
  *
  * 共 11 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
  * 不依赖任何池，每个用例自带全部夹具（栈上队列 / 栈上命令）。
@@ -17,7 +17,7 @@
  * 范围说明：
  *   - 调度器的选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）
  *     在 fc.c 的 static fc_poll_fill 里，只能经 fc_service() 触达（会推真 NAND）
- *     ⇒ 其覆盖属 Level 2/3，不在本文件。
+ *     ⇒ 其覆盖属 data_path/lifecycle，不在本文件。
  *   - fc_command_validate 的负向守卫全部是 ASSERT；param.cw_bitmap 的读者是 FTL，
  *     FC 侧不校验 ⇒ 本文件只留正向冒烟。
  */
@@ -459,7 +459,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
  *  Part 4: ONFI 参数页解码（手册 Table 11）
  *
  *  nand_onfi_parameter_page_decode() 是**纯函数**——零 HAL / 零日志 / 零硬件，
- *  故可在 Level 1 用栈上合成页直接测，不碰 NAND。断言取的是「手册 Table 11
+ *  故可在 pure 用栈上合成页直接测，不碰 NAND。断言取的是「手册 Table 11
  *  给死的值」（MT29F4G08ABADAWP 列），不是从代码反推的值。
  **************************************************************************/
 
@@ -582,34 +582,34 @@ static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[]
 /*************************************************************************
  *  套件定义
  *
- *  单个子套件 logic，挂在 /fc-nand/ 根套件下，与 Level 2（data_path）/
- *  Level 3（lifecycle）一致——**一个文件一个套件**。
+ *  单个子套件 pure，挂在 /fc-nand/ 根套件下，与 data_path /
+ *  lifecycle一致——**一个文件一个套件**。
  *  不按 command / queue 拆子套件：11 条全是纯 RAM 微秒级，按模块过滤省不出
  *  任何东西。真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），
- *  那由根套件的 Level 1/2/3 三层保住。
+ *  那由根套件的 pure/data_path/lifecycle 三层保住。
  *
- *  套件不需要 setup/teardown——Level 1 全部用例自带夹具，零全局状态。
+ *  套件不需要 setup/teardown——pure 全部用例自带夹具，零全局状态。
  **************************************************************************/
 
-MunitTest g_fc_logic_tests[] = {
+MunitTest g_fc_pure_tests[] = {
   /* Part 1: fc_command */
-    {       "validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "cmd_validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"cmd_validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* Part 2: fc_submission_queue */
-    {                "push_pop",                   test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             "wrap_around",                test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                "overflow",                   test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                    "peek",                       test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              "peek_empty",                 test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "sq_push_pop",                   test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              "sq_wrap_around",                test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "sq_overflow",                   test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                     "sq_peek",                       test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {               "sq_peek_empty",                 test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* Part 2b: fc_completion_queue */
-    {             "cqueue_init",                      test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         "cqueue_push_pop",                  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         "cqueue_overflow",                  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                     "cq_init",                      test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "cq_push_pop",                  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 "cq_overflow",                  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* Part 4: ONFI 参数页解码 */
-    {  "onfi_param_page_decode",       test_onfi_parameter_page_decode, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "onfi_param_page_decode",       test_onfi_parameter_page_decode, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-    {                      NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                          NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

@@ -30,6 +30,9 @@
 /* key 的「任意」哨兵。真实 key（plane / phase / opcode / region / LBA）远小于该值。 */
 #define FI_KEY_ANY (UINT32_MAX)
 
+/* 第二 key 未设置的哨兵（与 FI_KEY_ANY 区分：ANY 会匹配所有现场）。 */
+#define FI_KEY_NONE (UINT32_MAX - 1U)
+
 /* 命名构造函数：坐标域由故障类型绑定（C11），测试侧用这些宏表达意图。 */
 #define FI_KEY_PLANE(p)  ((DWORD)(p))
 #define FI_KEY_REGION(r) ((DWORD)(r))
@@ -39,21 +42,34 @@
 
 typedef enum FI_FAULT_E
 {
-    FI_CACHE_FAIL = 0,     /* cache program 完成：伪造 FAIL_CACHE（key = 页基址 LBA） */
-    FI_JOURNAL_WRITE_FAIL, /* Journal 页写失败（key 未用） */
-    FI_FC_STATUS,          /* FC 完成状态位注入（key = NAND opcode，arg = status 位） */
-    FI_ALLOC_FAIL,         /* 分配失败，模拟 free/OP 都拿不到块（key 未用，按次数） */
-    FI_L2P_LOAD_FAIL,      /* L2P region 加载启动失败（key 未用，按 META 读次数） */
-    FI_CP_ABORT_PHASE,     /* 指定 CP phase 中止（key = cp_phase_e） */
-    FI_BBT_WRITE_FAIL,     /* BBT record 写失败（key 未用） */
-    FI_MIG_READ_FAIL,      /* GC/WL victim 页读失败（key = plane） */
-    FI_MIG_WRITE_FAIL,     /* GC/WL 目的页写失败（key = plane） */
-    FI_MIG_ERASE_FAIL,     /* GC/WL victim 擦除失败（key = plane） */
-    FI_RR_READ_FAIL,       /* Read Recovery 恢复读硬失败（key = plane） */
-    FI_SEQ_GATE_STARVE,    /* 序列门控拒绝，模拟后台被饿死（key 未用） */
-    FI_FC_STATUS_DATA,     /* 仅 DATA 命令的 FC 完成状态注入（key = opcode 或 FI_KEY_ANY） */
-    FI_FC_STATUS_PLANE,    /* 按 plane 的 FC 完成状态注入（key = plane，arg = status 位） */
-    FI_FC_STATUS_PBA,      /* 按命令目标 PBA 的 FC 完成状态注入（key = PBA，arg = status 位） */
+    FI_CACHE_FAIL = 0,        /* cache program 完成：伪造 FAIL_CACHE（key = 页基址 LBA） */
+    FI_JOURNAL_WRITE_FAIL,    /* Journal 页写失败（key 未用） */
+    FI_FC_STATUS,             /* FC 完成状态位注入（key = NAND opcode，arg = status 位） */
+    FI_ALLOC_FAIL,            /* 分配失败，模拟 free/OP 都拿不到块（key 未用，按次数） */
+    FI_L2P_LOAD_FAIL,         /* L2P region 加载启动失败（key 未用，按 META 读次数） */
+    FI_CP_ABORT_PHASE,        /* 指定 CP phase 中止（key = cp_phase_e） */
+    FI_BBT_WRITE_FAIL,        /* BBT record 写失败（key 未用） */
+    FI_MIG_READ_FAIL,         /* GC/WL victim 页读失败（key = plane） */
+    FI_MIG_WRITE_FAIL,        /* GC/WL 目的页写失败（key = plane） */
+    FI_MIG_ERASE_FAIL,        /* GC/WL victim 擦除失败（key = plane） */
+    FI_RR_READ_FAIL,          /* Read Recovery 恢复读硬失败（key = plane） */
+    FI_SEQ_GATE_STARVE,       /* 序列门控拒绝，模拟后台被饿死（key 未用） */
+    FI_FC_STATUS_DATA,        /* 仅 DATA 命令的 FC 完成状态注入（key = opcode 或 FI_KEY_ANY） */
+    FI_FC_STATUS_PLANE,       /* 按 plane 的 FC 完成状态注入（key = plane，arg = status 位） */
+    FI_FC_STATUS_PBA,         /* 按命令目标 PBA 的 FC 完成状态注入（key = PBA，arg = status 位） */
+    FI_FC_ENGINE_FAIL,        /* dispatch 执行结果强制失败（key = NAND opcode） */
+    FI_COMPLETION_DROP,       /* 丢弃一条完成（key = NAND opcode；消费后不再投递） */
+    FI_COMPLETION_LATE,       /* 延迟一条完成到下轮 poll（key = NAND opcode） */
+    FI_COMPLETION_HOLD,       /* 扣住完成，测试显式 release（key = NAND opcode） */
+    FI_READ_COLUMN_FAIL,      /* ftl_sync_read_column 失败（key = PBA） */
+    FI_PLANE_STATUS,          /* dispatch 完成：按 plane 覆盖 cw_status（key = plane，arg = status 位） */
+    FI_DATA_PATH_ENCODE_FAIL, /* fc_data_path_encode 强制失败（key = opcode 或 ANY） */
+    FI_DATA_PATH_READ_FAIL,   /* fc_data_path_process_read 强制失败（key = opcode 或 ANY） */
+    FI_CLOCK_NOW_FAIL,        /* delay_time_now_us 失败（无 key，按次数） */
+    FI_JRN_REPLAY_APPLY_FAIL, /* Journal 回放应用遍页读失败（无 key，按次数） */
+    FI_ONFI_READ_FAIL,        /* ONFI 参数页读失败（无 key，按次数） */
+    FI_NAND_TIMING_FAIL,      /* NAND set_timing 失败（无 key，按次数） */
+    FI_CRC_COMPUTE_FAIL,      /* fc_crc_compute 强制返回 0（无 key，按次数） */
     FI_FAULT_NUM
 } fi_fault_e;
 
@@ -90,6 +106,19 @@ void fi_arm_at(fi_fault_e f, DWORD key, DWORD count);
  * @param arg   故障参数（FI_FC_STATUS 时为要 OR 进 status 的位）
  */
 void fi_arm_ex(fi_fault_e f, DWORD key, DWORD count, DWORD arg);
+
+/**
+ * @brief 武装一个故障，同时匹配两个 key（如 Directory 主/备副本）。
+ *
+ * @param f       故障类型
+ * @param key     第一个匹配 key
+ * @param key_alt 第二个匹配 key（FI_KEY_NONE = 不启用）
+ * @param count   命中次数
+ * @param arg     故障参数
+ *
+ * @note 每个 fault 仍只有一个槽；需要 3 个以上 key 时应改用 FI_KEY_ANY 或新增故障类型。
+ */
+void fi_arm_ex2(fi_fault_e f, DWORD key, DWORD key_alt, DWORD count, DWORD arg);
 
 /**
  * @brief 命中判定：只匹配「无 key」的武装。

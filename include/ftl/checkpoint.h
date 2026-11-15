@@ -138,10 +138,12 @@ typedef struct CP_JOB_HEADER_S
     BYTE      block_page;
     BYTE      wear_page;
     BOOL      block_ok;
-    WORD      block_words[FTL_BLOCK_TOTAL];
-    DWORD     wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES];
-    BYTE      wear_page_buf[PAGE_MAIN_SIZE];
-    DWORD     hdr_buf[PAGE_MAIN_SIZE / sizeof(DWORD)];
+    /* in/out 约定：cp_block_snapshot 写入；cp_block_table_load 读出并校验；
+     * wear_page_* 与 block_words 共用同一次 CP record 顺序，调用者不得重排。 */
+    WORD  block_words[FTL_BLOCK_TOTAL];
+    DWORD wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES];
+    BYTE  wear_page_buf[PAGE_MAIN_SIZE];
+    DWORD hdr_buf[PAGE_MAIN_SIZE / sizeof(DWORD)];
 } cp_job_hdr_s;
 
 /* Journal 截断 job 的一段（④）。 */

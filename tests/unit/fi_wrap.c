@@ -36,12 +36,18 @@ ftl_status_e __real_ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const
 ftl_status_e __real_ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
+ftl_status_e __real_ftl_sync_read_page_status(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out);
 ftl_status_e __real_ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba);
 ftl_status_e __real_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba);
+ftl_status_e __real_ftl_sync_erase_block_multi_plane(DWORD pba);
 ftl_status_e __real_ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg);
+ftl_status_e __real_ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4]);
 ftl_status_e __real_ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx);
 ftl_status_e __real_ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op, void *ctx);
 fc_status_e  __real_fc_poll_completion(fc_cmd_status_s *completion);
+fc_status_e  __real_fc_data_path_encode(fc_cmd_id_t cmd_id);
+fc_status_e  __real_fc_data_path_process_read(fc_cmd_id_t cmd_id);
+BOOL         __real_delay_time_now_us(DWORD *us);
 fc_status_e  __real_fc_poll_completions(fc_cmd_status_s *completions, WORD max_count, WORD *count);
 ftl_status_e __real_alc_super_open_alloc_pair(alc_s *alloc, alc_super_alloc_mode_e mode, DWORD out[PLANE_NUM]);
 
@@ -50,6 +56,24 @@ ftl_status_e __real_alc_super_open_alloc_pair(alc_s *alloc, alc_super_alloc_mode
 gc_select_e __real_gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out);
 
 static const super_block_s *s_forced_victim;
+static fc_cmd_status_s      s_late_completion;
+static BOOL                 s_late_valid;
+
+#    define FI_HOLD_MAX 16U
+
+static fc_cmd_status_s s_held[FI_HOLD_MAX];
+static BYTE            s_held_count;
+static BYTE            s_held_release;
+
+void fi_wrap_release_held(void)
+{
+    s_held_release = 1U;
+}
+
+DWORD fi_wrap_held_count(void)
+{
+    return s_held_count;
+}
 
 void fi_wrap_gc_force_victim(const super_block_s *victim)
 {
@@ -59,6 +83,9 @@ void fi_wrap_gc_force_victim(const super_block_s *victim)
 void fi_wrap_reset(void)
 {
     s_forced_victim = NULL;
+    s_late_valid    = false;
+    s_held_count    = 0U;
+    s_held_release  = 0U;
 }
 
 gc_select_e __wrap_gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_select_out_s *out)
@@ -206,6 +233,18 @@ ftl_status_e __wrap_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD 
     return __real_ftl_async_erase_block_multi_plane(out_cmd, pba);
 }
 
+ftl_status_e __wrap_ftl_sync_erase_block_multi_plane(DWORD pba)
+{
+    const BYTE plane = pba_to_plane(pba);
+
+    if (fi_take_at(FI_MIG_ERASE_FAIL, plane) == true)
+    {
+        return FTL_ERROR;
+    }
+
+    return __real_ftl_sync_erase_block_multi_plane(pba);
+}
+
 ftl_status_e __wrap_ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg)
 {
     if ((fi_data_page(cfg) == false) && (fi_take_at(FI_L2P_LOAD_FAIL, pba) == true))
@@ -214,6 +253,30 @@ ftl_status_e __wrap_ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, co
     }
 
     return __real_ftl_sync_read_page(pba, buffer, length, cfg);
+}
+
+ftl_status_e __wrap_ftl_sync_read_page_status(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out)
+{
+    if ((fi_data_page(cfg) == false) && (fi_take_at(FI_L2P_LOAD_FAIL, pba) == true))
+    {
+        if (completion_out != NULL)
+        {
+            memset(completion_out, 0, sizeof(*completion_out));
+        }
+        return FTL_ERROR;
+    }
+
+    return __real_ftl_sync_read_page_status(pba, buffer, length, cfg, completion_out);
+}
+
+ftl_status_e __wrap_ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4])
+{
+    if (fi_take_at(FI_READ_COLUMN_FAIL, pba) == true)
+    {
+        return FTL_ERROR;
+    }
+
+    return __real_ftl_sync_read_column(pba, column, out);
 }
 
 /* ── FTL 提交入口：CP phase 中止 / BBT 提交失败 / 门控饥饿 ── */
@@ -274,6 +337,35 @@ ftl_status_e __wrap_alc_super_open_alloc_pair(alc_s *alloc, alc_super_alloc_mode
     return __real_alc_super_open_alloc_pair(alloc, mode, out);
 }
 
+/* ── 数据路径 / 时基（D2）── */
+
+fc_status_e __wrap_fc_data_path_encode(fc_cmd_id_t cmd_id)
+{
+    if (fi_take(FI_DATA_PATH_ENCODE_FAIL) == true)
+    {
+        return FC_STATUS_NOT_SUPPORTED;
+    }
+    return __real_fc_data_path_encode(cmd_id);
+}
+
+fc_status_e __wrap_fc_data_path_process_read(fc_cmd_id_t cmd_id)
+{
+    if (fi_take(FI_DATA_PATH_READ_FAIL) == true)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+    return __real_fc_data_path_process_read(cmd_id);
+}
+
+BOOL __wrap_delay_time_now_us(DWORD *us)
+{
+    if (fi_take(FI_CLOCK_NOW_FAIL) == true)
+    {
+        return false;
+    }
+    return __real_delay_time_now_us(us);
+}
+
 /* ── FC 完成状态（CQ 出口）── */
 
 static void fi_fc_status_apply(fc_cmd_status_s *completion)
@@ -327,10 +419,64 @@ static void fi_fc_status_apply(fc_cmd_status_s *completion)
 
 fc_status_e __wrap_fc_poll_completion(fc_cmd_status_s *completion)
 {
+    /* 共享完成门：测试放行后，逐条投递被 FI_COMPLETION_HOLD 扣住的完成。 */
+    if ((s_held_release != 0U) && (s_held_count != 0U))
+    {
+        if (completion != NULL)
+        {
+            *completion = s_held[0];
+            s_held_count--;
+            for (BYTE i = 0U; i < s_held_count; i++)
+            {
+                s_held[i] = s_held[i + 1U];
+            }
+            if (s_held_count == 0U)
+            {
+                s_held_release = 0U;
+            }
+            return FC_STATUS_OK;
+        }
+        return FC_STATUS_QUEUE_EMPTY;
+    }
+
+    /* 迟到的完成先投递（D2）：上一轮 poll 把一条完成压入暂存，调用者下次先看到它。 */
+    if (s_late_valid == true)
+    {
+        if (completion != NULL)
+        {
+            *completion  = s_late_completion;
+            s_late_valid = false;
+            return FC_STATUS_OK;
+        }
+        return FC_STATUS_QUEUE_EMPTY;
+    }
+
     const fc_status_e st = __real_fc_poll_completion(completion);
 
     if ((st == FC_STATUS_OK) && (completion != NULL))
     {
+        const fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+        const DWORD     key = (cmd != NULL) ? cmd->config.operation : FI_KEY_ANY;
+
+        if (fi_take_ex(FI_COMPLETION_DROP, key, NULL) == true)
+        {
+            return FC_STATUS_QUEUE_EMPTY; /* 完成被丢弃：调用者只能超时 */
+        }
+        if (fi_take_ex(FI_COMPLETION_LATE, key, NULL) == true)
+        {
+            s_late_completion = *completion;
+            s_late_valid      = true;
+            return FC_STATUS_QUEUE_EMPTY; /* 本轮不投递，下一轮才可见 */
+        }
+        if (fi_take_ex(FI_COMPLETION_HOLD, key, NULL) == true)
+        {
+            if (s_held_count < FI_HOLD_MAX)
+            {
+                s_held[s_held_count++] = *completion;
+            }
+            return FC_STATUS_QUEUE_EMPTY; /* 扣住，等测试显式放行 */
+        }
+
         fi_fc_status_apply(completion);
     }
 

@@ -17,10 +17,11 @@
 
 typedef struct FI_SLOT_S
 {
-    DWORD left; /* 剩余命中次数（0 = 未武装） */
-    DWORD key;  /* 匹配 key（FI_KEY_ANY = 任意） */
-    DWORD arg;  /* 故障参数（类型相关） */
-    DWORD hits; /* 自 fi_reset() 以来的累计命中（证据用） */
+    DWORD left;    /* 剩余命中次数（0 = 未武装） */
+    DWORD key;     /* 匹配 key（FI_KEY_ANY = 任意） */
+    DWORD key_alt; /* 第二匹配 key（FI_KEY_NONE = 不启用） */
+    DWORD arg;     /* 故障参数（类型相关） */
+    DWORD hits;    /* 自 fi_reset() 以来的累计命中（证据用） */
 } fi_slot_s;
 
 static fi_slot_s s_fi[FI_FAULT_NUM];
@@ -29,10 +30,11 @@ void fi_reset(void)
 {
     for (BYTE i = 0U; i < (BYTE)FI_FAULT_NUM; i++)
     {
-        s_fi[i].left = 0U;
-        s_fi[i].key  = FI_KEY_ANY;
-        s_fi[i].arg  = 0U;
-        s_fi[i].hits = 0U;
+        s_fi[i].left    = 0U;
+        s_fi[i].key     = FI_KEY_ANY;
+        s_fi[i].key_alt = FI_KEY_NONE;
+        s_fi[i].arg     = 0U;
+        s_fi[i].hits    = 0U;
     }
 }
 
@@ -48,6 +50,11 @@ void fi_arm_at(fi_fault_e f, DWORD key, DWORD count)
 
 void fi_arm_ex(fi_fault_e f, DWORD key, DWORD count, DWORD arg)
 {
+    fi_arm_ex2(f, key, FI_KEY_NONE, count, arg);
+}
+
+void fi_arm_ex2(fi_fault_e f, DWORD key, DWORD key_alt, DWORD count, DWORD arg)
+{
     // 枚举由调用者自己持有（测试代码的编译期常量）⇒ 越界属编程错误（C5 / H34）。
     ASSERT((DWORD)f < (DWORD)FI_FAULT_NUM);
 
@@ -56,9 +63,10 @@ void fi_arm_ex(fi_fault_e f, DWORD key, DWORD count, DWORD arg)
         return; // release UT：测试侧内部 API，越界直接忽略（不静默改介质）
     }
 
-    s_fi[f].left = count;
-    s_fi[f].key  = key;
-    s_fi[f].arg  = arg;
+    s_fi[f].left    = count;
+    s_fi[f].key     = key;
+    s_fi[f].key_alt = key_alt;
+    s_fi[f].arg     = arg;
 }
 
 static BOOL fi_take_key(fi_fault_e f, DWORD key, DWORD *out_arg)
@@ -74,7 +82,7 @@ static BOOL fi_take_key(fi_fault_e f, DWORD key, DWORD *out_arg)
     {
         return false;
     }
-    if ((slot->key != FI_KEY_ANY) && (slot->key != key))
+    if ((slot->key != FI_KEY_ANY) && (slot->key != key) && (slot->key_alt != key))
     {
         return false;
     }

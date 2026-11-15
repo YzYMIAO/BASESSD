@@ -378,13 +378,8 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_s *ftl)
  *
  * @param ftl 实例
  */
-void bg_scheduler_service(ftl_ctx_s *ftl)
+static void bg_scheduler_publish(ftl_ctx_s *ftl)
 {
-    if (ftl->flags.bg_suspend == true)
-    {
-        return;
-    }
-
     const bg_level_e level = bg_scheduler_level_select(ftl);
 
     // 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。
@@ -392,5 +387,23 @@ void bg_scheduler_service(ftl_ctx_s *ftl)
 
     // 档位先发布到调度器：模块入口读 sched->level，不各自重选。
     ftl->bg.level = level;
-    bg_scheduler_run(&ftl->bg, ftl, &s_bg_level_cfg[level]);
+    ftl->bg.cfg   = &s_bg_level_cfg[level];
 }
+
+void bg_scheduler_service(ftl_ctx_s *ftl)
+{
+    if (ftl->flags.bg_suspend == true)
+    {
+        return;
+    }
+
+    bg_scheduler_publish(ftl);
+    bg_scheduler_run(&ftl->bg, ftl, ftl->bg.cfg);
+}
+
+#if defined(FC_NAND_TEST_ENABLE)
+void bg_test_publish(ftl_ctx_s *ftl)
+{
+    bg_scheduler_publish(ftl);
+}
+#endif

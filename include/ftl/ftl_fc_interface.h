@@ -519,6 +519,21 @@ ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, cons
 ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg);
 
 /**
+ * @brief 同步读页（保留完成状态）：同 ftl_sync_read_page，额外交出 CQE 状态。
+ *
+ * @param pba            目标页 PBA
+ * @param buffer         输出缓冲（可 NULL）
+ * @param length         字节数
+ * @param cfg            页配置
+ * @param completion_out 输出：命令完成状态；建链/提交层失败时为全 0
+ * @return 同 ftl_sync_read_page
+ *
+ * @note 供开机恢复区分「提交层失败」与「完成态 DATA_ERROR」：前者快照不可信，
+ *       后者可按 L2P 加载重试/降级处理。
+ */
+ftl_status_e ftl_sync_read_page_status(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out);
+
+/**
  * @brief 裸页读：LDPC_RAW，4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE，
  *        每 CW 只拷 **USER 512B**；槽尾 16B（META/CRC/parity）不填）。
  *

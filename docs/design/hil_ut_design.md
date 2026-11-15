@@ -1,6 +1,7 @@
 # HIL 单元测试设计（板端）
 
 > 状态：正常路径已上板（2026-11-13 13:21:29，15/15，0 skip）；剩余缺口见 §6。
+> 2026-11-14 拆 `/hil/contract/`（9）+ `/hil/io/`（7），**拆分后未上板**。
 > 范围：`src/hil/`（HIL 层）。FTL UT 见 `docs/design/ftl_ut_design.md`；
 > FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
 > 关联：`docs/design/known_iss.md` ISS-HIL-01；`docs/design/known_risks.md`
@@ -48,19 +49,17 @@
 
 | 层 | 根套件 | 环境 | 内容 | 破坏性 |
 |---|---|---|---|---|
-| **HIL** | `/hil/` | 真 FTL / NAND | controller 状态机 / init / LBA 范围 / submit 边界 / host queue / 真实 I/O | 是（尾窗写） |
+| **HIL** | `/hil/`（`contract/` + `io/`） | 真 FTL / NAND | controller 状态机 / init / LBA 范围 / submit 边界 / host queue / 真实 I/O | 是（尾窗写） |
 
 ```text
 /hil/
-  state_machine / init_ready / init_missing_slot / init_topo_mismatch
-  host_queue / lba_range_ok / submit_not_ready / submit_edges / is_complete
-  write_read_roundtrip / write_flush_readback
-  flush_job / flush_busy
-  trim_job / trim_busy
+  contract/   9 条：状态机 / init / host_queue / lba_range / submit / is_complete
+  io/         7 条：write_read_roundtrip / write_flush_readback / flush_* / trim_*
 ```
 
-执行入口：`test /hil/`。HIL 不另分 pure/media 子套件——所有用例共用同一个主 boot
-实例；共享状态由 teardown 的 `hil_quiesce()` 排空，不靠用例顺序。
+执行入口：`test /hil/`（展开到 `contract/` 与 `io/`）；也可定向
+`test /hil/contract/` 或 `test /hil/io/`。两个子套件共用同一个主 boot 实例；
+共享状态由 teardown 的 `hil_quiesce()` 排空，不靠用例顺序。
 
 ### 2.2 测试技术矩阵
 
@@ -72,7 +71,7 @@
 | **Seeded random** | 记录 seed；失败可复现 | HIL UT 当前不随机 |
 | **Fault injection** | 注入点 → 预期降级/恢复 | HIL UT 不注入（无 HIL 专属注入 seam） |
 | **Reboot / crash point** | 模拟重启或真 POR 后映射/账本一致 | **未覆盖**，见 §6 |
-| **Stress / perf** | 只作基准，不作功能通过率 | PC 主机矩阵 / `/speed/`，不在 `/hil/` |
+| **Stress / perf** | 只作基准，不作功能通过率 | PC 主机矩阵 / `/bench/speed/`，不在 `/hil/` |
 
 > HIL UT 的强项是**同步契约**：状态机、init、范围、submit、单飞行、完成回执；
 > 弱项是**持久化/并发/主机侧时序**——这些必须由 §6 的专项或 PC 矩阵补，不能靠 15/15 推定。
@@ -241,7 +240,7 @@ test /hil/
 - 真 POR / 掉电：人工流程；HIL UT 只复用主 boot 实例，不做 reboot。
 - 多 die / 跨实例 / 多 run 中途失败：见 §6。
 - USB 槽状态机、主机 fsync/TRIM 时序：PC 主机矩阵（`usb_msc.md` Part B）。
-- 长时间 soak、性能：`/speed/` 与主机工具，不是 `/hil/`。
+- 长时间 soak、性能：`/bench/speed/` 与主机工具，不是 `/hil/`。
 - FTL 内部 L2P/GC/CP/Journal 契约：`ftl_ut_design.md`；HIL 只钉接口层。
 
 > 未实现 / 未验证项统一登记 `docs/design/known_iss.md`；本文不复制状态。

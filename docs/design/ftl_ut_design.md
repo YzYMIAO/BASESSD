@@ -5,7 +5,7 @@
 > `docs/design/known_iss.md` ISS-HIL-01。
 > 被测设计：`docs/design/ftl_design.md`。风险状态：`docs/design/known_risks.md`。
 > 分层坐标：沿用 `docs/design/testing_guide.md` §3 的 L0~L6；本文属 **L2 FTL**，
-> `/speed/` 属 **L4**。
+> `/bench/speed/` 属 **L4**。
 
 ---
 
@@ -54,7 +54,7 @@
 |---|---|---|---|---|
 | **FTL-U** | `/ftl/pure/` | RAM，测试自有对象 | 模块单元、不变量、错误分支 | 否 |
 | **FTL-I** | `/ftl/media/` | 真 NAND（首次 format，部分用例再 format） | 跨模块契约、持久化、GC/WL、cache | 是 |
-| **PERF** | `/speed/ftl_rw` | 真 NAND | 吞吐基准；只判「跑不跑得完」 | 是 |
+| **PERF** | `/bench/speed/ftl_rw` | 真 NAND | 吞吐基准；只判「跑不跑得完」 | 是 |
 | **MANUAL** | 板端流程 | 真板 | POR、USB、H2testw、坏块注入 | 是 |
 
 ```text
@@ -66,7 +66,7 @@
     io/     L2P / CMT / GC / WL / RR
   media/
     e2e/    format / 写读 / wbuf / flush / TRIM / 模拟重启 / GC / WL / BBT / cache
-/speed/
+/bench/speed/
   ftl_rw    FTL host API 25 MiB 读写（破坏性）
 ```
 
@@ -90,26 +90,26 @@
 
 | 技术 | 判据 | 本仓落点 |
 |---|---|---|
-| **Directed / contract** | 一个不变量或契约一条用例 | `free_pool_invariants`、`l2p_wal_gate` |
-| **Negative** | 非法状态/越界/错误码必须被拒绝或降级 | `host_submit_invalid_args`、`group_exhaustion` |
+| **Directed / contract** | 一个不变量或契约一条用例 | `alloc_free_pool_invariants`、`l2p_wal_gate` |
+| **Negative** | 非法状态/越界/错误码必须被拒绝或降级 | `host_submit_invalid_args`、`pend_group_exhaustion` |
 | **Boundary / parameterized** | 边界值成组覆盖，不写死单点 | `host_io_matrix`、`wbuf_density`、`cache_failc_abort` |
-| **Seeded random** | 记录 seed；失败可按 seed 复现 | `host_io_random`、`/speed/ftl_rw` |
+| **Seeded random** | 记录 seed；失败可按 seed 复现 | `host_io_random`、`/bench/speed/ftl_rw` |
 | **Fault injection** | 注入点 → 预期降级/恢复 → 清除后可恢复 | `fi_cache_fail_arm`、`fi_journal_fail_arm` |
 | **Reboot / crash point** | 模拟重启或真 POR 后映射/账本一致 | `*_reboot_*`、`trim_no_resurrection` |
-| **Stress / perf** | 只作基准，不作功能通过率 | `/speed/ftl_rw` |
+| **Stress / perf** | 只作基准，不作功能通过率 | `/bench/speed/ftl_rw` |
 
 > 随机用例必须把 seed 写进证据行；没有 seed 的「随机跑过」不算可复现判据。
-> 压力/性能不进功能通过率：`/speed/ftl_rw` 只判「跑不跑得完」，写返回 `IO_ERROR`
+> 压力/性能不进功能通过率：`/bench/speed/ftl_rw` 只判「跑不跑得完」，写返回 `IO_ERROR`
 > 与读数据不符只计入 `err(wr/rd)` 上报。
 
 ### 2.3 覆盖模型（CP-*）
 
 | 覆盖点 | 要覆盖什么 | 典型用例 |
 |---|---|---|
-| `CP-STATE` | allocator / pending / group / cache stream / L2P line / CP phase 的状态与转移 | `free_pool_invariants`、`l2p_resident_states` |
-| `CP-BOUND` | 池满/空、队列满、ring 回绕、region/block/page-pair 边界 | `group_exhaustion`、`wbuf_density` |
+| `CP-STATE` | allocator / pending / group / cache stream / L2P line / CP phase 的状态与转移 | `alloc_free_pool_invariants`、`l2p_resident_states` |
+| `CP-BOUND` | 池满/空、队列满、ring 回绕、region/block/page-pair 边界 | `pend_group_exhaustion`、`wbuf_density` |
 | `CP-ERR` | `FTL_ERROR` / `FTL_AGAIN` / deferred error / 注入失败 | `journal_write_fail_wal_stall` |
-| `CP-LEDGER` | allocator 四本账、pending/group/ctx、FC 资源、cache/CMT 计数 | `free_pool_invariants`、teardown |
+| `CP-LEDGER` | allocator 四本账、pending/group/ctx、FC 资源、cache/CMT 计数 | `alloc_free_pool_invariants`、teardown |
 | `CP-MAP` | 写后读、覆盖写、TRIM、GC 搬移、重启回放 | `host_io_matrix`、`trim_no_resurrection` |
 | `CP-DUR` | flush 屏障、WAL 闸门、CP、Journal 回放、TRIM 持久化 | `journal_barrier_cp_progress` |
 | `CP-CONC` | 单飞行、队列满、host busy、cache batch 在飞 | `cache_early_ack_flush_barrier`、`cache_failc_abort` |
@@ -147,7 +147,7 @@
 
 - 复用 `ssd_platform_register` / `ssd_platform_ops_s.time_us`；`ftl_ut_clock_install()`
   保存原 ops，`ftl_ut_clock_restore()` 恢复。
-- 仅需要固定 now 的用例安装（当前为 `cp_init_timer`）；用例结束显式调用
+- 仅需要固定 now 的用例安装（当前为 `md_cp_init_timer`）；用例结束显式调用
   `ftl_ut_clock_restore()`，不要依赖 teardown。真 NAND I/O 一律用真实时钟。
 
 ### 3.4 结束不变量（INV-*）
@@ -161,7 +161,7 @@
 - `INV-CACHE`：`cache_stream` 序列计数归零，CMT 无残留 dirty。
 
 `INV-ALLOC`（`state==FREE ⟺ 在 Free Pool`、BAD 不在任何池/Closed、计数不越界）由
-allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入通用 teardown；
+allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**纳入通用 teardown；
 新增 allocator 用例时不要假设 teardown 已代查。
 
 > `INV-*` 是**本仓自拟**的不变量编号；用于把「结束条件」写成可引用的契约，不声称
@@ -229,7 +229,8 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 
 ## 4. 用例清单
 
-> 首列是 `test --list` 里的用例名；对应测试函数名为 `test_<name>`。
+> 首列是 `test --list` 里的用例名（稳定 ID）；测试函数名以 `test_` 开头，
+> 不要求与用例名逐字相同。
 > 参数列用 `/` 分隔取值，例如 `mode=hot/cold/high_wear`。
 > 本表只写**契约 / 覆盖点 / RISK**；具体输入、断言值、负例写在测试源注释里（§8 模板）。
 
@@ -237,47 +238,49 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
-| `address_roundtrip` | — | LBA/PBA 编解码往返、`ftl_gblock` plane-major 编号；`CP-MAP` | `RISK-ALLOC-06` |
-| `free_pool_invariants` | — | `state==FREE ⟺ 在池`、per-plane 两本账同步、OP refill LIFO；`CP-LEDGER` / `CP-STATE` | `RISK-ALLOC-09` |
-| `super_block_open_close` | `mode=hot/cold/high_wear` | 开 SB 两 plane 同页号、rewind 不烧块、close 记录 `sb_id`；`CP-STATE` | — |
-| `closed_list_add_drop` | — | Closed 列表按 plane 摘除，最后一个 plane 才释放条目；`CP-LEDGER` / `CP-STATE` | — |
-| `valid_count_guard` | — | `valid_count` 记账、BAD 后继续 sub 必须无效；`CP-LEDGER` / `CP-STATE` | `RISK-MIG-03` |
-| `op_spare_pools` | — | OP/Spare per-plane 独立计数、Spare LIFO、空池 pop 失败；`CP-BOUND` / `CP-LEDGER` | — |
-| `erase_stats` | — | 擦除后 `erase_count+1`、`last_pe_ts`、`valid/read_count` 清零、state OPEN；`CP-STATE` / `CP-LEDGER` | — |
-| `bbt_mark_bad` | `plane=0/1` | 标坏置 BAD、清 valid/sb_id、bad/dirty_gen 推进、Spare 补池、幂等；`CP-STATE` / `CP-LEDGER` | `RISK-BBT-01` / `RISK-BBT-10` |
-| `bbt_metadata_bad` | — | 元数据块标坏不弹用户 Spare，置 `pools.dirty` / `rebuild_required`；`CP-STATE` / `CP-LEDGER` | — |
-| `cw_masks` | — | CW flat 绝对编号、span/plane 掩码、popcount、`NAND_FIELD_MASK`；`CP-MAP` | `RISK-BIT-01` |
+| `pba_roundtrip` | — | LBA/PBA 编解码往返、`ftl_gblock` plane-major 编号；`CP-MAP` | `RISK-ALLOC-06` |
+| `alloc_free_pool_invariants` | — | `state==FREE ⟺ 在池`、per-plane 两本账同步、OP refill LIFO；`CP-LEDGER` / `CP-STATE` | `RISK-ALLOC-09` |
+| `alloc_super_open_close` | `mode=hot/cold/high_wear` | 开 SB 两 plane 同页号、rewind 不烧块、close 记录 `sb_id`；`CP-STATE` | — |
+| `alloc_closed_list_add_drop` | — | Closed 列表按 plane 摘除，最后一个 plane 才释放条目；`CP-LEDGER` / `CP-STATE` | — |
+| `alloc_valid_count_guard` | — | `valid_count` 记账、BAD 后继续 sub 必须无效；`CP-LEDGER` / `CP-STATE` | `RISK-MIG-03` |
+| `alloc_op_spare_pools` | — | OP/Spare per-plane 独立计数、Spare LIFO、空池 pop 失败；`CP-BOUND` / `CP-LEDGER` | — |
+| `alloc_erase_stats` | — | 擦除后 `erase_count+1`、`last_pe_ts`、`valid/read_count` 清零、state OPEN；`CP-STATE` / `CP-LEDGER` | — |
+| `alloc_bbt_mark_bad` | `plane=0/1` | 标坏置 BAD、清 valid/sb_id、bad/dirty_gen 推进、Spare 补池、幂等；`CP-STATE` / `CP-LEDGER` | `RISK-BBT-01` / `RISK-BBT-10` |
+| `alloc_bbt_metadata_bad` | — | 元数据块标坏不弹用户 Spare，置 `pools.dirty` / `rebuild_required`；`CP-STATE` / `CP-LEDGER` | — |
+| `pba_cw_masks` | — | CW flat 绝对编号、span/plane 掩码、popcount、`NAND_FIELD_MASK`；`CP-MAP` | `RISK-BIT-01` |
 | `alloc_spare_full_refill_none` | — | Spare 满拒收、清空后 refill、Free Pool 空时 refill 返回 0；`CP-BOUND` | — |
 
 ### 4.2 `/ftl/pure/md/`（metadata / checkpoint / journal）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
-| `metadata_idle` | — | metadata job 初始态、`md_handle_is_idle`、live block 计数 0；`CP-STATE` | — |
-| `ring_geometry` | — | `records_per_block` / `total_records` / `has_block` / `plane_at` 哨兵；`CP-BOUND` / `CP-MAP` | — |
-| `directory_commit` | — | primary 覆盖写 live 计数迁移、PAIR 双副本、entry/backup 查询；`CP-DUR` / `CP-LEDGER` | — |
-| `journal_append` | — | init/reserve/append 序号推进、pending 置位、未到水位不请求 CP；`CP-DUR` | — |
-| `ring_locate` | — | 中段/块末/空环定位；「空环」与「找不到最新记录」区分；`CP-STATE` / `CP-BOUND` | — |
-| `dir_ckpt_three_step` | — | begin → page/advance → commit、`dirty_gen` 竞态不清脏；`CP-DUR` / `CP-STATE` | `RISK-MD-06` |
-| `log_alloc_rotate_release` | — | 日志块分配/释放/轮转、页游标归零；`CP-LEDGER` | — |
-| `cp_init_timer` | — | `active/waiting=0`、`phase=IDLE`、T3 绝对到期时刻重装；`CP-STATE` | — |
+| `md_idle` | — | metadata job 初始态、`md_handle_is_idle`、live block 计数 0；`CP-STATE` | — |
+| `md_ring_geometry` | — | `records_per_block` / `total_records` / `has_block` / `plane_at` 哨兵；`CP-BOUND` / `CP-MAP` | — |
+| `md_directory_commit` | — | primary 覆盖写 live 计数迁移、PAIR 双副本、entry/backup 查询；`CP-DUR` / `CP-LEDGER` | — |
+| `md_journal_append` | — | init/reserve/append 序号推进、pending 置位、未到水位不请求 CP；`CP-DUR` | — |
+| `md_ring_locate` | — | 中段/块末/空环定位；「空环」与「找不到最新记录」区分；`CP-STATE` / `CP-BOUND` | — |
+| `md_dir_ckpt_three_step` | — | begin → page/advance → commit、`dirty_gen` 竞态不清脏；`CP-DUR` / `CP-STATE` | `RISK-MD-06` |
+| `md_log_alloc_rotate_release` | — | 日志块分配/释放/轮转、页游标归零；`CP-LEDGER` | — |
+| `md_cp_init_timer` | — | `active/waiting=0`、`phase=IDLE`、T3 绝对到期时刻重装；`CP-STATE` | — |
 | `md_status_error` | — | `handle.error` 进入 IDLE 被清，采样 `FTL_OK`（当前语义特征化）；`CP-ERR` | `RISK-MD-17` |
-| `journal_write_fail_clear` | — | `write_fail_seq` 只有 CP 水位追上才清除；`CP-ERR` | `RISK-JN-03` |
+| `md_journal_write_fail_clear` | — | `write_fail_seq` 只有 CP 水位追上才清除；`CP-ERR` | `RISK-JN-03` |
 | `md_abort_keeps_victim` | — | 压缩写 abort 只回 IDLE，不回收/擦除 victim；`CP-STATE` / `CP-ERR` | `RISK-MD-06` / `RISK-MD-16` / `RISK-BOOT-02` |
-| `journal_truncate_idempotent` | — | 水位/0 保护、环形下一块、重复 plan=ALREADY、`commit(NONE)` 不清预擦块；`CP-DUR` | — |
-| `cp_encoders` | — | block word 位段、快照、OP/Spare 标签、磨损页字节布局；`CP-DUR` / `CP-MAP` | — |
+| `md_reclaim_erase_fail` | `kind=fixed/borrowed` | 连续 3 次擦失败→`bbt_mark_bad`、清 reclaim、phase 回 IDLE；borrowed 块 `log_borrow_count` 结算；`CP-LEDGER` / `CP-STATE` | `RISK-MD-01` / `RISK-MD-22` |
+| `md_cp_read_fail_no_reclaim` | — | CP_READ 失败且无备份→abort；`l2p_live>0` 的 victim 不登记回收；`CP-ERR` / `CP-STATE` | `RISK-MD-16` |
+| `md_journal_truncate_idempotent` | — | 水位/0 保护、环形下一块、重复 plan=ALREADY、`commit(NONE)` 不清预擦块；`CP-DUR` | — |
+| `md_cp_encoders` | — | block word 位段、快照、OP/Spare 标签、磨损页字节布局；`CP-DUR` / `CP-MAP` | — |
 
 ### 4.3 `/ftl/pure/host/`（pending / group / wbuf / ftl_op / bg）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
 | `host_idle` | — | pending/group/ctx 全 0、wbuf idle、bg 任务表长度 = `BG_TASK_COUNT`；`CP-LEDGER` | — |
-| `pending_slots` | — | 槽满返回 NULL、按 `command_id` 查找/移除、移除后可再分配；`CP-BOUND` / `CP-STATE` | — |
-| `group_exhaustion` | — | 组槽满返回 0，已有组字段不被覆盖；`CP-BOUND` | `RISK-PEND-02` |
-| `group_complete_once` | — | 两个子操作 outstanding 2→0，只回调一次并释放组槽；`CP-STATE` | — |
-| `group_failure_aggregation` | — | 子操作 IO_ERROR 后 `agg_status` 粘滞，后续 OK 不清错；`CP-ERR` | — |
-| `confirm_park_timeout` | — | `pend_confirm_is_expired` 到点判定、`settle` 释放槽并按 IO_ERROR 结算一次；`CP-STATE` / `CP-ERR` | `RISK-HOST-05` |
-| `confirm_is_parked` | — | 待入账判别只看 `WRITE_CONFIRM`，普通 used 写槽为 false；`CP-STATE` | `RISK-HOST-05` |
+| `pend_slots` | — | 槽满返回 NULL、按 `command_id` 查找/移除、移除后可再分配；`CP-BOUND` / `CP-STATE` | — |
+| `pend_group_exhaustion` | — | 组槽满返回 0，已有组字段不被覆盖；`CP-BOUND` | `RISK-PEND-02` |
+| `pend_group_complete_once` | — | 两个子操作 outstanding 2→0，只回调一次并释放组槽；`CP-STATE` | — |
+| `pend_group_failure_aggregation` | — | 子操作 IO_ERROR 后 `agg_status` 粘滞，后续 OK 不清错；`CP-ERR` | — |
+| `pend_confirm_park_timeout` | — | `pend_confirm_is_expired` 到点判定、`settle` 释放槽并按 IO_ERROR 结算一次；`CP-STATE` / `CP-ERR` | `RISK-HOST-05` |
+| `pend_confirm_is_parked` | — | 待入账判别只看 `WRITE_CONFIRM`，普通 used 写槽为 false；`CP-STATE` | `RISK-HOST-05` |
 | `wbuf_append_read` | — | 单 CW append/read、同窗口稀疏两位、owners/在飞计数；`CP-MAP` / `CP-LEDGER` | `RISK-WB-03` |
 | `wbuf_drop_reset_owners` | — | DROP 清位/最后一个 CW 按 OK 结算、RESET 按 IO_ERROR 结算；`CP-STATE` / `CP-LEDGER` | `RISK-WB-03` |
 | `wbuf_density` | `n=1/2/4/8` | `occupied==(1<<n)-1`、组在飞只 +1、逐 CW 读回一致；`CP-MAP` / `CP-BOUND` | `RISK-WB-03` / `RISK-IF-04` |
@@ -292,7 +295,8 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
-| `policy_entry` | — | GC/WL 入口无副作用、空盘基线；`CP-STATE` | — |
+| `gc_policy_entry` | — | GC/WL 入口无副作用、空盘基线；`CP-STATE` | — |
+| `mig_eval_fake_clock` | — | 伪时钟 12345 下写计数变化⇒`write_last_ms=12345`，证 `mig_eval` 读 SysTick 而非 TIM6 快照；`CP-STATE` | `RISK-PLAT-10` |
 | `gc_trigger` | — | 空池 EMERGENCY、TARGET 以上不触发、总水位达标但单 plane 低仍 WATERMARK；`CP-BOUND` | `RISK-ALLOC-09` |
 | `gc_select_victim` | `mode=off/idle/emergency` | 三种 benefit 模式选有效数据更少者、饥饿 plane 优先成对/单条目；`CP-STATE` / `CP-BOUND` | `RISK-GC-06` / `RISK-GC-14` / `RISK-ALLOC-09` |
 | `gc_decode_cw_lba` | — | OK / EMPTY / CORRUPT / 空洞四态；`CP-MAP` / `CP-ERR` | — |
@@ -339,13 +343,13 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 | `bbt_ring_reload` | — | 两条 record 后重启走生产 `bbt_init`，两个坏块都在（载入最新）；`CP-DUR` | `RISK-BBT-18` |
 | `boot_restore_reconcile` | — | 写 + flush → 记录 free/OP/Spare/Closed/open + 借用的用户日志块合计 → 重启后守恒、抽样读回一致；`CP-LEDGER` / `CP-DUR` | `RISK-BOOT-24` |
 
-### 4.6 `/speed/ftl_rw`（真 NAND，破坏性）
+### 4.6 `/bench/speed/ftl_rw`（真 NAND，破坏性）
 
 | 用例 | 参数 | 契约 / 覆盖点 | RISK |
 |---|---|---|---|
 | `ftl_rw` | `chunk=8/16/32` | 100 gblock（51,200 LBA = 25 MiB）host 读写；只判「跑不跑得完」，写 IO_ERROR 与读数据不符只计入 `err(wr/rd)`；`CP-CONC` | — |
 
-> `/speed/ftl_rw` 是基准，不是功能判据。与 `/speed/fc_nand_rw` 的分工：FC 直接选器件
+> `/bench/speed/ftl_rw` 是基准，不是功能判据。与 `/bench/speed/fc_nand_rw` 的分工：FC 直接选器件
 > 读写方式，给出速度上下限；FTL 只报实际路径与速度。
 
 ---
@@ -359,11 +363,11 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 
 | RISK | 处置 | 用例 / 流程 |
 |---|---|---|
-| `RISK-ALLOC-06` | UT-P | `address_roundtrip` |
-| `RISK-ALLOC-09` | UT-P + UT-M | `free_pool_invariants`、`gc_trigger`、`gc_select_victim`、`gc_progress` |
-| `RISK-BIT-01` | UT-P | `cw_masks` |
-| `RISK-MD-06` | UT-P + BOARD | `dir_ckpt_three_step`、`md_abort_keeps_victim`；回收注入未落地 |
-| `RISK-MD-16` | UT-P + BOARD | `md_abort_keeps_victim`（RAM 语义）；物理不可读 victim 仍需注入 |
+| `RISK-ALLOC-06` | UT-P | `pba_roundtrip` |
+| `RISK-ALLOC-09` | UT-P + UT-M | `alloc_free_pool_invariants`、`gc_trigger`、`gc_select_victim`、`gc_progress` |
+| `RISK-BIT-01` | UT-P | `pba_cw_masks` |
+| `RISK-MD-06` | UT-P + BOARD | `md_dir_ckpt_three_step`、`md_abort_keeps_victim`；回收注入未落地 |
+| `RISK-MD-16` | UT-P + BOARD | `md_abort_keeps_victim` + `md_cp_read_fail_no_reclaim`（RAM 语义）；物理不可读 victim 的 fallback 成功路径仍未注入 |
 | `RISK-MD-17` | UT-P | `md_status_error` |
 | `RISK-BOOT-01` | UT-M | `preload_region_zero_and_high` |
 | `RISK-BOOT-02` | UT-P + UT-M + BOARD | `md_abort_keeps_victim`；物理注入未落地 |
@@ -379,38 +383,38 @@ allocator 用例显式断言（`free_pool_invariants` 等），**尚未**纳入�
 | `RISK-L2P-06` | UT-P | `l2p_miss_unmapped_evict`；越界分支待后续 |
 | `RISK-L2P-09` | UT-P + UT-M + FI | `l2p_wal_gate`、`journal_barrier_cp_progress` |
 | `RISK-L2P-10` | UT-M + FI | `journal_write_fail_wal_stall` |
-| `RISK-JN-03` | UT-P + UT-M + FI | `journal_write_fail_clear`、`journal_write_fail_wal_stall` |
-| `RISK-CR-02` | UT-P | `op_route`、`address_roundtrip` |
+| `RISK-JN-03` | UT-P + UT-M + FI | `md_journal_write_fail_clear`、`journal_write_fail_wal_stall` |
+| `RISK-CR-02` | UT-P | `op_route`、`pba_roundtrip` |
 | `RISK-WB-03` | UT-P + UT-M | `wbuf_append_read`、`wbuf_drop_reset_owners`、`wbuf_density`、`host_io_matrix` |
 | `RISK-IF-04` | UT-P + UT-M | `wbuf_density`、`host_io_matrix` |
 | `RISK-IF-05` | UT-P | `op_ctx_capacity` |
-| `RISK-PEND-02` | UT-P | `group_exhaustion` |
-| `RISK-HOST-05` | UT-P + BOARD | `confirm_park_timeout`、`confirm_is_parked`；现场根因仍需板端日志 |
+| `RISK-PEND-02` | UT-P | `pend_group_exhaustion` |
+| `RISK-HOST-05` | UT-P + BOARD | `pend_confirm_park_timeout`、`pend_confirm_is_parked`；现场根因仍需板端日志 |
 | `RISK-HOST-08` | UT-M + BOARD | `trim_no_resurrection`；极端时序人工 |
 | `RISK-HOST-11` | UT-M + BOARD | `trim_no_resurrection`（强制 CP + journal-only 两段） |
 | `RISK-CACHE-19` | UT-M + FI + BOARD | `cache_failc_abort` |
-| `RISK-CACHE-20` / `RISK-CACHE-21` | UT-M | `cache_seq_cross_block`；`/speed/ftl_rw` 仅作压力观测 |
+| `RISK-CACHE-20` / `RISK-CACHE-21` | UT-M | `cache_seq_cross_block`；`/bench/speed/ftl_rw` 仅作压力观测 |
 | `RISK-CACHE-24` | UT-M + BOARD | `cache_seq_cross_block`、`cache_failc_abort` |
 | `RISK-CACHE-27` | UT-M + FI | `cache_early_ack_read_visible`、`cache_wr_lookup`、`cache_failc_abort` |
 | `RISK-CACHE-28` | UT-M + FI + BOARD | `cache_failc_abort`、`cache_failc_undo_read_error`、`cache_wr_lookup` |
 | `RISK-CACHE-29` | UT-M | `cache_early_ack_flush_barrier` |
-| `RISK-BBT-01` | UT-P + UT-M | `bbt_mark_bad`、`bbt_persist` |
-| `RISK-BBT-06` | UT-P + FI-NA | `bbt_metadata_bad`；重复完成需注入 |
-| `RISK-BBT-10` | UT-P + UT-M | `bbt_mark_bad`、`bbt_metadata_bad`、`bbt_persist` |
+| `RISK-BBT-01` | UT-P + UT-M | `alloc_bbt_mark_bad`、`bbt_persist` |
+| `RISK-BBT-06` | UT-P + FI-NA | `alloc_bbt_metadata_bad`；重复完成需注入 |
+| `RISK-BBT-10` | UT-P + UT-M | `alloc_bbt_mark_bad`、`alloc_bbt_metadata_bad`、`bbt_persist` |
 | `RISK-BBT-18` | UT-M | `bbt_persist`（先擦池规避）、`bbt_ring_reload`（两条 record 后重启） |
-| `RISK-MIG-03` | UT-P + UT-M + BOARD | `valid_count_guard`、`trim_no_resurrection` |
+| `RISK-MIG-03` | UT-P + UT-M + BOARD | `alloc_valid_count_guard`、`trim_no_resurrection` |
 | `RISK-RD-01` | UT-P + BOARD | `rr_health`、`rr_predictive_retire`；映射/介质人工 |
 | `RISK-UT-02` | UT-M | `journal_barrier_cp_progress`、`trim_no_resurrection` |
 | `RISK-UT-06` | UT-M | `bbt_persist`、`bbt_ring_reload`；每次全量跑永久标坏用户块 |
 
 > §4 的 RISK 列只列该用例的主判据风险；§5 主表与下列补充映射不要求逐项写回 §4
 > （状态见 `known_risks.md`）：
-> `RISK-BOOT-05` → `cp_encoders` / `flush_reboot_readback` / `journal_barrier_cp_progress`；
-> `RISK-CP-03` → `cp_init_timer` / `cp_encoders` / `journal_barrier_cp_progress`；
+> `RISK-BOOT-05` → `md_cp_encoders` / `flush_reboot_readback` / `journal_barrier_cp_progress`；
+> `RISK-CP-03` → `md_cp_init_timer` / `md_cp_encoders` / `journal_barrier_cp_progress`；
 > `RISK-ALLOC-10` → `l2p_wal_gate` / `journal_barrier_cp_progress`；
 > `RISK-HOST-09` → `trim_no_resurrection`；
 > `RISK-BBT-02` → `format_in_progress_resume`（部分）；
-> `RISK-ARCH-02` → `address_roundtrip`（跨 LUN 未实现）；
+> `RISK-ARCH-02` → `pba_roundtrip`（跨 LUN 未实现）；
 > `RISK-NAND-06` → `format_and_roundtrip` / `gc_progress`（BOARD）；
 > `RISK-BOOT-13` → `format_and_roundtrip`（BOARD）；
 > `RISK-MIG-08` → `bbt_persist` 的恢复段（BOARD）。
@@ -441,7 +445,7 @@ make tests UT=FTL
 
 1. pure：`test --list` → `test /ftl/pure/`（可只跑子套件；安全）。
 2. media：拔 USB → `test /ftl/media/`（破坏性，内部先 format）。
-3. speed：`test /speed/ftl_rw`（破坏性，单独运行）。
+3. speed：`test /bench/speed/ftl_rw`（破坏性，单独运行）。
 4. 抓完整串口日志；记录套件/用例数、耗时、失败项、跳过的用例名。
 5. 收尾：`format` + POR，恢复可用的空盘。
 
@@ -456,9 +460,11 @@ make tests UT=FTL
 | `--log-visible debug` | `[EV]` 完整对比（inputs / outputs / 中间计数逐项列出） |
 | `--log-project info/debug` | 额外打开 FTL/FC 项目日志（默认 `LOG_OFF`） |
 
+- `[EV]` 行由用例自己调用 `ftl_ut_trace_summary/detail` 输出；没有调用就只有
+  `[ OK ]`。需要看内部过程时用 `--log-project info/debug` 另开项目日志。
 - 项目日志（`LOG_*`）在测试期间默认整档关闭；munit 的 `--log-visible` **每次 `test`
   调用重置为 ERROR**（不跨调用粘滞）；`--log-fatal` 是「达到该级别即中止」阈值，
-  不是打印开关。
+  不是打印开关。想看 FTL/FC 内部过程必须另加 `--log-project info/debug`。
 - 串口工具若开启「接收设置 → 自动换行」，会在静默期后补一个换行，把 munit 的名字行
   与 `[ OK ]` 拆成两行；这是采集端行为，不是固件输出（`RISK-PLAT-06`）。
 - `l2p_miss_unmapped_evict` 在该 region 已驻留、无空行，或 cache 有
@@ -491,7 +497,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 - 真空白片与格式化中断：真空白片需要全新芯片；`FORMAT_IN_PROGRESS` 的「save 后」分支
   已由 `format_in_progress_resume` 覆盖，erase 中 / CP marker 前掉电仍需人工
   （`RISK-BOOT-04/17`、`RISK-BBT-02`）。
-- USB 主机行为、外部吞吐（H2testw）、长时 soak；内部 FC/FTL 速度见 `/speed/*`。
+- USB 主机行为、外部吞吐（H2testw）、长时 soak；内部 FC/FTL 速度见 `/bench/speed/*`。
 - release 档特有行为：功能验收以 debug UT 为准；release `-O2` 全量 UT 也用于回归，
   但不能替代 debug 档的断言覆盖——release 下 `ASSERT` 被裁空，行为差异须按 H14
   另补运行期拒绝。
@@ -540,7 +546,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 |---|---|---|---|---|
 | 2026-11-11 | 21:44:15 | `test /ftl/ --log-visible debug` | 95/95，0 skip，235.63 s | `docs/design/known_iss.md` ISS-UT-05 |
 
-> 2026-11-12 另有 `/ftl/media/` **30/30** 常规回归与 `/speed/ftl_rw` **3/3，err=0**；
+> 2026-11-12 另有 `/ftl/media/` **30/30** 常规回归与 `/bench/speed/ftl_rw` **3/3，err=0**；
 > 它们不是全量 `/ftl/` 快照，故不替换上表（记录见 `docs/design/known_risks.md`
 > RISK-IF-04 / RISK-CACHE-36/37 的历史/验证行）。
 > 每次全量运行后只更新上表一行，不在此展开用例级结果。

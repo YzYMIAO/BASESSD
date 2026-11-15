@@ -52,7 +52,7 @@
 
 判据 4 只适用于"这个函数在别的场景下确实需要优雅返回"的情况。反例是 FC 的 `fc_queue.c` 指针判空：生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**，而不是为了让用例继续通过而保留返回码。
 
-FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；第二轮"全部入口守卫"补扫又删除了 `test_fc_level1.c` 的 6 个（`status_init_null` / `status_set_cw_overflow` / `status_set_cw_null` / `init_null` / `select_null` / `submit_null` / `poll_completion_null` / `configure_descriptors_null`）与 `test_fc_level2.c` 的 3 个（`encode_null` / `process_read_null` / `raid_recover_null`）。
+FC 层第一轮据此删除了 `test_fc_pure.c` 的 7 个 `*_null` 用例；第二轮"全部入口守卫"补扫又删除了 `test_fc_pure.c` 的 6 个（`status_init_null` / `status_set_cw_overflow` / `status_set_cw_null` / `init_null` / `select_null` / `submit_null` / `poll_completion_null` / `configure_descriptors_null`）与 `test_fc_data_path.c` 的 3 个（`encode_null` / `process_read_null` / `raid_recover_null`）。
 
 ## 五、落地注意
 
@@ -530,38 +530,43 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 
 ---
 
-## 二十九、故障 shell（`SSD_FAULT_ACTION`，2026-11-12）
+## 二十九、断言现场终端（ASSERT / abort）
 
-断言仍然 fail-fast：**不恢复业务**、不跑 FTL/NAND、不喂狗。区别只在停机后的处置，
-由编译期宏选择：
+**断言不是 CPU 异常。** 两条终端路径必须分开：
 
-| 模式 | 行为 | 默认 |
+| 来源 | 路径 | 行为 |
 |---|---|---|
-| `SSD_FAULT_ACTION_HALT` | 打印记录后死循环（接调试器看现场） | **所有构建** |
-| `SSD_FAULT_ACTION_SHELL` | 进入只读故障 shell（诊断用，opt-in） | 否 |
-| `SSD_FAULT_ACTION_RESET` | 打印后 `NVIC_SystemReset` | 否 |
+| HardFault / MemManage / BusFault / UsageFault | `platform/fault.c` | dump 后停机；异常入口不能返回 |
+| `ASSERT` / `ASSERT_REJECT` / munit `abort()` | `assertion.c` | 正常日志打印 → flush → 现场 CLI 循环 |
 
-打开 shell：`make ... CFLAGS_EXTRA=-DSSD_FAULT_ACTION=1`（0/1/2）。
-默认 HALT 与主流「停机 + 调试器」一致；shell 只作为调试器不可用时的兜底。
-⚠ 对象目录不包含 `CFLAGS_EXTRA` 的哈希：切换模式后先 `touch src/common/assertion.c
-src/common/fault_shell.c`（或 `make clean`），否则会复用旧 `.o`、模式不生效。
+断言路径**不接管故障控制台**（不调 `fault_port_console_init`）：那是异常路径的轮询
+UART 接管，会关掉 TX DMA/TXE，导致正常 CLI 断掉。断言保留当前调用栈（不做
+`longjmp`/复位），只做：
 
-### 只读边界（必须遵守）
+```text
+assertion_platform_context()   ← FC 资源快照
+ftl_assert_context()
+log_flush()
+assertion_console_run()        ← cli.c 强符号：while (1) { cli_service_poll(); }
+```
 
-- 白名单：`ftl_ctx [module]` / `crash` / `stack` / `pc` / `help`。
-- **禁止**任何写操作、分配、NAND 访问、后台任务推进、喂看门狗。
-- 不走主 CLI（主 CLI 会调业务逻辑），单独最小解析器。
-- 输出走 `fault_port_putc`（轮询 USART）+ `log_set_sink` 重定向；
-  **不走异步日志环** —— 断言路径已经关掉 TX DMA/TXE，走环会丢输出。
-- 输入走 `uart_rx_read`（USART IRQ 生产者）。
-- 防御式读取：断言后指针可能已损坏，dump 函数必须容忍 NULL/边界。
+### 现场 CLI 的边界
 
-### 为什么不是简单 `while(1)`
-
-`while(1)` 与现有 `for(;;)` 行为相同，仍然无法查询现场。SHELL 模式是在
-「停业务」与「保留现场」之间取平衡；release 默认 HALT，需要现场时单独出镜像。
+- 跑**正常** `cli_service_poll()`，命令表全部可用；不另起只读 shell。
+- 进入现场 CLI 前先清 CLI 行状态（`g_cli_length` / `g_cli_discarding` /
+  `g_cli_line`）：断言可能发生在 `uart_execute_command` 内部，外层还没清行；
+  残留的 CR/LF 会把同一条命令再提交一次（板端现象：`test` 断言后自动重跑整套）。
+- `wr/rd/tr/fl/wp` 的 handler **自带** `ssd_runtime_pump()` 同步等待；`format` /
+  `bbt erase` / `test` 原本就自带同步泵 ⇒ 命令在 assert 循环里也能独立跑完，
+  不依赖主循环。
+- 断言现场循环本身不推进后台泵；泵发生在命令 handler 内。若 assert 发生在 FTL/FC
+  内部，storage 命令的泵会重入刚失败的状态，可能二次断言——这是恢复语义的边界，
+  需要复位/重新初始化，而不是靠 CLI 修复。
+- UART 仍走正常异步日志通路，输入走 `uart_rx_read`（USART IRQ 生产者）。
+- 断言点以下的调用栈保持不动，JTAG/SWD 仍可回溯；CLI 命令使用更低的栈空间。
+- 无 HIL CLI 的镜像使用弱默认 `for (;;) {}`。
 
 ### 验证状态
 
-`make all` / `make release` / `make tests UT=FTL` 均 0 warning；debug/UT 镜像含
-`FAULT SHELL` 字符串，release 不含。**未上板**（R1）。
+`make all` / `make release` / `make tests UT=FTL` 均 `rc=0`、零新告警。
+**未上板**（R1）：断言后 CLI 是否保持可用、异常路径是否仍停机，需板端确认。

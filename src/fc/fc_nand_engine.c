@@ -20,6 +20,9 @@
  */
 
 #include "fc_nand_engine.h"
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "fault_inject.h"
+#endif
 
 #include "assertion.h"
 #include "delay.h"
@@ -269,7 +272,18 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
                 continue;
             }
 
-            /* NAND busy → 锁存起点 + 双条件超时检测（用独立 jump 状态，
+            /* NAND busy：先验 operand 再启动超时判定。
+             * operand 是静态 UOP 表的回跳距离；超过当前游标会让 WORD 下溢并越界读表，
+             * 这里由引擎自己守，不能依赖上层（上层只保证 uops 表非空）。
+             * 必须在超时判定之前：表错是永久性配置缺陷，不能先被「轮询超时」掩盖成
+             * 运行期故障（同一输入在刚上电与运行数秒后会返回不同错误码）。 */
+            ASSERT_REJECT(uop->operand <= state->uop_index,
+                          NAND_RESULT_INVALID_ARGUMENT,
+                          "engine step: JUMP operand=%lu index=%hu",
+                          uop->operand,
+                          state->uop_index);
+
+            /* 锁存起点 + 双条件超时检测（用独立 jump 状态，
              * 不被回跳体内返回 OK 的 UOP 复位） */
             if (fc_uop_engine_wait_latch(state, &state->jump) != NAND_RESULT_OK)
             {
@@ -280,14 +294,7 @@ nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state)
                 return NAND_RESULT_TIMEOUT;
             }
 
-            /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读）。
-             * operand 是静态 UOP 表的回跳距离；超过当前游标会让 WORD 下溢并越界读表，
-             * 这里由引擎自己守，不能依赖上层（上层只保证 uops 表非空）。 */
-            ASSERT_REJECT(uop->operand <= state->uop_index,
-                          NAND_RESULT_INVALID_ARGUMENT,
-                          "engine step: JUMP operand=%lu index=%hu",
-                          uop->operand,
-                          state->uop_index);
+            /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读）。 */
             state->uop_index -= uop->operand;
             return NAND_RESULT_NOT_READY;
         }
@@ -510,6 +517,16 @@ static nand_result_e fc_nand_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAN
     request.column      = 0U;
     request.buffer      = page;
     request.data_length = NAND_ONFI_PARAM_PAGE_SIZE;
+
+#if defined(FC_NAND_TEST_ENABLE)
+    if (fi_take(FI_ONFI_READ_FAIL) == true)
+    {
+        memset(completion, 0, sizeof(*completion));
+        completion->nand_status = (BYTE)NAND_STATUS_FAIL;
+        return NAND_RESULT_OPERATION_FAILED;
+    }
+#endif
+
     return fc_nand_execute(ch, ce, OP_READ_PARAMETER_PAGE, &request, completion);
 }
 
@@ -691,6 +708,13 @@ static nand_result_e fc_nand_target_probe(BYTE ch, BYTE ce, nand_target_info_s *
  *
  * @return OK / NOT_READY 无 target / 错误码
  */
+#if defined(FC_NAND_TEST_ENABLE)
+nand_result_e fc_nand_test_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion)
+{
+    return fc_nand_read_parameter_page(ch, ce, page, completion);
+}
+#endif
+
 static nand_result_e fc_nand_scan_targets(void)
 {
     BYTE present = 0U;
@@ -839,6 +863,12 @@ static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fm
     }
 
     result = dev->set_timing(ch, ce, (BYTE)CONFIG_NAND_TIMING_MODE, fmc_hz);
+#    if defined(FC_NAND_TEST_ENABLE)
+    if (fi_take(FI_NAND_TIMING_FAIL) == true)
+    {
+        result = NAND_RESULT_OPERATION_FAILED;
+    }
+#    endif
     if (result != NAND_RESULT_OK)
     {
         LOGE(LOG_TAG_NAND "set timing Mode %u failed: 0x%02hhX; rolling back\r\n", CONFIG_NAND_TIMING_MODE, result);

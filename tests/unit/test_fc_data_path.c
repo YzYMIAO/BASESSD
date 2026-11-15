@@ -1,5 +1,5 @@
 /*
- * test_fc_level2.c — Level 2 数据路径测试：fc_data_path 模块
+ * test_fc_data_path.c — 数据路径测试（buffer 级，不碰 NAND）：fc_data_path 模块
  *
  * 测试三个数据路径管线函数：
  *   fc_data_path_encode       写路径：META → CRC? → Random 加扰? → ECC 编码
@@ -12,7 +12,7 @@
  *   fc_complete_from_nand()   对 page read 调 fc_data_path_process_read——
  *   所以**提交出去的命令绝不能再手工调这两个函数**（会重复编码 / 重复解扰）。
  *   本层一律走 test_cmd_build() 拿一条未提交的命令，自己驱动管线。
- *   NAND 上的端到端往返由 Level 3 的页 helper 覆盖（test_prog_page / test_read_page）。
+ *   NAND 上的端到端往返由 lifecycle 的页 helper 覆盖（test_prog_page / test_read_page）。
  *
  * ── 产物自证 ──
  *   「encode 后 process_read 回到明文」这条恒等式在两边都是空转时**照样成立**。
@@ -26,7 +26,7 @@
  *
  * ── 夹具 ──
  *   setup / teardown、建链原语 test_cmd_build、源数据表、desc 链小工具全部来自共享模块
- *   fc_test_common（Level 2 / Level 3 共用一份，见 tests/unit/fc_test_common.h）。
+ *   fc_test_common（data_path / lifecycle 共用一份，见 tests/unit/fc_test_common.h）。
  *   源数据约定：每个 CW 的 USER 区 = **该 CW 自己的 PAA 重复 128 次**
  *   （test_fill_user_paa 填槽 + 拷进 desc）。故「读回来逐 dword 与期望 PAA 比」
  *   同时验了 block / plane / page / cw 四维。
@@ -67,7 +67,7 @@
 #include <string.h>
 
 /* ── 本层地址抽样 ──
- * 命令地址**按 munit 种子抽样**（block / page；plane 由用例钉死），与 Level 3 同路：
+ * 命令地址**按 munit 种子抽样**（block / page；plane 由用例钉死），与 lifecycle 同路：
  * 每轮拿到不同的加扰种子与 USER 图案，而不是所有用例挤在同一个固定页上。
  *
  * ⚠ 为什么必须加 salt：munit 每次 exec 前把 PRNG 重置回 runner->seed（munit.c:774），
@@ -76,10 +76,10 @@
  *   后者让**同一用例内各用途**互异。复现契约 = (seed, 用例名, 第几次抽样)。
  * ⚠ 本层**不碰介质**（见文件头）——地址只喂两样：**加扰种子**（fc_random_seed_from_meta）
  *   与 **USER 区的 PAA 图案**（test_fill_user_paa）。所以收益是「14 条用例拿到 14 组不同的
- *   种子 / 图案」，**不是** Level 3 那种「地址错值编译期无声」的风险。之所以仍值得做：本层
+ *   种子 / 图案」，**不是** lifecycle 那种「地址错值编译期无声」的风险。之所以仍值得做：本层
  *   多数用例是 MUNIT_TEST_OPTION_SINGLE_ITERATION（munit.c:765-767 把迭代数硬压成 1）
  *   ⇒ `--iterations N` 对它们无效，用例体内抽样是唯一的加量杠杆。
- * ⚠ 不设窗口：Level 3 的 30%~70% 是为了避开固定元数据区，而本层不写介质、那理由不成立，
+ * ⚠ 不设窗口：lifecycle 的 30%~70% 是为了避开固定元数据区，而本层不写介质、那理由不成立，
  *   故用整段 [0, BLOCKS_PER_PLANE) / [0, PAGES_PER_BLOCK)，与 test_scramble_whiten 同口径。
  *
  * 抽样结果必须打出来（见 l2_addr_draw）——它是 (seed, 用例名) 的纯函数，不打就无从复现。 */
@@ -1667,7 +1667,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
  *    - 位图是**字面**的（0 = 空集）——三条用例各自显式给位图
  *
  *  「按掩码建整条链」是策略，属 FTL（FC 只剩单数逐条入口
- *  fc_command_configure_descriptor）。这三条用例仍留在 Level 2，
+ *  fc_command_configure_descriptor）。这三条用例仍留在 data_path，
  *  因为验证的是 desc 链的几何（plane/cw 展开），而非 NAND 行为——
  *  且它们都**不提交**（半掩码组合正是「未覆盖 plane 被静默编程」的陷阱形态）。
  *
@@ -1814,39 +1814,39 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 /*************************************************************************
  *  套件定义
  *
- *  所有 Level 2 测试共享 test_setup / test_tear_down（共享夹具模块
+ *  所有 data_path 测试共享 test_setup / test_tear_down（共享夹具模块
  *  fc_test_common：fc_init 一次性 + 开 NAND 放行闩锁 + 分配/释放源数据表）
  **************************************************************************/
 
 MunitTest g_fc_data_path_tests[] = {
   /* ── 步骤级（单 CW 原语）── */
-    {          "crc_step_detect",           test_crc_step_detect, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_crc_params},
-    {          "scramble_whiten",           test_scramble_whiten, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
-    {                 "ecc_step",                  test_ecc_step, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_ecc_params},
+    {          "dp_crc_step_detect",           test_crc_step_detect, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_crc_params},
+    {          "dp_scramble_whiten",           test_scramble_whiten, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
+    {                 "dp_ecc_step",                  test_ecc_step, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_ecc_params},
 
  /* ── encode ── */
-    {                   "encode",                    test_encode, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_enc_params},
-    {      "encode_crc_disabled",       test_encode_crc_disabled, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {                   "dp_encode",                    test_encode, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_enc_params},
+    {      "dp_encode_crc_disabled",       test_encode_crc_disabled, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── process_read ── */
-    {          "process_read_ok",           test_process_read_ok, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_rt_params},
-    {         "process_read_unc",          test_process_read_unc, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {     "process_read_ecc_max",      test_process_read_ecc_max, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
-    {"process_read_masked_chain", test_process_read_masked_chain, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {  "process_read_meta_error",   test_process_read_meta_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {   "process_read_crc_error",    test_process_read_crc_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {    "process_read_ldpc_raw",     test_process_read_ldpc_raw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {          "dp_process_read_ok",           test_process_read_ok, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_rt_params},
+    {         "dp_process_read_unc",          test_process_read_unc, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {     "dp_process_read_ecc_max",      test_process_read_ecc_max, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
+    {"dp_process_read_masked_chain", test_process_read_masked_chain, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {  "dp_process_read_meta_error",   test_process_read_meta_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "dp_process_read_crc_error",    test_process_read_crc_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {    "dp_process_read_ldpc_raw",     test_process_read_ldpc_raw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── raid_recover ── */
 #if CONFIG_FC_RAID
-    {   "raid_recover_no_random",    test_raid_recover_no_random, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "dp_raid_recover_no_random",    test_raid_recover_no_random, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── stripe parity ── */
-    {   "generate_stripe_parity",    test_generate_stripe_parity, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "dp_generate_stripe_parity",    test_generate_stripe_parity, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 #endif  /* CONFIG_FC_RAID */
 
   /* ── flat CW 掩码建链 ── */
-    {                "cw_bitmap",                 test_cw_bitmap, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_bm_params},
+    {                "dp_cw_bitmap",                 test_cw_bitmap, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_bm_params},
 
-    {                       NULL,                           NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE,          NULL},
+    {                          NULL,                           NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE,          NULL},
 };
