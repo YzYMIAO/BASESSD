@@ -2615,7 +2615,7 @@
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
 | RISK-CACHE-15 | 已闭合 | 无数据 END 缺失，padding 页盘满例外未验 | 2026-10-31 上板（正常路径） |
-| RISK-CACHE-16 | 待后续 | 跨命令序列 + VWC 早回执，USB 端到端未跑 | 2026-11-15 判定 K（见 negative_coverage.md） |
+| RISK-CACHE-16 | 已闭合 | 跨命令序列 + VWC 早回执，USB 端到端未跑 | 2026-11-15 H2testw 415/423 MB 0 错误，写 950 / 读 885 KB/s（host 端到端） |
 | RISK-CACHE-18 | 待后续 | 提前回执扩大掉电暴露窗口，VWC 窗口未量化 | 2026-11-15 判定 K（见 negative_coverage.md） |
 | RISK-CACHE-26 | 待定位 | cache 写压测 1536 LBA 读回全 0 | 2026-11-01 上板复现 |
 | RISK-CACHE-29 | 待后续 | 早回执改变 flush/断电口径，长流+断电未量 | 2026-11-15 判定 K（见 negative_coverage.md） |
@@ -2649,6 +2649,7 @@
 - **历史/验证**：
   - 2026-11-01 release -O2 全量 `test` 156/156（含 media 36/36 与 `/bench/speed` 5/5） → UT 路径已上板；H2testw/USB 端到端未跑
   - 2026-10-31 旧模型 H2testw 415/415 MB、`sw=1663/1610`（62.8） → 上板通过
+  - 2026-11-15 release 镜像 H2testw 全盘：415/423 MB、`Test finished without errors`，写 950 / 读 885 KB/s（USB host 端到端）→ 闭合
 
 #### RISK-CACHE-18 提前回执扩大掉电暴露窗口
 
