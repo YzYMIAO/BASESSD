@@ -10,8 +10,8 @@
 |---|---|
 | FTL 改动 / 新功能 | `design/ftl_design.md`（主设计）→ `design/ftl_revision_history.md`（逐版本决策史）→ `design/known_iss.md`（未实现项）→ `design/known_risks.md`（风险） |
 | FTL 对外接口 | `include/ftl/*.h`（函数契约在头文件）+ `design/ftl_design.md` §5.1（模块契约/调用约束）；历史契约见 `archive/ftl_host_interface.md` |
-| FC-NAND 层改动 | `design/fc_nand_design.md`（§26 行业对照 = 判据） |
-| **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.6/§25.8 → `design/ftl_design.md` ADR-15 |
+| FC-NAND 层改动 | `design/fc_nand_design.md`（主设计；§26 行业对照 = 判据）→ `design/fc_nand_revision_history.md`（逐版本决策史 / 被否方案） |
+| **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.2/§17.3/§25.8 → `design/ftl_design.md` ADR-15 |
 | FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
 | 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_iss.md` §1） |
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md`（含 §8 统一定时调度器）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
@@ -19,6 +19,7 @@
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
 | **项目水平 / 定位评估** | `archive/project_positioning_20261029.md`（对照 OpenSSD / SPDK FTL 的定性评估；不是基准报告） |
 | **模块接口 / 解耦判据** | `design/ftl_design.md` §5.1.1/§5.1.2（handle 契约 / 字段所有权 / 超时 / 多 LUN；全文在 `archive/ftl_module_contracts.md`） |
+| **主机接口层（HIL）/ 请求拆分 / 完成回执** | `design/hil_design.md`（主设计）→ `include/hil/*.h`（契约）→ `design/hil_ut_design.md`（测试设计） |
 | **USB MSC / U 盘** | `design/usb_msc.md` Part A（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `design/usb_msc.md` Part B（上板验证手册 + 判据 + 脚本）→ `design/testing_guide.md`（分层测试 / 工具 / 性能方法 / 实测） |
 | 多 LUN / 共享 L2P cache / 内存域 | `design/ftl_design.md` §2.1/§5.4 + `design/known_iss.md` §4（实施计划已归档） |
 | **未实现 / 未验证项（feature backlog）** | `design/known_iss.md` |
@@ -31,7 +32,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史/UT 归档（数量随重构增长），见 archive/README.md
-├── design/                    ← 活跃权威设计文档（14 个）+ known_iss/known_risks
+├── design/                    ← 活跃权威设计文档（22 个）+ known_iss/known_risks
 ├── guides/                    ← 环境 / 调试操作指南（非设计）
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图

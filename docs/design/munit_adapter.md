@@ -238,7 +238,7 @@ JTAG/SWD 仍可回溯；正常 UART 上进入现场 CLI，可以继续敲命令�
 `platform/fault.c` 的 HardFault/MemManage/BusFault/UsageFault 路径；断言路径不走它。
 崩溃记录仍写 `.noinit`，复位后由 `[FAULT] previous ...` 报告，或当场用 CLI `crash` 查看。
 
-**`[RES]` FC 资源快照**：原内联在 `munit.c` 里（反向依赖 `fc_get_resource_stats`）。v1.2 迁到 `src/fc/fc_assert_context.c`，覆盖断言设施的弱钩子 `assertion_platform_context()`——依赖方向变为 FC → assertion。
+**`[RES]` FC 资源快照**：原内联在 `munit.c` 里（反向依赖 `fc_get_resource_stats`）。v1.2 迁到 `src/fc/fc.c`（`assertion_platform_context` 钩子），覆盖断言设施的弱钩子 `assertion_platform_context()`——依赖方向变为 FC → assertion。
 
 ### 3.4 无 fork 隔离的约束
 

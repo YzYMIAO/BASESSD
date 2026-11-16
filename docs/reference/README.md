@@ -39,7 +39,7 @@ docs/reference/
 
 | 来源 | 用途 |
 |---|---|
-| [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §17.5。 |
+| [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §17.2。 |
 | 同上，"Read Cache Operations" / "Two-Plane Read Cache Operations" | **31h 可跨 block（同 die）、禁止跨 die/LUN**；two-plane 31h 每个 plane 各前进一页。原文摘录已本地存档：`docs/reference/datasheet_mt29f_cache_ops.md`（R12 判据出处）。 |
 
 ### 外部规范（未本地存档）

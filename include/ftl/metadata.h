@@ -222,7 +222,7 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
 #define L2P_LOG_FREE_WATERMARK (8U)
 
 /* 固定日志区满时，允许从 **OP 池**动态借用的日志块上限（总块数）。
- * 有界溢出：8 块 = 512 KiB，足够打破“没有目标块可搬”的死锁；再多会侵蚀用户 OP。
+ * 有界溢出：8 块 = 1 MiB，足够打破“没有目标块可搬”的死锁；再多会侵蚀用户 OP。
  * 借出的块由 l2p_live / md_block_is_metadata 动态识别，擦空后回 OP。 */
 #define L2P_LOG_BORROW_MAX (8U)
 
@@ -237,7 +237,7 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
 #define MD_SLOT_RESV_MAX (8U)
 
 /* ── 共享 metadata spare（仅补固定元数据分区的 BAD 缺额）──
- * 4 块/plane 是用户选定的预算（= 2 MiB）；按 BBT BAD 集分配给
+ * 4 块/plane 是用户选定的预算（= 1 MiB，4 块 × 2 plane × 128 KiB）；按 BBT BAD 集分配给
  * BBT / Checkpoint / Journal（目录检查点与 L2P 日志固定区足够大，只跳过 BAD）。
  * 这是「BBT + spare 替换」的主流坏块管理形态：不做 logical→physical remap 表
  *（判据见 docs/design/ftl_design.md §3.3.8）。

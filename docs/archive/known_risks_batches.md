@@ -1507,3 +1507,49 @@ D0 中 6 条经小操作后从活动风险索引闭合：
 | RISK-CLI-05 | `rd`/`bbt` 新语法已同步文档 | `src/hil/cli.c` / 文档 |
 | RISK-NANDP-11 | timing 表命名已为 3.3V Mode5 口径 | `src/nand/devices/mt29f___g08a.c` |
 | RISK-BUILD-02 | launch 配置与 `debug_ut.elf` / `release_ut.elf` 产物名已核对 | `.vscode/launch.json` |
+
+
+## 2026-11-17 设计文档图内引用不存在的内部符号（1 条闭合）
+
+| ID | 结论 | 证据 |
+|---|---|---|
+| RISK-NANDP-22 | 图 2/11/15/16/18/19/22 曾使用 `fc_submit_internal` / `fc_submit_to_queue` / `fc_complete_internal` / `fc_init_internal` / `fc_command_alloc_internal` / `fc_command_release_internal` 六个不存在的符号；已改为 `fc_submit` + `fc_sched_submit` / `fc_complete_from_nand` + `fc_completion_queue_push` / `fc_init` / `fc_command_alloc` / `fc_command_release` | `docs/design/fc_nand_design.md` |
+
+核对方式：抽取全部 Mermaid 块内的 `fc_*` / `ftl_*` / `nand_*` / `md_*` / `cp_*` / `allocator_*` / `metadata_*` 标识符，逐个在 `src/` + `include/` 检索定义；53 个符号 0 缺失。后续新增或改图时重复该检查。
+
+## 2026-11-17 文档指针 / 注释与实现不符（3 条闭合）
+
+| ID | 结论 | 证据 |
+|---|---|---|
+| RISK-NANDP-19 | `nand_addr_s` 段首注释改为真实 API 清单：PAA 在 `nand_config.h`、PBA 在 `ftl_config.h`、LBA 直接位编码 | `include/nand/nand_config.h` |
+| RISK-NANDP-20 | boot 级联注释改为「per-(ch,ce) 后端 + GPIO 轮询 R/B#（无 EXTI）」 | `src/main.c:768` |
+| RISK-NANDP-21 | `CLAUDE.md` 缓存维护范本改为 `src/platform/stm32h743/usart_port.c:189-194`，注明无 Invalidate 调用点 | `CLAUDE.md` H17 / §八 |
+
+同批机械核对：`known_risks.md` 内 6 处证据路径（`nand_engine.c` / `nand_dispatch.c` / `fault_port.c` / `controller.h` / `fc_interface.c` / `metadata_slot.c`）与 5 份活跃文档（`munit_adapter.md` / `ftl_ut_design.md` / `hil_ut_design.md` / `ftl_design.md` / `assertion_guidelines.md`）的旧文件、旧符号引用已改为现行路径；无对应 RISK ID 的纯路径笔误不单独立项。
+
+#### RISK-NANDP-19 地址 helper 注释引用不存在的 `pba_from_addr()`
+
+- **后果**：`include/nand/nand_config.h:166` 的 `nand_addr_s` 段首注释把打包地址构造入口写成 `paa_from_addr() / pba_from_addr()`；`pba_from_addr()` 不存在（NAND 层只有 `addr_from_paa` / `addr_from_pba`，PBA 的构造与改写走 FTL 层 `pba_with_*`）。读者按注释寻找统一 API 会落空，新增地址转换时容易在调用点手写位操作 ⇒ 违反 C9 单一漏斗，静默算出错地址（编译期无声）。
+- **缓解**：无（注释与代码不一致）；真实 API 以 `nand_config.h` 的 `addr_from_*` 与 `ftl_config.h` 的 `pba_with_*` 为准。
+- **下一步**：改注释为真实 API 清单，并写明「三套打包地址以 `nand_addr_s` 为唯一构造入口」只对 PAA/LBA 成立，PBA 构造在 FTL 层；纯注释改动按 P11 不编译。
+- **证据**：`include/nand/nand_config.h:166-167`；`include/nand/nand_config.h:addr_from_paa` / `addr_from_pba`；`include/ftl/ftl_config.h:pba_with_cw` … `pba_with_ce`。
+- **历史/验证**：
+  - 2026-11-16 重写 `fc_nand_design.md` 时逐条核对源码发现 → 待后续
+
+#### RISK-NANDP-20 boot 注释写「R/B# EXTI」，实现为 GPIO 轮询
+
+- **后果**：`src/main.c:768` 的 boot 级联注释写 `fc_nand_init()` 包含「R/B# EXTI」；实际就绪等待是 `NAND_UOP_WAIT_READY` 的 GPIO 轮询（`nand_fmc_exec_wait_ready`），`src/nand`、`src/platform`、`include/nand`、`include/platform` 中 EXTI 引用为零。按中断模型排查读时序/就绪问题会被引向不存在的 EXTI 配置与 ISR，方向错误。
+- **缓解**：无（注释与实现不一致）；真实模型见 `docs/design/fc_nand_design.md` §18（ISSUE-WAIT-FETCH）与 §22（初始化全流程）。
+- **下一步**：注释改为「HAL/FMC + per-(ch,ce,lun) 后端 + GPIO 轮询 R/B# + RESET/READ_ID 校验」。
+- **证据**：`src/main.c:768`；`src/nand/nand_fmc.c:nand_fmc_exec_wait_ready`；`src/nand/onfi_1_0.c` WAIT_READY UOP 序列。
+- **历史/验证**：
+  - 2026-11-16 重写 `fc_nand_design.md` 时逐条核对源码发现 → 待后续
+
+#### RISK-NANDP-21 `CLAUDE.md` 缓存维护范本指向不存在的文件
+
+- **后果**：`CLAUDE.md` H17 与 §八坐标表把 `src/platform/stm32h743/nand_dma.c:337-357` 写成 Clean/Invalidate 范本；该文件不存在（该目录只有 `dma_port.c`（USART TX DMA）与 `usart_port.c`）。仓库内 `SCB_CleanDCache_by_Addr` 调用点只有 `usart_port.c:193`，`SCB_InvalidateDCache_by_Addr` 调用点为零 —— NAND 页缓冲与 FC 池位于 `.noncacheable_buffer` 段，本就不需要维护。照范本核对的新代码找不到文件，或误以为 NAND 走 DMA 缓存维护。
+- **缓解**：无（文档指针）；实际缓存策略以 `.noncacheable_buffer` 段与 `usart_port.c:usart_port_tx_dma_start` 为准。
+- **下一步**：用户裁决是否改 `CLAUDE.md`：范本改为 `src/platform/stm32h743/usart_port.c:usart_port_tx_dma_start`（Clean + 32 B 向上取整对齐），并注明 Invalidate 因 noncacheable 段当前无调用点；本轮不改 `CLAUDE.md`。
+- **证据**：`CLAUDE.md` H17 / §八；`src/platform/stm32h743/usart_port.c:193`；`include/ssd_compiler.h:NONCACHEABLE_BUFFER`；`src/fc/fc_nand_dispatch.c:g_nand_channel_page_buffer`。
+- **历史/验证**：
+  - 2026-11-16 重写 `fc_nand_design.md` 时逐条核对源码发现 → 待决策

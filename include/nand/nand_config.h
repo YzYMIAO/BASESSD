@@ -162,9 +162,11 @@ _Static_assert((1U << CW_WIDTH) == CW_NUM, "CW_WIDTH 与 CW_NUM 不一致");
 /* ══════════════════════════════════════════════════════════════
  * nand_addr_s — 展开式地址（具名字段）
  *
- * 三套打包地址（PAA / PBA / LBA）都以它为**唯一的构造入口**：
- *   paa_from_addr() / pba_from_addr()   展开 → 打包
- *   addr_from_paa() / addr_from_pba()   打包 → 展开
+ * 三套打包地址（PAA / PBA / LBA）都以它为**唯一的展开/打包载体**：
+ *   paa_from_addr() / addr_from_paa()      展开 ↔ PAA（本文件）
+ *   pba_pack() / pba_fields()              展开 ↔ PBA（FTL 层 ftl_config.h）
+ *
+ * LBA 不经过本结构体：它按 [plane:1][cw:2][page...] 的低位约定直接编码（见 lba_to_meta）。
  *
  * 为什么用具名字段而不是位置形参：三个打包地址的字段都是同型小整数，
  * 位置形参写反了**依然编译通过、依然落在合法值域内**（page<64、plane<2、

@@ -11,18 +11,18 @@
 
 1. **外部输入校验保留返回码**
    只有**来自外部**的输入才需要返回错误码：host 的 opcode/LBA、UART CLI 的参数、从介质读回的字节（见 §六辨析 C）。这些值的合法范围由外部世界决定，损坏/非法是**预期情形**，必须返回 `FC_STATUS_INVALID_ARGUMENT` / `FTL_ERROR` / `SSD_STATUS_INVALID_ARGUMENT` / `NAND_RESULT_INVALID_ARGUMENT` 等让上层处置。
-   **参数是不是"层对外头文件的入口"不再是判据**——关键在**值从哪来**：调用者（哪怕是跨层的 FTL/controller）用自己铸出的句柄、自己算出的索引、自己持有的指针调进来的，一律算前置条件（判据 2），即使该函数声明在 `nand_dispatch.h` / `fc_interface.h` / `nand_mt29f4g08abadawp.h` 这类"边界头"里。
+   **参数是不是"层对外头文件的入口"不再是判据**——关键在**值从哪来**：调用者（哪怕是跨层的 FTL/controller）用自己铸出的句柄、自己算出的索引、自己持有的指针调进来的，一律算前置条件（判据 2），即使该函数声明在 `fc_nand_dispatch.h` / `fc_interface.h` / `mt29f___g08a.h` 这类"边界头"里。
    （本判据原先把"边界头的全部入口"整体划为外部边界，属**过度概括**，见 §七辨析 D 与 §九。）
 
 2. **调用者已保证的前置条件转断言**
    `static` 函数、层内模块头里的接口，以及**跨层入口中调用者必然传有效值的指针/索引参数**，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并**删掉原来的 `return` 与恢复/降级分支**（"跳过坏 ID 继续找"、"回滚分配再返回"、"防御性降级"这类）。
-   层内模块头指：`include/nand/nand_engine.h`、`nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`ftl_op.h`/`bst.h`）。
+   层内模块头指：`include/fc/fc_nand_engine.h`、`include/nand/nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`ftl_op.h`/`bst.h`）。
    **`static inline` 的纯 getter/setter 一并适用**（2026-10-17 C 批明确）：判据**不是**"它是不是模块入口"，
    而是**该函数的 NULL 语义有没有被文档化或被 UT 钉住** —— 有 ⇒ 是契约，保留（辨析 B / 判据 4）；
    没有 ⇒ 指针就是前置条件，`if (p != NULL)` 是**恒真的静默吞**（§十附判据 1）⇒ 转 `ASSERT`。
    ⚠ 转 `ASSERT` 是 **release 的净收益**：`if (p != NULL)` 在 `NDEBUG` 下仍是活分支，
    `ASSERT` 被裁成 `((void)0)` ⇒ 零开销。见 §二十八 五。
-   **跨层入口一并适用**：`nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init/backend_get`、`nand_fc_execute/start/step/read_id/set_features`、`fc_submit`、`fc_command_configure_descriptor`、`fc_command_release`、`fc_data_path_*`、`fc_scheduler_*`、`fc_command_status_*`、`fc_ldpc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`（v13 由 FC 上移）、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_bitmap`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
+   **跨层入口一并适用**：`fc_nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init` / `nand_phy_backend_get`、`fc_nand_init/start/step/enable_high_speed`、`fc_submit`、`fc_command_configure_descriptor[_with_buffer]`、`fc_command_release`、`fc_data_path_*`、`fc_cw_status_*`、`fc_ecc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_bitmap`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
@@ -59,7 +59,7 @@ FC 层第一轮据此删除了 `test_fc_pure.c` 的 7 个 `*_null` 用例；第�
 - `make tests` 走 `BUILD_TYPE=debug`（`-DDEBUG`，无 `NDEBUG`），**断言在板上测试固件里是活的**：任何一条误判都会让板子停机而不是报失败。改动守卫后必须上板跑套件。
 - `release`（`-DNDEBUG`）下 `ASSERT` 被完全裁掉。若某处实际可达，表现会从"返回错误码"变成 HardFault——所以转断言的前提是"调用者已保证"，必须逐处核对调用链。
 - 每处改动在注释里保留原判据的语义（如 `/* 队列只存 fc_command_alloc() 产出的 ID */`），避免下一个人以为是误删。
-- **故障路径禁止断言**：`src/platform/stm32h743/fault.c` 的故障打印、`assertion.c` 自身的终端路径、`syscalls.c` 的堆守卫、`src/common/crash.c` 的崩溃记录路径——这些必须能在任何状态下继续运行。`crash.c` 的 `crash_copy(source == NULL)` 因此**保留返回式降级**（写空串），不转断言。
+- **故障路径禁止断言**：`src/platform/fault.c` / `src/platform/stm32h743/fault_port.c` 的故障打印、`assertion.c` 自身的终端路径、`syscalls.c` 的堆守卫、`src/common/crash.c` 的崩溃记录路径——这些必须能在任何状态下继续运行。`crash.c` 的 `crash_copy(source == NULL)` 因此**保留返回式降级**（写空串），不转断言。
 - 本仓链接**完整 newlib**：`%llu`/`%hhu`/`%zu` 均可用；QWORD 直接用 `%llu`，DWORD 用 `%lu`。
 
 ## 六、辨析 C：校验"不可信持久化数据"不是前置条件
@@ -185,7 +185,7 @@ FC 层第一轮据此删除了 `test_fc_pure.c` 的 7 个 `*_null` 用例；第�
 不这么做的话，命令**永不完成**，上层表现为「挂死」，比报错难查得多。
 
 **首次应用（v39）**：`fc_build_request_data_planes` 的 multi-plane 窄位图检查
-（见 `fc_nand_design.md` §25.4 与 `docs/archive/changelog/fc_multiplane_narrow_bitmap_v39.md`）。违反时
+（见 `fc_nand_design.md` §17.4 / §25.8 风险 2 与 `docs/archive/changelog/fc_multiplane_narrow_bitmap_v39.md`）。违反时
 NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未覆盖的 plane 既无数据也无地址，
 旧实现凭空造一条回退地址 ⇒ **静默给该 plane 编一页全 0xFF**，调用者完全不知道。这正是判据 9 说的
 「静默写坏介质」。同时它让 `fc_build_dispatch_request` 从「构建不可失败」变成有**唯一**失败出口——
@@ -206,10 +206,9 @@ NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未�
 > **判据 10：被 `ASSERT` 守的变量，在 `NDEBUG` 下可能变成 unused——编译告警是唯一的信号。**
 > `ASSERT` 展开为空后，只为它服务的局部变量（如 `const uint8_t all_planes`）会留下
 > `unused variable` 告警。**release 档的告警要单独看一眼**：它同时是「这条断言在 release 下
-> 没有等价守卫」的提示。本仓已知一处：FTL 侧 `ftl_cmd_resolve_cw_bitmap` 的越段 `ASSERT`
-> （`assertion_guidelines.md` §十八）在 `NDEBUG` 下把 `allowed` 裁成 unused
-> （`src/ftl/ftl_fc_interface.c:32` 告警）⇒ **FTL 侧 release 档同样无守卫**。
-> 按硬规则本次**不动 `src/ftl/**`**，只记录。
+> 没有等价守卫」的提示。判据 9 要求这类位置补 release 运行期拒绝；本仓 FTL 建链位图检查
+> `ftl_cmd_validate_cw_bitmap` 已按此配置（`allowed` 在 release 仍参与拒绝分支）。
+> 若 release 档出现 `unused variable`，说明还有断言独占变量、缺等价守卫，按本条排查。
 
 ## 二十五、v0.75：把"架构约定"变成可测断言（2026-10-14）
 

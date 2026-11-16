@@ -840,7 +840,7 @@ static void md_dir_ckpt_ring_init(const md_dir_cache_s *dir, md_ring_s *ring)
 }
 
 /**
- * @brief 廉价探针：只读 chunk 0 的 20 字节页头取 sequence。
+ * @brief 廉价探针：只读 chunk 0 的 24 字节页头取 sequence。
  * FC 读整页并校验 per-CW CRC + ECC，`length` 只限制拷出字节数。
  *
  * @param c            探针上下文（Directory + 池几何）

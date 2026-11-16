@@ -51,7 +51,7 @@
 | `metadata` / `metadata_job` | `src/ftl/metadata.c`、`metadata_job.c` | `md_*`、Directory 双副本、ring、压缩 job | pure / media / negative |
 | `checkpoint` | `src/ftl/checkpoint.c` | `cp_*`、CP phase、Header、Directory checkpoint | pure / media / negative |
 | `journal` | `src/ftl/journal.c` | `jrn_*`、append / truncate / replay、WAL 水位 | pure / media / negative |
-| `L2P` / `CMT` | `src/ftl/l2p.c`、`l2p_cmt.c` | 驻留行状态、miss / load、CMT set 路、WAL 闸门 | pure / media / negative |
+| `L2P` / `CMT` | `src/ftl/l2p_cache.c`（L2P + CMT） | 驻留行状态、miss / load、CMT set 路、WAL 闸门 | pure / media / negative |
 | `pending` / group | `src/ftl/pending.c` | `pend_*`、组槽、确认停车、错误聚合 | pure / negative / media |
 | `wbuf` | `src/ftl/wbuf.c` | 页打包窗口、owners、逐 CW 读回 | pure / media / negative |
 | `ftl_op` | `src/ftl/ftl_op.c` | request 表、route、ctx 旁表 | pure / negative / media |

@@ -236,7 +236,7 @@
 | 器件 / ONFI | ✅ 驱动跑通、ONFI 参数页解码、时序模式 | 更多器件特性（on-die ECC、多 plane cache op） |
 | FCC | ✅ 三池 + desc 链 + 数据面（ECC/加扰/CRC）+ per-LUN FIFO | 多通道受硬件限制；DMA 数据路径 |
 | FTL | ✅ L2P/GC/WL/Journal/Checkpoint/BBT（DRAM-less） | — |
-| HIL | ⚠ UART CLI 为主 | **没有真主机协议**（NVMe/eMMC/UFS）——这是离真主控最远的一层 |
+| HIL | ⚠ USB MSC（BOT/SCSI）+ UART CLI 调试前端 | 没有 NVMe/eMMC/UFS 的原生队列·门铃·中断；USB BOT 串行、完成靠轮询。设计见 `docs/design/hil_design.md` |
 | 规模 | ⚠ 单通道单 CE 单 LUN | 多通道架构（软件已留口，硬件不支持） |
 
 **下一步的三个候选**（按「向主控靠」的价值排序）：

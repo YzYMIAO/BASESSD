@@ -4,8 +4,8 @@
 > 每个模块有哪些设计要点、用什么判据覆盖、缺什么。
 > 用例名只作代表，完整清单以 `tests/unit/test_hil.c` 的注册表为准；
 > 运行证据见 `build/test-results/`，风险状态见 `docs/design/known_risks.md`。
-> 范围：`src/hil/`（HIL 层）。FTL UT 见 `docs/design/ftl_ut_design.md`；
-> FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
+> 范围：`src/hil/`（HIL 层）。架构设计见 `docs/design/hil_design.md`（本文只写测试，不复制设计细节）；
+> FTL UT 见 `docs/design/ftl_ut_design.md`；FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
 > 关联：`docs/design/known_iss.md` ISS-HIL-01/02/03；
 > `docs/design/known_risks.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-03 / RISK-CTRL-04 /
 > RISK-HOST-20 / RISK-HOST-21；
@@ -53,7 +53,7 @@
 | `hil_io`（真实 I/O 路径） | `tests/unit/test_hil.c` 经 `src/hil/controller.c` → FTL → FC/NAND | READ / WRITE / FLUSH / TRIM、尾窗读写 | io |
 | `cli` | `src/hil/cli.c`、`include/hil/cli.h` | 行编辑、命令表、`cli_host_busy` | 不覆盖（手工 CLI） |
 | `usb_msc` | `src/hil/usb_msc.c`、`include/hil/usb_msc.h` | BOT class 回调、SCSI → controller、host busy gate | 不覆盖（PC 主机矩阵） |
-| `runtime` | `src/hil/runtime.c`、`include/hil/runtime.h` | `ssd_runtime_pump` 的服务顺序 | 不覆盖（主循环间接） |
+| `runtime` | `src/main.c`（`ssd_runtime_pump`）、`include/hil/runtime.h` | `ssd_runtime_pump` 的服务顺序 | 不覆盖（主循环间接） |
 | 跨层平台守卫 | `src/platform/stm32h743/dma_port.c` | `dma_port_uart_tx_init` 返回值语义 | contract（跨层） |
 
 > 测试项按「模块 + 公共接口」切，不按函数逐个列；内部 `static` helper 由所属模块的

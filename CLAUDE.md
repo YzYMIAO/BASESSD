@@ -232,7 +232,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 
 **H17 DMA 缓冲区必须做缓存维护，且地址与长度按 32 字节对齐。**（华为附录 + 本仓实践）
 CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCache_by_Addr`。
-范本：`src/platform/stm32h743/nand_dma.c:337-357`（含向上取整对齐）、`src/platform/stm32h743/usart_port.c:190`。
+范本：`src/platform/stm32h743/usart_port.c:189-194`（Clean + 32 B 向上取整对齐）。本仓页缓冲与 FC 池放在 `.noncacheable_buffer` 段，当前无 Invalidate 调用点；新增可缓存 DMA 缓冲时按本条第 1 句补 Invalidate。
 ⚠ 漏 Invalidate = **拿错数据继续跑**，比读错更贵；该操作不免费，不要对同一缓冲区反复做。
 
 **H18 临界区必须用可嵌套的 PRIMASK 保存/恢复，不用裸 `__disable_irq()`/`__enable_irq()`。**
@@ -596,7 +596,7 @@ typedef union FC_PARAM_U
 | 文档地图 | `docs/README.md` |
 | **已知残余风险登记（R11 登记处）** | `docs/design/known_risks.md`（复查模块前先读） |
 | **未实现 / 未验证设计项登记** | `docs/design/known_iss.md`（与 known_risks 分工见文件头） |
-| 活跃设计文档 | `docs/design/`（19 个）+ `docs/archive/`（历史/计划） |
+| 活跃设计文档 | `docs/design/`（22 个）+ `docs/archive/`（历史/计划） |
 | **`CLAUDE.md` 自身的变更史** | `docs/archive/claude_md_history.md`（日常不读） |
 | 历史归档 | `docs/archive/`（日常不读） |
 | 构建 | `make all`(debug，含 `types-check`) / `make release` / `make tests UT=FC\|FTL\|HIL` |
@@ -605,7 +605,7 @@ typedef union FC_PARAM_U
 | 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`，按配置分置，**切换构建无需 `make clean`** |
 | 编译器 | arm-none-eabi；`-Wall -Wextra -Wshadow -Wcast-align ...`，**无 `-Werror`**（零告警靠纪律） |
 | 运行时硬约束 | IWDG nominal 30s 配置（`src/main.c:65-85`），**当前所有构建档关闭**（`src/main.c:56`；启用待上板，RISK-CLI-01）；长同步操作喂狗点 `storage_wdg_kick()`；栈哨兵 `include/common/stack_guard.h` |
-| 缓存维护范本 | `src/platform/stm32h743/nand_dma.c:337-357`（Clean/Invalidate + 32B 对齐） |
+| 缓存维护范本 | `src/platform/stm32h743/usart_port.c:189-194`（Clean + 32B 对齐；当前无 Invalidate 调用点） |
 | 临界区正例 | `src/platform/stm32h743/usart_port.c:241-256`（PRIMASK 保存/恢复） |
 | 故障取证入口 | `docs/design/fault_capture.md` |
 

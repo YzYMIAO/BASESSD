@@ -18,7 +18,7 @@
  * 生命周期：ssd_ftl_boot_all 成功 → g_ftl_ready=1，主循环由 fc_service
  *          切换到 ftl_service（后者内部会先跑 fc_service）。
  * 文件结构：日志 sink 绑定 → FTL 实例存储 → ssd_ftl_boot(_all) → main()。
- * 流程图见 docs/design/fc_nand_design.md §22（图 14）/ §23（图 18）。
+ * 流程图见 docs/design/fc_nand_design.md §22（图 15）/ §23（图 18）。
  * ====================================================================== */
 
 #include "allocator.h"
@@ -765,9 +765,10 @@ int main(void)
      *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC；无失败路径。
      *                             内部会调 fc_nand_dispatch_init()（纯 memset，不碰硬件），
      *                             所以 FC 可以先于 NAND 硬件初始化。
-     *   ② fc_nand_init()       —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
-     *                             + RESET + READ_ID 校验。其 boot 命令直接走
-     *                             FC 同步 UOP 引擎，绕过 fc / fc_nand_dispatch 命令队列。
+     *   ② fc_nand_init()       —— NAND 芯片：HAL/FMC + per-(ch,ce) 后端装配
+     *                             + RESET + READ_ID 校验；R/B# 由 GPIO 轮询（无 EXTI）。
+     *                             其 boot 命令直接走 FC 同步 UOP 引擎，绕过
+     *                             fc / fc_nand_dispatch 命令队列。
      *   ③ set_armed(1)         —— 放行 fc_nand_dispatch_submit / submit_chain
      *                             （此前一律返回 INVALID_ARGUMENT）。
      *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。

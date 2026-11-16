@@ -105,7 +105,7 @@
 - **后果**：L2P 映射指向已归还/已擦除的日志块——块 46 的 region 页 CRC 错、目录出现同 PBA 别名（52≡86 / 53≡87 / 54≡88），开机回退 `full metadata rebuild` 并降级 8 个 region ⇒ 映射丢失。只在「format + 3 代写 + 第 4 次重启（`boot type=2`）」的 UT 硬复位序列下确定性复现；H2testw 415/423 MB 与真实断电验证均 0 错误。
 - **缓解**：已落地的独立改进：① `pfr_valid_sub` 计数为 0 时按运行期 `ftl_block_sub_valid_if_live` 同口径跳过，不再把一条陈旧减法升级为「整份块元数据快照作废」；② 回放不再对 `old_pba` 调 `materialize`；③ 回放后不变量守卫成为「快照不可信」的唯一判据。目录检查点单飞、slot 预留、写回自校验探针均已尝试，未消除故障（探针已撤）。
 - **下一步**：根因未定位。再开条件：真实掉电后出现 `region … degraded` / `mapping lost`，或 `dangling` 与 `mapping lost` 同时出现。判据：`replay: N sub-at-zero kept …` / `fallback … reason/pba/vc_end/live/sub0` / `[FTL] dangling`。
-- **证据**：`src/ftl/power_failure_recovery.c`（回放/守卫）；`src/ftl/metadata.c`（`dirty_gen` / `dir_ckpt_gen`）；`src/ftl/metadata_slot.c`；`include/ftl/bst.h:ftl_block_sub_valid_if_live`。
+- **证据**：`src/ftl/power_failure_recovery.c`（回放/守卫）；`src/ftl/metadata.c`（`dirty_gen` / `dir_ckpt_gen`）；`src/ftl/metadata.c`（`md_slot_*`）；`include/ftl/bst.h:ftl_block_sub_valid_if_live`。
 - **历史/验证**：
   - 2026-11-01 13:11 用户裁决：当前介质状态下观测不到，本轮结束；**根因未定位、改动未上板验证**
   - 2026-11-01 13:21 release 全量 `test` 156/156、`/bench/speed` 5/5 `err=0`；无 fallback / dangling
@@ -459,7 +459,7 @@
 - **后果**：`/bench/speed/ftl_rw` cache 档 `rd=1363 KB/s` vs normal `1356 KB/s`（几乎相同），尽管 `rdc batches=1600`、`pairs>0` 表明 4-pair 序列在跑。瓶颈不在命令/启动开销，而在数据面（PIO 逐字节搬运 + 校验）或单 LUN 串行。
 - **缓解**：功能正确性不受影响；cache 读仍是有效路径。
 - **下一步**：定位数据面：① 统计单 pair 的 `tR` 与 PIO 拷贝耗时占比；② 评估 DMA/更大 FIFO 或提高 FC 批处理深度。与 RISK-PERF-02 一并评估。
-- **证据**：板端 2026-10-25 debug/release 数据；`src/platform/stm32h743/nand_dma.c`。
+- **证据**：板端 2026-10-25 debug/release 数据；`src/nand/nand_fmc.c`（PIO 数据面）。
 - **历史/验证**：
   - 2026-10-25 板端实测：debug cache 18776 vs normal 18873 ms；release 7598 vs 7598 ms → 信息
 
@@ -468,7 +468,7 @@
 - **后果**：2-plane 页 4096B，按 datasheet 阵列上限 ≈163.8 MB/s 读、20.5 MB/s 写；接口上限 100 MB/s（Mode 5 x16）。release 实测 FC 读 3.6 MB/s（阵列 6%）、FC 写 4.0 MB/s（约 20%）、FTL host 读 3.4 MB/s、写 2.5–2.7 MB/s；debug→release 全线 2.2–2.5× ⇒ 瓶颈在 CPU 侧（PIO 拷贝 + randomizer/CRC + BCH），不是 NAND，也不是总线。
 - **缓解**：无（功能正确性不受影响）。
 - **下一步**：按收益排序：① PIO → DMA（FC data path）；② BCH/randomizer 硬件化或向量化；③ 减少逐字节 copy。先用单 pair 拆 `tR` 与 CPU 段耗时验证。
-- **证据**：板端 2026-10-25 release 00:35 镜像 `/bench/speed/` 4/4；H2testw 415/423 MB；`src/platform/stm32h743/nand_dma.c`；MT29F4G08 datasheet。
+- **证据**：板端 2026-10-25 release 00:35 镜像 `/bench/speed/` 4/4；H2testw 415/423 MB；`src/nand/nand_fmc.c`（PIO 数据面）；MT29F4G08 datasheet。
 - **历史/验证**：
   - 2026-10-31 v1.06 复测：写 894 KB/s、读 888 KB/s（USB FS 59%/59%），序列优化不改变带宽
   - 2026-10-25 release 实测数据 → 信息
@@ -1406,7 +1406,7 @@
 - **后果**：`fc_complete_from_nand` 的 page-read 分支只 OR `desc->status`，不 OR `nand_completion->cw_status`。① NAND 读 FAIL 不以 `NAND_FAIL` 上报；② NAND 读 TIMEOUT 若 buffer 仍是上一次有效数据且 `meta=FC_META_UNKNOWN`，ECC/CRC/META 都能过 ⇒ 命令报 READY，静默返回陈旧数据。
 - **缓解**：状态字重构已修：page-read 分支按 flat CW 把 `cw_status[]` 并进 desc；命令级从 `pre_status`/`nand_status`/`execution_status` 映射 `NAND_FAIL`/`FAIL_CACHE`/`RDY`/`AREADY`/`WP`/`TIMEOUT`；TIMEOUT 一定进命令状态。
 - **下一步**：注入 NAND 读超时并保留旧 buffer，确认命令状态带 `TIMEOUT`、FTL 不进成功路径。
-- **证据**：`src/fc/fc.c:fc_complete_from_nand` Step 3；`src/nand/nand_engine.c:pre_jump_index`；`src/nand/nand_dispatch_tables.c:completion_per_cw`；`include/fc/fc_command.h:FC_CMD_STATUS_*`。
+- **证据**：`src/fc/fc.c:fc_complete_from_nand` Step 3；`src/fc/fc_nand_engine.c:pre_jump_index`；`src/fc/fc_nand_dispatch.c:completion_per_cw`；`include/fc/fc_command.h:FC_CMD_STATUS_*`。
 - **历史/验证**：
   - 2026-10-30 状态字重构修复 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：engine_timeout_sets_status 通过 → 闭合
@@ -1687,7 +1687,7 @@
 - **后果**：`/bench/speed/ftl_rw` 连跑 4 组合时，`cache rd=4` 结束后一条带 ctx 的后台双 plane 页写（`op=31`、`chain=END`）留在 SQ 头，`lun_used=0/lun_phase=IDLE/owner=NONE`，填充轮次在跑却没把命令发出去，teardown 断言 `ftl_op_req_count()==0` 失败。单独跑该组合不复现 ⇒ 依赖前序组合留下的状态。
 - **缓解**：测试侧隔离：非首个组合开始时先 `ftl_ut_reboot_from_media()`（quiesce + `fc_init` + 重新武装 + PFR），只清 RAM、保留介质；FC 侧只读诊断 `fc_debug_state_get()` 保留。
 - **下一步**：出现「host I/O 变慢/停住」或 teardown ctx 残留时，`ftl teardown leaked …` 行会带 `sq_head/st/bound/sched_sq/fill`，按该行定位。这不是修复，泄漏可能在，只是复现条件被隔离。
-- **证据**：`src/fc/fc.c:fc_poll_fill_queue` / `fc_debug_fill_counters`；`src/fc/fc_interface.c:fc_debug_state_get`；`tests/unit/test_speed.c`；`tests/unit/ftl_ut_common.c`。
+- **证据**：`src/fc/fc.c:fc_poll_fill_queue` / `fc_debug_fill_counters`；`src/fc/fc.c:fc_debug_state_get`；`tests/unit/test_speed.c`；`tests/unit/ftl_ut_common.c`。
 - **历史/验证**：
   - 2026-10-30 全套 test 148/148 通过（组合隔离后） → 复现条件消除，底层原因未证实
 
@@ -1968,7 +1968,7 @@
 - **后果**：linker 的 `.noncacheable_buffer` 输入段匹配原只有无前导点形式，`nand_dispatch.o` 的页缓冲被当孤儿段启发式放置：实测落进可缓存 AXI RAM `0x24000204`，与源注释「D-Cache 关闭」不符。`CONFIG_NAND_DMA=1` 时是潜在静默数据破坏。
 - **缓解**：链接脚本段匹配补前导点（`*(.noncacheable_buffer)`）；PIO 路径已上板。
 - **下一步**：开 `CONFIG_NAND_DMA=1` 上板验证页缓冲地址与 D-Cache 维护。
-- **证据**：`linker/stm32h743xx_flash.ld`；`src/nand/nand_dispatch.c`。
+- **证据**：`linker/stm32h743xx_flash.ld`；`src/fc/fc_nand_dispatch.c`。
 - **历史/验证**：
   - 2026-10-2x PIO 正常路径上板；DMA 未验
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：`make check-nocache` OK（2026-11-15，addr=604372992 size=72064） 通过 → 闭合
@@ -2410,7 +2410,7 @@
 - **后果**：一次 UT 失败（teardown leak → munit abort）之后，下一次复位启动打印 `[ERR] [FAULT] previous crash: MemManage PC=0x2400038c LR=0x24000b09 CFSR=0x00000001`。用当前 `debug_ut.elf` 符号解：PC 落在 `_sdata`、LR 落在 `s_ftl_speed_chunks` 附近（AXI 数据区），CFSR bit0 = IACCVIOL ⇒ **CPU 从数据段取指**。干净介质上 `test /ftl/` 95/95 通过时不复现。后果：UT 失败时板子可能不是干净停机，而是二次故障，干扰对首个失败的判读（`.noinit` 记录只有断电才清，容易与旧记录混淆）。
 - **缓解**：无。UT 入口已加 host 在飞请求拒绝，减少因 host 流量触发 teardown 失败的机会（这是本次失败的前置条件，但不是 MemManage 的直接解释）。**用户裁决（2026-11-14）：不关注，不再追查**；仅保留记录备查，不作为阻断项。
 - **下一步**：无（用户裁决不追）。若将来 UT 失败后板子行为异常并影响判读，再按本条的取证方法重开。
-- **证据**：板端 2026-11-14 09:13:22 复位日志；`arm-none-eabi-addr2line -e build/firmware/debug/bin/debug_ut.elf 0x2400038c 0x24000b09`（`_sdata`）；`src/common/fault_port.c` / `src/common/assertion.c` / munit 适配层。
+- **证据**：板端 2026-11-14 09:13:22 复位日志；`arm-none-eabi-addr2line -e build/firmware/debug/bin/debug_ut.elf 0x2400038c 0x24000b09`（`_sdata`）；`src/platform/stm32h743/fault_port.c` / `src/common/assertion.c` / munit 适配层。
 - **历史/验证**：
   - 2026-11-14 首次观测：host I/O 污染导致 `pba_roundtrip` teardown 失败（munit abort）后，下一次复位报上述 MemManage → 待定位
 
@@ -2768,7 +2768,7 @@
 - **后果**：主机每 0.5 s 采样 `Get-Disk -Number 2`，30 s 内 7/54 次返回 `Size=0` / `PartitionStyle=RAW` / 0 分区，其余为 440,139,776 B / MBR / 1 分区；同一时段 PnP 实例全程 Present/OK（无重枚举）。共存异常：① 现存 MBR 分区 `offset=65,536 size=440,598,528`，结束地址 440,664,064 超出盘尾 524,288 B（容量变小后未重建的陈旧 MBR）；② 卷 F: 无文件系统（历史 FAT 格式化失败遗留，`Get-Volume` 报 `Size=0 / OperationalStatus=Unknown`）。Windows 对无 FS 的可移动卷反复重扫 ⇒ 弹「需要格式化 / 无法访问」。
 - **缓解**：主机侧摘掉 F: 盘符（`mountvol F: /D` + `Remove-PartitionAccessPath`，未动介质数据）；60 s 复测 F: 未回挂、`Get-Disk` 异常采样 0/30 ⇒ 间歇 Size=0 至少部分由主机反复探测无 FS 的无效卷触发，非纯固件。⚠ 重启/重插后 Windows 可能重新自动分配盘符，需复测；根治仍是重建 MBR + 格式化。固件侧：`tud_msc_test_unit_ready_cb` 只返回 `g_ctrl.state == READY`，`tud_msc_capacity_cb` 恒返回 `ssd_controller_host_lba_max()`（常量），瞬时 0 的另一来源未确认。
 - **下一步**：复现窗口开串口抓 `g_ctrl.state` 与 SCSI trace，区分「主机未发 READ CAPACITY」与「固件返回 NOT READY」；止血（主机侧）= 管理员删 F: 盘符，或跑 `tools/usb_verify/usb_rebuild_mbr.ps1` 重建分区并格式化（同时修越界 MBR）。
-- **证据**：`src/hil/usb_msc.c:1212`（test_unit_ready）/ `:1224`（capacity）/ `src/hil/controller.h:138`；主机 `Get-Disk`/`Get-Partition`/`Get-Volume` 采样 2026-11-12 21:06:04–21:08:21；同表 RISK-USBC-02。
+- **证据**：`src/hil/usb_msc.c:1212`（test_unit_ready）/ `:1224`（capacity）/ `include/hil/controller.h:138`；主机 `Get-Disk`/`Get-Partition`/`Get-Volume` 采样 2026-11-12 21:06:04–21:08:21；同表 RISK-USBC-02。
 - **历史/验证**：
   - 2026-11-13 rev33（debug `18:38:28`）固件 `format` + POR 后：`diskpart clean/create/format`、写入、拔插后校验均正常，两次枚举无 Size=0；本轮**未做 30 s 采样**，不能判定间歇无介质消失 → 待定位
   - 2026-11-12 21:11 主机侧摘掉 F: 盘符 → 异常采样 7/54 → 0/30（止血）
@@ -2822,7 +2822,7 @@
 - **后果**：timer 调度器心跳只需周期中断，TIM6（basic）足够；系统 ms/µs 时基由 ARM 核心 SysTick 提供。若将来要求超过 SysTick 1 ms 窗口的 32-bit µs 时间戳，当前设计没有独立硬件计数器。⚠「基本定时器 / 通用定时器」是 STM32 器件分类（RM0433），不是存储主控架构判据；`docs/reference/` 没有「SSD 主控只有基本定时器」的出处，不得写成行业标准（§〇 / R12）。
 - **缓解**：`delay_time_now_us64` 用 HAL tick 扩展毫秒，不受 1 ms 窗口限制；NAND 忙期还有 SysTick µs + 轮询计数双保险（`nand_engine.c`）。
 - **下一步**：重访触发 = 需要不依赖 SysTick 的 32-bit µs 自由计数器，或 SysTick 在目标平台不可用；届时把 T2/T5 作为独立设计项评估，不顺手改现有 TIM6 心跳。
-- **证据**：`docs/design/platform_abstraction.md` §8.4；`src/platform/timer.c`；`src/platform/stm32h743/timer_port.c`；`include/platform/delay.h` `delay_time_*`；`src/nand/nand_engine.c`。
+- **证据**：`docs/design/platform_abstraction.md` §8.4；`src/platform/timer.c`；`src/platform/stm32h743/timer_port.c`；`include/platform/delay.h` `delay_time_*`；`src/fc/fc_nand_engine.c`。
 - **历史/验证**：
   - 2026-11-03 判定 TIM6 心跳足够，T2/T5 仅在需要独立 µs 计数器时评估 → 信息归档
 
@@ -2831,7 +2831,7 @@
 - **后果**：`platform_time_us`、NAND 忙期、NAND dispatch 最短忙期、USB submit→complete 计时改读 SysTick µs 时间戳（字段 `start_cycles` / `wait_start_cycles` / `submit_cycles` 改名 `*_us`）。失败场景：① `HAL_IncTick` 被高优先级 ISR 延迟时，ms 与 VAL 的相位差让 µs 时间戳最多滞后约 1 ms（随后跳回）；② SysTick 被停 / 改 LOAD ⇒ µs 时间戳失效；③ `tests/framework/munit.c` 仍用 DWT 计时（仅测试基础设施，不影响产品固件）。
 - **缓解**：SysTick 由 HAL 配置并随 `HAL_RCC_ClockConfig` 重配；`delay_init()` 从 LOAD 反推速率；ms / VAL 双读；µs 超时无符号差值；NAND 忙期轮询计数兜底；UT 用注入时钟。
 - **下一步**：上板对比 NAND 忙期、USB latency、FTL `time_us` 与 DWT 基线不出现数量级偏差；长时运行无异常超时；移植到无 SysTick 的 target 前先补独立计数器。
-- **证据**：`src/platform/delay.c` `delay_time_*`；`src/platform/platform.c` `platform_time_us`；`src/nand/nand_engine.c` `nand_engine_wait_latch/timeout`；`src/nand/nand_dispatch.c` `wait_start_us`；`src/hil/usb_msc.c` `submit_us`；`include/platform/delay.h`。
+- **证据**：`src/platform/delay.c` `delay_time_*`；`src/platform/platform.c` `platform_time_us`；`src/fc/fc_nand_engine.c` `fc_uop_engine_wait_latch/timeout`；`src/fc/fc_nand_dispatch.c` `wait_start_us`；`src/hil/usb_msc.c` `submit_us`；`include/platform/delay.h`。
 - **历史/验证**：
   - 2026-11-03 DWT 改 SysTick µs，`*_cycles` 字段改名 `*_us` → 未上板
 
@@ -2946,7 +2946,7 @@
 - **后果**：`q`/`cp`/`jrn`/`stat`/`id`/`ecc`/`wear` 直接读 FC/FTL 内部计数（`fc_resource_stats_s`、`pend_*`、`cp_state_s`、`jrn_state_s`、`bst_block_s.rr`）。若字段语义读错（如把 `persisted_seq` 当当前序号、把 `wb busy` 读反、把 `l2p_load` 当 flush、把 `last_ecc` 当终身值），会让排障结论指向错误模块（无介质副作用）。`stat` 另把原本在 `info` 里的计数行搬走，习惯看 `info` 的人会以为计数消失；`wear` 的 WL 差值在 `writes < 1000`（`WL_MIN_WRITES` 启动门）时 `valid=0` 是预期。
 - **缓解**：只读命令，无 host-busy 门（主循环单线程）；复用 `fc_get_resource_stats` / `pend_*_count` / `jrn_*` accessor / `rr_get_health` / `wl_ec_spread_get`，字段名即语义；`info` 保留身份/状态，计数在 `stat`。
 - **下一步**：① `q` 的 sq/hsq/cq/三池与 `[FTL] stall` 日志里的同一组值对得上；② `cp`/`jrn` 在 idle、写压力、CP 进行中各看一次；③ `stat` 的 `up` 随串口时间增长，`d4/wd/cmt` 与 `wp`/`rd` 操作次数对得上；④ `ecc` 的 health 计数与 `rr_predictive_scan` 触发一致、`read_blocks` 随读增长；⑤ `wear` 的 EC 直方图与 `info` 的 free/bad 一致，WL 触发前后 `max_free−min_used` 与 `[WL ]` 日志一致；⑥ `id` 与 boot 横幅/`info` 一致。
-- **证据**：`src/hil/cli.c:uart_cli_q` / `uart_cli_cp` / `uart_cli_jrn` / `uart_cli_stat` / `uart_cli_id` / `uart_cli_ecc` / `uart_cli_wear`；`src/ftl/wear_leveling.c:wl_ec_spread_get`；`src/fc/fc_interface.c:fc_get_resource_stats`；`include/ftl/checkpoint.h:cp_state_s`；`include/ftl/journal.h:jrn_state_s`；`include/ftl/bst.h:rr_ecc_track_s`。
+- **证据**：`src/hil/cli.c:uart_cli_q` / `uart_cli_cp` / `uart_cli_jrn` / `uart_cli_stat` / `uart_cli_id` / `uart_cli_ecc` / `uart_cli_wear`；`src/ftl/wear_leveling.c:wl_ec_spread_get`；`src/fc/fc.c:fc_get_resource_stats`；`include/ftl/checkpoint.h:cp_state_s`；`include/ftl/journal.h:jrn_state_s`；`include/ftl/bst.h:rr_ecc_track_s`。
 - **历史/验证**：
   - 2026-11-05 观测命令批次落地 → 未上板
 
@@ -3064,30 +3064,32 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-POOL-02 | 信息 | 命令 release 不校验 CQ / 在飞，依赖 FTL 调用链 | 未上板 |
+| RISK-POOL-02 | 信息 | 命令 release 不校验 CQ 是否取走（在飞由状态守卫拒绝），依赖 FTL 调用链 | 2026-11-17 代码核对 |
 | RISK-POOL-03 | 已闭合 | desc 链释放 / 遍历缺上界与环检测 | 未上板 |
 | RISK-POOL-04 | 信息 | 空闲链哨兵混用裸常量与具名 ID | 未上板 |
 | RISK-POOL-06 | 信息 | 单字段双语义，失败坐标字段无读者 | 未上板 |
 | RISK-POOL-07 | 信息 | 内部 API 后缀 / 命名不合 H49 | 未上板 |
 | RISK-POOL-08 | 信息 | FC 注释承载变更史与版本号 | 未上板 |
+| RISK-POOL-12 | 待议 | 描述符池按单 plane 口径估算，满额双 plane 命令并发上限 32 | 2026-11-16 代码核对 |
 
 ### 详情
 
 #### RISK-POOL-02 命令 release 依赖调用链
 
-- **后果**：`fc_core_command_release` 只 ASSERT `ALLOCATED` / `COMPLETED`，release 档不能识别「CQ 未取走」或「仍在飞」；正确性由 FTL 调用链保证（`ftl_sync_wait_owned` 未提交才 release、`ftl_op_drain` 处理迟到完成，RISK-IF-17）。
+- **后果**：`fc_pool_command_release` 只接受 `ALLOCATED` / `COMPLETED`（`FREE` 幂等早退）；在飞 / 排队状态在 release 档由 `ASSERT_REJECT_VOID` 拒绝，但接口是 `void` ⇒ 误用时池容量静默流失；正确性由 FTL 调用链保证（`ftl_sync_wait_owned` 未提交才 release、`ftl_op_drain` 处理迟到完成，RISK-IF-17）。
 - **缓解**：公开 `fc_command_release` 恢复 `void`；指针身份 ASSERT；`FREE` 幂等早退；FC 不再引入可失败 release API。
 - **下一步**：若 FTL 新增第二个释放入口，重新评估是否把 CQ / 状态守卫作为判据 9 显式例外；上板注入在飞 release，验证 ASSERT 停机 + 调用链回归。
-- **证据**：`src/fc/fc.c` `fc_core_command_release`；`src/fc/fc_interface.c` `fc_command_release`；`src/ftl/ftl_fc_interface.c` `ftl_sync_wait_owned`；`src/ftl/ftl_op.c` `ftl_op_drain`。
+- **证据**：`src/fc/fc_pool.c` `fc_pool_command_release` / `fc_command_release`；`src/ftl/ftl_fc_interface.c` `ftl_sync_wait_owned`；`src/ftl/ftl_op.c` `ftl_op_drain`。
 - **历史/验证**：
   - 2026-11-06 判定为「依赖调用链的有意设计」，不改 release API → 未上板
+  - 2026-11-17 代码核对：状态守卫在 `fc_pool_command_release`，release 档由 `ASSERT_REJECT_VOID` 拒绝在飞 / 排队释放；后果按现行为更新
 
 #### RISK-POOL-03 desc 链遍历缺上界与环检测
 
 - **后果**：释放、buffer 回收、append、完成回填四条链式遍历无上界与环检测时，成环会死循环 ⇒ 看门狗复位，或顺链释放别人的 desc。
 - **缓解**：四条遍历改为有界 for/while + 出口 `ASSERT`；超界时 release 档截断并置链头 `FC_DESCRIPTOR_ID_INVALID`，不再逐点 `ASSERT(false)+LOGE`。
 - **下一步**：上板 / 负例构造成环链，确认超界只截断并留日志，不继续写。
-- **证据**：`src/fc/fc.c` `fc_core_chain_release_all` / `fc_core_command_release_buffers` / `fc_command_chain_append` / `fc_complete_from_nand`。
+- **证据**：`src/fc/fc_pool.c` `fc_pool_chain_release_all` / `fc_pool_command_release_buffers` / `fc_pool_chain_append`；`src/fc/fc.c` `fc_complete_from_nand`。
 - **历史/验证**：
   - 2026-11-06 四条遍历加上池深上界 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：desc_cycle_release_bounded 通过 → 闭合
@@ -3114,11 +3116,12 @@
 #### RISK-POOL-07 内部 API 命名不合 H49
 
 - **后果**：`fc_*_internal` 后缀与 H49 冲突，`real_buffer` 名称含糊，内部 API 命名不一致。
-- **缓解**：20 个内部函数统一改为 `fc_core_*`；`fc_command_release_internal_api` → `fc_core_command_release`；`fc_buffer_id_to_real_buffer_internal` → `fc_core_buffer_cw_base`；公开 `fc_buffer_id_to_real_buffer` → `fc_buffer_get_user_data`；`fc_internal.h` 命名约定同步为 `fc_core_*(controller, ...)`。
-- **下一步**：UT / 文档同步旧名；grep 旧符号应为 0（测试源除外）。
+- **缓解**：内部函数按所属模块统一前缀——池 `fc_pool_*`、NAND 调度 `fc_nand_dispatch_*`、UOP 引擎 `fc_uop_engine_*`；公开层保持 `fc_*` 单例入口。不存在 `fc_*_internal` 后缀，`real_buffer` 已由 `fc_buffer_get_user_data` / `fc_pool_buffer_cw_base` 取代。
+- **下一步**：新增内部函数继续按模块前缀命名；UT / 文档引用同步现名，grep `_internal` 应为 0（测试源除外）。
 - **证据**：`src/fc/internal/fc_internal.h`；`src/fc/fc.c`；`src/ftl/ftl_fc_interface.c`。
 - **历史/验证**：
   - 2026-11-06 内部函数统一 `fc_core_*`（H49）→ 未上板
+  - 2026-11-17 代码核对：池与 NAND 调度拆分后，内部前缀为 `fc_pool_*` / `fc_nand_dispatch_*` / `fc_uop_engine_*`
 
 #### RISK-POOL-08 注释承载变更史
 
@@ -3129,6 +3132,14 @@
 - **历史/验证**：
   - 2026-11-06 注释收口（H37 / S6）→ 未上板
 
+#### RISK-POOL-12 描述符池容量按单 plane 口径估算，满额双 plane 命令并发上限 32
+
+- **后果**：`FC_DESCRIPTOR_POOL_DEPTH = 256` 的推导「64 命令 × 每命令 4 CW」是单 plane 口径。当前两 plane 全 CW 命令（`FTL_CACHE_FULL_CW`，8 位）建链要用 8 个 desc ⇒ 同时在链的满额命令上限是 **32 条**，不是命令池声明的 64 条；buffer 池 128 同理只够 16 条满额命令。超过时 `fc_command_configure_descriptor` 分配失败，`ftl_cmd_configure_descriptors` 回滚并返回 `FTL_ERROR` ⇒ host 写失败（有错误码，不是静默损坏）。
+- **缓解**：FTL 当前序列门控与批大小（per-LUN FIFO 深 4、`FC_SCHEDULER_CHAIN_MAX` 4、cache batch 窗口）使同时在链的满额命令远低于 32；desc 池耗尽的负例尚未构造。
+- **下一步**：待议：①把「满额并发上限 32」写成 FTL 侧必须遵守的设计约束；②或按 `cw_bitmap` 置位数给建链加准入（池满转 `FTL_AGAIN` 而非 `FTL_ERROR`）；③或加深 desc 池。先记录预期并发上界与实测峰值，再选。
+- **证据**：`include/fc/fc_interface.h:FC_DESCRIPTOR_POOL_DEPTH` / `FC_BUFFER_POOL_DEPTH`；`include/ftl/ftl_config.h:FTL_CACHE_FULL_CW`；`src/ftl/ftl_fc_interface.c:ftl_cmd_configure_descriptors`；`src/fc/fc_pool.c:fc_command_configure_descriptor`；`docs/design/fc_nand_design.md` §2.1。
+- **历史/验证**：
+  - 2026-11-16 重写设计文档时核对池深度推导发现 → 待议
 
 ### 已闭合（详情见 archive）
 
@@ -3141,9 +3152,9 @@
 
 **已判定为有意设计（重访时先读契约）**：
 
-- `fc_core_chain_release_head` 对 `*head >= FC_DESCRIPTOR_POOL_DEPTH` 早退是空链哨兵语义，改成 `ASSERT` 会让合法空链释放炸掉（`src/fc/fc.c`）。
-- `fc_core_command_release` 对 `FREE` 早退是幂等释放语义，防止重复释放顺着 desc 0 释放别人的链；与 RISK-POOL-02 的「在飞释放」是两件事，不能互相替代（`src/fc/fc.c`）。
-- `fc_debug_state_get` 只采样 `chain_owner[0][0][0]` / LUN0 是诊断采样口径，不是全维遍历；要覆盖全 LUN 时另加循环字段，不改采样语义（`src/fc/fc_interface.c`）。
+- `fc_pool_chain_release_head` 对 `*head >= FC_DESCRIPTOR_POOL_DEPTH` 早退是空链哨兵语义，改成 `ASSERT` 会让合法空链释放炸掉（`src/fc/fc_pool.c`）。
+- `fc_pool_command_release` 对 `FREE` 早退是幂等释放语义，防止重复释放顺着 desc 0 释放别人的链；与 RISK-POOL-02 的「在飞释放」是两件事，不能互相替代（`src/fc/fc_pool.c`）。
+- `fc_debug_state_get` 只采样 `chain_owner[0][0][0]` / LUN0 是诊断采样口径，不是全维遍历；要覆盖全 LUN 时另加循环字段，不改采样语义（`src/fc/fc.c`）。
 
 ---
 
@@ -3216,7 +3227,7 @@
 - **后果**：build request / encode / RAID parity / FC 查询 helper 的 desc 链遍历只判 `desc_id != INVALID` 或 `< DEPTH`，成环会死循环。
 - **缓解**：关键路径加 `steps < FC_DESCRIPTOR_POOL_DEPTH`；跑满仍未到链尾返回失败；FC 查询 helper 同样有界。
 - **下一步**：上板/负例构造成环链；确认失败而非挂死。
-- **证据**：`src/fc/fc.c:fc_build_request_data_planes`；`src/fc/fc_data_path.c` encode/parity；`src/fc/fc_interface.c` 查询 helper。
+- **证据**：`src/fc/fc.c:fc_build_request_data_planes`；`src/fc/fc_data_path.c` encode/parity；`src/fc/fc.c` 查询 helper。
 - **历史/验证**：
   - 2026-11-06 修复：关键路径链遍历加池深上界 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：desc_cycle_release_bounded 通过 → 闭合
@@ -3458,7 +3469,7 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-SCH-02 | 信息 | fc_core_poll 只在无完成时填充，持续完成下提交延迟 | 2026-11-15 判定 K（见 negative_coverage.md） |
+| RISK-SCH-02 | 信息 | 完成与填充同轮，持续完成下不延迟提交 | 2026-11-15 判定 K（见 negative_coverage.md） |
 | RISK-SCH-03 | 待决策 | CQ 满会丢完成项，FTL 永远收不到命令 | 2026-11-06 代码核对 |
 | RISK-SCH-04 | 信息 | 路由字段越界在 release 会越界访问 suspended 数组 | 2026-11-06 代码核对 |
 | RISK-SCH-05 | 信息 | fill_pops 少计链成员 pop，链长 N 少计 N-1 | 未上板 |
@@ -3468,23 +3479,25 @@
 
 ### 详情
 
-#### RISK-SCH-02 fc_core_poll 只在无完成时填充
+#### RISK-SCH-02 完成与填充同轮
 
-- **后果**：持续有完成时提交被让位，单次调用 `/service` 的前端会看到提交延迟。
-- **缓解**：同一轮完成处理后再执行一次 `fc_poll_fill`；填充 `IO_ERROR` 上升，`QUEUE_EMPTY/NOT_READY` 不改变「该轮有完成」的成功语义。
+- **后果**：若先处理完成、只在无完成时才填充，持续完成会让提交持续被让位，单次调用 `/service` 的前端会看到提交延迟。
+- **缓解**：`fc_service` 每轮先 poll 完成、再无条件执行 `fc_poll_fill`；填充 `IO_ERROR` 上升为本轮错误，`QUEUE_EMPTY/NOT_READY` 不改变「该轮有完成」的成功语义。
 - **下一步**：上板观察持续完成下的提交延迟；确认 FTL/HIL 的单次/多次 `fc_service` 都能量正常推进。
-- **证据**：`src/fc/fc.c:fc_core_poll`；`src/ftl/ftl.c:ftl_service_pump`。
+- **证据**：`src/fc/fc.c:fc_service`；`src/ftl/ftl.c:ftl_service_pump`。
 - **历史/验证**：
   - 2026-11-06 修复：完成处理后补一次 `fc_poll_fill` → 未上板
+  - 2026-11-17 代码核对：入口为 `fc_service`，每轮先 poll 完成再无条件 `fc_poll_fill`
 
 #### RISK-SCH-03 CQ 满会丢完成项
 
 - **后果**：`fc_complete_from_nand` 在 CQ 满时把命令置 COMPLETED 但没有 CQ entry，FTL 永远收不到该命令；FC 侧标记只是防槽位永久 ACTIVE，不能恢复 FTL 侧完成。
-- **缓解**：`LOGE` + 返回 `IO_ERROR`；`fc_core_poll` 把该轮上报为 fatal；正常情况下 CQ 深度=命令池深度且 release 只在取走后发生，CQ 满结构上不可达。
+- **缓解**：`LOGE` + 返回 `IO_ERROR`；`fc_service` 把该轮上报为 fatal；正常情况下 CQ 深度=命令池深度且 release 只在取走后发生，CQ 满结构上不可达。
 - **下一步**：二选一：提交侧按 CQ 高水位/预留禁止把 CQ 填到危险水位；或把 CQ 满定义为系统复位/停机路径。先确认是否需要支持「FTL 长时间不抽 CQ」。
-- **证据**：`src/fc/fc.c:fc_complete_from_nand / fc_core_poll`；`src/fc/fc_queue.c:fc_completion_queue_push`。
+- **证据**：`src/fc/fc.c:fc_complete_from_nand / fc_service`；`src/fc/fc_queue.c:fc_completion_queue_push`。
 - **历史/验证**：
   - 2026-11-06 审视：判定 CQ 满为 fatal，待二选一决策 → 未改
+  - 2026-11-17 代码核对：fatal 上报点为 `fc_service`（`fc_core_poll` 已不存在）
 
 #### RISK-SCH-04 路由字段越界在 release 会越界访问 suspended
 
@@ -3559,6 +3572,10 @@
 | RISK-NANDP-15 | 已闭合 | 首次 RESET timeout 500µs 小于 datasheet 1ms，冷启动可能误判 | 未上板 |
 | RISK-NANDP-17 | 待后续 | tR timeout 38µs 小于 tR_ECC 70µs，启用内部 ECC 会提前超时 | 2026-11-15 判定 K（见 negative_coverage.md） |
 | RISK-NANDP-18 | 信息 | 01h timing mode 的 tITC 1µs 已被 700µs timeout 覆盖 | — |
+| RISK-NANDP-19 | 已闭合 | 地址 helper 注释引用不存在的 `pba_from_addr()` | 2026-11-17 代码核对 |
+| RISK-NANDP-20 | 已闭合 | boot 注释写「R/B# EXTI」，实现为纯 GPIO 轮询 | 2026-11-17 代码核对 |
+| RISK-NANDP-21 | 已闭合 | `CLAUDE.md` 缓存维护范本指向不存在的 `nand_dma.c` | 2026-11-17 代码核对 |
+| RISK-NANDP-22 | 已闭合 | 设计文档图内引用不存在的内部符号（6 个） | 2026-11-17 符号核对 |
 
 ### 详情
 
@@ -3637,7 +3654,7 @@
 - **后果**：`nand_op_timing_s.twb_us/trst_us/twhr_us` 只出现在表初始化，实际 tWB/tWH 延时写死在 UOP 的 `NAND_UOP_DELAY_US`；tADL 写死 1U；改 timing 表不生效。
 - **缓解**：方案 B：新增 `NAND_UOP_DELAY_TIMING` + `NAND_TIMING_TWB/TWH/TADL` 选择器；UOP 表按当前 op 的 timing 字段延时；`nand_op_timing_s` 改为 `twb_us/twhr_us/tadl_us/busy_timeout_us`，删除无消费者的 `trst_us`；`NAND_TIME_*` 只作表初始化默认值。
 - **下一步**：上板回归常规读/写/擦除、cache read/program、multi-plane、reset；负例确认 UOP 字段越界返回 INVALID。`fc_nand_design.md` 待上板通过后统一定稿，至少同步 timing B、CHECK_FAIL/CHECK_FAIL_CACHE 表、单 plane `OP_PROGRAM_PAGE_CACHE_FIRST`（50）与 `OP_COUNT=51`。
-- **证据**：`include/nand/nand_protocol.h`；`src/nand/nand_fmc.c:nand_fmc_exec_delay_timing`；`src/nand/onfi_1_0.c:g_nand_operation_map` / UOP 数组；`docs/design/fc_nand_design.md:797-825`。
+- **证据**：`include/nand/nand_protocol.h`；`src/nand/nand_fmc.c:nand_fmc_exec_delay_timing`；`src/nand/onfi_1_0.c:g_nand_operation_map` / UOP 数组；`docs/design/fc_nand_design.md` §3.3（ONFI 命令表）/ §3.4（器件级操作）。
 - **历史/验证**：
   - 2026-11-07 改为按 op timing 字段延时 → 未上板
   - 2026-11-07 用户明确设计文档待上板后定稿
@@ -3709,13 +3726,16 @@
 - **历史/验证**：
   - 2026-11-07 查证 `tITC` → 判定 700µs timeout 足够，无需改
 
-
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
 |---|---|---|---|
 | RISK-NANDP-09 | 2026-11-11 | 命令/地址窗口写缺 __DMB，字节可能被合并重排 | `docs/archive/known_risks_batches.md` |
 | RISK-NANDP-16 | 2026-11-13 | tADL/11h 等待：Mode 0 `/fc-nand/` 62/62（含 SET_FEATURES/cache/multi-plane）+ H2testw 通过 | `docs/archive/known_risks_batches.md` |
+| RISK-NANDP-19 | 2026-11-17 | `nand_addr_s` 注释改为真实 API 清单 | `docs/archive/known_risks_batches.md` |
+| RISK-NANDP-20 | 2026-11-17 | boot 注释改为 GPIO 轮询 R/B#（无 EXTI） | `docs/archive/known_risks_batches.md` |
+| RISK-NANDP-21 | 2026-11-17 | `CLAUDE.md` 缓存维护范本改为 `usart_port.c:189-194` | `docs/archive/known_risks_batches.md` |
+| RISK-NANDP-22 | 2026-11-17 | 图 2/11/15/16/18/19/22 改用真实符号；53 个图内符号 0 缺失 | `docs/archive/known_risks_batches.md` |
 
 ---
 
@@ -3863,7 +3883,9 @@
 - **RISK-BBT-22（信息，2026-11-05 读码审计）**：`REBUILD_REQUIRED` 只随**最新有效 BBT record** 持久化（`reserved[1]`）；若最新 record 损坏/不可读，`md_ring_locate` 会回退到更旧的 record ⇒ 标志丢失，本应执行的 full metadata rebuild 被跳过。缓解：该标志只在「元数据日志块丢失」时置位，此时 CP/目录大概率也不可读，启动路径的其它检查可能兜底；但不等价。重开触发：看到日志块丢失日志后重启未出现 full rebuild 时，先查最新 BBT record 是否可读。证据：`src/ftl/bbt.c` `bbt_save` / `bbt_load`；`src/ftl/metadata.c` `md_ring_locate_fallback`。
 - **TRIM / cancel 矩阵（信息，2026-11-05 审视）**：`ssd_controller_trim_service` 的 `FTL_AGAIN`/错误/超时路径与 `ftl_trim_begin` 的 1 s 无进展超时闭合，不会永久挂起；TRIM 仅 CLI 入口，前端串行化由 host gate（`UART_CLI_FLAG_BUSY` + `usb_msc_host_busy`）+ controller 单飞行 + `g_cli_pending.busy` 保证，`ftl_trim_step` 的 wbuf-drop「不失效旧 L2P」依赖该串行化（并发 TRIM 前 RISK-HOST-09 不可达）。`ssd_controller_cancel_flush` 只摘 flush job、不清 trim；当前无 `cancel_trim` 是范围决策（TRIM 只能靠超时/复位结束）。重开触发：接入 host UNMAP/TRIM 或给 CLI 加 abort。证据：`src/hil/controller.c` `ssd_controller_trim_service` / `ssd_controller_cancel_flush`；`src/ftl/ftl.c` `ftl_trim_begin/step` / `ftl_flush_cancel`。
 
-- **RISK-DOC-04（待后续，2026-11-05 用户定「定稿后批量」）**：本轮代码改动已落地，但 `docs/design/` 的对应叙述仍是旧实现；**代码注释与 `known_risks` 已同步**，只有设计文档待批量更新。清单：① `ftl_design.md:1858-1867` 的 `md_ring_locate` ①~⑥（旧「第一个末槽无效块 = 游标块」→ 新「每个非满块降序找末条 + 全局最大 sequence + 写点由已校验胜者推」，RISK-BBT-18）；② 同文 `:1532` 「扫 2 块池」（引导环实为名义块 + 全部 shared spare，候选池 2..4 块）；③ 同文 `:1543-1544` BBT 异步 job「失败保留 dirty 下轮重试」（擦失败现为标坏 ring 块 + 重建候选池，RISK-BBT-19；另有同步/异步重叠守卫与 `dirty_gen` 快照，RISK-BBT-20）；④ 同文 `:2967-2972` 待入账预算（判据已移入 `ftl_confirm_service`，RISK-HOST-16）；⑤ 可选：`ftl_ut_design.md` 补「BAD 块末页读失败 + 后续块半写」负例规格（测试源由用户维护，R4）；⑥ `ftl_design.md` §3.10.5/§3.10.6 的同步等待「超时后调用者 release、迟到完成由 drain release」改为新的**命令归属**契约（`submitted` 出参，RISK-IF-17）。**后果**：设计文档与代码分叉，下轮读者可能按旧算法理解 ring 定位。**触发/下一步**：用户说「定稿 / 收尾 / 文档一起更新」时一次性回扫上述位置。
+- **RISK-DOC-04（待后续，2026-11-05 用户定「定稿后批量」）**：本轮代码改动已落地，但 `docs/design/` 的对应叙述仍是旧实现；**代码注释与 `known_risks` 已同步**，只有设计文档待批量更新。清单：① `ftl_design.md:1858-1867` 的 `md_ring_locate` ①~⑥（旧「第一个末槽无效块 = 游标块」→ 新「每个非满块降序找末条 + 全局最大 sequence + 写点由已校验胜者推」，RISK-BBT-18）；② 同文 `:1532` 「扫 2 块池」（引导环实为名义块 + 全部 shared spare，候选池 2..4 块）；③ 同文 `:1543-1544` BBT 异步 job「失败保留 dirty 下轮重试」（擦失败现为标坏 ring 块 + 重建候选池，RISK-BBT-19；另有同步/异步重叠守卫与 `dirty_gen` 快照，RISK-BBT-20）；④ 同文 `:2967-2972` 待入账预算（判据已移入 `ftl_confirm_service`，RISK-HOST-16）；⑤ 可选：`ftl_ut_design.md` 补「BAD 块末页读失败 + 后续块半写」负例规格（测试源由用户维护，R4）；⑥ `ftl_design.md` §3.10.5/§3.10.6 的同步等待「超时后调用者 release、迟到完成由 drain release」改为新的**命令归属**契约（`submitted` 出参，RISK-IF-17）。**后果**：设计文档与代码分叉，下轮读者可能按旧算法理解 ring 定位。**触发/下一步**：用户说「定稿 / 收尾 / 文档一起更新」时一次性回扫上述位置。**历史**：2026-11-17 按同一判据修正另一批数值/名称漂移（Journal 页头 16 B、目录检查点 16 页/条 × 4 条/块、L2P log 96 块 / 6144 region 页、shared spare 94..97、OP 借用 1 MiB、介质版本 BASE 14 + 多 die 哈希、GC 日志 5000 ms、压缩触发 64、migrate 三个独立 timer、BBT 出厂扫描含块 0，以及 `alc_op_alloc_log_block` / `md_log_rotate` / `md_commit_region(MD_COMMIT_PAIR)` / `ftl_cmd_write_data_cw(..., pair_major=true)` / RR `PLANE_END` 等现名）；证据为 `docs/design/ftl_design.md` 的定点 grep 与 `include/ftl/*.h` 符号核对。
+
+- **RISK-DOC-05（信息，2026-11-17）**：HIL 层没有架构设计文档，且 `fc_nand_design.md` §26.2 把 HIL 映射成 `src/main.c` + UART CLI + `usb_msc*`，遗漏 `src/hil/controller.c` / `request.c` / `host_queue.c` / `runtime.h`。**后果**：维护者按旧映射会把「请求拆分 / 完成聚合 / tag 生命周期」当成主循环或 USB 前端的一部分；新增 host 前端时容易再复制一份 `ssd_req_s` 与槽状态（`host_queue.h` 文件头明确禁止）。**缓解**：新建 `docs/design/hil_design.md`（层位置、表示链、提交/完成路径、前端仲裁、不变量、主流对照）；§26.2 映射改指 `src/hil/` 并链接新文档；`docs/README.md` 文档地图增加 HIL 入口；同时修正 `storage_controller_learning.md` / `storage_controller_design_essentials.md` 的「本仓 HIL = UART CLI」陈旧现状描述（USB MSC BOT 已是主机前端）。**重访触发**：新增 host 前端（NVMe / 第二个 USB 配置）、改 `ssd_req_s` 或 host queue 结构、或 `hil_design.md` 与代码再次分叉。**证据**：`docs/design/hil_design.md`；`docs/design/fc_nand_design.md:2536`；`include/hil/host_queue.h`；`src/hil/controller.c` / `request.c` / `host_queue.c` / `cli.c` / `usb_msc.c`。
 
 - **RISK-ARCH-13（已议，2026-11-03，有意偏离 C2）**：`ftl_confirm_write` 的 `ftl_page_desc_s` 构造在 `ftl_host_io_write_ok` 与 `ftl_confirm_service` **各写一次**，不抽 helper。用户判定：「只有频繁重复的才需要构造，两个调用点完全不必要，还付出函数本身开销」。**失败场景**：将来给 `ftl_page_desc_s` 增字段时只改一处 ⇒ 另一处漏填（静默用 0，编译期无声）。**缓解**：两处构造相邻且字段完全相同，改字段时按 grep 回扫。**重访触发**：出现第三个构造点，或描述符字段发生变化。证据：`src/ftl/ftl.c` `ftl_host_io_write_ok` / `ftl_confirm_service`。
 
