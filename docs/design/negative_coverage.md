@@ -12,7 +12,7 @@
 > 填写规则：每条必须有判定与一句理由；N 必须给出 seam / 触发 / 断言 / 用例名。
 > **禁止**把「没设计过」写成 N。
 
-> **套件路径说明**：2026-11-14 起负例拆为 `/ftl/negative/pure/`（16 条，不碰介质）
+> **套件路径说明**：2026-11-14 起负例拆为 `/ftl/negative/pure/`（42 条，不碰介质）
 > 与 `/ftl/negative/media/{gc,l2p,meta,boot,if}/`（49 条，真 NAND）。表中 2026-11-14 之前的上板证据仍记录
 > 当时的 `/ftl/media/negative/` 路径，未改写历史。
 >
@@ -20,6 +20,10 @@
 >
 > **D1 批次（2026-11-14）**：17 条 K 已判定并写用例/合并覆盖，表中对应行
 > 判定改为 **N**（已写/未上板）。全表当前口径：M 67 / N 85 / K 81 / 信息 47 / 已闭合 7；其余状态不变。
+>
+> **口径时点（2026-11-16）**：上表是 2026-11-14 的快照。2026-11-15/16 的 94 条风险闭合与
+> 状态变更以 `docs/design/known_risks.md` 为准；本文件不逐行回算 302 条，避免与风险登记
+> 两套状态并存。
 >
 > **K 行可行性分级**：见 `docs/design/negative_deferred_eval.md`（D1 现成可做 / D2 缺 seam / D3 缺夹具 / D4 不划算 / D0 非负例）。
 
@@ -156,7 +160,7 @@
 | 128 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-12 | 待议 | 组槽耗尽返回 FTL_ERROR；修法在 controller | M | 已上板（2026-11-14 release UT=FTL `/ftl/media/negative/` 54/54、0 SKIP、219.32 s）；N：已写/未上板；组表耗尽返回 FTL_AGAIN（H38）；代码已改| 用例 host_group_exhaustion |
 | 129 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-14 | 待上板 | 拔线后门控环形等待导致读回 MATA（根因已改，死锁路径未验） | K | 需拔线+满盘 GC 窗口，人工触发 |  |
 | 130 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-16 | 待上板 | 「无进展时长」预算实际未生效（死赋值） | N | D3 复用现有用例/已写；复用 pend_confirm_park_timeout：无进展超时结算 | |
-| 131 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-17 | 待上板 | host queue entry 生命周期，漏 release/重复 release | M | 已上板：HIL 15/15 每例 teardown 断言三池/队列/request 表归零（漏 release 会红）；在飞释放由 in_flight_release_guard 覆盖；重复 release 是 fc_command_release 的幂等早退（§四 有意设计） | seam: hil_quiesce（fc_get_resource_stats + ftl_op_req_count）；触发: 每例结束；断言: 全部计数归零；用例 HIL 15 例 teardown |
+| 131 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-17 | 待上板 | host queue entry 生命周期，漏 release/重复 release | M | 已上板：HIL 17/17 每例 teardown 断言三池/队列/request 表归零（漏 release 会红）；在飞释放由 in_flight_release_guard 覆盖；重复 release 是 fc_command_release 的幂等早退（§四 有意设计） | seam: hil_quiesce（fc_get_resource_stats + ftl_op_req_count）；触发: 每例结束；断言: 全部计数归零；用例 HIL 17 例 teardown |
 | 132 | 2G Host 提交 / 完成组 / pending（`ftl.c` + `pending.c`） | RISK-HOST-22 | 待上板 | host 写取不到页对时无界重试，USB 命令可能永久挂起 | K | K（触发不可确定性构造）：需 free+OP 同时耗尽；无注入点 | |
 | 133 | 2H 完成派发面（`ftl_op.c/h`） | RISK-CR-01 | 待上板 | ctx 旁表不按 command_id 去重，id 复用得别人 ctx | 信息 | D0 裁决（2026-11-14）：非负例，转信息 |  |
 | 134 | 2H 完成派发面（`ftl_op.c/h`） | RISK-CR-04 | 待上板 | request 表改 command_id 直接索引，删 op_tag | M | 已上板（2026-11-14 release UT=FTL 全量 39/39、0 skip、186.77 s）；越界拒绝 + 重复登记不双计数| seam: ftl_op_req_add/remove；触发: cmd_id == FTL_OP_REQ_TABLE_SIZE、同 id 加两次；断言: FTL_ERROR / count 不增；用例 op_req_table_guard |
@@ -305,10 +309,10 @@
 | 277 | 2AI NAND 器件 / PHY | RISK-NANDP-14 | 待上板 | 多条 busy 启动命令缺 tWB，WAIT_READY 提前返回读到旧数据 | K | 需板端 cache/multi-plane 数据回归 |  |
 | 278 | 2AI NAND 器件 / PHY | RISK-NANDP-15 | 待上板 | 首次 RESET timeout 500µs 小于 datasheet 1ms，冷启动可能误判 | K | 需冷启动/热复位观察 |  |
 | 279 | 2AI NAND 器件 / PHY | RISK-NANDP-17 | 待上板 | tR timeout 38µs 小于 tR_ECC 70µs，启用内部 ECC 会提前超时 | K | 需启用 on-die ECC |  |
-| 280 | 2AJ 平台返回状态 | RISK-PLAT-13 | 待上板 | `dma_port_uart_tx_init` 失败返 SUCCESS、成功返 ERROR | N | D3 已写/未上板；hil_uart_dma_init_returns：UART TX DMA 初始化返回 SUCCESS | |
+| 280 | 2AJ 平台返回状态 | RISK-PLAT-13 | 待上板 | `dma_port_uart_tx_init` 失败返 SUCCESS、成功返 ERROR | N | 成功路径已上板（2026-11-15 HIL 17/17）；`hil_uart_dma_init_returns`：UART TX DMA 初始化返回 SUCCESS；失败路径未注入（D3） | |
 | 281 | 2AK 构建档 / launch 配置 | RISK-BUILD-01 | 待上板 | `DEBUG_OPT=-O0` 静默复用 -O2 对象 | N | D1 已写；`make check-opt`：-O0 走独立 `obj_ut_FC_O0` 且带 `-O0`，默认 -O2 不加 `_O2`；非板端 | |
 | 282 | 2AK 构建档 / launch 配置 | RISK-BUILD-02 | 待上板 | launch 配置档位不符，产品/UT 共用 ELF 路径，易烧错镜像 | 已闭合 | D0 小修后闭合（2026-11-14），见 docs/archive/known_risks_batches.md | |
-| 283 | 2AL HIL UT | RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：`is_complete`、NULL、队列账本、flush 持久化 | N | 已写（部分）/已上板：is_complete、NULL controller/request、flush 持久化、队列账本已由既有 HIL 用例覆盖；buffer NULL 按用户裁决留以后（CTRL-04）、跨重启待链入 ftl_ut_common |  |
+| 283 | 2AL HIL UT | RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：buffer NULL、跨重启、多 run、USB 矩阵 | N | 已上板 17/17（contract 10 / io 7）：is_complete、NULL controller/request、flush 持久化、队列账本、TRIM 越界（trim_edges）已覆盖；buffer NULL 按用户裁决留以后（CTRL-04）、跨重启待链入 ftl_ut_common、多 run/USB 矩阵待多 die/PC |  |
 | 284 | 2C L2P cache | RISK-L2P-01 | 待上板 | region 加载失败曾立即降级为全未映射，映射静默不可用 | M | 已上板（2026-11-14 debug UT=FTL `test /ftl/media/negative/` 36/36、0 fail、200.10 s）；瞬态+持续两半已写用例，未上板| 已写/未上板；seam: FI_FC_STATUS(normal read, DATA_ERROR)；触发: write+flush+drop+read；断言: 瞬态恢复/持续降级 IO_ERROR；用例 l2p_read_error_degrades |
 | 285 | 2C L2P cache | RISK-L2P-02 | 待上板 | flush_kick 先取槽后建链，命令池空重试浪费日志槽 | M | 已上板（2026-11-14 release UT=FTL `/ftl/media/negative/` 54/54、0 SKIP、219.32 s）；N：已写/未上板；占满命令池后 flush 有界、恢复后 CMT 排空、无槽泄漏| 用例 l2p_pool_starve_flush |
 | 286 | 2C L2P cache | RISK-L2P-03 | 待上板 | flush_kick 背压/资源预检/CLOCK 引用位的行为未板验 | M | 已上板（2026-11-14 debug UT=FTL `test /ftl/media/negative/` 36/36、0 fail、200.10 s）；用分配/门控注入压 flush| 已写/未上板；seam: FI_ALLOC_FAIL / FI_SEQ_GATE_STARVE；触发: 写+flush；断言: flush 有界完成、无 L2P 槽泄漏；用例 l2p_flush_backpressure |

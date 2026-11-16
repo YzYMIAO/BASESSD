@@ -82,7 +82,7 @@
 |---|---|---|---|
 | ISS-UT-01 | 部分实现 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过 |
 | ISS-UT-06 | 部分实现 | 负例框架 + 48 条负例已写完；debug FTL 档 13/14 通过后暴露 teardown 夹具缺口（已修，待重跑） | 2026-11-14 上板部分通过 |
-| ISS-HIL-01 | 部分实现 | HIL UT 15 例已上板；剩余 buffer NULL/TRIM 越界/跨重启/多 run | 2026-11-13 上板通过 |
+| ISS-HIL-01 | 部分实现 | HIL UT 17 例已上板；剩余 buffer NULL/跨重启/多 run/USB 矩阵 | 2026-11-15 上板 17/17 |
 | ISS-HIL-02 | 部分实现 | HIL L2 验收 24 例无逐条上板记录 | 未上板 |
 | ISS-HIL-03 | 待硬件 | CH/CE/LUN>1 的 HIL 扩维用例 | 未上板 |
 
@@ -90,10 +90,10 @@
 
 #### ISS-UT-01 FTL UT 覆盖与剩余缺口
 
-- **当前事实**：FTL UT 按 `docs/design/ftl_ut_design.md` 重建；当前注册 **81 个用例函数 / 参数化 95 次运行**（pure 57/65 + media 24/30）。2026-11-11 21:44:15 板端 `test /ftl/` **95/95，0 skip，235.63 s**。设计文档 §4 已按当前测试源同步，不再维护静态计数。
+- **当前事实**：FTL UT 按 `docs/design/ftl_ut_design.md` 的模块表组织；当前注册 **176 条 FTL 用例条目**（pure 60 / media 24 / negative pure 42 / negative media 49 / `/bench/speed/ftl_rw` 1；`test_speed.c` 另有 FC 基准 1 条，不计入 FTL）。参数化后的运行次数以 `test --list` 与当次串口报告为准；设计文档不维护静态计数，最新板端结果见 `known_risks.md` 的历史/验证行。
 - **影响**：未落地项集中在故障注入、空白片、白盒构造；这些路径没有 UT 判据，不能声称覆盖。
-- **下一步 / 判据**：只剩 M-11 真介质注入、CP 版本不符、真空白片、NAND 写擦失败注入；见 `docs/design/ftl_ut_design.md` §4.5/§7。每项必须有可失败的负例（C7）。
-- **来源**：`docs/design/ftl_ut_design.md`；`tests/unit/ftl_ut_common.*`、`tests/unit/test_ftl_pure.c`、`tests/unit/test_ftl_media.c`
+- **下一步 / 判据**：只剩 M-11 真介质注入、CP 版本不符、真空白片、NAND 写擦失败注入；见 `docs/design/ftl_ut_design.md` §2 / §6。每项必须有可失败的负例（C7）。
+- **来源**：`docs/design/ftl_ut_design.md`；`tests/unit/ftl_ut_common.*`、`tests/unit/test_ftl_pure.c`、`tests/unit/test_ftl_media.c`、`tests/unit/test_negative_pure.c`、`tests/unit/test_negative_media.c`
 - **关联**：`ISS-UT-04`、`ISS-UT-05`、`RISK-UT-*`
 - **历史/验证**：
   - 2026-11-11 21:44:15 `test /ftl/ --log-visible debug` → 95/95，0 skip，235.63 s
@@ -272,12 +272,14 @@
 
 #### ISS-HIL-01 HIL 板端 UT
 
-- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` 导出 `g_hil_contract_tests[]` + `g_hil_io_tests[]`（`make tests UT=HIL`），拆前套件 `/hil/` 共 **16 个注册用例**（contract 9 / io 7）；拆分后套件 `/hil/contract/` + `/hil/io/`，**未上板**。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
-- **影响**：未覆盖 buffer NULL、TRIM 越界、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）。这些是 HIL 契约的剩余缺口；测试设计见 `docs/design/hil_ut_design.md`。
-- **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL（见 `RISK-CTRL-04`）、TRIM 越界、跨重启、多 run / USB 槽矩阵。跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。
+- **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` 导出 `g_hil_contract_tests[]` + `g_hil_io_tests[]`（`make tests UT=HIL`）。拆分后套件为 `/hil/contract/` + `/hil/io/`，共 **17 个注册用例**：contract 10（9 条 HIL 契约 + 1 条跨层平台守卫 `uart_dma_init_returns`）+ io 7。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压 / TRIM 越界。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
+- **影响**：未覆盖 buffer NULL、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）、`cancel_flush`。这些是 HIL 契约的剩余缺口；测试设计见 `docs/design/hil_ut_design.md`。
+- **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL（见 `RISK-CTRL-04`）、跨重启、多 run / USB 槽矩阵、`cancel_flush`（host 复位 / 拔出路径）。跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。
 - **来源**：`docs/design/hil_ut_design.md`；`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`src/hil/makefile.mk` / `src/fc/makefile.mk` / `makefile`（`UT=HIL`）
 - **关联**：`RISK-UT-34`、`ISS-HIL-02`、`ISS-HIL-03`
 - **历史/验证**：
+  - 2026-11-15 板端 `test /hil/` → 17/17（contract 10 / io 7）
+  - 2026-11-14 拆 `/hil/contract/` + `/hil/io/`，新增 `trim_edges` 与平台守卫；拆分后未上板
   - 2026-11-13 13:21:29 镜像 `test /hil/` → 15/15，0 skip，10.56 ms（seed `0x5a4f21e4`）
   - 2026-11-11 22:32:57 `test /hil/ --log-visible debug` → 15/15，0 skip，8.99 ms
   - 2026-11-11 22:14:53 `test /hil/` → 12/12，0 skip
@@ -585,10 +587,10 @@
 
 #### ISS-FTL-16 注入类验证的工程化
 
-- **当前事实**：① FTL 层注入 `include/common/fault_inject.h`（**测试镜像专属**：开关 `FC_NAND_TEST_ENABLE`，产品固件零代码；2026-11-01 起不再是 `NDEBUG` 门控）：`fi_cache_fail_arm`（cache program 完成上伪造 FAIL_CACHE，一次性、按页 LBA）、`fi_journal_fail_arm`（Journal 页写按失败结算）；UT 侧已落地 `cache_failc_abort` / `journal_write_fail_wal_stall`。② **未做**：`ftl_sync_*`（`RISK-BBT-02` / `RISK-MD-16`；⚠ 注入同步页读失败前要先裁决 `bbt_medium_has_ftl_data` 的判据——它用普通同步读探「介质是否写过」，读不通会被当成空片 ⇒ 出厂扫描可能把写过的块全判坏）、命令池精确饥饿（`RISK-L2P-05` / `RISK-CP-04`）、CLI 注入钩子、deferred error 的控制器/USB 端到端（`RISK-USBC-01`；2026-11-01 已接线：`usb_msc_take_deferred_error()` 先问 FTL，UT 用例规格见 `docs/design/ftl_ut_design.md` §4.5，**上板未做**）；③ 掉电回放 JSEG（`RISK-CACHE-17`）需物理断电/复位。
+- **当前事实**：① FTL 层注入 `include/common/fault_inject.h`（**测试镜像专属**：开关 `FC_NAND_TEST_ENABLE`，产品固件零代码；2026-11-01 起不再是 `NDEBUG` 门控）：`fi_cache_fail_arm`（cache program 完成上伪造 FAIL_CACHE，一次性、按页 LBA）、`fi_journal_fail_arm`（Journal 页写按失败结算）；UT 侧已落地 `cache_failc_abort` / `journal_write_fail_wal_stall`。② **未做**：`ftl_sync_*`（`RISK-BBT-02` / `RISK-MD-16`；⚠ 注入同步页读失败前要先裁决 `bbt_medium_has_ftl_data` 的判据——它用普通同步读探「介质是否写过」，读不通会被当成空片 ⇒ 出厂扫描可能把写过的块全判坏）、命令池精确饥饿（`RISK-L2P-05` / `RISK-CP-04`）、CLI 注入钩子、deferred error 的控制器/USB 端到端（`RISK-USBC-01`；2026-11-01 已接线：`usb_msc_take_deferred_error()` 先问 FTL，UT 用例规格见 `docs/design/ftl_ut_design.md` §2.15，**上板未做**）；③ 掉电回放 JSEG（`RISK-CACHE-17`）需物理断电/复位。
 - **影响**：失败路径没有完整注入判据；CLI/USB 端到端未验。
 - **下一步 / 判据**：注入只在 debug 档编入；判据 = page0 失败时其后页均不确认、Journal 失败时区域写回被 WAL 闸门挡住、清注入后能恢复；测试 setup 必须 `fi_reset()`（状态是进程级）。
-- **来源**：`RISK-CACHE-19` / `RISK-JN-03` / `RISK-L2P-09` / `RISK-USBC-01`；`docs/design/ftl_ut_design.md` §4.5/§5
+- **来源**：`RISK-CACHE-19` / `RISK-JN-03` / `RISK-L2P-09` / `RISK-USBC-01`；`docs/design/ftl_ut_design.md` §2 / §5
 - **关联**：`RISK-CACHE-19`、`RISK-JN-03`、`RISK-L2P-09`、`RISK-USBC-01`、`RISK-BBT-02`、`RISK-MD-16`
 - **历史/验证**：
   - 2026-10-31 `cache_failc_abort` arm=1/2/last、`journal_write_fail_wal_stall` → 上板全过

@@ -526,6 +526,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | 项 | 要求 |
 |---|---|
 | 测试镜像 | `make tests UT=FTL`（或 `UT=FC` / `UT=HIL`）——只有 `make tests` 定义 `FC_NAND_TEST_ENABLE` |
+| 负例档 | `/fc-nand/negative/` 的 13 条 release-only 用例在 debug 下 `MUNIT_SKIP`；验证拒绝语义用 `make tests BUILD_TYPE=release UT=FC`（同为测试镜像，`ASSERT_REJECT` 才返回错误码） |
 | 注入钩子 | `fault_inject.c/h` 与 `bbt fault` **只在测试镜像存在**；产品 debug/release 均不编入 |
 | 串口 | USART1 115200，`log level debug`（按需） |
 | 主机 | H2testw（全盘写读）、`/bench/speed`（FTL/FC 压测） |

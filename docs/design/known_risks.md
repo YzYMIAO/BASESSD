@@ -599,7 +599,7 @@
 - **后果**：`kick` / `scan_factory` / `format_erase` 三条路径没有单测 ⇒ 这些路径的回归没有自动判据。
 - **缓解**：`mark_bad` 幂等 / Spare 一次、元数据块丢失标记、clean-pool save→load 已由 `pure/mem/bbt_*` 与 `media/e2e/bbt_persist` 覆盖；`FORMAT_IN_PROGRESS` 恢复由 `format_in_progress_resume` 覆盖；多圈 ring 定位问题见 RISK-BBT-18。
 - **下一步**：补 factory-scan / format-in-progress 注入用例（测试源由用户维护，R4）。
-- **证据**：`tests/unit/test_ftl_pure.c` / `tests/unit/test_ftl_media.c`；`docs/design/ftl_ut_design.md` §4.1。
+- **证据**：`tests/unit/test_ftl_pure.c` / `tests/unit/test_ftl_media.c`；`docs/design/ftl_ut_design.md` §2.2。
 - **历史/验证**：
   - 2026-11-13 测试源已同步；kick/factory-scan/format_erase 仍缺单测 → 待后续
   - 2026-10-25 `format_in_progress_resume` 覆盖 `FORMAT_IN_PROGRESS` 恢复 → 上板通过
@@ -1978,7 +1978,7 @@
 - **后果**：旧 `TARGET` 只按 debug/release 分，不按 UT 分：`make tests UT=FTL` 后再 `make tests UT=FC`，后者镜像只含 FC 套件并覆盖前者；板端现象是 `test /ftl/` 打印 `NO test run`。
 - **缓解**：`config.mk` 的 `TARGET` 按 `FC_NAND_TEST_ENABLE` 加 `_ut` ⇒ 产品与 UT 镜像分名；`.build_cfg` 按产物分置。残留：`UT=FC` 与 `UT=FTL` 仍共用 `debug_ut.elf`。
 - **下一步**：分别构建产品 debug / UT debug / UT release / 产品 release，确认四个 ELF 同时存在、F5 按路径烧到预期镜像。
-- **证据**：`config.mk` §目标文件命名；`makefile:check-build-cfg`；`.vscode/launch.json`；`docs/design/ftl_ut_design.md §6`。
+- **证据**：`config.mk` §目标文件命名；`makefile:check-build-cfg`；`.vscode/launch.json`；`docs/design/ftl_ut_design.md §5.1`。
 - **历史/验证**：
   - 2026-11-11 按 UT 分名 → 编译通过，未上板
   - 2026-10-24 真实踩到 `NO test run`
@@ -2343,6 +2343,7 @@
 | RISK-UT-40 | 已闭合 | `/bench/speed/*` 测量依赖前序套件状态 | 2026-11-15 release 全量末尾 speed 与复位单跑一致 |
 | RISK-UT-41 | 已闭合 | pure 套件不复位 L2P 常驻行 / 后台不冻结，跨命令状态泄漏 | 2026-11-15 release 全量 pure 套件通过 |
 | RISK-UT-42 | 已闭合 | `timing_rollback_on_set_timing_fail` 把器件留在 Mode 0，污染后续所有套件的 NAND 时序 | 2026-11-15 二分 + release 全量 636 s，speed 与单测一致 |
+| RISK-UT-43 | 待测试源 | Mode 0 构建下 `timing_rollback_on_set_timing_fail` 断言与实现契约相反，用例静态必红 | 默认 Mode 5 不受影响；Mode 0 专项当前未验证 |
 
 ### 详情
 
@@ -2351,7 +2352,7 @@
 - **后果**：`/bench/speed/fc_nand_rw` 用 FC 公共接口对原始块做 multi-plane 擦写，FTL 的 RAM 映射/日志区可能指向这些块。测试期间 FTL 主循环被 CLI 阻塞、`bg_suspend=1`，不会并发分配；但测试返回后 FTL 状态可能已失效。跑完 FC-only 直接交给 host/USB 可能读到旧映射或写失败。
 - **缓解**：测试 summary 打印 "raw blocks destroyed — run format + POR"；文档要求 FC-only 后 `format` + POR；完整 `/` 运行由 `/bench/speed/ftl_rw` 的 format 修复。同一上电周期内连跑多条 `test` 时，media 套件在每条 `test` 内首次必格式化一次（`RISK-UT-08`）。
 - **下一步**：任何改变 FC 速度测试块范围/是否擦写的改动都要重新评估；不要把它并入默认的 `test /ftl/` 流程。
-- **证据**：`tests/unit/test_speed.c:test_fc_speed_mp`；`docs/design/fc_nand_ut.md` §4.4。
+- **证据**：`tests/unit/test_speed.c:test_fc_speed_mp`；`docs/design/fc_nand_ut.md` §4.5。
 - **历史/验证**：
   - 2026-11-01 media 套件改为每条 `test` 复位 → 已上板（release -O2 全量 156/156）
   - 2026-10-24 23:13 上板确认风险可见（信息）
@@ -2579,6 +2580,27 @@
   FC normal/cache 读 **3586 / 3634** KB/s（写 3719 / 4374），FTL 读
   **3391 / 2807 / 2799** KB/s（写 3750 / 3581 / 2019，chunk=32 为 depth=1 的固有
   低点）。Mode 0 已不再泄漏到后续套件。
+- **关联**：本用例在 Mode 0 构建下的断言冲突见 RISK-UT-43（不是同一缺陷；本条已闭合，
+  只说明同一用例的另一档行为）。
+
+#### RISK-UT-43 Mode 0 构建下 `timing_rollback_on_set_timing_fail` 断言与实现契约相反
+
+- **状态**：待测试源（测试源由用户维护，R4）。
+- **失败场景 / 后果**：`CONFIG_NAND_TIMING_MODE=0` 构建时，
+  `fc_nand_enable_high_speed(0)` 的 Mode 0 分支直接 `return NAND_RESULT_OK`；而
+  `timing_rollback_on_set_timing_fail` 首条断言要求该调用 `!= NAND_RESULT_OK`，随后还
+  断言 `nand_get_timing_mode(...) == 5`。两条都与 Mode 0 实现的契约相反，用例**静态必红**
+  ⇒ Mode 0 专项回归无法执行，`docs/design/fc_nand_ut.md` §5.4 不能声称 Mode 0 已通过。
+- **当前缓解**：默认构建 `CONFIG_NAND_TIMING_MODE=5` 不进入该分支，release 全量
+  `306/306`（2026-11-15）不受影响；文档已把 Mode 0 标为「当前套件未验证」，并删去旧
+  快照作为判据。
+- **重访触发 / 下一步**：由测试源所有者在该用例入口加
+  `#if CONFIG_NAND_TIMING_MODE == 0` 的 `MUNIT_SKIP`，或改写 Mode 0 下的期望
+  （`enable_high_speed(0) == OK`、模式保持 0）；改完跑一次 Mode 0 专项并给串口证据。
+  在此之前不得把 Mode 0 写成已验证。
+- **证据定位**：`src/fc/fc_nand_engine.c:886-900`（Mode 0 分支恒返 OK）、
+  `tests/unit/test_fc_lifecycle.c:2845`（用例断言）、
+  `include/nand/devices/mt29f___g08a.h:81-88`（默认 Mode 5）。
 
 ### 已闭合（详情见 archive）
 
@@ -3772,17 +3794,18 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：`is_complete`、NULL、队列账本、flush 持久化 | 2026-11-13 上板通过 |
+| RISK-UT-34 | 待后续 | HIL 契约覆盖缺口：buffer NULL、跨重启、多 run、USB 矩阵 | 2026-11-15 上板 17/17 |
 
 ### 详情
 
 #### RISK-UT-34 HIL 契约覆盖缺口
 
-- **后果**：① `ssd_controller_is_complete` 未测（NULL 视为完成、flag 0/1）；② 状态机未测 NULL 守卫与 `READY->INITIALIZING` 非法转换；③ `host_queue` 未断言 owner / `used` / 释放后 request 清零，只测 tag 与表满；④ `submit` 未测 NULL controller/request、buffer NULL、TRIM BUSY/越界；⑤ 真实 I/O 只有 4 条，`write_read_roundtrip` 不 flush，flush 后持久化/跨重启未覆盖。后果：HIL 入口守卫、队列账本、flush 语义回归无判据；15/15 全绿不代表这些路径正确。
-- **缓解**：已补 `is_complete`、状态机 NULL、host_queue owner/used/释放、submit NULL、TRIM BUSY、`write_flush_readback`，总数 15 例。
-- **下一步**：上板跑 15 例；后续再补 buffer NULL / TRIM 越界 / 可做的跨重启。buffer NULL 见 `RISK-CTRL-04`；TRIM 越界可直接加用例；跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。多 run/USB 槽留待多 die / PC 主机矩阵。**2026-11-13 用户决定：以上剩余缺口留以后检验，本轮不补用例**；测试设计见 `docs/design/hil_ut_design.md`。
+- **后果**：剩余缺口：① `buffer == NULL` 未校验（`RISK-CTRL-04`）；② 跨重启 / 真 POR 未覆盖；③ 多 run / 跨实例部分失败不可构造（单 die，`RISK-CTRL-01`）；④ `cancel_flush` 无 UT；⑤ USB 槽状态机与 host 前端时序需 PC 主机矩阵。已覆盖状态机 / init / LBA / submit / 单飞行 / `is_complete` / host_queue / TRIM；17/17 全绿不代表剩余路径正确。
+- **缓解**：已补 `is_complete`、状态机 NULL、host_queue owner/used/释放、submit NULL、TRIM BUSY/越界（`trim_edges`）、`write_flush_readback`，总数 17 例（contract 10 / io 7；contract 含 1 条平台守卫 `uart_dma_init_returns`）。
+- **下一步**：已上板 17 例；剩余补 buffer NULL / 跨重启 / 多 run / USB 槽矩阵 / `cancel_flush`。buffer NULL 见 `RISK-CTRL-04`；跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。多 run/USB 槽留待多 die / PC 主机矩阵。**2026-11-13 用户决定：以上剩余缺口留以后检验，本轮不补用例**；测试设计见 `docs/design/hil_ut_design.md`。
 - **证据**：`tests/unit/test_hil.c` `test_hil_is_complete` / `test_hil_trim_busy` / `test_hil_write_flush_readback` 等；`include/hil/controller.h:84`；`src/hil/host_queue.c:35-72`；`docs/design/hil_ut_design.md` §6。
 - **历史/验证**：
+  - 2026-11-15 板端 `test /hil/` → 17/17（contract 10 / io 7）；TRIM 越界由 `trim_edges` 覆盖
   - 2026-11-13 设计文档补记：HIL UT 设计见 `docs/design/hil_ut_design.md`；本轮不补用例
   - 2026-11-13 用户裁决：以上剩余缺口留以后检验 → 本轮不补
   - 2026-11-13 13:21:29 镜像 `test /hil/` → 15/15，0 skip，10.56 ms（seed `0x5a4f21e4`）；残余缺口不变

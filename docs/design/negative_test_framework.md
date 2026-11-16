@@ -1,6 +1,7 @@
 # 负例测试框架设计（分层故障注入）
 
-> 状态：**设计稿，待评审；未实现**（2026-11-14）。
+> 状态：活跃设计文档。框架与首批负例已落地；2026-11-15 release 全量 UT `306/306`、3 SKIP。
+> 用例清单以测试源注册表与 `test --list` 为准；各 UT 设计文档只写模块设计点与代表用例（本文件只写框架与 seam 语义）。
 > 范围：`fc-nand` / `ftl` / `hil` 三层的负例（negative test）注入框架。
 > 关联：`docs/design/testing_guide.md §11`（负例执行清单）、`docs/design/ftl_ut_design.md`、
 > `docs/design/fc_nand_ut.md`、`docs/design/hil_ut_design.md`、`docs/design/known_risks.md`。
@@ -363,8 +364,8 @@ FC 自身的状态解码（desc → FAIL_CACHE 归属、`7Ah` 状态、R/B 超�
 
 ### 6.1 用例命名与放置
 
-- 用例**主键 = munit 用例名**（稳定 ID；测试函数名以 `test_` 开头，二者不要求逐字相同；与 `ftl_ut_design.md` / `fc_nand_ut.md` /
-  `hil_ut_design.md` 的清单一致），不引入 `NEG-*` 独立编号；
+- 用例**主键 = munit 用例名**（稳定 ID；测试函数名以 `test_` 开头，二者不要求逐字相同；与 `ftl_ut_design.md` §2 模块表 / `fc_nand_ut.md` §2 模块表 /
+  `hil_ut_design.md` 的设计点一致），不引入 `NEG-*` 独立编号；
 - 放置：FTL pure 放 `/ftl/pure/` 对应模块套件；media/e2e 放 `/ftl/media/e2e/`；
   **注入负例放 `/ftl/negative/`（`tests/unit/test_negative_pure.c` + `test_negative_media.c`）**；
   FC 放 `pure` / `lifecycle` 套件；HIL 放 `/hil/` 套件；
@@ -452,8 +453,8 @@ src include` 确认没有现成入口。
 
 框架落地定稿时，一次性回扫并更新：
 
-- `docs/design/ftl_ut_design.md` §3（seam 表）与 §4（用例清单）；
-- `docs/design/fc_nand_ut.md` §3 / §4；
+- `docs/design/ftl_ut_design.md` §2（模块设计）与 §4.8 / §4.9（seam 与负例框架）；
+- `docs/design/fc_nand_ut.md` §2（模块设计）与 §4（夹具 / seam）；
 - `docs/design/hil_ut_design.md` §3 / §6；
 - `docs/design/testing_guide.md §11`（负例执行清单）；
 - `docs/design/known_risks.md`（覆盖状态与残余）。
@@ -529,9 +530,10 @@ src include` 确认没有现成入口。
 `cache_failc_abort`，`FI_JOURNAL_WRITE_FAIL` → `journal_write_fail_wal_stall`。
 
 **用例**：`/ftl/negative/` **91** 条（pure 42 + media 49） + `/fc-nand/negative/` **24** 条 + HIL
-`trim_edges`（HIL 共 17 条）。**2026-11-14 板端两档全绿**：
-debug UT=FTL `36/36 + 3 SKIP`、**release UT=FTL `54/54 + 0 SKIP`（219.32 s）**、
-**release UT=FC `11/11 + 0 SKIP`（141 µs）**。
+`trim_edges`（HIL 共 17 条）。**2026-11-14 板端**：debug UT=FTL `36/36 + 3 SKIP`、
+release UT=FTL `54/54 + 0 SKIP`（219.32 s）；`/fc-nand/negative/` 的 release 逐条结果未单列，
+已在 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 的 **306/306、3 SKIP** 中执行
+（原始日志见 `build/test-results/`，结案记录见 `docs/design/known_risks.md` 的 `RISK-UT-40` / `RISK-UT-42`）。
 
 **风险（302 条）**：
 

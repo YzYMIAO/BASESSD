@@ -1383,7 +1383,7 @@ raid_recover 各写了一遍字面量 `{520, 8, 4}`）。
 写回 / `desc->status` 赋值 / 错误码透传——这些要验得建链，属「管线级」用例。
 ⚠ **提交出去的命令绝不能再手工调这些原语**——FC 自己会跑整条管线，重复编码 = 数据损坏。
 
-用例与判据见 `fc_nand_ut.md` §2.4.3 / §4.2「步骤级用例」与 `docs/archive/changelog/fc_data_path_step_primitives_v29.md`。
+用例与判据见 `fc_nand_ut.md` §2.7（步骤级 vs 管线级）与 `docs/archive/changelog/fc_data_path_step_primitives_v29.md`。
 
 **关键约束**：RAID XOR 在 scrambled domain 进行——ECC 失败时其余 CW 处于"已纠错但仍加扰"，重建结果与被恢复 CW 同 domain，重建后再统一解扰。加解扰对 FTL 完全透明。
 
@@ -1471,7 +1471,7 @@ P(bit = 1 | 前面所有位) = 1/2        ← 目标（独立）
 ```
 
 段长服从几何分布 `P(段长 = k) = 2^-k`——**一半的段只有 1 个 bit**。所以「段数 ≈ 位数的一半」不是巧合，
-正是那个 1/2 的直接结果。统计方法（状态机 / 分桶 / 判据盲区）见 `fc_nand_ut.md` §2.4.7。
+正是那个 1/2 的直接结果。统计方法（状态机 / 分桶 / 判据盲区）见 `fc_nand_ut.md` §6.3。
 
 **为什么 `0101…` 对 NAND 反而有害**（不是「不够随机」，是「有害」）：
 
@@ -1566,7 +1566,7 @@ FC→NAND UT 的套件、入口、编写规范与运行方式见 `docs/design/fc
 分层测试流程见 `docs/design/testing_guide.md`。
 
 > ⚠ `make all` 之后直接 `make tests` 是空操作（目标未按测试 flag 重编）⇒ 必须先
-> `make clean`。完整命令见 `docs/design/fc_nand_ut.md` §6.1。
+> `make clean`。完整命令见 `docs/design/fc_nand_ut.md` §5.1。
 
 ## 10. 设计决策记录
 
