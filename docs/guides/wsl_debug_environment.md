@@ -29,7 +29,7 @@
 | 项目 | 规格 |
 |------|------|
 | MCU | STM32H743II (2 MiB Flash, 480 KB + 128 KB AXI RAM) |
-| 调试器 | J-Link V9 (S/N: 602717758), SWD 接口, 3.27V–3.29V |
+| 调试器 | J-Link V9 (S/N: <本机序列号>), SWD 接口, 3.27V–3.29V |
 | 连接 | USB → J-Link → SWD → 目标板 |
 
 ### 1.2 软件
@@ -41,7 +41,7 @@
 | **GDB** | WSL Ubuntu | gdb-multiarch 12.1 |
 | **交叉编译器** | WSL Ubuntu | arm-none-eabi-gcc 10.3.1 |
 | **socat** | WSL Ubuntu | 由系统包管理器安装 |
-| **JLinkGDBServerCL** | Windows `D:\StudyTool\Develop\JLink_V972\` | V9.72 |
+| **JLinkGDBServerCL** | Windows `D:\Tools\JLink\` | V9.72 |
 
 ### 1.3 目录结构
 
@@ -53,7 +53,7 @@
 │   └── debug_env.sh               # 一键启动脚本
 ├── docs/guides/
 │   └── wsl_debug_environment.md   # ⬅ 本文档
-└── build/firmware/debug/bin/
+└── build/debug/bin/
     ├── debug.elf                  # 产品调试 ELF（make all）
     └── debug_ut.elf               # UT 调试 ELF（make tests）
 ```
@@ -139,7 +139,7 @@ JLinkGDBServer 默认只绑定 `127.0.0.1`（不接受外部连接）。portprox
 │                   ↓                                                │
 │  socat TCP-LISTEN:2331                                             │
 │    └─ 转发到 TCP:Windows_IP:2331                                   │
-│       (即 172.29.32.1:2331)                                        │
+│       (即 <Windows_IP>:2331)                                        │
 └───────────────────────────┬───────────────────────────────────────┘
                             │ TCP 直连 (WSL eth0 → Windows vEthernet)
                             ▼
@@ -215,7 +215,7 @@ cd ~/projects/soft_ssd
 ```bash
 # 1. Windows 手动启动 JLinkGDBServer（保持窗口可见）
 #    PowerShell:
-#    & "D:\StudyTool\Develop\JLink_V972\JLinkGDBServerCL.exe" -device STM32H743II -if SWD -speed 4000 -port 2331 -LocalHostOnly 0
+#    & "D:\Tools\JLink\JLinkGDBServerCL.exe" -device STM32H743II -if SWD -speed 4000 -port 2331 -LocalHostOnly 0
 
 # 2. WSL 启动 socat
 WINDOWS_IP=$(ip route show default | awk '{print $3}')
@@ -321,7 +321,10 @@ make tests    # 重新编译
 #   - 2026-09-25: netstat 看到 0.0.0.0:2331 是 svchost(portproxy) 不是 JLink
 #     → Step 1 不再暴力杀 0.0.0.0:PORT 的进程
 
-JLINK_EXE="D:\\StudyTool\\Develop\\JLink_V972\\JLinkGDBServerCL.exe"
+# JLink 路径由环境变量提供（示例：%JLINK_HOME%\\JLinkGDBServerCL.exe）；
+# 也可在仓库根放 .debug_env.local（已 ignore）设置 JLINK_EXE。
+# 未设置时按 Windows PATH 查找。不要把本机安装路径写回仓库。
+JLINK_EXE="${JLINK_EXE:-JLinkGDBServerCL.exe}"
 DEVICE="STM32H743II"
 PORT=2331
 WINDOWS_IP=$(ip route show default | awk '{print $3}')
@@ -437,17 +440,17 @@ wait $SOCAT_PID
 
 ### 6.1 launch.json
 
-实际配置见 `.vscode/launch.json`（8 条 = 4 种产物 × 外部 / WSL 自启两种起法）：
+实际配置见 `.vscode/launch.json`（4 条 = 4 种产物，统一连外部 JLink）：
 
 | 编号 | 用途 | 产物 | 构建命令 |
 |---|---|---|---|
-| ①② | UT / 逻辑调试 | `build/firmware/debug/bin/debug_ut.elf` | `make tests UT=...` |
-| ③④ | 产品调试 | `build/firmware/debug/bin/debug.elf` | `make all` |
-| ⑤⑥ | 发布 / 速度（UT） | `build/firmware/release/bin/release_ut.elf` | `make tests BUILD_TYPE=release UT=...` |
-| ⑦⑧ | 发布（产品） | `build/firmware/release/bin/release.elf` | `make release` |
+| ① | UT / 逻辑调试 | `build/debug/bin/debug_ut.elf` | `make tests UT=...` |
+| ② | 产品调试 | `build/debug/bin/debug.elf` | `make all` |
+| ③ | 发布 / 速度（UT） | `build/release/bin/release_ut.elf` | `make tests BUILD_TYPE=release UT=...` |
+| ④ | 发布（产品） | `build/release/bin/release.elf` | `make release` |
 
-奇数号 = 外部 JLink（先跑 `sh/debug_env.sh`，连 `localhost:2331`）；偶数号 = VS Code
-通过 `serverpath` 自启 Windows JLink。代表配置（① UT 调试）：
+所有配置都先跑 `sh/debug_env.sh` 启动外部 JLink（`localhost:2331`），再按 F5。
+代表配置（① UT 调试）：
 
 ```json
 {
@@ -458,11 +461,10 @@ wait $SOCAT_PID
   "servertype": "external",
   "device": "STM32H743II",
   "gdbTarget": "localhost:2331",
-  "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut.elf",
+  "executable": "${workspaceFolder}/build/debug/bin/debug_ut.elf",
   "gdbPath": "/usr/bin/gdb-multiarch",
   "runToEntryPoint": "main",
   "preLaunchCommands": ["monitor reset halt", "load", "monitor reset"],
-  "svdFile": "${workspaceFolder}/STM32H743xI.svd",
   "armToolchainPath": "/usr/bin"
 }
 ```
@@ -480,7 +482,7 @@ wait $SOCAT_PID
 | `armToolchainPath` | `"/usr/bin"` | 让 cortex-debug 找到 arm 工具链 |
 | `runToEntryPoint` | `"main"` | 停在 main() 入口 |
 | `preLaunchCommands` | `reset halt → load → reset` | 自动烧录并复位运行 |
-| `executable` | `${workspaceFolder}/build/firmware/<type>/bin/<artifact>.elf` | 按用途选 `debug_ut.elf` / `debug.elf` / `release_ut.elf` / `release.elf` |
+| `executable` | `${workspaceFolder}/build/<type>/bin/<artifact>.elf` | 按用途选 `debug_ut.elf` / `debug.elf` / `release_ut.elf` / `release.elf` |
 
 ---
 
@@ -499,7 +501,7 @@ wait $SOCAT_PID
     - "Waiting for GDB connection..." → ✅
 
 [2] WSL→Windows 网络
-  → nc -zv -w4 172.29.32.1 2331
+  → nc -zv -w4 <Windows_IP> 2331
     确认 Windows 的 JLink 端口从 WSL 可达
 
 [3] socat 隧道
@@ -511,7 +513,7 @@ wait $SOCAT_PID
       -ex "target extended-remote localhost:2331" \
       -ex "monitor halt" \
       -ex "info registers r0" \
-      build/firmware/debug/bin/debug.elf
+      build/debug/bin/debug.elf
 ```
 
 ### 7.2 已知问题与对策
@@ -535,7 +537,7 @@ ip route show default          # Windows IP
 hostname -I                    # WSL IP
 pgrep -f "socat.*2331"         # 检查 socat
 nc -zv localhost 2331          # 测试 socat 监听
-nc -zv -w4 172.29.32.1 2331    # 测试 JLink 直连可达性
+nc -zv -w4 <Windows_IP> 2331    # 测试 JLink 直连可达性
 pkill -9 -f "socat.*2331"      # 杀 socat
 
 # Windows 端（WSL 中执行）
@@ -559,8 +561,8 @@ powershell.exe "netsh interface portproxy show v4tov4"        # 查 portproxy �
 ### 9.1 网络拓扑参考
 
 ```
-WSL 虚拟网卡: 172.29.47.241/20
-Windows 虚拟网卡: 172.29.32.1（默认网关）
+WSL 虚拟网卡: <WSL_IP>/20
+Windows 虚拟网卡: <Windows_IP>（默认网关）
 Windows 物理网卡: DHCP 获取（对局域网 IP）
 ```
 
@@ -584,8 +586,8 @@ ipconfig                # → vEthernet (WSL) 适配器 IP
 | arm-none-eabi-gcc | 10.3.1 (15:10.3-2021.07-4) | WSL `/usr/bin` |
 | gdb-multiarch | 12.1 | WSL `/usr/bin` |
 | socat | 由包管理器安装 | WSL `/usr/bin` |
-| JLinkGDBServerCL | V9.72 | Windows `D:\StudyTool\Develop\JLink_V972\` |
-| J-Link 硬件 | V9, Firmware May 7 2021, HW V9.70 | USB S/N 602717758 |
+| JLinkGDBServerCL | V9.72 | Windows `D:\Tools\JLink\` |
+| J-Link 硬件 | V9, Firmware May 7 2021, HW V9.70 | USB S/N <本机序列号> |
 | cortex-debug | v1.12.1 | VS Code 扩展 |
 
 ### 9.3 调试链路备忘
@@ -597,11 +599,11 @@ ipconfig                # → vEthernet (WSL) 适配器 IP
     ↓ target extended-remote localhost:2331
   socat (WSL)
     ↓ TCP
-  Windows_IP:2331 (172.29.32.1:2331)
+  Windows_IP:2331 (<Windows_IP>:2331)
     ↓ 直连（JLink 绑 0.0.0.0:2331, -LocalHostOnly 0）
   JLinkGDBServer 0.0.0.0:2331
     ↓ USB
-  J-Link V9 (S/N 602717758)
+  J-Link V9 (S/N <本机序列号>)
     ↓ SWD (4000kHz)
   STM32H743II (3.27V-3.29V)
 ```

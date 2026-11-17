@@ -151,8 +151,8 @@ bool munit_log_visible(MunitLogLevel level);   /* v1.4：只读查询可见级 *
 供**框架外**的代码（如 `tests/unit/fc_test_common.c` 的证据打印）复用同一套开关。
 三条语义：
 
-- 默认可见级是 **`ERROR`**（`munit.c:136`）⇒ 不加 `--log-visible` 时 INFO/DEBUG 一律不可见。
-- **过滤发生在任何输出之前**（`munit.c:140-145` 的 `if (level < visible) return;`）⇒
+- 默认可见级是 **`ERROR`**（`munit.c`）⇒ 不加 `--log-visible` 时 INFO/DEBUG 一律不可见。
+- **过滤发生在任何输出之前**（`munit.c` 的 `if (level < visible) return;`）⇒
   判不可见时连一个字节都不产出。这是「默认档报告格式逐字不变」的根据。
 - 可见级是文件级 static，但 **`munit_suite_main_custom` 在每次调用开头重置为 `ERROR`**
   ⇒ 同一次上电内先跑 `test --log-visible info`、再裸跑 `test`，**证据重新隐藏**，

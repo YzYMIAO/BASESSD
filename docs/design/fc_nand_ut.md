@@ -3,9 +3,9 @@
 > 状态：活跃设计文档。本文是 **test design**，按被测模块（test item）组织：
 > 每个模块有哪些设计要点、用什么判据覆盖、缺什么。
 > 用例名只作代表，完整清单以 `tests/unit/test_fc_*.c` 的注册表为准；
-> 运行结果见 `build/test-results/`，风险状态见 `docs/design/known_risks.md`。
+> 运行结果见 `build/test-results/`，风险状态见 `docs/design/known_open_items.md`。
 > 范围：`src/fc/` + `src/nand/` 的 FC-NAND 层；FTL UT 见 `docs/design/ftl_ut_design.md`。
-> 关联：`docs/design/testing_guide.md` §12（负例与故障注入框架，跨层）、
+> 关联：`docs/guides/testing_guide.md` §12（负例与故障注入框架，跨层）、
 > §3（L1 FC）。
 
 ---
@@ -24,14 +24,14 @@
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_fc_pure.c` / `test_fc_data_path.c` / `test_fc_lifecycle.c` / `test_fc_negative.c` | §2 只写代表用例与判据，不列全量清单 |
 | OP 操作码与编号 | `include/nand/onfi_1_0.h` | §2.9 只写覆盖策略，不抄 50 行表 |
-| 风险状态、历史、是否闭合 | `docs/design/known_risks.md` | §7 只写风险 → 模块追溯，不写状态词 |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md` | §7 只写风险 → 模块追溯，不写状态词 |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §7 只给 FC 层判定，其余层见各层文档 |
-| 故障注入框架与 seam 语义 | `docs/design/testing_guide.md` §12 | §4.3 只写本套件怎么用 |
-| 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
-| 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.5 只给目录与四件套 |
+| 故障注入框架与 seam 语义 | `docs/guides/testing_guide.md` §12 | §4.3 只写本套件怎么用 |
+| 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
+| 每次运行结果与证据 | `build/test-results/` + `docs/guides/testing_guide.md` §8.7 | §5.5 只给目录与四件套 |
 | 重构前版本 / 版本叙事 | `docs/archive/fc_nand_ut_pre_refactor_20261113.md` | 历史只查该快照 |
 
-> 判据：读者要知道「某风险现在什么状态」，去 `known_risks.md`；要知道「某条用例断言什么」，
+> 判据：读者要知道「某风险现在什么状态」，去 `known_open_items.md`；要知道「某条用例断言什么」，
 > 看测试源。本文两处都不重复。
 
 ---
@@ -276,7 +276,7 @@
 
 ### 2.11 `fc_raid_engine` — 当前不覆盖
 
-- `CONFIG_FC_RAID=0`（`include/fc/fc.h:52`），功能代码存在但未验证。
+- `CONFIG_FC_RAID=0`（`include/fc/fc.h`），功能代码存在但未验证。
 - `dp_raid_recover_no_random` / `dp_generate_stripe_parity` 只在 RAID=1 编译；当前构建的 UT
   不覆盖 RAID 恢复与 stripe parity。
 - 风险登记：`RISK-DP-05`。
@@ -312,7 +312,7 @@
 | **Seeded random** | 地址由 `(seed, 用例名, 抽样序号)` 决定，可复现 | data_path `l2_*`、lifecycle `l3_*` |
 | **Fault injection** | 注入点 → 预期错误位/返回值，且 `fi_hits` 可证 | data_path bit 注入；negative `fi_arm` / `fi_wrap` |
 | **Release-only guard** | debug 停机、release 返回错误码 | 13 条 negative 用例 |
-| **Reboot / crash point** | 真 POR 后映射/账本一致 | 不在 FC UT；见 `ftl_ut_design.md` / `known_risks.md` |
+| **Reboot / crash point** | 真 POR 后映射/账本一致 | 不在 FC UT；见 `ftl_ut_design.md` / `known_open_items.md` |
 | **Stress / perf** | 只作基准，不作功能通过率 | `mixed_pipeline`、`/bench/speed/fc_nand_rw` |
 
 ### 4.2 夹具与结束不变量
@@ -394,8 +394,8 @@
 
 | 档 | 命令 | 产物 | 断言/负例语义 |
 |---|---|---|---|
-| debug | `make tests UT=FC` | `build/firmware/debug/bin/debug_ut.elf` | `ASSERT` 停机；13 条 release-only 负例 `MUNIT_SKIP` |
-| release | `make tests BUILD_TYPE=release UT=FC` | `build/firmware/release/bin/release_ut.elf` | `-O2 -DNDEBUG`；`ASSERT` 裁空；`ASSERT_REJECT` 返回错误码；24 条负例执行 |
+| debug | `make tests UT=FC` | `build/debug/bin/debug_ut.elf` | `ASSERT` 停机；13 条 release-only 负例 `MUNIT_SKIP` |
+| release | `make tests BUILD_TYPE=release UT=FC` | `build/release/bin/release_ut.elf` | `-O2 -DNDEBUG`；`ASSERT` 裁空；`ASSERT_REJECT` 返回错误码；24 条负例执行 |
 
 - `FC_NAND_TEST_ENABLE=1` 时链接 `linker/stm32h743xx_flash_ut.ld`；生产镜像仍用生产链接脚本。
 - `UT=FC` / `UT=FTL` / `UT=HIL` 共用产物名；烧写前确认最后一次构建是 `UT=FC`。
@@ -498,7 +498,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
 > §7.1 只保留「判据非显然」的 FC-NAND 风险。
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
@@ -517,10 +517,10 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 ### 7.2 负例判定台账（FC-NAND 层）
 
 > 本表只列**当前未闭合**的 FC-NAND / NAND 器件风险（索引状态取自
-> `docs/design/known_risks.md`）。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
+> `docs/design/known_open_items.md`）。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
 > 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）；非负例项保留
-> 其状态词。**信息**与**已闭合**条目只在 `known_risks.md` 维护。
-> 跨层框架（注入 API、宏隔离、验收）见 `docs/design/testing_guide.md` §12。
+> 其状态词。**信息**与**已闭合**条目只在 `known_open_items.md` 维护。
+> 跨层框架（注入 API、宏隔离、验收）见 `docs/guides/testing_guide.md` §12。
 
 **FC 资源池（1）**
 
@@ -574,7 +574,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 
 - **新增/删除测试项**：同批更新 §1.1 与对应模块小节；不要新增全局用例表。
 - **新增/删除用例**：改测试源；只有当「设计要点或判据」变化时才改本文。
-- **风险状态变化**：只改 `docs/design/known_risks.md`；§7 只在映射变化时改。
+- **风险状态变化**：只改 `docs/design/known_open_items.md`；§7 只在映射变化时改。
 - **覆盖判定变化**：只改 §7.2 台账。
 - **地址抽样契约**：改抽样顺序 / 盐 / `fmix32` / `munit_platform_seed()` 会改变
   seed→地址映射；必须同批更新 §4.4 与测试源注释。

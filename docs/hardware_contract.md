@@ -7,10 +7,10 @@ access MMIO registers directly; register access lives in
 
 **NAND 层当前例外**：FTL / Controller / Common 只经 `ssd_platform_ops_s` 访问平台；
 NAND 层仍在 `src/nand/nand_fmc.c` 直接写 FMC 窗口，并在
-`src/nand/nand_mt29f4g08abadawp.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init`。
+`src/nand/devices/mt29f___g08a.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init`。
 平台服务分三层落地：抽象接口 `include/platform/<svc>.h`、共享逻辑
 `src/platform/<svc>.c`、SoC 适配 `src/platform/stm32h743/*_port.c`；核心模块不再引用
-`platform/<soc>/` 路径。分层审计与剩余收敛项见 `docs/design/platform_abstraction.md`。
+`platform/<soc>/` 路径。分层审计与剩余收敛项见 `docs/design/platform_design.md`。
 
 ## NAND device model
 
@@ -28,7 +28,7 @@ MT29F4G08 真硬件约束：先擦后写、页编程次数受限、坏块与操�
 | SRAM2 | `0x30020000` | 128 KiB | free / op / spare pool 与 closed SB list（`.sram2_data`） |
 | DTCM | `0x20000000` | 128 KiB | stacks, hot data |
 
-> 实测值取自 `build/firmware/debug/bin/debug.map`（2026-10-13）。`src/main.c:138` 有
+> 实测值取自 `build/debug/bin/debug.map`（2026-10-13）。`src/main.c` 有
 > `_Static_assert` 挡住 AXI_RAM 超预算——**提高 CH/CE/LUN 维度前必须先重新规划内存**。
 
 ## USB device (USB MSC U-disk)
@@ -49,6 +49,6 @@ MT29F4G08 真硬件约束：先擦后写、页编程次数受限、坏块与操�
 ## Build selection
 
 ```sh
-make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 debug
-make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 tests
+make FIRMWARE_PLATFORM=stm32h743 debug
+make FIRMWARE_PLATFORM=stm32h743 tests
 ```

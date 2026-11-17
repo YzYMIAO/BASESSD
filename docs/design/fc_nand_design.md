@@ -8,8 +8,8 @@
 > 2048 block × 64 page，2112 B/page（4 × 528 B CW），512 MiB SLC，ONFI 1.0。
 >
 > **本文只写当前设计**：分层、结构体、契约、机制与取舍理由。
-> 演进过程、被否方案、版本与验证记录见 `docs/design/fc_nand_revision_history.md`；
-> 缺陷与未验证项见 `docs/design/known_risks.md` / `docs/design/known_iss.md`。
+> 演进过程、被否方案、版本与验证记录见 `docs/design/revision_history/fc_nand_revision_history.md`；
+> 缺陷与未验证项见 `docs/design/known_open_items.md` / `docs/design/known_open_items.md`。
 > §26 的分层对照同时是 `docs/reference/` 的判据。
 >
 > 图目录与源码锚点见附录 A，推荐阅读顺序见附录 B。
@@ -118,7 +118,7 @@ flowchart TB
 | Buffer Pool | 128 | 528 B（一个 CW） | CW 数据缓冲 |
 
 - **64 命令**：覆盖一个 block 的全部 64 页，支持流水提交。
-- **256 描述符**：一条命令的 desc 数 = `cw_bitmap` 置位数（最多 `CW_TOTAL_MAX = 8`：2 plane × 4 CW）⇒ 最多 **32 条**满额命令同时在链。真正的并发上限由 desc / buffer 决定，不是命令池的 64；见 `known_risks.md` RISK-POOL-12。
+- **256 描述符**：一条命令的 desc 数 = `cw_bitmap` 置位数（最多 `CW_TOTAL_MAX = 8`：2 plane × 4 CW）⇒ 最多 **32 条**满额命令同时在链。真正的并发上限由 desc / buffer 决定，不是命令池的 64；见 `known_open_items.md` RISK-POOL-12。
 - **128 缓冲**：与描述符 1:2，一条满额命令占 8 个 buffer；并发上限 16 条满额命令。
 
 每个 Buffer 是一个完整 CW，布局固定：
@@ -682,7 +682,7 @@ handler 通过三个 volatile 窗口访问 FMC；上下文由 request 与实例�
 #### DATA_IN / DATA_OUT —— 固定 PIO
 
 数据阶段**只有 PIO**：CPU 逐字节读写 FMC 数据窗口，写方向每字节后 `__DMB()`
-（`volatile` 不保证连续写 FMC 的顺序，见 `src/nand/nand_fmc.c:301/321`）。
+（`volatile` 不保证连续写 FMC 的顺序，见 `src/nand/nand_fmc.c`）。
 
 **为什么没有 DMA**：STM32H743 的 FMC NAND 控制器**没有专用 DMA 请求线**（DMAMUX1 映射表无
 FMC/NAND 条目），memory-to-memory 模式也无法与 FMC 的等待状态握手。需要 DMA + 硬件 ECC 的
@@ -1239,7 +1239,7 @@ static inline DWORD paa_to_nand_row(DWORD paa); /* 器件行地址编码 */
 
 ## 8. 未实现 / 未验证项
 
-见 `docs/design/known_iss.md`（设计项）与 `docs/design/known_risks.md`（缺陷与残余风险）。
+见 `docs/design/known_open_items.md`（设计项）与 `docs/design/known_open_items.md`（缺陷与残余风险）。
 本文不复制清单。
 
 ---
@@ -1247,7 +1247,7 @@ static inline DWORD paa_to_nand_row(DWORD paa); /* 器件行地址编码 */
 ## 9. 测试
 
 FC→NAND UT 的套件、入口、编写规范与运行方式见 `docs/design/fc_nand_ut.md`；分层测试流程见
-`docs/design/testing_guide.md`。
+`docs/guides/testing_guide.md`。
 
 > ⚠ `make all` 之后直接 `make tests` 是空操作（目标未按测试 flag 重编）⇒ 必须先 `make clean`。
 > 完整命令见 `docs/design/fc_nand_ut.md` §5.1。
@@ -2313,7 +2313,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 ## 24. FC 层断言判据
 
-全工程判据在 `docs/design/assertion_guidelines.md`；本节只记 FC 层落点。断言设施见
+全工程判据在 `docs/design/common/assertion_guidelines.md`；本节只记 FC 层落点。断言设施见
 `include/common/assertion.h`。
 
 | # | 判据 | 落点 |
@@ -2340,7 +2340,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 不报错，只是**悄悄写坏介质**（首例：multi-plane 窄位图，§17.4）。对这类错误，`ASSERT` 之外
 **必须**再补一道 release 运行期拒绝（`return FC_STATUS_INVALID_ARGUMENT`，由调用者转成命令失败
 并注 `NAND_FAIL` 完成项），否则 release 档等于没有守卫。判据原文见
-`assertion_guidelines.md` 判据 9。
+`common/assertion_guidelines.md` 判据 9。
 
 > `make tests` 走 debug 档（无 `NDEBUG`），断言在板上测试固件里是活的：任何误判会让板子停机
 > 而不是报用例失败。改动这些守卫后必须上板跑三套 munit 套件。
@@ -2468,7 +2468,7 @@ Micron MT29F4G08 datasheet 的三条前提：
 2. plane 由**行地址 BA6** 选择（`paa_to_nand_row()` 把 plane 编在 bit 6）；
 3. two-plane 命令族要求器件内部 on-die ECC 关闭——本仓从不写 ECC feature（`0x90`），
    内部 ECC 保持默认关闭。
-   ⚠ 第 3 条的 datasheet 位置**出处待重核**（见 §17.2 与 `docs/design/known_risks.md`）。
+   ⚠ 第 3 条的 datasheet 位置**出处待重核**（见 §17.2 与 `docs/design/known_open_items.md`）。
 
 ### 25.7 完成项折叠
 
@@ -2490,7 +2490,7 @@ Micron MT29F4G08 datasheet 的三条前提：
 | 4 | `06h` 的 on-die ECC 前提出处未核对 | 若器件默认开启内部 ECC，多 plane 路径失效。当前不写 `0x90`，默认关闭；上板行为是最终判据 |
 | 5 | multi-plane 不属于 ONFI 1.0 | ONFI 1.0 全文无 `plane`；multi-plane 来自器件 datasheet。文档与代码不得把它写成"ONFI 规定" |
 
-历史演进、逐版验证记录与文件变更表见 `docs/design/fc_nand_revision_history.md`。
+历史演进、逐版验证记录与文件变更表见 `docs/design/revision_history/fc_nand_revision_history.md`。
 
 ---
 

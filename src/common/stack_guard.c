@@ -190,7 +190,7 @@ DWORD stack_guard_alarm(void)
  *     pop {r7, pc}
  * 于是「压栈的 r7 被写坏」会直接让 SP 变成垃圾值，随后 pop 从垃圾地址取 PC
  * —— 这正是 v0.71 那条记录 `SP/LR 同时落在同一块 4 KB 缓冲里、且 LR 带 Thumb 位`
- * 的形态（见 docs/design/fault_capture.md）。这种踩踏发生在**已用区**，
+ * 的形态（见 docs/design/common/fault_capture.md）。这种踩踏发生在**已用区**，
  * 填 pattern 看不见。
  *
  * 对应的工具是 `-fstack-protector-strong`：GCC 在「有局部数组的函数」的局部变量与

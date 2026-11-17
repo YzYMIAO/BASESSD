@@ -23,11 +23,6 @@ INC_ROOT := $(PROJECT_ROOT)/include
 
 
 
-VALID_BUILD_TARGETS := firmware
-ifeq ($(filter $(BUILD_TARGET),$(VALID_BUILD_TARGETS)),)
-    $(error Invalid BUILD_TARGET=$(BUILD_TARGET), valid values: $(VALID_BUILD_TARGETS))
-endif
-
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 CPU_TYPES := cortex-m7
 ifeq ($(FC_NAND_TEST_ENABLE),1)
@@ -44,10 +39,10 @@ endif
 
 # 两套目标使用独立构建目录，避免同名.o互相覆盖。
 
-BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TARGET)/$(BUILD_TYPE)
+BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TYPE)
 
 # 开卡镜像（make format-image）：**bin 输出路径保持标准**
-#   build/firmware/<type>/bin/debug.bin —— 用户的烧录/调试配置不用改。
+#   build/<type>/bin/debug.bin —— 用户的烧录/调试配置不用改。
 # 只有对象/库/依赖目录按 CFLAGS 分置，避免正常镜像与开卡镜像互相复用陈旧 .o
 # （本工程没有「CFLAGS 变化 ⇒ 重编译」依赖）。
 FORMAT_OBJ_SUFFIX :=
@@ -103,11 +98,7 @@ TARGET   := $(BIN_DIR)/$(BUILD_TYPE)$(if $(FC_NAND_TEST_ENABLE),_ut)
 # ----------------------------------------------------------------------------
 # 3. 工具链（支持交叉编译）
 # ----------------------------------------------------------------------------
-ifeq ($(BUILD_TARGET),firmware)
 CROSS_COMPILE ?= arm-none-eabi-
-else
-CROSS_COMPILE :=
-endif
 
 
 CC      = $(CROSS_COMPILE)gcc

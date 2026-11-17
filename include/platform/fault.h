@@ -7,7 +7,7 @@
 
 /*
  * Cortex-M 故障捕获抽象接口（共享逻辑在 src/platform/fault.c，SoC 适配在
- * src/platform/<soc>/fault_port.c）—— 设计见 docs/design/fault_capture.md
+ * src/platform/<soc>/fault_port.c）—— 设计见 docs/design/common/fault_capture.md
  *
  * 覆盖启动文件里的弱默认异常处理器（Default_Handler 死循环），捕获
  * NMI/HardFault/MemManage/BusFault/UsageFault 的现场并轮询控制台打印，

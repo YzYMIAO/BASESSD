@@ -42,19 +42,19 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 ## 2026-10-22 文档重组移入（10 个）
 
 > 原则：有效设计已并入主干（`../design/`）；未实现/未验证项已抽到
-> [`../design/known_iss.md`](../design/known_iss.md)；其余历史/计划稿在此保留全文。
+> [`../design/known_open_items.md`](../design/known_open_items.md)；其余历史/计划稿在此保留全文。
 
 | 文件 | 原用途 | 处置 |
 |---|---|---|
 | `cw_level_mapping_design.md` | CW 级布局与设计决策 | §1.3/1.4 口径表、§2.2 尺寸推导、approach ③ 已并入 `ftl_design.md` §2.1/§2.2 |
-| `multi_lun_generalization.md` | 多 LUN 泛化实施计划 | 内存预算/共享 cache 已并入 `ftl_design.md`；Phase D 等进 `known_iss` §4 |
-| `ftl_optimization_plan.md` | FTL 优化波次与遗留表 | §8 未决项进 `known_iss` §3；其余为历史 |
-| `nand_op_enablement_plan.md` | NAND OP 启用方案 | P1/P2/P3/Phase 0/D1-D5 进 `known_iss` §2 |
-| `hil_ut_design.md` | HIL UT 与系统验收设计 | 用例清单进 `known_iss` §1（未实现） |
+| `multi_lun_generalization.md` | 多 LUN 泛化实施计划 | 内存预算/共享 cache 已并入 `ftl_design.md`；Phase D 等进 `known_open_items` 模块 10 |
+| `ftl_optimization_plan.md` | FTL 优化波次与遗留表 | §8 未决项进 `known_open_items`；其余为历史 |
+| `nand_op_enablement_plan.md` | NAND OP 启用方案 | P1/P2/P3/Phase 0/D1-D5 进 `known_open_items` 模块 10 |
+| `hil_ut_design.md` | HIL UT 与系统验收设计 | 用例清单进 `known_open_items` 模块 14（未实现） |
 | `ftl_host_interface.md` | FTL 对外接口历史契约 | FLUSH/TRIM 语义已补进 `ftl_design.md` §3.9.10 |
 | `fc_api_usage.md` | FC 对外接口使用指南 | 主干 `fc_nand_design.md` §2.9/§2.10 已覆盖 |
 | `ftl_module_contracts.md` | FTL 模块 handle 契约 | §6 时间归属 / §8 字段所有权并入 `ftl_design.md` §5.1.2；全文保留 |
-| `ftl_ut_munit.md` | FTL L0 UT 设计与用例清单 | UT 冻结状态进 `known_iss` ISS-UT-01；全文保留 |
+| `ftl_ut_munit.md` | FTL L0 UT 设计与用例清单 | UT 冻结状态进 `known_open_items` ISS-UT-01；全文保留 |
 | `claude_md_history.md` | `CLAUDE.md` 规则变更史 | 纯历史 |
 
 ## 2026-11-13 重构归档
@@ -64,11 +64,11 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 
 | 文件 | 原位置 / 内容 | 处置 |
 |---|---|---|
-| `project_positioning_20261029.md` | 项目水平定位评估（一次性，2026-10-29） | 结论摘要并入 `storage_controller_learning.md` §6.1 |
-| `negative_test_plan.md` | 可执行负例清单 | 并入 `testing_guide.md` §11 |
-| `logging_design.md` | 日志设计 | 并入 `fault_capture.md` §10 |
-| `scheduler_design.md` | 统一定时调度器设计 | 并入 `platform_abstraction.md` §8 |
-| `usb_msc_udisk.md` / `usb_msc_verification.md` | USB 设计与上板验证 | 合并为 `usb_msc.md` Part A/B |
+| `project_positioning_20261029.md` | 项目水平定位评估（一次性，2026-10-29） | 原定位评估全文保留在此 |
+| `negative_test_plan.md` | 可执行负例清单 | 并入 `../guides/testing_guide.md` §11 |
+| `logging_design.md` | 日志设计 | 并入 `../design/common/fault_capture.md` §7 |
+| `scheduler_design.md` | 统一定时调度器设计 | 并入 `../design/common/timer.md` |
+| `usb_msc_udisk.md` / `usb_msc_verification.md` | USB 设计与上板验证 | 拆为 `../design/usb_msc.md`（设计）+ `../guides/usb_msc_verify.md`（验证） |
 | `assertion_rounds.md` | 断言规范 §八~§二十三 历史落地轮次 | 主文件保留标题与指针 |
 | `fc_design_discussions.md` | FC §11/§14~§16 设计讨论与重构记录 | 主文件保留标题与指针 |
 | `fc_nand_status_history.md` | FC §8/§9 状态/待完善项历史表 | 主文件改为指针 |
@@ -82,6 +82,6 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 
 ## 边界
 
-- 活跃权威设计文档一律在 **`../design/`**（14 个活跃 + `known_iss.md` / `known_risks.md`），不要往这里放。
+- 活跃权威设计文档一律在 **`../design/`**（10 篇主设计 + `common/` + `revision_history/` + `known_open_items.md`），不要往这里放。
 - 新增「已落地变更」的记录：若只是单版本落地/上板记录，直接放这里 `changelog/`；
   若是对当前设计仍有约束力的决策，进 `../design/` 对应文档。

@@ -25,7 +25,7 @@ description: 排查 stm32h743 目标板的故障——HardFault / 断言失败 /
 
 ## 1. 异常（HardFault / MemManage / BusFault / UsageFault）
 
-- 串口 dump 机制见 `docs/design/fault_capture.md`；记录落在 `.noinit` 段。
+- 串口 dump 机制见 `docs/design/common/fault_capture.md`；记录落在 `.noinit` 段。
 - CLI `crash` 看记录、`crash clear` 清记录。
 - 复位原因：`POR PIN BOR SFT (rsr=0x...)`。
 
@@ -46,7 +46,7 @@ description: 排查 stm32h743 目标板的故障——HardFault / 断言失败 /
 - `assertion_fail(#expression, file, line)` 会打表达式原文 + 文件 + 行号。
 - **release 档没有断言**（`NDEBUG` 下 `ASSERT` 展开为 `((void)0)`）——
   所以在 release 上看到的现象是**别的**（静默损坏 / HardFault），不要按 debug 的思路找。
-- 判据体系见 `docs/design/assertion_guidelines.md`（**判据 9**：后果是静默介质破坏的，
+- 判据体系见 `docs/design/common/assertion_guidelines.md`（**判据 9**：后果是静默介质破坏的，
   除 debug ASSERT 外必须补一道 release 运行期拒绝；**判据 10**：被 ASSERT 守的变量在
   `NDEBUG` 下变 unused ⇒ release 档的编译告警是「这条断言在 release 下没有等价守卫」的唯一提示）。
 

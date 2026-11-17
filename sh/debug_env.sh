@@ -20,7 +20,14 @@
 #   - 2026-09-25: netstat 看到 0.0.0.0:2331 是 svchost(portproxy) 不是 JLink
 #     → Step 1 不再暴力杀 0.0.0.0:PORT 的进程
 
-JLINK_EXE="D:\\StudyTool\\Develop\\JLink_V972\\JLinkGDBServerCL.exe"
+# JLink 路径由环境变量提供（示例：%JLINK_HOME%\\JLinkGDBServerCL.exe）；
+# 也可在仓库根放 .debug_env.local（已 ignore）设置 JLINK_EXE。
+# 未设置时按 Windows PATH 查找。不要把本机安装路径写回仓库。
+ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+if [ -z "${JLINK_EXE:-}" ] && [ -f "$ROOT_DIR/.debug_env.local" ]; then
+    . "$ROOT_DIR/.debug_env.local"
+fi
+JLINK_EXE="${JLINK_EXE:-JLinkGDBServerCL.exe}"
 DEVICE="STM32H743II"
 PORT=2331
 WINDOWS_IP=$(ip route show default | awk '{print $3}')

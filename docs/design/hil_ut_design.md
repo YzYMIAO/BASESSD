@@ -3,14 +3,14 @@
 > 状态：活跃设计文档。本文是 **test design**，按被测模块（test item）组织：
 > 每个模块有哪些设计要点、用什么判据覆盖、缺什么。
 > 用例名只作代表，完整清单以 `tests/unit/test_hil.c` 的注册表为准；
-> 运行证据见 `build/test-results/`，风险状态见 `docs/design/known_risks.md`。
+> 运行证据见 `build/test-results/`，风险状态见 `docs/design/known_open_items.md`。
 > 范围：`src/hil/`（HIL 层）。架构设计见 `docs/design/hil_design.md`（本文只写测试，不复制设计细节）；
 > FTL UT 见 `docs/design/ftl_ut_design.md`；FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
-> 关联：`docs/design/known_iss.md` ISS-HIL-01/02/03；
-> `docs/design/known_risks.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-03 / RISK-CTRL-04 /
+> 关联：`docs/design/known_open_items.md` ISS-HIL-01/02/03；
+> `docs/design/known_open_items.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-03 / RISK-CTRL-04 /
 > RISK-HOST-20 / RISK-HOST-21；
-> `docs/design/usb_msc.md` Part B（PC 主机矩阵）。
-> 分层坐标：`docs/design/testing_guide.md` §3 的 **L3 主机接口**（HIL）。
+> `docs/guides/usb_msc_verify.md`（PC 主机矩阵）。
+> 分层坐标：`docs/guides/testing_guide.md` §3 的 **L3 主机接口**（HIL）。
 
 ---
 
@@ -27,12 +27,12 @@
 | 信息 | 唯一事实源 | 本文怎么引用 |
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_hil.c` | §2 只写代表用例与判据，不列全量清单 |
-| 风险状态、历史、是否闭合 | `docs/design/known_risks.md` | §7 只写 `RISK-ID → 测试项 / 用例` 映射，**不写状态词** |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md` | §7 只写 `RISK-ID → 测试项 / 用例` 映射，**不写状态词** |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §6 / §7 只给 HIL 层判定 |
-| 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
-| 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
-| 分层与跨层测试流程 | `docs/design/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
-| USB 主机侧矩阵 | `docs/design/usb_msc.md` Part B | §2.5 / §6 只给入口 |
+| 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
+| 每次运行结果与证据 | `build/test-results/` + `docs/guides/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
+| 分层与跨层测试流程 | `docs/guides/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
+| USB 主机侧矩阵 | `docs/guides/usb_msc_verify.md` | §2.5 / §6 只给入口 |
 
 > HIL 是**主机接口层**，不是 FTL 的一部分：本文不重复 FTL 的 L2P/GC/CP 契约；
 > FTL 行为由 `ftl_ut_design.md` 覆盖，HIL 只钉「请求解析、路由、拆分、回执」这一层。
@@ -89,7 +89,7 @@
 2. **真 FTL / 真 NAND，无 mock**：直接复用主 boot 建好的 `g_ctrl` 与
    `g_ctrl.ftl[0]`，不建 FTL 桩、不绕过 controller。
 3. **不 format**：读写/FLUSH/TRIM 固定用容量尾部 8-LBA 窗口，避免破坏文件系统常用区。
-4. **不碰 USB host**：USB 槽状态机由 PC 主机侧矩阵覆盖（`usb_msc.md` Part B），
+4. **不碰 USB host**：USB 槽状态机由 PC 主机侧矩阵覆盖（`docs/guides/usb_msc_verify.md`），
    不放进 `/hil/`。
 5. **一个用例只钉一个契约**：判据必须能回答「断言比较的是哪两个值」；没有区分力的
    断言不算覆盖（C7 / C8）。
@@ -278,7 +278,7 @@
 
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
-| USB BOT / SCSI 映射 | PC 枚举、READ/WRITE、fsync、UNMAP、热插拔 | PC 主机矩阵（`usb_msc.md` Part B） | 整个模块不在固件 UT |
+| USB BOT / SCSI 映射 | PC 枚举、READ/WRITE、fsync、UNMAP、热插拔 | PC 主机矩阵（`docs/guides/usb_msc_verify.md`） | 整个模块不在固件 UT |
 | host busy gate | 同一时刻只有一个前端提交 controller | 手工观察 | RISK-HOST-20 |
 | host 超时 / 中止 | 命令不悬挂；复位/拔出可恢复 | 无 | RISK-HOST-21 |
 | CLI 同步命令 | `wr/rd/tr/fl` 在命令返回前完成 | 手工 CLI | 无逐条 UT |
@@ -313,7 +313,7 @@
 **负例 / 守卫**
 
 - 只有成功路径断言；失败路径需要注入或可控 fake，当前不可做（HIL 层不新增 seam，
-  见 `docs/design/testing_guide.md` §12）。
+  见 `docs/guides/testing_guide.md` §12）。
 - `dma_port.c` 的幂等标志 `s_uart_tx_dma_initialized` 是生产守卫；不能靠 HIL 用例
   反复初始化来验证，除非确认不会打断日志输出。
 
@@ -445,7 +445,7 @@
 - 破坏性：会写容量尾部 8-LBA 窗口；不 format、不恢复 host 数据。
 - 运行前必须拔掉 USB，并确认没有 host 在飞请求；`test` 命令**不**替用例检查
   `cli_host_busy()` / `usb_msc_host_busy()`，由操作者保证。
-- 跑完不要求 `format`（尾窗不是文件系统区），但正式交付前仍按 `testing_guide.md` 收尾。
+- 跑完不要求 `format`（尾窗不是文件系统区），但正式交付前仍按 `../guides/testing_guide.md` 收尾。
 - `contract` 不写 NAND；`io` 才破坏性。不要把 `contract` 的通过当成介质已验证。
 
 ### 4.6 跨重启夹具的边界
@@ -479,9 +479,9 @@
 
 | 档 | 命令 | 产物 | 说明 |
 |---|---|---|---|
-| debug HIL | `make tests UT=HIL` | `build/firmware/debug/bin/debug_ut.elf` | 默认；`ASSERT` 停机；HIL 无 SKIP |
-| release HIL | `make tests BUILD_TYPE=release UT=HIL` | `build/firmware/release/bin/release_ut.elf` | `-O2 -DNDEBUG`；同一批 HIL 用例执行 |
-| 全量 UT | `make tests UT=` | `build/firmware/debug/bin/debug_ut.elf` | FC + FTL + HIL 一起链接 |
+| debug HIL | `make tests UT=HIL` | `build/debug/bin/debug_ut.elf` | 默认；`ASSERT` 停机；HIL 无 SKIP |
+| release HIL | `make tests BUILD_TYPE=release UT=HIL` | `build/release/bin/release_ut.elf` | `-O2 -DNDEBUG`；同一批 HIL 用例执行 |
+| 全量 UT | `make tests UT=` | `build/debug/bin/debug_ut.elf` | FC + FTL + HIL 一起链接 |
 | 产品 | `make all` / `make release` | `debug.elf` / `release.elf` | 无 `test` 命令 |
 
 - `UT=HIL` / `UT=FC` / `UT=FTL` 共用 `debug_ut.elf`（release 共用 `release_ut.elf`）；
@@ -505,7 +505,7 @@ test /hil/
    确认串口日志没有中断。
 3. `test /hil/io/`：破坏性，先拔 USB；观察 4 LBA 写读、FLUSH、TRIM、单飞行。
 4. `test /hil/`：完整套件；记录套件/用例数、耗时、失败项、SKIP 原因。
-5. 收尾：按 `testing_guide.md` 恢复可用盘；`io` 只写尾窗，不要求 format。
+5. 收尾：按 `../guides/testing_guide.md` 恢复可用盘；`io` 只写尾窗，不要求 format。
 
 - 套件前缀必须带尾斜杠；`/hil/` 由 `ut_run_all()` 展开为叶子套件。
 - HIL 用例是 `MUNIT_TEST_OPTION_SINGLE_ITERATION`，`--iterations` 不增加运行次数。
@@ -547,7 +547,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 `meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 =
 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。需要长期留证的结论写
-`docs/design/known_risks.md` 或 `docs/design/known_iss.md`，原始日志不进版本库。
+`docs/design/known_open_items.md` 或 `docs/design/known_open_items.md`，原始日志不进版本库。
 
 ---
 
@@ -570,7 +570,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | soak / 性能 | `/bench/speed/` 与主机工具，不是 `/hil/` | — |
 | `uart_dma_init_returns` 失败路径 | 无注入 / fake UART 实例 | `RISK-PLAT-13` |
 | FTL 内部 L2P / GC / CP / Journal 契约 | HIL 只钉接口层；由 FTL UT 覆盖 | `ftl_ut_design.md` |
-| HIL L2 验收 24 例 | 需 PC 主机侧逐条记录 | `ISS-HIL-02`、`usb_msc.md` Part B |
+| HIL L2 验收 24 例 | 需 PC 主机侧逐条记录 | `ISS-HIL-02`、`docs/guides/usb_msc_verify.md` |
 
 **2026-11-13 用户裁决**：跨重启、多 run、USB 槽等剩余缺口**留以后检验**；本轮已补的
 TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `RISK-CTRL-04`。
@@ -608,7 +608,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
 > §7.1 只保留「判据非显然 / 跨模块」的 HIL 风险。
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
@@ -622,10 +622,10 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 
 ### 7.2 负例判定台账（HIL / USB / CLI 层）
 
-> 本表只列**当前未闭合**的 HIL 前端风险（索引状态取自 `docs/design/known_risks.md`）。
-> 判定口径同 `docs/design/testing_guide.md` §12.1；HIL 层没有注入 seam，失败路径只能靠
+> 本表只列**当前未闭合**的 HIL 前端风险（索引状态取自 `docs/design/known_open_items.md`）。
+> 判定口径同 `docs/guides/testing_guide.md` §12.1；HIL 层没有注入 seam，失败路径只能靠
 > 主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
-> **信息**与**已闭合**条目只在 `known_risks.md` 维护。
+> **信息**与**已闭合**条目只在 `known_open_items.md` 维护。
 
 **CLI（7）**
 
@@ -677,7 +677,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 > 台账合计 **22** 条：N 1 / K 12 / 状态词 9。已闭合的平台守卫
 > `RISK-PLAT-13` / `RISK-PLAT-14` 与信息项 `RISK-USB-09` / `RISK-USB-10` /
 > `RISK-USB-11` / `RISK-CTRL-01` / `RISK-PLAT-06` / `RISK-PLAT-07` 只在
-> `known_risks.md` 维护。
+> `known_open_items.md` 维护。
 
 ---
 
@@ -685,11 +685,11 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 
 - **新增/删除用例**：同批更新 §2 对应模块表 + 测试源注释；不得只改源或只改文档。
   全量用例清单不写进本文，归 `tests/unit/test_hil.c`。
-- **风险状态变化**：只改 `docs/design/known_risks.md`；§7 仅在映射变化时改，
+- **风险状态变化**：只改 `docs/design/known_open_items.md`；§7 仅在映射变化时改，
   **不写状态词**。
 - **覆盖判定变化**：只改 §7.2 台账。
 - **可测性变化**（夹具/硬件/主机矩阵）：更新 §6；不要把「能测」写成「已测」。
-- **运行结果**：写 `build/test-results/` 与 `known_risks.md` 历史；设计文档不维护
+- **运行结果**：写 `build/test-results/` 与 `known_open_items.md` 历史；设计文档不维护
   验收快照。
 - **禁止**：§7 写状态词；§2 复制实现细节；文档头写「N 函数 / M 次运行」快照。
 - **用例注释模板**：

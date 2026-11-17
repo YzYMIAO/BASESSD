@@ -27,6 +27,6 @@ SoC 相关代码通过 `platform/platform.h` 的 `ssd_platform_ops_s` 接入，�
 Controller、FTL 或 NAND 算法模块。
 
 **当前例外**：NAND 层尚未完全走抽象接口——`src/nand/nand_fmc.c` 直接写 FMC 窗口，
-`src/nand/nand_mt29f4g08abadawp.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init`。
+`src/nand/devices/mt29f___g08a.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init`。
 其余核心模块已无 `platform/stm32h743/` 路径依赖。完整审计与剩余项见
-`docs/design/platform_abstraction.md`。
+`docs/design/platform_design.md`。

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 创建 build/test-results/<ts>_<build>_<target>/ 并写 meta.txt。
 # 用法：sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]
-# 约定见 docs/design/testing_guide.md §8.7。
+# 约定见 docs/guides/testing_guide.md §8.7。
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -9,7 +9,7 @@ BUILD=${1:-debug}
 TARGET=${2:-debug_ut}
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUT="$ROOT/build/test-results/${STAMP}_${BUILD}_${TARGET}"
-ELF="$ROOT/build/firmware/${BUILD}/bin/${TARGET}.elf"
+ELF="$ROOT/build/${BUILD}/bin/${TARGET}.elf"
 
 mkdir -p "$OUT"
 

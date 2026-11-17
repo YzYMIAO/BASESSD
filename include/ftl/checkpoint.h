@@ -201,7 +201,7 @@ _Static_assert(sizeof(((cp_handle_s *)0)->hdr.block_words) == (FTL_BLOCK_TOTAL *
  * 字段 94 字 = 14 个标量 + region_bitmap[64] + wear_page_crc[16]；padding 补齐到 2048。
  * ⚠ padding 长度必须按实际字算：算错会让 sizeof > 一页 ⇒ 写入被静默截断。
  * 本页**无独立 CRC**：完整性由下层 FC 的 per-CW CRC + ECC 保证
- * （DRAM-less 主流做法，见 docs/design/ftl_revision_history.md）。*/
+ * （DRAM-less 主流做法，见 docs/design/revision_history/ftl_revision_history.md）。*/
 typedef struct CP_HEADER_S
 {
     DWORD magic;                                    /* CP_MAGIC */

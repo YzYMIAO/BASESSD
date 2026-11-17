@@ -10,7 +10,7 @@
  *   · 通过函数指针 / 回调表的调用不会被 wrap；
  *   · 静态函数不可 wrap ⇒ 这些缝仍用生产源码的宏隔离 hook。
  *
- * 设计：docs/design/testing_guide.md §12.4 / §12.10。
+ * 设计：docs/guides/testing_guide.md §12.4 / §12.10。
  */
 
 #include "fi_wrap.h"

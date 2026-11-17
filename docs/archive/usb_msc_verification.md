@@ -24,7 +24,7 @@
 
 ---
 
-> 分层测试流程、工具、性能方法与实测结果：见 [`testing_guide.md`](testing_guide.md)。
+> 分层测试流程、工具、性能方法与实测结果：见 [`../guides/testing_guide.md`](../guides/testing_guide.md)。
 
 ## 1. 范围
 

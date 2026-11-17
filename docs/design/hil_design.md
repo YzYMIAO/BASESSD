@@ -5,7 +5,7 @@
 >
 > 本文是 **architecture design**；测试设计（用例、判据、缺口）见
 > [`hil_ut_design.md`](hil_ut_design.md)，二者不互相复制。风险状态见
-> [`known_risks.md`](known_risks.md)，未实现项见 [`known_iss.md`](known_iss.md)。
+> [`known_open_items.md`](known_open_items.md)，未实现项见 [`known_open_items.md`](known_open_items.md)。
 >
 > 行业坐标：HIL 是 [`fc_nand_design.md`](fc_nand_design.md) §26 分层中的
 > **HIL（Host Interface Layer）**；FTL 见 [`ftl_design.md`](ftl_design.md)，
@@ -347,7 +347,7 @@ sequenceDiagram
    `complete_flag`。
 
 TRIM 没有 `cancel_trim`：只靠 FTL 的 1 s 无进展超时或复位结束。这是当前范围决策，
-不是遗漏（`known_risks.md` 的 TRIM/cancel 矩阵条目）。
+不是遗漏（`known_open_items.md` 的 TRIM/cancel 矩阵条目）。
 
 ### 5.4 FLUSH 撤销
 
@@ -526,7 +526,7 @@ cache 序列的 END 落点；传输段本身的边界不是 FTL 的序列边界�
 
 - 测试设计、用例矩阵、覆盖缺口：`docs/design/hil_ut_design.md`；
 - 用例注册表：`tests/unit/test_hil.c`；
-- 板端运行入口：`docs/design/testing_guide.md`。
+- 板端运行入口：`docs/guides/testing_guide.md`。
 
 本文不复制用例名与运行结果，避免与测试文档漂移（H6）。
 
@@ -539,5 +539,5 @@ cache 序列的 END 落点；传输段本身的边界不是 FTL 的序列边界�
 | 多 run 中途失败的状态聚合 | `RISK-CTRL-01` |
 | 稀疏拓扑注释与实现相反 | `RISK-CTRL-03` |
 | submit 未校验 `buffer == NULL` | `RISK-CTRL-04` |
-| HIL UT 未覆盖路径 | `docs/design/known_iss.md` ISS-HIL-01/02/03；`RISK-UT-34` |
-| USB 主机侧矩阵 | `docs/design/usb_msc.md` Part B |
+| HIL UT 未覆盖路径 | `docs/design/known_open_items.md` ISS-HIL-01/02/03；`RISK-UT-34` |
+| USB 主机侧矩阵 | `docs/guides/usb_msc_verify.md` |

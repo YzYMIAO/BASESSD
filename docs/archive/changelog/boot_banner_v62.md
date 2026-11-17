@@ -106,7 +106,7 @@ make clean && make all              # ✅ 0 warning / 0 error（172740 B，produ
 3. **新增 4 个纯读 API**：`sys_mpu_region_count` / `sys_port_mpu_region_count` /
    `fc_ecc_algo_name` / `fc_boot_report`。均无副作用。
 4. 已核对 `tests/` 对开机日志字符串**零依赖** ⇒ 重贴标签不影响单测。
-5. 本版**不以 `.bin` 为判据**（横幅时间戳 + 标签重贴必漂，见记忆 `cmsis-optimize-attr-bin-delta`）。
+5. 本版**不以 `.bin` 为判据**（横幅时间戳 + 标签重贴必漂）。
 6. **⚠ 上板踩坑：`HAL_RCCEx_GetPeriphCLKFreq` 对本工程三大外设恒返回 0**。第一版用它取
    FMC/QSPI/USART1，上板打出 `fmc=0 qspi=0 uart=0`。根因：**本仓 HAL 的该函数只覆盖
    12 种外设（ADC/FDCAN/SAI×5/SDMMC/SPI×3），没有 FMC/QSPI/USART 分支**，不支持即返回 0。

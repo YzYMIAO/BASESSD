@@ -77,7 +77,7 @@
  * （32 KiB = 两个 16 KiB host 传输段）才认为进入顺序流，允许开 cache 序列。
  * 依据：本阈值是工程取值（两个 16 KiB 传输段），没有对应的论文 / 规范参数；
  * 形态上对齐 DRAM-less 分支"顺序访问按整页 / 整段落盘"的处理（DFTL，Gupta et al.,
- * ASPLOS'09；见 docs/design/storage_controller_learning.md 的经典论文清单）。
+ * ASPLOS'09；见 docs/design/storage_controller_design.md 的经典论文清单）。
  * 阈值只用于过滤单个随机请求，不是 QoS 参数。
  * ⚠ host 传输段（USB 16 KiB）只是 LBA 流的一次交付，不是本阈值的作用域——
  *   跨段连续由 seq->next_lba 延续，见 docs/design/ftl_design.md §3.16。 */

@@ -408,8 +408,8 @@ engine  层：backend->handlers[uop->type](context, uop)    ← 函数指针表�
 
 ## 参考文档
 
-- 接口使用指南：👉 [fc_api_usage.md](../design/fc_api_usage.md)
-- 设计方案（含 §15 Phase D）：👉 [fc_nand_design.md](../design/fc_nand_design.md#15-nand_dispatch-函数指针表重构-phase-d)
+- 接口使用指南：👉 [fc_api_usage.md](../fc_api_usage.md)
+- 设计方案（含 §15 Phase D）：👉 [fc_nand_design.md](../../design/fc_nand_design.md#15-nand_dispatch-函数指针表重构-phase-d)
 ---
 
 ## Phase E: Multi-Plane 操作支持 + 行地址数组重构 + OP 码拆分

@@ -22,7 +22,7 @@
 
 ## 2. 测试分层
 
-框架与运行方式见 [`munit_adapter.md`](munit_adapter.md)，测试分三个层级：
+框架与运行方式见 [`../design/common/munit_adapter.md`](../design/common/munit_adapter.md)，测试分三个层级：
 
 ```
 Level 1: Pure Logic ──── 零硬件依赖，纯函数测试
@@ -676,7 +676,7 @@ endif
 ## 5. 测试编写规范
 
 > 通用规则（munit 用法、证据分级、参数化、日志开关）见
-> `docs/design/munit_adapter.md` 与 `docs/design/testing_guide.md` §3；本节只保留
+> `docs/design/../design/common/munit_adapter.md` 与 `docs/design/testing_guide.md` §3；本节只保留
 > FC 层特有约定与示例，避免与框架文档重复维护。
 
 ### 5.1 文件组织
@@ -785,7 +785,7 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 调完会一直留着影响 FTL/NAND 的生产日志。munit 的开关是 `test` 的一个参数、默认关、
 两级阈值天然对应 INFO/DEBUG、只作用于 munit 自己的输出。
 
-框架侧为此加了 1 个只读访问器 `munit_log_visible()`（见 `munit_adapter.md` §2.4）。
+框架侧为此加了 1 个只读访问器 `munit_log_visible()`（见 `../design/common/munit_adapter.md` §2.4）。
 
 若确实需要看**项目日志**（FTL/FC 的 `[INF]/[ERR]`），用单独的 `--log-project info|debug`：
 它在 `uart_cli_test` 里设置级别、跑完恢复，且透传给 munit 前被摘掉（munit 不认识该选项）。

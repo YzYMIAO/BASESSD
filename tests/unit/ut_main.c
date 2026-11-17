@@ -82,7 +82,7 @@ extern MunitTest g_speed_tests[];
 #endif
 
 /* ⚠ 子套件前缀**必须以 '/' 结尾**：munit 只把前缀和用例名**首尾相接**
- * （munit.c:1285 下探子套件、:1103 拼用例名），**不补分隔符**。根前缀已带尾斜杠；
+ * （munit.c 下探子套件、:1103 拼用例名），**不补分隔符**。根前缀已带尾斜杠；
  * 子套件漏了就会打印成 "/fc-nand/lifecycleblock_multi_plane"，且过滤串
  * "/fc-nand/lifecycle/…" 一条都匹配不上（用例名不带前导斜杠）。 */
 static MunitSuite g_ut_root_suite = {
@@ -200,7 +200,7 @@ static MunitSuite g_ut_root_suite = {
 };
 
 /* ── 套件路径展开 ─────────────────────────────────────────────────────────────
- * munit 的过滤是「全路径前缀」匹配（munit.c:1297-1303）：先要求套件累积前缀 pre 是过滤串
+ * munit 的过滤是「全路径前缀」匹配（munit.c）：先要求套件累积前缀 pre 是过滤串
  * 的前缀，再要求过滤串余部是**用例名**的前缀。用例挂在**叶子**套件下，其 pre 比用户输入的
  * 套件路径长 ⇒ 第一条 strncmp 在路径末尾即失配。⇒ `test /ftl/` 恒打印 "NO test run"，
  * 只有 `test /ftl/allocator/`（叶子套件全路径）或 `test /ftl/allocator/<用例名>` 能命中。

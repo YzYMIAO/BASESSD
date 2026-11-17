@@ -137,7 +137,7 @@ assertion failed: string info.model == "MT29F4G08ABADAWP" ("MT29F4G08ABADAWP    
    `request->data_length`）。**若读失败仍只降级为 `LOGW`、不 brick 开机** ——
    这也正是把它做成**非致命**的原因（本轮没被触发）。
 2. **时序字段量纲未查证**：`tprog/terase/tr/tccs` 只打原值、不打单位后缀，
-   避免凭记忆断言（见记忆 `no-unverified-protocol-claims`）。
+   避免凭记忆断言。
 3. **型号串尾空格 —— 已由测试抓出并修复**：见 §三/§四。器件按 ONFI 约定用空格右填充，
    解码侧必须 trim，否则 `%s` 打出的串带尾空格（日志里肉眼可见、字符串比较直接红）。
    这是本版**测试真正拦下的唯一缺陷**，也说明「补一条纯函数单测」这个决定是划算的。

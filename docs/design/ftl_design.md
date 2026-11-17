@@ -5,7 +5,7 @@
 > （FC + NAND 底层）平行，共同构成 SSD 固件设计。
 >
 > 本文**只描述当前设计**。演进史与逐版本决策见
-> [`ftl_revision_history.md`](ftl_revision_history.md)，逐版本落地与上板记录见
+> [`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md)，逐版本落地与上板记录见
 > [`docs/archive/changelog/`](../archive/changelog/)。正文不承载变更叙事。
 
 ---
@@ -61,12 +61,12 @@
 | 想知道 | 读 |
 |---|---|
 | **FTL 对外接口**（`ftl_init` / `ftl_submit_*` / 调用约束 / 接口级 UT 设计） | `include/ftl/*.h`（函数契约）+ 本文 §5.1（模块契约）+ [`../archive/ftl_host_interface.md`](../archive/ftl_host_interface.md)（历史契约） |
-| 逐版本决策史 | [`ftl_revision_history.md`](ftl_revision_history.md) |
+| 逐版本决策史 | [`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md) |
 | 多 LUN / 共享 cache / 内存域 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md) |
 | CW 级映射的来由与介质布局 | [`../archive/cw_level_mapping_design.md`](../archive/cw_level_mapping_design.md) |
 | FC / NAND 命令、ECC/CRC、地址层 | [`fc_nand_design.md`](fc_nand_design.md) |
-| 存储主控学习路线 | [`storage_controller_learning.md`](storage_controller_learning.md) |
-| 断言判据 | [`assertion_guidelines.md`](assertion_guidelines.md) |
+| 存储主控设计要点 | [`storage_controller_design.md`](storage_controller_design.md) |
+| 断言判据 | [`common/assertion_guidelines.md`](common/assertion_guidelines.md) |
 
 ⚠ **签名以头文件为准**。本文给结构形状与字段语义，不复制完整函数原型——接口改动频繁，
 文档复制签名必然漂移。当前公共入口见 `include/ftl/ftl.h`。
@@ -417,7 +417,7 @@ die 号统一为 `BYTE`，`0xFF` 为无效哨兵；`_Static_assert(FTL_DIE_MAX <
 版本不符 ⇒ 自动格式化。稀疏拓扑允许部分 die 槽为 NULL，controller 只校验 present die。
 共享 L2P cache 仍按 **(ch,ce) 一份**（同一 target 的多个 LUN 共享同一份 cache），
 不按 die 复制——否则同一 L2P 行的 load/flush 会在多个副本间分叉。
-登记见 `known_risks.md` RISK-TOP-01 / `known_iss.md` ISS-TOP-01。**地址/布局改动，未上板。**
+登记见 `known_open_items.md` RISK-TOP-01 / `known_open_items.md` ISS-TOP-01。**地址/布局改动，未上板。**
 
 **口径表（每实例 vs 全局；混了就会算错）**
 
@@ -684,7 +684,7 @@ Checkpoint 成功后按 `journal_sequence` 截断/回收。
 | `flags` | 1 B | `rising_count:4`（bit0..3）+ `health:2`（bit4..5）+ 保留 2 bit |
 
 > **主流对照（有出处）**：擦除计数必须持久化，否则跨重启归零、WL 失效
-> （`docs/design/storage_controller_design_essentials.md` §5.5）；read disturb 用
+> （`docs/design/storage_controller_design.md` §5.5）；read disturb 用
 > 读计数/刷新/GC 搬移（同文档失效模式表）。**"计数随 CP 快照落盘"的具体形态是本仓
 > 设计**——主流也会把 per-block 元数据放进 block descriptor/checkpoint，但具体布局
 > 无统一标准。
@@ -727,7 +727,7 @@ Directory 指向的 region 页优先放在**固定预留的 L2P 日志区** `[46
 - **擦同一块再写**：该块承担全部元数据擦除 ⇒ **单块热点**，先达到 P/E 上限
   ⇒ 早期坏块。
 
-这两类问题的历史记录见 `docs/design/ftl_revision_history.md` 的 v0.50（固定地址
+这两类问题的历史记录见 `docs/design/revision_history/ftl_revision_history.md` 的 v0.50（固定地址
 写模型）与 v0.82（独立 Wear 块是固定单副本热点）。
 
 **定量：环形池摊开的是单块磨损，不是总擦除数**
@@ -784,7 +784,7 @@ L2P log 6144 region 页）是
 
 - SPDK FTL 把 Superblock 常驻 cache 并镜像到 base device，nvcache chunk 按顺序写
   （<https://spdk.io/doc/ftl.html>，索引见 `docs/reference/README.md` §A4）——"固定根 + 顺序 chunk"与本节形态同构。
-- 磨损均衡的通用原则见 `docs/design/storage_controller_design_essentials.md §5.5`：
+- 磨损均衡的通用原则见 `docs/design/storage_controller_design.md §5.5`：
   P/E 有限 ⇒ 必须把擦除摊平。
 - **具体深度 32 / 8 / 2 / 4 是本仓自定**——公开资料没有对应的数值。
 
@@ -1106,7 +1106,7 @@ DWORD ftl_media_layout_version(void);
   例如 OP/Spare 池改为按 plane 预留时结构体布局没变，但预留块集合变了 ⇒ 必须升版本。
 
 **版本演进**：当前 `FTL_MEDIA_LAYOUT_VERSION_BASE = 14`（单 die）；多 die 版本 = `0x80000000 | boot_crc32(die 数 + topology map)`（`src/ftl/metadata.c` `ftl_media_layout_version`）。
-逐版本变更与"为什么必须 +1"见 [`ftl_revision_history.md`](ftl_revision_history.md)
+逐版本变更与"为什么必须 +1"见 [`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md)
 「介质布局版本」表——那边是**唯一版本表**，本文只保留当前值与判据，避免两处数字漂移。
 
 ---
@@ -1590,7 +1590,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 - 静态 WL 的 `max-min` 差值归零，永远不会触发；
 - read disturb / 预测性退役的记录归零，劣化块被当成新块。
 
-> **出处**：`docs/design/storage_controller_design_essentials.md` §5.5 —— "擦除计数必须
+> **出处**：`docs/design/storage_controller_design.md` §5.5 —— "擦除计数必须
 > 持久化，否则跨重启归零、WL 失效"；失效模式表：read disturb → "定期刷新、读计数、
 > GC 搬移"。
 
@@ -3117,7 +3117,7 @@ typedef struct
 
 #### 3.10.3 提交路径
 
-入口：`src/ftl/ftl_op.c:364` 的 `ftl_op_submit(cmd, op, ctx)`。
+入口：`src/ftl/ftl_op.c` 的 `ftl_op_submit(cmd, op, ctx)`。
 
 ```mermaid
 flowchart TD
@@ -3145,7 +3145,7 @@ flowchart TD
 4. **失败回滚**：`fc_submit` 失败只 `ftl_op_req_remove`，返回 `FTL_AGAIN`；
    **不 release 命令**。调用者保留命令，下轮重试或自行 release。
 
-**批量提交** `ftl_op_submit_batch(cmds, n, op, ctx)`（`src/ftl/ftl_op.c:398`）：
+**批量提交** `ftl_op_submit_batch(cmds, n, op, ctx)`（`src/ftl/ftl_op.c`）：
 
 - 先对**全部**命令过序列门控；任一被挡 ⇒ `FTL_AGAIN`，一条都不提交；
 - 再逐条登记 request；任一登记失败 ⇒ 回滚已登记项，返回 `FTL_ERROR`；
@@ -3190,7 +3190,7 @@ flowchart TD
 
 #### 3.10.5 同步等待
 
-同步等待器不在 `ftl_op.c`，在 `src/ftl/ftl_fc_interface.c:490`。
+同步等待器不在 `ftl_op.c`，在 `src/ftl/ftl_fc_interface.c`。
 
 ```mermaid
 sequenceDiagram
@@ -3324,7 +3324,7 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
    `cw*512` 偏移）；误用它会让 plane1 的 4 个 CW 复制 plane0 的前 2KB，表现为
    host 大文件“每 4KB 的后 2KB 重复前 2KB”（`RISK-WB-06`）。
    ⚠ 回归判据不能用 CLI 的 `wr/rd` 固定 pattern（每 2KB 相同，缺陷不可见），
-   必须用每 2KB 互不相同的数据（见 `docs/design/usb_msc.md` Part B USB-V05）。
+   必须用每 2KB 互不相同的数据（见 `docs/guides/usb_msc_verify.md` USB-V05）。
 
 #### 3.11.4 流程
 
@@ -3522,7 +3522,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 墙钟兜底失效（credit 仍生效，任务照常按
    credit 截断）；防刷屏靠各任务内部单飞行/事件门。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
-   从未被运行验证（见 `known_risks.md` RISK-BG-03）。
+   从未被运行验证（见 `known_open_items.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
    判定收在 `bg_scheduler_service` 首行（早于必跑任务）。
 
@@ -3765,7 +3765,7 @@ cost = 500·valid_ratio + 200·erase_ratio + 200·cold_penalty + 100·youth_pena
 两 plane 都健康（`min ≥ 4` 或持平）时不引入偏好，保持原贪心。
 
 > 单 plane 条目的来源是**恢复路径**（CP 快照 word 只有 16 bit，不含 `sb_id`，
-> 见 `pfr_closed_sb_add`）。彻底消除需要持久化 block→SB 归属（`known_iss.md` ISS-FTL-17），
+> 见 `pfr_closed_sb_add`）。彻底消除需要持久化 block→SB 归属（`known_open_items.md` ISS-FTL-17），
 > 本轮用「水位 + 偏好」把不平衡限制在可恢复范围内。
 
 #### 3.13.5 搬移状态机
@@ -4206,13 +4206,14 @@ flowchart TD
 ⑧ 放弃：方向不同 / 续接点不符 / 空闲 1 s ⇒ 只清 RAM，**不发 LAST**
 ```
 
-器件语义（`include/nand/onfi_1_0.h:256-282` + `docs/reference/datasheet_mt29f_cache_ops.md`）：
+器件语义（`include/nand/onfi_1_0.h` + MT29F4G08 datasheet 的 "Read Cache
+Operations" / "Two-Plane Read Cache Operations" 节；链接见 `docs/reference/README.md`）：
 `31h` **不带地址**，输出的是器件内部自增取到的下一页；自增到 block 末页后进入**下一个
 logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连续」= 同 block page+1 或
 两 plane 同时 block+1/page0，两者都要判。序列期间元数据提交被门控，旧页不会被擦 ⇒
 预取页内容仍等于当前映射内容；窗口内 `collect + submit` 无泵插入。
 
-实测（2026-10-31，v1.06）：`cr=27435/105840/2583/430/0` ⇒ 段长 **41 pair/start**；预取 started=hits=2891（100% 命中），128 pair 上限与 region 边界都不是限制——限制在**物理不连续**（分配器按动态 WL 选块，见 `known_iss.md` ISS-FTL-13）。
+实测（2026-10-31，v1.06）：`cr=27435/105840/2583/430/0` ⇒ 段长 **41 pair/start**；预取 started=hits=2891（100% 命中），128 pair 上限与 region 边界都不是限制——限制在**物理不连续**（分配器按动态 WL 选块，见 `known_open_items.md` ISS-FTL-13）。
 
 #### 3.16.5 写序列
 
@@ -4358,7 +4359,7 @@ sequenceDiagram
 #### 3.16.9 主流对照
 
 设备 cache 序列（`0x31/0x3F`、`15h/10h`）的器件语义见 Linux MTD rawnand 与 MT29F4G08
-datasheet（`docs/reference/README.md` §F1 / §C4；`include/nand/onfi_1_0.h:230-282`）。
+datasheet（`docs/reference/README.md` §F1 / §C4；`include/nand/onfi_1_0.h`）。
 
 主机侧写缓存语义（volatile write cache）与延迟错误（deferred error）来自 SCSI 的
 写缓存模型：写命令在数据进入设备缓冲后即可完成，NAND 提交失败不在原命令上报。
@@ -4376,7 +4377,7 @@ RAM 里的写合并缓存，未确认数据直接落在 NAND 页里，靠读覆�
 **FUA（不实现，用户裁决 2026-11-01）**：WRITE(10) 的 CDB byte1 bit3 是 FUA（T10 SBC-3
 §5.26：FUA=1 ⇒ 设备不得在数据真正写到介质前返回 GOOD，见 `docs/reference/README.md`
 §外部规范）。本仓**忽略**该位，依赖主机 fsync 的后续 `SYNCHRONIZE CACHE` 作为持久性
-屏障；取舍与恢复要点见 `known_risks.md` RISK-USB-05。
+屏障；取舍与恢复要点见 `known_open_items.md` RISK-USB-05。
 
 `SYNCHRONIZE CACHE` 在正常路径会先把序列 padding 收尾，并等 Journal 与 L2P 都落盘；
 L2P 区域写回现在按 **WAL 次序**等覆盖其映射的 Journal 条目先落盘（§3.6 不变量 8），
@@ -4975,7 +4976,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
    **不读** `*.handle.phase` / `waiting` / `active`。诊断 CLI 是唯一例外（只读、不参与控制流）。
 4. 超时四层归属：NAND/FC 操作超时在引擎；FTL 模块等待用自持 ms deadline；
    周期触发用 `last_run_ms` / `next_ms`；系统 liveness 用 IWDG（30 s，不在 ISR 喂狗）。
-5. 契约落地状态以 `known_risks.md` RISK-ARCH-10/11 与 `known_iss.md`
+5. 契约落地状态以 `known_open_items.md` RISK-ARCH-10/11 与 `known_open_items.md`
    ISS-ARCH-01/02 为准（RISK-ARCH-06 已于 2026-10-25 闭合，明细见
    `docs/archive/known_risks_batches.md` §2026-10-25）；逐模块细节归档在
    `docs/archive/ftl_module_contracts.md`。
@@ -5053,7 +5054,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 （AXI_RAM 384 KB + DTCM 128 KB + ITCM 64 KB 预算；DTCM 放 `g_ftl`/wbuf/journal/md/FC
 命令热数据，ITCM 放 host 数据路径/FC/NAND 热代码；明细见
 `docs/archive/multi_lun_generalization.md` §5 与 §8）。
-跨 LUN superblock 条带 / 跨 LUN GC/WL **未实现**（`known_iss.md` ISS-FTL-12 / ISS-ML-04）。
+跨 LUN superblock 条带 / 跨 LUN GC/WL **未实现**（`known_open_items.md` ISS-FTL-12 / ISS-ML-04）。
 
 ### 5.5 不变量清单
 
@@ -5291,7 +5292,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
-| 出处 | [`storage_controller_design_essentials.md`](storage_controller_design_essentials.md) 的调度形态；SPDK core poller 对照；`include/ftl/bg_scheduler.h` |
+| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；`include/ftl/bg_scheduler.h` |
 
 ### ADR-17 读写 run：FTL 构链，FC 执行 chain
 
@@ -5301,10 +5302,10 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 选项 | 依赖“全 FTL 命令走 SQ 且连续入队”的全局假设 / FTL 逐条提交并 defer 插入者 / **整条 run 标成 FC chain，控制器锁 LUN** |
 | 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，`ftl_op_submit_batch()` 原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨轮次保留、另一队列回推，END 才解锁 |
 | 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨轮次的 owner 状态解决“HSQ 插入劈开序列”（ISS-CACHE-01）；FC 侧复用既有 chain 机制，**无新增功能代码** |
-| 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_scheduler.h`），不是行业标准形态 |
+| 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_nand_dispatch.c`），不是行业标准形态 |
 | 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
 | 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
-| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`src/fc/internal/fc_internal.h:26-44`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
+| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`src/fc/internal/fc_internal.h`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
 
 > 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
 > `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
@@ -5314,7 +5315,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 > 相关注释；chain 路径此前仅 UT 覆盖，首启用必须上板验证跨轮次 owner / HSQ 回推 /
 > 失败页状态（R2：建链类改动）。
 >
-> ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_risks.md` RISK-IF-06）。
+> ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_open_items.md` RISK-IF-06）。
 
 ---
 
@@ -5326,8 +5327,8 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 ### 7.1 未验证状态
 
-当前未实现 / 未验证项见 `docs/design/known_iss.md`；缺陷与残余风险见
-`docs/design/known_risks.md`。本节原表是历史验证快照，已移入
+当前未实现 / 未验证项见 `docs/design/known_open_items.md`；缺陷与残余风险见
+`docs/design/known_open_items.md`。本节原表是历史验证快照，已移入
 `docs/archive/ftl_design_verification_history.md`。
 
 ### 7.2 已知限制
@@ -5351,7 +5352,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | CLOCK-pro / 自适应预取未实现 | 热点命中率有提升空间 | 顺序读单 region 预取已实现；自适应/多 region 预取未做；见 §3.6 |
 | 读路径不查 Journal overlay | thrashing 下多一次 region load | 独立改造，未纳入当前范围 |
 | GC Bitmap（Layer 2）未实现 | 掉电后 GC 从头重搬 | 用“擦除前 flush Journal”闭合等价窗口 |
-| Cache Program 仅限 host 16 KiB / GC 全 pair 批次 | 小请求、静态 WL、跨块边界仍走普通 multi-plane | 15h 中间页不确认；失败关闭目的 SB；掉电注入未做（见 `known_risks` RISK-CACHE-02） |
+| Cache Program 仅限 host 16 KiB / GC 全 pair 批次 | 小请求、静态 WL、跨块边界仍走普通 multi-plane | 15h 中间页不确认；失败关闭目的 SB；掉电注入未做（见 `known_open_items` RISK-CACHE-02） |
 | N=4 未就绪 | SRAM12/3/4 装不下 4 实例 | 需要表瘦身或 SDRAM；N=2 已能链接 |
 | SDRAM 未启用 | 无外置大缓冲 | 链接脚本无 SDRAM 段；`sdram_init` 无调用点 |
 | 无 NVMe host / RTOS | host 入口是 UART CLI | 有意不实现；学习主控的同步等待足够 |

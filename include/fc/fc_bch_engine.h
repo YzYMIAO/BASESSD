@@ -60,7 +60,7 @@ void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, BY
  * @return true  解码完成（可能纠正了 0..t 个错误）
  *         false 不可纠
  * @note 入参前置违反（len 超码长 / data、recv_ecc 为空）一律 ASSERT
- *       （见 assertion_guidelines.md §十五）。
+ *       （见 `docs/archive/assertion_rounds.md`）。
  * @note errloc[i] < 8*len 为数据区错误，errloc[i] >= 8*len 为 ECC 区错误；
  *       纠正方式 data[errloc/8] ^= (1 << (errloc%8))。
  */

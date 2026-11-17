@@ -70,21 +70,21 @@
  * 命令地址**按 munit 种子抽样**（block / page；plane 由用例钉死），与 lifecycle 同路：
  * 每轮拿到不同的加扰种子与 USER 图案，而不是所有用例挤在同一个固定页上。
  *
- * ⚠ 为什么必须加 salt：munit 每次 exec 前把 PRNG 重置回 runner->seed（munit.c:774），
+ * ⚠ 为什么必须加 salt：munit 每次 exec 前把 PRNG 重置回 runner->seed（munit.c），
  *   而导出的 munit_rand_* **不带盐** ⇒ 用例体内的**第一次**抽样在所有用例之间取值完全
  *   相同。故每次抽样异或进 `hash(用例名) ^ hash(用途标签)`：前者让**用例之间**互异，
  *   后者让**同一用例内各用途**互异。复现契约 = (seed, 用例名, 第几次抽样)。
  * ⚠ 本层**不碰介质**（见文件头）——地址只喂两样：**加扰种子**（fc_random_seed_from_meta）
  *   与 **USER 区的 PAA 图案**（test_fill_user_paa）。所以收益是「14 条用例拿到 14 组不同的
  *   种子 / 图案」，**不是** lifecycle 那种「地址错值编译期无声」的风险。之所以仍值得做：本层
- *   多数用例是 MUNIT_TEST_OPTION_SINGLE_ITERATION（munit.c:765-767 把迭代数硬压成 1）
+ *   多数用例是 MUNIT_TEST_OPTION_SINGLE_ITERATION（munit.c 把迭代数硬压成 1）
  *   ⇒ `--iterations N` 对它们无效，用例体内抽样是唯一的加量杠杆。
  * ⚠ 不设窗口：lifecycle 的 30%~70% 是为了避开固定元数据区，而本层不写介质、那理由不成立，
  *   故用整段 [0, BLOCKS_PER_PLANE) / [0, PAGES_PER_BLOCK)，与 test_scramble_whiten 同口径。
  *
  * 抽样结果必须打出来（见 l2_addr_draw）——它是 (seed, 用例名) 的纯函数，不打就无从复现。 */
 
-/** DJB2，与 munit.c:386 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
+/** DJB2，与 munit.c 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
 static DWORD l2_hash(const char *s)
 {
     DWORD h = 5381U;
@@ -297,7 +297,7 @@ static BYTE l2_buffer_round_trip(const nand_addr_s *addr, DWORD cw_bitmap, BYTE 
  * "只开 CRC" 就是只调 meta_write + crc_write——不调 scramble、不调 ecc_encode，
  * 于是不需要任何 config 位，也不需要 LDPC_RAW 去绕开 ECC 把注入的 bit 纠回去。
  *
- * fc_crc_compute(cw + 8) 只吃 **FC_CRC_USER_SIZE = 512** 字节（fc_crc_engine.c:125），
+ * fc_crc_compute(cw + 8) 只吃 **FC_CRC_USER_SIZE = 512** 字节（fc_crc_engine.c），
  * 存的值在 cw[4..8)，两者都不碰 META[0,4) 与 parity[520,528) ⇒ 这四处**期望不同**，
  * 是四个分支，不是一个断言的四种输入 —— 所以走参数化，不用随机采样：
  *
@@ -328,7 +328,7 @@ static const char *l2_crc_case_names[] = {"user-1", "crc-field-1", "meta-1", "pa
 
 _Static_assert((sizeof(l2_crc_case_names) / sizeof(l2_crc_case_names[0]) - 1U) == (sizeof(l2_crc_cases) / sizeof(l2_crc_cases[0])), "l2_crc_case_names 与 l2_crc_cases 数量不符");
 
-/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+/* MunitTest.parameters 是**非 const** 指针（munit.h）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_crc_params[] = {
     {"case", l2_crc_case_names},
     {  NULL,              NULL},
@@ -644,7 +644,7 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
  * 只钉两条恒成立的不变式（失败必须原子 / 纠正数不得超过 t）。
  *
  * 注入位置走框架 PRNG 并逐个打印：失败时按 seed 重放或直接按位置复现。
- * ⚠ 框架默认种子是 time() 派生的（munit.c:1395），每次跑都不同 ⇒ 任何"超能力错误
+ * ⚠ 框架默认种子是 time() 派生的（munit.c），每次跑都不同 ⇒ 任何"超能力错误
  *   必然不可纠"的断言都会偶发红灯。
  *
  * 本用例**不设** SINGLE_ITERATION ⇒ 可用 `--iterations N` 给每个场景多抽几组注入
@@ -725,7 +725,7 @@ static void l2_ecc_flip(BYTE *cw, DWORD lo, DWORD hi, DWORD k)
  * expect 语义：
  *   EXACT —— 必可纠：status == OK、纠正数 == d_k + p_k、缓冲区回到基准。
  *            回比长度由 p_k 定：p_k == 0 ⇒ parity 没被动过，比整块 528B；
- *            p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c:179-186），
+ *            p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c），
  *            parity 字节**不回写**，只比数据区 520B。
  *   BOUND —— 超能力：结果不确定，只钉不变式（见用例体）。
  *
@@ -781,7 +781,7 @@ static const char *l2_ecc_case_names[] = {
 
 _Static_assert((sizeof(l2_ecc_case_names) / sizeof(l2_ecc_case_names[0]) - 1U) == (sizeof(l2_ecc_cases) / sizeof(l2_ecc_cases[0])), "l2_ecc_case_names 与 l2_ecc_cases 数量不符");
 
-/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+/* MunitTest.parameters 是**非 const** 指针（munit.h）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_ecc_params[] = {
     {"case", l2_ecc_case_names},
     {  NULL,              NULL},
@@ -807,7 +807,7 @@ static const l2_ecc_case_s *l2_ecc_case_find(const char *name)
  *   inj —— 仅 BOUND 用：**注入后、解码前**的快照，用来验"失败必须原子"
  *
  * 一个用例跑遍场景表（`case` 参数选行）：每组一次独立的 setup/tear_down，失败互不遮蔽。
- * ⚠ 运行器在**每条参数化用例**开头都用同一个 `runner->seed` 重置 PRNG（munit.c:774 / :1125）
+ * ⚠ 运行器在**每条参数化用例**开头都用同一个 `runner->seed` 重置 PRNG（munit.c / :1125）
  *   ⇒ 本用例各 `case` 都从**同一段**随机流起抽 ⇒ 注入位置**逐 case 嵌套**（data-4 ⊇ data-3
  *   ⊇ data-2，beyond-5 ⊇ data-4）。是"每次多一个错"的叠加，不是 N 组独立抽样。
  * ecc_bits 预置 0xAA 当哨兵——证明解码**确实写了**它，而不是"恰好为 0"（哨兵取 0 就分不开）。 */
@@ -863,8 +863,8 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
         /* 超能力：BCH 允许误纠 ⇒ 只钉两条**恒成立**的不变式，不钉结果。
          * ① 失败必须原子：IO_ERROR 时缓冲一字节不动（对照**注入后**快照 inj，
          *    **不是**干净码字 ref——cw 本来就带 5 个错 bit，跟 ref 比永远不等）、
-         *    且纠正数为 0——IO_ERROR 在翻转循环**之前**就 return（fc_ldpc_engine.c:168-170），
-         *    而 err_bits 早在 fc_ldpc_decode 入口就被置 0（fc_ldpc_engine.c:139）⇒
+         *    且纠正数为 0——IO_ERROR 在翻转循环**之前**就 return（fc_ldpc_engine.c），
+         *    而 err_bits 早在 fc_ldpc_decode 入口就被置 0（fc_ldpc_engine.c）⇒
          *    既没被写坏、也不是"没写"。
          * ② 纠正数不得超过 t=4：errloc[4] 定长，BM 至多 t 个根。 */
         if (status == FC_STATUS_IO_ERROR)
@@ -885,7 +885,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
      *    · 纠正数**恰好等于**注入数：多纠 = 纠到了没坏的位置，比漏纠更危险；
      *    · 缓冲区逐字节回到基准（回比长度见下）。
      * ⚠ 回比长度看 parity 有没有被动过：p_k == 0 ⇒ parity 是干净的，整块 528B 都要比；
-     *   p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c:182），parity 字节
+     *   p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c），parity 字节
      *   **不回写**，只能比数据区 520B。 */
     munit_assert_int(status, ==, FC_STATUS_OK);
     munit_assert_uint8(ecc_bits, ==, total);
@@ -897,7 +897,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 /*************************************************************************
  *  fc_data_path_encode 测试
  *
- *  验证管线（Stage 3 跨命令 stripe RAID 已移出，见 fc_data_path.c:191）：
+ *  验证管线（Stage 3 跨命令 stripe RAID 已移出，见 fc_data_path.c）：
  *     Data → META → CRC? → Random 加扰? → ECC 编码
  *
  *  这几条**只 encode、不 process_read**：查的是编码产物本身。
@@ -941,7 +941,7 @@ static const char *l2_enc_case_names[] = {
 
 _Static_assert((sizeof(l2_enc_case_names) / sizeof(l2_enc_case_names[0]) - 1U) == (sizeof(l2_enc_cases) / sizeof(l2_enc_cases[0])), "l2_enc_case_names 与 l2_enc_cases 数量不符");
 
-/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+/* MunitTest.parameters 是**非 const** 指针（munit.h）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_enc_params[] = {
     {"case", l2_enc_case_names},
     {  NULL,              NULL},
@@ -1049,7 +1049,7 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
  *                              ↓ 否
  *                        不解扰，返回 IO_ERROR
  *
- *  ⚠ Pass 3/Pass 4 只置 desc status 位、**不改返回值**（fc_data_path.c:551 恒返回 OK），
+ *  ⚠ Pass 3/Pass 4 只置 desc status 位、**不改返回值**（fc_data_path.c 恒返回 OK），
  *    所以"读成功"必须查 desc->status，只看返回值会漏掉 CRC / META 校验回归。
  *  ⚠ Pass 2「解扰」的条件是**全部 CW 都通过 ECC**——有一条失败就整条命令都不解扰，
  *    未破坏的 CW 也停在加扰态（见 test_process_read_unc 的断言）。
@@ -1094,7 +1094,7 @@ static const char *l2_rt_case_names[] = {
 
 _Static_assert((sizeof(l2_rt_case_names) / sizeof(l2_rt_case_names[0]) - 1U) == (sizeof(l2_rt_cases) / sizeof(l2_rt_cases[0])), "l2_rt_case_names 与 l2_rt_cases 数量不符");
 
-/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+/* MunitTest.parameters 是**非 const** 指针（munit.h）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_rt_params[] = {
     {"case", l2_rt_case_names},
     {  NULL,             NULL},
@@ -1359,7 +1359,7 @@ static MunitResult test_process_read_meta_error(const MunitParameter params[], v
 
     /* 页内 META 此刻是「命令声明的页」| plane_cw（encode Stage 0 写的）。把**命令声明的页**
      * 换成**同 page / 同 plane、block 环移一格**的那一页：低 3 位（plane/cw）不变 ⇒ 自洽
-     * 校验①仍过，命中的是第二项校验②——它比的是 command->meta（fc_data_path.c:562），
+     * 校验①仍过，命中的是第二项校验②——它比的是 command->meta（fc_data_path.c），
      * 不是 desc->meta。
      * ⚠ 篡改点必须落在 PLANE_CW_MASK（0x7）**之上**：lba_to_meta() 会掩掉低 3 位再
      *   OR 回真实 plane/cw，动低 3 位等于什么都没改（`+1 页` 就是 `+4`，正好落在
@@ -1478,8 +1478,8 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *  验证管线：RAID XOR 重建 → ECC 重试 → 解扰所有 CW
  *
  *  ⚠ 本层构造不出真 stripe：fc_data_path_raid_recover 只收集**单条命令**的 desc 链
- *    （fc_data_path.c:591），而 parity CW 在另一条命令的链上（fc.c:888/924-933）；
- *    跨命令适配是 include/fc/fc_raid_engine.h:22 的未办事项。故这里用「4 个数据 CW
+ *    （fc_data_path.c），而 parity CW 在另一条命令的链上（fc.c）；
+ *    跨命令适配是 include/fc/fc_raid_engine.h 的未办事项。故这里用「4 个数据 CW
  *    的退化 stripe」，靠 pattern 异或为 0 还原被擦 CW。真 stripe 覆盖见
  *    test_generate_stripe_parity。
  *
@@ -1497,7 +1497,7 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
 /** 退化 stripe 的恢复流程（random=OFF 才成立，理由见上面的节头）：
  *   ① 4 个 CW 的 USER 区各填**不同** pattern —— 相同 pattern 下"XOR 还原"与"根本没动"
  *      分不开
- *   ② encode —— META / CRC / ECC 都写齐（RAID XOR **不在** encode 里做，fc_data_path.c:191）
+ *   ② encode —— META / CRC / ECC 都写齐（RAID XOR **不在** encode 里做，fc_data_path.c）
  *   ③ 把 error_idx 那条 CW 的**整 528B** 翻成 0xFF —— 远超 BCH 能力 ⇒ 必然不可纠，
  *      保证走的是"XOR 重建"而不是"ECC 顺手纠回来"（后者会让用例假过）
  *   ④ fc_data_path_raid_recover(cmd->cmd_id, error_idx)：XOR 重建 → ECC 重试 → 解扰
@@ -1519,7 +1519,7 @@ static void do_raid_recover_test(const nand_addr_s *addr, BYTE random_mode, BYTE
         memset(test_cw_user(cmd, i), (0x10U + i), FC_BUFFER_USER_SIZE);
     }
 
-    /* encode：META + CRC + 加扰? + ECC（RAID 不在 encode 里做，见 fc_data_path.c:191） */
+    /* encode：META + CRC + 加扰? + ECC（RAID 不在 encode 里做，见 fc_data_path.c） */
     munit_assert_int(fc_data_path_encode(cmd->cmd_id), ==, FC_STATUS_OK);
 
     /* 破坏指定 CW（全 CW 528B 翻转，使 ECC 不可纠） */
@@ -1736,7 +1736,7 @@ static const char *l2_bm_case_names[] = {
 
 _Static_assert((sizeof(l2_bm_case_names) / sizeof(l2_bm_case_names[0]) - 1U) == (sizeof(l2_bm_cases) / sizeof(l2_bm_cases[0])), "l2_bm_case_names 与 l2_bm_cases 数量不符");
 
-/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+/* MunitTest.parameters 是**非 const** 指针（munit.h）⇒ 本数组不能声明成 const。 */
 static MunitParameterEnum l2_bm_params[] = {
     {"case", l2_bm_case_names},
     {  NULL,             NULL},

@@ -242,7 +242,7 @@ static volatile ssd_status_e s_io_status;
 
 /* 让在飞命令收敛：停掉后台新任务，泵到 FC 池/CQ/ctx 全空。
  * ⚠ 必须在 ftl_init 前做：否则旧 CP/Journal 的迟到完成会在新实例上触发
- *    `h->waiting != 0` 断言（checkpoint.c:587）。
+ *    `h->waiting != 0` 断言（checkpoint.c）。
  * ⚠ 返回时 `bg_suspend` 仍为 1：调用者按需恢复。 */
 /**
  * @brief 把「已到期但还没启动」的后台 CP 在 fixture 里落定

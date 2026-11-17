@@ -200,7 +200,7 @@ static BOOL cache_read_pair_resident(const ftl_ctx_s *ftl, DWORD base)
  * 两种合法形态（READ PAGE CACHE SEQUENTIAL 31h **不带地址**，由器件内部自增取下一页）：
  *   · 同 block 且 page + 1；
  *   · 每个 plane 都到 block + 1 且 page == 0——31h 在 block 末页之后进入下一个
- *     logical block（`docs/reference/datasheet_mt29f_cache_ops.md` §2）。
+ *     logical block（MT29F4G08 datasheet「Read Cache Operations」节（链接见 `docs/reference/README.md`））。
  * two-plane 的 31h 让「每个已寻址 plane」各前进一页 ⇒ 两 plane 必须**同时**成立。
  * 跨 die/LUN 由 probe 的同拓扑检查挡住（31h 禁止跨 die）。
  *
@@ -1050,8 +1050,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
 
     // 序列允许 1 页窗口（含开新序列）：Journal 顺序页配额（63 pair）与物理 block
     // （64 页）不同长，块尾 1..3 页必须能开序列才能续上——写 cache program 的
-    // 44/48h 每条自带地址，序列跨 block 合法（`docs/reference/datasheet_mt29f_cache_ops.md`
-    // §5/§6）。少于 4 页的窗口只有块尾/命令尾两种情况，不增加 START 频次。
+    // 44/48h 每条自带地址，序列跨 block 合法（MT29F4G08 datasheet
+    // 「Program Page Cache」节（链接见 `docs/reference/README.md`））。少于 4 页的窗口只有块尾/命令尾两种情况，不增加 START 频次。
     const DWORD min_pages    = 1U;
     const DWORD remain_pages = remain / FTL_LBA_PER_PAIR;
 
@@ -1237,7 +1237,8 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
     // 断点：**Journal 顺序页写满** / D4 / 命令尾不足一个 pair（尾 1..7 LBA 只能走普通写，
     // 用 cmd_remaining 提前在数据页上 END）。**host 传输段、host 命令与物理 block 边界
     // 都不是断点**——写 cache program 的 44/48h 每条自带地址，序列跨 block 合法
-    // （`docs/reference/datasheet_mt29f_cache_ops.md` §5/§6）；窗口按 Open SB 剩余 clamp
+    // （MT29F4G08 datasheet「Program Page Cache」节，链接见 docs/reference/README.md）；
+    // 窗口按 Open SB 剩余 clamp
     // （一次构建不跨 SB，保 `alc_super_open_rewind_pair` 的回滚前提），下一个窗口由
     // `alloc_pair` 关旧块、开新块后继续同一序列。没有数据页时由 padding END 收尾。
     const DWORD after     = lba + (n_pages * FTL_LBA_PER_PAIR);

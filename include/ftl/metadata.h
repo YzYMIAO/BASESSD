@@ -101,7 +101,7 @@
  *      = 65,536 × 池块数 ÷ 每份页数（数据块基准 = 2,097,152）。
  *      目录检查点：16 页/份 ÷ 32 块 ⇒ 131,072（数据块的 1/16）。
  *      选 32 不是为了磨损（本仓远未到该量级），而是**主控形态**：固定根 +
- *      专用元数据块池（见 docs/design/storage_controller_design_essentials.md §一/§5.7）。
+ *      专用元数据块池（见 docs/design/storage_controller_design.md §一/§5.7）。
  *
  * ⚠ **每个 (ch,ce,lun) 用同一份块号**：本 FTL 是"分片模型"——每个 die 一个完整
  *   独立实例（各自的 L2P 表/目录检查点/BBT/Journal/Checkpoint），主机 LBA 空间
@@ -289,7 +289,7 @@ static inline BOOL ftl_is_l2p_log_gblock(WORD g)
  * 都必须把 BASE +1。开机 cp_pool_find_latest / dir_ckpt_page_valid 都校验它；不符
  * （或介质上根本没有当前版本的 Checkpoint）⇒ pfr_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
- * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
+ * 版本演进表见 docs/design/revision_history/ftl_revision_history.md「介质布局版本」。 */
 #define FTL_MEDIA_LAYOUT_VERSION_BASE (14U) /* v14：目录检查点页头 +dirty_gen（整条记录的页间一致性校验） */
 
 /*

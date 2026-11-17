@@ -1,22 +1,26 @@
 # 存储主控设计要点
 
 > **本文档性质**：存储主控（SSD / flash controller）**设计要点手册**——按 §26 分层组织，
-> 逐层给出**要决定什么 / 主流怎么做 / 场景差异 / 代价**。它是**知识参照**，不是本仓设计文档：
-> 本仓的落地以 [`fc_nand_design.md`](fc_nand_design.md)（FC/NAND）与 [`ftl_design.md`](ftl_design.md)（FTL）为准。
+> 逐层给出「要决定什么 / 主流怎么做 / 场景差异 / 代价」。
 >
-> **组织原则**（贯穿全文）：
-> 1. **分层**：照 [`fc_nand_design.md`](fc_nand_design.md) §26——HIL / FTL / FCC(硬件) / DRAM + 队列 + 门铃 + 完成；
->    器件侧再往下是 ONFI/Toggle 总线 → NAND die。
-> 2. **三条主线**：**数据面**（数据怎么走）、**控制面**（命令怎么排、怎么发、怎么回收）、**可靠性面**（怎么保证不出错、出错怎么救）。
-> 3. **场景轴**：同一个问题，消费级 / 企业级 / 数据中心 / 移动 / 嵌入式 / ZNS 的答案不同——**没有对错，只有约束下的取舍**。
+> 本仓的落地设计以 [`fc_nand_design.md`](fc_nand_design.md)（FC/NAND）与
+> [`ftl_design.md`](ftl_design.md)（FTL）为准；本文是知识参照，不是本仓设计文档。
 >
-> **用法**：设计一个功能前，先在 §十一「取舍清单」定位它属于哪一层、哪条主线；再用 §九「场景对照」问自己的约束是什么。
+> 组织原则：**分层**（HIL / FTL / FCC / DRAM + 队列 + 门铃 + 完成）、
+> **三条主线**（数据面 / 控制面 / 可靠性面）、**场景轴**（消费 / 企业 / 移动 / 嵌入式 / ZNS）。
 >
-> ⚠ **协议细节以规范原文为准**：本文对命令码/时序/字段的描述是**导航性质**，不替代 ONFI/JEDEC/NVMe 原文
-> （本仓有教训：别凭记忆说「协议要求」，见记忆 `no-unverified-protocol-claims`）。
->
-> 配套：[`storage_controller_learning.md`](storage_controller_learning.md)（学习路线 + 开源对照）、
-> [`../reference/README.md`](../reference/README.md)（离线资料）。
+> ⚠ 协议细节以规范原文为准：本文对命令码/时序/字段的描述是导航性质，不替代 ONFI/JEDEC/NVMe 原文。
+
+## 阅读路径
+
+| 你的目的 | 从这里开始 |
+|---|---|
+| 快速总览 | §〇 一页速览 |
+| 查器件 / 协议 | §二 器件、§三 NAND 接口 |
+| 查 FC / FTL / HIL | §四 FCC、§五 FTL、§六 HIL |
+| 查调度 / 可靠性 | §七 调度与 QoS、§八 可靠性 |
+| 做设计审查 | §十一 取舍 checklist |
+| 找开源项目 / 论文 | 附录参考资料 |
 
 ---
 
@@ -66,7 +70,7 @@
 3. **并行与调度**：单颗 NAND 慢（tR ~25μs、tPROG ~600μs），主控靠**多通道 × 多 CE × 多 LUN × 多 plane**
    的并行把带宽堆上去，并靠队列/调度保证延迟与公平。
 
-### 1.2 三种「主机接口形态」（§26.1）
+### 1.2 主机接口形态（§26.1 三种代表 + 扩展）
 
 | 形态 | 提交 | 完成 | 描述符 | 典型场景 |
 |---|---|---|---|---|
@@ -76,7 +80,7 @@
 | **UFS** | SCSI 命令 + MCQ 队列 | 完成 + 中断 | UPIU 承载 | 移动旗舰 |
 | **ZNS / OCSSD** | 裸写指针 / zone append | 完成队列 | 极简，设备侧几乎无 FTL | 数据中心（主机托管 FTL） |
 
-**三者的共同点**（§26.1）：设备侧固件最终拿到的都是**一条「已解析的请求」**——
+**共同点**（§26.1）：设备侧固件最终拿到的都是**一条「已解析的请求」**——
 目标 LBA/地址 + 数据缓冲指针 + 操作类型。「访问哪些物理单元、数据怎么搬」全是**固件**的事；
 硬件接口只负责「把请求排队、按序执行、回一个完成」。
 
@@ -198,8 +202,8 @@ channel（通道，主控的一组数据总线）
 | 电平 | NV-DDR / NV-DDR2 / NV-DDR3 | Toggle 1.0 / 2.0 / 3.0 |
 | 关系 | 二者**信号语义趋同**，现代器件多双支持 | 同上 |
 
-> **本仓是 ONFI 1.0**（见 `fc_nand_design.md` §3.3）。⚠ 记忆教训：**ONFI 1.0 全文无 "plane" 一词**，
-> multi-plane 是**器件侧特性**，不是 1.0 协议内容（见记忆 `onfi-1-0-no-multi-plane`）。
+> **本仓是 ONFI 1.0**（见 `fc_nand_design.md` §3.3）。⚠ 注意：**ONFI 1.0 全文无 "plane" 一词**，
+> multi-plane 是**器件侧特性**，不是 1.0 协议内容。
 
 ### 3.2 命令集（导航用，具体码以器件/规范为准）
 
@@ -223,15 +227,20 @@ channel（通道，主控的一组数据总线）
 
 ### 3.3 一次页读的完整序列（判据动作）
 
-```
-① 发 00h（命令）
-② 发 5 个地址周期（column 2 + row 3；本仓地址周期数 = 0x23 → 2 列 + 3 行）
-③ 发 30h（启动读）
-④ 等 R/B# 拉高（或轮询 70h 状态）
-⑤ 发 05h → 读数据（可选 E0h 进入 cache read 循环）
+```mermaid
+sequenceDiagram
+    participant H as 主控 FCC 时序单元
+    participant D as NAND die
+    H->>D: ① 00h（READ）
+    H->>D: ② 5 个地址周期（column 2 + row 3）
+    H->>D: ③ 30h（启动读）
+    D-->>H: ④ R/B# 拉高（或轮询 70h 状态）
+    H->>D: ⑤ 05h（读数据）
+    D-->>H: 数据输出
+    Note over H,D: 可选 E0h 进入 cache read 循环
 ```
 
-> **学会判据**：能不看资料写出这五步（含命令码与地址周期）。
+> **判据动作**：能不看资料写出这五步（含命令码与地址周期）。
 
 ### 3.4 并行与加速机制
 
@@ -288,13 +297,19 @@ channel（通道，主控的一组数据总线）
 
 ### 4.2 拓扑：并行的来源
 
-```
-主控 ─┬─ channel 0 ─┬─ CE0 ─┬─ LUN0 ─┬─ plane0
-      │             │       │        └─ plane1
-      │             │       └─ LUN1 ─ …
-      │             └─ CE1 ─ …
-      ├─ channel 1 ─ …
-      └─ channel N …
+```mermaid
+flowchart TB
+    M["主控"] --> C0["channel 0（独立总线）"]
+    M --> C1["channel 1 …"]
+    M --> CN["channel N …"]
+    C0 --> CE0["CE0（独立片选）"]
+    C0 --> CE1["CE1（独立片选）"]
+    CE0 --> L0["LUN0（独立执行）"]
+    CE0 --> L1["LUN1（独立执行）"]
+    L0 --> P0["plane0"]
+    L0 --> P1["plane1"]
+    C1 --> CE2["CE …"]
+    CN --> CE3["CE …"]
 ```
 
 - **每增加一层并行 = 一条独立的时序执行能力**：channel 独立总线、CE 独立片选、LUN 独立命令执行、plane die 内并行。
@@ -332,7 +347,7 @@ channel（通道，主控的一组数据总线）
 
 - **目标**：检测数据在**传输/搬运**过程中是否被破坏（与 ECC 纠错互补：CRC 检错、ECC 纠错）。
 - **位置**：常加在用户数据段，端到端保护（见 §八）。
-- ⚠ 本仓踩坑：CRC 硬件基址曾写错导致**自始静默失效**（见记忆 `fc-crc-base-addr-wrong`）——硬件外设接错基址不会报错。
+- ⚠ 本仓踩坑：CRC 硬件基址曾写错导致**自始静默失效**——硬件外设接错基址不会报错。
 
 ### 4.7 数据通路：DMA vs PIO
 
@@ -341,13 +356,13 @@ channel（通道，主控的一组数据总线）
 | **PIO** | CPU 逐字节/字搬 | 简单、可控 | 占 CPU、慢 |
 | **DMA** | DMA 引擎搬 | 释放 CPU、快 | 复杂（一致性/缓存）、调试难 |
 
-> ⚠ 本仓 `CONFIG_NAND_DMA=0`（PIO 路径）；PIO 路径有 `__DMB` 内存屏障教训（见记忆 `pio-dmb-debug-session`）。
+> ⚠ 本仓 NAND/FMC 数据面**固定 PIO**（FMC NAND 无专用 DMA 请求线）；DMA 抽象只保留 UART TX。PIO 路径有 `__DMB` 内存屏障约束，顺序敏感处必须显式屏障。
 
 ### 4.8 时序执行单元（微码状态机）
 
 - 一条 NAND 命令 = 一串**微操作 (uop)**：发命令码 → 发地址周期 → 等 R/B# → 读写数据。
 - **issue / wait / fetch 三段拆分**（本仓）：把「发起」与「等待」解耦，才能让多个 LUN 并发（等 A 的 R/B# 时去发起 B）。
-- **R/B# 等待**：可轮询 GPIO 或 70h 状态；本仓落**纯 GPIO 轮询 + 显式延迟**（见记忆 `70h-polling-wait-ready`）。
+- **R/B# 等待**：可轮询 GPIO 或 70h 状态；本仓落**纯 GPIO 轮询 + 显式延迟**。
 
 ### 4.9 RAID / XOR 恢复
 
@@ -368,9 +383,9 @@ channel（通道，主控的一组数据总线）
 | 方案 | 映射粒度 | 表大小 | 写放大 | 适用 |
 |---|---|---|---|---|
 | **块级 (BFTL)** | 逻辑块 → 物理块 | 小 | 高（改一页搬整块） | 极简/小内存 |
-| **页级 (DFTL)** | 逻辑页 → 物理页 | 大 | 低 | 主流 SSD |
+| **页级** | 逻辑页 → 物理页 | 大 | 低 | 主流 SSD |
 | **混合 (FAST)** | 数据块用块级 + 日志块用页级 | 中 | 中 | 折中 |
-| **DFTL** | 页级表**按需分页**到 SRAM | 可控 | 低 | **DRAM-less** |
+| **DFTL** | 页级表按需分页到 SRAM（页级映射的一种缓存实现） | 可控 | 低 | **DRAM-less** |
 | **学习式 (LeaFTL)** | 用回归预测映射 | 极小 | 视情况 | 研究前沿 |
 
 > **本仓**：纯页级 + DRAM-less（SRAM region cache + NAND 兜底）。
@@ -408,6 +423,19 @@ channel（通道，主控的一组数据总线）
 - **预擦除池 (pre-conditioned pool)**：后台提前擦好一批块，前台 IO 不用等 GC。
 - **成本-收益 (cost-benefit)**：`(1-valid) × age / (1+erase_count)` 类公式。
 - **场景**：消费级容忍 GC 抖动；企业级要**稳态性能**（GC 不能拖垮尾延迟）。
+
+**GC 循环**
+
+```mermaid
+flowchart LR
+    A["触发：free 水位 / 写入计数 / 磨损比"] --> B["选 victim（有效页最少 / 多维加权）"]
+    B --> C{"victim 有有效页？"}
+    C -- 是 --> D["搬有效页到新块"]
+    C -- 否 --> E["直接擦除"]
+    D --> E
+    E --> F["块回到 free pool"]
+    F --> A
+```
 
 > 本仓 victim 已改为**多维加权**（valid / erase / temp / age，P1-1 已落地），
 > 见 `ftl_design.md` §3.13。
@@ -471,14 +499,23 @@ channel（通道，主控的一组数据总线）
 
 ### 6.2 队列 + 门铃 + 完成 + 中断（所有现代接口的共同骨架）
 
-```
-主机                              设备
- │  ① 把命令写进 SQ（Submission Queue）  │
- │  ② 写 doorbell 寄存器 ───────────────▶ ③ 设备取命令
- │                                      ④ 执行（FTL→FCC→NAND）
- │  ⑤ ◀────────────── 把完成写进 CQ（Completion Queue）
- │  ⑥ ◀────────────── 发中断 (MSI-X)
- │  ⑦ 读 CQ、处理完成                     │
+```mermaid
+sequenceDiagram
+    participant H as 主机
+    participant SQ as 提交队列 SQ
+    participant DB as Doorbell
+    participant F as 设备固件 FTL/FCC
+    participant N as NAND
+    participant CQ as 完成队列 CQ
+    participant IRQ as 中断 MSI-X
+    H->>SQ: ① 写命令
+    H->>DB: ② 写 doorbell
+    DB->>F: ③ 设备取命令
+    F->>N: ④ 执行（FTL → FCC → NAND）
+    N-->>F: 完成
+    F->>CQ: ⑤ 写完成
+    F->>IRQ: ⑥ 发中断
+    IRQ-->>H: ⑦ 读 CQ、处理完成
 ```
 
 - **NVMe**：多对 SQ/CQ，门铃寄存器，MSI-X 中断，PRP/SGL 描述数据缓冲。
@@ -728,14 +765,128 @@ NAND die（写入时可能再叠 on-die ECC）
 
 ---
 
+# 附录：参考资料
+
+## 主要项目与资料
+
+### 真控制器固件平台（完整分层的对照）
+
+| 项目 | 覆盖层 | 学到什么 | 状态 |
+|---|---|---|---|
+| **Cosmos+ OpenSSD** | HIL+FTL+FCC+DRAM 全栈 | `host_lld.c`=HIL（NVMe 队列/门铃/DMA）· `address_translation.c`=FTL · `request_schedule/allocation.c`=调度 · `garbage_collection.c`=GC。**唯一能对照你 §26 完整分层的代码** | 活跃 |
+| **OpenSSD Jasmine** | FTL 为主 | 四种 FTL 参考实现：**Greedy**（页级+Greedy GC，GC 祖师爷）· **FASTer**（混合）· **DAC**（冷热分离）· Tutorial | 老（2011，GPLv3）但经典 |
+| **SoftSSD** | HIL+FCC（软件化） | 大部分组件在 ARM 上跑软件、只留 PCIe PHY+NAND 接口在 FPGA；事件驱动模型，可用调试器看内部状态 | 同名项目，值得读论文 |
+| **OpenExpress / BlueFlash** | FCC 硬件化 | 全硬件自动化 NVMe 框架 / 可重构 flash 控制器（MIT） | 研究平台 |
+
+### 生产级用户态 FTL（现代工程取舍的对照）
+
+**SPDK `spdk_ftl`**（CSAL 的核心，真在生产里跑）。它和你正好构成对照：
+
+| 维度 | SPDK FTL | 本仓 |
+|---|---|---|
+| L2P 驻留 | 只缓存最近用的 2 GiB，其余换出到 cache 设备 | **DRAM-less**：SRAM 数组 + NAND 兜底 |
+| 元数据 | **P2L 存在每个 band 尾部**，按 sequence ID 顺序读回重建 L2P | journal + checkpoint + BBT |
+| 写组织 | 1 GiB band，顺序写（默认 1 MiB 单元） | 块级/plane 级分配 |
+| 状态机 | band `FREE → OPEN → CLOSING → CLOSED` | FTL 状态机 |
+
+**这是最值得精读的现代 FTL**：它的每一个选择都能照出你 DRAM-less 路线的差异。
+
+### 仿真 / 模拟器（分层模型参考）
+
+| 项目 | 定位 | 对你的价值 |
+|---|---|---|
+| **SimpleSSD / Amber** | gem5 全系统，**HIL / FTL / PAL 分层** | **你的分层几乎就是它的翻版**（你有 HIL/FTL/FCC，它把硬件并行抽象成 PAL）——用它验证你的分层划分是否「标准」 |
+| **FEMU** | QEMU 里模拟 NVMe SSD（真延时），含 FTL，支持 OpenChannel/ZNS | 想在 Linux 里端到端跑一遍 FTL 逻辑时的试验台 |
+| **MQSim** | 多队列 NVMe 精确建模（误差 8–18%） | 队列/门铃/多流调度建模参考 |
+| **ConfZNS / ConfZNS++** | 基于 FEMU 的 ZNS 模拟器，对真机验证过 | 往 ZNS 方向看时 |
+
+### NAND 控制器 RTL（硬 FCC 对照）
+
+⚠ **「ONFI + Verilog + 开源 + 活跃」四者同时满足的极少**。
+
+| 项目 | 语言/许可 | 备注 |
+|---|---|---|
+| **OpenCores NAND Controller** | VHDL / LGPL | 唯一明确 **ONFI compliant** 的完整开源控制器，有规格文档 + Avalon-MM |
+| `cjhonlyone/NandFlashController` | Verilog / GPL-3.0 | AXI 接口、同步模式 |
+| Lattice RD1055 / Xilinx `nandpsu` | 参考设计 / 驱动 | ⚠ Xilinx 的 RTL 专有，GitHub 上只有**裸机驱动** |
+
+**你在 STM32 上做的是「软 FCC」**（FMC + 引擎状态机）——对比硬 FCC 能看清哪些事硬件替你做了、哪些是你的软件在补。
+
+### 嵌入式小规模 FTL（极简方案对照）
+
+- **`earlephilhower/SPIFTL`** —— MCU 级 SPI flash 静态磨损均衡。**省略了坏块管理/并行/保持性扫描** ⇒ 可当「最小 FTL 能省到什么程度」的反面教材
+- **`dhara`**（`dlbeer/dhara`，MIT）—— 低内存系统的 NAND FTL。设计点很干净：**完美磨损均衡**（任意两块擦除次数差 ≤ 1）、`write()`/`trim()` **原子 + 掉电回滚到最后同步点**、**不占用 OOB**（全部留给 ECC）、启动与所有操作 **O(log n) 最坏**。⚠ 上游已停维护（最后提交 4 年多前）；`espressif/dhara` 是活跃的封装
+- **F2FS** —— 文件系统层不是 FTL，但**分段 + GC + ZNS 感知**思路对 Allocator 有参考价值
+- **ZNS 生态**：`libzbd` / `zonefs` / `zns-tools` / BTRFS / XFS
+- ⚠ **Open-Channel SSD / LightNVM 已从 Linux 移除（5.15）**，被 ZNS 取代 —— 别再按 OCSSD 方向投入
+
+### 规范与论文（一手资料）
+
+| 类型 | 来源 |
+|---|---|
+| **器件规范** | ONFI 各版本（onfi.org）· JEDEC JESD230 · 具体型号 datasheet（如 Micron MT29F4G08） |
+| **经典论文** | FAST / MSST / HotStorage / SYSTOR 的 SSD 相关论文；**DFTL**、**Greedy FTL** 原始论文 |
+| **研究前沿** | `LeaFTL`（学习式 L2P，用线性回归预测映射）· FDP（Flexible Data Placement）· ZNS+ |
+
+> **一手规范 > 论文 > 别人代码 > 二手博客**。任何「协议要求……」的说法，先回去查规范原文（本仓曾吃过凭记忆断言协议的亏）。
+
+---
+
+## 速查链接
+
+**真固件平台**
+- Cosmos+ OpenSSD — https://github.com/Cosmos-OpenSSD/Cosmos-plus-OpenSSD （[文档](https://cosmos-plus-openssd-doc.readthedocs.io/en/latest/OpenSSD/OpenSSD.html)）
+- OpenSSD Jasmine — https://github.com/openssd/jasmine （GPLv3，含 Greedy/FASTer/DAC/Tutorial FTL）
+- SoftSSD — https://github.com/Jimx-/softssd （[论文 FITEE 2023](https://jzus.zju.edu.cn/article.php?doi=10.1631%2FFITEE.2200456)）
+
+**生产级 FTL**
+- SPDK FTL — https://spdk.io/doc/ftl.html
+
+**仿真器**
+- FEMU — https://github.com/vtess/FEMU （[FAST'18](https://www.usenix.org/system/files/conference/fast18/fast18-li.pdf)）
+- MQSim — https://github.com/CMU-SAFARI/MQSim （C++/MIT，[FAST'18](https://www.usenix.org/system/files/conference/fast18/fast18-tavakkol.pdf)）
+- SimpleSSD / Amber — [论文](https://arxiv.org/pdf/1705.06419) / [Amber](https://arxiv.org/pdf/1811.01544)
+- ConfZNS — https://github.com/DKUStarLab/ConfZNS
+
+**NAND 控制器 RTL**
+- OpenCores ONFI NAND Controller — https://opencores.org/projects/nand_controller （VHDL）
+- NandFlashController — https://github.com/cjhonlyone/NandFlashController （Verilog/AXI）
+- OCOWFC（Open-Channel Open-Way Flash Controller）— https://github.com/yhqiu16/OCOWFC
+  （FPL 2021；cache-mode pipelining + 双级调度器；论文 https://ieeexplore.ieee.org/abstract/document/9556350）
+
+**NAND 命令序列（cache read/program 的展开）**
+- Linux MTD rawnand sequential cache read（`31h`/`3Fh`，commit `003fe4b`）—
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011
+  （镜像 https://git.embedded.cherry.de/puma-linux.git/commit/drivers/mtd/nand/raw?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011）
+- ⚠ cache program（49h/44h/48h）**没有**找到完整开源实现；权威依据是 Micron MTG Table 18 /
+  Figure 74 的 FAILC（见 `docs/reference/README.md` §F2）
+
+**嵌入式 FTL**
+- SPIFTL — https://github.com/earlephilhower/SPIFTL
+- dhara — https://github.com/dlbeer/dhara
+
+**规范 / 生态**
+- ONFI — https://onfi.org/specifications/
+- Zoned Storage — https://zonedstorage.io/docs/introduction/linux-ecosystem
+- zns-tools — https://github.com/stonet-research/zns-tools
+
+**研究前沿**
+- LeaFTL — https://arxiv.org/pdf/2301.00072v1.pdf
+
+---
+
+*本文是存储主控设计要点手册；本仓落地设计以 [`fc_nand_design.md`](fc_nand_design.md) 与 [`ftl_design.md`](ftl_design.md) 为准。*
+
+---
+
 ## 附：相关文档索引
 
 | 主题 | 文档 |
 |---|---|
 | 本仓分层判据（§26） | [`fc_nand_design.md`](fc_nand_design.md) §26 |
 | 本仓 FC/NAND 设计 | [`fc_nand_design.md`](fc_nand_design.md) |
-| 本仓 FTL 设计 | [`ftl_design.md`](ftl_design.md)、[`ftl_revision_history.md`](ftl_revision_history.md) |
+| 本仓 FTL 设计 | [`ftl_design.md`](ftl_design.md)、[`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md) |
 | FTL 优化方向 | [`../archive/ftl_optimization_plan.md`](../archive/ftl_optimization_plan.md) |
-| 学习路线 + 开源对照 | [`storage_controller_learning.md`](storage_controller_learning.md) |
+| 参考资料 | 本文附录 |
 | 离线资料索引 | [`../reference/README.md`](../reference/README.md) |
-| 架构 / 硬件契约 / NAND 模型 | [`../architecture.md`](../architecture.md)、[`../hardware_contract.md`](../hardware_contract.md)、[`../nand_model.md`](../nand_model.md) |
+| 架构 / 硬件契约（含 NAND 模型） | [`../architecture.md`](../architecture.md)、[`../hardware_contract.md`](../hardware_contract.md) |

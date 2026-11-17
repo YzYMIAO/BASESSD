@@ -9,7 +9,7 @@
 3. 跳转 `main()`。中断向量表由 startup 的 `.isr_vector` 段提供；STM32H743 从片内 Flash 启动。
 
 > 早期文档写的 `soc_early_init()` / `soc_memory_init()` **从未实现**；时钟/Cache/MPU 的初始化
-> 现在都在 `sys_init()` 内（见下）。平台分层现状见 `docs/design/platform_abstraction.md`。
+> 现在都在 `sys_init()` 内（见下）。平台分层现状见 `docs/design/platform_design.md`。
 
 ## `main()` 启动顺序（`src/main.c`）
 
@@ -19,10 +19,10 @@
    落 `.sram2_data`）→ 绑定日志 sink → 打印开机横幅 + `fault_report_boot()`（复位原因 +
    上次崩溃记录，走 `.noinit`）→ `[SYS ]` 身份行与时钟树。
 2. **FC 控制面**：`fc_init()` —— 三池（命令/描述符/缓冲）+ SQ/HSQ/CQ + 调度器 + CRC。
-   内部的 `nand_dispatch_init()` 是纯 memset，故 FC 可以先于 NAND 硬件初始化。
+   内部的 `fc_nand_dispatch_init()` 是纯 memset，故 FC 可以先于 NAND 硬件初始化。
 3. **NAND 芯片**：`nand_init()` —— HAL/FMC + R/B# 轮询 + per-(ch,ce,lun) 后端 + RESET +
    READ_ID 校验（boot 命令直接走 `nand_engine_execute`，绕过命令队列）。
-4. **放行命令队列**：`nand_dispatch_set_armed(1)`（此前 `submit`/`submit_chain` 一律拒绝）。
+4. **放行命令队列**：`fc_nand_engine_set_armed(1U)`（此前 `submit`/`submit_chain` 一律拒绝）。
 5. **Controller 汇总**：`fc_boot_report()`。
 6. **平台 time_us 注册**：`stm32_platform_register()` —— FTL 的 T3 定时触发（CP 10 s / GC 500 ms）依赖它。
 7. **FTL**：`ssd_ftl_boot_all()` —— 全实例 `ftl_init` → 介质布局版本校验（不符则
@@ -30,7 +30,7 @@
    （Checkpoint 加载 + Journal 回放）→ `ssd_controller_init` 绑定路由 → `g_ftl_ready = 1`。
 8. **控制台**：TIM6 中断 + `[SYS ] console ready`。
 9. **主循环**：`cli_service_poll()`；`g_ftl_ready == 0` 时跑 `fc_service()`，否则跑
-   `ftl_service(&g_ftl[0][0][0])`（后者内部先跑 `fc_service`）。
+   `ssd_runtime_pump()`（逐个 die 推进 FTL 实例；FC 侧由 `fc_service` / `ftl_service_pump` 驱动）。
 
 ## 仍未实现（占位）
 

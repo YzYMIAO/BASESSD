@@ -99,7 +99,7 @@ watchdog_port.o T WWDG_IRQHandler
    **关 DMA 时这两个向量不再定义 ⇒ 回落 `Default_Handler`**。行为安全：该配置下 DMA2 从不
    使能、不会有中断到来。
 2. **`.bin` 不作为判据**：本版把定义在 TU 之间搬移、删了文件，`.bin` 尺寸必然变化
-   （tests 248160 B，v60 是 248352 B）—— 见记忆 `cmsis-optimize-attr-bin-delta`，
+   （tests 248160 B，v60 是 248352 B）——
    动符号归属时 `.bin` 会漂。改用 **`nm --print-size` 逐符号 + `.isr_vector` 尺寸**核对。
 3. **上板已验（2026-10-11）**：完整 `test` ⇒ **58 of 58 (100%)**、0 skipped、870.60 ms；
    开机日志逐字不变（见 §三）。

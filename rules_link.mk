@@ -31,24 +31,18 @@ $(foreach mod,$(MODULES),$(eval $(call BUILD_LIB_template,$(mod))))
 
 # Firmware-owned source files link as individual objects.  Only vendor code is
 # archived, preserving its normal on-demand static-library behavior.
-ifeq ($(BUILD_TARGET),firmware)
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 $(LIB_DIR)/libthird_party.a: $(THIRD_PARTY_C_OBJS)
 	@$(MKDIR) $(LIB_DIR)
 	@$(ECHO) "Archiving libthird_party.a..."
 	$(Q)$(AR) rcs $@ $^
 endif
-endif
 
 # ----------------------------------------------------------------------------
 # 3. 收集所有库文件
 # ----------------------------------------------------------------------------
-ifeq ($(BUILD_TARGET),firmware)
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 ALL_LIBS = $(LIB_DIR)/libthird_party.a
-else
-ALL_LIBS = $(foreach mod,$(MODULES),$(LIB_DIR)/lib$(mod).a)
-endif
 else
 ALL_LIBS = $(foreach mod,$(MODULES),$(LIB_DIR)/lib$(mod).a)
 endif
@@ -58,11 +52,7 @@ endif
 # ============================================================================
 
 # 固件 ELF 依赖链接脚本；修改内存布局后必须自动触发重新链接。
-ifeq ($(BUILD_TARGET),firmware)
 LINK_DEPS := $(LINKER_SCRIPT)
-else
-LINK_DEPS :=
-endif
 
 # 4.1 链接可执行文件（生成 .map 文件）
 $(TARGET).elf: $(LINK_S_OBJS) $(LINK_C_OBJS) $(ALL_LIBS) $(LINK_DEPS)
@@ -126,11 +116,7 @@ $(OBJ_DIR)/%.lst: $(OBJ_DIR)/%.o
 # ============================================================================
 # 6. 收集所有分析文件
 # ============================================================================
-ifeq ($(BUILD_TARGET),firmware)
 ANALYSIS_FILES =$(TARGET).elf $(TARGET) $(TARGET).sym $(TARGET).size $(TARGET).lst $(TARGET).bin
-else
-ANALYSIS_FILES = $(TARGET).elf
-endif
 
 # 所有 .i 文件列表
 ALL_I_FILES = $(C_SRCS:$(SRC_ROOT)/%.c=$(OBJ_DIR)/%.i)

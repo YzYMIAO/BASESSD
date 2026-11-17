@@ -97,7 +97,7 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
 
 ```
 [ERR] assertion failed: command->desc_id != FC_DESCRIPTOR_ID_INVALID
-      (/home/miao_yang/projects/soft_ssd/src/fc/fc_interface.c:258)
+      (/home/user/projects/soft_ssd/src/fc/fc_interface.c:258)
 [ERR] [RES] cmd=1/64 desc=0/256 buf=0/128 sq=0 hsq=0 cq=0
 ```
 

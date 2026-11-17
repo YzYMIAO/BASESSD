@@ -24,9 +24,9 @@ description: 在 stm32h743 目标板上编译、烧写、抓串口日志、判�
 | 体积/告警对比 | `make release` |
 | **开卡（破坏性）** | `make format-image`（每次启动擦全片；可加 `FORMAT_VERIFY=1`） |
 
-要求 **零新告警**（既有告警不计）。产物在 `build/firmware/<debug\|release>/bin/`。
+要求 **零新告警**（既有告警不计）。产物在 `build/<debug\|release>/bin/`。
 
-⚠ **开卡镜像**：`make format-image` 的产物路径与正常镜像**相同**（`build/firmware/<type>/bin/debug.bin`；
+⚠ **开卡镜像**：`make format-image` 的产物路径与正常镜像**相同**（`build/<type>/bin/debug.bin`；
 对象目录带 `_fmt` / `_fmt_vf` 隔离），固件在**每次上电**先 `pfr_media_format` 再继续 boot——用于介质账本已坏、
 开机 full metadata rebuild 太慢、等不到 CLI 的情况。开卡完成后**必须换回正常镜像**，
 否则每次上电都会清数据。
@@ -56,10 +56,10 @@ sh/debug_env.sh
 另一条路：`sh/flash.jlink`（JLink Commander 脚本，`loadfile ... .elf` + `r` + `g`），
 ⚠ 该文件在 `.gitignore` 里，是本机路径。
 ⚠ **产物名锁定用途，产品与 UT 不再共用路径**（`config.mk §目标文件命名`）：
-`make tests UT=...`（debug）→ `build/firmware/debug/bin/debug_ut.elf`；
-`make tests BUILD_TYPE=release UT=...` → `build/firmware/release/bin/release_ut.elf`；
-`make all` → `build/firmware/debug/bin/debug.elf`（产品）；
-`make release` → `build/firmware/release/bin/release.elf`（产品，无 `test` 命令）。
+`make tests UT=...`（debug）→ `build/debug/bin/debug_ut.elf`；
+`make tests BUILD_TYPE=release UT=...` → `build/release/bin/release_ut.elf`；
+`make all` → `build/debug/bin/debug.elf`（产品）；
+`make release` → `build/release/bin/release.elf`（产品，无 `test` 命令）。
 ⚠ 需要 -O0 时用 `make tests DEBUG_OPT=-O0`，对象目录自动切到 `obj_ut_*_O0`
 （不会复用 -O2 的 .o），产物仍是 `debug_ut.elf`。
 
@@ -92,7 +92,7 @@ UT 过滤串坑：
 - `--log-visible debug` 是阻塞式 UART（≈11.5 KB/s），**只对单条用例开**，且开了之后 `[ N ms ]` 不可信。
 - ⚠ 别用 `--log-fatal info`（与 `--log-visible` 共用取值解析，会让每条日志 `abort()`）。
 
-**运行日志落盘**：每轮用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 建 `build/test-results/<ts>_<build>_<target>/`，把串口终端工具的 log 写进 `run.log`；`meta.txt` 自动记录 commit 与镜像横幅时间戳。约定见 `docs/design/testing_guide.md §8.7`。
+**运行日志落盘**：每轮用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 建 `build/test-results/<ts>_<build>_<target>/`，把串口终端工具的 log 写进 `run.log`；`meta.txt` 自动记录 commit 与镜像横幅时间戳。约定见 `docs/guides/testing_guide.md §8.7`。
 
 ---
 

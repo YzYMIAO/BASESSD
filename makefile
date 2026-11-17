@@ -12,7 +12,6 @@
 # 1. 包含配置
 # ----------------------------------------------------------------------------
 PROJECT_ROOT := $(CURDIR)
-BUILD_TARGET ?= firmware
 FIRMWARE_PLATFORM ?= stm32h743
 BUILD_TYPE ?= debug
 
@@ -43,11 +42,11 @@ endif
 
 # ----------------------------------------------------------------------------
 # 1.6 开卡镜像（**破坏性**）
-#   make format-image            → build/firmware/<type>_fmt/bin/，每次启动先擦全片
+#   make format-image            → build/<type>_fmt/bin/，每次启动先擦全片
 #   make format-image FORMAT_VERIFY=1  → 开卡时追加全片擦除体检（擦除成功即好块）
 #   用途：介质账本已坏、开机 full metadata rebuild 太慢时，先烧这张镜像快速开卡；
 #         开卡完成后**必须换回正常镜像**——这张镜像每次上电都会清数据。
-#   **bin 输出路径与正常镜像相同**（build/firmware/<type>/bin/debug.bin，烧录配置不用改）；
+#   **bin 输出路径与正常镜像相同**（build/<type>/bin/debug.bin，烧录配置不用改）；
 #   只有对象/库/依赖目录带 _fmt 后缀，避免复用陈旧 .o，无需 make clean。
 # ----------------------------------------------------------------------------
 FORMAT_ON_BOOT ?= 0
@@ -83,7 +82,6 @@ include $(foreach mod,$(MODULES),$(SRC_ROOT)/$(mod)/makefile.mk)
 $(info All modules included)
 $(info ========================================)
 
-ifeq ($(BUILD_TARGET),firmware)
 # 根目录 main.c 是固件应用入口，不归入静态库，必须在链接时显式加入。
 	APP_C_SRCS := $(SRC_ROOT)/main.c
 	C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
@@ -108,16 +106,6 @@ CFLAGS += $(addprefix -I,$(ALL_INCS))
 CFLAGS += -DSSD_FIRMWARE_BUILD
 CFLAGS += -DDEBUG_FTL
 CFLAGS += $(CFLAGS_EXTRA)
-else
-C_SRCS := $(sort $(MODULE_SRCS))
-ALL_SRCS := $(C_SRCS)
-
-C_OBJS := $(patsubst $(SRC_ROOT)/%.c,$(OBJ_DIR)/%.o,$(C_SRCS))
-ALL_OBJS := $(C_OBJS)
-
-ALL_INCS := $(sort $(MODULE_INCS))
-CFLAGS += $(addprefix -I,$(ALL_INCS))
-endif
 
 # 导出收集结果（供调试和 rules.mk 使用）
 $(info ========================================)
@@ -160,14 +148,14 @@ asan:
 # 单元/集成测试构建。UT=（空）编入全部套件；UT=FC 仅 FC-NAND 三级；UT=FTL 仅 FTL L0。
 # PAA 在烧录后由串口命令 nand test <PAA> 显式传入。
 tests:
-	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT) CFLAGS_EXTRA="$(CFLAGS_EXTRA) -DMUNIT_ENABLE_TIMING"
+	$(MAKE)  FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT) CFLAGS_EXTRA="$(CFLAGS_EXTRA) -DMUNIT_ENABLE_TIMING"
 
 # 开卡镜像（破坏性）：FORMAT_ON_BOOT=1 ⇒ 每次启动擦全片 + 写初始元数据。
 # bin 路径与正常镜像相同（烧录配置不用改）；对象目录带 _fmt 后缀隔离。
 # 开卡后换回正常镜像（make all）。
 .PHONY: format-image
 format-image:
-	$(MAKE) all BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FORMAT_ON_BOOT=1 FORMAT_VERIFY=$(FORMAT_VERIFY)
+	$(MAKE) all FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FORMAT_ON_BOOT=1 FORMAT_VERIFY=$(FORMAT_VERIFY)
 
 # ============================================================================
 # 主目标
@@ -285,7 +273,6 @@ types-check:
 .PHONY: info
 info:
 	@echo "=== Build Configuration ==="
-	@echo "  BUILD_TARGET     : $(BUILD_TARGET)"
 	@echo "  FIRMWARE_PLATFORM: $(FIRMWARE_PLATFORM)"
 	@echo "  BUILD_TYPE       : $(BUILD_TYPE)"
 	@echo "  NAND_DEVICE      : $(NAND_DEVICE)"

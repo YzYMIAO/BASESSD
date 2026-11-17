@@ -1,5 +1,7 @@
 # 开源整理与发布步骤
 
+> **性质**：维护者操作清单——记录仓库发布前的整理步骤，不是项目使用指南。
+
 > **用途**：把当前仓库整理到可公开状态。先处理**发布阻塞项**（凭据、许可证、第三方资料、
 > README），再做代码与文档的结构性清理；最后用干净克隆复测。
 >
@@ -8,7 +10,7 @@
 >
 > **审计基线**：2026-11-17。执行前用各步骤里的命令复测；代码与文档会变，数字只作起点。
 >
-> **关联登记**：`docs/design/known_risks.md` 的 `RISK-REL-01` ~ `RISK-REL-05`。
+> **关联登记**：`docs/design/known_open_items.md` 的 `RISK-REL-01` ~ `RISK-REL-05`。
 
 ---
 
@@ -77,14 +79,14 @@ OS-12/13 可选优化
 
 **已有事实（不是猜测）**：
 
-- 现有 `build/firmware/release/bin/release.elf` 中，`ds_list_create` / `twoSum` /
+- 现有 `build/release/bin/release.elf` 中，`ds_list_create` / `twoSum` /
   `bubble_sort` 等 dead 符号**都不存在**；`--gc-sections` 已丢弃整块。删除死代码
   **不改固件行为**，只减少编译与阅读成本。
 - `test/app` 是 **aarch64 ELF**，`test/test.s` 是 AArch64 汇编；目标芯片是 Cortex-M7，
   且构建系统对 `test/` 零引用。
-- `README.md:9` 指向 `docs/design/wsl_debug_environment.md`，实际路径已是
+- `README.md` 指向 `docs/design/wsl_debug_environment.md`，实际路径已是
   `docs/guides/wsl_debug_environment.md`。
-- `docs/claude_code_usage.md:152` 含真实 token；该文件由提交 `3ee9ef9` 引入。
+- `docs/claude_code_usage.md` 含真实 token；该文件由提交 `3ee9ef9` 引入。
 - 根目录没有 `LICENSE` / `COPYING`；`third_party/stm32h743` 也没有 LICENSE 文件，
   但 ST HAL 头文件声明“license terms in the LICENSE file”。
 - `third_party/tinyusb/LICENSE` 存在（MIT）。
@@ -122,7 +124,7 @@ git rev-parse HEAD > /tmp/soft_ssd-before-open-source.commit
 
 **已知问题**：
 
-- `docs/claude_code_usage.md:152` 含 `ANTHROPIC_AUTH_TOKEN` 形态的真实值。
+- `docs/claude_code_usage.md` 含 `ANTHROPIC_AUTH_TOKEN` 形态的真实值。
 - 引入提交：`3ee9ef9`（`docs: 新增 Claude Code 使用说明（重点：模型切换）`）。
 - 只在新提交里删除文件**不够**：旧 commit 仍可 checkout 到该文件。
 
@@ -231,8 +233,9 @@ git grep -n 'SPDX-License-Identifier' third_party/stm32h743/cmsis-core | head
 **状态**：2026-11-17 用户裁决**移出仓库**，已执行。`git rm` 7 PDF + 9 HTML；
 本地副本在 `~/.local/share/soft_ssd-backup/reference-20261117/`（仓外，7.3 MB）；
 `docs/reference/README.md` 已改为链接清单（题名 / 出处 / URL / 用途），
-`docs/README.md`、`usb_msc.md`、`ftl_design.md`、`ftl_revision_history.md`、`known_iss.md`
-中的本地路径引用已改为 URL。改动在工作树，**未提交**（R3）。
+`docs/README.md`、`usb_msc.md`、`ftl_design.md`、`ftl_revision_history.md`、`known_open_items.md`
+中的本地路径引用已改为 URL。同批移出 `docs/reference/README.md`
+（Micron 数据手册原文摘录）。改动在工作树，**未提交**（R3）。
 
 **动作**：
 
@@ -323,7 +326,7 @@ git grep -nE '\b(bubble_sort|selection_sort|insertion_sort|shell_sort|quick_sort
 git grep -nE '\b(twoSum|threeSum|romanToInt|addBinary|reverseBits)\s*\(' -- src include tests
 
 # 2) 最终 ELF 无符号（现有 release 产物已证）
-arm-none-eabi-nm build/firmware/release/bin/release.elf | grep -E 'ds_list_create|twoSum|bubble_sort'
+arm-none-eabi-nm build/release/bin/release.elf | grep -E 'ds_list_create|twoSum|bubble_sort'
 ```
 
 三项引用检查应为空；ELF 检查应为空。`src/common/algorithm/*.c` 是 LeetCode 式练习代码
@@ -370,7 +373,7 @@ git rm sh/open-ubuntu.bat
    - **推荐**：改成模板，JLink 路径由环境变量提供：
      `JLINK_EXE="${JLINK_EXE:-JLinkGDBServerCL.exe}"`，并在注释里给 Windows 示例；
    - 或删除脚本，保留 `docs/guides/wsl_debug_environment.md` 的手动步骤。
-   同时更新该指南里写死的 `D:\StudyTool\...` 示例。
+   同时更新该指南里写死的 `<JLink 安装目录>` 示例。
 
 4. 删除未使用的格式配置：
 
@@ -390,7 +393,7 @@ git rm .clang-format_array
 **验收**：
 
 ```bash
-git grep -nE '/mnt/|/home/|C:\\\\|D:\\\\|miao_yang' -- ':!docs/archive' ':!docs/guides'
+git grep -nE '/mnt/|/home/|C:\\\\|D:\\\\|<user>' -- ':!docs/archive' ':!docs/guides'
 find . -maxdepth 2 -name '*.bat' -o -name '*.jlink'
 ```
 
@@ -441,16 +444,16 @@ git grep -n 'docs/ftl_design.md' -- README.md docs/*.md docs/design/*.md
 
 **动作（低链接成本方案）**：
 
-1. 不移动 `known_risks.md` / `known_iss.md`：`CLAUDE.md` 与大量文档都按现路径引用，
+1. 不移动 `known_open_items.md` / `known_open_items.md`：`CLAUDE.md` 与大量文档都按现路径引用，
    移动会产生大面积链接回扫。改为在 `docs/README.md` 明确标注：
    - **公开主干**：`architecture.md`、`hardware_contract.md`、`design/ftl_design.md`、
      `design/fc_nand_design.md`、`design/hil_design.md`、`design/usb_msc.md`、
-     `design/storage_controller_design_essentials.md`。
-   - **工程内部账本**：`known_risks.md`、`known_iss.md`、revision history、negative coverage、
+     `design/storage_controller_design.md`。
+   - **工程内部账本**：`known_open_items.md`、`known_open_items.md`、revision history、negative coverage、
      `docs/archive/`；保留路径，仅供维护者。
 2. 负例测试三件套不合并成单文档，而按**层次**并入：
    - 通用框架（判据、注入 API、seam 选型、用例模板、验收）→
-     `docs/design/testing_guide.md` §12；
+     `docs/guides/testing_guide.md` §12；
    - 未闭合风险的判定台账（M/N/K）→ 各层 UT 设计文档 §7.2
      （`ftl_ut_design.md` / `fc_nand_ut.md` / `hil_ut_design.md`）；
    - `negative_deferred_eval.md` 的 K 行可行性理由已并入各层台账，原文件不再保留。
@@ -481,7 +484,7 @@ git grep -n 'negative_test_framework.md|negative_coverage.md|negative_deferred_e
 
 - `CLAUDE.md` 618 行，是本仓的工程规则与判据，公开价值高，但含内部 risk ID 与工作流。
 - `.claude/skills/` 5 个文件，是 Claude Code 的项目技能。
-- `.codex/skills/huawei-c-standard/SKILL.md` 是 C 规范来源，`CLAUDE.md` 多处引用。
+- `.codex/skills/c-coding-standard/SKILL.md` 是 C 规范来源，`CLAUDE.md` 多处引用。
 
 **建议**：
 
@@ -624,7 +627,7 @@ make tests UT=FTL
 git status --porcelain
 git ls-files | grep -E '\.(o|elf|map|hex|bin|pdf|html)$'
 git grep -nE '(ark-[0-9a-f]{8}-[0-9a-f-]{27}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,})'
-git grep -nE '/mnt/|/home/|C:\\\\|D:\\\\|miao_yang'
+git grep -nE '/mnt/|/home/|C:\\\\|D:\\\\|<user>'
 git grep -nE 'TODO|FIXME|XXX|HACK'
 
 # 3) 体积与对象
@@ -657,7 +660,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 - **不要**只在新提交里删 `docs/claude_code_usage.md` 就认为 token 安全。
 - **不要**在没有 LICENSE 的情况下公开；也不要用一个根 LICENSE 覆盖 vendor。
 - **不要**把 `docs/reference` 的 PDF/HTML 一起公开，除非能出示再分发许可。
-- **不要**为了“看起来干净”删 `docs/design/known_risks.md` / `known_iss.md` / 设计文档；
+- **不要**为了“看起来干净”删 `docs/design/known_open_items.md` / `known_open_items.md` / 设计文档；
   它们是本项目的工程记录与差异化资产。
 - **不要**按行数拆分 `ftl.c` / `cli.c`；没有第二消费者或封装不变量时，拆了只会增加阅读成本。
 - **不要**在公开后随意 force-push；需要重写历史时先与用户确认并通知已克隆者。
@@ -686,7 +689,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 | OS-03 | 已完成 | Claude Code / 用户 | `git rm` 7 PDF + 9 HTML；`git ls-files docs/reference` 只剩 `.md`；本地副本 `~/.local/share/soft_ssd-backup/reference-20261117/`；`docs/reference/README.md` 改链接清单；跨文档路径改 URL | 改动在工作树，**未提交**（R3）；2026-11-17 用户裁决「移出仓库」 |
 | OS-04 | 已完成 | Claude Code / 用户 | `README.md` 重写：定位 / 架构 / 硬件 / 构建 / 烧写 / 状态表 / 已知限制 / 文档地图 / License / 反馈；失效路径已修 | 改动在工作树，**未提交**（R3）；状态表按 R1 标注已验证范围 |
 | OS-05 | 已完成 | Claude Code | `f26c6a4`：删除 `src/common/{data_structure,algorithm,sort.c}`、`include/common/data_structure`、`config/controller_config.h`；`make all` / `make release` / `make tests UT=FTL` 零新告警 | 未上板（删死代码不改建链/位图/地址，R2 不需上板） |
-| OS-06 | 已完成 | Claude Code | `f26c6a4`：删除遗留 `test/`、两份 `convert_encoding.py`、`sh/open-ubuntu.bat`、`.clang-format_array` 等 | 同上 |
+| OS-06 | 已完成 | Claude Code | `f26c6a4`：删除遗留 `test/`、两份 `convert_encoding.py`、`sh/open-ubuntu.bat`、`.clang-format_array` 等；本轮按动作 3 把 `sh/debug_env.sh` 的 JLink 路径改为 `JLINK_EXE` 环境变量，`wsl_debug_environment.md` 的本机路径 / J-Link 序列号 / WSL 动态 IP 全部改为占位符，`testing_guide.md` 的 DiskSpd 路径改为占位符 | 改动在工作树，**未提交**；调试链路需用户本机设置 `JLINK_EXE` 后确认 |
 | OS-07 | 已完成 | Claude Code | `f26c6a4`：`architecture.md` 重写；`ut_tree_restructure.md` 移入 `archive/`；`nand_model.md` 并入 `hardware_contract.md` 后与 `ftl_design.md` 桩一并删除；README/docs 链接同步 | 同上 |
 | OS-08 | 已完成 | Claude Code | `f26c6a4`：负例框架入 `testing_guide.md §12`，未闭合台账入三层 UT 设计 §7.2；`docs/design/README.md` 新建；`docs/README.md` 导航同步 | 同上 |
 | OS-09 | 已完成 | 用户 / Claude Code | 2026-11-17 用户裁决**全部保留**：`CLAUDE.md` + `.claude/skills/` + `.codex/skills/`；`settings.local.json` 已 ignore | 无需改动代码 |
@@ -697,9 +700,43 @@ git ls-files -z | xargs -0 du -cb | tail -1
 
 ---
 
+## 附：全仓逐目录发布范围审计（2026-11-17）
+
+> 对象：`git ls-files` 的 662 个跟踪文件 + 本机未跟踪文件。判据：**是否含本机信息 /
+> 凭据 / 不可再分发的第三方原文 / 构建产物**。跟踪数会随改动变化，本表只记判定与例外。
+
+| 目录 | 跟踪文件 | 判定 | 说明 |
+|---|---:|---|---|
+| 根目录 | 12 | 保留 | 构建入口 / 规则 / 许可证；无本机路径 |
+| `.github/` | 1 | 保留 | CI 工作流（构建三关，不上板） |
+| `.vscode/` | 3 | 保留 | 全 `${workspaceFolder}` / 环境变量模板，无个人序列号 |
+| `.claude/` | 5 | 保留 | 用户裁决（OS-09）；`settings.local.json` 与评审草稿已 ignore |
+| `.codex/` | 1 | 保留 | 用户裁决（OS-09）；C 规范为**改写摘要**，非原文 |
+| `linker/` | 2 | 保留 | 产品 / UT 链接脚本 |
+| `sh/` | 4 | 保留 | `debug_env.sh` 已改为 `JLINK_EXE` 环境变量 / `.debug_env.local`；`flash.jlink` 本地忽略 |
+| `tools/` | 8 | 保留 | UT 文档检查器 + Windows USB 工具；无个人路径 |
+| `tests/` | 23 | 保留 | UT 源 + μnit（含上游 COPYING） |
+| `src/` | 83 | 保留 | 固件源码，无本机路径 |
+| `include/` | 80 | 保留 | 头文件，无本机路径 |
+| `docs/design/` | 19 | 保留 | 主设计 + 内部账本（known_open_items / known_open_items） |
+| `docs/guides/` | 2 | 保留 | 本机 JLink 路径 / 序列号 / WSL 动态 IP 已改占位符 |
+| `docs/reference/` | 1 | 保留 | 仅 `README.md`（链接清单）；datasheet 原文摘录已移出，见 OS-03 |
+| `docs/archive/` | 106 | 保留 | 历史记录；仅一处 RFC1918 WSL 私网 IP，无凭据 / 个人身份 |
+| `docs/diagrams/` | 1 | 保留 | 无 SVG 元数据 |
+| `third_party/` | 306 | 保留 | 裁剪后的 TinyUSB + ST HAL/CMSIS，含各组件许可 |
+| `build/`、`compile_commands.json` | 0 | 忽略 | 构建产物 / 含绝对路径 |
+| 本机文件 | — | 忽略 | `sh/flash.jlink`、`.claude/settings.local.json`、`.claude/io_review_backlog.md`、`.debug_env.local`、`*.svd`、Python 缓存、编辑器临时文件 |
+
+**已裁决（2026-11-17）**：`docs/reference/README.md`（Micron 数据手册
+Read Cache / Two-Plane Read Cache 两节原文摘录）**移出仓库**，本地副本在
+`~/.local/share/soft_ssd-backup/reference-20261117/`；所有活跃文档引用改为
+「datasheet 节名 + `docs/reference/README.md` 链接」，与 OS-03 口径一致。
+
+---
+
 ## 附：与本清单对应的风险登记
 
-`docs/design/known_risks.md` §2AM 已登记：
+`docs/design/known_open_items.md` §2AM 已登记：
 
 - `RISK-REL-01` 凭据进入 git 历史
 - `RISK-REL-02` 项目 / vendor 许可证缺失

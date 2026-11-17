@@ -860,3 +860,327 @@ salt**，理由见 `fc_nand_ut.md` §5.4（munit 每 `exec` 前 reseed 回 `runn
 > 详见 `docs/archive/changelog/fc_data_path_step_primitives_v29.md`。
 
 ---
+
+
+---
+
+> 以下 §二十五~§二十八 从主文档迁入（2026-11-17）；正文不改写。
+
+## 二十五、v0.75：把"架构约定"变成可测断言（2026-10-14）
+
+判据 2 处理的是「调用者已保证的前置条件」。本仓 v0.75（FTL 命令提交/完成解耦）引入了
+一条**跨模块的架构约定**——「**完成服务函数内不得同步等 NAND**」。它没有单一调用点，
+违反它的后果也不是崩溃，而是**嵌套泵**：`ftl_sync_submit_wait` 在完成派发循环里再泵一轮，
+吞掉本应交给其它 job 的 completion，表现为**偶发的命令丢失 / 进度错乱**，极难复现。
+
+> **判据 11：当一条约定是「某个函数**不得**在某上下文里被调用」时，把该上下文做成一个
+> 可查询的**深度计数**（`ftl_op_is_in_dispatch()`），并在被禁函数的入口写
+> `ASSERT(ftl_op_is_in_dispatch() == 0)`。**约定从此可测**——任何新调用点一旦越界，debug 档
+> 当场停机，而不是留到上板后靠"偶发丢命令"去猜。**
+
+**落地形态**：`src/ftl/ftl_op.c` 里 `g_dispatch_depth` 深度计数（单线程顺序主循环 ⇒ 普通变量，
+无需原子），`ftl_op_drain` 的循环体用 `g_dispatch_depth++` / `g_dispatch_depth--` 包住服务函数调用
+（含它内部的嵌套派发，故计数天然覆盖嵌套）。`l2p_sync_pump()`（`l2p_cache.c`，四个 `*_sync`
+逃生口的自旋泵）第一行就是 `ASSERT(ftl_op_is_in_dispatch() == 0)`。
+
+**与判据 2 / 9 的关系**：判据 2 的断言守的是**值**（指针/索引非空/在域内），判据 9 守的是
+**静默介质破坏**，本条守的是**控制流位置**。三者互补：本条不检查任何入参，只回答
+"此刻我在哪一层"。它也**不**在 release 档保留运行期拒绝——违反它不会静默写坏介质，只会在
+debug 档暴露；release 档即便误调，也只是多泵一轮（后果与阶段 1 前的旧行为同级），
+不值得为它增加一条生产路径上的分支。
+
+**目标终态**（`ftl_op.h` 顶部已写明）：`ftl_sync_submit_wait` / `l2p_cache_*_sync` 只被
+开机 / 格式化 / 出厂扫描 / CLI 路径调用；这些路径都在 `main` 进入 superloop **之前**
+（或 CLI 的独立上下文）执行，此时没有别人 drain CQ，改异步反而死锁——它们是**结构性同步**，
+不是漏网。断言把"还有谁在重入"从口头约定变成编译期之后仍可验证的事实。
+
+## 二十六、FTL 层断言瘦身：模块内部不逐函数复检同一入参（2026-10-15）
+
+用户指出（2026-10-15）：FTL 层「每个函数判断一次参数是否合理」——同一前提在调用链**多层重复
+断言**，判断分支开销大；断言应主要落在对外接口，**以一个模块为界限**，模块内部默认没问题。
+
+**盘点**：`src/ftl/*.c` 共 **111 处 `ASSERT`**（16 文件；无 `ASSUME`），按「值从哪来」分四类：
+[I] 接口 27 / [BOUND] 子模块公开入口 10 / [INV] 不变量 48 / [REDUND] 冗余 26。
+本轮删 **[REDUND] 26 处**，保留 85 处（I / BOUND / INV 一个不动）。
+
+**删的是什么（各按既有判据，无新规则）**：
+- **同源守卫恒真 → 删**（§十附判据 1）：`pending.c` 全族 **13× `ASSERT(ftl != NULL)`**——host 入口
+  `ftl_submit_*` 已 if-guard，`pending_init` 注释自认「唯一调用者 ftl_init 已判过」，全模块恒真。
+- **内层已断言 → 外层死守卫删**（§十附判据 2）：**`cmd != NULL` 10×**——`fc_command_id_to_command`
+  公共壳已断言 ID 在池内恒非空，派发（`ftl_op_dispatch`）+ 9 个完成服务回调（`ftl_op_*`）各自再
+  断一次是死守卫。
+- **重复守卫收敛到共用漏斗**（§十附判据 2）：`n_cw` 范围三层重复（`ftl_issue_subop` →
+  `pending_add` → `ftl_drain_group`）收敛到 **`pending_add`**（pending.h 公开入口）唯一权威点。
+- **注释自认冗余**：`power_failure_recovery.c` 的 `sb_idx != UINT16_MAX`，注释明说
+  `allocator_add_closed_sb` 内部已断言列表未满。
+
+**保留什么（一处不动）**：host 入口（用返回码，判据 1，本就无 ASSERT）+ **FTL↔FC 命令边界**（[I]，
+「配置错误一律 ASSERT」）+ **子模块公开入口**（[BOUND]）+ 内部**高价值不变量**（[INV]：状态机非法态
+`ASSERT(0)` / 实例归属 `&ftl->xxx == ctx` / 簿记计数 / 运行时上下文 `ftl_op_is_in_dispatch()`）。
+
+**固化约定（防回加）**：**模块内部不逐函数复检同一入参。** 边界 = host 入口返回码 +
+FTL↔FC 命令边界 / 子模块公开入口 ASSERT；内部只留高价值不变量。新增内部函数时，入参有效性
+已由唯一调用者保证就不必再断言；只有「调用方可能传错」才在边界断言。
+
+**行为影响**：release（NDEBUG）下断言整体裁空、表达式不求值——本轮删的是 debug 档冗余 +
+代码噪音，**不改任何 return / 分支行为**。编译三关全过（`make all` / `make release` /
+`make tests UT=FTL`），**零新告警**（release 档 `ftl_fc_interface.c` 的 `allowed`/`plane_bits`
+未用告警是保留的 [I] 断言被裁空的既有告警，见文件头注释，非本轮引入）。
+
+**跟进（同日，用户定调「不该发生的分支用 ASSERT 而不是返回」）**：完成回调里 3 处
+`if (ftl == NULL) { LOGE; release; return; }`（`ftl_host_io_callback` / `ftl_l2p_callback` /
+`ftl_read_recovery_callback`）与 `pending_group_complete_subop` 的「组已释放防御早退」
+一并收口成 `ASSERT`——路由表 boot 前设好、完成派发保证实例恒非空，原 release-and-return
+是 debug 走不到、release 静默吞错误的死分支；release（NDEBUG 裁空）下若真走到则
+NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 phase 的 default 分支
+（journal / wear / bbt / checkpoint / metadata）分支体有 `fc_command_release` + 复位 job
+的**资源副作用**，裁掉会命令池泄漏 + job 卡死——它们是清理逻辑，不是错误返回。
+
+## 二十七、allocator.c 入口守卫收口：补做 §八 Tier 1 的欠账（2026-10-17）
+
+**背景**：用户读 `src/ftl/allocator.c` 时问「这些与预期不符的判断不是应该用 `ASSERT` 吗」。
+核对后确认这是**已登记、未闭合的欠账**，不是新判据——两处早已点名：
+
+- 判据 2 的层内模块头名单里**逐字写了 `allocator.h`**（§一）；
+- §八 的 Tier 1 表里，`ftl/` 一行第一个就是 **`allocator.c`**。
+
+而 `.c` 里 10 处入口守卫仍是 `if (…) return 错误码`。本轮按判据 2 收口。
+
+### 转换清单（判据 2：值从哪来）
+
+| 函数 | 转换的守卫 | 唯一调用者 / 保证 |
+|---|---|---|
+| `allocator_init` | `alloc/tables == NULL` | `ftl.c` 传 `&ftl->alloc` / `&ftl->tables` |
+| `allocator_select_plane_block_from_pool`(static) | `alloc/blocks == NULL`、`plane >= PLANE_NUM` | `allocator_open_sb` 循环变量；`allocator_alloc_log_block` 的 `dir->cur_metadata_plane` |
+| `allocator_remove_closed_sb` | `alloc == NULL`、`closed_idx >= closed_sb_count` | `migrate.c` 找 victim 时**已把越界换成 `UINT16_MAX` 并拦掉** ⇒ 内层是死守卫（§十附判据 2） |
+| `allocator_close_open_sb` | `alloc == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 传 `&ftl->alloc` + 编译期 HOT/COLD 常量 |
+| `allocator_alloc_pair` | `alloc/out == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 栈上 `new_pba`；`migrate.c` 的 `m->dst` + 编译期 HOT/COLD 常量 |
+| `allocator_free_block` | `alloc == NULL`；判据 9 四条：越界 / BAD / 重复归还（`state == FREE`）/ 池满 | `migrate.c` / `main.c` / `bbt.c` / `allocator.c` 内部 OP 补池 |
+| ~~`allocator_free_log_block`~~ | v0.80 已删除（纯转发薄包装）⇒ 直接走 `allocator_free_block` | — |
+| `allocator_alloc_log_block` | `out_gblock == NULL`（`alloc` / `blocks` / `plane` 由 `allocator_select_plane_block_from_pool` 统一校验） | `metadata.c`（`plane` 来自 `dir->cur_metadata_plane`） |
+| `allocator_add_closed_sb` | `alloc/plane_blocks == NULL`、`temperature >= FTL_TEMP_NUM` | `power_failure_recovery.c` 局部数组 + 默认温度常量 |
+| `allocator_remove_from_free` | `alloc == NULL` | 唯一出池闸门：`power_failure_recovery.c` / `bbt.c` / `migrate.c` + `allocator.c` 内部 open_sb / alloc_log |
+
+### 保留项（**不要**"顺手"转成 ASSERT）
+
+| 位置 | 类别 | 依据 |
+|---|---|---|
+| `allocator_alloc_pair` 池空 → `FTL_AGAIN` | 资源类结果 | 判据 3 |
+| `allocator_alloc_log_block` 池空 → `FTL_AGAIN` | 资源类结果 | 判据 3（`test_ftl.c` 测的正是它） |
+| `allocator_close_open_sb` 已关闭 → `FTL_ERROR` | **幂等早退** | §十三 `fc_command_release` 先例；调用者在 program 失败路径上会连续两次关同一 SB |
+| `allocator_remove_from_free` 不在池内 → no-op | 文档化契约 | **判据 4 明文举的就是这个例子** |
+
+### 新增守卫（判据 9）—— 本轮唯一的新增
+
+`allocator_free_block` 两处，形态照抄 `fc.c` 的 `fc_build_request_data_planes`（§二十四）：
+`ASSERT` 先行 + 紧跟 `if (违反) 拒绝`，注释写明"`ASSERT` 在 `NDEBUG` 下被裁空"。
+
+1. **缺 `gblock < FTL_BLOCK_TOTAL` 上界**（当时与孪生兄弟 `allocator_free_log_block` 不对称；
+   该薄包装已于 v0.80 删除）。
+   `blocks[]` 之后**紧跟** `free_blocks[]`（同为 `ftl_tables_t` 成员）⇒ 越界索引**静默改坏
+   Free Pool 数组** = 漏账（不崩、不报错、容量无声流失）⇒ `ASSERT` + release 拒绝（`LOGE` + `return`）。
+2. **`free_count` 满时静默丢弃**（与 v0.78 修掉的 Closed 列表静默丢弃同形态）：池满 = 某块被
+   重复归还（double free），入池同样越界写 `free_blocks[]` ⇒ `ASSERT` + 既有 `if` 作 release
+   拒绝，补 `LOGE` 把"静默"变成"可诊断"。
+
+⚠ 因为 `allocator_free_block` 现在自己把 `gblock` 范围，薄包装 `allocator_free_log_block`
+里的同名检查**删掉不重复**（§十附判据 2：重复守卫收敛到共用漏斗）；该包装已于 v0.80 整体删除。
+
+### 连带：删用例（§四）
+
+`tests/unit/test_ftl.c` 删 3 处**子断言块**（整条用例保留，用例数不变，仍 53）：
+
+- `allocator_add_closed_sb(a, NULL, …)` 的哨兵返回
+- `allocator_remove_closed_sb(a, 越界)` 的 no-op
+- `allocator_alloc_log_block(a, PLANE_NUM / …, NULL)` 的拒绝
+
+**不动**：池空（判据 3）、幂等早退、`remove_from_free` 越界 no-op（判据 4）。
+
+### 头文件契约同步
+
+`include/ftl/allocator.h` 四处 `@return` / `@param` 去掉"参数非法"（§十三 落地注意），
+文件头补**不变量 ⑤**（2026-10-17 重编号为 **④**）：指针 / 索引类实参是前置条件，由调用者保证，非法即 `ASSERT`。
+
+### 附带决定（待议）
+
+`allocator_init` 转后**恒返 `FTL_OK`**，但保留 `ftl_status_t` 签名。§十附判据 3 主张
+「返回值恒为常量 ⇒ 改 `void`」——本轮**不做**（会波及 `ftl.c` 与夹具），登记为待议。
+
+### 验证
+
+`make all` / `make release` / `make tests UT=FTL` 三关**零新告警**（release 档
+`ftl_fc_interface.c` 的 `allowed` / `plane_bits` 与 `crc_port.c` 的 `status` 是既有告警，
+见判据 10）。**未上板**——按 R4 需上板跑 `/ftl/` 叶子套件（断言在板上是活的，误判会停机
+而非报失败）。
+
+## 二十八、FTL 层入口守卫全量收口（2026-10-17，B 分批）
+
+**起因**：用户读 `src/ftl/allocator.c` 时指出——模块里一批「与预期不符就 `return` 错误码」
+的入口守卫，按本仓既有判据本应写成 `ASSERT`。用户随后定调：「**这么说来你有很多欠账啊，
+还是静默的，我都不知晓**」「**B 分批全做**」——即：把 §二十七 的口径推到 FTL 层**全部**同类
+守卫，**按文件分批**；用户当前在**读码 + 重构**，故**整轮改完再上板验证**（不是每批验）。
+
+**已批准的两条口径**（上一轮 AskUserQuestion）：
+① 收口方式 = **混合：死守卫删 + 其余转 `ASSERT`**；② §六 的 `journal.c` 豁免 = **一并收窄**。
+
+### 一、本轮落位（可复核）
+
+实测口径：`git diff -U0 -- src include | grep -cE '^\+[[:space:]]*ASSERT'` 等（**只数语句**）。
+
+| 文件 | 新增 `ASSERT` | 移除入口守卫 `if` | 说明 |
+|---|---|---|---|
+| `allocator.c` | 22 | 10 | §二十七 已记（本轮起点） |
+| `metadata.c` | 31 | 20 | 最大一批；含 `metadata_ring_locate` 的**废形参删除**（见三、） |
+| `journal.c` | 12 | 9 | 句柄族转 `ASSERT`；**回放数据校验与环翻转控制流不动**（§六 收窄） |
+| `l2p_cache.c` | 12 | 8 | 含 `line_idx` 界内断言；`line == NULL`（cache miss）与依赖态判空**保留** |
+| `bbt.c` | 7 | 7 | 5 转 + 2 删（`bbt_factory_scan` / `bbt_load` 同文件调用者） |
+| `ftl_fc_interface.c` | 7 | 6 | 全为**出参**（FTL↔FC 边界）；`cmd == NULL`（池空，判据 3）**保留** |
+| `migrate.c` | 4 | 5 | `mig_gc_begin` / `mig_wl_begin` / `mig_predict_begin` / `mig_handle` 转；`mig_job_start`（static）删 |
+| `power_failure_recovery.c` | 4 | 9 | 3 个**对外入口**转；6 个同文件内部路径函数删 |
+| `bg_scheduler.c` | 3 | 2 | 任务表项判空 |
+| `ftl.c` | 3 | 3 | `ftl_init` + 本轮补的 `ftl_flush` / `ftl_trim`（C5：唯一调用点已 `ASSERT`） |
+| `gc.c` | 3 | 1 | — |
+| `checkpoint.c` | 2 | 4 | `cp_job_begin` / `checkpoint_journal_watermark` 转；另 2 处见三、 |
+| `wear_leveling.c` | 0 | 6 | **纯删**（恒真）——见三、的分叉 |
+| `wear.c` | 0 | 2 | **纯删**（恒真） |
+| `ftl_op.c` | 0 | 1 | **纯删**（同文件调用者） |
+| **合计** | **110** | **93** | 其中**约 15 处是纯删**（未落断言） |
+
+> ⚠ **2026-10-19 补记**（§3.12 审查，见 `../known_open_items.md §2J`）：上表是**当轮批次记录**，
+> 不随之后改动回写。当前实际状态：
+> `bg_scheduler.c` 的任务装载 = `bg_scheduler_init`（装载内部静态表 `s_bg_tasks`，
+> **无 ASSERT**：表长是编译期常量，`_Static_assert` 已证明 == `BG_TASK_COUNT`）；
+> 接线（`bg_task_*` 适配器 / 任务表 `s_bg_tasks` / 档位表 `s_bg_level_cfg` / Phase 3 入口）
+> 与引擎同处 `src/ftl/bg_scheduler.c`；`bg_scheduler_init` / `bg_scheduler_service` 的入参由
+> `ftl_init` / `ftl_service` 调用链保证，不重复 `ASSERT`。
+
+配套：8 个头文件（`allocator.h` / `bbt.h` / `migrate.h` / `metadata.h` / `journal.h` /
+`l2p_cache.h` / `ftl_fc_interface.h` / `ftl.h`）的 `@param` / `@return` **契约同步**
+（删「参数非法」、改「**前置条件**，非法即 ASSERT」），`allocator.h` 补**不变量 ⑤**（2026-10-17 重编号为 **④**）。
+
+### 二、本轮用的判据（一句话）
+
+> **入参是不是「调用者自己持有的指针 / 自己算出的索引」**（判据 2）——
+> 是 ⇒ 收口成 `ASSERT`（§二十七）；不是（host 输入 / 介质读回 / 池空 / 表满）⇒ **保留返回码**。
+
+具体到本轮的**保留项**（**不要**"顺手"转）：
+
+| 类别 | 实例 | 依据 |
+|---|---|---|
+| host 入口返回码 | `ftl_submit_read`/`ftl_submit_write` 的 `req`/`req->buffer` | 判据 1 |
+| 资源类结果 | 全部 `fc_command_alloc()` 后的 `cmd == NULL`、`pending_alloc()` 后的 `p == NULL`、`ftl_fc_interface.c` 的 `buf == NULL` | 判据 3 |
+| 介质读回数据 | `journal.c` 的 `count > JRN_ENTRIES_PER_PAGE` | 判据 3 + H29（§六） |
+| 运行时/依赖态 | `l2p_cache.c` 的 `cache->md_dir == NULL \|\| cache->alloc == NULL`（Region 加载中）、`ftl.c` 的 `platform->time_us == NULL`、`gc_should_trigger` 的 `alloc == NULL`（0 无触发） | 判据 3 |
+| **UT 钉住的文档化契约** | `checkpoint_check_trigger(NULL)`/`checkpoint_is_emergency(NULL)`/`gc_should_trigger(NULL)`/`rr_check_predictive(NULL,…)`/`rr_get_health(NULL)`、`bbt.c` 两处 | **判据 4**（`tests/unit/test_ftl.c` 逐条钉住 ⇒ 转 `ASSERT` 会当场打红 UT） |
+| 可选参数 / 可选出参 | `ftl_op_submit(cmd, op, ctx)` 的 `ctx != NULL`、`l2p_cache_flush_*` 的 `out`、`journal_scan_latest`/`journal_resume` 的 `latest` | §四 可选参数语义、辨析 B |
+| 幂等早退 | `allocator_close_open_sb` 已关闭 → `FTL_ERROR` | §十三 `fc_command_release` 先例 |
+
+> ⚠️ **判据 4 是本轮最容易被"顺手"破坏的一条**：这 5 个查询函数的 `NULL → 默认值` 不是守卫，
+> 是**有 UT 钉住的公开契约**（"查不到就问不出"，语义上等同"没有这件事"）。把它们转成
+> `ASSERT` 会让 UT 当场红——**这正是判据 4 存在的意义**。
+
+### 三、口径分叉的**裁决结果**（2026-10-17 用户定）
+
+本轮暴露出本仓**两条已落地判据在同一类守卫上给出相反答案**：
+
+| | §二十六（2026-10-15，`adf897e`） | §二十七（2026-10-17） |
+|---|---|---|
+| 口径 | **恒真 → 删**（§十附判据 1）：「入参有效性已由唯一调用者保证就不必再断言」 | **判据 2 → `ASSERT`**：「`allocator.h` 在模块头名单里 ⇒ 是边界」 |
+| 实例 | `pending.c` **13 处 `ASSERT(ftl != NULL)` 删除**——**含 `pending_lookup`/`pending_remove`/`pending_count`/`pending_group_*` 等头文件公开入口** | `allocator.c` 10 处守卫**转 `ASSERT`** |
+| 冲突点 | 二者对「子模块公开入口的恒真指针守卫」给出**相反处理** | |
+
+**用户裁决：保持本轮现状 —— 删掉的就不再补回**（原话「**删除就删除了，暂时这样就行**」）。
+⇒ **不做任何反向操作**：
+
+- §二十六 已删的 `pending.c` 13 处 **不补回**；
+- 本轮按「调用者全在本 .c 内 ⇒ 纯删」处理的 `bbt_load` / `metadata_handle_reset` / `ftl_boot_fresh_start`
+  /`clean_start`/`power_failure` 等 **不补回**；
+- 落在争议线的 `wear_leveling.c` 6 / `wear.c` 2 / `checkpoint.c` 2 **保持删除**。
+
+**⚠️ 遗留（未闭合，登记不掩盖）**：上列第三组共 10 处的调用者**在别的 .c**
+（`wl_should_trigger`/`wl_select_victim` ← `migrate.c`；`checkpoint_handle` ← `ftl.c`/`bg_scheduler.c`；
+`checkpoint_find_latest` ← `ftl.c`/`power_failure_recovery.c`），按 §二十七 的判据 2 本应 `ASSERT`，
+本轮按「恒真」删了。⇒ **全仓口径暂未强行归一**，现行事实口径为：
+
+> **入参由唯一调用者结构性保证 ⇒ 删**；跨 .c 调用且便于调试停机处**留 `ASSERT`**（无硬边界，
+> 由改动者按「debug 停机信息值不值得」裁量）。
+
+两条判据的**边界待后续统一**，不阻塞本轮（R7：读码/重构期只分析不改造，且反向操作会波及
+已推送的 `adf897e`）。
+
+### 四、判据 10 的一次**真实命中**（本轮最有价值的副产物）
+
+`metadata_ring_locate` 的 `const ftl_topology_t *topo` 形参**在本函数体内从未被使用**——
+唯一的"用途"是入口的 `topo == NULL` 守卫。该守卫按判据 2 收口成 `ASSERT` 后，`topo` 在
+**release 档**当场报 `unused parameter`（判据 10）。
+
+⇒ 据此确认它是**废形参**（H5），而不是"漏用"。处理：**删形参**（不是 `(void)topo;`，也不是
+把告警记成既有）。调用点 7 处同步（`checkpoint.c` ×2、`bbt.c` ×3、`metadata.c` ×2）。
+头文件已留 ⚠ 注记。**这是判据 10「release 档的编译告警是断言在 release 下没有等价守卫的
+唯一提示」的正面用法**——它把一个**静默的**废参数变成了编译期可判的事实。
+
+### 五、`static inline` 访问器族的 `NULL` 守卫（C 批，2026-10-17 **已闭合**）
+
+**原先登记为「未做」（B 批）**：`include/ftl/` 里一族 **`static inline` 访问器**带
+`NULL → 默认值` 守卫，共约 20 处，理由记的是「形态与 `.c` 入口守卫不同 —— 是纯 getter/setter，
+`NULL → 默认值` 是这套访问器库的一致约定（且部分被 UT 或文档钉住）」+「`bst.h` 在热路径上」。
+
+**C 批裁决：那个「形态不同」的理由不成立**，逐族按**同一条判据**重判：
+
+> 判据 = **该函数的 NULL 语义有没有被文档化或被 UT 钉住**。
+> 有 ⇒ 是**契约**，按辨析 B / 判据 4 **保留**；
+> 没有 ⇒ 指针属前置条件（判据 2），守卫是**恒真的静默吞**（§十附判据 1）⇒ 转 `ASSERT` + 无条件执行。
+
+#### 已转 `ASSERT`（13 处）
+
+| 位置 | 处数 | 依据 |
+|---|---|---|
+| `bst.h` 全部 12 个访问器（`ftl_block_is_bad`/`set_bad`/`state_is`/`state_set`/`state_clr`/`set_temp`/`get_temp`/`sb_id`/`set_sb`/`add_valid`/`sub_valid`/`clear_valid`） | 12 | 见下 |
+| `l2p_cache.h` 的 `l2p_cache_is_thrashing` 的 `cache != NULL` | 1 | 唯一调用点传 `ftl->cache`（阶段 B 起 cache 为共享指针；`l2p_cache_set_md_dir` 已随共享 cache 删除） |
+
+**`bst.h` 的判据链**：
+
+1. **判据 2 的层内模块头名单逐字含 `bst.h`**（§一）。
+2. **无文档化 NULL 语义**：12 个访问器的注释**没有一条**写过 NULL；且其默认值**语义上是错的**
+   （`get_temp(NULL) → HOT` 读作"没有这个块 ⇒ 是热的"、`state_is(NULL, st) → false` 读作
+   "没有这个块 ⇒ 不是这个状态"）。对比判据 4 那 5 个被 UT 钉住的查询函数
+   （`gc_should_trigger(NULL) → 0` = "没有 allocator ⇒ 无触发"），后者的默认值是**连贯的**。
+3. **调用点普查：全仓零 NULL**（逐条核实 `src/` 11 个 .c + `tests/unit/test_ftl.c`）。
+   实参只有两种形态：`&<…>->blocks[<索引>]`，或紧邻使用前赋值的局部/形参（其右值同样是
+   `&…blocks[<索引>]`）。**根因**：`ftl_allocator_t.blocks` 由 `ftl_table_refs_s` 绑定到
+   HIL **独立定义**的数组（生命周期覆盖全程）⇒ 取元素地址**结构性恒非空**。
+   （附带：调用点传的是 `&blocks[i]` 而非基址 `blocks`，故即使基址真为 NULL，
+   `&blocks[i]`（`i > 0`）也不是 NULL 字面量 —— 守卫**连它想防的情形都拦不住**。）
+4. **「热路径」这条理由方向是反的**：现写法 `if (b != NULL) { … }` 在 release 档是**活的**
+   运行期分支（`ftl_block_add_valid` 每 CW 一次）；转 `ASSERT` 后 `NDEBUG` 把它裁成
+   `((void)0)` ⇒ **release 零开销、debug 保留停机检查**（H14）。
+
+⚠ **只删 NULL 守卫，不动任何返回值语义**。尤其 `ftl_block_get_temp`：`0=HOT / 1=COLD` 是
+**两值域不是真值域**（不是 `bool`），UT 逐条钉住该值域。
+
+#### **保留**（3 组，**不要**"顺手"转）
+
+| 位置 | 为什么保留 | 依据 |
+|---|---|---|
+| `metadata.h` 的 `ftl_l2p_region_placement` 的 3 处 | **文档化可选出参**（`metadata.h` 逐字「输出指针可为 NULL（只取需要的一项）」） | 辨析 B |
+| `metadata.h` 的 `metadata_dir_busy` 的 `dir != NULL` | 其 `@return` 注释**逐字写了**「false = 空闲（**或 dir == NULL**）」 | 辨析 B |
+| `bbt.h` 的 `bbt_is_bad` / `bbt_set_bad` | **UT 逐条钉住**：`test_ftl.c` `bbt_is_bad(NULL, 5U) == 0`、另一处 `bbt_set_bad(NULL, 1U)` 不崩 | **判据 4** |
+
+另注：`platform_now_ms`（`platform == NULL || platform->time_us == NULL`）**不在本族** ——
+它属 §二 的「运行时/依赖态」（判据 3），保留。
+
+#### 验证状态（R1）
+
+`make all` / `make release` / `make tests UT=FTL` 三关见文末。**未上板**（按用户定调
+「重构完再上版验证」）。⚠ 断言在板上是活的（`make tests` 走 debug 档）⇒ **最终必须上板**
+跑 `/ftl/` 叶子套件：一旦有调用点真传 NULL，表现会从「静默吞」变成**板子停机**。
+
+### 六、验证状态（R1）
+
+- `make all` / `make release` / `make tests UT=FTL` **三关全过**，**零新告警**
+  （release 档仅 `ftl_fc_interface.c` 的 `allowed` / `plane_bits` 两条**既有**告警，
+  即判据 10 形态，非本轮引入）。
+- **未上板**。按用户定调「**重构完再上版验证**」，本轮**不**上板。
+- **未提交、未推送**（R3）。
+
+---

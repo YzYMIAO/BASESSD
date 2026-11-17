@@ -1,6 +1,7 @@
 build/
 *.log
 
+# Source Insight 工程目录（本机 IDE）
 SI/
 
 # Prerequisites
@@ -84,9 +85,32 @@ Desktop.ini
 *.Zone.Identifier
 
 # 调试临时文件
-operand
-query
 sh/flash.jlink
 
 # IO 路线代码评审的登记清单（工作草稿，不进版本库）
 .claude/io_review_backlog.md
+
+# ============================================================================
+# 本机工具 / 编辑器状态（不属于仓库内容）
+# ============================================================================
+
+# Claude Code 本机权限设置（含本机命令白名单）
+.claude/settings.local.json
+
+# 本机调试环境变量（可设置 JLINK_EXE 等；见 sh/debug_env.sh）
+.debug_env.local
+
+# 按 .vscode/launch.json 提示放在工作区根的 SVD 文件
+*.svd
+
+# Python 工具缓存（tools/*.py）
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 编辑器临时文件
+.idea/
+*.swp
+*.swo
+*.orig
+*.rej

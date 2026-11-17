@@ -39,7 +39,7 @@
 /* 读序列单段上限（pair，跨 block 续接后仍需收尾）。
  *
  * why：READ PAGE CACHE SEQUENTIAL (31h) 可以跨 block（同 die；禁止跨 die/LUN ——
- * `docs/reference/datasheet_mt29f_cache_ops.md` §2），所以 block 边界不再是自然断点；
+ * MT29F4G08 datasheet「Read Cache Operations」节（链接见 `docs/reference/README.md`）），所以 block 边界不再是自然断点；
  * 但**整段读序列期间该 die 的 cache 寄存器被占用（ARDY = 0），程序命令发不进去**，
  * Journal / L2P / GC / 元数据写会被序列门控挡在段外。断点就是后台元数据在这块 die 上的
  * 让步点，必须有一个与器件无关的上限。
@@ -108,8 +108,8 @@ typedef enum FTL_CACHE_WRITE_RESULT_E
  * @note 断点（在数据页上 END）：Journal 顺序页写满 / D4 / 命令尾不足一对 /
  *       journal 预留失败 / 下一窗口 L2P 未驻留 / **收尾块时分配器开不出新块**。
  *       **host 传输段、host 命令、物理 block 边界都不是断点**——同一 LBA 流跨三者
- *       续接（44/48h 每条自带地址，见 `docs/reference/datasheet_mt29f_cache_ops.md`
- *       §5/§6）；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
+ *       续接（44/48h 每条自带地址，见 MT29F4G08 datasheet
+ *       「Program Page Cache」节（链接见 `docs/reference/README.md`））；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
  */
 ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 

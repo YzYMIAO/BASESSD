@@ -1,8 +1,8 @@
 # 存储主控 / 软 SSD 测试指南
 
 > 定位：从板端 NAND/FC 到主机 USB 的**分层测试流程、工具、性能方法、当前实测**。
-> 配套：`docs/design/usb_msc.md` Part A（USB 架构）、`docs/design/usb_msc.md` Part B
-> （上板验证手册）、`docs/design/known_risks.md`（残余风险）、
+> 配套：`docs/design/usb_msc.md` Part A（USB 架构）、`docs/guides/usb_msc_verify.md`
+> （上板验证手册）、`docs/design/known_open_items.md`（残余风险）、
 > `docs/design/fc_nand_ut.md`（FC UT）。
 >
 > **报告原则**：任何性能数字必须同时写明**盘状态（空盘 / 近满盘 / GC）、镜像、测试文件大小、
@@ -378,7 +378,7 @@ fl
 本地脚本（用户机器，仓库不收录）：
 
 ```text
-D:\StudyTool\TuBaTool\DiskSpd\amd64\run_diskspd_tests.ps1
+<DiskSpd 解压目录>\amd64\run_diskspd_tests.ps1
 ```
 
 等价命令：
@@ -463,7 +463,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 创建目录并生成 `meta.txt`；脚本打印路径，把串口终端工具的日志目录指到它即可。
 
-`meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 = 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。报告引用结论时抄这四行；原始日志不进版本库，需要长期留证的结论写本文件 §7 或 `docs/design/known_risks.md`。
+`meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 = 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。报告引用结论时抄这四行；原始日志不进版本库，需要长期留证的结论写本文件 §7 或 `docs/design/known_open_items.md`。
 
 ---
 
@@ -503,13 +503,13 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 - 4K 随机结果受 Windows/USB 调度影响；单次 ±10~20% 正常；
 - 未做 512 B 随机（真正小于 CW 的碎片）与 partial-page 专项；
 - `RISK-HOST-07/08/09/10`、`RISK-L2P-06`、`RISK-NAND-04` 见
-  `docs/design/known_risks.md`。
+  `docs/design/known_open_items.md`。
 
 ---
 
 ## 11. 负例执行清单（可执行）
 
-> 目的：把 `docs/design/known_risks.md` 里「待上板」的负例判据整理成可逐条执行的清单。
+> 目的：把 `docs/design/known_open_items.md` 里「待上板」的负例判据整理成可逐条执行的清单。
 > 每条都给出：风险 ID、触发方式、期望、证据。**未上板前不得勾选**（R1）。
 > 本清单是**手动/半自动**执行路径；UT 镜像内的可重复负例见 §12。
 > 当前硬件：无程控电源 / USB 继电器 ⇒ 掉电与拔线只能手动，无法自动化与大批量。
@@ -632,7 +632,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 | 结论（通过/失败/未复现）| 证据（日志行）
 ```
 
-结果写回 `known_risks.md` 对应条目的「历史/验证」行；通过的按 `docs/design/known_risks.md` §0.4 判定是否 `已闭合`。
+结果写回 `known_open_items.md` 对应条目的「历史/验证」行；通过的按 `docs/design/known_open_items.md` §0.4 判定是否 `已闭合`。
 
 ---
 
@@ -649,7 +649,7 @@ RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 
 - **C8**：必须给出「故障确实发生」的证据（注入计数、状态位、日志），不能只看返回码。
 - **H14**：注入只存在于测试镜像；产品构建零运行期开销（宏隔离，§12.4）。
 - **R4**：注入代码属于生产源码的测试分支；用例属于测试源（用户维护）。
-- **P3**：新增 `ASSERT` 前先读 `docs/design/assertion_guidelines.md`（判据 9/10）。
+- **P3**：新增 `ASSERT` 前先读 `docs/design/common/assertion_guidelines.md`（判据 9/10）。
 - **C5 / H34**：测试侧内部 API 的非法枚举值用 `ASSERT`；release UT 下越界直接 return。
 
 ### 12.2 借鉴与出处
@@ -681,8 +681,8 @@ RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 
 | 故障目录 | fault catalog | §12.5 的分类 + 各层 seam 表 |
 
 > 「W / H 机制」是本文简写（W = wrap，H = 静态 hook），**本仓自拟**，不冒充行业术语。
-> NAND 语义（FAIL_CACHE 指提交序前一页、`7Ah` 状态字节）以
-> `docs/reference/datasheet_mt29f_cache_ops.md` 与 MT29F4G08 datasheet 为准。
+> NAND 语义（FAIL_CACHE 指提交序前一页、`7Ah` 状态字节）以 MT29F4G08 datasheet 为准
+> （链接见 `docs/reference/README.md` 的「外部 datasheet」表）。
 
 ### 12.4 分层模型与选型
 
@@ -858,7 +858,7 @@ typedef struct FI_SLOT_S
 - 放置：FTL pure 放 `/ftl/pure/` 对应模块套件；media/e2e 放 `/ftl/media/e2e/`；
   **注入负例放 `/ftl/negative/`**（`tests/unit/test_negative_pure.c` + `test_negative_media.c`）；
   FC 放 `pure` / `lifecycle` 或 `/fc-nand/negative/` 套件；HIL 放 `/hil/` 套件。
-- **测试代码注释不得写 RISK 编号**：风险映射只维护在 `docs/design/known_risks.md`
+- **测试代码注释不得写 RISK 编号**：风险映射只维护在 `docs/design/known_open_items.md`
   与各层 UT 文档的覆盖台账，测试代码只写「故障 / 预期 / 判据」。
 - **内存约束**：combined UT（FC+FTL）的 AXI_RAM 已接近上限，负例缓冲放
   `SRAM4_DATA`（`.sram4_data` 是 NOLOAD，用例内先填后读）；新增负例避免再往 `.bss`

@@ -12,11 +12,11 @@
 > 编译期上限 `FTL_LBA_MAX` 变为 **868,352（424 MiB）**；运行时按实际坏块取
 > min(plane)/min(instance)，以 boot `[CAP]` / USB READ CAPACITY 为准。
 > 上文 rev30 的 429 MiB 是历史证据，不重写。
-> 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）；H2testw 吞吐与内部/器件上限的分层对照见 [`testing_guide.md`](testing_guide.md) §7.5 与 `known_risks.md` RISK-PERF-04。
+> 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）；H2testw 吞吐与内部/器件上限的分层对照见 [`../guides/testing_guide.md`](../guides/testing_guide.md) §7.5 与 `known_risks.md` RISK-PERF-04。
 
 ---
 
-> 分层测试流程、工具、性能方法与实测结果：见 [`testing_guide.md`](testing_guide.md)。
+> 分层测试流程、工具、性能方法与实测结果：见 [`../guides/testing_guide.md`](../guides/testing_guide.md)。
 
 ## 1. 目标与硬件
 

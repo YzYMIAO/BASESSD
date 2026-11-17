@@ -8,7 +8,7 @@
 v0.69（`ftl_is_metadata_block` 补 plane 掩码）上板后，重启仍然打印：
 
 ```
-[ERR] [FAULT] previous assert: b->valid_count > 0U (/home/miao_yang/projects/soft_ssd/include/ftl/bst.h:261)
+[ERR] [FAULT] previous assert: b->valid_count > 0U (/home/user/projects/soft_ssd/include/ftl/bst.h:261)
 ```
 
 ## 结论：陈旧记录，不是新崩溃

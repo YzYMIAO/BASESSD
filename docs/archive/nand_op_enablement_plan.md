@@ -3,7 +3,7 @@
 > 状态：**方案文档**。未改代码、未上板；所有收益数字是估算，不是实测（R1）。
 > 适用范围：STM32H743 + MT29F4G08ABADAWP，`LUN_NUM=1`、2 plane、FMC PIO、USB Full Speed。
 > 相关文档：[`ftl_design.md`](../design/ftl_design.md)（ADR-15）、[`fc_nand_design.md`](../design/fc_nand_design.md)
-> §17.6/§25.8、[`storage_controller_design_essentials.md`](../design/storage_controller_design_essentials.md) §3.4。
+> §17.6/§25.8、[`storage_controller_design_essentials.md`](../design/storage_controller_design.md) §3.4。
 
 ## 0. 结论摘要
 

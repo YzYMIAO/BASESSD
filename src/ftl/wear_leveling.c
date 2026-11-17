@@ -22,7 +22,7 @@
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  *
- * ⚠ 入口前置守卫口径（docs/design/assertion_guidelines.md §二十六 / §二十八）：
+ * ⚠ 入口前置守卫口径（docs/design/common/assertion_guidelines.md §九）：
  *   本文件全部函数都取 ftl 实例指针，且**只被 migrate.c（已持实例）与本文件内部**调用
  *   ⇒ ftl 非空是**前置条件**，不逐函数复检。
  */

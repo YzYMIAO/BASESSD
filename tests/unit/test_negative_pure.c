@@ -1,7 +1,7 @@
 /*
  * test_negative_pure.c — /ftl/negative/pure/：不碰介质的负例（RAM 夹具 / 纯函数）
  *
- * 设计：docs/design/testing_guide.md §12。
+ * 设计：docs/guides/testing_guide.md §12。
  *
  * 与 /ftl/negative/media/ 的分界：
  *   · pure：只用 RAM allocator 夹具、纯函数、或启动后即闲置的 live 实例表；
@@ -9,7 +9,7 @@
  *   · media：真 NAND 破坏性负例，需 format + 统一 drain。
  *
  * 用例名是稳定 ID（回溯/文档/覆盖账直接引用），不随套件重排改名。
- * 注释不写风险编号（映射只在设计文档 §11 与 known_risks.md 维护）。
+ * 注释不写风险编号（映射只在设计文档 §11 与 known_open_items.md 维护）。
  */
 
 #include "allocator.h"

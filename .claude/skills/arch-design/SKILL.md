@@ -48,8 +48,8 @@ description: 架构/分层决策 —— 新增或重构结构、判断「这件�
 - 核心模块直接 MMIO 或直接调 `HAL_*`。
 
 ⚠ **已知现状偏差（别当已修）**：NAND 层**仍有** FMC MMIO 直写（`src/nand/nand_fmc.c`）与
-`HAL_NAND_*` 直连（`nand_mt29f4g08abadawp.c`）—— 平台抽象的 **Stage 3 待办**，
-include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_abstraction.md`。
+`HAL_NAND_*` 直连（`mt29f___g08a.c`）—— 平台抽象的 **Stage 3 待办**，
+include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_design.md`。
 
 ⚠ **内存分区表会过时**：`docs/hardware_contract.md` 的 AXI_RAM 表是 **2026-10-13 实测快照**，
 此后 v0.78 改过 `SUPER_BLOCK_LIST_MAX` ⇒ **数字可能已不准**。
@@ -65,18 +65,18 @@ include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_a
 1. 这属于 **HIL / FTL / FCC / DRAM** 哪一层？
 2. 归哪条**主线**：**数据面**（数据怎么走）/ **控制面**（命令怎么排）/ **可靠性面**（出错怎么救）？
 
-自检（`essentials §1.3`）：**归不到「哪条主线的哪一层」= 理解还没到位。**
+自检（`storage_controller_design.md §1.3`）：**归不到「哪条主线的哪一层」= 理解还没到位。**
 
 ### 步骤 2 · 考点 → 出处 定位表（说「主流怎么做」时从这里引）
 
 | 考点（§〇） | 出处 |
 |---|---|
-| **分层** | `fc_nand_design.md` **§26**（唯一判据）· `essentials §〇/§一` |
+| **分层** | `fc_nand_design.md` **§26**（唯一判据）· `storage_controller_design.md §〇/§一` |
 | **队列 + 门铃 + 完成** | `fc_nand_design.md §26.1`（NVMe / eMMC CMDQ / ZNS 三形态表）· SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4） |
-| **数据面轮询** | `essentials §四 FCC` · `fc_nand_design.md §5`（数据路径） |
-| **通道并行仲裁** | `essentials §三/§七` · `fc_nand_design.md §17/§18`（multi-plane / 多通道） |
-| **ECC-LDPC** | `essentials §四/§八` · `fc_nand_design.md §25` |
-| **掉电恢复** | `essentials §五` · `docs/design/ftl_design.md` 对应章节 |
+| **数据面轮询** | `storage_controller_design.md §四 FCC` · `fc_nand_design.md §5`（数据路径） |
+| **通道并行仲裁** | `storage_controller_design.md §三/§七` · `fc_nand_design.md §17/§18`（multi-plane / 多通道） |
+| **ECC-LDPC** | `storage_controller_design.md §四/§八` · `fc_nand_design.md §25` |
+| **掉电恢复** | `storage_controller_design.md §五` · `docs/design/ftl_design.md` 对应章节 |
 
 ⚠ **对不上出处的，只能标「本仓自拟」，不得写成「行业标准形态」**（§〇）。
 ⚠ 出处只认 `docs/reference/`（论文 / 网页存档）+ `docs/design/` 两处，**不许凭记忆**。
@@ -91,12 +91,12 @@ include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_a
 ### 步骤 4 · 问场景轴（主流本身分岔）
 
 **DRAM 型 vs DRAM-less** —— 对齐时**必须说清对齐的是哪一支**。
-本仓是 **DRAM-less**（`FC_BUFFER_POOL` + SRAM 数组）。场景对照见 `essentials §九`。
+本仓是 **DRAM-less**（`FC_BUFFER_POOL` + SRAM 数组）。场景对照见 `storage_controller_design.md §九`。
 
 ### 步骤 5 · 过一遍取舍清单
 
-`essentials §十一 设计取舍清单` —— 逐条问「**我的选择是什么？代价是什么？**」
-算法选型的「主流选择」见 `essentials §十`。
+`storage_controller_design.md §十一 设计取舍清单` —— 逐条问「**我的选择是什么？代价是什么？**」
+算法选型的「主流选择」见 `storage_controller_design.md §十`。
 
 ### 步骤 6 · 偏离留痕（P5）
 
@@ -105,16 +105,15 @@ include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_a
 
 ---
 
-## 3. 出处层（本仓的架构知识都在这四份里）
+## 3. 出处层（本仓的架构知识都在这三份里）
 
-| 文档 | 规模 | 内容 |
-|---|---|---|
-| `docs/design/storage_controller_design_essentials.md` | 733 行 | **知识参照**：按 §26 分层组织；§九 场景×方案 · §十 算法速查 · **§十一 取舍清单** · §十二 术语表 |
-| `docs/design/fc_nand_design.md` **§26** | ~100 行 | 本仓**唯一**分层判据（§26.2 映射 · §26.3 寄存器表判据 · §26.5 反例） |
-| `docs/design/storage_controller_learning.md` | 284 行 | 学习路线 + 开源对照 |
-| `docs/reference/` | README 223 行 | 7 篇论文（FEMU/MQSim/SimpleSSD/Amber/LeaFTL…）+ 9 个网页存档 |
+| 文档 | 内容 |
+|---|---|
+| `docs/design/storage_controller_design.md` | **知识参照**：按 §26 分层组织；§九 场景×方案 · §十 算法速查 · **§十一 取舍清单** · §十二 术语表；附录参考资料 |
+| `docs/design/fc_nand_design.md` **§26** | 本仓**唯一**分层判据（§26.2 映射 · §26.3 寄存器表判据 · §26.5 反例） |
+| `docs/reference/` | 资料索引与逐份分析（论文题名 / arXiv / URL；原文不随仓库分发） |
 
-⚠ **本仓现状以 `docs/design/` 为准**，`essentials` 是**知识参照不是设计文档**（它自己文档头就写了）。
+⚠ **本仓现状以 `docs/design/` 为准**，`storage_controller_design.md` 是**知识参照不是设计文档**（它自己文档头就写了）。
 ⚠ 空壳文档别当权威：`docs/nand_model.md` 仅 5 行。
 
 ---

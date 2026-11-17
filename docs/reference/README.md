@@ -1,10 +1,9 @@
 # 资料区（docs/reference）
 
-配套文档：**[docs/design/storage_controller_learning.md](../design/storage_controller_learning.md)**（学习路线）。
+配套文档：**[docs/design/storage_controller_design.md](../design/storage_controller_design.md)**（存储主控设计要点）。
 
-本目录只保留**链接清单与逐份分析**：论文 PDF 与网页 HTML 不随仓库分发（再分发权未确认），
-需要原文时按表中 URL 自行获取。唯一的本地存档是 `datasheet_mt29f_cache_ops.md`
-（用户提供的原文摘录，引用规则见 R12）。
+本目录只保留**链接清单与逐份分析**：论文 PDF、网页 HTML 与 datasheet 原文摘录均不随仓库分发
+（再分发权未确认），需要原文时按表中 URL 自行获取。引用 datasheet 时给节名与 URL（R12）。
 
 判据始终是本仓 **`docs/design/fc_nand_design.md` §26 分层**（HIL / FTL / FCC(硬件) / DRAM
 + 队列 + 门铃 + 完成），**不是 Linux、不是通用 OS 编程**。所以下面每份资料的「价值」一栏，
@@ -16,8 +15,7 @@
 
 ```
 docs/reference/
-├── README.md                      ← 本文件：链接清单 + 逐份分析
-└── datasheet_mt29f_cache_ops.md   ← MT29F4G08 cache 操作原文摘录
+└── README.md   ← 本文件：链接清单 + 逐份分析
 ```
 
 ---
@@ -41,7 +39,7 @@ docs/reference/
 | 来源 | 用途 |
 |---|---|
 | [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §17.2。 |
-| 同上，"Read Cache Operations" / "Two-Plane Read Cache Operations" | **31h 可跨 block（同 die）、禁止跨 die/LUN**；two-plane 31h 每个 plane 各前进一页。原文摘录已本地存档：`docs/reference/datasheet_mt29f_cache_ops.md`（R12 判据出处）。 |
+| 同上，"Read Cache Operations" / "Two-Plane Read Cache Operations" | **31h 可跨 block（同 die）、禁止跨 die/LUN**；two-plane 31h 每个 plane 各前进一页。按 datasheet 节名引用（R12 判据出处；原文不随仓分发）。 |
 
 ### 外部规范（未本地存档）
 
@@ -49,8 +47,8 @@ docs/reference/
 
 | 来源 | 原文要点 | 本仓用到的地方 |
 |---|---|---|
-| [T10 SBC-3 草案 03-388r1](https://t10.org/ftp/t10/document.03/03-388r1.pdf) §5.26 Table 6/7（WRITE(10)） | CDB **byte 1 位 3 = FUA**（位 7:5 WRPROTECT、位 4 DPO、位 1 FUA_NV）。**FUA=1** 时「设备不得在逻辑块真正写到介质之前返回 GOOD」；FUA=0 可写缓存即返回，后续错误走 deferred error | `known_risks.md` RISK-USB-05（本仓**有意忽略** FUA：靠主机 fsync 的 SYNCHRONIZE CACHE 做持久性屏障；此条只记录被忽略位的语义） |
-| [NVM Express NVM Command Set Specification（1.0e / 1.1）](https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-1.0e-2024.07.29-Ratified.pdf) | ① Identify Namespace 的 **DLFEAT**（bits 2:0）规定**去分配 / 未写过 LBA** 的读值：`000b` = 全 0h 或全 FFh（实现自选）、`001b` = 全 0h、`010b` = 全 FFh；② Error Recovery feature（FID 05h）**CDW11 bit 16 = DULBE**（Deallocated or Unwritten Logical Block Error Enable，默认 0）：置 1 时读去分配区间**报错**。⇒ 主流是**命名空间级策略**，不是 per-LBA 持久丢失标记 | `docs/design/known_risks.md` RISK-CACHE-28（本仓重启后失败 LBA 读零 = DLFEAT `001b` 行为） |
+| [T10 SBC-3 草案 03-388r1](https://t10.org/ftp/t10/document.03/03-388r1.pdf) §5.26 Table 6/7（WRITE(10)） | CDB **byte 1 位 3 = FUA**（位 7:5 WRPROTECT、位 4 DPO、位 1 FUA_NV）。**FUA=1** 时「设备不得在逻辑块真正写到介质之前返回 GOOD」；FUA=0 可写缓存即返回，后续错误走 deferred error | `known_open_items.md` RISK-USB-05（本仓**有意忽略** FUA：靠主机 fsync 的 SYNCHRONIZE CACHE 做持久性屏障；此条只记录被忽略位的语义） |
+| [NVM Express NVM Command Set Specification（1.0e / 1.1）](https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-1.0e-2024.07.29-Ratified.pdf) | ① Identify Namespace 的 **DLFEAT**（bits 2:0）规定**去分配 / 未写过 LBA** 的读值：`000b` = 全 0h 或全 FFh（实现自选）、`001b` = 全 0h、`010b` = 全 FFh；② Error Recovery feature（FID 05h）**CDW11 bit 16 = DULBE**（Deallocated or Unwritten Logical Block Error Enable，默认 0）：置 1 时读去分配区间**报错**。⇒ 主流是**命名空间级策略**，不是 per-LBA 持久丢失标记 | `docs/design/known_open_items.md` RISK-CACHE-28（本仓重启后失败 LBA 读零 = DLFEAT `001b` 行为） |
 
 ### 网页
 
@@ -215,7 +213,7 @@ docs/reference/
 
 #### E1. ONFI（**未备份**，见 §三）
 - 器件命令集/时序的**权威来源**。⚠ 本仓记忆有教训：**别凭记忆说「协议要求」**
-  （见记忆 `no-unverified-protocol-claims`、`onfi-1-0-no-multi-plane`）——查 ONFI 原文。
+  ——必须查 ONFI 原文，不凭记忆断言。
 
 #### E2. Zoned Storage 生态（zonedstorage.io + zonefs 内核文档）
 - **是什么**：ZNS / SMR 的**主机侧软件栈**——内核 4.10 起支持，含驱动层/文件系统层/device

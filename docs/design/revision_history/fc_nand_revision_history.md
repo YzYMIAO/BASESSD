@@ -1,7 +1,7 @@
 # FC-NAND 设计变更历史
 
 > 本文档记录 FC（Flash Controller）与 NAND 底层模块设计过程中的关键讨论、方案反转、
-> 被否方案和验证记录，结构对齐 `docs/design/ftl_revision_history.md`。
+> 被否方案和验证记录，结构对齐 `docs/design/revision_history/ftl_revision_history.md`。
 >
 > **单一事实源**：当前设计只在 `docs/design/fc_nand_design.md`；本文只回答「为什么变成现在这样」。
 > 本文中的符号一律按**当时**的名字出现（`nand_dispatch_*`、`nand_fc_*`、`status.module` 等），
@@ -18,8 +18,8 @@
 | 现在怎么设计、当前结构体/接口是什么 | `docs/design/fc_nand_design.md` |
 | 某个机制为什么是现在这样、换过什么方案 | 本文 §3 / §4 |
 | 某个版本改了哪些文件、验证到什么程度 | 本文 §4.11 与对应 `docs/archive/changelog/*.md` |
-| 缺陷、未验证项、待决策 | `docs/design/known_risks.md` / `known_iss.md` |
-| FTL 侧的演进 | `docs/design/ftl_revision_history.md` |
+| 缺陷、未验证项、待决策 | `docs/design/known_open_items.md` / `../known_open_items.md` |
+| FTL 侧的演进 | `docs/design/revision_history/ftl_revision_history.md` |
 
 **阅读顺序**：先读 §1 版本总览定位到版本；再读 §2（Phase）或 §3（vN）中对应条目；
 需要方案对比时跳 §4 专题；§5 是被否方案清单，避免重新提议已经否决过的设计。
@@ -29,7 +29,7 @@
 - 「内容」= 当轮做了什么；「决策」= 为什么这样选；「拒绝方案」= 当时比较过但没有采用的方向。
 - 验证记录只写**当时**的结论与证据位置。未上板的一律写「未上板」，不因后续版本通过而追认。
 - 历史事实不改写。后续版本的更正写在新条目里，并注明它推翻了哪一条。
-- 裸写的 `§N` 指**当时**的 `fc_nand_design.md` 章节（章节号随重构变化）；指向本文条目的写作
+- 裸写的 `§N` 指**当时**的 `../fc_nand_design.md` 章节（章节号随重构变化）；指向本文条目的写作
   `§2.x` / `§3.x` / `§4.x`；指向原始讨论稿的写作 `docs/archive/fc_design_discussions.md` §N。
 
 ---
@@ -85,7 +85,7 @@
 | — | 2026-10-23 | 器件扩展：two-plane cache 读写落地 |
 | — | 2026-10-30 | FTL cache read / cache program 组链（推翻「FTL 恒 END」口径） |
 
-未列出的 v0.x~v60 见 `docs/archive/changelog/` 与 `docs/design/ftl_revision_history.md`（FTL 侧版本）。
+未列出的 v0.x~v60 见 `docs/archive/changelog/` 与 `docs/design/revision_history/ftl_revision_history.md`（FTL 侧版本）。
 
 ---
 
@@ -939,7 +939,7 @@ plane 都填 `plane_paa[plane]`（`paa_to_nand_row()` 丢掉 CW 位，故 PAA �
 >
 > 现在 `fc_build_request_data_planes` 对该组合**双档拦截**：debug 档 `ASSERT` 停机
 > （§24 判据 2 / §十三：配置错误 → 断言，不当返回码）；release 档 `ASSERT` 被裁空，故紧跟着
-> 返回 `FC_STATUS_INVALID_ARGUMENT`（新判据见 `assertion_guidelines.md` **§二十四 判据 9**：
+> 返回 `FC_STATUS_INVALID_ARGUMENT`（新判据见 `common/assertion_guidelines.md` **§二十四 判据 9**：
 > 后果是**静默写坏介质**的配置错误，除 `ASSERT` 外必须再补一道运行期拒绝）——**命令被拒绝，绝不提交**。`fc_build_dispatch_request`
 > 返回 `FC_STATUS_INVALID_ARGUMENT`——**命令被拒绝，绝不提交**。`fc_build_dispatch_request`
 > 透传该状态，两条派发路径（`fc_poll_dispatch_single` / `fc_poll_dispatch_chain`）收到非 OK 就
@@ -1072,7 +1072,7 @@ v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（
 **改动**：把 `0` 定义成「**本命令 plane 段内的全部 CW**」，两个入口共用同一个
 `ftl_cmd_resolve_cw_mask()`（`src/ftl/ftl_fc_interface.c`，static）。`config.cw` 自此
 **退出建链**（写入者保留；读者只剩 FC 内 RAID stripe 的 `cw_count`，默认不编译）。
-越段掩码由 `return FTL_ERROR` 改为 **`ASSERT`**（判据见 `assertion_guidelines.md` §十三，
+越段掩码由 `return FTL_ERROR` 改为 **`ASSERT`**（判据见 `common/assertion_guidelines.md` §十三，
 v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
 
 **行为中性**：生产 `config.cw` 恒为 3 → 旧的逐 plane 展开得 `0x0F`（单 plane）/ `0xFF`（双 plane），
@@ -1225,7 +1225,7 @@ uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效 */
 
 - 三档零警告：debug 152128B / release 87016B / `make format-check` 通过。
 - `make -k tests`：仅卡在用户维护的 `test_fc_level1.c`（旧 scheduler API）与
-  `test_fc_level3.c:48`（旧 `set_device_ready`），与本次改动无关。
+  `test_fc_level3.c`（旧 `set_device_ready`），与本次改动无关。
 - **上板未验证**（用户执行）。
 
 ##### 风险
@@ -1782,7 +1782,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 > 读序列还允许跨 USB chunk 续链），`ftl_op_submit_batch()` 原子入队，序列打开期间
 > `ftl_op_submit*` 门控阻止同 LUN 的其他提交插入。运行时因此**会**走
 > `fc_poll_dispatch_chain`，`chain_owner` 的跨轮次锁是这条路径的正确性前提。其余命令仍恒
-> `END`。**未上板**：需要命令 trace 与中止/恢复负例（`known_risks.md` RISK-IF-07/09/10；
+> `END`。**未上板**：需要命令 trace 与中止/恢复负例（`../known_open_items.md` RISK-IF-07/09/10；
 > 设计见 `docs/design/ftl_design.md` §3.16，实现见 `src/ftl/cache_batch.c`）。
 
 ### 4.9 加扰器：LFSR 抽头与种子（v24 / v38）
@@ -2047,13 +2047,13 @@ Table 29/31 的 3.3V 参数重算。
 - 2026-10-30 P1/P2 cache 流式：正常路径已上板；**序列/链路径的负例未上板**。
   已知风险 RISK-IF-07/09/10。
 - 后续 HIL / FTL UT 的上板结论见 `docs/design/hil_ut_design.md`、`docs/design/ftl_ut.md`
-  与 `docs/design/known_risks.md`，本文不复制。
+  与 `docs/design/known_open_items.md`，本文不复制。
 
 ---
 
 ## 8. 维护规则
 
-1. **当前设计进 `fc_nand_design.md`，演进只进本文**（H37）。设计文档不写版本号、日期、
+1. **当前设计进 `../fc_nand_design.md`，演进只进本文**（H37）。设计文档不写版本号、日期、
    「原先是…」「已删除…」。
 2. 新增版本条目按 §3 追加：版本、日期、内容、决策、拒绝方案、验证状态。
    没有独立变更记录的版本，写清「无 changelog」。

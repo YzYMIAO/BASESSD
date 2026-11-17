@@ -1,6 +1,6 @@
 # USB MSC U 盘验证脚本（Windows 原生）
 
-配套文档：`docs/design/usb_msc.md` Part B。
+配套文档：`docs/guides/usb_msc_verify.md`。
 
 ## 文件
 

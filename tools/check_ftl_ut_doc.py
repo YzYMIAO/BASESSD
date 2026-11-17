@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """正向不变量检查：docs/design/ftl_ut_design.md 的模块化结构仍成立。
 
-文档按被测模块组织，用例清单归测试源、风险状态归 known_risks、覆盖判定归各层 UT 设计文档 §7.2。本 checker 只守本文的结构契约：
+文档按被测模块组织，用例清单归测试源、风险状态归 known_open_items、覆盖判定归各层 UT 设计文档 §7.2。本 checker 只守本文的结构契约：
 
   1. 必需的章标题与 §2.1~§2.17 模块小节都在；
-  2. 正文引用的每个 RISK-* 都在 docs/design/known_risks.md 里有登记；
+  2. 正文引用的每个 RISK-* 都在 docs/design/known_open_items.md 里有登记；
   3. 没有已废弃口径（旧快照数、旧用例表说法）；
   4. 没有手工维护的全局用例表（首列直接是用例名的表格行）；
   5. 没有 §9 运行快照；
   6. 负例套件路径齐全（pure / media 的 gc、l2p、meta、boot、if）；
   7. 测试源注册的每个 FTL 用例名在文档里至少出现一次（模块表 / 场景表 / 负例列）。
 
-判据是正向不变量：从 known_risks.md 重建合法 RISK 集合、从测试源重建用例名集合，
+判据是正向不变量：从 known_open_items.md 重建合法 RISK 集合、从测试源重建用例名集合，
 再与文档比对，不是「旧词 grep = 0」。`--self-test` 先构造必然失败的输入，确认每条
 检查都有区分力（C7），再宣称通过。
 """
@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 DOC = ROOT / "docs" / "design" / "ftl_ut_design.md"
-KNOWN_RISKS = ROOT / "docs" / "design" / "known_risks.md"
+KNOWN_RISKS = ROOT / "docs" / "design" / "known_open_items.md"
 
 REQUIRED_HEADINGS = [
     "## 0. 文档定位与单一事实源",
@@ -112,7 +112,7 @@ def check_headings(text: str) -> list[str]:
 def check_risks(text: str, known_text: str) -> list[str]:
     known = set(RISK_RE.findall(known_text))
     if not known:
-        return ["known_risks.md 里找不到任何 RISK-* 登记"]
+        return ["known_open_items.md 里找不到任何 RISK-* 登记"]
 
     errors: list[str] = []
     for lineno, line in enumerate(text.splitlines(), start=1):

@@ -13,11 +13,11 @@ FTL 层 = 映射 / GC / WL / journal / checkpoint / BBT / 掉电恢复。
 ## 0. 动手前（CLAUDE.md P0 / P1）
 
 1. **先问「主流主控怎么实现这件事」，并找出处**（§〇）。
-   出处层：`docs/reference/README.md`、`docs/design/storage_controller_learning.md`、
+   出处层：`docs/reference/README.md`、`docs/design/storage_controller_design.md`、
    SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4）。⚠ **说不出出处就标「本仓自拟」**，不得写成「行业标准形态」。
    ⚠ 主流本身分岔（**DRAM 型 vs DRAM-less**）—— 说清对齐的是哪一支。
 2. **读设计文档**：`docs/design/ftl_design.md` 对应章节的「N.1 最新策略」+「N.2 策略选取」。
-   演进史查 `docs/design/ftl_revision_history.md`；历史细节查 `docs/archive/changelog/`。
+   演进史查 `docs/design/revision_history/ftl_revision_history.md`；历史细节查 `docs/archive/changelog/`。
 3. **先 grep 已有 helper**（R9 / C2）—— 位操作 / 地址转换 / 结构体构造 / 相似分支，
    大概率已有等价物（`ftl_gblock_plane/block`、`ftl_lba_page_base`、`pba_same_page`、
    `pba_with_page` 都是这么收敛出来的）。
@@ -36,7 +36,7 @@ FTL 层 = 映射 / GC / WL / journal / checkpoint / BBT / 掉电恢复。
 
 ### 断言（P3）
 
-动断言前先读 `docs/design/assertion_guidelines.md`：
+动断言前先读 `docs/design/common/assertion_guidelines.md`：
 - **模块内部不逐函数复检同一入参**；边界 = host 返回码 + FTL↔FC/子模块入口 ASSERT（H2）。
 - **判据 9**：后果是**静默介质破坏**的，除 debug `ASSERT` 外**必须**补 release 运行期拒绝。
 - **判据 10**：被 ASSERT 守的变量在 `NDEBUG` 下变 unused ⇒ **release 档的编译告警**

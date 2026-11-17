@@ -1,14 +1,14 @@
 /*
  * test_negative_media.c — /ftl/negative/media/{gc,l2p,meta,boot,if}/：故障注入负例（真 NAND，破坏性）
  *
- * 设计：docs/design/testing_guide.md §12。
+ * 设计：docs/guides/testing_guide.md §12。
  *
  * 注入机制分两种，测试侧用法相同：
  *   · W（链接期 wrap，`tests/unit/fi_wrap.c`）：FC/FTL 边界故障，生产源码零改动；
  *   · H（生产源码宏隔离 hook）：cache FAIL_CACHE / Journal 写失败（已有用例覆盖）。
  *
  * 注释约定同 test_ftl_media.c：每个用例写「覆盖 / 判据 / 备注」，不套 S5 契约（P5 偏离）。
- * 注释不写风险编号（映射只在设计文档 §11 与 known_risks.md 维护）。
+ * 注释不写风险编号（映射只在设计文档 §11 与 known_open_items.md 维护）。
  *
  * 用例生命周期（所有负例统一）：
  *   ① neg_prepare()    首次 format（一条 `test` 命令内只做一次）

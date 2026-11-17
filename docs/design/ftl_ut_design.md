@@ -3,11 +3,11 @@
 > 状态：活跃设计文档。本文是 **test design**，按被测模块（test item）组织：
 > 每个模块有哪些设计要点、用什么判据覆盖、缺什么。
 > 用例名只作代表，完整清单以 `tests/unit/test_ftl_*.c`、`test_negative_*.c` 的注册表为准；
-> 运行结果见 `build/test-results/`，风险状态见 `docs/design/known_risks.md`。
+> 运行结果见 `build/test-results/`，风险状态见 `docs/design/known_open_items.md`。
 > 范围：`src/ftl/`（FTL 层）。HIL（`src/hil/`）的 UT 不在本文，见
-> `docs/design/known_iss.md` ISS-HIL-01。
+> `docs/design/known_open_items.md` ISS-HIL-01。
 > 关联：`docs/design/ftl_design.md`（被测设计）、
-> `docs/design/testing_guide.md` §12（负例与故障注入框架，跨层）、
+> `docs/guides/testing_guide.md` §12（负例与故障注入框架，跨层）、
 > §3（L2 FTL）。
 
 ---
@@ -25,14 +25,14 @@
 | 信息 | 唯一事实源 | 本文怎么引用 |
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_ftl_pure.c`、`test_ftl_media.c`、`test_negative_pure.c`、`test_negative_media.c`、`test_speed.c`；`test --list` | §2 只写设计点与代表用例，不列全量用例表 |
-| 风险状态、历史、是否闭合 | `docs/design/known_risks.md`（已闭合历史另见 `docs/archive/known_risks_batches.md`） | §7 只写风险 → 模块追溯，**不写状态词** |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md`（已闭合历史另见 `docs/archive/known_risks_batches.md`） | §7 只写风险 → 模块追溯，**不写状态词** |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §3.5 只给入口与套件映射 |
-| 故障注入框架、seam 语义 | `docs/design/testing_guide.md` §12 | §4.9 只写本套件怎么用 |
-| 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
-| 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
-| 分层与跨层测试流程 | `docs/design/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
+| 故障注入框架、seam 语义 | `docs/guides/testing_guide.md` §12 | §4.9 只写本套件怎么用 |
+| 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
+| 每次运行结果与证据 | `build/test-results/` + `docs/guides/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
+| 分层与跨层测试流程 | `docs/guides/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
 
-> 判据：读者要知道「某风险现在什么状态」，去 `known_risks.md`；要知道「某条用例断言
+> 判据：读者要知道「某风险现在什么状态」，去 `known_open_items.md`；要知道「某条用例断言
 > 什么」，看测试源。本文两处都不重复。
 
 ---
@@ -58,7 +58,7 @@
 | `migrate` / `GC` | `src/ftl/migrate.c`、`gc.c` | `mig_*`、victim 选择、搬移 / 擦除 / 失败封顶 | pure / media / negative |
 | `wear_leveling` | `src/ftl/wear_leveling.c` | `wl_*`、UBI 判据、victim、目的块准备 | pure / media / negative |
 | `read_recovery` | `src/ftl/read_recovery.c` | `rr_*`、健康等级、预测退役、读失败闸门 | pure / media / negative |
-| `cache_batch` / cache | `src/ftl/cache_batch.c`、`cache.c` | FAILC、早回执、序列读、CMT 写回 | pure / media / negative |
+| `cache_batch` / L2P cache | `src/ftl/cache_batch.c`、`src/ftl/l2p_cache.c` | FAILC、早回执、序列读、CMT 写回 | pure / media / negative |
 | `ftl.c` / `ftl_fc_interface` | `src/ftl/ftl.c`、`ftl_fc_interface.c` | `ftl_*` 对外接口、提交 / 取完成 / 同步等待 | media / negative |
 | `power_failure_recovery` | `src/ftl/power_failure_recovery.c` | `pfr_*`、启动恢复、CP / Journal / BBT 对账 | media / negative |
 | `ftl_ut_common` | `tests/unit/ftl_ut_common.c` | 活实例、测试 RAM、伪时钟、模拟重启、清理断言 | 所有套件 |
@@ -704,7 +704,7 @@ media：`alloc_fail_bounded`、`gc_read_fail_bounded`、`gc_write_fail_bounded`�
 
 **判定词**：`M` = 有能变红的负例且上板通过；`N` = seam / 触发 / 断言已从源码确认、
 只差上板；`K` = 当前不可构造（真 POR / 真空白片 / 多 die）。状态变化只改
-`known_risks.md`，判定变化只改 §7.2。
+`known_open_items.md`，判定变化只改 §7.2。
 
 ### 3.6 覆盖模型（CP-*）
 
@@ -844,7 +844,7 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
 
 ### 4.9 负例框架
 
-负例框架的完整语义见 `docs/design/testing_guide.md` §12；这里只记本套件的用法。
+负例框架的完整语义见 `docs/guides/testing_guide.md` §12；这里只记本套件的用法。
 
 - **注入 API**：`fi_arm(kind, site, fail_after)` 在测试入口打开注入；
   `fi_arm_at(kind, site, at)` 指定第几次命中；`fi_take()` 由被测代码消费一次故障；
@@ -852,7 +852,7 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
   否则注入状态跨用例静默污染。
 - **链接期 seam**：`fi_wrap.c` 用 `-Wl,--wrap` 包装测试符号，生产源码不动；当前只有
   cache FAILC 与 Journal 页写两个静态 hook，新增 hook 必须登记在
-  `testing_guide.md` §12.10。
+  `../guides/testing_guide.md` §12.10。
 - **编译门禁**：注入只在 `FC_NAND_TEST_ENABLE` 测试镜像生效；产品镜像不编入。
 - **判据**：注入类用例必须同时断言「预期降级」与「故障确实发生」（`fi_hits` 增长），
   只断言后者是假阳性；只断言前者无法证明 seam 生效（C8）。
@@ -933,7 +933,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 `meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 =
 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。需要长期留证的结论写
-`docs/design/known_risks.md` 或 `docs/design/known_iss.md`，原始日志不进版本库。
+`docs/design/known_open_items.md` 或 `docs/design/known_open_items.md`，原始日志不进版本库。
 
 ---
 
@@ -953,7 +953,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
   但不能替代 debug 档的断言覆盖——release 下 `ASSERT` 被裁空，行为差异须按 H14
   另补运行期拒绝。
 - 跨 LUN 条带 / GC / WL（未实现）。
-- HIL/USB 槽状态机、多 run 拆分 / 跨实例部分失败：见 `docs/design/known_iss.md`
+- HIL/USB 槽状态机、多 run 拆分 / 跨实例部分失败：见 `docs/design/known_open_items.md`
   ISS-HIL-01 / ISS-HIL-03。
 
 > 每条风险「能不能构造负例、为什么暂时不可构造（K）」的逐条理由见 §7.2 台账；
@@ -966,7 +966,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | 随机抽样不穷举 | `host_io_random` 固定 8 轮；`host_io_matrix` 只抽起点 | 罕见 LBA / 长度组合漏测 | 用 `--iterations` 加量；seed 写证据 |
 | 模拟重启 ≠ POR | `ftl_ut_reboot_from_media` 是进程内重建 | 真掉电窗口（CP / Journal / FAILC 中间）漏测 | 人工 POR + 板端日志 |
 | 介质状态依赖 | media 用例共享 format 后的芯片 | 前序坏块 / 脏行改变后序结果 | 用 `media_prepare` / 每个破坏性用例自清场 |
-| 注入覆盖有限 | 只有 cache FAILC 与 Journal 页写两个静态 hook | NAND 读 / 擦失败的真实时序未注入 | `fi_wrap.c` 增 hook，登记 `testing_guide.md` §12.10 |
+| 注入覆盖有限 | 只有 cache FAILC 与 Journal 页写两个静态 hook | NAND 读 / 擦失败的真实时序未注入 | `fi_wrap.c` 增 hook，登记 `../guides/testing_guide.md` §12.10 |
 | `RR_FEATURE_READ_RETRY` | `0x89` 是保留地址，路径自始空转 | 读重试策略无真实介质证据 | 用户明确不处理，不纳入 UT 判据 |
 | release 断言裁空 | `ASSERT` 在 `NDEBUG` 下为 `((void)0)` | 静默介质破坏路径无守卫 | H14 运行期拒绝 + release UT 回归 |
 
@@ -975,7 +975,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
 > §7.1 只保留「判据非显然 / 跨模块」的风险簇。
 
 ### 7.1 风险簇
@@ -997,12 +997,12 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 ### 7.2 负例判定台账（FTL 层）
 
-> 本表只列**当前未闭合**的 FTL 风险（索引状态取自 `docs/design/known_risks.md`）。
+> 本表只列**当前未闭合**的 FTL 风险（索引状态取自 `docs/design/known_open_items.md`）。
 > **M** = 有能变红的负例且上板通过；**N** = 注入点 / 触发步骤 / 断言已从源码确认、只差上板；
 > **K** = 当前不可构造（写明原因）；非负例项保留其状态词（`待定位` / `待议` / `待决策`）。
-> **信息**与**已闭合**条目的判定与理由只在 `known_risks.md` 维护，本表不重复。
+> **信息**与**已闭合**条目的判定与理由只在 `known_open_items.md` 维护，本表不重复。
 > 组名沿用风险登记模块分组；跨层框架（注入 API、宏隔离、验收）见
-> `docs/design/testing_guide.md` §12。
+> `docs/guides/testing_guide.md` §12。
 
 **metadata（2）**
 
@@ -1142,10 +1142,10 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 - **新增/删除测试项**：同批更新 §1.1 与对应模块小节；不要新增全局用例表。
 - **新增/删除用例**：改测试源；只有当「设计要点或判据」变化时才改本文。
-- **风险状态变化**：只改 `docs/design/known_risks.md`；§7 只在映射关系变化时改。
+- **风险状态变化**：只改 `docs/design/known_open_items.md`；§7 只在映射关系变化时改。
 - **覆盖判定变化**：只改 §7.2 台账。
 - **API / 夹具 / 地址 / 位图变化**：同批更新 §2 / §4。
-- **运行结果**：写 `build/test-results/` 与 `known_risks.md` 历史；本文不保留运行快照。
+- **运行结果**：写 `build/test-results/` 与 `known_open_items.md` 历史；本文不保留运行快照。
 - **禁止**：§7 写状态词；§2 复制实现细节；文档头写「N 函数 / M 次运行」快照。
 - **用例注释模板**：
 

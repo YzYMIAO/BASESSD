@@ -24,7 +24,7 @@
  *   · QEMU blkdebug：event / 地址 / once 三个维度；
  *   · dm-flakey / dm-dust / nandbiterrs：永久 / 瞬态 / 坏区 / 位翻转的分类。
  *
- * 设计文档：docs/design/testing_guide.md §12
+ * 设计文档：docs/guides/testing_guide.md §12
  */
 
 /* key 的「任意」哨兵。真实 key（plane / phase / opcode / region / LBA）远小于该值。 */

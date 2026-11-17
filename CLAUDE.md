@@ -15,7 +15,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 **判据 = 有出处的主流设计**，不是 Linux，也**不是本仓现状** —— 既有代码/文档与主流不一致处都可以改。
 
 **出处层**（说「主流 / 行业标准」必须从这里引，不许凭记忆）：
-`docs/reference/README.md`（资料索引与逐份分析；PDF/HTML 原文不随仓库分发）、`docs/design/storage_controller_learning.md`（附录 URL 清单）、
+`docs/reference/README.md`（资料索引与逐份分析；PDF/HTML 原文不随仓库分发）、`docs/design/storage_controller_design.md`（存储主控设计要点 + 附录参考资料）、
 SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 `docs/reference/README.md` §A4 获取）。
 ⚠ 说不出出处只能标「本仓自拟」，不得写成「行业标准形态」。
 
@@ -41,7 +41,7 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 
 **R4 只跑目标平台。** stm32h743 + MT29F4G08；`make tests` 后上板，不用 host 模拟。测试源由用户自建。
 
-**R5 `CONFIG_FC_RAID` 保持 0。**（`include/fc/fc.h:52`，功能代码完成但未验证）
+**R5 `CONFIG_FC_RAID` 保持 0。**（`include/fc/fc.h`，功能代码完成但未验证）
 
 **R6 排版不手工调。** `.clang-format` 唯一权威，`make all` 已前置 `format`。
 
@@ -61,7 +61,7 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 
 **R11 缺陷与「判定结论」必须当场登记；只在对话里说 = 未完成。**
 - 登记对象：bug / 静默失效 / 口径分叉；**也包括「像 bug 但判定为有意设计」的结论**（否则下轮重查）；以及 `待决策 / 待后续 / 待上板 / 待测试源 / 信息`。
-- 登记处：`docs/design/known_risks.md` 对应模块 `2X` 分节（新模块新建）。
+- 登记处：`docs/design/known_open_items.md` 对应模块分节（模块 1~16）。
 - 五要素：① 状态词；② 失败场景 / 后果（说不出后果 ⇒ 归 §七 S，不进表）；③ 当前缓解；④ 重访触发 / 下一步；⑤ 证据定位（`文件:符号`）。
 - 判定发生在哪轮就登记在哪轮；对话里报了但表里没有 = 未完成。
 - 判据：下轮的人只读表就能行动。与 R7 分工：IO 建议进 backlog，本条管缺陷与判定结论。
@@ -142,7 +142,7 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 不知道背景的改动者（包括我）会去「修正」它们，从而制造新缺陷。**动之前先问用户。**
 
 - `src/ftl/read_recovery.c` 的 `RR_FEATURE_READ_RETRY = 0x89` 在本器件是**保留地址**、自始空转 —— **用户明确不处理**，别翻出来改。
-- `src/fc/fc.c` 的 4 处 `goto stripe_error` 是**合规**的统一错误出口（华为规则2.8 的例外）。
+- `src/fc/fc.c` 的 4 处 `goto stripe_error` 是**合规**的统一错误出口（规范 2.8 的例外）。
 - `switch` 里非法 `phase` 的 `default` 带 release/复位副作用，是**有意设计**，别改成空 default。
 - `fc_bch_decode` 的 ASSERT 必须在**函数体首条语句**（`bch` 在 `BCH_ECC_WORDS(bch)` 处已解引用）。
 - `fc_command_release` 的幂等早退、`pop_n(ids == NULL)`、`fc_bch_encode(ecc == NULL)` 是有意的**运行时分支/可选参数语义**，不转 ASSERT。
@@ -152,57 +152,57 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 
 ---
 
-## 五、C 语言规范（华为导入 + MISRA/CERT 补漏 + 本仓自定）
+## 五、C 语言规范（外部规范导入 + MISRA/CERT 补漏 + 本仓自定）
 
-完整规范在 `.codex/skills/huawei-c-standard/SKILL.md`；此处只放**必须常驻**的部分（每条已注明为何适用）。
+完整规范在 `.codex/skills/c-coding-standard/SKILL.md`；此处只放**必须常驻**的部分（每条已注明为何适用）。
 **出处标注**：
 
 | 编号 | 出处 |
 |---|---|
-| H1~H14 | 华为 DKBA 2826-2011.5，或据其改写 |
+| H1~H14 | 通用 C 编码规范（本仓改写） |
 | H15 | 本仓自定 |
-| H16~H21 | 嵌入式运行时：华为 SKILL.md 附录 + 本仓实践 |
+| H16~H21 | 嵌入式运行时：C 规范附录 + 本仓实践 |
 | H22~H23 | MISRA C:2012（类型 / 位运算） |
-| H24~H29 | 华为补漏（命名 / 宏 / 变量 / 表达式 / 质量） |
+| H24~H29 | 规范补漏（命名 / 宏 / 变量 / 表达式 / 质量） |
 | H30~H31 | CERT C（健壮性） |
 | H32~H40 | 本仓自定（状态机 / 返回语义 / 守卫 / 声明 / 命名 / 注释 / 维度泛化） |
 | H41~H50 | 本仓自定（头文件路径 / 内联分层 / 强转 / 实参 / 状态码 / 结构体初始化 / 优化顺序 / 类型命名） |
 
-**H1 资源申请与释放必须配对。**（华为规则6.5）
+**H1 资源申请与释放必须配对。**（规范 6.5）
 三池（命令/描述符/缓冲）、op release 归属（`SYNC_WAIT` 不 release，其余自己 release）、buffer `buf_own` 归属。漏配对 ⇒ 池泄漏 → 全系统 `FTL_AGAIN`，且不报错。
 
-**H2 参数合法性检查只在模块入口做一次，内部默认合法。**（华为规则2.4）
-边界 = host 入口返回码 + FTL↔FC/子模块入口 ASSERT；模块内部不逐函数复检同一入参（内部复检是纯开销）。详见 `docs/design/assertion_guidelines.md §十、§二十六`。配 C5 / H14。
+**H2 参数合法性检查只在模块入口做一次，内部默认合法。**（规范 2.4）
+边界 = host 入口返回码 + FTL↔FC/子模块入口 ASSERT；模块内部不逐函数复检同一入参（内部复检是纯开销）。详见 `docs/design/common/assertion_guidelines.md §九`。配 C5 / H14。
 
-**H3 整数运算必须考虑溢出。**（华为规则13.3 + CERT INT30-C/INT32-C）
+**H3 整数运算必须考虑溢出。**（规范 13.3 + CERT INT30-C/INT32-C）
 反例 `SUPER_BLOCK_LIST_MAX`：1024 是**估值**不是上界，写满 ~264 MiB 必溢出，运行时静默丢条目 = 永久漏账。
 判据：**先判后算** —— `if (a > SIZE_MAX - b) 报错; else c = a + b;`。无符号回绕不是 UB 但同为缺陷；有符号溢出是 UB（`if (x + 1 < x)` 会被优化掉）。
 
-**H4 禁止魔鬼数字。**（华为规则5.4）尺寸/容量常量用宏，**必须注明来源与推导**；把「估值」写成「上界」是已发生缺陷。
+**H4 禁止魔鬼数字。**（规范 5.4）尺寸/容量常量用宏，**必须注明来源与推导**；把「估值」写成「上界」是已发生缺陷。
 
-**H5 废弃代码及时清除。**（华为规则2.6）注释掉的代码、死函数、过时守卫，收口时删干净。
+**H5 废弃代码及时清除。**（规范 2.6）注释掉的代码、死函数、过时守卫，收口时删干净。
 
-**H6 改代码时同步维护周边注释。**（华为规则8.1）注释与代码不一致 = 缺陷。
+**H6 改代码时同步维护周边注释。**（规范 8.1）注释与代码不一致 = 缺陷。
 
-**H7 `switch` 必须有 `default`。**（华为规则6.6）见 §四例外。
+**H7 `switch` 必须有 `default`。**（规范 6.6）见 §四例外。
 
-**H8 禁止 `goto`，唯一例外是统一错误出口。**（华为规则2.8）见 §四。
+**H8 禁止 `goto`，唯一例外是统一错误出口。**（规范 2.8）见 §四。
 
-**H9 固定宽度整数统一用项目别名 `BYTE / WORD / DWORD / QWORD`。**（华为建议4.6 + 本仓定稿）
+**H9 固定宽度整数统一用项目别名 `BYTE / WORD / DWORD / QWORD`。**（规范建议 4.6 + 本仓定稿）
 - 项目代码一律用别名（`include/common/ssd_types.h`，typedef 自 `uint8_t/...`），不写 `uint8_t`；不提供小写别名（C9）。
 - **不设二级地址别名**：LBA / PAA / PBA 一律直接写 `DWORD`。容量口径：32-bit LBA × 4 KiB AU = 16 TiB（当前 IU=512 B 对应 2 TiB）。
 - 第三方/厂商边界（`third_party/`、CMSIS/HAL）保持原生 `uint*_t`；跨边界按值传递即可（同一类型，不需强转）。
 - 头文件用别名必须 `#include "ssd_types.h"`（裸名，H41）；它是 freestanding 头，不会把 libc 拉进 FTL include 闭包。
 
-**H10 全局可变状态必须单点修改。**（华为建议4.1 + 原则4.3）
+**H10 全局可变状态必须单点修改。**（规范建议 4.1 + 原则4.3）
 嵌入式静态分配是常态（`g_ftl[]` 等），适用的是**唯一闸门**；allocator 的「四本账」教训即此条。
 
-**H11 函数嵌套 ≤4 层。**（华为规则2.2）不设函数行数上限；行数不是拆分函数的判据，可读主干优先。
+**H11 函数嵌套 ≤4 层。**（规范 2.2）不设函数行数上限；行数不是拆分函数的判据，可读主干优先。
 
-**H12 头文件职责单一：只放声明不放变量定义，且必须自包含。**（华为规则1.3/1.4）
+**H12 头文件职责单一：只放声明不放变量定义，且必须自包含。**（规范 1.3/1.4）
 必须 `#ifndef/#define/#endif` 守卫，**禁止 `#pragma once`**，禁止循环依赖。`ssd_types.h` 的自包含注释记录了必要性（避免把 `stdio.h` 拉进 FTL include 闭包）。
 
-**H13 模块化：一个模块只做一件事；模块间只通过接口通信，不碰对方内部数据。**（华为原则2.1/12.2、建议4.2）
+**H13 模块化：一个模块只做一件事；模块间只通过接口通信，不碰对方内部数据。**（规范原则 2.1/12.2、建议4.2）
 **耦合过重的信号 = 改 A 模块被迫去改 B 的内部** ⇒ 不该改 B，该给 B 加接口。
 本仓落点：`allocator.h` 的 `op_count` / `spare_count` / `closed_at` 是「不让外部摸数组」；标量计数按下面三问直接读字段。
 ⚠ **访问器的价值来自它封装了什么，不来自它存在**：封装**数组 / 不变量**就留（`closed_at`）；只是给**坏字段名**打补丁的谓词要删（按 H36 改名）。
@@ -210,10 +210,10 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 与 H10 同源（H10 管全局变量，本条管模块内部状态）。⚠ 与 C2 不冲突：加访问器是把**手抄等价物**收进唯一入口。
 ⚠ **薄包装没有封装价值**：只转发调用、或只 `(void)` 掉返回值的函数，应并入唯一漏斗或说明封装了什么。实例：`allocator_pool_remove` 的 `bool` 零消费者 ⇒ 并入 `allocator_remove_from_free`。
 
-**H14 关键处用 `ASSERT`；「内部免检」正是靠它零开销。**（华为建议6.1）
+**H14 关键处用 `ASSERT`；「内部免检」正是靠它零开销。**（规范建议 6.1）
 - **位置**：不变量、前置条件、**不该发生**的状态（`switch default`、坐标越界、内部自铸句柄越界）。
-- **机制**（`include/common/assertion.h:71-87`）：debug 检查 + `assertion_fail` 停机；release（`NDEBUG`）展开为 `((void)0)`，零运行期开销。`ASSUME(e)` release 退化为 `__builtin_unreachable()`，不产生代码但把假设告诉编译器；本仓目前 0 处，新增前先说明收益。
-- ⚠ **陷阱：`NDEBUG` 下表达式不求值** ⇒ 有副作用的调用绝不能放进 `ASSERT`。实例 `src/platform/stm32h743/crc_port.c:38-43`：写成 `ASSERT(HAL_CRC_Init(...) == HAL_OK)` 会让初始化**根本不执行**；正确写法先 `status = f();` 再 `ASSERT(status == HAL_OK);`。
+- **机制**（`include/common/assertion.h`）：debug 检查 + `assertion_fail` 停机；release（`NDEBUG`）展开为 `((void)0)`，零运行期开销。`ASSUME(e)` release 退化为 `__builtin_unreachable()`，不产生代码但把假设告诉编译器；本仓目前 0 处，新增前先说明收益。
+- ⚠ **陷阱：`NDEBUG` 下表达式不求值** ⇒ 有副作用的调用绝不能放进 `ASSERT`。实例 `src/platform/stm32h743/crc_port.c`：写成 `ASSERT(HAL_CRC_Init(...) == HAL_OK)` 会让初始化**根本不执行**；正确写法先 `status = f();` 再 `ASSERT(status == HAL_OK);`。
 - ⚠ **边界**：release 下没有守卫。若后果是**静默介质破坏**（漏账 / 写坏 / 静默降级而非停机），除 `ASSERT` 外**必须**再补 release 运行期拒绝（`assertion_guidelines.md` 判据 9）—— `ASSERT` 与 `return` **不是二选一**。
 - 配套 C5 / C7 / C8 / H2。
 
@@ -226,28 +226,28 @@ SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 
 
 ### 5.1 嵌入式运行时（H16~H21）
 
-**H16 `volatile` 只用于三处，且它不是同步手段。**（华为附录 + 本仓实践）
+**H16 `volatile` 只用于三处，且它不是同步手段。**（规范附录 + 本仓实践）
 适用范围：**硬件寄存器** / **ISR 与主循环共享变量** / **DMA 可见缓冲区**（本仓 69 处）。
-⚠ 不保证访问顺序 —— 顺序敏感处必须配 `__DMB()`（`src/nand/nand_fmc.c:241` 注释、`:294` PIO 逐字节写）；也不保证原子性，多字节共享变量仍需临界区（H18）。
+⚠ 不保证访问顺序 —— 顺序敏感处必须配 `__DMB()`（`src/nand/nand_fmc.c` 注释、PIO 逐字节写）；也不保证原子性，多字节共享变量仍需临界区（H18）。
 
-**H17 DMA 缓冲区必须做缓存维护，且地址与长度按 32 字节对齐。**（华为附录 + 本仓实践）
+**H17 DMA 缓冲区必须做缓存维护，且地址与长度按 32 字节对齐。**（规范附录 + 本仓实践）
 CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCache_by_Addr`。
-范本：`src/platform/stm32h743/usart_port.c:189-194`（Clean + 32 B 向上取整对齐）。本仓页缓冲与 FC 池放在 `.noncacheable_buffer` 段，当前无 Invalidate 调用点；新增可缓存 DMA 缓冲时按本条第 1 句补 Invalidate。
+范本：`src/platform/stm32h743/usart_port.c`（Clean + 32 B 向上取整对齐）。本仓页缓冲与 FC 池放在 `.noncacheable_buffer` 段，当前无 Invalidate 调用点；新增可缓存 DMA 缓冲时按本条第 1 句补 Invalidate。
 ⚠ 漏 Invalidate = **拿错数据继续跑**，比读错更贵；该操作不免费，不要对同一缓冲区反复做。
 
 **H18 临界区必须用可嵌套的 PRIMASK 保存/恢复，不用裸 `__disable_irq()`/`__enable_irq()`。**
-裸开中断在嵌套时会让内层退出提前开中断，**外层临界区被击穿**。正例：`src/platform/stm32h743/usart_port.c:241-256`（`__get_PRIMASK()` 存 → `__set_PRIMASK()` 还）；反例：`src/platform/stm32h743/sys_port.c:190/195`，新代码不要照抄。临界区进出同受 H1 约束。
+裸开中断在嵌套时会让内层退出提前开中断，**外层临界区被击穿**。正例：`src/platform/stm32h743/usart_port.c`（`__get_PRIMASK()` 存 → `__set_PRIMASK()` 还）；反例：`src/platform/stm32h743/sys_port.c`，新代码不要照抄。临界区进出同受 H1 约束。
 
 **H19 递归必须有深度上界 —— 本仓不禁止递归，禁止无界递归。**
-已有正例：`src/common/sort.c:322`（快排尾递归消除，栈深 O(log n)）、`src/common/data_structure/ds_rb_tree_table.c:621`（递归销毁树）。判据：深度必须由**数据结构**保证（树高 / log n），**不是输入决定**的。
-⚠ 栈哨兵（`include/common/stack_guard.h`）只看得见空闲区，看不见已用区里被踩的保存寄存器；后者只在 `-O0` 构建存在（本仓两档均 `-O2`）。取证入口 `docs/design/fault_capture.md`。
+已有正例：`src/common/sort.c`（快排尾递归消除，栈深 O(log n)）、`src/common/data_structure/ds_rb_tree_table.c`（递归销毁树）。判据：深度必须由**数据结构**保证（树高 / log n），**不是输入决定**的。
+⚠ 栈哨兵（`include/common/stack_guard.h`）只看得见空闲区，看不见已用区里被踩的保存寄存器；后者只在 `-O0` 构建存在（本仓两档均 `-O2`）。取证入口 `docs/design/common/fault_capture.md`。
 
-**H20 看门狗：长操作必须喂狗，且喂狗点不能被慢路径饿死。**（华为附录）
-本仓 IWDG 在所有构建档关闭（`SSD_WATCHDOG_ENABLE` 硬编码 0，`src/main.c:56`）；启用与否是**待上板决策**（RISK-CLI-01），未验证前不得改成 1。
-唯一喂狗入口 `watchdog_port_iwdg_refresh()`（`src/platform/watchdog.c:182` 调用）；长同步操作（CLI `format` / `bbt --erase` / 出厂扫描）走 `storage_wdg_kick()`（`src/platform/watchdog.c`，≤10 ms 节流），调用点在 `ftl_sync_submit_wait` 的自旋泵。
+**H20 看门狗：长操作必须喂狗，且喂狗点不能被慢路径饿死。**（规范附录）
+本仓 IWDG 在所有构建档关闭（`SSD_WATCHDOG_ENABLE` 硬编码 0，`src/main.c`）；启用与否是**待上板决策**（RISK-CLI-01），未验证前不得改成 1。
+唯一喂狗入口 `watchdog_port_iwdg_refresh()`（`src/platform/watchdog.c` 调用）；长同步操作（CLI `format` / `bbt --erase` / 出厂扫描）走 `storage_wdg_kick()`（`src/platform/watchdog.c`，≤10 ms 节流），调用点在 `ftl_sync_submit_wait` 的自旋泵。
 ⚠ 放在主循环顶部会被慢分支饿死；⚠ 别在 ISR 里喂 —— 会抹掉「主循环卡死」这个信号。
 
-**H21 ISR 必须短、不阻塞、可重入；重活延后到主循环。**（华为附录 + 主流 ISR-safe 分级）
+**H21 ISR 必须短、不阻塞、可重入；重活延后到主循环。**（规范附录 + 主流 ISR-safe 分级）
 - **允许**：有界、可重入、不阻塞、栈有界（置标志、递增计数、打时间戳、读写 GPIO/ADC）。判据是**能力**，不是「回调一律禁止」。
 - **禁止**：`LOG*`、`ASSERT`、动态分配、等待/轮询外设、FTL/NAND 事务。
 - **延后**：ISR 置「有待办」标志，主循环 / 工作队列执行（本仓 FC 纯轮询，数据面本就在主循环）。
@@ -265,23 +265,23 @@ CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCac
 **H23 移位量必须小于类型位宽；位运算只用于无符号类型。**（MISRA Rule 12.2 + 10.1）
 `x << n` 中 `n >= 位宽` 是 **UB**；对有符号负数移位同样是 UB。配 H15：掩码用带 `U` 的无符号常量，移位前先与位宽比一次（`ASSERT` 或 `_Static_assert`）。
 
-### 5.3 华为规范补漏（H24~H29）
+### 5.3 C 规范补漏（H24~H29）
 
 **H24 命名规范。** `snake_case` 变量/函数、**宏全大写**、**全局 `g_` 前缀**（本仓 162 个唯一名）、`static` 文件级 `s_` 前缀（弱约定）。复合类型 / ID / 函数指针 / 数组按 H50。禁止拼音、禁止无意义单字符名（循环 `i/j/k` 除外）。
 
 **H25 宏的写法。** 表达式宏**每个参数与整体都加括号**；多条语句必须 `do { ... } while (0)`；**宏参数不得有副作用**（与 H14「副作用不能进 ASSERT」是同一个坑：展开次数 ≠ 求值次数）。
 
-**H26 变量必须先初始化后使用。**（华为规则4.3）
+**H26 变量必须先初始化后使用。**（规范 4.3）
 未初始化变量作右值是 UB 级缺陷；`.noinit` 段不清零，容易把「复位残留」误当「初值」。初始化位置离使用越近越好。
 
-**H27 通讯/持久化结构体必须显式约定字节序。**（华为规则4.2）
-落点：ONFI 参数页解析（`src/nand/onfi_1_0.c:876`）、NAND 元数据区结构。判据：跨边界（介质 / 上位机）的每个多字节字段，注释必须写清字节序；主机序↔小端只允许在**单一漏斗**发生（C9）。⚠ 本仓无通用字节序 helper，只有 `__builtin_bswap32`（`src/fc/fc_bch_engine.c:65`）。
+**H27 通讯/持久化结构体必须显式约定字节序。**（规范 4.2）
+落点：ONFI 参数页解析（`src/nand/onfi_1_0.c`）、NAND 元数据区结构。判据：跨边界（介质 / 上位机）的每个多字节字段，注释必须写清字节序；主机序↔小端只允许在**单一漏斗**发生（C9）。⚠ 本仓无通用字节序 helper，只有 `__builtin_bswap32`（`src/fc/fc_bch_engine.c`）。
 
-**H28 表达式：不依赖求值顺序、禁止嵌套赋值、自增自减独立成句。**（华为规则10.1~10.3）
+**H28 表达式：不依赖求值顺序、禁止嵌套赋值、自增自减独立成句。**（规范 10.1~10.3）
 `f(i++, i)`、`a = b = c`、`x = arr[i++] + arr[i]` 都是未定义或未指定行为。
 
-**H29 严禁使用未经验证的输入数据。**（华为规则6.4）
-这条解释了 `src/ftl/journal.c:380` 为何**刻意不转断言**：`count > JOURNAL_ENTRIES_PER_PAGE` 的数据来自 **NAND 读回的回放内容**，坏数据是掉电的预期情形 ⇒ 必须留运行期检查。判据：数据来源是**介质 / 上位机 / CLI**，一律按不可信处理，边界必须校验。
+**H29 严禁使用未经验证的输入数据。**（规范 6.4）
+这条解释了 `src/ftl/journal.c` 为何**刻意不转断言**：`count > JOURNAL_ENTRIES_PER_PAGE` 的数据来自 **NAND 读回的回放内容**，坏数据是掉电的预期情形 ⇒ 必须留运行期检查。判据：数据来源是**介质 / 上位机 / CLI**，一律按不可信处理，边界必须校验。
 
 ### 5.4 健壮性（CERT C 导入，H30~H31）
 
@@ -311,7 +311,7 @@ CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCac
 - ⚠ 「热路径」**不是**保留 `if` 的理由，方向相反：`if` 在 release 是**活分支**，`ASSERT` 裁成 `((void)0)` ⇒ release 净收益。
 - 被 `ASSERT` 守的形参在 release 变 unused 时，先判是否**废形参**（H5），确认后删形参 + 同步调用点；**不要用 `(void)param` 糊过去**。
 
-**H35 变量声明就近使用处（C99）。** 判据 = **首次使用的那一行声明**，不提到函数/块开头。⚠ 刻意偏离华为「声明集中块首」，按 P5 留痕；与 H26（先初始化）配套。
+**H35 变量声明就近使用处（C99）。** 判据 = **首次使用的那一行声明**，不提到函数/块开头。⚠ 刻意偏离规范「声明集中块首」，按 P5 留痕；与 H26（先初始化）配套。
 
 **H36 命名即语义：字段名不得撒谎。**（补充 H24 / H13）
 - 字段名与语义相反（`valid` 实际表示「是否 Open」）⇒ **改名**（`is_open`），**不靠谓词 / 注释兜**；为兜坏名字而存在的谓词，改名后就是纯仪式，应删（H5）。
@@ -395,7 +395,7 @@ CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCac
 - 按**具名常量**比较（`== FTL_AGAIN` / `== UART_LOG_INVALID`），禁止 `status < 0` / `status >= 0`（值域改了编译期完全无声）。
 - **已有 0 语义的步进枚举不重排**（`MD_COMPACT_BACKPRESSURE` / `MD_ANCHOR_CLEAN` / `CP_FLUSH_PENDING` / `JRN_TRUNC_ALREADY` / `RR_PLANE_SKIP` 的 0 保持原义）；新增错误码取**下一个未用正数**。
 - **例外（不是状态码）**：libc `_write()` 必须返回 `int`、失败 `-1`；比较器 `-1/0/1` 是排序契约；BCH `deg(0) = -1` 等局部算术/下标；`third_party/`、CMSIS/HAL、munit 保持上游。
-- **证据**：`arm-none-eabi-readelf --debug-dump=info build/firmware/debug/bin/debug.elf | grep -A1 FTL_ERROR`。
+- **证据**：`arm-none-eabi-readelf --debug-dump=info build/debug/bin/debug.elf | grep -A1 FTL_ERROR`。
 
 ### 5.11 结构体初始化（H47）
 
@@ -487,10 +487,10 @@ typedef union FC_PARAM_U
 - 历史 changelog 不改写；活跃文档按 P12 定稿回扫。
 - **改名不改语义/布局**：`make all` / `make release` / `make tests UT=HIL` 零新告警。纯类型改名时 release 的 `.text` / `.data` / `.ssd_code_*` 应**逐字节不变**（整个 `.bin` 因横幅时间戳不同不能直接比哈希；debug 会因 ASSERT 字符串化类型名使 `.rodata`/`.bin` 小幅变化，但不能改 `.text` 或运行期行为）。代码段变化必须停下查。
 
-### 华为条目去向
+### 规范条目去向
 
-本仓对华为规范逐条处理（**不采纳理由** / **已采纳但改写**的 `Hxx` 入口）见
-`.codex/skills/huawei-c-standard/SKILL.md` §条目去向。规则正文在 §五 各条，本表只是去向账。
+本仓对C 规范逐条处理（**不采纳理由** / **已采纳但改写**的 `Hxx` 入口）见
+`.codex/skills/c-coding-standard/SKILL.md` §条目去向。规则正文在 §五 各条，本表只是去向账。
 ⚠ 与 P5 的分工：该表只记**全局性**不采纳，不能替代逐次偏离留痕。
 
 ---
@@ -499,11 +499,11 @@ typedef union FC_PARAM_U
 
 **P0 动手前先查主流（§〇 的落地步骤）。** ① 主流主控怎么实现、**出处**在哪；② 本仓现在怎么做、差在哪；③ 然后才读设计文档（P1）、动手。**跳过 ①② 直接改，就是返工的主要来源。**
 
-**P1 改 FTL 前先读设计文档。** `docs/design/ftl_design.md` 对应章节「N.1 最新策略」+「N.2 策略选取」；演进史 `docs/design/ftl_revision_history.md`；历史细节 `docs/archive/changelog/`。
+**P1 改 FTL 前先读设计文档。** `docs/design/ftl_design.md` 对应章节「N.1 最新策略」+「N.2 策略选取」；演进史 `docs/design/revision_history/ftl_revision_history.md`；历史细节 `docs/archive/changelog/`。
 
 **P2 引用文档一律 `docs/...` 全路径。**
 
-**P3 动断言前先读 `docs/design/assertion_guidelines.md`。** **判据 9**：配置错误后果是静默介质破坏时，除 debug `ASSERT` 外**必须**补 release 运行期拒绝，二者不是二选一。**判据 10**：被 `ASSERT` 守的变量在 `NDEBUG` 下变 unused ⇒ release 档告警是「这条断言在 release 下没有等价守卫」的唯一提示。
+**P3 动断言前先读 `docs/design/common/assertion_guidelines.md`。** **判据 9**：配置错误后果是静默介质破坏时，除 debug `ASSERT` 外**必须**补 release 运行期拒绝，二者不是二选一。**判据 10**：被 `ASSERT` 守的变量在 `NDEBUG` 下变 unused ⇒ release 档告警是「这条断言在 release 下没有等价守卫」的唯一提示。
 
 **P4 skill 入口**（`.claude/skills/`，按需加载）：
 
@@ -518,9 +518,9 @@ typedef union FC_PARAM_U
 ⚠ 三种性质不同：**约束型说「不要做什么」，操作型说「怎么做」，判据型说「怎么决定」**，不能互相替代。
 ⚠ `c-review` 与 `arch-design` 都**刻意不复制**已有文档，只给流程与定位表，避免复制后漂移（H6）。
 
-**P5 偏离必须留痕。** 有意不遵守某条（如 H19 递归、H30 返回值丢弃）时，必须在该处（代码注释或提交信息）写明「**偏离 Hxx，因为…**」。华为条目的**全局性**去向见 `.codex/skills/huawei-c-standard/SKILL.md §条目去向`，它**不能替代逐次留痕**。⚠ 沉默偏离 = 下次读代码分不清「有意」与「漏了」—— 这正是 §四存在的原因。
+**P5 偏离必须留痕。** 有意不遵守某条（如 H19 递归、H30 返回值丢弃）时，必须在该处（代码注释或提交信息）写明「**偏离 Hxx，因为…**」。规范条目的**全局性**去向见 `.codex/skills/c-coding-standard/SKILL.md §条目去向`，它**不能替代逐次留痕**。⚠ 沉默偏离 = 下次读代码分不清「有意」与「漏了」—— 这正是 §四存在的原因。
 
-**P6 故障排查先质疑证据（§3.3 的落地步骤）。** ① 先确认**判据本身成立**（是当场那个镜像吗？是断电后的记录吗？是绕过 D-Cache 的读吗？）；② 再定位；③ 结论必须给出**可复现的负例**（C7）。入口 `docs/design/fault_capture.md`。⚠ 别一上来就改代码。
+**P6 故障排查先质疑证据（§3.3 的落地步骤）。** ① 先确认**判据本身成立**（是当场那个镜像吗？是断电后的记录吗？是绕过 D-Cache 的读吗？）；② 再定位；③ 结论必须给出**可复现的负例**（C7）。入口 `docs/design/common/fault_capture.md`。⚠ 别一上来就改代码。
 
 **P7 检视 / 修复类任务一次性改完。** 确定项**一次改完**（含顺带发现的同类停更），不逐档停下等确认；只在**真正有取舍或高风险**时提问（改语义、删 API、动介质格式）。汇报用「改了什么 + 证据 + 未做什么」。
 
@@ -550,7 +550,7 @@ typedef union FC_PARAM_U
 - 汇报只给最后一次构建证据，不逐步贴日志。理由：逐次重跑耗 token 与墙钟，注释改动零收益。
 
 **P12 文档同步节流：迭代期只写代码内注释 + 风险登记；定稿后一次性批量更新文档。**
-- **迭代期**（用户还在连续改、没说定稿）：当场写**代码内注释**（S5/H6）与 `known_risks.md` **新增**缺陷 / 待做项（R11 五要素最小版）。**不逐次改** `docs/` 下设计 / 接口 / UT / 平台文档（含主干六个的既有条目）。
+- **迭代期**（用户还在连续改、没说定稿）：当场写**代码内注释**（S5/H6）与 `known_open_items.md` **新增**缺陷 / 待做项（R11 五要素最小版）。**不逐次改** `docs/` 下设计 / 接口 / UT / 平台文档（含主干六个的既有条目）。
 - `docs/design/ftl_api_usage.md` **定稿前完全不改**，按最终 API 一次重写。
 - **唯一例外（不含 `ftl_api_usage.md`）**：本轮**删除 / 改名 API 或符号** ⇒ 只改**那一行**。判据：读者照文档写会不会直接编译失败或调错。
 - **定稿收尾**：以 `git diff --stat` + 符号变更为清单一次性回扫；先主干六个再支持文档；汇报列出更新了哪些。
@@ -594,20 +594,20 @@ typedef union FC_PARAM_U
 | 项 | 位置 |
 |---|---|
 | 文档地图 | `docs/README.md` |
-| **已知残余风险登记（R11 登记处）** | `docs/design/known_risks.md`（复查模块前先读） |
-| **未实现 / 未验证设计项登记** | `docs/design/known_iss.md`（与 known_risks 分工见文件头） |
+| **未闭合项登记（R11 登记处：风险 + 缺口）** | `docs/design/known_open_items.md`（复查模块前先读） |
+| **未实现 / 未验证设计项** | 同上，`docs/design/known_open_items.md` 的 `ISS-*` 条目 |
 | 活跃设计文档 | `docs/design/`（22 个）+ `docs/archive/`（历史/计划） |
 | **`CLAUDE.md` 自身的变更史** | `docs/archive/claude_md_history.md`（日常不读） |
 | 历史归档 | `docs/archive/`（日常不读） |
 | 构建 | `make all`(debug，含 `types-check`) / `make release` / `make tests UT=FC\|FTL\|HIL` |
 | 类型形态检查 | `make types-check`（H50 正向不变量；`tools/check_types.py`） |
-| 产物 | `build/firmware/<debug\|release>/` |
+| 产物 | `build/<debug\|release>/` |
 | 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`，按配置分置，**切换构建无需 `make clean`** |
 | 编译器 | arm-none-eabi；`-Wall -Wextra -Wshadow -Wcast-align ...`，**无 `-Werror`**（零告警靠纪律） |
-| 运行时硬约束 | IWDG nominal 30s 配置（`src/main.c:65-85`），**当前所有构建档关闭**（`src/main.c:56`；启用待上板，RISK-CLI-01）；长同步操作喂狗点 `storage_wdg_kick()`；栈哨兵 `include/common/stack_guard.h` |
-| 缓存维护范本 | `src/platform/stm32h743/usart_port.c:189-194`（Clean + 32B 对齐；当前无 Invalidate 调用点） |
-| 临界区正例 | `src/platform/stm32h743/usart_port.c:241-256`（PRIMASK 保存/恢复） |
-| 故障取证入口 | `docs/design/fault_capture.md` |
+| 运行时硬约束 | IWDG nominal 30s 配置（`src/main.c`），**当前所有构建档关闭**（`src/main.c`；启用待上板，RISK-CLI-01）；长同步操作喂狗点 `storage_wdg_kick()`；栈哨兵 `include/common/stack_guard.h` |
+| 缓存维护范本 | `src/platform/stm32h743/usart_port.c`（Clean + 32B 对齐；当前无 Invalidate 调用点） |
+| 临界区正例 | `src/platform/stm32h743/usart_port.c`（PRIMASK 保存/恢复） |
+| 故障取证入口 | `docs/design/common/fault_capture.md` |
 
 ---
 

@@ -209,7 +209,7 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
  *   NORMAL 据此决定是否回收一个 SB）；**BUSY 不求值**（host 饿着，让路），
  *   "无块可写"由 `ftl_issue_subop` 的**写路径按需 GC** 兜底。⚠ 这一条**是本仓自己的**、
  *   不是抄 SPDK：SPDK 的 GC 全在 core poller 里，判据是自由 band 水位；其写路径
- *   `ftl_band_get_next_free`（`ftl_core.c:769`）在 `free_bands` 空时直接返 NULL，
+ *   `ftl_band_get_next_free`（`ftl_core.c`）在 `free_bands` 空时直接返 NULL，
  *   **不就地触发 GC**。
  *
  * @param alloc  Allocator 上下文；NULL ⇒ 返回 0（UT 钉住的契约，不触发）

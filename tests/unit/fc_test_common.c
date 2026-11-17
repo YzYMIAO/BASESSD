@@ -35,7 +35,7 @@ static BYTE *g_cw_scratch = NULL;
 /* 本次用例是否已经与 munit 的结果行断过行。
  * munit 打印参数前缀（"    block=100, plane=0"）时**不带换行**并补齐到
  * MUNIT_TEST_NAME_LEN(55)，随后才跑用例、最后才打 "[ OK ]"
- * （munit.c:900-926 打印前缀，:935-982 打印结果）⇒ 用例体内的第一行输出会插进
+ * （munit.c 打印前缀，:935-982 打印结果）⇒ 用例体内的第一行输出会插进
  * 结果行中间——崩溃时看到的就是 "    block=100, plane=0   [ERR] assertion failed"。
  * 由 test_trace_begin() 在每个用例开头复位。 */
 static BOOL s_ev_line_started = 0U;

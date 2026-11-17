@@ -245,7 +245,7 @@ SECTIONS
   .bkpsram_data (NOLOAD) : { . = ALIGN(4); *(.bkpsram_data) *(.bkpsram_data.*) } > BKPSRAM
 
   /* NOLOAD 且不被启动代码清零 → 跨软复位（NVIC_SystemReset）保留。
-   * 崩溃记录落在这里，见 docs/design/fault_capture.md。 */
+   * 崩溃记录落在这里，见 docs/design/common/fault_capture.md。 */
   .noinit (NOLOAD) : { . = ALIGN(8); KEEP(*(.noinit)) KEEP(*(.noinit.*)) } > DTCM
 
   ._user_heap_stack (NOLOAD) :

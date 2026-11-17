@@ -18,9 +18,9 @@
  *     · `test --log-visible info /fc-nand/lifecycle/`        —— 每条抽一组，打印抽到的值
  *     · `test --seed 0x… /fc-nand/lifecycle/`                —— 复现上一轮（开场打印 seed 值）
  *     · `test --iterations N /fc-nand/lifecycle/`            —— 每条抽 N 组（覆盖旋钮）
- *   ⚠ 为什么必须加 salt：munit 在每次 exec 前把 PRNG 重置回 runner->seed（munit.c:774），
+ *   ⚠ 为什么必须加 salt：munit 在每次 exec 前把 PRNG 重置回 runner->seed（munit.c），
  *     而导出的 munit_rand_int_range **不带 salt**（带 salt 的 munit_rand_at_most 是 static，
- *     munit.c:503）⇒ 用例体内的**第一次**抽样在所有用例之间取值完全相同（六条会撞在同一个
+ *     munit.c）⇒ 用例体内的**第一次**抽样在所有用例之间取值完全相同（六条会撞在同一个
  *     块上、整轮只有一个 plane）。故本文件的 l3_rand 把 `hash(用例名) ^ hash(用途标签)`
  *     异或进每次抽样：前者让用例之间互异，后者让同一用例内各用途互异。
  *     机制与 data_path 的 test_scramble_whiten / test_crc_step_detect 同路（那两处直接用
@@ -206,12 +206,12 @@ static const nand_addr_s s_l3_zero_addr = {0};
  *  NULL 结尾的 const char* 数组，表达不了 820 宽的窗口，只能写死几个候选值。
  *
  *  ⚠ 必须给每次抽样加盐，理由见文件头「地址随机化」段：munit 每 exec 前 reseed 回
- *    runner->seed（munit.c:774），而导出的 munit_rand_* **不带盐**（带盐的
- *    munit_rand_at_most 是 static，munit.c:503）⇒ 用例体内的第一次抽样在所有用例
+ *    runner->seed（munit.c），而导出的 munit_rand_* **不带盐**（带盐的
+ *    munit_rand_at_most 是 static，munit.c）⇒ 用例体内的第一次抽样在所有用例
  *    之间取值完全相同。用例名让**用例之间**互异，标签让**同一用例内各用途**互异。
  **************************************************************************/
 
-/** DJB2，与 munit.c:386 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
+/** DJB2，与 munit.c 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
 static DWORD l3_hash(const char *s)
 {
     DWORD h = 5381U;
@@ -280,7 +280,7 @@ static BYTE l3_arr_contains(const BYTE *arr, BYTE n, BYTE v)
 
 /* 抽 n 个**互不重复**的页（n ∈ [2,8]，页 ∈ [0, PAGES_PER_BLOCK)）与 CW（n ∈ [1,4]）。
  * 个数也随机（不止位置）：只随机位置会把探针规模钉在参数表的几个候选值上。
- * 拒绝采样，与 data_path 的 l2_ecc_flip（test_fc_data_path.c:638-653）同形。
+ * 拒绝采样，与 data_path 的 l2_ecc_flip（test_fc_data_path.c）同形。
  * 上限 8×4 = 32 个探针 ⇒ **板上耗时上界**。 */
 #define L3_PAGES_MIN (2U)
 #define L3_PAGES_MAX (8U)
@@ -651,7 +651,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 /** GET_FEATURES(addr) → 4 字节出参。
  * SET/GET 都不建链（ftl_cmd_needs_desc_chain 两者皆排除 ⇒ cw_bitmap 走 0U 的短路分支），
  * pba / 掩码都不看。读回的值经 CQ 的 param 联合体返回，路径是
- * 器件 → g_fc_return_staging（fc.c:1280 把它当 cw_buffers[0]）→ completion.param（fc.c:805）。 */
+ * 器件 → g_fc_return_staging（fc.c 把它当 cw_buffers[0]）→ completion.param（fc.c）。 */
 static void l3_feature_get(BYTE addr, BYTE out[4])
 {
     fc_cmd_s       *cmd = test_cmd_build(&s_l3_zero_addr, 0U, 0U, L3_CFG(s_l3_cfg_get_features, FC_CRC_ENABLE));
@@ -666,7 +666,7 @@ static void l3_feature_get(BYTE addr, BYTE out[4])
     fc_command_release(cmd->cmd_id);
 }
 
-/** SET_FEATURES(addr, 4 字节)。写入值取自 cmd->param.value（fc.c:1283 在派发时拷进暂存，
+/** SET_FEATURES(addr, 4 字节)。写入值取自 cmd->param.value（fc.c 在派发时拷进暂存，
  * 再作为 cw_buffers[0] 交给 NAND）。 */
 static void l3_feature_set(BYTE addr, const BYTE in[4])
 {
@@ -720,7 +720,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
     /* Phase 1：手册里的四个寄存器各读一次。只读 ⇒ 一个器件状态都不动。
      * 证据打**实际字节**。
      * ⚠ 板上实测四个地址都读回 00 00 00 00，**这不是搬运失败**：Phase 2 往 01h 写 01h
-     *   能原样读回，说明 4 字节双向都在走——GET 的暂存是先 memset(0)（fc.c:1287）再
+     *   能原样读回，说明 4 字节双向都在走——GET 的暂存是先 memset(0)（fc.c）再
      *   交给引擎的，读回非 0 只可能来自器件。所以全 0 是器件在上电默认态下的**真实读数**。
      *   ⚠ 「驱动强度默认值不该是 0」不是可推出的结论（手册未给默认值）——判据只认实读字节。 */
     for (BYTE i = 0U; i < 4U; i++)
@@ -974,7 +974,7 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
 
 static MunitResult test_status_query(const MunitParameter params[], void *data)
 {
-    /* ⚠ OP_READ_STATUS 是**本项目 op 表的下标**（onfi_1_0.h:107 = 6），不是线上命令字节。
+    /* ⚠ OP_READ_STATUS 是**本项目 op 表的下标**（onfi_1_0.h = 6），不是线上命令字节。
      * 证据里两个都要打——只打下标会被读成「ONFI 命令 0x06」，那是误导。 */
     static const BYTE status_ops[2]  = {OP_READ_STATUS, OP_READ_STATUS_ENHANCED};
     static const BYTE status_cmds[2] = {NAND_CMD_READ_STATUS, NAND_CMD_READ_STATUS_ENHANCED};
@@ -1147,7 +1147,7 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
  *  ⚠ Step 5 的期望值必须取**源块坐标**：copyback 搬的是源页内容，而 READ/PROGRAM_
  *     FOR_INTERNAL_DATA_MOVE 都不是 page read/write（数据路径不介入、不重铸）⇒ 目标页
  *     的 USER 仍是**源块坐标**的 PAA。故不能用 test_read_block(dest)——它按入参 block
- *     重算期望（fc_test_common.c:644-675）。数据路径侧照常通过：META 低 3 位 = plane/cw
+ *     重算期望（fc_test_common.c）。数据路径侧照常通过：META 低 3 位 = plane/cw
  *     （源 / 目标同 plane、同 cw 枚举）、META 的 LBA 与命令 meta 同页 ⇒ Pass 4 两项都过；
  *     CRC 因 USER 原样搬过而一致。
  *  ⚠ dest 也是**抽出来的**（不是 src + 常数）⇒ 上面这条更容易写错：Step 5 的
@@ -1716,7 +1716,7 @@ static DWORD l3_le_word(const BYTE bytes[4])
  *    - op 11 可作**独立只读命令**下发（无 desc 链、无 CW 位图）
  *    - 由 pba.cw 选 CW（列地址 = CW 号 × CW_SIZE）——同一页不同 CW 回读到**不同** META
  *    - 回读值 == FC 写路径写入的 META（每 CW 的 META = (command->meta & ~PLANE_CW_MASK)
- *      | plane_cw，见 fc_interface.c:197；prog 的 command->meta = 本页 PBA）
+ *      | plane_cw，见 fc_interface.c；prog 的 command->meta = 本页 PBA）
  *    - **链内 META 复核**：另走一条**普通读**（有 desc 链），读回后从 CW 基址
  *      offset 0 经 `fc_buffer_get_meta(cmd->cmd_id, cw)` 取 META，与上面 op 11 的结果逐位一致——
  *      这正是 gc.c 的真实消费路径（读页 → get_meta(cmd,0) → 4 字节扇区地址 → >> CW_WIDTH）。
@@ -2552,8 +2552,8 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
  *  上面这些行（`fail_cw_attribution` 除外）用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
  *  --iterations N 才是覆盖旋钮（每条抽 N 组）；换成 SINGLE_ITERATION 会把旋钮锁死。
  *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
- *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
- *  ⚠ --iterations 是 **runner 级全局量**，且 runner->suite **恒指根套件**（munit.c:1359）
+ *  与是否带 SINGLE_ITERATION 无关（munit.c / :706-709）。
+ *  ⚠ --iterations 是 **runner 级全局量**，且 runner->suite **恒指根套件**（munit.c）
  *    ⇒ 子套件自己的 iterations 字段无效，**别去改 ut_main.c**（改了会把 pure/data_path 也乘 N）。
  *    它按调用范围生效：只跑 /fc-nand/lifecycle/ 就只乘 lifecycle。
  **************************************************************************/

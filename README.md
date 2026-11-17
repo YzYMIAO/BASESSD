@@ -36,7 +36,7 @@ make release        # release 构建
 make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 ```
 
-产物在 `build/firmware/<debug|release>/`。`make tests` **只证明编译与链接**；UT 必须在目标板上运行，
+产物在 `build/<debug|release>/`。`make tests` **只证明编译与链接**；UT 必须在目标板上运行，
 本项目不做 host 模拟。CI（`.github/workflows/build.yml`）只跑构建与链接，不上板。
 
 ## 烧写与上板
@@ -83,7 +83,7 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 | `docs/design/fc_nand_design.md` | FC-NAND 主设计（§26 行业对照） |
 | `docs/design/hil_design.md` | 主机接口层 |
 | `docs/guides/wsl_debug_environment.md` | WSL / JLink / 串口调试链 |
-| `docs/design/known_risks.md` | 已知风险与残余项（维护者账本） |
+| `docs/design/known_open_items.md` | 已知风险与残余项（维护者账本） |
 | `CLAUDE.md` | 工程规则与评审判据（不是用户手册） |
 
 ## License

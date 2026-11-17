@@ -42,7 +42,7 @@
  * ⚠ 本文件依赖 ftl_init 已完成 allocator / journal / metadata_dir 的初始化；
  *   步骤用圈码 ①②③ 编号（与 docs/design/ftl_design.md §3.1 对应）。
  *
- * ⚠ 入口前置守卫口径（docs/design/assertion_guidelines.md §二十六 / §二十八）：
+ * ⚠ 入口前置守卫口径（docs/design/common/assertion_guidelines.md §九）：
  *   对外入口（pfr_media_check_format / pfr_media_format / pfr_boot_recovery）的 ftl/result
  *   非空由 main.c 的调用链保证；启动计划与其内部 helper 只在本文件的启动恢复调用链内
  *   使用，该处的 ftl 非空已由入口保证 ⇒ **不再逐函数复检**。
