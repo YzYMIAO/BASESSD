@@ -13,7 +13,7 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/framework/munit.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
 # 故障注入：链接期 wrap（生产源码零改动）+ 宏隔离的静态缝 hook。
 # 只有跨 TU 调用会被 wrap；未武装时 __wrap_* 原样转发 __real_*。
-# 设计：docs/design/negative_test_framework.md §2.1 / §5。
+# 设计：docs/design/testing_guide.md §12（注入台账见各层 UT 设计文档 §7.2）。
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/fi_wrap.c
 LDFLAGS += -Wl,--wrap=fc_poll_completion -Wl,--wrap=fc_poll_completions
 LDFLAGS += -Wl,--wrap=ftl_op_submit -Wl,--wrap=ftl_op_submit_batch

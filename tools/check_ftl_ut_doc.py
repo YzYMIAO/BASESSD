@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """正向不变量检查：docs/design/ftl_ut_design.md 的模块化结构仍成立。
 
-文档按被测模块组织，用例清单归测试源、风险状态归 known_risks、覆盖判定归
-negative_coverage。本 checker 只守本文的结构契约：
+文档按被测模块组织，用例清单归测试源、风险状态归 known_risks、覆盖判定归各层 UT 设计文档 §7.2。本 checker 只守本文的结构契约：
 
   1. 必需的章标题与 §2.1~§2.17 模块小节都在；
   2. 正文引用的每个 RISK-* 都在 docs/design/known_risks.md 里有登记；

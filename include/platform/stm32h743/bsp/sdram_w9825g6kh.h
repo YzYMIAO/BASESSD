@@ -5,6 +5,13 @@
 
 #include "sys_port.h"
 
+/*
+ * ⚠ 当前未启用：FTL 为 DRAM-less（元数据常驻 AXI_RAM / SRAM2），
+ * 没有任何模块使用 SDRAM；bsp/sdram_w9825g6kh.c 也未纳入构建
+ * （src/platform/<soc>/makefile.mk 只通配 <soc>/*.c，不含 bsp/）。
+ * 接口保留供将来需要外扩元数据缓存时接入。
+ */
+
 extern SDRAM_HandleTypeDef g_sdram_handle; /* SDRAM句柄 */
 
 /* W9825G6KH：256 Mbit，4M x 16 bit，4 Bank，容量 32 MiB。 */

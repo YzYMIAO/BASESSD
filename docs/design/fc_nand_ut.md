@@ -5,8 +5,8 @@
 > 用例名只作代表，完整清单以 `tests/unit/test_fc_*.c` 的注册表为准；
 > 运行结果见 `build/test-results/`，风险状态见 `docs/design/known_risks.md`。
 > 范围：`src/fc/` + `src/nand/` 的 FC-NAND 层；FTL UT 见 `docs/design/ftl_ut_design.md`。
-> 关联：`docs/design/negative_test_framework.md`（负例框架）、
-> `docs/design/negative_coverage.md`（风险覆盖判定）、`docs/design/testing_guide.md` §3（L1 FC）。
+> 关联：`docs/design/testing_guide.md` §12（负例与故障注入框架，跨层）、
+> §3（L1 FC）。
 
 ---
 
@@ -25,8 +25,8 @@
 | 用例是否存在、参数、断言 | `tests/unit/test_fc_pure.c` / `test_fc_data_path.c` / `test_fc_lifecycle.c` / `test_fc_negative.c` | §2 只写代表用例与判据，不列全量清单 |
 | OP 操作码与编号 | `include/nand/onfi_1_0.h` | §2.9 只写覆盖策略，不抄 50 行表 |
 | 风险状态、历史、是否闭合 | `docs/design/known_risks.md` | §7 只写风险 → 模块追溯，不写状态词 |
-| 负例覆盖判定（M/N/K） | `docs/design/negative_coverage.md` | §7 只给入口，不复制 302 行判定 |
-| 故障注入框架与 seam 语义 | `docs/design/negative_test_framework.md` | §4.3 只写本套件怎么用 |
+| 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §7 只给 FC 层判定，其余层见各层文档 |
+| 故障注入框架与 seam 语义 | `docs/design/testing_guide.md` §12 | §4.3 只写本套件怎么用 |
 | 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
 | 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.5 只给目录与四件套 |
 | 重构前版本 / 版本叙事 | `docs/archive/fc_nand_ut_pre_refactor_20261113.md` | 历史只查该快照 |
@@ -497,9 +497,9 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 
 ## 7. 风险追溯（副轴）
 
-> 风险是**追溯维度**，不是本文的组织轴。完整 302 条判定见
-> `docs/design/negative_coverage.md`；状态、历史、是否闭合见
-> `docs/design/known_risks.md`。本节只保留「判据非显然」的 FC-NAND 风险。
+> 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
+> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> §7.1 只保留「判据非显然」的 FC-NAND 风险。
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
 |---|---|---|---|
@@ -514,6 +514,60 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 | `RISK-NANDP-03` | `fc_nand_engine` | Mode 5 运行期 UNC 只观测，不作 UT 通过判据 | `/bench/speed/fc_nand_rw` |
 | `RISK-DP-05` | `fc_raid_engine` | RAID 路径当前不编译、不覆盖 | —（RAID=1 专用用例） |
 
+### 7.2 负例判定台账（FC-NAND 层）
+
+> 本表只列**当前未闭合**的 FC-NAND / NAND 器件风险（索引状态取自
+> `docs/design/known_risks.md`）。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
+> 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）；非负例项保留
+> 其状态词。**信息**与**已闭合**条目只在 `known_risks.md` 维护。
+> 跨层框架（注入 API、宏隔离、验收）见 `docs/design/testing_guide.md` §12。
+
+**FC 资源池（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-POOL-12` | 待议 | 描述符池按单 plane 口径估算；满额双 plane 并发的上限需裁决 |
+
+**数据面（3）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-DP-15` | K | LDPC 未启用；切 LDPC 构建才可构造 |
+| `RISK-DP-27` | K | LDPC 未启用；解码栈超 2 KiB 栈预算 |
+| `RISK-DP-28` | N | `crc_compute_fail_seam`：注入 CRC 计算失败→`fc_crc_verify` 报错、`fi_hits` 增长（CRC init 失败的 release 守卫仍待做） |
+
+**主循环 / 调度 / CQ（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-SCH-03` | 待决策 | CQ 满时丢完成项；阻塞 / 拒绝二选一需裁决 |
+| `RISK-SCH-06` | K | 断言终端路径再次断言，需制造池账分叉，风险高 |
+
+**NAND 器件 / PHY（3）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-NANDP-05` | K | 多 target timing 共享单套 HAL 句柄，需多 target 硬件 |
+| `RISK-NANDP-08` | K | timing 表部分字段无消费者；改动需板端时序回归，非负例 |
+| `RISK-NANDP-17` | K | 需启用 on-die ECC 才能构造 `tR_ECC` 超时 |
+
+**NAND / FMC 时序与板端读完整性（3）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-NAND-05` | K | 需芯片物理坏页；当前介质无 |
+| `RISK-NAND-06` | 待定位 | 运行期 BAD 标记来源未定（Mode 5 时序 / 同页二次编程 / 边缘块），需板端复现 |
+| `RISK-RD-01` | 待定位 | 单次不可纠读的 `CRC|MATA` 事件，需复现与映射链路定位 |
+
+**UT 测试源（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-UT-43` | 待测试源 | Mode 0 构建下 `timing_rollback_on_set_timing_fail` 的断言与实现契约相反，测试源待同步 |
+
+> 台账合计 **13** 条：N 1 / K 7 / 状态词 5。HIL / USB / CLI 侧的负例见
+> `docs/design/hil_ut_design.md` §7.2；FTL 侧见 `docs/design/ftl_ut_design.md` §7.2。
+
 ---
 
 ## 8. 维护规则
@@ -521,7 +575,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 - **新增/删除测试项**：同批更新 §1.1 与对应模块小节；不要新增全局用例表。
 - **新增/删除用例**：改测试源；只有当「设计要点或判据」变化时才改本文。
 - **风险状态变化**：只改 `docs/design/known_risks.md`；§7 只在映射变化时改。
-- **覆盖判定变化**：只改 `docs/design/negative_coverage.md`。
+- **覆盖判定变化**：只改 §7.2 台账。
 - **地址抽样契约**：改抽样顺序 / 盐 / `fmix32` / `munit_platform_seed()` 会改变
   seed→地址映射；必须同批更新 §4.4 与测试源注释。
 - **OP 表**：`include/nand/onfi_1_0.h` 是唯一事实源；`OP_COUNT` / 槽位变化时只改 §2.9 的说明。

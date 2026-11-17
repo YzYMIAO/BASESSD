@@ -1,4 +1,4 @@
-# 存储主控 / 软 SSD 测试指南（2026-10-22）
+# 存储主控 / 软 SSD 测试指南
 
 > 定位：从板端 NAND/FC 到主机 USB 的**分层测试流程、工具、性能方法、当前实测**。
 > 配套：`docs/design/usb_msc.md` Part A（USB 架构）、`docs/design/usb_msc.md` Part B
@@ -467,7 +467,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 ---
 
-## 9. 吞吐优化记录（USB MSC）
+## 9. 吞吐与内存布局结论（USB MSC）
 
 ### 9.1 当前结论
 
@@ -509,13 +509,9 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 ## 11. 负例执行清单（可执行）
 
-> 来源：原独立文档 `negative_test_plan.md`，已归档到 `docs/archive/negative_test_plan.md`。
-> 目的：把 `docs/design/known_risks.md` 里「待上板」的负例判据整理成可逐条执行的清单。
-> **未上板前不得勾选**（R1）。
-
 > 目的：把 `docs/design/known_risks.md` 里「待上板」的负例判据整理成可逐条执行的清单。
 > 每条都给出：风险 ID、触发方式、期望、证据。**未上板前不得勾选**（R1）。
->
+> 本清单是**手动/半自动**执行路径；UT 镜像内的可重复负例见 §12。
 > 当前硬件：无程控电源 / USB 继电器 ⇒ 掉电与拔线只能手动，无法自动化与大批量。
 > 已有能力：测试镜像的固件注入钩子（`FC_NAND_TEST_ENABLE`）+ 串口 CLI + H2testw/`/bench/speed`/UT。
 
@@ -637,3 +633,313 @@ RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 
 ```
 
 结果写回 `known_risks.md` 对应条目的「历史/验证」行；通过的按 `docs/design/known_risks.md` §0.4 判定是否 `已闭合`。
+
+---
+
+## 12. 负例与故障注入框架（跨层）
+
+> 正例只证明「正常情况没坏」；负例证明「故障 / 非法输入时不静默写坏、丢数据或挂死」。
+> 风险表里「待上板」条目的残余多数是负例：FAIL 注入 / 掉电 / 超时 / 多圈 / 混优先级。
+> **跨层框架只此一处**；各层的注入 seam、覆盖台账与不覆盖项分别在
+> `docs/design/ftl_ut_design.md`、`docs/design/fc_nand_ut.md`、`docs/design/hil_ut_design.md`。
+
+### 12.1 判据（与 `CLAUDE.md` 一致）
+
+- **C7**：每条负例必须先在**未修复的实现**上变红（证明有区分力），修复后转绿；恒真断言不算覆盖。
+- **C8**：必须给出「故障确实发生」的证据（注入计数、状态位、日志），不能只看返回码。
+- **H14**：注入只存在于测试镜像；产品构建零运行期开销（宏隔离，§12.4）。
+- **R4**：注入代码属于生产源码的测试分支；用例属于测试源（用户维护）。
+- **P3**：新增 `ASSERT` 前先读 `docs/design/assertion_guidelines.md`（判据 9/10）。
+- **C5 / H34**：测试侧内部 API 的非法枚举值用 `ASSERT`；release UT 下越界直接 return。
+
+### 12.2 借鉴与出处
+
+本仓**没有**可直接链接的通用方案：目标是裸机 STM32、无 OS、无动态加载。下列工具只借**模型**，
+落地形态是**本仓自拟**。
+
+| 工具 / 项目 | 机制（出处） | 借什么 | 为什么不直接用 |
+|---|---|---|---|
+| [libfiu](https://github.com/albertito/libfiu) | C 库（public domain）：故障点 + 控制 API + 次数/概率 | 「故障点 + 控制 API + 按次数」的 API 形状 | userspace/POSIX 向，裸机无法链接 |
+| [QEMU blkdebug](https://qemu-project.gitlab.io/qemu/devel/testing/blkdebug.html) | 规则式：`event` + `errno` + `sector` + `once` | 「按事件/地址/次数定点」的三维 key | 依赖 QEMU/Linux 块层 |
+| [dm-error / dm-flakey / dm-dust](https://github.com/ligurio/sqa-wiki/wiki/Fault-injection) | 块层注入：永久 IOERR / 按比例失败 / 坏扇区 | 故障分类（永久 / 瞬态 / 介质坏区） | Linux Device Mapper，板端不可用 |
+| [mtd-utils `nandbiterrs`](https://git.infraroot.at/mtd-utils.git/plain/tests/mtd-tests/nandbiterrs.c?h=v2.2.0) | 逐位翻转 NAND 页，测 ECC 纠正上限 | 「位翻转 / 逐 CW 注入」的介质故障模型 | Linux MTD 用户态工具 |
+| [FAIL*](https://github.com/danceos/fail) | GPLv3，C++ 实验描述；含 OpenOCD（真实 ARM）后端 | fault space / campaign / 结果库的概念 | 体量与依赖远超本仓需要 |
+| [FFF](https://github.com/meekrosoft/fff) | 单头文件 C fake 框架：`FAKE_VALUE_FUNC` + 调用历史 | 需要函数替身时的轻量工具 | 本仓用 munit + 端口夹具，换框架无收益 |
+
+**结论**：API 形状照 libfiu；key 维度照 blkdebug；故障分类照 dm-flakey / nandbiterrs；
+实现保持本仓自拟、零外部依赖。
+
+### 12.3 术语
+
+| 中文 | 主流英文 | 说明 |
+|---|---|---|
+| 正例 / 负例 | positive / negative test case | 正常路径 / 故障或非法输入路径 |
+| 故障注入 | fault injection | 主动制造故障 |
+| 注入点 / 缝 | fault injection point / seam | 代码中允许注入的边界 |
+| 链接期包装 | link-time wrapping（`-Wl,--wrap`） | 测试构建替换符号、生产源码不动（**本仓自拟的落地方式**） |
+| 宏隔离 | compile-time isolation | `#if defined(FC_NAND_TEST_ENABLE)` 整体裁掉（**本仓自拟**） |
+| 故障目录 | fault catalog | §12.5 的分类 + 各层 seam 表 |
+
+> 「W / H 机制」是本文简写（W = wrap，H = 静态 hook），**本仓自拟**，不冒充行业术语。
+> NAND 语义（FAIL_CACHE 指提交序前一页、`7Ah` 状态字节）以
+> `docs/reference/datasheet_mt29f_cache_ops.md` 与 MT29F4G08 datasheet 为准。
+
+### 12.4 分层模型与选型
+
+注入有两种机制，**以链接期 wrap 为主**：
+
+| 维度 | A. 生产源码埋点 | B. 链接期 wrap（选定） |
+|---|---|---|
+| 生产源码改动 | 每个模块各加 include + 调用 | **0**（只保留已有 2 个静态缝 hook） |
+| include 扩散 | `fault_inject.h` 扩散到 FC/FTL 各模块 | 只在测试侧 |
+| 语义耦合 | 埋点必须理解模块内部状态（plane/region/phase 放在哪一步） | 只依赖**公开 API 参数**（pba / op / cfg / phase） |
+| 编译开关 | 每个模块都要 `FC_NAND_TEST_ENABLE` 分支 | 只在 UT 链接参数 + 测试侧 `.c` |
+| 覆盖能力 | 可精确到内部静态函数 | 覆盖所有跨 TU 的公开边界；静态函数需少量 hook |
+| 主要风险 | 埋点位置错误 → 语义被扰动（泄漏/跳过清理） | makefile 漏加 wrap、wrapper 未调用 `__real_*` |
+
+**wrap 在本仓成立的前提**（调用关系已核对）：
+
+- `fc_poll_completion` 只被 `ftl_op.c` 调用（跨 TU）；
+- `ftl_op_submit` 被 `checkpoint/journal/l2p_cache/bbt/migrate` 等调用（跨 TU）；
+- `ftl_async_read_page / write_page / write_page_cw / erase_block` 被
+  `migrate/read_recovery/journal/l2p_cache/metadata_job` 调用（跨 TU）；
+- `alc_super_open_alloc_pair` 被 `cache_batch/ftl/wbuf/migrate` 调用（跨 TU）。
+
+⇒ 这些符号在**测试构建**里加 `-Wl,--wrap=<symbol>`，测试侧提供 `__wrap_<symbol>`；
+正常路径必须调用 `__real_<symbol>`。
+
+**wrap 的边界（必须在用例里写清）**：
+
+- 同一 TU 内的调用**不会**被 wrap（例如 `ftl_fc_interface.c` 内部的 mirror 变体）；
+- 通过函数指针 / 回调表调用的不 wrap；
+- 静态函数（`l2p_load_begin` / `cp_job_step` / `jrn_write_complete` 等）不 wrap
+  ⇒ 要么保留**最小 hook**，要么改用其公开入口的 wrap（如 `ftl_op_submit` 带 ctx/phase）；
+- wrapper 只允许做「注入或调用 real」两件事；不得修改参数/状态。
+
+**结论**：生产源码只保留**已有的 2 个静态缝 hook**（cache program FAIL_CACHE、Journal 页写）；
+其余故障用 **UT 构建的 wrap 库**（`tests/unit/fi_wrap.c` + `-Wl,--wrap`）；
+若某条负例只能靠静态缝覆盖，先证明「公开边界无法表达」，再加**一个** hook 并在对应层
+UT 文档登记；测试侧注入状态仍用 `fi_arm*` / `fi_reset`，wrapper 与 hook 共用同一张表。
+
+**宏隔离硬约束（解耦不了的静态缝）**：静态缝的 `#include "fault_inject.h"` 与调用点都必须包在
+`#if defined(FC_NAND_TEST_ENABLE)` 内，**不允许**「无条件调用空实现」——产品构建里该模块不应
+出现任何测试符号引用：
+
+```c
+#if defined(FC_NAND_TEST_ENABLE)
+#  include "fault_inject.h"
+#endif
+
+/* ... */
+#if defined(FC_NAND_TEST_ENABLE)
+    if (fi_take_at(FI_XXX, key) == true)
+    {
+        /* 注入结果 */
+    }
+#endif
+```
+
+宏名只用 `FC_NAND_TEST_ENABLE`，不新增第二套开关（C9）。
+
+### 12.5 故障分类
+
+| 类别 | 例子 | 主要层 | 注入方式 |
+|---|---|---|---|
+| 输入 / 契约 | 非法 opcode、LBA 越界、`NULL`、`count=0`、非法状态转移 | HIL / FTL 入口 | 直接调用（无需钩子） |
+| 资源 / 背压 | 命令池空、SQ/CQ 满、pending 满、free/OP/spare 耗尽 | FTL / FC | `FI_ALLOC_FAIL`、池填充、入口拒绝 |
+| 介质 / 坏块 | program fail、erase fail、UNC、META/CRC、bad block、位翻转 | FC-NAND | `FI_FC_STATUS`、`bbt fault`、引擎级注入 |
+| 持久化 | Journal 页写失败、CP 各 phase 中止、Directory/Anchor 损坏、BBT 写失败 | FTL | `FI_JOURNAL_WRITE_FAIL` / `FI_CP_ABORT_PHASE` / `FI_BBT_WRITE_FAIL` |
+| 并发 / 时序 | 迟到完成、重复 release、混优先级 chain、wild-chain、命令超时、门控饥饿 | FC / FTL | 序列/队列构造、`FI_SEQ_GATE_STARVE` |
+| 掉电 / 恢复 | 写中断电、CP 各 phase 断电、format 中断电、快照撕裂 | 系统 | 手动断电（当前无程控电源）；UT 用 reboot-from-media |
+| 迁移 / 回收 | GC/WL victim 读失败、目的页写失败、RR 恢复读失败 | FTL | `FI_MIG_READ_FAIL` / `FI_MIG_WRITE_FAIL` / `FI_RR_READ_FAIL` |
+
+### 12.6 注入 API 契约
+
+**故障类型**（`include/common/fault_inject.h`）：
+
+```c
+#define FI_KEY_ANY (UINT32_MAX)
+
+typedef enum FI_FAULT_E
+{
+    FI_CACHE_FAIL = 0,      /* cache program 完成：伪造 FAIL_CACHE（key = 页基址 LBA） */
+    FI_JOURNAL_WRITE_FAIL,  /* Journal 页写失败（key 未用） */
+    FI_FC_STATUS,           /* FC 完成状态位注入（key = NAND opcode，arg = status 位） */
+    FI_ALLOC_FAIL,          /* 分配拿不到块（粗粒度：按次数，key 未用） */
+    FI_L2P_LOAD_FAIL,       /* 元数据读启动失败（key = PBA；FI_KEY_ANY = 全部元数据读） */
+    FI_CP_ABORT_PHASE,      /* 指定 CP phase 中止（key = cp_phase_e） */
+    FI_BBT_WRITE_FAIL,      /* 元数据（镜像）写失败（key = PBA；FI_KEY_ANY = 按次数） */
+    FI_MIG_READ_FAIL,       /* GC/WL victim 读失败（key = plane） */
+    FI_MIG_WRITE_FAIL,      /* GC/WL 目的页写失败（key = plane） */
+    FI_RR_READ_FAIL,        /* RR 恢复读硬失败（key = plane） */
+    FI_SEQ_GATE_STARVE,     /* 序列门控无条件拒绝，模拟后台被饿死 */
+    FI_FAULT_NUM
+} fi_fault_e;
+```
+
+**控制 API**：
+
+```c
+void  fi_reset(void);                                   // setup/teardown 必调
+void  fi_arm(fi_fault_e f, DWORD count);                // 任意 key
+void  fi_arm_at(fi_fault_e f, DWORD key, DWORD count);  // 指定 key
+void  fi_arm_ex(fi_fault_e f, DWORD key, DWORD count, DWORD arg); // 带故障参数
+BOOL  fi_take(fi_fault_e f);                            // 只匹配无 key 的武装
+BOOL  fi_take_at(fi_fault_e f, DWORD key);              // 匹配「无 key 或同 key」
+BOOL  fi_take_ex(fi_fault_e f, DWORD key, DWORD *out_arg);
+```
+
+**语义与约束**：
+
+- **按次数注入**，不是布尔开关；命中即自减，`0 = 不注入`。
+- `fi_take_at`：槽的 key 为 `FI_KEY_ANY` 或与现场 key 相同才命中。
+- `fi_take`：只匹配 `FI_KEY_ANY` 的武装（避免误消费定点注入）。
+- 状态是文件级静态量；**每个用例 setup 与 teardown 必须 `fi_reset()`**（否则跨用例静默污染）。
+- 只在 `FC_NAND_TEST_ENABLE` 下存在；产品构建为空实现（H14）。
+- 调用方只有两类：测试侧 wrap 库（`tests/unit/fi_wrap.c`）与既有的 2 个静态缝 hook；
+  生产模块**不新增** `#include "fault_inject.h"`。
+
+**表示链契约（P10）**：
+
+```text
+1. 坐标：key 的坐标域由故障类型唯一决定 ——
+   plane（FI_MIG_* / FI_RR_*）、
+   PBA（FI_L2P_LOAD_FAIL / FI_BBT_WRITE_FAIL）、
+   page LBA（FI_CACHE_FAIL）、
+   NAND opcode（FI_FC_STATUS）、
+   cp_phase_e（FI_CP_ABORT_PHASE）；
+   FI_ALLOC_FAIL 未用 key（粗粒度，按次数）；无 key 的故障用 FI_KEY_ANY。
+2. 表：fi_slot_s s_fi[FI_FAULT_NUM]；元素 {left, key, arg}；
+   left==0 = 未武装；key==FI_KEY_ANY = 任意；arg 的类型由故障类型定义。
+3. 计数：left 是「还能命中几次」，命中即减；上界由调用者给的 count 决定，
+   框架不设隐式上限；越界/非法枚举属调用者错误（C5/H34：ASSERT）。
+4. 归属：状态在 `fault_inject.c`（测试镜像）；控制 API 在 `fault_inject.h`；
+   生产构建整段裁剪（宏隔离）；测试侧 wrap 库与 H 类 hook 共用同一张表。
+5. 表示链：fi_fault_e → fi_slot_s.key/arg → wrap/hook 的 fi_take* →
+   被注入模块的返回值/状态位 → 用例断言；测试代码不另造第二套故障编号（C9）。
+6. 判据：§12.2 的公开工具形状 + 本仓分层（`docs/design/fc_nand_design.md` §26）；
+   不是「本仓现状」也不是「教科书」。
+```
+
+**坐标域不得混用（C11）**：plane / PBA / phase / opcode 都是 `DWORD`，但语义不同；
+API 用命名构造函数表达（`FI_KEY_PLANE` / `FI_KEY_REGION` / `FI_KEY_LBA` / `FI_KEY_OP` /
+`FI_KEY_PHASE`，只做语义标注，不改变值域）。测试代码不得把 region 当 plane 传。
+
+**类型形态（H50）**：
+
+```c
+typedef struct FI_SLOT_S
+{
+    DWORD left;
+    DWORD key;
+    DWORD arg;
+} fi_slot_s;
+```
+
+### 12.7 用例模板与命名放置
+
+```text
+1. 前置：干净状态（pure RAM / format+POR），确认基线判据
+2. 对照：不注入时同一条路径成功（正例对照）
+3. 注入：fi_arm_at(f, key, n)
+4. 触发：调用目标 API（写/读/流控/完成）
+5. 断言：
+   a. 返回状态 == 预期错误码（FTL_AGAIN / FTL_ERROR / SSD_STATUS_*）
+   b. 不变量成立（pending=0、L2P 未被错误撤销、valid_count 一致、队列无泄漏）
+   c. 无静默破坏（读回数据 / 介质内容 / map 结果）
+   d. 注入被消费：fi_take 计数 == n（C7）
+   e. 恢复：清除注入后下一条操作成功
+6. 收尾：fi_reset() + teardown assert_clean
+7. 证据：`ftl_ut_trace_begin` / `ftl_ut_trace_detail` / `ftl_ut_trace_summary`
+   （FC/HIL 用各自夹具的等价证据行）；内容含 fault / point / expected / observed
+```
+
+- 用例**主键 = munit 用例名**，不引入 `NEG-*` 独立编号；用例名与各层 UT 文档 §2 模块表的设计点一致。
+- 放置：FTL pure 放 `/ftl/pure/` 对应模块套件；media/e2e 放 `/ftl/media/e2e/`；
+  **注入负例放 `/ftl/negative/`**（`tests/unit/test_negative_pure.c` + `test_negative_media.c`）；
+  FC 放 `pure` / `lifecycle` 或 `/fc-nand/negative/` 套件；HIL 放 `/hil/` 套件。
+- **测试代码注释不得写 RISK 编号**：风险映射只维护在 `docs/design/known_risks.md`
+  与各层 UT 文档的覆盖台账，测试代码只写「故障 / 预期 / 判据」。
+- **内存约束**：combined UT（FC+FTL）的 AXI_RAM 已接近上限，负例缓冲放
+  `SRAM4_DATA`（`.sram4_data` 是 NOLOAD，用例内先填后读）；新增负例避免再往 `.bss`
+  放大数组，否则 `make tests` 会在链接期溢出。
+
+**复用优先（R9 / C2）**——落地每个 hook 或 wrapper 之前先查已有 seam：
+
+| 需要的能力 | 已有 seam / helper |
+|---|---|
+| FTL 读/写/擦失败 | `ftl_async_read_page` / `ftl_async_write_page` / `ftl_async_write_page_cw` / `ftl_async_erase_block` |
+| 分配耗尽 | `alc_super_open_alloc_pair`（`alc_free_*` / `alc_op_*` 计数访问器已存在） |
+| CP 阶段 | `ftl_op_submit` 的 `FTL_OP_CHECKPOINT` + `cp_handle_s->phase` |
+| 完成状态 | `fc_poll_completion` / `fc_poll_completions` |
+| Journal 写失败 | 既有 `fi_journal_fail_take` |
+| cache FAIL_CACHE | 既有 `fi_cache_fail_take` |
+| 坏块注入 | 既有 CLI `bbt fault` |
+
+机械自查：新增 hook 前 `grep -rn "fi_take\|ftl_async_\|alc_super_open_alloc_pair" src include`
+确认没有现成入口。
+
+### 12.8 执行、证据与构建门禁
+
+| 项 | 约定 |
+|---|---|
+| 镜像 | `make tests UT=FC/FTL/HIL`（只有 `FC_NAND_TEST_ENABLE` 才有注入） |
+| 运行前 | `format` + POR；**拔掉 USB**（`test` 入口会拒绝 host 在飞的请求） |
+| 复位 | 失败后按**复位**而不是断电，保留 `.noinit` 证据 |
+| 失败定位 | `crash` / `pc`（同一镜像符号表）；`ftl_ctx` / `q` / `jrn` / `cp` |
+| 证据 | 串口原始日志 + `ftl_ut_trace_*` 证据行 + UT 报告；未上板前不勾选 |
+
+**构建门禁（R2）**：
+
+- 实现每个阶段后必须跑：`make all` / `make release` / `make tests UT=FTL`（涉及 FTL）
+  以及 `UT=FC` / `UT=HIL`（涉及对应层）；**零新告警**。
+- 宏隔离的机械证据：产品 `debug.elf` / `release.elf` 中 `nm | grep ' fi_'` 为空；
+  与框架落地前的 `.text` 对比应**逐字节不变**（纯测试侧改动 + 宏裁掉）。
+- `make tests` 只证链接不证正确（R2）⇒ 负例必须上板跑。
+- P11：批量收尾跑一次，不逐文件构建；纯文档改动不编译。
+
+**偏离留痕（P5）**：新增静态缝 hook = 偏离「生产零耦合」原则，必须在代码注释与该层 UT
+文档的 seam 表写明「偏离原因 + 为何公开边界表达不了」；wrap 无法覆盖的用例
+（同 TU / 函数指针 / 静态函数）在用例处注明，避免下次误以为已覆盖。
+
+### 12.9 覆盖统计与验收（P13）
+
+1. 故障类型总数 / 已实现数 / 例外；
+2. 每个故障类型至少 1 条负例，且有**正例对照**；
+3. 每条负例的「不修复即红」证据（C7）；
+4. **生产源码 hook 数**：必须等于 2（既有）+ 已登记的新增静态缝；新增一个就要写理由；
+5. **宏隔离机械检查**：所有 `fault_inject.h` / `fi_*` 引用都在
+   `#if defined(FC_NAND_TEST_ENABLE)` 内（`git grep` 人工核对 + 产品 `nm` 无 `fi_` 符号）；
+6. **产品二进制不变**：框架落地前后 `debug.elf` / `release.elf` 的 `.text` 逐字节对比；
+   UT 侧 `.text` 变化需给出原因；
+7. **检查器要有区分力（C7 / P13）**：覆盖率脚本先用一个必然缺项的输入验证会报错，再宣称通过；
+8. 风险映射：可覆盖 N / 已覆盖 M / 明确不覆盖 K（硬件/环境），三者相加 = 总条目；
+9. 不得用「旧名 grep=0 / 编译通过」替代。
+
+### 12.10 各层注入点归属
+
+- **HIL**：入口契约层，负例**不需要任何注入**——直接以非法/边界参数调用公开 API
+  （`NULL` controller/request/buffer、LBA 越界、`count=0`、队列/组槽耗尽、TRIM 越界/BUSY、
+  SCSI 未知命令、deferred error 传播）。见 `docs/design/hil_ut_design.md` §4.7。
+- **FC**：状态解码（desc → FAIL_CACHE 归属、`7Ah` 状态、R/B 超时）不在 wrap 覆盖内，
+  它需要「伪造 NAND 完成」而非「修改 CQ 状态」。可用 seam：
+  `FI_FC_ENGINE_FAIL`（H，dispatch 完成策略前覆盖 result）、
+  `FI_COMPLETION_DROP` / `FI_COMPLETION_LATE`（W，CQ 出口）、
+  `FI_PLANE_STATUS`（H，按 plane 覆盖 `cw_status`）、
+  `fc_nand_dispatch_test_completion()`（测试 API，只驱动 completion 策略表，不提交 NAND）。
+  后续 FC 解码负例必须复用这些 seam，不得用 FTL 侧状态注入冒充。见
+  `docs/design/fc_nand_ut.md` §4.3。
+- **FTL**：W 类 seam 集中在 FTL↔FC 公开边界（`ftl_async_*` / `ftl_op_submit` /
+  `ftl_sync_read_column` / `alc_super_open_alloc_pair` / `fc_poll_completion`）与
+  两个 H 类静态缝；具体清单与覆盖台账见 `docs/design/ftl_ut_design.md` §4.9 / §3.5。
+
+**wrapper 契约（H30 / C5）**：
+
+- `__wrap_<symbol>` 默认必须调用 `__real_<symbol>` 并把**返回值原样传出**；
+  不得静默丢弃、不得改参数、不得改状态；
+- 注入时只允许两种形态：a. real 返回后修改输出（如 `fc_poll_completion` 的 `status`）；
+  b. 不调用 real 直接返回故障码（如 `ftl_async_*` 提前返回 `FTL_ERROR`）——
+  此时必须保证没有分配资源（否则泄漏）；
+- `FI_COMPLETION_DROP` / `FI_COMPLETION_LATE` 是**刻意的完成投递抑制**，
+  不属于「静默丢弃返回值」：命中由 `fi_hits` 证明，且只影响测试镜像；
+- wrapper 只在 UT 构建链接（`tests/unit/fi_wrap.c` + `-Wl,--wrap`），产品构建不存在。

@@ -1,7 +1,7 @@
 /*
  * test_negative_pure.c — /ftl/negative/pure/：不碰介质的负例（RAM 夹具 / 纯函数）
  *
- * 设计：docs/design/negative_test_framework.md。
+ * 设计：docs/design/testing_guide.md §12。
  *
  * 与 /ftl/negative/media/ 的分界：
  *   · pure：只用 RAM allocator 夹具、纯函数、或启动后即闲置的 live 实例表；

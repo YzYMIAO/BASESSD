@@ -13,7 +13,7 @@
 | FC-NAND 层改动 | `design/fc_nand_design.md`（主设计；§26 行业对照 = 判据）→ `design/fc_nand_revision_history.md`（逐版本决策史 / 被否方案） |
 | **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.2/§17.3/§25.8 → `design/ftl_design.md` ADR-15 |
 | FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
-| 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_iss.md` §1） |
+| 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_iss.md` §1）；负例与注入框架见 `design/testing_guide.md` §12 |
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md`（含 §8 统一定时调度器）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 | `design/assertion_guidelines.md` + `design/fault_capture.md`（日志设计见 §10） |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
@@ -25,6 +25,7 @@
 | **未实现 / 未验证项（feature backlog）** | `design/known_iss.md` |
 | **复查已知风险 / 判断是否该修** | **先读 `design/known_risks.md`**（缺陷/残余风险；已闭合条目在文末）→ 再进对应模块文档 |
 | **质疑某条项目规则（`CLAUDE.md`）的出处** | `archive/claude_md_history.md`（规则何时、因为什么改过；日常不读） |
+| **开源发布 / 仓库整理** | `guides/open_source_checklist.md`（P0 凭据 / 许可证 / 第三方资料 → P1 结构 → 发布前检查） |
 
 ## 目录
 
@@ -32,16 +33,13 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史/UT 归档（数量随重构增长），见 archive/README.md
-├── design/                    ← 活跃权威设计文档（22 个）+ known_iss/known_risks
-├── guides/                    ← 环境 / 调试操作指南（非设计）
-├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
+├── design/                    ← 活跃权威设计文档（18 个；阅读顺序见 design/README.md）+ known_iss/known_risks
+├── guides/                    ← 环境 / 调试 / 开源发布操作指南（非设计）
+├── reference/                 ← 资料区：论文 / 网页链接清单（公开仓库不含 PDF/HTML，见 OS-03）
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
 ├── boot_flow.md               ← 固件启动流程（复位 → main）
-├── hardware_contract.md       ← 硬件契约（STM32H743 + MT29F4G08）
-├── nand_model.md              ← NAND 组织模型
-├── claude_code_usage.md       ← Claude Code 日常用法（模型切换）
-└── ftl_design.md              ← 桩：指到 design/ftl_design.md
+└── hardware_contract.md       ← 硬件契约（STM32H743 + MT29F4G08，含 NAND 组织模型）
 ```
 
 ## 边界

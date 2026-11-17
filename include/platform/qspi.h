@@ -11,6 +11,9 @@
  *
  * 本头零 HAL 类型：QSPI 句柄、GPIO/时钟宏、命令/地址/数据模式枚举一律留在
  * SoC 侧（include/platform/<soc>/qspi_port.h）。共享层只做空参检查与转发。
+ *
+ * ⚠ 当前未启用：产品路径无任何调用点（本板不带 QSPI NOR flash），
+ * qspi.c / qspi_port.c 仍随构建编译但不被使用。接口保留供将来外挂 NOR 时接入。
  */
 
 func_status_e qspi_wait_flag(DWORD flag, BYTE sta, DWORD wtime);            /* 等待某个状态 */

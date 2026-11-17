@@ -1,7 +1,7 @@
 /*
  * test_negative_media.c — /ftl/negative/media/{gc,l2p,meta,boot,if}/：故障注入负例（真 NAND，破坏性）
  *
- * 设计：docs/design/negative_test_framework.md。
+ * 设计：docs/design/testing_guide.md §12。
  *
  * 注入机制分两种，测试侧用法相同：
  *   · W（链接期 wrap，`tests/unit/fi_wrap.c`）：FC/FTL 边界故障，生产源码零改动；

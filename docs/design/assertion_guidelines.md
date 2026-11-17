@@ -38,7 +38,7 @@
 来自 `fc_command_alloc()` / `mem_alloc` 的是**资源**（判据 3，保留）；来自函数入参的才是**前置条件**（判据 2，转断言）。FTL 里满屏的 `cmd == NULL` 绝大多数是前者。
 
 **辨析 B：语义分支不是前置条件。**
-用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`ds_deque.c` 的 `cp == NULL`（浅拷贝选择器）、`md_block_is_metadata(md_dir == NULL, …)`（固定区间照常分类）、`fc_ecc_decode(..., err_bits == NULL)`（不取纠正位数）。~~`fc_submission_queue_pop_n(ids == NULL)`（仅消耗队列）、`fc_command_status_init(status, command == NULL)`（无命令来源时填哨兵值）~~ **（2026-10-08：两函数因零生产调用者被整体删除，见 §十七）**。
+用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`md_block_is_metadata(md_dir == NULL, …)`（固定区间照常分类）、`fc_ecc_decode(..., err_bits == NULL)`（不取纠正位数）、`fc_bch_encode(ecc == NULL)`（跳过 ECC 写入）。
 
 ## 三、`ASSUME` 的取舍
 

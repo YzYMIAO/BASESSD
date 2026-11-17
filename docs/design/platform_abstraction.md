@@ -28,7 +28,7 @@
   `src/nand/nand_mt29f4g08abadawp.c` 直接定义 `HAL_NAND_MspInit` / `HAL_NAND_Init` /
   `__HAL_RCC_*_CLK_ENABLE`。
 - 真实存在的抽象 seam 是 `include/platform/platform.h` 的 `ssd_platform_ops_s`（4 个函数指针），
-  但**只有 `time_us` 被填**；`include/platform/interrupt.h` 的 `ssd_irq_*` **零调用者**。
+  但**只有 `time_us` 被填**。
 
 本文件把规则补成**可机械检查**的形式（§一），把现状逐文件审计出来（§二、§三），
 给出目标布局（§四）与分阶段路线图（§五）。
@@ -187,9 +187,18 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 | `bsp/sdram_w9825g6kh.c` | 207 | b | FMC SDRAM 初始化 | — |
 
 > 分类记号 **p** = port 适配层（只碰 HAL/MMIO，不含可移植逻辑）。
-> 另：`include/platform/stm32h743/bsp/` 还有 `led.h` / `norflash_w25q256.h` 两个**无实现**的头。
 > **Stage 2.7 起本目录不再有总装 `stm32h7rsxx_it.c`**：每个 ISR 直接定义在拥有该外设的
 > port 文件里（见 §5.5 的映射表）。
+
+### 2.3 当前未启用的平台服务
+
+以下服务已完成抽象分层，但产品路径**零调用者**，保留接口供将来接入；对应头文件已就地标注。
+
+| 服务 | 状态 | 说明 |
+|---|---|---|
+| QSPI | 未启用 | 本板不带 QSPI NOR flash，`qspi.c` / `qspi_port.c` 随构建编译但不被调用；`include/platform/qspi.h` 注明 |
+| RNG | 未启用 | 产品路径无消费者（UT 随机序列用软件 PRNG）；`include/platform/rng.h` 注明 |
+| SDRAM（W9825G6KH） | 未启用 | FTL 为 DRAM-less，元数据常驻 AXI_RAM / SRAM2；`bsp/sdram_w9825g6kh.c` **未纳入构建**（`<soc>/makefile.mk` 只通配 `<soc>/*.c`）；`include/platform/stm32h743/bsp/sdram_w9825g6kh.h` 注明 |
 
 ---
 
@@ -226,7 +235,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 
 ```
 include/platform/<svc>.h        ← 抽象接口：判据 B（零 HAL 类型）
-    platform.h  interrupt.h
+    platform.h
     delay.h  crc.h  dma.h  fault.h  usart.h
     timer.h  watchdog.h  mpu.h  rng.h  qspi.h  sys.h
 src/platform/<svc>.c            ← 共享逻辑：判据 D（零 SoC 头），跨 target 编译一次
@@ -494,8 +503,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 
 **未做**：`usart` 拆分（已由 Stage 2.5 接手，见 §5.3）；`h7r3`（已于 2026-11-07 删除）；
 `sys.c` / `mpu.c` / `crc.c` / `rng.c` / `qspi.c` / `dma.c` / `nand_dma.c` / `bsp/sdram_*` /
-`stm32h7rsxx_it.c`（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_s` 未扩张；
-`interrupt.h` 未动。
+`stm32h7rsxx_it.c`（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_s` 未扩张。
 
 ### 5.3 Stage 2.5 进度（2026-10-11，usart 拆分，只做 `stm32h743`）
 

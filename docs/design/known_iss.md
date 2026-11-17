@@ -101,11 +101,14 @@
 
 #### ISS-UT-06 负例框架与注入用例
 
-- **当前事实**：`include/common/fault_inject.h` / `src/common/fault_inject.c` 提供按次数 + key 的故障表与 `fi_hits()` 命中计数；`tests/unit/fi_wrap.c` 用 `-Wl,--wrap` 注入 FC/FTL 边界故障（生产源码零改动）。`/ftl/negative/` **91 例**（pure 42 / media 49）、`/fc-nand/negative/` **24 例**、HIL 共 17 例（含 `trim_edges`）。302 条风险逐条判定：**M 67 / N 85 / K 81 / 信息 47 / 已闭合 7 / 待判定 0 / 待决策 5 / 待定位 8 / 待测试源 1 / 待后续 1**（见 `docs/design/negative_coverage.md`）。拆分前已写用例均已上板：release UT=FTL `/ftl/negative/` **54/54、0 SKIP、219.32 s**，release UT=FC `/fc-nand/negative/` **11/11、0 SKIP、129 µs**；D1/D2 已全量转 N；D3 41 条 N（2 条 K：BBT-21 / SCH-06）；D0 47 条信息 + 6 条已闭合，D5 WL-01 已闭合；新增用例均未上板。
+- **当前事实**：`include/common/fault_inject.h` / `src/common/fault_inject.c` 提供按次数 + key 的故障表与 `fi_hits()` 命中计数；`tests/unit/fi_wrap.c` 用 `-Wl,--wrap` 注入 FC/FTL 边界故障（生产源码零改动）。`/ftl/negative/` **91 例**（pure 42 / media 49）、`/fc-nand/negative/` **24 例**、HIL 共 17 例（含 `trim_edges`）。各层未闭合风险的负例判定见 `docs/design/ftl_ut_design.md` §7.2 / `docs/design/fc_nand_ut.md` §7.2 / `docs/design/hil_ut_design.md` §7.2；状态以 `docs/design/known_risks.md` 为准。拆分前已写用例均已上板：release UT=FTL `/ftl/negative/` **54/54、0 SKIP、219.32 s**，release UT=FC `/fc-nand/negative/` **11/11、0 SKIP、129 µs**；D1/D2 已全量转 N；D3 41 条 N（2 条 K：BBT-21 / SCH-06）；D0 47 条信息 + 6 条已闭合，D5 WL-01 已闭合；新增用例均未上板。
 - **影响**：用例覆盖的是 FTL↔FC 边界 + CQ 出口的 seam，不代表风险列表覆盖完成。FC 引擎级注入（70h/7Ah/R-B）、Directory 读失败、cache 序列组失败、掉电类仍未实现。
 - **2026-11-14 已补**：`test_negative_media.c` 增加 `s_destructive_active`；`neg_teardown` 在用例断言失败 longjmp 后仍会执行 `ftl_ut_isolated_end()`（format + reboot），避免同一 `test` 命令的后续用例从半破坏介质起步。该路径**未上板**；板端仍建议破坏性套件单独跑并在命令后手动 `format` + POR。
-- **下一步 / 判据**：上板跑第二批（14 例全量）+ HIL 17 例；按设计 §9.2 补齐 N/K 逐条判定；FC 引擎级注入先补 §5.2 的 H 类偏离。每批交付「用例 + 覆盖表 + 上板证据」，不得以通过数代表覆盖。
-- **来源**：`docs/design/negative_test_framework.md`；`tests/unit/fi_wrap.c`、`tests/unit/test_negative_pure.c`、`tests/unit/test_negative_media.c`
+- **下一步 / 判据**：上板跑第二批（14 例全量）+ HIL 17 例；按 `docs/design/testing_guide.md` §12.9 补齐 N/K 逐条判定；FC 引擎级注入先补 §5.2 的 H 类偏离。每批交付「用例 + 覆盖表 + 上板证据」，不得以通过数代表覆盖。
+- **来源**：`docs/design/testing_guide.md` §12；各层判定台账见
+  `docs/design/ftl_ut_design.md` §7.2 / `docs/design/fc_nand_ut.md` §7.2 /
+  `docs/design/hil_ut_design.md` §7.2；`tests/unit/fi_wrap.c`、`tests/unit/test_negative_pure.c`、
+  `tests/unit/test_negative_media.c`
 - **关联**：`ISS-UT-01`、`RISK-UT-*`
 - **历史/验证**：
   - 2026-11-14 D2 seam 框架：`FI_FC_ENGINE_FAIL`（dispatch 完成策略前，arg 可选 TIMEOUT）、`FI_COMPLETION_DROP/LATE`（CQ 出口）、`FI_READ_COLUMN_FAIL`（列读 PBA）、`FI_PLANE_STATUS`（按 plane 覆盖 cw_status）、`FI_DATA_PATH_ENCODE_FAIL/READ_FAIL`、`FI_CLOCK_NOW_FAIL`、`fc_nand_dispatch_test_completion()` 测试 API；自定义 UOP 表用 `fc_uop_engine_start/step` 直接构造。证明用例：engine/late/drop/hold/read-column/plane/data-path/clock/uop/CP-duplicate/sync-timeout/cache-pad 等 20+ 条。三关构建零新告警，**未上板**；D2 23 条均已有 N 级用例/证明（部分为 seam 级，工厂扫描/HAL/init 的完整业务判据仍待板）。
@@ -131,13 +134,14 @@
     （`op_req_table_guard` / `pend_table_guard` / `alloc_rewind_underflow`）均已执行并通过。
     覆盖账：**M 36 / N 13（11 条 FC negative 待 UT=FC + HIL 2 条部分）/ K 129 /
     待判定 110**。下一步：`make tests BUILD_TYPE=release UT=FC` 跑 `/fc-nand/negative/`。
-  - 2026-11-14 UT 测试树评估：新增 `docs/design/ut_tree_restructure.md`（评估时未实施；P0+P1 随后已落地，见本文件上条）。
+  - 2026-11-14 UT 测试树评估：`docs/archive/ut_tree_restructure.md`（评估时未实施；P0+P1 随后已落地，见本文件上条）。
     结论：P0 改 FC level1/2/3 命名为 pure/data_path/lifecycle；P1 把 FTL 负例拆
     pure/media（纯 RAM 用例不再依赖 format）；P2 按 gc/l2p/meta/boot/if 拆子套件；
     P3 HIL 拆 contract/io。建议在写 D1/D2 用例前先做 P0+P1。
-  - 2026-11-14 K 类逐条评估：新增 `docs/design/negative_deferred_eval.md`，
-    把 216 条 K 拆成 D1 可做（17）/ D2 缺 seam（23）/ D3 缺夹具（43）/
+  - 2026-11-14 K 类逐条评估：把 216 条 K 拆成 D1 可做（17）/ D2 缺 seam（23）/ D3 缺夹具（43）/
     D5 待裁决（1）/ D4 不划算（69）/ D0 非负例（63）。建议按 D1→D2→D3 排期。
+    评估结论已按层并入各层 UT 设计文档 §7.2 台账（`ftl_ut_design.md` / `fc_nand_ut.md` /
+    `hil_ut_design.md`）。
   - 2026-11-14 板端第十三跑（release UT=FC 全量）：`/fc-nand/negative/`
     **11/11、0 SKIP、141 µs**（新增 `short_chain_read_short`）。
     风险文档闭合第二批：16 条转已闭合并归档；`BBT-10` 因 factory-scan/format-erase

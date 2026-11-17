@@ -11,6 +11,9 @@
  *
  * 本头零 HAL 类型：RNG 句柄、时钟源、就绪标志一律留在 SoC 侧
  * （include/platform/<soc>/rng_port.h）。
+ *
+ * ⚠ 当前未启用：产品路径无任何调用点（UT 的随机序列用软件 PRNG，
+ * 不依赖硬件 RNG），rng.c / rng_port.c 仍随构建编译但不被使用。
  */
 
 /* 初始化 RNG；返回 0 = 成功（FUNC_STATUS_SUCCESS），非 0 = 失败。 */

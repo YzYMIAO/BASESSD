@@ -7,9 +7,8 @@
 > 范围：`src/ftl/`（FTL 层）。HIL（`src/hil/`）的 UT 不在本文，见
 > `docs/design/known_iss.md` ISS-HIL-01。
 > 关联：`docs/design/ftl_design.md`（被测设计）、
-> `docs/design/negative_test_framework.md`（负例框架）、
-> `docs/design/negative_coverage.md`（风险覆盖判定）、
-> `docs/design/testing_guide.md` §3（L2 FTL）。
+> `docs/design/testing_guide.md` §12（负例与故障注入框架，跨层）、
+> §3（L2 FTL）。
 
 ---
 
@@ -27,8 +26,8 @@
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_ftl_pure.c`、`test_ftl_media.c`、`test_negative_pure.c`、`test_negative_media.c`、`test_speed.c`；`test --list` | §2 只写设计点与代表用例，不列全量用例表 |
 | 风险状态、历史、是否闭合 | `docs/design/known_risks.md`（已闭合历史另见 `docs/archive/known_risks_batches.md`） | §7 只写风险 → 模块追溯，**不写状态词** |
-| 负例覆盖判定（M/N/K） | `docs/design/negative_coverage.md` | §3.5 只给入口与套件映射 |
-| 故障注入框架、seam 语义 | `docs/design/negative_test_framework.md` | §4.9 只写本套件怎么用 |
+| 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §3.5 只给入口与套件映射 |
+| 故障注入框架、seam 语义 | `docs/design/testing_guide.md` §12 | §4.9 只写本套件怎么用 |
 | 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
 | 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
 | 分层与跨层测试流程 | `docs/design/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
@@ -692,20 +691,20 @@ media：`alloc_fail_bounded`、`gc_read_fail_bounded`、`gc_write_fail_bounded`�
 ### 3.5 负例套件映射与判定
 
 `/ftl/negative/` 是独立测试层，不是「pure 套件的补充」。判定用 M/N/K 三档，完整判定见
-`docs/design/negative_coverage.md`；本节只给本仓套件与模块映射。
+§7.2 台账；本节只给本仓套件与模块映射。
 
 | 套件 | 注册数 | 主要模块 | 判定入口 |
 |---|---:|---|---|
-| `/ftl/negative/pure/` | 42 | allocator / BBT / metadata / journal / L2P / cache / GC / WL / RR / iface | `negative_coverage.md` |
+| `/ftl/negative/pure/` | 42 | allocator / BBT / metadata / journal / L2P / cache / GC / WL / RR / iface | §7.2 |
 | `/ftl/negative/media/gc/` | 12 | GC / migrate / allocator | 同上 |
 | `/ftl/negative/media/l2p/` | 6 | L2P / CMT / flush | 同上 |
 | `/ftl/negative/media/meta/` | 14 | metadata / journal / BBT / checkpoint | 同上 |
 | `/ftl/negative/media/boot/` | 7 | PFR / CP / metadata | 同上 |
 | `/ftl/negative/media/if/` | 10 | ftl.c / interface / RR / cache | 同上 |
 
-**判定词**：`M` = 有 seam 且已落地；`N` = 无 seam 但可构造；`K` = 当前不可构造
-（真 POR / 真空白片 / 多 die）。状态变化只改 `known_risks.md`，判定变化只改
-`negative_coverage.md`。
+**判定词**：`M` = 有能变红的负例且上板通过；`N` = seam / 触发 / 断言已从源码确认、
+只差上板；`K` = 当前不可构造（真 POR / 真空白片 / 多 die）。状态变化只改
+`known_risks.md`，判定变化只改 §7.2。
 
 ### 3.6 覆盖模型（CP-*）
 
@@ -845,7 +844,7 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
 
 ### 4.9 负例框架
 
-负例框架的完整语义见 `docs/design/negative_test_framework.md`；这里只记本套件的用法。
+负例框架的完整语义见 `docs/design/testing_guide.md` §12；这里只记本套件的用法。
 
 - **注入 API**：`fi_arm(kind, site, fail_after)` 在测试入口打开注入；
   `fi_arm_at(kind, site, at)` 指定第几次命中；`fi_take()` 由被测代码消费一次故障；
@@ -853,7 +852,7 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
   否则注入状态跨用例静默污染。
 - **链接期 seam**：`fi_wrap.c` 用 `-Wl,--wrap` 包装测试符号，生产源码不动；当前只有
   cache FAILC 与 Journal 页写两个静态 hook，新增 hook 必须登记在
-  `negative_test_framework.md`。
+  `testing_guide.md` §12.10。
 - **编译门禁**：注入只在 `FC_NAND_TEST_ENABLE` 测试镜像生效；产品镜像不编入。
 - **判据**：注入类用例必须同时断言「预期降级」与「故障确实发生」（`fi_hits` 增长），
   只断言后者是假阳性；只断言前者无法证明 seam 生效（C8）。
@@ -957,6 +956,9 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 - HIL/USB 槽状态机、多 run 拆分 / 跨实例部分失败：见 `docs/design/known_iss.md`
   ISS-HIL-01 / ISS-HIL-03。
 
+> 每条风险「能不能构造负例、为什么暂时不可构造（K）」的逐条理由见 §7.2 台账；
+> 本节只归纳整类缺口。
+
 ### 6.2 判据盲区
 
 | 盲区 | 具体 | 后果 | 下一步 |
@@ -964,7 +966,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | 随机抽样不穷举 | `host_io_random` 固定 8 轮；`host_io_matrix` 只抽起点 | 罕见 LBA / 长度组合漏测 | 用 `--iterations` 加量；seed 写证据 |
 | 模拟重启 ≠ POR | `ftl_ut_reboot_from_media` 是进程内重建 | 真掉电窗口（CP / Journal / FAILC 中间）漏测 | 人工 POR + 板端日志 |
 | 介质状态依赖 | media 用例共享 format 后的芯片 | 前序坏块 / 脏行改变后序结果 | 用 `media_prepare` / 每个破坏性用例自清场 |
-| 注入覆盖有限 | 只有 cache FAILC 与 Journal 页写两个静态 hook | NAND 读 / 擦失败的真实时序未注入 | `fi_wrap.c` 增 hook，登记框架文档 |
+| 注入覆盖有限 | 只有 cache FAILC 与 Journal 页写两个静态 hook | NAND 读 / 擦失败的真实时序未注入 | `fi_wrap.c` 增 hook，登记 `testing_guide.md` §12.10 |
 | `RR_FEATURE_READ_RETRY` | `0x89` 是保留地址，路径自始空转 | 读重试策略无真实介质证据 | 用户明确不处理，不纳入 UT 判据 |
 | release 断言裁空 | `ASSERT` 在 `NDEBUG` 下为 `((void)0)` | 静默介质破坏路径无守卫 | H14 运行期拒绝 + release UT 回归 |
 
@@ -972,9 +974,11 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 ## 7. 风险追溯（副轴）
 
-> 风险是**追溯维度**，不是本文的组织轴。完整判定见
-> `docs/design/negative_coverage.md`；状态、历史、是否闭合见
-> `docs/design/known_risks.md`。本节只保留「判据非显然 / 跨模块」的风险簇。
+> 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
+> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> §7.1 只保留「判据非显然 / 跨模块」的风险簇。
+
+### 7.1 风险簇
 
 | RISK 簇 | 涉及测试项 | 判据 | 代表用例 |
 |---|---|---|---|
@@ -991,6 +995,147 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | `RISK-HOST-05` / `RISK-HOST-08` / `RISK-HOST-09` / `RISK-HOST-11` | `pending` / `journal` / `L2P` | 确认停车超时；TRIM 持久化；Journal 压力下的时序 | `pend_confirm_park_timeout`、`pend_confirm_is_parked`、`trim_no_resurrection` |
 | `RISK-WB-03` / `RISK-IF-04` / `RISK-CR-02` / `RISK-BBT-01` / `RISK-BBT-06` / `RISK-BBT-10` / `RISK-BBT-18` / `RISK-RD-01` | `wbuf` / `ftl_op` / `BBT` / `RR` | 窗口 owners / 在飞计数；route 同一实例；BBT 最新记录 / 重复完成；RR 健康单调 | `wbuf_append_read`、`op_route`、`bbt_ring_reload`、`rr_health` |
 
+### 7.2 负例判定台账（FTL 层）
+
+> 本表只列**当前未闭合**的 FTL 风险（索引状态取自 `docs/design/known_risks.md`）。
+> **M** = 有能变红的负例且上板通过；**N** = 注入点 / 触发步骤 / 断言已从源码确认、只差上板；
+> **K** = 当前不可构造（写明原因）；非负例项保留其状态词（`待定位` / `待议` / `待决策`）。
+> **信息**与**已闭合**条目的判定与理由只在 `known_risks.md` 维护，本表不重复。
+> 组名沿用风险登记模块分组；跨层框架（注入 API、宏隔离、验收）见
+> `docs/design/testing_guide.md` §12。
+
+**metadata（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-MD-06` | M（待定位） | 无 seam；3 代写后 reboot×4；断言 region 未降级、读回第 3 代；用例 `md_alias_full_rebuild_repro` |
+| `RISK-MD-23` | K | 需写目录检查点期间掉电（人工断电） |
+
+**GC / migrate / journal（9）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-GC-02` | N（待定位） | `gc_write_complete_fail_closes_cold`：行为断言通过，但已迁移页读回 0xFF，根因未定 |
+| `RISK-GC-05` | K | 性能优化项（GC bitmap），非失败场景 |
+| `RISK-GC-06` | K | 需长压测：WL 5s 节拍 / CLOSED 门控需白盒或长压测 |
+| `RISK-GC-14` | K | 需满盘 / 慢写窗口，短负例不可控 |
+| `RISK-GC-15` | K | 需写到 free<32 的长序列 |
+| `RISK-MIG-07` | M（待定位） | 同 `gc_read_unc_marks_bad`（熔断后不再成批标坏）；用例 `gc_systemic_read_fuse` |
+| `RISK-JN-10` | K | 需写 journal 期间掉电 |
+| `RISK-PERF-01` | K | 性能项（GC/WL 选块重复全表扫描），非失败场景 |
+| `RISK-PERF-02` | K | 性能项（目的页逐 plane 单条写） |
+
+**BBT（5）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-BBT-02` | N | `read_column_fail_seam`：列读 PBA 失败 seam（工厂扫描判坏路径待板） |
+| `RISK-BBT-03` | K | 需 format 处理中掉电 |
+| `RISK-BBT-04` | K | 介质格式演进项（header 无布局版本），非负例 |
+| `RISK-BBT-10` | N | kick 路径（`bbt_kick_candidates`）已上板；factory-scan / format_erase 破坏性路径未覆盖 |
+| `RISK-BBT-14` | K | 需 format 中途掉电 |
+
+**掉电恢复 / 启动（5）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-BOOT-04` | K | 两阶段格式化中途掉电（人工断电） |
+| `RISK-BOOT-17` | K | 需真空白片 |
+| `RISK-BOOT-22` | K | 需 format 中途掉电 |
+| `RISK-BOOT-25` | K | 需长压测：dangling 归因需日志采集与长序列 |
+| `RISK-MD-15` | K | 需满盘压缩与双副本搬移压力 |
+
+**Checkpoint（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-CP-04` | N | 扩展 `l2p_pool_starve_flush`：命令池占满时 force CP 有界返回、不无限等槽 |
+
+**磨损计数 / 静态 WL（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-WL-04` | K | 需正常 WL/GC + 断电 + soak，属长时压测 |
+| `RISK-WL-05` | K | 性能项（`wl_should_trigger` 与 `wl_select_victim` 各做一次全表扫描） |
+
+**FTL↔FC 接口（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-IF-09` | K | 需主机中途拔线 / 中止（PC 侧手动） |
+| `RISK-IF-12` | K | 需满盘大顺序写 + 序列门控，属长压测 |
+
+**Host 提交 / 完成组 / pending（4）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-HOST-05` | 待定位 | 上游三支未定，需日志现场采集 |
+| `RISK-HOST-11` | N | 复用 `trim_no_resurrection`：Journal 压力下 TRIM 持久化 |
+| `RISK-HOST-14` | K | 需拔线 + 满盘 GC 窗口，人工触发 |
+| `RISK-HOST-22` | K | 需 free+OP 同时耗尽；无注入点 |
+
+**完成派发面（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-FC-05` | 待定位 | 依赖前序组合状态，复现条件已隔离，原因未证实 |
+
+**页打包写缓冲（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-WB-07` | 待定位 | depth2 半页卡死未定位 |
+
+**service / 后台调度器（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-BG-01` | 待定位 | 风险描述与当前实现不符（已无 `rr_last_scan` 门），需重审该条目 |
+| `RISK-BG-10` | K | token bucket / 节拍是吞吐行为，需长压测 |
+
+**模块 handle 契约（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-ARCH-02` | K | 跨 LUN 条带需多实例硬件 |
+
+**allocator（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-ALLOC-09` | K | 需 plane 不平衡的低 free 长压测 |
+
+**L2P cache（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-L2P-07` | K | 顺序读预取白占 cache 行 / 资源，可能延迟 FLUSH；需长压测（预取收益与延迟的权衡） |
+
+**cache 长流（3）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-CACHE-18` | K | VWC 窗口需掉电量化 |
+| `RISK-CACHE-26` | 待定位 | 1536 LBA 读回全 0 未定位，需压测复现 |
+| `RISK-CACHE-29` | K | 长流 + 掉电窗口未量化 |
+
+**平台定时调度器（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-PLAT-09` | K | 时基行为需板端长跑；UT 只能测伪时钟 |
+| `RISK-PLAT-12` | K | DWT→SysTick 需板端对比 |
+
+**NAND 拓扑扫描（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-TOP-03` | N | `onfi_read_fail_seam`：参数页读失败 seam（扫描拒绝启动路径待板） |
+
+> 台账合计 **43** 条：M 2 / N 6 / K 30 / 状态词 5。HIL 主机前端相关的
+> `RISK-HOST-20` / `RISK-HOST-21` 见 `docs/design/hil_ut_design.md` §7.2；
+> `RISK-UT-43` 见 `docs/design/fc_nand_ut.md` §7.2。
+
 ---
 
 ## 8. 维护规则
@@ -998,7 +1143,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 - **新增/删除测试项**：同批更新 §1.1 与对应模块小节；不要新增全局用例表。
 - **新增/删除用例**：改测试源；只有当「设计要点或判据」变化时才改本文。
 - **风险状态变化**：只改 `docs/design/known_risks.md`；§7 只在映射关系变化时改。
-- **覆盖判定变化**：只改 `docs/design/negative_coverage.md`。
+- **覆盖判定变化**：只改 §7.2 台账。
 - **API / 夹具 / 地址 / 位图变化**：同批更新 §2 / §4。
 - **运行结果**：写 `build/test-results/` 与 `known_risks.md` 历史；本文不保留运行快照。
 - **禁止**：§7 写状态词；§2 复制实现细节；文档头写「N 函数 / M 次运行」快照。

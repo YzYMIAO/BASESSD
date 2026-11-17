@@ -28,7 +28,7 @@
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_hil.c` | §2 只写代表用例与判据，不列全量清单 |
 | 风险状态、历史、是否闭合 | `docs/design/known_risks.md` | §7 只写 `RISK-ID → 测试项 / 用例` 映射，**不写状态词** |
-| 负例覆盖判定（M/N/K） | `docs/design/negative_coverage.md` | §6 / §7 只给入口，不复制判定 |
+| 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §6 / §7 只给 HIL 层判定 |
 | 未实现 / 未验证的设计项 | `docs/design/known_iss.md` | §6 只给链接 |
 | 每次运行结果与证据 | `build/test-results/` + `docs/design/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
 | 分层与跨层测试流程 | `docs/design/testing_guide.md` | 本文沿用其 L0~L6 坐标 |
@@ -312,8 +312,8 @@
 
 **负例 / 守卫**
 
-- 只有成功路径断言；失败路径需要注入或可控 fake，当前不可做（`negative_deferred_eval.md`
-  PLAT-13）。
+- 只有成功路径断言；失败路径需要注入或可控 fake，当前不可做（HIL 层不新增 seam，
+  见 `docs/design/testing_guide.md` §12）。
 - `dma_port.c` 的幂等标志 `s_uart_tx_dma_initialized` 是生产守卫；不能靠 HIL 用例
   反复初始化来验证，除非确认不会打断日志输出。
 
@@ -608,21 +608,76 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_risks.md`；覆盖判定见 `docs/design/negative_coverage.md`。
-> 本节只保留「判据非显然 / 跨模块」的 HIL 风险；已闭合的 `RISK-CTRL-02` 不在此列。
+> `docs/design/known_risks.md`；负例判定台账（M/N/K）见 §7.2。
+> §7.1 只保留「判据非显然 / 跨模块」的 HIL 风险。
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
 |---|---|---|---|
 | `RISK-UT-34` | `ssd_controller` / `ssd_request` / `host_queue` / `hil_io` | HIL 契约剩余缺口：buffer NULL、跨重启、多 run、USB 矩阵 | `is_complete`、`host_queue`、`write_flush_readback` |
-| `RISK-CTRL-01` | `ssd_request` | 多 run 中途失败时父请求提前完成、错误被覆盖 | 无（1 die / 无注入） |
 | `RISK-CTRL-03` | `ssd_controller` | init 的稀疏拓扑注释与实现相反 | `init_missing_slot` |
 | `RISK-CTRL-04` | `ssd_controller` | submit 未校验 `buffer == NULL`，状态分类错误 | `submit_edges`（未覆盖 NULL） |
 | `RISK-HOST-20` | `host_queue` / `cli` / `usb_msc` | host 前端互斥不是单一闸门 | `host_queue`（部分） |
 | `RISK-HOST-21` | `cli` / `usb_msc` | 没有 host 命令超时 / 中止 | 无 |
-| `RISK-PLAT-13` / `RISK-PLAT-14` | 跨层平台守卫 | UART TX DMA init 返回值 / 运行期重入幂等 | `uart_dma_init_returns` |
-| `RISK-USB-09` / `RISK-USB-10` / `RISK-USB-11` / `RISK-USB-12` / `RISK-USB-13` | `usb_msc` | BOT 槽状态机 / fsync / 相同写匹配 / 总线复位 | PC 主机矩阵 |
-| `RISK-PLAT-06` | 证据采集 | 串口采集端的自动换行不是固件丢数据 | 所有运行日志 |
-| `RISK-PLAT-07` | 构建 / 烧写 | UT 与产品共用 ELF 路径，烧错镜像 | 横幅时间戳核对 |
+| `RISK-USB-12` / `RISK-USB-13` | `usb_msc` | SYNCHRONIZE CACHE(16) 未支持；两写槽占用时 READ 返回 ERROR | PC 主机矩阵 |
+
+### 7.2 负例判定台账（HIL / USB / CLI 层）
+
+> 本表只列**当前未闭合**的 HIL 前端风险（索引状态取自 `docs/design/known_risks.md`）。
+> 判定口径同 `docs/design/testing_guide.md` §12.1；HIL 层没有注入 seam，失败路径只能靠
+> 主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
+> **信息**与**已闭合**条目只在 `known_risks.md` 维护。
+
+**CLI（7）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-CLI-01` | 待决策 | IWDG 未启用，长命令阻塞主循环的复位后果无法验证（RISK-CLI-01 同时是 IWDG 启用裁决） |
+| `RISK-CLI-02` | K | 需 CLI `format` / `bbt --erase` 与 USB 在飞并发（主机侧矩阵） |
+| `RISK-CLI-03` | K | 需连续 `wp` 重入，CLI 交互构造 |
+| `RISK-CLI-06` | K | `q`/`cp`/`jrn`/`stat`/`id`/`ecc`/`wear` 字段需人工对拍 |
+| `RISK-CLI-07` | K | 需制造读失败并抓串口输出，触发不可确定性构造 |
+| `RISK-CLI-08` | K | 需 `wp` 与 USB 并发进入 FTL（主机侧矩阵） |
+| `RISK-CLI-09` | 待上板 | 断言现场 CLI 自带泵，但 FTL 内断言仍可能重入；未上板 |
+
+**Controller / host queue（4）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-CTRL-03` | 待决策 | 稀疏拓扑注释与实现相反，注释/实现二选一 |
+| `RISK-CTRL-04` | 待后续 | `submit` 未校验 `buffer == NULL`；先改 controller 才可构造 |
+| `RISK-HOST-20` | 待决策 | host 前端互斥需单点 claim 设计裁决 |
+| `RISK-HOST-21` | 待后续 | 缺 host 命令超时 / 中止，需设计 |
+
+**USB MSC / 主机侧（8）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-USB-02` | K | MSC 异步完成 / deferred / discard 需主机拔线或复位 |
+| `RISK-USB-07` | K | `cmd_remaining` 在 `usb_msc.c` 内，HIL 只到 controller，无法从请求对象断言 |
+| `RISK-USB-08` | K | 需主机早期回执 + 程序失败组合 |
+| `RISK-USB-12` | K | 需主机发 0x91，PC 侧验证 |
+| `RISK-USB-13` | K | 需两写槽在飞时 READ；槽状态构造未证明 |
+| `RISK-USB-14` | K | 需主机 `blkdiscard` / `fstrim` |
+| `RISK-USB-15` | 待决策 | UNMAP 未向主机广告，是否广告未定 |
+| `RISK-USBC-03` | 待定位 | USB 盘间歇报无介质；主机侧采样 / 盘符问题，需 PC 侧 |
+
+**平台 / 证据（2）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-PLAT-08` | 待定位 | `.noinit` 一次 HardFault，PC 落 newlib printf；故障镜像未定 |
+| `RISK-UT-34` | N | 已上板 17/17；剩余 buffer NULL / 跨重启 / 多 run / USB 槽矩阵 / `cancel_flush` |
+
+**cache 主机面（1）**
+
+| ID | 判定 | 用例 / 判定说明 |
+|---|---|---|
+| `RISK-USBC-01` | K | deferred sense 语义需主机侧观察 |
+
+> 台账合计 **22** 条：N 1 / K 12 / 状态词 9。已闭合的平台守卫
+> `RISK-PLAT-13` / `RISK-PLAT-14` 与信息项 `RISK-USB-09` / `RISK-USB-10` /
+> `RISK-USB-11` / `RISK-CTRL-01` / `RISK-PLAT-06` / `RISK-PLAT-07` 只在
+> `known_risks.md` 维护。
 
 ---
 
@@ -632,6 +687,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
   全量用例清单不写进本文，归 `tests/unit/test_hil.c`。
 - **风险状态变化**：只改 `docs/design/known_risks.md`；§7 仅在映射变化时改，
   **不写状态词**。
+- **覆盖判定变化**：只改 §7.2 台账。
 - **可测性变化**（夹具/硬件/主机矩阵）：更新 §6；不要把「能测」写成「已测」。
 - **运行结果**：写 `build/test-results/` 与 `known_risks.md` 历史；设计文档不维护
   验收快照。
