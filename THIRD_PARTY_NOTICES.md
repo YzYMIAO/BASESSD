@@ -43,7 +43,12 @@
 - 许可证：MIT，版权 `Copyright (c) 2013-2016 Evan Nemerson <evan@nemerson.com>`
 - 许可原文：`tests/framework/COPYING`
 
-## 5. 固件二进制
+## 5. BCH ECC 引擎
+
+- 位置：`src/fc/fc_bch_engine.c`、`include/fc/fc_bch_engine.h`
+- 说明：本项目 **clean-room 实现**（BCH m=13/t=4），不包含 Linux `lib/bch.c` 或其它第三方源码；按项目 Apache-2.0 许可。
+
+## 6. 固件二进制
 
 编译产物包含上述组件，分发 `.elf` / `.bin` 时需同时满足各组件条款；
 根目录 Apache-2.0 只覆盖本项目自身代码。

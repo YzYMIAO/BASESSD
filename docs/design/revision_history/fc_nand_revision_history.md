@@ -1880,6 +1880,22 @@ Table 29/31 的 3.3V 参数重算。
 
 ---
 
+### 4.12 BCH ECC 引擎的来源与 clean-room 替换（2026-11-17）
+
+**背景**：原 `src/fc/fc_bch_engine.c` 自述移植自 Linux `lib/bch.c`（GPL-2.0-only），与项目
+Apache-2.0 在组合分发上不兼容（Phase K 历史记录见 `docs/archive/changelog/fc_structural_changes.md`）。
+
+**决策**：不改变项目许可证，改为 clean-room 重写 BCH(m=13,t=4)；公共 API、52-bit parity 布局、
+错误位置语义保持不变，避免影响 NAND 介质格式。
+
+**验证**：host 对拍 200 组随机数据 / 0~8 bit 错误 / 增量编码 0 差异，另对 3/4 bit 错误
+各 2000 组、`swap_bits` 0/1 两档对拍 0 差异；根搜索 degree 3/4 采用次数专用变换
+（三次乘线性因子、四次消一次项后取倒数）化成 affine 四次式，再用 GF(2) 列基消元求根；
+affine/三次/四次求解器另与暴力枚举对拍 0 差异；构建三关零新告警；**未上板**。
+后续 API 精简（A2）：确认 `calc_ecc` / `syn` 无调用者后删除两条可选路径，
+`fc_bch_decode` 从 8 参数降到 6 参数；`RISK-ECC-01` 关闭。
+详情见 [`../../archive/changelog/fc_bch_cleanroom_v1.md`](../../archive/changelog/fc_bch_cleanroom_v1.md)。
+
 ## 5. 被否方案与已删除设计
 
 重新提议下列设计前先读对应条目。

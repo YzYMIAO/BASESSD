@@ -43,10 +43,10 @@
 
 #include "assertion.h"
 #include "bbt.h"
-#include "boot_policy.h" /* boot_crc32：拓扑 fingerprint（复用已有 CRC32） */
 #include "checkpoint.h"
 #include "fc.h"
-#include "ftl.h" /* ftl_ctx_s（服务函数要从实例取 &ftl->alloc） */
+#include "fc_crc_engine.h" /* fc_crc32_iso_hdlc：拓扑 fingerprint */
+#include "ftl.h"           /* ftl_ctx_s（服务函数要从实例取 &ftl->alloc） */
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_METADATA */
 #include "journal.h"
@@ -62,7 +62,7 @@
  * @brief 计算当前介质布局版本
  *
  * 单 die = BASE；多 die 把 die 数与 topology map 编入版本，拓扑变化 ⇒ 版本不符
- * ⇒ 格式化。用 boot_crc32 哈希字段字节（不哈希 padding）。
+ * ⇒ 格式化。用 fc_crc32_iso_hdlc 哈希字段字节（不哈希 padding）。
  *
  * @return 介质布局版本
  */
@@ -86,7 +86,7 @@ DWORD ftl_media_layout_version(void)
         topo[used++] = g_die_table[die].lun;
     }
 
-    const DWORD fingerprint = boot_crc32(topo, used);
+    const DWORD fingerprint = fc_crc32_iso_hdlc(topo, used);
 
     /* bit31 固定为 1：多 die 版本不可能与单 die 的 BASE 小版本号相撞。
      * 有效哈希 31 位，碰撞概率 2^-31。 */

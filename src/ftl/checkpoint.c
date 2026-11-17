@@ -36,9 +36,9 @@
 #include "checkpoint.h"
 
 #include "assertion.h"
-#include "bbt.h"         /* bbt_medium_has_ftl_data（CP 缺失时的空片判定） */
-#include "boot_policy.h" /* boot_crc32（块元数据快照跨页校验和） */
+#include "bbt.h" /* bbt_medium_has_ftl_data（CP 缺失时的空片判定） */
 #include "fc.h"
+#include "fc_crc_engine.h" /* fc_crc32_iso_hdlc（块元数据快照跨页校验和） */
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_CHECKPOINT */
@@ -453,7 +453,7 @@ static void cp_header_fill(cp_header_s *cp, const cp_handle_s *h, DWORD sequence
     cp->block_word_count = FTL_BLOCK_TOTAL;
     cp->block_word_bytes = CP_BLOCK_WORD_BYTES;
     cp->block_page_count = CP_BLOCK_PAGES;
-    cp->block_crc32      = boot_crc32(h->hdr.block_words, FTL_BLOCK_TOTAL * sizeof(WORD));
+    cp->block_crc32      = fc_crc32_iso_hdlc(h->hdr.block_words, FTL_BLOCK_TOTAL * sizeof(WORD));
     cp->wear_entry_count = FTL_BLOCK_TOTAL;
     cp->wear_entry_bytes = FTL_CHECKPOINT_WEAR_ENTRY_BYTES;
     cp->wear_page_count  = FTL_CHECKPOINT_WEAR_PAGES;
@@ -927,7 +927,7 @@ static void cp_job_step(cp_handle_s *h)
 
                 // 磨损快照在**写到哪页时组哪页**（软状态；CP 期间的计数变化允许漏到下一 CP）。
                 cp_wear_page_build(h->alloc, h->hdr.wear_page, h->hdr.wear_page_buf);
-                h->hdr.wear_page_crc[h->hdr.wear_page] = boot_crc32(h->hdr.wear_page_buf, PAGE_MAIN_SIZE);
+                h->hdr.wear_page_crc[h->hdr.wear_page] = fc_crc32_iso_hdlc(h->hdr.wear_page_buf, PAGE_MAIN_SIZE);
 
                 const BYTE wear_page_index = (1U + CP_BLOCK_PAGES + h->hdr.wear_page);
                 DWORD      a               = md_ring_addr(&h->hdr.ring, &h->topo, h->hdr.idx, wear_page_index);
@@ -1420,7 +1420,7 @@ BOOL cp_wear_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx)
             {
                 continue;
             }
-            if (boot_crc32(page, PAGE_MAIN_SIZE) != cp->wear_page_crc[p])
+            if (fc_crc32_iso_hdlc(page, PAGE_MAIN_SIZE) != cp->wear_page_crc[p])
             {
                 LOGW(LOG_TAG_WEAR "page %hhu crc mismatch (plane=%hhu rec=%hu)\r\n", p, plane, record_idx);
                 continue;
@@ -1519,7 +1519,7 @@ BOOL cp_block_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx,
             continue;
         }
 
-        if (boot_crc32(block_words, sizeof(WORD) * FTL_BLOCK_TOTAL) != cp->block_crc32)
+        if (fc_crc32_iso_hdlc(block_words, sizeof(WORD) * FTL_BLOCK_TOTAL) != cp->block_crc32)
         {
             LOGW(LOG_TAG_BLK "crc mismatch plane=%hhu rec=%hu seq=%lu\r\n", plane, record_idx, cp->sequence);
             continue;
@@ -1654,7 +1654,7 @@ ftl_status_e cp_initial_record_write(ftl_ctx_s *ftl)
     for (BYTE i = 0U; i < FTL_CHECKPOINT_WEAR_PAGES; i++)
     {
         cp_wear_page_build(&ftl->alloc, i, wear_page);
-        h->hdr.wear_page_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
+        h->hdr.wear_page_crc[i] = fc_crc32_iso_hdlc(wear_page, PAGE_MAIN_SIZE);
     }
 
     cp_header_s *cp = (cp_header_s *)h->hdr.hdr_buf;

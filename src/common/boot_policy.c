@@ -1,5 +1,7 @@
 #include "boot_policy.h"
 
+#include "fc_crc_engine.h"
+
 #include <stddef.h>
 
 static int boot_memory_equal(const BYTE *left, const BYTE *right, size_t size)
@@ -15,31 +17,6 @@ static int boot_memory_equal(const BYTE *left, const BYTE *right, size_t size)
     return difference == 0U;
 }
 
-DWORD boot_crc32(const void *data, size_t size)
-{
-    const BYTE *bytes = (const BYTE *)data;
-    DWORD       crc   = UINT32_MAX;
-    size_t      index;
-    DWORD       bit;
-
-    if ((data == NULL) && (size != 0U))
-    {
-        return 0U;
-    }
-
-    /* CRC-32/ISO-HDLC，多项式 0x04C11DB7 的反射形式。 */
-    for (index = 0U; index < size; ++index)
-    {
-        crc ^= bytes[index];
-        for (bit = 0U; bit < 8U; ++bit)
-        {
-            DWORD mask = (0U - (crc & 1U));
-            crc        = (crc >> 1U) ^ (UINT32_C(0xEDB88320) & mask);
-        }
-    }
-    return ~crc;
-}
-
 void boot_image_header_finalize(boot_image_hdr_s *header)
 {
     if (header == NULL)
@@ -47,7 +24,7 @@ void boot_image_header_finalize(boot_image_hdr_s *header)
         return;
     }
     header->header_crc32 = 0U;
-    header->header_crc32 = boot_crc32(header, sizeof(*header));
+    header->header_crc32 = fc_crc32_iso_hdlc(header, sizeof(*header));
 }
 
 static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
@@ -58,7 +35,7 @@ static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
     copy              = *header;
     expected          = copy.header_crc32;
     copy.header_crc32 = 0U;
-    return expected == boot_crc32(&copy, sizeof(copy));
+    return expected == fc_crc32_iso_hdlc(&copy, sizeof(copy));
 }
 
 int boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context)
@@ -101,7 +78,7 @@ void boot_metadata_finalize(boot_metadata_s *metadata)
         return;
     }
     metadata->crc32 = 0U;
-    metadata->crc32 = boot_crc32(metadata, sizeof(*metadata));
+    metadata->crc32 = fc_crc32_iso_hdlc(metadata, sizeof(*metadata));
 }
 
 void boot_metadata_initialize(boot_metadata_s *metadata, boot_slot_e active_slot, DWORD active_firmware_version)
@@ -137,7 +114,7 @@ int boot_metadata_is_valid(const boot_metadata_s *metadata)
     copy       = *metadata;
     expected   = copy.crc32;
     copy.crc32 = 0U;
-    return expected == boot_crc32(&copy, sizeof(copy));
+    return expected == fc_crc32_iso_hdlc(&copy, sizeof(copy));
 }
 
 static int boot_sequence_is_newer(DWORD candidate, DWORD reference)

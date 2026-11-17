@@ -208,7 +208,7 @@ fc_status_e fc_ecc_decode(BYTE *data, WORD data_length, BYTE *err_bits)
         // data_length 恒 ≥ 8（520），parity 尾区足够
         ASSERT(data_length >= 8U);
 
-        if (fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc, &nerr) == false)
+        if (fc_bch_decode(g_bch, data, data_length, recv_ecc, errloc, &nerr) == false)
         {
             return FC_STATUS_IO_ERROR;
         }

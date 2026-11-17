@@ -42,7 +42,7 @@ include/platform/<soc>/*_port.h   ← 实现头：允许 HAL 类型，只有 por
 | 定时调度器 | `timer.h` | `timer.c` | `timer_port.c` | watchdog、FTL 后台、观测 | 启用 |
 | 看门狗 | `watchdog.h` | `watchdog.c` | `watchdog_port.c` | 长同步操作、CLI | 启用 |
 | UART 传输 | `usart.h` | `usart.c` | `usart_port.c` | 日志 sink、CLI | 启用 |
-| CRC | `crc.h` | `crc.c` | `crc_port.c` | FC 数据面 | 启用 |
+| CRC | `crc.h` | `crc.c`（硬件后端选择） | `crc_port.c` | FC 数据面 | 启用（硬件；软件在 FC） |
 | DMA | `dma.h` | `dma.c` | `dma_port.c` | UART TX（NAND 数据面当前 PIO） | 启用 |
 | MPU | `mpu.h` | `mpu.c` | `mpu_port.c` | 启动内存保护 | 启用 |
 | QSPI | `qspi.h` | `qspi.c` | `qspi_port.c` | — | 未启用（保留抽象） |
@@ -56,6 +56,7 @@ include/platform/<soc>/*_port.h   ← 实现头：允许 HAL 类型，只有 por
   `src/nand/devices/mt29f___g08a.c` 定义 `HAL_NAND_MspInit` / `HAL_NAND_Init`。
 - QSPI / RNG 保留抽象，没有调用点；SDRAM 的 `.c` 未编入构建。
 - `src/platform/stm32h743/bsp/` 是 SoC 内部目录，不属于核心模块可见接口。
+- CRC 的软件实现放在 `src/fc/fc_crc_engine.c`（CRC-32/MPEG-2 与 ISO-HDLC）；平台层 `src/platform/crc.c` 只保留硬件后端选择。`PLATFORM_CRC_HW_SUPPORTED=1` 时 FC 优先调用 `crc_port.c` 的硬件实现，未定义/为 0 时使用 FC 软件实现。stm32h743 的 `makefile.mk` 默认置 1；仿真平台保持 0。两个后端必须在已知向量上 bit-exact。
 
 ## 3. Port 契约与判据
 

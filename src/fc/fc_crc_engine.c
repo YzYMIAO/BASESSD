@@ -1,40 +1,226 @@
 #include "fc_crc_engine.h"
 
 #include "assertion.h"
+#include "crc.h"
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "fault_inject.h"
 #endif
-#include "crc.h"
 
 #include <stddef.h>
 
 /* ══════════════════════════════════════════════════════════
  * CRC 引擎
+ *
+ * 软件实现全部在 FC 内；平台层只提供硬件 CRC port。
+ * FC 数据面用 CRC-32/MPEG-2；启动/FTL 元数据用 CRC-32/ISO-HDLC。
+ * PLATFORM_CRC_HW_SUPPORTED != 0 且硬件已初始化时优先走平台硬件；
+ * 否则走本文件的软件查表实现。两条路径必须 bit-exact。
  * ══════════════════════════════════════════════════════════ */
 
+#define FC_CRC_MPEG2_TABLE_SIZE (256U)
+#define FC_CRC_MPEG2_POLY       (0x04C11DB7UL)
+#define FC_CRC_ISO_TABLE_SIZE   (256U)
+#define FC_CRC_ISO_SLICES       (4U)
+#define FC_CRC_ISO_POLY_REFL    (0xEDB88320UL)
+#define FC_CRC_ISO_INIT         (0xFFFFFFFFUL)
+
+static DWORD s_crc_mpeg2_table[FC_CRC_MPEG2_TABLE_SIZE];
+static BOOL  s_crc_mpeg2_ready = false;
+
+static DWORD s_crc_iso_table[FC_CRC_ISO_SLICES][FC_CRC_ISO_TABLE_SIZE];
+static BOOL  s_crc_iso_ready = false;
+
+#if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+static BOOL s_hw_ready = false;
+#endif
+
+/* ── CRC-32/MPEG-2 软件实现 ───────────────────────────────────────── */
+
 /**
- * @brief 初始化硬件 CRC 外设
- *
- * 时钟使能、HAL 配置与外设应答自检都在平台层 crc_init() 内；自检不过
- * 一律 ASSERT，没有「失败静默继续」的降级路径。
+ * @brief 建立 MPEG-2 非反射 CRC 表。
+ * @note 每个表项是「一个字节从高位移入」后的 8 bit 余式；表只建一次。
  */
-void fc_crc_init(void)
+static void fc_crc_mpeg2_table_init(void)
 {
-    crc_init();
+    for (DWORD i = 0U; i < FC_CRC_MPEG2_TABLE_SIZE; i++)
+    {
+        DWORD value = i << 24U;
+
+        for (DWORD bit = 0U; bit < 8U; bit++)
+        {
+            value = ((value & 0x80000000UL) != 0U) ? ((value << 1U) ^ FC_CRC_MPEG2_POLY) : (value << 1U);
+        }
+        s_crc_mpeg2_table[i] = value;
+    }
+    s_crc_mpeg2_ready = true;
 }
 
 /**
- * @brief 计算 CW 的 512B USER 数据 CRC-32
- *
- * 平台层每次先 RESET 引擎回 INIT 值，保证独立计算；user_data 须 4 字节对齐
- * （HAL 的 WORDS 分支直接按 DWORD* 解引用）。
- *
- * @param user_data USER 区首地址
- * @return CRC-32
+ * @brief 软件计算 CRC-32/MPEG-2（按 STM32 硬件 word 的 MSB-first 顺序）。
+ * @param data 输入数据
+ * @param length_bytes 字节数；必须是 4 的倍数
+ * @return CRC-32 值
+ * @note STM32 按 32-bit word 喂入时先处理 word 的最高字节，故每个 4B 组按
+ *       data[3]、data[2]、data[1]、data[0] 的顺序送入 CRC。
+ */
+static DWORD fc_crc_mpeg2_sw_compute(const BYTE *data, DWORD length_bytes)
+{
+    DWORD crc = 0xFFFFFFFFUL;
+
+    // 入参由 fc_crc_compute / KAT 保证：非空且长度是 4 的倍数。
+    if (s_crc_mpeg2_ready == false)
+    {
+        fc_crc_mpeg2_table_init();
+    }
+
+    for (DWORD i = 0U; i < length_bytes; i += 4U)
+    {
+        crc ^= (DWORD)data[i + 3U] << 24U;
+        crc = (crc << 8U) ^ s_crc_mpeg2_table[(crc >> 24U) & 0xFFU];
+
+        crc ^= (DWORD)data[i + 2U] << 24U;
+        crc = (crc << 8U) ^ s_crc_mpeg2_table[(crc >> 24U) & 0xFFU];
+
+        crc ^= (DWORD)data[i + 1U] << 24U;
+        crc = (crc << 8U) ^ s_crc_mpeg2_table[(crc >> 24U) & 0xFFU];
+
+        crc ^= (DWORD)data[i] << 24U;
+        crc = (crc << 8U) ^ s_crc_mpeg2_table[(crc >> 24U) & 0xFFU];
+    }
+    return crc;
+}
+
+/* ── CRC-32/ISO-HDLC 软件实现 ─────────────────────────────────────── */
+
+/**
+ * @brief 建立 ISO-HDLC 的 slice-by-4 查表。
+ * @note 每个 slice 表的第 i 项表示「一个字节后移 8*k 位」的余式；表只建一次。
+ */
+static void fc_crc_iso_table_init(void)
+{
+    for (DWORD i = 0U; i < FC_CRC_ISO_TABLE_SIZE; i++)
+    {
+        DWORD value = i;
+
+        for (DWORD bit = 0U; bit < 8U; bit++)
+        {
+            value = ((value & 1U) != 0U) ? ((value >> 1U) ^ FC_CRC_ISO_POLY_REFL) : (value >> 1U);
+        }
+        s_crc_iso_table[0][i] = value;
+    }
+
+    for (DWORD slice = 1U; slice < FC_CRC_ISO_SLICES; slice++)
+    {
+        for (DWORD i = 0U; i < FC_CRC_ISO_TABLE_SIZE; i++)
+        {
+            const DWORD previous = s_crc_iso_table[slice - 1U][i];
+
+            s_crc_iso_table[slice][i] = (previous >> 8U) ^ s_crc_iso_table[0][previous & 0xFFU];
+        }
+    }
+    s_crc_iso_ready = true;
+}
+
+/**
+ * @brief 用 slice-by-4 表计算 CRC-32/ISO-HDLC。
+ * @param bytes 输入数据
+ * @param size 字节数
+ * @return CRC-32 值
+ * @note 数据按内存字节顺序处理；尾部不足 4B 用单字节表。
+ */
+static DWORD fc_crc_iso_sw_compute(const BYTE *bytes, size_t size)
+{
+    DWORD  crc   = FC_CRC_ISO_INIT;
+    size_t index = 0U;
+
+    if (s_crc_iso_ready == false)
+    {
+        fc_crc_iso_table_init();
+    }
+
+    while ((size - index) >= 4U)
+    {
+        const DWORD word = (DWORD)bytes[index] |
+                           ((DWORD)bytes[index + 1U] << 8U) |
+                           ((DWORD)bytes[index + 2U] << 16U) |
+                           ((DWORD)bytes[index + 3U] << 24U);
+
+        crc ^= word;
+        crc = s_crc_iso_table[3][crc & 0xFFU] ^
+              s_crc_iso_table[2][(crc >> 8U) & 0xFFU] ^
+              s_crc_iso_table[1][(crc >> 16U) & 0xFFU] ^
+              s_crc_iso_table[0][(crc >> 24U) & 0xFFU];
+        index += 4U;
+    }
+
+    while (index < size)
+    {
+        crc = (crc >> 8U) ^ s_crc_iso_table[0][(crc ^ bytes[index]) & 0xFFU];
+        index++;
+    }
+    return ~crc;
+}
+
+/* ── 公共接口 ─────────────────────────────────────────────────────── */
+
+/**
+ * @brief   初始化 CRC 后端（硬件优先，软件 fallback）。
+ * @note    在 fc_init() 中调用一次。硬件后端的时钟/外设自检在平台层；
+ *          软件后端只建表。自检不过一律 ASSERT。
+ */
+void fc_crc_init(void)
+{
+#if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+    crc_init();
+    s_hw_ready = true;
+#endif
+
+#ifndef NDEBUG
+    {
+        static const BYTE kat4[4] = {0x41U, 0x42U, 0x43U, 0x44U};
+        const DWORD       sw4     = fc_crc_mpeg2_sw_compute(kat4, (DWORD)sizeof(kat4));
+
+        ASSERT(sw4 == 0xCF534AE1UL);
+#    if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+        {
+            static const BYTE kat32[32] = {0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U, 0x08U, 0x09U, 0x0AU, 0x0BU, 0x0CU, 0x0DU, 0x0EU, 0x0FU, 0x10U, 0x11U, 0x12U, 0x13U, 0x14U, 0x15U, 0x16U, 0x17U, 0x18U, 0x19U, 0x1AU, 0x1BU, 0x1CU, 0x1DU, 0x1EU, 0x1FU};
+            const DWORD       sw32      = fc_crc_mpeg2_sw_compute(kat32, (DWORD)sizeof(kat32));
+            const DWORD       hw4       = crc_compute(kat4, (DWORD)sizeof(kat4));
+            const DWORD       hw32      = crc_compute(kat32, (DWORD)sizeof(kat32));
+
+            ASSERT(hw4 == sw4);
+            ASSERT(hw32 == sw32);
+        }
+#    endif
+    }
+#endif
+
+#ifndef NDEBUG
+    {
+        static const BYTE kat[] = "123456789";
+        const DWORD       sw    = fc_crc_iso_sw_compute((const BYTE *)kat, sizeof(kat) - 1U);
+
+        ASSERT(sw == 0xCBF43926UL);
+#    if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+        {
+            const DWORD hw = crc_compute_iso_hdlc((const BYTE *)kat, (DWORD)(sizeof(kat) - 1U));
+
+            ASSERT(hw == sw);
+        }
+#    endif
+    }
+#endif
+}
+
+/**
+ * @brief   对 USER 数据（512 字节）计算 CRC-32
+ * @param   user_data  指向 USER 数据的指针（buffer + 8）
+ * @return  CRC-32 值
+ * @note    user_data **必须 4 字节对齐**——硬性前置条件：硬件按 32 位字喂入，
+ *          HAL 直接按 DWORD* 解引用。违反属未对齐访问。
  */
 DWORD fc_crc_compute(const BYTE *user_data)
 {
-    // user_data 前置条件由调用者保证
     ASSERT(user_data != NULL);
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -44,20 +230,47 @@ DWORD fc_crc_compute(const BYTE *user_data)
     }
 #endif
 
-    return crc_compute(user_data, FC_CRC_USER_SIZE);
+#if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+    if (s_hw_ready == true)
+    {
+        return crc_compute(user_data, FC_CRC_USER_SIZE);
+    }
+#endif
+    return fc_crc_mpeg2_sw_compute(user_data, FC_CRC_USER_SIZE);
 }
 
 /**
- * @brief 校验 USER 数据 CRC 是否等于存储值
- *
- * @param user_data  USER 区首地址
- * @param stored_crc 读回的 CRC 字段
- * @return FC_CRC_RESULT_OK / FC_CRC_RESULT_ERROR
+ * @brief   校验 CRC：重算 USER 数据的 CRC 并与存储值比较
+ * @param   user_data    指向 USER 数据的指针（buffer + 8），必须 4 字节对齐
+ * @param   stored_crc   之前存储的 CRC 值（buffer[4..8] 读取）
+ * @return  FC_CRC_RESULT_OK 或 FC_CRC_RESULT_ERROR
  */
 BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc)
 {
-    // user_data 前置条件由调用者保证
-    ASSERT(user_data != NULL);
-
+    // user_data 的非空检查由 fc_crc_compute 的入口断言负责。
     return (fc_crc_compute(user_data) == stored_crc) ? FC_CRC_RESULT_OK : FC_CRC_RESULT_ERROR;
+}
+
+/**
+ * @brief   计算 CRC-32/ISO-HDLC（启动/FTL 元数据使用）。
+ * @param   data 输入数据；为 NULL 且 size == 0 时返回 0
+ * @param   size 字节数
+ * @return  CRC-32/ISO-HDLC 值
+ * @note    硬件 ISO-HDLC 后端可用时走硬件，否则走 FC 软件 slice-by-4；
+ *          两个后端必须 bit-exact。它与 FC CW 的 CRC-32/MPEG-2 不是同一变体。
+ */
+DWORD fc_crc32_iso_hdlc(const void *data, size_t size)
+{
+    if ((data == NULL) || (size == 0U))
+    {
+        return 0U;
+    }
+
+#if (PLATFORM_CRC_HW_SUPPORTED != 0U)
+    if (s_hw_ready == true)
+    {
+        return crc_compute_iso_hdlc((const BYTE *)data, (DWORD)size);
+    }
+#endif
+    return fc_crc_iso_sw_compute((const BYTE *)data, size);
 }

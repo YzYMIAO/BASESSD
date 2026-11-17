@@ -3,6 +3,7 @@
 #include "assertion.h"
 
 #include <stddef.h>
+#include <string.h>
 
 /* ══════════════════════════════════════════════════════════
  * 加扰/解扰引擎
@@ -71,7 +72,9 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
 // ⚠ 反馈必须包含**被移出的 bit0**。若照抄左移写法的 bit15^bit13^bit12^bit10，
 // 新状态 16 位全部只依赖旧 bit1..bit15 ⇒ 映射不可逆（1 → 0 是吸收态）⇒ 状态
 // 空间坍缩到周期 63，520B 的 CW 会退化成 63 字节图案重复 8.25 遍，加扰失效。
-#    define FC_LFSR_PERIOD (65535U)
+#    define FC_LFSR_PERIOD         (65535U)
+#    define FC_LFSR_TABLE_SIZE     (256U)
+#    define FC_LFSR_STEPS_PER_WORD (4U)
 
 /**
  * @brief 8 步递推：输出 8 bit，返回次态。与逐 bit 版本完全一致。
@@ -102,29 +105,57 @@ static WORD fc_lfsr_step8(WORD lfsr, BYTE *out)
 // 16 位状态 → 8 步输出/次态是 GF(2) 线性变换 ⇒ 可按低/高字节分解：
 // out  = out_lo[lo]  ^ out_hi[hi]
 // next = next_lo[lo] ^ next_hi[hi]
-// 4 张 256 项表约 1.5 KB；每字节 2 次查表 + 2 次异或，替代 8 次移位。
+// 每字节 2 次查表 + 2 次异或，替代 8 次移位。
+//
+// 4 步展开利用同一线性性：一次生成 32 bit 掩码 + 4 步后的 16 bit 次态。
+// 每 4 字节只需 out4_lo/out4_hi + next4_lo/next4_hi 4 次查表，替代
+// 4 次单步查表；尾部/非对齐输入仍走单步表。
 typedef struct FC_LFSR_TABLE_S
 {
-    BYTE out_lo[256];
-    BYTE out_hi[256];
-    WORD next_lo[256];
-    WORD next_hi[256];
+    BYTE  out_lo[FC_LFSR_TABLE_SIZE];
+    BYTE  out_hi[FC_LFSR_TABLE_SIZE];
+    WORD  next_lo[FC_LFSR_TABLE_SIZE];
+    WORD  next_hi[FC_LFSR_TABLE_SIZE];
+    DWORD out4_lo[FC_LFSR_TABLE_SIZE];
+    DWORD out4_hi[FC_LFSR_TABLE_SIZE];
+    WORD  next4_lo[FC_LFSR_TABLE_SIZE];
+    WORD  next4_hi[FC_LFSR_TABLE_SIZE];
 } fc_lfsr_tab_s;
 
 static fc_lfsr_tab_s s_lfsr_tab;
 static BOOL          s_lfsr_tab_ready = false;
 
 /**
- * @brief 构造 LFSR 的 4 张查表（低/高字节各一组 out/next）。
+ * @brief 构造 LFSR 的单步与 4 步查表（低/高字节各一组）。
  *
- * 表建立后置 s_lfsr_tab_ready，后续调用直接复用。
+ * 单步表用于尾部/非对齐输入；4 步表用于 32-bit 数据 XOR。表建立后置
+ * s_lfsr_tab_ready，后续调用直接复用。
  */
 static void fc_lfsr_tab_build(void)
 {
-    for (WORD v = 0U; v < 256U; v++)
+    for (WORD v = 0U; v < FC_LFSR_TABLE_SIZE; v++)
     {
+        BYTE out[FC_LFSR_STEPS_PER_WORD];
+        WORD state;
+
         s_lfsr_tab.next_lo[v] = fc_lfsr_step8((WORD)v, &s_lfsr_tab.out_lo[v]);
         s_lfsr_tab.next_hi[v] = fc_lfsr_step8((WORD)(v << 8U), &s_lfsr_tab.out_hi[v]);
+
+        state = (WORD)v;
+        for (BYTE k = 0U; k < FC_LFSR_STEPS_PER_WORD; k++)
+        {
+            state = fc_lfsr_step8(state, &out[k]);
+        }
+        s_lfsr_tab.out4_lo[v]  = (DWORD)out[0] | ((DWORD)out[1] << 8U) | ((DWORD)out[2] << 16U) | ((DWORD)out[3] << 24U);
+        s_lfsr_tab.next4_lo[v] = state;
+
+        state = (WORD)(v << 8U);
+        for (BYTE k = 0U; k < FC_LFSR_STEPS_PER_WORD; k++)
+        {
+            state = fc_lfsr_step8(state, &out[k]);
+        }
+        s_lfsr_tab.out4_hi[v]  = (DWORD)out[0] | ((DWORD)out[1] << 8U) | ((DWORD)out[2] << 16U) | ((DWORD)out[3] << 24U);
+        s_lfsr_tab.next4_hi[v] = state;
     }
 
     s_lfsr_tab_ready = true;
@@ -155,10 +186,50 @@ static void fc_lfsr_tab_selfcheck(void)
             ref_state    = fc_lfsr_step8(ref_state, &ref_out);
 
             ASSERT(tab_out == ref_out);
+            ASSERT(tab_state == ref_state);
+        }
+
+        {
+            WORD tab4_state = seeds[s];
+            WORD ref4_state = seeds[s];
+
+            for (BYTE i = 0U; i < 16U; i++)
+            {
+                const WORD  lo       = (WORD)(tab4_state & 0xFFU);
+                const WORD  hi       = (WORD)(tab4_state >> 8U);
+                const DWORD mask     = s_lfsr_tab.out4_lo[lo] ^ s_lfsr_tab.out4_hi[hi];
+                const WORD  next     = (WORD)(s_lfsr_tab.next4_lo[lo] ^ s_lfsr_tab.next4_hi[hi]);
+                DWORD       ref_mask = 0U;
+
+                for (BYTE k = 0U; k < FC_LFSR_STEPS_PER_WORD; k++)
+                {
+                    BYTE ref_out = 0U;
+                    ref4_state   = fc_lfsr_step8(ref4_state, &ref_out);
+                    ref_mask |= (DWORD)ref_out << (8U * k);
+                }
+                ASSERT(mask == ref_mask);
+                ASSERT(next == ref4_state);
+                tab4_state = next;
+            }
         }
     }
 }
 #    endif
+
+/**
+ * @brief 一次取 4 个伪随机字节的 32-bit 掩码并推进 4 步。
+ * @param state 输入输出：LFSR 状态，函数内推进到 4 步后的次态
+ * @return      低字节到高字节依次对应连续 4 个输出字节
+ */
+static DWORD fc_lfsr_next4(WORD *state)
+{
+    const WORD  lo   = (WORD)(*state & 0xFFU);
+    const WORD  hi   = (WORD)(*state >> 8U);
+    const DWORD mask = s_lfsr_tab.out4_lo[lo] ^ s_lfsr_tab.out4_hi[hi];
+
+    *state = (WORD)(s_lfsr_tab.next4_lo[lo] ^ s_lfsr_tab.next4_hi[hi]);
+    return mask;
+}
 
 /**
  * @brief 取下一个伪随机字节（查表版；调用前表已建立）。
@@ -207,14 +278,20 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 
     WORD index = 0U;
 
-    // 4 字节一组，减少循环开销；尾字节逐个处理。
-    while ((DWORD)index + 3U < (DWORD)length)
+    // 4 字节一组：4 步查表直接给出 32-bit 掩码与次态，数据按 32-bit word XOR。
+    // 只有 data 4 字节对齐时走该路径；未对齐输入保留逐字节回退。
+    if (((uintptr_t)data & 3U) == 0U)
     {
-        data[index] ^= fc_lfsr_next(&lfsr_state);
-        data[index + 1U] ^= fc_lfsr_next(&lfsr_state);
-        data[index + 2U] ^= fc_lfsr_next(&lfsr_state);
-        data[index + 3U] ^= fc_lfsr_next(&lfsr_state);
-        index = (WORD)(index + 4U);
+        while ((DWORD)index + 3U < (DWORD)length)
+        {
+            const DWORD mask = fc_lfsr_next4(&lfsr_state);
+            DWORD       word;
+
+            memcpy(&word, data + index, sizeof(word));
+            word ^= mask;
+            memcpy(data + index, &word, sizeof(word));
+            index = (WORD)(index + 4U);
+        }
     }
 
     while (index < length)

@@ -86,8 +86,6 @@ typedef struct BOOT_IMAGE_CONSTRAINTS_S
 /* 返回 0 表示签名可信；非 0 表示验证失败。 */
 typedef int (*boot_signature_verify_fn_t)(const boot_image_hdr_s *header, void *context);
 
-DWORD boot_crc32(const void *data, size_t size);
-
 void boot_image_header_finalize(boot_image_hdr_s *header);
 int  boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context);
 

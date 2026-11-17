@@ -104,7 +104,7 @@
 **最终链路（稳定运行中）**：
 
 ```
-GDB → localhost:2331 → socat → 172.29.32.1:2331
+GDB → localhost:2331 → socat → <Windows_IP>:2331
       → portproxy(0.0.0.0:2331, 内核NAT) → 127.0.0.1:2331 → JLink
 ```
 
@@ -152,7 +152,7 @@ GDB → localhost:2331 → socat → 172.29.32.1:2331
 3. 但实际 GDB 连接后 socat fork 的子进程连 `127.0.0.1:2331` 被拒绝（WSL2 内建转发不通）
 4. 直接测 **目标地址** 确认 WSL2 转发不通、portproxy 通：
    - `nc -zv 127.0.0.1 2331` ❌
-   - `nc -zv 172.29.32.1 2331` ✅
+   - `nc -zv <Windows_IP> 2331` ✅
 5. 手动启动 socat → portproxy 路径 → F5 ✅
 
 **根因**：
@@ -182,9 +182,9 @@ GDB → localhost:2331 → socat → 172.29.32.1:2331
 
 **排查过程**：
 1. portproxy `show` 显示规则存在（`0.0.0.0:2331 → 127.0.0.1:2331`）
-2. 但在 WSL 中用 `nc -zv 172.29.32.1 2331` 一直拒绝
+2. 但在 WSL 中用 `nc -zv <Windows_IP> 2331` 一直拒绝
 3. Windows 上 `Test-NetConnection 127.0.0.1:2331` ✅（JLink 正常）
-4. Windows 上 `Test-NetConnection 172.29.32.1:2331` ❌（portproxy 不转发）
+4. Windows 上 `Test-NetConnection <Windows_IP>:2331` ❌（portproxy 不转发）
 5. 添加了普通防火墙规则 + Hyper-V 防火墙规则（`New-NetFirewallHyperVRule`），仍无效
 6. 加了 Hyper-V 规则后 `EnforcementStatus` 显示 `ProfileDisabled`（配置文件不匹配）
 7. 重启 IP Helper 服务后恢复
@@ -217,7 +217,7 @@ GDB → localhost:2331 → socat → 172.29.32.1:2331
 ```bash
 # === WSL 侧 ===
 # 测试 portproxy 是否有效（必须测 Windows_IP，不能只测 localhost）
-nc -zv -w4 172.29.32.1 2331
+nc -zv -w4 <Windows_IP> 2331
 
 # 测试 WSL2 内建转发
 nc -zv -w4 127.0.0.1 2331
@@ -236,7 +236,7 @@ netsh interface portproxy show v4tov4
 Test-NetConnection 127.0.0.1 -Port 2331
 
 # 从 Windows 本地测试 portproxy（走虚拟网卡则走 NAT）
-Test-NetConnection 172.29.32.1 -Port 2331
+Test-NetConnection <Windows_IP> -Port 2331
 
 # === 如果 portproxy不通但 JLink 在跑 ===
 # 方案 A：重启 IP Helper 服务 + 重建 portproxy
@@ -279,7 +279,7 @@ netsh interface portproxy add v4tov4 listenport=2331 connectaddress=127.0.0.1 co
 **新链路**：
 
 ```
-GDB → localhost:2331 → socat → 172.29.32.1:2331 → JLink(0.0.0.0:2331, -LocalHostOnly 0)
+GDB → localhost:2331 → socat → <Windows_IP>:2331 → JLink(0.0.0.0:2331, -LocalHostOnly 0)
 ```
 
 **新前置条件**：无。不再依赖 portproxy / 防火墙规则 / WSL2 内建转发。

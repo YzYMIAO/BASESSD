@@ -214,7 +214,7 @@ typedef struct CP_HEADER_S
     DWORD block_word_count;                         /* 块元数据 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
     DWORD block_word_bytes;                         /* 每 word 字节数（2；0 = 无快照）*/
     DWORD block_page_count;                         /* 块元数据页数（FTL_CHECKPOINT_BLOCK_PAGES；0 = 无快照）*/
-    DWORD block_crc32;                              /* 块元数据 words 的 boot_crc32() */
+    DWORD block_crc32;                              /* 块元数据 words 的 fc_crc32_iso_hdlc() */
     DWORD wear_entry_count;                         /* 磨损条目数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
     DWORD wear_entry_bytes;                         /* 磨损条目字节（8；0 = 无快照）*/
     DWORD wear_page_count;                          /* 磨损页数（FTL_CHECKPOINT_WEAR_PAGES；0 = 无快照）*/
@@ -348,7 +348,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_s *h, DWORD *out_layout_versio
 /**
  * @brief 读取并校验一条 Checkpoint 记录的 块元数据快照
  *
- * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。
+ * 校验 header 的 bit_* 字段、逐页读入 words、再用 fc_crc32_iso_hdlc 验证。
  * 失败（含 block_page_count == 0 的旧记录 / v12 前空 initial CP）只表示
  * 「没有可用 块元数据快照」，**不得**据此触发格式化；块元数据改走 full metadata rebuild。
  *
