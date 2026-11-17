@@ -149,7 +149,7 @@ claude
 {
   "env": {
     // 火山方舟的认证 token（敏感凭据，勿提交到公开仓库 / 勿外泄）
-    "ANTHROPIC_AUTH_TOKEN": "ark-be6bef82-0826-49b7-bf8a-2a7516da142c-17d18",
+    "ANTHROPIC_AUTH_TOKEN": "<your-token-here>",
 
     // 网关入口，替换官方 api.anthropic.com
     "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/plan",
