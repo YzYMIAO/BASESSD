@@ -303,9 +303,9 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 
 ### 7.1 全盘 H2testw（近满盘、GC 参与）
 
-> 当前基线（release -O2，2026-10-25）：写 **843 KB/s** / 读 **889 KB/s**，H2testw
-> 415/423 MB 无错误；cache program 开（`cw=24906/99624/7945/0`），cache read 开
-> （`cr=25931/102794/681/0`）。完整两轮对比表见
+> 当前基线（release -O2，2026-11-15）：写 **950 KB/s** / 读 **885 KB/s**，H2testw
+> 415/423 MB、`Test finished without errors`；cache program / cache read 均开。
+> 历史轮次（含 2026-10-25 的 843 / 889 KB/s 与 cache 命中计数）见
 > `docs/archive/testing_guide_results_history.md`。
 
 ### 7.2 4K 随机（Windows diskspd，128 MB 文件）
@@ -323,19 +323,20 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 - 因此 4K 随机不是“比 CW 还小”的测试，而是这个 FTL 最自然的随机 I/O 单位；
   真正更碎的是 512 B 随机，可作为极端用例，但不是日常必测。
 
-### 7.5 速度分层对照（2026-10-25，release -O2）
-
-> 关键结论：NAND 阵列 + 总线理论上限约 **61 MB/s 读 / 20.5 MB/s 写**（2-plane）；
-> FC raw **3.68 / 4.42 MB/s**；FTL host **3.45 / 2.75 MB/s**；USB MSC **0.889 / 0.843 MB/s**。
-> 当前内部瓶颈是 **CPU 数据面**（PIO + randomizer/CRC + BCH），不是 NAND/总线。
-> 完整分层表与耗时折算见 `docs/archive/testing_guide_results_history.md`。
-
 ### 7.4 解释口径
 
 - **IOPS**：每秒完成多少次 4K；4K × IOPS ≈ 吞吐。
 - **AvgLat**：平均一次 I/O 的 submit→complete；包含 USB 往返 + FTL + NAND。
 - **p99 / max**：尾部延迟；`max 20~27 ms` 常来自 GC/CP/Journal 刷写，不等同错误。
 - 与 H2testw 的 16 KB/大块顺序数字不能直接比；块大小和队列深度不同。
+
+### 7.5 速度分层对照（release -O2）
+
+> 关键结论：NAND 阵列 + 总线理论上限约 **61 MB/s 读 / 20.5 MB/s 写**（2-plane）；
+> FC raw **3.68 / 4.42 MB/s**；FTL host **3.45 / 2.75 MB/s**；USB MSC 当前
+> **0.885 / 0.950 MB/s**（读 / 写，2026-11-15）。当前内部瓶颈是 **CPU 数据面**
+> （PIO + randomizer/CRC + BCH），不是 NAND/总线。各层耗时折算见
+> `docs/archive/testing_guide_results_history.md`。
 
 ---
 
@@ -471,11 +472,11 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 ### 9.1 当前结论
 
-> `-O0` 是设备侧主因；16 KB EP 有效；cache program 使顺序写达到
-> **843 / 889 KB/s**（avg latency 4.1 ms）；USB FS BOT 仍是主瓶颈。逐轮实测、
-> 已做改动与后续方案见 `docs/archive/testing_guide_results_history.md`。
+> `-O0` 是设备侧主因；16 KB EP 有效；cache program + cache read 下顺序吞吐为
+> **写 950 / 读 885 KB/s**（2026-11-15，USB host 端到端）；USB FS BOT 仍是主瓶颈。
+> 历史轮次、已做改动与后续方案见 `docs/archive/testing_guide_results_history.md`。
 
-### 9.4 ITCM / DTCM（当前结论）
+### 9.2 ITCM / DTCM（当前结论）
 
 - `.ssd_code_high`：release 61,344 B / debug 57,168 B / 64 KB；debug 余量 8,368 B（2026-10-30）。
 - `.dtcm_data`：release 67,832 B / 128 KB；预留 20 KB stack。
@@ -494,9 +495,10 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 **能力边界**
 
-- `[USB ] latency` 未在 765/884 那轮写阶段取到（写后已断电）；
+- `[USB ] latency` 只在部分轮次取到写阶段数据（写后断电会丢尾部日志）；
 - 4K 随机那组**未同步记录 banner/free**，只能当量级参考；
-- `make tests UT=FTL` 仍因冻结测试源编不过；FC UT 需上板；
+- UT 已可构建：2026-11-16 release 全量 `test` 为 306/306 通过 + 3 SKIP；
+  `UT=FC` / `UT=FTL` / `UT=HIL` 均需上板运行；
 - 未做 USB-IF 认证、USB 协议分析仪、NAND ATE；
 - 未做完整 JEDEC 耐久性 / retention / read disturb / P/E 循环；
 - USB BOT 单命令，不能测主控多队列/门铃；

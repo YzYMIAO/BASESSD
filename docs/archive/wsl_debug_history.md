@@ -290,3 +290,60 @@ GDB → localhost:2331 → socat → <Windows_IP>:2331 → JLink(0.0.0.0:2331, -
 - 之前认为 JLink V9.72 只绑 `127.0.0.1` 的判断（§8.5/§8.6）其实只看到了默认行为——`-LocalHostOnly 0` 参数可以改变这个行为
 
 ---
+
+
+## 从 guides 移入（2026-11-18）
+
+### 2.2 Windows 防火墙规则（已不再需要）
+
+> **2026-09-26：直连方案不需要防火墙规则。WSL 虚拟网卡和 Windows 在同一 Hyper-V 虚拟交换机上，不受 Windows 防火墙入站规则影响。** 保留此节供历史参考。
+
+以**管理员身份**打开 CMD 或 PowerShell，执行：
+
+```cmd
+netsh advfirewall firewall add rule name="JLink 2331" dir=in action=allow protocol=TCP localport=2331
+```
+
+确认输出：`Ok.`
+
+### 2.3 Windows 端口转发（portproxy）— ⚠️ 已废弃，且必须删除残留
+
+> **2026-09-26：已切换到 `-LocalHostOnly 0` 直连方案，不再需要 portproxy。保留此节仅作历史参考。**
+
+> **⚠️ 若曾按旧方案配置过 portproxy，务必删除这条规则。** 它会让 Windows 内核（svchost）持续监听 `0.0.0.0:2331`，与新方案 JLink（`-LocalHostOnly 0` 也绑 `0.0.0.0:2331`）**抢占同一端口**：JLink 绑不上、启动即退出（`Failed to open listener port 2331`），脚本会卡在「等待 JLink 进程」直到 30 秒超时。删除（管理员 PowerShell，一次即可）：
+>
+> ```powershell
+> netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0
+> netsh interface portproxy show v4tov4      # 确认 2331 那条已消失
+> ```
+
+以**管理员身份**执行一次，重启后持续生效（**旧方案，勿再使用**）：
+
+```cmd
+netsh interface portproxy add v4tov4 listenport=2331 listenaddress=0.0.0.0 connectport=2331 connectaddress=127.0.0.1
+```
+
+#### 为什么要 portproxy？（历史背景）
+
+JLinkGDBServer 默认只绑定 `127.0.0.1`（不接受外部连接）。portproxy 是 Windows 内核级 NAT，把 `0.0.0.0:2331` 的入站流量转发到 `127.0.0.1:2331`。
+
+2026-09-26 之前这是唯一方案。`-LocalHostOnly 0` 发现后该方案已废弃。
+
+
+### 3.2 历史方案（已废弃）
+
+> **portproxy + WSL2 内建转发方案已废弃（2026-09-26）。保留此节作为历史参考，不再使用。**
+
+之前的双层 fallback 方案依赖 portproxy（Windows 内核 NAT）和 WSL2 内建转发 (wslrelay)，但 portproxy 反复出现 zombie rule 失效，WSL2 内建转发也同步不可用。详见 `docs/archive/wsl_debug_history.md` §8.11。
+
+
+### 9.4 版本历史
+
+| 日期 | 变更 | 作者 |
+|------|------|------|
+| 2026-10-11 | §4.2 的 `test` 示例修正：套件名补尾斜杠（`/fc-nand/logic/` 等，`ut_main.c` v41 起前缀带 `/`）；删掉已失效的 `--param block 10`（v40 起 Level 3 不再参数化）；`test --log-visible info /fc-nand/` → `test --log-visible info`（根套件名单独用不匹配任何用例）；补两条过滤串约束的警示 | Claude Code |
+| 2026-10-04 | §5.3 脚本同步为当前 4 步直连版（直接从 `sh/debug_env.sh` 生成）；§2.3 补充 portproxy 残留必须删除的说明与命令；§7.2 新增故障 #8（portproxy 抢占 2331）；§4.3 手动命令补 `-LocalHostOnly 0`；§7.3 补查/删 portproxy 命令 | Claude Code |
+| 2026-09-26 | 切换到 -LocalHostOnly 0 直连方案；移除 portproxy/WSL2 内建转发双层 fallback；脚本 6→4 步；新增 `docs/archive/wsl_debug_history.md` §8.11 | Claude Code |
+| 2026-09-25 | 终版修复：脚本不再管理 portproxy，回归一次性配置原则；修正 `docs/archive/wsl_debug_history.md` §8.5 中"JLink 绑 0.0.0.0"的误判；新增 `docs/archive/wsl_debug_history.md` §8.6 全链路排查记录 | Claude Code |
+| 2026-09-24 | 重写全文：增加链路架构、故障排查实录、历史问题追踪、一键脚本完整内容 | Claude Code |
+| 2026-09-23 | 初始创建：WSL 调试环境搭建指南、一键脚本、故障排查实录 | Claude Code |

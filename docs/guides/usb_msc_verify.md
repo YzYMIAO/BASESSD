@@ -2,21 +2,17 @@
 
 > 从 `docs/design/usb_msc.md` Part B 拆出；设计见 [`../design/usb_msc.md`](../design/usb_msc.md)。
 
-> 状态：**基础数据面已上板通过（rev30）；2026-10-22 v12 全盘 H2testw 通过（release + 16 KB EP：写 673 KB/s / 读 758 KB/s，415/423 MB 无错误，`bad=0`）；掉电/多分区待测**。
+> 状态：**基础数据面已上板通过；2026-11-15 release 全盘 H2testw 415/423 MB
+> `Test finished without errors`，写 950 / 读 885 KB/s（USB host 端到端）；
+> 写中掉电（USB-V08）与部分负例待测**。
 >
 > 415/423 MB 的差额是 **H2testw 自带的约 2% 安全余量**（用 8 KB 簇格式化后仍是 415），
 > 不是容量算错、也不是文件系统元数据；盘容量以 boot `[CAP]` / `Get-Disk Size` 为准。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
-> rev30 已确认：Windows `Get-Disk` = 449,839,104 B（429 MiB），FAT 格式化，
-> `usb_verify -Step write/check` 拔插后 `RESULT=PASS`、2KB 块指纹全对。
-> ⚠ 介质版本 12（2026-10-22）起容量口径变为编译期 **868,352（424 MiB）**、运行时按实际
-> 坏块动态取 min(plane)/min(instance)；以 boot `[CAP]` 与 USB READ CAPACITY 为准。
-> 上文 rev30 的 429 MiB 是历史证据，不重写。
-> 大文件/GC、掉电恢复、吞吐仍未验证（R1）。
-> ⚠ rev33（v11，2026-10-21）：**128 MB 分区 H2testw 写入+校验通过**（127 MB，写 261 KB/s /
-> 读 296 KB/s）。该结果只覆盖 407 MiB 的约 1/3，且**未重启**，不满足全盘/GC/掉电判据。
-> ⚠ 同夜第二个 279 MB 分区**复现失败**：GC 启动后 `mark BAD` 156→420、`dng=55`、
-> Free/OP/Spare 耗尽、写入冻结（`RISK-MIG-07` / `RISK-GC-10`）。全盘判据仍未通过。
+> 介质版本 12 起容量口径为编译期 **868,352（424 MiB）**、运行时按实际坏块动态取
+> min(plane)/min(instance)；以 boot `[CAP]` 与 USB READ CAPACITY 为准。
+> 历史轮次（rev24~rev33 的失败/修复与旧容量证据）见
+> [`../archive/usb_msc_verification.md`](../archive/usb_msc_verification.md) §8。
 > 配套脚本：`tools/usb_verify/`（`usb_verify.ps1` / `usb_rebuild_mbr.ps1`）。
 > 设计与取舍：本文 Part A。已知风险：`docs/design/known_open_items.md`。
 
@@ -110,9 +106,9 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 | USB-V04 | 非均匀多页写 → 读回 | `-Step write` | `SRC_HASH == DST_HASH` | ✅ rev30 |
 | USB-V05 | 4KB pair 镜像 / 2KB 块指纹 | `-Step check` | pattern 的 2KB 块 0..7 内容分别为 0..7 | ✅ rev30 |
 | USB-V06 | SYNCHRONIZE CACHE + 拔插持久性 | `write` → `Write-VolumeCache` → 拔插 → `check` | `RESULT=PASS`，哈希不变 | ✅ rev30 |
-| USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ✅ 2026-10-22 全盘 H2testw（GC/CP 覆盖） |
+| USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ✅ 2026-11-15 全盘 H2testw（GC/CP 覆盖） |
 | USB-V08 | 写过程中掉电 | 写 32–64MB 中途拔电，重启后挂载并读回 | 卷可挂载；已写入部分哈希一致；无 `[FTL] dangling` | ⬜ 待测（`known_open_items` ISS-USB-01） |
-| USB-V09 | 吞吐基线 | `dd`/H2testw 记录顺序写读 | 与 RISK-NAND-04 的瓶颈结论一致 | ⬜ 待测（`known_open_items` ISS-USB-02） |
+| USB-V09 | 吞吐基线 | `dd`/H2testw 记录顺序写读 | 与 RISK-NAND-04 的瓶颈结论一致 | ✅ 2026-11-15：写 950 / 读 885 KB/s |
 | FTL-V01 | `RISK-MD-06` 回收前目录检查点 | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`dir_ckpt_seq > cp_seq` | ⬜ 待测 |
 | FTL-V02 | `RISK-MIG-02` predictive 活锁 | 观察串口 `[MIG] abort kind=2 ... victim read failed` | 不应反复重选同一 victim；坏块应被隔离 | ⬜ 待测 |
 
@@ -123,7 +119,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 > `[CAP] lba_max=854528`）：`inspect` = 437,518,336 B / 512+512 字节扇区 / BusType=USB；
 > `format` 走 `diskpart clean → create partition primary → NTFS` 成功（437,448,704 B）；
 > `write` `SRC_HASH==DST_HASH`、`FLUSH_OK`；拔插后 `check` **`RESULT=PASS`**。
-> 对应 USB-V01~V06 正常路径无回归；V08（写中掉电）/ V09（吞吐）仍未测。
+> 对应 USB-V01~V06 正常路径无回归；V08（写中掉电）仍未测，V09（吞吐）见 2026-11-15 全盘 H2testw。
 
 ---
 
@@ -368,75 +364,27 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 
 ---
 
-## B.8 本轮实测记录（2026-10-20）
+## B.8 历史实测记录（2026-10-20 / 10-21）
 
-| 固件/步骤 | 结果 | 说明 |
-|---|---|---|
-| rev24 枚举 | ✅ | 串口 `[USB ] mounted`；确认 PA11/PA12 可用 |
-| rev24/25 host 格式化 | ❌ | Windows 报“无法完成格式化 / track 0 bad”；串口出现 `[L2P] region 0 load failed`、`[MIG]` 风暴；期间定位了 `RISK-L2P-04` / `RISK-MD-06` / `RISK-MIG-02` |
-| rev26 MBR 重建 + 文件测试 | ❌ | 能分区/挂载，但 `notepad.exe` 拔插后哈希不一致；2KB 块指纹显示块 1=源块 0、块 3=源块 2 ⇒ 定位 `RISK-WB-06` |
-| rev27 pair 镜像修复 | ✅ | FAT 格式化成功；`notepad.exe` 源/盘哈希一致；16KB pattern 的 2KB 块 0..7 全匹配；`Write-VolumeCache` OK；拔插后 `RESULT=PASS` |
-| rev28 dangling 减计数守卫 | ⏳ 未单独复现 | 需在 predictive 标坏后覆盖写同一 LBA，确认只打 `[FTL] dangling`、不再断言 |
-| rev29/rev30 容量修正 | ✅ | Windows `Get-Disk Size=449,839,104`（429 MiB）、FAT 格式化、`usb_verify write/check` 拔插后 `RESULT=PASS`；`lba_max=878592 (429MiB)` |
+> 详细逐轮表（rev24 枚举与格式化失败、rev27 pair 镜像修复、rev30 容量修正、
+> rev33 分区与 GC 死锁）已归档到
+> [`../archive/usb_msc_verification.md`](../archive/usb_msc_verification.md) §8。
+> 当前状态以 B.4 验证矩阵与 `known_open_items.md` 为准；历史失败不再作为
+> 现状判断依据。
 
-#### 2026-10-21 rev33（v11，运行时 407 MiB）
+## B.9 未覆盖项与下一步
 
-| 步骤 | 结果 | 说明 |
-|---|---|---|
-| 介质恢复 | ✅ | `make format-image` 开卡后换回正常镜像（`.build_cfg=0/0`）；`[CAP] lba_max=833536 (407MiB)`，与磁盘管理 407 MB 一致 |
-| 128 MB 分区 | ✅ | 磁盘 2（可移动，407 MB）：128 MB 主分区 + 279 MB 未分配 |
-| H2testw（127 MB，写 + 校验） | ✅ | “Test finished without errors”；写 8:17 / 读 7:19；写 261 KB/s / 读 296 KB/s（USB-V09 首个数据点） |
-| 第二个 279 MB 分区 H2testw | ❌ | `free` 1178→32 触发 GC 后，`mark BAD` 156→**420**（+264，全部 UNC）、`dng=55`、`op=11/0`、`spare=0/29`，写指针停在 `wr=53120`，USB 反复重挂载 ⇒ 死锁。悬空 LBA 自 262346 起（第二分区起点）。归入 `RISK-MIG-07` / `RISK-GC-10` |
+仍待执行：
 
-**适用边界（不能当全盘结论）**：
-
-- 只写 127 MB ⇒ Free Pool 基本没被压低，**GC / 迁移路径几乎没跑**（boot `free=3268` 未见显著下降）；
-- H2testw **不重启** ⇒ 上次的失败形态（`[L2P] region 49 load failed` → full metadata rebuild）
-  是重启读回元数据时才暴露的，本次未覆盖；
-- 介质是刚开卡格式化的干净状态，旧的元数据损坏已被清除。
-- 因此 `RISK-MD-07` / `RISK-CAP-02` 的“全盘写到分区末端”判据**仍未满足**。
-
-**脚本形态的验证**：
-
-| 脚本步骤 | 状态 | 说明 |
-|---|---|---|
-| `usb_verify.ps1 -Step inspect` | ✅（rev27/28，旧容量） | 自动识别 SOFTSSD/USB；⚠ 脚本的 ExpectedSize 现为 444,596,224（424 MiB ±64 MiB 窗口），旧容量盘会被拒绝（预期） |
-| `usb_verify.ps1 -Step write` | ✅（rev27/28） | 写 `test.bin` + `pattern.bin`，`SRC_HASH==DST_HASH`，`FLUSH_OK` |
-| `usb_verify.ps1 -Step check` | ✅（逻辑） | 哈希 + 2KB 块指纹 `RESULT=PASS`；真实拔插判据用同一套检查手工做过 |
-| `usb_verify.ps1 -Step format` | ⚠ 未在最终脚本形态重跑 | 其步骤与手工验证过的“删分区→Clear-Disk→MBR→FAT32”一致；当前盘已被手工格式化，未再破坏性重跑 |
-| `usb_rebuild_mbr.ps1` | ⚠ 未在最终脚本形态重跑 | 手工版（raw 清零前 1MB → 重建 MBR）已执行成功；脚本是其整理版 |
-
-**已上板验证的结论**：
-
-- rev27：USB MSC 枚举、MBR 分区、FAT 格式化、非均匀多页写、读回、SYNCHRONIZE CACHE、
-  拔插持久性通过；**但容量是旧 512 MiB 超卖值**。
-- rev30：容量修正为 429 MiB，Windows 确认 `449,839,104 B`；格式化 + `usb_verify` 写/拔插/读回通过。
-- `RISK-WB-06` 已修并上板验证（基础数据面）。
-
-**仍未验证**：
-
-- 大文件/GC/CP 压力、`dd` 吞吐、写过程中掉电（USB-V07/V08/V09）。
-- `RISK-MD-06` 的回收前目录检查点专项（FTL-V01）。
-- `RISK-MIG-02` 的 predictive 活锁（FTL-V02）。
-
----
-
-## B.9 下一步
-
-**2026-10-21 起的优先顺序**（先把范围逐步放大，再谈“修复”结论）：
-
-1. H2testw “verify them again”：**断电重启后**重读 127 MB（约 7 分钟）→ 覆盖 L2P / journal 恢复路径。
-2. 256 MB 分区重跑 H2testw（约 30 分钟）；同时看串口 `[STAT]` 的 `dng/rrab/mig` 与 `info` 的 `live=`。
-3. 全盘 407 MiB H2testw（约 1 小时）——这才是 `RISK-MD-07` / `RISK-CAP-02` 的判据。
-
-以下为原矩阵项：
-
-4. **USB-V07**：写 32–64 MB 随机文件（`fsutil`/PowerShell 生成）→ flush → 拔插 → 哈希。
-5. **USB-V08**：写临时文件时断板子电源 → 重启重挂载 → 检查 FTL 恢复日志
+1. **USB-V08**：写临时文件时断板子电源 → 重启重挂载 → 检查 FTL 恢复日志
    （`boot type` / `journal_entries` / `[L2P]`）。
-6. **USB-V09**：记录大文件复制耗时，换算 MB/s。
-7. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前目录检查点。
-8. **FTL-V02**：若 `victim read failed` 风暴复现，修 `RISK-MIG-02`。
+2. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前目录检查点。
+3. **FTL-V02**：若 `victim read failed` 风暴复现，修 `RISK-MIG-02`。
+4. `usb_verify.ps1 -Step format` / `usb_rebuild_mbr.ps1` 的最终脚本形态
+   未破坏性重跑；两者步骤与已手工验证的流程等价。
+
+已由 2026-11-15 全盘 H2testw 覆盖：大文件 / GC / CP 压力（USB-V07）与
+顺序吞吐（USB-V09，写 950 / 读 885 KB/s）。
 
 ---
 

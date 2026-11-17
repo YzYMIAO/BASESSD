@@ -14,11 +14,11 @@
 | 待决策 | 需要用户裁决 | 16 |
 | 待定位 | 根因未明 | 18 |
 | 待验证 | 实现完成，缺板端证据 | 17 |
-| 待实现 | 功能/验证未开始 | 66 |
+| 待实现 | 功能/验证未开始 | 65 |
 | 进行中 | 已做一部分 | 13 |
 | 待外部 | 等硬件/测试源/第三方 | 3 |
 | 信息 | 判定结论/维护不变量 | 95 |
-| 已闭合 | 有证据且无剩余动作 | 228 |
+| 已闭合 | 有证据且无剩余动作 | 229 |
 | 不实现 | 用户明确不做 | 2 |
 
 ### 0.2 待用户裁决（待决策）
@@ -53,7 +53,6 @@
 | ISS-FTL-10 | 缺口 | NAND / FMC / 拓扑 / 时序 | FMC HiZ 写方向压力测试未做 |
 | ISS-LOG-01 | 缺口 | 平台（timer / watchdog / logging / fault capture / build） | `docs/archive/fault_capture_landing.md` 的落地状态表（9 项）未逐条确认 |
 | ISS-USB-01 | 缺口 | HIL（USB MSC / host queue / controller） | 写过程中掉电恢复未验 |
-| ISS-USB-02 | 缺口 | HIL（USB MSC / host queue / controller） | USB 吞吐 / `dd` 基线未验 |
 | ISS-USB-04 | 缺口 | HIL（USB MSC / host queue / controller） | 多分区/第二分区写满校验未验 |
 | RISK-BBT-02 | 风险 | 磨损均衡 / BBT / 坏块 | 工厂扫描对列读失败页的判坏行为未实测 |
 | RISK-CLI-09 | 风险 | CLI / 观测 / 调试 | 断言现场 CLI 命令自带泵，但 FTL 内断言仍可能重入 |
@@ -2130,7 +2129,6 @@
 | RISK-USB-15 | 风险 | 待决策 | UNMAP 未向主机广告，fstrim 可能不下发 | — |
 | RISK-PLAT-08 | 风险 | 待定位 | `.noinit` 出现一次 HardFault（PC 落 newlib printf） | 2026-10-25 记录，镜像未定 |
 | ISS-USB-01 | 缺口 | 待验证 | 写过程中掉电恢复未验 | 未上板 |
-| ISS-USB-02 | 缺口 | 待验证 | USB 吞吐 / `dd` 基线未验 | 未上板 |
 | ISS-USB-04 | 缺口 | 待验证 | 多分区/第二分区写满校验未验 | 未上板 |
 | ISS-FTL-11 | 缺口 | 待实现 | HIL 队列 + 门铃 + CQ 重构 | 未上板 |
 | RISK-CTRL-04 | 风险 | 待实现 | HIL submit 未校验 buffer NULL，FTL 兜底但状态分类错误 | 未上板 |
@@ -2192,18 +2190,8 @@
 - **当前事实**：未验证。
 - **影响**：写中断电后的卷可挂载性/哈希一致性没有板端证据。
 - **下一步 / 判据**：写 32–64 MB 中拔电，重启后卷可挂载、哈希一致。
-- **来源**：`docs/guides/usb_msc_verify.md` §B.8
+- **来源**：`docs/archive/usb_msc_verification.md` §8
 - **关联**：`RISK-CACHE-18`、`RISK-BOOT-*`
-- **历史/验证**：
-  - （无板端记录）
-
-#### ISS-USB-02 吞吐 / `dd` 基线（USB-V09）
-
-- **当前事实**：未验证。
-- **影响**：没有可复现的 USB 吞吐基线。
-- **下一步 / 判据**：记录顺序写/读、4K 随机；与 `RISK-NAND-04` 的瓶颈定位合并。
-- **来源**：`docs/guides/usb_msc_verify.md` §B.8
-- **关联**：`RISK-NAND-04`
 - **历史/验证**：
   - （无板端记录）
 
@@ -2212,7 +2200,7 @@
 - **当前事实**：多分区/第二分区（>128 MB）写满 + 校验未验证；历史 rev33 第二分区失败见 `RISK-MIG-07`。
 - **影响**：第二分区容量/映射可能仍有问题。
 - **下一步 / 判据**：v12 介质上重跑；与全盘 H2testw 分开记录。
-- **来源**：`docs/guides/usb_msc_verify.md` §B.8；`RISK-MIG-07`
+- **来源**：`docs/archive/usb_msc_verification.md` §8；`RISK-MIG-07`
 - **关联**：`RISK-MIG-07`
 - **历史/验证**：
   - （无板端记录）
@@ -3185,7 +3173,7 @@
 #### RISK-REL-01 公开前必须清理历史中的 API token
 
 - **后果**：`docs/claude_code_usage.md` 的 `ANTHROPIC_AUTH_TOKEN` 由提交 `3ee9ef9` 引入并留在 git 历史；只在新提交删除文件，公开后任何人仍可从旧 commit 取出凭据。若仓库已推到公开远端，按已泄露处理。
-- **缓解**：文件已于 2026-11-17 从工作树删除（`git rm`，未提交）。泄漏提交 `3ee9ef9` **已在 `origin/main` 历史里**（`git merge-base --is-ancestor 3ee9ef9 origin/main` → 是）；远端仓库可见性本机无法判定（未装 `gh`），若为 public 则按已泄露处理。token 轮换是唯一可靠补救，历史重写只防继续传播。
+- **缓解**：文件已删除并随 `f26c6a4` 推送。泄漏提交 `3ee9ef9` **已在 `origin/main` 历史里**（`git merge-base --is-ancestor 3ee9ef9 origin/main` → 是）；远端仓库可见性本机无法判定（未装 `gh`），若为 public 则按已泄露处理。token 轮换是唯一可靠补救，历史重写只防继续传播。
 - **下一步**：① 旧 token 吊销已由用户确认（2026-11-17）；② 用户 2026-11-17 裁决**暂不公开**，历史策略推迟：将来公开时按清单方案 A，新公开仓用 `git switch --orphan` squash 首提交，私有仓历史保持不动——历史里的旧串已失效，但公开仓库不应携带凭据形态文本；③ 验收命令只能在新公开仓的干净克隆上跑——私有仓 `git log --all -G 'ark-…'` 永远命中。步骤见 `docs/guides/open_source_checklist.md` OS-01。
 - **证据**：`docs/claude_code_usage.md`（删除前）；`git log --oneline -S 'ark-'` → `3ee9ef9`；`git merge-base --is-ancestor 3ee9ef9 origin/main` → 已推送。
 - **历史/验证**：
@@ -3487,9 +3475,10 @@
 | RISK-UT-42 | 风险 | UT / 测试基础设施 | `timing_rollback_on_set_timing_fail` 把器件留在 Mode 0，污染后续所有套件的 NAND 时序 | 2026-11-15 二分 + release 全量 636 s，speed 与单测一致 |
 | RISK-UT-44 | 风险 | UT / 测试基础设施 | LFSR 查表自检缺次态判据；已补 1 步/4 步次态比较 | 2026-11-18 自检修正 + host 对拍；未上板 |
 | ISS-PLAT-02 | 缺口 | 类型 / 契约 / 架构 / 跨模块 | 删除 stm32h7r3 平台，只保留 stm32h743 | 2026-11-07 归档（`docs/archive/known_iss_batches.md`） |
+| ISS-USB-02 | 缺口 | HIL（USB MSC / host queue / controller） | USB 顺序吞吐基线（USB-V09）已由全盘 H2testw 覆盖 | 2026-11-15 写 950 / 读 885 KB/s，415/423 MB 无错误 |
 | RISK-REL-02 | 风险 | 文档 / 开源 / 发布 | 根 LICENSE/NOTICE + ST 组件许可原文均已补齐 | 2026-11-17 `third_party/stm32h743/LICENSE` |
 | RISK-REL-03 | 风险 | 文档 / 开源 / 发布 | PDF/HTML 已移出仓库，改为链接清单 | 2026-11-17 `git rm` 16 文件，本地副本仓外 |
-| RISK-REL-04 | 风险 | 文档 / 开源 / 发布 | README 已按清单重写（工作树，未提交） | 2026-11-17 重写，状态表按 R1 |
+| RISK-REL-04 | 风险 | 文档 / 开源 / 发布 | README 已按清单重写 | 2026-11-17 重写并随 `62c4b18` 推送；状态表按 R1 |
 | RISK-REL-05 | 风险 | 文档 / 开源 / 发布 | `src/common` 零引用死代码约 1.07 万行 | 2026-11-17 已删除（构建三关通过） |
 | RISK-ECC-01 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | `fc_bch_decode` 的 `calc_ecc` 曾把校验差值当预计算 parity；A2 已删除该参数 | 2026-11-17 删除 `calc_ecc`/`syn`，8→6 参数；host 对拍/构建通过（未上板） |
 | RISK-CRC-01 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | 注释曾称 IEEE 802.3，实际为 CRC-32/MPEG-2 | 2026-11-18 注释修正；未上板 |
@@ -4764,8 +4753,8 @@
 - **后果**：根 `README.md` 仅 290 B，只给一条构建命令；其中 `docs/design/wsl_debug_environment.md` 已移至 `docs/guides/`，链接失效。公开读者无法判断架构、硬件假设、已验/未验范围与已知限制，容易把“能编译”误当“已验证”。
 - **缓解**：已按 OS-04 重写 `README.md`（定位 / 架构 / 硬件 / 构建 / 烧写 / 状态表 / 已知限制 /
   文档地图 / License / 反馈）；状态表按 R1 逐项给日期与证据；失效路径已改为
-  `docs/guides/wsl_debug_environment.md`。改动在工作树，**未提交**（R3）。
-- **下一步**：提交后按清单验收项复核干净克隆构建；用户裁决联系渠道为「仅 GitHub Issues」。
+  `docs/guides/wsl_debug_environment.md`。已随 `62c4b18` 推送。
+- **下一步**：按清单验收项复核干净克隆构建；用户裁决联系渠道为「仅 GitHub Issues」。
 - **证据**：`README.md`（重写后）；`docs/guides/wsl_debug_environment.md`。
 - **历史/验证**：
   - 2026-11-17 只读审计 → README 290 B，链接失效确认。
@@ -4817,6 +4806,16 @@
 - **证据**：`src/fc/fc_random_engine.c:fc_lfsr_tab_selfcheck`。
 - **历史/验证**：
   - 2026-11-18 补次态断言 + 4 步表自检 → host 对拍通过（未上板）
+
+#### ISS-USB-02 USB 吞吐 / 基线（USB-V09）
+
+- **当前事实**：2026-11-15 release 镜像全盘 H2testw 415/423 MB、`Test finished without errors`，写 950 / 读 885 KB/s（USB host 端到端）；4K 随机另有 diskspd 量级参考（`testing_guide.md` §7.2）。
+- **影响**：无剩余动作；顺序吞吐基线已可复现。
+- **下一步 / 判据**：无。新镜像若改 USB/FTL 数据面，按同一 H2testw 流程复测并对照本基线。
+- **来源**：`docs/guides/usb_msc_verify.md` USB-V09；`docs/guides/testing_guide.md` §7.1/§7.5。
+- **关联**：`RISK-NAND-04`、`RISK-CACHE-16`。
+- **历史/验证**：
+  - 2026-11-15 全盘 H2testw 写 950 / 读 885 KB/s → 闭合。
 
 ## B.3 不实现
 

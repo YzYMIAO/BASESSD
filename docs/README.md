@@ -36,7 +36,6 @@ docs/
 ├── design/                    ← 主设计 + common/ 公共设施 + revision_history/ 决策史 + known_open_items（阅读顺序见 design/README.md）
 ├── guides/                    ← 环境 / 调试 / 开源发布 / USB 上板验证 / 测试方法指南（非设计）
 ├── reference/                 ← 资料区：论文 / 网页链接清单（不含 PDF/HTML 原文）
-├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
 ├── boot_flow.md               ← 固件启动流程（复位 → main）
 └── hardware_contract.md       ← 硬件契约（STM32H743 + MT29F4G08，含 NAND 组织模型）

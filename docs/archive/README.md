@@ -96,6 +96,12 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | `fc_nand_ut_pre_refactor_20261113.md` | 重构前 FC-NAND UT 设计（含版本史/旧板端证据） | 主文档已按 FTL UT 骨架重写 |
 | `known_iss_batches.md` | known_iss 已闭合/不实现条目原文 | 主文件保留索引表 |
 
+## 2026-11-18 后续归档
+
+| 文件 | 原位置 / 内容 | 处置 |
+|---|---|---|
+| `open_source_audit_20261117.md` | `guides/open_source_checklist.md` 的执行记录与全仓审计快照 | 历史快照；当前状态以 checklist 的执行状态表为准 |
+
 ## 边界
 
 - 活跃权威设计文档一律在 **`../design/`**（10 篇主设计 + `common/` + `revision_history/` + `known_open_items.md`），不要往这里放。
