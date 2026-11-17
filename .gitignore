@@ -60,9 +60,6 @@ dkms.conf
 # OS-specific & IDE config (不在 Git 中追踪，避免不同操作系统的路径冲突)
 # ============================================================================
 
-# VS Code 调试配置（含操作系统相关路径）
-.vscode/launch.json
-
 # compile_commands.json（含绝对路径，不同机器不同）
 compile_commands.json
 

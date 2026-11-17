@@ -1,3 +1,12 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// launch.json 模板：仓库内只保留与机器无关的 ${workspaceFolder} 路径。
+// 本机相关项走环境变量（VSCode 启动时展开），未设置时请按注释在本机配置：
+//   JLINK_SERIAL        J-Link 调试器序列号（servertype=jlink 的两组配置需要）
+//   JLINK_SERVER_PATH   Windows 侧 JLinkGDBServer.exe 路径（WSL 自启 JLink 时用）
+// SVD 文件不在仓库内；需要外设视图时把 STM32H743xI.svd 放到工作区根，
+// 并取消下方 "svdFile" 行的注释。
+// ⚠ 个人序列号 / 本机绝对路径不要提交回仓库。
+// ─────────────────────────────────────────────────────────────────────────────
 {
   "version": "0.2.0",
   "configurations": [
@@ -36,7 +45,7 @@
         "monitor reset"
       ],
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
@@ -49,16 +58,16 @@
 
       "device": "STM32H743II",
       "interface": "swd",
-      "serialNumber": "602717758",
+      "serialNumber": "${env:JLINK_SERIAL}",
 
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+      "serverpath": "${env:JLINK_SERVER_PATH}",
 
       "runToEntryPoint": "main",
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     },
     {
       // 产品调试：不带 UT 运行态，用于排查正式路径（USB / host I/O / FTL 后台）。
@@ -84,7 +93,7 @@
         "monitor reset"
       ],
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
@@ -97,16 +106,16 @@
 
       "device": "STM32H743II",
       "interface": "swd",
-      "serialNumber": "602717758",
+      "serialNumber": "${env:JLINK_SERIAL}",
 
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+      "serverpath": "${env:JLINK_SERVER_PATH}",
 
       "runToEntryPoint": "main",
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     },
     // ─────────────────────────────────────────────────────────────────────
     // release 镜像：**只烧录/运行**，不做源码级调试。
@@ -135,7 +144,7 @@
         "monitor reset"
       ],
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
@@ -148,15 +157,15 @@
 
       "device": "STM32H743II",
       "interface": "swd",
-      "serialNumber": "602717758",
+      "serialNumber": "${env:JLINK_SERIAL}",
 
       "executable": "${workspaceFolder}/build/firmware/release/bin/release_ut.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+      "serverpath": "${env:JLINK_SERVER_PATH}",
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     },
     {
       // 发布/产品：`make release` 产物，无 test 命令；用于正式板与 H2testw。
@@ -180,7 +189,7 @@
         "monitor reset"
       ],
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
@@ -193,19 +202,19 @@
 
       "device": "STM32H743II",
       "interface": "swd",
-      "serialNumber": "602717758",
+      "serialNumber": "${env:JLINK_SERIAL}",
 
       "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+      "serverpath": "${env:JLINK_SERVER_PATH}",
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     },
     {
       // ⚠ 临时配置：Mode 0 UT 专项（CONFIG_NAND_TIMING_MODE=0）。
-      // 产物由 `make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"` 生成；
+      // 产物由 `make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"` 生成；
       // 用完切回 ①②，不要把这个路径当成默认 debug_ut.elf。
       "name": "⑨ UT/Mode0 临时 · debug_ut_mode0 · 外部 JLink 2331",
       "cwd": "${workspaceFolder}",
@@ -229,7 +238,7 @@
         "monitor reset"
       ],
 
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd",
 
       "armToolchainPath": "/usr/bin"
     },
@@ -243,16 +252,16 @@
 
       "device": "STM32H743II",
       "interface": "swd",
-      "serialNumber": "602717758",
+      "serialNumber": "${env:JLINK_SERIAL}",
 
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug_ut_mode0.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
+      "serverpath": "${env:JLINK_SERVER_PATH}",
 
       "runToEntryPoint": "main",
-      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
+      // "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     }
   ]
 }
