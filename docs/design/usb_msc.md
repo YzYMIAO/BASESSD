@@ -361,7 +361,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 - 分层：`docs/design/fc_nand_design.md §26`
 - FTL / DRAM-less / 算法 / 取舍：`docs/design/storage_controller_design_essentials.md §九~§十一`
-- SPDK FTL / P2L / band metadata：`docs/reference/pages/spdk_ftl.html`
+- SPDK FTL / P2L / band metadata：<https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4）
 - 论文清单：`docs/reference/README.md`
 - USB BOT / UASP：USB Mass Storage Class Bulk-Only Transport 1.0；
   USB Attached SCSI Protocol (UASP) 1.0（本仓未存档原文，按协议事实引用）

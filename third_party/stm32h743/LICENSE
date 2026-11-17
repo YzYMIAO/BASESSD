@@ -1,0 +1,49 @@
+Third-party license texts for third_party/stm32h743/
+
+## Component mapping
+
+- hal/
+    STM32H7xx HAL Driver — BSD-3-Clause (STMicroelectronics)
+- cmsis-device/, startup_stm32h743xx.s, system_stm32h7xx.c
+    CMSIS Device for STM32H7 — Apache-2.0 (STMicroelectronics)
+- cmsis-core/
+    CMSIS Core — Apache-2.0 (Arm), SPDX headers retained in the source files
+
+The Apache-2.0 text is identical to the root LICENSE file of this repository.
+
+License texts were taken from the upstream repositories' LICENSE.md files
+(2026-11-17):
+- https://github.com/STMicroelectronics/stm32h7xx_hal_driver/blob/master/LICENSE.md
+- https://github.com/STMicroelectronics/cmsis_device_h7/blob/master/LICENSE.md
+
+-------------------------------------------------------------------------------
+STM32H7xx HAL Driver license (BSD-3-Clause)
+-------------------------------------------------------------------------------
+
+Copyright 2017 STMicroelectronics.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

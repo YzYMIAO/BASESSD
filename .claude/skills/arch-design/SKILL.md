@@ -72,7 +72,7 @@ include 耦合已在 Stage 1~2.6 归零。权威记录：`docs/design/platform_a
 | 考点（§〇） | 出处 |
 |---|---|
 | **分层** | `fc_nand_design.md` **§26**（唯一判据）· `essentials §〇/§一` |
-| **队列 + 门铃 + 完成** | `fc_nand_design.md §26.1`（NVMe / eMMC CMDQ / ZNS 三形态表）· `docs/reference/pages/spdk_ftl.html` |
+| **队列 + 门铃 + 完成** | `fc_nand_design.md §26.1`（NVMe / eMMC CMDQ / ZNS 三形态表）· SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4） |
 | **数据面轮询** | `essentials §四 FCC` · `fc_nand_design.md §5`（数据路径） |
 | **通道并行仲裁** | `essentials §三/§七` · `fc_nand_design.md §17/§18`（multi-plane / 多通道） |
 | **ECC-LDPC** | `essentials §四/§八` · `fc_nand_design.md §25` |

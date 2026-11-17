@@ -15,8 +15,8 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 **判据 = 有出处的主流设计**，不是 Linux，也**不是本仓现状** —— 既有代码/文档与主流不一致处都可以改。
 
 **出处层**（说「主流 / 行业标准」必须从这里引，不许凭记忆）：
-`docs/reference/README.md`（论文题名 / arXiv / URL）、`docs/design/storage_controller_learning.md`（附录 URL 清单）、
-`docs/reference/pages/spdk_ftl.html`（一手）。
+`docs/reference/README.md`（资料索引与逐份分析；PDF/HTML 原文不随仓库分发）、`docs/design/storage_controller_learning.md`（附录 URL 清单）、
+SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（一手；离线副本按 `docs/reference/README.md` §A4 获取）。
 ⚠ 说不出出处只能标「本仓自拟」，不得写成「行业标准形态」。
 
 **诚实边界**：专有主控固件不可见 ⇒ 判断只能来自 NVMe 规范、公开架构资料、`fc_nand_design.md §26`

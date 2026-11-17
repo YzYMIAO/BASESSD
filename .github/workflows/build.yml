@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    # Ubuntu 22.04 ships gcc-arm-none-eabi 10.3 and clang-format-15, matching
+    # the toolchain this project is developed against. Newer images may carry a
+    # different clang-format major, which would change formatting results.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi clang-format-15 python3 make
+
+      - name: Debug build
+        run: make all
+
+      - name: Release build
+        run: make release
+
+      - name: FTL UT compile
+        run: make tests UT=FTL

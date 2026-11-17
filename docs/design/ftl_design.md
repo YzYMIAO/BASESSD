@@ -783,7 +783,7 @@ L2P log 6144 region 页）是
 **主流对照**
 
 - SPDK FTL 把 Superblock 常驻 cache 并镜像到 base device，nvcache chunk 按顺序写
-  （`docs/reference/pages/spdk_ftl.html`）——"固定根 + 顺序 chunk"与本节形态同构。
+  （<https://spdk.io/doc/ftl.html>，索引见 `docs/reference/README.md` §A4）——"固定根 + 顺序 chunk"与本节形态同构。
 - 磨损均衡的通用原则见 `docs/design/storage_controller_design_essentials.md §5.5`：
   P/E 有限 ⇒ 必须把擦除摊平。
 - **具体深度 32 / 8 / 2 / 4 是本仓自定**——公开资料没有对应的数值。

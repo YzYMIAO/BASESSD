@@ -2,7 +2,7 @@
 
 > 本文帮你**按任务只读该读的文档**。活跃权威文档在 [`design/`](design/)；
 > 已闭合 / 一次性 / 历史记录在 [`archive/`](archive/)（**日常不读**）；
-> 外部资料离线备份在 [`reference/`](reference/)。
+> 外部资料为 [`reference/`](reference/) 下的**链接清单**（PDF/HTML 原文不随仓库分发）。
 
 ## 按任务该读哪几个
 
@@ -35,7 +35,7 @@ docs/
 ├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史/UT 归档（数量随重构增长），见 archive/README.md
 ├── design/                    ← 活跃权威设计文档（18 个；阅读顺序见 design/README.md）+ known_iss/known_risks
 ├── guides/                    ← 环境 / 调试 / 开源发布操作指南（非设计）
-├── reference/                 ← 资料区：论文 / 网页链接清单（公开仓库不含 PDF/HTML，见 OS-03）
+├── reference/                 ← 资料区：论文 / 网页链接清单（不含 PDF/HTML 原文）
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
 ├── boot_flow.md               ← 固件启动流程（复位 → main）

@@ -14,7 +14,7 @@ FTL 层 = 映射 / GC / WL / journal / checkpoint / BBT / 掉电恢复。
 
 1. **先问「主流主控怎么实现这件事」，并找出处**（§〇）。
    出处层：`docs/reference/README.md`、`docs/design/storage_controller_learning.md`、
-   `docs/reference/pages/spdk_ftl.html`。⚠ **说不出出处就标「本仓自拟」**，不得写成「行业标准形态」。
+   SPDK FTL 官方文档 <https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4）。⚠ **说不出出处就标「本仓自拟」**，不得写成「行业标准形态」。
    ⚠ 主流本身分岔（**DRAM 型 vs DRAM-less**）—— 说清对齐的是哪一支。
 2. **读设计文档**：`docs/design/ftl_design.md` 对应章节的「N.1 最新策略」+「N.2 策略选取」。
    演进史查 `docs/design/ftl_revision_history.md`；历史细节查 `docs/archive/changelog/`。

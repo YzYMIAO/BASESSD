@@ -3852,10 +3852,10 @@
 
 | ID | 状态 | 一句话 | 最新验证 |
 |---|---|---|---|
-| RISK-REL-01 | 待后续 | 泄漏提交已在 `origin/main` 历史；旧 token 已吊销，待新公开仓 squash | 2026-11-17 用户确认吊销 |
-| RISK-REL-02 | 待后续 | 根 LICENSE/NOTICE 已加；ST 许可原文仍待补 | 2026-11-17 落地 Apache-2.0 + NOTICE |
-| RISK-REL-03 | 待后续 | 7 篇论文 PDF + 9 个网页存档的再分发权未确认 | 2026-11-17 代码核对 |
-| RISK-REL-04 | 待后续 | README 仅 290 B，构建入口与调试链接失效 | 2026-11-17 代码核对 |
+| RISK-REL-01 | 待后续 | 泄漏提交已在 `origin/main` 历史；旧 token 已吊销；用户裁决暂不公开，squash 推迟 | 2026-11-17 用户确认吊销 + 暂不公开 |
+| RISK-REL-02 | 已闭合 | 根 LICENSE/NOTICE + ST 组件许可原文均已补齐 | 2026-11-17 `third_party/stm32h743/LICENSE` |
+| RISK-REL-03 | 已闭合 | PDF/HTML 已移出仓库，改为链接清单 | 2026-11-17 `git rm` 16 文件，本地副本仓外 |
+| RISK-REL-04 | 已闭合 | README 已按清单重写（工作树，未提交） | 2026-11-17 重写，状态表按 R1 |
 | RISK-REL-05 | 已闭合 | `src/common` 零引用死代码约 1.07 万行 | 2026-11-17 已删除（构建三关通过） |
 
 ### 详情
@@ -3864,7 +3864,7 @@
 
 - **后果**：`docs/claude_code_usage.md:152` 的 `ANTHROPIC_AUTH_TOKEN` 由提交 `3ee9ef9` 引入并留在 git 历史；只在新提交删除文件，公开后任何人仍可从旧 commit 取出凭据。若仓库已推到公开远端，按已泄露处理。
 - **缓解**：文件已于 2026-11-17 从工作树删除（`git rm`，未提交）。泄漏提交 `3ee9ef9` **已在 `origin/main` 历史里**（`git merge-base --is-ancestor 3ee9ef9 origin/main` → 是）；远端仓库可见性本机无法判定（未装 `gh`），若为 public 则按已泄露处理。token 轮换是唯一可靠补救，历史重写只防继续传播。
-- **下一步**：① 旧 token 吊销已由用户确认（2026-11-17）；② 历史策略按清单方案 A：新公开仓用 `git switch --orphan` squash 首提交，私有仓历史保持不动——历史里的旧串已失效，但公开仓库不应携带凭据形态文本；③ 验收命令只能在新公开仓的干净克隆上跑——私有仓 `git log --all -G 'ark-…'` 永远命中。步骤见 `docs/guides/open_source_checklist.md` OS-01。
+- **下一步**：① 旧 token 吊销已由用户确认（2026-11-17）；② 用户 2026-11-17 裁决**暂不公开**，历史策略推迟：将来公开时按清单方案 A，新公开仓用 `git switch --orphan` squash 首提交，私有仓历史保持不动——历史里的旧串已失效，但公开仓库不应携带凭据形态文本；③ 验收命令只能在新公开仓的干净克隆上跑——私有仓 `git log --all -G 'ark-…'` 永远命中。步骤见 `docs/guides/open_source_checklist.md` OS-01。
 - **证据**：`docs/claude_code_usage.md:152`（删除前）；`git log --oneline -S 'ark-'` → `3ee9ef9`；`git merge-base --is-ancestor 3ee9ef9 origin/main` → 已推送。
 - **历史/验证**：
   - 2026-11-17 只读审计 → 命中一处凭据形态；HEAD 与 `.vscode/settings.json` 无其它命中。
@@ -3874,18 +3874,21 @@
 #### RISK-REL-02 项目许可证与 vendor 许可原文缺失
 
 - **后果**：根目录无 `LICENSE` / `COPYING`；`third_party/stm32h743` 无 LICENSE 文件，而 ST HAL 头文件声明“terms in the LICENSE file”；公开后默认版权保留，他人不能合法复制/修改，且容易误以为根 LICENSE 覆盖了 vendor。CMSIS 头是 Apache-2.0、TinyUSB 有 MIT LICENSE，但未汇总到 NOTICE。
-- **缓解**：2026-11-17 已落地根 `LICENSE`（Apache-2.0 原文 + 版权行）、`THIRD_PARTY_NOTICES.md`（逐组件归属）、`tests/framework/COPYING`（μnit 上游 MIT 原文）；TinyUSB 保留原 LICENSE，CMSIS 保留 SPDX 头。ST 许可原文仍缺，按文件头声明 AS-IS。
-- **下一步**：从取得该源码的 STM32Cube 包补 `third_party/stm32h743/LICENSE`；补上之前对外发布说明须写明“ST 组件许可原文待补”。README License 段已加，全文重写见 OS-04。
+- **缓解**：2026-11-17 已落地根 `LICENSE`（Apache-2.0 原文 + 版权行）、`THIRD_PARTY_NOTICES.md`（逐组件归属）、`tests/framework/COPYING`（μnit 上游 MIT 原文）；TinyUSB 保留原 LICENSE，CMSIS Core 保留 SPDX 头。本轮补 `third_party/stm32h743/LICENSE`：HAL 为 BSD-3-Clause，CMSIS Device / startup / system 为 Apache-2.0，文本取自上游仓库 LICENSE.md。
+- **下一步**：无；`THIRD_PARTY_NOTICES.md` 与 README License 段已同步。若后续升级 vendor 源码，按上游 LICENSE.md 复核文本。
 - **证据**：`git ls-files | grep -iE 'LICENSE|NOTICE|COPYING'` → `LICENSE` / `THIRD_PARTY_NOTICES.md` / `tests/framework/COPYING` / `third_party/tinyusb/LICENSE`；`third_party/stm32h743/hal/inc/stm32h7xx_hal.h:10-15`；`third_party/stm32h743/cmsis-core/cmsis_version.h:10`。
 - **历史/验证**：
   - 2026-11-17 只读审计 → 根许可证缺失、vendor 许可缺失确认。
-  - 2026-11-17 用户选定 Apache-2.0；LICENSE / NOTICE / μnit COPYING 已加；ST 原文仍缺（待补）。
+  - 2026-11-17 用户选定 Apache-2.0；LICENSE / NOTICE / μnit COPYING 已加。
+  - 2026-11-17 补 `third_party/stm32h743/LICENSE`（HAL BSD-3-Clause / CMSIS Device Apache-2.0），NOTICE 与 README 同步 → 闭合。
 
 #### RISK-REL-03 论文与网页存档的再分发权未确认
 
 - **后果**：`docs/reference/papers/` 7 个 PDF（MQSim / FEMU / LeaFTL / Amber / SoftSSD / SimpleSSD / zns-tools）与 `docs/reference/pages/` 9 个 HTML 存档被 git 跟踪；ACM/IEEE/USENIX 论文通常不允许随仓库再分发，公开仓库可能构成侵权。
-- **缓解**：`docs/reference/README.md` 已列题名、会议与 arXiv/URL；即使移除二进制，资料索引仍可查。
-- **下一步**：公开前 `git rm` PDF/HTML，把 README 改成纯链接清单；若已取得书面再分发许可，在 README 注明来源与许可。步骤见 OS-03。
+- **缓解**：2026-11-17 已 `git rm` 16 个文件（7 PDF + 9 HTML），本地副本移到仓外
+  `~/.local/share/soft_ssd-backup/reference-20261117/`；`docs/reference/README.md` 改为纯链接清单
+  （题名 / 出处 / URL / 用途），`docs/README.md` 与相关设计文档的本地路径引用同步改为 URL。
+- **下一步**：无（用户 2026-11-17 裁决移出仓库）。若将来取得书面再分发许可，再决定是否恢复本地副本。
 - **证据**：`git ls-files docs/reference | grep -E '\.(pdf|html)$'` → 16 个；`git ls-files -z docs/reference | xargs -0 du -cb | tail -1` → 约 7.3 MB。
 - **历史/验证**：
   - 2026-11-17 只读审计 → 7 PDF + 9 HTML，README 无版权说明。
@@ -3893,11 +3896,14 @@
 #### RISK-REL-04 README 不足以支撑公开使用
 
 - **后果**：根 `README.md` 仅 290 B，只给一条构建命令；其中 `docs/design/wsl_debug_environment.md` 已移至 `docs/guides/`，链接失效。公开读者无法判断架构、硬件假设、已验/未验范围与已知限制，容易把“能编译”误当“已验证”。
-- **缓解**：`docs/README.md` 与 `docs/design/*.md` 内容完整，但入口没有指向它们。
-- **下一步**：按 OS-04 重写 README（定位 / 架构 / 硬件 / 构建 / 烧写 / 状态表 / 已知限制 / 文档地图 / License）；状态表按 R1 逐项给证据；修失效路径。
-- **证据**：`README.md:1-10`；`docs/guides/wsl_debug_environment.md`；`git grep -n 'docs/design/wsl_debug_environment.md' -- README.md`。
+- **缓解**：已按 OS-04 重写 `README.md`（定位 / 架构 / 硬件 / 构建 / 烧写 / 状态表 / 已知限制 /
+  文档地图 / License / 反馈）；状态表按 R1 逐项给日期与证据；失效路径已改为
+  `docs/guides/wsl_debug_environment.md`。改动在工作树，**未提交**（R3）。
+- **下一步**：提交后按清单验收项复核干净克隆构建；用户裁决联系渠道为「仅 GitHub Issues」。
+- **证据**：`README.md`（重写后）；`docs/guides/wsl_debug_environment.md`。
 - **历史/验证**：
   - 2026-11-17 只读审计 → README 290 B，链接失效确认。
+  - 2026-11-17 执行 → README 重写，链接逐项核对存在。
 
 #### RISK-REL-05 `src/common` 零引用死代码
 
@@ -3971,3 +3977,6 @@
 |---|---|---|---|
 | RISK-DOC-01 | 2026-11-13 | 删除 ftl_api_usage.md，API 以 include/ftl/*.h 为准 | docs/archive/known_risks_batches.md |
 | RISK-REL-05 | 2026-11-17 | 删除 `src/common` 零引用死代码（约 1.07 万行）与 `controller_config.h` | 本文 §2AM 详情 |
+| RISK-REL-02 | 2026-11-17 | 补 `third_party/stm32h743/LICENSE`（HAL BSD-3-Clause / CMSIS Device Apache-2.0） | 本文 §2AM 详情 |
+| RISK-REL-03 | 2026-11-17 | PDF/HTML 移出仓库，`docs/reference/README.md` 改链接清单 | 本文 §2AM 详情 |
+| RISK-REL-04 | 2026-11-17 | README 按开源清单重写（工作树，未提交） | 本文 §2AM 详情 |

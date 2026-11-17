@@ -2311,7 +2311,7 @@ per-block 存是重复的。**v0.12 Policy B**（`cc09580`+`1927762`）已把前
 **② 数字双重过期。** 备注写「再省 96KB」；当前条目 20B（v0.56）× 4096 = **80KB**，且按 SB 索引
 （2048 条）只是 80KB → 40KB——省下的是**分辨率**而非重复。
 
-**③ 主流方向相反（两级结构）。** SPDK FTL（`docs/reference/pages/spdk_ftl.html`，本仓一手出处）
+**③ 主流方向相反（两级结构）。** SPDK FTL（<https://spdk.io/doc/ftl.html>，本仓一手出处；索引见 `docs/reference/README.md` §A4）
 是**两级**：band 级记 sequence ID / validity / write pointer / OPEN-FREE-CLOSE，底层仍是
 **per-block BIT**（"Valid map - bitmask of all the valid physical addresses"）。本仓
 `super_block_s`（SB 级）+ `ftl_block_t`（block 级）**逐项对应**，已对齐。改成按 SB 索引
@@ -2766,7 +2766,7 @@ CW 级映射迁移（波 2 序 2）与 v0.50~v0.60 的一连串元数据改造�
 
 | 出处 | 说的 GC 触发是什么 |
 |------|-------------------|
-| `reference/pages/spdk_ftl.html:180` | **按需**——「all of the bands contain some valid data and no band can be freed, so no writes can be executed anymore」 |
+| `spdk_ftl.html:180`（离线副本；原文 <https://spdk.io/doc/ftl.html>） | **按需**——「all of the bands contain some valid data and no band can be freed, so no writes can be executed anymore」 |
 | 同上 `:160` | nvcache 压缩的 **free-chunk 阈值**（水位） |
 | `reference/README.md:174`（dhara，DRAM-less） | 「没有复杂 GC，只有磨损均衡 + 坏块 + 日志」 |
 | `cw_level_mapping_design.md:445-465`（DFTL/LeaFTL/VPFTL） | DRAM-less 侧只讨论**有效性判定**（OOB 反向映射），触发同样只认空间压力 |
@@ -3125,7 +3125,7 @@ the first page of each block prior to performing any PROGRAM or ERASE operations
 - 仓内还存在**反方向**的无出处断言（`ftl_revision_history.md:1032`「行业标准：每 LUN
   独立 region 表」）⇒ 两个方向都被断言过，都无证据。
 - 唯一可能支持「单一 FTL 拥有全 LBA 空间」的**已备份**厂商文档（SPDK FTL，
-  `docs/reference/pages/spdk_ftl.html`）从未被引用于此。
+  `spdk_ftl.html` 离线副本；原文 <https://spdk.io/doc/ftl.html>）从未被引用于此。
 
 **裁决**（按 `ftl_optimization_plan.md:597` 明文允许的「**或**明确保留分片并登记理由」）：
 **保留分片模型**，理由如下，且**不**把它记为「与主流偏离」——
@@ -5597,7 +5597,8 @@ victim，运行期大部分时间不压缩。
 - 删除无调用者的 `allocator_alloc_log_block`。
 
 **依据**：SPDK FTL 把元数据放在独立区/独立介质（nvcache + 每 band 尾部 P2L），spare 在
-device formation 时从 surfaced capacity 扣除（`docs/reference/pages/spdk_ftl.html`）。
+device formation 时从 surfaced capacity 扣除（<https://spdk.io/doc/ftl.html>；索引见
+`docs/reference/README.md` §A4）。
 
 **状态**：编译零告警；**未上板**。介质版本 9→10 ⇒ 首启自动格式化是预期（用户已同意）。
 

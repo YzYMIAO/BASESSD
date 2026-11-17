@@ -474,7 +474,7 @@
 - **当前事实**：P3-3 学习型 L2P 压缩（LeaFTL 方向）未实现。
 - **影响**：L2P 内存/带宽压缩收益未拿到。
 - **下一步 / 判据**：工程量大，未排期。
-- **来源**：`docs/archive/ftl_optimization_plan.md` §8.2；`docs/reference/papers/LeaFTL.pdf`
+- **来源**：`docs/archive/ftl_optimization_plan.md` §8.2；<https://arxiv.org/pdf/2301.00072v1.pdf>（索引见 `docs/reference/README.md`）
 - **关联**：`RISK-L2P-*`
 - **历史/验证**：
   - （无板端记录）

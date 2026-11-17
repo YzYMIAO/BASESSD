@@ -21,10 +21,13 @@
   > in the root directory of this software component.
   > If no LICENSE file comes with this software, it is provided AS-IS.
 
-- **当前事实**：本仓库**没有**随附该 LICENSE 文件，因此按上述声明以 AS-IS 提供。
-- **待补**：从取得这份源码的 STM32Cube 包中把许可证原文放到
-  `third_party/stm32h743/LICENSE`。补上之前，对外发布说明必须写明“ST 组件许可原文待补”。
-  该缺口已登记为 `docs/design/known_risks.md` 的 `RISK-REL-02`。
+- 许可证（按上游 LICENSE.md 分组件）：
+  - `hal/`（STM32H7xx HAL Driver）— **BSD-3-Clause**
+  - `cmsis-device/`、`startup_stm32h743xx.s`、`system_stm32h7xx.c`（CMSIS Device）—
+    **Apache-2.0**
+- 许可原文：`third_party/stm32h743/LICENSE`（组件映射 + BSD-3-Clause 全文）；
+  Apache-2.0 全文见根目录 `LICENSE`（与上游文本一致）。
+- 修改说明：`system_stm32h7xx.c` 在本仓有注释性修改（中英对照），上游版权头保留。
 
 ## 3. CMSIS Core（Apache-2.0）
 

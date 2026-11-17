@@ -228,6 +228,12 @@ git grep -n 'SPDX-License-Identifier' third_party/stm32h743/cmsis-core | head
 
 **目标**：不在公开仓库再分发版权状态不明的 PDF/HTML。
 
+**状态**：2026-11-17 用户裁决**移出仓库**，已执行。`git rm` 7 PDF + 9 HTML；
+本地副本在 `~/.local/share/soft_ssd-backup/reference-20261117/`（仓外，7.3 MB）；
+`docs/reference/README.md` 已改为链接清单（题名 / 出处 / URL / 用途），
+`docs/README.md`、`usb_msc.md`、`ftl_design.md`、`ftl_revision_history.md`、`known_iss.md`
+中的本地路径引用已改为 URL。改动在工作树，**未提交**（R3）。
+
 **动作**：
 
 ```bash
@@ -485,6 +491,10 @@ git grep -n 'negative_test_framework.md|negative_coverage.md|negative_deferred_e
   引用，改成“内部参考”或不写路径。
 - 不要为了“看起来干净”删掉 `CLAUDE.md` 的规则正文；它是本项目区别于普通 demo 的部分。
 
+**裁决（2026-11-17）**：用户选择**全部保留**（`CLAUDE.md` + `.claude/skills/` + `.codex/skills/`）。
+理由：三者互相引用，全部保留时引用自洽；`.claude/settings.local.json` 已在 `.gitignore` 中，
+不入库。
+
 **验收**：
 
 ```bash
@@ -671,17 +681,17 @@ git ls-files -z | xargs -0 du -cb | tail -1
 | ID | 状态 | 执行人 | 证据（命令输出 / commit / 日志） | 备注 |
 |---|---|---|---|---|
 | OS-00 | 已完成 | Claude Code | `~/.local/share/soft_ssd-backup/soft_ssd-before-open-source-20261117.bundle`（18 MB，`git bundle verify` = "complete history"）+ `.commit`（HEAD 记录） | 未建 `open-source-prep` 分支，仍在 `main` |
-| OS-01 | 进行中 | Claude Code / 用户 | 已 `git rm docs/claude_code_usage.md`（未提交）；工作树凭据扫描 0 命中；`3ee9ef9` 确认已在 `origin/main`；**旧 token 已由用户确认吊销** | **待用户**：确认远端可见性；历史策略待公开推送前执行方案 A（squash 首提交） |
-| OS-02 | 进行中 | Claude Code / 用户 | 已加根 `LICENSE`（Apache-2.0）、`THIRD_PARTY_NOTICES.md`、`tests/framework/COPYING`（μnit MIT）；README License 段 | **待补**：`third_party/stm32h743/LICENSE` 原文（需从 STM32Cube 包取）；README 全文重写属 OS-04 |
-| OS-03 | 待办 |  |  |  |
-| OS-04 | 待办 |  |  |  |
-| OS-05 | 待办 |  |  |  |
-| OS-06 | 待办 |  |  |  |
-| OS-07 | 待办 |  |  |  |
-| OS-08 | 待办 |  |  |  |
-| OS-09 | 待办 |  |  |  |
-| OS-10 | 待办 |  |  |  |
-| OS-11 | 待办 |  |  |  |
+| OS-01 | 进行中 | Claude Code / 用户 | `f26c6a4` 删除 `docs/claude_code_usage.md`；工作树凭据扫描 0 命中；`3ee9ef9` 确认已在 `origin/main`；**旧 token 已由用户确认吊销** | **2026-11-17 用户裁决：暂不公开**；历史重写（方案 A：新仓 squash）推迟到公开前执行；`RISK-REL-01` 保持待后续 |
+| OS-02 | 已完成 | Claude Code / 用户 | `e6414b7` 加根 `LICENSE` / `THIRD_PARTY_NOTICES.md` / μnit `COPYING`；本轮补 `third_party/stm32h743/LICENSE`（HAL BSD-3-Clause + CMSIS Device Apache-2.0 映射与原文），NOTICE 与 README 同步 | 许可文本取自上游仓库 LICENSE.md（2026-11-17）；改动在工作树，**未提交** |
+| OS-03 | 已完成 | Claude Code / 用户 | `git rm` 7 PDF + 9 HTML；`git ls-files docs/reference` 只剩 `.md`；本地副本 `~/.local/share/soft_ssd-backup/reference-20261117/`；`docs/reference/README.md` 改链接清单；跨文档路径改 URL | 改动在工作树，**未提交**（R3）；2026-11-17 用户裁决「移出仓库」 |
+| OS-04 | 已完成 | Claude Code / 用户 | `README.md` 重写：定位 / 架构 / 硬件 / 构建 / 烧写 / 状态表 / 已知限制 / 文档地图 / License / 反馈；失效路径已修 | 改动在工作树，**未提交**（R3）；状态表按 R1 标注已验证范围 |
+| OS-05 | 已完成 | Claude Code | `f26c6a4`：删除 `src/common/{data_structure,algorithm,sort.c}`、`include/common/data_structure`、`config/controller_config.h`；`make all` / `make release` / `make tests UT=FTL` 零新告警 | 未上板（删死代码不改建链/位图/地址，R2 不需上板） |
+| OS-06 | 已完成 | Claude Code | `f26c6a4`：删除遗留 `test/`、两份 `convert_encoding.py`、`sh/open-ubuntu.bat`、`.clang-format_array` 等 | 同上 |
+| OS-07 | 已完成 | Claude Code | `f26c6a4`：`architecture.md` 重写；`ut_tree_restructure.md` 移入 `archive/`；`nand_model.md` 并入 `hardware_contract.md` 后与 `ftl_design.md` 桩一并删除；README/docs 链接同步 | 同上 |
+| OS-08 | 已完成 | Claude Code | `f26c6a4`：负例框架入 `testing_guide.md §12`，未闭合台账入三层 UT 设计 §7.2；`docs/design/README.md` 新建；`docs/README.md` 导航同步 | 同上 |
+| OS-09 | 已完成 | 用户 / Claude Code | 2026-11-17 用户裁决**全部保留**：`CLAUDE.md` + `.claude/skills/` + `.codex/skills/`；`settings.local.json` 已 ignore | 无需改动代码 |
+| OS-10 | 进行中 | Claude Code | 已建 `.github/workflows/build.yml`（ubuntu-22.04 + arm-none-eabi 10.3 + clang-format-15；跑 `make all` / `make release` / `make tests UT=FTL`） | **未在 GitHub Actions 上跑过**（仓库未公开）；本地等价命令已通过 |
+| OS-11 | 待办 |  |  | 用户裁决**暂不公开**；未打 tag、未发布 |
 | OS-12 | 不适用 |  |  | 无可选体积目标时不执行 |
 | OS-13 | 不适用 |  |  | 按 H49/C2 不按行数拆分 |
 
