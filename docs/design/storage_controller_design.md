@@ -13,14 +13,14 @@
 
 ## 阅读路径
 
-| 你的目的 | 从这里开始 |
+| 阅读目的 | 从这里开始 |
 |---|---|
 | 快速总览 | §〇 一页速览 |
 | 查器件 / 协议 | §二 器件、§三 NAND 接口 |
 | 查 FC / FTL / HIL | §四 FCC、§五 FTL、§六 HIL |
 | 查调度 / 可靠性 | §七 调度与 QoS、§八 可靠性 |
 | 做设计审查 | §十一 取舍 checklist |
-| 找开源项目 / 论文 | 附录参考资料 |
+| 找开源项目 / 论文 | [`../reference/README.md`](../reference/README.md)（链接 + 逐份分析） |
 
 ---
 
@@ -767,111 +767,34 @@ NAND die（写入时可能再叠 on-die ECC）
 
 # 附录：参考资料
 
-## 主要项目与资料
+> 外部资料的完整链接清单、逐份分析与获取失败登记统一在
+> [`../reference/README.md`](../reference/README.md)。本附录只保留「按层该看什么」的
+> 设计结论；需要原文/代码时按 reference 的条目 ID（A1~F2）取用。
 
-### 真控制器固件平台（完整分层的对照）
+## 按层的对照结论
 
-| 项目 | 覆盖层 | 学到什么 | 状态 |
-|---|---|---|---|
-| **Cosmos+ OpenSSD** | HIL+FTL+FCC+DRAM 全栈 | `host_lld.c`=HIL（NVMe 队列/门铃/DMA）· `address_translation.c`=FTL · `request_schedule/allocation.c`=调度 · `garbage_collection.c`=GC。**唯一能对照你 §26 完整分层的代码** | 活跃 |
-| **OpenSSD Jasmine** | FTL 为主 | 四种 FTL 参考实现：**Greedy**（页级+Greedy GC，GC 祖师爷）· **FASTer**（混合）· **DAC**（冷热分离）· Tutorial | 老（2011，GPLv3）但经典 |
-| **SoftSSD** | HIL+FCC（软件化） | 大部分组件在 ARM 上跑软件、只留 PCIe PHY+NAND 接口在 FPGA；事件驱动模型，可用调试器看内部状态 | 同名项目，值得读论文 |
-| **OpenExpress / BlueFlash** | FCC 硬件化 | 全硬件自动化 NVMe 框架 / 可重构 flash 控制器（MIT） | 研究平台 |
-
-### 生产级用户态 FTL（现代工程取舍的对照）
-
-**SPDK `spdk_ftl`**（CSAL 的核心，真在生产里跑）。它和你正好构成对照：
-
-| 维度 | SPDK FTL | 本仓 |
+| 层 / 主题 | 对照对象（reference ID） | 结论 |
 |---|---|---|
-| L2P 驻留 | 只缓存最近用的 2 GiB，其余换出到 cache 设备 | **DRAM-less**：SRAM 数组 + NAND 兜底 |
-| 元数据 | **P2L 存在每个 band 尾部**，按 sequence ID 顺序读回重建 L2P | journal + checkpoint + BBT |
-| 写组织 | 1 GiB band，顺序写（默认 1 MiB 单元） | 块级/plane 级分配 |
-| 状态机 | band `FREE → OPEN → CLOSING → CLOSED` | FTL 状态机 |
+| 完整分层 | Cosmos+ OpenSSD（A1） | 唯一能对照本仓 HIL+FTL+FCC 全栈的开源固件；看 host 接口 / 地址转换 / 调度 / GC 的边界 |
+| FTL 算法 | Jasmine（A2） | Greedy / FASTer / DAC / Tutorial 四种参考实现；传统 DRAM 型，做取舍对照 |
+| 软件定义固件 | SoftSSD（A3） | 与本仓最接近的原型；看分层与事件驱动模型 |
+| 生产级 FTL | SPDK FTL（A4） | L2P 驻留与 P2L/band 的工业级参照；用其 DRAM 开销反照本仓 DRAM-less |
+| 仿真 / 分层模型 | SimpleSSD / Amber（B3/B4） | HIL / FTL / PAL 分层与资源清单，校验本仓分层完整性 |
+| 队列 / 调度 | MQSim（B2） | 多队列 / 门铃 / 仲裁建模参照 |
+| FCC 硬件 | OpenCores NAND Controller（C1）、NandFlashController（C2）、BlueFlash（C3）、OCOWFC（C4） | 硬 FCC 的寄存器 / FIFO / 队列形态；BlueFlash 把 GC/WL 上移、总线/ECC 留在控制器 |
+| 极简 FTL | SPIFTL / dhara（D2） | 小内存 FTL 的最小机制集；dhara 的完美 WL 与掉电回滚可对照 |
+| 映射缓存 | AppL（D4） | DFTL fine/coarse cache 与 CMT 整页写回的出处 |
+| 规范 / 生态 | ONFI（E1）、Zoned Storage（E2） | 协议 / 时序以原文为准；ZNS 生态对照 HIL 的约束表达 |
 
-**这是最值得精读的现代 FTL**：它的每一个选择都能照出你 DRAM-less 路线的差异。
+## 设计判断（不在 reference 重复）
 
-### 仿真 / 模拟器（分层模型参考）
-
-| 项目 | 定位 | 对你的价值 |
-|---|---|---|
-| **SimpleSSD / Amber** | gem5 全系统，**HIL / FTL / PAL 分层** | **你的分层几乎就是它的翻版**（你有 HIL/FTL/FCC，它把硬件并行抽象成 PAL）——用它验证你的分层划分是否「标准」 |
-| **FEMU** | QEMU 里模拟 NVMe SSD（真延时），含 FTL，支持 OpenChannel/ZNS | 想在 Linux 里端到端跑一遍 FTL 逻辑时的试验台 |
-| **MQSim** | 多队列 NVMe 精确建模（误差 8–18%） | 队列/门铃/多流调度建模参考 |
-| **ConfZNS / ConfZNS++** | 基于 FEMU 的 ZNS 模拟器，对真机验证过 | 往 ZNS 方向看时 |
-
-### NAND 控制器 RTL（硬 FCC 对照）
-
-⚠ **「ONFI + Verilog + 开源 + 活跃」四者同时满足的极少**。
-
-| 项目 | 语言/许可 | 备注 |
-|---|---|---|
-| **OpenCores NAND Controller** | VHDL / LGPL | 唯一明确 **ONFI compliant** 的完整开源控制器，有规格文档 + Avalon-MM |
-| `cjhonlyone/NandFlashController` | Verilog / GPL-3.0 | AXI 接口、同步模式 |
-| Lattice RD1055 / Xilinx `nandpsu` | 参考设计 / 驱动 | ⚠ Xilinx 的 RTL 专有，GitHub 上只有**裸机驱动** |
-
-**你在 STM32 上做的是「软 FCC」**（FMC + 引擎状态机）——对比硬 FCC 能看清哪些事硬件替你做了、哪些是你的软件在补。
-
-### 嵌入式小规模 FTL（极简方案对照）
-
-- **`earlephilhower/SPIFTL`** —— MCU 级 SPI flash 静态磨损均衡。**省略了坏块管理/并行/保持性扫描** ⇒ 可当「最小 FTL 能省到什么程度」的反面教材
-- **`dhara`**（`dlbeer/dhara`，MIT）—— 低内存系统的 NAND FTL。设计点很干净：**完美磨损均衡**（任意两块擦除次数差 ≤ 1）、`write()`/`trim()` **原子 + 掉电回滚到最后同步点**、**不占用 OOB**（全部留给 ECC）、启动与所有操作 **O(log n) 最坏**。⚠ 上游已停维护（最后提交 4 年多前）；`espressif/dhara` 是活跃的封装
-- **F2FS** —— 文件系统层不是 FTL，但**分段 + GC + ZNS 感知**思路对 Allocator 有参考价值
-- **ZNS 生态**：`libzbd` / `zonefs` / `zns-tools` / BTRFS / XFS
-- ⚠ **Open-Channel SSD / LightNVM 已从 Linux 移除（5.15）**，被 ZNS 取代 —— 别再按 OCSSD 方向投入
-
-### 规范与论文（一手资料）
-
-| 类型 | 来源 |
-|---|---|
-| **器件规范** | ONFI 各版本（onfi.org）· JEDEC JESD230 · 具体型号 datasheet（如 Micron MT29F4G08） |
-| **经典论文** | FAST / MSST / HotStorage / SYSTOR 的 SSD 相关论文；**DFTL**、**Greedy FTL** 原始论文 |
-| **研究前沿** | `LeaFTL`（学习式 L2P，用线性回归预测映射）· FDP（Flexible Data Placement）· ZNS+ |
-
-> **一手规范 > 论文 > 别人代码 > 二手博客**。任何「协议要求……」的说法，先回去查规范原文（本仓曾吃过凭记忆断言协议的亏）。
-
----
-
-## 速查链接
-
-**真固件平台**
-- Cosmos+ OpenSSD — https://github.com/Cosmos-OpenSSD/Cosmos-plus-OpenSSD （[文档](https://cosmos-plus-openssd-doc.readthedocs.io/en/latest/OpenSSD/OpenSSD.html)）
-- OpenSSD Jasmine — https://github.com/openssd/jasmine （GPLv3，含 Greedy/FASTer/DAC/Tutorial FTL）
-- SoftSSD — https://github.com/Jimx-/softssd （[论文 FITEE 2023](https://jzus.zju.edu.cn/article.php?doi=10.1631%2FFITEE.2200456)）
-
-**生产级 FTL**
-- SPDK FTL — https://spdk.io/doc/ftl.html
-
-**仿真器**
-- FEMU — https://github.com/vtess/FEMU （[FAST'18](https://www.usenix.org/system/files/conference/fast18/fast18-li.pdf)）
-- MQSim — https://github.com/CMU-SAFARI/MQSim （C++/MIT，[FAST'18](https://www.usenix.org/system/files/conference/fast18/fast18-tavakkol.pdf)）
-- SimpleSSD / Amber — [论文](https://arxiv.org/pdf/1705.06419) / [Amber](https://arxiv.org/pdf/1811.01544)
-- ConfZNS — https://github.com/DKUStarLab/ConfZNS
-
-**NAND 控制器 RTL**
-- OpenCores ONFI NAND Controller — https://opencores.org/projects/nand_controller （VHDL）
-- NandFlashController — https://github.com/cjhonlyone/NandFlashController （Verilog/AXI）
-- OCOWFC（Open-Channel Open-Way Flash Controller）— https://github.com/yhqiu16/OCOWFC
-  （FPL 2021；cache-mode pipelining + 双级调度器；论文 https://ieeexplore.ieee.org/abstract/document/9556350）
-
-**NAND 命令序列（cache read/program 的展开）**
-- Linux MTD rawnand sequential cache read（`31h`/`3Fh`，commit `003fe4b`）—
-  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011
-  （镜像 https://git.embedded.cherry.de/puma-linux.git/commit/drivers/mtd/nand/raw?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011）
-- ⚠ cache program（49h/44h/48h）**没有**找到完整开源实现；权威依据是 Micron MTG Table 18 /
-  Figure 74 的 FAILC（见 `docs/reference/README.md` §F2）
-
-**嵌入式 FTL**
-- SPIFTL — https://github.com/earlephilhower/SPIFTL
-- dhara — https://github.com/dlbeer/dhara
-
-**规范 / 生态**
-- ONFI — https://onfi.org/specifications/
-- Zoned Storage — https://zonedstorage.io/docs/introduction/linux-ecosystem
-- zns-tools — https://github.com/stonet-research/zns-tools
-
-**研究前沿**
-- LeaFTL — https://arxiv.org/pdf/2301.00072v1.pdf
+- **OpenExpress / BlueFlash**：FCC 硬件化的对照；本仓是 STM32 上的「软 FCC」，
+  重点看哪些事硬件替本仓做了、哪些是软件在补。
+- **F2FS**：文件系统层不是 FTL，但分段 + GC + ZNS 感知对 Allocator 有参考价值。
+- **经典与前沿**：DFTL / Greedy FTL 是映射与 GC 的原始参照；LeaFTL、FDP、ZNS+ 属研究
+  前沿，按需跟踪。
+- **一手规范 > 论文 > 别人代码 > 二手博客**：任何「协议要求……」先查规范原文
+  （本仓曾吃过凭记忆断言协议的亏）。
 
 ---
 
@@ -887,6 +810,5 @@ NAND die（写入时可能再叠 on-die ECC）
 | 本仓 FC/NAND 设计 | [`fc_nand_design.md`](fc_nand_design.md) |
 | 本仓 FTL 设计 | [`ftl_design.md`](ftl_design.md)、[`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md) |
 | FTL 优化方向 | [`../archive/ftl_optimization_plan.md`](../archive/ftl_optimization_plan.md) |
-| 参考资料 | 本文附录 |
-| 离线资料索引 | [`../reference/README.md`](../reference/README.md) |
+| 参考资料（链接 / 分析） | [`../reference/README.md`](../reference/README.md) |
 | 架构 / 硬件契约（含 NAND 模型） | [`../architecture.md`](../architecture.md)、[`../hardware_contract.md`](../hardware_contract.md) |

@@ -26,13 +26,12 @@ docs/reference/
 
 | 题名 | 出处 | 链接 | 本仓用途 |
 |---|---|---|---|
-| FEMU: A Firmware-based Emulator for Fast and Accurate SSD Emulation | FAST '18 | <https://www.usenix.org/system/files/conference/fast18/fast18-li.pdf> | 固件级 SSD 仿真；NAND 时序 / 并行度建模 |
-| MQSim: A Framework for Enabling Realistic Studies of Modern Multi-Queue SSD Devices | FAST '18 | <https://www.usenix.org/system/files/conference/fast18/fast18-tavakkol.pdf> | 多队列 / 门铃 / 调度建模 |
-| SimpleSSD: Modeling Solid State Drives for Holistic System Simulation | arXiv:1705.06419 | <https://arxiv.org/pdf/1705.06419> | HIL / FTL / PAL 分层对照 |
-| Amber: Enabling Precise Full-System Simulation with Detailed Modeling of All SSD Resources | arXiv:1811.01544 | <https://arxiv.org/pdf/1811.01544> | SSD 内部资源穷举清单 |
-| LeaFTL: A Learning-Based Flash Translation Layer for Solid-State Drives | arXiv:2301.00072 | <https://arxiv.org/pdf/2301.00072v1.pdf> | DRAM-less / 小内存 FTL 思路 |
-| 基于 SoftSSD 的快速固态硬盘固件原型开发（中文，7 页） | FITEE 2023 | <https://jzus.zju.edu.cn/article.php?doi=10.1631%2FFITEE.2200456> | 软件定义 SSD 固件原型 |
-| zns-tools 配套论文 | GitHub | <https://github.com/stonet-research/zns-tools> | ZNS 工具链（参考价值有限） |
+| FEMU: A Firmware-based Emulator for Fast and Accurate SSD Emulation | FAST '18 | <https://www.usenix.org/system/files/conference/fast18/fast18-li.pdf> | [B1](#ref-b1) 固件级 SSD 仿真；NAND 时序 / 并行度建模 |
+| MQSim: A Framework for Enabling Realistic Studies of Modern Multi-Queue SSD Devices | FAST '18 | <https://www.usenix.org/system/files/conference/fast18/fast18-tavakkol.pdf> | [B2](#ref-b2) 多队列 / 门铃 / 调度建模 |
+| SimpleSSD: Modeling Solid State Drives for Holistic System Simulation | arXiv:1705.06419 | <https://arxiv.org/pdf/1705.06419> | [B3](#ref-b3) HIL / FTL / PAL 分层对照 |
+| Amber: Enabling Precise Full-System Simulation with Detailed Modeling of All SSD Resources | arXiv:1811.01544 | <https://arxiv.org/pdf/1811.01544> | [B4](#ref-b4) SSD 内部资源穷举清单 |
+| LeaFTL: A Learning-Based Flash Translation Layer for Solid-State Drives | arXiv:2301.00072 | <https://arxiv.org/pdf/2301.00072v1.pdf> | [D1](#ref-d1) DRAM-less / 小内存 FTL 思路 |
+| 基于 SoftSSD 的快速固态硬盘固件原型开发（中文，7 页） | FITEE 2023 | <https://jzus.zju.edu.cn/article.php?doi=10.1631%2FFITEE.2200456> | [A3](#ref-a3) 软件定义 SSD 固件原型 |
 
 ### 外部 datasheet（未本地存档）
 
@@ -49,26 +48,46 @@ docs/reference/
 |---|---|---|
 | [T10 SBC-3 草案 03-388r1](https://t10.org/ftp/t10/document.03/03-388r1.pdf) §5.26 Table 6/7（WRITE(10)） | CDB **byte 1 位 3 = FUA**（位 7:5 WRPROTECT、位 4 DPO、位 1 FUA_NV）。**FUA=1** 时「设备不得在逻辑块真正写到介质之前返回 GOOD」；FUA=0 可写缓存即返回，后续错误走 deferred error | `known_open_items.md` RISK-USB-05（本仓**有意忽略** FUA：靠主机 fsync 的 SYNCHRONIZE CACHE 做持久性屏障；此条只记录被忽略位的语义） |
 | [NVM Express NVM Command Set Specification（1.0e / 1.1）](https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-1.0e-2024.07.29-Ratified.pdf) | ① Identify Namespace 的 **DLFEAT**（bits 2:0）规定**去分配 / 未写过 LBA** 的读值：`000b` = 全 0h 或全 FFh（实现自选）、`001b` = 全 0h、`010b` = 全 FFh；② Error Recovery feature（FID 05h）**CDW11 bit 16 = DULBE**（Deallocated or Unwritten Logical Block Error Enable，默认 0）：置 1 时读去分配区间**报错**。⇒ 主流是**命名空间级策略**，不是 per-LBA 持久丢失标记 | `docs/design/known_open_items.md` RISK-CACHE-28（本仓重启后失败 LBA 读零 = DLFEAT `001b` 行为） |
+| [ONFI Specifications](https://onfi.org/specifications/) | 器件命令集与时序的权威来源；具体版本按器件支持选择 | [E1](#ref-e1)；`include/nand/onfi_1_0.h` |
 
 ### 网页
 
 | 主题 | 链接 |
 |---|---|
-| SPDK Flash Translation Layer 官方文档 | <https://spdk.io/doc/ftl.html> |
-| Linux Zoned Storage Ecosystem | <https://zonedstorage.io/docs/introduction/linux-ecosystem> |
-| ZoneFS 内核文档 | <https://docs.kernel.org/filesystems/zonefs.html> |
-| OpenCores NAND Controller 工程页 | <https://opencores.org/projects/nand_controller> |
-| Cosmos+ OpenSSD 文档 | <https://cosmos-plus-openssd-doc.readthedocs.io/en/latest/OpenSSD/OpenSSD.html> |
-| Cosmos+ 固件代码 / 软件层 / 硬件层 / NVMe 页 | 同上文档站子页（正文很薄，实质内容在 GitHub 仓库） |
+| [A4](#ref-a4) SPDK Flash Translation Layer 官方文档 | <https://spdk.io/doc/ftl.html> |
+| [E2](#ref-e2) Linux Zoned Storage Ecosystem | <https://zonedstorage.io/docs/introduction/linux-ecosystem> |
+| [E2](#ref-e2) ZoneFS 内核文档 | <https://docs.kernel.org/filesystems/zonefs.html> |
+| [C1](#ref-c1) OpenCores NAND Controller 工程页 | <https://opencores.org/projects/nand_controller> |
+| [A1](#ref-a1) Cosmos+ OpenSSD 文档 | <https://cosmos-plus-openssd-doc.readthedocs.io/en/latest/OpenSSD/OpenSSD.html> |
+| [A1](#ref-a1) Cosmos+ 固件代码 / 软件层 / 硬件层 / NVMe 页 | 同上文档站子页（正文很薄，实质内容在 GitHub 仓库） |
+| [E3](#ref-e3) zns-tools | <https://github.com/stonet-research/zns-tools> |
+
+### 开源代码仓库（按分析条目 ID）
+
+| ID | 仓库 | 用途 |
+|---|---|---|
+| [A1](#ref-a1) | <https://github.com/Cosmos-OpenSSD/Cosmos-plus-OpenSSD> | HIL+FTL+FCC 全栈固件对照 |
+| [A2](#ref-a2) | <https://github.com/openssd/jasmine> | 四种 FTL 参考实现（GPLv3） |
+| [A3](#ref-a3) | <https://github.com/Jimx-/softssd> | 软件定义 SSD 固件原型 |
+| [B1](#ref-b1) | <https://github.com/vtess/FEMU> | QEMU 固件级 SSD 仿真 |
+| [B2](#ref-b2) | <https://github.com/CMU-SAFARI/MQSim> | 多队列 SSD 仿真 |
+| [B5](#ref-b5) | <https://github.com/DKUStarLab/ConfZNS> | ZNS 仿真 |
+| [C2](#ref-c2) | <https://github.com/cjhonlyone/NandFlashController> | Verilog + AXI NAND 控制器 |
+| [C4](#ref-c4) | <https://github.com/yhqiu16/OCOWFC> | 开源 FPGA NAND 控制器 |
+| [D2](#ref-d2) | <https://github.com/earlephilhower/SPIFTL> | MCU 级极简 FTL |
+| [D2](#ref-d2) | <https://github.com/dlbeer/dhara> | 低内存 NAND FTL |
+| [D4](#ref-d4) | <https://github.com/postech-caoslab/AppL> | DFTL fine/coarse cache 参考 |
+| [E3](#ref-e3) | <https://github.com/stonet-research/zns-tools> | ZNS 工具链 |
 
 ---
 
 ## 二、逐份分析
 
-按五类分。**价值**一栏直接对标本仓北极星（FC 分层 + 队列/门铃/完成）。
+按六类分（A~F）。**价值**一栏直接对标本仓北极星（FC 分层 + 队列/门铃/完成）。
 
 ### A. 开源主控 / 固件（最贴近「主控固件长什么样」）
 
+<a id="ref-a1"></a>
 #### A1. Cosmos+ OpenSSD（文档站与源码）
 
 - **是什么**：韩国高校主导的开源 **NVMe SSD 控制器平台**——真实 FPGA 板 + 一套裸机固件。
@@ -79,25 +98,32 @@ docs/reference/
 - ⚠ **存档质量**：官方文档站是**空壳**——抓下来的 4 个子页正文各只有 ~850 字，基本是导航
   框架，实质内容全在 **GitHub 仓库代码**里（本目录未克隆仓库）。想读实质内容得看源码，
   不是看文档。
+- **代码入口**：`host_lld.c` = HIL（NVMe 队列/门铃/DMA）；`address_translation.c` = FTL；
+  `request_schedule/allocation.c` = 调度；`garbage_collection.c` = GC。
 - **怎么读**：把它当「另一种分层切法」看，别当规范看。
 
+<a id="ref-a2"></a>
 #### A2. OpenSSD Jasmine（**未备份**，见 §三）
 
 - **是什么**：OpenSSD 的**纯软件 FTL 参考实现**，GPLv3，含 Greedy / FASTer / DAC / Tutorial
-  四套 FTL 算法。
+  四套 FTL 算法；2011 年的老项目，但仍是经典教材。
 - **对本项目的价值**：**FTL 算法侧的现成教材**——GC 策略、地址映射（页级/块级/混合）的实现
   范式。本仓 FTL 是 DRAM-less + CLOCK + journal 路线，Jasmine 是传统 DRAM 型，正好做**取舍
-  对照**（它为什么敢常驻大表，你为什么不敢）。
+  对照**（它为什么敢常驻大表，本仓为什么不敢）。
 - **为什么没备份**：文档站在 Vercel 机器人墙后面，curl 与 WebFetch 都取不到（见 §三）。
 
+<a id="ref-a3"></a>
 #### A3. SoftSSD（FITEE 2023）
 
 - **是什么**：**软件定义的 SSD 固件原型**——把固件做成可快速迭代的原型框架（中文论文，
   7 页，好读）。
+- **形态**：大部分组件在 ARM 上跑软件，只留 PCIe PHY + NAND 接口在 FPGA；事件驱动，
+  可用调试器看内部状态。与本仓同名，注意区分。
 - **对本项目的价值**：**最像本仓的一份**。「用软件原型做固件、跑在真实 NAND 上」的动机与
   方法，和本仓 soft_ssd 的思路高度重合。看它怎么组织固件分层、怎么定义「原型」的边界。
 - **怎么读**：先读这份，它最短、最贴题。
 
+<a id="ref-a4"></a>
 #### A4. SPDK FTL（官方文档）——**内容最实**
 
 - **是什么**：Intel **CSAL（Cloud Storage Acceleration Layer）** 的核心组件，一个
@@ -107,6 +133,12 @@ docs/reference/
   - 提到 **L2P 占 DRAM 量**（<16TiB 用 4B/LBA，更大用 8B/LBA）——这正是**本仓 DRAM-less
     路线要对抗的东西**；
   - **P2L / nvcache / chunk / recovery** 等机制。
+- **与本仓的对照点**：
+  - L2P 驻留：只缓存最近用的 2 GiB，其余换出到 cache 设备；本仓是 SRAM 数组 + NAND 兜底。
+  - 元数据：P2L 存在每个 band 尾部，按 sequence ID 顺序读回重建 L2P；本仓是
+    journal + checkpoint + BBT。
+  - 写组织：1 GiB band、顺序写（默认 1 MiB 单元）；本仓是块级 / plane 级分配。
+  - 状态机：band `FREE → OPEN → CLOSING → CLOSED`；本仓是 FTL 状态机。
 - **对本项目的价值**：**L2P 表设计 + GC 缓冲的工业级参照**。本仓 FTL 的核心矛盾就是
   「L2P 表放不进 DRAM」，SPDK FTL 把 L2P 内存占用明码标价，是绝佳的反面对照——**看它花了
   多少 DRAM，就知道本仓省下的是什么**。
@@ -117,46 +149,60 @@ docs/reference/
 > 这一类对**本仓当前阶段价值最低**——本仓已在真实 STM32H743 + MT29F4G08 上跑。
 > 但它们是**「主控内部怎么建模」的知识源**：时序模型、并行度模型、队列模型。
 
+<a id="ref-b1"></a>
 #### B1. FEMU（FAST '18）
 - **是什么**：**基于 QEMU 的固件级 SSD 仿真器**（FAST '18）。支持 blackbox / whitebox，
   NVMe、ZNS 等。ConfZNS 就是建在它上面的。
 - **价值**：看它如何把 **NAND 时序、通道/way 并行、队列**抽象成可配置模型——本仓 NAND
   引擎的时序约束（tR/tPROG/tERASE）建模可以参考它的参数化方式。
 
+<a id="ref-b2"></a>
 #### B2. MQSim（FAST '18）
 - **是什么**：CMU-SAFARI 的 **多队列 SSD 仿真框架**（FAST '18），C++/MIT，NAND 时序模型
-  非常细。
+  非常细；对真机误差约 8~18%。
 - **价值**：**队列/调度**的建模参照。本仓有 SQ/HSQ/CQ + 门铃 + 完成，MQSim 的 multi-queue
   仲裁模型可对照——尤其「高优先级队列怎么抢低优先级」这块。
 
+<a id="ref-b3"></a>
 #### B3. SimpleSSD（arXiv:1705.06419）
-- **是什么**：**全系统 SSD 仿真**（arXiv:1705.06419），FTL + NAND 模型一体。
+- **是什么**：**gem5 全系统 SSD 仿真**（arXiv:1705.06419），FTL + NAND 模型一体。
 - **价值**：FTL 与 NAND 模型的分层接口设计。
 
+<a id="ref-b4"></a>
 #### B4. Amber（arXiv:1811.01544）
 - **是什么**：**全系统仿真中精确建模 SSD 全部资源**（arXiv:1811.01544）。
 - **价值**：比 SimpleSSD 更细的资源建模——DRAM/控制器/后端。看它「SSD 内部资源」清单，
   可当本仓 FC 资源账（命令池/描述符池/buffer 池）的**穷举对照表**。
 
+<a id="ref-b5"></a>
 #### B5. ConfZNS（**未备份**，见 §三）
 - **是什么**：建在 FEMU 上的 **ZNS SSD 仿真器**（SYSTOR '23），特色是 **zone→PU 的多种
-  映射**（SU/MU/FU-zone），用多逻辑时钟建模 PU 争用，对真机 ~8% 误差。
+  映射**（SU/MU/FU-zone），用多逻辑时钟建模 PU 争用，对真机 ~8% 误差；后继 **ConfZNS++**
+  可访问性更好。
 - **价值**：ZNS 方向；对本仓（传统 NAND FTL）参考价值有限。
 
 ### C. 真实硬件 RTL（看主控「硬件那一半」怎么写）
 
+<a id="ref-c1"></a>
 #### C1. OpenCores ONFI NAND Controller（OpenCores 工程页）
-- **是什么**：**VHDL 的 ONFI NAND 控制器 IP**（OpenCores 工程）。
+- **是什么**：**VHDL / LGPL 的 ONFI NAND 控制器 IP**（OpenCores 工程）；有规格文档 +
+  Avalon-MM 接口，是少见的明确 **ONFI compliant** 完整开源控制器。
 - **价值**：**本仓 FCC（硬件）那一层的 RTL 对照**。§26 说 FC 要「有对应硬件寄存器表」——
   这份 RTL 就是「真硬件 FCC 长什么样」的样本：命令寄存器、状态寄存器、数据 FIFO 怎么摆。
-  ⚠ 注意是 **ONFI 控制器**（管时序/ECC 的物理层），不含 FTL。
+  ⚠ 注意是 **ONFI 控制器**（管时序/ECC 的物理层），不含 FTL。本仓在 STM32 上做的是
+  「软 FCC」（FMC + 引擎状态机），对比硬 FCC 能看清哪些事硬件替本仓做了。
 - **怎么读**：拿它的寄存器表比对本仓 FC 对外函数——正是 §26.3 的判据动作。
 
+<a id="ref-c2"></a>
 #### C2. NandFlashController（**未备份**，见 §三）
-- **是什么**：`cjhonlyone/NandFlashController`，**Verilog + AXI** 的 NAND 控制器。
+- **是什么**：`cjhonlyone/NandFlashController`，**Verilog / GPL-3.0 + AXI** 的 NAND 控制器，
+  支持同步模式。
 - **价值**：与 C1 同类（真硬件 FCC 的 RTL 样本），但**接口是 AXI**——看一个 NAND 控制器怎么
   挂上片上总线、寄存器/命令怎么经总线访问，可比对本仓 FC 与 CPU 的交互形态。
+- **补充**：Lattice RD1055 / Xilinx `nandpsu` 只有参考设计或裸机驱动，RTL 不开放，不能当
+  开源对照。
 
+<a id="ref-c3"></a>
 #### C3. BlueFlash（**未备份**，MIT/BlueDBM，见 §三）
 - **是什么**：MIT CSAIL **BlueDBM**（分布式闪存存储、面向大数据分析）里的**可重构闪存控制器**。
   硬件：Xilinx **VC707** 载板（Virtex-7，走 PCIe）+ **FMC** 接口 + 闪存板上一颗**独立
@@ -172,6 +218,7 @@ docs/reference/
 - **怎么读**：重点读它的**功能划分**段落（谁在控制器、谁在软件），不是读它的 PCIe 细节。
 - **为什么没备份**：MIT DSpace 的 PDF 被 **AWS WAF 人机验证**拦截（见 §三）。
 
+<a id="ref-c4"></a>
 #### C4. OCOWFC（Open-Channel Open-Way Flash Controller，**未备份**）
 
 - **是什么**：开源 FPGA NAND 控制器（FPL 2021，`yhqiu16/OCOWFC`），支持 channel / way / plane
@@ -185,18 +232,25 @@ docs/reference/
 
 ### D. 小型 / 嵌入式 FTL（**最贴近本仓 DRAM-less 路线**）
 
+<a id="ref-d1"></a>
 #### D1. LeaFTL（arXiv:2301.00072）
 - **是什么**：**基于学习的 FTL**（arXiv:2301.00072）——用学习的方法管理映射/GC，目标之一是
   **降低 DRAM 占用**。
 - **价值**：**DRAM-less / 小内存 FTL 的前沿思路**。本仓 FTL 表放不进 DRAM，LeaFTL 用「学」
   压缩映射开销——是「不靠大表怎么办」的一种答案，可作思路启发（未必能直接抄）。
 
+<a id="ref-d2"></a>
 #### D2. SPIFTL / dhara（**未备份**，见 §三）
-- **是什么**：面向 **SPI-NOR / 小容量 raw flash** 的**极简 FTL**（dhara 是 `dlbeer/dhara`，
-  块级映射、日志式；上游不活跃）。
+- **是什么**：面向 **SPI-NOR / 小容量 raw flash** 的**极简 FTL**。
+  - `earlephilhower/SPIFTL`：MCU 级 SPI flash 静态磨损均衡；省略坏块管理 / 并行 / 保持性扫描。
+  - `dlbeer/dhara`：低内存 NAND FTL，块级映射、日志式；完美磨损均衡（任意两块擦除次数差
+    ≤ 1）、`write()` / `trim()` 原子 + 掉电回滚到最后同步点、不占用 OOB（全部留给 ECC）、
+    启动与所有操作 O(log n) 最坏；上游不活跃，`espressif/dhara` 是活跃封装。
 - **价值**：**极简 FTL 的范式**——没有 DRAM、没有复杂 GC，只有磨损均衡 + 坏块 + 日志。
-  本仓 FTL 虽大得多，但 dhara 的「小到极致」能帮你想清楚**哪些机制是必需的、哪些是奢侈的**。
+  本仓 FTL 虽大得多，但 dhara 的「小到极致」能帮本仓想清楚**哪些机制是必需的、哪些是奢侈的**；
+  SPIFTL 可当「最小 FTL 能省到什么程度」的反面教材。
 
+<a id="ref-d3"></a>
 #### D3. Linux MTD UBI 的静态磨损均衡（**未备份**，见 §三）
 - **是什么**：Linux 内核 UBI 卷管理层（`drivers/mtd/ubi/`）。`wl.c` 的静态 WL：
   取**擦除最少的 used PEB**（e1），从 Free Pool 取擦除显著更高的 PEB（e2），当
@@ -209,23 +263,43 @@ docs/reference/
   <https://raw.githubusercontent.com/torvalds/linux/master/drivers/mtd/ubi/wl.c>、
   <https://raw.githubusercontent.com/torvalds/linux/master/drivers/mtd/ubi/Kconfig>
 
+<a id="ref-d4"></a>
+#### D4. AppL（DFTL fine/coarse cache，CMT 写回的出处）
+
+- **是什么**：DFTL 的开源实现，含 fine/coarse cache 与 demand mapping。
+- **关键文件**：
+  - `algorithm/DFTL/caching/fine/fine_cache.c`：`__update_entry()` 对任意命中/插入
+    LBA 置 `DIRTY_FLAG`；`fine_update_eviction_target_translation()` 驱逐时把同一
+    translation page 的 dirty 条目合并整页写回。
+  - `algorithm/DFTL/demand_mapping.c`：冷写 `MISSR` 分支先
+    `insert_entry_from_translation()` 读 translation page，再标 dirty。
+- **价值**：本仓写回 CMT 的结构依据；说明「冷写仍读页」是主流行为，不是本仓妥协。
+- **URL**：<https://github.com/postech-caoslab/AppL>
+
 ### E. 协议 / 接口规范（判据依据）
 
+<a id="ref-e1"></a>
 #### E1. ONFI（**未备份**，见 §三）
 - 器件命令集/时序的**权威来源**。⚠ 本仓记忆有教训：**别凭记忆说「协议要求」**
   ——必须查 ONFI 原文，不凭记忆断言。
+- **URL**：<https://onfi.org/specifications/>
 
+<a id="ref-e2"></a>
 #### E2. Zoned Storage 生态（zonedstorage.io + zonefs 内核文档）
-- **是什么**：ZNS / SMR 的**主机侧软件栈**——内核 4.10 起支持，含驱动层/文件系统层/device
-  mapper 层。zonefs 是把 zoned 设备当文件系统用的内核模块。
+- **是什么**：ZNS / SMR 的**主机侧软件栈**，含 zoned block device 支持、驱动层、文件系统层
+  与 device mapper 层。zonefs 是把 zoned 设备当文件系统用的内核模块。
 - **价值**：**主机侧接口的对照**。本仓是自研 HIL（主机接口层），ZNS 展示了「主机与设备之间
   的顺序写约束怎么用软件栈表达」——对本仓 HIL 的**约束表达**有参照意义（不是照抄）。
+- **生态**：`libzbd` / `zonefs` / `zns-tools` / BTRFS / XFS；Open-Channel SSD / LightNVM
+  已从 Linux 移除（5.15），被 ZNS 取代——不要再按 OCSSD 方向投入。
 
+<a id="ref-e3"></a>
 #### E3. zns-tools（GitHub 工具链）
-- ZNS 工具链论文，偏实验工具，参考价值有限。
+- ZNS 工具链，偏实验工具，参考价值有限。
 
 ### F. 命令序列 / 驱动实现（cache read / program 的展开）
 
+<a id="ref-f1"></a>
 #### F1. Linux MTD rawnand 的顺序 cache read（**未备份**）
 
 - **是什么**：Linux 主线 `drivers/mtd/nand/raw` 的 sequential cache read——一次
@@ -237,6 +311,7 @@ docs/reference/
 - **URL**：<https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011>
   （镜像：<https://git.embedded.cherry.de/puma-linux.git/commit/drivers/mtd/nand/raw?id=003fe4b9545b83cca4f7a7633695d1f69a0b0011>）
 
+<a id="ref-f2"></a>
 #### F2. cache program 的开源空缺（如实登记）
 
 - 公开结果只确认 Linux 定义了 `NAND_CMD_CACHEDPROG 0x15`；**没有完整的 49h/44h/48h 开源序列实现**。
@@ -261,29 +336,22 @@ docs/reference/
 
 > **说明**：GitHub 代码仓库（Cosmos+/Jasmine/SoftSSD/FEMU/MQSim/ConfZNS/NandFlashController/
 > SPIFTL/dhara/zns-tools）**未克隆**——克隆会把嵌套 `.git` 塞进本仓，污染版本库。
-> 需要时按学习文档 §附录 的 URL 单独 clone 到仓外。
-
-### AppL（DFTL fine/coarse cache，CMT 写回的出处）
-
-- repo：`https://github.com/postech-caoslab/AppL`
-- 关键文件：
-  - `algorithm/DFTL/caching/fine/fine_cache.c`：`__update_entry()` 对任意命中/插入
-    LBA 置 `DIRTY_FLAG`；`fine_update_eviction_target_translation()` 驱逐时把同一
-    translation page 的 dirty 条目合并整页写回。
-  - `algorithm/DFTL/demand_mapping.c`：冷写 `MISSR` 分支先
-    `insert_entry_from_translation()` 读 translation page，再标 dirty。
-- 用途：本仓写回 CMT 的结构依据；说明「冷写仍读页」是主流行为，不是本仓妥协。
+> 需要时按本文件 §一「开源代码仓库」的 URL 单独 clone 到仓外。
 
 ---
 
 ## 四、怎么用这些资料
 
-别通读。按学习文档 §4 的三种读法取用：
+别通读。先按 [`storage_controller_design.md`](../design/storage_controller_design.md)
+的「阅读路径」定位层，再按下面三种读法取用：
 
 1. **结构对照**：Cosmos+/SoftSSD/SPDK FTL 的**分层**，比对本仓 `fc_nand_design.md` §26。
 2. **取舍对照**：Jasmine/SPDK FTL 的 **DRAM 型 L2P**，对照本仓 **DRAM-less** 路线——
    问「它敢花这块内存，我为什么不敢」。
 3. **反例对照**：LeaFTL/SPIFTL/dhara 的**小内存 FTL**，问「哪些机制可以砍」。
 
-判据回到学习文档 §5 的五条。**当前最大缺口是 HIL**（主机接口层）——本仓尚无，E2（Zoned
-Storage）与 A1/A2（Cosmos+/Jasmine 的 host 接口）是补这块的主要参照。
+判据回到 [`storage_controller_design.md`](../design/storage_controller_design.md) §十一
+「设计取舍清单」与 `docs/design/fc_nand_design.md` §26 分层。**当前最大缺口是 HIL 的
+主控级并发验证**：已有 USB MSC BOT 单命令路径（`docs/design/hil_design.md`、
+`docs/guides/usb_msc_verify.md`），但尚无多队列/门铃并发的主机侧验证；E2（Zoned
+Storage）与 A1/A2（Cosmos+/Jasmine 的 host 接口）仍是补这块的主要参照。
