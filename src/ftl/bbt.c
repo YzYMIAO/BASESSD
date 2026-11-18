@@ -41,8 +41,7 @@
 #include "bbt.h"
 
 #include "assertion.h"
-#include "fc.h"
-#include "fc_crc_engine.h" /* FC_CRC_META_SIZE（用户区抽样判空） */
+#include "fc_interface.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_BBT */
 #include "log.h"

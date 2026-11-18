@@ -9,6 +9,7 @@
 | 层 / 主题 | 主设计（先读） | 决策史 | 测试设计 |
 |---|---|---|---|
 | 系统总览 | [`../architecture.md`](../architecture.md) → [`../hardware_contract.md`](../hardware_contract.md) | — | — |
+| 启动流程 / Boot policy | [`../boot_flow.md`](../boot_flow.md)、`../src/boot/`（当前未接入 main） | — | — |
 | FTL | `ftl_design.md` | `revision_history/ftl_revision_history.md` | `ftl_ut_design.md` |
 | FC-NAND | `fc_nand_design.md`（§26 行业对照 = 判据） | `revision_history/fc_nand_revision_history.md` | `fc_nand_ut.md` |
 | HIL / USB | `hil_design.md` → `usb_msc.md` | — | `hil_ut_design.md` |

@@ -1,8 +1,8 @@
 #ifndef FC_ECC_ENGINE_H
 #define FC_ECC_ENGINE_H
 
-#include "fc_types.h"  /* fc_status_e */
-#include "ssd_types.h" /* BYTE/WORD */
+#include "fc_interface.h" /* fc_status_e */
+#include "ssd_types.h"    /* BYTE/WORD */
 
 #include <stdint.h>
 

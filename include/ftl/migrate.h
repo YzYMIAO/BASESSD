@@ -66,14 +66,14 @@
  *   反向包含会成环。ftl.h include 本文件以放置 mig_handle_s。
  */
 
-#include "allocator.h"  /* super_block_s */
-#include "fc_command.h" /* fc_cmd_status_s（服务函数签名） */
-#include "ftl_config.h" /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
-#include "ftl_type.h"   /* DWORD */
-#include "gc.h"         /* gc_benefit_mode_e */
-#include "journal.h"    /* l2p_jrn_s（端口） */
-#include "l2p_cache.h"  /* l2p_cache_s（端口） */
+#include "allocator.h"    /* super_block_s */
+#include "fc_interface.h" /* fc_cmd_status_s（服务函数签名） */
+#include "ftl_config.h"   /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_module.h"   /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
+#include "ftl_type.h"     /* DWORD */
+#include "gc.h"           /* gc_benefit_mode_e */
+#include "journal.h"      /* l2p_jrn_s（端口） */
+#include "l2p_cache.h"    /* l2p_cache_s（端口） */
 #include "log.h"
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 #include "timer.h"

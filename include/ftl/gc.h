@@ -26,11 +26,11 @@
  *   掉电时最多遗留"孤悬"Block，下次 GC 回收
  */
 
-#include "allocator.h"   /* alc_s, super_block_s */
-#include "fc_command.h"  /* fc_cmd_s（gc_decode_cw_lba 的形参） */
-#include "ftl_config.h"  /* DWORD */
-#include "ftl_type.h"    /* DWORD */
-#include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
+#include "allocator.h"    /* alc_s, super_block_s */
+#include "fc_interface.h" /* fc_cmd_s（gc_decode_cw_lba 的形参） */
+#include "ftl_config.h"   /* DWORD */
+#include "ftl_type.h"     /* DWORD */
+#include "nand_config.h"  /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdint.h>
 

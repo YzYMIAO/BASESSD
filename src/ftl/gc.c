@@ -26,7 +26,7 @@
 #include "gc.h"
 
 #include "assertion.h"
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl_fc_interface.h"
 #include "log.h"
 #include "onfi_1_0.h"

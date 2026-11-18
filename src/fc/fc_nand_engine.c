@@ -20,6 +20,8 @@
  */
 
 #include "fc_nand_engine.h"
+
+#include "fc_interface.h" /* fc_nand_init / fc_nand_enable_high_speed 公共契约 */
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "fault_inject.h"
 #endif

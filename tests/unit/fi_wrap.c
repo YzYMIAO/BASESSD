@@ -21,7 +21,7 @@
 
 #    include "allocator.h"
 #    include "checkpoint.h"
-#    include "fc.h"
+#    include "fc_interface.h"
 #    include "ftl_fc_interface.h"
 #    include "ftl_op.h"
 #    include "gc.h"

@@ -22,7 +22,7 @@
  *     FC 侧不校验 ⇒ 本文件只留正向冒烟。
  */
 
-#include "fc_command.h"
+#include "fc_interface.h"
 #include "fc_queue.h"
 #include "fc_test_common.h" /* 只为证据打印原语 test_trace_*（本文件不碰 NAND / 池） */
 #include "munit.h"

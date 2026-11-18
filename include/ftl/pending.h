@@ -15,11 +15,11 @@
  *   **buffer 非空 ≠ 写。**
  */
 
-#include "assertion.h"  /* ASSERT（inline 组计数 fast path / 超时谓词） */
-#include "fc.h"         /* FC_COMMAND_POOL_DEPTH（cmd_id 直接索引） */
-#include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
-#include "ftl_module.h" /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
-#include "ftl_type.h"   /* DWORD, ftl_status_e, pending_cb_fn_t, ssd_status_e */
+#include "assertion.h"    /* ASSERT（inline 组计数 fast path / 超时谓词） */
+#include "fc_interface.h" /* FC_COMMAND_POOL_DEPTH（cmd_id 直接索引） */
+#include "ftl_config.h"   /* DWORD, NAND_PBA_INVALID */
+#include "ftl_module.h"   /* FTL_GROUP_DRAIN_TIMEOUT_MS（inline 超时谓词） */
+#include "ftl_type.h"     /* DWORD, ftl_status_e, pending_cb_fn_t, ssd_status_e */
 
 #include <stdint.h>
 

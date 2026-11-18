@@ -1,7 +1,7 @@
 #ifndef FC_RAID_ENGINE_H
 #define FC_RAID_ENGINE_H
 
-#include "fc_types.h"
+#include "fc_interface.h"
 
 #include <stdint.h>
 
@@ -14,7 +14,7 @@
  * 当前 CONFIG_FC_RAID=0（默认不启用），所有 RAID 功能代码不编译。
  *
  * 何时开启：硬件功能验证闭环后，需要启用跨 Plane XOR 数据保护时。
- * 打开方法：在 include/fc/fc.h 中 #define CONFIG_FC_RAID 1
+ * 打开方法：在 include/fc/fc_interface.h 中 #define CONFIG_FC_RAID 1
  *
  * 开启后的两条路径：
  *   1) 写路径：fc.c 的 stripe 分支分配 parity 命令，
@@ -26,8 +26,6 @@
  * 设计文档：docs/design/fc_nand_design.md §5.1
  * ============================================================================
  */
-
-#include "fc.h" /* CONFIG_FC_RAID / FC_BUFFER_POOL_CW_SIZE */
 
 #if CONFIG_FC_RAID
 

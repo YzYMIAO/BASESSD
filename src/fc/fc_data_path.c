@@ -31,9 +31,9 @@
 #include "fc_data_path.h"
 
 #include "assertion.h"
-#include "fc.h"
 #include "fc_crc_engine.h"
 #include "fc_ecc_engine.h"
+#include "fc_interface.h"
 #include "fc_raid_engine.h"
 #include "fc_random_engine.h"
 
@@ -326,7 +326,7 @@ fc_status_e fc_data_path_encode(fc_cmd_id_t cmd_id)
 
 /* ══════════════════════════════════════════════════════════
  * 跨 Plane Stripe RAID 编码 — FC 内部调用
- * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
+ * 编译开关：CONFIG_FC_RAID (include/fc/fc_interface.h)
  * ══════════════════════════════════════════════════════════ */
 
 #if CONFIG_FC_RAID
@@ -633,7 +633,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
 
 /* ══════════════════════════════════════════════════════════
  * 读路径 Stage 2 — FTL 触发
- * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
+ * 编译开关：CONFIG_FC_RAID (include/fc/fc_interface.h)
  * ══════════════════════════════════════════════════════════ */
 
 #if CONFIG_FC_RAID

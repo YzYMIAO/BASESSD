@@ -1,8 +1,15 @@
 # Flash controller module：控制面 + 命令分发（NAND 器件/PHY 在 src/nand/）。
 MODULE_SRCS += $(wildcard $(SRC_ROOT)/fc/*.c)
 MODULE_INCS += $(INC_ROOT)/fc
-# FC 私有头（池 / 控制器/调度器）：不放进公共 include 目录。
-MODULE_INCS += $(SRC_ROOT)/fc/internal
+# FC 私有头（池 / 控制器/调度器 / 引擎）：只给 FC 自己的对象加 include，
+# FTL/HIL 不会通过全局 ALL_INCS 看到这些路径。
+FC_PRIVATE_INC := $(SRC_ROOT)/fc/internal
+$(OBJ_DIR)/fc/%.o: CFLAGS += -I$(FC_PRIVATE_INC)
+
+# 白盒测试允许访问 FC 私有头（tests 是仓内测试，不是公共消费者）。
+ifeq ($(FC_NAND_TEST_ENABLE),1)
+$(OBJ_DIR)/tests/unit/%.o: CFLAGS += -I$(FC_PRIVATE_INC)
+endif
 
 # FMC NAND 测试仅在显式启用时编入固件，默认产品固件不包含破坏性测试代码。
 ifeq ($(FC_NAND_TEST_ENABLE),1)

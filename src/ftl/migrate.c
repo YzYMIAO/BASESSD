@@ -38,7 +38,7 @@
 #include "assertion.h"
 #include "bbt.h"              /* bbt_mark_bad */
 #include "bst.h"              /* ftl_block_state / ftl_gblock */
-#include "fc.h"               /* fc_command_release / fc_command_id_to_command */
+#include "fc_interface.h"     /* fc_command_release / fc_command_id_to_command */
 #include "ftl.h"              /* ftl_ctx_s（仅完成服务的路由断言） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */

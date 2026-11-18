@@ -28,7 +28,7 @@
 #include "ftl_op.h"
 
 #include "assertion.h"
-#include "fc.h"               /* fc_submit / fc_poll_completion / fc_command_release */
+#include "fc_interface.h"     /* fc_submit / fc_poll_completion / fc_command_release */
 #include "ftl.h"              /* ftl_ctx_s */
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
 #include "l2p_cache.h"        /* die_2_ch/ce/lun（die → 坐标的唯一分解点） */

@@ -53,7 +53,7 @@
 #include "assertion.h"
 #include "bbt.h"
 #include "checkpoint.h"
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "gc.h"

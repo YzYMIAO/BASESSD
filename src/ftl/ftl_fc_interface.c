@@ -42,7 +42,7 @@
 #include "assertion.h"
 #include "bst.h"   /* ftl_pba_gblock（逐块 ECC 记账） */
 #include "delay.h" /* delay_time_now_us / delay_time_elapsed_us（真实等待上限） */
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl_type.h"
 #include "onfi_1_0.h"
@@ -766,7 +766,7 @@ static ftl_status_e ftl_sync_read_page_impl(DWORD pba, void *buffer, DWORD lengt
     {
         *completion_out = completion;
     }
-    // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_command.h 的链级判据同口径）。
+    // 失败判据 = FC_CMD_STATUS_ERROR_MASK 全集（与 fc_interface.h 的链级判据同口径）。
     // **只认 NAND_FAIL 是错的**：DATA_ERROR / META_ERROR 会让本页内容不可信却照常拷出——
     // · DATA_ERROR（UNC/CRC/RAID）：fc_data_path_read 在任何 CW 不可纠时**提前返回**，
     //   buffer 停在 "ECC 半修正 + 未解扰" 态（步骤 2/3/4 全跳过），拷出来的是加扰垃圾；

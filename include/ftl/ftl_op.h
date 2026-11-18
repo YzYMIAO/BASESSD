@@ -39,9 +39,9 @@
  *     NULL，全系统 FTL_AGAIN。
  */
 
-#include "fc.h"          /* fc_cmd_s / fc_cmd_status_s / FC_COMMAND_POOL_DEPTH */
-#include "ftl_type.h"    /* DWORD / ftl_status_e */
-#include "nand_config.h" /* CH_NUM / CE_NUM / LUN_NUM（路由表维度） */
+#include "fc_interface.h" /* fc_cmd_s / fc_cmd_status_s / FC_COMMAND_POOL_DEPTH */
+#include "ftl_type.h"     /* DWORD / ftl_status_e */
+#include "nand_config.h"  /* CH_NUM / CE_NUM / LUN_NUM（路由表维度） */
 
 #include <stdint.h>
 

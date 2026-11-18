@@ -35,7 +35,7 @@
 
 #include "assertion.h"
 #include "bbt.h" /* bbt_mark_bad（持续擦除失败标坏） */
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl.h" /* ftl_ctx_s（完成回调签名） */
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_METADATA */

@@ -17,8 +17,8 @@
 | 待实现 | 功能/验证未开始 | 65 |
 | 进行中 | 已做一部分 | 13 |
 | 待外部 | 等硬件/测试源/第三方 | 3 |
-| 信息 | 判定结论/维护不变量 | 95 |
-| 已闭合 | 有证据且无剩余动作 | 229 |
+| 信息 | 判定结论/维护不变量 | 94 |
+| 已闭合 | 有证据且无剩余动作 | 230 |
 | 不实现 | 用户明确不做 | 2 |
 
 ### 0.2 待用户裁决（待决策）
@@ -305,7 +305,7 @@
 - **后果**：H2testw 期间反复 `[CP] submit stalled 25ms — abort phase=1`。CP 用 `ftl_op_submit` 申请 FC 命令，host 写可占满 `FC_COMMAND_POOL_DEPTH=64`（`FTL_PENDING_MAX=32` 个写各占 2 条命令）⇒ CP 连续 10ms 拿不到槽即中止重试。后果：checkpoint 长期不推进、journal 环增长；环满后 host 写被 Backpressure 拒绝（写停顿，无静默损坏）。尚不能区分它是 GC 活锁的症状还是独立缺陷。
 - **缓解**：中止后可重试；journal 环满是安全背压；abort 日志 1s/实例。序列打开或仍有未完成主机组时 `ftl_op_bg_submit_deferred()` 挂起 CP 的提交 deadline。
 - **下一步**：先修 RISK-GC-07 后复跑 H2testw；若仍复现，给 CP 预留命令槽或延长 deadline；上板确认 journal 水位与 CP 成功率。
-- **证据**：`src/ftl/checkpoint.c:cp_job_stall` / `cp_command_result_handle`；`src/ftl/ftl_op.c:ftl_op_submit`；`include/fc/fc.h:FC_COMMAND_POOL_DEPTH`；串口 rev30 日志。
+- **证据**：`src/ftl/checkpoint.c:cp_job_stall` / `cp_command_result_handle`；`src/ftl/ftl_op.c:ftl_op_submit`；`include/fc/fc_interface.h:FC_COMMAND_POOL_DEPTH`；串口 rev30 日志。
 - **历史/验证**：
   - 2026-11-12 18:04:36 H2testw 通过；启动空闲期一次 `submit stalled 10ms`（cmd=1 buf=8、held ops md=1）⇒ 池未耗尽，是 deadline 与 metadata job 重叠的误 abort，无数据损失
   - 2026-11-12 H2testw 复现 `submit stalled 10ms`（free=3207、cmd=1/buf=4，见 RISK-HOST-18）
@@ -1414,7 +1414,7 @@
 - **后果**：`fc_poll_dispatch_chain` 没有单命令路径的 `#if CONFIG_FC_RAID` 分支。若 FTL 把写命令标成 `FC_CHAIN_MORE` 且 `raid=ENCODE`，整链写入会静默不写 parity（`CONFIG_FC_RAID=0` 时 ENCODE 分支不编译，不构成实际失效）。
 - **缓解**：RAID 关闭（R5）⇒ `raid` 固定 NORMAL、ENCODE 分支不编译；FTL 当前不设置 `raid=ENCODE`。
 - **下一步**：启用 RAID 或 FTL 开始设置 `raid=ENCODE` 之前，在 chain 路径补 stripe 分支或 `ASSERT(raid != ENCODE)`；加 UT 负例。
-- **证据**：`src/fc/fc.c`（single 的 RAID 分支；chain 无该分支）；`include/fc/fc.h`。
+- **证据**：`src/fc/fc.c`（single 的 RAID 分支；chain 无该分支）；`include/fc/fc_interface.h`。
 - **历史/验证**：
   - 2026-10-30 读码判定 → 待决策（RAID 关闭，无实际失效）
 
@@ -1568,7 +1568,7 @@
 - **当前事实**：`fc_desc_s.config` 保留为命令泛化/错误恢复上下文；当前无读者。只保留 config 并不能单独恢复整条命令（route/paa/meta/param/cmd_id 仍在 `fc_cmd_s`）。
 - **影响**：错误恢复时上下文可能不完整；删掉又会丢未来能力。
 - **下一步 / 判据**：先定「错误恢复时 `fc_cmd_s` 是否仍存活」：存活则登记为校验副本；不存活则补齐完整恢复上下文。无消费者前不得删除或改名（H5/R11）。
-- **来源**：`include/fc/fc_command.h`；`src/fc/fc_pool.c` 建链写入
+- **来源**：`include/fc/fc_interface.h`；`src/fc/fc_pool.c` 建链写入
 - **关联**：`ISS-FTL-11`
 - **历史/验证**：
   - （无板端记录）
@@ -1580,7 +1580,7 @@
 - **后果**：RAID 上下文 `end` 不校验 `processed==total`；recover 对 NULL/INVALID buffer 直接 memcpy；恢复后把所有 desc 清成 UNUSED，丢失 CRC/META。
 - **缓解**：`fc_raid_end` 校验累加数；`fc_collect_decode_buffers` 遇 INVALID 返回 0；recover 检查 count/failed index；恢复后重新 CRC/META 检查。
 - **下一步**：RAID 保持 `CONFIG_FC_RAID=0`（R5）；启用前必须编译+上板验证 `RAID` 恢复路径。
-- **证据**：`src/fc/fc_data_path.c` RAID 段；`include/fc/fc_data_path.h` RAID 段。
+- **证据**：`src/fc/fc_data_path.c` RAID 段；`src/fc/internal/fc_data_path.h` RAID 段。
 - **历史/验证**：
   - 2026-11-06 修复：补 RAID 累加数 / 无效 buffer / CRC-META 检查 → 未上板（RAID 关闭）
 
@@ -1616,16 +1616,16 @@
 - **后果**：枚举值 0 原命名 BCH，实际 0 = normal，当前默认编译引擎是 BCH；1/2 LDPC 未完整支持，数据路径只区分 raw，文档却写成运行时 BCH/LDPC。
 - **缓解**：枚举 0 改 `FC_ECC_MODE_NORMAL`，全生产调用点同步；`fc_ecc_engine.h` 说明 0=normal、当前编译引擎 BCH、LDPC hard/soft 未完整支持。
 - **下一步**：新增 ECC 配置/文档时确认不再使用 `FC_ECC_MODE_BCH`；启用 LDPC 前先完成实现与验证。
-- **证据**：`include/fc/fc_command.h`；`include/fc/fc_ecc_engine.h`；`src/ftl/*`；`include/ftl/ftl_fc_interface.h`。
+- **证据**：`include/fc/fc_interface.h`；`src/fc/internal/fc_ecc_engine.h`；`src/ftl/*`；`include/ftl/ftl_fc_interface.h`。
 - **历史/验证**：
   - 2026-11-07 修复：枚举 0 改名 `FC_ECC_MODE_NORMAL` → 未上板
 
 #### RISK-CRC-02 CRC 软件/硬件后端 KAT 尚未上板
 
 - **后果**：软件后端若与 STM32 硬件 word 顺序或 CRC 表不一致，FC 的 CRC 字段跨平台不兼容；当前只能证明 host 软件、debug KAT 代码存在。
-- **缓解**：`fc_crc_init` debug 构建对 MPEG-2 4B/32B、ISO-HDLC 9B 做软件/硬件对拍；FC 内 ISO-HDLC slice-by-4 与 host bitwise 对拍 0 差异；默认 STM32 构建走硬件，仿真构建走 FC 软件。
+- **缓解**：`fc_crc_init`/`crc_init` debug 构建对 MPEG-2 4B/32B 与 ISO-HDLC 9B 做软件/硬件对拍；ISO-HDLC 软件 slice-by-4 已在平台 CRC 服务，host bitwise 对拍 0 差异；默认 STM32 构建走硬件，仿真构建走共享软件 fallback。
 - **下一步**：板端分别运行 HW/SW 构建的 `format` + 读写回归，确认 `crc_init` KAT 不触发；SW 构建使用独立对象目录或 clean，避免 `PLATFORM_CRC_HW_SUPPORTED` 切换残留。
-- **证据**：`src/fc/fc_crc_engine.c:fc_crc_init / fc_crc32_iso_hdlc`；`src/platform/crc.c:crc_compute_iso_hdlc`；`src/platform/stm32h743/crc_port.c:crc_port_compute_iso_hdlc`；`include/platform/crc.h:PLATFORM_CRC_HW_SUPPORTED`。
+- **证据**：`src/fc/fc_crc_engine.c:fc_crc_init`；`src/platform/crc.c:crc_init / crc_compute_iso_hdlc / crc_iso_sw_compute`；`src/platform/stm32h743/crc_port.c:crc_port_compute_iso_hdlc`；`include/platform/crc.h:PLATFORM_CRC_HW_SUPPORTED`。
 - **历史/验证**：
   - 2026-11-18 代码实现 + host 对拍 → 未上板
 
@@ -1634,7 +1634,7 @@
 - **后果**：上限 `CH_NUM×CE_NUM×LUN_NUM` 可由静态上界到 256，恰好 256 会回绕为 0，`fc_service` 误判无完成。
 - **缓解**：返回类型与本地计数改为 `DWORD`；`fc_service` 同步使用 `DWORD`。当前板 1/1/1 无行为变化。
 - **下一步**：上板多通道/多 CE 配置，确认一轮完成数与实际完成条数一致，不再回绕。
-- **证据**：`include/fc/fc_nand_dispatch.h`；`src/fc/fc_nand_dispatch.c:fc_nand_dispatch_poll`；`src/fc/fc.c:fc_service`。
+- **证据**：`src/fc/internal/fc_nand_dispatch.h`；`src/fc/fc_nand_dispatch.c:fc_nand_dispatch_poll`；`src/fc/fc.c:fc_service`。
 - **历史/验证**：
   - 2026-11-07 修复：poll 返回类型与本地计数改 `DWORD` → 未上板
 
@@ -1662,7 +1662,7 @@
 - **后果**：一个 32-bit 字段承载双语义会让命令与 descriptor 的计数 / 索引互相污染；CQ 的 `failed_cw` / `failed_desc_id` 无读者，失败 CW 实际由 desc 链的 per-CW `status` 派生。
 - **缓解**：`fc_cmd_cfg_s.cw` 拆为命令专用 `cw_count` + descriptor 专用 `cw_index`；删除 `failed_cw` / `failed_desc_id`；NAND completion 同步删除 `failed_cw`；CQ 只保留 `cmd_id/status/param`。
 - **下一步**：UT 同步字段名；上板覆盖多 CW 失败定位（从 desc 链派生）。
-- **证据**：`include/fc/fc_command.h`；`include/fc/fc_nand_dispatch.h`；`src/fc/fc.c` `fc_complete_from_nand`。
+- **证据**：`include/fc/fc_interface.h`；`src/fc/internal/fc_nand_dispatch.h`；`src/fc/fc.c` `fc_complete_from_nand`。
 - **历史/验证**：
   - 2026-11-07 删除 NAND completion 的 `failed_cw`，CQ 失败坐标字段移除 → 未上板
   - 2026-11-06 拆分 `cw` 为 `cw_count` / `cw_index` → 未上板
@@ -2100,7 +2100,7 @@
 
 #### RISK-TOP-01 板级拓扑是扫描结果
 
-- **后果**：`nand_scan_targets` 在 armed 前逐个探测 (ch,ce)，`g_nand_targets` 记录 present / lun_count；`ftl_topology_build` 给实际存在的 LUN 分配紧凑 die 号并维护两张逆映射表。Phase 2a 实例遍历（boot / `[STAT]` / 后台节拍 / `ftl_service` / 容量统计 / ftl_op 服务查询 / controller cancel / USB deferred / CLI）走 `for die < DIE_MAX` + `g_die_table`；Phase 2b 的 L2P 路由、容量、介质布局版本、controller 槽位校验按运行时 `DIE_MAX`，数组按静态上限 `FTL_DIE_MAX` 分配。失败场景：① 当前硬件只有 FMC Bank3 + 单 NCE，`nand_select_target` 通路表只有 (0,0) ⇒ 多 target 未真正验证；② 主 target (0,0) 不存在或 ID / ONFI 几何不符 ⇒ 拒绝启动；③ ONFI `logical_units > LUN_MAX` ⇒ 拒绝启动；④ `DIE_MAX == 0` 时 `lba_2_die` / `l2p_global_*` 会除零（`ftl_topology_build` 无 die 即失败，boot 不进 FTL）；⑤ 多 die 介质版本 = bit31 标记 + `fc_crc32_iso_hdlc`(die 数 + topology map)，哈希碰撞 / 拓扑变化未识别时会误读旧布局；⑥ 稀疏拓扑下 die 槽为 NULL，`ftl_op_route_get` 对 absent 返回 NULL；⑦ 当前器件 `logical_units=1`，多 LUN 路径未上板；⑧ `ftl_ut_common` 每个套件 setup 用 `g_nand_targets` 重建 die 表；⑨ die 号为 `BYTE` + `0xFF` 哨兵，`FTL_DIE_MAX > 255` 编译期拒绝。
+- **后果**：`nand_scan_targets` 在 armed 前逐个探测 (ch,ce)，`g_nand_targets` 记录 present / lun_count；`ftl_topology_build` 给实际存在的 LUN 分配紧凑 die 号并维护两张逆映射表。Phase 2a 实例遍历（boot / `[STAT]` / 后台节拍 / `ftl_service` / 容量统计 / ftl_op 服务查询 / controller cancel / USB deferred / CLI）走 `for die < DIE_MAX` + `g_die_table`；Phase 2b 的 L2P 路由、容量、介质布局版本、controller 槽位校验按运行时 `DIE_MAX`，数组按静态上限 `FTL_DIE_MAX` 分配。失败场景：① 当前硬件只有 FMC Bank3 + 单 NCE，`nand_select_target` 通路表只有 (0,0) ⇒ 多 target 未真正验证；② 主 target (0,0) 不存在或 ID / ONFI 几何不符 ⇒ 拒绝启动；③ ONFI `logical_units > LUN_MAX` ⇒ 拒绝启动；④ `DIE_MAX == 0` 时 `lba_2_die` / `l2p_global_*` 会除零（`ftl_topology_build` 无 die 即失败，boot 不进 FTL）；⑤ 多 die 介质版本 = bit31 标记 + `crc_compute_iso_hdlc`(die 数 + topology map)，哈希碰撞 / 拓扑变化未识别时会误读旧布局；⑥ 稀疏拓扑下 die 槽为 NULL，`ftl_op_route_get` 对 absent 返回 NULL；⑦ 当前器件 `logical_units=1`，多 LUN 路径未上板；⑧ `ftl_ut_common` 每个套件 setup 用 `g_nand_targets` 重建 die 表；⑨ die 号为 `BYTE` + `0xFF` 哨兵，`FTL_DIE_MAX > 255` 编译期拒绝。
 - **缓解**：扫描在 armed 前、低速 Mode 0；两张表往返自检；满配时 `die == topo_2_die(topo)`；L2P / 容量 / 介质版本统一走 `DIE_MAX`；单 die 版本保持 BASE；稀疏槽位只校验 present。
 - **下一步**：上板（地址 / 布局类，必须）：`[NAND] scan ch=0 ce=0 present luns=1` + `[FTL ] topology: dies=1`；单 die 介质不触发重格式化（版本仍 14）；H2testw 读写 / 坏块 / 吞吐；每实例 `[FTL ] instance ...` 一行无遗漏。多 target 需扩展 `nand_select_target` 板级通路表；多 LUN 需换器件再验。
 - **证据**：`src/nand/devices/mt29f___g08a.c` `nand_target_probe` / `nand_scan_targets`；`include/nand/nand_config.h` `g_nand_targets`；`src/ftl/ftl.c` `ftl_topology_build`；`include/ftl/ftl_config.h`；`include/ftl/l2p_cache.h`；`src/ftl/metadata.c` `ftl_media_layout_version`；`src/main.c` / `src/hil/controller.c`。
@@ -3103,7 +3103,6 @@
 | ISS-FTL-08 | 缺口 | 待验证 | F8/F9 跨层项缺板端证据 | 未上板 |
 | ISS-ARCH-01 | 缺口 | 进行中 | 模块 handle 契约迁移正常路径已上板；掉电/格式化中断/注入未单独验 | 2026-10-25 上板通过（残余） |
 | RISK-BIT-01 | 风险 | 信息 | 通用掩码构造器挂在 NAND 层，FTL/FC 各自另写字面量宏 | 未上板 |
-| RISK-ARCH-13 | 风险 | 信息 | CRC 软件实现移入 FC 后，`src/common/boot_policy.c` 反向依赖 `include/fc` | 2026-11-18 代码核对 |
 
 ### 详情
 
@@ -3146,15 +3145,6 @@
 - **历史/验证**：
   - （日期未记录）从 `CLAUDE.md` H15 迁入并判定 → 未改代码
 
-#### RISK-ARCH-13 common 对 FC CRC 的反向依赖
-
-- **后果**：`src/common/boot_policy.c` 为调用 `fc_crc32_iso_hdlc` include `fc_crc_engine.h`，`src/common/makefile.mk` 也加入 `include/fc`；common 不再是只向下依赖的公共层。boot policy 若用于不含 FC 的引导环境，会多一个链接/头文件依赖。
-- **缓解**：`fc_crc32_iso_hdlc` 只依赖 `ssd_types.h`，软件 fallback 可在 FC 初始化前工作；当前工程链接完整，未上板。
-- **下一步 / 判据**：若后续要求 common 严格平台/FC 无关，把 ISO-HDLC 软件实现移回 common 或改成 common 侧钩子；否则保留本仓自定的 FC 归属。
-- **证据**：`src/common/boot_policy.c`；`src/common/makefile.mk`；`include/fc/fc_crc_engine.h`。
-- **历史/验证**：
-  - 2026-11-18 代码核对 → 按用户“软件 CRC 放 FC”的裁决保留该依赖
-
 ---
 
 ---
@@ -3186,7 +3176,7 @@
 - **后果**：原 `src/fc/fc_bch_engine.c` 自述「移植自 Linux 内核 `lib/bch.c`（GPL v2）」；GPL-2.0-only 与本项目 Apache-2.0 组合分发存在许可冲突，公开代码/archive 会暴露该问题。
 - **缓解**：2026-11-17 替换为 clean-room 实现（固定 m=13/t=4，独立生成 GF 表、生成多项式、BM 与根搜索；degree 3/4 用次数专用变换化为 affine 四次式，再用 GF(2) 列基消元求根）；ECC 52-bit 布局与错误位置语义不变，A2 后续精简了 `fc_bch_decode` 参数（不涉及介质格式）；旧实现作为对拍 oracle，不进入最终代码。
 - **下一步 / 判据**：上板跑 ECC 路径（FTL/FC UT + H2testw 读写）确认纠错与性能；通过后可闭合。
-- **证据**：`src/fc/fc_bch_engine.c`、`include/fc/fc_bch_engine.h`；host 对拍 200 组（长度 8~520、0~8 bit 错误、增量编码）+ 3/4 bit 错误各 2000 组（`swap_bits` 0/1）0 差异；affine 方程 20,000 组、随机三次/四次多项式各 3,000 组与暴力枚举 0 差异；`make all` / `make release` / `make tests UT=FC` / `make tests UT=FTL` 零新告警。
+- **证据**：`src/fc/fc_bch_engine.c`、`src/fc/internal/fc_bch_engine.h`；host 对拍 200 组（长度 8~520、0~8 bit 错误、增量编码）+ 3/4 bit 错误各 2000 组（`swap_bits` 0/1）0 差异；affine 方程 20,000 组、随机三次/四次多项式各 3,000 组与暴力枚举 0 差异；`make all` / `make release` / `make tests UT=FC` / `make tests UT=FTL` 零新告警。
 - **历史/验证**：
   - 2026-11-17 代码核对 → 确认 GPLv2 来源与 Apache-2.0 冲突。
   - 2026-11-17 clean-room 替换 → 编译三关通过，host 差分 0；**未上板**。
@@ -3483,6 +3473,7 @@
 | RISK-ECC-01 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | `fc_bch_decode` 的 `calc_ecc` 曾把校验差值当预计算 parity；A2 已删除该参数 | 2026-11-17 删除 `calc_ecc`/`syn`，8→6 参数；host 对拍/构建通过（未上板） |
 | RISK-CRC-01 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | 注释曾称 IEEE 802.3，实际为 CRC-32/MPEG-2 | 2026-11-18 注释修正；未上板 |
 | RISK-ARCH-12 | 风险 | 类型 / 契约 / 架构 / 跨模块 | CRC 软件实现放在 `boot_policy.c`，被 FTL checkpoint/metadata 复用；已迁入 FC CRC 引擎 | 2026-11-18 迁移完成（host 对拍、构建三关；未上板） |
+| RISK-ARCH-13 | 风险 | 类型 / 契约 / 架构 / 跨模块 | `boot_policy` 移出 common 到 `src/boot/`，改用平台 CRC 服务 | 2026-11-18 `src/boot` 迁移；common 不再 include FC |
 
 ## B.2 已闭合详情
 
@@ -3979,7 +3970,7 @@
 - **后果**：`ftl_host_io_write_fail` 旧实现只标 plane0，plane1 的编程失败要等 GC 擦除才暴露，期间坏 plane 仍可能被分配。
 - **缓解**：遍历失败命令的 desc 链，按逐 CW `status` + `desc->paa` 的 plane 得到失败 plane 掩码，分别 `bbt_mark_bad` 两个 plane 的块；没有逐 CW 失败位时退回旧行为。
 - **下一步**：注入单 plane 写失败，确认对应 plane 的块当轮标坏、`info bad` 增长、后续不再分配。
-- **证据**：`src/ftl/ftl.c:ftl_host_io_write_fail`；`include/fc/fc_command.h:fc_command_status_t`。
+- **证据**：`src/ftl/ftl.c:ftl_host_io_write_fail`；`include/fc/fc_interface.h:fc_command_status_t`。
 - **历史/验证**：
   - 2026-10-21 修复 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：host_write_plane_fail 通过 → 闭合
@@ -4180,7 +4171,7 @@
 - **后果**：host 读成败只看 `FC_CW_STATUS_NAND_FAIL`：ECC 不可纠只置 `UNC`、页内 META 不符只置 `MATA_ERROR`，两者的 `NAND_FAIL` 恒清 ⇒ 加扰垃圾按 `SSD_STATUS_OK` 交给 host。
 - **缓解**：改为 `fc_cw_status_has_error(completion->status)`（全集）；失败分支本就走「托管给 RR」。
 - **下一步**：造一次 ECC 不可纠 / MATA 读（写某 LBA → 擦掉其映射所指块 → 读该 LBA），确认 host 得 `IO_ERROR` 且 `[RR]` 心跳可见。
-- **证据**：`src/ftl/ftl.c:ftl_host_io_callback`；`include/fc/fc_command.h:fc_cw_status_has_error`。
+- **证据**：`src/ftl/ftl.c:ftl_host_io_callback`；`include/fc/fc_interface.h:fc_cw_status_has_error`。
 - **历史/验证**：
   - （日期未记录）判据改为全集 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：rr_read_fail_bounded / fc_status_nand_fail（M：2026-11-14 板端） 通过 → 闭合
@@ -4251,7 +4242,7 @@
 - **后果**：`fc_complete_from_nand` 的 page-read 分支只 OR `desc->status`，不 OR `nand_completion->cw_status`。① NAND 读 FAIL 不以 `NAND_FAIL` 上报；② NAND 读 TIMEOUT 若 buffer 仍是上一次有效数据且 `meta=FC_META_UNKNOWN`，ECC/CRC/META 都能过 ⇒ 命令报 READY，静默返回陈旧数据。
 - **缓解**：状态字重构已修：page-read 分支按 flat CW 把 `cw_status[]` 并进 desc；命令级从 `pre_status`/`nand_status`/`execution_status` 映射 `NAND_FAIL`/`FAIL_CACHE`/`RDY`/`AREADY`/`WP`/`TIMEOUT`；TIMEOUT 一定进命令状态。
 - **下一步**：注入 NAND 读超时并保留旧 buffer，确认命令状态带 `TIMEOUT`、FTL 不进成功路径。
-- **证据**：`src/fc/fc.c:fc_complete_from_nand` Step 3；`src/fc/fc_nand_engine.c:pre_jump_index`；`src/fc/fc_nand_dispatch.c:completion_per_cw`；`include/fc/fc_command.h:FC_CMD_STATUS_*`。
+- **证据**：`src/fc/fc.c:fc_complete_from_nand` Step 3；`src/fc/fc_nand_engine.c:pre_jump_index`；`src/fc/fc_nand_dispatch.c:completion_per_cw`；`include/fc/fc_interface.h:FC_CMD_STATUS_*`。
 - **历史/验证**：
   - 2026-10-30 状态字重构修复 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：engine_timeout_sets_status 通过 → 闭合
@@ -4353,7 +4344,7 @@
 - **后果**：`fc_nand_dispatch_comp_s.ecc_bit_count` 恒 0，`fc_complete_from_nand` 却回写 `desc->ecc_bits`；3D NAND 的可靠性/搬移判断拿不到实际纠正 bit 数。
 - **缓解**：completion sink 改为可写；`fc_complete_from_nand` 在数据路径后把 `desc->ecc_bits` 按 flat CW 回填到 `ecc_bit_count[]`；当前 CQ/FTL 尚无该字段消费者，现有可靠性判断仍走 desc / `fc_get_cmd_ecc_max`。
 - **下一步**：上板/负例：page read 注入可纠正错误，确认 `desc->ecc_bits` 与 `completion.ecc_bit_count` 同源且非零；空页/UNC 为 0。
-- **证据**：`include/fc/fc_nand_dispatch.h`；`src/fc/fc.c:fc_complete_from_nand`；`src/fc/fc_data_path.c:fc_data_path_process_read`。
+- **证据**：`src/fc/internal/fc_nand_dispatch.h`；`src/fc/fc.c:fc_complete_from_nand`；`src/fc/fc_data_path.c:fc_data_path_process_read`。
 - **历史/验证**：
   - 2026-11-07 修复：按 flat CW 回填 `ecc_bit_count[]` → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：dp_process_read_ecc_max 通过 → 闭合
@@ -4423,7 +4414,7 @@
 - **后果**：`nand_fmc_exec_wait_ready()` 在 FMC handler 内自旋 `while (RB# LOW) delay_us(1)`，只返回 OK/TIMEOUT ⇒ `fc_uop_engine_step()` 的 `NAND_RESULT_NOT_READY` / `wait_latch` / `wait_timeout` 让出路径不触发；一个 LUN 的 tR/tPROG/tBERS 等待占住整个 `fc_nand_step`/dispatch，其他 LUN/通道不能推进，与头文件「`NOT_READY` 是让出点」及多 LUN 并发设计不一致。
 - **缓解**：`nand_fmc_exec_wait_ready()` 改 one-shot：RB# LOW → `delay_us(1)` + `NAND_RESULT_NOT_READY`；`fc_uop_engine_step()` 在首次 NOT_READY 时才 `wait_latch`，由 `wait_timeout` 统一判超时；同步初始化路径仍通过 `fc_uop_engine_execute` 循环推进。
 - **下一步**：上板回归单 LUN 常规读/写/擦除、cache、multi-plane、reset；双 LUN 并发观察 tPROG/tBERS 期间另一 LUN 是否仍推进；负例确认 `WAIT_READY` 超时仍返回 TIMEOUT。⚠ 行为变更，必须上板后才能宣称修复。
-- **证据**：`src/nand/nand_fmc.c:nand_fmc_exec_wait_ready`；`src/fc/fc_nand_engine.c:fc_uop_engine_step / fc_uop_engine_wait_latch / fc_uop_engine_wait_timeout`；`include/fc/fc_nand_engine.h` 顶部「NOT_READY 是让出点」。
+- **证据**：`src/nand/nand_fmc.c:nand_fmc_exec_wait_ready`；`src/fc/fc_nand_engine.c:fc_uop_engine_step / fc_uop_engine_wait_latch / fc_uop_engine_wait_timeout`；`src/fc/internal/fc_nand_engine.h` 顶部「NOT_READY 是让出点」。
 - **历史/验证**：
   - 2026-11-07 修复：WAIT_READY 改 one-shot 协作让出 → 未上板
   - 2026-11-15 release 全量 `test --seed 0x5ee5cfbc` 306/306（3 SKIP）：常规读/写/擦除 + cache + multi-plane 回归；WAIT_READY 超时 通过 → 闭合
@@ -4775,7 +4766,7 @@
 - **后果**：`recv_ecc == NULL` 时，`calc_ecc` 曾直接送入 syndrome 计算；若调用者按参数名传入「预期 parity」，会得到错误 syndrome，可能不可纠或误纠。当前无生产调用者。
 - **缓解**：2026-11-17 按方案 A2 删除未使用的 `calc_ecc` / `syn`，`fc_bch_decode` 只保留 `recv_ecc` 路径，参数 8→6；`fc_ecc_decode` 同步调用。
 - **下一步**：无；将来若需要直接注入 syndrome，新增独立命名入口并补契约，不恢复隐式 `calc_ecc` 参数。
-- **证据**：`include/fc/fc_bch_engine.h:fc_bch_decode`；`src/fc/fc_bch_engine.c:fc_bch_decode`；`src/fc/fc_ecc_engine.c:fc_ecc_decode`。
+- **证据**：`src/fc/internal/fc_bch_engine.h:fc_bch_decode`；`src/fc/fc_bch_engine.c:fc_bch_decode`；`src/fc/fc_ecc_engine.c:fc_ecc_decode`。
 - **历史/验证**：
   - 2026-11-17 代码/契约核对 → A2 删除参数，host 对拍与构建通过 → 已闭合（未上板）
 
@@ -4794,7 +4785,7 @@
 - **后果**：`boot_crc32` 原是启动镜像/元数据的 CRC-32/ISO-HDLC，后被 `checkpoint.c` / `metadata.c` 复用；FTL 为了 CRC include `boot_policy.h`，`boot_policy.c` 同时承担启动策略与 CRC 表，模块边界不清（H13）。
 - **缓解**：CRC-32/ISO-HDLC 软件实现迁入 `src/fc/fc_crc_engine.c`，对外接口改为 `fc_crc32_iso_hdlc`；`boot_policy`、`checkpoint`、`metadata` 改 include FC CRC 引擎；`boot_policy.h` 删除 CRC 声明。
 - **下一步 / 判据**：无需上板；已做 host 对拍与构建验证。FC 软件/硬件 CRC 的 bit-exact KAT 仍见 `RISK-CRC-02`。
-- **证据**：`src/fc/fc_crc_engine.c:fc_crc32_iso_hdlc`；`include/fc/fc_crc_engine.h`；`src/common/boot_policy.c`；`src/ftl/checkpoint.c`；`src/ftl/metadata.c`。
+- **证据**：`src/fc/fc_crc_engine.c:fc_crc32_iso_hdlc`；`src/fc/internal/fc_crc_engine.h`；`src/common/boot_policy.c`；`src/ftl/checkpoint.c`；`src/ftl/metadata.c`。
 - **历史/验证**：
   - 2026-11-18 迁移完成 → host 对拍、`make all`/`release`/UT 通过（未上板）
 
@@ -4816,6 +4807,16 @@
 - **关联**：`RISK-NAND-04`、`RISK-CACHE-16`。
 - **历史/验证**：
   - 2026-11-15 全盘 H2testw 写 950 / 读 885 KB/s → 闭合。
+
+#### RISK-ARCH-13 common 对 FC CRC 的反向依赖
+
+- **后果**：`common/boot_policy` 曾直接引用 FC 的 ISO-HDLC CRC，使 common 反向依赖 FC。
+- **缓解**：boot policy 已迁到 `src/boot/`，改用 `include/platform/crc.h` 的 `crc_compute_iso_hdlc()`；`src/common/makefile.mk` 不再加入 `include/fc`。ISO-HDLC 软件实现也在平台 CRC 服务中，FC 只保留 MPEG-2。
+- **下一步 / 判据**：boot 模块接入 `main()` 后使用 `crc_init()` 的 KAT；当前 boot_policy 仍未接入。
+- **证据**：`src/boot/boot_policy.c`；`src/boot/makefile.mk`；`src/common/makefile.mk`；`config.mk`。
+- **历史/验证**：
+  - 2026-11-18 代码核对 → 按用户裁决保留该风险
+  - 2026-11-18 boot_policy 迁出 common + CRC 下沉 → 闭合
 
 ## B.3 不实现
 

@@ -44,10 +44,10 @@
 
 ## A/B 镜像策略模块
 
-`include/common/boot_policy.h` 与 `src/common/boot_policy.c` 提供不依赖具体
+`include/boot/boot_policy.h` 与 `src/boot/boot_policy.c` 提供不依赖具体
 Flash 控制器的启动策略实现，包含：
 
-- 固件镜像头 CRC、芯片/硬件版本、加载区间和防回滚检查。
+- 固件镜像头 CRC、芯片/硬件版本、加载区间和防回滚检查；CRC 使用平台 CRC 服务的 ISO-HDLC。
 - SHA-256 摘要比对以及可注入的签名验证接口。
 - 双副本启动元数据的 CRC 与 sequence 选择。
 - pending 槽启动前扣减重试次数、失败回退和成功确认。

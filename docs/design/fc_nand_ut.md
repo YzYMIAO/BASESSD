@@ -276,7 +276,7 @@
 
 ### 2.11 `fc_raid_engine` — 当前不覆盖
 
-- `CONFIG_FC_RAID=0`（`include/fc/fc.h`），功能代码存在但未验证。
+- `CONFIG_FC_RAID=0`（`include/fc/fc_interface.h`），功能代码存在但未验证。
 - `dp_raid_recover_no_random` / `dp_generate_stripe_parity` 只在 RAID=1 编译；当前构建的 UT
   不覆盖 RAID 恢复与 stripe parity。
 - 风险登记：`RISK-DP-05`。

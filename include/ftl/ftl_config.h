@@ -24,7 +24,7 @@
  *   BLOCKS_PER_PLANE   2048     每 plane 块数
  *   LUN_NUM            1        器件每片选 LUN 数（ONFI logical_units 的编译期上界）
  *   CW_NUM             4        每页 codeword 数（= 每页扇区数 = 映射单元数）
- *   FC_BUFFER_USER_SIZE 512 B   每 CW 用户数据区（fc.h；= CW_SIZE − 2×8B 头尾）
+ *   FC_BUFFER_USER_SIZE 512 B   每 CW 用户数据区（fc_interface.h；= CW_SIZE − 2×8B 头尾）
  *
  * ── 容量公式（怎么算出来）──
  *   CW 总数    = FTL_BLOCK_TOTAL × PAGES_PER_BLOCK × CW_NUM        （每实例）
@@ -37,12 +37,12 @@
  * ⚠ **元数据区布局不在这里**——哪个分区占哪些块、每个池多大、每条 record 占几页、
  *   运行期分区表 `g_ftl_partitions[]`，全部在 **ftl/metadata.h**（运行期表在
  *   src/ftl/metadata.c）。那是 metadata 模块的事实来源，不是"配置"。
- * ⚠ 本文件只依赖 nand_config.h（几何）与 fc.h（CW 用户区大小），不引 l2p_cache/metadata，
+ * ⚠ 本文件只依赖 nand_config.h（几何）与 fc_interface.h（CW 用户区大小），不引 l2p_cache/metadata，
  *   以免循环包含。
  */
 
-#include "assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
-#include "fc.h"        /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
+#include "assertion.h"    /* ASSERT —— CW 级地址辅助的参数自检 */
+#include "fc_interface.h" /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
 #include "field_mask.h"
 #include "ftl_type.h" /* DWORD —— CW 级地址辅助的形参/返回类型 */
 #include "nand_config.h"
@@ -142,7 +142,7 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
  *   LBA（同一 plane 位）共用一页；相邻 8 个 LBA 覆盖一对 plane 页。
  *
  * 物理 plane 必须与 LBA 的 plane 位一致：FC 侧 desc->meta 的低 3 位由**物理**
- * plane/cw 铸出（fc_command.h），页内 META 存的就是「本 CW 的扇区 LBA」。若两者
+ * plane/cw 铸出（fc_interface.h），页内 META 存的就是「本 CW 的扇区 LBA」。若两者
  * 不一致，写进去的 META 会指向另一个 LBA，GC 反查/读校验都会错。
  * ══════════════════════════════════════════════════════════════════ */
 

@@ -7,9 +7,8 @@
  * fc_complete_from_nand()（fc.c）内联完成。
  */
 
-#include "fc_command.h"
-
 #include "assertion.h"
+#include "fc_interface.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>

@@ -51,8 +51,7 @@
  */
 
 #include "fault_inject.h"
-#include "fc.h"
-#include "fc_command.h"
+#include "fc_interface.h"
 #include "fc_nand_engine.h"
 #include "fc_queue.h"
 #include "fc_test_common.h"

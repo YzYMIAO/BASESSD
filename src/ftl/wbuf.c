@@ -21,7 +21,7 @@
 #include "wbuf.h"
 
 #include "assertion.h"
-#include "fc.h"               /* fc_command_alloc / fc_command_release / FC_* 配置常量 */
+#include "fc_interface.h"     /* fc_command_alloc / fc_command_release / FC_* 配置常量 */
 #include "ftl_fc_interface.h" /* ftl_cmd_* / ftl_plane_* */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"

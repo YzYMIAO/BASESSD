@@ -28,7 +28,6 @@
 
 #include "cli.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "delay.h"
-#include "fc.h"
 #include "fc_interface.h"
 #include "fc_nand_dispatch.h"
 #include "fc_nand_engine.h"
@@ -91,8 +90,6 @@ static DWORD spd_clock_elapsed_us(const spd_clock_s *clock)
  * ══════════════════════════════════════════════════════════════════════ */
 
 #    include "bst.h"
-#    include "fc.h"
-#    include "fc_command.h"
 #    include "fc_interface.h"
 #    include "fc_test_common.h"
 #    include "ftl_config.h"

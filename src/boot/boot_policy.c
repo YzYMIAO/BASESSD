@@ -1,6 +1,6 @@
 #include "boot_policy.h"
 
-#include "fc_crc_engine.h"
+#include "crc.h"
 
 #include <stddef.h>
 
@@ -24,7 +24,7 @@ void boot_image_header_finalize(boot_image_hdr_s *header)
         return;
     }
     header->header_crc32 = 0U;
-    header->header_crc32 = fc_crc32_iso_hdlc(header, sizeof(*header));
+    header->header_crc32 = crc_compute_iso_hdlc(header, sizeof(*header));
 }
 
 static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
@@ -35,7 +35,7 @@ static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
     copy              = *header;
     expected          = copy.header_crc32;
     copy.header_crc32 = 0U;
-    return expected == fc_crc32_iso_hdlc(&copy, sizeof(copy));
+    return expected == crc_compute_iso_hdlc(&copy, sizeof(copy));
 }
 
 int boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context)
@@ -78,7 +78,7 @@ void boot_metadata_finalize(boot_metadata_s *metadata)
         return;
     }
     metadata->crc32 = 0U;
-    metadata->crc32 = fc_crc32_iso_hdlc(metadata, sizeof(*metadata));
+    metadata->crc32 = crc_compute_iso_hdlc(metadata, sizeof(*metadata));
 }
 
 void boot_metadata_initialize(boot_metadata_s *metadata, boot_slot_e active_slot, DWORD active_firmware_version)
@@ -114,7 +114,7 @@ int boot_metadata_is_valid(const boot_metadata_s *metadata)
     copy       = *metadata;
     expected   = copy.crc32;
     copy.crc32 = 0U;
-    return expected == fc_crc32_iso_hdlc(&copy, sizeof(copy));
+    return expected == crc_compute_iso_hdlc(&copy, sizeof(copy));
 }
 
 static int boot_sequence_is_newer(DWORD candidate, DWORD reference)

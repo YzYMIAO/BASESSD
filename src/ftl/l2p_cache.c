@@ -48,7 +48,7 @@
 
 #include "assertion.h"
 #include "bst.h" /* ftl_block_state / ftl_block_state_name（降级现场诊断） */
-#include "fc.h"
+#include "fc_interface.h"
 #include "fc_interface.h" /* fc_get_resource_stats（写回前的资源预检） */
 #include "ftl.h"          /* ftl_ctx_s / ftl_service_pump（同步逃生口用） */
 #include "ftl_fc_interface.h"

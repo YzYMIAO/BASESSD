@@ -1,7 +1,7 @@
 #ifndef FC_QUEUE_H
 #define FC_QUEUE_H
 
-#include "fc_command.h"
+#include "fc_interface.h"
 
 #include <stdint.h>
 

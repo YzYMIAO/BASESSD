@@ -36,7 +36,7 @@
  *  二、config 由调用者给，multi_plane 由 operation 派生
  * ══════════════════════════════════════════════════════════════════════
  *
- * config 类型就是 fc_cmd_s.config 的类型 fc_cmd_cfg_s（fc_command.h），
+ * config 类型就是 fc_cmd_s.config 的类型 fc_cmd_cfg_s（fc_interface.h），
  * 不是新造的类型。`test_cmd_build` 做 `cmd->config = *config` 后**只覆盖**几个
  * 字段：ch/ce/lun（取自 addr），以及
  *
@@ -125,7 +125,7 @@
  *
  *   为什么是 PBA 而不是 LBA：本夹具只验 **FC 的机制**——「写进去的 tag 必须能原样
  *   读回来」。PBA 是唯一地址、可查表，做这件事已经够用，且不必让单测假装知道 LBA
- *   分配。（**生产路径仍是 LBA**：FTL 交 LBA 建链，见 include/fc/fc_command.h。）
+ *   分配。（**生产路径仍是 LBA**：FTL 交 LBA 建链，见 include/fc/fc_interface.h。）
  *
  *   页 helper 一律取 `meta = pba_from_addr(本页地址)` —— 写读同页自然一致，
  *   且**页地址整体进了 META**，于是「读错页」会被 Pass 4 抓到。
@@ -138,8 +138,7 @@
  */
 
 #include "assertion.h"
-#include "fc.h"
-#include "fc_command.h"
+#include "fc_interface.h"
 #include "ftl_config.h" /* pba_make（见 pba_from_addr 薄壳） */
 #include "ftl_fc_interface.h"
 #include "munit.h"

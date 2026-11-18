@@ -16,7 +16,7 @@
  *     · ③④ 两个「整段访问」入口各自显式算 fc_command_plane_span_cw_bitmap(cmd)，
  *       只有 ① 接受调用者给的部分位图（空集 / 越段会被校验函数拒绝）；
  *     · 位图是建链的**输入**，不存进命令结构体（③④ 算好后直接传参）；
- *     · config.cw_count 不参与建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h）。
+ *     · config.cw_count 不参与建链（仍被 FC 的 RAID stripe 读取，见 fc_interface.h）。
  *
  * 【数据搬运】
  *   ⑤ ftl_cmd_write_data() — 用户数据写入 desc 链各 CW 的 USER 区
@@ -41,7 +41,7 @@
  *      ⇒ ch/ce/lun 只能显式给（完成派发的实例路由键）。
  *
  * 【命令身份】
- *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（读命令对象的 cmd_id，见 fc_command.h）。
+ *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（读命令对象的 cmd_id，见 fc_interface.h）。
  *
  * 为什么这些在本层：FC 定位为**硬件 FCC 的软件替身**——只提供槽位/描述符/
  * 队列/数据路径，不含策略。而「访问哪些 CW」（掩码枚举）与「数据怎么搬」（拷贝）
@@ -50,9 +50,8 @@
  */
 
 #include "assertion.h"
-#include "fc.h" /* 池/队列深度等模块常量（fc.h 内含 fc_interface.h） */
-#include "fc_interface.h"
-#include "ftl_config.h" /* DWORD, pba_to_paa */
+#include "fc_interface.h" /* 池/队列深度等模块常量 */
+#include "ftl_config.h"   /* DWORD, pba_to_paa */
 #include "ftl_type.h"
 #include "nand_config.h"
 #include "onfi_1_0.h"
@@ -110,13 +109,13 @@ static inline BOOL ftl_fc_host_budget_ok(void)
 }
 
 /* ── desc 链组装共用小工具 ──
- *   plane 段规则用 fc_command.h 的 fc_command_plane_span（唯一一份定义，
+ *   plane 段规则用 fc_interface.h 的 fc_command_plane_span（唯一一份定义，
  *   FC 的越段校验与 FTL 的掩码展开共用）。 */
 
 /**
  * @brief 命令指针 → FC 命令池 ID。
  *
- * 命令池 ID 保存在 fc_cmd_s.cmd_id（见 fc_command.h）。本层调用者手里的 cmd
+ * 命令池 ID 保存在 fc_cmd_s.cmd_id（见 fc_interface.h）。本层调用者手里的 cmd
  * 恒来自 fc_command_alloc()，故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
  * FC_CMD_ID_INVALID——那是编程错误，调用方（pending_add / sync_wait）会因查不到
  * 而失败，不会静默串命令。
@@ -467,7 +466,7 @@ ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DW
  *
  * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CMD_STATUS_ERROR_MASK 全集
  * （NAND_FAIL / FAIL_CACHE / TIMEOUT / DATA_ERROR / META_ERROR 任一置位即 FTL_ERROR；
- * UNC/CRC/RAID 合并为 DATA_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
+ * UNC/CRC/RAID 合并为 DATA_ERROR），与 fc_interface.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
  * 与 ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与 spare 正是它们的
  * 返回物），成败由调用者按内容自判。
  */

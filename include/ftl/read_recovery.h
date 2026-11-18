@@ -29,10 +29,10 @@
  */
 
 #include "allocator.h"
-#include "bst.h"        /* rr_ecc_track_s, rr_block_health_e, bst_block_s */
-#include "fc_command.h" /* fc_cmd_status_s（服务函数签名） */
-#include "ftl_config.h" /* DWORD */
-#include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
+#include "bst.h"          /* rr_ecc_track_s, rr_block_health_e, bst_block_s */
+#include "fc_interface.h" /* fc_cmd_status_s（服务函数签名） */
+#include "ftl_config.h"   /* DWORD */
+#include "ftl_module.h"   /* FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "log.h"

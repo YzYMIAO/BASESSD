@@ -18,7 +18,7 @@
 #include "cache_batch.h"
 
 #include "assertion.h"
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h"

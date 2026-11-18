@@ -16,7 +16,7 @@
 
 2. **调用者已保证的前置条件转断言**
    `static` 函数、层内模块头里的接口，以及**跨层入口中调用者必然传有效值的指针/索引参数**，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并**删掉原来的 `return` 与恢复/降级分支**（"跳过坏 ID 继续找"、"回滚分配再返回"、"防御性降级"这类）。
-   层内模块头指：`include/fc/fc_nand_engine.h`、`include/nand/nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`ftl_op.h`/`bst.h`）。
+   层内模块头指：`src/fc/internal/fc_nand_engine.h`、`include/nand/nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`ftl_op.h`/`bst.h`）。
    **`static inline` 的纯 getter/setter 一并适用**（2026-10-17 C 批明确）：判据**不是**"它是不是模块入口"，
    而是**该函数的 NULL 语义有没有被文档化或被 UT 钉住** —— 有 ⇒ 是契约，保留（辨析 B / 判据 4）；
    没有 ⇒ 指针就是前置条件，`if (p != NULL)` 是**恒真的静默吞**（判据 1 的反面）⇒ 转 `ASSERT`。

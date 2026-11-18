@@ -381,7 +381,7 @@ flowchart TB
 |---|---|---|
 | NAND 型号 | MT29F4G08ABADAWP（SLC） | `include/nand/devices/mt29f___g08a.h` |
 | Page main / spare | 2048 B / 64 B | 同上 |
-| CW 布局 | `[META:4][CRC:4][USER:512][PARITY:8]` = 528 B | `include/fc/fc.h` |
+| CW 布局 | `[META:4][CRC:4][USER:512][PARITY:8]` = 528 B | `include/fc/fc_interface.h` |
 | CW / Page | 4 | 器件参数 + `CW_NUM` |
 | Page / Block | 64 | `PAGES_PER_BLOCK` |
 | Block / Plane | 2048 | `BLOCKS_PER_PLANE` |
@@ -413,7 +413,7 @@ die 号统一为 `BYTE`，`0xFF` 为无效哨兵；`_Static_assert(FTL_DIE_MAX <
 板级容量 `CH_MAX`/`CE_MAX` 来自板卡接线（`NAND_BOARD_CH_NUM`/`NAND_BOARD_CE_NUM`），
 `LUN_MAX` 来自器件头 `LUN_NUM`；运行时实际值以扫描结果为准，不写死。
 单 die 时与旧布局逐位一致（介质版本仍为 BASE，不触发重格式化）；多 die 时
-`ftl_media_layout_version()` 用 `fc_crc32_iso_hdlc` 把 die 数 + topology map 编入版本，拓扑变化 ⇒
+`ftl_media_layout_version()` 用 `crc_compute_iso_hdlc` 把 die 数 + topology map 编入版本，拓扑变化 ⇒
 版本不符 ⇒ 自动格式化。稀疏拓扑允许部分 die 槽为 NULL，controller 只校验 present die。
 共享 L2P cache 仍按 **(ch,ce) 一份**（同一 target 的多个 LUN 共享同一份 cache），
 不按 die 复制——否则同一 L2P 行的 load/flush 会在多个副本间分叉。
@@ -1105,7 +1105,7 @@ DWORD ftl_media_layout_version(void);
 - **判据不是“结构体字节数变没变”**，而是“老固件的介质在新固件下会不会被误读/误用”。
   例如 OP/Spare 池改为按 plane 预留时结构体布局没变，但预留块集合变了 ⇒ 必须升版本。
 
-**版本演进**：当前 `FTL_MEDIA_LAYOUT_VERSION_BASE = 14`（单 die）；多 die 版本 = `0x80000000 | fc_crc32_iso_hdlc(die 数 + topology map)`（`src/ftl/metadata.c` `ftl_media_layout_version`）。
+**版本演进**：当前 `FTL_MEDIA_LAYOUT_VERSION_BASE = 14`（单 die）；多 die 版本 = `0x80000000 | crc_compute_iso_hdlc(die 数 + topology map)`（`src/ftl/metadata.c` `ftl_media_layout_version`）。
 逐版本变更与"为什么必须 +1"见 [`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md)
 「介质布局版本」表——那边是**唯一版本表**，本文只保留当前值与判据，避免两处数字漂移。
 
@@ -4069,7 +4069,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| 命令池 | 64 | `include/fc/fc.h` |
+| 命令池 | 64 | `include/fc/fc_interface.h` |
 | 描述符池 | 256 | 同上 |
 | 缓冲池 | 128 × 528 B | 同上 |
 | SQ / HSQ / CQ | 64 / 16 / 64 | 同上 |
@@ -5559,7 +5559,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| 命令池 | 64 | `include/fc/fc.h` |
+| 命令池 | 64 | `include/fc/fc_interface.h` |
 | 描述符池 | 256 | 同上 |
 | 缓冲池 | 128 × 528 B | 同上 |
 | SQ / HSQ / CQ | 64 / 16 / 64 | 同上 |

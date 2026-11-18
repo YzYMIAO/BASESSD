@@ -34,14 +34,14 @@
  * 状态机：FREE → ALLOCATED → QUEUED → ACTIVE → COMPLETED。
  */
 
-#include "fc.h"
-
 #include "assertion.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_ecc_engine.h"
+#include "fc_interface.h"
 #include "fc_internal.h"
 #include "fc_nand_dispatch.h"
+#include "fc_nand_engine.h"
 #include "fc_queue.h"
 #include "fc_raid_engine.h"
 #include "fc_random_engine.h"
@@ -84,7 +84,7 @@ static fc_cmd_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
 static fc_cmd_status_s g_fc_cq_storage[FC_CQ_DEPTH];
 
 // GET/SET_FEATURES 的 4 字节内联数据暂存，按 cmd_id（= 命令池槽位号）索引。
-// 为什么需要：SQ 命令提交后不可写（见 fc_command.h「SQ 不可变」），而引擎需要一个
+// 为什么需要：SQ 命令提交后不可写（见 fc_interface.h「SQ 不可变」），而引擎需要一个
 // 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
 // 故这里只做提交→完成之间的中转。索引用的 cmd_id 是命令池槽位号，
 // 恒 < FC_COMMAND_POOL_DEPTH。
@@ -507,7 +507,7 @@ fc_status_e fc_test_complete_nonactive(void)
  * fc_stripe_release_parity()  — 回收 parity 命令的 desc+buffer+command 资源
  * fc_stripe_submit()         — 分配 parity 命令、配置、XOR、构建 MP request、submit
  *
- * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
+ * 编译开关：CONFIG_FC_RAID (include/fc/fc_interface.h)
  * ══════════════════════════════════════════════════════════ */
 
 #if CONFIG_FC_RAID
@@ -1890,4 +1890,9 @@ void fc_boot_report(void)
     LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n", FC_COMMAND_POOL_DEPTH, FC_DESCRIPTOR_POOL_DEPTH, FC_BUFFER_POOL_DEPTH, FC_SQ_DEPTH, FC_HSQ_DEPTH, FC_CQ_DEPTH);
     LOGI("[FC  ] topology ch=%u ce=%u lun=%d plane=%d raid=%s\r\n", CH_NUM, CE_NUM, LUN_NUM, PLANE_NUM, (CONFIG_FC_RAID != 0U) ? "on" : "off");
     LOGI("[FC  ] data path=%s ecc=%s random=%s\r\n", data_path, fc_ecc_algo_name(), fc_random_algo_name());
+}
+
+void fc_boot_arm(void)
+{
+    fc_nand_engine_set_armed(1U);
 }

@@ -52,7 +52,7 @@
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "fault_inject.h" /* 测试镜像专属注入点；生产构建整段裁掉（宏隔离） */
 #endif
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_JOURNAL */

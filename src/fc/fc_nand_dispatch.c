@@ -6,7 +6,7 @@
  *         FC 预解析 → submit/submit_chain 入队 → poll 出队 + 执行 + 回 completion
  *
  * 层次关系：
- *   上层 FC（fc_command.h）→ 本文件（dispatch）
+ *   上层 FC（fc_interface.h）→ 本文件（dispatch）
  *     → fc_nand_start/step（fc_nand_engine.c）→ fc_uop_engine → NAND PHY（nand_fmc.c）
  *
  * 执行模型：
@@ -26,12 +26,12 @@
 
 #include "assertion.h"
 #include "delay.h"
-#include "fc_command.h"
+#include "fc_interface.h"
 #include "fc_nand_engine.h"
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "fault_inject.h"
 #endif
-#include "fc_types.h"
+#include "fc_interface.h"
 #include "log.h"
 #include "nand_board.h"
 #include "nand_config.h"

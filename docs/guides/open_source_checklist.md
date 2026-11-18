@@ -280,7 +280,7 @@ git ls-files -z docs/reference | xargs -0 du -cb | tail -1  # 应只剩 md
 | debug / release 构建 | 已验证 / 未验证（按当前事实） | 构建命令与告警数 |
 | UT 编译 | 已验证 / 未验证 | `make tests UT=...` |
 | 板端回归 | 已验证项逐条列出 | 串口日志 / 测试记录 |
-| `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc.h` |
+| `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h` |
 | IWDG | 关闭，待上板决策 | `src/main.c` |
 | read recovery `0x89` | 保留地址，空转，不处理 | `src/ftl/read_recovery.c` |
 

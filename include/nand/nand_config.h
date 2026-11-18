@@ -85,7 +85,7 @@ _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 #endif
 
 /* CW 布局（FC 层软件选择，不是器件几何）：每页 4 个 CW，码字 528B。
- * 528 = [META:4][CRC:4][USER:512][ECC:8]，布局见 include/fc/fc.h。 */
+ * 528 = [META:4][CRC:4][USER:512][ECC:8]，布局见 include/fc/fc_interface.h。 */
 #define CW_NUM   (4U)
 #define CW_WIDTH (2U) /* 4 个 codeword ⇒ 2 bit 编号 */
 #define CW_SIZE  (PAGE_SIZE / CW_NUM)
@@ -321,7 +321,7 @@ static inline DWORD paa_with_lun(DWORD paa, DWORD lun)
  * LBA 与 PBA 的低 3 位是**同一套编码**：低 2 位 = cw，bit 2 = plane。
  *   PBA 侧：pba_to_plane() / pba_to_cw() 取的就是这两位；
  *   LBA 侧：页内位置（plane 位在 bit CW_WIDTH，见 ftl_config.h §三）。
- * FC 侧铸命令的 desc->meta 也用这两位（fc_command.h / fc_data_path.c），
+ * FC 侧铸命令的 desc->meta 也用这两位（fc_interface.h / fc_data_path.c），
  * 所以**本段留在 NAND 层**，不随 PBA 搬走。
  * ══════════════════════════════════════════════════════════════ */
 

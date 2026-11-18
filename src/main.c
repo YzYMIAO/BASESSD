@@ -4,7 +4,7 @@
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
- *          → fc_nand_engine_set_armed(1) → stm32_platform_register
+ *          → fc_boot_arm() → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → usb_msc_init → usb_device_init
  *          → while(1) { stack_guard_check; cli_service_poll; ssd_runtime_pump; }
@@ -26,7 +26,7 @@
 #include "cli.h"
 #include "controller.h"
 #include "delay.h"
-#include "fc.h"
+#include "fc_interface.h"
 #include "ftl.h"
 #include "ftl_op.h"
 #include "log.h"
@@ -37,8 +37,6 @@
 #include "timer.h"
 // #include "led.h"
 #include "fault.h"
-#include "fc_nand_dispatch.h"
-#include "fc_nand_engine.h"
 #include "mpu.h"
 #include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"
@@ -785,7 +783,7 @@ int main(void)
     }
     else
     {
-        fc_nand_engine_set_armed(1U);
+        fc_boot_arm();
         boot_report_controller();
         /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
          * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */

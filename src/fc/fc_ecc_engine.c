@@ -2,8 +2,8 @@
 #include "fc_ecc_engine.h"
 
 #include "assertion.h"
-#include "fc.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
 #include "fc_bch_engine.h"
+#include "fc_interface.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
 #include "log.h"
 
 #include <stddef.h>

@@ -33,8 +33,7 @@
 
 #include "assertion.h"
 #include "bbt.h" /* bbt_mark_bad */
-#include "fc.h"
-#include "fc_command.h"
+#include "fc_interface.h"
 #include "ftl.h"              /* ftl_ctx_s（含 pending[] / cache / rr_page_scratch） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_cmd_read_data */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */

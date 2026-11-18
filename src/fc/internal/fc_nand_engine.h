@@ -111,23 +111,6 @@ nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const na
  */
 nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completion);
 
-/**
- * @brief FC 侧 NAND 初始化：器件 hw_init + 拓扑扫描（同步阶段）
- *
- * @return OK / 错误码
- */
-nand_result_e fc_nand_init(void);
-
-/**
- * @brief 把所有 present target 切到 CONFIG_NAND_TIMING_MODE
- *
- * @param fmc_hz FMC 内核时钟（Hz）；0 时使用实现侧 fallback
- * @return OK / 错误码
- *
- * @note 失败时尝试把 target 回滚到低速；回滚失败只记录，调用者不得继续假设
- *       “低速仍有效”。
- */
-nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz);
 #if defined(FC_NAND_TEST_ENABLE)
 /**
  * @brief 测试专用：调用参数页读取路径（用于 ONFI 读失败注入）。

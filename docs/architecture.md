@@ -10,6 +10,7 @@
 | FTL | `src/ftl/` | L2P 映射、GC、WL、Journal、Checkpoint、掉电恢复 | 只经 FC 命令接口访问介质 |
 | FC-NAND | `src/fc/` + `src/nand/` | 命令/描述符/缓冲池、UOP 引擎、ECC/CRC、FMC 时序 | 只经 NAND 器件后端访问 PHY |
 | DRAM | 无独立层 | 本仓 DRAM-less：元数据常驻 AXI_RAM / SRAM2 | 见 `docs/hardware_contract.md` 内存布局 |
+| Boot policy | `src/boot/` | A/B 镜像头、启动元数据与 slot 选择策略（当前未接入 `main()`） | 不访问 Flash；CRC 走平台服务 |
 
 核心模块只依赖抽象接口，不直接访问操作系统 API 或芯片寄存器。主机侧入口是
 USB MSC 与 UART CLI（无 NVMe 主机层）。

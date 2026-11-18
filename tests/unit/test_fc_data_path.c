@@ -49,11 +49,10 @@
  *       不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
  */
 
-#include "fc.h"
-#include "fc_command.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_ecc_engine.h"
+#include "fc_interface.h"
 #include "fc_random_engine.h"
 #include "fc_test_common.h"
 #include "munit.h"

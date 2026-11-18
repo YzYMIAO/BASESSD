@@ -27,14 +27,8 @@ FC 层是硬件 FCC（Flash Controller Core，SSD 主控里负责 NAND 通道与
 │ 上层：FTL（`src/ftl/`，设计见 ftl_design.md）                     │
 ├────────────────────────────────────────────────────────────────┤
 │ FC 固件层（`include/fc/` + `src/fc/`）                            │
-│   fc.h             公共 umbrella（只 include，不定义）            │
-│   fc_interface.h   对外 API + 池/队列/布局常量                    │
-│   fc_types.h       状态码 fc_status_e + 资源 ID 类型              │
-│   fc_command.h     命令/描述符/CQ 结构 + 状态位 + CW 位图工具      │
-│   fc_queue.h       SQ / HSQ / CQ 环形队列                        │
-│   fc_data_path.h   编解码编排（META→CRC→加扰→ECC→RAID）           │
-│   *_engine.h       crc / random / bch / ecc / raid 引擎           │
-│   internal/        池与控制器私有契约（`fc_pool.h`、`fc_internal.h`）│
+│   fc_interface.h   唯一公共头：类型/命令/CQ/布局/API/启动入口      │
+│   internal/        全部私有头（池、队列、engine、data_path、NAND） │
 │   fc.c             初始化、提交/填充/完成调度、服务主循环、诊断    │
 │   fc_pool.c        三池、空闲链表、生命周期、建链与链释放          │
 ├────────────────────────────────────────────────────────────────┤
@@ -181,7 +175,7 @@ typedef struct FC_COMMAND_S
 } fc_cmd_s;
 ```
 
-`sizeof(fc_cmd_s) == 24 B`（`_Static_assert` 钉住，见 `fc_command.h`）。
+`sizeof(fc_cmd_s) == 24 B`（`_Static_assert` 钉住，见 `fc_interface.h`）。
 
 命令级配置位域 `fc_cmd_cfg_s`（32 位打包，4 B）：
 
@@ -416,17 +410,20 @@ FC 不维护任何"软件寄存器影子"。队列用量与池用量直接读实
 
 ### 2.9 对外接口
 
-外部只 `#include "fc/fc.h"`；`fc.h` 只 include `fc_command.h` + `fc_interface.h`。
-`internal/` 下两个头是 FC 私有契约，FTL 不得 include。
+外部只 `#include "fc_interface.h"`。该头是 FC 唯一公共契约：基础类型、
+命令/描述符/CQ 结构、池/队列/布局常量、对外 API 与 main 启动入口。
+
+`src/fc/internal/` 下全部是 FC 私有头，FTL/HIL 不得 include；构建只为
+FC 对象和目标测试加私有 include 路径（见 `src/fc/makefile.mk`）。
 
 | 文件 | 内容 |
 |------|------|
-| `include/fc/fc.h` | 公共 umbrella，不定义配置与函数 |
-| `include/fc/fc_interface.h` | 对外 API + 池/队列/布局常量 |
-| `include/fc/fc_command.h` | 命令 / 描述符 / CQ 结构、状态位、CW 位图工具 |
-| `include/fc/fc_queue.h` | 队列类型与操作 |
+| `include/fc/fc_interface.h` | 唯一公共头（类型 + 命令结构 + 布局常量 + API + 启动入口） |
 | `src/fc/internal/fc_pool.h` | 池私有契约（状态枚举、buffer 行、池原语） |
 | `src/fc/internal/fc_internal.h` | `fc_ctl_s`、`fc_sched_s`、全局单例 |
+| `src/fc/internal/fc_queue.h` | SQ / HSQ / CQ 环形队列 |
+| `src/fc/internal/fc_data_path.h` | 编解码编排（META→CRC→加扰→ECC→RAID） |
+| `src/fc/internal/*_engine.h` | crc / random / bch / ecc / raid 引擎 |
 | `src/fc/fc.c` | 初始化编排、提交/填充/完成、服务主循环、Stripe RAID、诊断 |
 | `src/fc/fc_pool.c` | 三池、空闲链表、生命周期、建链与链释放 |
 
@@ -440,6 +437,7 @@ FC 不维护任何"软件寄存器影子"。队列用量与池用量直接读实
 | ④ 数据查询 | `fc_get_cmd_data_ptr`、`fc_get_cmd_cw_bitmap`、`fc_get_cmd_ecc_max`、`fc_get_cmd_all_cw_empty` |
 | ⑤ 查询工具 | `fc_command_id_to_command`、`fc_descriptor_id_to_descriptor`、`fc_get_resource_stats`、`fc_debug_state_get`、`fc_boot_report` |
 | ⑥ 服务入口 | `fc_service()` |
+| ⑦ 启动编排 | `fc_nand_init()`、`fc_nand_enable_high_speed()`、`fc_boot_arm()` |
 
 三处边界语义：
 
@@ -1043,7 +1041,7 @@ flowchart TB
 
 #### 单 CW 步骤原语
 
-两条管线中每个算法步骤都是**单 CW 原语**（`include/fc/fc_data_path.h`），管线本身只做编排
+两条管线中每个算法步骤都是**单 CW 原语**（`src/fc/internal/fc_data_path.h`），管线本身只做编排
 （取 buffer + 调原语）。原语只操作一块 528 B 裸 CW，不碰 command / descriptor / 链：
 
 | 原语 | 步骤 | 行为 |
@@ -2319,7 +2317,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 | # | 判据 | 落点 |
 |---|---|---|
 | 1 | **外部输入校验保留返回码** | 只有来自 host / CLI / 介质读回的字节才返回错误码。判定标准是「值从哪来」，不是「声明在哪个头文件」 |
-| 2 | **调用者已保证的前置条件转断言** | `static` 函数、内部头（`fc_internal.h` / `fc_pool.h` / `fc_queue.h`）、跨层入口中调用者必然传有效值的指针/索引 ⇒ `ASSERT`，删掉 `return` 与恢复分支 |
+| 2 | **调用者已保证的前置条件转断言** | `static` 函数、内部头（`src/fc/internal/fc_internal.h` / `fc_pool.h` / `fc_queue.h`）、跨层入口中调用者必然传有效值的指针/索引 ⇒ `ASSERT`，删掉 `return` 与恢复分支 |
 | 3 | **资源类结果与运行时状态保留返回码** | 池耗尽、CQ 满背压、NAND 报告错误、`ctx->active == 0` 这类「此刻能不能做」的状态 ⇒ 返回状态 |
 | 4 | **单测固化为契约的守卫保留返回码** | 仅当测试是被测函数的正当调用者（校验器、文档化 no-op） |
 
@@ -2553,7 +2551,7 @@ DWORD plane_paa[PLANE_NUM];      /* 每个 plane 的行地址 */
 BYTE *cw_buffers[CW_TOTAL_MAX];  /* 每个 CW 的数据缓冲指针 */
 ```
 
-**下界**（`include/fc/fc_nand_dispatch.h`）：`src/fc/` 必须在 submit 时把 desc 链解析完并交出
+**下界**（`src/fc/internal/fc_nand_dispatch.h`）：`src/fc/` 必须在 submit 时把 desc 链解析完并交出
 `cw_buffers[]`，dispatch 之后**不再回调 FC**。故「造请求者必须拥有 buffer 池」——
 FC 不能整体下沉到 FTL。
 
@@ -2600,7 +2598,7 @@ FC 不能整体下沉到 FTL。
 
 | 图 | 内容 | 定位 |
 |---|---|---|
-| 图 1 | 分层与数据流总览 | `src/fc/fc.c` 头注释；`include/fc/fc_nand_dispatch.h` |
+| 图 1 | 分层与数据流总览 | `src/fc/fc.c` 头注释；`src/fc/internal/fc_nand_dispatch.h` |
 | 图 2 | 命令生命周期 | `include/fc/fc_interface.h`；`src/fc/fc_pool.c` |
 | 图 3 | `fc_service()` 主循环 | `fc_service` / `fc_poll_fill`（`src/fc/fc.c`） |
 | 图 4 | `fc_uop_engine_step()` 骨架 | `src/fc/fc_nand_engine.c` |
