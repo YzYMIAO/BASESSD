@@ -10,7 +10,8 @@
  * USB MSC（Mass Storage Class, Bulk-Only Transport）块设备前端。
  *
  * 把 PC 的 SCSI READ(10)/WRITE(10) 映射到 controller 的 512B LBA 读写：
- *   1 LBA = 1 个 FTL 映射单元（FTL_IU_BYTES = 512B），容量 = FTL_LBA_MAX。
+ *   1 LBA = 1 个 FTL 映射单元（FTL_IU_BYTES = 512B）；
+ *   容量 = controller 的运行时 host_lba_max（≤ FTL_LBA_MAX，按实际坏块扣减）。
  * 另支持 SYNCHRONIZE CACHE(10/16) → FLUSH、UNMAP(0x42) → 逐 range TRIM、
  * WRITE(10) FUA（完成前不回执）。
  *

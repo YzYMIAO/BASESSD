@@ -7,7 +7,8 @@
  *   定位并从 NAND 加载；脏行写回走 owner 的「追加写」日志块。
  *
  * 共享模型：
- *   同一 (ch,ce) 下的所有 LUN 共用一份 cache（g_l2p_cache[ch][ce]）。
+ *   同一实际存在的 target（(ch,ce)）下所有 LUN 共用一份 cache；
+ *   槽位按扫描顺序紧凑编号（s_l2p_cache[target_slot]），稀疏拓扑不分配空 target。
  *   cache 行/脏位图的键是**全局 region**；映射页在 NAND 上的位置是
  *   **owner die 内的局部 region**（global_region / DIE_MAX）。
  *   owner 由全局 region 经注入的 owner_of_region 回调解析；load/flush/commit
@@ -60,6 +61,118 @@
 #include "ssd_compiler.h"
 
 #include <string.h>
+
+// 设备级共享 L2P cache：一个**实际存在的 target** 一份，同 target 的多个 LUN 共用。
+// 槽位按 (ch,ce) 扫描顺序紧凑编号；NAND_BOARD_TARGET_MAX 是板级上界，
+// 稀疏板卡用它把常驻 cache 从 CH×CE 矩形收紧到实际 target 数。
+// 定义与放置（普通 .bss → AXI）都归本模块；`owner` 端口按 die 登记。
+static l2p_cache_s s_l2p_cache[NAND_BOARD_TARGET_MAX];
+static BYTE        s_target_ch[NAND_BOARD_TARGET_MAX];
+static BYTE        s_target_ce[NAND_BOARD_TARGET_MAX];
+static BYTE        s_target_count;
+static l2p_owner_s s_l2p_owner[FTL_DIE_MAX];
+
+/**
+ * @brief 全局 region → owner die 端口的唯一解析点
+ *
+ * @param ctx          未使用（设备级共享 cache 只有一个 owner 表）
+ * @param global_region 全局 region
+ * @return owner 端口；未登记的 die 即 boot 顺序错误
+ */
+static const l2p_owner_s *s_owner_of_region(void *ctx, DWORD global_region)
+{
+    (void)ctx;
+
+    ASSERT(DIE_MAX != 0U);
+
+    const BYTE die = (BYTE)(global_region % DIE_MAX);
+
+    ASSERT(die < FTL_DIE_MAX);
+    ASSERT(s_l2p_owner[die].metadata_dir != NULL);
+
+    return &s_l2p_owner[die];
+}
+
+/**
+ * @brief 设备级初始化实际存在的 target 共享 cache（一次）
+ *
+ * 只给「至少有一个 present LUN」的 (ch,ce) 分配 cache 槽；稀疏拓扑下不为
+ * 不存在的 target 付 200 KiB 常驻内存与启动 memset。
+ */
+void l2p_device_init(void)
+{
+    s_target_count = 0U;
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            BOOL present = false;
+
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                if (g_chcelun_table[ch][ce][lun] != FTL_DIE_INVALID)
+                {
+                    present = true;
+                    break;
+                }
+            }
+
+            if (present == false)
+            {
+                continue;
+            }
+
+            if (s_target_count >= NAND_BOARD_TARGET_MAX)
+            {
+                /* 板级上界配错：该 target 无 cache 槽，实例 boot 会因取不到 cache 失败。 */
+                LOGE("[L2P ] target count exceeds board max; ch=%hhu ce=%hhu skipped\r\n", ch, ce);
+                continue;
+            }
+
+            s_target_ch[s_target_count] = ch;
+            s_target_ce[s_target_count] = ce;
+            l2p_init(&s_l2p_cache[s_target_count], ch, ce, s_owner_of_region, NULL);
+            s_target_count++;
+        }
+    }
+}
+
+/**
+ * @brief 登记某个 die 的 owner 端口（boot 时由 ftl_instance_init 调用）
+ *
+ * @param die   紧凑 die 号（< FTL_DIE_MAX）
+ * @param owner owner 端口内容（非空；按值拷贝）
+ */
+void l2p_owner_register(BYTE die, const l2p_owner_s *owner)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    ASSERT(owner != NULL);
+
+    s_l2p_owner[die] = *owner;
+}
+
+/**
+ * @brief 取 (ch,ce) 对应的共享 cache（定义在 l2p_cache.c）
+ *
+ * @param topo 本实例拓扑（ch/ce 必须在范围内）
+ * @return 共享 cache；该 (ch,ce) 不存在 / 无 present LUN 时返回 NULL
+ */
+l2p_cache_s *l2p_cache_workspace_get(ftl_topo_s topo)
+{
+    ASSERT(topo.ch < CH_NUM);
+    ASSERT(topo.ce < CE_NUM);
+
+    for (BYTE i = 0U; i < s_target_count; i++)
+    {
+        if ((s_target_ch[i] == topo.ch) && (s_target_ce[i] == topo.ce))
+        {
+            return &s_l2p_cache[i];
+        }
+    }
+
+    return NULL;
+}
 
 /* 行指针 → 同下标的查找元数据。region_id/state/access_count 只在 tags[] 里存放
  * （C9：不得在 l2p_cache_line_s 里保留第二份）。查找/CLOCK 只碰 tags[]，

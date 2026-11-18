@@ -62,6 +62,22 @@
 
 #include <string.h>
 
+// 每实例 Journal 环形工作区：定义与内存域（DTCM，CPU-only 热数据）都归本模块。
+// NOLOAD ⇒ 启动不清零，ftl_init 绑定后对该实例显式 memset。
+static l2p_jrn_s s_journal[FTL_DIE_MAX] DTCM_DATA;
+
+/**
+ * @brief 取本实例的 Journal 环形工作区（定义在 journal.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+l2p_jrn_s *jrn_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_journal[die];
+}
+
 // 同一环形块连续擦除失败多少次后判为不可用。
 // 3 次覆盖瞬态擦除失败；持续失败只能来自物理坏块。继续重试没有意义：环只有
 // JOURNAL_BLOCK_COUNT 块，必须标坏并跳过，否则 journal 永久停在 need_erase。

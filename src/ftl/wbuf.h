@@ -86,6 +86,14 @@ typedef struct WB_HANDLE_S
     struct MIGRATE_HANDLE_S *migrate;
 } wb_handle_s;
 
+/**
+ * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+wb_handle_s *wb_workspace_get(BYTE die);
+
 /* 触发参数。 */
 typedef struct WB_TRIGGER_S
 {

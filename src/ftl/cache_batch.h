@@ -27,6 +27,76 @@
 #include "ftl_type.h"   /* ftl_ctx_s */
 #include "ssd_types.h"
 
+/* ── 序列状态查询 / 控制（跨模块只走这里，不直接读 cache_stream.seq 字段）──
+ *
+ * `cache_stream.seq` 的写者是序列模块（本文件 + ftl.c 的状态机）；ftl_op.c 等
+ * 其他模块只能通过下面这组入口查询状态、请求断点/让行。定义在 cache_batch.c
+ * （那里能看到 ftl_ctx_s 的完整定义）。 */
+
+/**
+ * @brief 序列是否仍占用设备管线（active || draining）
+ *
+ * @param ftl 实例
+ * @return true = 未收尾（门控仍关着）
+ */
+BOOL ftl_cache_seq_is_open(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 序列是否处于有序收尾（close_requested || closing）
+ *
+ * @param ftl 实例
+ * @return true = 请求收尾 / padding END 在飞
+ */
+BOOL ftl_cache_seq_is_closing(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 最近持有序列的组号
+ *
+ * @param ftl 实例
+ * @return 组号（< FTL_GROUP_MAX 才可用于查 pending）
+ */
+WORD ftl_cache_seq_owner_gi(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 本次提交是否被序列门控挡住（open && !owner_submit）
+ *
+ * @param ftl 实例
+ * @return true = 必须拒绝（调用者折成 FTL_AGAIN）
+ */
+BOOL ftl_cache_seq_gate_blocks(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 是否有后台让行请求待兑现
+ *
+ * @param ftl 实例
+ * @return true = yield_pending
+ */
+BOOL ftl_cache_seq_yield_pending(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 请求下一窗口有序收尾
+ *
+ * @param ftl 实例
+ */
+void ftl_cache_seq_request_break(ftl_ctx_s *ftl);
+
+/**
+ * @brief 请求 host 暂不开新序列，给后台一次提交机会
+ *
+ * now_ms == 0（时钟缺失）时不置位：host 无法判超时，宁可不让行也不锁死。
+ *
+ * @param ftl    实例
+ * @param now_ms 当前毫秒时基（0 = 时钟缺失）
+ */
+void ftl_cache_seq_request_yield(ftl_ctx_s *ftl, DWORD now_ms);
+
+/**
+ * @brief 兑现后台让行（清 yield_pending / yield_ms）
+ *
+ * @param ftl 实例
+ */
+void ftl_cache_seq_yield_clear(ftl_ctx_s *ftl);
+
 /* ── cache read ──
  * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
  * （单条 LAST 收尾，见 cache_batch.c 的 ftl_cache_read_try）。

@@ -19,7 +19,8 @@ typedef enum SSD_STATUS_E
     SSD_STATUS_NO_SPACE         = 2U,
     SSD_STATUS_IO_ERROR         = 3U,
     SSD_STATUS_NOT_SUPPORTED    = 4U,
-    SSD_STATUS_BUSY             = 5U /* 同类请求已有一条在飞（如第二条 FLUSH） */
+    SSD_STATUS_BUSY             = 5U, /* 同类请求已有一条在飞（如第二条 FLUSH） */
+    SSD_STATUS_TIMEOUT          = 6U  /* HIL 请求超过 SSD_REQUEST_TIMEOUT_MS 仍未完成 */
 } ssd_status_e;
 
 /* 平台 / 共享算法的二元返回状态：0 = 成功，1 = 失败。 */

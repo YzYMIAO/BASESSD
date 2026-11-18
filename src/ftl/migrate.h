@@ -308,6 +308,14 @@ typedef struct MIGRATE_HANDLE_S
 } mig_handle_s;
 
 /**
+ * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+mig_handle_s *mig_workspace_get(BYTE die);
+
+/**
  * @brief 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。
  *
  * @param m handle（只读）。
@@ -325,6 +333,39 @@ static inline BOOL mig_fail_state_is_clean(const mig_handle_s *m)
         }
     }
     return true;
+}
+
+/**
+ * @brief 搬移引擎是否在推进（job 在飞，或 abort 后命令仍在 FC 侧）
+ *
+ * @param m handle（只读）
+ * @return true = 有在飞搬移；false = 完全空闲
+ */
+static inline BOOL mig_is_busy(const mig_handle_s *m)
+{
+    return (m->job.active != false) || (m->state.inflight != 0U);
+}
+
+/**
+ * @brief 搬移引擎是否因失败暂停
+ *
+ * @param m handle（只读）
+ * @return true = 失败暂停
+ */
+static inline BOOL mig_is_paused(const mig_handle_s *m)
+{
+    return m->state.failure.paused;
+}
+
+/**
+ * @brief GC 最近一次求值是否判定「无收益 victim」
+ *
+ * @param m handle（只读）
+ * @return true = 无收益（free 见底且搬不动）
+ */
+static inline BOOL mig_gc_no_gain(const mig_handle_s *m)
+{
+    return m->state.benefit.nogain;
 }
 
 /* ── 接口 ── */

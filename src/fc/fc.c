@@ -5,7 +5,7 @@
  *   fc_pool.c  —— 命令/描述符/缓冲三池、空闲链表、生命周期与链遍历；
  *   fc.c（本文件）—— 队列/调度器、提交/填充/完成、数据路径编排、服务主循环、诊断；
  *   fc_pool.h / fc_internal.h —— 池私有契约 / 控制器与调度器共享定义
- *                                （私有头在 src/fc/internal/，FTL 不可见）。
+ *                                （私有头在 src/fc/，FTL 不可见）。
  *
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数；句柄取 cmd->cmd_id → 逐条

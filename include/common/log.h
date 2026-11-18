@@ -25,18 +25,21 @@ typedef BOOL (*log_flush_sink_fn_t)(DWORD timeout_ms);
 /*
  * 运行时日志接口。sink 由已注册的平台提供，例如 firmware 的 UART 或 host 的 stderr。
  * 业务模块只依赖本头文件，不应直接操作 UART、文件描述符或平台寄存器。
+ *
+ * 日志是 best-effort：逐次调用的结果不返回；写入失败由内部计数，
+ * 经 log_get_write_failure_count() 读取（H38：无人消费的返回值不做 API）。
  */
-DWORD log_write(log_level_e level, const char *message);
+void log_write(log_level_e level, const char *message);
 /* 格式与实参类型由编译器按 printf 语义检查（GCC -Wformat）。 */
-__attribute__((format(printf, 2, 3))) DWORD log_printf(log_level_e level, const char *format, ...);
-DWORD                                       log_vprintf(log_level_e level, const char *format, va_list args);
-void                                        log_set_level(log_level_e level);
-log_level_e                                 log_get_level(void);
-void                                        log_set_sink(log_sink_fn_t sink);
-BOOL                                        log_flush(DWORD timeout_ms);
-void                                        log_set_flush_sink(log_flush_sink_fn_t sink);
-DWORD                                       log_get_truncated_count(void);
-DWORD                                       log_get_write_failure_count(void);
+__attribute__((format(printf, 2, 3))) void log_printf(log_level_e level, const char *format, ...);
+void                                       log_vprintf(log_level_e level, const char *format, va_list args);
+void                                       log_set_level(log_level_e level);
+log_level_e                                log_get_level(void);
+void                                       log_set_sink(log_sink_fn_t sink);
+BOOL                                       log_flush(DWORD timeout_ms);
+void                                       log_set_flush_sink(log_flush_sink_fn_t sink);
+DWORD                                      log_get_truncated_count(void);
+DWORD                                      log_get_write_failure_count(void);
 
 /*
  * 企业固件中的业务代码使用这些宏。DEBUG 日志可在 release 构建中完全裁剪，

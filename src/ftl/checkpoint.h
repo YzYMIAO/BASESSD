@@ -192,6 +192,14 @@ typedef struct CP_HANDLE_S
 _Static_assert(sizeof(((cp_handle_s *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "cp_handle_s.region_bitmap 必须是本 die 的局部 2048-bit 位图");
 _Static_assert(sizeof(((cp_handle_s *)0)->hdr.block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)), "cp_handle_s.block_words 必须恰好覆盖全部块");
 
+/**
+ * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，SRAM3）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+cp_handle_s *cp_workspace_get(BYTE die);
+
 /* ── Header Magic ── */
 /* Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）见
  * ftl/metadata.h「固定元数据区布局」。 */
@@ -409,6 +417,14 @@ void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger);
  * @param h  Checkpoint handle（重装 cp_state.next_t3_ms）
  */
 void cp_timer_reset(cp_handle_s *h);
+
+/**
+ * @brief host flush 触发 Checkpoint 的节流判据（半个 T3）
+ *
+ * @param h Checkpoint handle（只读）
+ * @return true = 时钟有效且距上次 CP 已超过 CP_TIME_INTERVAL_MS / 2
+ */
+BOOL cp_flush_kick_due(const cp_handle_s *h);
 
 /* ── 格式化 / 快照辅助 ── */
 

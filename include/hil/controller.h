@@ -1,7 +1,8 @@
 #ifndef SSD_CONTROLLER_H
 #define SSD_CONTROLLER_H
 
-#include "ftl.h"
+#include "ftl_capacity.h"
+#include "ftl_interface.h"
 #include "host_queue.h"
 #include "ssd_request.h"
 
@@ -64,7 +65,8 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
  * @brief 提交一条 host 请求（READ/WRITE/FLUSH/TRIM）。
  *
  * READ/WRITE 按 FTL 实例拆 run 后异步提交；FLUSH/TRIM 只登记并启动异步 job。
- * 请求对象必须活到 complete_flag 置 1。
+ * 请求对象必须活到 complete_flag 置 1；若发生过超时（timed_out），还必须
+ * 等 ssd_controller_request_reclaimable() 为真才能释放（FTL 可能仍在引用）。
  *
  * @param controller Controller 上下文（必须 READY）
  * @param request    主机请求
@@ -82,6 +84,19 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request);
  * @return 1 = 完成；0 = 未完成
  */
 BYTE ssd_controller_is_complete(const ssd_req_s *request);
+
+/**
+ * @brief 超时后请求是否已可安全释放
+ *
+ * `timed_out` 只解开 host 回执，不解除 FTL / controller 对请求的引用。
+ * 前端必须等本函数为真后才能归还 host entry / USB 槽。
+ *
+ * @param controller Controller 上下文
+ * @param request    请求（非空）
+ * @return true  READ/WRITE：所有 run 已完成；FLUSH/TRIM：controller 已摘指针
+ *         false 仍有在飞引用，提前释放会让完成回调写已释放内存
+ */
+BOOL ssd_controller_request_reclaimable(const ssd_ctl_s *controller, const ssd_req_s *request);
 
 /**
  * @brief 推进 Controller 自己的异步命令（FLUSH / TRIM）。

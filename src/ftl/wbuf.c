@@ -25,10 +25,27 @@
 #include "ftl_fc_interface.h" /* ftl_cmd_* / ftl_plane_* */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"
-#include "migrate.h" /* mig_handle_s / mig_gc_request_urgent */
-#include "timer.h"   /* platform_now_ms（取不到页对的兜底计时） */
+#include "migrate.h"      /* mig_handle_s / mig_gc_request_urgent */
+#include "ssd_compiler.h" /* DTCM_DATA */
+#include "timer.h"        /* platform_now_ms（取不到页对的兜底计时） */
 
 #include <string.h>
+
+// 每实例页打包写缓冲：定义与内存域（DTCM，CPU-only 热数据）都归本模块。
+// NOLOAD ⇒ 启动不清零，ftl_init 绑定后对该实例显式 memset。
+static wb_handle_s s_wbuf[FTL_DIE_MAX] DTCM_DATA;
+
+/**
+ * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+wb_handle_s *wb_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_wbuf[die];
+}
 
 /**
  * @brief 该 LBA 在 flat CW 位图（occupied / 命令 cw_bitmap）里的位。

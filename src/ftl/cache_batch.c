@@ -31,6 +31,100 @@
 
 #include <string.h>
 
+/* ── 序列状态查询 / 控制（跨模块入口） ──
+ * 写者是序列模块（本文件 + ftl.c 的状态机）；ftl_op.c 等模块只走这里。 */
+
+/**
+ * @brief 序列是否仍占用设备管线（active || draining）
+ *
+ * @param ftl 实例
+ * @return true = 未收尾
+ */
+BOOL ftl_cache_seq_is_open(const ftl_ctx_s *ftl)
+{
+    return (ftl->cache_stream.seq.active != false) || (ftl->cache_stream.seq.draining != false);
+}
+
+/**
+ * @brief 序列是否处于有序收尾（close_requested || closing）
+ *
+ * @param ftl 实例
+ * @return true = 请求收尾 / padding END 在飞
+ */
+BOOL ftl_cache_seq_is_closing(const ftl_ctx_s *ftl)
+{
+    return (ftl->cache_stream.seq.close_requested != false) || (ftl->cache_stream.seq.closing != false);
+}
+
+/**
+ * @brief 最近持有序列的组号
+ *
+ * @param ftl 实例
+ * @return 组号
+ */
+WORD ftl_cache_seq_owner_gi(const ftl_ctx_s *ftl)
+{
+    return ftl->cache_stream.seq.owner_gi;
+}
+
+/**
+ * @brief 本次提交是否被序列门控挡住（open && !owner_submit）
+ *
+ * @param ftl 实例
+ * @return true = 必须拒绝
+ */
+BOOL ftl_cache_seq_gate_blocks(const ftl_ctx_s *ftl)
+{
+    return (ftl_cache_seq_is_open(ftl) != false) && (ftl->cache_stream.seq.owner_submit == false);
+}
+
+/**
+ * @brief 是否有后台让行请求待兑现
+ *
+ * @param ftl 实例
+ * @return true = yield_pending
+ */
+BOOL ftl_cache_seq_yield_pending(const ftl_ctx_s *ftl)
+{
+    return ftl->cache_stream.seq.yield_pending;
+}
+
+/**
+ * @brief 请求下一窗口有序收尾
+ *
+ * @param ftl 实例
+ */
+void ftl_cache_seq_request_break(ftl_ctx_s *ftl)
+{
+    ftl->cache_stream.seq.break_requested = true;
+}
+
+/**
+ * @brief 请求 host 暂不开新序列，给后台一次提交机会
+ *
+ * @param ftl    实例
+ * @param now_ms 当前毫秒时基（0 = 时钟缺失，不置位）
+ */
+void ftl_cache_seq_request_yield(ftl_ctx_s *ftl, DWORD now_ms)
+{
+    if ((now_ms != 0U) && (ftl->cache_stream.seq.yield_pending == false))
+    {
+        ftl->cache_stream.seq.yield_pending = true;
+        ftl->cache_stream.seq.yield_ms      = now_ms;
+    }
+}
+
+/**
+ * @brief 兑现后台让行（清 yield_pending / yield_ms）
+ *
+ * @param ftl 实例
+ */
+void ftl_cache_seq_yield_clear(ftl_ctx_s *ftl)
+{
+    ftl->cache_stream.seq.yield_pending = false;
+    ftl->cache_stream.seq.yield_ms      = 0U;
+}
+
 /* cache read 单条 run 的 pair 上限：**由 FC 资源决定，不是 FIFO 深度**。
  * 每 pair 占 FTL_LBA_PER_PAIR（8）个 desc / buffer，FC buffer 池 =
  * FC_BUFFER_POOL_DEPTH ⇒ pair 数 ≤ FC_BUFFER_POOL_DEPTH / FTL_LBA_PER_PAIR。

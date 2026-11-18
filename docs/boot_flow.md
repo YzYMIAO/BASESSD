@@ -27,9 +27,9 @@
 6. **平台 time_us 注册**：`platform_register()` —— FTL 的 T3 定时触发（CP 10 s / GC 500 ms）依赖它。
 7. **FTL**：`ssd_ftl_boot_all()` —— 全实例 `ftl_init` → 介质布局版本校验（不符则
    `ftl_media_format` 自动全片格式化）→ free pool 回填 → `ftl_boot_recovery`
-   （Checkpoint 加载 + Journal 回放）→ `ssd_controller_init` 绑定路由 → `g_ftl_ready = 1`。
+   （Checkpoint 加载 + Journal 回放）→ `ssd_controller_init` 绑定路由 → controller 进入 READY。
 8. **控制台**：TIM6 中断 + `[SYS ] console ready`。
-9. **主循环**：`cli_service_poll()`；`g_ftl_ready == 0` 时跑 `fc_service()`，否则跑
+9. **主循环**：`cli_service_poll()`；controller 非 READY 时跑 `fc_service()`，否则跑
    `ssd_runtime_pump()`（逐个 die 推进 FTL 实例；FC 侧由 `fc_service` / `ftl_service_pump` 驱动）。
 
 ## 仍未实现（占位）

@@ -93,10 +93,21 @@ DWORD ftl_media_layout_version(void)
     return 0x80000000UL | (fingerprint & 0x7FFFFFFFUL);
 }
 
-// 每实例 Metadata Directory cache（CPU-only）。链接脚本按整个 metadata.o 的 .bss
-// 放进 SRAM4（与 BCH 交换：BCH 在 DTCM）；`.sram4_data` 是 NOLOAD ⇒ ftl_init
-// 绑定后对该实例显式 memset。
-md_dir_cache_s g_ftl_md[FTL_DIE_MAX];
+// 每实例 Metadata Directory cache（CPU-only）：定义与内存域（SRAM4）都归本模块。
+// `.sram4_data` 是 NOLOAD ⇒ ftl_init 绑定后对该实例显式 memset。
+static md_dir_cache_s s_md_dir[FTL_DIE_MAX] SRAM4_DATA;
+
+/**
+ * @brief 取本实例的 Metadata Directory cache（定义在 metadata.c，SRAM4）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+md_dir_cache_s *md_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_md_dir[die];
+}
 
 // 候选池重建日志节流：第 1 次立即打印，此后每 N 次一条（元数据坏块风暴不刷屏）。
 // N=16：重建本身较贵且罕见，16 条足以覆盖一次故障风暴。

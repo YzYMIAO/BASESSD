@@ -53,6 +53,22 @@
 
 #include <string.h>
 
+// 每实例搬移引擎工作区：定义归本模块，普通 .bss → AXI。
+// NOLOAD 语义同其它 workspace，ftl_init 绑定后显式 memset。
+static mig_handle_s s_mig_handle[FTL_DIE_MAX];
+
+/**
+ * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+mig_handle_s *mig_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_mig_handle[die];
+}
+
 /* ── 文件级静态数据 ── */
 
 // page0 补零写的全零页（.bss，零初始化；单线程 superloop 共享）。

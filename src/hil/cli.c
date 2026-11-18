@@ -73,7 +73,7 @@
  * ssd_ctl_s.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
  * 故仍用 _Static_assert 钉住 FTL_LBA_MAX 装得进 32 位。
  */
-_Static_assert(FTL_LBA_MAX_AT_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
+_Static_assert(FTL_LBA_MAX_AT_MAX <= UINT32_MAX, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
 
 /* 行编辑状态：g_cli_line 累积当前行（不含行尾 '\n'），g_cli_length 是已收字节数。
  * 行超过 USART_CLI_LINE_CAPACITY-1 时置 g_cli_discarding 并丢弃到下一个 '\n'
@@ -105,8 +105,8 @@ typedef enum UART_CLI_GROUP_E
 /*
  * 命令行为位（**本仓自拟**：U-Boot 的命令表只有 repeatable 一个行为位，
  * Zephyr 无对应字段；这里是因为调试 CLI 与 USB host 共用同一个 controller）。
- * `flags` 用 BYTE 存 ⇒ 结构体仍 20 B（新字段填掉原 padding）；判定走
- * UART_CLI_CMD_HAS_FLAG（H15：位语义由宏名表达）。
+ * `flags` 用 BYTE 存 ⇒ 结构体仍 20 B；判定走 UART_CLI_CMD_HAS_FLAG
+ * （H15：位语义由宏名表达）。
  */
 #define UART_CLI_FLAG_NONE        0x00U
 #define UART_CLI_FLAG_BUSY        0x01U /* 提交前要求 controller 无在飞 host 请求 */
@@ -175,25 +175,29 @@ static void uart_print_status(void)
     uart_stats_s stats;
 
     uart_get_stats(&stats);
-    (void)LOGI("uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n", stats.rx_overflow, stats.tx_dropped, stats.tx_context_errors, stats.tx_flush_timeouts, stats.tx_dma_errors, stats.tx_transport_errors, stats.overrun_errors, stats.framing_errors, stats.noise_errors, stats.parity_errors);
+    LOGI("uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n", stats.rx_overflow, stats.tx_dropped, stats.tx_context_errors, stats.tx_flush_timeouts, stats.tx_dma_errors, stats.tx_transport_errors, stats.overrun_errors, stats.framing_errors, stats.noise_errors, stats.parity_errors);
 }
 
 /*
  * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
  *
  * 固定 pattern 写 buffer：16KB，落 **AXI_RAM .bss**（启动清零；cli_init 仍主动预填
- * 0x55/0xAA）。阶段 C 起 SRAM1+SRAM2 合并给 FTL tables（2×123,896B），
- * 16KB CLI 缓冲放不进 SRAM12 的 14KB 余量，故迁回 AXI（见 main.c 内存断言）。
+ * 0x55/0xAA）。SRAM1+SRAM2 已分给 FTL tables（2×123,896 B），只剩 14KB 余量，
+ * 放不下 16KB CLI 缓冲（见 main.c 内存断言）。
  *
  * ⚠ CW 级映射（IU = 1 CW = 512B）：`wr lba n` / `rd lba n` 的 n 单位是**扇区**
- *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**
- *   （旧页级模型下 n 计 2048B 页，上限 8）。超出由 controller 的 buffer_size
- *   校验拒绝（写爆 g_wr_buf 是真实隐患）。
+ *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**。
+ *   超出由 controller 的 buffer_size 校验拒绝（写爆 g_wr_buf 是真实隐患）。
  */
 static BYTE g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM]; /* 16KB → AXI .bss */
 
 /* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
 #define UART_CLI_MAX_SECTORS ((sizeof(g_wr_buf) / FTL_IU_BYTES))
+
+/* CLI 固定 pattern：plane0 / plane1 两个半区；wp 每个组用自己的基准字节。 */
+#define UART_CLI_PATTERN_LO      (0x55555555U)
+#define UART_CLI_PATTERN_HI      (0xAAAAAAAAU)
+#define UART_CLI_WP_PATTERN_BASE (0xA0U)
 
 /* ── wp 诊断缓冲（§七 方案 A 合并可观测性）──
  *
@@ -248,8 +252,8 @@ static void uart_cli_pattern_init(void)
 
     for (i = 0U; i < words_per_half; i++)
     {
-        lo[i] = 0x55555555U;
-        hi[i] = 0xAAAAAAAAU;
+        lo[i] = UART_CLI_PATTERN_LO;
+        hi[i] = UART_CLI_PATTERN_HI;
     }
 }
 
@@ -261,7 +265,7 @@ static void uart_cli_pattern_init(void)
  */
 static DWORD uart_cli_expect_word(DWORD byte_offset)
 {
-    return (byte_offset < (FTL_READ_USER_SIZE * CW_NUM)) ? 0x55555555U : 0xAAAAAAAAU;
+    return (byte_offset < (FTL_READ_USER_SIZE * CW_NUM)) ? UART_CLI_PATTERN_LO : UART_CLI_PATTERN_HI;
 }
 
 /**
@@ -397,7 +401,7 @@ static void uart_cli_wr(int argc, char *argv[])
     n = (DWORD)n_parsed;
     if (n > UART_CLI_MAX_SECTORS)
     {
-        (void)LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
+        LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
         return;
     }
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, n))
@@ -416,7 +420,7 @@ static void uart_cli_wr(int argc, char *argv[])
         return;
     }
 
-    (void)LOGI("wr submit ok lba=%llu n=%lu, waiting...\r\n", lba, n);
+    LOGI("wr submit ok lba=%llu n=%lu, waiting...\r\n", lba, n);
     uart_cli_wait_host();
     return;
 }
@@ -442,7 +446,7 @@ static void uart_cli_rd(int argc, char *argv[])
     n = (DWORD)n_parsed;
     if (n > UART_CLI_MAX_SECTORS)
     {
-        (void)LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
+        LOGE("error: n exceeds g_wr_buf (max %lu sectors)\r\n", (DWORD)UART_CLI_MAX_SECTORS);
         return;
     }
 
@@ -469,7 +473,7 @@ static void uart_cli_rd(int argc, char *argv[])
         return;
     }
 
-    (void)LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, (compare != 0U) ? " --compare" : "");
+    LOGI("rd submit ok lba=%llu n=%lu%s, waiting...\r\n", lba, n, (compare != 0U) ? " --compare" : "");
     uart_cli_wait_host();
     return;
 }
@@ -601,7 +605,7 @@ static void uart_cli_wp(int argc, char *argv[])
 
         for (j = 0U; j < (n * FTL_IU_BYTES); j++)
         {
-            slice[j] = (0xA0U + i);
+            slice[j] = (UART_CLI_WP_PATTERN_BASE + i);
         }
         g_wp_done[i]   = 0U;
         g_wp_status[i] = SSD_STATUS_OK;
@@ -627,7 +631,7 @@ static void uart_cli_wp(int argc, char *argv[])
         if (ftl_submit_write(ftl, &req) != FTL_OK)
         {
             g_wp_inflight--; /* 本组未建组；此前各组仍会在完成时各自递减 */
-            (void)LOGE("wp: group %lu submit failed\r\n", i);
+            LOGE("wp: group %lu submit failed\r\n", i);
             failed = true;
             break;
         }
@@ -640,7 +644,7 @@ static void uart_cli_wp(int argc, char *argv[])
         return;
     }
 
-    (void)LOGI("wp done lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n", lba, n, k);
+    LOGI("wp done lba=%llu n=%lu k=%lu (expect 1 program on flush)\r\n", lba, n, k);
     return;
 }
 
@@ -686,7 +690,7 @@ static void uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)LOGI("controller state=%s lba_max=%lu\r\n", g_controller_state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
+        LOGI("controller state=%s lba_max=%lu\r\n", g_controller_state_names[g_ctrl.state], ssd_controller_host_lba_max(&g_ctrl));
     }
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -715,7 +719,7 @@ static void uart_cli_info(int argc, char *argv[])
             (void)snprintf(mode_text, sizeof(mode_text), "?");
         }
 
-        (void)LOGI("ftl[%hhu][%hhu][%hhu] mode=%s free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, mode_text, ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
+        LOGI("ftl[%hhu][%hhu][%hhu] mode=%s free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, mode_text, ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
         /* 计数类诊断（见 `stat`）：info 只保留身份/状态，避免两套计数视图。 */
 
@@ -726,7 +730,7 @@ static void uart_cli_info(int argc, char *argv[])
 
         if ((job->phase != MD_JOB_IDLE) || (md->reclaim.count != 0U))
         {
-            (void)LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall_armed=%d pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, (int)job->submit_deadline.armed, md->reclaim.count, job->victim);
+            LOGI("md[%hhu][%hhu][%hhu] phase=%d moved=%hu stall_armed=%d pending=%hu victim=%hu\r\n", ch, ce, lun, job->phase, job->moved, (int)job->submit_deadline.armed, md->reclaim.count, job->victim);
         }
     }
 
@@ -789,29 +793,29 @@ static void uart_cli_map(int argc, char *argv[])
     }
     if (pba == NAND_PBA_INVALID)
     {
-        (void)LOGI("map lba=%llu -> INVALID (未映射)\r\n", lba);
+        LOGI("map lba=%llu -> INVALID (未映射)\r\n", lba);
         return;
     }
     // L2P 条目是介质读回（H29）：非 INVALID 也要合法，否则下面的 BST 摘要会指向
     // 另一块、给出误导性结论（掩码字段保证下标不越界，但语义已错）。
     if (pba_is_valid(pba) == false)
     {
-        (void)LOGE("map lba=%llu -> invalid PBA 0x%08lx (L2P entry corrupt)\r\n", lba, pba);
+        LOGE("map lba=%llu -> invalid PBA 0x%08lx (L2P entry corrupt)\r\n", lba, pba);
         return;
     }
 
     g = ftl_pba_gblock(pba);
     b = &ftl->alloc.blocks[g];
-    (void)LOGI("map lba=%llu pba=%08lx paa=%08lx ch=%hhu ce=%hhu lun=%hhu plane=%hhu blk=%hu pg=%hhu cw=%hhu g=%hu\r\n", lba, pba, pba_to_paa(pba), pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba), g);
-    (void)LOGI("    block g=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", g, ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
+    LOGI("map lba=%llu pba=%08lx paa=%08lx ch=%hhu ce=%hhu lun=%hhu plane=%hhu blk=%hu pg=%hhu cw=%hhu g=%hu\r\n", lba, pba, pba_to_paa(pba), pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba), g);
+    LOGI("    block g=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", g, ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
 
     if (b->valid_count == 0U)
     {
-        (void)LOGE("    VERDICT: 悬空 —— 覆盖写该 LBA 会撞 bst.h valid_count>0 断言\r\n");
+        LOGE("    VERDICT: 悬空 —— 覆盖写该 LBA 会撞 bst.h valid_count>0 断言\r\n");
     }
     else
     {
-        (void)LOGI("    VERDICT: ok —— 覆盖写安全\r\n");
+        LOGI("    VERDICT: ok —— 覆盖写安全\r\n");
     }
     return;
 }
@@ -823,7 +827,7 @@ static void uart_cli_map(int argc, char *argv[])
  *   addr paa <paa> [ch ce]          PAA → PBA + 展开字段（默认单 chip ch=ce=0）
  *   addr g <g> [ch ce lun]          实例内全局块号 → plane/block + BST 摘要
  *
- * LBA → 上述字段的入口是 `map <lba>`；这里不再提供 `addr lba`，避免两套入口（C9）。
+ * LBA → 上述字段的入口是 `map <lba>`；本命令不提供 `addr lba`，避免两套入口（C9）。
  * 所有字段展开都复用 PBA/PAA getter 与 ftl_gblock helper，不手写位运算。
  *
  * @param argc 参数个数（含命令名）
@@ -835,7 +839,7 @@ static void uart_cli_addr(int argc, char *argv[])
 
     if (argc < 3)
     {
-        (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
+        LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
         return;
     }
 
@@ -843,11 +847,11 @@ static void uart_cli_addr(int argc, char *argv[])
     {
         if ((argc != 3) || (!uart_cli_parse_dword(argv[2], &value)) || (!pba_is_valid(value)))
         {
-            (void)LOGE("addr: invalid pba\r\n");
+            LOGE("addr: invalid pba\r\n");
             return;
         }
 
-        (void)LOGI("addr pba=0x%08lx paa=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba_to_paa(value), pba_to_ch(value), pba_to_ce(value), pba_to_lun(value), ftl_pba_gblock(value), pba_to_plane(value), pba_to_block(value), pba_to_page(value), pba_to_cw(value));
+        LOGI("addr pba=0x%08lx paa=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba_to_paa(value), pba_to_ch(value), pba_to_ce(value), pba_to_lun(value), ftl_pba_gblock(value), pba_to_plane(value), pba_to_block(value), pba_to_page(value), pba_to_cw(value));
         return;
     }
 
@@ -858,26 +862,26 @@ static void uart_cli_addr(int argc, char *argv[])
 
         if ((argc != 3) && (argc != 5))
         {
-            (void)LOGE("usage: addr paa <paa> [ch ce]\r\n");
+            LOGE("usage: addr paa <paa> [ch ce]\r\n");
             return;
         }
         if ((!uart_cli_parse_dword(argv[2], &value)) || (paa_is_valid_paa(value) == 0U))
         {
-            (void)LOGE("addr: invalid paa\r\n");
+            LOGE("addr: invalid paa\r\n");
             return;
         }
         if (argc == 5)
         {
             if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (ch >= CH_NUM) || (ce >= CE_NUM))
             {
-                (void)LOGE("addr: invalid ch/ce\r\n");
+                LOGE("addr: invalid ch/ce\r\n");
                 return;
             }
         }
 
         const DWORD pba = paa_to_pba(ch, ce, value);
 
-        (void)LOGI("addr paa=0x%08lx pba=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba, pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), ftl_pba_gblock(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba));
+        LOGI("addr paa=0x%08lx pba=0x%08lx ch=%hhu ce=%hhu lun=%hhu g=%hu plane=%hhu blk=%hu pg=%hhu cw=%hhu\r\n", value, pba, pba_to_ch(pba), pba_to_ce(pba), pba_to_lun(pba), ftl_pba_gblock(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_page(pba), pba_to_cw(pba));
         return;
     }
 
@@ -889,19 +893,19 @@ static void uart_cli_addr(int argc, char *argv[])
 
         if ((argc != 3) && (argc != 6))
         {
-            (void)LOGE("usage: addr g <g> [ch ce lun]\r\n");
+            LOGE("usage: addr g <g> [ch ce lun]\r\n");
             return;
         }
         if ((!uart_cli_parse_dword(argv[2], &value)) || (value >= FTL_BLOCK_TOTAL))
         {
-            (void)LOGE("addr: invalid gblock\r\n");
+            LOGE("addr: invalid gblock\r\n");
             return;
         }
         if (argc == 6)
         {
             if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) || (!uart_cli_parse_dword(argv[5], &lun)) || (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
             {
-                (void)LOGE("addr: invalid ch/ce/lun\r\n");
+                LOGE("addr: invalid ch/ce/lun\r\n");
                 return;
             }
         }
@@ -912,15 +916,15 @@ static void uart_cli_addr(int argc, char *argv[])
 
         if (ftl == NULL)
         {
-            (void)LOGE("addr: ftl instance not ready\r\n");
+            LOGE("addr: ftl instance not ready\r\n");
             return;
         }
         b = &ftl->alloc.blocks[value];
-        (void)LOGI("addr g=%lu plane=%hhu blk=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", value, ftl_gblock_plane((WORD)value), ftl_gblock_block((WORD)value), ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
+        LOGI("addr g=%lu plane=%hhu blk=%hu state=%s valid=%hu sb=%hu ec=%lu\r\n", value, ftl_gblock_plane((WORD)value), ftl_gblock_block((WORD)value), ftl_block_state_name(ftl_block_state(b)), b->valid_count, b->sb_id, b->erase_count);
         return;
     }
 
-    (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
+    LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
     return;
 }
 
@@ -961,13 +965,13 @@ static void uart_cli_crash(int argc, char *argv[])
         return;
     }
 
-    (void)LOGI("crash kind=%lu line=%lu\r\n", rec->kind, rec->line);
-    (void)LOGI("  expr: %s\r\n", rec->expression);
-    (void)LOGI("  file: %s\r\n", rec->file);
+    LOGI("crash kind=%lu line=%lu\r\n", rec->kind, rec->line);
+    LOGI("  expr: %s\r\n", rec->expression);
+    LOGI("  file: %s\r\n", rec->file);
     if (rec->kind == CRASH_KIND_FAULT)
     {
-        (void)LOGI("  fault kind=%lu pc=%08lx lr=%08lx sp=%08lx xpsr=%08lx\r\n", rec->fault.fault_kind, rec->fault.pc, rec->fault.lr, rec->fault.sp, rec->fault.xpsr);
-        (void)LOGI("  cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx\r\n", rec->fault.cfsr, rec->fault.hfsr, rec->fault.mmfar, rec->fault.bfar);
+        LOGI("  fault kind=%lu pc=%08lx lr=%08lx sp=%08lx xpsr=%08lx\r\n", rec->fault.fault_kind, rec->fault.pc, rec->fault.lr, rec->fault.sp, rec->fault.xpsr);
+        LOGI("  cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx\r\n", rec->fault.cfsr, rec->fault.hfsr, rec->fault.mmfar, rec->fault.bfar);
     }
     return;
 }
@@ -988,7 +992,7 @@ static void uart_cli_stack(int argc, char *argv[])
     (void)argc;
     (void)argv;
     stack_guard_report();
-    (void)LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n", syscalls_heap_used());
+    LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n", syscalls_heap_used());
     return;
 }
 
@@ -1039,15 +1043,15 @@ static void uart_cli_pc(int argc, char *argv[])
         if (argc == 2)
         {
             rate = pc_sample_rate(false);
-            (void)LOGI("pc: rate=%lu window=%lums\r\n", rate, rate * PC_SAMPLE_RING);
+            LOGI("pc: rate=%lu window=%lums\r\n", rate, rate * PC_SAMPLE_RING);
             return;
         }
         if ((argc != 3) || (uart_cli_parse_dword(argv[2], &new_rate) == false) || (pc_sample_rate_set(new_rate) == false))
         {
-            (void)LOGE("pc: rate must be 1..%u\r\n", PC_SAMPLE_RATE_MAX);
+            LOGE("pc: rate must be 1..%u\r\n", PC_SAMPLE_RATE_MAX);
             return;
         }
-        (void)LOGI("pc: rate=%lu window=%lums (kept across reset; 'pc rate 1' restores)\r\n", new_rate, new_rate * PC_SAMPLE_RING);
+        LOGI("pc: rate=%lu window=%lums (kept across reset; 'pc rate 1' restores)\r\n", new_rate, new_rate * PC_SAMPLE_RING);
         return;
     }
 
@@ -1104,7 +1108,7 @@ static void uart_cli_pc(int argc, char *argv[])
 
     if (count == 0U)
     {
-        (void)LOGI("pc: no %s samples (clear, reproduce, reset, then run 'pc')\r\n", (previous == true) ? "previous-run" : "live");
+        LOGI("pc: no %s samples (clear, reproduce, reset, then run 'pc')\r\n", (previous == true) ? "previous-run" : "live");
         return;
     }
 
@@ -1163,10 +1167,10 @@ static void uart_cli_pc(int argc, char *argv[])
             }
         }
 
-        (void)LOGI("pc[%s] samples=%lu rate=%lu span=%lums top=%hhu\r\n", (previous == true) ? "prev" : "live", count, rate, span, top_n);
+        LOGI("pc[%s] samples=%lu rate=%lu span=%lums top=%hhu\r\n", (previous == true) ? "prev" : "live", count, rate, span, top_n);
         for (i = 0U; i < top_n; i++)
         {
-            (void)LOGI("  pc=0x%08lx count=%lu share=%lu%%\r\n", top_pc[i], top_cnt[i], (top_cnt[i] * 100U) / count);
+            LOGI("  pc=0x%08lx count=%lu share=%lu%%\r\n", top_pc[i], top_cnt[i], (top_cnt[i] * 100U) / count);
         }
     }
     else
@@ -1175,7 +1179,7 @@ static void uart_cli_pc(int argc, char *argv[])
         const DWORD start = (show_all == true || count <= UART_CLI_PC_RAW_TAIL) ? 0U : (count - UART_CLI_PC_RAW_TAIL);
         DWORD       i;
 
-        (void)LOGI("pc[%s] samples=%lu rate=%lu span=%lums raw %s (oldest -> newest)\r\n", (previous == true) ? "prev" : "live", count, rate, span, (show_all == true) ? "all" : "last 64");
+        LOGI("pc[%s] samples=%lu rate=%lu span=%lums raw %s (oldest -> newest)\r\n", (previous == true) ? "prev" : "live", count, rate, span, (show_all == true) ? "all" : "last 64");
 
         // 上一轮快照已在 init 时按时间顺序重排；本轮活跃环按 head 回绕。
         // 4 个地址一行；最后一行不足 4 个时补 0（不会与真实地址混淆的概率可忽略）。
@@ -1190,7 +1194,7 @@ static void uart_cli_pc(int argc, char *argv[])
 
                 addr[k] = pc_sample_at(previous, phys);
             }
-            (void)LOGI("  %03lu: 0x%08lx 0x%08lx 0x%08lx 0x%08lx\r\n", i, addr[0], addr[1], addr[2], addr[3]);
+            LOGI("  %03lu: 0x%08lx 0x%08lx 0x%08lx 0x%08lx\r\n", i, addr[0], addr[1], addr[2], addr[3]);
         }
     }
 
@@ -1208,7 +1212,7 @@ static void uart_cli_pc(int argc, char *argv[])
  *   fault —— 负例注入：把指定物理块标 BAD 并触发候选池重算，证明 BAD 槽被
  *            shared metadata spare 顶替后记录仍可定位；若该块持有活元数据会丢一份副本。
  *
- * 子命令严格校验：不认识就报错返回，绝不静默降级为只读。静默忽略曾两次把
+ * 子命令严格校验：不认识就报错返回，绝不静默降级为只读。静默忽略会把
  * `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条擦除命令都没发。
  *
  * @param argc 参数个数（含命令名）
@@ -1281,7 +1285,7 @@ static void uart_cli_bbt(int argc, char *argv[])
             return;
         }
 #else
-        (void)LOGE("bbt: subcommand '%s' disabled in this build (erase/fault are debug-only)\r\n", argv[1]);
+        LOGE("bbt: subcommand '%s' disabled in this build (erase/fault are debug-only)\r\n", argv[1]);
         return;
 #endif
     }
@@ -1497,7 +1501,7 @@ static void uart_cli_q(int argc, char *argv[])
     (void)argv;
 
     fc_get_resource_stats(&rs);
-    (void)LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu hwm=%hu/%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.command_high, rs.descriptor_high, rs.buffer_high);
+    LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu hwm=%hu/%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.command_high, rs.descriptor_high, rs.buffer_high);
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
@@ -1511,7 +1515,7 @@ static void uart_cli_q(int argc, char *argv[])
             continue;
         }
 
-        (void)LOGI("q[%hhu][%hhu][%hhu] pend_slot=%hu pend_group=%hu ftl_op=%hu l2p_load=%hhu l2p_flush=%hhu mig=%hu wb_busy=%d\r\n", ch, ce, lun, pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), ftl->cache->inflight.load, ftl->cache->inflight.flush, ftl->mig_handle->state.inflight, (int)(wb_is_idle(ftl->wbuf) == false));
+        LOGI("q[%hhu][%hhu][%hhu] pend_slot=%hu pend_group=%hu ftl_op=%hu l2p_load=%hhu l2p_flush=%hhu mig=%hu wb_busy=%d\r\n", ch, ce, lun, pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), ftl->cache->inflight.load, ftl->cache->inflight.flush, ftl->mig_handle->state.inflight, (int)(wb_is_idle(ftl->wbuf) == false));
     }
 }
 
@@ -1548,8 +1552,8 @@ static void uart_cli_cp(int argc, char *argv[])
         ce  = die_2_ce(die);
         lun = die_2_lun(die);
 
-        (void)LOGI("cp[%hhu][%hhu][%hhu] active=%d phase=%d wait=%d fail=%d/%d timed=%d/%d age=%lums\r\n", ch, ce, lun, (int)cp->active, (int)cp->phase, (int)cp->waiting, (int)cp->failed, (int)cp->fail_phase, (int)cp->timed_out, (int)cp->timeout_phase, log_heartbeat_age_ms(&cp->hb));
-        (void)LOGI("cp[%hhu][%hhu][%hhu] seq=%lu widx=%hu cursor=%d adv_next=%d jrn=%lu last_writes=%lu t3=%lu last_cp=%lu now=%lu\r\n", ch, ce, lun, cp->cp_state.sequence, cp->cp_state.write_idx, (int)cp->cp_state.cursor_valid, (int)cp->cp_state.advance_next, cp->cp_state.last_journal_sequence, cp->cp_state.last_cp_writes, cp->cp_state.next_t3_ms, cp->cp_state.last_cp_ms, now);
+        LOGI("cp[%hhu][%hhu][%hhu] active=%d phase=%d wait=%d fail=%d/%d timed=%d/%d age=%lums\r\n", ch, ce, lun, (int)cp->active, (int)cp->phase, (int)cp->waiting, (int)cp->failed, (int)cp->fail_phase, (int)cp->timed_out, (int)cp->timeout_phase, log_heartbeat_age_ms(&cp->hb));
+        LOGI("cp[%hhu][%hhu][%hhu] seq=%lu widx=%hu cursor=%d adv_next=%d jrn=%lu last_writes=%lu t3=%lu last_cp=%lu now=%lu\r\n", ch, ce, lun, cp->cp_state.sequence, cp->cp_state.write_idx, (int)cp->cp_state.cursor_valid, (int)cp->cp_state.advance_next, cp->cp_state.last_journal_sequence, cp->cp_state.last_cp_writes, cp->cp_state.next_t3_ms, cp->cp_state.last_cp_ms, now);
     }
 }
 
@@ -1589,9 +1593,9 @@ static void uart_cli_jrn(int argc, char *argv[])
         ce    = die_2_ce(die);
         lun   = die_2_lun(die);
 
-        (void)LOGI("jrn[%hhu][%hhu][%hhu] water=%hhu seq=%lu persisted=%lu pages=%lu page_dirty=%d wal_seq=%lu wal_entry=%hu\r\n", ch, ce, lun, jrn_watermark_get(jrn), jrn_sequence_get(jrn), jrn_persisted_seq(jrn), jrn_page_writes(jrn), (int)jrn_has_pending_entries(jrn), state->write_page_seq, state->write_entry_count);
-        (void)LOGI("jrn[%hhu][%hhu][%hhu] cur=%hhu/%hhu/%hu kind=%d phase=%d erase_pend=%d ring_full=%d ckpt=%d emerg=%d wfail=%d\r\n", ch, ce, lun, state->current_block, state->current_page, state->current_entry, (int)state->page_kind, (int)job->phase, (int)jrn_has_erase_pending(jrn), (int)state->ring_full, (int)jrn_needs_checkpoint(jrn), (int)jrn_is_emergency(jrn), (int)jrn_has_write_failure(jrn));
-        (void)LOGI("jrn[%hhu][%hhu][%hhu] bad_mask=0x%02hhx erase_fail=%hhu/%hhu wfail_cnt=%lu wfail_seq=%lu merge_floor=%lu pre_erased=%hhu\r\n", ch, ce, lun, state->bad_mask, state->erase_fail_count, state->erase_fail_block, state->write_fail_count, state->write_fail_seq, state->merge_floor, state->pre_erased_block);
+        LOGI("jrn[%hhu][%hhu][%hhu] water=%hhu seq=%lu persisted=%lu pages=%lu page_dirty=%d wal_seq=%lu wal_entry=%hu\r\n", ch, ce, lun, jrn_watermark_get(jrn), jrn_sequence_get(jrn), jrn_persisted_seq(jrn), jrn_page_writes(jrn), (int)jrn_has_pending_entries(jrn), state->write_page_seq, state->write_entry_count);
+        LOGI("jrn[%hhu][%hhu][%hhu] cur=%hhu/%hhu/%hu kind=%d phase=%d erase_pend=%d ring_full=%d ckpt=%d emerg=%d wfail=%d\r\n", ch, ce, lun, state->current_block, state->current_page, state->current_entry, (int)state->page_kind, (int)job->phase, (int)jrn_has_erase_pending(jrn), (int)state->ring_full, (int)jrn_needs_checkpoint(jrn), (int)jrn_is_emergency(jrn), (int)jrn_has_write_failure(jrn));
+        LOGI("jrn[%hhu][%hhu][%hhu] bad_mask=0x%02hhx erase_fail=%hhu/%hhu wfail_cnt=%lu wfail_seq=%lu merge_floor=%lu pre_erased=%hhu\r\n", ch, ce, lun, state->bad_mask, state->erase_fail_count, state->erase_fail_block, state->write_fail_count, state->write_fail_seq, state->merge_floor, state->pre_erased_block);
     }
 }
 
@@ -1610,8 +1614,8 @@ static void uart_cli_ftl_ctx(int argc, char *argv[])
 
     if (ftl_debug_dump(module) == false)
     {
-        (void)LOGI("error: unknown FTL module '%s' (alloc|pend|seq|cache|jrn|cp|mig|md|wb)\r\n",
-                   (module != NULL) ? module : "(null)");
+        LOGI("error: unknown FTL module '%s' (alloc|pend|seq|cache|jrn|cp|mig|md|wb)\r\n",
+             (module != NULL) ? module : "(null)");
     }
 }
 
@@ -1630,7 +1634,7 @@ static void uart_cli_stat(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    (void)LOGI("stat up=%lus\r\n", delay_now_ms() / 1000U);
+    LOGI("stat up=%lus\r\n", delay_now_ms() / 1000U);
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
@@ -1644,15 +1648,15 @@ static void uart_cli_stat(int argc, char *argv[])
             continue;
         }
 
-        (void)LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->stats.dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.reclaimed, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop, ftl->mig_handle->state.counters.novictim, ftl->mig_handle->job.erased, ftl->mig_handle->state.failure.read_fail_streak, ftl->mig_handle->state.benefit.last_mode, ftl->mig_handle->state.counters.nogain, alc_free_min_plane_count(&ftl->alloc));
+        LOGI("diag[%hhu][%hhu][%hhu] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%hu streak=%hhu gcm=%d ng=%lu fpmin=%hu\r\n", ch, ce, lun, ftl->stats.dangling_total, ftl->read_recovery_handle.already_bad_reads, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.reclaimed, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop, ftl->mig_handle->state.counters.novictim, ftl->mig_handle->job.erased, ftl->mig_handle->state.failure.read_fail_streak, ftl->mig_handle->state.benefit.last_mode, ftl->mig_handle->state.counters.nogain, alc_free_min_plane_count(&ftl->alloc));
         /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
          * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->state.counters.batch_jobs, ftl->mig_handle->state.counters.batch_pages, ftl->mig_handle->state.counters.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
+        LOGI("l2p[%hhu][%hhu][%hhu] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu/%lu\r\n", ch, ce, lun, ftl->cache_stream.prefetch_run, ftl->cache_stream.prefetch_run_max, ftl->cache->prefetch.calls, ftl->cache->prefetch.started, ftl->cache->prefetch.skipped, ftl->cache->prefetch.resident, ftl->cache->prefetch.hits, ftl->cache_stream.read_batches, ftl->cache_stream.read_pairs, ftl->cache_stream.read_starts, ftl->cache_stream.read_declines, ftl->cache_stream.read_fallbacks);
+        LOGI("l2p[%hhu][%hhu][%hhu] cw=%lu/%lu/%lu/%lu sw=%lu/%lu pc=%lu jf=%lu mb=%lu/%lu/%lu d4=%lu wd=%lu\r\n", ch, ce, lun, ftl->cache_stream.wb_batches, ftl->cache_stream.wb_pages, ftl->cache_stream.wb_declines, ftl->cache_stream.wb_aborts, ftl->cache_stream.wb_starts, ftl->cache_stream.wb_page_ends, ftl->cache_stream.wb_pad_closes, jrn_page_writes(ftl->journal), ftl->mig_handle->state.counters.batch_jobs, ftl->mig_handle->state.counters.batch_pages, ftl->mig_handle->state.counters.batch_aborts, ftl->cache_stream.seq_breaks, ftl->cache->stats.wal_defer_count);
 
         /* entry 级 CMT：读/写命中率 + dirty 写回压力。 */
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] cmt hit=%lu/%lu wr=%lu/%lu dirty=%lu wb=%lu ev=%lu/%lu defer=%lu\r\n", ch, ce, lun, ftl->cache->stats.cmt_hits, ftl->cache->stats.cmt_misses, ftl->cache->stats.cmt_wr_hits, ftl->cache->stats.cmt_wr_misses, ftl->cache->stats.cmt_dirty, ftl->cache->stats.cmt_writebacks, ftl->cache->stats.cmt_evict_clean, ftl->cache->stats.cmt_evict_dirty, ftl->cache->stats.cmt_wb_defer);
-        (void)LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
+        LOGI("l2p[%hhu][%hhu][%hhu] cmt hit=%lu/%lu wr=%lu/%lu dirty=%lu wb=%lu ev=%lu/%lu defer=%lu\r\n", ch, ce, lun, ftl->cache->stats.cmt_hits, ftl->cache->stats.cmt_misses, ftl->cache->stats.cmt_wr_hits, ftl->cache->stats.cmt_wr_misses, ftl->cache->stats.cmt_dirty, ftl->cache->stats.cmt_writebacks, ftl->cache->stats.cmt_evict_clean, ftl->cache->stats.cmt_evict_dirty, ftl->cache->stats.cmt_wb_defer);
+        LOGI("l2p[%hhu][%hhu][%hhu] line hint=%lu/%lu\r\n", ch, ce, lun, ftl->cache->stats.hint_hits, ftl->cache->stats.hint_misses);
     }
 
     usb_msc_io_stats_print(); /* WRITE(10) 分块直方图 */
@@ -1678,9 +1682,9 @@ static void uart_cli_id(int argc, char *argv[])
 
     state_name = (g_ctrl.state <= SSD_CONTROLLER_FAILED) ? g_controller_state_names[g_ctrl.state] : "?";
 
-    (void)LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
-    (void)LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
-    (void)LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
+    LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
+    LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
+    LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
 
     BYTE                timing_mode = 0U;
     char                mode_text[4];
@@ -1695,7 +1699,7 @@ static void uart_cli_id(int argc, char *argv[])
         (void)snprintf(mode_text, sizeof(mode_text), "?");
     }
 
-    (void)LOGI("id media layout=v%lu timing=%s state=%s\r\n", ftl_media_layout_version(), mode_text, state_name);
+    LOGI("id media layout=v%lu timing=%s state=%s\r\n", ftl_media_layout_version(), mode_text, state_name);
 }
 
 /* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */
@@ -1803,9 +1807,9 @@ static void uart_cli_ecc(int argc, char *argv[])
             }
         }
 
-        (void)LOGI("ecc[%hhu][%hhu][%hhu] read_blocks=%hu/%hu last_max=%hhu high=%hu rising=%hu\r\n", ch, ce, lun, read_blocks, (WORD)FTL_BLOCK_TOTAL, last_max, high, rising);
-        (void)LOGI("ecc[%hhu][%hhu][%hhu] bins 0=%hu 1=%hu 2=%hu 3=%hu 4=%hu 5=%hu 6+=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
-        (void)LOGI("ecc[%hhu][%hhu][%hhu] health ok=%hu warn=%hu crit=%hu dying=%hu\r\n", ch, ce, lun, health_count[0], health_count[1], health_count[2], health_count[3]);
+        LOGI("ecc[%hhu][%hhu][%hhu] read_blocks=%hu/%hu last_max=%hhu high=%hu rising=%hu\r\n", ch, ce, lun, read_blocks, (WORD)FTL_BLOCK_TOTAL, last_max, high, rising);
+        LOGI("ecc[%hhu][%hhu][%hhu] bins 0=%hu 1=%hu 2=%hu 3=%hu 4=%hu 5=%hu 6+=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
+        LOGI("ecc[%hhu][%hhu][%hhu] health ok=%hu warn=%hu crit=%hu dying=%hu\r\n", ch, ce, lun, health_count[0], health_count[1], health_count[2], health_count[3]);
 
         line[0] = '\0';
         for (i = 0U; i < top_n; i++)
@@ -1822,7 +1826,7 @@ static void uart_cli_ecc(int argc, char *argv[])
         {
             (void)snprintf(line, sizeof(line), "none");
         }
-        (void)LOGI("ecc[%hhu][%hhu][%hhu] top g/ecc/rise/health/rc: %s\r\n", ch, ce, lun, line);
+        LOGI("ecc[%hhu][%hhu][%hhu] top g/ecc/rise/health/rc: %s\r\n", ch, ce, lun, line);
     }
 }
 
@@ -1943,9 +1947,9 @@ static void uart_cli_wear(int argc, char *argv[])
 
         const DWORD ec_avg = (good != 0U) ? (ec_sum / good) : 0U;
 
-        (void)LOGI("wear[%hhu][%hhu][%hhu] good=%hu ec min/max/avg=%lu/%lu/%lu read_max=%hu rd_high=%hu writes=%lu\r\n", ch, ce, lun, good, (ec_min == UINT32_MAX) ? 0U : ec_min, ec_max, ec_avg, read_max, rd_high, ftl->stats.total_writes);
-        (void)LOGI("wear[%hhu][%hhu][%hhu] ec [0,10)=%hu [10,50)=%hu [50,100)=%hu [100,200)=%hu [200,500)=%hu [500,1000)=%hu [1000+)=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
-        (void)LOGI("wear[%hhu][%hhu][%hhu] wl_trig=%d valid=%d max_free=%lu min_used=%lu spread=%lu thr=%u\r\n", ch, ce, lun, (int)wl_trig, (int)wl_valid, max_free, min_used, spread, WL_THRESHOLD);
+        LOGI("wear[%hhu][%hhu][%hhu] good=%hu ec min/max/avg=%lu/%lu/%lu read_max=%hu rd_high=%hu writes=%lu\r\n", ch, ce, lun, good, (ec_min == UINT32_MAX) ? 0U : ec_min, ec_max, ec_avg, read_max, rd_high, ftl->stats.total_writes);
+        LOGI("wear[%hhu][%hhu][%hhu] ec [0,10)=%hu [10,50)=%hu [50,100)=%hu [100,200)=%hu [200,500)=%hu [500,1000)=%hu [1000+)=%hu\r\n", ch, ce, lun, bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]);
+        LOGI("wear[%hhu][%hhu][%hhu] wl_trig=%d valid=%d max_free=%lu min_used=%lu spread=%lu thr=%u\r\n", ch, ce, lun, (int)wl_trig, (int)wl_valid, max_free, min_used, spread, WL_THRESHOLD);
 
         line[0] = '\0';
         for (i = 0U; i < top_n; i++)
@@ -1962,7 +1966,7 @@ static void uart_cli_wear(int argc, char *argv[])
         {
             (void)snprintf(line, sizeof(line), "none");
         }
-        (void)LOGI("wear[%hhu][%hhu][%hhu] hot g/ec/rc/ecc: %s\r\n", ch, ce, lun, line);
+        LOGI("wear[%hhu][%hhu][%hhu] hot g/ec/rc/ecc: %s\r\n", ch, ce, lun, line);
     }
 }
 
@@ -2010,11 +2014,11 @@ static void uart_cli_rdpaa(int argc, char *argv[])
     DWORD              cw_lba[CW_NUM];
     const ftl_status_e meta_st = gc_read_page_with_lba(pba, cw_lba);
 
-    (void)LOGI("rdpaa paa=0x%08lx pba=0x%08lx mode=%s read=%s meta=%s\r\n", paa, pba, raw ? "raw" : "normal", (st == FTL_OK) ? "ok" : "FAIL", (meta_st == FTL_OK) ? "ok" : "FAIL");
+    LOGI("rdpaa paa=0x%08lx pba=0x%08lx mode=%s read=%s meta=%s\r\n", paa, pba, raw ? "raw" : "normal", (st == FTL_OK) ? "ok" : "FAIL", (meta_st == FTL_OK) ? "ok" : "FAIL");
 
     if (meta_st == FTL_OK)
     {
-        (void)LOGI("  cw_lba: %08lx %08lx %08lx %08lx\r\n", cw_lba[0], cw_lba[1], cw_lba[2], cw_lba[3]);
+        LOGI("  cw_lba: %08lx %08lx %08lx %08lx\r\n", cw_lba[0], cw_lba[1], cw_lba[2], cw_lba[3]);
     }
 
     if (st != FTL_OK)
@@ -2026,7 +2030,7 @@ static void uart_cli_rdpaa(int argc, char *argv[])
     /* 只 dump 前 256B（16 行）：诊断足够，且不会把串口写满。 */
     for (DWORD offset = 0U; (offset < 256U) && (offset < PAGE_MAIN_SIZE); offset += 16U)
     {
-        (void)LOGI("%08lx: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx  %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\r\n", offset, buf[offset], buf[offset + 1U], buf[offset + 2U], buf[offset + 3U], buf[offset + 4U], buf[offset + 5U], buf[offset + 6U], buf[offset + 7U], buf[offset + 8U], buf[offset + 9U], buf[offset + 10U], buf[offset + 11U], buf[offset + 12U], buf[offset + 13U], buf[offset + 14U], buf[offset + 15U]);
+        LOGI("%08lx: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx  %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\r\n", offset, buf[offset], buf[offset + 1U], buf[offset + 2U], buf[offset + 3U], buf[offset + 4U], buf[offset + 5U], buf[offset + 6U], buf[offset + 7U], buf[offset + 8U], buf[offset + 9U], buf[offset + 10U], buf[offset + 11U], buf[offset + 12U], buf[offset + 13U], buf[offset + 14U], buf[offset + 15U]);
     }
 
     return;
@@ -2044,22 +2048,22 @@ static void uart_cli_rd_report(ssd_status_e status)
 
     if (status != SSD_STATUS_OK)
     {
-        (void)LOGE("rd FAIL status=%d\r\n", (int)status);
+        LOGE("rd FAIL status=%d\r\n", (int)status);
         return;
     }
 
     if (g_cli_pending.compare == 0U)
     {
         /* hex dump 前 64B 防刷屏 */
-        (void)LOGI("rd ok n=%lu, first 64 bytes:\r\n", g_cli_pending.nblocks);
+        LOGI("rd ok n=%lu, first 64 bytes:\r\n", g_cli_pending.nblocks);
         for (offset = 0U; (offset < 64U) && (offset < total_bytes); offset += 16U)
         {
-            (void)LOGI("%08lx: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx  %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\r\n", offset, g_wr_buf[offset], g_wr_buf[offset + 1U], g_wr_buf[offset + 2U], g_wr_buf[offset + 3U], g_wr_buf[offset + 4U], g_wr_buf[offset + 5U], g_wr_buf[offset + 6U], g_wr_buf[offset + 7U], g_wr_buf[offset + 8U], g_wr_buf[offset + 9U], g_wr_buf[offset + 10U], g_wr_buf[offset + 11U], g_wr_buf[offset + 12U], g_wr_buf[offset + 13U], g_wr_buf[offset + 14U], g_wr_buf[offset + 15U]);
+            LOGI("%08lx: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx  %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\r\n", offset, g_wr_buf[offset], g_wr_buf[offset + 1U], g_wr_buf[offset + 2U], g_wr_buf[offset + 3U], g_wr_buf[offset + 4U], g_wr_buf[offset + 5U], g_wr_buf[offset + 6U], g_wr_buf[offset + 7U], g_wr_buf[offset + 8U], g_wr_buf[offset + 9U], g_wr_buf[offset + 10U], g_wr_buf[offset + 11U], g_wr_buf[offset + 12U], g_wr_buf[offset + 13U], g_wr_buf[offset + 14U], g_wr_buf[offset + 15U]);
         }
         return;
     }
 
-    /* compare：按 4B 粒度与期望 pattern 比对（plane0=0x55555555 / plane1=0xAAAAAAAA） */
+    /* compare：按 4B 粒度与期望 pattern 比对（plane0=UART_CLI_PATTERN_LO / plane1=UART_CLI_PATTERN_HI） */
     for (offset = 0U; offset + sizeof(DWORD) <= total_bytes; offset += sizeof(DWORD))
     {
         DWORD expect = uart_cli_expect_word(offset);
@@ -2068,7 +2072,7 @@ static void uart_cli_rd_report(ssd_status_e status)
         memcpy(&actual, &g_wr_buf[offset], sizeof(actual));
         if (actual != expect)
         {
-            (void)LOGE("rd FAIL at byte %lu: got %08lx expect %08lx\r\n", offset, actual, expect);
+            LOGE("rd FAIL at byte %lu: got %08lx expect %08lx\r\n", offset, actual, expect);
             return;
         }
     }
@@ -2085,9 +2089,41 @@ static void uart_cli_pending_poll(void)
         return;
     }
 
-    ssd_req_s *request = &g_cli_pending.entry->request;
+    ssd_req_s *request  = &g_cli_pending.entry->request;
+    const BOOL complete = (ssd_controller_is_complete(request) != 0U);
 
-    if (ssd_controller_is_complete(request) == 0U)
+    /* 请求级 deadline：只对未完成、未超时的请求判超时。 */
+    if ((complete == false) && (request->timed_out == false) && (ssd_request_expired(request->start_ms, delay_now_ms()) != false))
+    {
+        ssd_request_mark_timeout(request);
+
+        if ((request->opcode == SSD_REQUEST_READ) || (request->opcode == SSD_REQUEST_WRITE))
+        {
+            ftl_abort_request(request);
+        }
+        else if (request->opcode == SSD_REQUEST_FLUSH)
+        {
+            ssd_controller_cancel_flush(&g_ctrl);
+        }
+
+        LOGW("cli: host request timeout op=%d lba=%llu n=%lu; waiting for FTL drain\r\n", (int)request->opcode, g_cli_pending.lba, g_cli_pending.nblocks);
+    }
+
+    if (request->timed_out != false)
+    {
+        /* host 回执已给（超时）；FTL / controller 仍引用 request 时不能释放 entry。 */
+        if (ssd_controller_request_reclaimable(&g_ctrl, request) == false)
+        {
+            return;
+        }
+
+        ssd_host_queue_free(&g_ctrl.host_queue, g_cli_pending.entry);
+        g_cli_pending.entry = NULL;
+        g_cli_pending.busy  = 0U;
+        return;
+    }
+
+    if (complete == false)
     {
         return;
     }
@@ -2095,16 +2131,16 @@ static void uart_cli_pending_poll(void)
     switch (request->opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)LOGI("wr done lba=%llu n=%lu status=%d\r\n", g_cli_pending.lba, g_cli_pending.nblocks, (int)request->completion_status);
+            LOGI("wr done lba=%llu n=%lu status=%d\r\n", g_cli_pending.lba, g_cli_pending.nblocks, (int)request->completion_status);
             break;
         case SSD_REQUEST_READ:
             uart_cli_rd_report(request->completion_status);
             break;
         case SSD_REQUEST_TRIM:
-            (void)LOGI("tr done lba=%llu status=%d\r\n", g_cli_pending.lba, (int)request->completion_status);
+            LOGI("tr done lba=%llu status=%d\r\n", g_cli_pending.lba, (int)request->completion_status);
             break;
         case SSD_REQUEST_FLUSH:
-            (void)LOGI("fl done status=%d\r\n", (int)request->completion_status);
+            LOGI("fl done status=%d\r\n", (int)request->completion_status);
             break;
         default:
             break;
@@ -2127,6 +2163,14 @@ static void uart_cli_wait_host(void)
     {
         ssd_runtime_pump();
         uart_cli_pending_poll();
+
+        /* 超时后不再同步等待 FTL 排空：host 侧已经拿到错误；entry 由后台
+         * poll 在 reclaimable 后释放，期间 cli_host_busy() 仍为真。 */
+        if ((g_cli_pending.entry != NULL) && (g_cli_pending.entry->request.timed_out != false))
+        {
+            break;
+        }
+
         storage_wdg_kick();
     }
 }
@@ -2152,7 +2196,7 @@ static void uart_cli_wait_wp(void)
  * 长语法串外提：AlignArrayOfStructures 按最长单元格对齐整表，160 字符的 test
  * 语法留在行内会把全表撑到 200+ 列。test 的选项是 munit 适配层既有契约，原样保留。
  *
- * bbt 的语法随构建档切换：release 的 help 不再宣传不可用的子命令。
+ * bbt 的语法随构建档切换：release 的 help 不列出不可用的子命令。
  */
 #define UART_CLI_SYNTAX_TEST "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]"
 #if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
@@ -2268,7 +2312,7 @@ static void uart_cli_help_group(const char *group_name, BYTE group)
 
     if (any == true)
     {
-        (void)LOGI("  %-11s: %s\r\n", group_name, line);
+        LOGI("  %-11s: %s\r\n", group_name, line);
     }
 }
 
@@ -2295,11 +2339,11 @@ static void uart_cli_help(int argc, char *argv[])
 
         if (command == NULL)
         {
-            (void)LOGE("help: unknown command '%s'\r\n", argv[1]);
+            LOGE("help: unknown command '%s'\r\n", argv[1]);
             return;
         }
-        (void)LOGI("usage: %s\r\n", command->syntax);
-        (void)LOGI("  %s\r\n", command->help);
+        LOGI("usage: %s\r\n", command->syntax);
+        LOGI("  %s\r\n", command->help);
         return;
     }
 
@@ -2560,7 +2604,7 @@ static void uart_execute_command(char *line)
     /* 只有参数个数不合法才打 usage；执行失败由 handler 自己报告原因。 */
     if ((argc < command->min_argc) || (argc > command->max_argc))
     {
-        (void)LOGE("usage: %s\r\n", command->syntax);
+        LOGE("usage: %s\r\n", command->syntax);
         return;
     }
 
@@ -2575,7 +2619,7 @@ static void uart_execute_command(char *line)
     /* 当前 destructive 命令用编译期隐藏；这层保证以后漏包 #if 的条目在量产档仍被拒绝。 */
     if (UART_CLI_CMD_HAS_FLAG(command, UART_CLI_FLAG_DESTRUCTIVE))
     {
-        (void)LOGE("error: '%s' disabled in this build (destructive)\r\n", command->name);
+        LOGE("error: '%s' disabled in this build (destructive)\r\n", command->name);
         return;
     }
 #endif

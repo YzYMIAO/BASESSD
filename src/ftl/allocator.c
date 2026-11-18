@@ -19,12 +19,39 @@
 #include "allocator.h"
 
 #include "assertion.h"
-#include "log.h" /* LOGE：release 运行期拒绝要留日志 */
+#include "log.h"          /* LOGE：release 运行期拒绝要留日志 */
+#include "ssd_compiler.h" /* SRAM12_DATA */
 
 #include <string.h>
 
 // 前向声明：Closed 提交在 Open 分配之后定义；契约写在定义处。
 static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb);
+
+// per-instance 五张表：定义与内存域（SRAM1+SRAM2）都归本模块。
+// NOLOAD ⇒ 启动不清零，ftl_init 绑定后逐表 memset。
+static bst_block_s   s_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          s_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          s_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD          s_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_s s_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+
+/**
+ * @brief 绑定本实例的五张表（workspace 的唯一定义点在本模块）
+ *
+ * @param die  紧凑 die 号（< FTL_DIE_MAX）
+ * @param refs 输出：五张表的引用（非空）
+ */
+void alc_bind_workspace(BYTE die, ftl_table_refs_s *refs)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    ASSERT(refs != NULL);
+
+    refs->blocks         = s_ftl_blocks[die];
+    refs->free_blocks    = s_ftl_free_blocks[die];
+    refs->op_blocks      = s_ftl_op_blocks[die];
+    refs->spare_blocks   = s_ftl_spare_blocks[die];
+    refs->closed_sb_list = s_ftl_closed_sb_list[die];
+}
 
 /* ── 1. 初始化 ── */
 

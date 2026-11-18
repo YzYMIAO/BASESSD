@@ -458,6 +458,46 @@ WORD pend_group_get_count(const pend_ctx_s *table);
 BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op);
 
 /**
+ * @brief 组槽是否在使用
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = used
+ */
+BOOL pend_group_is_used(const pend_ctx_s *table, WORD gi);
+
+/**
+ * @brief 组是否仍有未下发的子操作（used && next < total）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 所有者仍在下发
+ */
+BOOL pend_group_has_remaining(const pend_ctx_s *table, WORD gi);
+
+/**
+ * @brief 组是否仍在推进（used && (outstanding != 0 || next < total)）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 有在飞或在待发子操作
+ */
+BOOL pend_group_is_busy(const pend_ctx_s *table, WORD gi);
+
+/**
+ * @brief 中止属于同一 ctx 的所有组（best-effort）
+ *
+ * 置 `next = total` 停止下发剩余子操作；`outstanding == 0` 的组立即完成并
+ * 通知 ctx，其余等在飞子操作完成后自然完成。`agg_status` 置
+ * `SSD_STATUS_TIMEOUT`。不会强制丢弃仍在 FC/NAND 里的命令。
+ *
+ * @param table pending 表
+ * @param ctx   HIL 请求指针（非空；匹配 completion.on_complete_ctx）
+ * @return true = 至少命中一个组
+ */
+BOOL pend_group_abort_ctx(pend_ctx_s *table, void *ctx);
+
+/**
  * @brief 组在飞数增减的唯一闸门
  *
  * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走

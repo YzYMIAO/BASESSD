@@ -45,7 +45,7 @@
 
 | 测试项 | 源文件 | 主要接口 / 状态 | 测试层 |
 |---|---|---|---|
-| `allocator` + BST | `src/ftl/allocator.c`、`include/ftl/bst.h` | `alc_*`、Free / OP / Spare / Closed、块状态、`valid_count` | pure / negative / media |
+| `allocator` + BST | `src/ftl/allocator.c`、`src/ftl/bst.h` | `alc_*`、Free / OP / Spare / Closed、块状态、`valid_count` | pure / negative / media |
 | `bbt` | `src/ftl/bbt.c` | `bbt_*`、坏块记录 ring、候选池、Spare 补池 | pure / media / negative |
 | `metadata` / `metadata_job` | `src/ftl/metadata.c`、`metadata_job.c` | `md_*`、Directory 双副本、ring、压缩 job | pure / media / negative |
 | `checkpoint` | `src/ftl/checkpoint.c` | `cp_*`、CP phase、Header、Directory checkpoint | pure / media / negative |

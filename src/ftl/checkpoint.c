@@ -45,9 +45,26 @@
 #include "log.h"
 #include "metadata.h"
 #include "onfi_1_0.h"
+#include "ssd_compiler.h" /* SRAM3_DATA */
 #include "timer.h"
 
 #include <string.h>
+
+// 每实例 Checkpoint 工作区：定义与内存域（SRAM3）都归本模块。
+// NOLOAD ⇒ 启动不清零，ftl_init 绑定后对该实例显式 memset。
+static cp_handle_s s_cp_handle[FTL_DIE_MAX] SRAM3_DATA;
+
+/**
+ * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，SRAM3）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+cp_handle_s *cp_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_cp_handle[die];
+}
 
 // 池扫描用的 Header 暂存：单线程 superloop 串行调用，放文件级 static（AXI .bss），
 // 避免 `cp_record_probe` 每次在栈上放 2 KB 的 cp_header_s。
@@ -1838,4 +1855,17 @@ void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger)
 void cp_timer_reset(cp_handle_s *h)
 {
     h->cp_state.next_t3_ms = platform_now_ms() + CP_TIME_INTERVAL_MS;
+}
+
+/**
+ * @brief host flush 触发 Checkpoint 的节流判据（半个 T3）
+ *
+ * @param h Checkpoint handle（只读）
+ * @return true = 时钟有效且距上次 CP 已超过 CP_TIME_INTERVAL_MS / 2
+ */
+BOOL cp_flush_kick_due(const cp_handle_s *h)
+{
+    const DWORD now_ms = platform_now_ms();
+
+    return (now_ms != 0U) && ((now_ms - h->cp_state.last_cp_ms) >= (CP_TIME_INTERVAL_MS / 2U));
 }

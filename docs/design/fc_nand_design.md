@@ -28,7 +28,7 @@ FC 层是硬件 FCC（Flash Controller Core，SSD 主控里负责 NAND 通道与
 ├────────────────────────────────────────────────────────────────┤
 │ FC 固件层（`include/fc/` + `src/fc/`）                            │
 │   fc_interface.h   唯一公共头：类型/命令/CQ/布局/API/启动入口      │
-│   internal/        全部私有头（池、队列、engine、data_path、NAND） │
+│   *.h              全部私有头（池、队列、engine、data_path、NAND） │
 │   fc.c             初始化、提交/填充/完成调度、服务主循环、诊断    │
 │   fc_pool.c        三池、空闲链表、生命周期、建链与链释放          │
 ├────────────────────────────────────────────────────────────────┤
@@ -44,14 +44,14 @@ FC 层是硬件 FCC（Flash Controller Core，SSD 主控里负责 NAND 通道与
 │   onfi_1_0.c     51 个 OP 码的 UOP 序列表 + 协议属性              │
 │   nand_fmc.c     FMC 后端，13 个 UOP handler，数据阶段固定 PIO     │
 │   devices/mt29f___g08a.c  器件几何、时序表、探针                   │
-│   internal/      FMC 与 board target/PHY 私有头                    │
+│   *.h            FMC 与 board target/PHY 私有头                    │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 NAND 公共面：
 - FC 只 include `include/nand/nand_interface.h`（geometry/protocol/device/board/ONFI 的 umbrella）；
 - FTL 只 include `include/nand/nand_config.h` / `onfi_1_0.h` 取几何与命令常量；
-- `nand_fmc.h`、`nand_board_internal.h` 等私有头在 `src/nand/internal/`，FC/FTL 不得 include。
+- `nand_fmc.h`、`nand_board_internal.h` 等私有头在 `src/nand/`，FC/FTL 不得 include。
 
 设计原则：
 
@@ -59,7 +59,7 @@ NAND 公共面：
    O(1) 分配释放，无动态内存。
 2. **ID 引用代替指针**：池内资源一律 16 位 ID（0xFFFF = 无效）；跨模块接口传 ID，
    ID→指针转换只在 FC 内部发生。
-3. **内部状态不外泄**：`fc_ctl_s` 定义在 `src/fc/internal/fc_internal.h`，仅 `fc.c` /
+3. **内部状态不外泄**：`fc_ctl_s` 定义在 `src/fc/fc_internal.h`，仅 `fc.c` /
    `fc_pool.c` 可见；对外只有函数接口。
 4. **异步非阻塞**：提交立即返回，推进全部发生在 `fc_service()` 轮询里；
    `fc_poll_completion[_s]()` 取完成。
@@ -420,17 +420,17 @@ FC 不维护任何"软件寄存器影子"。队列用量与池用量直接读实
 外部只 `#include "fc_interface.h"`。该头是 FC 唯一公共契约：基础类型、
 命令/描述符/CQ 结构、池/队列/布局常量、对外 API 与 main 启动入口。
 
-`src/fc/internal/` 下全部是 FC 私有头，FTL/HIL 不得 include；构建只为
+`src/fc/` 下全部是 FC 私有头，FTL/HIL 不得 include；构建只为
 FC 对象和目标测试加私有 include 路径（见 `src/fc/makefile.mk`）。
 
 | 文件 | 内容 |
 |------|------|
 | `include/fc/fc_interface.h` | 唯一公共头（类型 + 命令结构 + 布局常量 + API + 启动入口） |
-| `src/fc/internal/fc_pool.h` | 池私有契约（状态枚举、buffer 行、池原语） |
-| `src/fc/internal/fc_internal.h` | `fc_ctl_s`、`fc_sched_s`、全局单例 |
-| `src/fc/internal/fc_queue.h` | SQ / HSQ / CQ 环形队列 |
-| `src/fc/internal/fc_data_path.h` | 编解码编排（META→CRC→加扰→ECC→RAID） |
-| `src/fc/internal/*_engine.h` | crc / random / bch / ecc / raid 引擎 |
+| `src/fc/fc_pool.h` | 池私有契约（状态枚举、buffer 行、池原语） |
+| `src/fc/fc_internal.h` | `fc_ctl_s`、`fc_sched_s`、全局单例 |
+| `src/fc/fc_queue.h` | SQ / HSQ / CQ 环形队列 |
+| `src/fc/fc_data_path.h` | 编解码编排（META→CRC→加扰→ECC→RAID） |
+| `src/fc/*_engine.h` | crc / random / bch / ecc / raid 引擎 |
 | `src/fc/fc.c` | 初始化编排、提交/填充/完成、服务主循环、Stripe RAID、诊断 |
 | `src/fc/fc_pool.c` | 三池、空闲链表、生命周期、建链与链释放 |
 
@@ -1048,7 +1048,7 @@ flowchart TB
 
 #### 单 CW 步骤原语
 
-两条管线中每个算法步骤都是**单 CW 原语**（`src/fc/internal/fc_data_path.h`），管线本身只做编排
+两条管线中每个算法步骤都是**单 CW 原语**（`src/fc/fc_data_path.h`），管线本身只做编排
 （取 buffer + 调原语）。原语只操作一块 528 B 裸 CW，不碰 command / descriptor / 链：
 
 | 原语 | 步骤 | 行为 |
@@ -2002,7 +2002,7 @@ FC-NAND 在软件层面完整对齐了主控的分层模型：命令池 / 描述
 sys_init → TIM6 毫秒心跳 → log 绑定 → stack_guard_init → banner
         → fc_init → fc_nand_init
         → fc_nand_engine_set_armed(1) → platform_register
-        → ssd_ftl_boot_all → [g_ftl_ready] fc_nand_enable_high_speed
+        → ssd_ftl_boot_all → [controller READY] fc_nand_enable_high_speed
         → usb_msc_init → usb_device_init → while(1)
 ```
 
@@ -2017,7 +2017,7 @@ sys_init → TIM6 毫秒心跳 → log 绑定 → stack_guard_init → banner
 | 门控 | 位置 | 作用 |
 |---|---|---|
 | armed 闩锁 | `fc_nand_engine_set_armed()`（`src/fc/fc_nand_engine.c`） | `fc_nand_dispatch_submit*` 放行条件；`poll` 不检查 |
-| `g_ftl_ready` | `src/main.c` | 主循环切换点：0 = 裸 `fc_service()`，1 = `ftl_service_pump()` + 逐实例 `ftl_service()` |
+| controller 状态 | `g_ctrl.state`（`src/main.c` / `src/hil/controller.c`） | 主循环切换点：非 READY = 裸 `fc_service()`，READY = `ftl_service_pump()` + 逐实例 `ftl_service()` |
 
 ### 图 15：上电初始化分层调用时序
 
@@ -2036,7 +2036,7 @@ sequenceDiagram
     M->>M: else fc_nand_engine_set_armed(1) ★放行 submit / submit_chain
     M->>M: platform_register() 注册 time_us（FTL 的 CP / GC 定时依赖）
     M->>BOOT: ssd_ftl_boot_all()
-    BOOT->>BOOT: ① 逐实例 ssd_ftl_boot → ftl_init / boot_recovery<br/>② 建 g_ftl_ptrs 三维指针表<br/>③ ftl_op_route_set(g_ftl_ptrs)<br/>④ ssd_controller_init(&amp;g_ctrl, g_ftl_ptrs)<br/>⑤ g_ftl_ready = 1 ★主循环切换点
+    BOOT->>BOOT: ① ftl_topology_build + ftl_global_init<br/>② 预绑 g_ftl_ptrs + ftl_device_prepare（实例路由 / L2P cache）<br/>③ 逐实例 ssd_ftl_boot → ftl_init / boot_recovery<br/>④ 路由自检 + ssd_controller_init(&amp;g_ctrl, g_ftl_ptrs)<br/>⑤ controller READY ★主循环切换点
     Note over M,BOOT: ★ NAND 初始化失败 ⇒ set_armed / platform_register / FTL boot 全跳过
 ```
 
@@ -2091,7 +2091,7 @@ flowchart TB
     I --> HW["mt29f_hw_init()（src/nand/devices/mt29f___g08a.c）"]
     HW --> H1["g_nand_handle: Bank3 / 8 位总线 / ECC 关闭 / TCLR=TAR=8"]
     HW --> H2["mt29f_fill_low_pcc → HAL_NAND_Init<br/>★首次碰硬件：MspInit 配时钟 / GPIO / NCE"]
-    HW --> H3["nand_board_init_all_targets → nand_board_init_target(ch, ce)<br/>（src/nand/internal/nand_board_internal.h）"]
+    HW --> H3["nand_board_init_all_targets → nand_board_init_target(ch, ce)<br/>（src/nand/nand_board_internal.h）"]
     H3 --> H3A["校验 (ch, ce) 在板级通路表内，占用 FMC bank"]
     H3 --> H3B["组装 FMC 三窗口（data / command / address）+ R/B# GPIO"]
     H3 --> H3C["nand_fmc_init_target(ch, ce, &amp;cfg) ← per-(ch, ce) 后端实例"]
@@ -2119,7 +2119,7 @@ flowchart TB
 | 6 | `set_armed(1)` | `submit`/`submit_chain` 放行——FC 才能向 NAND 派发命令 |
 | 7 | `platform_register` | `time_us` 就绪，FTL 的 CP / GC 定时有依据 |
 | 8 | `ssd_ftl_boot_all` ①–④ | 每个 (ch,ce,lun) 完成 `ftl_init` + `boot_recovery`；controller 绑定 FTL |
-| 9 | `ssd_ftl_boot_all` ⑤ | `g_ftl_ready = 1`，主循环切到 `ftl_service_pump()` |
+| 9 | `ssd_ftl_boot_all` ⑤ | controller 置 READY，主循环切到 `ftl_service_pump()` |
 | 10 | `fc_nand_enable_high_speed` | SET_FEATURES(01h, 5) + 重算 PCC + 重配 FMC；失败告警并回滚低速 |
 
 ### 22.3 编译期开关
@@ -2158,7 +2158,7 @@ while (1)
 | ④ | `usb_msc_task()` → `usb_device_task()` | 先检查在飞 MSC 请求，再跑协议栈 |
 | ⑤ | `timer_scheduler_poll()` | CP / GC / BBT / [STAT] 周期任务 |
 
-`g_ftl_ready == 0` 时只跑裸 `fc_service()`，保持 FC/NAND 裸路径可用。
+controller 非 READY 时只跑裸 `fc_service()`，保持 FC/NAND 裸路径可用。
 
 ### 图 18：一条命令的端到端生命周期
 
@@ -2253,7 +2253,7 @@ flowchart TB
 
     S["fc_service()"]
 
-    C1 -- "g_ftl_ready==0 时裸调" --> S
+    C1 -- "controller 非 READY 时裸调" --> S
     C2 -- "每轮 fc_service() ×≤4" --> S
     C3 -- "阻塞轮询直到目标命令完成<br/>（仅结构性顺序路径：boot / format / 扫描 / CLI）" --> S
 
@@ -2324,7 +2324,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 | # | 判据 | 落点 |
 |---|---|---|
 | 1 | **外部输入校验保留返回码** | 只有来自 host / CLI / 介质读回的字节才返回错误码。判定标准是「值从哪来」，不是「声明在哪个头文件」 |
-| 2 | **调用者已保证的前置条件转断言** | `static` 函数、内部头（`src/fc/internal/fc_internal.h` / `fc_pool.h` / `fc_queue.h`）、跨层入口中调用者必然传有效值的指针/索引 ⇒ `ASSERT`，删掉 `return` 与恢复分支 |
+| 2 | **调用者已保证的前置条件转断言** | `static` 函数、内部头（`src/fc/fc_internal.h` / `fc_pool.h` / `fc_queue.h`）、跨层入口中调用者必然传有效值的指针/索引 ⇒ `ASSERT`，删掉 `return` 与恢复分支 |
 | 3 | **资源类结果与运行时状态保留返回码** | 池耗尽、CQ 满背压、NAND 报告错误、`ctx->active == 0` 这类「此刻能不能做」的状态 ⇒ 返回状态 |
 | 4 | **单测固化为契约的守卫保留返回码** | 仅当测试是被测函数的正当调用者（校验器、文档化 no-op） |
 
@@ -2558,7 +2558,7 @@ DWORD plane_paa[PLANE_NUM];      /* 每个 plane 的行地址 */
 BYTE *cw_buffers[CW_TOTAL_MAX];  /* 每个 CW 的数据缓冲指针 */
 ```
 
-**下界**（`src/fc/internal/fc_nand_dispatch.h`）：`src/fc/` 必须在 submit 时把 desc 链解析完并交出
+**下界**（`src/fc/fc_nand_dispatch.h`）：`src/fc/` 必须在 submit 时把 desc 链解析完并交出
 `cw_buffers[]`，dispatch 之后**不再回调 FC**。故「造请求者必须拥有 buffer 池」——
 FC 不能整体下沉到 FTL。
 
@@ -2605,7 +2605,7 @@ FC 不能整体下沉到 FTL。
 
 | 图 | 内容 | 定位 |
 |---|---|---|
-| 图 1 | 分层与数据流总览 | `src/fc/fc.c` 头注释；`src/fc/internal/fc_nand_dispatch.h` |
+| 图 1 | 分层与数据流总览 | `src/fc/fc.c` 头注释；`src/fc/fc_nand_dispatch.h` |
 | 图 2 | 命令生命周期 | `include/fc/fc_interface.h`；`src/fc/fc_pool.c` |
 | 图 3 | `fc_service()` 主循环 | `fc_service` / `fc_poll_fill`（`src/fc/fc.c`） |
 | 图 4 | `fc_uop_engine_step()` 骨架 | `src/fc/fc_nand_engine.c` |

@@ -75,7 +75,7 @@ WSL 里的 `lsblk` **看不到** Windows 已枚举的 USB 大容量存储设备�
 串口横幅必须显示**当次**镜像：
 
 ```text
-=========== soft_ssd rev=27 built ... ===========
+=========== soft_ssd built ... ===========
 ```
 
 ⚠ 不看横幅就报「验证通过」不算证据（CLAUDE.md R1 / §3.3）：`.noinit` 崩溃记录、
@@ -181,7 +181,7 @@ Get-Volume | Where-Object DriveType -eq 'Removable' | Format-Table DriveLetter,F
 > 为什么不是 512 MiB：原始 NAND 主区是 512 MiB，但固定元数据（含 L2P 日志区）
 > 196 块（24.5 MiB）、OP 预留 408 块（51 MiB）、Spare 100 块（12.5 MiB）不可用于用户数据。
 > 数据块 = 4096 − 196 − 408 − 100 = 3392 块 = 424 MiB；
-> 见 `include/ftl/ftl.h` 的 `FTL_HOST_DATA_BLOCKS_PER_INSTANCE` / `FTL_LBA_MAX`。
+> 见 `src/ftl/ftl.h` 的 `FTL_HOST_DATA_BLOCKS_PER_INSTANCE` / `FTL_LBA_MAX`。
 > 对外上报这个数，避免主机把盘写满后 GC 无块可搬。
 
 ---

@@ -59,6 +59,16 @@
 _Static_assert(CH_NUM >= 1U, "板级通道数至少为 1");
 _Static_assert(CE_NUM >= 1U, "板级片选数至少为 1");
 
+/* 板上实际 target 数的**编译期上界**（板卡接线事实，不是 CH×CE 矩形）。
+ * 稀疏板卡（如 8 通道只装 2 个 target）必须用 -DNAND_BOARD_TARGET_MAX 收紧，
+ * 否则每 target 的常驻对象会按矩形上限分配（L2P cache 每份约 200 KiB）。
+ * 运行期"实际存在"仍由扫描结果决定，恒 <= 本上界。 */
+#ifndef NAND_BOARD_TARGET_MAX
+#    define NAND_BOARD_TARGET_MAX (CH_NUM * CE_NUM)
+#endif
+_Static_assert(NAND_BOARD_TARGET_MAX >= 1U, "板上至少有一个 target");
+_Static_assert(NAND_BOARD_TARGET_MAX <= (CH_NUM * CE_NUM), "target 上界不得超过接线矩形");
+
 /* ══════════════════════════════════════════════════════════════
  * 一、位宽推导与软件布局
  * ══════════════════════════════════════════════════════════════ */

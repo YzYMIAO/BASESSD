@@ -10,7 +10,7 @@
  *
  * 传输层（环形队列、日志 sink）在 src/platform/usart.c；本模块只消费它的
  * uart_rx_read / uart_log_write / uart_get_stats，并驱动 controller/FTL。
- * 这是唯一直接引用 g_ctrl（FTL 全链路）的调试前端。
+ * CLI 是唯一直接读 FTL 内部字段的诊断前端（文档化例外）。
  */
 
 /* main.c 定义的 controller 路由表；CLI 命令经它 ssd_controller_submit 驱动 FTL 全链路。 */

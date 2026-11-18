@@ -1,6 +1,9 @@
 #ifndef FTL_SERVICE_H
 #define FTL_SERVICE_H
 
+#include "ftl_capacity.h"
+#include "ftl_interface.h"
+
 /*
  * ftl_service — 主循环调度器
  *
@@ -121,19 +124,11 @@
  * ⚠ shared metadata spare 也必须计入：它是固定元数据分区的坏块替换池
  *   （BBT + sparing 的主流形态，见 metadata.h）。
  */
-#define FTL_HOST_DATA_BLOCKS_PER_INSTANCE (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE) * PLANE_NUM))
 
 /* 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
  * （每 (ch,ce,lun) 是独立 FTL 实例；单 die 时 3392×256 = 868,352 = 424 MiB）。
  * ⚠ 这是**L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
  *   对外一律以 `ssd_ctl_s.host_lba_max` 为准。 */
-#define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * DIE_MAX)
-
-/* 静态上限版本：只用于编译期断言（运行期用 FTL_LBA_MAX）。 */
-#define FTL_LBA_MAX_AT_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIE_MAX)
-
-/* 主机可见容量（字节）：给日志/文档用，和 USB MSC 的 READ CAPACITY 同源。 */
-#define FTL_HOST_CAPACITY_BYTES ((QWORD)FTL_LBA_MAX * FTL_IU_BYTES)
 
 /* 主机范围必须落在共享 cache 的键空间内（C9：同一语义只允许一套上限）。 */
 _Static_assert(FTL_LBA_MAX_AT_MAX <= L2P_GLOBAL_LBA_MAX_AT_MAX, "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
@@ -397,7 +392,7 @@ typedef struct FTL_TRIM_JOB_S
 typedef struct FTL_CONTEXT_S
 {
     ftl_topo_s   topo;    /* 本 FTL 绑定的 NAND 芯片路由 */
-    l2p_cache_s *cache;   /* 共享：g_l2p_cache[ch][ce] */
+    l2p_cache_s *cache;   /* 共享：按 (ch,ce) 由 l2p_cache_workspace_get() 取 */
     pend_ctx_s   pending; /* pending / group 两张表 */
     wb_handle_s *wbuf;    /* 页打包写缓冲（装配挂载） */
 
@@ -426,12 +421,11 @@ typedef struct FTL_CONTEXT_S
 } ftl_ctx_s;
 
 /**
- * @brief 描述符的外部存储
+ * @brief FTL 实例的 workspace 引用（内部装配结构）
  *
- * storage 数组由 HIL 提供并决定落哪个域（main.c：五张表与 md→各自 section、
- * journal/cp_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
- * 五张表各自独立定义，本结构只收它们的引用（指针），不约束表本体的放置。
- * ftl_init 只绑定指针；数组定义在 main.c，
+ * 各块由**拥有它的模块**定义并选定内存域（allocator→SRAM12、cp→SRAM3、
+ * md→SRAM4、journal/wbuf→DTCM、migrate/rr→AXI）；本结构只收引用（指针）。
+ * 由 ftl_instance_init 按 die 装配，ftl_init 只绑定指针；
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
  */
 typedef struct FTL_STORAGE_S
@@ -445,36 +439,17 @@ typedef struct FTL_STORAGE_S
     BYTE                   *rr_page_scratch; /* 装配挂载：FTL_READ_USER_SIZE */
 } ftl_storage_s;
 
-/* ── 接口 ── */
-
-/**
- * @brief 复位 FTL 文件级全局静态（只调用一次）
- *
- * `ftl.o` 的 `.bss` 整文件落 DTCM（NOLOAD），`s_dangling[]`、日志节流等
- * 文件级静态不被启动代码清零；必须在**所有实例 ftl_init 之前**复位一次。
- * 不能放在逐实例 ftl_init 里：多实例/运行期 re-init 会清掉已运行实例的共享状态。
- */
-void ftl_global_init(void);
-
-/**
- * @brief 由上电扫描结果构建紧凑 die 表（纯 RAM，不碰硬件）
- *
- * targets 由 FC 初始化阶段在 armed 之前扫描填好
- * （present / lun_count / lun_present[]）。
- * 只给实际存在且 78h 探测有响应的 LUN 分配紧凑 die 号；
- * g_chcelun_table 与 g_die_table 互为逆映射。
- *
- * @param targets 板级物理拓扑（CH_NUM × CE_NUM）
- * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
- */
-BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM]);
+/* ── 接口 ──
+ * 公开的 boot/topology 入口（ftl_global_init / ftl_topology_build）声明在
+ * ftl_interface.h；本头只列 FTL 内部装配接口。 */
 
 /**
  * @brief 初始化 FTL 子系统
  *
- * 描述符只持有指针；storage 数组/挂载块由调用者提供。
- * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由调用者初始化一次后
- * 传入；本函数只绑定指针，不 init、不 set_md_dir。
+ * 描述符只持有指针；storage 引用的 workspace 由各模块自持，
+ * 装配入口 ftl_instance_init 按 die 取引用后传入。
+ * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由 l2p_device_init
+ * 初始化一次后传入；本函数只绑定指针，不 init、不 set_md_dir。
  *
  * ⚠ storage 指向的数组可能在 NOLOAD 段（`.sram*_data`）：启动代码不清零，
  *   本函数会显式 memset 四个数组。
@@ -498,146 +473,6 @@ ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s *cache, const
  * @param ftl FTL 上下文（非 NULL；由 ssd_ftl_boot 在 ftl_init 成功后调用）
  */
 void ftl_contract_audit(const ftl_ctx_s *ftl);
-
-/**
- * @brief 实例无关的每轮泵（superloop 每轮调一次）
- *
- * 步骤（按执行序）：
- *   ① `[pump] 推进 NAND` —— fc_service() ≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成
- *   ② `[pump] 完成泵`    —— ftl_op_drain()：从 CQ 取完成，按命令 ch/ce/lun 路由回实例
- *
- * ⚠ 必须在所有 ftl_service() 之前调，且**每轮只调一次**——NAND 引擎与完成表都是
- *   全局单份，per-instance 调用会把 fc_service 预算重复消耗 N 遍。
- */
-void ftl_service_pump(void);
-
-/**
- * @brief 单个 FTL 实例的服务（对**每个**实例都要调）
- *
- * **步骤清单（唯一定义；其它模块一律用这些名字引用，不用编号）**，按执行序：
- *
- * | 步骤 | 做什么 | 实现 |
- * |---|---|---|
- * | 元数据候选池重算 | 元数据 BAD 后重算候选池（纯 RAM；等 metadata job 空闲） | `md_pool_service` |
- * | 写确认结算 | 推进待入账的写确认（**必须先于 host 补发**：待入账意味着该 LBA 还是旧映射，先补发会读到旧物理页） | `ftl_confirm_service` |
- * | cache 序列确认 | 按序确认已编程页（Journal→L2P→BST）、撤销失败页、弹出已证明页 | `ftl_cache_wr_confirm_step` |
- * | host 补发 | 逐组下发待补发的子操作（host IO 优先于后台） | `ftl_drain_group` |
- * | 序列收尾 | 孤儿序列超时关闭（读序列放弃）+ 写序列 padding END 有序收尾 | `ftl_cache_seq_idle_guard` / `_close_step` |
- * | wbuf 空闲 flush | 确认再无写组会 append 时，把页打包缓冲编程掉（否则这些写永不完成） | `wb_handle(MAYBE_FLUSH_IDLE)` |
- * | 后台调度 | 选档 → 任务表 → 预算（`bg_scheduler_service`） | `bg_scheduler_service` |
- *
- * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
- *   journal / checkpoint / bbt / GC 永不推进。
- *
- * @param ftl  FTL 上下文（**非 NULL**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- */
-void ftl_service(ftl_ctx_s *ftl);
-
-/**
- * @brief 非阻塞提交读请求（长度任意）
- *
- * 请求带**长度**（req->count 个连续 LBA），FTL 自行决定单/双 plane 拆分：
- *   ① 建完成组（一条 host 请求 = 一个组）
- *   ② 逐子操作下发（每个子操作 2 页 Multi-Plane，末条奇数页时单 plane）
- *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service 的 host 补发步
- *   ④ 数据在 ftl_op_drain 中路由回 buffer
- *
- * ⚠ 一次调用的完成通知（complete_flag/status_out/on_complete）**只在全部子操作
- *   完成后触发一次**。返回 FTL_OK 仅表示已受理（含部分子操作排队），不代表已完成。
- *
- * @param ftl  FTL 上下文
- * @param req  IO 请求描述（lba/buffer/count/complete_flag/status_out/on_complete/ctx）
- * @return FTL_OK    已受理
- *         FTL_ERROR 立即失败（参数非法 / LBA 越界 / 组槽满）
- */
-ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req);
-
-/**
- * @brief 非阻塞提交写请求（长度任意）
- *
- * 与 ftl_submit_read 对称：FTL 按 count 拆子操作，每子操作分配新 PBA（**逐 plane
- * 独立选块**——Policy B：SB 两 plane 的块号各自独立）+ 建 desc 链 + 异步写 NAND。
- * Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行。
- *
- * @param ftl  FTL 上下文
- * @param req  IO 请求描述（同 ftl_submit_read）
- * @return FTL_OK    已受理
- *         FTL_ERROR 立即失败
- */
-ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req);
-
-/**
- * @brief 取走并清除「延后错误」标志（volatile write cache 语义）。
- *
- * @param ftl 实例。
- * @return true = 上一次已回执的写后来被判失败；调用者应在**下一条**能承载状态的
- *         host 命令上上报一次错误（控制器 `usb_msc_take_deferred_error` 消费）。
- *
- * @note 早回执后组在页编程完成时就报 OK，FAILC 要晚一条命令才到；这条通道就是把
- *       那个迟到的结论交回给控制器的唯一出口（FTL 侧对应物）。
- */
-BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
-
-/**
- * @brief 异步 FLUSH job（host SYNCHRONIZE CACHE / CLI `fl`）
- *
- * 主流形态：FLUSH 是**排队命令**，提交即返回，完成由 HIL 的完成通道
- * （本仓 `complete_flag` / `status_out`，见 docs/archive/ftl_host_interface.md A.1）
- * 通知；不允许在 host 回调里自旋——那段时间主循环无法服务 USB 事件。
- *
- * 用法：HIL 提交 FLUSH 时调 begin（幂等）；此后每轮主循环调 step，返回 true = 完成。
- * 完成 = wbuf 无未编程数据 + 本 owner 的 L2P 无 DIRTY/FLUSHING/LOADING +
- *        Journal 无在飞 job 且无未落盘条目 + 无待入账中的 WRITE_CONFIRM。
- * Journal 持久性失败（best-effort）直接结束并打 WRN——与旧的同步语义一致。
- *
- * @param ftl  FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- */
-void ftl_flush_begin(ftl_ctx_s *ftl);
-
-/**
- * @brief 推进 FLUSH job（每轮主循环调用一次）
- *
- * @param ftl FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- * @return true  完成（含无在飞 job 的幂等完成）
- *         false 继续下一轮
- */
-BOOL ftl_flush_step(ftl_ctx_s *ftl);
-
-/**
- * @brief 放弃当前 FLUSH job（HIL 撤销回执时调用，如 host 复位）
- *
- * 只清本实例的 job 标志：在飞的数据操作由各自模块的异步路径自行收敛，无需回滚。
- * 下一次 begin 会以新的起点重新开始。
- *
- * @param ftl FTL 上下文
- */
-void ftl_flush_cancel(ftl_ctx_s *ftl);
-
-/**
- * @brief 异步取消 [lba, lba+count) 的 LBA 映射
- *
- * begin 只登记范围；step 每次异步推进一小段（L2P 未就绪 / Journal 容量不足时
- * 返 FTL_AGAIN，不产生半状态）。完成后 step 返 FTL_OK 并清 active。
- * 数据面 host 写确认不走这里；TRIM 只由 CLI 发起（控制面）。
- *
- * @param ftl   FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- * @param lba   起始逻辑地址
- * @param count 连续 LBA 数（>0；越界返 FTL_ERROR）
- * @return FTL_OK    已登记范围
- *         FTL_AGAIN 已有 TRIM 在飞
- *         FTL_ERROR 参数非法（count == 0 或越界）
- */
-ftl_status_e ftl_trim_begin(ftl_ctx_s *ftl, DWORD lba, DWORD count);
-
-/**
- * @brief 推进 TRIM job（每次最多处理 FTL_TRIM_STEP_LBAS 条 LBA）
- *
- * @param ftl FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- * @return FTL_OK    已完成（或本就没有在飞 TRIM）
- *         FTL_AGAIN 仍有剩余，下一轮继续
- *         FTL_ERROR 等待超时或 L2P 读失败，已中止 TRIM
- */
-ftl_status_e ftl_trim_step(ftl_ctx_s *ftl);
 
 /**
  * @brief 打印 FTL 各模块的关键现场（allocator / pending / cache seq / CP / MIG /

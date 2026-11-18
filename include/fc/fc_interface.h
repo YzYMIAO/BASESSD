@@ -10,7 +10,7 @@
  *   ③ 资源池 / 队列深度 / CW 布局常量
  *   ④ 对外 API 与 main 启动编排入口
  *
- * 私有实现头在 src/fc/internal/，外部消费者不得 include。
+ * 私有实现头在 src/fc/，外部消费者不得 include。
  *
  * FC = 硬件 FCC 的软件替身：只提供槽位/描述符/队列/数据路径，不含 FTL 策略。
  */
@@ -521,7 +521,7 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
  *
  *   fc_interface.h   ：唯一公共头（基础类型 + 命令结构 + API + 布局常量）
  *   fc.c / fc_pool.c ：实现
- *   私有头           ：src/fc/internal/，FTL 不可见
+ *   私有头           ：src/fc/，FTL 不可见
  *
  * 对外接口分组：
  *   ① 初始化            fc_init

@@ -43,6 +43,22 @@
 
 #include <string.h>
 
+// 每实例恢复整页暂存：定义归本模块，普通 .bss → AXI。
+// 异步读完成与随后的写之间隔着若干轮服务循环，必须常驻。
+static BYTE s_page_scratch[FTL_DIE_MAX][FTL_READ_USER_SIZE];
+
+/**
+ * @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return FTL_READ_USER_SIZE 字节的暂存区（非空）
+ */
+BYTE *rr_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return s_page_scratch[die];
+}
+
 /* ── 文件级静态数据 ── */
 
 // 不可恢复读的限流日志：坏块上的 LBA 会被 host（文件系统元数据）反复读，

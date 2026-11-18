@@ -11,7 +11,7 @@
 
 #include "assertion.h"
 #include "controller.h"
-#include "ftl.h"
+#include "ftl_interface.h"
 #include "log.h"
 
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
@@ -28,6 +28,17 @@ ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
 static void on_sub_complete(void *ctx)
 {
     ssd_req_s *req = (ssd_req_s *)ctx;
+
+    /* 已超时：host 回执已发出；只递减在飞 run 数，供前端判断何时可释放。
+     * 不得覆盖 TIMEOUT，也不得再置 complete_flag。 */
+    if (req->timed_out != false)
+    {
+        if (req->sub_remaining > 0U)
+        {
+            req->sub_remaining--;
+        }
+        return;
+    }
 
     /* 聚合状态：首个非 OK 胜出。FTL 在回调前已把本 run 的状态写进
      * completion_status；后续成功 run 会覆盖它，所以必须在这里锁存。 */

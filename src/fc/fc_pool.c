@@ -19,7 +19,7 @@
  *             fc_pool_command_release / fc_command_configure_descriptor_with_buffer。
  *
  * 提交/填充/完成调度在 fc.c；池私有契约见 fc_pool.h，控制器/调度器共享定义见
- * fc_internal.h（两个私有头都在 src/fc/internal/）。
+ * fc_internal.h（两个私有头都在 src/fc/）。
  */
 
 #include "fc_pool.h"

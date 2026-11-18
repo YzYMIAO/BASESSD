@@ -205,6 +205,14 @@ typedef struct L2P_JOURNAL_S
     jrn_handle_s handle;
 } l2p_jrn_s;
 
+/**
+ * @brief 取本实例的 Journal 环形工作区（定义在 journal.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+l2p_jrn_s *jrn_workspace_get(BYTE die);
+
 /* Journal 环形页引用：位置 + 页序号 + 页型 + 条目数（jrn_page_scan_latest 出参） */
 typedef struct JOURNAL_PAGE_REF_S
 {

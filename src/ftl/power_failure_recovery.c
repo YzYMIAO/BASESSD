@@ -689,14 +689,14 @@ static void pfr_boot_execute(ftl_ctx_s *ftl, pfr_plan_e plan, const pfr_boot_sca
         const DWORD newest = (DWORD)scan->ring.page_seq + (DWORD)scan->ring.entry_count;
         const DWORD gap    = jrn_seq_after(newest, scan->cp->journal_sequence) ? (newest - scan->cp->journal_sequence) : 0U;
 
-        (void)LOGW(LOG_TAG_BLK "power-failure diag: cp_seq=%lu cp_jseq=%lu ring_pseq=%lu ring_n=%hu ring_err=%d newest=%lu gap=%lu\r\n",
-                   scan->cp->sequence,
-                   scan->cp->journal_sequence,
-                   scan->ring.page_seq,
-                   scan->ring.entry_count,
-                   (int)scan->ring_read_error,
-                   newest,
-                   gap);
+        LOGW(LOG_TAG_BLK "power-failure diag: cp_seq=%lu cp_jseq=%lu ring_pseq=%lu ring_n=%hu ring_err=%d newest=%lu gap=%lu\r\n",
+             scan->cp->sequence,
+             scan->cp->journal_sequence,
+             scan->ring.page_seq,
+             scan->ring.entry_count,
+             (int)scan->ring_read_error,
+             newest,
+             gap);
     }
 
     switch (plan)

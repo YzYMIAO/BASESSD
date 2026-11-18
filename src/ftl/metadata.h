@@ -37,6 +37,7 @@
  */
 
 #include "allocator.h"
+#include "ftl_capacity.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
 #include "ftl_type.h"
 #include "log.h"
@@ -130,14 +131,12 @@
 #define DIR_CKPT_DIR_PRIMARY_PAGES ((L2P_REGIONS_PER_INSTANCE + DIR_CKPT_ENTRIES_PER_PAGE - 1U) / DIR_CKPT_ENTRIES_PER_PAGE)
 #define DIR_CKPT_DIR_BACKUP_PAGES  DIR_CKPT_DIR_PRIMARY_PAGES
 #define DIR_CKPT_PAGE_COUNT        (DIR_CKPT_DIR_PRIMARY_PAGES + DIR_CKPT_DIR_BACKUP_PAGES) /* 16 */
-#define DIR_CKPT_POOL_BLOCKS       (32U)                                                    /* 策略：池内块数（唯一磨损旋钮，见上）*/
 #define DIR_CKPT_RECORDS_PER_BLOCK (PAGES_PER_BLOCK / DIR_CKPT_PAGE_COUNT)                  /* 4 */
 
 /* ── BBT（坏块表）池 ──
  * 坏块位图 = BBT_BITMAP_SIZE 字节（512）⇒ **一条 record = 1 页**。*/
 #define BBT_MAX_BLOCKS  (FTL_BLOCK_TOTAL)
 #define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U)
-#define BBT_POOL_BLOCKS (2U) /* 策略：池内块数 */
 
 /* ── Checkpoint（L2P 快照 + 块元数据 + 磨损快照）池 ──
  * 一条 record = Header（1 页）+ 块元数据快照（4 页，16-bit/块 × 4096 = 8 KB）
@@ -156,7 +155,6 @@
 #define FTL_CHECKPOINT_SNAPSHOT_PAGES    (FTL_CHECKPOINT_BLOCK_PAGES + FTL_CHECKPOINT_WEAR_PAGES)
 #define FTL_CHECKPOINT_RECORD_PAGES      (1U + FTL_CHECKPOINT_SNAPSHOT_PAGES)
 #define FTL_CHECKPOINT_RECORDS_PER_BLOCK (PAGES_PER_BLOCK / FTL_CHECKPOINT_RECORD_PAGES)
-#define CHECKPOINT_POOL_BLOCKS           (8U) /* 策略：池内块数 */
 
 _Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL, "块元数据快照页数必须恰好覆盖全部块");
 _Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL, "磨损快照页数必须恰好覆盖全部块");
@@ -168,29 +166,21 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
  * 容量策略：Journal 必须容纳"两次 checkpoint 之间"的全部映射更新。
  * CW 级映射下，一次页写产生 CW_NUM 条 L2P 更新（IU = CW）
  * ⇒ 容量取 CW_NUM 块。*/
-#define JOURNAL_BLOCKS      (CW_NUM)
-#define JOURNAL_BLOCK_COUNT (JOURNAL_BLOCKS)
 
 /* ── 偏移：从元数据区起点顺序累积（不写死任何块号）── */
 
 /* 元数据区起点 */
-#define FTL_METADATA_BASE_BLOCK (0U)
 
 /* 目录检查点池：池 = [DIR_CKPT_BLOCK0, DIR_CKPT_BLOCK0 + DIR_CKPT_POOL_BLOCKS) */
-#define DIR_CKPT_BLOCK0 (FTL_METADATA_BASE_BLOCK)
 
 /* Checkpoint 池：接在目录检查点池之后 */
-#define CHECKPOINT_BLOCK0 (DIR_CKPT_BLOCK0 + DIR_CKPT_POOL_BLOCKS)
 
 /* BBT 池：接在 Checkpoint 池之后 */
-#define BBT_BLOCK (CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS)
 
 /* Journal：第 b 块 = JOURNAL_BLOCK0 + b（**环形 + 擦除**，唯一本来就正确的元数据）*/
-#define JOURNAL_BLOCK0 (BBT_BLOCK + BBT_POOL_BLOCKS)
 
 /* 固定元数据区末尾 = L2P 日志区的起点。
  * 磨损计数在 Checkpoint 快照内，不占独立块。 */
-#define FTL_METADATA_BLOCK_END (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)
 
 /* ── L2P region 日志区（固定预留）──
  * 理想块数 = ceil(region 数 / 每块页数)（每页一个 region）；预留 2×（current /
@@ -202,12 +192,8 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
 /* 每个 region 的**副本数**（L2）：主 + 备。
  * 活数据 = COPIES × ideal；日志区取 (COPIES+1) × ideal（多一份工作余量：
  * current 块 / 压缩目标 / 坏块）。 */
-#define L2P_REGION_COPIES (2U)
 /* 主/备各占**一个 plane** 的当前块（L2）⇒ 副本数不得超过 plane 数。 */
 _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_NUM（副本无法分 plane）");
-#define L2P_LOG_BLOCKS_TOTAL     (3U * L2P_LOG_IDEAL_BLOCKS) /* 96 = 2 份活数据 + 1 份余量 */
-#define L2P_LOG_BLOCKS_PER_PLANE (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
-#define L2P_LOG_BLOCK0           (FTL_METADATA_BLOCK_END)
 
 /* 压缩触发水位：活日志块**超过**两份副本的理想块数（> 64）就启动压缩。
  * ⚠ 不额外留 25% 碎片余量：固定日志区 3× ideal（96 块），活数据 = 2× ideal（64 块），
@@ -227,7 +213,6 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
 #define L2P_LOG_BORROW_MAX (8U)
 
 /* L2P 日志区末尾（= shared metadata spare 起点）。 */
-#define L2P_LOG_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
 
 /* 在飞写回的槽位预留表容量。
  * 每次 L2P region 写回在 `md_slot_pair_append` 取两个槽后，到 commit/失败之前占两条
@@ -243,11 +228,8 @@ _Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_N
  *（判据见 docs/design/ftl_design.md §3.3.8）。
  * ⚠ 本仓自拟的具体算法（nominal 优先 + 共享 spare 补缺 + 按 sequence 扫描定位）
  *   不冒充行业统一数值。 */
-#define MD_SPARE_BLOCK0           (L2P_LOG_AREA_END)
-#define MD_SPARE_BLOCKS_PER_PLANE (4U)
 
 /* 固定元数据区（含 L2P 日志区 + shared spare）末尾 = 第一个用户块。 */
-#define FTL_METADATA_AREA_END (MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE)
 
 /**
  * @brief 块号是否落在固定 L2P 日志区（各 plane 区间相同）。
@@ -841,7 +823,7 @@ typedef struct METADATA_HANDLE_S
     BYTE cp_buf[L2P_REGION_SIZE];
 } md_handle_s;
 
-/* ── 常驻 Directory Cache（33,752 B，`g_ftl_md[]` 落 SRAM4，见 src/ftl/metadata.c） ── */
+/* ── 常驻 Directory Cache（workspace 定义在 metadata.c，落 SRAM4） ── */
 /* 目录检查点的状态机（单飞 + 代数 + 游标）。 */
 typedef struct METADATA_DIRECTORY_CKPT_S
 {
@@ -902,6 +884,14 @@ typedef struct MD_DIRECTORY_CACHE_S
     alc_s       *alloc;
     const DWORD *total_writes;
 } md_dir_cache_s;
+
+/**
+ * @brief 取本实例的 Metadata Directory cache（定义在 metadata.c，SRAM4）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+md_dir_cache_s *md_workspace_get(BYTE die);
 
 /* 待回收位图按 32 位字切分，块总数必须能整除一个字。 */
 _Static_assert((FTL_BLOCK_TOTAL % 32U) == 0U, "FTL_BLOCK_TOTAL 必须是 32 的倍数");

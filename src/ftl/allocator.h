@@ -21,8 +21,9 @@
  *      运行期入口不逐次复检；init/bind 与 release 关键边界仍用 ASSERT。仅池空 / 幂等早退返回错误码。
  */
 
-#include "assertion.h"  /* ASSERT（inline 访问器与地址展开的入参检查） */
-#include "bst.h"        /* bst_block_s, FTL_BLOCK_TOTAL, ftl_gblock */
+#include "assertion.h" /* ASSERT（inline 访问器与地址展开的入参检查） */
+#include "bst.h"       /* bst_block_s, FTL_BLOCK_TOTAL, ftl_gblock */
+#include "ftl_capacity.h"
 #include "ftl_config.h" /* DWORD, pba_make */
 #include "ftl_type.h"   /* ftl_status_e, ftl_topo_s */
 #include "log.h"
@@ -59,12 +60,8 @@ typedef enum ALC_SUPER_ALLOCATOR_MODE_E
 #define FREE_POOL_PLANE_LOW (4U)
 
 /* ── OP / Spare 保留池（按 plane）── */
-#define FTL_OP_PERCENT          (10U) /* OP 预留百分比 */
-#define FTL_OP_BLOCKS_PER_PLANE ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)
 
 /* 数组维度钳到 ≥1：FTL_OP_PERCENT=0 时 [PLANE_NUM][0] 非法。 */
-#define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
-#define FTL_SPARE_POOL_PER_PLANE (50U) /* 每 plane 坏块替换池 */
 
 /* ── Closed Super Block 列表容量 ──
  * = 全部物理块数：重建时每写过一块最多建一条，取更小会溢出
@@ -94,9 +91,9 @@ typedef WORD alc_op_block_arr_t[FTL_OP_POOL_CAP];
 typedef WORD alc_spare_block_arr_t[FTL_SPARE_POOL_PER_PLANE];
 
 /* ── FTL 表的引用 ──
- * 五张大数组由 HIL（main.c）**各自独立定义、独立选内存域**（section 属性），
+ * 五张大数组由**本模块**（allocator.c）定义并各自选内存域（SRAM12 section 属性），
  * 本结构只持有它们的指针；表本体不在本结构里，故放置不受本类型约束。
- * 由 ftl_storage_s 传入，内存预算在 main.c 的 _Static_assert 单点可见。 */
+ * 装配入口 alc_bind_workspace() 按 die 填引用，ftl_storage_s 只做内部传递。 */
 typedef struct FTL_TABLE_REFS_S
 {
     bst_block_s           *blocks;         /* BST */
@@ -105,6 +102,17 @@ typedef struct FTL_TABLE_REFS_S
     alc_spare_block_arr_t *spare_blocks;   /* Spare 池 */
     super_block_s         *closed_sb_list; /* Closed 列表 */
 } ftl_table_refs_s;
+
+/**
+ * @brief 绑定本实例的五张表（workspace 的唯一定义点在本模块）
+ *
+ * @param die  紧凑 die 号（< FTL_DIE_MAX）
+ * @param refs 输出：五张表的引用（非空）
+ *
+ * @note 表定义在 allocator.c 并以 SRAM12_DATA 放置；启动代码不清零，
+ *       调用者（ftl_init）负责逐表 memset。
+ */
+void alc_bind_workspace(BYTE die, ftl_table_refs_s *refs);
 
 /* ── BBT 持久化状态（per-instance）──
  * 放在本头：bbt.c 使用，且 bbt.h 已 include 本文件，反向包含会成环。 */

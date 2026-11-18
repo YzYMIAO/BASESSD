@@ -2,8 +2,8 @@
  * host_queue.c — HIL 主机请求队列 / tag 表（见 host_queue.h）
  *
  * 这不是 NVMe SQ/CQ 的软件模型：BOT 串行下没有 doorbell/多队列。它只负责
- * 「请求归属 + tag 分配 + 单一生命周期」，让 USB MSC 和 UART CLI 不再各自持有
- * 一份 ssd_req_s。接 NVMe 时在本模块上扩展环形队列/完成队列。
+ * 「请求归属 + tag 分配 + 单一生命周期」，让 USB MSC 和 UART CLI 共用同一张表。
+ * 接 NVMe 时在本模块上扩展环形队列/完成队列。
  */
 
 #include "host_queue.h"

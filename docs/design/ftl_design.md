@@ -60,7 +60,7 @@
 
 | 想知道 | 读 |
 |---|---|
-| **FTL 对外接口**（`ftl_init` / `ftl_submit_*` / 调用约束 / 接口级 UT 设计） | `include/ftl/*.h`（函数契约）+ 本文 §5.1（模块契约）+ [`../archive/ftl_host_interface.md`](../archive/ftl_host_interface.md)（历史契约） |
+| **FTL 对外接口**（`ftl_init` / `ftl_submit_*` / 调用约束 / 接口级 UT 设计） | `include/ftl/`（公共 host/boot/capacity）与 `src/ftl/`（模块契约）+ 本文 §5.1（模块契约）+ [`../archive/ftl_host_interface.md`](../archive/ftl_host_interface.md)（历史契约） |
 | 逐版本决策史 | [`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md) |
 | 多 LUN / 共享 cache / 内存域 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md) |
 | CW 级映射的来由与介质布局 | [`../archive/cw_level_mapping_design.md`](../archive/cw_level_mapping_design.md) |
@@ -69,7 +69,7 @@
 | 断言判据 | [`common/assertion_guidelines.md`](common/assertion_guidelines.md) |
 
 ⚠ **签名以头文件为准**。本文给结构形状与字段语义，不复制完整函数原型——接口改动频繁，
-文档复制签名必然漂移。当前公共入口见 `include/ftl/ftl.h`。
+文档复制签名必然漂移。当前 host / 启动公共入口见 `include/ftl/ftl_interface.h`（API v1）；CLI 诊断仍是已文档化的内部例外。模块内部头已移入 `src/ftl/`。
 
 ### 0.3 推荐阅读顺序
 
@@ -489,7 +489,7 @@ PAA(uint32_t)，低位 → 高位：
 ### 2.3 固定元数据区布局
 
 固定元数据区在每个实例的每 plane 上占**相同的块号**（分片模型），块号由
-`include/ftl/metadata.h` 的几何公式推出，不手写：
+`src/ftl/metadata.h` 的几何公式推出，不手写：
 
 | 块号 | 分区 | 块数 | plane | 用途 |
 |---|---:|---:|---|---|
@@ -508,7 +508,7 @@ sequence 扫描定位。运行期元数据块变坏时，`md_pool_service()` 重
 重新定位（Journal/L2P 日志失块额外置 `REBUILD_REQUIRED`，下次开机 full rebuild）。
 
 各分区的**落盘结构 / 记录几何**见下表（结构体定义分别在
-`include/ftl/metadata.h` / `checkpoint.h` / `bbt.h` / `journal.h`；
+`src/ftl/metadata.h` / `checkpoint.h` / `bbt.h` / `journal.h`；
 尺寸与页数全部由宏推导，`_Static_assert` 校验）：
 
 | 分区 | 副本方式 | 落盘结构 | 条目/页 | 一条 record | 每块 record | 池内总量 |
@@ -806,7 +806,7 @@ L2P log 6144 region 页）是
 
 #### 2.3.8 结构分布图（一）：空间布局
 
-> 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格与 `include/ftl/*.h` 为准**；
+> 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格与 `src/ftl/*.h` 为准**；
 > 改布局时两处同步（H6）。
 
 **① 每个 die 的 plane / 块号分布**
@@ -905,7 +905,7 @@ offset   0                                                         2048
 ```
 
 > 尺上的字段名是缩写（为了排版）；完整字段名/类型见 2.3.1~2.3.5 的表与
-> `include/ftl/*.h`。
+> `src/ftl/*.h`（模块内部）与 `include/ftl/`（公共 API）。
 
 **⑤ 镜像写 / 读回退（运行期 async）**
 
@@ -1297,7 +1297,7 @@ flowchart TD
 |---|---|---|
 | 判型口径 | `page_seq + entry_count` | `src/ftl/power_failure_recovery.c` |
 | Journal 回放缓冲 | 栈上 `replay_pages[256]`（2 KiB） | `src/ftl/journal.c` |
-| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） | `include/ftl/metadata.h` |
+| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） | `src/ftl/metadata.h` |
 
 #### 3.1.8 主流对照
 
@@ -1380,7 +1380,7 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
   会写进 Closed 列表；
 - `FTL_GBLOCK_INVALID`（`UINT16_MAX`）：选块失败的**瞬时返回值**，从不落盘。
 
-**不变量**（`include/ftl/allocator.h` 文件头）：
+**不变量**（`src/ftl/allocator.h` 文件头）：
 
 1. **四类池各有唯一闸门**：Free 只走 `alc_free_push` / `alc_free_remove`；
    OP 只走 `alc_op_push`（出池由 `alc_free_refill_from_op` 内部完成）；Spare 只走 `alc_spare_push/pop`；Closed 只走 `alc_super_closed_add` /
@@ -1445,12 +1445,12 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 32 | `src/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |
 | `SUPER_BLOCK_LIST_MAX` | `FTL_BLOCK_TOTAL`（4096） | 同上 |
-| `bst_block_s` 尺寸 | 20 B | `include/ftl/bst.h` |
+| `bst_block_s` 尺寸 | 20 B | `src/ftl/bst.h` |
 | 温度 | HOT=0 / COLD=1 | `allocator.h` |
 
 #### 3.2.8 主流对照
@@ -1559,8 +1559,8 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `BBT_MAGIC` | `0x424254AB` | `include/ftl/bbt.h` |
-| BBT 池块数 | 2（块 40..41） | `include/ftl/metadata.h` |
+| `BBT_MAGIC` | `0x424254AB` | `src/ftl/bbt.h` |
+| BBT 池块数 | 2（块 40..41） | `src/ftl/metadata.h` |
 | `bad_map` | 512 B = 4096 bit | 同上 |
 | 出厂标记列 | 2048（`PAGE_MAIN_SIZE`） | 器件页布局 |
 | Spare / plane | 50 | `allocator.h` |
@@ -1679,10 +1679,10 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `include/ftl/metadata.h` |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `src/ftl/metadata.h` |
 | `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
 | `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | 0x0F / 0x03 | `src/ftl/checkpoint.c` |
-| `WL_THRESHOLD` | 200（本仓自拟；判据沿用 UBI） | `include/ftl/wear_leveling.h` |
+| `WL_THRESHOLD` | 200（本仓自拟；判据沿用 UBI） | `src/ftl/wear_leveling.h` |
 
 ### 3.5 元数据目录（metadata.c / metadata.h）
 
@@ -2150,7 +2150,7 @@ CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `DIR_CKPT_POOL_BLOCKS` | 32（0..31） | `include/ftl/metadata.h` |
+| `DIR_CKPT_POOL_BLOCKS` | 32（0..31） | `src/ftl/metadata.h` |
 | `DIR_CKPT_ENTRIES_PER_PAGE` | 256 | 同上 |
 | `DIR_CKPT_PAGE_COUNT` | 16（主 8 + 备 8） | 同上 |
 | `DIR_CKPT_RECORDS_PER_BLOCK` | 4 | 同上 |
@@ -2165,7 +2165,7 @@ CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看
 | `md_entry_s` | 7 B | 同上 |
 | `md_dir_ckpt_page_s` | 2048 B | 同上 |
 | 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） | 同上 |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（metadata 提交 deadline） |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `src/ftl/ftl_module.h`（metadata 提交 deadline） |
 | 目录检查点触发 | `dirty` 置位（元数据 job 异步） | `src/ftl/metadata_job.c` |
 
 #### 3.5.13 主流对照
@@ -2389,13 +2389,13 @@ l2p_flush_kick(line)
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `L2P_CACHE_SIZE` | 64 | `include/ftl/l2p_cache.h` |
+| `L2P_CACHE_SIZE` | 64 | `src/ftl/l2p_cache.h` |
 | `L2P_FLUSH_MAX_INFLIGHT` | 4 | 同上 |
 | `L2P_THRASH_WINDOW` | 256 | 同上 |
 | `L2P_THRASH_ENTER_PCT` / `EXIT_PCT` | 90 / 70 | 同上 |
 | `L2P_SYNC_GUARD_MAX` | 100,000 轮 | 同上 |
 | `L2P_PREFETCH_MAX_INFLIGHT` | 2 | 同上（本仓自定） |
-| `FTL_SEQ_PREFETCH_MIN_RUN` / `AHEAD_LBAS` | 2 / 64 | `include/ftl/ftl.h`（本仓自定） |
+| `FTL_SEQ_PREFETCH_MIN_RUN` / `AHEAD_LBAS` | 2 / 64 | `src/ftl/ftl.h`（本仓自定） |
 | `L2P_ENTRIES_PER_REGION` | 512 | `include/ftl/ftl_config.h` |
 
 #### 3.6.9 主流对照
@@ -2574,14 +2574,14 @@ jrn_replay(journal, cache, cp_sequence, &entries, block_ctx)
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `include/ftl/metadata.h` |
-| `JRN_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
+| `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `src/ftl/metadata.h` |
+| `JRN_PAGE_SIZE` | 2048 | `src/ftl/journal.h` |
 | `JRN_HEADER_SIZE` | 16 | 同上 |
 | `JRN_ENTRIES_PER_PAGE` | 127 | 同上 |
 | `JRN_SEG_ENTRIES_PER_PAGE` | 508 | 同上 |
 | `JRN_FULL_THRESHOLD` | 85% | `src/ftl/journal.c` |
 | `JRN_CRITICAL` | 95% | `src/ftl/journal.c` |
-| `JRN_MAGIC` | `0x524F554A` ("JOUR") | `include/ftl/journal.h` |
+| `JRN_MAGIC` | `0x524F554A` ("JOUR") | `src/ftl/journal.h` |
 | `JRN_MAGIC_SEG` | `0x4745534A` ("JSEG") | 同上 |
 | `JOURNAL_DRAIN_SPIN_MAX` | 100,000 | `src/ftl/journal.c` |
 
@@ -2769,10 +2769,10 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `CP_MAGIC` | `0xCCCCCCCC` | `include/ftl/checkpoint.h` |
-| `CHECKPOINT_POOL_BLOCKS` | 8 | `include/ftl/metadata.h` |
-| 一条 record | 21 页（1 Header + 4 块元数据 + 16 磨损） | `include/ftl/metadata.h` |
-| `CP_WRITE_INTERVAL` | 1024 | `include/ftl/ftl.h` |
+| `CP_MAGIC` | `0xCCCCCCCC` | `src/ftl/checkpoint.h` |
+| `CHECKPOINT_POOL_BLOCKS` | 8 | `src/ftl/metadata.h` |
+| 一条 record | 21 页（1 Header + 4 块元数据 + 16 磨损） | `src/ftl/metadata.h` |
+| `CP_WRITE_INTERVAL` | 1024 | `src/ftl/ftl.h` |
 | `CP_TIME_INTERVAL_MS` | 10,000 | 同上 |
 | `CP_T3_MIN_JOURNAL_DELTA` | 64 | `src/ftl/checkpoint.c` |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | 提交/等待 deadline（`ftl_module.h`） |
@@ -2990,11 +2990,11 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FTL_PENDING_MAX` / `FTL_GROUP_MAX` | 32 / 32 | `include/ftl/pending.h` |
+| `FTL_PENDING_MAX` / `FTL_GROUP_MAX` | 32 / 32 | `src/ftl/pending.h` |
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
-| `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
+| `FTL_DRAIN_STALL_MAX` | 8 | `src/ftl/ftl.h` |
 | `FTL_LBA_PER_PAIR` | 8（2 plane × 4 CW） | `include/ftl/ftl_config.h` |
-| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） | `include/ftl/ftl.h` |
+| `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） | `src/ftl/ftl.h` |
 
 #### 3.9.10 主流对照
 
@@ -3237,11 +3237,11 @@ sequenceDiagram
 
 | 常量 | 值 | 出处 / 推导 |
 |---|---|---|
-| `FTL_OP_REQ_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH` | `include/ftl/ftl_op.h`。command_id 是命令池槽位号，直接索引；容量 = 池深，不再有“表满”。 |
+| `FTL_OP_REQ_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH` | `src/ftl/ftl_op.h`。command_id 是命令池槽位号，直接索引；容量 = 池深，不再有“表满”。 |
 | `ftl_op_req_s` | 12 B | `4 B ctx + 4 B op + 1 B pending + 3 B 对齐` |
 | `FTL_OP_COUNT` | 枚举值 | `g_op_callbacks[]` 下标；无 7 位字段限制 |
 | `g_op_route` 容量 | `FTL_DIE_MAX` | die 号统一 `BYTE`，`FTL_DIE_MAX` 静态断言 ≤ 255 |
-| 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 stall 上限 | `include/ftl/l2p_cache.h` 等 |
+| 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 stall 上限 | `src/ftl/l2p_cache.h` 等 |
 
 #### 3.10.8 主流对照
 
@@ -3278,7 +3278,7 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 
 **实现位置**：`src/ftl/wbuf.c`（`wb_handle` typed 入口 + `wb_has/read` 查询 +
 `static wb_flush`（编程）/ `wb_append`（攒入）），
-结构体与接口声明在 `include/ftl/wbuf.h`。它是 FTL 层唯一**独立成文件**的子模块中
+结构体与接口声明在 `src/ftl/wbuf.h`。它是 FTL 层唯一**独立成文件**的子模块中
 最晚抽出的一支（其余子模块各自成文件）；`ftl.c` 只调用其接口，不碰 `wb_handle_s` 内部。
 
 - **做**：按窗口累积 CW（`slot = plane*CW_NUM + cw`）、记录占用位图与贡献组、切换窗口时
@@ -3448,7 +3448,7 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
-  - 实例步骤（按执行序，唯一定义见 `include/ftl/ftl.h` 的 `ftl_service()` 契约）：
+  - 实例步骤（按执行序，唯一定义见 `src/ftl/ftl.h` 的 `ftl_service()` 契约）：
     **元数据候选池重算**（`md_pool_service`）→ **写确认结算**（`ftl_confirm_service`）→
     **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_drain_group`）→
     **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
@@ -3613,13 +3613,13 @@ flowchart TB
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `NAND_SUBMIT_BUDGET` | 4 | `include/ftl/ftl.h` |
-| `L2P_FLUSH_MAX_NORMAL` / `L2P_FLUSH_MAX_BUSY` | 4 / 1 | `include/ftl/l2p_cache.h` |
-| `GC_EVAL_INTERVAL_MS` | 10 | `include/ftl/gc.h` |
-| `GC_LOG_INTERVAL_MS` | 5000 | `include/ftl/gc.h` |
-| `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
-| `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
-| `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） | `include/ftl/pending.h` |
+| `NAND_SUBMIT_BUDGET` | 4 | `src/ftl/ftl.h` |
+| `L2P_FLUSH_MAX_NORMAL` / `L2P_FLUSH_MAX_BUSY` | 4 / 1 | `src/ftl/l2p_cache.h` |
+| `GC_EVAL_INTERVAL_MS` | 10 | `src/ftl/gc.h` |
+| `GC_LOG_INTERVAL_MS` | 5000 | `src/ftl/gc.h` |
+| `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/read_recovery.h` |
+| `BG_TASK_COUNT` | 10 | `src/ftl/bg_scheduler.h` |
+| `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） | `src/ftl/pending.h` |
 | 档位配额 | 4 / 4 / 1（工作量单位） | `src/ftl/bg_scheduler.c` |
 | `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
 
@@ -3849,7 +3849,7 @@ flowchart TD
 |---|---|---|
 | `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `src/ftl/gc.c` |
 | `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `src/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
 | 页镜像 | 2 × 2048 B | `mig_handle_s.page_buf` |
 
@@ -3961,7 +3961,7 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `RR_ECC_RISING_THRESHOLD` | 4 | `include/ftl/read_recovery.h` |
+| `RR_ECC_RISING_THRESHOLD` | 4 | `src/ftl/read_recovery.h` |
 | `RR_ECC_HIGH_WATER` | 6 | 同上 |
 | `RR_ECC_MAX` | 15 | 同上 |
 | `RR_READ_DISTURB_THRESHOLD` | 1000 | 同上 |
@@ -4073,7 +4073,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 | 描述符池 | 256 | 同上 |
 | 缓冲池 | 128 × 528 B | 同上 |
 | SQ / HSQ / CQ | 64 / 16 / 64 | 同上 |
-| `FTL_PAGE_CFG_META/DATA/DATA_ANY` | 见头文件 | `include/ftl/ftl_fc_interface.h` |
+| `FTL_PAGE_CFG_META/DATA/DATA_ANY` | 见头文件 | `src/ftl/ftl_fc_interface.h` |
 
 #### 3.15.9 主流对照
 
@@ -4347,14 +4347,14 @@ sequenceDiagram
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FTL_STREAM_MIN_LBAS` | 64（32 KiB = 两个 16 KiB 传输段） | `include/ftl/ftl.h` |
-| `FTL_CACHE_READ_MIN_PAIRS` | 2 | `include/ftl/cache_batch.h` |
+| `FTL_STREAM_MIN_LBAS` | 64（32 KiB = 两个 16 KiB 传输段） | `src/ftl/ftl.h` |
+| `FTL_CACHE_READ_MIN_PAIRS` | 2 | `src/ftl/cache_batch.h` |
 | `FTL_CACHE_WRITE_MAX_PAGES` | 4 | 同上 |
-| `JRN_SEG_ENTRIES_PER_PAGE` | 508（`(2048 − 16) / 4`；按整 pair 用到 504 = 63 pair ≈252 KiB） | `include/ftl/journal.h` |
-| `FTL_CACHE_SEQ_RING` | 16 | `include/ftl/ftl.h` |
+| `JRN_SEG_ENTRIES_PER_PAGE` | 508（`(2048 − 16) / 4`；按整 pair 用到 504 = 63 pair ≈252 KiB） | `src/ftl/journal.h` |
+| `FTL_CACHE_SEQ_RING` | 16 | `src/ftl/ftl.h` |
 | `FTL_CACHE_SEQ_IDLE_MS` | 1000 | 同上 |
 | `FTL_CACHE_SEQ_DRAIN_STALL_MS` | 1000 | 同上（draining 卡死兜底，与空闲等待分开） |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_op.h` |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `src/ftl/ftl_op.h` |
 
 #### 3.16.9 主流对照
 
@@ -4915,7 +4915,7 @@ flowchart TB
 
 ### 5.1.1 模块 handle 契约
 
-公共类型在 `include/ftl/ftl_module.h`（设计与落地状态见本节 §5.1.1/§5.1.2；
+公共类型在 `src/ftl/ftl_module.h`（设计与落地状态见本节 §5.1.1/§5.1.2；
 全文归档在 `docs/archive/ftl_module_contracts.md`）：
 
 | 类型 | 关键字段 | 用途 |
@@ -5232,7 +5232,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 主流多 LUN 主控共享 L2P cache；全局 LBA + 分片是常见形态（具体实现本仓自定） |
 | 代价 | owner 解析回调、全局脏位图、CP/recovery/flush 都要按 owner 过滤 |
 | 重估触发 | 换多 die 芯片；或 cache 命中率需要 per-LUN 隔离 |
-| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md)；`include/ftl/l2p_cache.h` 的全局坐标注释 |
+| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md)；`src/ftl/l2p_cache.h` 的全局坐标注释 |
 
 ### ADR-13 实例描述符化 + 内存域散列
 
@@ -5258,7 +5258,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 消费级 DRAM-less 常见；企业级会用 credit/动态 budget |
 | 代价 | 无优先级/公平性；极端竞争下 host 可能看到错误 |
 | 重估触发 | 多 LUN 并发导致 pending 经常打满；或接入 NVMe host |
-| 出处 | 旧 D6 分析（现并入本节）；`include/ftl/pending.h` 的隐式背压注释 |
+| 出处 | 旧 D6 分析（现并入本节）；`src/ftl/pending.h` 的隐式背压注释 |
 
 ### ADR-15 NAND 流水线：Multi-Plane + 受限 Cache Program
 
@@ -5292,7 +5292,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
-| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；`include/ftl/bg_scheduler.h` |
+| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；`src/ftl/bg_scheduler.h` |
 
 ### ADR-17 读写 run：FTL 构链，FC 执行 chain
 
@@ -5305,7 +5305,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_nand_dispatch.c`），不是行业标准形态 |
 | 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
 | 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
-| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`src/fc/internal/fc_internal.h`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
+| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`include/nand/onfi_1_0.h`）；`src/fc/fc_internal.h`；`src/fc/fc.c` 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；`src/ftl/cache_batch.c` |
 
 > 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
 > `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
@@ -5369,7 +5369,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 限制 | 影响 | 备注 |
 |---|---|---|
-| FTL API 未定稿 | `include/ftl/*.h` 的签名/枚举/访问器仍会变 | 用户已明确会换 API；文档不复制签名 |
+| FTL 模块内部 API 仍演进 | host/boot v1 已冻结；`src/ftl/*.h` 的模块内部签名/枚举/访问器仍可能变 | `ftl_interface.h` 是 host/boot 契约；CLI 诊断仍是内部例外；用户后续可能换模块 API |
 | UT 冻结 | 部分用例编译失败 | 不为 UT 回退生产代码；测试源由用户维护 |
 | 共享 cache 的跨 LUN 公平性未实测 | 某 LUN 可能占满 flush credit | 当前 `flush_inflight` 是共享 credit 池；后续按实测调 |
 
@@ -5416,7 +5416,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `PAGES_PER_BLOCK` | 64 | 同上 |
 | `BLOCKS_PER_PLANE` | 2048 | 同上 |
 | `PLANE_NUM` | 2 | 同上 |
-| `FTL_BLOCK_TOTAL` | 4096 | `include/ftl/bst.h` |
+| `FTL_BLOCK_TOTAL` | 4096 | `src/ftl/bst.h` |
 | `FTL_IU_BYTES` | 512 | `include/ftl/ftl_config.h` |
 | `FTL_IU_TOTAL` | 1,048,576（**映射表寻址空间，非主机容量**） | 同上 |
 | `FTL_DIE_MAX` / `DIE_MAX` | `CH_MAX × CE_MAX × LUN_MAX` / `g_die_count` | 同上（静态上限 / 运行时实际） |
@@ -5429,7 +5429,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `L2P_CACHE_SIZE` | 64 | `include/ftl/l2p_cache.h` |
+| `L2P_CACHE_SIZE` | 64 | `src/ftl/l2p_cache.h` |
 | `L2P_FLUSH_MAX_INFLIGHT` | 4 | 同上 |
 | `L2P_SYNC_GUARD_MAX` | 100,000 | 同上 |
 | `L2P_THRASH_WINDOW` | 256 | 同上 |
@@ -5440,31 +5440,31 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FTL_PENDING_MAX` | 32 | `include/ftl/pending.h` |
+| `FTL_PENDING_MAX` | 32 | `src/ftl/pending.h` |
 | `FTL_GROUP_MAX` | 32 | 同上 |
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
-| `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
+| `FTL_DRAIN_STALL_MAX` | 8 | `src/ftl/ftl.h` |
 | `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） | 同上 |
-| `FTL_OP_REQ_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/ftl_op.h`。command_id 是命令池槽位号，直接索引；容量 = 池深，不再有表满路径。 |
+| `FTL_OP_REQ_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `src/ftl/ftl_op.h`。command_id 是命令池槽位号，直接索引；容量 = 池深，不再有表满路径。 |
 
 #### Journal
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `include/ftl/metadata.h` |
-| `JRN_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
+| `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `src/ftl/metadata.h` |
+| `JRN_PAGE_SIZE` | 2048 | `src/ftl/journal.h` |
 | `JRN_HEADER_SIZE` | 16 | 同上 |
 | `JRN_ENTRIES_PER_PAGE` | 127 | 同上 |
 | `JRN_SEG_ENTRIES_PER_PAGE` | 508 | 同上 |
 | `JRN_FULL_THRESHOLD` / `CRITICAL` | 85% / 95% | `src/ftl/journal.c` |
-| `JRN_MAGIC` / `JRN_MAGIC_SEG` | `0x524F554A` / `0x4745534A` | `include/ftl/journal.h` |
-| `JRN_BLOCK_NONE` | `0xFF` | `include/ftl/journal.h` |
+| `JRN_MAGIC` / `JRN_MAGIC_SEG` | `0x524F554A` / `0x4745534A` | `src/ftl/journal.h` |
+| `JRN_BLOCK_NONE` | `0xFF` | `src/ftl/journal.h` |
 
 #### Checkpoint
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `CHECKPOINT_POOL_BLOCKS` | 8 | `include/ftl/metadata.h` |
+| `CHECKPOINT_POOL_BLOCKS` | 8 | `src/ftl/metadata.h` |
 | `FTL_CHECKPOINT_BLOCK_WORD_BYTES` | 2 | 同上 |
 | `FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE` | 1024 | 同上 |
 | `FTL_CHECKPOINT_BLOCK_PAGES` | 4 | 同上 |
@@ -5472,8 +5472,8 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | 同上 |
 | `FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE` | 256 | 同上 |
 | `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
-| `CP_MAGIC` | `0xCCCCCCCC` | `include/ftl/checkpoint.h` |
-| `CP_WRITE_INTERVAL` | 1024 | `include/ftl/ftl.h` |
+| `CP_MAGIC` | `0xCCCCCCCC` | `src/ftl/checkpoint.h` |
+| `CP_WRITE_INTERVAL` | 1024 | `src/ftl/ftl.h` |
 | `CP_TIME_INTERVAL_MS` | 10,000 | 同上 |
 | `CP_T3_MIN_JOURNAL_DELTA` | 64 | `src/ftl/checkpoint.c` |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | 提交/等待 deadline（`ftl_module.h`） |
@@ -5483,7 +5483,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `DIR_CKPT_POOL_BLOCKS` | 32 | `include/ftl/metadata.h` |
+| `DIR_CKPT_POOL_BLOCKS` | 32 | `src/ftl/metadata.h` |
 | `DIR_CKPT_ENTRIES_PER_PAGE` | 256 | 同上 |
 | `DIR_CKPT_PAGE_COUNT` | 16（主 8 + 备 8） | 同上 |
 | `DIR_CKPT_RECORDS_PER_BLOCK` | 4 | 同上 |
@@ -5493,18 +5493,18 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `md_dir_ckpt_page_s` | 2048 B | 同上 |
 | `FTL_MEDIA_LAYOUT_VERSION` | 14（单 die）/ 0x80000000 + topology hash（多 die） | 同上 |
 | 目录检查点触发 | `dirty` 置位（元数据 job 异步） | `src/ftl/metadata_job.c` |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（metadata 提交 deadline） |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `src/ftl/ftl_module.h`（metadata 提交 deadline） |
 
 #### Allocator / BST
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 32 | `src/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |
 | `SUPER_BLOCK_LIST_MAX` | `FTL_BLOCK_TOTAL` = 4096 | 同上 |
-| `bst_block_s` | 20 B | `include/ftl/bst.h` |
+| `bst_block_s` | 20 B | `src/ftl/bst.h` |
 | 块状态 | NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD | 同上 |
 | 温度 | HOT=0 / COLD=1 | `allocator.h` |
 
@@ -5514,9 +5514,9 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 |---|---|---|
 | `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `src/ftl/gc.c` |
 | `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 | `src/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
-| `WL_THRESHOLD` | 200（UBI 模型；默认值本仓自拟） | `include/ftl/wear_leveling.h` |
+| `WL_THRESHOLD` | 200（UBI 模型；默认值本仓自拟） | `src/ftl/wear_leveling.h` |
 | `WL_MIN_WRITES` | 1000 writes（启动门，一次性） | 同上 |
 | `WL_MIN_VALID_RATIO` | 70% | 同上 |
 | `WL_EVAL_INTERVAL_MS` | 5000 ms（调度器求值节拍） | 同上 |
@@ -5525,18 +5525,18 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `include/ftl/metadata.h` |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `src/ftl/metadata.h` |
 | `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
 | `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | `0x0F` / `0x03` | `src/ftl/checkpoint.c` |
-| `BBT_MAGIC` | `0x424254AB` | `include/ftl/bbt.h` |
-| `BBT_BITMAP_SIZE` | 512 B（4096 bit） | `include/ftl/metadata.h` |
+| `BBT_MAGIC` | `0x424254AB` | `src/ftl/bbt.h` |
+| `BBT_BITMAP_SIZE` | 512 B（4096 bit） | `src/ftl/metadata.h` |
 | 出厂标记列 | 2048 | `src/ftl/bbt.c` |
 
 #### 读恢复
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `RR_ECC_RISING_THRESHOLD` | 4 | `include/ftl/read_recovery.h` |
+| `RR_ECC_RISING_THRESHOLD` | 4 | `src/ftl/read_recovery.h` |
 | `RR_ECC_HIGH_WATER` / `MAX` | 6 / 15 | 同上 |
 | `RR_READ_DISTURB_THRESHOLD` | 1000 | 同上 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | 同上（RR 提交 deadline） |
@@ -5546,12 +5546,12 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
-| `NAND_SUBMIT_BUDGET` | 4 | `include/ftl/ftl.h` |
-| `L2P_FLUSH_MAX_NORMAL` / `BUSY` | 4 / 1 | `include/ftl/l2p_cache.h` |
-| `GC_EVAL_INTERVAL_MS` | 10 | `include/ftl/gc.h` |
-| `GC_LOG_INTERVAL_MS` | 5000 | `include/ftl/gc.h` |
-| `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
+| `BG_TASK_COUNT` | 10 | `src/ftl/bg_scheduler.h` |
+| `NAND_SUBMIT_BUDGET` | 4 | `src/ftl/ftl.h` |
+| `L2P_FLUSH_MAX_NORMAL` / `BUSY` | 4 / 1 | `src/ftl/l2p_cache.h` |
+| `GC_EVAL_INTERVAL_MS` | 10 | `src/ftl/gc.h` |
+| `GC_LOG_INTERVAL_MS` | 5000 | `src/ftl/gc.h` |
+| `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/read_recovery.h` |
 | 档位配额 | IDLE 4 / NORMAL 4 / BUSY 1（工作量单位） | `src/ftl/bg_scheduler.c` |
 | `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
 
@@ -5591,22 +5591,22 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 结构 | 定义 | 关键字段/用途 |
 |---|---|---|
-| `ftl_ctx_s` | `include/ftl/ftl.h` | 描述符：topo / cache* / pending（含 groups） / **wbuf*** / **table_refs** / alloc / journal* / metadata_dir* / cp_handle* / **mig_handle*** / read_recovery_handle / **rr_page_scratch*** / bg |
+| `ftl_ctx_s` | `src/ftl/ftl.h` | 描述符：topo / cache* / pending（含 groups） / **wbuf*** / **table_refs** / alloc / journal* / metadata_dir* / cp_handle* / **mig_handle*** / read_recovery_handle / **rr_page_scratch*** / bg |
 | `ftl_storage_s` | 同上 | table_refs* / metadata_dir* / journal* / cp_handle* / **migrate*** / **wbuf*** / **rr_page_scratch*** |
 | `ftl_io_req_s` | `include/ftl/ftl_type.h` | lba / buffer / count / 完成通知 |
-| `pend_req_s`（32 B） | `include/ftl/pending.h` | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 |
+| `pend_req_s`（32 B） | `src/ftl/pending.h` | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 |
 | `pend_group_s`（48 B） | 同上 | next / total / outstanding / agg_status |
-| `l2p_cache_s` / `l2p_cache_line_s` / `l2p_owner_s` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 回调 `{die, metadata_dir, alloc, topo}` |
-| `l2p_jrn_s` / `jrn_handle_s` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / `alloc`（坏块走 owner API） |
-| `cp_header_s` / `cp_handle_s` | `include/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / 窄上下文 |
-| `md_entry_s` / `md_dir_ckpt_page_s` / `md_ring_s` / `md_dir_cache_s` / `md_handle_s` | `include/ftl/metadata.h` | Directory / 目录检查点 / 池几何 / 回收压缩 job / `alloc`+`total_writes` 窄指针 |
-| `bst_block_s` / `ftl_table_refs_s` / `alc_s` / `super_block_s` | `include/ftl/bst.h` / `allocator.h` | BST / 表引用 / 四类池计数 / SB |
-| `mig_handle_s` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
-| `rr_handle_s` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
-| `wb_handle_s` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
-| `ftl_mod_state_e` / `ftl_mod_status_s` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀（现仅 wbuf） |
-| `bg_sched_s` / `bg_task_s` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
-| `bbt_header_s` / `bbt_state_s` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
+| `l2p_cache_s` / `l2p_cache_line_s` / `l2p_owner_s` | `src/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 回调 `{die, metadata_dir, alloc, topo}` |
+| `l2p_jrn_s` / `jrn_handle_s` | `src/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / `alloc`（坏块走 owner API） |
+| `cp_header_s` / `cp_handle_s` | `src/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / 窄上下文 |
+| `md_entry_s` / `md_dir_ckpt_page_s` / `md_ring_s` / `md_dir_cache_s` / `md_handle_s` | `src/ftl/metadata.h` | Directory / 目录检查点 / 池几何 / 回收压缩 job / `alloc`+`total_writes` 窄指针 |
+| `bst_block_s` / `ftl_table_refs_s` / `alc_s` / `super_block_s` | `src/ftl/bst.h` / `allocator.h` | BST / 表引用 / 四类池计数 / SB |
+| `mig_handle_s` | `src/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
+| `rr_handle_s` | `src/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
+| `wb_handle_s` | `src/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
+| `ftl_mod_state_e` / `ftl_mod_status_s` | `src/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀（现仅 wbuf） |
+| `bg_sched_s` / `bg_task_s` | `src/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
+| `bbt_header_s` / `bbt_state_s` | `src/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_s` | `src/ftl/checkpoint.c` | CP 磨损快照条目（8 B/块；内部类型）|
 
 ### 8.C 静默失效与证据判据清单

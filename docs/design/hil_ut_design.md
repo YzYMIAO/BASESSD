@@ -652,7 +652,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-USB-02` | K | MSC 异步完成 / deferred / discard 需主机拔线或复位 |
+| `RISK-USB-02` | K | MSC 异步完成 / deferred / 会话切换需主机拔线或复位 |
 | `RISK-USB-07` | K | `cmd_remaining` 在 `usb_msc.c` 内，HIL 只到 controller，无法从请求对象断言 |
 | `RISK-USB-08` | K | 需主机早期回执 + 程序失败组合 |
 | `RISK-USB-12` | K | 需主机发 0x91，PC 侧验证 |

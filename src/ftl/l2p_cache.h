@@ -82,40 +82,27 @@ _Static_assert(L2P_GLOBAL_LBA_MAX_AT_MAX <= (QWORD)UINT32_MAX, "全局 LBA 超�
 _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 64 word");
 
 /**
- * @brief (ch,ce,lun) → 紧凑 die 号（查扫描表的唯一漏斗）。
- *
- * @param ch/ce/lun 物理坐标
- * @return 紧凑 die 号（0..DIE_MAX-1）；越界或不存在 ⇒ FTL_DIE_INVALID
- */
-static inline BYTE chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
-{
-    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-    {
-        return FTL_DIE_INVALID;
-    }
-    return g_chcelun_table[ch][ce][lun];
-}
-
-/**
- * @brief 拓扑 → 紧凑 die 号（查扫描表，不再用矩形公式）。
- *
- * @param topo 通道/片选/LUN 三维坐标
- * @return 紧凑 die 号（0..DIE_MAX-1）；不存在 ⇒ FTL_DIE_INVALID
- */
-static inline BYTE topo_2_die(ftl_topo_s topo)
-{
-    return chcelun_2_die(topo.ch, topo.ce, topo.lun);
-}
-
-/**
- * @brief 全局 LBA → 全局 region。
+ * @brief 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。
  *
  * @param glba 全局 LBA
- * @return 全局 region 序号（glba >> L2P_REGION_SHIFT）
+ * @param topo 目标实例的通道/片选/LUN 坐标
+ * @return true = 路由到该实例
+ *         false = 路由到其他实例
  */
-static inline DWORD lba_to_global_region(DWORD glba)
+static inline BOOL lba_routes_to(DWORD glba, ftl_topo_s topo)
 {
-    return (glba >> L2P_REGION_SHIFT);
+    return (lba_2_ch(glba) == topo.ch) && (lba_2_ce(glba) == topo.ce) && (lba_2_lun(glba) == topo.lun);
+}
+
+/**
+ * @brief 全局 LBA → region 内的 entry 下标。
+ *
+ * @param lba 全局 LBA
+ * @return entry 下标（lba & L2P_REGION_MASK）
+ */
+static inline WORD lba_to_entry(DWORD lba)
+{
+    return (lba & L2P_REGION_MASK);
 }
 
 /**
@@ -172,82 +159,6 @@ static inline BOOL l2p_region_owned_by(DWORD global_region, BYTE die)
 /* ── Region 分解 ──
  * L2P_REGION_SHIFT（lba / 每 region 条目数）与 L2P_REGION_MASK（lba % 每 region
  * 条目数）见 ftl/ftl_config.h §一。*/
-
-/**
- * @brief 全局 LBA → 实例编号（die）路由。
- *
- * 路由键 = **region 序号**（lba >> L2P_REGION_SHIFT），不是页号也不是条目号：
- * 一个 region（512 个 CW）整体落在同一个 die 上，region 的 flush 只碰一个实例。
- * 再把 region 序号按设备维度**分解**：
- * die = region % DIE_MAX
- * ch/ce/lun = g_die_table[die]
- * DIE_MAX = 1 时恒为 (0,0,0)。
- *
- * @param lba 全局 LBA
- * @return 紧凑 die 号（region % DIE_MAX）
- */
-static inline BYTE lba_2_die(QWORD lba)
-{
-    ASSERT(DIE_MAX != 0U);
-    return (BYTE)(((lba >> L2P_REGION_SHIFT) % DIE_MAX));
-}
-
-/**
- * @brief 全局 LBA → 通道号。
- *
- * @param lba 全局 LBA
- * @return 通道号
- */
-static inline BYTE lba_2_ch(QWORD lba)
-{
-    return die_2_ch(lba_2_die(lba));
-}
-
-/**
- * @brief 全局 LBA → 片选号。
- *
- * @param lba 全局 LBA
- * @return 片选号
- */
-static inline BYTE lba_2_ce(QWORD lba)
-{
-    return die_2_ce(lba_2_die(lba));
-}
-
-/**
- * @brief 全局 LBA → LUN 号。
- *
- * @param lba 全局 LBA
- * @return LUN 号
- */
-static inline BYTE lba_2_lun(QWORD lba)
-{
-    return die_2_lun(lba_2_die(lba));
-}
-
-/**
- * @brief 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。
- *
- * @param glba 全局 LBA
- * @param topo 目标实例的通道/片选/LUN 坐标
- * @return true = 路由到该实例
- *         false = 路由到其他实例
- */
-static inline BOOL lba_routes_to(DWORD glba, ftl_topo_s topo)
-{
-    return (lba_2_ch(glba) == topo.ch) && (lba_2_ce(glba) == topo.ce) && (lba_2_lun(glba) == topo.lun);
-}
-
-/**
- * @brief 全局 LBA → region 内的 entry 下标。
- *
- * @param lba 全局 LBA
- * @return entry 下标（lba & L2P_REGION_MASK）
- */
-static inline WORD lba_to_entry(DWORD lba)
-{
-    return (lba & L2P_REGION_MASK);
-}
 
 /* ── Cache 状态 ── */
 
@@ -559,6 +470,30 @@ static inline BOOL l2p_region_dirty_live(const l2p_cache_s *cache, DWORD region)
  * @param owner_ctx       回调透传上下文
  */
 void l2p_init(l2p_cache_s *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx);
+
+/**
+ * @brief 设备级初始化实际存在的 target 共享 cache（一次）
+ *
+ * 只给「至少有一个 present LUN」的 (ch,ce) 分配 cache 槽（按扫描顺序紧凑编号）；
+ * 本函数是设备级唯一初始化点，必须早于所有实例 boot。
+ */
+void l2p_device_init(void);
+
+/**
+ * @brief 登记某个 die 的 owner 端口（boot 时由 ftl_instance_init 调用）
+ *
+ * @param die   紧凑 die 号（< FTL_DIE_MAX）
+ * @param owner owner 端口内容（非空；按值拷贝）
+ */
+void l2p_owner_register(BYTE die, const l2p_owner_s *owner);
+
+/**
+ * @brief 取 (ch,ce) 对应的共享 cache（定义在 l2p_cache.c）
+ *
+ * @param topo 本实例拓扑（ch/ce 必须在范围内）
+ * @return 共享 cache；该 (ch,ce) 不存在 / 无 present LUN 时返回 NULL
+ */
+l2p_cache_s *l2p_cache_workspace_get(ftl_topo_s topo);
 
 /**
  * @brief 开机恢复（F4）专用：把一个 region 页同步预载进 cache。

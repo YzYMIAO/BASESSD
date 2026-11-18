@@ -14,7 +14,7 @@
  * NAND 不反向 include FC。
  *
  * 器件事实（几何/时序/ID/参数页）由 devices/<family>.c 导出；FMC 总线后端
- * 在 nand_fmc.c 实现（见 src/nand/internal/nand_fmc.h，FC 不得 include）。
+ * 在 nand_fmc.c 实现（见 src/nand/nand_fmc.h，FC 不得 include）。
  */
 
 /*

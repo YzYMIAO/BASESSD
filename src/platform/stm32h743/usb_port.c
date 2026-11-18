@@ -71,7 +71,7 @@ BOOL usb_device_init(void)
                                                     : (arch == 2U)   ? "internal-dma"
                                                                      : "unknown";
 
-    (void)LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n", ghwcfg2, arch, arch_s);
+    LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n", ghwcfg2, arch, arch_s);
 
     return ok;
 }

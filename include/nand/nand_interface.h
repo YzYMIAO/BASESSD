@@ -11,7 +11,7 @@
  *   - bank ownership（nand_board.h）
  *   - ONFI 命令/时序常量（onfi_1_0.h）
  *
- * 私有实现头在 src/nand/internal/（FMC、target PHY 初始化），FC 不得 include。
+ * 私有实现头在 src/nand/（FMC、target PHY 初始化），FC 不得 include。
  * FTL 仍可单独 include nand_config.h / onfi_1_0.h 取几何/常量。
  */
 

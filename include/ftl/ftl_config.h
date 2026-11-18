@@ -841,4 +841,94 @@ static inline BYTE die_2_lun(BYTE die)
     return g_die_table[die].lun;
 }
 
+/* ── 全局 LBA / 拓扑路由 helper（HIL 与 FTL 共用）── */
+/**
+ * @brief (ch,ce,lun) → 紧凑 die 号（查扫描表的唯一漏斗）。
+ *
+ * @param ch/ce/lun 物理坐标
+ * @return 紧凑 die 号（0..DIE_MAX-1）；越界或不存在 ⇒ FTL_DIE_INVALID
+ */
+static inline BYTE chcelun_2_die(BYTE ch, BYTE ce, BYTE lun)
+{
+    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+    {
+        return FTL_DIE_INVALID;
+    }
+    return g_chcelun_table[ch][ce][lun];
+}
+
+/**
+ * @brief 拓扑 → 紧凑 die 号（查扫描表，不再用矩形公式）。
+ *
+ * @param topo 通道/片选/LUN 三维坐标
+ * @return 紧凑 die 号（0..DIE_MAX-1）；不存在 ⇒ FTL_DIE_INVALID
+ */
+static inline BYTE topo_2_die(ftl_topo_s topo)
+{
+    return chcelun_2_die(topo.ch, topo.ce, topo.lun);
+}
+
+/**
+ * @brief 全局 LBA → 全局 region。
+ *
+ * @param glba 全局 LBA
+ * @return 全局 region 序号（glba >> L2P_REGION_SHIFT）
+ */
+static inline DWORD lba_to_global_region(DWORD glba)
+{
+    return (glba >> L2P_REGION_SHIFT);
+}
+
+/**
+ * @brief 全局 LBA → 实例编号（die）路由。
+ *
+ * 路由键 = **region 序号**（lba >> L2P_REGION_SHIFT），不是页号也不是条目号：
+ * 一个 region（512 个 CW）整体落在同一个 die 上，region 的 flush 只碰一个实例。
+ * 再把 region 序号按设备维度**分解**：
+ * die = region % DIE_MAX
+ * ch/ce/lun = g_die_table[die]
+ * DIE_MAX = 1 时恒为 (0,0,0)。
+ *
+ * @param lba 全局 LBA
+ * @return 紧凑 die 号（region % DIE_MAX）
+ */
+static inline BYTE lba_2_die(QWORD lba)
+{
+    ASSERT(DIE_MAX != 0U);
+    return (BYTE)(((lba >> L2P_REGION_SHIFT) % DIE_MAX));
+}
+
+/**
+ * @brief 全局 LBA → 通道号。
+ *
+ * @param lba 全局 LBA
+ * @return 通道号
+ */
+static inline BYTE lba_2_ch(QWORD lba)
+{
+    return die_2_ch(lba_2_die(lba));
+}
+
+/**
+ * @brief 全局 LBA → 片选号。
+ *
+ * @param lba 全局 LBA
+ * @return 片选号
+ */
+static inline BYTE lba_2_ce(QWORD lba)
+{
+    return die_2_ce(lba_2_die(lba));
+}
+
+/**
+ * @brief 全局 LBA → LUN 号。
+ *
+ * @param lba 全局 LBA
+ * @return LUN 号
+ */
+static inline BYTE lba_2_lun(QWORD lba)
+{
+    return die_2_lun(lba_2_die(lba));
+}
+
 #endif /* FTL_CONFIG_H */

@@ -35,9 +35,8 @@
 
 #include "cli.h"
 #include "controller.h"
-#include "delay.h"      /* SysTick µs 分段计时（submit → complete） */
-#include "device/dcd.h" /* DCD_EVENT_*：tusb.h 不导出该枚举 */
-#include "ftl.h"
+#include "delay.h" /* SysTick µs 分段计时（submit → complete） */
+#include "ftl_capacity.h"
 #include "log.h"
 #include "ssd_compiler.h"
 #include "tusb.h"
@@ -52,6 +51,36 @@
 #define USB_SCSI_UNMAP                0x42U
 #define USB_SCSI_MODE_SELECT_6        0x15U
 #define USB_SCSI_MODE_SELECT_10       0x55U
+
+/* SCSI additional sense code / qualifier（SPC-4）。 */
+#define USB_SCSI_ASC_WRITE_ERROR                 (0x0CU)
+#define USB_SCSI_ASC_UNRECOVERED_READ_ERROR      (0x11U)
+#define USB_SCSI_ASC_LBA_OUT_OF_RANGE            (0x21U)
+#define USB_SCSI_ASC_INVALID_FIELD_IN_CDB        (0x24U)
+#define USB_SCSI_ASC_INVALID_FIELD_IN_PARAM_LIST (0x26U)
+#define USB_SCSI_ASC_NO_INFORMATION              (0x00U)
+#define USB_SCSI_ASCQ_NONE                       (0x00U)
+
+/* MODE SENSE page codes / lengths（SPC-4）：page = code + 长度字节 + 数据。 */
+#define USB_SCSI_MODE_PAGE_CACHING          (0x08U)
+#define USB_SCSI_MODE_PAGE_IE               (0x1CU)
+#define USB_SCSI_MODE_PAGE_ALL              (0x3FU)
+#define USB_SCSI_MODE_PAGE_CACHING_DATA_LEN (18U)
+#define USB_SCSI_MODE_PAGE_IE_DATA_LEN      (10U)
+#define USB_SCSI_MODE_PAGE_CACHING_LEN      (2U + USB_SCSI_MODE_PAGE_CACHING_DATA_LEN)
+#define USB_SCSI_MODE_PAGE_IE_LEN           (2U + USB_SCSI_MODE_PAGE_IE_DATA_LEN)
+
+/* SCSI UNMAP 参数表（SBC-4）：8B 头 + N×16B block descriptor；
+ * descriptor 内 LBA 占 8B（高/低各 4B），NLB 在偏移 8。 */
+#define USB_MSC_UNMAP_HDR_SIZE        (8U)
+#define USB_MSC_UNMAP_DESC_SIZE       (16U)
+#define USB_MSC_UNMAP_DESC_NLB_OFFSET (8U)
+
+/* WR chunk 直方图的 4 KiB 桶边界。 */
+#define USB_MSC_HIST_4K (4096U)
+
+/* 单 LUN 设备（SCSI LUN 字段恒为 0）。 */
+#define USB_MSC_LUN (0U)
 
 /* SCSI UNMAP 参数表最多收多少个 range；超过拒绝（ILLEGAL REQUEST）。
  * 16 × 16B = 256B，足够覆盖文件系统的常见 discard 批量。 */
@@ -107,33 +136,36 @@ typedef enum USB_MSC_SLOT_STATE_E
  */
 typedef struct USB_MSC_SLOT_S
 {
-    /* state / discard 会被 USB ISR（tud_event_hook_cb）改写，必须 volatile（H16）。 */
-    volatile usb_msc_slot_state_e state;
-    volatile BOOL                 discard; /* 主机已复位/拔出：完成后丢弃结果 */
-    BOOL                          is_write;
-    BOOL                          is_flush;                        /* SYNCHRONIZE CACHE：无数据阶段 */
-    BOOL                          is_unmap;                        /* SCSI UNMAP：多 range，逐段 TRIM */
-    BOOL                          ack_sent;                        /* 写 chunk 的流控回执已发（提交即回执） */
-    BOOL                          fua;                             /* WRITE(10) FUA：完成前不回执 */
-    BOOL                          unmap_flush_done;                /* UNMAP 先做一次内部 FLUSH 屏障 */
-    BOOL                          unmap_submitted;                 /* 当前 range 的 TRIM 已提交 */
-    BYTE                          unmap_index;                     /* 当前 range 下标 */
-    BYTE                          unmap_count;                     /* 本命令 range 数（≤ USB_MSC_UNMAP_MAX） */
-    DWORD                         unmap_lba[USB_MSC_UNMAP_MAX];    /* range 起始 LBA */
-    DWORD                         unmap_blocks[USB_MSC_UNMAP_MAX]; /* range 块数 */
-    DWORD                         order;                           /* 到达序：完成按序处理（前 chunk 错误先记录） */
-    DWORD                         lba;                             /* 本 chunk 起始 LBA */
-    DWORD                         offset;                          /* 命令内字节偏移（TinyUSB 分块） */
-    DWORD                         length;                          /* 本 chunk 字节数 */
-    void                         *usb_buffer;                      /* TinyUSB 端点缓冲（读回写目标；写只读它一次） */
-    DWORD                         submit_us;                       /* submit 起点（SysTick µs），完成时算设备侧墙钟 */
-    ssd_host_entry_s             *entry;                           /* HIL host queue entry（tag/owner/request） */
-    BYTE                         *bounce;                          /* 指向本槽的 16 KiB 缓冲（见 s_bounce*） */
+    /* 状态机只在主循环（usb_msc_task / 前端回调）推进；会话代次也在 TinyUSB 的
+     * mount/umount 回调（task 上下文）推进。没有 ISR 共享 ⇒ state / session_gen
+     * 都无需 volatile（H16）。 */
+    usb_msc_slot_state_e state;
+    DWORD                session_gen; /* 本槽所属的 USB 会话代次（分配时快照） */
+    BOOL                 is_write;
+    BOOL                 is_flush;                        /* SYNCHRONIZE CACHE：无数据阶段 */
+    BOOL                 is_unmap;                        /* SCSI UNMAP：多 range，逐段 TRIM */
+    BOOL                 ack_sent;                        /* 写 chunk 的流控回执已发（提交即回执） */
+    BOOL                 fua;                             /* WRITE(10) FUA：完成前不回执 */
+    BOOL                 unmap_flush_done;                /* UNMAP 先做一次内部 FLUSH 屏障 */
+    BOOL                 unmap_submitted;                 /* 当前 range 的 TRIM 已提交 */
+    BYTE                 unmap_index;                     /* 当前 range 下标 */
+    BYTE                 unmap_count;                     /* 本命令 range 数（≤ USB_MSC_UNMAP_MAX） */
+    DWORD                unmap_lba[USB_MSC_UNMAP_MAX];    /* range 起始 LBA */
+    DWORD                unmap_blocks[USB_MSC_UNMAP_MAX]; /* range 块数 */
+    DWORD                start_ms;                        /* 本 host 命令到达时刻（请求级 deadline） */
+    DWORD                order;                           /* 到达序：完成按序处理（前 chunk 错误先记录） */
+    DWORD                lba;                             /* 本 chunk 起始 LBA */
+    DWORD                offset;                          /* 命令内字节偏移（TinyUSB 分块） */
+    DWORD                length;                          /* 本 chunk 字节数 */
+    void                *usb_buffer;                      /* TinyUSB 端点缓冲（读回写目标；写只读它一次） */
+    DWORD                submit_us;                       /* submit 起点（SysTick µs），完成时算设备侧墙钟 */
+    ssd_host_entry_s    *entry;                           /* HIL host queue entry（tag/owner/request） */
+    BYTE                *bounce;                          /* 指向本槽的 16 KiB 缓冲（见 s_bounce*） */
 } usb_msc_slot_s;
 
 static usb_msc_slot_s s_slots[USB_MSC_SLOT_NUM];
 
-/* 两个 chunk 的 bounce：0 号留在 AXI .bss（与旧单缓冲一致），1 号放 DTCM。
+/* 两个 chunk 的 bounce：0 号在 AXI .bss，1 号放 DTCM。
  * 两块都只被 CPU 读写（DWC2 走 PIO，不经 DMA）⇒ DTCM 可用且最快；
  * SRAM4/SRAM12 在 UT 镜像里已被 FTL 表占满。 */
 static BYTE s_bounce0[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
@@ -148,14 +180,28 @@ static BOOL  s_cmd_fua; /* 当前 WRITE(10) 的 FUA 位（READ 恒 false） */
 
 static DWORD s_order_next; /* 下一条到达 chunk 的序 */
 
+/* USB 会话代次（session generation）：
+ *   · `tud_mount_cb` / `tud_umount_cb`（TinyUSB task 上下文）各推进一次；
+ *   · `usb_msc_task` / `usb_msc_slot_alloc` 消费代次，统一退役 WAIT_GATE 槽、
+ *     撤销 stale FLUSH、给 in-flight 数据/UNMAP 槽打 stale 标记。
+ * 为什么以 mount/umount 为界：USB bus reset 必然导致重新枚举与 SET_CONFIGURATION，
+ * `tud_mount_cb` 在 class 命令之前执行；unplug 走 `tud_umount_cb`。因此所有 slot
+ * 状态转移都发生在 task 上下文，ISR 不参与应用状态机（H16 / H18）。
+ * 代次不等即「旧会话」；`s_session_gen_seen` 只由主循环写。 */
+static DWORD s_session_gen;
+static DWORD s_session_gen_seen; /* 主循环已应用到的代次 */
+
 /* 已提前回执的写 chunk 后来失败（volatile write cache）：留到下一条命令上报一次。 */
 static BOOL s_deferred_write_error;
+
+/* 消费会话代次（定义在 slot 辅助之后；deferred 错误入口需要先调用它）。 */
+static void usb_msc_session_apply(void);
 
 /**
  * @brief 取走 deferred 写错误（有则本次命令失败并带准确 sense）。
  *
  * 在承载错误的那条命令上设置 MEDIUM ERROR / WRITE ERROR (0x0C/0x00)；
- * TinyUSB 侧已打补丁：应用设置过 sense 时不再用默认 NOT READY/0x3A 覆盖。
+ * TinyUSB 侧补丁：应用设置过 sense 时，不用默认 NOT READY/0x3A 覆盖。
  *
  * @param lun SCSI LUN（0）
  * @return true = 上一条已回执的写有失败；本次命令应失败（并已清除标志）
@@ -163,13 +209,16 @@ static BOOL s_deferred_write_error;
  */
 static BOOL usb_msc_take_deferred_error(BYTE lun)
 {
+    /* 先消费会话代次：新会话必须在读 deferred 之前清掉旧会话的错误。 */
+    usb_msc_session_apply();
+
     /* FTL 侧的迟到结论优先：早回执后写组在页编程完成时就报 OK，
      * FAIL_CACHE 要晚一条命令才到 ⇒ 那个结论只存在于 FTL 的粘性错误里。 */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         if (ftl_take_deferred_error(g_ctrl.ftl[die]) == true)
         {
-            (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0CU, 0x00U);
+            (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, USB_SCSI_ASC_WRITE_ERROR, USB_SCSI_ASCQ_NONE);
             LOGW("[USB ] deferred write error (FTL) — fail the next command\r\n");
             return true;
         }
@@ -181,7 +230,7 @@ static BOOL usb_msc_take_deferred_error(BYTE lun)
     }
 
     s_deferred_write_error = false;
-    (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0CU, 0x00U);
+    (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, USB_SCSI_ASC_WRITE_ERROR, USB_SCSI_ASCQ_NONE);
     LOGW("[USB ] deferred write error — fail the next command (volatile write cache)\r\n");
     return true;
 }
@@ -196,7 +245,7 @@ static BOOL usb_msc_take_deferred_error(BYTE lun)
  */
 void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, BOOL fua)
 {
-    if (lun == 0U)
+    if (lun == USB_MSC_LUN)
     {
         s_cmd_lba    = lba;
         s_cmd_blocks = block_count;
@@ -272,7 +321,7 @@ static void usb_msc_note_write(DWORD bufsize)
     {
         s_wr_hist.le_block++;
     }
-    else if (bufsize <= 4096U)
+    else if (bufsize <= USB_MSC_HIST_4K)
     {
         s_wr_hist.le_4k++;
     }
@@ -288,7 +337,6 @@ static void usb_msc_note_write(DWORD bufsize)
 
 /**
  * @brief 打印 USB 写分块与延迟统计（诊断）
- *
  */
 void usb_msc_io_stats_print(void)
 {
@@ -332,8 +380,11 @@ void usb_msc_init(void)
     s_slots[1].bounce      = s_bounce1;
     s_cmd_lba              = 0U;
     s_cmd_blocks           = 0U;
+    s_cmd_fua              = false;
     s_order_next           = 0U;
     s_deferred_write_error = false;
+    s_session_gen          = 0U;
+    s_session_gen_seen     = 0U;
 }
 
 /**
@@ -398,19 +449,81 @@ static void usb_msc_slot_release(usb_msc_slot_s *slot)
 }
 
 /**
- * @brief 认领空闲槽或回收 WAIT_GATE 数据槽
+ * @brief 消费会话代次：在主循环上下文退役 stale 槽
  *
- * @param is_write true = WRITE
- * @param lba 起始 LBA
- * @param need_bounce 是否需要 bounce 槽
+ * 代次由 tud_mount_cb / tud_umount_cb（TinyUSB task 上下文）推进；本函数把
+ * 旧会话落到 slot 状态机：
+ *   · WAIT_GATE：尚未提交，直接归还（无 controller 请求）。会话结束时 mscd_reset
+ *     已清/将清 pending_io，**不能**在这里配 async_io_done，否则可能误配给新会话
+ *     的新命令；
+ *   · IN_FLIGHT FLUSH：撤销 controller 的 flush job 后立即归还（控制槽不长期占用）；
+ *   · IN_FLIGHT 数据 / UNMAP：保留到 FTL 完成；完成路径按 session_gen 判 stale 并丢弃。
+ */
+static void usb_msc_session_apply(void)
+{
+    const DWORD gen = s_session_gen;
+
+    if (gen == s_session_gen_seen)
+    {
+        return;
+    }
+    s_session_gen_seen = gen;
+
+    /* 新会话不继承旧会话的 deferred error：否则重新枚举后的第一条命令会被
+     * 上一个 host 会话的失败误伤。FTL 的粘性错误是设备级状态，也在这里清。 */
+    s_deferred_write_error = false;
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        (void)ftl_take_deferred_error(g_ctrl.ftl[die]);
+    }
+
+    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
+    {
+        usb_msc_slot_s *slot = &s_slots[i];
+
+        if (slot->state == USB_MSC_SLOT_FREE)
+        {
+            continue;
+        }
+
+        if (slot->state == USB_MSC_SLOT_WAIT_GATE)
+        {
+            usb_msc_slot_release(slot);
+            continue;
+        }
+
+        if ((slot->is_flush != false) && (g_ctrl.flush_req == usb_msc_slot_request(slot)))
+        {
+            /* 旧会话的 FLUSH：撤销 job 后立即释放；in-flight 数据槽不能取消，
+             * 等 FTL 完成。 */
+            ssd_controller_cancel_flush(&g_ctrl);
+            usb_msc_slot_release(slot);
+        }
+    }
+}
+
+/**
+ * @brief 认领空闲槽
+ *
+ * WAIT_GATE 槽属于当前正在等 gate 的命令，BOT 串行下不会同时出现第二条命令；
+ * 因此这里只认领 FREE 槽，绝不复用 WAIT_GATE（避免丢弃一条已返回 ASYNC 的命令）。
+ *
+ * @param need_bounce 是否需要带 bounce 的数据槽
  * @return 槽指针；NULL = 无可用
  */
-static usb_msc_slot_s *usb_msc_slot_alloc(BOOL is_write, DWORD lba, BOOL need_bounce)
+static usb_msc_slot_s *usb_msc_slot_alloc(BOOL need_bounce)
 {
+    /* 先消费会话代次：新命令绝不能复用旧会话的槽。 */
+    usb_msc_session_apply();
+
     /* FLUSH/UNMAP 优先用控制槽，避免占用数据槽。 */
     if ((need_bounce == false) && (s_slots[USB_MSC_SLOT_CONTROL].state == USB_MSC_SLOT_FREE))
     {
-        return &s_slots[USB_MSC_SLOT_CONTROL];
+        usb_msc_slot_s *slot = &s_slots[USB_MSC_SLOT_CONTROL];
+
+        ASSERT(slot->entry == NULL);
+        slot->session_gen = s_session_gen;
+        return slot;
     }
 
     for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
@@ -419,31 +532,8 @@ static usb_msc_slot_s *usb_msc_slot_alloc(BOOL is_write, DWORD lba, BOOL need_bo
 
         if ((slot->state == USB_MSC_SLOT_FREE) && ((need_bounce == false) || (slot->bounce != NULL)))
         {
-            return slot;
-        }
-    }
-
-    if (need_bounce == false)
-    {
-        return NULL; /* FLUSH 不回收数据命令的 WAIT_GATE 槽 */
-    }
-
-    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
-    {
-        usb_msc_slot_s *slot = &s_slots[i];
-
-        if ((slot->state == USB_MSC_SLOT_WAIT_GATE) && (slot->bounce != NULL) && (slot->is_unmap == false) && ((slot->is_write != is_write) || (slot->lba != lba)))
-        {
-            // bounce 是 init 时绑定的固定缓冲（0 号 AXI、1 号 DTCM）：清零槽时必须保留，
-            // 否则后续 memcpy 写 NULL。
-            BYTE *bounce = slot->bounce;
-
-            if (slot->entry != NULL)
-            {
-                ssd_host_queue_free(&g_ctrl.host_queue, slot->entry);
-            }
-            memset(slot, 0, sizeof(*slot));
-            slot->bounce = bounce;
+            ASSERT(slot->entry == NULL);
+            slot->session_gen = s_session_gen;
             return slot;
         }
     }
@@ -452,12 +542,40 @@ static usb_msc_slot_s *usb_msc_slot_alloc(BOOL is_write, DWORD lba, BOOL need_bo
 }
 
 /**
+ * @brief 把 controller 拒绝映射成 SCSI sense
+ *
+ * @param st   controller 返回状态（非 OK / BUSY）
+ * @param slot 槽（决定 MEDIUM ERROR 的 ASC：写/FLUSH 0x0C，读 0x11）
+ */
+static void usb_msc_note_submit_error(ssd_status_e st, const usb_msc_slot_s *slot)
+{
+    switch (st)
+    {
+        case SSD_STATUS_INVALID_ARGUMENT:
+        case SSD_STATUS_NOT_SUPPORTED:
+            (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_INVALID_FIELD_IN_CDB, USB_SCSI_ASCQ_NONE); /* invalid field in CDB */
+            break;
+        case SSD_STATUS_TIMEOUT:
+            (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_ABORTED_COMMAND, USB_SCSI_ASC_NO_INFORMATION, USB_SCSI_ASCQ_NONE);
+            break;
+        case SSD_STATUS_NO_SPACE:
+        case SSD_STATUS_IO_ERROR:
+        default:
+            (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, (slot->is_write != false) || (slot->is_flush != false) ? USB_SCSI_ASC_WRITE_ERROR : USB_SCSI_ASC_UNRECOVERED_READ_ERROR, USB_SCSI_ASCQ_NONE);
+            break;
+    }
+}
+
+/**
  * @brief 把槽请求提交给 controller（分配 host entry）
  *
  * @param slot 槽
- * @return true = 已受理
+ * @return SSD_STATUS_OK    已受理
+ *         SSD_STATUS_BUSY  host queue 满 / controller 忙（瞬态，调用者可保留
+ *                          WAIT_GATE 重试）
+ *         其他             controller 拒绝（调用者应映射 sense 并失败）
  */
-static BOOL usb_msc_slot_submit(usb_msc_slot_s *slot)
+static ssd_status_e usb_msc_slot_submit(usb_msc_slot_s *slot)
 {
     DWORD start_us = 0U;
 
@@ -466,7 +584,7 @@ static BOOL usb_msc_slot_submit(usb_msc_slot_s *slot)
         slot->entry = ssd_host_queue_alloc(&g_ctrl.host_queue, SSD_HOST_OWNER_USB);
         if (slot->entry == NULL)
         {
-            return false; /* host queue 满 */
+            return SSD_STATUS_BUSY; /* host queue 满 */
         }
     }
 
@@ -501,14 +619,61 @@ static BOOL usb_msc_slot_submit(usb_msc_slot_s *slot)
         }
     }
 
-    if (ssd_controller_submit(&g_ctrl, request) != SSD_STATUS_OK)
+    const ssd_status_e st = ssd_controller_submit(&g_ctrl, request);
+
+    if (st != SSD_STATUS_OK)
     {
-        return false;
+        return st;
     }
 
     slot->submit_us = start_us;
     slot->state     = USB_MSC_SLOT_IN_FLIGHT;
-    return true;
+    return SSD_STATUS_OK;
+}
+
+/**
+ * @brief 标记 host 命令超时并回执一次
+ *
+ * 只解开 host 侧；slot/entry 由调用者按 `ssd_controller_request_reclaimable()`
+ * 判断何时可释放（FTL / controller 可能仍引用 request）。
+ *
+ * @param slot 槽
+ */
+static void usb_msc_slot_timeout(usb_msc_slot_s *slot)
+{
+    ssd_req_s *request = (slot->entry != NULL) ? usb_msc_slot_request(slot) : NULL;
+
+    if (request != NULL)
+    {
+        ssd_request_mark_timeout(request);
+
+        /* READ/WRITE：中止本请求在所有 FTL 实例上的组；在飞命令完成后组仍会
+         * 回调（HIL timed_out 分支只递减 sub_remaining）。 */
+        if ((request->opcode == SSD_REQUEST_READ) || (request->opcode == SSD_REQUEST_WRITE))
+        {
+            ftl_abort_request(request);
+        }
+
+        /* FLUSH 可直接撤销；UNMAP 的内部 FLUSH 同理。TRIM 由 controller
+         * 在下一轮 service 里 ftl_trim_abort。 */
+        const BOOL flush_in_flight = (slot->is_flush != false) || ((slot->is_unmap != false) && (slot->unmap_submitted != false) && (slot->unmap_flush_done == false));
+
+        if ((flush_in_flight != false) && (g_ctrl.flush_req == request))
+        {
+            ssd_controller_cancel_flush(&g_ctrl);
+        }
+    }
+
+    /* 读 / FUA / FLUSH / UNMAP 还没回执：回一次 ABORTED COMMAND；
+     * 非 FUA 写已提前回执，host 侧不再发错误（迟到失败走 deferred）。 */
+    if (slot->ack_sent == false)
+    {
+        (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_ABORTED_COMMAND, USB_SCSI_ASC_NO_INFORMATION, USB_SCSI_ASCQ_NONE);
+        (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
+        slot->ack_sent = true;
+    }
+
+    LOGW("[USB ] request timeout op=%s lba=%lu len=%lu\r\n", (slot->is_flush != false) ? "flush" : ((slot->is_unmap != false) ? "unmap" : (slot->is_write ? "write" : "read")), slot->lba, slot->length);
 }
 
 /* ── SCSI UNMAP（多 range 逻辑擦除）──
@@ -527,9 +692,18 @@ static BOOL usb_msc_slot_submit(usb_msc_slot_s *slot)
  */
 static usb_msc_slot_s *usb_msc_slot_alloc_unmap(void)
 {
+    usb_msc_session_apply();
+
     usb_msc_slot_s *slot = &s_slots[USB_MSC_SLOT_CONTROL];
 
-    return (slot->state == USB_MSC_SLOT_FREE) ? slot : NULL;
+    if (slot->state != USB_MSC_SLOT_FREE)
+    {
+        return NULL;
+    }
+
+    ASSERT(slot->entry == NULL);
+    slot->session_gen = s_session_gen;
+    return slot;
 }
 
 /**
@@ -681,7 +855,7 @@ static BOOL usb_msc_unmap_start(usb_msc_slot_s *slot)
  */
 static void usb_msc_unmap_fail(usb_msc_slot_s *slot, BYTE asc)
 {
-    (void)tud_msc_set_sense(0U, SCSI_SENSE_MEDIUM_ERROR, asc, 0x00U);
+    (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, asc, USB_SCSI_ASCQ_NONE);
     usb_msc_slot_release(slot);
     (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
 }
@@ -693,11 +867,43 @@ static void usb_msc_unmap_fail(usb_msc_slot_s *slot, BYTE asc)
  */
 static void usb_msc_unmap_step(usb_msc_slot_s *slot)
 {
-    /* 总线复位/拔出：在飞的 TRIM 自然完成后再释放槽；不要在复位后调
-     * async_io_done（TinyUSB 已清 pending_io）。 */
-    if ((slot->discard == true) || !tud_ready())
+    const BOOL session_stale = (slot->session_gen != s_session_gen);
+
+    /* 会话结束/未就绪：内部 FLUSH 可立即撤销并释放；已提交的 TRIM 必须等
+     * controller 清掉 trim_req（提前释放会让 trim_req 悬垂）。
+     * 不要在会话结束后调 async_io_done（TinyUSB 的 mscd_reset 已清 pending_io）。 */
+    if ((session_stale != false) || !tud_ready())
     {
+        if ((session_stale != false) && (slot->unmap_submitted != false) && (slot->unmap_flush_done == false) && (g_ctrl.flush_req == usb_msc_slot_request(slot)))
+        {
+            ssd_controller_cancel_flush(&g_ctrl);
+            usb_msc_slot_release(slot);
+            return;
+        }
+
         if ((slot->unmap_submitted == false) || (ssd_controller_is_complete(usb_msc_slot_request(slot)) != 0U))
+        {
+            usb_msc_slot_release(slot);
+        }
+        return;
+    }
+
+    ssd_req_s *request = usb_msc_slot_request(slot);
+
+    if ((request->timed_out == false) && (slot->start_ms != 0U) && (ssd_request_expired(slot->start_ms, delay_now_ms()) != false))
+    {
+        usb_msc_slot_timeout(slot);
+    }
+    else if ((request->timed_out != false) && (slot->ack_sent == false))
+    {
+        usb_msc_slot_timeout(slot);
+    }
+
+    if (request->timed_out != false)
+    {
+        /* host 回执已发；内部 FLUSH 已撤销。TRIM 仍可能在飞（trim_req 指向本请求），
+         * 等 controller 清掉后再释放，避免 trim_req 悬垂。 */
+        if (ssd_controller_request_reclaimable(&g_ctrl, request) != false)
         {
             usb_msc_slot_release(slot);
         }
@@ -710,7 +916,7 @@ static void usb_msc_unmap_step(usb_msc_slot_s *slot)
 
         if (!ok)
         {
-            usb_msc_unmap_fail(slot, 0x0CU); /* WRITE ERROR */
+            usb_msc_unmap_fail(slot, USB_SCSI_ASC_WRITE_ERROR); /* WRITE ERROR */
         }
         return;
     }
@@ -722,7 +928,7 @@ static void usb_msc_unmap_step(usb_msc_slot_s *slot)
 
     if (usb_msc_slot_request(slot)->completion_status != SSD_STATUS_OK)
     {
-        usb_msc_unmap_fail(slot, 0x0CU);
+        usb_msc_unmap_fail(slot, USB_SCSI_ASC_WRITE_ERROR);
         return;
     }
 
@@ -746,7 +952,7 @@ static void usb_msc_unmap_step(usb_msc_slot_s *slot)
 
     if (!usb_msc_unmap_submit_next(slot))
     {
-        usb_msc_unmap_fail(slot, 0x0CU);
+        usb_msc_unmap_fail(slot, USB_SCSI_ASC_WRITE_ERROR);
     }
 }
 
@@ -760,7 +966,7 @@ static void usb_msc_unmap_step(usb_msc_slot_s *slot)
  */
 static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
 {
-    if ((lun != 0U) || (param == NULL) || (length < 8U))
+    if ((lun != USB_MSC_LUN) || (param == NULL) || (length < USB_MSC_UNMAP_HDR_SIZE))
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -769,17 +975,17 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
     const WORD desc_len = usb_msc_be16(param + 2U);
 
     /* UNMAP block descriptor（SBC-4）：8B LBA + 4B NLB + 4B reserved = 16B。 */
-    if ((data_len < 8U) || (data_len > length) || (desc_len != (WORD)(data_len - 8U)) || ((desc_len % 16U) != 0U))
+    if ((data_len < USB_MSC_UNMAP_HDR_SIZE) || (data_len > length) || (desc_len != (WORD)(data_len - USB_MSC_UNMAP_HDR_SIZE)) || ((desc_len % USB_MSC_UNMAP_DESC_SIZE) != 0U))
     {
-        (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x26U, 0x00U); /* invalid field in parameter list */
+        (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_INVALID_FIELD_IN_PARAM_LIST, USB_SCSI_ASCQ_NONE); /* invalid field in parameter list */
         return TUD_MSC_RET_ERROR;
     }
 
-    const DWORD count = (DWORD)desc_len / 16U;
+    const DWORD count = (DWORD)desc_len / USB_MSC_UNMAP_DESC_SIZE;
 
     if (count > USB_MSC_UNMAP_MAX)
     {
-        (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x26U, 0x00U);
+        (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_INVALID_FIELD_IN_PARAM_LIST, USB_SCSI_ASCQ_NONE);
         return TUD_MSC_RET_ERROR;
     }
 
@@ -789,10 +995,10 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
 
     for (DWORD i = 0U; i < count; i++)
     {
-        const BYTE *desc   = param + 8U + (i * 16U);
+        const BYTE *desc   = param + USB_MSC_UNMAP_HDR_SIZE + (i * USB_MSC_UNMAP_DESC_SIZE);
         const DWORD lba_hi = usb_msc_be32(desc);
         const DWORD lba_lo = usb_msc_be32(desc + 4U);
-        const DWORD blocks = usb_msc_be32(desc + 8U);
+        const DWORD blocks = usb_msc_be32(desc + USB_MSC_UNMAP_DESC_NLB_OFFSET);
 
         if (blocks == 0U)
         {
@@ -801,7 +1007,7 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
         /* 本仓 host LBA 是 32 位：高 32 位非零必然越界。 */
         if ((lba_hi != 0U) || !ssd_controller_lba_range_ok(&g_ctrl, lba_lo, blocks))
         {
-            (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x21U, 0x00U); /* LBA out of range */
+            (void)tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_LBA_OUT_OF_RANGE, USB_SCSI_ASCQ_NONE); /* LBA out of range */
             return TUD_MSC_RET_ERROR;
         }
         stored++;
@@ -823,13 +1029,15 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
         return TUD_MSC_RET_ERROR;
     }
 
+    slot->start_ms = delay_now_ms();
+
     DWORD store = 0U;
 
     for (DWORD i = 0U; i < count; i++)
     {
-        const BYTE *desc   = param + 8U + (i * 16U);
+        const BYTE *desc   = param + USB_MSC_UNMAP_HDR_SIZE + (i * USB_MSC_UNMAP_DESC_SIZE);
         const DWORD lba_lo = usb_msc_be32(desc + 4U);
-        const DWORD blocks = usb_msc_be32(desc + 8U);
+        const DWORD blocks = usb_msc_be32(desc + USB_MSC_UNMAP_DESC_NLB_OFFSET);
 
         if (blocks == 0U)
         {
@@ -848,7 +1056,6 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
     slot->offset           = 0U;
     slot->length           = 0U;
     slot->usb_buffer       = NULL;
-    slot->discard          = false;
     slot->ack_sent         = false;
     slot->unmap_count      = (BYTE)stored;
     slot->unmap_index      = 0U;
@@ -860,7 +1067,7 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
     {
         if (!usb_msc_unmap_start(slot))
         {
-            (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0CU, 0x00U);
+            (void)tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, USB_SCSI_ASC_WRITE_ERROR, USB_SCSI_ASCQ_NONE);
             usb_msc_slot_release(slot);
             return TUD_MSC_RET_ERROR;
         }
@@ -890,6 +1097,8 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
      * length 是主机数据阶段长度，先做边界检查再交给内部（H29/H31）。 */
     if ((offset != 0U) || (length == 0U) || (length > (DWORD)CFG_TUD_MSC_EP_BUFSIZE) || ((length % USB_MSC_BLOCK_SIZE) != 0U))
     {
+        /* 参数非法 ≠ 介质不存在：报 ILLEGAL REQUEST / invalid field (0x24)。 */
+        (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_INVALID_FIELD_IN_CDB, USB_SCSI_ASCQ_NONE);
         return TUD_MSC_RET_ERROR;
     }
 
@@ -897,6 +1106,8 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
 
     if (!ssd_controller_lba_range_ok(&g_ctrl, lba, blocks))
     {
+        /* LBA 越界：ILLEGAL REQUEST / LBA out of range (0x21)，与 UNMAP 同口径。 */
+        (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_ILLEGAL_REQUEST, USB_SCSI_ASC_LBA_OUT_OF_RANGE, USB_SCSI_ASCQ_NONE);
         return TUD_MSC_RET_ERROR;
     }
 
@@ -906,7 +1117,7 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
         return TUD_MSC_RET_ERROR;
     }
 
-    usb_msc_slot_s *slot = usb_msc_slot_alloc(is_write, lba, true);
+    usb_msc_slot_s *slot = usb_msc_slot_alloc(true);
 
     if (slot == NULL)
     {
@@ -916,6 +1127,7 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
         return TUD_MSC_RET_BUSY;
     }
 
+    slot->start_ms   = delay_now_ms();
     slot->is_write   = is_write;
     slot->is_flush   = false;
     slot->is_unmap   = false;
@@ -925,7 +1137,6 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
     slot->offset     = offset;
     slot->length     = length;
     slot->usb_buffer = buffer;
-    slot->discard    = false;
     slot->ack_sent   = false;
 
     if (is_write)
@@ -939,10 +1150,19 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
 
     if (!cli_host_busy())
     {
-        if (!usb_msc_slot_submit(slot))
+        const ssd_status_e st = usb_msc_slot_submit(slot);
+
+        if (st != SSD_STATUS_OK)
         {
+            if (st != SSD_STATUS_BUSY)
+            {
+                usb_msc_note_submit_error(st, slot);
+            }
+
             usb_msc_slot_release(slot);
-            return TUD_MSC_RET_ERROR;
+
+            // 瞬态（host queue 满）交给协议栈重投；其余按 sense 失败。
+            return (st == SSD_STATUS_BUSY) ? TUD_MSC_RET_BUSY : TUD_MSC_RET_ERROR;
         }
     }
 
@@ -967,22 +1187,26 @@ static void usb_msc_slot_complete(usb_msc_slot_s *slot)
 
     /* 主机已复位/拔出/挂起：TinyUSB 可能已把端点缓冲用于新的 CBW/枚举，
      * 此时既不能回写数据，也不能再依赖 pending_io。 */
-    if ((slot->discard == true) || !tud_ready())
+    const BOOL session_stale = (slot->session_gen != s_session_gen);
+
+    if ((session_stale != false) || !tud_ready())
     {
         /* 只有 FLUSH 槽才需要撤销 controller 的 flush job；数据槽被丢弃时不能
          * 顺手取消别人（可能是总线复位后新命令）的 FLUSH。 */
-        if (slot->is_flush)
+        if ((session_stale != false) && (slot->is_flush != false) && (g_ctrl.flush_req == usb_msc_slot_request(slot)))
         {
             ssd_controller_cancel_flush(&g_ctrl);
         }
 
-        const BOOL ack_owed = (slot->ack_sent == false);
+        /* 会话结束由 TinyUSB 的 mscd_reset 清 pending_io：不能再配对
+         * async_io_done，否则可能误配给新会话的新命令。只有「未就绪但会话未变」
+         * （挂起）才需要与之前的 ASYNC 返回配对。 */
+        const BOOL ack_owed = (session_stale == false) && (slot->ack_sent == false);
 
         usb_msc_slot_release(slot);
 
         if (ack_owed)
         {
-            /* 与之前的 ASYNC 返回配对；主机已复位时 pending_io 已清，调用无副作用。 */
             (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
         }
         return;
@@ -997,11 +1221,13 @@ static void usb_msc_slot_complete(usb_msc_slot_s *slot)
             usb_msc_note_latency(slot->submit_us);
             if (ok == false)
             {
-                (void)tud_msc_set_sense(0U, SCSI_SENSE_MEDIUM_ERROR, 0x0CU, 0x00U);
+                (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, USB_SCSI_ASC_WRITE_ERROR, USB_SCSI_ASCQ_NONE);
             }
 
+            const DWORD length = slot->length;
+
             usb_msc_slot_release(slot);
-            (void)tud_msc_async_io_done((ok == true) ? (int32_t)slot->length : TUD_MSC_RET_ERROR, false);
+            (void)tud_msc_async_io_done((ok == true) ? (int32_t)length : TUD_MSC_RET_ERROR, false);
             return;
         }
 
@@ -1021,6 +1247,13 @@ static void usb_msc_slot_complete(usb_msc_slot_s *slot)
     {
         memcpy(slot->usb_buffer, slot->bounce, slot->length);
     }
+    else if (ok == false)
+    {
+        /* 写失败已在上面分支处理（FUA 直接 sense / 非 FUA deferred）。这里只剩
+         * READ 与 FLUSH：不设 sense 时 TinyUSB 会默认报 NOT READY/0x3A
+         * （MEDIUM NOT PRESENT），主机会误判介质不存在。 */
+        (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, (slot->is_flush != false) ? USB_SCSI_ASC_WRITE_ERROR : USB_SCSI_ASC_UNRECOVERED_READ_ERROR, USB_SCSI_ASCQ_NONE);
+    }
 
     /* FLUSH 无数据阶段：成功回执为 0（TinyUSB 侧已按命令类型区分 0 的语义）。 */
     const int32_t transfer_result = (ok == true) ? (slot->is_flush ? 0 : (int32_t)slot->length) : TUD_MSC_RET_ERROR;
@@ -1036,6 +1269,10 @@ static void usb_msc_slot_complete(usb_msc_slot_s *slot)
 void usb_msc_task(void)
 {
     DWORD done_mask = 0U;
+
+    /* 先消费会话代次：退役旧会话的 WAIT_GATE / stale FLUSH。
+     * 之后本函数看到的所有槽都属于当前会话。 */
+    usb_msc_session_apply();
 
     /* 按到达序处理槽位：先回收先到达的槽、按序记录 deferred 错误。回执已在提交时发出，
      * 这里的顺序只影响缓冲回收与错误归因，不影响 CSW 时机（volatile write cache）。 */
@@ -1065,10 +1302,21 @@ void usb_msc_task(void)
 
         if (slot->state == USB_MSC_SLOT_WAIT_GATE)
         {
+            if ((slot->start_ms != 0U) && (ssd_request_expired(slot->start_ms, delay_now_ms()) != false))
+            {
+                usb_msc_slot_timeout(slot);
+
+                if ((slot->entry == NULL) || (ssd_controller_request_reclaimable(&g_ctrl, usb_msc_slot_request(slot)) != false))
+                {
+                    usb_msc_slot_release(slot);
+                }
+                continue;
+            }
+
             if (!tud_ready())
             {
-                /* 等待期间主机复位/拔出：命令作废。仍要回一次 async_io_done 与
-                 * 之前的 TUD_MSC_RET_ASYNC 配对（pending_io 已清时它返回 false）。 */
+                /* 挂起（会话未变）：命令作废，并配对之前的 ASYNC 返回。
+                 * 会话结束的 WAIT_GATE 已在 apply 里退役，不会走到这里。 */
                 usb_msc_slot_release(slot);
                 (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
                 continue;
@@ -1083,15 +1331,25 @@ void usb_msc_task(void)
             {
                 if (!usb_msc_unmap_start(slot))
                 {
-                    usb_msc_unmap_fail(slot, 0x0CU);
+                    usb_msc_unmap_fail(slot, USB_SCSI_ASC_WRITE_ERROR);
                     continue;
                 }
             }
-            else if (!usb_msc_slot_submit(slot))
+            else
             {
-                usb_msc_slot_release(slot);
-                (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
-                continue;
+                const ssd_status_e st = usb_msc_slot_submit(slot);
+
+                if (st == SSD_STATUS_BUSY)
+                {
+                    continue; /* 瞬态：保留 WAIT_GATE，下一轮重试 */
+                }
+                if (st != SSD_STATUS_OK)
+                {
+                    usb_msc_note_submit_error(st, slot);
+                    usb_msc_slot_release(slot);
+                    (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
+                    continue;
+                }
             }
         }
 
@@ -1102,17 +1360,51 @@ void usb_msc_task(void)
             continue;
         }
 
+        ssd_req_s *request  = usb_msc_slot_request(slot);
+        const BOOL complete = (ssd_controller_is_complete(request) != 0U);
+
+        /* 请求级 deadline：只对未完成、未超时的槽判超时。 */
+        if ((complete == false) && (request->timed_out == false) && (slot->start_ms != 0U) && (ssd_request_expired(slot->start_ms, delay_now_ms()) != false))
+        {
+            usb_msc_slot_timeout(slot);
+        }
+        else if ((request->timed_out != false) && (slot->ack_sent == false))
+        {
+            /* controller 可能先于 USB task 判超时（FLUSH/TRIM）：补一次 host 回执。 */
+            usb_msc_slot_timeout(slot);
+        }
+
+        if (request->timed_out != false)
+        {
+            if (ssd_controller_request_reclaimable(&g_ctrl, request) != false)
+            {
+                /* 迟到的非 FUA 写失败仍要在下一条命令上报，避免静默丢错误。
+                 * TIMEOUT 是 abort 的组状态，不是介质失败，不能报成 deferred。 */
+                if ((slot->is_write != false) && (slot->is_flush == false) && (slot->fua == false) && (request->completion_status != SSD_STATUS_OK) && (request->completion_status != SSD_STATUS_TIMEOUT))
+                {
+                    s_deferred_write_error = true;
+                }
+
+                usb_msc_slot_release(slot);
+            }
+            continue;
+        }
+
         /* 写 chunk（含末 chunk）：提交后立即回流控回执（volatile write cache）。
          * 设备 cache 序列因此可以跨 host 命令连续；槽位的 FTL 完成只用于回收缓冲
-         * 与 deferred error 记录。 */
-        if ((slot->is_write == true) && (slot->is_flush == false) && (slot->ack_sent == false) && (slot->fua == false))
+         * 与 deferred error 记录。
+         * ⚠ 旧会话的槽不能回执：async_io_done 是单飞行配对，复位后可能误配给
+         * 新会话正在等完成的命令。 */
+        const BOOL session_stale = (slot->session_gen != s_session_gen);
+
+        if ((session_stale == false) && (slot->is_write == true) && (slot->is_flush == false) && (slot->ack_sent == false) && (slot->fua == false))
         {
             slot->ack_sent = true;
             usb_msc_note_latency(slot->submit_us); /* 主机可见延迟 = submit → 回执 */
             (void)tud_msc_async_io_done((int32_t)slot->length, false);
         }
 
-        if (!ssd_controller_is_complete(usb_msc_slot_request(slot)))
+        if (complete == false)
         {
             continue;
         }
@@ -1136,7 +1428,7 @@ void usb_msc_task(void)
 int32_t tud_msc_read10_cb(BYTE lun, DWORD lba, DWORD offset, void *buffer, DWORD bufsize)
 {
     /* 单 LUN 设备：lun 是主机输入，越界直接拒绝（H29/H31）。 */
-    if (lun != 0U)
+    if (lun != USB_MSC_LUN)
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -1162,7 +1454,7 @@ int32_t tud_msc_read10_cb(BYTE lun, DWORD lba, DWORD offset, void *buffer, DWORD
  */
 int32_t tud_msc_write10_cb(BYTE lun, DWORD lba, DWORD offset, BYTE *buffer, DWORD bufsize)
 {
-    if (lun != 0U)
+    if (lun != USB_MSC_LUN)
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -1193,7 +1485,7 @@ void tud_msc_inquiry_cb(BYTE lun, BYTE vendor_id[8], BYTE product_id[16], BYTE p
     static const BYTE product_id_src[16] = {'N', 'A', 'N', 'D', ' ', 'U', '-', 'D', 'I', 'S', 'K', ' ', ' ', ' ', ' ', ' '};
     static const BYTE product_rev_src[4] = {'1', '.', '0', '0'};
 
-    if (lun != 0U)
+    if (lun != USB_MSC_LUN)
     {
         return;
     }
@@ -1211,7 +1503,7 @@ void tud_msc_inquiry_cb(BYTE lun, BYTE vendor_id[8], BYTE product_id[16], BYTE p
  */
 BOOL tud_msc_test_unit_ready_cb(BYTE lun)
 {
-    return (lun == 0U) && usb_msc_ready();
+    return (lun == USB_MSC_LUN) && usb_msc_ready();
 }
 
 /**
@@ -1223,7 +1515,7 @@ BOOL tud_msc_test_unit_ready_cb(BYTE lun)
  */
 void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
 {
-    if (lun != 0U)
+    if (lun != USB_MSC_LUN)
     {
         *block_count = 0U;
         *block_size  = 0U;
@@ -1243,11 +1535,11 @@ void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
  */
 static DWORD usb_msc_mode_page_caching(BYTE *page)
 {
-    page[0] = 0x08U;
-    page[1] = 0x12U;
-    memset(&page[2], 0, 18U);
+    page[0] = USB_SCSI_MODE_PAGE_CACHING;
+    page[1] = USB_SCSI_MODE_PAGE_CACHING_DATA_LEN;
+    memset(&page[2], 0, USB_SCSI_MODE_PAGE_CACHING_DATA_LEN);
     page[2] = 0x00U; /* WCE = 0 */
-    return 20U;
+    return USB_SCSI_MODE_PAGE_CACHING_LEN;
 }
 
 /**
@@ -1257,10 +1549,10 @@ static DWORD usb_msc_mode_page_caching(BYTE *page)
  */
 static DWORD usb_msc_mode_page_ie(BYTE *page)
 {
-    page[0] = 0x1CU;
-    page[1] = 0x0AU;
-    memset(&page[2], 0, 10U);
-    return 12U;
+    page[0] = USB_SCSI_MODE_PAGE_IE;
+    page[1] = USB_SCSI_MODE_PAGE_IE_DATA_LEN;
+    memset(&page[2], 0, USB_SCSI_MODE_PAGE_IE_DATA_LEN);
+    return USB_SCSI_MODE_PAGE_IE_LEN;
 }
 
 /**
@@ -1281,7 +1573,7 @@ static DWORD usb_msc_mode_page_ie(BYTE *page)
  */
 int32_t tud_msc_mode_sense_cb(BYTE lun, BYTE page, BYTE *buffer, WORD bufsize)
 {
-    if ((lun != 0U) || (buffer == NULL) || (bufsize < 4U))
+    if ((lun != USB_MSC_LUN) || (buffer == NULL) || (bufsize < 4U))
     {
         return 0;
     }
@@ -1290,13 +1582,13 @@ int32_t tud_msc_mode_sense_cb(BYTE lun, BYTE page, BYTE *buffer, WORD bufsize)
 
     switch (page)
     {
-        case 0x08U:
+        case USB_SCSI_MODE_PAGE_CACHING:
             n = usb_msc_mode_page_caching(&buffer[4]);
             break;
-        case 0x1CU:
+        case USB_SCSI_MODE_PAGE_IE:
             n = usb_msc_mode_page_ie(&buffer[4]);
             break;
-        case 0x3FU:
+        case USB_SCSI_MODE_PAGE_ALL:
             n += usb_msc_mode_page_caching(&buffer[4 + n]);
             n += usb_msc_mode_page_ie(&buffer[4 + n]);
             break;
@@ -1331,7 +1623,7 @@ BOOL tud_msc_start_stop_cb(BYTE lun, BYTE power_condition, BOOL start, BOOL load
     (void)start;
     (void)load_eject;
 
-    return lun == 0U;
+    return lun == USB_MSC_LUN;
 }
 
 /**
@@ -1342,7 +1634,7 @@ BOOL tud_msc_start_stop_cb(BYTE lun, BYTE power_condition, BOOL start, BOOL load
  */
 BOOL tud_msc_is_writable_cb(BYTE lun)
 {
-    return lun == 0U;
+    return lun == USB_MSC_LUN;
 }
 
 /**
@@ -1356,7 +1648,7 @@ BOOL tud_msc_is_writable_cb(BYTE lun)
  */
 int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bufsize)
 {
-    if (lun != 0U)
+    if (lun != USB_MSC_LUN)
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -1402,13 +1694,14 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
         return TUD_MSC_RET_ERROR;
     }
 
-    usb_msc_slot_s *slot = usb_msc_slot_alloc(false, 0U, false);
+    usb_msc_slot_s *slot = usb_msc_slot_alloc(false);
 
     if (slot == NULL)
     {
         return TUD_MSC_RET_ERROR;
     }
 
+    slot->start_ms   = delay_now_ms();
     slot->is_write   = false;
     slot->is_flush   = true;
     slot->is_unmap   = false;
@@ -1417,7 +1710,6 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
     slot->offset     = 0U;
     slot->length     = 0U;
     slot->usb_buffer = NULL;
-    slot->discard    = false;
     slot->ack_sent   = false;
     slot->state      = USB_MSC_SLOT_WAIT_GATE;
 
@@ -1425,10 +1717,20 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
     {
         /* CLI 占用 host gate：同 READ/WRITE 先排队，由 usb_msc_task 提交。 */
     }
-    else if (!usb_msc_slot_submit(slot))
+    else
     {
-        usb_msc_slot_release(slot);
-        return TUD_MSC_RET_ERROR;
+        const ssd_status_e st = usb_msc_slot_submit(slot);
+
+        if (st == SSD_STATUS_BUSY)
+        {
+            /* 瞬态：保留 WAIT_GATE，usb_msc_task 下一轮重试。 */
+        }
+        else if (st != SSD_STATUS_OK)
+        {
+            usb_msc_note_submit_error(st, slot);
+            usb_msc_slot_release(slot);
+            return TUD_MSC_RET_ERROR;
+        }
     }
 
     return TUD_MSC_RET_ASYNC;
@@ -1443,36 +1745,6 @@ void tud_msc_read10_complete_cb(BYTE lun)
 {
     /* READ 的数据与状态已在 usb_msc_task() 里交付；完成回调不需要额外动作。 */
     (void)lun;
-}
-
-/**
- * @brief TinyUSB 总线事件钩子：标记在飞请求 discard
- *
- * @param rhport USB root port
- * @param eventid DCD 事件号
- * @param in_isr 是否 ISR 上下文
- */
-void tud_event_hook_cb(BYTE rhport, DWORD eventid, BOOL in_isr)
-{
-    (void)rhport;
-    (void)in_isr;
-
-    if ((eventid != DCD_EVENT_BUS_RESET_START) && (eventid != DCD_EVENT_BUS_RESET_END) && (eventid != DCD_EVENT_UNPLUGGED))
-    {
-        return;
-    }
-
-    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
-    {
-        if (s_slots[i].state == USB_MSC_SLOT_IN_FLIGHT)
-        {
-            s_slots[i].discard = true;
-        }
-        else if (s_slots[i].state == USB_MSC_SLOT_WAIT_GATE)
-        {
-            s_slots[i].state = USB_MSC_SLOT_FREE;
-        }
-    }
 }
 
 /**
@@ -1597,10 +1869,13 @@ WORD const *tud_descriptor_string_cb(BYTE index, WORD langid)
 
 /**
  * @brief 挂载回调：打印容量
- *
  */
 void tud_mount_cb(void)
 {
+    /* 新会话开始：旧会话的 slot 全部作废（bus reset 后必然重新枚举到这里，
+     * 且发生在任何 class 命令之前）。 */
+    s_session_gen++;
+
     /* 容量按 SCSI 坐标打印：sector 数 × 每 sector 字节。 */
     const DWORD block_count = ssd_controller_host_lba_max(&g_ctrl);
 
@@ -1608,29 +1883,13 @@ void tud_mount_cb(void)
 }
 
 /**
- * @brief 卸载回调：丢弃 WAIT_GATE / 标记 IN_FLIGHT discard
- *
+ * @brief 卸载回调：推进会话代次（收尾在 usb_msc_task）
  */
 void tud_umount_cb(void)
 {
-    /*
-     * 主机拔出/复位：在飞请求仍由 FTL 完成。**不能直接清状态** ——
-     *   - WAIT_GATE 尚未提交，可以安全丢弃；
-     *   - IN_FLIGHT 的 `ssd_req_s` 仍被 FTL 完成回调引用，提前 memset
-     *     会让下一次 submit 覆盖在飞请求的子请求计数；只能标记 discard，
-     *     等 usb_msc_task() 看到完成后收尾。
-     */
-    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
-    {
-        if (s_slots[i].state == USB_MSC_SLOT_WAIT_GATE)
-        {
-            s_slots[i].state = USB_MSC_SLOT_FREE;
-        }
-        else if (s_slots[i].state == USB_MSC_SLOT_IN_FLIGHT)
-        {
-            s_slots[i].discard = true;
-        }
-    }
+    /* 会话结束：只推进代次；WAIT_GATE 退役、IN_FLIGHT 丢弃、stale FLUSH 撤销
+     * 全部由 usb_msc_task 在主循环按代次完成。 */
+    s_session_gen++;
 
     LOGI("[USB ] unmounted\r\n");
 }

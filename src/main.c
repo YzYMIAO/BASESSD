@@ -3,46 +3,40 @@
  *
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
- *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
- *          → fc_boot_arm() → platform_register
+ *   main() → pc_sample_init → sys_init → timer_timx_int_init → cli_init
+ *          → log sink 绑定 → stack_guard_init → 上电报告
+ *          → fc_init → fc_nand_init → fc_boot_arm → platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
- *          → usb_msc_init → usb_device_init
+ *          → usb_msc_init → usb_device_init → timer_scheduler_init
+ *          → ftl_timer_tasks_start
  *          → while(1) { stack_guard_check; cli_service_poll; ssd_runtime_pump; }
  * 关键约定：
  *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
  *     因此 fc_init 失败时 NAND 根本不会被初始化。
  *   - FC/NAND/FTL 的推进**全部在非 ISR 上下文**：没有任何中断调用
  *     fc_service / ftl_service，superloop 是唯一驱动源。
- *   - NAND 启动命令（RESET/READ_ID）在 nand_init 内绕过命令队列，
+ *   - NAND 启动命令（RESET/READ_ID）在 fc_nand_init 内绕过命令队列，
  *     直连 FC 的同步 UOP 引擎。
- * 生命周期：ssd_ftl_boot_all 成功 → g_ftl_ready=1，主循环由 fc_service
- *          切换到 ftl_service（后者内部会先跑 fc_service）。
+ * 生命周期：ssd_ftl_boot_all 成功（controller 进入 READY）后，主循环由
+ *          fc_service 切换到 ftl_service（后者内部会先跑 fc_service）。
  * 文件结构：日志 sink 绑定 → FTL 实例存储 → ssd_ftl_boot(_all) → main()。
  * 流程图见 docs/design/fc_nand_design.md §22（图 15）/ §23（图 18）。
  * ====================================================================== */
 
-#include "allocator.h"
-#include "bst.h"
 #include "cli.h"
 #include "controller.h"
 #include "delay.h"
-#include "fc_interface.h"
-#include "ftl.h"
-#include "ftl_op.h"
-#include "log.h"
-#include "metadata.h"
-#include "power_failure_recovery.h"
-#include "runtime.h"
-#include "stack_guard.h"
-#include "timer.h"
-// #include "led.h"
 #include "fault.h"
-#include "mpu.h"
+#include "fc_interface.h"
+#include "ftl_interface.h"
+#include "log.h"
 #include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"
-#include "ssd_compiler.h"
+#include "runtime.h"
+#include "stack_guard.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"
+#include "timer.h"
 #include "usart.h"
 #include "usb.h"
 #include "usb_msc.h"
@@ -50,19 +44,18 @@
 
 #include <string.h>
 
-/* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 33
 /* 全部构建档当前均为 0：健康域尚未覆盖所有最长路径。长同步操作已有
  * 显式喂狗点 storage_wdg_kick()（ftl_sync_submit_wait 的自旋泵），启用前仍需上板
  * 验证满盘 GC / format 等路径不会触发 30 s 复位。 */
 #define SSD_WATCHDOG_ENABLE 0U
 
-/* 编译期字符串化：把版本号宏拼进开机横幅。 */
-#define SSD_STR_(x) #x
-#define SSD_STR(x)  SSD_STR_(x)
+/* TIM6 是 timer 调度器的 1 ms 心跳：APB1=100 MHz 且 APB1 分频=2 ⇒ 内核时钟
+ * 200 MHz，arr=1000-1、psc=200-1。系统毫秒时基由 SysTick/HAL tick 提供。 */
+#define SSD_TIM6_ARR (1000U - 1U)
+#define SSD_TIM6_PSC (200U - 1U)
 
 /* 开机横幅（编译期常量；构建日期/时间由编译器注入 __DATE__ / __TIME__）。 */
-static const char g_boot_banner[] = "=========== soft_ssd rev=" SSD_STR(SSD_FIRMWARE_DEBUG_REVISION) " built " __DATE__ " " __TIME__ " ===========\r\n";
+static const char g_boot_banner[] = "=========== soft_ssd built " __DATE__ " " __TIME__ " ===========\r\n";
 
 #if (SSD_WATCHDOG_ENABLE != 0U)
 /*
@@ -86,26 +79,15 @@ static const storage_wdg_cfg_s g_storage_wdg_config = {
 };
 #endif
 
-/* Common logging stays transport-neutral; this BSP binds it to the non-blocking UART queue. */
-static DWORD stm32_uart_log_sink(const char *message, DWORD length)
-{
-    return uart_log_write(message, length);
-}
-
-static BOOL stm32_uart_log_flush_sink(DWORD timeout_ms)
-{
-    return uart_log_flush(timeout_ms);
-}
-
 /*
  * 分区标题（裸行，不带 [INF] 前缀）：把开机日志按
  * system / nand / controller / ftl / console 分区，便于扫读。
  */
 static void boot_section(const char *name)
 {
-    (void)uart_log_write("--- ", 4U);
+    (void)uart_log_write("--- ", sizeof("--- ") - 1U);
     (void)uart_log_write(name, strlen(name));
-    (void)uart_log_write(" ---\r\n", 6U);
+    (void)uart_log_write(" ---\r\n", sizeof(" ---\r\n") - 1U);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -128,27 +110,47 @@ static void boot_report_banner(void)
     {
         const DWORD pc_count = pc_sample_count(true);
         const DWORD pc_rate  = pc_sample_rate(true);
+        const DWORD span_ms  = pc_count * pc_rate;
 
-        LOGI("[PC  ] previous-run PC samples available (%lu samples, rate=%lu, span=%lums): type 'pc' to dump\r\n", pc_count, pc_rate, pc_count * pc_rate);
+        LOGI("[PC  ] previous-run PC samples available (%lu samples, rate=%lu, span=%lums): type 'pc' to dump\r\n", pc_count, pc_rate, span_ms);
     }
 }
 
 /* system 分区：系统身份（CPU/时钟 / Cache / MPU 区域数）+ 时钟树（全部 HAL 实读）。 */
 static void boot_report_system(void)
 {
+    boot_section("system");
+
+    const DWORD cpu_mhz  = delay_port_core_clock_hz() / 1000000U;
+    const DWORD hclk_mhz = delay_port_hclk_hz() / 1000000U;
+    const char *icache   = (get_icache_sta() != 0U) ? "on" : "off";
+    const char *dcache   = (get_dcache_sta() != 0U) ? "on" : "off";
+    const DWORD mpu_num  = sys_mpu_region_count();
+
+    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n", cpu_mhz, hclk_mhz, icache, dcache, mpu_num);
+
     sys_clock_tree_s clk;
 
-    boot_section("system");
-    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n", (delay_port_core_clock_hz() / 1000000U), (delay_port_hclk_hz() / 1000000U), (get_icache_sta() != 0U) ? "on" : "off", (get_dcache_sta() != 0U) ? "on" : "off", sys_mpu_region_count());
-    /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
     sys_clock_tree_get(&clk);
+
+    const DWORD sys_mhz   = clk.sysclk_hz / 1000000U;
+    const DWORD tree_hclk = clk.hclk_hz / 1000000U;
+    const DWORD pclk1_mhz = clk.pclk1_hz / 1000000U;
+    const DWORD pclk2_mhz = clk.pclk2_hz / 1000000U;
+    const DWORD pclk3_mhz = clk.pclk3_hz / 1000000U;
+    const DWORD pclk4_mhz = clk.pclk4_hz / 1000000U;
+    const DWORD fmc_mhz   = clk.fmc_hz / 1000000U;
+    const DWORD qspi_mhz  = clk.qspi_hz / 1000000U;
+    const DWORD uart_mhz  = clk.uart_hz / 1000000U;
+
+    /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
     if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n", (clk.sysclk_hz / 1000000U), (clk.hclk_hz / 1000000U), (clk.pclk1_hz / 1000000U), (clk.fmc_hz / 1000000U), (clk.qspi_hz / 1000000U), (clk.uart_hz / 1000000U));
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, fmc_mhz, qspi_mhz, uart_mhz);
     }
     else
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n", (clk.sysclk_hz / 1000000U), (clk.hclk_hz / 1000000U), (clk.pclk1_hz / 1000000U), (clk.pclk2_hz / 1000000U), (clk.pclk3_hz / 1000000U), (clk.pclk4_hz / 1000000U), (clk.fmc_hz / 1000000U), (clk.qspi_hz / 1000000U), (clk.uart_hz / 1000000U));
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, pclk2_mhz, pclk3_mhz, pclk4_mhz, fmc_mhz, qspi_mhz, uart_mhz);
     }
 }
 
@@ -168,98 +170,22 @@ static void boot_report_console(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * FTL 实例（v0.37 上线；P2-5 起**自持表**）
+ * FTL 实例
  *
- * 表所有权：BST / free / op / spare / closed 五个大数组由**本文件各自独立定义**，
- *   并决定落哪个域；FTL 只收 `ftl_table_refs_s`（五个指针，见 ftl/allocator.h）。
- *   每张表一个对象 ⇒ 可以单独换内存域。下面的 _Static_assert 只核对本文件可见的
- *   FTL 对象；FC 命令池等跨文件 DTCM 对象的完整容量由 linker 的 `.dtcm_data` ASSERT 核对。
+ * workspace 所有权在 FTL 模块内部：每块由拥有它的模块定义并选定内存域
+ * （allocator→SRAM12、checkpoint→SRAM3、metadata→SRAM4、journal/wbuf→DTCM、
+ * migrate/rr/L2P cache→AXI）。本文件只持有 controller 路由表，通过
+ * ftl_instance_get() 取不透明句柄，不引用任何 FTL 内部类型。
  *
- * SRAM 布局（阶段 C：描述符 + 内存域散列）：
- *   DTCM（.dtcm_data）：g_ftl 描述符 + g_ftl_wbuf + g_ftl_journal
- *                       + FC 命令池 + NAND dispatch 队列 + BCH 静态表
- *                       （CPU-only 热数据；DMA 不可访问，故 FC buffer/
- *                       NAND page buffer 不进来）
- *   AXI_RAM（.bss）：g_ftl_migrate / g_ftl_rr_page_scratch（装配挂载块）
- *                    + g_l2p_cache（共享热 cache）+ CLI 写缓冲 + 其它 .bss
- *   AXI_NOCACHE（.noncacheable_buffer）：FC buffer pool / return staging /
- *                    NAND 页缓冲（页缓冲放 DTCM 会破坏 multi-plane program，
- *                    板端已实测）
- *   SRAM1+SRAM2（.sram12_data）：g_ftl_blocks / g_ftl_free_blocks / g_ftl_op_blocks /
- *                                g_ftl_spare_blocks / g_ftl_closed_sb_list（各自独立对象）
- *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[]
- *   SRAM4（.sram4_data）：g_ftl_md 33,752 B（与 BCH 交换；TCM 之前本就在此域）
- *
- * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
- * 装配挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
- * 单 die：`.dtcm_data` 67,832B / ITCM 61,296B（release）、62,064B（debug）；
- * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
- * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
- * 完整容量由 linker ASSERT 核对。栈预留按历史实测 5,448B + 余量取 20KB。
+ * 各域容量由 linker ASSERT 兜底（.dtcm_data / .sram12_data / .sram3_data /
+ * .sram4_data 与 AXI_RAM 区域溢出均为链接错误）。
  * ══════════════════════════════════════════════════════════════════ */
-/* DTCM 热数据定义在 ftl.c；链接脚本按整个目标文件放 .dtcm_data。 */
-extern ftl_ctx_s g_ftl[FTL_DIE_MAX];
 
-/* 共享 L2P cache：同一 (ch,ce) 下所有 LUN 共用一份（阶段 B）。
- * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
-static l2p_cache_s g_l2p_cache[CH_NUM][CE_NUM];
+ssd_ctl_s g_ctrl; /* controller 路由表（按 compact die 号收 FTL 实例指针）；非 static：
+                   * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
 
-/* per-instance 大数组（阶段 C）：由 ftl_storage_s 绑定到描述符。
- * 五张表**各自独立定义**，每张可单独换 section/内存域；当前全部落 SRAM12，
- * 将来要挪某一张只改该行的 section 宏，不动别的表。 */
-static bst_block_s    g_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD           g_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD           g_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
-static WORD           g_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
-static super_block_s  g_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
-static cp_handle_s    g_ftl_checkpoint_handle[FTL_DIE_MAX] SRAM3_DATA;
-extern l2p_jrn_s      g_ftl_journal[FTL_DIE_MAX];
-extern md_dir_cache_s g_ftl_md[FTL_DIE_MAX];
-
-/* 装配挂载：三块大状态挂 storage 指针；wbuf 落 DTCM，migrate/rr 留 AXI。
- * 挂指针**不减少总 RAM**，只让 ftl_ctx_s 变小、放置可控、handle 形态统一。 */
-static mig_handle_s g_ftl_migrate[FTL_DIE_MAX];
-extern wb_handle_s  g_ftl_wbuf[FTL_DIE_MAX];
-static BYTE         g_ftl_rr_page_scratch[FTL_DIE_MAX][FTL_READ_USER_SIZE];
-
-ssd_ctl_s g_ctrl;       /* controller 路由表（按 compact die 号收 g_ftl 指针）；非 static：
-                         * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
-static int g_ftl_ready; /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
-
-/* ── 编译期内存预算（各域）──
- * AXI_RAM 是硬上限（linker: __AXI_RAM_SIZE = 0x60000 = 384KB）；
- * D2/D3 SRAM 的容量与 linker 的 SRAM12/SRAM3/SRAM4 区域一一对应。 */
-#define BOARD_AXI_RAM_SIZE       (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
-#define BOARD_SRAM12_SIZE        (256U * 1024U) /* SRAM1+SRAM2 合并区域 */
-#define BOARD_SRAM3_SIZE         (32U * 1024U)
-#define BOARD_SRAM4_SIZE         (64U * 1024U)
-#define BOARD_DTCM_SIZE          (128U * 1024U)
-#define BOARD_DTCM_STACK_RESERVE (20U * 1024U) /* 历史实测 5,448 B（v0.75）；当前版本待复测 */
-#define FTL_AXI_RAM_RESERVED     (20U * 1024U) /* 非 FTL 自有对象的保守 AXI .bss 预留 */
-
-/* g_wr_buf 从 .sram2_data 迁入 AXI .bss（SRAM12 留给 tables），显式计入预算。 */
-#define CLI_AXI_RAM_RESERVED (16U * 1024U)
-
-_Static_assert(sizeof(g_ftl_migrate) + sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) + FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE, "FTL 挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
-/* FTL 自有 DTCM 对象；fc.o / fc_bch_engine.o / nand_dispatch.o 的 DTCM 对象在
- * 其它 TU，其总量不在此断言内，由 linker 的
- * `.dtcm_data + .noinit + 20KB <= DTCM` 兜底。 */
-_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_wbuf) + sizeof(g_ftl_journal) + BOARD_DTCM_STACK_RESERVE <= BOARD_DTCM_SIZE, "DTCM 热数据 + stack/heap 预留超出 DTCM");
-_Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
-_Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) + sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
-_Static_assert(sizeof(g_ftl_checkpoint_handle) <= BOARD_SRAM3_SIZE, "cp_handle 超出 SRAM3");
-
-/* die → 实例指针表（类型匹配 ssd_controller_init / ftl_op_route_set 形参）。
- * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
- * -Wincompatible-pointer-types 恒报），此处显式构造。 */
+/* die → 实例指针表（ssd_controller_init 的输入；实例句柄由 FTL 提供）。 */
 static ftl_ctx_s *g_ftl_ptrs[FTL_DIE_MAX];
-
-/* die → FTL 实例：g_ftl 与路由表都按 compact die 号索引。 */
-static ftl_ctx_s *ssd_ftl_die_get(BYTE die)
-{
-    ASSERT(die < DIE_MAX);
-    return &g_ftl[die];
-}
 
 static ftl_topo_s ssd_ftl_die_topo(BYTE die)
 {
@@ -272,102 +198,35 @@ static ftl_topo_s ssd_ftl_die_topo(BYTE die)
     return topo;
 }
 
-/* 共享 L2P cache 的 owner 端口表（docs §4.7）：每 die 一份，只暴露
- * {die, metadata_dir, alloc, topo}，不把整个 ftl_context 交给 l2p_cache。
- * 由 ssd_ftl_boot 在 ftl_init 之后填充；生命周期覆盖全程。 */
-static l2p_owner_s g_l2p_owner[FTL_DIE_MAX];
-
-/*
- * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
+/**
+ * @brief 初始化单个 die 的 FTL 实例
  *
- * 共享 cache 的 load/flush/commit 用它找 owner die。die 坐标按
- * global_region % DIE_MAX 计算（与 lba_2_die 同一公式，避免第二套坐标）。
- */
-static const l2p_owner_s *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
-{
-    (void)ctx;
-
-    ASSERT(DIE_MAX != 0U);
-
-    const BYTE die = (BYTE)(global_region % DIE_MAX);
-
-    ASSERT(die < DIE_MAX);
-    ASSERT(g_l2p_owner[die].metadata_dir != NULL);
-
-    return &g_l2p_owner[die];
-}
-
-/*
- * ssd_ftl_boot - 初始化单个 die 的 FTL 实例
- *
- * 顺序：ftl_init（内部含 bbt_init 标坏块）→ 遍历 BST 非坏块回填 free pool
- *       （alc_init 不填 free pool、bbt 只标坏块——不回填则首次写失败）
- *       → pfr_boot_recovery → 日志。
+ * 顺序：ftl_instance_init（装配自持 workspace + ftl_init，内部含 bbt_init 标坏块
+ *       → 遍历 BST 非坏块回填 free pool，alc_init 不填 free pool、bbt 只标坏块）
+ *       → 格式判定 / 格式化 → ftl_boot_recover → 日志。
  *
  * @param die 紧凑 die 号（g_die_table 给出对应 (ch,ce,lun)）
- * @return 0 成功，负值失败
+ * @return FTL_OK 成功；FTL_ERROR 初始化 / 介质判定 / 格式化 / 恢复失败
  */
 static ftl_status_e ssd_ftl_boot(BYTE die)
 {
-    ASSERT(die < DIE_MAX);
+    ftl_ctx_s *ftl = ftl_instance_get(die);
 
-    ftl_ctx_s        *ftl = &g_ftl[die];
-    alc_s            *alloc;
-    pfr_boot_result_s result;
+    const ftl_topo_s topo = ssd_ftl_die_topo(die);
+    const BYTE       ch   = topo.ch;
+    const BYTE       ce   = topo.ce;
+    const BYTE       lun  = topo.lun;
 
-    ftl_topo_s topo;
-    topo.ch  = die_2_ch(die);
-    topo.ce  = die_2_ce(die);
-    topo.lun = die_2_lun(die);
-
-    const BYTE ch  = topo.ch;
-    const BYTE ce  = topo.ce;
-    const BYTE lun = topo.lun;
-
-    ftl_table_refs_s refs;
-    refs.blocks         = g_ftl_blocks[die];
-    refs.free_blocks    = g_ftl_free_blocks[die];
-    refs.op_blocks      = g_ftl_op_blocks[die];
-    refs.spare_blocks   = g_ftl_spare_blocks[die];
-    refs.closed_sb_list = g_ftl_closed_sb_list[die];
-
-    ftl_storage_s storage;
-    storage.table_refs      = &refs;
-    storage.metadata_dir    = &g_ftl_md[die];
-    storage.journal         = &g_ftl_journal[die];
-    storage.cp_handle       = &g_ftl_checkpoint_handle[die];
-    storage.migrate         = &g_ftl_migrate[die];
-    storage.wbuf            = &g_ftl_wbuf[die];
-    storage.rr_page_scratch = g_ftl_rr_page_scratch[die];
-
-    if (ftl_init(ftl, topo, &g_l2p_cache[ch][ce], &storage) != FTL_OK)
+    /* workspace 由 FTL 模块自持；本函数只触发装配（含 owner 登记与 debug 契约自检）。 */
+    if (ftl_instance_init(die) != FTL_OK)
     {
         LOGE("[FTL ] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
     }
 
-    alloc = &ftl->alloc;
-
-    /* L2P owner 端口：必须在任何 cache 访问（含下面的格式化/恢复）之前就绪。 */
-    l2p_owner_s owner;
-
-    owner.die          = die;
-    owner.metadata_dir = ftl->metadata_dir;
-    owner.alloc        = &ftl->alloc;
-    owner.topo         = ftl->topo;
-    owner.journal      = ftl->journal; /* WAL 水位闸门 */
-    g_l2p_owner[die]   = owner;
-
-    /* debug-only：初始化契约自检。必须在 owner 登记之后、任何 cache 访问之前——
-     * 校验全部句柄/端口绑定、topology 副本与 owner/route 身份。
-     * release 下连调用都不生成，保证零运行期开销。 */
-#if !defined(NDEBUG)
-    ftl_contract_audit(ftl);
-#endif
-
     /* 坏块落点统计（开机基线，**早于格式判定**）：boot 可能因介质读不通而中止，
      * 先打一行保证失败时也能看到 BAD 分布。 */
-    pfr_boot_log_bad_areas(ftl);
+    ftl_boot_log_bad_areas(ftl);
 
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
@@ -388,7 +247,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
     LOGW("[FTL ] FORCE_FORMAT_ON_BOOT: full-chip write/read verify enabled\r\n");
 #    endif
 #else
-    if (pfr_media_check_format(ftl, &need_format) != FTL_OK)
+    if (ftl_boot_check_format(ftl, &need_format) != FTL_OK)
     {
         LOGE("[FTL ] CP media unreadable — refuse to format ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
@@ -398,210 +257,50 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
     if (need_format)
     {
         LOGW("[FTL ] media blank / layout mismatch -> format\r\n");
-        if (pfr_media_format(ftl, format_verify) != FTL_OK)
+        if (ftl_boot_format(ftl, format_verify) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
             return FTL_ERROR;
         }
     }
 
-    /* 池回填 / full metadata rebuild / 块元数据快照恢复全部在 pfr_boot_recovery 内完成：
-     *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
+    /* 池回填 / full metadata rebuild / 块元数据快照恢复全部在 ftl_boot_recover 内完成：
+     *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不做几何 carve）；
      *   · 无快照 / 快照损坏 ⇒ full metadata rebuild → carve。
      * ⚠ **full metadata rebuild 必须先于 carve**（full metadata rebuild 认领写过的块，carve 只把 state==NONE 的块入池）；
      *   carve 也**不能**在块元数据快照恢复之前做——否则池条目会重复。 */
-    if (pfr_boot_recovery(ftl, &result) != FTL_OK)
+    ftl_boot_report_s result;
+
+    if (ftl_boot_recover(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
     }
 
-    LOGI("[FTL ] instance ch=%hhu ce=%hhu lun=%hhu free=%hu op=%hu spare=%hu\r\n", ch, ce, lun, alloc->free_count, alc_pool_sum_counts(alloc->op_count, PLANE_NUM), alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
+    ftl_boot_log_usage(ftl);
 
-    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n", (int)result.boot_type, result.cp_sequence, result.journal_entries, result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback"));
+    const char *boot_bit = result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback");
 
-    return 0;
+    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n", result.boot_type, result.cp_sequence, result.journal_entries, boot_bit);
+
+    return FTL_OK;
 }
 
-/* 主机容量 = 编译期映射上限 − 实际坏块占用的 LBA。
+/* 完整初始化 FTL：全实例 boot + controller 绑定（controller READY 才切 ftl_service）
  *
- * 本仓自拟的容量折中：主流量产 SSD 的容量在出厂固定，坏块由 OP 吸收、不在
- * 运行期缩容；本仓的二手片没有可信出厂坏块表，OP/Spare 也只会越用越少，
- * 容量口径（本仓自拟的动态折中；主流量产是固定容量 + OP 吸收坏块）：
- *   1. 每 plane 只统计**好**的、非固定元数据的块（`>= FTL_METADATA_AREA_END`）；
- *   2. 扣掉 OP 与 Spare 两个预留池的目标块数；
- *   3. **取 plane 最小值**再乘 PLANE_NUM —— Super Block 需要每 plane 一块，
- *      跨 plane 求和会超卖；
- *   4. **取实例最小值** —— LBA 按 region 路由，最紧的实例先耗尽，跨实例求和同样超卖。
- * 扣减粒度：每个物理块 = PAGES_PER_BLOCK × CW_NUM 个 512B LBA。
- * ⚠ 只在开机算一次：同一会话内 runtime 新增坏块由 Spare/OP 吸收，不改已枚举容量；
- *   下一次开机按当时的 BAD 集重算。
- */
-static DWORD ssd_ftl_host_lba_max(void)
-{
-    DWORD cap_blocks = UINT32_MAX;
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        const ftl_ctx_s *ftl              = ssd_ftl_die_get(die);
-        const ftl_topo_s topo             = ssd_ftl_die_topo(die);
-        DWORD            plane_usable_min = UINT32_MAX;
-
-        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-        {
-            DWORD good = 0U;
-
-            for (WORD block = FTL_METADATA_AREA_END; block < BLOCKS_PER_PLANE; block++)
-            {
-                const WORD g = ftl_gblock(plane, block);
-
-                if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
-                {
-                    good++;
-                }
-            }
-
-            const DWORD reserved = FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE;
-            const DWORD usable   = (good > reserved) ? (good - reserved) : 0U;
-
-            if (usable < plane_usable_min)
-            {
-                plane_usable_min = usable;
-            }
-        }
-
-        const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
-
-        LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", topo.ch, topo.ce, topo.lun, plane_usable_min, instance_blocks);
-
-        if (instance_blocks < cap_blocks)
-        {
-            cap_blocks = instance_blocks;
-        }
-    }
-
-    if (cap_blocks == UINT32_MAX)
-    {
-        cap_blocks = 0U;
-    }
-
-    QWORD lba = (QWORD)cap_blocks * PAGES_PER_BLOCK * CW_NUM * DIE_MAX;
-
-    if (lba > FTL_LBA_MAX)
-    {
-        lba = FTL_LBA_MAX;
-    }
-    if (lba == 0U)
-    {
-        lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
-    }
-
-    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n", cap_blocks, lba, (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
-
-    return (DWORD)lba;
-}
-
-/* --------------------------------------------------------------------
- * ssd_ftl_stat_task - 周期性 [STAT] 一行摘要（timer 表每 10 s 调用）
- *
- *   只保留块分配/坏块/搬移状态；op/spare/cp/jrn/wr/dng/rrab/mode 等低频计数
- *   改由 `info` / `stat` 按需查看，避免长期占用 UART。
- *   逐事件日志只保留首次故障与状态变化（见 docs/design/common/fault_capture.md §7）。
- * -------------------------------------------------------------------- */
-static void ssd_ftl_stat_task(void *context, DWORD now_ms)
-{
-    (void)context;
-    (void)now_ms; /* TIM6 只负责调度；t= 是系统时间，读 SysTick。 */
-
-    if (g_ftl_ready == 0)
-    {
-        return;
-    }
-
-    const DWORD uptime_ms = delay_now_ms();
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        const ftl_ctx_s *ftl  = ssd_ftl_die_get(die);
-        const ftl_topo_s topo = ssd_ftl_die_topo(die);
-
-        LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, ((ftl->mig_handle->job.active != 0U) ? 1U : 0U), ((ftl->mig_handle->state.failure.paused != 0U) ? 1U : 0U), ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop);
-    }
-}
-
-/*
- * 后台周期节拍：只置 flag / 补充配额，不跑业务。
- *   - L2P 写回节拍（L2P_FLUSH_INTERVAL_MS）
- *   - CP T3 到期判定由 cp_state.next_t3_ms 直接承担（cp_handle 内比较）
- *   - BBT 起新 job 节拍（BBT_FLUSH_INTERVAL_MS）
- * 真正的执行仍由 bg_scheduler 在 ftl_service 的固定位置完成；must-run 与在飞推进
- * 不受这些 flag 影响。
- */
-_Static_assert(BG_TOKEN_INTERVAL_MS == L2P_FLUSH_INTERVAL_MS, "后台节拍与 token refill 周期必须一致");
-
-static void ssd_ftl_bg_tick_task(void *context, DWORD now_ms)
-{
-    (void)context;
-    (void)now_ms; /* TIM6 只负责唤醒；时间比较读 SysTick。 */
-
-    if (g_ftl_ready == 0U)
-    {
-        return;
-    }
-
-    static DWORD s_bbt_last_ms;
-    const DWORD  now     = delay_now_ms();
-    const BOOL   bbt_due = (s_bbt_last_ms == 0U) || ((now - s_bbt_last_ms) >= BBT_FLUSH_INTERVAL_MS);
-
-    if (bbt_due != false)
-    {
-        s_bbt_last_ms = now;
-    }
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        ftl_ctx_s *ftl = ssd_ftl_die_get(die);
-
-        bg_scheduler_refill(&ftl->bg);
-        ftl->l2p_flush_due = 1U;
-
-        if (bbt_due != false)
-        {
-            ftl->alloc.bbt.flush_due = 1U;
-        }
-    }
-}
-
-/* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
- *
- *   ① 建 g_ftl_ptrs die 指针表 + ftl_op_route_set —— **必须早于逐实例 boot**，
- *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_read_sync 抽完成表）。
- *   ② 逐 die boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
- *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
- *   ④ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
+ *   ① 拓扑建表 + 全局静态复位 + g_ftl_ptrs 预绑 + ftl_device_prepare ——
+ *      **必须早于逐实例 boot**，理由见函数内注释。
+ *   ② 逐 die boot —— 任一失败则 boot_ok=false，整体回退 fc_service。
+ *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪（READY）。
+ *   ④ 主循环按 controller READY 切换到 ftl_service。
  */
 static void ssd_ftl_boot_all(void)
 {
-    BYTE         ch;
-    BYTE         ce;
-    int          boot_ok = 1;
-    ssd_status_e ctrl_ret;
+    BOOL boot_ok = true;
 
-    /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
-     *    - ftl_op_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
-     *      ⚠ 它原在 ftl_init 里（逐实例调用）⇒ 实例 1 的 init 会抹掉实例 0 在飞的
-     *      ctx 登记与已设好的路由表；已移到此处。
-     *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
-     *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `pfr_boot_recovery`
-     *      （full metadata rebuild）会经 `l2p_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
-     *      抽完成表。此时若 route 仍为 NULL，`ftl_op_drain` 解析出的 ftl 为 NULL，
-     *      服务函数只 release 不推进状态 ⇒ job 永久卡死
-     *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
-     *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
-     *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
     /* ① 拓扑建表：板级扫描结果（g_nand_targets，armed 之前已填）→ 紧凑 die 表。
      * 必须在逐实例 boot 之前；纯 RAM，不碰硬件。
-     * Phase 2b：L2P/容量按运行时 DIE_MAX；稀疏拓扑允许部分 (ch,ce,lun) 槽为 NULL。 */
+     * L2P/容量按运行时 DIE_MAX；die 表只含实际存在的 target。 */
     if (!ftl_topology_build(g_nand_targets))
     {
         LOGE("[FTL ] topology build failed\r\n");
@@ -609,11 +308,13 @@ static void ssd_ftl_boot_all(void)
     }
 
     ftl_global_init();
-    ftl_op_init();
-    memset(g_ftl_ptrs, 0, sizeof(g_ftl_ptrs)); /* 稀疏拓扑：缺失 die 保持 NULL */
+
+    /* ①.5 设备级一次初始化（全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache）。
+     * 必须早于逐实例 boot：恢复期的 full metadata rebuild 会抽完成表，路由为 NULL
+     * 时完成无法派发，job 永久卡死。 */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        ftl_ctx_s *ftl = &g_ftl[die];
+        ftl_ctx_s *ftl = ftl_instance_get(die);
 
         g_ftl_ptrs[die] = ftl;
 
@@ -622,25 +323,14 @@ static void ssd_ftl_boot_all(void)
          * boot 成功后 ssd_controller_init 会重新校验并绑定同一组指针。 */
         g_ctrl.ftl[die] = ftl;
     }
-    ftl_op_route_set(g_ftl_ptrs);
-
-    /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
-     * 必须早于逐实例 boot（pfr_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
-     * 且绝不能放进逐实例 ftl_init（第二个实例会清掉第一个实例的 line）。 */
-    for (ch = 0U; ch < CH_NUM; ch++)
-    {
-        for (ce = 0U; ce < CE_NUM; ce++)
-        {
-            l2p_init(&g_l2p_cache[ch][ce], ch, ce, ssd_l2p_owner_of_region, NULL);
-        }
-    }
+    ftl_device_prepare();
 
     /* ② 逐 die boot */
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         if (ssd_ftl_boot(die) != FTL_OK)
         {
-            boot_ok = 0;
+            boot_ok = false;
         }
     }
 
@@ -648,39 +338,43 @@ static void ssd_ftl_boot_all(void)
     {
         /* 实例未必 init 完成 ⇒ 撤销路由，恢复「路由未设」语义（此时主循环退回
          * fc_service，无人 drain 完成表，派发不会发生）。 */
-        ftl_op_route_set(NULL);
+        ftl_route_clear();
         LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
     }
 
     /* ②.5 路由 ↔ die 的往返自检（owner 解析的根基）：
      * topo_2_die(route(die)) 必须等于 die；公式漂移会让每次 cache 操作找不到 owner。
-     * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
+     * 必须在逐实例 ftl_instance_init 之后做（topo 那时才有值），且 release 也拒绝启动
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
-    if (ftl_op_route_verify() == false)
+    if (ftl_route_verify() == false)
     {
-        ftl_op_route_set(NULL);
+        ftl_route_clear();
+        LOGE("[FTL ] route/die verify failed, fallback to fc_service\r\n");
         return;
     }
 
     /* ③ controller 就绪 */
-    ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
+    const ssd_status_e ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)
     {
-        LOGE("[FTL ] controller init failed: %d\r\n", ctrl_ret);
+        ftl_route_clear();
+        LOGE("[FTL ] controller init failed: %d; fallback to fc_service\r\n", ctrl_ret);
         return;
     }
 
     /* ③.5 主机可见容量：按实际坏块扣减（本仓自拟的容量折中）。
      * 必须在 USB 枚举之前设置——main 继续往下才初始化 USB 设备栈。 */
-    g_ctrl.host_lba_max = ssd_ftl_host_lba_max();
+    g_ctrl.host_lba_max = ftl_host_lba_max();
 
-    /* ④ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
-    g_ftl_ready = 1;
-    LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n", g_ctrl.host_lba_max, ((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL));
+    /* ④ ssd_controller_init 已把状态置 READY —— 主循环据此切换 ftl_service。 */
+    const DWORD lba_max      = g_ctrl.host_lba_max;
+    const QWORD capacity_mib = ((QWORD)lba_max * FTL_IU_BYTES) / (1024UL * 1024UL);
+
+    LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n", lba_max, capacity_mib);
 }
 
-/* newlib calls this hook from __libc_init_array when no CRT provides it. */
+/* CRT 未提供时，newlib 的 __libc_init_array 会调用这个钩子。 */
 void _init(void)
 {
 }
@@ -701,7 +395,8 @@ void _init(void)
  */
 void ssd_runtime_pump(void)
 {
-    if (g_ftl_ready)
+    /* controller READY ⇔ FTL 全部实例 boot + 绑定完成（唯一就绪判据） */
+    if (g_ctrl.state == SSD_CONTROLLER_READY)
     {
         /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
         ftl_service_pump();
@@ -709,7 +404,9 @@ void ssd_runtime_pump(void)
         /* ② 逐 die 后台：host 补发 + 后台调度 */
         for (BYTE die = 0U; die < DIE_MAX; die++)
         {
-            ftl_service(ssd_ftl_die_get(die));
+            ftl_ctx_s *ftl = ftl_instance_get(die);
+
+            ftl_service(ftl);
         }
     }
     else
@@ -730,28 +427,20 @@ void ssd_runtime_pump(void)
 
 int main(void)
 {
-    nand_result_e nand_init_result;
-
     /* 必须先于 SysTick 启动：先把上一轮的采样环快照到 prev，再开始本轮采样，
      * 否则启动期间的采样会覆盖故障现场（pc_sample.h）。 */
     pc_sample_init();
 
     sys_init();
 
-    /*
-     * TIM6 是 timer 调度器的毫秒心跳（watchdog / [STAT] / FTL 周期评估），
-     * 必须在任务注册与首次 poll 之前运行。系统毫秒时基由 SysTick/HAL tick
-     * 提供，与 TIM6 无关；TIM6 晚启动只会推迟调度器任务的首次到期。
-     * APB1=100 MHz 且 APB1 分频=2 ⇒ TIM6 内核时钟 200 MHz；
-     * arr=1000-1、psc=200-1 ⇒ 1 ms 周期中断。
-     */
-    timer_timx_int_init(1000 - 1, 200 - 1);
+    /* TIM6 是 timer 调度器的毫秒心跳（watchdog / [STAT] / FTL 周期评估），
+     * 必须在任务注册与首次 poll 之前运行；晚启动只会推迟任务的首次到期。 */
+    timer_timx_int_init(SSD_TIM6_ARR, SSD_TIM6_PSC);
 
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
-    log_set_sink(stm32_uart_log_sink);
-    log_set_flush_sink(stm32_uart_log_flush_sink);
+    log_set_sink(uart_log_write);
+    log_set_flush_sink(uart_log_flush);
     log_set_level(LOG_INFO);
-    LOGD("debug logging enabled\r\n");
     /* 栈哨兵：把 [&end, 当前 SP) 整段填 pattern。必须**早**——越早，后面
      * （FTL boot / CLI test 这些深调用）用过的栈就越多地落在被守卫区内，
      * 周期校验才量得到真实峰值。此后由 superloop 每轮 stack_guard_check() 校验。 */
@@ -770,16 +459,16 @@ int main(void)
      *   ③ set_armed(1)         —— 放行 fc_nand_dispatch_submit / submit_chain
      *                             （此前一律返回 INVALID_ARGUMENT）。
      *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
-     *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
+     *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → controller READY。
      *   ⑥ fc_nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
     fc_init();
 
     boot_section("nand");
-    nand_init_result = fc_nand_init();
+    const nand_result_e nand_init_result = fc_nand_init();
     if (nand_init_result != NAND_RESULT_OK)
     {
-        LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
+        LOGE(LOG_TAG_NAND "init failed: %d\r\n", nand_init_result);
     }
     else
     {
@@ -794,7 +483,7 @@ int main(void)
         /* ⑥ 高速模式：只有初始化（NAND + FTL boot/恢复）全部完成后才切换，
          *    保证上电路径始终跑在保守低速时序。失败仅告警；engine 会尝试回滚，
          *    但回滚失败不代表低速仍有效。 */
-        if (g_ftl_ready != 0)
+        if (g_ctrl.state == SSD_CONTROLLER_READY)
         {
             sys_clock_tree_s clk;
 
@@ -804,7 +493,7 @@ int main(void)
 
             if (high_speed_result != NAND_RESULT_OK)
             {
-                LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02hhX — rollback attempted; check NAND/FMC mode\r\n", high_speed_result);
+                LOGW(LOG_TAG_NAND "high-speed enable failed: %d — rollback attempted; check NAND/FMC mode\r\n", high_speed_result);
             }
         }
     }
@@ -840,46 +529,23 @@ int main(void)
     LOGI("[SYS ] timer task table ready, IWDG disabled (SSD_WATCHDOG_ENABLE=0)\r\n");
 #endif
 
-    DWORD stat_task_id;
-    if (!timer_scheduler_add(ssd_ftl_stat_task, NULL, 10000U, 10000U, &stat_task_id))
+    /* FTL 周期任务（统计日志 / 后台节拍 / GC-WL 求值）：周期由 FTL 自定。
+     * 失败回退 fc_service 时不注册。 */
+    if (g_ctrl.state == SSD_CONTROLLER_READY)
     {
-        LOGE("[SYS ] stat task add failed\r\n");
+        ftl_timer_tasks_start();
     }
 
-    /* 后台周期节拍：L2P 写回 / CP T3 / BBT 起新 job 的 flag，10 ms 一次。 */
-    DWORD bg_tick_task_id;
-    if (!timer_scheduler_add(ssd_ftl_bg_tick_task, NULL, 0U, L2P_FLUSH_INTERVAL_MS, &bg_tick_task_id))
-    {
-        LOGE("[SYS ] bg tick task add failed\r\n");
-    }
-
-    /* FTL 周期求值（GC/WL/predict）：每实例一个 timer 任务，ctx = mig_handle。 */
-    if (g_ftl_ready != 0)
-    {
-        for (BYTE die = 0U; die < DIE_MAX; die++)
-        {
-            ftl_ctx_s *ftl = ssd_ftl_die_get(die);
-
-            if (!mig_timer_register(ftl->mig_handle))
-            {
-                const ftl_topo_s topo = ssd_ftl_die_topo(die);
-
-                LOGE("[SYS ] migrate timer register failed ch=%hhu ce=%hhu lun=%hhu\r\n", topo.ch, topo.ce, topo.lun);
-            }
-        }
-    }
-
-    cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   cli_service_poll() —— CLI 解析（含 `test` 单元测试入口）。
      *   ssd_runtime_pump() —— 后台服务统一入口，顺序与 CLI 同步命令共用：
-     *     g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着。
-     *     g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
-     *                       再对**每个**实例调 ftl_service()（host 补发 / 后台调度）。
-     *                       ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
-     *                         journal / checkpoint / bbt / GC 永不推进（序 4）。
+     *     controller 非 READY：只跑 fc_service()，保持 FC/NAND 裸路径活着。
+     *     controller READY：    ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
+     *                           再对**每个**实例调 ftl_service()（host 补发 / 后台调度）。
+     *                           ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
+     *                             journal / checkpoint / bbt / GC 永不推进。
      *     controller → USB → timer_scheduler_poll 的先后顺序见 ssd_runtime_pump()。
-     *   All command parsing and scheduled storage work remain outside ISR context. */
+     *   所有命令解析与调度型存储工作都不在 ISR 上下文。 */
     while (1)
     {
         /* 栈哨兵周期校验（每轮一次，MSP 无异常时开销 ~10 条指令）：

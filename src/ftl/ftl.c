@@ -67,18 +67,31 @@
 #include "log.h"
 #include "metadata_job.h"
 #include "pending.h"
+#include "power_failure_recovery.h"
 #include "ssd_compiler.h"
 #include "timer.h"
 #include "wbuf.h"
 
 #include <string.h>
 
-// FTL 每 I/O 热数据。链接脚本按整个 ftl.o 把 .bss 放进 DTCM。
-// 这些对象都是 CPU-only：NAND/FC 的 DMA buffer 不在这里，DMA1/2 也访问不到 DTCM。
+// 后台节拍与 bg_scheduler 的 token refill 周期必须一致：节拍快了会空转，
+// 慢了会让配额长期为零、后台任务饿死。
+_Static_assert(BG_TOKEN_INTERVAL_MS == L2P_FLUSH_INTERVAL_MS, "后台节拍与 token refill 周期必须一致");
+
+// FTL 每 I/O 热数据（实例描述符）：定义与内存域（DTCM）都归本模块。
+// CPU-only：NAND/FC 的 DMA buffer 不在这里，DMA1/2 也访问不到 DTCM。
 // `.dtcm_data` 是 NOLOAD ⇒ ftl_init 对每个实例显式 memset。
-ftl_ctx_s   g_ftl[FTL_DIE_MAX];
-wb_handle_s g_ftl_wbuf[FTL_DIE_MAX];
-l2p_jrn_s   g_ftl_journal[FTL_DIE_MAX];
+// 其余 workspace 由各自拥有的模块定义（wbuf/journal/allocator/...），
+// 本文件只经 workspace_get() 取引用装配。
+ftl_ctx_s g_ftl[FTL_DIE_MAX] DTCM_DATA;
+
+// 公共 boot 入口的 once 守卫：重复初始化会清掉共享 cache / 重复注册 timer，
+// 现象是静默停摆。本仓无运行期 re-init；若将来增加，必须同时复位这些守卫。
+// ⚠ 本文件 .bss 落 DTCM NOLOAD ⇒ 上电/软复位都不清零，必须由 ftl_global_init 复位。
+static BOOL  s_device_prepared;
+static BOOL  s_timers_started;
+static BOOL  s_instance_initialized[FTL_DIE_MAX];
+static DWORD s_bbt_last_ms; /* BBT 起新 job 的节拍时间戳（NOLOAD，同需复位） */
 
 // dangling 守卫日志：
 // · `st=BAD` 是**预期降级**（旧块已退役，数据本不可读）⇒ 每个旧 gblock 只打一行，
@@ -596,7 +609,7 @@ static void ftl_dangling_check(ftl_ctx_s *ftl, DWORD l, DWORD old_pba, WORD new_
         const char *old_state = ftl_block_state_name(old_st);
         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g]));
 
-        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s\r\n", l, old_pba, gob, old_state, ftl->alloc.blocks[gob].sb_id, new_g, new_state);
+        LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s\r\n", l, old_pba, gob, old_state, ftl->alloc.blocks[gob].sb_id, new_g, new_state);
     }
 }
 
@@ -1993,6 +2006,13 @@ void ftl_global_init(void)
     s_dangling_next      = 0U;
     s_write_retry_logged = 0U;
 
+    // 公共 boot 入口的 once 守卫与后台节拍时间戳：NOLOAD 段随机残留会让启动被
+    // 误判为「重复初始化」（直接拒绝）或让首次 BBT 节拍不确定。
+    s_device_prepared = false;
+    s_timers_started  = false;
+    s_bbt_last_ms     = 0U;
+    memset(s_instance_initialized, 0, sizeof(s_instance_initialized));
+
     // padding 页内容不映射任何 LBA，但必须是确定的零页；NOLOAD 段的随机残留
     // （可能是上一次运行的主机数据）不应被写进介质。
     memset(s_cache_pad_page, 0, sizeof(s_cache_pad_page));
@@ -2102,7 +2122,8 @@ BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM])
 /**
  * @brief 初始化 FTL 实例
  *
- * 只绑指针；storage 数组/挂载块由 HIL 提供，本函数显式 memset 表。
+ * 只绑指针；storage 引用的 workspace 由各模块自持（ftl_instance_init 装配），
+ * 本函数只对绑定到的表显式 memset。
  *
  * @param ftl     实例
  * @param topo    本实例路由
@@ -2142,7 +2163,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     ftl->trim.start_ms  = 0U;
     timer_deadline_clear(&ftl->trim.deadline);
 
-    // ├─ 绑定外部存储（storage 数组/挂载块由 HIL 按域提供）──
+    // ├─ 绑定 workspace（各模块自持，ftl_instance_init 按 die 装配）──
     // ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须逐表 memset。
     ftl->table_refs      = *storage->table_refs;
     ftl->metadata_dir    = storage->metadata_dir;
@@ -2154,8 +2175,8 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
 
     // ⚠ 这里**不**调 ftl_op_init()：request 表与实例路由表都是**全局**资源
     // （ftl_op.c 的 file-static），而本函数是**逐实例**调用的 ——
-    // 在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉 main.c 已设好的路由表。
-    // 该函数由 main.c 的 ssd_ftl_boot_all 在**所有实例 boot 之前**调用一次。
+    // 在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉已设好的路由表。
+    // 该函数由 ftl_device_prepare 在**所有实例 boot 之前**调用一次。
     // （完成派发不需要在此注册 handler：request 表里带 op，g_op_callbacks[] 是
     // 编译期常量数组，见 ftl_op.c；request 表只回答"这条命令的私有状态在哪"。）
 
@@ -2255,6 +2276,371 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     bg_scheduler_init(&ftl->bg);
 
     return FTL_OK;
+}
+
+/* ── Level 2：不透明实例 + workspace 装配 ── */
+
+/**
+ * @brief 取紧凑 die 号对应的 FTL 实例（不透明句柄）
+ *
+ * @param die 紧凑 die 号（< DIE_MAX；未分配的尾项不得访问）
+ * @return 实例指针（非空）
+ */
+ftl_ctx_s *ftl_instance_get(BYTE die)
+{
+    ASSERT(die < DIE_MAX);
+    return &g_ftl[die];
+}
+
+/**
+ * @brief 设备级一次初始化：全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache
+ *
+ * 调用顺序：ftl_topology_build → ftl_global_init → 本函数 → 逐实例 init。
+ * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复清 cache）。
+ * 路由必须早于实例 boot：恢复期的 full metadata rebuild 会抽完成表，路由为 NULL
+ * 时完成无法派发，job 永久卡死。
+ */
+void ftl_device_prepare(void)
+{
+    ASSERT(!s_device_prepared);
+    if (s_device_prepared != false)
+    {
+        LOGE("[FTL ] device_prepare called twice; ignored\r\n");
+        return;
+    }
+    s_device_prepared = true;
+
+    ftl_ctx_s *route[FTL_DIE_MAX];
+
+    memset(route, 0, sizeof(route));
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        route[die] = ftl_instance_get(die);
+    }
+
+    ftl_op_init();
+    ftl_op_route_set(route);
+    l2p_device_init();
+}
+
+/**
+ * @brief 初始化一个 FTL 实例的 workspace 与模块状态
+ *
+ * workspace 由各模块自持（本函数只取引用装配），调用者不需要知道任何内部类型。
+ * 每个 die 只能成功初始化一次；重复调用返回 FTL_ERROR（release 也拒绝）。
+ *
+ * @param die 紧凑 die 号（< DIE_MAX）
+ * @return FTL_OK；FTL_ERROR 重复初始化 / 本 target 无 L2P cache / 元数据候选池构建失败
+ */
+ftl_status_e ftl_instance_init(BYTE die)
+{
+    ftl_ctx_s *ftl = ftl_instance_get(die); /* 同时校验 die < DIE_MAX */
+
+    ASSERT(!s_instance_initialized[die]);
+    if (s_instance_initialized[die] != false)
+    {
+        LOGE("[FTL ] instance already initialized die=%hhu\r\n", die);
+        return FTL_ERROR;
+    }
+
+    const ftl_topo_s topo = g_die_table[die];
+
+    ftl_table_refs_s refs;
+    alc_bind_workspace(die, &refs);
+
+    l2p_cache_s *cache = l2p_cache_workspace_get(topo);
+
+    if (cache == NULL)
+    {
+        LOGE("[FTL ] no L2P cache for ch=%hhu ce=%hhu (topology/board target max mismatch)\r\n", topo.ch, topo.ce);
+        return FTL_ERROR;
+    }
+
+    ftl_storage_s storage;
+    storage.table_refs      = &refs;
+    storage.metadata_dir    = md_workspace_get(die);
+    storage.journal         = jrn_workspace_get(die);
+    storage.cp_handle       = cp_workspace_get(die);
+    storage.migrate         = mig_workspace_get(die);
+    storage.wbuf            = wb_workspace_get(die);
+    storage.rr_page_scratch = rr_workspace_get(die);
+
+    if (ftl_init(ftl, topo, cache, &storage) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    /* L2P owner 端口：必须在任何 cache 访问（含后续格式化/恢复）之前就绪。 */
+    l2p_owner_s owner;
+    owner.die          = die;
+    owner.metadata_dir = ftl->metadata_dir;
+    owner.alloc        = &ftl->alloc;
+    owner.topo         = ftl->topo;
+    owner.journal      = ftl->journal;
+    l2p_owner_register(die, &owner);
+
+#if !defined(NDEBUG)
+    ftl_contract_audit(ftl);
+#endif
+
+    s_instance_initialized[die] = true;
+    return FTL_OK;
+}
+
+/**
+ * @brief 校验实例路由与紧凑 die 表的往返一致性
+ *
+ * @return true = 一致；false = 路由/拓扑公式漂移
+ */
+BOOL ftl_route_verify(void)
+{
+    return ftl_op_route_verify();
+}
+
+/**
+ * @brief 撤销实例路由（boot 失败回退 fc_service 时用）
+ */
+void ftl_route_clear(void)
+{
+    ftl_op_route_set(NULL);
+}
+
+/**
+ * @brief 中止属于同一 host 请求的所有 FTL 组
+ *
+ * @param ctx HIL 请求指针（非空）
+ */
+void ftl_abort_request(void *ctx)
+{
+    ASSERT(ctx != NULL);
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        (void)pend_group_abort_ctx(&g_ftl[die].pending, ctx);
+    }
+}
+
+/**
+ * @brief 中止本实例的 TRIM job
+ *
+ * @param ftl 实例
+ */
+void ftl_trim_abort(ftl_ctx_s *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    ftl->trim.active    = false;
+    ftl->trim.start_lba = 0U;
+    ftl->trim.start_ms  = 0U;
+    timer_deadline_clear(&ftl->trim.deadline);
+}
+
+/**
+ * @brief 打印本实例的池占用（boot 基线）
+ *
+ * @param ftl 已初始化的实例（只读）
+ */
+void ftl_boot_log_usage(const ftl_ctx_s *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    const alc_s *alloc = &ftl->alloc;
+
+    LOGI("[FTL ] instance ch=%hhu ce=%hhu lun=%hhu free=%hu op=%hu spare=%hu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, alloc->free_count, alc_pool_sum_counts(alloc->op_count, PLANE_NUM), alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
+}
+
+/**
+ * @brief 计算主机可见的 LBA 上限（开机一次）
+ *
+ * 按实际坏块集，取各实例/plane 的最小可用块数；runtime 新增坏块不缩容。
+ *
+ * @return 主机 LBA 上限（>= 1）
+ */
+DWORD ftl_host_lba_max(void)
+{
+    DWORD cap_blocks = UINT32_MAX;
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_s *ftl              = &g_ftl[die];
+        const ftl_topo_s topo             = g_die_table[die];
+        DWORD            plane_usable_min = UINT32_MAX;
+
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            DWORD good = 0U;
+
+            for (WORD block = FTL_METADATA_AREA_END; block < BLOCKS_PER_PLANE; block++)
+            {
+                const WORD g = ftl_gblock(plane, block);
+
+                if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
+                {
+                    good++;
+                }
+            }
+
+            const DWORD reserved = FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE;
+            const DWORD usable   = (good > reserved) ? (good - reserved) : 0U;
+
+            if (usable < plane_usable_min)
+            {
+                plane_usable_min = usable;
+            }
+        }
+
+        const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
+
+        LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", topo.ch, topo.ce, topo.lun, plane_usable_min, instance_blocks);
+
+        if (instance_blocks < cap_blocks)
+        {
+            cap_blocks = instance_blocks;
+        }
+    }
+
+    if (cap_blocks == UINT32_MAX)
+    {
+        cap_blocks = 0U;
+    }
+
+    QWORD lba = (QWORD)cap_blocks * PAGES_PER_BLOCK * CW_NUM * DIE_MAX;
+
+    if (lba > FTL_LBA_MAX)
+    {
+        lba = FTL_LBA_MAX;
+    }
+    if (lba == 0U)
+    {
+        lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
+    }
+
+    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n", cap_blocks, lba, (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
+
+    return (DWORD)lba;
+}
+
+/**
+ * @brief 打印本实例的周期统计（[STAT] 一行）
+ *
+ * @param ftl       已初始化的实例（只读）
+ * @param uptime_ms 系统运行时长（毫秒）
+ */
+static void ftl_log_stats(const ftl_ctx_s *ftl, DWORD uptime_ms)
+{
+    LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ftl->topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, (mig_is_busy(ftl->mig_handle) != false) ? 1U : 0U, (mig_is_paused(ftl->mig_handle) != false) ? 1U : 0U, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop);
+}
+
+/**
+ * @brief 后台周期节拍：补调度配额、置 L2P/BBT 到期标志
+ *
+ * 只置 flag，不跑业务；真正执行在 ftl_service 的固定位置。
+ *
+ * @param ftl     实例
+ * @param bbt_due true = BBT 起新 job 的节拍到
+ */
+static void ftl_periodic_tick(ftl_ctx_s *ftl, BOOL bbt_due)
+{
+    bg_scheduler_refill(&ftl->bg);
+    ftl->l2p_flush_due = 1U;
+
+    if (bbt_due != false)
+    {
+        ftl->alloc.bbt.flush_due = 1U;
+    }
+}
+
+/**
+ * @brief 注册本实例的 GC/WL/预测性退役周期求值任务
+ *
+ * @param ftl 已初始化的实例
+ * @return true = 注册成功；false = 定时器任务表满
+ */
+static BOOL ftl_mig_timer_register(ftl_ctx_s *ftl)
+{
+    return mig_timer_register(ftl->mig_handle);
+}
+
+/**
+ * @brief 周期统计日志任务（timer 表每 10 s 一次）
+ *
+ * @param context 未使用
+ * @param now_ms  未使用（时间由 platform_now_ms 提供）
+ */
+static void ftl_stat_task(void *context, DWORD now_ms)
+{
+    (void)context;
+    (void)now_ms;
+
+    const DWORD uptime_ms = platform_now_ms();
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        ftl_log_stats(&g_ftl[die], uptime_ms);
+    }
+}
+
+/**
+ * @brief 后台周期节拍任务（每 L2P_FLUSH_INTERVAL_MS 一次）
+ *
+ * @param context 未使用
+ * @param now_ms  未使用（时间由 platform_now_ms 提供）
+ */
+static void ftl_bg_tick_task(void *context, DWORD now_ms)
+{
+    (void)context;
+    (void)now_ms;
+
+    const DWORD now     = platform_now_ms();
+    const BOOL  bbt_due = (s_bbt_last_ms == 0U) || ((now - s_bbt_last_ms) >= BBT_FLUSH_INTERVAL_MS);
+
+    if (bbt_due != false)
+    {
+        s_bbt_last_ms = now;
+    }
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        ftl_periodic_tick(&g_ftl[die], bbt_due);
+    }
+}
+
+/**
+ * @brief 注册 FTL 的周期任务（统计日志 / 后台节拍 / GC-WL 求值）
+ *
+ * 必须在全部实例 boot 成功之后调用一次；失败回退 fc_service 时不调用。
+ * 周期与内部策略由 FTL 决定，调用者不需要知道。
+ * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复注册）。
+ */
+void ftl_timer_tasks_start(void)
+{
+    ASSERT(!s_timers_started);
+    if (s_timers_started != false)
+    {
+        LOGE("[FTL ] timer tasks already started; ignored\r\n");
+        return;
+    }
+    s_timers_started = true;
+
+    DWORD task_id;
+
+    if (!timer_scheduler_add(ftl_stat_task, NULL, 10000U, 10000U, &task_id))
+    {
+        LOGE("[FTL ] stat task add failed\r\n");
+    }
+
+    if (!timer_scheduler_add(ftl_bg_tick_task, NULL, 0U, L2P_FLUSH_INTERVAL_MS, &task_id))
+    {
+        LOGE("[FTL ] bg tick task add failed\r\n");
+    }
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        if (!ftl_mig_timer_register(&g_ftl[die]))
+        {
+            LOGE("[FTL ] migrate timer register failed die=%hhu\r\n", die);
+        }
+    }
 }
 
 /* ── 初始化契约自检（debug-only）──
@@ -2415,6 +2801,69 @@ static SSD_CODE_FAST void contract_check_boot_zero(const ftl_ctx_s *ftl)
 #endif /* !NDEBUG */
 
 /**
+ * @brief 取实例拓扑（只读）。
+ * @param ftl FTL 上下文
+ * @return 拓扑指针（非 NULL）
+ */
+const ftl_topo_s *ftl_get_topo(const ftl_ctx_s *ftl)
+{
+    return &ftl->topo;
+}
+
+/**
+ * @brief 判定介质是否需要格式化。
+ * @param ftl FTL 上下文
+ * @param need_format 输出：true = 需要格式化
+ * @return FTL_OK 判定完成；FTL_ERROR CP 介质读不通（调用者不得格式化）
+ */
+ftl_status_e ftl_boot_check_format(ftl_ctx_s *ftl, BOOL *need_format)
+{
+    return pfr_media_check_format(ftl, need_format);
+}
+
+/**
+ * @brief 全量格式化当前实例的介质。
+ * @param ftl FTL 上下文
+ * @param verify true = 逐块擦除体检
+ * @return FTL_OK 成功；FTL_ERROR 失败
+ */
+ftl_status_e ftl_boot_format(ftl_ctx_s *ftl, BOOL verify)
+{
+    return pfr_media_format(ftl, verify);
+}
+
+/**
+ * @brief 执行启动恢复并输出报告。
+ * @param ftl FTL 上下文
+ * @param report 启动类型/Checkpoint/Journal 统计；可为 NULL
+ * @return FTL_OK 成功；FTL_ERROR 恢复失败
+ */
+ftl_status_e ftl_boot_recover(ftl_ctx_s *ftl, ftl_boot_report_s *report)
+{
+    pfr_boot_result_s result;
+    ftl_status_e      status = pfr_boot_recovery(ftl, &result);
+
+    if ((status == FTL_OK) && (report != NULL))
+    {
+        report->boot_type       = (ftl_boot_type_e)result.boot_type;
+        report->cp_sequence     = result.cp_sequence;
+        report->journal_entries = result.journal_entries;
+        report->blocks_restored = result.blocks_restored;
+        report->scoped          = result.scoped;
+    }
+    return status;
+}
+
+/**
+ * @brief 打印固定分区与数据区的坏块分布（开机基线）。
+ * @param ftl FTL 上下文（只读）
+ */
+void ftl_boot_log_bad_areas(const ftl_ctx_s *ftl)
+{
+    pfr_boot_log_bad_areas(ftl);
+}
+
+/**
  * @brief debug-only 初始化契约自检（release 空实现）
  *
  * 只证明初始化后不可变的绑定；不检查运行期状态。
@@ -2474,7 +2923,7 @@ void ftl_service_pump(void)
  */
 void ftl_service(ftl_ctx_s *ftl)
 {
-    // 唯一调用点 main.c 传 &g_ftl[die]（静态数组元素，结构性恒非空）；
+    // 唯一调用点 main.c 传 ftl_instance_get(die)（结构性恒非空）；
     // NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
     // 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。
     ASSERT(ftl != NULL);
@@ -2841,9 +3290,9 @@ static void ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
     const ftl_cache_seq_s *seq = &ftl->cache_stream.seq;
     const jrn_handle_s    *jrn = &ftl->journal->handle;
 
-    (void)LOGE(LOG_TAG_FTL "stall: seq kind=%d act=%d drain=%d close=%d brk=%d wr=%hu next=%lu\r\n", (int)seq->kind, (int)seq->active, (int)seq->draining, (int)seq->close_requested, (int)seq->break_requested, seq->wr.count, seq->next_lba);
+    LOGE(LOG_TAG_FTL "stall: seq kind=%d act=%d drain=%d close=%d brk=%d wr=%hu next=%lu\r\n", (int)seq->kind, (int)seq->active, (int)seq->draining, (int)seq->close_requested, (int)seq->break_requested, seq->wr.count, seq->next_lba);
 
-    (void)LOGE(LOG_TAG_FTL "stall: jrn phase=%d erase=%d full=%d kind=%d ent=%hu seq=%lu jf=%lu\r\n", (int)jrn->job.phase, (int)jrn->job.need_erase, (int)jrn->state.ring_full, (int)jrn->state.page_kind, jrn->state.current_entry, jrn->state.sequence_counter, jrn_page_writes(ftl->journal));
+    LOGE(LOG_TAG_FTL "stall: jrn phase=%d erase=%d full=%d kind=%d ent=%hu seq=%lu jf=%lu\r\n", (int)jrn->job.phase, (int)jrn->job.need_erase, (int)jrn->state.ring_full, (int)jrn->state.page_kind, jrn->state.current_entry, jrn->state.sequence_counter, jrn_page_writes(ftl->journal));
 
     {
         fc_resource_stats_s rs;
@@ -2863,7 +3312,7 @@ static void ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
             }
         }
 
-        (void)LOGE(LOG_TAG_FTL "stall: gi=%hu next=%lu/%lu wb_busy=%d pend=%hu free=%hu fpmin=%hu sb_open=%d np=%hhu p0=%02hhx fc cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu sq=%hu/%hu cq=%hu/%hu\r\n", gi, ftl->pending.groups[gi].next, ftl->pending.groups[gi].total, (int)(wb_is_idle(ftl->wbuf) == false), pend_slot_get_count(&ftl->pending), ftl->alloc.free_count, fpmin, (int)ftl->alloc.hot_sb.is_open, ftl->alloc.hot_sb.next_page, ftl->alloc.hot_sb.page0_programmed, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.sq_used, (WORD)FC_SQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH);
+        LOGE(LOG_TAG_FTL "stall: gi=%hu next=%lu/%lu wb_busy=%d pend=%hu free=%hu fpmin=%hu sb_open=%d np=%hhu p0=%02hhx fc cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu sq=%hu/%hu cq=%hu/%hu\r\n", gi, ftl->pending.groups[gi].next, ftl->pending.groups[gi].total, (int)(wb_is_idle(ftl->wbuf) == false), pend_slot_get_count(&ftl->pending), ftl->alloc.free_count, fpmin, (int)ftl->alloc.hot_sb.is_open, ftl->alloc.hot_sb.next_page, ftl->alloc.hot_sb.page0_programmed, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.sq_used, (WORD)FC_SQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH);
     }
 }
 
@@ -3009,13 +3458,13 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
             const BOOL seq_yield      = (ftl->cache_stream.seq.yield_pending == true);
             // Journal 页写 / 换块擦在飞：NAND 命令有超时 ⇒ 必有完成，属确定性等待。
             // 少这一条，序列边界触发的页刷若跨过 8 轮预算，正常的写会被误判成卡死。
-            const BOOL jrn_inflight   = (jrn_is_idle(ftl->journal) == false) || (ftl->journal->handle.job.need_erase == true);
+            const BOOL jrn_inflight   = (jrn_is_idle(ftl->journal) == false) || (jrn_has_erase_pending(ftl->journal) != false);
             // 待入账的写确认：要么 region 就绪后结算，要么 100 ms 后超时释放（pending.c）
             // ⇒ 确定性等待。待入账本身不占 drain 的进展，不能算卡死。
             const BOOL confirm_parked = pend_find_op(&ftl->pending, PENDING_OP_WRITE_CONFIRM, NULL);
             // 搬移引擎：job 在飞，或 job 已 abort 但命令仍在 FC 侧（新 job 被 inflight 门控
             // 拒绝）——后者同样是确定性等待（NAND 保证每条命令有完成），不能计成卡死。
-            const BOOL mig_inflight   = (ftl->mig_handle->job.active == true) || (ftl->mig_handle->state.inflight != 0U);
+            const BOOL mig_inflight   = (mig_is_busy(ftl->mig_handle) != false);
             /* wbuf 有打开窗口/页在飞也是**确定性进展**：它必然由 NAND 编程超时或
              * 后续 flush 收尾。speed 的 drain 循环远快于 600 µs tPROG，漏掉这一项
              * 会在 8 轮内把「wbuf 正在编程」误判成 IO_ERROR（板端 stall 现场
@@ -3032,7 +3481,7 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
                     // 无空间是终止态、host 会持续重试 ⇒ 用限流器，避免逐请求刷屏。
                     if (log_ratelimit_due(&s_nospace_log))
                     {
-                        if (ftl->mig_handle->state.benefit.nogain)
+                        if (mig_gc_no_gain(ftl->mig_handle) != false)
                         {
                             LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%hu) — IO_ERROR\r\n", ftl->alloc.free_count);
                         }
@@ -3428,9 +3877,7 @@ cp_trigger_s ftl_cp_trigger_build(const ftl_ctx_s *ftl, cp_reason_e reason, BOOL
  */
 static void ftl_flush_kick_cp(ftl_ctx_s *ftl)
 {
-    const DWORD now_ms = platform_now_ms();
-
-    if ((now_ms == 0U) || ((now_ms - ftl->cp_handle->cp_state.last_cp_ms) < (CP_TIME_INTERVAL_MS / 2U)))
+    if (cp_flush_kick_due(ftl->cp_handle) == false)
     {
         return;
     }

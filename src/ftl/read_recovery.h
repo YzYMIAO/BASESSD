@@ -159,6 +159,14 @@ typedef struct RR_HANDLE_S
     log_heartbeat_s hb;
 } rr_handle_s;
 
+/**
+ * @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return FTL_READ_USER_SIZE 字节的暂存区（非空）
+ */
+BYTE *rr_workspace_get(BYTE die);
+
 /* ── 接口 ── */
 
 /**

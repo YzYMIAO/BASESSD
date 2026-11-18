@@ -12,6 +12,8 @@ MODULE_INCS += $(INC_ROOT)/nand
 MODULE_INCS += $(INC_ROOT)/nand/devices
 MODULE_INCS += $(INC_ROOT)/platform/stm32h743
 
-# NAND 私有头（FMC/board internal）：只给 NAND 自己的对象。
-NAND_PRIVATE_INC := $(SRC_ROOT)/nand/internal
+# NAND 私有头（FMC / board internal）与 .c 同目录（src/nand/*.h）：只给 NAND 自己的对象。
+# `$(OBJ_DIR)/nand/%.o` 的 % 匹配 devices/…，器件驱动同样拿到这条 -I。
+# ⚠ 新增 src/nand/*.h 前必须 `find include src -name '<name>.h'` 查重。
+NAND_PRIVATE_INC := $(SRC_ROOT)/nand
 $(OBJ_DIR)/nand/%.o: CFLAGS += -I$(NAND_PRIVATE_INC)

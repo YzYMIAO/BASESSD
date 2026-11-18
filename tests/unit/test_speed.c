@@ -31,6 +31,7 @@
 #include "fc_interface.h"
 #include "fc_nand_dispatch.h"
 #include "fc_nand_engine.h"
+#include "ftl.h"
 #include "l2p_cache.h"
 #include "munit.h"
 #include "ssd_types.h"

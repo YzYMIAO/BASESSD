@@ -13,7 +13,7 @@ static log_flush_sink_fn_t g_log_flush_sink;
 static DWORD               g_log_truncated;
 static DWORD               g_log_write_failures;
 
-DWORD log_write(log_level_e level, const char *message)
+void log_write(log_level_e level, const char *message)
 {
     const ssd_platform_ops_s *platform = ssd_platform_get();
     DWORD                     length;
@@ -21,7 +21,7 @@ DWORD log_write(log_level_e level, const char *message)
 
     if ((message == NULL) || (level > g_log_level))
     {
-        return 0U;
+        return;
     }
 
     length = strlen(message);
@@ -34,39 +34,33 @@ DWORD log_write(log_level_e level, const char *message)
     else if ((platform != NULL) && (platform->log_write != NULL))
     {
         platform->log_write(message);
-        result = length;
+        return;
     }
     else
     {
-        return LOG_WRITE_INVALID;
+        return;
     }
 
     if (result != length)
     {
         g_log_write_failures++;
-        return LOG_WRITE_INVALID;
     }
-    return result;
 }
 
-DWORD log_vprintf(log_level_e level, const char *format, va_list args)
+void log_vprintf(log_level_e level, const char *format, va_list args)
 {
     char message[192];
     int  length;
 
     if ((format == NULL) || (level > g_log_level))
     {
-        return 0U;
+        return;
     }
 
     length = vsnprintf(message, sizeof(message), format, args);
-    if (length < 0)
+    if (length <= 0)
     {
-        return LOG_WRITE_INVALID;
-    }
-    if (length == 0)
-    {
-        return 0U;
+        return;
     }
     if ((size_t)length >= sizeof(message))
     {
@@ -77,22 +71,19 @@ DWORD log_vprintf(log_level_e level, const char *format, va_list args)
         g_log_truncated++;
         memcpy(&message[marker_offset], marker, marker_length);
         message[sizeof(message) - 1U] = '\0';
-        length                        = (int)(sizeof(message) - 1U);
     }
 
     /* Pass already-formatted text to the platform sink to preserve transport independence. */
-    return log_write(level, message);
+    log_write(level, message);
 }
 
-DWORD log_printf(log_level_e level, const char *format, ...)
+void log_printf(log_level_e level, const char *format, ...)
 {
-    DWORD   length;
     va_list args;
 
     va_start(args, format);
-    length = log_vprintf(level, format, args);
+    log_vprintf(level, format, args);
     va_end(args);
-    return length;
 }
 
 void log_set_level(log_level_e level)

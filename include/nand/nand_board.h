@@ -6,7 +6,7 @@
 /*
  * nand_board.h — FC 需要的板级 bank ownership 接口
  *
- * target 枚举、PHY 绑定与初始化在 src/nand/internal/nand_board_internal.h；
+ * target 枚举、PHY 绑定与初始化在 src/nand/nand_board_internal.h；
  * FC 只通过本头获取/释放 bank 所有权，避免看到 FMC/HAL 细节。
  */
 

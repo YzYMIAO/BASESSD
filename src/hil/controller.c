@@ -1,6 +1,7 @@
 #include "controller.h"
 
 #include "assertion.h"
+#include "delay.h" /* delay_now_ms：请求级 deadline */
 #include "log.h"
 
 #include <stddef.h>
@@ -141,7 +142,7 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
             return SSD_STATUS_INVALID_ARGUMENT;
         }
         /* die 索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
-        if ((slot->topo.ch != ch) || (slot->topo.ce != ce) || (slot->topo.lun != lun))
+        if ((ftl_get_topo(slot)->ch != ch) || (ftl_get_topo(slot)->ce != ce) || (ftl_get_topo(slot)->lun != lun))
         {
             LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hhu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
@@ -167,6 +168,35 @@ BYTE ssd_controller_is_complete(const ssd_req_s *request)
         return 1U;
     }
     return request->complete_flag;
+}
+
+/**
+ * @brief 超时后请求是否已可安全释放
+ *
+ * @param controller Controller 上下文
+ * @param request    请求（非空）
+ * @return true = 已无 FTL / controller 引用
+ */
+BOOL ssd_controller_request_reclaimable(const ssd_ctl_s *controller, const ssd_req_s *request)
+{
+    ASSERT(controller != NULL);
+    ASSERT(request != NULL);
+
+    switch (request->opcode)
+    {
+        case SSD_REQUEST_READ:
+        case SSD_REQUEST_WRITE:
+            return request->sub_remaining == 0U;
+
+        case SSD_REQUEST_FLUSH:
+            return controller->flush_req != request;
+
+        case SSD_REQUEST_TRIM:
+            return controller->trim_req != request;
+
+        default:
+            return true;
+    }
 }
 
 /**
@@ -210,22 +240,30 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
 {
     ssd_status_e ret;
 
-    if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))
+    if ((controller == NULL) || (request == NULL))
     {
-        if ((controller != NULL) && (controller->state != SSD_CONTROLLER_READY))
-        {
-            LOGW(LOG_TAG_CTRL "submit rejected: state=%d\r\n", (int)controller->state);
-        }
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (controller->state != SSD_CONTROLLER_READY)
+    {
+        LOGW(LOG_TAG_CTRL "submit rejected: state=%d\r\n", (int)controller->state);
+
+        /* 同步拒绝也要把请求标成完成：轮询型调用者不会因为返回码而跳过 poll。 */
+        request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
+        request->complete_flag     = 1U;
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
     /* 主机 IO 到来后的后台让路由 ftl_service 的档位判定（pending/groups → IDLE/
-     * NORMAL/BUSY）承担；Controller 只负责受理与拆分，不再维护调度钩子。 */
+     * NORMAL/BUSY）承担；Controller 只负责受理与拆分，不维护调度钩子。 */
 
-    /* 清零完成标志 / 状态聚合 */
+    /* 清零完成标志 / 状态聚合 / deadline */
     request->complete_flag     = 0U;
     request->completion_status = SSD_STATUS_OK;
     request->agg_status        = SSD_STATUS_OK;
+    request->start_ms          = delay_now_ms();
+    request->timed_out         = false;
 
     /* 组装 IO 请求模板（lba/buffer 由各路径覆盖） */
     request->io.complete_flag   = &request->complete_flag;
@@ -242,6 +280,15 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
              * 不会把越界 LBA 交给 FTL（FTL 只按编译期上限检查，不知道运行时容量）。 */
             if (!ssd_controller_lba_range_ok(controller, request->start_lba, request->block_count))
             {
+                request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
+                request->complete_flag     = 1U;
+                return SSD_STATUS_INVALID_ARGUMENT;
+            }
+
+            /* 数据缓冲必须存在：READ 回填 / WRITE 数据源都从这里走（H29）。 */
+            if (request->buffer == NULL)
+            {
+                LOGE(LOG_TAG_CTRL "null data buffer count=%lu\r\n", request->block_count);
                 request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
                 request->complete_flag     = 1U;
                 return SSD_STATUS_INVALID_ARGUMENT;
@@ -277,7 +324,12 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
                  * 错误已锁存到 agg_status，等全部 run 完成后由 on_sub_complete 回执。 */
                 return SSD_STATUS_OK;
             }
-            break;
+
+            /* 拆分成功 = 已受理。**不能**返回 request->completion_status：
+             * 同步完成的 run 可能已把它写成错误，而其他 run 仍在飞；前端若据此
+             * 判同步失败并释放请求，会让在飞 run 的 on_complete_ctx 悬垂。
+             * 最终状态只经 complete_flag 异步回执（与函数契约一致）。 */
+            return SSD_STATUS_OK;
 
         case SSD_REQUEST_TRIM:
             /* TRIM 是**异步命令**：submit 只登记范围，ssd_controller_service 每轮
@@ -371,10 +423,14 @@ static void ssd_controller_flush_service(ssd_ctl_s *controller)
         return; /* 还有实例没落定：下一轮继续 */
     }
 
-    /* 全部实例完成：按 HIL 完成通道回执（complete_flag / status_out）。 */
-    controller->flush_req->completion_status = SSD_STATUS_OK;
-    controller->flush_req->complete_flag     = 1U;
-    controller->flush_req                    = NULL;
+    /* 全部实例完成：按 HIL 完成通道回执（complete_flag / status_out）。
+     * 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
+    if (controller->flush_req->timed_out == false)
+    {
+        controller->flush_req->completion_status = SSD_STATUS_OK;
+        controller->flush_req->complete_flag     = 1U;
+    }
+    controller->flush_req = NULL;
 }
 
 /**
@@ -385,10 +441,14 @@ static void ssd_controller_flush_service(ssd_ctl_s *controller)
  */
 static void ssd_controller_trim_complete(ssd_ctl_s *controller, ssd_status_e status)
 {
-    controller->trim_req->completion_status = status;
-    controller->trim_req->complete_flag     = 1U;
-    controller->trim_req                    = NULL;
-    controller->trim_started                = false;
+    /* 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
+    if (controller->trim_req->timed_out == false)
+    {
+        controller->trim_req->completion_status = status;
+        controller->trim_req->complete_flag     = 1U;
+    }
+    controller->trim_req     = NULL;
+    controller->trim_started = false;
 }
 
 /**
@@ -468,6 +528,48 @@ void ssd_controller_service(ssd_ctl_s *controller)
     if (controller == NULL)
     {
         return;
+    }
+
+    /* 请求级 deadline：FLUSH 可撤销；TRIM 没有 abort API，只解开 host 回执，
+     * 继续 step 到 FTL 自己收尾（trim_req 清空后前端才 reclaim）。 */
+    const DWORD now_ms = delay_now_ms();
+
+    if (controller->flush_req != NULL)
+    {
+        if ((controller->flush_req->timed_out == false) && (ssd_request_expired(controller->flush_req->start_ms, now_ms) != false))
+        {
+            LOGW(LOG_TAG_CTRL "FLUSH timeout %lums\r\n", (DWORD)(now_ms - controller->flush_req->start_ms));
+            ssd_request_mark_timeout(controller->flush_req);
+        }
+
+        if (controller->flush_req->timed_out != false)
+        {
+            ssd_controller_cancel_flush(controller);
+        }
+    }
+
+    if (controller->trim_req != NULL)
+    {
+        if ((controller->trim_req->timed_out == false) && (ssd_request_expired(controller->trim_req->start_ms, now_ms) != false))
+        {
+            LOGW(LOG_TAG_CTRL "TRIM timeout %lums\r\n", (DWORD)(now_ms - controller->trim_req->start_ms));
+            ssd_request_mark_timeout(controller->trim_req);
+        }
+
+        if (controller->trim_req->timed_out != false)
+        {
+            if (controller->trim_started != false)
+            {
+                ftl_ctx_s *tftl = ssd_controller_route(controller, controller->trim_lba);
+
+                ASSERT(tftl != NULL);
+                ftl_trim_abort(tftl);
+            }
+
+            /* host 回执已给；TRIM job 已中止，立即摘指针让前端 reclaim。 */
+            controller->trim_req     = NULL;
+            controller->trim_started = false;
+        }
     }
 
     ssd_controller_flush_service(controller);

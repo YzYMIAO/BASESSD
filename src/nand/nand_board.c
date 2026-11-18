@@ -28,6 +28,8 @@ nand_target_info_s g_nand_targets[CH_NUM][CE_NUM];
 static const nand_board_target_s s_board_targets[] = {
     {0U, 0U, 0U},
 };
+/* NAND_BOARD_TARGET_MAX 是板级上界；表项数不得超过它（稀疏板卡用它收紧常驻对象）。 */
+_Static_assert((sizeof(s_board_targets) / sizeof(s_board_targets[0])) <= NAND_BOARD_TARGET_MAX, "板级 target 表项数超出 NAND_BOARD_TARGET_MAX");
 
 /* 当前板共享 FMC Bank3；同 bank target 不能并发。 */
 #define NAND_BOARD_BANK_MAX (16U)

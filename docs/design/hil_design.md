@@ -137,7 +137,7 @@ while (1) {
          buffer 是主机字节缓冲（READ 回填 / WRITE 数据源）。
 2. 表：ssd_host_queue_s.entries[SSD_HOST_QUEUE_DEPTH]，entry 内含 ssd_req_s；
         tag = 数组下标；owner = 前端（USB / CLI）。
-3. 计数：queue.used（BYTE，上界 8）；request.sub_remaining（volatile DWORD，run 数）；
+3. 计数：queue.used（BYTE，上界 8）；request.sub_remaining（DWORD，run 数）；
         io.cmd_remaining（每次 split 临时使用，不跨命令保留）。
 4. 归属：HIL 层 src/hil/；entry 由前端 alloc，完成由前端 free；controller 只写
         completion_status / complete_flag。
@@ -160,8 +160,8 @@ while (1) {
 | `sub_remaining` | `ssd_request_split` / `on_sub_complete` / 提交失败路径 | 同上 | 尚未完成的 run 数 |
 | `io` | controller / request.c | FTL | 子请求模板；每 run 只改 `lba/buffer/count/cmd_remaining` |
 
-`complete_flag` 是 `volatile BYTE`：前端在主循环轮询，完成写入在中断/主循环之外
-不可见（本仓没有完成中断，全部在主循环上下文完成）。
+`complete_flag` / `sub_remaining` 是普通字段：前端轮询与完成写入都在主循环上下文
+（本仓没有完成中断），不需要 `volatile`（H16）。
 
 ### 3.3 host entry / tag / owner
 
@@ -402,8 +402,14 @@ FREE → WAIT_GATE → IN_FLIGHT → FREE
 
 - `WAIT_GATE`：数据/参数已收到，等 CLI 释放 host busy gate；
 - `IN_FLIGHT`：已提交 controller，等 FTL 完成；
-- `discard` / `tud_ready() == false`：主机复位 / 拔出，完成后丢弃结果并释放槽；
-  FLUSH 槽还要 `ssd_controller_cancel_flush()`。
+- **会话代次（session generation）**：`tud_mount_cb` / `tud_umount_cb`（TinyUSB
+  task 上下文）各推进一次；bus reset 必然重新枚举并走到 mount，因此不需要
+  ISR 参与应用状态机。`usb_msc_session_apply()` 消费代次：
+  - `WAIT_GATE` 槽直接归还（未提交，无 controller 请求；不调 `async_io_done`）；
+  - `IN_FLIGHT` FLUSH 槽撤销 controller job 后立即归还；
+  - `IN_FLIGHT` 数据 / UNMAP 槽保留到 FTL 完成，完成路径按 `session_gen` 判 stale
+    并丢弃结果（不配对 `async_io_done`，避免误配给新会话的命令）。
+- `tud_ready() == false`（挂起，会话未变）：命令作废并按原 ASYNC 配对。
 
 回调模型：
 
@@ -464,6 +470,7 @@ cache 序列的 END 落点；传输段本身的边界不是 FTL 的序列边界�
 | `SSD_STATUS_IO_ERROR` | 设备侧失败 | run 提交失败（读）、TRIM 失败 |
 | `SSD_STATUS_NOT_SUPPORTED` | 未知 opcode | `ssd_controller_submit` `default` |
 | `SSD_STATUS_BUSY` | 同类请求已有在飞 | 第二条 FLUSH / TRIM |
+| `SSD_STATUS_TIMEOUT` | 请求超过 `SSD_REQUEST_TIMEOUT_MS` | 请求级 deadline（§7.4） |
 
 注意：**“部分 run 受理后失败”返回 `OK`**，最终错误只出现在
 `completion_status`。这是 HIL 的异步契约，不是错误被吞掉（`RISK-CTRL-01`）。
@@ -472,10 +479,41 @@ cache 序列的 END 落点；传输段本身的边界不是 FTL 的序列边界�
 
 - run 提交失败：未提交的 run 数从 `sub_remaining` 扣除；已提交 run 继续完成；
   错误锁存 `agg_status`；
-- 前端放弃（复位 / 拔出）：USB 槽置 `discard`，完成后再释放；FLUSH 槽撤销
-  controller 回执；数据操作不回滚；
+- 前端放弃（复位 / 拔出）：会话代次推进，旧槽标 stale；WAIT_GATE 立即归还，
+  FLUSH 槽撤销 controller 回执，数据操作完成后丢弃、不回滚；
 - host queue 满：命令被拒绝，不分配 entry；
 - FLUSH / TRIM 在飞：返回 `BUSY`，请求对象立即完成，前端自行释放。
+
+### 7.4 请求级超时（tombstone，RISK-HOST-21 A）
+
+每个请求在 `ssd_controller_submit` 记录 `start_ms`；前端（USB slot / CLI pending）
+用 `SSD_REQUEST_TIMEOUT_MS` 判 `ssd_request_expired()`。超时只做两件事：
+
+1. `ssd_request_mark_timeout()`：置 `timed_out`、`completion_status =
+   SSD_STATUS_TIMEOUT`、`complete_flag = 1`；USB 对未回执的命令回
+   `ABORTED COMMAND`，CLI 打印超时；非 FUA 写已提前回执，不再发 host 错误。
+2. **延迟释放**：`entry` / USB 槽 / bounce 必须等
+   `ssd_controller_request_reclaimable()` 为真才能归还：
+   - READ/WRITE：`sub_remaining == 0`（FTL 的 run 全部完成）；
+   - FLUSH：`flush_req != request`（超时路径调用 `ssd_controller_cancel_flush()`）；
+   - TRIM：`trim_req != request`（没有 abort API，继续 step 到 FTL 收尾）。
+
+迟到完成不得覆盖 `TIMEOUT` / `complete_flag`：`on_sub_complete` 对 `timed_out`
+只递减 `sub_remaining`；controller 的 FLUSH/TRIM 完成只摘指针、不写状态。
+非 FUA 写的迟到失败在 reclaim 时补记 deferred。
+
+**B（best-effort abort）已实现**：
+
+- READ/WRITE：`ftl_abort_request(ctx)` 把该请求在所有实例上的组置 `next = total`、
+  `agg_status = TIMEOUT` 并试触发完成；在飞 NAND 命令完成后组照常回调（HIL 的
+  `timed_out` 分支只递减 `sub_remaining`），随后即可 reclaim；
+- TRIM：controller 超时路径对该实例调 `ftl_trim_abort()`，只清 job 状态；
+  已提交的 Journal/L2P 命令自然完成；
+- FLUSH：`ssd_controller_cancel_flush()`。
+
+⚠ 残余：若**单条在飞 NAND/FC 命令永远不完成**，组的 `outstanding` 不归零，
+slot / entry 仍会一直占着。B 不能强制丢弃仍在硬件队列里的命令；这种情况需要
+控制器复位。
 
 ---
 

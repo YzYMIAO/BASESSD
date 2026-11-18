@@ -394,6 +394,89 @@ BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op)
 }
 
 /**
+ * @brief 组槽是否在使用
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = used
+ */
+BOOL pend_group_is_used(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    return table->groups[gi].used;
+}
+
+/**
+ * @brief 组是否仍有未下发的子操作（used && next < total）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 所有者仍在下发
+ */
+BOOL pend_group_has_remaining(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const pend_group_s *g = &table->groups[gi];
+
+    return (g->used != false) && (g->next < g->total);
+}
+
+/**
+ * @brief 组是否仍在推进（used && (outstanding != 0 || next < total)）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 有在飞或在待发子操作
+ */
+BOOL pend_group_is_busy(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const pend_group_s *g = &table->groups[gi];
+
+    return (g->used != false) && ((g->outstanding != 0U) || (g->next < g->total));
+}
+
+/**
+ * @brief 中止属于同一 ctx 的所有组（best-effort）
+ *
+ * @param table pending 表
+ * @param ctx   HIL 请求指针（非空）
+ * @return true = 至少命中一个组
+ */
+BOOL pend_group_abort_ctx(pend_ctx_s *table, void *ctx)
+{
+    ASSERT(table != NULL);
+    ASSERT(ctx != NULL);
+
+    BOOL any = false;
+
+    for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
+    {
+        pend_group_s *g = &table->groups[gi];
+
+        if ((g->used == false) || (g->completion.on_complete_ctx != ctx))
+        {
+            continue;
+        }
+
+        any = true;
+
+        /* 停止下发剩余子操作；在飞子操作完成后自然触发完成通知。 */
+        g->next       = g->total;
+        g->agg_status = SSD_STATUS_TIMEOUT;
+        pend_group_maybe_complete(table, gi);
+    }
+
+    return any;
+}
+
+/**
  * @brief 组 outstanding 下溢的限流日志
  *
  * @param who 触发者（静态字符串，日志用）

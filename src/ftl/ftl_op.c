@@ -327,7 +327,7 @@ BOOL ftl_op_cache_seq_active(void)
 
         // draining 也算「序列未结束」：门控在排空期间仍然关着，后台提交同样会被
         // 拒（见 ftl_op_seq_gate），所以 deadline 挂起判据必须把它算进来。
-        if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)))
+        if ((ftl != NULL) && (ftl_cache_seq_is_open(ftl) != false))
         {
             return true;
         }
@@ -350,25 +350,23 @@ BOOL ftl_op_cache_seq_progressing(void)
     {
         const ftl_ctx_s *ftl = g_op_route[die];
 
-        if ((ftl == NULL) || ((ftl->cache_stream.seq.active == false) && (ftl->cache_stream.seq.draining == false)))
+        if ((ftl == NULL) || (ftl_cache_seq_is_open(ftl) == false))
         {
             continue;
         }
 
-        const WORD gi = ftl->cache_stream.seq.owner_gi;
+        const WORD gi = ftl_cache_seq_owner_gi(ftl);
 
         if (gi >= FTL_GROUP_MAX)
         {
             continue;
         }
 
-        const pend_group_s *g = &ftl->pending.groups[gi];
-
-        if (g->used == false)
+        if (pend_group_is_used(&ftl->pending, gi) == false)
         {
             continue;
         }
-        if (g->next < g->total)
+        if (pend_group_has_remaining(&ftl->pending, gi) != false)
         {
             return true; /* 所有者仍在下发 */
         }
@@ -382,7 +380,7 @@ BOOL ftl_op_cache_seq_progressing(void)
         // 序列正在有序收尾（已请求 padding END / END 已在飞）：等它完成，不算结构性卡死。
         // ⚠ 不看 break_requested：它只是“请求下一窗口收尾”，若请求一直未被兑现，
         // 继续把它当进展会让 deadline 永远被清掉。
-        if ((ftl->cache_stream.seq.close_requested == true) || (ftl->cache_stream.seq.closing == true))
+        if (ftl_cache_seq_is_closing(ftl) != false)
         {
             return true;
         }
@@ -416,9 +414,7 @@ BOOL ftl_op_bg_submit_deferred(void)
 
         for (BYTE gi = 0U; gi < FTL_GROUP_MAX; gi++)
         {
-            const pend_group_s *g = &ftl->pending.groups[gi];
-
-            if ((g->used == true) && ((g->outstanding != 0U) || (g->next < g->total)))
+            if (pend_group_is_busy(&ftl->pending, gi) != false)
             {
                 return true;
             }
@@ -453,7 +449,7 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
 {
     ftl_ctx_s *ftl = ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun);
 
-    if ((ftl != NULL) && ((ftl->cache_stream.seq.active == true) || (ftl->cache_stream.seq.draining == true)) && (ftl->cache_stream.seq.owner_submit == false))
+    if ((ftl != NULL) && (ftl_cache_seq_gate_blocks(ftl) != false))
     {
         // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
         // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR。
@@ -463,22 +459,15 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
         // draining，把刚放开的门控立刻重新关上，恢复读永远提交不进来。
         if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_L2P))
         {
-            ftl->cache_stream.seq.break_requested = true;
+            ftl_cache_seq_request_break(ftl);
         }
 
         // L2P 加载是前台的确定依赖（写确认 / GC 搬移）：只请求断点不够，host 连续流
-        // 会在下一个窗口立刻重新占住门控，加载反复被拒直到调用者超时。这里再置
-        // yield_pending，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
-        // 时钟缺失（now == 0）时不置：host 端无法判断超时，宁可放弃让行也不锁死。
+        // 会在下一个窗口立刻重新占住门控，加载反复被拒直到调用者超时。这里再请求
+        // 让行，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
         if (op == FTL_OP_L2P)
         {
-            const DWORD now_ms = platform_now_ms();
-
-            if ((now_ms != 0U) && (ftl->cache_stream.seq.yield_pending == false))
-            {
-                ftl->cache_stream.seq.yield_pending = true;
-                ftl->cache_stream.seq.yield_ms      = now_ms;
-            }
+            ftl_cache_seq_request_yield(ftl, platform_now_ms());
         }
         return true;
     }
@@ -494,10 +483,9 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
  */
 static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
 {
-    if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl->cache_stream.seq.yield_pending == true))
+    if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl_cache_seq_yield_pending(ftl) != false))
     {
-        ftl->cache_stream.seq.yield_pending = false;
-        ftl->cache_stream.seq.yield_ms      = 0U;
+        ftl_cache_seq_yield_clear(ftl);
     }
 }
 
