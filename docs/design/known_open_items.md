@@ -2025,16 +2025,16 @@
 #### RISK-NANDP-04 多 target FMC 后端初始化覆盖不完整
 
 - **后果**：多 target 板卡若不逐个初始化，`nand_phy_backend_get(ch,ce)` 会返回 handlers 为空的实例。
-- **缓解**：`include/nand/nand_board.h` 提供 `nand_board_init_all_targets()`；`mt29f_hw_init()` 遍历板上 target 表调用 `nand_board_init_target()`；`nand_target_get()` 对 handlers 为 NULL 的 backend 返回 `NOT_READY`。当前 target 表仍只有 `(0,0)`。
+- **缓解**：`src/nand/internal/nand_board_internal.h` 提供 `nand_board_init_all_targets()`；`mt29f_hw_init()` 遍历板上 target 表调用 `nand_board_init_target()`；`nand_target_get()` 对 handlers 为 NULL 的 backend 返回 `NOT_READY`。当前 target 表仍只有 `(0,0)`。
 - **下一步**：多 target 板卡在 `src/nand/nand_board.c` 填充实际 target 表并实现 NCE/R-B#/FMC bank 选择；上板逐 target 验证。
-- **证据**：`include/nand/nand_board.h`；`src/nand/nand_board.c:nand_board_init_all_targets` / `nand_board_init_target` / `nand_target_get`；`src/nand/devices/mt29f___g08a.c:mt29f_hw_init`。
+- **证据**：`src/nand/internal/nand_board_internal.h`；`src/nand/nand_board.c:nand_board_init_all_targets` / `nand_board_init_target` / `nand_target_get`；`src/nand/devices/mt29f___g08a.c:mt29f_hw_init`。
 - **历史/验证**：
   - 2026-11-07 新增 target 表遍历初始化 + `NOT_READY` → 未上板
 
 #### RISK-NANDP-06 target 选择曾拆成两个半接口
 
 - **后果**：多 target 板卡上漏一次通路切换 ⇒ 命令打到当前 bank，**静默写错 target**。
-- **缓解**：target 选择收成唯一入口 `nand_target_get(ch,ce,&backend)`（通路校验 + backend 一次完成）；`nand_select_target` 为 `static`，`nand_phy_backend_get` 收进 `nand_fmc.h`（NAND 内部）；engine/dispatch 全部使用它。
+- **缓解**：target 选择收成唯一入口 `nand_target_get(ch,ce,&backend)`（通路校验 + backend 一次完成）；`nand_select_target` 为 `static`，`nand_phy_backend_get` 收进 `src/nand/internal/nand_fmc.h`（NAND 内部）；engine/dispatch 全部使用它。
 - **下一步**：单 target 回归；实现多 target 时补双通路负例上板。
 - **证据**：`include/nand/nand_device.h:nand_target_get`；`src/nand/nand_board.c`；`src/fc/fc_nand_engine.c:fc_nand_execute` / `fc_nand_enable_high_speed_target`；`src/fc/fc_nand_dispatch.c:fc_nand_dispatch_task_fc_start`。
 - **历史/验证**：

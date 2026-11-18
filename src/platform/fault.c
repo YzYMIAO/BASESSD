@@ -36,7 +36,7 @@
 #define FAULT_FLASH_END   0x08200000U
 #define FAULT_DTCM_BEGIN  0x20000000U
 /* ITCM 热代码（.ssd_code_high，VMA 0x0）：被中断函数的保存 LR 常落在这里。
- * 阈值 0x1000 只为压掉栈上的小整数噪声（本仓 l2p/ftl/fc 热函数都在 0x3xxx 以上）。 */
+ * 阈值 0x1000 只为压掉栈上的小整数噪声（本仓热函数都在 0x3xxx 以上）。 */
 #define FAULT_ITCM_CODE_BEGIN 0x00001000U
 #define FAULT_ITCM_END        0x00010000U
 

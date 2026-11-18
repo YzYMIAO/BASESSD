@@ -2,7 +2,6 @@
 #define FC_NAND_DISPATCH_H
 
 #include "fc_nand_engine.h"
-#include "nand_config.h"
 
 #include <stdint.h>
 

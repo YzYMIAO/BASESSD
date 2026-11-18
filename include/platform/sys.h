@@ -49,10 +49,6 @@ void sys_intx_disable(void);
 void sys_intx_enable(void);
 void sys_msr_msp(DWORD address);
 
-/* 参数顺序：预分频、倍频、SYSCLK分频、外设输出分频；HSE=25 MHz 时传入 5,160,2,4 得到 CPU=400 MHz。
- * 返回 0 = 成功（FUNC_STATUS_SUCCESS 语义），非 0 = 失败。 */
-func_status_e sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
-
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/sys_port.c 实现；共享层只通过这些函数触碰 SoC。
  */
@@ -69,6 +65,6 @@ void          sys_port_irq_disable(void);
 void          sys_port_irq_enable(void);
 void          sys_port_set_msp(DWORD address);
 void          sys_port_hal_init(void);
-func_status_e sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
+func_status_e sys_port_clock_init(void);
 
 #endif /* PLATFORM_SYS_H */

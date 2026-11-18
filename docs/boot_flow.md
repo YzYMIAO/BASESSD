@@ -24,7 +24,7 @@
    READ_ID 校验（boot 命令直接走 `nand_engine_execute`，绕过命令队列）。
 4. **放行命令队列**：`fc_nand_engine_set_armed(1U)`（此前 `submit`/`submit_chain` 一律拒绝）。
 5. **Controller 汇总**：`fc_boot_report()`。
-6. **平台 time_us 注册**：`stm32_platform_register()` —— FTL 的 T3 定时触发（CP 10 s / GC 500 ms）依赖它。
+6. **平台 time_us 注册**：`platform_register()` —— FTL 的 T3 定时触发（CP 10 s / GC 500 ms）依赖它。
 7. **FTL**：`ssd_ftl_boot_all()` —— 全实例 `ftl_init` → 介质布局版本校验（不符则
    `ftl_media_format` 自动全片格式化）→ free pool 回填 → `ftl_boot_recovery`
    （Checkpoint 加载 + Journal 回放）→ `ssd_controller_init` 绑定路由 → `g_ftl_ready = 1`。

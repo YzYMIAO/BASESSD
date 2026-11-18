@@ -29,6 +29,8 @@
  *   ② _sbrk()          —— 带上下界检查的堆生长
  */
 
+#include "syscalls.h"
+
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stddef.h>

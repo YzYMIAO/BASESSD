@@ -16,4 +16,3 @@ THIRD_PARTY_CFLAGS += -Wno-cast-align
 MODULE_SRCS += $(wildcard $(SRC_ROOT)/platform/stm32h743/*.c)
 MODULE_INCS += $(INC_ROOT)/platform/stm32h743
 MODULE_INCS += $(INC_ROOT)/platform/stm32h743/bsp
-MODULE_INCS += $(INC_ROOT)/nand

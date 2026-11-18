@@ -4,7 +4,7 @@
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
- *          → fc_boot_arm() → stm32_platform_register
+ *          → fc_boot_arm() → platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → usb_msc_init → usb_device_init
  *          → while(1) { stack_guard_check; cli_service_poll; ssd_runtime_pump; }
@@ -787,7 +787,7 @@ int main(void)
         boot_report_controller();
         /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
          * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
-        LOGE_IF(stm32_platform_register() != FUNC_STATUS_SUCCESS, "platform register failed; T3 timers disabled\r\n");
+        LOGE_IF(platform_register() != FUNC_STATUS_SUCCESS, "platform register failed; T3 timers disabled\r\n");
         boot_section("ftl");
         ssd_ftl_boot_all();
 

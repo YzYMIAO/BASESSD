@@ -30,7 +30,7 @@ void          uart_tx_dma_irq_handler(void);
  * 传输，控制台 TX 状态机因等不到完成中断而永久阻塞。
  *
  * @return FUNC_STATUS_SUCCESS 已就绪（本次初始化成功或此前已成功）；
- *         FUNC_STATUS_ERROR HAL_DMA_DeInit/Init 失败。
+ *         FUNC_STATUS_ERROR 底层 DMA 控制器反初始化/初始化失败。
  */
 func_status_e dma_port_uart_tx_init(void);
 void          dma_port_uart_tx_irq_handler(void);

@@ -50,7 +50,7 @@ static delay_status_e delay_systick_us_busy(DWORD us)
 /*
  * 读取一致的 (ms, 本毫秒内已过周期数)。
  *
- * SysTick 从 LOAD 递减到 0 后重装；HAL_IncTick 与 VAL=LOAD 同相。
+ * SysTick 从 LOAD 递减到 0 后重装；系统 tick 更新与 VAL=LOAD 同相。
  * 先读 ms、再读 VAL、再读 ms：若 ms 在两次读之间变化，重读 VAL，
  * 避免把「上一毫秒的 VAL」配到「下一毫秒的 ms」。
  */

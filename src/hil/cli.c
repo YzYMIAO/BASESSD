@@ -31,6 +31,7 @@
 #include "runtime.h"                /* ssd_runtime_pump：CLI 同步等待命令自带泵 */
 #include "ssd_request.h"
 #include "stack_guard.h"
+#include "syscalls.h" /* syscalls_heap_used：堆与栈共用 DTCM */
 #include "usart.h"
 #include "usb_msc.h"
 #include "watchdog.h" /* storage_wdg_kick：长同步命令的有界喂狗 */
@@ -45,9 +46,6 @@
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "ut_main.h"
 #endif
-
-/* 平台 syscalls.c：堆与栈共用 DTCM，`stack` 需要单独报告堆用量。 */
-extern DWORD syscalls_heap_used(void);
 
 #define USART_CLI_LINE_CAPACITY 128U
 /* 单条命令行最多几个 token。`test` 子命令要能容下

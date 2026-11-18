@@ -1,8 +1,7 @@
 #ifndef FC_NAND_ENGINE_H
 #define FC_NAND_ENGINE_H
 
-#include "nand_protocol.h"
-#include "onfi_1_0.h"
+#include "nand_interface.h"
 #include "ssd_types.h"
 
 #include <stdint.h>

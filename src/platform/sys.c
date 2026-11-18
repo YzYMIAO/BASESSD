@@ -20,7 +20,7 @@ void sys_init(void)
     sys_mpu_config();
     sys_cache_enable();
     sys_port_hal_init();
-    if (sys_stm32_clock_init(5U, 160U, 2U, 4U) != FUNC_STATUS_SUCCESS)
+    if (sys_port_clock_init() != FUNC_STATUS_SUCCESS)
     {
         while (1)
         {
@@ -85,9 +85,4 @@ void sys_intx_enable(void)
 void sys_msr_msp(DWORD address)
 {
     sys_port_set_msp(address);
-}
-
-func_status_e sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
-{
-    return sys_port_clock_init(pll_prediv, pll_mul, sysclk_div, peripheral_div);
 }

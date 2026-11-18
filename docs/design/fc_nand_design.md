@@ -40,11 +40,18 @@ FC 层是硬件 FCC（Flash Controller Core，SSD 主控里负责 NAND 通道与
 │   器件级操作：RESET / READ_ID / 参数页 / 时序模式切换              │
 ├────────────────────────────────────────────────────────────────┤
 │ NAND 协议与硬件后端（`src/nand/`）                                │
+│   nand_interface.h  FC 唯一公共入口（geometry/protocol/device/board/ONFI）│
 │   onfi_1_0.c     51 个 OP 码的 UOP 序列表 + 协议属性              │
 │   nand_fmc.c     FMC 后端，13 个 UOP handler，数据阶段固定 PIO     │
 │   devices/mt29f___g08a.c  器件几何、时序表、探针                   │
+│   internal/      FMC 与 board target/PHY 私有头                    │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+NAND 公共面：
+- FC 只 include `include/nand/nand_interface.h`（geometry/protocol/device/board/ONFI 的 umbrella）；
+- FTL 只 include `include/nand/nand_config.h` / `onfi_1_0.h` 取几何与命令常量；
+- `nand_fmc.h`、`nand_board_internal.h` 等私有头在 `src/nand/internal/`，FC/FTL 不得 include。
 
 设计原则：
 
@@ -1994,7 +2001,7 @@ FC-NAND 在软件层面完整对齐了主控的分层模型：命令池 / 描述
 ```text
 sys_init → TIM6 毫秒心跳 → log 绑定 → stack_guard_init → banner
         → fc_init → fc_nand_init
-        → fc_nand_engine_set_armed(1) → stm32_platform_register
+        → fc_nand_engine_set_armed(1) → platform_register
         → ssd_ftl_boot_all → [g_ftl_ready] fc_nand_enable_high_speed
         → usb_msc_init → usb_device_init → while(1)
 ```
@@ -2027,7 +2034,7 @@ sequenceDiagram
     M->>NE: else if fc_nand_init()
     NE->>NE: mt29f_hw_init（HAL_NAND_Init 低速 PCC + board target 装配）<br/>fc_nand_scan_targets → fc_nand_target_probe（RESET / READ_ID / 参数页）
     M->>M: else fc_nand_engine_set_armed(1) ★放行 submit / submit_chain
-    M->>M: stm32_platform_register() 注册 time_us（FTL 的 CP / GC 定时依赖）
+    M->>M: platform_register() 注册 time_us（FTL 的 CP / GC 定时依赖）
     M->>BOOT: ssd_ftl_boot_all()
     BOOT->>BOOT: ① 逐实例 ssd_ftl_boot → ftl_init / boot_recovery<br/>② 建 g_ftl_ptrs 三维指针表<br/>③ ftl_op_route_set(g_ftl_ptrs)<br/>④ ssd_controller_init(&amp;g_ctrl, g_ftl_ptrs)<br/>⑤ g_ftl_ready = 1 ★主循环切换点
     Note over M,BOOT: ★ NAND 初始化失败 ⇒ set_armed / platform_register / FTL boot 全跳过
@@ -2084,7 +2091,7 @@ flowchart TB
     I --> HW["mt29f_hw_init()（src/nand/devices/mt29f___g08a.c）"]
     HW --> H1["g_nand_handle: Bank3 / 8 位总线 / ECC 关闭 / TCLR=TAR=8"]
     HW --> H2["mt29f_fill_low_pcc → HAL_NAND_Init<br/>★首次碰硬件：MspInit 配时钟 / GPIO / NCE"]
-    HW --> H3["nand_board_init_all_targets → nand_board_init_target(ch, ce)"]
+    HW --> H3["nand_board_init_all_targets → nand_board_init_target(ch, ce)<br/>（src/nand/internal/nand_board_internal.h）"]
     H3 --> H3A["校验 (ch, ce) 在板级通路表内，占用 FMC bank"]
     H3 --> H3B["组装 FMC 三窗口（data / command / address）+ R/B# GPIO"]
     H3 --> H3C["nand_fmc_init_target(ch, ce, &amp;cfg) ← per-(ch, ce) 后端实例"]
@@ -2110,7 +2117,7 @@ flowchart TB
 | 4 | `fc_nand_init` → `mt29f_hw_init` | FMC 引脚/时钟、per-(ch,ce) 后端就绪；armed 仍为 0 |
 | 5 | `fc_nand_init` → 探针 | 芯片已复位、ID 与参数页已核对 |
 | 6 | `set_armed(1)` | `submit`/`submit_chain` 放行——FC 才能向 NAND 派发命令 |
-| 7 | `stm32_platform_register` | `time_us` 就绪，FTL 的 CP / GC 定时有依据 |
+| 7 | `platform_register` | `time_us` 就绪，FTL 的 CP / GC 定时有依据 |
 | 8 | `ssd_ftl_boot_all` ①–④ | 每个 (ch,ce,lun) 完成 `ftl_init` + `boot_recovery`；controller 绑定 FTL |
 | 9 | `ssd_ftl_boot_all` ⑤ | `g_ftl_ready = 1`，主循环切到 `ftl_service_pump()` |
 | 10 | `fc_nand_enable_high_speed` | SET_FEATURES(01h, 5) + 重算 PCC + 重配 FMC；失败告警并回滚低速 |

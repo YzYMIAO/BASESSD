@@ -20,15 +20,15 @@ static QWORD platform_time_us(void)
     return delay_time_now_us64();
 }
 
-static const ssd_platform_ops_s g_stm32_platform_ops = {
+static const ssd_platform_ops_s g_platform_ops_default = {
     .time_us = platform_time_us,
     .time_ms = delay_now_ms, /* SysTick/HAL tick：ARM 核心的系统毫秒时基 */
     /* log_write / memory_allocate / memory_free 暂不提供；register 只强制 time_us。 */
 };
 
-func_status_e stm32_platform_register(void)
+func_status_e platform_register(void)
 {
-    return ssd_platform_register(&g_stm32_platform_ops);
+    return ssd_platform_register(&g_platform_ops_default);
 }
 
 func_status_e ssd_platform_register(const ssd_platform_ops_s *ops)

@@ -13,6 +13,7 @@
 
 #include "assertion.h"
 #include "log.h"
+#include "nand_board_internal.h"
 #include "nand_config.h"
 #include "nand_device.h"
 #include "nand_fmc.h"

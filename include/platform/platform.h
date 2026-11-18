@@ -35,10 +35,9 @@ const ssd_platform_ops_s *ssd_platform_get(void);
 DWORD platform_now_ms(void);
 
 /*
- * 注册本平台的 ssd_platform_ops_s 实现表。
- * 名字被 src/main.c 冻结；实现表本身在共享 src/platform/platform.c，
- * 其中的 time_us 由 port 侧毫秒计数换算（见 src/platform/<soc>/<svc>_port.c）。
+ * 注册当前平台的 ssd_platform_ops_s 实现表。
+ * 实现表在共享 src/platform/platform.c；time_us 由 port 侧毫秒计数换算。
  */
-func_status_e stm32_platform_register(void);
+func_status_e platform_register(void);
 
 #endif /* SSD_PLATFORM_H */

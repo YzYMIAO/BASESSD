@@ -226,7 +226,7 @@ void sys_port_hal_init(void)
  *                          SDRAM SDCLK=200/2=100 MHz）
  */
 
-func_status_e sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
+func_status_e sys_port_clock_init(void)
 {
     RCC_OscInitTypeDef       oscillator;
     RCC_ClkInitTypeDef       clocks;
@@ -252,10 +252,10 @@ func_status_e sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_
     /* RCC_OscInitTypeDef.PLL 对应硬件 PLL1。以下参数得到 PLL1P=400 MHz。 */
     oscillator.PLL.PLLState   = RCC_PLL_ON;
     oscillator.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
-    oscillator.PLL.PLLM       = pll_prediv;     /* 预分频：25/5 = 5 MHz，PLL 输入频率 */
-    oscillator.PLL.PLLN       = pll_mul;        /* 倍频：5*160 = 800 MHz，PLL1 VCO */
-    oscillator.PLL.PLLP       = sysclk_div;     /* SYSCLK 分频：800/2 = 400 MHz，CPU 时钟 */
-    oscillator.PLL.PLLQ       = peripheral_div; /* 外设分频：800/4 = 200 MHz，PLL1_Q */
+    oscillator.PLL.PLLM       = 5U;   /* 预分频：25/5 = 5 MHz，PLL 输入频率 */
+    oscillator.PLL.PLLN       = 160U; /* 倍频：5*160 = 800 MHz，PLL1 VCO */
+    oscillator.PLL.PLLP       = 2U;   /* SYSCLK 分频：800/2 = 400 MHz，CPU 时钟 */
+    oscillator.PLL.PLLQ       = 4U;   /* 外设分频：800/4 = 200 MHz，PLL1_Q */
     oscillator.PLL.PLLR       = 2U;
     oscillator.PLL.PLLRGE     = RCC_PLL1VCIRANGE_2;
     oscillator.PLL.PLLVCOSEL  = RCC_PLL1VCOWIDE;

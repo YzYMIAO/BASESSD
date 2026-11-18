@@ -48,7 +48,7 @@ include/platform/<soc>/*_port.h   ← 实现头：允许 HAL 类型，只有 por
 | QSPI | `qspi.h` | `qspi.c` | `qspi_port.c` | — | 未启用（保留抽象） |
 | RNG | `rng.h` | `rng.c` | `rng_port.c` | — | 未启用（UT 用软件 PRNG） |
 | USB device | `usb.h` | —（抽象入口在 port 实现） | `usb_port.c` | HIL / TinyUSB | 启用 |
-| 系统调用 | — | `syscalls.c` | —（target 无关） | newlib `_sbrk` / 堆栈守卫 | 启用 |
+| 系统调用 | `syscalls.h` | `syscalls.c` | —（target 无关） | newlib `_sbrk` / 堆栈守卫 | 启用 |
 
 **例外与未启用**：
 

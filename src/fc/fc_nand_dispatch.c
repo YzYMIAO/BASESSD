@@ -28,17 +28,12 @@
 #include "delay.h"
 #include "fc_interface.h"
 #include "fc_nand_engine.h"
+#include "nand_interface.h"
 #if defined(FC_NAND_TEST_ENABLE)
 #    include "fault_inject.h"
 #endif
-#include "fc_interface.h"
 #include "log.h"
-#include "nand_board.h"
-#include "nand_config.h"
 #include "nand_debug.h"
-#include "nand_device.h"
-#include "nand_protocol.h"
-#include "onfi_1_0.h"
 #include "ssd_compiler.h"
 
 #include <stddef.h>

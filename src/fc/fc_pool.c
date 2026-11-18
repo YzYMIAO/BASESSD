@@ -26,7 +26,7 @@
 
 #include "assertion.h"
 #include "fc_internal.h"
-#include "onfi_1_0.h"
+#include "nand_interface.h"
 #include "ssd_compiler.h"
 
 #include <string.h>

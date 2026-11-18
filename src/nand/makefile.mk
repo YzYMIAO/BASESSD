@@ -11,3 +11,7 @@ MODULE_SRCS += $(NAND_DEVICE_SRC)
 MODULE_INCS += $(INC_ROOT)/nand
 MODULE_INCS += $(INC_ROOT)/nand/devices
 MODULE_INCS += $(INC_ROOT)/platform/stm32h743
+
+# NAND 私有头（FMC/board internal）：只给 NAND 自己的对象。
+NAND_PRIVATE_INC := $(SRC_ROOT)/nand/internal
+$(OBJ_DIR)/nand/%.o: CFLAGS += -I$(NAND_PRIVATE_INC)

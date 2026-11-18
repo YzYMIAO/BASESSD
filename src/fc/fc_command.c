@@ -9,7 +9,7 @@
 
 #include "assertion.h"
 #include "fc_interface.h"
-#include "onfi_1_0.h"
+#include "nand_interface.h"
 
 #include <stddef.h>
 #include <string.h>

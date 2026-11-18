@@ -29,10 +29,8 @@
 #include "assertion.h"
 #include "delay.h"
 #include "log.h"
-#include "nand_config.h"
 #include "nand_debug.h"
-#include "nand_device.h"
-#include "onfi_1_0.h"
+#include "nand_interface.h"
 
 #include <stddef.h>
 #include <string.h>
