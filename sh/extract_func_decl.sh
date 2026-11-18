@@ -27,15 +27,13 @@ show_help() {
     -h, --help      显示帮助信息
 
 示例:
-    # 单文件处理
-    $0 -f ../src/ds_array.c -o ../include/ds_array.h
-    $0 -f ds_array.c -o ds_array.h
-    $0 -f src/ds_array.c                    # 自动生成 src/ds_array.h
-    
+    # 单文件处理（在仓库根执行）
+    $0 -f src/common/log.c -o include/common/log.h
+    $0 -f src/common/log.c                  # 自动生成 src/common/log.h
+
     # 目录批量处理（指定输出目录）
-    $0 -d ../src/data_structure/ -o ../include/data_structure/
+    $0 -d src/common/ -o include/common/
     $0 -d src/ -o include/                  # 保持目录结构
-    $0 -d . -o ../include/                  # 处理当前目录，输出到../include/
 
 注意:
     - 头文件必须已存在，脚本只在末尾追加，不修改原有内容

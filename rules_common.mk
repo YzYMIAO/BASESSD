@@ -4,12 +4,14 @@
 # 功能：
 #   1. 编译规则：.c -> .o
 #   2. 自动依赖生成：-MMD -MP
-#   3. 代码覆盖率支持
 # ============================================================================
 
 # ----------------------------------------------------------------------------
-# 0. 静默模式控制
+# 0. 构建失败语义与静默模式
 # ----------------------------------------------------------------------------
+# 编译中断/失败时删除半成品 .o：否则残件可能比源码新，下次被当成有效对象。
+.DELETE_ON_ERROR:
+
 ifeq ($(V),1)
 Q =
 else
@@ -26,20 +28,13 @@ $(C_OBJS):$(OBJ_DIR)/%.o: $(SRC_ROOT)/%.c
 	$$(Q)$$(CC) $$(CFLAGS) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
 endef
 
-define ASILE_template
-$(S_OBJS):$(OBJ_DIR)/%.o:$(SRC_ROOT)/%.s
-	@$$(MKDIR) $$(dir $$@)
-	@$$(ECHO) "Assembling the $$< ..."
-	$$(Q)$$(AS) $$(ASFLAGS) -MD -MP -c $$< -o $$@
-endef
-
 define THIRD_PARTY_COMPILE_template
-$(THIRD_PARTY_C_OBJS):$(OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.c
+$(THIRD_PARTY_C_OBJS):$(VENDOR_OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.c
 	@$$(MKDIR) $$(dir $$@)
 	@$$(ECHO) "Compiling third-party $$< ..."
-	$$(Q)$$(CC) $$(CFLAGS) $$(THIRD_PARTY_CFLAGS) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CC) $$(VENDOR_CFLAGS) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
 
-$(THIRD_PARTY_S_OBJS):$(OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.s
+$(THIRD_PARTY_S_OBJS):$(VENDOR_OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.s
 	@$$(MKDIR) $$(dir $$@)
 	@$$(ECHO) "Assembling third-party $$< ..."
 	$$(Q)$$(AS) $$(ASFLAGS) -MD -MP -c $$< -o $$@
@@ -55,7 +50,6 @@ endef
 
 # 展开编译规则
 $(eval $(COMPILE_template))
-$(eval $(ASILE_template))
 
 # 开机横幅的 __DATE__/__TIME__ 来自 main.c 的编译时刻；若只重编其他模块再链接，
 # 横幅会显示旧时间，和实际二进制不一致。强制每次构建重编 main.c，保证 banner
@@ -72,18 +66,8 @@ endif
 
 # ----------------------------------------------------------------------------
 # 2. 自动包含依赖文件
+#   对象目录镜像源码路径，深度不固定（third_party 有多层目录），递归收集；
+#   不要写成固定层数的 wildcard —— 新增一级目录后依赖会静默丢失。
 # ----------------------------------------------------------------------------
--include $(wildcard $(OBJ_DIR)/*.d)
--include $(wildcard $(OBJ_DIR)/*/*.d)
--include $(wildcard $(OBJ_DIR)/*/*/*.d)
--include $(THIRD_PARTY_C_OBJS:.o=.d)
--include $(THIRD_PARTY_S_OBJS:.o=.d)
--include $(TEST_C_OBJS:.o=.d)
-
-# ----------------------------------------------------------------------------
-# 3. 代码覆盖率支持（通过 config.mk 中的 COVERAGE 控制）
-# ----------------------------------------------------------------------------
-ifeq ($(COVERAGE),1)
-CFLAGS += -fprofile-arcs -ftest-coverage
-LDFLAGS += -fprofile-arcs -ftest-coverage
-endif
+-include $(shell find $(OBJ_DIR) -name '*.d' 2>/dev/null)
+-include $(shell find $(VENDOR_OBJ_DIR) -name '*.d' 2>/dev/null)

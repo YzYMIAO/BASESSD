@@ -420,8 +420,9 @@ FC 不维护任何"软件寄存器影子"。队列用量与池用量直接读实
 外部只 `#include "fc_interface.h"`。该头是 FC 唯一公共契约：基础类型、
 命令/描述符/CQ 结构、池/队列/布局常量、对外 API 与 main 启动入口。
 
-`src/fc/` 下全部是 FC 私有头，FTL/HIL 不得 include；构建只为
-FC 对象和目标测试加私有 include 路径（见 `src/fc/makefile.mk`）。
+`src/fc/` 下全部是 FC 私有头，FTL/HIL 不得 include；构建只为 FC 对象加私有
+include 路径（见 `src/fc/makefile.mk`）。测试对象的私有 include 与测试源由
+`tests/makefile.mk` 统一声明，不散落在模块 fragment 里。
 
 | 文件 | 内容 |
 |------|------|

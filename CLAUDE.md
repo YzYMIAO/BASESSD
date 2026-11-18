@@ -600,9 +600,9 @@ typedef union FC_PARAM_U
 | **`CLAUDE.md` 自身的变更史** | `docs/archive/claude_md_history.md`（日常不读） |
 | 历史归档 | `docs/archive/`（日常不读） |
 | 构建 | `make all`(debug，含 `types-check`) / `make release` / `make tests UT=FC\|FTL\|HIL` |
-| 类型形态检查 | `make types-check`（H50 正向不变量；`tools/check_types.py`） |
+| 类型形态检查 | `make types-check`（H50 正向不变量；`tools/check_types.py`）；`make types-test` 为检查器自检（P13/C7 区分力） |
 | 产物 | `build/<debug\|release>/` |
-| 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`，按配置分置，**切换构建无需 `make clean`** |
+| 对象目录 | `obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL` / `obj_ut_HIL`，按配置分置，**切换构建无需 `make clean`**；第三方（HAL/TinyUSB）对象与 `libthird_party.a` 在 `obj_vendor` / `lib` 共享，所有 target 只编一次 |
 | 编译器 | arm-none-eabi；`-Wall -Wextra -Wshadow -Wcast-align ...`，**无 `-Werror`**（零告警靠纪律） |
 | 运行时硬约束 | IWDG nominal 30s 配置（`src/main.c`），**当前所有构建档关闭**（`src/main.c`；启用待上板，RISK-CLI-01）；长同步操作喂狗点 `storage_wdg_kick()`；栈哨兵 `include/common/stack_guard.h` |
 | 缓存维护范本 | `src/platform/stm32h743/usart_port.c`（Clean + 32B 对齐；当前无 Invalidate 调用点） |

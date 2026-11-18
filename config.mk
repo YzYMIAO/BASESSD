@@ -1,11 +1,10 @@
 # ============================================================================
-# config.mk - 企业级全局配置文件
+# config.mk - 全局构建配置
 # ============================================================================
 # 设计原则：
-#   1. 所有路径使用绝对路径（通过$(CURDIR)），避免子模块中的相对路径混乱
-#   2. 编译选项按功能分组（警告/调试/优化/安全检查）
+#   1. 所有路径使用绝对路径（通过 $(CURDIR)），避免子模块中的相对路径混乱
+#   2. 编译选项按功能分组（警告 / 调试 / 优化）
 #   3. 支持工具链前缀（CROSS_COMPILE），便于交叉编译
-#   4. 增加构建性能统计
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -24,7 +23,6 @@ INC_ROOT := $(PROJECT_ROOT)/include
 
 
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
-CPU_TYPES := cortex-m7
 ifeq ($(FC_NAND_TEST_ENABLE),1)
 # UT 镜像把测试自有大缓冲放到 SRAM 尾部，避免全量套件溢出 AXI_RAM/AXI_NOCACHE；
 # 生产镜像保持原布局。
@@ -43,8 +41,8 @@ BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TYPE)
 
 # 开卡镜像（make format-image）：**bin 输出路径保持标准**
 #   build/<type>/bin/debug.bin —— 用户的烧录/调试配置不用改。
-# 只有对象/库/依赖目录按 CFLAGS 分置，避免正常镜像与开卡镜像互相复用陈旧 .o
-# （本工程没有「CFLAGS 变化 ⇒ 重编译」依赖）。
+# 对象目录按 FORMAT 分置只是缓存：正确性由顶层 check-config / check-vendor-config
+# 的配置指纹保证（配置变化会清空对象目录）；后缀避免来回切换时全量重编。
 FORMAT_OBJ_SUFFIX :=
 ifeq ($(FORMAT_ON_BOOT),1)
     FORMAT_OBJ_SUFFIX := _fmt
@@ -59,20 +57,16 @@ endif
 #   obj_ut         `make tests`（-DFC_NAND_TEST_ENABLE 会改变 cli.c 的 test 命令注册）
 #   obj_ut_FC      `make tests UT=FC`
 #   obj_ut_FTL     `make tests UT=FTL`
-# 分置的原因：本工程无「CFLAGS 变化 ⇒ 重编译」依赖，若共用一个对象目录，先 make all
-# 再 make tests 会复用不带测试宏的陈旧 .o（症状：固件里没有 test 命令 / ut_main.o 引用
-# 未编入的套件数组而链接失败）。分置后三种构建互不污染，无需 make clean。
+# 分置是缓存，不承担正确性：任何未编码进目录名的 CFLAGS 变化由顶层
+# check-config 的指纹清空对象目录；分置只是让切换配置时省一次全量重编。
 # NAND 器件族选择（对应 include/nand/devices/<family>.h 与
-# src/nand/devices/<family>.c）。切换它会改变 CFLAGS（-DNAND_DEVICE_*）
-# 与参与编译的源文件；本工程没有「CFLAGS 变化 ⇒ 重编译」依赖，故非默认
-# 器件时在对象目录上加后缀，避免复用陈旧 .o。
+# src/nand/devices/<family>.c）。当前只支持一个器件（其他值在
+# src/nand/makefile.mk 直接报错），不需要目录后缀。
 NAND_DEVICE_DEFAULT := MT29F___G08A
 NAND_DEVICE         ?= $(NAND_DEVICE_DEFAULT)
 
-# debug 优化档同样改变编译结果。本工程没有「CFLAGS 变化 ⇒ 重编译」依赖，
-# 若对象目录只按 BUILD_TYPE/UT 分置，`make tests DEBUG_OPT=-O0` 会复用 -O2 的
-# 陈旧 .o，链接出来的仍是 -O2 镜像（编译期无声）。非默认档在目录名上加后缀：
-#   obj_ut_O0 / obj_ut_FC_O0 / ...
+# debug 优化档改变编译结果。后缀同样是缓存：切换 -O0/-O2 时不重编；
+# 即使去掉后缀，check-config 也会因 CFLAGS 变化清目录。check-opt 验证本维度。
 DEBUG_OPT ?= -O2
 ifeq ($(BUILD_TYPE),debug)
     ifneq ($(DEBUG_OPT),-O2)
@@ -80,10 +74,17 @@ ifeq ($(BUILD_TYPE),debug)
     endif
 endif
 
-OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
-LIB_DIR   := $(BUILD_DIR)/lib$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
+OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
+# 第三方 archive 只按构建档与优化档分置：vendor 源码/对象集合与 UT 范围、
+# 器件选择、开卡模式无关。按 UT 复制会在 lib_ut_* 下生成同一份 .a 的多份副本
+# （每份 ~61 MB，debug 档）。
+LIB_DIR   := $(BUILD_DIR)/lib$(OBJ_OPT_SUFFIX)
+
+# 第三方对象共享目录：vendor 代码不依赖 UT / 测试 / FORMAT / NAND_DEVICE 宏，
+# 只随构建档与优化档变化（见顶层 makefile 的 VENDOR_CFLAGS）。所有 target
+# 共用一份，避免每个 UT scope 重复编译 37 个 HAL 对象（每份 ~61 MB）。
+VENDOR_OBJ_DIR := $(BUILD_DIR)/obj_vendor$(OBJ_OPT_SUFFIX)
 BIN_DIR   := $(BUILD_DIR)/bin
-DEP_DIR   := $(BUILD_DIR)/dep$(OBJ_OPT_SUFFIX)$(FORMAT_OBJ_SUFFIX)
 
 # 目标文件命名：产品与 UT 分名（主流构建系统把测试程序与产品程序分成不同 target，
 # 例如 Automake 的 bin_PROGRAMS vs check_PROGRAMS，不复用同一产物名）。
@@ -106,18 +107,12 @@ AR      = $(CROSS_COMPILE)ar
 AS      = $(CROSS_COMPILE)gcc
 LD      = $(CROSS_COMPILE)gcc
 NM      = $(CROSS_COMPILE)nm
-GDB     = $(CROSS_COMPILE)gdb
 OBJCOPY = $(CROSS_COMPILE)objcopy
-OBJDUMP = $(CROSS_COMPILE)objdump
 SIZE    = $(CROSS_COMPILE)size
-READELF = $(CROSS_COMPILE)readelf
 
 RMDIR   = rm -rf
 MKDIR   = mkdir -p
 ECHO    = echo
-SED     = sed
-LN      = ln -sf 
-MAKE    = make
 
 
 # ----------------------------------------------------------------------------
@@ -126,7 +121,6 @@ MAKE    = make
 # 4.1 警告选项
 # -Wall                开启所有常见警告
 # -Wextra              开启额外的严格警告
-# -pedantic            严格遵循 ANSI/ISO C 标准（C99/C11）
 # -Wshadow             检测变量名遮蔽（内层变量遮蔽外层变量）
 # -Wpointer-arith      检查指针算术合法性（禁止对 void* 和函数指针运算）
 # -Wcast-align         检查强制转换是否导致内存对齐问题
@@ -134,14 +128,11 @@ MAKE    = make
 # -Wredundant-decls    检查重复的函数声明
 WARN_FLAGS  = -Wall\
             -Wextra\
-            -pedantic\
             -Wshadow\
             -Wpointer-arith\
             -Wcast-align\
             -Wwrite-strings\
             -Wredundant-decls
-# 为某些文件禁用 -Wpedantic 警告
-WARN_FLAGS += -Wno-pedantic
 
 #  头文件路径（基础路径，模块特定的路径会在后面追加）
 INC_FLAGS   = -I$(INC_ROOT)
@@ -192,11 +183,11 @@ else ifeq ($(BUILD_TYPE), release)
     OPT_FLAGS   = -O2 -DNDEBUG
     DBG_FLAGS   =
 else
-    $(error Unknown BUILD_TYPE: $(BUILD_TYPE). Use debug, release, or asan)
+    $(error Unknown BUILD_TYPE: $(BUILD_TYPE). Use debug or release)
 endif
 
 #最终CFLAGS（模块特定的包含路径会在顶层Makefile中追加）
-CFLAGS  = $(BASE_FLAGS) $(OPT_FLAGS) $(DBG_FLAGS) $(SAN_FLAGS)
+CFLAGS  = $(BASE_FLAGS) $(OPT_FLAGS) $(DBG_FLAGS)
 # 器件选择宏：nand/nand_config.h 用它决定包含哪个 devices/<family>.h。
 CFLAGS += -DNAND_DEVICE_$(NAND_DEVICE)
 
@@ -219,13 +210,11 @@ ASFLAGS += $(CPU_FLAGS)  \
 # 4.6 链接选项
 ifeq ($(BUILD_TYPE), debug)
     #   1. 生成详细的 .map 文件（含交叉引用）
-    #   2. 保留调试信息（-g）
-    #   3. 警告未解析符号（便于发现链接遗漏）
-    #   4. 不进行 strip（保留完整符号）
-
+    #   2. 保留调试信息（-g），不 strip
+    #   3. 未定义符号一律链接失败（--no-undefined）：debug 镜像也会上板，
+    #      容忍未解析符号等于把跳地址 0 的故障留到运行时
     TYPE_LDFLAGS += -Wl,-Map=$(TARGET).map,--cref\
                 -g\
-                -Wl,--warn-unresolved-symbols\
                 -Wl,--no-undefined
     # LDFLAGS += -Wl,--print-gc-sections   # 可选：打印被删除的段
 
@@ -234,25 +223,26 @@ else ifeq ($(BUILD_TYPE), release)
     #   2. 严格检查：未定义符号直接报错（--no-undefined）
     #   3. 检查段重叠（--check-sections）
     #   4. 移除符号表（-s），减小体积
-    #   5. 删除未使用的段（--gc-sections）
     TYPE_LDFLAGS += -Wl,-Map=$(TARGET).map\
                 -Wl,--no-undefined\
                 -Wl,--check-sections\
-                -s\
-                -Wl,--gc-sections
+                -s
 
 else
-    $(error Unknown BUILD_TYPE: $(BUILD_TYPE). Valid options: debug, release, asan)
+    $(error Unknown BUILD_TYPE: $(BUILD_TYPE). Valid options: debug, release)
 endif
 # -T $(LINKER_SCRIPT)           指定链接脚本文件（定义内存布局、段位置）
 # -Wl,--entry=Reset_Handler     指定程序入口点为 Reset_Handler（复位向量）
 # -specs=nosys.specs            使用无系统调用版本的 C 库（裸机环境）
 # 使用**完整 newlib**（不带 -specs=nano.specs）：支持 %llu/%hhu/%j/%z/%t 与浮点格式化。
 # 体积代价实测 ≈ +13 KB Flash / +2 KB RAM（本板 2 MiB Flash，余量充足）。
-# -nostartfiles                裸机固件不需要阻止标准 C 运行时启动文件（crt0.o、crtbegin.o）被链接
+# -nostartfiles                不链接编译器自带的 crt0/crtbegin；入口与向量表由
+#                              third_party 的 startup_stm32h743xx.s 提供，
+#                              __libc_init_array 需要的 _init 钩子由 main.c 定义。
+# -L$(PROJECT_ROOT)/linker：链接脚本 INCLUDE 的搜索路径（共享热代码片段）。
 BASE_LDFLAGS = $(CPU_FLAGS)\
                 -T $(LINKER_SCRIPT)\
-                -L$(LIB_DIR)\
+                -L$(PROJECT_ROOT)/linker\
                 -Wl,--entry=Reset_Handler\
                 -specs=nosys.specs\
                 -nostartfiles\
@@ -271,7 +261,9 @@ LDLIBS := -lc -lm -lgcc
 LDFLAGS = $(BASE_LDFLAGS) $(TYPE_LDFLAGS)
 
 # ----------------------------------------------------------------------------
-# 6. 模块列表（按依赖顺序：被依赖的在前）
+# 6. 模块列表
+#   只决定 makefile.mk 的包含顺序；本文件在收集完成后才消费这些变量，
+#   所以顺序不构成依赖关系（模块 makefile 只能追加变量，不能读取其它模块结果）。
 # ----------------------------------------------------------------------------
 MODULES = common boot hil fc ftl nand platform
 

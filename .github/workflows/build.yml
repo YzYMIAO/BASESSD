@@ -10,7 +10,7 @@ jobs:
     # the toolchain this project is developed against. Newer images may carry a
     # different clang-format major, which would change formatting results.
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -20,11 +20,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-none-eabi clang-format-15 python3 make
 
+      # 未格式化代码必须在 CI 失败；不要依赖构建里的 format 步骤
+      # （它会就地改写源码，然后编译通过，CI 看起来仍然是绿的）。
+      - name: Format check
+        run: make format-check
+
       - name: Debug build
         run: make all
+
+      # 聚合检查：format / types / headers / 布局 / 优化档（内部会确保 debug ELF 存在）。
+      - name: Project checks
+        run: make check
 
       - name: Release build
         run: make release
 
+      - name: FC-NAND UT compile
+        run: make tests UT=FC
+
       - name: FTL UT compile
         run: make tests UT=FTL
+
+      - name: HIL UT compile
+        run: make tests UT=HIL

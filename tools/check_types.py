@@ -15,6 +15,15 @@ Usage:
     python3 tools/check_types.py --root . --include-tests
 
 Exit code 0 = clean, 1 = violations, 2 = tool/input error.
+
+Known limitations (by design, regex/token based — no preprocessor):
+  * mutually exclusive `#if` branches that both define the same tag are
+    reported as duplicates;
+  * pointer typedefs (`typedef struct X_S {...} *p;`) are not modelled and
+    the `*` is ignored, so the alias-name check sees `p`;
+  * braces produced by macros can confuse the depth tracking.
+The checker is a positive invariant for the forms this repository uses; its
+discrimination is covered by `tools/test_check_types.py` (P13/C7).
 """
 
 from __future__ import annotations
@@ -325,6 +334,7 @@ def parse_file(path: Path, root: Path, report: Report) -> None:
 def validate(report: Report) -> None:
     defined_tags = {d.tag for d in report.definitions if d.tag}
     forward_tags = {f.tag for f in report.forwards}
+    tag_kind = {d.tag: d.kind for d in report.definitions if d.tag}
 
     alias_owner: dict[str, tuple[str, str, int]] = {}
     tag_owner: dict[str, tuple[str, str, int]] = {}
@@ -371,15 +381,38 @@ def validate(report: Report) -> None:
             report.errors.append(f"{where}: tag `{d.tag}` defined more than once (first at {prev[1]}:{prev[2]})")
         tag_owner[d.tag] = (d.tag, d.file, d.line)
 
+    forward_alias_owner: dict[str, str] = {}
+
     for f in report.forwards:
         if f.tag not in defined_tags:
             report.errors.append(
                 f"{f.file}:{f.line}: forward typedef `{f.tag}` has no definition in the scanned tree"
             )
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*_[SEU]", f.tag):
-            report.errors.append(f"{f.file}:{f.line}: forward tag `{f.tag}` does not match H50 tag form")
-        if not re.fullmatch(r"[a-z][a-z0-9_]*_[seu]", f.alias):
-            report.errors.append(f"{f.file}:{f.line}: forward alias `{f.alias}` does not match H50 alias form")
+        expected_tag = "_" + KIND_SUFFIX[f.kind]
+        expected_alias = "_" + ALIAS_SUFFIX[f.kind]
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*_[SEU]", f.tag) or not f.tag.endswith(expected_tag):
+            report.errors.append(
+                f"{f.file}:{f.line}: forward tag `{f.tag}` must be uppercase and end with `{expected_tag}`"
+            )
+        if not re.fullmatch(r"[a-z][a-z0-9_]*_[seu]", f.alias) or not f.alias.endswith(expected_alias):
+            report.errors.append(
+                f"{f.file}:{f.line}: forward alias `{f.alias}` must be lowercase and end with `{expected_alias}`"
+            )
+        if f.tag in tag_kind and tag_kind[f.tag] != f.kind:
+            report.errors.append(
+                f"{f.file}:{f.line}: forward `{f.kind} {f.tag}` conflicts with its definition kind `{tag_kind[f.tag]}`"
+            )
+        owner = alias_owner.get(f.alias)
+        if owner is not None and owner[0] != f.tag:
+            report.errors.append(
+                f"{f.file}:{f.line}: forward alias `{f.alias}` already denotes `{owner[0]}` at {owner[1]}:{owner[2]}"
+            )
+        prev = forward_alias_owner.get(f.alias)
+        if prev is not None and prev != f.tag:
+            report.errors.append(
+                f"{f.file}:{f.line}: forward alias `{f.alias}` already denotes `{prev}`"
+            )
+        forward_alias_owner[f.alias] = f.tag
 
 
 def collect_files(root: Path, include_tests: bool) -> list[Path]:

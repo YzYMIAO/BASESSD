@@ -1,12 +1,17 @@
 # ============================================================================
-# 顶层 Makefile - 企业级构建入口
+# 顶层 Makefile - 固件构建入口
 # ============================================================================
 # 设计原则：
-#   1. 只负责解析配置、调用 rules.mk
-#   2. 所有编译规则由 rules.mk 管理
-#   3. 支持多构建类型切换（debug/release/asan）
+#   1. 只负责解析配置、收集模块声明、定义入口目标
+#   2. 编译规则在 rules_common.mk，链接规则在 rules_link.mk
+#   3. 支持 debug / release 两种构建类型
+#   4. 本工程按串行 make 设计（format / check-config 必须先于编译）
 # ============================================================================
 .DEFAULT_GOAL := all
+
+# format、check-config、clean 与编译/链接之间存在先后约束，-j 下无法表达。
+# 工程规模不需要并行构建，直接全局串行，避免「格式化与编译并发」「clean 与 all 并发」。
+.NOTPARALLEL:
 
 # ----------------------------------------------------------------------------
 # 1. 包含配置
@@ -70,44 +75,44 @@ TEST_C_SRCS :=
 # 2. 初始化收集变量（供子模块追加）
 MODULE_SRCS :=
 MODULE_INCS :=
-PLATFORM_S_SRCS :=
 # C objects that must bypass static archives during the final link.
 LINK_C_OBJS :=
 
 # 3. 包含所有子模块的声明文件（在解析阶段完成收集）
 #    这一步会将子模块中的 MODULE_SRCS += xxx 追加进来
+ifeq ($(V),1)
 $(info ========================================)
 $(info Including module makefiles...)
+endif
 include $(foreach mod,$(MODULES),$(SRC_ROOT)/$(mod)/makefile.mk)
+# 测试构建声明统一由 tests/makefile.mk 负责（源、wrap、测试 include、UT 宏）。
+include $(PROJECT_ROOT)/tests/makefile.mk
+ifeq ($(V),1)
 $(info All modules included)
 $(info ========================================)
+endif
 
 # 根目录 main.c 是固件应用入口，不归入静态库，必须在链接时显式加入。
-	APP_C_SRCS := $(SRC_ROOT)/main.c
-	C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
-	S_SRCS := $(sort $(PLATFORM_S_SRCS))
-	ALL_SRCS := $(C_SRCS) $(S_SRCS) $(THIRD_PARTY_C_SRCS) $(THIRD_PARTY_S_SRCS) $(TEST_C_SRCS)
+APP_C_SRCS := $(SRC_ROOT)/main.c
+C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
+ALL_SRCS := $(C_SRCS) $(THIRD_PARTY_C_SRCS) $(THIRD_PARTY_S_SRCS) $(TEST_C_SRCS)
 
-APP_OBJS := $(patsubst $(SRC_ROOT)/%.c,$(OBJ_DIR)/%.o,$(APP_C_SRCS))
 C_OBJS := $(patsubst $(SRC_ROOT)/%.c,$(OBJ_DIR)/%.o,$(C_SRCS))
-S_OBJS := $(patsubst $(SRC_ROOT)/%.s,$(OBJ_DIR)/%.o,$(S_SRCS))
-	THIRD_PARTY_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(OBJ_DIR)/%.o,$(THIRD_PARTY_C_SRCS))
-	THIRD_PARTY_S_OBJS := $(patsubst $(PROJECT_ROOT)/%.s,$(OBJ_DIR)/%.o,$(THIRD_PARTY_S_SRCS))
-	TEST_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(OBJ_DIR)/%.o,$(TEST_C_SRCS))
-	# Application-owned sources must be linked as objects. In particular, this
-	# allows strong interrupt handlers to override weak startup defaults.
-	LINK_C_OBJS := $(C_OBJS) $(TEST_C_OBJS)
-	LINK_S_OBJS := $(S_OBJS) $(THIRD_PARTY_S_OBJS)
+THIRD_PARTY_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(VENDOR_OBJ_DIR)/%.o,$(THIRD_PARTY_C_SRCS))
+THIRD_PARTY_S_OBJS := $(patsubst $(PROJECT_ROOT)/%.s,$(VENDOR_OBJ_DIR)/%.o,$(THIRD_PARTY_S_SRCS))
+TEST_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(OBJ_DIR)/%.o,$(TEST_C_SRCS))
+# 固件自有源码必须按对象直链：强符号中断处理才能覆盖 startup 的弱符号默认实现。
+LINK_C_OBJS := $(C_OBJS) $(TEST_C_OBJS)
+LINK_S_OBJS := $(THIRD_PARTY_S_OBJS)
 
-	ALL_OBJS := $(C_OBJS) $(S_OBJS) $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS) $(TEST_C_OBJS)
+ALL_OBJS := $(C_OBJS) $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS) $(TEST_C_OBJS)
 
 ALL_INCS := $(sort $(MODULE_INCS))
 CFLAGS += $(addprefix -I,$(ALL_INCS))
 CFLAGS += -DSSD_FIRMWARE_BUILD
-CFLAGS += -DDEBUG_FTL
 CFLAGS += $(CFLAGS_EXTRA)
 
-# 导出收集结果（供调试和 rules.mk 使用）
+ifeq ($(V),1)
 $(info ========================================)
 $(info Collected $(words $(ALL_SRCS)) source files)
 $(info Collected $(words $(ALL_INCS)) include paths)
@@ -115,16 +120,59 @@ ifeq ($(FC_NAND_TEST_ENABLE),1)
 $(info UT scope: $(if $(UT),$(UT),ALL)  [FC suites: $(if $(UT_FC_ENABLE),on,off) / FTL suites: $(if $(UT_FTL_ENABLE),on,off)])
 endif
 $(info ========================================)
+endif
 
-export C_SRCS
-export S_SRCS
-export C_OBJS
-export S_OBJS
-export LINK_S_OBJS
-export LINK_C_OBJS
-export ALL_OBJS
-export TEST_C_OBJS
-export UT
+# ----------------------------------------------------------------------------
+# 构建配置指纹
+#   本工程没有「CFLAGS 变化 ⇒ 重编译」依赖：开关若只改编译选项而不改对象目录，
+#   会静默复用旧 .o。OBJ_DIR 已按 UT / BUILD_TYPE / NAND_DEVICE / DEBUG_OPT /
+#   FORMAT 分置；这里再对最终 CFLAGS / 工具链 / 链接脚本做指纹，任何未纳入
+#   目录名的配置变化（CFLAGS_EXTRA、CROSS_COMPILE、新增 -D 等）都会清空当前
+#   对象目录，不必再为每个开关手工加后缀。
+# ----------------------------------------------------------------------------
+CONFIG_STAMP     := $(OBJ_DIR)/.build_config
+CONFIG_SIGNATURE := $(CC) | $(CFLAGS) | $(ASFLAGS) | $(LDFLAGS) | $(LINKER_SCRIPT)
+
+.PHONY: check-config
+check-config:
+	@$(MKDIR) $(OBJ_DIR)
+	@cur="$(CONFIG_SIGNATURE)"; \
+	if [ ! -f "$(CONFIG_STAMP)" ]; then \
+		printf '%s\n' "$$cur" > "$(CONFIG_STAMP)"; \
+	elif [ "$$(cat "$(CONFIG_STAMP)")" != "$$cur" ]; then \
+		$(ECHO) "build config changed -> clearing $(OBJ_DIR)"; \
+		$(RMDIR) $(OBJ_DIR); \
+		$(MKDIR) $(OBJ_DIR); \
+		printf '%s\n' "$$cur" > "$(CONFIG_STAMP)"; \
+	fi
+
+# ----------------------------------------------------------------------------
+# 第三方对象共享（obj_vendor）
+#   vendor 代码只依赖构建档、优化档、公共头与平台公共宏；不依赖
+#   -DUT_* / -DFC_NAND_TEST_ENABLE / FORMAT / NAND_DEVICE 这些项目级开关。
+#   因此产品与所有 UT scope 共用一份 HAL/TinyUSB 对象和一份 libthird_party.a，
+#   切换 UT 时不重编第三方。指纹只覆盖 VENDOR_CFLAGS，不受 UT 宏影响。
+# ----------------------------------------------------------------------------
+VENDOR_CFLAGS    := $(BASE_FLAGS) $(OPT_FLAGS) $(DBG_FLAGS) \
+                    $(addprefix -I,$(ALL_INCS)) \
+                    $(PLATFORM_COMMON_DEFINES) \
+                    $(THIRD_PARTY_CFLAGS) \
+                    $(CFLAGS_EXTRA)
+VENDOR_STAMP     := $(VENDOR_OBJ_DIR)/.build_config
+VENDOR_SIGNATURE := $(CC) | $(VENDOR_CFLAGS) | $(ASFLAGS)
+
+.PHONY: check-vendor-config
+check-vendor-config:
+	@$(MKDIR) $(VENDOR_OBJ_DIR)
+	@cur="$(VENDOR_SIGNATURE)"; \
+	if [ ! -f "$(VENDOR_STAMP)" ]; then \
+		printf '%s\n' "$$cur" > "$(VENDOR_STAMP)"; \
+	elif [ "$$(cat "$(VENDOR_STAMP)")" != "$$cur" ]; then \
+		$(ECHO) "vendor config changed -> clearing $(VENDOR_OBJ_DIR)"; \
+		$(RMDIR) $(VENDOR_OBJ_DIR); \
+		$(MKDIR) $(VENDOR_OBJ_DIR); \
+		printf '%s\n' "$$cur" > "$(VENDOR_STAMP)"; \
+	fi
 
 # ============================================================================
 # 7. 包含编译和链接规则（明确分开包含）
@@ -135,20 +183,15 @@ include $(PROJECT_ROOT)/rules_link.mk     # 链接规则（.o -> 可执行文件
 # ----------------------------------------------------------------------------
 # 8. 快捷构建类型切换
 # ----------------------------------------------------------------------------
-.PHONY: debug release asan tests
-debug:
-	$(MAKE) BUILD_TYPE=debug
-
+.PHONY: release tests
 release:
 	$(MAKE) BUILD_TYPE=release
 
-asan:
-	$(MAKE) BUILD_TYPE=asan
-
-# 单元/集成测试构建。UT=（空）编入全部套件；UT=FC 仅 FC-NAND 三级；UT=FTL 仅 FTL L0。
-# PAA 在烧录后由串口命令 nand test <PAA> 显式传入。
+# 单元/集成测试构建。UT=（空）编入全部套件；UT=FC 仅 FC-NAND 三级；
+# UT=FTL 为 FTL pure + media；UT=HIL 仅 HIL 板端。PAA 在烧录后由串口命令
+# nand test <PAA> 显式传入。
 tests:
-	$(MAKE)  FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT) CFLAGS_EXTRA="$(CFLAGS_EXTRA) -DMUNIT_ENABLE_TIMING"
+	$(MAKE) FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT)
 
 # 开卡镜像（破坏性）：FORMAT_ON_BOOT=1 ⇒ 每次启动擦全片 + 写初始元数据。
 # bin 路径与正常镜像相同（烧录配置不用改）；对象目录带 _fmt 后缀隔离。
@@ -160,20 +203,6 @@ format-image:
 # ============================================================================
 # 主目标
 # ============================================================================
-# 正常镜像 / 开卡镜像 / 体检镜像的 ELF/BIN **不能互相复用**：
-# 记录每个产物上次构建的 (FORMAT_ON_BOOT/FORMAT_VERIFY)；配置切换时删掉旧输出，强制重链。
-# ⚠ 记录文件必须按 $(TARGET) 分置：产品与 UT 共用 BIN_DIR，若共用一份记录，
-#   先 `make format-image`（debug.elf）再 `make tests`（debug_ut.elf）会把记录改成
-#   0/0，之后的 `make all` 看不出 debug.elf 仍是开卡镜像。
-.PHONY: check-build-cfg
-check-build-cfg:
-	@$(MKDIR) $(BIN_DIR)
-	@cfg="$(FORMAT_ON_BOOT)/$(FORMAT_VERIFY)"; \
-	if [ -f "$(TARGET).elf" ] && { [ ! -f "$(TARGET).build_cfg" ] || [ "$$(cat "$(TARGET).build_cfg")" != "$$cfg" ]; }; then \
-		rm -f "$(TARGET).elf" "$(TARGET).bin" "$(TARGET).map" "$(TARGET).lst" "$(TARGET).sym" "$(TARGET).size"; \
-	fi; \
-	printf '%s\n' "$$cfg" > "$(TARGET).build_cfg"
-
 .PHONY: check-nocache
 # PLAT-01：DMA 页缓冲必须落在 AXI_NOCACHE 段（0x24060000..0x24080000）。
 check-nocache:
@@ -203,12 +232,15 @@ check-opt:
 #   format      —— 每次构建先强制格式化，保证产物与源码一致；
 #   types-check —— H50 正向不变量检查（公共完整类型必须定义处 typedef 等）。
 # 串行 make 下二者先于编译跑；干净树时 clang-format 不改 mtime（零开销、不触发
-# 重编译）。注意：本工程按串行 make 构建；若用 -j，format 会与编译并发，需改为在
-# 编译规则上挂 order-only 前置（见 rules_common.mk）。
-all: check-build-cfg format types-check $(ANALYSIS_FILES)
+# 重编译）。全局串行由顶部的 .NOTPARALLEL 保证。
+all: check-config check-vendor-config format types-check $(ANALYSIS_FILES)
 
-.PHONY: reall
-reall: clean all
+# ============================================================================
+# 聚合检查：格式 → H50 类型 → H41 头文件 → debug 镜像 → 布局/优化档守卫。
+# 可独立运行；已在 make all 之后运行时前几步是幂等的重复。
+# ============================================================================
+.PHONY: check
+check: format-check types-check types-test headers-check $(TARGET).elf check-nocache check-opt
 
 # ============================================================================
 # clang-format 配置
@@ -219,11 +251,10 @@ CLANG_FORMAT ?= clang-format-15
 FORMAT_FILES := $(shell find src include tests \
 	-type f \
 	\( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' \) \
-	-not -path '*/cmsis/*' \
 	-not -path '*/third_party/*' \
 )
 
-.PHONY: format format-check format-version
+.PHONY: format format-check
 
 FORMAT_CONFIG := .clang-format
 # FORMAT_CONFIG := .clang-format_array
@@ -249,9 +280,29 @@ format-check:
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 	@echo "Format check passed."
 
-# 查看实际使用的 clang-format 版本。
-format-version:
-	@$(CLANG_FORMAT) --version
+# ============================================================================
+# 编辑 / 静态分析辅助（不挂 check；依赖外部工具）
+# ============================================================================
+.PHONY: compile-commands tidy
+
+# 从 `make -B -n V=1 all` 的编译命令行重建 compile_commands.json（.vscode /
+# clangd 使用）。不依赖 bear，也不实际编译；工具本身在 tools/gen_compile_commands.py。
+compile-commands:
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(PYTHON)"; \
+		exit 1; \
+	}
+	@$(PYTHON) $(PROJECT_ROOT)/tools/gen_compile_commands.py --root $(PROJECT_ROOT)
+
+# clang-tidy 与 .clang-format 同用 v15；依赖 compile_commands.json。
+# 不挂 check：CI 不装 clang-tidy，版本漂移也不应阻塞构建。
+TIDY_RUNNER ?= run-clang-tidy-15
+tidy: compile-commands
+	@command -v $(TIDY_RUNNER) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(TIDY_RUNNER)"; \
+		exit 1; \
+	}
+	@$(TIDY_RUNNER) -p $(PROJECT_ROOT) '^$(PROJECT_ROOT)/src/.*\.c$$'
 
 # ============================================================================
 # H50 复合类型定义形态检查
@@ -267,6 +318,36 @@ types-check:
 	}
 	@$(PYTHON) $(TYPES_CHECK) --root $(PROJECT_ROOT)
 
+# 检查器自检（P13/C7）：正例必须通过，每条负例必须报错。
+# 区分力证据在 tools/test_check_types.py，不依赖 pytest。
+.PHONY: types-test
+types-test:
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(PYTHON)"; \
+		exit 1; \
+	}
+	@$(PYTHON) $(PROJECT_ROOT)/tools/test_check_types.py
+
+# ============================================================================
+# H41 头文件检查
+#   - 项目头一律裸名：目录前缀 include 会因 -I 顺序产生静默误解析；
+#   - include/ 与 src/ 的私有头不得同名（同一裸名两套语义）。
+# 第三方位（third_party/）按 H41 豁免，不扫描。
+# ============================================================================
+.PHONY: headers-check
+headers-check:
+	@if grep -rnE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"[^"]*/' src include tests; then \
+		echo "headers-check: directory-prefixed include found (H41)"; \
+		exit 1; \
+	fi
+	@dups=$$(find include src -name '*.h' | sed 's|.*/||' | sort | uniq -d); \
+	if [ -n "$$dups" ]; then \
+		echo "headers-check: duplicate header basenames:"; \
+		echo "$$dups"; \
+		exit 1; \
+	fi
+	@echo "headers-check: OK"
+
 # ============================================================================
 # 信息目标
 # ============================================================================
@@ -278,7 +359,8 @@ info:
 	@echo "  NAND_DEVICE      : $(NAND_DEVICE)"
 	@echo "  UT               : $(if $(UT),$(UT),ALL)"
 	@echo "  OBJ_DIR          : $(OBJ_DIR)"
-	@echo "  TARGET           : $(TARGET)"
+	@echo "  VENDOR_OBJ_DIR   : $(VENDOR_OBJ_DIR)"
+	@echo "  TARGET (elf)     : $(TARGET).elf"
 	@echo "  MODULES          : $(MODULES)"
 	@echo "  ALL_LIBS         :"
 	@printf '    %s\n' $(ALL_LIBS)
@@ -305,9 +387,6 @@ info:
 	@echo "  MAP file      : $(TARGET).map"
 	@echo "  SYM file      : $(TARGET).sym"
 	@echo "  SIZE file     : $(TARGET).size"
-	@echo "  LST file      : $(TARGET).lst"
-	@echo "  Preprocess    : $(words $(ALL_I_FILES)) .i files"
-	@echo "  Disassembly   : $(words $(ALL_LST_FILES)) .lst files"
 
 # ============================================================================
 # 帮助信息
@@ -315,21 +394,24 @@ info:
 .PHONY: help
 help:
 	@echo "============================================================"
-	@echo "  DS Library Build System"
+	@echo "  soft_ssd firmware build system"
 	@echo "============================================================"
 	@echo ""
 	@echo "  Build Targets:"
 	@echo "    all            - Build default (debug) target"
-	@echo "    debug          - Build debug version"
 	@echo "    release        - Build release version"
-	@echo "    asan           - Build with AddressSanitizer"
 	@echo "    tests          - Build firmware with UART NAND test commands"
 	@echo "    format-image   - Build **destructive** open-card image (formats on EVERY boot)"
 	@echo ""
-	@echo "  Analysis Targets:"
-	@echo "    preprocess     - Generate .i files"
-	@echo "    disassemble    - Generate .lst files"
-	@echo "    build-with-log - Build with error log"
+	@echo "  Tooling Targets (optional, external tools):"
+	@echo "    compile-commands - Regenerate compile_commands.json (from make -n)"
+	@echo "    tidy             - Run clang-tidy on src/ (needs run-clang-tidy-15)"
+	@echo ""
+	@echo "  Check Targets:"
+	@echo "    check          - format / types / headers / layout / opt checks"
+	@echo "    format-check   - Verify clang-format without modifying files"
+	@echo "    types-test     - Self-test for types-check (positive + negative cases)"
+	@echo "    headers-check  - H41: bare includes and unique header basenames"
 	@echo ""
 	@echo "  Cleanup Targets:"
 	@echo "    clean          - Remove build/$(BUILD_TYPE) directory"
@@ -340,10 +422,9 @@ help:
 	@echo "    help           - Show this help"
 	@echo ""
 	@echo "  Variables:"
-	@echo "    BUILD_TYPE     - debug, release, asan (default: debug)"
+	@echo "    BUILD_TYPE     - debug, release (default: debug)"
 	@echo "    UT             - unit test scope for 'tests': (empty)=all, FC, FTL, HIL"
 	@echo "    FORMAT_VERIFY  - with format-image: 1 = full-chip erase check (erase OK = good block)"
 	@echo "    V=1            - Show full compile commands"
 	@echo "    CROSS_COMPILE  - Cross-compilation prefix"
-	@echo "    COVERAGE=1     - Enable code coverage (gcov)"
 	@echo "============================================================"

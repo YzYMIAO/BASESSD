@@ -62,60 +62,10 @@ SECTIONS
     . = ALIGN(4);
   } > FLASH
 
-  /* Startup code must copy this range from Flash before calling it. */
-  .ssd_code_high :
-  {
-    . = ALIGN(4);
-    __ssd_code_high_start = .;
-    /* Whole-module hot code: no per-function annotations. Selection is the host
-     * data path (FTL submit/complete, L2P, wbuf/pending, cache read/write),
-     * FC pump/BCH, and NAND dispatch/FMC.
-     *
-     * The common set below must fit the -O0 debug build (64 KB ITCM). Release
-     * adds the modules listed after it: their object paths contain
-     * `release/obj/`, which the debug link does not, so the same script yields
-     * a larger ITCM image only in release. This is build-type selection by
-     * input path, not a C preprocessor switch. */
-    KEEP(*ftl/ftl.o(.text .text.*))
-    KEEP(*ftl/l2p_cache.o(.text .text.*))
-    KEEP(*ftl/wbuf.o(.text .text.*))
-    KEEP(*ftl/pending.o(.text .text.*))
-    KEEP(*ftl/cache_batch.o(.text .text.*))
-    KEEP(*fc/fc.o(.text .text.*))
-    KEEP(*fc/fc_data_path.o(.text .text.*))
-    KEEP(*fc/fc_bch_engine.o(.text .text.*))
-    KEEP(*nand/nand_dispatch.o(.text .text.*))
-    KEEP(*nand/nand_fmc.o(.text .text.*))
-    /* Release-only additions: write/GC/background path.  Keep this block
-     * below ~62 KB total (release .ssd_code_high measured after every change);
-     * debug is unaffected because its object directory is `debug/obj/`. */
-    KEEP(*release/obj/ftl/allocator.o(.text .text.*))
-    KEEP(*release/obj/ftl/journal.o(.text .text.*))
-    KEEP(*release/obj/ftl/metadata.o(.text .text.*))
-    KEEP(*release/obj/ftl/metadata_job.o(.text .text.*))
-    KEEP(*release/obj/ftl/migrate.o(.text .text.*))
-    KEEP(*release/obj/ftl/gc.o(.text .text.*))
-    /* wear_leveling / bg_scheduler 是纯后台路径，放 Flash 运行；写回 CMT 让
-     * l2p_cache.o 增大后，ITCM 优先留给 host 数据面。 */
-    KEEP(*release/obj/ftl/ftl_op.o(.text .text.*))
-    KEEP(*release/obj/fc/fc_interface.o(.text .text.*))
-    KEEP(*release/obj/fc/fc_queue.o(.text .text.*))
-    KEEP(*release/obj/fc/fc_command.o(.text .text.*))
-    KEEP(*release/obj/nand/nand_engine.o(.text .text.*))
-    KEEP(*(.ssd_code_high))
-    KEEP(*(.ssd_code_high.*))
-    . = ALIGN(4);
-    __ssd_code_high_end = .;
-  } > ITCM AT > FLASH
-  __ssd_code_high_load_start = LOADADDR(.ssd_code_high);
-
-  .ssd_code_fast :
-  {
-    . = ALIGN(4);
-    KEEP(*(.ssd_code_fast))
-    KEEP(*(.ssd_code_fast.*))
-    . = ALIGN(4);
-  } > FLASH
+  /* 热代码段（.ssd_code_high / .ssd_code_fast）由共享片段提供：
+   * 产品与 UT 不再各自维护一份 KEEP 清单（见 RISK-BUILD-04）。
+   * INCLUDE 的搜索路径由链接参数 -L$(PROJECT_ROOT)/linker 提供。 */
+  INCLUDE stm32h743xx_hot.ld
 
   .text :
   {
@@ -125,7 +75,6 @@ SECTIONS
     *(.glue_7)
     *(.glue_7t)
     . = ALIGN(4);
-    _etext = .;
   } > FLASH
 
   .rodata :

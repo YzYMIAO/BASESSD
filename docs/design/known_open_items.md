@@ -13,7 +13,7 @@
 |---|---|---:|
 | 待决策 | 需要用户裁决 | 16 |
 | 待定位 | 根因未明 | 18 |
-| 待验证 | 实现完成，缺板端证据 | 19 |
+| 待验证 | 实现完成，缺板端证据 | 20 |
 | 待实现 | 功能/验证未开始 | 64 |
 | 进行中 | 已做一部分 | 13 |
 | 待外部 | 等硬件/测试源/第三方 | 3 |
@@ -2329,9 +2329,9 @@
 #### RISK-PLAT-07 各构建配置共用 debug.elf
 
 - **后果**：旧 `TARGET` 只按 debug/release 分，不按 UT 分：`make tests UT=FTL` 后再 `make tests UT=FC`，后者镜像只含 FC 套件并覆盖前者；板端现象是 `test /ftl/` 打印 `NO test run`。
-- **缓解**：`config.mk` 的 `TARGET` 按 `FC_NAND_TEST_ENABLE` 加 `_ut` ⇒ 产品与 UT 镜像分名；`.build_cfg` 按产物分置。残留：`UT=FC` 与 `UT=FTL` 仍共用 `debug_ut.elf`。
+- **缓解**：`config.mk` 的 `TARGET` 按 `FC_NAND_TEST_ENABLE` 加 `_ut` ⇒ 产品与 UT 镜像分名。残留：`UT=FC` 与 `UT=FTL` 仍共用 `debug_ut.elf`。
 - **下一步**：分别构建产品 debug / UT debug / UT release / 产品 release，确认四个 ELF 同时存在、F5 按路径烧到预期镜像。
-- **证据**：`config.mk` §目标文件命名；`makefile:check-build-cfg`；`.vscode/launch.json`；`docs/design/ftl_ut_design.md §5.1`。
+- **证据**：`config.mk` §目标文件命名；`.vscode/launch.json`；`docs/design/ftl_ut_design.md §5.1`。
 - **历史/验证**：
   - 2026-11-11 按 UT 分名 → 编译通过，未上板
   - 2026-10-24 真实踩到 `NO test run`
@@ -2565,6 +2565,7 @@
 | RISK-PLAT-09 | 风险 | 待实现 | SysTick 时基与 TIM6 调度心跳的超时判据未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-PLAT-12 | 风险 | 待实现 | µs 时间戳从 DWT 改 SysTick，未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-BUILD-02 | 风险 | 信息 | launch 配置档位不符，产品/UT 共用 ELF 路径，易烧错镜像 | 未上板 |
+| RISK-BUILD-04 | 风险 | 待验证 | UT release 的 ITCM 放置块已对齐产品；未上板 | 2026-11-18 链接实测 4 种镜像 |
 | RISK-PLAT-11 | 风险 | 信息 | 不引入 TIM2/TIM5 作独立 µs 时基的判定 | 未上板 |
 
 ### 详情
@@ -2676,6 +2677,29 @@
 - **历史/验证**：
   - 2026-11-11 修正注释、去掉 postLaunch halt、按配置分名并扩成 8 条 launch → 未上板
 
+#### RISK-BUILD-04 UT release 镜像的 ITCM 放置块不命中
+
+- **后果（原失败场景）**：UT 脚本原先把产品脚本的 `KEEP(*release/obj/...)` 整段抄过去，
+  但 UT 的对象目录是 `build/<type>/obj_ut[_FC|_FTL|_HIL]/`，永不包含 `release/obj/`。
+  `make tests BUILD_TYPE=release UT=...` 的镜像把 allocator / journal / metadata /
+  migrate / gc / ftl_op / fc_interface / fc_queue / fc_command / nand_engine 留在
+  Flash `.text`，而产品 release 放进 ITCM；在 UT release 上量到的 `/speed` 吞吐不能
+  代表产品 release。debug UT / debug 产品不命中属预期。
+- **当前事实（2026-11-18 裁决 A 并落地）**：热代码 KEEP 清单抽到共享片段
+  `linker/stm32h743xx_hot.ld`，两份主脚本用 `INCLUDE` 引用；release 选择改为
+  `*release/obj*/`，同时匹配产品的 `obj/` 与 UT 的 `obj_ut_*`。链接实测
+  `.ssd_code_high`：产品 debug 0x94b0、产品 release 0xead0、debug UT 0x94d8、
+  release UT 0xec00（均 < 64 KB）；debug UT 仍不含 release 追加集。
+- **缓解**：共享片段消除了两份脚本的复制漂移；`LINK_DEPS` 已把片段纳入链接依赖。
+- **下一步 / 判据**：上板回归 release UT 的 `/speed` 与产品 release 对比（放置已同构）；
+  按 R2，放置/地址变化未上板前不得标「已验证」。
+- **证据**：`linker/stm32h743xx_hot.ld`；`linker/stm32h743xx_flash.ld` /
+  `stm32h743xx_flash_ut.ld` 的 `INCLUDE`；`config.mk` 的 `BASE_LDFLAGS`
+  （`-L$(PROJECT_ROOT)/linker`）；四种镜像的 `.map` 中 `__ssd_code_high_end`。
+- **关联**：`RISK-BUILD-01`、`RISK-BUILD-02`
+- **历史/验证**：
+  - 2026-11-18 构建规则审视发现；同日裁决 A、抽共享片段并改 `obj*/` 选择 → 链接通过，未上板
+
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
@@ -2737,7 +2761,7 @@
 - **当前事实**：`tests/unit/test_hil.c` / `tests/unit/test_hil.h` 导出 `g_hil_contract_tests[]` + `g_hil_io_tests[]`（`make tests UT=HIL`）。拆分后套件为 `/hil/contract/` + `/hil/io/`，共 **17 个注册用例**：contract 10（9 条 HIL 契约 + 1 条跨层平台守卫 `uart_dma_init_returns`）+ io 7。覆盖 controller 状态机 / init（缺槽、topo 不符）/ `lba_range_ok` / submit 边界（buffer 不足、0 长度、越界、未知 opcode、NULL controller/request）/ `is_complete` / host queue tag/owner/used / 经 controller 的真实 READ/WRITE/FLUSH/TRIM / `write→flush→read` / FLUSH/TRIM 单飞行背压 / TRIM 越界。**不 format**，读写固定用容量尾部 8-LBA 窗口；不 mock，复用主 boot 的 FTL/NAND。USB 侧另跑主机矩阵（write→fsync 0x35/0x91、两写 lookahead→读、相同 LBA 连写、总线复位/拔出），由 PC 主机侧执行，不在 `/hil/` 套件内。
 - **影响**：未覆盖 buffer NULL、跨重启、多 run 拆分/跨实例部分失败（单 die；需多 die 或 submit 注入）、USB 槽状态机（需 PC 主机侧矩阵）、`cancel_flush`。这些是 HIL 契约的剩余缺口；测试设计见 `docs/design/hil_ut_design.md`。
 - **下一步 / 判据**：按 `RISK-UT-34` 补：buffer NULL（见 `RISK-CTRL-04`）、跨重启、多 run / USB 槽矩阵、`cancel_flush`（host 复位 / 拔出路径）。跨重启需把 `ftl_ut_common.c` 链入 `UT=HIL` 或走 `UT=` 全量构建。
-- **来源**：`docs/design/hil_ut_design.md`；`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`src/hil/makefile.mk` / `src/fc/makefile.mk` / `makefile`（`UT=HIL`）
+- **来源**：`docs/design/hil_ut_design.md`；`tests/unit/test_hil.c` / `tests/unit/test_hil.h`；`tests/unit/ut_main.c`（`/hil/`）；`tests/makefile.mk` / `makefile`（`UT=HIL`）
 - **关联**：`RISK-UT-34`、`ISS-HIL-02`、`ISS-HIL-03`
 - **历史/验证**：
   - 2026-11-15 板端 `test /hil/` → 17/17（contract 10 / io 7）
@@ -4528,7 +4552,7 @@
 #### RISK-BUILD-01 `DEBUG_OPT=-O0` 静默复用 -O2 对象
 
 - **后果**：`OBJ_DIR` 只按 `BUILD_TYPE` / `FC_NAND_TEST_ENABLE` / `UT` / `NAND_DEVICE` 分置，不含优化档；本工程没有「CFLAGS 变化 ⇒ 重编译」依赖 ⇒ `make tests DEBUG_OPT=-O0` 会继续链接 `obj_ut_*` 里 -O2 编出的陈旧 `.o`，产物仍是 -O2，排查汇编/时序缺陷时拿到错误档位。
-- **缓解**：`DEBUG_OPT ?= -O2` 提前到目录配置之前；debug 下非默认档在 `OBJ_DIR` / `LIB_DIR` / `DEP_DIR` 加 `_O0` 一类后缀。`make -n tests UT=FC DEBUG_OPT=-O0` 确认对象目录为 `obj_ut_FC_O0` 且编译命令带 `-O0`。
+- **缓解**：`DEBUG_OPT ?= -O2` 提前到目录配置之前；debug 下非默认档在 `OBJ_DIR` / `LIB_DIR` 加 `_O0` 一类后缀。`make -n tests UT=FC DEBUG_OPT=-O0` 确认对象目录为 `obj_ut_FC_O0` 且编译命令带 `-O0`。
 - **下一步**：真正需要 -O0 定位时再跑一次全量 -O0 构建并上板；若加入其它优化档（`-Os` / `-O3`），确认后缀生成不产生非法目录名。
 - **证据**：`config.mk` §2 `OBJ_OPT_SUFFIX` / `DEBUG_OPT`；`make -n tests UT=FC DEBUG_OPT=-O0`。
 - **历史/验证**：
