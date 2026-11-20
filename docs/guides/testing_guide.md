@@ -426,9 +426,11 @@ info
 
 - 默认 INFO 只打上面三种；逐 victim 的
   `[MIG ] move k=gc src0=... dst0=... v=... mv=... t=...ms` 只在 `log level debug` 输出；
-- `vcw=0` 的空块回收不打任何 `[MIG ] move`，只让 `[GC  ] end noop=` /
+- `vcw=0` / 只回收不搬移的 GC 不打 `[MIG ] move`，由
+  `[GC  ] job end reclaimed=... noop=... ms=...` 收尾，并让 `[GC  ] end noop=` /
   `diag rec=` 增长；
-- `[GC  ] trig` 只在 `log level debug` 里每 5 s 一行；
+- `[GC  ] trig` 周期快照已删除；改打边沿事件：
+  `emergency enter/exit`、`suspend no-gain`、`resume`、`job start/end`；
   地址细节用 `map <lba>` / `addr pba|paa|g` 反查；
 - `free=32` 是 GC 目标线，触发条件是 **`free < 32`**；32 本身不触发；
 - BUSY 档跳过 WL/predict 与普通周期评估，但 **`free < FREE_POOL_TARGET` 时仍做
@@ -473,8 +475,11 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 ### 9.1 当前结论
 
 > `-O0` 是设备侧主因；16 KB EP 有效；cache program + cache read 下顺序吞吐为
-> **写 950 / 读 885 KB/s**（2026-11-15，USB host 端到端）；USB FS BOT 仍是主瓶颈。
-> 历史轮次、已做改动与后续方案见 `docs/archive/testing_guide_results_history.md`。
+> **写 950 / 读 885 KB/s**（2026-11-15，415/423 MB）；USB FS BOT 仍是主瓶颈。
+> 2026-11-21 满盘 421 MB（`free=0`、CP/背压更重）为 **写 912 / 读 857 KB/s**，
+> 两条不是同一盘况，不能直接当 A/B。
+> 历史轮次、已做改动与后续方案见 `docs/archive/testing_guide_results_history.md`；
+> H2testw 端到端截图（912/857）见 `docs/archive/test_logs/h2testw_912_857.png`。
 
 ### 9.2 ITCM / DTCM（当前结论）
 
@@ -497,7 +502,9 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 - `[USB ] latency` 只在部分轮次取到写阶段数据（写后断电会丢尾部日志）；
 - 4K 随机那组**未同步记录 banner/free**，只能当量级参考；
-- UT 已可构建：2026-11-16 release 全量 `test` 为 306/306 通过 + 3 SKIP；
+- UT 已可构建：2026-11-19 release 全量 `test` 为 **314/314 通过 + 3 SKIP**
+  （seed `0xbc2e3bb2`，677.71 s；原始日志 `docs/archive/test_logs/2026-11-19_release_ut_full.log`）；
+  3 SKIP 为 `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock`；
   `UT=FC` / `UT=FTL` / `UT=HIL` 均需上板运行；
 - 未做 USB-IF 认证、USB 协议分析仪、NAND ATE；
 - 未做完整 JEDEC 耐久性 / retention / read disturb / P/E 循环；

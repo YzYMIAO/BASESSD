@@ -29,11 +29,13 @@
 #include "fault.h"
 #include "fc_interface.h"
 #include "ftl_interface.h"
+#include "lifetime.h" /* 终身计数：boot_count / PFR / 上电起点 */
 #include "log.h"
 #include "pc_sample.h" /* 上一轮 PC 采样环的启动快照与提示 */
 #include "platform.h"
 #include "runtime.h"
 #include "stack_guard.h"
+#include "stats.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"
 #include "timer.h"
@@ -159,7 +161,6 @@ static void boot_report_controller(void)
 {
     boot_section("controller");
     fc_boot_report();
-    LOGI("[FC  ] raw path ready\r\n");
 }
 
 /* console 分区：交互入口就绪提示。 */
@@ -197,6 +198,9 @@ static ftl_topo_s ssd_ftl_die_topo(BYTE die)
 
     return topo;
 }
+
+// 本次 boot 是否有任一 die 走了 PFR；lifetime_boot 在全部 die 恢复后统一调用一次。
+static BOOL s_boot_pfr_any;
 
 /**
  * @brief 初始化单个 die 的 FTL 实例
@@ -283,6 +287,11 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
 
     LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n", result.boot_type, result.cp_sequence, result.journal_entries, boot_bit);
 
+    if (result.boot_type == FTL_BOOT_POWER_FAILURE)
+    {
+        s_boot_pfr_any = true;
+    }
+
     return FTL_OK;
 }
 
@@ -297,6 +306,8 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
 static void ssd_ftl_boot_all(void)
 {
     BOOL boot_ok = true;
+
+    s_boot_pfr_any = false;
 
     /* ① 拓扑建表：板级扫描结果（g_nand_targets，armed 之前已填）→ 紧凑 die 表。
      * 必须在逐实例 boot 之前；纯 RAM，不碰硬件。
@@ -343,6 +354,9 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
+    /* 全部实例的 lifetime 块已加载 ⇒ 统一计一次 boot / PFR，启动上电计时。 */
+    lifetime_boot(s_boot_pfr_any);
+
     /* ②.5 路由 ↔ die 的往返自检（owner 解析的根基）：
      * topo_2_die(route(die)) 必须等于 die；公式漂移会让每次 cache 操作找不到 owner。
      * 必须在逐实例 ftl_instance_init 之后做（topo 那时才有值），且 release 也拒绝启动
@@ -386,6 +400,54 @@ void _init(void)
  * 心跳（sys_init 配置完时钟树后立即启动）。
  */
 
+/* 主循环耗时采样：每 32 轮采样一次（每轮读 µs 时基 + 除法太贵）。 */
+#define SYS_STATS_TIME_SAMPLE_MASK (31U)
+#define SYS_STATS_OVER_1MS_US      (1000U)
+
+/* ── 主循环统计（模块自持；docs/design/common/statistics_design.md）──
+ * 空转判据：每轮比较 FC/FTL 的进展签名，签名不变即记一次 idle。
+ * 统计专用对象/表/签名在 SSD_STATS_ENABLE=0 时整体不编译。 */
+#if SSD_STATS_ENABLE
+typedef struct SYS_LOOP_STATISTICS_S
+{
+    DWORD rounds;
+    DWORD progress_rounds;
+    DWORD idle_streak;
+    DWORD idle_streak_max;
+    DWORD over_1ms; /* 采样轮中耗时 > 1 ms 的次数 */
+    DWORD max_us;   /* 采样轮的最大耗时（高水位 gauge） */
+} sys_stats_loop_s;
+
+static sys_stats_loop_s s_stats_loop;
+
+#    define SYS_LOOP_STATS_LIST(X)                   \
+        X(rounds, STATS_U32, STATS_COUNTER)          \
+        X(progress_rounds, STATS_U32, STATS_COUNTER) \
+        X(idle_streak, STATS_U32, STATS_GAUGE)       \
+        X(idle_streak_max, STATS_U32, STATS_GAUGE)   \
+        X(over_1ms, STATS_U32, STATS_COUNTER)        \
+        X(max_us, STATS_U32, STATS_GAUGE)
+
+#    define SYS_LOOP_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(sys_stats_loop_s, field), width, kind},
+static const stats_name_s s_stats_loop_names[] = {
+    SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_NAME)};
+#    undef SYS_LOOP_STATS_NAME
+#    define SYS_LOOP_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(sys_stats_loop_s, field, width);
+SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_CHECK)
+#    undef SYS_LOOP_STATS_CHECK
+
+/**
+ * @brief 主循环进展签名（FC 完成/派发 + FTL 完成派发/host 下发）
+ *
+ * @return 进展签名
+ */
+static DWORD sys_stats_progress(void)
+{
+    return fc_stats_progress() + ftl_op_stats_progress();
+}
+#endif /* SSD_STATS_ENABLE */
+
 /**
  * @brief 推进一次后台服务：FTL/FC → controller → USB → timer。
  *
@@ -395,6 +457,18 @@ void _init(void)
  */
 void ssd_runtime_pump(void)
 {
+#if SSD_STATS_ENABLE
+    STATS_INC(s_stats_loop.rounds);
+    const DWORD progress_before = sys_stats_progress();
+    BOOL        time_sample     = ((s_stats_loop.rounds & SYS_STATS_TIME_SAMPLE_MASK) == 0U) ? true : false;
+    DWORD       time_start_us   = 0U;
+
+    if ((time_sample != false) && (delay_time_now_us(&time_start_us) == false))
+    {
+        time_sample = false;
+    }
+#endif
+
     /* controller READY ⇔ FTL 全部实例 boot + 绑定完成（唯一就绪判据） */
     if (g_ctrl.state == SSD_CONTROLLER_READY)
     {
@@ -423,6 +497,43 @@ void ssd_runtime_pump(void)
     usb_device_task();
 
     timer_scheduler_poll();
+
+#if SSD_STATS_ENABLE
+    if (time_sample != false)
+    {
+        DWORD time_end_us = 0U;
+
+        if (delay_time_now_us(&time_end_us) != false)
+        {
+            const DWORD elapsed = time_end_us - time_start_us;
+
+            if (elapsed > s_stats_loop.max_us)
+            {
+                s_stats_loop.max_us = elapsed;
+            }
+            if (elapsed > SYS_STATS_OVER_1MS_US)
+            {
+                STATS_INC(s_stats_loop.over_1ms);
+            }
+        }
+    }
+
+    const DWORD progress_after = sys_stats_progress();
+
+    if (progress_after != progress_before)
+    {
+        STATS_INC(s_stats_loop.progress_rounds);
+        s_stats_loop.idle_streak = 0U;
+    }
+    else
+    {
+        STATS_INC(s_stats_loop.idle_streak);
+        if (s_stats_loop.idle_streak > s_stats_loop.idle_streak_max)
+        {
+            s_stats_loop.idle_streak_max = s_stats_loop.idle_streak;
+        }
+    }
+#endif
 }
 
 int main(void)
@@ -433,7 +544,7 @@ int main(void)
 
     sys_init();
 
-    /* TIM6 是 timer 调度器的毫秒心跳（watchdog / [STAT] / FTL 周期评估），
+    /* TIM6 是 timer 调度器的毫秒心跳（watchdog / FTL 周期评估），
      * 必须在任务注册与首次 poll 之前运行；晚启动只会推迟任务的首次到期。 */
     timer_timx_int_init(SSD_TIM6_ARR, SSD_TIM6_PSC);
 
@@ -523,18 +634,22 @@ int main(void)
     }
     else
     {
-        LOGI("[SYS ] timer task table ready, IWDG nominal=30s, period=100ms\r\n");
+        LOGI("[SYS ] IWDG nominal=30s, period=100ms\r\n");
     }
 #else
-    LOGI("[SYS ] timer task table ready, IWDG disabled (SSD_WATCHDOG_ENABLE=0)\r\n");
+    LOGI("[SYS ] IWDG disabled (SSD_WATCHDOG_ENABLE=0)\r\n");
 #endif
 
-    /* FTL 周期任务（统计日志 / 后台节拍 / GC-WL 求值）：周期由 FTL 自定。
+    /* FTL 周期任务（后台节拍 / GC-WL 求值）：周期由 FTL 自定。
      * 失败回退 fc_service 时不注册。 */
     if (g_ctrl.state == SSD_CONTROLLER_READY)
     {
         ftl_timer_tasks_start();
     }
+
+#if SSD_STATS_ENABLE
+    (void)stats_register("sys.loop", STATS_INST_NONE, &s_stats_loop, s_stats_loop_names, STATS_ENTRY_COUNT(s_stats_loop_names));
+#endif
 
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   cli_service_poll() —— CLI 解析（含 `test` 单元测试入口）。

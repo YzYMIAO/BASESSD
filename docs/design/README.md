@@ -1,6 +1,6 @@
 # 设计文档索引（design/）
 
-本目录是活跃权威设计文档（主设计 10 篇 + [`common/`](common/) 公共设施 6 篇 + [`revision_history/`](revision_history/) 决策史 2 篇）。先读哪个
+本目录是活跃权威设计文档（主设计 11 篇 + [`common/`](common/) 公共设施 6 篇 + [`revision_history/`](revision_history/) 决策史 2 篇）。先读哪个
 取决于任务 —— 导航表在 [`../README.md`](../README.md)。这里只给**阅读顺序**与
 **哪些是内部账本**，不复制设计内容。
 
@@ -17,6 +17,7 @@
 | 测试通用方法 | `../guides/testing_guide.md`（§12 = 负例与注入框架） | — | — |
 | 公共设施 / 横切规则 | [`common/README.md`](common/README.md)（assert / fault / logging / cli / timer / munit） | — | `common/munit_adapter.md` |
 | 设计原则 / 学习 | `storage_controller_design.md`（设计要点手册） | — | — |
+| **存储主控 SoC 介绍** | `controller_target_features.md`（硬件功能块 + FTL/固件功能块 + 消费/企业差异 + 当前平台案例 + 候选平台） | — | — |
 
 ## 内部账本（维护者用，公开阅读可跳过）
 

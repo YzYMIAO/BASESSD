@@ -31,6 +31,7 @@
 #include "pending.h"
 #include "read_recovery.h"
 #include "ssd_types.h"
+#include "stats.h" /* SSD_STATS_ENABLE（统计专用字段按档裁剪） */
 #include "timer.h"
 #include "wbuf.h"
 
@@ -367,8 +368,11 @@ typedef struct FTL_FLAGS_S
 
 typedef struct FTL_STATISTICS_S
 {
-    DWORD total_writes;   /* 累计 host 编程次数 */
+    DWORD total_writes;   /* 累计 host 编程次数（功能量：mig 判 host 写流） */
     DWORD dangling_total; /* L2P 指向 valid_count==0 的累计覆盖写次数 */
+#if SSD_STATS_ENABLE
+    DWORD deferred_taken; /* host 取走 deferred error 的次数（非 FUA 写迟到失败） */
+#endif
 } ftl_stats_s;
 
 typedef struct FTL_FLUSH_JOB_S

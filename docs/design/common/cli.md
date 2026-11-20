@@ -77,7 +77,8 @@ typedef struct UART_CLI_COMMAND_S {
 
 ## 8. 日志与测试选项
 
-- `log level <error|warn|info|debug>`：运行期调整项目日志级别。
+- `log level <error|warn|info|debug|trace>`：运行期调整项目日志级别。`trace` 只在
+  DEBUG 构建里有输出（数据面逐事件；稳定态日志不使用）。
 - `test --log-visible info|debug`：munit 自己的证据输出（`[EV]`），与项目日志独立。
 - `test --log-project info|debug`：打开项目日志；默认 `LOG_OFF`，避免全量 UT 时
   UART 成为瓶颈。

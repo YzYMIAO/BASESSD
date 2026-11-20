@@ -798,6 +798,7 @@ typedef struct METADATA_HANDLE_S
     BOOL                compact_wanted;       /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
     BOOL                dir_ckpt_for_reclaim; /* 本次目录检查点仅为「回收前落盘」：完成后回 RECLAIM */
     WORD                victim;               /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
+    BYTE                compact_victims;      /* 本 job 已压缩的 victim 数（观测；0 = 非压缩 job） */
     WORD                region_id;            /* 搬移游标（下一个待查 region_id）*/
     WORD                cur_region;           /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
     md_copy_e           cur_copy;             /* 当前搬移的副本（主 / 备）*/
@@ -815,7 +816,7 @@ typedef struct METADATA_HANDLE_S
     DWORD               reclaimed_count;      /* 累计擦除成功并归还的日志块数（单调进度） */
     int32_t             error;                /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
-    /* 心跳基准（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
+    /* 心跳基准（见 log.h / timer.h）：只在 age >= 5 s 时打一行 phase/victim/age */
     log_heartbeat_s hb;
 
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮

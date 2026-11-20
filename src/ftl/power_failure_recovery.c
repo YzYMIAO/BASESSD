@@ -366,10 +366,7 @@ static ftl_status_e pfr_format_verify_blocks(ftl_ctx_s *ftl)
             (void)bbt_mark_bad(alloc, g);
         }
 
-        if ((tested % 512U) == 0U)
-        {
-            LOGI(LOG_TAG_FLT "format --verify: %lu/%d blocks, bad=%lu\r\n", tested, FTL_BLOCK_TOTAL, bad);
-        }
+        LOGI_IF((tested % 512U) == 0U, LOG_TAG_FLT "format --verify: %lu/%d blocks, bad=%lu\r\n", tested, FTL_BLOCK_TOTAL, bad);
     }
 
     bbt_dirty_note(alloc);
@@ -603,10 +600,7 @@ static BOOL pfr_boot_scan(ftl_ctx_s *ftl, pfr_boot_scan_s *scan)
 
     scan->blocks_loaded = cp_block_table_load(ftl->cp_handle, cp, scan->cp_idx, words);
 
-    if (scan->blocks_loaded == false)
-    {
-        LOGW(LOG_TAG_BLK "unavailable (rec=%hu seq=%lu) — block accounting via full metadata rebuild\r\n", scan->cp_idx, cp->sequence);
-    }
+    LOGW_IF(scan->blocks_loaded == false, LOG_TAG_BLK "unavailable (rec=%hu seq=%lu) — block accounting via full metadata rebuild\r\n", scan->cp_idx, cp->sequence);
 
     // ⑥ 磨损计数是软状态：失败只让 WL 从零起算。
     if (cp_wear_table_load(ftl->cp_handle, cp, scan->cp_idx) == false)
@@ -893,10 +887,7 @@ static void pfr_refill_spare_pools(ftl_ctx_s *ftl)
 
         const WORD n = alc_spare_get_count(&ftl->alloc, p);
 
-        if (n < FTL_SPARE_POOL_PER_PLANE)
-        {
-            LOGW(LOG_TAG_BLK "spare plane%hhu=%hu/%u (Free pool 不足)\r\n", p, n, FTL_SPARE_POOL_PER_PLANE);
-        }
+        LOGW_IF(n < FTL_SPARE_POOL_PER_PLANE, LOG_TAG_BLK "spare plane%hhu=%hu/%u (Free pool 不足)\r\n", p, n, FTL_SPARE_POOL_PER_PLANE);
     }
 }
 
@@ -1129,10 +1120,7 @@ static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr
             LOGW(LOG_TAG_BLK "replay: %lu sub-at-zero kept (not fatal); first g=%hu st=%s live=%hu\r\n", stats->sub_zero, stats->sub_zero_g, ftl_block_state_name(zst), (stats->sub_zero_g < FTL_BLOCK_TOTAL) ? md_live_count_get(ftl->metadata_dir, stats->sub_zero_g) : 0U);
         }
 
-        if (jrn_replay_degraded_entries() != 0U)
-        {
-            LOGW(LOG_TAG_BLK "scoped recovery: %lu journal entr(ies) hit degraded L2P region(s) — snapshot kept\r\n", jrn_replay_degraded_entries());
-        }
+        LOGW_IF(jrn_replay_degraded_entries() != 0U, LOG_TAG_BLK "scoped recovery: %lu journal entr(ies) hit degraded L2P region(s) — snapshot kept\r\n", jrn_replay_degraded_entries());
 
         // ④ 按 CP region_bitmap 局部加载（F4）：跳过 DIRTY 回放行，非 bitmap 区懒加载。
         pfr_boot_apply_region_bitmap(ftl, cp, stats);
@@ -1157,10 +1145,7 @@ static BOOL pfr_ledger_snapshot(ftl_ctx_s *ftl, const pfr_boot_scan_s *scan, pfr
     }
 
     // 降级 region 只丢映射、不影响 valid_count 增量 ⇒ 不让它触发全量重建。
-    if ((plan == PFR_PLAN_REPLAY) && (stats->l2p_degraded_cw != 0U))
-    {
-        LOGW(LOG_TAG_BLK "scoped recovery: %lu CW in degraded L2P region(s) — snapshot kept, mappings lost\r\n", stats->l2p_degraded_cw);
-    }
+    LOGW_IF((plan == PFR_PLAN_REPLAY) && (stats->l2p_degraded_cw != 0U), LOG_TAG_BLK "scoped recovery: %lu CW in degraded L2P region(s) — snapshot kept, mappings lost\r\n", stats->l2p_degraded_cw);
 
     return true;
 }
@@ -1378,14 +1363,8 @@ BYTE pfr_test_scan_write_pointer(const ftl_ctx_s *ftl, BYTE plane, WORD block)
  */
 static void pfr_stats_report(const pfr_stats_s *stats)
 {
-    if (stats->l2p_read_errors != 0U)
-    {
-        LOGW(LOG_TAG_BLK "rebuild: L2P read failed for %lu CW — valid_count 可能少算\r\n", stats->l2p_read_errors);
-    }
-    if (stats->l2p_degraded_cw != 0U)
-    {
-        LOGW(LOG_TAG_BLK "rebuild: L2P region %lu degraded — %lu CW skipped (mapping lost)\r\n", stats->first_degraded_region, stats->l2p_degraded_cw);
-    }
+    LOGW_IF(stats->l2p_read_errors != 0U, LOG_TAG_BLK "rebuild: L2P read failed for %lu CW — valid_count 可能少算\r\n", stats->l2p_read_errors);
+    LOGW_IF(stats->l2p_degraded_cw != 0U, LOG_TAG_BLK "rebuild: L2P region %lu degraded — %lu CW skipped (mapping lost)\r\n", stats->first_degraded_region, stats->l2p_degraded_cw);
 }
 
 /**
@@ -1760,10 +1739,7 @@ static BOOL pfr_restore_blocks(ftl_ctx_s *ftl, pfr_block_table_s *tbl)
             // 可能上百块，不逐块告警）；其他非 LOG 状态才是真冲突，留痕一次。
             const BYTE prev = ftl_block_state(b);
 
-            if ((prev != FTL_BLOCK_STATE_LOG) && (prev != FTL_BLOCK_STATE_NONE))
-            {
-                LOGW(LOG_TAG_BLK "g=%hu state=%hhu but Directory says LOG — Directory wins\r\n", g, prev);
-            }
+            LOGW_IF((prev != FTL_BLOCK_STATE_LOG) && (prev != FTL_BLOCK_STATE_NONE), LOG_TAG_BLK "g=%hu state=%hhu but Directory says LOG — Directory wins\r\n", g, prev);
             ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
             ftl_block_clear_valid(b);
             ftl_block_set_temp(b, 0U);

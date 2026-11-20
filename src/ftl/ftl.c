@@ -63,12 +63,14 @@
 #endif
 #include "fc_interface.h"
 #include "ftl_fc_interface.h"
-#include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
+#include "ftl_op.h"        /* ftl_op_submit / FTL_OP_* */
+#include "lifetime_port.h" /* 终身计数接线（非热对象） */
 #include "log.h"
 #include "metadata_job.h"
 #include "pending.h"
 #include "power_failure_recovery.h"
 #include "ssd_compiler.h"
+#include "stats.h"
 #include "timer.h"
 #include "wbuf.h"
 
@@ -286,7 +288,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
         if ((now_ms - ftl->cache_stream.seq.idle_ms) > FTL_CACHE_SEQ_DRAIN_STALL_MS)
         {
             // 兜底放锁是异常路径（命令 1s 没排空）：必须留现场，否则真卡死时无记录。
-            LOGW_IF(log_ratelimit_due(&s_seq_drain_stall_log), LOG_TAG_FTL "seq drain force-clear gi=%hu outstanding=%hu age=%lums (LUN gate reopened)\r\n", gi, ftl->pending.groups[gi].outstanding, now_ms - ftl->cache_stream.seq.idle_ms);
+            LOGW_RL(&s_seq_drain_stall_log, LOG_TAG_FTL "seq drain force-clear gi=%hu outstanding=%hu age=%lums (LUN gate reopened)", gi, ftl->pending.groups[gi].outstanding, now_ms - ftl->cache_stream.seq.idle_ms);
 
             ftl->cache_stream.seq.draining = false;
             ftl->cache_stream.seq.idle_ms  = 0U;
@@ -491,10 +493,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
             // （H14：ASSERT 与运行期留痕不是二选一）。
             const BOOL appended = jrn_append_seq(ftl->journal, l, newp[bit]);
 
-            if (appended == false)
-            {
-                LOGE(LOG_TAG_FTL "seq journal append failed lba=%lu — mapping not persisted\r\n", l);
-            }
+            LOGE_IF(appended == false, LOG_TAG_FTL "seq journal append failed lba=%lu — mapping not persisted\r\n", l);
             ASSERT(appended);
         }
         else
@@ -604,13 +603,8 @@ static void ftl_dangling_check(ftl_ctx_s *ftl, DWORD l, DWORD old_pba, WORD new_
     }
 
     // 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。
-    if (log_ratelimit_due(&s_dangling_log))
-    {
-        const char *old_state = ftl_block_state_name(old_st);
-        const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g]));
-
-        LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s\r\n", l, old_pba, gob, old_state, ftl->alloc.blocks[gob].sb_id, new_g, new_state);
-    }
+    // 名称转换放在实参里：限流抑制时完全不求值（本函数在写确认热路径上）。
+    LOGE_RL(&s_dangling_log, LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s", l, old_pba, gob, ftl_block_state_name(old_st), ftl->alloc.blocks[gob].sb_id, new_g, ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g])));
 }
 
 /* ── host I/O 完成的四个分支（ftl_host_io_callback 按 pending->op 与成败分派）── */
@@ -751,18 +745,9 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
 
             // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
             // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
-            if (log_ratelimit_due(&s_confirm_log))
-            {
-                // 只在真正要打日志时统计。日志必须报「同时有多少条在等」——只打
-                // 扫描到的第一条（常是 idx=0）会被误读成「只有一个 region 卡住」
-                // 。计数含本轮尚未结算的项。
-                const WORD parked = pend_confirm_get_count(&ftl->pending);
-
-                LOGE(LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu\r\n",
-                     pending->lba,
-                     i,
-                     parked);
-            }
+            // 日志必须报「同时有多少条在等」——只打扫描到的第一条（常是 idx=0）会被
+            // 误读成「只有一个 region 卡住」。计数放进实参，只在真正打印时统计。
+            LOGE_RL(&s_confirm_log, LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu", pending->lba, i, pend_confirm_get_count(&ftl->pending));
         }
         else if (st != FTL_OK)
         {
@@ -929,7 +914,8 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
         }
     }
 
-    fc_cmd_s *cmd = fc_command_alloc();
+    // host 写重试命令走后台额度：不得吃掉 L2P demand load 的 CRIT 预留槽。
+    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
 
     if (cmd == NULL)
     {
@@ -1275,7 +1261,7 @@ static void ftl_cache_wr_mark_failed(ftl_ctx_s *ftl, ftl_cache_page_s *pg, const
     // 编程失败的页；降级位让「撤销完成前」的读也报 IO_ERROR，而不是返回可疑页内容。
     l2p_note_region_lost(ftl->cache, lba_to_global_region(pg->lba), pg->lba, pg->cw_bitmap);
 
-    LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr failed lba=%lu (%s) — close hot SB\r\n", pg->lba, why);
+    LOGE_RL(&s_cache_wb_fail_log, LOG_TAG_FTL "cache-wr failed lba=%lu (%s) — close hot SB", pg->lba, why);
 }
 
 /* 按 LBA 落 FAIL_CACHE 结论；页未入表则暂存。返回 true = 失败结论。 */
@@ -1405,12 +1391,9 @@ static void ftl_cache_wr_confirm_step(ftl_ctx_s *ftl)
             {
                 return;
             }
-            if (st != FTL_OK)
-            {
-                // 硬错误只可能是 L2P 读的 LBA 越界（编程错误）：本页已判失败、region 已
-                // 降级，丢弃该项避免永久卡住队头（flush 屏障会一直等它）。
-                LOGE(LOG_TAG_FTL "cache-wr undo failed lba=%lu — drop entry\r\n", pg->lba);
-            }
+            // 硬错误只可能是 L2P 读的 LBA 越界（编程错误）：本页已判失败、region 已
+            // 降级，丢弃该项避免永久卡住队头（flush 屏障会一直等它）。
+            LOGE_IF(st != FTL_OK, LOG_TAG_FTL "cache-wr undo failed lba=%lu — drop entry\r\n", pg->lba);
             ftl_cache_wr_ring_pop(ftl);
             continue;
         }
@@ -1539,7 +1522,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
     // （失败序列其后页一律不确认，否则 rebuild 的 page0 捷径会被击穿）。
     if (pending->cache_gen != ftl->cache_stream.seq.gen)
     {
-        LOGW_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr late completion lba=%lu gen=%hhu stale — drop page\r\n", page_lba, pending->cache_gen);
+        LOGW_RL(&s_cache_wb_fail_log, LOG_TAG_FTL "cache-wr late completion lba=%lu gen=%hhu stale — drop page", page_lba, pending->cache_gen);
 
         pend_release_index(&ftl->pending, idx);
         pend_group_complete_subop_multi(&ftl->pending, owners, SSD_STATUS_IO_ERROR);
@@ -1574,7 +1557,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
         (void)fc_cmd_status_str(status, stbuf, sizeof(stbuf));
         ftl->cache_stream.wb_aborts++;
 
-        LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr cmd failed lba=%lu st=%s\r\n", page_lba, stbuf);
+        LOGE_RL(&s_cache_wb_fail_log, LOG_TAG_FTL "cache-wr cmd failed lba=%lu st=%s", page_lba, stbuf);
 
         ftl_cache_wr_close_sb_if_open(ftl, pending->new_pba, pending->new_pba1);
         ftl->flags.deferred_error = true;
@@ -1614,7 +1597,7 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
             // 环满属结构性错误：环深 16 ≫ 在飞窗口（≤4 页/窗口 + 前窗尾页）。
             // release 下不能只靠 ASSERT：按 OK 结算会让这页永不确认，
             // host 已看到成功的写静默丢失。按失败中止序列 + 本组报 IO_ERROR（host 重试）。
-            LOGE_IF(log_ratelimit_due(&s_cache_wb_fail_log), LOG_TAG_FTL "cache-wr page table full lba=%lu — abort sequence\r\n", page_lba);
+            LOGE_RL(&s_cache_wb_fail_log, LOG_TAG_FTL "cache-wr page table full lba=%lu — abort sequence", page_lba);
             ASSERT_MSG(wr_ring_pushed, "cache-wr page table full lba=%lu", page_lba);
             ftl_cache_wr_abort(ftl);
             pend_release_index(&ftl->pending, idx);
@@ -1623,6 +1606,9 @@ static void ftl_cache_wr_member_done(ftl_ctx_s *ftl, pend_req_s *pending, const 
         }
     }
 
+#if SSD_STATS_PERSIST_ENABLE
+    lifetime_note_host_io(ftl, pending, true);
+#endif
     pend_release_index(&ftl->pending, idx);
     pend_group_complete_subop_multi(&ftl->pending, owners, SSD_STATUS_OK);
 }
@@ -1931,12 +1917,21 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
             if (is_read)
             {
                 sub_status = ftl_host_io_read_ok(ftl, cmd, pending, cmd_id);
+#if SSD_STATS_PERSIST_ENABLE
+                if (sub_status == SSD_STATUS_OK)
+                {
+                    lifetime_note_host_io(ftl, pending, false);
+                }
+#endif
             }
             else
             {
                 // 普通写 / page0 写：完成后确认映射（cache program 成员已在上面分流）。
                 if (ftl_host_io_write_ok(ftl, pending))
                 {
+#if SSD_STATS_PERSIST_ENABLE
+                    lifetime_note_host_io(ftl, pending, true);
+#endif
                     (void)fc_command_release(cmd->cmd_id);
                     return;
                 }
@@ -1950,7 +1945,7 @@ void ftl_host_io_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, voi
                 // 破坏 31h/3Fh 管线。直接报组错误；后续成员照常完成。
                 // 失败原因（NAND_FAIL/UNC/CRC/META/EMPTY…）只在这条 completion 上有，
                 // 限流打出来：定位「缓存读指到了什么页」不靠猜。
-                LOGE_IF(log_ratelimit_due(&s_cache_rd_err_log), LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX\r\n", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
+                LOGE_RL(&s_cache_rd_err_log, LOG_TAG_FTL "cache read cmd failed lba=%lu cmd=%hu st=0x%02lX pba=%08lX", pending->lba, cmd_id, (DWORD)completion->status, ftl_cmd_pba(cmd));
                 sub_status = SSD_STATUS_IO_ERROR;
             }
             else
@@ -2115,7 +2110,6 @@ BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM])
         }
     }
 
-    LOGI(LOG_TAG_FTL "topology: dies=%hhu (max=%u)\r\n", g_die_count, (unsigned int)FTL_DIE_MAX);
     return true;
 }
 
@@ -2131,6 +2125,105 @@ BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM])
  * @param storage storage 数组/挂载块
  * @return FTL_OK；FTL_ERROR 元数据候选池构建失败
  */
+#if SSD_STATS_ENABLE
+#    define FTL_STATS_LIST(X)                                                                                      \
+        X(total_writes, STATS_U32, STATS_GAUGE) /* 功能量：mig 用它判 host 写流，--clear 不得清零 */ \
+        X(dangling_total, STATS_U32, STATS_COUNTER)                                                                \
+        X(deferred_taken, STATS_U32, STATS_COUNTER)
+
+#    define FTL_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(ftl_stats_s, field), width, kind},
+static const stats_name_s s_stats_ftl_names[] = {
+    FTL_STATS_LIST(FTL_STATS_NAME)};
+#    undef FTL_STATS_NAME
+#    define FTL_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(ftl_stats_s, field, width);
+FTL_STATS_LIST(FTL_STATS_CHECK)
+#    undef FTL_STATS_CHECK
+
+#    define FTL_ALLOC_STATS_LIST(X)           \
+        X(free_count, STATS_U16, STATS_GAUGE) \
+        X(bad_count, STATS_U16, STATS_GAUGE)  \
+        X(closed_sb_count, STATS_U16, STATS_GAUGE)
+
+#    define FTL_ALLOC_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(alc_s, field), width, kind},
+static const stats_name_s s_stats_alloc_names[] = {
+    FTL_ALLOC_STATS_LIST(FTL_ALLOC_STATS_NAME)};
+#    undef FTL_ALLOC_STATS_NAME
+#    define FTL_ALLOC_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(alc_s, field, width);
+FTL_ALLOC_STATS_LIST(FTL_ALLOC_STATS_CHECK)
+#    undef FTL_ALLOC_STATS_CHECK
+
+#    define FTL_STREAM_STATS_LIST(X)                \
+        X(prefetch_run, STATS_U32, STATS_COUNTER)   \
+        X(prefetch_run_max, STATS_U32, STATS_GAUGE) \
+        X(read_batches, STATS_U32, STATS_COUNTER)   \
+        X(read_pairs, STATS_U32, STATS_COUNTER)     \
+        X(read_starts, STATS_U32, STATS_COUNTER)    \
+        X(read_declines, STATS_U32, STATS_COUNTER)  \
+        X(read_fallbacks, STATS_U32, STATS_COUNTER) \
+        X(seq_breaks, STATS_U32, STATS_COUNTER)     \
+        X(wb_batches, STATS_U32, STATS_COUNTER)     \
+        X(wb_pages, STATS_U32, STATS_COUNTER)       \
+        X(wb_declines, STATS_U32, STATS_COUNTER)    \
+        X(wb_aborts, STATS_U32, STATS_COUNTER)      \
+        X(wb_starts, STATS_U32, STATS_COUNTER)      \
+        X(wb_page_ends, STATS_U32, STATS_COUNTER)   \
+        X(wb_pad_closes, STATS_U32, STATS_COUNTER)
+
+#    define FTL_STREAM_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(ftl_cache_stream_s, field), width, kind},
+static const stats_name_s s_stats_stream_names[] = {
+    FTL_STREAM_STATS_LIST(FTL_STREAM_STATS_NAME)};
+#    undef FTL_STREAM_STATS_NAME
+#    define FTL_STREAM_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(ftl_cache_stream_s, field, width);
+FTL_STREAM_STATS_LIST(FTL_STREAM_STATS_CHECK)
+#    undef FTL_STREAM_STATS_CHECK
+
+#    define FTL_JRN_STATS_LIST(X)                       \
+        X(sequence_counter, STATS_U32, STATS_GAUGE)     \
+        X(page_writes, STATS_U32, STATS_COUNTER)        \
+        X(persisted_seq, STATS_U32, STATS_GAUGE)        \
+        X(write_page_seq, STATS_U32, STATS_GAUGE)       \
+        X(write_entry_count, STATS_U16, STATS_GAUGE)    \
+        X(current_block, STATS_U8, STATS_GAUGE)         \
+        X(current_page, STATS_U8, STATS_GAUGE)          \
+        X(current_entry, STATS_U16, STATS_GAUGE)        \
+        X(ring_full, STATS_U8, STATS_GAUGE)             \
+        X(erase_fail_count, STATS_U8, STATS_GAUGE)      \
+        X(erase_kick_blocked, STATS_U32, STATS_COUNTER) \
+        X(write_fail_count, STATS_U32, STATS_GAUGE)
+
+#    define FTL_JRN_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(jrn_state_s, field), width, kind},
+static const stats_name_s s_stats_jrn_names[] = {
+    FTL_JRN_STATS_LIST(FTL_JRN_STATS_NAME)};
+#    undef FTL_JRN_STATS_NAME
+#    define FTL_JRN_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(jrn_state_s, field, width);
+FTL_JRN_STATS_LIST(FTL_JRN_STATS_CHECK)
+#    undef FTL_JRN_STATS_CHECK
+
+static const stats_name_s s_stats_gc_state_names[] = {
+    {"paused", STATS_OFFSET_NESTED(mig_state_s, failure, mig_failure_s, paused), STATS_U8, STATS_GAUGE},
+    {"read_fail_streak", STATS_OFFSET_NESTED(mig_state_s, failure, mig_failure_s, read_fail_streak), STATS_U8, STATS_GAUGE},
+    {"inflight", STATS_OFFSET(mig_state_s, inflight), STATS_U16, STATS_GAUGE},
+    {"last_mode", STATS_OFFSET_NESTED(mig_state_s, benefit, mig_gc_benefit_s, last_mode), STATS_U8, STATS_GAUGE},
+    {"urgent_gc", STATS_OFFSET(mig_state_s, urgent_gc), STATS_U8, STATS_GAUGE},
+    {"batch_disabled", STATS_OFFSET(mig_state_s, batch_disabled), STATS_U8, STATS_GAUGE},
+};
+STATS_CHECK_FIELD(mig_state_s, inflight, STATS_U16);
+STATS_CHECK_FIELD(mig_state_s, urgent_gc, STATS_U8);
+STATS_CHECK_FIELD(mig_state_s, batch_disabled, STATS_U8);
+STATS_CHECK_FIELD(mig_failure_s, paused, STATS_U8);
+STATS_CHECK_FIELD(mig_failure_s, read_fail_streak, STATS_U8);
+STATS_CHECK_FIELD(mig_gc_benefit_s, last_mode, STATS_U8);
+
+static const stats_name_s s_stats_rr_names[] = {
+    {STATS_NAME_STR(already_bad_reads), STATS_OFFSET(rr_handle_s, already_bad_reads), STATS_U32, STATS_COUNTER},
+};
+STATS_CHECK_FIELD(rr_handle_s, already_bad_reads, STATS_U32);
+#endif /* SSD_STATS_ENABLE */
+
 SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s *cache, const ftl_storage_s *storage)
 {
     ASSERT(ftl != NULL);
@@ -2271,6 +2364,28 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     cp_init(ftl->cp_handle, ftl->cache, ftl->journal, ftl->metadata_dir, &ftl->alloc);
 
     // ├─ 统计 ──
+#if SSD_STATS_ENABLE
+    {
+        const BYTE inst = topo_2_die(ftl->topo);
+
+        // 拓扑不在扫描表里（异常/测试合成拓扑）：本实例的组不注册，记日志后继续运行。
+        if (inst == FTL_DIE_INVALID)
+        {
+            LOGE("[FTL ] stats: topo not in scan table; groups skipped\r\n");
+        }
+        else
+        {
+            mig_stats_register(ftl->mig_handle, inst);
+            (void)stats_register("ftl.stats", inst, &ftl->stats, s_stats_ftl_names, STATS_ENTRY_COUNT(s_stats_ftl_names));
+            (void)stats_register("ftl.alloc", inst, &ftl->alloc, s_stats_alloc_names, STATS_ENTRY_COUNT(s_stats_alloc_names));
+            (void)stats_register("ftl.stream", inst, &ftl->cache_stream, s_stats_stream_names, STATS_ENTRY_COUNT(s_stats_stream_names));
+            (void)stats_register("ftl.jrn", inst, &ftl->journal->handle.state, s_stats_jrn_names, STATS_ENTRY_COUNT(s_stats_jrn_names));
+            (void)stats_register("ftl.gc.state", inst, &ftl->mig_handle->state, s_stats_gc_state_names, STATS_ENTRY_COUNT(s_stats_gc_state_names));
+            (void)stats_register("ftl.rr", inst, &ftl->read_recovery_handle, s_stats_rr_names, STATS_ENTRY_COUNT(s_stats_rr_names));
+        }
+    }
+#endif
+
     // ├─ 后台调度器任务表（10 项；must-run + interval/budget）──
     // 必须在所有在飞的字段就绪后装载（适配器只依赖实例字段与 kick，无额外依赖）。
     bg_scheduler_init(&ftl->bg);
@@ -2463,7 +2578,6 @@ DWORD ftl_host_lba_max(void)
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
         const ftl_ctx_s *ftl              = &g_ftl[die];
-        const ftl_topo_s topo             = g_die_table[die];
         DWORD            plane_usable_min = UINT32_MAX;
 
         for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -2491,8 +2605,6 @@ DWORD ftl_host_lba_max(void)
 
         const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
 
-        LOGI(LOG_TAG_CAP "ch=%hhu ce=%hhu lun=%hhu plane_usable_min=%lu instance_blocks=%lu\r\n", topo.ch, topo.ce, topo.lun, plane_usable_min, instance_blocks);
-
         if (instance_blocks < cap_blocks)
         {
             cap_blocks = instance_blocks;
@@ -2518,17 +2630,6 @@ DWORD ftl_host_lba_max(void)
     LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%llu (%lluMiB)\r\n", cap_blocks, lba, (lba * FTL_IU_BYTES) / (1024UL * 1024UL));
 
     return (DWORD)lba;
-}
-
-/**
- * @brief 打印本实例的周期统计（[STAT] 一行）
- *
- * @param ftl       已初始化的实例（只读）
- * @param uptime_ms 系统运行时长（毫秒）
- */
-static void ftl_log_stats(const ftl_ctx_s *ftl, DWORD uptime_ms)
-{
-    LOGI(LOG_TAG_STAT "ch=%hhu t=%lus free=%hu bad=%hu mig=%u/%u mv=%lu nop=%lu\r\n", ftl->topo.ch, (uptime_ms / 1000U), ftl->alloc.free_count, ftl->alloc.bad_count, (mig_is_busy(ftl->mig_handle) != false) ? 1U : 0U, (mig_is_paused(ftl->mig_handle) != false) ? 1U : 0U, ftl->mig_handle->state.counters.moved, ftl->mig_handle->state.counters.noop);
 }
 
 /**
@@ -2562,25 +2663,6 @@ static BOOL ftl_mig_timer_register(ftl_ctx_s *ftl)
 }
 
 /**
- * @brief 周期统计日志任务（timer 表每 10 s 一次）
- *
- * @param context 未使用
- * @param now_ms  未使用（时间由 platform_now_ms 提供）
- */
-static void ftl_stat_task(void *context, DWORD now_ms)
-{
-    (void)context;
-    (void)now_ms;
-
-    const DWORD uptime_ms = platform_now_ms();
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        ftl_log_stats(&g_ftl[die], uptime_ms);
-    }
-}
-
-/**
  * @brief 后台周期节拍任务（每 L2P_FLUSH_INTERVAL_MS 一次）
  *
  * @param context 未使用
@@ -2606,7 +2688,7 @@ static void ftl_bg_tick_task(void *context, DWORD now_ms)
 }
 
 /**
- * @brief 注册 FTL 的周期任务（统计日志 / 后台节拍 / GC-WL 求值）
+ * @brief 注册 FTL 的周期任务（后台节拍 / GC-WL 求值）
  *
  * 必须在全部实例 boot 成功之后调用一次；失败回退 fc_service 时不调用。
  * 周期与内部策略由 FTL 决定，调用者不需要知道。
@@ -2623,11 +2705,6 @@ void ftl_timer_tasks_start(void)
     s_timers_started = true;
 
     DWORD task_id;
-
-    if (!timer_scheduler_add(ftl_stat_task, NULL, 10000U, 10000U, &task_id))
-    {
-        LOGE("[FTL ] stat task add failed\r\n");
-    }
 
     if (!timer_scheduler_add(ftl_bg_tick_task, NULL, 0U, L2P_FLUSH_INTERVAL_MS, &task_id))
     {
@@ -2885,8 +2962,6 @@ SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_s *ftl)
     contract_check_bg(ftl);
     contract_check_jobs_idle(ftl);
     contract_check_boot_zero(ftl);
-
-    LOGI("[FTL ] contract ok ch=%hhu ce=%hhu lun=%hhu regions=%u tasks=%hhu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, L2P_REGIONS_PER_INSTANCE, ftl->bg.task_count);
 #endif
 }
 
@@ -3093,7 +3168,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
                 // ⇒ 必须报错，不能把它的内容当数据返回。
                 if (ftl_cache_wr_failed_covers(ftl, l) == true)
                 {
-                    LOGE_IF(log_ratelimit_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: cache page failed (FAIL_CACHE) — IO_ERROR\r\n", l);
+                    LOGE_RL(&s_lost_log, LOG_TAG_FTL "rd lba=%lu: cache page failed (FAIL_CACHE) — IO_ERROR", l);
                     return FTL_ERROR;
                 }
 
@@ -3171,7 +3246,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
             // 回放已恢复的 LBA 有有效 PBA，不会走到这里。
             if (l2p_is_region_degraded(ftl->cache, lba_to_global_region(internal_lba)))
             {
-                LOGE_IF(log_ratelimit_due(&s_lost_log), LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR\r\n", internal_lba);
+                LOGE_RL(&s_lost_log, LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR", internal_lba);
                 return FTL_ERROR;
             }
 
@@ -3203,8 +3278,8 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
         return FTL_AGAIN;
     }
 
-    // 分配 FC 命令槽（池空 = 瞬态）
-    fc_cmd_s *cmd = fc_command_alloc();
+    // 分配 FC 命令槽（池空 = 瞬态）；host 读走后台额度，保留 L2P demand load 的 CRIT 槽。
+    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -3479,14 +3554,17 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
                     // 归因：GC 已判定「无收益 victim」时，这不是普通超时，是真正的无空间
                     // （free 见底且搬不动）。打印区分行，避免与瞬态背压混淆。
                     // 无空间是终止态、host 会持续重试 ⇒ 用限流器，避免逐请求刷屏。
-                    if (log_ratelimit_due(&s_nospace_log))
+                    // 两行共享一次限流判据：不能用 LOGx_RATE 调两次（第二次会被判 suppressed）。
+                    const DWORD suppressed = s_nospace_log.suppressed;
+
+                    if (log_ratelimit_due(&s_nospace_log) != false)
                     {
                         if (mig_gc_no_gain(ftl->mig_handle) != false)
                         {
-                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%hu) — IO_ERROR\r\n", ftl->alloc.free_count);
+                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%hu) — IO_ERROR suppressed=%lu\r\n", ftl->alloc.free_count, suppressed);
                         }
 
-                        LOGE(LOG_TAG_FTL "drain stalled gi=%hhu next=%lu/%lu\r\n", gi, g->next, g->total);
+                        LOGE(LOG_TAG_FTL "drain stalled gi=%hhu next=%lu/%lu suppressed=%lu\r\n", gi, g->next, g->total, suppressed);
                         ftl_drain_stall_dump(ftl, gi);
                     }
                     g->agg_status = SSD_STATUS_IO_ERROR;
@@ -3499,7 +3577,7 @@ static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
 
         // FTL_ERROR：永久失败 → 弃未下发者，组最终报错（已下发的照常完成）。
         // host 会重试 ⇒ 限流打印（保留首个失败位置与抑制计数）。
-        LOGE_IF(log_ratelimit_due(&s_subop_fail_log), LOG_TAG_FTL "subop failed gi=%hhu next=%lu/%lu\r\n", gi, g->next, g->total);
+        LOGE_RL(&s_subop_fail_log, LOG_TAG_FTL "subop failed gi=%hhu next=%lu/%lu", gi, g->next, g->total);
         g->agg_status = SSD_STATUS_IO_ERROR;
         g->next       = g->total;
         ftl_cache_seq_close(ftl, gi);
@@ -3814,6 +3892,10 @@ BOOL ftl_take_deferred_error(ftl_ctx_s *ftl)
     const BOOL has = ftl->flags.deferred_error;
 
     ftl->flags.deferred_error = false;
+    if (has != false)
+    {
+        STATS_INC(ftl->stats.deferred_taken);
+    }
     return has;
 }
 
@@ -4018,7 +4100,7 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
     {
         // best-effort：journal 页写/擦持续失败。CP 成功后
         // jrn_write_failure_clear 清 journal 标志。
-        LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush: journal write failure pending — complete best-effort\r\n");
+        LOGW_RL(&s_flush_err_log, LOG_TAG_FTL "flush: journal write failure pending — complete best-effort");
     }
     else if (timeout)
     {
@@ -4034,15 +4116,15 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
         // dirty CMT / 未确认写页 / 其它：三选一打印，共用限流器，不刷屏。
         if (ftl->cache->cmt_dirty_owner[die] != 0U)
         {
-            LOGE_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush stalled %lums (no progress %lums) with %lu dirty CMT entr(ies) — mappings not persisted\r\n", flush_ms, idle_ms, ftl->cache->cmt_dirty_owner[die]);
+            LOGE_RL(&s_flush_err_log, LOG_TAG_FTL "flush stalled %lums (no progress %lums) with %lu dirty CMT entr(ies) — mappings not persisted", flush_ms, idle_ms, ftl->cache->cmt_dirty_owner[die]);
         }
         else if (wr_pending == true)
         {
-            LOGE_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush stalled %lums (no progress %lums) with %hhu unconfirmed write page(s) — deferred IO_ERROR\r\n", flush_ms, idle_ms, ftl->cache_stream.seq.wr.count);
+            LOGE_RL(&s_flush_err_log, LOG_TAG_FTL "flush stalled %lums (no progress %lums) with %hhu unconfirmed write page(s) — deferred IO_ERROR", flush_ms, idle_ms, ftl->cache_stream.seq.wr.count);
         }
         else
         {
-            LOGW_IF(log_ratelimit_due(&s_flush_err_log), LOG_TAG_FTL "flush stalled %lums (no progress %lums) (wb=%d l2p=%d jrn=%d) — best-effort complete\r\n", flush_ms, idle_ms, wb_done, l2p_done, jrn_done);
+            LOGW_RL(&s_flush_err_log, LOG_TAG_FTL "flush stalled %lums (no progress %lums) (wb=%d l2p=%d jrn=%d) — best-effort complete", flush_ms, idle_ms, wb_done, l2p_done, jrn_done);
         }
     }
 
@@ -4050,7 +4132,7 @@ BOOL ftl_flush_step(ftl_ctx_s *ftl)
 
     // 耗时日志限流 5 s（单线程 superloop；多实例共享一个时间戳即可）。host 若
     // 频繁 fsync，逐次打印会刷屏。
-    LOGW_IF((ftl->flush.start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && log_ratelimit_due(&s_flush_log), LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
+    LOGW_RATE((ftl->flush.start_ms != 0U) && (flush_ms >= FTL_FLUSH_SLOW_LOG_MS) && (timeout == false) && log_ratelimit_due(&s_flush_log), s_flush_log.suppressed, LOG_TAG_FTL "flush took %lums (async job)", flush_ms);
 
     return true;
 }
@@ -4333,10 +4415,7 @@ BOOL ftl_debug_dump(const char *module)
         return false;
     }
 
-    if (flt.all)
-    {
-        LOGW(LOG_TAG_FTL "DBG req=%hu die_max=%hhu\r\n", ftl_op_req_count(), DIE_MAX);
-    }
+    LOGI_IF(flt.all, LOG_TAG_FTL "DBG req=%hu die_max=%hhu\r\n", ftl_op_req_count(), DIE_MAX);
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
@@ -4347,26 +4426,10 @@ BOOL ftl_debug_dump(const char *module)
             continue;
         }
 
-        if (flt.all || flt.alloc)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu alloc free=%hu bad=%hu closed=%hu op=%hu/%hu spare=%hu/%hu hot=%d/%hhu/%hhu cold=%d/%hhu\r\n",
-                 die,
-                 f->alloc.free_count,
-                 f->alloc.bad_count,
-                 f->alloc.closed_sb_count,
-                 alc_op_get_count(&f->alloc, 0U),
-                 alc_op_get_count(&f->alloc, 1U),
-                 alc_spare_get_count(&f->alloc, 0U),
-                 alc_spare_get_count(&f->alloc, 1U),
-                 (int)f->alloc.hot_sb.is_open,
-                 f->alloc.hot_sb.next_page,
-                 f->alloc.hot_sb.page0_programmed,
-                 (int)f->alloc.cold_sb.is_open,
-                 f->alloc.cold_sb.next_page);
-        }
+        LOGI_IF(flt.all || flt.alloc, LOG_TAG_FTL "DBG d=%hhu alloc free=%hu bad=%hu closed=%hu op=%hu/%hu spare=%hu/%hu hot=%d/%hhu/%hhu cold=%d/%hhu\r\n", die, f->alloc.free_count, f->alloc.bad_count, f->alloc.closed_sb_count, alc_op_get_count(&f->alloc, 0U), alc_op_get_count(&f->alloc, 1U), alc_spare_get_count(&f->alloc, 0U), alc_spare_get_count(&f->alloc, 1U), (int)f->alloc.hot_sb.is_open, f->alloc.hot_sb.next_page, f->alloc.hot_sb.page0_programmed, (int)f->alloc.cold_sb.is_open, f->alloc.cold_sb.next_page);
         if (flt.all || flt.pend)
         {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu pend slot=%hu group=%hu req=%hu\r\n",
+            LOGI(LOG_TAG_FTL "DBG d=%hhu pend slot=%hu group=%hu req=%hu\r\n",
                  die,
                  pend_slot_get_count(&f->pending),
                  pend_group_get_count(&f->pending),
@@ -4380,7 +4443,7 @@ BOOL ftl_debug_dump(const char *module)
                 {
                     continue;
                 }
-                LOGW(LOG_TAG_FTL "DBG d=%hhu g=%hhu op=%d lba=%lu next=%lu/%lu out=%hu stalls=%hhu agg=%d\r\n",
+                LOGI(LOG_TAG_FTL "DBG d=%hhu g=%hhu op=%d lba=%lu next=%lu/%lu out=%hu stalls=%hhu agg=%d\r\n",
                      die,
                      gi,
                      (int)g->op,
@@ -4394,7 +4457,7 @@ BOOL ftl_debug_dump(const char *module)
         }
         if (flt.all || flt.seq)
         {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu seq kind=%d act=%d drain=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu close=%d/%d\r\n",
+            LOGI(LOG_TAG_FTL "DBG d=%hhu seq kind=%d act=%d drain=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu close=%d/%d\r\n",
                  die,
                  (int)f->cache_stream.seq.kind,
                  (int)f->cache_stream.seq.active,
@@ -4409,7 +4472,7 @@ BOOL ftl_debug_dump(const char *module)
             if (f->cache_stream.seq.wr.count > 0U)
             {
                 const ftl_cache_page_s *hp = &f->cache_stream.seq.wr.page[f->cache_stream.seq.wr.head];
-                LOGW(LOG_TAG_FTL "DBG d=%hhu seq head lba=%lu st=%hhu proven=%d cw=0x%02hhx\r\n",
+                LOGI(LOG_TAG_FTL "DBG d=%hhu seq head lba=%lu st=%hhu proven=%d cw=0x%02hhx\r\n",
                      die,
                      hp->lba,
                      hp->state,
@@ -4417,66 +4480,26 @@ BOOL ftl_debug_dump(const char *module)
                      hp->cw_bitmap);
             }
         }
-        if (flt.all || flt.cache)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu cache load=%hhu flush=%hhu cmt=%lu flags def=%d bg=%d l2p=%d md=%d\r\n",
-                 die,
-                 f->cache->inflight.load,
-                 f->cache->inflight.flush,
-                 f->cache->stats.cmt_dirty,
-                 (int)f->flags.deferred_error,
-                 (int)f->flags.bg_suspend,
-                 (int)f->flags.l2p_defer,
-                 (int)f->flags.md_load_failed);
-        }
-        if (flt.all || flt.jrn)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu jrn seq=%lu water=%hhu idle=%d pend=%d emerg=%d\r\n",
-                 die,
-                 jrn_sequence_get(f->journal),
-                 jrn_watermark_get(f->journal),
-                 (int)jrn_is_idle(f->journal),
-                 (int)jrn_has_pending_entries(f->journal),
-                 (int)jrn_is_emergency(f->journal));
-        }
-        if (flt.all || flt.cp)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu cp act=%d/%d ph=%d\r\n",
-                 die,
-                 (int)f->cp_handle->active,
-                 (int)f->cp_handle->waiting,
-                 (int)f->cp_handle->phase);
-        }
-        if (flt.all || flt.mig)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n",
-                 die,
-                 (int)f->mig_handle->job.active,
-                 (int)f->mig_handle->job.waiting,
-                 (int)f->mig_handle->job.phase);
-        }
-        if (flt.all || flt.md)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n",
-                 die,
-                 (int)md_handle_is_idle(f->metadata_dir),
-                 (int)f->metadata_dir->handle.phase);
-        }
-        if (flt.all || flt.wb)
-        {
-            LOGW(LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n",
-                 die,
-                 (int)f->wbuf->open,
-                 f->wbuf->base,
-                 f->wbuf->occupied,
-                 f->wbuf->owners,
-                 (int)f->wbuf->error);
-        }
+        LOGI_IF(flt.all || flt.cache, LOG_TAG_FTL "DBG d=%hhu cache load=%hhu flush=%hhu cmt=%lu flags def=%d bg=%d l2p=%d md=%d\r\n", die, f->cache->inflight.load, f->cache->inflight.flush, f->cache->stats.cmt_dirty, (int)f->flags.deferred_error, (int)f->flags.bg_suspend, (int)f->flags.l2p_defer, (int)f->flags.md_load_failed);
+        LOGI_IF(flt.all || flt.jrn, LOG_TAG_FTL "DBG d=%hhu jrn seq=%lu water=%hhu idle=%d pend=%d emerg=%d\r\n", die, jrn_sequence_get(f->journal), jrn_watermark_get(f->journal), (int)jrn_is_idle(f->journal), (int)jrn_has_pending_entries(f->journal), (int)jrn_is_emergency(f->journal));
+        LOGI_IF(flt.all || flt.cp, LOG_TAG_FTL "DBG d=%hhu cp act=%d/%d ph=%d\r\n", die, (int)f->cp_handle->active, (int)f->cp_handle->waiting, (int)f->cp_handle->phase);
+        LOGI_IF(flt.all || flt.mig, LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n", die, (int)f->mig_handle->job.active, (int)f->mig_handle->job.waiting, (int)f->mig_handle->job.phase);
+        LOGI_IF(flt.all || flt.md, LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n", die, (int)md_handle_is_idle(f->metadata_dir), (int)f->metadata_dir->handle.phase);
+        LOGI_IF(flt.all || flt.wb, LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n", die, (int)f->wbuf->open, f->wbuf->base, f->wbuf->occupied, f->wbuf->owners, (int)f->wbuf->error);
     }
     return true;
 }
 
 void ftl_assert_context(void)
 {
+    // 故障现场必须可见：运行期若把级别调到 WARN/ERROR，临时放宽到 INFO；
+    // LOG_OFF 是测试/产测的显式静默，保持原样。
+    const log_level_e level = log_get_level();
+
+    if ((level != LOG_OFF) && (level < LOG_INFO))
+    {
+        log_set_level(LOG_INFO);
+    }
+
     (void)ftl_debug_dump(NULL);
 }

@@ -3740,7 +3740,7 @@ flowchart TB
 | `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
 | `free < 32` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
 
-`no-gain` 结论由 `mig_handle_s.gc_nogain` 保存，退避 `GC_NOGAIN_BACKOFF_MS`（500 ms）；
+`no-gain` 结论由 `mig_handle_s.gc_nogain` 保存，退避 `GC_NOGAIN_BACKOFF_MS`（5000 ms）；
 新建写、进入紧急水位、或时钟缺失（`now_ms == 0`）时立即重扫。紧急水位下若连目的页都分配
 不到（`mig_job_abort("no free block")`）同样记 `no-gain`——否则会陷入「选中 → 分配失败 →
 abort」的循环。写路径的 `ftl_drain_group` 在连续无进展后把组判为 `IO_ERROR`，并打

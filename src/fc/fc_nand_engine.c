@@ -875,16 +875,10 @@ static nand_result_e fc_nand_enable_high_speed_target(BYTE ch, BYTE ce, DWORD fm
 
         /* 先把 FMC 恢复到低速，再用低速 FMC 把 NAND feature 回 Mode 0。 */
         const nand_result_e fmc_rollback = dev->set_timing(ch, ce, 0U, fmc_hz);
-        if (fmc_rollback != NAND_RESULT_OK)
-        {
-            LOGE(LOG_TAG_NAND "FMC rollback to Mode 0 failed: 0x%02hhX\r\n", fmc_rollback);
-        }
+        LOGE_IF(fmc_rollback != NAND_RESULT_OK, LOG_TAG_NAND "FMC rollback to Mode 0 failed: 0x%02hhX\r\n", fmc_rollback);
 
         const nand_result_e nand_rollback = fc_nand_set_timing_mode(backend, 0U);
-        if (nand_rollback != NAND_RESULT_OK)
-        {
-            LOGE(LOG_TAG_NAND "NAND rollback to Mode 0 failed: 0x%02hhX\r\n", nand_rollback);
-        }
+        LOGE_IF(nand_rollback != NAND_RESULT_OK, LOG_TAG_NAND "NAND rollback to Mode 0 failed: 0x%02hhX\r\n", nand_rollback);
 
         return result;
     }
@@ -968,10 +962,7 @@ nand_result_e fc_nand_enable_high_speed(DWORD fmc_hz)
                         continue;
                     }
                     const nand_result_e rb_result = fc_nand_enable_low_speed_target(rb_ch, rb_ce, fmc_hz);
-                    if (rb_result != NAND_RESULT_OK)
-                    {
-                        LOGE(LOG_TAG_NAND "low-speed rollback failed ch=%hhu ce=%hhu result=0x%02hhX\r\n", rb_ch, rb_ce, rb_result);
-                    }
+                    LOGE_IF(rb_result != NAND_RESULT_OK, LOG_TAG_NAND "low-speed rollback failed ch=%hhu ce=%hhu result=0x%02hhX\r\n", rb_ch, rb_ce, rb_result);
                 }
             }
 #endif

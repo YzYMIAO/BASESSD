@@ -20,19 +20,21 @@
 
 #include "assertion.h"
 #include "log.h"          /* LOGE：release 运行期拒绝要留日志 */
-#include "ssd_compiler.h" /* SRAM12_DATA */
+#include "ssd_compiler.h" /* SRAM12_DATA / DTCM_DATA */
 
 #include <string.h>
 
 // 前向声明：Closed 提交在 Open 分配之后定义；契约写在定义处。
 static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb);
 
-// per-instance 五张表：定义与内存域（SRAM1+SRAM2）都归本模块。
+// per-instance 五张表：定义与内存域（SRAM12 / DTCM）都归本模块。
 // NOLOAD ⇒ 启动不清零，ftl_init 绑定后逐表 memset。
-static bst_block_s   s_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD          s_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD          s_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
-static WORD          s_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static bst_block_s s_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+/* free / op / spare 是每次分配/回收都扫的热表（约 9 KB），放 DTCM；
+ * 大表 blocks（80 KB）与 closed_sb_list（32 KB）留 SRAM12。 */
+static WORD          s_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] DTCM_DATA;
+static WORD          s_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] DTCM_DATA;
+static WORD          s_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] DTCM_DATA;
 static super_block_s s_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 
 /**
@@ -1366,7 +1368,7 @@ void alc_trace_dump(const alc_s *alloc, DWORD lba, DWORD pba)
         }
     }
 
-    LOGW(LOG_TAG_TRC "fail lba=%lu pba=0x%08lx match=%lu dup=%lu\r\n", lba, pba, matches, dups);
+    LOGW(LOG_TAG_WTRC "fail lba=%lu pba=0x%08lx match=%lu dup=%lu\r\n", lba, pba, matches, dups);
 
     DWORD shown = 0U;
 
@@ -1379,7 +1381,7 @@ void alc_trace_dump(const alc_s *alloc, DWORD lba, DWORD pba)
             continue;
         }
 
-        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%hhu bk=%hu pg=%hhu cw=%hhu %s\r\n", t->seq, t->lba, t->pba, t->plane, t->block, t->page, t->cw, (t->kind == ALC_TRACE_WRITE_OK) ? "write-ok" : ((t->kind == ALC_TRACE_PROGRAM_FAIL) ? "program-fail" : "gc-write"));
+        LOGW(LOG_TAG_WTRC "seq=%lu lba=%lu pba=0x%08lx pl=%hhu bk=%hu pg=%hhu cw=%hhu %s\r\n", t->seq, t->lba, t->pba, t->plane, t->block, t->page, t->cw, (t->kind == ALC_TRACE_WRITE_OK) ? "write-ok" : ((t->kind == ALC_TRACE_PROGRAM_FAIL) ? "program-fail" : "gc-write"));
         shown++;
     }
 }

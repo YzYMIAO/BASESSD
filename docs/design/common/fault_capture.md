@@ -284,8 +284,9 @@ void fault_hook(const fault_ctx_s *ctx);   /* 弱符号，默认空实现 */
 | 首次故障 | RR UNC/CRC：lba/pba/paa/g/plane/block/page/cw/retry/解码状态；program-fail；GC victim；erase-fail；dangling（非 BAD）；候选池/BBT 失败；CP abort；USB CSW | ERROR/WARN | 首次全上下文 |
 | 状态变化 | format required/done、FORMAT_IN_PROGRESS、REBUILD_REQUIRED、GC pause/resume、free/spare/OP 跨水位、journal 水位、L2P degrade、timing switch | INFO/WARN | 变化时 |
 | 搬移进度 | `[GC] start` 一行带触发上下文；逐 victim 的 `[MIG] move` 只在 DEBUG 打变化字段 | INFO / DEBUG | start 每会话一次；move 仅 `moved>0` |
-| 周期摘要 | `[STAT]`：ch/t/free/bad/mig（活跃/暂停）；op/spare/cp/jrn/wr/dng/rrab/mode 见 `info`/`diag` | INFO | **10 s** |
-| DEBUG | per-CP done、per-GC trig、wbuf flush、per-region load、ECC 趋势 | DEBUG | 默认关闭 |
+| 周期摘要 | 已删除；按需 `stats` / `stats --delta`（`info`/`diag` 保留紧凑视图） | INFO | 命令触发 |
+| 状态跃迁 | CP done（ms + suppressed）、GC emergency enter/exit、no-gain suspend/resume、GC job start/end、META compact、L2P load/flush 失败 | DEBUG | 边沿触发 |
+| 数据面 trace | `wbuf flush`、`hdr_prep`、逐页 / 逐请求细节 | TRACE | 默认关；`log level trace` |
 
 ### 2.1 `[STAT]` 字段
 
@@ -346,7 +347,9 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 |---|---|
 | `[CP  ] start/done` 每次 CP | **不打**；`info` 给 `cp=` |
 | `[JRN ] rotate` 每次换块 | **不打**；`info` 给 `jrn=`；仅错误行保留 |
-| `[GC  ] trig` 每次评估 | DEBUG，5 s 一行（`GC_LOG_INTERVAL_MS`） |
+| `[GC  ] emergency enter/exit` | DEBUG **边沿**：只在跨紧急水位时各打一行 |
+| `[GC  ] job start/end` | DEBUG 边沿：每个 job 一行；空块回收由 `job end reclaimed=…` 收尾 |
+| `[GC  ] resume` | DEBUG 边沿：no-gain 后真正搬移 / 回收时一行 |
 | `[MIG ] read` / 逐页/逐 CW 细节 | **不打**（debug 也不打）；地址用 `map`/`addr` 查 |
 | `[JRN ] flush` 每页 | **不打**（debug 也不打）；只保留 `rotate` 与错误行 |
 | `[RR  ] start/done` 每次恢复 | **不打**；失败现场由 `[RR  ] unc`（限流）承担，卡住由 `[RR  ] job` 心跳承担 |
@@ -354,7 +357,7 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 | `[MIG ] victim read failed` 每块 | 单块 WARN；连续 ≥8 个不同 victim ⇒ **熔断** `mig.paused`（ERROR 一行） |
 | `[FTL ] dangling` 每个 LBA | `st=BAD`：每个旧 gblock 一行 + `lbas=` 聚合；`FREE/LOG/NONE`：ERROR（缺陷） |
 | `read unrecoverable ... already-BAD` | 每个 gblock 只打一次；其余计数进 `rrab` |
-| `[L2P ] load start failed` | 按 cause 聚合，5 s 一行 |
+| `[L2P ] load start failed` | 按 cause 聚合，gate/submit 背压 10 s 一行（`suppressed` 携带量级），其余 1 s |
 | 每页/每 CW 读成功、ECC 趋势 | 只计数，不打 |
 | `[MIG ] abort` / `write retry` | 保留限流；`no free block` 且 `moved==0` 不打印（满盘死路，不是搬移进展）；计数进 `info`/`diag` |
 
@@ -365,29 +368,31 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 - 一个 128 KiB victim 的搬移受 NAND 读/写/擦物理速率约束，真实 victim 的
   `[MIG ] move` 不会成为稳态刷屏源。
 - 空 victim 只进 `noop=` 计数；DEBUG 也不做 per-page/per-CW。
-- 重复异常继续用 `supp=` / `count=`。
+- 重复异常继续用 `suppressed=` / `count=`。
 
 ### 10.4 消息格式
 
-- 级别前缀固定 3 字符：`[ERR]` / `[WRN]` / `[INF]` / `[DBG]`。
+- 级别前缀固定 3 字符：`[ERR]` / `[WRN]` / `[INF]` / `[DBG]` / `[TRC]`。
 - 模块标签固定 **4 字符宽**，右括号对齐，不足补空格：`[GC  ]` / `[MIG ]` /
   `[L2P ]` / `[JRN ]` / `[CP  ]` / `[RR  ]` / `[STAT]` / `[TRIM]` / `[PRED]` 等。
   `[FAULT]` / `[BOUND]` 是断言/故障类别，不参与模块标签对齐。
-- 固定字段序：`lba pba paa g pl bk pg cw st retry count supp`；事件行只带本事件
+- 固定字段序：`lba pba paa g pl bk pg cw st retry count suppressed`；事件行只带本事件
   相关字段，其余靠紧邻行推导或 `map`/`addr` 查。
 - FC 状态必须解码：`fc=0x48(READY|UNC)`，不裸给 hex。
 - 每条 ≤ 192 B（`log_vprintf` 缓冲），超了会截断。
-- 重复事件带 `supp=` 或 `count=`；关键事件带 `t=` / `wr=` 便于与 H2testw 进度对齐。
+- 重复事件带 `suppressed=` 或 `count=`；关键事件带 `t=` / `wr=` 便于与 H2testw 进度对齐。
 
 ### 7.5 验证判据
 
 
-1. H2testw 失败时，日志只出现：首次 UNC 一行（全字段）+ 最多 8 条 `[TRC ]` + 10 s 一条 `[STAT]`；不再逐 LBA/逐 CP/逐 GC 刷屏。
+1. H2testw 失败时，日志只出现：首次 UNC 一行（全字段）+ 最多 8 条 `[WTRC]` + 按需 `stats`；不再逐 LBA/逐 CP/逐 GC 刷屏。
 2. 已退役块被 host 反复读时，每个 gblock 只出现一次 `[RR  ] retired ...`，`rrab` 增长。
-3. `[TRC ] dup>0` ⇒ 同页二次编程；`dup=0` ⇒ 写后读坏/时序。
+3. `[WTRC] dup>0` ⇒ 同页二次编程；`dup=0` ⇒ 写后读坏/时序。
 4. 系统性读失败时，`[MIG ] victim read failed` 最多 8 行后出现 `suspend GC until reboot`，之后不再有 GC 触发。
 5. GC 正常（INFO 档）只出现：每会话一行 `[GC  ] start`、5 s 一行 `[GC  ] progress`、有实际搬移的会话一行 `[GC  ] end`；逐 victim 的 `[MIG ] move` 只在 `log level debug` 出现，空 victim/无搬移会话不打印。
-6. `log level debug` 下也不出现逐页/逐 CW 的 `[MIG ] read/move`、逐页 `[JRN ] flush`、逐次 `[RR  ] start/done`；`[GC  ] trig` ≤1 行/5 s。
+6. `log level debug` 下也不出现逐页/逐 CW 的 `[MIG ] read/move`、逐页 `[JRN ] flush`、
+   逐次 `[RR  ] start/done`；GC 只在 emergency / no-gain / job 边沿打，稳态无周期行；
+   `wbuf flush` / `hdr_prep` 只在 `log level trace` 出现。
 7. 所有模块标签右括号在同一列（`[GC  ]` / `[MIG ]` / `[STAT]`）；`[FAULT]`/`[BOUND]` 例外。
 
 ## 8. 历史验证记录

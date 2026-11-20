@@ -266,9 +266,14 @@ static ftl_status_e wb_flush(wb_handle_s *h)
         goto wbuf_flush_fail;
     }
 
-    // 观测口：一页一次编程；base/cw/nplanes/owners 即"合并了多少"的判据。
-    // ⚠ LOGD（不是 LOGI）：批量写下每 4KB 一行、UART 阻塞 ~5ms，比 NAND 编程慢一个量级。
-    LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%hhu nplanes=%hhu owners=0x%lx\r\n", h->base, n_cw, write_planes, h->owners);
+    // 观测口：一页一次编程；lba/n_cw/planes/pba 即"合并到哪、写了哪"的判据。
+    // status/ms 不在这里：本行是提交点，完成结果由 cache-wr / 组完成路径负责。
+    // ⚠ 只在 TRACE 输出：批量写下每 4 KB 一行，比 NAND 编程慢一个量级。
+#if defined(DEBUG)
+    const DWORD pba1 = (write_planes > 1U) ? pba[1] : UINT32_MAX;
+
+    LOGT(LOG_TAG_FTL "wbuf flush lba=%lu n_cw=%hhu planes=%hhu pba0=%08lx pba1=%08lx owners=0x%08lx\r\n", h->base, n_cw, write_planes, pba[0], pba1, h->owners);
+#endif
 
     // 提交成功才清缓冲
     h->open     = false;

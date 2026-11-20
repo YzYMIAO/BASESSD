@@ -94,8 +94,6 @@ void stack_guard_init(void)
     }
 
     g_armed = 1U;
-
-    LOGI("[STK ] guard armed paint=[%08lx,%08lx) size=%lu B\r\n", lo, hi, (hi - lo));
 }
 
 /* --------------------------------------------------------------------

@@ -16,6 +16,7 @@
 #include "ftl_config.h" /* FTL_DIE_MAX / FTL_IU_BYTES / 容量几何 */
 #include "ftl_type.h"   /* ftl_ctx_s / ftl_io_req_s / ftl_status_e */
 #include "ssd_types.h"
+#include "stats.h" /* SSD_STATS_ENABLE（统计专用声明按档裁剪） */
 
 #define FTL_API_VERSION (1U)
 
@@ -191,6 +192,18 @@ void ftl_service_pump(void);
  * @param ftl FTL 上下文（非 NULL）
  */
 void ftl_service(ftl_ctx_s *ftl);
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief 完成派发侧的进展签名（主循环空转判据）。
+ *
+ * = 已消费完成数 + 成功下发的 host 子操作数。只用于比较两次采样是否变化；
+ * u32 回绕不影响相等比较。
+ *
+ * @return 进展签名
+ */
+DWORD ftl_op_stats_progress(void);
+#endif
 
 /* ── Host I/O ── */
 

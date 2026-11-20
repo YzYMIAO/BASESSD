@@ -43,7 +43,6 @@ static fc_ldpc_qc_s *s_qc = NULL;
 
 // 惰性初始化的单次日志标志：成功/失败各只打印一次，避免每次编解码刷屏。
 static BOOL s_bch_init_failed = false;
-static BOOL s_bch_init_logged = false;
 
 /**
  * @brief 惰性初始化 BCH 引擎（m=13, t=4）
@@ -66,11 +65,6 @@ static BYTE fc_ecc_init_bch(void)
                 s_bch_init_failed = true;
                 LOGE("[FC  ] BCH init FAILED: ECC is disabled (check static storage/size)\r\n");
             }
-        }
-        else if (s_bch_init_logged == false)
-        {
-            s_bch_init_logged = true;
-            LOGI("[FC  ] BCH ready: static tables, no heap\r\n");
         }
     }
     return (g_bch != NULL) ? 1U : 0U;

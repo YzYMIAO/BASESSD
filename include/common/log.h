@@ -14,7 +14,8 @@ typedef enum LOG_LEVEL_E
     LOG_ERROR = 0,
     LOG_WARNING,
     LOG_INFO,
-    LOG_DEBUG
+    LOG_DEBUG,
+    LOG_TRACE /* 数据面逐事件 trace；只在 DEBUG 构建里编译，默认级别不打开 */
 } log_level_e;
 
 /* A sink owns transport policy and returns the accepted byte count or LOG_WRITE_INVALID. */
@@ -62,7 +63,7 @@ DWORD                                      log_get_write_failure_count(void);
 #define LOG_TAG_USB  "[USB ] "
 #define LOG_TAG_FTL  "[FTL ] "
 #define LOG_TAG_BLK  "[BLK ] "
-#define LOG_TAG_TRC  "[TRC ] "
+#define LOG_TAG_WTRC "[WTRC] "
 #define LOG_TAG_CAP  "[CAP ] "
 #define LOG_TAG_FLT  "[FLT ] "
 #define LOG_TAG_STAT "[STAT] "
@@ -91,6 +92,16 @@ DWORD                                      log_get_write_failure_count(void);
 #    define LOGD(format, ...) log_printf(LOG_DEBUG, "[DBG] " format, ##__VA_ARGS__)
 #else
 #    define LOGD(...) ((void)0)
+#endif
+
+/*
+ * TRACE：数据面逐事件（逐页 / 逐写缓冲 / 逐请求）。只在 DEBUG 构建里编译，
+ * 默认级别不打开；用 CLI `log level trace` 显式打开。稳定态日志不应使用它。
+ */
+#if defined(DEBUG)
+#    define LOGT(format, ...) log_printf(LOG_TRACE, "[TRC] " format, ##__VA_ARGS__)
+#else
+#    define LOGT(...) ((void)0)
 #endif
 
 /*
@@ -172,5 +183,50 @@ BOOL log_tick(DWORD *log_ms);
  * @return true 本次应打印；false 继续抑制
  */
 BOOL log_rate_due(DWORD *last_ms, DWORD *count, DWORD interval_ms);
+
+/*
+ * 限流日志：把「判据 + 被抑制条数 + 打印」收成一行。
+ *
+ * 用法：
+ *   LOGW_RATE(log_ratelimit_due(&s_log), s_log.suppressed, "msg ...", args);
+ *   LOGW_RATE(log_rate_due(&ms, &n, interval), n, "msg ...", args);
+ *   LOGW_RATE((no_free == false) && log_ratelimit_due(&s_log), s_log.suppressed,
+ *             "msg ...", args);
+ *
+ * ⚠ format 不要写 `\r\n`：宏统一追加 ` suppressed=%lu\r\n`。
+ * ⚠ suppressed_expr 先于 cond 求值，必须无副作用（字段 / 静态变量读取）。
+ * ⚠ cond 为假时整行不求值、不打印；打印级别由宏名决定。
+ */
+#define LOG_RATE_PRINT(level, cond, suppressed_expr, format, ...)                              \
+    do                                                                                         \
+    {                                                                                          \
+        const DWORD log_suppressed_ = (suppressed_expr);                                       \
+        if (cond)                                                                              \
+        {                                                                                      \
+            log_printf((level), format " suppressed=%lu\r\n", ##__VA_ARGS__, log_suppressed_); \
+        }                                                                                      \
+    } while (0)
+
+#define LOGE_RATE(cond, suppressed_expr, format, ...) LOG_RATE_PRINT(LOG_ERROR, (cond), (suppressed_expr), "[ERR] " format, ##__VA_ARGS__)
+#define LOGW_RATE(cond, suppressed_expr, format, ...) LOG_RATE_PRINT(LOG_WARNING, (cond), (suppressed_expr), "[WRN] " format, ##__VA_ARGS__)
+#define LOGI_RATE(cond, suppressed_expr, format, ...) LOG_RATE_PRINT(LOG_INFO, (cond), (suppressed_expr), "[INF] " format, ##__VA_ARGS__)
+#if defined(DEBUG)
+#    define LOGD_RATE(cond, suppressed_expr, format, ...) LOG_RATE_PRINT(LOG_DEBUG, (cond), (suppressed_expr), "[DBG] " format, ##__VA_ARGS__)
+#else
+#    define LOGD_RATE(cond, suppressed_expr, format, ...) ((void)0)
+#endif
+
+/*
+ * 便捷形态：rl 是 `log_ratelimit_s *`。
+ * ⚠ rl 会被求值两次，必须是稳定的指针表达式（静态对象字段 / 局部指针）。
+ */
+#define LOGE_RL(rl, format, ...) LOGE_RATE(log_ratelimit_due(rl), (rl)->suppressed, format, ##__VA_ARGS__)
+#define LOGW_RL(rl, format, ...) LOGW_RATE(log_ratelimit_due(rl), (rl)->suppressed, format, ##__VA_ARGS__)
+#define LOGI_RL(rl, format, ...) LOGI_RATE(log_ratelimit_due(rl), (rl)->suppressed, format, ##__VA_ARGS__)
+#if defined(DEBUG)
+#    define LOGD_RL(rl, format, ...) LOGD_RATE(log_ratelimit_due(rl), (rl)->suppressed, format, ##__VA_ARGS__)
+#else
+#    define LOGD_RL(rl, format, ...) ((void)0)
+#endif
 
 #endif /* LOG_H */

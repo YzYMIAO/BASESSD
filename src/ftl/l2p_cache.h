@@ -22,6 +22,7 @@
 #include "ftl_config.h" /* §一 容量/分解宏 + §三.2 DWORD / pba_* */
 #include "ftl_type.h"   /* DWORD */
 #include "metadata.h"   /* metadata_dir_* / md_dir_cache_s（Directory 访问） */
+#include "stats.h"      /* SSD_STATS_ENABLE（统计专用字段按档裁剪） */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -263,6 +264,16 @@ typedef struct L2P_CACHE_LINE_S
      * 预取加载完成时 fresh=0，第一次 host 命中计 hit 并清本标志；
      * 异步失败/降级/行被驱逐/初始化时清。 */
     BOOL prefetch;
+
+    /* 本行向 ready 推进的代数：load 或 flush 每完成一次（成功/失败都计）
+     * 递增。GC 的 mig_job_wait 用它做 per-region 活性判据——别的 region
+     * 加载/写回不会推进本行。 */
+    DWORD line_generation;
+
+#if SSD_STATS_ENABLE
+    DWORD load_start_us; /* 本次加载提交时刻（µs） */
+    BOOL  load_timed;    /* true = load_start_us 有效（时钟可用） */
+#endif
 } l2p_cache_line_s;
 
 /* ── Owner 端口（docs §4.7）──
@@ -339,6 +350,23 @@ typedef struct L2P_CACHE_STATISTICS_S
     DWORD cmt_evict_clean; /* 为新条目替换 CLEAN CMT 槽的次数 */
     DWORD cmt_evict_dirty; /* 因容量触发的 dirty victim 整页写回次数 */
     DWORD cmt_wb_defer;    /* dirty victim 写回因在飞/背压退让的次数 */
+
+#if SSD_STATS_ENABLE
+    /* region 加载 / 写回的成功与失败原因（诊断满盘时“卡在哪一步”）。
+     * 只服务 stats；关闭统计时整块裁掉（自增点经 STATS_INC 自动消失）。 */
+    DWORD load_start;       /* 成功提交、进入 LOADING 的次数（含预取） */
+    DWORD load_done_ok;     /* 加载完成且数据可用的次数 */
+    DWORD load_done_err;    /* 加载完成但状态/拷贝失败（可能随后重试备份） */
+    DWORD load_fail_no_cmd; /* 命令分配失败（池/额度） */
+    DWORD load_fail_gate;   /* ftl_op_submit 被 cache 序列门控拒绝 */
+    DWORD load_fail_submit; /* ftl_op_submit 的其他拒绝（FC 队列/登记） */
+    DWORD degrade;          /* 重试耗尽后降级为“全未映射”的次数 */
+    DWORD flush_start;      /* region 写回 job 启动次数 */
+    DWORD flush_ok;         /* 写回 job 成功（行回 CLEAN）的次数 */
+    DWORD flush_fail;       /* 写回 job 失败（行回 DIRTY）的次数 */
+
+    stats_hist_s load_lat_us; /* region 加载延迟（提交 → 完成） */
+#endif
 } l2p_cache_stats_s;
 
 typedef struct L2P_PREFETCH_STATISTICS_S
@@ -401,6 +429,19 @@ typedef struct L2P_CACHE_S
     l2p_owner_fn_t owner_of_region;
     void          *owner_ctx;
 } l2p_cache_s;
+
+/**
+ * @brief 某 LBA 所属 region 的 line 进度代数（GC 的依赖活性判据）
+ *
+ * 复用 l2p_line_find 定位行（会更新 hint 与命中统计；GC 等待是低频路径，
+ * 统计只用于 CLI 展示，无算法消费者）。region 未驻留返回 0。
+ * load 与 flush 每完成一次都会递增；别的 region 不会推进本行。
+ *
+ * @param cache 共享 cache
+ * @param lba   host LBA
+ * @return 该 region 所在行的进度代数；region 未驻留时为 0
+ */
+DWORD l2p_line_progress(l2p_cache_s *cache, DWORD lba);
 
 /* ── 查询（替代外部直读 cache 内部） ── */
 typedef struct L2P_LINE_INFORMATION_S

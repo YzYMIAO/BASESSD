@@ -2561,8 +2561,13 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
  *
  * 覆盖：`OP_NORMAL_READ_PAGE_WITH_DATA_OUT` + 稀疏 flat 位图（只选 CW1/CW2）。
  * 判据：FC 必须把稀疏位图分流到 WITHOUT/LOAD + 05h/06h 取数，而不是先做一次
- *       DATA_OUT；否则首输出会固定读 CW0，CW1/CW2 的数据错。逐槽 PAA 比对。
- * 备注：写侧先按整页 PAA 图案编程；本用例只碰 buffer + 真 NAND 读。 */
+ *       DATA_OUT；否则首输出会固定读 CW0，CW1/CW2 的数据错。
+ *
+ * 前置：块是随机抽的，必须先擦除再编程（同 block_write_read 等块级用例）；
+ *       erase / program 的完成状态都要查，否则写失败会伪装成后面的读/PAA 失败。
+ * 验收：直接按读链逐 desc 检查——desc 的 plane/cw 必须落在选中位图里，USER 必须
+ *       编码该 desc 自己的 PAA；不经过 test_capture_cmd / g_source_data 预填，
+ *       读链选错 CW 时不会假过。 */
 
 static MunitResult test_sparse_data_out_read(const MunitParameter params[], void *data)
 {
@@ -2573,7 +2578,14 @@ static MunitResult test_sparse_data_out_read(const MunitParameter params[], void
     const WORD block     = l3_block_draw("sparse_data_out_read");
     const BYTE bm_planes = TEST_PLANE_BM(plane);
 
-    test_prog_page(block, bm_planes, 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+    /* 随机块不保证是擦除态；program 的前提必须在这里建立，且失败当场报。 */
+    const fc_cmd_status_s erase = test_erase_block(block, bm_planes, L3_CFG(s_l3_cfg_erase_block, FC_CRC_ENABLE));
+
+    munit_assert_uint32(erase.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
+
+    const fc_cmd_status_s prog = test_prog_page(block, bm_planes, 0U, L3_CFG(s_l3_cfg_normal_program_page, FC_CRC_DISABLE), NULL);
+
+    munit_assert_uint32(prog.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
 
     nand_addr_s addr;
 
@@ -2591,21 +2603,34 @@ static MunitResult test_sparse_data_out_read(const MunitParameter params[], void
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
     munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, cw_bitmap);
+    munit_assert_uint8(test_cw_count(cmd), ==, 2U);
 
-    test_capture_cmd(cmd);
+    /* 直接验收读链：desc 必须正好是选中的 CW1/CW2，且 USER 编码该 desc 的 PAA。
+     * EMPTY 不在命令错误掩码里，必须单独拒绝。 */
+    DWORD seen = 0U;
 
-    for (BYTE cw = 1U; cw <= 2U; cw++)
+    for (BYTE i = 0U; i < test_cw_count(cmd); i++)
     {
-        nand_addr_s slot_addr = addr;
+        const fc_desc_s *desc = test_cw_desc(cmd, i);
+        const BYTE      *user = test_cw_user(cmd, i);
 
-        slot_addr.cw = cw;
+        munit_assert_not_null(desc);
+        munit_assert_not_null(user);
 
-        const BYTE *slot = test_source_slot(plane, cw);
+        const BYTE d_pln = paa_to_plane(desc->paa);
+        const BYTE d_cw  = paa_to_cw(desc->paa);
 
-        munit_assert_uint8(test_check_paa(slot, paa_from_addr(&slot_addr)), ==, 1U);
+        munit_assert_uint8(d_pln, ==, plane);
+        munit_assert_uint8((d_cw == 1U) || (d_cw == 2U), ==, 1U);
+        munit_assert_uint8(desc->status, ==, 0U); /* 成功读不得带任何 CW 状态位 */
+        munit_assert_uint8(test_check_paa(user, desc->paa), ==, 1U);
+
+        seen |= ftl_cw_bit(d_pln, d_cw);
     }
 
-    test_trace_summary("sparse DATA_OUT: plane=%hhu block=%hu cw=1/2 selected, per-slot PAA verified", plane, block);
+    munit_assert_uint32(seen, ==, cw_bitmap);
+
+    test_trace_summary("sparse DATA_OUT: plane=%hhu block=%hu chain=%02lX, per-desc PAA verified", plane, block, seen);
 
     fc_command_release(cmd->cmd_id);
     return MUNIT_OK;

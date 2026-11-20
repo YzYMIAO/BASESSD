@@ -19,6 +19,7 @@
 #include "nand_config.h"   /* PLANE_NUM / CW_NUM / CW_SIZE / paa_to_plane */
 #include "nand_protocol.h" /* nand_result_e（FC 启动编排返回类型） */
 #include "ssd_types.h"     /* BYTE/WORD/DWORD/QWORD */
+#include "stats.h"         /* SSD_STATS_ENABLE（统计专用声明按档裁剪） */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -243,6 +244,17 @@ typedef enum FC_BUFFER_OWN_E
 static inline BOOL fc_cw_status_has_error(DWORD status)
 {
     return (status & FC_CW_STATUS_ERROR_MASK) != 0U;
+}
+
+/**
+ * @brief 单个 CW 状态是否为不可纠 ECC（UNC）
+ *
+ * @param status FC_CW_STATUS_* 位或
+ * @return true = UNC
+ */
+static inline BOOL fc_cw_status_has_unc(DWORD status)
+{
+    return (status & FC_CW_STATUS_UNC) != 0U;
 }
 
 /**
@@ -567,6 +579,22 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 #define FC_BUFFER_POOL_DEPTH     (128U)
 #define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
 
+/* 命令池 CRIT 预留：L2P region 加载（GC / 写确认的前台依赖）独占 2 槽。
+ * 其余后台（CP/GC/journal/metadata）与 host 只能用到 DEPTH - CRIT；
+ * host 路径另有独立预算限流（不在本层）。
+ * desc/buffer 同理：L2P region 页（2 KiB = 4 个 512B CW）需要 4 组，预留 8 组。 */
+#define FC_CMD_RESERVE_CRIT      (2U)
+#define FC_CMD_RESERVE_CRIT_DESC (8U)
+#define FC_CMD_RESERVE_CRIT_BUFS (8U)
+
+/* 命令分配类：决定当前池占用上限；默认 BG。 */
+typedef enum FC_CMD_CLASS_E
+{
+    FC_CMD_CLASS_BG = 0, /* 后台元数据 / host：上限 DEPTH - CRIT */
+    FC_CMD_CLASS_CRIT,   /* L2P load：上限 DEPTH */
+    FC_CMD_CLASS_NUM     /* 边界哨兵 */
+} fc_cmd_class_e;
+
 /*
  * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
  * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
@@ -624,11 +652,22 @@ extern "C"
 
     /* ═══════ ② 命令生命周期 ═══════ */
     /**
-     * @brief 申请一个命令槽位。命令句柄 = 返回对象的 `cmd_id` 字段。
+     * @brief 申请一个命令槽位（满池额度；测试 / RAID parity 入口）。
      *
-     * @return 命令指针（供调用者填 config/route/paa）；命令池空时返回 NULL。
+     * 命令句柄 = 返回对象的 `cmd_id` 字段。生产 FTL 用 fc_command_alloc_class()
+     * 区分 BG / CRIT 额度。
+     *
+     * @return 命令指针（供调用者填 config/route/paa）；池空时返回 NULL。
      */
     fc_cmd_s *fc_command_alloc(void);
+
+    /**
+     * @brief 按分配类申请命令槽位；类决定当前池占用上限。
+     *
+     * @param cls 分配类（FC_CMD_CLASS_*）
+     * @return 命令指针；该类额度用完时返回 NULL
+     */
+    fc_cmd_s *fc_command_alloc_class(fc_cmd_class_e cls);
 
     /**
      * @brief 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
@@ -884,6 +923,16 @@ extern "C"
     BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id);
 
     /**
+     * @brief 命令 desc 链上是否存在 UNC（不可纠 ECC）CW
+     *
+     * 须在 fc_command_release 之前调用。
+     *
+     * @param cmd_id 命令 ID
+     * @return true = 至少一个 CW 为 UNC
+     */
+    BOOL fc_get_cmd_has_unc(fc_cmd_id_t cmd_id);
+
+    /**
      * @brief 命令读到的所有 CW 是否都是**擦除页**（desc 链上每个 CW 都是 FC_CW_STATUS_EMPTY）。
      *
      * 这是「这一页编程过没有」的**唯一权威判据**：空/非空的依据（ECC 是否成码字、
@@ -946,6 +995,18 @@ extern "C"
      * @param out 出参；须非空。
      */
     void fc_debug_state_get(fc_debug_state_s *out);
+
+#if SSD_STATS_ENABLE
+    /**
+     * @brief FC 侧进展签名（主循环空转判据）。
+     *
+     * = 已消费完成数 + 有派发的填充轮数。只用于比较两次采样是否变化；
+     * u32 回绕不影响相等比较。
+     *
+     * @return 进展签名
+     */
+    DWORD fc_stats_progress(void);
+#endif
 
     /**
      * @brief 资源使用统计（测试/监控用）。

@@ -284,6 +284,7 @@ void md_handle_reset(md_dir_cache_s *dir)
 // 逐次 WRN 会刷屏；5 s 一行 + 被抑制条数（时钟缺失时 64 次一行）。
 static DWORD s_abort_log_ms;
 static DWORD s_stall_log_ms; /* 提交 deadline 触发的 abort 日志限流时间戳 */
+static DWORD s_stall_log_n;  /* 同上，被抑制条数 */
 static DWORD s_abort_log_n;
 
 /**
@@ -318,7 +319,7 @@ static void md_handle_abort(md_dir_cache_s *dir)
     }
     else
     {
-        LOGE_IF(md_abort_log_is_due(), LOG_TAG_META "md job abort phase=%d victim=%hu moved=%hu (victim 不擦)\r\n", j->phase, j->victim, j->moved);
+        LOGE_RATE(md_abort_log_is_due(), s_abort_log_n, LOG_TAG_META "md job abort phase=%d victim=%hu moved=%hu (victim 不擦)", j->phase, j->victim, j->moved);
     }
 
     if ((j->victim != UINT16_MAX) && (dir->l2p_live[j->victim] == 0U))
@@ -363,7 +364,7 @@ static BOOL md_handle_stall(md_dir_cache_s *dir)
     }
     if (timer_deadline_expired(&j->submit_deadline, now_ms))
     {
-        LOGW_IF(log_rate_due(&s_stall_log_ms, NULL, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_META "md job submit stalled %lums — abort\r\n", (now_ms - j->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS);
+        LOGW_RATE(log_rate_due(&s_stall_log_ms, &s_stall_log_n, LOG_RATE_SLOW_INTERVAL_MS), s_stall_log_n, LOG_TAG_META "md job submit stalled %lums — abort", (now_ms - j->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS);
         j->timed_out     = true;
         j->timeout_phase = j->phase;
         md_handle_abort(dir);
@@ -585,12 +586,13 @@ static md_compact_start_e md_compact_begin(md_dir_cache_s *dir, const alc_s *all
         return MD_COMPACT_NO_SLOTS;
     }
 
-    j->victim      = victim;
-    j->region_id   = 0U;
-    j->cur_region  = 0U;
-    j->moved       = 0U;
-    j->slot        = NAND_PBA_INVALID;
-    j->dir_ckpt.ok = false;
+    j->victim          = victim;
+    j->compact_victims = 1U;
+    j->region_id       = 0U;
+    j->cur_region      = 0U;
+    j->moved           = 0U;
+    j->slot            = NAND_PBA_INVALID;
+    j->dir_ckpt.ok     = false;
     timer_deadline_clear(&j->submit_deadline);
     j->phase = MD_JOB_CP_READ;
 
@@ -779,6 +781,9 @@ static BOOL md_compact_next(md_dir_cache_s *dir, const alc_s *alloc)
     j->cur_region = 0U;
     j->slot       = NAND_PBA_INVALID;
     j->phase      = MD_JOB_CP_READ;
+    j->compact_victims++;
+
+    LOGD(LOG_TAG_META "compact next victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur.page[plane]);
     return true;
 }
 
@@ -837,7 +842,7 @@ static void md_handle_step(md_dir_cache_s *dir)
     {
         log_heartbeat_begin(&j->hb);
     }
-    else if (log_heartbeat_due(&j->hb))
+    else if ((log_heartbeat_age_ms(&j->hb) >= LOG_RATE_SLOW_AFTER_MS) && log_heartbeat_due(&j->hb))
     {
         LOGD(LOG_TAG_MD "job phase=%d victim=%hu moved=%hu pending=%hu age=%lums\r\n", j->phase, j->victim, j->moved, dir->reclaim.count, log_heartbeat_age_ms(&j->hb));
     }
@@ -1122,7 +1127,14 @@ static void md_handle_step(md_dir_cache_s *dir)
             }
 
             case MD_JOB_DONE:
-                LOGD(LOG_TAG_META "compact done victim=%hu moved=%hu\r\n", j->victim, j->moved);
+                if (j->compact_victims != 0U)
+                {
+                    LOGD(LOG_TAG_META "compact done victim=%hu victims=%hhu moved=%hu\r\n", j->victim, j->compact_victims, j->moved);
+                }
+                else if (j->victim != UINT16_MAX)
+                {
+                    LOGD(LOG_TAG_META "reclaim done victim=%hu\r\n", j->victim);
+                }
                 md_handle_reset(dir);
                 break; /* 回 IDLE：继续循环（可能还有待回收的块）*/
 

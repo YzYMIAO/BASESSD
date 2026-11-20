@@ -26,8 +26,10 @@
 #include "ftl_type.h"   /* ftl_ctx_s */
 #include "journal.h"
 #include "l2p_cache.h"
+#include "lifetime.h" /* 终身计数块（CP Header padding 内） */
 #include "log.h"
 #include "metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
+#include "stats.h"    /* SSD_STATS_ENABLE / stats_hist_s */
 #include "timer.h"
 
 #include <stdint.h>
@@ -109,6 +111,9 @@ typedef struct CP_STATE_S
     timer_ms_t next_t3_ms;            /* T3 下次到期时刻（绝对；由 CP 起点重装） */
     timer_ms_t last_cp_ms;            /* 上次 CP 启动时刻（host flush 节流基准） */
     DWORD      last_cp_writes;        /* 上次 CP 起点看到的 total_writes（T2 增量判据） */
+#if SSD_STATS_ENABLE
+    stats_hist_s job_us; /* CP job 持续时间（启动 → 完成/中止） */
+#endif
 } cp_state_s;
 
 /*
@@ -167,6 +172,10 @@ typedef struct CP_HANDLE_S
     /* ① job 起点快照（必须先于任何 flush）。 */
     DWORD region_bitmap[L2P_LOCAL_DIRTY_WORDS];
     DWORD journal_seq;
+#if SSD_STATS_ENABLE
+    DWORD start_us;    /* 本 job 启动时刻（µs，延迟直方图） */
+    BOOL  start_timed; /* true = start_us 有效 */
+#endif
 
     md_dir_ckpt_write_s dir;   /* ② 目录检查点（CP/metadata 共用上下文） */
     cp_job_hdr_s        hdr;   /* ③ Header + 块元数据/磨损快照 */
@@ -212,23 +221,24 @@ cp_handle_s *cp_workspace_get(BYTE die);
  * （DRAM-less 主流做法，见 docs/design/revision_history/ftl_revision_history.md）。*/
 typedef struct CP_HEADER_S
 {
-    DWORD magic;                                    /* CP_MAGIC */
-    DWORD sequence;                                 /* 本池自己的单调序号（最新有效）*/
-    DWORD timestamp;                                /* timer_get_ms() 快照 */
-    DWORD region_count;                             /* 非零 bitmap word 数（无消费方，仅信息量）*/
-    DWORD region_bitmap[64];                        /* 2048 bit，哪些 region 在 checkpoint 中 */
-    DWORD journal_sequence;                         /* 截断到此 sequence 之前的 journal */
-    DWORD layout_version;                           /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
-    DWORD block_word_count;                         /* 块元数据 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
-    DWORD block_word_bytes;                         /* 每 word 字节数（2；0 = 无快照）*/
-    DWORD block_page_count;                         /* 块元数据页数（FTL_CHECKPOINT_BLOCK_PAGES；0 = 无快照）*/
-    DWORD block_crc32;                              /* 块元数据 words 的 crc_compute_iso_hdlc() */
-    DWORD wear_entry_count;                         /* 磨损条目数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
-    DWORD wear_entry_bytes;                         /* 磨损条目字节（8；0 = 无快照）*/
-    DWORD wear_page_count;                          /* 磨损页数（FTL_CHECKPOINT_WEAR_PAGES；0 = 无快照）*/
-    DWORD wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES]; /* 每页磨损快照的 CRC32 */
-    DWORD record_pages;                             /* 1 + block_page_count + wear_page_count */
-    BYTE  padding[2048 - 94 * 4];                   /* 补齐到一页主区（1672 B）*/
+    DWORD           magic;                                            /* CP_MAGIC */
+    DWORD           sequence;                                         /* 本池自己的单调序号（最新有效）*/
+    DWORD           timestamp;                                        /* timer_get_ms() 快照 */
+    DWORD           region_count;                                     /* 非零 bitmap word 数（无消费方，仅信息量）*/
+    DWORD           region_bitmap[64];                                /* 2048 bit，哪些 region 在 checkpoint 中 */
+    DWORD           journal_sequence;                                 /* 截断到此 sequence 之前的 journal */
+    DWORD           layout_version;                                   /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
+    DWORD           block_word_count;                                 /* 块元数据 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
+    DWORD           block_word_bytes;                                 /* 每 word 字节数（2；0 = 无快照）*/
+    DWORD           block_page_count;                                 /* 块元数据页数（FTL_CHECKPOINT_BLOCK_PAGES；0 = 无快照）*/
+    DWORD           block_crc32;                                      /* 块元数据 words 的 crc_compute_iso_hdlc() */
+    DWORD           wear_entry_count;                                 /* 磨损条目数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
+    DWORD           wear_entry_bytes;                                 /* 磨损条目字节（8；0 = 无快照）*/
+    DWORD           wear_page_count;                                  /* 磨损页数（FTL_CHECKPOINT_WEAR_PAGES；0 = 无快照）*/
+    DWORD           wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES];         /* 每页磨损快照的 CRC32 */
+    DWORD           record_pages;                                     /* 1 + block_page_count + wear_page_count */
+    lifetime_disk_s lifetime;                                         /* 终身计数块（自描述 magic/version/crc32）*/
+    BYTE            padding[2048 - 94 * 4 - sizeof(lifetime_disk_s)]; /* 补齐到一页主区 */
 } cp_header_s;
 
 _Static_assert(sizeof(cp_header_s) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");

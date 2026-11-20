@@ -124,7 +124,7 @@ static ftl_status_e ftl_cmd_validate_cw_bitmap(DWORD bitmap, BYTE plane_first, B
  */
 ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap)
 {
-    // cmd 由调用者从 fc_command_alloc() 取且已判空；此处不重复断言。
+    // cmd 由调用者从命令池取得且已判空；此处不重复断言。
     // 唯一合法失败是**池空**（desc/buffer）——那才是返回码。
 
     if (ftl_cmd_needs_desc_chain(cmd) == false)
@@ -246,7 +246,7 @@ static ftl_status_e ftl_cmd_build_pair_chain(fc_cmd_s *cmd, const DWORD pba[PLAN
  */
 ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
 {
-    // cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
+    // cmd 来自调用者的命令池（已判空）、pba 是调用者的局部数组
     // （见 ftl_issue_subop / wb_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT。
 
     // 空位图必须在算 first_plane **之前**拒绝：否则 first_plane == PLANE_NUM，
@@ -631,6 +631,29 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
  *   · 超时（擦除 20ms，其余默认）
  */
 
+/* 命令分配类：构造期上下文（单线程 superloop），默认 BG。
+ * L2P demand load 在构造点临时提升到 CRIT，构造后恢复；prefetch/其余路径保持 BG。 */
+static fc_cmd_class_e s_cmd_class = FC_CMD_CLASS_BG;
+
+/**
+ * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）
+ *
+ * L2P demand load 在构造点提升到 FC_CMD_CLASS_CRIT，构造后恢复到原值；
+ * prefetch 与其余路径保持 BG。
+ * 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
+ *
+ * @param cls 目标类（FC_CMD_CLASS_*）
+ * @return 原类
+ */
+fc_cmd_class_e ftl_cmd_class_set(fc_cmd_class_e cls)
+{
+    ASSERT(cls < FC_CMD_CLASS_NUM);
+
+    const fc_cmd_class_e prev = s_cmd_class;
+    s_cmd_class               = cls;
+    return prev;
+}
+
 /**
  * @brief 分配命令 + 填配置（**不含**地址与建链）。池空返回 NULL。
  * 建链只认 cw_bitmap（字面位图、无隐式展开）；pba_to_cmd 算出「本命令 plane 段内
@@ -645,7 +668,7 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
  */
 static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_cmd_s *cmd = fc_command_alloc();
+    fc_cmd_s *cmd = fc_command_alloc_class(s_cmd_class);
 
     if (cmd == NULL)
     {
@@ -1382,7 +1405,8 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
  */
 ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {
-    fc_cmd_s *cmd = fc_command_alloc();
+    // 维护类命令走后台额度：本原语不得占用 L2P demand 加载的 CRIT 预留。
+    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */

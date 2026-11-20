@@ -76,6 +76,7 @@
 #include "l2p_cache.h"    /* l2p_cache_s（端口） */
 #include "log.h"
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
+#include "stats.h"       /* SSD_STATS_ENABLE（统计专用字段/声明按档裁剪） */
 #include "timer.h"
 
 #include <stdbool.h>
@@ -194,6 +195,12 @@ typedef struct MIGRATE_JOB_S
     BYTE             plane;
     timer_deadline_s submit_deadline;
     timer_deadline_s external_deadline;
+    DWORD            wait_progress;       /* 上次看到的外部依赖进度（L2P load / Journal） */
+    BOOL             wait_progress_valid; /* false = 本 job 还没有记录过进度 */
+#if SSD_STATS_ENABLE
+    DWORD start_us;    /* job 启动时刻（µs，延迟直方图） */
+    BOOL  start_timed; /* true = start_us 有效 */
+#endif
     timer_deadline_s command_deadline;
     BOOL             timed_out;
     mig_phase_e      timeout_phase;
@@ -220,6 +227,7 @@ typedef struct MIGRATE_JOB_S
 /* 跨 job 保留的持久状态：job 起点不清。 */
 typedef struct MIGRATE_GC_BENEFIT_S
 {
+    BOOL              emergency_active; /* 观测：上次求值是否处于紧急水位（边沿日志用） */
     BOOL              nogain;
     gc_benefit_mode_e nogain_mode;
     timer_ms_t        nogain_ms;
@@ -253,18 +261,60 @@ typedef struct MIGRATE_FAILURE_S
     BYTE fail_count[PLANE_NUM];
 } mig_failure_s;
 
+/* GC / WL 中止原因：日志字符串与统计分类的唯一来源。 */
+typedef enum MIG_ABORT_E
+{
+    MIG_ABORT_L2P_LOAD_TIMEOUT = 0,
+    MIG_ABORT_JRN_CAPACITY_TIMEOUT,
+    MIG_ABORT_JRN_FLUSH_TIMEOUT,
+    MIG_ABORT_SUBMIT_TIMEOUT,
+    MIG_ABORT_CACHE_DRAIN_TIMEOUT,
+    MIG_ABORT_COMPLETION_TIMEOUT,
+    MIG_ABORT_L2P_READ_FAIL,
+    MIG_ABORT_FC_ERR,
+    MIG_ABORT_SHORT_CHAIN,
+    MIG_ABORT_DECODE_CORRUPT,
+    MIG_ABORT_L2P_WRITE_FAIL,
+    MIG_ABORT_JRN_APPEND_FAIL,
+    MIG_ABORT_JRN_WRITE_PENDING,
+    MIG_ABORT_NO_FREE_BLOCK,
+    MIG_ABORT_PLANE_BASE_MISMATCH,
+    MIG_ABORT_READ_REJECTED,
+    MIG_ABORT_WRITE_REJECTED,
+    MIG_ABORT_ERASE_REJECTED,
+    MIG_ABORT_DST_ALLOC_FAIL,
+    MIG_ABORT_BUILD_FAIL,
+    MIG_ABORT_PAD_WRITE_FAIL,
+    MIG_ABORT_WRITE_FAIL,
+    MIG_ABORT_CACHE_WRITE_FAIL,
+    MIG_ABORT_UNEXPECTED_COMPLETION,
+    MIG_ABORT_NUM
+} mig_abort_e;
+
 typedef struct MIGRATE_COUNTERS_S
 {
     DWORD reclaimed;
     DWORD moved;
     DWORD noop;
-    DWORD novictim;
-    DWORD nogain;
+    DWORD novictim; /* closed list 无可扫候选（GC_SELECT_NO_CANDIDATE） */
+    DWORD nogain;   /* 有候选但收益不足，或满盘目的页分配失败（no-gain 退避） */
 
     /* cache-program 批次诊断（跨 job 累计；放 job 里会被 job 起点 memset 清零）。 */
     DWORD batch_jobs;   /* 已提交的批次数 */
     DWORD batch_pages;  /* 批次内总页数 */
     DWORD batch_aborts; /* 批次失败/中止数 */
+
+#if SSD_STATS_ENABLE
+    /* job 生命周期与 abort 原因分项（跨 job 累计）。只服务 stats，关闭时整块裁掉。 */
+    DWORD        job_start;
+    DWORD        job_end;
+    DWORD        abort_l2p_timeout;
+    DWORD        abort_submit_timeout;
+    DWORD        abort_read_fail;
+    DWORD        abort_jrn_timeout;
+    DWORD        abort_other;
+    stats_hist_s job_us; /* job 持续时间（启动 → 完成/中止） */
+#endif
 } mig_counters_s;
 
 typedef struct MIGRATE_STATE_S
@@ -276,11 +326,10 @@ typedef struct MIGRATE_STATE_S
      * （erase 阶段会把未擦块当已擦回收）⇒ 必须等它回来再复用引擎。 */
     WORD inflight;
 
-    BOOL            batch_disabled;
-    bg_level_e      level;
-    BOOL            timers_registered;
-    log_ratelimit_s rl_eval;
-    DWORD           wl_last_writes;
+    BOOL       batch_disabled;
+    bg_level_e level;
+    BOOL       timers_registered;
+    DWORD      wl_last_writes;
 
     mig_gc_benefit_s benefit;
     mig_gc_session_s session;
@@ -382,6 +431,16 @@ static inline BOOL mig_gc_no_gain(const mig_handle_s *m)
  * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
  */
 void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes);
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief 注册本实例的 GC/WL 统计（由 FTL 组合根在实例装配完成后调用）。
+ *
+ * @param m    已初始化的迁移引擎（生产路径为实例自持对象）
+ * @param inst 实例号（紧凑 die 号）
+ */
+void mig_stats_register(mig_handle_s *m, BYTE inst);
+#endif
 #if defined(FC_NAND_TEST_ENABLE)
 /**
  * @brief 测试专用：直接启动一个搬移 job（GC-18 等状态机负例）。

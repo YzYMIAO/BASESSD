@@ -42,6 +42,7 @@
 #include "fc_interface.h" /* fc_cmd_s / fc_cmd_status_s / FC_COMMAND_POOL_DEPTH */
 #include "ftl_type.h"     /* DWORD / ftl_status_e */
 #include "nand_config.h"  /* CH_NUM / CE_NUM / LUN_NUM（路由表维度） */
+#include "stats.h"        /* SSD_STATS_ENABLE（统计专用声明按档裁剪） */
 
 #include <stdint.h>
 
@@ -56,6 +57,7 @@ typedef enum FTL_OPERATION_ID_E
     FTL_OP_GC,            /* GC 搬移 job（migrate.c） */
     FTL_OP_WL,            /* 静态 WL / 预测性退役搬移 job（migrate.c，与 GC 共用引擎） */
     FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c） */
+    FTL_OP_L2P_PREFETCH,  /* L2P region 预取加载（同回调；不请求 cache 序列断点/让行） */
     FTL_OP_CHECKPOINT,    /* Checkpoint job（checkpoint.c） */
     FTL_OP_BBT,           /* BBT 持久化 job（bbt.c） */
     FTL_OP_METADATA,      /* L2P 日志块整理 job（metadata_job.c） */
@@ -301,6 +303,18 @@ ftl_status_e ftl_op_submit_batch(fc_cmd_s *const cmds[], DWORD n, ftl_op_id_e op
  * @note 循环不能只看进入时的 CQ 深度：服务函数可能在本轮里提交新命令并立即完成。
  */
 void ftl_op_drain(void);
+
+/**
+ * @brief 该命令的目标实例当前是否被 cache 序列门控挡住（只读）
+ *
+ * 供 L2P 加载失败归因（gate vs 队列满/额度满）。只读，不改门控状态。
+ * 日志与统计共用本判据，避免「日志说 submit_backpressure、计数说 gate」的口径分叉。
+ *
+ * @param cmd 命令（用其 ch/ce/lun 路由到实例）
+ * @return true 门控会拒绝该命令
+ *         false 不会被门控拒绝
+ */
+BOOL ftl_op_gate_blocks(const fc_cmd_s *cmd);
 
 /**
  * @brief 当前是否在完成服务函数（或其嵌套调用）里。

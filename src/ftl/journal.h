@@ -169,6 +169,8 @@ typedef struct JOURNAL_STATE_S
     BYTE erase_fail_block;
     BOOL ring_full;
 
+    DWORD erase_kick_blocked; /* 换块擦除因背压起不来的累计次数（不是擦除失败） */
+
     /* 持久性失败观测 */
     DWORD write_fail_count;
     DWORD write_fail_seq;

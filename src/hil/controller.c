@@ -1,7 +1,8 @@
 #include "controller.h"
 
 #include "assertion.h"
-#include "delay.h" /* delay_now_ms：请求级 deadline */
+#include "delay.h"    /* delay_now_ms：请求级 deadline */
+#include "lifetime.h" /* 终身计数：FLUSH / TRIM 成功计数 */
 #include "log.h"
 
 #include <stddef.h>
@@ -112,6 +113,10 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
     {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
+
+#if SSD_STATS_ENABLE
+    ssd_request_stats_register();
+#endif
 
     controller->flush_req    = NULL;
     controller->trim_req     = NULL;
@@ -245,6 +250,10 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
+#if SSD_STATS_ENABLE
+    request->start_timed = delay_time_now_us(&request->start_us);
+#endif
+
     if (controller->state != SSD_CONTROLLER_READY)
     {
         LOGW(LOG_TAG_CTRL "submit rejected: state=%d\r\n", (int)controller->state);
@@ -262,12 +271,15 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
     request->complete_flag     = 0U;
     request->completion_status = SSD_STATUS_OK;
     request->agg_status        = SSD_STATUS_OK;
+    request->sub_status        = SSD_STATUS_OK;
     request->start_ms          = delay_now_ms();
     request->timed_out         = false;
 
-    /* 组装 IO 请求模板（lba/buffer 由各路径覆盖） */
+    /* 组装 IO 请求模板（lba/buffer 由各路径覆盖）。
+     * status_out 是 FTL 组完成写入口；必须指向 sub_status，不能直接改 host 可见的
+     * completion_status（迟到完成会在超时 tombstone 之后把它覆盖成 OK）。 */
     request->io.complete_flag   = &request->complete_flag;
-    request->io.status_out      = &request->completion_status;
+    request->io.status_out      = &request->sub_status;
     request->io.on_complete     = NULL;
     request->io.on_complete_ctx = NULL;
 
@@ -322,6 +334,9 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
                 /* 部分 run 已在飞：请求**已受理**，不能在这里置 complete_flag
                  * （否则调用者会释放 bounce/请求对象，而在飞 run 仍持有它）。
                  * 错误已锁存到 agg_status，等全部 run 完成后由 on_sub_complete 回执。 */
+#if SSD_STATS_ENABLE
+                ssd_request_note_cmd(request->opcode);
+#endif
                 return SSD_STATUS_OK;
             }
 
@@ -329,6 +344,9 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
              * 同步完成的 run 可能已把它写成错误，而其他 run 仍在飞；前端若据此
              * 判同步失败并释放请求，会让在飞 run 的 on_complete_ctx 悬垂。
              * 最终状态只经 complete_flag 异步回执（与函数契约一致）。 */
+#if SSD_STATS_ENABLE
+            ssd_request_note_cmd(request->opcode);
+#endif
             return SSD_STATUS_OK;
 
         case SSD_REQUEST_TRIM:
@@ -352,6 +370,9 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
             controller->trim_lba       = request->start_lba;
             controller->trim_started   = false;
             request->completion_status = SSD_STATUS_OK;
+#if SSD_STATS_ENABLE
+            ssd_request_note_cmd(request->opcode);
+#endif
             break;
 
         case SSD_REQUEST_FLUSH:
@@ -379,6 +400,9 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
 
             controller->flush_req      = request;
             request->completion_status = SSD_STATUS_OK;
+#if SSD_STATS_ENABLE
+            ssd_request_note_cmd(request->opcode);
+#endif
             break;
 
         default:
@@ -429,7 +453,11 @@ static void ssd_controller_flush_service(ssd_ctl_s *controller)
     {
         controller->flush_req->completion_status = SSD_STATUS_OK;
         controller->flush_req->complete_flag     = 1U;
+        lifetime_note_cmd(LIFETIME_CMD_FLUSH);
     }
+#if SSD_STATS_ENABLE
+    ssd_request_note_latency(controller->flush_req);
+#endif
     controller->flush_req = NULL;
 }
 
@@ -446,7 +474,20 @@ static void ssd_controller_trim_complete(ssd_ctl_s *controller, ssd_status_e sta
     {
         controller->trim_req->completion_status = status;
         controller->trim_req->complete_flag     = 1U;
+#if SSD_STATS_ENABLE
+        if (status != SSD_STATUS_OK)
+        {
+            ssd_request_note_bad_status();
+        }
+#endif
+        if (status == SSD_STATUS_OK)
+        {
+            lifetime_note_cmd(LIFETIME_CMD_TRIM);
+        }
     }
+#if SSD_STATS_ENABLE
+    ssd_request_note_latency(controller->trim_req);
+#endif
     controller->trim_req     = NULL;
     controller->trim_started = false;
 }

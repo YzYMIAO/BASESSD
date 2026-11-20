@@ -54,17 +54,15 @@
  * 故按节拍求值而不是主循环每轮跑。 */
 #define GC_EVAL_INTERVAL_MS (10U)
 
-/* GC 触发日志的节拍（与求值同一套时基）。
- * ⚠ 求值节拍**不能**兼作日志节拍：求值节拍管「多久算一次」，10ms 拍仍会打出 100 行/秒。
- * 日志要的是「同一状态别重复报」。 */
-#define GC_LOG_INTERVAL_MS (5000U)
-
 /* GC 会话收尾的静默窗口：连续这么久没有 GC job 活动才认为本次会话结束。
  * 2 s 足以跨过单 victim 的正常间隙，又不会让一次短暂写入把会话拖成永远不结束。 */
 #define GC_SESSION_IDLE_MS (2000U)
 
-/* 无收益结论后的 closed-list 复扫间隔（migrate 消费）。 */
-#define GC_NOGAIN_BACKOFF_MS (500U)
+/* 无收益结论后的 closed-list 复扫间隔（migrate 消费）。
+ * 有新建写 / 进入紧急水位 / 时钟缺失时立即重扫；5000 ms 只用于「无写入、状态未变」的空闲尾，
+ * 避免满盘时每 500 ms 全表扫 closed list（板端实测约 2 次/s、closed≈1695）。
+ * 写路径需要空间时先走 OP 兜底，program 完成会改变 total_writes ⇒ 下一轮立即重扫。 */
+#define GC_NOGAIN_BACKOFF_MS (5000U)
 
 /* host 写流判定窗口（migrate 消费）：total_writes 变化后这么久内视为 host 在写。 */
 #define GC_HOST_WRITE_WINDOW_MS (2000U)

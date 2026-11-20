@@ -117,7 +117,8 @@ SECTIONS
     . = ALIGN(32);
   } > SRAM123
 
-  /* DTCM hot data: whole-object placement (no per-variable annotations).
+  /* DTCM hot data: whole-object placement。显式 `DTCM_DATA` 的对象（CP job、
+   * allocator free/op/spare 热表）由通用 KEEP 收；其余按对象 KEEP。
    * Must be before the generic .bss pattern, which would otherwise consume
    * these .bss.* input sections first. NOLOAD: init functions memset them. */
   .dtcm_data (NOLOAD) :
@@ -223,7 +224,7 @@ SECTIONS
 
 ASSERT(__NONCACHEABLEBUFFER_END <= ORIGIN(AXI_NOCACHE) + LENGTH(AXI_NOCACHE),
        "AXI non-cacheable DMA buffer region overflow")
-ASSERT(SIZEOF(.dtcm_data) + SIZEOF(.noinit) + 0x5000 <= LENGTH(DTCM), "DTCM hot data + 20KB stack reserve overflow")
+ASSERT(SIZEOF(.dtcm_data) + SIZEOF(.noinit) + 0x6000 <= LENGTH(DTCM), "DTCM hot data + 24KB (~19%) stack reserve overflow")
 ASSERT(SIZEOF(.ssd_code_high) <= LENGTH(ITCM), "ITCM hot code overflow")
 ASSERT((SIZEOF(.ssd_code_high) & 3) == 0, "ITCM copy loop requires 4-byte multiple size")
 ASSERT(SIZEOF(.sram12_data) + SIZEOF(.ut_test_slow) + SIZEOF(.sram3_data) <= LENGTH(SRAM123), "SRAM123 (SRAM1+SRAM2+SRAM3) FTL tables + UT slow data overflow")

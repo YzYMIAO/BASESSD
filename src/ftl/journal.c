@@ -883,12 +883,12 @@ void jrn_handle(l2p_jrn_s *journal, const jrn_trigger_e *trigger)
 
     if (journal->handle.job.phase != JRN_IDLE)
     {
-        // 心跳（见 log.h / timer.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口
+        // 心跳（见 log.h / timer.h）：只在 age >= 5 s 时打一行；异步后「卡在哪个 phase」的唯一观测口
         if (journal->handle.job.hb.active == false)
         {
             log_heartbeat_begin(&journal->handle.job.hb);
         }
-        else if (log_heartbeat_due(&journal->handle.job.hb))
+        else if ((log_heartbeat_age_ms(&journal->handle.job.hb) >= LOG_RATE_SLOW_AFTER_MS) && log_heartbeat_due(&journal->handle.job.hb))
         {
             LOGI(LOG_TAG_JRN "job phase=%d waddr=0x%08lx age=%lums\r\n", journal->handle.job.phase, journal->handle.job.waddr, log_heartbeat_age_ms(&journal->handle.job.hb));
         }
@@ -1091,8 +1091,9 @@ static void jrn_write_complete(l2p_jrn_s *journal, fc_cmd_s *cmd, const fc_cmd_s
         else if (jrn_erase_start(journal) == false)
         {
             // 背压（池空 / 队列满 / cache 序列门控）是**预期**等待，need_erase 保留、下轮重试。
-            // 限流 5 s 一行（时间优先），避免 host 大顺序写 + GC 期间刷屏。
-            LOGE_IF(log_rate_due(&s_erase_kick_log_ms, &s_erase_kick_n, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_JRN "erase kick failed blk=%hhu — 下轮重试\r\n", journal->handle.job.target_block);
+            // 计数不丢；日志用 WRN 并限流 5 s 一行，避免 host 大顺序写 + GC 期间刷屏。
+            journal->handle.state.erase_kick_blocked++;
+            LOGW_RATE(log_rate_due(&s_erase_kick_log_ms, &s_erase_kick_n, LOG_RATE_SLOW_INTERVAL_MS), s_erase_kick_n, LOG_TAG_JRN "erase kick blocked blk=%hhu — 下轮重试", journal->handle.job.target_block);
         }
     }
 
@@ -1339,10 +1340,7 @@ SSD_CODE_FAST BOOL jrn_page_scan_latest(const l2p_jrn_s *journal, jrn_page_ref_s
     {
         *out_read_error = (read_errors != 0U);
     }
-    if (read_errors != 0U)
-    {
-        LOGW(LOG_TAG_JRN "ring scan: %hu page(s) unreadable — 判型结果不可信\r\n", read_errors);
-    }
+    LOGW_IF(read_errors != 0U, LOG_TAG_JRN "ring scan: %hu page(s) unreadable — 判型结果不可信\r\n", read_errors);
 
     // 有效页必有 ≥1 条条目（entry_count == 0 才是「环空」）；不能用 page_seq > 0
     // 当哨兵——序号回绕后 0 是合法值。
@@ -1730,10 +1728,7 @@ SSD_CODE_FAST ftl_status_e jrn_replay(l2p_jrn_s *journal, l2p_cache_s *cache, DW
              s_replay_degraded_region,
              s_replay_degraded_entries);
     }
-    if (s_replay_write_fail_entries != 0U)
-    {
-        LOGW(LOG_TAG_JRN "replay: L2P write failed for %lu entries (first lba=%lu) — force full metadata rebuild\r\n", s_replay_write_fail_entries, s_replay_write_fail_lba);
-    }
+    LOGW_IF(s_replay_write_fail_entries != 0U, LOG_TAG_JRN "replay: L2P write failed for %lu entries (first lba=%lu) — force full metadata rebuild\r\n", s_replay_write_fail_entries, s_replay_write_fail_lba);
 
     if (out_entries != NULL)
     {

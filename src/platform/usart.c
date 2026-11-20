@@ -14,6 +14,7 @@
 #include "usart.h"
 
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+#include "stats.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -52,6 +53,29 @@ static volatile BYTE g_tx_transport_fault;
 
 static uart_stats_s g_uart_stats;
 static BYTE         g_usart_ready;
+
+#if SSD_STATS_ENABLE
+#    define UART_STATS_LIST(X)                           \
+        X(rx_overflow, STATS_U32, STATS_COUNTER)         \
+        X(tx_dropped, STATS_U32, STATS_COUNTER)          \
+        X(tx_context_errors, STATS_U32, STATS_COUNTER)   \
+        X(tx_flush_timeouts, STATS_U32, STATS_COUNTER)   \
+        X(tx_dma_errors, STATS_U32, STATS_COUNTER)       \
+        X(tx_transport_errors, STATS_U32, STATS_COUNTER) \
+        X(overrun_errors, STATS_U32, STATS_COUNTER)      \
+        X(framing_errors, STATS_U32, STATS_COUNTER)      \
+        X(noise_errors, STATS_U32, STATS_COUNTER)        \
+        X(parity_errors, STATS_U32, STATS_COUNTER)
+
+#    define UART_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(uart_stats_s, field), width, kind},
+static const stats_name_s s_stats_uart_names[] = {
+    UART_STATS_LIST(UART_STATS_NAME)};
+#    undef UART_STATS_NAME
+#    define UART_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(uart_stats_s, field, width);
+UART_STATS_LIST(UART_STATS_CHECK)
+#    undef UART_STATS_CHECK
+#endif /* SSD_STATS_ENABLE */
 
 /* ─────────────────────────── 队列原语（供 port / CLI 调用）─────────────────────────── */
 
@@ -213,6 +237,9 @@ void usart_init(DWORD baudrate)
 {
     g_tx_dma_ready = usart_port_hw_init(baudrate);
     g_usart_ready  = 1U;
+#if SSD_STATS_ENABLE
+    (void)stats_register("uart", STATS_INST_NONE, &g_uart_stats, s_stats_uart_names, STATS_ENTRY_COUNT(s_stats_uart_names));
+#endif
 }
 
 /*

@@ -63,15 +63,7 @@ BOOL usb_device_init(void)
     const BOOL ok = tusb_rhport_init(USB_PORT_RHPORT, &rh_init);
 
     /* GHWCFG2.arch[2:0]：0 = slave-only，1 = external DMA，2 = internal DMA。
-     * 本仓走 slave/PIO；这一行用于在板端确认该芯片的 OTG_FS 到底有没有
-     * 内部 DMA（TinyUSB 的 DMA 路径要求 arch == INTERNAL_DMA）。 */
-    const DWORD ghwcfg2 = USB2_OTG_FS->GHWCFG2;
-    const DWORD arch    = ghwcfg2 & 0x7U;
-    const char *arch_s  = (arch == 0U) ? "slave-only" : (arch == 1U) ? "external-dma"
-                                                    : (arch == 2U)   ? "internal-dma"
-                                                                     : "unknown";
-
-    LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n", ghwcfg2, arch, arch_s);
+     * 本仓走 slave/PIO；架构值属器件常量，不再逐 boot 打印。 */
 
     return ok;
 }

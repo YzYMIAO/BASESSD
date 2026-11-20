@@ -49,6 +49,8 @@
  *       不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
  */
 
+#include "crc.h"
+#include "fc_bch_engine.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_ecc_engine.h"
@@ -1041,6 +1043,248 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
 }
 
 /*************************************************************************
+ *  介质格式 KAT（golden vector）
+ *
+ *  这几条用例的目的不是再测一遍功能，而是**冻结介质格式**：写进 NAND 的
+ *  parity / 加扰序列 / CRC 变体一旦漂移，旧固件写的页在新固件上就不可读。
+ *  现有往返用例是「同源编解码」，编码器/解码器一起错时仍然通过
+ *  （docs/design/fc_nand_ut.md §6.2 缺口⑥、§6.3），故必须用固定输入 +
+ *  独立算出的期望值钉住。
+ *
+ *  ⚠ 期望值不是从被测实现反推的，来源写在各用例上方。
+ **************************************************************************/
+
+/* BCH 参数与生产配置一致（fc_bch_init(13, 4, 0, 0)）：
+ * parity = m*t = 52 bit ⇒ 7B；ECC 槽 = CW 528B - data 520B = 8B。 */
+#define L2_BITS_PER_BYTE     (8U)
+#define L2_BCH_KAT_M         (13U)
+#define L2_BCH_KAT_T         (4U)
+#define L2_BCH_KAT_BITS      (L2_BCH_KAT_M * L2_BCH_KAT_T)
+#define L2_BCH_KAT_ECC_BYTES ((L2_BCH_KAT_BITS + L2_BITS_PER_BYTE - 1U) / L2_BITS_PER_BYTE)
+#define L2_BCH_KAT_ECC_SLOT  (FC_BUFFER_POOL_CW_SIZE - FC_BUFFER_DATA_SIZE)
+
+/* 固定输入图案参数；改这两个值会同时改变 golden。 */
+#define L2_BCH_KAT_STEP (37U)
+#define L2_BCH_KAT_BASE (11U)
+
+/* 固定错误位置：按数据区位宽四等分，避免只测同一字节。 */
+#define L2_BCH_KAT_DATA_BITS (FC_BUFFER_DATA_SIZE * L2_BITS_PER_BYTE)
+
+/* KAT 负例的翻转掩码：只翻 1 bit，证明判据有区分力。
+ * BCH 用 0x08 与 scramble/CRC 的 0x01 错开，避免负例都落在同一 bit。 */
+#define L2_KAT_FLIP_MASK     (0x01U)
+#define L2_BCH_KAT_FLIP_MASK (0x08U)
+
+/* BCH parity 固定向量。
+ *
+ * 输入：data[i] = (i * L2_BCH_KAT_STEP + L2_BCH_KAT_BASE) & 0xFF。
+ * 独立来源：Python 实现的 GF(2^13)（prim=0x201B）、
+ * g(x)=∏minpoly(α^1,α^3,α^5,α^7)、MSB-first 系统编码；与本仓
+ * fc_bch_encode 逐字节一致。期望 7B parity（第 8 字节保持 0）：
+ * B5 53 C5 CC 06 7E 60。 */
+static const BYTE s_bch_kat_ecc[L2_BCH_KAT_ECC_BYTES] = {0xB5U, 0x53U, 0xC5U, 0xCCU, 0x06U, 0x7EU, 0x60U};
+
+/* scramble_kat — 加扰序列固定向量。
+ *
+ * 输入：data[i] = i & 0xFF（512B），seed 由固定 META 0x12345678 派生。
+ * 期望：seed = 0x021C1E0F；前 16B 与全 512B 的 FNV-1a32 如下。
+ * 独立来源：按 fc_random_engine.c 注释的多项式 x^16+x^14+x^13+x^11+1
+ * （右移、抽头 bit0^bit2^bit3^bit5）用 Python 独立实现，逐字节一致。
+ * 统计/自反判据测不出序列漂移（fc_nand_ut.md §6.3），这条负责冻结序列。 */
+#define L2_SCRAMBLE_KAT_META       0x12345678UL
+#define L2_SCRAMBLE_KAT_SEED       0x021C1E0FUL
+#define L2_SCRAMBLE_KAT_FNV        0x8499365CUL
+#define L2_SCRAMBLE_KAT_PREFIX_LEN (16U) /* 失败时可读的前缀长度；完整序列由 FNV 钉住 */
+
+/* FNV-1a 32-bit 规范常量（offset basis / prime），不是本仓自造。 */
+#define L2_FNV1A32_OFFSET_BASIS (0x811C9DC5UL)
+#define L2_FNV1A32_PRIME        (0x01000193UL)
+
+/* CRC 固定向量。
+ *
+ * 512B USER：data[i] = i & 0xFF，期望 MPEG-2 = 0xEA3BEC76。
+ * ⚠ 本仓按 STM32 word 顺序喂 CRC：每个 4B 组入序是
+ *   data[3],data[2],data[1],data[0]（不是标准字节流的 data[0..3]）。
+ *   该期望由独立 Python 按同一 word 顺序算出；标准字节流顺序是
+ *   0xD08D7AD9，不能混用。
+ * ISO-HDLC check value "123456789" = 0xCBF43926（标准）。
+ *
+ * 序列断言 ISO → MPEG-2 → ISO 覆盖 crc_port_compute_iso_hdlc 的
+ * 「临时切硬件配置后恢复 MPEG-2」路径：恢复失败时同一次 boot 内
+ * 后续写页的 CRC 会算错，重启后 CRC 校验失败。 */
+#define L2_CRC_KAT_MPEG2    (0xEA3BEC76UL)
+#define L2_CRC_KAT_ISO_HDLC (0xCBF43926UL)
+
+/** FNV-1a 32-bit：KAT 用独立摘要，避免在测试里再实现一遍被测算法。 */
+static DWORD l2_fnv1a32(const BYTE *data, DWORD length)
+{
+    DWORD hash = L2_FNV1A32_OFFSET_BASIS;
+
+    for (DWORD i = 0U; i < length; i++)
+    {
+        hash ^= data[i];
+        hash *= L2_FNV1A32_PRIME;
+    }
+    return hash;
+}
+
+/** BCH parity KAT：固定 520B → 固定 7B；4 bit 错误必须精确纠正。 */
+static MunitResult test_bch_parity_kat(const MunitParameter params[], void *data)
+{
+    static BYTE               kat_data[FC_BUFFER_DATA_SIZE];
+    static BYTE               kat_work[FC_BUFFER_DATA_SIZE];
+    static BYTE               kat_ecc[L2_BCH_KAT_ECC_SLOT];
+    static BYTE               kat_ecc_flip[L2_BCH_KAT_ECC_SLOT];
+    static const unsigned int err_pos[L2_BCH_KAT_T] = {
+        0U,
+        L2_BCH_KAT_DATA_BITS / 4U,
+        L2_BCH_KAT_DATA_BITS / 2U,
+        (L2_BCH_KAT_DATA_BITS * 3U) / 4U,
+    };
+
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    for (DWORD i = 0U; i < sizeof(kat_data); i++)
+    {
+        kat_data[i] = (BYTE)((i * L2_BCH_KAT_STEP + L2_BCH_KAT_BASE) & 0xFFU);
+    }
+
+    fc_bch_control_s *bch = fc_bch_init((int)L2_BCH_KAT_M, (int)L2_BCH_KAT_T, 0U, 0U);
+
+    munit_assert_not_null(bch);
+
+    memset(kat_ecc, 0, sizeof(kat_ecc));
+    fc_bch_encode(bch, kat_data, sizeof(kat_data), kat_ecc);
+    munit_assert_uint8(kat_ecc[L2_BCH_KAT_ECC_BYTES], ==, 0U); /* 第 8 字节不属于 52-bit parity */
+    munit_assert_memory_equal(sizeof(s_bch_kat_ecc), kat_ecc, s_bch_kat_ecc);
+
+    /* C7 负例：输入翻 1 bit，parity 必须变化（证明向量有区分力）。 */
+    memcpy(kat_work, kat_data, sizeof(kat_work));
+    kat_work[0] ^= L2_BCH_KAT_FLIP_MASK;
+    memset(kat_ecc_flip, 0, sizeof(kat_ecc_flip));
+    fc_bch_encode(bch, kat_work, sizeof(kat_work), kat_ecc_flip);
+    munit_assert_int(memcmp(kat_ecc_flip, s_bch_kat_ecc, sizeof(s_bch_kat_ecc)), !=, 0);
+
+    /* 解码侧：固定 L2_BCH_KAT_T 个 bit 错误按 golden parity 精确纠正。 */
+    memcpy(kat_work, kat_data, sizeof(kat_work));
+    for (BYTE i = 0U; i < L2_BCH_KAT_T; i++)
+    {
+        kat_work[err_pos[i] / L2_BITS_PER_BYTE] ^= 1U << (err_pos[i] % L2_BITS_PER_BYTE);
+    }
+
+    unsigned int errloc[L2_BCH_KAT_T];
+    unsigned int nerr = 0U;
+
+    munit_assert_true(fc_bch_decode(bch, kat_work, sizeof(kat_work), s_bch_kat_ecc, errloc, &nerr));
+    munit_assert_uint32(nerr, ==, L2_BCH_KAT_T);
+    for (BYTE i = 0U; i < nerr; i++)
+    {
+        kat_work[errloc[i] / L2_BITS_PER_BYTE] ^= 1U << (errloc[i] % L2_BITS_PER_BYTE);
+    }
+    munit_assert_memory_equal(sizeof(kat_work), kat_work, kat_data);
+
+    test_trace_summary("bch kat: %uB -> parity %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX; %u-bit errors corrected",
+                       sizeof(kat_data),
+                       kat_ecc[0],
+                       kat_ecc[1],
+                       kat_ecc[2],
+                       kat_ecc[3],
+                       kat_ecc[4],
+                       kat_ecc[5],
+                       kat_ecc[6],
+                       L2_BCH_KAT_T);
+    return MUNIT_OK;
+}
+
+/** 加扰序列 KAT：固定 seed + 固定明文 → 固定密文摘要；自反仍成立。 */
+static MunitResult test_scramble_kat(const MunitParameter params[], void *data)
+{
+    static DWORD      words[FC_BUFFER_USER_SIZE / sizeof(DWORD)]; /* DWORD 数组保证 4B 对齐 */
+    static const BYTE prefix[L2_SCRAMBLE_KAT_PREFIX_LEN] = {0xF0U, 0x79U, 0xBFU, 0x4BU, 0x0FU, 0x2CU, 0x1DU, 0xE1U, 0xDFU, 0x98U, 0xCDU, 0x6BU, 0x01U, 0xECU, 0xE7U, 0x5BU};
+    BYTE             *buf                                = (BYTE *)words;
+
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    for (DWORD i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+    {
+        buf[i] = i & 0xFFU;
+    }
+
+    const DWORD seed = fc_random_seed_from_meta(L2_SCRAMBLE_KAT_META);
+
+    munit_assert_uint32(seed, ==, L2_SCRAMBLE_KAT_SEED);
+
+    fc_random_transform(buf, FC_BUFFER_USER_SIZE, seed);
+    munit_assert_memory_equal(sizeof(prefix), buf, prefix);
+    munit_assert_uint32(l2_fnv1a32(buf, FC_BUFFER_USER_SIZE), ==, L2_SCRAMBLE_KAT_FNV);
+
+    /* C7 负例：明文翻 1 bit，输出摘要必须变化。 */
+    for (DWORD i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+    {
+        buf[i] = i & 0xFFU;
+    }
+    buf[0] ^= L2_KAT_FLIP_MASK;
+    fc_random_transform(buf, FC_BUFFER_USER_SIZE, seed);
+    munit_assert_uint32(l2_fnv1a32(buf, FC_BUFFER_USER_SIZE), !=, L2_SCRAMBLE_KAT_FNV);
+
+    /* 自反：同一函数再变换一次回到明文。 */
+    for (DWORD i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+    {
+        buf[i] = i & 0xFFU;
+    }
+    fc_random_transform(buf, FC_BUFFER_USER_SIZE, seed);
+    fc_random_transform(buf, FC_BUFFER_USER_SIZE, seed);
+    for (DWORD i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+    {
+        munit_assert_uint8(buf[i], ==, i & 0xFFU);
+    }
+
+    test_trace_summary("scramble kat: seed=0x%08lX fnv=0x%08lX; inverse held", seed, L2_SCRAMBLE_KAT_FNV);
+    return MUNIT_OK;
+}
+
+/** CRC KAT：MPEG-2 512B + ISO-HDLC check value + ISO→MPEG-2 恢复序列。 */
+static MunitResult test_crc_kat(const MunitParameter params[], void *data)
+{
+    static const BYTE iso_kat[] = "123456789";
+    static DWORD      user_words[FC_CRC_USER_SIZE / sizeof(DWORD)]; /* DWORD 数组保证 4B 对齐 */
+    BYTE             *user = (BYTE *)user_words;
+
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    for (DWORD i = 0U; i < FC_CRC_USER_SIZE; i++)
+    {
+        user[i] = i & 0xFFU;
+    }
+
+    /* 先 ISO 再 MPEG-2：硬件后端会临时切换 CRC 配置，这里验证它恢复成功。 */
+    munit_assert_uint32(crc_compute_iso_hdlc(iso_kat, (sizeof(iso_kat) - 1U)), ==, L2_CRC_KAT_ISO_HDLC);
+    munit_assert_uint32(fc_crc_compute(user), ==, L2_CRC_KAT_MPEG2);
+    munit_assert_uint32(crc_compute_iso_hdlc(iso_kat, (sizeof(iso_kat) - 1U)), ==, L2_CRC_KAT_ISO_HDLC);
+    munit_assert_uint32(fc_crc_compute(user), ==, L2_CRC_KAT_MPEG2);
+
+    /* C7 负例：USER 翻 1 bit，MPEG-2 必须变化。 */
+    user[0] ^= L2_KAT_FLIP_MASK;
+    munit_assert_uint32(fc_crc_compute(user), !=, L2_CRC_KAT_MPEG2);
+
+    test_trace_summary("crc kat: MPEG2(%uB)=0x%08lX, ISO(%uB)=0x%08lX, ISO->MPEG2 restore held",
+                       FC_CRC_USER_SIZE,
+                       L2_CRC_KAT_MPEG2,
+                       sizeof(iso_kat) - 1U,
+                       L2_CRC_KAT_ISO_HDLC);
+    return MUNIT_OK;
+}
+
+/*************************************************************************
  *  fc_data_path_process_read 测试
  *
  *  验证管线（Pass 1~4）：
@@ -1826,6 +2070,11 @@ MunitTest g_fc_data_path_tests[] = {
  /* ── encode ── */
     {                   "dp_encode",                    test_encode, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_enc_params},
     {      "dp_encode_crc_disabled",       test_encode_crc_disabled, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+
+ /* ── 介质格式 KAT（golden vector）── */
+    {           "dp_bch_parity_kat",            test_bch_parity_kat, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {             "dp_scramble_kat",              test_scramble_kat, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {                  "dp_crc_kat",                   test_crc_kat, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── process_read ── */
     {          "dp_process_read_ok",           test_process_read_ok, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_rt_params},

@@ -36,8 +36,9 @@
 #include "checkpoint.h"
 
 #include "assertion.h"
-#include "bbt.h" /* bbt_medium_has_ftl_data（CP 缺失时的空片判定） */
-#include "crc.h" /* crc_compute_iso_hdlc（块元数据快照跨页校验和） */
+#include "bbt.h"   /* bbt_medium_has_ftl_data（CP 缺失时的空片判定） */
+#include "crc.h"   /* crc_compute_iso_hdlc（块元数据快照跨页校验和） */
+#include "delay.h" /* delay_time_now_us（CP job 延迟直方图） */
 #include "fc_interface.h"
 #include "ftl.h"
 #include "ftl_fc_interface.h"
@@ -45,17 +46,19 @@
 #include "log.h"
 #include "metadata.h"
 #include "onfi_1_0.h"
-#include "ssd_compiler.h" /* SRAM3_DATA */
+#include "ssd_compiler.h" /* DTCM_DATA */
 #include "timer.h"
 
 #include <string.h>
 
-// 每实例 Checkpoint 工作区：定义与内存域（SRAM3）都归本模块。
+// 每实例 Checkpoint 工作区：定义与内存域（DTCM）都归本模块。
 // NOLOAD ⇒ 启动不清零，ftl_init 绑定后对该实例显式 memset。
-static cp_handle_s s_cp_handle[FTL_DIE_MAX] SRAM3_DATA;
+/* CP 是长任务、每次 host 写流都会触发；job 结构含 8 KB 块快照，放 DTCM
+ * （400 MHz、无 cache），SRAM3 留给更冷的对象。 */
+static cp_handle_s s_cp_handle[FTL_DIE_MAX] DTCM_DATA;
 
 /**
- * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，SRAM3）
+ * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，DTCM）
  *
  * @param die 紧凑 die 号（< FTL_DIE_MAX）
  * @return 本实例句柄（非空）
@@ -476,6 +479,13 @@ static void cp_header_fill(cp_header_s *cp, const cp_handle_s *h, DWORD sequence
     cp->wear_page_count  = FTL_CHECKPOINT_WEAR_PAGES;
     memcpy(cp->wear_page_crc, h->hdr.wear_page_crc, sizeof(cp->wear_page_crc));
     cp->record_pages = CP_RECORD_PAGES;
+
+    const BYTE life_die = topo_2_die(h->topo);
+
+    if (life_die != FTL_DIE_INVALID)
+    {
+        lifetime_snapshot(life_die, &cp->lifetime);
+    }
 }
 
 /**
@@ -889,7 +899,7 @@ static void cp_job_step(cp_handle_s *h)
 
                 // sequence 在最终槽位确定后取（池内已有序号时才能续上）。
                 // LOGD 留作 seq=0 现场的取证：normal build 静默。
-                LOGD(LOG_TAG_CP "hdr_prep seq_before=%lu idx=%hu\r\n", h->cp_state.sequence, h->hdr.idx);
+                LOGT(LOG_TAG_CP "hdr_prep seq_before=%lu idx=%hu\r\n", h->cp_state.sequence, h->hdr.idx);
                 h->hdr.seq = ++h->cp_state.sequence;
 
                 h->hdr.block_page = 0U;
@@ -996,15 +1006,27 @@ static void cp_job_step(cp_handle_s *h)
 
             case CP_DONE:
             {
+#if SSD_STATS_ENABLE
+                if (h->start_timed != false)
+                {
+                    DWORD now_us = 0U;
+
+                    if (delay_time_now_us(&now_us) != false)
+                    {
+                        stats_hist_observe(&h->cp_state.job_us, now_us - h->start_us);
+                    }
+                    h->start_timed = false;
+                }
+#endif
                 if (h->failed)
                 {
-                    LOGW_IF(cp_job_abort_log_due(h), LOG_TAG_CP "abort at phase=%d (不写 Header / 不截断，脏区与 journal 保留)\r\n", h->fail_phase);
+                    LOGW_RATE(cp_job_abort_log_due(h), h->rl_abort.suppressed, LOG_TAG_CP "abort at phase=%d (不写 Header / 不截断，脏区与 journal 保留)", h->fail_phase);
                 }
                 else if (h->hdr.seq == 0U)
                 {
                     // sequence 0 = 本 Header 在开机被忽略（commit 页无效）。
                     // 这是缺陷状态：限流后以 ERR 暴露，不再每 CP 刷一行。
-                    LOGE_IF(cp_job_abort_log_due(h), LOG_TAG_CP "done with invalid seq=0 — header ignored at boot\r\n");
+                    LOGE_RATE(cp_job_abort_log_due(h), h->rl_abort.suppressed, LOG_TAG_CP "done with invalid seq=0 — header ignored at boot");
                 }
                 else
                 {
@@ -1013,7 +1035,7 @@ static void cp_job_step(cp_handle_s *h)
                     // 限流 5 s：水位触发（1024 次写）可能快于 5 s，逐条打印会在
                     // 115200 串口上刷屏（写满 4 KB TX 环后 uart_log_write 会等待）。
                     // 被跳过的 CP 不影响判据——最新序号看 `info` 的 cp= 或下一条 done。
-                    LOGD_IF(log_ratelimit_due(&h->rl_done), LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s\r\n", h->hdr.seq, h->journal_seq, (h->dir.skip == true) ? "skip" : "written");
+                    LOGD_RATE(log_ratelimit_due(&h->rl_done), h->rl_done.suppressed, LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s ms=%lu", h->hdr.seq, h->journal_seq, (h->dir.skip == true) ? "skip" : "written", log_heartbeat_age_ms(&h->hb));
                 }
 
                 h->active  = false;
@@ -1090,6 +1112,9 @@ static ftl_status_e cp_job_begin(cp_handle_s *h)
 
     h->active = true;
     h->phase  = CP_FLUSH_REGIONS;
+#if SSD_STATS_ENABLE
+    h->start_timed = delay_time_now_us(&h->start_us);
+#endif
     log_heartbeat_begin(&h->hb);
 
     // CP 是高频元数据维护（每次水位触发），start 不逐次打；当前序号看 info 的 cp=。
@@ -1177,8 +1202,18 @@ ftl_status_e cp_pool_find_latest(cp_handle_s *h, cp_header_s *cp, WORD *out_reco
     }
 
     h->cp_state.last_journal_sequence = cp->journal_sequence;
+
+    {
+        const BYTE life_die = topo_2_die(h->topo);
+
+        if (life_die != FTL_DIE_INVALID)
+        {
+            lifetime_init(life_die, &cp->lifetime);
+        }
+    }
+
     // 本 session 首次 CP 先跳一槽：避开掉电残留的「快照已写 / Header 未写」半编程槽。
-    h->cp_state.advance_next          = true;
+    h->cp_state.advance_next = true;
 
     if (out_record_idx != NULL)
     {
@@ -1558,6 +1593,45 @@ BOOL cp_block_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx,
  * @param metadata_dir Directory
  * @param alloc        allocator（同时作为本实例拓扑来源）
  */
+#if SSD_STATS_ENABLE
+#    define CP_STATS_LIST(X)                             \
+        X(sequence, STATS_U32, STATS_GAUGE)              \
+        X(last_journal_sequence, STATS_U32, STATS_GAUGE) \
+        X(write_idx, STATS_U16, STATS_GAUGE)             \
+        X(cursor_valid, STATS_U8, STATS_GAUGE)           \
+        X(advance_next, STATS_U8, STATS_GAUGE)           \
+        X(next_t3_ms, STATS_U32, STATS_GAUGE)            \
+        X(last_cp_ms, STATS_U32, STATS_GAUGE)            \
+        X(last_cp_writes, STATS_U32, STATS_GAUGE)
+
+#    define CP_STATS_NAME(field, width, kind) {STATS_NAME_STR(field), STATS_OFFSET(cp_state_s, field), width, kind},
+static const stats_name_s s_stats_cp_names[] = {CP_STATS_LIST(CP_STATS_NAME)};
+#    undef CP_STATS_NAME
+
+#    define CP_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(cp_state_s, field, width);
+CP_STATS_LIST(CP_STATS_CHECK)
+#    undef CP_STATS_CHECK
+
+#    define CP_STATS_HIST_LIST(X)     X(job_us)
+#    define CP_STATS_HIST_NAME(field) {STATS_NAME_STR(field), STATS_OFFSET(cp_state_s, field)},
+static const stats_hist_name_s s_stats_cp_hist_names[] = {CP_STATS_HIST_LIST(CP_STATS_HIST_NAME)};
+#    undef CP_STATS_HIST_NAME
+STATS_CHECK_HIST_FIELD(cp_state_s, job_us);
+
+static const stats_name_s s_stats_cp_job_names[] = {
+    {                 "active", STATS_OFFSET(cp_handle_s,    active), STATS_U8, STATS_GAUGE},
+    {                  "phase", STATS_OFFSET(cp_handle_s,     phase), STATS_U8, STATS_GAUGE},
+    {                "waiting", STATS_OFFSET(cp_handle_s,   waiting), STATS_U8, STATS_GAUGE},
+    {                 "failed", STATS_OFFSET(cp_handle_s,    failed), STATS_U8, STATS_GAUGE},
+    {STATS_NAME_STR(timed_out), STATS_OFFSET(cp_handle_s, timed_out), STATS_U8, STATS_GAUGE},
+};
+STATS_CHECK_FIELD(cp_handle_s, active, STATS_U8);
+STATS_CHECK_FIELD(cp_handle_s, phase, STATS_U8);
+STATS_CHECK_FIELD(cp_handle_s, waiting, STATS_U8);
+STATS_CHECK_FIELD(cp_handle_s, failed, STATS_U8);
+STATS_CHECK_FIELD(cp_handle_s, timed_out, STATS_U8);
+#endif /* SSD_STATS_ENABLE */
+
 void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cache_s *metadata_dir, alc_s *alloc)
 {
     ASSERT(h != NULL);
@@ -1576,6 +1650,23 @@ void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cach
     log_ratelimit_init(&h->rl_done, LOG_RATE_SLOW_INTERVAL_MS);
     log_heartbeat_end(&h->hb);
     h->cp_state.next_t3_ms = platform_now_ms() + CP_TIME_INTERVAL_MS;
+
+#if SSD_STATS_ENABLE
+    {
+        const BYTE inst = topo_2_die(h->topo);
+
+        if (inst == FTL_DIE_INVALID)
+        {
+            LOGE(LOG_TAG_CP "stats: topo not in scan table; group skipped\r\n");
+        }
+        else
+        {
+            (void)stats_register("ftl.cp", inst, &h->cp_state, s_stats_cp_names, STATS_ENTRY_COUNT(s_stats_cp_names));
+            (void)stats_register_hist("ftl.cp", inst, &h->cp_state, s_stats_cp_hist_names, STATS_ENTRY_COUNT(s_stats_cp_hist_names));
+            (void)stats_register("ftl.cp.job", inst, h, s_stats_cp_job_names, STATS_ENTRY_COUNT(s_stats_cp_job_names));
+        }
+    }
+#endif
 }
 
 /**
@@ -1817,10 +1908,10 @@ void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger)
         // job 在飞时只上报、不再推进（否则一轮会被推进 3 次，行为漂移）。
         if (trigger->reason == CP_REASON_ADVANCE)
         {
-            // 心跳（见 log.h / timer.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase
-            // 才持续可见。判据 = 两次心跳之间 phase 不动 ⇒ 卡死。
+            // 心跳（见 log.h / timer.h）：满载时 CP 常在 1~3 s（等 region 写回），属正常；
+            // 只有 ≥5 s 才打一行，判据 = 持续不动 ⇒ 卡死。
             // ⚠ 起点在 cp_job_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。
-            if (log_heartbeat_due(&h->hb))
+            if ((log_heartbeat_age_ms(&h->hb) >= LOG_RATE_SLOW_AFTER_MS) && log_heartbeat_due(&h->hb))
             {
                 LOGI(LOG_TAG_CP "job phase=%d wait=%d fail=%d age=%lums\r\n", h->phase, h->waiting, h->failed, log_heartbeat_age_ms(&h->hb));
             }

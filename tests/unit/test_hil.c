@@ -45,6 +45,14 @@ static BYTE       s_hil_edge_buf[HIL_IO_LBAS * FTL_IU_BYTES];
  * 该结构约 9 KB 且 CPU-only，不需要 D-Cache。 */
 static ftl_ctx_s s_hil_bad_ftl NONCACHEABLE_BUFFER;
 
+/* 超时用例的请求必须比测试函数活得久：mark_timeout 之后 controller / FTL 仍可能
+ * 持有它；若断言失败 longjmp 出栈，teardown 的 hil_quiesce 还会碰这个对象。 */
+static ssd_req_s s_hil_timeout_req;
+
+/* 超时写用例的数据图案：内容无关，只要每个字节不同以便区分一次写。 */
+#define HIL_TIMEOUT_WR_STEP (17U)
+#define HIL_TIMEOUT_WR_BASE (0x33U)
+
 /* HIL 证据输出：与 /ftl/、/fc-nand/ 的 `[EV]` 同形，复用 munit 的 --log-visible。
  * HIL 构建不链接 fc/ftl 的测试夹具，故这里保留最小本地实现。默认档（error）
  * 一个字节都不输出，报告格式不变。 */
@@ -795,6 +803,127 @@ static MunitResult test_hil_trim_busy(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* 把 start_ms 推到 deadline 之外：避免等真实 5 s。start_ms=0 是「未提交」语义，
+ * 回绕到 0 时再退 1 ms（now - 1 仍 >= 5000 才算到期）。 */
+static void hil_age_request(ssd_req_s *req)
+{
+    req->start_ms = platform_now_ms() - (SSD_REQUEST_TIMEOUT_MS + 1U);
+    if (req->start_ms == 0U)
+    {
+        req->start_ms = 1U;
+    }
+}
+
+/* request_timeout_tombstone — 超时后迟到完成不得覆盖 TIMEOUT。
+ *
+ * READ/WRITE 的到期检测在前端（usb_msc / cli），HIL 直接调 mark_timeout
+ * 构造「已回执但 FTL 仍在飞」的状态；泵完后迟到完成只能递减 sub_remaining。
+ * 判据：completion_status 保持 TIMEOUT、complete_flag 保持 1、最终可 reclaim。 */
+static MunitResult test_hil_request_timeout_tombstone(const MunitParameter params[], void *data)
+{
+    ssd_req_s  *req = &s_hil_timeout_req;
+    const DWORD lba = hil_lba_base();
+
+    (void)params;
+    (void)data;
+
+    hil_trace_begin();
+
+    for (DWORD i = 0U; i < sizeof(s_hil_wr); i++)
+    {
+        s_hil_wr[i] = (BYTE)((i * HIL_TIMEOUT_WR_STEP) + HIL_TIMEOUT_WR_BASE);
+    }
+
+    hil_req_init(req, SSD_REQUEST_WRITE, lba, HIL_IO_LBAS, s_hil_wr, sizeof(s_hil_wr));
+    munit_assert_int(ssd_controller_submit(&g_ctrl, req), ==, SSD_STATUS_OK);
+    munit_assert_uint8(req->complete_flag, ==, 0U); /* 必须真的在飞，否则测不到迟到完成 */
+
+    ssd_request_mark_timeout(req);
+    munit_assert_int(req->completion_status, ==, SSD_STATUS_TIMEOUT);
+    munit_assert_uint8(req->complete_flag, ==, 1U);
+
+    hil_quiesce(); /* 泵完在飞写；迟到完成走 on_sub_complete 的 timed_out 分支 */
+
+    munit_assert_uint32(req->sub_remaining, ==, 0U);
+    munit_assert_int(req->completion_status, ==, SSD_STATUS_TIMEOUT);
+    munit_assert_uint8(req->complete_flag, ==, 1U);
+    munit_assert_true(ssd_controller_request_reclaimable(&g_ctrl, req));
+
+    hil_trace_detail("timeout tombstone: late completion decremented sub_remaining, status stayed TIMEOUT, reclaimable");
+    hil_trace_summary("hil timeout: tombstone not overwritten by late completion");
+
+    return MUNIT_OK;
+}
+
+/* request_timeout_flush — FLUSH 到期由 controller 判定并撤销。
+ *
+ * 判据：start_ms 超期后 service 置 TIMEOUT；flush_req 摘链；请求可 reclaim。
+ * ⚠ 不等真实 deadline：直接把 start_ms 推老。 */
+static MunitResult test_hil_request_timeout_flush(const MunitParameter params[], void *data)
+{
+    ssd_req_s *req = &s_hil_timeout_req;
+
+    (void)params;
+    (void)data;
+
+    hil_trace_begin();
+
+    hil_req_init(req, SSD_REQUEST_FLUSH, 0U, 0U, NULL, 0U);
+    munit_assert_int(ssd_controller_submit(&g_ctrl, req), ==, SSD_STATUS_OK);
+    munit_assert_ptr_equal(g_ctrl.flush_req, req);
+
+    hil_age_request(req);
+    ssd_controller_service(&g_ctrl);
+
+    munit_assert_true(req->timed_out);
+    munit_assert_int(req->completion_status, ==, SSD_STATUS_TIMEOUT);
+    munit_assert_uint8(req->complete_flag, ==, 1U);
+
+    hil_quiesce();
+    munit_assert_ptr_null(g_ctrl.flush_req);
+    munit_assert_true(ssd_controller_request_reclaimable(&g_ctrl, req));
+
+    hil_trace_detail("timeout flush: start_ms aged -> TIMEOUT, flush_req cleared, reclaimable");
+    hil_trace_summary("hil timeout: FLUSH deadline detected and cancelled");
+
+    return MUNIT_OK;
+}
+
+/* request_timeout_trim — TRIM 到期由 controller 判定并中止。
+ *
+ * 判据：start_ms 超期后 service 置 TIMEOUT；trim_req 摘链；请求可 reclaim。
+ * 若 trim 已开始，service 会先 ftl_trim_abort 再摘链；此处不断言是否已开始。 */
+static MunitResult test_hil_request_timeout_trim(const MunitParameter params[], void *data)
+{
+    ssd_req_s  *req = &s_hil_timeout_req;
+    const DWORD lba = hil_lba_base();
+
+    (void)params;
+    (void)data;
+
+    hil_trace_begin();
+
+    hil_req_init(req, SSD_REQUEST_TRIM, lba, HIL_IO_LBAS, NULL, 0U);
+    munit_assert_int(ssd_controller_submit(&g_ctrl, req), ==, SSD_STATUS_OK);
+    munit_assert_ptr_equal(g_ctrl.trim_req, req);
+
+    hil_age_request(req);
+    ssd_controller_service(&g_ctrl);
+
+    munit_assert_true(req->timed_out);
+    munit_assert_int(req->completion_status, ==, SSD_STATUS_TIMEOUT);
+    munit_assert_uint8(req->complete_flag, ==, 1U);
+
+    hil_quiesce();
+    munit_assert_ptr_null(g_ctrl.trim_req);
+    munit_assert_true(ssd_controller_request_reclaimable(&g_ctrl, req));
+
+    hil_trace_detail("timeout trim: start_ms aged -> TIMEOUT, trim_req cleared, reclaimable");
+    hil_trace_summary("hil timeout: TRIM deadline detected and cleared");
+
+    return MUNIT_OK;
+}
+
 /* ══ 子套件 /hil/ ══ */
 
 /* ══ 子套件 /hil/contract/（契约）与 /hil/io/（真实 I/O）══ */
@@ -809,27 +938,118 @@ static MunitResult test_hil_uart_dma_init_returns(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* request_timeout_boundary — 请求级 deadline 的边界语义。
+ *
+ * 覆盖 ssd_request_expired 的 0 / 边界 / 无符号回绕 / 时钟倒退，以及
+ * ssd_request_mark_timeout 的三个可见字段。
+ * 判据：时钟缺失（now=0）不判超时；deadline 是 >=；回绕按无符号差值；
+ * 时钟倒退当前判超时——这是有意钉住现状，读码时不要当 bug 改。 */
+typedef struct HIL_TIMEOUT_CASE_S
+{
+    DWORD start_ms;
+    DWORD now_ms;
+    BOOL  expect;
+} hil_timeout_case_s;
+
+/* deadline 边界表参数：到期相关值从 SSD_REQUEST_TIMEOUT_MS 派生，改超时不需重算。
+ * WRAP_* 用 32-bit 无符号回绕构造「start 在 2^32 尾部、now 已绕回」的差值。 */
+#define HIL_TIMEOUT_BASE_MS    (100U)
+#define HIL_TIMEOUT_OTHER_MS   (1234U) /* 任意非零时刻（未提交用例的 now） */
+#define HIL_TIMEOUT_WRAP_START (0xFFFFFF00UL)
+#define HIL_TIMEOUT_WRAP_SHORT ((HIL_TIMEOUT_WRAP_START + SSD_REQUEST_TIMEOUT_MS - 1U) & UINT32_MAX)
+#define HIL_TIMEOUT_WRAP_LONG  ((HIL_TIMEOUT_WRAP_START + SSD_REQUEST_TIMEOUT_MS) & UINT32_MAX)
+
+static MunitResult test_hil_request_timeout_boundary(const MunitParameter params[], void *data)
+{
+    static const hil_timeout_case_s timeout_cases[] = {
+        {                    0U,                              HIL_TIMEOUT_OTHER_MS, false}, /* 未提交 */
+        {   HIL_TIMEOUT_BASE_MS,                                                0U, false}, /* 时钟缺失 */
+        {   HIL_TIMEOUT_BASE_MS, HIL_TIMEOUT_BASE_MS + SSD_REQUEST_TIMEOUT_MS - 1U, false}, /* 差 deadline-1 */
+        {   HIL_TIMEOUT_BASE_MS,      HIL_TIMEOUT_BASE_MS + SSD_REQUEST_TIMEOUT_MS,  true}, /* 刚好 deadline：>= */
+        {HIL_TIMEOUT_WRAP_START,                            HIL_TIMEOUT_WRAP_SHORT, false}, /* 无符号回绕，差 deadline-1 */
+        {HIL_TIMEOUT_WRAP_START,                             HIL_TIMEOUT_WRAP_LONG,  true}, /* 无符号回绕，差 deadline */
+        {   HIL_TIMEOUT_BASE_MS,                          HIL_TIMEOUT_BASE_MS - 1U,  true}, /* 时钟倒退 */
+    };
+    ssd_req_s req;
+
+    (void)params;
+    (void)data;
+
+    hil_trace_begin();
+
+    for (BYTE i = 0U; i < (BYTE)(sizeof(timeout_cases) / sizeof(timeout_cases[0])); i++)
+    {
+        munit_assert_int(ssd_request_expired(timeout_cases[i].start_ms, timeout_cases[i].now_ms), ==, timeout_cases[i].expect);
+    }
+
+    memset(&req, 0, sizeof(req));
+    ssd_request_mark_timeout(&req);
+    munit_assert_true(req.timed_out);
+    munit_assert_int(req.completion_status, ==, SSD_STATUS_TIMEOUT);
+    munit_assert_uint8(req.complete_flag, ==, 1U);
+
+    const DWORD case_cnt = sizeof(timeout_cases) / sizeof(timeout_cases[0]);
+
+    hil_trace_detail("timeout boundary: %lu cases (0/edge/wrap/backward) held; mark_timeout sets TIMEOUT + flag", case_cnt);
+    hil_trace_summary("hil timeout: deadline boundary semantics held");
+
+    return MUNIT_OK;
+}
+
+/* instance_init_twice — FTL 实例只能成功初始化一次（release 拒绝）。
+ *
+ * debug 下第二条是 ASSERT 停机，故按 FC 负例的惯例 MUNIT_SKIP；
+ * release UT 验证返回 FTL_ERROR 且不破坏已在跑的实例。 */
+static MunitResult test_hil_instance_init_twice(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+#if !defined(NDEBUG)
+    return MUNIT_SKIP; /* debug：ASSERT 停机，无法用 munit 断言 */
+#else
+    hil_trace_begin();
+
+    munit_assert_int(ftl_instance_init(0U), ==, FTL_ERROR);
+
+    /* 第二次 device_prepare 是 no-op：不得改变 controller READY / 实例状态。 */
+    ftl_device_prepare();
+    munit_assert_int(g_ctrl.state, ==, SSD_CONTROLLER_READY);
+    munit_assert_not_null(g_ctrl.ftl[0]);
+
+    hil_trace_detail("instance init twice: duplicate -> FTL_ERROR; device_prepare no-op; controller still READY");
+    hil_trace_summary("ftl init: duplicate instance_init rejected in release");
+
+    return MUNIT_OK;
+#endif
+}
+
 MunitTest g_hil_contract_tests[] = {
-    {(char *)"uart_dma_init_returns", test_hil_uart_dma_init_returns, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        (char *)"state_machine",         test_hil_state_machine, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"init_ready",            test_hil_init_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    (char *)"init_missing_slot",     test_hil_init_missing_slot, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   (char *)"init_topo_mismatch",    test_hil_init_topo_mismatch, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"host_queue",            test_hil_host_queue, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         (char *)"lba_range_ok",          test_hil_lba_range_ok, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     (char *)"submit_not_ready",      test_hil_submit_not_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         (char *)"submit_edges",          test_hil_submit_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"is_complete",           test_hil_is_complete, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                           NULL,                           NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {   (char *)"uart_dma_init_returns",    test_hil_uart_dma_init_returns, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           (char *)"state_machine",            test_hil_state_machine, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              (char *)"init_ready",               test_hil_init_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       (char *)"init_missing_slot",        test_hil_init_missing_slot, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      (char *)"init_topo_mismatch",       test_hil_init_topo_mismatch, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              (char *)"host_queue",               test_hil_host_queue, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {            (char *)"lba_range_ok",             test_hil_lba_range_ok, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        (char *)"submit_not_ready",         test_hil_submit_not_ready, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {            (char *)"submit_edges",             test_hil_submit_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {             (char *)"is_complete",              test_hil_is_complete, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {(char *)"request_timeout_boundary", test_hil_request_timeout_boundary, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"instance_init_twice",      test_hil_instance_init_twice, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                              NULL,                              NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_hil_io_tests[] = {
-    {(char *)"write_read_roundtrip", test_hil_write_read_roundtrip, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {(char *)"write_flush_readback", test_hil_write_flush_readback, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"flush_job",            test_hil_flush_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"flush_busy",           test_hil_flush_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            (char *)"trim_job",             test_hil_trim_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          (char *)"trim_edges",           test_hil_trim_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           (char *)"trim_busy",            test_hil_trim_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                          NULL,                          NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {     (char *)"write_read_roundtrip",      test_hil_write_read_roundtrip, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"write_flush_readback",      test_hil_write_flush_readback, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                (char *)"flush_job",                 test_hil_flush_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {               (char *)"flush_busy",                test_hil_flush_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 (char *)"trim_job",                  test_hil_trim_job, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {               (char *)"trim_edges",                test_hil_trim_edges, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                (char *)"trim_busy",                 test_hil_trim_busy, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {(char *)"request_timeout_tombstone", test_hil_request_timeout_tombstone, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    (char *)"request_timeout_flush",     test_hil_request_timeout_flush, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     (char *)"request_timeout_trim",      test_hil_request_timeout_trim, hil_setup, hil_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                               NULL,                               NULL,      NULL,         NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

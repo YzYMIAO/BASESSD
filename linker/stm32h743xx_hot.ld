@@ -27,7 +27,8 @@
     . = ALIGN(4);
     __ssd_code_high_start = .;
     /* 公共集：host 数据面（FTL submit/complete、L2P、wbuf/pending、cache
-     * read/write）、FC pump/BCH、NAND dispatch/FMC。 */
+     * read/write）、FC pump/BCH/池/加扰/ECC 包装、NAND dispatch/FMC。
+     * CRC 引擎（小、调用点少）留 Flash，给 UT 构建留 ITCM 余量。 */
     KEEP(*ftl/ftl.o(.text .text.*))
     KEEP(*ftl/l2p_cache.o(.text .text.*))
     KEEP(*ftl/wbuf.o(.text .text.*))
@@ -35,6 +36,9 @@
     KEEP(*ftl/cache_batch.o(.text .text.*))
     KEEP(*fc/fc.o(.text .text.*))
     KEEP(*fc/fc_data_path.o(.text .text.*))
+    KEEP(*fc/fc_pool.o(.text .text.*))
+    KEEP(*fc/fc_random_engine.o(.text .text.*))
+    KEEP(*fc/fc_ecc_engine.o(.text .text.*))
     KEEP(*fc/fc_bch_engine.o(.text .text.*))
     KEEP(*nand/nand_dispatch.o(.text .text.*))
     KEEP(*nand/nand_fmc.o(.text .text.*))

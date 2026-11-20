@@ -315,7 +315,7 @@ static void rr_settle_plane(rr_handle_s *rr)
         }
         else
         {
-            LOGE_IF(rr_unrec_log_is_due(), LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%hu pl=%hhu bk=%hu pg=%hhu cw=%hhu retry=%hhu st=%s\r\n", lba, fail_pba, fail_paa, gblock, pba_to_plane(fail_pba), pba_to_block(fail_pba), pba_to_page(fail_pba), pba_to_cw(fail_pba), rr->retry_count, stbuf);
+            LOGE_RATE(rr_unrec_log_is_due(), s_rr_unrec_suppressed, LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%hu pl=%hhu bk=%hu pg=%hhu cw=%hhu retry=%hhu st=%s", lba, fail_pba, fail_paa, gblock, pba_to_plane(fail_pba), pba_to_block(fail_pba), pba_to_page(fail_pba), pba_to_cw(fail_pba), rr->retry_count, stbuf);
 
             // 首次不可纠：dump 与失败 PBA/LBA 相关的最近写轨迹（判二次编程/写后读坏）。
             alc_trace_dump(rr->alloc, lba, fail_pba);
@@ -548,14 +548,14 @@ void rr_trigger(rr_handle_s *rr, const rr_owner_s *owner)
  */
 void rr_handle(rr_handle_s *rr)
 {
-    // 心跳（见 log.h / timer.h）：恢复在飞期间每满 1s 打一行 stage/age。
+    // 心跳（见 log.h / timer.h）：只在 age >= 5 s 时打一行 stage/age（正常恢复不刷）。
     // ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
     // 那段同样属于「job 卡住」，正是心跳要暴露的。
     if (rr->stage == RR_STAGE_IDLE)
     {
         log_heartbeat_end(&rr->hb);
     }
-    else if (log_heartbeat_due(&rr->hb))
+    else if ((log_heartbeat_age_ms(&rr->hb) >= LOG_RATE_SLOW_AFTER_MS) && log_heartbeat_due(&rr->hb))
     {
         LOGI(LOG_TAG_RR "job stage=%d plane=%hhu attempt=%hhu retry=%hhu age=%lums\r\n", rr->stage, rr->plane, rr->attempt, rr->retry_count, log_heartbeat_age_ms(&rr->hb));
     }

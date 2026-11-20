@@ -291,9 +291,15 @@ static MunitResult test_host_io_random(const MunitParameter params[], void *data
 
     for (BYTE round = 0U; round < 8U; round++)
     {
-        const DWORD count = (DWORD)munit_rand_int_range(1, (int)FTL_UT_MATRIX_LBAS + 1);
+        /* munit_rand_int_range 的上界是**闭区间**：写 +1 会抽到 65，
+         * count*512 越过 s_io_buf[64*512] 512B，正好踩进 s_cp_handle 的
+         * active/waiting/phase（实测 0x30044800）⇒ quiesce 永远读不到 idle。 */
+        const DWORD count = (DWORD)munit_rand_int_range(1, (int)FTL_UT_MATRIX_LBAS);
         const DWORD off   = (DWORD)munit_rand_int_range(0, (int)(FTL_UT_LBA_WINDOW - count));
         const DWORD lba   = ftl_ut_lba_base() + off;
+
+        munit_assert_uint32(count, <=, FTL_UT_MATRIX_LBAS);
+        munit_assert_uint32(off + count, <=, FTL_UT_LBA_WINDOW);
 
         for (DWORD i = 0U; i < (count * FTL_IU_BYTES); i++)
         {

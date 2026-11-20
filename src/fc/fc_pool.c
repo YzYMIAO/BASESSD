@@ -28,6 +28,7 @@
 #include "fc_internal.h"
 #include "nand_interface.h"
 #include "ssd_compiler.h"
+#include "stats.h"
 
 #include <string.h>
 
@@ -45,6 +46,62 @@ static fc_desc_id_t       g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
 static fc_buf_id_t        g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
 static fc_buf_state_e     g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 static fc_cmd_id_t        g_fc_buffer_owner[FC_BUFFER_POOL_DEPTH];
+
+/* 当前命令分配类：desc/buffer 分配跟随最近一次 fc_command_alloc_class()。
+ * 单线程 superloop 的构造期上下文；默认 CRIT（测试/直接调用可用满池）。 */
+static fc_cmd_class_e s_alloc_class = FC_CMD_CLASS_CRIT;
+
+/* ── 统计（docs/design/common/statistics_design.md）──
+ * 统计专用对象/表在 SSD_STATS_ENABLE=0 时整体不编译；自增点经 STATS_INC 自动消失。 */
+#if SSD_STATS_ENABLE
+typedef struct FC_ALLOC_STATISTICS_S
+{
+    DWORD cmd_fail_bg;
+    DWORD cmd_fail_crit;
+    DWORD desc_fail;
+    DWORD buf_fail;
+} fc_alloc_stats_s;
+
+static fc_alloc_stats_s s_stats_fc_alloc;
+
+/* fc.pool 的 base 是控制器本体；SQ/HSQ/CQ 当前占用用嵌套 offset 取（无影子字段）。 */
+_Static_assert(sizeof(fc_ctl_s) <= 0xFFFFU, "fc_ctl_s exceeds stats WORD offset range");
+static const stats_name_s s_stats_fc_pool_names[] = {
+    {STATS_NAME_STR(command_used), STATS_OFFSET(fc_ctl_s, command_used), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(descriptor_used), STATS_OFFSET(fc_ctl_s, descriptor_used), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(buffer_used), STATS_OFFSET(fc_ctl_s, buffer_used), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(command_high), STATS_OFFSET(fc_ctl_s, command_high), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(descriptor_high), STATS_OFFSET(fc_ctl_s, descriptor_high), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(buffer_high), STATS_OFFSET(fc_ctl_s, buffer_high), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(sq_used), STATS_OFFSET_NESTED(fc_ctl_s, sq, fc_sub_queue_s, count), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(hsq_used), STATS_OFFSET_NESTED(fc_ctl_s, hsq, fc_sub_queue_s, count), STATS_U16, STATS_GAUGE},
+    {STATS_NAME_STR(cq_used), STATS_OFFSET_NESTED(fc_ctl_s, cq, fc_comp_queue_s, count), STATS_U16, STATS_GAUGE},
+};
+
+STATS_CHECK_FIELD(fc_ctl_s, command_used, STATS_U16);
+STATS_CHECK_FIELD(fc_ctl_s, descriptor_used, STATS_U16);
+STATS_CHECK_FIELD(fc_ctl_s, buffer_used, STATS_U16);
+STATS_CHECK_FIELD(fc_ctl_s, command_high, STATS_U16);
+STATS_CHECK_FIELD(fc_ctl_s, descriptor_high, STATS_U16);
+STATS_CHECK_FIELD(fc_ctl_s, buffer_high, STATS_U16);
+STATS_CHECK_FIELD(fc_sub_queue_s, count, STATS_U16);
+STATS_CHECK_FIELD(fc_comp_queue_s, count, STATS_U16);
+
+#    define FC_ALLOC_STATS_LIST(X)                 \
+        X(cmd_fail_bg, STATS_U32, STATS_COUNTER)   \
+        X(cmd_fail_crit, STATS_U32, STATS_COUNTER) \
+        X(desc_fail, STATS_U32, STATS_COUNTER)     \
+        X(buf_fail, STATS_U32, STATS_COUNTER)
+
+#    define FC_ALLOC_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(fc_alloc_stats_s, field), width, kind},
+static const stats_name_s s_stats_fc_alloc_names[] = {
+    FC_ALLOC_STATS_LIST(FC_ALLOC_STATS_NAME)};
+#    undef FC_ALLOC_STATS_NAME
+#    define FC_ALLOC_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(fc_alloc_stats_s, field, width);
+FC_ALLOC_STATS_LIST(FC_ALLOC_STATS_CHECK)
+#    undef FC_ALLOC_STATS_CHECK
+#endif /* SSD_STATS_ENABLE */
 
 /**
  * @brief 初始化三池本体、簿记数组与空闲链表（不碰队列/调度器/硬件）
@@ -99,6 +156,13 @@ void fc_pool_init(fc_ctl_s *controller)
     controller->command_high         = 0U;
     controller->descriptor_high      = 0U;
     controller->buffer_high          = 0U;
+    s_alloc_class                    = FC_CMD_CLASS_CRIT;
+
+#if SSD_STATS_ENABLE
+    memset(&s_stats_fc_alloc, 0, sizeof(s_stats_fc_alloc));
+    (void)stats_register("fc.pool", STATS_INST_NONE, controller, s_stats_fc_pool_names, STATS_ENTRY_COUNT(s_stats_fc_pool_names));
+    (void)stats_register("fc.alloc", STATS_INST_NONE, &s_stats_fc_alloc, s_stats_fc_alloc_names, STATS_ENTRY_COUNT(s_stats_fc_alloc_names));
+#endif
 }
 
 /**
@@ -164,9 +228,21 @@ static fc_desc_s *fc_pool_descriptor_alloc(fc_ctl_s *controller, fc_cmd_id_t cmd
 {
     WORD descriptor_index;
 
+    WORD limit = FC_DESCRIPTOR_POOL_DEPTH;
+    if (s_alloc_class == FC_CMD_CLASS_BG)
+    {
+        limit -= FC_CMD_RESERVE_CRIT_DESC;
+    }
+    if (controller->descriptor_used >= limit)
+    {
+        STATS_INC(s_stats_fc_alloc.desc_fail);
+        return NULL;
+    }
+
     descriptor_index = controller->descriptor_free_head;
     if (descriptor_index == FC_DESC_ID_INVALID)
     {
+        STATS_INC(s_stats_fc_alloc.desc_fail);
         return NULL;
     }
     ASSERT_REJECT(controller->descriptor_owner[descriptor_index] == FC_CMD_ID_INVALID, NULL, "descriptor alloc: desc=%hu owner=%hu", descriptor_index, controller->descriptor_owner[descriptor_index]);
@@ -562,18 +638,52 @@ static void fc_pool_chain_append(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_de
 }
 
 /**
- * @brief 分配命令槽位（清零 + desc_id=INVALID + 写入槽位号）
+ * @brief 按分配类申请命令槽位（清零 + desc_id=INVALID + 写入槽位号）
  *
- * @return 命令指针；NULL = 命令池空
+ * 类决定当前池占用上限：其余路径不能吃掉 L2P demand load 的 CRIT 预留槽。
+ *
+ * @param cls 分配类（FC_CMD_CLASS_*）
+ * @return 命令指针；该类额度用完时返回 NULL
  */
-fc_cmd_s *fc_command_alloc(void)
+fc_cmd_s *fc_command_alloc_class(fc_cmd_class_e cls)
 {
     fc_ctl_s   *controller = &g_fc_controller;
     fc_cmd_id_t index;
 
+    ASSERT(cls < FC_CMD_CLASS_NUM);
+
+    s_alloc_class = cls;
+
+    DWORD limit = FC_COMMAND_POOL_DEPTH;
+    if (cls == FC_CMD_CLASS_BG)
+    {
+        limit -= FC_CMD_RESERVE_CRIT;
+    }
+
+    if (controller->command_used >= limit)
+    {
+        if (cls == FC_CMD_CLASS_BG)
+        {
+            STATS_INC(s_stats_fc_alloc.cmd_fail_bg);
+        }
+        else
+        {
+            STATS_INC(s_stats_fc_alloc.cmd_fail_crit);
+        }
+        return NULL;
+    }
+
     index = controller->command_free_head;
     if (index == FC_CMD_ID_INVALID)
     {
+        if (cls == FC_CMD_CLASS_BG)
+        {
+            STATS_INC(s_stats_fc_alloc.cmd_fail_bg);
+        }
+        else
+        {
+            STATS_INC(s_stats_fc_alloc.cmd_fail_crit);
+        }
         return NULL;
     }
     ASSERT_REJECT(controller->command_state[index] == FC_COMMAND_STATE_FREE, NULL, "cmd alloc: cmd=%hu state=%d", index, controller->command_state[index]);
@@ -592,6 +702,19 @@ fc_cmd_s *fc_command_alloc(void)
 }
 
 /**
+ * @brief 分配命令槽位（满池额度；测试/兼容入口）
+ *
+ * 生产 FTL 一律走 fc_command_alloc_class() 的 BG/CRIT 额度；本入口保留给 FC 测试
+ * 与 RAID parity 内部命令，行为与引入额度前一致（可用满 DEPTH）。
+ *
+ * @return 命令指针；池空时返回 NULL
+ */
+fc_cmd_s *fc_command_alloc(void)
+{
+    return fc_command_alloc_class(FC_CMD_CLASS_CRIT);
+}
+
+/**
  * @brief 分配一个 buffer
  *
  * @return buffer ID；FC_BUF_ID_INVALID = 池空
@@ -601,9 +724,21 @@ fc_buf_id_t fc_buffer_alloc(void)
     fc_ctl_s *controller = &g_fc_controller;
     WORD      buffer_index;
 
+    WORD limit = FC_BUFFER_POOL_DEPTH;
+    if (s_alloc_class == FC_CMD_CLASS_BG)
+    {
+        limit -= FC_CMD_RESERVE_CRIT_BUFS;
+    }
+    if (controller->buffer_used >= limit)
+    {
+        STATS_INC(s_stats_fc_alloc.buf_fail);
+        return FC_BUF_ID_INVALID;
+    }
+
     buffer_index = controller->buffer_free_head;
     if (buffer_index == FC_BUF_ID_INVALID)
     {
+        STATS_INC(s_stats_fc_alloc.buf_fail);
         return FC_BUF_ID_INVALID;
     }
     ASSERT_REJECT(controller->buffer_state[buffer_index] == FC_BUFFER_STATE_FREE, FC_BUF_ID_INVALID, "buffer alloc: id=%hu state=%d", buffer_index, controller->buffer_state[buffer_index]);
@@ -1005,6 +1140,34 @@ BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id)
         desc_id = (fc_desc_id_t)descriptor->next_id;
     }
     return ecc_max;
+}
+
+/**
+ * @brief 命令 desc 链上是否存在 UNC（不可纠 ECC）CW
+ *
+ * 须在 fc_command_release 之前调用。
+ *
+ * @param cmd_id 命令 ID
+ * @return true = 至少一个 CW 为 UNC
+ */
+BOOL fc_get_cmd_has_unc(fc_cmd_id_t cmd_id)
+{
+    fc_desc_id_t desc_id;
+
+    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+
+    desc_id = (fc_desc_id_t)cmd->desc_id;
+    for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
+    {
+        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+
+        if (fc_cw_status_has_unc(descriptor->status) != false)
+        {
+            return true;
+        }
+        desc_id = (fc_desc_id_t)descriptor->next_id;
+    }
+    return false;
 }
 
 /* ── ID / 指针转换 ── */

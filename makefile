@@ -127,11 +127,11 @@ endif
 #   本工程没有「CFLAGS 变化 ⇒ 重编译」依赖：开关若只改编译选项而不改对象目录，
 #   会静默复用旧 .o。OBJ_DIR 已按 UT / BUILD_TYPE / NAND_DEVICE / DEBUG_OPT /
 #   FORMAT 分置；这里再对最终 CFLAGS / 工具链 / 链接脚本做指纹，任何未纳入
-#   目录名的配置变化（CFLAGS_EXTRA、CROSS_COMPILE、新增 -D 等）都会清空当前
-#   对象目录，不必再为每个开关手工加后缀。
+#   目录名的配置变化（CFLAGS_EXTRA、CROSS_COMPILE、新增 -D、target 级 include
+#   等）都会清空当前对象目录，不必再为每个开关手工加后缀。
 # ----------------------------------------------------------------------------
 CONFIG_STAMP     := $(OBJ_DIR)/.build_config
-CONFIG_SIGNATURE := $(CC) | $(CFLAGS) | $(ASFLAGS) | $(LDFLAGS) | $(LINKER_SCRIPT)
+CONFIG_SIGNATURE := $(CC) | $(CFLAGS) | $(ASFLAGS) | $(LDFLAGS) | $(LINKER_SCRIPT) | $(TEST_INCS) | $(FC_PRIVATE_INC) | $(FTL_PRIVATE_INC)
 
 .PHONY: check-config
 check-config:

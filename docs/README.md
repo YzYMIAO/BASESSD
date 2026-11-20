@@ -17,6 +17,7 @@
 | 平台 / 移植 / 调试链 | `design/platform_design.md`（timer 见 `design/common/timer.md`）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 / CLI | `design/common/`：`assertion_guidelines.md`、`logging.md`、`fault_capture.md`、`cli.md` |
 | 设计原则 / 学习 | `design/storage_controller_design.md`（设计要点手册）；CW 布局事实见 `design/ftl_design.md` §2.1/§2.2 |
+| **存储主控 SoC 介绍** | `design/controller_target_features.md`（硬件功能块 + FTL/固件功能块 + 消费/企业差异 + 当前平台案例 + 候选平台） |
 | **项目水平 / 定位评估** | `archive/project_positioning_20261029.md`（对照 OpenSSD / SPDK FTL 的定性评估；不是基准报告） |
 | **模块接口 / 解耦判据** | `design/ftl_design.md` §5.1.1/§5.1.2（handle 契约 / 字段所有权 / 超时 / 多 LUN；全文在 `archive/ftl_module_contracts.md`） |
 | **主机接口层（HIL）/ 请求拆分 / 完成回执** | `design/hil_design.md`（主设计）→ `include/hil/*.h`（契约）→ `design/hil_ut_design.md`（测试设计） |

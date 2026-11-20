@@ -23,8 +23,34 @@ STM32H743 + MT29F4G08（4 Gb SLC NAND）上的 **DRAM-less 软 SSD 固件原型*
 - 主机接口：`USB2_OTG_FS` device mode，全速 12 Mbps，MSC/BOT，单 LUN，512 B 块，主机可见容量约 424 MiB
 - 串口：USART1，115200 8N1（CLI 与日志）
 - 调试：J-Link（SWD）
+- 板卡资料：[正点原子 Apollo V2 资料页](https://www.openedv.com/docs/boards/stm32/zdyz_stm32h743_apolloV2.html)（硬件手册 / 原理图在页面所列 A 盘）
 
-引脚、时钟与内存布局见 `docs/hardware_contract.md`。⚠ 板卡为 Apollo V2，USB 引脚映射未经原理图确认。
+引脚、时钟与内存布局见 `docs/hardware_contract.md`。USB 引脚已由 Apollo V2 原理图 2.2.10.1 确认：
+Type-C 的 D-/D+ 经 22R 接 `PA11/PA12`（OTG_FS），SBU 未接，无 ULPI PHY，只有 FS 12 Mbps。
+
+## 主控 SoC 模块与本平台取舍
+
+下表按「主控物理硬件块」列模块、常见形态、功能和本平台的选择/替代。
+详细说明见 `docs/design/controller_target_features.md` §3/§6；下一平台选择见同文档 §7。
+
+| 主控 SoC 模块 | 常见种类 / 形态 | 功能简略 | 本平台选择 / 替代 |
+|---|---|---|---|
+| 主机 PHY / 链路 | PCIe、SATA、SAS、UFS（M-PHY+UniPro）、eMMC、USB | 电气、串行/并行、链路训练、速率/lane | **USB2 OTG_FS device，12 Mbps**（板载限制）；无链路训练/多 lane 可学 |
+| 主机控制器 | PCIe controller（RC/EP）、AHCI、UFS、USB、eMMC | 队列、命令搬运、中断、DMA | STM32 USB OTG controller；**HIL 软件请求拆分/排队/完成回执**；无 SQ/CQ/doorbell |
+| 命令 / 队列协议 | NVMe、AHCI+ATA、SCSI、UFS UTP、MMC、USB MSC/UASP | 命令语义、队列、完成、描述符 | **USB MSC BOT 单命令**；替代：软件请求生命周期；无 NVMe 队列 |
+| 描述符 / 主机 DMA | PRP/SGL（NVMe）、PRD（AHCI）、UPIU（UFS） | 数据缓冲怎么指、DMA 搬运 | 无 host 描述符；USB FIFO/软件缓冲；替代：HIL 请求 + 缓冲池 |
+| CPU | 单核 MCU、多核 AP、AP+实时核 | 协议解析、FTL、调度、后台 | **单 Cortex-M7**；轮询 + 后台时间预算；无多核并行 |
+| SRAM / DRAM | 片上 SRAM、DDR3/4、HBM（少） | L2P 驻留、命令/数据缓冲 | **DRAM-less**：32 MB SDRAM 未用，元数据在 AXI_RAM/SRAM2；替代：region cache + journal/CP |
+| FC（NAND 通道控制器） | 硬 FC（多通道/队列/DMA/ECC）、软 FC | 通道/CE/LUN/plane 时序、描述符链、ECC | **软件 FC**：cmd/desc/buf 三池 + UOP；单 ch/1 CE/1 LUN/2 plane；无硬 FC 并行 |
+| NAND 接口 | ONFI、Toggle；SDR/NV-DDR；多 timing mode | 命令/地址/数据、R/B#、时序、multi-plane | **ONFI 1.0 SDR Mode 5**，FMC bank3；单颗 MT29F4G08；无 NV-DDR/multi-channel |
+| ECC | BCH、LDPC（硬/软判决）、RAID/XOR | 纠错、坏块判定、数据恢复 | **BCH(13,4) 硬判决**；无 LDPC/软判决/RAID |
+| 加扰 / CRC / E2E | LFSR 加扰、CRC、DIF/DIX | 数据随机化、完整性校验、端到端保护 | **LFSR16 + CRC**；无 DIF/DIX/主机 E2E |
+| DMA / 数据通路 | host DMA、NAND DMA、描述符/SG、cache 一致 | 数据搬运、减少 CPU 占用 | **NAND 侧 PIO（FMC 逐字节）**；UART DMA；无 NAND DMA/描述符链 |
+| 安全 | AES-XTS/SED、secure boot、OPAL、sanitize | 加密、密钥、访问控制、安全擦除 | **未实现**；SWD 开放；替代：无（明确缺口） |
+| 电源 / PLP | PMIC、hold-up 电容、PFail | 掉电保持、电源时序 | **无 PLP**；替代：Journal + Checkpoint + PFR；VWC 撤销 |
+| 热 / 功耗 | 温度传感器、throttle、DVFS | 热保护、功耗管理 | **无专门热管理**；无 DVFS/风扇；替代：软件限流/日志 |
+| 调试 / telemetry | JTAG/SWD、trace、ILA、SMART/telemetry | 可观测性、故障捕获、健康 | **SWD + UART**；`stats`/`smart`/日志/fault capture；无 trace/ILA |
+| 可靠性 / 可用性 | ECC/RAID、双端口、热插拔、SR-IOV | 故障恢复、冗余、多租户 | **单 LUN/单端口**；无 RAID/双端口/热插拔；替代：ECC/BBT/WL/PFR |
 
 ## 构建
 
@@ -53,15 +79,55 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 | 项目 | 状态 | 证据 / 说明 |
 |---|---|---|
-| debug / release 构建 | 已验证 | 2026-11-17，本机 arm-none-eabi-gcc，零新告警 |
-| UT 编译（FC/FTL/HIL） | 已验证 | 2026-11-17，`make tests UT=FTL` 链接通过；仅证链接 |
-| 板端 UT（release 全量） | 已验证 | 2026-11-16，306/306 通过、3 SKIP、636 s（`test --seed 0x5ee5cfbc`） |
-| 板端 H2testw | 已验证 | 2026-11-16，415/423 MB、0 错误；写 950 / 读 885 KB/s |
+| debug / release 构建 | 已验证 | 2026-11-20，本机 arm-none-eabi-gcc，零新告警 |
+| UT 编译（FC/FTL/HIL） | 已验证 | 2026-11-19，`make tests UT=FTL` 链接通过；仅证链接 |
+| 板端 UT（release 全量） | 已验证 | 见下「最新测试结果」 |
+| 板端 H2testw | 已验证 | 见下「最新测试结果」 |
 | `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h`；功能代码完成但未上板 |
 | IWDG 看门狗 | 关闭，待上板决策 | `src/main.c`（`SSD_WATCHDOG_ENABLE=0`） |
 | read recovery `0x89` | 保留地址，空转 | `src/ftl/read_recovery.c`；本器件无读电压重试表，不处理 |
 
 > 「已验证」仅覆盖表中证据对应的范围；未列出的分支与配置均为未验证。
+> 上表证据对应 2026-11-20 镜像；此后工作区还有未提交的日志 / 统计改动，尚未重新构建、上板。
+
+## 最新测试结果
+
+### UT（release 全量，2026-11-19）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `built Nov 19 2026 17:15:02` |
+| 结果 | **314/314 通过，3 SKIP** |
+| seed | `0xbc2e3bb2` |
+| 耗时 | 677.71 s |
+| 3 SKIP | `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock` |
+| 原始日志 | [`2026-11-19_release_ut_full.log`](docs/archive/test_logs/2026-11-19_release_ut_full.log) |
+| 复现 | 串口执行 `test --seed 0xbc2e3bb2` |
+
+```text
+314 of 314 (100%) tests successful, 3 (0%) test skipped. Total wall-clock: 677.71 s
+```
+
+### H2testw（USB MSC 端到端，2026-11-21）
+
+| 写 KB/s | 读 KB/s | 数据量 | 结果 |
+|---:|---:|---|---|
+| 912 | 857 | 421 MB | `Test finished without errors` |
+
+> 镜像 `built Nov 20 2026 13:41:57`；满盘（`free=0`），0 错误。
+> 这是最终结果；截图与串口 `info` / `stats` 见下节。
+
+## 测试证据
+
+### H2testw 截图
+
+![H2testw 端到端结果（912/857）](docs/archive/test_logs/h2testw_912_857.png)
+
+### 原始记录
+
+- UT 原始日志：[`2026-11-19_release_ut_full.log`](docs/archive/test_logs/2026-11-19_release_ut_full.log)
+- H2testw 截图：[`h2testw_912_857.png`](docs/archive/test_logs/h2testw_912_857.png)
+- 测试方法与吞吐结论：[`docs/guides/testing_guide.md`](docs/guides/testing_guide.md)
 
 ## 已知限制
 
@@ -82,6 +148,7 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 | `docs/design/ftl_design.md` | FTL 主设计 |
 | `docs/design/fc_nand_design.md` | FC-NAND 主设计（§26 行业对照） |
 | `docs/design/hil_design.md` | 主机接口层 |
+| `docs/design/controller_target_features.md` | 存储主控 SoC 介绍（硬件/FTL 功能块 + 当前平台 + 下一平台选择） |
 | `docs/guides/wsl_debug_environment.md` | WSL / JLink / 串口调试链 |
 | `docs/design/known_open_items.md` | 已知风险与残余项（维护者账本） |
 | `CLAUDE.md` | 工程规则与评审判据（不是用户手册） |

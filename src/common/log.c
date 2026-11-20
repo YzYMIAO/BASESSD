@@ -88,7 +88,7 @@ void log_printf(log_level_e level, const char *format, ...)
 
 void log_set_level(log_level_e level)
 {
-    if (level <= LOG_DEBUG)
+    if (level <= LOG_TRACE)
     {
         g_log_level = level;
     }

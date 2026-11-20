@@ -484,7 +484,7 @@ BOOL pend_group_abort_ctx(pend_ctx_s *table, void *ctx)
  */
 static void pend_note_underflow(const char *who, WORD gi)
 {
-    LOGE_IF(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug\r\n", who, gi);
+    LOGE_RATE(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), s_group_underflow_n, LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug", who, gi);
 }
 
 /**

@@ -29,9 +29,11 @@ ALL_LIBS = $(LIB_DIR)/libthird_party.a
 LINK_DEPS := $(LINKER_SCRIPT) $(PROJECT_ROOT)/linker/stm32h743xx_hot.ld
 
 # 3.1 链接可执行文件（生成 .map 文件）
-# check-vendor-config 必须是第一个前置：配置文件变化时要先清空第三个对象目录，
-# 再编 vendor / 链接。它是 .PHONY，ELF 反正由 main.o 的 FORCE 每轮重链。
-$(TARGET).elf: check-vendor-config $(LINK_S_OBJS) $(LINK_C_OBJS) $(ALL_LIBS) $(LINK_DEPS)
+# check-config / check-vendor-config 必须是前置：配置变化时先清空对象目录，
+# 再编 vendor / 链接。二者都是 .PHONY；ELF 反正由 main.o 的 FORCE 每轮重链。
+# check-config 也必须挂在这里（不只挂 all）：`make check` 直接依赖 ELF，
+# 绕过 all 时同样要清陈旧对象。
+$(TARGET).elf: check-config check-vendor-config $(LINK_S_OBJS) $(LINK_C_OBJS) $(ALL_LIBS) $(LINK_DEPS)
 	@$(MKDIR) $(BIN_DIR)
 	@$(ECHO) "Linking $(BUILD_TYPE) version..."
 	# 模块静态库之间允许存在合理的双向引用，链接组负责重复扫描并解析符号。

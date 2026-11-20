@@ -9,6 +9,7 @@
 docs/archive/
 ├── README.md          ← 本文件
 ├── changelog/         ← 原 docs/changelog/：FC / FTL 各版本逐版本落地记录（72 个）
+├── test_logs/         ← 板端测试原始串口日志（按日期命名）
 ├── <dated 6 个>       ← 原 docs/design/ 的一次性阶段文档
 ├── <计划/历史 10 个>   ← 2026-10-22 文档重组移入（见下节）
 └── <2026-11-13 重构归档> ← UT 修订史 / 断言历史轮次 / 设计讨论 / 合并后的原文档
@@ -20,7 +21,7 @@ docs/archive/
 
 | 层 | 内容 | 典型文件/目录 | 何时读 |
 |---|---|---|---|
-| **A. 证据层** | 逐版本落地、上板验证、风险/断言批次原文 | `changelog/`、`ftl_*_board_verify.md`、`known_risks_batches.md`、`assertion_rounds.md`、`known_iss_batches.md` | 查「为什么这样做 / 当时验证到什么程度」 |
+| **A. 证据层** | 逐版本落地、上板验证、风险/断言批次原文 | `changelog/`、`test_logs/`、`ftl_*_board_verify.md`、`known_risks_batches.md`、`assertion_rounds.md`、`known_iss_batches.md` | 查「为什么这样做 / 当时验证到什么程度」 |
 | **B. 设计由来** | 被否方案、历史契约、迁移计划 | `cw_level_mapping_design.md`、`fc_design_discussions.md`、`ftl_module_contracts.md`、`multi_lun_generalization.md`、`nand_op_enablement_plan.md`、`ftl_optimization_plan.md` | 查「为什么不是另一种做法」 |
 | **C. 一次性记录** | 单次调试、已完成计划、历史评估 | `debug_*.md`、`ftl_full_landing_plan_*.md`、`project_positioning_*.md`、`testing_guide_*_history.md` | 低频考古；不作为当前判据 |
 
@@ -29,6 +30,15 @@ docs/archive/
 - archive 只含历史证据，不作为当前权威设计；当前设计看 `../design/`。
 - 历史正文不改写；只做路径 / 隐私 / 失效链接修正（H37 / P2）。
 - 归档区已按发布范围审计：无凭据、无个人身份、无构建产物；WSL 私网地址已改为占位符。
+
+## test_logs/
+
+板端测试原始串口日志，按日期命名；只作为证据，不作为当前判据。
+
+| 文件 | 内容 | 结果 |
+|---|---|---|
+| `2026-11-19_release_ut_full.log` | release 全量 UT（镜像 `built Nov 19 2026 17:15:02`） | 314/314 + 3 SKIP，seed `0xbc2e3bb2`，677.71 s |
+| `h2testw_912_857.png` | H2testw 端到端最终结果（写 912 / 读 857 KB/s，421 MB，0 错误） | 用户提供；只作证据，不做归因 |
 
 ## changelog/（原 `docs/changelog/`，2026-10-15 移入）
 

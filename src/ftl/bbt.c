@@ -892,7 +892,7 @@ static ftl_status_e bbt_write_submit(alc_s *alloc)
  */
 void bbt_handle(alc_s *alloc)
 {
-    // 心跳（见 log.h / timer.h）：job 在飞期间每满 1s 打一行 phase/age
+    // 心跳（见 log.h / timer.h）：只在 age >= 5 s 时打一行 phase/age
     if (alloc->bbt.handle.phase == BBT_JOB_IDLE)
     {
         log_heartbeat_end(&alloc->bbt.handle.hb);
@@ -901,7 +901,7 @@ void bbt_handle(alc_s *alloc)
     {
         log_heartbeat_begin(&alloc->bbt.handle.hb);
     }
-    else if (log_heartbeat_due(&alloc->bbt.handle.hb))
+    else if ((log_heartbeat_age_ms(&alloc->bbt.handle.hb) >= LOG_RATE_SLOW_AFTER_MS) && log_heartbeat_due(&alloc->bbt.handle.hb))
     {
         LOGI(LOG_TAG_BBT "job phase=%d waiting=%d seq=%lu idx=%u age=%lums\r\n", alloc->bbt.handle.phase, alloc->bbt.handle.waiting, alloc->bbt.sequence, alloc->bbt.write_idx, log_heartbeat_age_ms(&alloc->bbt.handle.hb));
     }

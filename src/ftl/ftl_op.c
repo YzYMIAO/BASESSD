@@ -28,11 +28,14 @@
 #include "ftl_op.h"
 
 #include "assertion.h"
+#include "cache_batch.h"      /* ftl_cache_seq_gate_blocks（L2P 失败归因） */
 #include "fc_interface.h"     /* fc_submit / fc_poll_completion / fc_command_release */
 #include "ftl.h"              /* ftl_ctx_s */
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
 #include "l2p_cache.h"        /* die_2_ch/ce/lun（die → 坐标的唯一分解点） */
+#include "lifetime_port.h"    /* 终身计数接线（非热对象） */
 #include "log.h"
+#include "stats.h"
 #include "timer.h" /* platform_now_ms（后台让行超时） */
 
 #include <string.h>
@@ -52,6 +55,43 @@ static ftl_ctx_s *g_op_route[FTL_DIE_MAX];
 // 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 → 普通变量即可。
 static BYTE g_dispatch_depth = 0U;
 
+/* ── 统计（模块自持；docs/design/common/statistics_design.md）──
+ * 统计专用对象/表在 SSD_STATS_ENABLE=0 时整体不编译；自增点经 STATS_INC 自动消失。 */
+#if SSD_STATS_ENABLE
+typedef struct FTL_OP_STATISTICS_S
+{
+    DWORD gate_block;
+    DWORD break_request;
+    DWORD yield_request;
+    DWORD yield_clear;
+    DWORD req_add_fail;
+    DWORD host_submitted;
+    DWORD drain_rounds;
+    DWORD drain_completed;
+} ftl_op_stats_s;
+
+static ftl_op_stats_s s_stats_ftl_op;
+
+#    define FTL_OP_STATS_LIST(X)                    \
+        X(gate_block, STATS_U32, STATS_COUNTER)     \
+        X(break_request, STATS_U32, STATS_COUNTER)  \
+        X(yield_request, STATS_U32, STATS_COUNTER)  \
+        X(yield_clear, STATS_U32, STATS_COUNTER)    \
+        X(req_add_fail, STATS_U32, STATS_COUNTER)   \
+        X(host_submitted, STATS_U32, STATS_COUNTER) \
+        X(drain_rounds, STATS_U32, STATS_COUNTER)   \
+        X(drain_completed, STATS_U32, STATS_COUNTER)
+
+#    define FTL_OP_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(ftl_op_stats_s, field), width, kind},
+static const stats_name_s s_stats_ftl_op_names[] = {
+    FTL_OP_STATS_LIST(FTL_OP_STATS_NAME)};
+#    undef FTL_OP_STATS_NAME
+#    define FTL_OP_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(ftl_op_stats_s, field, width);
+FTL_OP_STATS_LIST(FTL_OP_STATS_CHECK)
+#    undef FTL_OP_STATS_CHECK
+#endif /* SSD_STATS_ENABLE */
+
 /* ── 服务函数数组 ──
  *
  * C99 designated initializer 的 const 数组（非"注册函数"）：编译期即可发现重复/
@@ -65,6 +105,8 @@ static BYTE g_dispatch_depth = 0U;
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = ftl->mig_handle）——同一台引擎，
  *     op ID 分开只为日志/调试可辨（GC/WL 回收 vs 预测性退役）；
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
+ *   · FTL_OP_L2P_PREFETCH：L2P region 预取加载（ctx = 该 cache line；回调与 L2P 相同，
+ *     但 op 独立 ⇒ 不请求 cache 序列断点/让行）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_handle）；
  *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
  *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）；
@@ -78,6 +120,7 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
     [FTL_OP_GC]            = ftl_migrate_callback,
     [FTL_OP_WL]            = ftl_migrate_callback,
     [FTL_OP_L2P]           = ftl_l2p_callback,
+    [FTL_OP_L2P_PREFETCH]  = ftl_l2p_callback,
     [FTL_OP_CHECKPOINT]    = ftl_checkpoint_callback,
     [FTL_OP_BBT]           = ftl_bbt_callback,
     [FTL_OP_METADATA]      = ftl_metadata_callback,
@@ -95,6 +138,10 @@ void ftl_op_init(void)
 {
     memset(g_op_req, 0, sizeof(g_op_req));
     memset(g_op_route, 0, sizeof(g_op_route));
+#if SSD_STATS_ENABLE
+    memset(&s_stats_ftl_op, 0, sizeof(s_stats_ftl_op));
+    (void)stats_register("ftl.op", STATS_INST_NONE, &s_stats_ftl_op, s_stats_ftl_op_names, STATS_ENTRY_COUNT(s_stats_ftl_op_names));
+#endif
 }
 
 /* ── 3. request 表 ── */
@@ -123,6 +170,7 @@ static BOOL __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
         case FTL_OP_GC:
         case FTL_OP_WL:
         case FTL_OP_L2P:
+        case FTL_OP_L2P_PREFETCH:
         case FTL_OP_CHECKPOINT:
         case FTL_OP_BBT:
         case FTL_OP_METADATA:
@@ -161,10 +209,7 @@ ftl_status_e ftl_op_req_add(WORD cmd_id, ftl_op_id_e op, void *ctx)
         return FTL_ERROR;
     }
 
-    if (g_op_req[cmd_id].pending == true)
-    {
-        LOGW(LOG_TAG_FTL "completion entry cmd=%hu reused — stale request overwritten\r\n", cmd_id);
-    }
+    LOGW_IF(g_op_req[cmd_id].pending == true, LOG_TAG_FTL "completion entry cmd=%hu reused — stale request overwritten\r\n", cmd_id);
 
     g_op_req[cmd_id].ctx     = ctx;
     g_op_req[cmd_id].op      = op;
@@ -451,6 +496,7 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
 
     if ((ftl != NULL) && (ftl_cache_seq_gate_blocks(ftl) != false))
     {
+        STATS_INC(s_stats_ftl_op.gate_block);
         // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
         // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR。
         // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
@@ -459,6 +505,7 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
         // draining，把刚放开的门控立刻重新关上，恢复读永远提交不进来。
         if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_L2P))
         {
+            STATS_INC(s_stats_ftl_op.break_request);
             ftl_cache_seq_request_break(ftl);
         }
 
@@ -467,6 +514,7 @@ static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
         // 让行，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
         if (op == FTL_OP_L2P)
         {
+            STATS_INC(s_stats_ftl_op.yield_request);
             ftl_cache_seq_request_yield(ftl, platform_now_ms());
         }
         return true;
@@ -485,6 +533,7 @@ static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
 {
     if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl_cache_seq_yield_pending(ftl) != false))
     {
+        STATS_INC(s_stats_ftl_op.yield_clear);
         ftl_cache_seq_yield_clear(ftl);
     }
 }
@@ -501,7 +550,7 @@ static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
  */
 ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
 {
-    // cmd 由调用者从 fc_command_alloc() 取得（池外指针 ftl_cmd_id() 会给
+    // cmd 由调用者从命令池取得（池外指针 ftl_cmd_id() 会给
     // FC_CMD_ID_INVALID，登记入口的 cmd_id 断言会拦下）。
     ASSERT(cmd != NULL);
 
@@ -510,11 +559,20 @@ ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
         return FTL_AGAIN;
     }
 
+    /* 只有 read recovery 进 HSQ。L2P region 加载留在 SQ：它最多有 L2P_CACHE_SIZE
+     * 个并发，超过 HSQ 深度（16）；且 cache sequence 正在占用 LUN 时，HSQ 命令会被
+     * 回推并在 HSQ 里堆积到序列结束，HSQ 满后新加载（含 GC 自己的依赖）提交不进来。 */
+    if (op == FTL_OP_READ_RECOVERY)
+    {
+        cmd->high_priority = 1U;
+    }
+
     const WORD cmd_id = ftl_cmd_id(cmd);
 
     // ctx == NULL 也登记（HOST_IO / CACHE_PAD 无私有状态）。
     if (ftl_op_req_add(cmd_id, op, ctx) != FTL_OK)
     {
+        STATS_INC(s_stats_ftl_op.req_add_fail);
         return FTL_ERROR; /* 池外命令指针（cmd_id 越界） */
     }
 
@@ -525,6 +583,10 @@ ftl_status_e ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
         return FTL_AGAIN;
     }
 
+    if (op == FTL_OP_HOST_IO)
+    {
+        STATS_INC(s_stats_ftl_op.host_submitted);
+    }
     ftl_op_seq_yield_clear(ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun), op);
     return FTL_OK;
 }
@@ -620,8 +682,11 @@ void ftl_op_drain(void)
 {
     fc_cmd_status_s completion;
 
+    STATS_INC(s_stats_ftl_op.drain_rounds);
+
     while (fc_poll_completion(&completion) == FC_STATUS_OK)
     {
+        STATS_INC(s_stats_ftl_op.drain_completed);
         // cmd_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
         fc_cmd_s *cmd = fc_command_id_to_command(completion.cmd_id);
 
@@ -661,6 +726,10 @@ void ftl_op_drain(void)
         // l2p_read_sync 抽完成表；故此处解析出 NULL 只可能是编程错误。
         ftl_ctx_s *ftl = ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun);
 
+#if SSD_STATS_PERSIST_ENABLE
+        lifetime_note_completion(ftl, cmd, &completion);
+#endif
+
         // 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
         // "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。
         g_dispatch_depth++;
@@ -668,6 +737,39 @@ void ftl_op_drain(void)
         g_dispatch_depth--;
     }
 }
+
+/**
+ * @brief 该命令的目标实例当前是否被 cache 序列门控挡住
+ *
+ * 供 L2P 加载失败归因使用（gate vs 队列满/额度满）。只读，不改门控状态。
+ * 日志与统计共用本判据，避免「日志说 submit_backpressure、计数说 gate」的口径分叉。
+ *
+ * @param cmd 命令（用其 ch/ce/lun 路由到实例）
+ * @return true 门控会拒绝该命令；false 不会被门控拒绝
+ */
+BOOL ftl_op_gate_blocks(const fc_cmd_s *cmd)
+{
+    ASSERT(cmd != NULL);
+
+    const ftl_ctx_s *ftl = ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun);
+
+    return ((ftl != NULL) && (ftl_cache_seq_gate_blocks(ftl) != false)) ? true : false;
+}
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief 完成派发侧的进展签名（主循环空转判据）
+ *
+ * = 已消费完成数 + 成功下发的 host 子操作数；只用于比较两次采样是否变化，
+ * u32 回绕不影响相等比较。
+ *
+ * @return 进展签名
+ */
+DWORD ftl_op_stats_progress(void)
+{
+    return s_stats_ftl_op.drain_completed + s_stats_ftl_op.host_submitted;
+}
+#endif /* SSD_STATS_ENABLE */
 
 /* ── 7. 同步等待服务函数 ── */
 

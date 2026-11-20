@@ -63,13 +63,14 @@
 #### A.2.1 硬件侧
 
 - STM32H743II 有 OTG_FS 与 OTG_HS 两个 USB 核（`third_party/stm32h743/cmsis-device/stm32h743xx.h`）。
-- Type-C 先按 **PA11/PA12（OTG_FS，AF10）**；若枚举失败，再查 **PB14/PB15**
-  （OTG_HS 内嵌 FS PHY，AF12）。
-- **ULPI 高速不做**：PC0/PC2/PC3 与 SDRAM/FMC 冲突，PB0/PB1 是 LED，板上没有 ULPI PHY。
+- Type-C 的 D-/D+ 经 22R 接 **PA11/PA12（OTG_FS，AF10）**，已由原理图 2.2.10.1 确认；
+  SBU1/SBU2 未接。
+- **ULPI 高速不做**：板上没有 ULPI PHY，只有 FS 12 Mbps；HS 需要外部
+  ULPI PHY（USB3300/3320 等），当前硬件没有路径。
 - ⚠ **PA9 是 `OTG_FS_VBUS`，但本仓已用作 USART1_TX** ⇒ 必须
-  `vbus_sensing_enable = DISABLE`，不能用 VBUS  sensing。
-- USB 需要 48 MHz 内核时钟；HSI48 已在 `src/platform/stm32h743/sys_port.c` 打开，
-  但尚未选为 USB 内核时钟。
+  `vbus_sensing_enable = DISABLE`，不能用 VBUS sensing。
+- USB 需要 48 MHz 内核时钟；HSI48 已在 `src/platform/stm32h743/sys_port.c` 选为
+  USB 内核时钟（`RCC_USBCLKSOURCE_HSI48`）。
 
 #### A.2.2 仓库侧
 
@@ -302,7 +303,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| PA11/PA12 接线未确认 | 无原理图；也可能 PB14/PB15 | 上板枚举失败先换 AF/引脚；用万用表确认 |
+| USB 只支持 FS 12 Mbps | 原理图 2.2.10.1：Type-C D-/D+ 经 22R 接 PA11/PA12，无 ULPI PHY | 不改 `OPT_MODE_HIGH_SPEED`；要 HS 只能换板 |
 | TinyUSB MSC 异步回调 | 已改用 `TUD_MSC_RET_ASYNC` + `tud_msc_async_io_done`；主机复位时需丢弃在飞结果 | `discard` 标志 + `tud_ready()` 守卫；未上板 |
 | `ftl_flush` 非 barrier | 只 best-effort，不能承诺绝对掉电持久 | SYNCHRONIZE CACHE 只在前序写完成后调用；文档写清 |
 | WRITE(10) FUA（2026-11-05 用户改判实现） | FUA 写 chunk 不回早回执，等 FTL 组完成（program + 映射确认）后才回 CSW；失败直接 CSW failed | 非 FUA 写仍是 volatile write cache 早回执；上板验证 FUA 回执延迟与断电读回（RISK-USB-05） |

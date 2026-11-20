@@ -71,17 +71,17 @@
  * + 已回执写丢失。预算取 4 pair，保证后台始终有提交配额。
  *
  * 判据：host 的**下一次**子操作之后，各池仍至少剩 RESERVED 个槽位。
- * ⚠ 只约束 host 路径；后台路径（CP/GC/journal）直接走各自的 async 原语，不经过本检查。 */
+ * ⚠ 只约束 host 路径；后台路径（CP/GC/journal）直接走各自的 async 原语，不经过本检查。
+ * ⚠ host 不使用 HSQ（只有 read recovery 走 HSQ），故 HSQ 不参与本预算。 */
 #define FTL_FC_HOST_RESERVED_CMDS (8U)
 #define FTL_FC_HOST_RESERVED_DESC (4U * FTL_LBA_PER_PAIR)
 #define FTL_FC_HOST_RESERVED_BUFS (4U * FTL_LBA_PER_PAIR)
 #define FTL_FC_HOST_RESERVED_SQ   (8U)
-#define FTL_FC_HOST_RESERVED_HSQ  (2U)
 
 /**
  * @brief host 是否还有余量提交 n 个子操作。
  *
- * 逐池检查：受理本批 n 个子操作后，命令 / desc / buffer / SQ / HSQ 仍各留
+ * 逐池检查：受理本批 n 个子操作后，命令 / desc / buffer / SQ 仍各留
  * FTL_FC_HOST_RESERVED_* 个槽位。
  *
  * @param n 本批子操作数（命令 / SQ 各占 n 个槽，desc / buffer 各占 n × FTL_LBA_PER_PAIR 个）
@@ -95,7 +95,7 @@ static inline BOOL ftl_fc_host_budget_ok_n(DWORD n)
 
     const DWORD cw = n * FTL_LBA_PER_PAIR;
 
-    return (st.command_used + n + FTL_FC_HOST_RESERVED_CMDS <= FC_COMMAND_POOL_DEPTH) && (st.descriptor_used + cw + FTL_FC_HOST_RESERVED_DESC <= FC_DESCRIPTOR_POOL_DEPTH) && (st.buffer_used + cw + FTL_FC_HOST_RESERVED_BUFS <= FC_BUFFER_POOL_DEPTH) && (st.sq_used + n + FTL_FC_HOST_RESERVED_SQ <= FC_SQ_DEPTH) && (st.hsq_used + FTL_FC_HOST_RESERVED_HSQ <= FC_HSQ_DEPTH);
+    return (st.command_used + n + FTL_FC_HOST_RESERVED_CMDS <= FC_COMMAND_POOL_DEPTH) && (st.descriptor_used + cw + FTL_FC_HOST_RESERVED_DESC <= FC_DESCRIPTOR_POOL_DEPTH) && (st.buffer_used + cw + FTL_FC_HOST_RESERVED_BUFS <= FC_BUFFER_POOL_DEPTH) && (st.sq_used + n + FTL_FC_HOST_RESERVED_SQ <= FC_SQ_DEPTH);
 }
 
 /**
@@ -116,11 +116,11 @@ static inline BOOL ftl_fc_host_budget_ok(void)
  * @brief 命令指针 → FC 命令池 ID。
  *
  * 命令池 ID 保存在 fc_cmd_s.cmd_id（见 fc_interface.h）。本层调用者手里的 cmd
- * 恒来自 fc_command_alloc()，故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
+ * 恒来自 fc_command_alloc_class()（经 ftl_cmd_prepare_alloc），故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
  * FC_CMD_ID_INVALID——那是编程错误，调用方（pending_add / sync_wait）会因查不到
  * 而失败，不会静默串命令。
  *
- * @param cmd 命令指针（本层调用者恒来自 fc_command_alloc()）
+ * @param cmd 命令指针（本层调用者恒来自 fc_command_alloc_class()（经 ftl_cmd_prepare_alloc））
  * @return FC 命令池 ID；池外指针返回 FC_CMD_ID_INVALID
  */
 static inline WORD ftl_cmd_id(const fc_cmd_s *cmd)
@@ -242,6 +242,18 @@ static inline BYTE ftl_cache_prog_op(BYTE j, BYTE n)
  */
 ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap);
 
+/**
+ * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）
+ *
+ * L2P demand load 在构造点提升到 FC_CMD_CLASS_CRIT，构造后恢复到原值；
+ * prefetch 与其余路径保持 BG。
+ * 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
+ *
+ * @param cls 目标类（FC_CMD_CLASS_*）
+ * @return 原类
+ */
+fc_cmd_class_e ftl_cmd_class_set(fc_cmd_class_e cls);
+
 /* ── PBA helper（**自己算整段位图**并传给建链入口） ── */
 
 /**
@@ -291,14 +303,14 @@ ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM]
  * 直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 / checkpoint /
  * sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
  *
- * @param cmd 已从 fc_command_alloc() 取得、且已判空的命令
+ * @param cmd 已从命令池取得、且已判空的命令
  * @param pba 本命令的 PBA（须通过 pba_is_valid）
  * @return FTL_OK 建链成功
  *         FTL_ERROR 池空 / 位图越段（ASSERT 后的 release 拒绝）
  */
 static inline ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba)
 {
-    /* cmd 由调用者从 fc_command_alloc() 取且已判空 ⇒ 本函数不再判空。 */
+    /* cmd 由调用者从命令池取且已判空 ⇒ 本函数不再判空。 */
 
     /* 边界不变量：进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当 suspended[][][] 下标
      * 直接用，越界即栈越界写。校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
@@ -609,7 +621,7 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba);
  *   见 ftl_fc_interface.c），故本函数返回后调用者即可复用 / 覆写源缓冲——这正是
  *   Journal 刷页不需要 ping-pong 快照缓冲的原因。
  * ⚠ 调用者拿到 cmd 后**必须**提交或释放：既未提交也未 release 即泄漏命令槽位
- *   ⇒ fc_command_alloc 恒 NULL ⇒ 全系统 FTL_AGAIN。
+ *   ⇒ 命令分配恒 NULL ⇒ 全系统 FTL_AGAIN。
  * ⚠ 失败返回时命令已自行回收（与 ftl_sync_* 同约定），out_cmd 不被写入。
  *
  * @param out_cmd 出参：已建链、已装好数据的命令（须提交或 release）

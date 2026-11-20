@@ -47,6 +47,7 @@
 #include "fc_random_engine.h"
 #include "log.h"
 #include "ssd_compiler.h"
+#include "stats.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -92,53 +93,88 @@ static fc_cmd_status_s g_fc_cq_storage[FC_CQ_DEPTH];
 // 返回段由引擎经 FMC 写回，避免 CPU 缓存与总线视图不一致。
 static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] NONCACHEABLE_BUFFER;
 
-/* ── 排障计数（仅 debug 档）──
- * 声明、读写接口与条件编译集中在这里；调用点不再带 #if。
- * release 档的空函数在 -O2 下会被内联掉，零代码。 */
-#ifndef NDEBUG
-static DWORD s_fill_calls;
-static DWORD s_fill_pops;
+/* ── 统计（docs/design/common/statistics_design.md）──
+ * 值在本文件（模块自持），名字表 + stats_register 交给 CLI 打印。
+ * fc_debug_state_s 的 fill_calls/fill_pops 与这里共用同一份存储。
+ * 统计专用对象/表在 SSD_STATS_ENABLE=0 时整体不编译；自增点经 STATS_INC 自动消失。 */
+#if SSD_STATS_ENABLE
+typedef struct FC_SUBMIT_STATISTICS_S
+{
+    DWORD ok;
+    DWORD reject_sq_full;
+    DWORD reject_hsq_full;
+    DWORD complete_ok;
+    DWORD complete_err;
+    DWORD cq_full;
+} fc_submit_stats_s;
 
-static void fc_fill_calls_inc(void)
+typedef struct FC_FILL_STATISTICS_S
 {
-    s_fill_calls++;
-}
+    DWORD rounds;
+    DWORD pops;
+    DWORD dispatched;
+    DWORD empty;
+    DWORD not_ready;
+    DWORD defer_chain_locked;
+} fc_fill_stats_s;
 
-static void fc_fill_pops_inc(void)
+typedef struct FC_POLL_STATISTICS_S
 {
-    s_fill_pops++;
-}
+    DWORD rounds;
+    DWORD completions;
+} fc_poll_stats_s;
 
-static void fc_fill_counters_read(DWORD *calls, DWORD *pops)
-{
-    *calls = s_fill_calls;
-    *pops  = s_fill_pops;
-}
+static fc_submit_stats_s s_stats_fc_submit;
+static fc_fill_stats_s   s_stats_fc_fill;
+static fc_poll_stats_s   s_stats_fc_poll;
 
-static void fc_fill_counters_reset(void)
-{
-    s_fill_calls = 0U;
-    s_fill_pops  = 0U;
-}
-#else
-static void fc_fill_calls_inc(void)
-{
-}
+#    define FC_SUBMIT_STATS_LIST(X)                  \
+        X(ok, STATS_U32, STATS_COUNTER)              \
+        X(reject_sq_full, STATS_U32, STATS_COUNTER)  \
+        X(reject_hsq_full, STATS_U32, STATS_COUNTER) \
+        X(complete_ok, STATS_U32, STATS_COUNTER)     \
+        X(complete_err, STATS_U32, STATS_COUNTER)    \
+        X(cq_full, STATS_U32, STATS_COUNTER)
 
-static void fc_fill_pops_inc(void)
-{
-}
+#    define FC_FILL_STATS_LIST(X)               \
+        X(rounds, STATS_U32, STATS_COUNTER)     \
+        X(pops, STATS_U32, STATS_COUNTER)       \
+        X(dispatched, STATS_U32, STATS_COUNTER) \
+        X(empty, STATS_U32, STATS_COUNTER)      \
+        X(not_ready, STATS_U32, STATS_COUNTER)  \
+        X(defer_chain_locked, STATS_U32, STATS_COUNTER)
 
-static void fc_fill_counters_read(DWORD *calls, DWORD *pops)
-{
-    (void)calls;
-    (void)pops;
-}
+#    define FC_POLL_STATS_LIST(X)           \
+        X(rounds, STATS_U32, STATS_COUNTER) \
+        X(completions, STATS_U32, STATS_COUNTER)
 
-static void fc_fill_counters_reset(void)
-{
-}
-#endif
+#    define FC_SUBMIT_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(fc_submit_stats_s, field), width, kind},
+static const stats_name_s s_stats_fc_submit_names[] = {
+    FC_SUBMIT_STATS_LIST(FC_SUBMIT_STATS_NAME)};
+#    undef FC_SUBMIT_STATS_NAME
+#    define FC_SUBMIT_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(fc_submit_stats_s, field, width);
+FC_SUBMIT_STATS_LIST(FC_SUBMIT_STATS_CHECK)
+#    undef FC_SUBMIT_STATS_CHECK
+
+#    define FC_FILL_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(fc_fill_stats_s, field), width, kind},
+static const stats_name_s s_stats_fc_fill_names[] = {
+    FC_FILL_STATS_LIST(FC_FILL_STATS_NAME)};
+#    undef FC_FILL_STATS_NAME
+#    define FC_FILL_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(fc_fill_stats_s, field, width);
+FC_FILL_STATS_LIST(FC_FILL_STATS_CHECK)
+#    undef FC_FILL_STATS_CHECK
+
+#    define FC_POLL_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(fc_poll_stats_s, field), width, kind},
+static const stats_name_s s_stats_fc_poll_names[] = {
+    FC_POLL_STATS_LIST(FC_POLL_STATS_NAME)};
+#    undef FC_POLL_STATS_NAME
+#    define FC_POLL_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(fc_poll_stats_s, field, width);
+FC_POLL_STATS_LIST(FC_POLL_STATS_CHECK)
+#    undef FC_POLL_STATS_CHECK
+#endif /* SSD_STATS_ENABLE */
 
 // 全局单例控制器：定义在 fc.c，fc_pool.c 经 fc_internal.h 的 extern 访问；FTL 不可见
 fc_ctl_s g_fc_controller;
@@ -151,7 +187,7 @@ fc_ctl_s g_fc_controller;
  * @brief 初始化 FC 控制器：清三池/队列/状态位图并挂指针
  *
  * 三池本体是文件作用域 static，地址在固件生命周期内固定；可重复调用以重置
- * （重置 fill 调试计数、池/队列、NAND dispatch 软件状态与引擎 armed 闩锁）。
+ * （重置统计计数、池/队列、NAND dispatch 软件状态与引擎 armed 闩锁）。
  *
  * @note **调用前须确保 FC 已 quiesce**：本函数会清空在途命令/完成并 disarm NAND
  *       引擎；运行中调用会丢失未完成的命令。初始化没有失败路径（CRC 自检失败会
@@ -163,10 +199,14 @@ SSD_CODE_FAST void fc_init(void)
 
     /* ── ① 控制器清零 + 三池/簿记/空闲链表（池本体在 fc_pool.c） ── */
     memset(controller, 0, sizeof(*controller));
-    fc_fill_counters_reset();
+#if SSD_STATS_ENABLE
+    memset(&s_stats_fc_submit, 0, sizeof(s_stats_fc_submit));
+    memset(&s_stats_fc_fill, 0, sizeof(s_stats_fc_fill));
+    memset(&s_stats_fc_poll, 0, sizeof(s_stats_fc_poll));
+#endif
     fc_pool_init(controller);
 
-    /* ── ② 三条环形队列：SQ（普通命令）/ HSQ（高优先，如 read retry）/
+    /* ── ② 三条环形队列：SQ（普通命令）/ HSQ（高优先：read recovery）/
      *    CQ（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
     memset(g_fc_sq_storage, 0, sizeof(g_fc_sq_storage));
     memset(g_fc_hsq_storage, 0, sizeof(g_fc_hsq_storage));
@@ -207,6 +247,13 @@ SSD_CODE_FAST void fc_init(void)
         controller->stripe_parity_for_data[index] = FC_CMD_ID_INVALID;
     }
 #endif /* CONFIG_FC_RAID */
+
+    /* ── ⑥ 统计注册（值在 s_*_stats；CLI `stats` 只读）── */
+#if SSD_STATS_ENABLE
+    (void)stats_register("fc.submit", STATS_INST_NONE, &s_stats_fc_submit, s_stats_fc_submit_names, STATS_ENTRY_COUNT(s_stats_fc_submit_names));
+    (void)stats_register("fc.fill", STATS_INST_NONE, &s_stats_fc_fill, s_stats_fc_fill_names, STATS_ENTRY_COUNT(s_stats_fc_fill_names));
+    (void)stats_register("fc.poll", STATS_INST_NONE, &s_stats_fc_poll, s_stats_fc_poll_names, STATS_ENTRY_COUNT(s_stats_fc_poll_names));
+#endif
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -232,9 +279,18 @@ static fc_status_e fc_sched_submit(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
     // 只负责 push + 状态转移。
     if (fc_submission_queue_push(queue, cmd_id) != FC_STATUS_OK)
     {
+        if (cmd->high_priority != 0U)
+        {
+            STATS_INC(s_stats_fc_submit.reject_hsq_full);
+        }
+        else
+        {
+            STATS_INC(s_stats_fc_submit.reject_sq_full);
+        }
         return FC_STATUS_QUEUE_FULL;
     }
 
+    STATS_INC(s_stats_fc_submit.ok);
     fc_pool_command_state_set(controller, cmd_id, FC_COMMAND_STATE_QUEUED);
     return FC_STATUS_OK;
 }
@@ -461,6 +517,14 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
 
         if (complete_status == FC_STATUS_OK)
         {
+            if (fc_cmd_status_has_error(cq_entry.status) != false)
+            {
+                STATS_INC(s_stats_fc_submit.complete_err);
+            }
+            else
+            {
+                STATS_INC(s_stats_fc_submit.complete_ok);
+            }
             fc_pool_command_state_set(controller, nand_completion->cmd_id, FC_COMMAND_STATE_COMPLETED);
             return FC_STATUS_OK;
         }
@@ -469,6 +533,7 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
             // CQ 满：完成项没有进 CQ，FTL 永远不会收到这条命令；这不是“防泄漏”，
             // 而是 fatal 的完成丢失。保留 COMPLETED 只是避免 FC 侧命令槽永久 ACTIVE，
             // 上层必须把本轮 IO_ERROR 当系统故障处理。
+            STATS_INC(s_stats_fc_submit.cq_full);
             LOGE(LOG_TAG_RES "CQ full: completion lost for cmd=%hu\r\n", nand_completion->cmd_id);
             controller->fatal = true;
             fc_pool_command_state_set(controller, nand_completion->cmd_id, FC_COMMAND_STATE_COMPLETED);
@@ -1334,7 +1399,7 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
         BYTE             j;
 
         (void)fc_submission_queue_pop(queue, &id);
-        fc_fill_pops_inc();
+        STATS_INC(s_stats_fc_fill.pops);
         cmd = fc_command_id_to_command(id);
 
         ch  = cmd->ch;
@@ -1361,6 +1426,7 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
 
         if ((chain_owner != FC_CHAIN_OWNER_NONE) && (chain_owner != owner))
         {
+            STATS_INC(s_stats_fc_fill.defer_chain_locked);
             (void)fc_submission_queue_push(queue, id);
             continue;
         }
@@ -1379,7 +1445,7 @@ static fc_status_e fc_poll_fill_queue(fc_ctl_s *controller, fc_sub_queue_s *queu
         for (j = 1U; j < need; j++)
         {
             (void)fc_submission_queue_pop(queue, &chain.ids[j]);
-            fc_fill_pops_inc();
+            STATS_INC(s_stats_fc_fill.pops);
         }
         k = (k + need - 1U); /* 跳过已取出的链成员 */
 
@@ -1442,7 +1508,7 @@ static fc_status_e fc_poll_fill(fc_ctl_s *controller)
     BOOL        dispatched = false;
 
     memset(suspended, 0, sizeof(suspended));
-    fc_fill_calls_inc();
+    STATS_INC(s_stats_fc_fill.rounds);
 
     /* ── HSQ 优先：先扫 HSQ，再扫 SQ；同一套扫描逻辑，共享同一张 suspended 表 ── */
     if (fc_poll_fill_queue(controller, scheduler->hsq, FC_CHAIN_OWNER_HSQ, suspended, &dispatched) != FC_STATUS_OK)
@@ -1456,9 +1522,21 @@ static fc_status_e fc_poll_fill(fc_ctl_s *controller)
 
     if (dispatched == true)
     {
+        STATS_INC(s_stats_fc_fill.dispatched);
         return FC_STATUS_OK;
     }
-    return ((scheduler->sq->count == 0U) && (scheduler->hsq->count == 0U)) ? FC_STATUS_QUEUE_EMPTY : FC_STATUS_NOT_READY;
+
+    const fc_status_e result = ((scheduler->sq->count == 0U) && (scheduler->hsq->count == 0U)) ? FC_STATUS_QUEUE_EMPTY : FC_STATUS_NOT_READY;
+
+    if (result == FC_STATUS_QUEUE_EMPTY)
+    {
+        STATS_INC(s_stats_fc_fill.empty);
+    }
+    else
+    {
+        STATS_INC(s_stats_fc_fill.not_ready);
+    }
+    return result;
 }
 
 /* ── NAND 完成回调 ──
@@ -1513,6 +1591,8 @@ fc_status_e fc_service(void)
 {
     fc_ctl_s *controller = &g_fc_controller;
 
+    STATS_INC(s_stats_fc_poll.rounds);
+
     // sticky fatal：CQ 满/时间源缺失后不再继续提交，直到 fc_init 清零。
     if (controller->fatal == true)
     {
@@ -1520,6 +1600,8 @@ fc_status_e fc_service(void)
     }
 
     const DWORD delivered = fc_nand_dispatch_poll(fc_nand_completion_sink, controller);
+
+    STATS_ADD(s_stats_fc_poll.completions, delivered);
 
     if (fc_nand_dispatch_fatal() == true)
     {
@@ -1547,6 +1629,21 @@ fc_status_e fc_service(void)
     // “本轮已有完成”的成功语义。
     return (result == FC_STATUS_IO_ERROR) ? FC_STATUS_IO_ERROR : FC_STATUS_OK;
 }
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief FC 侧进展签名（主循环空转判据）
+ *
+ * = 已消费完成数 + 有派发的填充轮数。只用于「两次采样是否变化」，
+ * u32 回绕不影响相等比较。
+ *
+ * @return 进展签名
+ */
+DWORD fc_stats_progress(void)
+{
+    return s_stats_fc_poll.completions + s_stats_fc_fill.dispatched;
+}
+#endif
 
 /* ══════════════════════════════════════════════════════════
  * 7. CQ 出口
@@ -1791,7 +1888,10 @@ void fc_debug_state_get(fc_debug_state_s *out)
     out->chain_owner = (BYTE)g_fc_controller.scheduler.chain_owner[0][0][0];
     out->lun_used    = fc_nand_dispatch_lun_used(0U, 0U, 0U);
     out->lun_phase   = fc_nand_dispatch_lun_phase(0U, 0U, 0U);
-    fc_fill_counters_read(&out->fill_calls, &out->fill_pops);
+#if SSD_STATS_ENABLE
+    out->fill_calls = s_stats_fc_fill.rounds;
+    out->fill_pops  = s_stats_fc_fill.pops;
+#endif
     out->sched_sq_count = (g_fc_controller.scheduler.sq != NULL) ? g_fc_controller.scheduler.sq->count : 0U;
     out->sched_sq_bound = ((g_fc_controller.scheduler.sq == &g_fc_controller.sq) && (g_fc_controller.scheduler.hsq == &g_fc_controller.hsq)) ? 1U : 0U;
 

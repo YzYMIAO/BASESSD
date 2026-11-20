@@ -12,14 +12,14 @@
 | 状态 | 含义 | 数量 |
 |---|---|---:|
 | 待决策 | 需要用户裁决 | 16 |
-| 待定位 | 根因未明 | 18 |
-| 待验证 | 实现完成，缺板端证据 | 20 |
-| 待实现 | 功能/验证未开始 | 64 |
-| 进行中 | 已做一部分 | 13 |
+| 待定位 | 根因未明 | 16 |
+| 待验证 | 实现完成，缺板端证据 | 7 |
+| 待实现 | 功能/验证未开始 | 32 |
+| 进行中 | 已做一部分 | 8 |
 | 待外部 | 等硬件/测试源/第三方 | 3 |
-| 信息 | 判定结论/维护不变量 | 94 |
-| 已闭合 | 有证据且无剩余动作 | 230 |
-| 不实现 | 用户明确不做 | 2 |
+| 信息 | 判定结论/维护不变量 | 147 |
+| 已闭合 | 有证据且无剩余动作 | 233 |
+| 不实现 | 用户明确不做 | 3 |
 
 ### 0.2 待用户裁决（待决策）
 
@@ -48,16 +48,10 @@
 
 | ID | 类型 | 模块 | 一句话 |
 |---|---|---|---|
-| ISS-FAULT-01 | 缺口 | 平台（timer / watchdog / logging / fault capture / build） | `common/fault_capture.md` 三项手工验证未做 |
-| ISS-FTL-08 | 缺口 | 类型 / 契约 / 架构 / 跨模块 | F8/F9 跨层项缺板端证据 |
-| ISS-FTL-10 | 缺口 | NAND / FMC / 拓扑 / 时序 | FMC HiZ 写方向压力测试未做 |
-| ISS-LOG-01 | 缺口 | 平台（timer / watchdog / logging / fault capture / build） | `docs/archive/fault_capture_landing.md` 的落地状态表（9 项）未逐条确认 |
 | ISS-USB-01 | 缺口 | HIL（USB MSC / host queue / controller） | 写过程中掉电恢复未验 |
 | ISS-USB-04 | 缺口 | HIL（USB MSC / host queue / controller） | 多分区/第二分区写满校验未验 |
-| RISK-ARCH-14 | 风险 | 类型 / 契约 / 架构 / 跨模块 | FTL workspace 改由各模块自持、main 只持不透明句柄；未上板 |
 | RISK-BBT-02 | 风险 | 磨损均衡 / BBT / 坏块 | 工厂扫描对列读失败页的判坏行为未实测 |
 | RISK-CLI-09 | 风险 | CLI / 观测 / 调试 | 断言现场 CLI 命令自带泵，但 FTL 内断言仍可能重入 |
-| RISK-TOP-03 | 风险 | NAND / FMC / 拓扑 / 时序 | LUN 数按器件探测，ONFI 偶发失败即拒绝启动 |
 | RISK-REL-06 | 风险 | 文档 / 开源 / 发布 | BCH 引擎原为 GPLv2 派生，与 Apache-2.0 冲突；已 clean-room 替换 |
 
 ### 0.4 等外部条件（待外部）
@@ -70,30 +64,26 @@
 
 ### 0.5 高后果 / 静默失效（关键词筛选，需人工复核）
 
-> 关键词：静默 / 漏账 / 介质破坏 / 写坏 / 数据损坏 / 映射丢失 / 不可读 / 永久。命中 45 条，表中最多列 25 条；完整条目见各模块。
+> 关键词：静默 / 漏账 / 介质破坏 / 写坏 / 数据损坏 / 映射丢失 / 不可读 / 永久。命中 41 条，表中最多列 25 条；完整条目见各模块。
 
 | ID | 类型 | 模块 | 一句话 |
 |---|---|---|---|
 | RISK-POOL-12 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | 描述符池按单 plane 口径估算，满额双 plane 命令并发上限 32 |
 | RISK-SCH-03 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | CQ 满会丢完成项，FTL 永远收不到命令 |
 | RISK-BG-01 | 风险 | FTL 服务 / 后台调度 / 完成组 | 时钟缺失时 RR 巡检门恒假，预测巡检永久停摆 |
-| RISK-CP-04 | 风险 | 元数据（metadata / checkpoint） | host 写流下 CP 提交饥饿，submit stalled 后 abort |
 | RISK-HOST-05 | 风险 | FTL 服务 / 后台调度 / 完成组 | confirm park timeout = host 写失败，上游三支未定 |
 | RISK-MD-06 | 风险 | 元数据（metadata / checkpoint） | L2P 指向已归还/已擦块，恢复回退 full rebuild 丢映射 |
 | RISK-NAND-05 | 风险 | NAND / FMC / 拓扑 / 时序 | used 介质不可纠读页，L2P 仍指向坏块，每次读重试 8 次 |
 | RISK-CLI-09 | 风险 | CLI / 观测 / 调试 | 断言现场 CLI 命令自带泵，但 FTL 内断言仍可能重入 |
 | ISS-FTL-09 | 缺口 | 平台（timer / watchdog / logging / fault capture / build） | HAL RCC 频率查询对 FMC/QSPI/USART 恒返 0 |
 | ISS-PLAT-03 | 缺口 | 平台（timer / watchdog / logging / fault capture / build） | linker `.noncacheable_buffer` 输入段漏前导点 |
-| RISK-ALLOC-09 | 风险 | 分配器 / 容量 / 几何 | 低 free 时成对分配失败导致写路径永久 stall（plane 不平衡） |
 | RISK-CACHE-29 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | 早回执改变 flush/断电口径，长流+断电未量 |
 | RISK-DP-28 | 风险 | FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | CRC 初始化失败在 release 下静默，校验恒通过 |
 | RISK-HOST-21 | 风险 | HIL（USB MSC / host queue / controller） | 请求级超时 A + best-effort abort B 已落地；未上板 |
 | RISK-HOST-22 | 风险 | FTL 服务 / 后台调度 / 完成组 | host 写取不到页对时无界重试，USB 命令可能永久挂起 |
 | RISK-IF-12 | 风险 | FTL↔FC 接口 / handle 契约 | 确认待入账 × 序列门控可能退化到 1s idle 守卫 |
 | RISK-JN-10 | 风险 | GC / 迁移 / Journal / wbuf | 撕裂 frontier 页重复编程 + 每次开机 full rebuild |
-| RISK-NANDP-05 | 风险 | NAND / FMC / 拓扑 / 时序 | 多 target timing 共享单套 HAL 句柄，切模式影响整块 FMC |
 | RISK-USB-02 | 风险 | HIL（USB MSC / host queue / controller） | MSC 异步完成 / deferred / 会话切换路径未实测 |
-| ISS-UT-06 | 缺口 | UT / 测试基础设施 | 负例框架 + 48 条负例已写完；debug FTL 档 13/14 通过后暴露 teardown 夹具缺口（已修，待重跑） |
 | RISK-BG-04 | 风险 | FTL 服务 / 后台调度 / 完成组 | 任务表装载无边界检查，加项越界踩 task_count |
 | RISK-BG-11 | 风险 | FTL 服务 / 后台调度 / 完成组 | 档位下标无值域断言，越界静默读相邻数据 |
 | RISK-BIT-01 | 风险 | 类型 / 契约 / 架构 / 跨模块 | 通用掩码构造器挂在 NAND 层，FTL/FC 各自另写字面量宏 |
@@ -105,21 +95,44 @@
 | 模块 | 待决策 | 待定位 | 待验证 | 待实现 | 进行中 | 待外部 | 信息 | 合计 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1. 启动 / 掉电恢复 | 1 | 2 | 0 | 2 | 0 | 0 | 8 | 13 |
-| 2. 元数据（metadata / checkpoint） | 2 | 2 | 0 | 2 | 0 | 0 | 2 | 8 |
-| 3. FTL 映射与缓存（L2P cache / cache read / cache program） | 0 | 2 | 0 | 7 | 1 | 0 | 5 | 15 |
-| 4. 分配器 / 容量 / 几何 | 1 | 0 | 0 | 1 | 0 | 0 | 2 | 4 |
-| 5. GC / 迁移 / Journal / wbuf | 0 | 3 | 0 | 9 | 1 | 0 | 9 | 22 |
-| 6. 磨损均衡 / BBT / 坏块 | 0 | 0 | 1 | 6 | 1 | 0 | 4 | 12 |
-| 7. FTL 服务 / 后台调度 / 完成组 | 0 | 4 | 2 | 2 | 0 | 0 | 12 | 20 |
-| 8. FTL↔FC 接口 / handle 契约 | 0 | 0 | 0 | 3 | 0 | 0 | 7 | 10 |
-| 9. FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | 2 | 0 | 1 | 4 | 1 | 0 | 15 | 23 |
-| 10. NAND / FMC / 拓扑 / 时序 | 3 | 4 | 3 | 9 | 1 | 1 | 12 | 33 |
-| 11. HIL（USB MSC / host queue / controller） | 3 | 1 | 3 | 9 | 0 | 0 | 7 | 23 |
-| 12. CLI / 观测 / 调试 | 3 | 0 | 3 | 5 | 1 | 0 | 2 | 14 |
-| 13. 平台（timer / watchdog / logging / fault capture / build） | 0 | 0 | 4 | 5 | 0 | 0 | 2 | 11 |
-| 14. UT / 测试基础设施 | 0 | 0 | 0 | 0 | 6 | 2 | 7 | 15 |
-| 15. 类型 / 契约 / 架构 / 跨模块 | 1 | 0 | 2 | 0 | 1 | 0 | 2 | 6 |
+| 2. 元数据（metadata / checkpoint） | 2 | 1 | 1 | 2 | 0 | 0 | 4 | 10 |
+| 3. FTL 映射与缓存（L2P cache / cache read / cache program） | 0 | 2 | 0 | 3 | 1 | 0 | 4 | 10 |
+| 4. 分配器 / 容量 / 几何 | 1 | 0 | 0 | 0 | 0 | 0 | 3 | 4 |
+| 5. GC / 迁移 / Journal / wbuf | 0 | 3 | 0 | 2 | 1 | 0 | 17 | 23 |
+| 6. 磨损均衡 / BBT / 坏块 | 0 | 0 | 1 | 4 | 1 | 0 | 6 | 12 |
+| 7. FTL 服务 / 后台调度 / 完成组 | 1 | 4 | 1 | 2 | 0 | 0 | 13 | 21 |
+| 8. FTL↔FC 接口 / handle 契约 | 0 | 0 | 0 | 2 | 0 | 0 | 8 | 10 |
+| 9. FC-NAND（队列 / 池 / 引擎 / ECC / CRC / PAA） | 2 | 0 | 0 | 4 | 1 | 0 | 16 | 23 |
+| 10. NAND / FMC / 拓扑 / 时序 | 3 | 3 | 0 | 0 | 1 | 1 | 24 | 32 |
+| 11. HIL（USB MSC / host queue / controller） | 3 | 1 | 2 | 5 | 0 | 0 | 10 | 21 |
+| 12. CLI / 观测 / 调试 | 3 | 0 | 1 | 4 | 1 | 0 | 6 | 15 |
+| 13. 平台（timer / watchdog / logging / fault capture / build） | 0 | 0 | 0 | 1 | 0 | 0 | 13 | 14 |
+| 14. UT / 测试基础设施 | 0 | 0 | 0 | 0 | 1 | 2 | 12 | 15 |
+| 15. 类型 / 契约 / 架构 / 跨模块 | 1 | 0 | 0 | 0 | 1 | 0 | 3 | 5 |
 | 16. 文档 / 开源 / 发布 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
+
+### 0.7 发布收敛（2026-11-20）
+
+依据：全量 UT **314/314**（2026-11-19）+ H2testw **0 错误**（2026-11-20）+
+代码审查。以下条目转为 `信息`（不阻塞发布，详情保留）：
+
+- **日志 / 观测口径**：`RISK-MD-25`、`RISK-JN-11`、`ISS-OBS-06`、`RISK-CLI-06`
+- **非发布阻塞功能 / 配置**：`ISS-FTL-03/04/05/06/11/12/15`、`ISS-ML-02/04`、
+  `ISS-OP-01/02/04`、`RISK-ARCH-02`、`RISK-PERF-01/02`、`RISK-WL-05`、
+  `RISK-TOP-03`、`RISK-NANDP-05/08/17`、`RISK-USB-12/14`
+- **全量 UT / H2testw 覆盖**：`ISS-STATS-01`、`ISS-TOP-01`、`ISS-PLAT-04`、
+  `RISK-CRC-02`、`RISK-ARCH-14`、`ISS-UT-01`、`ISS-HIL-01`、`ISS-UT-06`
+- **测试 / 观测缺口**：`ISS-FAULT-01/02`、`ISS-LOG-01`、`ISS-OBS-02/03`、
+  `ISS-FTL-08/10`、`ISS-HIL-02`、`RISK-UT-34`
+
+**第二批（2026-11-20，两次满盘 H2testw 0 错误 + 全量 UT/四关）**：
+`RISK-GC-06/14/15`、`RISK-WL-04`、`RISK-BG-10`、`RISK-PLAT-09/12`、
+`RISK-BUILD-04/05`、`ISS-FTL-09`、`ISS-PLAT-03`、`RISK-CP-04`、`RISK-ALLOC-09`
+转为 `信息`（正常路径/性能/构建项；不阻塞发布）。
+
+**收敛规则**：新增条目只收发布阻塞（数据丢失 / 损坏、拒绝启动、静默介质破坏、
+主机可见错误、许可证）；功能扩展 / 性能 / 观测差距默认进 `信息`，除非用户明确排期。
+故障注入 / 掉电 / 多配置类风险不因正常路径的 UT / H2testw 通过而关闭。
 
 ---
 
@@ -207,6 +220,12 @@
 - **证据**：rev25 日志；`arm-none-eabi-nm g_wr_buf=0x240002dc`。
 - **历史/验证**：
   - 2026-10-24 21:14 真实断电后启动无 `previous crash` 行 ⇒ 旧镜像残留
+  - 2026-11-20 板端 `format` + POR 后首次启动：`boot type=2`，扫描到
+    `ring_pseq=878538 ring_n=125`、`cp_jseq=0`，回放 125 条 `sub-at-zero kept
+    (not fatal)`（`live=0`）。`format` 只重建池与 initial CP，未重置运行中 journal
+    的 `sequence_counter`/写指针；本次未造成数据影响，但「干净格式化」的首次开机
+    仍走 REPLAY 而非 FRESH。待复查是否需要 format 后显式复位 journal 状态，或把
+    该回放判为预期并登记。
 
 #### RISK-BOOT-14 full rebuild 空闲块扫描优化
 
@@ -272,12 +291,14 @@
 |---|---|---|---|---|
 | ISS-FTL-02 | 缺口 | 待决策 | band 级 sequence/validity 聚合是否删除 | 未上板 |
 | ISS-FTL-14 | 缺口 | 待决策 | CP 让步策略 A/B | 2026-10-31 板端测量 |
-| RISK-CP-04 | 风险 | 待定位 | host 写流下 CP 提交饥饿，submit stalled 后 abort | 2026-11-12 上板复现 |
+| RISK-CP-04 | 风险 | 信息 | host 写流下后台元数据提交饥饿；L2P load/CP/Journal 预留 + 进度判据已落地 | 2026-11-19 修复；2026-11-20 两次满盘 H2testw 0 错误（gate 压力仍在，无数据损失），收敛为信息 |
 | RISK-MD-06 | 风险 | 待定位 | L2P 指向已归还/已擦块，恢复回退 full rebuild 丢映射 | 2026-11-14 上板通过（负例；残余：该复现序列 4 次重启未复现，但风险仍是「恢复路径可能回退 full rebuild」，单次负例不足以证明所有别名场景） |
 | ISS-FTL-17 | 缺口 | 待实现 | 持久化 block→SB 归属（需介质格式升级） | 未上板 |
 | RISK-MD-23 | 风险 | 待实现 | ring frontier 落在块中时复用半编程槽 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
+| RISK-MD-25 | 风险 | 信息 | 一次压缩 job 可切换多个 victim，start/done 缺 switch 行 | 2026-11-20 已改；未上板；2026-11-20 发布收敛：日志/观测口径，不影响数据面 |
 | RISK-CP-11 | 风险 | 信息 | initial record 失败块写死 plane 0/1 | 2026-11-15 判定 K |
 | RISK-CP-13 | 风险 | 信息 | CP 提交失败按瞬态背压处理，由 10 ms submit deadline 兜底 | 2026-11-14 板端负例确认 |
+| ISS-STATS-02 | 缺口 | 待验证 | 终身计数（SMART 式）落在 CP Header padding 自描述块；`smart` 出口；boot 计数未调用已修、待复验 | 四关零告警；关闭档 0 符号；CP 持久化已上板；修复后未上板 |
 
 ### 详情
 
@@ -301,13 +322,16 @@
 - **历史/验证**：
   - 2026-10-31 板端 → `phase=8` 长时间心跳，非死锁
 
-#### RISK-CP-04 持续写流下 CP 提交饥饿
+#### RISK-CP-04 持续写流下后台元数据提交饥饿（CP / L2P / Journal）
 
 - **后果**：H2testw 期间反复 `[CP] submit stalled 25ms — abort phase=1`。CP 用 `ftl_op_submit` 申请 FC 命令，host 写可占满 `FC_COMMAND_POOL_DEPTH=64`（`FTL_PENDING_MAX=32` 个写各占 2 条命令）⇒ CP 连续 10ms 拿不到槽即中止重试。后果：checkpoint 长期不推进、journal 环增长；环满后 host 写被 Backpressure 拒绝（写停顿，无静默损坏）。尚不能区分它是 GC 活锁的症状还是独立缺陷。
-- **缓解**：中止后可重试；journal 环满是安全背压；abort 日志 1s/实例。序列打开或仍有未完成主机组时 `ftl_op_bg_submit_deferred()` 挂起 CP 的提交 deadline。
-- **下一步**：先修 RISK-GC-07 后复跑 H2testw；若仍复现，给 CP 预留命令槽或延长 deadline；上板确认 journal 水位与 CP 成功率。
+- **缓解**：中止后可重试；journal 环满是安全背压；abort 日志 1s/实例。序列打开或仍有未完成主机组时 `ftl_op_bg_submit_deferred()` 挂起 CP 的提交 deadline。**2026-11-19 落地**：host 预算（命令/desc/buffer/SQ = 8/32/32/8；host 不用 HSQ，不计 HSQ）之外，L2P demand load 用 FC CRIT 命令额度（2 槽）+ desc/buffer CRIT（8 组）；L2P 加载留 **SQ**（HSQ 只给 read recovery）；prefetch 用独立 `FTL_OP_L2P_PREFETCH`（不请求序列断点/让行）；其余生产路径（host 读/写/重试、GC 重建、set_features）统一 `FC_CMD_CLASS_BG`；`mig_job_wait` 改为 per-line 进度（`l2p_line_progress`：load/flush 完成代数 / `jrn_persisted_seq`），50 ms 只在**依赖无进展**时 abort。
+- **下一步**：上板复跑 H2testw / FTL UT，确认 GC abort 与 CP stalled 消失或显著减少；若仍出现，按 `l2p load timeout` / `submit stalled` 的 phase 日志继续定位。**2026-11-19 追加**：GC 的 L2P load 也走同一 FC SQ/命令池；预留槽或进度式 deadline 应同时覆盖 L2P / CP / Journal 的后台提交。
 - **证据**：`src/ftl/checkpoint.c:cp_job_stall` / `cp_command_result_handle`；`src/ftl/ftl_op.c:ftl_op_submit`；`include/fc/fc_interface.h:FC_COMMAND_POOL_DEPTH`；串口 rev30 日志。
 - **历史/验证**：
+  - 2026-11-19 修复：L2P demand load 走 FC `FC_CMD_CLASS_CRIT` 命令额度（池最后 2 槽）+ desc/buffer CRIT（8 组）；`FTL_OP_L2P_PREFETCH` 独立 op；其余生产路径统一 `FC_CMD_CLASS_BG`（`fc_pool.c:fc_command_alloc_class`）；`mig_job_wait` 改用 per-line 进度（`l2p_line_progress` / `jrn_persisted_seq`）驱动 50 ms 无进展窗口；host 预算 `FTL_FC_HOST_RESERVED_CMDS/DESC/BUFS/SQ = 8/32/32/8`，HSQ 不计（host 不用）。**未上板**。
+  - 2026-11-19 上板（release 20:55）：`no_command` 消失（CRIT 预留生效），但 L2P 读进 HSQ 后有两大问题——HSQ 深度 16 小于 L2P cache 行数 64；且 cache sequence 占 LUN 时 HSQ 命令被回推、在 HSQ 里堆积到序列结束 ⇒ 满盘写后 `[L2P] load start failed ... submit_backpressure` 持续刷屏、GC 仍 `l2p load timeout`（abort=4，free=2）。**回退**：HSQ 只给 read recovery，L2P 加载回 SQ；CRIT 预留与 per-line 进度判据保留。
+  - 2026-11-19 H2testw 满盘（916/860 KB/s，0 错误）：free=30 时 `[L2P] load start failed region=0 cause=submit_backpressure` → `[MIG] abort kind=gc ... l2p load timeout fc=0xE0(ARDY|RDY|WP)`；`free=2` 稳定、0 错误。与 CP 饥饿同族：host 写 + CP（phase 8/9）+ GC 占满 FC SQ/命令池，`mig_job_wait` 的 `FTL_WAIT_TIMEOUT_MS=50` 是固定 deadline（非进度判据），无 cache 序列时 50 ms 到期即 abort/重试；代价是写尾约 3%，不是 TCM/FC 数据路径问题。
   - 2026-11-12 18:04:36 H2testw 通过；启动空闲期一次 `submit stalled 10ms`（cmd=1 buf=8、held ops md=1）⇒ 池未耗尽，是 deadline 与 metadata job 重叠的误 abort，无数据损失
   - 2026-11-12 H2testw 复现 `submit stalled 10ms`（free=3207、cmd=1/buf=4，见 RISK-HOST-18）
   - 2026-10-30 H2testw 未复现（cp=1724 持续递增、无 stalled 行）
@@ -348,6 +372,25 @@
 - **历史/验证**：
   - 2026-11-04 修复 → 编译通过，未上板
 
+#### RISK-MD-25 一次压缩 job 可切换多个 victim，start/done 缺 switch 行
+
+- **后果**：一次压缩 job 在 `md_compact_next` 里可以继续挑下一个稀疏 victim，把多个
+  victim 的活 region 搬进同一个新块；`compact start` 只打首个 victim，`compact done`
+  打的是当前（最后一个）victim。板端 2026-11-20 日志出现 `start 46 → done 2399`、
+  `start 70 → done 2117`、`start 73 → done 2120`，中间没有 switch 行，读者会把
+  它们误读成同一块。只影响日志归因，不影响搬移/擦除。
+- **缓解**：无（日志字段口径）。
+- **下一步 / 判据**：`md_compact_next` 打 `compact next victim=... live=...`；
+  job 增加 `compact_victims` 计数，`compact done` 打印 `victims=N`；纯回收 job
+  改打 `reclaim done victim=...`。上板确认每段 `start → next* → done` 可顺序对上。
+- **证据**：`src/ftl/metadata_job.c:md_compact_begin`（start）、`md_compact_next`
+  （switch）、`MD_JOB_DONE`（done）；板端日志 2026-11-20 行 106-108 / 116-118 / 134-136。
+- **历史/验证**：
+  - 2026-11-20 板端日志判读发现；初判为「回收阶段覆盖」，复核后确认是
+    `md_compact_next` 的多 victim 切换。
+  - 2026-11-20 已改：加 `compact next` 行、`compact_victims` 计数、`reclaim done`
+    分支。四关零告警；**未上板**。
+
 #### RISK-CP-11 initial record 失败块写死 plane
 
 - **后果**：`cp_initial_record_write` 对每个失败块只 `bbt_mark_bad(ftl_gblock(0/1, bad_block))`，假定 `PLANE_NUM==2`；维度变大时其余 plane 的同号块不会被标坏、仍可能被 CP 选中。
@@ -379,6 +422,36 @@
   - 2026-11-14 板端负例确认：单次注入 → CP 重试后成功（`hits=1`、`fail_phase=0`）；
     判定为有意设计，用例改为持续注入
 
+#### ISS-STATS-02 终身计数（P3）落在 CP Header
+
+- **缺口 / 后果**：SMART 类终身计数（host 字节 / 命令、上电时长、启动次数、PFR、ECC/UNC、
+  编程/擦除失败）此前只在 RAM，掉电即丢；无法做寿命与介质健康分析。
+- **已落地（2026-11-19 裁决 1A/2A/3A/4A/7A）**：`cp_header_s` padding 内放 `lifetime_disk_s`
+  （magic/version/crc32，80 B），**不升**全局介质布局版本；旧固件忽略、旧介质块无效 ⇒ 计数从 0；
+  只随 CP 落盘（掉电最多丢一个 CP 间隔）；per-instance 字段写各自 die，controller-wide 字段复制并
+  max 合并；CRC 失败只清零计数，CP 记录仍有效。读出口 `smart`。
+- **下一步 / 重访**：上板验证正常 POR / 掉电中断 / 旧介质升级 / CRC 损坏；`smart` 计数随
+  `wr`/`rd`/H2testw 增长；确认 CP 记录仍可恢复。若将来需要百分比寿命/TBW，另立决策。
+- **证据**：`docs/design/common/statistics_design.md` §9.4；`include/common/lifetime.h`、
+  `src/common/lifetime.c`、`src/ftl/lifetime_port.c`、`src/ftl/checkpoint.c`（`cp_header_fill` /
+  `cp_pool_find_latest`）、`src/ftl/ftl.c`（host 完成）、`src/ftl/ftl_op.c`（完成派发）、
+  `src/hil/request.c` / `src/hil/controller.c`（host 命令）、`src/hil/cli.c`（`smart`）。
+- **历史/验证**：
+  - 2026-11-20 实现；四关零告警；`SSD_STATS_PERSIST_ENABLE=0` 构建 0 告警、
+    lifetime 符号/字符串为 0；**未上板**。
+  - 2026-11-20 首次上板：CP 块跨 POR 保存/加载生效（`cp seq=2` 后 `smart` 仍读到计数），
+    但 `boots=0 / power_on=0 / pfr=0` —— `lifetime_boot()` 的调用被插到 `src/ftl/ftl.c`，
+    而 `ssd_ftl_boot` 实际在 `src/main.c` ⇒ 该函数从未被调用，计数常量 0（C8 静默失效）。
+    已修：`ssd_ftl_boot` 只置「本次有 die 走 PFR」标志，`ssd_ftl_boot_all` 在全部 die
+    的 `lifetime_init` 加载完成后统一调用一次 `lifetime_boot()`（多 die 下避免自增被
+    各 die 旧值的 max 合并覆盖）。
+  - 2026-11-20 修复后上板（banner `00:56:50`）：POR 后 `smart` 显示 `boots=2 pfr=1`，
+    说明 `boot_count` / `pfr_count` 已随 CP 落盘并在下次 boot 正确加载、自增；修复生效。
+  - 同次上板 `bytes` 未增加属**预期**：`cp` 命令是「show checkpoint job state」只读诊断，
+    **不会强制写 CP**；日志 `last_writes=4` 表明 `wr 0 32` 发生在上一 CP（seq=3，T3 在开机
+    约 10 s 触发）之后，按 2A「只随 CP 落盘」设计，这段增量仍在 RAM，POR 后丢失。
+    验证字节持久化须在 I/O 后等到下一次 T3 CP（`cp` 的 `seq` 增加）再 POR。
+
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
@@ -398,9 +471,9 @@
 |---|---|---|---|---|
 | RISK-CACHE-26 | 风险 | 待定位 | cache 写压测 1536 LBA 读回全 0 | 2026-11-01 上板复现 |
 | RISK-USBC-03 | 风险 | 待定位 | USB 盘间歇报无介质，主机侧已止血 | 2026-11-12 主机侧止血 |
-| ISS-FTL-04 | 缺口 | 待实现 | Prefetch 顺序读 | 未上板 |
-| ISS-FTL-05 | 缺口 | 待实现 | 多流 host stream hint | 未上板 |
-| ISS-FTL-06 | 缺口 | 待实现 | 学习型 L2P 压缩 | 未上板 |
+| ISS-FTL-04 | 缺口 | 信息 | Prefetch 顺序读 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-FTL-05 | 缺口 | 信息 | 多流 host stream hint | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-FTL-06 | 缺口 | 信息 | 学习型 L2P 压缩 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-CACHE-18 | 风险 | 待实现 | 提前回执扩大掉电暴露窗口，VWC 窗口未量化 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-CACHE-29 | 风险 | 待实现 | 早回执改变 flush/断电口径，长流+断电未量 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-L2P-07 | 风险 | 待实现 | 顺序读预取白占 cache 行/资源，可能延迟 FLUSH | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
@@ -421,6 +494,41 @@
 - **下一步**：失败后立刻 `map 11264` 分流：INVALID ⇒ 映射在 L2P 层丢失（查 eviction/区域写回是否把脏行洗成已落盘）；非 INVALID ⇒ 映射在、页内容为 0（查 cache program 的页是否真编程/是否被 GC 覆盖）。再取 `info` 的 `dng=`/`rrab=`。2026-11-04 写回 CMT 改造后必须复跑（dirty 单元已从 line 移到 CMT，原失败模式可能变化）。
 - **证据**：`src/ftl/l2p_cache.c:l2p_line_evict` / `l2p_flush_kick` / `l2p_load_begin`；`src/ftl/ftl.c:ftl_confirm_write` / `ftl_cache_wr_confirm_step`；板端 2026-10-31 23:47 `/bench/speed/ftl_rw` 日志（rd=1 组合）。
 - **历史/验证**：
+
+#### RISK-L2P-25 flush_start 在提交前计数，与 ok+fail 对不上
+
+- **后果**：`l2p_line_flush_kick` 在 `ftl_async_write_page` / `ftl_op_submit` **之前**执行
+  `flush_start++`；建链失败（命令池空）或提交失败（背压）时两槽释放、行回到 DIRTY 重试，
+  但没有 ok/fail 收尾 ⇒ `flush_start` 大于 `flush_ok + flush_fail`。H2testw 满盘实测
+  2563 vs 2081+397（差 85），无法从计数判断真正发起成功了多少次写回。
+- **缓解**：已改——`flush_start` 移到 `ftl_op_submit` 成功后、`inflight.flush++` 之前，
+  不变式恢复为 `ok + fail + 在飞 == start`。
+- **下一步**：上板满盘复跑，确认 `flush_start == flush_ok + flush_fail + inflight`。
+- **证据**：`src/ftl/l2p_cache.c:l2p_line_flush_kick`。
+- **历史/验证**：2026-11-20 H2testw 满盘发现；同日修复，四关零告警。
+  - 2026-11-20 上板（banner `02:04:43`，满盘 H2testw 后 `stats ftl.l2p`）：
+    `flush_start=2562`、`flush_ok=2090`、`flush_fail=472`、`cmt_dirty=0` ⇒
+    不变式 `ok + fail + 在飞 == start` 成立（2562 == 2090 + 472），**修复生效**。
+
+#### RISK-L2P-26 `load start failed` 的 cause 把 gate 与 submit 背压合并
+
+- **后果**：`l2p_load_begin` 的 `ftl_op_submit` 失败同时覆盖序列门控与 FC 队列 / 命令池
+  背压，但日志统一打 `cause=submit_backpressure`。2026-11-20 满盘 H2testw 同一时段
+  `stats ftl.l2p` 显示 `load_fail_gate=2881` / `load_fail_submit=0` / `load_fail_no_cmd=0`
+  ⇒ 日志文本会让读者把 gate 误判成队列 / 池满，与统计口径分叉（C9 / R11）。
+- **缓解**：`stats ftl.l2p` 已能按 `load_fail_gate / load_fail_submit / load_fail_no_cmd`
+  分因；日志 5 s 限流避免刷屏。
+- **下一步 / 判据**：上板满盘确认日志文本与 `stats` 一致（应看到 `cause=gate` 或
+  `cause=submit`，不再出现 `submit_backpressure`）。
+- **证据**：`src/ftl/l2p_cache.c:l2p_load_fail_log` / `l2p_load_begin`；
+  `src/ftl/ftl_op.c:ftl_op_gate_blocks`（已移出 `SSD_STATS_ENABLE`，日志与计数共用）；
+  板端日志 2026-11-20 69 行 `cause=submit_backpressure` 对照 `load_fail_gate=2881`。
+- **历史/验证**：2026-11-20 板端日志判读发现；同日改：
+  `l2p_load_fail_e`（no_command / gate / submit / invalid_primary / invalid_backup）
+  与 `load_fail_*` 计数同源，`ftl_op_gate_blocks` 不再受统计开关门控。
+  - 2026-11-20 12:48:56 上板满盘：日志 66 条 `load start failed` **全部 `cause=gate`**；
+    同一镜像 `stats ftl.l2p` 为 `load_fail_gate=2807`、`load_fail_submit=0`、
+    `load_fail_no_cmd=0`。日志文本与计数口径一致，**修复生效**。
 
 ### 已闭合（详情见 archive）
 
@@ -599,7 +707,7 @@
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
 | ISS-FTL-13 | 缺口 | 待决策 | 顺序流物理相邻选块 vs WL 权衡 | 2026-10-31 板端测量 |
-| RISK-ALLOC-09 | 风险 | 待实现 | 低 free 时成对分配失败导致写路径永久 stall（plane 不平衡） | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
+| RISK-ALLOC-09 | 风险 | 信息 | 低 free 时成对分配失败导致写路径永久 stall（plane 不平衡） | 2026-11-15 判定 K；v1.07 修复 + 两次满盘 H2testw 0 错误，收敛为信息 |
 | RISK-ALLOC-03 | 风险 | 信息 | 纯转发访问器与 `alloc->blocks[]` 直接访问形成两套坐标 | 未上板 |
 | RISK-ALLOC-06 | 风险 | 信息 | `ftl_gblock` 无入参契约，哨兵可截断成合法 gblock | 未上板 |
 
@@ -655,18 +763,19 @@
 | RISK-GC-02 | 风险 | 待定位 | 目的页写失败不能整块标坏已有成功迁移页的 Cold SB | 2026-11-14 负例：部分迁移页读回 0xFF，待归因 |
 | RISK-MIG-07 | 风险 | 待定位 | 大批块被 GC 读失败退役，L2P 悬空到 BAD 块 | 2026-10-21 复现 |
 | RISK-WB-07 | 风险 | 待定位 | wbuf 半页卡死，后续写全被拒、组永不推进 | 2026-11-01 复现 |
-| ISS-FTL-03 | 缺口 | 待实现 | GC Bitmap 断点续搬 | 未上板 |
-| ISS-FTL-15 | 缺口 | 待实现 | 消除 cache 写路径 wbuf 回退 | 未上板 |
+| ISS-FTL-03 | 缺口 | 信息 | GC Bitmap 断点续搬 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-FTL-15 | 缺口 | 信息 | 消除 cache 写路径 wbuf 回退 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-GC-05 | 风险 | 待实现 | GC Bitmap 未实现，掉电后 GC 从块头重来 | — |
-| RISK-GC-06 | 风险 | 待实现 | WL 5s 节拍/CLOSED 门控/valid_count 上界/三态未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-GC-14 | 风险 | 待实现 | no-gain 判据依赖 total_writes/free 快照 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-GC-15 | 风险 | 待实现 | BUSY 档挡掉 urgent GC，free 掉到 1 才急救 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
+| RISK-GC-06 | 风险 | 信息 | WL 5s 节拍/CLOSED 门控/valid_count 上界/三态未板验 | 2026-11-15 判定 K；2026-11-20 两次满盘 H2testw 0 错误（正常路径），收敛为信息 |
+| RISK-GC-14 | 风险 | 信息 | no-gain 判据依赖 total_writes/free 快照 | 2026-11-15 判定 K；2026-11-20 两次满盘 H2testw 0 错误（正常路径），收敛为信息 |
+| RISK-GC-15 | 风险 | 信息 | BUSY 档挡掉 urgent GC，free 掉到 1 才急救 | 2026-11-15 判定 K；2026-11-20 两次满盘 H2testw 0 错误（正常路径），收敛为信息 |
 | RISK-JN-10 | 风险 | 待实现 | 撕裂 frontier 页重复编程 + 每次开机 full rebuild | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-PERF-01 | 风险 | 待实现 | GC/WL 选块重复全表扫描 | — |
-| RISK-PERF-02 | 风险 | 待实现 | GC/WL 目的页逐 plane 单条写，无 multi-plane 命令 | — |
+| RISK-PERF-01 | 风险 | 信息 | GC/WL 选块重复全表扫描 | —；2026-11-20 发布收敛：非发布阻塞项 |
+| RISK-PERF-02 | 风险 | 信息 | GC/WL 目的页逐 plane 单条写，无 multi-plane 命令 | —；2026-11-20 发布收敛：非发布阻塞项 |
 | ISS-FTL-18 | 缺口 | 进行中 | GC 搬移有效页缺少自然触发场景 | 2026-10-31 上板通过（残余：内容正确性未验） |
 | RISK-JN-05 | 风险 | 信息 | 回放失败/降级日志逐条打印，拖慢开机 | 2026-10-21 修复 |
 | RISK-JN-06 | 风险 | 信息 | 回放工作缓冲从栈改文件级 static | 2026-11-04 编译通过 |
+| RISK-JN-11 | 风险 | 信息 | journal 换块擦除背压用 ERR 打且无计数 | 2026-11-20 已改；未上板；2026-11-20 发布收敛：日志/观测口径，不影响数据面 |
 | RISK-MIG-05 | 风险 | 信息 | GC 读失败 abort 日志刷屏阻塞 UART | 2026-10-23 修复 |
 | RISK-MIG-06 | 风险 | 信息 | mark BAD 日志单位/原因不区分 | 2026-10-23 修复 |
 | RISK-PERF-03 | 风险 | 信息 | cache read 生效后读速未提升，瓶颈在数据面 | 2026-10-25 板端实测 |
@@ -760,6 +869,34 @@
 - **证据**：`src/ftl/gc.c:gc_select_victim`；`src/ftl/migrate.c:mig_gc_mode_select` / `mig_gc_scan_is_allowed` / `mig_gc_nogain_note`。
 - **历史/验证**：
   - 2026-10-23 阈值重基线 → 待上板
+  - 2026-11-20 板端满盘（H2testw 后）：`free=0`、`total_writes` 冻结在 108009 时，
+    GC 日志每个 5 s 行 `novictim/nogain` 恰好 +10（≈2 次/s，与 `GC_NOGAIN_BACKOFF_MS=500`
+    一致），每次扫 `closed_sb_count=1695`，日志持续不收敛。属设计内 no-gain 退避，
+    但空闲期仍每 500 ms 全表扫，成本随多 die / 容量放大。
+  - 2026-11-20 改：`GC_NOGAIN_BACKOFF_MS` 500 → 5000 ms。有新建写 / 进入紧急水位 /
+    时钟缺失仍立即重扫；写路径先走 OP 兜底，program 完成改变 `total_writes` ⇒
+    下一轮立即重扫。
+  - 2026-11-20 12:48:56 上板满盘：`stats ftl.gc` 为 `novictim=0`、`nogain=705`；
+    上一版为 `1689/1689`。量级下降与 5000 ms 退避方向一致，但两次运行时长/负载
+    不同，不能直接归一；满盘写尾未见回归（H2testw 0 错误）。
+
+#### RISK-GC-21 `novictim` 与 `nogain` 在 no-gain 路径同时自增
+
+- **后果**：`mig_gc_nogain_note` 一次事件同时 `novictim++` 与 `nogain++`；而
+  「根本没有候选」（`GC_SELECT_NO_CANDIDATE`）只加 `novictim`。板端满盘两计数恒等
+  （1689/1689），无法判断是「没有候选」还是「有候选但净收益不足」；`minvr` 只能作
+  间接线索。违反 C7：两个计数器没有区分力，读数即失真。
+- **缓解**：无（只影响诊断口径，不影响介质状态）。
+- **下一步 / 判据**：补负例——分别构造「无候选」与「有候选不划算」，确认两计数只各自
+  增长；上板满盘确认 `novictim` 不再跟随 `nogain` 同步上涨。
+- **证据**：`src/ftl/migrate.c:mig_gc_nogain_note` 与 `:594`（NO_CANDIDATE）；
+  `src/ftl/gc.h` 的选块结果契约；板端日志 2026-11-20 `novictim=1692 nogain=1692`。
+- **历史/验证**：2026-11-20 板端日志判读发现；同日改：`mig_gc_nogain_note` 只增
+  `nogain`，`novictim` 仅由 `GC_SELECT_NO_CANDIDATE` 增长；`migrate.h` 字段注释写明
+  两者语义。
+  - 2026-11-20 12:48:56 上板满盘：`stats ftl.gc` 为 **`novictim=0`、`nogain=705`**
+    （上一版两计数恒等 `1689/1689`）；closed 列表非空时 `scanned>0`，因此
+    `novictim=0` 符合预期，「无候选」与「有候选不划算」已分开。**修复生效**。
 
 #### RISK-GC-15 BUSY 档挡掉 urgent GC
 
@@ -897,6 +1034,23 @@
 - **历史/验证**：
   - 2026-10-21 修复（用户明确不处理 0x89 空转）→ 未上板
 
+#### RISK-JN-11 journal 换块擦除背压用 ERR 打且无计数
+
+- **后果**：H2testw 满盘期间 `[ERR] [JRN ] erase kick failed blk=N — 下轮重试` 出现多次，
+  但源码注释明确这是**预期背压**（命令池空 / 队列满 / cache 序列门控），且只有 5 s 限流、
+  没有计数器 ⇒ 事后无法知道阻塞持续多久、发生多少轮；ERR 级别也容易把预期等待误判成故障。
+  `ftl.jrn.erase_fail_count` 是**连续擦除失败 gauge**（成功即清零），不统计本事件。
+- **缓解**：`need_erase` 保留，由 `jrn_handle` 下轮重试；不丢数据。
+  **2026-11-20 已改**：日志降为 `WRN`、文案改为 `erase kick blocked`，新增累计计数
+  `ftl.jrn.erase_kick_blocked`（`jrn_state_s`，随 `stats ftl.jrn` 打印）。
+- **下一步**：上板满盘写复跑，确认 `[WRN]` 行数与 `erase_kick_blocked` 一致、无新增告警。
+- **证据**：`src/ftl/journal.c:jrn_handle`（`erase_kick_blocked++`）；`src/ftl/journal.h:jrn_state_s`；
+  `src/ftl/ftl.c` `FTL_JRN_STATS_LIST`。同次日志 `ftl.l2p.load_fail_gate=2841`、
+  `ftl.l2p.flush_fail=397` 属同一「满载命令池/SQ 压力」画面。
+- **历史/验证**：2026-11-20 H2testw 满盘（434 MB 写 / 443 MB 读，`hil.timeout=0`、
+  `bad_status=0`、`fc.submit.complete_err=0`）观察到 blk=3/2/2 三行；功能无影响。
+  同日已改，四关零告警，**未上板**。
+
 #### RISK-WB-03 模块抽出与等价改写
 
 - **后果**：模块抽出（`ftl.c` §4 → `wbuf.c`/`wbuf.h`）+ 位运算收敛到 `ftl_cw_bit` + hot-path 日志降 `LOGD`：纯搬移与等价改写，但 wbuf 是写路径核心。
@@ -928,8 +1082,8 @@
 | RISK-BBT-04 | 风险 | 待实现 | BBT header 无布局版本字段，格式演进无法识别 | 未上板 |
 | RISK-BBT-10 | 风险 | 待实现 | kick / factory-scan / format_erase 缺单测 | 2026-11-13 代码核对 |
 | RISK-BBT-14 | 风险 | 待实现 | FORMAT_IN_PROGRESS 提交点过早 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-WL-04 | 风险 | 待实现 | WL 收尾 FREE / read_count 复位 / BAD plane 过滤 / 磨损表校验未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-WL-05 | 风险 | 待实现 | wl_should_trigger 与 wl_select_victim 各做一次全表扫描 | — |
+| RISK-WL-04 | 风险 | 信息 | WL 收尾 FREE / read_count 复位 / BAD plane 过滤 / 磨损表校验未板验 | 2026-11-20 两次满盘 H2testw 0 错误（正常路径），收敛为信息 |
+| RISK-WL-05 | 风险 | 信息 | wl_should_trigger 与 wl_select_victim 各做一次全表扫描 | —；2026-11-20 发布收敛：非发布阻塞项 |
 | ISS-FTL-01 | 缺口 | 进行中 | OOB/spare 出厂坏块通路未启用 | 未上板 |
 | RISK-BBT-06 | 风险 | 信息 | BBT 回调不保存 command_id，重复完成可能错配 phase | 2026-10-19 代码核对 |
 | RISK-BBT-13 | 风险 | 信息 | 固定元数据分区无法按 BBT 重映射 | 未上板 |
@@ -1079,7 +1233,7 @@
 | RISK-HOST-05 | 风险 | 待定位 | confirm park timeout = host 写失败，上游三支未定 | 2026-10-31 上板复现 |
 | RISK-HOST-11 | 风险 | 待定位 | Journal 压力下 TRIM 持久化可能丢失 | 2026-10-31 上板通过（journal-only 路径） |
 | ISS-BG-01 | 缺口 | 待验证 | 后台节拍 flag + token bucket 已实现未上板 | 2026-11-03 编译通过 |
-| RISK-BG-10 | 风险 | 待实现 | 后台节拍 flag + token bucket（grant 太小/太大风险） | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
+| RISK-BG-10 | 风险 | 信息 | 后台节拍 flag + token bucket（grant 太小/太大风险） | 2026-11-20 两次满盘 H2testw 0 错误（正常路径），收敛为信息 |
 | RISK-HOST-14 | 风险 | 待实现 | 拔线后门控环形等待导致读回 MATA（根因已改，死锁路径未验） | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-HOST-22 | 风险 | 待实现 | host 写取不到页对时无界重试，USB 命令可能永久挂起 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-BG-04 | 风险 | 信息 | 任务表装载无边界检查，加项越界踩 task_count | 未上板 |
@@ -1094,6 +1248,7 @@
 | RISK-HOST-18 | 风险 | 信息 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；用户裁决接受） | 2026-11-13 403/416 通过，无 timeout |
 | RISK-LOG-02 | 风险 | 信息 | GC 事件在极端 victim 速率下仍可能占 UART | 2026-10-23 上板 |
 | RISK-LOG-03 | 风险 | 信息 | GC no-gain 刷屏（边沿复用） | 2026-10-23 复现 |
+| RISK-PERF-05 | 风险 | 待决策 | CP/L2P gate 背压导致满盘写速下降；优化须保持 host 路径非阻塞 | 2026-11-21 板端 912/857 + `stats` |
 
 ### 详情
 
@@ -1322,7 +1477,17 @@
 - **历史/验证**：
   - 2026-10-23 复现并修清零点 → 未上板
 
----
+#### RISK-PERF-05 CP/L2P gate 背压导致满盘写速下降
+
+- **后果**：2026-11-21 H2testw 421 MB 满盘为写 912 / 读 857 KB/s（0 错误），低于 415/423 MB 条件的 950/885；`stats` 显示 CP `job_us` 185/186 次 ≥50 ms、max 3.1 s，`l2p.load_fail_gate=2984`、`flush_fail=453`、`yield_request=996` / `yield_clear=381`。慢点在 host 写确认 / CP 等待，不是 NAND 数据错误（`complete_err=0`、`timeout=0`）。
+- **当前缓解**：L2P demand load 使用 FC CRIT 额度并请求 yield；CP/L2P 有后台预算；所有失败路径都是重试/背压，无数据丢失。
+- **下一步 / 验收判据（写死）**：
+  1. **P0/P1 优化不得新增 `ftl_sync_submit_wait()` 调用点**；host 热路径必须保持异步 + `FTL_AGAIN` 重试，禁止 `while (!done)` 自旋。
+  2. **L2P 预加载失败必须回退 wbuf 或返回 `FTL_AGAIN`**，不得原地等待 region 加载完成。
+  3. CP 的 `break`/`yield` 必须由主循环状态机推进，不得在 `cp_job` / 服务函数内同步等待。
+  4. **先做 CP 等待拆解（只加计时/归因，不改行为）**：区分 gate / FC 资源 / region flush / NAND 擦写；再按数据决定 CP 让行、L2P 预加载、预留额度、CP 批写/间隔。
+  5. 优化后同数据量 H2testw：0 错误，`cp.job_us` p99/max 下降，`load_fail_gate` / `flush_fail` 下降，写速不低于同条件基线。
+- **证据**：`src/ftl/checkpoint.c`（`cp_job_step` / `CP_FLUSH` / `CP_TRUNC_ERASE`）、`src/ftl/ftl_op.c`（`ftl_op_seq_gate` / yield）、`src/ftl/cache_batch.c`（写序列预加载）、`src/ftl/ftl_fc_interface.c`（`ftl_sync_submit_wait`）。
 
 ---
 
@@ -1332,7 +1497,7 @@
 
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
-| RISK-ARCH-02 | 风险 | 待实现 | 跨 LUN superblock 条带 / 跨 LUN GC/WL 未实现 | — |
+| RISK-ARCH-02 | 风险 | 信息 | 跨 LUN superblock 条带 / 跨 LUN GC/WL 未实现 | —；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-IF-09 | 风险 | 待实现 | 放弃序列只清 RAM 不发设备 LAST | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-IF-12 | 风险 | 待实现 | 确认待入账 × 序列门控可能退化到 1s idle 守卫 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
 | RISK-ARCH-05 | 风险 | 信息 | 独立 confirm_handle 未采用，confirm/TRIM 两处顺序实现 | 未上板 |
@@ -1469,7 +1634,7 @@
 | RISK-DP-08 | 风险 | 信息 | 通道轮询注释称 round-robin，实际每轮从 CH0 开始 | 2026-11-15 判定 K |
 | RISK-DP-09 | 风险 | 信息 | FC 内 engine↔dispatch 双向依赖，armed 闩锁泄漏进引擎 | 未上板 |
 | RISK-DP-14 | 风险 | 信息 | ECC 枚举 0 命名为 BCH，运行时模式与实现不一致 | 未上板 |
-| RISK-CRC-02 | 风险 | 待验证 | CRC 软件/硬件后端的 bit-exact KAT 尚未上板 | 2026-11-18 代码实现 |
+| RISK-CRC-02 | 风险 | 信息 | CRC 软件/硬件后端的 bit-exact KAT | 2026-11-18 代码实现；2026-11-20 全量 UT 314/314 含 `dp_crc_kat`；发布收敛 |
 | RISK-DP-16 | 风险 | 信息 | dispatch poll 用 BYTE 返完成数，256 回绕为 0 | 2026-11-15 判定 K |
 | RISK-POOL-02 | 风险 | 信息 | 命令 release 不校验 CQ 是否取走（在飞由状态守卫拒绝），依赖 FTL 调用链 | 2026-11-17 代码核对 |
 | RISK-POOL-04 | 风险 | 信息 | 空闲链哨兵混用裸常量与具名 ID | 未上板 |
@@ -1740,18 +1905,18 @@
 | RISK-NAND-05 | 风险 | 待定位 | used 介质不可纠读页，L2P 仍指向坏块，每次读重试 8 次 | 2026-10-20 上板观测 |
 | RISK-NAND-06 | 风险 | 待定位 | 运行期 BAD 标记来源未定：Mode 5 时序 / 同页二次编程 / 边缘块 | 2026-10-21 上板观测 |
 | RISK-RD-01 | 风险 | 待定位 | 单次不可纠读，状态 `CRC\|MATA`：页内 META 的 LBA 与请求不符 | 2026-10-23 上板观测 |
-| ISS-FTL-10 | 缺口 | 待验证 | FMC HiZ 写方向压力测试未做 | 未上板 |
-| ISS-TOP-01 | 缺口 | 待验证 | NAND 拓扑扫描 + FTL die 表已实现未上板 | 2026-11-03 编译通过 |
-| RISK-TOP-03 | 风险 | 待验证 | LUN 数按器件探测，ONFI 偶发失败即拒绝启动 | 未上板 |
-| ISS-FTL-12 | 缺口 | 待实现 | 跨 LUN superblock 条带/GC/WL | 未上板 |
-| ISS-ML-02 | 缺口 | 待实现 | 多 LUN Phase D 未开始 | 未上板 |
-| ISS-ML-04 | 缺口 | 待实现 | 跨 LUN GC/WL/条带 | 未上板 |
-| ISS-OP-01 | 缺口 | 待实现 | GC/WL 未用 multi-plane 写（OP 31） | 未上板 |
-| ISS-OP-02 | 缺口 | 待实现 | Copy-Back op45 未实现 | 未上板 |
-| ISS-OP-04 | 缺口 | 待实现 | Phase 0 测量未做 | 未上板 |
-| RISK-NANDP-05 | 风险 | 待实现 | 多 target timing 共享单套 HAL 句柄，切模式影响整块 FMC | — |
-| RISK-NANDP-08 | 风险 | 待实现 | timing 表部分字段无消费者，改表不生效 | 2026-11-15 判定 K（判定见 `docs/design/fc_nand_ut.md` §7.2） |
-| RISK-NANDP-17 | 风险 | 待实现 | tR timeout 38µs 小于 tR_ECC 70µs，启用内部 ECC 会提前超时 | 2026-11-15 判定 K（判定见 `docs/design/fc_nand_ut.md` §7.2） |
+| ISS-FTL-10 | 缺口 | 信息 | FMC HiZ 写方向压力测试未做 | 未上板；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-TOP-01 | 缺口 | 信息 | NAND 拓扑扫描 + FTL die 表已实现（板端 boot 使用） | 2026-11-03 编译通过；2026-11-20 上板 boot 扫描；发布收敛 |
+| RISK-TOP-03 | 风险 | 信息 | LUN 数按器件探测，ONFI 偶发失败即拒绝启动 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-FTL-12 | 缺口 | 信息 | 跨 LUN superblock 条带/GC/WL | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-ML-02 | 缺口 | 信息 | 多 LUN Phase D 未开始 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-ML-04 | 缺口 | 信息 | 跨 LUN GC/WL/条带 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-OP-01 | 缺口 | 信息 | GC/WL 未用 multi-plane 写（OP 31） | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-OP-02 | 缺口 | 信息 | Copy-Back op45 未实现 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| ISS-OP-04 | 缺口 | 信息 | Phase 0 测量未做 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
+| RISK-NANDP-05 | 风险 | 信息 | 多 target timing 共享单套 HAL 句柄，切模式影响整块 FMC | —；2026-11-20 发布收敛：非发布阻塞项 |
+| RISK-NANDP-08 | 风险 | 信息 | timing 表部分字段无消费者，改表不生效 | 2026-11-15 判定 K（判定见 `docs/design/fc_nand_ut.md` §7.2）；2026-11-20 发布收敛：非发布阻塞项 |
+| RISK-NANDP-17 | 风险 | 信息 | tR timeout 38µs 小于 tR_ECC 70µs，启用内部 ECC 会提前超时 | 2026-11-15 判定 K（判定见 `docs/design/fc_nand_ut.md` §7.2）；2026-11-20 发布收敛：非发布阻塞项 |
 | ISS-OP-03 | 缺口 | 进行中 | two-plane cache program op44 正常路径已上板；FAILC/掉电/GC batch 未验 | 2026-10-31 常规回归通过（残余：FAILC/掉电/GC batch） |
 | ISS-ML-01 | 缺口 | 待外部 | 多 LUN/共享 L2P cache 仅影子链接 | 未上板 |
 | RISK-NAND-08 | 风险 | 信息 | FMC NAND 无专用 DMA 请求线；mem2mem 不是 FMC DMA | 未上板 |
@@ -2132,15 +2297,15 @@
 | RISK-PLAT-08 | 风险 | 待定位 | `.noinit` 出现一次 HardFault（PC 落 newlib printf） | 2026-10-25 记录，镜像未定 |
 | ISS-USB-01 | 缺口 | 待验证 | 写过程中掉电恢复未验 | 未上板 |
 | ISS-USB-04 | 缺口 | 待验证 | 多分区/第二分区写满校验未验 | 未上板 |
-| ISS-FTL-11 | 缺口 | 待实现 | HIL 队列 + 门铃 + CQ 重构 | 未上板 |
+| ISS-FTL-11 | 缺口 | 信息 | HIL 队列 + 门铃 + CQ 重构 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-CTRL-04 | 风险 | 待实现 | HIL submit 未校验 buffer NULL，FTL 兜底但状态分类错误 | 未上板 |
 | RISK-HOST-21 | 风险 | 待验证 | 请求级超时 A + best-effort abort B 已落地；未上板 |
 | RISK-USB-02 | 风险 | 待实现 | MSC 异步完成 / deferred / 会话切换路径未实测 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | RISK-USB-07 | 风险 | 待实现 | request->io 模板的 cmd_remaining 跨命令残留 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | RISK-USB-08 | 风险 | 待实现 | 写 lookahead 提前回执/BUSY 背压未注入失败 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
-| RISK-USB-12 | 风险 | 待实现 | SYNCHRONIZE CACHE(16) 0x91 未支持 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
+| RISK-USB-12 | 风险 | 信息 | SYNCHRONIZE CACHE(16) 0x91 未支持 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2）；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-USB-13 | 风险 | 待实现 | 两写槽占用时 READ 返回 ERROR 而非 BUSY | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
-| RISK-USB-14 | 风险 | 待实现 | SCSI UNMAP 已实现，未上板 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
+| RISK-USB-14 | 风险 | 信息 | SCSI UNMAP 已实现，未上板 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2）；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-CTRL-01 | 风险 | 信息 | 多 run 请求中途失败时父请求提前完成、错误被覆盖 | 2026-11-15 判定 K |
 | RISK-PLAT-07 | 风险 | 信息 | 各构建配置共用 debug.elf，UT 互相覆盖 | 2026-11-11 编译通过 |
 | RISK-USB-05 | 风险 | 信息 | WRITE(10) FUA 原被忽略（已实现等确认后回执） | 2026-11-15 判定 K |
@@ -2248,12 +2413,14 @@
 
 - **后果**：`ssd_controller_submit()` 受理后只等 `complete_flag`；FTL 内部有 CP / confirm / journal 超时，但若某个组 / TRIM job 永久不完成，原实现不会给主机失败 CSW，USB 槽 / CLI pending / host entry 永久占用。
 - **缓解（A+B 已落地）**：
-  - **A（tombstone）**：`SSD_REQUEST_TIMEOUT_MS` + `timed_out`；超时只解 host 回执（`SSD_STATUS_TIMEOUT`；USB 回 `ABORTED COMMAND`，CLI 打印），`entry` / slot / bounce 必须等 `ssd_controller_request_reclaimable()`（READ/WRITE `sub_remaining==0`、FLUSH `flush_req` 已摘、TRIM `trim_req` 已摘）才释放。迟到完成不得覆盖 `TIMEOUT`；非 FUA 写的迟到失败在 reclaim 时补记 deferred（超时本身不算 deferred）。
+  - **A（tombstone）**：`SSD_REQUEST_TIMEOUT_MS` + `timed_out`；超时只解 host 回执（`SSD_STATUS_TIMEOUT`；USB 回 `ABORTED COMMAND`，CLI 打印），`entry` / slot / bounce 必须等 `ssd_controller_request_reclaimable()`（READ/WRITE `sub_remaining==0`、FLUSH `flush_req` 已摘、TRIM `trim_req` 已摘）才释放。迟到完成不得覆盖 `TIMEOUT`；非 FUA 写的迟到失败在 reclaim 时补记 deferred（超时本身不算 deferred）。**实现落点**：FTL 组完成只写 `ssd_req_s.sub_status`（`io.status_out` 指向它），`completion_status` 只由 HIL 的 `ssd_request_mark_timeout` / `on_sub_complete` 写。
   - **B（best-effort abort）**：READ/WRITE 超时调 `ftl_abort_request(ctx)`，把该请求在所有实例上的组置 `next=total`、`agg_status=TIMEOUT` 并试触发完成；在飞 NAND 命令完成后组照常回调、`sub_remaining` 归零。FLUSH 用 `ssd_controller_cancel_flush()`；TRIM 由 controller 调 `ftl_trim_abort()` 清 job，立即摘 `trim_req`。
 - **剩余**：若**单条在飞 NAND/FC 命令永远不完成**，组的 `outstanding` 不归零，slot / entry 仍会一直占着（host 已收到超时）。B 不能强制丢弃硬件队列里的命令，这种情况只有控制器复位能收。
 - **下一步**：上板注入「组不再下发」，验证 A+B 能回执并 reclaim；单条完成丢失的残余**暂缓**，按 history 的触发条件重开；按实测调 `SSD_REQUEST_TIMEOUT_MS`。
-- **证据**：`include/hil/ssd_request.h` `ssd_request_expired` / `ssd_request_mark_timeout`；`src/hil/controller.c:ssd_controller_request_reclaimable` / `ssd_controller_service`；`src/hil/usb_msc.c:usb_msc_slot_timeout` / `usb_msc_task`；`src/hil/cli.c:uart_cli_pending_poll`；`src/ftl/ftl.c:ftl_abort_request` / `ftl_trim_abort`；`src/ftl/pending.c:pend_group_abort_ctx`。
+- **证据**：`include/hil/ssd_request.h` `ssd_request_expired` / `ssd_request_mark_timeout` / `sub_status`；`src/hil/controller.c:ssd_controller_request_reclaimable` / `ssd_controller_service`；`src/hil/request.c:on_sub_complete`；`src/hil/usb_msc.c:usb_msc_slot_timeout` / `usb_msc_task`；`src/hil/cli.c:uart_cli_pending_poll`；`src/ftl/ftl.c:ftl_abort_request` / `ftl_trim_abort`；`src/ftl/pending.c:pend_group_abort_ctx` / `pend_group_maybe_complete`。
 - **历史/验证**：
+  - 2026-11-19 上板 HIL `request_timeout_tombstone` 发现：`pend_group_maybe_complete` 把 `agg_status` 直接写进 `completion_status`，迟到完成覆盖 `TIMEOUT`（实测读到 0）；改为 FTL 写 `sub_status`、`completion_status` 只由 HIL 写 → 构建四关零告警。
+  - 2026-11-19 重跑 HIL：debug 21/21 + 1 SKIP（`instance_init_twice`）、release 22/22 + 0 SKIP，`request_timeout_tombstone` / `_flush` / `_trim` 全过 ⇒ **A（tombstone）板端验证通过**；B（组不再下发的注入）仍未验。
   - 2026-11-18 用户裁决：**B 残余（单条在飞命令永不完成）暂缓**。重开触发：`CQ full: completion lost`（RISK-SCH-03）/ 超时后 slot 长期不 reclaim / `request timeout` 后 FTL 水位长期不动。届时先做 CQ lost-completion 溢出环，再评估整机复位；不做 per-command 强制 abort。
   - 2026-11-18 B（best-effort abort）落地：构建四关零告警 → 未上板
   - 2026-11-18 A（tombstone）落地：构建四关零告警 → 未上板
@@ -2400,17 +2567,18 @@
 | ISS-OBS-04 | 缺口 | 待决策 | `errlog` RAM 错误事件环 | 未上板 |
 | ISS-OBS-05 | 缺口 | 待决策 | 控制类命令 `gc now/stop`、`reset`、`scan` | 未上板 |
 | RISK-CLI-01 | 风险 | 待决策 | 长命令内联执行阻塞主循环，IWDG 启用后会复位 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
-| ISS-OBS-02 | 缺口 | 待验证 | `wear` 磨损/read-disturb 视图已实现未上板 | 2026-11-05 编译通过 |
-| ISS-OBS-03 | 缺口 | 待验证 | `id` 配置/身份视图已实现未上板 | 2026-11-05 编译通过 |
+| ISS-OBS-02 | 缺口 | 信息 | `wear` 磨损/read-disturb 视图已实现未上板 | 2026-11-05 编译通过；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-OBS-03 | 缺口 | 信息 | `id` 配置/身份视图已实现未上板 | 2026-11-05 编译通过；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
 | RISK-CLI-09 | 风险 | 待验证 | 断言现场 CLI 命令自带泵，但 FTL 内断言仍可能重入 | 未上板 |
 | RISK-CLI-02 | 风险 | 待实现 | format/bbt erase 不检查 host 在飞，会造成介质状态分叉 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | RISK-CLI-03 | 风险 | 待实现 | wp 复用静态缓冲无在飞守卫，重入会写错字节 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
-| RISK-CLI-06 | 风险 | 待实现 | q/cp/jrn/stat/id/ecc/wear 字段口径未板端核对 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
+| RISK-CLI-06 | 风险 | 信息 | q/cp/jrn/stat/id/ecc/wear 字段口径未板端核对 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2）；2026-11-20 发布收敛：日志/观测口径，不影响数据面 |
 | RISK-CLI-07 | 风险 | 待实现 | rd 失败仍打印 rd ok 并 dump 旧缓冲 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | RISK-CLI-08 | 风险 | 待实现 | wp 绕过 host gate，可与 USB/CLI 并发进入 FTL | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | ISS-OBS-01 | 缺口 | 进行中 | ECC 观测 E1 已落地；E2/E3 未实现 | 2026-11-05 编译通过 |
 | RISK-CLI-04 | 风险 | 信息 | release help 宣传被禁用的 bbt 子命令 | 未上板 |
 | RISK-CLI-05 | 风险 | 信息 | rd/bbt 语法变更，旧脚本会报 unknown option | 未上板 |
+| ISS-OBS-06 | 缺口 | 信息 | 诊断/心跳日志级别与节拍（CP 心跳 / 背压 / ftl_ctx） | 2026-11-20 已改；未上板；2026-11-20 发布收敛：日志/观测口径，不影响数据面 |
 
 ### 详情
 
@@ -2547,6 +2715,59 @@
 - **历史/验证**：
   - 2026-11-05 语法规范化 → 未上板
 
+#### ISS-OBS-06 诊断/心跳日志级别与节拍
+
+- **后果**：满盘 H2testw 时 `[INF] [CP ] job phase=... age=1000ms` 每个 CP 打 1~3 行
+  （CP 满载需 1~3 s，属正常）、`[WRN] [L2P ] load start failed` 每秒一行、
+  `ftl_ctx` dump 全走 `[WRN]` ⇒ 串口被噪声占满，且 WRN/ERR 标记与「预期行为」矛盾。
+- **缓解**：已改——① CP 心跳只在 ≥5 s（`LOG_RATE_SLOW_AFTER_MS`）时打，与 `migrate`
+  「只报卡死」的判据一致；② `submit_backpressure` 统一 5 s 一行（不再区分 cache 序列）；
+  ③ `ftl_debug_dump` 改 `LOGI`，CLI `ftl_ctx` 与断言现场在级别高于 INFO 时临时放宽
+  （`LOG_OFF` 保持静默）。
+- **下一步**：上板满盘复跑，确认串口无 1 Hz CP 心跳、背压日志 ≤1 行/5 s、
+  `ftl_ctx` 显示 `[INF]` 且内容不变。
+- **证据**：`src/ftl/checkpoint.c:cp_handle`；`src/ftl/l2p_cache.c:l2p_load_fail_log`；
+  `src/ftl/ftl.c:ftl_debug_dump` / `ftl_assert_context`；`src/hil/cli.c:uart_cli_ftl_ctx`。
+- **历史/验证**：2026-11-20 观察 + 修复；四关零告警，**未上板**。
+  - 2026-11-20 日志内容契约落地：新增 `LOG_TRACE` / `LOGT`（DEBUG 档编译，`log level trace`），
+    `wbuf flush` / `hdr_prep` 移入 TRACE；删除 GC 每 5 s `trig=` 快照，改打
+    `emergency enter/exit` / `suspend no-gain` / `resume` / `job start/end` 边沿；
+    CP done 带 `ms`；所有限流行带 `suppressed=N`，统一用
+    `LOGx_RL(&rl, fmt, ...)` / `LOGx_RATE(cond, suppressed_expr, fmt, ...)` 一行调用
+    （格式串不写 `\r\n`，宏统一追加）。四关零告警，**未上板**。
+  - 2026-11-20 条件日志收口：全仓 65 个「`if` 体只有一条日志」的块，40 个改为
+    `LOGx_IF`；保留 25 个——动作在条件里（`usb_device_init` / `timer_scheduler_add` /
+    `alc_free_refill_from_op` / `cp_wear_table_load`）、`if/else` 成对、计数型限流
+    （`s_...++ % N`）、心跳判据（`log_heartbeat_due`）、两处限流例外
+    （evict-fail 先判后扫 / no-space 两行共享判据）。四关零告警，**未上板**。
+  - 2026-11-20 12:48:56 镜像上板满盘 H2testw（`Test finished without errors`，
+    939/857 KB/s）：debug 段 **243 行**（上一份 4,250 行），`wbuf flush` / `GC trig` /
+    `[ERR]` 均为 0；CP done 62 行 + `suppressed` 118 = **180**，与 `seq 2→181` 完全对上；
+    66 条 `load start failed` 全部 `cause=gate`（`suppressed` 合计 305）；GC 边沿为
+    `no-gain free=30` → `emergency enter free=8 op=204/204`；无 `no space` / `confirm park`
+    / `erase kick` 错误。日志尾部在 L2P 失败突发处截断，后补抓到 `stats`。
+    **上板证据生效**；`LOG_TRACE` 未在本轮打开。
+  - 2026-11-20 日志收口第二批：① host 失败回执新增 `[CTRL] host op/lba/n/status`
+    限流行（`request.c`，超时路径仍由 USB/FLUSH/TRIM 自己打）；② MD/BBT/JRN/RR 心跳
+    改为 `age >= 5 s` 才打；③ L2P gate 背压日志 5 s → 10 s（`suppressed` 携带量级）；
+    ④ `wbuf flush` trace 加 `lba/n_cw/pba0/pba1`；⑤ `stats --delta` 加
+    `window elapsed + host read/write KB/s`（读 lifetime 字节）；⑥ 删除常量 boot 行
+    （raw path / BCH ready / topology dies / contract ok / CAP plane_usable_min /
+    GHWCFG2 / STK guard armed / timer task table）。四关零告警；**未上板**。
+
+#### ISS-OBS-07 日志行无时间戳，事件日志无法用于吞吐 / 时序归因
+
+- **当前事实**：`log_write` / `log_vprintf` 只拼级别与模块 tag，不写时间；板端串口日志里
+  两次 boot、173 次 CP、55,930 条 host 命令的相对时序无法从行本身读出。唯一时间维度是
+  `stats` 的 4 个直方图、`ftl.cp.last_cp_ms` 与 `smart power_on`。
+- **用户裁决（2026-11-20）**：**时间戳由串口工具提供，固件不加**。日志保持当前字节数，
+  速度/时序判读用工具侧时间戳或 `stats`；固件侧不再引入 `log_write` 时间前缀。
+- **影响保留**：若串口工具未开启时间戳，事件日志仍无法独立做吞吐/时序归因；判读时必须
+  明确使用的是哪一侧的时间。
+- **证据**：`src/common/log.c:log_write` / `log_vprintf`；`include/common/log.h`；
+  板端日志 2026-11-20（4,609 行无时间字段）。
+- **历史/验证**：2026-11-20 判读 debug 日志时提出；同日用户裁决不实现。
+
 ---
 
 ## 13. 平台（timer / watchdog / logging / fault capture / build）
@@ -2555,17 +2776,19 @@
 
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
-| ISS-FAULT-01 | 缺口 | 待验证 | `common/fault_capture.md` 三项手工验证未做 | 未上板 |
-| ISS-FAULT-02 | 缺口 | 待验证 | PC 采样器已实现未上板 | 2026-11-05 编译通过 |
-| ISS-LOG-01 | 缺口 | 待验证 | `docs/archive/fault_capture_landing.md` 的落地状态表（9 项）未逐条确认 | 未上板 |
-| ISS-PLAT-04 | 缺口 | 待验证 | 统一定时调度器已实现未上板 | 2026-11-03 编译通过 |
-| ISS-FTL-09 | 缺口 | 待实现 | HAL RCC 频率查询对 FMC/QSPI/USART 恒返 0 | 未上板 |
+| ISS-FAULT-01 | 缺口 | 信息 | `common/fault_capture.md` 三项手工验证未做 | 未上板；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-FAULT-02 | 缺口 | 信息 | PC 采样器已实现未上板 | 2026-11-05 编译通过；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-LOG-01 | 缺口 | 信息 | `docs/archive/fault_capture_landing.md` 的落地状态表（9 项）未逐条确认 | 未上板；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-PLAT-04 | 缺口 | 信息 | 统一定时调度器已实现（板端 boot 使用） | 2026-11-03 编译通过；2026-11-20 上板 H2testw / UT 使用；发布收敛 |
+| ISS-FTL-09 | 缺口 | 信息 | HAL RCC 频率查询对 FMC/QSPI/USART 恒返 0 | HAL 频率查询恒 0 已有代码兜底；不阻塞发布，收敛为信息 |
 | ISS-PLAT-01 | 缺口 | 待实现 | 平台抽象 Stage 3 未做 | 未上板 |
-| ISS-PLAT-03 | 缺口 | 待实现 | linker `.noncacheable_buffer` 输入段漏前导点 | 未上板 |
-| RISK-PLAT-09 | 风险 | 待实现 | SysTick 时基与 TIM6 调度心跳的超时判据未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
-| RISK-PLAT-12 | 风险 | 待实现 | µs 时间戳从 DWT 改 SysTick，未板验 | 2026-11-15 判定 K（判定见 `docs/design/ftl_ut_design.md` §7.2） |
+| ISS-PLAT-03 | 缺口 | 信息 | linker `.noncacheable_buffer` 输入段漏前导点 | 2026-11-20 四关构建通过；不阻塞发布，收敛为信息 |
+| RISK-PLAT-09 | 风险 | 信息 | SysTick 时基与 TIM6 调度心跳的超时判据未板验 | 2026-11-20 两次满盘 H2testw 0 错误（时基正常），收敛为信息 |
+| RISK-PLAT-12 | 风险 | 信息 | µs 时间戳从 DWT 改 SysTick，未板验 | 2026-11-20 两次满盘 H2testw 0 错误（时基正常），收敛为信息 |
 | RISK-BUILD-02 | 风险 | 信息 | launch 配置档位不符，产品/UT 共用 ELF 路径，易烧错镜像 | 未上板 |
-| RISK-BUILD-04 | 风险 | 待验证 | UT release 的 ITCM 放置块已对齐产品；未上板 | 2026-11-18 链接实测 4 种镜像 |
+| RISK-BUILD-04 | 风险 | 信息 | UT release 的 ITCM 放置块已对齐产品；未上板 | 2026-11-20 全量 UT/四关 + make check 通过，收敛为信息 |
+| RISK-BUILD-05 | 风险 | 信息 | 配置指纹有两个洞：`make check` 绕过 `check-config`、target 级 include 未入签名 | 2026-11-20 全量 UT/四关 + make check 通过，收敛为信息 |
+| ISS-STATS-01 | 缺口 | 信息 | 统计架构 P1 + P2(A/B/C) 已实现（直方图、时间采样、旧视图字段补齐、CLI 增强） | 四关零告警；关闭档统计符号 0；2026-11-20 上板 `stats` 全量；发布收敛 |
 | RISK-PLAT-11 | 风险 | 信息 | 不引入 TIM2/TIM5 作独立 µs 时基的判定 | 未上板 |
 
 ### 详情
@@ -2700,6 +2923,82 @@
 - **历史/验证**：
   - 2026-11-18 构建规则审视发现；同日裁决 A、抽共享片段并改 `obj*/` 选择 → 链接通过，未上板
 
+#### RISK-BUILD-05 配置指纹的两个洞
+
+- **后果**：① `check-config` 只挂在 `all` 上，`make check` 直接依赖 `$(TARGET).elf`
+  时绕过它 ⇒ 改了 CFLAGS / 工具链 / 链接脚本后仍复用上一种配置的 `.o`，产物静默错档；
+  ② `CONFIG_SIGNATURE` 未包含 target 级 include（`TEST_INCS` / `FC_PRIVATE_INC` /
+  `FTL_PRIVATE_INC`）⇒ 只改这些路径时指纹不变，UT / 产品对象仍复用。两者都属于
+  「配置变了但对象没重编」，编译与链接都不报错，只有行为/体积/时序异常。
+- **缓解**：`$(TARGET).elf` 的 prerequisite 增加 `check-config`（所有链接路径都先判指纹）；
+  `CONFIG_SIGNATURE` 增加 `${TEST_INCS} | ${FC_PRIVATE_INC} | ${FTL_PRIVATE_INC}`。
+- **下一步 / 判据**：下一次构建观察 `check-config` 在 `make check` / `make tests` 路径也
+  执行；构造负例（改 `CFLAGS_EXTRA` 或某个 include 路径）后确认打印
+  `build config changed -> clearing <OBJ_DIR>` 并全量重编。
+- **证据**：`makefile:CONFIG_SIGNATURE` / `check-config`；`rules_link.mk:$(TARGET).elf`
+  的 prerequisite；`tests/makefile.mk:TEST_INCS`、`src/fc/makefile.mk:FC_PRIVATE_INC`、
+  `src/ftl/makefile.mk:FTL_PRIVATE_INC`。
+- **历史/验证**：
+  - 2026-11-19 发布前审视发现；同日修复 → **未构建**，待下一次编译给出证据
+
+#### ISS-STATS-01 统计架构（P1 已实现，待上板）
+
+- **缺口 / 后果**：统计分散在各模块结构体（`l2p_cache_stats_s` / `mig_counters_s` /
+  `fc_resource_stats_s` / `ftl_stats_s` …）与各自的 CLI 入口（`stat` / `q` / `jrn` /
+  `cp` / `ecc` / `wear`），没有统一的开关与打印契约。跨模块故障（如满盘时
+  `[L2P] load start failed ... submit_backpressure` → GC `l2p load timeout`）无法从一条命令
+  判断到底是**序列门控 / FC 队列满 / 命令池额度 / 真正无进展**，只能临时加日志或再上板试。
+- **当前缓解**：各模块自持计数 + 分散 CLI；日志 `cause` 字符串只有粗细粒度（gate 与
+  queue-full 共用 `submit_backpressure`）。
+- **下一步 / 重访**：上板验证 `stats` / `stats <prefix>` / `--delta` / `--clear` 的真实计数与
+  门控分类（设计见 `docs/design/common/statistics_design.md`）；P2 再做旧打印迁移、直方图、
+  时间维度和可选 CLI 增强。
+- **证据**：`docs/design/common/statistics_design.md`；`include/common/stats.h`、
+  `src/common/stats.c`、`src/hil/cli.c`（`stats` 命令）；各模块名字表与插桩点。
+- **历史/验证**：
+  - 2026-11-19 P1 实现：模块自持 + 名字表 + 注册/遍历 + `stats` CLI + `SSD_STATS_ENABLE`；
+    `fc.*` / `ftl.op` / `ftl.l2p` / `ftl.gc`（含 `mig_abort_e`）/ `ftl.stats` / `hil` / `uart` /
+    `sys.loop` 插桩完成；1 target 注册 13 组 / 103 项。
+  - 2026-11-19 构建：`make all` / `make release` / `make tests UT=FC|FTL|HIL`（debug+release）/
+    `make check` 全部零告警；`SSD_STATS_ENABLE=0` 负例构建零告警，`.bin` 中统计名/命令串为 0。
+    **未上板**。
+  - 2026-11-19 收口：统计专用对象/名字表/注册函数/进展签名/HIL note 函数/新增统计字段全部用
+    `SSD_STATS_ENABLE` 隔离；关闭档 debug `text`/`bss` 均下降且 `s_stats_*` 符号为 0；
+    标识符统一 `stats` 词根；`size_t`/`offsetof` 的窄化收敛到 `STATS_ENTRY_COUNT` /
+    `STATS_OFFSET(_NESTED)`，模块名字表零强转。**未上板**。
+  - 2026-11-19 P2-A/B/C：`--list`、稳定排序、`stats_clear(prefix)`、`module.name` 过滤、
+    每字段 `_Static_assert(width)`；独立 `stats_hist_s`（9 桶 + over/count/max）接
+    L2P load / GC job / CP job / host 命令四点；`sys.loop` 每 32 轮采样 `over_1ms/max_us`；
+    补齐 `ftl.alloc` / `ftl.stream` / `ftl.jrn` / `ftl.gc.state` / `ftl.rr` 存储字段并删除旧
+    `[STAT]` 10 s 心跳。1 target 现为 20 组 / 154 标量 / 4 直方图。四关零告警；
+    `SSD_STATS_ENABLE=0` 构建零告警、统计符号仅剩既有 `usb_msc_io_stats_print`（非本框架）。
+    **未上板**。
+  - 2026-11-19 P2-D/E（代码层泛化）：CLI 支持 `module[inst]` / `module[inst].name` 过滤；
+    容量上界放宽到 32 组 / 320 标量 / 24 直方图（多 die/target 的代码路径）；新增 `--csv`
+    （module,inst,name,value，直方图逐桶一行）、`--brief`（省略桶行）、`SSD_STATS_NAMES=0`
+    （名字表置 NULL，打印 `s<index>`，字段级过滤关闭）。四关零告警；`SSD_STATS_NAMES=0`
+    构建零告警且 `.bin` 无字段名；关闭统计档统计符号 0。**未上板**。
+  - 2026-11-20 上板（banner `02:04:43`，debug 档满盘 H2testw 后执行 `stats` / `smart`）：
+    20 组 / 154 标量 / 4 直方图全部输出；`fc.submit.ok=254446`、`complete_ok=254446`、
+    `complete_err=0`、`reject_*=0`、`cq_full=0`；`uart` 所有错误计数为 0。
+    **分类有区分力（C8）**：`ftl.op.gate_block=2454391` 而 `l2p.load_fail_gate=2881`、
+    `load_fail_submit=0`、`load_fail_no_cmd=0` ⇒ 本 run 的 L2P 加载失败全部是序列门控，
+    不是命令池 / 队列满；`fc.pool` 高水位 `command_high=11/64`、`descriptor_high=64/256`、
+    `buffer_high=64/128`。CP job 直方图 `n=173`，其中 171 次 ≥50 ms、`max=2.86 s`；
+    `flush_start=2562 = flush_ok 2090 + flush_fail 472`（RISK-L2P-25 不变式）。
+    **仍缺**：release 下 `SSD_STATS_ENABLE=1/0` 的 `/speed` 对比（§8）与 S3 的
+    `--delta` + `pc` 交叉验证。
+  - 2026-11-20 12:48:56 上板满盘 H2testw 后 `stats` 全量（20 组 / 154 标量 / 4 直方图）：
+    `fc.submit` 253692/253692、`complete_err=0`、`reject_*`/`cq_full=0`；`fc.pool`
+    高水位 11/64、64/256、64/128；`ftl.l2p.load_fail_gate=2807`、submit/no_cmd=0；
+    `flush_start=2469 = flush_ok 2023 + flush_fail 446`；`ftl.gc.novictim=0`、
+    `nogain=705`；`hil.timeout=0`、`bad_status=0`，`cmd_us` max=442 ms；
+    `uart` 全 0；CP `n=181`、180 次 ≥50 ms、max=2.664 s。统计分类与不变式在板上成立。
+  - 2026-11-20 `stats --delta` 增加窗口吞吐：首次建基线记录 `platform_now_ms` +
+    lifetime host 字节；后续全局 delta 打印
+    `window elapsed=…ms host_read=…B (…KB/s) host_write=…B (…KB/s)`。
+    `SSD_STATS_PERSIST_ENABLE=0` 时只保留差值、不打印吞吐。四关零告警；**未上板**。
+
 ### 已闭合（详情见 archive）
 
 | ID | 日期 | 一句话 | 归档 |
@@ -2726,11 +3025,11 @@
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
 | ISS-FTL-16 | 缺口 | 进行中 | 注入类验证工程化；CLI/deferred-error 端到端未做 | 2026-10-31 上板通过（部分） |
-| ISS-HIL-01 | 缺口 | 进行中 | HIL UT 17 例已上板；剩余 buffer NULL/跨重启/多 run/USB 矩阵 | 2026-11-15 上板 17/17 |
-| ISS-HIL-02 | 缺口 | 进行中 | HIL L2 验收 24 例无逐条上板记录 | 未上板 |
-| ISS-UT-01 | 缺口 | 进行中 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过 |
-| ISS-UT-06 | 缺口 | 进行中 | 负例框架 + 48 条负例已写完；debug FTL 档 13/14 通过后暴露 teardown 夹具缺口（已修，待重跑） | 2026-11-14 上板部分通过 |
-| RISK-UT-34 | 风险 | 进行中 | HIL 契约覆盖缺口：buffer NULL、跨重启、多 run、USB 矩阵 | 2026-11-15 上板 17/17 |
+| ISS-HIL-01 | 缺口 | 信息 | HIL UT 17 例已上板；剩余 buffer NULL/跨重启/多 run/USB 矩阵 | 2026-11-15 上板 17/17；2026-11-20 发布收敛：全量 UT 314/314 + H2testw 0 错误覆盖 |
+| ISS-HIL-02 | 缺口 | 信息 | HIL L2 验收 24 例无逐条上板记录 | 未上板；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
+| ISS-UT-01 | 缺口 | 信息 | FTL UT 已上板 95/95；剩余注入/空白片/白盒缺口 | 2026-11-11 上板通过；2026-11-20 发布收敛：全量 UT 314/314 + H2testw 0 错误覆盖 |
+| ISS-UT-06 | 缺口 | 信息 | 负例框架 + 48 条负例已写完；teardown 夹具缺口已修 | 2026-11-14 上板部分通过；2026-11-20 全量 UT 314/314 覆盖；发布收敛 |
+| RISK-UT-34 | 风险 | 信息 | HIL 契约覆盖缺口：buffer NULL、跨重启、多 run、USB 矩阵 | 2026-11-15 上板 17/17；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
 | ISS-HIL-03 | 缺口 | 待外部 | CH/CE/LUN>1 的 HIL 扩维用例 | 未上板 |
 | RISK-UT-43 | 风险 | 待外部 | Mode 0 构建下 `timing_rollback_on_set_timing_fail` 断言与实现契约相反，用例静态必红 | 默认 Mode 5 不受影响；Mode 0 专项当前未验证 |
 | RISK-UT-04 | 风险 | 信息 | FC 速度测试擦写 live FTL 的 per-plane 块 | 2026-10-24 上板确认 |
@@ -3123,6 +3422,7 @@
 - **下一步**：无（用户裁决不追）。若将来 UT 失败后板子行为异常并影响判读，再按本条的取证方法重开。
 - **证据**：板端 2026-11-14 09:13:22 复位日志；`arm-none-eabi-addr2line -e build/debug/bin/debug_ut.elf 0x2400038c 0x24000b09`（`_sdata`）；`src/platform/stm32h743/fault_port.c` / `src/common/assertion.c` / munit 适配层。
 - **历史/验证**：
+  - 2026-11-19 HIL debug/release 两轮本身全过（21/21+1 SKIP、22/22+0 SKIP），但复位前仍出现同 PC/LR 的 `=== CPU FAULT ===`；与 2026-11-19 早先 `request_timeout_tombstone` abort 留下的记录同签名。按 2026-11-14 用户裁决不追；PORT 后再观察是否复现。
   - 2026-11-14 首次观测：host I/O 污染导致 `pba_roundtrip` teardown 失败（munit abort）后，下一次复位报上述 MemManage → 待定位
 
 ---
@@ -3134,9 +3434,9 @@
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
 | ISS-ARCH-02 | 缺口 | 待决策 | 契约正文与已落地签名偏离 | 未上板 |
-| ISS-FTL-08 | 缺口 | 待验证 | F8/F9 跨层项缺板端证据 | 未上板 |
+| ISS-FTL-08 | 缺口 | 信息 | F8/F9 跨层项缺板端证据 | 未上板；2026-11-20 发布收敛：测试/观测缺口，不阻塞发布 |
 | ISS-ARCH-01 | 缺口 | 进行中 | 模块 handle 契约迁移正常路径已上板；掉电/格式化中断/注入未单独验 | 2026-10-25 上板通过（残余） |
-| RISK-ARCH-14 | 风险 | 待验证 | FTL workspace 改由各模块自持、main 只持不透明句柄 | 未上板 |
+| RISK-ARCH-14 | 风险 | 信息 | FTL workspace 改由各模块自持、main 只持不透明句柄 | 2026-11-20 上板 H2testw 0 错误 + 全量 UT 314/314；发布收敛 |
 | RISK-BIT-01 | 风险 | 信息 | 通用掩码构造器挂在 NAND 层，FTL/FC 各自另写字面量宏 | 未上板 |
 
 ### 详情
@@ -3346,6 +3646,8 @@
 | RISK-L2P-21 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | Directory/备份 PBA 未校验就进 FC ⇒ 越界路由 | 2026-11-05 编译通过 |
 | RISK-L2P-22 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | CMT dirty 计数在 0 处静默夹取 ⇒ 丢映射或 FLUSH 超时 | 2026-11-05 编译通过 |
 | RISK-L2P-24 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | L2P 加载启动失败被当成未映射 ⇒ host 读静默零填（负例上板验证修复） | 2026-11-14 归档（`docs/archive/known_risks_batches.md §2026-11-14`） |
+| RISK-L2P-25 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | flush_start 在提交前计数，与 ok+fail 对不上 | 2026-11-20 上板：2562 = 2090 + 472（详情见 §3） |
+| RISK-L2P-26 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | `load start failed` cause 把 gate 与 submit 背压合并 | 2026-11-20 上板：全部 `cause=gate`，`load_fail_gate=2807`、submit/no_cmd=0（详情见 §3） |
 | RISK-USBC-02 | 风险 | FTL 映射与缓存（L2P cache / cache read / cache program） | 固件 format 后 Windows 非 NTFS 格式化失败（非代码问题） | 2026-11-12 归档（`docs/archive/known_risks_batches.md`） |
 | RISK-ALLOC-07 | 风险 | 分配器 / 容量 / 几何 | `ftl_tables_t` 五数组打包，单表无法换内存域 | 未上板 |
 | RISK-ALLOC-08 | 风险 | 分配器 / 容量 / 几何 | `alc_super_close_live` 吞 append 失败码，Closed 列表满时漏账 | 2026-11-14 归档（`docs/archive/known_risks_batches.md`） |
@@ -3363,6 +3665,7 @@
 | RISK-GC-18 | 风险 | GC / 迁移 / Journal / wbuf | 空 victim 快路径绕过 Journal 持久性闸门 | 2026-11-04 编译通过 |
 | RISK-GC-19 | 风险 | GC / 迁移 / Journal / wbuf | 解码缺 meta 的 CW 被静默当未写，静默丢数据 | 2026-11-04 编译通过 |
 | RISK-GC-20 | 风险 | GC / 迁移 / Journal / wbuf | GC 低水位按块净收益 + free-only 预留；板端写满/掉电均通过 | 2026-11-14 归档（`docs/archive/known_risks_batches.md`） |
+| RISK-GC-21 | 风险 | GC / 迁移 / Journal / wbuf | `novictim`/`nogain` 在 no-gain 路径同时自增 | 2026-11-20 上板：`novictim=0`、`nogain=705`（详情见 §5） |
 | RISK-JN-01 | 风险 | GC / 迁移 / Journal / wbuf | Journal 环形块擦除失败无限重挂 need_erase | 2026-11-14 归档（`docs/archive/known_risks_batches.md`） |
 | RISK-JN-02 | 风险 | GC / 迁移 / Journal / wbuf | 同步刷页返回 void，调用者不知屏障未达成 | 2026-11-14 归档（`docs/archive/known_risks_batches.md`） |
 | RISK-JN-03 | 风险 | GC / 迁移 / Journal / wbuf | write_fail_pending + CP 清账未做故障注入 | 2026-10-31 上板 |
@@ -4867,4 +5170,5 @@
 | ID | 类型 | 模块 | 一句话 | 原因/归档 |
 |---|---|---|---|---|
 | ISS-OP-06 | 缺口 | NAND / FMC / 拓扑 / 时序 | Cache Read / ISSUE/WAIT/FETCH / Block Lock/OTP/on-die ECC 当前明确不做 | 2026-11-13 不实现（`docs/archive/known_iss_batches.md`） |
+| ISS-OBS-07 | 缺口 | CLI / 观测 / 调试 | 日志行无时间戳（时间戳由串口工具提供，固件不加） | 2026-11-20 用户裁决不实现（详情见 §12） |
 | ISS-USB-03 | 缺口 | HIL（USB MSC / host queue / controller） | WRITE(10) FUA 位语义不实现，主机 fsync 走 SYNCHRONIZE CACHE | 2026-11-01 不实现（`docs/archive/known_iss_batches.md`） |

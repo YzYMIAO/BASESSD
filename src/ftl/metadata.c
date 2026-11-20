@@ -2363,10 +2363,7 @@ void md_pool_print(const md_dir_cache_s *dir)
         {
             const WORD b = ring->blocks[i];
 
-            if ((b < ring->first_block) || (b >= (ring->first_block + ring->nominal_count)))
-            {
-                LOGI(LOG_TAG_POOL "%-10s remapped -> spare block=%hu (candidate_idx=%hu)\r\n", part->name, b, i);
-            }
+            LOGI_IF((b < ring->first_block) || (b >= (ring->first_block + ring->nominal_count)), LOG_TAG_POOL "%-10s remapped -> spare block=%hu (candidate_idx=%hu)\r\n", part->name, b, i);
         }
     }
 }
