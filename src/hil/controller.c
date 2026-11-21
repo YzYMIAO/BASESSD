@@ -4,6 +4,7 @@
 #include "delay.h"    /* delay_now_ms：请求级 deadline */
 #include "lifetime.h" /* 终身计数：FLUSH / TRIM 成功计数 */
 #include "log.h"
+#include "watchdog.h" /* storage_wdg_kick：format MBR 的同步泵 */
 
 #include <stddef.h>
 #include <string.h>
@@ -32,6 +33,208 @@ ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
     ASSERT(die < DIE_MAX);
 
     return controller->ftl[die];
+}
+
+/**
+ * @brief 小端写 32 bit（MBR 字段）
+ *
+ * @param p 目标
+ * @param v 值
+ */
+static void mbr_put32(BYTE *p, DWORD v)
+{
+    p[0] = (BYTE)(v & 0xFFU);
+    p[1] = (BYTE)((v >> 8U) & 0xFFU);
+    p[2] = (BYTE)((v >> 16U) & 0xFFU);
+    p[3] = (BYTE)((v >> 24U) & 0xFFU);
+}
+
+/**
+ * @brief 推进一轮 NAND 完成与目标实例的 host 补发
+ *
+ * MBR 的同步读/写不能只调 `ftl_service_pump()`：未映射 LBA 的首次读会起
+ * L2P region 异步加载，组停在 `next=0`，必须由 `ftl_service()` 的 host 补发
+ * 重新下发；漏掉它会让 MBR 读/写永远等不到完成。
+ *
+ * @param ftl 目标 FTL 实例
+ */
+static void ssd_mbr_service_step(ftl_ctx_s *ftl)
+{
+    storage_wdg_kick();
+    ftl_service_pump();
+    ftl_service(ftl);
+}
+
+/**
+ * @brief 写默认 MBR（分区从 LBA 128 起，类型 0x0C）
+ *
+ * @param controller Controller 上下文（READY）
+ * @return SSD_STATUS_OK；容量不足 / 写 / flush 失败返回错误
+ */
+static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
+{
+    const DWORD start_lba = 128U; /* 64 KiB 对齐，与 usb_verify.ps1 的标准布局一致 */
+    const DWORD max       = ssd_controller_host_lba_max(controller);
+
+    /* controller / READY / ftl[0] 已由唯一调用者 ensure 校验；这里只守容量前提。 */
+    if (max <= start_lba)
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
+
+    ftl_ctx_s *ftl = controller->ftl[0];
+    BYTE       mbr[512];
+
+    memset(mbr, 0, sizeof(mbr));
+
+    /* 分区项 0：LBA 模式；CHS 对现代 Windows 不参与寻址。 */
+    mbr[446] = 0x00U; /* 非活动分区 */
+    mbr[447] = 0x02U; /* start CHS: head */
+    mbr[448] = 0x03U; /* start CHS: sector */
+    mbr[449] = 0x00U; /* start CHS: cylinder */
+    mbr[450] = 0x0CU; /* FAT32 LBA */
+    mbr[451] = 0xFEU; /* end CHS 占位（LBA 模式） */
+    mbr[452] = 0xFFU;
+    mbr[453] = 0xFFU;
+    mbr_put32(&mbr[454], start_lba);
+    mbr_put32(&mbr[458], max - start_lba);
+    mbr[510] = 0x55U;
+    mbr[511] = 0xAAU;
+
+    volatile BYTE         done   = 0U;
+    volatile ssd_status_e status = SSD_STATUS_IO_ERROR;
+    ftl_io_req_s          req;
+
+    memset(&req, 0, sizeof(req));
+    req.lba           = 0U;
+    req.buffer        = mbr;
+    req.count         = 1U;
+    req.complete_flag = &done;
+    req.status_out    = &status;
+
+    if (ftl_submit_write(ftl, &req) != FTL_OK)
+    {
+        return SSD_STATUS_IO_ERROR;
+    }
+
+    for (DWORD spin = 0U; (spin < 1000000U) && (done == 0U); spin++)
+    {
+        ssd_mbr_service_step(ftl);
+    }
+
+    if ((done == 0U) || (status != SSD_STATUS_OK))
+    {
+        return SSD_STATUS_IO_ERROR;
+    }
+
+    /* MBR 映射必须随 Journal/CP 落盘后才能断电；否则 L2P 回滚回 partitionless。 */
+    ftl_flush_begin(ftl);
+
+    for (DWORD spin = 0U; spin < 1000000U; spin++)
+    {
+        ssd_mbr_service_step(ftl);
+
+        if (ftl_flush_step(ftl) != false)
+        {
+            return SSD_STATUS_OK;
+        }
+    }
+
+    return SSD_STATUS_IO_ERROR;
+}
+
+/**
+ * @brief LBA0 是否为 format 后未映射的全零扇区
+ *
+ * FTL 对未映射 LBA 的读取契约是零填充，因此 format 后 LBA0 必然全 0x00。
+ * 全 0xFF 不视为空白：那可能是用户实际写入的数据，不能覆盖。
+ *
+ * @param sector 512 B 扇区
+ * @return true  全 0x00；false 有非零字节
+ */
+static BOOL ssd_lba0_zero(const BYTE sector[512])
+{
+    DWORD zeros = 0U;
+
+    for (DWORD i = 0U; i < 512U; i++)
+    {
+        zeros += (sector[i] == 0x00U) ? 1U : 0U;
+    }
+    return zeros == 512U;
+}
+
+/**
+ * @brief boot 后确保空白介质带默认 MBR
+ *
+ * 读 LBA0：已有 55AA 引导签名则保持原样；LBA0 全 0x00（format 后未映射）
+ * 则写默认 MBR。LBA0 有数据但无引导签名时不动，避免覆盖用户自建布局。
+ * 调用点必须在 ftl_boot_recover 回填 free/op/spare 池之后。
+ *
+ * @param controller Controller 上下文（READY；非空）
+ * @return SSD_STATUS_OK 已有 MBR / 已写入 / LBA0 有数据保持原样
+ *         SSD_STATUS_INVALID_ARGUMENT 状态或实例非法
+ *         SSD_STATUS_IO_ERROR LBA0 读失败或 MBR 写失败
+ */
+ssd_status_e ssd_controller_ensure_default_mbr(ssd_ctl_s *controller)
+{
+    if ((controller == NULL) || (controller->state != SSD_CONTROLLER_READY) || (controller->ftl[0] == NULL))
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
+
+    ftl_ctx_s *ftl = controller->ftl[0];
+    BYTE       sector[512];
+
+    memset(sector, 0, sizeof(sector));
+
+    volatile BYTE         done   = 0U;
+    volatile ssd_status_e status = SSD_STATUS_IO_ERROR;
+    ftl_io_req_s          req;
+
+    memset(&req, 0, sizeof(req));
+    req.lba           = 0U;
+    req.buffer        = sector;
+    req.count         = 1U;
+    req.complete_flag = &done;
+    req.status_out    = &status;
+
+    if (ftl_submit_read(ftl, &req) != FTL_OK)
+    {
+        LOGE("[HIL ] default MBR: LBA0 read submit failed\r\n");
+        return SSD_STATUS_IO_ERROR;
+    }
+
+    for (DWORD spin = 0U; (spin < 1000000U) && (done == 0U); spin++)
+    {
+        ssd_mbr_service_step(ftl);
+    }
+
+    if ((done == 0U) || (status != SSD_STATUS_OK))
+    {
+        LOGE("[HIL ] default MBR: LBA0 read failed\r\n");
+        return SSD_STATUS_IO_ERROR;
+    }
+
+    if ((sector[510] == 0x55U) && (sector[511] == 0xAAU))
+    {
+        return SSD_STATUS_OK; /* 已有 MBR / 文件系统引导扇区，不覆盖 */
+    }
+
+    if (ssd_lba0_zero(sector) == false)
+    {
+        /* LBA0 有数据但不是 MBR：可能是用户自建的分区方案，保持原样。 */
+        LOGW("[HIL ] default MBR: LBA0 has data without 55AA; leave unchanged\r\n");
+        return SSD_STATUS_OK;
+    }
+
+    if (ssd_mbr_write_default(controller) != SSD_STATUS_OK)
+    {
+        LOGE("[HIL ] default MBR: write failed\r\n");
+        return SSD_STATUS_IO_ERROR;
+    }
+
+    LOGI("[HIL ] default MBR written (partition LBA 128)\r\n");
+    return SSD_STATUS_OK;
 }
 
 /**

@@ -67,5 +67,6 @@ typedef struct FTL_MODULE_STATUS_S
 #define FTL_WAIT_TIMEOUT_MS        (50U)  /* 等 L2P/Journal 等外部模块 */
 #define FTL_SUBMIT_TIMEOUT_MS      (10U)  /* 提交背压（池空/QUEUE 满） */
 #define FTL_GROUP_DRAIN_TIMEOUT_MS (100U) /* 写确认待入账 / 组收尾 */
+#define FTL_L2P_DEMAND_WINDOW_MS   (500U) /* demand L2P 独立提交窗口（本仓取值） */
 
 #endif /* FTL_MODULE_H */

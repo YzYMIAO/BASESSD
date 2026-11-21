@@ -49,7 +49,7 @@
     KEEP(*release/obj*/ftl/metadata.o(.text .text.*))
     KEEP(*release/obj*/ftl/metadata_job.o(.text .text.*))
     KEEP(*release/obj*/ftl/migrate.o(.text .text.*))
-    KEEP(*release/obj*/ftl/gc.o(.text .text.*))
+    /* gc.o（victim 选择）是纯后台路径，产品与 UT 都留 Flash，给 host 热路径留 ITCM 预算。 */
     /* wear_leveling / bg_scheduler 是纯后台路径，放 Flash 运行；写回 CMT 让
      * l2p_cache.o 增大后，ITCM 优先留给 host 数据面。 */
     KEEP(*release/obj*/ftl/ftl_op.o(.text .text.*))

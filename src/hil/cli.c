@@ -24,12 +24,11 @@
 #include "l2p_cache.h"
 #include "lifetime.h" /* 终身计数（P3）*/
 #include "log.h"
-#include "metadata.h"               /* md_pool_print（pool 诊断） */
-#include "nand_device.h"            /* nand_get_timing_mode（通用器件查询） */
-#include "pc_sample.h"              /* PC 采样环（pc 命令） */
-#include "pending.h"                /* pend_slot/group_get_count（q） */
-#include "power_failure_recovery.h" /* pfr_media_format（boot 失败后的恢复格式化） */
-#include "runtime.h"                /* ssd_runtime_pump：CLI 同步等待命令自带泵 */
+#include "metadata.h"    /* md_pool_print（pool 诊断） */
+#include "nand_device.h" /* nand_get_timing_mode（通用器件查询） */
+#include "pc_sample.h"   /* PC 采样环（pc 命令） */
+#include "pending.h"     /* pend_slot/group_get_count（q） */
+#include "runtime.h"     /* ssd_runtime_pump：CLI 同步等待命令自带泵 */
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "stats.h"
@@ -1343,10 +1342,12 @@ static void uart_cli_bbt(int argc, char *argv[])
 /**
  * @brief format — boot 失败后的恢复格式化（破坏性）
  *
- * 用途：CP/目录检查点介质状态无法被 pfr_media_check_format 判定为「空片/版本不符」
+ * 用途：CP/目录检查点介质状态无法被 ftl_boot_check_format 判定为「空片/版本不符」
  * （例如上一轮 bbt erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
- * 本命令直接对已 ftl_init 的实例执行 pfr_media_format：重落 BBT（带
+ * 本命令直接对已 ftl_init 的实例执行 ftl_boot_format：重落 BBT（带
  * FORMAT_IN_PROGRESS）→ 擦除 BBT 池之外的块 → 写当前版本初始 Checkpoint。
+ * 格式化只写 initial CP 并清空池，本会话随后必须断电；下次 boot 由
+ * ftl_boot_recover 回填池，并在检测到 LBA0 无 MBR 时补写默认 MBR。
  *
  * ⚠ 擦除全部用户数据与元数据；执行后必须断电重启，不能在运行中的 FTL 上继续用。
  * ⚠ 所有构建档注册（`UART_CLI_FORMAT_ENABLE`）；release 现场恢复也用它。
@@ -1409,7 +1410,7 @@ static void uart_cli_format(int argc, char *argv[])
             ftl_service_pump();
         }
 
-        if (pfr_media_format(ftl, verify) != FTL_OK)
+        if (ftl_boot_format(ftl, verify) != FTL_OK)
         {
             LOGE("format: failed ch=%hhu ce=%hhu lun=%hhu\r\n", ch, ce, lun);
             return;
@@ -1425,6 +1426,9 @@ static void uart_cli_format(int argc, char *argv[])
         return;
     }
 
+    /* 格式化只写 initial CP 并清空池；本会话的 FTL 不能再收 host I/O。
+     * 默认 MBR 由下次 boot 在 recover 回填池之后检测 LBA0 自动补写。 */
+    LOGI("format: default MBR will be written on next boot\r\n");
     LOGW("format: done. POWER-CYCLE NOW.\r\n");
     return;
 }

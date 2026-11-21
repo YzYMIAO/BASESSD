@@ -1245,10 +1245,10 @@
 | RISK-HOST-08 | 风险 | 信息 | TRIM 已异步；CLI 诊断与 CP 冷启动 locate 仍同步 | 部分上板（2026-10-22） |
 | RISK-HOST-09 | 风险 | 信息 | TRIM 命中 wbuf 未编程 LBA 时不失效旧映射 | — |
 | RISK-HOST-15 | 风险 | 信息 | 写确认 handler 用文件级全局 + `void *`，UT 需 save/restore | 未上板 |
-| RISK-HOST-18 | 风险 | 信息 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；用户裁决接受） | 2026-11-13 403/416 通过，无 timeout |
+| RISK-HOST-18 | 风险 | 已闭合 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；2026-11-21 去格式化复现） | 2026-11-21 release 修正后：format 满盘 415/423、0 错误、无 timeout、窗口 open=11/blocked=276；无 format 满盘 415/423、0 错误、889/870、窗口 open=90/blocked=6636/expired=1、无 timeout |
 | RISK-LOG-02 | 风险 | 信息 | GC 事件在极端 victim 速率下仍可能占 UART | 2026-10-23 上板 |
 | RISK-LOG-03 | 风险 | 信息 | GC no-gain 刷屏（边沿复用） | 2026-10-23 复现 |
-| RISK-PERF-05 | 风险 | 待决策 | CP/L2P gate 背压导致满盘写速下降；优化须保持 host 路径非阻塞 | 2026-11-21 板端 912/857 + `stats` |
+| RISK-PERF-05 | 风险 | 待决策 | CP/L2P gate 背压导致满盘写速下降；优化须保持 host 路径非阻塞 | 2026-11-21 release 910/870（415/423，0 错误）；confirm timeout 未出现（一次） |
 
 ### 详情
 
@@ -1457,6 +1457,15 @@
   - 2026-11-13 代码对比 `574b8e7..HEAD`：`ftl_op.c`（seq gate）/ `l2p_cache.c`（加载）/ `pending.c` 均 **0 diff**，`ftl_fc_interface.h` 仅注释 ⇒ HOST-18 的修复代码未被改坏。行为差异只有 122aaf7（USB MODE SENSE 宣称 WCE=0）与 155cf9a（cache 写序列 verdict/pad/closing + flush 无进展超时）；本轮日志无 `cache-wr failed` / `flush stalled`，新分支未触发 ⇒ 仍是同一潜伏时序竞态，不是已定位的新回归
   - 空间假说已排除：2026-11-12 通过时结束 `free=23`，本轮失败时 `free=33`，且 OP 池 408 块未动 ⇒ 不是「真的写满」
   - 2026-11-12 18:04:36 镜像 H2testw 406/420 MB 通过 → 当时闭合（详情见 `docs/archive/known_risks_batches.md`）；仅一次通过，不代表边界稳定
+  - **2026-11-21 02:36:00 release 复现**：H2testw **415/423 MB、`Test finished without errors`、写 911 / 读 869 KB/s**；但串口有一次 `confirm park timeout lba=771072 idx=0 parked=8` → host `io_error` → 两条 `write chunk failed after ack` + deferred error；结束 `complete_err=4`、`bad_status=2`、`timeout=0`、`free=44`、`cp max=2.97 s`。⇒ 仍是同一间歇竞态，H2testw 最终校验通过（主机重试/重挂载后未丢数据），非 P1 失败形态（无 `free=0` / `wbuf no block`）。
+  - **2026-11-21 追踪（未改代码）**：`lba=771072 → region 1506`（512 entry/region）；本轮 `l2p.load_start=1680` / `load_done_ok=1680`、**`load_fail_gate=1833`**、`load_fail_no_cmd=0` / `load_fail_submit=0`、`degrade=0`、`free=44`，且日志无 `no evictable line`；`ftl.op.yield_request=562` / `yield_clear=358`。⇒ 高度指向“**L2P demand load 被 host cache 序列门控反复拒绝，没有在飞 load**”，`ftl_confirm_progress_pending` 因此判定无进展，100 ms 到期把已编程写在确认阶段结算成 IO_ERROR。不是 free 池耗尽、不是 slot 满、不是 L2P 行全脏。下一步若重开：只在 `ftl_confirm_service` 增加“gate/yield 期间的 park 预算延长（有硬上限）”候选，或给 demand load 独立提交窗口；二者都必须 H2testw 0 错误验收，不能靠调 timeout 掩盖。
+  - **2026-11-21 候选修复（未上板）**：在 cache stream 调度层加 **demand L2P 独立窗口**（`ftl_cache_stream_s.l2p_demand`，状态 `IDLE/OPEN/EXPIRED` + `timer_deadline_s`）：confirm 依赖的 region 未驻留且无在飞 load 时开 500 ms 窗口；窗口内 `cache_wr_build(starting)` 返回 `FTL_CACHE_WRITE_AGAIN`，只挡新序列、不打断已有序列；confirm 成功/无 parked 清窗。统计 `ftl.stream.demand_window_{open,blocked,expired}`。`gc.o` 从产品与 UT release 的 ITCM 热集合移除（纯后台，给 host 热路径留预算）。构建四关通过，**未上板**。
+  - **2026-11-21 03:46:35 release 上板**：H2testw **415/423 MB、0 错误、写 910 / 读 870 KB/s**；串口**无** `confirm park timeout` / `write chunk failed` / `host io_error`，仅 `md job submit stalled 10ms`、`CP submit stalled 11ms free=36`、`JRN erase kick blocked`、`predictive relocate` 等后台告警。随后 `stats ftl.stream`：`demand_window_open=0` / `blocked=0` / `expired=0`；`stats` 仍有 `load_fail_gate=1808`、`flush_fail=445`、`cp.job_us max=2.756s`、`gate_block=2.4M`。⇒ **本次未触发 demand 窗口**，H2testw 通过只能说明这一轮没踩到 confirm 竞态，不能作为候选修复有效性的证据。
+  - **2026-11-21 用户裁决：挂起**。不再继续 H2testw / demand window 验证；代码保持现状，待未来有新的 `confirm park timeout` 现场再重开。复现时先看 `stats ftl.stream` 的 `demand_window_*`。
+  - **2026-11-21 11:16 无 format 复现（重开）**：主机删除 `.h2w` 后不格式化直接 H2testw，到 **200/423 MB** 报 `Code 1392 文件或目录损坏且无法读取`，写 899 KB/s。串口 `[L2P] load start failed region=90 cause=gate`、`[MIG] abort ... l2p load timeout`、`confirm park timeout lba=28800 parked=8` → Host `io_error` + `write chunk failed after ack`；GC `free` 30→16、`moved=75` / `noop=102` / `abort=2`。`stats`：`demand_window_open/blocked/expired` **仍全 0**；`load_fail_gate=15`、`flush_fail=50`、`gate_block=306768`、`complete_err=7`、`bad_status=4`、`degrade=0`、`bad=0`。⇒ 候选窗口**未被触发**，失败分支不在“region 未驻留 + 无在飞 load”；GC 的 L2P load 也被 gate 拒绝。H2testw 的错误是主机文件系统被 deferred write error 破坏的症状，不是 NAND 读错。
+  - **2026-11-21 判据修正（未上板）**：`ftl_confirm_write()` 增加 `l2p_blocked` 出参，区分“L2P 未就绪/批量读遇 FLUSHING”与“Journal 容量不足”；`ftl_confirm_service()` 改为只在 `l2p_blocked && inflight.load==0` 时开 demand window，不再用 `l2p_is_resident`（该谓词对 FLUSHING 返回 true，正是漏掉的路径）。`make all` / `make release` / `make tests UT=FTL` 通过；下一步用**删除后不 format**的 H2testw 复测，先看 `demand_window_open` 是否非零及 `confirm park timeout` 是否消失。GC 的 L2P load gate 仍是独立风险，若窗口生效后 GC 仍 abort，再单独处理。
+  - **2026-11-21 11:26:58 release 修正版上板（部分测试）**：无 format 直接 H2testw，因卷内已有 `1.h2w` 200 MB，只测 **200/423 MB**，`Test finished without errors`，写 884 / 读 826 KB/s；串口**无** `confirm park timeout` / host io_error。`stats ftl.stream`：`demand_window_open=47` / `blocked=4193` / `expired=1` ⇒ 窗口确实触发；`complete_err=2`、`bad_status=0`、`degrade=0`、`bad=0`。GC 在无 format/低 free（29~32）下仍重度搬运：`moved=281510`、`noop=1551`、`abort_l2p_timeout=5`，`CP submit stalled` 多次，但未升级为 host 失败。⚠ **200/423 不是满盘测试**；需删除 `G:\1.h2w`（或 format）后再跑满 423 MB 才能闭合。
+  - **2026-11-21 12:20 无 format 满盘通过（闭合 confirm 分支）**：删除测试文件后不 format，H2testw **415/423 MB、`Test finished without errors`、写 889 / 读 870 KB/s**。`stats ftl.stream`：`demand_window_open=90` / `blocked=6636` / `expired=1`；串口无 `confirm park timeout`；`complete_err=0`、`bad_status=0`、`deferred_taken=0`、`degrade=0`、`bad=0`。⇒ demand 窗口实际介入并完成，confirm 间歇竞态本轮未复现，闭合该条。⚠ 残余 GC/CP 压力仍在：`gc.job_start/end=1680`、`noop=1676`、`abort_l2p_timeout=2`、`cp.job_us max=3.49s`、`load_fail_gate=3374`、`flush_fail=741`，归 `RISK-PERF-05` / GC 性能，不再作为 confirm 超时证据。
 
 #### RISK-LOG-02 GC 事件占 UART
 
@@ -2299,6 +2308,7 @@
 | ISS-USB-04 | 缺口 | 待验证 | 多分区/第二分区写满校验未验 | 未上板 |
 | ISS-FTL-11 | 缺口 | 信息 | HIL 队列 + 门铃 + CQ 重构 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
 | RISK-CTRL-04 | 风险 | 待实现 | HIL submit 未校验 buffer NULL，FTL 兜底但状态分类错误 | 未上板 |
+| RISK-CTRL-05 | 风险 | 已闭合 | CLI format 后立即写默认 MBR 时池未回填，MBR 写失败 | 2026-11-21 release 上板：boot 写出 MBR |
 | RISK-HOST-21 | 风险 | 待验证 | 请求级超时 A + best-effort abort B 已落地；未上板 |
 | RISK-USB-02 | 风险 | 待实现 | MSC 异步完成 / deferred / 会话切换路径未实测 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
 | RISK-USB-07 | 风险 | 待实现 | request->io 模板的 cmd_remaining 跨命令残留 | 2026-11-15 判定 K（判定见 `docs/design/hil_ut_design.md` §7.2） |
@@ -2400,6 +2410,18 @@
   - 2026-11-13 设计文档补记：HIL UT 设计见 `docs/design/hil_ut_design.md`；本轮不改代码
   - 2026-11-13 用户裁决：留以后检验 → 本轮不修
   - 2026-11-13 读码判定 → 未上板
+
+#### RISK-CTRL-05 CLI format 后立即写默认 MBR 失败
+
+- **状态**：已闭合（固件 MBR 写入路径上板通过；Windows VDS 弹窗另属主机侧，不随本条闭合）
+- **后果**：`uart_cli_format` 在 `pfr_media_format` 刚结束时调用 `ssd_controller_write_default_mbr`；此时 format 已把 free/op/spare 池清空（`free=0`），`ftl_submit_write` 无法分配页对，日志 `format: default MBR write failed`。随后 host 侧（磁盘管理）继续写入也报 `wbuf: no block for 1000ms — fail host write (free=0)`，普通用户看到无分区表 / 无法删除卷。boot auto-format 路径因先跑 `ftl_boot_recover` 回填池，未触发。
+- **当前缓解**：MBR 统一移到 boot 的 `ftl_boot_recover` 之后：`ssd_controller_ensure_default_mbr` 先读 LBA0，已有 `55AA` 则不动，只有全 `00` 的未映射扇区才写默认 MBR；CLI format 只提示「下次 boot 写 MBR」，仍要求断电。CLI 与 boot auto-format 共用这一处。
+- **下一步 / 判据**：上板跑 CLI `format` → 断电重启；串口应出现 `[HIL ] default MBR written (partition LBA 128)`，Windows 磁盘管理可正常删除/新建卷，且不再出现 `wbuf: no block ... free=0`。若 LBA0 读失败，先查 boot 后 `free` 是否已回填。
+- **证据**：`src/hil/cli.c:uart_cli_format`；`src/hil/controller.c:ssd_controller_ensure_default_mbr` / `ssd_mbr_write_default`；`src/main.c:ssd_ftl_boot_all` ③.6；2026-11-21 板端日志（镜像 `built Nov 21 2026 03:25:39`）`format: default MBR write failed` + `wbuf: no block ... free=0`。
+- **历史/验证**：
+  - 2026-11-21 板端复现 → 定位 format 清池与 MBR 写时序；改为 boot 后补写（未上板）
+  - 2026-11-21 板端复测 → `[HIL ] default MBR: LBA0 read failed`：boot 时 LBA0 未映射，首次读起 L2P region 异步加载并返回 `FTL_AGAIN`；等待循环只调 `ftl_service_pump()`，漏了 `ftl_service()` 的 host 补发，组停在 `next=0`。已抽出 `ssd_mbr_service_step()`（pump + 目标实例 service）供读、写、flush 三处共用；`make all` / `make release` 通过（未上板）
+  - 2026-11-21 03:46:35 release 镜像上板 → boot 日志 `[HIL ] default MBR written (partition LBA 128)`；随后 H2testw 415/423 MB、0 错误、写 910 / 读 870 KB/s。⇒ 固件 MBR 写入路径通过；Windows 磁盘管理的 VDS 弹窗另查（用户裁决暂不追）
 
 ---
 

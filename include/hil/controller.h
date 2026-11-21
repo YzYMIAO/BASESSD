@@ -156,6 +156,20 @@ static inline DWORD ssd_controller_host_lba_max(const ssd_ctl_s *controller)
 }
 
 /**
+ * @brief boot 后确保空白介质带默认 MBR
+ *
+ * 读 LBA0：已有 55AA 引导签名则保持原样；LBA0 全 0x00（format 后未映射）
+ * 则写默认 MBR。LBA0 有数据但无引导签名时不动，避免覆盖用户自建布局。
+ * 调用点必须在 ftl_boot_recover 回填 free/op/spare 池之后。
+ *
+ * @param controller Controller 上下文（READY；非空）
+ * @return SSD_STATUS_OK 已有 MBR / 已写入 / LBA0 有数据保持原样
+ *         SSD_STATUS_INVALID_ARGUMENT 状态或实例非法
+ *         SSD_STATUS_IO_ERROR LBA0 读失败或 MBR 写失败
+ */
+ssd_status_e ssd_controller_ensure_default_mbr(ssd_ctl_s *controller);
+
+/**
  * @brief Controller 最小状态机（C1）。
  *
  * 合法转换表：RESET→INITIALIZING（boot）、INITIALIZING→READY/FAILED

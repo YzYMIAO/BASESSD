@@ -414,8 +414,13 @@ typedef struct FTL_PAGE_DESCRIPTOR_S
  * Journal 容量不足时 jrn_reserve 只起异步刷页并返 FTL_AGAIN，确认阶段不碰
  * NAND、不重入完成派发 ⇒ 就绪判定与第二遍之间状态不可能变。
  */
-static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
+static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l2p_blocked)
 {
+    if (l2p_blocked != NULL)
+    {
+        *l2p_blocked = false;
+    }
+
     // 三个调用点（host 完成路径 / cache 写确认步 / 写确认服务）都传非空 ftl 与描述符
     // ⇒ 不在本函数复检（§十附 / §二十六）。
     // 同理 d->lba 恒为**窗口基址**（唯一写点是 wb_handle(FLUSH) 的 wbuf.base）——
@@ -431,6 +436,10 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
         // 返回 AGAIN 交由待入账重试：预算是否延长由 `ftl_confirm_service` 按
         // 「确有可推进的工作」判定。加载**起不动**
         // （`load_inflight==0`）时该判据不成立 ⇒ 仍保留 100 ms 的有界失败。
+        if (l2p_blocked != NULL)
+        {
+            *l2p_blocked = true; /* LOADING / FLUSHING / CMT 写回容量不足 */
+        }
         return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
     }
 
@@ -467,6 +476,10 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d)
         // 第三处 AGAIN：行在就绪检查之后变成 FLUSHING（写回在飞）⇒ 批量读被拒。
         // 预算延长同样由 `ftl_confirm_service` 判定（`flush_inflight > 0` 会命中），
         // 否则 100 ms 到期把一次**有限**的写回等待结算成 host 写失败。
+        if (l2p_blocked != NULL)
+        {
+            *l2p_blocked = true; /* 就绪检查与批量读之间行转为 FLUSHING */
+        }
         return FTL_AGAIN;
     }
 
@@ -676,7 +689,7 @@ static BOOL ftl_host_io_write_ok(ftl_ctx_s *ftl, pend_req_s *pending)
     d.cw_bitmap = pending->cw_bitmap;
     d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
 
-    if (ftl_confirm_write(ftl, &d) != FTL_AGAIN)
+    if (ftl_confirm_write(ftl, &d, NULL) != FTL_AGAIN)
     {
         return false;
     }
@@ -700,6 +713,11 @@ static BOOL ftl_host_io_write_ok(ftl_ctx_s *ftl, pend_req_s *pending)
 static void ftl_confirm_service(ftl_ctx_s *ftl)
 {
     const DWORD now_ms = platform_now_ms();
+
+    if (pend_confirm_get_count(&ftl->pending) == 0U)
+    {
+        ftl_cache_demand_window_clear(ftl); /* 没有 parked 确认：窗口上下文结束 */
+    }
 
     for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -725,10 +743,22 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
         d.cw_bitmap = pending->cw_bitmap;
         d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
 
-        const ftl_status_e st = ftl_confirm_write(ftl, &d);
+        BOOL               l2p_blocked = false;
+        const ftl_status_e st          = ftl_confirm_write(ftl, &d, &l2p_blocked);
 
         if (st == FTL_AGAIN)
         {
+            // confirm 被 L2P 阻塞（LOADING / FLUSHING / CMT 写回容量不足）且没有在飞
+            // load ⇒ 开独立提交窗口。不能用 `l2p_is_resident` 判断：它对 FLUSHING
+            // 返回 true，而 `l2p_entries_ready` 对 FLUSHING 返回 false，会漏掉正是
+            // “写回被门控挡住”的失败路径。`l2p_blocked` 由 ftl_confirm_write 精确回传。
+            if ((l2p_blocked != false) && (ftl->cache->inflight.load == 0U) &&
+                (ftl_cache_demand_window_open(ftl, now_ms) != false))
+            {
+                pending->park_ms = now_ms; /* 窗口期间不算 confirm 超时 */
+                continue;
+            }
+
             // 预算按「无进展时长」计：确有完成源在推进
             // （region 加载或写回在飞、Journal 页写或换块擦、任一非待入账 pending 项）⇒
             // 刷新起点；全都没有才是结构性卡死，让 100 ms 到期暴露成一次写失败。
@@ -752,6 +782,11 @@ static void ftl_confirm_service(ftl_ctx_s *ftl)
         else if (st != FTL_OK)
         {
             LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
+        }
+
+        if (st == FTL_OK)
+        {
+            ftl_cache_demand_window_clear(ftl); /* 本确认已推进，窗口目的达成 */
         }
 
         const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
@@ -1408,7 +1443,7 @@ static void ftl_cache_wr_confirm_step(ftl_ctx_s *ftl)
             d.cw_bitmap = pg->cw_bitmap;
             d.seq_page  = true;
 
-            if (ftl_confirm_write(ftl, &d) != FTL_OK)
+            if (ftl_confirm_write(ftl, &d, NULL) != FTL_OK)
             {
                 return; /* FTL_AGAIN：背压，下轮再来 */
             }
@@ -2154,22 +2189,25 @@ static const stats_name_s s_stats_alloc_names[] = {
 FTL_ALLOC_STATS_LIST(FTL_ALLOC_STATS_CHECK)
 #    undef FTL_ALLOC_STATS_CHECK
 
-#    define FTL_STREAM_STATS_LIST(X)                \
-        X(prefetch_run, STATS_U32, STATS_COUNTER)   \
-        X(prefetch_run_max, STATS_U32, STATS_GAUGE) \
-        X(read_batches, STATS_U32, STATS_COUNTER)   \
-        X(read_pairs, STATS_U32, STATS_COUNTER)     \
-        X(read_starts, STATS_U32, STATS_COUNTER)    \
-        X(read_declines, STATS_U32, STATS_COUNTER)  \
-        X(read_fallbacks, STATS_U32, STATS_COUNTER) \
-        X(seq_breaks, STATS_U32, STATS_COUNTER)     \
-        X(wb_batches, STATS_U32, STATS_COUNTER)     \
-        X(wb_pages, STATS_U32, STATS_COUNTER)       \
-        X(wb_declines, STATS_U32, STATS_COUNTER)    \
-        X(wb_aborts, STATS_U32, STATS_COUNTER)      \
-        X(wb_starts, STATS_U32, STATS_COUNTER)      \
-        X(wb_page_ends, STATS_U32, STATS_COUNTER)   \
-        X(wb_pad_closes, STATS_U32, STATS_COUNTER)
+#    define FTL_STREAM_STATS_LIST(X)                       \
+        X(prefetch_run, STATS_U32, STATS_COUNTER)          \
+        X(prefetch_run_max, STATS_U32, STATS_GAUGE)        \
+        X(read_batches, STATS_U32, STATS_COUNTER)          \
+        X(read_pairs, STATS_U32, STATS_COUNTER)            \
+        X(read_starts, STATS_U32, STATS_COUNTER)           \
+        X(read_declines, STATS_U32, STATS_COUNTER)         \
+        X(read_fallbacks, STATS_U32, STATS_COUNTER)        \
+        X(seq_breaks, STATS_U32, STATS_COUNTER)            \
+        X(wb_batches, STATS_U32, STATS_COUNTER)            \
+        X(wb_pages, STATS_U32, STATS_COUNTER)              \
+        X(wb_declines, STATS_U32, STATS_COUNTER)           \
+        X(wb_aborts, STATS_U32, STATS_COUNTER)             \
+        X(wb_starts, STATS_U32, STATS_COUNTER)             \
+        X(wb_page_ends, STATS_U32, STATS_COUNTER)          \
+        X(wb_pad_closes, STATS_U32, STATS_COUNTER)         \
+        X(demand_window_open, STATS_U32, STATS_COUNTER)    \
+        X(demand_window_blocked, STATS_U32, STATS_COUNTER) \
+        X(demand_window_expired, STATS_U32, STATS_COUNTER)
 
 #    define FTL_STREAM_STATS_NAME(field, width, kind) \
         {STATS_NAME_STR(field), STATS_OFFSET(ftl_cache_stream_s, field), width, kind},

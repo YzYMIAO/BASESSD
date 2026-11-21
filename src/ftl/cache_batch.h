@@ -97,6 +97,34 @@ void ftl_cache_seq_request_yield(ftl_ctx_s *ftl, DWORD now_ms);
  */
 void ftl_cache_seq_yield_clear(ftl_ctx_s *ftl);
 
+/**
+ * @brief 开 demand L2P 独立提交窗口
+ *
+ * confirm 依赖的 region 未驻留、且没有在飞 load 时调用。窗口只挡**新** cache
+ * 序列，不打断已有序列。
+ *
+ * @param ftl    实例
+ * @param now_ms 当前毫秒时基（0 = 时钟缺失，不开窗口）
+ * @return true = 窗口有效（本次或此前已开）；false = 时钟缺失 / 本轮已超时
+ */
+BOOL ftl_cache_demand_window_open(ftl_ctx_s *ftl, DWORD now_ms);
+
+/**
+ * @brief 清 demand L2P 独立提交窗口
+ *
+ * @param ftl 实例
+ */
+void ftl_cache_demand_window_clear(ftl_ctx_s *ftl);
+
+/**
+ * @brief 当前 demand L2P 窗口是否仍在阻止开新 cache 序列
+ *
+ * @param ftl 实例
+ * @return true = 暂不要开新序列；false = 无窗口 / 已超时
+ * @note 只在 host cache 写序列 **starting** 时调用。
+ */
+BOOL ftl_cache_demand_window_blocks(ftl_ctx_s *ftl);
+
 /* ── cache read ──
  * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
  * （单条 LAST 收尾，见 cache_batch.c 的 ftl_cache_read_try）。

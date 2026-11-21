@@ -269,10 +269,28 @@ typedef struct FTL_STREAM_DETECT_S
  *     判据是 cache 序列**能否开启**（FTL_STREAM_MIN_LBAS）。
  *   · prefetch_*：按 **请求次数**累计，flush / trim 时复位；
  *     只用于 L2P region 预取（FTL_SEQ_PREFETCH_MIN_RUN）。 */
+typedef enum FTL_L2P_DEMAND_WINDOW_STATE_E
+{
+    FTL_L2P_DEMAND_WINDOW_IDLE = 0,
+    FTL_L2P_DEMAND_WINDOW_OPEN,
+    FTL_L2P_DEMAND_WINDOW_EXPIRED,
+} ftl_l2p_demand_window_state_e;
+
+/* 写确认依赖的 demand L2P 加载被 cache 序列门控拒绝时的独立提交窗口。
+ * 只挡**新** cache 序列，不打断已有序列；窗口有界，超时后恢复 host。 */
+typedef struct FTL_L2P_DEMAND_WINDOW_S
+{
+    ftl_l2p_demand_window_state_e state;
+    timer_deadline_s              deadline;
+} ftl_l2p_demand_window_s;
+
 typedef struct FTL_CACHE_STREAM_S
 {
     /* 设备侧 cache 读写序列（单 LUN 同时一条；跨窗口 / 跨 chunk 保持）。 */
     ftl_cache_seq_s seq;
+
+    /* confirm 依赖的 demand L2P 独立提交窗口（调度状态归 cache stream）。 */
+    ftl_l2p_demand_window_s l2p_demand;
 
     /* 顺序流检测：cache 序列的开启判据。 */
     ftl_stream_det_s rd; /* 读方向 */
@@ -301,6 +319,10 @@ typedef struct FTL_CACHE_STREAM_S
     DWORD wb_starts;     /* 打开的写序列段数（START 计数） */
     DWORD wb_page_ends;  /* 写满一张 Journal 顺序页而主动 END 的次数（≈每 252 KiB 一次） */
     DWORD wb_pad_closes; /* padding END 有序收尾的次数（LBA 不连续 / 空闲 / flush） */
+
+    DWORD demand_window_open;    /* 为 confirm 依赖的 demand load 开独立窗口次数 */
+    DWORD demand_window_blocked; /* 因该窗口拒绝开新 cache 序列的次数 */
+    DWORD demand_window_expired; /* 窗口超时、恢复 host 的次数 */
 } ftl_cache_stream_s;
 
 /**

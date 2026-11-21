@@ -125,6 +125,66 @@ void ftl_cache_seq_yield_clear(ftl_ctx_s *ftl)
     ftl->cache_stream.seq.yield_ms      = 0U;
 }
 
+BOOL ftl_cache_demand_window_open(ftl_ctx_s *ftl, DWORD now_ms)
+{
+    ASSERT(ftl != NULL);
+
+    ftl_l2p_demand_window_s *w = &ftl->cache_stream.l2p_demand;
+
+    if (now_ms == 0U)
+    {
+        return false; /* 时钟缺失：保持原有 100 ms bounded failure */
+    }
+    if (w->state == FTL_L2P_DEMAND_WINDOW_OPEN)
+    {
+        return true;
+    }
+    if (w->state == FTL_L2P_DEMAND_WINDOW_EXPIRED)
+    {
+        return false; /* 本轮已超时，等 parked 清空后再重置 */
+    }
+
+    w->state = FTL_L2P_DEMAND_WINDOW_OPEN;
+    timer_deadline_arm(&w->deadline, now_ms, FTL_L2P_DEMAND_WINDOW_MS);
+    ftl->cache_stream.demand_window_open++;
+    return true;
+}
+
+void ftl_cache_demand_window_clear(ftl_ctx_s *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    ftl_l2p_demand_window_s *w = &ftl->cache_stream.l2p_demand;
+
+    w->state = FTL_L2P_DEMAND_WINDOW_IDLE;
+    timer_deadline_clear(&w->deadline);
+}
+
+BOOL ftl_cache_demand_window_blocks(ftl_ctx_s *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    ftl_l2p_demand_window_s *w = &ftl->cache_stream.l2p_demand;
+
+    if (w->state != FTL_L2P_DEMAND_WINDOW_OPEN)
+    {
+        return false;
+    }
+
+    const DWORD now_ms = platform_now_ms();
+
+    if ((now_ms != 0U) && timer_deadline_expired(&w->deadline, now_ms))
+    {
+        w->state = FTL_L2P_DEMAND_WINDOW_EXPIRED;
+        timer_deadline_clear(&w->deadline);
+        ftl->cache_stream.demand_window_expired++;
+        return false;
+    }
+
+    ftl->cache_stream.demand_window_blocked++;
+    return true;
+}
+
 /* cache read 单条 run 的 pair 上限：**由 FC 资源决定，不是 FIFO 深度**。
  * 每 pair 占 FTL_LBA_PER_PAIR（8）个 desc / buffer，FC buffer 池 =
  * FC_BUFFER_POOL_DEPTH ⇒ pair 数 ≤ FC_BUFFER_POOL_DEPTH / FTL_LBA_PER_PAIR。
@@ -1126,6 +1186,12 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
     }
 
     const BOOL starting = (seq->active == false);
+
+    if ((starting == true) && (ftl_cache_demand_window_blocks(ftl) != false))
+    {
+        ftl->cache_stream.wb_declines++;
+        return FTL_CACHE_WRITE_AGAIN; /* demand L2P 独立窗口：暂不开新序列 */
+    }
 
     if ((starting == true) && (cache_seq_yielded(seq) == true))
     {

@@ -381,6 +381,14 @@ static void ssd_ftl_boot_all(void)
      * 必须在 USB 枚举之前设置——main 继续往下才初始化 USB 设备栈。 */
     g_ctrl.host_lba_max = ftl_host_lba_max();
 
+    /* ③.6 空白介质补默认 MBR：boot auto-format 与 CLI format 都走这里。
+     * 必须在 recover 回填 free/op/spare 池、host_lba_max 定稿之后；
+     * LBA0 已有 55AA 时保持用户分区不动。 */
+    if (ssd_controller_ensure_default_mbr(&g_ctrl) != SSD_STATUS_OK)
+    {
+        LOGE("[HIL ] default MBR ensure failed — host may see partitionless media\r\n");
+    }
+
     /* ④ ssd_controller_init 已把状态置 READY —— 主循环据此切换 ftl_service。 */
     const DWORD lba_max      = g_ctrl.host_lba_max;
     const QWORD capacity_mib = ((QWORD)lba_max * FTL_IU_BYTES) / (1024UL * 1024UL);
