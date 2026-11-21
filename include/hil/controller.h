@@ -142,6 +142,18 @@ void ssd_controller_cancel_flush(ssd_ctl_s *controller);
 BOOL ssd_controller_lba_range_ok(const ssd_ctl_s *controller, QWORD lba, DWORD count);
 
 /**
+ * @brief host 写启动许可（按 LBA 路由到 FTL 实例）
+ *
+ * USB/CLI 写前端在提交 WRITE 前调用；false 时保留请求、稍后重试，读不经过
+ * 本判据。
+ *
+ * @param controller Controller 上下文
+ * @param lba        写起始 LBA
+ * @return true 允许启动；false 暂缓
+ */
+BOOL ssd_controller_host_write_admit(const ssd_ctl_s *controller, QWORD lba);
+
+/**
  * @brief 主机可见 LBA 上限（0 = 未初始化 ⇒ 编译期上限）。
  *
  * 只有一个读者口径：USB READ CAPACITY、CLI 范围检查与 boot 日志都必须用它，

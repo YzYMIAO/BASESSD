@@ -1077,6 +1077,17 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
 }
 
 /**
+ * @brief 写请求是否允许启动（读/FLUSH/UNMAP 不受 admission 限制）
+ *
+ * @param slot 已填好 lba / is_write 的槽
+ * @return true = 允许提交；false = 保持 WAIT_GATE 稍后重试
+ */
+static BOOL usb_msc_slot_write_admit(const usb_msc_slot_s *slot)
+{
+    return (slot->is_write == false) || (ssd_controller_host_write_admit(&g_ctrl, slot->lba) != false);
+}
+
+/**
  * @brief READ10/WRITE10 公共入口：校验 + 槽分配 + 提交
  *
  * @param is_write true = WRITE
@@ -1150,6 +1161,11 @@ static int32_t usb_msc_transfer(BOOL is_write, DWORD lba, DWORD offset, void *bu
 
     if (!cli_host_busy())
     {
+        if (usb_msc_slot_write_admit(slot) == false)
+        {
+            return TUD_MSC_RET_ASYNC; /* 保持 WAIT_GATE，usb_msc_task 下一轮重试 */
+        }
+
         const ssd_status_e st = usb_msc_slot_submit(slot);
 
         if (st != SSD_STATUS_OK)
@@ -1325,6 +1341,11 @@ void usb_msc_task(void)
             if (cli_host_busy())
             {
                 continue;
+            }
+
+            if (usb_msc_slot_write_admit(slot) == false)
+            {
+                continue; /* 写 admission 暂缓；读/FLUSH/UNMAP 不受影响 */
             }
 
             if (slot->is_unmap)

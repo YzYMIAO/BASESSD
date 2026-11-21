@@ -26,11 +26,16 @@
 
 /* L2P region 日志区（固定预留）。 */
 #define L2P_LOG_IDEAL_BLOCKS     ((L2P_REGIONS_PER_INSTANCE + PAGES_PER_BLOCK - 1U) / PAGES_PER_BLOCK)
-#define L2P_REGION_COPIES        (2U)
+#define L2P_REGION_COPIES        ((DWORD)(PLANE_NUM))
 #define L2P_LOG_BLOCKS_TOTAL     (3U * L2P_LOG_IDEAL_BLOCKS)
 #define L2P_LOG_BLOCKS_PER_PLANE (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
 #define L2P_LOG_BLOCK0           (FTL_METADATA_BLOCK_END)
 #define L2P_LOG_AREA_END         (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
+
+/* flush_pba[] 的副本位置 = 承载 plane。当前 Directory 格式只存主 + 备两个 PBA，
+ * metadata.h 用断言把副本数钉在 2；改 PLANE_NUM 必须同步扩展格式。 */
+#define L2P_COPY_PRIMARY (0U)
+#define L2P_COPY_BACKUP  (1U)
 
 /* 共享 metadata spare（仅补固定元数据分区的 BAD 缺额）。 */
 #define MD_SPARE_BLOCK0           (L2P_LOG_AREA_END)

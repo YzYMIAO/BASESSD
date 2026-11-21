@@ -430,6 +430,10 @@ static ftl_status_e md_submit(md_dir_cache_s *dir, md_submit_op_e op, DWORD addr
     fc_cmd_s    *cmd = NULL;
     ftl_status_e st;
 
+    /* metadata 搬移/擦除是 CP/目录检查点的推进依赖：和 L2P flush 共用 CRIT 保留，
+     * 不能被 host 随机写占满的 BG 额度饿死。 */
+    const fc_cmd_class_e saved = ftl_cmd_class_set(FC_CMD_CLASS_CRIT);
+
     switch (op)
     {
         case MD_SUBMIT_WRITE:
@@ -449,8 +453,11 @@ static ftl_status_e md_submit(md_dir_cache_s *dir, md_submit_op_e op, DWORD addr
             break;
         default:
             ASSERT_DEFAULT(md_submit_op_e);
+            (void)ftl_cmd_class_set(saved);
             return FTL_ERROR;
     }
+
+    (void)ftl_cmd_class_set(saved);
 
     if (st != FTL_OK)
     {
@@ -905,7 +912,7 @@ static void md_handle_step(md_dir_cache_s *dir)
                         // 换 **victim 所在 plane** 的当前块（搬移目标就在那个 plane）。
                         const BYTE vp = (j->victim != UINT16_MAX) ? ftl_gblock_plane(j->victim) : 0U;
 
-                        (void)md_log_rotate(dir, alloc, (vp < PLANE_NUM) ? vp : 0U);
+                        (void)md_log_rotate(dir, alloc, (vp < PLANE_NUM) ? vp : 0U, true);
                     }
                     return;
                 }
@@ -982,8 +989,8 @@ static void md_handle_step(md_dir_cache_s *dir)
                     return; /* 已提交 / 背压 */
                 }
                 // 本 victim 已搬空。当前块还有空槽、且还有能装下的稀疏 victim ⇒ 继续搬
-                // 下一个（一次新生块退多个块）。旧实现“一个 rotation 只压一个”会让
-                // 碎片稳态停在 live≈N，日志区永远收不回来。
+                // 下一个（一次新生块退多个块）。一个 rotation 只压一个会让碎片稳态
+                // 停在 live≈N，日志区永远收不回来。
                 if (md_compact_next(dir, alloc))
                 {
                     break; /* phase 已置 CP_READ，循环继续 */

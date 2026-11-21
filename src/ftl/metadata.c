@@ -1653,11 +1653,11 @@ void md_commit_region(md_dir_cache_s *dir, WORD region_id, md_commit_mode_e mode
     switch (mode)
     {
         case MD_COMMIT_PRIMARY:
-            first = 0U;
+            first = L2P_COPY_PRIMARY;
             count = 1U;
             break;
         case MD_COMMIT_BACKUP:
-            first = 1U;
+            first = L2P_COPY_BACKUP;
             count = 1U;
             break;
         case MD_COMMIT_PAIR:
@@ -2540,11 +2540,6 @@ SSD_CODE_FAST BOOL md_slot_pair_append(md_dir_cache_s *dir, alc_s *alloc, DWORD 
     // **未消耗任何槽**（两副本不会出现"取到一个、另一个失败"的半对）。
     for (BYTE p = 0U; p < L2P_REGION_COPIES; p++)
     {
-        if (p >= PLANE_NUM)
-        {
-            return false; /* 编译期断言保证不可达 */
-        }
-
         if (dir->cur.valid[p])
         {
             const bst_block_s *b = &alloc->blocks[dir->cur.block[p]];
@@ -2557,7 +2552,7 @@ SSD_CODE_FAST BOOL md_slot_pair_append(md_dir_cache_s *dir, alc_s *alloc, DWORD 
 
         if ((dir->cur.valid[p] == false) || ((WORD)dir->cur.page[p] + 1U > PAGES_PER_BLOCK))
         {
-            if (md_log_rotate(dir, alloc, p) == false)
+            if (md_log_rotate(dir, alloc, p, false) == false)
             {
                 return false;
             }
@@ -2645,7 +2640,7 @@ SSD_CODE_FAST void md_slot_release(md_dir_cache_s *dir, DWORD primary, DWORD bac
  * @param plane 目标 plane
  * @return true 已换块；false 无可用块 / 背压
  */
-SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
+SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane, BOOL for_compaction)
 {
     if (plane >= PLANE_NUM)
     {
@@ -2671,11 +2666,20 @@ SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
     // 擦除由后台 job 异步做——同步 tERASE ~3 ms 会击穿服务预算。
     md_reclaim_mark_all(dir, alloc);
 
-    // 只剩最后 1 个空闲块：先登记压缩再把它用作当前块——新块有整块空槽，
-    // 压缩才有目标可搬。free 水位判据见 L2P_LOG_FREE_WATERMARK。
-    if (md_log_area_free_count(alloc) <= 1U)
+    // free 水位是压缩的主判据（L2P_LOG_FREE_WATERMARK）。追加路径在触及水位时
+    // 必须停手，把剩余空闲块留给整理 job 作压缩目标；整理路径可以用其中一块换当前块。
+    // 否则 current 填满后没有压缩目标，md_slot_pair_append 会永久拒绝
+    // （板端现场 live=64、free=0、no evictable）。
+    const WORD free_blocks = md_log_area_free_count(alloc);
+
+    if (free_blocks <= L2P_LOG_FREE_WATERMARK)
     {
         dir->handle.compact_wanted = true;
+
+        if (for_compaction == false)
+        {
+            return false;
+        }
     }
 
     // 只从**本 plane 的固定 L2P 日志区**取块（md_log_alloc），不碰用户 Free Pool。
@@ -2709,8 +2713,8 @@ SSD_CODE_FAST BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane)
 
     // 抗碎片：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好够把多个稀疏
     // victim 一次搬空。触发判据是**元数据空间水位**（live 日志块数），不是用户
-    // Free Pool——旧实现只在 free≤32 时压，运行期大部分时间不压，日志碎片从理想
-    // 32 块一路涨到上千块，把用户容量吃光。
+    // Free Pool：按 free 触发会让大部分运行期不压，日志碎片从理想 32 块涨到上千块，
+    // 把用户容量吃光。
     // 只**登记请求**，本次不发放槽位：调用者收到 NAND_PBA_INVALID 返回 FTL_AGAIN，
     // 下轮重试；若 job 已起则继续让路直到压缩走完。
     if (md_live_block_count_get(dir) > L2P_LOG_COMPACT_TRIGGER)

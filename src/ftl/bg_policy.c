@@ -1,28 +1,22 @@
 /*
- * bg_scheduler.c — 工作量配额后台调度器：引擎 + FTL 任务表/档位策略
+ * bg_policy.c — 工作量配额后台调度器：引擎 + FTL 任务表/档位策略
  *
  * 本文件两段：
  *   · 引擎（本段）：机械执行「必跑任务（must-run）」与「预算任务」两批，不认识任何具体任务。
- *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_tasks + 档位表 s_bg_level_cfg
+ *   · FTL 策略段（下方）：10 个适配器 + 任务表 s_bg_policy_tasks + 档位表 s_bg_level_cfg
  *     + 装配 / 选档 / 后台调度步入口。
  *
- * 语义定义（must_run / units / grant_units / token bucket / 墙钟兜底）见 `bg_scheduler.h` 头注，
+ * 语义定义（must_run / units / grant_units / token bucket / 墙钟兜底）见 `bg_policy.h` 头注，
  * 设计说明见 `docs/design/ftl_design.md §3.12`——不在此重复，避免两份漂移。
  */
 
-#include "bg_scheduler.h"
+#include "bg_policy.h"
 
 #include "assertion.h"
-#include "bbt.h"
-#include "checkpoint.h"
 #include "ftl.h"
-#include "journal.h"
-#include "l2p_cache.h"
-#include "metadata.h"
-#include "migrate.h"
+#include "ftl_sched.h"
 #include "pending.h"
 #include "platform.h" /* ssd_platform_get / ssd_platform_ops_s.time_us */
-#include "read_recovery.h"
 #include "timer.h"
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -35,22 +29,22 @@
 
 // 任务位：每个任务一个独立位，由表项 `.mask` 声明；表序只决定执行顺序，
 // 不兼职掩码位号（C9：同一语义只允许一套坐标）。
-#define BG_TASK_CP_JOIN    (1U << 0) /* 在飞 CP 跨轮推进（must-run，表首） */
-#define BG_TASK_RR         (1U << 1) /* Read Recovery 推进（must-run） */
-#define BG_TASK_MIGRATE    (1U << 2) /* 搬移引擎推进 + 自持节拍（must-run） */
-#define BG_TASK_METADATA   (1U << 3) /* 目录整理（must-run） */
-#define BG_TASK_JRN_ERASE  (1U << 4) /* Journal 换块擦除（must-run） */
-#define BG_TASK_CP_EMERG   (1U << 5) /* 紧急 Checkpoint（must-run） */
-#define BG_TASK_L2P_FLUSH  (1U << 6) /* L2P 后台写回（预算） */
-#define BG_TASK_JRN_FLUSH  (1U << 7) /* Journal 刷页（预算） */
-#define BG_TASK_BBT        (1U << 8) /* BBT 持久化（预算） */
-#define BG_TASK_CP_TRIGGER (1U << 9) /* Checkpoint 周期触发（预算） */
+#define BG_POLICY_TASK_CP_JOIN    (1U << 0) /* 在飞 CP 跨轮推进（must-run，表首） */
+#define BG_POLICY_TASK_RR         (1U << 1) /* Read Recovery 推进（must-run） */
+#define BG_POLICY_TASK_MIGRATE    (1U << 2) /* 搬移引擎推进 + 自持节拍（must-run） */
+#define BG_POLICY_TASK_METADATA   (1U << 3) /* 目录整理（must-run） */
+#define BG_POLICY_TASK_JRN_ERASE  (1U << 4) /* Journal 换块擦除（must-run） */
+#define BG_POLICY_TASK_CP_EMERG   (1U << 5) /* 紧急 Checkpoint（must-run） */
+#define BG_POLICY_TASK_L2P_FLUSH  (1U << 6) /* L2P 后台写回（预算） */
+#define BG_POLICY_TASK_JRN_FLUSH  (1U << 7) /* Journal 刷页（预算） */
+#define BG_POLICY_TASK_BBT        (1U << 8) /* BBT 持久化（预算） */
+#define BG_POLICY_TASK_CP_TRIGGER (1U << 9) /* Checkpoint 周期触发（预算） */
 
 // 档位预设：只列出**预算任务**的位；must-run 由 bg_task_s.must_run 无条件执行。
-#define BG_TASK_BUDGETED_ALL (BG_TASK_L2P_FLUSH | BG_TASK_JRN_FLUSH | BG_TASK_BBT | BG_TASK_CP_TRIGGER)
-#define BG_IDLE_TASKS        (BG_TASK_BUDGETED_ALL)
-#define BG_NORMAL_TASKS      (BG_TASK_BUDGETED_ALL)
-#define BG_BUSY_TASKS        (BG_TASK_L2P_FLUSH)
+#define BG_POLICY_TASK_BUDGETED_ALL (BG_POLICY_TASK_L2P_FLUSH | BG_POLICY_TASK_JRN_FLUSH | BG_POLICY_TASK_BBT | BG_POLICY_TASK_CP_TRIGGER)
+#define BG_IDLE_TASKS               (BG_POLICY_TASK_BUDGETED_ALL)
+#define BG_NORMAL_TASKS             (BG_POLICY_TASK_BUDGETED_ALL)
+#define BG_BUSY_TASKS               (BG_POLICY_TASK_L2P_FLUSH)
 
 // 档位 → 每个 token interval 的 credit 配额。单位见 bg_task_s.units：一次 kick
 // ≈ 1 条命令（L2P 的具体条数由模块内 max_kick 再限）。IDLE/NORMAL 放行全部 4 个
@@ -78,15 +72,14 @@ static const bg_level_cfg_s s_bg_level_cfg[BG_LEVEL_NUM] = {
  * @param ftl   FTL 上下文
  * @param cfg   本轮档位配置（发布到 sched->cfg）
  */
-void bg_scheduler_run(bg_sched_s *sched, ftl_ctx_s *ftl, const bg_level_cfg_s *cfg)
+void bg_policy_run(bg_policy_s *sched, ftl_ctx_s *ftl, const bg_level_cfg_s *cfg)
 {
     // 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不各自反查档位表。
-    // 档位（sched->level）由策略层 bg_scheduler_service 在同轮先写入，本引擎不改。
+    // 档位（sched->level）由策略层 bg_policy_service 在同轮先写入，本引擎不改。
     sched->cfg = cfg;
 
     // 必跑任务：正确性关键集（不 gate、不占预算）。
-    // 表序即执行序：cp_handle（表首）必须最先——在飞的 CP 要跨轮推进，
-    // 拖到预算任务里会被低优先级/预算耗尽饿死。
+    // 本函数只**提交**；执行顺序由 ftl_sched_dispatch 按 FTL_SCHED_PRIO_E 决定。
     for (BYTE i = 0U; i < sched->task_count; i++)
     {
         if ((sched->tasks[i].func != NULL) && sched->tasks[i].must_run)
@@ -95,8 +88,8 @@ void bg_scheduler_run(bg_sched_s *sched, ftl_ctx_s *ftl, const bg_level_cfg_s *c
         }
     }
 
-    // 预算任务：按表序 + token bucket credit（表已按执行序预排序，线性扫）。
-    // credit 由 bg_scheduler_refill 在 timer 任务里补充；must-run 不消耗 credit。
+    // 预算任务：按表序 + token bucket credit（表序决定提交先后，执行由 scheduler 仲裁）。
+    // credit 由 bg_policy_refill 在 timer 任务里补充；must-run 不消耗 credit。
     const ssd_platform_ops_s *platform   = ssd_platform_get();
     const BOOL                clock_ok   = (platform != NULL) && (platform->time_us != NULL);
     const QWORD               start_us   = (clock_ok == true) ? platform->time_us() : 0U;
@@ -142,7 +135,7 @@ void bg_scheduler_run(bg_sched_s *sched, ftl_ctx_s *ftl, const bg_level_cfg_s *c
  *
  * @param sched 本实例调度器
  */
-void bg_scheduler_refill(bg_sched_s *sched)
+void bg_policy_refill(bg_policy_s *sched)
 {
     if (sched->cfg == NULL)
     {
@@ -174,24 +167,22 @@ void bg_scheduler_refill(bg_sched_s *sched)
  * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续步骤
  * 要跨多轮跨档位走完——排在预算任务里会被低优先级/预算耗尽饿死。
  *
- * @param ftl FTL 上下文（推进其 cp_handle 上的在飞 job）。
+ * @param ftl FTL 上下文（提交 CP_ADVANCE 后台 job）。
  */
 static void bg_task_cp_join(ftl_ctx_s *ftl)
 {
-    const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, false);
-
-    cp_handle(ftl->cp_handle, &trigger);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_CP_ADVANCE);
 }
 
 /**
  * @brief 表 1 · must_run —— 推进 Read Recovery job。
  * host 读在等结果（托管的子操作占着组在飞数），不推进即死等；任何档位都要跑。
  *
- * @param ftl FTL 上下文（推进其 read_recovery_handle）。
+ * @param ftl FTL 上下文（提交 RECOVERY job）。
  */
 static void bg_task_rr(ftl_ctx_s *ftl)
 {
-    rr_handle(&ftl->read_recovery_handle);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_RECOVERY);
 }
 
 /**
@@ -199,12 +190,12 @@ static void bg_task_rr(ftl_ctx_s *ftl)
  * 写路径的紧急 GC 在 BUSY 档起（wb_handle(FLUSH) 分配不到块 ⇒ FTL_AGAIN），
  * 不推进即死锁；任何档位都要跑。
  *
- * @param ftl FTL 上下文（推进其 mig_handle；不在飞时按其自持节拍评估）。
+ * @param ftl FTL 上下文（提交 GC job；不在飞时由 migrate 内部按节拍评估）。
  */
 static void bg_task_migrate(ftl_ctx_s *ftl)
 {
     // 在飞推进 + 会话收尾 + 紧急 GC；周期评估由 timer 表的 mig_eval 任务负责。
-    mig_handle(ftl->mig_handle, ftl->bg.level);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_GC);
 }
 
 /**
@@ -216,7 +207,7 @@ static void bg_task_migrate(ftl_ctx_s *ftl)
  */
 static void bg_task_metadata(ftl_ctx_s *ftl)
 {
-    md_handle(ftl->metadata_dir);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_METADATA);
 }
 
 /**
@@ -224,13 +215,11 @@ static void bg_task_metadata(ftl_ctx_s *ftl)
  * 新环形块没擦过就不能往里写 ⇒ 任何档位都要补，否则 host 写路径卡死。
  * 判据（有无待擦块 / 是否已有 job 在飞）在 journal 模块内，本文件不读其内部字段。
  *
- * @param ftl FTL 上下文（其 journal 收到 JRN_TRIGGER_ERASE_ONLY）。
+ * @param ftl FTL 上下文（提交 JOURNAL_ERASE job）。
  */
 static void bg_task_journal_erase(ftl_ctx_s *ftl)
 {
-    const jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
-
-    jrn_handle(ftl->journal, &trigger);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_JOURNAL_ERASE);
 }
 
 /**
@@ -238,21 +227,19 @@ static void bg_task_journal_erase(ftl_ctx_s *ftl)
  * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。cp_job_begin 只装配 job、
  * 单飞行（cp_handle.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。
  *
- * @param ftl FTL 上下文（按紧急水位触发其 cp_handle）。
+ * @param ftl FTL 上下文（提交 CP_EMERGENCY job）。
  */
 static void bg_task_cp_emergency(ftl_ctx_s *ftl)
 {
-    const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_EMERGENCY, false);
-
-    cp_handle(ftl->cp_handle, &trigger);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_CP_EMERGENCY);
 }
 
 /**
  * @brief 表 6 · 预算 — 后台 flush 脏 L2P region，条数上界取**本轮档位配置**（引擎发布的
- * sched->cfg，见 bg_scheduler.h）。BUSY 档只放行本项 ⇒ 最小预算 = 「must-run + 1 flush」。
+ * sched->cfg，见 bg_policy.h）。BUSY 档只放行本项 ⇒ 最小预算 = 「must-run + 1 flush」。
  * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
  *
- * @param ftl FTL 上下文（读其 cache 与 topo 维度，并把本轮档位传给模块）。
+ * @param ftl FTL 上下文（提交 L2P_FLUSH 后台 job）。
  */
 static void bg_task_l2p_flush(ftl_ctx_s *ftl)
 {
@@ -263,10 +250,7 @@ static void bg_task_l2p_flush(ftl_ctx_s *ftl)
     }
     ftl->l2p_flush_due = 0U;
 
-    // 档位 → max_kick 的 static const 表在 l2p 模块内；thrashing 降级也在模块内判定。
-    const BYTE die = topo_2_die(ftl->topo);
-
-    l2p_handle(ftl->cache, die, ftl->bg.level);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_L2P_FLUSH);
 }
 
 /**
@@ -277,18 +261,18 @@ static void bg_task_l2p_flush(ftl_ctx_s *ftl)
  */
 static void bg_task_journal_flush(ftl_ctx_s *ftl)
 {
-    jrn_handle(ftl->journal, NULL);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_JOURNAL_FLUSH);
 }
 
 /**
  * @brief 表 8 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
  * typed 入口：本适配器不读 handle 内部状态。
  *
- * @param ftl FTL 上下文（传其 alloc 给 bbt_handle）。
+ * @param ftl FTL 上下文（提交 BBT 后台 job）。
  */
 static void bg_task_bbt(ftl_ctx_s *ftl)
 {
-    bbt_handle(&ftl->alloc);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_BBT);
 }
 
 /**
@@ -296,52 +280,51 @@ static void bg_task_bbt(ftl_ctx_s *ftl)
  * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
  * job 装配由 cp_job_begin（提交即返回），成败由 [CP] 心跳判。
  *
- * @param ftl FTL 上下文（按定时/水位/写入量触发其 cp_handle）。
+ * @param ftl FTL 上下文（提交 CP_TRIGGER job）。
  */
 static void bg_task_cp_trigger(ftl_ctx_s *ftl)
 {
-    const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_TIMER, false);
-
-    cp_handle(ftl->cp_handle, &trigger);
+    ftl_sched_bg_request(&ftl->sched, FTL_BG_JOB_CP_TRIGGER);
 }
 
 /* ── 任务映射表（放最下面：表项引用上面的适配器）── */
 
-// 表序 = 执行序 = 优先级；任务位由 .mask 显式声明，不由表下标推导。
-// 加任务 = 表里插一行 + 新增 BG_TASK_* 位 + 视需要加入档位预设 + 同步 BG_TASK_COUNT。
-static const bg_task_s s_bg_tasks[] = {
+// 表序 = 提交序 = 调度优先级（scheduler 按 ftl_bg_job_e 表序执行）；
+// 任务位由 .mask 显式声明，不由表下标推导。
+// 加任务 = 表里插一行 + 新增 BG_POLICY_TASK_* 位 + 视需要加入档位预设 + 同步 BG_POLICY_TASK_COUNT。
+static const bg_task_s s_bg_policy_tasks[] = {
   // 表 0..5 · must-run 正确性关键集：无条件每轮跑、不 gate、不占预算
-    {      .func = bg_task_cp_join,    .mask = BG_TASK_CP_JOIN, .must_run = true}, /* 在飞 CP 跨轮推进，必须最先 */
-    {           .func = bg_task_rr,         .mask = BG_TASK_RR, .must_run = true}, /* host 读在等结果，不推进即死等 */
-    {      .func = bg_task_migrate,    .mask = BG_TASK_MIGRATE, .must_run = true}, /* 写路径紧急 GC 在 BUSY 起，不推进即死锁 */
-    {     .func = bg_task_metadata,   .mask = BG_TASK_METADATA, .must_run = true}, /* 前台写路径置的压缩请求，不推进即永久 FTL_AGAIN */
-    {.func = bg_task_journal_erase,  .mask = BG_TASK_JRN_ERASE, .must_run = true}, /* 新环形块没擦不能写，BUSY 也要补 */
-    { .func = bg_task_cp_emergency,   .mask = BG_TASK_CP_EMERG, .must_run = true}, /* Journal ≥95%，任何档位随时响应 */
+    {      .func = bg_task_cp_join,    .mask = BG_POLICY_TASK_CP_JOIN, .must_run = true}, /* 在飞 CP 跨轮推进，必须最先 */
+    {           .func = bg_task_rr,         .mask = BG_POLICY_TASK_RR, .must_run = true}, /* host 读在等结果，不推进即死等 */
+    {      .func = bg_task_migrate,    .mask = BG_POLICY_TASK_MIGRATE, .must_run = true}, /* 写路径紧急 GC 在 BUSY 起，不推进即死锁 */
+    {     .func = bg_task_metadata,   .mask = BG_POLICY_TASK_METADATA, .must_run = true}, /* 前台写路径置的压缩请求，不推进即永久 FTL_AGAIN */
+    {.func = bg_task_journal_erase,  .mask = BG_POLICY_TASK_JRN_ERASE, .must_run = true}, /* 新环形块没擦不能写，BUSY 也要补 */
+    { .func = bg_task_cp_emergency,   .mask = BG_POLICY_TASK_CP_EMERG, .must_run = true}, /* Journal ≥95%，任何档位随时响应 */
 
   // 表 6..9 · 预算任务：本档位掩码放行且配额足够才跑。
   // GC/WL/predict 的周期评估由 timer 表调用 mig_eval；本表只负责搬移推进与预算任务。
-    {    .func = bg_task_l2p_flush,  .mask = BG_TASK_L2P_FLUSH,      .units = 1U},
-    {.func = bg_task_journal_flush,  .mask = BG_TASK_JRN_FLUSH,      .units = 1U},
-    {          .func = bg_task_bbt,        .mask = BG_TASK_BBT,      .units = 1U},
-    {   .func = bg_task_cp_trigger, .mask = BG_TASK_CP_TRIGGER,      .units = 1U},
+    {    .func = bg_task_l2p_flush,  .mask = BG_POLICY_TASK_L2P_FLUSH,      .units = 1U},
+    {.func = bg_task_journal_flush,  .mask = BG_POLICY_TASK_JRN_FLUSH,      .units = 1U},
+    {          .func = bg_task_bbt,        .mask = BG_POLICY_TASK_BBT,      .units = 1U},
+    {   .func = bg_task_cp_trigger, .mask = BG_POLICY_TASK_CP_TRIGGER,      .units = 1U},
 };
 
-// 表项数必须与 BG_TASK_COUNT 一致（capacity 是 tasks[] 维度；错位会越界或漏装载）。
-_Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_COUNT, "任务表项数与 BG_TASK_COUNT 不一致");
+// 表项数必须与 BG_POLICY_TASK_COUNT 一致（capacity 是 tasks[] 维度；错位会越界或漏装载）。
+_Static_assert((sizeof(s_bg_policy_tasks) / sizeof(s_bg_policy_tasks[0])) == BG_POLICY_TASK_COUNT, "任务表项数与 BG_POLICY_TASK_COUNT 不一致");
 
 /* ── 装配与后台调度步 ── */
 
 /**
  * @brief 装载内置 FTL 任务表
  *
- * 表长是编译期常量（_Static_assert 已证明 == BG_TASK_COUNT）⇒ 无运行期边界参数。
+ * 表长是编译期常量（_Static_assert 已证明 == BG_POLICY_TASK_COUNT）⇒ 无运行期边界参数。
  *
  * @param sched 本实例调度器
  */
-void bg_scheduler_init(bg_sched_s *sched)
+void bg_policy_init(bg_policy_s *sched)
 {
-    sched->tasks      = s_bg_tasks; /* 共享只读表：不逐实例复制 */
-    sched->task_count = (BYTE)(sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0]));
+    sched->tasks      = s_bg_policy_tasks; /* 共享只读表：不逐实例复制 */
+    sched->task_count = sizeof(s_bg_policy_tasks) / sizeof(s_bg_policy_tasks[0]);
     sched->cfg        = NULL;
     sched->level      = BG_LEVEL_IDLE;
     sched->credits    = 0U; /* 首次 refill 后才有预算任务可跑 */
@@ -355,7 +338,7 @@ void bg_scheduler_init(bg_sched_s *sched)
  * @param ftl 实例
  * @return 档位
  */
-bg_level_e bg_scheduler_level_select(const ftl_ctx_s *ftl)
+bg_level_e bg_policy_level_select(const ftl_ctx_s *ftl)
 {
     const WORD pending = pend_slot_get_count(&ftl->pending);
     const WORD queued  = pend_group_get_count(&ftl->pending);
@@ -378,9 +361,9 @@ bg_level_e bg_scheduler_level_select(const ftl_ctx_s *ftl)
  *
  * @param ftl 实例
  */
-static void bg_scheduler_publish(ftl_ctx_s *ftl)
+static void bg_policy_publish(ftl_ctx_s *ftl)
 {
-    const bg_level_e level = bg_scheduler_level_select(ftl);
+    const bg_level_e level = bg_policy_level_select(ftl);
 
     // 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。
     ASSERT(level < BG_LEVEL_NUM);
@@ -390,20 +373,20 @@ static void bg_scheduler_publish(ftl_ctx_s *ftl)
     ftl->bg.cfg   = &s_bg_level_cfg[level];
 }
 
-void bg_scheduler_service(ftl_ctx_s *ftl)
+void bg_policy_service(ftl_ctx_s *ftl)
 {
     if (ftl->flags.bg_suspend == true)
     {
         return;
     }
 
-    bg_scheduler_publish(ftl);
-    bg_scheduler_run(&ftl->bg, ftl, ftl->bg.cfg);
+    bg_policy_publish(ftl);
+    bg_policy_run(&ftl->bg, ftl, ftl->bg.cfg);
 }
 
 #if defined(FC_NAND_TEST_ENABLE)
-void bg_test_publish(ftl_ctx_s *ftl)
+void bg_policy_test_publish(ftl_ctx_s *ftl)
 {
-    bg_scheduler_publish(ftl);
+    bg_policy_publish(ftl);
 }
 #endif

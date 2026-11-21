@@ -11,18 +11,19 @@
  *   ① ftl_service_pump()   —— **实例无关**：[pump] 推进 NAND + [pump] 完成泵。
  *                              全局的 NAND 引擎与完成表，每轮**只调一次**。
  *   ② ftl_service(ftl)     —— **单实例**：元数据候选池重算 → 写确认结算 →
- *                              cache 序列确认 → host 补发 → 序列收尾 →
+ *                              cache 序列确认 → scheduler host 补发 → 序列收尾 →
  *                              wbuf 空闲 flush → 后台调度（逐步清单见 ftl_service 契约）。
  *                              对**每一个**实例都要调（多 LUN 下不能只跑 [0][0][0]）。
  *
  * 三级模式切换依据未决命令数（pending + 组），非"本轮提交了几条 NAND"。
  */
 
-#include "allocator.h"    /* ftl_table_refs_s, super_block_s */
-#include "bg_scheduler.h" /* 工作量配额后台调度器（ftl_ctx_s 含调度器） */
-#include "cache_batch.h"  /* cache read/write 批次的常量与对 FTL 的尝试入口 */
+#include "allocator.h"   /* ftl_table_refs_s, super_block_s */
+#include "bg_policy.h"   /* 工作量配额后台调度器（ftl_ctx_s 含调度器） */
+#include "cache_batch.h" /* cache read/write 批次的常量与对 FTL 的尝试入口 */
 #include "checkpoint.h"
-#include "ftl_type.h" /* ftl_io_req_s */
+#include "ftl_sched.h" /* FTL request scheduler */
+#include "ftl_type.h"  /* ftl_io_req_s */
 #include "gc.h"
 #include "journal.h"
 #include "l2p_cache.h"
@@ -437,8 +438,9 @@ typedef struct FTL_CONTEXT_S
     ftl_flush_job_s flush; /* host SYNCHRONIZE CACHE / CLI fl */
     ftl_trim_job_s  trim;  /* CLI tr */
 
-    bg_sched_s bg;
-    BYTE       l2p_flush_due; /* timer 置位，bg_scheduler 消费 */
+    bg_policy_s bg;
+    ftl_sched_s sched;         /* request scheduler（L2P/host/后台 job + host 写 admission） */
+    BYTE        l2p_flush_due; /* timer 置位，bg_policy 消费 */
 
     mig_handle_s *mig_handle;           /* GC / WL / predict（装配挂载） */
     rr_handle_s   read_recovery_handle; /* 异步恢复 job */
@@ -521,6 +523,14 @@ void ftl_assert_context(void);
 /* ── 内部辅助（FTL 层内共用，不属于 HIL 接口）── */
 
 /**
+ * @brief 推进一个 host 完成组的待下发子操作
+ *
+ * @param ftl FTL 实例
+ * @param gi  pending 组下标
+ */
+void ftl_host_group_drain(ftl_ctx_s *ftl, WORD gi);
+
+/**
  * @brief 按当前实例状态构造一次 Checkpoint 触发快照。
  *
  * @param ftl    实例（读 total_writes 与 journal 的 seq / 水位 / 紧急标志）
@@ -529,7 +539,7 @@ void ftl_assert_context(void);
  *
  * @return 触发快照（now_ms 取调用时刻）
  *
- * @note 后台适配器（bg_scheduler）与显式 CP（ftl_flush_kick_cp）共用——同一组字段
+ * @note 后台适配器（bg_policy）与显式 CP（ftl_flush_kick_cp）共用——同一组字段
  *       只在单处装配，`cp_trigger_s` 加字段时不会漏改某一处。
  */
 cp_trigger_s ftl_cp_trigger_build(const ftl_ctx_s *ftl, cp_reason_e reason, BOOL force);

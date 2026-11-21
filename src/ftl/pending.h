@@ -433,6 +433,14 @@ WORD pend_slot_get_count(const pend_ctx_s *table);
 BOOL pend_group_alloc(pend_ctx_s *table, BYTE *out_gi);
 
 /**
+ * @brief 释放一个尚未下发任何子操作的组（提交侧回滚）
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ */
+void pend_group_release(pend_ctx_s *table, WORD gi);
+
+/**
  * @brief 当前占用（未完成）的组数
  *
  * ftl_service 的档位判定用它近似"排队未下发的 host 请求"——

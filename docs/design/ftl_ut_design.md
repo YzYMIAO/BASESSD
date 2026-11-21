@@ -54,7 +54,8 @@
 | `pending` / group | `src/ftl/pending.c` | `pend_*`、组槽、确认停车、错误聚合 | pure / negative / media |
 | `wbuf` | `src/ftl/wbuf.c` | 页打包窗口、owners、逐 CW 读回 | pure / media / negative |
 | `ftl_op` | `src/ftl/ftl_op.c` | request 表、route、ctx 旁表 | pure / negative / media |
-| `bg_scheduler` | `src/ftl/bg_scheduler.c` | 任务表、等级选择、门控 | pure / negative / media |
+| `bg_policy` | `src/ftl/bg_policy.c` | 任务表、等级选择、预算/触发 | pure / negative / media |
+| `ftl_sched` | `src/ftl/ftl_sched.c` | work item、credit、host/flush 登记、完成回收 | pure / negative / media |
 | `migrate` / `GC` | `src/ftl/migrate.c`、`gc.c` | `mig_*`、victim 选择、搬移 / 擦除 / 失败封顶 | pure / media / negative |
 | `wear_leveling` | `src/ftl/wear_leveling.c` | `wl_*`、UBI 判据、victim、目的块准备 | pure / media / negative |
 | `read_recovery` | `src/ftl/read_recovery.c` | `rr_*`、健康等级、预测退役、读失败闸门 | pure / media / negative |
@@ -83,7 +84,7 @@
   l2p/md/cp/bbt 多个套件会让「哪条用例负责准备介质」变成跨套件隐式依赖。
 - 当前注册表规模：pure 60（mem 11 / md 15 / host 16 / io 18）、media 24、
   negative pure 42、negative media 49（gc 12 / l2p 6 / meta 14 / boot 7 / if 10）、
-  `/bench/speed/ftl_rw` 1；合计 **176 条 FTL 用例**。`test_speed.c` 另注册
+  `/bench/speed/ftl_rw` 1；合计 **180 条 FTL 用例**。`test_speed.c` 另注册
   `/bench/speed/fc_nand_rw` 1 条，属 FC 基准，不计入 FTL 176。
 
 ### 1.3 测试原则
@@ -396,19 +397,23 @@ entry_count`，只比页首会 off-by-one）、`jrn_resume_cross_block_erase_fai
 
 - 跨 die 路由组合受单 target 板限制（`RISK-CR-02`）。
 
-### 2.10 `bg_scheduler` — 后台任务与门控
+### 2.10 `bg_policy` + `ftl_sched` — 后台触发与请求调度
 
 **设计要点**
 
-- 任务表长度 = `BG_TASK_COUNT`；`level_select` 返回合法档位。
+- 任务表长度 = `BG_POLICY_TASK_COUNT`；`level_select` 返回合法档位。
 - pending 0→IDLE、8→NORMAL、17→BUSY；used group 保守升 BUSY。
 - 门控必须单一配置源；host busy 与后台任务不得互相饿死。
 
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
-| 任务表 / 等级 | 表长 = `BG_TASK_COUNT`；`level_select` 合法 | `bg_engine` | — |
+| 任务表 / 等级 | 表长 = `BG_POLICY_TASK_COUNT`；`level_select` 合法 | `bg_engine` | — |
 | 等级边界 | pending 0→IDLE、8→NORMAL、17→BUSY；used group 升 BUSY | `bg_level_select` | — |
 | 空盘基线 | GC/WL 入口无副作用；空盘不误触发 | `gc_policy_entry` | — |
+| flush 登记 | 同 region 幂等；`flush_items` 计数；reset 清空 | `sched_flush_registry` | — |
+| L2P credit | demand 8 / 预取 2 独立；complete 归还 | `sched_load_credit` | — |
+| host item | 同组 begin 幂等；组释放后 reap 归零 | `sched_host_item` | — |
+| 后台 job | 预留 item 置 READY；重复请求幂等 | `sched_bg_request` | — |
 
 **负例 / 守卫**
 
@@ -850,8 +855,9 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
   `fi_arm_at(kind, site, at)` 指定第几次命中；`fi_take()` 由被测代码消费一次故障；
   `fi_hits()` 返回命中次数；`fi_reset()` 清状态。setup / teardown 都必须 `fi_reset()`，
   否则注入状态跨用例静默污染。
-- **链接期 seam**：`fi_wrap.c` 用 `-Wl,--wrap` 包装测试符号，生产源码不动；当前只有
-  cache FAILC 与 Journal 页写两个静态 hook，新增 hook 必须登记在
+- **链接期 seam**：`fi_wrap.c` 用 `-Wl,--wrap` 包装测试符号，生产源码不动。当前覆盖
+  页级读写原语（含 2026-11-21 新增的 `ftl_async_read_page_leased`，L2P load 在 E2 后
+  走 lease 入口）、`ftl_op_submit[_batch]`、分配入口与完成 poll；新增 hook 必须登记在
   `../guides/testing_guide.md` §12.10。
 - **编译门禁**：注入只在 `FC_NAND_TEST_ENABLE` 测试镜像生效；产品镜像不编入。
 - **判据**：注入类用例必须同时断言「预期降级」与「故障确实发生」（`fi_hits` 增长），

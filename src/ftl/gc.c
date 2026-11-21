@@ -61,7 +61,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
     // 命令池空是**资源类**结果（FTL_AGAIN）。调用者：掉电重建（池结构性充足）与 CLI
     // rdpaa 诊断（可与主机 IO 同时在飞）⇒ 走后台额度，不吃 L2P demand 的 CRIT 预留。
-    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
     if (cmd == NULL)
     {
         return FTL_AGAIN;

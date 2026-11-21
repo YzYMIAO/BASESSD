@@ -79,54 +79,82 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 | 项目 | 状态 | 证据 / 说明 |
 |---|---|---|
-| debug / release 构建 | 已验证 | 2026-11-20，本机 arm-none-eabi-gcc，零新告警 |
-| UT 编译（FC/FTL/HIL） | 已验证 | 2026-11-19，`make tests UT=FTL` 链接通过；仅证链接 |
-| 板端 UT（release 全量） | 已验证 | 见下「最新测试结果」 |
+| debug / release 构建 | 已验证 | 2026-11-21，本机 arm-none-eabi-gcc，零新告警 |
+| UT 编译（FC/FTL/HIL） | 已验证 | 2026-11-21，`make tests UT=FTL` 链接通过；仅证链接 |
+| 板端 UT（release 全量） | 已验证 | 2026-11-22，318/318 通过，3 SKIP |
 | 板端 H2testw | 已验证 | 见下「最新测试结果」 |
 | `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h`；功能代码完成但未上板 |
 | IWDG 看门狗 | 关闭，待上板决策 | `src/main.c`（`SSD_WATCHDOG_ENABLE=0`） |
 | read recovery `0x89` | 保留地址，空转 | `src/ftl/read_recovery.c`；本器件无读电压重试表，不处理 |
 
 > 「已验证」仅覆盖表中证据对应的范围；未列出的分支与配置均为未验证。
-> 上表证据对应 2026-11-20 镜像；此后工作区还有未提交的日志 / 统计改动，尚未重新构建、上板。
+> H2testw 证据对应 2026-11-21 22:58 镜像；UT 证据对应 2026-11-22 01:04 镜像。
 
 ## 最新测试结果
 
-### UT（release 全量，2026-11-19）
+### UT（release 全量，2026-11-22）
 
 | 项 | 值 |
 |---|---|
-| 镜像 | `built Nov 19 2026 17:15:02` |
-| 结果 | **314/314 通过，3 SKIP** |
-| seed | `0xbc2e3bb2` |
-| 耗时 | 677.71 s |
+| 镜像 | `built Nov 22 2026 01:04:14` |
+| 结果 | **318/318 通过，3 SKIP** |
+| seed | `0x81a7c024` |
+| 耗时 | 697.30 s |
 | 3 SKIP | `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock` |
-| 原始日志 | [`2026-11-19_release_ut_full.log`](docs/archive/test_logs/2026-11-19_release_ut_full.log) |
-| 复现 | 串口执行 `test --seed 0xbc2e3bb2` |
+| 原始日志 | [`2026-11-22_release_ut_full.log`](docs/archive/test_logs/2026-11-22_release_ut_full.log) |
+| 复现 | 串口执行 `test --seed 0x81a7c024` |
 
 ```text
-314 of 314 (100%) tests successful, 3 (0%) test skipped. Total wall-clock: 677.71 s
+318 of 318 (100%) tests successful, 3 (0%) test skipped. Total wall-clock: 697.30 s
 ```
+
+内部 speed 用例（同一轮，0 错误）：
+
+| 用例 | 写 KB/s | 读 KB/s |
+|---|---:|---:|
+| `ftl_rw` chunk=8 / depth=4 | 3516 | 3083 |
+| `ftl_rw` chunk=16 / depth=2 | 3338 | 3033 |
+| `ftl_rw` chunk=32 / depth=1 | 2386 | 2993 |
+| `fc_nand_rw` normal | 3578 | 3298 |
+| `fc_nand_rw` cache | 4194 | 3356 |
 
 ### H2testw（USB MSC 端到端，2026-11-21）
 
 | 写 KB/s | 读 KB/s | 数据量 | 结果 |
 |---:|---:|---|---|
-| 912 | 857 | 421 MB | `Test finished without errors` |
+| **938** | **866** | 415/423 MB | `Test finished without errors` |
 
-> 镜像 `built Nov 20 2026 13:41:57`；满盘（`free=0`），0 错误。
-> 这是最终结果；截图与串口 `info` / `stats` 见下节。
+> 镜像 `built Nov 21 2026 22:58:18`（FTL request scheduler + 双副本预留 + CP headroom）；
+> H2testw 0 错误；串口侧 `bad_status=0`、`complete_err=0`、`buf_fail=0`、`flush_fail=0`，
+> 调度计数全部闭合。截图与原始记录见下节。
+
+### CrystalDiskMark 9（USB MSC 端到端，2026-11-21）
+
+| 项目 | 读 MB/s | 写 MB/s |
+|---|---:|---:|
+| SEQ1M Q1T1 | **0.84** | **0.84** |
+| RND4K Q1T1 | **0.74** | **0.75** |
+| SEQ1M Q8T1 / RND4K Q32T1 | 0.00 | 0.00 |
+
+> 镜像 `built Nov 21 2026 22:58:18`；CDM9、5 线程、128 MiB。
+> Q8T1 / Q32T1 为 0.00：USB MSC BOT 是**单命令串行**模型，没有多 outstanding 队列，
+> 队列深度 >1 的测试不成立；有效口径是 Q1T1。
 
 ## 测试证据
 
 ### H2testw 截图
 
-![H2testw 端到端结果（912/857）](docs/archive/test_logs/h2testw_912_857.png)
+![H2testw 端到端结果（938/866）](docs/archive/test_logs/h2testw_938_866.png)
+
+### CrystalDiskMark 9 截图
+
+![CDM9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.75）](docs/archive/test_logs/cdm9_20261121.png)
 
 ### 原始记录
 
-- UT 原始日志：[`2026-11-19_release_ut_full.log`](docs/archive/test_logs/2026-11-19_release_ut_full.log)
-- H2testw 截图：[`h2testw_912_857.png`](docs/archive/test_logs/h2testw_912_857.png)
+- UT 原始日志：[`2026-11-22_release_ut_full.log`](docs/archive/test_logs/2026-11-22_release_ut_full.log)
+- H2testw 截图：[`h2testw_938_866.png`](docs/archive/test_logs/h2testw_938_866.png)
+- CDM9 截图：[`cdm9_20261121.png`](docs/archive/test_logs/cdm9_20261121.png)
 - 测试方法与吞吐结论：[`docs/guides/testing_guide.md`](docs/guides/testing_guide.md)
 
 ## 已知限制

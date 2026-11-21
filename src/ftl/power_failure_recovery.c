@@ -426,6 +426,9 @@ ftl_status_e pfr_media_format(ftl_ctx_s *ftl, BOOL verify)
     // 整片格式化退化为 4096 次同步超时（每次约 20 ms）。
     ftl_cache_seq_discard(ftl);
 
+    // 旧 L2P flush 登记属于擦除前的介质状态，格式化后不得再提交。
+    ftl_sched_l2p_flush_reset(&ftl->sched);
+
     // 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
     // 都还完整，格式化不完成、可重试。
     if (bbt_format_erase(&ftl->alloc) != FTL_OK)
@@ -979,7 +982,7 @@ static void pfr_boot_apply_region_bitmap(ftl_ctx_s *ftl, const cp_header_s *cp, 
             continue; /* 未映射：无页可预载，懒加载合成全 INVALID 行 */
         }
 
-        const DWORD        global = (local * DIE_MAX) + die;
+        const DWORD        global = l2p_local_to_global_region(local, die);
         const DWORD        backup = md_backup_find(ftl->metadata_dir, local);
         const ftl_status_e st     = l2p_region_preload(ftl->cache, global, addr, backup);
 

@@ -31,6 +31,7 @@
 /* ── __real_* 原型（必须与被 wrap 的函数签名逐字一致）── */
 
 ftl_status_e __real_ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_cfg_s *cfg);
+ftl_status_e __real_ftl_async_read_page_leased(fc_cmd_s **out_cmd, ftl_cmd_lease_s *lease, DWORD pba, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_s *cfg);
 ftl_status_e __real_ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_s *cfg);
@@ -139,6 +140,31 @@ ftl_status_e __wrap_ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl
     }
 
     return __real_ftl_async_read_page(out_cmd, pba, cfg);
+}
+
+ftl_status_e __wrap_ftl_async_read_page_leased(fc_cmd_s **out_cmd, ftl_cmd_lease_s *lease, DWORD pba, const ftl_page_cfg_s *cfg)
+{
+    // L2P load 走 lease 入口（E2 起）：注入点必须与生产路径一致，否则
+    // FI_L2P_LOAD_FAIL 命中数为 0。失败时命令仍归 lease，由调用者 release。
+    if (fi_data_page(cfg) == true)
+    {
+        const BYTE plane = pba_to_plane(pba);
+
+        if (fi_take_at(FI_MIG_READ_FAIL, plane) == true)
+        {
+            return FTL_ERROR;
+        }
+        if (fi_take_at(FI_RR_READ_FAIL, plane) == true)
+        {
+            return FTL_ERROR;
+        }
+    }
+    else if (fi_take_at(FI_L2P_LOAD_FAIL, pba) == true)
+    {
+        return FTL_ERROR;
+    }
+
+    return __real_ftl_async_read_page_leased(out_cmd, lease, pba, cfg);
 }
 
 ftl_status_e __wrap_ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)

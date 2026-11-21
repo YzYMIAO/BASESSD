@@ -343,6 +343,27 @@ BOOL pend_group_alloc(pend_ctx_s *table, BYTE *out_gi)
 }
 
 /**
+ * @brief 释放一个尚未下发任何子操作的组（提交侧回滚）
+ *
+ * 只允许在 `pend_group_alloc` 之后、任何子操作/通知之前调用；组里没有
+ * outstanding，因此不会触发完成回调。
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ */
+void pend_group_release(pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    pend_group_s *g = &table->groups[gi];
+
+    ASSERT((g->used != false) && (g->next == 0U) && (g->outstanding == 0U));
+
+    memset(g, 0, sizeof(*g));
+}
+
+/**
  * @brief 未完成组数
  *
  * 有未完成组 = host 工作饿着 → 归 BUSY。

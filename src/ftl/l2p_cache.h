@@ -44,7 +44,7 @@
 #define L2P_FLUSH_MAX_NORMAL (4U)
 #define L2P_FLUSH_MAX_BUSY   (1U)
 
-/* L2P 后台写回节拍：timer 任务每 N ms 置 ftl->l2p_flush_due，bg_scheduler 消费。
+/* L2P 后台写回节拍：timer 任务每 N ms 置 ftl->l2p_flush_due，bg_policy 消费。
  * 只 gate「要不要踢一次」，具体条数仍由上面的 max_kick 与 token bucket 限。 */
 #define L2P_FLUSH_INTERVAL_MS (10U)
 
@@ -144,6 +144,18 @@ static inline DWORD l2p_global_to_local_region(DWORD global_region)
 }
 
 /**
+ * @brief owner die 内的局部 region → 全局 region
+ *
+ * @param local_region 本 die 的 local region
+ * @param die          owner die
+ * @return 全局 region（local_region * DIE_MAX + die）
+ */
+static inline DWORD l2p_local_to_global_region(DWORD local_region, BYTE die)
+{
+    return (local_region * DIE_MAX) + die;
+}
+
+/**
  * @brief region 是否属于 die 这个实例。
  *
  * @param global_region 全局 region
@@ -155,6 +167,31 @@ static inline BOOL l2p_region_owned_by(DWORD global_region, BYTE die)
 {
     ASSERT(DIE_MAX != 0U);
     return (global_region % DIE_MAX) == die;
+}
+
+/* ── 位图原语 ──
+ * 脏位图是 flat 绝对编号（bit = 全局 region）。set/clear/test 集中在此，
+ * 避免调用点各自手写 word 下标与移位（H15 / C9）。 */
+/**
+ * @brief 置位图中的一位。
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标（flat 绝对编号）
+ */
+static inline void l2p_bitmap_set(DWORD *bitmap, DWORD bit)
+{
+    bitmap[bit / 32U] |= (1UL << (bit & 31U));
+}
+
+/**
+ * @brief 清位图中的一位。
+ *
+ * @param bitmap 位图基址
+ * @param bit    位下标（flat 绝对编号）
+ */
+static inline void l2p_bitmap_clear(DWORD *bitmap, DWORD bit)
+{
+    bitmap[bit / 32U] &= ~(1UL << (bit & 31U));
 }
 
 /* ── Region 分解 ──
@@ -244,11 +281,15 @@ typedef struct L2P_CACHE_LINE_S
 
     /* ── 双副本写回（L2）──
      * 串行写：先主副本；主成功后提交备份副本。两份都成功才 commit（原子）；任一失败
-     * 都保持 DIRTY、不登记新位置（旧 pair 仍是 Directory 真值，槽位作废）。 */
-    DWORD flush_pba[L2P_REGION_COPIES]; /* 0=主 / 1=备 */
-    BYTE  flush_issued;                 /* 已提交副数（1 或 2） */
-    BYTE  flush_done;                   /* 已完成副数 */
-    BOOL  flush_fail;                   /* true = 任一副本失败 ⇒ 不提交 */
+     * 都保持 DIRTY、不登记新位置（旧 pair 仍是 Directory 真值，槽位作废）。
+     * 备副本命令在写回起点就预留（命令槽），提交被 cache 序列门控拒绝时保留重试，
+     * 不丢弃已编程的主副本。 */
+    DWORD     flush_pba[L2P_REGION_COPIES]; /* 0=主 / 1=备 */
+    BYTE      flush_issued;                 /* 已提交副数（1 或 2） */
+    BYTE      flush_done;                   /* 已完成副数 */
+    BOOL      flush_fail;                   /* true = 任一副本失败 ⇒ 不提交 */
+    BOOL      flush_backup_deferred;        /* true = 备副本已建链、提交被门控，等 resume */
+    fc_cmd_s *flush_pending_cmd;            /* 预留的备副本命令；写回起点即置位 */
 
     /* 本次加载读的是哪一份（主备回退，的 L2）。 */
     DWORD load_pba;        /* 在飞/最近一次加载的 PBA */
@@ -286,6 +327,11 @@ typedef struct L2P_CACHE_LINE_S
  * 不 include journal.h——journal.h 反向 include 本头，会成环。 */
 typedef struct L2P_JOURNAL_S l2p_jrn_s;
 
+typedef struct FTL_SCHEDULER_S ftl_sched_s;
+
+/* 前向声明：行内持有「已预留、待提交」的备副本命令（不把 fc_interface.h 拉进本头）。 */
+typedef struct FC_COMMAND_S fc_cmd_s;
+
 typedef struct L2P_OWNER_S
 {
     BYTE            die; /* 本 owner 的实例编号（global 路由键） */
@@ -293,6 +339,7 @@ typedef struct L2P_OWNER_S
     alc_s          *alloc;
     ftl_topo_s      topo;
     l2p_jrn_s      *journal; /* 本 die 的 Journal：区域写回前查 WAL 水位（可为 NULL：纯 RAM 夹具） */
+    ftl_sched_s    *sched;   /* 本 die 的 scheduler：demand load 登记/完成（纯 RAM 夹具可为 NULL） */
 } l2p_owner_s;
 
 typedef const l2p_owner_s *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);
@@ -312,6 +359,10 @@ typedef const l2p_owner_s *(*l2p_owner_fn_t)(void *ctx, DWORD global_region);
 #define L2P_CMT_SIZE (L2P_CMT_SETS * L2P_CMT_WAYS)
 _Static_assert((L2P_CMT_SETS & (L2P_CMT_SETS - 1U)) == 0U, "L2P_CMT_SETS 必须是 2 的幂");
 _Static_assert(L2P_CMT_SIZE == 4096U, "CMT 共 4096 项（1024 set × 4 way，64 KiB）");
+
+/* CMT 主动写回水位：host 写 admission 与后台写回共用同一个阈值。
+ * 本仓自拟 75%：留 1/4 容量吸收在飞写与驱逐路径的突发。 */
+#define L2P_CMT_WB_WATERMARK ((L2P_CMT_SIZE * 3U) / 4U)
 
 typedef enum L2P_CMT_STATE_E
 {
@@ -354,16 +405,25 @@ typedef struct L2P_CACHE_STATISTICS_S
 #if SSD_STATS_ENABLE
     /* region 加载 / 写回的成功与失败原因（诊断满盘时“卡在哪一步”）。
      * 只服务 stats；关闭统计时整块裁掉（自增点经 STATS_INC 自动消失）。 */
-    DWORD load_start;       /* 成功提交、进入 LOADING 的次数（含预取） */
-    DWORD load_done_ok;     /* 加载完成且数据可用的次数 */
-    DWORD load_done_err;    /* 加载完成但状态/拷贝失败（可能随后重试备份） */
-    DWORD load_fail_no_cmd; /* 命令分配失败（池/额度） */
-    DWORD load_fail_gate;   /* ftl_op_submit 被 cache 序列门控拒绝 */
-    DWORD load_fail_submit; /* ftl_op_submit 的其他拒绝（FC 队列/登记） */
-    DWORD degrade;          /* 重试耗尽后降级为“全未映射”的次数 */
-    DWORD flush_start;      /* region 写回 job 启动次数 */
-    DWORD flush_ok;         /* 写回 job 成功（行回 CLEAN）的次数 */
-    DWORD flush_fail;       /* 写回 job 失败（行回 DIRTY）的次数 */
+    DWORD load_start;           /* 成功提交、进入 LOADING 的次数（含预取） */
+    DWORD load_done_ok;         /* 加载完成且数据可用的次数 */
+    DWORD load_done_err;        /* 加载完成但状态/拷贝失败（可能随后重试备份） */
+    DWORD load_fail_no_cmd;     /* 命令额度不足（FTL_AGAIN） */
+    DWORD load_fail_build;      /* 地址/desc/buffer 建链失败（FTL_ERROR） */
+    DWORD load_fail_gate;       /* ftl_op_submit 被 cache 序列门控拒绝 */
+    DWORD load_fail_submit;     /* ftl_op_submit 的其他拒绝（FC 队列/登记） */
+    DWORD degrade;              /* 重试耗尽后降级为“全未映射”的次数 */
+    DWORD flush_start;          /* region 写回 job 启动次数 */
+    DWORD flush_ok;             /* 写回 job 成功（行回 CLEAN）的次数 */
+    DWORD flush_fail;           /* 写回 job 失败（行回 DIRTY）的次数 */
+    DWORD flush_defer_inflight; /* 在飞 flush 达上限，暂缓 */
+    DWORD flush_defer_resource; /* FC 命令/desc/buffer 预检不足，暂缓 */
+    DWORD flush_defer_md_slot;  /* md_slot_pair_append 拒绝（md job 忙/无日志块） */
+    DWORD flush_defer_build;    /* ftl_async_write_page 建链失败 */
+    DWORD flush_defer_submit;   /* ftl_op_submit 拒绝 */
+    DWORD flush_backup_defer;   /* 备副本提交被序列门控拒绝，保留命令下轮重试 */
+    DWORD flush_backup_resume;  /* 保留的备副本命令最终提交成功 */
+    DWORD evict_fail;           /* l2p_line_evict 找不到可驱逐行 */
 
     stats_hist_s load_lat_us; /* region 加载延迟（提交 → 完成） */
 #endif
@@ -388,8 +448,9 @@ typedef struct L2P_THRASH_S
 
 typedef struct L2P_INFLIGHT_S
 {
-    BYTE load;  /* 在飞 region 加载数（观测） */
-    BYTE flush; /* 在飞 region 写回数（背压闸门，上限 L2P_FLUSH_MAX_INFLIGHT） */
+    BYTE load;                       /* 在飞 region 加载数（观测） */
+    BYTE flush;                      /* 在飞 region 写回数（背压闸门，上限 L2P_FLUSH_MAX_INFLIGHT） */
+    BYTE flush_pending[FTL_DIE_MAX]; /* 按 owner die：备副本命令等待提交的写回数 */
 } l2p_inflight_s;
 
 typedef struct L2P_CACHE_S
@@ -449,6 +510,15 @@ typedef struct L2P_LINE_INFORMATION_S
     DWORD             region_id; /* 全局 region（INVALID 行无意义） */
     l2p_cache_state_e state;     /* 行状态（枚举，不是裸 BYTE） */
 } l2p_line_info_s;
+
+/**
+ * @brief 取 region 当前行状态（不更新 hint / 命中统计）
+ *
+ * @param cache  cache
+ * @param region 全局 region
+ * @return 行状态；region 未驻留返回 L2P_CACHE_INVALID
+ */
+l2p_cache_state_e l2p_region_state_get(const l2p_cache_s *cache, DWORD region);
 
 /**
  * @brief 测试一个 flat 位图位（bit = 全局 region / LBA 下标）
@@ -845,6 +915,18 @@ ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx);
  * @param force_cmt true = host FLUSH / IDLE 排空，无视水位；false = 后台，仅按水位
  */
 void l2p_owner_flush_kick(l2p_cache_s *cache, BYTE owner_die, BYTE max_kick, BOOL force_cmt);
+
+/**
+ * @brief 重试本 die 已预留的备副本命令提交
+ *
+ * 主副本完成后，备副本提交可能被 cache 序列门控拒绝（FTL_AGAIN）。此时命令保留
+ * 在行内，由本函数每轮重试；只有硬失败才把写回判为失败。只处理 owner die 为本
+ * die 的行（共享 cache 上其它 die 的行由各自的 service 轮推进）。
+ *
+ * @param cache 共享 L2P cache（非空）
+ * @param die   本 service 轮的 die
+ */
+void l2p_flush_resume(l2p_cache_s *cache, BYTE die);
 
 /**
  * @brief 本 owner 是否已无待落盘的 L2P 行

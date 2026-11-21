@@ -36,6 +36,25 @@ ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
 }
 
 /**
+ * @brief host 写启动许可（按 LBA 路由到 FTL 实例）
+ *
+ * @param controller Controller 上下文
+ * @param lba        写起始 LBA
+ * @return true 允许启动；false 暂缓
+ */
+BOOL ssd_controller_host_write_admit(const ssd_ctl_s *controller, QWORD lba)
+{
+    if ((controller == NULL) || (controller->state != SSD_CONTROLLER_READY))
+    {
+        return false;
+    }
+
+    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
+
+    return (ftl != NULL) && (ftl_host_write_admit(ftl) != false);
+}
+
+/**
  * @brief 小端写 32 bit（MBR 字段）
  *
  * @param p 目标

@@ -223,7 +223,14 @@ static DWORD neg_wait_cp_idle(ftl_ctx_s *ftl, DWORD max_steps)
 
             cp_handle(ftl->cp_handle, &advance);
         }
+
+        // cp_handle 只登记 L2P flush item；必须让 scheduler dispatch 执行它。
+        // 调用者可能带着 bg_suspend=1 进来（quiesce 后未恢复），临时放开再恢复。
+        const BOOL suspend0 = ftl->flags.bg_suspend;
+
+        ftl->flags.bg_suspend = false;
         ftl_service(ftl);
+        ftl->flags.bg_suspend = suspend0;
         steps++;
     }
     return steps;

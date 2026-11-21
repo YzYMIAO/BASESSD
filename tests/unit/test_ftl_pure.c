@@ -10,7 +10,7 @@
  */
 
 #include "bbt.h"
-#include "bg_scheduler.h"
+#include "bg_policy.h"
 #include "bst.h"
 #include "checkpoint.h"
 #include "fc_interface.h"
@@ -1049,7 +1049,7 @@ static MunitResult test_log_alloc_rotate_release(const MunitParameter params[], 
     // 不写死 plane 下标（H39）。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        munit_assert_true(md_log_rotate(d, a, p));
+        munit_assert_true(md_log_rotate(d, a, p, false));
         munit_assert_true(d->cur.valid[p]);
         munit_assert_uint32(d->cur.page[p], ==, 0U);
         ftl_ut_trace_detail("md log: plane=%hhu cur=g%hu page=%hhu valid=%d", p, d->cur.block[p], d->cur.page[p], d->cur.valid[p]);
@@ -1470,7 +1470,7 @@ static void host_group_done(void *ctx)
 
 /* host_idle — host 侧启动不变量。
  *
- * 覆盖：pending 槽/组、op ctx 全 0，wbuf idle，bg 任务表长度 = BG_TASK_COUNT。
+ * 覆盖：pending 槽/组、op ctx 全 0，wbuf idle，bg 任务表长度 = BG_POLICY_TASK_COUNT。
  * 判据：任一项非 0 都说明初始化漏了配对释放或上一个用例污染了全局池。纯 RAM。 */
 
 static MunitResult test_host_idle(const MunitParameter params[], void *data)
@@ -1486,7 +1486,7 @@ static MunitResult test_host_idle(const MunitParameter params[], void *data)
     munit_assert_uint16(pend_group_get_count(&ftl->pending), ==, 0U);
     munit_assert_uint16(ftl_op_req_count(), ==, 0U);
     munit_assert_true(wb_is_idle(ftl->wbuf));
-    munit_assert_uint32(ftl->bg.task_count, ==, BG_TASK_COUNT);
+    munit_assert_uint32(ftl->bg.task_count, ==, BG_POLICY_TASK_COUNT);
 
     ftl_ut_trace_detail("host idle: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), wb_is_idle(ftl->wbuf), ftl->bg.task_count);
     ftl_ut_trace_summary("host: pending=%hu groups=%hu req=%hu wbuf_idle=%d bg_tasks=%hhu", pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), wb_is_idle(ftl->wbuf), ftl->bg.task_count);
@@ -1721,7 +1721,7 @@ static MunitResult test_op_ctx(const MunitParameter params[], void *data)
 
 /* bg_engine — 后台调度器引擎初始化。
  *
- * 覆盖：bg_scheduler_init 后任务表长度 = BG_TASK_COUNT；level_select 对活实例返回
+ * 覆盖：bg_policy_init 后任务表长度 = BG_POLICY_TASK_COUNT；level_select 对活实例返回
  *       合法档位（< BG_LEVEL_NUM）。
  * 判据：任务表长度与档位枚举是预算调度的坐标，先钉住入口。纯 RAM。 */
 
@@ -1730,15 +1730,15 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    bg_sched_s     sched;
+    bg_policy_s    sched;
     bg_level_cfg_s cfg;
     bg_level_e     level;
 
     ftl_ut_trace_begin();
     memset(&sched, 0, sizeof(sched));
-    bg_scheduler_init(&sched);
+    bg_policy_init(&sched);
 
-    munit_assert_uint32(sched.task_count, ==, BG_TASK_COUNT);
+    munit_assert_uint32(sched.task_count, ==, BG_POLICY_TASK_COUNT);
     munit_assert_uint32(sched.credits, ==, 0U);
 
     /* Token bucket：每 interval 补 grant_units，饱和到 grant_units × CAP。 */
@@ -1747,20 +1747,20 @@ static MunitResult test_bg_engine(const MunitParameter params[], void *data)
     cfg.task_mask   = 0U;
     sched.cfg       = &cfg;
 
-    bg_scheduler_refill(&sched);
+    bg_policy_refill(&sched);
     munit_assert_uint32(sched.credits, ==, 4U);
 
     for (DWORD i = 0U; i < (BG_TOKEN_CAP_TICKS + 2U); i++)
     {
-        bg_scheduler_refill(&sched);
+        bg_policy_refill(&sched);
     }
     munit_assert_uint32(sched.credits, ==, (4U * BG_TOKEN_CAP_TICKS));
 
-    level = bg_scheduler_level_select(ftl_ut_live());
+    level = bg_policy_level_select(ftl_ut_live());
 
     munit_assert_uint32(level, <, BG_LEVEL_NUM);
 
-    ftl_ut_trace_detail("bg: task_count 0->%hhu; credits 0->4->%lu; level_select(live)=%d; BG_TASK_COUNT=%u", sched.task_count, sched.credits, level, BG_TASK_COUNT);
+    ftl_ut_trace_detail("bg: task_count 0->%hhu; credits 0->4->%lu; level_select(live)=%d; BG_POLICY_TASK_COUNT=%u", sched.task_count, sched.credits, level, BG_POLICY_TASK_COUNT);
     ftl_ut_trace_summary("bg: task_count 0->%hhu credits=%lu level=%d", sched.task_count, sched.credits, level);
 
     return MUNIT_OK;
@@ -1857,21 +1857,21 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
 
     ftl_ut_trace_begin();
 
-    munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_IDLE);
+    munit_assert_int(bg_policy_level_select(f), ==, BG_LEVEL_IDLE);
 
     for (WORD i = 0U; i < 8U; i++)
     {
         slots[i] = pend_alloc(&f->pending, i);
         munit_assert_not_null(slots[i]);
     }
-    munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_NORMAL);
+    munit_assert_int(bg_policy_level_select(f), ==, BG_LEVEL_NORMAL);
 
     for (WORD i = 8U; i < 17U; i++)
     {
         slots[i] = pend_alloc(&f->pending, i);
         munit_assert_not_null(slots[i]);
     }
-    munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_BUSY);
+    munit_assert_int(bg_policy_level_select(f), ==, BG_LEVEL_BUSY);
 
     for (WORD i = 0U; i < 17U; i++)
     {
@@ -1880,10 +1880,10 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *dat
         pend_release_index(&f->pending, idx);
     }
 
-    munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_IDLE);
+    munit_assert_int(bg_policy_level_select(f), ==, BG_LEVEL_IDLE);
 
     f->pending.groups[0].used = 1;
-    munit_assert_int(bg_scheduler_level_select(f), ==, BG_LEVEL_BUSY);
+    munit_assert_int(bg_policy_level_select(f), ==, BG_LEVEL_BUSY);
     f->pending.groups[0].used = 0;
 
     ftl_ut_trace_detail("bg level: pending 0->idle; 8->normal; 17->busy; release->idle; group used->busy");
@@ -2307,6 +2307,136 @@ static MunitResult test_host_submit_invalid_args(const MunitParameter params[], 
     return MUNIT_OK;
 }
 
+/* sched_flush_registry — L2P flush 登记：幂等、计数、reset（FTL-SCHED-01）。
+ *
+ * 覆盖：`ftl_sched_l2p_flush_request` 的重复登记、`flush_items` 计数、`flush_reset` 清空。
+ * 判据：同 region 重复登记只占 1 项；reset 后 `flush_items == 0` 且 `pending == false`。
+ * 备注：纯 RAM，不调用 dispatch，不碰 cache 行。 */
+static MunitResult test_sched_flush_registry(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s   *f = ftl_ut_live();
+    ftl_sched_s *s = &f->sched;
+
+    munit_assert_uint32(s->flush_items, ==, 0U);
+    munit_assert_true(ftl_sched_l2p_flush_request(s, 0U));
+    munit_assert_true(ftl_sched_l2p_flush_request(s, 0U)); /* 幂等 */
+    munit_assert_uint32(s->flush_items, ==, 1U);
+    munit_assert_true(ftl_sched_l2p_flush_request(s, 1U));
+    munit_assert_uint32(s->flush_items, ==, 2U);
+    munit_assert_true(ftl_sched_l2p_flush_pending(s));
+
+    ftl_sched_l2p_flush_reset(s);
+    munit_assert_uint32(s->flush_items, ==, 0U);
+    munit_assert_false(ftl_sched_l2p_flush_pending(s));
+    return MUNIT_OK;
+}
+
+/* sched_load_credit — L2P_LOAD demand/预取独立 credit（FTL-SCHED-02）。
+ *
+ * 覆盖：demand 上限 `FTL_SCHED_L2P_LOAD_CREDIT`、幂等 begin、complete 归还；
+ *       预取上限 `FTL_SCHED_L2P_PREFETCH_CREDIT` 且不占 demand credit。
+ * 判据：第 N+1 个 begin 返回 false；complete 后 credit 归零；预取计数独立。
+ * 备注：item 只登记/释放，不提交命令、不 dispatch。 */
+static MunitResult test_sched_load_credit(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s   *f = ftl_ut_live();
+    ftl_sched_s *s = &f->sched;
+
+    munit_assert_uint32(s->credit[FTL_WORK_CLASS_L2P_LOAD], ==, 0U);
+    munit_assert_uint32(s->prefetch_items, ==, 0U);
+
+    for (DWORD i = 0U; i < FTL_SCHED_L2P_LOAD_CREDIT; i++)
+    {
+        munit_assert_true(ftl_sched_l2p_load_begin(s, i, false));
+    }
+    munit_assert_false(ftl_sched_l2p_load_begin(s, FTL_SCHED_L2P_LOAD_CREDIT, false));
+    munit_assert_true(ftl_sched_l2p_load_begin(s, 0U, false)); /* 同一 region 重试沿用 item */
+    munit_assert_uint32(s->credit[FTL_WORK_CLASS_L2P_LOAD], ==, FTL_SCHED_L2P_LOAD_CREDIT);
+
+    for (DWORD i = 0U; i < FTL_SCHED_L2P_LOAD_CREDIT; i++)
+    {
+        ftl_sched_l2p_load_complete(s, i, false);
+    }
+    munit_assert_uint32(s->credit[FTL_WORK_CLASS_L2P_LOAD], ==, 0U);
+    munit_assert_uint32(s->prefetch_items, ==, 0U);
+
+    for (DWORD i = 0U; i < FTL_SCHED_L2P_PREFETCH_CREDIT; i++)
+    {
+        munit_assert_true(ftl_sched_l2p_load_begin(s, 100U + i, true));
+    }
+    munit_assert_false(ftl_sched_l2p_load_begin(s, 100U + FTL_SCHED_L2P_PREFETCH_CREDIT, true));
+    munit_assert_uint32(s->prefetch_items, ==, FTL_SCHED_L2P_PREFETCH_CREDIT);
+    munit_assert_uint32(s->credit[FTL_WORK_CLASS_L2P_LOAD], ==, 0U);
+    for (DWORD i = 0U; i < FTL_SCHED_L2P_PREFETCH_CREDIT; i++)
+    {
+        ftl_sched_l2p_load_complete(s, 100U + i, true);
+    }
+    munit_assert_uint32(s->prefetch_items, ==, 0U);
+    return MUNIT_OK;
+}
+
+/* sched_host_item — host 组 item 幂等登记与 reap（FTL-SCHED-03）。
+ *
+ * 覆盖：`ftl_sched_host_begin` 同组幂等、`host_items` 计数、组释放后 reap。
+ * 判据：同组重复 begin 仍只有 1 项；组释放 + reap 后计数归零。
+ * 备注：只操作 pending 组表与 scheduler item，不下发子操作。 */
+static MunitResult test_sched_host_item(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s   *f  = ftl_ut_live();
+    ftl_sched_s *s  = &f->sched;
+    BYTE         gi = 0U;
+
+    munit_assert_uint32(s->host_items, ==, 0U);
+    munit_assert_true(pend_group_alloc(&f->pending, &gi));
+    munit_assert_true(ftl_sched_host_begin(s, (WORD)gi, true));
+    munit_assert_true(ftl_sched_host_begin(s, (WORD)gi, true)); /* 同组幂等 */
+    munit_assert_uint32(s->host_items, ==, 1U);
+
+    pend_group_release(&f->pending, (WORD)gi);
+    ftl_sched_host_reap(f);
+    munit_assert_uint32(s->host_items, ==, 0U);
+    munit_assert_uint32(pend_group_get_count(&f->pending), ==, 0U);
+    return MUNIT_OK;
+}
+
+/* sched_bg_request — 后台 job 预留 item 只置 READY、重复请求幂等（FTL-SCHED-04）。
+ *
+ * 覆盖：`ftl_sched_bg_request` 对全部 `ftl_bg_job_e` 的登记与重复调用。
+ * 判据：预留 item 的 `bg_job` 为真；重复请求保持 READY，不新建 item。
+ * 备注：不 dispatch；用例结束把预留 item 复位为 FREE，避免污染后续 service。 */
+static MunitResult test_sched_bg_request(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    ftl_ctx_s   *f = ftl_ut_live();
+    ftl_sched_s *s = &f->sched;
+
+    for (BYTE job = 0U; job < FTL_BG_JOB_NUM; job++)
+    {
+        ftl_sched_bg_request(s, (ftl_bg_job_e)job);
+        munit_assert_int(s->items[job].state, ==, FTL_WORK_READY);
+        munit_assert_true(s->items[job].bg_job);
+        ftl_sched_bg_request(s, (ftl_bg_job_e)job); /* 幂等 */
+        munit_assert_int(s->items[job].state, ==, FTL_WORK_READY);
+    }
+
+    for (BYTE job = 0U; job < FTL_BG_JOB_NUM; job++)
+    {
+        s->items[job].state = FTL_WORK_FREE;
+    }
+    return MUNIT_OK;
+}
+
 /* ══ 子套件 /ftl/pure/host/：pending / 组 / wbuf / op ctx / bg 调度（纯 RAM）══ */
 
 MunitTest g_ftl_pure_host_tests[] = {
@@ -2326,6 +2456,10 @@ MunitTest g_ftl_pure_host_tests[] = {
     {                      (char *)"op_route",                  test_op_route, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {               (char *)"bg_level_select",           test_bg_level_select, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {      (char *)"host_submit_invalid_args",  test_host_submit_invalid_args, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {          (char *)"sched_flush_registry",      test_sched_flush_registry, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {             (char *)"sched_load_credit",         test_sched_load_credit, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {               (char *)"sched_host_item",           test_sched_host_item, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
+    {              (char *)"sched_bg_request",          test_sched_bg_request, ftl_ut_pure_setup, ftl_ut_pure_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION,            NULL},
     {                                    NULL,                           NULL,              NULL,                 NULL,             MUNIT_TEST_OPTION_NONE,            NULL},
 };
 

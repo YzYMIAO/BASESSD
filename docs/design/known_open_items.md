@@ -469,7 +469,7 @@
 
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
-| RISK-CACHE-26 | 风险 | 待定位 | cache 写压测 1536 LBA 读回全 0 | 2026-11-01 上板复现 |
+| RISK-CACHE-26 | 风险 | 待验证 | cache 写压测 1536 LBA 读回全 0 / 64 行全 DIRTY 饱和 | 2026-11-21 B2/C 上板：无 CP abort/no evictable，H2testw 944/871，CDM 随机 0.75/0.65 |
 | RISK-USBC-03 | 风险 | 待定位 | USB 盘间歇报无介质，主机侧已止血 | 2026-11-12 主机侧止血 |
 | ISS-FTL-04 | 缺口 | 信息 | Prefetch 顺序读 | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
 | ISS-FTL-05 | 缺口 | 信息 | 多流 host stream hint | 未上板；2026-11-20 发布收敛：非发布阻塞项 |
@@ -539,6 +539,21 @@
 | RISK-CACHE-28 | 2026-11-14 | FAILC 撤销按 region 粒度降级，跨重启丢失 | `docs/archive/known_risks_batches.md` |
   - 2026-11-01 00:53 镜像复现于写阶段结束后的全量校验（`lba=18944..19000` 共 8 个 8-LBA 请求读回 0），L2P cache 处于「64 行全 DIRTY、`no evictable line`、CP `region=39 dirty but state=LOADING — abort`」饱和态 → 待定位
   - 2026-10-31 23:47 首次复现（`lba=11264..12800` 整段 0） → 待定位
+  - **2026-11-21 12:52 随机写复现（release 11:26:58，已含 confirm demand window）**：Random Write 5 线程 / 128 MiB / 卷 G 49% 占用，读/写降到 0.84/0.76/0.56 MB/s，部分线程 0；串口反复 `[L2P ] no evictable line: region=0/891 inv=0 clean=0 dirty=64 loading=0 flushing=0`，`CP job phase=1 age` 持续增长到 >449 s，`drain stalled` / `USB request timeout`。`stats`：`cmt_dirty=1849`、`flush_start=9135` / `flush_ok=7953` / `flush_fail=1182`、`load_fail_no_cmd=677`、`load_fail_gate=4428`、`fc.alloc.buf_fail=696`、`cp.job_us max=72.78 s`、`gc.nogain=130`、`hil timeout=27` / `bad_status=13`、`sys.loop max_us=1,050,379`。⇒ 同一 L2P dirty 饱和/驱逐死锁，**与 confirm demand 窗口不是同一条**；窗口 `open=232` / `blocked=14992` 已生效，但无法解决“全 64 行 DIRTY + 无 COMMAND/BUFFER 写回”的根因。
+  - **2026-11-21 13:24 调度/资源根因分析（未改代码）**：`l2p_load_submit` 把 demand load 提升到 `FC_CMD_CLASS_CRIT`，但 **`l2p_flush_kick` 的 region 页写回仍走默认 BG**；host 随机写（wbuf）、GC、metadata job 也走 BG。BG 的 command/desc/buffer 配额先被 host 占满（`fc.alloc.buf_fail=1788`、`buffer_high=128`），L2P 写回只能 `FTL_AGAIN`，dirty 行无法转 FLUSHING，`l2p_line_evict` 返回 NULL（`no evictable line`）。同时 `md_slot_pair_append` 在 md job 非 idle 或无空日志块时也返回 false；metadata job 自己同为 BG，被 host 饥饿，CP phase=1 等 L2P flush 与 metadata slot，形成循环。random write 走 wbuf，不经 cache write sequence，故 `demand_window_blocked=0`，confirm 窗口不适用。13:24 `stats`：`buf_fail=1788`、`load_fail_no_cmd=1727`、`cmt_wb_defer=59653`、`flush_fail=488`、`cp.job_us max=221s`、`hil timeout=24`、`sys.loop max_us=720ms`；`cmt_dirty=0` 是长时间恢复后的快照。⇒ **不是单点 timeout，是 BG 资源优先级 / L2P 写回与 metadata compaction 的调度死锁**。下一步方向：给 L2P flush + metadata/CP 独立 CRIT/保留额度；在 dirty 高水位时对 host 随机写做 admit/backpressure；按资源层级重排，不能只调 timeout。
+  - **2026-11-21 P0+P1 实现（未上板）**：
+    - P0：`load_fail_*` 拆为 `no_cmd / no_desc / no_buf / build`；L2P 写回新增 `flush_defer_inflight / resource / md_slot / build / submit` 与 `evict_fail` 计数，日志 `load start failed` 带具体 cause。
+    - P1：`FC_CMD_RESERVE_CRIT` 提升为 **4 cmd / 16 desc / 16 buf**；`ftl_async_write_page`（L2P region 写回、Journal、metadata）、`ftl_async_write_page_mirror`（CP/BBT）、`ftl_async_erase_block_multi_plane`（Journal/CP/BBT）以及 `md_submit` 的 metadata 读写擦统一使用 `FC_CMD_CLASS_CRIT`，不再与 host wbuf/GC 共用 BG 额度。GC 的 `write_page_cw` 与 host 仍走 BG。
+    - `make all` / `make release` / `make tests UT=FTL` 通过；下一步用同一 5 线程随机写复测，看 `evict_fail`、`flush_defer_md_slot`、`buf_fail`、`load_fail_no_buf/desc`、`cmt_wb_defer` 与 `CP phase1 age` 是否下降。
+  - **2026-11-21 13:37 P0/P1 上板复测（仍未修复）**：Random Write 5 线程 / 128 MiB 仍为 0.84 / 0.40 MB/s，读多次 0；`no evictable line`（`dirty=64`）、`drain stalled`、USB timeout 继续出现。`stats` 的关键分解：`flush_defer_md_slot=1,527,986` 远大于 `flush_defer_resource=8,570`；`flush_defer_inflight=24,362`、`flush_fail=520`、`evict_fail=325`、`cmt_dirty=1,353`、`load_fail_no_buf=1,676`、`buf_fail=1,714`；`CP active phase=1` 持续 >169 s、`cp.job_us max=63.3 s`；GC `moved=3` / `noop=2,310`。启动日志 `L2P log area: live=64 reclaim=32 borrow=1 (total=48/plane)` ⇒ 固定日志区没有空闲块。⇒ P1 已把 FC buffer/CRIT 失败分出来，但**主瓶颈变成 metadata log/slot 耗尽与 md compaction 无法推进**，不是再加 buffer 能解决。
+  - **2026-11-21 代码修正（未上板）**：`md_log_rotate()` 增加 `for_compaction` 参数。追加路径（`md_slot_pair_append`，即 L2P/CP 写回）在 `free <= L2P_LOG_FREE_WATERMARK (8)` 时只置 `compact_wanted` 并返回 false，不再把最后的日志块吃掉；整理 job 的压缩路径可以用其中一块换当前块作为 destination。目标是保证**压缩永远有目标块**，避免 `free=0 → md_slot_pair_append 永久拒绝 → no evictable`。`make all` / `make release` 通过。2026-11-21 测试源已按当前 API 同步（`md_log_rotate(..., false)` 等），`make tests UT=FTL` 编译/链接通过；**UT 尚未上板复测**。
+  - **2026-11-21 14:08 复测（未 format，旧饱和态）**：镜像 `14:01:25` 从**上一轮已经耗尽的日志区**启动：`L2P log area live=60 reclaim=36 borrow=1`、free=0；随机写仍 0.84/0.43。`stats`：`flush_defer_inflight=700,016`、`flush_defer_md_slot=867,667`、`flush_defer_resource=3,773`、`load_fail_no_buf=4,828`、`buf_fail=4,858`、`evict_fail=721`、`cmt_dirty=712`、`CP phase=1 max=122s`、`hil timeout=23`。⇒ **这轮不是新代码的有效对照**：旧日志区已满且未 format，水位修正只能阻止继续恶化，不能把 `free=0` 的旧状态直接恢复；同时 16 组 CRIT buffer 被 4 个在飞 L2P flush（4×4）吃满，demand load 无 buffer。
+  - **2026-11-21 14:01 追加预留修正**：`FC_CMD_RESERVE_CRIT` 从 4/16/16 提升到 **8/32/32**，覆盖 4 个 L2P flush（16 buf）+ demand load（4）+ metadata mirror（8）等 CRIT 内部并发；此前 16 buf 被 flush 占满，`load_fail_no_buf` 直接暴露。`make all` / `make release` 通过。下一次必须 **format 一次**清空旧日志区后再跑随机写，否则仍是在旧饱和态上测。
+  - **2026-11-21 14:26 format 后复测（watermark + 32 CRIT）**：干净日志区 `live=0 reclaim=96`，随机写后 `flush_defer_md_slot=142,631`（较 1.5M 大幅下降）、`evict_fail=88`、`flush_fail=194`、`cmt_dirty=0`、`free=2238`；但 `load_fail_no_buf=5,412`、`buf_fail=5,416`、`flush_defer_inflight=530,601`、`CP phase1 max=34 s`、`cmd_us max=13.2 s`、USB timeout 仍在，CDM 仍 0.84/0.51。⇒ format 后 metadata slot/evict 已明显改善，**新主瓶颈是 CRIT 内部 buffer 自饥饿**：4 个在飞 L2P flush（16）+ metadata mirror（8）+ journal（4）+ demand load（4）超过 32，demand load 拿不到 buffer。
+  - **2026-11-21 14:xx CRIT 预留再加到 48**：`FC_CMD_RESERVE_CRIT_DESC/BUFS` 从 32 提到 **48**（cmd 仍 8），BG host 上限相应降到 80 buffer；目的先让 demand load 与 metadata 在 4 个 L2P flush 同时在飞时仍有 buffer。`make all` / `make release` 通过，未上板。
+  - **2026-11-21 17:23 B2/C 上板**：format 后随机写/H2testw；日志无 `CP abort phase=1`、无 `no evictable`、无 `hil timeout`；`flush_defer_md_slot=334`、`evict_fail=0`、`flush_fail=263`、`cmt_dirty=0`、`free=50`；H2testw **415/423 MB、0 错误、写 944 / 读 871 KB/s**；CDM 随机 0.75/0.65 MB/s。⇒ B2/C 的调度路径方向成立；随机 4K 仍低，转入 D 的 cache/GC 策略评估。
+  - **2026-11-21 D 评估（同一镜像 17:23 随机写后 / 17:40 H2testw 后）**：随机写行命中 `657,466/7,482`（98.9%）、`load_start=8,435`、`load_lat_us max=7.8ms`、`cmt_evict_dirty=88`、`evict_fail=0`；H2testw 后行命中 `2,813,368/450`（99.98%）、`cmt_evict_dirty=0`；GC `moved=423`、`noop/nogain/novictim=0`、`free=50`。⇒ **cache/GC 不是剩余随机吞吐的瓶颈，D 不改策略**。H2testw 944 KB/s 已接近 USB FS 理论 1.5 MB/s（4 KiB 在 12 Mbit/s 上仅数据约 2.7 ms），内部历史 `/bench/speed/ftl_rw` 约 3.3 MB/s；主机可见随机 0.65 MB/s 主要归因于 USB FS + BOT 单命令往返。要评价 FTL 随机策略，需内部 4 KiB 基准或更高带宽 host。RISK 保留为功能回归判据（无 `no evictable`/CP abort/host timeout），不再作为 cache/GC 调参依据。
+  - **2026-11-21 用户裁决：重新打开，要求解决问题**；此前“暂不追踪/非发布阻塞”的裁决因随机写效果更差而撤销。恢复设备仍先断电重启或重新 format。
 
 #### RISK-USBC-03 USB 盘间歇报无介质
 
@@ -1229,6 +1244,7 @@
 | ID | 类型 | 状态 | 一句话 | 验证 |
 |---|---|---|---|---|
 | RISK-BG-01 | 风险 | 待定位 | 时钟缺失时 RR 巡检门恒假，预测巡检永久停摆 | 2026-11-15 判定：描述与当前实现不符（已无 rr_last_scan 门），见 `docs/design/ftl_ut_design.md` §7.2 |
+| ISS-FTL-19 | 缺口 | 进行中 | FTL request scheduler 架构（E1~E13：L2P + host + 全部后台 job 触发化 + command lease + completion hook + stats/CLI + 每轮开销收敛 + 预取纳入调度 + E11 统一分派 + E13 后台仲裁；E12 驳回） | E1~E10 已过 20:11 首轮上板；E11/E13 与双副本预留未上板；B/C 路径上板通过：CP abort 消失、H2testw 944/871；D 评估完成：host-bound，不改 cache/GC |
 | RISK-FC-05 | 风险 | 待定位 | 后台双 plane 页写留 SQ 头不发，teardown ctx 残留 | 2026-10-30 复现条件隔离 |
 | RISK-HOST-05 | 风险 | 待定位 | confirm park timeout = host 写失败，上游三支未定 | 2026-10-31 上板复现 |
 | RISK-HOST-11 | 风险 | 待定位 | Journal 压力下 TRIM 持久化可能丢失 | 2026-10-31 上板通过（journal-only 路径） |
@@ -1248,16 +1264,59 @@
 | RISK-HOST-18 | 风险 | 已闭合 | H2testw 近满盘 `confirm park timeout`（2 次失败后第 4 次通过；2026-11-21 去格式化复现） | 2026-11-21 release 修正后：format 满盘 415/423、0 错误、无 timeout、窗口 open=11/blocked=276；无 format 满盘 415/423、0 错误、889/870、窗口 open=90/blocked=6636/expired=1、无 timeout |
 | RISK-LOG-02 | 风险 | 信息 | GC 事件在极端 victim 速率下仍可能占 UART | 2026-10-23 上板 |
 | RISK-LOG-03 | 风险 | 信息 | GC no-gain 刷屏（边沿复用） | 2026-10-23 复现 |
-| RISK-PERF-05 | 风险 | 待决策 | CP/L2P gate 背压导致满盘写速下降；优化须保持 host 路径非阻塞 | 2026-11-21 release 910/870（415/423，0 错误）；confirm timeout 未出现（一次） |
+| RISK-PERF-05 | 风险 | 待决策 | CP/L2P gate 背压导致满盘写速下降；优化须保持 host 路径非阻塞 | 2026-11-21 22:58 release **938/866 KB/s（415/423，0 错误）**；CDM 随机已无 host 错误；`flush_fail=0`、`buf_fail=0`、`buffer_high=56`；见 ISS-FTL-19 |
 
 ### 详情
+
+#### ISS-FTL-19 FTL request scheduler 架构
+
+- **当前事实**：E1~E13 已全部落地，现行设计与代码定位见 `docs/design/ftl_design.md` §3.12.12；迁移期设计稿归档于 `docs/archive/ftl_scheduler_design.md`。`ftl_sched` 接管 L2P load/flush、host group、CP/META/JOURNAL/RR/GC/BBT/L2P CMT flush 后台 job、`WAIT_DEP(MD_SLOT)`、host 写 admission、command lease 单一漏斗、completion hook 与 `stats ftl.sched` / `ftl_ctx sched`；`bg_policy` 只做档位/周期触发与提交。E12（每 class 一套 scheduler credit）已驳回，理由见归档稿 Phase E12。
+- **影响**：`RISK-CACHE-26` 的 `no evictable` / `flush_defer_md_slot` / `CP phase=1` 环形等待已由调度结构收口；普通路径不再靠调 FC reserve 或 timeout。
+- **方案/下一步**：22:58 镜像通过首轮验收（H2testw 938/866、0 错误；CDM 随机无 host 错误；调度计数闭合）。剩余：掉电恢复专项、多轮重复稳定性；随机读“同 region 反复驱逐/重载”的延迟抖动作为后续优化。
+- **证据**：`docs/archive/ftl_scheduler_design.md`（归档）、`docs/design/ftl_design.md` §3.12.12；`src/ftl/bg_policy.c/h`；`src/ftl/ftl.c:ftl_service`；`docs/design/storage_controller_design.md` §6.2/§7.3/§7.4/§7.6。
+- **历史/验证**：设计稿已建立；A0 骨架 `src/ftl/ftl_sched.c/h` 已加入（静态 work item 队列 + 空 `ftl_sched_run`，未接管 host/FC 路径）；A1 已把后台预算器统一为 `src/ftl/bg_policy.c/h` / `bg_policy_*` / `BG_POLICY_TASK_*`；B 已把 CP 的 L2P flush 从直接 `l2p_region_flush_kick` + bool 重试改为 `ftl_sched_l2p_flush_request` 登记，由 `ftl_sched_run` 在资源可用时启动，CP 只观察 pending/failed。B2 增加 `l2p_flush_wait_md`：撞到 md job busy/compact 时暂停重试，`md_handle` 从 busy 回 IDLE 时调用 `ftl_sched_md_slot_released()` 唤醒下一轮；`make all` / `make release` 通过。
+  - 2026-11-21 16:23 上板：CP `phase=1` 高频 abort（suppressed 5k~8k）、`flush_defer_md_slot=46,381`、`flush_fail=1,507`。根因：`cp_job_begin()` 的 `memset(h,0,...)` 没有保留新增的 `owner`，第一次 CP 后 `h->owner=NULL`，之后 `cp_regions_flush()` 直接返回 `CP_FLUSH_FAILED`。已把 `owner` 加入窄上下文保存/恢复；`make all` / `make release` 通过，待复测。另：同镜像启动曾记录一次旧 `fc_submission_queue_push` HardFault（PC=0x0801ab96）；用户裁决**忽略，不纳入本轮**。
+  - 2026-11-21 C：host 写 admission 接入 `ftl_sched`——`ftl_sched_host_write_admit()` 在 CMT dirty ≥1024 或 free <8 时拒绝新 host 写；HIL `usb_msc` 用现有 `WAIT_GATE` 暂缓 WRITE 提交（读、FLUSH、UNMAP 不经过该判据），由 `usb_msc_task` 下一轮重试；`ftl_submit_common` 对直接走 FTL 的 host 写也做 admission。host 补发改成**读组先、写组后**两轮派发，读不再被长期占着的写组挡住。
+  - 2026-11-21 17:23 B2/C 上板通过：CP owner 修复后 `CP abort phase=1` 消失，`flush_defer_md_slot=334`、`evict_fail=0`、`hil timeout=0`；H2testw 944/871，0 错误；CDM 随机 0.75/0.65。⇒ B2/C 完成；下一阶段 D 只剩 cache/GC 策略评估。
+  - 2026-11-21 D 评估：基于 17:07 镜像随机写后（17:23）与 H2testw 后（17:40）的同一轮 `stats`，判断 cache/GC 不是剩余随机吞吐的瓶颈，**D 不调 cache/CMT/GC 策略**。依据：随机写行命中 657,466/7,482（98.9%），`load_start=8,435`、`load_lat max=7.8ms`、`cmt_evict_dirty=88`、`evict_fail=0`；GC `moved=423`、`noop/nogain/novictim=0`、`free=50`；H2testw 944 KB/s 已接近 USB FS 理论 1.5 MB/s（4 KiB 数据在 12 Mbit/s 上仅传输约 2.7 ms），内部历史 `/bench/speed/ftl_rw` 约 3.3 MB/s。⇒ 主机可见随机 0.65 MB/s 主要归因于 USB FS + BOT 的单命令往返；要评价 FTL 随机策略需内部 4 KiB 基准或更高带宽 host，不能再用 CDM/H2testw 直接给 cache/GC 调参。D 以「FTL 非瓶颈 + 证据」结案，设计文档 Phase D 退出判据已同步改为允许该结案方式。
+  - 2026-11-21 代码审视收尾：删除未接入的 `ftl_work_item` 队列/credit 死骨架；`cp_handle_s` 的宽 `owner` 收窄为 `ftl_sched_s *sched`；`ftl_sched_run` 增加 `bg_suspend` 门控，并在 `pfr_media_format` 起点清 L2P flush 登记；host admission 与 CMT 主动写回统一使用 `L2P_CMT_WB_WATERMARK`，free 水位复用 `FREE_POOL_EMERGENCY`；删除 FTL 侧复制 FC 池阈值的 `no_desc/no_buf` 分因，只按 `FTL_AGAIN/FTL_ERROR` 区分；bitmap/local→global region 复用 `l2p_bitmap_*` / `l2p_local_to_global_region`；清理陈旧注释、变更史与 `bg_policy.h` 头文件守卫。`make all` / `make release` 通过（零新告警）；UT 冻结未编、未上板。
+  - 2026-11-21 E1 落地：`ftl_sched` 增加 work item 静态池（`FREE/READY/WAIT_DEP/INFLIGHT`）、L2P_FLUSH class credit 与 `WAIT_DEP(MD_SLOT)`；CP 不再写 scheduler bitmap，改提交 item，`ftl_sched_run` 启动写回并按脏位清空回收。删除 `l2p_flush_bitmap`/`l2p_flush_wait_md` 两套过渡状态。E1 仅覆盖 L2P_FLUSH；FC lease、L2P_LOAD、host/GC 请求类与统一完成口按 E2~E7 待做。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E2 落地：demand `L2P_LOAD` 成为 work item（class credit 8，`l2p_load_start` 准入、`ftl_l2p_callback` 最终成功/降级后结算；备份副本重试期间 item 保持）；新增 `ftl_cmd_lease_acquire/release/take`，L2P load 的命令槽不再直接 `fc_command_alloc_class()`。desc/buffer 物理 lease 与统一完成口留 E6；prefetch 仍走 L2P 内部 BG 路径。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E3 落地：host 完成组成为 `HOST_READ`/`HOST_WRITE` item；`ftl_submit_common` 先登记 scheduler 再补发，`ftl_sched_run_host` 按读先写后推进；`ftl_service` 的 host 两轮循环删除；host item 在组 `used=false` 后回收；增加重入保护、提交前 reap（防止 group 槽复用）与 `pend_group_release` 回滚。host 上限 32，给读保留 4 个组槽（写组最多 28），避免写队列吃光读。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E4 落地：`bg_policy` 的 CP advance/emergency/trigger、metadata、Journal erase/flush 六项改为 `ftl_sched_bg_request()`；`ftl_sched_run_bg()` 执行，每个任务后立即 run 以保持表序。`ftl_service` 不再单独执行后台 job；RR/migrate/BBT/L2P 后台 flush 仍直接调用。`WAIT_DEP(MD_SLOT)` 在 metadata step 后由 `ftl_sched_run` 的 reap 唤醒。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E5 落地：RR 适配器提交 `RECOVERY` job，migrate 提交 `GC` job；`ftl_sched_run_bg()` 按表序执行，RR 先于 migrate。migrate 因承载写路径紧急 GC 仍为 must-run，不走可被预算饿死的 credit；自愿 GC 的节拍/收益仍在 migrate 内部。BBT 与 L2P 后台 CMT flush 仍直接调用。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E6 落地：FTL 所有命令分配改为 `ftl_cmd_alloc_class()` → `ftl_cmd_lease_acquire()`；`fc_command_alloc_class()` 只保留在 lease 实现。desc/buffer 作为 command chain 的一部分随 release 回收，不单独预租。`ftl_op_drain()` 在模块完成回调后统一调用 `ftl_sched_note_completion()`，回收 host/L2P item 并唤醒 `WAIT_DEP(MD_SLOT)`。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E7 落地：新增 `stats ftl.sched` 计数器（host/load/flush/bg/completion）与 `ftl_ctx sched` 现场（各 class 活动数、WAIT_DEP、credit、host_running、flush_failed）；CLI 过滤词与帮助同步。板端验收矩阵写入设计文档。`make all` / `make release` 通过；**板端验收未做**。
+  - 2026-11-21 E8 落地：`bg_policy` 最后两个直接任务 BBT / L2P CMT flush 改为 `FTL_BG_JOB_BBT` / `FTL_BG_JOB_L2P_FLUSH`；新增 `bg_job` item 标志隔离后台 job 与普通 region flush；`ftl_sched_run_bg()` 执行。`bg_policy.c` 已无模块 handle 直接调用。`make all` / `make release` 通过；未上板。
+  - 2026-11-21 E1~E8 整体代码审视：未发现阻塞级逻辑错误；复核了 item 生命周期、host group 槽复用前 reap、L2P flush 的 LOADING/FLUSHING 区分、load credit 的备份重试/最终结算、bg_policy 表序与 `run_bg` 即时执行、`bg_job` 与普通 L2P_FLUSH 隔离、command lease 单一漏斗与 completion hook。仅修正 `ftl_sched_reap` 的过期 `@param die` 注释并移除 WAIT_DEP 唤醒时多余的 `bg_job=false`。`make all` / `make release` 通过；**仍未上板，不能据此宣称验证完成**。
+  - 2026-11-21 E9 落地（每轮开销收敛）：后台 job 改为 item 池前 `FTL_BG_JOB_NUM` 个永久预留项，`ftl_sched_bg_request()` 只置 READY、不再分配，返回类型改 `void`；新增 `host_items`/`flush_items` 计数与唯一释放漏斗 `ftl_sched_item_release()`，`ftl_sched_l2p_flush_pending()`、`ftl_sched_reap()`、`ftl_sched_host_reap()`、`ftl_sched_run()`、`ftl_sched_run_host()` 在计数为 0 时 O(1) 返回；`bg_policy_run` 每阶段只调一次 `ftl_sched_run_bg()`，不再每任务跑一次。`make all`（types-check OK）/ `make release`（275872 B）零新告警；**未上板**，性能效果与启动 BusFault 修复均待板端确认。
+  - 2026-11-21 E10 落地（预取纳入 `L2P_LOAD` 调度）：`l2p_region_prefetch` 现登记带 `prefetch` 标志的 `L2P_LOAD` item，使用独立 credit（2），不再直接 `l2p_load_begin` 绕开 scheduler；`ftl_sched_l2p_load_begin/complete()` 增加 `prefetch` 参数并按 `region + prefetch` 匹配；完成回调在 `l2p_load_fail_settle` 清标志前捕获 `load_prefetch`，避免漏释放；未映射/提交失败当场释放 item。`stats ftl.sched` 增加 `prefetch_begin/prefetch_complete`，`ftl_ctx sched` 增加 `pf=`；item 16→20 B。`make all`（types-check OK）/ `make release`（276240 B）零新告警；**未上板**。
+  - 2026-11-21 E11+E13 落地（统一分派 / 后台仲裁收归 scheduler）：新增 `FTL_SCHED_PRIO_E`（HOST_READ → HOST_WRITE → `BG_BASE+job` → L2P_FLUSH）作为唯一顺序来源（item 不新增坐标，顺序由 class/job 推导，`_Static_assert` 钉住）；`ftl_sched_dispatch()` 合并原 `ftl_sched_run_bg()` + `ftl_sched_run()`，按 host → bg 表序 → flush 执行，`bg_suspend` 只放行 host；`ftl_sched_run_host()` 保留为提交快路径 host-only 入口；`bg_policy_run()` 不再调用 `ftl_sched_run_bg()`，档位/掩码/token bucket 仍只决定提交。host 仍在 `ftl_service` 原位派发（早于 seq close/wbuf），后台与 L2P flush 在 `bg_policy_service` 后统一执行。**E12 驳回**：后台 job 单实例，class credit 只有 0/1 且不能 gate 并发；共享资源信用已在 FC 池 BG/CRIT 额度，再来一套是 C9 双坐标。`make all`（types-check OK）/ `make release`（277460 B）零新告警；**未上板**。
+  - 2026-11-21 代码复核（E11/E13 后）：发现并修复 `ftl_sched_l2p_flush_reset` 会对 **FREE** item 调用 `release` —— E9 删除显式 `flush_items = 0U` 后，FREE item 残留的 class 会让计数重复递减（debug ASSERT 失败；release 下 WORD 回绕，`l2p_flush_pending` 恒真）。修复为先判 `state != FTL_WORK_FREE`，并加 `flush_items == 0` 断言。该缺陷在 20:11 镜像之后引入，**未上板**。同轮收口：`l2p_region_state_get` 改为 hint-first（scheduler 每轮按 flush item 查询，原实现每次 64 行线性扫描）；副本维度改为 `L2P_REGION_COPIES = PLANE_NUM`，主/备位置用 `L2P_COPY_PRIMARY/BACKUP`，`flush_pba[]`/`region_addr[]` 的下标不再写 0/1 字面量；Directory 只有两个副本位置，故 `_Static_assert(L2P_REGION_COPIES == 2U)` 把格式钉死（改 PLANE_NUM 必须同步扩展格式）；抽出 `ftl_cmd_bind_page_write` / `ftl_sched_dispatch_host` / `usb_msc_slot_write_admit` 消除重复；删除内部冗余 ASSERT、多余 `(BYTE)/(WORD)/(int)` 强转、过期 `item prio` / `run_bg` 注释；`BG_SCHEDULER_S` → `BG_POLICY_S`；新增通用位判断宏 `SSD_FLAGS_ANY`。`make all`（types-check OK）/ `make release` 零新告警；未上板。
+  - 2026-11-21 跨 die 仲裁评估（不改 FC）：FC 层已定稿，`include/fc/fc_interface.h` / `src/fc/fc_pool.c` 的类与配额**不回退也不扩展**；曾试做“HOST/BG/CRIT 三类 + FC 池作为设备级唯一仲裁层”，因 FC 定稿已整体回退。离线出处不足以引用“多 LUN / 多 die FTL 请求调度”的主流具体形态：NVMe 仲裁是主机队列级（`storage_controller_design.md` §7.3），Cosmos+ 的 `request_schedule` 仓库未克隆，MQSim 是建模参照——按 §〇 不引入设备级 arbiter。⇒ 结论：**调度器保持 per-die，跨 die 共享资源只由定稿的 FC 池承担**；本次只保留 per-die 隔离小改（`ftl_sched_s.die` + workspace 行校验 + per-die corrupt 日志 + per-die `flush_pending`/`l2p_flush_resume` 过滤），不做行为性仲裁改动。`make all`（types-check OK）/ `make release`（277012 B）零新告警；**未上板**。
+  - **2026-11-21 21:39 镜像上板（双副本预留 + E11/E13 + per-die 隔离）**：H2testw 415/423、0 错误、936/866 KB/s（20:11 为 933/866）；CDM 0.75/0.77（20:11 为 0.75/0.80）；`hil.timeout=0`、`complete_err=0`、`drain stalled=0`、`evict_fail=0`；`cp.job active=0 failed=0`、RR 0。双副本预留生效：H2testw `flush_fail=0`、`flush_backup_defer=213`、`flush_backup_resume=213`；随机跑 `flush_fail=1`。
+  - **同轮发现并修复：`l2p_flush_resume` 会提交“预留但未建链”的备副本命令**。`line->flush_pending_cmd` 在写回起点就指向预留命令，但 resume 只按 `flush_pending[die]` 放行、扫描所有带 pending_cmd 的行 ⇒ 主副本仍在飞的行也会被 `ftl_op_submit` 提交未配置命令。现场表现为随机跑 `flush_backup_defer=85` 而 `resume=853`（resume 远大于 defer）。修复：新增 `line->flush_backup_deferred`，只在备副本建链且提交返回 `FTL_AGAIN` 时置位；resume 只处理该标志为真的行。**未上板**。
+  - 同轮另见：`sched corrupt: d=0 load complete: item missing` 一次；`load_begin=load_complete=8923`，计数平衡 ⇒ 重复 complete 而非泄漏。已把日志改为带 `region/pf` 的一次性诊断，待下轮定位。随机跑 `buf_fail=149`、`buffer_high=128`（20:11 为 3/80），待双副本 resume 修复后复测是否收敛。
+  - **2026-11-21 22:10 镜像随机跑失败（未修复，已加诊断）**：CDM 随机 0.75/0.77，但出现 `drain stalled gi=0 next=0/32` → `host op=read lba=752 n=32 status=io_error`，`hil.bad_status=1`、`complete_err=1`；同轮 `buf_fail=129`、`buffer_high=128`、`load_fail_build=49`，读组卡在 L2P 加载建链失败上。`flush_backup_defer=78=resume`（上一轮 resume 不等式已消失）。另有 `sched: load complete missing d=0 region=232 pf=0` 仍复现（`load_begin=load_complete=8975`，计数平衡 ⇒ 重复 complete 而非泄漏）。22:25 诊断镜像（未上板）新增：drain 连续 `FTL_AGAIN` 的 100 ms 限流归因行（`l2pdef/ldfail/seq/load/flush/pfpend/pend/free`）、stall 第二行（`cache load/flush/pfpend/ldfail/seq wrinf/wrcnt/own/yield`）、`stats ftl.sched.load_begin_dup` 幂等 begin 计数、L2P `last_load_fail`。诊断函数已移出 ITCM（`SSD_CODE_FAST + noinline`），release 重新链接通过。
+  - **2026-11-21 22:25 诊断镜像定位并修复 flush-load 绕过调度器**：`l2p_region_flush_kick()` 在 line 不在、CMT 脏时直接 `l2p_load_begin()`，未登记 scheduler、不受 L2P_LOAD credit 8 限制。现场：`cache load=22`（credit 仅 8+2）、`load_begin_dup=0`、`load complete missing region=232`、`buf_fail=95`、`buffer_high=128`、`ldfail=build`，最终读组 `next=0/32` → `drain stalled` → `host op=read lba=688 n=32 status=io_error`、`hil.bad_status=1`、`complete_err=1`。修复：flush 触发的加载同样 `ftl_sched_l2p_load_begin(..., false)` 登记，失败/CLEAN/evict 失败路径即时 `complete`，完整占用 demand credit。`make all`（types-check OK）/ `make release`（278024 B）零新告警；**未上板**。诊断行保留：`again ... ldfail/seq/load/flush/pfpend`、`stall: cache ...`、`load_begin_dup`。
+  - **2026-11-21 22:35 镜像随机跑（flush-load 修复后）**：该段日志 **0 次** `drain stalled` / `io_error` / `load complete missing`，上一轮的读组 IO_ERROR 链路已消失。但仍不通过：长时间 `again gi=0 next=0/8 l2pdef=1 load=1`，随后 `ldfail=0`（NO_CMD：FC 命令池无槽）与 `ldfail=7`（SCHED：L2P_LOAD credit/item 拒绝），`CP submit stalled phase=2 cmd=1 buf=8`、`held ops md=1`；日志未跑完（无最终 stats，CDM 3/5）。根因：FC 定稿的 CRIT 类内部无子仲裁，L2P load/flush 可占满 CP/metadata 的命令与页资源。
+  - **2026-11-21 FTL 侧 CP 资源保底（22:47 镜像，未上板）**：新增 `FTL_FC_CP_{CMD,DESC,BUFS}_HEADROOM = 2/8/8`（本仓自拟）；`l2p_flush_resources_available()` 与 demand `l2p_load_submit()` 在分配前留出该保底，拿不到时按 `NO_CMD` 背压。预取走 BG，不占保底；host 路径仍走原有 `ftl_fc_host_budget_ok`。`again` 诊断行新增 `fccmd=used/depth fcbuf=used/depth`，限流改 1s。`make all`（types-check OK）/ `make release`（278116 B）零新告警。
+  - **2026-11-21 诊断撤除（H2testw 前）**：22:47 镜像随机跑按日志判通过后，移除临时诊断（`again` 归因行、`stall: cache` 第二行、`load_begin_dup`、`last_load_fail`）；保留 `load complete missing` 一次性损坏守卫与相关功能修复（flush-load 登记、CP headroom、双副本 deferred 标志、per-die 隔离）。`make all`（types-check OK）/ `make release`（277332 B）零新告警。随机跑残余的“同 region 反复驱逐/重载”延迟抖动已登记，待 H2testw/后续再看。
+  - **2026-11-21 22:58 镜像验收（诊断已移除）**：H2testw 415/423、**0 错误**、写 **938** / 读 **866 KB/s**（20:11 为 933/866）；`hil.timeout=0`、`bad_status=0`、`complete_err=0`、`buf_fail=0`、`command_high=12`、`buffer_high=56`、`flush_fail=0`、`flush_backup_defer=247=resume`、`load_fail_no_cmd/build=0`；`ftl.sched` 全部闭合（`host_begin=reaped=56788`、`load_begin=complete=412`、`prefetch_begin=complete=4518`、`flush_request=reaped=237`）；CP `active=0 failed=0 timed_out=0`；GC abort 全 0；RR 0。CDM 随机在功能等价的 22:47 镜像上已通过（0 `drain stalled` / 0 `io_error` / 0 `load complete missing`，`bad_status=0`）。⇒ **本次调度重构 + 双副本预留 + CP headroom + per-die 隔离首轮板端验收通过**；未做掉电恢复专项。残余观察：随机跑仍有同 region 反复驱逐/重载的延迟抖动（已无错误），归后续优化。
+  - **2026-11-21 UT 源同步（未上板复测）**：测试源机械同步调度重构 API——`bg_scheduler*` → `bg_policy*`、`bg_sched_s` → `bg_policy_s`、`BG_TASK_COUNT` → `BG_POLICY_TASK_COUNT`、`bg_test_publish` → `bg_policy_test_publish`、`md_log_rotate` 增第 4 参 `for_compaction=false`。`ftl_ut_common.c:ftl_ut_quiesce()` 修正语义：`bg_suspend` 下 scheduler dispatch 不执行已登记 flush item，CP 会永久 PENDING；改为每轮临时放开 suspend、执行 `ftl_sched_dispatch()` 后恢复，并在 idle 判据中加入 `host_items/flush_items/prefetch_items` 与 L2P load/flush credit 归零。`make tests UT=FTL` / `UT=HIL` 零告警、链接通过；2026-11-22 上板首轮发现 `gc_l2p_load_wait_timeout` 的 `FI_L2P_LOAD_FAIL` 命中 0——L2P load 已改走 `ftl_async_read_page_leased`，而注入只 wrap 了 `ftl_async_read_page`。已在 `fi_wrap.c` 补 leased 入口 wrap 并加入 `tests/makefile.mk` 的 `--wrap`；**2026-11-22 release UT 全量已上板通过：318/318、3 SKIP、697.30 s，speed 0 错误**（`docs/archive/test_logs/2026-11-22_release_ut_full.log`）。当前 UT 仍没有 scheduler 直接的 item 生命周期/双副本 deferred/CP headroom 用例，只有经 `ftl_service` 的集成覆盖。
+  - **2026-11-22 UT 发现并修复 CP 无界等待（调度集成缺口）**：`l2p_pool_starve_flush` 在 FC 命令池被占满后 force CP，CP phase1 只看到 scheduler 有 flush 登记就返回 `CP_FLUSH_PENDING` 并清 stall deadline；命令池满时 READY item 永远起不来，CP 永不中止（`cp_steps` 打满 200）。修复：scheduler 有登记时区分“有确定推进源”（flush credit>0 / L2P inflight / md busy / compact_wanted）与“只是 READY 但资源饥饿”；后者走 `cp_job_stall()`，到期返回 `CP_FLUSH_FAILED`。UT 的 `FI_L2P_LOAD_FAIL` seam 同时补了 `ftl_async_read_page_leased` wrap（生产 L2P load 已走 lease 入口）。`make all` / `make release` / `make tests UT=FTL` 零告警；**修复后 UT 待重新上板**。
+  - **2026-11-22 UT 发现并修复 host 提交快路径批量 drain**：`ftl_submit_common` 原改为调用 `ftl_sched_run_host()`（扫所有 host 组）；提交循环里每次 submit 都把全部组 drain 一遍，stall 计数在**没有时间流逝**时被推到 `FTL_DRAIN_STALL_MAX`，组被误判 IO_ERROR、槽位提前释放（`host_group_exhaustion` 第 33 个提交反而成功）。修复：新增 `ftl_sched_host_kick(ftl, group)`，提交快路径只推进本组；服务循环仍用 `ftl_sched_run_host()` 批量派发。`make all` / `make tests UT=FTL` 零告警；**UT 待重新上板**。
+  - **2026-11-22 release UT：speed 用例把 admission 背压当错误**：`/bench/speed/ftl_rw` 内部写速 ~60 MB/s 时 CMT dirty 触达 `L2P_CMT_WB_WATERMARK (3072)`，`ftl_submit_write` 返回 `FTL_AGAIN`；`spd_ftl_phase()` 在 `inflight==0` 时把它计成写错误并退出（`err_wr=1`、CMT dirty=3096），teardown 的 `assert_clean` 因 dirty CMT 失败。修复（测试源）：`spd_ftl_submit` 返回 `ftl_status_e`，`FTL_AGAIN` 按瞬态背压 break 并在 service 后重试，只有 `FTL_ERROR` 计错。release UT 重新构建通过；**待上板复测**。
+  - **2026-11-21 19:12 镜像 BusFault（根因已定位并修复）**：fault PC=0x00005970 落在 `pend_group_is_used`，LR=0x08022c8b 落在 `ftl_sched_host_reap`；由 `BFAR=0x201b5e0b` 反推 `gi=0x900C`（`table=0x200056a0` + gi×48 + 0x52b）。19:30 镜像启动日志在 `META dir_ckpt load` 之前打印 `sched corrupt: host reap: items pointer` ⇒ **`ftl_init` 内的启动期完成（bbt/metadata 初始化）先于 `ftl_sched_init` 调用了 `ftl_op_drain` 的 completion hook**；此时 `sched.items == NULL`，`host_reap` 把地址 0（ITCM 代码）当 item 数组扫描，代码字节恰好构造出 `state/class=HOST`、`group=0x900C` 的假 item，随后越界。修复：`ftl_sched_host_reap` / `ftl_sched_reap` / `ftl_sched_run_host` / `ftl_sched_run` 在 `sched.items == NULL` 时静默返回（启动期合法状态）；保留 item magic、items 指针范围、host group 上界作为后续真实损坏的守卫。19:58:00 clean build 已通过，待上板确认启动不再出现 `sched corrupt`。
+
+  - **2026-11-21 20:11 镜像首轮上板（E9 启动修复 + E10 预取账本）**：横幅 20:11:19；两次上电（PIN 复位 + POR）均无 `sched corrupt`、无 HardFault/BusFault，正常到 CLI/USB。H2testw 415/423 MB、0 错误、933/866 KB/s（上一镜像 914/857，17:23 基线 944/871）；CDM 随机 0.75/0.80 MB/s（上一轮 0.73/0.72）；`hil.timeout=0`、`bad_status=0`、`complete_err=0`、`evict_fail=0`。`stats ftl.sched` 全部闭合：`host_begin=host_reaped=55394`、`load_begin=load_complete=448`、`prefetch_begin=prefetch_complete=4626`、`flush_request=flush_reaped=76`；预取 `started 2913 + skipped 1713 = begin 4626`，无 item 泄漏。⇒ **E9/E10 首轮通过**；未做掉电恢复与满盘专项。观察项：`bg_request=254M` 是 must-run 每轮重新触发（42.7M 轮 × 约 6 个），不是 item 分配；`flush_fail=609/2484` 为备份副本提交 `FTL_AGAIN` 导致主副本白写，归 RISK-PERF-05；随机写期间 CP `phase=1 age=20s` 但 `wait=0 fail=0`，最终完成。
 
 #### RISK-BG-01 时钟缺失时 RR 巡检门恒假
 
 - **后果**：`bg_task_rr` 的内部门 `(now_ms - rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS` 在时钟缺失（`ftl_now_ms()` 恒 0）下恒为假 ⇒ 慢死预测巡检永久停摆；与 `mig_gc_evaluate` 的哨兵语义方向相反。
 - **缓解**：补 `|| (rr_last_scan_ms == 0U)` 哨兵，与 GC 同构。
 - **下一步**：上板确认 1s 节流仍在（巡检不逐轮跑）。
-- **证据**：`src/ftl/bg_scheduler.c:bg_task_rr`。
+- **证据**：`src/ftl/bg_policy.c:bg_task_rr`。
 - **历史/验证**：
   - （日期未记录）修复：哨兵 → 未上板
 
@@ -1304,7 +1363,7 @@
 
 #### ISS-BG-01 后台节拍 flag + token bucket
 
-- **当前事实**：CP T3 / L2P flush / BBT 起新 job 由 10 ms timer 任务置 flag；`bg_scheduler` 预算从「每轮配额」改为「每 10 ms 补 `grant_units` credit（IDLE/NORMAL 4、BUSY 1，上限 4 个 interval）」；must-run 与在飞推进不变。
+- **当前事实**：CP T3 / L2P flush / BBT 起新 job 由 10 ms timer 任务置 flag；`bg_policy` 预算从「每轮配额」改为「每 10 ms 补 `grant_units` credit（IDLE/NORMAL 4、BUSY 1，上限 4 个 interval）」；must-run 与在飞推进不变。
 - **影响**：GC/WL 吞吐与 host 写延迟未上板测量。
 - **下一步 / 判据**：上板测 GC/WL 吞吐与 host 写延迟；按结果调 `grant_units` / `BG_TOKEN_INTERVAL_MS`；验证 flag 消费、T3 不延迟、BBT 仍能落盘。
 - **来源**：`RISK-BG-10`；`docs/design/platform_design.md` §8.5
@@ -1317,7 +1376,7 @@
 - **后果**：CP T3 / L2P flush / BBT 起新 job 改由 `ssd_ftl_bg_tick_task`（10ms）置 flag；`total_units` 每轮配额改为 `grant_units`/10ms 的 credit（IDLE/NORMAL 4、BUSY 1，上限 4 个 interval）。失败场景：① grant 太小 ⇒ 后台吞吐下降，Free Pool drain 后 host 写 `FTL_AGAIN`；② grant 太大 ⇒ 后台抢 host 带宽；③ flag 漏置/未消费 ⇒ L2P 脏行累积、BBT 不落盘、CP T3 延迟；④ timer 注册失败（表满）⇒ flag 永不置（有 LOGE）；⑤ 紧急 CP 不重置 T3。
 - **缓解**：must-run 与在飞推进不变；L2P flush 10ms、BBT 1s、CP T3 10s 判据；flag 消费即清；`BG_ROUND_HARD_LIMIT_US` 保留；注册失败打 LOGE。
 - **下一步**：GC/WL 吞吐、host 写延迟、`[GC] trig` ≤10ms/次、H2testw 0 错误；观察 `[SYS] bg tick task add failed`。
-- **证据**：`src/main.c:ssd_ftl_bg_tick_task`；`src/ftl/bg_scheduler.c:bg_scheduler_run` / `bg_scheduler_refill`；`src/ftl/checkpoint.c:cp_timer_poll` / `cp_should_start`；`src/ftl/bbt.c:bbt_handle`；`src/ftl/l2p_cache.c:l2p_handle`。
+- **证据**：`src/main.c:ssd_ftl_bg_tick_task`；`src/ftl/bg_policy.c:bg_policy_run` / `bg_policy_refill`；`src/ftl/checkpoint.c:cp_timer_poll` / `cp_should_start`；`src/ftl/bbt.c:bbt_handle`；`src/ftl/l2p_cache.c:l2p_handle`。
 - **历史/验证**：
   - 2026-11-03 实现节拍 flag + token bucket → 编译通过，未上板
 
@@ -1361,27 +1420,27 @@
 #### RISK-BG-04 任务表装载无边界检查
 
 - **后果**：加第 14 项会 `tasks[13]` 越界写踩掉 `task_count`（静默失效，编译期无声）；适配器注释里的位号（12/13）与真实下标（11/12）不符。
-- **缓解**：改表驱动 `s_bg_tasks` + `_Static_assert` 容量门 + `bg_scheduler_init` 直接取编译期表长装载；任务位改由表项 `.mask` 显式声明。
+- **缓解**：改表驱动 `s_bg_policy_tasks` + `_Static_assert` 容量门 + `bg_policy_init` 直接取编译期表长装载；任务位改由表项 `.mask` 显式声明。
 - **下一步**：IDLE/NORMAL/BUSY 各跑一轮，确认 10 项照常执行。
-- **证据**：`src/ftl/bg_scheduler.c:s_bg_tasks` / `bg_scheduler_init`。
+- **证据**：`src/ftl/bg_policy.c:s_bg_policy_tasks` / `bg_policy_init`。
 - **历史/验证**：
   - （日期未记录）修复：表驱动 + 静态断言 → 未上板
 
 #### RISK-BG-05 调度器死字段与两套坐标
 
-- **后果**：`bg_scheduler_t` 死字段 `priority`/`round_total_us`/`round_used_us`/`round_seq`/`level`/`clock_ok` 无生产消费者；`priority` 与表序是同一语义的两套坐标且已漂移（取值跳过 5）。
-- **缓解**：删除；`clock_ok` 降为 `bg_scheduler_run` 局部变量；表序即优先级（C9）。
+- **后果**：`bg_policy_t` 死字段 `priority`/`round_total_us`/`round_used_us`/`round_seq`/`level`/`clock_ok` 无生产消费者；`priority` 与表序是同一语义的两套坐标且已漂移（取值跳过 5）。
+- **缓解**：删除；`clock_ok` 降为 `bg_policy_run` 局部变量；表序即优先级（C9）。
 - **下一步**：上板确认无行为变化（表序未变）。
-- **证据**：`src/ftl/bg_scheduler.h`；`src/ftl/bg_scheduler.c`。
+- **证据**：`src/ftl/bg_policy.h`；`src/ftl/bg_policy.c`。
 - **历史/验证**：
   - （日期未记录）删除死字段 → 未上板
 
 #### RISK-BG-11 档位下标无值域断言
 
-- **后果**：`bg_scheduler_service` 用 `level` 直接索引 `s_bg_level_cfg[level]`；越界不会崩，会静默读相邻静态数据 ⇒ 预算/掩码全错而无声。
+- **后果**：`bg_policy_service` 用 `level` 直接索引 `s_bg_level_cfg[level]`；越界不会崩，会静默读相邻静态数据 ⇒ 预算/掩码全错而无声。
 - **缓解**：入口 `ASSERT(level < BG_LEVEL_NUM)`；并在表旁注明「grant_units 必须 ≥ 本档位预算任务数」。
 - **下一步**：改选档逻辑或加预算任务时重访：档位越界与 grant < 任务数都在这里核对。
-- **证据**：`src/ftl/bg_scheduler.c:bg_scheduler_service` / `s_bg_level_cfg` 注释。
+- **证据**：`src/ftl/bg_policy.c:bg_policy_service` / `s_bg_level_cfg` 注释。
 - **历史/验证**：
   - 2026-11-04 加值域断言 + 预算说明 → 编译通过，未上板
 
@@ -1490,6 +1549,7 @@
 
 - **后果**：2026-11-21 H2testw 421 MB 满盘为写 912 / 读 857 KB/s（0 错误），低于 415/423 MB 条件的 950/885；`stats` 显示 CP `job_us` 185/186 次 ≥50 ms、max 3.1 s，`l2p.load_fail_gate=2984`、`flush_fail=453`、`yield_request=996` / `yield_clear=381`。慢点在 host 写确认 / CP 等待，不是 NAND 数据错误（`complete_err=0`、`timeout=0`）。
 - **当前缓解**：L2P demand load 使用 FC CRIT 额度并请求 yield；CP/L2P 有后台预算；所有失败路径都是重试/背压，无数据丢失。
+- **2026-11-21 双副本预留（未上板）**：区域写回在起点同时预留主/备两个命令槽（`l2p_cache.c:l2p_flush_kick`）；备副本建链后若 `ftl_op_submit` 被 cache 序列门控拒绝（`FTL_AGAIN`），命令保留在 `line->flush_pending_cmd`，由 `l2p_flush_resume()` 每轮重试，不再作废已编程的主副本。新增计数 `flush_backup_defer` / `flush_backup_resume`；两者在盘空闲时应相等（差值 = 仍在等待的备副本）。`make all` / `make release` 零新告警；**未上板**，验收看 `flush_fail` 是否从 609/2484 显著下降、`flush_backup_defer≈flush_backup_resume`、H2testw 0 错误且写速不低于 933/866。
 - **下一步 / 验收判据（写死）**：
   1. **P0/P1 优化不得新增 `ftl_sync_submit_wait()` 调用点**；host 热路径必须保持异步 + `FTL_AGAIN` 重试，禁止 `while (!done)` 自旋。
   2. **L2P 预加载失败必须回退 wbuf 或返回 `FTL_AGAIN`**，不得原地等待 region 加载完成。
@@ -2616,10 +2676,10 @@
 
 #### ISS-OBS-05 控制类命令
 
-- **当前事实**：`gc now/stop`、`reset`、`scan` 未实现。风险：与 `bg_scheduler` / `mig_handle` 单飞行冲突、host 在飞、长操作喂狗；`reset` 需「无在飞 IO」门。`scan` 可先用 `test` 的速度/读扫描替代。
+- **当前事实**：`gc now/stop`、`reset`、`scan` 未实现。风险：与 `bg_policy` / `mig_handle` 单飞行冲突、host 在飞、长操作喂狗；`reset` 需「无在飞 IO」门。`scan` 可先用 `test` 的速度/读扫描替代。
 - **影响**：板端排障需要控制类命令时没有安全入口。
 - **下一步 / 判据**：等板端排障需要再排；任何控制命令都 debug-only + host-idle 门。
-- **来源**：`src/ftl/gc.c` / `src/ftl/bg_scheduler.c`；`RISK-CLI-01`
+- **来源**：`src/ftl/gc.c` / `src/ftl/bg_policy.c`；`RISK-CLI-01`
 - **关联**：`RISK-CLI-01`
 - **历史/验证**：
   - （无板端记录）
@@ -2855,7 +2915,7 @@
 
 #### ISS-PLAT-04 统一定时调度器 + 时间源纠正
 
-- **当前事实**：`btim`→`timer` 改名；一张表 `{fn, ctx, first_delay, period}`；watchdog / `[STAT]` / FTL 周期评估迁入；拆 `mig_handle` 的 advance/eval；`bg_scheduler` 降为预算子引擎。系统时基 = ARM 核心 SysTick（ms + µs）；timer 调度器心跳 = TIM6；DWT 从产品路径删除。Phase 0~3 已落地（改名 + 容量 64 + `add_at/set_period/task_count` + `[STAT]` 迁移 + `mig_eval` 注册）；delay/usart/watchdog/TinyUSB/FTL `time_ms` 统一到 SysTick；NAND/USB 的 DWT µs 计时改为 SysTick `LOAD/VAL`；TIM6 只驱动 timer 任务表。
+- **当前事实**：`btim`→`timer` 改名；一张表 `{fn, ctx, first_delay, period}`；watchdog / `[STAT]` / FTL 周期评估迁入；拆 `mig_handle` 的 advance/eval；`bg_policy` 降为预算子引擎。系统时基 = ARM 核心 SysTick（ms + µs）；timer 调度器心跳 = TIM6；DWT 从产品路径删除。Phase 0~3 已落地（改名 + 容量 64 + `add_at/set_period/task_count` + `[STAT]` 迁移 + `mig_eval` 注册）；delay/usart/watchdog/TinyUSB/FTL `time_ms` 统一到 SysTick；NAND/USB 的 DWT µs 计时改为 SysTick `LOAD/VAL`；TIM6 只驱动 timer 任务表。
 - **影响**：未上板验证，时间源/调度行为没有板端证据。
 - **下一步 / 判据**：上板验证 timebase/调度；见 `docs/design/platform_design.md` §8。
 - **来源**：`docs/design/platform_design.md` §8
@@ -4509,9 +4569,9 @@
 | RISK-WB-01 | 2026-11-14 | FLUSH 失败丢弃页对，allocator 无归还 API，容量无声流失 | `docs/archive/known_risks_batches.md` |
 
 - **后果**：`bg_task_l2p_flush` 经 `ftl->bg.level` 反查 `s_bg_level_cfg` 取 `l2p_flush_max`，与引擎实际收到的 `cfg` 可能不同步（引擎按形参跑、适配器按字段读）。
-- **缓解**：引擎在 `bg_scheduler_run` 起点发布 `sched->cfg = cfg`，适配器读 `ftl->bg.cfg->l2p_flush_max`（单写点）。
+- **缓解**：引擎在 `bg_policy_run` 起点发布 `sched->cfg = cfg`，适配器读 `ftl->bg.cfg->l2p_flush_max`（单写点）。
 - **下一步**：上板 BUSY 档 flush 条数应为 1（`BG_BUSY_FLUSH_COUNT`）。
-- **证据**：`src/ftl/bg_scheduler.c:bg_task_l2p_flush`。
+- **证据**：`src/ftl/bg_policy.c:bg_task_l2p_flush`。
 - **历史/验证**：
   - （日期未记录）修复：单写点 → 未上板
 

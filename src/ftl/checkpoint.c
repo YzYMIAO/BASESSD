@@ -505,20 +505,25 @@ static void cp_header_fill(cp_header_s *cp, const cp_handle_s *h, DWORD sequence
  */
 static cp_flush_step_e cp_regions_flush(cp_handle_s *h)
 {
-    const BYTE die     = topo_2_die(h->topo);
-    BOOL       pending = false;
-    BYTE       started = 0U;
+    const BYTE die = topo_2_die(h->topo);
 
-    // 按 snapshot 位置驱动：dirty 可能在 line，也可能只在 CMT（无 resident line）。
-    // 实时脏位已清 = 本次 CP 已 commit（行可能已被驱逐），直接放过。
+    if (h->sched == NULL)
+    {
+        return CP_FLUSH_FAILED; /* 未绑定 scheduler：无法登记 flush */
+    }
+
+    BOOL pending = false;
+
+    // 按 snapshot 位置登记给 request scheduler；实际 l2p_region_flush_kick 由
+    // ftl_sched_run 在 md slot / FC 资源允许时调用。CP 自身只观察登记结果。
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        if ((h->region_bitmap[local / 32U] & (1UL << (local & 31U))) == 0U)
+        if (l2p_bitmap_test_bit(h->region_bitmap, local) == false)
         {
             continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底） */
         }
 
-        const DWORD global_region = (local * DIE_MAX) + die;
+        const DWORD global_region = l2p_local_to_global_region(local, die);
 
         if (l2p_region_dirty_live(h->cache, global_region) == false)
         {
@@ -526,21 +531,15 @@ static cp_flush_step_e cp_regions_flush(cp_handle_s *h)
         }
 
         pending = true;
-
-        if (started < L2P_FLUSH_MAX_NORMAL)
+        if (ftl_sched_l2p_flush_request(h->sched, global_region) == false)
         {
-            const ftl_status_e st = l2p_region_flush_kick(h->cache, global_region);
-
-            if (st == FTL_ERROR)
-            {
-                return CP_FLUSH_FAILED; /* 无依赖 / 建链失败：中止 */
-            }
-            // FTL_AGAIN 是背压/在飞，不是失败；下轮重试。
-            if (st == FTL_OK)
-            {
-                started++;
-            }
+            break; /* item 池满：scheduler 完成回收后下一轮继续登记 */
         }
+    }
+
+    if (h->sched->l2p_flush_failed != false)
+    {
+        return CP_FLUSH_FAILED;
     }
 
     if (pending == false)
@@ -555,8 +554,22 @@ static cp_flush_step_e cp_regions_flush(cp_handle_s *h)
         return CP_FLUSH_DONE;
     }
 
-    // 有在飞命令（含 CMT 合并加载）= 有进展。共享 credit 池是全局的，别的 LUN
-    // 的在飞写回同样代表系统在推进；目录整理 job 在飞也同理。
+    // scheduler 仍有登记（含 md slot 等待/在飞 flush）。**有登记不等于有进展**：
+    // 命令池被占满时 READY item 永远起不来，必须让 stall deadline 生效（CP-04）。
+    if (ftl_sched_l2p_flush_pending(h->sched) != false)
+    {
+        const BOOL progressing = (h->sched->credit[FTL_WORK_CLASS_L2P_FLUSH] > 0U) || l2p_cache_any_inflight(h->cache) || md_is_busy(h->metadata_dir) || (h->metadata_dir->handle.compact_wanted != false);
+
+        if (progressing != false)
+        {
+            timer_deadline_clear(&h->submit_deadline);
+            return CP_FLUSH_PENDING;
+        }
+
+        return (cp_job_stall(h) != false) ? CP_FLUSH_FAILED : CP_FLUSH_PENDING;
+    }
+
+    // 兜底：scheduler 已清登记但仍有在飞写回/目录整理（其它 die 共享 cache）。
     if (l2p_cache_any_inflight(h->cache) || md_is_busy(h->metadata_dir) || h->metadata_dir->handle.compact_wanted)
     {
         timer_deadline_clear(&h->submit_deadline);
@@ -1072,6 +1085,7 @@ static ftl_status_e cp_job_begin(cp_handle_s *h)
     }
 
     // 窄上下文与池游标跨 job 保留；其余执行状态整体复位。
+    ftl_sched_s *const    sched        = h->sched;
     l2p_cache_s *const    cache        = h->cache;
     l2p_jrn_s *const      journal      = h->journal;
     md_dir_cache_s *const metadata_dir = h->metadata_dir;
@@ -1083,6 +1097,7 @@ static ftl_status_e cp_job_begin(cp_handle_s *h)
 
     memset(h, 0, sizeof(*h));
 
+    h->sched        = sched;
     h->cache        = cache;
     h->journal      = journal;
     h->metadata_dir = metadata_dir;
@@ -1096,6 +1111,12 @@ static ftl_status_e cp_job_begin(cp_handle_s *h)
     // flush 成功会清 region 脏位 ⇒ 快照必须先行；journal 水位同理。
     // 共享 cache 的脏位图是全局的；本 job 只需要本 die 的局部 2048-bit 快照。
     const BYTE die = topo_2_die(h->topo);
+
+    // 新 CP job：清上一轮 scheduler 的 L2P flush 登记；本次 snapshot 重新登记。
+    if (h->sched != NULL)
+    {
+        ftl_sched_l2p_flush_reset(h->sched);
+    }
 
     l2p_owner_bitmap_snapshot(h->cache, die, h->region_bitmap);
     h->journal_seq = jrn_sequence_get(h->journal);
@@ -1667,6 +1688,20 @@ void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cach
         }
     }
 #endif
+}
+
+/**
+ * @brief 绑定所属实例的 request scheduler
+ *
+ * @param h     checkpoint handle
+ * @param sched request scheduler（非空）
+ */
+void cp_bind_sched(cp_handle_s *h, ftl_sched_s *sched)
+{
+    ASSERT(h != NULL);
+    ASSERT(sched != NULL);
+
+    h->sched = sched;
 }
 
 /**

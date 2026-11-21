@@ -22,7 +22,7 @@ docs/archive/
 | 层 | 内容 | 典型文件/目录 | 何时读 |
 |---|---|---|---|
 | **A. 证据层** | 逐版本落地、上板验证、风险/断言批次原文 | `changelog/`、`test_logs/`、`ftl_*_board_verify.md`、`known_risks_batches.md`、`assertion_rounds.md`、`known_iss_batches.md` | 查「为什么这样做 / 当时验证到什么程度」 |
-| **B. 设计由来** | 被否方案、历史契约、迁移计划 | `cw_level_mapping_design.md`、`fc_design_discussions.md`、`ftl_module_contracts.md`、`multi_lun_generalization.md`、`nand_op_enablement_plan.md`、`ftl_optimization_plan.md` | 查「为什么不是另一种做法」 |
+| **B. 设计由来** | 被否方案、历史契约、迁移计划 | `cw_level_mapping_design.md`、`fc_design_discussions.md`、`ftl_module_contracts.md`、`multi_lun_generalization.md`、`nand_op_enablement_plan.md`、`ftl_optimization_plan.md`、`ftl_scheduler_design.md`（E1~E13 迁移稿；现行见 `../design/ftl_design.md` §3.12.12） | 查「为什么不是另一种做法」 |
 | **C. 一次性记录** | 单次调试、已完成计划、历史评估 | `debug_*.md`、`ftl_full_landing_plan_*.md`、`project_positioning_*.md`、`testing_guide_*_history.md` | 低频考古；不作为当前判据 |
 
 ## 发布边界

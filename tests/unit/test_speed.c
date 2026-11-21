@@ -827,7 +827,7 @@ static spd_ftl_req_s *spd_ftl_slot_alloc(BYTE chunk, BYTE *out_index)
     return NULL;
 }
 
-static BOOL spd_ftl_submit(ftl_ctx_s *ftl, spd_ftl_req_s *slot, DWORD lba, DWORD count, BOOL write)
+static ftl_status_e spd_ftl_submit(ftl_ctx_s *ftl, spd_ftl_req_s *slot, DWORD lba, DWORD count, BOOL write)
 {
     ftl_io_req_s req;
 
@@ -846,9 +846,8 @@ static BOOL spd_ftl_submit(ftl_ctx_s *ftl, spd_ftl_req_s *slot, DWORD lba, DWORD
     if (status != FTL_OK)
     {
         slot->used = false;
-        return false;
     }
-    return true;
+    return status;
 }
 
 static void spd_ftl_cache_get(const ftl_ctx_s *ftl, spd_ftl_cache_s *out)
@@ -964,28 +963,32 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
             {
                 spd_ftl_fill(s_spd_ftl_lba_base + next, slot->buf, chunk);
             }
-            if (!spd_ftl_submit(ftl, slot, s_spd_ftl_lba_base + next, chunk, write))
+            const ftl_status_e st = spd_ftl_submit(ftl, slot, s_spd_ftl_lba_base + next, chunk, write);
+
+            if (st == FTL_AGAIN)
             {
-                if (inflight == 0U)
-                {
-                    (*errors)++;
-                    *ms_out = platform_now_ms() - t0;
-                    return false;
-                }
+                // host admission / 组槽 / 池瞬态背压：本轮到此为止，service 后重试。
+                // 不能当成写错误（生产 HIL 同样 WAIT_GATE 后重试）。
                 break;
+            }
+            if (st != FTL_OK)
+            {
+                (*errors)++;
+                *ms_out = platform_now_ms() - t0;
+                return false;
             }
 
             next += chunk;
             inflight++;
         }
 
-        /* 与生产主循环一致：timer 表补 bg_scheduler credit，否则长写序列在
+        /* 与生产主循环一致：timer 表补 bg_policy credit，否则长写序列在
          * credit 耗尽后 group 不再被补发（chunk=32 曾出现 fill_delta 有值、pop=0）。 */
         timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
-        /* CP/MIG 在飞时显式推进：speed 循环不能只等 bg_scheduler；否则 CP active
+        /* CP/MIG 在飞时显式推进：speed 循环不能只等 bg_policy；否则 CP active
          * 会占住 FC 资源，host 写组停在 pending（chunk=32 诊断 cp=1/0）。 */
         if (ftl->cp_handle->active != 0U)
         {

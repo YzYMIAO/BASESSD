@@ -579,19 +579,22 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 #define FC_BUFFER_POOL_DEPTH     (128U)
 #define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
 
-/* 命令池 CRIT 预留：L2P region 加载（GC / 写确认的前台依赖）独占 2 槽。
- * 其余后台（CP/GC/journal/metadata）与 host 只能用到 DEPTH - CRIT；
- * host 路径另有独立预算限流（不在本层）。
- * desc/buffer 同理：L2P region 页（2 KiB = 4 个 512B CW）需要 4 组，预留 8 组。 */
-#define FC_CMD_RESERVE_CRIT      (2U)
-#define FC_CMD_RESERVE_CRIT_DESC (8U)
-#define FC_CMD_RESERVE_CRIT_BUFS (8U)
+/* 命令池 CRIT 预留：L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 共用。
+ * 这些操作是 host 写确认、dirty 行驱逐和掉电恢复的推进依赖，不能和 host 随机写/GC
+ * 共用 BG 额度；否则 BG 饱和时 dirty 行写不出去，形成 no evictable line。
+ * 其余后台（GC / host wbuf / prefetch）只能用到 DEPTH - CRIT。
+ * desc/buffer 同理：一次 2 KiB region/metadata 页 = 4 个 512B CW。当前在飞路径的
+ * 基线是 L2P flush 4 组（4×4=16）+ metadata mirror（8）+ journal（4）+ demand
+ * load（4）= 32 组；再留 16 组给 CP/BBT/压缩的突发。48 是本仓预留，不是行业值。 */
+#define FC_CMD_RESERVE_CRIT      (8U)
+#define FC_CMD_RESERVE_CRIT_DESC (48U)
+#define FC_CMD_RESERVE_CRIT_BUFS (48U)
 
 /* 命令分配类：决定当前池占用上限；默认 BG。 */
 typedef enum FC_CMD_CLASS_E
 {
-    FC_CMD_CLASS_BG = 0, /* 后台元数据 / host：上限 DEPTH - CRIT */
-    FC_CMD_CLASS_CRIT,   /* L2P load：上限 DEPTH */
+    FC_CMD_CLASS_BG = 0, /* host / GC / prefetch：上限 DEPTH - CRIT */
+    FC_CMD_CLASS_CRIT,   /* L2P load/flush + Journal/CP/BBT/metadata：上限 DEPTH */
     FC_CMD_CLASS_NUM     /* 边界哨兵 */
 } fc_cmd_class_e;
 

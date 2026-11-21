@@ -169,7 +169,7 @@
 
 | 术语 | 含义 |
 |---|---|
-| **bg_scheduler** | token bucket 后台调度器：must-run 集 + 预算任务 |
+| **bg_policy** | token bucket 后台调度器：must-run 集 + 预算任务 |
 | **must-run** | 每轮无条件执行、不占配额的正确性关键任务 |
 | **op tag** | 完成服务函数选择器；`g_op_callbacks[]` 的下标 |
 | **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
@@ -303,7 +303,7 @@ flowchart TB
     end
 
     subgraph "后台与空间"
-        M11 --> B1["bg_scheduler must-run 预算任务 S3-12"]
+        M11 --> B1["bg_policy must-run 预算任务 S3-12"]
         B1 --> B2["GC 求值 S3-13"]
         B1 --> B3["静态 WL S3-4"]
         B1 --> B4["md_handle S3-5"]
@@ -1134,7 +1134,7 @@ DWORD ftl_media_layout_version(void);
 | Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
 | 完成派发面 | `ftl_op.c/h` | §3.10 |
 | 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
-| Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h` | §3.12 |
+| Service / 后台调度 | `ftl.c`、`bg_policy.c/h` | §3.12 |
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
 | 读恢复 | `read_recovery.c/h` | §3.14 |
 | FTL↔FC 接口 | `ftl_fc_interface.c/h`、`ftl_config.h` | §3.15 |
@@ -3402,7 +3402,7 @@ coalescing。本仓没有 SLC cache（介质本身就是 SLC），只做**同窗
 
 <a id="s3-12" name="s3-12"></a>
 
-### 3.12 FTL service 与后台调度器（ftl.c + bg_scheduler）
+### 3.12 FTL service 与请求调度（ftl.c + ftl_sched + bg_policy）
 
 #### 3.12.1 背景与需求
 
@@ -3442,7 +3442,7 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 | **档位** | 按 host 繁忙度选出的三档负载：`IDLE` / `NORMAL` / `BUSY` |
 | **预算（工作量）** | 本轮预算任务可用的工作量单位；每次 kick 扣 `units`，不足即截断 |
 | **must-run** | 正确性关键任务：无条件每轮执行，**不 gate、不占配额** |
-| **表序** | `s_bg_tasks[]` 中的位置。**表序 = 执行序 = 优先级**，没有独立的 `priority` 字段 |
+| **表序** | `s_bg_policy_tasks[]` 中的位置。**表序 = 执行序 = 优先级**，没有独立的 `priority` 字段 |
 
 #### 3.12.3 职责与边界
 
@@ -3450,15 +3450,17 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 - **`ftl_service(ftl)`**（每实例一次）：
   - 实例步骤（按执行序，唯一定义见 `src/ftl/ftl.h` 的 `ftl_service()` 契约）：
     **元数据候选池重算**（`md_pool_service`）→ **写确认结算**（`ftl_confirm_service`）→
-    **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_drain_group`）→
+    **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_sched_run_host`）→
     **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
-    **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台调度**（`bg_scheduler_service`）。
-- **`bg_scheduler.c/h`**：一个模块承载两层内容——
+    **flush 备副本重试**（`l2p_flush_resume`）→
+    **wbuf 空闲 flush**（`wb_handle(MAYBE_FLUSH_IDLE)`）→ **后台触发**（`bg_policy_service`，
+    只提交）→ **唯一仲裁执行**（`ftl_sched_dispatch`）。
+- **`bg_policy.c/h`**：一个模块承载两层内容——
   - **引擎**：必跑任务 + 预算任务 + 配额截断（函数本身零 kick 知识，
-    不认识任何具体任务）；
+    不认识任何具体任务）；**只提交 job，不直接执行 handle**；
   - **FTL 策略段**：10 个 `static` 适配器把异构 kick 包成 `void(ftl_ctx_s *)` + 任务表
-    `s_bg_tasks` + 档位配额表 `s_bg_level_cfg` + `bg_scheduler_init` /
-    `bg_scheduler_level_select` / `bg_scheduler_service`。
+    `s_bg_policy_tasks` + 档位配额表 `s_bg_level_cfg` + `bg_policy_init` /
+    `bg_policy_level_select` / `bg_policy_service`。
 
   两层同放一个 `.c` 是刻意的：引擎的接口就是“一张 `bg_task_s` 表”，把策略段拆出去只会让
   引擎多一层间接；而“档位是 FTL 域策略”这条边界，靠**引擎不决定档位**（档位由策略段在同轮
@@ -3469,24 +3471,25 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 #### 3.12.4 结构与不变量
 
 `bg_task_s`：`func` / `mask` / `units`（工作量单位）/ `must_run`（`bool`）。
-`bg_sched_s`：`tasks[BG_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
+`bg_policy_s`：`tasks[BG_POLICY_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
 引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，模块入口
-直接读取） / `credits`（预算 credit，由 `bg_scheduler_refill` 在 timer 任务里补充，
-`bg_scheduler_run` 消费；must-run 不占）。
+直接读取） / `credits`（预算 credit，由 `bg_policy_refill` 在 timer 任务里补充，
+`bg_policy_run` 用于提交预算任务；must-run 不占。实际执行由 `ftl_sched_dispatch`
+按 `ftl_bg_job_e` 表序完成（§3.12.12）。
 `bg_level_cfg_s`：每个 token interval 的 credit 配额（`grant_units`） / 任务掩码
 （预算任务位集合）。
 
 ⚠ **表序 = 执行序 = 优先级**：`bg_task_s` **没有** `priority` 字段——表序已是优先级坐标，
 再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
-（`BG_TASK_*`），表序不再兼职位号。加任务 = 在 `s_bg_tasks` 里插一行并给 `.mask` 新位 +
-视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_TASK_COUNT`，并确认对应档位的 `grant_units`
+（`BG_POLICY_TASK_*`），表序不再兼职位号。加任务 = 在 `s_bg_policy_tasks` 里插一行并给 `.mask` 新位 +
+视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_POLICY_TASK_COUNT`，并确认对应档位的 `grant_units`
 足够容纳新任务（credit 不够会被截掉）。表项数由 `_Static_assert` 在编译期
-锁死为 `BG_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
+锁死为 `BG_POLICY_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
 **must-run 的归纳判据（6 项同一条）**：**有前台请求或在飞 job 正在等它**——不跑就死锁或
 host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
-**10 项任务**（任务位宏 `BG_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的 credit 成本（must-run 不占 credit）：
+**10 项任务**（任务位宏 `BG_POLICY_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的 credit 成本（must-run 不占 credit）：
 
 | 表序 | 任务 | 类型 | 配额（units） | 语义 |
 |---:|---|---|---:|---|
@@ -3503,7 +3506,7 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 **档位**：
 
-| 档位 | 条件（`bg_scheduler_level_select`） | 每 10 ms credit | 允许的预算任务 |
+| 档位 | 条件（`bg_policy_level_select`） | 每 10 ms credit | 允许的预算任务 |
 |---|---|---:|---|
 | IDLE | `pending == 0 && queued == 0` | 4 | 表序 6..9 全开 |
 | NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 4 | 表序 6..9 全开 |
@@ -3524,15 +3527,18 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
    ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
    从未被运行验证（见 `known_open_items.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
-   判定收在 `bg_scheduler_service` 首行（早于必跑任务）。
+   判定收在 `bg_policy_service` 首行（早于必跑任务）。
 
 #### 3.12.5 一轮走查（host 正在连续写）
+
+> 本节描述**提交**动作；`bg_policy` 现在只把任务提交为 scheduler job，真正调用
+> `cp_handle/md_handle/...` 的是同一轮的 `ftl_sched_dispatch`（表序不变，§3.12.12）。
 
 把上面的规则跑一遍，数字取典型值，只为说明形状：
 
 ```text
 前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
-      cfg = { grant_units = 1, task_mask = BG_TASK_L2P_FLUSH }
+      cfg = { grant_units = 1, task_mask = BG_POLICY_TASK_L2P_FLUSH }
 
 ① 必跑任务（must-run，表序 0..5，全部执行，不计配额）
   cp_handle(ADVANCE)        → 在飞 CP 推进一步（没有在飞则空操作）
@@ -3570,14 +3576,15 @@ flowchart TB
         P1["fc_service x 最多 4 次"] --> P2["ftl_op_drain"]
     end
     subgraph "ftl_service ftl 每实例"
-        S1["ftl_confirm_service"] --> S2["逐组 ftl_drain_group"]
-        S2 --> S3["wb_handle(MAYBE_FLUSH_IDLE)"]
-        S3 --> S4{"bg_scheduler_service: bg_suspend"}
-        S4 -- "是" --> S5["return"]
-        S4 -- "否" --> S6["bg_scheduler_level_select 选档"]
-        S6 --> S7["bg_scheduler_run"]
-        S7 --> S8["必跑任务 must-run"]
-        S7 --> S9["预算任务（按表序）"]
+        S1["ftl_confirm_service"] --> S2["ftl_sched_run_host"]
+        S2 --> S3["序列收尾 / l2p_flush_resume / wbuf idle flush"]
+        S3 --> S4{"bg_policy_service: bg_suspend"}
+        S4 -- "是" --> S5["跳过后台触发"]
+        S4 -- "否" --> S6["bg_policy_level_select 选档"]
+        S6 --> S7["bg_policy_run：只提交 must-run / 预算任务"]
+        S7 --> S8["ftl_sched_dispatch"]
+        S5 --> S8
+        S8 --> S9["host 残留 → bg 表序 → L2P flush"]
     end
     P2 --> S1
 ```
@@ -3591,12 +3598,14 @@ flowchart TB
 4. 再跑预算任务：按表序扫；**本档位掩码允许且配额够**才跑（每次扣 `units`）；
    单轮墙钟超过 `BG_ROUND_HARD_LIMIT_US`（4 ms）即兜底截断（不抢占）。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
+6. 本轮提交的后台 job 由 `ftl_sched_dispatch` 按 `FTL_SCHED_PRIO_E` 执行；`bg_policy`
+   不再直接调用模块 handle。详见 §3.12.12。
 
 #### 3.12.8 与相邻章节的关系（读本节前先看这三条）
 
 | 相邻章节 | 关系 |
 |---|---|
-| **§3.9.5 读子操作 / `l2p_defer`** | 前台 `ftl_drain_group` 能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（`l2p_cache_any_inflight`），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（RISK-HOST-14 的环形等待） |
+| **§3.9.5 读子操作 / `l2p_defer`** | 前台 `ftl_host_group_drain`（由 `ftl_sched_run_host` 驱动）能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（`l2p_cache_any_inflight`），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（RISK-HOST-14 的环形等待） |
 | **§3.10 完成派发面（`ftl_op`）** | `ftl_op_seq_gate` 决定**后台提交能否成功**：cache 序列 `active/draining` 期间只放行所有者；被拒的 kick 返回 FTL_AGAIN，本轮白跑、下轮重试 |
 | **§3.11 页打包写缓冲（wbuf）** | `wb_handle(MAYBE_FLUSH_IDLE)` 属于 **wbuf 空闲 flush** 步（host IO 收尾），不在本节的**后台调度**步；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
 
@@ -3607,7 +3616,7 @@ flowchart TB
 | 某任务提交被背压 | kick 保留状态，下轮重试 | 后台变慢，不影响正确性 |
 | must-run 任务自身卡死 | 心跳日志（job phase/age）暴露 | 由各 job 的 stall 上限中止 |
 | 时钟缺失 | 墙钟兜底失效（配额仍生效） | 靠内部事件门防刷屏 |
-| `bg_suspend` 置位 | **后台调度**步整体跳过 | 只能复位恢复（诊断/擦片后） |
+| `bg_suspend` 置位 | host 仍派发；后台 job / L2P flush 在 `ftl_sched_dispatch` 内跳过 | 只能复位恢复（诊断/擦片后） |
 
 #### 3.12.10 常量与出处
 
@@ -3618,16 +3627,92 @@ flowchart TB
 | `GC_EVAL_INTERVAL_MS` | 10 | `src/ftl/gc.h` |
 | `GC_LOG_INTERVAL_MS` | 5000 | `src/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/read_recovery.h` |
-| `BG_TASK_COUNT` | 10 | `src/ftl/bg_scheduler.h` |
+| `BG_POLICY_TASK_COUNT` | 10 | `src/ftl/bg_policy.h` |
 | `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） | `src/ftl/pending.h` |
-| 档位配额 | 4 / 4 / 1（工作量单位） | `src/ftl/bg_scheduler.c` |
-| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
+| 档位配额 | 4 / 4 / 1（工作量单位） | `src/ftl/bg_policy.c` |
+| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_policy.c` |
 
 #### 3.12.11 主流对照
 
-“主循环 + 独立后台调度器 + 每任务配额/优先级”是主控固件的常见形态
+“主循环 + 请求调度器 + 独立后台策略/配额 + 每任务优先级”是主控固件的常见形态
 （SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定配额
 （不是连续带宽调节）与 must-run 集合的划分。
+
+#### 3.12.12 请求调度器（ftl_sched）：调度策略与代码定位
+
+**定位**：FTL 与 FC 之间的请求/资源仲裁层。HIL host 请求 → `ftl_sched`（每 die 一份）→
+`ftl_cmd_lease` → FC。`bg_policy` 只决定“本轮提交哪些后台 job”，`ftl_sched` 决定执行顺序、
+准入与完成回收；FC 资源池（已定稿的 BG/CRIT 两类）负责跨 die 的共享资源上限。
+
+**对象与状态**（`src/ftl/ftl_sched.h`）：
+
+- `ftl_work_item_s`：`region` / `group` / `job` / `bg_job` / `prefetch` / `dep_mask` /
+  `class_id` / `state` / `magic`；静态池 `FTL_SCHED_MAX_WORK = 128`，**前
+  `FTL_BG_JOB_NUM`（10）个槽永久预留给后台 job**，不参与普通 item 分配。
+- `ftl_work_state_e`：`FREE / READY / WAIT_DEP / INFLIGHT`。FREE item 的 `class_id` 是
+  上次使用的残留 —— **所有遍历必须先判 `state`**，否则会把已释放的 item 再释放一次。
+- `FTL_SCHED_PRIO_E`：唯一顺序表
+  `HOST_READ → HOST_WRITE → BG_BASE + job（ftl_bg_job_e 表序）→ L2P_FLUSH`。
+  `class_id` 只做账本/观测，**不表达优先级**。
+- 每 die 一份 `ftl_sched_s`（`ftl->sched`）与 workspace 行
+  `s_sched_items[FTL_DIE_MAX][128]`；共享 L2P cache 通过 `l2p_owner_s.sched` 把
+  load/flush 登记到 **owner die** 的 scheduler。
+
+**调度策略**：
+
+1. **一轮顺序**：`ftl_sched_host_kick()`（提交快路径，只推进本组）/
+   `ftl_sched_run_host()`（服务循环，读组先于写组批量派发）→
+   `bg_policy_service()`（只提交 must-run/预算 job）→ `ftl_sched_dispatch()`
+   （host 残留 → 后台 job 表序 → L2P flush）。后台 job 使用预留 item，不再每轮分配/释放。
+2. **host 写准入**：`ftl_sched_host_write_admit()` 在 CMT dirty ≥ 75% 或 free <
+   `FREE_POOL_EMERGENCY` 时拒绝新 host 写；HIL 用 `WAIT_GATE` 暂缓并下轮重试，读不经过
+   该判据。host item 上限 32，其中读组保留 4 个槽（写最多 28）。
+3. **L2P load**：demand 与预取分别 8 / 2 个 credit；预取不占 demand 保底。flush 触发的
+   “CMT 合并加载”（line 不在、CMT 脏）也走同一 demand 登记与 credit，不允许绕开。
+4. **L2P flush**：CP 把 dirty region 登记为 item（活动上限 64，超额由 CP 下轮继续）；
+   `ftl_sched_dispatch_flush()` 按 `L2P_FLUSH_MAX_NORMAL` 预算启动；撞 metadata slot 时
+   转 `WAIT_DEP(MD_SLOT)`，由 metadata 空闲唤醒。
+5. **双副本预留**：写回起点一次预留主/备两个命令槽；备副本提交被 cache 序列门控拒绝时，
+   命令保留在 `line->flush_pending_cmd` 且 `flush_backup_deferred = true`，由
+   `l2p_flush_resume()` 每轮重试；只有硬失败才作废整对。
+6. **CP/metadata 保底**：FC 定稿不改，FTL 侧在 L2P flush 预检与 demand load 分配前留出
+   `FTL_FC_CP_{CMD,DESC,BUFS}_HEADROOM = 2/8/8`，避免把 CP 的最后一个命令/页资源吃光。
+7. **统一完成口**：`ftl_op_drain()` 在模块完成回调返回后调用
+   `ftl_sched_note_completion()`，回收 host/flush item 并唤醒 `MD_SLOT`；模块数据面仍先执行。
+8. **`bg_suspend`**：host 仍派发；后台 job 与 L2P flush 在 `ftl_sched_dispatch` 内跳过。
+
+**不变量**：
+
+- **单一申请口**：FTL 命令只经 `ftl_cmd_lease_acquire()` → `fc_command_alloc_class()`；
+  desc/buffer 随命令 chain 释放。
+- **单一释放漏斗**：`ftl_sched_item_release()` 维护 `host_items` / `flush_items`，
+  所有普通 item 的 `state = FREE` 都经过它。
+- **启动期**：`sched.items == NULL` 是合法状态（boot 早于 `ftl_sched_init` 的完成钩子必须
+  静默返回）；之后 `ftl_sched_items_ok()` 校验 workspace 必须是本 die 那一行。
+- **每 die 只推进自己的请求**：`l2p_flush_resume(cache, die)` 只处理 owner die 的行；
+  `inflight.flush_pending[]` 按 die 分开计数。
+
+**代码定位**：
+
+| 对象 / 动作 | 位置 |
+|---|---|
+| 调度器本体（item / credit / 分派 / 回收 / 统计 / CLI） | `src/ftl/ftl_sched.c/.h` |
+| 初始化与绑定 | `ftl.c:ftl_init`、`ftl_sched_init(sched, die)`、`cp_bind_sched`、`l2p_owner_register` 的 `owner.sched` |
+| host 提交 / 补发 | `ftl.c:ftl_submit_common`、`ftl_host_group_drain`、`ftl_sched_host_kick`（单组快路径）、`ftl_sched_run_host`（服务循环批量） |
+| L2P load / flush | `l2p_cache.c:l2p_load_start`、`l2p_region_prefetch`、`l2p_region_flush_kick`、`l2p_flush_resume` |
+| CP 登记 | `checkpoint.c:cp_regions_flush`、`cp_job_begin` |
+| 完成钩子 | `ftl_op.c:ftl_op_drain` → `ftl_sched_note_completion` |
+| 后台触发 | `bg_policy.c:bg_policy_run`（只提交）、`ftl_sched_bg_request` |
+| 命令租约 / CP headroom | `ftl_fc_interface.c:ftl_cmd_lease_*`、`FTL_FC_CP_*_HEADROOM` |
+| 观测 | `stats ftl.sched`、`ftl_ctx sched` |
+
+**验收状态（2026-11-21）**：
+
+- 22:58 镜像：H2testw 415/423、0 错误、938/866 KB/s；CDM 随机 0 host 错误。
+- `stats ftl.sched` 的 begin/reap/complete 全部闭合；`flush_fail=0`、`buf_fail=0`；
+  CP/GC 无 abort。未做掉电恢复专项。
+- 残余：随机读下同 region 反复驱逐/重载的延迟抖动（无错误），后续优化。
+- 原设计稿已归档：`docs/archive/ftl_scheduler_design.md`（现行内容以本节为准）。
 
 <a id="s3-13" name="s3-13"></a>
 
@@ -4812,7 +4897,7 @@ flowchart TD
     A["host 补发完成"] --> B{"bg_suspend"}
     B -- "是" --> Z["return"]
     B -- "否" --> C["level 为 select pending groups"]
-    C --> D["bg_scheduler_run"]
+    C --> D["bg_policy_run"]
     D --> E["必跑任务 must-run 按表序"]
     E --> E1["cp_handle"]
     E --> E2["rr_handle"]
@@ -4994,7 +5079,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | **块** | NONE / FREE / OPEN / CLOSED / LOG / RETIRED / BAD | 分配 / 写满 / 搬移 / 标坏 | allocator / migrate / bbt |
 | **mig job** | IDLE → READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE | 页/plane 推进 | `mig_handle` / `ftl_migrate_callback` |
 | **RR job** | IDLE → PLANE → READ → PLANE_END → FINISH | 读结果 / 重试耗尽 / 提交卡死 | `rr_handle` / `ftl_read_recovery_callback` |
-| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `bg_scheduler_level_select` |
+| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `bg_policy_level_select` |
 
 **状态机的统一约定**：
 
@@ -5292,7 +5377,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
 | 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
-| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；`src/ftl/bg_scheduler.h` |
+| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；`src/ftl/bg_policy.h` |
 
 ### ADR-17 读写 run：FTL 构链，FC 执行 chain
 
@@ -5546,14 +5631,14 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `BG_TASK_COUNT` | 10 | `src/ftl/bg_scheduler.h` |
+| `BG_POLICY_TASK_COUNT` | 10 | `src/ftl/bg_policy.h` |
 | `NAND_SUBMIT_BUDGET` | 4 | `src/ftl/ftl.h` |
 | `L2P_FLUSH_MAX_NORMAL` / `BUSY` | 4 / 1 | `src/ftl/l2p_cache.h` |
 | `GC_EVAL_INTERVAL_MS` | 10 | `src/ftl/gc.h` |
 | `GC_LOG_INTERVAL_MS` | 5000 | `src/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/read_recovery.h` |
-| 档位配额 | IDLE 4 / NORMAL 4 / BUSY 1（工作量单位） | `src/ftl/bg_scheduler.c` |
-| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_scheduler.c` |
+| 档位配额 | IDLE 4 / NORMAL 4 / BUSY 1（工作量单位） | `src/ftl/bg_policy.c` |
+| `BG_ROUND_HARD_LIMIT_US` | 4000 | `src/ftl/bg_policy.c` |
 
 #### FC 资源
 
@@ -5605,7 +5690,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `rr_handle_s` | `src/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
 | `wb_handle_s` | `src/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
 | `ftl_mod_state_e` / `ftl_mod_status_s` | `src/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀（现仅 wbuf） |
-| `bg_sched_s` / `bg_task_s` | `src/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
+| `bg_policy_s` / `bg_task_s` | `src/ftl/bg_policy.h` | 任务表 / 预算 / 档位（10 项） |
 | `bbt_header_s` / `bbt_state_s` | `src/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_s` | `src/ftl/checkpoint.c` | CP 磨损快照条目（8 B/块；内部类型）|
 

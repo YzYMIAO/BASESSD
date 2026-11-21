@@ -292,12 +292,20 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
         }
         md_handle(ftl->metadata_dir);
         jrn_handle(ftl->journal, NULL);
+
+        // bg_suspend 只阻止**新**后台任务；已登记的 scheduler flush item 仍要执行，
+        // 否则 CP 的 L2P flush 阶段永远 PENDING（CP 现在只登记 item，不再直接 kick）。
+        ftl->flags.bg_suspend = 0U;
+        ftl_sched_dispatch(ftl);
+        ftl->flags.bg_suspend = 1U;
+
         ftl_service_pump();
 
         memset(&rs, 0, sizeof(rs));
         fc_get_resource_stats(&rs);
 
-        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U);
+        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->sched.items != NULL) &&
+                               (ftl->sched.host_items == 0U) && (ftl->sched.flush_items == 0U) && (ftl->sched.prefetch_items == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_LOAD] == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH] == 0U);
 
         if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && jobs_idle)
         {
@@ -427,7 +435,7 @@ static BOOL ftl_ut_io_wait(DWORD timeout_ms)
 
     while (s_io_done == 0U)
     {
-        /* 与生产主循环一致：timer 表补 bg_scheduler credit，CP/Journal/L2P 后台
+        /* 与生产主循环一致：timer 表补 bg_policy credit，CP/Journal/L2P 后台
          * 任务才能推进。漏掉它时长时间的写序列会因 credit 耗尽而停摆。 */
         timer_scheduler_poll();
         ftl_service_pump();
@@ -713,6 +721,12 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_true(wb_is_idle(ftl->wbuf));
     munit_assert_uint32(ftl->cache->inflight.load, ==, 0U);
     munit_assert_uint32(ftl->cache->inflight.flush, ==, 0U);
+    /* scheduler 账本同样必须归零：item 泄漏/credit 未还是静默容量流失。 */
+    munit_assert_uint32(ftl->sched.host_items, ==, 0U);
+    munit_assert_uint32(ftl->sched.flush_items, ==, 0U);
+    munit_assert_uint32(ftl->sched.prefetch_items, ==, 0U);
+    munit_assert_uint32(ftl->sched.credit[FTL_WORK_CLASS_L2P_LOAD], ==, 0U);
+    munit_assert_uint32(ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH], ==, 0U);
     /* 写序列的页表 / 在飞成员 / dirty CMT 是跨用例污染的主要来源：teardown 必须
      * 证明它们已排空，否则下一用例可能读到旧页或被序列门控拒绝。 */
     munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);

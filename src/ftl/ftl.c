@@ -3,9 +3,9 @@
  *
  * 职责：
  *   FTL 的对外门面与主循环——ftl_init 装配各子模块；ftl_service 是**服务主循环**
- *   （NAND 泵 → 完成泵 → 补发 host 子操作 → 工作量配额后台调度）；ftl_submit_read/write
- *   把一条 host 请求拆成多个 FC 子操作下发；ftl_flush_begin/step / ftl_trim_begin/step
- *   供 HIL 调用（均为异步推进）。
+ *   （NAND 泵 → 完成泵 → scheduler host 补发 → 工作量配额后台调度）；
+ *   ftl_submit_read/write 把一条 host 请求拆成多个 FC 子操作下发；
+ *   ftl_flush_begin/step / ftl_trim_begin/step 供 HIL 调用（均为异步推进）。
  *
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
@@ -19,7 +19,7 @@
  *   [pump] 完成泵      ftl_op_drain —— 按 request.op 派发到服务函数数组
  *   —— 以上在 ftl_service_pump（实例无关，每轮一次）；以下在 ftl_service（每实例）——
  *   [svc]  元数据候选池重算 / 写确认结算 / cache 序列确认 / host 补发 /
- *          序列收尾 / wbuf 空闲 flush / 后台调度（bg_scheduler_service）
+ *          序列收尾 / wbuf 空闲 flush / 后台调度（bg_policy_service）
  *   步骤清单的唯一定义见 include/ftl/ftl.h 的 ftl_service() 契约。
  *
  * 文件结构（与下方分区注释一一对应）：
@@ -32,18 +32,18 @@
  *   6. 紧凑 die 表      ftl_topology_build（扫描结果的 FTL 调度坐标）
  *   7. 初始化契约自检  debug-only 的「初始化后不可变」绑定审计
  *   8. 服务主循环      ftl_service_pump / ftl_service
- *   9. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
+ *   9. 子操作下发      ftl_issue_subop / ftl_host_group_drain + ftl_submit_read / write
  *  10. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
  *
- * ⚠ 后台调度在 `ftl/bg_scheduler.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
- *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / 后台调度入口 bg_scheduler_service；
+ * ⚠ 后台调度在 `ftl/bg_policy.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
+ *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / 后台调度入口 bg_policy_service；
  *   通用引擎也在同一文件。本文件不持有任何后台策略。
  *
  * ⚠ 页打包写缓冲在 `ftl/wbuf.c`（wbuf.h 定义 wb_handle_s），本文件只调用其接口。
  *
  * ⚠ 回收动作在 `ftl/migrate.c`：GC / WL / 预测性退役共用一台异步搬移 job
  *   （mig_gc_begin / mig_wl_begin / mig_predict_begin / mig_handle）。触发求值在
- *   `ftl/bg_scheduler.c`，写路径的按需 GC 在
+ *   `ftl/bg_policy.c`，写路径的按需 GC 在
  *   ftl_issue_subop；本文件不直接触发搬移。
  *
  * ⚠ 多实例：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
@@ -76,7 +76,7 @@
 
 #include <string.h>
 
-// 后台节拍与 bg_scheduler 的 token refill 周期必须一致：节拍快了会空转，
+// 后台节拍与 bg_policy 的 token refill 周期必须一致：节拍快了会空转，
 // 慢了会让配额长期为零、后台任务饿死。
 _Static_assert(BG_TOKEN_INTERVAL_MS == L2P_FLUSH_INTERVAL_MS, "后台节拍与 token refill 周期必须一致");
 
@@ -337,8 +337,6 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
         }
     }
 }
-
-static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi);
 
 /**
  * @brief 待入账的依赖是否**确实有待推进的工作**。
@@ -950,7 +948,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_
     }
 
     // host 写重试命令走后台额度：不得吃掉 L2P demand load 的 CRIT 预留槽。
-    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
 
     if (cmd == NULL)
     {
@@ -2400,6 +2398,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     // ├─ Checkpoint：窄上下文（l2p / journal / metadata / allocator / topo）──
     // cp_init 内部整体 memset ⇒ 池游标 cursor_valid==0，首次 job 先扫池定位。
     cp_init(ftl->cp_handle, ftl->cache, ftl->journal, ftl->metadata_dir, &ftl->alloc);
+    cp_bind_sched(ftl->cp_handle, &ftl->sched);
 
     // ├─ 统计 ──
 #if SSD_STATS_ENABLE
@@ -2426,7 +2425,17 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
 
     // ├─ 后台调度器任务表（10 项；must-run + interval/budget）──
     // 必须在所有在飞的字段就绪后装载（适配器只依赖实例字段与 kick，无额外依赖）。
-    bg_scheduler_init(&ftl->bg);
+    bg_policy_init(&ftl->bg);
+
+    // request scheduler：L2P/host 请求调度。item workspace 与其它模块一样自持。
+    ftl_sched_init(&ftl->sched, topo_2_die(topo));
+
+#if SSD_STATS_ENABLE
+    if (topo_2_die(ftl->topo) != FTL_DIE_INVALID)
+    {
+        ftl_sched_stats_register(&ftl->sched, topo_2_die(ftl->topo));
+    }
+#endif
 
     return FTL_OK;
 }
@@ -2530,6 +2539,7 @@ ftl_status_e ftl_instance_init(BYTE die)
     owner.alloc        = &ftl->alloc;
     owner.topo         = ftl->topo;
     owner.journal      = ftl->journal;
+    owner.sched        = &ftl->sched;
     l2p_owner_register(die, &owner);
 
 #if !defined(NDEBUG)
@@ -2680,7 +2690,7 @@ DWORD ftl_host_lba_max(void)
  */
 static void ftl_periodic_tick(ftl_ctx_s *ftl, BOOL bbt_due)
 {
-    bg_scheduler_refill(&ftl->bg);
+    bg_policy_refill(&ftl->bg);
     ftl->l2p_flush_due = 1U;
 
     if (bbt_due != false)
@@ -2823,7 +2833,7 @@ static SSD_CODE_FAST void contract_check_module_contexts(const ftl_ctx_s *ftl)
 
     const cp_handle_s *cp = ftl->cp_handle;
 
-    ASSERT((cp->cache == ftl->cache) && (cp->journal == ftl->journal) && (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc));
+    ASSERT((cp->sched == &ftl->sched) && (cp->cache == ftl->cache) && (cp->journal == ftl->journal) && (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc));
 
     const mig_handle_s *mg = ftl->mig_handle;
 
@@ -2854,11 +2864,11 @@ static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_s *ftl)
     // 只查本实例拥有的 region：其他 LUN 的 owner 可能尚未 boot。
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
     {
-        const DWORD        global = (local * DIE_MAX) + die;
+        const DWORD        global = l2p_local_to_global_region(local, die);
         const l2p_owner_s *owner  = ftl->cache->owner_of_region(ftl->cache->owner_ctx, global);
         const QWORD        lba    = (QWORD)global * L2P_ENTRIES_PER_REGION;
 
-        ASSERT((owner != NULL) && (owner->die == die) && (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) && (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) && (owner->topo.lun == ftl->topo.lun) && (topo_2_die(owner->topo) == die));
+        ASSERT((owner != NULL) && (owner->die == die) && (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) && (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) && (owner->topo.lun == ftl->topo.lun) && (owner->sched == &ftl->sched) && (topo_2_die(owner->topo) == die));
 
         ASSERT((ftl_op_route_get_region(global) == ftl) && (lba_2_ch(lba) == ftl->cache->ch) && (lba_2_ce(lba) == ftl->cache->ce));
     }
@@ -2871,7 +2881,7 @@ static SSD_CODE_FAST void contract_check_identity(const ftl_ctx_s *ftl)
  */
 static SSD_CODE_FAST void contract_check_bg(const ftl_ctx_s *ftl)
 {
-    ASSERT((ftl->bg.tasks != NULL) && (ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
+    ASSERT((ftl->bg.tasks != NULL) && (ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_POLICY_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
 
     for (BYTE i = 0U; i < ftl->bg.task_count; i++)
     {
@@ -3054,16 +3064,9 @@ void ftl_service(ftl_ctx_s *ftl)
     // 撤销失败页、弹出已证明页。组早已完成，这里只做元数据记账。
     ftl_cache_wr_confirm_step(ftl);
 
-    // [svc] host 补发：下发各组的待补发子操作。完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），
-    // 再把各组的待下发子操作补上；顺序保证 host IO 优先于后台调度。
-    // 只遍历**本实例**的组（每实例一份 groups 表）。
-    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
-    {
-        if (ftl->pending.groups[i].used == true)
-        {
-            ftl_drain_group(ftl, i);
-        }
-    }
+    // [svc] host 补发：request scheduler 按 HOST_READ 先于 HOST_WRITE 派发；
+    // 组状态仍由 pending 持有，scheduler item 只承载调度坐标。
+    ftl_sched_run_host(ftl);
 
     // 安全网：序列跨 host 段/命令保持打开等同一 LBA 流的下一段；孤儿序列超时关闭。
     ftl_cache_seq_idle_guard(ftl);
@@ -3071,6 +3074,10 @@ void ftl_service(ftl_ctx_s *ftl)
     // 有序收尾：写序列用 padding END（给提前回执的最后一页补 FAIL_CACHE 结算），
     // 读序列直接放弃。放在补发之后：本轮的窗口先发出去，再决定是否收尾。
     ftl_cache_seq_close_step(ftl);
+
+    // [svc] 双副本写回：重试被序列门控拒绝的备副本提交。主副本已编程，
+    // 不能因为第二次提交被门控就作废整对（那会白写一个页）。
+    l2p_flush_resume(ftl->cache, topo_2_die(ftl->topo));
 
     // [svc] wbuf 空闲 flush：页打包写缓冲的**确定性空闲 flush**——补发循环跑完后，若再无写组会
     // 向当前窗口 append，就把缓冲编程掉（否则这些 host 写永不完成）。放在 bg_suspend
@@ -3083,8 +3090,12 @@ void ftl_service(ftl_ctx_s *ftl)
     }
 
     // [svc] 后台调度：工作量配额后台调度 —— 档位选择 / 10 项任务表 / 配额规模 / bg_suspend
-    // 判定全在 ftl/bg_scheduler.c（本文件不持有后台策略）。
-    bg_scheduler_service(ftl);
+    // 判定全在 ftl/bg_policy.c（本文件不持有后台策略）。
+    bg_policy_service(ftl);
+
+    // [svc] 唯一仲裁入口：host（本轮通常已由上面的快路径派发）→ 后台 job → L2P 写回，
+    // 均按 FTL_SCHED_PRIO_E 顺序；后台 job 只执行 bg_policy 本轮已提交的 READY 项。
+    ftl_sched_dispatch(ftl);
 }
 
 /* ── 子操作下发（一条 host 请求 → 多个 FC 子操作）──
@@ -3099,7 +3110,7 @@ void ftl_service(ftl_ctx_s *ftl)
  *
  * ⚠ n_cw 是**入参兼出参**：调用者给出本窗口内可提供的最大 LBA 数，本函数按
  *   「L2P 可分组性」（读）或「窗口边界」（写）收缩后回填**实际消费的 LBA 数**，
- *   调用者（ftl_drain_group）据此推进进度。
+ *   调用者（ftl_host_group_drain）据此推进进度。
  *
  * ⚠ **一个子操作最多覆盖每个 plane 一个物理页**——这是 FC 建链的硬约束：
  *   fc_build_request_data_planes 断言同 plane 的各 desc 共享 block/page/lun，且
@@ -3145,7 +3156,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     // 数据在 wb_handle(FLUSH) 里一次编程——分配/建链/提交/确认全在那里。
     if (pend_op_is_read(g->op) == false)
     {
-        // 回填窗口夹住后的实际消费数——调用者（ftl_drain_group）据此推进 g->next。
+        // 回填窗口夹住后的实际消费数——调用者（ftl_host_group_drain）据此推进 g->next。
         // ⚠ 不可漏：内部 n 可能被窗口边界夹小（internal_lba 未 8 对齐时 avail<8），
         // 漏回填会让 g->next 越过窗口、跳过未下发的 LBA。
         *n_cw = n;
@@ -3317,7 +3328,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
     }
 
     // 分配 FC 命令槽（池空 = 瞬态）；host 读走后台额度，保留 L2P demand load 的 CRIT 槽。
-    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -3398,7 +3409,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_s *ftl, WORD gi, DWORD internal_lba,
  *
  * @note 只读状态，不改任何记录。拆三行保证单行不超日志缓冲。
  */
-static void ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
+static void SSD_CODE_FAST __attribute__((noinline)) ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
 {
     const ftl_cache_seq_s *seq = &ftl->cache_stream.seq;
     const jrn_handle_s    *jrn = &ftl->journal->handle;
@@ -3443,8 +3454,11 @@ static void ftl_drain_stall_dump(const ftl_ctx_s *ftl, WORD gi)
  * 故循环末尾统一试触发组完成通知——覆盖"整段未映射读"这种从不进 outstanding、
  * 无人触发完成的组。
  */
-static void ftl_drain_group(ftl_ctx_s *ftl, WORD gi)
+void ftl_host_group_drain(ftl_ctx_s *ftl, WORD gi)
 {
+    ASSERT(ftl != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
     pend_group_s *g = &ftl->pending.groups[gi];
 
     while ((g->used == true) && (g->next < g->total))
@@ -3777,7 +3791,8 @@ static void ftl_seq_prefetch_pending(ftl_ctx_s *ftl, DWORD generation)
  * @param op PENDING_OP_READ / PENDING_OP_WRITE（决定组类型与日志标签）。
  *
  * @return FTL_OK    已建组（可能仍有余量待 host 补发步补发）
- *         FTL_ERROR 参数非法 / 越界 / 组槽满
+ *         FTL_AGAIN host 写被 admission 暂缓 / 组槽不足
+ *         FTL_ERROR 参数非法 / 越界 / 延迟写错误
  *
  * @note 两个公开入口的流程**逐字相同**（差异只有 op 与日志文案）⇒ 收敛到本函数
  * 一份，避免两处各自漂移（H6：注释与代码不一致即缺陷，重复实现更甚）。
@@ -3800,6 +3815,13 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
         ftl->flags.deferred_error = false;
         LOGE(LOG_TAG_FTL "%s: deferred write error from an earlier acked segment — fail this command once\r\n", label);
         return FTL_ERROR;
+    }
+
+    // host 写 admission：CMT dirty / free 水位高时不启动新写。USB 前端已在
+    // WAIT_GATE 侧暂缓；这里覆盖 CLI / 其他直接走 FTL 的 host 写入口。
+    if ((op == PENDING_OP_WRITE) && (ftl_sched_host_write_admit(ftl) == false))
+    {
+        return FTL_AGAIN;
     }
 
     // 长度 = 连续 LBA 数（上层 block_count）；FTL 自行决定单/双 plane 拆分
@@ -3838,6 +3860,9 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
 
     // 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入：
     // 下发可能当场完成整组，届时通知就要读它们。
+    // 先回收已完成组的 scheduler item：group 槽会被复用，不能让旧 item 留在新组上。
+    ftl_sched_host_reap(ftl);
+
     BYTE gi = 0U;
 
     if (pend_group_alloc(&ftl->pending, &gi) == false)
@@ -3856,6 +3881,12 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
     g->completion.buffer = req->buffer;
     g->agg_status        = SSD_STATUS_OK;
     g->cmd_remaining     = req->cmd_remaining;
+
+    if (ftl_sched_host_begin(&ftl->sched, gi, (op == PENDING_OP_READ)) == false)
+    {
+        pend_group_release(&ftl->pending, gi);
+        return FTL_AGAIN; /* scheduler host 上限 / item 池满：瞬态 */
+    }
 
     // 序列延续只看 **LBA 连续性**（与 host 传输段边界 / 命令身份无关）：方向不同或
     // 接续点不一致 ⇒ 上一序列不可能再由本请求续。
@@ -3895,10 +3926,9 @@ static ftl_status_e ftl_submit_common(ftl_ctx_s *ftl, const ftl_io_req_s *req, p
         seq_gen = ftl->cache_stream.prefetch_generation;
     }
 
-    // 快路径：小请求当场下发完；遇背压则余下留待 ftl_service 的 host 补发步补发。
-    // 数据在 ftl_op_drain 中拷贝回 buffer（读），Journal + L2P 在完成
-    // handler 中确认 NAND PROGRAM 成功后执行（写）。
-    ftl_drain_group(ftl, gi);
+    // 快路径：只推进**本组**，不扫其它 host 组。批量派发留给 ftl_service；
+    // 否则一次 submit 会把所有组的 stall 计数推进一遍，无时间流逝却可能判卡死。
+    ftl_sched_host_kick(ftl, gi);
 
     if (op == PENDING_OP_READ)
     {
@@ -3963,6 +3993,18 @@ ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req)
 ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req)
 {
     return ftl_submit_common(ftl, req, PENDING_OP_WRITE);
+}
+
+/**
+ * @brief host 写启动许可
+ *
+ * @param ftl FTL 实例（非 NULL）
+ * @return true 允许；false 暂缓
+ */
+BOOL ftl_host_write_admit(const ftl_ctx_s *ftl)
+{
+    ASSERT(ftl != NULL);
+    return ftl_sched_host_write_admit(ftl);
 }
 
 /* ── 元数据落盘 / TRIM（供 HIL 调用）── */
@@ -4381,6 +4423,7 @@ typedef struct FTL_DBG_FILTER_S
     BOOL mig;
     BOOL md;
     BOOL wb;
+    BOOL sched;
 } ftl_dbg_filter_s;
 
 static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
@@ -4429,6 +4472,10 @@ static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
     {
         flt->wb = true;
     }
+    else if (strcmp(module, "sched") == 0)
+    {
+        flt->sched = true;
+    }
     else
     {
         return false;
@@ -4439,7 +4486,7 @@ static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
 /**
  * @brief 打印 FTL 各模块的关键现场（可按模块缩写过滤）。
  *
- * @param module NULL / "all" = 全部；alloc / pend / seq / cache / jrn / cp / mig / md / wb。
+ * @param module NULL / "all" = 全部；alloc / pend / seq / cache / jrn / cp / mig / md / wb / sched。
  * @return true = 参数合法并已输出；false = 未知模块。
  *
  * @note 只读标量快照，不调用会断言的池扫描；CLI `ftl_ctx` 与断言终端共用。
@@ -4524,6 +4571,11 @@ BOOL ftl_debug_dump(const char *module)
         LOGI_IF(flt.all || flt.mig, LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n", die, (int)f->mig_handle->job.active, (int)f->mig_handle->job.waiting, (int)f->mig_handle->job.phase);
         LOGI_IF(flt.all || flt.md, LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n", die, (int)md_handle_is_idle(f->metadata_dir), (int)f->metadata_dir->handle.phase);
         LOGI_IF(flt.all || flt.wb, LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n", die, (int)f->wbuf->open, f->wbuf->base, f->wbuf->occupied, f->wbuf->owners, (int)f->wbuf->error);
+
+        if ((flt.all || flt.sched) && (f->sched.items != NULL))
+        {
+            ftl_sched_debug_dump(f, die);
+        }
     }
     return true;
 }

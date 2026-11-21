@@ -131,7 +131,7 @@ static BOOL hil_wait(const ssd_req_s *req, DWORD timeout_ms)
         }
         ssd_controller_service(&g_ctrl);
 
-        /* 与生产主循环一致：timer 表补 bg_scheduler credit，CP/Journal/WL 才能推进；
+        /* 与生产主循环一致：timer 表补 bg_policy credit，CP/Journal/WL 才能推进；
          * 漏掉它时长写/flush 等待会因 credit 耗尽而超时。 */
         timer_scheduler_poll();
 

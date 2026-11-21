@@ -632,14 +632,15 @@ static ftl_status_e ftl_sync_wait_owned(fc_cmd_s *cmd, fc_cmd_status_s *status_o
  */
 
 /* 命令分配类：构造期上下文（单线程 superloop），默认 BG。
- * L2P demand load 在构造点临时提升到 CRIT，构造后恢复；prefetch/其余路径保持 BG。 */
+ * L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 在构造点提升到 CRIT，
+ * 构造后恢复；host wbuf、GC、prefetch 保持 BG。 */
 static fc_cmd_class_e s_cmd_class = FC_CMD_CLASS_BG;
 
 /**
  * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）
  *
- * L2P demand load 在构造点提升到 FC_CMD_CLASS_CRIT，构造后恢复到原值；
- * prefetch 与其余路径保持 BG。
+ * L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 在构造点提升到
+ * FC_CMD_CLASS_CRIT，构造后恢复到原值；host wbuf、GC、prefetch 保持 BG。
  * 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
  *
  * @param cls 目标类（FC_CMD_CLASS_*）
@@ -666,14 +667,9 @@ fc_cmd_class_e ftl_cmd_class_set(fc_cmd_class_e cls)
  * @param cfg       页配置（crc / random / ldpc / 页 LBA）
  * @return 已填好配置的命令；命令池空返回 NULL
  */
-static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
+static void ftl_cmd_prepare_config(fc_cmd_s *cmd, BYTE operation, const ftl_page_cfg_s *cfg)
 {
-    fc_cmd_s *cmd = fc_command_alloc_class(s_cmd_class);
-
-    if (cmd == NULL)
-    {
-        return NULL;
-    }
+    ASSERT(cfg != NULL);
 
     cmd->config.operation   = operation;
     cmd->config.crc         = cfg->crc;
@@ -685,7 +681,18 @@ static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg
     // 页 LBA → 扇区 LBA。FTL_LBA_UNKNOWN（FTL_PAGE_CFG_DATA_ANY）⇒ FC_META_UNKNOWN，
     // 让 FC 侧跳过「页内 META 与本命令 LBA 比对」那一项。
     cmd->meta               = (cfg->lba == FTL_LBA_UNKNOWN) ? FC_META_UNKNOWN : (cfg->lba << CW_WIDTH);
+}
 
+static fc_cmd_s *ftl_cmd_prepare_alloc(BYTE operation, const ftl_page_cfg_s *cfg)
+{
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(s_cmd_class);
+
+    if (cmd == NULL)
+    {
+        return NULL;
+    }
+
+    ftl_cmd_prepare_config(cmd, operation, cfg);
     return cmd;
 }
 
@@ -1051,9 +1058,11 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
 {
     ASSERT(pba_is_valid(pba));
 
-    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
+    const fc_cmd_class_e saved = ftl_cmd_class_set(FC_CMD_CLASS_CRIT);
+    fc_cmd_s            *cmd   = ftl_cmd_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
     if (cmd == NULL)
     {
+        (void)ftl_cmd_class_set(saved);
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
 
@@ -1073,6 +1082,7 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
     if (st != FTL_OK)
     {
         (void)fc_command_release(cmd->cmd_id);
+        (void)ftl_cmd_class_set(saved);
         return st; /* FTL_AGAIN 池空 / FTL_ERROR 建链失败 */
     }
 
@@ -1088,9 +1098,11 @@ ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const vo
     if (ftl_cmd_write_data_cw(cmd, page, bitmap, false) != FTL_OK)
     {
         (void)fc_command_release(cmd->cmd_id);
+        (void)ftl_cmd_class_set(saved);
         return FTL_ERROR;
     }
 
+    (void)ftl_cmd_class_set(saved);
     *out_cmd = cmd;
     return FTL_OK;
 }
@@ -1139,6 +1151,37 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
  * 而同步版把它和"地址非法"一起压成 FTL_ERROR（同步调用者没有重试的地方）。 */
 
 /**
+ * @brief 在命令上绑定 PBA + 拷入写数据（构造期 CRIT；失败回收命令）
+ *
+ * @param cmd    已分配且已 prepare_config 的命令
+ * @param pba    目标页 PBA
+ * @param data   源数据（可 NULL）
+ * @param length 源长度
+ * @return FTL_OK；FTL_ERROR 地址/建链失败（命令已回收）
+ */
+static ftl_status_e ftl_cmd_bind_page_write(fc_cmd_s *cmd, DWORD pba, const void *data, DWORD length)
+{
+    const fc_cmd_class_e saved = ftl_cmd_class_set(FC_CMD_CLASS_CRIT);
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd->cmd_id);
+        (void)ftl_cmd_class_set(saved);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U) && (ftl_cmd_write_data(cmd, data, length) != FTL_OK))
+    {
+        (void)fc_command_release(cmd->cmd_id);
+        (void)ftl_cmd_class_set(saved);
+        return FTL_ERROR;
+    }
+
+    (void)ftl_cmd_class_set(saved);
+    return FTL_OK;
+}
+
+/**
  * @brief 异步普通页写（提交与完成解耦）
  *
  * 数据在返回前已拷进 FC buffer 池 ⇒ 调用者源缓冲可立即复用。
@@ -1152,26 +1195,45 @@ ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD lengt
  */
 ftl_status_e ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
 {
-    fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    const fc_cmd_class_e saved = ftl_cmd_class_set(FC_CMD_CLASS_CRIT);
+    fc_cmd_s            *cmd   = ftl_cmd_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+
+    (void)ftl_cmd_class_set(saved);
+
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
 
-    if (pba_to_cmd(cmd, pba) != FTL_OK)
-    {
-        (void)fc_command_release(cmd->cmd_id);
-        return FTL_ERROR;
-    }
+    const ftl_status_e st = ftl_cmd_bind_page_write(cmd, pba, data, length);
 
-    if ((data != NULL) && (length > 0U) && (ftl_cmd_write_data(cmd, data, length) != FTL_OK))
+    if (st != FTL_OK)
     {
-        (void)fc_command_release(cmd->cmd_id);
-        return FTL_ERROR;
+        return st;
     }
 
     *out_cmd = cmd;
     return FTL_OK;
+}
+
+/**
+ * @brief 用已预留的命令槽建链并装数据（不提交）
+ *
+ * desc/buffer 仍跟随构造期 class（写回固定 CRIT）；命令槽由调用者预留。
+ *
+ * @param cmd    已预留的命令
+ * @param pba    目标页 PBA
+ * @param data   源数据（可 NULL）
+ * @param length 源长度
+ * @param cfg    页配置
+ * @return FTL_OK；FTL_ERROR 地址/建链失败（命令已回收）
+ */
+ftl_status_e ftl_async_write_page_reserved(fc_cmd_s *cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg)
+{
+    ASSERT(cmd != NULL);
+
+    ftl_cmd_prepare_config(cmd, OP_NORMAL_PROGRAM_PAGE, cfg);
+    return ftl_cmd_bind_page_write(cmd, pba, data, length);
 }
 
 /**
@@ -1344,22 +1406,92 @@ ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
  */
 ftl_status_e ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const ftl_page_cfg_s *cfg = &s_page_cfg_normal;
+    const ftl_page_cfg_s *cfg   = &s_page_cfg_normal;
+    const fc_cmd_class_e  saved = ftl_cmd_class_set(FC_CMD_CLASS_CRIT);
 
     fc_cmd_s *cmd = ftl_cmd_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, cfg);
     if (cmd == NULL)
     {
+        (void)ftl_cmd_class_set(saved);
         return FTL_AGAIN;
     }
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
         (void)fc_command_release(cmd->cmd_id);
+        (void)ftl_cmd_class_set(saved);
         return FTL_ERROR;
     }
 
+    (void)ftl_cmd_class_set(saved);
     *out_cmd = cmd;
     return FTL_OK;
+}
+
+/**
+ * @brief 申请一个命令租约（构造期 class 额度）
+ *
+ * @param lease 租约（非空）
+ * @param cls   命令分配类
+ * @return true 已持有命令；false 池/额度空
+ */
+BOOL ftl_cmd_lease_acquire(ftl_cmd_lease_s *lease, fc_cmd_class_e cls)
+{
+    ASSERT(lease != NULL);
+    ASSERT(cls < FC_CMD_CLASS_NUM);
+
+    lease->cls = cls;
+    lease->cmd = fc_command_alloc_class(cls);
+    return lease->cmd != NULL;
+}
+
+/**
+ * @brief 按 class 取一条命令（内部经 command lease；调用者负责 release）
+ *
+ * @param cls 命令分配类
+ * @return 命令；池/额度空返回 NULL
+ */
+fc_cmd_s *ftl_cmd_alloc_class(fc_cmd_class_e cls)
+{
+    ftl_cmd_lease_s lease;
+
+    if (ftl_cmd_lease_acquire(&lease, cls) == false)
+    {
+        return NULL;
+    }
+    return ftl_cmd_lease_take(&lease);
+}
+
+/**
+ * @brief 释放未提交的命令租约
+ *
+ * @param lease 租约（非空）
+ */
+void ftl_cmd_lease_release(ftl_cmd_lease_s *lease)
+{
+    ASSERT(lease != NULL);
+
+    if (lease->cmd != NULL)
+    {
+        (void)fc_command_release(lease->cmd->cmd_id);
+        lease->cmd = NULL;
+    }
+}
+
+/**
+ * @brief 取走租约里的命令（所有权转交调用者）
+ *
+ * @param lease 租约（非空）
+ * @return 命令；租约已空时返回 NULL
+ */
+fc_cmd_s *ftl_cmd_lease_take(ftl_cmd_lease_s *lease)
+{
+    ASSERT(lease != NULL);
+
+    fc_cmd_s *cmd = lease->cmd;
+
+    lease->cmd = NULL;
+    return cmd;
 }
 
 /**
@@ -1391,6 +1523,41 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
 }
 
 /**
+ * @brief 用已租约的命令建链并异步读页
+ *
+ * 成功时命令所有权转交调用者；失败时命令仍归 lease，调用者负责 release。
+ *
+ * @param out_cmd 输出：建好的命令
+ * @param lease   已持有的命令租约
+ * @param pba     目标页 PBA
+ * @param cfg     页配置
+ * @return FTL_OK；FTL_ERROR 地址/建链失败
+ */
+ftl_status_e ftl_async_read_page_leased(fc_cmd_s **out_cmd, ftl_cmd_lease_s *lease, DWORD pba, const ftl_page_cfg_s *cfg)
+{
+    ASSERT(out_cmd != NULL);
+    ASSERT(lease != NULL);
+    ASSERT(lease->cmd != NULL);
+
+    fc_cmd_s            *cmd   = lease->cmd;
+    const fc_cmd_class_e saved = ftl_cmd_class_set(lease->cls);
+
+    ftl_cmd_prepare_config(cmd, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+
+    const ftl_status_e st = pba_to_cmd(cmd, pba);
+
+    (void)ftl_cmd_class_set(saved);
+
+    if (st != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    *out_cmd = ftl_cmd_lease_take(lease);
+    return FTL_OK;
+}
+
+/**
  * @brief 异步 SET FEATURES
  *
  * 不绑 PBA（特性寄存器是 die 级）；ch/ce/lun 必须填，ftl_op_drain 靠它路由。
@@ -1406,7 +1573,7 @@ ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_c
 ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode)
 {
     // 维护类命令走后台额度：本原语不得占用 L2P demand 加载的 CRIT 预留。
-    fc_cmd_s *cmd = fc_command_alloc_class(FC_CMD_CLASS_BG);
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */

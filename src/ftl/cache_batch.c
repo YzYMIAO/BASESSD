@@ -520,7 +520,7 @@ static BOOL cache_read_build(cache_read_build_s *b, const cache_read_req_s *req,
     for (DWORD i = 0U; i < b->n_pairs; i++)
     {
         // host 读命令走后台额度：不得吃掉 L2P demand load 的 CRIT 预留槽。
-        b->cmds[i] = fc_command_alloc_class(FC_CMD_CLASS_BG);
+        b->cmds[i] = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
 
         if (b->cmds[i] == NULL)
         {

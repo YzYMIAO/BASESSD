@@ -8,7 +8,7 @@
 
 | 任务 | 读（按序） |
 |---|---|
-| FTL 改动 / 新功能 | `design/ftl_design.md`（主设计）→ `design/revision_history/ftl_revision_history.md`（逐版本决策史）→ `design/known_open_items.md`（未闭合项：`ISS-*` 缺口 + `RISK-*` 风险） |
+| FTL 改动 / 新功能 | `design/ftl_design.md`（主设计，含 §3.12.12 request scheduler）→ `design/revision_history/ftl_revision_history.md`（逐版本决策史）→ `design/known_open_items.md`（未闭合项：`ISS-*` 缺口 + `RISK-*` 风险） |
 | FTL 对外接口 | `include/ftl/*.h`（函数契约在头文件）+ `design/ftl_design.md` §5.1（模块契约/调用约束）；历史契约见 `archive/ftl_host_interface.md` |
 | FC-NAND 层改动 | `design/fc_nand_design.md`（主设计；§26 行业对照 = 判据）→ `design/revision_history/fc_nand_revision_history.md`（逐版本决策史 / 被否方案） |
 | **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_open_items.md` 模块 10（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.2/§17.3/§25.8 → `design/ftl_design.md` ADR-15 |

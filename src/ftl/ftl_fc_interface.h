@@ -108,6 +108,17 @@ static inline BOOL ftl_fc_host_budget_ok(void)
     return ftl_fc_host_budget_ok_n(1U);
 }
 
+/* ── CP/metadata 的 FC 资源保底（FTL 侧）──
+ *
+ * FC 已定型：CRIT 类内部不区分 L2P load/flush 与 CP/metadata，谁先占谁赢。
+ * L2P 路径在预检时给 CP/metadata 留出这些槽位，避免把 CP 的最后一个命令/页
+ * 资源吃光（现场：CP submit stalled cmd=1 buf=8）。
+ * 数值是本仓自拟：2 命令 ≈ 一次 CP/metadata 提交 + 1 在飞余量；
+ * 8 desc/buf ≈ 2 个 metadata 页（每页 CW_NUM=4）。 */
+#define FTL_FC_CP_CMD_HEADROOM  (2U)
+#define FTL_FC_CP_DESC_HEADROOM (8U)
+#define FTL_FC_CP_BUFS_HEADROOM (8U)
+
 /* ── desc 链组装共用小工具 ──
  *   plane 段规则用 fc_interface.h 的 fc_command_plane_span（唯一一份定义，
  *   FC 的越段校验与 FTL 的掩码展开共用）。 */
@@ -116,11 +127,11 @@ static inline BOOL ftl_fc_host_budget_ok(void)
  * @brief 命令指针 → FC 命令池 ID。
  *
  * 命令池 ID 保存在 fc_cmd_s.cmd_id（见 fc_interface.h）。本层调用者手里的 cmd
- * 恒来自 fc_command_alloc_class()（经 ftl_cmd_prepare_alloc），故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
+ * 恒来自 ftl_cmd_alloc_class()（经 ftl_cmd_prepare_alloc），故 ID 必然有效；池外指针（栈上的 fc_cmd_s）得到
  * FC_CMD_ID_INVALID——那是编程错误，调用方（pending_add / sync_wait）会因查不到
  * 而失败，不会静默串命令。
  *
- * @param cmd 命令指针（本层调用者恒来自 fc_command_alloc_class()（经 ftl_cmd_prepare_alloc））
+ * @param cmd 命令指针（本层调用者恒来自 ftl_cmd_alloc_class()（经 ftl_cmd_prepare_alloc））
  * @return FC 命令池 ID；池外指针返回 FC_CMD_ID_INVALID
  */
 static inline WORD ftl_cmd_id(const fc_cmd_s *cmd)
@@ -245,8 +256,8 @@ ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap);
 /**
  * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）
  *
- * L2P demand load 在构造点提升到 FC_CMD_CLASS_CRIT，构造后恢复到原值；
- * prefetch 与其余路径保持 BG。
+ * L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 在构造点提升到
+ * FC_CMD_CLASS_CRIT，构造后恢复到原值；host wbuf、GC、prefetch 保持 BG。
  * 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
  *
  * @param cls 目标类（FC_CMD_CLASS_*）
@@ -635,6 +646,24 @@ ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba);
 ftl_status_e ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
 /**
+ * @brief 用**已预留**的命令槽建链并装数据（不提交）
+ *
+ * 与 ftl_async_write_page 的唯一差别：命令由调用者预先用 ftl_cmd_alloc_class()
+ * 取得，本函数不再分配命令。用于双副本写回——备副本命令在主副本提交前就预留，
+ * 主副本完成时即使命令池被占满也能建链提交。
+ *
+ * 失败时命令已由本函数回收（与 ftl_async_write_page 同约定）；成功时命令仍归调用者。
+ *
+ * @param cmd    已预留的命令（非空，池内、未提交）
+ * @param pba    目标页 PBA
+ * @param data   源数据（可 NULL）
+ * @param length 源长度
+ * @param cfg    页配置
+ * @return FTL_OK；FTL_ERROR 地址/建链失败（命令已回收）
+ */
+ftl_status_e ftl_async_write_page_reserved(fc_cmd_s *cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
+
+/**
  * @brief 建链（无数据），**不提交**，命令经 out_cmd 交回。
  *
  * @param out_cmd 出参命令（非 NULL）
@@ -740,6 +769,46 @@ ftl_status_e ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *
  */
 ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_s *cfg);
 
+/* 命令租约：当前只租 command slot；desc/buffer 仍由建链路径按同一 class 取用，
+ * 全资源 lease 尚未收口。 */
+typedef struct FTL_CMD_LEASE_S
+{
+    fc_cmd_s      *cmd;
+    fc_cmd_class_e cls; /* 建链时 desc/buffer 跟随的 class */
+} ftl_cmd_lease_s;
+
+/**
+ * @brief 申请一个命令租约（构造期 class 额度）
+ *
+ * @param lease 租约（非空）
+ * @param cls   命令分配类
+ * @return true 已持有命令；false 池/额度空
+ */
+BOOL ftl_cmd_lease_acquire(ftl_cmd_lease_s *lease, fc_cmd_class_e cls);
+
+/**
+ * @brief 按 class 取一条命令（内部经 command lease；调用者负责 release）
+ *
+ * @param cls 命令分配类
+ * @return 命令；池/额度空返回 NULL
+ */
+fc_cmd_s *ftl_cmd_alloc_class(fc_cmd_class_e cls);
+
+/**
+ * @brief 释放未提交的命令租约
+ *
+ * @param lease 租约（非空）
+ */
+void ftl_cmd_lease_release(ftl_cmd_lease_s *lease);
+
+/**
+ * @brief 取走租约里的命令（所有权转交调用者）
+ *
+ * @param lease 租约（非空）
+ * @return 命令；租约已空时返回 NULL
+ */
+fc_cmd_s *ftl_cmd_lease_take(ftl_cmd_lease_s *lease);
+
 /**
  * @brief 读页（异步）：OP_NORMAL_READ_PAGE_WITH_DATA_OUT，建链，**不提交**。
  *
@@ -758,6 +827,19 @@ ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_
  *         FTL_ERROR 入参或地址非法
  */
 ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_cfg_s *cfg);
+
+/**
+ * @brief 用已租约的命令建链并异步读页
+ *
+ * 成功时命令所有权转交调用者；失败时命令仍归 lease，调用者负责 release。
+ *
+ * @param out_cmd 出参：已建链的命令
+ * @param lease   已持有的命令租约
+ * @param pba     目标页 PBA
+ * @param cfg     页配置
+ * @return FTL_OK 命令已备好；FTL_ERROR 地址/建链失败
+ */
+ftl_status_e ftl_async_read_page_leased(fc_cmd_s **out_cmd, ftl_cmd_lease_s *lease, DWORD pba, const ftl_page_cfg_s *cfg);
 
 /**
  * @brief SET_FEATURES（异步）：无地址、无数据链，把 mode 写进 feature_addr 指定的特性寄存器。

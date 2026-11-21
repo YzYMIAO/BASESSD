@@ -36,7 +36,7 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/fi_wrap.c
 LDFLAGS += -Wl,--wrap=fc_poll_completion -Wl,--wrap=fc_poll_completions
 LDFLAGS += -Wl,--wrap=ftl_op_submit -Wl,--wrap=ftl_op_submit_batch
-LDFLAGS += -Wl,--wrap=ftl_async_read_page -Wl,--wrap=ftl_async_write_page
+LDFLAGS += -Wl,--wrap=ftl_async_read_page -Wl,--wrap=ftl_async_read_page_leased -Wl,--wrap=ftl_async_write_page
 LDFLAGS += -Wl,--wrap=ftl_async_write_page_cw -Wl,--wrap=ftl_async_write_pair_cmd
 LDFLAGS += -Wl,--wrap=ftl_async_erase_block
 LDFLAGS += -Wl,--wrap=ftl_async_erase_block_multi_plane

@@ -211,7 +211,9 @@ DWORD ftl_op_stats_progress(void);
  * @brief 非阻塞提交读请求。
  * @param ftl FTL 上下文
  * @param req IO 请求描述（lba/buffer/count/完成通知）
- * @return FTL_OK 已受理；FTL_ERROR 参数非法 / LBA 越界 / 组槽满
+ * @return FTL_OK 已受理
+ *         FTL_AGAIN 组槽不足（瞬态背压，调用者稍后重试）
+ *         FTL_ERROR 参数非法 / LBA 越界 / 延迟写错误
  */
 ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req);
 
@@ -219,9 +221,22 @@ ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req);
  * @brief 非阻塞提交写请求。
  * @param ftl FTL 上下文
  * @param req IO 请求描述（同 ftl_submit_read）
- * @return FTL_OK 已受理；FTL_ERROR 参数非法 / LBA 越界 / 组槽满
+ * @return FTL_OK 已受理
+ *         FTL_AGAIN host 写 admission 暂缓 / 组槽不足（调用者稍后重试）
+ *         FTL_ERROR 参数非法 / LBA 越界 / 延迟写错误
  */
 ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req);
+
+/**
+ * @brief host 写启动许可（读不经过本判据）
+ *
+ * HIL 在提交 WRITE 前调用；false 时应保持 HIL 请求未提交并稍后重试，
+ * 而不是把它当作永久失败。
+ *
+ * @param ftl FTL 实例
+ * @return true 允许启动；false 当前应暂缓 host 写
+ */
+BOOL ftl_host_write_admit(const ftl_ctx_s *ftl);
 
 /**
  * @brief 取走并清除 volatile write cache 的 deferred error 标志。

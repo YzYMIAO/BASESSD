@@ -56,8 +56,8 @@ typedef enum FTL_STATUS_E
     FTL_TIMEOUT = 3U, /* 等待超时（ms deadline 到期） */
 } ftl_status_e;
 
-/* 后台档位（load level）：bg_scheduler 选择并发布、typed 模块入口消费。
- * 三档决定 must-run 之外的任务条数与预算，见 bg_scheduler.h。 */
+/* 后台档位（load level）：bg_policy 选择并发布、typed 模块入口消费。
+ * 三档决定 must-run 之外的任务条数与预算，见 bg_policy.h。 */
 typedef enum BG_LEVEL_E
 {
     BG_LEVEL_IDLE   = 0,

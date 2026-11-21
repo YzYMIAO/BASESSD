@@ -400,7 +400,7 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
          * 此时再 request 可能无事可做（序号不前进），所以基准必须取用例起点而不是 request 前。 */
         while (((f->cp_handle->cp_state.sequence <= cp0) || (f->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
         {
-            /* 生产主循环每轮都跑 timer_scheduler_poll：bg_scheduler 的 credit 与
+            /* 生产主循环每轮都跑 timer_scheduler_poll：bg_policy 的 credit 与
              * CP 触发任务都在 timer 表里；只泵 ftl_service 时预算任务永远不跑。 */
             timer_scheduler_poll();
             ftl_service_pump();
@@ -570,7 +570,7 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
      * 的序号，所以「先比较、后调用」，且比较基准取调用前的 cp_target（否则断言恒真）。 */
     while (((ftl->cp_handle->cp_state.sequence <= cp0) || (ftl->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
     {
-        /* 同 test_trim_no_resurrection：CP 触发是 bg_scheduler 的预算任务，
+        /* 同 test_trim_no_resurrection：CP 触发是 bg_policy 的预算任务，
          * 必须先让 timer 表补 credit。 */
         timer_scheduler_poll();
         ftl_service_pump();
@@ -691,7 +691,7 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
     {
         /* 每轮重新排队 urgent：第一轮可能只回收 valid=0 的 padding SB（reclaimed+1,
          * moved 不变），下一轮才会选到有有效数据的 SB。直接推进 mig 以排除
-         * bg_scheduler 档位/credit 对用例的干扰。 */
+         * bg_policy 档位/credit 对用例的干扰。 */
         mig_gc_request_urgent(ftl->mig_handle);
         timer_scheduler_poll();
         mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
@@ -1309,7 +1309,7 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
 
     while (jrn_has_write_failure(ftl->journal) && ((platform_now_ms() - t1) < FTL_UT_IO_TIMEOUT_MS))
     {
-        /* CP 收尾同样依赖 bg_scheduler / timer 表推进。 */
+        /* CP 收尾同样依赖 bg_policy / timer 表推进。 */
         timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);

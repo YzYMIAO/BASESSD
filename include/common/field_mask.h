@@ -11,4 +11,13 @@
  */
 #define SSD_FIELD_MASK(width) (((width) == 0U) ? 0UL : ((1UL << (width)) - 1UL))
 
+/**
+ * @brief @p value 中是否有任一 @p mask 位置位。
+ *
+ * @param value 被检查的值
+ * @param mask  位掩码
+ * @return true = 至少一位置位。
+ */
+#define SSD_FLAGS_ANY(value, mask) (((value) & (mask)) != 0U)
+
 #endif /* FIELD_MASK_H */

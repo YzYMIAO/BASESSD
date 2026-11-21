@@ -735,6 +735,9 @@ void ftl_op_drain(void)
         g_dispatch_depth++;
         fn(ftl, &completion, ctx);
         g_dispatch_depth--;
+
+        // 所有 FC 完成进入 scheduler 的唯一钩子：回收 host/L2P item，并唤醒 MD_SLOT。
+        ftl_sched_note_completion(ftl);
     }
 }
 

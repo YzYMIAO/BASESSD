@@ -14,7 +14,7 @@
 
 #include "allocator.h"
 #include "bbt.h"
-#include "bg_scheduler.h"
+#include "bg_policy.h"
 #include "bst.h"
 #include "checkpoint.h"
 #include "fault_inject.h"
@@ -1031,7 +1031,7 @@ static MunitResult test_bg_busy_cfg_single_source(const MunitParameter params[],
     munit_assert_true(pend_group_alloc(t, &gi));
 
     /* 只验证选档 + cfg 发布；不跑任务表，避免这里启一个搬移 job 污染 teardown。 */
-    bg_test_publish(ftl);
+    bg_policy_test_publish(ftl);
 
     munit_assert_int(ftl->bg.level, ==, BG_LEVEL_BUSY);
     munit_assert_not_null(ftl->bg.cfg);

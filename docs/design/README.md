@@ -1,6 +1,6 @@
 # 设计文档索引（design/）
 
-本目录是活跃权威设计文档（主设计 11 篇 + [`common/`](common/) 公共设施 6 篇 + [`revision_history/`](revision_history/) 决策史 2 篇）。先读哪个
+本目录是活跃权威设计文档（主设计 12 篇，含 request scheduler 设计稿 + [`common/`](common/) 公共设施 6 篇 + [`revision_history/`](revision_history/) 决策史 2 篇）。先读哪个
 取决于任务 —— 导航表在 [`../README.md`](../README.md)。这里只给**阅读顺序**与
 **哪些是内部账本**，不复制设计内容。
 
@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 系统总览 | [`../architecture.md`](../architecture.md) → [`../hardware_contract.md`](../hardware_contract.md) | — | — |
 | 启动流程 / Boot policy | [`../boot_flow.md`](../boot_flow.md)、`../src/boot/`（当前未接入 main） | — | — |
-| FTL | `ftl_design.md` | `revision_history/ftl_revision_history.md` | `ftl_ut_design.md` |
+| FTL | `ftl_design.md`（含 §3.12.12 request scheduler） | `revision_history/ftl_revision_history.md` | `ftl_ut_design.md` |
 | FC-NAND | `fc_nand_design.md`（§26 行业对照 = 判据） | `revision_history/fc_nand_revision_history.md` | `fc_nand_ut.md` |
 | HIL / USB | `hil_design.md` → `usb_msc.md` | — | `hil_ut_design.md` |
 | 平台 / 移植 | `platform_design.md` | — | — |

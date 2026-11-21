@@ -23,6 +23,7 @@
 
 #include "allocator.h"
 #include "ftl_module.h" /* FTL_SUBMIT_TIMEOUT_MS */
+#include "ftl_sched.h"  /* ftl_sched_s */
 #include "ftl_type.h"   /* ftl_ctx_s */
 #include "journal.h"
 #include "l2p_cache.h"
@@ -182,6 +183,7 @@ typedef struct CP_HANDLE_S
     cp_trunc_s          trunc; /* ④ Journal 截断 */
 
     /* 窄上下文：跨 job 保留。 */
+    ftl_sched_s    *sched; /* 所属实例的 request scheduler（只暴露 L2P flush 登记） */
     l2p_cache_s    *cache;
     l2p_jrn_s      *journal;
     md_dir_cache_s *metadata_dir;
@@ -197,7 +199,7 @@ typedef struct CP_HANDLE_S
 } cp_handle_s;
 
 /* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
- * 不再同尺寸（阶段 B）。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
+ * 不再同尺寸。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
 _Static_assert(sizeof(((cp_handle_s *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "cp_handle_s.region_bitmap 必须是本 die 的局部 2048-bit 位图");
 _Static_assert(sizeof(((cp_handle_s *)0)->hdr.block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)), "cp_handle_s.block_words 必须恰好覆盖全部块");
 
@@ -333,6 +335,14 @@ static inline BYTE cp_block_word_pool(WORD word)
  * @param alloc        allocator（ch/ce/lun 同时作为本实例拓扑来源）
  */
 void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cache_s *metadata_dir, alc_s *alloc);
+
+/**
+ * @brief 绑定所属实例的 request scheduler
+ *
+ * @param h     checkpoint handle
+ * @param sched request scheduler（非空）
+ */
+void cp_bind_sched(cp_handle_s *h, ftl_sched_s *sched);
 
 /**
  * @brief 扫描 Checkpoint 池找最新有效 Header

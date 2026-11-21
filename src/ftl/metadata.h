@@ -192,8 +192,11 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U, "每块至少容纳 2 条
 /* 每个 region 的**副本数**（L2）：主 + 备。
  * 活数据 = COPIES × ideal；日志区取 (COPIES+1) × ideal（多一份工作余量：
  * current 块 / 压缩目标 / 坏块）。 */
-/* 主/备各占**一个 plane** 的当前块（L2）⇒ 副本数不得超过 plane 数。 */
-_Static_assert(L2P_REGION_COPIES <= PLANE_NUM, "L2P_REGION_COPIES 超过 PLANE_NUM（副本无法分 plane）");
+/* 主/备各占**一个 plane** 的当前块（L2）⇒ 副本数 = plane 数。
+ * 但 Directory 条目只存 pba + backup_pba 两个位置 ⇒ 当前格式固定 2 副本。
+ * 改 PLANE_NUM 必须同步扩展 Directory 格式与恢复路径，不能只改宏。 */
+_Static_assert(L2P_COPY_BACKUP < L2P_REGION_COPIES, "备副本位置超出副本数");
+_Static_assert(L2P_REGION_COPIES == 2U, "Directory 格式固定主 + 备两副本；改 PLANE_NUM 必须同步扩展格式");
 
 /* 压缩触发水位：活日志块**超过**两份副本的理想块数（> 64）就启动压缩。
  * ⚠ 不额外留 25% 碎片余量：固定日志区 3× ideal（96 块），活数据 = 2× ideal（64 块），
@@ -1061,13 +1064,16 @@ WORD md_log_alloc(md_dir_cache_s *dir, alc_s *alloc, BYTE plane);
  *
  * 旧当前块若已无活 region ⇒ 登记回收；换块时扫描全池只登记不擦。
  *
- * @param dir   Directory cache（换块并更新该 plane 的游标）
- * @param alloc 分配器（取块 / 读块状态）
- * @param plane 目标 plane（主副本 → 0、备副本 → 1）
+ * @param dir            Directory cache（换块并更新该 plane 的游标）
+ * @param alloc          分配器（取块 / 读块状态）
+ * @param plane          目标 plane（主副本 → 0、备副本 → 1）
+ * @param for_compaction true = 整理 job 为压缩目标换块；false = 追加路径换块。
+ *                       追加路径在 free <= L2P_LOG_FREE_WATERMARK 时只请求压缩并返回
+ *                       false，不能把最后的压缩目标块也吃掉。
  * @return true = 已换到新块（cur_page[plane] == 0）；
- *         false = 没换（该 plane 固定区无空闲块且借用已满，或刚换块但活块数超水位）
+ *         false = 没换（追加路径触及水位 / 固定区无空闲块且借用已满 / 活块数超水位）
  */
-BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane);
+BOOL md_log_rotate(md_dir_cache_s *dir, alc_s *alloc, BYTE plane, BOOL for_compaction);
 
 /**
  * @brief 擦除成功后归还一个日志块

@@ -1618,7 +1618,7 @@ static void uart_cli_ftl_ctx(int argc, char *argv[])
 
     log_set_level(saved);
 
-    LOGI_IF(ok == false, "error: unknown FTL module '%s' (alloc|pend|seq|cache|jrn|cp|mig|md|wb)\r\n", (module != NULL) ? module : "(null)");
+    LOGI_IF(ok == false, "error: unknown FTL module '%s' (alloc|pend|seq|cache|jrn|cp|mig|md|wb|sched)\r\n", (module != NULL) ? module : "(null)");
 }
 
 /**
@@ -2355,7 +2355,7 @@ static const uart_cli_cmd_s g_uart_cli_commands[] = {
     {      "q",                                                     "q",                            "show FC queues, pools and pending backlog", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
     {     "cp",                                                    "cp",                               "show checkpoint job state and sequence", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
     {    "jrn",                                                   "jrn",                           "show journal ring, watermark and WAL state", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
-    {"ftl_ctx",                                      "ftl_ctx [module]",             "dump FTL context (alloc|pend|seq|cache|jrn|cp|mig|md|wb)", 1U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG, uart_cli_ftl_ctx},
+    {"ftl_ctx",                                      "ftl_ctx [module]",       "dump FTL context (alloc|pend|seq|cache|jrn|cp|mig|md|wb|sched)", 1U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG, uart_cli_ftl_ctx},
     {    "map",                                             "map <lba>",                               "print L2P mapping + target block entry", 2U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
     {   "addr",                                    UART_CLI_SYNTAX_ADDR,                                      "translate PBA/PAA/gblock fields", 3U,  6U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
     {  "rdpaa",                                   "rdpaa <paa> [--raw]",                          "read one NAND page by PAA (--raw: raw bits)", 2U,  3U, UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
