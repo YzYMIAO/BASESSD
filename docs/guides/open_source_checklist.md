@@ -120,6 +120,8 @@ git rev-parse HEAD > /tmp/basessd-before-open-source.commit
 
 ### OS-01 凭据清理（最高优先级）
 
+**状态（2026-11-22 用户裁决）**：旧 token 已吊销/失效；用户决定接受历史保留，**不执行**下面的历史重写。OS-01 以“历史中无可用凭据”关闭；公开历史里仍可能出现该字符串，这是已知且接受的残余。
+
 **目标**：让公开历史里**不存在**任何可用凭据。
 
 **已知问题**：
@@ -139,8 +141,7 @@ git rm docs/claude_code_usage.md
 git commit -m "chore: remove off-topic credential-bearing doc"
 ```
 
-3. **本仓采用的路径**：私有仓继续开发，**历史先不动**；迁移到新公开仓库时用下面二选一，
-   确保新仓库的**历史里没有这个文件**。
+3. **备选路径（本次未采用）**：若将来要求公开历史不含该文件，可用下面二选一；当前裁决是接受历史保留。
 
    **A. squash 首提交（推荐，最简单）**：公开仓只有一个「当前树」提交，旧历史不随行。
 
@@ -167,14 +168,15 @@ git push -u origin main
 > 方案 B 会改写全部 commit hash（本仓约 389 个），文档里引用的旧 hash 在公开仓中失效。
 > 无论 A/B，旧历史仍留在私有仓；`git clone --no-local` 得到的是独立副本，不影响原仓。
 
-4. **禁止**：把现有私有仓直接改成 public，或把现有历史直接 `git push --all` 到新公开仓 ——
-   两者都会把 `3ee9ef9` 一起带出去。
+4. **本次例外（用户裁决）**：token 已失效，用户接受历史保留，因此允许将现有仓库公开。若 token 仍有效，仍应禁止直接 public / `push --all`。
 
-**验收**（全部为 0 或空）：
+**验收（本次口径：工作树为空；历史命中已知且接受）**：
 
 ```bash
-git log --all --oneline -- docs/claude_code_usage.md
+# 工作树必须为空
 git grep -nE '(ark-[0-9a-f]{8}-[0-9a-f-]{27}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,})'
+# 历史仍会命中 3ee9ef9：token 已失效，用户裁决接受，不阻塞公开
+git log --all --oneline -- docs/claude_code_usage.md
 git log --all -G 'ark-[0-9a-f]{8}-[0-9a-f-]{27}' --oneline
 ```
 
@@ -513,6 +515,8 @@ git grep -nE '/home/|/mnt/|C:\\\\|D:\\\\' -- .claude .codex CLAUDE.md
 
 ### OS-10 CI
 
+**状态（2026-11-22）**：workflow 已建；仓库公开后首次 push 触发实跑，未跑前保持“进行中”，不阻塞公开。
+
 **目标**：让公开仓库能证明“干净克隆可以构建”，而不是只靠作者本机。
 
 **动作**：新增 `.github/workflows/build.yml`，示例：
@@ -554,6 +558,8 @@ jobs:
 ---
 
 ### OS-11 发布
+
+**状态（2026-11-22 用户裁决）**：公开 ≠ 发布。仓库改名 `BASESSD` 并公开即可；不要求打 tag/release。下面步骤保留为将来正式发布时的参考。
 
 **目标**：打出可复现的公开版本，并留下发布记录。
 
@@ -686,7 +692,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 | ID | 状态 | 当前结论 |
 |---|---|---|
 | OS-00 | 已完成 | bundle + `.commit` 已生成 |
-| OS-01 | 进行中 | `docs/claude_code_usage.md` 已删除、旧 token 已吊销；**历史 squash 待公开前执行**（用户裁决暂不公开） |
+| OS-01 | 已完成 | `docs/claude_code_usage.md` 已删除、旧 token 已吊销/失效；用户裁决接受历史保留，不重写历史（历史中无**可用**凭据） |
 | OS-02 | 已完成 | `e6414b7`（Apache-2.0 / NOTICE / μnit COPYING）+ `62c4b18`（ST 组件许可原文） |
 | OS-03 | 已完成 | `62c4b18`：7 PDF + 9 HTML 已移出，`docs/reference` 只剩链接清单 |
 | OS-04 | 已完成 | `62c4b18`：README 重写；失效路径已修 |
@@ -695,9 +701,9 @@ git ls-files -z | xargs -0 du -cb | tail -1
 | OS-07 | 已完成 | `f26c6a4` + `921f0d1`：文档分层、死链与过期引用清理 |
 | OS-08 | 已完成 | `f26c6a4` + `921f0d1`：负例框架并入各层 UT 设计，台账统一 |
 | OS-09 | 已完成 | 用户裁决：`CLAUDE.md` / `.claude` / `.codex` 保留 |
-| OS-10 | 进行中 | `.github/workflows/build.yml` 已建；**未在 GitHub Actions 实际运行**（仓库未公开） |
-| OS-11 | 待办 | 用户裁决**暂不公开**；未打 tag、未发布 |
+| OS-10 | 进行中 | `.github/workflows/build.yml` 已建；仓库公开后首次 push 触发实跑，未跑前不阻塞公开 |
+| OS-11 | 已完成 | 用户裁决公开；仓库已改名 `BASESSD`；不打 tag/release（公开 ≠ 发布） |
 | OS-12 | 不适用 | 无可选体积目标 |
 | OS-13 | 不适用 | 按 H49/C2 不按行数拆分目录 |
 
-**发布结论：未完成。** OS-01 历史清理、OS-10 CI 实跑、OS-11 公开/tag 仍未完成。
+**公开结论：公开准备已完成。** 旧 token 已失效，用户裁决不重写历史；仓库已改名 `BASESSD` 并决定公开。唯一未实跑项：OS-10 CI（公开后首次 push 触发，不阻塞公开）。
