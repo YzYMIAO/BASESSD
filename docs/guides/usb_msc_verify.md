@@ -75,7 +75,7 @@ WSL 里的 `lsblk` **看不到** Windows 已枚举的 USB 大容量存储设备�
 串口横幅必须显示**当次**镜像：
 
 ```text
-=========== soft_ssd built ... ===========
+=========== basessd built ... ===========
 ```
 
 ⚠ 不看横幅就报「验证通过」不算证据（CLAUDE.md R1 / §3.3）：`.noinit` 崩溃记录、
@@ -248,7 +248,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step write
 - 生成 `F:\pattern.bin`：16KB，每 2KB 块内容 = 块号 0..7；
 - 计算源/盘上 SHA256；
 - `Write-VolumeCache`（SYNCHRONIZE CACHE）；
-- 状态写入 `%TEMP%\softssd_usb_verify_state.json`。
+- 状态写入 `%TEMP%\basessd_usb_verify_state.json`。
 
 **期望**：
 

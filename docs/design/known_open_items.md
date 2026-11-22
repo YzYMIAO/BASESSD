@@ -1722,7 +1722,7 @@
 - **后果**：`FC_DESCRIPTOR_POOL_DEPTH = 256` 的推导「64 命令 × 每命令 4 CW」是单 plane 口径。当前两 plane 全 CW 命令（`FTL_CACHE_FULL_CW`，8 位）建链要用 8 个 desc ⇒ 同时在链的满额命令上限是 **32 条**，不是命令池声明的 64 条；buffer 池 128 同理只够 16 条满额命令。超过时 `fc_command_configure_descriptor` 分配失败，`ftl_cmd_configure_descriptors` 回滚并返回 `FTL_ERROR` ⇒ host 写失败（有错误码，不是静默损坏）。
 - **缓解**：FTL 当前序列门控与批大小（per-LUN FIFO 深 4、`FC_SCHEDULER_CHAIN_MAX` 4、cache batch 窗口）使同时在链的满额命令远低于 32；desc 池耗尽的负例尚未构造。
 - **下一步**：待议：①把「满额并发上限 32」写成 FTL 侧必须遵守的设计约束；②或按 `cw_bitmap` 置位数给建链加准入（池满转 `FTL_AGAIN` 而非 `FTL_ERROR`）；③或加深 desc 池。先记录预期并发上界与实测峰值，再选。
-- **证据**：`include/fc/fc_interface.h:FC_DESCRIPTOR_POOL_DEPTH` / `FC_BUFFER_POOL_DEPTH`；`include/ftl/ftl_config.h:FTL_CACHE_FULL_CW`；`src/ftl/ftl_fc_interface.c:ftl_cmd_configure_descriptors`；`src/fc/fc_pool.c:fc_command_configure_descriptor`；`docs/design/fc_nand_design.md` §2.1。
+- **证据**：`include/fc/fc_interface.h:FC_DESCRIPTOR_POOL_DEPTH` / `FC_BUFFER_POOL_DEPTH`；`src/ftl/ftl_config.h:FTL_CACHE_FULL_CW`；`src/ftl/ftl_fc_interface.c:ftl_cmd_configure_descriptors`；`src/fc/fc_pool.c:fc_command_configure_descriptor`；`docs/design/fc_nand_design.md` §2.1。
 - **历史/验证**：
   - 2026-11-16 重写设计文档时核对池深度推导发现 → 待议
 
@@ -2098,7 +2098,7 @@
 - **当前事实**：板级 `nand_scan_targets` 在 armed 前经 `nand_select_target` 选通路、探测 (ch,ce) target，并用 78h 逐 LUN 探测，结果写 `g_nand_targets`；FTL `ftl_topology_build` 给实际存在的 LUN 分配紧凑 die 号，维护 `g_chcelun_table` / `g_die_table`。Phase 2a：实例遍历改走 `for die < DIE_MAX` + `g_die_table`。Phase 2b：L2P 路由（`lba_2_*` / `l2p_global_*` / `ftl_op_route_get_region`）、容量（`FTL_LBA_MAX` / `FTL_IU_TOTAL`）、介质布局版本（`ftl_media_layout_version()`）、die 槽位（controller 只校验 present die）全部按运行时 `DIE_MAX`；数组按静态上限 `FTL_DIE_MAX`。
 - **影响**：多 target/多 LUN 未在真实硬件验证。
 - **下一步 / 判据**：上板：单 die 介质不触发重格式化（版本仍 BASE）；H2testw 读写/坏块/吞吐；多 target 需扩展板级 `nand_select_target` 通路表；多 LUN 的逐 LUN 78h probe 需换多 LUN 器件再验。
-- **来源**：`RISK-TOP-01`；`include/nand/nand_config.h` / `include/ftl/ftl_config.h` / `src/ftl/l2p_cache.h` / `src/ftl/metadata.h` / `src/ftl/ftl.c` / `src/main.c` / `src/hil/controller.c`
+- **来源**：`RISK-TOP-01`；`include/nand/nand_config.h` / `src/ftl/ftl_config.h` / `src/ftl/l2p_cache.h` / `src/ftl/metadata.h` / `src/ftl/ftl.c` / `src/main.c` / `src/hil/controller.c`
 - **关联**：`RISK-TOP-01`、`ISS-ML-01`
 - **历史/验证**：
   - 2026-11-03 Phase 1/2a/2b 落地 → 编译通过，未上板
@@ -2339,7 +2339,7 @@
 - **后果**：`nand_scan_targets` 在 armed 前逐个探测 (ch,ce)，`g_nand_targets` 记录 present / lun_count；`ftl_topology_build` 给实际存在的 LUN 分配紧凑 die 号并维护两张逆映射表。Phase 2a 实例遍历（boot / `[STAT]` / 后台节拍 / `ftl_service` / 容量统计 / ftl_op 服务查询 / controller cancel / USB deferred / CLI）走 `for die < DIE_MAX` + `g_die_table`；Phase 2b 的 L2P 路由、容量、介质布局版本、controller 槽位校验按运行时 `DIE_MAX`，数组按静态上限 `FTL_DIE_MAX` 分配。失败场景：① 当前硬件只有 FMC Bank3 + 单 NCE，`nand_select_target` 通路表只有 (0,0) ⇒ 多 target 未真正验证；② 主 target (0,0) 不存在或 ID / ONFI 几何不符 ⇒ 拒绝启动；③ ONFI `logical_units > LUN_MAX` ⇒ 拒绝启动；④ `DIE_MAX == 0` 时 `lba_2_die` / `l2p_global_*` 会除零（`ftl_topology_build` 无 die 即失败，boot 不进 FTL）；⑤ 多 die 介质版本 = bit31 标记 + `crc_compute_iso_hdlc`(die 数 + topology map)，哈希碰撞 / 拓扑变化未识别时会误读旧布局；⑥ 稀疏拓扑下 die 槽为 NULL，`ftl_op_route_get` 对 absent 返回 NULL；⑦ 当前器件 `logical_units=1`，多 LUN 路径未上板；⑧ `ftl_ut_common` 每个套件 setup 用 `g_nand_targets` 重建 die 表；⑨ die 号为 `BYTE` + `0xFF` 哨兵，`FTL_DIE_MAX > 255` 编译期拒绝。
 - **缓解**：扫描在 armed 前、低速 Mode 0；两张表往返自检；满配时 `die == topo_2_die(topo)`；L2P / 容量 / 介质版本统一走 `DIE_MAX`；单 die 版本保持 BASE；稀疏槽位只校验 present。
 - **下一步**：上板（地址 / 布局类，必须）：`[NAND] scan ch=0 ce=0 present luns=1` + `[FTL ] topology: dies=1`；单 die 介质不触发重格式化（版本仍 14）；H2testw 读写 / 坏块 / 吞吐；每实例 `[FTL ] instance ...` 一行无遗漏。多 target 需扩展 `nand_select_target` 板级通路表；多 LUN 需换器件再验。
-- **证据**：`src/nand/devices/mt29f___g08a.c` `nand_target_probe` / `nand_scan_targets`；`include/nand/nand_config.h` `g_nand_targets`；`src/ftl/ftl.c` `ftl_topology_build`；`include/ftl/ftl_config.h`；`src/ftl/l2p_cache.h`；`src/ftl/metadata.c` `ftl_media_layout_version`；`src/main.c` / `src/hil/controller.c`。
+- **证据**：`src/nand/devices/mt29f___g08a.c` `nand_target_probe` / `nand_scan_targets`；`include/nand/nand_config.h` `g_nand_targets`；`src/ftl/ftl.c` `ftl_topology_build`；`src/ftl/ftl_config.h`；`src/ftl/l2p_cache.h`；`src/ftl/metadata.c` `ftl_media_layout_version`；`src/main.c` / `src/hil/controller.c`。
 - **历史/验证**：
   - 2026-11-03 Phase 1 / 2a / 2b 落地（扫描拓扑、实例遍历、L2P / 容量 / 版本按 `DIE_MAX`）→ 未上板
 
@@ -2620,10 +2620,10 @@
 
 #### RISK-USB-11 TinyUSB 本地补丁清单不完整
 
-- **后果**：`third_party/tinyusb/README.soft_ssd.md` 写「三处最小补丁」，实际还有 `tud_msc_cbw_info_cb` 弱钩子——它把 CBW 的总 block_count/起始 LBA 交给应用，是 FTL cache 序列 `cmd_remaining` 的唯一来源。升级时若只按 README 重套三处，该钩子会静默消失 ⇒ `cmd_remaining` 恒 0 ⇒ 顺序写序列提前收尾（功能不坏，吞吐/序列行为退化）。
+- **后果**：`third_party/tinyusb/README.basessd.md` 写「三处最小补丁」，实际还有 `tud_msc_cbw_info_cb` 弱钩子——它把 CBW 的总 block_count/起始 LBA 交给应用，是 FTL cache 序列 `cmd_remaining` 的唯一来源。升级时若只按 README 重套三处，该钩子会静默消失 ⇒ `cmd_remaining` 恒 0 ⇒ 顺序写序列提前收尾（功能不坏，吞吐/序列行为退化）。
 - **缓解**：补丁代码本身有 `【本仓补丁】` 注释，可 diff 查；升级时按 grep `本仓补丁` 全量重套。
 - **下一步**：修 README：列出 4 组补丁与升级回归项（含「连续大顺序写跨 chunk」）；下次升级按 grep 验证。
-- **证据**：`third_party/tinyusb/README.soft_ssd.md`；`third_party/tinyusb/src/class/msc/msc_device.c:tud_msc_cbw_info_cb`；`src/hil/usb_msc.c:tud_msc_cbw_info_cb`。
+- **证据**：`third_party/tinyusb/README.basessd.md`；`third_party/tinyusb/src/class/msc/msc_device.c:tud_msc_cbw_info_cb`；`src/hil/usb_msc.c:tud_msc_cbw_info_cb`。
 - **历史/验证**：
   - 2026-11-05 文档待修 → 编译无关
 
@@ -2708,7 +2708,7 @@
 - **当前事实**：编译期几何（CH/CE/LUN/PLANE/BLOCKS/PAGE/CW/IU）、容量（LBA / IU 总数 / 主机 MiB）、FTL 配置（pair / 块总数 / group / op / spare / CMT）、介质布局版本、timing mode、控制器状态。纯 CLI、无 NAND 访问。ONFI 参数页按计划不做（boot 已打印，`id --onfi` 需 idle 重读，未实现）。
 - **影响**：未上板核对，视图可能与 boot 横幅/`info` 不一致。
 - **下一步 / 判据**：上板核对与 boot 横幅 / `info` 一致（并入 `RISK-CLI-06`）。
-- **来源**：`src/hil/cli.c` `uart_cli_id`；`include/ftl/ftl_config.h`；`ftl_media_layout_version()`；`nand_get_timing_mode()`
+- **来源**：`src/hil/cli.c` `uart_cli_id`；`src/ftl/ftl_config.h`；`ftl_media_layout_version()`；`nand_get_timing_mode()`
 - **关联**：`RISK-CLI-06`
 - **历史/验证**：
   - 2026-11-05 落地 → 编译通过，未上板

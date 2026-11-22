@@ -1,4 +1,6 @@
-# soft_ssd — STM32H743 软 SSD 固件
+# BASESSD — 开源低成本端到端 SSD 主控固件
+
+> **BASESSD** = **B**are-metal, **A**ffordable, **S**imple, **E**nd-to-end **SSD**。
 
 STM32H743 + MT29F4G08（4 Gb SLC NAND）上的 **DRAM-less 软 SSD 固件原型**：
 主机经 USB MSC 把它当作 U 盘访问，固件内部按 HIL / FTL / FC-NAND 分层实现。

@@ -49,7 +49,7 @@ MT29F4G08 真硬件约束：先擦后写、页编程次数受限、坏块与操�
 | VBUS sensing | **disabled** (`CFG_TUD_VBUS_DETECT_HW = 0`) — PA9 is USART1_TX |
 | IRQ | `OTG_FS_IRQn`, preempt priority 5 (lower than USART1=3) |
 | Class | MSC / SCSI transparent / BOT, single LUN, 512 B block, 424 MiB host capacity（0 坏块；实际按 `[CAP]` 动态值） |
-| Stack | TinyUSB 0.21.0 (MIT), pruned to device+MSC+DWC2 (see `third_party/tinyusb/README.soft_ssd.md`) |
+| Stack | TinyUSB 0.21.0 (MIT), pruned to device+MSC+DWC2 (see `third_party/tinyusb/README.basessd.md`) |
 
 > Pin mapping confirmed by schematic 2.2.10.1: Type-C D-/D+ → `PA11/PA12`,
 > SBU1/SBU2 not connected, **no ULPI PHY** ⇒ only USB 2.0 Full Speed 12 Mbps.

@@ -13,8 +13,8 @@
  *   - submit/flush/trim:  HIL 控制路径，异步推进，不得在回调中自旋。
  */
 
-#include "ftl_config.h" /* FTL_DIE_MAX / FTL_IU_BYTES / 容量几何 */
-#include "ftl_type.h"   /* ftl_ctx_s / ftl_io_req_s / ftl_status_e */
+#include "ftl_geometry.h" /* 公共几何 / 拓扑契约（不含 FC 头） */
+#include "ftl_type.h"     /* ftl_ctx_s / ftl_io_req_s / ftl_status_e */
 #include "ssd_types.h"
 #include "stats.h" /* SSD_STATS_ENABLE（统计专用声明按档裁剪） */
 

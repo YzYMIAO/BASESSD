@@ -1,6 +1,13 @@
 #ifndef FIELD_MASK_H
 #define FIELD_MASK_H
 
+/*
+ * field_mask.h — 位掩码构造与“任一位置位”判据
+ *
+ * SSD_FIELD_MASK 构造低 width 位全 1；SSD_FLAGS_ANY 判断 value 中是否有
+ * 任一 mask 位被置位。两者只用于无符号整数。
+ */
+
 #include "ssd_types.h"
 
 /**

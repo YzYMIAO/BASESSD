@@ -4,11 +4,11 @@
 /*
  * ftl_capacity.h — FTL 容量与固定元数据区布局的公共派生量
  *
- * 这些量由 nand_config / ftl_config 的几何推导；集中在本头，避免
+ * 这些量由 nand_config / ftl_geometry 的几何推导；集中在本头，避免
  * controller / usb / 诊断代码为了容量宏直接 include metadata / allocator 内部头。
  */
 
-#include "ftl_config.h"
+#include "ftl_geometry.h"
 
 /* ── 固定元数据区块布局（per-plane 块号）── */
 #define FTL_METADATA_BASE_BLOCK (0U)

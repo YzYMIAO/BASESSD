@@ -6,7 +6,7 @@
  *
  * 本头文件有两部分，前者是后者的前提：
  *   ① **固定元数据区布局**（见下方「固定元数据区布局」大区）——哪个分区占哪些块、
- *      每个池多大、每条 record 占几页、介质布局版本。全部由 ftl_config.h §一 的几何量
+ *      每个池多大、每条 record 占几页、介质布局版本。全部由 ftl_geometry.h 的几何量
  *      推出，**没有任何块号是写死的**。运行期分区表 `g_ftl_partitions[]` 在 metadata.c。
  *   ② **Metadata Directory** ——L2P region 页放在**固定预留的 L2P 日志区**（见下），
  *      通过 Directory 追踪每份元数据的当前物理位置。Directory SRAM 常驻
@@ -38,7 +38,7 @@
 
 #include "allocator.h"
 #include "ftl_capacity.h"
-#include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
+#include "ftl_config.h" /* PBA/地址编码；几何量见 ftl_geometry.h */
 #include "ftl_type.h"
 #include "log.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（目录检查点页打包自检）*/
@@ -52,7 +52,7 @@
  * 固定元数据区布局（单一事实来源）
  *
  * 回答两件事：**元数据放在哪些块上**、**每个分区多大**。分四层推导：
- *   ① 几何量来自 ftl_config.h §一（页/块/plane/LUN 数、页主区字节、CW 数）；
+ *   ① 几何量来自 ftl_geometry.h（页/块/plane/LUN 数、页主区字节、CW 数）；
  *   ② **每个分区的块数** = f(几何量, 策略常量)。策略常量（副本数、每副本冗余页数、
  *      Journal 容量系数）在下面显式列出——这是本区唯一允许"写死"的旋钮，
  *      且每个都写明了策略理由；

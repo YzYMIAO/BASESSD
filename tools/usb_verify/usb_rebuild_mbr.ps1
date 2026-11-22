@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    重建 soft_ssd USB 盘的 MBR（分区表损坏时的恢复脚本）。
+    重建 BASESSD USB 盘的 MBR（分区表损坏时的恢复脚本）。
 
 .DESCRIPTION
     什么时候用：
@@ -23,7 +23,7 @@
       5. dump 新 MBR 并回读卷信息。
 
     ⚠ 破坏性：会清空整块 U 盘。需要管理员权限。
-    ⚠ 只用于 soft_ssd 的 U 盘；不要对系统盘执行。
+    ⚠ 只用于 BASESSD 的 U 盘；不要对系统盘执行。
 
 .PARAMETER DiskNumber
     可选。显式指定 Windows 磁盘号。默认自动查找
@@ -36,7 +36,7 @@
         策略拒绝；
       · 本脚本是 UTF-8 with BOM（Windows PowerShell 5.1 需要）。
 
-    日志：%TEMP%\softssd_usb_rebuild_mbr.log
+    日志：%TEMP%\basessd_usb_rebuild_mbr.log
 
     配套文档：docs/guides/usb_msc_verify.md（USB-V03 / 故障排查）。
 
@@ -64,7 +64,7 @@ $ErrorActionPreference = 'Stop'
 $VolumeLabel  = 'SOFTSSD'
 $ExpectedSize = 444596224       # 424 MiB = 868,352 × 512B（介质 v12，0 坏块；容量按坏块动态扣减）
 $SizeTolerance = 67108864       # ±64 MiB ≈ 512 个坏块（RISK-CAP-03）
-$LogFile      = Join-Path $env:TEMP 'softssd_usb_rebuild_mbr.log'
+$LogFile      = Join-Path $env:TEMP 'basessd_usb_rebuild_mbr.log'
 
 Start-Transcript -Path $LogFile -Force | Out-Null
 
@@ -152,7 +152,7 @@ function Show-Mbr {
 function Invoke-DiskpartRepair {
     param([int]$Number, [string]$Fs)
 
-    $script = Join-Path $env:TEMP ("softssd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
+    $script = Join-Path $env:TEMP ("basessd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
 
     @(
         "select disk $Number",

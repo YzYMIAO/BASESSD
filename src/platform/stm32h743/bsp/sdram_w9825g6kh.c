@@ -1,10 +1,16 @@
+/*
+ * sdram_w9825g6kh.c — W9825G6KH SDRAM BSP（当前未启用）
+ *
+ * 职责：FMC SDRAM 控制器初始化与读写测试。本仓是 DRAM-less：FTL 元数据
+ * 不依赖 SDRAM，本文件未纳入构建；仅作为未来平台扩展的板级参考保留。
+ */
 #include "sdram_w9825g6kh.h"
 
 #include "common.h"
 #include "delay.h"
 #include "sys_port.h"
 
-SDRAM_HandleTypeDef g_sdram_handle; /* SRAM句柄 */
+SDRAM_HandleTypeDef g_sdram_handle; /* SDRAM 句柄 */
 
 /**
  * @brief       初始化SDRAM

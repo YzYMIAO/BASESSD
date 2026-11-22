@@ -46,7 +46,7 @@
 ### 1.3 目录结构
 
 ```
-~/projects/soft_ssd/
+~/projects/basessd/
 ├── .vscode/
 │   └── launch.json                # VS Code 调试配置
 ├── sh/
@@ -143,7 +143,7 @@ which socat                # → /usr/bin/socat
 
 ```bash
 # 终端：一键启动调试环境
-cd ~/projects/soft_ssd
+cd ~/projects/basessd
 ./sh/debug_env.sh
 # 会自动：杀残留 → 启动 JLink(Windows弹出窗口) → 启动 socat → 验证链路
 
@@ -159,7 +159,7 @@ Windows 重启后，**只需两步**：
 
 ```bash
 # 第 1 步：一键启动（自动清理旧进程 + 启动 JLink + socat）
-cd ~/projects/soft_ssd
+cd ~/projects/basessd
 ./sh/debug_env.sh
 
 # 第 2 步：VS Code 按 F5 烧录调试

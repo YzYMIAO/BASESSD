@@ -2490,7 +2490,7 @@ static void uart_cli_status(int argc, char *argv[])
  */
 static void uart_cli_version(int argc, char *argv[])
 {
-    static const char version[] = "soft_ssd debug console\r\n";
+    static const char version[] = "BASESSD debug console\r\n";
 
     (void)argc;
     (void)argv;

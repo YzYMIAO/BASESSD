@@ -1,6 +1,13 @@
 #ifndef SSD_FIRMWARE_BOOT_POLICY_H
 #define SSD_FIRMWARE_BOOT_POLICY_H
 
+/*
+ * boot_policy.h — A/B 镜像头与启动元数据契约（当前未接入 main）
+ *
+ * 定义镜像头 / 启动元数据的版本、slot 与状态码；策略实现见 boot_policy.c。
+ * 当前仅作为设计组件保留，未接入启动流程。
+ */
+
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stddef.h>

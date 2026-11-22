@@ -50,3 +50,54 @@ docs/
   以及纯历史（版本变更史 / 规则变更史）。
   新增已落地变更记录 → 放 `archive/changelog/`；对当前设计仍有约束力的决策 → 进 `design/` 对应文档；
   未实现/未验证的设计项 → 进 `design/known_open_items.md`，不要留在计划稿里。
+
+## 文档分层规则（doc policy）
+
+> 目的：**设计文档在换平台、重构、重新构建后不需要改。**
+> 判据是“这条内容属于契约，还是当前实现/当前测量”。
+
+| 类别 | 放什么 | 典型位置 | 稳定性 |
+|---|---|---|---|
+| **design** | 需求、约束、数据流、不变量、状态机、策略、取舍、主流对照 | `design/*_design.md`、`architecture.md` | 跨实现稳定 |
+| **platform** | SoC、内存域、链接段、时钟、引脚、启动细节 | `hardware_contract.md`、`platform_design.md`、`boot_flow.md`、`usb_msc.md` | 随平台 |
+| **verification** | 测试设计、用例、上板结果、吞吐、日期 | `*_ut_design.md`、`guides/testing_guide.md` | 随时间 |
+| **ledger** | 未闭合风险 / 缺口（`RISK-*` / `ISS-*`） | `design/known_open_items.md` | 随修复 |
+| **revision** | 逐版本决策史、被否方案 | `design/revision_history/` | 只追加 |
+| **archive** | 已闭合阶段记录、历史稿 | `archive/` | 不改写 |
+
+**design 文档禁止写**：
+
+- 平台/SoC/内存域/链接脚本：`STM32H743`、`ITCM/DTCM/AXI/SRAMx`、`NOLOAD`、`.bss`、`FMC/HAL/GPIO`、内存映射。
+- 代码导航坐标：`src/...` / `include/...` 内部路径、函数名、`g_*`/`s_*` 符号、`file:line`。
+- 当前测量：日期、版本号、`KB/s`、测试计数/seed、镜像时间、结构体/workspace 的精确字节数。
+- 账本：`RISK-*`、`ISS-*`、`docs/archive/...` 引用。
+
+**允许保留**（它们描述设计语义，不是代码导航）：
+
+- 结构体 / 枚举 / 联合体定义与字段语义（空间布局、状态机、所有权）。
+- 关键常量宏及其值（布局/状态转移需要，如 `FTL_IU_BYTES`、`PEND_MAX`）。
+- 状态机、数据流、空间布局图。
+
+**不建实现索引文档**：文件名/函数名/全局符号直接看代码；设计文档不承担导航职责。
+
+**允许的显式例外**（HTML 注释，不参与渲染）：
+
+```markdown
+<!-- doc-policy: allow platform -->
+本段是当前平台映射示例，不是 FTL/FC 契约。
+<!-- /doc-policy -->
+
+<!-- doc-policy: allow verification -->
+本段是某次上板测量快照。
+<!-- /doc-policy -->
+```
+
+**检查**：
+
+```sh
+make docs-report   # 按文档/类别列计数，用于逐篇审视
+make docs-check    # 违规即失败；已挂 make check
+make docs-test     # 检查器自检（每条规则必须有负例）
+```
+
+规则正文在 `CLAUDE.md` P14。

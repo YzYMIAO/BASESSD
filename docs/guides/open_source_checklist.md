@@ -105,11 +105,11 @@ OS-12/13 可选优化
 ```bash
 git status --porcelain
 git switch -c open-source-prep
-git bundle create /tmp/soft_ssd-before-open-source.bundle --all
-git rev-parse HEAD > /tmp/soft_ssd-before-open-source.commit
+git bundle create /tmp/basessd-before-open-source.bundle --all
+git rev-parse HEAD > /tmp/basessd-before-open-source.commit
 ```
 
-**验收**：`git bundle verify /tmp/soft_ssd-before-open-source.bundle` 通过；
+**验收**：`git bundle verify /tmp/basessd-before-open-source.bundle` 通过；
 工作树无未提交改动。
 
 **回退**：从 bundle 克隆或 `git bundle unbundle`；不要在没有备份时跑 history rewrite。
@@ -157,8 +157,8 @@ git push -u public public-main:main
    **B. 克隆副本上 filter-repo（想保留逐版本历史时）**：本机未装，需先 `pip install git-filter-repo`。
 
 ```bash
-git clone --no-local . /tmp/soft_ssd-public
-cd /tmp/soft_ssd-public
+git clone --no-local . /tmp/basessd-public
+cd /tmp/basessd-public
 git filter-repo --path docs/claude_code_usage.md --invert-paths
 git remote add origin <公开仓库 URL>
 git push -u origin main
@@ -178,7 +178,7 @@ git grep -nE '(ark-[0-9a-f]{8}-[0-9a-f-]{27}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-
 git log --all -G 'ark-[0-9a-f]{8}-[0-9a-f-]{27}' --oneline
 ```
 
-**回退**：从 `/tmp/soft_ssd-before-open-source.bundle` 恢复。
+**回退**：从 `/tmp/basessd-before-open-source.bundle` 恢复。
 **注意**：如果仓库已经在公开远端存在，优先考虑“新建公开仓库 + 当前树 squash 首提交”而不是
 在旧仓库上强推；两种方案都要先轮换 token。
 
@@ -231,7 +231,7 @@ git grep -n 'SPDX-License-Identifier' third_party/stm32h743/cmsis-core | head
 **目标**：不在公开仓库再分发版权状态不明的 PDF/HTML。
 
 **状态**：2026-11-17 用户裁决**移出仓库**，已执行。`git rm` 7 PDF + 9 HTML；
-本地副本在 `~/.local/share/soft_ssd-backup/reference-20261117/`（仓外，7.3 MB）；
+本地副本在 `~/.local/share/basessd-backup/reference-20261117/`（仓外，7.3 MB）；
 `docs/reference/README.md` 已改为链接清单（题名 / 出处 / URL / 用途），
 `docs/README.md`、`usb_msc.md`、`ftl_design.md`、`ftl_revision_history.md`、`known_open_items.md`
 中的本地路径引用已改为 URL。同批移出 `docs/reference/README.md`
@@ -562,7 +562,7 @@ jobs:
 1. 完成 OS-00 ~ OS-10 后，在 `main` 上打标签：
 
 ```bash
-git tag -a vX.Y.Z -m "soft_ssd vX.Y.Z: <一句话范围>"
+git tag -a vX.Y.Z -m "basessd vX.Y.Z: <一句话范围>"
 ```
 
 2. 写 release notes：范围、已知限制、上板验证项、构建命令、许可证。
@@ -615,8 +615,8 @@ git push origin vX.Y.Z
 在**干净克隆**里执行，不要在当前工作树里“看起来通过”：
 
 ```bash
-git clone <repo-url> /tmp/soft_ssd-public
-cd /tmp/soft_ssd-public
+git clone <repo-url> /tmp/basessd-public
+cd /tmp/basessd-public
 
 # 1) 构建三关（零新告警）
 make all
@@ -670,7 +670,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 
 | 回退点 | 方式 |
 |---|---|
-| 整理前完整状态 | `/tmp/soft_ssd-before-open-source.bundle` |
+| 整理前完整状态 | `/tmp/basessd-before-open-source.bundle` |
 | 单步删除 | `git restore --source <commit> -- <path>`（未提交时） |
 | history rewrite | 从 bundle 重新克隆，丢弃改写分支 |
 | 已公开后发现问题 | 新提交修复；不要在公开主线上强推，除非用户明确要求 |

@@ -1,3 +1,9 @@
+/*
+ * boot_policy.c — A/B 镜像头与启动元数据策略（当前未接入 main）
+ *
+ * 职责：镜像头 / 启动元数据的 CRC、slot 选择与回滚判据；不访问 Flash，
+ * 介质读写由调用者提供。当前仅作为设计组件保留，未接入启动流程。
+ */
 #include "boot_policy.h"
 
 #include "crc.h"

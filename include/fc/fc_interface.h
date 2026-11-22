@@ -16,6 +16,7 @@
  */
 
 #include "assertion.h"
+#include "media_layout.h"  /* MEDIA_CW_USER_*：FTL/FC 共享的 CW 槽布局 */
 #include "nand_config.h"   /* PLANE_NUM / CW_NUM / CW_SIZE / paa_to_plane */
 #include "nand_protocol.h" /* nand_result_e（FC 启动编排返回类型） */
 #include "ssd_types.h"     /* BYTE/WORD/DWORD/QWORD */
@@ -602,9 +603,10 @@ typedef enum FC_CMD_CLASS_E
  * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
  * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
  */
-#define FC_BUFFER_USER_OFFSET (8U)   /* USER 区域在 CW 中的偏移 */
-#define FC_BUFFER_USER_SIZE   (512U) /* 暴露给 FTL 的用户数据大小 */
-#define FC_BUFFER_DATA_SIZE   (520U) /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
+/* 规范定义在 media_layout.h（FTL/FC 共享介质契约）；FC_ 名保留给 FC 与 UT。 */
+#define FC_BUFFER_USER_OFFSET MEDIA_CW_USER_OFFSET /* USER 区域在 CW 中的偏移 */
+#define FC_BUFFER_USER_SIZE   MEDIA_CW_USER_SIZE   /* 暴露给 FTL 的用户数据大小 */
+#define FC_BUFFER_DATA_SIZE   (520U)               /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
 
 /* CW 内 META/CRC/USER 区域偏移（FTL 诊断与 FC 数据路径共用） */
 #define FC_CRC_META_SIZE   (4U)

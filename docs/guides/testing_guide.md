@@ -475,11 +475,9 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 ### 9.1 当前结论
 
 > `-O0` 是设备侧主因；16 KB EP 有效；cache program + cache read 下顺序吞吐为
-> **写 950 / 读 885 KB/s**（2026-11-15，415/423 MB）；USB FS BOT 仍是主瓶颈。
-> 2026-11-21 满盘 421 MB（`free=0`、CP/背压更重）为 **写 912 / 读 857 KB/s**，
-> 两条不是同一盘况，不能直接当 A/B。
+> 当前基线：**写 938 / 读 866 KB/s**（2026-11-21，415/423 MB）；USB FS BOT 仍是主瓶颈。
 > 历史轮次、已做改动与后续方案见 `docs/archive/testing_guide_results_history.md`；
-> H2testw 端到端截图（912/857）见 `docs/archive/test_logs/h2testw_912_857.png`。
+> H2testw 端到端截图（938/866）见 `docs/archive/test_logs/h2testw_938_866.png`。
 
 ### 9.2 ITCM / DTCM（当前结论）
 
@@ -502,8 +500,8 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 - `[USB ] latency` 只在部分轮次取到写阶段数据（写后断电会丢尾部日志）；
 - 4K 随机那组**未同步记录 banner/free**，只能当量级参考；
-- UT 已可构建：2026-11-19 release 全量 `test` 为 **314/314 通过 + 3 SKIP**
-  （seed `0xbc2e3bb2`，677.71 s；原始日志 `docs/archive/test_logs/2026-11-19_release_ut_full.log`）；
+- UT 已可构建：2026-11-22 release 全量 `test` 为 **318/318 通过 + 3 SKIP**
+  （seed `0x81a7c024`，697.30 s；原始日志 `docs/archive/test_logs/2026-11-22_release_ut_full.log`）；
   3 SKIP 为 `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock`；
   `UT=FC` / `UT=FTL` / `UT=HIL` 均需上板运行；
 - 未做 USB-IF 认证、USB 协议分析仪、NAND ATE；

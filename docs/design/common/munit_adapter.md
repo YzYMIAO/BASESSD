@@ -6,7 +6,7 @@
 
 ## 1. 概述
 
-本文档记录 `tests/framework/munit.c` 和 `munit.h` 在 soft_ssd 项目中的嵌入式适配设计、对外接口说明以及完整的修订历史。
+本文档记录 `tests/framework/munit.c` 和 `munit.h` 在 BASESSD 项目中的嵌入式适配设计、对外接口说明以及完整的修订历史。
 
 munit 原版来自 [nemequ/munit](https://nemequ.github.io/munit/)（MIT License），本项目基于 v0.4.1 做了嵌入式裸机适配。
 

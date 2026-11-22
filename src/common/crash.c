@@ -1,3 +1,9 @@
+/*
+ * crash.c — 崩溃记录存储（跨软复位保留）
+ *
+ * 职责：把断言/故障现场的紧凑记录写进 .noinit，复位后由启动报告与 CLI 读取。
+ * 记录在本轮只写不读；checksum 覆盖 version/kind/line 与文本/fault 负载。
+ */
 #include "crash.h"
 
 #include <string.h>

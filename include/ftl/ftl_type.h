@@ -109,9 +109,9 @@ typedef struct FTL_TOPOLOGY_S
  *   ftl_io_req_s  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
- * 位域可移植性问题）；**地址一律用 DWORD**（ftl/ftl_config.h §三.2）。
+ * 位域可移植性问题）；**地址一律用 DWORD**（FTL 私有地址编码）。
  * 具名字段访问经 pba_fields() 值语义视图（4 字节位域，仅内存内，不落介质；
- * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_s /
+ * 见 FTL 私有地址编码）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_s /
  * PAA——那是 NAND 层的表示。
  */
 

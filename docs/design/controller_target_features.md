@@ -3344,13 +3344,13 @@ Checkpoint + Journal replay / PFR
 | 项目 | 状态 | 证据 |
 |---|---|---|
 | debug / release 构建 | 已验证 | 2026-11-20，零新告警 |
-| 板端 UT（release 全量） | 已验证 | 2026-11-19，314/314，3 SKIP；seed `0xbc2e3bb2`，677.71 s；日志 `docs/archive/test_logs/2026-11-19_release_ut_full.log` |
-| 板端 H2testw | 已验证 | 2026-11-21，421 MB 满盘，912/857 KB/s，0 错误（`free=0`） |
+| 板端 UT（release 全量） | 已验证 | 2026-11-22，318/318，3 SKIP；seed `0x81a7c024`，697.30 s；日志 `docs/archive/test_logs/2026-11-22_release_ut_full.log` |
+| 板端 H2testw | 已验证 | 2026-11-21，415/423 MB，938/866 KB/s，0 错误 |
 | `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h` |
 | IWDG 看门狗 | 关闭，待上板决策 | `src/main.c` |
 | read recovery `0x89` | 保留地址，空转 | `src/ftl/read_recovery.c` |
 
-> 上表证据对应 2026-11-20 的镜像；此后工作区还有未提交的日志 / 统计改动，尚未重新构建、上板。
+> 上表证据对应 2026-11-22 的镜像。
 
 ## 7. 下一平台选择
 

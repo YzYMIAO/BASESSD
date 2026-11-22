@@ -1,4 +1,4 @@
-# CLAUDE.md — soft_ssd 项目规则
+# CLAUDE.md — BASESSD 项目规则
 
 STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 
@@ -564,6 +564,15 @@ typedef union FC_PARAM_U
 - 规则有例外时先消除歧义并按 R11 登记，不得选择能让当前代码通过的宽松解释。
 - **检查器必须有区分力**（C7）：先构造必然失败的负例，确认报错，再宣称通过。
 - 类型 / 命名 / 布局类改动收尾除 `make all` / `make release` 外，还必须跑对应检查器；检查器失败不得用编译通过覆盖。
+
+**P14 文档分层：设计契约 / 平台实现 / 验证快照 / 索引 / 历史分离。**
+- **`*_design.md` 只写跨实现稳定的契约**：需求、约束、数据流、不变量、状态机、策略、取舍、主流对照。
+- **设计文档禁止写**：平台/SoC/内存域/链接脚本（`STM32H743`、`ITCM/DTCM/AXI/SRAMx`、`NOLOAD`、`.bss`、`FMC/HAL/GPIO`）；代码导航坐标（`src/`/`include/` 内部路径、函数名、`g_*`/`s_*`、`file:line`）；当前测量（日期、版本号、`KB/s`、测试计数/seed、镜像时间、结构体/workspace 精确字节数）；账本（`RISK-*`/`ISS-*`/`docs/archive`）。
+- **允许保留**：结构体/枚举/联合体与字段语义、关键常量宏及其值（空间布局与状态机需要）、状态机/数据流/布局图。**不建实现索引文档**；文件名/函数名/全局符号直接看代码。
+- **去向**：平台映射 → `hardware_contract.md` / `platform_design.md`；验证快照 → `*_ut_design.md` / `guides/testing_guide.md`；风险缺口 → `known_open_items.md`；逐版本史 → `revision_history/`。
+- **例外必须显式标注**：`<!-- doc-policy: allow platform -->`、`allow verification`，块尾 `<!-- /doc-policy -->`。
+- **检查**：`make docs-check` / `make docs-report` / `make docs-test`（自检有负例）；规则正文在 `docs/README.md`「文档分层规则」。已挂 `make check`；不挂 `make all`（构建高频）。
+- **判据**：换平台 / 重构 / 重新构建后，设计文档不需要改；需要改的只能是 platform / verification 文档。
 
 ---
 

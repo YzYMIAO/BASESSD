@@ -18,11 +18,12 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "allocator.h"  /* alc_s */
-#include "ftl_config.h" /* §一 容量/分解宏 + §三.2 DWORD / pba_* */
-#include "ftl_type.h"   /* DWORD */
-#include "metadata.h"   /* metadata_dir_* / md_dir_cache_s（Directory 访问） */
-#include "stats.h"      /* SSD_STATS_ENABLE（统计专用字段按档裁剪） */
+#include "allocator.h"    /* alc_s */
+#include "fc_interface.h" /* fc_cmd_s —— 预留的备副本命令句柄 */
+#include "ftl_config.h"   /* §三.2 DWORD / pba_*（几何量见 ftl_geometry.h） */
+#include "ftl_type.h"     /* DWORD */
+#include "metadata.h"     /* metadata_dir_* / md_dir_cache_s（Directory 访问） */
+#include "stats.h"        /* SSD_STATS_ENABLE（统计专用字段按档裁剪） */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -30,7 +31,7 @@
 /* ── 宏 ──
  * L2P 容量与分解宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
  * L2P_REGIONS_PER_INSTANCE / L2P_REGION_SHIFT / L2P_REGION_MASK /
- * DIE_MAX）见 ftl/ftl_config.h §一；
+ * DIE_MAX）见 ftl/ftl_geometry.h；
  * 元数据块布局见 ftl/metadata.h「固定元数据区布局」。*/
 #define L2P_CACHE_SIZE (64U) /* cache 行数（可配 32/64/128）*/
 
@@ -196,7 +197,7 @@ static inline void l2p_bitmap_clear(DWORD *bitmap, DWORD bit)
 
 /* ── Region 分解 ──
  * L2P_REGION_SHIFT（lba / 每 region 条目数）与 L2P_REGION_MASK（lba % 每 region
- * 条目数）见 ftl/ftl_config.h §一。*/
+ * 条目数）见 ftl/ftl_geometry.h。*/
 
 /* ── Cache 状态 ── */
 

@@ -306,7 +306,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 | 文件 | 作用 |
 |---|---|
-| `third_party/tinyusb/`（新增，已裁剪） | MIT USB 协议栈；只保留 device + MSC + DWC2 编译闭包（见其 `README.soft_ssd.md`） |
+| `third_party/tinyusb/`（新增，已裁剪） | MIT USB 协议栈；只保留 device + MSC + DWC2 编译闭包（见其 `README.basessd.md`） |
 | `third_party/tinyusb_vendor.mk`（新增） | 编入源文件与包含路径 |
 | `include/tusb_config.h`（新增） | TinyUSB 编译期配置（H7 / OPT_OS_NONE / MSC / 16 KB EP） |
 | `include/platform/usb.h`（新增） | `usb_device_init` / `usb_device_task` 抽象 |

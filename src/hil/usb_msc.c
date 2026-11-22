@@ -1786,7 +1786,7 @@ void tud_msc_write10_complete_cb(BYTE lun)
 #define USB_MSC_STRING_MAX_CHARS 31U /* 描述符缓冲 32 项：长度字 + 最多 31 个 UTF-16 单元 */
 
 static const char *const s_string_desc[USB_MSC_STRING_COUNT] = {
-    "soft_ssd",
+    "BASESSD",
     "NAND U-Disk",
     "SSD0001",
 };

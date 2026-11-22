@@ -37,8 +37,9 @@ docs/archive/
 
 | 文件 | 内容 | 结果 |
 |---|---|---|
-| `2026-11-19_release_ut_full.log` | release 全量 UT（镜像 `built Nov 19 2026 17:15:02`） | 314/314 + 3 SKIP，seed `0xbc2e3bb2`，677.71 s |
-| `h2testw_912_857.png` | H2testw 端到端最终结果（写 912 / 读 857 KB/s，421 MB，0 错误） | 用户提供；只作证据，不做归因 |
+| `2026-11-22_release_ut_full.log` | release 全量 UT（镜像 `built Nov 22 2026 01:04:14`） | 318/318 + 3 SKIP，seed `0x81a7c024`，697.30 s |
+| `h2testw_938_866.png` | H2testw 端到端结果（写 938 / 读 866 KB/s，415/423 MB，0 错误） | 用户提供；只作证据，不做归因 |
+| `cdm9_20261121.png` | CrystalDiskMark 9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.75 MB/s） | 用户提供；Q1T1 为有效口径 |
 
 ## changelog/（原 `docs/changelog/`，2026-10-15 移入）
 

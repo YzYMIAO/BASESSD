@@ -109,7 +109,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step write
 - `pattern.bin`：16KB，每 2KB 块内容 = 块号（0..7）
 
 并执行 `Write-VolumeCache`（主机侧 SYNCHRONIZE CACHE）。哈希写入
-`%TEMP%\softssd_usb_verify_state.json`。
+`%TEMP%\basessd_usb_verify_state.json`。
 
 ### 4. 拔插后校验
 
@@ -140,9 +140,9 @@ powershell -NoProfile -File .\usb_rebuild_mbr.ps1
 
 ## 日志与状态
 
-- 每步日志：`%TEMP%\softssd_usb_verify_<step>.log`
-- 写入状态：`%TEMP%\softssd_usb_verify_state.json`
-- MBR 恢复日志：`%TEMP%\softssd_usb_rebuild_mbr.log`
+- 每步日志：`%TEMP%\basessd_usb_verify_<step>.log`
+- 写入状态：`%TEMP%\basessd_usb_verify_state.json`
+- MBR 恢复日志：`%TEMP%\basessd_usb_rebuild_mbr.log`
 
 ## 安全约束
 

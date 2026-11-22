@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    soft_ssd USB MSC U 盘验证脚本（Windows 原生）。
+    BASESSD USB MSC U 盘验证脚本（Windows 原生）。
 
 .DESCRIPTION
     把「板子当 U 盘」拆成四个可独立判定的步骤，避免把枚举 / 容量 / 格式化 /
@@ -18,7 +18,7 @@
                  test.bin    = C:\Windows\System32\notepad.exe 的副本（360448B）
                  pattern.bin = 16KB，每 2KB 块内容 = 块号（0..7）
                并计算 SHA256、执行 Write-VolumeCache（SYNCHRONIZE CACHE），
-               把期望哈希写进 %TEMP%\softssd_usb_verify_state.json。
+               把期望哈希写进 %TEMP%\basessd_usb_verify_state.json。
 
       check    重新读回并比对哈希 + 2KB 块指纹。应在**拔插 USB 之后**执行。
                验证：SYNCHRONIZE CACHE 生效、数据真的落盘、重枚举后读回一致。
@@ -67,8 +67,8 @@
         中文注释可能吞换行、导致语法错误，编辑后请保持 BOM。
 
     日志与状态：
-      · %TEMP%\softssd_usb_verify_<step>.log
-      · %TEMP%\softssd_usb_verify_state.json（write 生成，check 读取）
+      · %TEMP%\basessd_usb_verify_<step>.log
+      · %TEMP%\basessd_usb_verify_state.json（write 生成，check 读取）
 
     配套文档：
       · docs/guides/usb_msc_verify.md（步骤/判据/故障排查）
@@ -123,8 +123,8 @@ $TestFileName     = 'test.bin'
 $PatternFileName  = 'pattern.bin'
 
 # write 与 check 之间的期望值通过该文件传递（C: 上，跨拔插保留）。
-$StateFile = Join-Path $env:TEMP 'softssd_usb_verify_state.json'
-$LogFile   = Join-Path $env:TEMP ("softssd_usb_verify_{0}.log" -f $Step)
+$StateFile = Join-Path $env:TEMP 'basessd_usb_verify_state.json'
+$LogFile   = Join-Path $env:TEMP ("basessd_usb_verify_{0}.log" -f $Step)
 
 Start-Transcript -Path $LogFile -Force | Out-Null
 
@@ -146,7 +146,7 @@ function Test-IsElevated {
 function Invoke-DiskpartRepair {
     param([int]$Number, [string]$Fs)
 
-    $script = Join-Path $env:TEMP ("softssd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
+    $script = Join-Path $env:TEMP ("basessd_diskpart_{0}.txt" -f [Guid]::NewGuid().ToString('N'))
 
     @(
         "select disk $Number",

@@ -400,3 +400,55 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 - 落地日期、涉及模块、同期改动、上板验证步骤与验证清单见
   [`../../archive/fault_capture_landing.md`](../../archive/fault_capture_landing.md)。
 - 本文只保留当前设计、已知限制与日志设计；验证结论以 archive 记录为准。
+
+## 9. 静默失效与证据判据清单
+
+> 这一节是读代码/上板时的“先质疑证据”清单。以下现象**能通过编译、甚至通过断言**，
+> 但功能实际未生效。
+
+### 编译期无声的三类量
+
+| 类型 | 例子 | 为什么编译期无声 | 判据 |
+|---|---|---|---|
+| **建链** | 描述符链覆盖错 CW / plane | 位图/索引是运行期值 | 必须上板读回数据 |
+| **位图** | plane 1 的 CW0 是 `bit 4`，不是 `bit 0` | `1U << cw` 是 plane 盲位图；值错仍合法 | 用负例：plane 1 单 CW 写/读 |
+| **地址** | PBA/PAA 位序相反 | 字段类型相同，编译期不校验语义 | 用 `pba_to_paa` 单一漏斗；上板验证 |
+
+### 常见的“假通过”
+
+| 现象 | 真相 |
+|---|---|
+| `crc_check` 恒通过 | CRC 基址写错 ⇒ `fc_crc_compute` 恒返 0 ⇒ `0 == 0` |
+| 写状态字节被静默丢弃 | `fc_complete_from_nand` 从不读 `nand_status` |
+| 所有命令都寻址 block 0 | `plane_paa[]` 未填，`cmd->paa` 白设 |
+| 测试“碰巧通过” | `expected_byte` 用 `(block<<8|page<<4|plane)` 后截断成 `uint8_t`，block 参数完全不影响结果 |
+| 只验了 page 0 | 其余 63 页的损坏全被漏掉 |
+| “cache read 已启用” | `cache_read_collect` 跨 plane 比较 `pba_page()`（保留 plane/block 位）⇒ `complete` 恒 false ⇒ `cache_stream.read_batches` 恒 0，读静默回退普通路径；必须看计数器/断言给出“确实生效过”的证据（C8） |
+| `ASSERT` 在 release 下“保护”了 | `NDEBUG` 下展开为 `((void)0)`；后果若是静默介质破坏，必须另补 release 拒绝 |
+| `ASSERT(HAL_...())` 初始化成功 | `NDEBUG` 下表达式不求值 ⇒ 初始化根本没执行 |
+| `.bin` 逐字相同 | 动了 include 图时不成立（CMSIS `optimize("Os")` 会 TU 级泄漏） |
+| 调试器读到旧值 | SWD 读可缓存内存绕过 D-Cache |
+| “又看到同一行故障记录” | `.noinit` 只有断电才清，不是“又崩了一次” |
+| “能打出完整 banner” | 故障处理器 `for(;;)` 从不复位；banner 不代表本次没崩 |
+| PC 落在某符号 | 必须用**当场那个镜像**的符号表解 |
+
+### 平台/工具链的坑
+
+| 坑 | 判据 |
+|---|---|
+| `HAL_RCCEx_GetPeriphCLKFreq()` 对 FMC/QSPI/USART 恒返 0 | HAL 里没有这三个 case；动 HAL 前先读源码 |
+| **完整 newlib**（已移除 `nano.specs`）支持 `hh/ll/j/z/t` | 若回退 nano：这些修饰符会静默错位可变参数 |
+| CMSIS 头的 `optimize("Os")` 泄漏 | 只带声明无定义也会影响整个 TU |
+| 上位机日志“折行” | CR 数 == LF 数 == 行数，折行不是丢数据 |
+
+### 断言/守卫的判据
+
+1. **断言必须能失败**：构造一个必然让它失败的输入（负例），否则它只是“已验证”的假象。
+2. **无返回码的静默 `if (p == NULL) return;`**：唯一调用点结构性恒非空 ⇒ 收口成 ASSERT；
+   host 入口有返回码才保留 if-guard。
+3. **release 下没有守卫**：若错误后果是静默介质破坏（漏账/写坏/静默降级），
+   `ASSERT` 之外必须再补一道运行期拒绝。
+4. **校验必须给出“确实生效过”的证据**：跑通、零告警、断言全绿 ≠ 功能生效；
+   必须有可观测的生效证据。
+
+---

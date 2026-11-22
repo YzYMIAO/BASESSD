@@ -240,7 +240,7 @@ all: check-config check-vendor-config format types-check $(ANALYSIS_FILES)
 # 可独立运行；已在 make all 之后运行时前几步是幂等的重复。
 # ============================================================================
 .PHONY: check
-check: format-check types-check types-test headers-check $(TARGET).elf check-nocache check-opt
+check: format-check types-check types-test docs-check docs-test headers-check $(TARGET).elf check-nocache check-opt
 
 # ============================================================================
 # clang-format 配置
@@ -329,6 +329,27 @@ types-test:
 	@$(PYTHON) $(PROJECT_ROOT)/tools/test_check_types.py
 
 # ============================================================================
+# 文档分层检查（doc policy）
+#   - design 文档不得携带平台实现、代码坐标、日期/测试快照、风险/归档引用；
+#   - 例外用 <!-- doc-policy: allow ... --> 显式标注；
+#   - 规则见 docs/README.md「文档分层规则」。
+# 已挂进 make check；不挂 make all（构建高频，文档检查放在聚合检查里）。
+# ============================================================================
+DOCS_CHECK := $(PROJECT_ROOT)/tools/check_docs.py
+
+.PHONY: docs-check
+docs-check:
+	@$(PYTHON) $(DOCS_CHECK) --root $(PROJECT_ROOT)
+
+.PHONY: docs-report
+docs-report:
+	@$(PYTHON) $(DOCS_CHECK) --root $(PROJECT_ROOT) --report
+
+.PHONY: docs-test
+docs-test:
+	@$(PYTHON) $(DOCS_CHECK) --self-test
+
+# ============================================================================
 # H41 头文件检查
 #   - 项目头一律裸名：目录前缀 include 会因 -I 顺序产生静默误解析；
 #   - include/ 与 src/ 的私有头不得同名（同一裸名两套语义）。
@@ -394,7 +415,7 @@ info:
 .PHONY: help
 help:
 	@echo "============================================================"
-	@echo "  soft_ssd firmware build system"
+	@echo "  BASESSD firmware build system"
 	@echo "============================================================"
 	@echo ""
 	@echo "  Build Targets:"

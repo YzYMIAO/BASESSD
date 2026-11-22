@@ -1,5 +1,7 @@
 build/
 *.log
+# 板端测试原始日志是发布证据（README / 测试文档直接引用），按需纳入版本库
+!docs/archive/test_logs/*.log
 
 # Source Insight 工程目录（本机 IDE）
 SI/

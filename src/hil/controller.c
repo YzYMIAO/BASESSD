@@ -1,3 +1,9 @@
+/*
+ * controller.c — HIL Controller：生命周期、入口校验、路由与 FLUSH/TRIM 异步命令
+ *
+ * 职责：维护 controller 状态机；校验 host 请求并路由到 FTL 实例；
+ * FLUSH/TRIM 作为单飞行异步 job 每轮推进；不实现 FTL 映射 / GC 策略。
+ */
 #include "controller.h"
 
 #include "assertion.h"

@@ -57,7 +57,7 @@
 #define SSD_TIM6_PSC (200U - 1U)
 
 /* 开机横幅（编译期常量；构建日期/时间由编译器注入 __DATE__ / __TIME__）。 */
-static const char g_boot_banner[] = "=========== soft_ssd built " __DATE__ " " __TIME__ " ===========\r\n";
+static const char g_boot_banner[] = "=========== BASESSD built " __DATE__ " " __TIME__ " ===========\r\n";
 
 #if (SSD_WATCHDOG_ENABLE != 0U)
 /*
