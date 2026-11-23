@@ -7,7 +7,7 @@ paths:
 # HIL 规则（常驻于 HIL 代码路径）
 
 > 契约见 `docs/design/hil_design.md` / `docs/design/usb_msc.md`；
-> 改动流程见 `basessd-develop-hil(HIL)`；CLI 语义见 `docs/design/common/cli.md`。
+> 改动流程见 `basessd-develop-hil`；CLI 语义见 `docs/design/common/cli.md`。
 
 ## 请求与完成
 

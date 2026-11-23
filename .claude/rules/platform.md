@@ -8,7 +8,7 @@ paths:
 # 平台规则（常驻于平台代码路径）
 
 > 平台映射见 `docs/hardware_contract.md` / `docs/design/platform_design.md`；
-> 上板见 `basessd-verify-board(上板)`；故障见 `basessd-maintain-fault(故障)`。
+> 上板见 `basessd-verify-board`；故障见 `basessd-maintain-fault`。
 
 ## 缓存与 DMA
 

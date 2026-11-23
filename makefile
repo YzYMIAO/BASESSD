@@ -394,7 +394,7 @@ rules-test:
 #   - 文档中的 #缺陷# 必须带台账 ID；代码 / 测试不带；
 #   - 已挂 make check；不挂 make all（构建高频）。
 # ============================================================================
-REVIEW_MARKS := $(PROJECT_ROOT)/.claude/skill-collection/skills/review/basessd-review(审查)/scripts/check_review_marks.py
+REVIEW_MARKS := $(PROJECT_ROOT)/.claude/skill-collection/skills/review/basessd-review/scripts/check_review_marks.py
 
 .PHONY: review-marks review-marks-check review-marks-strict review-marks-test
 review-marks:

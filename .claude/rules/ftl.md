@@ -6,8 +6,8 @@ paths:
 
 # FTL 规则（常驻于 FTL 代码路径）
 
-> 设计契约见 `docs/design/ftl_design.md`；改动流程见 skill `basessd-develop-ftl(FTL改动)`；
-> 故障分诊见 `basessd-maintain-fault(故障)`。
+> 设计契约见 `docs/design/ftl_design.md`；改动流程见 skill `basessd-develop-ftl`；
+> 故障分诊见 `basessd-maintain-fault`。
 
 ## 不变量：唯一闸门
 

@@ -4,14 +4,14 @@
 四层架构：
   CLAUDE.md              常驻判据（R/C/P）
   .claude/rules/*.md     路径作用域规则（H/S + 领域约束），必须带 paths:
-  .claude/skills/*       按需 skill（统一 basessd- 前缀）
+  .claude/skills/*       按需 skill（统一 basessd- 前缀，ASCII kebab-case）
   docs/                  知识
 
 检查项：
   1. CLAUDE.md 体积预算（硬上限 220 行 / 28,000 字节；目标 200 行 / 25 KB）；
   2. CLAUDE.md 行首定义 R1~R12 / C1~C12 / P0~P14 各恰好一次；
   3. .claude/rules/c-coding.md 行首定义 H1~H50 / S1~S6 各恰好一次；
-  4. skill basessd-c-rules(C规范) 中 ### H1~H50 各恰好一次；
+  4. docs/guides/coding_rules.md 中 ### H1~H50 各恰好一次；
   5. .claude/rules/*.md 必须有 YAML paths:；
   6. skill 目录名 = frontmatter name，统一 basessd- 前缀，有 description，< 500 行；
   7. 关键路径存在；
@@ -38,6 +38,8 @@ ROOT_LINES_TARGET = 200
 ROOT_BYTES_TARGET = 25_000
 SKILL_MAX_LINES = 500
 SKILL_PREFIX = "basessd-"
+# Claude Code / VS Code: skill name == directory name, lowercase/digits/hyphens only.
+SKILL_NAME_RX = re.compile(r"^[a-z0-9-]+$")
 
 EXPECTED_ROOT = {
     "R": set(range(1, 13)),
@@ -49,19 +51,19 @@ EXPECTED_C_CODING = {
     "S": set(range(1, 7)),
 }
 EXPECTED_SKILLS = {
-    "basessd-project(立项)",
-    "basessd-design(设计)",
-    "basessd-verify(验证)",
-    "basessd-maintain(维护)",
-    "basessd-release(发布)",
-    "basessd-design-arch(架构)",
-    "basessd-verify-board(上板)",
-    "basessd-develop-fc(FC-NAND)",
-    "basessd-maintain-fault(故障)",
-    "basessd-develop-ftl(FTL改动)",
-    "basessd-develop-hil(HIL)",
-    "basessd-develop-platform(平台)",
-    "basessd-review(审查)",
+    "basessd-project",
+    "basessd-design",
+    "basessd-verify",
+    "basessd-maintain",
+    "basessd-release",
+    "basessd-design-arch",
+    "basessd-verify-board",
+    "basessd-develop-fc",
+    "basessd-maintain-fault",
+    "basessd-develop-ftl",
+    "basessd-develop-hil",
+    "basessd-develop-platform",
+    "basessd-review",
 }
 EXPECTED_RULES = {"c-coding", "fc-nand", "ftl", "hil", "platform"}
 
@@ -195,6 +197,11 @@ def check_skill(dir_name: str, text: str) -> list[str]:
         )
     if not dir_name.startswith(SKILL_PREFIX):
         errors.append(f"skill {dir_name}: 缺少统一前缀 {SKILL_PREFIX}")
+    if not SKILL_NAME_RX.match(dir_name):
+        errors.append(
+            f"skill {dir_name}: 名称只能包含小写字母、数字、连字符"
+            "（VS Code / Claude Code 校验）"
+        )
     if not fm.get("description"):
         errors.append(f"skill {dir_name}: 缺少 description")
     lines = len(text.splitlines())
@@ -330,7 +337,11 @@ def self_test() -> int:
     for kind, expected in EXPECTED_ROOT.items():
         require(f"正例 root {kind}", not check_expected(ok_root, kind, expected, "root"))
     require("正例 c-coding", not check_expected(c_coding_text(), "H", EXPECTED_C_CODING["H"], "cc"))
-    require("正例 skill", not check_skill("basessd-review(审查)", skill_text("basessd-review(审查)")))
+    require("正例 skill", not check_skill("basessd-review", skill_text("basessd-review")))
+    require(
+        "skill 名非法字符",
+        bool(check_skill("basessd-review(审查)", skill_text("basessd-review(审查)"))),
+    )
 
     big = ok_root + "\n".join("x" for _ in range(ROOT_LINES_HARD)) + "\n"
     require("root 超行数", bool(check_budget(big, "root")))
@@ -351,7 +362,7 @@ def self_test() -> int:
         ),
     )
 
-    skill_missing = skill_text("basessd-review(审查)", h_ids=set(range(1, 50)))
+    skill_missing = skill_text("basessd-review", h_ids=set(range(1, 50)))
     found = [
         int(m.group(1))
         for line in skill_missing.splitlines()

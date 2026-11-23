@@ -139,21 +139,22 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 
 | skill | 性质 | 何时用 |
 |---|---|---|
-| `basessd-project(立项)` | 判据型 | 新功能 / 新项目立项 |
-| `basessd-design(设计)` | 判据型 | 方案 / ADR |
-| `basessd-verify(验证)` | 操作型 | 测试矩阵 / 验收 |
-| `basessd-maintain(维护)` | 操作型 | 变更 / 回归 / 兼容性 |
-| `basessd-release(发布)` | 操作型 | 版本 / 许可 / CI / 打包 |
-| `basessd-verify-board(上板)` | 操作型 | 编译 → 烧写 → 串口 → 判定 |
-| `basessd-maintain-fault(故障)` | 操作型 | HardFault / 断言 / 静默失效 / 结果不对 |
-| `basessd-develop-ftl(FTL改动)` | 约束型 | 改 `src/ftl/`、`include/ftl/` |
-| `basessd-develop-fc(FC-NAND)` | 约束型 | 改 `src/fc/`、`src/nand/` |
-| `basessd-develop-hil(HIL)` | 约束型 | 改 `src/hil/`（USB/CLI/请求拆分） |
-| `basessd-develop-platform(平台)` | 约束型 | 改 `src/platform/`、移植 |
-| `basessd-review(审查)` | 约束型 | 审查本仓 C 代码 |
-| `basessd-design-arch(架构)` | 判据型 | 分层决策 / 增删接口 / 跨层 |
+| `basessd-project` | 判据型 | 新功能 / 新项目立项 |
+| `basessd-design` | 判据型 | 方案 / ADR |
+| `basessd-verify` | 操作型 | 测试矩阵 / 验收 |
+| `basessd-maintain` | 操作型 | 变更 / 回归 / 兼容性 |
+| `basessd-release` | 操作型 | 版本 / 许可 / CI / 打包 |
+| `basessd-verify-board` | 操作型 | 编译 → 烧写 → 串口 → 判定 |
+| `basessd-maintain-fault` | 操作型 | HardFault / 断言 / 静默失效 / 结果不对 |
+| `basessd-develop-ftl` | 约束型 | 改 `src/ftl/`、`include/ftl/` |
+| `basessd-develop-fc` | 约束型 | 改 `src/fc/`、`src/nand/` |
+| `basessd-develop-hil` | 约束型 | 改 `src/hil/`（USB/CLI/请求拆分） |
+| `basessd-develop-platform` | 约束型 | 改 `src/platform/`、移植 |
+| `basessd-review` | 约束型 | 审查 C 代码 / 设计文档 |
+| `basessd-design-arch` | 判据型 | 分层决策 / 增删接口 / 跨层 |
 
-命名：生命周期级 `basessd-<stage>(中文)`；子流程 `basessd-<stage>-<domain>(中文)`。
+命名：生命周期级 `basessd-<stage>`；子流程 `basessd-<stage>-<domain>`；
+`name` 只用小写字母、数字、连字符（VS Code / Claude Code 校验），中文放 `description`。
 ⚠ 约束型说「不要做什么」，操作型说「怎么做」，判据型说「怎么决定」。
 **P5 偏离必须留痕。** 有意不遵守某条时，在该处写「偏离 Hxx，因为…」。沉默偏离 = 下次分不清「有意」与「漏了」。
 **P6 故障排查先质疑证据。** ① 判据本身成立吗（当场镜像？断电后记录？绕过 D-Cache？）；② 再定位；③ 结论必须给**可复现负例**。入口 `docs/design/common/fault_capture.md`。
@@ -161,6 +162,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 ### 批量与效率
 **P7 检视 / 修复类任务一次性改完。** 确定项一次改完（含同类停更），不逐档停下；只在真正有取舍或高风险时提问。汇报「改了什么 + 证据 + 未做什么」。
 **P8 机械改词 / 重命名用批量替换。** `grep -rl` 取目标集 + 一条脚本；先长词再短词；历史 / 归档显式 skip；验证只跑 `grep -c` / `git diff --stat`。
+- 机械改名（目录 / symlink / 引用）：一个映射表 + 一个 Python 脚本；`git status --short` 一次只看异常；一条命令跑 rules/docs/review/diff-check；汇报只给计数 + 失败项；不反查第三方 bundle。
 **P9 改完 / 推完即止；「看效果」是用户自己做的事。** 不把它转成我的任务，只报告事实。⚠ 不省 R1：声称验证通过仍须给证据。
 **P10 表示链改动先写契约。** 改语义 / 类型 / 宽度 / 哨兵 / 位置前写六行：坐标 / 表 / 计数 / 归属 / 表示链 / 判据。六行写不出 = 还没想清，不得动代码。
 **P11 构建频率：批量收尾跑一次；注释 / 文档不编译。** 纯注释 / 文档：`git diff --check` + 定点 grep；分析阶段不构建；代码语义改动一批一验；头文件 / API / 配置 / 地址 / 位图类按 R2 全量。汇报只给最后一次构建证据。

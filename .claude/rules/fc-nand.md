@@ -9,7 +9,7 @@ paths:
 # FC-NAND 规则（常驻于 FC / NAND 代码路径）
 
 > 设计契约见 `docs/design/fc_nand_design.md`（§26 分层判据）；
-> 分层决策见 `basessd-design-arch(架构)`；故障分诊见 `basessd-maintain-fault(故障)`。
+> 分层决策见 `basessd-design-arch`；故障分诊见 `basessd-maintain-fault`。
 
 ## 坐标
 

@@ -18,25 +18,25 @@
 ```text
 skills/
 ├── project/                       立项
-│   └── basessd-project(立项)       现有
+│   └── basessd-project            现有
 ├── design/                        设计
-│   ├── basessd-design-arch(架构)          现有
-│   └── basessd-design(设计)        现有
+│   ├── basessd-design-arch        现有
+│   └── basessd-design             现有
 ├── develop/                       开发
-│   ├── basessd-develop-ftl(FTL改动)        现有
-│   ├── basessd-develop-fc(FC-NAND)         现有（P0）
-│   ├── basessd-develop-hil(HIL)            现有（P0）
-│   └── basessd-develop-platform(平台)      现有（P0）
+│   ├── basessd-develop-ftl        现有
+│   ├── basessd-develop-fc         现有（P0）
+│   ├── basessd-develop-hil        现有（P0）
+│   └── basessd-develop-platform   现有（P0）
 ├── verify/                        验证
-│   ├── basessd-verify-board(上板)         现有
-│   └── basessd-verify(验证)        现有
+│   ├── basessd-verify-board       现有
+│   └── basessd-verify             现有
 ├── maintain/                      维护
-│   ├── basessd-maintain-fault(故障)         现有
-│   └── basessd-maintain(维护)      现有
+│   ├── basessd-maintain-fault     现有
+│   └── basessd-maintain           现有
 ├── review/                        审查
-│   └── basessd-review(审查)        现有
+│   └── basessd-review             现有
 └── release/                       发布
-    └── basessd-release(发布)       现有
+    └── basessd-release            现有
 ```
 
 ## 3. 流程
@@ -78,7 +78,7 @@ skills/
 ## 5. 命名与写法
 
 - 生命周期：`basessd-<stage>(中文)`；子流程：`basessd-<stage>-<domain>(中文)`。
-  例：`basessd-develop-ftl(FTL改动)`、`basessd-verify-board(上板)`。
+  例：`basessd-develop-ftl`、`basessd-verify-board`。
 - **不用 `/`**（路径分隔符），用 `-` 或中文。
 - description = **what + when + when not**（stop list）。
 - L2 路由器 30~50 行；L3 层流程 60~120 行；只写流程/入口/边界/产出/完成。

@@ -39,8 +39,8 @@
 ## 发现模型
 
 ```text
-.claude/skills/basessd-develop-ftl(FTL改动)
-  -> ../skill-collection/skills/develop/basessd-develop-ftl(FTL改动)
+.claude/skills/basessd-develop-ftl
+  -> ../skill-collection/skills/develop/basessd-develop-ftl
 ```
 
 扁平 symlink 保持 `/` 菜单名字干净；层次由本目录的 lifecycle 分组表达。
