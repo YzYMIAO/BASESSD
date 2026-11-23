@@ -27,7 +27,7 @@
 | 信息 | 唯一事实源 | 本文怎么引用 |
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_hil.c` | §2 只写代表用例与判据，不列全量清单 |
-| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md` | §7 只写 `RISK-ID → 测试项 / 用例` 映射，**不写状态词** |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md`（未闭合 / 信息）+ `docs/design/known_closed_items.md`（已闭合） | §7 只写 `RISK-ID → 测试项 / 用例` 映射，**不写状态词** |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §6 / §7 只给 HIL 层判定 |
 | 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
 | 每次运行结果与证据 | `build/test-results/` + `docs/guides/testing_guide.md` §8.7 | §5.4 只给目录与四件套 |
@@ -625,7 +625,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 > 本表只列**当前未闭合**的 HIL 前端风险（索引状态取自 `docs/design/known_open_items.md`）。
 > 判定口径同 `docs/guides/testing_guide.md` §12.1；HIL 层没有注入 seam，失败路径只能靠
 > 主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
-> **信息**与**已闭合**条目只在 `known_open_items.md` 维护。
+> **信息**条目只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。
 
 **CLI（7）**
 
@@ -675,9 +675,9 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 | `RISK-USBC-01` | K | deferred sense 语义需主机侧观察 |
 
 > 台账合计 **22** 条：N 1 / K 12 / 状态词 9。已闭合的平台守卫
-> `RISK-PLAT-13` / `RISK-PLAT-14` 与信息项 `RISK-USB-09` / `RISK-USB-10` /
-> `RISK-USB-11` / `RISK-CTRL-01` / `RISK-PLAT-06` / `RISK-PLAT-07` 只在
-> `known_open_items.md` 维护。
+> `RISK-PLAT-13` / `RISK-PLAT-14` / `RISK-PLAT-06` 见 `known_closed_items.md`；
+> 信息项 `RISK-USB-09` / `RISK-USB-10` / `RISK-USB-11` / `RISK-CTRL-01` /
+> `RISK-PLAT-07` 在 `known_open_items.md` 维护。
 
 ---
 

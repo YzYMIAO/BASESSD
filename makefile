@@ -240,7 +240,7 @@ all: check-config check-vendor-config format types-check $(ANALYSIS_FILES)
 # 可独立运行；已在 make all 之后运行时前几步是幂等的重复。
 # ============================================================================
 .PHONY: check
-check: format-check types-check types-test docs-check docs-test headers-check $(TARGET).elf check-nocache check-opt
+check: format-check types-check types-test docs-check docs-test ledger-check ledger-test rules-check rules-test review-marks-check review-marks-test headers-check $(TARGET).elf check-nocache check-opt
 
 # ============================================================================
 # clang-format 配置
@@ -350,6 +350,66 @@ docs-test:
 	@$(PYTHON) $(DOCS_CHECK) --self-test
 
 # ============================================================================
+# 开放式 / 已闭合台账一致性检查
+#   - 0.1 状态统计 / 0.6 按模块统计 / 0. 概览由脚本生成，禁止手改；
+#   - 开放式台账的模块索引不得出现「已闭合 / 不实现」（附录 A.5）；
+#   - 同一 ID 在两个台账合起来不得重复登记。
+# 已挂 make check；不挂 make all（构建高频）。
+# ============================================================================
+LEDGER_CHECK := $(PROJECT_ROOT)/tools/check_ledger.py
+
+.PHONY: ledger-check
+ledger-check:
+	@$(PYTHON) $(LEDGER_CHECK) --root $(PROJECT_ROOT) --check
+
+.PHONY: ledger-write
+ledger-write:
+	@$(PYTHON) $(LEDGER_CHECK) --root $(PROJECT_ROOT) --write
+
+.PHONY: ledger-test
+ledger-test:
+	@$(PYTHON) $(LEDGER_CHECK) --self-test
+
+# ============================================================================
+# CLAUDE.md / rules / skills 分层检查
+#   - CLAUDE.md 体积预算与 R/C/P 覆盖；
+#   - .claude/rules/*.md 必须有 paths:，H/S 覆盖在 c-coding.md；
+#   - skill 统一 basessd- 前缀、frontmatter 一致、< 500 行；
+#   - 关键路径存在。
+# 已挂 make check；不挂 make all（构建高频）。
+# ============================================================================
+RULES_CHECK := $(PROJECT_ROOT)/tools/check_rules.py
+
+.PHONY: rules-check
+rules-check:
+	@$(PYTHON) $(RULES_CHECK) --root $(PROJECT_ROOT) --check
+
+.PHONY: rules-test
+rules-test:
+	@$(PYTHON) $(RULES_CHECK) --root $(PROJECT_ROOT) --self-test
+
+# ============================================================================
+# 审查标记检查（#优化# / #决策# / #讨论# / #重构# / #未验# / #缺陷# / #标识保留#）
+#   - 设计文档行首 / C 注释体第一段；
+#   - 文档中的 #缺陷# 必须带台账 ID；代码 / 测试不带；
+#   - 已挂 make check；不挂 make all（构建高频）。
+# ============================================================================
+REVIEW_MARKS := $(PROJECT_ROOT)/.claude/skill-collection/skills/review/basessd-review(审查)/scripts/check_review_marks.py
+
+.PHONY: review-marks review-marks-check review-marks-strict review-marks-test
+review-marks:
+	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --report
+
+review-marks-check:
+	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --check
+
+review-marks-strict:
+	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --strict
+
+review-marks-test:
+	@$(PYTHON) "$(REVIEW_MARKS)" --self-test
+
+# ============================================================================
 # H41 头文件检查
 #   - 项目头一律裸名：目录前缀 include 会因 -I 顺序产生静默误解析；
 #   - include/ 与 src/ 的私有头不得同名（同一裸名两套语义）。
@@ -429,9 +489,18 @@ help:
 	@echo "    tidy             - Run clang-tidy on src/ (needs run-clang-tidy-15)"
 	@echo ""
 	@echo "  Check Targets:"
-	@echo "    check          - format / types / headers / layout / opt checks"
+	@echo "    check          - format / types / docs / ledger / rules / review / headers / layout / opt checks"
 	@echo "    format-check   - Verify clang-format without modifying files"
 	@echo "    types-test     - Self-test for types-check (positive + negative cases)"
+	@echo "    ledger-check   - open/closed ledger stats and structure consistency"
+	@echo "    ledger-write   - Regenerate stats for both ledgers"
+	@echo "    ledger-test    - Self-test for ledger-check (positive + negative cases)"
+	@echo "    rules-check    - CLAUDE.md / rules / skills layering consistency"
+	@echo "    rules-test     - Self-test for rules-check (positive + negative cases)"
+	@echo "    review-marks   - Report #优化# / #决策# ... review marks"
+	@echo "    review-marks-check - Validate review mark syntax and ledger refs"
+	@echo "    review-marks-strict - Fail on any non-retained review mark"
+	@echo "    review-marks-test - Self-test for review-marks-check"
 	@echo "    headers-check  - H41: bare includes and unique header basenames"
 	@echo ""
 	@echo "  Cleanup Targets:"

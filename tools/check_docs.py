@@ -89,7 +89,10 @@ POLICY: dict[str, dict[str, object]] = {
         "checks": [],
     },
     "ledger": {
-        "paths": ["docs/design/known_open_items.md"],
+        "paths": [
+            "docs/design/known_open_items.md",
+            "docs/design/known_closed_items.md",
+        ],
         "checks": [],
     },
     "revision": {
@@ -145,6 +148,12 @@ LEDGER_RX = re.compile(
 
 MARKER_RX = re.compile(r"<!--\s*doc-policy:\s*allow\s+([a-z-]+)\s*-->")
 END_MARKER = "<!-- /doc-policy -->"
+
+# Review marks carry deliberate code/ledger references (path#symbol, RISK-*).
+# They are doc-local review notes, not implementation coordinates; skip any
+# line-start #...# marker. Tag validity is check_review_marks.py's job, so this
+# checker does not duplicate the tag vocabulary (C9).
+REVIEW_MARK_RX = re.compile(r"^\s*#[^#\s]+#")
 
 CHECK_LABEL = {
     "platform": "平台/内存域",
@@ -223,6 +232,8 @@ def scan_file(root: Path, path: str) -> list[Violation]:
             allowed.clear()
             continue
         if fenced[idx - 1]:
+            continue
+        if REVIEW_MARK_RX.match(line):
             continue
 
         if active("platform") and PLATFORM_RX.search(line):
@@ -310,8 +321,18 @@ def self_test() -> int:
         if check_root(root):
             failures.append("clean design fixture rejected")
 
+        # Review mark lines are exempt: their code/ledger refs are deliberate.
+        (root / design).write_text(
+            "#优化# RISK-FTL-01 见 src/ftl/ftl.c 这里要改\n",
+            encoding="utf-8",
+        )
+        if check_root(root):
+            failures.append("review mark line was flagged")
+
         expect(root, design, "使用 STM32H743 的 DTCM。\n", "platform")
         expect(root, design, "见 `src/ftl/ftl.c`。\n", "code")
+        # Only line-start marks are exempt; a tag inside prose is still checked.
+        expect(root, design, "文本 #优化# 见 src/ftl/ftl.c。\n", "code")
         expect(root, design, "2026-11-22 实测 318/318。\n", "temporal")
         expect(root, design, "工作区占用 128 KB。\n", "size")
         expect(root, design, "见 RISK-TOP-01 与 docs/archive/foo.md。\n", "ledger")

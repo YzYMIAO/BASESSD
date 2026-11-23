@@ -16,6 +16,8 @@
 | 写 / 跑 UT | `design/fc_nand_ut.md` + `design/common/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_open_items.md` 模块 14）；负例与注入框架见 `guides/testing_guide.md` §12 |
 | 平台 / 移植 / 调试链 | `design/platform_design.md`（timer 见 `design/common/timer.md`）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 / CLI | `design/common/`：`assertion_guidelines.md`、`logging.md`、`fault_capture.md`、`cli.md` |
+| C 编码规则细则 | `guides/coding_rules.md`（H1~H50 细则）+ `guides/coding_rules_generic.md`（通用 15 章） |
+| 技能分层 / 维护 skill | `.claude/skill-collection/README.md` → `docs/skill-map.md` |
 | 设计原则 / 学习 | `design/storage_controller_design.md`（设计要点手册）；CW 布局事实见 `design/ftl_design.md` §2.1/§2.2 |
 | **存储主控 SoC 介绍** | `design/controller_target_features.md`（硬件功能块 + FTL/固件功能块 + 消费/企业差异 + 当前平台案例 + 候选平台） |
 | **项目水平 / 定位评估** | `archive/project_positioning_20261029.md`（对照 OpenSSD / SPDK FTL 的定性评估；不是基准报告） |
@@ -24,7 +26,7 @@
 | **USB MSC / U 盘** | `design/usb_msc.md` Part A（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `guides/usb_msc_verify.md`（上板验证手册 + 判据 + 脚本）→ `guides/testing_guide.md`（分层测试 / 工具 / 性能方法 / 实测） |
 | 多 LUN / 共享 L2P cache / 内存域 | `design/ftl_design.md` §2.1/§5.4 + `design/known_open_items.md` 模块 10（实施计划已归档） |
 | **未实现 / 未验证项（feature backlog）** | `design/known_open_items.md` |
-| **复查已知风险 / 判断是否该修** | **先读 `design/known_open_items.md`**（缺陷/残余风险；已闭合条目在文末）→ 再进对应模块文档 |
+| **复查已知风险 / 判断是否该修** | **先读 `design/known_open_items.md`**（未闭合缺陷/残余风险；已闭合 / 不实现见 `design/known_closed_items.md`）→ 再进对应模块文档 |
 | **质疑某条项目规则（`CLAUDE.md`）的出处** | `archive/claude_md_history.md`（规则何时、因为什么改过；日常不读） |
 | **开源发布 / 仓库整理** | `guides/open_source_checklist.md`（P0 凭据 / 许可证 / 第三方资料 → P1 结构 → 发布前检查） |
 
@@ -34,7 +36,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog、阶段性记录、计划/历史/UT 归档；清单见 archive/README.md
-├── design/                    ← 主设计 + common/ 公共设施 + revision_history/ 决策史 + known_open_items（阅读顺序见 design/README.md）
+├── design/                    ← 主设计 + common/ 公共设施 + revision_history/ 决策史 + known_open_items / known_closed_items（阅读顺序见 design/README.md）
 ├── guides/                    ← 环境 / 调试 / 开源发布 / USB 上板验证 / 测试方法指南（非设计）
 ├── reference/                 ← 资料区：论文 / 网页链接清单（不含 PDF/HTML 原文）
 ├── architecture.md            ← 软件架构总览
@@ -62,6 +64,7 @@ docs/
 | **platform** | SoC、内存域、链接段、时钟、引脚、启动细节 | `hardware_contract.md`、`platform_design.md`、`boot_flow.md`、`usb_msc.md` | 随平台 |
 | **verification** | 测试设计、用例、上板结果、吞吐、日期 | `*_ut_design.md`、`guides/testing_guide.md` | 随时间 |
 | **ledger** | 未闭合风险 / 缺口（`RISK-*` / `ISS-*`） | `design/known_open_items.md` | 随修复 |
+| **ledger** | 已闭合 / 不实现条目 | `design/known_closed_items.md` | 只追加 |
 | **revision** | 逐版本决策史、被否方案 | `design/revision_history/` | 只追加 |
 | **archive** | 已闭合阶段记录、历史稿 | `archive/` | 不改写 |
 

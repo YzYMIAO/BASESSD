@@ -25,7 +25,7 @@
 | 信息 | 唯一事实源 | 本文怎么引用 |
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_ftl_pure.c`、`test_ftl_media.c`、`test_negative_pure.c`、`test_negative_media.c`、`test_speed.c`；`test --list` | §2 只写设计点与代表用例，不列全量用例表 |
-| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md`（已闭合历史另见 `docs/archive/known_risks_batches.md`） | §7 只写风险 → 模块追溯，**不写状态词** |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md`（未闭合 / 信息）+ `docs/design/known_closed_items.md`（已闭合；更早历史另见 `docs/archive/known_risks_batches.md`） | §7 只写风险 → 模块追溯，**不写状态词** |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §3.5 只给入口与套件映射 |
 | 故障注入框架、seam 语义 | `docs/guides/testing_guide.md` §12 | §4.9 只写本套件怎么用 |
 | 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
@@ -1006,7 +1006,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 > 本表只列**当前未闭合**的 FTL 风险（索引状态取自 `docs/design/known_open_items.md`）。
 > **M** = 有能变红的负例且上板通过；**N** = 注入点 / 触发步骤 / 断言已从源码确认、只差上板；
 > **K** = 当前不可构造（写明原因）；非负例项保留其状态词（`待定位` / `待议` / `待决策`）。
-> **信息**与**已闭合**条目的判定与理由只在 `known_open_items.md` 维护，本表不重复。
+> **信息**条目的判定与理由只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。本表不重复。
 > 组名沿用风险登记模块分组；跨层框架（注入 API、宏隔离、验收）见
 > `docs/guides/testing_guide.md` §12。
 

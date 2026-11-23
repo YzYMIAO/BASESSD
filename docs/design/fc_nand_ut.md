@@ -24,7 +24,7 @@
 |---|---|---|
 | 用例是否存在、参数、断言 | `tests/unit/test_fc_pure.c` / `test_fc_data_path.c` / `test_fc_lifecycle.c` / `test_fc_negative.c` | §2 只写代表用例与判据，不列全量清单 |
 | OP 操作码与编号 | `include/nand/onfi_1_0.h` | §2.9 只写覆盖策略，不抄 50 行表 |
-| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md` | §7 只写风险 → 模块追溯，不写状态词 |
+| 风险状态、历史、是否闭合 | `docs/design/known_open_items.md`（未闭合 / 信息）+ `docs/design/known_closed_items.md`（已闭合） | §7 只写风险 → 模块追溯，不写状态词 |
 | 负例覆盖判定（M/N/K） | 本文 §7.2 台账 | §7 只给 FC 层判定，其余层见各层文档 |
 | 故障注入框架与 seam 语义 | `docs/guides/testing_guide.md` §12 | §4.3 只写本套件怎么用 |
 | 未实现 / 未验证的设计项 | `docs/design/known_open_items.md` | §6 只给链接 |
@@ -519,7 +519,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 > 本表只列**当前未闭合**的 FC-NAND / NAND 器件风险（索引状态取自
 > `docs/design/known_open_items.md`）。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
 > 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）；非负例项保留
-> 其状态词。**信息**与**已闭合**条目只在 `known_open_items.md` 维护。
+> 其状态词。**信息**条目只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。
 > 跨层框架（注入 API、宏隔离、验收）见 `docs/guides/testing_guide.md` §12。
 
 **FC 资源池（1）**

@@ -180,7 +180,8 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 | `docs/design/hil_design.md` | 主机接口层 |
 | `docs/design/controller_target_features.md` | 存储主控 SoC 介绍（硬件/FTL 功能块 + 当前平台 + 下一平台选择） |
 | `docs/guides/wsl_debug_environment.md` | WSL / JLink / 串口调试链 |
-| `docs/design/known_open_items.md` | 已知风险与残余项（维护者账本） |
+| `docs/design/known_open_items.md` | 未闭合风险与残余项（维护者账本） |
+| `docs/design/known_closed_items.md` | 已闭合 / 不实现条目（维护者账本，只追加） |
 | `CLAUDE.md` | 工程规则与评审判据（不是用户手册） |
 
 ## License

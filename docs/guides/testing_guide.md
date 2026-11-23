@@ -639,7 +639,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 | 结论（通过/失败/未复现）| 证据（日志行）
 ```
 
-结果写回 `known_open_items.md` 对应条目的「历史/验证」行；通过的按 `docs/design/known_open_items.md` §0.4 判定是否 `已闭合`。
+结果写回 `known_open_items.md` 对应条目的「历史/验证」行；通过后按 `docs/design/known_open_items.md` 附录 A 判定状态，`已闭合` / `不实现` 条目迁入 `docs/design/known_closed_items.md`。
 
 ---
 

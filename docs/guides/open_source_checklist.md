@@ -446,12 +446,12 @@ git grep -n 'docs/ftl_design.md' -- README.md docs/*.md docs/design/*.md
 
 **动作（低链接成本方案）**：
 
-1. 不移动 `known_open_items.md` / `known_open_items.md`：`CLAUDE.md` 与大量文档都按现路径引用，
+1. 不移动 `known_open_items.md` / `known_closed_items.md`：`CLAUDE.md` 与大量文档都按现路径引用，
    移动会产生大面积链接回扫。改为在 `docs/README.md` 明确标注：
    - **公开主干**：`architecture.md`、`hardware_contract.md`、`design/ftl_design.md`、
      `design/fc_nand_design.md`、`design/hil_design.md`、`design/usb_msc.md`、
      `design/storage_controller_design.md`。
-   - **工程内部账本**：`known_open_items.md`、`known_open_items.md`、revision history、negative coverage、
+   - **工程内部账本**：`known_open_items.md`、`known_closed_items.md`、revision history、negative coverage、
      `docs/archive/`；保留路径，仅供维护者。
 2. 负例测试三件套不合并成单文档，而按**层次**并入：
    - 通用框架（判据、注入 API、seam 选型、用例模板、验收）→
@@ -480,34 +480,39 @@ git grep -n 'negative_test_framework.md|negative_coverage.md|negative_deferred_e
 
 ### OS-09 AI 工具配置范围
 
-**目标**：决定 `.claude/`、`.codex/`、`CLAUDE.md` 是否随公开仓库发布。
+**目标**：决定 `.claude/`、`CLAUDE.md` 是否随公开仓库发布（`.codex/` 已合并）。
 
 **现状**：
 
-- `CLAUDE.md` 618 行，是本仓的工程规则与判据，公开价值高，但含内部 risk ID 与工作流。
-- `.claude/skills/` 5 个文件，是 Claude Code 的项目技能。
-- `.codex/skills/c-coding-standard/SKILL.md` 是 C 规范来源，`CLAUDE.md` 多处引用。
+- `CLAUDE.md` 常驻判据（约 184 行），是本仓的工程规则与判据，公开价值高。
+- `.claude/rules/` 5 份路径作用域规则（`c-coding` + `ftl` / `fc-nand` / `hil` / `platform`）。
+- `.claude/skills/` 13 个 `basessd-*` symlink；源在 `.claude/skill-collection/skills/`。
+- C 规则细则与通用规范在 `docs/guides/coding_rules.md` / `coding_rules_generic.md`。
 
 **建议**：
 
 - **保留** `CLAUDE.md` 在根目录，并在 README 里一句话说明“这是项目的工程规则/评审判据，
   不是用户手册”。
-- `.claude/` 与 `.codex/` 若公开价值低，可移出公开仓库；但移出前必须回扫 `CLAUDE.md` 的
-  引用，改成“内部参考”或不写路径。
+- `.claude/` 若公开价值低，可移出公开仓库；但移出前必须回扫 `CLAUDE.md` 的引用，
+  改成“内部参考”或不写路径。
 - 不要为了“看起来干净”删掉 `CLAUDE.md` 的规则正文；它是本项目区别于普通 demo 的部分。
 
-**裁决（2026-11-17）**：用户选择**全部保留**（`CLAUDE.md` + `.claude/skills/` + `.codex/skills/`）。
-理由：三者互相引用，全部保留时引用自洽；`.claude/settings.local.json` 已在 `.gitignore` 中，
-不入库。
+**裁决（2026-11-17）**：用户选择**全部保留**（`CLAUDE.md` + `.claude/rules/` + `.claude/skills/` + `.codex/skills/`）。
+
+**变更（2026-11-23）**：用户裁决把 `.codex/` **合并进 `.claude/` 并删除**；
+通用规范成为 C 规则细则的附录，现位于 `docs/guides/coding_rules_generic.md`；
+`.codex/` 不再存在。理由：统一规范来源，避免漂移（H6）。
 
 **验收**：
 
 ```bash
-git grep -n '\.codex/skills|\.claude/skills' -- CLAUDE.md docs
-git grep -nE '/home/|/mnt/|C:\\\\|D:\\\\' -- .claude .codex CLAUDE.md
+git grep -n '\.claude/skills|\.claude/rules' -- CLAUDE.md docs
+git grep -n '\.codex' -- CLAUDE.md .claude                                   # 应为空
+test ! -e .codex                                                              # 应通过
+git grep -nE '/home/|/mnt/|C:\\\\|D:\\\\' -- .claude CLAUDE.md
 ```
 
-第二条应为空；第一条若保留目录则指向存在的文件。
+第二条应为空；第三条应通过。
 
 **执行人**：用户决策；我执行移动/链接回扫。
 
@@ -666,7 +671,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 - **不要**只在新提交里删 `docs/claude_code_usage.md` 就认为 token 安全。
 - **不要**在没有 LICENSE 的情况下公开；也不要用一个根 LICENSE 覆盖 vendor。
 - **不要**把 `docs/reference` 的 PDF/HTML 一起公开，除非能出示再分发许可。
-- **不要**为了“看起来干净”删 `docs/design/known_open_items.md` / `known_open_items.md` / 设计文档；
+- **不要**为了“看起来干净”删 `docs/design/known_open_items.md` / `docs/design/known_closed_items.md` / 设计文档；
   它们是本项目的工程记录与差异化资产。
 - **不要**按行数拆分 `ftl.c` / `cli.c`；没有第二消费者或封装不变量时，拆了只会增加阅读成本。
 - **不要**在公开后随意 force-push；需要重写历史时先与用户确认并通知已克隆者。
@@ -700,7 +705,7 @@ git ls-files -z | xargs -0 du -cb | tail -1
 | OS-06 | 已完成 | `f26c6a4`：遗留 `test/`、转换脚本、机器相关文件已清理；本机路径改占位符 |
 | OS-07 | 已完成 | `f26c6a4` + `921f0d1`：文档分层、死链与过期引用清理 |
 | OS-08 | 已完成 | `f26c6a4` + `921f0d1`：负例框架并入各层 UT 设计，台账统一 |
-| OS-09 | 已完成 | 用户裁决：`CLAUDE.md` / `.claude` / `.codex` 保留 |
+| OS-09 | 已完成 | 用户裁决：`CLAUDE.md` / `.claude` 保留；`.codex` 已合并进 `.claude`（2026-11-23） |
 | OS-10 | 已完成 | run `45002897451`（commit `4883365`）：`build` / `success` |
 | OS-11 | 已完成 | 用户裁决公开；仓库已改名 `BASESSD`；不打 tag/release（公开 ≠ 发布） |
 | OS-12 | 不适用 | 无可选体积目标 |
