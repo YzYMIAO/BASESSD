@@ -13,9 +13,12 @@
   3. .claude/rules/c-coding.md 行首定义 H1~H50 / S1~S6 各恰好一次；
   4. docs/guides/coding_rules.md 中 ### H1~H50 各恰好一次；
   5. .claude/rules/*.md 必须有 YAML paths:；
-  6. skill 目录名 = frontmatter name，统一 basessd- 前缀，有 description，< 500 行；
-  7. 关键路径存在；
-  8. --self-test 覆盖上述每条负例（C7）。
+  6. skill 目录名 = frontmatter name，统一 basessd- 前缀，ASCII kebab-case，
+     有 description、必需小节，< 500 行；
+  7. 实际 skill / symlink 集合 == EXPECTED_SKILLS；skill-map 完整且无未知名；
+  8. SKILL.md 的 docs/... / .claude/... 引用存在；
+  9. 关键路径存在；
+  10. --self-test 覆盖上述每条负例（C7）。
 
 用法：
   python3 tools/check_rules.py --root . --check
@@ -40,6 +43,11 @@ SKILL_MAX_LINES = 500
 SKILL_PREFIX = "basessd-"
 # Claude Code / VS Code: skill name == directory name, lowercase/digits/hyphens only.
 SKILL_NAME_RX = re.compile(r"^[a-z0-9-]+$")
+REQUIRED_SKILL_SECTIONS = ("## 产物格式", "## 常见失败", "## 完成")
+# Concrete docs/... and .claude/... references; skip globs/placeholders.
+SKILL_REF_RX = re.compile(
+    r"(?<![\w./-])((?:docs|\.claude)/[A-Za-z0-9_./-]*(?:\.[A-Za-z0-9]+|/))"
+)
 
 EXPECTED_ROOT = {
     "R": set(range(1, 13)),
@@ -157,11 +165,30 @@ def check_paths(root: Path) -> list[str]:
     return [f"缺少关键路径 {rel}" for rel in KEY_PATHS if not (root / rel).is_file()]
 
 
+def check_skill_set(present: set[str], where: str = "skill 集合") -> list[str]:
+    """实际 skill 集合必须与 EXPECTED_SKILLS 完全一致。"""
+    errors: list[str] = []
+    missing = sorted(EXPECTED_SKILLS - present)
+    extra = sorted(present - EXPECTED_SKILLS)
+    if missing:
+        errors.append(f"{where}: 缺少 {missing}")
+    if extra:
+        errors.append(f"{where}: 多余 {extra}")
+    return errors
+
+
 def check_skill_links(root: Path) -> list[str]:
     """`.claude/skills/<name>` 必须是指向 collection 的 symlink，且目标有 SKILL.md。"""
     links_dir = root / ".claude" / "skills"
-    errors: list[str] = []
-    for name in sorted(EXPECTED_SKILLS):
+    if not links_dir.is_dir():
+        return [".claude/skills/: 目录不存在"]
+    present = {
+        path.name
+        for path in links_dir.iterdir()
+        if not path.name.startswith(".")
+    }
+    errors = check_skill_set(present, ".claude/skills")
+    for name in sorted(EXPECTED_SKILLS & present):
         link = links_dir / name
         if not link.is_symlink():
             errors.append(f".claude/skills/{name}: 应为 symlink")
@@ -204,11 +231,45 @@ def check_skill(dir_name: str, text: str) -> list[str]:
         )
     if not fm.get("description"):
         errors.append(f"skill {dir_name}: 缺少 description")
+    for section in REQUIRED_SKILL_SECTIONS:
+        if not re.search(rf"^{re.escape(section)}\s*$", text, re.MULTILINE):
+            errors.append(f"skill {dir_name}: 缺少 {section}")
     lines = len(text.splitlines())
     if lines >= SKILL_MAX_LINES:
         errors.append(
             f"skill {dir_name}: {lines} 行 >= {SKILL_MAX_LINES}；拆 references"
         )
+    return errors
+
+
+def check_skill_refs(root: Path, dir_name: str, text: str) -> list[str]:
+    """SKILL.md 里的 docs/... / .claude/... 具体路径必须存在。"""
+    errors: list[str] = []
+    seen: set[str] = set()
+    for match in SKILL_REF_RX.finditer(text):
+        path = match.group(1).rstrip(".,;:)")
+        if path in seen:
+            continue
+        seen.add(path)
+        if not (root / path).exists():
+            errors.append(f"skill {dir_name}: 引用路径不存在 {path}")
+    return errors
+
+
+def check_skill_map(root: Path) -> list[str]:
+    """skill-map.md 必须列出全部 skill，且不得出现未知名。"""
+    path = root / ".claude" / "skill-collection" / "docs" / "skill-map.md"
+    if not path.is_file():
+        return ["缺少 .claude/skill-collection/docs/skill-map.md"]
+    text = read(path)
+    errors: list[str] = []
+    missing = sorted(name for name in EXPECTED_SKILLS if name not in text)
+    if missing:
+        errors.append(f"skill-map.md: 缺少 {missing}")
+    names = set(re.findall(r"\bbasessd-[a-z0-9-]+\b", text))
+    unknown = sorted(names - EXPECTED_SKILLS)
+    if unknown:
+        errors.append(f"skill-map.md: 未知 skill {unknown}")
     return errors
 
 
@@ -281,12 +342,16 @@ def check_all(root: Path) -> list[str]:
     else:
         present = set()
         for path in sorted(skills_dir.rglob("SKILL.md")):
-            present.add(path.parent.name)
-            errors.extend(check_skill(path.parent.name, read(path)))
-        missing = sorted(EXPECTED_SKILLS - present)
-        if missing:
-            errors.append(f".claude/skill-collection/skills/: 缺少 {missing}")
+            name = path.parent.name
+            present.add(name)
+            text = read(path)
+            errors.extend(check_skill(name, text))
+            errors.extend(check_skill_refs(root, name, text))
+        errors.extend(
+            check_skill_set(present, ".claude/skill-collection/skills")
+        )
 
+    errors.extend(check_skill_map(root))
     errors.extend(check_paths(root))
     errors.extend(check_skill_links(root))
     errors.extend(check_no_codex(root))
@@ -330,6 +395,9 @@ def self_test() -> int:
         h_ids = set(range(1, 51)) if h_ids is None else h_ids
         lines = ["---", f"name: {name}", "description: test", "---", ""]
         lines.extend(f"### H{i} rule" for i in sorted(h_ids))
+        lines.extend(
+            ["## 产物格式", "x", "## 常见失败", "x", "## 完成", "- [ ] x"]
+        )
         return "\n".join(lines) + "\n"
 
     ok_root = root_text()
@@ -342,6 +410,67 @@ def self_test() -> int:
         "skill 名非法字符",
         bool(check_skill("basessd-review(审查)", skill_text("basessd-review(审查)"))),
     )
+    require(
+        "skill 缺完成",
+        bool(
+            check_skill(
+                "basessd-review",
+                skill_text("basessd-review").replace("## 完成\n- [ ] x\n", ""),
+            )
+        ),
+    )
+    require(
+        "skill 集合缺",
+        bool(check_skill_set(set(EXPECTED_SKILLS) - {"basessd-review"})),
+    )
+    require(
+        "skill 集合多",
+        bool(check_skill_set(set(EXPECTED_SKILLS) | {"basessd-extra"})),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "docs/guides").mkdir(parents=True)
+        (root / "docs/guides/ok.md").write_text("x", encoding="utf-8")
+        require(
+            "skill 引用正例",
+            not check_skill_refs(root, "basessd-review", "见 docs/guides/ok.md"),
+        )
+        require(
+            "skill 引用缺失",
+            bool(
+                check_skill_refs(
+                    root, "basessd-review", "见 docs/guides/missing.md"
+                )
+            ),
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        map_path = root / ".claude/skill-collection/docs/skill-map.md"
+        map_path.parent.mkdir(parents=True)
+        map_path.write_text("\n".join(sorted(EXPECTED_SKILLS)), encoding="utf-8")
+        require("skill-map 正例", not check_skill_map(root))
+        map_path.write_text(
+            "\n".join(sorted(EXPECTED_SKILLS - {"basessd-review"})),
+            encoding="utf-8",
+        )
+        require("skill-map 缺项", bool(check_skill_map(root)))
+        map_path.write_text(
+            "\n".join(sorted(EXPECTED_SKILLS | {"basessd-extra"})),
+            encoding="utf-8",
+        )
+        require("skill-map 未知名", bool(check_skill_map(root)))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        links = root / ".claude/skills"
+        links.mkdir(parents=True)
+        (links / "basessd-extra").symlink_to(".")
+        require(
+            "多余 skill symlink",
+            any("多余" in error for error in check_skill_links(root)),
+        )
 
     big = ok_root + "\n".join("x" for _ in range(ROOT_LINES_HARD)) + "\n"
     require("root 超行数", bool(check_budget(big, "root")))

@@ -47,7 +47,7 @@
 
 ## 新增 skill
 
-1. 在 `skills/<lifecycle>/<skill>/` 建 `SKILL.md`。
+1. 在 `skills/<lifecycle>/<skill>/` 建 `SKILL.md`；必须有 `## 产物格式` / `## 常见失败` / `## 完成`；名字只用小写字母/数字/连字符；引用的 `docs/...` / `.claude/...` 必须存在。
 2. 在 `.claude/skills/` 建同名 symlink。
 3. 更新 `docs/skill-map.md`、`CLAUDE.md` P4 表、`tools/check_rules.py` 的 `EXPECTED_SKILLS`。
 4. 跑 `make rules-check rules-test`；补触发矩阵。
