@@ -30,83 +30,11 @@
 
 #include <stddef.h>
 
-/* --------------------------------------------------------------------
- * g_nand_fmc_handlers — UOP → handler 调度表（定义在本文件末尾）
- *   下标为 NAND_UOP_* 枚举；设计初始化器，与枚举顺序解耦。
- *   [NAND_UOP_JUMP_IF_NOT_READY] = NULL：该微指令由 fc 的 UOP 引擎 直接
- *   处理（条件跳转不经过 FMC 后端），此处刻意留空；若误以为漏实现
- *   而补 handler，会导致引擎两条跳转路径并存。
- *   新增 NAND_UOP_* 时须同步本表长度（NAND_UOP_COUNT）。
- *   表定义放在各 handler 之后：handler 定义即声明，省掉 12 条长签名
- *   前向声明，也就无需 __attribute__((used))。
- * -------------------------------------------------------------------- */
-static const nand_uop_handler_fn_t g_nand_fmc_handlers[NAND_UOP_COUNT];
-
 /* ── FMC 后端实例（按 target）──
  * 每个 (ch,ce) 一个实例；同 bank 的各 LUN 共享窗口，LUN 由 PAA 行地址表达。
  * handlers 是 const 表，context 指向该 target 的 config；每事务可变状态在
  * fc_uop_engine_state_s，不在 backend，故多 target 并发安全。 */
 static nand_fmc_instance_s g_nand_fmc_instances[CH_NUM][CE_NUM];
-
-/**
- * @brief 取指定 target 的 FMC 后端
- *
- * 同步路径与 fc_nand_dispatch_task_load() 都按 (ch,ce) 取后端。
- *
- * @return 后端接口（handlers 为 const 表，context 指向该 target 的 config）
- */
-const nand_phy_backend_s *nand_phy_backend_get(BYTE ch, BYTE ce)
-{
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
-    return &g_nand_fmc_instances[ch][ce].backend;
-}
-/**
- * @brief 装配指定 target 的 FMC 后端
- *
- * @param ch/ce 目标坐标
- * @param config FMC 窗口指针 + R/B# 接线（按值复制进实例）
- * @return NAND_RESULT_OK
- */
-nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *config)
-{
-    /* 前置条件由调用者保证（板级/器件初始化传入 const config） */
-    ASSERT(config != NULL);
-    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
-
-    g_nand_fmc_instances[ch][ce].config           = *config;
-    g_nand_fmc_instances[ch][ce].backend.handlers = g_nand_fmc_handlers;
-    g_nand_fmc_instances[ch][ce].backend.context  = &g_nand_fmc_instances[ch][ce].config; /* 指向实例内持久副本 */
-    return NAND_RESULT_OK;
-}
-
-/**
- * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
- *
- * 非阻塞: RB# LOW 时只观察一次并让出，由 fc UOP 引擎的 wait_timeout 计时。
- * 每次让出前 delay 1 us，避免同步初始化路径退化成纯忙转。
- *
- * @param timing 不使用（超时由引擎按 busy_timeout_us 统一判定）
- * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY
- */
-static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
-{
-    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
-
-    (void)uop;
-    (void)request;
-    (void)timing;
-    (void)completion;
-
-    /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
-    if (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) != 0U)
-    {
-        return NAND_RESULT_OK;
-    }
-
-    /* RB# LOW → 让出给调度器/其他 LUN；下一次 step 再检查。 */
-    delay_us(1U);
-    return NAND_RESULT_NOT_READY;
-}
 
 /**
  * @brief 地址窗口写入值的显式窄化（FMC 地址窗口是 byte 宽）
@@ -140,6 +68,50 @@ static BOOL nand_fmc_row_byte(const nand_cmd_req_s *request, const nand_uop_s *u
 }
 
 /**
+ * @brief 写 FMC 命令/地址窗口并在写后等待写缓冲排空
+ *
+ * FMC 命令/地址窗口写进入 STM32H743 AXI write buffer；连续写同一窗口
+ * 可能被合并或重排。写后 DMB 保证本次周期先到达 FMC，再执行下一条 UOP。
+ *
+ * @param window FMC command/address 窗口
+ * @param value  窗口字节
+ */
+static void nand_fmc_write_window(volatile BYTE *window, BYTE value)
+{
+    *window = value;
+    __DMB();
+}
+
+/**
+ * @brief 轮询 RB# 等待 NAND ready（WAIT_READY）
+ *
+ * 非阻塞: RB# LOW 时只观察一次并让出，由 fc UOP 引擎的 wait_timeout 计时。
+ * 每次让出前 delay 1 us，避免同步初始化路径退化成纯忙转。
+ *
+ * @param timing 不使用（超时由引擎按 busy_timeout_us 统一判定）
+ * @return NAND_RESULT_OK / NAND_RESULT_NOT_READY
+ */
+static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_s *uop, const nand_cmd_req_s *request, const nand_op_timing_s *timing, nand_cmd_comp_s *completion)
+{
+    const nand_fmc_cfg_s *config = (const nand_fmc_cfg_s *)context;
+
+    (void)uop;
+    (void)request;
+    (void)timing;
+    (void)completion;
+
+    /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
+    if (HAL_GPIO_ReadPin(config->rb_port, config->rb_pin) != 0U)
+    {
+        return NAND_RESULT_OK;
+    }
+
+    /* RB# LOW → 让出给调度器/其他 LUN；下一次 step 再检查。 */
+    delay_us(1U);
+    return NAND_RESULT_NOT_READY;
+}
+
+/**
  * @brief 检查 DATA_IN/OUT 的 buffer/长度是否落在页缓冲逻辑范围内
  *
  * `nand_cmd_req_s` 不带 buffer 容量；这里用 PAGE_BUFFER_SIZE 作上限。
@@ -163,21 +135,6 @@ static BOOL nand_fmc_data_range_is_valid(const nand_cmd_req_s *request, const na
     }
 
     return ((DWORD)request->data_length <= ((DWORD)PAGE_BUFFER_SIZE - uop->operand));
-}
-
-/**
- * @brief 写 FMC 命令/地址窗口并在写后等待写缓冲排空
- *
- * FMC 命令/地址窗口写进入 STM32H743 AXI write buffer；连续写同一窗口
- * 可能被合并或重排。写后 DMB 保证本次周期先到达 FMC，再执行下一条 UOP。
- *
- * @param window FMC command/address 窗口
- * @param value  窗口字节
- */
-static void nand_fmc_write_window(volatile BYTE *window, BYTE value)
-{
-    *window = value;
-    __DMB();
 }
 
 /**
@@ -476,6 +433,13 @@ static nand_result_e nand_fmc_exec_delay_timing(void *context, const nand_uop_s 
     return NAND_RESULT_OK;
 }
 
+/**
+ * @brief 取指定 target 的 FMC 后端
+ *
+ * 同步路径与 fc_nand_dispatch_task_load() 都按 (ch,ce) 取后端。
+ *
+ * @return 后端接口（handlers 为 const 表，context 指向该 target 的 config）
+ */
 /* --------------------------------------------------------------------
  * g_nand_fmc_handlers — UOP → handler 调度表
  *   说明与注意事项见文件开头的前向声明处。
@@ -496,3 +460,29 @@ static const nand_uop_handler_fn_t g_nand_fmc_handlers[NAND_UOP_COUNT] = {
     [NAND_UOP_CHECK_FAIL_CACHE]  = nand_fmc_exec_check_fail_cache,
     [NAND_UOP_DELAY_TIMING]      = nand_fmc_exec_delay_timing,
 };
+
+const nand_phy_backend_s *nand_phy_backend_get(BYTE ch, BYTE ce)
+{
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
+    return &g_nand_fmc_instances[ch][ce].backend;
+}
+
+/**
+ * @brief 装配指定 target 的 FMC 后端
+ *
+ * @param ch/ce 目标坐标
+ * @param config FMC 窗口指针 + R/B# 接线（按值复制进实例）
+ * @return NAND_RESULT_OK
+ */
+
+nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *config)
+{
+    /* 前置条件由调用者保证（板级/器件初始化传入 const config） */
+    ASSERT(config != NULL);
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM));
+
+    g_nand_fmc_instances[ch][ce].config           = *config;
+    g_nand_fmc_instances[ch][ce].backend.handlers = g_nand_fmc_handlers;
+    g_nand_fmc_instances[ch][ce].backend.context  = &g_nand_fmc_instances[ch][ce].config; /* 指向实例内持久副本 */
+    return NAND_RESULT_OK;
+}

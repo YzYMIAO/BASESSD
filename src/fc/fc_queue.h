@@ -36,30 +36,6 @@ typedef struct FC_COMPLETION_QUEUE_S
     WORD             count;   /* 当前条数（0..depth） */
 } fc_comp_queue_s;
 
-/* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
-
-/**
- * @brief 初始化 SQ/HSQ 环形队列（storage 由调用方提供）。
- *
- * @param queue 队列
- * @param storage 命令 ID 数组（长度 depth）
- * @param depth 容量
- *
- * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
- */
-void fc_submission_queue_init(fc_sub_queue_s *queue, fc_cmd_id_t *storage, WORD depth);
-
-/**
- * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
- *
- * @param queue 队列
- * @param storage 完成项数组
- * @param depth 容量。
- *
- * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
- */
-void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, WORD depth);
-
 /**
  * @brief 把命令 ID 入队尾。
  *
@@ -115,5 +91,29 @@ fc_status_e fc_completion_queue_push(fc_comp_queue_s *queue, const fc_cmd_status
  *         FC_STATUS_QUEUE_EMPTY（队列为空）
  */
 fc_status_e fc_completion_queue_pop(fc_comp_queue_s *queue, fc_cmd_status_s *completion);
+
+/* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
+
+/**
+ * @brief 初始化 SQ/HSQ 环形队列（storage 由调用方提供）。
+ *
+ * @param queue 队列
+ * @param storage 命令 ID 数组（长度 depth）
+ * @param depth 容量
+ *
+ * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
+ */
+void fc_submission_queue_init(fc_sub_queue_s *queue, fc_cmd_id_t *storage, WORD depth);
+
+/**
+ * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
+ *
+ * @param queue 队列
+ * @param storage 完成项数组
+ * @param depth 容量。
+ *
+ * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
+ */
+void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, WORD depth);
 
 #endif /* FC_QUEUE_H */

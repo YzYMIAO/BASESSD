@@ -5,37 +5,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ══════════════════════════════════════════════════════════
- * 加扰/解扰引擎
- * ══════════════════════════════════════════════════════════ */
-
-/* ══════════════════════════════════════════════════════════════════
- * 种子生成（唯一一种）
- * ══════════════════════════════════════════════════════════════════ */
-
-/**
- * @brief 由 CW 的 META 派生加扰种子
- *
- * 32→16 位折叠避免相差 64K 扇区的 LBA 撞种子，再做雪崩混合让相邻 LBA 充分
- * 分散。与物理地址无关：GC 搬页后逻辑地址不变 ⇒ 密文不变。
- *
- * @param cw_meta 本 CW 的 META（逻辑地址）
- * @return 非零 32 位种子
- */
-DWORD fc_random_seed_from_meta(DWORD cw_meta)
-{
-    // 折叠：高位并进低位，保住 32 位的全部信息
-    DWORD seed = cw_meta ^ (cw_meta >> 16U);
-
-    // 雪崩混合（splitmix32 的乘法常量）
-    seed *= 0x9E3779B9UL;
-    seed ^= seed >> 16U;
-    seed *= 0x85EBCA6BUL;
-    seed ^= seed >> 13U;
-
-    return (seed != 0U) ? seed : 0x1U;
-}
-
 /* ══════════════════════════════════════════════════════════════════
  * 加扰算法
  *
@@ -61,6 +30,8 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
  * ③ 种子维度：企业级可能混入更多维度（Die ID 等）
  * ══════════════════════════════════════════════════════════════════ */
 
+#define FC_SIMPLE_XOR_PATTERN_LEN (64U) /* SIMPLE_XOR 分支使用；提前定义以满足 H51 */
+
 #if (FC_RANDOM_ALGO == FC_RANDOM_ALGO_LFSR)
 
 // 16 级 LFSR，多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1，周期 2¹⁶ - 1 = 65535。
@@ -75,6 +46,29 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
 #    define FC_LFSR_PERIOD         (65535U)
 #    define FC_LFSR_TABLE_SIZE     (256U)
 #    define FC_LFSR_STEPS_PER_WORD (4U)
+
+// 16 位状态 → 8 步输出/次态是 GF(2) 线性变换 ⇒ 可按低/高字节分解：
+// out  = out_lo[lo]  ^ out_hi[hi]
+// next = next_lo[lo] ^ next_hi[hi]
+// 每字节 2 次查表 + 2 次异或，替代 8 次移位。
+//
+// 4 步展开利用同一线性性：一次生成 32 bit 掩码 + 4 步后的 16 bit 次态。
+// 每 4 字节只需 out4_lo/out4_hi + next4_lo/next4_hi 4 次查表，替代
+// 4 次单步查表；尾部/非对齐输入仍走单步表。
+typedef struct FC_LFSR_TABLE_S
+{
+    BYTE  out_lo[FC_LFSR_TABLE_SIZE];
+    BYTE  out_hi[FC_LFSR_TABLE_SIZE];
+    WORD  next_lo[FC_LFSR_TABLE_SIZE];
+    WORD  next_hi[FC_LFSR_TABLE_SIZE];
+    DWORD out4_lo[FC_LFSR_TABLE_SIZE];
+    DWORD out4_hi[FC_LFSR_TABLE_SIZE];
+    WORD  next4_lo[FC_LFSR_TABLE_SIZE];
+    WORD  next4_hi[FC_LFSR_TABLE_SIZE];
+} fc_lfsr_tab_s;
+
+static fc_lfsr_tab_s s_lfsr_tab;
+static BOOL          s_lfsr_tab_ready = false;
 
 /**
  * @brief 8 步递推：输出 8 bit，返回次态。与逐 bit 版本完全一致。
@@ -101,29 +95,6 @@ static WORD fc_lfsr_step8(WORD lfsr, BYTE *out)
     *out = result;
     return lfsr;
 }
-
-// 16 位状态 → 8 步输出/次态是 GF(2) 线性变换 ⇒ 可按低/高字节分解：
-// out  = out_lo[lo]  ^ out_hi[hi]
-// next = next_lo[lo] ^ next_hi[hi]
-// 每字节 2 次查表 + 2 次异或，替代 8 次移位。
-//
-// 4 步展开利用同一线性性：一次生成 32 bit 掩码 + 4 步后的 16 bit 次态。
-// 每 4 字节只需 out4_lo/out4_hi + next4_lo/next4_hi 4 次查表，替代
-// 4 次单步查表；尾部/非对齐输入仍走单步表。
-typedef struct FC_LFSR_TABLE_S
-{
-    BYTE  out_lo[FC_LFSR_TABLE_SIZE];
-    BYTE  out_hi[FC_LFSR_TABLE_SIZE];
-    WORD  next_lo[FC_LFSR_TABLE_SIZE];
-    WORD  next_hi[FC_LFSR_TABLE_SIZE];
-    DWORD out4_lo[FC_LFSR_TABLE_SIZE];
-    DWORD out4_hi[FC_LFSR_TABLE_SIZE];
-    WORD  next4_lo[FC_LFSR_TABLE_SIZE];
-    WORD  next4_hi[FC_LFSR_TABLE_SIZE];
-} fc_lfsr_tab_s;
-
-static fc_lfsr_tab_s s_lfsr_tab;
-static BOOL          s_lfsr_tab_ready = false;
 
 /**
  * @brief 构造 LFSR 的单步与 4 步查表（低/高字节各一组）。
@@ -306,7 +277,6 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 // 简单 XOR：用 seed 生成固定长度的伪随机 pattern，然后按字节异或。
 // 每 length 字节重复 pattern 绕回。
 // 适合资源极度受限的场景。
-#    define FC_SIMPLE_XOR_PATTERN_LEN (64U)
 
 /**
  * @brief 用 64 字节伪随机 pattern 循环异或 data。
@@ -367,6 +337,37 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 }
 
 #endif
+
+/* ══════════════════════════════════════════════════════════
+ * 加扰/解扰引擎
+ * ══════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════
+ * 种子生成（唯一一种）
+ * ══════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief 由 CW 的 META 派生加扰种子
+ *
+ * 32→16 位折叠避免相差 64K 扇区的 LBA 撞种子，再做雪崩混合让相邻 LBA 充分
+ * 分散。与物理地址无关：GC 搬页后逻辑地址不变 ⇒ 密文不变。
+ *
+ * @param cw_meta 本 CW 的 META（逻辑地址）
+ * @return 非零 32 位种子
+ */
+DWORD fc_random_seed_from_meta(DWORD cw_meta)
+{
+    // 折叠：高位并进低位，保住 32 位的全部信息
+    DWORD seed = cw_meta ^ (cw_meta >> 16U);
+
+    // 雪崩混合（splitmix32 的乘法常量）
+    seed *= 0x9E3779B9UL;
+    seed ^= seed >> 16U;
+    seed *= 0x85EBCA6BUL;
+    seed ^= seed >> 13U;
+
+    return (seed != 0U) ? seed : 0x1U;
+}
 
 /* ══════════════════════════════════════════════════════════════════
  * 公接口

@@ -19,17 +19,6 @@
 typedef struct FC_BCH_CONTROL_S fc_bch_control_s;
 
 /**
- * @brief 初始化 BCH 引擎（本工程固定 m=13 / t=4）。
- * @param m 域阶；本实现只支持 13
- * @param t 纠错 bit 数；本实现只支持 4
- * @param prim_poly 本原多项式；0 使用 0x201B
- * @param swap_bits 非 0 时对数据与 ECC 字节做位序反转
- * @return 引擎句柄；参数不支持或建表失败返回 NULL
- * @note 表存于静态结构体（约 40 KiB），无堆分配；重复调用会重建。
- */
-fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
-
-/**
  * @brief 释放 BCH 引擎。
  * @param bch 引擎句柄（可为 NULL）
  * @note 存储为静态分配；本实现不释放资源，保留 API 语义。
@@ -62,5 +51,16 @@ void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, BY
  * @note 入参前置违反（len 超长 / data、recv_ecc、errloc、out_nerr 为空）一律 ASSERT。
  */
 BOOL fc_bch_decode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, unsigned int *errloc, unsigned int *out_nerr);
+
+/**
+ * @brief 初始化 BCH 引擎（本工程固定 m=13 / t=4）。
+ * @param m 域阶；本实现只支持 13
+ * @param t 纠错 bit 数；本实现只支持 4
+ * @param prim_poly 本原多项式；0 使用 0x201B
+ * @param swap_bits 非 0 时对数据与 ECC 字节做位序反转
+ * @return 引擎句柄；参数不支持或建表失败返回 NULL
+ * @note 表存于静态结构体（约 40 KiB），无堆分配；重复调用会重建。
+ */
+fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
 
 #endif /* FC_BCH_ENGINE_H */

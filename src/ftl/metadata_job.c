@@ -56,6 +56,30 @@
 // 一条前台 flush 现在**双副本占两个槽**（L2）⇒ 预留 2；见 md_compact_begin。
 #define MD_COMPACT_RESERVED_SLOTS (L2P_REGION_COPIES)
 
+/* 元数据 job 的提交操作类型；五类命令共用同一个提交漏斗。 */
+typedef enum METADATA_SUBMIT_OPERATION_E
+{
+    MD_SUBMIT_WRITE = 0,    /* 单 plane 页写（L2P region 搬移） */
+    MD_SUBMIT_WRITE_MIRROR, /* multi-plane 镜像页写（目录检查点 / CP / BBT） */
+    MD_SUBMIT_ERASE,        /* 单块擦除（日志回收 / victim 擦除） */
+    MD_SUBMIT_ERASE_MULTI,  /* multi-plane 镜像块擦除（固定元数据池换块） */
+    MD_SUBMIT_READ,         /* 页读（搬移 victim） */
+} md_submit_op_e;
+
+/* ══════════════════════════════════════════════════════════════════
+ * 二、job 提交原语（abort / stall / submit）
+ * ══════════════════════════════════════════════════════════════════ */
+
+// 中止日志限流：真异常（读页失败 / 目录检查点写坏 / 账本分叉）会每轮 GC 重复，
+// 逐次 WRN 会刷屏；5 s 一行 + 被抑制条数（时钟缺失时 64 次一行）。
+static DWORD s_abort_log_ms;
+
+static DWORD s_stall_log_ms; /* 提交 deadline 触发的 abort 日志限流时间戳 */
+
+static DWORD s_stall_log_n; /* 同上，被抑制条数 */
+
+static DWORD s_abort_log_n;
+
 /* ══════════════════════════════════════════════════════════════════
  * 〇、文件级 helper（块身份复核 / 地址换算）
  * ══════════════════════════════════════════════════════════════════ */
@@ -99,39 +123,88 @@ static DWORD md_block_page_to_pba(const md_dir_cache_s *dir, WORD gblock, BYTE p
     return pba_make(dir->topo.ch, dir->topo.ce, dir->topo.lun, block, plane, page, 0U);
 }
 
+/**
+ * @brief 判断本次中止日志是否该输出：5 s 一行；时钟缺失时每 64 次一行。
+ *
+ * @return true = 本次输出
+ *         false = 限流中，本次只累加抑制计数
+ */
+static BOOL md_abort_log_is_due(void)
+{
+    // 时间优先，条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
+    return log_rate_due(&s_abort_log_ms, &s_abort_log_n, LOG_RATE_SLOW_INTERVAL_MS);
+}
+
 /* ══════════════════════════════════════════════════════════════════
- * 一、待回收位图 / 写指针 / job 复位
+ * 四、job 状态机
  * ══════════════════════════════════════════════════════════════════ */
 
-/* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
+/**
+ * @brief 待回收队列是否该**立即**擦（懒擦门控）。
+ *
+ * 开机时 `md_log_area_restore` 把日志区**全部**非活块登记为回收候选（不读介质判空，
+ *），其中多数本来就是擦除态。若立即全擦，等于每次开机白付几十次
+ * P/E；而其中只有「空闲块不足水位」的那部分才是真需要补的。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器（读固定日志区空闲块数）
+ *
+ * @return true  = 该擦（空闲块低于水位，或有借来的日志块待归还）
+ *         false = 候选留在队列里，等水位降下来再擦
+ *
+ * @note 借用块例外：从 OP 池借来的日志块占用有上限的借用配额（L2P_LOG_BORROW_MAX），
+ *       必须擦完归还，否则压缩再也拿不到目标块。
+ */
+static BOOL md_reclaim_is_eager(const md_dir_cache_s *dir, const alc_s *alloc)
+{
+    // 擦到「多于水位」为止：水位本身正是压缩触发点（`free <= WATERMARK ⇒ compact`），
+    // 停在等于水位会让压缩在开机后一直空转。
+    if (md_log_area_free_count(alloc) <= L2P_LOG_FREE_WATERMARK)
+    {
+        return true;
+    }
+
+    return (dir->log_borrow_count != 0U);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 六、完成服务（g_op_callbacks[FTL_OP_METADATA]）
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 整理 job 的完成服务 ── */
+
+// 每个提交阶段的完成处理（ftl_metadata_callback 按 phase 分派）。
+// ⚠ 与 cp_complete_* 不同，**不能**把 release 提到派发处统一做：CP_READ 必须先
+// ftl_cmd_read_data 再 release（数据在 desc 链上）。
 
 /**
- * @brief 登记一个待回收块（幂等）
+ * @brief 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
+ * 且**先记账再归还**。固定区块回固定区（NONE）；用户区借来的块回 Free Pool。
  *
- * 已置位返回 false；越界块号不入图。
- *
- * @param dir Directory
- * @param g   全局块号
- * @return true 本次新登记；false 已登记 / 越界
+ * @param dir    Directory
+ * @param gblock 刚擦除完成的 gblock
  */
-BOOL md_reclaim_mark(md_dir_cache_s *dir, WORD g)
+static void md_block_erased_note(md_dir_cache_s *dir, WORD gblock)
 {
-    if (g >= FTL_BLOCK_TOTAL)
-    {
-        return false;
-    }
+    const DWORD total_writes = *dir->total_writes;
 
-    DWORD *word = &dir->reclaim.bitmap[g >> 5U];
-    DWORD  bit  = 1UL << (g & 31U);
+    alc_bst_note_erase(dir->alloc, gblock, total_writes);
+    md_log_release(dir, gblock);
+}
 
-    if ((*word & bit) != 0U)
-    {
-        return false;
-    }
+/**
+ * @brief 目录检查点一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
+ *
+ * @param j      整理 job（waiting / dir_ckpt 共享上下文）
+ * @param cmd    完成命令（本函数 release）
+ * @param failed 本页写是否失败
+ */
+static void md_dir_ckpt_write_complete(md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
+{
+    (void)fc_command_release(cmd->cmd_id);
+    j->waiting = false;
 
-    *word |= bit;
-    dir->reclaim.count++;
-    return true;
+    (void)md_dir_ckpt_write_advance(&j->dir_ckpt, failed); /* 失败整条作废，页序仍前进 */
 }
 
 /**
@@ -188,115 +261,6 @@ static void md_reclaim_clear(md_dir_cache_s *dir, WORD g)
             dir->reclaim.count--;
         }
     }
-}
-
-/**
- * @brief 清空待回收位图、计数与扫描游标
- *
- * 格式化 / 目录重建后调用。
- *
- * @param dir Directory
- */
-void md_reclaim_reset(md_dir_cache_s *dir)
-{
-    memset(dir->reclaim.bitmap, 0, sizeof(dir->reclaim.bitmap));
-    dir->reclaim.count = 0U;
-    dir->reclaim.scan  = 0U;
-}
-
-/**
- * @brief 全盘重扫：把所有可回收日志块登记进位图
- *
- * 开机 / 目录重建后调用。
- *
- * @param dir   Directory
- * @param alloc 分配器
- */
-void md_reclaim_mark_all(md_dir_cache_s *dir, const alc_s *alloc)
-{
-    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
-    {
-        if (md_log_block_is_reclaimable(dir, alloc, g) == false)
-        {
-            continue;
-        }
-        (void)md_reclaim_mark(dir, g);
-    }
-}
-
-/**
- * @brief 从当前写块取一个空槽
- *
- * plane 无当前块或块已满返回 INVALID；取到即推进写指针。
- *
- * @param dir   Directory
- * @param plane 目标 plane
- * @return 槽 PBA；NAND_PBA_INVALID = 无可用槽
- */
-DWORD md_slot_take(md_dir_cache_s *dir, BYTE plane)
-{
-    if ((plane >= PLANE_NUM) || (dir->cur.valid[plane] == false) || (dir->cur.page[plane] >= PAGES_PER_BLOCK))
-    {
-        return NAND_PBA_INVALID;
-    }
-
-    const BYTE page = dir->cur.page[plane];
-
-    dir->cur.page[plane]++;
-
-    return md_block_page_to_pba(dir, dir->cur.block[plane], page);
-}
-
-/**
- * @brief 复位整理 job 状态
- *
- * 保留单调进度与最近错误，其余清零并重写「无」哨兵。
- *
- * @param dir Directory
- */
-void md_handle_reset(md_dir_cache_s *dir)
-{
-    // reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
-    // error 也保留到下一次起 job 时再清（status 要能看到最近一次失败）。
-    // 哨兵必须显式写（memset 只给 0）：victim / reclaim_gblock / reclaim_fail_gblock
-    // 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。
-    const DWORD   reclaimed  = dir->handle.reclaimed_count;
-    const int32_t last_error = dir->handle.error;
-
-    // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
-    md_dir_ckpt_write_abort(dir, &dir->handle.dir_ckpt);
-
-    memset(&dir->handle, 0, sizeof(dir->handle));
-    dir->handle.victim              = UINT16_MAX;
-    dir->handle.reclaim_gblock      = UINT16_MAX;
-    dir->handle.reclaim_fail_gblock = UINT16_MAX;
-    dir->handle.slot                = NAND_PBA_INVALID;
-    dir->handle.cur_source          = NAND_PBA_INVALID;
-    dir->handle.reclaimed_count     = reclaimed;
-    dir->handle.error               = last_error;
-}
-
-/* ══════════════════════════════════════════════════════════════════
- * 二、job 提交原语（abort / stall / submit）
- * ══════════════════════════════════════════════════════════════════ */
-
-// 中止日志限流：真异常（读页失败 / 目录检查点写坏 / 账本分叉）会每轮 GC 重复，
-// 逐次 WRN 会刷屏；5 s 一行 + 被抑制条数（时钟缺失时 64 次一行）。
-static DWORD s_abort_log_ms;
-static DWORD s_stall_log_ms; /* 提交 deadline 触发的 abort 日志限流时间戳 */
-static DWORD s_stall_log_n;  /* 同上，被抑制条数 */
-static DWORD s_abort_log_n;
-
-/**
- * @brief 判断本次中止日志是否该输出：5 s 一行；时钟缺失时每 64 次一行。
- *
- * @return true = 本次输出
- *         false = 限流中，本次只累加抑制计数
- */
-static BOOL md_abort_log_is_due(void)
-{
-    // 时间优先，条数只作无时钟时的兜底（否则高频 abort 一秒撞满 64 条）。
-    return log_rate_due(&s_abort_log_ms, &s_abort_log_n, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -404,16 +368,6 @@ static ftl_status_e md_command_submit(md_dir_cache_s *dir, fc_cmd_s *cmd)
     timer_deadline_clear(&j->submit_deadline);
     return FTL_OK;
 }
-
-/* 元数据 job 的提交操作类型；五类命令共用同一个提交漏斗。 */
-typedef enum METADATA_SUBMIT_OPERATION_E
-{
-    MD_SUBMIT_WRITE = 0,    /* 单 plane 页写（L2P region 搬移） */
-    MD_SUBMIT_WRITE_MIRROR, /* multi-plane 镜像页写（目录检查点 / CP / BBT） */
-    MD_SUBMIT_ERASE,        /* 单块擦除（日志回收 / victim 擦除） */
-    MD_SUBMIT_ERASE_MULTI,  /* multi-plane 镜像块擦除（固定元数据池换块） */
-    MD_SUBMIT_READ,         /* 页读（搬移 victim） */
-} md_submit_op_e;
 
 /**
  * @brief 元数据 job 的唯一命令提交漏斗
@@ -526,33 +480,6 @@ static WORD md_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc
     return best;
 }
 
-/**
- * @brief 选 victim、核空槽预算、把 job 推进到 CP_READ（纯 RAM，不碰介质）。
- *
- * @param dir   Directory
- * @param alloc 分配器（读 BST 判 LOG 身份）
- * @return MD_COMPACT_STARTED    已进入 CP_READ
- *         MD_COMPACT_NO_CURRENT 无当前写块：无处可搬
- *         MD_COMPACT_NO_VICTIM  无候选（零活块归 reclaim 管 / 只剩当前块）
- *         MD_COMPACT_NO_SLOTS   当前块空槽装不下活 region 最少的 victim
- *
- * @note 起不动时 phase 留在 IDLE，由调用者决定是否换块。
- *
- * @note **无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
- * 又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
- * 空槽预算在此**重算**（不在 append_slot 置位时算）：置位到本函数之间可能
- * 又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_page[victim 的 plane] 核才准。
- * ⚠ 已知良性竞态：job 启动前已发出、尚未 commit 的前台 region 写可能在扫描期间落回
- * victim ⇒ 实际需搬数超过本预算 ⇒ md_compact_write 取不到槽 ⇒ 中止。已登记 region
- * 指向新页、victim 不擦，无数据损失，只是本次压缩重来。
- */
-#if defined(FC_NAND_TEST_ENABLE)
-WORD md_test_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc)
-{
-    return md_compact_victim_find(dir, alloc);
-}
-#endif
-
 static md_compact_start_e md_compact_begin(md_dir_cache_s *dir, const alc_s *alloc)
 {
     md_handle_s *j = &dir->handle;
@@ -607,13 +534,6 @@ static md_compact_start_e md_compact_begin(md_dir_cache_s *dir, const alc_s *all
 
     return MD_COMPACT_STARTED;
 }
-
-#if defined(FC_NAND_TEST_ENABLE)
-md_compact_start_e md_test_compact_begin(md_dir_cache_s *dir, const alc_s *alloc)
-{
-    return md_compact_begin(dir, alloc);
-}
-#endif
 
 /**
  * @brief 从 job.region_id 起找 victim 上**下一个**仍有引用的 region，发起异步读。
@@ -792,38 +712,6 @@ static BOOL md_compact_next(md_dir_cache_s *dir, const alc_s *alloc)
 
     LOGD(LOG_TAG_META "compact next victim=%hu live=%hu cur_page=%hhu\r\n", victim, dir->l2p_live[victim], dir->cur.page[plane]);
     return true;
-}
-
-/* ══════════════════════════════════════════════════════════════════
- * 四、job 状态机
- * ══════════════════════════════════════════════════════════════════ */
-
-/**
- * @brief 待回收队列是否该**立即**擦（懒擦门控）。
- *
- * 开机时 `md_log_area_restore` 把日志区**全部**非活块登记为回收候选（不读介质判空，
- *），其中多数本来就是擦除态。若立即全擦，等于每次开机白付几十次
- * P/E；而其中只有「空闲块不足水位」的那部分才是真需要补的。
- *
- * @param dir   Directory
- * @param alloc 分配器（读固定日志区空闲块数）
- *
- * @return true  = 该擦（空闲块低于水位，或有借来的日志块待归还）
- *         false = 候选留在队列里，等水位降下来再擦
- *
- * @note 借用块例外：从 OP 池借来的日志块占用有上限的借用配额（L2P_LOG_BORROW_MAX），
- *       必须擦完归还，否则压缩再也拿不到目标块。
- */
-static BOOL md_reclaim_is_eager(const md_dir_cache_s *dir, const alc_s *alloc)
-{
-    // 擦到「多于水位」为止：水位本身正是压缩触发点（`free <= WATERMARK ⇒ compact`），
-    // 停在等于水位会让压缩在开机后一直空转。
-    if (md_log_area_free_count(alloc) <= L2P_LOG_FREE_WATERMARK)
-    {
-        return true;
-    }
-
-    return (dir->log_borrow_count != 0U);
 }
 
 /**
@@ -1154,49 +1042,6 @@ static void md_handle_step(md_dir_cache_s *dir)
     }
 }
 
-/* ══════════════════════════════════════════════════════════════════
- * 五、模块入口与状态
- * ══════════════════════════════════════════════════════════════════ */
-
-/* ── 模块 handle（typed 入口） ── */
-
-/**
- * @brief 元数据整理 job 每轮入口
- *
- * 推进整理状态机一次，再填状态上报。
- *
- * @param dir Directory
- */
-void md_handle(md_dir_cache_s *dir)
-{
-    md_handle_step(dir);
-}
-
-/* ══════════════════════════════════════════════════════════════════
- * 六、完成服务（g_op_callbacks[FTL_OP_METADATA]）
- * ══════════════════════════════════════════════════════════════════ */
-
-/* ── 整理 job 的完成服务 ── */
-
-// 每个提交阶段的完成处理（ftl_metadata_callback 按 phase 分派）。
-// ⚠ 与 cp_complete_* 不同，**不能**把 release 提到派发处统一做：CP_READ 必须先
-// ftl_cmd_read_data 再 release（数据在 desc 链上）。
-
-/**
- * @brief 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
- * 且**先记账再归还**。固定区块回固定区（NONE）；用户区借来的块回 Free Pool。
- *
- * @param dir    Directory
- * @param gblock 刚擦除完成的 gblock
- */
-static void md_block_erased_note(md_dir_cache_s *dir, WORD gblock)
-{
-    const DWORD total_writes = *dir->total_writes;
-
-    alc_bst_note_erase(dir->alloc, gblock, total_writes);
-    md_log_release(dir, gblock);
-}
-
 /**
  * @brief 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证
  * 它不会永久挡住后续块）；成功 ⇒ 清位 + 归还。
@@ -1363,21 +1208,6 @@ static void md_dir_ckpt_erase_complete(md_dir_cache_s *dir, md_handle_s *j, fc_c
 }
 
 /**
- * @brief 目录检查点一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。
- *
- * @param j      整理 job（waiting / dir_ckpt 共享上下文）
- * @param cmd    完成命令（本函数 release）
- * @param failed 本页写是否失败
- */
-static void md_dir_ckpt_write_complete(md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
-{
-    (void)fc_command_release(cmd->cmd_id);
-    j->waiting = false;
-
-    (void)md_dir_ckpt_write_advance(&j->dir_ckpt, failed); /* 失败整条作废，页序仍前进 */
-}
-
-/**
  * @brief Victim 擦完成：失败 ⇒ victim 已无引用（目录检查点已落盘）⇒ 登记给回收阶段重试。
  *
  * @param dir    Directory
@@ -1401,6 +1231,179 @@ static void md_cp_reclaim_complete(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s
     }
 
     j->phase = MD_JOB_DONE;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 一、待回收位图 / 写指针 / job 复位
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
+
+/**
+ * @brief 登记一个待回收块（幂等）
+ *
+ * 已置位返回 false；越界块号不入图。
+ *
+ * @param dir Directory
+ * @param g   全局块号
+ * @return true 本次新登记；false 已登记 / 越界
+ */
+BOOL md_reclaim_mark(md_dir_cache_s *dir, WORD g)
+{
+    if (g >= FTL_BLOCK_TOTAL)
+    {
+        return false;
+    }
+
+    DWORD *word = &dir->reclaim.bitmap[g >> 5U];
+    DWORD  bit  = 1UL << (g & 31U);
+
+    if ((*word & bit) != 0U)
+    {
+        return false;
+    }
+
+    *word |= bit;
+    dir->reclaim.count++;
+    return true;
+}
+
+/**
+ * @brief 清空待回收位图、计数与扫描游标
+ *
+ * 格式化 / 目录重建后调用。
+ *
+ * @param dir Directory
+ */
+void md_reclaim_reset(md_dir_cache_s *dir)
+{
+    memset(dir->reclaim.bitmap, 0, sizeof(dir->reclaim.bitmap));
+    dir->reclaim.count = 0U;
+    dir->reclaim.scan  = 0U;
+}
+
+/**
+ * @brief 全盘重扫：把所有可回收日志块登记进位图
+ *
+ * 开机 / 目录重建后调用。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器
+ */
+void md_reclaim_mark_all(md_dir_cache_s *dir, const alc_s *alloc)
+{
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        if (md_log_block_is_reclaimable(dir, alloc, g) == false)
+        {
+            continue;
+        }
+        (void)md_reclaim_mark(dir, g);
+    }
+}
+
+/**
+ * @brief 从当前写块取一个空槽
+ *
+ * plane 无当前块或块已满返回 INVALID；取到即推进写指针。
+ *
+ * @param dir   Directory
+ * @param plane 目标 plane
+ * @return 槽 PBA；NAND_PBA_INVALID = 无可用槽
+ */
+DWORD md_slot_take(md_dir_cache_s *dir, BYTE plane)
+{
+    if ((plane >= PLANE_NUM) || (dir->cur.valid[plane] == false) || (dir->cur.page[plane] >= PAGES_PER_BLOCK))
+    {
+        return NAND_PBA_INVALID;
+    }
+
+    const BYTE page = dir->cur.page[plane];
+
+    dir->cur.page[plane]++;
+
+    return md_block_page_to_pba(dir, dir->cur.block[plane], page);
+}
+
+/**
+ * @brief 复位整理 job 状态
+ *
+ * 保留单调进度与最近错误，其余清零并重写「无」哨兵。
+ *
+ * @param dir Directory
+ */
+void md_handle_reset(md_dir_cache_s *dir)
+{
+    // reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
+    // error 也保留到下一次起 job 时再清（status 要能看到最近一次失败）。
+    // 哨兵必须显式写（memset 只给 0）：victim / reclaim_gblock / reclaim_fail_gblock
+    // 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。
+    const DWORD   reclaimed  = dir->handle.reclaimed_count;
+    const int32_t last_error = dir->handle.error;
+
+    // 放弃本 job 可能持有的目录检查点单飞锁（prepare 之后没走到 commit）。
+    md_dir_ckpt_write_abort(dir, &dir->handle.dir_ckpt);
+
+    memset(&dir->handle, 0, sizeof(dir->handle));
+    dir->handle.victim              = UINT16_MAX;
+    dir->handle.reclaim_gblock      = UINT16_MAX;
+    dir->handle.reclaim_fail_gblock = UINT16_MAX;
+    dir->handle.slot                = NAND_PBA_INVALID;
+    dir->handle.cur_source          = NAND_PBA_INVALID;
+    dir->handle.reclaimed_count     = reclaimed;
+    dir->handle.error               = last_error;
+}
+
+/**
+ * @brief 选 victim、核空槽预算、把 job 推进到 CP_READ（纯 RAM，不碰介质）。
+ *
+ * @param dir   Directory
+ * @param alloc 分配器（读 BST 判 LOG 身份）
+ * @return MD_COMPACT_STARTED    已进入 CP_READ
+ *         MD_COMPACT_NO_CURRENT 无当前写块：无处可搬
+ *         MD_COMPACT_NO_VICTIM  无候选（零活块归 reclaim 管 / 只剩当前块）
+ *         MD_COMPACT_NO_SLOTS   当前块空槽装不下活 region 最少的 victim
+ *
+ * @note 起不动时 phase 留在 IDLE，由调用者决定是否换块。
+ *
+ * @note **无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
+ * 又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
+ * 空槽预算在此**重算**（不在 append_slot 置位时算）：置位到本函数之间可能
+ * 又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_page[victim 的 plane] 核才准。
+ * ⚠ 已知良性竞态：job 启动前已发出、尚未 commit 的前台 region 写可能在扫描期间落回
+ * victim ⇒ 实际需搬数超过本预算 ⇒ md_compact_write 取不到槽 ⇒ 中止。已登记 region
+ * 指向新页、victim 不擦，无数据损失，只是本次压缩重来。
+ */
+#if defined(FC_NAND_TEST_ENABLE)
+WORD md_test_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc)
+{
+    return md_compact_victim_find(dir, alloc);
+}
+#endif
+
+#if defined(FC_NAND_TEST_ENABLE)
+md_compact_start_e md_test_compact_begin(md_dir_cache_s *dir, const alc_s *alloc)
+{
+    return md_compact_begin(dir, alloc);
+}
+#endif
+
+/* ══════════════════════════════════════════════════════════════════
+ * 五、模块入口与状态
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 模块 handle（typed 入口） ── */
+
+/**
+ * @brief 元数据整理 job 每轮入口
+ *
+ * 推进整理状态机一次，再填状态上报。
+ *
+ * @param dir Directory
+ */
+void md_handle(md_dir_cache_s *dir)
+{
+    md_handle_step(dir);
 }
 
 /**

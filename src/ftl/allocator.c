@@ -24,18 +24,217 @@
 
 #include <string.h>
 
-// 前向声明：Closed 提交在 Open 分配之后定义；契约写在定义处。
-static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb);
-
 // per-instance 五张表：定义与内存域（SRAM12 / DTCM）都归本模块。
 // NOLOAD ⇒ 启动不清零，ftl_init 绑定后逐表 memset。
 static bst_block_s s_ftl_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] SRAM12_DATA;
+
 /* free / op / spare 是每次分配/回收都扫的热表（约 9 KB），放 DTCM；
  * 大表 blocks（80 KB）与 closed_sb_list（32 KB）留 SRAM12。 */
-static WORD          s_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] DTCM_DATA;
-static WORD          s_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] DTCM_DATA;
-static WORD          s_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] DTCM_DATA;
+static WORD s_ftl_free_blocks[FTL_DIE_MAX][FTL_BLOCK_TOTAL] DTCM_DATA;
+
+static WORD s_ftl_op_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_OP_POOL_CAP] DTCM_DATA;
+
+static WORD s_ftl_spare_blocks[FTL_DIE_MAX][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] DTCM_DATA;
+
 static super_block_s s_ftl_closed_sb_list[FTL_DIE_MAX][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+
+// 前向声明：Closed 提交在 Open 分配之后定义；契约写在定义处。
+static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb);
+
+/**
+ * @brief 从 Free Pool 为指定 plane 选一个块
+ *
+ * @param alloc 分配器
+ * @param plane 目标 plane
+ * @param mode  分配策略（决定取擦除最少还是最多）
+ *
+ * @return 选中的 gblock
+ *         FTL_GBLOCK_INVALID = 该 plane 无可用空闲块
+ *
+ * @note 判据是 Free Pool 数组成员关系，不是 BST 的 FREE 位；
+ * 选中 ⇒ alc_free_remove 必然成功。
+ */
+static WORD alc_free_find_block(const alc_s *alloc, BYTE plane, alc_super_alloc_mode_e mode)
+{
+    const BOOL high_wear = (mode == ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
+    WORD       best      = FTL_GBLOCK_INVALID;
+    DWORD      key       = high_wear ? 0U : UINT32_MAX; /* high_wear：取最大擦除；否则取最小（动态 WL） */
+
+    for (WORD i = 0U; i < alloc->free_count; i++)
+    {
+        WORD gblock = alloc->free_blocks[i];
+
+        if (ftl_gblock_plane(gblock) != plane)
+        {
+            continue;
+        }
+
+        const bst_block_s *blk = &alloc->blocks[gblock];
+
+        if (ftl_block_is_bad(blk))
+        {
+            continue;
+        }
+
+        if ((best == FTL_GBLOCK_INVALID) || (high_wear ? (blk->erase_count > key) : (blk->erase_count < key)))
+        {
+            key  = blk->erase_count;
+            best = gblock;
+        }
+    }
+
+    return best;
+}
+
+/**
+ * @brief 为 Open SB 分配各 plane 的物理块
+ *
+ * @param alloc 分配器
+ * @param sb    目标槽
+ * @param mode  分配策略
+ *
+ * @return true = 分配成功
+ *         false = 某 plane 无块
+ *
+ * @note 选块阶段不改 SB / 池账（**例外**：某 plane 的 Free 用尽时 OP 兜底会把一个
+ *       OP 块移入 Free Pool——块仍在 Free，后续 plane 选块失败时它会留在那里，
+ *       等价于提前从 OP 移入 Free，不泄漏）；全部 plane 就位后才出池并置 OPEN。
+ */
+static BOOL alc_super_open(alc_s *alloc, super_block_s *sb, alc_super_alloc_mode_e mode)
+{
+    const BYTE temperature = (mode == ALC_SUPER_ALLOC_HOT) ? FTL_TEMP_HOT : FTL_TEMP_COLD;
+    // free 在某 plane 先耗尽时从该 plane 的 OP 池补一块：成对分配要求每 plane 各一块，
+    // 只看总 free 会在两侧不均时永久失败（host 写窗口 flush 不出去 ⇒ USB 超时）。
+    // OP 是设备 formation 时从 host 可用空间扣掉的余量，所有分配路径都可在 free 不足时
+    // 使用；GC 的低水位按块净收益闸门负责防止无收益搬移把 OP 抽干。
+    // 静态 WL 例外：OP 块的擦除次数不受该策略控制，不能借。
+    const BOOL allow_op    = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
+    WORD       gblock[PLANE_NUM];
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        gblock[plane] = alc_free_find_block(alloc, plane, mode);
+        if ((gblock[plane] == FTL_GBLOCK_INVALID) && allow_op)
+        {
+            gblock[plane] = alc_free_refill_from_op(alloc, plane);
+        }
+        if (gblock[plane] == FTL_GBLOCK_INVALID)
+        {
+            return false;
+        }
+    }
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        // 先出池（校验 state == FREE），再由本转移赋 OPEN。
+        alc_free_remove(alloc, gblock[plane]);
+        sb->plane_blocks[plane] = ftl_gblock_block(gblock[plane]);
+
+        bst_block_s *b = &alloc->blocks[gblock[plane]];
+
+        ftl_block_set_state(b, FTL_BLOCK_STATE_OPEN);
+        ftl_block_set_temp(b, temperature);
+        ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+    }
+
+    sb->next_page        = 0U;
+    sb->temperature      = temperature;
+    sb->is_open          = true;
+    sb->page0_programmed = 0U;
+
+    return true;
+}
+
+/* ── 7. Super Block：Closed ── */
+
+/**
+ * @brief Open → Closed：唯一 live setter + 列表追加
+ *
+ * @param alloc 分配器
+ * @param sb    待关闭 SB（live 或重建时的临时条目）
+ *
+ * @return 新条目在 closed_sb_list 的索引
+ *         FTL_BLOCK_NO_SB = 列表满，条目被拒绝
+ *
+ * @note live 标志与列表副本必须在同一函数内完成——只改副本会让 Open SB
+ * 继续被分配、或被重复关闭。调用者必须检查失败码；列表满
+ * 属结构异常，不能静默吞掉。
+ * @note 全部 plane 都不可用（BAD / 越界）时不追加条目（避免 plane_count==0 的
+ * 死条目泄漏列表槽），返回当前 count —— 调用者只判 `== NO_SB`。
+ */
+static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb)
+{
+    ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
+
+    // release 兜底：结构上不应满；真满时拒绝写入，避免越界。
+    // 此时不改变 live is_open：让调用者看到失败并保留原状态，避免“已关闭但
+    // 未进列表”的不可恢复漏账。
+    if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
+    {
+        LOGE(LOG_TAG_FTL "closed_sb_list full, entry dropped\r\n");
+        return FTL_BLOCK_NO_SB;
+    }
+
+    sb->is_open = false;
+
+    const WORD    closed_idx = alloc->closed_sb_count;
+    super_block_s entry      = *sb;
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (super_block_has_plane(&entry, plane) == false)
+        {
+            continue;
+        }
+
+        // release 兜底：非法块号按哨兵处理，避免索引越界。
+        ASSERT(entry.plane_blocks[plane] < BLOCKS_PER_PLANE);
+        if (entry.plane_blocks[plane] >= BLOCKS_PER_PLANE)
+        {
+            LOGE(LOG_TAG_FTL "closed_sb: plane%hhu block %hu out of range\r\n", plane, entry.plane_blocks[plane]);
+            entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
+            continue;
+        }
+
+        bst_block_s *b = &alloc->blocks[ftl_gblock(plane, entry.plane_blocks[plane])];
+
+        if (ftl_block_is_bad(b))
+        {
+            entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE; /* 坏块不进入 Closed SB */
+            continue;
+        }
+
+        ftl_block_set_state(b, FTL_BLOCK_STATE_CLOSED);
+        ftl_block_set_temp(b, entry.temperature);
+        ftl_block_set_sb(b, closed_idx);
+    }
+
+    // 全部 plane 都已被过滤（BAD / 越界）：没有可回收的块，**不产生条目**。
+    // 追加会让 plane_count==0 的条目永远选不中、也永远没人移除 ⇒ closed 列表槽
+    // 泄漏。SB 仍算已关闭；返回当前 count，调用者只与
+    // FTL_BLOCK_NO_SB 比较（此时返回值不是有效下标）。
+    {
+        BOOL any_plane = false;
+
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            if (entry.plane_blocks[plane] != FTL_BLOCK_NO_PLANE)
+            {
+                any_plane = true;
+                break;
+            }
+        }
+
+        if (any_plane == false)
+        {
+            LOGW(LOG_TAG_FTL "closed_sb: all planes unusable, entry not added\r\n");
+            return alloc->closed_sb_count;
+        }
+    }
+
+    alloc->closed_sb_list[alloc->closed_sb_count++] = entry;
+    return closed_idx;
+}
 
 /**
  * @brief 绑定本实例的五张表（workspace 的唯一定义点在本模块）
@@ -315,51 +514,6 @@ DWORD alc_free_get_max_erase(const alc_s *alloc)
     return (limit == UINT32_MAX) ? 0U : limit;
 }
 
-/**
- * @brief 从 Free Pool 为指定 plane 选一个块
- *
- * @param alloc 分配器
- * @param plane 目标 plane
- * @param mode  分配策略（决定取擦除最少还是最多）
- *
- * @return 选中的 gblock
- *         FTL_GBLOCK_INVALID = 该 plane 无可用空闲块
- *
- * @note 判据是 Free Pool 数组成员关系，不是 BST 的 FREE 位；
- * 选中 ⇒ alc_free_remove 必然成功。
- */
-static WORD alc_free_find_block(const alc_s *alloc, BYTE plane, alc_super_alloc_mode_e mode)
-{
-    const BOOL high_wear = (mode == ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
-    WORD       best      = FTL_GBLOCK_INVALID;
-    DWORD      key       = high_wear ? 0U : UINT32_MAX; /* high_wear：取最大擦除；否则取最小（动态 WL） */
-
-    for (WORD i = 0U; i < alloc->free_count; i++)
-    {
-        WORD gblock = alloc->free_blocks[i];
-
-        if (ftl_gblock_plane(gblock) != plane)
-        {
-            continue;
-        }
-
-        const bst_block_s *blk = &alloc->blocks[gblock];
-
-        if (ftl_block_is_bad(blk))
-        {
-            continue;
-        }
-
-        if ((best == FTL_GBLOCK_INVALID) || (high_wear ? (blk->erase_count > key) : (blk->erase_count < key)))
-        {
-            key  = blk->erase_count;
-            best = gblock;
-        }
-    }
-
-    return best;
-}
-
 /* ── 4. OP Pool ── */
 
 /**
@@ -556,65 +710,6 @@ BOOL alc_super_can_open(const alc_s *alloc, alc_super_alloc_mode_e mode)
             return false;
         }
     }
-
-    return true;
-}
-
-/**
- * @brief 为 Open SB 分配各 plane 的物理块
- *
- * @param alloc 分配器
- * @param sb    目标槽
- * @param mode  分配策略
- *
- * @return true = 分配成功
- *         false = 某 plane 无块
- *
- * @note 选块阶段不改 SB / 池账（**例外**：某 plane 的 Free 用尽时 OP 兜底会把一个
- *       OP 块移入 Free Pool——块仍在 Free，后续 plane 选块失败时它会留在那里，
- *       等价于提前从 OP 移入 Free，不泄漏）；全部 plane 就位后才出池并置 OPEN。
- */
-static BOOL alc_super_open(alc_s *alloc, super_block_s *sb, alc_super_alloc_mode_e mode)
-{
-    const BYTE temperature = (mode == ALC_SUPER_ALLOC_HOT) ? FTL_TEMP_HOT : FTL_TEMP_COLD;
-    // free 在某 plane 先耗尽时从该 plane 的 OP 池补一块：成对分配要求每 plane 各一块，
-    // 只看总 free 会在两侧不均时永久失败（host 写窗口 flush 不出去 ⇒ USB 超时）。
-    // OP 是设备 formation 时从 host 可用空间扣掉的余量，所有分配路径都可在 free 不足时
-    // 使用；GC 的低水位按块净收益闸门负责防止无收益搬移把 OP 抽干。
-    // 静态 WL 例外：OP 块的擦除次数不受该策略控制，不能借。
-    const BOOL allow_op    = (mode != ALC_SUPER_ALLOC_COLD_HIGH_WEAR);
-    WORD       gblock[PLANE_NUM];
-
-    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        gblock[plane] = alc_free_find_block(alloc, plane, mode);
-        if ((gblock[plane] == FTL_GBLOCK_INVALID) && allow_op)
-        {
-            gblock[plane] = alc_free_refill_from_op(alloc, plane);
-        }
-        if (gblock[plane] == FTL_GBLOCK_INVALID)
-        {
-            return false;
-        }
-    }
-
-    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        // 先出池（校验 state == FREE），再由本转移赋 OPEN。
-        alc_free_remove(alloc, gblock[plane]);
-        sb->plane_blocks[plane] = ftl_gblock_block(gblock[plane]);
-
-        bst_block_s *b = &alloc->blocks[gblock[plane]];
-
-        ftl_block_set_state(b, FTL_BLOCK_STATE_OPEN);
-        ftl_block_set_temp(b, temperature);
-        ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
-    }
-
-    sb->next_page        = 0U;
-    sb->temperature      = temperature;
-    sb->is_open          = true;
-    sb->page0_programmed = 0U;
 
     return true;
 }
@@ -867,97 +962,6 @@ BOOL alc_super_prepare_wl_destination(alc_s *alloc)
 
     // 关不掉时 cold SB 仍 open ⇒ 调用者必须放弃本次 WL（否则续写普通块）。
     return (alc_super_close_live(alloc, sb) != FTL_BLOCK_NO_SB);
-}
-
-/* ── 7. Super Block：Closed ── */
-
-/**
- * @brief Open → Closed：唯一 live setter + 列表追加
- *
- * @param alloc 分配器
- * @param sb    待关闭 SB（live 或重建时的临时条目）
- *
- * @return 新条目在 closed_sb_list 的索引
- *         FTL_BLOCK_NO_SB = 列表满，条目被拒绝
- *
- * @note live 标志与列表副本必须在同一函数内完成——只改副本会让 Open SB
- * 继续被分配、或被重复关闭。调用者必须检查失败码；列表满
- * 属结构异常，不能静默吞掉。
- * @note 全部 plane 都不可用（BAD / 越界）时不追加条目（避免 plane_count==0 的
- * 死条目泄漏列表槽），返回当前 count —— 调用者只判 `== NO_SB`。
- */
-static WORD alc_super_close_live(alc_s *alloc, super_block_s *sb)
-{
-    ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
-
-    // release 兜底：结构上不应满；真满时拒绝写入，避免越界。
-    // 此时不改变 live is_open：让调用者看到失败并保留原状态，避免“已关闭但
-    // 未进列表”的不可恢复漏账。
-    if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
-    {
-        LOGE(LOG_TAG_FTL "closed_sb_list full, entry dropped\r\n");
-        return FTL_BLOCK_NO_SB;
-    }
-
-    sb->is_open = false;
-
-    const WORD    closed_idx = alloc->closed_sb_count;
-    super_block_s entry      = *sb;
-
-    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        if (super_block_has_plane(&entry, plane) == false)
-        {
-            continue;
-        }
-
-        // release 兜底：非法块号按哨兵处理，避免索引越界。
-        ASSERT(entry.plane_blocks[plane] < BLOCKS_PER_PLANE);
-        if (entry.plane_blocks[plane] >= BLOCKS_PER_PLANE)
-        {
-            LOGE(LOG_TAG_FTL "closed_sb: plane%hhu block %hu out of range\r\n", plane, entry.plane_blocks[plane]);
-            entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
-            continue;
-        }
-
-        bst_block_s *b = &alloc->blocks[ftl_gblock(plane, entry.plane_blocks[plane])];
-
-        if (ftl_block_is_bad(b))
-        {
-            entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE; /* 坏块不进入 Closed SB */
-            continue;
-        }
-
-        ftl_block_set_state(b, FTL_BLOCK_STATE_CLOSED);
-        ftl_block_set_temp(b, entry.temperature);
-        ftl_block_set_sb(b, closed_idx);
-    }
-
-    // 全部 plane 都已被过滤（BAD / 越界）：没有可回收的块，**不产生条目**。
-    // 追加会让 plane_count==0 的条目永远选不中、也永远没人移除 ⇒ closed 列表槽
-    // 泄漏。SB 仍算已关闭；返回当前 count，调用者只与
-    // FTL_BLOCK_NO_SB 比较（此时返回值不是有效下标）。
-    {
-        BOOL any_plane = false;
-
-        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-        {
-            if (entry.plane_blocks[plane] != FTL_BLOCK_NO_PLANE)
-            {
-                any_plane = true;
-                break;
-            }
-        }
-
-        if (any_plane == false)
-        {
-            LOGW(LOG_TAG_FTL "closed_sb: all planes unusable, entry not added\r\n");
-            return alloc->closed_sb_count;
-        }
-    }
-
-    alloc->closed_sb_list[alloc->closed_sb_count++] = entry;
-    return closed_idx;
 }
 
 /**

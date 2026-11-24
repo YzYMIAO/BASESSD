@@ -6,12 +6,21 @@
 #include <stdio.h>
 #include <string.h>
 
+/* ── 日志节拍 / 限流 ── */
+
+/* 无时钟（platform_now_ms() == 0）时的条数兜底：抑制满这么多条放行一行。 */
+#define LOG_RATE_COUNT_FALLBACK (64U)
+
 /* This filter applies before formatting, so suppressed logs consume no TX queue space. */
-static log_level_e         g_log_level = LOG_INFO;
-static log_sink_fn_t       g_log_sink;
+static log_level_e g_log_level = LOG_INFO;
+
+static log_sink_fn_t g_log_sink;
+
 static log_flush_sink_fn_t g_log_flush_sink;
-static DWORD               g_log_truncated;
-static DWORD               g_log_write_failures;
+
+static DWORD g_log_truncated;
+
+static DWORD g_log_write_failures;
 
 void log_write(log_level_e level, const char *message)
 {
@@ -123,11 +132,6 @@ DWORD log_get_write_failure_count(void)
 {
     return g_log_write_failures;
 }
-
-/* ── 日志节拍 / 限流 ── */
-
-/* 无时钟（platform_now_ms() == 0）时的条数兜底：抑制满这么多条放行一行。 */
-#define LOG_RATE_COUNT_FALLBACK (64U)
 
 /**
  * @brief 起算心跳：记 start/log 并置 active

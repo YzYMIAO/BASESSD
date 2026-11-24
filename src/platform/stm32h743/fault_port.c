@@ -12,13 +12,60 @@
 #include "fault.h"
 #include "stm32h7xx_hal.h"
 
-#define FAULT_CONSOLE   USART1
-#define FAULT_TX_DMA    DMA1_Stream0
-#define FAULT_TX_GUARD  200000U /* 轮询 TXE/TC 的自旋上限，防挂死 */
+#define FAULT_CONSOLE USART1
+
+#define FAULT_TX_DMA DMA1_Stream0
+
+#define FAULT_TX_GUARD 200000U /* 轮询 TXE/TC 的自旋上限，防挂死 */
+
 #define FAULT_DMA_GUARD 100000U /* 等 DMA 关闭的自旋上限 */
+
+#define FAULT_ENTRY(name)                         \
+    void name(void) __attribute__((naked, used)); \
+    void name(void)                               \
+    {                                             \
+        __asm volatile("b fault_trampoline \n");  \
+    }
 
 /* 控制台是否可用：USART 未使能时（极早期故障）只写记录、不打印。 */
 static volatile BYTE g_fault_console_ready;
+
+/* ────────────────────────────── 异常入口 ────────────────────────────── */
+
+/*
+ * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR，
+ * fault_r7 为蹦床在 C 序言之前抓到的 R7（硬件不压 R4~R11，只能这样取）。
+ * 现场在此抓取（只有 port 侧够得着 CMSIS/寄存器），随后转交共享层，不返回。
+ */
+void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7) __attribute__((used, noinline));
+
+/*
+ * naked 蹦床：进入异常时 LR = EXC_RETURN。bit2 选栈（0=MSP / 1=PSP），
+ * bit4=0 表示叠加了 FPU 扩展帧（硬浮点下常态）。必须在编译器插入任何序言
+ * 之前读取，否则读到的就是异常栈而不是出错栈。
+ */
+static void fault_trampoline(void) __attribute__((naked, used));
+
+static DWORD fault_append_text(char *buffer, DWORD capacity, DWORD length, const char *text)
+{
+    while ((*text != '\0') && (length < (capacity - 1U)))
+    {
+        buffer[length++] = *text++;
+    }
+    buffer[length] = '\0';
+    return length;
+}
+
+static void fault_trampoline(void)
+{
+    __asm volatile("tst   lr, #4           \n"
+                   "ite   eq               \n"
+                   "mrseq r0, msp          \n"
+                   "mrsne r0, psp          \n"
+                   "mov   r1, lr           \n"
+                   "mov   r2, r7           \n" /* 出错上下文的 R7，C 序言前抓 */
+                   "b     fault_port_entry_c \n");
+}
 
 /*
  * 抢占异步 TX 通路：关 TXE 中断、关 DMA 请求、abort DMA1_Stream0。
@@ -87,16 +134,6 @@ void fault_port_reset_flags_clear(void)
     RCC->RSR |= RCC_RSR_RMVF;
 }
 
-static DWORD fault_append_text(char *buffer, DWORD capacity, DWORD length, const char *text)
-{
-    while ((*text != '\0') && (length < (capacity - 1U)))
-    {
-        buffer[length++] = *text++;
-    }
-    buffer[length] = '\0';
-    return length;
-}
-
 void fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity)
 {
     DWORD length = 0U;
@@ -136,14 +173,6 @@ void fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity)
     (void)length;
 }
 
-/* ────────────────────────────── 异常入口 ────────────────────────────── */
-
-/*
- * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR，
- * fault_r7 为蹦床在 C 序言之前抓到的 R7（硬件不压 R4~R11，只能这样取）。
- * 现场在此抓取（只有 port 侧够得着 CMSIS/寄存器），随后转交共享层，不返回。
- */
-void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7) __attribute__((used, noinline));
 void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7)
 {
     fault_ctx_s ctx;
@@ -176,30 +205,6 @@ void fault_port_entry_c(DWORD *frame, DWORD exc_return, DWORD fault_r7)
 
     fault_report_and_halt(&ctx);
 }
-
-/*
- * naked 蹦床：进入异常时 LR = EXC_RETURN。bit2 选栈（0=MSP / 1=PSP），
- * bit4=0 表示叠加了 FPU 扩展帧（硬浮点下常态）。必须在编译器插入任何序言
- * 之前读取，否则读到的就是异常栈而不是出错栈。
- */
-static void fault_trampoline(void) __attribute__((naked, used));
-static void fault_trampoline(void)
-{
-    __asm volatile("tst   lr, #4           \n"
-                   "ite   eq               \n"
-                   "mrseq r0, msp          \n"
-                   "mrsne r0, psp          \n"
-                   "mov   r1, lr           \n"
-                   "mov   r2, r7           \n" /* 出错上下文的 R7，C 序言前抓 */
-                   "b     fault_port_entry_c \n");
-}
-
-#define FAULT_ENTRY(name)                         \
-    void name(void) __attribute__((naked, used)); \
-    void name(void)                               \
-    {                                             \
-        __asm volatile("b fault_trampoline \n");  \
-    }
 
 FAULT_ENTRY(NMI_Handler)
 FAULT_ENTRY(HardFault_Handler)

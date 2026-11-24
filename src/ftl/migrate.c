@@ -50,11 +50,7 @@
 #include "log.h"
 #include "read_recovery.h" /* rr_record_ecc / rr_predictive_scan / rr_retire_block */
 #include "stats.h"
-#include "timer.h" /* timer_scheduler_add（周期求值注册） */
-
-#if SSD_STATS_ENABLE
-static void mig_job_time_note(mig_handle_s *m); /* 定义在收尾区；abort 先用到 */
-#endif
+#include "timer.h"         /* timer_scheduler_add（周期求值注册） */
 #include "wear_leveling.h" /* wl_should_trigger / wl_select_victim */
 
 #include <string.h>
@@ -63,18 +59,6 @@ static void mig_job_time_note(mig_handle_s *m); /* 定义在收尾区；abort �
 // NOLOAD 语义同其它 workspace，ftl_init 绑定后显式 memset。
 static mig_handle_s s_mig_handle[FTL_DIE_MAX];
 
-/**
- * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
-mig_handle_s *mig_workspace_get(BYTE die)
-{
-    ASSERT(die < FTL_DIE_MAX);
-    return &s_mig_handle[die];
-}
-
 /* ── 文件级静态数据 ── */
 
 // page0 补零写的全零页（.bss，零初始化；单线程 superloop 共享）。
@@ -82,7 +66,47 @@ static BYTE s_zero_page[PAGE_MAIN_SIZE];
 
 // abort 日志限流：上一行日志的时刻 + 本窗口内被抑制的条数。
 static DWORD s_abort_log_ms;
+
 static DWORD s_abort_suppressed;
+
+#if SSD_STATS_ENABLE
+#    define MIG_STATS_LIST(X)                             \
+        X(reclaimed, STATS_U32, STATS_COUNTER)            \
+        X(moved, STATS_U32, STATS_COUNTER)                \
+        X(noop, STATS_U32, STATS_COUNTER)                 \
+        X(novictim, STATS_U32, STATS_COUNTER)             \
+        X(nogain, STATS_U32, STATS_COUNTER)               \
+        X(batch_jobs, STATS_U32, STATS_COUNTER)           \
+        X(batch_pages, STATS_U32, STATS_COUNTER)          \
+        X(batch_aborts, STATS_U32, STATS_COUNTER)         \
+        X(job_start, STATS_U32, STATS_COUNTER)            \
+        X(job_end, STATS_U32, STATS_COUNTER)              \
+        X(abort_l2p_timeout, STATS_U32, STATS_COUNTER)    \
+        X(abort_submit_timeout, STATS_U32, STATS_COUNTER) \
+        X(abort_read_fail, STATS_U32, STATS_COUNTER)      \
+        X(abort_jrn_timeout, STATS_U32, STATS_COUNTER)    \
+        X(abort_other, STATS_U32, STATS_COUNTER)
+
+#    define MIG_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(mig_counters_s, field), width, kind},
+static const stats_name_s s_stats_gc_names[] = {
+    MIG_STATS_LIST(MIG_STATS_NAME)};
+#    undef MIG_STATS_NAME
+#    define MIG_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(mig_counters_s, field, width);
+MIG_STATS_LIST(MIG_STATS_CHECK)
+#    undef MIG_STATS_CHECK
+
+#    define MIG_STATS_HIST_LIST(X)     X(job_us)
+#    define MIG_STATS_HIST_NAME(field) {STATS_NAME_STR(field), STATS_OFFSET(mig_counters_s, field)},
+static const stats_hist_name_s s_stats_gc_hist_names[] = {
+    MIG_STATS_HIST_LIST(MIG_STATS_HIST_NAME)};
+#    undef MIG_STATS_HIST_NAME
+STATS_CHECK_HIST_FIELD(mig_counters_s, job_us);
+#endif /* SSD_STATS_ENABLE */
+
+#if SSD_STATS_ENABLE
+static void mig_job_time_note(mig_handle_s *m); /* 定义在收尾区；abort 先用到 */
+#endif
 
 /* ── 前置声明 ── */
 
@@ -90,6 +114,8 @@ static DWORD s_abort_suppressed;
  * @brief 状态机主体定义在第 5 节（mig_job_start 要先见到它）。
  */
 static void mig_job_step(mig_handle_s *m);
+static BOOL mig_predict_begin(mig_handle_s *m);
+static void mig_wl_eval(mig_handle_s *m);
 
 /* ── 1. 内部工具 ── */
 
@@ -113,44 +139,6 @@ static void mig_victim_from_planes(super_block_s *sb, const WORD plane_blocks[PL
         sb->plane_blocks[p] = plane_blocks[p];
     }
     sb->next_page = next_page;
-}
-
-/**
- * @brief 从 from 起找下一个**仍归本 victim 所有**的 plane；没有返回 PLANE_NUM。
- *
- * 只接受 BST state == CLOSED 的 plane：
- * · 哨兵 plane（退化单 plane 条目）不是本 victim 的物理块；
- * · 部分 plane 已擦除后 job 中止，重试时那些 plane 已是 FREE/RETIRED/BAD，
- * 再擦一次会重复计磨损 / 复活 BAD；
- * · 迁移期间被 RR 标 BAD 的 plane 不能再读/擦。
- *
- * @param alloc allocator（读 blocks[].state 判断 plane 是否仍可处理）。
- * @param m     job（提供 victim 视图）。
- * @param from  起始 plane 下标。
- *
- * @return 0..PLANE_NUM-1 —— 下一个仍归本 victim 且 state == CLOSED 的 plane 下标；
- *         PLANE_NUM —— 没有这样的 plane。
- */
-static BYTE mig_present_plane_next(const alc_s *alloc, const mig_handle_s *m, BYTE from)
-{
-    for (BYTE p = from; p < PLANE_NUM; p++)
-    {
-        if (super_block_has_plane(&m->job.victim, p) == false)
-        {
-            continue;
-        }
-
-        const WORD gblock = ftl_gblock(p, m->job.victim.plane_blocks[p]);
-
-        if (ftl_block_state(&alloc->blocks[gblock]) != FTL_BLOCK_STATE_CLOSED)
-        {
-            continue;
-        }
-
-        return p;
-    }
-
-    return PLANE_NUM;
 }
 
 /**
@@ -262,6 +250,158 @@ static const char *mig_gc_mode_name(gc_benefit_mode_e mode)
     _Static_assert(sizeof(names) / sizeof(names[0]) == (GC_BENEFIT_EMERGENCY + 1U), "names 与 gc_benefit_mode_e 不同步");
 
     return ((unsigned)mode < (sizeof(names) / sizeof(names[0]))) ? names[mode] : "?";
+}
+
+/* ── 4. 收尾 ── */
+
+/**
+ * @brief abort 日志限流：坏块介质上 GC 会反复选中不可读 victim、每次
+ * 重试都 abort；逐次 WRN 会把有效进展淹没。5 s 一行（时钟缺失时 64 次一行）；
+ * `mark BAD` 仍逐块 LOGE（每个坏块只发生一次，是真正的结论）。
+ *
+ * @return true  —— 本行应打印；
+ *         false —— 本行被抑制（内部已累加计数）。
+ */
+static BOOL mig_abort_log_is_due(void)
+{
+    // 时间优先（1 行/5 s），条数只作无时钟时的兜底：free=1 的 abort 循环一秒能撞
+    // 几十次，把 count>=64 当主判据仍会刷屏。
+    return log_rate_due(&s_abort_log_ms, &s_abort_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
+}
+
+/**
+ * @brief 释放 cmds[0..n) 中已建好的命令（NULL 条目跳过）。
+ *
+ * @param cmds 命令数组。
+ * @param n    需要释放的条数。
+ */
+static void mig_batch_release_cmds(fc_cmd_s *cmds[], BYTE n)
+{
+    for (BYTE k = 0U; k < n; k++)
+    {
+        if (cmds[k] != NULL)
+        {
+            (void)fc_command_release(cmds[k]->cmd_id);
+        }
+    }
+}
+
+/**
+ * @brief 归还本次已分配但不打算使用的 n 个目的页对。
+ *
+ * @param m job。
+ * @param n 需要 rewind 的页对数。
+ */
+static void mig_batch_rewind_dst(mig_handle_s *m, BYTE n)
+{
+    for (BYTE k = 0U; k < n; k++)
+    {
+        alc_super_open_rewind_pair(m->alloc, FTL_TEMP_COLD);
+    }
+}
+
+/**
+ * @brief GC 会话进展：只在会话活跃且距上次 >=5 s 时打；now_ms==0（无时钟）时不打。
+ *
+ * @param m      job。
+ * @param now_ms 当前时刻（0 = 无时钟，不打日志）。
+ */
+static void mig_gc_session_progress(mig_handle_s *m, DWORD now_ms)
+{
+    if ((m->state.session.active == false) || (now_ms == 0U) || (m->state.session.moved == 0U))
+    {
+        return;
+    }
+    LOGI_RL(&m->state.session.rl, LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, m->alloc->free_count);
+}
+
+/**
+ * @brief predict 周期求值（timer 表每 RR_SCAN_INTERVAL_MS 唤醒）
+ *
+ * @param m handle
+ */
+static void mig_predict_eval(mig_handle_s *m)
+{
+    if (m->job.active || m->state.failure.paused || m->state.urgent_gc || (m->state.level != BG_LEVEL_IDLE))
+    {
+        return;
+    }
+
+    (void)mig_predict_begin(m);
+}
+
+/**
+ * @brief timer 回调：GC 求值
+ *
+ * @param context mig_handle_s *
+ * @param now_ms  timer 快照（FTL 时间戳仍由 mig_eval 内部读 SysTick）
+ */
+static void mig_eval_task(void *context, DWORD now_ms)
+{
+    (void)now_ms;
+    mig_eval((mig_handle_s *)context);
+}
+
+/**
+ * @brief timer 回调：WL 求值
+ *
+ * @param context mig_handle_s *
+ * @param now_ms  timer 快照（未使用）
+ */
+static void mig_wl_eval_task(void *context, DWORD now_ms)
+{
+    (void)now_ms;
+    mig_wl_eval((mig_handle_s *)context);
+}
+
+/**
+ * @brief timer 回调：predict 求值
+ *
+ * @param context mig_handle_s *
+ * @param now_ms  timer 快照（未使用）
+ */
+static void mig_predict_eval_task(void *context, DWORD now_ms)
+{
+    (void)now_ms;
+    mig_predict_eval((mig_handle_s *)context);
+}
+
+/**
+ * @brief 从 from 起找下一个**仍归本 victim 所有**的 plane；没有返回 PLANE_NUM。
+ *
+ * 只接受 BST state == CLOSED 的 plane：
+ * · 哨兵 plane（退化单 plane 条目）不是本 victim 的物理块；
+ * · 部分 plane 已擦除后 job 中止，重试时那些 plane 已是 FREE/RETIRED/BAD，
+ * 再擦一次会重复计磨损 / 复活 BAD；
+ * · 迁移期间被 RR 标 BAD 的 plane 不能再读/擦。
+ *
+ * @param alloc allocator（读 blocks[].state 判断 plane 是否仍可处理）。
+ * @param m     job（提供 victim 视图）。
+ * @param from  起始 plane 下标。
+ *
+ * @return 0..PLANE_NUM-1 —— 下一个仍归本 victim 且 state == CLOSED 的 plane 下标；
+ *         PLANE_NUM —— 没有这样的 plane。
+ */
+static BYTE mig_present_plane_next(const alc_s *alloc, const mig_handle_s *m, BYTE from)
+{
+    for (BYTE p = from; p < PLANE_NUM; p++)
+    {
+        if (super_block_has_plane(&m->job.victim, p) == false)
+        {
+            continue;
+        }
+
+        const WORD gblock = ftl_gblock(p, m->job.victim.plane_blocks[p]);
+
+        if (ftl_block_state(&alloc->blocks[gblock]) != FTL_BLOCK_STATE_CLOSED)
+        {
+            continue;
+        }
+
+        return p;
+    }
+
+    return PLANE_NUM;
 }
 
 /* ── 2. 提交原语 ── */
@@ -455,13 +595,6 @@ static void mig_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind
 
     mig_job_step(m);
 }
-
-#if defined(FC_NAND_TEST_ENABLE)
-void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e kind, const char *reason, DWORD triggers)
-{
-    mig_job_start(m, victim, kind, reason, triggers);
-}
-#endif
 
 /**
  * @brief 按触发位与 host 写流选收益判据模式。
@@ -744,23 +877,6 @@ static BOOL mig_predict_begin(mig_handle_s *m)
     return true;
 }
 
-/* ── 4. 收尾 ── */
-
-/**
- * @brief abort 日志限流：坏块介质上 GC 会反复选中不可读 victim、每次
- * 重试都 abort；逐次 WRN 会把有效进展淹没。5 s 一行（时钟缺失时 64 次一行）；
- * `mark BAD` 仍逐块 LOGE（每个坏块只发生一次，是真正的结论）。
- *
- * @return true  —— 本行应打印；
- *         false —— 本行被抑制（内部已累加计数）。
- */
-static BOOL mig_abort_log_is_due(void)
-{
-    // 时间优先（1 行/5 s），条数只作无时钟时的兜底：free=1 的 abort 循环一秒能撞
-    // 几十次，把 count>=64 当主判据仍会刷屏。
-    return log_rate_due(&s_abort_log_ms, &s_abort_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
-}
-
 /**
  * @brief 中止原因的日志字符串（枚举 → 静态字符串的唯一映射）
  *
@@ -823,58 +939,6 @@ static const char *mig_abort_name(mig_abort_e reason)
             return "unknown";
     }
 }
-
-#if SSD_STATS_ENABLE
-#    define MIG_STATS_LIST(X)                             \
-        X(reclaimed, STATS_U32, STATS_COUNTER)            \
-        X(moved, STATS_U32, STATS_COUNTER)                \
-        X(noop, STATS_U32, STATS_COUNTER)                 \
-        X(novictim, STATS_U32, STATS_COUNTER)             \
-        X(nogain, STATS_U32, STATS_COUNTER)               \
-        X(batch_jobs, STATS_U32, STATS_COUNTER)           \
-        X(batch_pages, STATS_U32, STATS_COUNTER)          \
-        X(batch_aborts, STATS_U32, STATS_COUNTER)         \
-        X(job_start, STATS_U32, STATS_COUNTER)            \
-        X(job_end, STATS_U32, STATS_COUNTER)              \
-        X(abort_l2p_timeout, STATS_U32, STATS_COUNTER)    \
-        X(abort_submit_timeout, STATS_U32, STATS_COUNTER) \
-        X(abort_read_fail, STATS_U32, STATS_COUNTER)      \
-        X(abort_jrn_timeout, STATS_U32, STATS_COUNTER)    \
-        X(abort_other, STATS_U32, STATS_COUNTER)
-
-#    define MIG_STATS_NAME(field, width, kind) \
-        {STATS_NAME_STR(field), STATS_OFFSET(mig_counters_s, field), width, kind},
-static const stats_name_s s_stats_gc_names[] = {
-    MIG_STATS_LIST(MIG_STATS_NAME)};
-#    undef MIG_STATS_NAME
-#    define MIG_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(mig_counters_s, field, width);
-MIG_STATS_LIST(MIG_STATS_CHECK)
-#    undef MIG_STATS_CHECK
-
-#    define MIG_STATS_HIST_LIST(X)     X(job_us)
-#    define MIG_STATS_HIST_NAME(field) {STATS_NAME_STR(field), STATS_OFFSET(mig_counters_s, field)},
-static const stats_hist_name_s s_stats_gc_hist_names[] = {
-    MIG_STATS_HIST_LIST(MIG_STATS_HIST_NAME)};
-#    undef MIG_STATS_HIST_NAME
-STATS_CHECK_HIST_FIELD(mig_counters_s, job_us);
-#endif /* SSD_STATS_ENABLE */
-
-#if SSD_STATS_ENABLE
-/**
- * @brief 注册本实例的 GC/WL 统计（值在 mig state.counters）
- *
- * 由 FTL 组合根在实例装配完成后调用：直接调用 mig_init 的测试用例
- * 不应把栈上的 handle 地址注册进来。
- *
- * @param m    已初始化的迁移引擎（生产路径为实例自持对象）
- * @param inst 实例号（紧凑 die 号）
- */
-void mig_stats_register(mig_handle_s *m, BYTE inst)
-{
-    (void)stats_register("ftl.gc", inst, &m->state.counters, s_stats_gc_names, STATS_ENTRY_COUNT(s_stats_gc_names));
-    (void)stats_register_hist("ftl.gc", inst, &m->state.counters, s_stats_gc_hist_names, STATS_ENTRY_COUNT(s_stats_gc_hist_names));
-}
-#endif /* SSD_STATS_ENABLE */
 
 /**
  * @brief 中止 job：不擦 victim、不动 L2P、不移除 closed 条目（源数据仍有效，下轮重试）。
@@ -1475,37 +1539,6 @@ static BOOL mig_batch_prepare_commit(mig_handle_s *m)
 
     timer_deadline_clear(&m->job.external_deadline);
     return true;
-}
-
-/**
- * @brief 释放 cmds[0..n) 中已建好的命令（NULL 条目跳过）。
- *
- * @param cmds 命令数组。
- * @param n    需要释放的条数。
- */
-static void mig_batch_release_cmds(fc_cmd_s *cmds[], BYTE n)
-{
-    for (BYTE k = 0U; k < n; k++)
-    {
-        if (cmds[k] != NULL)
-        {
-            (void)fc_command_release(cmds[k]->cmd_id);
-        }
-    }
-}
-
-/**
- * @brief 归还本次已分配但不打算使用的 n 个目的页对。
- *
- * @param m job。
- * @param n 需要 rewind 的页对数。
- */
-static void mig_batch_rewind_dst(mig_handle_s *m, BYTE n)
-{
-    for (BYTE k = 0U; k < n; k++)
-    {
-        alc_super_open_rewind_pair(m->alloc, FTL_TEMP_COLD);
-    }
 }
 
 /**
@@ -2224,54 +2257,6 @@ static void mig_job_step(mig_handle_s *m)
     }
 }
 
-/* ── 6. typed handle（端口装配 / 触发 / 自持节拍 / 上报）── */
-
-/**
- * @brief 装配 migrate handle
- *
- * 整块清零、绑定端口、失败块表置无效；不碰介质。
- *
- * @param m            handle
- * @param alloc        分配器
- * @param journal      Journal
- * @param cache        L2P cache
- * @param total_writes 累计写计数指针
- */
-void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes)
-{
-    // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
-    // （cache / journal / alloc / total_writes 均为实例内嵌对象的地址）⇒ 不重复检查。
-    memset(m, 0, sizeof(*m));
-    m->alloc        = alloc;
-    m->journal      = journal;
-    m->cache        = cache;
-    m->total_writes = total_writes;
-    m->topo         = alc_topo(alloc);
-    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        m->state.failure.fail_gblock[plane] = UINT16_MAX;
-    }
-    log_ratelimit_init(&m->state.session.rl, LOG_RATE_SLOW_INTERVAL_MS);
-    log_heartbeat_end(&m->job.hb);
-    m->state.error = FTL_OK;
-}
-
-/**
- * @brief 置紧急 GC 请求位
- *
- * 只排队，下一轮求值才真正触发。
- *
- * @param m handle
- */
-void mig_gc_request_urgent(mig_handle_s *m)
-{
-    // 句柄由调用者持有：生产路径恒为 &ftl->mig_*；wb_flush 的可选端口分支已在
-    // 调用点判空，这里不重复返回码（H2）。NULL 写进来会落到 urgent_gc 的偏移
-    // （本结构该字段偏移 0x4220）⇒ 直接踩 ITCM 代码，必须当场停。
-    ASSERT(m != NULL);
-    m->state.urgent_gc = true;
-}
-
 /**
  * @brief GC 求值：命中时返回 GC_TRIGGER_* 位掩码并打观测日志。
  *
@@ -2331,21 +2316,6 @@ static DWORD mig_gc_evaluate(mig_handle_s *m, DWORD now_ms, BOOL *host_writing)
 }
 
 /**
- * @brief GC 会话进展：只在会话活跃且距上次 >=5 s 时打；now_ms==0（无时钟）时不打。
- *
- * @param m      job。
- * @param now_ms 当前时刻（0 = 无时钟，不打日志）。
- */
-static void mig_gc_session_progress(mig_handle_s *m, DWORD now_ms)
-{
-    if ((m->state.session.active == false) || (now_ms == 0U) || (m->state.session.moved == 0U))
-    {
-        return;
-    }
-    LOGI_RL(&m->state.session.rl, LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%hu", m->state.session.jobs, m->state.session.moved, m->state.session.reclaimed, m->state.session.noop, m->state.session.aborted, m->alloc->free_count);
-}
-
-/**
  * @brief GC 会话收尾：连续 GC_SESSION_IDLE_MS 没有 GC job 活动。
  *
  * @param m      job。
@@ -2377,108 +2347,6 @@ static void mig_gc_session_end(mig_handle_s *m, DWORD now_ms)
 }
 
 /**
- * @brief 搬移引擎每轮入口
- *
- * 只做在飞推进、会话收尾、紧急 GC；周期求值见 mig_eval。
- *
- * @param m     handle
- * @param level 本轮后台档位
- */
-void mig_handle(mig_handle_s *m, bg_level_e level)
-{
-    const DWORD now_ms = platform_now_ms();
-
-    // 发布本轮档位：mig_eval 由 timer 表在 ftl_service 之后调用，从 handle 读取。
-    m->state.level = level;
-
-    // ① 在飞：只服务当前 job（提交即返回）。
-    if (m->job.active)
-    {
-        // 心跳（见 log.h / timer.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见。
-        // ⚠ 只报「真的卡住」：单个 victim 正常 1 s 内完成，逐 victim 的 1 s 心跳在持续
-        // GC 时会变成 1 行/秒。job age ≥ SLOW_AFTER 才打；之后 helper 自动降到 5 s。
-        if (log_heartbeat_due(&m->job.hb) && (log_heartbeat_age_ms(&m->job.hb) >= LOG_RATE_SLOW_AFTER_MS))
-        {
-            LOGI(LOG_TAG_MIG "job kind=%d phase=%d page=%hhu plane=%hhu aborted=%d age=%lums\r\n", m->job.kind, m->job.phase, m->job.page, m->job.plane, m->job.aborted, log_heartbeat_age_ms(&m->job.hb));
-        }
-
-        mig_job_step(m);
-        mig_gc_session_progress(m, now_ms);
-
-        return;
-    }
-
-    // 会话收尾必须在 paused 早退之前：熔断后仍要留下本次会话的结束行。
-    mig_gc_session_end(m, now_ms);
-    mig_gc_session_progress(m, now_ms);
-
-    // ② 系统性命中熔断：不再启动任何 GC/WL/predict（重启才清）。
-    if (m->state.failure.paused)
-    {
-        return;
-    }
-
-    // ③ 紧急 GC：写路径分配不到页对（wbuf 调 mig_gc_request_urgent）时，必须在 BUSY 档也处理。
-    // 否则 host 持续写 → load_level 恒 BUSY → 本函数每次早退 → urgent_gc 永不被消费
-    // ⇒ free_count 卡在目标线附近、写请求永久 FTL_AGAIN（CDM "Preparing" 卡住的现场）。
-    // BUSY 只让**周期评估**（T1/T4/WL/predict）让路，不让“写不进去”的急救让路。
-    if (m->state.urgent_gc)
-    {
-        m->state.urgent_gc = false;
-
-        // free 仍高于紧急线时按 OFF（不筛），因为 urgent 的语义是「写不进去」，
-        // 不是「空闲补池」。
-        const gc_benefit_mode_e mode = (m->alloc->free_count <= FREE_POOL_EMERGENCY) ? GC_BENEFIT_EMERGENCY : GC_BENEFIT_OFF;
-        (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_URGENT, 0U);
-
-        return;
-    }
-
-    // 平台时钟完全缺失时 timer 任务永不到期：退回每轮求值，保证 GC 不停摆
-    // （与旧节拍「无时钟 ⇒ 每轮求值」的取舍一致）。
-    if (now_ms == 0U)
-    {
-        mig_eval(m);
-    }
-}
-
-/**
- * @brief GC 周期求值入口（timer 10ms）
- *
- * WL/predict 由各自 timer 任务驱动；三者共享 job.active 单飞行。
- *
- * @param m handle
- */
-void mig_eval(mig_handle_s *m)
-{
-    const DWORD now_ms = platform_now_ms();
-    // 与 mig_handle 的早退条件一致：在飞 / 熔断 / 紧急 GC 时不启动新工作。
-    if (m->job.active || m->state.failure.paused || m->state.urgent_gc)
-    {
-        return;
-    }
-
-    // ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
-    // GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
-    // 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。
-    if ((m->state.level == BG_LEVEL_BUSY) && (m->alloc->free_count >= FREE_POOL_TARGET))
-    {
-        return;
-    }
-
-    // ⑤ 周期评估 GC；WL/predict 由各自的 timer 任务按 5 s / 1 s 节拍进入。
-    BOOL        host_writing = false;
-    const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
-
-    if (trig != 0U)
-    {
-        const gc_benefit_mode_e mode = mig_gc_mode_select(trig, host_writing);
-
-        (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
-    }
-}
-
-/**
  * @brief WL 周期求值（timer 表每 WL_EVAL_INTERVAL_MS 唤醒）
  *
  * 单飞行/熔断/紧急 GC 由 m->job.active 仲裁；GC 任务注册在前，同一轮先跑 ⇒
@@ -2503,92 +2371,6 @@ static void mig_wl_eval(mig_handle_s *m)
     {
         (void)mig_wl_begin(m);
     }
-}
-
-/**
- * @brief predict 周期求值（timer 表每 RR_SCAN_INTERVAL_MS 唤醒）
- *
- * @param m handle
- */
-static void mig_predict_eval(mig_handle_s *m)
-{
-    if (m->job.active || m->state.failure.paused || m->state.urgent_gc || (m->state.level != BG_LEVEL_IDLE))
-    {
-        return;
-    }
-
-    (void)mig_predict_begin(m);
-}
-
-/**
- * @brief timer 回调：GC 求值
- *
- * @param context mig_handle_s *
- * @param now_ms  timer 快照（FTL 时间戳仍由 mig_eval 内部读 SysTick）
- */
-static void mig_eval_task(void *context, DWORD now_ms)
-{
-    (void)now_ms;
-    mig_eval((mig_handle_s *)context);
-}
-
-/**
- * @brief timer 回调：WL 求值
- *
- * @param context mig_handle_s *
- * @param now_ms  timer 快照（未使用）
- */
-static void mig_wl_eval_task(void *context, DWORD now_ms)
-{
-    (void)now_ms;
-    mig_wl_eval((mig_handle_s *)context);
-}
-
-/**
- * @brief timer 回调：predict 求值
- *
- * @param context mig_handle_s *
- * @param now_ms  timer 快照（未使用）
- */
-static void mig_predict_eval_task(void *context, DWORD now_ms)
-{
-    (void)now_ms;
-    mig_predict_eval((mig_handle_s *)context);
-}
-
-/**
- * @brief 注册 GC/WL/predict 三个 timer 任务（幂等）
- *
- * @param m handle
- * @return true 已注册 / 本次成功；false timer 表满
- */
-BOOL mig_timer_register(mig_handle_s *m)
-{
-    ASSERT(m != NULL);
-
-    if (m->state.timers_registered)
-    {
-        return true;
-    }
-
-    DWORD task_id;
-
-    // 注册顺序 = 同轮仲裁顺序：GC 先跑，抢到单飞行后 WL/predict 看到 active 即让路。
-    if (!timer_scheduler_add(mig_eval_task, m, 0U, GC_EVAL_INTERVAL_MS, &task_id))
-    {
-        return false;
-    }
-    if (!timer_scheduler_add(mig_wl_eval_task, m, 0U, WL_EVAL_INTERVAL_MS, &task_id))
-    {
-        return false;
-    }
-    if (!timer_scheduler_add(mig_predict_eval_task, m, 0U, RR_SCAN_INTERVAL_MS, &task_id))
-    {
-        return false;
-    }
-
-    m->state.timers_registered = true;
-    return true;
 }
 
 /* ── 7. 完成服务（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）── */
@@ -2906,6 +2688,227 @@ static void mig_erase_complete(mig_handle_s *m, fc_cmd_s *cmd, const fc_cmd_stat
     timer_deadline_clear(&m->job.submit_deadline);
     m->job.plane = (plane + 1U);
     mig_job_step(m);
+}
+
+/**
+ * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+mig_handle_s *mig_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_mig_handle[die];
+}
+
+#if defined(FC_NAND_TEST_ENABLE)
+void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e kind, const char *reason, DWORD triggers)
+{
+    mig_job_start(m, victim, kind, reason, triggers);
+}
+#endif
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief 注册本实例的 GC/WL 统计（值在 mig state.counters）
+ *
+ * 由 FTL 组合根在实例装配完成后调用：直接调用 mig_init 的测试用例
+ * 不应把栈上的 handle 地址注册进来。
+ *
+ * @param m    已初始化的迁移引擎（生产路径为实例自持对象）
+ * @param inst 实例号（紧凑 die 号）
+ */
+void mig_stats_register(mig_handle_s *m, BYTE inst)
+{
+    (void)stats_register("ftl.gc", inst, &m->state.counters, s_stats_gc_names, STATS_ENTRY_COUNT(s_stats_gc_names));
+    (void)stats_register_hist("ftl.gc", inst, &m->state.counters, s_stats_gc_hist_names, STATS_ENTRY_COUNT(s_stats_gc_hist_names));
+}
+#endif /* SSD_STATS_ENABLE */
+
+/* ── 6. typed handle（端口装配 / 触发 / 自持节拍 / 上报）── */
+
+/**
+ * @brief 装配 migrate handle
+ *
+ * 整块清零、绑定端口、失败块表置无效；不碰介质。
+ *
+ * @param m            handle
+ * @param alloc        分配器
+ * @param journal      Journal
+ * @param cache        L2P cache
+ * @param total_writes 累计写计数指针
+ */
+void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes)
+{
+    // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
+    // （cache / journal / alloc / total_writes 均为实例内嵌对象的地址）⇒ 不重复检查。
+    memset(m, 0, sizeof(*m));
+    m->alloc        = alloc;
+    m->journal      = journal;
+    m->cache        = cache;
+    m->total_writes = total_writes;
+    m->topo         = alc_topo(alloc);
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        m->state.failure.fail_gblock[plane] = UINT16_MAX;
+    }
+    log_ratelimit_init(&m->state.session.rl, LOG_RATE_SLOW_INTERVAL_MS);
+    log_heartbeat_end(&m->job.hb);
+    m->state.error = FTL_OK;
+}
+
+/**
+ * @brief 置紧急 GC 请求位
+ *
+ * 只排队，下一轮求值才真正触发。
+ *
+ * @param m handle
+ */
+void mig_gc_request_urgent(mig_handle_s *m)
+{
+    // 句柄由调用者持有：生产路径恒为 &ftl->mig_*；wb_flush 的可选端口分支已在
+    // 调用点判空，这里不重复返回码（H2）。NULL 写进来会落到 urgent_gc 的偏移
+    // （本结构该字段偏移 0x4220）⇒ 直接踩 ITCM 代码，必须当场停。
+    ASSERT(m != NULL);
+    m->state.urgent_gc = true;
+}
+
+/**
+ * @brief 搬移引擎每轮入口
+ *
+ * 只做在飞推进、会话收尾、紧急 GC；周期求值见 mig_eval。
+ *
+ * @param m     handle
+ * @param level 本轮后台档位
+ */
+void mig_handle(mig_handle_s *m, bg_level_e level)
+{
+    const DWORD now_ms = platform_now_ms();
+
+    // 发布本轮档位：mig_eval 由 timer 表在 ftl_service 之后调用，从 handle 读取。
+    m->state.level = level;
+
+    // ① 在飞：只服务当前 job（提交即返回）。
+    if (m->job.active)
+    {
+        // 心跳（见 log.h / timer.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见。
+        // ⚠ 只报「真的卡住」：单个 victim 正常 1 s 内完成，逐 victim 的 1 s 心跳在持续
+        // GC 时会变成 1 行/秒。job age ≥ SLOW_AFTER 才打；之后 helper 自动降到 5 s。
+        if (log_heartbeat_due(&m->job.hb) && (log_heartbeat_age_ms(&m->job.hb) >= LOG_RATE_SLOW_AFTER_MS))
+        {
+            LOGI(LOG_TAG_MIG "job kind=%d phase=%d page=%hhu plane=%hhu aborted=%d age=%lums\r\n", m->job.kind, m->job.phase, m->job.page, m->job.plane, m->job.aborted, log_heartbeat_age_ms(&m->job.hb));
+        }
+
+        mig_job_step(m);
+        mig_gc_session_progress(m, now_ms);
+
+        return;
+    }
+
+    // 会话收尾必须在 paused 早退之前：熔断后仍要留下本次会话的结束行。
+    mig_gc_session_end(m, now_ms);
+    mig_gc_session_progress(m, now_ms);
+
+    // ② 系统性命中熔断：不再启动任何 GC/WL/predict（重启才清）。
+    if (m->state.failure.paused)
+    {
+        return;
+    }
+
+    // ③ 紧急 GC：写路径分配不到页对（wbuf 调 mig_gc_request_urgent）时，必须在 BUSY 档也处理。
+    // 否则 host 持续写 → load_level 恒 BUSY → 本函数每次早退 → urgent_gc 永不被消费
+    // ⇒ free_count 卡在目标线附近、写请求永久 FTL_AGAIN（CDM "Preparing" 卡住的现场）。
+    // BUSY 只让**周期评估**（T1/T4/WL/predict）让路，不让“写不进去”的急救让路。
+    if (m->state.urgent_gc)
+    {
+        m->state.urgent_gc = false;
+
+        // free 仍高于紧急线时按 OFF（不筛），因为 urgent 的语义是「写不进去」，
+        // 不是「空闲补池」。
+        const gc_benefit_mode_e mode = (m->alloc->free_count <= FREE_POOL_EMERGENCY) ? GC_BENEFIT_EMERGENCY : GC_BENEFIT_OFF;
+        (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_URGENT, 0U);
+
+        return;
+    }
+
+    // 平台时钟完全缺失时 timer 任务永不到期：退回每轮求值，保证 GC 不停摆
+    // （与旧节拍「无时钟 ⇒ 每轮求值」的取舍一致）。
+    if (now_ms == 0U)
+    {
+        mig_eval(m);
+    }
+}
+
+/**
+ * @brief GC 周期求值入口（timer 10ms）
+ *
+ * WL/predict 由各自 timer 任务驱动；三者共享 job.active 单飞行。
+ *
+ * @param m handle
+ */
+void mig_eval(mig_handle_s *m)
+{
+    const DWORD now_ms = platform_now_ms();
+    // 与 mig_handle 的早退条件一致：在飞 / 熔断 / 紧急 GC 时不启动新工作。
+    if (m->job.active || m->state.failure.paused || m->state.urgent_gc)
+    {
+        return;
+    }
+
+    // ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
+    // GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
+    // 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。
+    if ((m->state.level == BG_LEVEL_BUSY) && (m->alloc->free_count >= FREE_POOL_TARGET))
+    {
+        return;
+    }
+
+    // ⑤ 周期评估 GC；WL/predict 由各自的 timer 任务按 5 s / 1 s 节拍进入。
+    BOOL        host_writing = false;
+    const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
+
+    if (trig != 0U)
+    {
+        const gc_benefit_mode_e mode = mig_gc_mode_select(trig, host_writing);
+
+        (void)mig_gc_begin(m, mode, now_ms, MIG_GC_START_PERIODIC, trig);
+    }
+}
+
+/**
+ * @brief 注册 GC/WL/predict 三个 timer 任务（幂等）
+ *
+ * @param m handle
+ * @return true 已注册 / 本次成功；false timer 表满
+ */
+BOOL mig_timer_register(mig_handle_s *m)
+{
+    ASSERT(m != NULL);
+
+    if (m->state.timers_registered)
+    {
+        return true;
+    }
+
+    DWORD task_id;
+
+    // 注册顺序 = 同轮仲裁顺序：GC 先跑，抢到单飞行后 WL/predict 看到 active 即让路。
+    if (!timer_scheduler_add(mig_eval_task, m, 0U, GC_EVAL_INTERVAL_MS, &task_id))
+    {
+        return false;
+    }
+    if (!timer_scheduler_add(mig_wl_eval_task, m, 0U, WL_EVAL_INTERVAL_MS, &task_id))
+    {
+        return false;
+    }
+    if (!timer_scheduler_add(mig_predict_eval_task, m, 0U, RR_SCAN_INTERVAL_MS, &task_id))
+    {
+        return false;
+    }
+
+    m->state.timers_registered = true;
+    return true;
 }
 
 /**

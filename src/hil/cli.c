@@ -49,10 +49,12 @@
 #endif
 
 #define USART_CLI_LINE_CAPACITY 128U
+
 /* 单条命令行最多几个 token。`test` 子命令要能容下
  * `--seed/--iterations/--single/--list/--list-params/--log-visible/--log-project`
  * 加多组 `--param name value` 再过套件名，10 不够（两组 --param 就顶满）。 */
 #define UART_CLI_MAX_ARGUMENTS 24U
+
 #define UART_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 /* uart_log_write 需要显式长度；字面量统一由本宏取 sizeof，避免手写长度与文本脱节
@@ -63,25 +65,64 @@
  * 它自己打印破坏性警告，并带 BUSY 守卫（有在飞 host 请求时拒绝）。
  * bbt erase / fault 仍是调试/工厂诊断，只在 debug/bench 档暴露。 */
 #define UART_CLI_FORMAT_ENABLE 1U
-#if defined(NDEBUG)
-#    define UART_CLI_DESTRUCTIVE_ENABLE 0U
-#else
-#    define UART_CLI_DESTRUCTIVE_ENABLE 1U
-#endif
 
 /*
- * QWORD（host LBA）一律用 %llu；DWORD 用 %lu。完整 newlib 支持标准长度修饰符。
- * ssd_ctl_s.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
- * 故仍用 _Static_assert 钉住 FTL_LBA_MAX 装得进 32 位。
+ * 命令行为位（**本仓自拟**：U-Boot 的命令表只有 repeatable 一个行为位，
+ * Zephyr 无对应字段；这里是因为调试 CLI 与 USB host 共用同一个 controller）。
+ * `flags` 用 BYTE 存 ⇒ 结构体仍 20 B；判定走 UART_CLI_CMD_HAS_FLAG
+ * （H15：位语义由宏名表达）。
  */
-_Static_assert(FTL_LBA_MAX_AT_MAX <= UINT32_MAX, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
+#define UART_CLI_FLAG_NONE 0x00U
 
-/* 行编辑状态：g_cli_line 累积当前行（不含行尾 '\n'），g_cli_length 是已收字节数。
- * 行超过 USART_CLI_LINE_CAPACITY-1 时置 g_cli_discarding 并丢弃到下一个 '\n'
- * —— 否则截断后的半行会被当成一条完整命令执行。 */
-static char g_cli_line[USART_CLI_LINE_CAPACITY];
-static WORD g_cli_length;
-static BYTE g_cli_discarding;
+#define UART_CLI_FLAG_BUSY 0x01U /* 提交前要求 controller 无在飞 host 请求 */
+
+#define UART_CLI_FLAG_DESTRUCTIVE 0x02U /* 危险操作标记：当前无命令使用（format 走 BUSY+自身警告，bbt 子命令编译期隐藏），留给未来命令 */
+
+#define UART_CLI_CMD_HAS_FLAG(command, flag) (((command)->flags & (flag)) != 0U)
+
+/* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
+#define UART_CLI_MAX_SECTORS ((sizeof(g_wr_buf) / FTL_IU_BYTES))
+
+/* CLI 固定 pattern：plane0 / plane1 两个半区；wp 每个组用自己的基准字节。 */
+#define UART_CLI_PATTERN_LO (0x55555555U)
+
+#define UART_CLI_PATTERN_HI (0xAAAAAAAAU)
+
+#define UART_CLI_WP_PATTERN_BASE (0xA0U)
+
+/* pc 的聚合视图 top-N；原始序列默认只打最近 64 个，`pc all` 打全部。 */
+#define UART_CLI_PC_TOP (8U)
+
+#define UART_CLI_PC_RAW_TAIL (64U)
+
+/* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */
+#define UART_CLI_ECC_BINS (7U)
+
+#define UART_CLI_ECC_TOP (4U)
+
+/* wear 的 EC 分档上边界（本仓自选的展示分档；WL_THRESHOLD=200 落在 200..499 档）。 */
+#define UART_CLI_WEAR_BINS (7U)
+
+#define UART_CLI_WEAR_TOP (4U)
+
+/* ── 帮助输出用的常量 ── */
+#define UART_CLI_HELP_LINE_CAPACITY (128U)
+
+/*
+ * 长语法串外提：AlignArrayOfStructures 按最长单元格对齐整表，160 字符的 test
+ * 语法留在行内会把全表撑到 200+ 列。test 的选项是 munit 适配层既有契约，原样保留。
+ *
+ * bbt 的语法随构建档切换：release 的 help 不列出不可用的子命令。
+ */
+#define UART_CLI_SYNTAX_TEST "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]"
+
+#define UART_CLI_SYNTAX_ADDR "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]"
+
+/*
+ * 仅支持空格和 Tab 分隔，不支持引号、转义或二进制参数。该约束让调试 CLI 保持小且可预测；
+ * 产测或固件下载应使用独立的二进制帧协议，而不是继续扩展这个文本解析器。
+ */
+#define UART_CLI_ARGC_INVALID (UINT32_MAX)
 
 /*
  * 命令表把「命令字符串 -> 语法 -> 说明 -> 参数约束 -> 行为位 -> 处理函数」集中管理。
@@ -103,18 +144,6 @@ typedef enum UART_CLI_GROUP_E
     UART_CLI_GROUP_COUNT
 } uart_cli_group_e;
 
-/*
- * 命令行为位（**本仓自拟**：U-Boot 的命令表只有 repeatable 一个行为位，
- * Zephyr 无对应字段；这里是因为调试 CLI 与 USB host 共用同一个 controller）。
- * `flags` 用 BYTE 存 ⇒ 结构体仍 20 B；判定走 UART_CLI_CMD_HAS_FLAG
- * （H15：位语义由宏名表达）。
- */
-#define UART_CLI_FLAG_NONE        0x00U
-#define UART_CLI_FLAG_BUSY        0x01U /* 提交前要求 controller 无在飞 host 请求 */
-#define UART_CLI_FLAG_DESTRUCTIVE 0x02U /* 危险操作标记：当前无命令使用（format 走 BUSY+自身警告，bbt 子命令编译期隐藏），留给未来命令 */
-
-#define UART_CLI_CMD_HAS_FLAG(command, flag) (((command)->flags & (flag)) != 0U)
-
 typedef struct UART_CLI_COMMAND_S
 {
     const char           *name;
@@ -127,38 +156,95 @@ typedef struct UART_CLI_COMMAND_S
     uart_cli_handler_fn_t handler;
 } uart_cli_cmd_s;
 
-static void uart_cli_help(int argc, char *argv[]);
-static void uart_cli_status(int argc, char *argv[]);
-static void uart_cli_version(int argc, char *argv[]);
-static void uart_cli_log(int argc, char *argv[]);
-static void uart_cli_wr(int argc, char *argv[]);
-static void uart_cli_rd(int argc, char *argv[]);
-static void uart_cli_tr(int argc, char *argv[]);
-static void uart_cli_fl(int argc, char *argv[]);
-static void uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
-static void uart_cli_info(int argc, char *argv[]);
-static void uart_cli_map(int argc, char *argv[]);     /* L2P 映射 + 目标块 BST 条目（只读诊断） */
-static void uart_cli_addr(int argc, char *argv[]);    /* PBA/PAA/gblock 地址字段转换（只读诊断） */
-static void uart_cli_rdpaa(int argc, char *argv[]);   /* 按 PAA 读一个 NAND 页（诊断） */
-static void uart_cli_crash(int argc, char *argv[]);   /* .noinit 崩溃记录查看/清除 */
-static void uart_cli_pc(int argc, char *argv[]);      /* PC 采样热点（死循环定位） */
-static void uart_cli_q(int argc, char *argv[]);       /* 队列 / 三池 / 背压水位 */
-static void uart_cli_cp(int argc, char *argv[]);      /* Checkpoint job 现场 */
-static void uart_cli_jrn(int argc, char *argv[]);     /* Journal 环 / WAL / 水位 */
-static void uart_cli_ftl_ctx(int argc, char *argv[]); /* FTL 模块关键现场（可过滤） */
-static void uart_cli_stat(int argc, char *argv[]);    /* 计数类诊断（从 info 拆出） */
-#if SSD_STATS_ENABLE
-static void uart_cli_stats(int argc, char *argv[]); /* 模块统计（前缀 / 差分 / 清零） */
+/* wr/rd/tr/fl 的 pending 记录：handler 提交后在本函数内用 ssd_runtime_pump
+ * 自旋等待完成（同步语义），完成后由 uart_cli_pending_poll 打印并释放。 */
+typedef struct UART_CLI_PENDING_S
+{
+    BYTE              busy;    /* 1=有未决 CLI 请求 */
+    ssd_host_entry_s *entry;   /* HIL host queue entry（tag/owner/request） */
+    BYTE              compare; /* rd: 1=compare 模式，0=hex dump */
+    QWORD             lba;     /* 本次请求起始 LBA（结果打印用） */
+    DWORD             nblocks; /* 本次请求块数 */
+} uart_cli_pend_s;
+
+/*
+ * QWORD（host LBA）一律用 %llu；DWORD 用 %lu。完整 newlib 支持标准长度修饰符。
+ * ssd_ctl_s.host_lba_max 仍是 DWORD（32-bit LBA × 512B = 2 TiB 上限），
+ * 故仍用 _Static_assert 钉住 FTL_LBA_MAX 装得进 32 位。
+ */
+_Static_assert(FTL_LBA_MAX_AT_MAX <= UINT32_MAX, "FTL_LBA_MAX 超出 32 位，host_lba_max 装不下");
+
+/* 行编辑状态：g_cli_line 累积当前行（不含行尾 '\n'），g_cli_length 是已收字节数。
+ * 行超过 USART_CLI_LINE_CAPACITY-1 时置 g_cli_discarding 并丢弃到下一个 '\n'
+ * —— 否则截断后的半行会被当成一条完整命令执行。 */
+static char g_cli_line[USART_CLI_LINE_CAPACITY];
+
+static WORD g_cli_length;
+
+static BYTE g_cli_discarding;
+
+/*
+ * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
+ *
+ * 固定 pattern 写 buffer：16KB，落 **AXI_RAM .bss**（启动清零；cli_init 仍主动预填
+ * 0x55/0xAA）。SRAM1+SRAM2 已分给 FTL tables（2×123,896 B），只剩 14KB 余量，
+ * 放不下 16KB CLI 缓冲（见 main.c 内存断言）。
+ *
+ * ⚠ CW 级映射（IU = 1 CW = 512B）：`wr lba n` / `rd lba n` 的 n 单位是**扇区**
+ *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**。
+ *   超出由 controller 的 buffer_size 校验拒绝（写爆 g_wr_buf 是真实隐患）。
+ */
+static BYTE g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM]; /* 16KB → AXI .bss */
+
+/* ── wp 诊断缓冲（§七 方案 A 合并可观测性）──
+ *
+ * 一个 pair 窗口 = FTL_LBA_PER_PAIR（= 8）个 CW = 8 扇区。wp 一次提交 k 个组、
+ * 每组 n 个扇区（k*n ≤ 8），各组的源数据取自本缓冲的**不相交切片**（组 i 用
+ * 扇区段 [i*n, i*n+n)）。切片内容按组号填不同字节，便于 rd 回读时肉眼分辨
+ * 「哪一段是哪个组写的」——若打包把 CW 错位，回读会看到串段的字节。 */
+static BYTE g_wp_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 × 512B = 4KB */
+
+/* 每组一个完成标志/状态（wp 不等待，仅作在飞期间的写回目标，避免悬垂指针）。 */
+static volatile BYTE g_wp_done[FTL_LBA_PER_PAIR];
+
+static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
+
+/* 在飞组数：wp 绕过 CLI 的 pending gate（要在飞多组），但 g_wp_buf 的切片
+ * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp。 */
+static BYTE g_wp_inflight;
+
+static uart_cli_pend_s g_cli_pending;
+
+/* 控制器状态名：info 与 id 共用（同一映射只写一处）。 */
+static const char *const g_controller_state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
+
+/*
+ * 命令表。约定：
+ *   · 一级命令用短词；动作/模式是裸子命令（bbt erase / crash clear / addr pba）；
+ *     修饰项用 `--全词`（--compare / --verify / --raw）。
+ *   · help 只写「动词 + 宾语」，不枚举选项（选项只出现在 syntax）。
+ *   · flags 是命令级策略，由 dispatcher 单点执行；bbt erase 的破坏性检查在
+ *     handler 内（命令级 flag 会把只读 bbt 一起拒掉）。
+ *   · `format` 在所有构建档注册（UART_CLI_FORMAT_ENABLE），release 现场恢复也要用；
+ *     bbt erase/fault 只在 debug/bench 档暴露（UART_CLI_DESTRUCTIVE_ENABLE）。
+ *     量产档的自动恢复路径仍在 main.c（pfr_media_check_format）。
+ */
+#if defined(NDEBUG)
+#    define UART_CLI_DESTRUCTIVE_ENABLE 0U
+#else
+#    define UART_CLI_DESTRUCTIVE_ENABLE 1U
 #endif
-static void uart_cli_id(int argc, char *argv[]);   /* 编译期配置 / 容量 / 介质版本 */
-static void uart_cli_ecc(int argc, char *argv[]);  /* per-block ECC 健康（E1） */
-static void uart_cli_wear(int argc, char *argv[]); /* 擦除 / read-disturb / WL 差值 */
-#if defined(FC_NAND_TEST_ENABLE)
-static void uart_cli_test(int argc, char *argv[]);
+#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
+#    define UART_CLI_SYNTAX_BBT "bbt [erase | fault <plane> <block>]"
+#else
+#    define UART_CLI_SYNTAX_BBT "bbt"
 #endif
+
+static const uart_cli_cmd_s g_uart_cli_commands[];
 
 /* 同步命令自带泵：在 handler 内推进后台服务，直到本命令完成。 */
 static void uart_cli_wait_host(void);
+
 static void uart_cli_wait_wp(void);
 
 /**
@@ -182,85 +268,6 @@ static void uart_print_status(void)
     LOGI("uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n", stats.rx_overflow, stats.tx_dropped, stats.tx_context_errors, stats.tx_flush_timeouts, stats.tx_dma_errors, stats.tx_transport_errors, stats.overrun_errors, stats.framing_errors, stats.noise_errors, stats.parity_errors);
 }
 
-/*
- * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
- *
- * 固定 pattern 写 buffer：16KB，落 **AXI_RAM .bss**（启动清零；cli_init 仍主动预填
- * 0x55/0xAA）。SRAM1+SRAM2 已分给 FTL tables（2×123,896 B），只剩 14KB 余量，
- * 放不下 16KB CLI 缓冲（见 main.c 内存断言）。
- *
- * ⚠ CW 级映射（IU = 1 CW = 512B）：`wr lba n` / `rd lba n` 的 n 单位是**扇区**
- *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**。
- *   超出由 controller 的 buffer_size 校验拒绝（写爆 g_wr_buf 是真实隐患）。
- */
-static BYTE g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM]; /* 16KB → AXI .bss */
-
-/* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
-#define UART_CLI_MAX_SECTORS ((sizeof(g_wr_buf) / FTL_IU_BYTES))
-
-/* CLI 固定 pattern：plane0 / plane1 两个半区；wp 每个组用自己的基准字节。 */
-#define UART_CLI_PATTERN_LO      (0x55555555U)
-#define UART_CLI_PATTERN_HI      (0xAAAAAAAAU)
-#define UART_CLI_WP_PATTERN_BASE (0xA0U)
-
-/* ── wp 诊断缓冲（§七 方案 A 合并可观测性）──
- *
- * 一个 pair 窗口 = FTL_LBA_PER_PAIR（= 8）个 CW = 8 扇区。wp 一次提交 k 个组、
- * 每组 n 个扇区（k*n ≤ 8），各组的源数据取自本缓冲的**不相交切片**（组 i 用
- * 扇区段 [i*n, i*n+n)）。切片内容按组号填不同字节，便于 rd 回读时肉眼分辨
- * 「哪一段是哪个组写的」——若打包把 CW 错位，回读会看到串段的字节。 */
-static BYTE g_wp_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 × 512B = 4KB */
-/* 每组一个完成标志/状态（wp 不等待，仅作在飞期间的写回目标，避免悬垂指针）。 */
-static volatile BYTE         g_wp_done[FTL_LBA_PER_PAIR];
-static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
-
-/* 在飞组数：wp 绕过 CLI 的 pending gate（要在飞多组），但 g_wp_buf 的切片
- * 在**未下发的 run** 里仍被组持有 ⇒ 上一批没走完前不许再 wp。 */
-static BYTE g_wp_inflight;
-
-/* wr/rd/tr/fl 的 pending 记录：handler 提交后在本函数内用 ssd_runtime_pump
- * 自旋等待完成（同步语义），完成后由 uart_cli_pending_poll 打印并释放。 */
-typedef struct UART_CLI_PENDING_S
-{
-    BYTE              busy;    /* 1=有未决 CLI 请求 */
-    ssd_host_entry_s *entry;   /* HIL host queue entry（tag/owner/request） */
-    BYTE              compare; /* rd: 1=compare 模式，0=hex dump */
-    QWORD             lba;     /* 本次请求起始 LBA（结果打印用） */
-    DWORD             nblocks; /* 本次请求块数 */
-} uart_cli_pend_s;
-
-static uart_cli_pend_s g_cli_pending;
-
-/**
- * @brief CLI 是否有未决 host 请求（含 wp 直连 FTL 的在飞组）
- *
- * USB 前端用本谓词让路；wp 不经过 controller，必须单独计入，否则 USB 会在
- * wp 组仍持有 g_wp_buf 时提交 controller。
- *
- * @return true = g_cli_pending 有未决请求，或 wp 组仍在飞
- */
-BOOL cli_host_busy(void)
-{
-    return (g_cli_pending.busy != 0U) || (g_wp_inflight != 0U);
-}
-
-/**
- * @brief 预填 g_wr_buf 的 0x55/0xAA pattern
- */
-static void uart_cli_pattern_init(void)
-{
-    DWORD  i;
-    DWORD  words_per_half = ((FTL_READ_USER_SIZE * CW_NUM) / sizeof(DWORD)); /* 8KB/4 = 2048 */
-    DWORD *lo             = (DWORD *)(void *)g_wr_buf;
-    DWORD *hi             = (DWORD *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
-
-    for (i = 0U; i < words_per_half; i++)
-    {
-        lo[i] = UART_CLI_PATTERN_LO;
-        hi[i] = UART_CLI_PATTERN_HI;
-    }
-}
-
 /**
  * @brief 取 compare 模式在给定偏移的期望 pattern 字
  *
@@ -281,6 +288,84 @@ static DWORD uart_cli_expect_word(DWORD byte_offset)
 static ftl_ctx_s *uart_cli_ftl_for_lba(QWORD lba)
 {
     return g_ctrl.ftl[lba_2_die(lba)];
+}
+
+/**
+ * @brief wp 组完成回调：递减在飞计数
+ *
+ * @param ctx 回调上下文
+ */
+static void uart_cli_wp_complete(void *ctx)
+{
+    (void)ctx;
+
+    if (g_wp_inflight > 0U)
+    {
+        g_wp_inflight--;
+    }
+}
+
+#if SSD_STATS_PERSIST_ENABLE
+/**
+ * @brief smart — 终身计数（掉电保持的 SMART 类数据）
+ *
+ * 数据源是 CP Header 里的 lifetime 块；每次 CP 落盘，掉电最多丢一个 CP 间隔。
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
+static void uart_cli_smart(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    lifetime_print(DIE_MAX);
+}
+#endif /* SSD_STATS_PERSIST_ENABLE */
+
+/**
+ * @brief 同步等待 wp 的全部在飞组完成。
+ *
+ * @note 组完成回调只递减 g_wp_inflight；FTL 推进由 ssd_runtime_pump 负责。
+ */
+static void uart_cli_wait_wp(void)
+{
+    while (g_wp_inflight != 0U)
+    {
+        ssd_runtime_pump();
+        storage_wdg_kick();
+    }
+}
+
+/**
+ * @brief status 命令：UART 错误/队列计数
+ *
+ * @param argc 参数个数（含命令名）
+ * @param argv 参数向量
+ */
+static void uart_cli_status(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    uart_print_status();
+    return;
+}
+
+/**
+ * @brief 预填 g_wr_buf 的 0x55/0xAA pattern
+ */
+static void uart_cli_pattern_init(void)
+{
+    DWORD  i;
+    DWORD  words_per_half = ((FTL_READ_USER_SIZE * CW_NUM) / sizeof(DWORD)); /* 8KB/4 = 2048 */
+    DWORD *lo             = (DWORD *)(void *)g_wr_buf;
+    DWORD *hi             = (DWORD *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
+
+    for (i = 0U; i < words_per_half; i++)
+    {
+        lo[i] = UART_CLI_PATTERN_LO;
+        hi[i] = UART_CLI_PATTERN_HI;
+    }
 }
 
 /**
@@ -515,21 +600,6 @@ static void uart_cli_tr(int argc, char *argv[])
 }
 
 /**
- * @brief wp 组完成回调：递减在飞计数
- *
- * @param ctx 回调上下文
- */
-static void uart_cli_wp_complete(void *ctx)
-{
-    (void)ctx;
-
-    if (g_wp_inflight > 0U)
-    {
-        g_wp_inflight--;
-    }
-}
-
-/**
  * @brief wp <lba> <n> <k> — 页打包写缓冲合并诊断
  *
  * 一次提交 k 个「同一 pair 窗口内、各 n 个连续 LBA」的小写，**直接调 ftl_submit_write
@@ -673,8 +743,6 @@ static void uart_cli_fl(int argc, char *argv[])
     return;
 }
 
-/* 控制器状态名：info 与 id 共用（同一映射只写一处）。 */
-static const char *const g_controller_state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
 _Static_assert(UART_ARRAY_SIZE(g_controller_state_names) == (SSD_CONTROLLER_FAILED + 1U), "控制器状态名表必须覆盖全部状态");
 
 /**
@@ -993,10 +1061,6 @@ static void uart_cli_stack(int argc, char *argv[])
     LOGI("[STK ] heap_used=%lu B (heap+stack share DTCM)\r\n", syscalls_heap_used());
     return;
 }
-
-/* pc 的聚合视图 top-N；原始序列默认只打最近 64 个，`pc all` 打全部。 */
-#define UART_CLI_PC_TOP      (8U)
-#define UART_CLI_PC_RAW_TAIL (64U)
 
 /**
  * @brief pc [live] [all | top] | pc clear | pc rate [n] — PC 采样（死循环 / 跑飞定位）。
@@ -1664,24 +1728,6 @@ static void uart_cli_stat(int argc, char *argv[])
     usb_msc_io_stats_print(); /* WRITE(10) 分块直方图 */
 }
 
-#if SSD_STATS_PERSIST_ENABLE
-/**
- * @brief smart — 终身计数（掉电保持的 SMART 类数据）
- *
- * 数据源是 CP Header 里的 lifetime 块；每次 CP 落盘，掉电最多丢一个 CP 间隔。
- *
- * @param argc 参数个数（含命令名）
- * @param argv 参数向量
- */
-static void uart_cli_smart(int argc, char *argv[])
-{
-    (void)argc;
-    (void)argv;
-
-    lifetime_print(DIE_MAX);
-}
-#endif /* SSD_STATS_PERSIST_ENABLE */
-
 #if SSD_STATS_ENABLE
 /**
  * @brief stats — 模块统计（只读；可选前缀过滤 / 差分 / 清零）
@@ -1815,10 +1861,6 @@ static void uart_cli_id(int argc, char *argv[])
     LOGI("id media layout=v%lu timing=%s state=%s\r\n", ftl_media_layout_version(), mode_text, state_name);
 }
 
-/* ECC last-ecc 直方图分档：0/1/2/3/4/5/>=6（6 = RR_ECC_HIGH_WATER）。 */
-#define UART_CLI_ECC_BINS (7U)
-#define UART_CLI_ECC_TOP  (4U)
-
 /**
  * @brief ecc — per-block ECC 健康（只读，E1 口径）。
  *
@@ -1942,10 +1984,6 @@ static void uart_cli_ecc(int argc, char *argv[])
         LOGI("ecc[%hhu][%hhu][%hhu] top g/ecc/rise/health/rc: %s\r\n", ch, ce, lun, line);
     }
 }
-
-/* wear 的 EC 分档上边界（本仓自选的展示分档；WL_THRESHOLD=200 落在 200..499 档）。 */
-#define UART_CLI_WEAR_BINS (7U)
-#define UART_CLI_WEAR_TOP  (4U)
 
 /**
  * @brief wear — 擦除计数 / read-disturb / WL 触发差值（只读）。
@@ -2286,94 +2324,6 @@ static void uart_cli_wait_host(void)
 }
 
 /**
- * @brief 同步等待 wp 的全部在飞组完成。
- *
- * @note 组完成回调只递减 g_wp_inflight；FTL 推进由 ssd_runtime_pump 负责。
- */
-static void uart_cli_wait_wp(void)
-{
-    while (g_wp_inflight != 0U)
-    {
-        ssd_runtime_pump();
-        storage_wdg_kick();
-    }
-}
-
-/* ── 帮助输出用的常量 ── */
-#define UART_CLI_HELP_LINE_CAPACITY (128U)
-
-/*
- * 长语法串外提：AlignArrayOfStructures 按最长单元格对齐整表，160 字符的 test
- * 语法留在行内会把全表撑到 200+ 列。test 的选项是 munit 适配层既有契约，原样保留。
- *
- * bbt 的语法随构建档切换：release 的 help 不列出不可用的子命令。
- */
-#define UART_CLI_SYNTAX_TEST "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [--log-project info|debug] [--param name value]... [test_name...]"
-#if (UART_CLI_DESTRUCTIVE_ENABLE != 0U)
-#    define UART_CLI_SYNTAX_BBT "bbt [erase | fault <plane> <block>]"
-#else
-#    define UART_CLI_SYNTAX_BBT "bbt"
-#endif
-#define UART_CLI_SYNTAX_ADDR "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]"
-
-/*
- * 命令表。约定：
- *   · 一级命令用短词；动作/模式是裸子命令（bbt erase / crash clear / addr pba）；
- *     修饰项用 `--全词`（--compare / --verify / --raw）。
- *   · help 只写「动词 + 宾语」，不枚举选项（选项只出现在 syntax）。
- *   · flags 是命令级策略，由 dispatcher 单点执行；bbt erase 的破坏性检查在
- *     handler 内（命令级 flag 会把只读 bbt 一起拒掉）。
- *   · `format` 在所有构建档注册（UART_CLI_FORMAT_ENABLE），release 现场恢复也要用；
- *     bbt erase/fault 只在 debug/bench 档暴露（UART_CLI_DESTRUCTIVE_ENABLE）。
- *     量产档的自动恢复路径仍在 main.c（pfr_media_check_format）。
- */
-static const uart_cli_cmd_s g_uart_cli_commands[] = {
-  /* ── 系统 ── */
-    {   "help",                                        "help [command]",                            "show command list or one command's syntax", 1U,  2U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_help},
-    { "status",                                                "status",                                   "show UART error and queue counters", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,  uart_cli_status},
-    {"version",                                               "version",                                        "show firmware console version", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM, uart_cli_version},
-    {    "log",               "log level <error|warn|info|debug|trace>",                                                "set runtime log level", 3U,  3U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,     uart_cli_log},
-    {  "stack",                                                 "stack",                         "show stack guard: paint region, peak, alarms", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_stack},
-    {  "crash",                                         "crash [clear]",                                  "show/clear the .noinit crash record", 1U,  2U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_crash},
-    {     "pc",                "pc [live] [all|top] | clear | rate [n]",                "show sampled PC sequence/hot spots (same-ELF resolve)", 1U,  3U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_pc},
-    {   "info",                                                  "info",                             "show controller + FTL identity and state", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_info},
-    {   "stat",                                                  "stat",                    "show runtime counters (uptime, GC, L2P, CMT, USB)", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_stat},
-    {     "id",                                                    "id",                         "show build config, capacity and media layout", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_id},
- /* ── host I/O（模拟 NVMe 命令，经 controller 全链路）── */
-    {     "wr",                                          "wr <lba> <n>",                                 "write n sectors with a fixed pattern", 3U,  3U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_wr},
-    {     "rd",                              "rd <lba> <n> [--compare]",                        "read n sectors (--compare checks the pattern)", 3U,  4U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_rd},
-    {     "tr",                                              "tr <lba>",                                                         "trim one lba", 2U,  2U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_tr},
-    {     "fl",                                                    "fl",                                    "flush dirty L2P + journal to NAND", 1U,  1U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_fl},
-    {     "wp",                                      "wp <lba> <n> <k>",                                   "submit k writes in one pair window", 4U,  4U, UART_CLI_FLAG_NONE,     UART_CLI_GROUP_HOST_IO,      uart_cli_wp},
- /* ── 诊断 ── */
-#if SSD_STATS_ENABLE
-    {  "stats", "stats [prefix] [--list|--clear|--delta|--csv|--brief]", "dump module statistics (prefix / list / delta / clear / csv / brief)", 1U,  3U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,   uart_cli_stats},
-#endif
-#if SSD_STATS_PERSIST_ENABLE
-    {  "smart",                                                 "smart",                                  "show lifetime counters (SMART-like)", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,   uart_cli_smart},
-#endif
-    {      "q",                                                     "q",                            "show FC queues, pools and pending backlog", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
-    {     "cp",                                                    "cp",                               "show checkpoint job state and sequence", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
-    {    "jrn",                                                   "jrn",                           "show journal ring, watermark and WAL state", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
-    {"ftl_ctx",                                      "ftl_ctx [module]",       "dump FTL context (alloc|pend|seq|cache|jrn|cp|mig|md|wb|sched)", 1U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG, uart_cli_ftl_ctx},
-    {    "map",                                             "map <lba>",                               "print L2P mapping + target block entry", 2U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
-    {   "addr",                                    UART_CLI_SYNTAX_ADDR,                                      "translate PBA/PAA/gblock fields", 3U,  6U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
-    {  "rdpaa",                                   "rdpaa <paa> [--raw]",                          "read one NAND page by PAA (--raw: raw bits)", 2U,  3U, UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
-    {   "pool",                                                  "pool",                           "print fixed-metadata candidate block pools", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_pool},
-    {    "bbt",                                     UART_CLI_SYNTAX_BBT,                                          "print factory bad block map", 1U,  4U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_bbt},
-    {    "ecc",                                                   "ecc",                "show per-block ECC health and corrected-bit histogram", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_ecc},
-    {   "wear",                                                  "wear",                   "show erase/read-disturb distribution and WL spread", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_wear},
- /* ── 破坏性（仅 debug/bench 档；量产档整行不注册）── */
-#if (UART_CLI_FORMAT_ENABLE != 0U)
-    { "format",                                     "format [--verify]",                          "erase all blocks and write initial metadata", 1U,  2U, UART_CLI_FLAG_BUSY, UART_CLI_GROUP_DESTRUCTIVE,  uart_cli_format},
-#endif
-  /* ── 测试（munit 适配层既有语法）── */
-#if defined(FC_NAND_TEST_ENABLE)
-    {   "test",                                    UART_CLI_SYNTAX_TEST,                                            "run munit unit test suite", 1U, 24U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_TEST,    uart_cli_test},
-#endif
-};
-
-/**
  * @brief 按名字查找命令表项
  *
  * @param name 命令名
@@ -2383,7 +2333,7 @@ static const uart_cli_cmd_s *uart_cli_find(const char *name)
 {
     DWORD index;
 
-    for (index = 0U; index < UART_ARRAY_SIZE(g_uart_cli_commands); index++)
+    for (index = 0U; g_uart_cli_commands[index].name != NULL; index++)
     {
         const uart_cli_cmd_s *command = &g_uart_cli_commands[index];
 
@@ -2408,7 +2358,7 @@ static void uart_cli_help_group(const char *group_name, BYTE group)
     BOOL  any  = false;
     DWORD index;
 
-    for (index = 0U; index < UART_ARRAY_SIZE(g_uart_cli_commands); index++)
+    for (index = 0U; g_uart_cli_commands[index].name != NULL; index++)
     {
         const uart_cli_cmd_s *command = &g_uart_cli_commands[index];
 
@@ -2466,20 +2416,6 @@ static void uart_cli_help(int argc, char *argv[])
         uart_cli_help_group(group_names[group], group);
     }
     UART_CLI_WRITE("use 'help <command>' for syntax and details\r\n");
-}
-
-/**
- * @brief status 命令：UART 错误/队列计数
- *
- * @param argc 参数个数（含命令名）
- * @param argv 参数向量
- */
-static void uart_cli_status(int argc, char *argv[])
-{
-    (void)argc;
-    (void)argv;
-    uart_print_status();
-    return;
 }
 
 /**
@@ -2641,11 +2577,6 @@ static void uart_cli_test(int argc, char *argv[])
 }
 #endif
 
-/*
- * 仅支持空格和 Tab 分隔，不支持引号、转义或二进制参数。该约束让调试 CLI 保持小且可预测；
- * 产测或固件下载应使用独立的二进制帧协议，而不是继续扩展这个文本解析器。
- */
-#define UART_CLI_ARGC_INVALID (UINT32_MAX)
 /**
  * @brief 按空格/Tab 分词命令行
  *
@@ -2746,6 +2677,20 @@ static void uart_execute_command(char *line)
 }
 
 /**
+ * @brief CLI 是否有未决 host 请求（含 wp 直连 FTL 的在飞组）
+ *
+ * USB 前端用本谓词让路；wp 不经过 controller，必须单独计入，否则 USB 会在
+ * wp 组仍持有 g_wp_buf 时提交 controller。
+ *
+ * @return true = g_cli_pending 有未决请求，或 wp 组仍在飞
+ */
+
+BOOL cli_host_busy(void)
+{
+    return (g_cli_pending.busy != 0U) || (g_wp_inflight != 0U);
+}
+
+/**
  * @brief 初始化 CLI（预填固定 pattern）
  */
 void cli_init(void)
@@ -2841,3 +2786,50 @@ _Noreturn void assertion_console_run(void)
         cli_service_poll();
     }
 }
+
+static const uart_cli_cmd_s g_uart_cli_commands[] = {
+  /* ── 系统 ── */
+    {   "help",                                        "help [command]",                            "show command list or one command's syntax", 1U,  2U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_help},
+    { "status",                                                "status",                                   "show UART error and queue counters", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,  uart_cli_status},
+    {"version",                                               "version",                                        "show firmware console version", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM, uart_cli_version},
+    {    "log",               "log level <error|warn|info|debug|trace>",                                                "set runtime log level", 3U,  3U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,     uart_cli_log},
+    {  "stack",                                                 "stack",                         "show stack guard: paint region, peak, alarms", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_stack},
+    {  "crash",                                         "crash [clear]",                                  "show/clear the .noinit crash record", 1U,  2U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,   uart_cli_crash},
+    {     "pc",                "pc [live] [all|top] | clear | rate [n]",                "show sampled PC sequence/hot spots (same-ELF resolve)", 1U,  3U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_pc},
+    {   "info",                                                  "info",                             "show controller + FTL identity and state", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_info},
+    {   "stat",                                                  "stat",                    "show runtime counters (uptime, GC, L2P, CMT, USB)", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,    uart_cli_stat},
+    {     "id",                                                    "id",                         "show build config, capacity and media layout", 1U,  1U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,      uart_cli_id},
+ /* ── host I/O（模拟 NVMe 命令，经 controller 全链路）── */
+    {     "wr",                                          "wr <lba> <n>",                                 "write n sectors with a fixed pattern", 3U,  3U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_wr},
+    {     "rd",                              "rd <lba> <n> [--compare]",                        "read n sectors (--compare checks the pattern)", 3U,  4U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_rd},
+    {     "tr",                                              "tr <lba>",                                                         "trim one lba", 2U,  2U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_tr},
+    {     "fl",                                                    "fl",                                    "flush dirty L2P + journal to NAND", 1U,  1U, UART_CLI_FLAG_BUSY,     UART_CLI_GROUP_HOST_IO,      uart_cli_fl},
+    {     "wp",                                      "wp <lba> <n> <k>",                                   "submit k writes in one pair window", 4U,  4U, UART_CLI_FLAG_NONE,     UART_CLI_GROUP_HOST_IO,      uart_cli_wp},
+ /* ── 诊断 ── */
+#if SSD_STATS_ENABLE
+    {  "stats", "stats [prefix] [--list|--clear|--delta|--csv|--brief]", "dump module statistics (prefix / list / delta / clear / csv / brief)", 1U,  3U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,   uart_cli_stats},
+#endif
+#if SSD_STATS_PERSIST_ENABLE
+    {  "smart",                                                 "smart",                                  "show lifetime counters (SMART-like)", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,   uart_cli_smart},
+#endif
+    {      "q",                                                     "q",                            "show FC queues, pools and pending backlog", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,       uart_cli_q},
+    {     "cp",                                                    "cp",                               "show checkpoint job state and sequence", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,      uart_cli_cp},
+    {    "jrn",                                                   "jrn",                           "show journal ring, watermark and WAL state", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_jrn},
+    {"ftl_ctx",                                      "ftl_ctx [module]",       "dump FTL context (alloc|pend|seq|cache|jrn|cp|mig|md|wb|sched)", 1U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG, uart_cli_ftl_ctx},
+    {    "map",                                             "map <lba>",                               "print L2P mapping + target block entry", 2U,  2U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_map},
+    {   "addr",                                    UART_CLI_SYNTAX_ADDR,                                      "translate PBA/PAA/gblock fields", 3U,  6U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_addr},
+    {  "rdpaa",                                   "rdpaa <paa> [--raw]",                          "read one NAND page by PAA (--raw: raw bits)", 2U,  3U, UART_CLI_FLAG_BUSY,        UART_CLI_GROUP_DIAG,   uart_cli_rdpaa},
+    {   "pool",                                                  "pool",                           "print fixed-metadata candidate block pools", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_pool},
+    {    "bbt",                                     UART_CLI_SYNTAX_BBT,                                          "print factory bad block map", 1U,  4U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_bbt},
+    {    "ecc",                                                   "ecc",                "show per-block ECC health and corrected-bit histogram", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,     uart_cli_ecc},
+    {   "wear",                                                  "wear",                   "show erase/read-disturb distribution and WL spread", 1U,  1U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_DIAG,    uart_cli_wear},
+ /* ── 破坏性（仅 debug/bench 档；量产档整行不注册）── */
+#if (UART_CLI_FORMAT_ENABLE != 0U)
+    { "format",                                     "format [--verify]",                          "erase all blocks and write initial metadata", 1U,  2U, UART_CLI_FLAG_BUSY, UART_CLI_GROUP_DESTRUCTIVE,  uart_cli_format},
+#endif
+  /* ── 测试（munit 适配层既有语法）── */
+#if defined(FC_NAND_TEST_ENABLE)
+    {   "test",                                    UART_CLI_SYNTAX_TEST,                                            "run munit unit test suite", 1U, 24U, UART_CLI_FLAG_NONE,        UART_CLI_GROUP_TEST,    uart_cli_test},
+#endif
+    {     NULL,                                                    NULL,                                                                   NULL, 0U,  0U, UART_CLI_FLAG_NONE,      UART_CLI_GROUP_SYSTEM,             NULL},
+};

@@ -47,89 +47,23 @@
 // 异步读完成与随后的写之间隔着若干轮服务循环，必须常驻。
 static BYTE s_page_scratch[FTL_DIE_MAX][FTL_READ_USER_SIZE];
 
-/**
- * @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return FTL_READ_USER_SIZE 字节的暂存区（非空）
- */
-BYTE *rr_workspace_get(BYTE die)
-{
-    ASSERT(die < FTL_DIE_MAX);
-    return s_page_scratch[die];
-}
-
 /* ── 文件级静态数据 ── */
 
 // 不可恢复读的限流日志：坏块上的 LBA 会被 host（文件系统元数据）反复读，
 // 逐次 LOGE 会写满 UART 并拖慢校验。5 s 一行 + suppressed；已 BAD 的块不再重复标坏。
 static DWORD s_rr_unrec_log_ms;
+
 static DWORD s_rr_unrec_suppressed;
 
-/* ── 1. 记录（ECC 趋势 / read disturb）── */
-
 /**
- * @brief 记录一次 ECC 位数，更新趋势（只升不降）
+ * @brief 判断不可恢复读日志是否该输出：5 s 一行；时钟缺失时每 64 条一行。
  *
- * 恢复由 rr_retire_block 复位。
- *
- * @param track    ECC 趋势
- * @param ecc_bits 本次 ECC bit 数
+ * @return true  本次输出
+ *         false 限流中，本次只累加抑制计数
  */
-void rr_record_ecc(rr_ecc_track_s *track, BYTE ecc_bits)
+static BOOL rr_unrec_log_is_due(void)
 {
-    // 层内接口：调用者一律传 &bst_block_s.rr（BST 常驻，恒非 NULL）
-
-    // 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数
-    if (ecc_bits > track->last_ecc)
-    {
-        track->rising_count++;
-    }
-    else
-    {
-        track->rising_count = 0U; /* 不上升就清空连续计数 */
-    }
-    track->last_ecc = ecc_bits;
-
-    // 健康状态**单调升级**：只取 max，绝不回落。
-    // ⚠ 逐条直接赋值会让 CRITICAL/DYING 块在后续几次低 ECC 连续上升时被打回
-    // WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖预测性退役信号。
-    rr_block_health_e level = track->health;
-
-    if ((track->rising_count >= RR_ECC_RISING_THRESHOLD) && (level < RR_BLOCK_WARNING))
-    {
-        level = RR_BLOCK_WARNING;
-    }
-    if ((ecc_bits >= RR_ECC_HIGH_WATER) && (level < RR_BLOCK_CRITICAL))
-    {
-        level = RR_BLOCK_CRITICAL;
-    }
-    if ((ecc_bits >= RR_ECC_MAX) && (level < RR_BLOCK_DYING))
-    {
-        level = RR_BLOCK_DYING;
-    }
-    track->health = level;
-}
-
-/**
- * @brief 记录一次块级读的 ECC 位数并累加 read_count
- *
- * 越界块号属内部簿记错误 ⇒ 断言。
- *
- * @param alloc    分配器
- * @param gblock   全局块号
- * @param ecc_bits 本次 ECC bit 数
- */
-void rr_record_block_ecc(alc_s *alloc, WORD gblock, BYTE ecc_bits)
-{
-    // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
-    // gblock 的界内由 BST 唯一索引入口保证，此处只保留越界断言（H31）。
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    bst_block_s *blk = &alloc->blocks[gblock];
-
-    rr_record_ecc(&blk->rr, ecc_bits);
-    blk->read_count++;
+    return log_rate_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /* ── 2. 恢复 job（异步状态机）──
@@ -233,17 +167,6 @@ static rr_plane_step_e rr_select_plane(rr_handle_s *rr)
     }
 
     return (rr->page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
-}
-
-/**
- * @brief 判断不可恢复读日志是否该输出：5 s 一行；时钟缺失时每 64 条一行。
- *
- * @return true  本次输出
- *         false 限流中，本次只累加抑制计数
- */
-static BOOL rr_unrec_log_is_due(void)
-{
-    return log_rate_due(&s_rr_unrec_log_ms, &s_rr_unrec_suppressed, LOG_RATE_SLOW_INTERVAL_MS);
 }
 
 /**
@@ -495,6 +418,174 @@ static void rr_job_step(rr_handle_s *rr)
     }
 }
 
+/* ── 4. 完成服务（ftl_read_recovery_callback 按 rr->stage 分派）──
+ *
+ * 共同约定：命令的 release 与 rr_job_step 续跑**不**在这里做（见 dispatcher）——
+ * 但 READ 分支必须在此把数据拷进 rr_page_scratch，因为 release 之后 desc 链失效。
+ *
+ * 读重试策略（SLC、本器件无 read-retry table）：
+ *   · 无错误 ⇒ 成功；
+ *   · **只有 CRC_ERROR** ⇒ 允许**一次**重读（总线/瞬态；CRC 能区分出来）；
+ *   · UNC / NAND_FAIL / TIMEOUT / META_ERROR ⇒ 不重试，直接按失败结算。
+ *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
+ *     二者都**不实现**，失败即判坏。
+ */
+/**
+ * @brief 扫 desc 链判断失败是否**只有 CRC**（RR 允许再读一次的唯一情形）。
+ *
+ * @param cmd 读命令（desc 链在 release 前有效）。
+ *
+ * @return true = 至少一个失败 CW，且所有失败 CW 的错误位都只有 CRC_ERROR。
+ *
+ * @note 命令级 DATA_ERROR 把 UNC/CRC/RAID 合并成一位；要判 CRC-only 必须回看 desc。
+ */
+static BOOL rr_desc_failure_is_crc_only(const fc_cmd_s *cmd)
+{
+    BOOL any = false;
+    WORD did = cmd->desc_id;
+
+    while (did != FC_DESC_ID_INVALID)
+    {
+        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
+
+        if (d == NULL)
+        {
+            break;
+        }
+
+        const DWORD err = d->status & FC_CW_STATUS_ERROR_MASK;
+
+        if (err != 0U)
+        {
+            if ((err & ~FC_CW_STATUS_CRC_ERROR) != 0U)
+            {
+                return false;
+            }
+            any = true;
+        }
+        did = d->next_id;
+    }
+
+    return any;
+}
+
+/**
+ * @brief 处理 RR 页读完成：成功时拷数据，CRC 错误允许一次重读，其余进入结算。
+ *
+ * @param rr         实例（推进 stage / retry_count / last_status）
+ * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
+ * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
+ *
+ * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
+ *       UNC / NAND_FAIL / TIMEOUT / META_ERROR 直接交 rr_settle_plane 清零 + 标坏。
+ */
+static void rr_read_complete(rr_handle_s *rr, fc_cmd_s *cmd, const fc_cmd_status_s *completion)
+{
+    rr->retry_count = rr->attempt;
+    rr->last_status = completion->status; /* 收尾日志解码用 */
+
+    if (fc_cmd_status_is_success(completion->status))
+    {
+        (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
+        rr->recovered = true;
+        rr->stage     = RR_STAGE_PLANE_END;
+        return;
+    }
+
+    // 命令级 DATA_ERROR 合并了 UNC/CRC/RAID，CRC-only 要回看 desc；
+    // NAND/FAILC/TIMEOUT/META 任意一个出现都不是 CRC-only。
+    const DWORD err_bits = completion->status & FC_CMD_STATUS_ERROR_MASK;
+    const BOOL  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
+
+    if (crc_only && (rr->attempt < 2U))
+    {
+        rr->attempt++;
+        rr->stage = RR_STAGE_READ; /* CRC 错：再读一次 */
+    }
+    else
+    {
+        rr->stage = RR_STAGE_PLANE_END; /* 数据不可恢复：交给结算（清零 + 标坏） */
+    }
+}
+
+/**
+ * @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return FTL_READ_USER_SIZE 字节的暂存区（非空）
+ */
+BYTE *rr_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return s_page_scratch[die];
+}
+
+/* ── 1. 记录（ECC 趋势 / read disturb）── */
+
+/**
+ * @brief 记录一次 ECC 位数，更新趋势（只升不降）
+ *
+ * 恢复由 rr_retire_block 复位。
+ *
+ * @param track    ECC 趋势
+ * @param ecc_bits 本次 ECC bit 数
+ */
+void rr_record_ecc(rr_ecc_track_s *track, BYTE ecc_bits)
+{
+    // 层内接口：调用者一律传 &bst_block_s.rr（BST 常驻，恒非 NULL）
+
+    // 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数
+    if (ecc_bits > track->last_ecc)
+    {
+        track->rising_count++;
+    }
+    else
+    {
+        track->rising_count = 0U; /* 不上升就清空连续计数 */
+    }
+    track->last_ecc = ecc_bits;
+
+    // 健康状态**单调升级**：只取 max，绝不回落。
+    // ⚠ 逐条直接赋值会让 CRITICAL/DYING 块在后续几次低 ECC 连续上升时被打回
+    // WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖预测性退役信号。
+    rr_block_health_e level = track->health;
+
+    if ((track->rising_count >= RR_ECC_RISING_THRESHOLD) && (level < RR_BLOCK_WARNING))
+    {
+        level = RR_BLOCK_WARNING;
+    }
+    if ((ecc_bits >= RR_ECC_HIGH_WATER) && (level < RR_BLOCK_CRITICAL))
+    {
+        level = RR_BLOCK_CRITICAL;
+    }
+    if ((ecc_bits >= RR_ECC_MAX) && (level < RR_BLOCK_DYING))
+    {
+        level = RR_BLOCK_DYING;
+    }
+    track->health = level;
+}
+
+/**
+ * @brief 记录一次块级读的 ECC 位数并累加 read_count
+ *
+ * 越界块号属内部簿记错误 ⇒ 断言。
+ *
+ * @param alloc    分配器
+ * @param gblock   全局块号
+ * @param ecc_bits 本次 ECC bit 数
+ */
+void rr_record_block_ecc(alc_s *alloc, WORD gblock, BYTE ecc_bits)
+{
+    // 前置条件：唯一调用者 migrate.c 传实例 alloc 与 ftl_gblock() 算出的块号；
+    // gblock 的界内由 BST 唯一索引入口保证，此处只保留越界断言（H31）。
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    bst_block_s *blk = &alloc->blocks[gblock];
+
+    rr_record_ecc(&blk->rr, ecc_bits);
+    blk->read_count++;
+}
+
 /* ── 3. typed handle（端口装配 / 触发 / 上报）── */
 
 /**
@@ -595,96 +686,6 @@ void rr_handle(rr_handle_s *rr)
     }
 }
 
-/* ── 4. 完成服务（ftl_read_recovery_callback 按 rr->stage 分派）──
- *
- * 共同约定：命令的 release 与 rr_job_step 续跑**不**在这里做（见 dispatcher）——
- * 但 READ 分支必须在此把数据拷进 rr_page_scratch，因为 release 之后 desc 链失效。
- *
- * 读重试策略（SLC、本器件无 read-retry table）：
- *   · 无错误 ⇒ 成功；
- *   · **只有 CRC_ERROR** ⇒ 允许**一次**重读（总线/瞬态；CRC 能区分出来）；
- *   · UNC / NAND_FAIL / TIMEOUT / META_ERROR ⇒ 不重试，直接按失败结算。
- *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
- *     二者都**不实现**，失败即判坏。
- */
-/**
- * @brief 扫 desc 链判断失败是否**只有 CRC**（RR 允许再读一次的唯一情形）。
- *
- * @param cmd 读命令（desc 链在 release 前有效）。
- *
- * @return true = 至少一个失败 CW，且所有失败 CW 的错误位都只有 CRC_ERROR。
- *
- * @note 命令级 DATA_ERROR 把 UNC/CRC/RAID 合并成一位；要判 CRC-only 必须回看 desc。
- */
-static BOOL rr_desc_failure_is_crc_only(const fc_cmd_s *cmd)
-{
-    BOOL any = false;
-    WORD did = cmd->desc_id;
-
-    while (did != FC_DESC_ID_INVALID)
-    {
-        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
-
-        if (d == NULL)
-        {
-            break;
-        }
-
-        const DWORD err = d->status & FC_CW_STATUS_ERROR_MASK;
-
-        if (err != 0U)
-        {
-            if ((err & ~FC_CW_STATUS_CRC_ERROR) != 0U)
-            {
-                return false;
-            }
-            any = true;
-        }
-        did = d->next_id;
-    }
-
-    return any;
-}
-
-/**
- * @brief 处理 RR 页读完成：成功时拷数据，CRC 错误允许一次重读，其余进入结算。
- *
- * @param rr         实例（推进 stage / retry_count / last_status）
- * @param cmd        已完成命令（数据在 release 前从 desc 链拷出）
- * @param completion 完成状态（status 的 FC_CMD_STATUS_* 位）
- *
- * @note 拷数据必须早于 release（desc 链之后失效）；只有 CRC_ERROR 允许再读一次，
- *       UNC / NAND_FAIL / TIMEOUT / META_ERROR 直接交 rr_settle_plane 清零 + 标坏。
- */
-static void rr_read_complete(rr_handle_s *rr, fc_cmd_s *cmd, const fc_cmd_status_s *completion)
-{
-    rr->retry_count = rr->attempt;
-    rr->last_status = completion->status; /* 收尾日志解码用 */
-
-    if (fc_cmd_status_is_success(completion->status))
-    {
-        (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
-        rr->recovered = true;
-        rr->stage     = RR_STAGE_PLANE_END;
-        return;
-    }
-
-    // 命令级 DATA_ERROR 合并了 UNC/CRC/RAID，CRC-only 要回看 desc；
-    // NAND/FAILC/TIMEOUT/META 任意一个出现都不是 CRC-only。
-    const DWORD err_bits = completion->status & FC_CMD_STATUS_ERROR_MASK;
-    const BOOL  crc_only = (err_bits == FC_CMD_STATUS_DATA_ERROR) && rr_desc_failure_is_crc_only(cmd);
-
-    if (crc_only && (rr->attempt < 2U))
-    {
-        rr->attempt++;
-        rr->stage = RR_STAGE_READ; /* CRC 错：再读一次 */
-    }
-    else
-    {
-        rr->stage = RR_STAGE_PLANE_END; /* 数据不可恢复：交给结算（清零 + 标坏） */
-    }
-}
-
 /**
  * @brief Read Recovery 命令完成服务
  *
@@ -735,6 +736,7 @@ void ftl_read_recovery_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completio
 
     rr_job_step(rr);
 }
+
 /* ── 5. 判定（块健康 / 全表扫描）── */
 
 /**

@@ -86,14 +86,6 @@ typedef struct WB_HANDLE_S
     struct MIGRATE_HANDLE_S *migrate;
 } wb_handle_s;
 
-/**
- * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
-wb_handle_s *wb_workspace_get(BYTE die);
-
 /* 触发参数。 */
 typedef struct WB_TRIGGER_S
 {
@@ -117,6 +109,49 @@ typedef struct WB_STATUS_S
     DWORD      flushed_pages;
     DWORD      drop_count;
 } wb_status_s;
+
+/**
+ * @brief wbuf 是否完全空闲（无打开窗口、无未编程数据）。
+ * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。
+ *
+ * @param h wbuf handle
+ * @return true = 完全空闲；false = 仍有打开窗口或未编程数据
+ */
+static inline BOOL wb_is_idle(const wb_handle_s *h)
+{
+    return (!h->open) && (h->occupied == 0U);
+}
+
+/**
+ * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+wb_handle_s *wb_workspace_get(BYTE die);
+
+/* ── 查询（读路径；只判不取） ── */
+
+/**
+ * @brief 该 LBA 是否在缓冲里（当前打开窗口内且槽位有效）。
+ *
+ * @param h   wbuf handle
+ * @param lba 逻辑地址
+ * @return true = 命中当前窗口的有效槽位
+ *         false = 未命中（无打开窗口 / pair 窗口不同 / 槽位为空）
+ */
+BOOL wb_has(const wb_handle_s *h, DWORD lba);
+
+/**
+ * @brief 从缓冲读取一个 IU 的数据。
+ *
+ * @param h   wbuf handle
+ * @param lba 逻辑地址
+ * @param out 输出缓冲（至少 FTL_IU_BYTES 字节）
+ * @return true = 命中并已拷贝 FTL_IU_BYTES 字节
+ *         false = 未命中（out 不被写）
+ */
+BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out);
 
 /* ── 接口 ── */
 
@@ -150,40 +185,5 @@ void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_H
  *         FTL_ERROR FLUSH / MAYBE_FLUSH_IDLE 建链失败 / trigger->kind 非法
  */
 ftl_status_e wb_handle(wb_handle_s *h, const wb_trigger_s *trigger, wb_status_s *out);
-
-/* ── 查询（读路径；只判不取） ── */
-
-/**
- * @brief 该 LBA 是否在缓冲里（当前打开窗口内且槽位有效）。
- *
- * @param h   wbuf handle
- * @param lba 逻辑地址
- * @return true = 命中当前窗口的有效槽位
- *         false = 未命中（无打开窗口 / pair 窗口不同 / 槽位为空）
- */
-BOOL wb_has(const wb_handle_s *h, DWORD lba);
-
-/**
- * @brief 从缓冲读取一个 IU 的数据。
- *
- * @param h   wbuf handle
- * @param lba 逻辑地址
- * @param out 输出缓冲（至少 FTL_IU_BYTES 字节）
- * @return true = 命中并已拷贝 FTL_IU_BYTES 字节
- *         false = 未命中（out 不被写）
- */
-BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out);
-
-/**
- * @brief wbuf 是否完全空闲（无打开窗口、无未编程数据）。
- * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。
- *
- * @param h wbuf handle
- * @return true = 完全空闲；false = 仍有打开窗口或未编程数据
- */
-static inline BOOL wb_is_idle(const wb_handle_s *h)
-{
-    return (!h->open) && (h->occupied == 0U);
-}
 
 #endif /* FTL_WBUF_H */

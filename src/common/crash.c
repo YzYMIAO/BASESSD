@@ -8,7 +8,8 @@
 
 #include <string.h>
 
-#define CRASH_MAGIC   0x43524153U
+#define CRASH_MAGIC 0x43524153U
+
 #define CRASH_VERSION 2U /* v2：增加 kind + fault 负载；存储段改 .noinit */
 
 /*
@@ -18,6 +19,16 @@
  * volatile：记录在本轮只写不读，靠它阻止编译器把写优化掉。
  */
 static volatile crash_record_s g_crash_record __attribute__((section(".noinit")));
+
+static DWORD crash_checksum(void);
+
+static void crash_commit(void)
+{
+    g_crash_record.checksum = crash_checksum();
+    __asm volatile("" ::
+                       : "memory");
+    g_crash_record.magic = CRASH_MAGIC;
+}
 
 static void crash_copy(char *destination, const char *source)
 {
@@ -64,14 +75,6 @@ static DWORD crash_checksum(void)
     checksum ^= g_crash_record.fault.bfar;
 
     return checksum;
-}
-
-static void crash_commit(void)
-{
-    g_crash_record.checksum = crash_checksum();
-    __asm volatile("" ::
-                       : "memory");
-    g_crash_record.magic = CRASH_MAGIC;
 }
 
 /* 清空 fault 负载：非 FAULT 记录不应把上一次的异常现场带进校验和/dump。 */

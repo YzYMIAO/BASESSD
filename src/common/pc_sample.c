@@ -14,8 +14,9 @@
 
 #include "assertion.h"
 
-#define PC_SAMPLE_MAGIC   (0x50435341U) /* "PCSA" */
-#define PC_SAMPLE_VERSION (2U)          /* v2：加 rate / tick_count / prev_rate */
+#define PC_SAMPLE_MAGIC (0x50435341U) /* "PCSA" */
+
+#define PC_SAMPLE_VERSION (2U) /* v2：加 rate / tick_count / prev_rate */
 
 typedef struct PC_SAMPLE_RECORD_S
 {
@@ -38,10 +39,10 @@ typedef struct PC_SAMPLE_RECORD_S
     DWORD prev_ring[PC_SAMPLE_RING];
 } pc_sample_record_s;
 
-static volatile pc_sample_record_s g_pc_sample __attribute__((section(".noinit")));
-
 /* ISR 与主循环共享：H16 要求 volatile；由 pc_sample_init 置位。 */
 static volatile BOOL s_pc_sample_ready;
+
+static volatile pc_sample_record_s g_pc_sample __attribute__((section(".noinit")));
 
 _Static_assert((PC_SAMPLE_RING & (PC_SAMPLE_RING - 1U)) == 0U, "PC_SAMPLE_RING 必须是 2 的幂（掩码取模）");
 

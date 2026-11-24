@@ -357,14 +357,6 @@ typedef struct MIGRATE_HANDLE_S
 } mig_handle_s;
 
 /**
- * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
-mig_handle_s *mig_workspace_get(BYTE die);
-
-/**
  * @brief 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。
  *
  * @param m handle（只读）。
@@ -417,20 +409,13 @@ static inline BOOL mig_gc_no_gain(const mig_handle_s *m)
     return m->state.benefit.nogain;
 }
 
-/* ── 接口 ── */
-
 /**
- * @brief 绑定窄上下文并复位 handle。
+ * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
  *
- * @param m            handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param alloc        allocator（拓扑也从这里取）
- * @param journal      Journal 端口
- * @param cache        L2P cache 端口
- * @param total_writes host 累计写计数指针（host 写流判定与 WL 让路用）
- *
- * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
  */
-void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes);
+mig_handle_s *mig_workspace_get(BYTE die);
 
 #if SSD_STATS_ENABLE
 /**
@@ -441,6 +426,7 @@ void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *ca
  */
 void mig_stats_register(mig_handle_s *m, BYTE inst);
 #endif
+
 #if defined(FC_NAND_TEST_ENABLE)
 /**
  * @brief 测试专用：直接启动一个搬移 job（GC-18 等状态机负例）。
@@ -455,20 +441,6 @@ void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e
  * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  */
 void mig_gc_request_urgent(mig_handle_s *m);
-
-/**
- * @brief 推进搬移引擎（每轮 must-run；提交即返回）
- *
- * 语义：
- *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
- *   ② 不在飞 ⇒ 会话收尾/进展日志、紧急触发（mig_gc_request_urgent）；
- *   ③ 周期求值不在本函数：GC 由 timer 表的 `mig_eval`（10 ms）、WL 由
- *      `mig_wl_eval`（5 s）、predict 由 `mig_predict_eval`（1 s）分别驱动。
- *
- * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->state.level 供各 timer 任务使用
- */
-void mig_handle(mig_handle_s *m, bg_level_e level);
 
 /**
  * @brief GC 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）
@@ -497,5 +469,34 @@ void mig_eval(mig_handle_s *m);
 BOOL mig_timer_register(mig_handle_s *m);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
+
+/* ── 接口 ── */
+
+/**
+ * @brief 绑定窄上下文并复位 handle。
+ *
+ * @param m            handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param alloc        allocator（拓扑也从这里取）
+ * @param journal      Journal 端口
+ * @param cache        L2P cache 端口
+ * @param total_writes host 累计写计数指针（host 写流判定与 WL 让路用）
+ *
+ * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
+ */
+void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes);
+
+/**
+ * @brief 推进搬移引擎（每轮 must-run；提交即返回）
+ *
+ * 语义：
+ *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
+ *   ② 不在飞 ⇒ 会话收尾/进展日志、紧急触发（mig_gc_request_urgent）；
+ *   ③ 周期求值不在本函数：GC 由 timer 表的 `mig_eval`（10 ms）、WL 由
+ *      `mig_wl_eval`（5 s）、predict 由 `mig_predict_eval`（1 s）分别驱动。
+ *
+ * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->state.level 供各 timer 任务使用
+ */
+void mig_handle(mig_handle_s *m, bg_level_e level);
 
 #endif /* FTL_MIGRATE_H */

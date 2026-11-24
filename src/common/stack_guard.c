@@ -14,17 +14,40 @@
 
 #include "log.h"
 
+/* pattern 用可读 ASCII："STAK"。不用 0xDEADBEEF/0xA5A5A5A5 这类常见填充——
+ * 它们可能是别的代码/协议里正常出现的值，会制造假阴性。 */
+#define STACK_GUARD_PATTERN (0x5354414BU)
+
+/* init 自己的栈帧（push 的 r4/lr + 局部变量）位于入口 SP 之下；paint_hi
+ * 必须把这段排除，否则 loop 会把保存的 LR 填成 STACK_GUARD_PATTERN，
+ * 函数返回时跳进 0x5354414B（release -O2 实测：PC=0x5354414A，
+ * MemManage IACCVIOL）。64 B 覆盖本函数在 -O2 下的帧并留出编译器余量。 */
+#define STACK_GUARD_INIT_FRAME_MARGIN (64U)
+
 /* ── 1. 链接脚本边界与常量 ── */
 
 /* 堆起点 = DTCM 空闲区底部；栈顶 = DTCM 顶。两符号都来自
  * src/platform/stm32h743/linker/stm32h743xx_flash.ld（`PROVIDE(end = .)` / `_estack = ORIGIN+LENGTH`），
  * 与 src/platform/syscalls.c 取 &end 的方式一致。 */
-extern char  end;
+extern char end;
+
 extern DWORD _estack;
 
-/* pattern 用可读 ASCII："STAK"。不用 0xDEADBEEF/0xA5A5A5A5 这类常见填充——
- * 它们可能是别的代码/协议里正常出现的值，会制造假阴性。 */
-#define STACK_GUARD_PATTERN (0x5354414BU)
+/* ── 2. 状态 ── */
+
+static DWORD g_paint_lo; /* 最低被填 pattern 的地址（= &end，4 对齐） */
+
+static DWORD g_paint_hi; /* 最高被填 pattern 的地址（= init 时的 SP，4 对齐） */
+
+static DWORD g_low_mark; /* 当前已知**被踩到**的最低地址，单调下移 */
+
+static DWORD g_boot_msp; /* init 时的 SP，报告里做基准 */
+
+static DWORD g_armed; /* init 过才允许 check */
+
+static DWORD g_alarm; /* STACK_GUARD_ALARM_* 位或 */
+
+static DWORD g_alarm_hits; /* 告警次数（含重复；用于看"是一次还是持续"） */
 
 /* 单次 check 最多向下扫多少个字。取小值是为了让「栈首次深下去」那一次
  * 不要把一整轮 superloop 卡住；摊还到多次调用后总代价不变。 */
@@ -32,11 +55,23 @@ extern DWORD _estack;
 #    define STACK_GUARD_SCAN_WORDS_PER_CALL (64U)
 #endif
 
-/* init 自己的栈帧（push 的 r4/lr + 局部变量）位于入口 SP 之下；paint_hi
- * 必须把这段排除，否则 loop 会把保存的 LR 填成 STACK_GUARD_PATTERN，
- * 函数返回时跳进 0x5354414B（release -O2 实测：PC=0x5354414A，
- * MemManage IACCVIOL）。64 B 覆盖本函数在 -O2 下的帧并留出编译器余量。 */
-#define STACK_GUARD_INIT_FRAME_MARGIN (64U)
+/* ── 4. 尾注 ──
+ *
+ * 本模块**不覆盖**的一类：越界写踩坏「已用栈里的某个保存寄存器」。
+ * debug 构建是 -O0 ⇒ GCC 保留帧指针 ⇒ 每个函数尾声都是
+ *     mov sp, r7
+ *     pop {r7, pc}
+ * 于是「压栈的 r7 被写坏」会直接让 SP 变成垃圾值，随后 pop 从垃圾地址取 PC
+ * —— 这正是 v0.71 那条记录 `SP/LR 同时落在同一块 4 KB 缓冲里、且 LR 带 Thumb 位`
+ * 的形态（见 docs/design/common/fault_capture.md）。这种踩踏发生在**已用区**，
+ * 填 pattern 看不见。
+ *
+ * 对应的工具是 `-fstack-protector-strong`：GCC 在「有局部数组的函数」的局部变量与
+ * 保存寄存器之间插一个 canary 字，返回前比对，不等就调 `__stack_chk_fail()`。
+ * 裸机上要自己提供 `__stack_chk_guard`（开机赋非零值）与 `__stack_chk_fail`（dump 后
+ * 停机）。它是**构建期全局开关**，会改所有 TU 的代码生成 ⇒ 需要单独一次改动 + 上板回归，
+ * 未并入本模块。
+ */
 
 /* 本文件跨 target 共享（同 syscalls.c）：只读 MSP，不 include 任何 SoC 头
  * ——那会依赖设备头提供 IRQn_Type，裸包含编译不过。 */
@@ -48,16 +83,6 @@ static DWORD stack_guard_msp(void)
                      : "=r"(msp));
     return msp;
 }
-
-/* ── 2. 状态 ── */
-
-static DWORD g_paint_lo;   /* 最低被填 pattern 的地址（= &end，4 对齐） */
-static DWORD g_paint_hi;   /* 最高被填 pattern 的地址（= init 时的 SP，4 对齐） */
-static DWORD g_low_mark;   /* 当前已知**被踩到**的最低地址，单调下移 */
-static DWORD g_boot_msp;   /* init 时的 SP，报告里做基准 */
-static DWORD g_armed;      /* init 过才允许 check */
-static DWORD g_alarm;      /* STACK_GUARD_ALARM_* 位或 */
-static DWORD g_alarm_hits; /* 告警次数（含重复；用于看"是一次还是持续"） */
 
 /* ── 3. 实现 ── */
 
@@ -179,21 +204,3 @@ DWORD stack_guard_alarm(void)
 {
     return g_alarm;
 }
-
-/* ── 4. 尾注 ──
- *
- * 本模块**不覆盖**的一类：越界写踩坏「已用栈里的某个保存寄存器」。
- * debug 构建是 -O0 ⇒ GCC 保留帧指针 ⇒ 每个函数尾声都是
- *     mov sp, r7
- *     pop {r7, pc}
- * 于是「压栈的 r7 被写坏」会直接让 SP 变成垃圾值，随后 pop 从垃圾地址取 PC
- * —— 这正是 v0.71 那条记录 `SP/LR 同时落在同一块 4 KB 缓冲里、且 LR 带 Thumb 位`
- * 的形态（见 docs/design/common/fault_capture.md）。这种踩踏发生在**已用区**，
- * 填 pattern 看不见。
- *
- * 对应的工具是 `-fstack-protector-strong`：GCC 在「有局部数组的函数」的局部变量与
- * 保存寄存器之间插一个 canary 字，返回前比对，不等就调 `__stack_chk_fail()`。
- * 裸机上要自己提供 `__stack_chk_guard`（开机赋非零值）与 `__stack_chk_fail`（dump 后
- * 停机）。它是**构建期全局开关**，会改所有 TU 的代码生成 ⇒ 需要单独一次改动 + 上板回归，
- * 未并入本模块。
- */

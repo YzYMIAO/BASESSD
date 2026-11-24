@@ -20,39 +20,35 @@
 #include <stdint.h>
 
 #define USART_RX_RING_MASK (USART_RX_RING_CAPACITY - 1U)
+
 #define USART_TX_RING_MASK (USART_TX_RING_CAPACITY - 1U)
-
-#if ((USART_RX_RING_CAPACITY & USART_RX_RING_MASK) != 0U)
-#    error "USART_RX_RING_CAPACITY must be a power of two"
-#endif
-
-#if ((USART_TX_RING_CAPACITY & USART_TX_RING_MASK) != 0U)
-#    error "USART_TX_RING_CAPACITY must be a power of two"
-#endif
+#define WRITE_BUF_SIZE     512U
 
 /*
  * RX 环形队列：USART IRQ 是唯一生产者，uart_rx_read() 是唯一消费者。
  * IRQ 只发布 g_rx_head，主循环只推进 g_rx_tail，这是无锁 SPSC 队列成立的前提。
  */
-static BYTE          g_rx_ring[USART_RX_RING_CAPACITY];
+static BYTE g_rx_ring[USART_RX_RING_CAPACITY];
+
 static volatile WORD g_rx_head;
+
 static volatile WORD g_rx_tail;
 
-/*
- * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
- * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE/DMA”的交接，防止日志丢在队列中。
- */
-/* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
-static BYTE          g_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
 static volatile WORD g_tx_head;
+
 static volatile WORD g_tx_tail;
+
 static volatile WORD g_tx_dma_length;
+
 static volatile BYTE g_tx_dma_active;
-static BYTE          g_tx_dma_ready;
+
+static BYTE g_tx_dma_ready;
+
 static volatile BYTE g_tx_transport_fault;
 
 static uart_stats_s g_uart_stats;
-static BYTE         g_usart_ready;
+
+static BYTE g_usart_ready;
 
 #if SSD_STATS_ENABLE
 #    define UART_STATS_LIST(X)                           \
@@ -76,6 +72,52 @@ static const stats_name_s s_stats_uart_names[] = {
 UART_STATS_LIST(UART_STATS_CHECK)
 #    undef UART_STATS_CHECK
 #endif /* SSD_STATS_ENABLE */
+
+#if ((USART_RX_RING_CAPACITY & USART_RX_RING_MASK) != 0U)
+#    error "USART_RX_RING_CAPACITY must be a power of two"
+#endif
+
+#if ((USART_TX_RING_CAPACITY & USART_TX_RING_MASK) != 0U)
+#    error "USART_TX_RING_CAPACITY must be a power of two"
+#endif
+
+/*
+ * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
+ * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE/DMA”的交接，防止日志丢在队列中。
+ */
+/* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
+static BYTE g_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
+
+/* ─────────────────────────── TX 状态机（策略在共享侧）─────────────────────────── */
+
+/* Called with IRQs masked by uart_log_write(), or from the DMA completion ISR. */
+static void uart_tx_dma_start_locked(void)
+{
+    DWORD tail;
+    DWORD length;
+
+    if ((g_tx_dma_ready == 0U) || (g_tx_dma_active != 0U) || (g_tx_tail == g_tx_head))
+    {
+        return;
+    }
+    tail   = g_tx_tail;
+    length = (g_tx_head > tail) ? (g_tx_head - tail) : (USART_TX_RING_CAPACITY - tail);
+
+    g_tx_dma_length = length;
+    g_tx_dma_active = 1U;
+    if (!usart_port_tx_dma_start(&g_tx_ring[tail], length))
+    {
+        g_tx_dma_active = 0U;
+        g_uart_stats.tx_dma_errors++;
+        g_uart_stats.tx_transport_errors++;
+        g_tx_transport_fault = 1U;
+        /* No tail movement occurred; the TXE fallback drains the retained bytes. */
+        g_tx_dma_ready       = 0U;
+        usart_port_tx_irq_enable();
+        usart_port_event_signal();
+        return;
+    }
+}
 
 /* ─────────────────────────── 队列原语（供 port / CLI 调用）─────────────────────────── */
 
@@ -159,37 +201,6 @@ void uart_stats_count_rx_error(DWORD kinds)
     if ((kinds & UART_RX_ERROR_OVERRUN) != 0U)
     {
         g_uart_stats.overrun_errors++;
-    }
-}
-
-/* ─────────────────────────── TX 状态机（策略在共享侧）─────────────────────────── */
-
-/* Called with IRQs masked by uart_log_write(), or from the DMA completion ISR. */
-static void uart_tx_dma_start_locked(void)
-{
-    DWORD tail;
-    DWORD length;
-
-    if ((g_tx_dma_ready == 0U) || (g_tx_dma_active != 0U) || (g_tx_tail == g_tx_head))
-    {
-        return;
-    }
-    tail   = g_tx_tail;
-    length = (g_tx_head > tail) ? (g_tx_head - tail) : (USART_TX_RING_CAPACITY - tail);
-
-    g_tx_dma_length = length;
-    g_tx_dma_active = 1U;
-    if (!usart_port_tx_dma_start(&g_tx_ring[tail], length))
-    {
-        g_tx_dma_active = 0U;
-        g_uart_stats.tx_dma_errors++;
-        g_uart_stats.tx_transport_errors++;
-        g_tx_transport_fault = 1U;
-        /* No tail movement occurred; the TXE fallback drains the retained bytes. */
-        g_tx_dma_ready       = 0U;
-        usart_port_tx_irq_enable();
-        usart_port_event_signal();
-        return;
     }
 }
 
@@ -286,7 +297,6 @@ int _write(int file, char *buffer, int length)
     }
 
     /* ── 慢速路径：在裸 \n 前插入 \r ── */
-#define WRITE_BUF_SIZE 512U
     static char converted[WRITE_BUF_SIZE];
     BOOL        ok = true;
     dst_len        = 0;

@@ -33,12 +33,16 @@
  * port 接口（如 fault_port_stack_top()/fault_port_is_code_address()）。
  */
 #define FAULT_FLASH_BEGIN 0x08000000U
-#define FAULT_FLASH_END   0x08200000U
-#define FAULT_DTCM_BEGIN  0x20000000U
+
+#define FAULT_FLASH_END 0x08200000U
+
+#define FAULT_DTCM_BEGIN 0x20000000U
+
 /* ITCM 热代码（.ssd_code_high，VMA 0x0）：被中断函数的保存 LR 常落在这里。
  * 阈值 0x1000 只为压掉栈上的小整数噪声（本仓热函数都在 0x3xxx 以上）。 */
 #define FAULT_ITCM_CODE_BEGIN 0x00001000U
-#define FAULT_ITCM_END        0x00010000U
+
+#define FAULT_ITCM_END 0x00010000U
 
 /* 栈顶符号由链接脚本提供（_estack = DTCM 末尾），用于给栈扫描设界。 */
 extern DWORD _estack;
@@ -50,6 +54,15 @@ static void fault_puts(const char *text)
     while (*text != '\0')
     {
         fault_port_putc(*text++);
+    }
+}
+
+static void fault_bit(DWORD value, DWORD mask, const char *name)
+{
+    if ((value & mask) != 0U)
+    {
+        fault_port_putc(' ');
+        fault_puts(name);
     }
 }
 
@@ -104,15 +117,6 @@ static const char *fault_kind_name(DWORD kind)
             return "UsageFault";
         default:
             return "Unknown";
-    }
-}
-
-static void fault_bit(DWORD value, DWORD mask, const char *name)
-{
-    if ((value & mask) != 0U)
-    {
-        fault_port_putc(' ');
-        fault_puts(name);
     }
 }
 

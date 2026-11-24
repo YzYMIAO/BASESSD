@@ -10,6 +10,18 @@
 
 #include <stddef.h>
 
+static int boot_sequence_is_newer(DWORD candidate, DWORD reference)
+{
+    /* 有符号差值允许 sequence 在 UINT32_MAX 后自然回绕。 */
+    return (int32_t)(candidate - reference) > 0;
+}
+
+static void boot_metadata_changed(boot_metadata_s *metadata)
+{
+    ++metadata->sequence;
+    boot_metadata_finalize(metadata);
+}
+
 static int boot_memory_equal(const BYTE *left, const BYTE *right, size_t size)
 {
     size_t index;
@@ -23,16 +35,6 @@ static int boot_memory_equal(const BYTE *left, const BYTE *right, size_t size)
     return difference == 0U;
 }
 
-void boot_image_header_finalize(boot_image_hdr_s *header)
-{
-    if (header == NULL)
-    {
-        return;
-    }
-    header->header_crc32 = 0U;
-    header->header_crc32 = crc_compute_iso_hdlc(header, sizeof(*header));
-}
-
 static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
 {
     boot_image_hdr_s copy;
@@ -42,6 +44,16 @@ static int boot_image_header_crc_is_valid(const boot_image_hdr_s *header)
     expected          = copy.header_crc32;
     copy.header_crc32 = 0U;
     return expected == crc_compute_iso_hdlc(&copy, sizeof(copy));
+}
+
+void boot_image_header_finalize(boot_image_hdr_s *header)
+{
+    if (header == NULL)
+    {
+        return;
+    }
+    header->header_crc32 = 0U;
+    header->header_crc32 = crc_compute_iso_hdlc(header, sizeof(*header));
 }
 
 int boot_image_validate(const boot_image_hdr_s *header, const boot_image_constraints_s *constraints, const BYTE actual_payload_hash[BOOT_SHA256_SIZE], boot_signature_verify_fn_t verify_signature, void *verify_context)
@@ -123,12 +135,6 @@ int boot_metadata_is_valid(const boot_metadata_s *metadata)
     return expected == crc_compute_iso_hdlc(&copy, sizeof(copy));
 }
 
-static int boot_sequence_is_newer(DWORD candidate, DWORD reference)
-{
-    /* 有符号差值允许 sequence 在 UINT32_MAX 后自然回绕。 */
-    return (int32_t)(candidate - reference) > 0;
-}
-
 int boot_metadata_select_latest(const boot_metadata_s copies[2], boot_metadata_s *selected, DWORD *selected_copy)
 {
     int   valid0;
@@ -151,12 +157,6 @@ int boot_metadata_select_latest(const boot_metadata_s copies[2], boot_metadata_s
     *selected      = copies[index];
     *selected_copy = index;
     return BOOT_POLICY_OK;
-}
-
-static void boot_metadata_changed(boot_metadata_s *metadata)
-{
-    ++metadata->sequence;
-    boot_metadata_finalize(metadata);
 }
 
 int boot_policy_select_slot(boot_metadata_s *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed)

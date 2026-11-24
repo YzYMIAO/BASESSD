@@ -17,48 +17,9 @@
 
 /* 外部：request.c — 按实例边界切 run / 提交子请求 */
 ssd_status_e ssd_request_split(ssd_ctl_s *controller, ssd_req_s *request);
-QWORD        ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
 
-/**
- * @brief 按全局 LBA 路由到对应 FTL 实例（region 粒度）。
- *
- * 唯一实现：controller submit 与 request split 共用；换哈希策略只改这里。
- *
- * @param controller Controller 上下文（调用者保证非 NULL）
- * @param lba        host 全局 LBA
- * @return 路由到的 FTL 实例
- */
-ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
-{
-    /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
-    ASSERT(controller != NULL);
-
-    const BYTE die = lba_2_die(lba);
-
-    /* 路由取模结果本应在 [0,DIE_MAX) 内 */
-    ASSERT(die < DIE_MAX);
-
-    return controller->ftl[die];
-}
-
-/**
- * @brief host 写启动许可（按 LBA 路由到 FTL 实例）
- *
- * @param controller Controller 上下文
- * @param lba        写起始 LBA
- * @return true 允许启动；false 暂缓
- */
-BOOL ssd_controller_host_write_admit(const ssd_ctl_s *controller, QWORD lba)
-{
-    if ((controller == NULL) || (controller->state != SSD_CONTROLLER_READY))
-    {
-        return false;
-    }
-
-    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
-
-    return (ftl != NULL) && (ftl_host_write_admit(ftl) != false);
-}
+QWORD      ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
 
 /**
  * @brief 小端写 32 bit（MBR 字段）
@@ -88,6 +49,26 @@ static void ssd_mbr_service_step(ftl_ctx_s *ftl)
     storage_wdg_kick();
     ftl_service_pump();
     ftl_service(ftl);
+}
+
+/**
+ * @brief LBA0 是否为 format 后未映射的全零扇区
+ *
+ * FTL 对未映射 LBA 的读取契约是零填充，因此 format 后 LBA0 必然全 0x00。
+ * 全 0xFF 不视为空白：那可能是用户实际写入的数据，不能覆盖。
+ *
+ * @param sector 512 B 扇区
+ * @return true  全 0x00；false 有非零字节
+ */
+static BOOL ssd_lba0_zero(const BYTE sector[512])
+{
+    DWORD zeros = 0U;
+
+    for (DWORD i = 0U; i < 512U; i++)
+    {
+        zeros += (sector[i] == 0x00U) ? 1U : 0U;
+    }
+    return zeros == 512U;
 }
 
 /**
@@ -169,23 +150,187 @@ static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
 }
 
 /**
- * @brief LBA0 是否为 format 后未映射的全零扇区
+ * @brief 推进全部 present die 的 FLUSH job；全部完成时回执 flush_req。
  *
- * FTL 对未映射 LBA 的读取契约是零填充，因此 format 后 LBA0 必然全 0x00。
- * 全 0xFF 不视为空白：那可能是用户实际写入的数据，不能覆盖。
- *
- * @param sector 512 B 扇区
- * @return true  全 0x00；false 有非零字节
+ * @param controller Controller 上下文
  */
-static BOOL ssd_lba0_zero(const BYTE sector[512])
+static void ssd_controller_flush_service(ssd_ctl_s *controller)
 {
-    DWORD zeros = 0U;
-
-    for (DWORD i = 0U; i < 512U; i++)
+    if (controller->flush_req == NULL)
     {
-        zeros += (sector[i] == 0x00U) ? 1U : 0U;
+        return;
     }
-    return zeros == 512U;
+
+    BOOL all_done = true;
+
+    /* 先推进**全部** present die 再判完成：某一实例未完成时直接 return 会让后面的实例
+     * 永远得不到推进（多实例下 FLUSH 卡死）。 */
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        ftl_ctx_s *fftl = controller->ftl[die];
+
+        ASSERT(fftl != NULL);
+
+        if (!ftl_flush_step(fftl))
+        {
+            all_done = false;
+        }
+    }
+
+    if (!all_done)
+    {
+        return; /* 还有实例没落定：下一轮继续 */
+    }
+
+    /* 全部实例完成：按 HIL 完成通道回执（complete_flag / status_out）。
+     * 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
+    if (controller->flush_req->timed_out == false)
+    {
+        controller->flush_req->completion_status = SSD_STATUS_OK;
+        controller->flush_req->complete_flag     = 1U;
+        lifetime_note_cmd(LIFETIME_CMD_FLUSH);
+    }
+#if SSD_STATS_ENABLE
+    ssd_request_note_latency(controller->flush_req);
+#endif
+    controller->flush_req = NULL;
+}
+
+/**
+ * @brief 以给定状态完成当前 TRIM 请求并清空 trim_req。
+ *
+ * @param controller Controller 上下文
+ * @param status     回执状态
+ */
+static void ssd_controller_trim_complete(ssd_ctl_s *controller, ssd_status_e status)
+{
+    /* 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
+    if (controller->trim_req->timed_out == false)
+    {
+        controller->trim_req->completion_status = status;
+        controller->trim_req->complete_flag     = 1U;
+#if SSD_STATS_ENABLE
+        if (status != SSD_STATUS_OK)
+        {
+            ssd_request_note_bad_status();
+        }
+#endif
+        if (status == SSD_STATUS_OK)
+        {
+            lifetime_note_cmd(LIFETIME_CMD_TRIM);
+        }
+    }
+#if SSD_STATS_ENABLE
+    ssd_request_note_latency(controller->trim_req);
+#endif
+    controller->trim_req     = NULL;
+    controller->trim_started = false;
+}
+
+/**
+ * @brief 按 run 推进在飞 TRIM（begin/step），全部完成时回执 trim_req。
+ *
+ * @param controller Controller 上下文
+ */
+static void ssd_controller_trim_service(ssd_ctl_s *controller)
+{
+    if (controller->trim_req == NULL)
+    {
+        return;
+    }
+
+    const QWORD end = controller->trim_req->start_lba + controller->trim_req->block_count;
+
+    if (controller->trim_lba >= end)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
+        return;
+    }
+
+    const QWORD run_end = ssd_controller_run_end(controller, controller->trim_lba, end);
+    ftl_ctx_s  *tftl    = ssd_controller_route(controller, controller->trim_lba);
+
+    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+    ASSERT(tftl != NULL);
+
+    if (!controller->trim_started)
+    {
+        const DWORD        lba   = (DWORD)controller->trim_lba;
+        const DWORD        count = (DWORD)(run_end - controller->trim_lba);
+        const ftl_status_e bst   = ftl_trim_begin(tftl, lba, count);
+
+        if (bst == FTL_AGAIN)
+        {
+            return; /* 实例上已有 job：下一轮重试 */
+        }
+        if (bst != FTL_OK)
+        {
+            ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
+            return;
+        }
+        controller->trim_started = true;
+    }
+
+    const ftl_status_e st = ftl_trim_step(tftl);
+
+    if (st == FTL_AGAIN)
+    {
+        return; /* 本轮未完成：下一轮继续 */
+    }
+    if (st != FTL_OK)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
+        return;
+    }
+
+    controller->trim_started = false;
+    controller->trim_lba     = run_end;
+
+    if (controller->trim_lba >= end)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
+    }
+}
+
+/**
+ * @brief 按全局 LBA 路由到对应 FTL 实例（region 粒度）。
+ *
+ * 唯一实现：controller submit 与 request split 共用；换哈希策略只改这里。
+ *
+ * @param controller Controller 上下文（调用者保证非 NULL）
+ * @param lba        host 全局 LBA
+ * @return 路由到的 FTL 实例
+ */
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
+{
+    /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
+    ASSERT(controller != NULL);
+
+    const BYTE die = lba_2_die(lba);
+
+    /* 路由取模结果本应在 [0,DIE_MAX) 内 */
+    ASSERT(die < DIE_MAX);
+
+    return controller->ftl[die];
+}
+
+/**
+ * @brief host 写启动许可（按 LBA 路由到 FTL 实例）
+ *
+ * @param controller Controller 上下文
+ * @param lba        写起始 LBA
+ * @return true 允许启动；false 暂缓
+ */
+BOOL ssd_controller_host_write_admit(const ssd_ctl_s *controller, QWORD lba)
+{
+    if ((controller == NULL) || (controller->state != SSD_CONTROLLER_READY))
+    {
+        return false;
+    }
+
+    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
+
+    return (ftl != NULL) && (ftl_host_write_admit(ftl) != false);
 }
 
 /**
@@ -640,149 +785,6 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request)
     }
 
     return request->completion_status;
-}
-
-/**
- * @brief 推进全部 present die 的 FLUSH job；全部完成时回执 flush_req。
- *
- * @param controller Controller 上下文
- */
-static void ssd_controller_flush_service(ssd_ctl_s *controller)
-{
-    if (controller->flush_req == NULL)
-    {
-        return;
-    }
-
-    BOOL all_done = true;
-
-    /* 先推进**全部** present die 再判完成：某一实例未完成时直接 return 会让后面的实例
-     * 永远得不到推进（多实例下 FLUSH 卡死）。 */
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        ftl_ctx_s *fftl = controller->ftl[die];
-
-        ASSERT(fftl != NULL);
-
-        if (!ftl_flush_step(fftl))
-        {
-            all_done = false;
-        }
-    }
-
-    if (!all_done)
-    {
-        return; /* 还有实例没落定：下一轮继续 */
-    }
-
-    /* 全部实例完成：按 HIL 完成通道回执（complete_flag / status_out）。
-     * 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
-    if (controller->flush_req->timed_out == false)
-    {
-        controller->flush_req->completion_status = SSD_STATUS_OK;
-        controller->flush_req->complete_flag     = 1U;
-        lifetime_note_cmd(LIFETIME_CMD_FLUSH);
-    }
-#if SSD_STATS_ENABLE
-    ssd_request_note_latency(controller->flush_req);
-#endif
-    controller->flush_req = NULL;
-}
-
-/**
- * @brief 以给定状态完成当前 TRIM 请求并清空 trim_req。
- *
- * @param controller Controller 上下文
- * @param status     回执状态
- */
-static void ssd_controller_trim_complete(ssd_ctl_s *controller, ssd_status_e status)
-{
-    /* 已超时的请求保留 host 侧 TIMEOUT，不被迟到完成覆盖。 */
-    if (controller->trim_req->timed_out == false)
-    {
-        controller->trim_req->completion_status = status;
-        controller->trim_req->complete_flag     = 1U;
-#if SSD_STATS_ENABLE
-        if (status != SSD_STATUS_OK)
-        {
-            ssd_request_note_bad_status();
-        }
-#endif
-        if (status == SSD_STATUS_OK)
-        {
-            lifetime_note_cmd(LIFETIME_CMD_TRIM);
-        }
-    }
-#if SSD_STATS_ENABLE
-    ssd_request_note_latency(controller->trim_req);
-#endif
-    controller->trim_req     = NULL;
-    controller->trim_started = false;
-}
-
-/**
- * @brief 按 run 推进在飞 TRIM（begin/step），全部完成时回执 trim_req。
- *
- * @param controller Controller 上下文
- */
-static void ssd_controller_trim_service(ssd_ctl_s *controller)
-{
-    if (controller->trim_req == NULL)
-    {
-        return;
-    }
-
-    const QWORD end = controller->trim_req->start_lba + controller->trim_req->block_count;
-
-    if (controller->trim_lba >= end)
-    {
-        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
-        return;
-    }
-
-    const QWORD run_end = ssd_controller_run_end(controller, controller->trim_lba, end);
-    ftl_ctx_s  *tftl    = ssd_controller_route(controller, controller->trim_lba);
-
-    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
-    ASSERT(tftl != NULL);
-
-    if (!controller->trim_started)
-    {
-        const DWORD        lba   = (DWORD)controller->trim_lba;
-        const DWORD        count = (DWORD)(run_end - controller->trim_lba);
-        const ftl_status_e bst   = ftl_trim_begin(tftl, lba, count);
-
-        if (bst == FTL_AGAIN)
-        {
-            return; /* 实例上已有 job：下一轮重试 */
-        }
-        if (bst != FTL_OK)
-        {
-            ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
-            return;
-        }
-        controller->trim_started = true;
-    }
-
-    const ftl_status_e st = ftl_trim_step(tftl);
-
-    if (st == FTL_AGAIN)
-    {
-        return; /* 本轮未完成：下一轮继续 */
-    }
-    if (st != FTL_OK)
-    {
-        ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
-        return;
-    }
-
-    controller->trim_started = false;
-    controller->trim_lba     = run_end;
-
-    if (controller->trim_lba >= end)
-    {
-        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
-    }
 }
 
 /**

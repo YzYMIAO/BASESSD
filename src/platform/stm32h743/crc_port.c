@@ -9,6 +9,9 @@
 #include "crc.h"
 #include "sys_port.h" /* CRC_HandleTypeDef、UNUSED、__HAL_CRC_*、__HAL_RCC_CRC_CLK_ENABLE */
 
+/* 8 路展开：每轮少 7 次循环判断；CRC_DR 写仍按 32-bit 顺序串行。 */
+#define CRC_PORT_UNROLL (8U)
+
 static CRC_HandleTypeDef g_crc_handle;
 
 /*
@@ -55,9 +58,6 @@ DWORD crc_port_get_idr(void)
 {
     return __HAL_CRC_GET_IDR(&g_crc_handle);
 }
-
-/* 8 路展开：每轮少 7 次循环判断；CRC_DR 写仍按 32-bit 顺序串行。 */
-#define CRC_PORT_UNROLL (8U)
 
 /**
  * @brief 用硬件 CRC 计算 length_bytes（4 的倍数）的 CRC-32。

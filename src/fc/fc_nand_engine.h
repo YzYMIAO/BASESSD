@@ -46,6 +46,14 @@ typedef struct FC_UOP_ENGINE_STATE_S
     fc_uop_engine_wait_s      jump;
 } fc_uop_engine_state_s;
 
+/* 一条 NAND 命令的异步事务：UOP 引擎状态 + 命令/完成存储体。 */
+typedef struct FC_NAND_TRANSACTION_S
+{
+    fc_uop_engine_state_s engine;
+    nand_cmd_req_s        request;
+    nand_cmd_comp_s       completion;
+} fc_nand_txn_s;
+
 /**
  * @brief 置/清异步路径放行闩锁（0 = 同步初始化；1 = 异步 dispatch）。
  *
@@ -73,22 +81,6 @@ BYTE fc_nand_engine_is_armed(void);
 nand_result_e fc_uop_engine_start(fc_uop_engine_state_s *state, const nand_uop_s *uops, const nand_op_timing_s *timing);
 
 /**
- * @brief 推进 UOP 游标一次（可消费多个 UOP），驱动 NAND PHY。
- *
- * @param state 引擎状态
- * @return OK / NOT_READY（让出）/ 错误码
- */
-nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state);
-
-/* 一条 NAND 命令的异步事务：UOP 引擎状态 + 命令/完成存储体。 */
-typedef struct FC_NAND_TRANSACTION_S
-{
-    fc_uop_engine_state_s engine;
-    nand_cmd_req_s        request;
-    nand_cmd_comp_s       completion;
-} fc_nand_txn_s;
-
-/**
  * @brief 发起一条异步 ONFI 事务
  *
  * @param transaction 事务对象；engine.backend 必须由调用者按 target 预先绑定
@@ -101,6 +93,21 @@ typedef struct FC_NAND_TRANSACTION_S
  */
 nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const nand_cmd_req_s *request);
 
+#if defined(FC_NAND_TEST_ENABLE)
+/**
+ * @brief 测试专用：调用参数页读取路径（用于 ONFI 读失败注入）。
+ */
+nand_result_e fc_nand_test_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion);
+#endif
+
+/**
+ * @brief 推进 UOP 游标一次（可消费多个 UOP），驱动 NAND PHY。
+ *
+ * @param state 引擎状态
+ * @return OK / NOT_READY（让出）/ 错误码
+ */
+nand_result_e fc_uop_engine_step(fc_uop_engine_state_s *state);
+
 /**
  * @brief 推进一条异步事务
  *
@@ -109,12 +116,5 @@ nand_result_e fc_nand_start(fc_nand_txn_s *transaction, BYTE operation, const na
  * @return NOT_READY（继续 poll）/ 完成结果
  */
 nand_result_e fc_nand_step(fc_nand_txn_s *transaction, nand_cmd_comp_s *completion);
-
-#if defined(FC_NAND_TEST_ENABLE)
-/**
- * @brief 测试专用：调用参数页读取路径（用于 ONFI 读失败注入）。
- */
-nand_result_e fc_nand_test_read_parameter_page(BYTE ch, BYTE ce, BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_cmd_comp_s *completion);
-#endif
 
 #endif /* FC_NAND_ENGINE_H */

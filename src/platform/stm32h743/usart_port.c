@@ -21,7 +21,22 @@ UART_HandleTypeDef g_uart1_handle = {0};
 extern DMA_HandleTypeDef g_dma_handle;
 
 static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle);
+
 static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle);
+
+/* ─────────────────────────── DMA 回调（HAL 签名）─────────────────────────── */
+
+static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle)
+{
+    (void)dma_handle;
+    uart_tx_dma_complete_handler();
+}
+
+static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle)
+{
+    (void)dma_handle;
+    uart_tx_dma_error_handler();
+}
 
 BYTE usart_port_hw_init(DWORD baudrate)
 {
@@ -258,18 +273,4 @@ void usart_port_irq_disable(void)
 void usart_port_irq_restore(DWORD state)
 {
     __set_PRIMASK(state);
-}
-
-/* ─────────────────────────── DMA 回调（HAL 签名）─────────────────────────── */
-
-static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle)
-{
-    (void)dma_handle;
-    uart_tx_dma_complete_handler();
-}
-
-static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle)
-{
-    (void)dma_handle;
-    uart_tx_dma_error_handler();
 }

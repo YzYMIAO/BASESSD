@@ -47,33 +47,51 @@
  * 两者都没有 data stage，走同一条异步 FLUSH 路径；某些主机（含部分 Windows/FS
  * 工具链）用 16 字节 CDB 版本。 */
 #define USB_SCSI_SYNCHRONIZE_CACHE_10 0x35U
+
 #define USB_SCSI_SYNCHRONIZE_CACHE_16 0x91U
-#define USB_SCSI_UNMAP                0x42U
-#define USB_SCSI_MODE_SELECT_6        0x15U
-#define USB_SCSI_MODE_SELECT_10       0x55U
+
+#define USB_SCSI_UNMAP 0x42U
+
+#define USB_SCSI_MODE_SELECT_6 0x15U
+
+#define USB_SCSI_MODE_SELECT_10 0x55U
 
 /* SCSI additional sense code / qualifier（SPC-4）。 */
-#define USB_SCSI_ASC_WRITE_ERROR                 (0x0CU)
-#define USB_SCSI_ASC_UNRECOVERED_READ_ERROR      (0x11U)
-#define USB_SCSI_ASC_LBA_OUT_OF_RANGE            (0x21U)
-#define USB_SCSI_ASC_INVALID_FIELD_IN_CDB        (0x24U)
+#define USB_SCSI_ASC_WRITE_ERROR (0x0CU)
+
+#define USB_SCSI_ASC_UNRECOVERED_READ_ERROR (0x11U)
+
+#define USB_SCSI_ASC_LBA_OUT_OF_RANGE (0x21U)
+
+#define USB_SCSI_ASC_INVALID_FIELD_IN_CDB (0x24U)
+
 #define USB_SCSI_ASC_INVALID_FIELD_IN_PARAM_LIST (0x26U)
-#define USB_SCSI_ASC_NO_INFORMATION              (0x00U)
-#define USB_SCSI_ASCQ_NONE                       (0x00U)
+
+#define USB_SCSI_ASC_NO_INFORMATION (0x00U)
+
+#define USB_SCSI_ASCQ_NONE (0x00U)
 
 /* MODE SENSE page codes / lengths（SPC-4）：page = code + 长度字节 + 数据。 */
-#define USB_SCSI_MODE_PAGE_CACHING          (0x08U)
-#define USB_SCSI_MODE_PAGE_IE               (0x1CU)
-#define USB_SCSI_MODE_PAGE_ALL              (0x3FU)
+#define USB_SCSI_MODE_PAGE_CACHING (0x08U)
+
+#define USB_SCSI_MODE_PAGE_IE (0x1CU)
+
+#define USB_SCSI_MODE_PAGE_ALL (0x3FU)
+
 #define USB_SCSI_MODE_PAGE_CACHING_DATA_LEN (18U)
-#define USB_SCSI_MODE_PAGE_IE_DATA_LEN      (10U)
-#define USB_SCSI_MODE_PAGE_CACHING_LEN      (2U + USB_SCSI_MODE_PAGE_CACHING_DATA_LEN)
-#define USB_SCSI_MODE_PAGE_IE_LEN           (2U + USB_SCSI_MODE_PAGE_IE_DATA_LEN)
+
+#define USB_SCSI_MODE_PAGE_IE_DATA_LEN (10U)
+
+#define USB_SCSI_MODE_PAGE_CACHING_LEN (2U + USB_SCSI_MODE_PAGE_CACHING_DATA_LEN)
+
+#define USB_SCSI_MODE_PAGE_IE_LEN (2U + USB_SCSI_MODE_PAGE_IE_DATA_LEN)
 
 /* SCSI UNMAP 参数表（SBC-4）：8B 头 + N×16B block descriptor；
  * descriptor 内 LBA 占 8B（高/低各 4B），NLB 在偏移 8。 */
-#define USB_MSC_UNMAP_HDR_SIZE        (8U)
-#define USB_MSC_UNMAP_DESC_SIZE       (16U)
+#define USB_MSC_UNMAP_HDR_SIZE (8U)
+
+#define USB_MSC_UNMAP_DESC_SIZE (16U)
+
 #define USB_MSC_UNMAP_DESC_NLB_OFFSET (8U)
 
 /* WR chunk 直方图的 4 KiB 桶边界。 */
@@ -86,16 +104,23 @@
  * 16 × 16B = 256B，足够覆盖文件系统的常见 discard 批量。 */
 #define USB_MSC_UNMAP_MAX (16U)
 
-#define USB_MSC_EP_OUT       0x01U
-#define USB_MSC_EP_IN        0x81U
-#define USB_MSC_EP_SIZE      64U  /* 本仓选定的 FS bulk 端点包长（TinyUSB MSC 描述符参数） */
-#define USB_MSC_POWER_MA     500U /* 总线供电声明；实际功耗以板级实测为准 */
+#define USB_MSC_EP_OUT 0x01U
+
+#define USB_MSC_EP_IN 0x81U
+
+#define USB_MSC_EP_SIZE 64U /* 本仓选定的 FS bulk 端点包长（TinyUSB MSC 描述符参数） */
+
+#define USB_MSC_POWER_MA 500U /* 总线供电声明；实际功耗以板级实测为准 */
+
 #define USB_MSC_LANGID_EN_US 0x0409U
 
 /* 设备描述符标识：VID 沿用 ST 开发板 VID，PID 为本仓选定的开发用值（未申请量产分配）。 */
-#define USB_MSC_VID        0x0483U
-#define USB_MSC_PID        0x5720U
-#define USB_MSC_BCD_USB    0x0200U /* bcdUSB：USB 2.0 */
+#define USB_MSC_VID 0x0483U
+
+#define USB_MSC_PID 0x5720U
+
+#define USB_MSC_BCD_USB 0x0200U /* bcdUSB：USB 2.0 */
+
 #define USB_MSC_BCD_DEVICE 0x0100U /* bcdDevice：本仓设备版本 1.00 */
 
 /* SCSI READ CAPACITY 的块计数是 32 位；越界会让主机看到错误容量。 */
@@ -110,9 +135,18 @@ _Static_assert(USB_MSC_BLOCK_SIZE == FTL_IU_BYTES, "MSC sector must equal FTL ma
  * 控制槽单独一个是为了：两个写 chunk 都在飞（volatile write cache 的 lookahead）时，
  * 主机紧跟的 SYNCHRONIZE CACHE / UNMAP 仍能排队并异步完成，而不是被 host busy 门拒掉。 */
 #define USB_MSC_SLOT_NUM (3U)
+
 /* 最后一个槽是控制槽：FLUSH / UNMAP 共用（BOT 串行下同一时刻只有一条控制命令），
  * 无 bounce。 */
 #define USB_MSC_SLOT_CONTROL (USB_MSC_SLOT_NUM - 1U)
+
+/* ─────────────────────────── USB 描述符 ─────────────────────────── */
+
+#define USB_MSC_STRING_COUNT 3U
+
+#define USB_MSC_STRING_MAX_CHARS 31U /* 描述符缓冲 32 项：长度字 + 最多 31 个 UTF-16 单元 */
+
+#define USB_MSC_CONFIG_LEN (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
 
 typedef enum USB_MSC_SLOT_STATE_E
 {
@@ -163,20 +197,46 @@ typedef struct USB_MSC_SLOT_S
     BYTE                *bounce;                          /* 指向本槽的 16 KiB 缓冲（见 s_bounce*） */
 } usb_msc_slot_s;
 
-static usb_msc_slot_s s_slots[USB_MSC_SLOT_NUM];
+/* WRITE(10) 数据相分块直方图（取证）。
+ *
+ * TinyUSB 按 CFG_TUD_MSC_EP_BUFSIZE 分块回调，桶值就是本次数据相长度：
+ * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导）；<=4K 说明每块 4 KB；
+ * <=16K 说明 16 KB 端点缓冲生效（每块一次 FTL 异步完成往返）。只在 `info`
+ * 时打印，运行期不输出，不影响时序。 */
+_Static_assert(CFG_TUD_MSC_EP_BUFSIZE == 16384U, "histogram label <=16K depends on EP bufsize");
 
-/* 两个 chunk 的 bounce：0 号在 AXI .bss，1 号放 DTCM。
- * 两块都只被 CPU 读写（DWC2 走 PIO，不经 DMA）⇒ DTCM 可用且最快；
- * SRAM4/SRAM12 在 UT 镜像里已被 FTL 表占满。 */
-static BYTE s_bounce0[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
-static BYTE s_bounce1[CFG_TUD_MSC_EP_BUFSIZE] DTCM_DATA __attribute__((aligned(4)));
+typedef struct USB_MSC_WR_HIST_S
+{
+    DWORD calls;    /* 回调次数 = 数据相分块数 */
+    DWORD bytes;    /* 累计字节 */
+    DWORD le_block; /* <= 512 B */
+    DWORD le_4k;    /* (512, 4096] B */
+    DWORD le_epbuf; /* (4096, 16384] B */
+    DWORD gt_epbuf; /* > 16384 B（当前配置下不应出现） */
+} usb_msc_wr_hist_s;
+
+/* submit → complete 的设备侧墙钟（SysTick µs）。用来区分：
+ *   · 十几 ms：设备处理本身；
+ *   · 只有几 ms：剩余时间在 USB/BOT 主机侧等待，不是 CPU/FTL。
+ * 只在 `info` 打印，运行期零输出。 */
+typedef struct USB_MSC_LAT_S
+{
+    DWORD calls;
+    QWORD total_us;
+    DWORD max_us;
+    DWORD last_us;
+} usb_msc_lat_s;
+
+static usb_msc_slot_s s_slots[USB_MSC_SLOT_NUM];
 
 /* 当前 SCSI 命令的 CBW 信息（tud_msc_cbw_info_cb 填写）。它只用于给 FTL 计算
  * 「本 chunk 之后同一命令还剩多少 LBA」（cache 序列 END 的落点）；序列本身由 FTL
  * 的顺序流检测器判定，host 传输段边界不构成断点。0 = 未知（按单 chunk 处理）。 */
 static DWORD s_cmd_lba;
+
 static DWORD s_cmd_blocks;
-static BOOL  s_cmd_fua; /* 当前 WRITE(10) 的 FUA 位（READ 恒 false） */
+
+static BOOL s_cmd_fua; /* 当前 WRITE(10) 的 FUA 位（READ 恒 false） */
 
 static DWORD s_order_next; /* 下一条到达 chunk 的序 */
 
@@ -189,13 +249,168 @@ static DWORD s_order_next; /* 下一条到达 chunk 的序 */
  * 状态转移都发生在 task 上下文，ISR 不参与应用状态机（H16 / H18）。
  * 代次不等即「旧会话」；`s_session_gen_seen` 只由主循环写。 */
 static DWORD s_session_gen;
+
 static DWORD s_session_gen_seen; /* 主循环已应用到的代次 */
 
 /* 已提前回执的写 chunk 后来失败（volatile write cache）：留到下一条命令上报一次。 */
 static BOOL s_deferred_write_error;
 
+static usb_msc_wr_hist_s s_wr_hist;
+
+static usb_msc_lat_s s_lat;
+
+static const char *const s_string_desc[USB_MSC_STRING_COUNT] = {
+    "BASESSD",
+    "NAND U-Disk",
+    "SSD0001",
+};
+
+static const tusb_desc_device_t s_device_desc = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = USB_MSC_BCD_USB,
+    .bDeviceClass       = 0x00, /* class 在 interface 上定义（MSC） */
+    .bDeviceSubClass    = 0x00,
+    .bDeviceProtocol    = 0x00,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor           = USB_MSC_VID,
+    .idProduct          = USB_MSC_PID,
+    .bcdDevice          = USB_MSC_BCD_DEVICE,
+    .iManufacturer      = 0x01,
+    .iProduct           = 0x02,
+    .iSerialNumber      = 0x03,
+    .bNumConfigurations = 0x01,
+};
+
+static const BYTE s_config_desc[] = {
+    /* config, itf count, string idx, total len, attributes, power(2mA) */
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, USB_MSC_CONFIG_LEN, 0x00, USB_MSC_POWER_MA),
+    /* itf, string idx, EP out, EP in, EP size */
+    TUD_MSC_DESCRIPTOR(0, 0, USB_MSC_EP_OUT, USB_MSC_EP_IN, USB_MSC_EP_SIZE),
+};
+
+/* 两个 chunk 的 bounce：0 号在 AXI .bss，1 号放 DTCM。
+ * 两块都只被 CPU 读写（DWC2 走 PIO，不经 DMA）⇒ DTCM 可用且最快；
+ * SRAM4/SRAM12 在 UT 镜像里已被 FTL 表占满。 */
+static BYTE s_bounce0[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
+
+static BYTE s_bounce1[CFG_TUD_MSC_EP_BUFSIZE] DTCM_DATA __attribute__((aligned(4)));
+
 /* 消费会话代次（定义在 slot 辅助之后；deferred 错误入口需要先调用它）。 */
 static void usb_msc_session_apply(void);
+
+/**
+ * @brief Controller 是否已 READY
+ *
+ * @return true = 可接受 host 命令
+ */
+static BOOL usb_msc_ready(void)
+{
+    return g_ctrl.state == SSD_CONTROLLER_READY;
+}
+
+/**
+ * @brief 取槽的 host queue request（entry 必须已分配）
+ *
+ * @param slot 槽
+ * @return request 指针
+ */
+static ssd_req_s *usb_msc_slot_request(usb_msc_slot_s *slot)
+{
+    ASSERT(slot->entry != NULL);
+    return &slot->entry->request;
+}
+
+/**
+ * @brief 归还槽的 host queue entry 并置 FREE
+ *
+ * @param slot 槽
+ */
+static void usb_msc_slot_release(usb_msc_slot_s *slot)
+{
+    if (slot->entry != NULL)
+    {
+        ssd_host_queue_free(&g_ctrl.host_queue, slot->entry);
+        slot->entry = NULL;
+    }
+    slot->state = USB_MSC_SLOT_FREE;
+}
+
+/**
+ * @brief 两个数据槽是否都空闲
+ *
+ * @return true = 都 FREE
+ */
+static BOOL usb_msc_data_slots_idle(void)
+{
+    for (BYTE i = 0U; i < USB_MSC_SLOT_CONTROL; i++)
+    {
+        if (s_slots[i].state != USB_MSC_SLOT_FREE)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief 读取 Big-Endian 16-bit
+ *
+ * @param p 字节指针
+ * @return 16-bit 值
+ */
+static WORD usb_msc_be16(const BYTE *p)
+{
+    return (WORD)(((WORD)p[0] << 8) | (WORD)p[1]);
+}
+
+/**
+ * @brief 读取 Big-Endian 32-bit
+ *
+ * @param p 字节指针
+ * @return 32-bit 值
+ */
+static DWORD usb_msc_be32(const BYTE *p)
+{
+    return ((DWORD)p[0] << 24) | ((DWORD)p[1] << 16) | ((DWORD)p[2] << 8) | (DWORD)p[3];
+}
+
+/**
+ * @brief 以 MEDIUM ERROR 结束 UNMAP 并回执
+ *
+ * @param slot 槽
+ * @param asc ASC（0x0C = write error）
+ */
+static void usb_msc_unmap_fail(usb_msc_slot_s *slot, BYTE asc)
+{
+    (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, asc, USB_SCSI_ASCQ_NONE);
+    usb_msc_slot_release(slot);
+    (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
+}
+
+/**
+ * @brief 写请求是否允许启动（读/FLUSH/UNMAP 不受 admission 限制）
+ *
+ * @param slot 已填好 lba / is_write 的槽
+ * @return true = 允许提交；false = 保持 WAIT_GATE 稍后重试
+ */
+static BOOL usb_msc_slot_write_admit(const usb_msc_slot_s *slot)
+{
+    return (slot->is_write == false) || (ssd_controller_host_write_admit(&g_ctrl, slot->lba) != false);
+}
+
+/**
+ * @brief 填 MODE SENSE page 0x1C（Informational Exceptions Control），返回字节数。
+ *
+ * 全部为 0：不主动上报 IE（DEXCPT=0 / LOGERR=0 / MRIE=0）。
+ */
+static DWORD usb_msc_mode_page_ie(BYTE *page)
+{
+    page[0] = USB_SCSI_MODE_PAGE_IE;
+    page[1] = USB_SCSI_MODE_PAGE_IE_DATA_LEN;
+    memset(&page[2], 0, USB_SCSI_MODE_PAGE_IE_DATA_LEN);
+    return USB_SCSI_MODE_PAGE_IE_LEN;
+}
 
 /**
  * @brief 取走 deferred 写错误（有则本次命令失败并带准确 sense）。
@@ -234,59 +449,6 @@ static BOOL usb_msc_take_deferred_error(BYTE lun)
     LOGW("[USB ] deferred write error — fail the next command (volatile write cache)\r\n");
     return true;
 }
-
-/**
- * @brief 记录 CBW 的起始 LBA / 块数 / FUA（TinyUSB 弱钩子）
- *
- * @param lun 逻辑单元（本仓恒 0）
- * @param lba 起始 LBA
- * @param block_count 块数
- * @param fua WRITE(10) FUA 位
- */
-void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, BOOL fua)
-{
-    if (lun == USB_MSC_LUN)
-    {
-        s_cmd_lba    = lba;
-        s_cmd_blocks = block_count;
-        s_cmd_fua    = fua;
-        /* ⚠ 不清 deferred 写错误：它必须留给下一条能承载状态的命令上报。 */
-    }
-}
-
-/* WRITE(10) 数据相分块直方图（取证）。
- *
- * TinyUSB 按 CFG_TUD_MSC_EP_BUFSIZE 分块回调，桶值就是本次数据相长度：
- * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导）；<=4K 说明每块 4 KB；
- * <=16K 说明 16 KB 端点缓冲生效（每块一次 FTL 异步完成往返）。只在 `info`
- * 时打印，运行期不输出，不影响时序。 */
-_Static_assert(CFG_TUD_MSC_EP_BUFSIZE == 16384U, "histogram label <=16K depends on EP bufsize");
-
-typedef struct USB_MSC_WR_HIST_S
-{
-    DWORD calls;    /* 回调次数 = 数据相分块数 */
-    DWORD bytes;    /* 累计字节 */
-    DWORD le_block; /* <= 512 B */
-    DWORD le_4k;    /* (512, 4096] B */
-    DWORD le_epbuf; /* (4096, 16384] B */
-    DWORD gt_epbuf; /* > 16384 B（当前配置下不应出现） */
-} usb_msc_wr_hist_s;
-
-static usb_msc_wr_hist_s s_wr_hist;
-
-/* submit → complete 的设备侧墙钟（SysTick µs）。用来区分：
- *   · 十几 ms：设备处理本身；
- *   · 只有几 ms：剩余时间在 USB/BOT 主机侧等待，不是 CPU/FTL。
- * 只在 `info` 打印，运行期零输出。 */
-typedef struct USB_MSC_LAT_S
-{
-    DWORD calls;
-    QWORD total_us;
-    DWORD max_us;
-    DWORD last_us;
-} usb_msc_lat_s;
-
-static usb_msc_lat_s s_lat;
 
 /**
  * @brief 记录一次 submit→complete 的延迟
@@ -336,68 +498,6 @@ static void usb_msc_note_write(DWORD bufsize)
 }
 
 /**
- * @brief 打印 USB 写分块与延迟统计（诊断）
- */
-void usb_msc_io_stats_print(void)
-{
-    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu <=16K=%lu >16K=%lu\r\n", s_wr_hist.calls, s_wr_hist.bytes, s_wr_hist.le_block, s_wr_hist.le_4k, s_wr_hist.le_epbuf, s_wr_hist.gt_epbuf);
-
-    {
-        const DWORD avg_us = (s_lat.calls == 0U) ? 0U : (DWORD)(s_lat.total_us / s_lat.calls);
-
-        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%llums\r\n", s_lat.calls, avg_us, s_lat.max_us, s_lat.last_us, s_lat.total_us / 1000U);
-    }
-}
-
-/**
- * @brief 是否有 USB 槽尚未回到 FREE
- *
- * @return true = 任一槽 WAIT_GATE/IN_FLIGHT
- */
-BOOL usb_msc_host_busy(void)
-{
-    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
-    {
-        if (s_slots[i].state != USB_MSC_SLOT_FREE)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/**
- * @brief 清零 USB MSC 槽状态（host queue 由 controller 初始化）
- *
- */
-void usb_msc_init(void)
-{
-    /* 在 usb_device_init() 之前调用，USB ISR 尚未使能；可整体清零。
-     * 2 号槽是控制槽（FLUSH/UNMAP）：bounce 保持 NULL。 */
-    memset(s_slots, 0, sizeof(s_slots));
-    s_slots[0].bounce      = s_bounce0;
-    s_slots[1].bounce      = s_bounce1;
-    s_cmd_lba              = 0U;
-    s_cmd_blocks           = 0U;
-    s_cmd_fua              = false;
-    s_order_next           = 0U;
-    s_deferred_write_error = false;
-    s_session_gen          = 0U;
-    s_session_gen_seen     = 0U;
-}
-
-/**
- * @brief Controller 是否已 READY
- *
- * @return true = 可接受 host 命令
- */
-static BOOL usb_msc_ready(void)
-{
-    return g_ctrl.state == SSD_CONTROLLER_READY;
-}
-
-/**
  * @brief 查找可复用的 WAIT_GATE 数据槽（事件重放）
  *
  * @param is_write true = WRITE
@@ -419,33 +519,6 @@ static usb_msc_slot_s *usb_msc_slot_match(BOOL is_write, DWORD lba, DWORD offset
     }
 
     return NULL;
-}
-
-/**
- * @brief 取槽的 host queue request（entry 必须已分配）
- *
- * @param slot 槽
- * @return request 指针
- */
-static ssd_req_s *usb_msc_slot_request(usb_msc_slot_s *slot)
-{
-    ASSERT(slot->entry != NULL);
-    return &slot->entry->request;
-}
-
-/**
- * @brief 归还槽的 host queue entry 并置 FREE
- *
- * @param slot 槽
- */
-static void usb_msc_slot_release(usb_msc_slot_s *slot)
-{
-    if (slot->entry != NULL)
-    {
-        ssd_host_queue_free(&g_ctrl.host_queue, slot->entry);
-        slot->entry = NULL;
-    }
-    slot->state = USB_MSC_SLOT_FREE;
 }
 
 /**
@@ -707,45 +780,6 @@ static usb_msc_slot_s *usb_msc_slot_alloc_unmap(void)
 }
 
 /**
- * @brief 两个数据槽是否都空闲
- *
- * @return true = 都 FREE
- */
-static BOOL usb_msc_data_slots_idle(void)
-{
-    for (BYTE i = 0U; i < USB_MSC_SLOT_CONTROL; i++)
-    {
-        if (s_slots[i].state != USB_MSC_SLOT_FREE)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-/**
- * @brief 读取 Big-Endian 16-bit
- *
- * @param p 字节指针
- * @return 16-bit 值
- */
-static WORD usb_msc_be16(const BYTE *p)
-{
-    return (WORD)(((WORD)p[0] << 8) | (WORD)p[1]);
-}
-
-/**
- * @brief 读取 Big-Endian 32-bit
- *
- * @param p 字节指针
- * @return 32-bit 值
- */
-static DWORD usb_msc_be32(const BYTE *p)
-{
-    return ((DWORD)p[0] << 24) | ((DWORD)p[1] << 16) | ((DWORD)p[2] << 8) | (DWORD)p[3];
-}
-
-/**
  * @brief UNMAP 屏障：提交内部 FLUSH
  *
  * @param slot 槽
@@ -845,19 +879,6 @@ static BOOL usb_msc_unmap_start(usb_msc_slot_s *slot)
      * wr_inflight / WRITE_CONFIRM），再逐 range TRIM；否则早回执写可能在 TRIM
      * 之后才确认，数据会复活。 */
     return usb_msc_unmap_submit_flush(slot);
-}
-
-/**
- * @brief 以 MEDIUM ERROR 结束 UNMAP 并回执
- *
- * @param slot 槽
- * @param asc ASC（0x0C = write error）
- */
-static void usb_msc_unmap_fail(usb_msc_slot_s *slot, BYTE asc)
-{
-    (void)tud_msc_set_sense(USB_MSC_LUN, SCSI_SENSE_MEDIUM_ERROR, asc, USB_SCSI_ASCQ_NONE);
-    usb_msc_slot_release(slot);
-    (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
 }
 
 /**
@@ -1077,17 +1098,6 @@ static int32_t usb_msc_unmap_parse(BYTE lun, const BYTE *param, WORD length)
 }
 
 /**
- * @brief 写请求是否允许启动（读/FLUSH/UNMAP 不受 admission 限制）
- *
- * @param slot 已填好 lba / is_write 的槽
- * @return true = 允许提交；false = 保持 WAIT_GATE 稍后重试
- */
-static BOOL usb_msc_slot_write_admit(const usb_msc_slot_s *slot)
-{
-    return (slot->is_write == false) || (ssd_controller_host_write_admit(&g_ctrl, slot->lba) != false);
-}
-
-/**
  * @brief READ10/WRITE10 公共入口：校验 + 槽分配 + 提交
  *
  * @param is_write true = WRITE
@@ -1276,6 +1286,93 @@ static void usb_msc_slot_complete(usb_msc_slot_s *slot)
 
     usb_msc_slot_release(slot);
     (void)tud_msc_async_io_done(transfer_result, false);
+}
+
+/**
+ * @brief 填 MODE SENSE page 0x08（Caching），返回字节数。
+ *
+ * WCE=0：对主机宣称无 write cache。主机若看到 WCE=1，会在格式化前用 MODE SELECT
+ * 设置缓存页；本仓只接受、不应用 mode parameter list，保持 WCE=0 让主机走简单路径
+ * （与“不提供 caching page”的既有行为等效）。
+ */
+static DWORD usb_msc_mode_page_caching(BYTE *page)
+{
+    page[0] = USB_SCSI_MODE_PAGE_CACHING;
+    page[1] = USB_SCSI_MODE_PAGE_CACHING_DATA_LEN;
+    memset(&page[2], 0, USB_SCSI_MODE_PAGE_CACHING_DATA_LEN);
+    page[2] = 0x00U; /* WCE = 0 */
+    return USB_SCSI_MODE_PAGE_CACHING_LEN;
+}
+
+/**
+ * @brief 记录 CBW 的起始 LBA / 块数 / FUA（TinyUSB 弱钩子）
+ *
+ * @param lun 逻辑单元（本仓恒 0）
+ * @param lba 起始 LBA
+ * @param block_count 块数
+ * @param fua WRITE(10) FUA 位
+ */
+void tud_msc_cbw_info_cb(uint8_t lun, uint32_t lba, uint16_t block_count, BOOL fua)
+{
+    if (lun == USB_MSC_LUN)
+    {
+        s_cmd_lba    = lba;
+        s_cmd_blocks = block_count;
+        s_cmd_fua    = fua;
+        /* ⚠ 不清 deferred 写错误：它必须留给下一条能承载状态的命令上报。 */
+    }
+}
+
+/**
+ * @brief 打印 USB 写分块与延迟统计（诊断）
+ */
+void usb_msc_io_stats_print(void)
+{
+    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu <=16K=%lu >16K=%lu\r\n", s_wr_hist.calls, s_wr_hist.bytes, s_wr_hist.le_block, s_wr_hist.le_4k, s_wr_hist.le_epbuf, s_wr_hist.gt_epbuf);
+
+    {
+        const DWORD avg_us = (s_lat.calls == 0U) ? 0U : (DWORD)(s_lat.total_us / s_lat.calls);
+
+        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%llums\r\n", s_lat.calls, avg_us, s_lat.max_us, s_lat.last_us, s_lat.total_us / 1000U);
+    }
+}
+
+/**
+ * @brief 是否有 USB 槽尚未回到 FREE
+ *
+ * @return true = 任一槽 WAIT_GATE/IN_FLIGHT
+ */
+BOOL usb_msc_host_busy(void)
+{
+    for (BYTE i = 0U; i < USB_MSC_SLOT_NUM; i++)
+    {
+        if (s_slots[i].state != USB_MSC_SLOT_FREE)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief 清零 USB MSC 槽状态（host queue 由 controller 初始化）
+ *
+ */
+void usb_msc_init(void)
+{
+    /* 在 usb_device_init() 之前调用，USB ISR 尚未使能；可整体清零。
+     * 2 号槽是控制槽（FLUSH/UNMAP）：bounce 保持 NULL。 */
+    memset(s_slots, 0, sizeof(s_slots));
+    s_slots[0].bounce      = s_bounce0;
+    s_slots[1].bounce      = s_bounce1;
+    s_cmd_lba              = 0U;
+    s_cmd_blocks           = 0U;
+    s_cmd_fua              = false;
+    s_order_next           = 0U;
+    s_deferred_write_error = false;
+    s_session_gen          = 0U;
+    s_session_gen_seen     = 0U;
 }
 
 /**
@@ -1548,35 +1645,6 @@ void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
 }
 
 /**
- * @brief 填 MODE SENSE page 0x08（Caching），返回字节数。
- *
- * WCE=0：对主机宣称无 write cache。主机若看到 WCE=1，会在格式化前用 MODE SELECT
- * 设置缓存页；本仓只接受、不应用 mode parameter list，保持 WCE=0 让主机走简单路径
- * （与“不提供 caching page”的既有行为等效）。
- */
-static DWORD usb_msc_mode_page_caching(BYTE *page)
-{
-    page[0] = USB_SCSI_MODE_PAGE_CACHING;
-    page[1] = USB_SCSI_MODE_PAGE_CACHING_DATA_LEN;
-    memset(&page[2], 0, USB_SCSI_MODE_PAGE_CACHING_DATA_LEN);
-    page[2] = 0x00U; /* WCE = 0 */
-    return USB_SCSI_MODE_PAGE_CACHING_LEN;
-}
-
-/**
- * @brief 填 MODE SENSE page 0x1C（Informational Exceptions Control），返回字节数。
- *
- * 全部为 0：不主动上报 IE（DEXCPT=0 / LOGERR=0 / MRIE=0）。
- */
-static DWORD usb_msc_mode_page_ie(BYTE *page)
-{
-    page[0] = USB_SCSI_MODE_PAGE_IE;
-    page[1] = USB_SCSI_MODE_PAGE_IE_DATA_LEN;
-    memset(&page[2], 0, USB_SCSI_MODE_PAGE_IE_DATA_LEN);
-    return USB_SCSI_MODE_PAGE_IE_LEN;
-}
-
-/**
  * @brief MODE SENSE(6) 应用响应（TinyUSB 补丁）。
  *
  * Windows 的格式化流程会查询 caching（0x08）与 informational exceptions（0x1C）
@@ -1779,43 +1847,6 @@ void tud_msc_write10_complete_cb(BYTE lun)
      * 持久化由主机的 SYNCHRONIZE CACHE 驱动。 */
     (void)lun;
 }
-
-/* ─────────────────────────── USB 描述符 ─────────────────────────── */
-
-#define USB_MSC_STRING_COUNT     3U
-#define USB_MSC_STRING_MAX_CHARS 31U /* 描述符缓冲 32 项：长度字 + 最多 31 个 UTF-16 单元 */
-
-static const char *const s_string_desc[USB_MSC_STRING_COUNT] = {
-    "BASESSD",
-    "NAND U-Disk",
-    "SSD0001",
-};
-
-static const tusb_desc_device_t s_device_desc = {
-    .bLength            = sizeof(tusb_desc_device_t),
-    .bDescriptorType    = TUSB_DESC_DEVICE,
-    .bcdUSB             = USB_MSC_BCD_USB,
-    .bDeviceClass       = 0x00, /* class 在 interface 上定义（MSC） */
-    .bDeviceSubClass    = 0x00,
-    .bDeviceProtocol    = 0x00,
-    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor           = USB_MSC_VID,
-    .idProduct          = USB_MSC_PID,
-    .bcdDevice          = USB_MSC_BCD_DEVICE,
-    .iManufacturer      = 0x01,
-    .iProduct           = 0x02,
-    .iSerialNumber      = 0x03,
-    .bNumConfigurations = 0x01,
-};
-
-#define USB_MSC_CONFIG_LEN (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
-
-static const BYTE s_config_desc[] = {
-    /* config, itf count, string idx, total len, attributes, power(2mA) */
-    TUD_CONFIG_DESCRIPTOR(1, 1, 0, USB_MSC_CONFIG_LEN, 0x00, USB_MSC_POWER_MA),
-    /* itf, string idx, EP out, EP in, EP size */
-    TUD_MSC_DESCRIPTOR(0, 0, USB_MSC_EP_OUT, USB_MSC_EP_IN, USB_MSC_EP_SIZE),
-};
 
 /**
  * @brief 返回设备描述符

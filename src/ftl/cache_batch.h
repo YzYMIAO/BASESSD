@@ -27,6 +27,51 @@
 #include "ftl_type.h"   /* ftl_ctx_s */
 #include "ssd_types.h"
 
+/* ── cache read ──
+ * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
+ * （单条 LAST 收尾，见 cache_batch.c 的 ftl_cache_read_try）。
+ * 单条窗口的 pair 上限由 FC 资源决定（见 cache_batch.c 的 FTL_CACHE_READ_MAX_PAIRS）：
+ * per-LUN FIFO 深度只决定 FC 每趟往 NAND 填充几条，不是窗口上限。
+ * 尝试时机：序列所有者每轮都试（续窗口）；其余情况只在 FTL 顺序流检测器判为
+ * 顺序读时尝试（判据是连续 LBA 长度，与 host 传输段长度无关）。 */
+#define FTL_CACHE_READ_MIN_PAIRS (2U)
+
+/* 读序列单段上限（pair，跨 block 续接后仍需收尾）。
+ *
+ * why：READ PAGE CACHE SEQUENTIAL (31h) 可以跨 block（同 die；禁止跨 die/LUN ——
+ * MT29F4G08 datasheet「Read Cache Operations」节（链接见 `docs/reference/README.md`）），所以 block 边界不再是自然断点；
+ * 但**整段读序列期间该 die 的 cache 寄存器被占用（ARDY = 0），程序命令发不进去**，
+ * Journal / L2P / GC / 元数据写会被序列门控挡在段外。断点就是后台元数据在这块 die 上的
+ * 让步点，必须有一个与器件无关的上限。
+ *
+ * 口径：128 pair = 512 KiB 数据，按实测顺序读 ~887 KB/s 约 0.58 s 一段；与写侧
+ * Journal 顺序页配额（63 pair ≈ 0.29 s）同一量级的让步节奏。太小则 START 数回升，
+ * 太大则 GC/CP 在长顺序读期间得不到窗口。
+ * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展。 */
+#define FTL_CACHE_READ_MAX_RUN_PAIRS (128U)
+
+/* ── cache program ──
+ * 窗口页数上限 = host 单次写传输 16 KiB / 4 KiB 页 = 4（CFG_TUD_MSC_EP_BUFSIZE）。
+ * 序列本身跨窗口、跨 chunk（首 49 / 中间 44 / 断点 48），窗口只是资源边界；
+ * 不是 NAND FIFO 深度。 */
+#define FTL_CACHE_WRITE_MAX_PAGES (4U)
+
+typedef enum FTL_CACHE_READ_RESULT_E
+{
+    FTL_CACHE_READ_DECLINED = 0, /* 条件不满足：调用者回退普通读 */
+    FTL_CACHE_READ_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
+    FTL_CACHE_READ_AGAIN    = 2, /* L2P 加载在飞/资源背压：本轮停止 */
+    FTL_CACHE_READ_ERROR    = 3, /* 永久错误：组报 IO_ERROR（如链契约违反） */
+} ftl_cache_read_result_e;
+
+typedef enum FTL_CACHE_WRITE_RESULT_E
+{
+    FTL_CACHE_WRITE_DECLINED = 0, /* 条件不满足：调用者回退 wbuf */
+    FTL_CACHE_WRITE_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
+    FTL_CACHE_WRITE_AGAIN    = 2, /* 资源/空间瞬态背压：本轮停止 */
+    FTL_CACHE_WRITE_ERROR    = 3, /* 永久错误：组报 IO_ERROR */
+} ftl_cache_write_result_e;
+
 /* ── 序列状态查询 / 控制（跨模块只走这里，不直接读 cache_stream.seq 字段）──
  *
  * `cache_stream.seq` 的写者是序列模块（本文件 + ftl.c 的状态机）；ftl_op.c 等
@@ -125,37 +170,6 @@ void ftl_cache_demand_window_clear(ftl_ctx_s *ftl);
  */
 BOOL ftl_cache_demand_window_blocks(ftl_ctx_s *ftl);
 
-/* ── cache read ──
- * 新序列至少 2 个 pair（1 个 pair 用普通读）；**续序列允许 1 个 pair 的尾巴**
- * （单条 LAST 收尾，见 cache_batch.c 的 ftl_cache_read_try）。
- * 单条窗口的 pair 上限由 FC 资源决定（见 cache_batch.c 的 FTL_CACHE_READ_MAX_PAIRS）：
- * per-LUN FIFO 深度只决定 FC 每趟往 NAND 填充几条，不是窗口上限。
- * 尝试时机：序列所有者每轮都试（续窗口）；其余情况只在 FTL 顺序流检测器判为
- * 顺序读时尝试（判据是连续 LBA 长度，与 host 传输段长度无关）。 */
-#define FTL_CACHE_READ_MIN_PAIRS (2U)
-
-/* 读序列单段上限（pair，跨 block 续接后仍需收尾）。
- *
- * why：READ PAGE CACHE SEQUENTIAL (31h) 可以跨 block（同 die；禁止跨 die/LUN ——
- * MT29F4G08 datasheet「Read Cache Operations」节（链接见 `docs/reference/README.md`）），所以 block 边界不再是自然断点；
- * 但**整段读序列期间该 die 的 cache 寄存器被占用（ARDY = 0），程序命令发不进去**，
- * Journal / L2P / GC / 元数据写会被序列门控挡在段外。断点就是后台元数据在这块 die 上的
- * 让步点，必须有一个与器件无关的上限。
- *
- * 口径：128 pair = 512 KiB 数据，按实测顺序读 ~887 KB/s 约 0.58 s 一段；与写侧
- * Journal 顺序页配额（63 pair ≈ 0.29 s）同一量级的让步节奏。太小则 START 数回升，
- * 太大则 GC/CP 在长顺序读期间得不到窗口。
- * 重访触发：上板看 `cr` 的 starts 与 GC/metadata 在长读期间的进展。 */
-#define FTL_CACHE_READ_MAX_RUN_PAIRS (128U)
-
-typedef enum FTL_CACHE_READ_RESULT_E
-{
-    FTL_CACHE_READ_DECLINED = 0, /* 条件不满足：调用者回退普通读 */
-    FTL_CACHE_READ_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
-    FTL_CACHE_READ_AGAIN    = 2, /* L2P 加载在飞/资源背压：本轮停止 */
-    FTL_CACHE_READ_ERROR    = 3, /* 永久错误：组报 IO_ERROR（如链契约违反） */
-} ftl_cache_read_result_e;
-
 /**
  * @brief 尝试为当前读组提交一个 cache read 窗口；序列状态跨调用保留。
  *
@@ -171,20 +185,6 @@ typedef enum FTL_CACHE_READ_RESULT_E
  *         FTL_CACHE_READ_ERROR 永久错误，组报 IO_ERROR。
  */
 ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
-
-/* ── cache program ──
- * 窗口页数上限 = host 单次写传输 16 KiB / 4 KiB 页 = 4（CFG_TUD_MSC_EP_BUFSIZE）。
- * 序列本身跨窗口、跨 chunk（首 49 / 中间 44 / 断点 48），窗口只是资源边界；
- * 不是 NAND FIFO 深度。 */
-#define FTL_CACHE_WRITE_MAX_PAGES (4U)
-
-typedef enum FTL_CACHE_WRITE_RESULT_E
-{
-    FTL_CACHE_WRITE_DECLINED = 0, /* 条件不满足：调用者回退 wbuf */
-    FTL_CACHE_WRITE_OK       = 1, /* 已提交，*used = 消费的 LBA 数 */
-    FTL_CACHE_WRITE_AGAIN    = 2, /* 资源/空间瞬态背压：本轮停止 */
-    FTL_CACHE_WRITE_ERROR    = 3, /* 永久错误：组报 IO_ERROR */
-} ftl_cache_write_result_e;
 
 /**
  * @brief 尝试为当前写组提交一个 cache program 窗口；序列状态跨调用、跨 chunk 保留。

@@ -20,15 +20,9 @@
  */
 
 /* CRC 计算结果类型 */
-#define FC_CRC_RESULT_OK    (0U)
-#define FC_CRC_RESULT_ERROR (1U)
+#define FC_CRC_RESULT_OK (0U)
 
-/**
- * @brief   初始化 CRC 后端（硬件优先，软件 fallback）。
- * @note    在 fc_init() 中调用一次。硬件后端的时钟/外设自检在平台层；
- *          软件后端只建表。自检不过一律 ASSERT。
- */
-void fc_crc_init(void);
+#define FC_CRC_RESULT_ERROR (1U)
 
 /**
  * @brief   对 USER 数据（512 字节）计算 CRC-32
@@ -46,5 +40,12 @@ DWORD fc_crc_compute(const BYTE *user_data);
  * @return  FC_CRC_RESULT_OK 或 FC_CRC_RESULT_ERROR
  */
 BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc);
+
+/**
+ * @brief   初始化 CRC 后端（硬件优先，软件 fallback）。
+ * @note    在 fc_init() 中调用一次。硬件后端的时钟/外设自检在平台层；
+ *          软件后端只建表。自检不过一律 ASSERT。
+ */
+void fc_crc_init(void);
 
 #endif /* FC_CRC_ENGINE_H_ */

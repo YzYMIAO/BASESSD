@@ -21,7 +21,51 @@
 
 /* host 失败回执的限流日志（无命令池/队列依赖，统计关闭也保留）。 */
 static DWORD s_bad_status_log_ms;
+
 static DWORD s_bad_status_log_n;
+
+#if SSD_STATS_ENABLE
+typedef struct HIL_REQUEST_STATISTICS_S
+{
+    DWORD        cmd_read;
+    DWORD        cmd_write;
+    DWORD        cmd_flush;
+    DWORD        cmd_trim;
+    DWORD        timeout;
+    DWORD        bad_status;
+    stats_hist_s cmd_us; /* host 命令提交 → 完成 */
+} hil_request_stats_s;
+
+static hil_request_stats_s s_stats_hil;
+
+#    define HIL_STATS_LIST(X)                  \
+        X(cmd_read, STATS_U32, STATS_COUNTER)  \
+        X(cmd_write, STATS_U32, STATS_COUNTER) \
+        X(cmd_flush, STATS_U32, STATS_COUNTER) \
+        X(cmd_trim, STATS_U32, STATS_COUNTER)  \
+        X(timeout, STATS_U32, STATS_COUNTER)   \
+        X(bad_status, STATS_U32, STATS_COUNTER)
+
+#    define HIL_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(hil_request_stats_s, field), width, kind},
+static const stats_name_s s_stats_hil_names[] = {
+    HIL_STATS_LIST(HIL_STATS_NAME)};
+#    undef HIL_STATS_NAME
+#    define HIL_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(hil_request_stats_s, field, width);
+HIL_STATS_LIST(HIL_STATS_CHECK)
+#    undef HIL_STATS_CHECK
+
+#    define HIL_STATS_HIST_LIST(X)     X(cmd_us)
+#    define HIL_STATS_HIST_NAME(field) {STATS_NAME_STR(field), STATS_OFFSET(hil_request_stats_s, field)},
+static const stats_hist_name_s s_stats_hil_hist_names[] = {
+    HIL_STATS_HIST_LIST(HIL_STATS_HIST_NAME)};
+#    undef HIL_STATS_HIST_NAME
+STATS_CHECK_HIST_FIELD(hil_request_stats_s, cmd_us);
+#endif /* SSD_STATS_ENABLE */
+
+/* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
+QWORD      ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
 
 /**
  * @brief 请求 opcode 的短名（日志用）
@@ -74,120 +118,6 @@ static const char *ssd_request_status_name(ssd_status_e status)
             return "unknown";
     }
 }
-
-/* ── HIL 请求统计（模块自持；docs/design/common/statistics_design.md）──
- * 统计专用对象/表/函数在 SSD_STATS_ENABLE=0 时整体不编译。 */
-#if SSD_STATS_ENABLE
-typedef struct HIL_REQUEST_STATISTICS_S
-{
-    DWORD        cmd_read;
-    DWORD        cmd_write;
-    DWORD        cmd_flush;
-    DWORD        cmd_trim;
-    DWORD        timeout;
-    DWORD        bad_status;
-    stats_hist_s cmd_us; /* host 命令提交 → 完成 */
-} hil_request_stats_s;
-
-static hil_request_stats_s s_stats_hil;
-
-#    define HIL_STATS_LIST(X)                  \
-        X(cmd_read, STATS_U32, STATS_COUNTER)  \
-        X(cmd_write, STATS_U32, STATS_COUNTER) \
-        X(cmd_flush, STATS_U32, STATS_COUNTER) \
-        X(cmd_trim, STATS_U32, STATS_COUNTER)  \
-        X(timeout, STATS_U32, STATS_COUNTER)   \
-        X(bad_status, STATS_U32, STATS_COUNTER)
-
-#    define HIL_STATS_NAME(field, width, kind) \
-        {STATS_NAME_STR(field), STATS_OFFSET(hil_request_stats_s, field), width, kind},
-static const stats_name_s s_stats_hil_names[] = {
-    HIL_STATS_LIST(HIL_STATS_NAME)};
-#    undef HIL_STATS_NAME
-#    define HIL_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(hil_request_stats_s, field, width);
-HIL_STATS_LIST(HIL_STATS_CHECK)
-#    undef HIL_STATS_CHECK
-
-#    define HIL_STATS_HIST_LIST(X)     X(cmd_us)
-#    define HIL_STATS_HIST_NAME(field) {STATS_NAME_STR(field), STATS_OFFSET(hil_request_stats_s, field)},
-static const stats_hist_name_s s_stats_hil_hist_names[] = {
-    HIL_STATS_HIST_LIST(HIL_STATS_HIST_NAME)};
-#    undef HIL_STATS_HIST_NAME
-STATS_CHECK_HIST_FIELD(hil_request_stats_s, cmd_us);
-
-/**
- * @brief HIL 请求统计注册（controller init 调用一次；幂等，重入会重置计数）
- */
-void ssd_request_stats_register(void)
-{
-    memset(&s_stats_hil, 0, sizeof(s_stats_hil));
-    (void)stats_register("hil", STATS_INST_NONE, &s_stats_hil, s_stats_hil_names, STATS_ENTRY_COUNT(s_stats_hil_names));
-    (void)stats_register_hist("hil", STATS_INST_NONE, &s_stats_hil, s_stats_hil_hist_names, STATS_ENTRY_COUNT(s_stats_hil_hist_names));
-}
-
-/**
- * @brief 已受理的主机命令计数
- *
- * @param opcode 请求类型（READ / WRITE / FLUSH / TRIM）
- */
-void ssd_request_note_cmd(ssd_req_opcode_e opcode)
-{
-    switch (opcode)
-    {
-        case SSD_REQUEST_READ:
-            STATS_INC(s_stats_hil.cmd_read);
-            break;
-        case SSD_REQUEST_WRITE:
-            STATS_INC(s_stats_hil.cmd_write);
-            break;
-        case SSD_REQUEST_FLUSH:
-            STATS_INC(s_stats_hil.cmd_flush);
-            break;
-        case SSD_REQUEST_TRIM:
-            STATS_INC(s_stats_hil.cmd_trim);
-            break;
-        default:
-            ASSERT(false);
-            break;
-    }
-}
-
-/** @brief host 超时回执计数（ssd_request_mark_timeout 调用） */
-void ssd_request_note_timeout(void)
-{
-    STATS_INC(s_stats_hil.timeout);
-}
-
-/** @brief 异步完成回执为失败（非 OK、非 TIMEOUT）的计数 */
-void ssd_request_note_bad_status(void)
-{
-    STATS_INC(s_stats_hil.bad_status);
-}
-
-/**
- * @brief 记录一次请求的完成延迟（只记一次）
- *
- * @param request 请求（start_timed 为 false 时直接返回）
- */
-void ssd_request_note_latency(ssd_req_s *request)
-{
-    if (request->start_timed == false)
-    {
-        return;
-    }
-
-    DWORD now_us = 0U;
-
-    if (delay_time_now_us(&now_us) != false)
-    {
-        stats_hist_observe(&s_stats_hil.cmd_us, now_us - request->start_us);
-    }
-    request->start_timed = false;
-}
-#endif /* SSD_STATS_ENABLE */
-
-/* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
-ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
 
 /**
  * @brief 子请求完成回调：聚合状态并递减未完成 run 数。
@@ -277,6 +207,105 @@ static void on_sub_complete(void *ctx)
 }
 
 /**
+ * @brief 预统计拆分出的 run 段数。
+ *
+ * 必须在提交前精确置位：run 的完成可能**同步**触发 on_sub_complete（如整段未映射读），
+ * 计数为 0 时同步回调会把父请求提前置完成。
+ *
+ * @param controller Controller 上下文
+ * @param request    主机请求
+ * @return run 段数（>0）
+ */
+static DWORD ssd_split_count(ssd_ctl_s *controller, ssd_req_s *request)
+{
+    QWORD lba     = request->start_lba;
+    QWORD lba_end = request->start_lba + request->block_count;
+    DWORD count   = 0U;
+
+    while (lba < lba_end)
+    {
+        count++;
+        lba = ssd_controller_run_end(controller, lba, lba_end);
+    }
+
+    return count;
+}
+
+/* ── HIL 请求统计（模块自持；docs/design/common/statistics_design.md）──
+ * 统计专用对象/表/函数在 SSD_STATS_ENABLE=0 时整体不编译。 */
+#if SSD_STATS_ENABLE
+/**
+ * @brief HIL 请求统计注册（controller init 调用一次；幂等，重入会重置计数）
+ */
+void ssd_request_stats_register(void)
+{
+    memset(&s_stats_hil, 0, sizeof(s_stats_hil));
+    (void)stats_register("hil", STATS_INST_NONE, &s_stats_hil, s_stats_hil_names, STATS_ENTRY_COUNT(s_stats_hil_names));
+    (void)stats_register_hist("hil", STATS_INST_NONE, &s_stats_hil, s_stats_hil_hist_names, STATS_ENTRY_COUNT(s_stats_hil_hist_names));
+}
+
+/**
+ * @brief 已受理的主机命令计数
+ *
+ * @param opcode 请求类型（READ / WRITE / FLUSH / TRIM）
+ */
+void ssd_request_note_cmd(ssd_req_opcode_e opcode)
+{
+    switch (opcode)
+    {
+        case SSD_REQUEST_READ:
+            STATS_INC(s_stats_hil.cmd_read);
+            break;
+        case SSD_REQUEST_WRITE:
+            STATS_INC(s_stats_hil.cmd_write);
+            break;
+        case SSD_REQUEST_FLUSH:
+            STATS_INC(s_stats_hil.cmd_flush);
+            break;
+        case SSD_REQUEST_TRIM:
+            STATS_INC(s_stats_hil.cmd_trim);
+            break;
+        default:
+            ASSERT(false);
+            break;
+    }
+}
+
+/** @brief host 超时回执计数（ssd_request_mark_timeout 调用） */
+void ssd_request_note_timeout(void)
+{
+    STATS_INC(s_stats_hil.timeout);
+}
+
+/** @brief 异步完成回执为失败（非 OK、非 TIMEOUT）的计数 */
+void ssd_request_note_bad_status(void)
+{
+    STATS_INC(s_stats_hil.bad_status);
+}
+
+/**
+ * @brief 记录一次请求的完成延迟（只记一次）
+ *
+ * @param request 请求（start_timed 为 false 时直接返回）
+ */
+void ssd_request_note_latency(ssd_req_s *request)
+{
+    if (request->start_timed == false)
+    {
+        return;
+    }
+
+    DWORD now_us = 0U;
+
+    if (delay_time_now_us(&now_us) != false)
+    {
+        stats_hist_observe(&s_stats_hil.cmd_us, now_us - request->start_us);
+    }
+    request->start_timed = false;
+}
+#endif /* SSD_STATS_ENABLE */
+
+/**
  * @brief 从 lba 起、路由到同一 FTL 实例的最长连续 run 的结束 LBA（开区间）。
  *
  * 路由按 region（L2P_REGION_SHIFT 个 LBA）粒度分片 ⇒ run 只可能在 region 边界处结束，
@@ -313,31 +342,6 @@ QWORD ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit)
     }
 
     return end;
-}
-
-/**
- * @brief 预统计拆分出的 run 段数。
- *
- * 必须在提交前精确置位：run 的完成可能**同步**触发 on_sub_complete（如整段未映射读），
- * 计数为 0 时同步回调会把父请求提前置完成。
- *
- * @param controller Controller 上下文
- * @param request    主机请求
- * @return run 段数（>0）
- */
-static DWORD ssd_split_count(ssd_ctl_s *controller, ssd_req_s *request)
-{
-    QWORD lba     = request->start_lba;
-    QWORD lba_end = request->start_lba + request->block_count;
-    DWORD count   = 0U;
-
-    while (lba < lba_end)
-    {
-        count++;
-        lba = ssd_controller_run_end(controller, lba, lba_end);
-    }
-
-    return count;
 }
 
 /**

@@ -53,46 +53,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ══════════════════════════════════════════════════════════
- * 1. 静态资源
- *
- * 静态资源区：FC 控制面固定资源，当前位于默认 .bss（AXI SRAM）。
- * 不使用动态内存。后续根据 Cache 和 Buffer Pool 设计，
- * 可将各数组分别放入指定链接段。
- *
- *   池布局：
- *     command_pool / descriptor_pool / buffer_pool —— 三池本体
- *     descriptor_owner[desc] —— desc 归属的命令 ID（O(1) 反查）
- *     command_state / command_free_next —— 命令状态 + 空闲链表
- *     descriptor_free_next —— desc 空闲链表
- *     buffer_free_next / buffer_state —— buffer 空闲链表 + 占用状态
- *
- *   ⚠ 「一条命令拥有哪些 desc」**只有一份真值**：命令的 desc 链
- *     （command->desc_id + descriptor_pool[].next_id）。不设另一条
- *     「所有权链」（descriptor_owned_next[] + command_descriptor_head[]）为
- *     「desc 已分配但尚未挂进数据链」的中间态兜底，（省 640B）。
- *
- *   ⚠ **desc 出池即挂链**：fc_command_configure_descriptor 分配 desc 后
- *     先把字段填好、立刻 append，再分配 buffer。于是「已分配 desc 全部在链上」
- *     恒成立，失败时沿链释放即完备——不需要任何「链外半成品」的回滚逻辑
- *     （中间态本身不存在，不依赖就地回滚）。代价：链上允许存在
- *     buffer_id == FC_BUF_ID_INVALID 的 desc（FC_BUFFER_POOL_DEPTH < FC_DESCRIPTOR_POOL_DEPTH，
- *     这是最现实的失败点），所有走链的读者都要容忍它。
- * ══════════════════════════════════════════════════════════ */
-
-static fc_cmd_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
-static fc_cmd_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
-static fc_cmd_status_s g_fc_cq_storage[FC_CQ_DEPTH];
-
-// GET/SET_FEATURES 的 4 字节内联数据暂存，按 cmd_id（= 命令池槽位号）索引。
-// 为什么需要：SQ 命令提交后不可写（见 fc_interface.h「SQ 不可变」），而引擎需要一个
-// 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
-// 故这里只做提交→完成之间的中转。索引用的 cmd_id 是命令池槽位号，
-// 恒 < FC_COMMAND_POOL_DEPTH。
-// 与 buffer pool 同放 noncacheable 段：READ_META / GET_FEATURES 的 4 字节
-// 返回段由引擎经 FMC 写回，避免 CPU 缓存与总线视图不一致。
-static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] NONCACHEABLE_BUFFER;
-
 /* ── 统计（docs/design/common/statistics_design.md）──
  * 值在本文件（模块自持），名字表 + stats_register 交给 CLI 打印。
  * fc_debug_state_s 的 fill_calls/fill_pops 与这里共用同一份存储。
@@ -176,84 +136,288 @@ FC_POLL_STATS_LIST(FC_POLL_STATS_CHECK)
 #    undef FC_POLL_STATS_CHECK
 #endif /* SSD_STATS_ENABLE */
 
+/* ══════════════════════════════════════════════════════════
+ * 1. 静态资源
+ *
+ * 静态资源区：FC 控制面固定资源，当前位于默认 .bss（AXI SRAM）。
+ * 不使用动态内存。后续根据 Cache 和 Buffer Pool 设计，
+ * 可将各数组分别放入指定链接段。
+ *
+ *   池布局：
+ *     command_pool / descriptor_pool / buffer_pool —— 三池本体
+ *     descriptor_owner[desc] —— desc 归属的命令 ID（O(1) 反查）
+ *     command_state / command_free_next —— 命令状态 + 空闲链表
+ *     descriptor_free_next —— desc 空闲链表
+ *     buffer_free_next / buffer_state —— buffer 空闲链表 + 占用状态
+ *
+ *   ⚠ 「一条命令拥有哪些 desc」**只有一份真值**：命令的 desc 链
+ *     （command->desc_id + descriptor_pool[].next_id）。不设另一条
+ *     「所有权链」（descriptor_owned_next[] + command_descriptor_head[]）为
+ *     「desc 已分配但尚未挂进数据链」的中间态兜底，（省 640B）。
+ *
+ *   ⚠ **desc 出池即挂链**：fc_command_configure_descriptor 分配 desc 后
+ *     先把字段填好、立刻 append，再分配 buffer。于是「已分配 desc 全部在链上」
+ *     恒成立，失败时沿链释放即完备——不需要任何「链外半成品」的回滚逻辑
+ *     （中间态本身不存在，不依赖就地回滚）。代价：链上允许存在
+ *     buffer_id == FC_BUF_ID_INVALID 的 desc（FC_BUFFER_POOL_DEPTH < FC_DESCRIPTOR_POOL_DEPTH，
+ *     这是最现实的失败点），所有走链的读者都要容忍它。
+ * ══════════════════════════════════════════════════════════ */
+
+static fc_cmd_id_t g_fc_sq_storage[FC_SQ_DEPTH];
+
+static fc_cmd_id_t g_fc_hsq_storage[FC_HSQ_DEPTH];
+
+static fc_cmd_status_s g_fc_cq_storage[FC_CQ_DEPTH];
+
+// GET/SET_FEATURES 的 4 字节内联数据暂存，按 cmd_id（= 命令池槽位号）索引。
+// 为什么需要：SQ 命令提交后不可写（见 fc_interface.h「SQ 不可变」），而引擎需要一个
+// 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
+// 故这里只做提交→完成之间的中转。索引用的 cmd_id 是命令池槽位号，
+// 恒 < FC_COMMAND_POOL_DEPTH。
+// 与 buffer pool 同放 noncacheable 段：READ_META / GET_FEATURES 的 4 字节
+// 返回段由引擎经 FMC 写回，避免 CPU 缓存与总线视图不一致。
+static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4] NONCACHEABLE_BUFFER;
+
 // 全局单例控制器：定义在 fc.c，fc_pool.c 经 fc_internal.h 的 extern 访问；FTL 不可见
 fc_ctl_s g_fc_controller;
 
+static void fc_poll_fail_command(fc_ctl_s *controller, fc_cmd_id_t cmd_id);
+
 /* ══════════════════════════════════════════════════════════
- * 2. 初始化
+ * 5. Stripe RAID 辅助函数
+ *
+ * fc_stripe_release_parity()  — 回收 parity 命令的 desc+buffer+command 资源
+ * fc_stripe_submit()         — 分配 parity 命令、配置、XOR、构建 MP request、submit
+ *
+ * 编译开关：CONFIG_FC_RAID (include/fc/fc_interface.h)
  * ══════════════════════════════════════════════════════════ */
 
+#if CONFIG_FC_RAID
+
 /**
- * @brief 初始化 FC 控制器：清三池/队列/状态位图并挂指针
+ * @brief 回收 parity 命令占用的所有资源（desc 链 + buffer + command 槽位）。
  *
- * 三池本体是文件作用域 static，地址在固件生命周期内固定；可重复调用以重置
- * （重置统计计数、池/队列、NAND dispatch 软件状态与引擎 armed 闩锁）。
+ * @param controller FC 控制器
+ * @param parity_id parity 命令 ID。
  *
- * @note **调用前须确保 FC 已 quiesce**：本函数会清空在途命令/完成并 disarm NAND
- *       引擎；运行中调用会丢失未完成的命令。初始化没有失败路径（CRC 自检失败会
- *       直接 ASSERT），故不返回状态码。
+ * @note 在 NAND completion 路径中调用（parity 数据已完成使命），
+ * 把 desc/buffer 挂回空闲链，command 槽位置 FREE 回池。
  */
-SSD_CODE_FAST void fc_init(void)
+static void fc_stripe_release_parity(fc_ctl_s *controller, fc_cmd_id_t parity_id)
 {
-    fc_ctl_s *controller = &g_fc_controller;
+    // 层内 helper：唯一调用者是完成路径的 stripe 清理，parity_id 取自
+    // stripe_parity_for_data[]（注册时即 fc_command_alloc() 铸出的池内 ID）。
+    ASSERT(parity_id < FC_COMMAND_POOL_DEPTH);
 
-    /* ── ① 控制器清零 + 三池/簿记/空闲链表（池本体在 fc_pool.c） ── */
-    memset(controller, 0, sizeof(*controller));
-#if SSD_STATS_ENABLE
-    memset(&s_stats_fc_submit, 0, sizeof(s_stats_fc_submit));
-    memset(&s_stats_fc_fill, 0, sizeof(s_stats_fc_fill));
-    memset(&s_stats_fc_poll, 0, sizeof(s_stats_fc_poll));
-#endif
-    fc_pool_init(controller);
+    // 与 fc_pool_command_release 完全同义（desc 链 + buffer + 命令槽位），
+    // 直接复用，不另写拷贝。parity 未单独提交，状态应为 ALLOCATED。
+    fc_pool_command_release(controller, parity_id);
+}
 
-    /* ── ② 三条环形队列：SQ（普通命令）/ HSQ（高优先：read recovery）/
-     *    CQ（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
-    memset(g_fc_sq_storage, 0, sizeof(g_fc_sq_storage));
-    memset(g_fc_hsq_storage, 0, sizeof(g_fc_hsq_storage));
-    memset(g_fc_cq_storage, 0, sizeof(g_fc_cq_storage));
-    memset(g_fc_return_staging, 0, sizeof(g_fc_return_staging));
-    fc_submission_queue_init(&controller->sq, g_fc_sq_storage, FC_SQ_DEPTH);
-    fc_submission_queue_init(&controller->hsq, g_fc_hsq_storage, FC_HSQ_DEPTH);
-    fc_completion_queue_init(&controller->cq, g_fc_cq_storage, FC_CQ_DEPTH);
+/**
+ * @brief 处理 raid=ENCODE 命令的 Stripe 提交路径：
+ * ① 分配 parity 命令（command + desc 链 + buffer）
+ * ② 配置 parity 命令的 OP 码和 PAA（plane = PLANE_NUM-1）
+ * ③ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
+ * ④ 构建 Multi-Plane dispatch request（plane0=data, plane1=parity）
+ * ⑤ fc_nand_dispatch_submit()
+ *
+ * 成功时 parity 命令由 completion 路径自动释放。
+ * 失败时已分配资源全部回滚 + 数据命令以 error completion 返回。
+ *
+ * @param controller FC 控制器
+ * @param data_cmd 触发 stripe 的数据命令
+ * @param data_cmd_id 数据命令的池内 ID
+ *
+ * @return FC_STATUS_OK = parity 命令已提交
+ *         FC_STATUS_IO_ERROR = 任一步失败，已回滚并给数据命令注 error completion
+ *
+ * @note 仅处理 PLANE_NUM=2 场景（单数据命令 + 单 parity 命令）。
+ */
+static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_id_t data_cmd_id)
+{
+    ASSERT(data_cmd_id < FC_COMMAND_POOL_DEPTH);
 
-    /* ── ③ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 fc_nand_dispatch_lun_free） ── */
-    controller->scheduler.sq  = &controller->sq;
-    controller->scheduler.hsq = &controller->hsq;
+    fc_cmd_s *data_cmd = &controller->command_pool[data_cmd_id];
+    ASSERT(data_cmd->cmd_id == data_cmd_id);
+    fc_cmd_s              *parity_cmd;
+    fc_cmd_id_t            parity_id;
+    fc_nand_dispatch_req_s mp_req;
+    BYTE                   cw_count;
+    BYTE                   cw;
+    fc_desc_id_t           desc_id;
+    fc_cmd_id_t            data_ids[FC_STRIPE_DATA_MAX];
 
-    /* ── ④ 本函数里唯一的 NAND 依赖：只清 NAND 侧的通道队列与 per-LUN 链状态
-     *    （纯 memset，不碰 FMC 硬件）。硬件那半由 fc_nand_init() 负责，且在 main()
-     *    里排在 fc_init() 之后——正因为这里不碰硬件，FC 才能先初始化。 ── */
-    fc_nand_dispatch_init();
+    cw_count = (data_cmd->config.cw_count + 1U);
 
-    // 初始化 RAID 引擎上下文（每个 LUN 独立）
-#if CONFIG_FC_RAID
-    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+    // RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
+    // flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
+    // 掩码由 **desc 链重建**（链是 CW 集合的唯一真值，不回读 FTL 的输入字段）。
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_id)));
+
+    // ① 分配 parity cmd
+    parity_cmd = fc_command_alloc();
+    if (parity_cmd == NULL)
     {
-        fc_raid_init_ctx(lun);
+        goto stripe_error;
     }
+    parity_id = parity_cmd->cmd_id;
+
+    // ② 配置 parity cmd
+    parity_cmd->config           = data_cmd->config;
+    parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;         /* parity 命令不需要 RAID */
+    parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
+    // parity 是 FC 内部命令（buffer 由 FC 申请、FC 释放），不继承 data_cmd 的 buf_own——
+    // 否则 data_cmd 若是「上层申请」档，建链入口会因拿不到上层 buffer_id 而断言。
+    parity_cmd->config.buf_own   = FC_BUF_OWN_FC_ALLOC_FC_FREE;
+    parity_cmd->high_priority    = data_cmd->high_priority;
+    parity_cmd->meta             = data_cmd->meta;
+
+    // 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1。
+    // ch/ce 不在 PAA 里——parity 命令的路由取自它自己的 config（上面已从 data_cmd 复制）。
+    parity_cmd->paa = paa_with_plane(data_cmd->paa, PLANE_NUM - 1U);
+
+    // ③ 分配 parity desc + buffer
+    // parity 命令是**单 plane**（plane = PLANE_NUM-1），CW 集合 = 连续 0..config.cw_count。
+    // 「按掩码建链」在 FTL，FC 内没有掩码枚举；RAID 是 FC 内部机制，
+    // 建链只有公共入口 fc_command_configure_descriptor，这里逐条调它挂链
+    // （parity 恒为连续 0..config.cw_count，等价于 FTL 侧整段位图 fc_command_plane_span_cw_bitmap）。
+    // ⚠ 该入口固定使用单例 g_fc_controller；RAID 暂未启用（CONFIG_FC_RAID=0），
+    // 将来启用多实例前需先把这条路径改回 controller 参数化入口。
+    // 行地址：同一 plane 内所有 CW 共用 parity_cmd->paa（page/block/lun）。
+    {
+        const BYTE  parity_plane = paa_to_plane(parity_cmd->paa);
+        const DWORD parity_paa   = parity_cmd->paa;
+        BYTE        pcw;
+
+        for (pcw = 0U; pcw <= parity_cmd->config.cw_count; pcw++)
+        {
+            if (fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_paa) != FC_STATUS_OK)
+            {
+                // 回滚半成品：fc_pool_command_release 一次做完 desc 链 + buffer + 命令槽位。
+                fc_pool_command_release(controller, parity_id);
+                goto stripe_error;
+            }
+        }
+    }
+
+    // 写入 parity descriptors 的 meta（与数据命令对应 CW 一致）
+    {
+        fc_desc_id_t data_desc_id   = (fc_desc_id_t)data_cmd->desc_id;
+        fc_desc_id_t parity_desc_id = (fc_desc_id_t)parity_cmd->desc_id;
+
+        for (cw = 0U; cw < cw_count; cw++)
+        {
+            fc_desc_s *pdesc = fc_descriptor_id_to_descriptor(parity_desc_id);
+            fc_desc_s *ddesc = fc_descriptor_id_to_descriptor(data_desc_id);
+            if ((pdesc != NULL) && (ddesc != NULL))
+            {
+                pdesc->meta = ddesc->meta;
+            }
+            parity_desc_id = (pdesc != NULL) ? (fc_desc_id_t)pdesc->next_id : FC_DESC_ID_INVALID;
+            data_desc_id   = (ddesc != NULL) ? (fc_desc_id_t)ddesc->next_id : FC_DESC_ID_INVALID;
+        }
+    }
+
+    // ④ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
+    data_ids[0U] = data_cmd_id;
+    if (fc_data_path_generate_stripe_parity(data_ids, 1U, parity_id) != FC_STATUS_OK)
+    {
+        fc_stripe_release_parity(controller, parity_id);
+        goto stripe_error;
+    }
+
+    // ⑤ 构建 Multi-Plane dispatch request
+    memset(&mp_req, 0, sizeof(mp_req));
+    mp_req.cmd_id      = data_cmd_id; /* 完成路由回数据命令 */
+    mp_req.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
+    mp_req.ch          = data_cmd->ch;
+    mp_req.ce          = data_cmd->ce;
+    mp_req.lun         = data_cmd->lun;
+    mp_req.plane_count = PLANE_NUM;
+    mp_req.plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
+    mp_req.page_type   = data_cmd->config.page_type;
+    // 两 plane 的行地址 + 掩码：stripe 命令 plane 对称（见上方 ASSERT），
+    // 两 plane 访问同一组 CW → 掩码 = 两组相同的低位。
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        mp_req.plane_paa[p] = paa_with_plane(data_cmd->paa, p);
+        for (cw = 0U; cw < cw_count; cw++)
+        {
+            mp_req.cw_bitmap |= (1UL << fc_cw_flat(p, cw));
+        }
+    }
+
+    // 填充 plane 0（= 数据命令）的 CW buffer
+    desc_id = (fc_desc_id_t)data_cmd->desc_id;
+    for (cw = 0U; cw < cw_count; cw++)
+    {
+        // desc_id 由链遍历产生，恒在池内——越界即链损坏 = 调用者 bug，转 ASSERT
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+        const fc_desc_s *desc = &controller->descriptor_pool[desc_id];
+
+        mp_req.cw_buffers[cw] = (desc->buffer_id != FC_BUF_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
+        desc_id               = (fc_desc_id_t)desc->next_id;
+    }
+
+    // 填充 plane 1（= parity 命令）的 CW buffer
+    desc_id = (fc_desc_id_t)parity_cmd->desc_id;
+    for (cw = 0U; cw < cw_count; cw++)
+    {
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+        const fc_desc_s *desc = &controller->descriptor_pool[desc_id];
+
+        mp_req.cw_buffers[CW_NUM + cw] = (desc->buffer_id != FC_BUF_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
+        desc_id                        = (fc_desc_id_t)desc->next_id;
+    }
+
+    // 注册 parity 命令到数据命令的清理映射表
+    controller->stripe_parity_for_data[data_cmd_id] = parity_id;
+
+    // ⑥ fc_nand_dispatch_submit()
+    if (fc_nand_dispatch_submit(&mp_req) != NAND_RESULT_OK)
+    {
+        controller->stripe_parity_for_data[data_cmd_id] = FC_CMD_ID_INVALID;
+        fc_stripe_release_parity(controller, parity_id);
+        goto stripe_error;
+    }
+
+    return FC_STATUS_OK;
+
+stripe_error:
+    // 数据命令注 error completion，让 FTL 感知失败
+    {
+        fc_nand_dispatch_comp_s fail_comp;
+
+        memset(&fail_comp, 0, sizeof(fail_comp));
+        fail_comp.cmd_id           = data_cmd_id;
+        fail_comp.execution_status = NAND_RESULT_NOT_READY;
+        fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
+        if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
+        {
+            controller->fatal = true;
+        }
+    }
+    return FC_STATUS_IO_ERROR;
+}
+
 #endif /* CONFIG_FC_RAID */
 
-    /* ── ⑤ CRC 硬件（STM32H743 CRC 外设）：写路径编码时给每个 CW 算 CRC ── */
-    fc_crc_init();
-
-    // 初始化 Stripe RAID 积累状态
-#if CONFIG_FC_RAID
-    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+/**
+ * @brief 下发失败兜底：链上每条命令都注 NAND_FAIL 完成项并返回 IO_ERROR。
+ *
+ * @param controller FC 控制器
+ * @param chain 失败链；单命令路径的 count 恒为 1
+ * @return 恒为 FC_STATUS_IO_ERROR
+ */
+static fc_status_e fc_poll_dispatch_abort(fc_ctl_s *controller, const fc_sched_chain_s *chain)
+{
+    for (BYTE i = 0U; i < chain->count; i++)
     {
-        memset(&controller->stripe_accum[lun], 0, sizeof(controller->stripe_accum[lun]));
+        const fc_cmd_id_t cmd_id = chain->ids[i];
+        fc_poll_fail_command(controller, cmd_id);
     }
-    for (WORD index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
-    {
-        controller->stripe_parity_for_data[index] = FC_CMD_ID_INVALID;
-    }
-#endif /* CONFIG_FC_RAID */
-
-    /* ── ⑥ 统计注册（值在 s_*_stats；CLI `stats` 只读）── */
-#if SSD_STATS_ENABLE
-    (void)stats_register("fc.submit", STATS_INST_NONE, &s_stats_fc_submit, s_stats_fc_submit_names, STATS_ENTRY_COUNT(s_stats_fc_submit_names));
-    (void)stats_register("fc.fill", STATS_INST_NONE, &s_stats_fc_fill, s_stats_fc_fill_names, STATS_ENTRY_COUNT(s_stats_fc_fill_names));
-    (void)stats_register("fc.poll", STATS_INST_NONE, &s_stats_fc_poll, s_stats_fc_poll_names, STATS_ENTRY_COUNT(s_stats_fc_poll_names));
-#endif
+    return FC_STATUS_IO_ERROR;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -542,249 +706,6 @@ static fc_status_e fc_complete_from_nand(fc_ctl_s *controller, fc_nand_dispatch_
         return complete_status;
     }
 }
-
-#if defined(FC_NAND_TEST_ENABLE)
-fc_status_e fc_test_complete_nonactive(void)
-{
-    fc_cmd_s *cmd = fc_command_alloc();
-
-    if (cmd == NULL)
-    {
-        return FC_STATUS_IO_ERROR;
-    }
-
-    fc_nand_dispatch_comp_s completion;
-
-    memset(&completion, 0, sizeof(completion));
-    completion.cmd_id           = cmd->cmd_id;
-    completion.execution_status = NAND_RESULT_OK;
-
-    const fc_status_e st = fc_complete_from_nand(&g_fc_controller, &completion);
-
-    fc_command_release(cmd->cmd_id);
-    return st;
-}
-#endif
-
-/* ══════════════════════════════════════════════════════════
- * 5. Stripe RAID 辅助函数
- *
- * fc_stripe_release_parity()  — 回收 parity 命令的 desc+buffer+command 资源
- * fc_stripe_submit()         — 分配 parity 命令、配置、XOR、构建 MP request、submit
- *
- * 编译开关：CONFIG_FC_RAID (include/fc/fc_interface.h)
- * ══════════════════════════════════════════════════════════ */
-
-#if CONFIG_FC_RAID
-
-/**
- * @brief 回收 parity 命令占用的所有资源（desc 链 + buffer + command 槽位）。
- *
- * @param controller FC 控制器
- * @param parity_id parity 命令 ID。
- *
- * @note 在 NAND completion 路径中调用（parity 数据已完成使命），
- * 把 desc/buffer 挂回空闲链，command 槽位置 FREE 回池。
- */
-static void fc_stripe_release_parity(fc_ctl_s *controller, fc_cmd_id_t parity_id)
-{
-    // 层内 helper：唯一调用者是完成路径的 stripe 清理，parity_id 取自
-    // stripe_parity_for_data[]（注册时即 fc_command_alloc() 铸出的池内 ID）。
-    ASSERT(parity_id < FC_COMMAND_POOL_DEPTH);
-
-    // 与 fc_pool_command_release 完全同义（desc 链 + buffer + 命令槽位），
-    // 直接复用，不另写拷贝。parity 未单独提交，状态应为 ALLOCATED。
-    fc_pool_command_release(controller, parity_id);
-}
-
-/**
- * @brief 处理 raid=ENCODE 命令的 Stripe 提交路径：
- * ① 分配 parity 命令（command + desc 链 + buffer）
- * ② 配置 parity 命令的 OP 码和 PAA（plane = PLANE_NUM-1）
- * ③ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
- * ④ 构建 Multi-Plane dispatch request（plane0=data, plane1=parity）
- * ⑤ fc_nand_dispatch_submit()
- *
- * 成功时 parity 命令由 completion 路径自动释放。
- * 失败时已分配资源全部回滚 + 数据命令以 error completion 返回。
- *
- * @param controller FC 控制器
- * @param data_cmd 触发 stripe 的数据命令
- * @param data_cmd_id 数据命令的池内 ID
- *
- * @return FC_STATUS_OK = parity 命令已提交
- *         FC_STATUS_IO_ERROR = 任一步失败，已回滚并给数据命令注 error completion
- *
- * @note 仅处理 PLANE_NUM=2 场景（单数据命令 + 单 parity 命令）。
- */
-static fc_status_e fc_stripe_submit(fc_ctl_s *controller, fc_cmd_id_t data_cmd_id)
-{
-    ASSERT(data_cmd_id < FC_COMMAND_POOL_DEPTH);
-
-    fc_cmd_s *data_cmd = &controller->command_pool[data_cmd_id];
-    ASSERT(data_cmd->cmd_id == data_cmd_id);
-    fc_cmd_s              *parity_cmd;
-    fc_cmd_id_t            parity_id;
-    fc_nand_dispatch_req_s mp_req;
-    BYTE                   cw_count;
-    BYTE                   cw;
-    fc_desc_id_t           desc_id;
-    fc_cmd_id_t            data_ids[FC_STRIPE_DATA_MAX];
-
-    cw_count = (data_cmd->config.cw_count + 1U);
-
-    // RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
-    // flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
-    // 掩码由 **desc 链重建**（链是 CW 集合的唯一真值，不回读 FTL 的输入字段）。
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_id)));
-
-    // ① 分配 parity cmd
-    parity_cmd = fc_command_alloc();
-    if (parity_cmd == NULL)
-    {
-        goto stripe_error;
-    }
-    parity_id = parity_cmd->cmd_id;
-
-    // ② 配置 parity cmd
-    parity_cmd->config           = data_cmd->config;
-    parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;         /* parity 命令不需要 RAID */
-    parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
-    // parity 是 FC 内部命令（buffer 由 FC 申请、FC 释放），不继承 data_cmd 的 buf_own——
-    // 否则 data_cmd 若是「上层申请」档，建链入口会因拿不到上层 buffer_id 而断言。
-    parity_cmd->config.buf_own   = FC_BUF_OWN_FC_ALLOC_FC_FREE;
-    parity_cmd->high_priority    = data_cmd->high_priority;
-    parity_cmd->meta             = data_cmd->meta;
-
-    // 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1。
-    // ch/ce 不在 PAA 里——parity 命令的路由取自它自己的 config（上面已从 data_cmd 复制）。
-    parity_cmd->paa = paa_with_plane(data_cmd->paa, PLANE_NUM - 1U);
-
-    // ③ 分配 parity desc + buffer
-    // parity 命令是**单 plane**（plane = PLANE_NUM-1），CW 集合 = 连续 0..config.cw_count。
-    // 「按掩码建链」在 FTL，FC 内没有掩码枚举；RAID 是 FC 内部机制，
-    // 建链只有公共入口 fc_command_configure_descriptor，这里逐条调它挂链
-    // （parity 恒为连续 0..config.cw_count，等价于 FTL 侧整段位图 fc_command_plane_span_cw_bitmap）。
-    // ⚠ 该入口固定使用单例 g_fc_controller；RAID 暂未启用（CONFIG_FC_RAID=0），
-    // 将来启用多实例前需先把这条路径改回 controller 参数化入口。
-    // 行地址：同一 plane 内所有 CW 共用 parity_cmd->paa（page/block/lun）。
-    {
-        const BYTE  parity_plane = paa_to_plane(parity_cmd->paa);
-        const DWORD parity_paa   = parity_cmd->paa;
-        BYTE        pcw;
-
-        for (pcw = 0U; pcw <= parity_cmd->config.cw_count; pcw++)
-        {
-            if (fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_paa) != FC_STATUS_OK)
-            {
-                // 回滚半成品：fc_pool_command_release 一次做完 desc 链 + buffer + 命令槽位。
-                fc_pool_command_release(controller, parity_id);
-                goto stripe_error;
-            }
-        }
-    }
-
-    // 写入 parity descriptors 的 meta（与数据命令对应 CW 一致）
-    {
-        fc_desc_id_t data_desc_id   = (fc_desc_id_t)data_cmd->desc_id;
-        fc_desc_id_t parity_desc_id = (fc_desc_id_t)parity_cmd->desc_id;
-
-        for (cw = 0U; cw < cw_count; cw++)
-        {
-            fc_desc_s *pdesc = fc_descriptor_id_to_descriptor(parity_desc_id);
-            fc_desc_s *ddesc = fc_descriptor_id_to_descriptor(data_desc_id);
-            if ((pdesc != NULL) && (ddesc != NULL))
-            {
-                pdesc->meta = ddesc->meta;
-            }
-            parity_desc_id = (pdesc != NULL) ? (fc_desc_id_t)pdesc->next_id : FC_DESC_ID_INVALID;
-            data_desc_id   = (ddesc != NULL) ? (fc_desc_id_t)ddesc->next_id : FC_DESC_ID_INVALID;
-        }
-    }
-
-    // ④ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
-    data_ids[0U] = data_cmd_id;
-    if (fc_data_path_generate_stripe_parity(data_ids, 1U, parity_id) != FC_STATUS_OK)
-    {
-        fc_stripe_release_parity(controller, parity_id);
-        goto stripe_error;
-    }
-
-    // ⑤ 构建 Multi-Plane dispatch request
-    memset(&mp_req, 0, sizeof(mp_req));
-    mp_req.cmd_id      = data_cmd_id; /* 完成路由回数据命令 */
-    mp_req.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
-    mp_req.ch          = data_cmd->ch;
-    mp_req.ce          = data_cmd->ce;
-    mp_req.lun         = data_cmd->lun;
-    mp_req.plane_count = PLANE_NUM;
-    mp_req.plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
-    mp_req.page_type   = data_cmd->config.page_type;
-    // 两 plane 的行地址 + 掩码：stripe 命令 plane 对称（见上方 ASSERT），
-    // 两 plane 访问同一组 CW → 掩码 = 两组相同的低位。
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
-    {
-        mp_req.plane_paa[p] = paa_with_plane(data_cmd->paa, p);
-        for (cw = 0U; cw < cw_count; cw++)
-        {
-            mp_req.cw_bitmap |= (1UL << fc_cw_flat(p, cw));
-        }
-    }
-
-    // 填充 plane 0（= 数据命令）的 CW buffer
-    desc_id = (fc_desc_id_t)data_cmd->desc_id;
-    for (cw = 0U; cw < cw_count; cw++)
-    {
-        // desc_id 由链遍历产生，恒在池内——越界即链损坏 = 调用者 bug，转 ASSERT
-        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
-        const fc_desc_s *desc = &controller->descriptor_pool[desc_id];
-
-        mp_req.cw_buffers[cw] = (desc->buffer_id != FC_BUF_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
-        desc_id               = (fc_desc_id_t)desc->next_id;
-    }
-
-    // 填充 plane 1（= parity 命令）的 CW buffer
-    desc_id = (fc_desc_id_t)parity_cmd->desc_id;
-    for (cw = 0U; cw < cw_count; cw++)
-    {
-        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
-        const fc_desc_s *desc = &controller->descriptor_pool[desc_id];
-
-        mp_req.cw_buffers[CW_NUM + cw] = (desc->buffer_id != FC_BUF_ID_INVALID) ? fc_buffer_get_base(desc->buffer_id) : NULL;
-        desc_id                        = (fc_desc_id_t)desc->next_id;
-    }
-
-    // 注册 parity 命令到数据命令的清理映射表
-    controller->stripe_parity_for_data[data_cmd_id] = parity_id;
-
-    // ⑥ fc_nand_dispatch_submit()
-    if (fc_nand_dispatch_submit(&mp_req) != NAND_RESULT_OK)
-    {
-        controller->stripe_parity_for_data[data_cmd_id] = FC_CMD_ID_INVALID;
-        fc_stripe_release_parity(controller, parity_id);
-        goto stripe_error;
-    }
-
-    return FC_STATUS_OK;
-
-stripe_error:
-    // 数据命令注 error completion，让 FTL 感知失败
-    {
-        fc_nand_dispatch_comp_s fail_comp;
-
-        memset(&fail_comp, 0, sizeof(fail_comp));
-        fail_comp.cmd_id           = data_cmd_id;
-        fail_comp.execution_status = NAND_RESULT_NOT_READY;
-        fail_comp.cw_status[0]     = FC_CW_STATUS_FAIL;
-        if (fc_complete_from_nand(controller, &fail_comp) != FC_STATUS_OK)
-        {
-            controller->fatal = true;
-        }
-    }
-    return FC_STATUS_IO_ERROR;
-}
-
-#endif /* CONFIG_FC_RAID */
 
 /* ══════════════════════════════════════════════════════════
  * 6. 调度 / 轮询
@@ -1141,23 +1062,6 @@ static fc_status_e fc_build_dispatch_request(fc_ctl_s *controller, fc_cmd_id_t c
     }
 
     return FC_STATUS_OK;
-}
-
-/**
- * @brief 下发失败兜底：链上每条命令都注 NAND_FAIL 完成项并返回 IO_ERROR。
- *
- * @param controller FC 控制器
- * @param chain 失败链；单命令路径的 count 恒为 1
- * @return 恒为 FC_STATUS_IO_ERROR
- */
-static fc_status_e fc_poll_dispatch_abort(fc_ctl_s *controller, const fc_sched_chain_s *chain)
-{
-    for (BYTE i = 0U; i < chain->count; i++)
-    {
-        const fc_cmd_id_t cmd_id = chain->ids[i];
-        fc_poll_fail_command(controller, cmd_id);
-    }
-    return FC_STATUS_IO_ERROR;
 }
 
 /**
@@ -1578,6 +1482,106 @@ static void fc_nand_completion_sink(fc_nand_dispatch_comp_s *nand_completion, vo
     }
 #endif /* CONFIG_FC_RAID */
 }
+
+/* ══════════════════════════════════════════════════════════
+ * 2. 初始化
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * @brief 初始化 FC 控制器：清三池/队列/状态位图并挂指针
+ *
+ * 三池本体是文件作用域 static，地址在固件生命周期内固定；可重复调用以重置
+ * （重置统计计数、池/队列、NAND dispatch 软件状态与引擎 armed 闩锁）。
+ *
+ * @note **调用前须确保 FC 已 quiesce**：本函数会清空在途命令/完成并 disarm NAND
+ *       引擎；运行中调用会丢失未完成的命令。初始化没有失败路径（CRC 自检失败会
+ *       直接 ASSERT），故不返回状态码。
+ */
+SSD_CODE_FAST void fc_init(void)
+{
+    fc_ctl_s *controller = &g_fc_controller;
+
+    /* ── ① 控制器清零 + 三池/簿记/空闲链表（池本体在 fc_pool.c） ── */
+    memset(controller, 0, sizeof(*controller));
+#if SSD_STATS_ENABLE
+    memset(&s_stats_fc_submit, 0, sizeof(s_stats_fc_submit));
+    memset(&s_stats_fc_fill, 0, sizeof(s_stats_fc_fill));
+    memset(&s_stats_fc_poll, 0, sizeof(s_stats_fc_poll));
+#endif
+    fc_pool_init(controller);
+
+    /* ── ② 三条环形队列：SQ（普通命令）/ HSQ（高优先：read recovery）/
+     *    CQ（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
+    memset(g_fc_sq_storage, 0, sizeof(g_fc_sq_storage));
+    memset(g_fc_hsq_storage, 0, sizeof(g_fc_hsq_storage));
+    memset(g_fc_cq_storage, 0, sizeof(g_fc_cq_storage));
+    memset(g_fc_return_staging, 0, sizeof(g_fc_return_staging));
+    fc_submission_queue_init(&controller->sq, g_fc_sq_storage, FC_SQ_DEPTH);
+    fc_submission_queue_init(&controller->hsq, g_fc_hsq_storage, FC_HSQ_DEPTH);
+    fc_completion_queue_init(&controller->cq, g_fc_cq_storage, FC_CQ_DEPTH);
+
+    /* ── ③ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 fc_nand_dispatch_lun_free） ── */
+    controller->scheduler.sq  = &controller->sq;
+    controller->scheduler.hsq = &controller->hsq;
+
+    /* ── ④ 本函数里唯一的 NAND 依赖：只清 NAND 侧的通道队列与 per-LUN 链状态
+     *    （纯 memset，不碰 FMC 硬件）。硬件那半由 fc_nand_init() 负责，且在 main()
+     *    里排在 fc_init() 之后——正因为这里不碰硬件，FC 才能先初始化。 ── */
+    fc_nand_dispatch_init();
+
+    // 初始化 RAID 引擎上下文（每个 LUN 独立）
+#if CONFIG_FC_RAID
+    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+    {
+        fc_raid_init_ctx(lun);
+    }
+#endif /* CONFIG_FC_RAID */
+
+    /* ── ⑤ CRC 硬件（STM32H743 CRC 外设）：写路径编码时给每个 CW 算 CRC ── */
+    fc_crc_init();
+
+    // 初始化 Stripe RAID 积累状态
+#if CONFIG_FC_RAID
+    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+    {
+        memset(&controller->stripe_accum[lun], 0, sizeof(controller->stripe_accum[lun]));
+    }
+    for (WORD index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
+    {
+        controller->stripe_parity_for_data[index] = FC_CMD_ID_INVALID;
+    }
+#endif /* CONFIG_FC_RAID */
+
+    /* ── ⑥ 统计注册（值在 s_*_stats；CLI `stats` 只读）── */
+#if SSD_STATS_ENABLE
+    (void)stats_register("fc.submit", STATS_INST_NONE, &s_stats_fc_submit, s_stats_fc_submit_names, STATS_ENTRY_COUNT(s_stats_fc_submit_names));
+    (void)stats_register("fc.fill", STATS_INST_NONE, &s_stats_fc_fill, s_stats_fc_fill_names, STATS_ENTRY_COUNT(s_stats_fc_fill_names));
+    (void)stats_register("fc.poll", STATS_INST_NONE, &s_stats_fc_poll, s_stats_fc_poll_names, STATS_ENTRY_COUNT(s_stats_fc_poll_names));
+#endif
+}
+
+#if defined(FC_NAND_TEST_ENABLE)
+fc_status_e fc_test_complete_nonactive(void)
+{
+    fc_cmd_s *cmd = fc_command_alloc();
+
+    if (cmd == NULL)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+
+    fc_nand_dispatch_comp_s completion;
+
+    memset(&completion, 0, sizeof(completion));
+    completion.cmd_id           = cmd->cmd_id;
+    completion.execution_status = NAND_RESULT_OK;
+
+    const fc_status_e st = fc_complete_from_nand(&g_fc_controller, &completion);
+
+    fc_command_release(cmd->cmd_id);
+    return st;
+}
+#endif
 
 /**
  * @brief FC 服务主入口：先取 NAND 完成，无完成则填充下发

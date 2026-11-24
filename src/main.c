@@ -54,7 +54,20 @@
 /* TIM6 是 timer 调度器的 1 ms 心跳：APB1=100 MHz 且 APB1 分频=2 ⇒ 内核时钟
  * 200 MHz，arr=1000-1、psc=200-1。系统毫秒时基由 SysTick/HAL tick 提供。 */
 #define SSD_TIM6_ARR (1000U - 1U)
+
 #define SSD_TIM6_PSC (200U - 1U)
+
+/*
+ * STM32H743 烧录自检入口。
+ * Reset_Handler 已完成 C 运行时初始化；HAL_Init() 配置 SysTick 为 1 ms 节拍。
+ * 项目毫秒/微秒时基由 ARM 核心 SysTick 提供；TIM6 只驱动 timer 任务表的调度
+ * 心跳（sys_init 配置完时钟树后立即启动）。
+ */
+
+/* 主循环耗时采样：每 32 轮采样一次（每轮读 µs 时基 + 除法太贵）。 */
+#define SYS_STATS_TIME_SAMPLE_MASK (31U)
+
+#define SYS_STATS_OVER_1MS_US (1000U)
 
 /* 开机横幅（编译期常量；构建日期/时间由编译器注入 __DATE__ / __TIME__）。 */
 static const char g_boot_banner[] = "=========== BASESSD built " __DATE__ " " __TIME__ " ===========\r\n";
@@ -81,16 +94,98 @@ static const storage_wdg_cfg_s g_storage_wdg_config = {
 };
 #endif
 
+/* ══════════════════════════════════════════════════════════════════
+ * FTL 实例
+ *
+ * workspace 所有权在 FTL 模块内部：每块由拥有它的模块定义并选定内存域
+ * （allocator→SRAM12、checkpoint→SRAM3、metadata→SRAM4、journal/wbuf→DTCM、
+ * migrate/rr/L2P cache→AXI）。本文件只持有 controller 路由表，通过
+ * ftl_instance_get() 取不透明句柄，不引用任何 FTL 内部类型。
+ *
+ * 各域容量由 linker ASSERT 兜底（.dtcm_data / .sram12_data / .sram3_data /
+ * .sram4_data 与 AXI_RAM 区域溢出均为链接错误）。
+ * ══════════════════════════════════════════════════════════════════ */
+
+ssd_ctl_s g_ctrl; /* controller 路由表（按 compact die 号收 FTL 实例指针）；非 static：
+
+                   * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
+
+/* die → 实例指针表（ssd_controller_init 的输入；实例句柄由 FTL 提供）。 */
+static ftl_ctx_s *g_ftl_ptrs[FTL_DIE_MAX];
+
+// 本次 boot 是否有任一 die 走了 PFR；lifetime_boot 在全部 die 恢复后统一调用一次。
+static BOOL s_boot_pfr_any;
+
 /*
  * 分区标题（裸行，不带 [INF] 前缀）：把开机日志按
  * system / nand / controller / ftl / console 分区，便于扫读。
  */
+#if SSD_STATS_ENABLE
+typedef struct SYS_LOOP_STATISTICS_S
+{
+    DWORD rounds;
+    DWORD progress_rounds;
+    DWORD idle_streak;
+    DWORD idle_streak_max;
+    DWORD over_1ms; /* 采样轮中耗时 > 1 ms 的次数 */
+    DWORD max_us;   /* 采样轮的最大耗时（高水位 gauge） */
+} sys_stats_loop_s;
+
+static sys_stats_loop_s s_stats_loop;
+
+#    define SYS_LOOP_STATS_LIST(X)                   \
+        X(rounds, STATS_U32, STATS_COUNTER)          \
+        X(progress_rounds, STATS_U32, STATS_COUNTER) \
+        X(idle_streak, STATS_U32, STATS_GAUGE)       \
+        X(idle_streak_max, STATS_U32, STATS_GAUGE)   \
+        X(over_1ms, STATS_U32, STATS_COUNTER)        \
+        X(max_us, STATS_U32, STATS_GAUGE)
+
+#    define SYS_LOOP_STATS_NAME(field, width, kind) \
+        {STATS_NAME_STR(field), STATS_OFFSET(sys_stats_loop_s, field), width, kind},
+static const stats_name_s s_stats_loop_names[] = {
+    SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_NAME)};
+#    undef SYS_LOOP_STATS_NAME
+#    define SYS_LOOP_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(sys_stats_loop_s, field, width);
+SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_CHECK)
+#    undef SYS_LOOP_STATS_CHECK
+#endif /* SSD_STATS_ENABLE */
+
 static void boot_section(const char *name)
 {
     (void)uart_log_write("--- ", sizeof("--- ") - 1U);
     (void)uart_log_write(name, strlen(name));
     (void)uart_log_write(" ---\r\n", sizeof(" ---\r\n") - 1U);
 }
+
+/* controller 分区：FC 池 / 拓扑 / 数据通路配置汇总（器件就绪后打印）。 */
+static void boot_report_controller(void)
+{
+    boot_section("controller");
+    fc_boot_report();
+}
+
+/* console 分区：交互入口就绪提示。 */
+static void boot_report_console(void)
+{
+    boot_section("console");
+    LOGI("[SYS ] console ready, type 'help' for commands\r\n");
+}
+
+/* ── 主循环统计（模块自持；docs/design/common/statistics_design.md）──
+ * 空转判据：每轮比较 FC/FTL 的进展签名，签名不变即记一次 idle。
+ * 统计专用对象/表/签名在 SSD_STATS_ENABLE=0 时整体不编译。 */
+#if SSD_STATS_ENABLE
+/**
+ * @brief 主循环进展签名（FC 完成/派发 + FTL 完成派发/host 下发）
+ *
+ * @return 进展签名
+ */
+static DWORD sys_stats_progress(void)
+{
+    return fc_stats_progress() + ftl_op_stats_progress();
+}
+#endif /* SSD_STATS_ENABLE */
 
 /* ══════════════════════════════════════════════════════════════════
  * 上电报告（boot_report_*）：把 main() 里的上电打印按分区封装成函数，
@@ -156,38 +251,6 @@ static void boot_report_system(void)
     }
 }
 
-/* controller 分区：FC 池 / 拓扑 / 数据通路配置汇总（器件就绪后打印）。 */
-static void boot_report_controller(void)
-{
-    boot_section("controller");
-    fc_boot_report();
-}
-
-/* console 分区：交互入口就绪提示。 */
-static void boot_report_console(void)
-{
-    boot_section("console");
-    LOGI("[SYS ] console ready, type 'help' for commands\r\n");
-}
-
-/* ══════════════════════════════════════════════════════════════════
- * FTL 实例
- *
- * workspace 所有权在 FTL 模块内部：每块由拥有它的模块定义并选定内存域
- * （allocator→SRAM12、checkpoint→SRAM3、metadata→SRAM4、journal/wbuf→DTCM、
- * migrate/rr/L2P cache→AXI）。本文件只持有 controller 路由表，通过
- * ftl_instance_get() 取不透明句柄，不引用任何 FTL 内部类型。
- *
- * 各域容量由 linker ASSERT 兜底（.dtcm_data / .sram12_data / .sram3_data /
- * .sram4_data 与 AXI_RAM 区域溢出均为链接错误）。
- * ══════════════════════════════════════════════════════════════════ */
-
-ssd_ctl_s g_ctrl; /* controller 路由表（按 compact die 号收 FTL 实例指针）；非 static：
-                   * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
-
-/* die → 实例指针表（ssd_controller_init 的输入；实例句柄由 FTL 提供）。 */
-static ftl_ctx_s *g_ftl_ptrs[FTL_DIE_MAX];
-
 static ftl_topo_s ssd_ftl_die_topo(BYTE die)
 {
     ftl_topo_s topo;
@@ -198,9 +261,6 @@ static ftl_topo_s ssd_ftl_die_topo(BYTE die)
 
     return topo;
 }
-
-// 本次 boot 是否有任一 die 走了 PFR；lifetime_boot 在全部 die 恢复后统一调用一次。
-static BOOL s_boot_pfr_any;
 
 /**
  * @brief 初始化单个 die 的 FTL 实例
@@ -400,61 +460,6 @@ static void ssd_ftl_boot_all(void)
 void _init(void)
 {
 }
-
-/*
- * STM32H743 烧录自检入口。
- * Reset_Handler 已完成 C 运行时初始化；HAL_Init() 配置 SysTick 为 1 ms 节拍。
- * 项目毫秒/微秒时基由 ARM 核心 SysTick 提供；TIM6 只驱动 timer 任务表的调度
- * 心跳（sys_init 配置完时钟树后立即启动）。
- */
-
-/* 主循环耗时采样：每 32 轮采样一次（每轮读 µs 时基 + 除法太贵）。 */
-#define SYS_STATS_TIME_SAMPLE_MASK (31U)
-#define SYS_STATS_OVER_1MS_US      (1000U)
-
-/* ── 主循环统计（模块自持；docs/design/common/statistics_design.md）──
- * 空转判据：每轮比较 FC/FTL 的进展签名，签名不变即记一次 idle。
- * 统计专用对象/表/签名在 SSD_STATS_ENABLE=0 时整体不编译。 */
-#if SSD_STATS_ENABLE
-typedef struct SYS_LOOP_STATISTICS_S
-{
-    DWORD rounds;
-    DWORD progress_rounds;
-    DWORD idle_streak;
-    DWORD idle_streak_max;
-    DWORD over_1ms; /* 采样轮中耗时 > 1 ms 的次数 */
-    DWORD max_us;   /* 采样轮的最大耗时（高水位 gauge） */
-} sys_stats_loop_s;
-
-static sys_stats_loop_s s_stats_loop;
-
-#    define SYS_LOOP_STATS_LIST(X)                   \
-        X(rounds, STATS_U32, STATS_COUNTER)          \
-        X(progress_rounds, STATS_U32, STATS_COUNTER) \
-        X(idle_streak, STATS_U32, STATS_GAUGE)       \
-        X(idle_streak_max, STATS_U32, STATS_GAUGE)   \
-        X(over_1ms, STATS_U32, STATS_COUNTER)        \
-        X(max_us, STATS_U32, STATS_GAUGE)
-
-#    define SYS_LOOP_STATS_NAME(field, width, kind) \
-        {STATS_NAME_STR(field), STATS_OFFSET(sys_stats_loop_s, field), width, kind},
-static const stats_name_s s_stats_loop_names[] = {
-    SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_NAME)};
-#    undef SYS_LOOP_STATS_NAME
-#    define SYS_LOOP_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(sys_stats_loop_s, field, width);
-SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_CHECK)
-#    undef SYS_LOOP_STATS_CHECK
-
-/**
- * @brief 主循环进展签名（FC 完成/派发 + FTL 完成派发/host 下发）
- *
- * @return 进展签名
- */
-static DWORD sys_stats_progress(void)
-{
-    return fc_stats_progress() + ftl_op_stats_progress();
-}
-#endif /* SSD_STATS_ENABLE */
 
 /**
  * @brief 推进一次后台服务：FTL/FC → controller → USB → timer。

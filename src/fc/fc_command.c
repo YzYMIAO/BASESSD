@@ -23,6 +23,27 @@ typedef struct FC_STATUS_NAME_S
     DWORD       bit;
     const char *name;
 } fc_status_name_s;
+
+static const fc_status_name_s s_cw_status_names[] = {
+    {      FC_CW_STATUS_FAIL,  "FAIL"},
+    {       FC_CW_STATUS_UNC,   "UNC"},
+    { FC_CW_STATUS_CRC_ERROR,   "CRC"},
+    {FC_CW_STATUS_META_ERROR,  "META"},
+    {FC_CW_STATUS_RAID_ERROR,  "RAID"},
+    {     FC_CW_STATUS_EMPTY, "EMPTY"},
+};
+
+static const fc_status_name_s s_cmd_status_names[] = {
+    { FC_CMD_STATUS_NAND_FAIL,    "NAND"},
+    {FC_CMD_STATUS_FAIL_CACHE,   "FAILC"},
+    {   FC_CMD_STATUS_TIMEOUT, "TIMEOUT"},
+    {FC_CMD_STATUS_DATA_ERROR,    "DATA"},
+    {FC_CMD_STATUS_META_ERROR,    "META"},
+    {    FC_CMD_STATUS_AREADY,    "ARDY"},
+    {       FC_CMD_STATUS_RDY,     "RDY"},
+    {        FC_CMD_STATUS_WP,      "WP"},
+};
+
 /**
  * @brief 把状态位集合格式化成 "A|B|?" 文本
  *
@@ -81,25 +102,6 @@ static const char *fc_status_str_format(const fc_status_name_s *tbl, DWORD count
     return buf;
 }
 
-static const fc_status_name_s s_cw_status_names[] = {
-    {      FC_CW_STATUS_FAIL,  "FAIL"},
-    {       FC_CW_STATUS_UNC,   "UNC"},
-    { FC_CW_STATUS_CRC_ERROR,   "CRC"},
-    {FC_CW_STATUS_META_ERROR,  "META"},
-    {FC_CW_STATUS_RAID_ERROR,  "RAID"},
-    {     FC_CW_STATUS_EMPTY, "EMPTY"},
-};
-
-static const fc_status_name_s s_cmd_status_names[] = {
-    { FC_CMD_STATUS_NAND_FAIL,    "NAND"},
-    {FC_CMD_STATUS_FAIL_CACHE,   "FAILC"},
-    {   FC_CMD_STATUS_TIMEOUT, "TIMEOUT"},
-    {FC_CMD_STATUS_DATA_ERROR,    "DATA"},
-    {FC_CMD_STATUS_META_ERROR,    "META"},
-    {    FC_CMD_STATUS_AREADY,    "ARDY"},
-    {       FC_CMD_STATUS_RDY,     "RDY"},
-    {        FC_CMD_STATUS_WP,      "WP"},
-};
 /**
  * @brief CW 状态位转文本（"FAIL|UNC|CRC|…"）
  *
@@ -112,6 +114,7 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
 {
     return fc_status_str_format(s_cw_status_names, (DWORD)(sizeof(s_cw_status_names) / sizeof(s_cw_status_names[0])), status, buf, buflen);
 }
+
 /**
  * @brief 命令状态位转文本（"NAND|FAILC|TIMEOUT|…"）
  *

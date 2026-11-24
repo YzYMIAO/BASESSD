@@ -40,21 +40,6 @@
 
 #include <string.h>
 
-// 服务函数定义在本文件末尾；g_op_callbacks 初始化时必须先见到它。
-static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx);
-
-/* ── 1. 静态资源 ── */
-
-// request 表按 FC cmd_id 直接索引；容量 = 命令池深度，没有“表满”路径。
-static ftl_op_req_s g_op_req[FTL_OP_REQ_TABLE_SIZE];
-
-// 实例路由表：按紧凑 die 号 → FTL 实例。命令完成仍带 (ch,ce,lun)，
-// 由 chcelun_2_die() 唯一漏斗转换后查表。
-static ftl_ctx_s *g_op_route[FTL_DIE_MAX];
-
-// 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 → 普通变量即可。
-static BYTE g_dispatch_depth = 0U;
-
 /* ── 统计（模块自持；docs/design/common/statistics_design.md）──
  * 统计专用对象/表在 SSD_STATS_ENABLE=0 时整体不编译；自增点经 STATS_INC 自动消失。 */
 #if SSD_STATS_ENABLE
@@ -92,6 +77,18 @@ FTL_OP_STATS_LIST(FTL_OP_STATS_CHECK)
 #    undef FTL_OP_STATS_CHECK
 #endif /* SSD_STATS_ENABLE */
 
+/* ── 1. 静态资源 ── */
+
+// request 表按 FC cmd_id 直接索引；容量 = 命令池深度，没有“表满”路径。
+static ftl_op_req_s g_op_req[FTL_OP_REQ_TABLE_SIZE];
+
+// 实例路由表：按紧凑 die 号 → FTL 实例。命令完成仍带 (ch,ce,lun)，
+// 由 chcelun_2_die() 唯一漏斗转换后查表。
+static ftl_ctx_s *g_op_route[FTL_DIE_MAX];
+
+// 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 → 普通变量即可。
+static BYTE g_dispatch_depth = 0U;
+
 /* ── 服务函数数组 ──
  *
  * C99 designated initializer 的 const 数组（非"注册函数"）：编译期即可发现重复/
@@ -112,36 +109,22 @@ FTL_OP_STATS_LIST(FTL_OP_STATS_CHECK)
  *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）；
  *   · FTL_OP_CACHE_PAD：cache 写序列的 padding END（ctx = NULL）——用一条不映射的
  *     零页给提前回执的最后一页提供 FAIL_CACHE 结算点，然后关闭序列。 */
-static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
-    [FTL_OP_SYNC_WAIT]     = ftl_sync_wait_callback,
-    [FTL_OP_HOST_IO]       = ftl_host_io_callback,
-    [FTL_OP_JOURNAL]       = ftl_journal_callback,
-    [FTL_OP_READ_RECOVERY] = ftl_read_recovery_callback,
-    [FTL_OP_GC]            = ftl_migrate_callback,
-    [FTL_OP_WL]            = ftl_migrate_callback,
-    [FTL_OP_L2P]           = ftl_l2p_callback,
-    [FTL_OP_L2P_PREFETCH]  = ftl_l2p_callback,
-    [FTL_OP_CHECKPOINT]    = ftl_checkpoint_callback,
-    [FTL_OP_BBT]           = ftl_bbt_callback,
-    [FTL_OP_METADATA]      = ftl_metadata_callback,
-    [FTL_OP_CACHE_PAD]     = ftl_cache_pad_callback,
-};
 
-/* ── 2. 初始化 ── */
+// 服务函数定义在本文件末尾；g_op_callbacks 初始化时必须先见到它。
 
 /**
- * @brief 初始化 op 分发表、路由表与 request 索引
+ * @brief 后台让行达成：清 yield_pending
  *
- * 设备级只调一次；放进逐实例 ftl_init 会抹掉其它实例在飞的登记。
+ * 只认 L2P 提交成功：让行就是为一个被拒的 L2P 加载而要的，别的后台/前台提交
+ * （尤其 CACHE_PAD / HOST_IO）可能抢在它前面，不能替它清标志。
  */
-void ftl_op_init(void)
+static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
 {
-    memset(g_op_req, 0, sizeof(g_op_req));
-    memset(g_op_route, 0, sizeof(g_op_route));
-#if SSD_STATS_ENABLE
-    memset(&s_stats_ftl_op, 0, sizeof(s_stats_ftl_op));
-    (void)stats_register("ftl.op", STATS_INST_NONE, &s_stats_ftl_op, s_stats_ftl_op_names, STATS_ENTRY_COUNT(s_stats_ftl_op_names));
-#endif
+    if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl_cache_seq_yield_pending(ftl) != false))
+    {
+        STATS_INC(s_stats_ftl_op.yield_clear);
+        ftl_cache_seq_yield_clear(ftl);
+    }
 }
 
 /* ── 3. request 表 ── */
@@ -178,6 +161,119 @@ static BOOL __attribute__((unused)) ftl_op_requires_ctx(BYTE op)
         default:
             return false;
     }
+}
+
+/* ── 5. 提交 ── */
+
+/**
+ * @brief cache 写序列的门控：该命令此刻是否必须被拒。
+ *
+ * 序列 `active || draining` 期间只放行 owner（`seq.owner_submit`）；其余提交
+ * 返回 true，由 ftl_op_submit* 折成 FTL_AGAIN。
+ *
+ * @note draining = 窗口已提交完但命令仍在飞：门控必须继续关到排空，否则器件侧
+ *       的 31h/3Fh 管线会被别的提交劈开。
+ * @note 断点请求策略（docs/design/ftl_design.md §3.16.5）：前台/同步/恢复类被挡
+ *       时置 break_requested，请求下一窗口 END；后台元数据只等待、不请求断点。
+ *       顺序序列占用 plane cache 寄存器期间，Journal/L2P/GC/WL/CP/元数据目录
+ *       本来就写不进去；若它们每次重试都请求断点，序列会被后台任务切回逐窗口
+ *       长度。设计 A 让它们等在段边界，由 FTL 主动收尾后落盘。
+ *
+ * @param cmd 待提交命令（用其 ch/ce/lun 定位实例）。
+ * @param op  完成服务函数选择器（决定被挡时是否请求断点）。
+ * @return true —— 被门控拒绝；
+ * @return false —— 放行。
+ */
+static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
+{
+    ftl_ctx_s *ftl = ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun);
+
+    if ((ftl != NULL) && (ftl_cache_seq_gate_blocks(ftl) != false))
+    {
+        STATS_INC(s_stats_ftl_op.gate_block);
+        // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
+        // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR。
+        // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
+        // ⚠ FTL_OP_READ_RECOVERY **不能**置 break_requested：它恢复的正是本序列
+        // 自己的读组。置断点会触发 close_step → ftl_cache_seq_release 重算
+        // draining，把刚放开的门控立刻重新关上，恢复读永远提交不进来。
+        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_L2P))
+        {
+            STATS_INC(s_stats_ftl_op.break_request);
+            ftl_cache_seq_request_break(ftl);
+        }
+
+        // L2P 加载是前台的确定依赖（写确认 / GC 搬移）：只请求断点不够，host 连续流
+        // 会在下一个窗口立刻重新占住门控，加载反复被拒直到调用者超时。这里再请求
+        // 让行，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
+        if (op == FTL_OP_L2P)
+        {
+            STATS_INC(s_stats_ftl_op.yield_request);
+            ftl_cache_seq_request_yield(ftl, platform_now_ms());
+        }
+        return true;
+    }
+
+    return false;
+}
+
+/* ── 7. 同步等待服务函数 ── */
+
+/**
+ * @brief 同步等待的完成服务：把 completion 存入 waiter、置 done = true。
+ *
+ * 不 release 命令——调用者（ftl_sync_submit_wait）要在 wait 返回后读 cmd 数据
+ * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。
+ *
+ * @param ftl        实例（本函数不用）。
+ * @param completion FC 完成状态。
+ * @param ctx        `ftl_sync_waiter_s *`；request 表保证非 NULL。
+ *
+ * @note 超时后的迟到完成不会到这里：超时已把 request 表项摘掉，ftl_op_drain 走
+ *       “completion without request” 分支，只 release 命令。
+ */
+static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
+{
+    (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
+
+    ftl_sync_waiter_s *waiter = (ftl_sync_waiter_s *)ctx;
+
+    ASSERT(waiter != NULL);
+
+    waiter->completion = *completion;
+    waiter->done       = true;
+}
+
+/* ── 2. 初始化 ── */
+
+/**
+ * @brief 初始化 op 分发表、路由表与 request 索引
+ *
+ * 设备级只调一次；放进逐实例 ftl_init 会抹掉其它实例在飞的登记。
+ */
+static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
+    [FTL_OP_SYNC_WAIT]     = ftl_sync_wait_callback,
+    [FTL_OP_HOST_IO]       = ftl_host_io_callback,
+    [FTL_OP_JOURNAL]       = ftl_journal_callback,
+    [FTL_OP_READ_RECOVERY] = ftl_read_recovery_callback,
+    [FTL_OP_GC]            = ftl_migrate_callback,
+    [FTL_OP_WL]            = ftl_migrate_callback,
+    [FTL_OP_L2P]           = ftl_l2p_callback,
+    [FTL_OP_L2P_PREFETCH]  = ftl_l2p_callback,
+    [FTL_OP_CHECKPOINT]    = ftl_checkpoint_callback,
+    [FTL_OP_BBT]           = ftl_bbt_callback,
+    [FTL_OP_METADATA]      = ftl_metadata_callback,
+    [FTL_OP_CACHE_PAD]     = ftl_cache_pad_callback,
+};
+
+void ftl_op_init(void)
+{
+    memset(g_op_req, 0, sizeof(g_op_req));
+    memset(g_op_route, 0, sizeof(g_op_route));
+#if SSD_STATS_ENABLE
+    memset(&s_stats_ftl_op, 0, sizeof(s_stats_ftl_op));
+    (void)stats_register("ftl.op", STATS_INST_NONE, &s_stats_ftl_op, s_stats_ftl_op_names, STATS_ENTRY_COUNT(s_stats_ftl_op_names));
+#endif
 }
 
 /**
@@ -469,75 +565,6 @@ BOOL ftl_op_bg_submit_deferred(void)
     return false;
 }
 
-/* ── 5. 提交 ── */
-
-/**
- * @brief cache 写序列的门控：该命令此刻是否必须被拒。
- *
- * 序列 `active || draining` 期间只放行 owner（`seq.owner_submit`）；其余提交
- * 返回 true，由 ftl_op_submit* 折成 FTL_AGAIN。
- *
- * @note draining = 窗口已提交完但命令仍在飞：门控必须继续关到排空，否则器件侧
- *       的 31h/3Fh 管线会被别的提交劈开。
- * @note 断点请求策略（docs/design/ftl_design.md §3.16.5）：前台/同步/恢复类被挡
- *       时置 break_requested，请求下一窗口 END；后台元数据只等待、不请求断点。
- *       顺序序列占用 plane cache 寄存器期间，Journal/L2P/GC/WL/CP/元数据目录
- *       本来就写不进去；若它们每次重试都请求断点，序列会被后台任务切回逐窗口
- *       长度。设计 A 让它们等在段边界，由 FTL 主动收尾后落盘。
- *
- * @param cmd 待提交命令（用其 ch/ce/lun 定位实例）。
- * @param op  完成服务函数选择器（决定被挡时是否请求断点）。
- * @return true —— 被门控拒绝；
- * @return false —— 放行。
- */
-static BOOL ftl_op_seq_gate(const fc_cmd_s *cmd, ftl_op_id_e op)
-{
-    ftl_ctx_s *ftl = ftl_op_route_get(cmd->ch, cmd->ce, cmd->lun);
-
-    if ((ftl != NULL) && (ftl_cache_seq_gate_blocks(ftl) != false))
-    {
-        STATS_INC(s_stats_ftl_op.gate_block);
-        // L2P 加载也可能是 host 写确认的依赖：gate 拒绝它却不请求断点，会让
-        // confirm park 到 100 ms 后把已编程的写结算成 IO_ERROR。
-        // 因此把 FTL_OP_L2P 与前台 HOST_IO / SYNC_WAIT 同等对待：请求段边界收尾。
-        // ⚠ FTL_OP_READ_RECOVERY **不能**置 break_requested：它恢复的正是本序列
-        // 自己的读组。置断点会触发 close_step → ftl_cache_seq_release 重算
-        // draining，把刚放开的门控立刻重新关上，恢复读永远提交不进来。
-        if ((op == FTL_OP_HOST_IO) || (op == FTL_OP_SYNC_WAIT) || (op == FTL_OP_L2P))
-        {
-            STATS_INC(s_stats_ftl_op.break_request);
-            ftl_cache_seq_request_break(ftl);
-        }
-
-        // L2P 加载是前台的确定依赖（写确认 / GC 搬移）：只请求断点不够，host 连续流
-        // 会在下一个窗口立刻重新占住门控，加载反复被拒直到调用者超时。这里再请求
-        // 让行，host 暂不开新序列，让 L2P 在本轮拿到一次提交机会。
-        if (op == FTL_OP_L2P)
-        {
-            STATS_INC(s_stats_ftl_op.yield_request);
-            ftl_cache_seq_request_yield(ftl, platform_now_ms());
-        }
-        return true;
-    }
-
-    return false;
-}
-
-/**
- * @brief 后台让行达成：清 yield_pending
- *
- * 只认 L2P 提交成功：让行就是为一个被拒的 L2P 加载而要的，别的后台/前台提交
- * （尤其 CACHE_PAD / HOST_IO）可能抢在它前面，不能替它清标志。
- */
-static void ftl_op_seq_yield_clear(ftl_ctx_s *ftl, ftl_op_id_e op)
-{
-    if ((ftl != NULL) && (op == FTL_OP_L2P) && (ftl_cache_seq_yield_pending(ftl) != false))
-    {
-        STATS_INC(s_stats_ftl_op.yield_clear);
-        ftl_cache_seq_yield_clear(ftl);
-    }
-}
-
 /**
  * @brief 提交一条命令并登记 request
  *
@@ -773,30 +800,3 @@ DWORD ftl_op_stats_progress(void)
     return s_stats_ftl_op.drain_completed + s_stats_ftl_op.host_submitted;
 }
 #endif /* SSD_STATS_ENABLE */
-
-/* ── 7. 同步等待服务函数 ── */
-
-/**
- * @brief 同步等待的完成服务：把 completion 存入 waiter、置 done = true。
- *
- * 不 release 命令——调用者（ftl_sync_submit_wait）要在 wait 返回后读 cmd 数据
- * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。
- *
- * @param ftl        实例（本函数不用）。
- * @param completion FC 完成状态。
- * @param ctx        `ftl_sync_waiter_s *`；request 表保证非 NULL。
- *
- * @note 超时后的迟到完成不会到这里：超时已把 request 表项摘掉，ftl_op_drain 走
- *       “completion without request” 分支，只 release 命令。
- */
-static void ftl_sync_wait_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void *ctx)
-{
-    (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
-
-    ftl_sync_waiter_s *waiter = (ftl_sync_waiter_s *)ctx;
-
-    ASSERT(waiter != NULL);
-
-    waiter->completion = *completion;
-    waiter->done       = true;
-}

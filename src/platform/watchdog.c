@@ -13,11 +13,20 @@
 
 #include <string.h>
 
-static storage_wdg_cfg_s              g_storage_wdg_config;
-static storage_wdg_status_s           g_storage_wdg_status;
+/* 长操作显式喂狗的节流间隔：远小于 scheduler 域超时（100 ms），又避免同步泵的
+ * 每个自旋轮次都写一次 IWDG 寄存器。 */
+#define STORAGE_WDG_KICK_INTERVAL_MS (10U)
+
+static storage_wdg_cfg_s g_storage_wdg_config;
+
+static storage_wdg_status_s g_storage_wdg_status;
+
 static storage_wdg_recovery_hook_fn_t g_storage_wdg_recovery_hook;
+
 /* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
 static DWORD g_storage_wdg_last_wwdg_refresh_ms;
+
+static DWORD s_last_kick_ms;
 
 static BOOL storage_wdg_domain_is_valid(wdg_domain_e domain)
 {
@@ -181,12 +190,6 @@ void storage_wdg_service(void)
     /* IWDG 刷新必须位于所有健康检查及 WWDG 窗口检查之后，保证它是最终裁决结果。 */
     watchdog_port_iwdg_refresh();
 }
-
-/* 长操作显式喂狗的节流间隔：远小于 scheduler 域超时（100 ms），又避免同步泵的
- * 每个自旋轮次都写一次 IWDG 寄存器。 */
-#define STORAGE_WDG_KICK_INTERVAL_MS (10U)
-
-static DWORD s_last_kick_ms;
 
 void storage_wdg_kick(void)
 {

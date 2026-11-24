@@ -29,20 +29,25 @@
 
 #include <string.h>
 
+/* 低速 bring-up 的 FMC PCC 值（FMC 周期）：对 Mode0 数据手册最小值留保守余量。
+ * 不是从 AC 表推导——上电时先保证任何时序边缘都能读 ID/参数页。 */
+#define MT29F_LOW_PCC_SETUP (4U)
+
+#define MT29F_LOW_PCC_WAIT (6U)
+
+#define MT29F_LOW_PCC_HOLD (2U)
+
+#define MT29F_LOW_PCC_HIZ (4U)
+
+#define MT29F_LOW_TCLR (8U)
+
+#define MT29F_LOW_TAR (8U)
+
 /* 全局 HAL NAND 句柄：生命周期从 fc_nand_init 起，供 FMC 初始化/时序更新复用 */
 static NAND_HandleTypeDef g_nand_handle;
 
 /* 当前实际生效的 ONFI timing mode（0 = 仍为低速）。[STAT] 诊断用。 */
 static BYTE s_timing_mode[CH_NUM][CE_NUM];
-
-/* 低速 bring-up 的 FMC PCC 值（FMC 周期）：对 Mode0 数据手册最小值留保守余量。
- * 不是从 AC 表推导——上电时先保证任何时序边缘都能读 ID/参数页。 */
-#define MT29F_LOW_PCC_SETUP (4U)
-#define MT29F_LOW_PCC_WAIT  (6U)
-#define MT29F_LOW_PCC_HOLD  (2U)
-#define MT29F_LOW_PCC_HIZ   (4U)
-#define MT29F_LOW_TCLR      (8U)
-#define MT29F_LOW_TAR       (8U)
 
 #if (CONFIG_NAND_TIMING_MODE != 0U)
 
@@ -92,6 +97,36 @@ static const nand_fmc_timing_s g_nand_timing_3v3_mode5 = {
 };
 #endif /* CONFIG_NAND_TIMING_MODE */
 
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+/* FMC 周期由调用者传入实际 fmc_hz 计算（1e12 / fmc_hz ps，向下取整）。
+ * 当前 sys_port.c 配 PLL2R=200MHz（D1 域 FMC 上限 200MHz）⇒ tHCLK = 5000 ps。 */
+/* 首次 Mode 5 上板留 1 个 FMC 周期的余量；稳定后可收紧到 0。 */
+#    define NAND_PCC_MARGIN_CYCLES (1U)
+/* 板级时序余量（单位：FMC 周期）：Setup/Wait 在通用 margin 之上再各 +1。
+ * 2× 曾用于 bring-up 确认“失败来自余量”；当前值 FCUT 55/55 通过，
+ * 200MHz 下各相相对数据手册最小值 ≥ +5ns。再减 1 周期即 0ns 余量，不再收紧。 */
+#    define NAND_PCC_SETUP_EXTRA          (1U)
+#    define NAND_PCC_WAIT_EXTRA           (1U)
+#    define NS_TO_PCC_CYCLES(ns, tclk_ps) ((((ns)*1000U) + (tclk_ps)-1U) / (tclk_ps))
+#endif /* CONFIG_NAND_TIMING_MODE */
+
+/**
+ * @brief 当前 NAND 时序模式（器件内部实现，经 nand_device.h 的通用接口暴露）
+ *
+ * @param ch   通道号
+ * @param ce   片选号
+ * @param mode 输出：模式号（0 = 低速）
+ * @return OK / INVALID_ARGUMENT
+ */
+static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
+{
+    ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "get timing mode: mode NULL");
+    ASSERT_REJECT((ch < CH_NUM) && (ce < CE_NUM), NAND_RESULT_INVALID_ARGUMENT, "get timing mode: ch/ce out of range");
+
+    *mode = s_timing_mode[ch][ce];
+    return NAND_RESULT_OK;
+}
+
 /*
  * 根据 ONFI 时序参数 nand_fmc_timing_s 和 FMC 时钟频率，
  * 计算 FMC PCC 硬件寄存器值。
@@ -106,16 +141,6 @@ static const nand_fmc_timing_s g_nand_timing_3v3_mode5 = {
  *   HiZSetupTime  = tRHZ / tHCLK
  */
 #if (CONFIG_NAND_TIMING_MODE != 0U)
-/* FMC 周期由调用者传入实际 fmc_hz 计算（1e12 / fmc_hz ps，向下取整）。
- * 当前 sys_port.c 配 PLL2R=200MHz（D1 域 FMC 上限 200MHz）⇒ tHCLK = 5000 ps。 */
-/* 首次 Mode 5 上板留 1 个 FMC 周期的余量；稳定后可收紧到 0。 */
-#    define NAND_PCC_MARGIN_CYCLES (1U)
-/* 板级时序余量（单位：FMC 周期）：Setup/Wait 在通用 margin 之上再各 +1。
- * 2× 曾用于 bring-up 确认“失败来自余量”；当前值 FCUT 55/55 通过，
- * 200MHz 下各相相对数据手册最小值 ≥ +5ns。再减 1 周期即 0ns 余量，不再收紧。 */
-#    define NAND_PCC_SETUP_EXTRA          (1U)
-#    define NAND_PCC_WAIT_EXTRA           (1U)
-#    define NS_TO_PCC_CYCLES(ns, tclk_ps) ((((ns)*1000U) + (tclk_ps)-1U) / (tclk_ps))
 
 /*
  * ST 精确式（tHCLK = 1e12 / fmc_hz ps，当前 5000 ps）：
@@ -363,8 +388,6 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
 #endif /* CONFIG_NAND_TIMING_MODE */
 }
 
-static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode);
-
 static const nand_device_desc_s g_mt29f_desc = {
     .name            = "MT29F4G08ABADAWP",
     .expected_id     = NAND_CHIP_ID,
@@ -376,21 +399,4 @@ static const nand_device_desc_s g_mt29f_desc = {
 const nand_device_desc_s *nand_device_get(void)
 {
     return &g_mt29f_desc;
-}
-
-/**
- * @brief 当前 NAND 时序模式（器件内部实现，经 nand_device.h 的通用接口暴露）
- *
- * @param ch   通道号
- * @param ce   片选号
- * @param mode 输出：模式号（0 = 低速）
- * @return OK / INVALID_ARGUMENT
- */
-static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
-{
-    ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "get timing mode: mode NULL");
-    ASSERT_REJECT((ch < CH_NUM) && (ce < CE_NUM), NAND_RESULT_INVALID_ARGUMENT, "get timing mode: ch/ce out of range");
-
-    *mode = s_timing_mode[ch][ce];
-    return NAND_RESULT_OK;
 }

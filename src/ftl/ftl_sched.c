@@ -103,6 +103,36 @@ static ftl_work_item_s *ftl_sched_workspace_get(BYTE die)
 }
 
 /**
+ * @brief 取一个空闲 item
+ *
+ * @param sched 调度器
+ * @return item；池满返回 NULL
+ */
+static ftl_work_item_s *ftl_sched_item_free(ftl_sched_s *sched)
+{
+    // 前 FTL_BG_JOB_NUM 个是后台 job 的永久预留项，不参与普通 item 分配。
+    for (WORD i = FTL_BG_JOB_NUM; i < FTL_SCHED_MAX_WORK; i++)
+    {
+        if (sched->items[i].state == FTL_WORK_FREE)
+        {
+            return &sched->items[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * @brief 该 item 等待的 metadata 依赖是否已解除
+ *
+ * @param ftl FTL 实例
+ * @return true = metadata job 空闲且无待压缩请求
+ */
+static BOOL ftl_sched_md_wait_cleared(const ftl_ctx_s *ftl)
+{
+    return (md_handle_is_idle(ftl->metadata_dir) != false) && (ftl->metadata_dir->handle.compact_wanted == false);
+}
+
+/**
  * @brief 后台 job → class
  *
  * @param job 后台 job
@@ -123,6 +153,322 @@ static ftl_work_class_e ftl_sched_bg_class(ftl_bg_job_e job)
             return FTL_WORK_CLASS_L2P_FLUSH;
         default:
             return FTL_WORK_CLASS_CP_META;
+    }
+}
+
+/**
+ * @brief 释放一个 item（唯一出口：同步维护 host/flush 计数）
+ *
+ * @param sched 调度器
+ * @param it    非 NULL item
+ */
+static void ftl_sched_item_release(ftl_sched_s *sched, ftl_work_item_s *it)
+{
+    if (it->class_id == FTL_WORK_CLASS_HOST_READ || it->class_id == FTL_WORK_CLASS_HOST_WRITE)
+    {
+        ASSERT(sched->host_items > 0U);
+        sched->host_items--;
+    }
+    else if ((it->class_id == FTL_WORK_CLASS_L2P_FLUSH) && (it->bg_job == false))
+    {
+        ASSERT(sched->flush_items > 0U);
+        sched->flush_items--;
+    }
+    it->state = FTL_WORK_FREE;
+}
+
+/**
+ * @brief 某 class 的活动 item 数
+ *
+ * @param sched    调度器
+ * @param class_id class
+ * @return item 数
+ */
+static WORD ftl_sched_class_count(const ftl_sched_s *sched, ftl_work_class_e class_id)
+{
+    WORD n = 0U;
+
+    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
+    {
+        const ftl_work_item_s *it = &sched->items[i];
+
+        if ((it->state != FTL_WORK_FREE) && (it->class_id == class_id))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief 回收已完成 item
+ *
+ * @param ftl   FTL 实例
+ * @param sched 调度器
+ */
+static void ftl_sched_reap(ftl_ctx_s *ftl, ftl_sched_s *sched)
+{
+    if (sched->items == NULL)
+    {
+        return; /* 启动早期 completion：scheduler 尚未 init */
+    }
+    if (ftl_sched_items_ok(sched) == false)
+    {
+        ftl_sched_corrupt_report(sched, "flush reap: items pointer");
+        return;
+    }
+    if (sched->flush_items == 0U)
+    {
+        return;
+    }
+
+    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
+    {
+        ftl_work_item_s *it = &sched->items[i];
+
+        if ((it->state == FTL_WORK_FREE) || (it->class_id != FTL_WORK_CLASS_L2P_FLUSH) || (it->bg_job != false))
+        {
+            continue;
+        }
+        if (it->magic != FTL_SCHED_ITEM_MAGIC)
+        {
+            ftl_sched_corrupt_report(sched, "flush reap: item magic");
+            ftl_sched_item_release(sched, it);
+            continue;
+        }
+
+        if (l2p_region_dirty_live(ftl->cache, it->region) == false)
+        {
+            if (it->state == FTL_WORK_INFLIGHT)
+            {
+                ASSERT(sched->credit[it->class_id] > 0U);
+                sched->credit[it->class_id]--;
+            }
+            ftl_sched_item_release(sched, it);
+            STATS_INC(sched->stats.flush_reaped);
+            continue;
+        }
+
+        // 只有 INFLIGHT 才需要查行状态；READY/WAIT_DEP 查了也没用，且是一次
+        // 64 行扫描。完成钩子每个完成都会走到这里。
+        if ((it->state == FTL_WORK_INFLIGHT) && (l2p_region_state_get(ftl->cache, it->region) != L2P_CACHE_FLUSHING))
+        {
+            /* 写回命令已结束但 region 仍 dirty（例如刚完成的是加载）：退回 READY
+             * 让本轮重新 kick，不占 class credit。 */
+            ASSERT(sched->credit[it->class_id] > 0U);
+            sched->credit[it->class_id]--;
+            it->state = FTL_WORK_READY;
+            continue;
+        }
+
+        if ((it->state == FTL_WORK_WAIT_DEP) && (SSD_FLAGS_ANY(it->dep_mask, FTL_WORK_DEP_MD_SLOT) != false) && (ftl_sched_md_wait_cleared(ftl) != false))
+        {
+            it->dep_mask = 0U;
+            it->state    = FTL_WORK_READY;
+        }
+    }
+}
+
+/**
+ * @brief 执行一个后台 job（由统一分派按优先级表调用）
+ *
+ * @param ftl FTL 实例
+ * @param job 后台 job
+ */
+static void ftl_sched_bg_job_run(ftl_ctx_s *ftl, BYTE job)
+{
+    switch ((ftl_bg_job_e)job)
+    {
+        case FTL_BG_JOB_CP_ADVANCE:
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, false);
+
+            cp_handle(ftl->cp_handle, &trigger);
+            break;
+        }
+        case FTL_BG_JOB_CP_EMERGENCY:
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_EMERGENCY, false);
+
+            cp_handle(ftl->cp_handle, &trigger);
+            break;
+        }
+        case FTL_BG_JOB_CP_TRIGGER:
+        {
+            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_TIMER, false);
+
+            cp_handle(ftl->cp_handle, &trigger);
+            break;
+        }
+        case FTL_BG_JOB_METADATA:
+            md_handle(ftl->metadata_dir);
+            break;
+        case FTL_BG_JOB_JOURNAL_ERASE:
+        {
+            const jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
+
+            jrn_handle(ftl->journal, &trigger);
+            break;
+        }
+        case FTL_BG_JOB_JOURNAL_FLUSH:
+            jrn_handle(ftl->journal, NULL);
+            break;
+        case FTL_BG_JOB_RECOVERY:
+            rr_handle(&ftl->read_recovery_handle);
+            break;
+        case FTL_BG_JOB_GC:
+            mig_handle(ftl->mig_handle, ftl->bg.level);
+            break;
+        case FTL_BG_JOB_L2P_FLUSH:
+            l2p_handle(ftl->cache, topo_2_die(ftl->topo), ftl->bg.level);
+            break;
+        case FTL_BG_JOB_BBT:
+            bbt_handle(&ftl->alloc);
+            break;
+        default:
+            ASSERT_DEFAULT(ftl_bg_job_e);
+            break;
+    }
+}
+
+/**
+ * @brief 分派一个 host class 的 READY item（调用者已持 host_running）
+ *
+ * @param ftl FTL 实例
+ * @param cls HOST_READ 或 HOST_WRITE
+ */
+static void ftl_sched_dispatch_host_class(ftl_ctx_s *ftl, ftl_work_class_e cls)
+{
+    ftl_sched_s *sched = &ftl->sched;
+
+    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
+    {
+        ftl_work_item_s *it = &sched->items[i];
+
+        if ((it->state != FTL_WORK_READY) || (it->class_id != cls))
+        {
+            continue;
+        }
+        if ((it->magic != FTL_SCHED_ITEM_MAGIC) || (it->group >= FTL_GROUP_MAX))
+        {
+            ftl_sched_corrupt_report(sched, "host dispatch: item magic/group");
+            ftl_sched_item_release(sched, it);
+            continue;
+        }
+
+        ftl_host_group_drain(ftl, it->group);
+
+        if (pend_group_is_used(&ftl->pending, it->group) == false)
+        {
+            ftl_sched_item_release(sched, it);
+            STATS_INC(sched->stats.host_reaped);
+        }
+    }
+}
+
+/**
+ * @brief host 阶段分派：读先于写，带重入保护
+ *
+ * @param ftl FTL 实例
+ */
+static void ftl_sched_dispatch_host(ftl_ctx_s *ftl)
+{
+    ftl_sched_s *sched = &ftl->sched;
+
+    if ((sched->host_running != false) || (sched->host_items == 0U))
+    {
+        return; /* 重入 submit：外层调度继续；无 host item：不扫表 */
+    }
+
+    sched->host_running = true;
+    ftl_sched_host_reap(ftl);
+    ftl_sched_dispatch_host_class(ftl, FTL_WORK_CLASS_HOST_READ);
+    ftl_sched_dispatch_host_class(ftl, FTL_WORK_CLASS_HOST_WRITE);
+    sched->host_running = false;
+}
+
+/**
+ * @brief 分派 READY 的 L2P_FLUSH item（调用者已检查 bg_suspend）
+ *
+ * @param ftl FTL 实例
+ */
+static void ftl_sched_dispatch_flush(ftl_ctx_s *ftl)
+{
+    ftl_sched_s *sched    = &ftl->sched;
+    BYTE         attempts = 0U;
+
+    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
+    {
+        ftl_work_item_s *it = &sched->items[i];
+
+        if ((it->state != FTL_WORK_READY) || (it->class_id != FTL_WORK_CLASS_L2P_FLUSH) || (it->bg_job != false))
+        {
+            continue;
+        }
+        if (it->magic != FTL_SCHED_ITEM_MAGIC)
+        {
+            ftl_sched_corrupt_report(sched, "flush run: item magic");
+            ftl_sched_item_release(sched, it);
+            continue;
+        }
+        if (sched->credit[it->class_id] >= L2P_FLUSH_MAX_INFLIGHT)
+        {
+            break; /* 本 class 在飞额度已满；等完成回收 */
+        }
+        const l2p_cache_state_e state = l2p_region_state_get(ftl->cache, it->region);
+
+        if (state == L2P_CACHE_FLUSHING)
+        {
+            /* 写回已在飞（可能由本 scheduler 或 owner flush 启动）：纳入 class credit。 */
+            it->state = FTL_WORK_INFLIGHT;
+            sched->credit[it->class_id]++;
+            continue;
+        }
+        if (state == L2P_CACHE_LOADING)
+        {
+            continue; /* region 页加载中：完成后再 kick flush */
+        }
+        if (attempts >= L2P_FLUSH_MAX_NORMAL)
+        {
+            break; /* 本轮预算已用完；留下的 item 下一轮继续 */
+        }
+
+        const ftl_status_e st = l2p_region_flush_kick(ftl->cache, it->region);
+
+        attempts++;
+
+        if (st == FTL_ERROR)
+        {
+            sched->l2p_flush_failed = true;
+            ftl_sched_item_release(sched, it);
+            STATS_INC(sched->stats.flush_reaped);
+            continue;
+        }
+        if ((st == FTL_OK) && (l2p_region_dirty_live(ftl->cache, it->region) == false))
+        {
+            ftl_sched_item_release(sched, it);
+            STATS_INC(sched->stats.flush_reaped);
+            continue;
+        }
+        if (st == FTL_AGAIN)
+        {
+            if (ftl_sched_md_wait_cleared(ftl) == false)
+            {
+                it->dep_mask = FTL_WORK_DEP_MD_SLOT;
+                it->state    = FTL_WORK_WAIT_DEP;
+            }
+            continue; /* 其它背压：保持 READY，下一轮重试 */
+        }
+
+        if (l2p_region_state_get(ftl->cache, it->region) == L2P_CACHE_FLUSHING)
+        {
+            it->state = FTL_WORK_INFLIGHT;
+            sched->credit[it->class_id]++;
+        }
+        else
+        {
+            it->state = FTL_WORK_READY; /* 本次 kick 只起了加载/合并，flush 尚未在飞 */
+        }
     }
 }
 
@@ -170,69 +516,6 @@ void ftl_sched_stats_register(ftl_sched_s *sched, BYTE inst)
     (void)stats_register("ftl.sched", inst, &sched->stats, s_stats_sched_names, STATS_ENTRY_COUNT(s_stats_sched_names));
 }
 #endif
-
-/**
- * @brief 取一个空闲 item
- *
- * @param sched 调度器
- * @return item；池满返回 NULL
- */
-static ftl_work_item_s *ftl_sched_item_free(ftl_sched_s *sched)
-{
-    // 前 FTL_BG_JOB_NUM 个是后台 job 的永久预留项，不参与普通 item 分配。
-    for (WORD i = FTL_BG_JOB_NUM; i < FTL_SCHED_MAX_WORK; i++)
-    {
-        if (sched->items[i].state == FTL_WORK_FREE)
-        {
-            return &sched->items[i];
-        }
-    }
-    return NULL;
-}
-
-/**
- * @brief 释放一个 item（唯一出口：同步维护 host/flush 计数）
- *
- * @param sched 调度器
- * @param it    非 NULL item
- */
-static void ftl_sched_item_release(ftl_sched_s *sched, ftl_work_item_s *it)
-{
-    if (it->class_id == FTL_WORK_CLASS_HOST_READ || it->class_id == FTL_WORK_CLASS_HOST_WRITE)
-    {
-        ASSERT(sched->host_items > 0U);
-        sched->host_items--;
-    }
-    else if ((it->class_id == FTL_WORK_CLASS_L2P_FLUSH) && (it->bg_job == false))
-    {
-        ASSERT(sched->flush_items > 0U);
-        sched->flush_items--;
-    }
-    it->state = FTL_WORK_FREE;
-}
-
-/**
- * @brief 某 class 的活动 item 数
- *
- * @param sched    调度器
- * @param class_id class
- * @return item 数
- */
-static WORD ftl_sched_class_count(const ftl_sched_s *sched, ftl_work_class_e class_id)
-{
-    WORD n = 0U;
-
-    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
-    {
-        const ftl_work_item_s *it = &sched->items[i];
-
-        if ((it->state != FTL_WORK_FREE) && (it->class_id == class_id))
-        {
-            n++;
-        }
-    }
-    return n;
-}
 
 /**
  * @brief 提交一个 L2P dirty-region 写回请求（幂等）
@@ -500,86 +783,6 @@ BOOL ftl_sched_host_write_admit(const ftl_ctx_s *ftl)
 }
 
 /**
- * @brief 该 item 等待的 metadata 依赖是否已解除
- *
- * @param ftl FTL 实例
- * @return true = metadata job 空闲且无待压缩请求
- */
-static BOOL ftl_sched_md_wait_cleared(const ftl_ctx_s *ftl)
-{
-    return (md_handle_is_idle(ftl->metadata_dir) != false) && (ftl->metadata_dir->handle.compact_wanted == false);
-}
-
-/**
- * @brief 回收已完成 item
- *
- * @param ftl   FTL 实例
- * @param sched 调度器
- */
-static void ftl_sched_reap(ftl_ctx_s *ftl, ftl_sched_s *sched)
-{
-    if (sched->items == NULL)
-    {
-        return; /* 启动早期 completion：scheduler 尚未 init */
-    }
-    if (ftl_sched_items_ok(sched) == false)
-    {
-        ftl_sched_corrupt_report(sched, "flush reap: items pointer");
-        return;
-    }
-    if (sched->flush_items == 0U)
-    {
-        return;
-    }
-
-    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
-    {
-        ftl_work_item_s *it = &sched->items[i];
-
-        if ((it->state == FTL_WORK_FREE) || (it->class_id != FTL_WORK_CLASS_L2P_FLUSH) || (it->bg_job != false))
-        {
-            continue;
-        }
-        if (it->magic != FTL_SCHED_ITEM_MAGIC)
-        {
-            ftl_sched_corrupt_report(sched, "flush reap: item magic");
-            ftl_sched_item_release(sched, it);
-            continue;
-        }
-
-        if (l2p_region_dirty_live(ftl->cache, it->region) == false)
-        {
-            if (it->state == FTL_WORK_INFLIGHT)
-            {
-                ASSERT(sched->credit[it->class_id] > 0U);
-                sched->credit[it->class_id]--;
-            }
-            ftl_sched_item_release(sched, it);
-            STATS_INC(sched->stats.flush_reaped);
-            continue;
-        }
-
-        // 只有 INFLIGHT 才需要查行状态；READY/WAIT_DEP 查了也没用，且是一次
-        // 64 行扫描。完成钩子每个完成都会走到这里。
-        if ((it->state == FTL_WORK_INFLIGHT) && (l2p_region_state_get(ftl->cache, it->region) != L2P_CACHE_FLUSHING))
-        {
-            /* 写回命令已结束但 region 仍 dirty（例如刚完成的是加载）：退回 READY
-             * 让本轮重新 kick，不占 class credit。 */
-            ASSERT(sched->credit[it->class_id] > 0U);
-            sched->credit[it->class_id]--;
-            it->state = FTL_WORK_READY;
-            continue;
-        }
-
-        if ((it->state == FTL_WORK_WAIT_DEP) && (SSD_FLAGS_ANY(it->dep_mask, FTL_WORK_DEP_MD_SLOT) != false) && (ftl_sched_md_wait_cleared(ftl) != false))
-        {
-            it->dep_mask = 0U;
-            it->state    = FTL_WORK_READY;
-        }
-    }
-}
-
-/**
  * @brief 提交一个后台 job 请求（幂等；bg_policy 只产生触发）
  *
  * 后台 job 使用预留 item，不会因池满失败。
@@ -606,68 +809,6 @@ void ftl_sched_bg_request(ftl_sched_s *sched, ftl_bg_job_e job)
     it->prefetch = false;
     it->magic    = FTL_SCHED_ITEM_MAGIC;
     STATS_INC(sched->stats.bg_request);
-}
-
-/**
- * @brief 执行一个后台 job（由统一分派按优先级表调用）
- *
- * @param ftl FTL 实例
- * @param job 后台 job
- */
-static void ftl_sched_bg_job_run(ftl_ctx_s *ftl, BYTE job)
-{
-    switch ((ftl_bg_job_e)job)
-    {
-        case FTL_BG_JOB_CP_ADVANCE:
-        {
-            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_ADVANCE, false);
-
-            cp_handle(ftl->cp_handle, &trigger);
-            break;
-        }
-        case FTL_BG_JOB_CP_EMERGENCY:
-        {
-            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_EMERGENCY, false);
-
-            cp_handle(ftl->cp_handle, &trigger);
-            break;
-        }
-        case FTL_BG_JOB_CP_TRIGGER:
-        {
-            const cp_trigger_s trigger = ftl_cp_trigger_build(ftl, CP_REASON_TIMER, false);
-
-            cp_handle(ftl->cp_handle, &trigger);
-            break;
-        }
-        case FTL_BG_JOB_METADATA:
-            md_handle(ftl->metadata_dir);
-            break;
-        case FTL_BG_JOB_JOURNAL_ERASE:
-        {
-            const jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
-
-            jrn_handle(ftl->journal, &trigger);
-            break;
-        }
-        case FTL_BG_JOB_JOURNAL_FLUSH:
-            jrn_handle(ftl->journal, NULL);
-            break;
-        case FTL_BG_JOB_RECOVERY:
-            rr_handle(&ftl->read_recovery_handle);
-            break;
-        case FTL_BG_JOB_GC:
-            mig_handle(ftl->mig_handle, ftl->bg.level);
-            break;
-        case FTL_BG_JOB_L2P_FLUSH:
-            l2p_handle(ftl->cache, topo_2_die(ftl->topo), ftl->bg.level);
-            break;
-        case FTL_BG_JOB_BBT:
-            bbt_handle(&ftl->alloc);
-            break;
-        default:
-            ASSERT_DEFAULT(ftl_bg_job_e);
-            break;
-    }
 }
 
 /**
@@ -783,62 +924,6 @@ void ftl_sched_note_completion(ftl_ctx_s *ftl)
 }
 
 /**
- * @brief 分派一个 host class 的 READY item（调用者已持 host_running）
- *
- * @param ftl FTL 实例
- * @param cls HOST_READ 或 HOST_WRITE
- */
-static void ftl_sched_dispatch_host_class(ftl_ctx_s *ftl, ftl_work_class_e cls)
-{
-    ftl_sched_s *sched = &ftl->sched;
-
-    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
-    {
-        ftl_work_item_s *it = &sched->items[i];
-
-        if ((it->state != FTL_WORK_READY) || (it->class_id != cls))
-        {
-            continue;
-        }
-        if ((it->magic != FTL_SCHED_ITEM_MAGIC) || (it->group >= FTL_GROUP_MAX))
-        {
-            ftl_sched_corrupt_report(sched, "host dispatch: item magic/group");
-            ftl_sched_item_release(sched, it);
-            continue;
-        }
-
-        ftl_host_group_drain(ftl, it->group);
-
-        if (pend_group_is_used(&ftl->pending, it->group) == false)
-        {
-            ftl_sched_item_release(sched, it);
-            STATS_INC(sched->stats.host_reaped);
-        }
-    }
-}
-
-/**
- * @brief host 阶段分派：读先于写，带重入保护
- *
- * @param ftl FTL 实例
- */
-static void ftl_sched_dispatch_host(ftl_ctx_s *ftl)
-{
-    ftl_sched_s *sched = &ftl->sched;
-
-    if ((sched->host_running != false) || (sched->host_items == 0U))
-    {
-        return; /* 重入 submit：外层调度继续；无 host item：不扫表 */
-    }
-
-    sched->host_running = true;
-    ftl_sched_host_reap(ftl);
-    ftl_sched_dispatch_host_class(ftl, FTL_WORK_CLASS_HOST_READ);
-    ftl_sched_dispatch_host_class(ftl, FTL_WORK_CLASS_HOST_WRITE);
-    sched->host_running = false;
-}
-
-/**
  * @brief host 调度一步：回收已完成的组，读组先于写组补发
  *
  * 提交快路径专用：只碰 host item，不执行后台 job。
@@ -862,91 +947,6 @@ void ftl_sched_run_host(ftl_ctx_s *ftl)
     }
 
     ftl_sched_dispatch_host(ftl);
-}
-
-/**
- * @brief 分派 READY 的 L2P_FLUSH item（调用者已检查 bg_suspend）
- *
- * @param ftl FTL 实例
- */
-static void ftl_sched_dispatch_flush(ftl_ctx_s *ftl)
-{
-    ftl_sched_s *sched    = &ftl->sched;
-    BYTE         attempts = 0U;
-
-    for (WORD i = 0U; i < FTL_SCHED_MAX_WORK; i++)
-    {
-        ftl_work_item_s *it = &sched->items[i];
-
-        if ((it->state != FTL_WORK_READY) || (it->class_id != FTL_WORK_CLASS_L2P_FLUSH) || (it->bg_job != false))
-        {
-            continue;
-        }
-        if (it->magic != FTL_SCHED_ITEM_MAGIC)
-        {
-            ftl_sched_corrupt_report(sched, "flush run: item magic");
-            ftl_sched_item_release(sched, it);
-            continue;
-        }
-        if (sched->credit[it->class_id] >= L2P_FLUSH_MAX_INFLIGHT)
-        {
-            break; /* 本 class 在飞额度已满；等完成回收 */
-        }
-        const l2p_cache_state_e state = l2p_region_state_get(ftl->cache, it->region);
-
-        if (state == L2P_CACHE_FLUSHING)
-        {
-            /* 写回已在飞（可能由本 scheduler 或 owner flush 启动）：纳入 class credit。 */
-            it->state = FTL_WORK_INFLIGHT;
-            sched->credit[it->class_id]++;
-            continue;
-        }
-        if (state == L2P_CACHE_LOADING)
-        {
-            continue; /* region 页加载中：完成后再 kick flush */
-        }
-        if (attempts >= L2P_FLUSH_MAX_NORMAL)
-        {
-            break; /* 本轮预算已用完；留下的 item 下一轮继续 */
-        }
-
-        const ftl_status_e st = l2p_region_flush_kick(ftl->cache, it->region);
-
-        attempts++;
-
-        if (st == FTL_ERROR)
-        {
-            sched->l2p_flush_failed = true;
-            ftl_sched_item_release(sched, it);
-            STATS_INC(sched->stats.flush_reaped);
-            continue;
-        }
-        if ((st == FTL_OK) && (l2p_region_dirty_live(ftl->cache, it->region) == false))
-        {
-            ftl_sched_item_release(sched, it);
-            STATS_INC(sched->stats.flush_reaped);
-            continue;
-        }
-        if (st == FTL_AGAIN)
-        {
-            if (ftl_sched_md_wait_cleared(ftl) == false)
-            {
-                it->dep_mask = FTL_WORK_DEP_MD_SLOT;
-                it->state    = FTL_WORK_WAIT_DEP;
-            }
-            continue; /* 其它背压：保持 READY，下一轮重试 */
-        }
-
-        if (l2p_region_state_get(ftl->cache, it->region) == L2P_CACHE_FLUSHING)
-        {
-            it->state = FTL_WORK_INFLIGHT;
-            sched->credit[it->class_id]++;
-        }
-        else
-        {
-            it->state = FTL_WORK_READY; /* 本次 kick 只起了加载/合并，flush 尚未在飞 */
-        }
-    }
 }
 
 /**

@@ -36,17 +36,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 本文件是**跨 target 共享**的平台源文件（放这里而不是 src/platform/<soc>/）：
- * 不 include 任何 SoC 头，也不出现 HAL 类型。唯一需要架构知识的是读 MSP ——
- * 用内联汇编直接取，不走内核头（那会依赖设备头提供 IRQn_Type，裸包含编译不过）。 */
-static DWORD syscalls_current_msp(void)
-{
-    DWORD msp;
+/* --------------------------------------------------------------------
+ * _sbrk
+ *   功能：把堆顶向上/向下移动 incr 字节，返回移动前的堆顶（新分配块的首地址）。
+ *   参数：incr —— 增量（可为负，free 收缩堆时使用）。
+ *   返回：成功返回旧堆顶；越界返回 (void *)-1（_sbrk_r 据此置 errno=ENOMEM）。
+ *   实现要点：
+ *     - 首次调用时惰性初始化 heap_end = &end（链接脚本符号，DTCM 底部）。
+ *     - 上界：heap_end + incr 不得越过 __get_MSP() - SBRK_STACK_GUARD。
+ *     - 下界：heap_end + incr 不得退到 &end 之下（防止 free 路径把堆顶算穿）。
+ *     - 失败时**不**修改 heap_end，保证后续调用看到一致的堆顶。
+ *     - 用 ptrdiff_t 而非 int：与 newlib _sbrk_r 的实参类型一致（ARM 上同为 32 位）。
+ * -------------------------------------------------------------------- */
+static char *s_heap_end;
 
-    __asm__ volatile("mrs %0, msp"
-                     : "=r"(msp));
-    return msp;
-}
+extern char end; /* 链接脚本 PROVIDE(end = .) —— 堆起点 */
 
 /* 堆顶与实时 MSP 之间必须留出的余量（字节）。
  *
@@ -63,21 +67,17 @@ static DWORD syscalls_current_msp(void)
 #    define SBRK_STACK_GUARD (0x400U)
 #endif
 
-/* --------------------------------------------------------------------
- * _sbrk
- *   功能：把堆顶向上/向下移动 incr 字节，返回移动前的堆顶（新分配块的首地址）。
- *   参数：incr —— 增量（可为负，free 收缩堆时使用）。
- *   返回：成功返回旧堆顶；越界返回 (void *)-1（_sbrk_r 据此置 errno=ENOMEM）。
- *   实现要点：
- *     - 首次调用时惰性初始化 heap_end = &end（链接脚本符号，DTCM 底部）。
- *     - 上界：heap_end + incr 不得越过 __get_MSP() - SBRK_STACK_GUARD。
- *     - 下界：heap_end + incr 不得退到 &end 之下（防止 free 路径把堆顶算穿）。
- *     - 失败时**不**修改 heap_end，保证后续调用看到一致的堆顶。
- *     - 用 ptrdiff_t 而非 int：与 newlib _sbrk_r 的实参类型一致（ARM 上同为 32 位）。
- * -------------------------------------------------------------------- */
-static char *s_heap_end;
+/* 本文件是**跨 target 共享**的平台源文件（放这里而不是 src/platform/<soc>/）：
+ * 不 include 任何 SoC 头，也不出现 HAL 类型。唯一需要架构知识的是读 MSP ——
+ * 用内联汇编直接取，不走内核头（那会依赖设备头提供 IRQn_Type，裸包含编译不过）。 */
+static DWORD syscalls_current_msp(void)
+{
+    DWORD msp;
 
-extern char end; /* 链接脚本 PROVIDE(end = .) —— 堆起点 */
+    __asm__ volatile("mrs %0, msp"
+                     : "=r"(msp));
+    return msp;
+}
 
 void *_sbrk(ptrdiff_t incr)
 {

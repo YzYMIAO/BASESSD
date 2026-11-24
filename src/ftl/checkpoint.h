@@ -35,6 +35,34 @@
 
 #include <stdint.h>
 
+/* ── Header Magic ── */
+/* Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）见
+ * ftl/metadata.h「固定元数据区布局」。 */
+#define CP_MAGIC (0xCCCCCCCCUL)
+
+/* ── 块元数据快照 word 编解码（与 power_failure_recovery 共用）──
+ * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块元数据快照」。
+ * word 位域：valid_count 10 / state 3 / temp 1 / pool 2（小端、显式移位，H27）。 */
+#define CP_BLOCK_WORD_VALID_MASK (0x03FFU)
+
+#define CP_BLOCK_WORD_STATE_SHIFT (10U)
+
+#define CP_BLOCK_WORD_STATE_MASK (0x7U)
+
+#define CP_BLOCK_WORD_TEMP_SHIFT (13U)
+
+#define CP_BLOCK_WORD_POOL_SHIFT (14U)
+
+#define CP_BLOCK_WORD_POOL_MASK (0x3U)
+
+#define CP_BLOCK_WORD_MAX_VALID ((PAGES_PER_BLOCK * CW_NUM))
+
+#define CP_BLOCK_POOL_NONE (0U)
+
+#define CP_BLOCK_POOL_OP (1U)
+
+#define CP_BLOCK_POOL_SPARE (2U)
+
 /* ── 异步 Checkpoint job ──
  *
  * CP 是严格有序的流水线（掉电安全契约，见 .c 头注释）；顺序由本状态机的 phase
@@ -198,24 +226,6 @@ typedef struct CP_HANDLE_S
     log_ratelimit_s rl_done;
 } cp_handle_s;
 
-/* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
- * 不再同尺寸。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
-_Static_assert(sizeof(((cp_handle_s *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "cp_handle_s.region_bitmap 必须是本 die 的局部 2048-bit 位图");
-_Static_assert(sizeof(((cp_handle_s *)0)->hdr.block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)), "cp_handle_s.block_words 必须恰好覆盖全部块");
-
-/**
- * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，SRAM3）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
-cp_handle_s *cp_workspace_get(BYTE die);
-
-/* ── Header Magic ── */
-/* Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）见
- * ftl/metadata.h「固定元数据区布局」。 */
-#define CP_MAGIC (0xCCCCCCCCUL)
-
 /* ── Header 格式：**恰好一页主区**（2048 B）──
  * 字段 94 字 = 14 个标量 + region_bitmap[64] + wear_page_crc[16]；padding 补齐到 2048。
  * ⚠ padding 长度必须按实际字算：算错会让 sizeof > 一页 ⇒ 写入被静默截断。
@@ -243,24 +253,18 @@ typedef struct CP_HEADER_S
     BYTE            padding[2048 - 94 * 4 - sizeof(lifetime_disk_s)]; /* 补齐到一页主区 */
 } cp_header_s;
 
+/* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
+ * 不再同尺寸。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
+_Static_assert(sizeof(((cp_handle_s *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "cp_handle_s.region_bitmap 必须是本 die 的局部 2048-bit 位图");
+
+_Static_assert(sizeof(((cp_handle_s *)0)->hdr.block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)), "cp_handle_s.block_words 必须恰好覆盖全部块");
+
 _Static_assert(sizeof(cp_header_s) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
+
 _Static_assert(sizeof(((cp_header_s *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)), "Header 位图必须是本 die 的局部 2048-bit 位图");
 
-/* ── 块元数据快照 word 编解码（与 power_failure_recovery 共用）──
- * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块元数据快照」。
- * word 位域：valid_count 10 / state 3 / temp 1 / pool 2（小端、显式移位，H27）。 */
-#define CP_BLOCK_WORD_VALID_MASK  (0x03FFU)
-#define CP_BLOCK_WORD_STATE_SHIFT (10U)
-#define CP_BLOCK_WORD_STATE_MASK  (0x7U)
-#define CP_BLOCK_WORD_TEMP_SHIFT  (13U)
-#define CP_BLOCK_WORD_POOL_SHIFT  (14U)
-#define CP_BLOCK_WORD_POOL_MASK   (0x3U)
-#define CP_BLOCK_WORD_MAX_VALID   ((PAGES_PER_BLOCK * CW_NUM))
-#define CP_BLOCK_POOL_NONE        (0U)
-#define CP_BLOCK_POOL_OP          (1U)
-#define CP_BLOCK_POOL_SPARE       (2U)
-
 _Static_assert((unsigned)CP_BLOCK_WORD_MAX_VALID <= (unsigned)CP_BLOCK_WORD_VALID_MASK, "valid_count 超出 word 位宽");
+
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)CP_BLOCK_WORD_STATE_MASK, "state 超出 word 位宽");
 
 /**
@@ -321,20 +325,25 @@ static inline BYTE cp_block_word_pool(WORD word)
     return ((word >> CP_BLOCK_WORD_POOL_SHIFT) & CP_BLOCK_WORD_POOL_MASK);
 }
 
-/* ── 接口 ── */
-
-/* ── 初始化 / 恢复 ── */
+/**
+ * @brief 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
+ * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。
+ *
+ * @param h  Checkpoint handle
+ * @return 指向 handle 内 FTL_BLOCK_TOTAL 个 word 的常驻缓冲（非空，所有权归 handle）
+ */
+static inline WORD *cp_block_words_get(cp_handle_s *h)
+{
+    return h->hdr.block_words;
+}
 
 /**
- * @brief 复位 checkpoint handle 并绑定窄上下文
+ * @brief 取本实例的 Checkpoint 工作区（定义在 checkpoint.c，SRAM3）
  *
- * @param h            checkpoint handle（由 storage 提供）
- * @param cache        L2P cache
- * @param journal      Journal
- * @param metadata_dir Directory
- * @param alloc        allocator（ch/ce/lun 同时作为本实例拓扑来源）
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
  */
-void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cache_s *metadata_dir, alc_s *alloc);
+cp_handle_s *cp_workspace_get(BYTE die);
 
 /**
  * @brief 绑定所属实例的 request scheduler
@@ -407,31 +416,6 @@ BOOL cp_block_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx,
 BOOL cp_wear_table_load(cp_handle_s *h, const cp_header_s *cp, WORD record_idx);
 
 /**
- * @brief 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
- * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。
- *
- * @param h  Checkpoint handle
- * @return 指向 handle 内 FTL_BLOCK_TOTAL 个 word 的常驻缓冲（非空，所有权归 handle）
- */
-static inline WORD *cp_block_words_get(cp_handle_s *h)
-{
-    return h->hdr.block_words;
-}
-
-/* ── 运行期 Checkpoint ── */
-
-/**
- * @brief 推进 Checkpoint（typed handle；提交即返回）
- *
- * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
- * （T3 带最小 journal 增量门，见 checkpoint.c）。已在跑则续跑下一步（任何档位都要调）。
- *
- * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param trigger 本轮触发信息（**非空**）
- */
-void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger);
-
-/**
  * @brief 复位 T3 到期时刻（boot 恢复 / 格式化后调用）。
  *
  * @param h  Checkpoint handle（重装 cp_state.next_t3_ms）
@@ -483,5 +467,33 @@ void cp_block_snapshot(const alc_s *alloc, const md_dir_cache_s *md_dir, WORD wo
  * @param page        输出：一页主区（PAGE_MAIN_SIZE）
  */
 void cp_wear_page_build(const alc_s *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
+
+/* ── 接口 ── */
+
+/* ── 初始化 / 恢复 ── */
+
+/**
+ * @brief 复位 checkpoint handle 并绑定窄上下文
+ *
+ * @param h            checkpoint handle（由 storage 提供）
+ * @param cache        L2P cache
+ * @param journal      Journal
+ * @param metadata_dir Directory
+ * @param alloc        allocator（ch/ce/lun 同时作为本实例拓扑来源）
+ */
+void cp_init(cp_handle_s *h, l2p_cache_s *cache, l2p_jrn_s *journal, md_dir_cache_s *metadata_dir, alc_s *alloc);
+
+/* ── 运行期 Checkpoint ── */
+
+/**
+ * @brief 推进 Checkpoint（typed handle；提交即返回）
+ *
+ * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
+ * （T3 带最小 journal 增量门，见 checkpoint.c）。已在跑则续跑下一步（任何档位都要调）。
+ *
+ * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param trigger 本轮触发信息（**非空**）
+ */
+void cp_handle(cp_handle_s *h, const cp_trigger_s *trigger);
 
 #endif /* FTL_CHECKPOINT_H */

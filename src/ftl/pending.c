@@ -38,6 +38,7 @@
 // 组 outstanding 下溢（重复完成 / 重复回滚）的 release 留痕：debug 由 ASSERT 拦住，
 // release 必须阻止 WORD 回绕（回绕 ⇒ 组永不完成 ⇒ host 写挂死）。
 static DWORD s_group_underflow_log_ms;
+
 static DWORD s_group_underflow_n;
 
 /**
@@ -55,6 +56,17 @@ static void pend_unbind(pend_ctx_s *table, pend_req_s *req)
     {
         table->slot_of[cmd_id] = 0xFF;
     }
+}
+
+/**
+ * @brief 组 outstanding 下溢的限流日志
+ *
+ * @param who 触发者（静态字符串，日志用）
+ * @param gi  组下标
+ */
+static void pend_note_underflow(const char *who, WORD gi)
+{
+    LOGE_RATE(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), s_group_underflow_n, LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug", who, gi);
 }
 
 /**
@@ -495,17 +507,6 @@ BOOL pend_group_abort_ctx(pend_ctx_s *table, void *ctx)
     }
 
     return any;
-}
-
-/**
- * @brief 组 outstanding 下溢的限流日志
- *
- * @param who 触发者（静态字符串，日志用）
- * @param gi  组下标
- */
-static void pend_note_underflow(const char *who, WORD gi)
-{
-    LOGE_RATE(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), s_group_underflow_n, LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug", who, gi);
 }
 
 /**

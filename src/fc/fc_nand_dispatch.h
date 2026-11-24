@@ -5,6 +5,11 @@
 
 #include <stdint.h>
 
+/* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
+#ifndef FC_CW_STATUS_UNUSED
+#    define FC_CW_STATUS_UNUSED (0U)
+#endif
+
 /* One fixed per-LUN FIFO (depth NAND_DISPATCH_CHAIN_DEPTH) is attached to each LUN.
  * 深度定义在 nand_config.h（FTL cache batch 也按它派生批次上限）。 */
 
@@ -76,24 +81,14 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
     BYTE          ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上；由 FC 数据路径解码后回填。 */
 } fc_nand_dispatch_comp_s;
 
-/* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
-#ifndef FC_CW_STATUS_UNUSED
-#    define FC_CW_STATUS_UNUSED (0U)
-#endif
-
-/* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware.
- * Pure software reset (memset + disarm), no failure path. */
-void fc_nand_dispatch_init(void);
+/* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。
+ * completion 可写：FC 数据路径在回调内把实际 ECC 纠正数回填到 ecc_bit_count[]，
+ * 供完成消费者按 CW 读取；dispatch 本身不产生 ECC 计数。 */
+typedef void (*fc_nand_dispatch_sink_fn_t)(fc_nand_dispatch_comp_s *completion, void *ctx);
 
 /* 调度层 fatal 查询：当前仅 µs 时间源不可用（无法执行最短忙期等待）。
  * fc.c 每轮 poll 后查询，非零时把控制器 fatal 置位。 */
 BOOL fc_nand_dispatch_fatal(void);
-
-/* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
- * dispatch 只查询，不再提供自己的 set/is 入口。 */
-
-/* Submit one pre-resolved command to its LUN FIFO (count = 1). */
-nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
 
 /*
  * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
@@ -104,11 +99,6 @@ nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
  * 每条命令各回一份 completion（由 poll 逐条返回）。
  */
 nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count);
-
-/* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。
- * completion 可写：FC 数据路径在回调内把实际 ECC 纠正数回填到 ecc_bit_count[]，
- * 供完成消费者按 CW 读取；dispatch 本身不产生 ECC 计数。 */
-typedef void (*fc_nand_dispatch_sink_fn_t)(fc_nand_dispatch_comp_s *completion, void *ctx);
 
 /*
  * 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
@@ -161,5 +151,15 @@ BYTE fc_nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun);
  */
 void fc_nand_dispatch_test_completion(BYTE operation, DWORD cw_bitmap, BYTE cw_status[CW_TOTAL_MAX]);
 #endif
+
+/* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware.
+ * Pure software reset (memset + disarm), no failure path. */
+void fc_nand_dispatch_init(void);
+
+/* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
+ * dispatch 只查询，不再提供自己的 set/is 入口。 */
+
+/* Submit one pre-resolved command to its LUN FIFO (count = 1). */
+nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
 
 #endif /* FC_NAND_DISPATCH_H */

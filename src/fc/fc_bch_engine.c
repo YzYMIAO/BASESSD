@@ -26,17 +26,27 @@
 // 避免 O(nbits) 的 Chien 全扫描。
 // parity、错误位置与增量编码的兼容性由 host 差分测试覆盖。
 
-#define BCH_M              (13U)
-#define BCH_N              ((1U << BCH_M) - 1U)
-#define BCH_T              (4U)
-#define BCH_ECC_BITS       (BCH_M * BCH_T) /* 52 */
-#define BCH_ECC_BYTES      ((BCH_ECC_BITS + 7U) / 8U)
-#define BCH_PRIM_POLY      (0x201BU)
-#define BCH_MASK52         ((UINT64_C(1) << BCH_ECC_BITS) - UINT64_C(1))
-#define BCH_MAX_DATA_LEN   ((BCH_N - BCH_ECC_BITS) / 8U)
+#define BCH_M (13U)
+
+#define BCH_N ((1U << BCH_M) - 1U)
+
+#define BCH_T (4U)
+
+#define BCH_ECC_BITS (BCH_M * BCH_T) /* 52 */
+
+#define BCH_ECC_BYTES ((BCH_ECC_BITS + 7U) / 8U)
+
+#define BCH_PRIM_POLY (0x201BU)
+
+#define BCH_MASK52 ((UINT64_C(1) << BCH_ECC_BITS) - UINT64_C(1))
+
+#define BCH_MAX_DATA_LEN ((BCH_N - BCH_ECC_BITS) / 8U)
+
 #define BCH_ENC_WORD_BYTES (4U) /* 32-bit 编码字 = 4 byte */
+
 /* affine 四次式最多 4 个根；零空间维数 k 对应 2^k 个根 ⇒ k ≤ 2。 */
-#define BCH_AFFINE_MAX_ROOTS   BCH_T
+#define BCH_AFFINE_MAX_ROOTS BCH_T
+
 #define BCH_AFFINE_MAX_NULLITY (2U)
 
 typedef struct FC_BCH_CONTROL_S
@@ -51,6 +61,56 @@ typedef struct FC_BCH_CONTROL_S
 } fc_bch_control_s;
 
 static fc_bch_control_s s_bch;
+
+/**
+ * @brief 有限域逆元 a^-1。
+ * @param bch 引擎句柄
+ * @param a 非零域元素
+ * @return a^-1
+ * @note 调用者必须保证 a != 0。
+ */
+static inline uint16_t gf_inv(const fc_bch_control_s *bch, uint16_t a)
+{
+    ASSERT(a != 0U);
+    return (bch->log[a] == 0U) ? 1U : bch->exp[BCH_N - bch->log[a]];
+}
+
+/**
+ * @brief 计算 α^exponent。
+ * @param bch 引擎句柄
+ * @param exponent 任意非负指数；入口取模到 [0, n)
+ * @return 域元素 α^exponent
+ */
+static inline uint16_t gf_alpha(const fc_bch_control_s *bch, uint32_t exponent)
+{
+    return bch->exp[exponent % BCH_N];
+}
+
+/* ── 编码 ─────────────────────────────────────────────────────────── */
+
+/**
+ * @brief 反转 byte 内的 bit 顺序。
+ * @param value 输入 byte
+ * @return bit7..bit0 反转后的 byte
+ */
+static inline BYTE reverse_byte(BYTE value)
+{
+    value = (BYTE)((value & 0xF0U) >> 4U) | (BYTE)((value & 0x0FU) << 4U);
+    value = (BYTE)((value & 0xCCU) >> 2U) | (BYTE)((value & 0x33U) << 2U);
+    value = (BYTE)((value & 0xAAU) >> 1U) | (BYTE)((value & 0x55U) << 1U);
+    return value;
+}
+
+/**
+ * @brief 按 swap_bits 处理输入/输出 byte。
+ * @param bch 引擎句柄
+ * @param value 输入 byte
+ * @return swap_bits 非 0 时返回位序反转结果，否则原值
+ */
+static inline BYTE input_byte(const fc_bch_control_s *bch, BYTE value)
+{
+    return (bch->swap_bits != 0U) ? reverse_byte(value) : value;
+}
 
 _Static_assert(sizeof(fc_bch_control_s) <= (50U * 1024U), "BCH static storage exceeds 50 KiB");
 
@@ -77,30 +137,6 @@ static inline uint16_t gf_mul(const fc_bch_control_s *bch, uint16_t a, uint16_t 
         sum -= BCH_N;
     }
     return bch->exp[sum];
-}
-
-/**
- * @brief 有限域逆元 a^-1。
- * @param bch 引擎句柄
- * @param a 非零域元素
- * @return a^-1
- * @note 调用者必须保证 a != 0。
- */
-static inline uint16_t gf_inv(const fc_bch_control_s *bch, uint16_t a)
-{
-    ASSERT(a != 0U);
-    return (bch->log[a] == 0U) ? 1U : bch->exp[BCH_N - bch->log[a]];
-}
-
-/**
- * @brief 计算 α^exponent。
- * @param bch 引擎句柄
- * @param exponent 任意非负指数；入口取模到 [0, n)
- * @return 域元素 α^exponent
- */
-static inline uint16_t gf_alpha(const fc_bch_control_s *bch, uint32_t exponent)
-{
-    return bch->exp[exponent % BCH_N];
 }
 
 /**
@@ -336,74 +372,6 @@ static void build_lookup_tables(fc_bch_control_s *bch)
 }
 
 /**
- * @brief 初始化 BCH 引擎（本工程固定 m=13 / t=4）。
- * @param m 域阶；本实现只支持 13
- * @param t 纠错 bit 数；本实现只支持 4
- * @param prim_poly 本原多项式；0 使用 0x201B
- * @param swap_bits 非 0 时对数据与 ECC 字节做位序反转
- * @return 引擎句柄；参数不支持或建表失败返回 NULL
- * @note 表存于静态结构体（约 40 KiB），无堆分配；重复调用会重建。
- */
-SSD_CODE_FAST fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
-{
-    if ((m != (int)BCH_M) || (t != (int)BCH_T))
-    {
-        ASSERT_MSG(false, "unsupported BCH params m=%d t=%d", m, t);
-        return NULL;
-    }
-
-    memset(&s_bch, 0, sizeof(s_bch));
-    s_bch.swap_bits = swap_bits;
-
-    if ((build_field_tables(&s_bch, (prim_poly == 0U) ? BCH_PRIM_POLY : prim_poly) == false) ||
-        (build_generator(&s_bch) == false))
-    {
-        memset(&s_bch, 0, sizeof(s_bch));
-        return NULL;
-    }
-
-    build_lookup_tables(&s_bch);
-    s_bch.ready = true;
-    return &s_bch;
-}
-
-/**
- * @brief 释放 BCH 引擎。
- * @param bch 引擎句柄（可为 NULL）
- * @note 存储为静态分配；本实现不释放资源，保留 API 语义。
- */
-void fc_bch_free(fc_bch_control_s *bch)
-{
-    (void)bch;
-}
-
-/* ── 编码 ─────────────────────────────────────────────────────────── */
-
-/**
- * @brief 反转 byte 内的 bit 顺序。
- * @param value 输入 byte
- * @return bit7..bit0 反转后的 byte
- */
-static inline BYTE reverse_byte(BYTE value)
-{
-    value = (BYTE)((value & 0xF0U) >> 4U) | (BYTE)((value & 0x0FU) << 4U);
-    value = (BYTE)((value & 0xCCU) >> 2U) | (BYTE)((value & 0x33U) << 2U);
-    value = (BYTE)((value & 0xAAU) >> 1U) | (BYTE)((value & 0x55U) << 1U);
-    return value;
-}
-
-/**
- * @brief 按 swap_bits 处理输入/输出 byte。
- * @param bch 引擎句柄
- * @param value 输入 byte
- * @return swap_bits 非 0 时返回位序反转结果，否则原值
- */
-static inline BYTE input_byte(const fc_bch_control_s *bch, BYTE value)
-{
-    return (bch->swap_bits != 0U) ? reverse_byte(value) : value;
-}
-
-/**
  * @brief 从 ECC 缓冲区读取 52-bit 余式。
  * @param bch 引擎句柄
  * @param ecc 7B parity（外部字节表示，按 swap_bits 处理）
@@ -442,61 +410,6 @@ static void store_remainder(const fc_bch_control_s *bch, BYTE *ecc, uint64_t rem
     for (uint32_t i = 0U; i < BCH_ECC_BYTES; i++)
     {
         ecc[i] = input_byte(bch, ecc[i]);
-    }
-}
-
-/**
- * @brief 计算数据段的 BCH parity。
- * @param bch 引擎句柄
- * @param data 输入数据
- * @param len 数据字节数；须满足 8*len ≤ n - ecc_bits
- * @param ecc 7B parity 输出；非 NULL 时以其为初值做增量编码，NULL 时按全零初值计算并丢弃结果
- * @note 增量编码：首次调用前 ecc 必须清零；后续传入上一次输出即可继续。
- * @note parity 为 shortening 后的余式，MSB-first；第 8 字节保持调用者原值。
- * @note bch/data 为空或 len 超长违反前置条件，一律 ASSERT。
- */
-SSD_CODE_FAST void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, BYTE *ecc)
-{
-    uint64_t rem = 0U;
-
-    ASSERT(bch != NULL);
-    ASSERT(bch->ready == true);
-    ASSERT(data != NULL);
-    ASSERT(len <= BCH_MAX_DATA_LEN);
-
-    if (ecc != NULL)
-    {
-        rem = load_remainder(bch, ecc);
-    }
-
-    uint32_t i = 0U;
-
-    // 32 bit 批处理：4 个 byte 位置的查表线性组合；每 4 byte 处理一次。
-    while ((len - i) >= BCH_ENC_WORD_BYTES)
-    {
-        const uint32_t word = ((uint32_t)input_byte(bch, data[i]) << 24U) |
-                              ((uint32_t)input_byte(bch, data[i + 1U]) << 16U) |
-                              ((uint32_t)input_byte(bch, data[i + 2U]) << 8U) |
-                              (uint32_t)input_byte(bch, data[i + 3U]);
-        const uint32_t x = (uint32_t)(rem >> 20U) ^ word;
-
-        rem = ((rem << 32U) & BCH_MASK52) ^
-              bch->enc_word[0][(x >> 24U) & 0xFFU] ^
-              bch->enc_word[1][(x >> 16U) & 0xFFU] ^
-              bch->enc_word[2][(x >> 8U) & 0xFFU] ^
-              bch->enc_word[3][x & 0xFFU];
-        i += BCH_ENC_WORD_BYTES;
-    }
-
-    // 尾部不足 4 byte：最多 3 byte，逐 byte 处理。
-    for (; i < len; i++)
-    {
-        rem = encode_byte_raw(bch, rem, input_byte(bch, data[i]));
-    }
-
-    if (ecc != NULL)
-    {
-        store_remainder(bch, ecc, rem);
     }
 }
 
@@ -994,6 +907,103 @@ static int find_roots(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 
         }
     }
     return (int)count;
+}
+
+/**
+ * @brief 初始化 BCH 引擎（本工程固定 m=13 / t=4）。
+ * @param m 域阶；本实现只支持 13
+ * @param t 纠错 bit 数；本实现只支持 4
+ * @param prim_poly 本原多项式；0 使用 0x201B
+ * @param swap_bits 非 0 时对数据与 ECC 字节做位序反转
+ * @return 引擎句柄；参数不支持或建表失败返回 NULL
+ * @note 表存于静态结构体（约 40 KiB），无堆分配；重复调用会重建。
+ */
+SSD_CODE_FAST fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
+{
+    if ((m != (int)BCH_M) || (t != (int)BCH_T))
+    {
+        ASSERT_MSG(false, "unsupported BCH params m=%d t=%d", m, t);
+        return NULL;
+    }
+
+    memset(&s_bch, 0, sizeof(s_bch));
+    s_bch.swap_bits = swap_bits;
+
+    if ((build_field_tables(&s_bch, (prim_poly == 0U) ? BCH_PRIM_POLY : prim_poly) == false) ||
+        (build_generator(&s_bch) == false))
+    {
+        memset(&s_bch, 0, sizeof(s_bch));
+        return NULL;
+    }
+
+    build_lookup_tables(&s_bch);
+    s_bch.ready = true;
+    return &s_bch;
+}
+
+/**
+ * @brief 释放 BCH 引擎。
+ * @param bch 引擎句柄（可为 NULL）
+ * @note 存储为静态分配；本实现不释放资源，保留 API 语义。
+ */
+void fc_bch_free(fc_bch_control_s *bch)
+{
+    (void)bch;
+}
+
+/**
+ * @brief 计算数据段的 BCH parity。
+ * @param bch 引擎句柄
+ * @param data 输入数据
+ * @param len 数据字节数；须满足 8*len ≤ n - ecc_bits
+ * @param ecc 7B parity 输出；非 NULL 时以其为初值做增量编码，NULL 时按全零初值计算并丢弃结果
+ * @note 增量编码：首次调用前 ecc 必须清零；后续传入上一次输出即可继续。
+ * @note parity 为 shortening 后的余式，MSB-first；第 8 字节保持调用者原值。
+ * @note bch/data 为空或 len 超长违反前置条件，一律 ASSERT。
+ */
+SSD_CODE_FAST void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsigned int len, BYTE *ecc)
+{
+    uint64_t rem = 0U;
+
+    ASSERT(bch != NULL);
+    ASSERT(bch->ready == true);
+    ASSERT(data != NULL);
+    ASSERT(len <= BCH_MAX_DATA_LEN);
+
+    if (ecc != NULL)
+    {
+        rem = load_remainder(bch, ecc);
+    }
+
+    uint32_t i = 0U;
+
+    // 32 bit 批处理：4 个 byte 位置的查表线性组合；每 4 byte 处理一次。
+    while ((len - i) >= BCH_ENC_WORD_BYTES)
+    {
+        const uint32_t word = ((uint32_t)input_byte(bch, data[i]) << 24U) |
+                              ((uint32_t)input_byte(bch, data[i + 1U]) << 16U) |
+                              ((uint32_t)input_byte(bch, data[i + 2U]) << 8U) |
+                              (uint32_t)input_byte(bch, data[i + 3U]);
+        const uint32_t x = (uint32_t)(rem >> 20U) ^ word;
+
+        rem = ((rem << 32U) & BCH_MASK52) ^
+              bch->enc_word[0][(x >> 24U) & 0xFFU] ^
+              bch->enc_word[1][(x >> 16U) & 0xFFU] ^
+              bch->enc_word[2][(x >> 8U) & 0xFFU] ^
+              bch->enc_word[3][x & 0xFFU];
+        i += BCH_ENC_WORD_BYTES;
+    }
+
+    // 尾部不足 4 byte：最多 3 byte，逐 byte 处理。
+    for (; i < len; i++)
+    {
+        rem = encode_byte_raw(bch, rem, input_byte(bch, data[i]));
+    }
+
+    if (ecc != NULL)
+    {
+        store_remainder(bch, ecc, rem);
+    }
 }
 
 /**
