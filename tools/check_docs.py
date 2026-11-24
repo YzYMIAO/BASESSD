@@ -151,9 +151,10 @@ END_MARKER = "<!-- /doc-policy -->"
 
 # Review marks carry deliberate code/ledger references (path#symbol, RISK-*).
 # They are doc-local review notes, not implementation coordinates; skip any
-# line-start #...# marker. Tag validity is check_review_marks.py's job, so this
-# checker does not duplicate the tag vocabulary (C9).
-REVIEW_MARK_RX = re.compile(r"^\s*#[^#\s]+#")
+# line-start // #...# marker and its \ continuations. Tag validity is
+# check_review_marks.py's job, so this checker does not duplicate the tag
+# vocabulary (C9).
+REVIEW_MARK_RX = re.compile(r"^\s*//\s*#[^#\s]+#")
 
 CHECK_LABEL = {
     "platform": "平台/内存域",
@@ -223,7 +224,11 @@ def scan_file(root: Path, path: str) -> list[Violation]:
     def active(check: str) -> bool:
         return check in checks and check not in allowed
 
+    review_cont = False
     for idx, line in enumerate(lines, 1):
+        if review_cont:
+            review_cont = line.rstrip().endswith("\\")
+            continue
         marker = MARKER_RX.search(line)
         if marker:
             allowed.add(marker.group(1))
@@ -234,6 +239,7 @@ def scan_file(root: Path, path: str) -> list[Violation]:
         if fenced[idx - 1]:
             continue
         if REVIEW_MARK_RX.match(line):
+            review_cont = line.rstrip().endswith("\\")
             continue
 
         if active("platform") and PLATFORM_RX.search(line):
@@ -323,16 +329,27 @@ def self_test() -> int:
 
         # Review mark lines are exempt: their code/ledger refs are deliberate.
         (root / design).write_text(
-            "#优化# RISK-FTL-01 见 src/ftl/ftl.c 这里要改\n",
+            "// #优化# RISK-FTL-01 见 src/ftl/ftl.c 这里要改\n",
             encoding="utf-8",
         )
         if check_root(root):
             failures.append("review mark line was flagged")
 
+        # The \ continuation belongs to the mark and is exempt too.
+        (root / design).write_text(
+            "// #优化# 见 src/ftl/ftl.c 这里要改\\\n"
+            "// 还有 RISK-FTL-01 与 src/ftl/ftl.c\n",
+            encoding="utf-8",
+        )
+        if check_root(root):
+            failures.append("review mark continuation was flagged")
+
         expect(root, design, "使用 STM32H743 的 DTCM。\n", "platform")
         expect(root, design, "见 `src/ftl/ftl.c`。\n", "code")
-        # Only line-start marks are exempt; a tag inside prose is still checked.
+        # Only line-start // marks are exempt; a tag inside prose is still checked.
         expect(root, design, "文本 #优化# 见 src/ftl/ftl.c。\n", "code")
+        # A bare mark without // is not exempt.
+        expect(root, design, "#优化# RISK-FTL-01 见 src/ftl/ftl.c。\n", "code")
         expect(root, design, "2026-11-22 实测 318/318。\n", "temporal")
         expect(root, design, "工作区占用 128 KB。\n", "size")
         expect(root, design, "见 RISK-TOP-01 与 docs/archive/foo.md。\n", "ledger")

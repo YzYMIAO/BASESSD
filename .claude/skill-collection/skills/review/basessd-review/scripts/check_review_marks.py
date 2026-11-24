@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """审查标记（#优化# / #决策# / ...）报告与校验。
 
-标记是设计文档行首或 C 注释体第一段内容的普通文本，故意不包 HTML 注释：
-人工审查时要能看见，C 里也只能写在 // 或 /* */ 里。
+标记是 .md / .c / .h 中以 // 开头的普通文本（行首 # 可能被当标题/预处理，
+故统一要求 //）；C 块注释 /* */ 也接受。描述可用行尾 \ 续到下一行：
+
+    // #优化# #讨论# 第一段描述\
+    // 第二段描述
+
+第一个标签决定报告分组；#标识保留# 任意位置都表示允许上传 / strict 放行。
 
 用法：
     python3 check_review_marks.py --root . --report
@@ -135,11 +140,10 @@ def parse_marker_text(text: str) -> Parsed:
 
 
 def group_of(tags: list[str]) -> str:
-    groups = {TAG_SPECS[tag].group for tag in tags if tag in TAG_SPECS}
-    for group in GROUP_ORDER:
-        if group in groups:
-            return group
-    return "todo"
+    """第一标签决定分组；后续标签只展示。"""
+    if not tags:
+        return "todo"
+    return TAG_SPECS[tags[0]].group
 
 
 def _kind_of(path: str) -> str:
@@ -223,27 +227,106 @@ def _strip_comment_prefix(body: str) -> str:
     return body
 
 
+def _ends_with_continuation(text: str) -> bool:
+    return text.rstrip().endswith("\\")
+
+
+def _strip_continuation(text: str) -> str:
+    text = text.rstrip()
+    if text.endswith("\\"):
+        text = text[:-1].rstrip()
+    return text
+
+
 def scan_md_file(path: str, text: str, kind: str) -> tuple[list[Mark], list[Issue]]:
     lines = text.splitlines()
     fenced = _fenced_flags(lines)
     heading = ""
     marks: list[Mark] = []
     issues: list[Issue] = []
+    i = 0
 
-    for lineno, line in enumerate(lines, 1):
-        if fenced[lineno - 1]:
+    while i < len(lines):
+        line = lines[i]
+        if fenced[i]:
+            i += 1
             continue
         stripped = line.strip()
         match = HEADING_RX.match(stripped)
         if match:
             heading = _heading_context(match.group(2))
+            i += 1
             continue
 
-        parsed = parse_marker_text(stripped)
-        if parsed.error:
-            issues.append(Issue(path, lineno, parsed.error, "error"))
-        elif parsed.tags:
-            marks.append(Mark(path, lineno, parsed.tags, parsed.desc, heading, kind))
+        if stripped.startswith("//"):
+            body = stripped[2:].lstrip()
+            parsed = parse_marker_text(body)
+            if parsed.error:
+                issues.append(Issue(path, i + 1, parsed.error, "error"))
+                i += 1
+                continue
+            if not parsed.tags:
+                i += 1
+                continue
+
+            desc_parts = [parsed.desc]
+            cont = _ends_with_continuation(line)
+            if cont:
+                desc_parts[0] = _strip_continuation(desc_parts[0])
+
+            j = i + 1
+            while cont and j < len(lines):
+                if fenced[j]:
+                    issues.append(
+                        Issue(path, j + 1, "续行不能进入代码块", "error")
+                    )
+                    break
+                nxt = lines[j]
+                nxt_stripped = nxt.strip()
+                if not nxt_stripped.startswith("//"):
+                    issues.append(
+                        Issue(
+                            path,
+                            j + 1,
+                            "Markdown 续行必须以 // 开头",
+                            "error",
+                        )
+                    )
+                    break
+                nxt_body = nxt_stripped[2:].lstrip()
+                nxt_cont = _ends_with_continuation(nxt)
+                if nxt_cont:
+                    nxt_body = _strip_continuation(nxt_body)
+                desc_parts.append(nxt_body)
+                cont = nxt_cont
+                j += 1
+
+            if cont:
+                issues.append(Issue(path, i + 1, "续行缺少下一行", "error"))
+
+            desc = " ".join(part for part in desc_parts if part).strip()
+            if not desc:
+                issues.append(Issue(path, i + 1, "标记缺少问题描述", "error"))
+            else:
+                marks.append(
+                    Mark(path, i + 1, parsed.tags, desc, heading, kind)
+                )
+            i = j
+            continue
+
+        # 行首裸 #标签#：旧格式，要求改用 //
+        if (
+            stripped.startswith("#")
+            and not stripped.startswith("# ")
+            and not stripped.startswith("##")
+        ):
+            parsed = parse_marker_text(stripped)
+            if parsed.tags or parsed.error:
+                issues.append(
+                    Issue(path, i + 1, "Markdown 标记必须以 // 开头", "error")
+                )
+
+        i += 1
 
     return marks, issues
 
@@ -251,15 +334,58 @@ def scan_md_file(path: str, text: str, kind: str) -> tuple[list[Mark], list[Issu
 def scan_c_file(path: str, text: str, kind: str) -> tuple[list[Mark], list[Issue]]:
     marks: list[Mark] = []
     issues: list[Issue] = []
-    for lineno, body in _iter_c_comments(text):
+    comments = list(_iter_c_comments(text))
+    i = 0
+
+    while i < len(comments):
+        lineno, body = comments[i]
         body = _strip_comment_prefix(body)
         if not body:
+            i += 1
             continue
+
         parsed = parse_marker_text(body)
         if parsed.error:
             issues.append(Issue(path, lineno, parsed.error, "error"))
-        elif parsed.tags:
-            marks.append(Mark(path, lineno, parsed.tags, parsed.desc, "", kind))
+            i += 1
+            continue
+        if not parsed.tags:
+            i += 1
+            continue
+
+        desc_parts = [parsed.desc]
+        cont = _ends_with_continuation(body)
+        if cont:
+            desc_parts[0] = _strip_continuation(desc_parts[0])
+
+        j = i + 1
+        prev_line = lineno
+        while cont and j < len(comments):
+            nxt_line, nxt_body = comments[j]
+            if nxt_line != prev_line + 1:
+                issues.append(
+                    Issue(path, nxt_line, "续行必须紧邻上一行注释", "error")
+                )
+                break
+            nxt_body = _strip_comment_prefix(nxt_body)
+            nxt_cont = _ends_with_continuation(nxt_body)
+            if nxt_cont:
+                nxt_body = _strip_continuation(nxt_body)
+            desc_parts.append(nxt_body)
+            prev_line = nxt_line
+            cont = nxt_cont
+            j += 1
+
+        if cont:
+            issues.append(Issue(path, lineno, "续行缺少下一行", "error"))
+
+        desc = " ".join(part for part in desc_parts if part).strip()
+        if not desc:
+            issues.append(Issue(path, lineno, "标记缺少问题描述", "error"))
+        else:
+            marks.append(Mark(path, lineno, parsed.tags, desc, "", kind))
+        i = j
+
     return marks, issues
 
 
@@ -356,7 +482,7 @@ def render_report(result: ScanResult) -> None:
     for mark in marks:
         groups[group_of(mark.tags)].append(mark)
 
-    retained = len(groups["retained"])
+    retained = sum(1 for mark in marks if RETAIN_TAG in mark.tags)
     open_count = len(marks) - retained
     print(
         f"review-marks: {len(marks)} marks in {result.files} files "
@@ -437,11 +563,14 @@ def self_test() -> int:
     def warnings(result: ScanResult) -> list[Issue]:
         return [issue for issue in result.issues if issue.severity == "warning"]
 
+    NL = chr(10)
+    CONT = chr(92)
+
     result = _scan_fixture(
         {
             "docs/design/ftl_design.md": (
-                "### 3.2 分配器 / BST\n\n"
-                "#优化# #讨论# 低 free 时成对分配失败是否应该回滚\n"
+                "### 3.2 分配器 / BST" + NL + NL
+                + "// #优化# #讨论# 低 free 时成对分配失败是否应该回滚" + NL
             )
         }
     )
@@ -456,108 +585,202 @@ def self_test() -> int:
         bool(result.marks) and "3.2 分配器" in result.marks[0].context,
     )
 
-    result = _scan_fixture({"src/a.c": "// #优化# 这里可以提前退出\n"})
+    result = _scan_fixture(
+        {
+            "docs/design/ftl_design.md": (
+                "// #优化# #讨论# 第一段描述" + CONT + NL
+                + "// 第二段描述" + NL
+            )
+        }
+    )
+    check(
+        "Markdown 续行",
+        len(result.marks) == 1
+        and result.marks[0].desc == "第一段描述 第二段描述"
+        and not errors(result),
+    )
+
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "#优化# 描述" + NL}
+    )
+    check("Markdown 必须 //", bool(errors(result)))
+
+    result = _scan_fixture(
+        {
+            "docs/design/ftl_design.md": (
+                "// #优化# 第一段描述" + CONT + NL
+                + "第二段描述" + NL
+            )
+        }
+    )
+    check("Markdown 续行缺 //", bool(errors(result)))
+
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "// #优化# 描述" + CONT + NL}
+    )
+    check("Markdown 续行缺下一行", bool(errors(result)))
+
+    result = _scan_fixture({"src/a.c": "// #优化# 这里可以提前退出" + NL})
     check("C 行注释", len(result.marks) == 1 and not errors(result))
 
-    result = _scan_fixture({"src/a.c": "/*\n * #重构# 收敛坐标\n */\n"})
+    result = _scan_fixture(
+        {"src/a.c": "/*" + NL + " * #重构# 收敛坐标" + NL + " */" + NL}
+    )
     check("C 块注释", len(result.marks) == 1 and not errors(result))
 
-    result = _scan_fixture({"src/a.c": "foo(); // #优化# 重算\n"})
+    result = _scan_fixture({"src/a.c": "foo(); // #优化# 重算" + NL})
     check("C 行尾注释", len(result.marks) == 1 and not errors(result))
 
-    result = _scan_fixture({"src/a.c": "/** #优化# 文档注释里的标记 */\n"})
+    result = _scan_fixture(
+        {"src/a.c": "/** #优化# 文档注释里的标记 */" + NL}
+    )
     check("C /** 注释", len(result.marks) == 1 and not errors(result))
 
-    result = _scan_fixture({"docs/design/ftl_design.md": "#优化 缺少闭合\n"})
+    result = _scan_fixture(
+        {
+            "src/a.c": (
+                "// #优化# 第一段描述" + CONT + NL
+                + "// 第二段描述" + NL
+            )
+        }
+    )
+    check(
+        "C 续行",
+        len(result.marks) == 1
+        and result.marks[0].desc == "第一段描述 第二段描述"
+        and not errors(result),
+    )
+
+    result = _scan_fixture(
+        {
+            "src/a.c": (
+                "/* #重构# 第一段描述" + CONT + NL
+                + " * 第二段描述 */" + NL
+            )
+        }
+    )
+    check(
+        "C 块注释续行",
+        len(result.marks) == 1
+        and result.marks[0].desc == "第一段描述 第二段描述"
+        and not errors(result),
+    )
+
+    result = _scan_fixture(
+        {
+            "src/a.c": (
+                "// #优化# 第一段描述" + CONT + NL
+                + "int x;" + NL
+                + "// 第二段描述" + NL
+            )
+        }
+    )
+    check("C 续行必须紧邻", bool(errors(result)))
+
+    result = _scan_fixture({"src/a.c": "// #优化# 描述" + CONT + NL})
+    check("C 续行缺下一行", bool(errors(result)))
+
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "// #优化 缺少闭合" + NL}
+    )
     check("未知标签", bool(errors(result)))
 
-    result = _scan_fixture({"docs/design/ftl_design.md": "#优化#\n"})
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "// #优化#" + NL}
+    )
     check("空描述", bool(errors(result)))
 
     result = _scan_fixture(
-        {"docs/design/ftl_design.md": "```\n#优化# 示例\n```\n"}
+        {
+            "docs/design/ftl_design.md": (
+                "```" + NL + "// #优化# 示例" + NL + "```" + NL
+            )
+        }
     )
     check("围栏代码块跳过", not result.marks and not errors(result))
 
     result = _scan_fixture(
-        {"src/a.c": 'const char *s = "#优化# not a comment";\n'}
+        {"src/a.c": 'const char *s = "#优化# not a comment";' + NL}
     )
     check("字符串跳过", not result.marks and not errors(result))
 
-    result = _scan_fixture({"docs/design/ftl_design.md": "#缺陷# 问题\n"})
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "// #缺陷# 问题" + NL}
+    )
     check("文档缺陷缺台账", bool(errors(result)))
 
     result = _scan_fixture(
         {
-            "docs/design/ftl_design.md": "#缺陷# RISK-FTL-01 问题\n",
-            "docs/design/known_open_items.md": "| RISK-FTL-01 | 风险 | 信息 | x | y |\n",
+            "docs/design/ftl_design.md": "// #缺陷# RISK-FTL-01 问题" + NL,
+            "docs/design/known_open_items.md": "| RISK-FTL-01 | 风险 | 信息 | x | y |" + NL,
         }
     )
     check("文档缺陷有台账", not errors(result))
 
-    result = _scan_fixture({"src/a.c": "// #缺陷# 问题\n"})
+    result = _scan_fixture({"src/a.c": "// #缺陷# 问题" + NL})
     check(
         "代码缺陷不要求台账",
         not errors(result) and not warnings(result),
     )
 
-    result = _scan_fixture({"src/a.c": "// #缺陷# RISK-FTL-01 问题\n"})
+    result = _scan_fixture({"src/a.c": "// #缺陷# RISK-FTL-01 问题" + NL})
     check(
         "代码缺陷带 RISK 告警",
         bool(warnings(result)) and not errors(result),
     )
 
     result = _scan_fixture(
-        {"docs/design/ftl_design.md": "#优化# #标识保留# 等下一版\n"}
+        {"docs/design/ftl_design.md": "// #标识保留# #优化# 等下一版" + NL}
     )
     check(
         "保留分组",
         len(result.marks) == 1 and group_of(result.marks[0].tags) == "retained",
     )
-    check("strict 待做", group_of(["#优化#"]) == "todo")
-    check("strict 保留", group_of(["#优化#", "#标识保留#"]) == "retained")
-    check("group action", group_of(["#优化#", "#讨论#"]) == "action")
-    check("group unverified", group_of(["#优化#", "#未验#"]) == "unverified")
-    check(
-        "group priority",
-        group_of(["#优化#", "#未验#", "#讨论#", "#标识保留#"]) == "retained",
-    )
+
+    check("第一标签 待做", group_of(["#优化#"]) == "todo")
+    check("第一标签 保留", group_of(["#标识保留#", "#优化#"]) == "retained")
+    check("第一标签 动作", group_of(["#讨论#", "#优化#"]) == "action")
+    check("第一标签 未验", group_of(["#未验#", "#优化#"]) == "unverified")
+    check("顺序决定分组", group_of(["#优化#", "#讨论#"]) == "todo")
+    check("保留任意位置分组", group_of(["#讨论#", "#标识保留#"]) == "action")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "docs/design").mkdir(parents=True)
         (root / "docs/design/ftl_design.md").write_text(
-            "#优化# 待做\n", encoding="utf-8"
+            "// #优化# 待做" + NL, encoding="utf-8"
         )
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             code = main(["--root", str(root), "--strict"])
         check("strict 非保留退出码", code == 1)
 
         (root / "docs/design/ftl_design.md").write_text(
-            "#优化# #标识保留# 暂缓\n", encoding="utf-8"
+            "// #优化# #标识保留# 暂缓" + NL, encoding="utf-8"
         )
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             code = main(["--root", str(root), "--strict"])
-        check("strict 保留退出码", code == 0)
+        check("strict 保留任意位置退出码", code == 0)
 
-    result = _scan_fixture({"docs/design/ftl_design.md": "### 3.2 分配器\n"})
+    result = _scan_fixture(
+        {"docs/design/ftl_design.md": "### 3.2 分配器" + NL}
+    )
     check("标题不是标记", not result.marks and not errors(result))
 
     result = _scan_fixture(
-        {"docs/design/ftl_design.md": "#优化# #讨论 描述\n"}
+        {"docs/design/ftl_design.md": "// #优化# #讨论 描述" + NL}
     )
     check("后续未知标签", bool(errors(result)))
 
     result = _scan_fixture(
         {
-            "docs/design/ftl_design.md": "#缺陷# RISK-FTL-99 问题\n",
-            "docs/design/known_open_items.md": "| RISK-FTL-01 | 风险 | 信息 | x | y |\n",
+            "docs/design/ftl_design.md": "// #缺陷# RISK-FTL-99 问题" + NL,
+            "docs/design/known_open_items.md": "| RISK-FTL-01 | 风险 | 信息 | x | y |" + NL,
         }
     )
     check("台账找不到 ID", bool(errors(result)))
 
     result = _scan_fixture(
-        {"docs/design/ftl_design.md": "#优化# #优化# 描述\n"}
+        {"docs/design/ftl_design.md": "// #优化# #优化# 描述" + NL}
     )
     check(
         "重复标签去重",

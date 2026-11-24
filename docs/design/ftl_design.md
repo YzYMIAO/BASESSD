@@ -435,6 +435,9 @@ PBA(uint32_t)，低位 → 高位：
 当前 LUN 用 2 bit；`LUN_ADDR_WIDTH` 由器件头选择（0~4 bit），PBA 的 LUN 字段宽度随之
 变化，但 `pba_make` / `pba_to_*` 是唯一入口，上层不手写移位。
 
+//#标识保留# #优化# #讨论#  这里的PBA布局我看ce ch是放在高位，也没有lun，其是不是以后多package和lun下，lba转PBA不好转呀\
+// 我觉得应该吧CE、CH、LUN的改为die，然后讨论是否考虑移动到page和plane之间方便写读写数据在各lun之间摊开
+
 #### PAA 位布局（NAND 命令层）
 
 ```
