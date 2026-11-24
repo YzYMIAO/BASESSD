@@ -103,6 +103,15 @@ SECTIONS
     KEEP(*(.dtcm_data))
     KEEP(*(.dtcm_data.*))
     KEEP(*ftl/ftl.o(.bss .bss.*))
+    /* cache 写序列的 padding 页（4 KiB）+ 日志限流对象：原在 ftl.o .bss，
+     * 拆到 ftl_cache_wr.o 后仍落 DTCM（NOLOAD，由 ftl_cache_wr_init memset）。 */
+    KEEP(*ftl/ftl_cache_wr.o(.bss .bss.*))
+    /* 写确认的 dangling 聚合 / 重试 / 待入账日志：原在 ftl.o .bss，随模块搬出。 */
+    KEEP(*ftl/ftl_confirm.o(.bss .bss.*))
+    /* host I/O 路径的限流日志：原在 ftl.o .bss，随模块搬出。 */
+    KEEP(*ftl/ftl_host_io.o(.bss .bss.*))
+    /* flush/trim 限流日志：原在 ftl.o .bss，随模块搬出。 */
+    KEEP(*ftl/ftl_flush_trim.o(.bss .bss.*))
     /* metadata.o（g_ftl_md）与 BCH 交换域：g_ftl_md 回到基线 SRAM4，
      * BCH 只读查表放 DTCM。 */
     KEEP(*fc/fc.o(.bss .bss.*))
