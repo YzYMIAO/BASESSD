@@ -7,7 +7,7 @@ description: 审查本仓 C 代码与设计文档的流程、输出格式和审�
 
 规则来源**按对象加载**：
 
-1. `.claude/rules/c-coding.md` —— H1~H50 / S1~S6 一句话规则（代码路径自动加载）。
+1. `.claude/rules/c-coding.md` —— H1~H51 / S1~S6 一句话规则（代码路径自动加载）。
 2. `docs/guides/coding_rules.md` —— H 规则的 why / 反例 / 落点。
 3. `docs/guides/coding_rules_generic.md` —— 通用 15 章 + 不采纳理由（**仅深审**读）。
 4. `docs/README.md` + `docs/reference/README.md` —— 文档分层与出处索引（文档审查读）。
@@ -39,6 +39,7 @@ description: 审查本仓 C 代码与设计文档的流程、输出格式和审�
 - [ ] **模块间有没有直接摸对方内部数据**？改 A 被迫改 B 的内部 = 耦合过重。（H13）
 - [ ] 全局可变状态是否**单点修改**？（H10）
 - [ ] 同一不变量是否被**多个模块手工维护**？（C3 / §3.1）
+- [ ] `.c/.h` 文件级宏 / 类型 / 变量是否都在第一个函数 / 原型之前？短函数 / 查询在前、实现 / 主入口在后？`.h` 只声明、`static inline` 只放快路径？（H51）
 
 ### 第 2 遍 · 资源与错误路径（H1 / H14 / H30 / C5）
 

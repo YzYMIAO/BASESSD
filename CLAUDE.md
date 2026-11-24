@@ -123,7 +123,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 - 一句话规则：`.claude/rules/c-coding.md`（触碰 `src/` / `include/` / `tests/` 自动加载）。
 - 细则 / why / 反例：`docs/guides/coding_rules.md`。
 - 通用 15 章 + 不采纳理由：`docs/guides/coding_rules_generic.md`。
-- 编号 H1~H50 / S1~S6；出处映射见 `.claude/rules/c-coding.md` 顶部。
+- 编号 H1~H51 / S1~S6；出处映射见 `.claude/rules/c-coding.md` 顶部。
 - 用户问某条 H 规则时，先读 `docs/guides/coding_rules.md` 对应小节，不凭记忆答。
 
 ## 六、流程 P
@@ -151,7 +151,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 | `basessd-develop-hil` | 约束型 | 改 `src/hil/`（USB/CLI/请求拆分） |
 | `basessd-develop-platform` | 约束型 | 改 `src/platform/`、移植 |
 | `basessd-review` | 约束型 | 审查 C 代码 / 设计文档 |
-| `basessd-design-arch` | 判据型 | 分层决策 / 增删接口 / 跨层 |
+| `basessd-design-arch` | 判据型 | 分层决策 / 模块拆解 / 文件布局 / 增删接口 / 跨层 |
 
 命名：生命周期级 `basessd-<stage>`；子流程 `basessd-<stage>-<domain>`；
 `name` 只用小写字母、数字、连字符（VS Code / Claude Code 校验），中文放 `description`。
