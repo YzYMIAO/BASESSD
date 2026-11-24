@@ -5,7 +5,8 @@
 STM32H743 + MT29F4G08（4 Gb SLC NAND）上的 **DRAM-less 软 SSD 固件原型**：
 主机经 USB MSC 把它当作 U 盘访问，固件内部按 HIL / FTL / FC-NAND 分层实现。
 
-> 这是**学习存储主控设计**的原型项目，不是产品固件。验证范围以本文「状态」表为准。
+> 这是**学习存储主控设计**的原型项目，不是产品固件。
+> 验证范围以「验证基线」与「状态」表为准；**基线之后的提交不自动继承验证结论**。
 
 ## 架构
 
@@ -77,6 +78,18 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 完整调试链（WSL ↔ JLink ↔ 串口）见 `docs/guides/wsl_debug_environment.md`。
 串口 CLI 命令见 `src/hil/cli.c`（`format`、`test`、统计类命令等）。
 
+## 验证基线
+
+| 项 | 值 |
+|---|---|
+| 最近一次板端验证提交 | `e1760dd`（2026-11-22，FTL 请求调度器收口 / 板端验收） |
+| UT 证据镜像 | `built Nov 22 2026 01:04:14` |
+| H2testw / CDM9 证据镜像 | `built Nov 21 2026 22:58:18` |
+| 基线之后的提交 | **未自动验证**；包括 H51 布局重构、规则框架等 |
+
+> README 中的「已验证」只对应 `e1760dd` 及其测试证据。
+> 之后的提交即使能构建、能通过 `make check`，也不等于已上板验证；以该提交自己的测试记录为准。
+
 ## 状态
 
 | 项目 | 状态 | 证据 / 说明 |
@@ -98,6 +111,7 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 | 项 | 值 |
 |---|---|
+| 代码基线 | `e1760dd` |
 | 镜像 | `built Nov 22 2026 01:04:14` |
 | 结果 | **318/318 通过，3 SKIP** |
 | seed | `0x81a7c024` |
@@ -122,9 +136,9 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 ### H2testw（USB MSC 端到端，2026-11-21）
 
-| 写 KB/s | 读 KB/s | 数据量 | 结果 |
-|---:|---:|---|---|
-| **938** | **866** | 415/423 MB | `Test finished without errors` |
+| 代码基线 | 写 KB/s | 读 KB/s | 数据量 | 结果 |
+|---|---|---|---:|---|
+| `e1760dd` | **938** | **866** | 415/423 MB | `Test finished without errors` |
 
 > 镜像 `built Nov 21 2026 22:58:18`（FTL request scheduler + 双副本预留 + CP headroom）；
 > H2testw 0 错误；串口侧 `bad_status=0`、`complete_err=0`、`buf_fail=0`、`flush_fail=0`，
@@ -132,11 +146,11 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 ### CrystalDiskMark 9（USB MSC 端到端，2026-11-21）
 
-| 项目 | 读 MB/s | 写 MB/s |
-|---|---:|---:|
-| SEQ1M Q1T1 | **0.84** | **0.84** |
-| RND4K Q1T1 | **0.74** | **0.75** |
-| SEQ1M Q8T1 / RND4K Q32T1 | 0.00 | 0.00 |
+| 代码基线 | 项目 | 读 MB/s | 写 MB/s |
+|---|---|---:|---:|
+| `e1760dd` | SEQ1M Q1T1 | **0.84** | **0.84** |
+| `e1760dd` | RND4K Q1T1 | **0.74** | **0.75** |
+| `e1760dd` | SEQ1M Q8T1 / RND4K Q32T1 | 0.00 | 0.00 |
 
 > 镜像 `built Nov 21 2026 22:58:18`；CDM9、5 线程、128 MiB。
 > Q8T1 / Q32T1 为 0.00：USB MSC BOT 是**单命令串行**模型，没有多 outstanding 队列，
