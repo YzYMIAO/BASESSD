@@ -400,7 +400,7 @@
 - `FC_NAND_TEST_ENABLE=1` 时链接 `src/platform/stm32h743/linker/stm32h743xx_flash_ut.ld`；生产镜像仍用生产链接脚本。
 - `UT=FC` / `UT=FTL` / `UT=HIL` 共用产物名；烧写前确认最后一次构建是 `UT=FC`。
 - 串口横幅时间戳必须与构建时间一致；「烧了旧镜像」的判据是横幅。
-- ⚠ `make tests` 只证链接，不证正确（R2）；碰建链/位图/地址三类量必须上板。
+- ⚠ `make tests` 只证链接，不证正确（R2）；碰建链语义/位图/地址三类量必须上板。
 
 ### 5.2 运行
 

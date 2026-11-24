@@ -882,7 +882,7 @@ make tests UT=FTL
   `make tests UT=FTL` 是最后一次 UT 链接。
 - 症状对照：`test` 命令不存在 ⇒ 烧了产品镜像；`test /ftl/` 打 `NO test run` ⇒ 镜像里
   是 FC-only 或 HIL-only 套件。两者都先查产物路径与横幅时间戳（`RISK-PLAT-07`）。
-- ⚠ `make tests` 只证链接，不证正确（R2）；碰建链 / 位图 / 地址三类量必须上板。
+- ⚠ `make tests` 只证链接，不证正确（R2）；碰建链语义 / 位图 / 地址三类量必须上板。
 
 ### 5.2 运行
 

@@ -34,7 +34,7 @@ make release        # 体积 + release 专属告警（判据 10）
 make tests UT=FTL   # FTL 单测
 ```
 
-⚠ **`make tests` 只证链接，不证正确。** 碰了 **建链 / 位图 / 地址** 三类量
+⚠ **`make tests` 只证链接，不证正确。** 碰了 **建链语义 / 位图 / 地址** 三类量
 **必须上板**（`basessd-verify-board`）。
 
 ⚠ 改介质布局抬 `FTL_MEDIA_LAYOUT_VERSION`；首启自动格式化是预期行为，提前告知用户。
@@ -63,4 +63,4 @@ make tests UT=FTL   # FTL 单测
 - [ ] 唯一闸门 / 一套坐标
 - [ ] 新断言有负例
 - [ ] 三关零新告警
-- [ ] 建链 / 位图 / 地址已上板
+- [ ] 建链语义 / 位图 / 地址已上板

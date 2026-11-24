@@ -16,7 +16,7 @@ description: 目标板上板运行：编译、烧写、抓串口日志、判定�
 ## 流程
 
 1. **编译**：`make all` / `make release` / `make tests UT=<FC|FTL|HIL>`；零新告警。
-   ⚠ `make tests` 只证链接；碰**建链 / 位图 / 地址**三类量必须上板（R2）。
+   ⚠ `make tests` 只证链接；碰**建链语义 / 位图 / 地址**必须上板（R2；纯路径移动构建即可）。
 2. **链路**：`tools/debug_env.sh` → VS Code F5（自动烧写复位）。
    手动分步见 `docs/guides/wsl_debug_environment.md`。
 3. **串口**：USART1 115200。**命令表以 `help` / `src/hil/cli.c` 为准**，

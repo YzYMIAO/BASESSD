@@ -19,7 +19,7 @@ description: 修改 FC/NAND 层代码的流程与验收。用户说「改 FC」�
 3. grep 已有 UOP / handler / helper，不另造第二套坐标。
 4. 改代码：desc 链上界、池配对、ECC/CRC、状态读取、timing 回滚。
 5. 构建：`make all` / `make release` / `make tests UT=FC`。
-6. 碰建链 / 位图 / 地址 → 上板（`basessd-verify-board`）。
+6. 碰建链语义 / 位图 / 地址 → 上板（`basessd-verify-board`）。
 7. 证据与台账（R1 / R11）。
 
 ## 产物格式
@@ -53,9 +53,9 @@ description: 修改 FC/NAND 层代码的流程与验收。用户说「改 FC」�
 - timing 失败不回滚。
 
 ## 完成
-三关零新告警；有生效证据；建链/位图/地址已上板；未提交未推送（R3）。
+三关零新告警；有生效证据；建链语义/位图/地址已上板；未提交未推送（R3）。
 
 - [ ] 坐标 / 链 / 时序变化写清
 - [ ] 新检查有负例
 - [ ] 三关零新告警
-- [ ] 建链 / 位图 / 地址已上板
+- [ ] 建链语义 / 位图 / 地址已上板
