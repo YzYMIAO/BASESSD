@@ -16,7 +16,7 @@
 | 写 / 跑 UT | `design/fc_nand_ut.md` + `design/common/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_open_items.md` 模块 14）；负例与注入框架见 `guides/testing_guide.md` §12 |
 | 平台 / 移植 / 调试链 | `design/platform_design.md`（timer 见 `design/common/timer.md`）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 / CLI | `design/common/`：`assertion_guidelines.md`、`logging.md`、`fault_capture.md`、`cli.md` |
-| C 编码规则细则 | `guides/coding_rules.md`（H1~H50 细则）+ `guides/coding_rules_generic.md`（通用 15 章） |
+| C 编码规则细则 | `guides/coding_rules.md`（H1~H51 细则）+ `guides/coding_rules_generic.md`（通用 15 章） |
 | 技能分层 / 维护 skill | `.claude/skill-collection/README.md` → `docs/skill-map.md` |
 | 设计原则 / 学习 | `design/storage_controller_design.md`（设计要点手册）；CW 布局事实见 `design/ftl_design.md` §2.1/§2.2 |
 | **存储主控 SoC 介绍** | `design/controller_target_features.md`（硬件功能块 + FTL/固件功能块 + 消费/企业差异 + 当前平台案例 + 候选平台） |

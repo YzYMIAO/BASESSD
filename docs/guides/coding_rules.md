@@ -1,7 +1,7 @@
 > 常驻一句话规则在 `.claude/rules/c-coding.md`；本文件是细则 / why / 反例，按需读。
 > 通用 15 章见 [coding_rules_generic.md](coding_rules_generic.md)。
 
-# C 编码规则细则（本项目 H1~H50）
+# C 编码规则细则（本项目 H1~H51）
 
 三层关系：
 
@@ -338,6 +338,66 @@ tag 全大写 `_S/_E/_U`，alias 全小写 `_s/_e/_u`，与 tag 不同名。
 | controller | `ctl` |
 
 `make types-check` 是正向不变量检查。
+
+统一入口为 `tools/check_c.py`（`make c-rules-check` = H41 / H50 / H51；
+`types-check` / `layout-check` / `headers-check` 暂保留为兼容目标）。
+
+### H51 文件内布局（.c / .h）
+
+目标是「先看定义，再看短入口，最后看实现 / 主入口」。
+
+`.c`：
+
+```text
+1. 文件头注释
+2. #include
+3. 宏 / 常量
+4. 类型：enum / struct / union / typedef
+5. 文件级变量：g_* / s_* / static const 表
+6. static 函数前向声明（含最多一行“注册表自身声明”）
+7. 短函数：≤4 NBNC 的分发 / 查询 / 谓词 / 纯包装
+8. 实现函数：按调用 / 依赖顺序
+9. 注册 / 分发表：函数指针表 / 命令表 / 任务表 / 设备描述表
+10. 模块主函数 / 几大入口：
+    *_init / *_service / *_handle / *_step / *_submit / *_begin / *_run / main
+```
+
+`.h`：
+
+```text
+1. include guard
+2. 文件头注释
+3. #include（系统 <...> → 项目 "..."）
+4. 宏 / 常量
+5. 类型：enum / struct / union / typedef
+6. extern 声明（只声明，不定义变量）
+7. static inline 短 fast path（纯函数，≤5 NBNC，H42）
+8. 函数原型：按资源分组；查询 / 谓词 / getter 在前，
+   *_init / *_service / *_handle / *_step / *_submit / *_begin / *_run 在后
+9. #endif
+```
+
+- **文件级**宏、类型、变量必须在**第一个函数定义 / 原型之前**；不夹在后面。
+  函数内局部变量/局部类型仍按 H35 就近声明。
+- **注册表例外**：函数指针表 / 命令表 / 任务表 / 设备描述表若以本文件函数为初始化项，
+  放在第 9 段（被引用函数之后、主入口组之前）；也可放文件最末作为数据附录，
+  此时 `main` 仍是最后一个函数。不要为表前置声明整批 handler 原型；表若被更早函数引用，
+  只在第 6 段保留**一条表自身声明**（例：
+  `static const bg_task_s s_bg_policy_tasks[BG_POLICY_TASK_COUNT];`）。
+  普通 `static const` 常量表（不含本文件函数）仍算第 5 段变量。
+- **短函数阈值 = ≤4 NBNC**（非空非注释行）；主入口即使很短也放最后。
+- 短函数调用后文实现时，用第 6 段前向声明，不把实现提前。
+- `.h` 只放声明（H12）；变量定义、普通函数定义禁止；只有 `static inline` 快路径例外（H42）。
+- 模块头声明**本模块自己的接口**；umbrella 头只 `#include` 模块头，不复制原型。
+- **普通** `static const` 表算变量，放第 5 段；不要夹在函数中间。
+  以本文件函数为初始化项的注册 / 分发表按上面的例外放第 9 段（或文件最末）。
+- 条件编译：定义放对应顶部段；测试 / 统计 / 调试优先单独头/源文件，不塞回 umbrella/core。
+- 与 H49 分工：H49 管「优化/重构时的命名→布局→调用链→封装」顺序；
+  H51 管**文件内物理布局**。H51 不设函数行数上限（H11）。
+
+反例：`.c` 中 `s_write_retry_logged` / `FTL_WRITE_RETRY_LOG_EVERY` 出现在重试函数附近，
+`s_cache_pad_page` 出现在 padding 函数中间；`.h` 中宏/类型夹在原型之后，或模块头只有类型、
+函数原型全堆在 umbrella 里。定义应上移；原型应回到模块头。
 
 ## 注释风格补充（S5 / S6）
 

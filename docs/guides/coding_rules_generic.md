@@ -1,7 +1,7 @@
 # C 语言编码规范（通用 15 章）
 
 > 本文件是通用 15 章附录，仅在深审 / 规范争议时读取。
-> 常驻一句话规则见 `.claude/rules/c-coding.md`；本仓 H1~H50 细则见 [coding_rules.md](coding_rules.md)。
+> 常驻一句话规则见 `.claude/rules/c-coding.md`；本仓 H1~H51 细则见 [coding_rules.md](coding_rules.md)。
 > 本仓对通用条款的不采纳 / 改写见文末「条目去向」。
 
 编写或修改 C 代码时必须遵守以下规则。
