@@ -65,6 +65,7 @@ ifeq ($(filter $(FORMAT_VERIFY),0 1),)
 endif
 
 include $(PROJECT_ROOT)/config.mk
+include $(PROJECT_ROOT)/tools/checks.mk
 
 # ============================================================================
 # 关键修正：在包含 rules.mk 之前，先收集所有子模块的源文件
@@ -236,11 +237,11 @@ check-opt:
 all: check-config check-vendor-config format types-check $(ANALYSIS_FILES)
 
 # ============================================================================
-# 聚合检查：格式 → H50 类型 → H41 头文件 → debug 镜像 → 布局/优化档守卫。
-# 可独立运行；已在 make all 之后运行时前几步是幂等的重复。
+# 聚合检查：格式 → H 规则（H41/H50/H51）→ docs / ledger / rules / review
+# → debug 镜像 → 布局/优化档守卫。可独立运行。
 # ============================================================================
 .PHONY: check
-check: format-check types-check types-test docs-check docs-test ledger-check ledger-test rules-check rules-test review-marks-check review-marks-test headers-check $(TARGET).elf check-nocache check-opt
+check: check-format check-c check-docs check-meta $(TARGET).elf check-nocache check-opt
 
 # ============================================================================
 # clang-format 配置
@@ -279,155 +280,6 @@ format-check:
 	@echo "Checking source format..."
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 	@echo "Format check passed."
-
-# ============================================================================
-# 编辑 / 静态分析辅助（不挂 check；依赖外部工具）
-# ============================================================================
-.PHONY: compile-commands tidy
-
-# 从 `make -B -n V=1 all` 的编译命令行重建 compile_commands.json（.vscode /
-# clangd 使用）。不依赖 bear，也不实际编译；工具本身在 tools/gen_compile_commands.py。
-compile-commands:
-	@command -v $(PYTHON) >/dev/null 2>&1 || { \
-		echo "错误：未找到 $(PYTHON)"; \
-		exit 1; \
-	}
-	@$(PYTHON) $(PROJECT_ROOT)/tools/gen_compile_commands.py --root $(PROJECT_ROOT)
-
-# clang-tidy 与 .clang-format 同用 v15；依赖 compile_commands.json。
-# 不挂 check：CI 不装 clang-tidy，版本漂移也不应阻塞构建。
-TIDY_RUNNER ?= run-clang-tidy-15
-tidy: compile-commands
-	@command -v $(TIDY_RUNNER) >/dev/null 2>&1 || { \
-		echo "错误：未找到 $(TIDY_RUNNER)"; \
-		exit 1; \
-	}
-	@$(TIDY_RUNNER) -p $(PROJECT_ROOT) '^$(PROJECT_ROOT)/src/.*\.c$$'
-
-# ============================================================================
-# H50 复合类型定义形态检查
-# ============================================================================
-PYTHON ?= python3
-TYPES_CHECK := $(PROJECT_ROOT)/tools/check_types.py
-
-.PHONY: types-check
-types-check:
-	@command -v $(PYTHON) >/dev/null 2>&1 || { \
-		echo "错误：未找到 $(PYTHON)"; \
-		exit 1; \
-	}
-	@$(PYTHON) $(TYPES_CHECK) --root $(PROJECT_ROOT)
-
-# 检查器自检（P13/C7）：正例必须通过，每条负例必须报错。
-# 区分力证据在 tools/test_check_types.py，不依赖 pytest。
-.PHONY: types-test
-types-test:
-	@command -v $(PYTHON) >/dev/null 2>&1 || { \
-		echo "错误：未找到 $(PYTHON)"; \
-		exit 1; \
-	}
-	@$(PYTHON) $(PROJECT_ROOT)/tools/test_check_types.py
-
-# ============================================================================
-# 文档分层检查（doc policy）
-#   - design 文档不得携带平台实现、代码坐标、日期/测试快照、风险/归档引用；
-#   - 例外用 <!-- doc-policy: allow ... --> 显式标注；
-#   - 规则见 docs/README.md「文档分层规则」。
-# 已挂进 make check；不挂 make all（构建高频，文档检查放在聚合检查里）。
-# ============================================================================
-DOCS_CHECK := $(PROJECT_ROOT)/tools/check_docs.py
-
-.PHONY: docs-check
-docs-check:
-	@$(PYTHON) $(DOCS_CHECK) --root $(PROJECT_ROOT)
-
-.PHONY: docs-report
-docs-report:
-	@$(PYTHON) $(DOCS_CHECK) --root $(PROJECT_ROOT) --report
-
-.PHONY: docs-test
-docs-test:
-	@$(PYTHON) $(DOCS_CHECK) --self-test
-
-# ============================================================================
-# 开放式 / 已闭合台账一致性检查
-#   - 0.1 状态统计 / 0.6 按模块统计 / 0. 概览由脚本生成，禁止手改；
-#   - 开放式台账的模块索引不得出现「已闭合 / 不实现」（附录 A.5）；
-#   - 同一 ID 在两个台账合起来不得重复登记。
-# 已挂 make check；不挂 make all（构建高频）。
-# ============================================================================
-LEDGER_CHECK := $(PROJECT_ROOT)/tools/check_ledger.py
-
-.PHONY: ledger-check
-ledger-check:
-	@$(PYTHON) $(LEDGER_CHECK) --root $(PROJECT_ROOT) --check
-
-.PHONY: ledger-write
-ledger-write:
-	@$(PYTHON) $(LEDGER_CHECK) --root $(PROJECT_ROOT) --write
-
-.PHONY: ledger-test
-ledger-test:
-	@$(PYTHON) $(LEDGER_CHECK) --self-test
-
-# ============================================================================
-# CLAUDE.md / rules / skills 分层检查
-#   - CLAUDE.md 体积预算与 R/C/P 覆盖；
-#   - .claude/rules/*.md 必须有 paths:，H/S 覆盖在 c-coding.md；
-#   - skill 统一 basessd- 前缀、frontmatter 一致、< 500 行；
-#   - 关键路径存在。
-# 已挂 make check；不挂 make all（构建高频）。
-# ============================================================================
-RULES_CHECK := $(PROJECT_ROOT)/tools/check_rules.py
-
-.PHONY: rules-check
-rules-check:
-	@$(PYTHON) $(RULES_CHECK) --root $(PROJECT_ROOT) --check
-
-.PHONY: rules-test
-rules-test:
-	@$(PYTHON) $(RULES_CHECK) --root $(PROJECT_ROOT) --self-test
-
-# ============================================================================
-# 审查标记检查（#优化# / #决策# / #讨论# / #重构# / #未验# / #缺陷# / #标识保留#）
-#   - 设计文档行首 / C 注释体第一段；
-#   - 文档中的 #缺陷# 必须带台账 ID；代码 / 测试不带；
-#   - 已挂 make check；不挂 make all（构建高频）。
-# ============================================================================
-REVIEW_MARKS := $(PROJECT_ROOT)/.claude/skill-collection/skills/review/basessd-review/scripts/check_review_marks.py
-
-.PHONY: review-marks review-marks-check review-marks-strict review-marks-test
-review-marks:
-	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --report
-
-review-marks-check:
-	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --check
-
-review-marks-strict:
-	@$(PYTHON) "$(REVIEW_MARKS)" --root $(PROJECT_ROOT) --strict
-
-review-marks-test:
-	@$(PYTHON) "$(REVIEW_MARKS)" --self-test
-
-# ============================================================================
-# H41 头文件检查
-#   - 项目头一律裸名：目录前缀 include 会因 -I 顺序产生静默误解析；
-#   - include/ 与 src/ 的私有头不得同名（同一裸名两套语义）。
-# 第三方位（third_party/）按 H41 豁免，不扫描。
-# ============================================================================
-.PHONY: headers-check
-headers-check:
-	@if grep -rnE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"[^"]*/' src include tests; then \
-		echo "headers-check: directory-prefixed include found (H41)"; \
-		exit 1; \
-	fi
-	@dups=$$(find include src -name '*.h' | sed 's|.*/||' | sort | uniq -d); \
-	if [ -n "$$dups" ]; then \
-		echo "headers-check: duplicate header basenames:"; \
-		echo "$$dups"; \
-		exit 1; \
-	fi
-	@echo "headers-check: OK"
 
 # ============================================================================
 # 信息目标
@@ -489,9 +341,10 @@ help:
 	@echo "    tidy             - Run clang-tidy on src/ (needs run-clang-tidy-15)"
 	@echo ""
 	@echo "  Check Targets:"
-	@echo "    check          - format / types / docs / ledger / rules / review / headers / layout / opt checks"
+	@echo "    check          - format / H-rules / docs / ledger / rules / review / opt checks"
 	@echo "    format-check   - Verify clang-format without modifying files"
-	@echo "    types-test     - Self-test for types-check (positive + negative cases)"
+	@echo "    types-check    - H50 compatibility alias (unified runner)"
+	@echo "    types-test     - Self-test for H50 rules"
 	@echo "    ledger-check   - open/closed ledger stats and structure consistency"
 	@echo "    ledger-write   - Regenerate stats for both ledgers"
 	@echo "    ledger-test    - Self-test for ledger-check (positive + negative cases)"
@@ -501,7 +354,12 @@ help:
 	@echo "    review-marks-check - Validate review mark syntax and ledger refs"
 	@echo "    review-marks-strict - Fail on any non-retained review mark"
 	@echo "    review-marks-test - Self-test for review-marks-check"
-	@echo "    headers-check  - H41: bare includes and unique header basenames"
+	@echo "    headers-check  - H41 compatibility alias (unified runner)"
+	@echo "    layout-check   - H51 compatibility alias (unified runner)"
+	@echo "    layout-report  - H51: inventory plus short/entry ordering warnings"
+	@echo "    layout-test    - Self-test for H51 rules"
+	@echo "    c-rules-check  - Unified H-rule runner (H41 / H50 / H51)"
+	@echo "    c-rules-test   - Self-test for all registered H rules"
 	@echo ""
 	@echo "  Cleanup Targets:"
 	@echo "    clean          - Remove build/$(BUILD_TYPE) directory"
