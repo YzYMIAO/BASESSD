@@ -72,7 +72,7 @@ flowchart TD
 | `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `assertion_console_run` 现场 CLI）；固件 `abort()` 重定向 |
 | `src/hil/cli.c` | 覆盖弱钩子 `assertion_console_run()`：正常 CLI 循环，不推进 FTL/FC 后台泵 |
 | `src/fc/fc_assert_context.c` | 覆盖弱钩子 `assertion_platform_context()`，进入现场 CLI 前追加 `[RES]` FC 资源快照 |
-| `linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
+| `src/platform/stm32h743/linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
 | `src/platform/stm32h743/sys.c` | `sys_init()` 末尾调 `fault_init()` |
 | `src/platform/stm32h743/stm32h7rsxx_it.c` | 删除 5 个裸 `while(1)` 处理器（改由 fault.c 提供） |
 | `src/main.c` | `sys_init()` + sink 绑定之后调 `fault_report_boot()` |

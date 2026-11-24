@@ -70,7 +70,7 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 ## 烧写与上板
 
 ```sh
-./sh/debug_env.sh    # WSL 下启动 JLink 链路
+./tools/debug_env.sh    # WSL 下启动 JLink 链路
 # 之后在 VS Code 用对应 launch 配置烧写 / 调试
 ```
 

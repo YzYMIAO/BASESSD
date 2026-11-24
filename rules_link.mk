@@ -26,7 +26,7 @@ ALL_LIBS = $(LIB_DIR)/libthird_party.a
 # ============================================================================
 
 # 固件 ELF 依赖链接脚本与其共享片段；修改内存布局后必须自动触发重新链接。
-LINK_DEPS := $(LINKER_SCRIPT) $(PROJECT_ROOT)/linker/stm32h743xx_hot.ld
+LINK_DEPS := $(LINKER_SCRIPT) $(LINKER_HOT)
 
 # 3.1 链接可执行文件（生成 .map 文件）
 # check-config / check-vendor-config 必须是前置：配置变化时先清空对象目录，
@@ -53,7 +53,7 @@ $(TARGET).sym: $(TARGET).elf
 	$(Q)$(NM) -n $< > $@
 
 # 3.4 生成大小汇总表（.size）
-#  stm32h743 平台额外追加 SRAM 使用汇总（按 linker/stm32h743xx_flash.ld 的区域容量）
+#  stm32h743 平台额外追加 SRAM 使用汇总（按 $(LINKER_DIR)/stm32h743xx_flash.ld 的区域容量）
 $(TARGET).size: $(TARGET).elf
 	@$(ECHO) "Generating size summary..."
 	$(Q)$(SIZE) -A $< | awk 'NR <= 2 { print; next } NF == 3 { printf "%-24s %10d 0x%08x\n", $$1, $$2, $$3; next } { print }' > $@

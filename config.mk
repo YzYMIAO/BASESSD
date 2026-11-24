@@ -22,13 +22,17 @@ INC_ROOT := $(PROJECT_ROOT)/include
 
 
 
+# 链接脚本是平台构建资产：目录跟随 FIRMWARE_PLATFORM，构建按 target 选择。
+LINKER_DIR ?= $(PROJECT_ROOT)/src/platform/$(FIRMWARE_PLATFORM)/linker
+LINKER_HOT ?= $(LINKER_DIR)/stm32h743xx_hot.ld
+
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 ifeq ($(FC_NAND_TEST_ENABLE),1)
 # UT 镜像把测试自有大缓冲放到 SRAM 尾部，避免全量套件溢出 AXI_RAM/AXI_NOCACHE；
 # 生产镜像保持原布局。
-LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash_ut.ld
+LINKER_SCRIPT ?= $(LINKER_DIR)/stm32h743xx_flash_ut.ld
 else
-LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash.ld
+LINKER_SCRIPT ?= $(LINKER_DIR)/stm32h743xx_flash.ld
 endif
 endif
 # ----------------------------------------------------------------------------
@@ -239,10 +243,10 @@ endif
 # -nostartfiles                不链接编译器自带的 crt0/crtbegin；入口与向量表由
 #                              third_party 的 startup_stm32h743xx.s 提供，
 #                              __libc_init_array 需要的 _init 钩子由 main.c 定义。
-# -L$(PROJECT_ROOT)/linker：链接脚本 INCLUDE 的搜索路径（共享热代码片段）。
+# -L$(LINKER_DIR)：链接脚本 INCLUDE 的搜索路径（共享热代码片段）。
 BASE_LDFLAGS = $(CPU_FLAGS)\
                 -T $(LINKER_SCRIPT)\
-                -L$(PROJECT_ROOT)/linker\
+                -L$(LINKER_DIR)\
                 -Wl,--entry=Reset_Handler\
                 -specs=nosys.specs\
                 -nostartfiles\

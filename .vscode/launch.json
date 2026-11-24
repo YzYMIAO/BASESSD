@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // launch.json 模板：仓库内只保留与机器无关的 ${workspaceFolder} 路径。
-// 所有配置都连**外部 JLink**：先跑 sh/debug_env.sh（或自行启动 JLinkGDBServer，
+// 所有配置都连**外部 JLink**：先跑 tools/debug_env.sh（或自行启动 JLinkGDBServer，
 // 监听 2331），再按 F5。
 // SVD 文件不在仓库内；需要外设视图时把 STM32H743xI.svd 放到工作区根，
 // 并取消下方 "svdFile" 行的注释。

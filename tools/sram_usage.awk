@@ -4,7 +4,7 @@
 # 输入：arm-none-eabi-size -A <elf> 的输出（section / size / addr）。
 # 输出：Region / Capacity / Used / % 表，供构建日志与 .size 文件使用。
 #
-# 区域容量必须与 linker/stm32h743xx_flash*.ld 的 MEMORY 定义一致；
+# 区域容量必须与 src/platform/stm32h743/linker/stm32h743xx_flash*.ld 的 MEMORY 定义一致；
 # 改链接脚本后同步这里，否则汇总会静默算错。
 
 function hex2num(h,    i, c, v) {

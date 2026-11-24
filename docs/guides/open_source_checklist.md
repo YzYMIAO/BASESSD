@@ -371,7 +371,7 @@ git rm -r test
 git rm sh/open-ubuntu.bat
 ```
 
-3. `sh/debug_env.sh` 二选一：
+3. `tools/debug_env.sh` 二选一：
    - **推荐**：改成模板，JLink 路径由环境变量提供：
      `JLINK_EXE="${JLINK_EXE:-JLinkGDBServerCL.exe}"`，并在注释里给 Windows 示例；
    - 或删除脚本，保留 `docs/guides/wsl_debug_environment.md` 的手动步骤。
@@ -389,8 +389,8 @@ git rm .clang-format_array
    它目前**已被跟踪但被 `.gitignore` 声明忽略**，二选一：保留通用模板并删除 ignore 行，
    或 `git rm --cached .vscode/launch.json` 并保留 ignore。
 
-6. `sh/list-dir.bat` / `sh/extract_func_decl.sh` 是通用工具，可保留；
-   `sh/flash.jlink` 已被忽略，保持本地即可。
+6. `tools/list-dir.bat` / `tools/extract_func_decl.sh` 是通用工具，可保留；
+   `tools/flash.jlink` 已被忽略，保持本地即可。
 
 **验收**：
 

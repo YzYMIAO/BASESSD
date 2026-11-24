@@ -144,7 +144,7 @@ which socat                # → /usr/bin/socat
 ```bash
 # 终端：一键启动调试环境
 cd ~/projects/basessd
-./sh/debug_env.sh
+./tools/debug_env.sh
 # 会自动：杀残留 → 启动 JLink(Windows弹出窗口) → 启动 socat → 验证链路
 
 # VS Code：按 F5 开始调试（按所选配置烧对应产物）
@@ -160,7 +160,7 @@ Windows 重启后，**只需两步**：
 ```bash
 # 第 1 步：一键启动（自动清理旧进程 + 启动 JLink + socat）
 cd ~/projects/basessd
-./sh/debug_env.sh
+./tools/debug_env.sh
 
 # 第 2 步：VS Code 按 F5 烧录调试
 ```
@@ -224,7 +224,7 @@ make tests    # 重新编译
 如果调试过程中目标板断电（或手动复位后 JLink 连接异常）：
 
 1. **JLink 窗口显示 `Target voltage: 0.00V` 或 `Connection lost`** → 无需立即操作，JLink 在电压恢复后会自动重连（等待 3-5 秒）
-2. **JLink 窗口卡死或显示异常** → `./sh/debug_env.sh` 重新启动 JLink + socat
+2. **JLink 窗口卡死或显示异常** → `./tools/debug_env.sh` 重新启动 JLink + socat
 3. **JLink USB 指示灯异常（不亮/常闪）** → 拔插 J-Link USB，再跑脚本
 4. **GDB 烧录失败报 `vMustReplyEmpty: timeout`** → 跑脚本重启链路，然后 F5
 5. **始终**：跑脚本 → F5。`preLaunchCommands` 中的 `monitor reset halt → load → monitor reset` 会自动处理 MCU 未知状态
@@ -237,7 +237,7 @@ make tests    # 重新编译
 
 ### 5.1 脚本位置
 
-`sh/debug_env.sh`
+`tools/debug_env.sh`
 
 ### 5.2 功能
 
@@ -256,8 +256,8 @@ make tests    # 重新编译
 
 脚本正文以仓库文件为准，本文不再复制，避免两份内容漂移：
 
-- [`../../sh/debug_env.sh`](../../sh/debug_env.sh)
-- 运行：`sh/debug_env.sh`
+- [`../../tools/debug_env.sh`](../../tools/debug_env.sh)
+- 运行：`tools/debug_env.sh`
 
 历史版本（portproxy / WSL2 fallback 的 6 步版）已废弃，见
 [`../archive/wsl_debug_history.md`](../archive/wsl_debug_history.md)。
@@ -275,7 +275,7 @@ make tests    # 重新编译
 | ③ | 发布 / 速度（UT） | `build/release/bin/release_ut.elf` | `make tests BUILD_TYPE=release UT=...` |
 | ④ | 发布（产品） | `build/release/bin/release.elf` | `make release` |
 
-所有配置都先跑 `sh/debug_env.sh` 启动外部 JLink（`localhost:2331`），再按 F5。
+所有配置都先跑 `tools/debug_env.sh` 启动外部 JLink（`localhost:2331`），再按 F5。
 代表配置（① UT 调试）：
 
 ```json
@@ -353,7 +353,7 @@ make tests    # 重新编译
 | 5 | 烧录后程序不运行 | `monitor reset` 后没有 halt | `postLaunchCommands` 已配好 `monitor halt` |
 | 6 | WSL IP 变动 | WSL 重启后虚拟网卡 IP 变化 | 脚本自动获取：`ip route show default` |
 | 7 | socat 启动后 /dev/tcp 验证失败 | WSL→Windows 网络不通，或 JLink 未正确绑定 | `nc -zv $WINDOWS_IP 2331` 手动测可达性，检查 JLink 窗口 |
-| 8 | 脚本卡在「等待 JLink 进程」直到 30s 超时；`Get-Process *JLink*` 为空，但 `netstat :2331` 显示 **svchost** 在 LISTEN | 旧方案遗留的 portproxy 规则（`0.0.0.0:2331 → 127.0.0.1:2331`）抢占端口，JLink 带 `-LocalHostOnly 0` 绑不上、启动即退出 | 管理员 PowerShell：`netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0`，再重跑 `sh/debug_env.sh`（详见 §2.3） |
+| 8 | 脚本卡在「等待 JLink 进程」直到 30s 超时；`Get-Process *JLink*` 为空，但 `netstat :2331` 显示 **svchost** 在 LISTEN | 旧方案遗留的 portproxy 规则（`0.0.0.0:2331 → 127.0.0.1:2331`）抢占端口，JLink 带 `-LocalHostOnly 0` 绑不上、启动即退出 | 管理员 PowerShell：`netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0`，再重跑 `tools/debug_env.sh`（详见 §2.3） |
 
 ### 7.3 常用诊断命令速查
 

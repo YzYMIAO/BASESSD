@@ -1,26 +1,8 @@
 /*
- * STM32H743xI bare-metal C linker script —— UT 专用变体。
+ * STM32H743xI bare-metal C linker script.
  *
- * 与 stm32h743xx_flash.ld 的唯一区别是**数据放置**：全量 UT（FC-NAND + FTL +
- * HIL + speed）把测试自有的大缓冲也编进同一个镜像，原布局会溢出
- * AXI_RAM（debug +3.7 KB / release +5.5 KB）和 AXI_NOCACHE（+832 B）。
- *
- * 放置原则（与生产脚本一致，只是更显式）：
- *   ITCM / DTCM     最快（400 MHz、无 cache）：热代码、热全局、栈。
- *   SRAM12/3/4      片内 SRAM（D2/D3 域）：FTL 表、checkpoint、metadata、冷数据。
- *   AXI_RAM         512 KB AXI SRAM 的可缓存部分：默认 .data/.bss（L2P cache 等）。
- *   AXI_NOCACHE     不可缓存：只放 DMA / FMC 数据面缓冲。
- *   FLASH           冷代码与只读数据。
- *
- * UT 新增段（测试自有、CPU-only，无 DMA 访问）：
- *   .ut_test_slow    tests/unit/test_ftl_media.o 的 32 KB 读写缓冲
- *                    → SRAM123 尾部（D2 SRAM，比 AXI 慢，但测试不敏感）。
- *   .ut_test_nocache tests/unit/test_hil.o 的假 ftl_ctx（约 9.6 KB）
- *                    → SRAM4 尾部，源文件里已 memset 后使用，缓存属性无影响。
- * 两者都从 AXI/NOCACHE 移出，给生产的 L2P cache 与 FC/NAND 缓冲留余量。
- *
- * 这两段是 NOLOAD：启动代码只清 _sbss.._ebss。所选对象要么在被使用前
- * 显式 memset，要么先写后读，不依赖静态零初始化。
+ * This layout targets the 2 MiB Flash H743xI variants.  For an H743xG
+ * (1 MiB Flash), change __FLASH_SIZE to 0x00100000.
  */
 
 ENTRY(Reset_Handler)
@@ -44,9 +26,9 @@ MEMORY
   DTCM        (xrw) : ORIGIN = 0x20000000,      LENGTH = 0x00020000
   AXI_RAM     (xrw) : ORIGIN = __AXI_RAM_BEGIN, LENGTH = __AXI_RAM_SIZE
   AXI_NOCACHE (xrw) : ORIGIN = __AXI_NOCACHE_BEGIN, LENGTH = __AXI_NOCACHE_SIZE
-  /* D2 域 SRAM1+SRAM2+SRAM3 连续映射（0x30000000..0x30047FFF）。
-   * UT 侧合成一个 region：FTL 表之后、cp_handle 之前留出一段连续冷数据区。 */
-  SRAM123     (xrw) : ORIGIN = 0x30000000,      LENGTH = 0x00048000
+  /* SRAM1+SRAM2 连续映射（0x30000000..0x3003FFFF）：FTL tables 跨两 bank 使用。 */
+  SRAM12      (xrw) : ORIGIN = 0x30000000,      LENGTH = 0x00040000
+  SRAM3       (xrw) : ORIGIN = 0x30040000,      LENGTH = 0x00008000
   SRAM4       (xrw) : ORIGIN = 0x38000000,      LENGTH = 0x00010000
   BKPSRAM     (xrw) : ORIGIN = 0x38800000,      LENGTH = 0x00001000
 }
@@ -64,7 +46,7 @@ SECTIONS
 
   /* 热代码段（.ssd_code_high / .ssd_code_fast）由共享片段提供：
    * 产品与 UT 不再各自维护一份 KEEP 清单（见 RISK-BUILD-04）。
-   * INCLUDE 的搜索路径由链接参数 -L$(PROJECT_ROOT)/linker 提供。 */
+   * INCLUDE 的搜索路径由链接参数 -L$(LINKER_DIR) 提供。 */
   INCLUDE stm32h743xx_hot.ld
 
   .text :
@@ -98,24 +80,18 @@ SECTIONS
     _edata = .;
   } > AXI_RAM AT > FLASH
 
-  /* FTL 热表放 SRAM123 前部（生产布局不变）。 */
-  .sram12_data (NOLOAD) :
+  /* Non-cacheable DMA/NAND buffers in AXI_NOCACHE (MPU-disabled DCache). */
+  .noncacheable_buffer (NOLOAD) :
   {
     . = ALIGN(32);
-    KEEP(*(.sram12_data))
-    KEEP(*(.sram12_data.*))
+    __NONCACHEABLEBUFFER_BEGIN = .;
+    KEEP(*(.noncacheable_buffer))
+    KEEP(*(.noncacheable_buffer.*))
+    KEEP(*(noncacheable_buffer))
+    KEEP(*(noncacheable_buffer.*))
     . = ALIGN(32);
-  } > SRAM123
-
-  /* UT cold data: keep the 32 KB media I/O buffer out of AXI_RAM. Must
-   * precede the generic `.bss` rule, which would otherwise consume the
-   * `.bss.s_io_buf` input section. It is filled before use, not zero-init. */
-  .ut_test_slow (NOLOAD) :
-  {
-    . = ALIGN(32);
-    KEEP(*tests/unit/test_ftl_media.o(.bss.s_io_buf))
-    . = ALIGN(32);
-  } > SRAM123
+    __NONCACHEABLEBUFFER_END = .;
+  } > AXI_NOCACHE
 
   /* DTCM hot data: whole-object placement。显式 `DTCM_DATA` 的对象（CP job、
    * allocator free/op/spare 热表）由通用 KEEP 收；其余按对象 KEEP。
@@ -147,38 +123,6 @@ SECTIONS
     . = ALIGN(32);
   } > SRAM4
 
-  /* UT cold fixture: fake ftl_ctx (~9.6 KB, explicitly memset before use).
-   * Must precede `.noncacheable_buffer` below, which matches the same input
-   * section and would otherwise place it in the full AXI_NOCACHE region. */
-  .ut_test_nocache (NOLOAD) :
-  {
-    . = ALIGN(32);
-    KEEP(*tests/unit/test_hil.o(.noncacheable_buffer))
-    . = ALIGN(32);
-  } > SRAM4
-
-  /* Non-cacheable DMA/NAND buffers in AXI_NOCACHE (MPU-disabled DCache). */
-  .noncacheable_buffer (NOLOAD) :
-  {
-    . = ALIGN(32);
-    __NONCACHEABLEBUFFER_BEGIN = .;
-    KEEP(*(.noncacheable_buffer))
-    KEEP(*(.noncacheable_buffer.*))
-    KEEP(*(noncacheable_buffer))
-    KEEP(*(noncacheable_buffer.*))
-    . = ALIGN(32);
-    __NONCACHEABLEBUFFER_END = .;
-  } > AXI_NOCACHE
-
-  /* cp_handle 放在 UT 冷数据段之后，SRAM123 的剩余空间由三段连续分配。 */
-  .sram3_data (NOLOAD) :
-  {
-    . = ALIGN(32);
-    KEEP(*(.sram3_data))
-    KEEP(*(.sram3_data.*))
-    . = ALIGN(32);
-  } > SRAM123
-
   .bss (NOLOAD) :
   {
     . = ALIGN(4);
@@ -192,6 +136,8 @@ SECTIONS
     __bss_end__ = .;
   } > AXI_RAM
 
+  .sram12_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram12_data)) KEEP(*(.sram12_data.*)) } > SRAM12
+  .sram3_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram3_data)) KEEP(*(.sram3_data.*)) } > SRAM3
   .bkpsram_data (NOLOAD) : { . = ALIGN(4); *(.bkpsram_data) *(.bkpsram_data.*) } > BKPSRAM
 
   /* NOLOAD 且不被启动代码清零 → 跨软复位（NVIC_SystemReset）保留。
@@ -227,5 +173,6 @@ ASSERT(__NONCACHEABLEBUFFER_END <= ORIGIN(AXI_NOCACHE) + LENGTH(AXI_NOCACHE),
 ASSERT(SIZEOF(.dtcm_data) + SIZEOF(.noinit) + 0x6000 <= LENGTH(DTCM), "DTCM hot data + 24KB (~19%) stack reserve overflow")
 ASSERT(SIZEOF(.ssd_code_high) <= LENGTH(ITCM), "ITCM hot code overflow")
 ASSERT((SIZEOF(.ssd_code_high) & 3) == 0, "ITCM copy loop requires 4-byte multiple size")
-ASSERT(SIZEOF(.sram12_data) + SIZEOF(.ut_test_slow) + SIZEOF(.sram3_data) <= LENGTH(SRAM123), "SRAM123 (SRAM1+SRAM2+SRAM3) FTL tables + UT slow data overflow")
-ASSERT(SIZEOF(.sram4_data) + SIZEOF(.ut_test_nocache) <= LENGTH(SRAM4), "SRAM4 FTL metadata dir + UT fixture overflow")
+ASSERT(SIZEOF(.sram12_data) <= LENGTH(SRAM12), "SRAM12 (SRAM1+SRAM2) FTL tables overflow")
+ASSERT(SIZEOF(.sram3_data) <= LENGTH(SRAM3), "SRAM3 FTL cp_job/journal overflow")
+ASSERT(SIZEOF(.sram4_data) <= LENGTH(SRAM4), "SRAM4 FTL metadata dir overflow")

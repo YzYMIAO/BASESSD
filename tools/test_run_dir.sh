@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 创建 build/test-results/<ts>_<build>_<target>/ 并写 meta.txt。
-# 用法：sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]
+# 用法：tools/test_run_dir.sh [debug|release] [debug_ut|release_ut]
 # 约定见 docs/guides/testing_guide.md §8.7。
 set -euo pipefail
 

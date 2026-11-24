@@ -1348,7 +1348,7 @@
 - **后果**：① `ftl_service` 注释称 NULL 属 ASSERT，函数体没有；② 917/927 行两个同名分区标题，旧流水线语义与早回执矛盾；③ 1803 行空分区标题；④ 文件头分区表只列 4 项；⑤ `ftl_confirm_write` 契约块与函数之间隔了 `ftl_confirm_progress_pending`（违反 S5）；⑥ `s_cache_pad_page` 注释称启动清零，实际 `.dtcm_data (NOLOAD)` 且 `ftl_global_init` 未 memset。
 - **缓解**：已改：删重复旧段落；契约块移回函数上方；补两处 `ASSERT(ftl != NULL)`；`ftl_global_init` 补 memset；重写文件头分区表；删空标题。
 - **下一步**：`make all` / `make release` 零新告警。
-- **证据**：`src/ftl/ftl.c` 文件头 / `ftl_confirm_write` / `ftl_service` / `s_cache_pad_page` / `ftl_global_init`；`linker/stm32h743xx_flash.ld` `.dtcm_data (NOLOAD)`。
+- **证据**：`src/ftl/ftl.c` 文件头 / `ftl_confirm_write` / `ftl_service` / `s_cache_pad_page` / `ftl_global_init`；`src/platform/stm32h743/linker/stm32h743xx_flash.ld` `.dtcm_data (NOLOAD)`。
 - **历史/验证**：
   - 2026-11-05 纯注释 + 两行断言 + 一行 memset → 编译通过，未上板
 
@@ -1604,7 +1604,7 @@
 - **后果**：`fc_ldpc_qc_decode()` 局部 `BYTE col_failures[QC_N]`（QC_N=4224）本身 4.2KB，另有 `syndromes[64]`；`_Min_Stack_Size=0x800`。若切 LDPC 构建，运行到解码就会踩栈。
 - **缓解**：默认 BCH 不编译该分支；LDPC 未启用。
 - **下一步**：启用 LDPC 前把 `col_failures` 移到静态/全局（或按 bit 压缩），再按 `stack_guard` 上板验证；与 RISK-DP-15 的 `g_qc` 符号问题一起修。
-- **证据**：`src/fc/fc_ecc_engine.c:fc_ldpc_qc_decode`；`linker/stm32h743xx_flash.ld:_Min_Stack_Size`。
+- **证据**：`src/fc/fc_ecc_engine.c:fc_ldpc_qc_decode`；`src/platform/stm32h743/linker/stm32h743xx_flash.ld:_Min_Stack_Size`。
 - **历史/验证**：
   - 2026-11-07 审视：局部 `col_failures` 4.2KB 超出栈预算 → 待后续，未修
 
@@ -2705,7 +2705,7 @@
 - **当前事实**：linker `.noncacheable_buffer` 输入段漏前导点，落点随启发式漂移。
 - **影响**：DMA/页缓冲落点不稳定，可能静默破坏数据（`RISK-PLAT-01`）。
 - **下一步 / 判据**：单独一轮：`KEEP(*(.noncacheable_buffer))` + 上板回归 DMA。
-- **来源**：`RISK-PLAT-01`；`linker/stm32h743xx_flash.ld`
+- **来源**：`RISK-PLAT-01`；`src/platform/stm32h743/linker/stm32h743xx_flash.ld`
 - **关联**：`RISK-PLAT-01`
 - **历史/验证**：
   - （无板端记录）
@@ -2748,14 +2748,14 @@
   Flash `.text`，而产品 release 放进 ITCM；在 UT release 上量到的 `/speed` 吞吐不能
   代表产品 release。debug UT / debug 产品不命中属预期。
 - **当前事实（2026-11-18 裁决 A 并落地）**：热代码 KEEP 清单抽到共享片段
-  `linker/stm32h743xx_hot.ld`，两份主脚本用 `INCLUDE` 引用；release 选择改为
+  `src/platform/stm32h743/linker/stm32h743xx_hot.ld`，两份主脚本用 `INCLUDE` 引用；release 选择改为
   `*release/obj*/`，同时匹配产品的 `obj/` 与 UT 的 `obj_ut_*`。链接实测
   `.ssd_code_high`：产品 debug 0x94b0、产品 release 0xead0、debug UT 0x94d8、
   release UT 0xec00（均 < 64 KB）；debug UT 仍不含 release 追加集。
 - **缓解**：共享片段消除了两份脚本的复制漂移；`LINK_DEPS` 已把片段纳入链接依赖。
 - **下一步 / 判据**：上板回归 release UT 的 `/speed` 与产品 release 对比（放置已同构）；
   按 R2，放置/地址变化未上板前不得标「已验证」。
-- **证据**：`linker/stm32h743xx_hot.ld`；`linker/stm32h743xx_flash.ld` /
+- **证据**：`src/platform/stm32h743/linker/stm32h743xx_hot.ld`；`src/platform/stm32h743/linker/stm32h743xx_flash.ld` /
   `stm32h743xx_flash_ut.ld` 的 `INCLUDE`；`config.mk` 的 `BASE_LDFLAGS`
   （`-L$(PROJECT_ROOT)/linker`）；四种镜像的 `.map` 中 `__ssd_code_high_end`。
 - **关联**：`RISK-BUILD-01`、`RISK-BUILD-02`

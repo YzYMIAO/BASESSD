@@ -464,7 +464,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
   meta.txt     # commit / 镜像横幅时间戳 / 命令 / 结果 / 备注
 ```
 
-用 `sh/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 创建目录并生成 `meta.txt`；脚本打印路径，把串口终端工具的日志目录指到它即可。
+用 `tools/test_run_dir.sh [debug|release] [debug_ut|release_ut]` 创建目录并生成 `meta.txt`；脚本打印路径，把串口终端工具的日志目录指到它即可。
 
 `meta.txt` 的四件套是证据判据（P6）：`commit` = 代码版本，`image` 的横幅时间戳 = 烧的是哪个镜像，`command` / `result` = 跑了什么、结果如何。报告引用结论时抄这四行；原始日志不进版本库，需要长期留证的结论写本文件 §7 或 `docs/design/known_open_items.md`。
 
