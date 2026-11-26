@@ -293,18 +293,23 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
         md_handle(ftl->metadata_dir);
         jrn_handle(ftl->journal, NULL);
 
-        // bg_suspend 只阻止**新**后台任务；已登记的 scheduler flush item 仍要执行，
-        // 否则 CP 的 L2P flush 阶段永远 PENDING（CP 现在只登记 item，不再直接 kick）。
+        // bg_suspend 只阻止**新**后台任务；本轮的 dispatch 要执行已登记的 flush item
+        // （CP 现在只登记 item，不再直接 kick）。dispatch 同时会跑后台策略；临时把
+        // credit 清零，保证 quiesce 期间不提交预算任务（must-run 在静止态是幂等空操作）。
+        const DWORD credits_saved = ftl->sched.bg.credits;
+
+        ftl->sched.bg.credits = 0U;
         ftl->flags.bg_suspend = 0U;
         ftl_sched_dispatch(ftl);
         ftl->flags.bg_suspend = 1U;
+        ftl->sched.bg.credits = credits_saved;
 
         ftl_service_pump();
 
         memset(&rs, 0, sizeof(rs));
         fc_get_resource_stats(&rs);
 
-        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->sched.items != NULL) &&
+        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.write.count == 0U) && (ftl->cache_stream.seq.write_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->sched.items != NULL) &&
                                (ftl->sched.host_items == 0U) && (ftl->sched.flush_items == 0U) && (ftl->sched.prefetch_items == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_LOAD] == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH] == 0U);
 
         if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && jobs_idle)
@@ -435,7 +440,7 @@ static BOOL ftl_ut_io_wait(DWORD timeout_ms)
 
     while (s_io_done == 0U)
     {
-        /* 与生产主循环一致：timer 表补 bg_policy credit，CP/Journal/L2P 后台
+        /* 与生产主循环一致：timer 表补 sched bg credit，CP/Journal/L2P 后台
          * 任务才能推进。漏掉它时长时间的写序列会因 credit 耗尽而停摆。 */
         timer_scheduler_poll();
         ftl_service_pump();
@@ -467,8 +472,8 @@ static void ftl_ut_trace_io_fail(const char *op, DWORD lba, DWORD count, int sub
                         f->alloc.free_count,
                         jrn_sequence_get(f->journal),
                         jrn_persisted_seq(f->journal),
-                        f->cache_stream.seq.wr.count,
-                        f->cache_stream.seq.wr_inflight,
+                        f->cache_stream.seq.write.count,
+                        f->cache_stream.seq.write_inflight,
                         f->cache->inflight.flush,
                         f->cache->inflight.load);
 }
@@ -670,8 +675,8 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_not_null(ftl->mig_handle);
     munit_assert_not_null(ftl->wbuf);
 
-    munit_assert_uint16(pend_slot_get_count(&ftl->pending), ==, 0U);
-    munit_assert_uint16(pend_group_get_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(pend_slot_count(&ftl->pending), ==, 0U);
+    munit_assert_uint16(pend_group_count(&ftl->pending), ==, 0U);
 
     /* ctx 残留 = 有能力登记却没被派发的命令留在队列里。这里把「谁卡住」一并打出来
      * （只读快照；munit_errorf 会带出这行），否则只有一句 count!=0 无法定位。 */
@@ -729,7 +734,7 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_uint32(ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH], ==, 0U);
     /* 写序列的页表 / 在飞成员 / dirty CMT 是跨用例污染的主要来源：teardown 必须
      * 证明它们已排空，否则下一用例可能读到旧页或被序列门控拒绝。 */
-    munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);
-    munit_assert_uint32(ftl->cache_stream.seq.wr_inflight, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write.count, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write_inflight, ==, 0U);
     munit_assert_uint32(ftl->cache->stats.cmt_dirty, ==, 0U);
 }

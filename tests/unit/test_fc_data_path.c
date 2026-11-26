@@ -1904,7 +1904,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 /*************************************************************************
  *  flat CW 掩码建链
  *
- *  建链走 FTL 策略层（ftl_cmd_configure_descriptors），不碰 NAND：
+ *  建链走 FTL 策略层（ftl_cmd_build_descriptors），不碰 NAND：
  *    - 位图按 **flat 绝对编号**（bit n = plane*CW_NUM + cw）逐位建 desc
  *    - 链序 plane-major
  *    - 位图是**字面**的（0 = 空集）——三条用例各自显式给位图

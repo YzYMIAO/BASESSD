@@ -2,25 +2,18 @@
  * gc.c — 垃圾回收（触发判定 + 选 victim + 共用读原语）
  *
  * 职责：
- *   按四项加权评分选 victim SB，并给出 GC 触发判定。搬移与擦除归还在 migrate.c
- *   的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）。
+ *   · 按四项加权评分选 victim SB（valid / erase / temp / age）；
+ *   · 求本轮 GC 触发位并集（T1 空闲水位 / T4 紧急）；
+ *   · 提供搬移读与掉电重建共用的解码原语（gc_decode_cw_lba / gc_read_page_with_lba）。
  *
- * 与 wear_leveling.c 的分工：
- *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
- *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
- *         migrate.c 的搬移引擎；`gc_decode_cw_lba` 是搬移读与掉电重建共用的解码入口，
- *         `gc_read_page_with_lba` 只服务掉电重建的同步路径。
+ * 关键机制：
+ *   · 全部按全局块号索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane；
+ *   · 触发位 = 位掩码（0 = 不触发）；磨损维护不占 GC 触发位，由 wear_leveling 独立启动；
+ *   · 搬移 / 擦除归还归 migrate.c 的异步 job（GC / WL 共用引擎）。
  *
- * 两条触发（gc_should_trigger，位掩码）：
- *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY。
- *   磨损维护不在 GC 触发里，由 wear_leveling 的 UBI 判据独立启动。
- *
- * 文件结构：
- *   1. 共用原语        gc_read_page_with_lba / gc_decode_cw_lba
- *   2. 选 victim       gc_select_victim（四项加权评分）
- *   3. 触发判定        gc_should_trigger
- *
- * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
+ * 与其他模块：
+ *   · 上游：bg 调度器（GC job）、migrate（选 victim / 解码）、掉电重建（同步读）；
+ *   · 下游：allocator（free 水位 / BST）、l2p_cache、fc_interface。
  */
 
 #include "gc.h"
@@ -33,7 +26,7 @@
 
 #include <string.h>
 
-/* ── 内部策略参数（仅 gc.c 使用）──
+/* 内部策略参数（仅 gc.c 使用）
  * 权重为**千分比整数**：本仓无 FPU 便利、浮点格式化开销大 ⇒ 全整数，四项各自
  * 归一化到 0..1000 后再加权。符号约定：cost 取小 = 越优先回收；
  * 擦除项取 +erase_ratio（避开临近寿命块）；温度项 HOT 优先当 victim。 */
@@ -46,82 +39,7 @@
 #define GC_VICTIM_MAX_VALID_PCT   (80U) /* 空闲补池：valid 占比 > 80% 视为无收益 */
 #define GC_EMERGENCY_MIN_GAIN_PCT (1U)  /* 紧急水位：可回收占比 < 1% 视为无收益 */
 
-/* ── 1. 共用原语 ── */
-
-/**
- * @brief 读一页并逐 CW 取出 META LBA
- *
- * 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集：UNC/META 页内容不可信。
- *
- * @param pba    目标页 PBA
- * @param cw_lba 输出：逐 CW 的 LBA（未写过 = FTL_LBA_INVALID）
- * @return FTL_OK；FTL_ERROR 读失败 / 内容不可信
- */
-ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
-{
-    // 命令池空是**资源类**结果（FTL_AGAIN）。调用者：掉电重建（池结构性充足）与 CLI
-    // rdpaa 诊断（可与主机 IO 同时在飞）⇒ 走后台额度，不吃 L2P demand 的 CRIT 预留。
-    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
-    if (cmd == NULL)
-    {
-        return FTL_AGAIN;
-    }
-    const fc_cmd_id_t cmd_id = cmd->cmd_id;
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw_count    = CW_NUM - 1U;
-    cmd->config.crc         = FC_CRC_ENABLE;
-    cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来 */
-
-    if (pba_to_cmd(cmd, pba) != FTL_OK)
-    {
-        (void)fc_command_release(cmd_id);
-        return FTL_ERROR;
-    }
-
-    {
-        fc_cmd_status_s completion;
-        BOOL            submitted = false;
-
-        const ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U, &submitted);
-
-        if (ret != FTL_OK)
-        {
-            // 只有「未提交」才由调用者 release；已提交但超时时命令仍在
-            // FC/NAND，迟到完成由 ftl_op_drain 的 missing-request 分支释放。
-            if (submitted == false)
-            {
-                (void)fc_command_release(cmd_id);
-            }
-            return FTL_ERROR;
-        }
-
-        // ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / META_ERROR
-        // 页当成功读并解析 META（重建期可能写回错误映射）。
-        if (fc_cmd_status_has_error(completion.status))
-        {
-            (void)fc_command_release(cmd_id);
-            return FTL_ERROR;
-        }
-    }
-
-    // 从 META 解码逐 CW 的扇区 LBA（与异步搬移 job 共用同一份实现）。
-    // 空页 = 无有效数据；页基址不一致 = META 损坏；两者都按失败返回。
-    if (gc_decode_cw_lba(cmd, pba, cw_lba, NULL) != GC_DECODE_OK)
-    {
-        (void)fc_command_release(cmd_id);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd_id);
-
-    return FTL_OK;
-}
+/* ── decode ── */
 
 /**
  * @brief 解码命令 desc 链上的逐 CW LBA
@@ -200,7 +118,84 @@ gc_decode_e gc_decode_cw_lba(fc_cmd_s *cmd, DWORD pba, DWORD cw_lba[CW_NUM], DWO
     return GC_DECODE_OK;
 }
 
-/* ── 2. 选 victim ── */
+/* ── read ── */
+
+/**
+ * @brief 读一页并逐 CW 取出 META LBA
+ *
+ * 成败判据 = FC_CMD_STATUS_ERROR_MASK 全集：UNC/META 页内容不可信。
+ *
+ * @param pba    目标页 PBA
+ * @param cw_lba 输出：逐 CW 的 LBA（未写过 = FTL_LBA_INVALID）
+ * @return FTL_OK；FTL_ERROR 读失败 / 内容不可信
+ */
+ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
+{
+    // 命令池空是**资源类**结果（FTL_AGAIN）。调用者：掉电重建（池结构性充足）与 CLI
+    // rdpaa 诊断（可与主机 IO 同时在飞）⇒ 走后台额度，不吃 L2P demand 的 CRIT 预留。
+    fc_cmd_s *cmd = ftl_cmd_alloc_class(FC_CMD_CLASS_BG);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN;
+    }
+    const fc_cmd_id_t cmd_id = cmd->cmd_id;
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw_count    = CW_NUM - 1U;
+    cmd->config.crc         = FC_CRC_ENABLE;
+    cmd->config.random      = FC_RANDOM_ENABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_NORMAL;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来 */
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd_id);
+        return FTL_ERROR;
+    }
+
+    {
+        fc_cmd_status_s completion;
+        BOOL            submitted = false;
+
+        const ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U, &submitted);
+
+        if (ret != FTL_OK)
+        {
+            // 只有「未提交」才由调用者 release；已提交但超时时命令仍在
+            // FC/NAND，迟到完成由 ftl_op_drain 的 missing-request 分支释放。
+            if (submitted == false)
+            {
+                (void)fc_command_release(cmd_id);
+            }
+            return FTL_ERROR;
+        }
+
+        // ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / META_ERROR
+        // 页当成功读并解析 META（重建期可能写回错误映射）。
+        if (fc_cmd_status_has_error(completion.status))
+        {
+            (void)fc_command_release(cmd_id);
+            return FTL_ERROR;
+        }
+    }
+
+    // 从 META 解码逐 CW 的扇区 LBA（与异步搬移 job 共用同一份实现）。
+    // 空页 = 无有效数据；页基址不一致 = META 损坏；两者都按失败返回。
+    if (gc_decode_cw_lba(cmd, pba, cw_lba, NULL) != GC_DECODE_OK)
+    {
+        (void)fc_command_release(cmd_id);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd_id);
+
+    return FTL_OK;
+}
+
+/* ── select ── */
 
 /**
  * @brief 选一个 GC victim
@@ -398,7 +393,7 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
     return (out->scanned == 0U) ? GC_SELECT_NO_CANDIDATE : GC_SELECT_NOT_WORTHWHILE;
 }
 
-/* ── 3. 触发判定 ── */
+/* ── trigger ── */
 
 /**
  * @brief 求本轮 GC 触发位并集
@@ -408,7 +403,7 @@ gc_select_e gc_select_victim(const alc_s *alloc, gc_benefit_mode_e mode, gc_sele
  * @param alloc 分配器
  * @return 触发位并集（0 = 不触发）
  */
-DWORD gc_should_trigger(const alc_s *alloc)
+DWORD gc_trigger_mask(const alc_s *alloc)
 {
     // NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），
     // 不是静默吞（C5 判据 4）。

@@ -53,7 +53,7 @@ static inline BOOL md_handle_is_compacting(const md_dir_cache_s *dir)
  * @return true = 可回收
  *         false = 越界 / 仍有活 region / 有在飞槽位 / 是当前写块
  *
- * @note 在飞槽位（`md_slot_reserved`）必须挡住：写命令发出到 commit 之间，槽里的
+ * @note 在飞槽位（`md_slot_is_reserved`）必须挡住：写命令发出到 commit 之间，槽里的
  *       数据还没进 Directory，`l2p_live` 看不到；此时擦块会把在飞数据连同落点一起
  *       丢掉，commit 后 Directory 指向已擦页。
  */
@@ -67,7 +67,7 @@ static inline BOOL md_log_block_is_idle(const md_dir_cache_s *dir, WORD g)
     {
         return false;
     }
-    if (md_slot_reserved(dir, g))
+    if (md_slot_is_reserved(dir, g))
     {
         return false;
     }
@@ -86,42 +86,26 @@ static inline BOOL md_log_block_is_idle(const md_dir_cache_s *dir, WORD g)
 /* ── 待回收日志块位图 ── */
 
 /**
- * @brief 置位；已置位返回 false。g 越界是内部调用者的编程错误 ⇒ 运行期拒绝（H31/C5）。
- *
- * @param dir Directory（待回收位图所属）
- * @param g   候选 gblock 编号
- * @return true = 本次新置位并计数
- *         false = g 越界或该位已置位
+ * @brief 置位待回收位图；已置位 / g 越界返回 false（g 越界是内部调用者的编程错误）。
  */
 BOOL md_reclaim_mark(md_dir_cache_s *dir, WORD g);
 
-/**
- * @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。
- *
- * @param dir Directory
- */
+/** @brief 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。 */
 void md_reclaim_reset(md_dir_cache_s *dir);
 
 /**
- * @brief 扫描全池，把"已无引用、非当前写块、确实是 LOG"的块登记进待回收位图。
- * **只登记，不擦除**：换块时调用，擦除全部交给后台 job。
+ * @brief 扫描全池，把「已无引用、非当前写块、确实是 LOG」的块登记进待回收位图。
  *
- * @param dir   Directory
- * @param alloc 分配器（读 BST 判 LOG 身份）
+ * @note **只登记，不擦除**：换块时调用，擦除全部交给后台 job。
  */
 void md_reclaim_mark_all(md_dir_cache_s *dir, const alc_s *alloc);
 
 /* ── 写指针 ── */
 
 /**
- * @brief 取**指定 plane** 当前日志块的下一个空槽并推进该 plane 的写指针（纯 RAM）。
+ * @brief 取指定 plane 当前日志块的下一个空槽并推进该 plane 的写指针（纯 RAM）。
  *
- * @param dir   Directory
- * @param plane 目标 plane（主副本 → plane0 当前块，备副本 → plane1 当前块）
- * @return 槽位 PBA
- *         NAND_PBA_INVALID = 该 plane 无当前块 / 块已满
- *
- * @note 取到位置后**立即推进** cur_page[plane]：写失败时该页可能已半编程、不可复用。
+ * @note 取到位置后**立即推进** `cur_page[plane]`：写失败时该页可能已半编程、不可复用。
  */
 DWORD md_slot_take(md_dir_cache_s *dir, BYTE plane);
 
@@ -129,24 +113,25 @@ DWORD md_slot_take(md_dir_cache_s *dir, BYTE plane);
 
 /**
  * @brief 把整理 job 清回 IDLE。
- * 哨兵值必须显式写（memset 只给 0）：victim / reclaim_gblock / reclaim_fail_gblock
- * 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。漏一个 ⇒ append_slot 永久让路（phase 卡死）
- * 或下次压缩复用已消耗的槽（二次编程 = 静默损坏）。
- * ⚠ 不清 `reclaim_pending` / `reclaim_scan`：待回收知识不属于 job 状态。
  *
- * @param dir Directory
+ * @note 哨兵值必须显式写（memset 只给 0）：victim / reclaim_gblock / reclaim_fail_gblock
+ *       的「无」是 UINT16_MAX，slot 的「未取」是 NAND_PBA_INVALID。漏一个 ⇒
+ *       append_slot 永久让路（phase 卡死）或下次压缩复用已消耗的槽（二次编程）。
+ * @note 不清 `reclaim_pending` / `reclaim_scan`：待回收知识不属于 job 状态。
  */
 void md_handle_reset(md_dir_cache_s *dir);
 
 #if defined(FC_NAND_TEST_ENABLE)
-/**
- * @brief 测试专用：查压缩 victim 选择（跳过在飞槽位/当前块）。
- */
+/** @brief 测试专用：查压缩 victim 选择（跳过在飞槽位 / 当前块）。 */
 WORD md_test_compact_victim_find(const md_dir_cache_s *dir, const alc_s *alloc);
-/**
- * @brief 测试专用：跑压缩启动预算（含 reserved slots）。
- */
+
+/** @brief 测试专用：跑压缩启动预算（含 reserved slots）。 */
 md_compact_start_e md_test_compact_begin(md_dir_cache_s *dir, const alc_s *alloc);
 #endif
+
+/* ── 入口 ── */
+
+/** @brief 推进元数据目录整理 job（typed handle；提交即返回）。 */
+void md_handle(md_dir_cache_s *dir);
 
 #endif /* FTL_METADATA_JOB_H */

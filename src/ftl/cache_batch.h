@@ -56,6 +56,14 @@
  * 不是 NAND FIFO 深度。 */
 #define FTL_CACHE_WRITE_MAX_PAGES (4U)
 
+/* 后台让行的最长 host 暂停：后台被门控拒绝后置 yield_pending，host 暂不开新序列，
+ * 让后台在本轮提交。后台若一直提交不出去，超过本值即忽略让行、恢复 host，
+ * 防止后台故障把 host 饿死。取 20 ms：一个 16 KiB 窗口在 940 KB/s 下约 17 ms。 */
+#define FTL_CACHE_SEQ_YIELD_MAX_MS (20U)
+
+/* demand L2P 独立提交窗口的时长（本仓取值）。 */
+#define FTL_L2P_DEMAND_WINDOW_MS (500U)
+
 typedef enum FTL_CACHE_READ_RESULT_E
 {
     FTL_CACHE_READ_DECLINED = 0, /* 条件不满足：调用者回退普通读 */
@@ -75,139 +83,57 @@ typedef enum FTL_CACHE_WRITE_RESULT_E
 /* ── 序列状态查询 / 控制（跨模块只走这里，不直接读 cache_stream.seq 字段）──
  *
  * `cache_stream.seq` 的写者是序列模块（本文件 + ftl.c 的状态机）；ftl_op.c 等
- * 其他模块只能通过下面这组入口查询状态、请求断点/让行。定义在 cache_batch.c
- * （那里能看到 ftl_ctx_s 的完整定义）。 */
+ * 其他模块只能通过下面这组入口查询状态、请求断点/让行。
+ * 纯谓词（is_open / is_closing / owner_gi / gate_blocks / yield_pending）已内联到
+ * ftl_cache.h（收 ftl_cache_stream_s *）；本文件只留改状态的入口。 */
 
-/**
- * @brief 序列是否仍占用设备管线（active || draining）
- *
- * @param ftl 实例
- * @return true = 未收尾（门控仍关着）
- */
-BOOL ftl_cache_seq_is_open(const ftl_ctx_s *ftl);
-
-/**
- * @brief 序列是否处于有序收尾（close_requested || closing）
- *
- * @param ftl 实例
- * @return true = 请求收尾 / padding END 在飞
- */
-BOOL ftl_cache_seq_is_closing(const ftl_ctx_s *ftl);
-
-/**
- * @brief 最近持有序列的组号
- *
- * @param ftl 实例
- * @return 组号（< FTL_GROUP_MAX 才可用于查 pending）
- */
-WORD ftl_cache_seq_owner_gi(const ftl_ctx_s *ftl);
-
-/**
- * @brief 本次提交是否被序列门控挡住（open && !owner_submit）
- *
- * @param ftl 实例
- * @return true = 必须拒绝（调用者折成 FTL_AGAIN）
- */
-BOOL ftl_cache_seq_gate_blocks(const ftl_ctx_s *ftl);
-
-/**
- * @brief 是否有后台让行请求待兑现
- *
- * @param ftl 实例
- * @return true = yield_pending
- */
-BOOL ftl_cache_seq_yield_pending(const ftl_ctx_s *ftl);
-
-/**
- * @brief 请求下一窗口有序收尾
- *
- * @param ftl 实例
- */
+/** @brief 请求下一窗口有序收尾。 */
 void ftl_cache_seq_request_break(ftl_ctx_s *ftl);
 
 /**
- * @brief 请求 host 暂不开新序列，给后台一次提交机会
+ * @brief 请求 host 暂不开新序列，给后台一次提交机会。
  *
- * now_ms == 0（时钟缺失）时不置位：host 无法判超时，宁可不让行也不锁死。
- *
- * @param ftl    实例
- * @param now_ms 当前毫秒时基（0 = 时钟缺失）
+ * @note now_ms == 0（时钟缺失）时不置位：host 无法判超时，宁可不让行也不锁死。
  */
 void ftl_cache_seq_request_yield(ftl_ctx_s *ftl, DWORD now_ms);
 
-/**
- * @brief 兑现后台让行（清 yield_pending / yield_ms）
- *
- * @param ftl 实例
- */
+/** @brief 兑现后台让行（清 yield_pending / yield_ms）。 */
 void ftl_cache_seq_yield_clear(ftl_ctx_s *ftl);
 
 /**
- * @brief 开 demand L2P 独立提交窗口
+ * @brief 开 demand L2P 独立提交窗口。
  *
- * confirm 依赖的 region 未驻留、且没有在飞 load 时调用。窗口只挡**新** cache
- * 序列，不打断已有序列。
- *
- * @param ftl    实例
- * @param now_ms 当前毫秒时基（0 = 时钟缺失，不开窗口）
- * @return true = 窗口有效（本次或此前已开）；false = 时钟缺失 / 本轮已超时
+ * @note confirm 依赖的 region 未驻留、且没有在飞 load 时调用；窗口只挡**新**
+ *       cache 序列，不打断已有序列。
  */
 BOOL ftl_cache_demand_window_open(ftl_ctx_s *ftl, DWORD now_ms);
 
-/**
- * @brief 清 demand L2P 独立提交窗口
- *
- * @param ftl 实例
- */
+/** @brief 清 demand L2P 独立提交窗口。 */
 void ftl_cache_demand_window_clear(ftl_ctx_s *ftl);
 
 /**
- * @brief 当前 demand L2P 窗口是否仍在阻止开新 cache 序列
+ * @brief 当前 demand L2P 窗口是否仍在阻止开新 cache 序列。
  *
- * @param ftl 实例
- * @return true = 暂不要开新序列；false = 无窗口 / 已超时
  * @note 只在 host cache 写序列 **starting** 时调用。
  */
-BOOL ftl_cache_demand_window_blocks(ftl_ctx_s *ftl);
+BOOL ftl_cache_demand_window_check(ftl_ctx_s *ftl);
 
 /**
- * @brief 尝试为当前读组提交一个 cache read 窗口；序列状态跨调用保留。
+ * @brief 尝试为当前读组提交一个 cache read 窗口（序列状态跨调用保留）。
  *
- * @param ftl     FTL 实例（序列状态在 ftl->cache_stream.seq）
- * @param gi      组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
- * @param lba     当前子操作起始全局 LBA（必须 pair 对齐才尝试）
- * @param buffer  当前 host 读缓冲（后续 pair 按 4 KiB 递增）
- * @param remain  本组剩余 LBA 数
- * @param used    出参：OK 时消费的 LBA 数（N * FTL_LBA_PER_PAIR）
- *
- * @return FTL_CACHE_READ_DECLINED 条件不满足，调用者回退普通读（不计数为错误）；
- *         FTL_CACHE_READ_OK 已提交；FTL_CACHE_READ_AGAIN 资源/加载瞬态，本轮停止；
- *         FTL_CACHE_READ_ERROR 永久错误，组报 IO_ERROR。
+ * @note DECLINED = 条件不满足、调用者回退普通读（不计数为错误）；
+ *       其余返回值见 ftl_cache_read_result_e。
  */
 ftl_cache_read_result_e ftl_cache_read_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 
 /**
- * @brief 尝试为当前写组提交一个 cache program 窗口；序列状态跨调用、跨 chunk 保留。
+ * @brief 尝试为当前写组提交一个 cache program 窗口（序列状态跨调用 / chunk 保留）。
  *
- * @pre 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
- *
- * @param ftl    实例（序列状态与逐页确认 FIFO 在 ftl->cache_stream.seq）
- * @param gi     写组下标（组的 cmd_remaining 给出本命令末尾；续序列由 next_lba 判定）
- * @param lba    本窗口起始 LBA（须 pair 对齐）
- * @param buffer 本窗口源数据（最多 4 × 4 KiB）
- * @param remain 本组剩余可写 LBA 数
- * @param used   出参：实际提交的 LBA 数（1..MAX_PAGES × FTL_LBA_PER_PAIR）
- *
- * @return DECLINED —— 条件不满足，调用者回退普通 wbuf 路径（不计数为错误）；
- *                   OK —— 已提交；
- *                   AGAIN —— 资源 / 确认 FIFO / 加载瞬态，本轮停止 drain；
- *                   ERROR —— 永久错误，组报 IO_ERROR。
- *
- * @note 断点（在数据页上 END）：Journal 顺序页写满 / D4 / 命令尾不足一对 /
- *       journal 预留失败 / 下一窗口 L2P 未驻留 / **收尾块时分配器开不出新块**。
- *       **host 传输段、host 命令、物理 block 边界都不是断点**——同一 LBA 流跨三者
- *       续接（44/48h 每条自带地址，见 MT29F4G08 datasheet
- *       「Program Page Cache」节（链接见 `docs/reference/README.md`））；没有数据页可 END 时由 service 的 padding END 收尾（ftl.c）。
+ * @note 调用者在 ftl_drain_group 的写分支、正常 wbuf 路径之前调用。
+ * @note 断点只在数据页上：Journal 顺序页写满 / D4 / 命令尾不足一对 / journal
+ *       预留失败 / 下一窗口 L2P 未驻留 / 收尾块开不出新块。**host 传输段、host
+ *       命令、物理 block 边界都不是断点**（44/48h 每条自带地址）；无数据页可 END
+ *       时由 service 的 padding END 收尾（ftl.c）。
  */
 ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba, void *buffer, DWORD remain, DWORD *used);
 

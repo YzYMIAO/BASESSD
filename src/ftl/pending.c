@@ -2,27 +2,19 @@
  * pending.c — Pending Request 表 + 完成组（pend_group_s）实现
  *
  * 职责：
- *   ① 跟踪异步请求的 cmd_id → 请求映射，供 FC 完成回调据以做 caller 通知
- *      与写回滚簿记（ftl_host_io_callback → pend_find）；
- *   ② 实现「完成组」——把一条 host 请求拆出的多条 FC 子操作聚成一个完成单元，
- *      通知字段（complete_flag/status_out/on_complete）只在最后一个子操作完成后
- *      触发一次（见 pend_group_* 族）。
+ *   · 跟踪异步请求的 cmd_id → 请求映射（完成回调据此做通知与回滚簿记）；
+ *   · 完成组：把一条 host 请求拆出的多条 FC 子操作聚成完成单元，通知只触发一次；
+ *   · 组槽分配 / 中止 / 子操作计数 / 待入账（confirm park）。
  *
- * 与 pending.h 的分工：
- *   pending.h —— 表结构（pend_req_s / pend_group_s）+ 容量宏 + 语义约定；
- *   本文件     —— 两张表的增删查 + 组完成编排，无新数据结构。
+ * 关键机制：
+ *   · outstanding 只经 subop_finish / drop_subop / abort 三条路径变更；下溢 debug
+ *     ASSERT、release 限流留痕不回绕；
+ *   · used=0 必须在完成通知之后（回调可能重入再申请槽）；
+ *   · 脱钩项（cmd_id=NONE）只能按 op 查找；FIFO 顺序 = 下标升序。
  *
- * 存储：pending[] / groups[] 由 pend_ctx_s（per-instance）持有；文件级 static
- *   只放下溢留痕的限流时间戳，不持有表数据。
- *
- * 文件结构：
- *   1. pending 表基础操作   init / alloc / find / remove / find_op / view_op / release_index / count
- *   2. 完成组操作           alloc / count / add·drop_subop / complete_subop[_multi] /
- *                           maybe_complete / has_window_pending
- *   3. write-confirm 待入账   park / find_next / is_expired / settle / get_count
- *
- * ⚠ 读写判别必须**显式携带** op（pend_op_e），不可从 buffer 字段反推——
- *   写请求的 buffer 是数据源、非 NULL ⇒ `buffer != NULL` 对写恒真（见 pending.h 文件头）。
+ * 与其他模块：
+ *   · 上游：host_io / ftl_confirm / read_recovery / migrate / bbt / ftl_interface；
+ *   · 下游：无（纯 RAM 账本，不碰介质）。
  */
 
 #include "pending.h"
@@ -33,6 +25,7 @@
 
 #include <string.h>
 
+/* 文件级静态数据 */
 /* ── 文件级静态数据 ── */
 
 // 组 outstanding 下溢（重复完成 / 重复回滚）的 release 留痕：debug 由 ASSERT 拦住，
@@ -41,22 +34,7 @@ static DWORD s_group_underflow_log_ms;
 
 static DWORD s_group_underflow_n;
 
-/**
- * @brief 清除 pending 项与 cmd_id 的映射
- *
- * @param table pending 表
- * @param req   待脱钩的请求槽；cmd_id 为 NONE 时跳过
- */
-static void pend_unbind(pend_ctx_s *table, pend_req_s *req)
-{
-    const WORD cmd_id = req->cmd_id;
-    const BYTE index  = (BYTE)(req - table->slots);
-
-    if ((cmd_id < FC_COMMAND_POOL_DEPTH) && (table->slot_of[cmd_id] == index))
-    {
-        table->slot_of[cmd_id] = 0xFF;
-    }
-}
+/* ── note ── */
 
 /**
  * @brief 组 outstanding 下溢的限流日志
@@ -69,17 +47,7 @@ static void pend_note_underflow(const char *who, WORD gi)
     LOGE_RATE(log_rate_due(&s_group_underflow_log_ms, &s_group_underflow_n, LOG_RATE_SLOW_INTERVAL_MS), s_group_underflow_n, LOG_TAG_FTL "group outstanding underflow (%s gi=%hu) — bookkeeping bug", who, gi);
 }
 
-/**
- * @brief 清空本实例的 pending 表、完成组表与 cmd_id 映射
- *
- * @param table pending 表
- */
-void pend_init(pend_ctx_s *table)
-{
-    memset(table->slots, 0, sizeof(table->slots));
-    memset(table->groups, 0, sizeof(table->groups));
-    memset(table->slot_of, 0xFF, sizeof(table->slot_of));
-}
+/* ── bind ── */
 
 /**
  * @brief 把已有 pending 槽绑定到新的 cmd_id（写重试替换命令时用）
@@ -95,13 +63,19 @@ void pend_bind(pend_ctx_s *table, pend_req_s *req, WORD cmd_id)
     ASSERT((req >= table->slots) && (req < &table->slots[FTL_PENDING_MAX]));
     ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
 
-    const BYTE index = (BYTE)(req - table->slots);
+    const BYTE index   = (BYTE)(req - table->slots);
+    const WORD old_cmd = req->cmd_id;
 
-    pend_unbind(table, req);
+    if ((old_cmd < FC_COMMAND_POOL_DEPTH) && (table->slot_of[old_cmd] == index))
+    {
+        table->slot_of[old_cmd] = 0xFF; /* 解除旧映射 */
+    }
     ASSERT(table->slot_of[cmd_id] == 0xFF); /* 同一 cmd_id 不得同时绑两个槽 */
     req->cmd_id            = cmd_id;
     table->slot_of[cmd_id] = index;
 }
+
+/* ── detach ── */
 
 /**
  * @brief 与 FC 命令脱钩：清映射并把 cmd_id 置哨兵
@@ -116,41 +90,17 @@ void pend_detach_command(pend_ctx_s *table, pend_req_s *req)
     ASSERT(table != NULL);
     ASSERT(req != NULL);
 
-    pend_unbind(table, req);
+    const WORD old_cmd = req->cmd_id;
+    const BYTE index   = (BYTE)(req - table->slots);
+
+    if ((old_cmd < FC_COMMAND_POOL_DEPTH) && (table->slot_of[old_cmd] == index))
+    {
+        table->slot_of[old_cmd] = 0xFF;
+    }
     req->cmd_id = FTL_PENDING_CMD_NONE;
 }
 
-/**
- * @brief 分配一个 pending 槽并绑定 cmd_id
- *
- * 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。
- *
- * @param table  pending 表
- * @param cmd_id 绑定的 cmd_id
- * @return 槽指针；NULL = 池满
- */
-pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id)
-{
-    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
-
-    if (cmd_id >= FC_COMMAND_POOL_DEPTH)
-    {
-        return NULL;
-    }
-
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
-    {
-        if (table->slots[i].used == false)
-        {
-            memset(&table->slots[i], 0, sizeof(table->slots[i]));
-            table->slots[i].used = true;
-            pend_bind(table, &table->slots[i], cmd_id);
-            return &table->slots[i];
-        }
-    }
-
-    return NULL; /* 表满 */
-}
+/* ── find ── */
 
 /**
  * @brief 按 cmd_id 直接索引 pending 槽
@@ -186,25 +136,6 @@ pend_req_s *pend_find(pend_ctx_s *table, WORD cmd_id)
 }
 
 /**
- * @brief 释放一个 pending 槽并清映射
- *
- * 未找到则 no-op（幂等，供完成路径重复调用）。
- *
- * @param table  pending 表
- * @param cmd_id cmd_id
- */
-void pend_remove(pend_ctx_s *table, WORD cmd_id)
-{
-    pend_req_s *req = pend_find(table, cmd_id);
-
-    if (req != NULL)
-    {
-        pend_unbind(table, req);
-        req->used = false;
-    }
-}
-
-/**
  * @brief 按 op 找托管项（cmd_id 已置 NONE）
  *
  * 下标升序 = FIFO，与托管顺序一致。
@@ -231,6 +162,70 @@ BOOL pend_find_op(const pend_ctx_s *table, pend_op_e op, BYTE *out_index)
     return false;
 }
 
+/* ── remove ── */
+
+/**
+ * @brief 释放一个 pending 槽并清映射
+ *
+ * 未找到则 no-op（幂等，供完成路径重复调用）。
+ *
+ * @param table  pending 表
+ * @param cmd_id cmd_id
+ */
+void pend_remove(pend_ctx_s *table, WORD cmd_id)
+{
+    pend_req_s *req = pend_find(table, cmd_id);
+
+    if (req != NULL)
+    {
+        const WORD cmd   = req->cmd_id;
+        const BYTE index = (BYTE)(req - table->slots);
+
+        if ((cmd < FC_COMMAND_POOL_DEPTH) && (table->slot_of[cmd] == index))
+        {
+            table->slot_of[cmd] = 0xFF;
+        }
+        req->used = false;
+    }
+}
+
+/* ── alloc ── */
+
+/**
+ * @brief 分配一个 pending 槽并绑定 cmd_id
+ *
+ * 认领即置 used=1，调用者填完须调 pend_validate()（pending.h）。填字段之前
+ * 不得有任何可能返 FTL_AGAIN 的早退，否则槽位泄漏（表里多一条 used=1 的垃圾项）。
+ *
+ * @param table  pending 表
+ * @param cmd_id 绑定的 cmd_id
+ * @return 槽指针；NULL = 池满
+ */
+pend_req_s *pend_alloc(pend_ctx_s *table, WORD cmd_id)
+{
+    ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
+
+    if (cmd_id >= FC_COMMAND_POOL_DEPTH)
+    {
+        return NULL;
+    }
+
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        if (table->slots[i].used == false)
+        {
+            memset(&table->slots[i], 0, sizeof(table->slots[i]));
+            table->slots[i].used = true;
+            pend_bind(table, &table->slots[i], cmd_id);
+            return &table->slots[i];
+        }
+    }
+
+    return NULL; /* 表满 */
+}
+
+/* ── op ── */
+
 /**
  * @brief 按 op 查槽并拷出只读视图
  *
@@ -241,7 +236,7 @@ BOOL pend_find_op(const pend_ctx_s *table, pend_op_e op, BYTE *out_index)
  * @param out   输出：视图
  * @return true 找到；false 无托管项
  */
-BOOL pend_view_op(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out)
+BOOL pend_op_view_get(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out)
 {
     BYTE idx = 0U;
 
@@ -260,6 +255,8 @@ BOOL pend_view_op(const pend_ctx_s *table, pend_op_e op, pend_op_view_s *out)
     return true;
 }
 
+/* ── release ── */
+
 /**
  * @brief 按索引释放托管项
  *
@@ -273,9 +270,16 @@ void pend_release_index(pend_ctx_s *table, BYTE index)
     ASSERT(index < FTL_PENDING_MAX);
     ASSERT(table->slots[index].used == true); /* 重复释放即簿记错误，留现场 */
 
-    pend_unbind(table, &table->slots[index]);
+    const WORD cmd = table->slots[index].cmd_id;
+
+    if ((cmd < FC_COMMAND_POOL_DEPTH) && (table->slot_of[cmd] == index))
+    {
+        table->slot_of[cmd] = 0xFF;
+    }
     table->slots[index].used = false;
 }
+
+/* ── has ── */
 
 /**
  * @brief 是否有不属于 cache 序列的写在飞（cache_role == NONE）
@@ -304,6 +308,8 @@ BOOL pend_has_foreign_write(const pend_ctx_s *table)
     return false;
 }
 
+/* ── slot ── */
+
 /**
  * @brief 本实例占用的 pending 槽位数
  *
@@ -312,7 +318,7 @@ BOOL pend_has_foreign_write(const pend_ctx_s *table)
  * @param table pending 表
  * @return 占用槽位数
  */
-WORD pend_slot_get_count(const pend_ctx_s *table)
+WORD pend_slot_count(const pend_ctx_s *table)
 {
     WORD count = 0U;
 
@@ -327,7 +333,138 @@ WORD pend_slot_get_count(const pend_ctx_s *table)
     return count;
 }
 
-/* ── 完成组（pend_group_s）── */
+/* ── group ── */
+
+/**
+ * @brief 未完成组数
+ *
+ * 有未完成组 = host 工作饿着 → 归 BUSY。
+ *
+ * @param table pending 表
+ * @return 组数
+ */
+WORD pend_group_count(const pend_ctx_s *table)
+{
+    WORD count = 0U;
+
+    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
+    {
+        if (table->groups[i].used == true)
+        {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+/**
+ * @brief 组 gi 是否还有指定类型的在飞子操作
+ *
+ * 读序列的 drain 判据：托管给 Read Recovery 的子操作命令已脱钩、不占设备
+ * read pipeline，不能再让读序列停在 draining，否则恢复读会被同一道门挡住。
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ * @param op    子操作类型
+ * @return true = 至少一个该类型的 used 槽位属于本组
+ */
+BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const DWORD bit = ftl_group_bit(gi);
+
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        const pend_req_s *req = &table->slots[i];
+
+        if ((req->used == true) && ((req->owners & bit) != 0U) && (req->op == op))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief 组槽是否在使用
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = used
+ */
+BOOL pend_group_is_used(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    return table->groups[gi].used;
+}
+
+/**
+ * @brief 组是否仍在推进（used && (outstanding != 0 || next < total)）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 有在飞或在待发子操作
+ */
+BOOL pend_group_is_busy(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const pend_group_s *g = &table->groups[gi];
+
+    return (g->used != false) && ((g->outstanding != 0U) || (g->next < g->total));
+}
+
+/**
+ * @brief 组是否仍有未下发的子操作（used && next < total）
+ *
+ * @param table pending 表
+ * @param gi    组号（< FTL_GROUP_MAX）
+ * @return true = 所有者仍在下发
+ */
+BOOL pend_group_has_remaining(const pend_ctx_s *table, WORD gi)
+{
+    ASSERT(table != NULL);
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    const pend_group_s *g = &table->groups[gi];
+
+    return (g->used != false) && (g->next < g->total);
+}
+
+/**
+ * @brief 该窗口是否还有未完成的组
+ *
+ * 只读扫描 groups[]；数组不暴露给 wbuf。
+ *
+ * @param table  pending 表
+ * @param window 窗口号
+ * @return true 仍有未完成组
+ */
+BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window)
+{
+    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
+    {
+        const pend_group_s *g = &table->groups[i];
+
+        if ((g->used == false) || (pend_op_is_write(g->op) == false) || (g->next >= g->total))
+        {
+            continue;
+        }
+        if (ftl_lba_pair_base(g->lba + g->next) == window)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 /**
  * @brief 分配一个完成组
@@ -376,140 +513,6 @@ void pend_group_release(pend_ctx_s *table, WORD gi)
 }
 
 /**
- * @brief 未完成组数
- *
- * 有未完成组 = host 工作饿着 → 归 BUSY。
- *
- * @param table pending 表
- * @return 组数
- */
-WORD pend_group_get_count(const pend_ctx_s *table)
-{
-    WORD count = 0U;
-
-    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
-    {
-        if (table->groups[i].used == true)
-        {
-            count++;
-        }
-    }
-
-    return count;
-}
-
-/**
- * @brief 组 gi 是否还有指定类型的在飞子操作
- *
- * @param table pending 表
- * @param gi    组下标
- * @param op    子操作类型
- * @return true = 至少一个该类型的 used 槽位属于本组
- */
-BOOL pend_group_has_op(const pend_ctx_s *table, WORD gi, pend_op_e op)
-{
-    ASSERT(table != NULL);
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    const DWORD bit = ftl_group_bit(gi);
-
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
-    {
-        const pend_req_s *req = &table->slots[i];
-
-        if ((req->used == true) && ((req->owners & bit) != 0U) && (req->op == op))
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/**
- * @brief 组槽是否在使用
- *
- * @param table pending 表
- * @param gi    组号（< FTL_GROUP_MAX）
- * @return true = used
- */
-BOOL pend_group_is_used(const pend_ctx_s *table, WORD gi)
-{
-    ASSERT(table != NULL);
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    return table->groups[gi].used;
-}
-
-/**
- * @brief 组是否仍有未下发的子操作（used && next < total）
- *
- * @param table pending 表
- * @param gi    组号（< FTL_GROUP_MAX）
- * @return true = 所有者仍在下发
- */
-BOOL pend_group_has_remaining(const pend_ctx_s *table, WORD gi)
-{
-    ASSERT(table != NULL);
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    const pend_group_s *g = &table->groups[gi];
-
-    return (g->used != false) && (g->next < g->total);
-}
-
-/**
- * @brief 组是否仍在推进（used && (outstanding != 0 || next < total)）
- *
- * @param table pending 表
- * @param gi    组号（< FTL_GROUP_MAX）
- * @return true = 有在飞或在待发子操作
- */
-BOOL pend_group_is_busy(const pend_ctx_s *table, WORD gi)
-{
-    ASSERT(table != NULL);
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    const pend_group_s *g = &table->groups[gi];
-
-    return (g->used != false) && ((g->outstanding != 0U) || (g->next < g->total));
-}
-
-/**
- * @brief 中止属于同一 ctx 的所有组（best-effort）
- *
- * @param table pending 表
- * @param ctx   HIL 请求指针（非空）
- * @return true = 至少命中一个组
- */
-BOOL pend_group_abort_ctx(pend_ctx_s *table, void *ctx)
-{
-    ASSERT(table != NULL);
-    ASSERT(ctx != NULL);
-
-    BOOL any = false;
-
-    for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
-    {
-        pend_group_s *g = &table->groups[gi];
-
-        if ((g->used == false) || (g->completion.on_complete_ctx != ctx))
-        {
-            continue;
-        }
-
-        any = true;
-
-        /* 停止下发剩余子操作；在飞子操作完成后自然触发完成通知。 */
-        g->next       = g->total;
-        g->agg_status = SSD_STATUS_TIMEOUT;
-        pend_group_maybe_complete(table, gi);
-    }
-
-    return any;
-}
-
-/**
  * @brief 撤销一个尚未提交的子操作（组在飞数 -1）
  *
  * 不触发完成通知；任一路径漏掉即 host 写组永不完成。
@@ -525,7 +528,7 @@ void pend_group_drop_subop(pend_ctx_s *table, WORD gi)
 
     ASSERT(g->used == true);
 
-    // 与 complete_subop 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
+    // 与 subop_finish 同口径：debug 断言；release 不下溢（WORD 回绕 ⇒ 组永不完成）。
     ASSERT(g->outstanding > 0U);
 
     if (g->outstanding > 0U)
@@ -539,15 +542,81 @@ void pend_group_drop_subop(pend_ctx_s *table, WORD gi)
 }
 
 /**
+ * @brief 若组已归零则结算
+ *
+ * used=0 必须在通知之后（回调可能重入再申请槽）。
+ *
+ * @param table pending 表
+ * @param gi    组下标
+ */
+void pend_group_maybe_finish(pend_ctx_s *table, WORD gi)
+{
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    pend_group_s *g = &table->groups[gi];
+    if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
+    {
+        return;
+    }
+
+    if (g->completion.status_out != NULL)
+    {
+        *g->completion.status_out = g->agg_status;
+    }
+    if (g->completion.complete_flag != NULL)
+    {
+        *g->completion.complete_flag = 1U;
+    }
+    if (g->completion.on_complete != NULL)
+    {
+        g->completion.on_complete(g->completion.on_complete_ctx);
+    }
+
+    // 回调可能重入 ftl_submit_* 再申请组槽 ⇒ used 清零必须在通知之后
+    g->used = false;
+}
+
+/**
+ * @brief 中止属于同一 ctx 的所有组（best-effort）
+ *
+ * 置 `next = total` 停止下发剩余子操作；`outstanding == 0` 的组立即完成并通知
+ * ctx，其余等在飞子操作完成后自然完成。`agg_status` 置 `SSD_STATUS_TIMEOUT`；
+ * 不会强制丢弃仍在 FC/NAND 里的命令。
+ *
+ * @param table pending 表
+ * @param ctx   HIL 请求指针（非空）
+ */
+void pend_group_abort_ctx(pend_ctx_s *table, void *ctx)
+{
+    ASSERT(table != NULL);
+    ASSERT(ctx != NULL);
+
+    for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
+    {
+        pend_group_s *g = &table->groups[gi];
+
+        if ((g->used == false) || (g->completion.on_complete_ctx != ctx))
+        {
+            continue;
+        }
+
+        /* 停止下发剩余子操作；在飞子操作完成后自然触发完成通知。 */
+        g->next       = g->total;
+        g->agg_status = SSD_STATUS_TIMEOUT;
+        pend_group_maybe_finish(table, gi);
+    }
+}
+
+/**
  * @brief 一条命令完成多个组的子操作
  *
- * agg_status 粘性；outstanding-- 后交 maybe_complete。
+ * agg_status 粘性；outstanding-- 后交 maybe_finish。
  *
  * @param table      pending 表
  * @param owners     组位图
  * @param sub_status 本子操作状态
  */
-void pend_group_complete_subop_multi(pend_ctx_s *table, DWORD owners, ssd_status_e sub_status)
+void pend_group_subop_finish_multi(pend_ctx_s *table, DWORD owners, ssd_status_e sub_status)
 {
     for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
@@ -577,74 +646,36 @@ void pend_group_complete_subop_multi(pend_ctx_s *table, DWORD owners, ssd_status
             pend_note_underflow("complete", gi);
         }
 
-        pend_group_maybe_complete(table, gi);
+        pend_group_maybe_finish(table, gi);
     }
 }
 
+/* ── confirm ── */
+
 /**
- * @brief 若组已归零则结算
- *
- * used=0 必须在通知之后（回调可能重入再申请槽）。
+ * @brief 待入账项数量
  *
  * @param table pending 表
- * @param gi    组下标
+ * @return 数量
  */
-void pend_group_maybe_complete(pend_ctx_s *table, WORD gi)
+WORD pend_confirm_count(const pend_ctx_s *table)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
+    ASSERT(table != NULL);
 
-    pend_group_s *g = &table->groups[gi];
-    if ((g->used == false) || (g->next < g->total) || (g->outstanding != 0U))
-    {
-        return;
-    }
+    WORD count = 0U;
 
-    if (g->completion.status_out != NULL)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        *g->completion.status_out = g->agg_status;
-    }
-    if (g->completion.complete_flag != NULL)
-    {
-        *g->completion.complete_flag = 1U;
-    }
-    if (g->completion.on_complete != NULL)
-    {
-        g->completion.on_complete(g->completion.on_complete_ctx);
-    }
-
-    // 回调可能重入 ftl_submit_* 再申请组槽 ⇒ used 清零必须在通知之后
-    g->used = false;
-}
-
-/**
- * @brief 该窗口是否还有未完成的组
- *
- * 只读扫描 groups[]；数组不暴露给 wbuf。
- *
- * @param table  pending 表
- * @param window 窗口号
- * @return true 仍有未完成组
- */
-BOOL pend_group_has_window_pending(const pend_ctx_s *table, DWORD window)
-{
-    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
-    {
-        const pend_group_s *g = &table->groups[i];
-
-        if ((g->used == false) || (pend_op_is_write(g->op) == false) || (g->next >= g->total))
+        if (pend_confirm_is_parked(table, i) == true)
         {
-            continue;
-        }
-        if (ftl_lba_pair_base(g->lba + g->next) == window)
-        {
-            return true;
+            count++;
         }
     }
 
-    return false;
+    return count;
 }
 
-/* ── write-confirm park（待入账列表 = pending 表里的 WRITE_CONFIRM 项）──
+/* write-confirm park（待入账列表 = pending 表里的 WRITE_CONFIRM 项）
  *
  * 不另建一张列表：待入账项本来就在 pending 表里（op = WRITE_CONFIRM、cmd_id
  * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。
@@ -696,28 +727,19 @@ void pend_confirm_settle(pend_ctx_s *table, BYTE index, ssd_status_e status)
     const DWORD owners = pending->owners;
 
     pend_release_index(table, index);
-    pend_group_complete_subop_multi(table, owners, status);
+    pend_group_subop_finish_multi(table, owners, status);
 }
 
+/* ── init ── */
+
 /**
- * @brief 待入账项数量
+ * @brief 清空本实例的 pending 表、完成组表与 cmd_id 映射
  *
  * @param table pending 表
- * @return 数量
  */
-WORD pend_confirm_get_count(const pend_ctx_s *table)
+void pend_init(pend_ctx_s *table)
 {
-    ASSERT(table != NULL);
-
-    WORD count = 0U;
-
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
-    {
-        if (pend_confirm_is_parked(table, i) == true)
-        {
-            count++;
-        }
-    }
-
-    return count;
+    memset(table->slots, 0, sizeof(table->slots));
+    memset(table->groups, 0, sizeof(table->groups));
+    memset(table->slot_of, 0xFF, sizeof(table->slot_of));
 }

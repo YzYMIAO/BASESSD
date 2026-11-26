@@ -127,18 +127,37 @@ extern BYTE       g_chcelun_table[CH_NUM][CE_NUM][LUN_NUM];
 extern ftl_topo_s g_die_table[FTL_DIE_MAX];
 
 /* die → 物理坐标：唯一分解点；未分配尾项字段为 0xFF，不得访问。 */
+
+/**
+ * @brief die → 物理 ch（唯一分解点之一）
+ *
+ * @param die 紧凑 die 号（< DIE_MAX；未分配尾项不得访问）
+ * @return 物理 ch
+ */
 static inline BYTE die_2_ch(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_die_table[die].ch;
 }
 
+/**
+ * @brief die → 物理 ce（唯一分解点之一）
+ *
+ * @param die 紧凑 die 号（< DIE_MAX；未分配尾项不得访问）
+ * @return 物理 ce
+ */
 static inline BYTE die_2_ce(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return g_die_table[die].ce;
 }
 
+/**
+ * @brief die → 物理 lun（唯一分解点之一）
+ *
+ * @param die 紧凑 die 号（< DIE_MAX；未分配尾项不得访问）
+ * @return 物理 lun
+ */
 static inline BYTE die_2_lun(BYTE die)
 {
     ASSERT(die < DIE_MAX);

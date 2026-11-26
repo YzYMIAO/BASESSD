@@ -30,10 +30,10 @@
      * read/write）、FC pump/BCH/池/加扰/ECC 包装、NAND dispatch/FMC。
      * CRC 引擎（小、调用点少）留 Flash，给 UT 构建留 ITCM 余量。 */
     KEEP(*ftl/ftl.o(.text .text.*))
-    KEEP(*ftl/ftl_cache_wr.o(.text .text.*))
+    KEEP(*ftl/ftl_cache.o(.text .text.*))
     KEEP(*ftl/ftl_confirm.o(.text .text.*))
     KEEP(*ftl/ftl_host_io.o(.text .text.*))
-    KEEP(*ftl/ftl_flush_trim.o(.text .text.*))
+    KEEP(*ftl/ftl_flush.o(.text .text.*))
     KEEP(*ftl/l2p_cache.o(.text .text.*))
     KEEP(*ftl/wbuf.o(.text .text.*))
     KEEP(*ftl/pending.o(.text .text.*))

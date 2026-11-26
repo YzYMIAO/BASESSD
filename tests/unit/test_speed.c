@@ -890,16 +890,16 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
                          seq->closing,
                          seq->owner_gi,
                          seq->next_lba,
-                         seq->wr.count,
-                         seq->wr_inflight,
-                         seq->wr.head,
-                         seq->wr.verdict_next,
+                         seq->write.count,
+                         seq->write_inflight,
+                         seq->write.head,
+                         seq->write.verdict_next,
                          ftl->wbuf->open,
                          ftl->wbuf->base,
                          ftl->wbuf->occupied,
                          ftl->wbuf->owners,
-                         pend_slot_get_count(&ftl->pending),
-                         pend_group_get_count(&ftl->pending));
+                         pend_slot_count(&ftl->pending),
+                         pend_group_count(&ftl->pending));
 
     fc_resource_stats_s rs;
 
@@ -982,13 +982,13 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
             inflight++;
         }
 
-        /* 与生产主循环一致：timer 表补 bg_policy credit，否则长写序列在
+        /* 与生产主循环一致：timer 表补 sched bg credit，否则长写序列在
          * credit 耗尽后 group 不再被补发（chunk=32 曾出现 fill_delta 有值、pop=0）。 */
         timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
 
-        /* CP/MIG 在飞时显式推进：speed 循环不能只等 bg_policy；否则 CP active
+        /* CP/MIG 在飞时显式推进：speed 循环不能只等 sched 后台策略；否则 CP active
          * 会占住 FC 资源，host 写组停在 pending（chunk=32 诊断 cp=1/0）。 */
         if (ftl->cp_handle->active != 0U)
         {
@@ -1044,12 +1044,12 @@ static BOOL spd_ftl_phase(ftl_ctx_s *ftl, BOOL write, DWORD chunk, BYTE depth, D
                                  ftl->alloc.closed_sb_count,
                                  wb_is_idle(ftl->wbuf),
                                  ftl->flags.bg_suspend,
-                                 ftl->cache_stream.seq.wr.count,
-                                 ftl->cache_stream.seq.wr_inflight,
+                                 ftl->cache_stream.seq.write.count,
+                                 ftl->cache_stream.seq.write_inflight,
                                  ftl->cache->inflight.load,
                                  ftl->cache->inflight.flush,
-                                 pend_slot_get_count(&ftl->pending),
-                                 pend_group_get_count(&ftl->pending),
+                                 pend_slot_count(&ftl->pending),
+                                 pend_group_count(&ftl->pending),
                                  ftl->cp_handle->active,
                                  ftl->cp_handle->waiting,
                                  ftl->mig_handle->job.active,
@@ -1106,7 +1106,7 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
         memset(&stats, 0, sizeof(stats));
         fc_get_resource_stats(&stats);
 
-        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (!ftl->mig_handle->job.active) && (!ftl->mig_handle->job.waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U))
+        if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_count(&ftl->pending) == 0U) && (pend_group_count(&ftl->pending) == 0U) && (!ftl->mig_handle->job.active) && (!ftl->mig_handle->job.waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U))
         {
             return true;
         }
@@ -1142,12 +1142,12 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
                                  ftl->alloc.bad_count,
                                  ftl->alloc.closed_sb_count,
                                  ftl->flags.bg_suspend,
-                                 ftl->cache_stream.seq.wr.count,
-                                 ftl->cache_stream.seq.wr_inflight,
+                                 ftl->cache_stream.seq.write.count,
+                                 ftl->cache_stream.seq.write_inflight,
                                  ftl->cache->inflight.load,
                                  ftl->cache->inflight.flush,
-                                 pend_slot_get_count(&ftl->pending),
-                                 pend_group_get_count(&ftl->pending),
+                                 pend_slot_count(&ftl->pending),
+                                 pend_group_count(&ftl->pending),
                                  ftl->cp_handle->active,
                                  ftl->cp_handle->waiting,
                                  ftl->mig_handle->job.active,
@@ -1233,7 +1233,7 @@ static void spd_ftl_diag_window(ftl_ctx_s *ftl, DWORD base)
         const DWORD lba = base + k;
 
         pba[k] = NAND_PBA_INVALID;
-        if (wb_has(ftl->wbuf, lba))
+        if (wb_has_lba(ftl->wbuf, lba))
         {
             wb_hit++;
         }

@@ -14,7 +14,7 @@
  *
  * data[slot] 的 slot = plane*CW_NUM + cw（与 LBA 低 3 位同构，见 ftl_lba_pair_slot），
  * occupied 逐位标记有效槽。owners 记录「哪些组向本页贡献过」——一页可能由多个组拼成，
- * 完成时必须**逐组**递减在飞数（见 pend_group_complete_subop_multi）。
+ * 完成时必须**逐组**递减在飞数（见 pend_group_subop_finish_multi）。
  *
  * ⚠ 掉电语义（无电容）：缓冲里的数据**不落 journal/L2P**——只有 flush 编程成功的
  *   completion 才确认映射（与既有顺序一致）。掉电时这些写组仍 outstanding（从未完成），
@@ -30,12 +30,33 @@
 
 #include "allocator.h"  /* alc_s */
 #include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_e */
-#include "ftl_module.h" /* ftl_mod_status_s */
 #include "pending.h"    /* pend_req_s（端口出参类型） */
 #include "ssd_types.h"  /* ssd_status_e */
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* ── 模块状态（wb_status_s 的公共前缀；当前唯一消费者是本模块）──
+ *
+ * 只描述「本轮调用之后模块处于什么状态」，不是模块内部的 phase 编号。 */
+typedef enum FTL_MODULE_STATE_E
+{
+    FTL_MODULE_IDLE = 0,
+    FTL_MODULE_RUNNING,
+    FTL_MODULE_WAITING,
+    FTL_MODULE_BLOCKED,
+    FTL_MODULE_FAILED,
+} ftl_mod_state_e;
+
+typedef struct FTL_MODULE_STATUS_S
+{
+    ftl_mod_state_e state;
+    BOOL            critical;  /* must-run liveness；正确性关键集 */
+    BOOL            wants_run; /* 下一轮是否还需要被调 */
+    DWORD           progress;  /* 单调计数：区分「在推进」与「卡死」 */
+    DWORD           next_ms;   /* 0 = 随时可调；否则最早下次调用时间 */
+    int32_t         error;     /* 仅 state == FAILED 时有意义 */
+} ftl_mod_status_s;
 
 /* 取不到目的页对的兜底上限：连续失败超过该时长即判真无块，按 FTL_ERROR 结算
  * host 写，避免 host 命令永远等（USB BOT 超时 → 设备消失）。按容量上界，
@@ -122,35 +143,15 @@ static inline BOOL wb_is_idle(const wb_handle_s *h)
     return (!h->open) && (h->occupied == 0U);
 }
 
-/**
- * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
+/** @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）。 */
 wb_handle_s *wb_workspace_get(BYTE die);
 
 /* ── 查询（读路径；只判不取） ── */
 
-/**
- * @brief 该 LBA 是否在缓冲里（当前打开窗口内且槽位有效）。
- *
- * @param h   wbuf handle
- * @param lba 逻辑地址
- * @return true = 命中当前窗口的有效槽位
- *         false = 未命中（无打开窗口 / pair 窗口不同 / 槽位为空）
- */
-BOOL wb_has(const wb_handle_s *h, DWORD lba);
+/** @brief 该 LBA 是否在缓冲里（当前打开窗口内且槽位有效）。 */
+BOOL wb_has_lba(const wb_handle_s *h, DWORD lba);
 
-/**
- * @brief 从缓冲读取一个 IU 的数据。
- *
- * @param h   wbuf handle
- * @param lba 逻辑地址
- * @param out 输出缓冲（至少 FTL_IU_BYTES 字节）
- * @return true = 命中并已拷贝 FTL_IU_BYTES 字节
- *         false = 未命中（out 不被写）
- */
+/** @brief 从缓冲读取一个 IU 的数据（未命中时 out 不被写）。 */
 BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out);
 
 /* ── 接口 ── */
@@ -158,31 +159,18 @@ BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out);
 /**
  * @brief 绑定窄上下文并复位 handle。
  *
- * @param h       wbuf handle（整块清零后重新绑定上下文）
- * @param alloc   allocator（取页对 / 归还页对 / 查 Open 页状态）
- * @param pending pending 表（组在飞数结算 / 窗口占用查询 / 子操作登记）
- * @param migrate migrate handle（Free Pool 耗尽时登记紧急 GC）；**允许 NULL** ——
- *                无后台迁移器时（纯 RAM 单测）只做背压，不登记 GC。生产路径由
- *                `ftl.c` 绑定真实 handle，不传 NULL。
+ * @note `migrate` **允许 NULL**（纯 RAM 单测）：无后台迁移器时只做背压，不登记
+ *       紧急 GC；生产路径由 `ftl.c` 绑定真实 handle。
  */
 void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_HANDLE_S *migrate);
 
 /**
- * @brief 事件驱动入口（docs §4.8）
+ * @brief 事件驱动入口（docs §4.8）。
  *
- * 返回操作结果（**偏离 §4.8 的 void 签名**：写路径必须据此区分 FTL_AGAIN 背压与
- * FTL_ERROR 永久失败，P5 留痕）。`out` 非 NULL 时填本轮上报；调用者只关心返回值时
- * 可传 NULL（状态上报丢弃，不分配 dummy status）。
- *
- * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
- * 只有编程成功的 FLUSH 才清空缓冲。
- *
- * @param h       wbuf handle
- * @param trigger 触发参数（kind + 对应载荷：LBA / 数据 / CW 数 / 组号）
- * @param out     出参（可为 NULL）：非 NULL 时填本轮状态上报
- * @return FTL_OK    操作完成 / 无需操作
- *         FTL_AGAIN APPEND / FLUSH / MAYBE_FLUSH_IDLE 遇到瞬态背压（缓冲保留，可重试）
- *         FTL_ERROR FLUSH / MAYBE_FLUSH_IDLE 建链失败 / trigger->kind 非法
+ * @note 返回操作结果（偏离 §4.8 的 void 签名：写路径必须区分 AGAIN 背压与 ERROR
+ *       永久失败）；`out` 可为 NULL。
+ * @note APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可
+ *       重试）；只有编程成功的 FLUSH 才清空缓冲。
  */
 ftl_status_e wb_handle(wb_handle_s *h, const wb_trigger_s *trigger, wb_status_s *out);
 

@@ -697,7 +697,7 @@ static MunitResult test_l2p_load_fail_bounded(const MunitParameter params[], voi
 /* data_read_fail_bounded — 数据页读提交失败时 host 读有界报错，不返回陈旧/错误数据。
  *
  * 覆盖：host 读在 `ftl_op_submit`（`op==HOST_IO` + 读 opcode）注入 FTL_ERROR（持续）。
- *       host 读是 `ftl_issue_subop` 内联建链后直接提交，**不经过** `ftl_async_read_page`；
+ *       host 读是 `host_group_subop_issue` 内联建链后直接提交，**不经过** `ftl_async_read_page`；
  *       后者只覆盖 GC/RR/L2P/元数据读。
  * 判据：① 对照读成功；② 注入后读失败；③ 放开后读回原数据。
  * 备注：入口把提交失败归为 FTL_AGAIN（重试），持续失败由 drain 的无进展预算结算成
@@ -1115,7 +1115,7 @@ static MunitResult test_cp_dir_ckpt_abort(const MunitParameter params[], void *d
 /* bbt_write_fail — BBT record 写失败时 dirty 必须保留，放开后落盘成功。
  *
  * 覆盖：同步镜像写（`ftl_sync_write_page_mirror`）注入 FTL_ERROR。
- * 判据：① `bbt_save` 返回非 FTL_OK 且 `dirty` 仍为 true；② 放开后 `bbt_save` 成功、`dirty` 清零。
+ * 判据：① `bbt_store` 返回非 FTL_OK 且 `dirty` 仍为 true；② 放开后 `bbt_store` 成功、`dirty` 清零。
  * 备注：先 quiesce，避免后台 BBT job 与同步保存互斥（后者会被拒绝）。 */
 
 static MunitResult test_bbt_write_fail(const MunitParameter params[], void *data)
@@ -1130,7 +1130,7 @@ static MunitResult test_bbt_write_fail(const MunitParameter params[], void *data
 
     neg_drain_to_clean(ftl);
 
-    /* 前置：在飞 job 会让 bbt_save 直接拒绝——那会让「!= FTL_OK」以错误原因通过。 */
+    /* 前置：在飞 job 会让 bbt_store 直接拒绝——那会让「!= FTL_OK」以错误原因通过。 */
     munit_assert_false(alloc->bbt.handle.waiting);
 
     bbt_dirty_note(alloc);
@@ -1141,13 +1141,13 @@ static MunitResult test_bbt_write_fail(const MunitParameter params[], void *data
 
     fi_arm(FI_BBT_WRITE_FAIL, 1U);
 
-    munit_assert_int(bbt_save(alloc), !=, FTL_OK);
+    munit_assert_int(bbt_store(alloc), !=, FTL_OK);
     munit_assert_true(alloc->bbt.dirty);
     munit_assert_uint32(fi_hits(FI_BBT_WRITE_FAIL) - hits0, >, 0U); /* 注入确实到达 record 写 */
 
     fi_reset();
 
-    munit_assert_int(bbt_save(alloc), ==, FTL_OK);
+    munit_assert_int(bbt_store(alloc), ==, FTL_OK);
     munit_assert_false(alloc->bbt.dirty);
 
     /* 两次 save 都走到写入（各自 sequence++）：证明第一次确实失败在 record 写，
@@ -2151,7 +2151,7 @@ static MunitResult test_md_alias_full_rebuild_repro(const MunitParameter params[
 
 /* bbt_mark_bad_idempotent — 运行时标坏幂等 + 落盘后重启仍是 BAD（BBT-01）。
  *
- * 覆盖：对用户区一个 FREE 块重复 `bbt_mark_bad` → `bbt_save` → reboot。
+ * 覆盖：对用户区一个 FREE 块重复 `bbt_mark_bad` → `bbt_store` → reboot。
  * 判据：bad_count 只 +1；两次调用都 `FTL_OK`；重启后该块仍 BAD。
  * 备注：Spare 记账只断言坏块数，不展开 spare 池收支。 */
 
@@ -2212,7 +2212,7 @@ static MunitResult test_bbt_mark_bad_idempotent(const MunitParameter params[], v
     munit_assert_int(bbt_mark_bad(a, g), ==, FTL_OK); /* 终态幂等 */
     munit_assert_uint16(a->bad_count, ==, (WORD)(bad0 + 1U));
 
-    munit_assert_int(bbt_save(a), ==, FTL_OK);
+    munit_assert_int(bbt_store(a), ==, FTL_OK);
 
     ftl_ut_reboot_from_media();
 
@@ -2791,7 +2791,7 @@ static MunitResult test_host_group_exhaustion(const MunitParameter params[], voi
 
     const ftl_status_e third = ftl_submit_read(ftl, &extra);
 
-    ftl_ut_trace_detail("host group: accepted=%lu third=%d groups=%hu pend=%hu loadhits=%lu ret=%d/%d/%d/%d", accepted, third, pend_group_get_count(&ftl->pending), pend_slot_get_count(&ftl->pending), fi_hits(FI_L2P_LOAD_FAIL) - load_hits0, first_ret[0], first_ret[1], first_ret[2], first_ret[3]);
+    ftl_ut_trace_detail("host group: accepted=%lu third=%d groups=%hu pend=%hu loadhits=%lu ret=%d/%d/%d/%d", accepted, third, pend_group_count(&ftl->pending), pend_slot_count(&ftl->pending), fi_hits(FI_L2P_LOAD_FAIL) - load_hits0, first_ret[0], first_ret[1], first_ret[2], first_ret[3]);
 
     munit_assert_int(third, ==, FTL_AGAIN);
 
@@ -2963,7 +2963,7 @@ MunitTest g_negative_media_l2p_tests[] = {
 
 /* bbt_ring_erase_fail_advances — BBT ring 擦失败必须标坏并作废游标，不得原地重试（BBT-19）。
  *
- * 覆盖：`ftl_bbt_callback` 收到 `BBT_JOB_ERASE` 的失败完成态。
+ * 覆盖：`ftl_bbt_op_callback` 收到 `BBT_JOB_ERASE` 的失败完成态。
  * 判据：① 目标 ring 块按 plane_mask 全部标 BAD；② `bbt.cursor_valid=false`（下次
  *       job 必须重新定位到新池）；③ phase 回 IDLE、waiting 清零（不会无限重试同一块）。
  * 备注：直接喂失败完成态，不依赖真擦失败；结束时还原 BST/BBT RAM 状态并 reboot，
@@ -3021,7 +3021,7 @@ static MunitResult test_bbt_ring_erase_fail_advances(const MunitParameter params
     a->bbt.handle.waiting   = true;
     a->bbt.handle.dirty_gen = a->bbt.dirty_gen;
 
-    ftl_bbt_callback(ftl, &st, a);
+    ftl_bbt_op_callback(ftl, &st, a);
 
     munit_assert_int(a->bbt.handle.phase, ==, BBT_JOB_IDLE);
     munit_assert_false(a->bbt.handle.waiting);
@@ -3084,7 +3084,7 @@ static MunitResult test_bbt_ring_reload_latest(const MunitParameter params[], vo
     for (WORD i = 0U; i < (WORD)(total + 2U); i++)
     {
         bbt_dirty_note(a);
-        munit_assert_int(bbt_save(a), ==, FTL_OK);
+        munit_assert_int(bbt_store(a), ==, FTL_OK);
         last_seq = a->bbt.sequence;
     }
 

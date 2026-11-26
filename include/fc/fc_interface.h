@@ -456,7 +456,7 @@ static inline BYTE fc_command_plane_span(const fc_cmd_s *cmd, BYTE *plane_first,
  * @return 段内每个 CW 一位置 1 的 flat 位图（bit n = plane*CW_NUM + cw）；
  *         plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF。
  *
- * @note 用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径
+ * @note 用途：产出 **ftl_cmd_build_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段路径
  * （pba_to_cmd / _pair_cw）一律先调本函数算出位图，再作为形参交给建链入口。
  * ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  */
@@ -513,7 +513,7 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
  *     data_input_cycles>0 只是其子集。
  *   - **不校验 CW 集合**（集合不在命令里）：它是 FTL 的建链输入，FC 只认 desc 链
  *     （链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
- *     ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
+ *     ftl_cmd_build_descriptors()。本函数只确认「有数据的命令必须已有链」。
  */
 void fc_command_validate(const fc_cmd_s *cmd);
 
@@ -553,7 +553,7 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数；句柄取 cmd->cmd_id → 逐条
  *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
- *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
+ *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_build_descriptors()）
  *   → fc_submit(cmd_id) → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release(cmd_id) 回收。
  *
@@ -677,7 +677,7 @@ extern "C"
     /**
      * @brief 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
      * **建链的唯一入口**：按掩码一次性建链的策略层在 FTL（见
-     * ftl_cmd_configure_descriptors()），本函数即机制体。
+     * ftl_cmd_build_descriptors()），本函数即机制体。
      * 上层自行组装 CW 集合（例如只读离散 CW）：
      * 按自己算出的集合循环调用即可，
      * **链序即数据布局顺序**（FTL 侧拷贝按此顺序遍历链，见 ftl_cmd_read_data）。

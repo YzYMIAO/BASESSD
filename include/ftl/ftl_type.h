@@ -56,8 +56,8 @@ typedef enum FTL_STATUS_E
     FTL_TIMEOUT = 3U, /* 等待超时（ms deadline 到期） */
 } ftl_status_e;
 
-/* 后台档位（load level）：bg_policy 选择并发布、typed 模块入口消费。
- * 三档决定 must-run 之外的任务条数与预算，见 bg_policy.h。 */
+/* 后台档位（load level）：ftl_sched 的后台策略选择并发布、typed 模块入口消费。
+ * 三档决定 must-run 之外的任务条数与预算，见 ftl_sched.h。 */
 typedef enum BG_LEVEL_E
 {
     BG_LEVEL_IDLE   = 0,
@@ -115,7 +115,7 @@ typedef struct FTL_TOPOLOGY_S
  * PAA——那是 NAND 层的表示。
  */
 
-/* pending 完成回调 — 在 ftl_host_io_callback 数据拷贝 + 标志置位后调用。
+/* pending 完成回调 — 在 ftl_host_io_op_callback 数据拷贝 + 标志置位后调用。
  * 定义于此（而非 pending.h），避免 pending.h ↔ ftl_type.h 循环 include。 */
 typedef void (*pending_cb_fn_t)(void *ctx);
 

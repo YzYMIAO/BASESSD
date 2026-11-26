@@ -122,7 +122,7 @@ static const char *ssd_request_status_name(ssd_status_e status)
 /**
  * @brief 子请求完成回调：聚合状态并递减未完成 run 数。
  *
- * 由组的完成通知（pend_group_maybe_complete）调用，一次 host run 恰好一次；
+ * 由组的完成通知（pend_group_maybe_finish）调用，一次 host run 恰好一次；
  * 归零时把 agg_status 写回 completion_status 并置 complete_flag。
  *
  * @param ctx 父请求（ssd_req_s *）

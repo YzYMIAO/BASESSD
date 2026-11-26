@@ -131,7 +131,7 @@ static BOOL hil_wait(const ssd_req_s *req, DWORD timeout_ms)
         }
         ssd_controller_service(&g_ctrl);
 
-        /* 与生产主循环一致：timer 表补 bg_policy credit，CP/Journal/WL 才能推进；
+        /* 与生产主循环一致：timer 表补 sched bg credit，CP/Journal/WL 才能推进；
          * 漏掉它时长写/flush 等待会因 credit 耗尽而超时。 */
         timer_scheduler_poll();
 
@@ -147,7 +147,7 @@ static BOOL hil_wait(const ssd_req_s *req, DWORD timeout_ms)
  * wbuf/cache 仍可能持有在飞状态，必须一起判。 */
 static BOOL hil_ftl_idle(const ftl_ctx_s *ftl)
 {
-    return (ftl->cp_handle->active == 0U) && (ftl->cp_handle->waiting == 0U) && (ftl->mig_handle->job.active == 0U) && (ftl->mig_handle->job.waiting == 0U) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.wr.count == 0U) && (ftl->cache_stream.seq.wr_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U);
+    return (ftl->cp_handle->active == 0U) && (ftl->cp_handle->waiting == 0U) && (ftl->mig_handle->job.active == 0U) && (ftl->mig_handle->job.waiting == 0U) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.write.count == 0U) && (ftl->cache_stream.seq.write_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U);
 }
 
 /* 排空 FTL/FC 在飞资源；bg_suspend 恢复原值（与 /ftl/media/ 同口径）。
@@ -218,8 +218,8 @@ static void hil_quiesce(void)
                          md_handle_is_idle(ftl->metadata_dir),
                          jrn_is_idle(ftl->journal),
                          wb_is_idle(ftl->wbuf),
-                         ftl->cache_stream.seq.wr.count,
-                         ftl->cache_stream.seq.wr_inflight,
+                         ftl->cache_stream.seq.write.count,
+                         ftl->cache_stream.seq.write_inflight,
                          ftl->cache->inflight.load,
                          ftl->cache->inflight.flush,
                          ftl_op_req_count(),
@@ -1012,12 +1012,12 @@ static MunitResult test_hil_instance_init_twice(const MunitParameter params[], v
 
     munit_assert_int(ftl_instance_init(0U), ==, FTL_ERROR);
 
-    /* 第二次 device_prepare 是 no-op：不得改变 controller READY / 实例状态。 */
-    ftl_device_prepare();
+    /* 第二次 device_init 是 no-op：不得改变 controller READY / 实例状态。 */
+    ftl_device_init();
     munit_assert_int(g_ctrl.state, ==, SSD_CONTROLLER_READY);
     munit_assert_not_null(g_ctrl.ftl[0]);
 
-    hil_trace_detail("instance init twice: duplicate -> FTL_ERROR; device_prepare no-op; controller still READY");
+    hil_trace_detail("instance init twice: duplicate -> FTL_ERROR; device_init no-op; controller still READY");
     hil_trace_summary("ftl init: duplicate instance_init rejected in release");
 
     return MUNIT_OK;

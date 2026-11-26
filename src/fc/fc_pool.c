@@ -907,6 +907,7 @@ fc_desc_id_t fc_descriptor_chain_release_all(fc_desc_id_t head)
     fc_pool_chain_release_all(&g_fc_controller, head);
     return FC_DESC_ID_INVALID;
 }
+// #优化# 这个fc_command_release返回值就是void类型的呀不用调用处强转呀
 
 /**
  * @brief 释放命令槽位（FREE 幂等）

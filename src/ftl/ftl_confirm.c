@@ -1,8 +1,21 @@
 /*
- * ftl_confirm.c — 写确认 / 待入账 / retry / dangling 守卫 / host I/O 失败分支
+ * ftl_confirm.c — 写确认 / 待入账 / 透明重试 / dangling 守卫 / host I/O 完成分支
  *
- * 从 ftl.c 拆出的写完成策略模块：Journal→L2P→BST 的确认事务、待入账停滞、
- * 写重试与 dangling 现场。状态仍由 pending / L2P / journal / BST 拥有。
+ * 职责：
+ *   · 写确认事务：Journal → L2P → BST 的落账顺序，两遍式（就绪前置 + 动账）保证不重复记账；
+ *   · 待入账（confirm park）：region 未就绪时命令脱钩、组不结算，由 service 按完成源预算推进；
+ *   · host I/O 完成的四个分支：读成功拷出 + ECC 记账 / 写成功确认 / 读失败托管 RR / 写失败标坏；
+ *   · 透明重试：失败页读回 → 新块建链 → 重发；dangling 守卫：覆盖写前旧块 0 有效的现场。
+ *
+ * 关键机制：
+ *   · confirm 只在确认时刻重查 L2P（不存 old_pba），先 Journal 后 L2P；
+ *   · 待入账超时预算只按「有确定完成时刻的进展」延长，全无进展才结算成写失败；
+ *   · 四个 host I/O 分支不改变组结算权：托管 / 待入账都保持组 pending（命令脱钩）。
+ *
+ * 与其他模块：
+ *   · 上游：ftl_host_io_op_callback 调四个分支；ftl_service 调 ftl_confirm_service；
+ *   · 下游：l2p_cache（行读写 / 就绪判定）、journal（reserve/append）、BST/allocator
+ *     （valid_count 与 trace）、bbt（标坏）、read_recovery（读失败托管）。
  */
 
 #include "assertion.h"
@@ -15,6 +28,7 @@
 
 #include <string.h>
 
+/* 文件级宏 / 类型 / 变量 */
 // dangling 守卫日志：
 // · `st=BAD` 是**预期降级**（旧块已退役，数据本不可读）⇒ 每个旧 gblock 只打一行，
 // 其余 LBA 只累计到该槽位的 lbas（一个块 256 个 LBA，逐条打必刷屏）。
@@ -39,8 +53,76 @@ static DWORD s_write_retry_logged;
 
 static ftl_dangling_entry_s s_dangling[FTL_DANGLING_SLOTS];
 
-/* 定义在下方「确认路径」之后；三个减法入口（覆盖写 / 填洞未映射 / TRIM）共用。 */
+/* dangling 聚合槽的轮转游标：BAD 退役块超过槽数时循环覆盖。 */
 static BYTE s_dangling_next;
+
+/* ── dangling ── */
+
+/**
+ * @brief 覆盖/解除映射前的**常驻守卫**：L2P 指向的旧块在 BST 里 0 有效时留现场。
+ *
+ * 触发条件：`valid_count == 0` 却仍被 L2P 引用。此后每次覆盖写该 LBA 都会撞
+ * `bst.h` 的 `valid_count > 0U` 断言；运行期被 `sub_valid_if_live` 静默夹住，
+ * 但 journal 条目照样落盘 ⇒ 下次开机回放 `pfr_valid_remove` 判**下溢** ⇒ `ctx_ok=0`
+ * ⇒ 整份块元数据快照作废（full metadata rebuild）。这是「重建漏认 / 分配器复用
+ * 活块」类缺陷的**唯一故障点**，三个减法入口（覆盖写 / 填洞未映射 / TRIM）都必须过它。
+ *
+ * @param ftl     FTL 实例
+ * @param l       LBA（日志定位）
+ * @param old_pba L2P 里记录的旧物理地址
+ * @param new_g   本次写入的新 gblock（仅用于日志对照）
+ *
+ * @note 状态一眼可判：BAD=坏块（预期降级）；FREE=已归还空闲池（会被复用，**丢数据**）；
+ *       LOG=元数据日志块（分类判据过宽）；NONE=重建从未认领（页 0 判空/未扫描到）。
+ */
+void ftl_dangling_check(ftl_ctx_s *ftl, DWORD l, DWORD old_pba, WORD new_g)
+{
+    const WORD gob = ftl_pba_gblock(old_pba);
+
+    if (ftl->alloc.blocks[gob].valid_count != 0U)
+    {
+        return;
+    }
+
+    const bst_state_e old_st = ftl_block_state(&ftl->alloc.blocks[gob]);
+
+    ftl->stats.dangling_total++;
+
+    if (old_st == FTL_BLOCK_STATE_BAD)
+    {
+        // 预期降级：旧块已退役。每个旧 gblock 只打一行，其余 LBA 只累计。
+        ftl_dangling_entry_s *slot = NULL;
+
+        for (BYTE i = 0U; i < FTL_DANGLING_SLOTS; i++)
+        {
+            if ((s_dangling[i].lbas != 0U) && (s_dangling[i].g == gob))
+            {
+                slot = &s_dangling[i];
+                break;
+            }
+        }
+
+        if (slot == NULL)
+        {
+            slot = &s_dangling[s_dangling_next % FTL_DANGLING_SLOTS];
+            s_dangling_next++;
+            slot->g         = gob;
+            slot->first_lba = l;
+            slot->lbas      = 0U;
+
+            LOGW(LOG_TAG_FTL "dangling g=%hu first_lba=%lu st=BAD newg=%hu (retired; later LBAs aggregated)\r\n", gob, l, new_g);
+        }
+
+        slot->lbas++;
+        return;
+    }
+
+    // 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。
+    // 名称转换放在实参里：限流抑制时完全不求值（本函数在写确认热路径上）。
+    LOGE_RL(&s_dangling_log, LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s", l, old_pba, gob, ftl_block_state_name(old_st), ftl->alloc.blocks[gob].sb_id, new_g, ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g])));
+}
+
+/* ── confirm ── */
 
 /**
  * @brief 待入账的依赖是否**确实有待推进的工作**。
@@ -57,7 +139,7 @@ static BYTE s_dangling_next;
  *       陷阱：Journal 换块擦除提交失败期间 `phase` 仍是 IDLE，只看 `jrn_is_idle()` 会漏掉
  *       这一类（表现为 `confirm park timeout`）。
  */
-static BOOL ftl_confirm_progress_pending(const ftl_ctx_s *ftl)
+static BOOL ftl_confirm_progress_is_pending(const ftl_ctx_s *ftl)
 {
     // 非待入账的 pending 项 = 活命令 / RR job / cache 成员：都有 NAND 完成点或超时。
     // 待入账项自己不算（否则自己等自己）。
@@ -122,7 +204,7 @@ ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l
 
     const DWORD mask = d->cw_bitmap & ((1U << FTL_LBA_PER_PAIR) - 1U);
 
-    if ((mask != 0U) && (l2p_entries_ready(ftl->cache, d->lba, mask) == false))
+    if ((mask != 0U) && (l2p_entries_is_ready(ftl->cache, d->lba, mask) == false))
     {
         // 返回 AGAIN 交由待入账重试：预算是否延长由 `ftl_confirm_service` 按
         // 「确有可推进的工作」判定。加载**起不动**
@@ -137,7 +219,7 @@ ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l
     // Journal 容量/坐标在动账前判定：不足或页型不符时只起异步刷页并返回 false，
     // 本函数直接待入账重试，绝不在这里同步刷 Journal（那会重入完成派发）。
     // 按最坏情况（mask 置位数）预留并留 1 个空槽 ⇒ 随后的 append 不会触发页满分支。
-    // 两种页型走各自的入口：顺序写确认 = jrn_seq_ready + jrn_append_seq（4B 隐式
+    // 两种页型走各自的入口：顺序写确认 = jrn_seq_is_ready + jrn_append_seq（4B 隐式
     // LBA），其余（wbuf / GC / page0）= jrn_reserve + jrn_append（16B 显式 LBA）。
     const BYTE n_entries = ftl_cw_bitmap_popcount(mask);
     // cache program 页（cache_role != NONE）属于顺序写流 ⇒ Journal 走顺序映射页
@@ -146,7 +228,7 @@ ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l
 
     if (n_entries != 0U)
     {
-        const BOOL reserved = (seq_page == true) ? jrn_seq_ready(ftl->journal, d->lba, n_entries)
+        const BOOL reserved = (seq_page == true) ? jrn_seq_is_ready(ftl->journal, d->lba, n_entries)
                                                  : jrn_reserve(ftl->journal, n_entries);
 
         if (reserved == false)
@@ -191,7 +273,7 @@ ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l
 
         if (seq_page == true)
         {
-            // 顺序页只记 new_pba；坐标/容量已由 jrn_seq_ready 全批判过 ⇒ 这里的
+            // 顺序页只记 new_pba；坐标/容量已由 jrn_seq_is_ready 全批判过 ⇒ 这里的
             // 失败是结构性簿记错误。丢弃条目会让已确认的写在掉电后丢映射，
             // 故 debug 留现场（C7：传错 lba 即可构造失败），release 也必须留下日志
             // （H14：ASSERT 与运行期留痕不是二选一）。
@@ -248,68 +330,111 @@ ftl_status_e ftl_confirm_write(ftl_ctx_s *ftl, const ftl_page_desc_s *d, BOOL *l
 }
 
 /**
- * @brief 覆盖/解除映射前的**常驻守卫**：L2P 指向的旧块在 BST 里 0 有效时留现场。
- *
- * 触发条件：`valid_count == 0` 却仍被 L2P 引用。此后每次覆盖写该 LBA 都会撞
- * `bst.h` 的 `valid_count > 0U` 断言；运行期被 `sub_valid_if_live` 静默夹住，
- * 但 journal 条目照样落盘 ⇒ 下次开机回放 `pfr_valid_sub` 判**下溢** ⇒ `ctx_ok=0`
- * ⇒ 整份块元数据快照作废（full metadata rebuild）。这是「重建漏认 / 分配器复用
- * 活块」类缺陷的**唯一故障点**，三个减法入口（覆盖写 / 填洞未映射 / TRIM）都必须过它。
- *
- * @param ftl     FTL 实例
- * @param l       LBA（日志定位）
- * @param old_pba L2P 里记录的旧物理地址
- * @param new_g   本次写入的新 gblock（仅用于日志对照）
- *
- * @note 状态一眼可判：BAD=坏块（预期降级）；FREE=已归还空闲池（会被复用，**丢数据**）；
- *       LOG=元数据日志块（分类判据过宽）；NONE=重建从未认领（页 0 判空/未扫描到）。
+ * @brief 初始化本模块的日志限流对象（NOLOAD，上电/软复位需显式复位）。
  */
-void ftl_dangling_check(ftl_ctx_s *ftl, DWORD l, DWORD old_pba, WORD new_g)
+void ftl_confirm_init(void)
 {
-    const WORD gob = ftl_pba_gblock(old_pba);
-
-    if (ftl->alloc.blocks[gob].valid_count != 0U)
-    {
-        return;
-    }
-
-    const bst_state_e old_st = ftl_block_state(&ftl->alloc.blocks[gob]);
-
-    ftl->stats.dangling_total++;
-
-    if (old_st == FTL_BLOCK_STATE_BAD)
-    {
-        // 预期降级：旧块已退役。每个旧 gblock 只打一行，其余 LBA 只累计。
-        ftl_dangling_entry_s *slot = NULL;
-
-        for (BYTE i = 0U; i < FTL_DANGLING_SLOTS; i++)
-        {
-            if ((s_dangling[i].lbas != 0U) && (s_dangling[i].g == gob))
-            {
-                slot = &s_dangling[i];
-                break;
-            }
-        }
-
-        if (slot == NULL)
-        {
-            slot = &s_dangling[s_dangling_next % FTL_DANGLING_SLOTS];
-            s_dangling_next++;
-            slot->g         = gob;
-            slot->first_lba = l;
-            slot->lbas      = 0U;
-
-            LOGW(LOG_TAG_FTL "dangling g=%hu first_lba=%lu st=BAD newg=%hu (retired; later LBAs aggregated)\r\n", gob, l, new_g);
-        }
-
-        slot->lbas++;
-        return;
-    }
-
-    // 非预期：FREE/LOG/NONE 都可能意味着重建/分配器/分类器缺陷。
-    // 名称转换放在实参里：限流抑制时完全不求值（本函数在写确认热路径上）。
-    LOGE_RL(&s_dangling_log, LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%hu st=%s sb=%hu newg=%hu nst=%s", l, old_pba, gob, ftl_block_state_name(old_st), ftl->alloc.blocks[gob].sb_id, new_g, ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[new_g])));
+    log_ratelimit_init(&s_dangling_log, LOG_RATE_INTERVAL_MS);
+    log_ratelimit_init(&s_confirm_log, LOG_RATE_SLOW_INTERVAL_MS);
+    s_write_retry_logged = 0U;
+    memset(s_dangling, 0, sizeof(s_dangling));
+    s_dangling_next = 0U;
 }
+
+/**
+ * @brief 写确认服务：推进**待入账**的写确认（ftl_service 的 [svc] 步）。
+ *
+ * @param ftl 实例。
+ *
+ * @note 循环在 FTL（控制器写管线的形态：映射更新由 FTL 执行），pending 只提供
+ *       表原语；结算顺序不变量由 pend_confirm_settle 维护。
+ */
+void ftl_confirm_service(ftl_ctx_s *ftl)
+{
+    const DWORD now_ms = platform_now_ms();
+
+    if (pend_confirm_count(&ftl->pending) == 0U)
+    {
+        ftl_cache_demand_window_clear(ftl); /* 没有 parked 确认：窗口上下文结束 */
+    }
+
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        if (pend_confirm_is_parked(&ftl->pending, i) == false)
+        {
+            continue;
+        }
+
+        pend_req_s *pending = &ftl->pending.slots[i];
+
+        if (pending->park_ms == 0U)
+        {
+            // 懒初始化待入账时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
+            // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
+            pending->park_ms = now_ms;
+        }
+
+        ftl_page_desc_s d;
+
+        d.lba       = pending->lba;
+        d.new_pba   = pending->new_pba;
+        d.new_pba1  = pending->new_pba1;
+        d.cw_bitmap = pending->cw_bitmap;
+        d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
+
+        BOOL               l2p_blocked = false;
+        const ftl_status_e st          = ftl_confirm_write(ftl, &d, &l2p_blocked);
+
+        if (st == FTL_AGAIN)
+        {
+            // confirm 被 L2P 阻塞（LOADING / FLUSHING / CMT 写回容量不足）且没有在飞
+            // load ⇒ 开独立提交窗口。不能用 `l2p_is_resident` 判断：它对 FLUSHING
+            // 返回 true，而 `l2p_entries_is_ready` 对 FLUSHING 返回 false，会漏掉正是
+            // “写回被门控挡住”的失败路径。`l2p_blocked` 由 ftl_confirm_write 精确回传。
+            if ((l2p_blocked != false) && (ftl->cache->inflight.load == 0U) &&
+                (ftl_cache_demand_window_open(ftl, now_ms) != false))
+            {
+                pending->park_ms = now_ms; /* 窗口期间不算 confirm 超时 */
+                continue;
+            }
+
+            // 预算按「无进展时长」计：确有完成源在推进
+            // （region 加载或写回在飞、Journal 页写或换块擦、任一非待入账 pending 项）⇒
+            // 刷新起点；全都没有才是结构性卡死，让 100 ms 到期暴露成一次写失败。
+            if (ftl_confirm_progress_is_pending(ftl) == true)
+            {
+                pending->park_ms = now_ms;
+                continue;
+            }
+
+            if (pend_confirm_is_expired(pending, now_ms) == false)
+            {
+                continue; /* region 仍在加载：保留待入账，下轮再来 */
+            }
+
+            // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
+            // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
+            // 日志必须报「同时有多少条在等」——只打扫描到的第一条（常是 idx=0）会被
+            // 误读成「只有一个 region 卡住」。计数放进实参，只在真正打印时统计。
+            LOGE_RL(&s_confirm_log, LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu", pending->lba, i, pend_confirm_count(&ftl->pending));
+        }
+        else if (st != FTL_OK)
+        {
+            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
+        }
+
+        if (st == FTL_OK)
+        {
+            ftl_cache_demand_window_clear(ftl); /* 本确认已推进，窗口目的达成 */
+        }
+
+        const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+
+        pend_confirm_settle(&ftl->pending, i, status);
+    }
+}
+
+/* ── host_io ── */
 
 /**
  * @brief 读成功：按链序把数据拷给 caller。
@@ -341,7 +466,7 @@ ssd_status_e ftl_host_io_read_ok(ftl_ctx_s *ftl, fc_cmd_s *cmd, pend_req_s *pend
     // 覆盖**两个独立块**，第二块的趋势会漏记。
     // ⚠ 须在 fc_command_release(cmd->cmd_id) 之前调用——desc 释放后失效。
     ftl_cmd_block_ecc_s blocks[PLANE_NUM];
-    const BYTE          nblocks = ftl_cmd_block_ecc_list(cmd, blocks, PLANE_NUM);
+    const BYTE          nblocks = ftl_cmd_block_ecc_collect(cmd, blocks, PLANE_NUM);
 
     for (BYTE i = 0U; i < nblocks; i++)
     {
@@ -492,6 +617,8 @@ void ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc_cmd_st
     (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
 }
 
+/* ── write ── */
+
 /**
  * @brief 写失败后把同一页重发到新块（透明重试，主流 program-fail 恢复）
  *
@@ -534,7 +661,7 @@ ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_s *old_
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (bit_mask_any(pending->cw_bitmap, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
+        if (bit_mask_any(pending->cw_bitmap, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_pba_state(&ftl->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
             alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
@@ -554,7 +681,7 @@ ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_s *old_
     cmd->config = old_cmd->config;
     cmd->meta   = pending->lba;
 
-    ftl_status_e st = ftl_cmd_setup_ppa_pair_cw(cmd, pba, pending->cw_bitmap);
+    ftl_status_e st = ftl_cmd_build_ppa_pair_cw(cmd, pba, pending->cw_bitmap);
 
     if (st == FTL_OK)
     {
@@ -586,109 +713,4 @@ ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_s *old_
     }
 
     return FTL_OK;
-}
-
-/**
- * @brief 初始化本模块的日志限流对象（NOLOAD，上电/软复位需显式复位）。
- */
-void ftl_confirm_init(void)
-{
-    log_ratelimit_init(&s_dangling_log, LOG_RATE_INTERVAL_MS);
-    log_ratelimit_init(&s_confirm_log, LOG_RATE_SLOW_INTERVAL_MS);
-    s_write_retry_logged = 0U;
-    memset(s_dangling, 0, sizeof(s_dangling));
-    s_dangling_next = 0U;
-}
-
-/**
- * @brief 写确认服务：推进**待入账**的写确认（ftl_service 的 [svc] 步）。
- *
- * @param ftl 实例。
- *
- * @note 循环在 FTL（控制器写管线的形态：映射更新由 FTL 执行），pending 只提供
- *       表原语；结算顺序不变量由 pend_confirm_settle 维护。
- */
-void ftl_confirm_service(ftl_ctx_s *ftl)
-{
-    const DWORD now_ms = platform_now_ms();
-
-    if (pend_confirm_get_count(&ftl->pending) == 0U)
-    {
-        ftl_cache_demand_window_clear(ftl); /* 没有 parked 确认：窗口上下文结束 */
-    }
-
-    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
-    {
-        if (pend_confirm_is_parked(&ftl->pending, i) == false)
-        {
-            continue;
-        }
-
-        pend_req_s *pending = &ftl->pending.slots[i];
-
-        if (pending->park_ms == 0U)
-        {
-            // 懒初始化待入账时刻。⚠ 平台时钟缺失时 now_ms 恒 0 ⇒ park_ms 保持 0、
-            // 超时永不触发（有界失败依赖平台时钟已在 main 的装配阶段注册）。
-            pending->park_ms = now_ms;
-        }
-
-        ftl_page_desc_s d;
-
-        d.lba       = pending->lba;
-        d.new_pba   = pending->new_pba;
-        d.new_pba1  = pending->new_pba1;
-        d.cw_bitmap = pending->cw_bitmap;
-        d.seq_page  = (pending->cache_role != PEND_CACHE_ROLE_NONE);
-
-        BOOL               l2p_blocked = false;
-        const ftl_status_e st          = ftl_confirm_write(ftl, &d, &l2p_blocked);
-
-        if (st == FTL_AGAIN)
-        {
-            // confirm 被 L2P 阻塞（LOADING / FLUSHING / CMT 写回容量不足）且没有在飞
-            // load ⇒ 开独立提交窗口。不能用 `l2p_is_resident` 判断：它对 FLUSHING
-            // 返回 true，而 `l2p_entries_ready` 对 FLUSHING 返回 false，会漏掉正是
-            // “写回被门控挡住”的失败路径。`l2p_blocked` 由 ftl_confirm_write 精确回传。
-            if ((l2p_blocked != false) && (ftl->cache->inflight.load == 0U) &&
-                (ftl_cache_demand_window_open(ftl, now_ms) != false))
-            {
-                pending->park_ms = now_ms; /* 窗口期间不算 confirm 超时 */
-                continue;
-            }
-
-            // 预算按「无进展时长」计：确有完成源在推进
-            // （region 加载或写回在飞、Journal 页写或换块擦、任一非待入账 pending 项）⇒
-            // 刷新起点；全都没有才是结构性卡死，让 100 ms 到期暴露成一次写失败。
-            if (ftl_confirm_progress_pending(ftl) == true)
-            {
-                pending->park_ms = now_ms;
-                continue;
-            }
-
-            if (pend_confirm_is_expired(pending, now_ms) == false)
-            {
-                continue; /* region 仍在加载：保留待入账，下轮再来 */
-            }
-
-            // 限流：元数据日志区卡死时，每个 host 写都会超时（100ms 一个），
-            // 逐条 ERR 会刷屏；5s 一行仍能看见问题。
-            // 日志必须报「同时有多少条在等」——只打扫描到的第一条（常是 idx=0）会被
-            // 误读成「只有一个 region 卡住」。计数放进实参，只在真正打印时统计。
-            LOGE_RL(&s_confirm_log, LOG_TAG_FTL "confirm park timeout lba=%lu idx=%hhu parked=%hu", pending->lba, i, pend_confirm_get_count(&ftl->pending));
-        }
-        else if (st != FTL_OK)
-        {
-            LOGE(LOG_TAG_FTL "confirm failed lba=%lu idx=%hhu\r\n", pending->lba, i);
-        }
-
-        if (st == FTL_OK)
-        {
-            ftl_cache_demand_window_clear(ftl); /* 本确认已推进，窗口目的达成 */
-        }
-
-        const ssd_status_e status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
-
-        pend_confirm_settle(&ftl->pending, i, status);
-    }
 }

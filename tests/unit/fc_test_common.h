@@ -65,7 +65,7 @@
  *
  * cw_bitmap 是**字面位图**：置 1 的位 = 要访问的 CW，0 = 一个都不访问，没有
  * 「0 = 本命令 plane 段内全部 CW」的重载 ⇒ 整段访问必须**显式**算出来。
- * 它是 ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的**形参**（建链的输入，用完即弃），
+ * 它是 ftl_cmd_build_descriptors(cmd, cw_bitmap) 的**形参**（建链的输入，用完即弃），
  * 不存进命令结构体。helper 按 plane_bitmap 算出「选中 plane 段内的
  * 全部 CW」（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）当实参传进去。好处是它与 helper
  * 自己推出的 multi_plane / pba.plane 互为**交叉检查**——两者不一致时
@@ -309,7 +309,7 @@ void test_read_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
 
 /** 跨块 pair 版：两 plane 各在一个 block（Policy B 的真实形态，生产 FTL 恒如此）。
  *   与上面同块版的差别只有地址来源：行地址逐 plane 取 blocks[plane]（走
- *   ftl_cmd_setup_ppa_pair_cw，与生产同一个建链入口），故 meta 只能取整对共用的
+ *   ftl_cmd_build_ppa_pair_cw，与生产同一个建链入口），故 meta 只能取整对共用的
  *   LBA 口径（一个命令只有一个 command->meta）。
  *   覆盖点：05h-E0h 的 plane 选择与 31h 预取推进在「两 plane 不同块」下是否仍按页 +1。 */
 fc_cmd_s *test_cmd_build_pair_cross_block(const WORD blocks[PLANE_NUM], WORD page_index, DWORD lba_meta, const fc_cmd_cfg_s *config);

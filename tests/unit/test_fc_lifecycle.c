@@ -36,7 +36,7 @@
  *
  * 依赖：
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
- *   - 建链走共享夹具的 test_cmd_build()（FTL 策略层 ftl_cmd_configure_descriptors，
+ *   - 建链走共享夹具的 test_cmd_build()（FTL 策略层 ftl_cmd_build_descriptors，
  *     「按掩码建整条链」）或建立在它之上的页 / block helper。
  *     ⚠ cw_bitmap 是**字面位图**（置 1 = 要访问该 CW，0 = 空集），不展开成
  *       「本命令 plane 段内的全部 CW」。凡"只要 1 条 desc"的用例必须显式给出该 CW
@@ -90,7 +90,7 @@
  *    ② cmd->meta 用页 PBA：页地址整体进 META，数据路径 Pass 4 ② 能抓到
  *       「读到了别的页」。
  *    ③ 建链统一走共享夹具的 test_cmd_build()（FTL 策略层
- *       ftl_cmd_configure_descriptors），不手写 config.cw_count。
+ *       ftl_cmd_build_descriptors），不手写 config.cw_count。
  *
  *  setup / teardown 见套件表：test_setup / test_tear_down。
  **************************************************************************/
@@ -2381,7 +2381,7 @@ static WORD l3_buf_used(void)
 }
 
 /** 模式 10/11 的建链：上层先 fc_buffer_alloc()，再把 id 传进 5 参入口。
- * ⚠ 不能用 test_cmd_build —— 它走 ftl_cmd_configure_descriptors（4 参入口，即
+ * ⚠ 不能用 test_cmd_build —— 它走 ftl_cmd_build_descriptors（4 参入口，即
  *   buf_own = FC 申请那条路）。此处照 test_cmd_try_build 的样子手工建。 */
 static fc_cmd_s *l3_buf_own_build_upper(fc_buf_id_t buffer_id, BYTE buf_own)
 {

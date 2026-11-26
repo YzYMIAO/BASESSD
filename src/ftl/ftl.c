@@ -1,55 +1,24 @@
 /*
- * ftl.c — FTL 顶层（初始化 / 后台调度服务主循环 / 子操作下发 / 对外读写入口）
+ * ftl.c — FTL 组合根（初始化装配 / 服务主循环 / 序列守卫 / 对外门面）
  *
  * 职责：
- *   FTL 的对外门面与主循环——ftl_init 装配各子模块；ftl_service 是**服务主循环**
- *   （NAND 泵 → 完成泵 → scheduler host 补发 → 工作量配额后台调度）；
- *   ftl_submit_read/write 把一条 host 请求拆成多个 FC 子操作下发；
- *   ftl_flush_begin/step / ftl_trim_begin/step 供 HIL 调用（均为异步推进）。
+ *   · 启动装配：全局 once 复位 → 设备级完成表/路由/L2P cache → 逐实例 workspace 绑定与模块 init；
+ *   · 服务主循环：ftl_service_pump（全局 NAND 泵 + 完成泵）与 ftl_service（逐实例写确认 /
+ *     host 补发 / 序列守卫 / wbuf 空闲 flush / 后台调度）；
+ *   · cache 序列生命周期守卫（排空 / 空闲超时 / 让出 / 关闭）与紧凑 die 表。
  *
- * 与子模块的分工：
- *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
- *   pending.c          —— 子操作登记 + 组完成聚合（一条 host 请求 = 一个 group）。
- *   ftl_op.c           —— request 表 + 实例路由 + 提交 + CQ 排空/派发（[pump] 完成泵）。
- *   其余模块（gc / wl / journal / checkpoint / bbt / l2p_cache）各司其职，
- *   见各自文件头。
+ * 关键机制：
+ *   · 初始化顺序是承重的：BBT BAD 集 → 元数据候选池 → Journal/Directory/CP workspace 绑定；
+ *     全部 NOLOAD 数组在绑定前显式 memset；
+ *   · once 守卫（设备 / 每实例 / timer）防止重复初始化静默清表；
+ *   · 多实例：泵每轮一次（全局），ftl_service 必须逐实例调用；序列门控只在 owner 组
+ *     在飞子操作归零时放开 LUN，超时兜底放锁并留日志。
  *
- * 服务主循环（全局泵 + 每实例服务）：
- *   [pump] 推进 NAND   fc_service × NAND_SUBMIT_BUDGET
- *   [pump] 完成泵      ftl_op_drain —— 按 request.op 派发到服务函数数组
- *   —— 以上在 ftl_service_pump（实例无关，每轮一次）；以下在 ftl_service（每实例）——
- *   [svc]  元数据候选池重算 / 写确认结算 / cache 序列确认 / host 补发 /
- *          序列收尾 / wbuf 空闲 flush / 后台调度（bg_policy_service）
- *   步骤清单的唯一定义见 include/ftl/ftl.h 的 ftl_service() 契约。
- *
- * 文件结构（与下方分区注释一一对应）：
- *   1. 内部辅助        写确认（ftl_confirm_write / ftl_confirm_service）/
- *                      ftl_host_io_write_ok / 写重试 / cache 写序列状态机
- *   2. host I/O 完成   四个完成分支 + ftl_host_io_callback
- *   3. cache program   host cache program 序列（早回执 + 已编程页表）
- *   4. padding END     写序列有序收尾（ftl_cache_pad_submit / callback）
- *   5. 对外接口        ftl_global_init / ftl_init
- *   6. 紧凑 die 表      ftl_topology_build（扫描结果的 FTL 调度坐标）
- *   7. 初始化契约自检  debug-only 的「初始化后不可变」绑定审计
- *   8. 服务主循环      ftl_service_pump / ftl_service
- *   9. 子操作下发      ftl_issue_subop / ftl_host_group_drain + ftl_submit_read / write
- *  10. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
- *
- * ⚠ 后台调度在 `ftl/bg_policy.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
- *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / 后台调度入口 bg_policy_service；
- *   通用引擎也在同一文件。本文件不持有任何后台策略。
- *
- * ⚠ 页打包写缓冲在 `ftl/wbuf.c`（wbuf.h 定义 wb_handle_s），本文件只调用其接口。
- *
- * ⚠ 回收动作在 `ftl/migrate.c`：GC / WL / 预测性退役共用一台异步搬移 job
- *   （mig_gc_begin / mig_wl_begin / mig_predict_begin / mig_handle）。触发求值在
- *   `ftl/bg_policy.c`，写路径的按需 GC 在
- *   ftl_issue_subop；本文件不直接触发搬移。
- *
- * ⚠ 多实例：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
- *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
- *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 host 补发 / 后台调度——
- *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进。
+ * 与其他模块：
+ *   · 上游：main.c 调 global_init / topology_build / device_init / instance_init /
+ *     timer_tasks_start / service_pump / service；
+ *   · 下游：pending、ftl_op（完成泵/路由）、wbuf、cache_batch、journal、checkpoint、
+ *     metadata、allocator、BBT、migrate、read_recovery、scheduler。
  */
 
 #include "ftl.h"
@@ -63,8 +32,7 @@
 #endif
 #include "fc_interface.h"
 #include "ftl_fc_interface.h"
-#include "ftl_op.h"        /* ftl_op_submit / FTL_OP_* */
-#include "lifetime_port.h" /* 终身计数接线（非热对象） */
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
 #include "log.h"
 #include "metadata_job.h"
 #include "pending.h"
@@ -76,6 +44,17 @@
 
 #include <string.h>
 
+/* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充轮次）。 */
+#define NAND_SUBMIT_BUDGET (4U)
+
+/* cache 序列跨 chunk 等待下一 chunk 的上限：超过即关闭序列状态，避免门控永久
+ * 挡住该 LUN。1 s 是宽松上界（时钟缺失时不计时）。 */
+#define FTL_CACHE_SEQ_IDLE_MS (1000U)
+
+/* 窗口已提交、命令却迟迟不排空的兜底：超过即强制放开 LUN 门控（异常路径，留 WRN）。 */
+#define FTL_CACHE_SEQ_DRAIN_STALL_MS (1000U)
+
+/* 文件级变量 */
 // FTL 每 I/O 热数据（实例描述符）：定义与内存域（DTCM）都归本模块。
 // CPU-only：NAND/FC 的 DMA buffer 不在这里，DMA1/2 也访问不到 DTCM。
 // `.dtcm_data` 是 NOLOAD ⇒ ftl_init 对每个实例显式 memset。
@@ -99,17 +78,15 @@ static DWORD s_bbt_last_ms; /* BBT 起新 job 的节拍时间戳（NOLOAD，同�
 // log_ratelimit_s，本文件只保留一套限流类型（C9）。
 static log_ratelimit_s s_seq_drain_stall_log; /* 序列 draining 兜底放锁（5 s） */
 
-/* ══════════════════════════════════════════════════════════════
- * 紧凑 die 表（扫描结果的 FTL 调度坐标）
- *
- * 板级 target 扫描（armed 之前）只给出哪些 (ch,ce) target 存在、
- * logical_units 多少；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
- * ══════════════════════════════════════════════════════════════ */
+// 紧凑 die 表（扫描结果的 FTL 调度坐标）：板级 target 扫描只给出存在的 (ch,ce) target
+// 与 logical_units；这里给实际存在的 LUN 分配紧凑 die 号，并填两张逆映射表。
 BYTE g_die_count;
 
 BYTE g_chcelun_table[CH_NUM][CE_NUM][LUN_NUM];
 
 ftl_topo_s g_die_table[FTL_DIE_MAX];
+
+/* ── periodic ── */
 
 /**
  * @brief 后台周期节拍：补调度配额、置 L2P/BBT 到期标志
@@ -121,7 +98,7 @@ ftl_topo_s g_die_table[FTL_DIE_MAX];
  */
 static void ftl_periodic_tick(ftl_ctx_s *ftl, BOOL bbt_due)
 {
-    bg_policy_refill(&ftl->bg);
+    ftl_sched_bg_refill(&ftl->sched);
     ftl->l2p_flush_due = 1U;
 
     if (bbt_due != false)
@@ -130,16 +107,34 @@ static void ftl_periodic_tick(ftl_ctx_s *ftl, BOOL bbt_due)
     }
 }
 
+/* ── bg ── */
+
 /**
- * @brief 注册本实例的 GC/WL/预测性退役周期求值任务
+ * @brief 后台周期节拍任务（每 L2P_FLUSH_INTERVAL_MS 一次）
  *
- * @param ftl 已初始化的实例
- * @return true = 注册成功；false = 定时器任务表满
+ * @param context 未使用
+ * @param now_ms  未使用（时间由 platform_now_ms 提供）
  */
-static BOOL ftl_mig_timer_register(ftl_ctx_s *ftl)
+static void ftl_bg_tick_task(void *context, DWORD now_ms)
 {
-    return mig_timer_register(ftl->mig_handle);
+    (void)context;
+    (void)now_ms;
+
+    const DWORD now     = platform_now_ms();
+    const BOOL  bbt_due = (s_bbt_last_ms == 0U) || ((now - s_bbt_last_ms) >= BBT_FLUSH_INTERVAL_MS);
+
+    if (bbt_due != false)
+    {
+        s_bbt_last_ms = now;
+    }
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        ftl_periodic_tick(&g_ftl[die], bbt_due);
+    }
 }
+
+/* ── cache ── */
 
 /**
  * @brief 序列守卫：两件事 —— ① `draining` 的排空判定；② chunk 边界序列等下一 chunk 的
@@ -154,7 +149,7 @@ static BOOL ftl_mig_timer_register(ftl_ctx_s *ftl)
  *       END 收尾，不丢提前回执页）；读序列直接释放（不发 LAST）。
  *       两者时钟缺失（now_ms == 0）时都不计时。
  */
-static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
+static void SSD_CODE_FAST ftl_cache_seq_idle_check(ftl_ctx_s *ftl)
 {
     // 排空守卫：窗口已提交、命令仍在飞 ⇒ 门控继续关着，直到所有者组的在飞子操作
     // 归零（或 1 s 兜底：命令卡死时不能把 LUN 永久锁死；放锁时留 WRN 现场）。
@@ -236,94 +231,7 @@ static void SSD_CODE_FAST ftl_cache_seq_idle_guard(ftl_ctx_s *ftl)
     }
 }
 
-/**
- * @brief 后台周期节拍任务（每 L2P_FLUSH_INTERVAL_MS 一次）
- *
- * @param context 未使用
- * @param now_ms  未使用（时间由 platform_now_ms 提供）
- */
-static void ftl_bg_tick_task(void *context, DWORD now_ms)
-{
-    (void)context;
-    (void)now_ms;
-
-    const DWORD now     = platform_now_ms();
-    const BOOL  bbt_due = (s_bbt_last_ms == 0U) || ((now - s_bbt_last_ms) >= BBT_FLUSH_INTERVAL_MS);
-
-    if (bbt_due != false)
-    {
-        s_bbt_last_ms = now;
-    }
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        ftl_periodic_tick(&g_ftl[die], bbt_due);
-    }
-}
-
-/**
- * @brief 让出设备序列：写序列请求 padding 收尾，读序列直接放弃（不发 LAST）。
- *
- * @param ftl 实例
- *
- * @note 需要写 Journal/L2P 的前台控制路径（flush / trim）在入口调用：序列不退出，
- *       这些元数据提交会被门控，flush/trim 只能等空闲守卫。写序列不能 abort
- *       （提前回执页未确认），所以走 padding END。
- */
-void SSD_CODE_FAST ftl_cache_seq_yield(ftl_ctx_s *ftl)
-{
-    if (ftl->cache_stream.seq.active == false)
-    {
-        return;
-    }
-
-    if (ftl->cache_stream.seq.kind == FTL_CACHE_SEQ_WRITE)
-    {
-        ftl->cache_stream.seq.close_requested = true;
-    }
-    else
-    {
-        ftl_cache_seq_release(ftl);
-    }
-}
-
-/**
- * @brief 组被弃/失败时关闭它持有的 cache 序列。
- *
- * @param ftl 实例。
- * @param gi  组下标。
- *
- * @note 不关闭会让序列门控永久挡住该 LUN 的所有提交（门控只认 owner_submit）。
- */
-void SSD_CODE_FAST ftl_cache_seq_close(ftl_ctx_s *ftl, WORD gi)
-{
-    if ((ftl->cache_stream.seq.active == true) && (ftl->cache_stream.seq.owner_gi == gi))
-    {
-        ftl_cache_seq_release(ftl);
-    }
-}
-
-/**
- * @brief 复位 ftl.o 的文件级静态（NOLOAD 段不清零）
- *
- * 只调用一次，且必须在所有实例 ftl_init 之前。
- */
-void ftl_global_init(void)
-{
-    // 公共 boot 入口的 once 守卫与后台节拍时间戳：NOLOAD 段随机残留会让启动被
-    // 误判为「重复初始化」（直接拒绝）或让首次 BBT 节拍不确定。
-    s_device_prepared = false;
-    s_timers_started  = false;
-    s_bbt_last_ms     = 0U;
-    memset(s_instance_initialized, 0, sizeof(s_instance_initialized));
-
-    // NOLOAD 段不清零：限流对象的 interval 必须在这里装好（last/suppressed 归零）。
-    log_ratelimit_init(&s_seq_drain_stall_log, LOG_RATE_SLOW_INTERVAL_MS);
-    ftl_flush_trim_init();
-    ftl_host_io_init();
-    ftl_confirm_init();
-    ftl_cache_wr_init();
-}
+/* ── topology ── */
 
 /**
  * @brief 由上电扫描结果构建紧凑 die 表
@@ -403,6 +311,8 @@ BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM])
     return true;
 }
 
+/* ── init ── */
+
 /**
  * @brief 初始化 FTL 实例
  *
@@ -461,7 +371,7 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     // ⚠ 这里**不**调 ftl_op_init()：request 表与实例路由表都是**全局**资源
     // （ftl_op.c 的 file-static），而本函数是**逐实例**调用的 ——
     // 在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉已设好的路由表。
-    // 该函数由 ftl_device_prepare 在**所有实例 boot 之前**调用一次。
+    // 该函数由 ftl_device_init 在**所有实例 boot 之前**调用一次。
     // （完成派发不需要在此注册 handler：request 表里带 op，g_op_callbacks[] 是
     // 编译期常量数组，见 ftl_op.c；request 表只回答"这条命令的私有状态在哪"。）
 
@@ -526,8 +436,8 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
 
     // cache_stream 的其余字段已由上面的整块 memset 清零；只有顺序流检测器的
     // 「无上一请求」哨兵不是 0（FTL_LBA_INVALID），必须显式写。
-    ftl->cache_stream.rd.last_end = FTL_LBA_INVALID;
-    ftl->cache_stream.wr.last_end = FTL_LBA_INVALID;
+    ftl->cache_stream.read.last_end  = FTL_LBA_INVALID;
+    ftl->cache_stream.write.last_end = FTL_LBA_INVALID;
     {
         const ftl_status_e md_ret = md_load(ftl->metadata_dir, &ftl->alloc, &ftl->stats.total_writes);
 
@@ -559,17 +469,18 @@ SSD_CODE_FAST ftl_status_e ftl_init(ftl_ctx_s *ftl, ftl_topo_s topo, l2p_cache_s
     // ├─ 统计 ──
     ftl_stats_register_modules(ftl);
 
-    // ├─ 后台调度器任务表（10 项；must-run + interval/budget）──
-    // 必须在所有在飞的字段就绪后装载（适配器只依赖实例字段与 kick，无额外依赖）。
-    bg_policy_init(&ftl->bg);
-
-    // request scheduler：L2P/host 请求调度。item workspace 与其它模块一样自持。
+    // ├─ request scheduler：L2P/host 请求调度 + 后台任务表。item workspace 自持。
     ftl_sched_init(&ftl->sched, topo_2_die(topo));
+
+    // 后台策略状态必须在上面的 memset 之后装载（ftl_sched_init 会清空整个 sched）。
+    ftl_sched_bg_init(&ftl->sched);
 
     ftl_stats_register_sched(ftl);
 
     return FTL_OK;
 }
+
+/* ── instance ── */
 
 /**
  * @brief 取紧凑 die 号对应的 FTL 实例（不透明句柄）
@@ -581,37 +492,6 @@ ftl_ctx_s *ftl_instance_get(BYTE die)
 {
     ASSERT(die < DIE_MAX);
     return &g_ftl[die];
-}
-
-/**
- * @brief 设备级一次初始化：全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache
- *
- * 调用顺序：ftl_topology_build → ftl_global_init → 本函数 → 逐实例 init。
- * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复清 cache）。
- * 路由必须早于实例 boot：恢复期的 full metadata rebuild 会抽完成表，路由为 NULL
- * 时完成无法派发，job 永久卡死。
- */
-void ftl_device_prepare(void)
-{
-    ASSERT(!s_device_prepared);
-    if (s_device_prepared != false)
-    {
-        LOGE("[FTL ] device_prepare called twice; ignored\r\n");
-        return;
-    }
-    s_device_prepared = true;
-
-    ftl_ctx_s *route[FTL_DIE_MAX];
-
-    memset(route, 0, sizeof(route));
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        route[die] = ftl_instance_get(die);
-    }
-
-    ftl_op_init();
-    ftl_op_route_set(route);
-    l2p_device_init();
 }
 
 /**
@@ -671,44 +551,70 @@ ftl_status_e ftl_instance_init(BYTE die)
     owner.sched        = &ftl->sched;
     l2p_owner_register(die, &owner);
 
-    ftl_contract_audit(ftl);
+    ftl_contract_verify(ftl);
 
     s_instance_initialized[die] = true;
     return FTL_OK;
 }
 
+/* ── global ── */
+
 /**
- * @brief 校验实例路由与紧凑 die 表的往返一致性
+ * @brief 复位 ftl.o 的文件级静态（NOLOAD 段不清零）
  *
- * @return true = 一致；false = 路由/拓扑公式漂移
+ * 只调用一次，且必须在所有实例 ftl_init 之前。
  */
-BOOL ftl_route_verify(void)
+void ftl_global_init(void)
 {
-    return ftl_op_route_verify();
+    // 公共 boot 入口的 once 守卫与后台节拍时间戳：NOLOAD 段随机残留会让启动被
+    // 误判为「重复初始化」（直接拒绝）或让首次 BBT 节拍不确定。
+    s_device_prepared = false;
+    s_timers_started  = false;
+    s_bbt_last_ms     = 0U;
+    memset(s_instance_initialized, 0, sizeof(s_instance_initialized));
+
+    // NOLOAD 段不清零：限流对象的 interval 必须在这里装好（last/suppressed 归零）。
+    log_ratelimit_init(&s_seq_drain_stall_log, LOG_RATE_SLOW_INTERVAL_MS);
+    ftl_flush_trim_init();
+    ftl_host_io_init();
+    ftl_confirm_init();
+    ftl_cache_write_init();
 }
 
-/**
- * @brief 撤销实例路由（boot 失败回退 fc_service 时用）
- */
-void ftl_route_clear(void)
-{
-    ftl_op_route_set(NULL);
-}
+/* ── device ── */
 
 /**
- * @brief 中止属于同一 host 请求的所有 FTL 组
+ * @brief 设备级一次初始化：全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache
  *
- * @param ctx HIL 请求指针（非空）
+ * 调用顺序：ftl_topology_build → ftl_global_init → 本函数 → 逐实例 init。
+ * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复清 cache）。
+ * 路由必须早于实例 boot：恢复期的 full metadata rebuild 会抽完成表，路由为 NULL
+ * 时完成无法派发，job 永久卡死。
  */
-void ftl_abort_request(void *ctx)
+void ftl_device_init(void)
 {
-    ASSERT(ctx != NULL);
+    ASSERT(!s_device_prepared);
+    if (s_device_prepared != false)
+    {
+        LOGE("[FTL ] device_init called twice; ignored\r\n");
+        return;
+    }
+    s_device_prepared = true;
 
+    ftl_ctx_s *route[FTL_DIE_MAX];
+
+    memset(route, 0, sizeof(route));
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        (void)pend_group_abort_ctx(&g_ftl[die].pending, ctx);
+        route[die] = ftl_instance_get(die);
     }
+
+    ftl_op_init();
+    ftl_op_route_set(route);
+    l2p_device_init();
 }
+
+/* ── trim ── */
 
 /**
  * @brief 中止本实例的 TRIM job
@@ -725,19 +631,7 @@ void ftl_trim_abort(ftl_ctx_s *ftl)
     timer_deadline_clear(&ftl->trim.deadline);
 }
 
-/**
- * @brief 打印本实例的池占用（boot 基线）
- *
- * @param ftl 已初始化的实例（只读）
- */
-void ftl_boot_log_usage(const ftl_ctx_s *ftl)
-{
-    ASSERT(ftl != NULL);
-
-    const alc_s *alloc = &ftl->alloc;
-
-    LOGI("[FTL ] instance ch=%hhu ce=%hhu lun=%hhu free=%hu op=%hu spare=%hu\r\n", ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, alloc->free_count, alc_pool_sum_counts(alloc->op_count, PLANE_NUM), alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
-}
+/* ── host ── */
 
 /**
  * @brief 计算主机可见的 LBA 上限（开机一次）
@@ -807,6 +701,8 @@ DWORD ftl_host_lba_max(void)
     return (DWORD)lba;
 }
 
+/* ── timer ── */
+
 /**
  * @brief 注册 FTL 的周期任务（后台节拍 / GC-WL 求值）
  *
@@ -833,75 +729,26 @@ void ftl_timer_tasks_start(void)
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
     {
-        if (!ftl_mig_timer_register(&g_ftl[die]))
+        if (!mig_timer_register(g_ftl[die].mig_handle))
         {
             LOGE("[FTL ] migrate timer register failed die=%hhu\r\n", die);
         }
     }
 }
 
+/* ── topo ── */
+
 /**
  * @brief 取实例拓扑（只读）。
  * @param ftl FTL 上下文
  * @return 拓扑指针（非 NULL）
  */
-const ftl_topo_s *ftl_get_topo(const ftl_ctx_s *ftl)
+const ftl_topo_s *ftl_topo_get(const ftl_ctx_s *ftl)
 {
     return &ftl->topo;
 }
 
-/**
- * @brief 判定介质是否需要格式化。
- * @param ftl FTL 上下文
- * @param need_format 输出：true = 需要格式化
- * @return FTL_OK 判定完成；FTL_ERROR CP 介质读不通（调用者不得格式化）
- */
-ftl_status_e ftl_boot_check_format(ftl_ctx_s *ftl, BOOL *need_format)
-{
-    return pfr_media_check_format(ftl, need_format);
-}
-
-/**
- * @brief 全量格式化当前实例的介质。
- * @param ftl FTL 上下文
- * @param verify true = 逐块擦除体检
- * @return FTL_OK 成功；FTL_ERROR 失败
- */
-ftl_status_e ftl_boot_format(ftl_ctx_s *ftl, BOOL verify)
-{
-    return pfr_media_format(ftl, verify);
-}
-
-/**
- * @brief 执行启动恢复并输出报告。
- * @param ftl FTL 上下文
- * @param report 启动类型/Checkpoint/Journal 统计；可为 NULL
- * @return FTL_OK 成功；FTL_ERROR 恢复失败
- */
-ftl_status_e ftl_boot_recover(ftl_ctx_s *ftl, ftl_boot_report_s *report)
-{
-    pfr_boot_result_s result;
-    ftl_status_e      status = pfr_boot_recovery(ftl, &result);
-
-    if ((status == FTL_OK) && (report != NULL))
-    {
-        report->boot_type       = (ftl_boot_type_e)result.boot_type;
-        report->cp_sequence     = result.cp_sequence;
-        report->journal_entries = result.journal_entries;
-        report->blocks_restored = result.blocks_restored;
-        report->scoped          = result.scoped;
-    }
-    return status;
-}
-
-/**
- * @brief 打印固定分区与数据区的坏块分布（开机基线）。
- * @param ftl FTL 上下文（只读）
- */
-void ftl_boot_log_bad_areas(const ftl_ctx_s *ftl)
-{
-    pfr_boot_log_bad_areas(ftl);
-}
+/* ── service ── */
 
 /**
  * @brief 实例无关的每轮泵：推进 NAND + 完成派发
@@ -950,14 +797,14 @@ void ftl_service(ftl_ctx_s *ftl)
 
     // [svc] cache 序列确认：推进 cache 写序列的「已编程页表」——按序确认（Journal→L2P→BST）、
     // 撤销失败页、弹出已证明页。组早已完成，这里只做元数据记账。
-    ftl_cache_wr_confirm_step(ftl);
+    ftl_cache_write_confirm_step(ftl);
 
     // [svc] host 补发：request scheduler 按 HOST_READ 先于 HOST_WRITE 派发；
     // 组状态仍由 pending 持有，scheduler item 只承载调度坐标。
     ftl_sched_run_host(ftl);
 
     // 安全网：序列跨 host 段/命令保持打开等同一 LBA 流的下一段；孤儿序列超时关闭。
-    ftl_cache_seq_idle_guard(ftl);
+    ftl_cache_seq_idle_check(ftl);
 
     // 有序收尾：写序列用 padding END（给提前回执的最后一页补 FAIL_CACHE 结算），
     // 读序列直接放弃。放在补发之后：本轮的窗口先发出去，再决定是否收尾。
@@ -977,11 +824,7 @@ void ftl_service(ftl_ctx_s *ftl)
         (void)wb_handle(ftl->wbuf, &trigger, NULL);
     }
 
-    // [svc] 后台调度：工作量配额后台调度 —— 档位选择 / 10 项任务表 / 配额规模 / bg_suspend
-    // 判定全在 ftl/bg_policy.c（本文件不持有后台策略）。
-    bg_policy_service(ftl);
-
-    // [svc] 唯一仲裁入口：host（本轮通常已由上面的快路径派发）→ 后台 job → L2P 写回，
-    // 均按 FTL_SCHED_PRIO_E 顺序；后台 job 只执行 bg_policy 本轮已提交的 READY 项。
+    // [svc] 唯一仲裁入口：后台策略（选档 + token bucket + 按表序提交）→ host（本轮通常
+    // 已由上面的快路径派发）→ 后台 job → L2P 写回，均按 FTL_SCHED_PRIO_E 顺序。
     ftl_sched_dispatch(ftl);
 }

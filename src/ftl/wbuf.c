@@ -2,20 +2,18 @@
  * wbuf.c — 页打包写缓冲（page-packing write buffer）
  *
  * 职责：
- *   把**同一 pair 窗口**内的多次 host 写攒成一页，窗口填满 / 切到别的窗口 / 显式 flush /
- *   空闲时**一次编程**（两 plane 都有数据即一条 multi-plane）⇒ 写指针按页推进，消除
- *   「逐子操作分配整对页」的浪费（背景与不变量见 wbuf.h 文件头）。
+ *   · 把同一 pair 窗口内的多次 host 写攒成一页，窗口填满 / 切窗口 / 显式 flush /
+ *     空闲时一次编程（两 plane 都有数据即一条 multi-plane）；
+ *   · 写指针按页推进，消除「逐子操作分配整对页」的浪费。
  *
- * 文件结构：
- *   1. 槽位位 / 查询    wb_lba_bit（static）/ wb_has / wb_read
- *   2. 攒入与编程       wb_flush / wb_append（static）
- *   3. 丢弃 / 复位      wb_drop / wb_reset（static）
- *   4. 空闲 flush       wb_maybe_flush_idle（static）
- *   5. typed 入口       wb_init / wb_status_fill（static）/ wb_handle
+ * 关键机制：
+ *   · 槽位位图 / 占用 / 组位图 / 计数都在 handle 内；flush 失败（背压）不消费本子操作；
+ *   · 空闲 flush 是 host 写的确定性收尾，不是后台任务；
+ *   · 模块边界：本文件不 include ftl.h，只持 allocator / pending / migrate 三个窄指针。
  *
- * ⚠ 模块边界：本文件不 include ftl.h。只持有 allocator / pending 表 / migrate handle
- *   三个窄指针，调用它们的 owner API。
- *   由 ftl.c 在 ftl_init 中绑定（docs/archive/ftl_module_contracts.md §4.8）。
+ * 与其他模块：
+ *   · 上游：host_io（APPEND 子操作）、ftl_service（MAYBE_FLUSH_IDLE）、flush/trim（FLUSH/DROP）；
+ *   · 下游：allocator（页对）、pending（组子操作）、fc/FTL 异步写、migrate（紧急 GC 端口）。
  */
 
 #include "wbuf.h"
@@ -31,21 +29,34 @@
 
 #include <string.h>
 
+/* 文件级变量 */
 // 每实例页打包写缓冲：定义与内存域（DTCM，CPU-only 热数据）都归本模块。
 // NOLOAD ⇒ 启动不清零，ftl_init 绑定后对该实例显式 memset。
 static wb_handle_s s_wbuf[FTL_DIE_MAX] DTCM_DATA;
 
+/* ── init ── */
+
 /**
- * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
+ * @brief 初始化 wbuf handle
  *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
+ * 整块清零（窗口 / 占用 / 组位图 / 计数）后绑定 owner 指针；不碰介质。
+ *
+ * @param h       wbuf handle
+ * @param alloc   allocator
+ * @param pending pending 表
+ * @param migrate migrate handle
  */
-wb_handle_s *wb_workspace_get(BYTE die)
+void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_HANDLE_S *migrate)
 {
-    ASSERT(die < FTL_DIE_MAX);
-    return &s_wbuf[die];
+    // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
+    // （alloc / pending 为实例内嵌对象的地址，migrate 由同一审计保证）⇒ 不重复检查。
+    memset(h, 0, sizeof(*h));
+    h->alloc   = alloc;
+    h->pending = pending;
+    h->migrate = migrate;
 }
+
+/* ── lba ── */
 
 /**
  * @brief 该 LBA 在 flat CW 位图（occupied / 命令 cw_bitmap）里的位。
@@ -62,7 +73,21 @@ static BYTE wb_lba_bit(DWORD lba)
     return ftl_cw_bit(ftl_lba_plane(lba), ftl_lba_cw(lba));
 }
 
-/* ── 1. 查询 ── */
+/* ── workspace ── */
+
+/**
+ * @brief 取本实例的页打包写缓冲工作区（定义在 wbuf.c，DTCM）
+ *
+ * @param die 紧凑 die 号（< FTL_DIE_MAX）
+ * @return 本实例句柄（非空）
+ */
+wb_handle_s *wb_workspace_get(BYTE die)
+{
+    ASSERT(die < FTL_DIE_MAX);
+    return &s_wbuf[die];
+}
+
+/* ── has ── */
 
 /**
  * @brief 查询该 LBA 在当前窗口的缓冲槽是否有数据
@@ -71,7 +96,7 @@ static BYTE wb_lba_bit(DWORD lba)
  * @param lba 全局 host LBA
  * @return true = 命中，可从缓冲直接读；false = 未命中 / 窗口未开
  */
-BOOL wb_has(const wb_handle_s *h, DWORD lba)
+BOOL wb_has_lba(const wb_handle_s *h, DWORD lba)
 {
     if (h->open == false)
     {
@@ -85,6 +110,8 @@ BOOL wb_has(const wb_handle_s *h, DWORD lba)
     return (h->occupied & wb_lba_bit(lba)) != 0U;
 }
 
+/* ── read ── */
+
 /**
  * @brief 从缓冲拷出 1 IU
  *
@@ -97,7 +124,7 @@ BOOL wb_has(const wb_handle_s *h, DWORD lba)
  */
 BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out)
 {
-    if (wb_has(h, lba) == false)
+    if (wb_has_lba(h, lba) == false)
     {
         return false;
     }
@@ -108,7 +135,7 @@ BOOL wb_read(const wb_handle_s *h, DWORD lba, void *out)
     return true;
 }
 
-/* ── 2. 攒入与编程 ── */
+/* ── flush ── */
 
 /**
  * @brief 把当前缓冲页编程成一条 NAND 写命令并注册 pending。
@@ -138,7 +165,7 @@ static ftl_status_e wb_flush(wb_handle_s *h)
     // ftl_async_write_pair_cmd() 在页对之后分配。取不到页对时无资源占用；页对之后的
     // 任何失败都由统一错误出口 alc_super_open_rewind_pair 归还（否则页对凭空蒸发，
     // 表现为容量无声流失，见 CLAUDE.md §3.1）。
-    if (pend_slot_get_count(h->pending) >= FTL_PENDING_MAX)
+    if (pend_slot_count(h->pending) >= FTL_PENDING_MAX)
     {
         return FTL_AGAIN;
     }
@@ -193,7 +220,7 @@ static ftl_status_e wb_flush(wb_handle_s *h)
     // page0 异步写屏障：page>0 的写必须等同一 plane 的 page0 成功完成。
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_get_pba_state(h->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
+        if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) && (pba_to_page(pba[p]) > 0U) && (alc_super_open_pba_state(h->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
             alc_super_open_rewind_pair(h->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
@@ -295,6 +322,8 @@ wbuf_flush_fail:
     return ret;
 }
 
+/* ── append ── */
+
 /**
  * @brief 把一个组的 n 个 CW 攒进当前窗口；窗口切换时先编程旧页。
  *
@@ -354,7 +383,7 @@ static ftl_status_e wb_append(wb_handle_s *h, WORD gi, DWORD lba, const void *bu
     return FTL_OK;
 }
 
-/* ── 3. 丢弃 / 复位 ── */
+/* ── drop ── */
 
 /**
  * @brief 从缓冲丢弃一个 LBA（TRIM）；窗口被清空时结算全部贡献组的在飞数。
@@ -366,7 +395,7 @@ static ftl_status_e wb_append(wb_handle_s *h, WORD gi, DWORD lba, const void *bu
  */
 static BOOL wb_drop(wb_handle_s *h, DWORD lba)
 {
-    if (wb_has(h, lba) == false)
+    if (wb_has_lba(h, lba) == false)
     {
         return false;
     }
@@ -380,7 +409,7 @@ static BOOL wb_drop(wb_handle_s *h, DWORD lba)
         // 每个贡献组对该窗口至多一次 append ⇒ 逐组递减一次即在飞数配平。
         // ⚠ 本动作是 wbuf 的**内部不变量**（occupied 清空 ⟺ owners 必须结算），
         // 收在这里，不由调用者手工维护（CLAUDE.md §3.1）。
-        pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_OK);
+        pend_group_subop_finish_multi(h->pending, h->owners, SSD_STATUS_OK);
         h->open   = false;
         h->owners = 0U;
         h->base   = 0U;
@@ -388,6 +417,8 @@ static BOOL wb_drop(wb_handle_s *h, DWORD lba)
 
     return true;
 }
+
+/* ── reset ── */
 
 /**
  * @brief 丢弃整页缓冲，并按写失败（IO_ERROR）结算 owners 的在飞数。
@@ -400,7 +431,7 @@ static void wb_reset(wb_handle_s *h)
     {
         // 缓冲里的写被整体丢弃（介质已擦净）⇒ 按**写失败**收尾。不能只清零 owners：
         // 那些组仍在等子操作完成，直接丢会让它们的在飞数永不归零、host 写挂死。
-        pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_IO_ERROR);
+        pend_group_subop_finish_multi(h->pending, h->owners, SSD_STATUS_IO_ERROR);
     }
 
     h->open     = false;
@@ -409,7 +440,7 @@ static void wb_reset(wb_handle_s *h)
     h->base     = 0U;
 }
 
-/* ── 4. 空闲 flush ── */
+/* ── idle ── */
 
 /**
  * @brief 无打开窗口或仍有写组会 append 本窗口时不动；否则尝试编程。
@@ -418,7 +449,7 @@ static void wb_reset(wb_handle_s *h)
  * @return FTL_OK 无需编程或已提交；其余同 wb_flush（失败时缓冲原样保留，
  *         错误由 wb_handle 锁存 ⇒ host FLUSH 可快速失败，不等墙钟超时）
  */
-static ftl_status_e wb_maybe_flush_idle(wb_handle_s *h)
+static ftl_status_e wb_idle_flush(wb_handle_s *h)
 {
     if (h->open == false)
     {
@@ -433,27 +464,7 @@ static ftl_status_e wb_maybe_flush_idle(wb_handle_s *h)
     return wb_flush(h);
 }
 
-/* ── 5. typed 入口 ── */
-
-/**
- * @brief 初始化 wbuf handle
- *
- * 整块清零（窗口 / 占用 / 组位图 / 计数）后绑定 owner 指针；不碰介质。
- *
- * @param h       wbuf handle
- * @param alloc   allocator
- * @param pending pending 表
- * @param migrate migrate handle
- */
-void wb_init(wb_handle_s *h, alc_s *alloc, pend_ctx_s *pending, struct MIGRATE_HANDLE_S *migrate)
-{
-    // 前置条件：ftl_init 调本函数前已由 contract_check_handles 证明各容器非空
-    // （alloc / pending 为实例内嵌对象的地址，migrate 由同一审计保证）⇒ 不重复检查。
-    memset(h, 0, sizeof(*h));
-    h->alloc   = alloc;
-    h->pending = pending;
-    h->migrate = migrate;
-}
+/* ── status ── */
 
 /**
  * @brief 用 handle 当前状态填写上报结构。
@@ -488,6 +499,8 @@ static void wb_status_fill(const wb_handle_s *h, wb_status_s *out)
     out->flushed_pages = h->flushed_pages;
     out->drop_count    = h->drop_count;
 }
+
+/* ── handle ── */
 
 /**
  * @brief wbuf typed 入口：按 trigger->kind 分发
@@ -525,7 +538,7 @@ ftl_status_e wb_handle(wb_handle_s *h, const wb_trigger_s *trigger, wb_status_s 
             break;
 
         case WBUF_TRIGGER_MAYBE_FLUSH_IDLE:
-            st = wb_maybe_flush_idle(h);
+            st = wb_idle_flush(h);
             break;
 
         default:

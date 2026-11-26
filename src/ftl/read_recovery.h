@@ -24,15 +24,14 @@
  *   ④ 不可恢复 ⇒ 各 CW 清零 + 块退役
  *
  * ⚠ 恢复路径是**异步状态机**（rr_handle_s + rr_handle +
- *   ftl_read_recovery_callback）：读失败的完成服务函数把 pending 子操作托管给 job 就返回，
+ *   ftl_read_recovery_op_callback）：读失败的完成服务函数把 pending 子操作托管给 job 就返回，
  *   恢复在 rr_handle / 完成服务函数里分步推进，不在完成泵里嵌套同步等待。
  */
 
 #include "allocator.h"
 #include "bst.h"          /* rr_ecc_track_s, rr_block_health_e, bst_block_s */
 #include "fc_interface.h" /* fc_cmd_status_s（服务函数签名） */
-#include "ftl_config.h"   /* DWORD */
-#include "ftl_module.h"   /* FTL_SUBMIT_TIMEOUT_MS */
+#include "ftl_config.h"   /* DWORD / FTL_SUBMIT_TIMEOUT_MS */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "log.h"
@@ -105,7 +104,7 @@ typedef enum RR_PLANE_STEP_E
  * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。
  *
  * 取 1 s 而非 `FTL_SUBMIT_TIMEOUT_MS`（10 ms）：只有「序列没有任何真实进展」
- * 时才计时（见 ftl_op_cache_seq_progressing），正常写流/序列边界会在 1 s 内推进；
+ * 时才计时（见 ftl_op_cache_seq_is_progressing），正常写流/序列边界会在 1 s 内推进；
  * 1 s 仍提交不出去说明恢复读被结构性挡住，必须让 host 读有界失败而不是挂死。 */
 #define RR_SUBMIT_TIMEOUT_MS (1000U)
 
@@ -159,112 +158,53 @@ typedef struct RR_HANDLE_S
     log_heartbeat_s hb;
 } rr_handle_s;
 
-/**
- * @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return FTL_READ_USER_SIZE 字节的暂存区（非空）
- */
+/* ── 查询 / getter ── */
+
+/** @brief 取本实例的恢复整页暂存（定义在 read_recovery.c；普通 .bss → AXI）。 */
 BYTE *rr_workspace_get(BYTE die);
 
-/* ── 接口 ── */
+/** @brief 获取 Block 健康状态（track 为 NULL 时按 HEALTHY 处理）。 */
+rr_block_health_e rr_get_health(const rr_ecc_track_s *track);
 
-/**
- * @brief 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。
- *
- * @param rr           待绑定并复位的 handle
- * @param cache        L2P cache（恢复选页时 l2p_read 的查表入口）
- * @param alloc        分配器（持有 BST；拓扑与块状态来源）
- * @param page_scratch 整页读缓冲（恢复读的落点）
- * @param pending      pending 表（托管子操作的领取与结算）
- */
-void rr_init(rr_handle_s *rr, l2p_cache_s *cache, alc_s *alloc, BYTE *page_scratch, pend_ctx_s *pending);
+/* ── ECC 趋势 / 预测性退役 ── */
 
-/**
- * @brief 登记一个被托管的读子操作（不立即推进）。
- *
- * @param rr    handle
- * @param owner 被托管子操作的身份（owners / pending_idx / upper_buf / lba / n_cw）
- */
-void rr_trigger(rr_handle_s *rr, const rr_owner_s *owner);
-
-/**
- * @brief 推进 Read Recovery job（每轮 must-run；提交即返回）。
- *
- * @param rr    handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- */
-void rr_handle(rr_handle_s *rr);
-
-/**
- * @brief 记录一次读取的 ECC bit 数，更新趋势
- *
- * 每次 read 完成后记录 ecc_bits，与上一次读数比较：连续上升则累加 rising_count，
- * 否则清零。三级水位（连续上升次数 / 单次高水位 / 单次上限）只升级 health，不回落；
- * 搬移由巡检与迁移 job 另行触发。
- *
- * @param track    per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
- * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 desc 链全链 CW 的最大值，见 fc_get_cmd_ecc_max）
- */
+/** @brief 记录一次读取的 ECC bit 数，更新趋势。 */
 void rr_record_ecc(rr_ecc_track_s *track, BYTE ecc_bits);
 
 /**
- * @brief 记录 gblock 一次读的 ECC 趋势并累加 read_count
+ * @brief 记录 gblock 一次读的 ECC 趋势并累加 read_count。
  *
- * 迁移读路径不直接摸 allocator->blocks[]：由 RR（趋势数据 owner）提供唯一写入点。
- *
- * @param alloc    分配器（持有 BST）
- * @param gblock   全局块号
- * @param ecc_bits 本次读最大纠正 bit 数
+ * @note 迁移读路径不直接摸 allocator->blocks[]：RR 是趋势数据 owner 的唯一写入点。
  */
 void rr_record_block_ecc(alc_s *alloc, WORD gblock, BYTE ecc_bits);
 
-/* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
- * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
-
-/**
- * @brief 获取 Block 健康状态
- *
- * @param track per-Block ECC 追踪（&blocks[gblock].rr）；可为 NULL
- * @return RR_BLOCK_HEALTHY track 为 NULL（按健康处理）
- *         track->health    track 非 NULL
- */
-rr_block_health_e rr_get_health(const rr_ecc_track_s *track);
-
-/**
- * @brief 巡检：找第一个预测性退役候选的 Closed 块（health ≥ CRITICAL 或 read_count 超阈值）
- *
- * 只扫 CLOSED（跳过 OPEN/FREE/BAD/LOG/RETIRED），返回全局物理 Block 号。
- * 预测性退役命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
- *
- * @param alloc  FTL allocator（含 blocks 表）
- * @param gblock 输出：命中的全局 Block 号
- * @return true  命中，*gblock 有效
- *         false 无命中的 Closed 块
- */
+/** @brief 巡检：找第一个预测性退役候选的 Closed 块。 */
 BOOL rr_predictive_scan(const alc_s *alloc, WORD *gblock);
 
 /**
- * @brief 退役一个预测性退役候选块（不再分配新数据，不标坏）
- *
- * 有效数据已由调用方搬走，本函数：
- *   - 状态机：置 RETIRED（互斥枚举 ⇒ 一行赋值即抹掉原状态；温度字段正交，不动）
- *   - 清反向索引 sb_id → NO_SB
- *   - 复位 rr 健康（health=HEALTHY、rising_count=0、last_ecc=0、read_count=0）
- *     块仍可读（ECC 能纠），只是不再当新块分配。
- *
- * @param b 目标物理块
+ * @brief 退役一个预测性退役候选块（不再分配新数据，不标坏）。
  *
  * @note 调用者必须先把该块从 Free Pool 移除：本函数只拿 bst_block_s*，置 RETIRED
  *       挡不住分配（Free Pool 以数组为准）。
  */
 void rr_retire_block(bst_block_s *b);
 
-/**
- * @brief 退役 gblock（复位 read_count/ECC 趋势）
- *
- * @param alloc   分配器（持有 BST）
- * @param gblock  全局块号
- */
+/** @brief 退役 gblock（复位 read_count/ECC 趋势）。 */
 void rr_retire_block_at(alc_s *alloc, WORD gblock);
+
+/* ── 托管 / 入口 ── */
+
+/** @brief 登记一个被托管的读子操作（不立即推进）。 */
+void rr_trigger(rr_handle_s *rr, const rr_owner_s *owner);
+
+/** @brief 绑定窄上下文并复位 handle（拓扑取 alloc 的 ch/ce/lun）。 */
+void rr_init(rr_handle_s *rr, l2p_cache_s *cache, alc_s *alloc, BYTE *page_scratch, pend_ctx_s *pending);
+
+/**
+ * @brief 推进 Read Recovery job（每轮 must-run；提交即返回）。
+ *
+ * @note 前置条件：实例绑定由 ftl_contract_verify 证明。
+ */
+void rr_handle(rr_handle_s *rr);
 
 #endif /* FTL_READ_RECOVERY_H */

@@ -57,46 +57,28 @@ typedef struct WL_VICTIM_S
 /* ── 接口 ── */
 
 /**
- * @brief 取 WL 触发判据的两个擦除计数（与 wl_should_trigger 同一漏斗）
+ * @brief 取 WL 触发判据的两个擦除计数（与 wl_trigger_is_due 同一漏斗）。
  *
- * 判据：`max_free_ec − min_used_ec ≥ WL_THRESHOLD`。本函数只求值、不判定；
- * 供 `wl_should_trigger` 与 CLI `wear` 共用，避免第二套擦除计数口径（C9）。
- *
- * @param alloc        分配器
- * @param total_writes 累计编程次数（启动门：不足 WL_MIN_WRITES 不求值）
- * @param out_max_free 出参：Free Pool 中最大擦除次数（仅返回 true 时有效）
- * @param out_min_used 出参：最冷 used SB 的平均擦除次数（仅返回 true 时有效）
- * @return true  求值有效（已过启动门且至少有一个 used 候选）
- *         false 未过启动门 / 无候选
+ * @note 只求值、不判定；供 `wl_trigger_is_due` 与 CLI `wear` 共用，避免第二套
+ *       擦除计数口径（C9）。
  */
 BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used);
 
 /**
- * @brief 检查是否需要触发静态 WL（UBI 模型）
+ * @brief 检查是否需要触发静态 WL（UBI 模型）。
  *
- * 判据只有一条：
- *   max_free_ec − min_used_ec ≥ WL_THRESHOLD
- *   · min_used_ec = Closed SB 中**平均擦除次数最小**者（最冷的 used SB）；
- *   · max_free_ec = Free Pool 中最大的 erase_count（可接收冷数据的高磨损块）。
- * 含义与 UBI 一致：只有当存在「显著更旧」的空闲块时，才值得把冷数据搬过去，
- * 让低磨损块空出来给热数据。搬移本身不改变擦除计数，差值不满足时必须停止。
- *
- * @param alloc        分配器
- * @param total_writes 累计编程次数（启动门）
- * @return true 需要触发，false 不需要
+ * @note 判据：`max_free_ec − min_used_ec ≥ WL_THRESHOLD`；min_used 取 Closed SB 平均
+ *       擦除次数最小者，max_free 取 Free Pool 最大 erase_count。搬移本身不改变擦除
+ *       计数，差值不满足时必须停止。
  */
-BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes);
+BOOL wl_trigger_is_due(const alc_s *alloc, DWORD total_writes);
 
 /**
- * @brief 选择 WL victim Super Block
+ * @brief 选择 WL victim Super Block。
  *
- * 与 GC 相反：选**平均擦除次数最少**（最冷）且有效 CW ≥ 70% 的 Closed SB
- * （UBI 的 e1）；同擦除次数下按 valid_cw 多、read_sum 高排序。
- * 只遍历 closed_sb_list，跳过打开的 SB 与含坏 plane 的 SB。
- *
- * @param alloc  分配器
- * @param victim 输出：选中的 victim
- * @return true 找到，false 无合适 victim
+ * @note 与 GC 相反：选平均擦除次数最少（最冷）且有效 CW ≥ 70% 的 Closed SB
+ *       （UBI 的 e1）；同擦除次数下按 valid_cw 多、read_sum 高排序。只遍历
+ *       closed_sb_list，跳过打开的 SB 与含坏 plane 的 SB。
  */
 BOOL wl_select_victim(const alc_s *alloc, wl_victim_s *victim);
 
@@ -108,7 +90,7 @@ BOOL wl_select_victim(const alc_s *alloc, wl_victim_s *victim);
 /*
  * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义；候选项过滤（Open / 坏 plane /
  * 有效 CW 门限）收敛在 `wl_candidate_get`，Free Pool 最大擦除值走 allocator 的
- * `alc_free_get_max_erase`。
+ * `alc_free_erase_limit`。
  */
 
 #endif /* FTL_WEAR_LEVELING_H */

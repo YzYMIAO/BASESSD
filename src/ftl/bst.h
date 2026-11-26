@@ -1,6 +1,8 @@
 #ifndef FTL_BST_H
 #define FTL_BST_H
 
+/* header-only: inline-access */
+
 /*
  * Block State Table（BST）— 统一 per-Block 结构体数组
  *
@@ -48,7 +50,7 @@ typedef enum RR_BLOCK_HEALTH_E
 } rr_block_health_e;
 
 /* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
- * 消费方：ftl_host_io_callback 读成功后 rr_record_ecc；
+ * 消费方：ftl_host_io_op_callback 读成功后 rr_record_ecc；
  *         rr_get_health 查询健康度。
  *
  * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）

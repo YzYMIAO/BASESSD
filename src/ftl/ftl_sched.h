@@ -2,17 +2,19 @@
 #define FTL_SCHED_H
 
 /*
- * ftl_sched — FTL request scheduler（L2P + host + 后台 job）
+ * ftl_sched — FTL 请求调度器 + 后台策略（L2P + host + 后台 job）
  *
- * 当前职责：
+ * 职责：
  *   · work item 静态池 + 唯一分派顺序表 `FTL_SCHED_PRIO_E`；
  *   · CP 把 dirty L2P region 提交为 `L2P_FLUSH` item，统一分派启动写回；
  *   · demand / 预取 L2P load 以 `L2P_LOAD` item 分别计入独立 credit，完成由 L2P callback 结算；
  *   · host group 以 `HOST_READ` / `HOST_WRITE` item 进入 host 调度；读先于写；
- *   · CP/metadata/Journal/RR/GC/BBT/L2P CMT flush 以后台 job 进入统一分派；
+ *   · 后台策略：按负载选档 → token bucket 预算 → 按 `ftl_bg_job_e` 表序提交；
+ *     执行由 `ftl_sched_dispatch` 统一仲裁；
  *   · host 写 admission。
  */
 
+#include "ftl_type.h"
 #include "ssd_types.h"
 #include "stats.h"
 
@@ -37,6 +39,11 @@
 #define FTL_SCHED_HOST_MAX          (32U)
 #define FTL_SCHED_HOST_READ_RESERVE (4U)
 
+/* 后台 token bucket：timer 节拍（ftl_bg_tick_task，周期 L2P_FLUSH_INTERVAL_MS）
+ * 为每实例补 grant_units；上限 = grant_units × BG_TOKEN_CAP_TICKS。
+ * 实际补充速率由 timer 周期决定，与主循环频率无关。 */
+#define BG_TOKEN_CAP_TICKS (4U)
+
 /* FTL 实例类型在 ftl.h 定义；本头只用指针，避免反向 include。 */
 typedef struct FTL_CONTEXT_S ftl_ctx_s;
 
@@ -54,8 +61,8 @@ typedef enum FTL_WORK_CLASS_E
     FTL_WORK_CLASS_NUM
 } ftl_work_class_e;
 
-/* 后台 job 触发（bg_policy 只提交请求，scheduler 执行）。
- * 顺序 = bg_policy 任务表顺序；ftl_sched_dispatch 按此顺序执行预留 item。 */
+/* 后台 job：任务表下标 = 本枚举，表序即提交序 / 执行优先级（唯一坐标）。
+ * 任务策略（must_run / units / gate）见 ftl_sched.c 的 s_bg_tasks。 */
 typedef enum FTL_BG_JOB_E
 {
     FTL_BG_JOB_CP_ADVANCE = 0,
@@ -108,6 +115,31 @@ typedef struct FTL_WORK_ITEM_S
     WORD             magic;    /* 分配时写 FTL_SCHED_ITEM_MAGIC；防越界/脏值 */
 } ftl_work_item_s;
 
+/* 后台任务策略：下标 = ftl_bg_job_e；job 本身不存进表项（唯一坐标 = 表下标）。 */
+typedef struct BG_TASK_S
+{
+    WORD units;    /* 单次提交的工作量单位（预算任务用） */
+    BOOL must_run; /* 正确性关键集：不 gate、不占配额、每轮无条件提交 */
+    BOOL gated;    /* true = 提交前检查 l2p_flush_due */
+} bg_task_s;
+
+/* 档位 → 每个 token interval 的 credit 配额（FTL 策略表，引擎不持有）。 */
+typedef struct BG_LEVEL_CONFIGURATION_S
+{
+    DWORD grant_units; /* 每个 token interval 的 credit 数 */
+    DWORD task_mask;   /* 本档位允许的预算任务位集合（1U << job） */
+} bg_level_cfg_s;
+
+/* 每实例后台策略状态（任务表是共享只读，不逐实例复制）。 */
+typedef struct FTL_SCHED_BG_S
+{
+    const bg_task_s      *tasks;
+    BYTE                  task_count;
+    const bg_level_cfg_s *cfg;     /* 本轮档位配置（publish 起点写入） */
+    bg_level_e            level;   /* 本轮档位（模块入口读它） */
+    DWORD                 credits; /* token bucket 余额 */
+} ftl_sched_bg_s;
+
 #if SSD_STATS_ENABLE
 typedef struct FTL_SCHED_STATISTICS_S
 {
@@ -136,156 +168,134 @@ typedef struct FTL_SCHEDULER_S
     WORD             prefetch_items;             /* 活动预取 L2P_LOAD item 数（独立 credit） */
     BOOL             host_running;               /* host 补发重入保护（完成回调可重入 submit） */
     BOOL             l2p_flush_failed;
+    ftl_sched_bg_s   bg; /* 后台策略：任务表 / 档位 / token bucket */
 #if SSD_STATS_ENABLE
     ftl_sched_stats_s stats;
 #endif
 } ftl_sched_s;
 
-/**
- * @brief 初始化本 die 的调度器（绑定 workspace、清空 item / credit）
- *
- * @param sched 调度器（非空）
- * @param die   紧凑 die 号；决定使用哪一行静态 workspace
- */
-void ftl_sched_init(ftl_sched_s *sched, BYTE die);
+/* ── 查询 / 谓词 ── */
+
+/** @brief 是否仍有活动 L2P flush item。 */
+BOOL ftl_sched_l2p_flush_is_pending(const ftl_sched_s *sched);
 
 /**
- * @brief 提交一个 L2P dirty-region 写回请求（幂等）
+ * @brief host 写启动许可（读路径不调用）。
  *
- * @param sched  调度器
- * @param region 全局 region
- * @return true 已登记；false 静态池满（CP 下一轮重试）
+ * @note CMT dirty 或 free 水位过高时返回 false，host 写应保持未提交（HIL 的
+ *       WAIT_GATE），让 scheduler/GC/metadata 先推进。
  */
+BOOL ftl_sched_host_write_is_admitted(const ftl_ctx_s *ftl);
+
+/* ── L2P load / flush 登记 ── */
+
+/** @brief 提交一个 L2P dirty-region 写回请求（幂等）。 */
 BOOL ftl_sched_l2p_flush_request(ftl_sched_s *sched, DWORD region);
 
 /**
- * @brief 登记一个 L2P_LOAD（已由 L2P 层启动）
+ * @brief 结束一个 L2P_LOAD（成功、重试耗尽或降级后）。
  *
- * demand 与预取分开计 credit：预取不能占用 demand 的保底额度。
- *
- * @param sched    调度器
- * @param region   全局 region
- * @param prefetch true = 预取加载
- * @return true 已登记；false class credit / 静态池满（调用者稍后重试）
+ * @note prefetch 必须与 begin 时一致。
  */
-BOOL ftl_sched_l2p_load_begin(ftl_sched_s *sched, DWORD region, BOOL prefetch);
+void ftl_sched_l2p_load_finish(ftl_sched_s *sched, DWORD region, BOOL prefetch);
 
 /**
- * @brief 结束一个 L2P_LOAD（成功、重试耗尽或降级后）
+ * @brief 清空 L2P_FLUSH 登记（新 CP job 起点）。
  *
- * @param sched    调度器
- * @param region   全局 region
- * @param prefetch true = 预取加载（必须与 begin 时一致）
- */
-void ftl_sched_l2p_load_complete(ftl_sched_s *sched, DWORD region, BOOL prefetch);
-
-/**
- * @brief 登记一个 host 完成组（同一 group 幂等）
- *
- * @param sched 调度器
- * @param group pending 组下标
- * @param is_read true = HOST_READ；false = HOST_WRITE
- * @return true 已登记；false item 池 / host 上限满
- */
-BOOL ftl_sched_host_begin(ftl_sched_s *sched, WORD group, BOOL is_read);
-
-/**
- * @brief 是否仍有活动 L2P flush item
- *
- * @param sched 调度器
- * @return true 仍有 READY / WAIT_DEP / INFLIGHT L2P_FLUSH item
- */
-BOOL ftl_sched_l2p_flush_pending(const ftl_sched_s *sched);
-
-/**
- * @brief 清空 L2P_FLUSH 登记（新 CP job 起点；保留在飞 L2P_LOAD）
- *
- * @param sched 调度器
+ * @note 保留在飞 L2P_LOAD。
  */
 void ftl_sched_l2p_flush_reset(ftl_sched_s *sched);
 
-/**
- * @brief host 写启动许可
- *
- * 读路径不调用。CMT dirty 或 free 水位过高时返回 false，host 写应保持
- * 未提交（HIL 的 WAIT_GATE），让 scheduler/GC/metadata 先推进。
- *
- * @param ftl FTL 实例
- * @return true 允许启动新 host 写；false 暂缓
- */
-BOOL ftl_sched_host_write_admit(const ftl_ctx_s *ftl);
+/* ── host 组 ── */
 
 /**
- * @brief 提交一个后台 job 请求（幂等；bg_policy 只产生触发）
+ * @brief 只推进一个 host 组（提交快路径；不扫其它组）。
  *
- * 后台 job 使用预留 item，不会因池满失败。
+ * @note 服务循环用 `ftl_sched_run_host()` 批量派发。只 kick 本组，避免一次
+ *       submit 顺带推进所有组的 stall 计数（无时间流逝却判卡死）。
+ */
+void ftl_sched_host_kick(ftl_ctx_s *ftl, WORD group);
+
+/** @brief 回收已完成 host 组的 item（提交新组前调用，防止 group 槽复用）。 */
+void ftl_sched_host_reap(ftl_ctx_s *ftl);
+
+/* ── 后台 job / 完成通知 ── */
+
+/**
+ * @brief 提交一个后台 job 请求（幂等；后台策略只提交请求）。
  *
- * @param sched 调度器
- * @param job   后台 job
+ * @note 后台 job 使用预留 item，不会因池满失败。
  */
 void ftl_sched_bg_request(ftl_sched_s *sched, ftl_bg_job_e job);
 
 /**
- * @brief 唯一仲裁入口：host 读 → host 写 → 后台 job → L2P flush
+ * @brief FC 完成通知：回收已完成 item 并唤醒 MD_SLOT 依赖。
  *
- * 后台 job 的执行顺序由 `FTL_SCHED_PRIO_E` 决定（`ftl_bg_job_e` 表序）；
- * 是否提交仍由 `bg_policy` 的档位/credit 决定。
- *
- * @param ftl FTL 实例
- */
-void ftl_sched_dispatch(ftl_ctx_s *ftl);
-
-/**
- * @brief 只推进一个 host 组（提交快路径；不扫其它组）
- *
- * 服务循环仍用 `ftl_sched_run_host()` 批量派发。提交快路径只 kick 本组，
- * 避免一次 submit 顺带推进所有组的 stall 计数（无时间流逝却判卡死）。
- *
- * @param ftl   FTL 实例
- * @param group pending 组下标
- */
-void ftl_sched_host_kick(ftl_ctx_s *ftl, WORD group);
-
-/**
- * @brief 回收已完成 host 组的 item（提交新组前调用，防止 group 槽复用）
- *
- * @param ftl FTL 实例
- */
-void ftl_sched_host_reap(ftl_ctx_s *ftl);
-
-/**
- * @brief FC 完成通知：回收已完成 item 并唤醒 MD_SLOT 依赖
- *
- * 由 `ftl_op_drain` 在模块完成回调返回后调用；它是所有 FC 完成进入
- * scheduler 的唯一钩子，不替代模块自己的数据/状态收尾。
- *
- * @param ftl FTL 实例
+ * @note 由 `ftl_op_drain` 在模块完成回调返回后调用；它是所有 FC 完成进入
+ *       scheduler 的唯一钩子，不替代模块自己的数据/状态收尾。
  */
 void ftl_sched_note_completion(ftl_ctx_s *ftl);
 
-/**
- * @brief 打印本实例 scheduler 现场（CLI `ftl_ctx sched` / 断言终端）
- *
- * @param ftl FTL 实例（只读）
- * @param die 实例号（打印用）
- */
-void ftl_sched_debug_dump(const ftl_ctx_s *ftl, BYTE die);
+/* ── 计数器注册 ── */
 
 #if SSD_STATS_ENABLE
-/**
- * @brief 注册 scheduler 计数器（`stats ftl.sched`）
- *
- * @param sched 调度器
- * @param inst  实例号
- */
+/** @brief 注册 scheduler 计数器（`stats ftl.sched`）。 */
 void ftl_sched_stats_register(ftl_sched_s *sched, BYTE inst);
 #endif
 
+/* ── 后台策略 ── */
+
 /**
- * @brief host 调度一步：回收已完成的组，读组先于写组补发
+ * @brief 负载 → 后台档位（纯函数）。
  *
- * @param ftl FTL 实例
+ * @note pending 与组计数全空 ⇒ IDLE；pending 过半池或有未决组 ⇒ BUSY；其余 NORMAL。
  */
+bg_level_e ftl_sched_bg_level_select(const ftl_ctx_s *ftl);
+
+/** @brief 补充预算 credit（timer 节拍调用）。 */
+void ftl_sched_bg_refill(ftl_sched_s *sched);
+
+#if defined(FC_NAND_TEST_ENABLE)
+/** @brief 测试钩子：只做选档 + 发布 cfg，不提交任务。 */
+void ftl_sched_bg_test_publish(ftl_ctx_s *ftl);
+#endif
+
+/* ── 运行 ── */
+
+/** @brief host 调度一步：回收已完成的组，读组先于写组补发。 */
 void ftl_sched_run_host(ftl_ctx_s *ftl);
+
+/** @brief 打印本实例 scheduler 现场（CLI `ftl_ctx sched` / 断言终端）。 */
+void ftl_sched_debug_dump(const ftl_ctx_s *ftl, BYTE die);
+
+/**
+ * @brief 唯一仲裁入口：host 读 → host 写 → 后台 job → L2P flush。
+ *
+ * @note 后台 job 的执行顺序由 `FTL_SCHED_PRIO_E` 决定（`ftl_bg_job_e` 表序）。
+ *       本入口先做后台策略（选档 + token bucket + 按表序提交），再执行。
+ */
+void ftl_sched_dispatch(ftl_ctx_s *ftl);
+
+/* ── 入口 ── */
+
+/**
+ * @brief 登记一个 L2P_LOAD（已由 L2P 层启动）。
+ *
+ * @note demand 与预取分开计 credit：预取不能占用 demand 的保底额度。
+ */
+BOOL ftl_sched_l2p_load_begin(ftl_sched_s *sched, DWORD region, BOOL prefetch);
+
+/** @brief 登记一个 host 完成组（同一 group 幂等）。 */
+BOOL ftl_sched_host_begin(ftl_sched_s *sched, WORD group, BOOL is_read);
+
+/**
+ * @brief 绑定内置任务表并复位档位 / credit。
+ *
+ * @note 必须在 ftl_sched_init 之后调用（init 会 memset 整个 sched）。
+ */
+void ftl_sched_bg_init(ftl_sched_s *sched);
+
+/** @brief 初始化本 die 的调度器（绑定 workspace、清空 item / credit）。 */
+void ftl_sched_init(ftl_sched_s *sched, BYTE die);
 
 #endif /* FTL_SCHED_H */

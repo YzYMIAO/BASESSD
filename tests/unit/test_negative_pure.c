@@ -14,7 +14,6 @@
 
 #include "allocator.h"
 #include "bbt.h"
-#include "bg_policy.h"
 #include "bst.h"
 #include "checkpoint.h"
 #include "fault_inject.h"
@@ -22,6 +21,7 @@
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "ftl_op.h"
+#include "ftl_sched.h"
 #include "ftl_ut_common.h"
 #include "gc.h"
 #include "l2p_cache.h"
@@ -147,7 +147,7 @@ static MunitResult test_rr_ecc_monotonic(const MunitParameter params[], void *da
 
 /* iface_pair_cmd_guards — 空位图建链必须拒绝，不得越界读 pba[PLANE_NUM]（IF-18）。
  *
- * 覆盖：`ftl_cmd_setup_ppa_pair_cw(cmd, pba, 0)`。
+ * 覆盖：`ftl_cmd_build_ppa_pair_cw(cmd, pba, 0)`。
  * 判据：返回 `FTL_ERROR`；命令槽位随后可正常释放。
  * 备注：这是 release 运行期拒绝（非 ASSERT）；debug 同样返回。 */
 
@@ -166,7 +166,7 @@ static MunitResult test_iface_pair_cmd_guards(const MunitParameter params[], voi
 
     memset(pba, 0, sizeof(pba));
 
-    munit_assert_int(ftl_cmd_setup_ppa_pair_cw(cmd, pba, 0U), ==, FTL_ERROR);
+    munit_assert_int(ftl_cmd_build_ppa_pair_cw(cmd, pba, 0U), ==, FTL_ERROR);
 
     fc_command_release(cmd->cmd_id);
 
@@ -522,7 +522,7 @@ static MunitResult test_wl_destination_prepare_fail(const MunitParameter params[
 
 /* wl_snapshot_entry_trigger — 快照恢复的单 plane 条目也要能触发静态 WL（WL-10）。
  *
- * 覆盖：`wl_ec_spread_get` / `wl_should_trigger` 的分母按条目自身容量。
+ * 覆盖：`wl_ec_spread_get` / `wl_trigger_is_due` 的分母按条目自身容量。
  * 判据：free 高擦除块 − 最冷 used SB ≥ WL_THRESHOLD 时触发。
  * 备注：RAM 分配器夹具；用于钉住「分母用整 SB 容量」的回归。 */
 
@@ -558,7 +558,7 @@ static MunitResult test_wl_snapshot_entry_trigger(const MunitParameter params[],
 
     munit_assert_true(wl_ec_spread_get(a, WL_MIN_WRITES, &max_free, &min_used));
     munit_assert_uint32((max_free - min_used), >=, WL_THRESHOLD);
-    munit_assert_true(wl_should_trigger(a, WL_MIN_WRITES));
+    munit_assert_true(wl_trigger_is_due(a, WL_MIN_WRITES));
 
     return MUNIT_OK;
 }
@@ -675,7 +675,7 @@ static MunitResult test_read_column_fail_seam(const MunitParameter params[], voi
 
 /* cp_duplicate_completion_guard — 无在飞命令时重复/迟到完成必须被拒绝并释放（CP-02）。
  *
- * 覆盖：`ftl_checkpoint_callback` 在 `waiting==false` 的入口守卫。
+ * 覆盖：`ftl_checkpoint_op_callback` 在 `waiting==false` 的入口守卫。
  * 判据：不按当前 phase 再推进 chunk/游标；完成携带的命令被 release（池回到基线）。
  * 备注：debug 下入口 ASSERT 会停机 ⇒ `MUNIT_SKIP`；release 验证运行期拒绝。 */
 
@@ -707,7 +707,7 @@ static MunitResult test_cp_duplicate_completion_guard(const MunitParameter param
     memset(&st, 0, sizeof(st));
     st.cmd_id = cmd->cmd_id;
 
-    ftl_checkpoint_callback(ftl, &st, h);
+    ftl_checkpoint_op_callback(ftl, &st, h);
 
     fc_resource_stats_s after;
 
@@ -778,7 +778,7 @@ static MunitResult test_sync_timeout_late_completion(const MunitParameter params
 
 /* cache_pad_early_exit_releases — pad 回调早退（序列已死）必须释放命令（CACHE-31）。
  *
- * 覆盖：`ftl_cache_pad_callback` 在 `kind != WRITE || closing == false` 的早退分支。
+ * 覆盖：`ftl_cache_pad_op_callback` 在 `kind != WRITE || closing == false` 的早退分支。
  * 判据：完成携带的命令被 release，FC command 池回到基线；不改 allocator 账本。 */
 
 static MunitResult test_cache_pad_early_exit_releases(const MunitParameter params[], void *data)
@@ -803,7 +803,7 @@ static MunitResult test_cache_pad_early_exit_releases(const MunitParameter param
     memset(&st, 0, sizeof(st));
     st.cmd_id = cmd->cmd_id;
 
-    ftl_cache_pad_callback(ftl, &st, NULL);
+    ftl_cache_pad_op_callback(ftl, &st, NULL);
 
     fc_resource_stats_s after;
 
@@ -1031,12 +1031,12 @@ static MunitResult test_bg_busy_cfg_single_source(const MunitParameter params[],
     munit_assert_true(pend_group_alloc(t, &gi));
 
     /* 只验证选档 + cfg 发布；不跑任务表，避免这里启一个搬移 job 污染 teardown。 */
-    bg_policy_test_publish(ftl);
+    ftl_sched_bg_test_publish(ftl);
 
-    munit_assert_int(ftl->bg.level, ==, BG_LEVEL_BUSY);
-    munit_assert_not_null(ftl->bg.cfg);
-    munit_assert_uint32(ftl->bg.cfg->grant_units, ==, 1U);
-    munit_assert_uint32(ftl->bg.cfg->task_mask, !=, 0U);
+    munit_assert_int(ftl->sched.bg.level, ==, BG_LEVEL_BUSY);
+    munit_assert_not_null(ftl->sched.bg.cfg);
+    munit_assert_uint32(ftl->sched.bg.cfg->grant_units, ==, 1U);
+    munit_assert_uint32(ftl->sched.bg.cfg->task_mask, !=, 0U);
 
     memset(&t->groups[gi], 0, sizeof(t->groups[gi]));
 
@@ -1289,7 +1289,7 @@ static MunitResult test_md_compact_superseded_no_commit(const MunitParameter par
     memset(&st, 0, sizeof(st));
     st.cmd_id = cmd->cmd_id;
 
-    ftl_metadata_callback(live, &st, d);
+    ftl_metadata_op_callback(live, &st, d);
 
     munit_assert_uint32(d->entries[0].pba, ==, 0x2000U); /* 未被旧页覆盖 */
     munit_assert_int(d->handle.phase, ==, MD_JOB_CP_READ);
@@ -1385,20 +1385,20 @@ static MunitResult test_cache_release_sees_inflight(const MunitParameter params[
     const BYTE kind0 = (BYTE)seq->kind;
     const BYTE gen0  = seq->gen;
 
-    seq->kind        = FTL_CACHE_SEQ_WRITE;
-    seq->gen         = 0U;
-    seq->wr_inflight = 1U;
-    seq->wr.count    = 0U;
+    seq->kind           = FTL_CACHE_SEQ_WRITE;
+    seq->gen            = 0U;
+    seq->write_inflight = 1U;
+    seq->write.count    = 0U;
 
     ftl_cache_seq_release(ftl);
 
     munit_assert_int(seq->kind, ==, FTL_CACHE_SEQ_NONE);
-    munit_assert_uint8(seq->gen, ==, 1U);         /* abort 升 gen，迟到完成被丢弃 */
-    munit_assert_uint8(seq->wr_inflight, ==, 1U); /* release 本身不改在飞计数 */
+    munit_assert_uint8(seq->gen, ==, 1U);            /* abort 升 gen，迟到完成被丢弃 */
+    munit_assert_uint8(seq->write_inflight, ==, 1U); /* release 本身不改在飞计数 */
 
-    seq->kind        = (ftl_cache_seq_kind_e)kind0;
-    seq->gen         = gen0;
-    seq->wr_inflight = 0U;
+    seq->kind           = (ftl_cache_seq_kind_e)kind0;
+    seq->gen            = gen0;
+    seq->write_inflight = 0U;
 
     return MUNIT_OK;
 }
@@ -1415,13 +1415,13 @@ static MunitResult test_cache_pad_skips_proven(const MunitParameter params[], vo
     const BYTE kind0    = (BYTE)seq->kind;
     const BOOL closing0 = seq->closing;
 
-    seq->kind              = FTL_CACHE_SEQ_WRITE;
-    seq->closing           = true;
-    seq->pad_verdict_valid = false;
-    seq->wr.count          = 1U;
-    seq->wr.head           = 0U;
-    seq->wr.page[0].proven = true;
-    seq->pad_pba[0]        = pba_make(0U, 0U, 0U, 1U, 0U, 1U, 0U); /* page1，避开 page0 屏障 */
+    seq->kind                 = FTL_CACHE_SEQ_WRITE;
+    seq->closing              = true;
+    seq->pad_verdict_valid    = false;
+    seq->write.count          = 1U;
+    seq->write.head           = 0U;
+    seq->write.page[0].proven = true;
+    seq->pad_pba[0]           = pba_make(0U, 0U, 0U, 1U, 0U, 1U, 0U); /* page1，避开 page0 屏障 */
 
     fc_cmd_s       *cmd = fc_command_alloc();
     fc_cmd_status_s st;
@@ -1430,16 +1430,16 @@ static MunitResult test_cache_pad_skips_proven(const MunitParameter params[], vo
     memset(&st, 0, sizeof(st));
     st.cmd_id = cmd->cmd_id;
 
-    ftl_cache_pad_callback(ftl, &st, NULL);
+    ftl_cache_pad_op_callback(ftl, &st, NULL);
 
-    munit_assert_true(seq->wr.page[0].proven);
+    munit_assert_true(seq->write.page[0].proven);
     munit_assert_int(seq->kind, ==, FTL_CACHE_SEQ_NONE);
     munit_assert_false(seq->closing);
 
-    seq->kind              = (ftl_cache_seq_kind_e)kind0;
-    seq->closing           = closing0;
-    seq->wr.count          = 0U;
-    seq->wr.page[0].proven = false;
+    seq->kind                 = (ftl_cache_seq_kind_e)kind0;
+    seq->closing              = closing0;
+    seq->write.count          = 0U;
+    seq->write.page[0].proven = false;
 
     return MUNIT_OK;
 }
@@ -1610,11 +1610,11 @@ static MunitResult test_cache_pad_no_free_aborts(const MunitParameter params[], 
     const BOOL active0 = seq->active;
     const BOOL clos0   = seq->closing;
 
-    seq->kind        = FTL_CACHE_SEQ_WRITE;
-    seq->gen         = 0U;
-    seq->active      = true;
-    seq->closing     = false;
-    seq->wr_inflight = 1U;
+    seq->kind           = FTL_CACHE_SEQ_WRITE;
+    seq->gen            = 0U;
+    seq->active         = true;
+    seq->closing        = false;
+    seq->write_inflight = 1U;
 
     fi_arm(FI_ALLOC_FAIL, 1U);
 
@@ -1623,11 +1623,11 @@ static MunitResult test_cache_pad_no_free_aborts(const MunitParameter params[], 
     munit_assert_uint8(seq->gen, ==, 1U);
 
     fi_reset();
-    seq->kind        = (ftl_cache_seq_kind_e)kind0;
-    seq->gen         = gen0;
-    seq->active      = active0;
-    seq->closing     = clos0;
-    seq->wr_inflight = 0U;
+    seq->kind           = (ftl_cache_seq_kind_e)kind0;
+    seq->gen            = gen0;
+    seq->active         = active0;
+    seq->closing        = clos0;
+    seq->write_inflight = 0U;
 
     return MUNIT_OK;
 }

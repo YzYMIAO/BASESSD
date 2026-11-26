@@ -1,6 +1,8 @@
 #ifndef FTL_CONFIG_H
 #define FTL_CONFIG_H
 
+/* header-only: config */
+
 /*
  * ftl_config.h — FTL 私有配置 + 地址编码（LBA / PBA）
  *
@@ -47,6 +49,24 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* ── 跨模块配置（无模块归属的调参）── */
+
+/* 一次读返回的用户数据大小 = 4 CW × 512B。 */
+#define FTL_READ_USER_SIZE (2048U)
+
+/* 提交背压（池空 / QUEUE 满）的等待上限。模块 deadline 必须 > NAND 超时 + 余量。 */
+#define FTL_SUBMIT_TIMEOUT_MS (10U)
+
+/* 顺序流检测阈值（本仓自定，FTL 自判）：同一方向连续 LBA 累计达到 64 条
+ * （32 KiB = 两个 16 KiB host 传输段）才认为进入顺序流，允许开 cache 序列。
+ * 依据：本阈值是工程取值（两个 16 KiB 传输段），没有对应的论文 / 规范参数；
+ * 形态上对齐 DRAM-less 分支"顺序访问按整页 / 整段落盘"的处理（DFTL，Gupta et al.,
+ * ASPLOS'09；见 docs/design/storage_controller_design.md 的经典论文清单）。
+ * 阈值只用于过滤单个随机请求，不是 QoS 参数。
+ * ⚠ host 传输段（USB 16 KiB）只是 LBA 流的一次交付，不是本阈值的作用域——
+ *   跨段连续由 seq->next_lba 延续，见 docs/design/ftl_design.md §3.16。 */
+#define FTL_STREAM_MIN_LBAS (64U)
 
 /* ══════════════════════════════════════════════════════════════════
  * 三、地址编码（LBA 侧 + PBA 侧）

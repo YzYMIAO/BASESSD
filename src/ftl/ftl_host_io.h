@@ -1,26 +1,23 @@
 #ifndef FTL_HOST_IO_H
 #define FTL_HOST_IO_H
 
-#include "fc_interface.h"
-#include "ftl_internal.h"
-#include "pending.h"
+#include "ftl_config.h"
+#include "ftl_type.h"
 
-/* host I/O 完成 / 失败 / 组排空接口。实现见 ftl_host_io.c 与 ftl_confirm.c。 */
+/* host I/O 组排空 / 顺序流复位接口。实现见 ftl_host_io.c；
+ * 完成分支（read_ok / read_fail / write_ok / write_fail）在 ftl_confirm.h。 */
 
-/**
- * @brief 推进一个 host 完成组的待下发子操作
- *
- * @param ftl FTL 实例
- * @param gi  pending 组下标
- */
+/* 一个组的子操作连续遇 FTL_AGAIN 而无任何进展的轮数上限。超过即判真卡死：
+ * 弃未下发子操作、组报 IO_ERROR（已下发的照常完成）。 */
+#define FTL_DRAIN_STALL_MAX (8U)
+
+/** @brief 推进一个 host 完成组的待下发子操作。 */
 void ftl_host_group_drain(ftl_ctx_s *ftl, WORD gi);
 
-BOOL         ftl_host_io_write_ok(ftl_ctx_s *ftl, pend_req_s *pending);
-ssd_status_e ftl_host_io_read_ok(ftl_ctx_s *ftl, fc_cmd_s *cmd, pend_req_s *pending, WORD cmd_id);
-void         ftl_host_io_read_fail(ftl_ctx_s *ftl, pend_req_s *pending);
-void         ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc_cmd_status_s *completion);
-
+/** @brief 复位顺序读检测状态，并使已算出的预取计划失效。 */
 void ftl_seq_reset(ftl_ctx_s *ftl);
+
+/** @brief 初始化 host I/O 的日志限流对象（NOLOAD，显式复位）。 */
 void ftl_host_io_init(void);
 
 #endif /* FTL_HOST_IO_H */

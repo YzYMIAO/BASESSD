@@ -1,12 +1,20 @@
 /*
- * ftl_diag.c — FTL 诊断 / 统计 / 初始化审计
+ * ftl_diag.c — FTL 诊断 / 统计 / 初始化契约审计
  *
- * 本文件只放**不参与正常数据面**的代码：
- *   · stats 表与注册（SSD_STATS_ENABLE）
- *   · debug-only 初始化契约审计（!NDEBUG；release 空实现）
- *   · CLI `ftl_ctx` / 断言终端的现场 dump
+ * 职责：
+ *   · stats 表与注册（SSD_STATS_ENABLE）：ftl / alloc / stream / journal / gc / rr / sched；
+ *   · debug-only 初始化契约审计（!NDEBUG）：句柄 / topology / 窄上下文 / owner 身份 / job 零态；
+ *   · CLI `ftl_ctx` 与断言终端的现场 dump（按模块缩写过滤）。
  *
- * 条件编译集中在这里：ftl.c 不再散落 SSD_STATS_ENABLE / !NDEBUG 大块。
+ * 关键机制：
+ *   · 条件编译集中在本文件：SSD_STATS_ENABLE / !NDEBUG 不在 ftl.c 散落；
+ *   · 审计只证明「初始化后不可变」的绑定，不覆盖运行期可变状态与入参前置条件；
+ *     release 下整体不存在，不能替代 release 运行期拒绝；
+ *   · dump 只读标量快照，不调用会断言的池扫描。
+ *
+ * 与其他模块：
+ *   · 上游：ftl.c（register / contract verify）、cli.c（ftl_ctx）、assertion.c（弱钩子强覆盖）；
+ *   · 下游：各模块的只读访问器与 debug dump。
  */
 
 #include "assertion.h"
@@ -121,8 +129,9 @@ static const stats_name_s s_stats_rr_names[] = {
 };
 STATS_CHECK_FIELD(rr_handle_s, already_bad_reads, STATS_U32);
 #endif /* SSD_STATS_ENABLE */
+
 /* debug dump 的模块过滤位图。类型放文件前部，不夹在函数之间。 */
-typedef struct FTL_DBG_FILTER_S
+typedef struct FTL_DEBUG_FILTER_S
 {
     BOOL all;
     BOOL alloc;
@@ -135,9 +144,11 @@ typedef struct FTL_DBG_FILTER_S
     BOOL md;
     BOOL wb;
     BOOL sched;
-} ftl_dbg_filter_s;
+} ftl_debug_filter_s;
 
-/* ── 初始化契约自检（debug-only）──
+/* ── contract ── */
+
+/* 初始化契约自检（debug-only）
  *
  * 只在 ftl_init + 设备级 owner 登记完成后跑一次，证明“初始化后不可变”的绑定。
  * 覆盖：句柄、storage 数组、模块窄上下文、topology 副本、PBA 布局、bg 任务表、
@@ -158,12 +169,7 @@ typedef struct FTL_DBG_FILTER_S
  */
 static SSD_CODE_FAST void contract_check_bg(const ftl_ctx_s *ftl)
 {
-    ASSERT((ftl->bg.tasks != NULL) && (ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_POLICY_TASK_COUNT) && (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
-
-    for (BYTE i = 0U; i < ftl->bg.task_count; i++)
-    {
-        ASSERT(ftl->bg.tasks[i].func != NULL);
-    }
+    ASSERT((ftl->sched.bg.tasks != NULL) && (ftl->sched.bg.task_count == FTL_BG_JOB_NUM) && (ftl->sched.bg.cfg == NULL) && (ftl->sched.bg.level == BG_LEVEL_IDLE));
 }
 
 /**
@@ -173,7 +179,7 @@ static SSD_CODE_FAST void contract_check_bg(const ftl_ctx_s *ftl)
  */
 static SSD_CODE_FAST void contract_check_boot_zero(const ftl_ctx_s *ftl)
 {
-    ASSERT((pend_slot_get_count(&ftl->pending) == 0U) && (pend_group_get_count(&ftl->pending) == 0U) && (ftl->stats.total_writes == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->flags.bg_suspend == false) && (ftl->flags.l2p_defer == false));
+    ASSERT((pend_slot_count(&ftl->pending) == 0U) && (pend_group_count(&ftl->pending) == 0U) && (ftl->stats.total_writes == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->flags.bg_suspend == false) && (ftl->flags.l2p_defer == false));
 }
 
 /**
@@ -282,7 +288,7 @@ static SSD_CODE_FAST void contract_check_jobs_idle(const ftl_ctx_s *ftl)
 
     ASSERT((cp->active == false) && (cp->waiting == false) && (cp->failed == false) && (cp->phase == CP_IDLE) && (cp->cp_state.advance_next == false) && (cp->cp_state.cursor_valid == false));
 
-    ASSERT((md_is_busy(ftl->metadata_dir) == false) && (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) && md_cursor_bounds_ok(ftl->metadata_dir));
+    ASSERT((md_is_busy(ftl->metadata_dir) == false) && (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) && md_cursor_is_in_bounds(ftl->metadata_dir));
 
     ASSERT((ftl->mig_handle->job.active == false) && (ftl->mig_handle->job.waiting == false) && (ftl->mig_handle->job.phase == MIG_IDLE) && mig_fail_state_is_clean(ftl->mig_handle));
 
@@ -293,8 +299,35 @@ static SSD_CODE_FAST void contract_check_jobs_idle(const ftl_ctx_s *ftl)
 
 #endif /* !NDEBUG */
 
+/**
+ * @brief debug-only 初始化契约审计（release 下空实现）
+ *
+ * 在 ftl_init 与设备级 owner 登记完成后调用一次；只证明初始化后**不可变**的绑定。
+ *
+ * @param ftl 已初始化的实例
+ */
+SSD_CODE_FAST void ftl_contract_verify(const ftl_ctx_s *ftl)
+{
+#if defined(NDEBUG)
+    (void)ftl; /* release：审计不存在，行为与今天一致 */
+#else
+    ASSERT(ftl != NULL);
+    ASSERT(pba_fields_layout_matches());
+
+    contract_check_handles(ftl);
+    contract_check_topology(ftl);
+    contract_check_module_contexts(ftl);
+    contract_check_identity(ftl);
+    contract_check_bg(ftl);
+    contract_check_jobs_idle(ftl);
+    contract_check_boot_zero(ftl);
+#endif
+}
+
+/* ── debug ── */
+
 /* 模块缩写过滤器：NULL / "all" = 全部；未知返回 false。 */
-static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
+static BOOL ftl_debug_filter_init(const char *module, ftl_debug_filter_s *flt)
 {
     if ((module == NULL) || (strcmp(module, "all") == 0))
     {
@@ -352,6 +385,105 @@ static BOOL ftl_dbg_filter_init(const char *module, ftl_dbg_filter_s *flt)
 }
 
 /**
+ * @brief 打印 FTL 各模块的关键现场（可按模块缩写过滤）。
+ *
+ * @param module NULL / "all" = 全部；alloc / pend / seq / cache / jrn / cp / mig / md / wb / sched。
+ * @return true = 参数合法并已输出；false = 未知模块。
+ *
+ * @note 只读标量快照，不调用会断言的池扫描；CLI `ftl_ctx` 与断言终端共用。
+ */
+BOOL ftl_debug_dump(const char *module)
+{
+    ftl_debug_filter_s flt;
+
+    if (ftl_debug_filter_init(module, &flt) == false)
+    {
+        return false;
+    }
+
+    LOGI_IF(flt.all, LOG_TAG_FTL "DBG req=%hu die_max=%hhu\r\n", ftl_op_req_count(), DIE_MAX);
+
+    for (BYTE die = 0U; die < DIE_MAX; die++)
+    {
+        const ftl_ctx_s *f = ftl_instance_get(die);
+
+        if ((f->cache == NULL) || (f->journal == NULL) || (f->metadata_dir == NULL))
+        {
+            continue;
+        }
+
+        LOGI_IF(flt.all || flt.alloc, LOG_TAG_FTL "DBG d=%hhu alloc free=%hu bad=%hu closed=%hu op=%hu/%hu spare=%hu/%hu hot=%d/%hhu/%hhu cold=%d/%hhu\r\n", die, f->alloc.free_count, f->alloc.bad_count, f->alloc.closed_sb_count, alc_op_get_count(&f->alloc, 0U), alc_op_get_count(&f->alloc, 1U), alc_spare_get_count(&f->alloc, 0U), alc_spare_get_count(&f->alloc, 1U), (int)f->alloc.hot_sb.is_open, f->alloc.hot_sb.next_page, f->alloc.hot_sb.page0_programmed, (int)f->alloc.cold_sb.is_open, f->alloc.cold_sb.next_page);
+        if (flt.all || flt.pend)
+        {
+            LOGI(LOG_TAG_FTL "DBG d=%hhu pend slot=%hu group=%hu req=%hu\r\n",
+                 die,
+                 pend_slot_count(&f->pending),
+                 pend_group_count(&f->pending),
+                 ftl_op_req_count());
+
+            for (BYTE gi = 0U; gi < (BYTE)FTL_GROUP_MAX; gi++)
+            {
+                const pend_group_s *g = &f->pending.groups[gi];
+
+                if (g->used == false)
+                {
+                    continue;
+                }
+                LOGI(LOG_TAG_FTL "DBG d=%hhu g=%hhu op=%d lba=%lu next=%lu/%lu out=%hu stalls=%hhu agg=%d\r\n",
+                     die,
+                     gi,
+                     (int)g->op,
+                     (DWORD)g->lba,
+                     g->next,
+                     g->total,
+                     g->outstanding,
+                     g->stalls,
+                     (int)g->agg_status);
+            }
+        }
+        if (flt.all || flt.seq)
+        {
+            LOGI(LOG_TAG_FTL "DBG d=%hhu seq kind=%d act=%d drain=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu close=%d/%d\r\n",
+                 die,
+                 (int)f->cache_stream.seq.kind,
+                 (int)f->cache_stream.seq.active,
+                 (int)f->cache_stream.seq.draining,
+                 f->cache_stream.seq.owner_gi,
+                 f->cache_stream.seq.next_lba,
+                 f->cache_stream.seq.write.count,
+                 f->cache_stream.seq.write_inflight,
+                 f->cache_stream.seq.write.head,
+                 (int)f->cache_stream.seq.close_requested,
+                 (int)f->cache_stream.seq.closing);
+            if (f->cache_stream.seq.write.count > 0U)
+            {
+                const ftl_cache_page_s *hp = &f->cache_stream.seq.write.page[f->cache_stream.seq.write.head];
+                LOGI(LOG_TAG_FTL "DBG d=%hhu seq head lba=%lu st=%hhu proven=%d cw=0x%02hhx\r\n",
+                     die,
+                     hp->lba,
+                     hp->state,
+                     (int)hp->proven,
+                     hp->cw_bitmap);
+            }
+        }
+        LOGI_IF(flt.all || flt.cache, LOG_TAG_FTL "DBG d=%hhu cache load=%hhu flush=%hhu cmt=%lu flags def=%d bg=%d l2p=%d md=%d\r\n", die, f->cache->inflight.load, f->cache->inflight.flush, f->cache->stats.cmt_dirty, (int)f->flags.deferred_error, (int)f->flags.bg_suspend, (int)f->flags.l2p_defer, (int)f->flags.md_load_failed);
+        LOGI_IF(flt.all || flt.jrn, LOG_TAG_FTL "DBG d=%hhu jrn seq=%lu water=%hhu idle=%d pend=%d emerg=%d\r\n", die, jrn_sequence_get(f->journal), jrn_watermark_get(f->journal), (int)jrn_is_idle(f->journal), (int)jrn_has_pending_entries(f->journal), (int)jrn_is_emergency(f->journal));
+        LOGI_IF(flt.all || flt.cp, LOG_TAG_FTL "DBG d=%hhu cp act=%d/%d ph=%d\r\n", die, (int)f->cp_handle->active, (int)f->cp_handle->waiting, (int)f->cp_handle->phase);
+        LOGI_IF(flt.all || flt.mig, LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n", die, (int)f->mig_handle->job.active, (int)f->mig_handle->job.waiting, (int)f->mig_handle->job.phase);
+        LOGI_IF(flt.all || flt.md, LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n", die, (int)md_handle_is_idle(f->metadata_dir), (int)f->metadata_dir->handle.phase);
+        LOGI_IF(flt.all || flt.wb, LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n", die, (int)f->wbuf->open, f->wbuf->base, f->wbuf->occupied, f->wbuf->owners, (int)f->wbuf->error);
+
+        if ((flt.all || flt.sched) && (f->sched.items != NULL))
+        {
+            ftl_sched_debug_dump(f, die);
+        }
+    }
+    return true;
+}
+
+/* ── stats ── */
+
+/**
  * @brief 注册模块级 stats（mig / alloc / stream / journal / gc / rr）。
  *
  * 只在 SSD_STATS_ENABLE 下生效；release 为空实现。
@@ -402,122 +534,14 @@ void ftl_stats_register_sched(ftl_ctx_s *ftl)
 #endif
 }
 
-SSD_CODE_FAST void ftl_contract_audit(const ftl_ctx_s *ftl)
-{
-#if defined(NDEBUG)
-    (void)ftl; /* release：审计不存在，行为与今天一致 */
-#else
-    ASSERT(ftl != NULL);
-    ASSERT(pba_fields_layout_matches());
-
-    contract_check_handles(ftl);
-    contract_check_topology(ftl);
-    contract_check_module_contexts(ftl);
-    contract_check_identity(ftl);
-    contract_check_bg(ftl);
-    contract_check_jobs_idle(ftl);
-    contract_check_boot_zero(ftl);
-#endif
-}
+/* ── assert ── */
 
 /**
- * @brief 打印 FTL 各模块的关键现场（可按模块缩写过滤）。
+ * @brief 断言终端的 FTL 现场钩子（强符号覆盖 assertion.c 的弱默认）
  *
- * @param module NULL / "all" = 全部；alloc / pend / seq / cache / jrn / cp / mig / md / wb / sched。
- * @return true = 参数合法并已输出；false = 未知模块。
- *
- * @note 只读标量快照，不调用会断言的池扫描；CLI `ftl_ctx` 与断言终端共用。
+ * 运行期日志级别低于 INFO 时临时放宽，然后 dump 全模块现场。
  */
-BOOL ftl_debug_dump(const char *module)
-{
-    ftl_dbg_filter_s flt;
-
-    if (ftl_dbg_filter_init(module, &flt) == false)
-    {
-        return false;
-    }
-
-    LOGI_IF(flt.all, LOG_TAG_FTL "DBG req=%hu die_max=%hhu\r\n", ftl_op_req_count(), DIE_MAX);
-
-    for (BYTE die = 0U; die < DIE_MAX; die++)
-    {
-        const ftl_ctx_s *f = ftl_instance_get(die);
-
-        if ((f->cache == NULL) || (f->journal == NULL) || (f->metadata_dir == NULL))
-        {
-            continue;
-        }
-
-        LOGI_IF(flt.all || flt.alloc, LOG_TAG_FTL "DBG d=%hhu alloc free=%hu bad=%hu closed=%hu op=%hu/%hu spare=%hu/%hu hot=%d/%hhu/%hhu cold=%d/%hhu\r\n", die, f->alloc.free_count, f->alloc.bad_count, f->alloc.closed_sb_count, alc_op_get_count(&f->alloc, 0U), alc_op_get_count(&f->alloc, 1U), alc_spare_get_count(&f->alloc, 0U), alc_spare_get_count(&f->alloc, 1U), (int)f->alloc.hot_sb.is_open, f->alloc.hot_sb.next_page, f->alloc.hot_sb.page0_programmed, (int)f->alloc.cold_sb.is_open, f->alloc.cold_sb.next_page);
-        if (flt.all || flt.pend)
-        {
-            LOGI(LOG_TAG_FTL "DBG d=%hhu pend slot=%hu group=%hu req=%hu\r\n",
-                 die,
-                 pend_slot_get_count(&f->pending),
-                 pend_group_get_count(&f->pending),
-                 ftl_op_req_count());
-
-            for (BYTE gi = 0U; gi < (BYTE)FTL_GROUP_MAX; gi++)
-            {
-                const pend_group_s *g = &f->pending.groups[gi];
-
-                if (g->used == false)
-                {
-                    continue;
-                }
-                LOGI(LOG_TAG_FTL "DBG d=%hhu g=%hhu op=%d lba=%lu next=%lu/%lu out=%hu stalls=%hhu agg=%d\r\n",
-                     die,
-                     gi,
-                     (int)g->op,
-                     (DWORD)g->lba,
-                     g->next,
-                     g->total,
-                     g->outstanding,
-                     g->stalls,
-                     (int)g->agg_status);
-            }
-        }
-        if (flt.all || flt.seq)
-        {
-            LOGI(LOG_TAG_FTL "DBG d=%hhu seq kind=%d act=%d drain=%d own=%hu next=%lu wr=%hhu/%hhu head=%hhu close=%d/%d\r\n",
-                 die,
-                 (int)f->cache_stream.seq.kind,
-                 (int)f->cache_stream.seq.active,
-                 (int)f->cache_stream.seq.draining,
-                 f->cache_stream.seq.owner_gi,
-                 f->cache_stream.seq.next_lba,
-                 f->cache_stream.seq.wr.count,
-                 f->cache_stream.seq.wr_inflight,
-                 f->cache_stream.seq.wr.head,
-                 (int)f->cache_stream.seq.close_requested,
-                 (int)f->cache_stream.seq.closing);
-            if (f->cache_stream.seq.wr.count > 0U)
-            {
-                const ftl_cache_page_s *hp = &f->cache_stream.seq.wr.page[f->cache_stream.seq.wr.head];
-                LOGI(LOG_TAG_FTL "DBG d=%hhu seq head lba=%lu st=%hhu proven=%d cw=0x%02hhx\r\n",
-                     die,
-                     hp->lba,
-                     hp->state,
-                     (int)hp->proven,
-                     hp->cw_bitmap);
-            }
-        }
-        LOGI_IF(flt.all || flt.cache, LOG_TAG_FTL "DBG d=%hhu cache load=%hhu flush=%hhu cmt=%lu flags def=%d bg=%d l2p=%d md=%d\r\n", die, f->cache->inflight.load, f->cache->inflight.flush, f->cache->stats.cmt_dirty, (int)f->flags.deferred_error, (int)f->flags.bg_suspend, (int)f->flags.l2p_defer, (int)f->flags.md_load_failed);
-        LOGI_IF(flt.all || flt.jrn, LOG_TAG_FTL "DBG d=%hhu jrn seq=%lu water=%hhu idle=%d pend=%d emerg=%d\r\n", die, jrn_sequence_get(f->journal), jrn_watermark_get(f->journal), (int)jrn_is_idle(f->journal), (int)jrn_has_pending_entries(f->journal), (int)jrn_is_emergency(f->journal));
-        LOGI_IF(flt.all || flt.cp, LOG_TAG_FTL "DBG d=%hhu cp act=%d/%d ph=%d\r\n", die, (int)f->cp_handle->active, (int)f->cp_handle->waiting, (int)f->cp_handle->phase);
-        LOGI_IF(flt.all || flt.mig, LOG_TAG_FTL "DBG d=%hhu mig act=%d/%d ph=%d\r\n", die, (int)f->mig_handle->job.active, (int)f->mig_handle->job.waiting, (int)f->mig_handle->job.phase);
-        LOGI_IF(flt.all || flt.md, LOG_TAG_FTL "DBG d=%hhu md idle=%d ph=%d\r\n", die, (int)md_handle_is_idle(f->metadata_dir), (int)f->metadata_dir->handle.phase);
-        LOGI_IF(flt.all || flt.wb, LOG_TAG_FTL "DBG d=%hhu wb open=%d base=%lu occ=0x%02hhX own=0x%08lX err=%d\r\n", die, (int)f->wbuf->open, f->wbuf->base, f->wbuf->occupied, f->wbuf->owners, (int)f->wbuf->error);
-
-        if ((flt.all || flt.sched) && (f->sched.items != NULL))
-        {
-            ftl_sched_debug_dump(f, die);
-        }
-    }
-    return true;
-}
-
-void ftl_assert_context(void)
+void ftl_assert_context_dump(void)
 {
     // 故障现场必须可见：运行期若把级别调到 WARN/ERROR，临时放宽到 INFO；
     // LOG_OFF 是测试/产测的显式静默，保持原样。

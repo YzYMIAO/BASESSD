@@ -117,7 +117,7 @@ void ssd_controller_service(ssd_ctl_s *controller);
 /**
  * @brief 放弃在飞的 FLUSH 回执（host 复位 / 拔出 / 前端换命令）。
  *
- * 摘掉 `flush_req` 回执指针，并清各实例的 flush job 标志（`ftl_flush_cancel`），
+ * 摘掉 `flush_req` 回执指针，并清各实例的 flush job 标志（`ftl_flush_abort`），
  * 避免旧 job 在请求对象被复用后才完成、把回执写到新请求上。在飞的数据操作有各自
  * 的异步路径，不需要回滚。
  *

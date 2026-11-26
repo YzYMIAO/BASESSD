@@ -330,7 +330,7 @@ BOOL ssd_controller_host_write_admit(const ssd_ctl_s *controller, QWORD lba)
 
     ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
 
-    return (ftl != NULL) && (ftl_host_write_admit(ftl) != false);
+    return (ftl != NULL) && (ftl_host_write_is_admitted(ftl) != false);
 }
 
 /**
@@ -520,7 +520,7 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
             return SSD_STATUS_INVALID_ARGUMENT;
         }
         /* die 索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
-        if ((ftl_get_topo(slot)->ch != ch) || (ftl_get_topo(slot)->ce != ce) || (ftl_get_topo(slot)->lun != lun))
+        if ((ftl_topo_get(slot)->ch != ch) || (ftl_topo_get(slot)->ce != ce) || (ftl_topo_get(slot)->lun != lun))
         {
             LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hhu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
@@ -870,6 +870,6 @@ void ssd_controller_cancel_flush(ssd_ctl_s *controller)
         ftl_ctx_s *ftl = controller->ftl[die];
 
         ASSERT(ftl != NULL);
-        ftl_flush_cancel(ftl);
+        ftl_flush_abort(ftl);
     }
 }

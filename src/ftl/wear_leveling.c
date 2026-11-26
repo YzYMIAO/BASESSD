@@ -2,29 +2,20 @@
  * wear_leveling.c — 静态磨损均衡（触发判定 + 选 victim）
  *
  * 职责：
- *   在块擦除次数分布不均时，挑出「擦得少」的冷 SB 作为搬运候选；另有一条「预测性退役」
- *   旁路的巡检（rr_predictive_scan）由搬移引擎调用。**搬移本身不在本文件**。
+ *   · 从 Closed SB 中筛出静态 WL 的合法候选（同一套过滤给触发与选块共用）；
+ *   · 求 Free Pool 最大擦除次数与最冷 used SB 的平均擦除次数，判定是否触发；
+ *   · 选 victim：平均擦除次数最少 → 同擦除次数下 valid_cw 多 → read_sum 高。
  *
- * 与 gc.c 的分工：
- *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
- *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
- *         migrate.c 的搬移引擎；异步读路径用 ftl_async_read_page + gc_decode_cw_lba
- *         （gc_read_page_with_lba 是掉电重建专用的同步原语）。
+ * 关键机制：
+ *   · 触发判据 = UBI 模型：max_free_ec − min_used_ec ≥ WL_THRESHOLD；
+ *     搬移不改变擦除计数，差值不足必须停止，否则是纯写放大；
+ *   · 候选过滤：跳过 Open / 含坏 plane / 全哨兵条目；有效 CW ≥ 条目容量 × WL_MIN_VALID_RATIO；
+ *   · 全部按全局块号索引 BST（跨 plane），退化单 plane 条目按自身容量算分母。
  *
- * 触发判据（UBI 模型，见 wl_should_trigger）：是否存在「高擦除空闲块」显著旧于
- * 「最冷的 used SB」；是则把冷数据搬到高磨损块，低磨损块空出来给热数据。
- *
- * 文件结构：
- *   1. 候选 / 触发 / 选块   wl_candidate_get（static）/ wl_should_trigger / wl_select_victim
- *
- * ⚠ 搬移在 `ftl/migrate.c` 的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）
- *   ——本文件只留触发判定与选块策略。
- *
- * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
- *
- * ⚠ 入口前置守卫口径（docs/design/common/assertion_guidelines.md §九）：
- *   本文件全部函数都取 ftl 实例指针，且**只被 migrate.c（已持实例）与本文件内部**调用
- *   ⇒ ftl 非空是**前置条件**，不逐函数复检。
+ * 与其他模块：
+ *   · 上游：migrate.c 的 WL 求值 / 搬移引擎调用；
+ *   · 下游：allocator（closed 列表 / free 最大擦除）、CLI `wear`（同一漏斗）；
+ *   · 搬移本身不在本文件（GC / WL 共用 migrate.c 的异步 job）。
  */
 
 #include "wear_leveling.h"
@@ -33,7 +24,7 @@
 
 #include <string.h>
 
-/* ── 1. 触发 / 选块 ── */
+/* ── candidate ── */
 
 /**
  * @brief 判定一个 Closed 条目是否是静态 WL 的合法候选，并给出聚合统计与平均擦除次数。
@@ -102,7 +93,9 @@ static BOOL wl_candidate_get(const alc_s *alloc, const super_block_s *sb, alc_su
     return true;
 }
 
-// 契约见 wear_leveling.h。CLI `wear` 与 wl_should_trigger 共用本函数，
+/* ── ec_spread ── */
+
+// 契约见 wear_leveling.h。CLI `wear` 与 wl_trigger_is_due 共用本函数，
 // 避免第二套擦除计数口径（C9）。
 BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_free, DWORD *out_min_used)
 {
@@ -136,14 +129,16 @@ BOOL wl_ec_spread_get(const alc_s *alloc, DWORD total_writes, DWORD *out_max_fre
         return false; /* 无可用 used 候选：判据无从比较 */
     }
 
-    *out_max_free = alc_free_get_max_erase(alloc);
+    *out_max_free = alc_free_erase_limit(alloc);
     *out_min_used = min_used;
     return true;
 }
 
+/* ── trigger ── */
+
 // 判据唯一：与 wl_ec_spread_get 同一漏斗。搬移不改变擦除计数，差值不足必须
 // 停止，否则就是纯写放大。
-BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes)
+BOOL wl_trigger_is_due(const alc_s *alloc, DWORD total_writes)
 {
     DWORD max_free = 0U;
     DWORD min_used = 0U;
@@ -155,6 +150,8 @@ BOOL wl_should_trigger(const alc_s *alloc, DWORD total_writes)
 
     return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }
+
+/* ── victim ── */
 
 /**
  * @brief 选静态 WL 的搬运 victim（冷数据搬到高磨损块）。

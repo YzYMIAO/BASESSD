@@ -38,6 +38,96 @@ typedef struct FTL_BOOT_REPORT_S
     BOOL            scoped;          /* true = 范围化恢复（部分旧映射丢失） */
 } ftl_boot_report_s;
 
+/* ── 查询 / 谓词 / getter ── */
+
+/**
+ * @brief 取紧凑 die 号对应的 FTL 实例（不透明句柄）
+ *
+ * @param die 紧凑 die 号（< DIE_MAX；未分配的尾项不得访问）
+ * @return 实例指针（非空）
+ */
+ftl_ctx_s *ftl_instance_get(BYTE die);
+
+/**
+ * @brief 校验实例路由与紧凑 die 表的往返一致性
+ *
+ * @return true = 一致；false = 路由/拓扑公式漂移
+ */
+BOOL ftl_route_verify(void);
+
+/**
+ * @brief 计算主机可见的 LBA 上限（开机一次）
+ *
+ * 按实际坏块集，取各实例/plane 的最小可用块数；runtime 新增坏块不缩容。
+ *
+ * @return 主机 LBA 上限（>= 1）
+ */
+DWORD ftl_host_lba_max(void);
+
+/**
+ * @brief 计算当前介质布局版本（拓扑指纹）
+ *
+ * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）：
+ * - DIE_MAX == 1：global == local，介质上的值逐位不变 ⇒ 版本保持 BASE，
+ *   **不额外格式化**（与现有单 die 介质兼容）。
+ * - DIE_MAX > 1：把 die 数 + topology map 哈希编入版本 ⇒ 不同拓扑（哪怕 die 数
+ *   相同）也会被识别为版本不符，首次启用自动全片格式化。
+ * 这是本仓自定的格式策略。
+ *
+ * @return 介质布局版本
+ */
+DWORD ftl_media_layout_version(void);
+
+/**
+ * @brief 取实例拓扑（只读）
+ *
+ * @param ftl FTL 实例（非 NULL）
+ * @return 实例内嵌的 ch/ce/lun 拓扑（随实例生命周期有效）
+ */
+const ftl_topo_s *ftl_topo_get(const ftl_ctx_s *ftl);
+
+#if SSD_STATS_ENABLE
+/**
+ * @brief 完成派发侧的进展签名（主循环空转判据）。
+ *
+ * = 已消费完成数 + 成功下发的 host 子操作数。只用于比较两次采样是否变化；
+ * u32 回绕不影响相等比较。
+ *
+ * @return 进展签名
+ */
+DWORD ftl_op_stats_progress(void);
+#endif
+
+/**
+ * @brief host 写启动许可（读不经过本判据）
+ *
+ * HIL 在提交 WRITE 前调用；false 时应保持 HIL 请求未提交并稍后重试，
+ * 而不是把它当作永久失败。
+ *
+ * @param ftl FTL 实例
+ * @return true 允许启动；false 当前应暂缓 host 写
+ */
+BOOL ftl_host_write_is_admitted(const ftl_ctx_s *ftl);
+
+/**
+ * @brief 取走并清除 volatile write cache 的 deferred error 标志。
+ * @param ftl FTL 上下文
+ * @return true = 上一次已回执的写后来失败，下一条 host 命令应上报错误
+ */
+BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
+
+/* ── 拓扑 / 启动 / 恢复 ── */
+
+/**
+ * @brief 由上电扫描结果构建紧凑 die 表（纯 RAM，不碰硬件）
+ *
+ * 只给实际存在且探测有响应的 LUN 分配紧凑 die 号。
+ *
+ * @param targets 板级物理拓扑（CH_NUM × CE_NUM；armed 之前已填）
+ * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
+ */
+BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM]);
+
 /**
  * @brief 判定介质是否需要格式化。
  * @param ftl FTL 上下文
@@ -63,99 +153,26 @@ ftl_status_e ftl_boot_format(ftl_ctx_s *ftl, BOOL verify);
 ftl_status_e ftl_boot_recover(ftl_ctx_s *ftl, ftl_boot_report_s *report);
 
 /**
- * @brief 打印固定分区与数据区的坏块分布（开机基线）。
- * @param ftl FTL 上下文（只读）
- */
-void ftl_boot_log_bad_areas(const ftl_ctx_s *ftl);
-
-/* ── 设备 / 实例初始化（boot 编排）── */
-
-/**
- * @brief 由上电扫描结果构建紧凑 die 表（纯 RAM，不碰硬件）
- *
- * 只给实际存在且探测有响应的 LUN 分配紧凑 die 号。
- *
- * @param targets 板级物理拓扑（CH_NUM × CE_NUM；armed 之前已填）
- * @return true = 至少一个 die 且往返自检通过；false = 无 die / 越界 / 自检失败
- */
-BOOL ftl_topology_build(const nand_target_info_s targets[CH_NUM][CE_NUM]);
-
-/**
- * @brief 复位 FTL 文件级全局静态（所有实例 init 之前调用一次）
- *
- * 这些静态落在 NOLOAD 段，上电/软复位都不清零；必须在 ftl_device_prepare 之前
- * 调用，否则 boot once 守卫可能被随机残留误判为「已初始化」。
- */
-void ftl_global_init(void);
-
-/**
- * @brief 设备级一次初始化：全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache
- *
- * 调用顺序：ftl_topology_build → ftl_global_init → 本函数 → 逐实例 init。
- * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复清 cache）。
- */
-void ftl_device_prepare(void);
-
-/**
- * @brief 取紧凑 die 号对应的 FTL 实例（不透明句柄）
- *
- * @param die 紧凑 die 号（< DIE_MAX；未分配的尾项不得访问）
- * @return 实例指针（非空）
- */
-ftl_ctx_s *ftl_instance_get(BYTE die);
-
-/**
- * @brief 初始化一个 FTL 实例的 workspace 与模块状态
- *
- * 必须在 ftl_device_prepare 之后、逐实例推进；实例的 workspace 由 FTL 自持。
- * 每个 die 只能成功初始化一次；重复调用返回 FTL_ERROR（release 也拒绝）。
- *
- * @param die 紧凑 die 号（< DIE_MAX = 运行时实际 die 数）
- * @return FTL_OK 成功；FTL_ERROR 重复初始化 / 本 target 无 L2P cache /
- *         元数据候选池构建失败
- */
-ftl_status_e ftl_instance_init(BYTE die);
-
-/**
- * @brief 校验实例路由与紧凑 die 表的往返一致性
- *
- * @return true = 一致；false = 路由/拓扑公式漂移
- */
-BOOL ftl_route_verify(void);
-
-/**
- * @brief 撤销实例路由（boot 失败回退 fc_service 时用）
- */
-void ftl_route_clear(void);
-
-/**
  * @brief 打印本实例的池占用（boot 基线）
  *
  * @param ftl 已初始化的实例（只读）
  */
-void ftl_boot_log_usage(const ftl_ctx_s *ftl);
-
-/* ── 周期任务 / 容量（HIL 只经这些入口，不读 FTL 内部字段）── */
+void ftl_boot_print_usage(const ftl_ctx_s *ftl);
 
 /**
- * @brief 计算主机可见的 LBA 上限（开机一次）
- *
- * 按实际坏块集，取各实例/plane 的最小可用块数；runtime 新增坏块不缩容。
- *
- * @return 主机 LBA 上限（>= 1）
+ * @brief 打印固定分区与数据区的坏块分布（开机基线）。
+ * @param ftl FTL 上下文（只读）
  */
-DWORD ftl_host_lba_max(void);
+void ftl_boot_print_bad_areas(const ftl_ctx_s *ftl);
+
+/* ── 控制 / 中止 ── */
 
 /**
- * @brief 注册 FTL 的周期任务（统计日志 / 后台节拍 / GC-WL 求值）
+ * @brief 撤销实例路由（boot 失败回退 fc_service 时用）
  *
- * 必须在全部实例 boot 成功之后调用一次；失败回退 fc_service 时不调用。
- * 周期与内部策略由 FTL 决定，调用者不需要知道。
- * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复注册）。
+ * @note 清空 op 路由表后，ftl_op_route_get 返回 NULL；ftl_instance_get 不依赖该表。
  */
-void ftl_timer_tasks_start(void);
-
-/* ── 超时中止（best-effort；仅用于 HIL 已标记 timed_out 的请求）── */
+void ftl_route_clear(void);
 
 /**
  * @brief 中止属于同一 host 请求的所有 FTL 组
@@ -176,34 +193,11 @@ void ftl_abort_request(void *ctx);
  */
 void ftl_trim_abort(ftl_ctx_s *ftl);
 
-/* ── 主循环服务 ── */
-
-/** @brief 取实例拓扑（只读）。 */
-const ftl_topo_s *ftl_get_topo(const ftl_ctx_s *ftl);
-
 /**
- * @brief 实例无关的每轮泵。
- * @note 必须先于所有 ftl_service()，且每轮只调一次。
+ * @brief 放弃当前 FLUSH job（host 复位等撤销路径）。
+ * @param ftl FTL 上下文
  */
-void ftl_service_pump(void);
-
-/**
- * @brief 单个 FTL 实例的服务；多实例下每个实例都要调用。
- * @param ftl FTL 上下文（非 NULL）
- */
-void ftl_service(ftl_ctx_s *ftl);
-
-#if SSD_STATS_ENABLE
-/**
- * @brief 完成派发侧的进展签名（主循环空转判据）。
- *
- * = 已消费完成数 + 成功下发的 host 子操作数。只用于比较两次采样是否变化；
- * u32 回绕不影响相等比较。
- *
- * @return 进展签名
- */
-DWORD ftl_op_stats_progress(void);
-#endif
+void ftl_flush_abort(ftl_ctx_s *ftl);
 
 /* ── Host I/O ── */
 
@@ -227,25 +221,50 @@ ftl_status_e ftl_submit_read(ftl_ctx_s *ftl, const ftl_io_req_s *req);
  */
 ftl_status_e ftl_submit_write(ftl_ctx_s *ftl, const ftl_io_req_s *req);
 
-/**
- * @brief host 写启动许可（读不经过本判据）
- *
- * HIL 在提交 WRITE 前调用；false 时应保持 HIL 请求未提交并稍后重试，
- * 而不是把它当作永久失败。
- *
- * @param ftl FTL 实例
- * @return true 允许启动；false 当前应暂缓 host 写
- */
-BOOL ftl_host_write_admit(const ftl_ctx_s *ftl);
+/* ── 周期任务 ── */
 
 /**
- * @brief 取走并清除 volatile write cache 的 deferred error 标志。
- * @param ftl FTL 上下文
- * @return true = 上一次已回执的写后来失败，下一条 host 命令应上报错误
+ * @brief 注册 FTL 的周期任务（统计日志 / 后台节拍 / GC-WL 求值）
+ *
+ * 必须在全部实例 boot 成功之后调用一次；失败回退 fc_service 时不调用。
+ * 周期与内部策略由 FTL 决定，调用者不需要知道。
+ * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复注册）。
  */
-BOOL ftl_take_deferred_error(ftl_ctx_s *ftl);
+void ftl_timer_tasks_start(void);
 
-/* ── FLUSH / TRIM ── */
+/* ── 入口 ── */
+
+/**
+ * @brief 复位 FTL 文件级全局静态（所有实例 init 之前调用一次）
+ *
+ * 这些静态落在 NOLOAD 段，上电/软复位都不清零；必须在 ftl_device_init 之前
+ * 调用，否则 boot once 守卫可能被随机残留误判为「已初始化」。
+ *
+ * @note 只复位文件级静态；实例内状态由 ftl_instance_init 负责。
+ */
+void ftl_global_init(void);
+
+/**
+ * @brief 设备级一次初始化：全局完成表 + 实例路由 + 每 (ch,ce) 共享 L2P cache
+ *
+ * 调用顺序：ftl_topology_build → ftl_global_init → 本函数 → 逐实例 init。
+ * 重复调用会被拒绝（debug ASSERT；release 记日志后返回，不重复清 cache）。
+ *
+ * @note 设备级只调一次；每实例的 workspace 与模块状态由 ftl_instance_init 装配。
+ */
+void ftl_device_init(void);
+
+/**
+ * @brief 初始化一个 FTL 实例的 workspace 与模块状态
+ *
+ * 必须在 ftl_device_init 之后、逐实例推进；实例的 workspace 由 FTL 自持。
+ * 每个 die 只能成功初始化一次；重复调用返回 FTL_ERROR（release 也拒绝）。
+ *
+ * @param die 紧凑 die 号（< DIE_MAX = 运行时实际 die 数）
+ * @return FTL_OK 成功；FTL_ERROR 重复初始化 / 本 target 无 L2P cache /
+ *         元数据候选池构建失败
+ */
+ftl_status_e ftl_instance_init(BYTE die);
 
 /**
  * @brief 开始异步 FLUSH job（幂等）。
@@ -259,12 +278,6 @@ void ftl_flush_begin(ftl_ctx_s *ftl);
  * @return true 完成；false 下一轮继续
  */
 BOOL ftl_flush_step(ftl_ctx_s *ftl);
-
-/**
- * @brief 放弃当前 FLUSH job（host 复位等撤销路径）。
- * @param ftl FTL 上下文
- */
-void ftl_flush_cancel(ftl_ctx_s *ftl);
 
 /**
  * @brief 登记 [lba, lba+count) 的异步 TRIM。
@@ -281,5 +294,18 @@ ftl_status_e ftl_trim_begin(ftl_ctx_s *ftl, DWORD lba, DWORD count);
  * @return FTL_OK 完成；FTL_AGAIN 仍有剩余；FTL_ERROR 中止
  */
 ftl_status_e ftl_trim_step(ftl_ctx_s *ftl);
+
+/**
+ * @brief 实例无关的每轮泵（完成派发 + 全局调度）
+ *
+ * @note 必须先于所有 ftl_service()，且每轮只调一次。
+ */
+void ftl_service_pump(void);
+
+/**
+ * @brief 单个 FTL 实例的服务；多实例下每个实例都要调用。
+ * @param ftl FTL 上下文（非 NULL）
+ */
+void ftl_service(ftl_ctx_s *ftl);
 
 #endif /* FTL_INTERFACE_H */

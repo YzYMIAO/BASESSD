@@ -279,7 +279,7 @@ static MunitResult test_data_ptr_single_plane_only(const MunitParameter params[]
 
 /* cw_write_plane1_only — 只覆盖 plane1 的 CW 位图必须落在 plane1（IF-01）。
  *
- * 覆盖：`ftl_cmd_setup_ppa_pair_cw` 用 plane1 位图建链。
+ * 覆盖：`ftl_cmd_build_ppa_pair_cw` 用 plane1 位图建链。
  * 判据：cmd->paa 与链上每条 desc 都在 plane1、CW 覆盖 0..3；数据指针按 CW 可查。
  * 备注：plane 盲位图（`1U<<cw`）会把 plane1 的 CW0 算成 plane0 ⇒ 链落错 plane 或
  *       越段。本用例是 GC 迁移写（同一入口）的链级判据。 */
@@ -301,7 +301,7 @@ static MunitResult test_cw_write_plane1_only(const MunitParameter params[], void
     cmd->config.operation   = (BYTE)OP_NORMAL_PROGRAM_PAGE;
     cmd->config.multi_plane = 0U;
 
-    munit_assert_int(ftl_cmd_setup_ppa_pair_cw(cmd, pba, ftl_cw_plane_mask(1U)), ==, FTL_OK);
+    munit_assert_int(ftl_cmd_build_ppa_pair_cw(cmd, pba, ftl_cw_plane_mask(1U)), ==, FTL_OK);
     munit_assert_uint8(paa_to_plane(cmd->paa), ==, 1U);
 
     BYTE cw_seen = 0U;

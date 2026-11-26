@@ -229,7 +229,7 @@ ftl_status_e __wrap_ftl_sync_write_page_mirror(DWORD pba, const void *data, DWOR
 {
     if ((fi_data_page(cfg) == false) && (fi_take_at(FI_BBT_WRITE_FAIL, pba) == true))
     {
-        return FTL_ERROR; /* 同步镜像写（开机 / 格式化 / bbt_save）失败 */
+        return FTL_ERROR; /* 同步镜像写（开机 / 格式化 / bbt_store）失败 */
     }
 
     return __real_ftl_sync_write_page_mirror(pba, data, length, cfg);
@@ -314,7 +314,7 @@ ftl_status_e __wrap_ftl_op_submit(fc_cmd_s *cmd, ftl_op_id_e op, void *ctx)
         return FTL_AGAIN; /* 模拟被序列门控拒绝 */
     }
 
-    // host 数据读由 ftl_issue_subop **内联建链**后直接提交（不走 ftl_async_read_page），
+    // host 数据读由 host_group_subop_issue **内联建链**后直接提交（不走 ftl_async_read_page），
     // 所以 DATA 读的提交层失败要在本入口补。RR/L2P/元数据读仍由 async wrap 覆盖。
     if ((op == FTL_OP_HOST_IO) && (cmd != NULL) && ((cmd->config.operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) || (cmd->config.operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)) &&
         (fi_take(FI_MIG_READ_FAIL) == true))

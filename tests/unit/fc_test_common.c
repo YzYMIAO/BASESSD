@@ -424,7 +424,7 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD met
 
     /* 无数据 op 走到 ftl_cmd_needs_desc_chain 的短路分支（cw_bitmap 不看），
      * desc_id 保持 fc_command_alloc 置的 INVALID。 */
-    if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
+    if (ftl_cmd_build_descriptors(cmd, cw_bitmap) != FTL_OK)
     {
         /* 建链中途失败（desc / buffer 池空）：不就地回滚，整条 release 沿链回收
          * 已挂的 desc/buffer + 归还命令槽，再向上报「建不出来」。 */
@@ -906,7 +906,7 @@ void test_read_block_cache_multi_plane(WORD block_index, const fc_cmd_cfg_s *con
 /* ── 两 plane 各在一个 block 的 pair 原语（Policy B 的真实形态） ──
  *
  * test_cmd_build 只能表达「两 plane 同 block」：行地址来自一个 nand_addr_s。
- * 生产 FTL 的 pair 两 plane 分属不同 gblock（ftl_cmd_setup_ppa_pair_cw）⇒
+ * 生产 FTL 的 pair 两 plane 分属不同 gblock（ftl_cmd_build_ppa_pair_cw）⇒
  * 需要一条能分别给两个 plane 块的超集原语。
  *
  * meta 走**整对共用的 LBA 口径**（低 3 位由 desc 的 plane/cw 覆盖），不能用 PBA：
@@ -945,7 +945,7 @@ fc_cmd_s *test_cmd_build_pair_cross_block(const WORD blocks[PLANE_NUM], WORD pag
     cmd->config.multi_plane = PLANE_NUM;
     cmd->meta               = lba_meta;
 
-    if (ftl_cmd_setup_ppa_pair_cw(cmd, pba, test_plane_cw_bitmap(TEST_PLANE_BM_ALL)) != FTL_OK)
+    if (ftl_cmd_build_ppa_pair_cw(cmd, pba, test_plane_cw_bitmap(TEST_PLANE_BM_ALL)) != FTL_OK)
     {
         fc_command_release(cmd->cmd_id);
         munit_errorf("pair chain build failed (page=%hu)", page_index);

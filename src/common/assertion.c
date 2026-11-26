@@ -74,7 +74,7 @@ _Noreturn void assertion_fail_u64(const char *expression_a, const char *op, cons
 /* ── ④ 终端路径 ── */
 
 /* 由 FTL 强符号覆盖；此处先声明，避免调用点隐式声明。 */
-__attribute__((weak)) void ftl_assert_context(void);
+__attribute__((weak)) void ftl_assert_context_dump(void);
 
 /* 无 HIL CLI 的镜像（例如最小化 host 构建）只保留现场；有 CLI 时由 cli.c
  * 提供强符号，在调用者栈上循环解析命令。 */
@@ -88,7 +88,7 @@ __attribute__((weak)) _Noreturn void assertion_console_run(void)
 _Noreturn void assertion_terminate(void)
 {
     assertion_platform_context();
-    ftl_assert_context();
+    ftl_assert_context_dump();
     (void)log_flush(ASSERTION_FLUSH_TIMEOUT_MS);
 
 #if defined(SSD_FIRMWARE_BUILD)
@@ -107,7 +107,7 @@ __attribute__((weak)) void assertion_platform_context(void)
 }
 
 /* FTL 现场弱钩子：固件链接 ftl.c 时由强符号覆盖；无 FTL 的构建保持空实现。 */
-__attribute__((weak)) void ftl_assert_context(void)
+__attribute__((weak)) void ftl_assert_context_dump(void)
 {
 }
 

@@ -6,12 +6,12 @@
  * ===================
  *
  * 【desc 链组装】
- *   ① ftl_cmd_configure_descriptors(cmd, cw_bitmap) — 按形参 cw_bitmap 建整条 desc 链
- *   ③ ftl_cmd_setup_ppa_pair_cw() — 每 plane 各自的 PBA + 显式位图 → 建链（Policy B）
+ *   ① ftl_cmd_build_descriptors(cmd, cw_bitmap) — 按形参 cw_bitmap 建整条 desc 链
+ *   ③ ftl_cmd_build_ppa_pair_cw() — 每 plane 各自的 PBA + 显式位图 → 建链（Policy B）
  *   ④ pba_to_cmd() — DWORD 直填 + 整段位图 + 建链（遍历路径 / 同步页原语）
  *      ⑩ ftl_cmd_pba() — FC 命令 → PBA（④ 的逆，供 FTL 模块回读自己下发的地址）
  *
- *   位图规则（①③ 共用，唯一定义在 ftl_cmd_validate_cw_bitmap）：
+ *   位图规则（①③ 共用，唯一定义在 ftl_cmd_check_cw_bitmap）：
  *     · cw_bitmap 是**字面位图**（bit 置 1 = 要访问该 CW；0 = 空集，无隐式展开）；
  *     · ③④ 两个「整段访问」入口各自显式算 fc_command_plane_span_cw_bitmap(cmd)，
  *       只有 ① 接受调用者给的部分位图（空集 / 越段会被校验函数拒绝）；
@@ -318,584 +318,201 @@ static inline DWORD ftl_cmd_pba(const fc_cmd_s *cmd)
 /* ── desc 链组装 ── */
 
 /**
- * @brief 按形参 cw_bitmap 组装整条 desc 链
+ * @brief 按形参 cw_bitmap 组装整条 desc 链。
  *
- * cw_bitmap 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；**字面位图**——
- * 置 1 的位就是本命令要访问的 CW，**0 = 空集**（不是"全部"）。置位的每个 CW 逐条调
- * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
- * 想只读离散 CW（例如 plane1 的 CW0/CW2）：传 (1U<<4)|(1U<<6)。
- * 想整段访问：传 fc_command_plane_span_cw_bitmap(cmd)
- *   —— 或者干脆用 pba_to_cmd()，它替你算。
- *
- * 位图是本函数的**形参**，不是命令结构体的字段——它是"这次建链要建哪些 CW"的
- * 输入，用完即弃。
- *
- * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
- * （Policy B）请用 ftl_cmd_setup_ppa_pair_cw()**，本函数不适用。
- *
- * @param cmd       须已设 config.operation / multi_plane / paa（config.cw_count 不参与建链）
- * @param cw_bitmap flat 字面位图；无数据 op（ERASE / RESET / FEATURES）不读它
- * @return FTL_OK 建链成功
- *         FTL_ERROR 池空；位图 0 或越出 plane 段是编程错误 → ASSERT
+ * @note cw_bitmap 是 flat 绝对编号（bit = plane*CW_NUM + cw）的**字面位图**：
+ *       0 = 空集（不是「全部」）；链序 = plane-major、plane 内 CW 递增。
+ * @note 所有 plane 共用 `cmd->paa` 的行地址（同页语义）；两 plane 不同块
+ *       （Policy B）请用 `ftl_cmd_build_ppa_pair_cw`。
  */
-ftl_status_e ftl_cmd_configure_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap);
+ftl_status_e ftl_cmd_build_descriptors(fc_cmd_s *cmd, DWORD cw_bitmap);
 
 /**
- * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）
+ * @brief 设置命令分配类（构造期上下文；返回原值以便恢复）。
  *
- * L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 在构造点提升到
- * FC_CMD_CLASS_CRIT，构造后恢复到原值；host wbuf、GC、prefetch 保持 BG。
- * 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
- *
- * @param cls 目标类（FC_CMD_CLASS_*）
- * @return 原类
+ * @note 额度是文件级构造上下文：调用点必须用返回值恢复；单线程 superloop，无并发保护。
  */
 fc_cmd_class_e ftl_cmd_class_set(fc_cmd_class_e cls);
 
-/* ── PBA helper（**自己算整段位图**并传给建链入口） ── */
-
 /**
- * @brief 按**每 plane 各自**的 PBA + 显式位图建 desc 链（Policy B）
+ * @brief 按每 plane 各自的 PBA + 显式位图建 desc 链（Policy B）。
  *
- * 与 pba_to_cmd 的区别：后者把单一 PBA 转成 PAA 填进 command->paa 后展开到各 plane，
- * 隐含「两 plane 同 block」；本函数逐 plane 取各自 PBA 的行地址（转成 PAA）写进对应
- * plane 的 desc。CW 级映射（IU = 1 CW）专用入口：一条子操作常只覆盖一页里的**部分 CW**
- * （512B 扇区写、页尾残段、GC 只搬有效 CW），故位图由调用者显式给出。
- *
- * ⚠ **plane 号取自每个 PBA 自己的 plane 位，不是数组下标**：读路径的 pba[]
- *   是按 LBA 查出来的，plane 取决于当初怎么写进去（例如 `wr 0 2` 之后
- *   lba 1 映射到 plane 1），下标与 plane 号并不总相等。
- *
- * ⚠ **cmd->config.multi_plane 必须由调用者建链前设好**——它决定 plane 段，
- *   位图须落在该段内（单 plane 命令的段 = paa 的 plane 那一个，如 plane 1 → 0xF0）。
- * ⚠ 未置位的 plane **整体跳过**（连 pba_is_valid 都不判）⇒ 调用者可按约定让
- *   未用到的那半个 pair 的 pba 保持未初始化。
- *
- * @param cmd        FC 命令（须已设 config.operation / multi_plane / meta）
- * @param pba        [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取本命令实际覆盖的第一个 plane）
- * @param cw_bitmap  flat 字面位图（bit = plane*CW_NUM + cw，0 = 空集 → ASSERT）
- * @return FTL_OK
- *         FTL_AGAIN（desc/buffer 池空）
- *         FTL_ERROR（位图越段 → ASSERT）
+ * @note plane 号取自每个 PBA 自己的 plane 位，不是数组下标。
+ * @note `cmd->config.multi_plane` 必须由调用者建链前设好；未置位的 plane 整体跳过
+ *       （连 pba_is_valid 都不判）。
  */
-ftl_status_e ftl_cmd_setup_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap);
+ftl_status_e ftl_cmd_build_ppa_pair_cw(fc_cmd_s *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap);
+
+/** @brief 逐 plane 反查命令访问的全局块与 ECC（multi-plane 两块必须分别记账）。 */
+BYTE ftl_cmd_block_ecc_collect(const fc_cmd_s *cmd, ftl_cmd_block_ecc_s *out, BYTE max);
 
 /**
- * @brief 逐 plane 反查命令访问的全局块与 ECC
+ * @brief 把外部数据按 CW 顺序写入 desc 链上各 CW 的 USER 区。
  *
- * 一个 multi-plane 子操作在 Policy B 下覆盖**两个独立块**；host 读成功后的
- * read_count / ECC 趋势记账必须逐块进行，只记 `ftl_cmd_pba()` 的首个 desc 会漏掉
- * 第二个 plane。本函数遍历 desc 链、按 gblock 去重、取每块内
- * ECC 最大值——desc 链布局与 PBA→PAA 转换都留在本层（H13）。
- *
- * @param cmd 已完成、且尚未 release 的命令（desc 链仍有效）
- * @param out 输出数组（长度 >= max）
- * @param max 输出容量
- * @return 实际写入的块数（0..max）；链为空返回 0
- */
-BYTE ftl_cmd_block_ecc_list(const fc_cmd_s *cmd, ftl_cmd_block_ecc_s *out, BYTE max);
-
-/* ── 数据搬运 ── */
-
-/**
- * @brief 把外部数据按 CW 顺序写入 desc 链上各 CW 的 USER 区
- *
- * 硬件 FCC 不提供「按 CW 拷贝」寄存器，数据由固件在 desc 链上逐 CW 填。
- * 遍历界走 desc 链（链长度是 CW 数的唯一真值）；数据耗尽后剩余 CW 的 USER 区填 0xFF
- * dummy（不把上一轮残值写进 NAND）。
- * ⚠ `length` 超过链容量时，多余的源数据**被忽略**（不报错）——调用者应保证
- *   length 与链上 CW 数匹配（搬页数据用 L2P_REGION_SIZE / FTL_READ_USER_SIZE）。
- *
- * @param cmd     已建链的命令（desc_id 有效）
- * @param data    源数据
- * @param length  字节数
- * @return FTL_OK 搬入成功
- *         FTL_ERROR 链上 desc 无 buffer
+ * @note 遍历界走 desc 链（链长度是 CW 数的唯一真值）；数据耗尽后剩余 CW 填 0xFF。
+ *       `length` 超过链容量时多余源数据**被忽略**（调用者应保证匹配）。
  */
 ftl_status_e ftl_cmd_write_data(fc_cmd_s *cmd, const void *data, DWORD length);
 
 /**
- * @brief CW 级数据填装（按页内 CW 偏移从源镜像散射取数）
+ * @brief CW 级数据填装（按页内 CW 偏移从源镜像散射取数）。
  *
- * 与 ftl_cmd_write_data 的差别只在取数方式：后者按**链序打包**消费连续源缓冲
- * （host 写路径：主机数据本来就紧凑），本函数按 **CW 偏移**从镜像取数
- * （GC/WL 搬移：源是整页镜像，只需搬其中几个有效 CW，且搬入位置必须保持原 CW 偏移
- * ——页内 META 的 LBA 由 CW 号决定，挪位即错）。位图外的 CW 填 0xFF。
- *
- * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap，可跨两个 plane）
- * @param page_buf   源镜像，布局由 pair_major 决定
- * @param cw_bitmap  本页哪些 CW 有效（flat 字面位图，bit = plane*CW_NUM + cw）
- * @param pair_major false = 单页镜像（2KB，两个 plane 读同一份数据，槽位 cw）；
- *                   true  = pair 镜像（4KB，槽位 plane*CW_NUM + cw，页打包 wbuf 的 h->data）
- * @return FTL_OK 搬入成功
- *         FTL_ERROR 链上 desc 无 buffer
- *
- * @note 两种布局不能合并成同一套取数：wbuf 的 plane1 数据在 `page_buf + 4*512`，
- *       而 mirror 的两个 plane 本来就该相同；误用会让 plane1 复制 plane0（host 大文件静默损坏）。
+ * @note 两种布局不能合并：wbuf 的 plane1 数据在 `page_buf + 4*512`，而 mirror 的
+ *       两个 plane 本来就该相同；误用会让 plane1 复制 plane0（host 大文件静默损坏）。
  */
 ftl_status_e ftl_cmd_write_data_cw(fc_cmd_s *cmd, const BYTE *page_buf, DWORD cw_bitmap, BOOL pair_major);
 
-/**
- * @brief 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
- *
- * 与 ftl_cmd_write_data 对称；遍历界走 desc 链，数据够即停。
- *
- * @param cmd     已完成的命令（desc_id 有效）
- * @param buffer  输出缓冲
- * @param length  字节数
- * @return FTL_OK 拷出成功
- *         FTL_ERROR 链上 desc 无 buffer / 链比请求短
- */
+/** @brief 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲。 */
 ftl_status_e ftl_cmd_read_data(fc_cmd_s *cmd, void *buffer, DWORD length);
 
-/* ── 内部同步 NAND 操作（仅保留 sync_wait）── */
-
 /**
- * @brief 提交命令并阻塞等待其完成（同步提交的唯一入口）
+ * @brief 提交命令并阻塞等待其完成（同步提交的唯一入口）。
  *
- * 内部就是 ftl_op 机制的一个客户端：
- *   ① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上 waiter、提交；
- *   ② 自旋 fc_service() + ftl_op_drain() 直到 waiter.done；
- *   ③ 超时则 ftl_op_req_remove 后返回 FTL_ERROR。
- *
- * ⚠ **只在结构性必须顺序执行的路径上用**：开机初始化 / 全片格式化 / 出厂坏块扫描 /
- *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
- *   会把调用者栈帧钉住并重入完成泵。
- *
- * ⚠ **命令归属由 `submitted` 出参决定，错误路径不得无条件 release**：
- *   · 成功（FTL_OK）：命令仍归调用者，读完数据（`ftl_cmd_read_data`）后再 release。
- *   · 失败且 `*submitted == false`（未提交）：命令从未进 FC ⇒ **调用者必须 release**。
- *   · 失败且 `*submitted == true`（已提交但超时）：命令仍在 FC/NAND 管线，
- *     **调用者不得 release、不得读数据**。request 表项已摘除，迟到完成走
- *     `ftl_op_drain` 的 missing-request 分支，由 drain 在完成时释放。
- *     若迟到完成永不发生，代价是泄漏 1 个命令槽——远优于释放仍在飞的 desc/buffer
- *     （NAND 可能仍在 DMA 使用）或释放已被新命令复用的槽位。
- *
- * @param cmd         已建链的命令（本函数负责提交）
- * @param status_out  输出：完成状态（可 NULL；仅 FTL_OK 时有效）
- * @param timeout_us  超时微秒（0 = 默认 10 ms；上限 65 ms——超上限按上限处理，
- *                    `delay_time_elapsed_us` 的 timeout 形参是 WORD）
- * @param submitted   输出（非 NULL）：本函数返回时命令是否已提交给 FC。
- *                    见上方「命令归属」。
- * @return FTL_OK 完成（status_out 有效）
- *         FTL_ERROR 提交失败 / 超时 / request 登记失败
- *
- * @note 判据是**真实微秒**（`delay_time_now_us` / `delay_time_elapsed_us`）；
- *       时钟不可用时退化为同值轮数兜底。NAND 侧 busy 预算：擦除 tBERS 5 ms、
- *       编程 tPROG 0.7 ms、读 tR 38 µs ⇒ `ftl_sync_erase_block` 的 20 ms 是外层兜底。
+ * @note 只在结构性必须顺序执行的路径上用（开机 / 格式化 / 出厂扫描 / CLI）；主循环
+ *       路径一律异步化，同步等待会钉住调用者栈帧并重入完成泵。
+ * @note 命令归属由 `*submitted` 决定：失败且未提交 ⇒ 调用者必须 release；已提交但
+ *       超时 ⇒ 调用者**不得** release / 读数据（迟到完成走 drain 的 missing-request）。
  */
 ftl_status_e ftl_sync_submit_wait(fc_cmd_s *cmd, fc_cmd_status_s *status_out, DWORD timeout_us, BOOL *submitted);
 
-/**
- * @brief 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。
- *
- * @param pba    目标页 PBA（整段访问，隐含两 plane 同 block）
- * @param data   源数据（可 NULL；NULL 或 length 为 0 时不搬数据）
- * @param length 字节数
- * @param cfg    页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 成功
- *         FTL_ERROR 池空 / 提交失败 / 命令报错 / 搬数据失败
- */
+/** @brief 同步写页（OP_NORMAL_PROGRAM_PAGE；data/length 为空时只发命令不搬数据）。 */
 ftl_status_e ftl_sync_write_page(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
 /**
- * @brief 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。
- *
- * @param pba    目标页 PBA
- * @param buffer 输出缓冲（可 NULL；NULL 或 length 为 0 时不拷出）
- * @param length 字节数
- * @param cfg    页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 成功且页内容可信
- *         FTL_ERROR 池空 / 提交失败 / 命令报错 / 拷出失败
- */
-ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg);
-
-/**
- * @brief 同步读页（保留完成状态）：同 ftl_sync_read_page，额外交出 CQE 状态。
- *
- * @param pba            目标页 PBA
- * @param buffer         输出缓冲（可 NULL）
- * @param length         字节数
- * @param cfg            页配置
- * @param completion_out 输出：命令完成状态；建链/提交层失败时为全 0
- * @return 同 ftl_sync_read_page
+ * @brief 同步读页（保留完成状态）。
  *
  * @note 供开机恢复区分「提交层失败」与「完成态 DATA_ERROR」：前者快照不可信，
- *       后者可按 L2P 加载重试/降级处理。
+ *       后者可按 L2P 加载重试 / 降级处理。
  */
 ftl_status_e ftl_sync_read_page_status(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg, fc_cmd_status_s *completion_out);
 
+/** @brief 同步读页（数据在完成后拷入 buffer）。 */
+ftl_status_e ftl_sync_read_page(DWORD pba, void *buffer, DWORD length, const ftl_page_cfg_s *cfg);
+
 /**
- * @brief 裸页读：LDPC_RAW，4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE，
- *        每 CW 只拷 **USER 512B**；槽尾 16B（META/CRC/parity）不填）。
+ * @brief 裸页读（LDPC_RAW），每 CW 只拷 USER 512B。
  *
- * ⚠ 刻意**不判定 NAND 失败**——诊断 dump / 出厂坏块探针要拿到原始位。
- * ⚠ **不能用来判空**：LDPC_RAW 跳过 ECC，且本层拿不到 META/CRC/parity，
- *   「RAW 读 + 数 FF」判不出「编程过没有」——判空用 `ftl_page_is_blank`
- *   / `ftl_page_blank_check`（解码路径 + FC 的 CW 状态位）。。
- *
- * @param pba    目标页 PBA
- * @param buffer 输出缓冲（须 >= PAGE_SIZE，按 CW 槽位排布）
- * @return FTL_OK 命令完成（内容不保证可信）
- *         FTL_ERROR 池空 / 提交失败 / 取不到 CW 数据
+ * @note 刻意不判定 NAND 失败（诊断 / 出厂坏块探针要原始位）。
+ * @note **不能用来判空**：RAW 跳过 ECC；判空用 `ftl_page_is_blank` /
+ *       `ftl_page_blank_check`（解码路径 + FC 的 CW 状态位）。
  */
 ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer);
 
 /**
- * @brief 判整页是否**从未编程**（擦除页）：普通读一次，看 FC 是否把每个 CW 都判为擦除页。
+ * @brief 判整页是否从未编程（擦除页）：普通读一次，看 FC 是否把每个 CW 都判为擦除页。
  *
- * 判据在**解码路径**里成立（FC 侧 `fc_cw_is_blank` + `FC_CW_STATUS_EMPTY`）：
- * 依据是 ECC 是否成码字 + 整条 528B CW 的 1 比特占比 + parity 是否写成。
- * ⇒ FTL 不需要、也**不应该**自己拿 USER 区字节去猜（FC 只向 FTL 暴露 USER 512B）。
- * ⚠ 不要用 `ftl_sync_read_page_raw()` + 数 FF 实现本判据：RAW 读跳过 ECC，
- *   空/非空的证据全被跳过。
- *
- * 读命令没走通 ⇒ 一律返回 false（判“非空”，保守方向）。
- * 判据与 full rebuild / BBT 探针 / Journal 扫页 / L2P 日志区恢复共用（C2：唯一实现）。
- *
- * @param pba 目标页 PBA
- * @return true 该页从未编程；false 已编程 / 读失败（保守判非空）
+ * @note 判据在解码路径里成立（ECC 成码字 + 1 比特占比 + parity）；读命令没走通 ⇒
+ *       一律返回 false（判「非空」，保守方向）。与 full rebuild / BBT 探针 /
+ *       Journal 扫页 / L2P 日志区恢复共用唯一实现。
  */
 BOOL ftl_page_is_blank(DWORD pba);
 
-/**
- * @brief 同 `ftl_page_is_blank`，但把"命令没走通"与"已编程"分开报告。
- *
- * 需要区分「介质是空片」与「总线/超时读不通」的调用者用它（空片判定、出厂探测）；
- * 其它调用者用 `ftl_page_is_blank` 即可（读失败按非空处理）。
- *
- * @param pba   目标页 PBA
- * @param blank 出参：true = 该页从未编程（仅 FTL_OK 时有效）
- * @return FTL_OK    读命令完成，*blank 有效
- *         FTL_ERROR 池空 / 提交失败 / 超时（*blank 未写）
- */
+/** @brief 同 `ftl_page_is_blank`，但把「命令没走通」与「已编程」分开报告。 */
 ftl_status_e ftl_page_blank_check(DWORD pba, BOOL *blank);
 
-/**
- * @brief 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。
- *
- * @param pba 目标块 PBA（plane 取自它）
- * @return FTL_OK 成功
- *         FTL_ERROR 池空 / 提交失败 / 命令报错
- */
+/** @brief 擦块（单 plane，OP_ERASE_BLOCK，plane 取自 PBA）。 */
 ftl_status_e ftl_sync_erase_block(DWORD pba);
 
-/**
- * @brief 擦块（多 plane）：OP_ERASE_BLOCK_MULTI_PLANE，擦**同一 block 号在两个 plane**
- * 上的两个物理块。只给跨 plane 的固定池（Journal：页地址按奇偶跨 plane）用；
- * 普通块擦除仍走单 plane 版本。PBA 的 plane 字段被忽略。
- *
- * @param pba 目标块 PBA（只用其 block 号，plane 字段被忽略）
- * @return FTL_OK 成功
- *         FTL_ERROR 池空 / 提交失败 / 命令报错
- */
+/** @brief 擦块（多 plane，擦同一 block 号在两个 plane 上的物理块；PBA 的 plane 字段被忽略）。 */
 ftl_status_e ftl_sync_erase_block_multi_plane(DWORD pba);
 
-/** ── 异步页级原语（提交与完成解耦）──
- * @brief 与上面 ftl_sync_* 同一 prepare 模板（同样的建链规则、同样的配置、同样的搬数据），
- * 差别只有最后一步：**不提交**，把已建链、已装好数据的命令交回调用者。
+/* ── 异步页级原语（提交与完成解耦）──
  *
- *   ftl_async_*  →  调用者 ftl_op_submit(cmd, <功能 op ID>, ctx)
- *                 →  g_op_callbacks[<op ID>] 服务函数判完成状态 + fc_command_release
+ * 与 ftl_sync_* 同一 prepare 模板，差别只有最后一步：**不提交**，把已建链、
+ * 已装好数据的命令交回调用者：
+ *   ftl_async_* → 调用者 ftl_op_submit(cmd, <功能 op ID>, ctx)
+ *               → g_op_callbacks[<op ID>] 服务函数判完成状态 + release
  *
- * ⚠ **数据在 prepare 阶段就已拷进 FC buffer 池**（ftl_cmd_write_data 是 memcpy，
- *   见 ftl_fc_interface.c），故本函数返回后调用者即可复用 / 覆写源缓冲——这正是
- *   Journal 刷页不需要 ping-pong 快照缓冲的原因。
- * ⚠ 调用者拿到 cmd 后**必须**提交或释放：既未提交也未 release 即泄漏命令槽位
- *   ⇒ 命令分配恒 NULL ⇒ 全系统 FTL_AGAIN。
- * ⚠ 失败返回时命令已自行回收（与 ftl_sync_* 同约定），out_cmd 不被写入。
- *
- * @param out_cmd 出参：已建链、已装好数据的命令（须提交或 release）
- * @param pba     目标页 PBA（整段访问）
- * @param data    源数据（可 NULL；NULL 或 length 为 0 时不搬数据）
- * @param length  字节数
- * @param cfg     页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 命令已备好
- *         FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽（可稍后重试）
- */
+ * ⚠ 数据在 prepare 阶段就已拷进 FC buffer 池 ⇒ 返回后调用者即可复用源缓冲。
+ * ⚠ 调用者拿到 cmd 后**必须**提交或释放；泄漏命令槽位 ⇒ 全系统 FTL_AGAIN。
+ * ⚠ 失败返回时命令已自行回收，out_cmd 不被写入。 */
+
+/** @brief 异步写页（建链 + 装数据，不提交）。 */
 ftl_status_e ftl_async_write_page(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
-/**
- * @brief 用**已预留**的命令槽建链并装数据（不提交）
- *
- * 与 ftl_async_write_page 的唯一差别：命令由调用者预先用 ftl_cmd_alloc_class()
- * 取得，本函数不再分配命令。用于双副本写回——备副本命令在主副本提交前就预留，
- * 主副本完成时即使命令池被占满也能建链提交。
- *
- * 失败时命令已由本函数回收（与 ftl_async_write_page 同约定）；成功时命令仍归调用者。
- *
- * @param cmd    已预留的命令（非空，池内、未提交）
- * @param pba    目标页 PBA
- * @param data   源数据（可 NULL）
- * @param length 源长度
- * @param cfg    页配置
- * @return FTL_OK；FTL_ERROR 地址/建链失败（命令已回收）
- */
+/** @brief 用已预留的命令槽建链并装数据（双副本写回；失败时命令已回收）。 */
 ftl_status_e ftl_async_write_page_reserved(fc_cmd_s *cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
-/**
- * @brief 建链（无数据），**不提交**，命令经 out_cmd 交回。
- *
- * @param out_cmd 出参命令（非 NULL）
- * @param pba 目标块 PBA。
- *
- * @return FTL_OK
- *         FTL_AGAIN（命令池空）
- *         FTL_ERROR（入参或地址非法 / 建链失败）。
- *
- * @note 实现要点：擦除慢（20ms 超时）是**同步版**的形参；异步版的超时由 FC 层自己的
- * 命令超时与 job watchdog 承担，本函数不设。
- */
+/** @brief 异步擦块（单 plane；建链，不提交）。 */
 ftl_status_e ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba);
 
-/**
- * @brief 多 plane 擦块（异步）：同 ftl_async_erase_block，op = OP_ERASE_BLOCK_MULTI_PLANE。
- *
- * @param out_cmd 出参：已建链的命令（须提交或 release）
- * @param pba     目标块 PBA（只用其 block 号，plane 字段被忽略）
- * @return FTL_OK 命令已备好
- *         FTL_AGAIN 命令池空
- *         FTL_ERROR 入参或地址非法 / 建链失败
- */
+/** @brief 异步擦块（多 plane；同 `ftl_async_erase_block`，plane 字段被忽略）。 */
 ftl_status_e ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba);
 
 /**
- * @brief 元数据镜像写（多 plane 同页同数据），**不提交**。
+ * @brief 元数据镜像写（多 plane 同页同数据，不提交）。
  *
- * 用 OP_PROGRAM_PAGE_MULTI_PLANE 把**同一份页数据**一次写入 PLANE_NUM 个 plane 的
- * 同一 block/page（元数据固定池的空间冗余；读侧任一副本有效即可）。
- *
- * 数据填装：按 CW 偏移把同一页复制到每个 plane 的 desc（`ftl_cmd_write_data_cw`）；
- * `length < PAGE_MAIN_SIZE` 时（如 BBT header 540 B）用 0xFF 补齐到一页。
- *
- * ⚠ 只给**固定元数据池**用；用户数据/日志块仍走单 plane/正常多 plane 数据路径。
- * ⚠ 这是 multi-plane program：两个 plane 的 page 必须都处于擦除态。
- *
- * @param out_cmd 出参：已建链、已装好数据的命令（须提交或 release）
- * @param pba     目标块 PBA（其 block/page 被复制到每个 plane）
- * @param data    页数据（长度可小于 PAGE_MAIN_SIZE，不足部分以 0xFF 补齐）
- * @param length  有效字节数（<= PAGE_MAIN_SIZE）
- * @param cfg     页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 命令已备好
- *         FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽
- *         FTL_ERROR 建链失败 / 搬数据失败
+ * @note 只给**固定元数据池**用；两个 plane 的 page 必须都处于擦除态。
+ *       `length < PAGE_MAIN_SIZE` 时用 0xFF 补齐到一页。
  */
 ftl_status_e ftl_async_write_page_mirror(fc_cmd_s **out_cmd, DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
-/**
- * @brief 镜像写的同步版（建链 + 提交等待 + 判错）。
- *
- * @param pba    目标块 PBA（其 block/page 被复制到每个 plane）
- * @param data   页数据（长度可小于 PAGE_MAIN_SIZE）
- * @param length 有效字节数（<= PAGE_MAIN_SIZE）
- * @param cfg    页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 成功
- *         FTL_ERROR 建链失败 / 提交失败 / 命令报错
- */
+/** @brief 镜像写的同步版（建链 + 提交等待 + 判错）。 */
 ftl_status_e ftl_sync_write_page_mirror(DWORD pba, const void *data, DWORD length, const ftl_page_cfg_s *cfg);
 
 /**
- * @brief 写页（CW 级，异步）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页，**不提交**。
+ * @brief 写页（CW 级，异步）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页。
  *
- * 与 ftl_async_write_page 的差别：位图来自形参而非「整段」；数据按**页内 CW 偏移**
- * 散射取（`ftl_cmd_write_data_cw`），不是按链序紧凑打包。
- * GC/WL 搬移专用——只搬有效 CW 且必须保持原 CW 偏移。
- *
- * ⚠ 数据在本函数内已拷进 FC buffer 池（同 ftl_async_write_page）⇒ 返回后调用者即可
- *   复用 page_buf。
- * ⚠ cw_bitmap 须落在本命令 plane 段内（单 plane 命令的段由 pba 的 plane 决定，
- *   见 ftl_cmd_setup_ppa_pair_cw 的注释）；越段是编程错误 → ASSERT。
- *
- * @param out_cmd   出参：已建链、已装好数据的命令（须提交或 release）
- * @param pba       目标页 PBA（plane 由它决定）
- * @param page_buf  单页镜像（FTL_READ_USER_SIZE 字节，CW c 的数据在 page_buf + c×512）
- * @param cw_bitmap 本页哪些 CW 有效（flat 字面位图，bit = plane*CW_NUM + cw）
- * @param cfg       页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 命令已备好（须提交或 release）
- *         FTL_AGAIN 命令池空
- *         FTL_ERROR 入参非法 / 地址非法 / 建链失败 / 搬数据失败
+ * @note 数据在本函数内已拷进 FC buffer 池 ⇒ 返回后调用者即可复用 page_buf。
+ * @note cw_bitmap 须落在本命令 plane 段内；越段是编程错误 → ASSERT。
  */
 ftl_status_e ftl_async_write_page_cw(fc_cmd_s **out_cmd, DWORD pba, const BYTE *page_buf, DWORD cw_bitmap, const ftl_page_cfg_s *cfg);
 
 /**
- * @brief 写 pair 页（CW 级，异步，显式 op）：双 plane 各自 PBA + plane-major 页镜像。
+ * @brief 写 pair 页（CW 级，异步，显式 op；cache program 批次用）。
  *
- * 用于 cache program 批次：operation 传 OP_TWO_PLANE_PROGRAM_CACHE（中间页）或
- * OP_TWO_PLANE_PROGRAM_CACHE_END（末页）。数据在本函数内已拷进 FC buffer 池。
- *
- * ⚠ pair_buf 布局 = plane0 的 PAGE_MAIN_SIZE 字节 + plane1 的 PAGE_MAIN_SIZE 字节；
- *   cw_bitmap 是 flat 绝对位图（bit = plane*CW_NUM+cw）。两 plane 都在时传全 1。
- * ⚠ 两个 pba 必须同 ch/ce/lun；多 plane 命令的 desc 链必须覆盖每个 plane。
- *
- * @param out_cmd   出参：已建链、已装好数据的命令（须提交或 release）
- * @param pba       [PLANE_NUM] 每 plane 的 PBA（只校验位图覆盖的 plane）
- * @param pair_buf  plane-major pair 镜像（plane0 的 PAGE_MAIN_SIZE 字节 + plane1 的 PAGE_MAIN_SIZE 字节）
- * @param cw_bitmap flat 绝对位图（bit = plane*CW_NUM + cw）
- * @param operation 写页 operation（普通写或 cache program 批次中的一页）
- * @param cfg       页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK
- *         FTL_AGAIN（命令池空）
- *         FTL_ERROR（入参、地址或建链失败）。
+ * @note pair_buf 布局 = plane0 的 PAGE_MAIN_SIZE 字节 + plane1 的 PAGE_MAIN_SIZE
+ *       字节；两个 pba 必须同 ch/ce/lun；多 plane 链须覆盖每个 plane。
  */
 ftl_status_e ftl_async_write_pair_cmd(fc_cmd_s **out_cmd, const DWORD pba[PLANE_NUM], const BYTE *pair_buf, DWORD cw_bitmap, BYTE operation, const ftl_page_cfg_s *cfg);
 
-/**
- * @brief 申请一个命令租约（构造期 class 额度）
- *
- * @param lease 租约（非空）
- * @param cls   命令分配类
- * @return true 已持有命令；false 池/额度空
- */
-BOOL ftl_cmd_lease_acquire(ftl_cmd_lease_s *lease, fc_cmd_class_e cls);
+/** @brief 申请一个命令租约（构造期 class 额度）。 */
+BOOL ftl_cmd_lease_claim(ftl_cmd_lease_s *lease, fc_cmd_class_e cls);
 
-/**
- * @brief 按 class 取一条命令（内部经 command lease；调用者负责 release）
- *
- * @param cls 命令分配类
- * @return 命令；池/额度空返回 NULL
- */
+/** @brief 按 class 取一条命令（内部经 command lease；调用者负责 release）。 */
 fc_cmd_s *ftl_cmd_alloc_class(fc_cmd_class_e cls);
 
-/**
- * @brief 释放未提交的命令租约
- *
- * @param lease 租约（非空）
- */
+/** @brief 释放未提交的命令租约。 */
 void ftl_cmd_lease_release(ftl_cmd_lease_s *lease);
 
-/**
- * @brief 取走租约里的命令（所有权转交调用者）
- *
- * @param lease 租约（非空）
- * @return 命令；租约已空时返回 NULL
- */
+/** @brief 取走租约里的命令（所有权转交调用者）。 */
 fc_cmd_s *ftl_cmd_lease_take(ftl_cmd_lease_s *lease);
 
 /**
- * @brief 读页（异步）：OP_NORMAL_READ_PAGE_WITH_DATA_OUT，建链，**不提交**。
+ * @brief 读页（异步，建链，不提交）。
  *
- * 与 ftl_async_write_page 有一处**不对称**，是本函数存在独立文档块的理由：
- * 写的数据在 prepare 阶段就 memcpy 进 FC buffer 池（源缓冲随即可复用），**读不是**——
- * 数据留在命令的 desc 链上，只有服务函数在 release 之前调 ftl_cmd_read_data 才拿得到。
- * ⇒ 调用者指定的目标缓冲必须在**命令完成之前**保持有效，且拷出必须早于 release。
- *
- * 成败判据也搬到服务函数（同步版是 FC_CMD_STATUS_ERROR_MASK 全集，见 ftl_sync_read_page）。
- *
- * @param out_cmd 出参：已建链的命令（须提交或 release）
- * @param pba     目标页 PBA
- * @param cfg     页配置（crc / random / ldpc / 页 LBA）
- * @return FTL_OK 命令已备好（须提交或 release）
- *         FTL_AGAIN 命令池空
- *         FTL_ERROR 入参或地址非法
+ * @note 与写**不对称**：读数据留在命令的 desc 链上，只有服务函数在 release **之前**
+ *       调 `ftl_cmd_read_data` 才拿得到 ⇒ 调用者的目标缓冲必须在命令完成之前保持有效。
+ *       成败判据也搬到服务函数（同步版见 `ftl_sync_read_page_status`）。
  */
 ftl_status_e ftl_async_read_page(fc_cmd_s **out_cmd, DWORD pba, const ftl_page_cfg_s *cfg);
 
-/**
- * @brief 用已租约的命令建链并异步读页
- *
- * 成功时命令所有权转交调用者；失败时命令仍归 lease，调用者负责 release。
- *
- * @param out_cmd 出参：已建链的命令
- * @param lease   已持有的命令租约
- * @param pba     目标页 PBA
- * @param cfg     页配置
- * @return FTL_OK 命令已备好；FTL_ERROR 地址/建链失败
- */
+/** @brief 用已租约的命令建链并异步读页（成功时所有权转交调用者）。 */
 ftl_status_e ftl_async_read_page_leased(fc_cmd_s **out_cmd, ftl_cmd_lease_s *lease, DWORD pba, const ftl_page_cfg_s *cfg);
 
 /**
- * @brief SET_FEATURES（异步）：无地址、无数据链，把 mode 写进 feature_addr 指定的特性寄存器。
+ * @brief SET_FEATURES（异步）：无地址、无数据链。
  *
- * ⚠ 本仓 Read Recovery **不使用**该入口：0x89 在本器件是保留地址、SLC 也无 retry table。
- *   保留本原语作为特性寄存器诊断/未来器件入口。
- * 与 ftl_sync_* 系列不同，本命令**不绑 PBA**：cmd->paa 恒 0——特性寄存器是 die 级、
- * 无 plane/page 语义（同 fc.c 中 OP_SET_FEATURES 分支的注释）。
- *
- * ⚠ ch/ce/lun 必须由调用者显式给：它们不是地址，而是**完成派发的实例路由键**
- *   （ftl_op_drain 按命令自身 ch/ce/lun 经 ftl_op_route_get 解析归属实例）。
- *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
- *
- * @param out_cmd      出参：已备好的命令（须提交或 release）
- * @param ch           目标 die 的 ch（完成派发路由键）
- * @param ce           目标 die 的 ce（完成派发路由键）
- * @param lun          目标 die 的 lun（完成派发路由键）
- * @param feature_addr 特性寄存器地址
- * @param mode         写入特性寄存器的值
- * @return FTL_OK 命令已备好（须提交或 release）
- *         FTL_AGAIN 命令池空
- *
- * @note out_cmd 由调用者传局部地址，本函数不重复断言。
+ * @note 本仓 Read Recovery **不使用**该入口：0x89 在本器件是保留地址、SLC 也无 retry 表。
+ * @note 本命令不绑 PBA（`cmd->paa` 恒 0）；ch/ce/lun 是**完成派发的实例路由键**，
+ *       必须显式传——留 0 在多实例下会把完成派给实例 [0][0][0]。
  */
 ftl_status_e ftl_async_set_features(fc_cmd_s **out_cmd, BYTE ch, BYTE ce, BYTE lun, BYTE feature_addr, BYTE mode);
 
 /**
- * @brief 按列读：OP_READ_COLUMN，无数据链，回读 pba 指定页**从列 column 起的 4 个字节**。
+ * @brief 按列读（OP_READ_COLUMN）：回读页内从 `column` 起的 4 个字节。
  *
- * 列地址**不来自 pba 的 cw 字段，而由 column 形参给**
- * ——cw 只有 2 位（列上限 1584），够不到 spare 区。出厂坏块标记在 **spare 首字节 = 列
- * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 pba 的 block/plane/page。
- *
- * 列地址经 FC 命令的 `param.parameter0/1`（小端）下传（见 fc_build_dispatch_request 的
- * OP_READ_COLUMN 分支），结果经 CQ 的 `param.value` 回。
- *
- * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏块的 spare 也要拿到，
- * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
- * column + 4 须落在页内：唯一调用者 bbt.c 传 PAGE_MAIN_SIZE（+4 ≤ PAGE_SIZE），
- * 本函数不重复校验。
- *
- * @param pba    目标页 PBA（行地址取 block/plane/page）
- * @param column 列地址（spare 首字节 = PAGE_MAIN_SIZE）
- * @param out    输出 4 字节（控制器侧暂存结果）
- * @return FTL_OK 命令完成（内容不保证可信）
- *         FTL_ERROR 池空 / 提交失败 / 命令报错
+ * @note 与 `ftl_sync_read_page_raw` 同契约：刻意不判定 NAND 失败（坏块 spare 也要
+ *       拿到），命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。
  */
 ftl_status_e ftl_sync_read_column(DWORD pba, WORD column, BYTE out[4]);
 
-// 偏离 H51：本 inline 依赖下文 ftl_cmd_configure_descriptors() 原型，故放在原型之后；
-// 纯 fast path 仍集中在原型之前。
 /**
- * @brief 地址直填：把 PBA 写进 FC 命令（PBA→PAA 的唯一关卡之一）。
+ * @brief 地址直填：把 PBA 写进 FC 命令并建 desc 链（PBA→PAA 的唯一关卡之一）。
  *
- * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
- * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
- *   ch/ce/lun           → cmd->ch / cmd->ce / cmd->lun
- *   block/plane/page/cw → cmd->paa（pba_to_paa 在 FTL 侧一次转出）
- *
- * 本入口是同步页原语与遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座，
- * 语义是「整段访问」（单一 PBA，隐含「两 plane 同 block」；Policy B 用 _pair_cw 入口）。
- * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
- * fc_submit 的 fc_command_validate 会在 debug 下以 desc_id == INVALID ASSERT。
- * 无数据操作（ERASE / RESET / META / COLUMN 等）由 ftl_cmd_configure_descriptors
- * 短路为 desc_id = INVALID。
- *
- * 本入口把 fc_command_plane_span_cw_bitmap(cmd)（「本命令 plane 段内全部 CW」）算出来
- * 直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 / checkpoint /
- * sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
- *
- * @param cmd 已从命令池取得、且已判空的命令
- * @param pba 本命令的 PBA（须通过 pba_is_valid）
- * @return FTL_OK 建链成功
- *         FTL_ERROR 池空 / 位图越段（ASSERT 后的 release 拒绝）
+ * @note 地址填好后必须建 desc 链；无数据操作由建链入口短路。PBA 须通过
+ *       `pba_is_valid`（进 FC 的 ch/ce/lun 被当数组下标直接用）。
  */
-static inline ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba)
-{
-    /* cmd 由调用者从命令池取且已判空 ⇒ 本函数不再判空。 */
-
-    /* 边界不变量：进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当 suspended[][][] 下标
-     * 直接用，越界即栈越界写。校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
-     * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
-    ASSERT(pba_is_valid(pba));
-
-    cmd->ch  = pba_to_ch(pba);
-    cmd->ce  = pba_to_ce(pba);
-    cmd->lun = pba_to_lun(pba);
-    /* PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，调用点不在 FC 内部。
-     * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
-    cmd->paa = pba_to_paa(pba);
-
-    // 位图不存进命令结构体，直接算出来当实参传。
-    // 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。
-    return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
-}
+ftl_status_e pba_to_cmd(fc_cmd_s *cmd, DWORD pba);
 
 #endif /* FTL_FC_INTERFACE_H */

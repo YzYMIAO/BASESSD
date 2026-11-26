@@ -876,7 +876,7 @@ static BOOL usb_msc_unmap_start(usb_msc_slot_s *slot)
 
     /* UNMAP 是「丢弃」语义，但必须在本命令之前已回执的写**确认映射之后**才能
      * 生效。先借 controller 的异步 FLUSH 做一道屏障（ftl_flush_step 会等
-     * wr_inflight / WRITE_CONFIRM），再逐 range TRIM；否则早回执写可能在 TRIM
+     * write_inflight / WRITE_CONFIRM），再逐 range TRIM；否则早回执写可能在 TRIM
      * 之后才确认，数据会复活。 */
     return usb_msc_unmap_submit_flush(slot);
 }
@@ -1776,7 +1776,7 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
 
     /* 不能再检查 usb_msc_host_busy()：写路径提交即回执后，主机可在最后一个写 chunk
      * 仍 IN_FLIGHT 时紧接 SYNCHRONIZE CACHE；这道门会把正常的 fsync 拒掉。
-     * FLUSH 的有序性由 FTL 的 ftl_flush_step 保证（它等待 wr_inflight / WRITE_CONFIRM），
+     * FLUSH 的有序性由 FTL 的 ftl_flush_step 保证（它等待 write_inflight / WRITE_CONFIRM），
      * 这里只需要一个可用的 FLUSH 槽。 */
     if (!usb_msc_ready())
     {

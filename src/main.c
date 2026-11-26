@@ -290,7 +290,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
 
     /* 坏块落点统计（开机基线，**早于格式判定**）：boot 可能因介质读不通而中止，
      * 先打一行保证失败时也能看到 BAD 分布。 */
-    ftl_boot_log_bad_areas(ftl);
+    ftl_boot_print_bad_areas(ftl);
 
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
@@ -341,7 +341,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
         return FTL_ERROR;
     }
 
-    ftl_boot_log_usage(ftl);
+    ftl_boot_print_usage(ftl);
 
     const char *boot_bit = result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback");
 
@@ -357,7 +357,7 @@ static ftl_status_e ssd_ftl_boot(BYTE die)
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（controller READY 才切 ftl_service）
  *
- *   ① 拓扑建表 + 全局静态复位 + g_ftl_ptrs 预绑 + ftl_device_prepare ——
+ *   ① 拓扑建表 + 全局静态复位 + g_ftl_ptrs 预绑 + ftl_device_init ——
  *      **必须早于逐实例 boot**，理由见函数内注释。
  *   ② 逐 die boot —— 任一失败则 boot_ok=false，整体回退 fc_service。
  *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪（READY）。
@@ -394,7 +394,7 @@ static void ssd_ftl_boot_all(void)
          * boot 成功后 ssd_controller_init 会重新校验并绑定同一组指针。 */
         g_ctrl.ftl[die] = ftl;
     }
-    ftl_device_prepare();
+    ftl_device_init();
 
     /* ② 逐 die boot */
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -456,11 +456,6 @@ static void ssd_ftl_boot_all(void)
     LOGI("[FTL ] controller ready, lba_max=%lu (%lluMiB)\r\n", lba_max, capacity_mib);
 }
 
-/* CRT 未提供时，newlib 的 __libc_init_array 会调用这个钩子。 */
-void _init(void)
-{
-}
-
 /**
  * @brief 推进一次后台服务：FTL/FC → controller → USB → timer。
  *
@@ -498,7 +493,7 @@ void ssd_runtime_pump(void)
     }
     else
     {
-        (void)fc_service();
+        (void)fc_service(); /* 回退路径不消费 FC 状态；H30 显式丢弃。 */
     }
 
     /* Controller 自己的异步命令（FLUSH / TRIM）：每轮推进 + 完成回执。
@@ -572,20 +567,9 @@ int main(void)
     boot_report_banner();
     boot_report_system();
 
-    /* ── 全系统初始化顺序（② 起为 if/else-if 级联：前一步失败会整段跳过后面的）──
-     *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC；无失败路径。
-     *                             内部会调 fc_nand_dispatch_init()（纯 memset，不碰硬件），
-     *                             所以 FC 可以先于 NAND 硬件初始化。
-     *   ② fc_nand_init()       —— NAND 芯片：HAL/FMC + per-(ch,ce) 后端装配
-     *                             + RESET + READ_ID 校验；R/B# 由 GPIO 轮询（无 EXTI）。
-     *                             其 boot 命令直接走 FC 同步 UOP 引擎，绕过
-     *                             fc / fc_nand_dispatch 命令队列。
-     *   ③ set_armed(1)         —— 放行 fc_nand_dispatch_submit / submit_chain
-     *                             （此前一律返回 INVALID_ARGUMENT）。
-     *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
-     *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → controller READY。
-     *   ⑥ fc_nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
-     *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
+    /* 全系统初始化顺序：fc_init → fc_nand_init → arm → platform_register →
+     * ssd_ftl_boot_all → high-speed。失败语义与逐步约束见
+     * docs/design/fc_nand_design.md §22「初始化全流程」。 */
     fc_init();
 
     boot_section("nand");

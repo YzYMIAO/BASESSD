@@ -48,13 +48,38 @@
 #define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
 #define FTL_SPARE_POOL_PER_PLANE (50U)
 
-/* ── 用户容量 ── */
+/* ── 用户容量 ──
+ *
+ * 主机可见的最大 LBA = 实际可用于用户数据的块 × 每块 CW 数。
+ *
+ * ⚠ `FTL_IU_TOTAL`（= 全部物理 CW）是**映射表寻址空间**，不是主机容量：
+ *   它把固定元数据、OP 预留、Spare、L2P 日志区全算成了可写空间。直接拿它当容量
+ *   会超卖，写满后 Free/OP 池耗尽、GC 没有搬移目标，前台写入失败。
+ *
+ * 每 plane 的预算：
+ *   FTL_METADATA_AREA_END（98 = 固定元数据 46 + L2P 日志区 48 + shared spare 4）
+ * + FTL_OP_BLOCKS_PER_PLANE（204，10% GC headroom）
+ * + FTL_SPARE_POOL_PER_PLANE（50，坏块替换）
+ * = 352 blocks/plane；数据块 = 2048 − 352 = 1696/plane，全设备 3392。
+ * 当前几何：3392 × 64 × 4 = 868,352 LBA = 424 MiB（不是 512/437 MiB）。
+ *
+ * ⚠ L2P 日志区必须计入：它是固定预留的元数据区（4 MiB 表本体 × 2 份副本
+ *   = 8 MiB，再留 1× 工作余量 = 12 MiB = 96 gblocks 的 L2）。若从 Free Pool
+ *   动态分配且不扣容量，日志碎片会吃掉用户容量（实测可达 1076 块 / 134 MiB），
+ *   导致容量未满就写失败。
+ * ⚠ shared metadata spare 也必须计入：它是固定元数据分区的坏块替换池
+ *   （BBT + sparing 的主流形态，见 metadata.h）。 */
 #define FTL_HOST_DATA_BLOCKS_PER_INSTANCE (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE) * PLANE_NUM))
 
 /* 运行时 L2P 映射空间上限（不扣除实际坏块）。 */
 #define FTL_LBA_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * DIE_MAX)
 
-/* 静态上限版本（仅编译期断言）。 */
+/* 静态上限版本（仅编译期断言）。
+ *
+ * 全局 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
+ * （每 (ch,ce,lun) 是独立 FTL 实例；单 die 时 3392×256 = 868,352 = 424 MiB）。
+ * ⚠ 这是 **L2P 映射空间上限**，不是主机最终可见容量：开机按实际坏块扣减后，
+ *   对外一律以 `ssd_ctl_s.host_lba_max` 为准。 */
 #define FTL_LBA_MAX_AT_MAX ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIE_MAX)
 
 /* 主机可见容量（字节，编译期上界）。 */

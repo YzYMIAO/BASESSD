@@ -12,7 +12,7 @@
  *   fc_command_configure_descriptor(cmd_id, ...) 组装 desc 链
  *   → fc_submit(cmd_id) → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release(cmd_id) 回收。
- *   （掩码建链与数据搬运在 FTL 侧：ftl_cmd_configure_descriptors / ftl_cmd_write_data）
+ *   （掩码建链与数据搬运在 FTL 侧：ftl_cmd_build_descriptors / ftl_cmd_write_data）
  *
  * 文件结构（按职责分区，函数定义顺序即依赖顺序）：
  *    1. 静态资源        队列存储 + 返回暂存 + 填充计数 + g_fc_controller

@@ -15,8 +15,7 @@
 #include "bbt.h"
 #include "crash.h"
 #include "delay.h"        /* delay_now_ms（stat 的本次开机时间） */
-#include "fc_interface.h" /* 池/队列深度等模块常量（内含 fc_interface.h） */
-#include "fc_interface.h" /* fc_get_resource_stats（q 的队列/三池水位） */
+#include "fc_interface.h" /* 池/队列深度等模块常量；fc_get_resource_stats（q 的队列/三池水位） */
 #include "ftl.h"
 #include "ftl_fc_interface.h" /* ftl_sync_read_page / FTL_PAGE_CFG_DATA_ANY（rdpaa 诊断）*/
 #include "ftl_op.h"           /* ftl_op_req_count（q 的同步等待在飞数） */
@@ -788,7 +787,7 @@ static void uart_cli_info(int argc, char *argv[])
             (void)snprintf(mode_text, sizeof(mode_text), "?");
         }
 
-        LOGI("ftl[%hhu][%hhu][%hhu] mode=%s free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, mode_text, ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count_get(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
+        LOGI("ftl[%hhu][%hhu][%hhu] mode=%s free=%hu op=%hu/%hu spare=%hu/%hu bad=%hu closed=%hu live=%hu thrash=%d miss=%hhu%% cp=%lu cpa=%d jrn=%lu wr=%lu\r\n", ch, ce, lun, mode_text, ftl->alloc.free_count, alc_op_get_count(&ftl->alloc, 0U), alc_op_get_count(&ftl->alloc, 1U), alc_spare_get_count(&ftl->alloc, 0U), alc_spare_get_count(&ftl->alloc, 1U), ftl->alloc.bad_count, ftl->alloc.closed_sb_count, md_live_block_count(ftl->metadata_dir), ftl->cache->thrash.thrashing, ftl->cache->thrash.miss_pct, ftl->cp_handle->cp_state.sequence, ftl->cp_handle->active, ftl->journal->handle.state.sequence_counter, ftl->stats.total_writes);
 
         /* 计数类诊断（见 `stat`）：info 只保留身份/状态，避免两套计数视图。 */
 
@@ -1467,7 +1466,7 @@ static void uart_cli_format(int argc, char *argv[])
         }
 
         /* 格式化会重写 BBT 池：先等在飞的 BBT 异步写完成，避免 sync save 与它
-         * 二次编程同一槽（bbt_save 也会拒绝这种重叠，这里把正常
+         * 二次编程同一槽（bbt_store 也会拒绝这种重叠，这里把正常
          * 路径等干净，而不是让 format 直接失败）。泵是全局的，顺便推进其它实例。 */
         for (WORD spin = 0U; (ftl->alloc.bbt.handle.waiting == true) && (spin < 1000U); spin++)
         {
@@ -1573,7 +1572,7 @@ static void uart_cli_q(int argc, char *argv[])
             continue;
         }
 
-        LOGI("q[%hhu][%hhu][%hhu] pend_slot=%hu pend_group=%hu ftl_op=%hu l2p_load=%hhu l2p_flush=%hhu mig=%hu wb_busy=%d\r\n", ch, ce, lun, pend_slot_get_count(&ftl->pending), pend_group_get_count(&ftl->pending), ftl_op_req_count(), ftl->cache->inflight.load, ftl->cache->inflight.flush, ftl->mig_handle->state.inflight, (int)(wb_is_idle(ftl->wbuf) == false));
+        LOGI("q[%hhu][%hhu][%hhu] pend_slot=%hu pend_group=%hu ftl_op=%hu l2p_load=%hhu l2p_flush=%hhu mig=%hu wb_busy=%d\r\n", ch, ce, lun, pend_slot_count(&ftl->pending), pend_group_count(&ftl->pending), ftl_op_req_count(), ftl->cache->inflight.load, ftl->cache->inflight.flush, ftl->mig_handle->state.inflight, (int)(wb_is_idle(ftl->wbuf) == false));
     }
 }
 
@@ -1989,7 +1988,7 @@ static void uart_cli_ecc(int argc, char *argv[])
  * @brief wear — 擦除计数 / read-disturb / WL 触发差值（只读）。
  *
  * 统计排除 BAD 块（WL 判据也不看 BAD）；固定元数据块（state=NONE）仍计入磨损。
- * WL 差值不在这里重算：`wl_ec_spread_get` 与 `wl_should_trigger` 是同一漏斗（C9），
+ * WL 差值不在这里重算：`wl_ec_spread_get` 与 `wl_trigger_is_due` 是同一漏斗（C9），
  * 前者只给数值，后者给判定。
  *
  * @param argc 参数个数（含命令名）
@@ -2035,7 +2034,7 @@ static void uart_cli_wear(int argc, char *argv[])
         }
 
         wl_valid = wl_ec_spread_get(&ftl->alloc, ftl->stats.total_writes, &max_free, &min_used);
-        wl_trig  = wl_should_trigger(&ftl->alloc, ftl->stats.total_writes);
+        wl_trig  = wl_trigger_is_due(&ftl->alloc, ftl->stats.total_writes);
         spread   = (wl_valid && (max_free > min_used)) ? (max_free - min_used) : 0U;
 
         for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)

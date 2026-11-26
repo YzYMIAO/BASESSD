@@ -69,7 +69,6 @@
 #include "allocator.h"    /* super_block_s */
 #include "fc_interface.h" /* fc_cmd_status_s（服务函数签名） */
 #include "ftl_config.h"   /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_module.h"   /* FTL_SUBMIT_TIMEOUT_MS / FTL_WAIT_TIMEOUT_MS */
 #include "ftl_type.h"     /* DWORD */
 #include "gc.h"           /* gc_benefit_mode_e */
 #include "journal.h"      /* l2p_jrn_s（端口） */
@@ -81,6 +80,9 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* 等 L2P / Journal 等外部模块的 ms deadline（本仓取值，须上板标定）。 */
+#define FTL_WAIT_TIMEOUT_MS (50U)
 
 /* ── 提交/等待 deadline（绝对 ms，docs §6.3）──
  * 提交侧（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）用
@@ -262,33 +264,33 @@ typedef struct MIGRATE_FAILURE_S
 } mig_failure_s;
 
 /* GC / WL 中止原因：日志字符串与统计分类的唯一来源。 */
-typedef enum MIG_ABORT_E
+typedef enum MIGRATE_ABORT_E
 {
-    MIG_ABORT_L2P_LOAD_TIMEOUT = 0,
-    MIG_ABORT_JRN_CAPACITY_TIMEOUT,
-    MIG_ABORT_JRN_FLUSH_TIMEOUT,
-    MIG_ABORT_SUBMIT_TIMEOUT,
-    MIG_ABORT_CACHE_DRAIN_TIMEOUT,
-    MIG_ABORT_COMPLETION_TIMEOUT,
-    MIG_ABORT_L2P_READ_FAIL,
-    MIG_ABORT_FC_ERR,
-    MIG_ABORT_SHORT_CHAIN,
-    MIG_ABORT_DECODE_CORRUPT,
-    MIG_ABORT_L2P_WRITE_FAIL,
-    MIG_ABORT_JRN_APPEND_FAIL,
-    MIG_ABORT_JRN_WRITE_PENDING,
-    MIG_ABORT_NO_FREE_BLOCK,
-    MIG_ABORT_PLANE_BASE_MISMATCH,
-    MIG_ABORT_READ_REJECTED,
-    MIG_ABORT_WRITE_REJECTED,
-    MIG_ABORT_ERASE_REJECTED,
-    MIG_ABORT_DST_ALLOC_FAIL,
-    MIG_ABORT_BUILD_FAIL,
-    MIG_ABORT_PAD_WRITE_FAIL,
-    MIG_ABORT_WRITE_FAIL,
-    MIG_ABORT_CACHE_WRITE_FAIL,
-    MIG_ABORT_UNEXPECTED_COMPLETION,
-    MIG_ABORT_NUM
+    MIGRATE_ABORT_L2P_LOAD_TIMEOUT = 0,
+    MIGRATE_ABORT_JRN_CAPACITY_TIMEOUT,
+    MIGRATE_ABORT_JRN_FLUSH_TIMEOUT,
+    MIGRATE_ABORT_SUBMIT_TIMEOUT,
+    MIGRATE_ABORT_CACHE_DRAIN_TIMEOUT,
+    MIGRATE_ABORT_COMPLETION_TIMEOUT,
+    MIGRATE_ABORT_L2P_READ_FAIL,
+    MIGRATE_ABORT_FC_ERR,
+    MIGRATE_ABORT_SHORT_CHAIN,
+    MIGRATE_ABORT_DECODE_CORRUPT,
+    MIGRATE_ABORT_L2P_WRITE_FAIL,
+    MIGRATE_ABORT_JRN_APPEND_FAIL,
+    MIGRATE_ABORT_JRN_WRITE_PENDING,
+    MIGRATE_ABORT_NO_FREE_BLOCK,
+    MIGRATE_ABORT_PLANE_BASE_MISMATCH,
+    MIGRATE_ABORT_READ_REJECTED,
+    MIGRATE_ABORT_WRITE_REJECTED,
+    MIGRATE_ABORT_ERASE_REJECTED,
+    MIGRATE_ABORT_DST_ALLOC_FAIL,
+    MIGRATE_ABORT_BUILD_FAIL,
+    MIGRATE_ABORT_PAD_WRITE_FAIL,
+    MIGRATE_ABORT_WRITE_FAIL,
+    MIGRATE_ABORT_CACHE_WRITE_FAIL,
+    MIGRATE_ABORT_UNEXPECTED_COMPLETION,
+    MIGRATE_ABORT_NUM
 } mig_abort_e;
 
 typedef struct MIGRATE_COUNTERS_S
@@ -409,93 +411,60 @@ static inline BOOL mig_gc_no_gain(const mig_handle_s *m)
     return m->state.benefit.nogain;
 }
 
-/**
- * @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）
- *
- * @param die 紧凑 die 号（< FTL_DIE_MAX）
- * @return 本实例句柄（非空）
- */
+/** @brief 取本实例的搬移引擎工作区（定义在 migrate.c；普通 .bss → AXI）。 */
 mig_handle_s *mig_workspace_get(BYTE die);
 
 #if SSD_STATS_ENABLE
-/**
- * @brief 注册本实例的 GC/WL 统计（由 FTL 组合根在实例装配完成后调用）。
- *
- * @param m    已初始化的迁移引擎（生产路径为实例自持对象）
- * @param inst 实例号（紧凑 die 号）
- */
+/** @brief 注册本实例的 GC/WL 统计（由组合根在实例装配完成后调用）。 */
 void mig_stats_register(mig_handle_s *m, BYTE inst);
 #endif
 
 #if defined(FC_NAND_TEST_ENABLE)
-/**
- * @brief 测试专用：直接启动一个搬移 job（GC-18 等状态机负例）。
- */
+/** @brief 测试专用：直接启动一个搬移 job（GC-18 等状态机负例）。 */
 void mig_test_job_start(mig_handle_s *m, const super_block_s *victim, mig_kind_e kind, const char *reason, DWORD triggers);
 #endif
 
 /**
  * @brief 登记一次紧急 GC 请求（写路径分配不到页对）。
- * 只登记，不立即启动；由下一次 mig_handle 消费。
  *
- * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @note 只登记，不立即启动；由下一次 `mig_handle` 消费。
  */
 void mig_gc_request_urgent(mig_handle_s *m);
 
 /**
- * @brief GC 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）
+ * @brief GC 周期求值入口（timer 表每 10 ms 唤醒；也可由测试直接调用）。
  *
- * WL / predict 已拆成独立 timer 任务（5 s / 1 s），三者按注册顺序在同一轮
- * `timer_scheduler_poll` 内串行执行；`m->job.active` 保证每轮最多启动一个 job。
- * `m->state.level` 必须由 mig_handle 在最近一轮发布。
- *
- * @note 时钟分配：timer 任务的 period 只决定**唤醒频率**；本函数内部的
- *       deadline/interval 一律读 `platform_now_ms()`（SysTick），与
- *       mig_handle / mig_job_* 使用同一时间坐标。TIM6 的 tick 不参与 FTL
- *       时间戳。
- *
- * @param m handle
+ * @note WL / predict 是独立 timer 任务（5 s / 1 s），三者按注册顺序在同一轮
+ *       `timer_scheduler_poll` 内串行；`m->job.active` 保证每轮最多启动一个 job。
+ * @note timer period 只决定唤醒频率；本函数内部的 deadline / interval 一律读
+ *       `platform_now_ms()`（SysTick），与 `mig_handle` / `mig_job_*` 同一时间坐标。
  */
 void mig_eval(mig_handle_s *m);
 
 /**
  * @brief 把 GC/WL/predict 三个求值任务注册进 timer 表（每实例一次；幂等）。
  *
- * 注册顺序 = 同轮仲裁顺序：GC（10 ms）→ WL（5 s）→ predict（1 s）。
- *
- * @param m handle
- * @return true 已注册或本次注册成功；false timer 表满
+ * @note 注册顺序 = 同轮仲裁顺序：GC（10 ms）→ WL（5 s）→ predict（1 s）。
  */
 BOOL mig_timer_register(mig_handle_s *m);
 
-/* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
+/* 完成服务函数 ftl_migrate_op_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 
 /* ── 接口 ── */
 
 /**
  * @brief 绑定窄上下文并复位 handle。
  *
- * @param m            handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param alloc        allocator（拓扑也从这里取）
- * @param journal      Journal 端口
- * @param cache        L2P cache 端口
- * @param total_writes host 累计写计数指针（host 写流判定与 WL 让路用）
- *
- * @note handle 整体清零后重新绑定；fail_gblock[] 置 UINT16_MAX（= 无读失败计数）。
+ * @note handle 整体清零后重新绑定；`fail_gblock[]` 置 UINT16_MAX（= 无读失败计数）。
  */
 void mig_init(mig_handle_s *m, alc_s *alloc, l2p_jrn_s *journal, l2p_cache_s *cache, const DWORD *total_writes);
 
 /**
- * @brief 推进搬移引擎（每轮 must-run；提交即返回）
+ * @brief 推进搬移引擎（每轮 must-run；提交即返回）。
  *
- * 语义：
- *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
- *   ② 不在飞 ⇒ 会话收尾/进展日志、紧急触发（mig_gc_request_urgent）；
- *   ③ 周期求值不在本函数：GC 由 timer 表的 `mig_eval`（10 ms）、WL 由
- *      `mig_wl_eval`（5 s）、predict 由 `mig_predict_eval`（1 s）分别驱动。
- *
- * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param level 本轮后台档位（IDLE / NORMAL / BUSY），发布到 m->state.level 供各 timer 任务使用
+ * @note job 在飞 ⇒ 只推进/心跳；不在飞 ⇒ 会话收尾、进展日志、紧急触发。
+ * @note 周期求值不在本函数：GC / WL / predict 分别由 timer 表的 `mig_eval`（10 ms）、
+ *       `mig_wl_eval`（5 s）、`mig_predict_eval`（1 s）驱动。
  */
 void mig_handle(mig_handle_s *m, bg_level_e level);
 

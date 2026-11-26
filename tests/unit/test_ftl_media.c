@@ -400,7 +400,7 @@ static MunitResult test_trim_no_resurrection(const MunitParameter params[], void
          * 此时再 request 可能无事可做（序号不前进），所以基准必须取用例起点而不是 request 前。 */
         while (((f->cp_handle->cp_state.sequence <= cp0) || (f->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
         {
-            /* 生产主循环每轮都跑 timer_scheduler_poll：bg_policy 的 credit 与
+            /* 生产主循环每轮都跑 timer_scheduler_poll：sched bg 的 credit 与
              * CP 触发任务都在 timer 表里；只泵 ftl_service 时预算任务永远不跑。 */
             timer_scheduler_poll();
             ftl_service_pump();
@@ -570,7 +570,7 @@ static MunitResult test_journal_barrier_cp_progress(const MunitParameter params[
      * 的序号，所以「先比较、后调用」，且比较基准取调用前的 cp_target（否则断言恒真）。 */
     while (((ftl->cp_handle->cp_state.sequence <= cp0) || (ftl->cp_handle->phase != CP_IDLE)) && ((platform_now_ms() - t0) < FTL_UT_IO_TIMEOUT_MS))
     {
-        /* 同 test_trim_no_resurrection：CP 触发是 bg_policy 的预算任务，
+        /* 同 test_trim_no_resurrection：CP 触发是 sched bg 的预算任务，
          * 必须先让 timer 表补 credit。 */
         timer_scheduler_poll();
         ftl_service_pump();
@@ -691,7 +691,7 @@ static MunitResult test_gc_progress(const MunitParameter params[], void *data)
     {
         /* 每轮重新排队 urgent：第一轮可能只回收 valid=0 的 padding SB（reclaimed+1,
          * moved 不变），下一轮才会选到有有效数据的 SB。直接推进 mig 以排除
-         * bg_policy 档位/credit 对用例的干扰。 */
+         * sched bg 档位/credit 对用例的干扰。 */
         mig_gc_request_urgent(ftl->mig_handle);
         timer_scheduler_poll();
         mig_handle(ftl->mig_handle, BG_LEVEL_IDLE);
@@ -883,7 +883,7 @@ static void media_erase_bbt_pool(alc_s *a)
 
 /* bbt_persist — BBT 的 save→reload 持久化。
  *
- * 覆盖：标坏一个空闲块 → bbt_save（dirty 清零、sequence 推进）→ 模拟重启并走
+ * 覆盖：标坏一个空闲块 → bbt_store（dirty 清零、sequence 推进）→ 模拟重启并走
  *       生产 bbt_init → 坏块仍在。
  * 判据：坏块图丢失会把已知坏块当可用块写，首次上板才炸。
  * 备注：先清 BBT 池隔离「多圈 ring 选中旧 record」的 ；真 NAND。 */
@@ -922,7 +922,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
 
     ftl_ut_trace_detail("bbt before save g=%hu bad_count=%hu dirty=%d seq=%lu idx=%hu", g, a->bad_count, a->bbt.dirty, a->bbt.sequence, a->bbt.write_idx);
 
-    munit_assert_int(bbt_save(a), ==, FTL_OK);
+    munit_assert_int(bbt_store(a), ==, FTL_OK);
 
     ftl_ut_trace_detail("bbt after save dirty=%d seq=%lu idx=%hu", a->bbt.dirty, a->bbt.sequence, a->bbt.write_idx);
 
@@ -949,7 +949,7 @@ static MunitResult test_bbt_persist(const MunitParameter params[], void *data)
  *       选中）+ 擦 CP 池 ⇒ 探针 NO_RECORD、需要格式化；重启后标志恢复；完整 format
  *       的提交点写 initial CP 并清标志。
  * 判据：标志丢失 + 无 CP 会被判成「损坏」而拒绝启动或误格式化。
- * 备注：不擦 BBT 载体——失败路径上擦 spare 会丢坏块图；bbt_save 在 dirty=0 时是空操作。 */
+ * 备注：不擦 BBT 载体——失败路径上擦 spare 会丢坏块图；bbt_store 在 dirty=0 时是空操作。 */
 
 static MunitResult test_format_in_progress_resume(const MunitParameter params[], void *data)
 {
@@ -968,12 +968,12 @@ static MunitResult test_format_in_progress_resume(const MunitParameter params[],
      *    写一条带 FORMAT_IN_PROGRESS 的 BBT record，并用**更大的 sequence** 让它
      *    在真实开机 bootstrap 扫描中胜出（旧 record 可能留在已移出候选池的 spare 上，
      *    / BOOT-22）。不擦 BBT 载体：失败路径上擦 spare 会丢坏块图。
-     *    ⚠ bbt_save 在 dirty==0 时直接返回 OK（不写盘），必须同时置 dirty。 */
+     *    ⚠ bbt_store 在 dirty==0 时直接返回 OK（不写盘），必须同时置 dirty。 */
     a->bbt.sequence           = 0xFFFFFF00U; /* 新 record 必须是最新（见上） */
     a->bbt.cursor_valid       = 0U;          /* 让 save 重新定位 write_idx */
     a->bbt.format_in_progress = 1;
     a->bbt.dirty              = 1U;
-    munit_assert_int(bbt_save(a), ==, FTL_OK);
+    munit_assert_int(bbt_store(a), ==, FTL_OK);
 
     /* ② 擦掉 Checkpoint 池，制造“无有效 CP record”。 */
     for (WORD block = 0U; block < CHECKPOINT_POOL_BLOCKS; block++)
@@ -1091,7 +1091,7 @@ static MunitParameterEnum s_failc_params[]     = {
  *   ⚠ 不断言「序列已关闭」：中止后同一条 host 命令的剩余 LBA 会合法地重新开一条
  *   序列，结束时 `cache_stream.seq.active` 可能为真。
  * 判据：失败页之后的页若被确认，rebuild 会引用一个 page0 未落盘的块 ⇒ 静默丢数据。
- * 备注：注入点在 FTL 层（`ftl_cache_wr_member_done`），验证的是 FTL 策略；器件
+ * 备注：注入点在 FTL 层（`ftl_cache_write_member_finish`），验证的是 FTL 策略；器件
  *       FAILC 归属与 7Ah 状态字节仍须上板。真 NAND。 */
 
 static MunitResult test_cache_failc_abort(const MunitParameter params[], void *data)
@@ -1309,7 +1309,7 @@ static MunitResult test_journal_write_fail_wal_stall(const MunitParameter params
 
     while (jrn_has_write_failure(ftl->journal) && ((platform_now_ms() - t1) < FTL_UT_IO_TIMEOUT_MS))
     {
-        /* CP 收尾同样依赖 bg_policy / timer 表推进。 */
+        /* CP 收尾同样依赖 sched 后台策略 / timer 表推进。 */
         timer_scheduler_poll();
         ftl_service_pump();
         ftl_service(ftl);
@@ -1374,12 +1374,12 @@ static MunitResult test_bbt_ring_reload(const MunitParameter params[], void *dat
     munit_assert_uint32(g2, !=, FTL_GBLOCK_INVALID);
 
     munit_assert_int(bbt_mark_bad(a, g1), ==, FTL_OK);
-    munit_assert_int(bbt_save(a), ==, FTL_OK);
+    munit_assert_int(bbt_store(a), ==, FTL_OK);
 
     const DWORD seq1 = a->bbt.sequence;
 
     munit_assert_int(bbt_mark_bad(a, g2), ==, FTL_OK);
-    munit_assert_int(bbt_save(a), ==, FTL_OK);
+    munit_assert_int(bbt_store(a), ==, FTL_OK);
 
     const DWORD seq2 = a->bbt.sequence;
 
@@ -1449,8 +1449,8 @@ static WORD media_ledger_total(const alc_s *a)
 {
     WORD sum = a->free_count;
 
-    sum = (WORD)(sum + alc_pool_sum_counts(a->op_count, PLANE_NUM));
-    sum = (WORD)(sum + alc_pool_sum_counts(a->spare_count, PLANE_NUM));
+    sum = (WORD)(sum + alc_pool_counts_sum(a->op_count, PLANE_NUM));
+    sum = (WORD)(sum + alc_pool_counts_sum(a->spare_count, PLANE_NUM));
 
     for (WORD i = 0U; i < a->closed_sb_count; i++)
     {
@@ -1508,7 +1508,7 @@ static MunitResult test_boot_restore_reconcile(const MunitParameter params[], vo
     munit_assert_true(ftl_ut_host_read(lba, count, s_media_buf));
     media_assert_wr(lba, count);
 
-    ftl_ut_trace_detail("boot reconcile: ledger %hu -> %hu; free=%hu op=%hu spare=%hu closed=%hu bad=%hu; read byte-equal", ledger0, ledger1, ftl->alloc.free_count, alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM), alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM), ftl->alloc.closed_sb_count, ftl->alloc.bad_count);
+    ftl_ut_trace_detail("boot reconcile: ledger %hu -> %hu; free=%hu op=%hu spare=%hu closed=%hu bad=%hu; read byte-equal", ledger0, ledger1, ftl->alloc.free_count, alc_pool_counts_sum(ftl->alloc.op_count, PLANE_NUM), alc_pool_counts_sum(ftl->alloc.spare_count, PLANE_NUM), ftl->alloc.closed_sb_count, ftl->alloc.bad_count);
     ftl_ut_trace_summary("media: boot restore ledger %hu -> %hu (conserved)", ledger0, ledger1);
 
     return MUNIT_OK;
@@ -1605,7 +1605,7 @@ static MunitResult test_cache_early_ack_read_visible(const MunitParameter params
     media_fill_failc(count, 9U, 0U);
     munit_assert_true(ftl_ut_host_write(lba, count, s_io_buf));
 
-    const BYTE pending = ftl->cache_stream.seq.wr.count;
+    const BYTE pending = ftl->cache_stream.seq.write.count;
 
     /* 早回执后页表还有未 pop 的页（可能是 PROGRAMMED 走读覆盖层，也可能已
      * CONFIRMED 等后继 FAILC 结论而走 L2P）。两条路径都必须读到新数据；本用例
@@ -1617,7 +1617,7 @@ static MunitResult test_cache_early_ack_read_visible(const MunitParameter params
     media_assert_failc(count, 9U, 0U);
 
     munit_assert_true(ftl_ut_flush());
-    munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write.count, ==, 0U);
 
     ftl_ut_reboot_from_media();
 
@@ -1634,7 +1634,7 @@ static MunitResult test_cache_early_ack_read_visible(const MunitParameter params
 /* cache_early_ack_flush_barrier — flush 必须等已编程页确认完才完成。
  *
  * 覆盖：写一段新数据后 `ftl_flush_begin/step`；完成前页表仍有未证明页，完成后
- *       `wr.count==0` / `wr_inflight==0`，L2P 指向新 PBA，重启读回一致。
+ *       `write.count==0` / `write_inflight==0`，L2P 指向新 PBA，重启读回一致。
  * 判据：flush 提前完成 ⇒ 掉电窗口内「已回执未确认」的页没有屏障。
  * 备注：真 NAND。 */
 
@@ -1663,12 +1663,12 @@ static MunitResult test_cache_early_ack_flush_barrier(const MunitParameter param
     media_fill_failc(count, 10U, 0U);
     munit_assert_true(ftl_ut_host_write(lba, count, s_io_buf));
 
-    const BYTE pending = ftl->cache_stream.seq.wr.count;
+    const BYTE pending = ftl->cache_stream.seq.write.count;
 
     munit_assert_uint32(pending, >, 0U);
     munit_assert_true(ftl_ut_flush());
-    munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);
-    munit_assert_uint32(ftl->cache_stream.seq.wr_inflight, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write.count, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write_inflight, ==, 0U);
 
     DWORD new_pba = NAND_PBA_INVALID;
 
@@ -1734,7 +1734,7 @@ static MunitResult test_cache_failc_undo_read_error(const MunitParameter params[
     media_fill_failc(16U, 13U, 0U);
     munit_assert_true(ftl_ut_host_write(lba, 16U, s_io_buf));
     munit_assert_true(ftl_ut_flush());
-    munit_assert_uint32(ftl->cache_stream.seq.wr.count, ==, 0U);
+    munit_assert_uint32(ftl->cache_stream.seq.write.count, ==, 0U);
 
     memset(s_io_buf, 0, sizeof(s_io_buf));
     munit_assert_true(ftl_ut_host_read(lba, 16U, s_io_buf));
