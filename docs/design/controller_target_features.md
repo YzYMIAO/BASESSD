@@ -44,6 +44,8 @@ STM32H743 + MT29F4G08 的现成开发板做案例，并给出下一平台的选�
 | §5 | 三类市场与选型综合 | 需求如何变成架构分岔 |
 | §6 | 当前平台案例 | 这块板怎么选、差距在哪、能学什么 |
 | §7 | 下一平台选择 | 按硬件块怎么选、买前核对什么 |
+| §8 | FTL 架构选择（ADR） | 为什么这样选、主要替代是什么 |
+| §9 | FTL 模块主流对照 | 主流怎么做、本仓差在哪 |
 | 附录 | 候选平台数据 | 各候选的原始对照与待核实项 |
 
 **边界：**
@@ -3457,6 +3459,450 @@ Checkpoint + Journal replay / PFR
 - [ ] 预算档位与工具链偏好（Vivado/Vitis、Quartus、STM32Cube）。
 
 ---
+
+## 8. FTL 架构选择（ADR）
+
+> 本节从 `ftl_design.md` 的 ADR 章节迁入，保留 ADR-1~17 编号；FTL 设计文档只保留索引。
+> 下文未注明文档名的 `§x.y` 均指 `ftl_design.md`。
+
+### ADR-1 映射粒度：纯 CW 级页映射
+
+| 项 | 内容 |
+|---|---|
+| 背景 | NAND 只能异地更新；映射粒度决定表大小、写放大、GC 复杂度 |
+| 选项 | 块映射 / 混合映射（BAST/FAST）/ 纯页映射（4 KiB 或 CW） |
+| 选择 | **纯页映射，粒度 = 1 CW = 512 B** |
+| 理由 | 写放大较小（模型值，实测见验证文档）；与 FC 的 ECC/CRC/加扰单位完全对齐，无粒度折算；GC 可只搬页内有效 CW |
+| 主流 | 现代 SSD 普遍纯页映射；UFS/eMMC 也是页级（见 §1.6） |
+| 代价 | 表最大（4 MiB）；GC 逐 CW 搬移，实现复杂 |
+| 重估触发 | 若改用 4 KiB IU，表缩小 8×，但页内小写会放大写放大；当前器件 512 B CW，不换 |
+| 出处 | `docs/reference/README.md` A4 SPDK FTL、D4 DFTL/AppL；本仓 WA 模型见验证文档 |
+
+### ADR-2 L2P 存放：NAND 全表 + SRAM region cache
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 4 MiB 表装不进 SRAM；外置 DRAM 本板不可用 |
+| 选项 | 全表 DRAM / 全表 SDRAM / 全表 SRAM / NAND + SRAM cache |
+| 选择 | **NAND 存全表 + 64 行 SRAM region cache（DRAM-less）** |
+| 理由 | 与 UFS/eMMC 的 DRAM-less 形态同构；SRAM 预算可支撑 64 行；掉电一致性由 Journal/CP 保证 |
+| 主流 | UFS 4.0 / eMMC / 消费级 DRAM-less 均为“L2P on NAND + SRAM cache” |
+| 代价 | 全盘随机访问命中率低（64 行 ≈ 3%）；需要 thrashing 降级 |
+| 寿命核算 | 上界模型：一次全盘写 ≈ 1.8 万次 region flush；L2P 元数据区寿命约 5.7 TB 写入；**Journal（4 块）约 1.6 TB，是更短的瓶颈**。开发/学习负载（≤100 MB/天）有充足余量 |
+| 重估触发 | 增加 DRAM/SDRAM；或 cache 行数显著增加（需重算 SRAM 预算） |
+| 出处 | `docs/reference/README.md` A4 SPDK FTL、D4 DFTL；DRAM-less 对照 §1.6 |
+
+### ADR-3 RAID 不实现
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 跨 die/plane 的 XOR 恢复可提高可靠性，但增加 GC/parity 管理复杂度 |
+| 选项 | 单 plane 恢复 / 跨 die·plane XOR / 全盘 RAID |
+| 选择 | **`CONFIG_FC_RAID = 0`，不实现** |
+| 理由 | 当前 SLC 单盘 BER 较低；学习主控优先把分层/队列/映射做对；RAID 会显著增加 GC 与元数据复杂度 |
+| 主流 | 企业级常用；消费级 DRAM-less 通常不做 |
+| 代价 | 单 die/页不可纠错时只能标坏/丢数据 |
+| 重估触发 | 换 TLC/QLC 或需要企业级可靠性 |
+| 出处 | 本仓自定；企业级 RAID 对照见 `storage_controller_design.md` |
+
+### ADR-4 FTL 通过 FC 接口访问 NAND
+
+| 项 | 内容 |
+|---|---|
+| 背景 | NAND 时序、地址周期、ECC/CRC/加扰必须统一管理 |
+| 选项 | FTL 直接操作 NAND / 经 FC 接口 |
+| 选择 | **FTL 只调用 `ftl_fc_interface` 的 helper / 同步异步原语** |
+| 理由 | 数据保护链完整；多平面/流水线能力复用；FTL 不感知 NAND 时序 |
+| 主流 | 主控固件的标准分层（FTL / HAL / 介质） |
+| 代价 | 每次读写有 alloc/submit/poll/release 开销 |
+| 重估触发 | 不重估；这是分层底线 |
+| 出处 | OpenSSD/SPDK 分层对照；本仓 `ftl_fc_interface` 契约 |
+
+### ADR-5 Cache 替换：CLOCK
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 64 行 cache 需要近似 LRU，且不能有动态内存/链表开销 |
+| 选项 | LRU（链表）/ FIFO / CLOCK / 2Q |
+| 选择 | **CLOCK（二次机会）** |
+| 理由 | 命中率接近 LRU；O(1) amortized；只需一个整数字段；无动态分配 |
+| 主流 | 嵌入式/DRAM-less 常用 |
+| 代价 | 不如 LRU 精确；顺序/随机混合负载下略差 |
+| 重估触发 | 若命中率成为瓶颈，可评估 CLOCK-pro / 自适应预取（见 §7.2） |
+| 出处 | SPDK FTL（A4）的 cache 形态；CLOCK 为通用替换算法 |
+
+### ADR-6 Super Block：跨 plane 条带化
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 双 plane 可并行编程/擦除；按单块管理会浪费并行度 |
+| 选项 | 单块管理 / 跨 plane Super Block |
+| 选择 | **跨各 plane 的逻辑 SB；各 plane 独立选块（Policy B）** |
+| 理由 | Multi-Plane 提升吞吐；擦除/GC 以 SB 为粒度；坏块导致两块编号不同不影响并行 |
+| 主流 | 企业级跨 die、消费级跨 plane 的通用形态 |
+| 代价 | allocator 配对/关闭逻辑更复杂；退化单 plane 条目需要哨兵 |
+| 重估触发 | 换多 die 封装或 plane 数变化 |
+| 出处 | `docs/reference/README.md` A1 Cosmos+、A4 SPDK FTL；本仓 Policy B 自定 |
+
+### ADR-7 温度分区：Hot / Cold 双 Open SB
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 热数据无效页增长快，冷数据几乎不变；混写会降低 GC 效率 |
+| 选项 | 单 Open SB / Hot + Cold 双 SB / 多温区 |
+| 选择 | **两个 Open SB：HOT（host 写）/ COLD（GC 搬移）** |
+| 理由 | HOT 块很快变成高无效比例，GC 回收便宜；COLD 块几乎不用回收；纯软件 |
+| 主流 | 消费级 2~4 温区；企业级多级温度 |
+| 代价 | allocator 维护两个 SB；写路径要指定温度 |
+| 重估触发 | 容量/负载需要更多温区 |
+| 出处 | 本仓自定；消费级 2~4 温区为公开经验值 |
+
+### ADR-8 OP 预留 10%
+
+| 项 | 内容 |
+|---|---|
+| 背景 | GC 需要空闲块缓冲；坏块替换需要储备；无 OP 时写压力会直接撞 GC |
+| 选项 | 0% / 7~15% / 28% |
+| 选择 | **10%（每 plane 204 块，共 408）** |
+| 理由 | 给 GC 足够缓冲，前台写入不因 GC 断崖；坏块替换后用户容量不变 |
+| 主流 | 消费级 7~15%，企业级 7~28% |
+| 代价 | 用户可见容量 **424 MiB**（512 MiB − 固定元数据 24.5 − OP 51 − Spare 12.5） |
+| 重估触发 | 容量/性能目标变化；`FTL_OP_PERCENT` 可配 0~28 |
+| 出处 | 消费级/企业级 OP 区间为公开经验值；具体 10% 本仓自定 |
+
+### ADR-9 Free Pool：一个已擦除池 + 三级水位 + 独立 OP/Spare
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 需要“前台零等待”和“后台补池”，但不能把擦除放到关键路径 |
+| 选项 | 三个物理池（预擦/普通/紧急）/ 一个池 + 水位 + 独立保留池 |
+| 选择 | **一个已擦除池 + 三级水位（32/8/0）+ 独立 OP/Spare 池** |
+| 理由 | 搬移是“先擦后归还”⇒ 池内没有未擦块，无法按擦除状态分区；前台零等待靠水位，不靠第二个池 |
+| 主流 | 真实主控同样是“一个 free pool + 软/硬水位 + 独立保留池” |
+| 代价 | 水位阈值是本仓经验值，需要按容量/OP 调整 |
+| 重估触发 | 换更大容量或不同 OP 比例 |
+| 出处 | SPDK FTL（A4）的 free band 水位；具体阈值本仓自定 |
+
+### ADR-10 不实现 SLC Cache
+
+| 项 | 内容 |
+|---|---|
+| 背景 | SLC cache 是 TLC/QLC 的写加速技术 |
+| 选项 | SLC cache / 不做 |
+| 选择 | **不实现** |
+| 理由 | 介质本身就是 SLC；没有“慢速 TLC 写”需要掩盖 |
+| 主流 | SLC 介质不需要；TLC/QLC 才用 |
+| 代价 | 无 |
+| 重估触发 | 换 TLC/QLC 介质 |
+| 出处 | 本仓自定（介质为 SLC）；TLC/QLC 对照见公开资料 |
+
+### ADR-11 坏块管理：出厂扫描 + 运行时隔离 + Block Sparing
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 坏块不可用；出厂标记会被擦除毁掉；运行时还会新增坏块 |
+| 选项 | Block Skip / Block Remap Table / Block Sparing |
+| 选择 | **出厂扫描（仅空片）+ 运行时标坏 + Spare Pool 按 plane 补充** |
+| 理由 | 不需要两层映射；PAA 直接物理；坏块配对异号不影响 Multi-Plane；Spare 保容量水位 |
+| 主流 | 企业级也用 sparing + 数据迁移，不用 remap 表 |
+| 代价 | 出厂扫描约 250 ms；Spare 池占用 100 块 |
+| 重估触发 | 坏块率显著高于预期，或需要在线替换策略 |
+| 出处 | Micron AN1819 / ONFI；候选池算法本仓自拟 |
+
+### ADR-12 多 LUN：共享 L2P cache + 全链路全局 LBA
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 每个 `(ch,ce,lun)` 一个实例；若每实例一份 cache，SRAM 装不下；若数据通路用局部 LBA，跨实例语义复杂 |
+| 选项 | 每实例独立 cache + 局部 LBA / 每 `(ch,ce)` 共享 cache + 全局 LBA |
+| 选择 | **每 `(ch,ce)` 一份共享 cache；数据通路全链路全局 LBA；映射页落盘用 owner 的局部 region** |
+| 理由 | cache 容量按 `(ch,ce)` 而不是按 LUN 增长；全局 LBA 让 host/Journal/META 只有一套坐标；owner 解析把“落盘位置”收在单一漏斗 |
+| 主流 | 主流多 LUN 主控共享 L2P cache；全局 LBA + 分片是常见形态（具体实现本仓自定） |
+| 代价 | owner 解析回调、全局脏位图、CP/recovery/flush 都要按 owner 过滤 |
+| 重估触发 | 换多 die 芯片；或 cache 命中率需要 per-LUN 隔离 |
+| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md)；`l2p_cache.h` 的全局坐标注释 |
+
+### ADR-13 实例描述符化 + 模块自持 workspace
+
+| 项 | 内容 |
+|---|---|
+| 背景 | `ftl_ctx_s` 内嵌大数组时，单实例描述符很大；多实例线性增长，超出片上 RAM 预算 |
+| 选项 | 继续内嵌 / 全部放外部存储 / 描述符 + 模块自持 workspace |
+| 选择 | **描述符只留指针 + 热状态；每个模块自持 workspace 并选择落点；落点由平台决定** |
+| 理由 | 多实例可装下；workspace 所有权归属清晰；落点可控但不写进 FTL 契约 |
+| 主流 | 主控固件用 descriptor + 表指针，由平台链接/散列决定落点（OpenSSD/SPDK 同思路） |
+| 代价 | 不清零 workspace 必须显式初始化；CPU-only 与 DMA-visible 的区分是设计约束；跨域访问需平台保证 |
+| 重估触发 | 维度继续增加；或表结构显著变大 |
+| 出处 | OpenSSD/SPDK 的 descriptor + workspace 形态；落点本仓自定 |
+
+### ADR-14 主机背压：三态返回，不内部排队
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 多个提交者（host / GC / metadata）竞争有限的命令/描述符/缓冲/pending 资源 |
+| 选项 | ① 直接返回错误 ② 内部重试队列 ③ 动态 budget ④ 主机级 doorbell 流控 |
+| 选择 | **①：pending 表满/资源不足即返回 `FTL_AGAIN` 或 `FTL_ERROR`** |
+| 理由 | 零额外 SRAM；资源回滚路径完整；本仓 host 为 USB MSC（BOT）与 UART CLI，提交者自带泵 / 同步等待，不需要 doorbell；内部重试队列与 DRAM-less 目标冲突 |
+| 主流 | 消费级 DRAM-less 常见；企业级会用 credit/动态 budget |
+| 代价 | 无优先级/公平性；极端竞争下 host 可能看到错误 |
+| 重估触发 | 多 LUN 并发导致 pending 经常打满；或接入 NVMe host |
+| 出处 | 旧 D6 分析（现并入本节）；`FTL_AGAIN` 语义见 `ftl_interface.h` |
+
+### ADR-15 NAND 流水线：Multi-Plane + 受限 Cache Program
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 需要重叠 NAND 延迟；三种技术：Multi-Plane、Cache Program、ISSUE/WAIT/FETCH |
+| 选项 | 只用单命令 / Multi-Plane / + Cache Program / + ISSUE/WAIT |
+| 选择 | **写用 Multi-Plane；host 16 KiB 与 GC/WL 顺序搬移使用受限 Cache Program 批次；读在 LUN>1 时走 ISSUE/WAIT/FETCH** |
+| 理由 | 器件支持 `80h-11h-80h-15h`（中间页）与 `80h-11h-80h-10h`（末页）；15h 完成只代表 cache 可复用、tPROG 仍在后台。**不提前确认**：中间页只释放命令，只有末页 10h 成功且 FAILC/FAIL 均无错误后才统一更新 L2P/Journal，因此不违反先编程后映射（program-before-map）。掉电时未确认页没有映射，恢复会关闭部分写块（不续写），安全。 |
+| 主流 | 主流主控用 Multi-Plane + 流水线；cache program 属器件特性，批次策略是**本仓自拟**，不是行业标准形态 |
+| 代价 | 需要 FAILC 状态检查；批次失败只能关闭目的 SB（不能 rewind）；GC 批次多占约 16 KiB SRAM |
+| 重估触发 | 引入 HSQ / FC chain 或跨 LUN batch；或器件 datasheet 的 FAILC 语义变化 |
+| 出处 | Micron MT29FxG08xAA datasheet Figure 74（Two-Plane Program Page Cache）与状态寄存器 FAILC 说明；op44/op48 的用法见 `fc_nand_design.md` |
+
+> ⚠ 15h 后状态寄存器 bit1 = `FAILC` 表示**上一页** cache program 的成败；只检查 bit0
+> `FAIL` 会把中间页失败静默当成成功。op44 与末页 op48 都使用 `NAND_UOP_CHECK_FAIL_CACHE`
+> （FAIL | FAILC）；首页用 op49 只查 FAIL，避免残留 FAILC 误判。
+> host 16 KiB 正常路径的 cache program 收益与上板结果见验证文档。
+> **FAILC 负例、失败注入、掉电注入仍未做**，不得据此声称 cache program 全部已验证。
+
+### ADR-16 后台调度：工作量配额 + must-run
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
+| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务时间预算 + must-run / 每任务工作量配额 + must-run |
+| 选择 | **10 项任务表：6 must-run（不 gate、不占配额）+ 4 预算任务；三级负载→固定配额/掩码** |
+| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/credit 截断；每秒后台量由 token bucket（10 ms 补 grant_units）固定，单轮墙钟只做异常兜底——前台保护是确定性的（掩码/补充速率） |
+| 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
+| 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
+| 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
+| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照 |
+
+### ADR-17 读写 run：FTL 构链，FC 执行 chain
+
+| 项 | 内容 |
+|---|---|
+| 背景 | cache read / cache program 的 45h…47h / 49h…48h 必须在器件 cache 管线上连续执行；任一条被其他命令插入就会破坏序列 |
+| 选项 | 依赖“全 FTL 命令走 SQ 且连续入队”的全局假设 / FTL 逐条提交并 defer 插入者 / **整条 run 标成 FC chain，控制器锁 LUN** |
+| 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，批量提交原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨轮次保留、另一队列回推，END 才解锁 |
+| 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨轮次的 owner 状态解决“HSQ 插入劈开序列”；FC 侧复用既有 chain 机制，**无新增功能代码** |
+| 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_nand_dispatch.c`），不是行业标准形态 |
+| 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
+| 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
+| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`docs/reference/README.md`）；`fc_poll_fill_queue` / `fc_poll_chain_length` 见 `fc_nand_design.md` |
+
+> 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
+> `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
+> （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`；见 `fc_nand_design.md`）。
+>
+> ⚠ chain 路径当前仅有 UT 覆盖；首启用必须上板验证跨轮次 owner / HSQ 回推 / 失败页状态（建链类改动）。
+>
+> ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_open_items.md`）。
+
+
+## 9. FTL 模块主流对照
+
+> 本节从 `ftl_design.md` 各模块的「主流对照」迁入；FTL 设计文档只保留「设计取舍」摘要。
+> 下文未注明文档名的 `§x.y` 均指 `ftl_design.md`。
+
+### 9.1 引导与掉电恢复
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.14.8）。
+
+DRAM-less 主控普遍采用「快照 + 增量日志 + 全盘扫描兜底」三段式：快照限定恢复上界，
+日志补 post-snapshot 增量，扫描处理元数据损坏。**本仓自定**的部分是块元数据快照的
+16-bit/块编码与 fresh/clean/PF 的判型口径；快照/日志/扫描的分工是 DRAM-less 的通用形态
+（DFTL 等，见 `docs/reference/README.md`）。
+
+---
+
+### 9.2 分配器 / BST / Super Block
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.9.8）。
+
+每块一个 metadata/descriptor、Free Pool + OP + Spare 的池化、Super Block 跨 plane 条带化，
+是主流 SSD 控制器的共同形态（OpenSSD 全局表、SPDK FTL 内嵌表）。**本仓自定**的是
+`valid_count` 的 CW 粒度与“无逐页位图”（DRAM-less approach ③，见 §3.12）。
+
+---
+
+### 9.3 坏块表
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.10.8）。
+
+坏块表 + 预留替换块（sparing）而不是 block remap 表，是主流做法：ONFI Multi-Plane 命令
+每个 plane 有独立行地址，坏块导致两块编号不同不影响并行操作，因此不需要“两层映射”。
+固定元数据分区沿用同一原则：分区 = 候选块池（名义区间跳过 BAD + 共享
+metadata spare 补缺），record 靠 sequence 扫描定位，不维护 logical→physical 表。
+出厂标记“先读后擦”的判据来自 Micron AN1819（见 `bbt.c` 的引文）。
+⚠ 本仓的具体候选池算法（4 块/plane shared spare、硬下界、重建顺序）是**本仓自拟实现**，
+不冒充行业统一数值；机制本身是主流 BBT + sparing。
+
+---
+
+### 9.4 元数据目录
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.6.13）。
+
+“固定根（root/目录检查点）+ 专用元数据块池 + 日志区 + Directory”是主控固件的常见形态：
+固定根给启动一个确定的查找起点，日志区吸收高频更新，Directory 追踪最新位置。
+日志区本身是**固定预留**（46..93/plane），与目录检查点/CP/BBT 同属固定元数据；
+这是“元数据独立、有界、容量扣除”的主流原则（SPDK FTL：nvcache 独立 bdev + 每 band
+尾部 P2L；spare 在 device formation 时从 surfaced capacity 扣除）。
+具体块数/放置是本仓自定，不冒充行业统一数值。
+
+固定池为什么必须环形轮转、池深如何影响单块磨损与启动扫描，见 §2.3.7。
+
+DRAM-less 侧的关键同构是 **flash reverse-mapping**：不常驻逐页有效位图，
+靠页内 META + L2P 反查判有效（§3.12）。这与 Directory 是两件事：Directory 管
+“region 页在哪”，META 管“页内某 CW 是否仍被 L2P 指向”。
+
+---
+
+### 9.5 L2P Cache
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.5.9）。
+
+DRAM-less 主控的 L2P cache 普遍采用“按需加载 + 近似 LRU（CLOCK/2Q）+ write-back”，
+并用日志/快照保一致性；区别在 cache 行数、替换算法、是否共享与是否做 read-ahead。
+**本仓自定**的是 64 行、CLOCK、thrashing 滞回 90/70、“加载失败按全未映射处理”，
+以及顺序读触发的单 region 预取（阈值 2 个请求 / 提前 64 LBA / 最多 2 个在飞）。
+
+---
+
+### 9.6 Journal
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.7.9）。
+
+“写前日志 + 定期快照截断”是数据库与闪存 FTL 共用的崩溃恢复形态；DRAM-less FTL
+把 L2P 增量写进 Journal、用 Checkpoint 限定回放长度，是主流做法（DFTL 等）。
+DFTL 的 mapping page 是 512 条 × 4 B、整页回写；本仓的 `JSEG` 页采用同一形态
+（LBA 隐式、4 B/条），只是把它放进 Journal 环形页并由 `page_seq` 定序。
+**本仓自定**的是 4 块环形、127 条通用页 / 508 条顺序页、85%/95% 水位与同 LBA 合并策略。
+
+---
+
+### 9.7 Checkpoint
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.8.9）。
+
+“全量快照 + 日志截断 + 崩溃安全的提交顺序”是主流 FTL/数据库的通用恢复模型。
+块元数据快照（per-block metadata snapshot）对应企业级 SSD 的 block descriptor/accounting
+snapshot。**本仓自定**的是 16-bit/块 + 8 B/块的紧凑编码、21 页/record 与 T1/T2/T3 阈值。
+
+---
+
+### 9.8 Host 提交 / group / pending
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.1.11）。
+
+“请求拆分 + 完成组 + 子操作表 + 背压/待入账”是主控固件数据面的标准形态：host 命令被拆成
+介质命令，完成按命令 id 回收，组完成只通知一次。**本仓自定**的是 32 项固定表、
+8 轮 stall 预算与页打包的 `owners` 位掩码。
+
+
+---
+
+### 9.9 完成派发面
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.2.8）。
+
+NVMe/主控数据面的基本模型是「提交队列 + 完成队列 + 命令 ID 旁表」：完成项只带命令 ID
+和状态，host/主控用 ID 找回请求上下文；FTL 再把“完成该由谁收尾”映射到服务函数。
+本仓把 NVMe 的 SQ/CQ 简化为 FC 的队列 + 全局完成表：
+
+- `command_id` 对应 NVMe 的 CID，用来连接 FC 完成项与 FTL request 表；
+- `request.op` 是本仓的“服务函数选择器”，不是 NVMe 的命令类型字段；
+- 实例路由按命令自身的 `(ch,ce,lun)` 解析，对应主控按 target/queue 归属完成；
+- **本仓自定**：按 command_id 直接索引的 request 表、单一全局 CQ、`先摘表项再回调` 的防重入顺序，
+ 以及派发深度对嵌套完成泵的拦截。
+
+---
+
+### 9.10 页打包写缓冲
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.3.7）。
+
+写缓冲/页打包是主控数据面的常规优化：消费级用 SLC cache/写缓冲，企业级用 write
+coalescing。本仓没有 SLC cache（介质本身就是 SLC），只做**同窗口页打包**；
+**本仓自定**的是 8-CW 窗口与 owners 位掩码的完成聚合方式。
+
+---
+
+### 9.11 FTL service 与请求调度
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.4.11）。
+
+“主循环 + 请求调度器 + 独立后台策略/配额 + 每任务优先级”是主控固件的常见形态
+（SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定配额
+（不是连续带宽调节）与 must-run 集合的划分。
+
+### 9.12 GC 策略与迁移引擎
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.12.9）。
+
+GC 触发看自由块水位、victim 按有效性比例选、后台异步回收，是主流 FTL 的共同形态
+（SPDK 的 free band 水位、DRAM-less 的空间压力触发）。本仓额外加了磨损/温度/年龄三项，
+**这是本仓自定**的评分权重；它们不冒充“行业标准公式”。与 SPDK 的一个刻意差异：
+本仓写路径在分配不到页时会**就地起紧急 GC**，SPDK 的写路径直接返回 NULL、GC 全在
+poller 里——这条差异已登记。
+
+---
+
+### 9.13 读恢复
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.13.8）。
+
+read retry（soft-decode）、邻居页辅助、RAID/XOR 是企业级 SSD 读恢复的常见组成。
+本仓**裁剪**为「单次读 + CRC 重读一次 + 块退役」是器件/配置约束（0x89 保留、SLC
+无 retry table、RAID 关闭），不是对这些机制的否定。**本仓自定**的是 4 级健康状态
+与 1000 次 read-disturb 阈值。
+
+---
+
+### 9.14 FTL↔FC 接口
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.15.9）。
+
+“FTL 只表达逻辑请求、HAL/FC 负责介质命令与数据保护”是主控分层的通用形态；
+描述符链 + 完成状态是 NVMe/ONFI 数据面的常见实现。**本仓自定**的是 CW 子集位图建链、
+`cmd->meta` 携带扇区 LBA 的方式与 FC 池深度。
+
+---
+
+### 9.15 cache 序列
+
+> 迁入自 `ftl_design.md` 模块主流对照（现 §3.16.9）。
+
+设备 cache 序列（`0x31/0x3F`、`15h/10h`）的器件语义见 Linux MTD rawnand 与 MT29F4G08
+datasheet（`docs/reference/README.md` §F1 / §C4；）。
+
+主机侧写缓存语义（volatile write cache）与延迟错误（deferred error）来自 SCSI 的
+写缓存模型：写命令在数据进入设备缓冲后即可完成，NAND 提交失败不在原命令上报。
+⚠ **本仓出处层没有 SPC/SBC 原文**（`docs/reference/` 未收录），因此这里**不把具体
+实现写成行业标准形态**：`padding END` 与"下一条能承载状态的命令直接失败一次"都是
+**本仓自拟**。与公开 SCSI 语义的差异：TinyUSB MSC 不支持自定义 sense data，所以本仓
+无法给出 CHECK CONDITION + deferred sense（具体 ASC 不作断言），只能用命令级失败近似
+。
+
+**早回执（volatile write cache）**：写命令在页编程完成（不是提交）后即可完成——与
+DRAM 型/DRAM-less 主控都把「完成点」放在设备侧缓冲写完之后同型；差异是本仓**不做**
+RAM 里的写合并缓存，未确认数据直接落在 NAND 页里，靠读覆盖层保证可见性。掉电窗口
+因此是「已编程未证明的页 + 未落盘的 Journal 映射」，量化。
+
+**FUA（不实现，用户裁决）**：WRITE(10) 的 CDB byte1 bit3 是 FUA（T10 SBC-3
+§5.26：FUA=1 ⇒ 设备不得在数据真正写到介质前返回 GOOD，见 `docs/reference/README.md`
+§外部规范）。本仓**忽略**该位，依赖主机 fsync 的后续 `SYNCHRONIZE CACHE` 作为持久性
+屏障；取舍与恢复要点见 `known_open_items.md` 。
+
+`SYNCHRONIZE CACHE` 在正常路径会先把序列 padding 收尾，并等 Journal 与 L2P 都落盘；
+L2P 区域写回现在按 **WAL 次序**等覆盖其映射的 Journal 条目先落盘（§3.5 不变量 8），
+所以正常完成的 flush 是「日志 + 数据」的完整屏障。只有**超时路径**仍是 best-effort
+（`FTL_FLUSH_TIMEOUT_MS`，元数据真卡死时主机不能永不完成），那一路不是绝对屏障。
+
+Journal 顺序映射页的形态出处（DFTL translation page）与差异见 §3.7.9 / §3.16.5。
 
 ## 附录：候选平台数据（§7 选型用）
 

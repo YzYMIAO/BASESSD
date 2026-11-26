@@ -10,190 +10,148 @@
 
 ## 目录
 
-- [0. 本文定位与阅读路径](#s0)
+- [0. 摘要](#s0)
+  - [0.1 问题与约束](#s0-1)
+  - [0.2 方案要点](#s0-2)
+  - [0.3 范围与非目标](#s0-3)
+  - [0.4 文档约定](#s0-4)
 - [1. 需求、约束与总体设计](#s1)
- - [1.4 模块全景与主流程图](#s1-4)
- - [1.5 重要数据/状态流转路径](#s1-5)
+  - [1.1 为什么需要 FTL](#s1-1)
+  - [1.2 为什么是 DRAM-less](#s1-2)
+  - [1.3 设计目标与导出约束](#s1-3)
+  - [1.4 模块全景与主流程图](#s1-4)
+  - [1.5 重要数据/状态流转路径](#s1-5)
+  - [1.6 DRAM 型 vs DRAM-less / 企业级 vs 消费级](#s1-6)
 - [2. 介质与地址模型](#s2)
+  - [2.1 NAND 几何与容量预算](#s2-1)
+  - [2.2 LBA / region / PBA / PAA / META](#s2-2)
+  - [2.3 固定元数据区布局](#s2-3)
+  - [2.4 单一坐标与转换漏斗](#s2-4)
+  - [2.5 介质布局版本与自动格式化](#s2-5)
 - [3. 模块设计](#s3)
- - [3.1 引导与掉电恢复](#s3-1)
- - [3.2 分配器 / BST / Super Block](#s3-2)
- - [3.3 坏块表 BBT](#s3-3)
- - [3.4 磨损计数持久化与静态磨损均衡](#s3-4)
- - [3.5 元数据目录](#s3-5)
- - [3.6 L2P Cache](#s3-6)
- - [3.7 Journal](#s3-7)
- - [3.8 Checkpoint](#s3-8)
- - [3.9 Host 提交 / group / pending](#s3-9)
- - [3.10 完成派发面（ftl_op）](#s3-10)
- - [3.11 页打包写缓冲 wbuf](#s3-11)
- - [3.12 FTL service 与后台调度器](#s3-12)
- - [3.13 GC 策略与迁移引擎](#s3-13)
- - [3.14 读恢复](#s3-14)
- - [3.15 FTL↔FC 接口](#s3-15)
- - [3.16 cache 序列（cache_batch）](#s3-16)
+  - [3.1 Host 提交 / group / pending](#s3-1)
+  - [3.2 完成派发面](#s3-2)
+  - [3.3 页打包写缓冲](#s3-3)
+  - [3.4 FTL service 与请求调度](#s3-4)
+  - [3.5 L2P Cache](#s3-5)
+  - [3.6 元数据目录](#s3-6)
+  - [3.7 Journal](#s3-7)
+  - [3.8 Checkpoint](#s3-8)
+  - [3.9 分配器 / BST / Super Block](#s3-9)
+  - [3.10 坏块表](#s3-10)
+  - [3.11 磨损计数持久化与静态磨损均衡](#s3-11)
+  - [3.12 GC 策略与迁移引擎](#s3-12)
+  - [3.13 读恢复](#s3-13)
+  - [3.14 引导与掉电恢复](#s3-14)
+  - [3.15 FTL↔FC 接口](#s3-15)
+  - [3.16 cache 序列（cache read / cache program）](#s3-16)
 - [4. 端到端场景](#s4)
+  - [4.1 首次上电 / 介质版本不匹配 → 格式化](#s4-1)
+  - [4.2 干净启动（clean start）](#s4-2)
+  - [4.3 掉电恢复（power-failure start）](#s4-3)
+  - [4.4 主机读](#s4-4)
+  - [4.5 主机写](#s4-5)
+  - [4.6 L2P 脏 region 回写与 Directory commit](#s4-6)
+  - [4.7 Checkpoint](#s4-7)
+  - [4.8 GC / WL / 预测性迁移](#s4-8)
+  - [4.9 后台调度一轮](#s4-9)
 - [5. 数据与状态模型](#s5)
-- [6. 策略决策记录（ADR）](#s6)
+  - [5.1 结构体关系](#s5-1)
+  - [5.1.1 模块 handle 契约](#s5-1-1)
+  - [5.1.2 字段所有权与单写者](#s5-1-2)
+  - [5.2 状态机总表](#s5-2)
+  - [5.3 持久化对象与恢复来源](#s5-3)
+  - [5.4 单实例 / 多实例与全局坐标](#s5-4)
+  - [5.5 不变量清单](#s5-5)
+- [6. 设计取舍索引](#s6)
 - [7. 已知限制与待办](#s7)
+  - [7.1 未验证状态](#s7-1)
+  - [7.2 已知限制](#s7-2)
+  - [7.3 后续阶段](#s7-3)
+  - [7.4 明确不实现](#s7-4)
 - [8. 附录](#s8)
-
----
+  - [8.A 常量/阈值总表](#s8-a)
+  - [8.B 当前结构索引](#s8-b)
+  - [8.C 静默失效与证据判据清单](#s8-c)
+  - [8.D 术语速查](#s8-d)
 
 <a id="s0" name="s0"></a>
 
-## 0. 本文定位与阅读路径
+## 0. 摘要
 
-### 0.1 本文回答什么、不回答什么
+<a id="s0-1" name="s0-1"></a>
 
-| 回答 | 不回答 |
+### 0.1 问题与约束
+
+FTL 把主机的 LBA 覆盖写映射到 NAND 的追加写。目标器件是单 die SLC NAND
+（2 plane × 2048 block × 64 page × 4 CW，1 CW = 512 B 用户数据），主机可见容量
+424 MiB；无外置 DRAM，L2P 全表必须留在 NAND，片上 SRAM 只放小型 region cache。
+
+约束来自三端：
+
+- **NAND**：按页编程、按块擦除；同一页不能二次编程；
+- **主机**：按 512 B LBA 覆盖写，要求完成语义与掉电一致性；
+- **平台**：无外置 DRAM，SRAM 不足以常驻映射表。
+
+因此 FTL 必须同时解决：地址映射、写放大、垃圾回收、磨损均衡、坏块隔离、掉电恢复。
+
+<a id="s0-2" name="s0-2"></a>
+
+### 0.2 方案要点
+
+| 编号 | 要点 | 设计选择 |
+|---|---|---|
+| P1 | 映射 | IU = 1 CW；L2P 全表 4 MiB 存 NAND，SRAM 只缓存 64 个 region |
+| P2 | 写路径 | wbuf 攒页 → 先编程后映射 → L2P write-back (写回) → Journal WAL |
+| P3 | 元数据 | 固定分区 + Directory + 目录检查点 + Checkpoint + Journal 截断 |
+| P4 | 空间与可靠性 | Super Block (超级块)、四本账、GC / 静态 WL / 预测退役、BBT / Spare、读恢复 |
+| P5 | 执行 | HIL → group / pending → 完成派发；单线程 superloop + 每轮调度 |
+| P6 | 一致性 | Journal 先于映射、F10 屏障、早回执 + deferred error |
+
+| 要点 | 主要章节 |
 |---|---|
-| FTL 为什么存在、要满足哪些约束 | 对外 API 的逐字段契约（见 §0.2 两份接口文档） |
-| 每个模块的**需求背景**、职责边界、结构、流程 | 某个版本何时改了什么（见 revision history） |
-| 数据与状态在模块之间怎么流转 | FC/NAND 内部的命令链、ECC/CRC 实现（见 `fc_nand_design.md`） |
-| 掉电时哪些状态会丢、怎么恢复 | 板级外设与时序（见 `platform` / `boot_flow.md`） |
-| 策略取舍与主流对照（ADR） | 未验证功能的“已完成”声明（验证状态见 §7） |
+| P1 | §2、§3.6、§3.5 |
+| P2 | §3.5、§3.7、§3.1~§3.3 |
+| P3 | §3.14、§3.6、§3.7、§3.8 |
+| P4 | §3.9~§3.11、§3.12、§3.13 |
+| P5 | §3.1~§3.4、§3.15、§3.16 |
+| P6 | §3.7、§3.12、§4.3、§4.5、§4.6 |
 
-### 0.2 文档分工
+逐模块的对应关系见 §3 开头的模块地图；各章开头另有「支撑摘要」标注。
 
-| 想知道 | 读 |
-|---|---|
-| FTL 对外接口（初始化 / 提交 / 调用约束） | 公共 FTL 接口头 + 本文 §5.1（模块契约） |
-| 逐版本决策史 / 上板记录 | `docs/README.md` 的文档地图 |
-| 多 LUN / 共享 cache | 本文 §5.4 |
-| CW 级映射与介质布局 | 本文 §2.1 / §2.2 / §2.3 |
-| FC / NAND 命令、ECC/CRC、地址层 | [`fc_nand_design.md`](fc_nand_design.md) |
-| 存储主控设计要点 | [`storage_controller_design.md`](storage_controller_design.md) |
-| 断言判据 | [`common/assertion_guidelines.md`](common/assertion_guidelines.md) |
+<a id="s0-3" name="s0-3"></a>
 
-⚠ **签名以头文件为准**。本文给结构形状与字段语义，不复制完整函数原型——接口改动频繁，
-文档复制签名必然漂移。当前 host / 启动公共入口见 （API v1）；CLI 诊断仍是已文档化的内部例外。模块内部头已移入 。
+### 0.3 范围与非目标
 
-### 0.3 推荐阅读顺序
+本文描述 FTL 的当前设计：需求背景、模块边界、数据结构、状态流转、失败语义与不变量。
 
-先读 **§1.4 总图 + §1.5 路径表**，建立“一次 host 读写从哪进、经过谁、从哪出”的地图。
-然后按下面的顺序读，**不要从 §3.5 metadata 开始**：
+不描述：
 
-| 顺序 | 模块 | 为什么先看它 |
-|---:|---|---|
-| 1 | **§3.9 Host 提交 / group / pending** | 整个 FTL 的入口。先理解“一条 host 请求如何拆成子操作、如何用一个组聚合完成”，后面所有异步 job 都是同一套骨架 |
-| 2 | **§3.10 完成派发面（ftl_op）** | 与 §3.9 配对：提交与完成解耦，op tag 决定谁收尾。不懂这条链路，后面每个 job 的 `waiting/phase` 都会显得莫名其妙 |
-| 3 | **§3.11 写缓冲 wbuf** | 一次 512 B 写如何攒成一页、双 plane 如何合并。写路径最直观的一层 |
-| 4 | **§3.2 分配器 / BST / Super Block** | 页从哪来、块状态怎么变、Free/OP/Spare/Closed 四类池的计数。GC/WL 的前提 |
-| 5 | **§3.6 L2P Cache** | 读命中/未命中、异步加载、脏行回写。**这是 metadata 的前置** |
-| 6 | **§3.5 元数据目录** | 现在再看：region 为什么不在固定位置、append/commit 为什么分离、live 位图 干什么、目录检查点为什么存在 |
-| 7 | **§3.7 Journal + §3.8 Checkpoint** | 写回之后的掉电一致性：增量日志 + 全量快照 + 截断顺序 |
-| 8 | **§3.13 GC / 迁移 + §3.4 WL + §3.3 BBT** | 后台如何回收空间、均衡磨损、处理坏块 |
-| 9 | **§3.12 service / 后台调度** | 回头看这些 job 如何在单线程 superloop 里被调度、为什么有 must-run |
-| 10 | **§3.14 读恢复 + §3.1 启动恢复** | 异常路径：读失败怎么救、掉电后怎么重建 |
+- FC / NAND 内部实现（命令链、ECC / CRC、时序）→ `fc_nand_design.md`；
+- 对外接口的逐字段契约 → 公共 FTL 接口头（签名以头文件为准）；
+- 逐版本决策史与上板记录 → revision history 与验证文档；
+- 未实现 / 未验证项的当前状态 → §7。
 
-最后用 **§4.5 主机写**、**§4.6 L2P 回写**、**§4.7 Checkpoint** 三个场景把前面串一遍；
-状态机记不住时查 §5.2。
+<a id="s0-4" name="s0-4"></a>
 
-#### 如果只想先攻克 metadata
+### 0.4 文档约定
 
-按这个最小闭环读：
-
-1. §2.2 地址模型（LBA / region / PBA）
-2. §3.6.4 读路径、§3.6.5 写路径与写回
-3. §3.5.5 ring / locate / prepare
-4. §3.5.6 lookup 与启动加载
-5. §3.5.7 append → 写页 → commit
-6. §3.5.8 live 位图 / 回收 / 压缩
-7. §3.5.9 目录检查点
-
-原因：`metadata.c` 里的 `append_slot` / `commit_region` / live 位图 不是凭空出现的——
-它们是 **L2P cache 脏行回写**的落盘端。先看 §3.6 的 `l2p_flush_kick` 怎么调用它们，
-再回头看 §3.5，顺序就顺了。
-
-#### 其它三条快速路径
-
-| 路径 | 顺序 |
-|---|---|
-| **按上电顺序**（想知道盘怎么活过来） | §1.1~1.3 → §2 → §3.1 引导恢复 → §3.2 分配器 → §3.3 BBT → §3.4 磨损 → §3.5 元数据目录 |
-| **按写路径**（想知道一次 host 写经过谁） | §1.4 总图 → §3.9 提交/组 → §3.11 wbuf → §3.2 分配 → §3.10 完成派发面 → §3.6 L2P cache → §3.7 Journal → §3.5 元数据目录 → §4.5 |
-| **按后台任务**（想知道空闲时在做什么） | §3.12 调度器 → §3.13 GC/迁移 → §3.4 WL → §3.8 Checkpoint → §3.14 读恢复 |
-
-### 0.4 术语速查
-
-#### 地址与映射
-
-| 术语 | 含义 |
-|---|---|
-| **LBA** | 主机逻辑地址；本项目 1 LBA = 1 CW = 512 B 用户数据 |
-| **PBA** | FTL 内部物理地址：`CH/CE/LUN + block/plane/page/CW`，L2P 的存储单位 |
-| **PAA** | NAND 命令层物理地址（芯片内）；**位序与 PBA 不同**，只在 FTL↔FC 边界转换 |
-| **L2P** | LBA → PBA 映射表；全表 4 MiB，存 NAND，SRAM 只缓存少量 region |
-| **region** | L2P 分片：1 页 = 512 条 entry；`region_id = LBA / 512` |
-| **IU** | 映射单元；本项目 IU = 1 CW（512 B） |
-| **PBA / PAA / META** | PBA = FTL 地址；PAA = 芯片地址；META = 页内每 CW 头 4 B 记录的本 CW 扇区 LBA |
-
-#### 介质与块管理
-
-| 术语 | 含义 |
-|---|---|
-| **plane / block / page / CW** | 平面 / 擦除单位（64 页）/ 读写单位（4 CW）/ ECC 码字（512 B 用户 + 校验） |
-| **Super Block（SB）** | 跨各 plane 的逻辑写入单元；各 plane 取一个物理块配对 |
-| **gblock** | 全局块号 `plane * BLOCKS_PER_PLANE + block`；BST 的唯一索引 |
-| **Open / Closed** | 正在追加写的 SB / 写满封口、等待 GC 的 SB |
-| **Free Pool** | 一个**已擦除**池；三级是水位，不是三个池 |
-| **OP / Spare** | OP = 性能缓冲预留；Spare = 坏块替换储备；两者都按 plane 各留一份 |
-| **BST** | Block State Table：每块状态、温度、有效 CW 数、擦除/读计数、ECC 健康 |
-| **BBT** | 坏块表；NAND 上持久化坏块位图 |
-| **L2P 日志区** | L2P region 页的追加日志；**固定预留** `[46,94)/plane`（96 gblock = 12 MiB，每 region 主+备两份），容量已扣；按活日志块水位压缩 |
-| **GC / victim** | 垃圾回收 / 被选中搬移的块 |
-| **WL** | 磨损均衡；动态 WL 在分配时选低擦除块，静态 WL 主动搬冷数据 |
-| **WA** | 写放大 = 实际 NAND 写入 / 主机写入 |
-
-#### 一致性与恢复
-
-| 术语 | 含义 |
-|---|---|
-| **DRAM-less** | 无外置 DRAM：L2P 全表在 NAND，SRAM 只做 region cache |
-| **Write-back** | L2P cache 延迟写回；脏行由 Journal 保掉电一致性 |
-| **Journal** | L2P 增量日志（环形块）；掉电后回放 post-checkpoint 的更新 |
-| **块元数据快照** | per-block metadata snapshot（旧文档曾用自拟名「块账快照」）。每 gblock 一个 16-bit word（有效 CW 数 / 状态 / 温度 / 池归属），随 Checkpoint 记录落盘。主流资料称 per-block metadata / block descriptor；本仓粒度是物理 gblock、放 CP record（SPDK 的 Chunk 是 band 级、放 nvcache） |
-| **Checkpoint（CP）** | L2P 全量快照 + 块元数据快照 + 截断 Journal |
-| **目录检查点** | Metadata Directory 的全量快照，存在固定目录检查点池。主流称 checkpoint（directory checkpoint）；本仓把它做成独立 record、放固定池，与 Checkpoint(CP) job 分开 |
-| **待入账** | deferred write completion（DFTL 的 translation page miss 导致映射更新延后）：NAND 已编程、L2P/Journal 未入账的子操作留在 pending 表里每轮重试；100 ms 超时按 IO_ERROR 结算 |
-| **预测性退役** | predictive failure analysis（PFA）：ECC 趋势 / read disturb 上升 → 在数据损坏前主动搬移并退役 |
-| **先编程后映射（program-before-map）** | 先等 NAND PROGRAM 成功，再改 L2P/Journal；失败则 L2P 不动 = 自动回滚 |
-| **full metadata rebuild** | 全盘元数据重建（本仓自述；机制 = full media scan + 逐 CW 读 META 反查 L2P）：重建 Closed 列表与有效计数 |
-| **F4** | 按 Checkpoint 的 region 位图局部预载 L2P region |
-| **F10** | 搬移条目先落 Journal，再擦 victim（数据安全屏障） |
-| **Read Recovery** | 读失败恢复：单次读 + CRC 重读一次 → 标坏/搬移（本器件无 read-retry table） |
-
-#### 调度与执行
-
-| 术语 | 含义 |
-|---|---|
-| **bg_policy** | token bucket 后台调度器：must-run 集 + 预算任务 |
-| **must-run** | 每轮无条件执行、不占配额的正确性关键任务 |
-| **op tag** | 完成服务函数选择器；`完成回调表[]` 的下标 |
-| **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
-| **pending / group** | 子操作追踪表 / 一条 host 请求的完成组 |
-| **owners** | 一个 pending 子操作由哪些组贡献的位掩码 |
-| **FTL_AGAIN** | 瞬态资源不足（池空 / 背压 / region 加载中），调用者稍后重试 |
-| **thrashing** | L2P cache 工作集远大于容量，miss 率持续极高 |
-
-### 0.5 标注约定
-
-- **「主流」** = 有出处的主流主控做法（出处见 §6 每条 ADR）。
-- **「本仓自定」** = 没有可引用的公开出处，是本项目的实现选择；不得写成行业标准。
-- 阈值/常量均标 `file:line` 来源；代码与文档冲突时**以代码为准**。
-- 本文的 `§x.y` 引用均指向本文自身章节。
-- **GitHub 渲染约束**：GitHub 的 viewscreen 用 Mermaid **12.1.0**，
- `securityLevel: antiscript`，`flowchart.diagramPadding: 48`，`sequence.diagramMarginY: 40`。
- 图里不要用 `click`、`%%{init}%%` 覆盖 `securityLevel/maxTextSize`、FontAwesome/Emoji、
- 裸 HTML、反引号；标签统一加引号；`subgraph` ID 不要当节点/连线端点。
- GitHub 报 “Unable to render rich display” 时先硬刷新/无痕窗口，再查
- `viewscreen.githubusercontent.com` 是否可达。
+- **主流 / 本仓自定**：写「主流」必须给出出处（§6 每条 ADR）；说不出出处标「本仓自定」，
+  不得写成行业标准。
+- **代码为准**：常量与签名以代码 / 头文件为唯一权威；本文只给名称、值与设计含义。
+- **章节引用**：本文 `§x.y` 均指向本文自身；跨文档引用写全文件名。
+- **图与表**：图只表达结构与顺序，不替代不变量；表中的值必须能从代码推导。
+- **术语**：术语速查见 §8.D。
 
 ---
 
 <a id="s1" name="s1"></a>
 
 ## 1. 需求、约束与总体设计
+
+> 支撑摘要：P1~P6 的问题、约束与总体方案。
+
+<a id="s1-1" name="s1-1"></a>
 
 ### 1.1 为什么需要 FTL
 
@@ -204,11 +162,13 @@ NAND 有四个物理事实，主机语义（按 LBA 覆盖写）与它们直接�
 | **擦后写**：编程只能 1→0，改写必须先擦整块 | 不能原地覆盖 512 B | 写新位置 + 更新 L2P（异地更新） |
 | **擦除单位远大于写单位**：块 64 页，页 4 CW | 改 1 个 CW 也要占新页 | 页打包写缓冲、CW 级映射、GC |
 | **块会坏**：出厂坏块 + 运行时坏块 | 坏块上的数据不可恢复 | BBT 扫描/隔离/替换（Spare） |
-| **磨损与读干扰**：P/E 有限，反复读会扰动邻近单元 | 写集中会提前耗尽某些块 | 动态/静态 WL、read disturb 计数、读恢复 |
+| **磨损与读干扰**：P/E 有限，反复读会扰动邻近单元 | 写集中会提前耗尽某些块 | 动态/静态 WL、read disturb (读干扰) 计数、读恢复 |
 
 FTL 因此承担四件事：**地址映射**（L2P）、**空间管理**（Allocator / GC / WL）、
-**掉电一致性**（Journal / Checkpoint）、**介质健康**（BBT / Read Recovery）。
+**掉电一致性**（Journal / Checkpoint）、**介质健康**（BBT / Read Recovery (读恢复)）。
 FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + ECC + 加扰的数据保护链。
+
+<a id="s1-2" name="s1-2"></a>
 
 ### 1.2 为什么是 DRAM-less
 
@@ -219,26 +179,28 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 | 用户容量 | **424 MiB = 868,352 个 IU（512 B）**；物理映射空间 1,048,576 IU（含固定元数据/L2P 日志区/OP/Spare） |
 | L2P 每条 entry | 4 B（`DWORD`） |
 | L2P 全表 | 4 MiB |
-| SRAM region cache | 64 行 × 2 KiB ≈ 128 KiB |
+| SRAM region cache | 映射数据 64 行 × 2 KiB ≈ 128 KiB；行状态另计 |
 | 覆盖的工作集 | 64 × 512 = 32,768 个 LBA = 16 MiB LBA 空间 |
 
 ⇒ **L2P 全表存 NAND，SRAM 只缓存最近访问的 region**。读 miss 时按需加载；
-写命中时只改 RAM（write-back），脏行由 Journal 保掉电一致性。
+写命中时只改 RAM（write-back (写回)），脏行由 Journal 保掉电一致性。
 
 这与 UFS/eMMC 等 DRAM-less 主控同构：表在 NAND、SRAM 做 cache、用日志/快照恢复。
 **不是**把表放 SDRAM 的“伪 DRAM-less”，也不是有 DRAM 的企业级形态（见 §1.6）。
+
+<a id="s1-3" name="s1-3"></a>
 
 ### 1.3 设计目标与导出约束
 
 | 目标 | 导出约束 | 落点 |
 |---|---|---|
 | 主机写不丢映射 | 映射变更先入 Journal；Checkpoint 截断前 Journal 不得擦 | §3.7、§3.8 |
-| 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免 full metadata rebuild | §3.8、§3.1 |
-| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + token bucket 配额；must-run 只放防死锁动作 | §3.12 |
-| 写放大可控 | CW 级映射 + 页打包 + 只搬有效 CW + 冷热分离 | §3.11、§3.13 |
-| 容量不无声流失 | 池账本唯一闸门；坏块/退役块不得留在 Free Pool；块元数据快照 | §3.2、§3.8 |
-| 坏块不扩散 | 出厂扫描先读后擦；运行时隔离 + Spare 按 plane 补充 | §3.3 |
-| 读失败可恢复 | CRC 重读一次 → 标坏搬移；ECC 趋势预测 | §3.14 |
+| 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免 full metadata rebuild | §3.8、§3.14 |
+| 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + token bucket 配额；must-run 只放防死锁动作 | §3.4 |
+| 写放大可控 | CW 级映射 + 页打包 + 只搬有效 CW + 冷热分离 | §3.3、§3.12 |
+| 容量不无声流失 | 池账本唯一闸门；坏块/退役块不得留在 Free Pool；块元数据快照 | §3.9、§3.8 |
+| 坏块不扩散 | 出厂扫描先读后擦；运行时隔离 + Spare 按 plane 补充 | §3.10 |
+| 读失败可恢复 | CRC 重读一次 → 标坏搬移；ECC 趋势预测 | §3.13 |
 
 **不可协商的约束**：
 
@@ -252,15 +214,15 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 ### 1.4 模块全景与主流程图
 
 下图是**覆盖全部 FTL 模块与真实场景**的总图：上电恢复、主机读、主机写、
-元数据落盘、后台回收都画在一起。节点方括号里的 `S3.x` 是对应模块章节。
+元数据落盘、后台回收都画在一起。节点方括号里的 `S3-x` / `S4-x` 是对应章节。
 
 ```mermaid
 flowchart TB
  subgraph "主机与请求"
-  H1["Host UART CLI"] --> H2["controller_submit 按实例边界切 run"]
-  H2 --> H3["host 读入口 write S3-9"]
+  H1["Host USB MSC / UART CLI"] --> H2["ssd_controller_submit 按实例边界切 run"]
+  H2 --> H3["host 读 / 写入口 S3-9"]
   H3 --> H4["完成组 group next outstanding"]
-  H4 --> H5["ftl_issue_subop S3-9"]
+  H4 --> H5["host_group_subop_issue S3-9"]
  end
 
  subgraph "数据面"
@@ -283,7 +245,7 @@ flowchart TB
   C3 --> C4["FC CQ"]
   C4 --> C5["ftl_service_pump ftl_op_drain S3-10"]
   C5 --> C6["drain 循环体：按 request.op 选服务函数"]
-  C6 --> C7["ftl_host_io_callback 读拷回写 confirm"]
+  C6 --> C7["ftl_host_io_op_callback 读拷回写 confirm"]
  end
 
  subgraph "元数据与一致性"
@@ -295,13 +257,13 @@ flowchart TB
   M5 --> M6["md_slot_pair_append S3-5"]
   M6 --> M7["写主副本页再到备副本页"]
   M7 --> M8["md_commit_region(MD_COMMIT_PAIR) S3-5"]
-  M2 --> M9["checkpoint_journal_watermark 85 百分比 95 百分比 S3-7"]
+  M2 --> M9["jrn_watermark_update 85 百分比 95 百分比 S3-7"]
   M9 --> M10["cp_job_begin S3-8"]
   M10 --> M11["flush regions 到目录检查点到块元数据快照到磨损快照到 Header 到截断 Journal"]
  end
 
  subgraph "后台与空间"
-  M11 --> B1["bg_policy must-run 预算任务 S3-12"]
+  M11 --> B1["ftl_sched 后台策略 must-run / 预算任务 S3-12"]
   B1 --> B2["GC 求值 S3-13"]
   B1 --> B3["静态 WL S3-4"]
   B1 --> B4["md_handle S3-5"]
@@ -331,7 +293,7 @@ flowchart TB
 - 主机写路径在 `C7` 之后**只改 RAM 元数据**（Journal + L2P cache + BST）；
  真正的 NAND 元数据写发生在后台（`M5` 起）或 Checkpoint（`M10`）。
 - 所有 NAND 命令最终都走 `C1→C2→C3→C4→C5→C6`：**提交与完成解耦**，
- 完成由 op tag 选择服务函数（§3.10）。
+ 完成由 op tag 选择服务函数（§3.2）。
 - 上电路径 `P1→P6` 在进入 superloop 之前完成；`P5` 的 full metadata rebuild 是兜底，优先走快照/回放。
 
 <a id="s1-5" name="s1-5"></a>
@@ -340,14 +302,16 @@ flowchart TB
 
 | 路径 | 入口 | 经过模块 | 持久状态变化 | 失败分支 | 场景 |
 |---|---|---|---|---|---|
-| **P1** 读命中 | host 读入口 | §3.9 → §3.11（wbuf）或 §3.6（cache）→ §3.10 → §3.15 | 无持久变化（读计数随下一次 CP 的磨损快照落盘） | ECC 失败 → §3.14 | §4.4 |
-| **P2** 读 miss | 同上 | §3.6 region load → 下轮重试 | 无（cache 行 CLEAN） | load 失败 → 行 INVALID，重试 | §4.4 |
-| **P3** 主机写 | host 写入口 | §3.11 wbuf → §3.2 分配 → §3.10 → §3.15 → 完成 §3.6/§3.7/§3.2 | Journal 追加；L2P 行 DIRTY；BST valid ±1 | 编程失败 → 关 SB + 标坏，L2P 不动 | §4.5 |
-| **P4** 脏 region 回写 | 缓存驱逐 / 后台 flush / CP | §3.6 → §3.5 append → 写页 → commit | L2P region 新位置；Directory 更新；live 位图 增减 | 写失败 → 行回 DIRTY，Directory 不登记 | §4.6 |
+| **P1** 读命中 | host 读入口 | §3.1 → §3.3（wbuf）或 §3.5（cache）→ §3.2 → §3.15 | 无持久变化（读计数随下一次 CP 的磨损快照落盘） | ECC 失败 → §3.13 | §4.4 |
+| **P2** 读 miss | 同上 | §3.5 region load → 下轮重试 | 无（cache 行 CLEAN） | load 失败 → 行 INVALID，重试 | §4.4 |
+| **P3** 主机写 | host 写入口 | §3.3 wbuf → §3.9 分配 → §3.2 → §3.15 → 完成 §3.5/§3.7/§3.9 | Journal 追加；L2P 行 DIRTY；BST valid ±1 | 编程失败 → 关 SB + 标坏，L2P 不动 | §4.5 |
+| **P4** 脏 region 回写 | 缓存驱逐 / 后台 flush / CP | §3.5 → §3.6 append → 写页 → commit | L2P region 新位置；Directory 更新；live 位图 增减 | 写失败 → 行回 DIRTY，Directory 不登记 | §4.6 |
 | **P5** Checkpoint | 水位/写入量/定时/紧急 | §3.8：快照 → flush regions → 目录检查点 → 块元数据 → 磨损 → Header → 截断 | 新 CP record；目录检查点；Journal 水位标志/预擦 | flush 失败 → 中止，不写 Header | §4.7 |
-| **P6** GC / WL / 预测迁移 | 后台触发 / 写路径紧急 GC | §3.13：选 victim → 读 → 反查有效 → 写新页 → 改 L2P/Journal → 屏障 → 擦 | 新位置映射；journal 条目；源块擦除/归还或退役 | 分配不到目标页 → 中止且不擦 victim | §4.8 |
-| **P7** 读恢复 | host 读 ECC 失败 | §3.14：托管 pending → 单次读 + CRC 重读 → 标坏/搬移 | 成功则拷回；失败则 BBT 标坏 + 迁移 | 提交侧长期无进展 → 按失败收尾 | §4.9 |
-| **P8** 上电恢复 | 实例初始化后 | §3.1 → §2.5 版本 → §3.7 scan → §3.8 find → §3.1 三分支 → full metadata rebuild | 块元数据/映射/cache 从介质重建 | 快照/探测不一致 → full metadata rebuild 兜底 | §4.1~4.3 |
+| **P6** GC / WL / 预测迁移 | 后台触发 / 写路径紧急 GC | §3.12：选 victim → 读 → 反查有效 → 写新页 → 改 L2P/Journal → 屏障 → 擦 | 新位置映射；journal 条目；源块擦除/归还或退役 | 分配不到目标页 → 中止且不擦 victim | §4.8 |
+| **P7** 读恢复 | host 读 ECC 失败 | §3.13：托管 pending → 单次读 + CRC 重读 → 标坏/搬移 | 成功则拷回；失败则 BBT 标坏 + 迁移 | 提交侧长期无进展 → 按失败收尾 | §4.9 |
+| **P8** 上电恢复 | 实例初始化后 | §3.14 → §2.5 版本 → §3.7 scan → §3.8 find → §3.14 三分支 → full metadata rebuild | 块元数据/映射/cache 从介质重建 | 快照/探测不一致 → full metadata rebuild 兜底 | §4.1~4.3 |
+
+<a id="s1-6" name="s1-6"></a>
 
 ### 1.6 DRAM 型 vs DRAM-less / 企业级 vs 消费级
 
@@ -356,7 +320,7 @@ flowchart TB
 | L2P 表位置 | NAND | NAND | DRAM 全表 |
 | SRAM 角色 | 64 region 的 cache | 32~256 region cache | 表常驻，cache 不是瓶颈 |
 | 替换策略 | CLOCK | CLOCK / 2Q | 不需要 |
-| 写策略 | Write-back + Journal | Write-back + Journal | 直写 DRAM |
+| 写策略 | write-back (写回) + Journal | write-back (写回) + Journal | 直写 DRAM |
 | 映射粒度 | CW（512 B） | 4 KiB（通常） | 4 KiB |
 | 元数据位置 | 固定池 + 固定预留 L2P 日志区 | 固定池 + 动态 | 跨 Die 动态 + RAID1 |
 | OP | 10% | 7~15% | 7~28% |
@@ -372,6 +336,10 @@ flowchart TB
 <a id="s2" name="s2"></a>
 
 ## 2. 介质与地址模型
+
+> 支撑摘要：P1 映射（地址与介质基础）。
+
+<a id="s2-1" name="s2-1"></a>
 
 ### 2.1 NAND 几何与容量预算
 
@@ -409,6 +377,8 @@ flowchart TB
 
 **多 LUN 边界**：共享 L2P cache 仍按 `(ch,ce)` 一份（同一 target 的多个 LUN 共用），不按 die 复制；否则同一 L2P 行的 load/flush 会在多个副本间分叉。跨 LUN superblock 条带、跨 LUN GC/WL 不在当前范围。
 
+<a id="s2-2" name="s2-2"></a>
+
 ### 2.2 LBA / region / PBA / PAA / META
 
 #### 映射单位
@@ -426,25 +396,42 @@ CW 级而非 4 KiB 级的理由：FC 的数据通路、加扰、CRC、ECC 都以
 
 #### PBA 位布局（FTL 内部唯一地址货币）
 
-```
-PBA(uint32_t)，低位 → 高位：
- CW(2) | PLANE(1) | PAGE(6) | BLOCK(11) | LUN(LUN_ADDR_WIDTH) | CE(2) | CH(2)
- bit0  bit2  bit3  bit9  bit20 ...
+> 下方 `packet-beta` 按网络约定 **bit 0 在左**，与 C 代码低位在右相反；读图时注意方向。
+
+```mermaid
+packet-beta
+title PBA（本器件 LUN_ADDR_WIDTH = 0，共 24 bit）
+0-1: "CW (2)"
+2: "PLANE (1)"
+3-8: "PAGE (6)"
+9-19: "BLOCK (11)"
+20-21: "CE (2)"
+22-23: "CH (2)"
 ```
 
-当前 LUN 用 2 bit；`LUN_ADDR_WIDTH` 由器件头选择（0~4 bit），PBA 的 LUN 字段宽度随之
-变化，但 `pba_make` / `pba_to_*` 是唯一入口，上层不手写移位。
+**读图要点**：packet-beta 按 bit0 在左画，与 C 代码低位在右相反；LUN 宽度随器件；CE/CH 在最高位。
 
-//#标识保留# #优化# #讨论#  这里的PBA布局我看ce ch是放在高位，也没有lun，其是不是以后多package和lun下，lba转PBA不好转呀\
-// 我觉得应该吧CE、CH、LUN的改为die，然后讨论是否考虑移动到page和plane之间方便写读写数据在各lun之间摊开
+LUN 位宽 `LUN_ADDR_WIDTH` 由器件头 `LUN_NUM` 推导（0~6 bit）；本器件 `LUN_NUM = 1`
+⇒ 宽度为 0。PBA 的 LUN 字段宽度随器件变化，但 `pba_make` / `pba_to_*` 是唯一入口，
+上层不手写移位。
+
+PBA 字段序当前把 CE / CH 放在最高位；本器件 `LUN_ADDR_WIDTH = 0`，LUN 字段宽度为零。
+是否把 CE/CH/LUN 合并为 die、并调整到 PAGE 与 PLANE 之间以改善多 LUN 摊开，尚未决策
+（待决策项见 §7.1 的台账入口）。上层不依赖字段位置：`pba_make` / `pba_to_*` 是唯一入口，
+重排只影响该漏斗与介质布局版本。
 
 #### PAA 位布局（NAND 命令层）
 
+```mermaid
+packet-beta
+title PAA（本器件 LUN_ADDR_WIDTH = 0，共 20 bit）
+0-1: "CW (2)"
+2-7: "PAGE (6)"
+8: "PLANE (1)"
+9-19: "BLOCK (11)"
 ```
-PAA(uint32_t)，低位 → 高位：
- CW(2) | PAGE(6) | PLANE(1) | BLOCK(11) | LUN(...)
- bit0  bit2  bit8  bit9
-```
+
+**读图要点**：PBA/PAA 的 PAGE/PLANE 位序相反；跨层只经 pba_to_cmd 漏斗；LUN 只在 PAA 出现。
 
 ⚠ **PBA 与 PAA 的 PLANE/PAGE 位序相反**。`pba_to_paa` 是字段重排，不是掩码截取；
 跨层转换只允许在 `pba_to_cmd` / `ftl_cmd_pba` 这个单一漏斗发生（§2.4）。
@@ -461,6 +448,8 @@ PAA(uint32_t)，低位 → 高位：
 本仓无 DRAM（§1.2）⇒ 选 ③：不维护常驻逐页位图，`gc_read_page_with_lba` 从页内 META
 取回 LBA 后反查 L2P；BST 只留 per-CW `valid_count` 聚合（GC 选 victim 用）。
 同类实现：DFTL（OOB 存 LBA）、LeaFTL/VPFTL（P2L + L2P 交叉验证）、KIISE（DRAM-less）。
+
+<a id="s2-3" name="s2-3"></a>
 
 ### 2.3 固定元数据区布局
 
@@ -480,7 +469,7 @@ PAA(uint32_t)，低位 → 高位：
 `[first, first+count)` 中在 plane_mask 所有 plane 上都非 BAD 的块作为候选，不足硬下界
 时从 94..97 的 shared spare 补。候选表**不落盘**，每次开机由 BBT 重算；record 仍靠
 sequence 扫描定位。运行期元数据块变坏时，元数据 job 重算候选池并让各池
-重新定位（Journal/L2P 日志失块额外置 `REBUILD_REQUIRED`，下次开机 full rebuild）。
+重新定位（Journal/L2P 日志失块额外置 `BBT_FLAG_REBUILD_REQUIRED`，下次开机 full rebuild）。
 
 各分区的**落盘结构 / 记录几何**见下表（结构体由各元数据模块定义；尺寸与页数全部由宏推导并编译期校验）：
 
@@ -512,8 +501,7 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 
 ⚠ 镜像池（目录检查点/CP/BBT）的**逻辑 record 数**与上表一致；每个 record 在 P0/P1 各存
 一份 ⇒ **物理页用量与元数据写放大 ×2**（换的是单 plane 损坏仍可恢复）。Journal 是
-单副本交错。**磨损计数（erase/read/ECC 健康）在 CP 记录里**（介质版本 9 起，v10 延续），
-没有独立 Wear 块。
+单副本交错。**磨损计数（erase/read/ECC 健康）在 CP 记录里**，没有独立 Wear 块。
 
 #### 2.3.1 目录检查点 —— Metadata Directory 的全量快照
 
@@ -540,13 +528,12 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 | `entries[256]` | 1792 B | 256 × 7 B |
 | `padding` | 232 B | 补齐到一页主区（头 24 B） |
 
-//#优化# 这下面的描述好多都是中文，没有专业的英文名称吗 比如媒体、加载侧、新代、混代、代次、条目
-
-**记录级一致性**：一条 record 的 16 页跨多个服务循环写；若写入
-期间 Directory 有更新，早写的页是旧代、晚写的是新代，在媒体上看起来完全合法。加载
-侧要求 16 页的 `sequence` 与 `dirty_gen` **全部一致**，否则整条作废、回退到上一条
-一致记录（丢失的增量由 Journal 回放补回）。这消除了"混代目录被当作最新快照加载 ⇒
-两个代次的条目在复用过的页上互相碰撞（两个 region 指向同一页）"的路径。
+**Record-level consistency**：一条 record 的 16 页跨多个 service loop 写；若写入
+期间 Directory 有更新，早写的页是 old generation、晚写的是 new generation，在 media 上
+看起来完全合法。load path 要求 16 页的 `sequence` 与 `dirty_gen` **全部一致**，否则整条
+作废、回退到上一条一致记录（丢失的增量由 Journal replay 补回）。这消除了
+"mixed-generation directory 被当作最新 snapshot 加载 ⇒ 两个 generation 的 entry 在
+复用过的页上互相碰撞（两个 region 指向同一页）"的路径。
 
 **几何**：2048 条 Directory ⇒ 8 页主 + 8 页备 = 16 页/record；每块 4 条 record；池 32 块 ⇒ 128 个槽位。
 **副本**：P0+P1 镜像——同一页用 multi-plane program 写两个 plane；读侧任一副本有效。
@@ -612,7 +599,7 @@ CRC/读失败再换另一个 plane。
 
 **写模型**：只追加、环形轮转、最新有效胜。标坏幂等（已 BAD 不重复计数、
 不重复消耗 Spare）；dirty 置位同时推进 `dirty_gen`，写 job 完成时只有代际未变才清
-dirty（覆盖“写飞行期间又标坏”的丢更新窗口）。同步 `bbt_save`（开机/格式化）与异步
+dirty（覆盖“写飞行期间又标坏”的丢更新窗口）。同步 `bbt_store`（开机/格式化）与异步
 `bbt_handle`（后台攒批）写出的 record 格式一致。
 
 **工厂标记**：只在空片读 Page 0 的 `spare[0]`（列 2048）；用过的介质该字节是 FTL 数据，
@@ -672,10 +659,10 @@ Directory 指向的 region 页优先放在**固定预留的 L2P 日志区** `[46
  每条目是一个 CW 的物理位置，`NAND_PBA_INVALID` = 未映射。每次 flush 取两个相邻槽，
  写主/备两份内容相同的页。
 - **一块 = 64 页 = 64 个 region 副本**；只追加，块满先取固定区下一块（`md_log_alloc`），
- 固定区无空闲块时再借用户块；live 位图 归零 ⇒ `reclaim_pending` ⇒ 后台擦除后
- `md_log_release`：固定块置 NONE，借来的块回 OP 池（§3.5）。
+ 固定区无空闲块时再借用户块；live 位图 归零 ⇒ `reclaim.bitmap` ⇒ 后台擦除后
+ `md_log_release`：固定块置 NONE，借来的块回 OP 池（§3.6）。
 - **动态块的识别**：`dir->l2p_live[g] != 0`（Directory 条目的账本）是
- 元数据块判据的唯一动态判据（C9），借来的块因此不会被当作普通用户块回收，
+ 元数据块判据的唯一动态判据，借来的块因此不会被当作普通用户块回收，
  full metadata rebuild 也会把它当 LOG 跳过。
 - **压缩**：主判据是 **free 水位**（固定区空闲块 ≤ `L2P_LOG_FREE_WATERMARK = 8`），
  辅以 `live > L2P_LOG_COMPACT_TRIGGER`（= 64，两份活数据的理想水位）。一次新生块可连续搬多个稀疏
@@ -691,7 +678,7 @@ Directory 指向的 region 页优先放在**固定预留的 L2P 日志区** `[46
 **固定元数据块唯一的磨损均衡**
 
 固定元数据块（目录检查点 / Checkpoint / BBT / Journal / **L2P 日志区**）**不在 Free Pool 里**，GC 与 WL
-都管理不到它们（§3.2.3：这些块的 pool 归属是 NONE）。因此，对这些块而言，
+都管理不到它们（§3.9.3：这些块的 pool 归属是 NONE）。因此，对这些块而言，
 **池内环形轮转是唯一的磨损均衡手段**。如果只在一个固定块/固定页上反复擦写：
 
 - **不擦就重写**：NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据
@@ -750,7 +737,7 @@ L2P log 6144 region 页）是
 - 启动：`md_ring_locate` 快路径要读每个块的末条 record（O(块数) 次页读），
  池越深启动扫描越久。
 
-**主流对照**
+**设计取舍**
 
 - SPDK FTL 把 Superblock 常驻 cache 并镜像到 base device，nvcache chunk 按顺序写
  （<https://spdk.io/doc/ftl.html>，索引见 `docs/reference/README.md` §A4）——"固定根 + 顺序 chunk"与本节形态同构。
@@ -758,7 +745,9 @@ L2P log 6144 region 页）是
  P/E 有限 ⇒ 必须把擦除摊平。
 - **具体深度 32 / 8 / 2 / 4 是本仓自定**——公开资料没有对应的数值。
 
-- **固定池的副本策略**（介质版本 9 起，v10 延续）：
+完整对照见 `controller_target_features.md` §4.3 / §4.4。
+
+- **固定池的副本策略**：
  - **目录检查点 / Checkpoint / BBT：P0+P1 镜像**。同一条 record/页用 multi-plane program
  一次写进两个 plane 的同 block/page（`ftl_async_write_page_mirror`）；读侧任一副本
  有效即可，一个 plane 损坏仍能恢复。运行期写走异步提交 + 完成服务；同步镜像写只在
@@ -777,7 +766,7 @@ L2P log 6144 region 页）是
 #### 2.3.8 结构分布图（一）：空间布局
 
 > 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格为准**；
-> 改布局时两处同步（H6）。
+> 改布局时表与图两处同步。
 
 **① 每个 die 的 plane / 块号分布**
 
@@ -813,11 +802,23 @@ P1 [ 目录检查点'0..31 ][ CP'32..39   ][ BBT'40..41 ][ Journal 42..45 ][ L2P
 
 一个 chunk 的页内布局：
 
-```text
-offset 0  4  8  10  12  16  20  24       1816  2048
-   [magic][seq ][chunk_i][chunk_c][cnt ][ver ][d_gen][ entries 256 × 7 B ][ pad ]
-bytes  4  4  2  2  4  4  4   1792     232
+```mermaid
+block-beta
+  columns 5
+  space:1 b3["Byte 3"] b2["Byte 2"] b1["Byte 1"] b0["Byte 0"]
+
+  r00["DW 00"] magic["magic"]:4
+  r01["DW 01"] seq["sequence"]:4
+  r02["DW 02"] ci["chunk_index"]:2 cc["chunk_count"]:2
+  r03["DW 03"] ec["entry_count"]:4
+  r04["DW 04"] lv["layout_version"]:4
+  r05["DW 05"] dg["dirty_gen"]:4
+
+  d1["......  entries[256]（256 × 7 B = 1792 B，偏移 24..1815；每项 type 1 / id 2 / pba 4）  ......"]:5
+  r454["DW 454"] pad["padding（DW 454–511，58 × 4 B = 232 B）"]:4
 ```
+
+**读图要点**：一张图就是整页；DW 行是 4 B，顶部 Byte 3..0 是行内字节序；`entries[256]` 每项 7 B，不对齐 DW 网格，所以压成一行并标出元素布局；padding 从 DW 454 起补齐到 2048 B。
 
 **③ 其余池的块内排布**
 
@@ -845,77 +846,145 @@ L2P region（固定日志区 46..93）
 └─ 一块 = 64 页 = 64 个 region
 ```
 
-**④ 关键结构的字节偏移尺**
+**④ 关键结构的字段布局**
 
-```text
-cp_header_s（2048 B；94 字 = 376 B + padding）
-offset 0  4  8  12  16      272 276 280 284 288 292 296 300 304 308      372  376  2048
-   [magic][seq ][ts ][rgn_cnt][ region_bitmap 64×4 ][jseq ][ver ][wcnt ][wbytes][pcnt ][crc32 ][w_ent][w_byt][w_pg][ wear_page_crc 16×4 ][rpages][ pad ]
-bytes  4  4  4  4   256    4  4  4  4  4  4  4  4  4  64   4  1672
+```mermaid
+block-beta
+  columns 5
+  space:1 b3["Byte 3"] b2["Byte 2"] b1["Byte 1"] b0["Byte 0"]
 
-bbt_header_s（540 B，packed）
-offset 0  4  8  12  16   28   540
-   [magic][seq ][total ][bad_cnt][reserved 12][ bad_map 512 ]
-bytes  4  4  4  4   12   512
+  r00["DW 00"] magic["magic"]:4
+  r01["DW 01"] seq["sequence"]:4
+  r02["DW 02"] ts["timestamp"]:4
+  r03["DW 03"] rc["region_count"]:4
 
-Journal 页（2048 B）
-offset 0  4  8  10  12  16      2048
-   [magic][p_seq ][e_cnt ][b_seq ][base ][ 127 × 16 B entries ]
-bytes  4  4  2  2  4    2032
-entry [ lba 4 ][ old_pba 4 ][ new_pba 4 ][ sequence 4 ] = 16 B
+  r04["DW 04"] bm["region_bitmap[0]"]:4
+  d1["......  region_bitmap[1..63]（DW 05–67，63 × 4 B）  ......"]:5
 
-CP 磨损条目 cp_wear_entry_s（8 B；每页 256 条）
-offset 0  4  6  7  8
-   [erase 4][read 2][ecc 1][flags 1] = 8 B
-flags bit0..3 rising_count | bit4..5 health | bit6..7 保留
+  r68["DW 68"] js["journal_sequence"]:4
+  r69["DW 69"] lv["layout_version"]:4
+  r70["DW 70"] bwc["block_word_count"]:4
+  r71["DW 71"] bwb["block_word_bytes"]:4
+  r72["DW 72"] bpc["block_page_count"]:4
+  r73["DW 73"] bcrc["block_crc32"]:4
+  r74["DW 74"] wec["wear_entry_count"]:4
+  r75["DW 75"] web["wear_entry_bytes"]:4
+  r76["DW 76"] wpc["wear_page_count"]:4
 
-L2P region 页（2048 B）
-offset 0               2048
-   [ 512 × DWORD（4 B） = 2048 B；NAND_PBA_INVALID = 未映射 ]
+  r77["DW 77"] wcrc["wear_page_crc[0]"]:4
+  d2["......  wear_page_crc[1..15]（DW 78–92，15 × 4 B）  ......"]:5
+
+  r93["DW 93"] rp["record_pages"]:4
+  d3["......  padding（DW 94–511，418 × 4 B = 1672 B）  ......"]:5
 ```
 
-> 尺上的字段名是缩写（为了排版）；完整字段名/类型见 2.3.1~2.3.5 的表与
-> （模块内部）与 （公共 API）。
+**读图要点**：一张图就是整页；DW 行是 4 B，顶部 Byte 3..0 是行内字节序；`region_bitmap[64]` 与 `wear_page_crc[16]` 是重复数组，各保留一行代表 + 一行 `......`；`......` 行给出重复范围、元素数和总字节；padding 1672 B 同样压缩。完整字段语义见 §2.3.2。
+
+```mermaid
+block-beta
+  columns 5
+  space:1 b3["Byte 3"] b2["Byte 2"] b1["Byte 1"] b0["Byte 0"]
+
+  r00["DW 00"] magic["magic"]:4
+  r01["DW 01"] seq["sequence"]:4
+  r02["DW 02"] tb["total_blocks"]:4
+  r03["DW 03"] bc["bad_count"]:4
+
+  r04["DW 04"] res0["reserved[0..3]"]:4
+  r05["DW 05"] res1["reserved[4..7]"]:4
+  r06["DW 06"] res2["reserved[8..11]"]:4
+
+  r07["DW 07"] bm0["bad_map[0]"]:4
+  d1["......  bad_map[1..126]（DW 08–133，126 × 4 B）  ......"]:5
+  r134["DW 134"] bm1["bad_map[127]"]:4
+```
+
+**读图要点**：一张图就是整页 540 B；`reserved[12]` 占 DW 04–06；`bad_map[512]` 是 4096 bit、每 bit 一个 gblock，按 DWORD 重复 128 次，只保留首尾并省略中间；`......` 行给出范围与字节数。
+
+```mermaid
+block-beta
+  columns 5
+  space:1 b3["Byte 3"] b2["Byte 2"] b1["Byte 1"] b0["Byte 0"]
+
+  r00["DW 00"] magic["magic"]:4
+  r01["DW 01"] ps["page_seq"]:4
+  r02["DW 02"] ec["entry_count"]:2 bs["block_seq"]:2
+  r03["DW 03"] bl["base_lba"]:4
+
+  r04["DW 04"] e0["entry[0].lba"]:4
+  r05["DW 05"] e1["entry[0].old_pba"]:4
+  r06["DW 06"] e2["entry[0].new_pba"]:4
+  r07["DW 07"] e3["entry[0].sequence"]:4
+
+  d1["......  entry[1..126]（126 × 16 B = 2016 B，DW 08–511）  ......"]:5
+```
+
+**读图要点**：一张图就是整页 2048 B；前 16 B 页头，后面 127 个 16 B entry，无 padding；`entry[0]` 展开成 4 个 4 B 字段，其余 126 个用 `......` 压缩；DW 行是 4 B。
+
+```mermaid
+block-beta
+  columns 5
+  space:1 b3["Byte 3"] b2["Byte 2"] b1["Byte 1"] b0["Byte 0"]
+
+  r00["DW 00"] erase["erase_count"]:4
+  r01["DW 01"] read["read_count"]:2 ecc["last_ecc"]:1 flags["flags（0–3 rising / 4–5 health / 6–7 保留）"]
+```
+
+**读图要点**：一条磨损记录 8 B；DW 00 是 `erase_count`，DW 01 由 `read_count 2 B + last_ecc 1 B + flags 1 B` 横向拼成；flags 位定义写在标签里，不再另起表。
+
+L2P region 页（2048 B）：512 × DWORD（4 B）数组；`NAND_PBA_INVALID` = 未映射。该页是数组而不是字段布局，保留文字说明。
 
 **⑤ 镜像写 / 读回退（运行期 async）**
 
 ```mermaid
-flowchart LR
- A["record/page 2 KiB"] --> B["multi-plane program: P0 page N + P1 page N"]
- B --> C["completion: waiting=0"]
- D["read P0 page N"] --> E{"valid?"}
- E -- "yes" --> F["use"]
- E -- "no" --> G["read P1 page N"]
- G --> H{"valid + seq match?"}
- H -- "yes" --> F
- H -- "no" --> I["fallback previous record"]
+sequenceDiagram
+    autonumber
+    participant W as 元数据写入者
+    participant N as NAND
+    participant R as 读取者
+    W->>N: multi-plane program P0 page N + P1 page N
+    N-->>W: 完成
+    R->>N: 读 P0 page N
+    alt P0 有效
+        N-->>R: 数据
+    else P0 无效
+        R->>N: 读 P1 page N
+        alt P1 有效且 seq 匹配
+            N-->>R: 数据
+        else P1 无效
+            R-->>R: 回退上一条 record
+        end
+    end
 ```
+
+**读图要点**：两 plane 同页镜像；读主副本失败回退备；seq 不匹配回退上一条 record。
 
 #### 2.3.9 结构分布图（二）：池间流转
 
 > 本节回答"数据从哪来、什么时候被替换、掉电后从哪恢复"，把各池串起来。
-> 精确时序以本文流程与 §3.5 / §3.7 / §3.8 为准。
+> 精确时序以本文流程与 §3.6 / §3.7 / §3.8 为准。
 
 **① 各池的"产生 → 消费 → 替换/回收 → 恢复"**
 
 | 池 | 产生（谁写） | 消费（谁读） | 替换 / 回收 | 掉电后 |
 |---|---|---|---|---|
-| **目录检查点** | `commit_region` 置脏 → CP/后台 job 组页写 | 开机 `md_load` | 池内 ring：块满轮转；最新 sequence 胜；旧块整块擦 | 重建 Directory；缺页回退"未映射" |
+| **目录检查点** | `md_commit_region` 置脏 → CP/后台 job 组页写 | 开机 `md_load` | 池内 ring：块满轮转；最新 sequence 胜；旧块整块擦 | 重建 Directory；缺页回退"未映射" |
 | **Checkpoint** | CP job：快照 bitmap → flush region → flush 目录检查点 → 写块元数据快照 + 磨损快照 → 写 Header | 开机 `cp_pool_find_latest` + `cp_block_table_load` / `cp_wear_table_load` | 池内 ring：8 块 × 3 条（21 页/条）；最新 sequence 胜 | Header 给 Journal 水位；块元数据快照给 state/valid/temp/池归属；磨损快照给 erase/read/rr |
 | **BBT** | 出厂扫描 / 运行时标坏 → BBT job | `bbt_init`（开机） | 池内 ring：2 块 × 64 条；最新 sequence 胜 | 坏块图；无有效 BBT 时按空片/拒扫策略 |
 | **Journal** | 每次 host 写确认 `jrn_append` | 开机 Journal 回放；CP 截断 | 4 块环形：页满换块；CP 按水位截断 | 回放 `seq > CP journal_sequence` 的条目 |
 | **磨损计数（CP 内）** | 运行时 `erase/read/rr` 更新 BST → CP job 组页 | 开机 `cp_wear_table_load` | 随 CP record 轮转覆盖；无独立回收 | 从 CP 磨损快照回填；丢失只退化 WL（软状态） |
-| **L2P region log**（固定预留区） | L2P cache 刷脏 → `append_slot` + FC 写 | cache miss 读回；GC/compaction | 块满换块（固定区）；`l2p_live==0` → `reclaim_pending`；活块数 >64 → compaction | Directory 指向最新页；Journal 补差量 |
-| **Directory（SRAM）** | `commit_region` / journal replay 写入 cache 后 flush | L2P lookup；目录检查点快照源 | 覆盖 entry；目录检查点全量落盘 | 目录检查点重建 Directory；Journal 回放补 L2P cache 增量 |
+| **L2P region log**（固定预留区） | L2P cache 刷脏 → `md_slot_pair_append` + FC 写 | cache miss 读回；GC/compaction | 块满换块（固定区）；`l2p_live==0` → `reclaim.bitmap`；活块数 >64 → compaction | Directory 指向最新页；Journal 补差量 |
+| **Directory（SRAM）** | `md_commit_region` / journal replay 写入 cache 后 flush | L2P lookup；目录检查点快照源 | 覆盖 entry；目录检查点全量落盘 | 目录检查点重建 Directory；Journal 回放补 L2P cache 增量 |
 
 **② 上电恢复顺序（逻辑依赖）**
 
 ```mermaid
 flowchart TD
- PWR["上电"] --> JI["实例初始化: jrn_init"]
+ PWR["上电"] --> BBTI["bbt_init: BBT 或出厂扫描"]
+ BBTI --> POOL0["md_pool_build_all: 元数据候选池"]
+ POOL0 --> JI["jrn_init: Journal 游标"]
  JI --> MDL["md_load: 目录检查点 → Directory"]
- MDL --> BBTI["bbt_init: BBT 或出厂扫描"]
- BBTI --> VER["pfr_media_check_format: CP 介质状态"]
+ MDL --> VER["pfr_media_check_format: CP 介质状态"]
  VER -- "NO_RECORD / 版本不符" --> FMT["全片格式化（两阶段 BBT）"]
  VER -- "I/O 错误" --> HALT["拒绝格式化 / 启动失败"]
  VER -- "CURRENT" --> BR["pfr_boot_recovery"]
@@ -935,11 +1004,14 @@ flowchart TD
  FB --> LOOP
 ```
 
+**读图要点**：上电顺序 BBT→候选池→Journal→Directory→介质判定；格式化两阶段；恢复分快照/回放/rebuild。
+
 **③ 运行期写入 + Checkpoint 流转**
 
 ```mermaid
 sequenceDiagram
  participant H as Host
+    autonumber
  participant F as FTL 数据路径
  participant J as Journal
  participant L as L2P cache
@@ -952,8 +1024,8 @@ sequenceDiagram
  F->>J: jrn_append(lba, old_pba, new_pba, seq)
  F->>L: l2p_write（行 DIRTY）
  L->>LB: flush region 页（append slot）
- LB-->>D: commit_region(region → new PBA)
- D->>D: l2p_live 旧减/新加；归零 → reclaim_pending（擦前若 dirty 先写目录检查点）
+ LB-->>D: md_commit_region(region → new PBA)
+ D->>D: l2p_live 旧减/新加；归零 → reclaim.bitmap（擦前若 dirty 先写目录检查点）
  Note over C: CP 触发（水位 / 定时 / 强制）
  C->>L: 快照脏 bitmap + journal 水位
  C->>LB: flush 脏 region
@@ -961,6 +1033,8 @@ sequenceDiagram
  C->>C: 写块元数据 + 磨损快照，再写 Header（commit）
  C->>J: truncate（水位之前的条目）
 ```
+
+**读图要点**：写先 FC 编程，再 Journal/L2P；区域回写经 Directory commit；CP 先 flush 再快照/截断。
 
 **④ GC / 回收 / 压缩如何影响各池**
 
@@ -971,17 +1045,19 @@ flowchart LR
  MV --> CL["关闭 / 擦除 victim；更新 BST"]
  CL --> BBTJ["BBT job（如有坏块）"]
  CL --> WJ["BST 计数更新（随下次 CP 落盘）"]
- L2P["L2P log block l2p_live == 0"] --> RP["reclaim_pending 位图"]
+ L2P["L2P log block l2p_live == 0"] --> RP["reclaim.bitmap"]
  RP --> RJ["MD job RECLAIM：dirty 先写目录检查点 → 单 plane 擦 → 固定日志区置 NONE"]
  COLD["活日志块 > 64 / 冷热混合"] --> MC["MD job 压缩：多个稀疏 victim 搬进新生块 → 目录检查点 → 擦 victim"]
  MC --> RP
 ```
 
+**读图要点**：水位触发 GC；l2p_live 归零才可回收；活块多时触发压缩。
+
 **⑤ 掉电持久性映射**
 
 | 数据 | 最后落点 | 掉电后怎么恢复 |
 |---|---|---|
-| 用户数据 | data block 页 + 页内 META（CW 的 LBA） | ECC / read retry / RAID（若启用） |
+| 用户数据 | data block 页 + 页内 META（CW 的 LBA） | ECC；read retry 在本器件不可用，RAID 关闭 |
 | L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP journal_sequence` |
 | L2P region 页 | L2P log block（Directory 指向最新页） | Directory 加载后按 PBA 读回 |
 | Directory | 目录检查点（全量快照，P0+P1 镜像） | `md_load` 取最新完整 record |
@@ -1007,9 +1083,11 @@ Checkpoint（21 页/record：Header 1 + 块元数据 4 + 磨损 16）
 
 L2P region log（固定预留区，追加块）
  region 页追加到当前块 page 0..63 → 从固定区取下一块 page 0
- l2p_live 归零 ⇒ reclaim_pending ⇒（dirty 先写目录检查点）⇒ job 异步擦除 → 固定区置 NONE
+ l2p_live 归零 ⇒ reclaim.bitmap ⇒（dirty 先写目录检查点）⇒ job 异步擦除 → 固定区置 NONE
  活日志块 > 64 ⇒ compaction：多个稀疏 victim 搬进同一新生块 → 目录检查点落盘 → 擦 victim
 ```
+
+<a id="s2-4" name="s2-4"></a>
 
 ### 2.4 单一坐标与转换漏斗
 
@@ -1021,7 +1099,7 @@ L2P region log（固定预留区，追加块）
 | **PBA** | FTL 物理地址（含 ch/ce/lun） | FTL 私有地址编码（§2.2） |
 | **PAA** | 芯片内地址 | `nand_config.h` |
 
-规则（C9）：
+约束：
 
 - 同一语义只允许一套坐标。`gblock` 与“per-plane block + plane”不得在业务代码里各算各的；
  一律 `ftl_gblock` / `ftl_gblock_plane` / `ftl_gblock_block`。
@@ -1029,6 +1107,8 @@ L2P region log（固定预留区，追加块）
  `lba_2_*` 发生；现场手写 `region / DIE_MAX` 是缺陷。
 - PBA↔PAA 只在 FTL↔FC 边界转换；FC 层不认 PBA，FTL 业务层不手写 PAA 位运算。
 - 方向相反的转换（例如 `pba_with_page`）必须用构造函数，不用掩码拼装。
+
+<a id="s2-5" name="s2-5"></a>
 
 ### 2.5 介质布局版本与自动格式化
 
@@ -1049,1679 +1129,42 @@ L2P region log（固定预留区，追加块）
 
 ## 3. 模块设计
 
-> **本节模板**：每个模块按「背景与需求 → 职责与边界 → 结构与不变量 → 流程图 →
-> 关键流程 → 失败语义 → 常量与出处 → 主流对照」组织。背景写“没有它会怎样”，
+> 支撑摘要：P1~P6（模块地图见下）。
+
+> **本节模板**：每个模块按「背景与需求 → 职责与边界 → 结构与不变量 → 流程 →
+> 失败语义 → 设计取舍 → 常量与阈值」组织。背景写“没有它会怎样”，
 > 不是“它实现了什么”。
 
 **模块地图**：
 
-| 模块 | 主要文件 | 章节 |
-|---|---|---|
-| 引导与掉电恢复 | `power_failure_recovery.c/h` | §3.1 |
-| 分配器 / BST / Super Block | `allocator.c/h`、`bst.h` | §3.2 |
-| 坏块表 | `bbt.c/h` | §3.3 |
-| 磨损计数持久化 / 静态 WL | `checkpoint.c`（磨损快照）、`wear_leveling.c/h` | §3.4 |
-| 元数据目录 | `metadata.c/h` | §3.5 |
-| L2P cache | `l2p_cache.c/h` | §3.6 |
-| Journal | `journal.c/h` | §3.7 |
-| Checkpoint | `checkpoint.c/h` | §3.8 |
-| Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
-| 完成派发面 | `ftl_op.c/h` | §3.10 |
-| 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
-| Service / 后台调度 | `ftl.c`、`bg_policy.c/h` | §3.12 |
-| GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
-| 读恢复 | `read_recovery.c/h` | §3.14 |
-| FTL↔FC 接口 | FTL-FC 接口层、FTL 私有地址编码 | §3.15 |
-| 观测性 | `log.h`（心跳/限流）、`timer.h`（deadline/age）、各 job 心跳 | 并入 §3.12 |
+| 模块 | 章节 | 支撑摘要 |
+| --- | --- | --- |
+| Host 提交 / 组 / pending | §3.1 | P5 |
+| 完成派发面 | §3.2 | P5 |
+| 页打包写缓冲 | §3.3 | P2 |
+| Service / 后台调度 | §3.4 | P5 |
+| L2P cache | §3.5 | P1、P2 |
+| 元数据目录 | §3.6 | P1、P3 |
+| Journal | §3.7 | P2、P3、P6 |
+| Checkpoint | §3.8 | P3 |
+| 分配器 / BST / Super Block | §3.9 | P4 |
+| 坏块表 | §3.10 | P4 |
+| 磨损计数持久化 / 静态 WL | §3.11 | P4 |
+| GC / 迁移 | §3.12 | P4 |
+| 读恢复 | §3.13 | P4 |
+| 引导与掉电恢复 | §3.14 | P3、P6 |
+| FTL↔FC 接口 | §3.15 | P2、P5 |
+| cache 序列 | §3.16 | P2、P5 |
+| 观测性 | 并入 §3.4 | P5 |
+
 
 <a id="s3-1" name="s3-1"></a>
 
-### 3.1 引导与掉电恢复（power_failure_recovery）
+### 3.1 Host 提交 / group / pending
 
 #### 3.1.1 背景与需求
 
-FTL 的运行时状态分两类：
-
-| 状态 | 掉电后 |
-|---|---|
-| L2P cache（64 行）、Block State Table、Free/OP/Spare 池、Closed 列表、各类写指针 | **全部丢失**（RAM） |
-| 用户数据、页内 META、L2P region 页、目录检查点、Checkpoint、Journal、BBT、CP 磨损快照 | 留在 NAND |
-
-没有恢复模块，开机后 L2P cache 是空的、Closed 列表是空的、Free Pool 可能把**写过的块**
-当空白块分配——第一次写就会 AND 掉旧数据。恢复模块要回答三个问题：
-
-1. 上一次是**干净关机**还是**异常掉电**？
-2. L2P 映射从哪恢复到哪（Checkpoint 快照 + Journal 增量）？
-3. 块元数据（状态/有效计数/池归属）从快照恢复，还是全盘扫描重建？
-
-#### 3.1.2 职责与边界
-
-- **做**：判定启动类型；编排“扫描 → 分类 → 恢复块元数据 / 回放 Journal / full metadata rebuild → 建池”的顺序；
- 维护恢复结果与统计。
-- **不做**：不定义 Journal/Checkpoint/目录检查点的记录格式（各模块自己拥有）；不做介质格式化
- （`pfr_media_format` 在版本判据命中时调用）；不处理 host IO。
-- **上游**：`main.c` 的 `ssd_ftl_boot`；**下游**：Journal、Checkpoint、Metadata、Allocator、L2P cache。
-
-#### 3.1.3 结构与不变量
-
-| 结构 | 关键字段 | 说明 |
-|---|---|---|
-| `pfr_boot_type_e` | `FRESH / CLEAN / POWER_FAILURE` | 启动分类 |
-| `pfr_boot_result_s` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored`、`scoped` | 观测/日志；由执行层最后一次性填满 |
-| `pfr_plan_e`（内部） | `FRESH / SNAPSHOT / REPLAY / FORCE_REBUILD` | `pfr_boot_plan` 产出的唯一决策点 |
-| `pfr_stats_s`（内部） | `closed`、`partial`、读错误计数、`l2p_degraded_cw`、`valid_cw`、`sub_zero` | 本次启动唯一统计；计数一律 `DWORD` |
-| `pfr_block_table_s`（内部） | `word`、`loaded`、`restored`、`probed` | 块快照的显式对账进度；`build_pools` 断言 `probed` |
-| `cp_handle_s.block_words` | 16-bit/块 × 4096 | Checkpoint 的块元数据快照，boot 时复用为加载缓冲 |
-| `cp_handle_s.wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 8 B/块 × 4096 → 16 页 | 磨损快照写进度 / 每页 CRC / 组页缓冲 |
-
-不变量：
-
-1. **块元数据快照先于 Journal 回放恢复**：回放要同步维护 `valid_count`，没有块元数据就没有记账对象。
-2. **判型用整页**：`page_seq + entry_count <= cp.journal_sequence` 才是干净关机；
- 只比页首页序号会漏掉跨水位那一页的新条目。
-3. **三条路径都要 Journal 续跑**：环形块没有被擦，写指针/序号必须接回；
- 否则二次编程或序号回退。
-4. **Open SB 不续写**：快照/full metadata rebuild 都把 OPEN 降级为 CLOSED，整块交 GC。掉电可能留下半编程页，
- 续写会二次编程；Policy B 下两 plane 的配对也无法可靠恢复。
-5. **快照失败只回退 full metadata rebuild，不格式化**：格式化只由介质版本判据触发。
-
-#### 3.1.4 启动判定流程
-
-```mermaid
-flowchart TD
- BOOT["pfr_boot_recovery"] --> LATEST["jrn_page_scan_latest 只读,不改状态"]
- LATEST --> FIND{"cp_pool_find_latest 有当前版本有效 Header"}
- FIND -- "否" --> FRESH["fresh full metadata rebuild 全扫 → carve"]
- FIND -- "是" --> LOAD{"cp_block_table_load"}
- LOAD -- "否" --> PFALL["块元数据走 full metadata rebuild 兜底"]
- LOAD -- "是" --> WEAR["cp_wear_table_load 软状态，失败只从 0 起算"]
- WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
- JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
- JUDGE -- "否" --> PF["PF restore journal replay F4 probe build_pools"]
- PFALL --> FULL_SCAN["reset → full metadata rebuild → carve"]
- PF --> PFOk{"块元数据恢复一致"}
- PFOk -- "否" --> FULL_SCAN
- PFOk -- "是" --> READY["Controller 到 Ready"]
- CLEAN --> READY
- FRESH --> READY
- FULL_SCAN --> READY
-```
-
-#### 3.1.5 关键流程
-
-1. **扫描**：`jrn_page_scan_latest` 只读环形池，取 `(block, page, page_seq, entry_count)`；
- `cp_pool_find_latest` 用 `md_ring_locate` 扫 Checkpoint 池，取最新有效 Header，
- 同时恢复本实例的 CP 序号与写游标。
-2. **分类**：`pfr_boot_plan` 是唯一决策点，产出 `pfr_plan_e`：
- - 无有效 CP → **FRESH**；
- - `REBUILD_REQUIRED` → **FORCE_REBUILD**（不尝试快照）；
- - `page_seq + entry_count <= cp.journal_sequence` → **SNAPSHOT**（Journal 已全部落入 L2P）；
- - 否则 → **REPLAY**（有未回放的增量）。
-3. **fresh**：失效本 owner 的 cache 行/脏位 → **full metadata rebuild（重建 Closed 列表）→ carve 池**
- （carve 只把 state==NONE 的块入池）→ Spare 补池 → Journal 续跑。
-4. **clean**：块元数据快照有效时 `restore_blocks`（先全量校验再应用）→ 按 CP 位图
- **逐 region 预载**（F4，不按 INVALID 行的 region_id 反查）→ probe 池块 →
- `build_pools` → Spare 补池；任一步失败 → reset → full metadata rebuild → carve。
- 最后 Journal 续跑。
- - **live L2P 日志块的自愈**：这类块归 `metadata_dir` 所有、
-  不在 allocator 池里，合法 word 是 `NONE + no pool tag`。校验阶段对
-  `live 计数查询(dir, g) > 0` 的块放行，第 3 遍按 Directory 修正为 `LOG`
-  （Directory 是 live 日志块身份的唯一权威）。否则旧版 full rebuild 留下的
-  NONE/no-pool 会让**整份**快照被拒绝，每次冷启动都全盘重建。
-5. **PF**：先恢复块元数据 → Journal 回放（所有 `page_seq+entry_count > cp_seq` 的页，
- 按 `(page_seq, entry_idx)` 递增，last-write-wins；同步维护 valid_count）→ F4 →
- probe + `build_pools` + Spare 补池；失败 → reset → full metadata rebuild → carve。
- ⚠ **降级检测与范围化恢复**：`l2p_read_sync` 返回 OK **不等于**
- 读到合法映射——连续加载失败后行会降级为“全未映射”。处理分两层：
- - Journal 回放 在降级基线上成功写入条目时**不再**清 降级标志：降级只丢该
-  region 未被 Journal 覆盖的旧映射，**不影响** valid_count 增量（old/new PBA 来自
-  条目本身）⇒ 保留块元数据快照，启动结果标 `bit=scoped`；
- - PFR 块探测 把降级 CW 单独计入 `l2p_degraded_cw`，**不再**计入
-  读错误计数；只有真正的读失败才回退 full metadata rebuild。
- - 丢失的映射由 host 读路径按 `IO_ERROR` 暴露（不零填）；降级 region 记入 cache 级
-  `region_degraded_bitmap`，行被驱逐/重载后仍能识别。
- - 代价：该 region 的 pre-CP 旧映射不可恢复；相关块 `valid_count` 仍按快照计（偏高、
-  由 GC 迁移时逐 CW 反查自愈），无静默数据损坏。
-6. **full metadata rebuild**：逐 plane/块扫 page 0 判空、找写指针；坏块/固定元数据块跳过；
- **live L2P 日志块按 Directory 显式置 `LOG`**（不能留 NONE：`cp_block_snapshot`
- 只按 BST+池编码，NONE/no-pool 会让下一次开机的快照校验整份失败——）；
- 写过的块建退化单 plane 的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。
- full metadata rebuild **先于 carve**：否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
- - **空闲块快速判空**：页判空（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比）⇒ 直接返回 0，**不再扫 64 页**。
-  这把空闲块从 64 次读降到 1 次（本板 3392 个空闲块约省 21.7 万次页读）。
- - **写过的块**：从 page 1 继续找第一个空白页，并检测 hole（空白页后又有写过页
-  ⇒ 返回整块让调用者逐页反查）。
- - ⚠ 快速判空依赖“顺序追加 + page 0 失败即关闭 SB、不继续写后续页”；若将来开放
-  Open SB 续写/失败后继续写，必须恢复全块扫描或在 page 0 空白后补读 page 63
-  （见）。
-
-**启动时间量级**（观测值，不是编译期常量）：
-
-| 路径 | 量级 | 说明 |
-|---|---:|---|
-| clean + 块元数据快照 | ~150 ms + L2P 日志区恢复 | 不跑 full metadata rebuild；probe 只读池块 page 0 |
-| power failure | ~250 ms + L2P 日志区恢复 | 多 Journal 回放 |
-| L2P 日志区恢复 | ~0 | 非活块一律置 LOG + 登记回收（**不读介质**）；擦除按 free 水位懒执行（`md_reclaim_is_eager`）|
-| full metadata rebuild 兜底 | ~400~550 ms（**空片**） | 全盘扫描 + 逐页反查 |
-
-⚠ 上表 rebuild 行是**空片**量级（page 0 快路径一跳到底）。**写过的介质**上每个写过的
-页要读两遍（找写指针 + 计 valid），时间随写入量线性增长；这是 full rebuild 的兜底代价，具体耗时见验证文档
-（约 2500 个块 × 64 页 × 2 次页读，单次约 0.4–0.6 ms）。因此启动路径应优先命中
-快照/回放，rebuild 只作兜底。
-
-#### 3.1.6 失败语义
-
-| 失败点 | 结果 | 数据影响 |
-|---|---|---|
-| 无有效 CP | fresh + full metadata rebuild | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
-| 块元数据快照 CRC 失败 | 该快照丢弃，走 full metadata rebuild | 用户数据不丢；恢复时间变长 |
-| 快照 word 为 `NONE/no-pool`（live L2P 日志块） | **不丢弃**：Directory 是权威，第 3 遍修正为 LOG | 自愈旧版 rebuild 留下的快照；避免每次冷启动全盘 rebuild |
-| 快照 word 非法且**不是** live 日志块 | 该快照丢弃，走 full metadata rebuild | 保守：块账本可能不可信 |
-| Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
-| L2P region 加载降级（两份副本都读失败） | 行 CLEAN + 全 INVALID + `degraded=1`，置 cache 级降级位图 | 保留快照走**范围化恢复**（`bit=scoped`）；该 region 未被 Journal 覆盖的旧映射丢失，host 读该范围返回 `IO_ERROR`；其余数据不受影响 |
-| 块元数据恢复与 probe 不一致 | reset → full metadata rebuild → carve | 以介质为准；块元数据重新计算 |
-| full metadata rebuild 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
-
-⚠ **恢复路径不在完成派发里**：它在 superloop 之前运行，无人 drain CQ，所以允许使用
-`*_sync` 逃生口（内部自旋泵）。服务函数禁止调用这些同步口（会嵌套泵）。
-
-#### 3.1.7 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| 判型口径 | `page_seq + entry_count` |
-| Journal 回放缓冲 | 栈上 `replay_pages[256]`（2 KiB） |
-| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） |
-
-#### 3.1.8 主流对照
-
-DRAM-less 主控普遍采用「快照 + 增量日志 + 全盘扫描兜底」三段式：快照限定恢复上界，
-日志补 post-snapshot 增量，扫描处理元数据损坏。**本仓自定**的部分是块元数据快照的
-16-bit/块编码与 fresh/clean/PF 的判型口径；快照/日志/扫描的分工是 DRAM-less 的通用形态
-（DFTL 等，见 `docs/reference/README.md`）。
-
----
-
-<a id="s3-2" name="s3-2"></a>
-
-### 3.2 分配器 / BST / Super Block（allocator + bst）
-
-#### 3.2.1 背景与需求
-
-NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL 因此需要一套块元数据：
-
-- 哪些块是空闲且已擦除的（Free Pool）；
-- 哪些块正在写（Open SB）、写满了（Closed SB）、是坏块、是元数据日志块、已退役；
-- 每个块擦了多少次、读了多少次、还有多少有效 CW；
-- 坏块替换的储备（Spare）与 GC 的性能缓冲（OP）。
-
-没有统一账本，同一不变量会被多个模块各自手工维护，任一处漏掉就是**永久漏账**：
-容量无声流失、GC 选错 victim、坏块被重新分配、`FREE` 字段说谎。
-
-#### 3.2.2 职责与边界
-
-- **做**：持有 BST（每块 20 B）与四个池（Free / OP / Spare / Closed 列表）；提供唯一的
- 进出闸门；按 plane 选块、配对成 SB；维护 SB 写指针与关闭；提供磨损/有效性统计访问器。
-- **不做**：不决定“什么时候 GC”（`gc.c` 的策略）；不执行搬移（`migrate.c`）；不定义坏块
- 持久化格式（`bbt.c`）；不定义元数据布局（`metadata.h`）。
-- **下游**：GC/WL/migrate、元数据目录、BBT、掉电恢复都读它。
-
-#### 3.2.3 结构与不变量
-
-`bst_block_s`（20 B × 4096 = 80 KiB，`_Static_assert` 钉住）：
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `erase_count` | 4 B | 擦除次数；动态 WL 选块、静态 WL 触发、GC 的 erase 项 |
-| `last_pe_ts` | 4 B | 最近擦除时间戳；GC 的 age 项（刻意不持久化） |
-| `read_count` | 2 B | read disturb 计数（自上次擦除）；预测搬移 |
-| `valid_count` | 2 B | **CW 级**有效计数（0..512），GC/WL 的 valid 项 |
-| `state` | 1 B | 互斥枚举：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD |
-| `temp` | 1 B | HOT/COLD，正交于状态 |
-| `sb_id` | 2 B | 反向索引到 SB；`UINT16_MAX` = 无 |
-| `rr` | 3 B | `last_ecc` / `rising_count` / `health` |
-
-五张表（每实例；各自独立对象；落点由平台决定）：
-
-| 数组 | 大小 | 作用 |
-|---|---:|---|
-| `blocks[FTL_BLOCK_TOTAL]` | 80 KiB | BST |
-| `free_blocks[FTL_BLOCK_TOTAL]` | 8 KiB | Free Pool（全局块号） |
-| `op_blocks[PLANE_NUM][204]` | 816 B | OP 池，每 plane 独立 |
-| `spare_blocks[PLANE_NUM][50]` | 200 B | Spare 池，每 plane 独立 |
-| `closed_sb_list[FTL_BLOCK_TOTAL]` | 32 KiB | Closed SB 列表（swap-remove） |
-
-`super_block_s`（8 B）：`plane_blocks[PLANE_NUM]`（可为 `FTL_BLOCK_NO_PLANE` 哨兵）、
-`next_page`、`temperature`、`is_open`。
-
-**池的分工**：
-
-| 池 | 容量 | 用途 | 消费/补充 |
-|---|---:|---|---|
-| Free | 全部已擦除块 | 写分配、GC 归还 | 三级水位（下表） |
-| OP | 204 块/plane | GC 性能缓冲，防止前台等 GC | 该 plane 的 Free 给出不块时补入 |
-| Spare | 50 块/plane | 坏块替换，只出不进 | Spare 补池 |
-
-| 水位 | 条件 | 动作 |
-|---|---|---|
-| ① 正常 | `free_count ≥ 32` | 不做后台 GC |
-| ② 补池 | `8 < free_count < 32` **或任一 plane 的 free < 4** | 后台 GC（T1）；单 plane 饥饿也在其中（见 §3.13.4） |
-| ③ 紧急 | `free_count ≤ 8` | 强制 GC（T4），写路径也兜底 |
-
-**两个同值哨兵**（C11：同值 ≠ 同一坐标）：
-
-- `FTL_BLOCK_NO_PLANE`（`UINT16_MAX`）：`plane_blocks[]` 里“该 plane 无块”的**存储态**，
- 会写进 Closed 列表；
-- `FTL_GBLOCK_INVALID`（`UINT16_MAX`）：选块失败的**瞬时返回值**，从不落盘。
-
-**不变量**（文件头）：
-
-1. **四类池各有唯一闸门**：Free 只走 `alc_free_push` / `alc_free_remove`；
- OP 只走 `alc_op_push`（出池由 `alc_free_refill_from_op` 内部完成）；Spare 只走 `alc_spare_push/pop`；Closed 只走 `alc_super_closed_add` /
- `alc_super_closed_remove`。外部模块不裸写数组，读走访问器。
-2. **`state == FREE` ⟺ 在 Free Pool 里**。入池置 FREE；出池只校验、不赋态，新态由转移
- 归属者紧随其后赋值。**BAD 永不进池**（入池闸门 debug ASSERT + release 拒绝）。
-3. **`closed_sb_list` 是 swap-remove 活列表**：借出的指针不跨调用有效；跨调用按值拷贝
- （migrate 的 victim 副本）。
-4. **无归属的块是 NONE**：固定元数据区、OP 池、Spare 池不参与分配。
-5. **选块以 Free Pool 数组为准**：选中即 `remove_from_free` 必命中，避免“选中→移除失败→重选”死循环。
-
-#### 3.2.4 块状态机
-
-```mermaid
-flowchart TD
- START["开始"]
- NONE["NONE 无归属"]
- FREE["FREE 在 Free Pool"]
- OPEN["OPEN 正在写"]
- CLOSED["CLOSED 等待 GC"]
- LOG["LOG L2P 日志块"]
- RETIRED["RETIRED 退役"]
- BAD["BAD 坏块"]
- START -- "固定元数据 OP Spare" --> NONE
- START -- "建池擦除归还" --> FREE
- FREE -- "成对分配" --> OPEN
- OPEN -- "64 页写满" --> CLOSED
- CLOSED -- "GC / 静态 WL 搬移擦除归还" --> FREE
- CLOSED -- "预测性退役出池不标坏" --> RETIRED
- FREE -- "alc_op_alloc_log_block" --> LOG
- LOG -- "l2p_live 归零擦除归还" --> FREE
- FREE -- "出厂扫描或探测判坏" --> BAD
- OPEN -- "PROGRAM 失败" --> BAD
- CLOSED -- "运行时坏块或读不可恢复" --> BAD
-```
-
-#### 3.2.5 关键流程
-
-1. **分配一页**（成对分配）：
- - 取对应温度的 Open SB；写满 → `alc_super_close` → Closed 列表；
- - 从 Free Pool 逐 plane 独立选擦除次数最少的块（Policy B，不要求同号）；
- - 填 `out[plane]` 为当前页 PBA，`next_page++`；
- - Free Pool 空 → `FTL_AGAIN`（写路径触发紧急 GC 后重试）。
-2. **关闭 SB**：`is_open=false` → 加入 Closed 列表；各 plane 块状态 CLOSED + `sb_id`。
-3. **归还**：搬移擦除成功后 `alc_free_push` 入池并置 FREE；退役走
- `alc_free_remove` + RETIRED，**不得**先入池。
-4. **日志块**：`md_log_alloc` 从**固定 L2P 日志区**（`[46,94)/plane`）取一块已擦净的
- 空闲块（置 LOG）；擦除完成后 `md_log_release` 置 NONE，**不回 Free Pool**
- 。
-
-#### 3.2.6 失败语义
-
-| 情况 | 结果 | 后果 |
-|---|---|---|
-| Free Pool 空 | `FTL_AGAIN` | 写路径起紧急 GC；持续为空则写失败 |
-| 入池块是 BAD | debug 停机；release 拒绝 | 防止把 BAD 覆盖成 FREE |
-| 出池块不在池 | no-op（文档化契约） | 幂等；不制造反向分叉 |
-| 退役块先入池 | 会被再次分配 | 违反不变量 2，必须出池后置 RETIRED |
-| Closed 列表满 | 结构上不可能（容量 = 全部块） | 真满即断言，不静默丢条目 |
-
-#### 3.2.7 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `FREE_POOL_TARGET` | 32 |
-| `FREE_POOL_EMERGENCY` | 8 |
-| `FTL_OP_PERCENT` | 10%（204 块/plane） |
-| `FTL_SPARE_POOL_PER_PLANE` | 50 |
-| `SUPER_BLOCK_LIST_MAX` | `FTL_BLOCK_TOTAL`（4096） |
-| `bst_block_s` 尺寸 | 20 B |
-| 温度 | HOT=0 / COLD=1 |
-
-#### 3.2.8 主流对照
-
-每块一个 metadata/descriptor、Free Pool + OP + Spare 的池化、Super Block 跨 plane 条带化，
-是主流 SSD 控制器的共同形态（OpenSSD 全局表、SPDK FTL 内嵌表）。**本仓自定**的是
-`valid_count` 的 CW 粒度与“无逐页位图”（DRAM-less approach ③，见 §3.13）。
-
----
-
-<a id="s3-3" name="s3-3"></a>
-
-### 3.3 坏块表（BBT）
-
-#### 3.3.1 背景与需求
-
-NAND 的坏块有两类：
-
-- **出厂坏块**：厂商在每块 page 0 的 spare 区写非 `0xFF` 标记；**擦除会永久毁掉标记**
- （Micron AN1819）。
-- **运行时坏块**：PROGRAM/ERASE 失败、读恢复耗尽后判定。
-
-没有 BBT：开机可能把坏块分给用户；坏块上的数据写到一半就丢；重启后不知道哪些块坏。
-另一个更隐蔽的坑：**用过的芯片不能再做出厂扫描**——页编程 2112 B 会把 CW3 尾巴写进 spare，
-spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含目录检查点/Checkpoint）判成坏块。
-
-#### 3.3.2 职责与边界
-
-- **做**：坏块的持久化（`bbt_header_s.bad_map`）、出厂扫描（仅在空片）、运行时标记、
- Spare Pool 按 plane 补充。
-- **不做**：不维护 RAM 块状态（BST 是唯一数据源）；不决定替换哪个块（调用方给 plane）；
- 不做数据迁移（migrate）。
-- **调用点**：`bbt_init`（boot）、写失败（`ftl.c`）、GC 擦除失败（`migrate.c`）、
- 读恢复失败（`read_recovery.c`）、格式化（`pfr_media_format`）。
-
-#### 3.3.3 结构与不变量
-
-| 结构 | 字段 | 说明 |
-|---|---|---|
-| `bbt_header_s` | magic / sequence / total_blocks / bad_count / `bad_map[512]` | 540 B，一条 record = 1 页 |
-| `bbt_state_s`（在 `alc_s`） | sequence / write_idx / cursor_valid / dirty / format_in_progress / rebuild_required / dirty_gen / flush_due / handle | 每实例一份池游标 |
-| `bbt_handle_s` | phase / waiting / dirty_gen / 心跳 | 异步持久化；状态查询直读 `bbt_state_s` 的 `format_in_progress` / `rebuild_required` / `dirty_gen` / `flush_due` |
-
-不变量：
-
-1. **出厂扫描只在空片执行**：介质已有 FTL 数据判据命中 ⇒ 拒绝扫描 + LOGE。
-2. **先读后擦**：出厂标记必须在任何 PROGRAM/ERASE 之前读。
-3. **标坏先出池、再置 BAD**：`alc_free_remove` 的断言要求块此刻仍是 FREE。
-4. **RAM 只信 BST**：`bbt_is_bad` 只用于读持久化位图；运行时判定一律 `ftl_block_is_bad`。
-5. **候选池（v11）**：BBT 名义块 + shared metadata spare（94..97）中、在 plane_mask 所有
- plane 上都非 BAD 的块组成候选表；自举期间直接扫描「名义块 + 全部 spare」，record 靠
- magic/sequence 校验，坏块/空块自然被忽略。候选表不落盘，每次开机重算。
-6. **元数据 BAD 不走用户 Spare**：`block < FTL_METADATA_AREA_END` 或
- `l2p_live[g]` / 当前 plane 的 `cur.block[plane]` 指向该块（从 OP 借用的 L2P 日志块）⇒ 只置
- `alloc->pools->dirty`，由元数据 job 重算候选池；Journal / L2P 日志失块
- 额外置 BBT header `reserved[1]` 的 **`REBUILD_REQUIRED`**（本仓自拟），新 CP 落盘后清除。
-
-#### 3.3.4 流程图
-
-```mermaid
-flowchart TD
- INIT["bbt_init"] --> LOAD{"bbt_load 池内有有效 record"}
- LOAD -- "是" --> REBUILD["bad_map 到 BST state 为 BAD"]
- LOAD -- "否" --> USED{"介质已有 FTL 数据"}
- USED -- "是" --> REJECT["拒绝出厂扫描 LOGE bad_count 为 0,运行时兜底"]
- USED -- "否" --> SCAN["逐块读 page0 列 2048 非 0xFF 则 BAD"]
- SCAN --> SAVE["bbt_save 写入池"]
- REBUILD --> RUN["运行时"]
- REJECT --> RUN
- SAVE --> RUN
- RUN --> MARK["PROGRAM ERASE 失败或 RR 耗尽"]
- MARK --> EXPEL["alc_free_remove"]
- EXPEL --> BAD["BST 置 BAD bbt-dirty 为 1"]
- BAD --> KICK["bbt_handle 异步写回"]
-```
-
-#### 3.3.5 关键流程
-
-1. **加载**：`bbt_load` 用 `md_ring_locate` 扫 2 块池，取 magic 正确且 sequence 最大者；
- 恢复 `alloc->bbt` 游标与序号。
-2. **出厂扫描**：逐块（含块 0）读 `OP_READ_COLUMN` 列 2048 的 spare 首字节；
- 非 `0xFF` ⇒ 坏块。**只读不擦**。
-3. **运行时标记**：标坏：出池 → 置 BAD → 清 valid → 置 dirty。
- ⚠ **清 valid 之后 L2P 仍可能指向该块**（预测性迁移读失败标坏、full metadata rebuild
- 漏认）。因此覆盖写旧位置、TRIM、搬离源块的减计数必须走
- `ftl_block_sub_valid_if_live`（BAD 或 count==0 时跳过）；直接
- `ftl_block_sub_valid` 会在 debug 撞断言、release 把 uint16 回绕成 65535，
- 虚高的 valid_count 会污染 GC/WL 的 victim 评分。dangling 现场由写确认路径的
- `[FTL] dangling` 日志留痕。
-4. **持久化**：`bbt_handle` 装配 job；换块先异步擦，再写 1 页 record；完成由
- `ftl_bbt_callback` 推进游标。失败保留 dirty，下轮重试。
-5. **补充**：Spare 补池从**坏块所属 plane** 的 Spare 池取一块，
- 归还 Free Pool；池空则容量自然减少。
-
-#### 3.3.6 失败语义
-
-| 情况 | 结果 | 数据影响 |
-|---|---|---|
-| 无有效 BBT 且介质已用过 | 拒绝扫描，坏块表从空开始 | 已知坏块靠运行时失败兜底；不会误标活块 |
-| 出厂扫描读列失败 | 保守判坏 | 可能多标；不会少标 |
-| Spare 池耗尽 | 新坏块直接减少可用容量 | 用户容量下降，不丢已写数据 |
-| BBT 写失败 | dirty 保留，下轮重试 | 掉电后可能丢最后一次坏块更新 |
-
-#### 3.3.7 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `BBT_MAGIC` | `0x424254AB` |
-| BBT 池块数 | 2（块 40..41） |
-| `bad_map` | 512 B = 4096 bit |
-| 出厂标记列 | 2048（`PAGE_MAIN_SIZE`） |
-| Spare / plane | 50 |
-
-#### 3.3.8 主流对照
-
-坏块表 + 预留替换块（sparing）而不是 block remap 表，是主流做法：ONFI Multi-Plane 命令
-每个 plane 有独立行地址，坏块导致两块编号不同不影响并行操作，因此不需要“两层映射”。
-v11 把这个原则同样应用到**固定元数据分区**：分区 = 候选块池（名义区间跳过 BAD + 共享
-metadata spare 补缺），record 靠 sequence 扫描定位，不维护 logical→physical 表。
-出厂标记“先读后擦”的判据来自 Micron AN1819（见 `bbt.c` 的引文）。
-⚠ 本仓的具体候选池算法（4 块/plane shared spare、硬下界、重建顺序）是**本仓自拟实现**，
-不冒充行业统一数值；机制本身是主流 BBT + sparing。
-
----
-
-<a id="s3-4" name="s3-4"></a>
-
-### 3.4 磨损计数持久化与静态磨损均衡（checkpoint + wear_leveling）
-
-#### 3.4.1 背景与需求
-
-BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，实例初始化的 memset 会清零。
-如果不持久化，重启后：
-
-- 动态 WL 不知道哪块擦得少，可能继续用已经磨损的块；
-- 静态 WL 的 `max-min` 差值归零，永远不会触发；
-- read disturb / 预测性退役的记录归零，劣化块被当成新块。
-
-> **出处**：`docs/design/storage_controller_design.md` §5.5 —— "擦除计数必须
-> 持久化，否则跨重启归零、WL 失效"；失效模式表：read disturb → "定期刷新、读计数、
-> GC 搬移"。
-
-静态 WL 的需求是另一个方向：GC 只回收"有效数据少"的块，冷数据所在的低擦除块
-可能长期不被擦到；需要主动把冷数据搬走一次，让这些块进入磨损轮转。
-方向与 UBI 一致：把**最冷的 used SB** 搬到**擦除次数最多**的空闲块上，低擦除块
-空出来给热数据（动态 WL 优先选它）⇒ 擦除计数回升。
-
-#### 3.4.2 职责与边界
-
-- **checkpoint.c**：`cp_wear_page_build` 从 BST 组 16 页磨损快照；
- `cp_wear_table_load` 开机逐页校验并回填 BST。计数随 CP 记录**原子落盘**，
- 没有独立 Wear 块。
-- **wear_leveling.c**：静态 WL 的触发判定与 victim 选择；搬移交给 `migrate.c`。
-- **不做**：不执行擦除/搬移；不决定 GC（`gc.c`）；不维护 BST（`allocator.h`）。
-- **动态 WL** 不在本模块：它是 `alc_free_find_block` 的选块策略
- （选擦除最少者）。
-
-#### 3.4.3 结构与不变量
-
-| 结构 | 字段 | 说明 |
-|---|---|---|
-| `cp_wear_entry_s` | erase(4) / read(2) / last_ecc(1) / flags(1) | 8 B，按 **gblock 下标**存；定义在 — |
-| CP Header 磨损字段 | `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` / `wear_page_crc[16]` | 几何 + 每页 CRC |
-| `wl_victim_s` | found / plane_blocks / valid_cw / read_count | WL 选块结果 |
-
-不变量：
-
-1. **绝对值 + CP 快照**：每次 CP 写整份磨损快照（不是增量），读回直接覆盖 BST。
-2. **软状态**：两次 CP 之间掉电只丢一个 CP 窗口的计数，不丢用户数据；
- 快照损坏只退化 WL/read-disturb 精度，**不得**触发格式化。
-3. **WL 只选 Closed 块**：跳过 Open / 含坏 plane 的 SB；有效 CW ≥ **该条目自身容量**的 70%（`plane_count × FTL_CW_PER_BLOCK`，快照恢复出的单 plane 条目按单 plane 算）；
- 按**平均擦除次数最少**（最冷）优先，同擦除次数下 valid_cw 多、read_count 高优先。
-4. **目标方向固定**：静态 WL 的目的页对取 **Free Pool 中擦除次数最多**的块
- （成对分配），且不允许 OP 兜底；启动前沿
- `alc_super_prepare_wl_destination` 摘掉当前 cold SB，保证第一页新开 high-wear SB。
-5. **WL 与 GC 共用一台迁移引擎与同一收尾（FREE）**：WL 只改 victim 来源；
- 擦完归还 Free Pool，源块由动态 WL 优先选中写入，擦除计数回升。
- 退役只属于预测性退役 / read recovery。
-
-#### 3.4.4 流程图
-
-```mermaid
-flowchart TD
- W1["timer: mig_wl_eval（每 5 s）"] --> W2["mig_wl_begin"]
- W2 --> W3{"间隔门 total_writes 不低于 1000"}
- W3 -- "否" --> W0["不触发"]
- W3 -- "是" --> W4{"max_free_ec 减 min_used_ec 不低于 WL_THRESHOLD"}
- W4 -- "否" --> W0
- W4 -- "是" --> W5["wl_select_victim 最冷 used SB valid 不低于 70 百分比"]
- W5 -- "无" --> W0
- W5 -- "有" --> W6["摘掉 cold SB 后启动迁移 job WL 目标取擦除最多的空闲块"]
- W6 --> W7["擦完归还 Free Pool"]
-```
-
-#### 3.4.5 关键流程
-
-1. **开机**：`cp_wear_table_load` 逐页读 16 页磨损快照（P0/P1 任一副本），
- 每页用 Header 的 `wear_page_crc[p]` 校验，回填 BST 的 erase/read/rr 三组字段。
- 无快照 / CRC 错 / 读失败 ⇒ 计数从 0 开始（软状态，非致命）。
-2. **落盘**：CP job 在块元数据快照之后、Header 之前，逐页调用
- `cp_wear_page_build` 从 BST 组页并写入；每页 CRC 存进 Header 的
- `wear_page_crc[]`。Header 是 commit 页——它落盘才代表整条 record 有效。
- **持久化窗口 = CP 间隔**（水位/定时/强制触发）。
-3. **静态 WL 触发**（UBI 模型）：判据只有 `max_free_ec − min_used_ec ≥ WL_THRESHOLD`，
- 其中 `min_used_ec` = Closed 列表中**有效 CW ≥ 自身容量 70% 且无坏 plane** 的 SB 平均擦除
- 次数最小值，`max_free_ec` = Free Pool 最大擦除次数。启动门
- `total_writes ≥ WL_MIN_WRITES`，求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
- 搬移不改变擦除计数 ⇒ 差值不足时必须停止（否则是纯写放大，）。
-4. **选 victim**：与触发同门限，选平均擦除次数最小的 SB；平手看 valid_cw / read_count。
-5. **搬移**：`mig_wl_begin` 先 `alc_super_prepare_wl_destination` 摘掉当前 cold SB，再起
- job；目标页对走成对分配（每 plane 取擦除最多的空闲块，无 OP
- 兜底）。收尾 `MIG_POST_FREE`：擦完归还 Free Pool，源块由动态 WL 优先选中写入。
-
-#### 3.4.6 失败语义
-
-| 情况 | 结果 | 数据影响 |
-|---|---|---|
-| 磨损快照读失败 / CRC 错 | 计数从 0 开始 | WL/read-disturb 精度下降；用户数据不丢 |
-| 磨损页写失败 | `block_ok=0`，整条 CP record 作废（不写 Header），游标推进一槽 | 下一 CP 重试；计数窗口延长 |
-| WL 无 victim | 不触发，下轮再试 | 磨损继续累积 |
-| WL 搬移中分配不到目标页 | 中止且不擦 victim | 数据无损，下轮重来 |
-| 擦除失败 | 标坏，不退役 | 数据由 GC/BBT 处理 |
-
-#### 3.4.7 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 |
-| `FTL_CHECKPOINT_WEAR_PAGES` | 16 |
-| `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | 0x0F / 0x03 |
-| `WL_THRESHOLD` | 200（本仓自拟；判据沿用 UBI） |
-
-### 3.5 元数据目录（metadata.c / metadata.h）
-
-> **本节怎么读**：先看 §3.5.1 的背景（为什么位置会变、为什么需要 Directory），再看
-> §3.5.3 的四个结构，然后按 §3.5.5 的写路径读一遍，最后看 §3.5.8 的回收/压缩状态机。
-> `metadata.c` 的核心是**唯一的一层位置来源**：Directory 条目。`NAND_PBA_INVALID` =
-> 从未写过（未映射），非 INVALID = region 页在日志块上的真实位置。
-
-#### 3.5.1 背景与需求
-
-L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 region 都固定在元数据区，
-更新一个 region 就必须**就地重写**那一页——NAND 只能 1→0，二次编程 = 新数据 AND 旧数据
-= 静默损坏。所以写过的 region 必须**追加**到新的位置。
-
-于是产生两个问题：
-
-1. **位置会变**：region 从固定页迁到日志块，再从日志块迁到另一个日志块。没有索引，
- 每次 L2P 读都要全盘找。
-2. **旧位置要回收**：日志块写满后要换块；旧块上的 region 全部搬走后才能擦。没有引用计数，
- 擦掉仍被引用的块 = 映射永久丢失。
-
-**Metadata Directory 就是“region → 当前位置”的索引**：
-`(type, id) → PBA`。它自己也要持久化，否则重启后索引丢失；但索引不能自己指向自己，
-所以它用**固定块池里的全量快照（目录检查点）**落盘。
-
-#### 3.5.2 职责与边界
-
-| 做 | 不做 |
-|---|---|
-| 固定元数据区布局（块号/池大小/记录页数/介质版本） | L2P cache 的替换策略（§3.6） |
-| Directory 的查找/更新/落盘（目录检查点） | Journal 记录格式与回放（§3.7） |
-| L2P 日志块的追加/提交/回收/压缩 | Checkpoint 的阶段编排（§3.8） |
-| 通用元数据 record 池原语（`metadata_ring_*`） | 块分配（调用 `alc_op_alloc_log_block`，§3.2） |
-| 元数据块判据判定 | 坏块内容判定（§3.3） |
-
-**上游调用者**：
-
-| 调用者 | 用的接口 |
-|---|---|
-| `l2p_cache.c` | `lookup` / `append_slot` / `commit_region` / `snapshot` 前的 Directory |
-| `checkpoint.c` | `metadata_ring_*`、`dir_ckpt_prepare/page/commit` |
-| `bbt.c` | `metadata_ring_*`（固定块池） |
-| `power_failure_recovery.c` | `md_load`、元数据块判据 |
-| `ftl.c` | `md_handle`（后台 job） |
-
-#### 3.5.3 元数据位置模型
-
-| 对象 | 位置 | 谁写 | 读回含义 |
-|---|---|---|---|
-| **L2P region（未映射）** | Directory 条目 = `NAND_PBA_INVALID` | 无（`fill_fixed` 预登记） | 该 region 从未写过；不读 NAND |
-| **L2P 日志块** | **固定预留区 46..93/plane** | `l2p_flush_kick` 追加 | 最新一份 region 页 |
-| **目录检查点** | 固定池 0..31 | Directory 快照 job / CP | Directory 全量快照 |
-| **Checkpoint** | 固定池 32..39 | CP job | L2P 水位 + 块元数据快照 + 磨损快照 |
-| **BBT** | 固定池 40..41 | BBT job | 坏块位图 |
-| **Journal** | 固定池 42..45 | Journal job | L2P 增量日志 |
-
-两类写模型：
-
-- **固定池（目录检查点/CP/BBT）**：record 池，块内轮转，先擦后写，最新有效胜；Journal 是页环形。
- 每条 record 带单调 sequence；读 = 找“整条校验通过”中 sequence 最大者。
-- **L2P 日志区（固定预留）**：一页一个 region 副本，只追加；每个 region 一次 flush
- 写**主+备两页**（`L2P_REGION_COPIES = 2`，两份都成功才提交 Directory）；块满从固定区
- 取下一块；旧块由 live 位图 归零后回收（擦后置 NONE）。未映射的 region 没有物理页，
- 也没有"固定回退位置"。该区与目录检查点/CP/BBT/Journal 一样属于固定元数据，容量已扣除。
-
-#### 3.5.4 结构与字段
-
-**`md_entry_s`（7 B，packed）**
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `type` | 1 B | `METADATA_TYPE_L2P_REGION / JOURNAL / CHECKPOINT / BBT`（当前只写 `L2P_REGION`） |
-| `id` | 2 B | L2P region_id；其他类型为 0 |
-| `pba` | 4 B | 物理位置（PBA，自带 ch/ce/lun） |
-
-> entry 存 **PBA** 而不是裸 PAA：Directory 不假设“元数据一定在本实例的 ch/ce 上”，
-> 换多 die 布局时不需要改记录格式。
-
-**`md_dir_ckpt_page_s`（恰好 2048 B）**
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `magic` | 4 B | `DIR_CKPT_MAGIC`（"ANDIR"） |
-| `sequence` | 4 B | 同一份 Directory 的各 chunk 相同；单调递增 |
-| `chunk_index` | 2 B | 0..`DIR_CKPT_PAGE_COUNT-1` |
-| `chunk_count` | 2 B | 总页数（= `DIR_CKPT_PAGE_COUNT` = 16，8 主 + 8 备） |
-| `entry_count` | 4 B | 本页有效 entry 数（≤ 256） |
-| `layout_version` | 4 B | 介质版本；不符 ⇒ 本页作废 |
-| `dirty_gen` | 4 B | 本页填充时刻的 Directory 代数（整条 record 要求 16 页全部相同） |
-| `entries[256]` | 1792 B | 256 × 7 B |
-| `padding` | 232 B | 补齐到一页（头 24 B） |
-
-**`md_ring_s`（固定池几何）**
-
-| 字段 | 含义 |
-|---|---|
-| `first_block` | 池首块（per-plane 块号） |
-| `block_count` | 池块数（≥ 2；1 块的池换块会擦掉唯一有效 record） |
-| `pages_per_record` | 一条 record 占几页；块尾不足一条的页不用 |
-| `plane_mask` | 池实际使用的 plane 位图（镜像池 = 全部 plane） |
-
-派生量：`records_per_block = PAGES_PER_BLOCK / pages_per_record`（floor）；
-`total_records = block_count × records_per_block`。
-
-**`md_dir_cache_s`（每实例，CPU-only workspace）**
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `entries[2048]` | 14 KiB | Directory 本体：每个 region 一条 |
-| `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
-| `dir_ckpt_sequence` | 4 B | 当前目录检查点序号 |
-| `dirty` | 1 B | 有未写回目录检查点的变更 |
-| `dirty_gen` | 4 B | Directory 变更代数；每次 `md_entry_update` 自增 |
-| `dir_ckpt_gen` | 4 B | 本次目录检查点写入所覆盖的 `dirty_gen` 快照（过期保护） |
-| `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 live 日志块判据（防御分支 / probe） |
-| `cur_block[PLANE_NUM]` | 2 B × plane | **每 plane 一个**当前日志块 gblock（主副本→plane0、备副本→plane1） |
-| `cur_page[PLANE_NUM]` | 1 B × plane | 该 plane 当前日志块下一可用页 |
-| `cur_valid[PLANE_NUM]` | 1 B × plane | 该 plane 游标是否已建立 |
-| `reclaim_pending` / `count` / `scan` | ~516 B | 待回收位图 + 计数 + 轮转起点 |
-| `handle` | ~2.2 KiB | 回收/压缩 handle（含 `cp_buf[2048]`） |
-| `dir_ckpt_write_idx` | 2 B | 目录检查点池写点槽位 |
-| `dir_ckpt_cursor_valid` | 1 B | 目录检查点游标是否已定位 |
-| `topo` | 3 B | 元数据所在芯片路由 |
-| `alloc` / `total_writes` | 2 指针 | allocator + total_writes 窄指针（init 绑定；无端口结构体） |
-
-**`md_handle_s` 关键字段**
-
-| 字段 | 含义 |
-|---|---|
-| `phase` | `md_handle_phase_e`（见 §3.5.8） |
-| `waiting` | 有命令在飞；完成服务函数清 |
-| `compact_wanted` | 活日志块数超水位（>64），请求压缩 |
-| `dir_ckpt` | `md_dir_ckpt_write_s`（与 Checkpoint job 共用）：池几何/基址/槽位/序号/页序/写结果/擦除判定/持有者 |
-| `victim` / `region_id` / `cur_region` / `moved` | 压缩的 victim / 游标 / 当前 region / 已搬数 |
-| `reclaim_gblock` | 在飞擦除的 gblock（待回收集合在 dir 的 `reclaim_pending` 位图里） |
-| `stall_ms` | 连续提交不出去（> `FTL_SUBMIT_TIMEOUT_MS` 中止） |
-| `timed_out` / `timeout_phase` | 超时归因（status 上报） |
-| `reclaimed_count` / `error` | 单调回收计数 / 最近一次中止归因 |
-| `start_ms` / `log_ms` | 心跳基准 |
-| `cur_source` / `cur_fallback` | 压缩读的源副本 / 是否已降级读过另一副本 |
-| `slot` | 压缩搬移已取到、待写的槽 |
-| `cp_buf[L2P_REGION_SIZE]` | victim region 页搬运缓冲（必须常驻，异步读完成与写之间跨多轮） |
-
-**不变量**
-
-1. **`entries` 容量 = 每实例 region 数**：每个 region 都必须能登记自己的位置；
- 容量不足会让“满则丢弃”丢掉已落到日志块的 region，重启后回落到“未映射” = 更新永久丢失。
-2. **`l2p_live[g]` = 最新位置在 g 上的 region 数**。归零才可擦；各 plane 的当前写块除外。
-3. **`append_slot` 只取槽、不登记**；`commit_region` 只登记。两者分离是崩溃安全前提。
-4. **目录检查点先于 victim 擦除**：压缩的顺序是“搬移 → 登记 → 目录检查点落盘 → 擦 victim → 归还”。
-5. **`entries` 存 PBA，不存 PAA**；读取一律经 `lookup`，不现场手写位置公式。
-6. **未映射没有物理位置**：`append_slot` 分配失败时返回 `NAND_PBA_INVALID`；不存在可回退的固定块。
-
-#### 3.5.5 地址模型：ring / locate / prepare
-
-**ring 地址计算**
-
-```text
-records_per_block = PAGES_PER_BLOCK / pages_per_record
-block = ring->first_block + record_idx / records_per_block
-page = (record_idx % records_per_block) * pages_per_record + page_in_record
-plane = ring->plane
-return pba_make(topo->ch, topo->ce, topo->lun, block, plane, page, 0)
-```
-
-三个原语的分工：
-
-| 原语 | 输入 | 输出 | 是否碰介质 |
-|---|---|---|---|
-| ring 地址计算 | 槽位 | 芯片地址 | 否 |
-| `md_ring_locate` | 池几何 + 探针 | 最新有效槽 + sequence + 下一写槽 | **只读** |
-| `md_ring_prepare_addr` | 写点槽 | 地址 + 是否需要先擦块 | 否 |
-| `md_ring_prepare_write` | 写点槽 | 地址（需要时**同步擦**） | 是 |
-
-`locate` 的快路径（利用“record 块内页对齐 + 池内顺序写”两个不变量，只读 O(块数) 页）：
-
-```text
-① 逐块读该块“末条 record”的廉价探针（只读第 0 页取 sequence）
-② 第一个末条无效的块 = 游标块；所有块末条都有效（写满一圈）⇒ 游标块 = (最大 sequence 块 + 1) % N
-③ 游标块内降序找最后一条有效 record
-④ 写点 = 该 record 的下一槽；块内无有效 record ⇒ 块槽 0
-⑤ 候选 = {全池最大 sequence 的末条, 游标块末条}，按 sequence 降序做整条校验
-⑥ 快路径全失败 ⇒ 慢路径全池扫描（只在损坏时付全池代价）
-```
-
-**L2P 日志块的地址**不是 ring record：一页一个 region 副本。每次 flush 从**两个
-plane 各取一页**（主副本 → plane0 的当前块，备副本 → plane1 的当前块），每 plane
-的追加游标是 `(cur_block[p], cur_page[p])`。这样单个 plane 的块被擦/写坏时，另一
-plane 的副本仍完整（的 L2 冗余）；每个 plane 的块写满 64 页才换块。
-任一 plane 的块满/无游标时换**该 plane** 的块：
-
-```text
-md_slot_pair_append
- ├─ 两 plane 各剩余 ≥ 1 页 ⇒ 各返回一页 PBA，page[p] += 1
- ├─ 某 plane 剩余不足 1 页/无当前块
- │ ├─ 该 plane 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
- │ ├─ md_reclaim_mark_all：把 l2p_live==0 且非当前的 LOG 块**只登记**进
- │ │      reclaim_pending 位图（不擦；擦除由后台 job 异步做）
- │ ├─ md_log_rotate(dir, alloc, plane) 换块（固定区优先，满时借 OP）
- │ ├─ 设置 `cur.block[plane]` / `cur.page[plane]=0` / `cur.valid[plane]=true`
- │ └─ 各 plane 的 cur.block/page/valid 独立维护
- └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN，
-  等后台 job 擦完待回收块后重试）
-```
-
-**plane 由写序轮转决定，与 region_id 无关**。region 落在哪个 plane 完全由 PBA 携带，
-读回一律经 Directory 查 PBA，所以不存在“region 奇偶决定 plane”的第二套坐标。
-
-#### 3.5.6 读路径：lookup 与启动加载
-
-**运行期 lookup**：
-
-```mermaid
-flowchart LR
- A["l2p_read miss"] --> B["l2p_load_start"]
- B --> C["owner = owner 解析(global_region) → l2p_owner_s"]
- C --> D["local_region 为 global DIE_MAX"]
- D --> E["md_entry_find L2P_REGION, local_region"]
- E --> F{"pba 有效"}
- F -- "是" --> G["ftl_async_read_page pba"]
- G --> I["ftl_l2p_callback 填入 cache line：LOADING → CLEAN"]
- F -- "否" --> H["line 直接置 CLEAN（entries 全 INVALID，不读 NAND）"]
-```
-
-`md_entry_find` 是 `entries[]` 线性扫描（2048 条）。**它不读 NAND**——Directory
-是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令（未映射则根本不发命令）。
-元数据块判据的 live 日志块判定改用 `l2p_live[g]`（O(1)，不再扫 entries）。
-
-**启动加载**（`md_load`）：
-
-```text
-① md_fixed_fill：铺基础层（与 md_init 共用）
- 对 r = 0..2047：entries[r] = {type=L2P_REGION, id=r, pba=NAND_PBA_INVALID}
- （= 未映射；没有物理页，也没有固定回退位置）
-② md_ring_locate(目录检查点池) 找最新“整条校验通过”的 record
-③ 读胜者各页，逐页校验 chunk_index / sequence / layout_version，装配覆盖对应区间
- - 镜像池：每页先读 P0 副本；不可信时回退 P1 副本（sequence 必须等于被选中的
-  record sequence，绝不跨 record 拼页）
-④ 由装配后的 entries 重建 l2p_live[]：每个合法 pba 的 region 计数一次。
- - 日志块现在在**固定预留区 46..93/plane**；身份仍按分区表判，**不要**写死
-  "block >= 某常量"（布局随介质版本演进）
-⑤ 日志游标置无效（cur_block_valid=false）——首次追加从**固定 L2P 日志区**取一个
- 已擦净块（`md_log_alloc`），绝不复用可能已编程的旧页；**目录检查点游标反向
- 恢复**：locate 已给出 `dir_ckpt_write_idx` / `dir_ckpt_sequence`，直接置
- `dir_ckpt_cursor_valid=true`，避免首次 flush 再扫一遍池
-```
-
-无有效目录检查点 ⇒ 返回错误，调用者转 `md_init`（fresh）或格式化（版本判据）。
-
-#### 3.5.7 写路径：append → 写页 → commit
-
-```mermaid
-sequenceDiagram
- participant C as L2P cache
- participant D as Directory
- participant N as NAND
- participant J as metadata job
-
- C->>D: md_slot_pair_append
- alt 当前块剩余 ≥ 2 页
-  D->>D: 两 plane 各返回一页 PBA, page[p] 加一
- else 块满/无当前块
-  D->>D: md_reclaim_mark_all 只登记零活 LOG 块（不擦）
-  D->>D: md_log_rotate 换块（固定区优先，满时借 OP）
-  D->>D: 更新 cur_block[p] / page[p]
- end
- D-->>C: 两页 PBA（主/备），失败为 false
- C->>N: 写主副本页异步
- N-->>C: 完成
- C->>N: 写备副本页异步（主成功后串行）
- N-->>C: 完成
- alt 两份都成功
-  C->>D: md_commit_region(MD_COMMIT_PAIR)
-  D->>D: 更新 region 的主/备 pba
-  D->>D: l2p_live 旧各减一、新各加一
-  D->>D: dirty 为 1, 旧块归零则置 reclaim_pending 位
- else 写失败
-  C->>C: 行回 DIRTY, Directory 不登记
- end
- J->>J: md_handle 消费 reclaim_pending / 压缩 compact_wanted
-```
-
-**为什么必须“先写后登记”**：
-
-- 写失败/掉电在写页之前：槽位作废，Directory 仍指旧位置；旧页是上一份完整快照 ⇒ 映射回退一版，
- 但 Journal 里有这次更新（写确认路径先 `jrn_append`），回放可恢复。
-- 写成功但掉电在 commit 之前：新页是“孤儿”，Directory 仍指旧位置；同样由 Journal 恢复。
-- **绝不出现**“Directory 指向未写页”——这是掉电安全的关键。
-
-**`md_entry_update` 的定位**：它是“直接覆盖 entry”的低层写入，供固定层铺设、
-目录检查点装配、测试使用；运行期 L2P region 的更新走 `commit_region`，以维护 live 位图。
-两者不要混用。
-
-#### 3.5.8 live 位图、回收与压缩
-
-**为什么需要 live 位图**：一个日志块装 64 页 = 64 个 region 的最新位置。只有当这 64 个
-region 全部被改写、最新位置都迁到别处后，这个块才没有活引用，才能擦。`l2p_live[g]`
-就是这个计数；它只在 `commit_region` 里增减，并在 `md_load` 里重建。
-
-**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足五条：
-
-1. `l2p_live[g] == 0` **且该块上没有在飞写回的槽位预留**（`md_slot_reserved`，见下）；
-2. `g` 不是任一 plane 的 `cur.block[plane]`（已满且零活的当前块会先被摘掉当前身份）；
-3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）；
-4. **`dir->dirty == false`**（on-media 目录检查点已覆盖当前 Directory；见下方 ③→④ 契约）。
-
-⚠ **条件 1 的后半句不可省**：live 位图 只统计**已 commit** 的位置。写回从
-`md_slot_pair_append` 取槽到 commit 之间，槽里的数据还在写命令上、Directory 尚未
-登记 ⇒ 该块可能 `l2p_live == 0`，但其实马上就会有活 region 落回来。此时换块/擦除
-会把在飞数据连同其落点一起丢掉，写完成后的 commit 再把 Directory 指向已擦页
-（重启 region 读失败、映射丢失，）。所以在飞写回在 `slot_resv[]` 里占一个
-表项，块的"可回收"判据同时看它；commit/失败后释放。
-
-登记点：`commit_region` 旧位置归零、`append_slot` 换走零活旧块、换块时的
-回收位图标记 扫描、压缩/擦除失败重试。**登记只置位，不碰 NAND**；
-`md_handle` 的 RECLAIM 阶段逐块异步擦除，成功才清位并归还**固定 L2P 日志区**，
-失败保留位下轮重试。运行期没有任何同步 `tERASE`（3 ms 会击穿服务预算）。
-
-⚠ **登记 ≠ 可擦**：普通 L2P flush 在 `commit_region` 里登记回收候选时，新位置还只在
-RAM Directory 里，on-media 目录检查点仍指向旧块。因此 `MD_JOB_RECLAIM` 在擦除前要求
-`dir->dirty == false`；脏则先走 `CP_DIR_CKPT_*` 写一条目录检查点（`dir_ckpt_for_reclaim`），
-落盘成功后才回到 RECLAIM。压缩路径原本就是 `CP_DIR_CKPT → CP_RECLAIM`，现在两条路径
-共用同一条 ③→④ 契约。`dirty_gen` / `dir_ckpt_gen` 保证写入期间有新 commit 时目录检查点
-不会被误标为"已覆盖当前 Directory"；目录检查点成功且未过期后才调用
-回收位图标记，保证新登记的候选都不在刚写下的目录检查点引用集合里。
-
-**压缩**（抗碎片）：日志区固定 96 块（两份活数据 64 + 工作余量 32）；随机 flush 会让很多块只剩 1–2 个活 region，
-live 位图 长期不归零。触发判据是**活日志块数 > `L2P_LOG_COMPACT_TRIGGER`（64）**，
-不是用户 Free Pool 水位；压缩挑**活 region 最少**的 victim，把它（以及后续仍能装进
-同一新生块的稀疏 victim）连续搬进当前块，落目录检查点后擦 victim。一次新生块可退多个块。
-
-
-`md_handle_s` 状态机：
-
-```mermaid
-flowchart TD
- IDLE["IDLE"]
- RECLAIM["RECLAIM"]
- CP_READ["CP_READ"]
- CP_WRITE["CP_WRITE"]
- APREP["CP_DIR_CKPT_PREP"]
- AERASE["CP_DIR_CKPT_ERASE"]
- AWRITE["CP_DIR_CKPT_WRITE"]
- CPRECLAIM["CP_RECLAIM"]
- DONE["DONE"]
- IDLE -- "reclaim_pending 非空且 dirty" --> APREP
- IDLE -- "reclaim_pending 非空且目录检查点已同步" --> RECLAIM
- APREP -- "for_reclaim + 目录检查点已落盘" --> RECLAIM
- RECLAIM -- "异步擦完清位归还" --> IDLE
- IDLE -- "compact_wanted" --> CP_READ
- CP_READ -- "读到一条活 region" --> CP_WRITE
- CP_WRITE -- "写成功继续下一条" --> CP_READ
- CP_READ -- "victim 扫完换下一个稀疏 victim" --> CP_READ
- CP_READ -- "victim 扫完无可装下候选" --> APREP
- APREP -- "写点需换块" --> AERASE
- APREP -- "无需擦" --> AWRITE
- AERASE --> AWRITE
- AWRITE -- "所有分页写完" --> CPRECLAIM
- CPRECLAIM -- "victim 擦完归还" --> DONE
- DONE --> IDLE
-```
-
-**顺序契约（不可倒）**：
-
-```text
-① 搬移 victim 的活 region → ② commit 到新位置 → ③ 写目录检查点（Directory 落盘）
-→ ④ 擦 victim → ⑤ 归还固定 L2P 日志区（置 NONE，不回 Free Pool）
-```
-
-③ 必须早于 ④：否则掉电后目录检查点仍指向已擦块，那些 region 的映射永久丢失。
-**普通回收**（没有搬移，只有 ③→④）同样适用：`commit_region` 释放旧日志块时就会登记
-回收候选，但此时新位置只在 RAM Directory 里；所以 RECLAIM 必须先让目录检查点追上
-Directory（`dir_ckpt_for_reclaim`），否则就是同一个掉电丢映射。
-
-`dirty_gen / dir_ckpt_gen` 是这条契约的并发保护：目录检查点分 16 页异步写，期间可能有新的
-`commit_region`。`dir_ckpt_prepare` 记录当时的 `dirty_gen`，`dir_ckpt_commit` 只有
-`ok && dirty_gen == dir_ckpt_gen` 才清 dirty；否则保留 dirty，写下一整条目录检查点。
-
-
-**失败不回滚**：任一 phase 失败 ⇒ 中止。已登记的 region 指向新页，未搬的仍指向 victim
-（victim 不擦）⇒ 两边都有效，下次换块时重来。这是“宁可多占一个块，不丢映射”的取舍。
-
-**服务函数不推进状态机**：`ftl_metadata_callback` 只记结果、release、改 phase；推进留给下一轮
-`md_handle`。原因是 `CP_DIR_CKPT_PREP` 在游标未建立时会**同步**扫池定位，
-在完成派发里跑就是嵌套泵。
-
-#### 3.5.9 目录检查点：Directory 的全量快照
-
-| 项 | 值/行为 |
-|---|---|
-| 一条 record | `DIR_CKPT_PAGE_COUNT = 16` 页（8 主 + 8 备），覆盖全部 2048 条 entry |
-| 每页 | 自包含：magic + sequence + chunk_index + chunk_count + entry_count + layout_version + dirty_gen + 256 条 entry |
-| 池 | 32 块，每块 4 条 record（64 页 / 16 页），共 128 个槽位 |
-| 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
-| 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
-| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`dir_ckpt_for_reclaim`）；Checkpoint 前也要求 flush；不在 `md_entry_update` 里同步做 |
-| CRC | 无本层 CRC；完整性由下层 FC 的 per-CW CRC + ECC 保证 |
-
-三段式（所有落盘站点统一）：
-
-```text
-md_dir_ckpt_write_begin(dir, &w, owner) ← w = {ring, base, idx, seq, need_erase, owner}
- ├─ 定位游标 + 取槽 + 自增 sequence；判定是否需先擦块
- └─ 返回 READY / CLEAN（不脏，跳过）/ BUSY（另一 writer 在写）/ FAILED
-[metadata_dir_ckpt_erase] ← 仅 w.need_erase
-md_dir_ckpt_page(dir, w.seq, chunk, &page) × 16 ← 纯 RAM 组页（8 主 + 8 备）
-写 16 页（异步镜像写）
-md_dir_ckpt_commit(dir, &w)
- ├─ 无论成败推进游标（半编程槽不可复用），并清 w.owner（之后的 abort 为 no-op）
- └─ ok **且** dirty_gen == covered_gen 才清 dirty；失败/过期整条作废，保留 dirty
-```
-
-**torn write**：单页损坏只让该页作废；一条 record 要求所有页 sequence 一致，
-所以半条 record 不会被采用，旧 record 仍在池里可用。
-
-**“过期”保护**：prepare 时记下 `dir_ckpt_gen = dirty_gen`；16 页异步写期间若有新的
-`commit_region`，`dirty_gen` 会前进。commit 发现不相等时保留 dirty，下一次 job
-在新槽重写整条；**不允许**把“旧快照 + 新变更”误标为已落盘（否则回收会擦掉
-目录检查点仍引用的旧块）。
-
-#### 3.5.10 与 L2P cache / Checkpoint 的交界
-
-| 交界 | 行为 |
-|---|---|
-| `l2p_flush_kick` | `append_slot` → 写 region 页 → `ftl_l2p_callback` 成功 → `commit_region` |
-| `l2p_owner_bitmap_snapshot` | Checkpoint 起点取本 die 的局部脏位图；Directory 不参与 |
-| `md_is_busy` | CP 的 `cp_regions_flush` 用它区分“压缩在推进”与“真卡死”，不误计 stall |
-| CP 的目录检查点阶段 | `md_dir_ckpt_prepare/page/commit`，与压缩 job 共用同一套三段式 |
-| 共享 cache 的 owner | owner 解析返回 `l2p_owner_s {die, metadata_dir, alloc, topo}`；不返回整个 `ftl_ctx_s` |
-
-**元数据块判据的三条分支**（full metadata rebuild / 建池共用）：
-
-1. **固定分区**：遍历运行期分区表按 `first_block/block_count` 判区间；
- 固定块号各 die 相同，**与 plane 无关**。L2P 日志区（46..93）也在这张表里，
- 正常路径由本分支命中。
-2. **已登记日志块**（防御分支）：扫 `entries[]` 找 `type=L2P_REGION` 且 pba 落在
- **固定区之外**的块——v10 正常介质不会出现，只用于**旧布局/损坏 Directory** 的
- 兼容判定；必须带 plane 比较（同一块号在另一 plane 可能是用户数据）。
-3. **当前游标块**（防御分支）：当前写块 `cur.block[plane]` 可能还没有任何 region 指向它；
- 同样必须带 plane 比较。它也在固定区内，分支 1 已覆盖。
-
-漏掉 2/3 的 plane 比较会把另一 plane 的同号块一起排除——它既进不了 Free Pool，
-又被 full metadata rebuild 跳过，落在任何池之外（容量白丢）。
-
-#### 3.5.11 失败语义与掉电点
-
-| 掉电/失败点 | 介质状态 | 恢复结果 |
-|---|---|---|
-| `append_slot` 之后、写页之前 | 槽位已推进，页仍是擦除态 | 该槽作废；Directory 指旧位置；Journal 回放恢复映射 |
-| 写页成功、`commit_region` 之前 | 新页有数据，Directory 未登记 | 新页成孤儿；Directory 指旧位置；Journal 回放恢复 |
-| `commit_region` 之后 | Directory 已指向新页 | 目录检查点可能还是旧的 ⇒ boot 从旧目录检查点加载后，靠 Journal 回放补齐；**若该 commit 释放了旧日志块，回收 gate 会先写目录检查点再擦** |
-| 目录检查点写一半 | 部分页新、部分页旧 | 整条 record 校验失败；旧 record 仍有效 |
-| 目录检查点写入期间有新 commit | 新 entry 不在本条 record 里 | `dirty_gen != dir_ckpt_gen` ⇒ commit 不清 dirty；job 在下一槽重写整条，期间**不允许**回收 |
-| 目录检查点已落盘、擦 victim 之前 | 新位置已登记且落盘 | victim 未擦，映射完整；下次压缩重来 |
-| 擦 victim 中掉电 | victim 部分块擦除 | `l2p_live == 0` 才擦，且目录检查点已先落盘 ⇒ 无映射指向 victim |
-| 回收日志块时掉电 | 无活 region 的块被擦 | 仅在 `l2p_live == 0`、目录检查点已覆盖当前 Directory（`!dirty`）时擦；满足后无映射引用它，安全 |
-| 目录检查点池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效的目录检查点；最坏走 full metadata rebuild |
-| 介质版本不符 | 记录作废 | `pfr_media_format` 全片格式化（§2.5） |
-
-⚠ **“没有本层 CRC”不是漏洞**：元数据页的 FC CRC 由 `FTL_PAGE_CFG_META` 统一开启；
-CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看似成功”的假阳性。
-
-#### 3.5.12 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `DIR_CKPT_POOL_BLOCKS` | 32（0..31） |
-| `DIR_CKPT_ENTRIES_PER_PAGE` | 256 |
-| `DIR_CKPT_PAGE_COUNT` | 16（主 8 + 备 8） |
-| `DIR_CKPT_RECORDS_PER_BLOCK` | 4 |
-| `CHECKPOINT_POOL_BLOCKS` | 8（32..39） |
-| `BBT_POOL_BLOCKS` | 2（40..41） |
-| `JOURNAL_BLOCKS` | `CW_NUM` = 4（42..45） |
-| `L2P_LOG_IDEAL_BLOCKS` | 32（4 MiB 表 ÷ 64 页/块） |
-| `L2P_LOG_BLOCKS_PER_PLANE` | 48（总 96 gblock = 12 MiB：2 份副本 + 1× 余量） |
-| `L2P_LOG_BLOCK0` / `FTL_METADATA_AREA_END` | 46 / 98（per-plane） |
-| `L2P_LOG_COMPACT_TRIGGER` | 64（两份活数据 = 2× ideal 32） |
-| `METADATA_DIR_ENTRIES` | 2048 |
-| `md_entry_s` | 7 B |
-| `md_dir_ckpt_page_s` | 2048 B |
-| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
-| 目录检查点触发 | `dirty` 置位（元数据 job 异步） |
-
-#### 3.5.13 主流对照
-
-“固定根（root/目录检查点）+ 专用元数据块池 + 日志区 + Directory”是主控固件的常见形态：
-固定根给启动一个确定的查找起点，日志区吸收高频更新，Directory 追踪最新位置。
-日志区本身是**固定预留**（46..93/plane），与目录检查点/CP/BBT 同属固定元数据；
-这是“元数据独立、有界、容量扣除”的主流原则（SPDK FTL：nvcache 独立 bdev + 每 band
-尾部 P2L；spare 在 device formation 时从 surfaced capacity 扣除）。
-具体块数/放置是本仓自定，不冒充行业统一数值。
-
-固定池为什么必须环形轮转、池深如何影响单块磨损与启动扫描，见 §2.3.7。
-
-DRAM-less 侧的关键同构是 **flash reverse-mapping**：不常驻逐页有效位图，
-靠页内 META + L2P 反查判有效（§3.13）。这与 Directory 是两件事：Directory 管
-“region 页在哪”，META 管“页内某 CW 是否仍被 L2P 指向”。
-
----
-
-<a id="s3-6" name="s3-6"></a>
-
-### 3.6 L2P Cache（l2p_cache）
-
-#### 3.6.1 背景与需求
-
-L2P 全表 4 MiB，片上 SRAM 只能拿出约 128 KiB 做缓存。没有 cache，**每一次** LBA 访问
-都要先读一页 NAND 取映射——读放大不可接受，写路径也要先读后改。
-
-Cache 带来三个新问题，模块必须正面回答：
-
-1. **未命中怎么办**：同步等 NAND 会钉住整个完成泵；本仓选择**异步加载**——
- 起一条读命令、返回 `FTL_AGAIN`、调用者下轮重试。
-2. **脏行什么时候写回**：写回是整页 2 KiB（region 粒度），不能就地覆盖；只能追加到
- 日志块（§3.5）。写回在后台做，前台不感知。
-3. **工作集远大于 cache 怎么办**：全盘随机访问时 miss 率接近 100%，驱逐→写回→加载
- 反复，称为 thrashing。需要检测并降级，把 NAND 带宽让给前台。
-
-#### 3.6.2 职责与边界
-
-- **做**：64 行 cache、CLOCK 替换、三态读/写、异步载入/写回、全局 region 脏位图、
- thrashing 检测、owner 解析（共享 cache 跨 LUN）、**顺序读触发的下一 region 预取**
- （best-effort，不制造写回）。
-- **不做**：不决定 region 页落在哪个物理位置（§3.5）；不写 Journal（§3.7）；
- 不决定 Checkpoint 时机（§3.8）。
-- **共享模型**：一个 `(ch, ce)` 一份 cache，同 `(ch,ce)` 下的多个 LUN 共用；
- 每行用**全局 region** 作键，load/flush 时通过 owner 解析解析到 `l2p_owner_s`。
-- **后台入口**：L2P 推进只处理本 owner 的 DIRTY 行；
- 档位→`max_kick` 的 `static const` 表在模块内，`thrashing` 降级也在模块内判定。
- 同步逃生口 `*_sync` 自己用 drain deadline，不经过本入口。
-
-#### 3.6.3 结构与不变量
-
-`l2p_cache_line_s`：
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `entries[512]` | 2 KiB | region 的 512 条 PBA |
-| `region_id` | 4 B | **全局** region 编号 |
-| `state` | 1 B | INVALID / CLEAN / DIRTY / FLUSHING / LOADING |
-| `access_count` | 2 B | CLOCK 访问计数 |
-| `fresh` | 1 B | 本次加载正是为当前访问而起；首次触碰不计命中 |
-| `load_fail_count` | 1 B | 同一 region 连续加载失败次数（`L2P_LOAD_RETRY_MAX = 3`） |
-| `degraded` | 1 B | 最近一次加载在重试耗尽后降级为“全未映射”；cache 级 `region_degraded_bitmap` 是权威（行驱逐后仍保留） |
-| `flush_pba[2]` | 8 B | 双副本写回的两个槽（0=主 / 1=备），一次 pair 预留 |
-| `flush_issued` / `flush_done` | 各 1 B | 已提交 / 已完成副数（串行：先主后备） |
-| `flush_fail` | 1 B | 任一副本失败 ⇒ 不提交 Directory |
-| `load_pba` | 4 B | 在飞/最近一次加载的 PBA |
-| `load_use_backup` | 1 B | 本次加载读的是备份副本（成功即交换主备） |
-| `prefetch` | 1 B | 本行由顺序读预取发起；完成时 fresh=0，首次 host 命中计 hit 并清标志 |
-
-`l2p_cache_s`：
-
-| 字段 | 含义 |
-|---|---|
-| `lines[64]` | 约 128 KiB |
-| `clock_hand` | CLOCK 指针 |
-| `hit_count` / `miss_count` | 开机累计（观测） |
-| `window_access` / `window_miss` / `miss_pct` / `thrashing` | 窗口 miss 率 + 滞回 |
-| `region_dirty_bitmap[]` | **全局** region 脏位；Checkpoint 按 owner 过滤快照 |
-| `load_inflight` / `flush_inflight` | 在飞计数；后者是写回背压闸门 |
-| `ch` / `ce` | 本 cache 服务范围 |
-| owner 解析 / `owner_ctx` | 全局 region → `l2p_owner_s`（die / metadata_dir / alloc / topo） |
-
-**状态机**：
-
-```mermaid
-flowchart LR
- INVALID["INVALID"]
- LOADING["LOADING"]
- CLEAN["CLEAN"]
- DIRTY["DIRTY"]
- FLUSHING["FLUSHING"]
- INVALID -- "miss 起异步读" --> LOADING
- LOADING -- "加载完成" --> CLEAN
- CLEAN -- "写命中" --> DIRTY
- DIRTY -- "flush_kick" --> FLUSHING
- FLUSHING -- "写成功" --> CLEAN
- FLUSHING -- "写失败" --> DIRTY
- CLEAN -- "驱逐" --> INVALID
- DIRTY -- "驱逐时踢一次 flush" --> DIRTY
-```
-
-**不变量**：
-
-1. **同一 region 只有一行**。`find` 匹配 CLEAN/DIRTY/FLUSHING/LOADING，只排除 INVALID；
- 否则 FLUSHING 窗口会为同一 region 再分配一行 ⇒ 两行分叉。
-2. **FLUSHING 可读不可写**：entries 是有效快照，读照常命中；写会让“落盘的是旧快照、
- RAM 是新值”分叉 ⇒ 写一律 `FTL_AGAIN`。
-3. **LOADING 不可读不可写**：entries 尚未有效。
-4. **写路径两遍式**：先 `ready` 再 `write`；`write` 遇到未驻留的 region 只起加载、不写。
- 一遍式会静默丢更新。
-5. **`flush_inflight` 是共享 credit 池**：上限 4，防止写回把 FC 命令/缓冲池吃光。
-6. **同步逃生口只许结构性同步上下文**：开机、CLI、`fl`、CP；服务函数禁止调用
- （`l2p_sync_pump` 有 `ftl_op_is_in_dispatch==0` 断言）。
-7. **降级不是“合法未映射”**：连续 `L2P_LOAD_RETRY_MAX` 次加载失败（主备两份都读不出）
- 后，行置 CLEAN + entries 全 INVALID + `degraded = 1`，并置 cache 级
- `region_degraded_bitmap`（行被驱逐/重载后仍能识别）。
- - **host 读**：`ftl_issue_subop` 在 `p == INVALID` 时查 降级 region 判据，
-  命中返回 `FTL_ERROR`（主机看到读错误），不再静默零填；
- - **开机恢复**：Journal 回放 / `probe` 用 降级 region 判据 识别，
-  走范围化恢复（保留块元数据快照，`bit=scoped`），不再回退 full metadata rebuild
-  。
-8. **区域写回遵守 WAL 次序**：行记录其映射更新依赖的 Journal 序号上界
- `dirty_seq`（= 更新后的 `sequence_counter`）；`l2p_flush_kick` 只有在 Journal 的
- **落盘水位** `persisted_seq ≥ dirty_seq` 时才提交区域页，否则返回 `FTL_AGAIN` 退让
- （计数 `wal_defer`，`info` 的 `wd=`）。理由：掉电时若「区域页已落盘、Journal 页未落盘」，
- region 里的新映射会生效，而 `valid_count` 只有 CP 快照 + 存活回放的数字 ⇒ 计数偏低
- 甚至为 0 ⇒ dangling、GC 按 `valid_cw==0` 误回收仍被 L2P 引用的块
- ⇒ 静默丢数据。同一条规则也保证 F4（`pfr_boot_apply_region_bitmap`）的
- 「未置位区 NAND 页更旧」假设成立。
- ⚠ **例外：Journal 页写失败时闸门必须放行**。失败页的条目已随
- `page_buf` 清空而丢失，`persisted_seq` 永远覆盖不到那段序号；若继续退让，
- Checkpoint 的区域落盘被永久挡住，而清除失败标记（`write_fail_pending`）的唯一
- 途径就是「CP 完成」⇒ 互相等待。此时 CP 本身就是恢复机制：它完成后快照全部 L2P
- 并截断 Journal，CP 未提交时新写的区域页无人引用，不产生额外损失。
-
-#### 3.6.4 读路径
-
-```mermaid
-flowchart TD
- A["l2p_read"] --> B["region 为 lba 512, idx 为 lba 模 512"]
- B --> C{"查找 region"}
- C -- "LOADING" --> D["返回 FTL_AGAIN"]
- C -- "CLEAN DIRTY FLUSHING" --> E["返回 entries idx fresh 不计命中"]
- C -- "未命中" --> F["miss 加一, note_access 1"]
- F --> G["CLOCK 选 victim"]
- G -- "无可驱逐" --> H["返回 FTL_AGAIN"]
- G -- "有" --> I["起异步加载 lookup 到 read page state 为 LOADING"]
- I --> J["返回 FTL_AGAIN"]
- J --> K["下轮重试"]
- D --> K
-```
-
-`ftl_l2p_callback` 收尾（`ctx = line`）：
-
-- 成功：`ftl_cmd_read_data` 把整页 region 拷进 `entries`；state = CLEAN。
-- 失败：entries 保持全 `NAND_PBA_INVALID`（= 该 region 全部未映射），state = **CLEAN**。
- 这样后续访问走“未映射”路径，不会每次重试加载。
-- 两者都置 `fresh=1`：下一次命中是本次访问的重试，不计 hit（保持 miss 率口径）。
-
-#### 3.6.5 写路径与写回
-
-```text
-l2p_is_ready(lba) ── 未驻留则起加载、返回 false；命中不记账
-l2p_write(lba, pba)
- ├─ 行未就绪（LOADING/FLUSHING）⇒ FTL_AGAIN，不改状态
- ├─ entries[idx] = pba；state = DIRTY；置全局 region 脏位
- └─ fresh? 消费 fresh : access++/hit++
-
-l2p_flush_kick(line)
- ├─ 非 DIRTY / 已在 FLUSHING ⇒ 返回
- ├─ **WAL 闸门**：jrn_persisted_seq < line->dirty_seq 且**无 Journal 写失败**
- │ ⇒ wal_defer++、返回 FTL_AGAIN（写失败时放行，见不变量 8 的例外）
- ├─ flush_inflight 达上限 ⇒ FTL_AGAIN
- ├─ md_slot_pair_append 取两槽（失败 ⇒ 行保持 DIRTY）
- ├─ 起异步写主副本；state = FLUSHING
- ├─ 主副本完成 ⇒ 串行提交备副本
- └─ 完成：两份都成功 ⇒ md_commit_region(MD_COMMIT_PAIR) + CLEAN + 清脏位
-    任一失败 ⇒ 回 DIRTY，Directory 不登记
-```
-
-**CLOCK 驱逐**：
-
-```text
-① FLUSHING / LOADING → 跳过（在飞）
-② DIRTY → 踢一次 flush_kick，跳过本行（不等写回）
-③ INVALID → 直接占用
-④ access_count > 0 → access_count--，下一行
-⑤ access_count == 0 → 回收
-⑥ 扫完一圈无可驱逐 → -1（调用者 FTL_AGAIN）
-```
-
-#### 3.6.6 Thrashing 检测与降级
-
-```text
-每 256 次访问结算一次：miss_pct = window_miss * 100 / window_access
-进入：>= 90%；退出：< 70%（滞回）
-降级动作：停掉后台**主动** flush；脏行只由驱逐路径按需写回
-```
-
-持久性不受影响：L2P 更新在写完成路径里先入 Journal；Checkpoint 也会无条件 flush
-快照内的脏 region。**刻意不做** write-through（整页追加模型下省不掉 load，反而放弃合并收益）。
-**不做无条件预取**：只做顺序读触发、距 region 末尾 64 LBA 内的下一 region 预取；
-`thrashing` / `flush_active` / `trim_active` / 资源不足 / 在飞 load 达 2 时停。
-预取只驱逐 INVALID/CLEAN（遇 DIRTY 跳过，不 kick 写回），不计 miss/hit；预取行
-第一次被 host 命中时才计 hit。
-
-#### 3.6.7 失败语义
-
-| 情况 | 返回值/结果 | 数据影响 |
-|---|---|---|
-| `FTL_AGAIN` | 加载中/背压/行在飞 | 调用者下轮重试；不是错误 |
-| `FTL_OK` + `NAND_PBA_INVALID` | **未映射**（合法结果） | 读路径零填充；写路径分配新位置 |
-| `FTL_ERROR`（越界） | 也回填 `INVALID` | 调用者按未映射处理 |
-| 加载失败 | 行 CLEAN + 全 INVALID + `degraded=1` | 该 region 视为全未映射；不反复重试。**boot 恢复**用 降级 region 判据 区分“合法未映射”与“读失败降级”：后者计入 读错误计数，回退 full metadata rebuild，不再报 `restored` |
-| 写回失败 | 行回 DIRTY | Directory 仍指旧位置；Journal 可恢复 |
-| 所有行在飞 | 驱逐返回 -1 | 调用者 FTL_AGAIN |
-
-#### 3.6.8 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `L2P_CACHE_SIZE` | 64 |
-| `L2P_FLUSH_MAX_INFLIGHT` | 4 |
-| `L2P_THRASH_WINDOW` | 256 |
-| `L2P_THRASH_ENTER_PCT` / `L2P_THRASH_EXIT_PCT` | 90 / 70 |
-| `L2P_SYNC_GUARD_MAX` | 100,000 轮 |
-| `L2P_PREFETCH_MAX_INFLIGHT` | 2 |
-| `FTL_SEQ_PREFETCH_MIN_RUN` / `FTL_SEQ_PREFETCH_AHEAD_LBAS` | 2 / 64 |
-| `L2P_ENTRIES_PER_REGION` | 512 |
-
-#### 3.6.9 主流对照
-
-DRAM-less 主控的 L2P cache 普遍采用“按需加载 + 近似 LRU（CLOCK/2Q）+ write-back”，
-并用日志/快照保一致性；区别在 cache 行数、替换算法、是否共享与是否做 read-ahead。
-**本仓自定**的是 64 行、CLOCK、thrashing 滞回 90/70、“加载失败按全未映射处理”，
-以及顺序读触发的单 region 预取（阈值 2 个请求 / 提前 64 LBA / 最多 2 个在飞）。
-
----
-
-<a id="s3-7" name="s3-7"></a>
-
-### 3.7 Journal（journal）
-
-#### 3.7.1 背景与需求
-
-L2P cache 是 write-back：主机写成功时只改了 RAM，映射还没有写回 NAND。若此时掉电，
-数据在 NAND 上、映射却丢了——数据永久不可达。
-
-Journal 是 **L2P 的增量写前日志**：每次映射变更先追加一条 `(lba, old, new)`，
-再改 cache。掉电后从 Checkpoint 水位之后回放，恢复映射。
-
-没有 Journal 的替代方案是“每次写都同步把 region 页写回 NAND”，代价是每个 512 B 写
-都要写 2 KiB region 页，写放大 4×，且前台等 NAND。Journal 把“持久化”和“写回”解耦：
-Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
-
-#### 3.7.2 职责与边界
-
-- **做**：记录格式（两种页型：16 B 通用条目 / 4 B 顺序流条目）、RAM 页缓冲、异步刷页 job、
- 环形块切换与擦除、回放（两遍扫描）、写指针恢复、截断（plan/commit）。
-- **不做**：不决定 Checkpoint 时机（§3.8）；不管理 region 位置（§3.5）；
- 不决定 L2P cache 替换（§3.6）。
-- **调用者**：写完成路径 Journal 预留 + `jrn_append`（cache 顺序写走 `jrn_seq_ready` +
- `jrn_append_seq`）、GC/WL 的 `MIG_FLUSH_JRN` 屏障、boot 的 `scan/resume/replay`、
- CP 的 `truncate_plan/commit`。
-
-#### 3.7.3 结构与不变量
-
-**页格式**（恰好 2048 B，两种页型由 magic 区分）：
-
-| 页型 | Header | Entries | N |
-|---|---:|---|---:|
-| `JOUR` · LBA 显式（通用：host 写 / GC / TRIM） | 16 B | N × 16 B：lba / old_pba / new_pba / sequence | 127 |
-| `JSEG` · 顺序流映射页（顺序写确认专用） | 16 B | N × 4 B：new_pba（lba = base_lba + 下标） | 508 |
-| Padding | — | 余量 0xFF | — |
-
-页头统一 16 B：magic 4 + page_seq 4 + entry_count 2 + block_seq 2 + base_lba 4；
-`base_lba` 只对 `JSEG` 有效（`JOUR` 恒 0）。
-
-`JRN_ENTRIES_PER_PAGE = (2048 - 16) / 16 = 127`；
-`JRN_SEG_ENTRIES_PER_PAGE = (2048 - 16) / 4 = 508`（都必须推导；写死 128 会写穿 `page_buf`）。
-
-`JSEG` 页的条目坐标全部隐式：`lba = base_lba + k`、`sequence = page_seq + k`。
-`base_lba` **由首条 append 落定**（不在序列 START 时定）：顺序确认按提交序到达，上一段
-的尾页可能在新 START 之后才确认，按首条确认的 LBA 定基准才能与确认序一致。
-两种页型**不混装**：普通条目遇到顺序页会先把它刷出（空页也刷）。
-
-**跨 host 命令续用**：Journal 序列开始在"顺序页已有条目 + 剩余空间 ≥ need +
-`lba == base_lba + 条目数`"时**不刷页**，同一张页继续填到 504 条（63 pair ≈252 KiB）才
-在写路径主动 END。`jrn_seq_room` 是写路径窗口收缩与页满断点的唯一判据；
-`jrn_page_writes` 是页写次数观测口（`info` 的 `jf=`）。依据与端到端取舍见 §3.16.5。
-
-**`l2p_jrn_s` / `jrn_handle_s`**：
-
-| 对象 | 字段 | 含义 |
-|---|---|---|
-| `l2p_jrn_s` | `topo` | 目标芯片路由 |
-| | `alloc` | 坏块查询/标坏走坏块查询 / 标坏（无端口结构体） |
-| | `handle` | `jrn_handle_s`（本模块全部执行状态，见下） |
-| `jrn_handle_s` | `phase` / `need_erase` / `target_*` / `from_*` / `waddr` | 异步刷页 job（IDLE/WRITE/ERASE） |
-| | `current_block` / `current_page` / `current_entry` | RAM 写游标（`current_entry` 为 WORD：顺序页可到 508） |
-| | `page_kind` / `page_base` | 当前页缓冲的页型 / 顺序页基准 LBA（首条 append 落定） |
-| | `sequence_counter` | 全局单调序号 |
-| | `merge_floor` | CP 水位；`sequence < merge_floor` 的条目不得原地合并 |
-| | `pre_erased_block` | 已被 CP 预擦、回切时跳过擦除的块 |
-| | `page_buf[2048]` | 当前页缓冲 |
-| | `checkpoint_needed` / `emergency` | 85% / 95% 水位标志 |
-| | `bad_mask` / `erase_fail_count` / `erase_fail_block` / 环满标志 | 环形块坏块策略（见不变量 6） |
-| | `write_fail_count` / `write_fail_seq` / `write_fail_pending` | 持久性失败观测（F10 屏障） |
-| | `start_ms` / `log_ms` | 心跳基准 |
-
-**不变量**：
-
-1. **页是回放单位**：判据是 `page_seq + entry_count > cp_sequence`，不是只看页首页序号。
- 只比页首会把跨水位那一页整页跳过，丢掉它的新条目。
-2. **同 LBA 合并受 `merge_floor` 约束**：CP 后的覆盖写不能复用 CP 前的 sequence，
- 否则块元数据增量回放按 sequence 过滤时漏记。
-3. **同一块每圈只擦一次**：CP 预擦的块记 `pre_erased_block`，`jrn_handle` 换块擦除
- 回切时跳过擦除。
-4. **单飞行**：`job.phase != IDLE` 时不再起新页写；两条写会争同一页地址。
-5. **回放不信任页内容**：Journal 模块整体不转断言——页头可能因掉电撕裂而非法，
- 属预期情形，返回错误/跳过。
-6. **环形块持续擦除失败的处理**：同一块连续失败 `JRN_ERASE_FAIL_MAX`（3）次 ⇒
- 置 `bad_mask` + 标坏（两个 plane），跳到下一个可用块；全部不可用 ⇒
- 环满标志，停止写入并拒绝新条目（绝不写未擦块，也不再无限重试）。坏块在
- `jrn_ring_scan` 中被跳过，不会把回放误判为“不完整”。
-
-#### 3.7.4 写路径
-
-```mermaid
-flowchart TD
- A["写完成 ftl_confirm_write"] --> B["jrn_append lba, old, new"]
- B --> C{"当前页已有同 LBA 且 sequence 不低于 merge_floor"}
- C -- "是" --> D["就地更新 new_pba 不新增条目不消耗 sequence"]
- C -- "否" --> E["写 entry, sequence 加一, entry_index 加一"]
- E --> F{"页满 127 条"}
- F -- "否" --> G["返回"]
- F -- "是" --> H["jrn_handle 起异步页写"]
- H --> I{"页写完成"}
- I --> J{"需要换块"}
- J -- "否" --> K["推进写指针"]
- J -- "是" --> L["擦下一块跳过 pre_erased_block"]
- L --> K
-```
-
-**host 写确认（capacity reserve）**：`ftl_confirm_write` 在追加前调用
-Journal 预留预留本页 `n` 个槽位（按 mask 最坏情况，留 1 个空槽）。不足时
-Journal 预留只调用 `jrn_freeze` 起**异步**页写并返回 `false`，confirm 直接返
-`FTL_AGAIN` 待入账；**confirm 内不同步刷页、不调 `ftl_sync_submit_wait` / `ftl_op_drain`**。
-预留成功后追加 `n` 条不会触发页满分支，Journal 页由 `jrn_handle` 在后续 service 轮
-异步落盘。Journal 模块**不提供同步刷页出口**。
-
-**屏障**：GC/WL 先在 `MIG_WRITE_SETTLE` 用 Journal 预留预留槽位（不足则挂起），
-F10 屏障走 `MIG_FLUSH_JRN`：`jrn_handle` 冲刷半满页，等 job 空闲 **且
-`write_fail_pending == 0`**。
-页写失败时 pending 会阻止 victim 擦除，直到一次 Checkpoint Header 成功
-（其 journal 水位 ≥ 失败点）把 L2P 落盘后才清除。
-
-#### 3.7.5 回放与恢复
-
-```text
-jrn_replay(journal, cache, cp_sequence, &entries, block_ctx)
- 第一遍：扫 4 × 64 = 256 页，收集 page_seq+entry_count > cp_sequence 的页
-   → replay_pages[256]（栈上 2 KiB；下标必须 uint16_t）
- 第二遍：按 (page_seq, entry_idx) 递增排序，逐页读、逐条应用
-   - l2p_write_sync(lba, new_pba)（开机无人 drain CQ，用同步逃生口）
-   - 写成功后检查 l2p_is_region_degraded(region)：若该行是“加载失败降级”
-   的空基线，说明旧映射不可信 ⇒ block_ctx->ok = 0（回退 full metadata
-   rebuild，不能报 restored；）
-   - block_ctx 有效时同步维护 valid_count：new +1 / old -1
-   （TRIM 只减 old；old == new 跳过）
-   - materialize 失败/越界/下溢 ⇒ ok=0，调用者回退 full metadata rebuild
- Journal 续跑(latest, floor=cp_sequence)：写指针落到最新页之后，序号不回退
-```
-
-**为什么必须恢复写指针**：`jrn_init` 把游标复位到 `(block0, page0)`、序号复位到 1，
-但 NAND 上的环形块**没有被擦**。不接回去会有两个后果：序号从 1 重来 ⇒ 新页排到旧页之后，
-下次开机回放过滤把它们整页丢弃；写指针回到已编程页 ⇒ 二次编程（AND 损坏）。
-
-#### 3.7.6 Journal 自身的掉电保护
-
-| 掉电点 | 现象 | 保护 |
-|---|---|---|
-| A：RAM 缓冲未落盘 | 丢当前页 ≤ 127 条 | 写确认路径已把映射更新交给 Journal；丢的是最近一页，属容忍窗口 |
-| B：页编程中途 | 页面部分烧录 | FC per-CW CRC + ECC；坏页整页丢弃 |
-| C：编程成功但返回途中掉电 | 不知是否成功 | magic + `entry_count` 精确定位；sequence 连续性检查 |
-
-四层：FC 的 CRC/ECC（下层）、Header magic + entry_count、单调 sequence、
-多块环形轮换（不是双写）。Journal 条目本身无独立 CRC——16 B 已被字段占满，
-完整性靠整页 CRC/ECC + 页序判定。
-
-#### 3.7.7 失败语义
-
-| 情况 | 结果 | 数据影响 |
-|---|---|---|
-| 环形写满且 CP 未完成 | `emergency=1`，强制 CP | 前台写入可能被背压 |
-| 截断水位不覆盖全部已写条目 | `JRN_TRUNC_NO_TRUNCATE`，不截断 | 最旧块仍持有回放条目，安全 |
-| 页写失败 | 条目已随页缓冲丢弃；置 `write_fail_pending` + `checkpoint_needed/emergency` | 迁移侧中止且不擦 victim；CP 把当前 L2P 落盘后清 pending |
-| 回放某页读失败 | 跳过该页 | 该页条目丢失；映射回退一版 |
-| 回放基线 region 降级 | 降级 region 判据 命中 ⇒ `block_ctx->ok=0` | 旧映射不可信：回退 full metadata rebuild，不报 restored |
-| 序号不连续 | 在该处截断 | 之后的页不应用 |
-| 顺序页确认坐标断裂 | `jrn_seq_ready` 刷页并返 false ⇒ 确认待入账重试（落新页） | 无丢失；确认 FIFO 保证重试时同批仍连续（§3.16.5） |
-
-#### 3.7.8 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `JOURNAL_BLOCKS` | `CW_NUM` = 4 |
-| `JRN_PAGE_SIZE` | 2048 |
-| `JRN_HEADER_SIZE` | 16 |
-| `JRN_ENTRIES_PER_PAGE` | 127 |
-| `JRN_SEG_ENTRIES_PER_PAGE` | 508 |
-| `JRN_FULL_THRESHOLD` | 85% |
-| `JRN_CRITICAL` | 95% |
-| `JRN_MAGIC` | `0x524F554A` ("JOUR") |
-| `JRN_MAGIC_SEG` | `0x4745534A` ("JSEG") |
-
-#### 3.7.9 主流对照
-
-“写前日志 + 定期快照截断”是数据库与闪存 FTL 共用的崩溃恢复形态；DRAM-less FTL
-把 L2P 增量写进 Journal、用 Checkpoint 限定回放长度，是主流做法（DFTL 等）。
-DFTL 的 mapping page 是 512 条 × 4 B、整页回写；本仓的 `JSEG` 页采用同一形态
-（LBA 隐式、4 B/条），只是把它放进 Journal 环形页并由 `page_seq` 定序。
-**本仓自定**的是 4 块环形、127 条通用页 / 508 条顺序页、85%/95% 水位与同 LBA 合并策略。
-
----
-
-<a id="s3-8" name="s3-8"></a>
-
-### 3.8 Checkpoint（checkpoint）
-
-#### 3.8.1 背景与需求
-
-Journal 只增不减。如果永远不截断，环形块很快写满，启动回放也越来越长。
-Checkpoint 的作用是：
-
-1. 把当前 L2P cache 里的脏 region **全部写回 NAND L2P 表**；
-2. 写一条 Header，记录“到此为止的 Journal 水位”；
-3. 截断/预擦 Journal 的旧块；
-4. 顺带把**块元数据**（每块状态/有效计数/池归属）做成快照，减少开机 full metadata rebuild。
-
-没有 Checkpoint，Journal 会溢出，掉电恢复时间无界；没有块元数据快照，每次开机都要全盘扫描
-（约 250~400 ms）。
-
-#### 3.8.2 职责与边界
-
-- **做**：触发判定（水位/写入量/定时/紧急）、CP job 状态机、region 脏位图快照、
- 目录检查点协调、块元数据快照编码与落盘、Journal 截断协调。
-- **不做**：不定义 Journal 记录格式（§3.7）；不定义目录检查点页格式（§3.5）；
- 不决定 L2P 写回细节（§3.6）。
-- **调用者**：后台 `bg_task_cp_trigger` / `bg_task_cp_emergency` / `bg_task_cp_join`；
- boot 的 `cp_pool_find_latest` / `load_block_table`。
-
-#### 3.8.3 结构与不变量
-
-**`cp_header_s`（恰好 2048 B）**：
-
-| 字段 | 大小 | 含义 |
-|---|---:|---|
-| `magic` | 4 B | `CP_MAGIC` |
-| `sequence` | 4 B | 本池自己的单调序号 |
-| `timestamp` | 4 B | 观测 |
-| `region_count` | 4 B | 本 CP 覆盖的 region 数 |
-| `region_bitmap[64]` | 256 B | 本 die 的局部 2048-bit 位图 |
-| `journal_sequence` | 4 B | 截断/回放水位 |
-| `layout_version` | 4 B | 介质版本 |
-| `block_word_count` | 4 B | 块元数据 word 数（0 = 无快照） |
-| `block_word_bytes` | 4 B | 每 word 字节数（2） |
-| `block_page_count` | 4 B | 块元数据页数（4） |
-| `block_crc32` | 4 B | 块元数据 words 的 CRC |
-| `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` | 4 + 4 + 4 B | 磨损快照几何（4096 / 8 / 16） |
-| `wear_page_crc[16]` | 64 B | 每页磨损快照的 CRC |
-| `record_pages` | 4 B | 1 + 4 + 16 |
-| `padding` | 1672 B | 补齐一页 |
-
-**一条 record = 21 页**：块元数据快照 4 页（16-bit/块 × 4096 = 8 KiB）+ 磨损快照 16 页
-（8 B/块 × 4096 = 32 KiB）+ Header 1 页。
-**Header 是 commit 页**：块元数据页 + 磨损页必须先写，Header 最后写。
-
-块元数据快照只存**块元数据**需要的量：`valid_count` / `state` / `temp` / 池归属；
-磨损快照存 `erase_count` / `read_count` / `rr`（last_ecc / rising_count / health）。
-`last_pe_ts` 不存（刻意 volatile，上电后从 0 开始）。
-
-**块元数据 word 位域**（小端、显式移位）：
-
-```text
-valid_count(10) | state(3) | temp(1) | pool(2)
-pool: 0=NONE / 1=OP / 2=SPARE
-```
-
-**`cp_handle_s`**：
-
-| 字段 | 含义 |
-|---|---|
-| `active` / `phase` / `waiting` | 单飞行 / 阶段 / 有命令在飞 |
-| `failed` / `fail_phase` / `stall_ms` / `timed_out` | 中止原因与提交 deadline |
-| `region_bitmap[64]` | **job 起点**的本 die 局部脏位图快照 |
-| `journal_seq` | job 起点取定的 Journal 水位 |
-| `dir_ckpt_*` | 目录检查点池几何、基址、槽位、序号、页序、擦除判定 |
-| `hdr_*` | Header 池几何、地址、槽位、序号、擦除判定 |
-| `block_page` / `block_ok` / `block_words[4096]` | 块元数据快照进度与缓冲 |
-| `wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 磨损快照进度 / 每页 CRC / 组页缓冲 |
-| `trunc_addr` / `trunc_next` | Journal 预擦块 |
-| `cp_state` | `cp_state_s`：池 unique 序号 / 上次 CP 水位 / 写游标 / 游标有效位 / advance_next |
-| `last_ms` | T3 定时基准（上次触发时刻） |
-| `cache` / `journal` / `metadata_dir` / `alloc` / `topo` | 窄指针；total_writes 原端口字段无人读，已删 |
-
-**不变量**：
-
-1. **快照点在 job 起点**：脏位图与 `journal_sequence` 一起取定。异步 CP 跨多轮，
- 若取“CP 末尾”的水位，CP 期间完成的 host 写会两边都不认（不 flush、不回放）⇒ 丢映射。
-2. **顺序不可换**：flush regions → 目录检查点 → 块元数据快照 → 磨损快照 → Header → 截断 Journal。
- Header 一旦落盘，boot 就信 `region_bitmap` 里的 region 已在 NAND 上。
-3. **flush 失败 ⇒ 中止**：不写 Header。否则 boot 会预载未落盘的 region。
-4. **Header 写无论成败都推进池游标**：半编程槽不可复用。
-5. **截断必须覆盖全部已写条目**：水位不足时拒绝截断，最旧块可能仍持有回放条目。
-6. **完成服务函数不推进状态机**：`CP_DIR_CKPT_PREP` / `CP_HDR_PREP` 可能含同步定位，
- 在完成泵里跑会嵌套泵；推进留给下一轮 `cp_handle`。
-
-#### 3.8.4 触发条件
-
-| 触发 | 条件 | 行为 |
-|---|---|---|
-| **T1 水位** | Journal ≥ 85% | 设 `checkpoint_needed`，后台执行 |
-| **T1 紧急** | Journal ≥ 95% | 设 `emergency`，任何档位都执行 |
-| **T2 写入量** | 自上次 CP 起增量 ≥ 1024 | 后台执行 |
-| **T3 定时** | 距上次 ≥ 10 s 且 Journal 增量 ≥ 64 | 后台执行（轻载不写空 CP） |
-
-#### 3.8.5 阶段与顺序契约
-
-```mermaid
-flowchart TD
- IDLE["CP_IDLE"]
- FLUSH["CP_FLUSH_REGIONS"]
- APREP["CP_DIR_CKPT_PREP"]
- AERASE["CP_DIR_CKPT_ERASE"]
- AWRITE["CP_DIR_CKPT_WRITE"]
- HPREP["CP_HDR_PREP"]
- HERASE["CP_HDR_ERASE"]
- BWRITE["CP_BLOCK_WRITE"]
- WWRITE["CP_WEAR_WRITE"]
- HWRITE["CP_HDR_WRITE"]
- TPREP["CP_TRUNC_PREP"]
- TERASE["CP_TRUNC_ERASE"]
- DONE["CP_DONE"]
- IDLE -- "cp_job_begin" --> FLUSH
- FLUSH -- "所有脏 region 已持久" --> APREP
- APREP -- "需换块" --> AERASE
- APREP -- "无需擦" --> AWRITE
- AERASE --> AWRITE
- AWRITE -- "16 页写完" --> HPREP
- HPREP -- "需换块" --> HERASE
- HPREP -- "无需擦" --> BWRITE
- HERASE --> BWRITE
- BWRITE -- "4 页块元数据写完" --> WWRITE
- WWRITE -- "16 页磨损写完" --> HWRITE
- HWRITE -- "Header 落盘" --> TPREP
- TPREP -- "需预擦" --> TERASE
- TPREP -- "无需" --> DONE
- TERASE --> DONE
-```
-
-| phase | 动作 | 失败 |
-|---|---|---|
-| `CP_FLUSH_REGIONS` | 按快照位图逐条 kick L2P flush，等 `flush_inflight` 归零 | 中止，不写 Header |
-| `CP_DIR_CKPT_PREP` | 定位目录检查点游标 + 取槽 + 判定擦除 | 中止 |
-| `CP_DIR_CKPT_ERASE` | 换块先擦 | 中止 |
-| `CP_DIR_CKPT_WRITE` | 逐页写 16 页目录检查点 | 任一分页失败 ⇒ 整条作废，仍推进 |
-| `CP_HDR_PREP` / `CP_HDR_ERASE` | 定位 Header 槽 / 换块擦 | 中止 |
-| `CP_BLOCK_WRITE` | 逐页写 4 页块元数据快照 | 失败 ⇒ 中止，不写 Header |
-| `CP_WEAR_WRITE` | 逐页写 16 页磨损快照（每页 CRC 存 Header） | 失败 ⇒ 中止，不写 Header |
-| `CP_HDR_WRITE` | 写 1 页 Header（commit） | 无论成败推进游标；失败中止 |
-| `CP_TRUNC_PREP` | 水位判定，算预擦块 | 水位不足 ⇒ 不截断 |
-| `CP_TRUNC_ERASE` | 预擦 Journal 最旧块 | 失败仅 LOGW，仍记账（预擦只是磨损优化） |
-| `CP_DONE` | 清 active，记日志 | — |
-
-#### 3.8.6 关键流程
-
-1. `cp_job_begin`：单飞行检查 → memset job → 快照局部脏位图 + `journal_seq` →
- `active=1; phase=CP_FLUSH_REGIONS` → `cp_job_step` 推进第一步即返回。
-2. 每轮 `cp_handle` 续跑；有命令在飞时只打心跳。
-3. 完成由 `ftl_checkpoint_callback` 按 phase 记结果、release、改 phase；**不**调用 kick。
-4. `CP_FLUSH_REGIONS` 用 `md_is_busy` 区分“压缩在推进”与“真卡死”，
- 不把正常的长压缩计成 CP stall。
-
-#### 3.8.7 失败语义
-
-| 情况 | 结果 | 数据影响 |
-|---|---|---|
-| L2P flush 失败 | 中止，不写 Header | boot 用上一个 CP + Journal 回放，一致 |
-| 目录检查点分页失败 | 整条目录检查点作废，保留 dirty | 旧目录检查点仍有效 |
-| 块元数据快照失败 | 不写 Header | 本次 CP 未提交；下次重来 |
-| 磨损快照失败 | 不写 Header | 本次 CP 未提交；计数窗口延长，用户数据不受影响 |
-| Header 写失败 | 游标仍推进；中止 | 旧 Header 仍有效 |
-| Journal 截断失败 | 只记日志 | 预擦是磨损优化，不影响一致性 |
-| 提交侧长期背压 | `stall_ms > FTL_SUBMIT_TIMEOUT_MS` 中止 | 下轮重试；不丢映射 |
-
-#### 3.8.8 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `CP_MAGIC` | `0xCCCCCCCC` |
-| `CHECKPOINT_POOL_BLOCKS` | 8 |
-| 一条 record | 21 页（1 Header + 4 块元数据 + 16 磨损） |
-| `CP_WRITE_INTERVAL` | 1024 |
-| `CP_TIME_INTERVAL_MS` | 10,000 |
-| `CP_T3_MIN_JOURNAL_DELTA` | 64 |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
-
-#### 3.8.9 主流对照
-
-“全量快照 + 日志截断 + 崩溃安全的提交顺序”是主流 FTL/数据库的通用恢复模型。
-块元数据快照（per-block metadata snapshot）对应企业级 SSD 的 block descriptor/accounting
-snapshot。**本仓自定**的是 16-bit/块 + 8 B/块的紧凑编码、21 页/record 与 T1/T2/T3 阈值。
-
----
-
-<a id="s3-9" name="s3-9"></a>
-
-### 3.9 Host 提交 / group / pending（ftl.c + pending.c）
-
-#### 3.9.1 背景与需求
-
-一条 host 请求可能覆盖很多连续 LBA（CLI 可一次写 8 个 LBA，接口允许更长）。
+一条 host 请求可能覆盖很多连续 LBA（USB MSC 一个 16 KiB 传输段 = 32 个 LBA；CLI 可一次写 8 个 LBA）。
 FTL 不能把它当成一条 NAND 命令：
 
 - 读要按 L2P 映射分组：连续 LBA 可能落在不同页/plane；
@@ -2732,14 +1175,14 @@ FTL 不能把它当成一条 NAND 命令：
 
 **group + pending + owners** 就是为这五件事存在的。
 
-#### 3.9.2 职责与边界
+#### 3.1.2 职责与边界
 
-- **做**：参数/LBA 校验、完成组分配、`ftl_drain_group` 循环、`ftl_issue_subop` 读写拆分、
+- **做**：参数/LBA 校验、完成组分配、`ftl_host_group_drain` 循环、`host_group_subop_issue` 读写拆分、
  pending 槽登记、组完成聚合（`next==total && outstanding==0`）、待入账项管理。
-- **不做**：不建 FC 命令链（§3.15）；不决定 L2P 映射（§3.6）；不执行搬移/恢复（§3.13/§3.14）。
-- **上游**：controller / CLI；**下游**：L2P cache、wbuf、allocator、FC 接口。
+- **不做**：不建 FC 命令链（§3.15）；不决定 L2P 映射（§3.5）；不执行搬移/恢复（§3.12/§3.13）。
+- **上游**：HIL（USB MSC / CLI）经 `ssd_controller_submit` 进入；**下游**：L2P cache、wbuf、allocator、FC 接口。
 
-#### 3.9.3 结构与不变量
+#### 3.1.3 结构与不变量
 
 **术语**（本节后面反复出现）：
 
@@ -2753,7 +1196,9 @@ FTL 不能把它当成一条 NAND 命令：
 | D4 | 非所有者提交被门控拒绝 ⇒ 序列在下一窗口边界收尾，见 §3.16 |
 
 **`ftl_io_req_s`**（`ftl_type.h`）：`lba`（uint64）、`buffer`、`count`、
-`complete_flag`、`status_out`、`on_complete`、`ctx`。`count` 是**连续 LBA 数**；
+- `complete_flag` / `status_out`：组完成通知；
+- `on_complete` / `ctx`：组完成回调；
+- `count`：**连续 LBA 数**；
 plane 配对由 FTL 内部决定，不暴露 `pages`。
 
 **`pend_group_s`**（32 项）：
@@ -2798,16 +1243,16 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 3. **写页可能由多个组拼成**：`owners` 记录贡献组，完成时逐组递减 outstanding。
 4. **待入账项不与 FC 命令挂钩**：`command_id = NONE`，防止命令 id 复用后误撞。
 5. **组进度按 LBA 偏移计**，不是“子操作序号”：一个子操作最多消费 8 个 LBA，
- 消费几个由 `ftl_issue_subop` 现场决定。
+ 消费几个由 `host_group_subop_issue` 现场决定。
 
-#### 3.9.4 提交流程
+#### 3.1.4 流程（提交）
 
 ```text
 host 读入口/write
  ① 校验：LBA 范围 / count ≠ 0 / buffer 非空（host 输入 ⇒ 返回码，不转断言）
  ② pend_group_alloc：建组、填通知字段与 total
  ③ 循环（直到 next == total）：
-  ftl_issue_subop 按读/写分支消费 1..8 个 LBA
+  host_group_subop_issue 按读/写分支消费 1..8 个 LBA
   ├─ 成功：pending 槽登记 → 提交命令 → outstanding++
   ├─ FTL_AGAIN：保留 next，本轮结束、下轮重试
   └─ 连续 8 轮无进展（stalls 达 FTL_DRAIN_STALL_MAX）：弃未下发子操作、组报 IO_ERROR
@@ -2819,10 +1264,36 @@ host 读入口/write
 要点：提交侧只负责「把子操作交出去」，完成侧只负责「把组收齐」；两者靠 pending 表 +
 组号连接，提交路径**不同步等待**任何 NAND 完成。
 
-#### 3.9.5 读子操作
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Host / HIL
+    participant C as controller
+    participant G as 完成组 / pending
+    participant S as 子操作拆分
+    participant W as wbuf / L2P
+    participant F as FC / NAND
+    H->>C: submit read / write
+    C->>G: 建组（total / 通知字段）
+    loop next < total
+        G->>S: 下一轮 drain
+        alt 读
+            S->>W: wbuf 命中或 l2p_read
+        else 写
+            S->>W: wbuf APPEND
+        end
+        W->>F: 提交子操作命令
+        F-->>G: 完成回调 outstanding--
+    end
+    G-->>H: next==total && outstanding==0 通知一次
+```
+
+**读图要点**：提交与完成解耦；组只收一次通知；无进展由 stall 预算退出。
+
+#### 3.1.5 流程（读子操作）
 
 ```text
-ftl_issue_subop(read) 对每个 LBA：
+host_group_subop_issue(read) 对每个 LBA：
  ① wbuf 命中（该窗口尚未 flush）⇒ 直接从 wbuf.data 拷出，消费 1 个 LBA
  ② 否则 l2p_read(global_lba)
   - FTL_AGAIN（region 未驻留）⇒ `l2p_defer` 由 L2P 在飞判据派生，
@@ -2841,39 +1312,39 @@ ftl_issue_subop(read) 对每个 LBA：
 见 `fc_nand_design.md §26` 的队列/完成模型；请求无资源时进 allocation/retry 队列、其它工作照跑，
 `docs/reference/README.md` 的 Cosmos+ `request_schedule/allocation.c` / SPDK FTL）。
 `l2p_load_start` 会因**无空闲行**或**提交被拒**而失败并返回 false，此时没有加载在飞；
-若仍宣称"在飞"，`ftl_drain_group` 的 stall 检测永久失效 ⇒ 组永不结束 ⇒ cache 序列永不关闭 ⇒
-序列门控持续拒绝后台提交 ⇒ 脏行排不出去（的环形等待）。
-因此 `l2p_defer` 一律由 L2P 在飞判据（`load_inflight || flush_inflight`）派生；
-「序列收尾」这类进展由 `bg_progress` 里的 `seq_closing` 表达，不借 `l2p_defer`。
+若仍宣称"在飞"，`ftl_host_group_drain` 的 stall 检测永久失效 ⇒ 组永不结束 ⇒ cache 序列永不关闭 ⇒
+序列门控持续拒绝后台提交 ⇒ 脏行排不出去（形成环形等待）。
+因此 `l2p_defer` 一律由 L2P 在飞判据（`inflight.load || inflight.flush`）派生；
+「序列收尾」这类进展由后台进度的 `seq_closing` 表达，不借 L2P 的 `l2p_defer`。
 
-**cache 读序列（选读）**：`ftl_drain_group` 在下发普通子操作前先尝试
+**cache 读序列（选读）**：`ftl_host_group_drain` 在下发普通子操作前先尝试
 `ftl_cache_read_try`——命中时整窗按 `45h/46h/47h` 批量提交；窗口只是资源边界，
 序列可跨窗口、跨 host 命令保持。开序列条件（顺序流检测、pair 对齐、两 plane 物理
 连续）、lookahead、128 pair 单段上限、门控与 D4、放弃语义**全部见 §3.16.4**。
 本节只保留与提交/pending 相关的两点：序列打开期间后台提交被门控（非所有者被拒置
 `break_requested`）；序列状态在 `ftl->cache_stream.seq`（per 实例）。
 
-#### 3.9.6 写子操作
+#### 3.1.6 流程（写子操作）
 
-写路径不在 `issue_subop` 里建 NAND 命令，而是交给 wbuf（§3.11）：
+写路径不在 `host_group_subop_issue` 里建 NAND 命令，而是交给 wbuf（§3.3）：
 
 ```text
-ftl_issue_subop(write)：
- wbuf 动作(APPEND)(ftl, lba, buffer)
+host_group_subop_issue(write)：
+ wb_handle(WBUF_TRIGGER_APPEND, lba, buffer, n, gi)
  ├─ 窗口变化 ⇒ 先 flush 旧窗口
  ├─ 打开/复用窗口；逐 CW 拷进 wbuf.data[plane*CW_NUM+cw]
  ├─ occupied 置位；owners |= 1<<gi；group.outstanding 加一
  └─ 页满 ⇒ 尽力 flush（失败不影响已受理）
 ```
 
-真正的 NAND 写、pending 登记、L2P/Journal 确认都在 wbuf 动作与完成路径里。
+真正的 NAND 写、pending 登记、L2P/Journal 确认都在 `wb_handle` 与完成路径里。
 
 wbuf 写 **page0** 时按 full pair 写（缺失 plane 补零、映射仍按原 CW 位图），保证同 SB
 的 page>0 写屏障与恢复 page0 捷径成立。**cache 写序列**也会自己打开新块并写 page0
 （`own_page0`）：它靠有序管线保证 page0 失败会中止其后所有页，不依赖「page0 成功后才写
 page>0」的提交点屏障；成功结算时记 `page0_programmed`（§3.16.5）。
 
-#### 3.9.7 组完成与脱钩态
+#### 3.1.7 流程（组完成与脱钩态）
 
 ```text
 pend_group_complete_subop_multi(owners, status)
@@ -2887,21 +1358,21 @@ pend_group_complete_subop_multi(owners, status)
 
 | 脱钩态 | 触发 | 语义 | 谁推进 |
 |---|---|---|---|
-| `READ_RECOVERY` | 读 NAND 失败 | **错误恢复**：子操作托管给 RR job；恢复成功则拷回，失败则 IO_ERROR | `rr_handle`（§3.14） |
-| `WRITE_CONFIRM` | 写 NAND 成功、L2P region 未就绪 | **待入账**（deferred write completion）：映射入账延后到 region 就绪 | `ftl_confirm_service`（每轮的**写确认结算**步） |
+| `PENDING_OP_READ_RECOVERY` | 读 NAND 失败 | **错误恢复**：子操作托管给 RR job；恢复成功则拷回，失败则 IO_ERROR | `rr_handle`（§3.13） |
+| `PENDING_OP_WRITE_CONFIRM` | 写 NAND 成功、L2P region 未就绪 | **待入账**：deferred write completion (映射入账延后到 region 就绪) | `ftl_confirm_service`（每轮的**写确认结算**步） |
 
-⚠ `READ_RECOVERY` 属于错误恢复，不是「待入账」——复用同一张表只是为了不重复建队列；
+⚠ `PENDING_OP_READ_RECOVERY` 属于错误恢复，不是「待入账」——复用同一张表只是为了不重复建队列；
 两者的推进者和超时语义都不同。脱钩项的 `command_id = NONE`、组 `outstanding` 不递减，
 收尾时由各自的推进者统一结算。
 
 **WRITE_CONFIRM 的超时预算是「无进展时长」而不是「待入账时长」**（支路 (a)）：
 写完成路径在依赖**确实有待推进的工作**时刷新 `park_ms`——
-`ftl_confirm_progress_pending`：L2P region 加载在飞 / region 写回在飞 / Journal 页写在飞 /
+`ftl_confirm_progress_is_pending`：L2P region 加载在飞 / region 写回在飞 / Journal 页写在飞 /
 Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journal 待刷条目；
 全都没有时不刷新，`FTL_GROUP_DRAIN_TIMEOUT_MS`（100 ms）到期按 IO_ERROR 结算。这样后台拥塞（CP 提交被门控、Journal 擦除排队）不会把**有限**的
 等待变成 host 写失败，而结构性卡死仍然有界。
 
-#### 3.9.8 失败语义
+#### 3.1.8 失败语义
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
@@ -2910,13 +1381,13 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 | 子操作遇到 `FTL_AGAIN` | 保留 `next`，下轮重试 | 无 |
 | 连续 8 轮无进展 | 弃未下发子操作，组报 IO_ERROR | 已下发子操作照常完成 |
 | 读 NAND 失败 | 脱钩（托管给 RR）；不递减 outstanding | 恢复成功则拷回，失败则 IO_ERROR |
-| 读成败判据 | **全错误位**（`fc_cmd_status_has_error`），非仅 `NAND_FAIL` | UNC / MATA 只置 `DATA_ERROR`/`MATA_ERROR`，单看 `NAND_FAIL` 会把加扰页当成功搬给 host |
+| 读成败判据 | **全错误位**（`fc_cmd_status_has_error`），非仅 `NAND_FAIL` | UNC / CRC / RAID 置 `FC_CMD_STATUS_DATA_ERROR`，META 置 `FC_CMD_STATUS_META_ERROR`，单看 `NAND_FAIL` 会把加扰页当成功搬给 host |
 | 读 desc 链短于请求 | 立即 `SSD_STATUS_IO_ERROR` | 尾部缓冲未写，不得当数据交给 host |
 | cache program 批次任一成员失败 | 关闭目的 SB；整批不确认映射；已完成的成员立即 IO_ERROR，在飞成员等各自完成回调 | 未确认页成为无映射垃圾，由 GC 回收；host 可重试 |
 | 写 NAND 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚到旧数据 |
 | 写成功但 L2P 未就绪 | 待入账 → `ftl_confirm_service` | 下轮补齐，不重复记账 |
 
-#### 3.9.9 常量与出处
+#### 3.1.9 常量与阈值
 
 | 常量 | 值 |
 | --- | --- |
@@ -2926,13 +1397,7 @@ Journal 换块擦除待做（`need_erase`，此时 `phase` 仍是 IDLE）/ Journ
 | `FTL_LBA_PER_PAIR` | 8（2 plane × 4 CW） |
 | `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × DIE_MAX`（= 868,352） |
 
-#### 3.9.10 主流对照
-
-“请求拆分 + 完成组 + 子操作表 + 背压/待入账”是主控固件数据面的标准形态：host 命令被拆成
-介质命令，完成按命令 id 回收，组完成只通知一次。**本仓自定**的是 32 项固定表、
-8 轮 stall 预算与页打包的 `owners` 位掩码。
-
-#### 3.9.11 FLUSH / TRIM（相邻控制面命令）
+#### 3.1.10 FLUSH / TRIM（相邻控制面命令）
 
 **FLUSH 语义边界**（`ftl_flush_begin/step`）：把 wbuf、L2P 脏 region、Journal 刷到 NAND，
 **不是** NVMe barrier——返回时不保证已产生新的 Checkpoint；掉电后仍靠“上一个 CP + Journal
@@ -2941,13 +1406,20 @@ best-effort 完成，避免主机永远等不到 CSW。TRIM 也改为异步 job
 （`ftl_trim_begin/step`）：Controller 每轮按 run 推进，L2P region 未就绪或 Journal
 容量不足时返 `FTL_AGAIN`，由下一轮 service 继续。
 
+#### 3.1.11 设计取舍
+
+选择：请求拆分 + 完成组 + pending + 背压。主要替代：单命令同步或内部重试队列。
+差异：32 项固定表、8 轮 stall 预算、页打包 owners 位掩码。完整论证见架构文档 §9.8。
+
 ---
 
-<a id="s3-10" name="s3-10"></a>
 
-### 3.10 完成派发面（ftl_op：request 表 + 实例路由 + op dispatch）
 
-#### 3.10.1 背景与一张图
+<a id="s3-2" name="s3-2"></a>
+
+### 3.2 完成派发面
+
+#### 3.2.1 背景与需求
 
 FTL 的命令是异步的：提交命令返回后，命令在 FC/NAND 里执行，完成后从
 **全局 CQ** 出来。FTL 必须回答三个问题：
@@ -2996,7 +1468,15 @@ flowchart LR
  ROUTE --> FN
 ```
 
-#### 3.10.2 三个数据结构
+**读图要点**：三张表分工：完成表/实例路由/op 回调；cmd_id 直接索引；op 选择服务函数。
+
+#### 3.2.2 职责与边界
+
+**做**：完成表登记/回收、实例路由、op 完成服务函数分派、同步等待唤醒、派发深度守卫。
+**不做**：不建 FC 命令链（§3.15）、不决定 L2P 映射（§3.5）、不执行各 job 的状态机。
+**上游**：FC 完成队列；**下游**：各模块的完成服务函数（host IO / Journal / L2P / CP / Metadata / BBT / Migrate / RR）。
+
+#### 3.2.3 结构与不变量
 
 | 结构 | 内容 | 生命周期 / 初始化 |
 |---|---|---|
@@ -3015,8 +1495,8 @@ flowchart LR
 ```c
 typedef struct
 {
- WORD    cmd_id;  /* 等待的 command_id */
- bool    done;  /* 服务函数置 true */
+ WORD    cmd_id;  /* 等待的 cmd_id */
+ BOOL    done;    /* 服务函数置 true */
  fc_cmd_status_s completion; /* 服务函数保存的完整 completion */
 } ftl_sync_waiter_s;
 ```
@@ -3045,21 +1525,38 @@ typedef struct
 | `FTL_OP_SYNC_WAIT` 成功 | 调用者：`ftl_sync_submit_wait` 返回后读数据再 release |
 | `FTL_OP_SYNC_WAIT` 超时后的迟到完成 | `ftl_op_drain`（missing-request 分支） |
 
-#### 3.10.3 提交路径
+#### 3.2.4 流程（提交）
 
-入口： 的提交命令。
+入口：`ftl_op_submit` / `ftl_op_submit_batch`。
 
 ```mermaid
-flowchart TD
- A["提交命令(cmd, op, ctx)"] --> B{"序列门控(cmd, op)"}
- B -- "拒绝" --> R1["FTL_AGAIN<br/>命令未提交，调用者保留"]
- B -- "放行" --> C["登记 request(cmd_id, op, ctx)"]
- C -- "失败（cmd_id 越界）" --> R2["FTL_ERROR<br/>命令未提交"]
- C -- "成功" --> G["提交到 FC(cmd)"]
- G -- "失败" --> H["移除 request(cmd_id)"]
- H --> R3["FTL_AGAIN<br/>命令未提交，调用者保留"]
- G -- "成功" --> OK["FTL_OK<br/>完成稍后从 CQ 回来"]
+sequenceDiagram
+    autonumber
+    participant C as 调用者
+    participant O as ftl_op
+    participant R as request 表
+    participant F as FC
+    C->>O: 提交命令(cmd, op, ctx)
+    O->>O: 序列门控(cmd, op)
+    alt 拒绝
+        O-->>C: FTL_AGAIN（命令未提交）
+    else 放行
+        O->>R: 登记 request(cmd_id, op, ctx)
+        alt cmd_id 越界
+            O-->>C: FTL_ERROR（命令未提交）
+        else 登记成功
+            O->>F: 提交命令
+            alt 提交失败
+                O->>R: 移除 request
+                O-->>C: FTL_AGAIN（命令未提交）
+            else 提交成功
+                O-->>C: FTL_OK（完成稍后从 CQ 回来）
+            end
+        end
+    end
 ```
+
+**读图要点**：门控→登记→提交；失败回滚表项；command_id 唯一。
 
 逐步说明：
 
@@ -3083,24 +1580,36 @@ flowchart TD
  `FTL_AGAIN`，其余返回 `FTL_ERROR`；
 - 失败时命令仍归调用者。
 
-#### 3.10.4 完成路径
+#### 3.2.5 流程（完成）
 
 入口：`ftl_op_drain` 循环 `fc_poll_completion`，每条完成的派发直接在循环体内完成
 （无独立函数边界）。
 
 ```mermaid
-flowchart TD
- A["ftl_op_drain: while fc_poll_completion"] --> C["cmd = 按 ID 取命令(...)<br/>req = &完成表[completion.command_id]"]
- C --> D{"req.pending == false?"}
- D -- "是" --> O["missing request<br/>fc_command_release + LOGE"]
- D -- "否" --> X["ctx = req.ctx; op = req.op<br/>req 清项"]
- X --> E{"fn = 完成回调表[op] == NULL?"}
- E -- "是" --> G["orphan op<br/>fc_command_release + LOGE"]
- E -- "否" --> H["ftl = 实例路由(cmd->config.ch, ce, lun)"]
- H --> I["派发深度++"]
- I --> J["fn(ftl, completion, ctx)"]
- J --> K["派发深度--"]
+sequenceDiagram
+    autonumber
+    participant Q as FC CQ
+    participant D as ftl_op_drain
+    participant R as 完成表 / request
+    participant S as 实例路由 / 服务函数
+    loop 每条 CQ 完成
+        Q->>D: completion
+        D->>R: 按 command_id 取命令与表项
+        alt missing request
+            D->>D: release + LOGE（迟到 / 孤儿）
+        else 已登记
+            D->>R: 清项，取 ctx / op
+            alt op 无回调
+                D->>D: release + LOGE（orphan op）
+            else 有回调
+                D->>S: 按 cmd->config.ch/ce/lun 路由
+                D->>S: fn(ftl, completion, ctx)
+            end
+        end
+    end
 ```
+
+**读图要点**：先摘表项再回调；按命令自身坐标路由；服务函数不自旋。
 
 关键点：
 
@@ -3116,15 +1625,16 @@ flowchart TD
  （部分服务函数与实例无关，只用 ctx）。
 5. **深度计数**：`派发深度++` 包住服务函数（含其内部嵌套派发），
  `ftl_op_is_in_dispatch` 供同步等待器拒绝嵌套泵。深度不会溢出——每层都要消费一条命令。
-6. **release 归属**：合法回调不在这里 release；由 §3.10.2 的归属表决定。
+6. **release 归属**：合法回调不在这里 release；由 §3.2.3 的归属表决定。
 
-#### 3.10.5 同步等待
+#### 3.2.6 流程（同步等待）
 
 同步等待器不在完成派发模块，而在同步原语内部。
 
 ```mermaid
 sequenceDiagram
  participant Caller
+    autonumber
  participant SW as ftl_sync_submit_wait
  participant FC as FC / NAND
  participant OP as ftl_op / CQ
@@ -3137,20 +1647,22 @@ sequenceDiagram
   SW->>OP: ftl_op_drain
  end
  FC-->>OP: completion(command_id, status)
- OP->>SW: ftl_sync_wait_callback: waiter.done = true
+ OP->>SW: ftl_sync_wait_op_callback: waiter.done = true
  SW-->>Caller: status_out
  Note over SW: 成功后调用者读 cmd 数据，再 release
 ```
+
+**读图要点**：同步命令带 SYNC_WAIT；调用者等待；超时后的迟到完成由 drain 释放。
 
 - waiter 在调用者**栈上**；提交命令把 `&waiter` 登记为 ctx。
 - 入口断言 `ftl_op_is_in_dispatch == false`，禁止嵌套泵。
 - 自旋体是 `fc_service` + `ftl_op_drain`；非目标完成由 drain 按各自 request.op 正常派发。
 - 超时：移除 request 后返回错误。之后迟到的完成在 drain 里
  看到 `pending == false`，走 missing-request 分支，只 release 命令，不解引用已失效的栈。
-- `ftl_sync_wait_callback` **不 release**：调用者要在 wait 返回后读 `ftl_cmd_read_data`
+- `ftl_sync_wait_op_callback` **不 release**：调用者要在 wait 返回后读 `ftl_cmd_read_data`
  等命令数据，提前释放会悬垂。
 
-#### 3.10.6 失败语义
+#### 3.2.7 失败语义
 
 | 情况 | 判定点 | 行为 | 命令 release |
 |---|---|---|---|
@@ -3163,35 +1675,30 @@ sequenceDiagram
 | 同步等待超时 | wait 循环 | 清 request 表项，返回错误；迟到完成走 missing-request 分支 | 调用者；迟到完成由 drain release |
 | 服务函数里调同步等待 | `ASSERT(ftl_op_is_in_dispatch == false)` | debug 停机 | N/A |
 
-#### 3.10.7 容量与常量
+#### 3.2.8 常量与阈值
 
 | 常量 | 值 | 出处 / 推导 |
 |---|---|---|
 | `FTL_OP_REQ_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH` | command_id 是命令池槽位号，直接索引；容量 = 池深，没有“表满” |
-| `ftl_op_req_s` | 12 B | `4 B ctx + 4 B op + 1 B pending + 3 B 对齐` |
+| `ftl_op_req_s` | 8 B | `4 B ctx + 1 B op + 1 B pending + 2 B 对齐`（`-fshort-enums`） |
 | `FTL_OP_COUNT` | 枚举值 | `完成回调表[]` 下标；无 7 位字段限制 |
 | 实例路由表容量 | `FTL_DIE_MAX` | die 号统一 `BYTE`，`FTL_DIE_MAX` 静态断言 ≤ 255 |
-| 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 stall 上限 | — 等 |
+| 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 `submit_deadline` | 超过即返回 `FTL_AGAIN` / 中止 job |
 
-#### 3.10.8 主流对照
+#### 3.2.9 设计取舍
 
-NVMe/主控数据面的基本模型是「提交队列 + 完成队列 + 命令 ID 旁表」：完成项只带命令 ID
-和状态，host/主控用 ID 找回请求上下文；FTL 再把“完成该由谁收尾”映射到服务函数。
-本仓把 NVMe 的 SQ/CQ 简化为 FC 的队列 + 全局完成表：
-
-- `command_id` 对应 NVMe 的 CID，用来连接 FC 完成项与 FTL request 表；
-- `request.op` 是本仓的“服务函数选择器”，不是 NVMe 的命令类型字段；
-- 实例路由按命令自身的 `(ch,ce,lun)` 解析，对应主控按 target/queue 归属完成；
-- **本仓自定**：按 command_id 直接索引的 request 表、单一全局 CQ、`先摘表项再回调` 的防重入顺序，
- 以及派发深度对嵌套完成泵的拦截。
+选择：command_id 旁表 + 全局完成队列 + op 服务函数。主要替代：按命令类型猜或每队列回调。
+差异：request 表按 cmd_id 索引、先摘表项再回调、拦截嵌套完成泵。完整论证见架构文档 §9.9。
 
 ---
 
-<a id="s3-11" name="s3-11"></a>
 
-### 3.11 页打包写缓冲（wbuf）
 
-#### 3.11.1 背景与需求
+<a id="s3-3" name="s3-3"></a>
+
+### 3.3 页打包写缓冲
+
+#### 3.3.1 背景与需求
 
 CW 级映射下，一次 512 B 写只覆盖一个 CW；而 NAND 按**页**编程（4 CW，双 plane 共 8 CW）。
 如果每个子操作都分配一对新页，利用率只有 12.5%~50%：
@@ -3204,22 +1711,23 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 页打包写缓冲把**同一 pair 窗口**内的多次 host 写攒成一页，窗口填满/切换/显式 flush/
 空闲时一次编程；两 plane 都有数据就走 multi-plane。页内利用率回到 100%，写指针按页推进。
 
-#### 3.11.2 职责与边界
+#### 3.3.2 职责与边界
 
-**实现位置**：wbuf 的 typed 动作入口 + 命中/读查询，加上编程/攒入两个内部动作；结构体与接口由 wbuf 模块定义。它是 FTL 层唯一**独立成文件**的子模块中最晚抽出的一支（其余子模块各自成文件）；主流程只调用其接口，不碰内部结构。
+**实现位置**：wbuf 是独立子模块，只通过事件接口（`wb_handle`）对外：攒入、编程、丢弃、复位、空闲刷写，以及命中/读查询。主流程只调用接口，不碰内部结构。
 
 - **做**：按窗口累积 CW（`slot = plane*CW_NUM + cw`）、记录占用位图与贡献组、切换窗口时
  flush、空闲 flush、页满尽力 flush、构造一条页写命令。
-- **不做**：不决定 L2P 更新（完成路径做，§3.9）；不分配块（调用 allocator，§3.2）；
- 不做 GC（分配失败时起紧急 GC，§3.13）。
-- **读路径**也用它：未 flush 的窗口数据还在 wbuf，读要先从这里拿（§3.9）。
-- **对外接口**：`wb_has` / `wb_read`（读路径，命中即拷贝）/
- wbuf 动作（TRIM 丢弃单槽）/ wbuf 动作 / wbuf 动作 /
- wbuf 动作 / wbuf 动作（介质被擦净后整体作废）。
- ⚠ 缓冲的**内部不变量**（清空窗口 ⇒ 结算 `owners`）由 wbuf 动作 / wbuf 动作
- 在模块内收口，**不**由调用者手工维护（CLAUDE.md §3.1 / C3）。
+- **不做**：不决定 L2P 更新（完成路径做，§3.1）；不分配块（调用 allocator，§3.9）；
+ 不做 GC（分配失败时起紧急 GC，§3.12）。
+- **读路径**也用它：未 flush 的窗口数据还在 wbuf，读要先从这里拿（§3.1）。
+- **对外接口**：`wb_has_lba` / `wb_read`（读路径，命中即拷贝）；
+ `wb_handle` 的 `WBUF_TRIGGER_APPEND` / `WBUF_TRIGGER_FLUSH` /
+ `WBUF_TRIGGER_MAYBE_FLUSH_IDLE`（正常写、显式 flush、空闲 flush）、
+ `WBUF_TRIGGER_DROP`（TRIM 丢弃单槽）与 `WBUF_TRIGGER_RESET`（介质被擦净后整体作废）。
+ ⚠ 缓冲的**内部不变量**（清空窗口 ⇒ 结算 `owners`）由 `WBUF_TRIGGER_DROP` /
+ `WBUF_TRIGGER_RESET` 在模块内收口，**不**由调用者手工维护。
 
-#### 3.11.3 结构与不变量
+#### 3.3.3 结构与不变量
 
 | 字段 | 含义 |
 |---|---|
@@ -3229,6 +1737,7 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 | `base` | 窗口基址（低 3 位清零） |
 | `owners` | bit gi = 组 gi 贡献过本页 |
 | `flushed_pages` / `drop_count` / `error` | 单调观测计数 / 最近一次失败归因 |
+| `alloc_fail_ms` | 连续取不到页对的起始时刻（0 = 本期未失败）；超 `WBUF_ALLOC_STALL_TIMEOUT_MS` 按 `FTL_ERROR` 结算 |
 | `alloc` / `pending` / `migrate` | 窄指针（init 绑定；无端口结构体） |
 
 **不变量**：
@@ -3238,13 +1747,13 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
  `ftl_lba_pair_slot` 只用作 `data[]` 的**数组下标**（不是位）。
 2. **只有提交成功后才清 wbuf**：提交失败（命令池/描述符池满）保留数据，下轮重试。
 3. **一页可能由多个组拼成**：`owners` 必须逐组记录，完成时逐组递减；
- 每个贡献组对该窗口**至多一次** append（`ftl_issue_subop` 把 `n` 夹到窗口边界）。
+ 每个贡献组对该窗口**至多一次** append（`host_group_subop_issue` 把 `n` 夹到窗口边界）。
 4. **窗口切换先 flush**：不同窗口的 LBA 不能混进同一页。
 5. **页满尽力 flush**：失败不回滚已受理的写，留给后续 flush/空闲 flush。
 6. **`occupied` 清空 ⟺ `owners` 必须结算**：窗口被丢弃（TRIM 清空 / 介质擦净复位）时，
  必须对贡献组按对应状态码逐组递减在飞数（TRIM ⇒ OK，复位 ⇒ IO_ERROR）；只清 `owners`
- 会让那些组的在飞数永不归零、host 写组挂死。该不变量由 wbuf 动作 / wbuf 动作
- 在模块内收口（§3.1：不变量不得靠外部模块手工维护）。
+ 会让那些组的在飞数永不归零、host 写组挂死。该不变量由 `WBUF_TRIGGER_DROP` /
+ `WBUF_TRIGGER_RESET` 在模块内收口（§3.14：不变量不得靠外部模块手工维护）。
 7. **取数函数必须匹配 `data[]` 布局**：wbuf 的 `data[]` 是 **plane-major pair 镜像**
  （slot = `plane*CW_NUM + cw`），页写必须用按 CW 写数据。
  按 CW 写数据的契约是**单页镜像**（mirror / GC / WL：两个 plane 共用
@@ -3253,34 +1762,36 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
  ⚠ 回归判据不能用 CLI 的 `wr/rd` 固定 pattern（每 2KB 相同，缺陷不可见），
  必须用每 2KB 互不相同的数据（见 `docs/guides/usb_msc_verify.md` USB-V05）。
 
-#### 3.11.4 流程
+#### 3.3.4 流程
 
 ```mermaid
 flowchart TD
- A["wbuf 动作(APPEND) lba, data"] --> B{"窗口 base 相同"}
- B -- "否" --> C["wbuf 动作(FLUSH) 旧窗口"]
+ A["wb_handle APPEND lba, data"] --> B{"窗口 base 相同"}
+ B -- "否" --> C["wb_handle FLUSH 旧窗口"]
  C --> D["打开新窗口 base"]
  B -- "是" --> D
  D --> E["逐 CW 拷进 data slot occupied 置位 bit, owners 置位 gi group-outstanding 加一"]
  E --> F{"occupied 等于 0xFF"}
- F -- "是" --> G["wbuf 动作(FLUSH) 尽力"]
+ F -- "是" --> G["wb_handle FLUSH 尽力"]
  F -- "否" --> H["返回"]
  G --> H
 ```
 
-**wbuf 动作**（资源获取顺序：先做**不占资源**的余量检查，再取页对；
+**读图要点**：窗口内攒页；切窗口先 flush；页满尽力 flush。
+
+**`WBUF_TRIGGER_FLUSH`**（资源获取顺序：先做**不占资源**的余量检查，再取页对；
 命令/desc/buffer 由 `ftl_async_write_pair_cmd` 在页对之后分配，失败由统一出口归还页对）：
 
 ```text
 ① host 预算检查 ftl_fc_host_budget_ok（不足 ⇒ FTL_AGAIN；此时未占用任何资源）
-② pending 表余量检查（pend_slot_get_count >= FTL_PENDING_MAX ⇒ FTL_AGAIN）
+② pending 表余量检查（pend_slot_count >= FTL_PENDING_MAX ⇒ FTL_AGAIN）
 ③ 成对分配(ALC_SUPER_ALLOC_HOT, pba)
   失败 ⇒ mig_gc_request_urgent + FTL_AGAIN（未占用资源）
 ④ page0 异步写屏障：本页覆盖的 plane 中 page>0 且该 plane 的 page0 未完成
   ⇒ alc_super_open_rewind_pair + FTL_AGAIN
 ⑤ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
   page0 ⇒ 缺失 plane 补零、write_bitmap = FTL_CACHE_FULL_CW
-⑥ ftl_async_write_pair_cmd：命令头 + ftl_cmd_setup_ppa_pair_cw + 按 CW 写数据（pair_major=true）
+⑥ ftl_async_write_pair_cmd：命令头 + ftl_cmd_build_ppa_pair_cw + 按 CW 写数据（pair_major=true）
   （plane-major pair 镜像）；命令/desc/buffer 在此分配（失败 ⇒ 错误出口）
 ⑦ pend_alloc：逐字段填 owners / op / n_cw / cw_bitmap / lba / new_pba*；pend_validate
 ⑧ 提交命令(FTL_OP_HOST_IO)（失败 ⇒ pend_remove + 错误出口）
@@ -3292,12 +1803,33 @@ flowchart TD
 ```
 
 ⚠ 取到页对后**任何**失败都必须 `alc_super_open_rewind_pair` 归还：命令从未提交 ⇒ 页从未被编程，
-归还是安全的；不归还则每次重试白烧 2 页，表现为**容量无声流失**（CLAUDE.md §3.1）。
+归还是安全的；不归还则每次重试白烧 2 页，表现为**容量无声流失**。
 
-**空闲 flush**：wbuf 动作在实例服务的 **wbuf 空闲 flush** 步检查“是否还有写组
+**空闲 flush**：`WBUF_TRIGGER_MAYBE_FLUSH_IDLE` 在实例服务的 wbuf 空闲 flush 步检查“是否还有写组
 指向当前窗口”；没有就 flush，确保 host 收尾不会无限等待。
 
-#### 3.11.5 失败语义
+```mermaid
+sequenceDiagram
+    autonumber
+    participant G as host 组
+    participant W as wbuf
+    participant A as allocator
+    participant F as FC
+    participant P as pending / 完成
+    G->>W: APPEND（窗口内 CW）
+    W->>W: 窗口满 / 切换 / 显式 FLUSH
+    W->>A: 成对分配 HOT
+    A-->>W: PBA pair
+    W->>F: 建链 + 按 CW 写数据
+    W->>P: 登记 pending（owners / new_pba）
+    W->>F: 提交命令
+    F-->>P: 完成
+    P-->>G: 逐组递减 / 组完成
+```
+
+**读图要点**：资源顺序是不占资源检查→取页对→建链；提交成功才清 wbuf；失败保留数据。
+
+#### 3.3.5 失败语义
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
@@ -3307,10 +1839,10 @@ flowchart TD
 | 命令提交失败（SQ 满） | 先摘 pending，再归还页对 + `FTL_AGAIN` | 同上 |
 | 建链/填数据失败 | `FTL_ERROR` / 原样上抛 + 归还页对 | 同上（缓冲保留，但永久错误不再重试） |
 | PROGRAM 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚旧数据 |
-| TRIM 清空窗口 / 介质擦净复位 | wbuf 动作 / wbuf 动作结算 `owners` | 未落盘写被丢弃（TRIM 无映射变更；复位按写失败收尾） |
+| TRIM 清空窗口 / 介质擦净复位 | `WBUF_TRIGGER_DROP` / `WBUF_TRIGGER_RESET` 结算 `owners` | 未落盘写被丢弃（TRIM 无映射变更；复位按写失败收尾） |
 | 中途掉电 | wbuf 是 RAM，丢失未提交页 | 这些 host 写尚未 acked，属容忍窗口 |
 
-#### 3.11.6 常量与出处
+#### 3.3.6 常量与阈值
 
 | 常量 | 值 |
 | --- | --- |
@@ -3319,19 +1851,20 @@ flowchart TD
 | `occupied` | 8 bit |
 | `owners` | 32 bit（`FTL_GROUP_MAX`） |
 
-#### 3.11.7 主流对照
+#### 3.3.7 设计取舍
 
-写缓冲/页打包是主控数据面的常规优化：消费级用 SLC cache/写缓冲，企业级用 write
-coalescing。本仓没有 SLC cache（介质本身就是 SLC），只做**同窗口页打包**；
-**本仓自定**的是 8-CW 窗口与 owners 位掩码的完成聚合方式。
+选择：同窗口页打包。主要替代：SLC cache / write coalescing（本介质 SLC，不适用）。
+差异：8-CW 窗口 + owners 位掩码聚合。完整论证见架构文档 §9.10。
 
 ---
 
-<a id="s3-12" name="s3-12"></a>
 
-### 3.12 FTL service 与请求调度（ftl.c + ftl_sched + bg_policy）
 
-#### 3.12.1 背景与需求
+<a id="s3-4" name="s3-4"></a>
+
+### 3.4 FTL service 与请求调度
+
+#### 3.4.1 背景与需求
 
 FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它必须同时做三件事：
 
@@ -3352,14 +1885,14 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 由此得到两个直接结论：
 
 - **“预算”按 token bucket 记。** 一次 kick 通常 = 一条命令 ≈ 1 个 unit；每档位每
- `BG_TOKEN_INTERVAL_MS`（10 ms）补 `grant_units` 个 credit（IDLE/NORMAL 4、BUSY 1），
+ `L2P_FLUSH_INTERVAL_MS`（10 ms）补 `grant_units` 个 credit（IDLE/NORMAL 4、BUSY 1），
  credit 不足即截断；上限 `grant_units × BG_TOKEN_CAP_TICKS`。L2P 一次 kick 的具体
  条数由模块内档位表（`L2P_FLUSH_MAX_*`）再收一层。
 - **确定性保护 = 档位掩码 + 固定 token 补充速率。** 每秒后台量不再随主循环频率漂移；
  单轮墙钟兜底（`BG_ROUND_HARD_LIMIT_US`，只在任务之间检查、不能抢占）仍保留，只防
  某个 kick 异常膨胀。
 
-#### 3.12.2 术语
+#### 3.4.2 术语
 
 本节几个行话，首次出现即此义：
 
@@ -3371,52 +1904,46 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。每转一圈它
 | **must-run** | 正确性关键任务：无条件每轮执行，**不 gate、不占配额** |
 | **表序** | `后台任务表[]` 中的位置。**表序 = 执行序 = 优先级**，没有独立的 `priority` 字段 |
 
-#### 3.12.3 职责与边界
+#### 3.4.3 职责与边界
 
 - **`ftl_service_pump`**（实例无关，每轮一次）：`fc_service` ≤ 4 次 + 完成表抽干。
-- **实例服务**（每实例一次）：
- - 实例步骤（按执行序，唯一定义见的实例服务契约）：
+- **实例服务**（每实例一次）：实例步骤（按执行序）：
  **元数据候选池重算**（元数据 job）→ **写确认结算**（`ftl_confirm_service`）→
- **cache 序列确认**（`ftl_cache_wr_confirm_step`）→ **host 补发**（`ftl_sched_run_host`）→
- **序列收尾**（`ftl_cache_seq_idle_guard` / `_close_step`）→
- **flush 备副本重试**（L2P flush 续跑）→
- **wbuf 空闲 flush**（wbuf 动作）→ **后台触发**（`bg_policy_service`，
- 只提交）→ **唯一仲裁执行**（`ftl_sched_dispatch`）。
-- **`bg_policy.c/h`**：一个模块承载两层内容——
- - **引擎**：必跑任务 + 预算任务 + 配额截断（函数本身零 kick 知识，
- 不认识任何具体任务）；**只提交 job，不直接执行 handle**；
- - **FTL 策略段**：10 个静态适配器把异构 kick 包成统一签名的入口 + 任务表
- 后台任务表 + 档位配额表档位配额表 + `bg_policy_init` /
- `bg_policy_level_select` / `bg_policy_service`。
-
- 两层同放一个 `.c` 是刻意的：引擎的接口就是“一张 `bg_task_s` 表”，把策略段拆出去只会让
- 引擎多一层间接；而“档位是 FTL 域策略”这条边界，靠**引擎不决定档位**（档位由策略段在同轮
- 先写入 `sched->level`）来保证。
+ **cache 序列确认**（`ftl_cache_write_confirm_step`）→ **host 补发**（`ftl_sched_run_host`）→
+ **序列收尾**（`ftl_cache_seq_idle_check` / `ftl_cache_seq_close_step`）→
+ **flush 备副本重试**（L2P flush 续跑）→ **wbuf 空闲 flush** →
+ **唯一仲裁入口**（`ftl_sched_dispatch`：起点先跑后台策略步——选档 + token bucket +
+ 按 `ftl_bg_job_e` 表序提交；随后按 host 残留 → 后台 job → L2P flush 执行）。
+- **`ftl_sched.c/h`**：同一模块承载调度器与后台策略——
+ - **调度器**：work item 池 + `FTL_SCHED_PRIO_E` 仲裁 + L2P load/flush credit + host 组派发；
+ - **后台策略步**：后台任务表（按 `ftl_bg_job_e` 下标）+ 档位配额表（按 `BG_LEVEL_NUM`）
+ + 后台任务表的初始化 / 档位选择 / token 补充三个入口；
+ 只提交 job，不直接执行模块 handle。
 - **GC / WL / predict 的求值节拍**在 migrate handle 内自持，不单列成任务。
-- **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎函数不决定档位。
+- **不做**：不实现各后台任务（各模块的 `*_handle`）。
 
-#### 3.12.4 结构与不变量
+#### 3.4.4 结构与不变量
 
-`bg_task_s`：`func` / `mask` / `units`（工作量单位）/ `must_run`（`bool`）。
-`bg_policy_s`：`tasks[BG_POLICY_TASK_COUNT]`（当前 10） / `task_count` / `cfg`（本轮生效的档位配置，
-引擎在 `run` 起点发布，任务读它而不各自反查档位表） / `level`（本轮档位，模块入口
-直接读取） / `credits`（预算 credit，由 `bg_policy_refill` 在 timer 任务里补充，
-`bg_policy_run` 用于提交预算任务；must-run 不占。实际执行由 `ftl_sched_dispatch`
-按 `ftl_bg_job_e` 表序完成（§3.12.12）。
-`bg_level_cfg_s`：每个 token interval 的 credit 配额（`grant_units`） / 任务掩码
-（预算任务位集合）。
+`bg_task_s`：`units`（工作量单位）/ `must_run`（不 gate、不占配额）/ `gated`
+（提交前检查 `l2p_flush_due`）。
+`ftl_sched_bg_s`：`tasks` / `task_count` / `cfg`（本轮档位配置，策略步起点发布） /
+`level`（本轮档位） / `credits`（token bucket 余额，由 `ftl_sched_bg_refill` 在 timer
+任务里补充；must-run 不占）。实际执行由同一 `ftl_sched_dispatch` 按 `FTL_SCHED_PRIO_E`
+完成（§3.4.10）。
+`bg_level_cfg_s`：每个 token interval 的 credit 配额（`grant_units`） / 预算任务位集合
+（`task_mask`，位号 = `ftl_bg_job_e`）。
 
-⚠ **表序 = 执行序 = 优先级**：`bg_task_s` **没有** `priority` 字段——表序已是优先级坐标，
-再加一个平行数字就是第二套坐标（C9），且必然漂移。任务掩码位由表项 `.mask` 显式声明
-（`BG_POLICY_TASK_*`），表序不再兼职位号。加任务 = 在后台任务表里插一行并给 `.mask` 新位 +
-视需要加入 `BG_*_TASKS` 预设 + 同步 `BG_POLICY_TASK_COUNT`，并确认对应档位的 `grant_units`
-足够容纳新任务（credit 不够会被截掉）。表项数由 `_Static_assert` 在编译期
-锁死为 `BG_POLICY_TASK_COUNT`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
+⚠ **表序 = 执行序 = 优先级**：`bg_task_s` 没有 `priority` 字段——`ftl_bg_job_e` 的枚举序
+（= 任务表下标）已是优先级坐标，再加一个平行数字就是第二套坐标。
+预算任务掩码 = `1U << job`；L2P flush 用 `gated` 标出。加任务 = 在枚举与任务表
+各加一项 + 视需要加入预算任务全集 + 同步对应档位的 `task_mask`，并确认 `grant_units`
+足够容纳新任务（credit 不够会被截掉）。表项数由 `_Static_assert` 在编译期锁死为
+`FTL_BG_JOB_NUM`（不等即编译失败，避免越界写 `tasks[]` / 漏装载）。
 
 **must-run 的归纳判据（6 项同一条）**：**有前台请求或在飞 job 正在等它**——不跑就死锁或
 host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
-**10 项任务**（任务位宏 `BG_POLICY_TASK_*`；表序 = 执行序 = 优先级）。只列预算任务的 credit 成本（must-run 不占 credit）：
+**10 项任务**（任务位 = `1U << FTL_BG_JOB_*`；表序 = 执行序 = 优先级）。只列预算任务的 credit 成本（must-run 不占 credit）：
 
 | 表序 | 任务 | 类型 | 配额（units） | 语义 |
 |---:|---|---|---:|---|
@@ -3433,14 +1960,14 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 
 **档位**：
 
-| 档位 | 条件（`bg_policy_level_select`） | 每 10 ms credit | 允许的预算任务 |
+| 档位 | 条件（`ftl_sched_bg_level_select`） | 每 10 ms credit | 允许的预算任务 |
 |---|---|---:|---|
 | IDLE | `pending == 0 && queued == 0` | 4 | 表序 6..9 全开 |
 | NORMAL | 非 IDLE，且 `pending <= FTL_PENDING_MAX/2` 且 `queued == 0` | 4 | 表序 6..9 全开 |
 | BUSY | `pending > FTL_PENDING_MAX/2` 或 `queued != 0` | 1 | **仅表序 6（L2P flush）** |
 
-（`pending` = 待下发子操作数 `pend_slot_get_count`；`queued` = 未完成组数
-`pend_group_get_count`；`FTL_PENDING_MAX = 32`，故分界当前为 16。**判据写表达式不写数字**：
+（`pending` = 待下发子操作数 `pend_slot_count`；`queued` = 未完成组数
+`pend_group_count`；`FTL_PENDING_MAX = 32`，故分界当前为 16。**判据写表达式不写数字**：
 池尺寸一改，写死的数就错了。）
 
 **不变量**：
@@ -3448,24 +1975,24 @@ host 挂起。逐项理由见下表“语义”列，不必逐个记。
 1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗配额。
 2. **每个实例都要调实例服务**：漏一个，它的 Journal/CP/BBT/GC 永不推进。
 3. **must-run 不 gate、不占 credit**：它们是防死锁/防 host 挂起的动作。
-4. **确定性保护靠“档位掩码 + 固定 token 补充速率”**，不靠每轮 `elapsed` 计时（理由见 §3.12.1）。
+4. **确定性保护靠“档位掩码 + 固定 token 补充速率”**，不靠每轮 `elapsed` 计时（理由见 §3.4.1）。
 5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ 墙钟兜底失效（credit 仍生效，任务照常按
  credit 截断）；防刷屏靠各任务内部单飞行/事件门。
  ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
  从未被运行验证（见 `known_open_items.md`）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
- 判定收在 `bg_policy_service` 首行（早于必跑任务）。
+ 判定收在 `ftl_sched_dispatch` 的后台策略步首行（早于必跑任务）。
 
-#### 3.12.5 一轮走查（host 正在连续写）
+#### 3.4.5 流程（一轮走查：host 正在连续写）
 
-> 本节描述**提交**动作；`bg_policy` 现在只把任务提交为 scheduler job，真正调用
-> `cp_handle/md_handle/...` 的是同一轮的 `ftl_sched_dispatch`（表序不变，§3.12.12）。
+> 本节描述**提交**动作；`ftl_sched` 的后台策略步只把任务提交为 scheduler job，真正调用
+> `cp_handle/md_handle/...` 的是同一轮的 `ftl_sched_dispatch`（表序不变，§3.4.10）。
 
 把上面的规则跑一遍，数字取典型值，只为说明形状：
 
 ```text
 前提：host 连续写，pending = 20 ⇒ pending > FTL_PENDING_MAX/2（=16）⇒ 本轮档位 = BUSY
-  cfg = { grant_units = 1, task_mask = BG_POLICY_TASK_L2P_FLUSH }
+  cfg = { grant_units = 1, task_mask = (1U << FTL_BG_JOB_L2P_FLUSH) }
 
 ① 必跑任务（must-run，表序 0..5，全部执行，不计配额）
  cp_handle(ADVANCE)  → 在飞 CP 推进一步（没有在飞则空操作）
@@ -3493,9 +2020,9 @@ host 空闲时后台跑满。
 
 **BUSY 档为什么只留 L2P 写回**：写回是**释放 L2P 缓存行**的唯一途径——它是写路径的
 依赖项，不是“可选优化”。其余三项（Journal 刷页 / BBT / CP 触发）停在 BUSY 不会让 host
-卡住：Journal 页满时 `jrn_append` 自己会起刷页（§3.9.4），BBT 攒批、CP 有紧急水位兜底。
+卡住：Journal 页满时 `jrn_append` 自己会起刷页（§3.1.4），BBT 攒批、CP 有紧急水位兜底。
 
-#### 3.12.6 主循环
+#### 3.4.6 流程（主循环）
 
 ```mermaid
 flowchart TB
@@ -3505,38 +2032,40 @@ flowchart TB
  subgraph "实例服务 ftl 每实例"
   S1["ftl_confirm_service"] --> S2["ftl_sched_run_host"]
   S2 --> S3["序列收尾 / L2P flush 续跑 / wbuf idle flush"]
-  S3 --> S4{"bg_policy_service: bg_suspend"}
-  S4 -- "是" --> S5["跳过后台触发"]
-  S4 -- "否" --> S6["bg_policy_level_select 选档"]
-  S6 --> S7["bg_policy_run：只提交 must-run / 预算任务"]
-  S7 --> S8["ftl_sched_dispatch"]
+  S3 --> S4{"ftl_sched_dispatch: bg_suspend"}
+  S4 -- "是" --> S5["跳过后台策略步"]
+  S4 -- "否" --> S6["ftl_sched_bg_level_select 选档"]
+  S6 --> S7["策略步：只提交 must-run / 预算任务"]
+  S7 --> S8["ftl_sched_dispatch 执行"]
   S5 --> S8
   S8 --> S9["host 残留 → bg 表序 → L2P flush"]
  end
  P2 --> S1
 ```
 
-#### 3.12.7 关键流程
+**读图要点**：pump 每轮一次；每实例 service；后台策略步在 dispatch 起点。
+
+#### 3.4.7 流程（关键步骤）
 
 1. 主循环：`cli_service_poll` → `ftl_service_pump` → 逐实例实例服务。
-2. 档位选择：`inflight = pend_slot_get_count + pend_group_get_count`；0 → IDLE；
+2. 档位选择：`inflight = pend_slot_count + pend_group_count`；0 → IDLE；
  `pending > FTL_PENDING_MAX/2` 或 `queued != 0` → BUSY；否则 NORMAL。
 3. 先跑必跑任务：按表序跑所有 `must_run`，无条件、不计配额。
 4. 再跑预算任务：按表序扫；**本档位掩码允许且配额够**才跑（每次扣 `units`）；
  单轮墙钟超过 `BG_ROUND_HARD_LIMIT_US`（4 ms）即兜底截断（不抢占）。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
-6. 本轮提交的后台 job 由 `ftl_sched_dispatch` 按 `FTL_SCHED_PRIO_E` 执行；`bg_policy`
- 不再直接调用模块 handle。详见 §3.12.12。
+6. 本轮提交的后台 job 由 `ftl_sched_dispatch` 按 `FTL_SCHED_PRIO_E` 执行；后台策略步
+ 不再直接调用模块 handle。详见 §3.4.10。
 
-#### 3.12.8 与相邻章节的关系（读本节前先看这三条）
+#### 3.4.8 与相邻章节的关系（读本节前先看这三条）
 
 | 相邻章节 | 关系 |
 |---|---|
-| **§3.9.5 读子操作 / `l2p_defer`** | 前台 `ftl_host_group_drain`（由 `ftl_sched_run_host` 驱动）能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（L2P 在飞判据），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（的环形等待） |
-| **§3.10 完成派发面（`ftl_op`）** | 序列门控决定**后台提交能否成功**：cache 序列 `active/draining` 期间只放行所有者；被拒的 kick 返回 FTL_AGAIN，本轮白跑、下轮重试 |
-| **§3.11 页打包写缓冲（wbuf）** | wbuf 动作属于 **wbuf 空闲 flush** 步（host IO 收尾），不在本节的**后台调度**步；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
+| **§3.1.5 读子操作 / `l2p_defer`** | 前台 `ftl_host_group_drain`（由 `ftl_sched_run_host` 驱动）能否推进，取决于 L2P region 是否驻留；`l2p_defer` 是它给 drain 的“有进展”信号。⚠ 该信号**必须由在飞命令派生**（L2P 在飞判据），否则 drain 永不判卡死、host 组永不结束，本节的后台任务会被序列门控长期挡住（形成环形等待） |
+| **§3.2 完成派发面（`ftl_op`）** | 序列门控决定**后台提交能否成功**：cache 序列 `active/draining` 期间只放行所有者；被拒的 kick 返回 FTL_AGAIN，本轮白跑、下轮重试 |
+| **§3.3 页打包写缓冲（wbuf）** | `WBUF_TRIGGER_MAYBE_FLUSH_IDLE` 属于 wbuf 空闲 flush 步（host IO 收尾），不在本节的**后台调度**步；它是“没有写组会再 append 时就把缓冲编掉”的确定性动作 |
 
-#### 3.12.9 失败语义
+#### 3.4.9 失败语义
 
 | 情况 | 结果 | 影响 |
 |---|---|---|
@@ -3545,31 +2074,11 @@ flowchart TB
 | 时钟缺失 | 墙钟兜底失效（配额仍生效） | 靠内部事件门防刷屏 |
 | `bg_suspend` 置位 | host 仍派发；后台 job / L2P flush 在 `ftl_sched_dispatch` 内跳过 | 只能复位恢复（诊断/擦片后） |
 
-#### 3.12.10 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `NAND_SUBMIT_BUDGET` | 4 |
-| `L2P_FLUSH_MAX_NORMAL` / `L2P_FLUSH_MAX_BUSY` | 4 / 1 |
-| `GC_EVAL_INTERVAL_MS` | 10 |
-| `GC_NOGAIN_BACKOFF_MS` | 5000 |
-| `RR_SCAN_INTERVAL_MS` | 1000 |
-| `BG_POLICY_TASK_COUNT` | 10 |
-| `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） |
-| 档位配额 | 4 / 4 / 1（工作量单位） |
-| `BG_ROUND_HARD_LIMIT_US` | 4000 |
-
-#### 3.12.11 主流对照
-
-“主循环 + 请求调度器 + 独立后台策略/配额 + 每任务优先级”是主控固件的常见形态
-（SPDK core poller、企业级后台核）。**本仓自定**的是 10 项任务表、三级负载→固定配额
-（不是连续带宽调节）与 must-run 集合的划分。
-
-#### 3.12.12 请求调度器（ftl_sched）：调度策略
+#### 3.4.10 流程（请求调度器：调度策略）
 
 **定位**：FTL 与 FC 之间的请求/资源仲裁层。HIL host 请求 → `ftl_sched`（每 die 一份）→
-`ftl_cmd_lease` → FC。`bg_policy` 只决定“本轮提交哪些后台 job”，`ftl_sched` 决定执行顺序、
-准入与完成回收；FC 资源池（已定稿的 BG/CRIT 两类）负责跨 die 的共享资源上限。
+`ftl_cmd_lease_claim` → FC。`ftl_sched` 的后台策略步只决定“本轮提交哪些后台 job”，同一调度器
+决定执行顺序、准入与完成回收；FC 资源池（已定稿的 BG/CRIT 两类）负责跨 die 的共享资源上限。
 
 **对象与状态**：
 
@@ -3588,44 +2097,1606 @@ flowchart TB
 **调度策略**：
 
 1. **一轮顺序**：`ftl_sched_host_kick`（提交快路径，只推进本组）/
- `ftl_sched_run_host`（服务循环，读组先于写组批量派发）→
- `bg_policy_service`（只提交 must-run/预算 job）→ `ftl_sched_dispatch`
- （host 残留 → 后台 job 表序 → L2P flush）。后台 job 使用预留 item，不再每轮分配/释放。
-2. **host 写准入**：`ftl_sched_host_write_admit` 在 CMT dirty ≥ 75% 或 free <
- `FREE_POOL_EMERGENCY` 时拒绝新 host 写；HIL 用 `WAIT_GATE` 暂缓并下轮重试，读不经过
+ `ftl_sched_run_host`（服务循环，读组先于写组批量派发）→ `ftl_sched_dispatch`
+ （起点先跑后台策略步：选档 + token bucket + 提交 must-run/预算 job；随后按
+ host 残留 → 后台 job 表序 → L2P flush 执行）。后台 job 使用预留 item，不再每轮分配/释放。
+2. **host 写准入**：`ftl_sched_host_write_is_admitted` 在 CMT dirty ≥ 75% 或 free <
+ `FREE_POOL_EMERGENCY` 时拒绝新 host 写；HIL 用 `USB_MSC_SLOT_WAIT_GATE` 暂缓并下轮重试，读不经过
  该判据。host item 上限 32，其中读组保留 4 个槽（写最多 28）。
 3. **L2P load**：demand 与预取分别 8 / 2 个 credit；预取不占 demand 保底。flush 触发的
  “CMT 合并加载”（line 不在、CMT 脏）也走同一 demand 登记与 credit，不允许绕开。
 4. **L2P flush**：CP 把 dirty region 登记为 item（活动上限 64，超额由 CP 下轮继续）；
- `ftl_sched_dispatch_flush` 按 `L2P_FLUSH_MAX_NORMAL` 预算启动；撞 metadata slot 时
- 转 `WAIT_DEP(MD_SLOT)`，由 metadata 空闲唤醒。
+ `ftl_sched_dispatch` 的 L2P flush 阶段按 `L2P_FLUSH_MAX_NORMAL` 预算启动；撞 metadata slot 时
+ 转 `FTL_WORK_WAIT_DEP`（`FTL_WORK_DEP_MD_SLOT`），由 metadata 空闲唤醒。
 5. **双副本预留**：写回起点一次预留主/备两个命令槽；备副本提交被 cache 序列门控拒绝时，
  命令保留在 `line->flush_pending_cmd` 且 `flush_backup_deferred = true`，由
  L2P flush 续跑每轮重试；只有硬失败才作废整对。
 6. **CP/metadata 保底**：FC 定稿不改，FTL 侧在 L2P flush 预检与 demand load 分配前留出
  `FTL_FC_CP_{CMD,DESC,BUFS}_HEADROOM = 2/8/8`，避免把 CP 的最后一个命令/页资源吃光。
 7. **统一完成口**：`ftl_op_drain` 在模块完成回调返回后调用
- `ftl_sched_note_completion`，回收 host/flush item 并唤醒 `MD_SLOT`；模块数据面仍先执行。
+ `ftl_sched_note_completion`，回收 host/flush item 并唤醒等待 `FTL_WORK_DEP_MD_SLOT` 的 item；模块数据面仍先执行。
 8. **`bg_suspend`**：host 仍派发；后台 job 与 L2P flush 在 `ftl_sched_dispatch` 内跳过。
 
 **不变量**：
 
-- **单一申请口**：FTL 命令只经 `ftl_cmd_lease_acquire` → `fc_command_alloc_class`；
+- **单一申请口**：FTL 命令只经 `ftl_cmd_lease_claim` → `fc_command_alloc_class`；
  desc/buffer 随命令 chain 释放。
-- **单一释放漏斗**：`ftl_sched_item_release` 维护 `host_items` / `flush_items`，
+- **单一释放漏斗**：所有普通 item 的 `state = FREE` 都经 `sched_item_release`，它同时维护 host / flush item 计数；
  所有普通 item 的 `state = FREE` 都经过它。
 - **启动期**：`sched.items == NULL` 是合法状态（boot 早于 `ftl_sched_init` 的完成钩子必须
- 静默返回）；之后 `ftl_sched_items_ok` 校验 workspace 必须是本 die 那一行。
+ 静默返回）；之后 `sched_items_is_valid` 校验 workspace 必须是本 die 那一行。
 - **每 die 只推进自己的请求**：L2P flush 续跑只处理 owner die 的行；
  `inflight.flush_pending[]` 按 die 分开计数。
 
 **验证状态**：调度器统计的 begin/reap/complete 闭合与上板结果见 `docs/guides/testing_guide.md`；已知残余是随机读下同 region 反复驱逐/重载的延迟抖动（无错误）。
 
-<a id="s3-13" name="s3-13"></a>
+#### 3.4.11 设计取舍
 
-### 3.13 GC 策略与迁移引擎（gc + migrate）
+选择：主循环 + 请求调度器 + 固定分档配额 + must-run。主要替代：每轮全跑 / 时间片 / 连续带宽调节。
+差异：10 项任务表、三级负载固定配额。完整论证见架构文档 §9.11。
 
-#### 3.13.1 背景与需求
+#### 3.4.12 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `NAND_SUBMIT_BUDGET` | 4 |
+| `L2P_FLUSH_MAX_NORMAL` / `L2P_FLUSH_MAX_BUSY` | 4 / 1 |
+| `GC_EVAL_INTERVAL_MS` | 10 |
+| `GC_NOGAIN_BACKOFF_MS` | 5000 |
+| `RR_SCAN_INTERVAL_MS` | 1000 |
+| `FTL_BG_JOB_NUM` | 10 |
+| `FTL_PENDING_MAX` | 32（档位分界 = 它的一半） |
+| 档位配额 | 4 / 4 / 1（工作量单位） |
+| `BG_ROUND_HARD_LIMIT_US` | 4000 |
+
+
+
+
+<a id="s3-5" name="s3-5"></a>
+
+### 3.5 L2P Cache
+
+#### 3.5.1 背景与需求
+
+L2P 全表 4 MiB，片上 SRAM 只能拿出约 128 KiB 做缓存。没有 cache，**每一次** LBA 访问
+都要先读一页 NAND 取映射——读放大不可接受，写路径也要先读后改。
+
+Cache 带来三个新问题，模块必须正面回答：
+
+1. **未命中怎么办**：同步等 NAND 会钉住整个完成泵；本仓选择**异步加载**——
+ 起一条读命令、返回 `FTL_AGAIN`、调用者下轮重试。
+2. **脏行什么时候写回**：写回是整页 2 KiB（region 粒度），不能就地覆盖；只能追加到
+ 日志块（§3.6）。写回在后台做，前台不感知。
+3. **工作集远大于 cache 怎么办**：全盘随机访问时 miss 率接近 100%，驱逐→写回→加载
+ 反复，称为 thrashing。需要检测并降级，把 NAND 带宽让给前台。
+
+#### 3.5.2 职责与边界
+
+- **做**：64 行 cache、CLOCK 替换、三态读/写、异步载入/写回、全局 region 脏位图、
+ thrashing 检测、owner 解析（共享 cache 跨 LUN）、**顺序读触发的下一 region 预取**
+ （best-effort，不制造写回）。
+- **不做**：不决定 region 页落在哪个物理位置（§3.6）；不写 Journal（§3.7）；
+ 不决定 Checkpoint 时机（§3.8）。
+- **共享模型**：一个 `(ch, ce)` 一份 cache，同 `(ch,ce)` 下的多个 LUN 共用；
+ 每行用**全局 region** 作键，load/flush 时通过 owner 解析解析到 `l2p_owner_s`。
+- **后台入口**：L2P 推进只处理本 owner 的 DIRTY 行；
+ 档位→`max_kick` 的 `static const` 表在模块内，`thrashing` 降级也在模块内判定。
+ 同步逃生口 `*_sync` 自己用 drain deadline，不经过本入口。
+
+#### 3.5.3 结构与不变量
+
+`l2p_cache_line_s`：
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `entries[512]` | 2 KiB | region 的 512 条 PBA |
+| `tag.region_id` | 4 B | **全局** region 编号（`l2p_tag_s`） |
+| `tag.state` | 1 B | INVALID / CLEAN / DIRTY / FLUSHING / LOADING（`l2p_tag_s`） |
+| `tag.access_count` | 2 B | CLOCK 访问计数（`l2p_tag_s`） |
+| `fresh` | 1 B | 本次加载正是为当前访问而起；首次触碰不计命中 |
+| `load_fail_count` | 1 B | 同一 region 连续加载失败次数（`L2P_LOAD_RETRY_MAX = 3`） |
+| `degraded` | 1 B | 最近一次加载在重试耗尽后降级为“全未映射”；cache 级 `region_degraded_bitmap` 是权威（行驱逐后仍保留） |
+| `flush_pba[2]` | 8 B | 双副本写回的两个槽（0=主 / 1=备），一次 pair 预留 |
+| `flush_issued` / `flush_done` | 各 1 B | 已提交 / 已完成副数（串行：先主后备） |
+| `flush_fail` | 1 B | 任一副本失败 ⇒ 不提交 Directory |
+| `flush_backup_deferred` | 1 B | 备副本已建链、提交被门控，等 resume |
+| `flush_pending_cmd` | 指针 | 写回起点预留的备副本命令 |
+| `load_pba` | 4 B | 在飞/最近一次加载的 PBA |
+| `load_use_backup` | 1 B | 本次加载读的是备份副本（成功即交换主备） |
+| `prefetch` | 1 B | 本行由顺序读预取发起；完成时 fresh=0，首次 host 命中计 hit 并清标志 |
+
+`l2p_cache_s`：
+
+| 字段 | 含义 |
+|---|---|
+| `lines[64]` | 约 128 KiB |
+| `clock_hand` | CLOCK 指针 |
+| `stats.hit_count` / `stats.miss_count` | 开机累计（观测） |
+| `thrash.window_access` / `thrash.window_miss` / `thrash.miss_pct` / `thrash.thrashing` | 窗口 miss 率 + 滞回 |
+| `region_dirty_bitmap[]` | **全局** region 脏位；Checkpoint 按 owner 过滤快照 |
+| `inflight.load` / `inflight.flush` / `inflight.flush_pending[die]` | 在飞计数；`flush` 是写回背压闸门，`flush_pending` 按 owner die 计备副本待提交数 |
+| `ch` / `ce` | 本 cache 服务范围（跨 LUN 共享） |
+| owner 解析 / `owner_ctx` | 全局 region → `l2p_owner_s`（die / metadata_dir / alloc / topo） |
+
+**状态机**：
+
+```mermaid
+stateDiagram-v2
+    state "INVALID" as INVALID
+    state "LOADING" as LOADING
+    state "CLEAN" as CLEAN
+    state "DIRTY" as DIRTY
+    state "FLUSHING" as FLUSHING
+    [*] --> INVALID
+    INVALID --> LOADING: miss 起异步读
+    LOADING --> CLEAN: 加载完成
+    CLEAN --> DIRTY: 写命中
+    DIRTY --> FLUSHING: flush_kick
+    FLUSHING --> CLEAN: 写成功
+    FLUSHING --> DIRTY: 写失败
+    CLEAN --> INVALID: 驱逐
+    DIRTY --> DIRTY: 驱逐时踢一次 flush
+```
+
+**读图要点**：FLUSHING 可读不可写；LOADING 不可读写；驱逐 DIRTY 前先踢 flush。
+
+**不变量**：
+
+1. **同一 region 只有一行**。`find` 匹配 CLEAN/DIRTY/FLUSHING/LOADING，只排除 INVALID；
+ 否则 FLUSHING 窗口会为同一 region 再分配一行 ⇒ 两行分叉。
+2. **FLUSHING 可读不可写**：entries 是有效快照，读照常命中；写会让“落盘的是旧快照、
+ RAM 是新值”分叉 ⇒ 写一律 `FTL_AGAIN`。
+3. **LOADING 不可读不可写**：entries 尚未有效。
+4. **写路径两遍式**：先 `ready` 再 `write`；`write` 遇到未驻留的 region 只起加载、不写。
+ 一遍式会静默丢更新。
+5. **`inflight.flush` 是共享 credit 池**：上限 4，防止写回把 FC 命令/缓冲池吃光。
+6. **同步逃生口只许结构性同步上下文**：开机、CLI、`fl`、CP；服务函数禁止调用
+ （`l2p_sync_pump` 有 `ftl_op_is_in_dispatch==0` 断言）。
+7. **降级不是“合法未映射”**：连续 `L2P_LOAD_RETRY_MAX` 次加载失败（主备两份都读不出）
+ 后，行置 CLEAN + entries 全 INVALID + `degraded = 1`，并置 cache 级
+ `region_degraded_bitmap`（行被驱逐/重载后仍能识别）。
+ - **host 读**：`host_group_subop_issue` 在 `p == INVALID` 时查 降级 region 判据，
+  命中返回 `FTL_ERROR`（主机看到读错误），不再静默零填；
+ - **开机恢复**：Journal 回放 / `probe` 用 降级 region 判据 识别，
+  走范围化恢复（保留块元数据快照，`bit=scoped`），不再回退 full metadata rebuild
+  。
+8. **区域写回遵守 WAL 次序**：行记录其映射更新依赖的 Journal 序号上界
+ `dirty_seq`（= 更新后的 `sequence_counter`）；
+ 区域写回只有在 Journal 的
+ **落盘水位** `persisted_seq ≥ dirty_seq` 时才提交区域页，否则返回 `FTL_AGAIN` 退让
+ （计数 `stats.wal_defer_count`，`info` 的 `wd=`）。理由：掉电时若「区域页已落盘、Journal 页未落盘」，
+ region 里的新映射会生效，而 `valid_count` 只有 CP 快照 + 存活回放的数字 ⇒ 计数偏低
+ 甚至为 0 ⇒ dangling、GC 按 `valid_cw==0` 误回收仍被 L2P 引用的块
+ ⇒ 静默丢数据。同一条规则也保证 F4（`pfr_boot_apply_region_bitmap`）的
+ 「未置位区 NAND 页更旧」假设成立。
+ ⚠ **例外：Journal 页写失败时闸门必须放行**。失败页的条目已随
+ `page_buf` 清空而丢失，`persisted_seq` 永远覆盖不到那段序号；若继续退让，
+ Checkpoint 的区域落盘被永久挡住，而清除失败标记（`write_fail_pending`）的唯一
+ 途径就是「CP 完成」⇒ 互相等待。此时 CP 本身就是恢复机制：它完成后快照全部 L2P
+ 并截断 Journal，CP 未提交时新写的区域页无人引用，不产生额外损失。
+
+#### 3.5.4 流程（读路径）
+
+```mermaid
+flowchart TD
+ A["l2p_read"] --> B["region 为 lba 512, idx 为 lba 模 512"]
+ B --> C{"查找 region"}
+ C -- "LOADING" --> D["返回 FTL_AGAIN"]
+ C -- "CLEAN DIRTY FLUSHING" --> E["返回 entries idx fresh 不计命中"]
+ C -- "未命中" --> F["miss 加一, note_access 1"]
+ F --> G["CLOCK 选 victim"]
+ G -- "无可驱逐" --> H["返回 FTL_AGAIN"]
+ G -- "有" --> I["起异步加载 lookup 到 read page state 为 LOADING"]
+ I --> J["返回 FTL_AGAIN"]
+ J --> K["下轮重试"]
+ D --> K
+```
+
+**读图要点**：命中/未命中/未映射三分支；miss 起加载；加载失败降级。
+
+`ftl_l2p_op_callback` 收尾（`ctx = line`）：
+
+- 成功：`ftl_cmd_read_data` 把整页 region 拷进 `entries`；state = CLEAN。
+- 失败：entries 保持全 `NAND_PBA_INVALID`（= 该 region 全部未映射），state = **CLEAN**。
+ 这样后续访问走“未映射”路径，不会每次重试加载。
+- 两者都置 `fresh=1`：下一次命中是本次访问的重试，不计 hit（保持 miss 率口径）。
+
+#### 3.5.5 流程（写回）
+
+```text
+l2p_is_ready(lba) ── 未驻留则起加载、返回 false；命中不记账
+l2p_write(lba, pba)
+ ├─ 行未就绪（LOADING/FLUSHING）⇒ FTL_AGAIN，不改状态
+ ├─ entries[idx] = pba；state = DIRTY；置全局 region 脏位
+ └─ fresh? 消费 fresh : access++/hit++
+
+l2p_flush_kick(line)
+ ├─ 非 DIRTY / 已在 FLUSHING ⇒ 返回
+ ├─ **WAL 闸门**：jrn_persisted_seq < line->dirty_seq 且**无 Journal 写失败**
+ │ ⇒ stats.wal_defer_count++、返回 FTL_AGAIN（写失败时放行，见不变量 8 的例外）
+ ├─ inflight.flush 达上限 ⇒ FTL_AGAIN
+ ├─ md_slot_pair_append 取两槽（失败 ⇒ 行保持 DIRTY）
+ ├─ 起异步写主副本；state = FLUSHING
+ ├─ 主副本完成 ⇒ 串行提交备副本
+ └─ 完成：两份都成功 ⇒ md_commit_region(MD_COMMIT_PAIR) + CLEAN + 清脏位
+    任一失败 ⇒ 回 DIRTY，Directory 不登记
+```
+
+**CLOCK 驱逐**：
+
+```text
+① FLUSHING / LOADING → 跳过（在飞）
+② DIRTY → 踢一次 flush_kick，跳过本行（不等写回）
+③ INVALID → 直接占用
+④ access_count > 0 → access_count--，下一行
+⑤ access_count == 0 → 回收
+⑥ 扫完一圈无可驱逐 → -1（调用者 FTL_AGAIN）
+```
+
+#### 3.5.6 流程（thrashing 检测与降级）
+
+```text
+每 256 次访问结算一次：miss_pct = window_miss * 100 / window_access
+进入：>= 90%；退出：< 70%（滞回）
+降级动作：停掉后台**主动** flush；脏行只由驱逐路径按需写回
+```
+
+持久性不受影响：L2P 更新在写完成路径里先入 Journal；Checkpoint 也会无条件 flush
+快照内的脏 region。**刻意不做** write-through（整页追加模型下省不掉 load，反而放弃合并收益）。
+**不做无条件预取**：只做顺序读触发、距 region 末尾 64 LBA 内的下一 region 预取；
+`thrashing` / `flush.active` / `trim.active` / 资源不足 / 在飞 load 达 2 时停。
+预取只驱逐 INVALID/CLEAN（遇 DIRTY 跳过，不 kick 写回），不计 miss/hit；预取行
+第一次被 host 命中时才计 hit。
+
+#### 3.5.7 失败语义
+
+| 情况 | 返回值/结果 | 数据影响 |
+|---|---|---|
+| `FTL_AGAIN` | 加载中/背压/行在飞 | 调用者下轮重试；不是错误 |
+| `FTL_OK` + `NAND_PBA_INVALID` | **未映射**（合法结果） | 读路径零填充；写路径分配新位置 |
+| `FTL_ERROR`（越界） | 也回填 `INVALID` | 调用者按未映射处理 |
+| 加载失败 | 行 CLEAN + 全 INVALID + `degraded=1` | 该 region 视为全未映射；不反复重试。**boot 恢复**用 降级 region 判据 区分“合法未映射”与“读失败降级”：后者计入 读错误计数，回退 full metadata rebuild，不再报 `restored` |
+| 写回失败 | 行回 DIRTY | Directory 仍指旧位置；Journal 可恢复 |
+| 所有行在飞 | 驱逐返回 -1 | 调用者 FTL_AGAIN |
+
+#### 3.5.8 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `L2P_CACHE_SIZE` | 64 |
+| `L2P_FLUSH_MAX_INFLIGHT` | 4 |
+| `L2P_THRASH_WINDOW` | 256 |
+| `L2P_THRASH_ENTER_PCT` / `L2P_THRASH_EXIT_PCT` | 90 / 70 |
+| `L2P_SYNC_GUARD_MAX` | 100,000 轮 |
+| `L2P_PREFETCH_MAX_INFLIGHT` | 2 |
+| `FTL_SEQ_PREFETCH_MIN_RUN` / `FTL_SEQ_PREFETCH_AHEAD_LBAS` | 2 / 64 |
+| `L2P_ENTRIES_PER_REGION` | 512 |
+
+#### 3.5.9 设计取舍
+
+选择：按需加载 + CLOCK + write-back (写回)。主要替代：LRU / 2Q / 直写。
+差异：64 行、thrashing 滞回 90/70、加载失败按未映射处理。完整论证见架构文档 §9.5。
+
+---
+
+
+
+<a id="s3-6" name="s3-6"></a>
+
+### 3.6 元数据目录
+
+> **本节怎么读**：先看 §3.6.1 的背景（为什么位置会变、为什么需要 Directory），再看
+> §3.6.3 的四个结构，然后按 §3.6.5 的写路径读一遍，最后看 §3.6.8 的回收/压缩状态机。
+> `metadata.c` 的核心是**唯一的一层位置来源**：Directory 条目。`NAND_PBA_INVALID` =
+> 从未写过（未映射），非 INVALID = region 页在日志块上的真实位置。
+
+#### 3.6.1 背景与需求
+
+L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 region 都固定在元数据区，
+更新一个 region 就必须**就地重写**那一页——NAND 只能 1→0，二次编程 = 新数据 AND 旧数据
+= 静默损坏。所以写过的 region 必须**追加**到新的位置。
+
+于是产生两个问题：
+
+1. **位置会变**：region 从固定页迁到日志块，再从日志块迁到另一个日志块。没有索引，
+ 每次 L2P 读都要全盘找。
+2. **旧位置要回收**：日志块写满后要换块；旧块上的 region 全部搬走后才能擦。没有引用计数，
+ 擦掉仍被引用的块 = 映射永久丢失。
+
+**Metadata Directory 就是“region → 当前位置”的索引**：
+`(type, id) → PBA`。它自己也要持久化，否则重启后索引丢失；但索引不能自己指向自己，
+所以它用**固定块池里的全量快照（目录检查点）**落盘。
+
+#### 3.6.2 职责与边界
+
+| 做 | 不做 |
+|---|---|
+| 固定元数据区布局（块号/池大小/记录页数/介质版本） | L2P cache 的替换策略（§3.5） |
+| Directory 的查找/更新/落盘（目录检查点） | Journal 记录格式与回放（§3.7） |
+| L2P 日志块的追加/提交/回收/压缩 | Checkpoint 的阶段编排（§3.8） |
+| 通用元数据 record 池原语（`metadata_ring_*`） | 块分配（调用 `alc_op_alloc_log_block`，§3.9） |
+| 元数据块判据判定 | 坏块内容判定（§3.10） |
+
+**上游调用者**：
+
+| 调用者 | 用的接口 |
+|---|---|
+| `l2p_cache.c` | `md_entry_find` / `md_slot_pair_append` / `md_commit_region`（Checkpoint 快照前的 Directory） |
+| `checkpoint.c` | `metadata_ring_*`、`md_dir_ckpt_prepare` / `md_dir_ckpt_page_build` / `md_dir_ckpt_commit` |
+| `bbt.c` | `metadata_ring_*`（固定块池） |
+| `power_failure_recovery.c` | `md_load`、元数据块判据 |
+| `ftl.c` | `md_handle`（后台 job） |
+
+#### 3.6.3 结构与位置模型
+
+| 对象 | 位置 | 谁写 | 读回含义 |
+|---|---|---|---|
+| **L2P region（未映射）** | Directory 条目 = `NAND_PBA_INVALID` | 无（`md_fixed_fill` 预登记） | 该 region 从未写过；不读 NAND |
+| **L2P 日志块** | **固定预留区 46..93/plane** | `l2p_flush_kick` 追加 | 最新一份 region 页 |
+| **目录检查点** | 固定池 0..31 | Directory 快照 job / CP | Directory 全量快照 |
+| **Checkpoint** | 固定池 32..39 | CP job | L2P 水位 + 块元数据快照 + 磨损快照 |
+| **BBT** | 固定池 40..41 | BBT job | 坏块位图 |
+| **Journal** | 固定池 42..45 | Journal job | L2P 增量日志 |
+
+两类写模型：
+
+- **固定池（目录检查点/CP/BBT）**：record 池，块内轮转，先擦后写，最新有效胜；Journal 是页环形。
+ 每条 record 带单调 sequence；读 = 找“整条校验通过”中 sequence 最大者。
+- **L2P 日志区（固定预留）**：一页一个 region 副本，只追加；每个 region 一次 flush
+ 写**主+备两页**（`L2P_REGION_COPIES = 2`，两份都成功才提交 Directory）；块满从固定区
+ 取下一块；旧块由 live 位图 归零后回收（擦后置 NONE）。未映射的 region 没有物理页，
+ 也没有"固定回退位置"。该区与目录检查点/CP/BBT/Journal 一样属于固定元数据，容量已扣除。
+
+#### 3.6.4 结构与字段
+
+**`md_entry_s`（7 B，packed）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `type` | 1 B | `METADATA_TYPE_L2P_REGION` / `METADATA_TYPE_JOURNAL` / `METADATA_TYPE_CHECKPOINT` / `METADATA_TYPE_BBT`（当前只写 `METADATA_TYPE_L2P_REGION`） |
+| `id` | 2 B | L2P region_id；其他类型为 0 |
+| `pba` | 4 B | 物理位置（PBA，自带 ch/ce/lun） |
+
+> entry 存 **PBA** 而不是裸 PAA：Directory 不假设“元数据一定在本实例的 ch/ce 上”，
+> 换多 die 布局时不需要改记录格式。
+
+**`md_dir_ckpt_page_s`（恰好 2048 B）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `magic` | 4 B | `DIR_CKPT_MAGIC`（"ANDIR"） |
+| `sequence` | 4 B | 同一份 Directory 的各 chunk 相同；单调递增 |
+| `chunk_index` | 2 B | 0..`DIR_CKPT_PAGE_COUNT-1` |
+| `chunk_count` | 2 B | 总页数（= `DIR_CKPT_PAGE_COUNT` = 16，8 主 + 8 备） |
+| `entry_count` | 4 B | 本页有效 entry 数（≤ 256） |
+| `layout_version` | 4 B | 介质版本；不符 ⇒ 本页作废 |
+| `dirty_gen` | 4 B | 本页填充时刻的 Directory 代数（整条 record 要求 16 页全部相同） |
+| `entries[256]` | 1792 B | 256 × 7 B |
+| `padding` | 232 B | 补齐到一页（头 24 B） |
+
+**`md_ring_s`（固定池几何）**
+
+| 字段 | 含义 |
+|---|---|
+| `first_block` | 池首块（per-plane 块号） |
+| `block_count` | 池块数（≥ 2；1 块的池换块会擦掉唯一有效 record） |
+| `pages_per_record` | 一条 record 占几页；块尾不足一条的页不用 |
+| `plane_mask` | 池实际使用的 plane 位图（镜像池 = 全部 plane） |
+
+派生量：`records_per_block = PAGES_PER_BLOCK / pages_per_record`（floor）；
+`total_records = block_count × records_per_block`。
+
+**`md_dir_cache_s`（每实例，CPU-only workspace）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `entries[2048]` | 14 KiB | Directory 本体：每个 region 一条 |
+| `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
+| `ckpt.sequence` | 4 B | 当前目录检查点序号 |
+| `ckpt.dirty` | 1 B | 有未写回目录检查点的变更 |
+| `ckpt.dirty_gen` | 4 B | Directory 变更代数；每次 `md_entry_update` 自增 |
+| `ckpt.covered_gen` | 4 B | 本次目录检查点写入所覆盖的 `dirty_gen` 快照（过期保护） |
+| `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 live 日志块判据（防御分支 / probe） |
+| `cur.block[PLANE_NUM]` | 2 B × plane | **每 plane 一个**当前日志块 gblock（主副本→plane0、备副本→plane1） |
+| `cur.page[PLANE_NUM]` | 1 B × plane | 该 plane 当前日志块下一可用页 |
+| `cur.valid[PLANE_NUM]` | 1 B × plane | 该 plane 游标是否已建立 |
+| `reclaim.bitmap` / `reclaim.count` / `reclaim.scan` | ~516 B | 待回收位图 + 计数 + 轮转起点 |
+| `handle` | ~2.2 KiB | 回收/压缩 handle（含 `cp_buf[2048]`） |
+| `ckpt.write_idx` | 2 B | 目录检查点池写点槽位 |
+| `ckpt.cursor_valid` | 1 B | 目录检查点游标是否已定位 |
+| `topo` | 3 B | 元数据所在芯片路由 |
+| `alloc` / `total_writes` | 2 指针 | allocator + total_writes 窄指针（init 绑定；无端口结构体） |
+
+**`md_handle_s` 关键字段**
+
+| 字段 | 含义 |
+|---|---|
+| `phase` | `md_handle_phase_e`（见 §3.6.8） |
+| `waiting` | 有命令在飞；完成服务函数清 |
+| `compact_wanted` | 日志区可用块 ≤ `L2P_LOG_FREE_WATERMARK` 时请求压缩 |
+| `dir_ckpt` | `md_dir_ckpt_write_s`（与 Checkpoint job 共用）：池几何/基址/槽位/序号/页序/写结果/擦除判定/持有者 |
+| `victim` / `region_id` / `cur_region` / `moved` | 压缩的 victim / 游标 / 当前 region / 已搬数 |
+| `reclaim_gblock` | 在飞擦除的 gblock（待回收集合在 `dir->reclaim.bitmap` 里） |
+| `submit_deadline` | 连续提交不出去（> `FTL_SUBMIT_TIMEOUT_MS` 中止） |
+| `timed_out` / `timeout_phase` | 超时归因（status 上报） |
+| `reclaimed_count` / `error` | 单调回收计数 / 最近一次中止归因 |
+| `hb` | 心跳基准（`log_heartbeat_s`） |
+| `cur_source` / `cur_fallback` | 压缩读的源副本 / 是否已降级读过另一副本 |
+| `slot` | 压缩搬移已取到、待写的槽 |
+| `cp_buf[L2P_REGION_SIZE]` | victim region 页搬运缓冲（必须常驻，异步读完成与写之间跨多轮） |
+
+**不变量**
+
+1. **`entries` 容量 = 每实例 region 数**：每个 region 都必须能登记自己的位置；
+ 容量不足会让“满则丢弃”丢掉已落到日志块的 region，重启后回落到“未映射” = 更新永久丢失。
+2. **`l2p_live[g]` = 最新位置在 g 上的 region 数**。归零才可擦；各 plane 的当前写块除外。
+3. **`md_slot_pair_append` 只取槽、不登记**；`md_commit_region` 只登记。两者分离是崩溃安全前提。
+4. **目录检查点先于 victim 擦除**：压缩的顺序是“搬移 → 登记 → 目录检查点落盘 → 擦 victim → 归还”。
+5. **`entries` 存 PBA，不存 PAA**；读取一律经 `md_entry_find`，不现场手写位置公式。
+6. **未映射没有物理位置**：`md_slot_pair_append` 分配失败时返回 `NAND_PBA_INVALID`；不存在可回退的固定块。
+
+#### 3.6.5 地址模型：ring / locate / prepare
+
+**ring 地址计算**
+
+```text
+records_per_block = PAGES_PER_BLOCK / pages_per_record
+block = ring->first_block + record_idx / records_per_block
+page = (record_idx % records_per_block) * pages_per_record + page_in_record
+plane = ring->plane
+return pba_make(topo->ch, topo->ce, topo->lun, block, plane, page, 0)
+```
+
+三个原语的分工：
+
+| 原语 | 输入 | 输出 | 是否碰介质 |
+|---|---|---|---|
+| ring 地址计算 | 槽位 | 芯片地址 | 否 |
+| `md_ring_locate` | 池几何 + 探针 | 最新有效槽 + sequence + 下一写槽 | **只读** |
+| `md_ring_prepare_addr` | 写点槽 | 地址 + 是否需要先擦块 | 否 |
+| `md_ring_prepare_write` | 写点槽 | 地址（需要时**同步擦**） | 是 |
+
+`locate` 的快路径（利用“record 块内页对齐 + 池内顺序写”两个不变量，只读 O(块数) 页）：
+
+```text
+① 逐块读该块“末条 record”的廉价探针（只读第 0 页取 sequence）
+② 第一个末条无效的块 = 游标块；所有块末条都有效（写满一圈）⇒ 游标块 = (最大 sequence 块 + 1) % N
+③ 游标块内降序找最后一条有效 record
+④ 写点 = 该 record 的下一槽；块内无有效 record ⇒ 块槽 0
+⑤ 候选 = {全池最大 sequence 的末条, 游标块末条}，按 sequence 降序做整条校验
+⑥ 快路径全失败 ⇒ 慢路径全池扫描（只在损坏时付全池代价）
+```
+
+**L2P 日志块的地址**不是 ring record：一页一个 region 副本。每次 flush 从**两个
+plane 各取一页**（主副本 → plane0 的当前块，备副本 → plane1 的当前块），每 plane
+的追加游标是 `(cur.block[p], cur.page[p])`。这样单个 plane 的块被擦/写坏时，另一
+plane 的副本仍完整（依赖 L2 双副本冗余）；每个 plane 的块写满 64 页才换块。
+任一 plane 的块满/无游标时换**该 plane** 的块：
+
+```text
+md_slot_pair_append
+ ├─ 两 plane 各剩余 ≥ 1 页 ⇒ 各返回一页 PBA，page[p] += 1
+ ├─ 某 plane 剩余不足 1 页/无当前块
+ │ ├─ 该 plane 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
+ │ ├─ md_reclaim_mark_all：把 l2p_live==0 且非当前的 LOG 块**只登记**进
+ │ │      reclaim.bitmap（待回收位图，不擦；擦除由后台 job 异步做）
+ │ ├─ md_log_rotate(dir, alloc, plane) 换块（固定区优先，满时借 OP）
+ │ ├─ 设置 `cur.block[plane]` / `cur.page[plane]=0` / `cur.valid[plane]=true`
+ │ └─ 各 plane 的 cur.block/page/valid 独立维护
+ └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN，
+  等后台 job 擦完待回收块后重试）
+```
+
+**plane 由写序轮转决定，与 region_id 无关**。region 落在哪个 plane 完全由 PBA 携带，
+读回一律经 Directory 查 PBA，所以不存在“region 奇偶决定 plane”的第二套坐标。
+
+#### 3.6.6 流程（读路径：lookup 与启动加载）
+
+**运行期 lookup**：
+
+```mermaid
+flowchart LR
+ A["l2p_read miss"] --> B["l2p_load_start"]
+ B --> C["owner = owner 解析(global_region) → l2p_owner_s"]
+ C --> D["local_region 为 global DIE_MAX"]
+ D --> E["md_entry_find L2P_REGION, local_region"]
+ E --> F{"pba 有效"}
+ F -- "是" --> G["ftl_async_read_page pba"]
+ G --> I["ftl_l2p_op_callback 填入 cache line：LOADING → CLEAN"]
+ F -- "否" --> H["line 直接置 CLEAN（entries 全 INVALID，不读 NAND）"]
+```
+
+**读图要点**：读命中 CLEAN/DIRTY；LOADING 返回背压；加载失败按未映射降级。
+
+`md_entry_find` 是 `entries[]` 线性扫描（2048 条）。**它不读 NAND**——Directory
+是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令（未映射则根本不发命令）。
+元数据块判据的 live 日志块判定改用 `l2p_live[g]`（O(1)，不再扫 entries）。
+
+**启动加载**（`md_load`）：
+
+```text
+① md_fixed_fill：铺基础层（与 md_init 共用）
+ 对 r = 0..2047：entries[r] = {type=L2P_REGION, id=r, pba=NAND_PBA_INVALID}
+ （= 未映射；没有物理页，也没有固定回退位置）
+② md_ring_locate(目录检查点池) 找最新“整条校验通过”的 record
+③ 读胜者各页，逐页校验 chunk_index / sequence / layout_version，装配覆盖对应区间
+ - 镜像池：每页先读 P0 副本；不可信时回退 P1 副本（sequence 必须等于被选中的
+  record sequence，绝不跨 record 拼页）
+④ 由装配后的 entries 重建 l2p_live[]：每个合法 pba 的 region 计数一次。
+ - 日志块现在在**固定预留区 46..93/plane**；身份仍按分区表判，**不要**写死
+  "block >= 某常量"（布局随介质版本演进）
+⑤ 日志游标置无效（`cur.valid[plane] = false`）——首次追加从**固定 L2P 日志区**取一个
+ 已擦净块（`md_log_alloc`），绝不复用可能已编程的旧页；**目录检查点游标反向
+ 恢复**：locate 已给出 `ckpt.write_idx` / `ckpt.sequence`，直接置
+ `ckpt.cursor_valid=true`，避免首次 flush 再扫一遍池
+```
+
+无有效目录检查点 ⇒ 返回错误，调用者转 `md_init`（fresh）或格式化（版本判据）。
+
+#### 3.6.7 流程（写路径：append → 写页 → commit）
+
+```mermaid
+sequenceDiagram
+ participant C as L2P cache
+    autonumber
+ participant D as Directory
+ participant N as NAND
+ participant J as metadata job
+
+ C->>D: md_slot_pair_append
+ alt 当前块剩余 ≥ 2 页
+  D->>D: 两 plane 各返回一页 PBA, page[p] 加一
+ else 块满/无当前块
+  D->>D: md_reclaim_mark_all 只登记零活 LOG 块（不擦）
+  D->>D: md_log_rotate 换块（固定区优先，满时借 OP）
+  D->>D: 更新 cur.block[p] / cur.page[p]
+ end
+ D-->>C: 两页 PBA（主/备），失败为 false
+ C->>N: 写主副本页异步
+ N-->>C: 完成
+ C->>N: 写备副本页异步（主成功后串行）
+ N-->>C: 完成
+ alt 两份都成功
+  C->>D: md_commit_region(MD_COMMIT_PAIR)
+  D->>D: 更新 region 的主/备 pba
+  D->>D: l2p_live 旧各减一、新各加一
+  D->>D: dirty 为 1, 旧块归零则置 reclaim.bitmap 位
+ else 写失败
+  C->>C: 行回 DIRTY, Directory 不登记
+ end
+ J->>J: md_handle 消费 reclaim.bitmap / 压缩 compact_wanted
+```
+
+**读图要点**：slot 预留→写主/备→commit；失败保持 DIRTY；旧块归零登记回收。
+
+**为什么必须“先写后登记”**：
+
+- 写失败/掉电在写页之前：槽位作废，Directory 仍指旧位置；旧页是上一份完整快照 ⇒ 映射回退一版，
+ 但 Journal 里有这次更新（写确认路径先 `jrn_append`），回放可恢复。
+- 写成功但掉电在 commit 之前：新页是“孤儿”，Directory 仍指旧位置；同样由 Journal 恢复。
+- **绝不出现**“Directory 指向未写页”——这是掉电安全的关键。
+
+**`md_entry_update` 的定位**：它是“直接覆盖 entry”的低层写入，供固定层铺设、
+目录检查点装配、测试使用；运行期 L2P region 的更新走 `md_commit_region`，以维护 live 位图。
+两者不要混用。
+
+#### 3.6.8 流程（回收与压缩）
+
+**为什么需要 live 位图**：一个日志块装 64 页 = 64 个 region 的最新位置。只有当这 64 个
+region 全部被改写、最新位置都迁到别处后，这个块才没有活引用，才能擦。`l2p_live[g]`
+就是这个计数；它只在 `md_commit_region` 里增减，并在 `md_load` 里重建。
+
+**回收**（`reclaim.bitmap`（待回收位图） + `MD_JOB_RECLAIM`）：块进入回收前必须满足五条：
+
+1. `l2p_live[g] == 0` **且该块上没有在飞写回的槽位预留**（`md_slot_is_reserved`，见下）；
+2. `g` 不是任一 plane 的 `cur.block[plane]`（已满且零活的当前块会先被摘掉当前身份）；
+3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）；
+4. **`dir->dirty == false`**（on-media 目录检查点已覆盖当前 Directory；见下方 ③→④ 契约）。
+
+⚠ **条件 1 的后半句不可省**：live 位图 只统计**已 commit** 的位置。写回从
+`md_slot_pair_append` 取槽到 commit 之间，槽里的数据还在写命令上、Directory 尚未
+登记 ⇒ 该块可能 `l2p_live == 0`，但其实马上就会有活 region 落回来。此时换块/擦除
+会把在飞数据连同其落点一起丢掉，写完成后的 commit 再把 Directory 指向已擦页
+（重启后 region 读失败、映射丢失）。所以在飞写回在 `slot_resv[]` 里占一个
+表项，块的"可回收"判据同时看它；commit/失败后释放。
+
+登记点：`md_commit_region` 旧位置归零、`md_slot_pair_append` 换走零活旧块、换块时的
+回收位图标记 扫描、压缩/擦除失败重试。**登记只置位，不碰 NAND**；
+`md_handle` 的 RECLAIM 阶段逐块异步擦除，成功才清位并归还**固定 L2P 日志区**，
+失败保留位下轮重试。运行期没有任何同步 `tERASE`（3 ms 会击穿服务预算）。
+
+⚠ **登记 ≠ 可擦**：普通 L2P flush 在 `md_commit_region` 里登记回收候选时，新位置还只在
+RAM Directory 里，on-media 目录检查点仍指向旧块。因此 `MD_JOB_RECLAIM` 在擦除前要求
+`dir->dirty == false`；脏则先走 `CP_DIR_CKPT_*` 写一条目录检查点（`dir_ckpt_for_reclaim`），
+落盘成功后才回到 RECLAIM。压缩路径原本就是 `CP_DIR_CKPT → CP_RECLAIM`，现在两条路径
+共用同一条 ③→④ 契约。`dirty_gen` / `ckpt.covered_gen` 保证写入期间有新 commit 时目录检查点
+不会被误标为"已覆盖当前 Directory"；目录检查点成功且未过期后才调用
+回收位图标记，保证新登记的候选都不在刚写下的目录检查点引用集合里。
+
+**压缩**（抗碎片）：日志区固定 96 块（两份活数据 64 + 工作余量 32）；随机 flush 会让很多块只剩 1–2 个活 region，
+live 位图 长期不归零。触发判据是**活日志块数 > `L2P_LOG_COMPACT_TRIGGER`（64）**，
+不是用户 Free Pool 水位；压缩挑**活 region 最少**的 victim，把它（以及后续仍能装进
+同一新生块的稀疏 victim）连续搬进当前块，落目录检查点后擦 victim。一次新生块可退多个块。
+
+
+`md_handle_s` 状态机：
+
+```mermaid
+flowchart TD
+ IDLE["IDLE"]
+ RECLAIM["RECLAIM"]
+ CP_READ["CP_READ"]
+ CP_WRITE["CP_WRITE"]
+ APREP["CP_DIR_CKPT_PREP"]
+ AERASE["CP_DIR_CKPT_ERASE"]
+ AWRITE["CP_DIR_CKPT_WRITE"]
+ CPRECLAIM["CP_RECLAIM"]
+ DONE["DONE"]
+ IDLE -- "reclaim.bitmap 非空且 dirty" --> APREP
+ IDLE -- "reclaim.bitmap 非空且目录检查点已同步" --> RECLAIM
+ APREP -- "for_reclaim + 目录检查点已落盘" --> RECLAIM
+ RECLAIM -- "异步擦完清位归还" --> IDLE
+ IDLE -- "compact_wanted" --> CP_READ
+ CP_READ -- "读到一条活 region" --> CP_WRITE
+ CP_WRITE -- "写成功继续下一条" --> CP_READ
+ CP_READ -- "victim 扫完换下一个稀疏 victim" --> CP_READ
+ CP_READ -- "victim 扫完无可装下候选" --> APREP
+ APREP -- "写点需换块" --> AERASE
+ APREP -- "无需擦" --> AWRITE
+ AERASE --> AWRITE
+ AWRITE -- "所有分页写完" --> CPRECLAIM
+ CPRECLAIM -- "victim 擦完归还" --> DONE
+ DONE --> IDLE
+```
+
+**读图要点**：live=0 才回收；擦前先写目录检查点；压缩搬多个稀疏 victim。
+
+**顺序契约（不可倒）**：
+
+```text
+① 搬移 victim 的活 region → ② commit 到新位置 → ③ 写目录检查点（Directory 落盘）
+→ ④ 擦 victim → ⑤ 归还固定 L2P 日志区（置 NONE，不回 Free Pool）
+```
+
+③ 必须早于 ④：否则掉电后目录检查点仍指向已擦块，那些 region 的映射永久丢失。
+**普通回收**（没有搬移，只有 ③→④）同样适用：`md_commit_region` 释放旧日志块时就会登记
+回收候选，但此时新位置只在 RAM Directory 里；所以 RECLAIM 必须先让目录检查点追上
+Directory（`dir_ckpt_for_reclaim`），否则就是同一个掉电丢映射。
+
+`dirty_gen / ckpt.covered_gen` 是这条契约的并发保护：目录检查点分 16 页异步写，期间可能有新的
+`md_commit_region`。目录检查点准备阶段记录当时的 `dirty_gen`；提交阶段只有
+`ok && dirty_gen == ckpt.covered_gen` 才清 dirty；否则保留 dirty，写下一整条目录检查点。
+
+
+**失败不回滚**：任一 phase 失败 ⇒ 中止。已登记的 region 指向新页，未搬的仍指向 victim
+（victim 不擦）⇒ 两边都有效，下次换块时重来。这是“宁可多占一个块，不丢映射”的取舍。
+
+**服务函数不推进状态机**：`ftl_metadata_op_callback` 只记结果、release、改 phase；推进留给下一轮
+`md_handle`。原因是 `CP_DIR_CKPT_PREP` 在游标未建立时会**同步**扫池定位，
+在完成派发里跑就是嵌套泵。
+
+#### 3.6.9 流程（目录检查点）
+
+| 项 | 值/行为 |
+|---|---|
+| 一条 record | `DIR_CKPT_PAGE_COUNT = 16` 页（8 主 + 8 备），覆盖全部 2048 条 entry |
+| 每页 | 自包含：magic + sequence + chunk_index + chunk_count + entry_count + layout_version + dirty_gen + 256 条 entry |
+| 池 | 32 块，每块 4 条 record（64 页 / 16 页），共 128 个槽位 |
+| 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
+| 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
+| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`dir_ckpt_for_reclaim`）；Checkpoint 前也要求 flush；不在 `md_entry_update` 里同步做 |
+| CRC | 无本层 CRC；完整性由下层 FC 的 per-CW CRC + ECC 保证 |
+
+三段式（所有落盘站点统一）：
+
+```text
+md_dir_ckpt_write_begin(dir, &w, owner) ← w = {ring, base, idx, seq, need_erase, owner}
+ ├─ 定位游标 + 取槽 + 自增 sequence；判定是否需先擦块
+ └─ 返回 READY / CLEAN（不脏，跳过）/ BUSY（另一 writer 在写）/ FAILED
+[metadata_dir_ckpt_erase] ← 仅 w.need_erase
+md_dir_ckpt_page_build(dir, w.seq, chunk, &page) × 16 ← 纯 RAM 组页（8 主 + 8 备）
+写 16 页（异步镜像写）
+md_dir_ckpt_commit(dir, &w)
+ ├─ 无论成败推进游标（半编程槽不可复用），并清 w.owner（之后的 abort 为 no-op）
+ └─ ok **且** dirty_gen == covered_gen 才清 dirty；失败/过期整条作废，保留 dirty
+```
+
+**torn write**：单页损坏只让该页作废；一条 record 要求所有页 sequence 一致，
+所以半条 record 不会被采用，旧 record 仍在池里可用。
+
+**“过期”保护**：prepare 时记下 `ckpt.covered_gen = dirty_gen`；16 页异步写期间若有新的
+`md_commit_region`，`dirty_gen` 会前进。commit 发现不相等时保留 dirty，下一次 job
+在新槽重写整条；**不允许**把“旧快照 + 新变更”误标为已落盘（否则回收会擦掉
+目录检查点仍引用的旧块）。
+
+#### 3.6.10 职责（与 L2P cache / Checkpoint 的交界）
+
+| 交界 | 行为 |
+|---|---|
+| `l2p_flush_kick` | `md_slot_pair_append` → 写 region 页 → `ftl_l2p_op_callback` 成功 → `md_commit_region` |
+| `l2p_owner_bitmap_snapshot` | Checkpoint 起点取本 die 的局部脏位图；Directory 不参与 |
+| `md_is_busy` | CP 的 `cp_regions_flush` 用它区分“压缩在推进”与“真卡死”，不误计 stall |
+| CP 的目录检查点阶段 | `md_dir_ckpt_prepare` / `md_dir_ckpt_page_build` / `md_dir_ckpt_commit`，与压缩 job 共用同一套三段式 |
+| 共享 cache 的 owner | owner 解析返回 `l2p_owner_s {die, metadata_dir, alloc, topo}`；不返回整个 `ftl_ctx_s` |
+
+**元数据块判据的三条分支**（full metadata rebuild / 建池共用）：
+
+1. **固定分区**：遍历运行期分区表按 `first_block/block_count` 判区间；
+ 固定块号各 die 相同，**与 plane 无关**。L2P 日志区（46..93）也在这张表里，
+ 正常路径由本分支命中。
+2. **已登记日志块**（防御分支）：扫 `entries[]` 找 `type=L2P_REGION` 且 pba 落在
+ **固定区之外**的块——正常介质不会出现，只用于**旧布局/损坏 Directory** 的
+ 兼容判定；必须带 plane 比较（同一块号在另一 plane 可能是用户数据）。
+3. **当前游标块**（防御分支）：当前写块 `cur.block[plane]` 可能还没有任何 region 指向它；
+ 同样必须带 plane 比较。它也在固定区内，分支 1 已覆盖。
+
+漏掉 2/3 的 plane 比较会把另一 plane 的同号块一起排除——它既进不了 Free Pool，
+又被 full metadata rebuild 跳过，落在任何池之外（容量白丢）。
+
+#### 3.6.11 失败语义与掉电点
+
+| 掉电/失败点 | 介质状态 | 恢复结果 |
+|---|---|---|
+| `md_slot_pair_append` 之后、写页之前 | 槽位已推进，页仍是擦除态 | 该槽作废；Directory 指旧位置；Journal 回放恢复映射 |
+| 写页成功、`md_commit_region` 之前 | 新页有数据，Directory 未登记 | 新页成孤儿；Directory 指旧位置；Journal 回放恢复 |
+| `md_commit_region` 之后 | Directory 已指向新页 | 目录检查点可能还是旧的 ⇒ boot 从旧目录检查点加载后，靠 Journal 回放补齐；**若该 commit 释放了旧日志块，回收 gate 会先写目录检查点再擦** |
+| 目录检查点写一半 | 部分页新、部分页旧 | 整条 record 校验失败；旧 record 仍有效 |
+| 目录检查点写入期间有新 commit | 新 entry 不在本条 record 里 | `dirty_gen != ckpt.covered_gen` ⇒ commit 不清 dirty；job 在下一槽重写整条，期间**不允许**回收 |
+| 目录检查点已落盘、擦 victim 之前 | 新位置已登记且落盘 | victim 未擦，映射完整；下次压缩重来 |
+| 擦 victim 中掉电 | victim 部分块擦除 | `l2p_live == 0` 才擦，且目录检查点已先落盘 ⇒ 无映射指向 victim |
+| 回收日志块时掉电 | 无活 region 的块被擦 | 仅在 `l2p_live == 0`、目录检查点已覆盖当前 Directory（`!dirty`）时擦；满足后无映射引用它，安全 |
+| 目录检查点池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效的目录检查点；最坏走 full metadata rebuild |
+| 介质版本不符 | 记录作废 | `pfr_media_format` 全片格式化（§2.5） |
+
+⚠ **“没有本层 CRC”不是漏洞**：元数据页的 FC CRC 由 `FTL_PAGE_CFG_META` 统一开启；
+CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看似成功”的假阳性。
+
+#### 3.6.12 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `DIR_CKPT_POOL_BLOCKS` | 32（0..31） |
+| `DIR_CKPT_ENTRIES_PER_PAGE` | 256 |
+| `DIR_CKPT_PAGE_COUNT` | 16（主 8 + 备 8） |
+| `DIR_CKPT_RECORDS_PER_BLOCK` | 4 |
+| `CHECKPOINT_POOL_BLOCKS` | 8（32..39） |
+| `BBT_POOL_BLOCKS` | 2（40..41） |
+| `JOURNAL_BLOCKS` | `CW_NUM` = 4（42..45） |
+| `L2P_LOG_IDEAL_BLOCKS` | 32（4 MiB 表 ÷ 64 页/块） |
+| `L2P_LOG_BLOCKS_PER_PLANE` | 48（总 96 gblock = 12 MiB：2 份副本 + 1× 余量） |
+| `L2P_LOG_BLOCK0` / `FTL_METADATA_AREA_END` | 46 / 98（per-plane） |
+| `L2P_LOG_COMPACT_TRIGGER` | 64（两份活数据 = 2× ideal 32） |
+| `METADATA_DIR_ENTRIES` | 2048 |
+| `md_entry_s` | 7 B |
+| `md_dir_ckpt_page_s` | 2048 B |
+| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
+| 目录检查点触发 | `dirty` 置位（元数据 job 异步） |
+
+#### 3.6.13 设计取舍
+
+选择：固定根 + 专用元数据池 + L2P 日志区 + Directory。主要替代：全部固定 region 或纯动态分配。
+差异：日志区固定预留 96 块并扣容量；Directory 管「页在哪」，页内 META 管「CW 是否仍有效」。完整论证见架构文档 §9.4。
+
+---
+
+
+
+<a id="s3-7" name="s3-7"></a>
+
+### 3.7 Journal
+
+#### 3.7.1 背景与需求
+
+L2P cache 是 write-back (写回)：主机写成功时只改了 RAM，映射还没有写回 NAND。若此时掉电，
+数据在 NAND 上、映射却丢了——数据永久不可达。
+
+Journal 是 **L2P 的增量写前日志**：每次映射变更先追加一条 `(lba, old, new)`，
+再改 cache。掉电后从 Checkpoint 水位之后回放，恢复映射。
+
+没有 Journal 的替代方案是“每次写都同步把 region 页写回 NAND”，代价是每个 512 B 写
+都要写 2 KiB region 页，写放大 4×，且前台等 NAND。Journal 把“持久化”和“写回”解耦：
+Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
+
+#### 3.7.2 职责与边界
+
+- **做**：记录格式（两种页型：16 B 通用条目 / 4 B 顺序流条目）、RAM 页缓冲、异步刷页 job、
+ 环形块切换与擦除、回放（两遍扫描）、写指针恢复、截断（plan/commit）。
+- **不做**：不决定 Checkpoint 时机（§3.8）；不管理 region 位置（§3.6）；
+ 不决定 L2P cache 替换（§3.5）。
+- **调用者**：写完成路径 Journal 预留 + `jrn_append`（cache 顺序写走 `jrn_seq_is_ready` +
+ `jrn_append_seq`）、GC/WL 的 `MIG_FLUSH_JRN` 屏障、boot 的 `scan/resume/replay`、
+ CP 的 `truncate_plan/commit`。
+
+#### 3.7.3 结构与不变量
+
+**页格式**（恰好 2048 B，两种页型由 magic 区分）：
+
+| 页型 | Header | Entries | N |
+|---|---:|---|---:|
+| `JRN_PAGE_LBA` · LBA 显式（通用：host 写 / GC / TRIM） | 16 B | N × 16 B：lba / old_pba / new_pba / sequence | 127 |
+| `JRN_PAGE_SEG` · 顺序流映射页（顺序写确认专用） | 16 B | N × 4 B：new_pba（lba = base_lba + 下标） | 508 |
+| Padding | — | 余量 0xFF | — |
+
+页头统一 16 B：magic 4 + page_seq 4 + entry_count 2 + block_seq 2 + base_lba 4；
+`base_lba` 只对 `JRN_PAGE_SEG` 有效（`JRN_PAGE_LBA` 恒 0）。
+
+`JRN_ENTRIES_PER_PAGE = (2048 - 16) / 16 = 127`；
+`JRN_SEG_ENTRIES_PER_PAGE = (2048 - 16) / 4 = 508`（都必须推导；写死 128 会写穿 `page_buf`）。
+
+`JRN_PAGE_SEG` 页的条目坐标全部隐式：`lba = base_lba + k`、`sequence = page_seq + k`。
+`base_lba` **由首条 append 落定**（不在序列 START 时定）：顺序确认按提交序到达，上一段
+的尾页可能在新 START 之后才确认，按首条确认的 LBA 定基准才能与确认序一致。
+两种页型**不混装**：普通条目遇到顺序页会先把它刷出（空页也刷）。
+
+**跨 host 命令续用**：Journal 序列开始在"顺序页已有条目 + 剩余空间 ≥ need +
+`lba == base_lba + 条目数`"时**不刷页**，同一张页继续填到 504 条（63 pair ≈252 KiB）才
+在写路径主动 END。`jrn_seq_room` 是写路径窗口收缩与页满断点的唯一判据；
+`jrn_page_writes` 是页写次数观测口（`info` 的 `jf=`）。依据与端到端取舍见 §3.16.5。
+
+**`l2p_jrn_s` / `jrn_handle_s`**：
+
+| 对象 | 字段 | 含义 |
+|---|---|---|
+| `l2p_jrn_s` | `topo` | 目标芯片路由 |
+| | `alloc` | 坏块查询/标坏走坏块查询 / 标坏（无端口结构体） |
+| | `handle` | `jrn_handle_s`（本模块全部执行状态，见下） |
+| `jrn_handle_s` | `phase` / `need_erase` / `target_*` / `from_*` / `waddr` | 异步刷页 job（IDLE/WRITE/ERASE） |
+| | `current_block` / `current_page` / `current_entry` | RAM 写游标（`current_entry` 为 WORD：顺序页可到 508） |
+| | `page_kind` / `page_base` | 当前页缓冲的页型 / 顺序页基准 LBA（首条 append 落定） |
+| | `sequence_counter` | 全局单调序号 |
+| | `merge_floor` | CP 水位；`sequence < merge_floor` 的条目不得原地合并 |
+| | `pre_erased_block` | 已被 CP 预擦、回切时跳过擦除的块 |
+| | `page_buf[2048]` | 当前页缓冲 |
+| | `checkpoint_needed` / `emergency` | 85% / 95% 水位标志 |
+| | `bad_mask` / `erase_fail_count` / `erase_fail_block` / 环满标志 | 环形块坏块策略（见不变量 6） |
+| | `write_fail_count` / `write_fail_seq` / `write_fail_pending` | 持久性失败观测（F10 屏障） |
+| | `hb` | 心跳基准（`log_heartbeat_s`） |
+
+**不变量**：
+
+1. **页是回放单位**：判据是 `page_seq + entry_count > cp_sequence`，不是只看页首页序号。
+ 只比页首会把跨水位那一页整页跳过，丢掉它的新条目。
+2. **同 LBA 合并受 `merge_floor` 约束**：CP 后的覆盖写不能复用 CP 前的 sequence，
+ 否则块元数据增量回放按 sequence 过滤时漏记。
+3. **同一块每圈只擦一次**：CP 预擦的块记 `pre_erased_block`，`jrn_handle` 换块擦除
+ 回切时跳过擦除。
+4. **单飞行**：`job.phase != IDLE` 时不再起新页写；两条写会争同一页地址。
+5. **回放不信任页内容**：Journal 模块整体不转断言——页头可能因掉电撕裂而非法，
+ 属预期情形，返回错误/跳过。
+6. **环形块持续擦除失败的处理**：同一块连续失败 `JRN_ERASE_FAIL_MAX`（3）次 ⇒
+ 置 `bad_mask` + 标坏（两个 plane），跳到下一个可用块；全部不可用 ⇒
+ 环满标志，停止写入并拒绝新条目（绝不写未擦块，也不再无限重试）。坏块在
+ `jrn_ring_scan` 中被跳过，不会把回放误判为“不完整”。
+
+#### 3.7.4 流程（写路径）
+
+```mermaid
+flowchart TD
+ A["写完成 ftl_confirm_write"] --> B["jrn_append lba, old, new"]
+ B --> C{"当前页已有同 LBA 且 sequence 不低于 merge_floor"}
+ C -- "是" --> D["就地更新 new_pba 不新增条目不消耗 sequence"]
+ C -- "否" --> E["写 entry, sequence 加一, entry_index 加一"]
+ E --> F{"页满 127 条"}
+ F -- "否" --> G["返回"]
+ F -- "是" --> H["jrn_handle 起异步页写"]
+ H --> I{"页写完成"}
+ I --> J{"需要换块"}
+ J -- "否" --> K["推进写指针"]
+ J -- "是" --> L["擦下一块跳过 pre_erased_block"]
+ L --> K
+```
+
+**读图要点**：页满换块；先擦后写；失败保留待重试。
+
+**host 写确认（capacity reserve）**：`ftl_confirm_write` 在追加前调用
+Journal 预留预留本页 `n` 个槽位（按 mask 最坏情况，留 1 个空槽）。不足时
+Journal 预留只调用 `jrn_freeze` 起**异步**页写并返回 `false`，confirm 直接返
+`FTL_AGAIN` 待入账；**confirm 内不同步刷页、不调 `ftl_sync_submit_wait` / `ftl_op_drain`**。
+预留成功后追加 `n` 条不会触发页满分支，Journal 页由 `jrn_handle` 在后续 service 轮
+异步落盘。Journal 模块**不提供同步刷页出口**。
+
+**屏障**：GC/WL 先在 `MIG_WRITE_SETTLE` 用 Journal 预留预留槽位（不足则挂起），
+F10 屏障走 `MIG_FLUSH_JRN`：`jrn_handle` 冲刷半满页，等 job 空闲 **且
+`write_fail_pending == 0`**。
+页写失败时 pending 会阻止 victim 擦除，直到一次 Checkpoint Header 成功
+（其 journal 水位 ≥ 失败点）把 L2P 落盘后才清除。
+
+#### 3.7.5 流程（回放与恢复）
+
+```text
+jrn_replay(journal, cache, cp_sequence, &entries, block_ctx)
+ 第一遍：扫 4 × 64 = 256 页，收集 page_seq+entry_count > cp_sequence 的页
+   → replay_pages[256]（栈上 2 KiB；下标必须 uint16_t）
+ 第二遍：按 (page_seq, entry_idx) 递增排序，逐页读、逐条应用
+   - l2p_write_sync(lba, new_pba)（开机无人 drain CQ，用同步逃生口）
+   - 写成功后检查 l2p_is_region_degraded(region)：若该行是“加载失败降级”
+   的空基线，说明旧映射不可信 ⇒ block_ctx->ok = 0（回退 full metadata
+   rebuild，不能报 restored；）
+   - block_ctx 有效时同步维护 valid_count：new +1 / old -1
+   （TRIM 只减 old；old == new 跳过）
+   - 回放 materialize 回调（`pfr_materialize_pba`）失败/越界/下溢 ⇒ ok=0，调用者回退 full metadata rebuild
+ Journal 续跑(latest, floor=cp_sequence)：写指针落到最新页之后，序号不回退
+```
+
+**为什么必须恢复写指针**：`jrn_init` 把游标复位到 `(block0, page0)`、序号复位到 1，
+但 NAND 上的环形块**没有被擦**。不接回去会有两个后果：序号从 1 重来 ⇒ 新页排到旧页之后，
+下次开机回放过滤把它们整页丢弃；写指针回到已编程页 ⇒ 二次编程（AND 损坏）。
+
+#### 3.7.6 流程（自身掉电保护）
+
+| 掉电点 | 现象 | 保护 |
+|---|---|---|
+| A：RAM 缓冲未落盘 | 丢当前页 ≤ 127 条 | 写确认路径已把映射更新交给 Journal；丢的是最近一页，属容忍窗口 |
+| B：页编程中途 | 页面部分烧录 | FC per-CW CRC + ECC；坏页整页丢弃 |
+| C：编程成功但返回途中掉电 | 不知是否成功 | magic + `entry_count` 精确定位；sequence 连续性检查 |
+
+四层：FC 的 CRC/ECC（下层）、Header magic + entry_count、单调 sequence、
+多块环形轮换（不是双写）。Journal 条目本身无独立 CRC——16 B 已被字段占满，
+完整性靠整页 CRC/ECC + 页序判定。
+
+#### 3.7.7 失败语义
+
+| 情况 | 结果 | 数据影响 |
+|---|---|---|
+| 环形写满且 CP 未完成 | `emergency=1`，强制 CP | 前台写入可能被背压 |
+| 截断水位不覆盖全部已写条目 | `JRN_TRUNC_NO_TRUNCATE`，不截断 | 最旧块仍持有回放条目，安全 |
+| 页写失败 | 条目已随页缓冲丢弃；置 `write_fail_pending` + `checkpoint_needed/emergency` | 迁移侧中止且不擦 victim；CP 把当前 L2P 落盘后清 pending |
+| 回放某页读失败 | 跳过该页 | 该页条目丢失；映射回退一版 |
+| 回放基线 region 降级 | 降级 region 判据 命中 ⇒ `block_ctx->ok=0` | 旧映射不可信：回退 full metadata rebuild，不报 restored |
+| 序号不连续 | 在该处截断 | 之后的页不应用 |
+| 顺序页确认坐标断裂 | `jrn_seq_is_ready` 刷页并返 false ⇒ 确认待入账重试（落新页） | 无丢失；确认 FIFO 保证重试时同批仍连续（§3.16.5） |
+
+#### 3.7.8 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `JOURNAL_BLOCKS` | `CW_NUM` = 4 |
+| `JRN_PAGE_SIZE` | 2048 |
+| `JRN_HEADER_SIZE` | 16 |
+| `JRN_ENTRIES_PER_PAGE` | 127 |
+| `JRN_SEG_ENTRIES_PER_PAGE` | 508 |
+| `JRN_FULL_THRESHOLD` | 85% |
+| `JRN_CRITICAL` | 95% |
+| `JRN_MAGIC` | `0x524F554A` ("JOUR") |
+| `JRN_MAGIC_SEG` | `0x4745534A` ("JSEG") |
+
+#### 3.7.9 设计取舍
+
+选择：WAL + Checkpoint 截断。主要替代：无日志或只做全量快照。
+差异：4 块环形、127/508 条页、85/95% 水位、同 LBA 合并。完整论证见架构文档 §9.6。
+
+---
+
+
+<a id="s3-8" name="s3-8"></a>
+
+### 3.8 Checkpoint
+
+#### 3.8.1 背景与需求
+
+Journal 只增不减。如果永远不截断，环形块很快写满，启动回放也越来越长。
+Checkpoint 的作用是：
+
+1. 把当前 L2P cache 里的脏 region **全部写回 NAND L2P 表**；
+2. 写一条 Header，记录“到此为止的 Journal 水位”；
+3. 截断/预擦 Journal 的旧块；
+4. 顺带把**块元数据**（每块状态/有效计数/池归属）做成快照，减少开机 full metadata rebuild。
+
+没有 Checkpoint，Journal 会溢出，掉电恢复时间无界；没有块元数据快照，每次开机都要全盘扫描
+（约 250~400 ms）。
+
+#### 3.8.2 职责与边界
+
+- **做**：触发判定（水位/写入量/定时/紧急）、CP job 状态机、region 脏位图快照、
+ 目录检查点协调、块元数据快照编码与落盘、Journal 截断协调。
+- **不做**：不定义 Journal 记录格式（§3.7）；不定义目录检查点页格式（§3.6）；
+ 不决定 L2P 写回细节（§3.5）。
+- **调用者**：后台 CP 触发 / 紧急 CP / CP 推进（`ftl_bg_job_e` 的
+ `FTL_BG_JOB_CP_TRIGGER` / `FTL_BG_JOB_CP_EMERGENCY` / `FTL_BG_JOB_CP_ADVANCE`）；boot 的 `cp_pool_find_latest` /
+ `cp_block_table_load`。
+
+#### 3.8.3 结构与不变量
+
+**`cp_header_s`（恰好 2048 B）**：
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `magic` | 4 B | `CP_MAGIC` |
+| `sequence` | 4 B | 本池自己的单调序号 |
+| `timestamp` | 4 B | 观测 |
+| `region_count` | 4 B | 本 CP 覆盖的 region 数 |
+| `region_bitmap[64]` | 256 B | 本 die 的局部 2048-bit 位图 |
+| `journal_sequence` | 4 B | 截断/回放水位 |
+| `layout_version` | 4 B | 介质版本 |
+| `block_word_count` | 4 B | 块元数据 word 数（0 = 无快照） |
+| `block_word_bytes` | 4 B | 每 word 字节数（2） |
+| `block_page_count` | 4 B | 块元数据页数（4） |
+| `block_crc32` | 4 B | 块元数据 words 的 CRC |
+| `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` | 4 + 4 + 4 B | 磨损快照几何（4096 / 8 / 16） |
+| `wear_page_crc[16]` | 64 B | 每页磨损快照的 CRC |
+| `record_pages` | 4 B | 1 + 4 + 16 |
+| `padding` | 1672 B | 补齐一页 |
+
+**一条 record = 21 页**：块元数据快照 4 页（16-bit/块 × 4096 = 8 KiB）+ 磨损快照 16 页
+（8 B/块 × 4096 = 32 KiB）+ Header 1 页。
+**Header 是 commit 页**：块元数据页 + 磨损页必须先写，Header 最后写。
+
+块元数据快照只存**块元数据**需要的量：`valid_count` / `state` / `temp` / 池归属；
+磨损快照存 `erase_count` / `read_count` / `rr`（last_ecc / rising_count / health）。
+`last_pe_ts` 不存（刻意 volatile，上电后从 0 开始）。
+
+**块元数据 word 位域**（小端、显式移位）：
+
+```text
+valid_count(10) | state(3) | temp(1) | pool(2)
+pool: 0=NONE / 1=OP / 2=SPARE
+```
+
+```mermaid
+packet-beta
+title CP 块元数据 word（16 bit；packet-beta bit0 在左）
+0-9: "valid_count (10)"
+10-12: "state (3)"
+13: "temp (1)"
+14-15: "pool (2)"
+```
+
+**读图要点**：valid 10 位、state 3 位、temp 1 位、pool 2 位；packet-beta bit0 在左。
+
+**`cp_handle_s`**：
+
+| 字段 | 含义 |
+|---|---|
+| `active` / `phase` / `waiting` | 单飞行 / 阶段 / 有命令在飞 |
+| `failed` / `fail_phase` / `submit_deadline` / `timed_out` | 中止原因与提交 deadline |
+| `region_bitmap[64]` | **job 起点**的本 die 局部脏位图快照 |
+| `journal_seq` | job 起点取定的 Journal 水位 |
+| `dir_ckpt_*` | 目录检查点池几何、基址、槽位、序号、页序、擦除判定 |
+| `hdr_*` | Header 池几何、地址、槽位、序号、擦除判定 |
+| `block_page` / `block_ok` / `block_words[4096]` | 块元数据快照进度与缓冲 |
+| `wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 磨损快照进度 / 每页 CRC / 组页缓冲 |
+| `trunc.addr` / `trunc.next` | Journal 预擦块 |
+| `cp_state` | `cp_state_s`：池 unique 序号 / 上次 CP 水位 / 写游标 / 游标有效位 / advance_next |
+| `last_ms` | T3 定时基准（上次触发时刻） |
+| `cache` / `journal` / `metadata_dir` / `alloc` / `topo` | 窄指针；total_writes 原端口字段无人读，已删 |
+
+**不变量**：
+
+1. **快照点在 job 起点**：脏位图与 `journal_sequence` 一起取定。异步 CP 跨多轮，
+ 若取“CP 末尾”的水位，CP 期间完成的 host 写会两边都不认（不 flush、不回放）⇒ 丢映射。
+2. **顺序不可换**：flush regions → 目录检查点 → 块元数据快照 → 磨损快照 → Header → 截断 Journal。
+ Header 一旦落盘，boot 就信 `region_bitmap` 里的 region 已在 NAND 上。
+3. **flush 失败 ⇒ 中止**：不写 Header。否则 boot 会预载未落盘的 region。
+4. **Header 写无论成败都推进池游标**：半编程槽不可复用。
+5. **截断必须覆盖全部已写条目**：水位不足时拒绝截断，最旧块可能仍持有回放条目。
+6. **完成服务函数不推进状态机**：`CP_DIR_CKPT_PREP` / `CP_HDR_PREP` 可能含同步定位，
+ 在完成泵里跑会嵌套泵；推进留给下一轮 `cp_handle`。
+
+#### 3.8.4 流程（触发条件）
+
+| 触发 | 条件 | 行为 |
+|---|---|---|
+| **T1 水位** | Journal ≥ 85% | 设 `checkpoint_needed`，后台执行 |
+| **T1 紧急** | Journal ≥ 95% | 设 `emergency`，任何档位都执行 |
+| **T2 写入量** | 自上次 CP 起增量 ≥ 1024 | 后台执行 |
+| **T3 定时** | 距上次 ≥ 10 s 且 Journal 增量 ≥ 64 | 后台执行（轻载不写空 CP） |
+
+#### 3.8.5 流程（阶段与顺序）
+
+```mermaid
+stateDiagram-v2
+    state "CP_IDLE" as IDLE
+    state "CP_FLUSH_REGIONS" as FLUSH
+    state "CP_DIR_CKPT_PREP" as APREP
+    state "CP_DIR_CKPT_ERASE" as AERASE
+    state "CP_DIR_CKPT_WRITE" as AWRITE
+    state "CP_HDR_PREP" as HPREP
+    state "CP_HDR_ERASE" as HERASE
+    state "CP_BLOCK_WRITE" as BWRITE
+    state "CP_WEAR_WRITE" as WWRITE
+    state "CP_HDR_WRITE" as HWRITE
+    state "CP_TRUNC_PREP" as TPREP
+    state "CP_TRUNC_ERASE" as TERASE
+    state "CP_DONE" as DONE
+    [*] --> IDLE
+    IDLE --> FLUSH: cp_job_begin
+    FLUSH --> APREP: 所有脏 region 已持久
+    APREP --> AERASE: 需换块
+    APREP --> AWRITE: 无需擦
+    AERASE --> AWRITE
+    AWRITE --> HPREP: 16 页写完
+    HPREP --> HERASE: 需换块
+    HPREP --> BWRITE: 无需擦
+    HERASE --> BWRITE
+    BWRITE --> WWRITE: 4 页块元数据写完
+    WWRITE --> HWRITE: 16 页磨损写完
+    HWRITE --> TPREP: Header 落盘
+    TPREP --> TERASE: 需预擦
+    TPREP --> DONE: 无需
+    TERASE --> DONE
+```
+
+**读图要点**：flush regions→目录检查点→块元数据→磨损→Header→截断；Header 是 commit；失败不写 Header。
+
+| phase | 动作 | 失败 |
+|---|---|---|
+| `CP_FLUSH_REGIONS` | 按快照位图逐条 kick L2P flush，等 `inflight.flush` 归零 | 中止，不写 Header |
+| `CP_DIR_CKPT_PREP` | 定位目录检查点游标 + 取槽 + 判定擦除 | 中止 |
+| `CP_DIR_CKPT_ERASE` | 换块先擦 | 中止 |
+| `CP_DIR_CKPT_WRITE` | 逐页写 16 页目录检查点 | 任一分页失败 ⇒ 整条作废，仍推进 |
+| `CP_HDR_PREP` / `CP_HDR_ERASE` | 定位 Header 槽 / 换块擦 | 中止 |
+| `CP_BLOCK_WRITE` | 逐页写 4 页块元数据快照 | 失败 ⇒ 中止，不写 Header |
+| `CP_WEAR_WRITE` | 逐页写 16 页磨损快照（每页 CRC 存 Header） | 失败 ⇒ 中止，不写 Header |
+| `CP_HDR_WRITE` | 写 1 页 Header（commit） | 无论成败推进游标；失败中止 |
+| `CP_TRUNC_PREP` | 水位判定，算预擦块 | 水位不足 ⇒ 不截断 |
+| `CP_TRUNC_ERASE` | 预擦 Journal 最旧块 | 失败仅 LOGW，仍记账（预擦只是磨损优化） |
+| `CP_DONE` | 清 active，记日志 | — |
+
+#### 3.8.6 流程（执行）
+
+1. `cp_job_begin`：单飞行检查 → memset job → 快照局部脏位图 + `journal_seq` →
+ `active=1; phase=CP_FLUSH_REGIONS` → `cp_job_step` 推进第一步即返回。
+2. 每轮 `cp_handle` 续跑；有命令在飞时只打心跳。
+3. 完成由 `ftl_checkpoint_op_callback` 按 phase 记结果、release、改 phase；**不**调用 kick。
+4. `CP_FLUSH_REGIONS` 用 `md_is_busy` 区分“压缩在推进”与“真卡死”，
+ 不把正常的长压缩计成 CP stall。
+
+#### 3.8.7 失败语义
+
+| 情况 | 结果 | 数据影响 |
+|---|---|---|
+| L2P flush 失败 | 中止，不写 Header | boot 用上一个 CP + Journal 回放，一致 |
+| 目录检查点分页失败 | 整条目录检查点作废，保留 dirty | 旧目录检查点仍有效 |
+| 块元数据快照失败 | 不写 Header | 本次 CP 未提交；下次重来 |
+| 磨损快照失败 | 不写 Header | 本次 CP 未提交；计数窗口延长，用户数据不受影响 |
+| Header 写失败 | 游标仍推进；中止 | 旧 Header 仍有效 |
+| Journal 截断失败 | 只记日志 | 预擦是磨损优化，不影响一致性 |
+| 提交侧长期背压 | `submit_deadline` 超过 `FTL_SUBMIT_TIMEOUT_MS` 中止 | 下轮重试；不丢映射 |
+
+#### 3.8.8 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `CP_MAGIC` | `0xCCCCCCCC` |
+| `CHECKPOINT_POOL_BLOCKS` | 8 |
+| 一条 record | 21 页（1 Header + 4 块元数据 + 16 磨损） |
+| `CP_WRITE_INTERVAL` | 1024 |
+| `CP_TIME_INTERVAL_MS` | 10,000 |
+| `CP_T3_MIN_JOURNAL_DELTA` | 64 |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
+
+#### 3.8.9 设计取舍
+
+选择：全量快照 + 日志截断 + 崩溃安全提交顺序。主要替代：只回放或只快照。
+差异：16-bit/块 + 8 B/块编码、21 页/record、T1/T2/T3 阈值。完整论证见架构文档 §9.7。
+
+---
+
+
+<a id="s3-9" name="s3-9"></a>
+
+### 3.9 分配器 / BST / Super Block
+
+#### 3.9.1 背景与需求
+
+NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL 因此需要一套块元数据：
+
+- 哪些块是空闲且已擦除的（Free Pool）；
+- 哪些块正在写（Open SB）、写满了（Closed SB）、是坏块、是元数据日志块、已退役；
+- 每个块擦了多少次、读了多少次、还有多少有效 CW；
+- 坏块替换的储备（Spare）与 GC 的性能缓冲（OP）。
+
+没有统一账本，同一不变量会被多个模块各自手工维护，任一处漏掉就是**永久漏账**：
+容量无声流失、GC 选错 victim、坏块被重新分配、`FREE` 字段说谎。
+
+#### 3.9.2 职责与边界
+
+- **做**：持有 BST（每块 20 B）与四个池（Free / OP / Spare / Closed 列表）；提供唯一的
+ 进出闸门；按 plane 选块、配对成 SB；维护 SB 写指针与关闭；提供磨损/有效性统计访问器。
+- **不做**：不决定“什么时候 GC”（`gc.c` 的策略）；不执行搬移（`migrate.c`）；不定义坏块
+ 持久化格式（`bbt.c`）；不定义元数据布局（`metadata.h`）。
+- **下游**：GC/WL/migrate、元数据目录、BBT、掉电恢复都读它。
+
+#### 3.9.3 结构与不变量
+
+`bst_block_s`（20 B × 4096 = 80 KiB，`_Static_assert` 钉住）：
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `erase_count` | 4 B | 擦除次数；动态 WL 选块、静态 WL 触发、GC 的 erase 项 |
+| `last_pe_ts` | 4 B | 最近擦除时间戳；GC 的 age 项（刻意不持久化） |
+| `read_count` | 2 B | read disturb 计数（自上次擦除）；预测搬移 |
+| `valid_count` | 2 B | **CW 级**有效计数（0..512），GC/WL 的 valid 项 |
+| `state` | 1 B | 互斥枚举：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD |
+| `temp` | 1 B | HOT/COLD，正交于状态 |
+| `sb_id` | 2 B | 反向索引到 SB；`UINT16_MAX` = 无 |
+| `rr` | 3 B | `last_ecc` / `rising_count` / `health` |
+
+五张表（每实例；各自独立对象；落点由平台决定）：
+
+| 数组 | 大小 | 作用 |
+|---|---:|---|
+| `blocks[FTL_BLOCK_TOTAL]` | 80 KiB | BST |
+| `free_blocks[FTL_BLOCK_TOTAL]` | 8 KiB | Free Pool（全局块号） |
+| `op_blocks[PLANE_NUM][204]` | 816 B | OP 池，每 plane 独立 |
+| `spare_blocks[PLANE_NUM][50]` | 200 B | Spare 池，每 plane 独立 |
+| `closed_sb_list[FTL_BLOCK_TOTAL]` | 32 KiB | Closed SB 列表（swap-remove） |
+
+`super_block_s`（8 B）：`plane_blocks[PLANE_NUM]`（可为 `FTL_BLOCK_NO_PLANE` 哨兵）、
+- `next_page`：当前写页；
+- `temperature`：HOT / COLD；
+- `is_open`：是否仍在写；
+- `page0_programmed`：按 plane 的 page0 异步写屏障。
+
+**池的分工**：
+
+| 池 | 容量 | 用途 | 消费/补充 |
+|---|---:|---|---|
+| Free | 全部已擦除块 | 写分配、GC 归还 | 三级水位（下表） |
+| OP | 204 块/plane | GC 性能缓冲，防止前台等 GC | 该 plane 的 Free 给出不块时补入 |
+| Spare | 50 块/plane | 坏块替换，只出不进 | Spare 补池 |
+
+| 水位 | 条件 | 动作 |
+|---|---|---|
+| ① 正常 | `free_count ≥ 32` | 不做后台 GC |
+| ② 补池 | `8 < free_count < 32` **或任一 plane 的 free < 4** | 后台 GC（T1）；单 plane 饥饿也在其中（见 §3.12.4） |
+| ③ 紧急 | `free_count ≤ 8` | 强制 GC（T4），写路径也兜底 |
+
+**两个同值哨兵**（C11：同值 ≠ 同一坐标）：
+
+- `FTL_BLOCK_NO_PLANE`（`UINT16_MAX`）：`plane_blocks[]` 里“该 plane 无块”的**存储态**，
+ 会写进 Closed 列表；
+- `FTL_GBLOCK_INVALID`（`UINT16_MAX`）：选块失败的**瞬时返回值**，从不落盘。
+
+**不变量**（文件头）：
+
+1. **四类池各有唯一闸门**：Free 只走 `alc_free_push` / `alc_free_remove`；
+- Free：只走 `alc_free_push` / `alc_free_remove`；
+- OP：只走 `alc_op_push`（出池由 Free 补池内部完成）；
+- Spare：只走 `alc_spare_push/pop`；
+- Closed：只走 `alc_super_closed_add` / `alc_super_closed_remove`。
+外部模块不裸写数组，读走访问器。
+2. **`state == FREE` ⟺ 在 Free Pool 里**。入池置 FREE；出池只校验、不赋态，新态由转移
+ 归属者紧随其后赋值。**BAD 永不进池**（入池闸门 debug ASSERT + release 拒绝）。
+3. **`closed_sb_list` 是 swap-remove 活列表**：借出的指针不跨调用有效；跨调用按值拷贝
+ （migrate 的 victim 副本）。
+4. **无归属的块是 NONE**：固定元数据区、OP 池、Spare 池不参与分配。
+5. **选块以 Free Pool 数组为准**：选中即 `alc_free_remove` 必命中，避免“选中→移除失败→重选”死循环。
+
+#### 3.9.4 流程（块状态机）
+
+```mermaid
+stateDiagram-v2
+    state "START 开始" as START
+    state "NONE 无归属" as NONE
+    state "FREE 在 Free Pool" as FREE
+    state "OPEN 正在写" as OPEN
+    state "CLOSED 等待 GC" as CLOSED
+    state "LOG L2P 日志块" as LOG
+    state "RETIRED 退役" as RETIRED
+    state "BAD 坏块" as BAD
+    START --> NONE: 固定元数据 / OP / Spare
+    START --> FREE: 建池擦除归还
+    FREE --> OPEN: 成对分配
+    OPEN --> CLOSED: 64 页写满
+    CLOSED --> FREE: GC / 静态 WL 搬移擦除归还
+    CLOSED --> RETIRED: 预测性退役（出池不标坏）
+    FREE --> LOG: alc_op_alloc_log_block
+    LOG --> FREE: l2p_live 归零擦除归还
+    FREE --> BAD: 出厂扫描或探测判坏
+    OPEN --> BAD: PROGRAM 失败
+    CLOSED --> BAD: 运行时坏块或读不可恢复
+```
+
+**读图要点**：块状态互斥；BAD 是终态；退役块不入 Free Pool。
+
+#### 3.9.5 流程（分配）
+
+1. **分配一页**（成对分配）：
+ - 取对应温度的 Open SB；写满 → `alc_super_close` → Closed 列表；
+ - 从 Free Pool 逐 plane 独立选擦除次数最少的块（Policy B，不要求同号）；
+ - 填 `out[plane]` 为当前页 PBA，`next_page++`；
+ - Free Pool 空 → `FTL_AGAIN`（写路径触发紧急 GC 后重试）。
+2. **关闭 SB**：`is_open=false` → 加入 Closed 列表；各 plane 块状态 CLOSED + `sb_id`。
+3. **归还**：搬移擦除成功后 `alc_free_push` 入池并置 FREE；退役走
+ `alc_free_remove` + RETIRED，**不得**先入池。
+4. **日志块**：`md_log_alloc` 从**固定 L2P 日志区**（`[46,94)/plane`）取一块已擦净的
+ 空闲块（置 LOG）；擦除完成后 `md_log_release` 置 NONE，**不回 Free Pool**
+ 。
+
+#### 3.9.6 失败语义
+
+| 情况 | 结果 | 后果 |
+|---|---|---|
+| Free Pool 空 | `FTL_AGAIN` | 写路径起紧急 GC；持续为空则写失败 |
+| 入池块是 BAD | debug 停机；release 拒绝 | 防止把 BAD 覆盖成 FREE |
+| 出池块不在池 | no-op（文档化契约） | 幂等；不制造反向分叉 |
+| 退役块先入池 | 会被再次分配 | 违反不变量 2，必须出池后置 RETIRED |
+| Closed 列表满 | 结构上不可能（容量 = 全部块） | 真满即断言，不静默丢条目 |
+
+#### 3.9.7 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `FREE_POOL_TARGET` | 32 |
+| `FREE_POOL_EMERGENCY` | 8 |
+| `FTL_OP_PERCENT` | 10%（204 块/plane） |
+| `FTL_SPARE_POOL_PER_PLANE` | 50 |
+| `SUPER_BLOCK_LIST_MAX` | `FTL_BLOCK_TOTAL`（4096） |
+| `bst_block_s` 尺寸 | 20 B |
+| 温度 | HOT=0 / COLD=1 |
+
+#### 3.9.8 设计取舍
+
+选择：每块 descriptor + Free/OP/Spare 池 + 跨 plane SB。主要替代：按需扫描或单池。
+差异：有效计数为 CW 粒度，不维护逐页位图。完整论证见架构文档 §9.2。
+
+---
+
+
+
+<a id="s3-10" name="s3-10"></a>
+
+### 3.10 坏块表
+
+#### 3.10.1 背景与需求
+
+NAND 的坏块有两类：
+
+- **出厂坏块**：厂商在每块 page 0 的 spare 区写非 `0xFF` 标记；**擦除会永久毁掉标记**
+ （Micron AN1819）。
+- **运行时坏块**：PROGRAM/ERASE 失败、读恢复耗尽后判定。
+
+没有 BBT：开机可能把坏块分给用户；坏块上的数据写到一半就丢；重启后不知道哪些块坏。
+另一个更隐蔽的坑：**用过的芯片不能再做出厂扫描**——页编程 2112 B 会把 CW3 尾巴写进 spare，
+spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含目录检查点/Checkpoint）判成坏块。
+
+#### 3.10.2 职责与边界
+
+- **做**：坏块的持久化（`bbt_header_s.bad_map`）、出厂扫描（仅在空片）、运行时标记、
+ Spare Pool 按 plane 补充。
+- **不做**：不维护 RAM 块状态（BST 是唯一数据源）；不决定替换哪个块（调用方给 plane）；
+ 不做数据迁移（migrate）。
+- **调用点**：`bbt_init`（boot）、写失败（`ftl.c`）、GC 擦除失败（`migrate.c`）、
+ 读恢复失败（`read_recovery.c`）、格式化（`pfr_media_format`）。
+
+#### 3.10.3 结构与不变量
+
+| 结构 | 字段 | 说明 |
+|---|---|---|
+| `bbt_header_s` | magic / sequence / total_blocks / bad_count / `bad_map[512]` | 540 B，一条 record = 1 页 |
+| `bbt_state_s`（在 `alc_s`） | sequence / write_idx / cursor_valid / dirty / format_in_progress / rebuild_required / dirty_gen / flush_due / handle | 每实例一份池游标 |
+| `bbt_handle_s` | phase / waiting / dirty_gen / 心跳 | 异步持久化；状态查询直读 `bbt_state_s` 的 `format_in_progress` / `rebuild_required` / `dirty_gen` / `flush_due` |
+
+不变量：
+
+1. **出厂扫描只在空片执行**：介质已有 FTL 数据判据命中 ⇒ 拒绝扫描 + LOGE。
+2. **先读后擦**：出厂标记必须在任何 PROGRAM/ERASE 之前读。
+3. **标坏先出池、再置 BAD**：`alc_free_remove` 的断言要求块此刻仍是 FREE。
+4. **RAM 只信 BST**：`bbt_is_bad` 只用于读持久化位图；运行时判定一律 `ftl_block_is_bad`。
+5. **候选池**：BBT 名义块 + shared metadata spare（94..97）中、在 plane_mask 所有
+ plane 上都非 BAD 的块组成候选表；自举期间直接扫描「名义块 + 全部 spare」，record 靠
+ magic/sequence 校验，坏块/空块自然被忽略。候选表不落盘，每次开机重算。
+6. **元数据 BAD 不走用户 Spare**：`block < FTL_METADATA_AREA_END` 或
+ `l2p_live[g]` / 当前 plane 的 `cur.block[plane]` 指向该块（从 OP 借用的 L2P 日志块）⇒ 只置
+ `alloc->pools->dirty`，由元数据 job 重算候选池；Journal / L2P 日志失块
+ 额外置 BBT header `reserved[1]` 的 **`BBT_FLAG_REBUILD_REQUIRED`**（本仓自拟），新 CP 落盘后清除。
+
+#### 3.10.4 流程（判定）
+
+```mermaid
+flowchart TD
+ INIT["bbt_init"] --> LOAD{"bbt_load 池内有有效 record"}
+ LOAD -- "是" --> REBUILD["bad_map 到 BST state 为 BAD"]
+ LOAD -- "否" --> USED{"介质已有 FTL 数据"}
+ USED -- "是" --> REJECT["拒绝出厂扫描 LOGE bad_count 为 0,运行时兜底"]
+ USED -- "否" --> SCAN["逐块读 page0 列 2048 非 0xFF 则 BAD"]
+ SCAN --> SAVE["bbt_store 写入池"]
+ REBUILD --> RUN["运行时"]
+ REJECT --> RUN
+ SAVE --> RUN
+ RUN --> MARK["PROGRAM ERASE 失败或 RR 耗尽"]
+ MARK --> EXPEL["alc_free_remove"]
+ EXPEL --> BAD["BST 置 BAD bbt-dirty 为 1"]
+ BAD --> KICK["bbt_handle 异步写回"]
+```
+
+**读图要点**：出厂标记先读后擦；候选池跳过 BAD；sequence 最大者胜。
+
+#### 3.10.5 流程（持久化）
+
+1. **加载**：`bbt_load` 用 `md_ring_locate` 扫 2 块池，取 magic 正确且 sequence 最大者；
+ 恢复 `alloc->bbt` 游标与序号。
+2. **出厂扫描**：逐块（含块 0）读 `OP_READ_COLUMN` 列 2048 的 spare 首字节；
+ 非 `0xFF` ⇒ 坏块。**只读不擦**。
+3. **运行时标记**：标坏：出池 → 置 BAD → 清 valid → 置 dirty。
+ ⚠ **清 valid 之后 L2P 仍可能指向该块**（预测性迁移读失败标坏、full metadata rebuild
+ 漏认）。因此覆盖写旧位置、TRIM、搬离源块的减计数必须走
+ `ftl_block_sub_valid_if_live`（BAD 或 count==0 时跳过）；直接
+ `ftl_block_sub_valid` 会在 debug 撞断言、release 把 uint16 回绕成 65535，
+ 虚高的 valid_count 会污染 GC/WL 的 victim 评分。dangling 现场由写确认路径的
+ `[FTL] dangling` 日志留痕。
+4. **持久化**：`bbt_handle` 装配 job；换块先异步擦，再写 1 页 record；完成由
+ `ftl_bbt_op_callback` 推进游标。失败保留 dirty，下轮重试。
+5. **补充**：Spare 补池从**坏块所属 plane** 的 Spare 池取一块，
+ 归还 Free Pool；池空则容量自然减少。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as 调用方
+    participant B as BBT job
+    participant T as BST / allocator
+    participant F as FC / NAND
+    C->>B: 标坏 / dirty
+    B->>T: 出池 + 置 BAD
+    B->>B: 置 dirty
+    loop service kick
+        B->>F: 若需换块先异步擦
+        F-->>B: 擦完成
+        B->>F: 写 1 页 BBT record
+        F-->>B: 写完成
+        alt 成功
+            B->>B: 推进池游标 / 清 dirty
+        else 失败
+            B->>B: 保留 dirty，下轮重试
+        end
+    end
+```
+
+**读图要点**：标坏先出池再置 BAD；record 写失败保留 dirty；换块先擦后写。
+
+#### 3.10.6 失败语义
+
+| 情况 | 结果 | 数据影响 |
+|---|---|---|
+| 无有效 BBT 且介质已用过 | 拒绝扫描，坏块表从空开始 | 已知坏块靠运行时失败兜底；不会误标活块 |
+| 出厂扫描读列失败 | 保守判坏 | 可能多标；不会少标 |
+| Spare 池耗尽 | 新坏块直接减少可用容量 | 用户容量下降，不丢已写数据 |
+| BBT 写失败 | dirty 保留，下轮重试 | 掉电后可能丢最后一次坏块更新 |
+
+#### 3.10.7 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `BBT_MAGIC` | `0x424254AB` |
+| BBT 池块数 | 2（块 40..41） |
+| `bad_map` | 512 B = 4096 bit |
+| 出厂标记列 | 2048（`PAGE_MAIN_SIZE`） |
+| Spare / plane | 50 |
+
+#### 3.10.8 设计取舍
+
+选择：BBT + Spare + 出厂扫描；不做 block remap 表。主要替代：两层映射表。
+差异：固定元数据区按候选池 + shared spare，record 靠 sequence 扫描定位。完整论证见架构文档 §9.3。
+
+---
+
+
+
+<a id="s3-11" name="s3-11"></a>
+
+### 3.11 磨损计数持久化与静态磨损均衡
+
+#### 3.11.1 背景与需求
+
+BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，实例初始化的 memset 会清零。
+如果不持久化，重启后：
+
+- 动态 WL 不知道哪块擦得少，可能继续用已经磨损的块；
+- 静态 WL 的 `max-min` 差值归零，永远不会触发；
+- read disturb / 预测性退役的记录归零，劣化块被当成新块。
+
+> **出处**：`docs/design/storage_controller_design.md` §5.5 —— "擦除计数必须
+> 持久化，否则跨重启归零、WL 失效"；失效模式表：read disturb → "定期刷新、读计数、
+> GC 搬移"。
+
+静态 WL 的需求是另一个方向：GC 只回收"有效数据少"的块，冷数据所在的低擦除块
+可能长期不被擦到；需要主动把冷数据搬走一次，让这些块进入磨损轮转。
+方向与 UBI 一致：把**最冷的 used SB** 搬到**擦除次数最多**的空闲块上，低擦除块
+空出来给热数据（动态 WL 优先选它）⇒ 擦除计数回升。
+
+#### 3.11.2 职责与边界
+
+- **checkpoint.c**：`cp_wear_page_build` 从 BST 组 16 页磨损快照；
+ `cp_wear_table_load` 开机逐页校验并回填 BST。计数随 CP 记录**原子落盘**，
+ 没有独立 Wear 块。
+- **wear_leveling.c**：静态 WL 的触发判定与 victim 选择；搬移交给 `migrate.c`。
+- **不做**：不执行擦除/搬移；不决定 GC（`gc.c`）；不维护 BST（`allocator.h`）。
+- **动态 WL** 不在本模块：它是 `alc_free_find_block` 的选块策略
+ （选擦除最少者）。
+
+#### 3.11.3 结构与不变量
+
+| 结构 | 字段 | 说明 |
+|---|---|---|
+| `cp_wear_entry_s` | erase(4) / read(2) / last_ecc(1) / flags(1) | 8 B，按 **gblock 下标**存；定义在 `checkpoint.h` |
+| CP Header 磨损字段 | `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` / `wear_page_crc[16]` | 几何 + 每页 CRC |
+| `wl_victim_s` | found / plane_blocks / valid_cw / read_count | WL 选块结果 |
+
+不变量：
+
+1. **绝对值 + CP 快照**：每次 CP 写整份磨损快照（不是增量），读回直接覆盖 BST。
+2. **软状态**：两次 CP 之间掉电只丢一个 CP 窗口的计数，不丢用户数据；
+ 快照损坏只退化 WL/read-disturb 精度，**不得**触发格式化。
+3. **WL 只选 Closed 块**：跳过 Open / 含坏 plane 的 SB；有效 CW ≥ **该条目自身容量**的 70%（`plane_count × FTL_CW_PER_BLOCK`，快照恢复出的单 plane 条目按单 plane 算）；
+ 按**平均擦除次数最少**（最冷）优先，同擦除次数下 valid_cw 多、read_count 高优先。
+4. **目标方向固定**：静态 WL 的目的页对取 **Free Pool 中擦除次数最多**的块
+ （成对分配），且不允许 OP 兜底；启动前沿
+ `alc_super_prepare_wl_destination` 摘掉当前 cold SB，保证第一页新开 high-wear SB。
+5. **WL 与 GC 共用一台迁移引擎与同一收尾（FREE）**：WL 只改 victim 来源；
+ 擦完归还 Free Pool，源块由动态 WL 优先选中写入，擦除计数回升。
+ 退役只属于预测性退役 / read recovery。
+
+#### 3.11.4 流程（计算）
+
+```mermaid
+flowchart TD
+ W1["timer: mig_wl_eval（每 5 s）"] --> W2["mig_wl_begin"]
+ W2 --> W3{"间隔门 total_writes 不低于 1000"}
+ W3 -- "否" --> W0["不触发"]
+ W3 -- "是" --> W4{"max_free_ec 减 min_used_ec 不低于 WL_THRESHOLD"}
+ W4 -- "否" --> W0
+ W4 -- "是" --> W5["wl_select_victim 最冷 used SB valid 不低于 70 百分比"]
+ W5 -- "无" --> W0
+ W5 -- "有" --> W6["摘掉 cold SB 后启动迁移 job WL 目标取擦除最多的空闲块"]
+ W6 --> W7["擦完归还 Free Pool"]
+```
+
+**读图要点**：UBI 差值触发；最冷 used SB 优先；目的块取高擦除空闲块。
+
+#### 3.11.5 流程（触发/搬移）
+
+1. **开机**：`cp_wear_table_load` 逐页读 16 页磨损快照（P0/P1 任一副本），
+ 每页用 Header 的 `wear_page_crc[p]` 校验，回填 BST 的 erase/read/rr 三组字段。
+ 无快照 / CRC 错 / 读失败 ⇒ 计数从 0 开始（软状态，非致命）。
+2. **落盘**：CP job 在块元数据快照之后、Header 之前，逐页调用
+ `cp_wear_page_build` 从 BST 组页并写入；每页 CRC 存进 Header 的
+ `wear_page_crc[]`。Header 是 commit 页——它落盘才代表整条 record 有效。
+ **持久化窗口 = CP 间隔**（水位/定时/强制触发）。
+3. **静态 WL 触发**（UBI 模型）：判据只有 `max_free_ec − min_used_ec ≥ WL_THRESHOLD`，
+ 其中 `min_used_ec` = Closed 列表中**有效 CW ≥ 自身容量 70% 且无坏 plane** 的 SB 平均擦除
+ 次数最小值，`max_free_ec` = Free Pool 最大擦除次数。启动门
+ `total_writes ≥ WL_MIN_WRITES`，求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
+ 搬移不改变擦除计数 ⇒ 差值不足时必须停止（否则是纯写放大）。
+4. **选 victim**：与触发同门限，选平均擦除次数最小的 SB；平手看 valid_cw / read_count。
+5. **搬移**：`mig_wl_begin` 先 `alc_super_prepare_wl_destination` 摘掉当前 cold SB，再起
+ job；目标页对走成对分配（每 plane 取擦除最多的空闲块，无 OP
+ 兜底）。收尾 `MIG_POST_FREE`：擦完归还 Free Pool，源块由动态 WL 优先选中写入。
+
+#### 3.11.6 失败语义
+
+| 情况 | 结果 | 数据影响 |
+|---|---|---|
+| 磨损快照读失败 / CRC 错 | 计数从 0 开始 | WL/read-disturb 精度下降；用户数据不丢 |
+| 磨损页写失败 | `block_ok=0`，整条 CP record 作废（不写 Header），游标推进一槽 | 下一 CP 重试；计数窗口延长 |
+| WL 无 victim | 不触发，下轮再试 | 磨损继续累积 |
+| WL 搬移中分配不到目标页 | 中止且不擦 victim | 数据无损，下轮重来 |
+| 擦除失败 | 标坏，不退役 | 数据由 GC/BBT 处理 |
+
+#### 3.11.7 设计取舍
+
+选择：磨损快照随 Checkpoint 记录落盘 + 静态 WL（UBI 判据）。主要替代：独立 Wear 块或不持久化。
+差异：8 B/块、16 页快照；`WL_THRESHOLD = 200` 为本仓自定（UBI 判据缩放），不冒充行业数值。
+完整对照见架构文档 §4.7。
+
+#### 3.11.8 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 |
+| `FTL_CHECKPOINT_WEAR_PAGES` | 16 |
+| `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | 0x0F / 0x03 |
+| `WL_THRESHOLD` | 200（本仓自拟；判据沿用 UBI） |
+
+
+
+<a id="s3-12" name="s3-12"></a>
+
+### 3.12 GC 策略与迁移引擎
+
+#### 3.12.1 背景与需求
 
 异地更新会不断产生无效数据：一个 Closed SB 里可能只剩 10% 的有效 CW。空间要回收，
 就必须把有效 CW 搬到新位置、更新 L2P，再擦掉旧块。没有 GC，Free Pool 只出不进，
@@ -3635,16 +3706,16 @@ flowchart TB
 而它有一个**在完成回调里**的入口（写路径分配不到页时的紧急 GC）。因此搬移必须是
 **异步 job**：每轮只推进一条命令，host IO 与后台搬移在 superloop 上重叠。
 
-#### 3.13.2 职责与边界
+#### 3.12.2 职责与边界
 
 - **`gc.c`（策略）**：触发判定（空间压力 + 磨损）、victim 四维加权选择、共用读原语
  （`gc_read_page_with_lba` / `gc_decode_cw_lba`）。
 - **`migrate.c`（引擎）**：`mig_handle_s` 状态机；GC / 静态 WL / 预测性退役共用一台。
 - **不做**：不决定块元数据（allocator）；不决定坏块（BBT）；不做读恢复（RR）。
-- **入口**：`mig_handle` 每轮推进在飞 job / 紧急 GC；周期评估由 timer 表三个独立任务驱动：`mig_eval`（10 ms → `mig_gc_begin`）、`mig_wl_eval`（5 s → `mig_wl_begin`）、`mig_predict_eval`（1 s → `mig_predict_begin`），同一轮按注册顺序仲裁单飞行；`mig_gc_request_urgent` 只登记紧急原因；完成服务
- `ftl_migrate_callback`（GC 与 WL 共用）。
+- **入口**：迁移引擎每轮推进在飞 job / 紧急 GC；周期评估由 timer 表三个独立任务驱动（GC 10 ms、WL 5 s、predict 1 s），同一轮按注册顺序仲裁单飞行；紧急请求只登记原因，完成服务
+ `ftl_migrate_op_callback`（GC 与 WL 共用）。
 
-#### 3.13.3 结构与不变量
+#### 3.12.3 结构与不变量
 
 `mig_handle_s`：
 
@@ -3659,15 +3730,15 @@ flowchart TB
 | `migrated` | 已搬有效 CW 数（>0 才需要 F10 屏障） |
 | `page_buf[plane][2048]` | 页镜像（异步读落此、写从此取） |
 | `alloc` / `journal` / `cache` / `total_writes` / `topo` | 窄指针（init 绑定；无端口结构体） |
-| `stall_ms` / `wait_ms` | 提交背压 / 等外部模块的 deadline 起点 |
+| `submit_deadline` / `external_deadline` / `command_deadline` | 提交背压 / 等外部模块 / 等完成回调的 deadline |
 | `timed_out` / `timeout_phase` | 超时归因（status 上报） |
 | `fail_gblock[plane]` / `fail_count[plane]` | **每个 plane 源块**的连续读失败计数（跨 job 保留；整块迁移成功或标 BAD 才清） |
 | `read_fail_streak` / `paused` | 系统性读失败熔断计数 / 已熔断标志（跨 job 保留；整块迁移成功才清零） |
 | `inflight` | 已提交、未收到完成的命令数（batch 按条计，跨 job 保留）。>0 时三个 `*_begin` 拒绝启新 job：job 超时放弃后命令仍在 FC 侧，迟到完成会按新 job 的 phase 结算 |
 | `state.timers_registered` | GC/WL/predict 三个 timer 任务是否已注册（求值节拍由 timer 表持有） |
 | `state.counters.reclaimed` / `state.counters.novictim` | 单调进展计数（外部诊断直接读；纯标量，无封装价值） |
-| `urgent_gc` | `mig_gc_request_urgent` 的登记位 |
-| `error` | 最近一次中止归因 |
+| `state.urgent_gc` | `mig_gc_request_urgent` 的登记位 |
+| `state.error` | 最近一次中止归因 |
 
 **不变量**：
 
@@ -3692,7 +3763,7 @@ flowchart TB
  分开计数（交替失败不能互相清零）。
 11. **只读已编程页**：搬移按 `victim.next_page` 截断扫描区间 `[0, next_page)`。
  半写块（提前关闭 / GC 目的块）的空洞页物理上是擦除态，既不该读、也不能因此判坏块
- 。重建条目无法得知真实写指针时按满 64 处理，由 FC 的 `BLANK` 识别兜底。
+ 。重建条目无法得知真实写指针时按满 64 处理，由 FC 的 `FC_CW_STATUS_EMPTY` 识别兜底。
 12. **系统性读失败熔断**：连续 `MIG_SYSTEMIC_READ_FAIL_MAX`（8）个不同 victim 被标 BAD
  ⇒ `paused = true`，停止 GC/WL/predict 直到重启。计数与 `paused` **跨 job 保留**
  （启动迁移 job 的 memset 不得清掉），只在**整块迁移成功**时清零；逐 plane 擦除成功
@@ -3706,18 +3777,18 @@ flowchart TB
  80% / 1% / 500 ms / 2 s 均为本仓自拟。过滤在 cost 评分**之前**做（否则可能因为
  「最差的块仍太有效」而漏掉更稀疏的候选）。
 14. **无收益结论要退避，且能变成 NO_SPACE**：`GC_SELECT_NOT_WORTHWHILE` ⇒ 置
- `gc_nogain` 并按 `GC_NOGAIN_BACKOFF_MS` 退避（有新建写 / 进入紧急水位 / 时钟缺失
+ `benefit.nogain` 并按 `GC_NOGAIN_BACKOFF_MS` 退避（有新建写 / 进入紧急水位 / 时钟缺失
  时立即重扫）；紧急水位下目的页也分配不到（`no free block`）同样置 no-gain。
  写路径在失速预算耗尽后据此报 `IO_ERROR`（不再无限 `FTL_AGAIN`）。
 
-#### 3.13.4 触发与选块
+#### 3.12.4 流程（触发与选块）
 
 | 触发 | 条件 | 语义 |
 |---|---|---|
 | T1 水位 | `free_count < 32` **或任一 plane 的 free < `FREE_POOL_PLANE_LOW`(4)** | 主动补池 |
 | T4 紧急 | `free_count ≤ 8` | 最后手段；写路径也兜底 |
 
-> **单 plane 水位（本仓自拟，）**：分配按 plane 成对取块，总水位不能代表成对
+> **单 plane 水位（本仓自拟）**：分配按 plane 成对取块，总水位不能代表成对
 > 分配能力——`free=264` 但一侧为 0 时仍无法开新 SB。per-plane 计数由 allocator 的两个闸门
 > （`alc_free_push` / `alc_free_remove`）维护，O(PLANE_NUM) 查询。
 
@@ -3728,14 +3799,14 @@ flowchart TB
 
 | 条件 | 模式 | 选块规则 |
 |---|---|---|
-| `free ≤ 8` | `EMERGENCY` | 可回收 ≥ 1% 才搬，否则记 `no-gain` |
-| `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
-| `free < 32` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
+| `free ≤ 8` | `GC_BENEFIT_EMERGENCY` | 可回收 ≥ 1% 才搬，否则记 `no-gain` |
+| `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `GC_BENEFIT_OFF` | 不筛（满盘写必须靠搬移腾空间） |
+| `free < 32` 且 host 不在写 | `GC_BENEFIT_IDLE` | `valid ≤ 80%` 才搬 |
 
-`no-gain` 结论由 `mig_handle_s.gc_nogain` 保存，退避 `GC_NOGAIN_BACKOFF_MS`（5000 ms）；
+`no-gain` 结论由 `mig_handle_s.benefit.nogain` 保存，退避 `GC_NOGAIN_BACKOFF_MS`（5000 ms）；
 新建写、进入紧急水位、或时钟缺失（`now_ms == 0`）时立即重扫。紧急水位下若连目的页都分配
 不到（迁移中止）同样记 `no-gain`——否则会陷入「选中 → 分配失败 →
-abort」的循环。写路径的 `ftl_drain_group` 在连续无进展后把组判为 `IO_ERROR`，并打
+abort」的循环。写路径的 `ftl_host_group_drain` 在连续无进展后把组判为 `IO_ERROR`，并打
 `[FTL] no space: GC no-gain` 归因行。
 
 victim 评分（cost 取小）：
@@ -3751,7 +3822,7 @@ cost = 500·valid_ratio + 200·erase_ratio + 200·cold_penalty + 100·youth_pena
 
 平手取 `valid_count` 更小者；退化单 plane 条目跳过哨兵 plane。
 
-**plane 平衡偏好（本仓自拟，）**：成对条目回收后两 plane 各 +1；单 plane 条目
+**plane 平衡偏好（本仓自拟）**：成对条目回收后两 plane 各 +1；单 plane 条目
 只补一侧。当某 plane 的 free 低于 `FREE_POOL_PLANE_LOW` 且两 plane 不均衡时，victim 选择分成
 两组——「成对条目 + 饥饿 plane 的单条目」优先，只有该组为空才退回「富 plane 的单条目」。
 两 plane 都健康（`min ≥ 4` 或持平）时不引入偏好，保持原贪心。
@@ -3760,34 +3831,42 @@ cost = 500·valid_ratio + 200·erase_ratio + 200·cold_penalty + 100·youth_pena
 > 见 `pfr_closed_sb_add`）。彻底消除需要持久化 block→SB 归属（`known_open_items.md`），
 > 本轮用「水位 + 偏好」把不平衡限制在可恢复范围内。
 
-#### 3.13.5 搬移状态机
+#### 3.12.5 流程（搬移状态机）
 
 ```mermaid
-flowchart TD
- IDLE["MIG_IDLE"]
- READ["MIG_READ"]
- RS["MIG_READ_SETTLE"]
- WRITE["MIG_WRITE"]
- WS["MIG_WRITE_SETTLE"]
- FLUSH["MIG_FLUSH_JRN"]
- ERASE["MIG_ERASE"]
- DONE["MIG_DONE"]
- IDLE -- "mig_gc_begin / mig_wl_begin / mig_predict_begin 启动" --> READ
- READ -- "读完当前页所有 plane" --> RS
- RS -- "反查 L2P 得 cw_bitmap" --> WRITE
- RS -- "本页全空洞" --> WRITE
- WRITE -- "写完当前页所有 plane" --> WS
- WS -- "page 加一未到 64" --> READ
- WS -- "page 等于 64" --> FLUSH
- FLUSH -- "journal job 空闲" --> ERASE
- ERASE -- "两 plane 擦完" --> DONE
- DONE -- "valid_total 为 0 快路径" --> IDLE
- DONE -- "正常收尾" --> IDLE
+stateDiagram-v2
+    state "MIG_IDLE" as IDLE
+    state "MIG_READ" as READ
+    state "MIG_READ_SETTLE" as RS
+    state "MIG_WRITE" as WRITE
+    state "MIG_WRITE_SETTLE" as WS
+    state "MIG_WRITE_BATCH" as WB
+    state "MIG_WRITE_SETTLE_BATCH" as WSB
+    state "MIG_FLUSH_JRN" as FLUSH
+    state "MIG_ERASE" as ERASE
+    state "MIG_DONE" as DONE
+    [*] --> IDLE
+    IDLE --> READ: mig_gc_begin / mig_wl_begin / mig_predict_begin
+    READ --> RS: 读完当前页所有 plane
+    RS --> WRITE: 反查 L2P 得 cw_bitmap
+    RS --> WRITE: 本页全空洞
+    WRITE --> WS: 写完当前页所有 plane
+    WS --> READ: page 加一未到 64
+    WS --> WB: 满足批处理条件
+    WB --> WSB: 批次完成
+    WSB --> READ: page 加一未到 64
+    WS --> FLUSH: page 等于 64
+    WSB --> FLUSH: page 等于 64
+    FLUSH --> ERASE: journal job 空闲
+    ERASE --> DONE: 两 plane 擦完
+    DONE --> IDLE: 正常收尾 / 空块快路径
 ```
 
-#### 3.13.6 关键流程
+**读图要点**：READ→READ_SETTLE→WRITE→WRITE_SETTLE；batch 走 WRITE_BATCH/SETTLE；F10 后才擦。
 
-1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_should_trigger`）；`mig_gc_begin`（内部）只
+#### 3.12.6 流程（搬移执行）
+
+1. 触发求值在迁移引擎内部完成，GC 选块使用触发位掩码；启动入口只
  选 victim → 启动迁移 job（post 由 kind 决定）。
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
  记 `rr_record_ecc` / `read_count`（预测性退役闭环）。**读错误 ⇒ 中止**（该 plane
@@ -3798,8 +3877,8 @@ flowchart TD
 4. `MIG_WRITE`：本页有有效 CW ⇒ 成对分配 → 提交 CW 子集写。
  **写错误 ⇒ 中止**（victim 不擦）。
 5. `MIG_WRITE_SETTLE`：先就绪前置；再逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），
- 仍指向源 CW 才 `jrn_append` → `l2p_write` → 源块 `sub_valid` / 新块
- `add_valid`。append/L2P 失败 ⇒ 中止。
+ 仍指向源 CW 才追加 Journal → 写 L2P → 源块有效计数减一 / 新块
+ `ftl_block_add_valid`。append/L2P 失败 ⇒ 中止。
  **cache program 批次**：读仍逐页走 READ/READ_SETTLE；当 cold SB 的 page0 已成功、
  余量 ≥4 页且非静态 WL high-wear 时，把最多 4 页攒进 `batch_buf`。满 4 页或到 victim
  末尾后进入 `MIG_WRITE_BATCH`：一次连续分配 N 个目的页对，提交 N 条 pair 命令
@@ -3821,7 +3900,7 @@ flowchart TD
 8. `MIG_DONE`：移除 Closed 条目；只有擦除成功且条目确实移除才
  内部 `state.counters.reclaimed++`（外部诊断直接读）/ 打 predict 日志；复位 job。
 
-#### 3.13.7 失败语义
+#### 3.12.7 失败语义
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
@@ -3833,9 +3912,9 @@ flowchart TD
 | Journal 页写失败 | 置 `write_fail_pending`，中止 F10 | pending 阻止一切 victim 擦除，直到 CP 确认 L2P 落盘 |
 | 提交侧超过 `FTL_SUBMIT_TIMEOUT_MS` 无进展 | 中止（`timed_out`） | 数据无损；命令在飞由 NAND 超时保证完成 |
 | 擦除失败 | 未 BAD 则标坏一次；`erase_failed` | 数据由 BBT/GC 处理；不计入 `state.counters.reclaimed` |
-| 掉电 | 最多一个孤悬块 | Journal 回放恢复映射；victim 未擦或已擦但 L2P/CP 已落盘 |
+| 掉电 | 每实例在飞迁移 job 最多一个孤悬 COLD SB | 已入 Journal 的映射由回放恢复；未入账页成为垃圾，由 GC 回收；victim 未擦或已擦但 L2P/CP 已落盘 |
 
-#### 3.13.8 常量与出处
+#### 3.12.8 常量与阈值
 
 | 常量 | 值 |
 | --- | --- |
@@ -3845,21 +3924,20 @@ flowchart TD
 | `FTL_WAIT_TIMEOUT_MS` | 50 |
 | 页镜像 | 2 × 2048 B |
 
-#### 3.13.9 主流对照
+#### 3.12.9 设计取舍
 
-GC 触发看自由块水位、victim 按有效性比例选、后台异步回收，是主流 FTL 的共同形态
-（SPDK 的 free band 水位、DRAM-less 的空间压力触发）。本仓额外加了磨损/温度/年龄三项，
-**这是本仓自定**的评分权重；它们不冒充“行业标准公式”。与 SPDK 的一个刻意差异：
-本仓写路径在分配不到页时会**就地起紧急 GC**，SPDK 的写路径直接返回 NULL、GC 全在
-poller 里——这条差异已登记。
+选择：水位触发 + 有效性 victim + 后台异步 GC。主要替代：纯空闲 GC 或写路径同步 GC。
+差异：磨损/温度/年龄附加评分；写路径分配不到页时可起紧急 GC。完整论证见架构文档 §9.12。
 
 ---
 
-<a id="s3-14" name="s3-14"></a>
 
-### 3.14 读恢复（read_recovery）
 
-#### 3.14.1 背景与需求
+<a id="s3-13" name="s3-13"></a>
+
+### 3.13 读恢复
+
+#### 3.13.1 背景与需求
 
 NAND 读会失败：retention、read disturb、编程干扰都表现为 ECC 纠正位数上升，最终超过
 纠错能力。直接向 host 返回 IO 错误太早——即使数据读不回来，也应该先搬走其余有效数据、
@@ -3869,23 +3947,23 @@ NAND 读会失败：retention、read disturb、编程干扰都表现为 ECC 纠�
 主流企业级 SSD 的恢复管线是 read retry（切读电压/soft-decode）→ 邻居页辅助 →
 XOR/RAID。**本仓器件/配置下前两级无效**：MT29F4G08 的 read-retry feature（0x89）
 是保留地址、SLC 无 retry table、邻居页无法恢复目标页、RAID 关闭。因此本仓只保留：
-**一次正常读 + 仅 `CRC_ERROR` 重读一次**；UNC / NAND_FAIL / TIMEOUT / MATA_ERROR
+**一次正常读 + 仅 `CRC_ERROR` 重读一次**；UNC / NAND_FAIL / TIMEOUT / FC_CMD_STATUS_META_ERROR
 直接按失败结算并块退役。
 
-#### 3.14.2 职责与边界
+#### 3.13.2 职责与边界
 
 - **做**：读失败后的异步恢复状态机；per-block ECC 趋势（`rr` 在 BST）；预测巡检；
  退役（RETIRED）。
 - **不做**：不做 XOR/RAID 恢复（未实现）；不执行搬移（调用 `mig_predict_begin`）；
  不决定坏块持久化（BBT）。
 - **托管模型**：host 读失败时，把 pending 子操作托管给 RR job（保留 pending 项、
- 不递减组在飞数）；job 一次只提交一条命令，完成由 `ftl_read_recovery_callback` 推进。
+ 不递减组在飞数）；job 一次只提交一条命令，完成由 `ftl_read_recovery_op_callback` 推进。
 
-#### 3.14.3 结构与不变量
+#### 3.13.3 结构与不变量
 
 | 结构 | 字段 | 说明 |
 |---|---|---|
-| `rr_handle_s` | `stage` / `waiting` / `plane` / `attempt` / `pending_idx` / `page` / `recovered` / `all_ok` / `stall_ms` | 单 job |
+| `rr_handle_s` | `stage` / `waiting` / `plane` / `attempt` / `pending_idx` / `page` / `recovered` / `all_ok` / `submit_deadline` | 单 job |
 | | `owner` / `has_owner` / 窄上下文 | `rr_trigger` 登记的 owner；cache/alloc/topo/page_scratch/pending 窄指针 |
 | | `planes_recovered` / `planes_failed` / `error` | 观测计数与最近一次 abort 归因 |
 | `rr_ecc_track_s`（BST） | `last_ecc` / `rising_count` / `health` | 每块 |
@@ -3900,41 +3978,44 @@ XOR/RAID。**本仓器件/配置下前两级无效**：MT29F4G08 的 read-retry 
 4. **提交侧超过 `FTL_SUBMIT_TIMEOUT_MS` 无进展 ⇒ 按失败收尾**，不标坏块（避免把命令池泄漏当介质问题）。
 5. **退役不是坏块**：RETIRED 仍可读、不再分配、不标坏；有效数据已搬走。
 
-#### 3.14.4 状态机
+#### 3.13.4 流程（状态机）
 
 ```mermaid
-flowchart TD
- IDLE["IDLE"]
- PLANE["PLANE"]
- READ["READ"]
- PLANEEND["PLANE_END"]
- FINISH["FINISH"]
- IDLE -- "领走托管的 pending 项" --> PLANE
- PLANE -- "找到本 plane 目标页" --> READ
- PLANE -- "本子操作不覆盖本 plane" --> PLANE
- READ -- "读成功" --> PLANEEND
- READ -- "仅 CRC_ERROR 且首次" --> READ
- READ -- "UNC/NAND/META/重试用尽" --> PLANEEND
- PLANEEND -- "plane 加一" --> PLANE
- PLANEEND -- "plane 等于 PLANE_NUM" --> FINISH
- PLANE -- "提交侧长期无进展（清零缓冲）" --> FINISH
+stateDiagram-v2
+    state "IDLE" as IDLE
+    state "PLANE" as PLANE
+    state "READ" as READ
+    state "PLANE_END" as PLANEEND
+    state "FINISH" as FINISH
+    [*] --> IDLE
+    IDLE --> PLANE: 领走托管的 pending 项
+    PLANE --> READ: 找到本 plane 目标页
+    PLANE --> PLANE: 本子操作不覆盖本 plane
+    READ --> PLANEEND: 读成功
+    READ --> READ: 仅 CRC_ERROR 且首次
+    READ --> PLANEEND: UNC / NAND / META / 重试用尽
+    PLANEEND --> PLANE: plane 加一
+    PLANEEND --> FINISH: plane 等于 PLANE_NUM
+    PLANE --> FINISH: 提交侧长期无进展
 ```
 
-#### 3.14.5 关键流程
+**读图要点**：托管项不递减 outstanding；CRC 只重读一次；失败标坏/迁移。
+
+#### 3.13.5 流程（恢复执行）
 
 1. host 读完成回调检测到**任一错误位**（`fc_cmd_status_has_error`：NAND_FAIL / FAIL_CACHE /
- TIMEOUT / DATA_ERROR / MATA_ERROR 全集——UNC/CRC/RAID 合并为 DATA_ERROR，MATA 单独；
+ TIMEOUT / FC_CMD_STATUS_DATA_ERROR / FC_CMD_STATUS_META_ERROR 全集——UNC/CRC/RAID 合并为 FC_CMD_STATUS_DATA_ERROR，META 单独；
  单看 NAND_FAIL 会把加扰页当成功交给 host）：pending 项 `op = READ_RECOVERY`、
  `command_id = NONE`，命令释放，`rr_handle`。
-2. `rr_handle` 领走托管项，进入 `PLANE`；选本 plane 目标页（L2P region 加载中则原地等）。
+2. `rr_handle` 领走托管项，进入 `RR_STAGE_PLANE`；选本 plane 目标页（L2P region 加载中则原地等）。
 3. `READ`：读目标页一次；**只有 `CRC_ERROR`** 允许再读一次（attempt=2）。
-4. 其余错误（UNC / NAND_FAIL / TIMEOUT / MATA_ERROR），或 CRC 重读仍失败 ⇒ 直接 `PLANE_END`。
-5. `PLANE_END`：成功则把 scratch 按 CW 偏移拷回 host buffer；失败则清零并按失败结算。
-6. `FINISH`：释放 pending 槽 + 组聚合；失败且确认不可恢复 ⇒ 标坏 + 数据迁移。
+4. 其余错误（UNC / NAND_FAIL / TIMEOUT / FC_CMD_STATUS_META_ERROR），或 CRC 重读仍失败 ⇒ 直接 `RR_STAGE_PLANE_END`。
+5. `RR_STAGE_PLANE_END`：成功则把 scratch 按 CW 偏移拷回 host buffer；失败则清零并按失败结算。
+6. `RR_STAGE_FINISH`：释放 pending 槽 + 组聚合；失败且确认不可恢复 ⇒ 标坏 + 数据迁移。
 7. **预测巡检**：`rr_predictive_scan` 找 health ≥ CRITICAL 的 Closed 块 →
  `mig_predict_begin`（搬空并退役）。
 
-#### 3.14.6 失败语义
+#### 3.13.6 失败语义
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
@@ -3949,7 +4030,7 @@ flowchart TD
 （见 §7.2，用户明确不处理）。⇒ 多级读电压重试与邻居页辅助在本板上没有物理意义，
 已移除；失败即块退役。
 
-#### 3.14.7 常量与出处
+#### 3.13.7 常量与阈值
 
 | 常量 | 值 |
 | --- | --- |
@@ -3959,18 +4040,189 @@ flowchart TD
 | `RR_READ_DISTURB_THRESHOLD` | 1000 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 |
 
-#### 3.14.8 主流对照
+#### 3.13.8 设计取舍
 
-read retry（soft-decode）、邻居页辅助、RAID/XOR 是企业级 SSD 读恢复的常见组成。
-本仓**裁剪**为「单次读 + CRC 重读一次 + 块退役」是器件/配置约束（0x89 保留、SLC
-无 retry table、RAID 关闭），不是对这些机制的否定。**本仓自定**的是 4 级健康状态
-与 1000 次 read-disturb 阈值。
+选择：单次读 + CRC 重读 + 标坏/退役。主要替代：read retry / 邻居页 / RAID（本器件不可用）。
+差异：4 级健康状态与 1000 次 read-disturb 阈值。完整论证见架构文档 §9.13。
 
 ---
 
+
+
+<a id="s3-14" name="s3-14"></a>
+
+### 3.14 引导与掉电恢复
+
+#### 3.14.1 背景与需求
+
+FTL 的运行时状态分两类：
+
+| 状态 | 掉电后 |
+|---|---|
+| L2P cache（64 行）、Block State Table、Free/OP/Spare 池、Closed 列表、各类写指针 | **全部丢失**（RAM） |
+| 用户数据、页内 META、L2P region 页、目录检查点、Checkpoint、Journal、BBT、CP 磨损快照 | 留在 NAND |
+
+没有恢复模块，开机后 L2P cache 是空的、Closed 列表是空的、Free Pool 可能把**写过的块**
+当空白块分配——第一次写就会 AND 掉旧数据。恢复模块要回答三个问题：
+
+1. 上一次是**干净关机**还是**异常掉电**？
+2. L2P 映射从哪恢复到哪（Checkpoint 快照 + Journal 增量）？
+3. 块元数据（状态/有效计数/池归属）从快照恢复，还是全盘扫描重建？
+
+#### 3.14.2 职责与边界
+
+- **做**：判定启动类型；编排“扫描 → 分类 → 恢复块元数据 / 回放 Journal / full metadata rebuild → 建池”的顺序；
+ 维护恢复结果与统计。
+- **不做**：不定义 Journal/Checkpoint/目录检查点的记录格式（各模块自己拥有）；不做介质格式化
+ （`pfr_media_format` 在版本判据命中时调用）；不处理 host IO。
+- **上游**：`main.c` 的 `ssd_ftl_boot`；**下游**：Journal、Checkpoint、Metadata、Allocator、L2P cache。
+
+#### 3.14.3 结构与不变量
+
+| 结构 | 关键字段 | 说明 |
+|---|---|---|
+| `pfr_boot_type_e` | `FRESH / CLEAN / POWER_FAILURE` | 启动分类 |
+| `pfr_boot_result_s` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored`、`scoped` | 观测/日志；由执行层最后一次性填满 |
+| `pfr_plan_e`（内部） | `FRESH / SNAPSHOT / REPLAY / FORCE_REBUILD` | `pfr_boot_plan` 产出的唯一决策点 |
+| `pfr_stats_s`（内部） | `closed`、`partial`、读错误计数、`l2p_degraded_cw`、`valid_cw`、`sub_zero` | 本次启动唯一统计；计数一律 `DWORD` |
+| `pfr_block_table_s`（内部） | `word`、`loaded`、`restored`、`probed` | 块快照的显式对账进度；`pfr_boot_carve_pools` 断言 `probed` |
+| `cp_handle_s.block_words` | 16-bit/块 × 4096 | Checkpoint 的块元数据快照，boot 时复用为加载缓冲 |
+| `cp_handle_s.wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 8 B/块 × 4096 → 16 页 | 磨损快照写进度 / 每页 CRC / 组页缓冲 |
+
+不变量：
+
+1. **块元数据快照先于 Journal 回放恢复**：回放要同步维护 `valid_count`，没有块元数据就没有记账对象。
+2. **判型用整页**：`page_seq + entry_count <= cp.journal_sequence` 才是干净关机；
+ 只比页首页序号会漏掉跨水位那一页的新条目。
+3. **三条路径都要 Journal 续跑**：环形块没有被擦，写指针/序号必须接回；
+ 否则二次编程或序号回退。
+4. **Open SB 不续写**：快照/full metadata rebuild 都把 OPEN 降级为 CLOSED，整块交 GC。掉电可能留下半编程页，
+ 续写会二次编程；Policy B 下两 plane 的配对也无法可靠恢复。
+5. **快照失败只回退 full metadata rebuild，不格式化**：格式化只由介质版本判据触发。
+
+#### 3.14.4 流程（启动判定）
+
+```mermaid
+flowchart TD
+ BOOT["pfr_boot_recovery"] --> LATEST["jrn_page_scan_latest 只读,不改状态"]
+ LATEST --> FIND{"cp_pool_find_latest 有当前版本有效 Header"}
+ FIND -- "否" --> FRESH["fresh full metadata rebuild 全扫 → carve"]
+ FIND -- "是" --> LOAD{"cp_block_table_load"}
+ LOAD -- "否" --> PFALL["块元数据走 full metadata rebuild 兜底"]
+ LOAD -- "是" --> WEAR["cp_wear_table_load 软状态，失败只从 0 起算"]
+ WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
+ JUDGE -- "是" --> CLEAN["clean restore probe pfr_boot_carve_pools"]
+ JUDGE -- "否" --> PF["PF restore journal replay F4 probe pfr_boot_carve_pools"]
+ PFALL --> FULL_SCAN["reset → full metadata rebuild → carve"]
+ PF --> PFOk{"块元数据恢复一致"}
+ PFOk -- "否" --> FULL_SCAN
+ PFOk -- "是" --> READY["Controller 到 Ready"]
+ CLEAN --> READY
+ FRESH --> READY
+ FULL_SCAN --> READY
+```
+
+**读图要点**：fresh / clean / PF 三分支；格式化先于恢复；快照失败由 rebuild 兜底。
+
+#### 3.14.5 流程（恢复）
+
+1. **扫描**：`jrn_page_scan_latest` 只读环形池，取 `(block, page, page_seq, entry_count)`；
+ `cp_pool_find_latest` 用 `md_ring_locate` 扫 Checkpoint 池，取最新有效 Header，
+ 同时恢复本实例的 CP 序号与写游标。
+2. **分类**：`pfr_boot_plan` 是唯一决策点，产出 `pfr_plan_e`：
+ - 无有效 CP → **FRESH**；
+ - `BBT_FLAG_REBUILD_REQUIRED` → **FORCE_REBUILD**（不尝试快照）；
+ - `page_seq + entry_count <= cp.journal_sequence` → **SNAPSHOT**（Journal 已全部落入 L2P）；
+ - 否则 → **REPLAY**（有未回放的增量）。
+3. **fresh**：失效本 owner 的 cache 行/脏位 → **full metadata rebuild（重建 Closed 列表）→ carve 池**
+ （carve 只把 state==NONE 的块入池）→ Spare 补池 → Journal 续跑。
+4. **clean**：块元数据快照有效时 `pfr_restore_blocks`（先全量校验再应用）→ 按 CP 位图
+ **逐 region 预载**（F4，不按 INVALID 行的 region_id 反查）→ probe 池块 →
+ `pfr_boot_carve_pools` → Spare 补池；任一步失败 → reset → full metadata rebuild → carve。
+ 最后 Journal 续跑。
+ - **live L2P 日志块的自愈**：这类块归 `metadata_dir` 所有、
+  不在 allocator 池里，合法 word 是 `NONE + no pool tag`。校验阶段对
+  `live 计数查询(dir, g) > 0` 的块放行，第 3 遍按 Directory 修正为 `LOG`
+  （Directory 是 live 日志块身份的唯一权威）。否则旧版 full rebuild 留下的
+  NONE/no-pool 会让**整份**快照被拒绝，每次冷启动都全盘重建。
+5. **PF**：先恢复块元数据 → Journal 回放（所有 `page_seq+entry_count > cp_seq` 的页，
+ 按 `(page_seq, entry_idx)` 递增，last-write-wins；同步维护 valid_count）→ F4 →
+ probe + `pfr_boot_carve_pools` + Spare 补池；失败 → reset → full metadata rebuild → carve。
+ ⚠ **降级检测与范围化恢复**：`l2p_read_sync` 返回 OK **不等于**
+ 读到合法映射——连续加载失败后行会降级为“全未映射”。处理分两层：
+ - Journal 回放 在降级基线上成功写入条目时**不再**清 降级标志：降级只丢该
+  region 未被 Journal 覆盖的旧映射，**不影响** valid_count 增量（old/new PBA 来自
+  条目本身）⇒ 保留块元数据快照，启动结果标 `bit=scoped`；
+ - PFR 块探测 把降级 CW 单独计入 `l2p_degraded_cw`，**不再**计入
+  读错误计数；只有真正的读失败才回退 full metadata rebuild。
+ - 丢失的映射由 host 读路径按 `IO_ERROR` 暴露（不零填）；降级 region 记入 cache 级
+  `region_degraded_bitmap`，行被驱逐/重载后仍能识别。
+ - 代价：该 region 的 pre-CP 旧映射不可恢复；相关块 `valid_count` 仍按快照计（偏高、
+  由 GC 迁移时逐 CW 反查自愈），无静默数据损坏。
+6. **full metadata rebuild**：逐 plane/块扫 page 0 判空、找写指针；坏块/固定元数据块跳过；
+ **live L2P 日志块按 Directory 显式置 `LOG`**（不能留 NONE：`cp_block_snapshot`
+ 只按 BST+池编码，NONE/no-pool 会让下一次开机的快照校验整份失败——）；
+ 写过的块建退化单 plane 的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。
+ full metadata rebuild **先于 carve**：否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
+ - **空闲块快速判空**：页判空（解码路径：ECC 是否成码字 + 整条 CW 的 1 比特占比）⇒ 直接返回 0，**不再扫 64 页**。
+  这把空闲块从 64 次读降到 1 次（本板 3392 个空闲块约省 21.7 万次页读）。
+ - **写过的块**：从 page 1 继续找第一个空白页，并检测 hole（空白页后又有写过页
+  ⇒ 返回整块让调用者逐页反查）。
+ - ⚠ 快速判空依赖“顺序追加 + page 0 失败即关闭 SB、不继续写后续页”；若将来开放
+  Open SB 续写/失败后继续写，必须恢复全块扫描，或在 page 0 空白后补读 page 63。
+
+<!-- doc-policy: allow verification -->
+**启动时间量级**（观测值，不是编译期常量）：
+
+| 路径 | 量级 | 说明 |
+|---|---:|---|
+| clean + 块元数据快照 | ~150 ms + L2P 日志区恢复 | 不跑 full metadata rebuild；probe 只读池块 page 0 |
+| power failure | ~250 ms + L2P 日志区恢复 | 多 Journal 回放 |
+| L2P 日志区恢复 | ~0 | 非活块一律置 LOG + 登记回收（**不读介质**）；擦除按 free 水位懒执行（`md_reclaim_is_eager`）|
+| full metadata rebuild 兜底 | ~400~550 ms（**空片**） | 全盘扫描 + 逐页反查 |
+
+⚠ 上表 rebuild 行是**空片**量级（page 0 快路径一跳到底）。**写过的介质**上每个写过的
+页要读两遍（找写指针 + 计 valid），时间随写入量线性增长；这是 full rebuild 的兜底代价，具体耗时见验证文档
+（约 2500 个块 × 64 页 × 2 次页读，单次约 0.4–0.6 ms）。因此启动路径应优先命中
+快照/回放，rebuild 只作兜底。
+<!-- /doc-policy -->
+
+#### 3.14.6 失败语义
+
+| 失败点 | 结果 | 数据影响 |
+|---|---|---|
+| 无有效 CP | fresh + full metadata rebuild | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
+| 块元数据快照 CRC 失败 | 该快照丢弃，走 full metadata rebuild | 用户数据不丢；恢复时间变长 |
+| 快照 word 为 `NONE/no-pool`（live L2P 日志块） | **不丢弃**：Directory 是权威，第 3 遍修正为 LOG | 自愈旧版 rebuild 留下的快照；避免每次冷启动全盘 rebuild |
+| 快照 word 非法且**不是** live 日志块 | 该快照丢弃，走 full metadata rebuild | 保守：块账本可能不可信 |
+| Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
+| L2P region 加载降级（两份副本都读失败） | 行 CLEAN + 全 INVALID + `degraded=1`，置 cache 级降级位图 | 保留快照走**范围化恢复**（`bit=scoped`）；该 region 未被 Journal 覆盖的旧映射丢失，host 读该范围返回 `IO_ERROR`；其余数据不受影响 |
+| 块元数据恢复与 probe 不一致 | reset → full metadata rebuild → carve | 以介质为准；块元数据重新计算 |
+| full metadata rebuild 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
+
+⚠ **恢复路径不在完成派发里**：它在 superloop 之前运行，无人 drain CQ，所以允许使用
+`*_sync` 逃生口（内部自旋泵）。服务函数禁止调用这些同步口（会嵌套泵）。
+
+#### 3.14.7 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| 判型口径 | `page_seq + entry_count` |
+| Journal 回放缓冲 | 栈上 `replay_pages[256]`（2 KiB） |
+| 介质版本 | 14（单 die）/ 0x80000000 + topology hash（多 die） |
+
+#### 3.14.8 设计取舍
+
+选择：快照 + Journal 增量 + 全盘扫描兜底。主要替代：只扫描或只回放。
+差异：块元数据快照按 16-bit/块编码，fresh / clean / PF 三分支判型。完整论证见架构文档 §9.1。
+
+---
+
+
+
 <a id="s3-15" name="s3-15"></a>
 
-### 3.15 FTL↔FC 接口（FTL-FC 接口层 + FTL 几何/地址契约）
+### 3.15 FTL↔FC 接口
 
 #### 3.15.1 背景与需求
 
@@ -3989,7 +4241,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 - **做**：CW 子集的描述符链构造、数据拷贝、PBA→PAA 转换、同步/异步页原语、
  同步等待器。
 - **不做**：不实现 NAND 引擎/时序；不决定 FTL 的映射与空间管理；不拥有完成路由
- （§3.10）。
+ （§3.2）。
 - **调用者**：FTL 所有需要碰 NAND 的模块（L2P、Journal、CP、Metadata、GC/WL、RR、BBT、PFR）。
 
 #### 3.15.3 结构与约束
@@ -4008,11 +4260,11 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 - **没有 `cmd->lba`**：LBA 走 `cmd->meta`；FC 侧按 `(meta & ~PLANE_CW_MASK) | (plane<<2) | cw`
  铸出逐 CW 的扇区 LBA。
 - **按位图建链是两参**：位图由 FTL 的
- `ftl_cw_span_mask` / `ftl_cmd_plane_span_cw_bitmap` 算出；`config.cw` 不参与建链。
+ `ftl_cw_span_mask` / `fc_command_plane_span_cw_bitmap` 算出；`config.cw` 不参与建链。
 - **`cmd->paa` 只能是 `pba_to_paa` 的结果**；FTL 业务层不手写 PAA 位运算。
 - **`cmd->config.ch/ce/lun` 从 PBA 高位拆出**；多实例下命令必须回到正确芯片。
 
-#### 3.15.4 写序列
+#### 3.15.4 流程（写序列）
 
 ```text
 ① 成对分配 → 各 plane 的新 PBA
@@ -4020,27 +4272,63 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
  cmd->config.multi_plane = nplanes
  cmd->config.crc/random/ldpc/page_type 按上表
  cmd->meta = 窗口基址
-③ ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, cw_bitmap) // desc 链
+③ ftl_cmd_build_ppa_pair_cw(cmd, new_pba, cw_bitmap) // desc 链
 ④ 按 CW 写数据(cmd, wbuf.data, cw_bitmap, true) // 按 plane-major 槽位散射取数
 ⑤ 提交命令(cmd, FTL_OP_HOST_IO, NULL)
 ⑥ 完成：检查 per-CW status/ECC；成功才走 confirm 路径
 ```
 
-#### 3.15.5 读序列
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as FTL
+    participant C as FC 命令构造
+    participant Q as FC 队列
+    participant N as NAND
+    T->>T: 成对分配 PBA
+    T->>C: 配置 operation / meta
+    T->>C: 按 CW 位图建描述符链
+    T->>C: 按 plane-major 写数据
+    T->>Q: 提交命令
+    Q->>N: multi-plane program
+    N-->>Q: 完成 + per-CW status
+    Q-->>T: completion
+```
+
+**读图要点**：FTL 只表达页/CW 与数据；FC 负责命令链与数据保护；完成按 per-CW 状态确认。
+
+#### 3.15.5 流程（读序列）
 
 ```text
 ① l2p_read 得到 PBA（或 wbuf 命中）
 ② 按 (plane, page) 分组；CW 子集由 LBA 在页内的位置决定
-③ ftl_cmd_setup_ppa_pair_cw / ftl_cmd_read_data
+③ ftl_cmd_build_ppa_pair_cw / ftl_cmd_read_data
 ④ 提交命令(tag=HOST_IO 或 L2P，ctx=pending/line)
 ⑤ 完成：数据已拷进 buffer/line；状态检查
 ```
 
-#### 3.15.6 不变量与禁止项
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as FTL
+    participant L as L2P cache
+    participant C as FC 命令构造
+    participant N as NAND
+    T->>L: 查 LBA → PBA
+    L-->>T: PBA / 未映射
+    T->>C: 按 plane/page 分组 + 位图建链
+    T->>N: 提交读命令（经 FC 队列）
+    N-->>T: 数据 + per-CW status
+    T->>T: 拷回 buffer / 更新读计数
+```
+
+**读图要点**：读路径同样只经 FC；数据在命令完成时拷出；short chain / 错误位按失败处理。
+
+#### 3.15.6 结构（不变量与禁止项）
 
 | 约束 | 原因 |
 |---|---|
-| 不直接调 `nand_read_page` / `nand_program_page` | 绕过 CRC/ECC/加扰与队列 |
+| 不直接调 NAND 页读 / 页编程底层入口 | 绕过 FC 的 CRC/ECC/加扰与队列 |
 | 不直接操作 NAND 引擎状态机/寄存器 | 破坏 FC 的时序与多命令调度 |
 | 不手动分配描述符 | 必须走按位图建链 |
 | 不在 FTL 业务层手写 PAA/地址掩码 | PBA/PAA 位序不同，现场转换已多次算错 |
@@ -4057,7 +4345,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 | 命令超时 | `FC_CMD_STATUS_TIMEOUT` | job 的 stall 计数兜底 |
 | 建链/配置错误 | debug ASSERT；release 可能静默 | 这是 FC 层最贵的一类，必须用负例验证 |
 
-#### 3.15.8 常量与出处
+#### 3.15.8 常量与阈值
 
 | 常量 | 值 |
 | --- | --- |
@@ -4067,17 +4355,17 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 | SQ / HSQ / CQ | 64 / 16 / 64 |
 | `FTL_PAGE_CFG_META/DATA/DATA_ANY` | 见头文件 |
 
-#### 3.15.9 主流对照
+#### 3.15.9 设计取舍
 
-“FTL 只表达逻辑请求、HAL/FC 负责介质命令与数据保护”是主控分层的通用形态；
-描述符链 + 完成状态是 NVMe/ONFI 数据面的常见实现。**本仓自定**的是 CW 子集位图建链、
-`cmd->meta` 携带扇区 LBA 的方式与 FC 池深度。
+选择：FTL 只表达逻辑请求，FC 负责介质命令与数据保护。主要替代：FTL 直控 NAND。
+差异：CW 子集位图建链、命令 meta 携带扇区 LBA、固定 FC 池深。完整论证见架构文档 §9.14。
 
 ---
 
+
 <a id="s3-16" name="s3-16"></a>
 
-### 3.16 cache 序列（cache_batch：cache read / cache program）
+### 3.16 cache 序列（cache read / cache program）
 
 #### 3.16.1 背景与需求
 
@@ -4094,7 +4382,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 | **设备 cache 序列**（START/SEQ/END） | `cache_stream.seq.next_lba == 下一段起始 LBA`——**跨 host 传输段、跨 host 命令、跨物理 block**延续 | Journal 顺序页写满（≈63 pair / 252 KiB）/ LBA 不连续 / 空闲 / flush / 收尾块时开不出新块 |
 | **Journal 顺序页**（JSEG） | 同上（LBA 连续且页内有空间） | 页写满（504 条）/ LBA 不连续 / 空间不足一个窗口 |
 
-为什么设备序列能跨 host 命令：控制器改成 **volatile write cache** 语义——**所有**写
+为什么设备序列能跨 host 命令：控制器改成 **volatile write cache (易失写缓存)** 语义——**所有**写
 段落（含一条命令的最后一段）在提交后立即回执，主机不必等最后一页的 `FAIL_CACHE` 就能
 发下一条命令。写段的最终失败不再属于那一条已回执的命令，而是作为 **deferred error**
 由**下一条能承载状态的命令**（READ / WRITE / SYNC CACHE）上报一次。这对应主流 SSD 的
@@ -4115,7 +4403,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
  `info` 的 `cr=` / `cw=` / `sw=` / `pc=` / `jf=` / `d4=` 计数。
 - **不做**：FC 序列句柄 / tag；IRQ 驱动；多 LUN 交织（序列 per 实例）；器件 opcode 顺序；
  控制器槽管理（在 `usb_msc.c`）。
-- **调用者**：`ftl_drain_group` 在读 / 写子操作路径最前面各试一次；实例服务
+- **调用者**：`ftl_host_group_drain` 在读 / 写子操作路径最前面各试一次；实例服务
  **序列收尾**步每轮调 `ftl_cache_seq_close_step`。
 
 #### 3.16.3 结构与约束
@@ -4157,7 +4445,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
  最后一页（`NAND_FAIL` 是 padding 页自身，忽略）。理论上 FIFO 只剩 1 页（更早的页已由
  各自后继命令结算）；代码对 >1 做防御性按失败结算。
 - **padding 页落在新块 page0**：成功必须 `alc_super_open_note_page_programmed`（否则
- `get_room` 恒 0，后续窗口全被拒）；失败关 hot SB（与 cache 成员失败同口径）。
+ `alc_super_open_room` 恒 0，后续窗口全被拒）；失败关 hot SB（与 cache 成员失败同口径）。
 - **命令边界不是断点**：`cmd_remaining` 只用来判"命令尾不足一个 pair"（提前收尾，
  避免尾段还要 padding）；命令尾 不再结束序列。
 - **`owner_submit` 是门控唯一旁路**：padding END 由 service 提交，也要临时置位。
@@ -4176,7 +4464,9 @@ flowchart TD
  D -- "所有者组在飞归零 / 1 s 守卫" --> I
 ```
 
-#### 3.16.4 读序列
+**读图要点**：序列键是 next_lba；断点在页满/不连续/空闲/flush；门控 owner 独占。
+
+#### 3.16.4 流程（读序列）
 
 ```text
 ① 组收到读（g->next 处）→ ftl_cache_read_try
@@ -4207,7 +4497,32 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
 
 设计结论：段长受**物理不连续**限制（分配器按动态 WL 选块）；128 pair 上限与 region 边界不是限制。实测数据见验证文档。
 
-#### 3.16.5 写序列
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Host / group
+    participant S as cache 序列
+    participant L as L2P cache
+    participant F as FC
+    participant N as NAND
+    H->>S: 读请求（drain 起点）
+    S->>S: 检测顺序流 + pair 对齐
+    S->>L: 预载当前 / 下一 region
+    S->>S: 收集两 plane 同页 / 跨 block
+    alt 下一 pair 物理连续
+        S->>F: START / SEQ 批量提交
+    else 物理断点或命令尾
+        S->>F: 追加 LAST
+    end
+    F->>N: cache read 45h/46h/47h
+    N-->>F: 数据
+    F-->>S: 完成
+    S-->>H: 拷回 / 组完成
+```
+
+**读图要点**：读序列同样跨命令；断点看物理连续与 next_lba；预取只在 START 前做。
+
+#### 3.16.5 流程（写序列）
 
 ```text
 ① 开序列条件：检测器判为顺序写 + 请求起点 pair 对齐 + ≥1 个 pair（块尾 1..3 页也要能
@@ -4220,7 +4535,7 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
  窗口大小 = min(remain, block 剩余, 4 页, ring 余量, **顺序页剩余**)
  （block 剩余只用于**窗口 clamp**——一次构建不跨 SB，保 `alc_super_open_rewind_pair`
  的回滚前提；**序列本身跨 block**：窗口吃干当前 SB 后，下一个窗口由 `alloc_pair`
- 关旧块、开新块后继续同一序列。`alc_super_open_get_room_seq` 的语义：**新块允许由
+ 关旧块、开新块后继续同一序列。`alc_super_open_room_seq` 的语义：**新块允许由
  本序列自己打开**，新块 page0 计入本序列；page0 尚未确认时本序列可继续写 page>0——
  有序管线保证 page0 失败会中止其后所有页，rebuild 的 page0 空白捷径不被击穿）
 ④ 命令：首窗口首条 49（FIRST）/ 中间 44（15h）/ 断点末条 48（10h）
@@ -4230,13 +4545,13 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
  队头会停在「已证明、等确认」的页（见 §3.16.5「volatile write cache」）
 ⑥ **早回执**：页在**自身命令完成**时就结算子操作（组完成 ⇒ host 可见完成），
  不再等下一命令的 FAILC；组完成与确认/证明解耦
-⑦ 确认路径：cache 页走 JSEG 顺序页（jrn_seq_ready + jrn_append_seq，4B/条隐式 LBA），
- 由 `ftl_cache_wr_confirm_step` 每轮 service 按提交序推进（背压 = 下轮再来）
+⑦ 确认路径：cache 页走 JSEG 顺序页（jrn_seq_is_ready + jrn_append_seq，4B/条隐式 LBA），
+ 由 `ftl_cache_write_confirm_step` 每轮 service 按提交序推进（背压 = 下轮再来）
 ⑧ 断点（在**数据页**上 END）：
  · Journal 顺序页写满（本窗口吃干剩余空间，≈63 pair / 252 KiB）
  · 命令尾不足一个 pair（用 cmd_remaining 提前收尾，尾段走 wbuf）
  · D4（前台提交被门控拒绝）
- · **收尾块时分配器开不出新块**（`alc_super_can_open` 为 false）：保持序列打开会让
+ · **收尾块时分配器开不出新块**（`alc_super_is_openable` 为 false）：保持序列打开会让
   门控挡住 GC、padding END 也无页可分配 ⇒ 退回旧语义在 block 边界 END
  · 物理 block 边界**不是**断点：44/48h 每条自带地址（datasheet §5/§6）
 ⑨ 有序收尾（没有数据页可 END 时 → **padding END（本仓自拟）**）：
@@ -4262,9 +4577,9 @@ logical block 的 page 0**（同 die；禁止跨 die/LUN）。所以「物理连
 |---|---|---|
 | 已回执但未确认的页，读怎么看到新数据 | 读路径在 `wb_read` 之后、`l2p_read` 之前查「已编程页表」，命中直读该页 PBA；cache 读批量对含未确认 LBA 的 pair 判不可批量 | |
 | 后来 FAILC 判失败怎么办 | 撤销该页（Journal + L2P `NAND_PBA_INVALID`）、**立即**置 region degraded、粘性 deferred error；撤销完成前的读也报 IO_ERROR | |
-| flush 什么时候算完成 | 等「已编程页表」全部证明并确认进 L2P（`wr.count == 0`）**且没有在飞成员**（`wr_inflight == 0`，页在完成时才入表）+ Journal/L2P/wbuf 空闲 | / |
+| flush 什么时候算完成 | 等「已编程页表」全部证明并确认进 L2P（`write.count == 0`）**且没有在飞成员**（`write_inflight == 0`，页在完成时才入表）+ Journal/L2P/wbuf 空闲 | / |
 
-**在飞成员计数（`wr_inflight`）**：页在**完成时**才入表 ⇒ 只数 `wr.count` 会把「已下发、
+**在飞成员计数（`write_inflight`）**：页在**完成时**才入表 ⇒ 只数 `write.count` 会把「已下发、
 仍在 NAND 里编程」的页当成不存在。flush 屏障与「开新序列」都要求它归零；窗口构建
 （环余量 / Journal 顺序页余量）也必须把它算进「在飞」，否则完成后集中入表即溢出。
 
@@ -4286,6 +4601,7 @@ vs `cache_stream.seq.gen`）；不一致 ⇒ 只按 IO_ERROR 结算组，页一�
 ```mermaid
 sequenceDiagram
  participant H as Host (WRITE N, N+1…)
+    autonumber
  participant U as USB MSC
  participant F as FTL cache_seq
  participant N as NAND
@@ -4301,19 +4617,21 @@ sequenceDiagram
  Note over F,N: 每页命令完成即早回执（VWC）；FAILC 晚一条命令到 ⇒ 撤销 + deferred error
 ```
 
+**读图要点**：cache program 批次；FAILC 结论晚一条命令；早回执 + deferred error。
+
 **Journal 顺序映射页**：顺序流的确认条目按提交序到达，LBA = `base_lba + 下标`，每条 4 B
 `new_pba`。页头 16 B（magic + page_seq + entry_count + block_seq + base_lba）。页**跨 host
 命令续用**：START 时若 `lba == base_lba + entry_count` 且剩余空间 ≥ 一个窗口 ⇒ 不刷页。
 回放时 `old_pba` 从 L2P 基线现读（与确认路径"完成时重查 L2P"同源）。
 
-#### 3.16.6 不变量与禁止项
+#### 3.16.6 结构（不变量与禁止项）
 
 | 约束 | 原因 |
 |---|---|
 | 窗口提交完置 `draining`（读），门控在 `active`/`draining`/`closing` 期间都关闭 | 器件管线未走完时插入别的命令会劈开序列 |
 | 写序列**不得 abort** 于有序收尾路径（空闲 / LBA 不连续 / flush） | 写段已对 host 提前回执；abort 会把已确认数据当错误丢弃。只用 padding END 收尾。**唯一例外**：无空闲页、连 padding 页都分配不到时（盘满），为避免「序列门控 ↔ GC 等 Journal 容量」互相等待，放弃序列（未确认页 IO_ERROR + deferred error），让 GC 能跑 |
 | padding END 必须落在**数据页**上（零页也是页），且其 `NAND_FAIL` 不映射 | 器件没有无数据 END；padding 页不被 L2P 引用 |
-| padding 页成功且为 page0 ⇒ 记 `page0_programmed`；失败 ⇒ 关 hot SB | 否则 allocator 的 `get_room` 恒 0 / 继续写可疑块 |
+| padding 页成功且为 page0 ⇒ 记 `page0_programmed`；失败 ⇒ 关 hot SB | 否则 allocator 的 `alc_super_open_room` 恒 0 / 继续写可疑块 |
 | 序列延续只看 `next_lba`，与 SCSI 命令身份 / 传输段边界无关 | 命令末尾由 `cmd_remaining` 单独表达（尾段提前收尾） |
 | 序列只在 pair 对齐的 host 段上开启 | 段长是 pair 整数倍；未对齐命令的跨段续接点必然对不上 |
 | 顺序页专用于顺序流；普通条目遇到它就刷页换页（空页也刷） | 顺序条目不携带 LBA，混装会破坏隐式坐标 |
@@ -4324,10 +4642,10 @@ sequenceDiagram
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
-| 读命令级失败（UNC / CRC / MATA / TIMEOUT） | 逐页上报组 IO_ERROR、序列关闭；RR 不介入 | 该页不可用 |
-| 写任一错误位（NAND_FAIL / TIMEOUT / DATA_ERROR） | 序列中止：本页按 IO_ERROR 当场结算（尚未回执），其余未证明页按 IO_ERROR 结算、关 hot SB；**deferred error** 由下一条命令上报 | 失败页及其后不确认；已回执命令的 CSW 不改写 |
+| 读命令级失败（UNC / CRC / META / TIMEOUT） | 逐页上报组 IO_ERROR、序列关闭；RR 不介入 | 该页不可用 |
+| 写任一错误位（NAND_FAIL / TIMEOUT / FC_CMD_STATUS_DATA_ERROR） | 序列中止：本页按 IO_ERROR 当场结算（尚未回执），其余未证明页按 IO_ERROR 结算、关 hot SB；**deferred error** 由下一条命令上报 | 失败页及其后不确认；已回执命令的 CSW 不改写 |
 | 写命令的 FAIL_CACHE（判**前一页**失败） | 前一页标失败 + **整个序列中止**（同一条可疑管线；保住的 page0 捷径）；本页也按 IO_ERROR 结算 | 器件已证明的页保留；失败页撤销 + region degraded |
-| 已回执页后来被判失败 | 撤销：Journal + L2P 写 `NAND_PBA_INVALID`；region **立即**置 degraded；读该 region 的未映射 LBA / 失败页覆盖的 LBA 报 IO_ERROR | 主机可见地失败（不是零填、不是旧数据）；同 region 其它未映射 LBA 也报错（的已知取舍） |
+| 已回执页后来被判失败 | 撤销：Journal + L2P 写 `NAND_PBA_INVALID`；region **立即**置 degraded；读该 region 的未映射 LBA / 失败页覆盖的 LBA 报 IO_ERROR | 主机可见地失败（不是零填、不是旧数据）；同 region 其它未映射 LBA 也报错（已知取舍） |
 | padding END 失败 | 最后一页按 IO_ERROR 结算；关 hot SB | 该页映射不确认（deferred error） |
 | 顺序页预留失败 / 页满 | 本窗口 END（页满断点） | 无 |
 | 空闲 / LBA 不连续 / flush | padding END 有序收尾 | 无（最后一页正常结算） |
@@ -4335,50 +4653,7 @@ sequenceDiagram
 | deferred error 被下一条命令取走 | 该命令 CSW 失败一次；主机重试 | 失败写的数据丢失；无 sense 指明 LBA（本仓近似） |
 | 请求不足 2 个 pair（读）/ 不足窗口（写） | 回退普通读 / wbuf 写 | 无 |
 
-#### 3.16.8 常量与出处
-
-| 常量 | 值 |
-| --- | --- |
-| `FTL_STREAM_MIN_LBAS` | 64（32 KiB = 两个 16 KiB 传输段） |
-| `FTL_CACHE_READ_MIN_PAIRS` | 2 |
-| `FTL_CACHE_WRITE_MAX_PAGES` | 4 |
-| `JRN_SEG_ENTRIES_PER_PAGE` | 508（`(2048 − 16) / 4`；按整 pair 用到 504 = 63 pair ≈252 KiB） |
-| `FTL_CACHE_SEQ_RING` | 16 |
-| `FTL_CACHE_SEQ_IDLE_MS` | 1000 |
-| `FTL_CACHE_SEQ_DRAIN_STALL_MS` | 1000 |
-| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
-
-#### 3.16.9 主流对照
-
-设备 cache 序列（`0x31/0x3F`、`15h/10h`）的器件语义见 Linux MTD rawnand 与 MT29F4G08
-datasheet（`docs/reference/README.md` §F1 / §C4；）。
-
-主机侧写缓存语义（volatile write cache）与延迟错误（deferred error）来自 SCSI 的
-写缓存模型：写命令在数据进入设备缓冲后即可完成，NAND 提交失败不在原命令上报。
-⚠ **本仓出处层没有 SPC/SBC 原文**（`docs/reference/` 未收录），因此这里**不把具体
-实现写成行业标准形态**：`padding END` 与"下一条能承载状态的命令直接失败一次"都是
-**本仓自拟**。与公开 SCSI 语义的差异：TinyUSB MSC 不支持自定义 sense data，所以本仓
-无法给出 CHECK CONDITION + deferred sense（具体 ASC 不作断言），只能用命令级失败近似
-。
-
-**早回执（volatile write cache）**：写命令在页编程完成（不是提交）后即可完成——与
-DRAM 型/DRAM-less 主控都把「完成点」放在设备侧缓冲写完之后同型；差异是本仓**不做**
-RAM 里的写合并缓存，未确认数据直接落在 NAND 页里，靠读覆盖层保证可见性。掉电窗口
-因此是「已编程未证明的页 + 未落盘的 Journal 映射」，量化。
-
-**FUA（不实现，用户裁决）**：WRITE(10) 的 CDB byte1 bit3 是 FUA（T10 SBC-3
-§5.26：FUA=1 ⇒ 设备不得在数据真正写到介质前返回 GOOD，见 `docs/reference/README.md`
-§外部规范）。本仓**忽略**该位，依赖主机 fsync 的后续 `SYNCHRONIZE CACHE` 作为持久性
-屏障；取舍与恢复要点见 `known_open_items.md` 。
-
-`SYNCHRONIZE CACHE` 在正常路径会先把序列 padding 收尾，并等 Journal 与 L2P 都落盘；
-L2P 区域写回现在按 **WAL 次序**等覆盖其映射的 Journal 条目先落盘（§3.6 不变量 8），
-所以正常完成的 flush 是「日志 + 数据」的完整屏障。只有**超时路径**仍是 best-effort
-（`FTL_FLUSH_TIMEOUT_MS`，元数据真卡死时主机不能永不完成），那一路不是绝对屏障。
-
-Journal 顺序映射页的形态出处（DFTL translation page）与差异见 §3.7.9 / §3.16.5。
-
-#### 3.16.10 端到端分层限制表
+#### 3.16.8 端到端分层限制表
 
 | 层 | 实际值 | 依据 |
 | --- | --- | --- |
@@ -4396,20 +4671,42 @@ Journal 顺序映射页的形态出处（DFTL translation page）与差异见 §
  `cache_stream.wb_pages / cache_stream.wb_starts` 在**跨 region 预加载 + 跨 block 续写**后应接近 63
  （JSEG 页容量仍是硬上限）；`wr − cw pages`（wbuf 页数）应接近 0（块尾页不再回退 wbuf）；
  `pc` 只随 LBA 不连续 / flush 出现（少量）；`jf` 应接近 pairs/63——块尾 wbuf 页走普通
- Journal 条目（`JRN_PAGE_LBA`）会先把当前 JSEG 页冻结，块尾页进序列后 JSEG 页才能填满。
+ Journal 条目（`JRN_PAGE_LBA`）会先把当前 `JRN_PAGE_SEG` 页冻结，块尾页进序列后该页才能填满。
 - 读：`cr=batches/pairs/starts/declines/fallbacks`，`pairs/starts` 应显著大于改前的
  ~32 pair（跨 region 预加载 → 跨 block 续写；受 128 pair 单段上限与 region 驻留限制，
  预期 65~128）。跨命令、跨 block 不断。
 - **WAL 次序**：`info` 的 `cw=` 行 `wd=`（区域写回被 WAL 闸门退让的次数）
  应 >0（证明闸门在真实路径上生效）；GC 压力 + 掉电后 `dng=0`、`rrab=0`、verify 0 错误。
-- **未上板前不得声称"流式已达成"**（R1）。
+- **未上板前不得声称"流式已达成"**。
+
+#### 3.16.9 设计取舍
+
+选择：设备 cache 序列 + 早回执 + padding END。主要替代：逐命令提交或不做序列。
+差异：FTL 构链、FC 执行 chain；早回执 + deferred error 近似。完整论证见架构文档 §9.15。
+
+#### 3.16.10 常量与阈值
+
+| 常量 | 值 |
+| --- | --- |
+| `FTL_STREAM_MIN_LBAS` | 64（32 KiB = 两个 16 KiB 传输段） |
+| `FTL_CACHE_READ_MIN_PAIRS` | 2 |
+| `FTL_CACHE_WRITE_MAX_PAGES` | 4 |
+| `JRN_SEG_ENTRIES_PER_PAGE` | 508（`(2048 − 16) / 4`；按整 pair 用到 504 = 63 pair ≈252 KiB） |
+| `FTL_CACHE_SEQ_RING` | 16 |
+| `FTL_CACHE_SEQ_IDLE_MS` | 1000 |
+| `FTL_CACHE_SEQ_DRAIN_STALL_MS` | 1000 |
+| `FTL_SUBMIT_TIMEOUT_MS` | 10 |
 
 <a id="s4" name="s4"></a>
 
 ## 4. 端到端场景
 
+> 支撑摘要：P2 写路径、P3 元数据、P6 一致性。
+
 > 本节把 §3 的模块串起来。每个场景给：**触发条件 → 时序/流程 → 状态变化 → 失败分支**。
 > 图中节点省略了错误处理，失败分支在每小节末尾的表里列。
+
+<a id="s4-1" name="s4-1"></a>
 
 ### 4.1 首次上电 / 介质版本不匹配 → 格式化
 
@@ -4429,15 +4726,17 @@ flowchart TD
  B -- "CURRENT" --> C["正常启动 4-2 4-3 节"]
  B -- "NO_RECORD / VERSION_MISMATCH" --> D["pfr_media_format"]
  B -- "IO_ERROR" --> H["拒绝格式化 / 启动失败"]
- D --> D1["bbt_format_erase 阶段①：置 FORMAT_IN_PROGRESS + bbt_save"]
+ D --> D1["bbt_format_erase 阶段①：置 FORMAT_IN_PROGRESS + bbt_store"]
  D1 -- "save 失败" --> H2["中止（不擦用户块）"]
  D1 --> D2["阶段②：擦除 BBT 池之外的块，失败标 BAD"]
- D2 --> D3["阶段③：best-effort bbt_save 并入新 BAD"]
+ D2 --> D3["阶段③：best-effort bbt_store 并入新 BAD"]
  D3 --> D4["md_init 复位 Directory"]
  D4 --> D5["写初始目录检查点 + cp_initial_record_write（块元数据 + 磨损 + Header）"]
  D5 --> D6["CP 读回成功 ⇒ 清 FORMAT_IN_PROGRESS 并落盘（提交点）"]
  D6 --> E["后续正常启动"]
 ```
+
+**读图要点**：介质三分支；先 BBT 后擦；FORMAT_IN_PROGRESS 到 CP 落盘才清。
 
 **状态变化**：
 
@@ -4461,8 +4760,10 @@ flowchart TD
  完整 initial CP 的块/磨损页在 Header 之前写；任一分页失败都不会留下有效 record。
 - 旧介质上由旧固件写出的空 initial CP（`block_word_count=0`）仍走 clean-start 的
  initial-CP 快速路径（跳过 full metadata rebuild + carve）；新 format 写出的完整快照
- 则走 `restore → probe → build_pools`。
+ 则走 `restore → probe → pfr_boot_carve_pools`。
 - 单 die 介质版本 = BASE，与旧介质兼容（不误格式化）；多 die 版本 = bit31 | die 数 + topology 哈希，拓扑变化 ⇒ 版本不符 ⇒ 格式化。
+
+<a id="s4-2" name="s4-2"></a>
 
 ### 4.2 干净启动（clean start）
 
@@ -4472,6 +4773,7 @@ flowchart TD
 ```mermaid
 sequenceDiagram
  participant B as boot
+    autonumber
  participant J as Journal
  participant C as Checkpoint
  participant A as Allocator
@@ -4483,10 +4785,10 @@ sequenceDiagram
  B->>C: cp_block_table_load
  alt 块元数据快照有效
   C-->>B: block_words
-  B->>A: restore_blocks（PFR 内部 static；先全量校验再应用）
+  B->>A: pfr_restore_blocks（PFR 内部 static；先全量校验再应用）
   B->>L: 按 CP region_bitmap 逐 region 预载 F4
   B->>A: probe_blocks 池块 page0（PFR 内部 static）
-  B->>A: build_pools（PFR 内部 static）
+  B->>A: pfr_boot_carve_pools（PFR 内部 static）
  else 快照无效
   B->>A: reset → full metadata rebuild（认领写过块）→ carve（只入池 state==NONE）
  end
@@ -4495,9 +4797,11 @@ sequenceDiagram
  B-->>B: Controller 到 Ready
 ```
 
+**读图要点**：快照优先；clean 也 probe 池块；失败走 rebuild。
+
 > **PFR 公开边界**：公开头只保留 `pfr_media_check_format` / `pfr_media_format` /
 > `pfr_boot_recovery` 三个顶层入口；fresh / clean / power-failure 子流程与 full metadata rebuild 原语
-> （restore / probe / build_pools / reset / page_is_blank / scan_write_pointer /
+> （restore / probe / pfr_boot_carve_pools / reset / page_is_blank / scan_write_pointer /
 > close_block / carve / rebuild_closed_sb_list）全部为 `static`。
 
 **状态变化**：
@@ -4506,16 +4810,18 @@ sequenceDiagram
 |---|---|
 | L2P cache | 空（INVALID）；按需加载 |
 | BST | 来自块元数据快照（state/valid/temp/池归属）；OPEN→CLOSED |
-| Free/OP/Spare | 由 `build_pools` 按快照重建 |
+| Free/OP/Spare | 由 `pfr_boot_carve_pools` 按快照重建 |
 | Closed 列表 | 快照恢复；退化单 plane 条目 |
 | Journal | 写指针接回最新页之后；序号 ≥ cp_seq |
-| Directory | 从目录检查点池加载（§3.5） |
+| Directory | 从目录检查点池加载（§3.6） |
 
 ⚠ **clean 也要 probe 池块**：本仓无关机 journal flush，“末页丢失”与干净关机在介质上
 不可区分。probe 只读池块 page 0，成本可控。
 
 **失败分支**：快照 CRC 失败/不一致 ⇒ reset → full metadata rebuild → carve（顺序不可颠倒：carve 只把
 `state == NONE` 的块入池，否则写过块会同时是池成员与 Closed 条目）；full metadata rebuild 中读失败 ⇒ 跳过该块。
+
+<a id="s4-3" name="s4-3"></a>
 
 ### 4.3 掉电恢复（power-failure start）
 
@@ -4524,23 +4830,26 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
  participant B as boot
+    autonumber
  participant A as Allocator
  participant J as Journal
  participant L as L2P cache
  participant P as Pools
 
- B->>A: restore_blocks 若快照有效
+ B->>A: pfr_restore_blocks 若快照有效
  B->>J: jrn_replay cp_seq
  J->>J: 第一遍收集晚于 cp_seq 的页
  J->>L: 第二遍按 page_seq 与 entry_idx 应用
  J->>A: block_ctx new 加一 old 减一
  B->>L: F4 按 region_bitmap 逐 region 预载
- B->>A: probe build_pools → Spare 补池
+ B->>A: probe pfr_boot_carve_pools → Spare 补池
  alt 任一步不一致
   B->>A: reset → full metadata rebuild → carve → Spare 补池
  end
  B->>J: Journal 续跑 floor 为 cp_seq
 ```
+
+**读图要点**：回放 post-CP 增量；必须覆盖跨页；失败 scoped 或 rebuild。
 
 **状态变化**：
 
@@ -4554,35 +4863,55 @@ sequenceDiagram
 **失败分支**：
 
 - 某页读失败 ⇒ 跳过该页，继续其余页（该页条目丢失）。
-- `materialize` 的 PBA 非法（越界 / ch-ce-lun 与拓扑不符）或 valid 下溢 ⇒
+- 回放 materialize 回调（`pfr_materialize_pba`）的 PBA 非法（越界 / ch-ce-lun 与拓扑不符）或 valid 下溢 ⇒
  `block_ctx.ok=0`，块元数据回退 full metadata rebuild。
 - full metadata rebuild 中某块读失败 ⇒ 跳过；该块数据不可恢复。
 
 ⚠ **回放必须覆盖所有 `page_seq > cp_seq` 的页**，不能只回放最大一页；跨多页掉电时
 其余条目会静默丢失。
 
+<a id="s4-4" name="s4-4"></a>
+
 ### 4.4 主机读
 
 **入口**：host 读入口。
 
 ```mermaid
-flowchart TD
- A["host 读入口"] --> B["校验建组"]
- B --> C["ftl_drain_group 到 issue_subop"]
- C --> D{"该 LBA 在 wbuf"}
- D -- "是" --> E["从 wbuf-data 拷出消费 1 LBA"]
- D -- "否" --> F["l2p_read"]
- F -- "FTL_AGAIN LOADING" --> G["l2p_defer 为 1 停止本子操作,下轮重试"]
- F -- "FTL_OK INVALID" --> H["零填充消费 1 LBA"]
- F -- "FTL_OK PBA" --> I["按 plane,page 分组建 pending 提交读"]
- I --> J["ftl_host_io_callback 拷回 buffer rr_record_ecc read_count 加一"]
- J --> K{"NAND_FAIL ECC 超限"}
- K -- "是" --> L["待入账到 READ_RECOVERY rr_handle 3-14 节"]
- K -- "否" --> M["组完成递减 outstanding"]
- E --> M
- H --> M
- G --> C
+sequenceDiagram
+    autonumber
+    participant H as Host / HIL
+    participant D as group drain
+    participant W as wbuf
+    participant L as L2P
+    participant P as pending
+    participant F as FC
+    participant R as RR
+    H->>D: 读请求
+    D->>D: 校验建组
+    loop next < total
+        D->>W: 窗口内命中？
+        alt 命中
+            W-->>D: 拷出 1 LBA
+        else 未命中
+            D->>L: l2p_read
+            alt FTL_AGAIN（LOADING）
+                L-->>D: 下轮重试
+            else 未映射
+                L-->>D: 零填充
+            else 得到 PBA
+                D->>P: 登记 pending
+                D->>F: 提交读命令
+                F-->>D: 完成 / 错误位
+                alt 错误位
+                    D->>R: 托管给 RR
+                end
+            end
+        end
+    end
+    D-->>H: 组完成 / IO_ERROR
 ```
+
+**读图要点**：wbuf 优先；L2P miss 异步加载；错误位转 RR。
 
 **状态变化**：
 
@@ -4593,8 +4922,10 @@ flowchart TD
 | BST | `read_count++`（数据页） | 同左 | 无 |
 | Journal/L2P | 无 | 无（load 只读） | 无 |
 
-**失败分支**：region 加载失败 ⇒ 行 CLEAN + 全 INVALID（视为未映射）；ECC 失败 ⇒ RR；
+**失败分支**：region 加载失败 ⇒ 行 CLEAN + 全 INVALID（视为未映射）；读命令错误位（DATA / META）⇒ RR；
 组连续 8 轮无进展 ⇒ 弃未下发子操作并报 IO_ERROR。
+
+<a id="s4-5" name="s4-5"></a>
 
 ### 4.5 主机写
 
@@ -4603,6 +4934,7 @@ flowchart TD
 ```mermaid
 sequenceDiagram
  participant H as Host
+    autonumber
  participant F as host 写入口
  participant W as wbuf
  participant A as Allocator
@@ -4621,7 +4953,7 @@ sequenceDiagram
   W->>C: 清 wbuf 提交成功后
  end
  N-->>C: 完成
- C->>C: ftl_host_io_callback
+ C->>C: ftl_host_io_op_callback
  alt 写成功且非中间页
   C->>L: 第一遍 ready 页对 + Journal 预留(n)
   alt region 未就绪或 Journal 容量不足
@@ -4634,15 +4966,17 @@ sequenceDiagram
    loop 每个有效 CW
     C->>C: valid_count 新加一旧减一
    end
-   C->>J: checkpoint_journal_watermark
+   C->>J: jrn_watermark_update
    C->>C: total_writes 加一
   end
  else 写失败
-  C->>A: close_open_sb HOT
+  C->>A: 关闭 Hot SB（alc_super_close）
   C->>C: 标坏失败 plane 块
   C->>C: L2P 不动为回滚
  end
 ```
+
+**读图要点**：wbuf→program→confirm；两遍式 ready/apply；失败关 SB、L2P 不动。
 
 **状态变化**：
 
@@ -4659,9 +4993,11 @@ sequenceDiagram
 - 分配不到页 ⇒ 紧急 GC + `FTL_AGAIN`；数据仍在 wbuf。
 - 提交失败 ⇒ 保留 wbuf，下轮重试。
 - PROGRAM 失败 ⇒ 关 SB + 标坏；L2P 不动（旧数据仍可达）。
-- L2P region 未就绪 ⇒ 待入账 `WRITE_CONFIRM`；`ftl_confirm_service` 下轮重试，不重复记账。
+- L2P region 未就绪 ⇒ 待入账 `PENDING_OP_WRITE_CONFIRM`；`ftl_confirm_service` 下轮重试，不重复记账。
 - Journal 容量不足 / 页写在飞 / 换块待擦 ⇒ Journal 预留返 `false` ⇒ 同样待入账
- `WRITE_CONFIRM`；confirm 内**不同步**刷 Journal，由 `jrn_handle` 异步推进后再重试。
+ `PENDING_OP_WRITE_CONFIRM`；confirm 内**不同步**刷 Journal，由 `jrn_handle` 异步推进后再重试。
+
+<a id="s4-6" name="s4-6"></a>
 
 ### 4.6 L2P 脏 region 回写与 Directory commit
 
@@ -4671,6 +5007,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
  participant S as 触发者
+    autonumber
  participant C as L2P cache
  participant D as Directory
  participant A as Allocator
@@ -4678,13 +5015,13 @@ sequenceDiagram
 
  S->>C: l2p_flush_kick
  C->>C: 非 DIRTY 已在 FLUSHING 则返回
- C->>C: flush_inflight 达上限则 FTL_AGAIN
+ C->>C: inflight.flush 达上限则 FTL_AGAIN
  C->>D: md_slot_pair_append
  alt 当前日志块剩余 ≥ 2 页
   D-->>C: 两 plane 各一页 PBA（主/备）
  else 剩余不足 2 页
-  D->>D: 登记 l2p_live 为 0 的 LOG 块到 reclaim_pending（不擦）
-  D->>A: alloc_log_block
+  D->>D: 登记 l2p_live 为 0 的 LOG 块到 reclaim.bitmap（不擦）
+  D->>A: alc_op_alloc_log_block
   A-->>D: 新块
   D-->>C: 新块 page 0 PBA
  end
@@ -4702,6 +5039,8 @@ sequenceDiagram
  end
 ```
 
+**读图要点**：pair 槽预留；主备串行写；两份成功才 commit。
+
 **状态变化**：
 
 | 对象 | 成功 | 失败 |
@@ -4712,8 +5051,10 @@ sequenceDiagram
 | 全局 region 脏位 | 清 | 保持 |
 | 旧日志块 | `l2p_live==0` ⇒ 登记回收目标 | — |
 
-**失败分支**：`append_slot_pair` 失败（池空/整理 job 在飞）⇒ 行保持 DIRTY，下轮重试；
+**失败分支**：`md_slot_pair_append` 失败（池空/整理 job 在飞）⇒ 行保持 DIRTY，下轮重试；
 写失败 ⇒ 同上；两者都不丢映射（Journal 有记录）。
+
+<a id="s4-7" name="s4-7"></a>
 
 ### 4.7 Checkpoint
 
@@ -4722,6 +5063,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
  participant T as 触发者
+    autonumber
  participant CP as cp_handle
  participant L as L2P cache
  participant D as Directory
@@ -4729,15 +5071,17 @@ sequenceDiagram
 
  T->>CP: cp_job_begin
  CP->>CP: 单飞行检查 memset
- CP->>L: snapshot_owner_bitmap 全局到局部
+ CP->>L: l2p_owner_bitmap_snapshot 全局到局部
  CP->>J: 记录 journal_seq job 起点
- CP->>L: CP_FLUSH_REGIONS 逐个 kick,等 flush_inflight 为 0
+ CP->>L: CP_FLUSH_REGIONS 逐个 kick,等 inflight.flush 为 0
  CP->>D: CP_DIR_CKPT_PREP 到可选 ERASE 到 WRITE x8 到 commit
  CP->>CP: CP_HDR_PREP 到可选 ERASE 到 CP_BLOCK_WRITE x4 到 CP_WEAR_WRITE x16
  CP->>CP: CP_HDR_WRITE commit
  CP->>J: CP_TRUNC_PREP 到可选 TRUNC_ERASE 到 commit
  CP->>CP: CP_DONE
 ```
+
+**读图要点**：CP 起点快照；阶段顺序固定；Header commit 后截断 Journal。
 
 **状态变化**：
 
@@ -4750,6 +5094,8 @@ sequenceDiagram
 
 **失败分支**：flush 失败 ⇒ 中止，不写 Header；目录检查点分页失败 ⇒ 整条作废；
 块元数据/磨损失败 ⇒ 不写 Header；Header 失败 ⇒ 游标仍推进，旧 Header 有效；截断失败只记日志。
+
+<a id="s4-8" name="s4-8"></a>
 
 ### 4.8 GC / WL / 预测性迁移
 
@@ -4775,11 +5121,13 @@ flowchart TD
  N --> O["MIG_ERASE 逐 plane 擦"]
  O --> P{"post 类型"}
  P -- "FREE GC 或 WL" --> Q["alc_free_push 入池"]
- P -- "RETIRE 预测性退役" --> R["remove_from_free RETIRED"]
+ P -- "RETIRE 预测性退役" --> R["alc_free_remove RETIRED"]
  Q --> S["MIG_DONE 移除 closed 条目计数"]
  R --> S
  E --> N
 ```
+
+**读图要点**：选 victim→读写→F10→擦；FREE 入池 / RETIRE 退役；失败不擦 victim。
 
 **状态变化**：
 
@@ -4793,7 +5141,9 @@ flowchart TD
 | BST 状态 | GC / 静态 WL：FREE；预测性退役：RETIRED |
 
 **失败分支**：分配不到目标页 / 提交侧超 `FTL_SUBMIT_TIMEOUT_MS` / 等外部模块超 `FTL_WAIT_TIMEOUT_MS` ⇒ 中止，不擦 victim；
-写失败 ⇒ 该 plane L2P 不动；擦除失败 ⇒ 标坏；掉电 ⇒ 最多一个孤悬块，Journal 回放恢复。
+写失败 ⇒ 该 plane L2P 不动；擦除失败 ⇒ 标坏；掉电 ⇒ 每实例在飞迁移 job 最多一个孤悬 COLD SB；已入 Journal 的映射由回放恢复，未入账页由 GC 回收。
+
+<a id="s4-9" name="s4-9"></a>
 
 ### 4.9 后台调度一轮
 
@@ -4803,8 +5153,8 @@ flowchart TD
 flowchart TD
  A["host 补发完成"] --> B{"bg_suspend"}
  B -- "是" --> Z["return"]
- B -- "否" --> C["level 为 select pending groups"]
- C --> D["bg_policy_run"]
+ B -- "否" --> C["按 pending groups 选档"]
+ C --> D["ftl_sched_dispatch 后台策略步"]
  D --> E["必跑任务 must-run 按表序"]
  E --> E1["cp_handle"]
  E --> E2["rr_handle"]
@@ -4825,6 +5175,8 @@ flowchart TD
  G --> F1
 ```
 
+**读图要点**：档位与配额决定后台量；must-run 不占配额；墙钟只做兜底。
+
 **状态变化**：这一轮的 kick 只提交/推进**一步**：GC 可能起一个 job；Journal 可能起一页写；
 CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在下一轮 pump 或完成回调里。
 
@@ -4837,40 +5189,59 @@ CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在�
 
 ## 5. 数据与状态模型
 
+> 支撑摘要：P1~P6 的数据与状态模型。
+
+<a id="s5-1" name="s5-1"></a>
+
 ### 5.1 结构体关系
 
 ```mermaid
-flowchart TB
- subgraph "设备级（启动时一次）"
-  ROUTE["实例路由：紧凑 die 号 → FTL 实例"]
-  CT["完成派发表：command_id → {ctx, op}"]
-  LC["共享 L2P cache：按 (ch,ce) 共享"]
- end
+classDiagram
+    class ftl_ctx_s {
+        topo
+        cache
+        pending
+        wbuf
+        table_refs
+        alloc
+        journal
+        metadata_dir
+        cp_handle
+        mig_handle
+        rr_handle
+        sched
+        cache_stream
+    }
+    class l2p_cache_s
+    class pend_ctx_s
+    class wb_handle_s
+    class l2p_jrn_s
+    class md_dir_cache_s
+    class cp_handle_s
+    class mig_handle_s
+    class rr_handle_s
+    class ftl_sched_s
+    class alc_s
+    class completion_table
+    class instance_route_table
+    class l2p_cache_line_s
 
- subgraph "每实例（FTL 描述符）"
-  CTX["ftl_ctx_s：topo / cache* / pending / wbuf* / table_refs / alloc / journal* / metadata_dir* / cp_handle* / mig_handle* / rr_handle / sched / 热状态"]
-  TAB["块表：blocks / free / op / spare / closed"]
-  MD["metadata directory：entries / l2p_live / 整理 job"]
-  JRN["journal：页缓冲 / 环 / 回放状态"]
-  CPJ["checkpoint：phase / 快照位图 / 块表 / 磨损表"]
-  MIG["migrate：phase / victim / page_buf / 计数"]
-  WB["wbuf：数据 / 占用 / owner / 窗口"]
-  RRS["read recovery：恢复页暂存"]
-  SCH["scheduler：host / 后台 / L2P 工作项"]
- end
-
- CTX --> TAB
- CTX --> MD
- CTX --> JRN
- CTX --> CPJ
- CTX --> MIG
- CTX --> WB
- CTX --> RRS
- CTX --> SCH
- CTX --> LC
- CTX --> ROUTE
- CT -.->|完成回调| CT
+    ftl_ctx_s --> l2p_cache_s : cache（共享）
+    ftl_ctx_s *-- pend_ctx_s : pending
+    ftl_ctx_s --> wb_handle_s : wbuf
+    ftl_ctx_s *-- alc_s : alloc
+    ftl_ctx_s --> l2p_jrn_s : journal
+    ftl_ctx_s --> md_dir_cache_s : metadata_dir
+    ftl_ctx_s --> cp_handle_s : cp_handle
+    ftl_ctx_s --> mig_handle_s : mig_handle
+    ftl_ctx_s *-- rr_handle_s : read_recovery
+    ftl_ctx_s *-- ftl_sched_s : sched
+    l2p_cache_s *-- l2p_cache_line_s : lines
+    completion_table --> l2p_cache_line_s : ctx
+    instance_route_table --> ftl_ctx_s : die → 实例
 ```
+
+**读图要点**：设备级共享与每实例句柄分开；完成表 ctx 生命周期覆盖在飞命令。
 
 **所有权**：
 
@@ -4880,6 +5251,8 @@ flowchart TB
 - 完成表的 `ctx` 可以是 `NULL`（host IO）、cache line、job、pending 槽；生命周期必须覆盖命令在飞期。
 - **模块执行状态 vs 共享数据面**：`ftl_ctx_s` 持有共享账本与 per-instance 模块句柄；模块只拥有执行状态（FSM / 单飞行 / 计时器 / 进度计数）。主流程通过 typed 模块入口推进，**不读/写** 模块内部的 phase / waiting / active；跨模块字段走 owner API 或只读实例字段。
 - 模块契约的公共状态类型（IDLE / RUNNING / WAITING / BLOCKED / FAILED）只描述“本轮调用之后的状态”，不是内部 phase 编号。
+
+<a id="s5-1-1" name="s5-1-1"></a>
 
 ### 5.1.1 模块 handle 契约
 
@@ -4899,6 +5272,8 @@ flowchart TB
 主流程只走查询接口，**不读**模块内部的 phase / waiting / active；诊断 CLI 是唯一只读例外。
 
 **时间与超时**：模块自持单调时基；提交背压 10 ms，等外部模块 50 ms，confirm park 100 ms。cache 序列打开时的门控等待不计时（写序列由 Journal 配额/命令尾收尾，读序列由 128 pair 单段上限收尾，等待必然在段边界结束）；否则长顺序写会被 GC/WL 的 deadline 反复中止。时钟缺失时 deadline 不生效；平台必须提供单调时基。
+
+<a id="s5-1-2" name="s5-1-2"></a>
 
 ### 5.1.2 字段所有权与单写者
 
@@ -4937,20 +5312,22 @@ flowchart TB
 4. 超时四层归属：NAND/FC 操作超时在引擎；FTL 模块等待用自持 deadline；周期触发用 last_run/next_ms；系统 liveness 统一由平台看门狗承担。
 5. 契约的落地状态与未闭合项见 known_open_items（本文件只写契约，不写风险编号）。
 
+<a id="s5-2" name="s5-2"></a>
+
 ### 5.2 状态机总表
 
 | 状态机 | 状态 | 转移条件 | 谁推进 |
 |---|---|---|---|
 | **完成组** | `used=0 → used=1 → 完成 → used=0` | `next==total && outstanding==0` | `pend_group_*` |
-| **pending 项** | READ/WRITE → READ_RECOVERY / WRITE_CONFIRM → 释放 | 读失败 / 写成功但 L2P 未就绪 | `rr_handle` / `ftl_confirm_service` |
-| **L2P 行** | INVALID → LOADING → CLEAN → DIRTY → FLUSHING → CLEAN/INVALID | miss / 写 / flush / 驱逐 | `l2p_cache_*` / `ftl_l2p_callback` |
-| **Journal job** | IDLE → WRITE → （ERASE）→ IDLE | 页满 / 换块 | `jrn_handle` / `ftl_journal_callback` |
-| **CP job** | IDLE → FLUSH_REGIONS → DIR_CKPT_* → HDR_* → TRUNC_* → DONE | phase 完成 | `cp_handle` / `ftl_checkpoint_callback` |
-| **md job** | IDLE → RECLAIM → IDLE；IDLE → CP_READ ⇄ CP_WRITE → DIR_CKPT_* → CP_RECLAIM → DONE | 回收目标 / 压缩请求 | `md_handle` / `ftl_metadata_callback` |
+| **pending 项** | READ / WRITE / READ_CACHE / WRITE_CACHE / WRITE_PAGE0 → READ_RECOVERY / WRITE_CONFIRM → 释放 | 读失败 / 写成功但 L2P 未就绪 / cache 页待结论 | `rr_handle` / `ftl_confirm_service` |
+| **L2P 行** | INVALID → LOADING → CLEAN → DIRTY → FLUSHING → CLEAN/INVALID | miss / 写 / flush / 驱逐 | `l2p_cache_*` / `ftl_l2p_op_callback` |
+| **Journal job** | IDLE → WRITE → （ERASE）→ IDLE | 页满 / 换块 | `jrn_handle` / `ftl_journal_op_callback` |
+| **CP job** | IDLE → FLUSH_REGIONS → DIR_CKPT_* → HDR_* → TRUNC_* → DONE | phase 完成 | `cp_handle` / `ftl_checkpoint_op_callback` |
+| **md job** | IDLE → RECLAIM → IDLE；IDLE → CP_READ ⇄ CP_WRITE → DIR_CKPT_* → CP_RECLAIM → DONE | 回收目标 / 压缩请求 | `md_handle` / `ftl_metadata_op_callback` |
 | **块** | NONE / FREE / OPEN / CLOSED / LOG / RETIRED / BAD | 分配 / 写满 / 搬移 / 标坏 | allocator / migrate / bbt |
-| **mig job** | IDLE → READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE | 页/plane 推进 | `mig_handle` / `ftl_migrate_callback` |
-| **RR job** | IDLE → PLANE → READ → PLANE_END → FINISH | 读结果 / 重试耗尽 / 提交卡死 | `rr_handle` / `ftl_read_recovery_callback` |
-| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `bg_policy_level_select` |
+| **mig job** | IDLE → READ → READ_SETTLE → WRITE → WRITE_SETTLE → （WRITE_BATCH → WRITE_SETTLE_BATCH）→ FLUSH_JRN → ERASE → DONE | 页/plane 推进；批处理走 batch 分支 | `mig_handle` / `ftl_migrate_op_callback` |
+| **RR job** | IDLE → PLANE → READ → PLANE_END → FINISH | 读结果 / 重试耗尽 / 提交卡死 | `rr_handle` / `ftl_read_recovery_op_callback` |
+| **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `ftl_sched_bg_level_select` |
 
 **状态机的统一约定**：
 
@@ -4961,6 +5338,8 @@ flowchart TB
 - 完成服务函数**不**推进状态机（避免嵌套泵），推进留给下一轮 kick。
 - 所有单飞行 job 都有绝对 ms 提交 deadline（`FTL_SUBMIT_TIMEOUT_MS`），只兜“提交不出去”，不强拆在飞命令。
 
+<a id="s5-3" name="s5-3"></a>
+
 ### 5.3 持久化对象与恢复来源
 
 | 持久对象 | 谁写 | 谁读 | 丢失/损坏后果 |
@@ -4968,7 +5347,7 @@ flowchart TB
 | 用户数据页 | wbuf 编程 / migrate | host 读 / GC | 数据丢失 |
 | 页内 META | FC（`cmd->meta`） | GC / full metadata rebuild / RR | 无法判有效 CW |
 | L2P region 页 | L2P flush | L2P load | 映射回退一版 |
-| Directory entry（SRAM） | `commit_region` / load | lookup | 位置丢失 |
+| Directory entry（SRAM，非持久） | `md_commit_region` / `md_load` | `md_entry_find` | 位置丢失 |
 | 目录检查点记录 | CP / md job | boot | Directory 回退到旧快照 |
 | Journal 页 | Journal job | boot replay | 增量丢失 |
 | Checkpoint Header | CP | boot | 水位/块元数据丢失 |
@@ -4980,8 +5359,10 @@ flowchart TB
 **恢复顺序**（不可换）：
 
 ```text
-介质版本检查 → 块元数据快照 → Journal 回放 → F4 预载 → probe + build_pools
+介质版本检查 → 块元数据快照 → Journal 回放 → F4 预载 → probe + pfr_boot_carve_pools
 ```
+
+<a id="s5-4" name="s5-4"></a>
 
 ### 5.4 单实例 / 多实例与全局坐标
 
@@ -5004,6 +5385,8 @@ flowchart TB
 
 **多 LUN 设计边界**：支持稀疏拓扑；实例按紧凑 die 号索引，物理坐标由 die 表分解；共享 cache 不按 die 复制。跨 LUN superblock 条带、跨 LUN GC/WL 不在当前范围；未实机验证的部分见验证入口。
 
+<a id="s5-5" name="s5-5"></a>
+
 ### 5.5 不变量清单
 
 | 模块 | 不变量 | 谁维护 | 违反后果 |
@@ -5023,242 +5406,43 @@ flowchart TB
 | Journal | 同一块每圈只擦一次 | `pre_erased_block` | 双倍磨损 |
 | CP | 快照点在 job 起点 | `cp_job_begin` | 两边都不认，丢映射 |
 | CP | flush → 目录检查点 → 块元数据 → 磨损 → Header → 截断 | `cp_job_step` | boot 预载未落盘 region |
-| Metadata | append_slot 只取槽；commit 才登记 | `l2p_cache` | Directory 指向未写页 |
+| Metadata | md_slot_pair_append 只取槽；commit 才登记 | `l2p_cache` | Directory 指向未写页 |
 | Metadata | 目录检查点先于 victim 擦除 | metadata job phase | 掉电后映射永久丢失 |
-| Metadata | 固定层永不写 | `append_slot` | 反向映射到擦除态页 |
+| Metadata | 固定层永不写 | `md_slot_pair_append` | 反向映射到擦除态页 |
 | Migrate | 写新页 → 改 L2P/Journal → F10 → 擦旧块 | `mig_job_step` phase | 掉电丢数据 |
 | Migrate | 分配不到目标页 ⇒ 不擦 victim | 迁移中止 | 擦掉未搬的有效页 |
-| RR | 托管项不递减组 outstanding | `rr_handle` / `ftl_host_io_callback` | 组提前完成/丢通知 |
+| RR | 托管项不递减组 outstanding | `rr_handle` / `ftl_host_io_op_callback` | 组提前完成/丢通知 |
 | wbuf | owners 逐组记录，完成逐组递减 | wbuf 编程 / pending | 组完成计数错乱 |
-| Service | pump 每轮一次；每实例都 service | `main.c` | NAND 预算重复/实例饿死 |
+| Service | pump 每轮一次；每实例都 service | `ftl_service`（`main` 编排） | NAND 预算重复/实例饿死 |
 
 ---
 
 <a id="s6" name="s6"></a>
 
-## 6. 策略决策记录（ADR）
+## 6. 设计取舍索引
 
-> 每条 ADR 只记录**当前选择、理由、代价与重估触发**，不按时间叙事。
-> 出处口径：能引公开资料/规范的标出处；不能的标「本仓自定」，不写成行业标准。
-> 对齐的是 **DRAM-less** 分支；有 DRAM 的企业级形态只作对照。
+> 完整 ADR 与模块主流对照已迁到 `controller_target_features.md` §8 / §9；
+> 本节只给索引，避免两处维护。
 
-### ADR-1 映射粒度：纯 CW 级页映射
-
-| 项 | 内容 |
-|---|---|
-| 背景 | NAND 只能异地更新；映射粒度决定表大小、写放大、GC 复杂度 |
-| 选项 | 块映射 / 混合映射（BAST/FAST）/ 纯页映射（4 KiB 或 CW） |
-| 选择 | **纯页映射，粒度 = 1 CW = 512 B** |
-| 理由 | 写放大最小（1.0~1.3×）；与 FC 的 ECC/CRC/加扰单位完全对齐，无粒度折算；GC 可只搬页内有效 CW |
-| 主流 | 现代 SSD 普遍纯页映射；UFS/eMMC 也是页级（见 §1.6） |
-| 代价 | 表最大（4 MiB）；GC 逐 CW 搬移，实现复杂 |
-| 重估触发 | 若改用 4 KiB IU，表缩小 8×，但页内小写会放大写放大；当前器件 512 B CW，不换 |
-
-### ADR-2 L2P 存放：NAND 全表 + SRAM region cache
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 4 MiB 表装不进 SRAM；外置 DRAM 本板不可用 |
-| 选项 | 全表 DRAM / 全表 SDRAM / 全表 SRAM / NAND + SRAM cache |
-| 选择 | **NAND 存全表 + 64 行 SRAM region cache（DRAM-less）** |
-| 理由 | 与 UFS/eMMC 的 DRAM-less 形态同构；SRAM 预算可支撑 64 行；掉电一致性由 Journal/CP 保证 |
-| 主流 | UFS 4.0 / eMMC / 消费级 DRAM-less 均为“L2P on NAND + SRAM cache” |
-| 代价 | 全盘随机访问命中率低（64 行 ≈ 3%）；需要 thrashing 降级 |
-| 寿命核算 | 上界模型：一次全盘写 ≈ 1.8 万次 region flush；L2P 元数据区寿命约 5.7 TB 写入；**Journal（4 块）约 1.6 TB，是更短的瓶颈**。开发/学习负载（≤100 MB/天）有充足余量 |
-| 重估触发 | 增加 DRAM/SDRAM；或 cache 行数显著增加（需重算 SRAM 预算） |
-
-### ADR-3 RAID 不实现
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 跨 die/plane 的 XOR 恢复可提高可靠性，但增加 GC/parity 管理复杂度 |
-| 选择 | **`CONFIG_FC_RAID = 0`，不实现** |
-| 理由 | 当前 SLC 单盘 BER 较低；学习主控优先把分层/队列/映射做对；RAID 会显著增加 GC 与元数据复杂度 |
-| 主流 | 企业级常用；消费级 DRAM-less 通常不做 |
-| 代价 | 单 die/页不可纠错时只能标坏/丢数据 |
-| 重估触发 | 换 TLC/QLC 或需要企业级可靠性 |
-
-### ADR-4 FTL 通过 FC 接口访问 NAND
-
-| 项 | 内容 |
-|---|---|
-| 背景 | NAND 时序、地址周期、ECC/CRC/加扰必须统一管理 |
-| 选择 | **FTL 只调用 `ftl_fc_interface` 的 helper / 同步异步原语** |
-| 理由 | 数据保护链完整；多平面/流水线能力复用；FTL 不感知 NAND 时序 |
-| 主流 | 主控固件的标准分层（FTL / HAL / 介质） |
-| 代价 | 每次读写有 alloc/submit/poll/release 开销 |
-| 重估触发 | 不重估；这是分层底线 |
-
-### ADR-5 Cache 替换：CLOCK
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 64 行 cache 需要近似 LRU，且不能有动态内存/链表开销 |
-| 选项 | LRU（链表）/ FIFO / CLOCK / 2Q |
-| 选择 | **CLOCK（二次机会）** |
-| 理由 | 命中率接近 LRU；O(1) amortized；只需一个整数字段；无动态分配 |
-| 主流 | 嵌入式/DRAM-less 常用 |
-| 代价 | 不如 LRU 精确；顺序/随机混合负载下略差 |
-| 重估触发 | 若命中率成为瓶颈，可评估 CLOCK-pro / 自适应预取（见 §7.2） |
-
-### ADR-6 Super Block：跨 plane 条带化
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 双 plane 可并行编程/擦除；按单块管理会浪费并行度 |
-| 选择 | **跨各 plane 的逻辑 SB；各 plane 独立选块（Policy B）** |
-| 理由 | Multi-Plane 提升吞吐；擦除/GC 以 SB 为粒度；坏块导致两块编号不同不影响并行 |
-| 主流 | 企业级跨 die、消费级跨 plane 的通用形态 |
-| 代价 | allocator 配对/关闭逻辑更复杂；退化单 plane 条目需要哨兵 |
-| 重估触发 | 换多 die 封装或 plane 数变化 |
-
-### ADR-7 温度分区：Hot / Cold 双 Open SB
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 热数据无效页增长快，冷数据几乎不变；混写会降低 GC 效率 |
-| 选择 | **两个 Open SB：HOT（host 写）/ COLD（GC 搬移）** |
-| 理由 | HOT 块很快变成高无效比例，GC 回收便宜；COLD 块几乎不用回收；纯软件 |
-| 主流 | 消费级 2~4 温区；企业级多级温度 |
-| 代价 | allocator 维护两个 SB；写路径要指定温度 |
-| 重估触发 | 容量/负载需要更多温区 |
-
-### ADR-8 OP 预留 10%
-
-| 项 | 内容 |
-|---|---|
-| 背景 | GC 需要空闲块缓冲；坏块替换需要储备；无 OP 时写压力会直接撞 GC |
-| 选择 | **10%（每 plane 204 块，共 408）** |
-| 理由 | 给 GC 足够缓冲，前台写入不因 GC 断崖；坏块替换后用户容量不变 |
-| 主流 | 消费级 7~15%，企业级 7~28% |
-| 代价 | 用户可见容量 **424 MiB**（512 MiB − 固定元数据 24.5 − OP 51 − Spare 12.5） |
-| 重估触发 | 容量/性能目标变化；`FTL_OP_PERCENT` 可配 0~28 |
-
-### ADR-9 Free Pool：一个已擦除池 + 三级水位 + 独立 OP/Spare
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 需要“前台零等待”和“后台补池”，但不能把擦除放到关键路径 |
-| 选项 | 三个物理池（预擦/普通/紧急）/ 一个池 + 水位 + 独立保留池 |
-| 选择 | **一个已擦除池 + 三级水位（32/8/0）+ 独立 OP/Spare 池** |
-| 理由 | 搬移是“先擦后归还”⇒ 池内没有未擦块，无法按擦除状态分区；前台零等待靠水位，不靠第二个池 |
-| 主流 | 真实主控同样是“一个 free pool + 软/硬水位 + 独立保留池” |
-| 代价 | 水位阈值是本仓经验值，需要按容量/OP 调整 |
-| 重估触发 | 换更大容量或不同 OP 比例 |
-
-### ADR-10 不实现 SLC Cache
-
-| 项 | 内容 |
-|---|---|
-| 背景 | SLC cache 是 TLC/QLC 的写加速技术 |
-| 选择 | **不实现** |
-| 理由 | 介质本身就是 SLC；没有“慢速 TLC 写”需要掩盖 |
-| 主流 | SLC 介质不需要；TLC/QLC 才用 |
-| 代价 | 无 |
-| 重估触发 | 换 TLC/QLC 介质 |
-
-### ADR-11 坏块管理：出厂扫描 + 运行时隔离 + Block Sparing
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 坏块不可用；出厂标记会被擦除毁掉；运行时还会新增坏块 |
-| 选项 | Block Skip / Block Remap Table / Block Sparing |
-| 选择 | **出厂扫描（仅空片）+ 运行时标坏 + Spare Pool 按 plane 补充** |
-| 理由 | 不需要两层映射；PAA 直接物理；坏块配对异号不影响 Multi-Plane；Spare 保容量水位 |
-| 主流 | 企业级也用 sparing + 数据迁移，不用 remap 表 |
-| 代价 | 出厂扫描约 250 ms；Spare 池占用 100 块 |
-| 重估触发 | 坏块率显著高于预期，或需要在线替换策略 |
-
-### ADR-12 多 LUN：共享 L2P cache + 全链路全局 LBA
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 每个 `(ch,ce,lun)` 一个实例；若每实例一份 cache，SRAM 装不下；若数据通路用局部 LBA，跨实例语义复杂 |
-| 选项 | 每实例独立 cache + 局部 LBA / 每 `(ch,ce)` 共享 cache + 全局 LBA |
-| 选择 | **每 `(ch,ce)` 一份共享 cache；数据通路全链路全局 LBA；映射页落盘用 owner 的局部 region** |
-| 理由 | cache 容量按 `(ch,ce)` 而不是按 LUN 增长；全局 LBA 让 host/Journal/META 只有一套坐标；owner 解析把“落盘位置”收在单一漏斗 |
-| 主流 | 主流多 LUN 主控共享 L2P cache；全局 LBA + 分片是常见形态（具体实现本仓自定） |
-| 代价 | owner 解析回调、全局脏位图、CP/recovery/flush 都要按 owner 过滤 |
-| 重估触发 | 换多 die 芯片；或 cache 命中率需要 per-LUN 隔离 |
-| 出处 | [`../archive/multi_lun_generalization.md`](../archive/multi_lun_generalization.md)；— 的全局坐标注释 |
-
-### ADR-13 实例描述符化 + 模块自持 workspace
-
-| 项 | 内容 |
-|---|---|
-| 背景 | `ftl_ctx_s` 内嵌大数组时，单实例描述符很大；多实例线性增长，超出片上 RAM 预算 |
-| 选项 | 继续内嵌 / 全部放外部存储 / 描述符 + 模块自持 workspace |
-| 选择 | **描述符只留指针 + 热状态；每个模块自持 workspace 并选择落点；落点由平台决定** |
-| 理由 | 多实例可装下；workspace 所有权归属清晰；落点可控但不写进 FTL 契约 |
-| 主流 | 主控固件用 descriptor + 表指针，由平台链接/散列决定落点（OpenSSD/SPDK 同思路） |
-| 代价 | 不清零 workspace 必须显式初始化；CPU-only 与 DMA-visible 的区分是设计约束；跨域访问需平台保证 |
-| 重估触发 | 维度继续增加；或表结构显著变大 |
-
-### ADR-14 主机背压：三态返回，不内部排队
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 多个提交者（host / GC / metadata）竞争有限的命令/描述符/缓冲/pending 资源 |
-| 选项 | ① 直接返回错误 ② 内部重试队列 ③ 动态 budget ④ 主机级 doorbell 流控 |
-| 选择 | **①：pending 表满/资源不足即返回 `FTL_AGAIN` 或 `FTL_ERROR`** |
-| 理由 | 零额外 SRAM；资源回滚路径完整；本仓 host 是 UART CLI（handler 自带泵的同步等待），不需要 doorbell；内部重试队列与 DRAM-less 目标冲突 |
-| 主流 | 消费级 DRAM-less 常见；企业级会用 credit/动态 budget |
-| 代价 | 无优先级/公平性；极端竞争下 host 可能看到错误 |
-| 重估触发 | 多 LUN 并发导致 pending 经常打满；或接入 NVMe host |
-| 出处 | 旧 D6 分析（现并入本节）；— 的隐式背压注释 |
-
-### ADR-15 NAND 流水线：Multi-Plane + 受限 Cache Program
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 需要重叠 NAND 延迟；三种技术：Multi-Plane、Cache Program、ISSUE/WAIT/FETCH |
-| 选项 | 只用单命令 / Multi-Plane / + Cache Program / + ISSUE/WAIT |
-| 选择 | **写用 Multi-Plane；host 16 KiB 与 GC/WL 顺序搬移使用受限 Cache Program 批次；读在 LUN>1 时走 ISSUE/WAIT/FETCH** |
-| 理由 | 器件支持 `80h-11h-80h-15h`（中间页）与 `80h-11h-80h-10h`（末页）；15h 完成只代表 cache 可复用、tPROG 仍在后台。**不提前确认**：中间页只释放命令，只有末页 10h 成功且 FAILC/FAIL 均无错误后才统一更新 L2P/Journal，因此不违反先编程后映射（program-before-map）。掉电时未确认页没有映射，恢复会关闭部分写块（不续写），安全。 |
-| 主流 | 主流主控用 Multi-Plane + 流水线；cache program 属器件特性，批次策略是**本仓自拟**，不是行业标准形态 |
-| 代价 | 需要 FAILC 状态检查；批次失败只能关闭目的 SB（不能 rewind）；GC 批次多占约 16 KiB SRAM |
-| 重估触发 | 引入 HSQ / FC chain 或跨 LUN batch；或器件 datasheet 的 FAILC 语义变化 |
-| 出处 | Micron MT29FxG08xAA datasheet Figure 74（Two-Plane Program Page Cache）与状态寄存器 FAILC 说明；— op44/op48；FC Phase V |
-
-> ⚠ 15h 后状态寄存器 bit1 = `FAILC` 表示**上一页** cache program 的成败；只检查 bit0
-> `FAIL` 会把中间页失败静默当成成功。op44 与末页 op48 都使用 `CHECK_FAIL_CACHE`
-> （FAIL | FAILC）；首页用 op49 只查 FAIL，避免残留 FAILC 误判。
-> host 16 KiB 正常路径的 cache program 收益与上板结果见验证文档。
-> **FAILC 负例、失败注入、掉电注入仍未做**，不得据此声称 cache program 全部已验证。
-
-### ADR-16 后台调度：工作量配额 + must-run
-
-| 项 | 内容 |
-|---|---|
-| 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
-| 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务时间预算 + must-run / 每任务工作量配额 + must-run |
-| 选择 | **10 项任务表：6 must-run（不 gate、不占配额）+ 4 预算任务；三级负载→固定配额/掩码** |
-| 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按表序/credit 截断；每秒后台量由 token bucket（10 ms 补 grant_units）固定，单轮墙钟只做异常兜底——前台保护是确定性的（掩码/补充速率） |
-| 主流 | 主控固件常见“poller + 后台调度器 + 每队列/每任务配额”；本仓用固定分档而非连续带宽调节 |
-| 代价 | 分档粒度粗；时钟缺失时墙钟兜底失效（配额仍生效） |
-| 重估触发 | 多核/RTOS；或需要更细的带宽比例控制 |
-| 出处 | [`storage_controller_design.md`](storage_controller_design.md) 的调度形态；SPDK core poller 对照；— |
-
-### ADR-17 读写 run：FTL 构链，FC 执行 chain
-
-| 项 | 内容 |
-|---|---|
-| 背景 | cache read / cache program 的 45h…47h / 49h…48h 必须在器件 cache 管线上连续执行；任一条被其他命令插入就会破坏序列 |
-| 选项 | 依赖“全 FTL 命令走 SQ 且连续入队”的全局假设 / FTL 逐条提交并 defer 插入者 / **整条 run 标成 FC chain，控制器锁 LUN** |
-| 选择 | **FTL 决策并构链**：L2P 前向扫描决定 run 边界，按位置选 45h/46h/47h（写 49h/44h/48h），末条 `FC_CHAIN_END`、其余 `FC_CHAIN_MORE`，批量提交原子连续入队；**FC 执行**：`fc_poll_chain_length` 每趟最多取 `FC_SCHEDULER_CHAIN_MAX`（= per-LUN FIFO 深度 4，**填充窗口**），批尾 MORE 时 `chain_owner` 跨轮次保留、另一队列回推，END 才解锁 |
-| 理由 | 链总长 = run 页数，不受 FIFO 深度限制；跨轮次的 owner 状态解决“HSQ 插入劈开序列”；FC 侧复用既有 chain 机制，**无新增功能代码** |
-| 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_nand_dispatch.c`），不是行业标准形态 |
-| 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
-| 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
-| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（—）；—；— 的 `fc_poll_fill_queue` / `fc_poll_chain_length`；— |
-
-> 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
-> `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
-> （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`，见）。
->
-> ⚠ chain 路径此前仅 UT 覆盖；首启用必须上板验证跨轮次 owner / HSQ 回推 / 失败页状态（建链类改动）。
->
-> ⚠ chain 写路径不处理 RAID stripe encode（RAID 关闭；启用前见 `known_open_items.md`）。
+| ADR | 当前选择 | 主要替代 / 与主流差异 | 详见 |
+|---|---|---|---|
+| ADR-1 | 纯 CW 级页映射（IU = 512 B） | 块映射 / 混合映射 / 4 KiB 页映射；本仓与 ECC/CRC/加扰单位对齐 | 架构 §8 ADR-1 |
+| ADR-2 | L2P 全表存 NAND + 64 行 SRAM cache | DRAM / SDRAM / 全表 SRAM；DRAM-less 形态 | 架构 §8 ADR-2 |
+| ADR-3 | 不实现 RAID / XOR | 企业级常用；消费级 DRAM-less 通常不做 | 架构 §8 ADR-3 |
+| ADR-4 | FTL 只经 FC 接口访问 NAND | 直接操作 NAND；分层底线 | 架构 §8 ADR-4 |
+| ADR-5 | CLOCK 替换 | LRU / FIFO / 2Q；近似 LRU、O(1) | 架构 §8 ADR-5 |
+| ADR-6 | 跨 plane 的 Super Block | 单块管理；跨 plane 条带提升并行 | 架构 §8 ADR-6 |
+| ADR-7 | Hot / Cold 双 Open SB | 单 Open SB；冷热分离降低 GC 成本 | 架构 §8 ADR-7 |
+| ADR-8 | OP 预留 10% | 0~28%；容量换 GC 缓冲 | 架构 §8 ADR-8 |
+| ADR-9 | 一个已擦除 Free Pool + 三级水位 + 独立 OP/Spare | 三个物理池；本仓按水位而非擦除状态分区 | 架构 §8 ADR-9 |
+| ADR-10 | 不实现 SLC Cache | TLC/QLC 才需要；本介质是 SLC | 架构 §8 ADR-10 |
+| ADR-11 | 出厂扫描 + 运行时标坏 + Spare | Block Remap Table；无两层映射 | 架构 §8 ADR-11 |
+| ADR-12 | 每 `(ch,ce)` 共享 L2P cache + 全局 LBA | 每实例独立 cache + 局部 LBA | 架构 §8 ADR-12 |
+| ADR-13 | 描述符 + 模块自持 workspace | 内嵌大数组 / 全部外置 | 架构 §8 ADR-13 |
+| ADR-14 | 资源不足返回 `FTL_AGAIN` / `FTL_ERROR` | 内部重试队列 / doorbell 流控 | 架构 §8 ADR-14 |
+| ADR-15 | Multi-Plane + 受限 Cache Program | 单命令 / 全流水；批次策略本仓自拟 | 架构 §8 ADR-15 |
+| ADR-16 | 工作量配额 + must-run | 每轮全跑 / 固定顺序 / 时间片 | 架构 §8 ADR-16 |
+| ADR-17 | FTL 构链，FC 执行 chain | 全局连续入队假设 / 逐条提交并 defer | 架构 §8 ADR-17 |
 
 ---
 
@@ -5266,11 +5450,17 @@ flowchart TB
 
 ## 7. 已知限制与待办
 
+> 支撑摘要：摘要承诺之外的未实现 / 未验证项。
+
 > 这是全文**唯一的待办出口**。各模块正文只描述当前设计，未实现/未验证项统一列在这里。
+
+<a id="s7-1" name="s7-1"></a>
 
 ### 7.1 未验证状态
 
 当前未实现 / 未验证项与残余风险见 `docs/design/known_open_items.md`；测试方法、上板结果与吞吐快照见 `docs/guides/testing_guide.md`。
+
+<a id="s7-2" name="s7-2"></a>
 
 ### 7.2 已知限制
 
@@ -5281,22 +5471,22 @@ flowchart TB
 | 同页双 plane 合并回写未实现 | region 写回逐条追加，单 plane 编程 | 当前设计不追求配对；配对会与“尽快落盘”冲突 |
 | Checkpoint 批量写未实现 | 每个 region 各写一页，元数据 GC 开销未摊薄 | 与元数据写模型相关，非当前优先级 |
 | 无 shutdown journal flush | 干净启动也要 probe 池块 | “末页丢失”与干净关机在介质上不可区分 |
-| full metadata rebuild 启动 ~400–550 ms（空片）/ 2–4 min（312 MiB 介质） | 快照损坏时恢复较慢 | 快照路径 ~150–250 ms + 日志区恢复 ~0.3–1 s；rebuild 是兜底 |
+| full metadata rebuild 明显慢于快照路径 | 快照损坏时恢复较慢 | 耗时与测试条件见验证文档；rebuild 是兜底 |
 | 日志区固定 96 块（12 MiB） | 碎片会让 live 块逼近上限、压缩腾挪空间有限 | 容量已扣；压缩按活块水位（>64）触发，一次退多个稀疏 victim |
-| 目录检查点/元数据池磨损集中 | 目录检查点磨损约为数据块的 8× | 本仓磨损不是约束；池大小是为启动/形态而非磨损优化 |
+| 目录检查点/元数据池磨损集中 | 目录检查点磨损高于数据块 | 本仓磨损不是约束；池大小是为启动/形态而非磨损优化 |
 | 介质版本不符即全片格式化 | 升级会擦掉旧数据 | 判据是“老固件介质在新固件下会否被误读”；这是有意的安全兜底 |
 
 **数据面与性能**
 
 | 限制 | 影响 | 备注 |
 |---|---|---|
-| CLOCK-pro / 自适应预取未实现 | 热点命中率有提升空间 | 顺序读单 region 预取已实现；自适应/多 region 预取未做；见 §3.6 |
+| CLOCK-pro / 自适应预取未实现 | 热点命中率有提升空间 | 顺序读单 region 预取已实现；自适应/多 region 预取未做；见 §3.5 |
 | 读路径不查 Journal overlay | thrashing 下多一次 region load | 独立改造，未纳入当前范围 |
 | GC Bitmap（Layer 2）未实现 | 掉电后 GC 从头重搬 | 用“擦除前 flush Journal”闭合等价窗口 |
 | Cache Program 仅限 host 16 KiB / GC 全 pair 批次 | 小请求、静态 WL、跨块边界仍走普通 multi-plane | 15h 中间页不确认；失败关闭目的 SB；掉电注入未做（见 `known_open_items`） |
 | N=4 未就绪 | 片上 SRAM 装不下 4 实例 | 需要表瘦身或外置 DRAM；N=2 已能链接 |
 | 无外置大缓冲 | DRAM-less：L2P 与元数据常驻片上 SRAM | 设计选择；不依赖外置 DRAM |
-| 无 NVMe host / RTOS | host 入口是 UART CLI | 有意不实现；学习主控的同步等待足够 |
+| 无 NVMe host / RTOS | host 入口是 USB MSC（BOT）与 UART CLI | 有意不实现 NVMe；学习主控的同步等待足够 |
 
 **读恢复**
 
@@ -5310,19 +5500,23 @@ flowchart TB
 
 | 限制 | 影响 | 备注 |
 |---|---|---|
-| FTL 模块内部 API 仍演进 | host/boot v1 已冻结；— 的模块内部签名/枚举/访问器仍可能变 | `ftl_interface.h` 是 host/boot 契约；CLI 诊断仍是内部例外；用户后续可能换模块 API |
-| UT 冻结 | 部分用例编译失败 | 不为 UT 回退生产代码；测试源由用户维护 |
-| 共享 cache 的跨 LUN 公平性未实测 | 某 LUN 可能占满 flush credit | 当前 `flush_inflight` 是共享 credit 池；后续按实测调 |
+| FTL 模块内部 API 仍演进 | host/boot 入口为 `ftl_interface.h`（API v1）；模块内部签名/枚举/访问器仍可能变 | `ftl_interface.h` 是 host/boot 契约；CLI 诊断仍是内部例外；用户后续可能换模块 API |
+| UT 测试源由用户维护 | 覆盖率以用户维护的测试集为准 | 不为 UT 回退生产代码；板端结果见 §7.1 的验证文档 |
+| 共享 cache 的跨 LUN 公平性未实测 | 某 LUN 可能占满 flush credit | 当前 `inflight.flush` 是共享 credit 池；后续按实测调 |
+
+<a id="s7-3" name="s7-3"></a>
 
 ### 7.3 后续阶段
 
 | 阶段 | 内容 | 出口判据 |
 |---|---|---|
-| **DIM=1 上板回归** | 启动三分支、读写、flush、map、CP、断电重启、GC | 串口日志 + CLI 结果；覆盖 fresh/clean/PF |
+| **单 die 上板回归** | 启动三分支、读写、flush、map、CP、断电重启、GC | 串口日志 + CLI 结果；覆盖 fresh/clean/PF |
 | **阶段 D 审计** | 文档/代码一致性、不变量与负例、未验证分支清单 | 每条不变量有“能失败的输入”；文档引用可解析 |
-| **多 LUN 实机** | 多 die/多 LUN 的并发、共享 cache、owner 过滤 | 有对应硬件后再做；当前只有 DIM=2 链接证明 |
+| **多 LUN 实机** | 多 die/多 LUN 的并发、共享 cache、owner 过滤 | 有对应硬件后再做；当前只有双实例链接证明 |
 | **API 定稿** | 按新接口重构调用点与文档 | 用户发话后再动 |
 | **性能/容量优化** | CLOCK 升级、GC bitmap、CP 批量写、N=4 表瘦身 | 有实测瓶颈后再排优先级 |
+
+<a id="s7-4" name="s7-4"></a>
 
 ### 7.4 明确不实现
 
@@ -5330,8 +5524,8 @@ flowchart TB
 |---|---|
 | RAID / XOR 恢复 | `CONFIG_FC_RAID` 保持 0；SLC 单盘优先级低（ADR-3） |
 | SLC Cache | 介质本身是 SLC（ADR-10） |
-| Cache Program 的提前确认 / write-back | 15h 不确认映射；见 ADR-15 的受限批次 |
-| NVMe host / doorbell 流控 | 学习主控不实现 NVMe；host = UART CLI（ADR-14） |
+| Cache Program 的提前确认 / write-back (写回) | 15h 不确认映射；见 ADR-15 的受限批次 |
+| NVMe host / doorbell 流控 | 学习主控不实现 NVMe；host 为 USB MSC / UART CLI（ADR-14） |
 | RTOS | 单线程 superloop + ISR 足够；主控常见形态 |
 | SDRAM 参与 FTL | DRAM-less 设计不依赖外置 DRAM |
 | `0x89` 读重试修正 | 本器件保留地址；用户明确不处理 |
@@ -5341,6 +5535,10 @@ flowchart TB
 <a id="s8" name="s8"></a>
 
 ## 8. 附录
+
+> 支撑摘要：P1~P6 的常量、结构与判据索引。
+
+<a id="s8-a" name="s8-a"></a>
 
 ### 8.A 常量/阈值总表
 
@@ -5453,7 +5651,7 @@ flowchart TB
 
 | 常量 | 值 | 说明 |
 |---|---|---|
-| `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500 / 200 / 200 / 100 | victim 评分权重 |
+| `GC_WEIGHT_VALID` / `GC_WEIGHT_ERASE` / `GC_WEIGHT_TEMP` / `GC_WEIGHT_AGE` | 500 / 200 / 200 / 100 | victim 评分权重 |
 | `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01 / 0x08 | 触发位 |
 | `WL_THRESHOLD` | 200（UBI 模型；本仓自拟） | 磨损差门限 |
 | `WL_MIN_WRITES` | 1000 writes（启动门，一次性） | |
@@ -5464,8 +5662,6 @@ flowchart TB
 
 | 常量 | 值 | 说明 |
 |---|---|---|
-| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | 磨损条目 |
-| `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 磨损快照页数 |
 | `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | `0x0F` / `0x03` | ECC 趋势/健康掩码 |
 | `BBT_MAGIC` | `0x424254AB` | |
 | `BBT_BITMAP_SIZE` | 512 B（4096 bit） | |
@@ -5485,7 +5681,7 @@ flowchart TB
 
 | 常量 | 值 | 说明 |
 |---|---|---|
-| `BG_POLICY_TASK_COUNT` | 10 | 后台任务数 |
+| `FTL_BG_JOB_NUM` | 10 | 后台任务数 |
 | `NAND_SUBMIT_BUDGET` | 4 | 每轮 fc_service 上限 |
 | `L2P_FLUSH_MAX_NORMAL` / `L2P_FLUSH_MAX_BUSY` | 4 / 1 | 每轮 flush 条数 |
 | `GC_EVAL_INTERVAL_MS` | 10 ms | GC 求值 |
@@ -5497,7 +5693,7 @@ flowchart TB
 | `FTL_SCHED_HOST_MAX` / `FTL_SCHED_HOST_READ_RESERVE` | 32 / 4 | host item 上限 / 读保留 |
 | `FTL_SCHED_L2P_LOAD_CREDIT` / `FTL_SCHED_L2P_PREFETCH_CREDIT` | 8 / 2 | L2P load credit |
 | `FTL_SCHED_L2P_FLUSH_MAX` | 64 | flush item 活动上限 |
-| `FTL_FC_CP_CMD/DESC/BUFS_HEADROOM` | 2 / 8 / 8 | CP 资源保底 |
+| `FTL_FC_CP_CMD_HEADROOM` / `FTL_FC_CP_DESC_HEADROOM` / `FTL_FC_CP_BUFS_HEADROOM` | 2 / 8 / 8 | CP 资源保底 |
 
 #### FC 资源
 
@@ -5510,6 +5706,8 @@ flowchart TB
 
 > 内存占用与对象落点属于平台文档；本设计只约束 workspace 的所有权、访问温度与生命周期（§5.1.2）。不清零 workspace 必须由拥有它的模块显式初始化。
 
+<a id="s8-b" name="s8-b"></a>
+
 ### 8.B 当前结构索引
 
 > 只列类型/字段语义，不列文件路径；实现细节直接看代码。
@@ -5518,26 +5716,93 @@ flowchart TB
 |---|---|---|
 | `ftl_ctx_s` | FTL 描述符 | topo / cache* / pending / wbuf* / table_refs / alloc / journal* / metadata_dir* / cp_handle* / mig_handle* / read_recovery_handle / rr_page_scratch* / sched / cache_stream / flush / trim / flags / stats |
 | `ftl_storage_s` | 装配引用 | table_refs* / metadata_dir* / journal* / cp_handle* / migrate* / wbuf* / rr_page_scratch* |
-| `ftl_io_req_s` | 对外请求 | lba / buffer / count / 完成通知 |
-| `pend_req_s`（32 B） | pending | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 |
+| `ftl_io_req_s` | 对外请求 | lba / buffer / count / cmd_remaining / 完成通知 |
+| `pend_req_s`（40 B） | pending | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 / cache_gen |
 | `pend_group_s`（48 B） | pending | next / total / outstanding / agg_status |
 | `l2p_cache_s` / `l2p_cache_line_s` / `l2p_owner_s` | L2P cache | 行状态 / entries / clock / 脏位图；owner 回调 {die, metadata_dir, alloc, topo} |
 | `l2p_jrn_s` / `jrn_handle_s` | journal | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / alloc 引用 |
-| `cp_header_s` / `cp_handle_s` | checkpoint | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / cp_state / last_ms |
+| `cp_header_s` / `cp_handle_s` | checkpoint | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / cp_state / `cp_state.last_cp_ms` |
 | `md_entry_s` / `md_dir_ckpt_page_s` / `md_ring_s` / `md_dir_cache_s` / `md_handle_s` | metadata | Directory / 目录检查点 / 池几何 / 回收压缩 job |
 | `bst_block_s` / `ftl_table_refs_s` / `alc_s` / `super_block_s` | allocator/BST | BST / 表引用 / 池计数 / SB |
 | `mig_handle_s` | migrate | phase / kind / post / victim / cw_bitmap / page_buf / GC-WL-predict 节拍 / 计数 |
-| `rr_handle_s` | read recovery | stage / waiting / pending_idx / page / owner |
+| `rr_handle_s` | read recovery | stage / waiting / pending_idx / page / page_lba / recovered / all_ok / retry_count |
 | `wb_handle_s` | wbuf | data / occupied / owners / open / base |
 | `ftl_mod_state_e` / `ftl_mod_status_s` | 模块契约 | 模块状态 / 公共 status 前缀（现仅 wbuf） |
-| `bg_policy_s` / `bg_task_s` | bg_policy | 任务表 / 预算 / 档位（10 项） |
+| `ftl_sched_bg_s` / `bg_task_s` | ftl_sched | 任务表 / 预算 / 档位（10 项） |
 | `ftl_sched_s` / `ftl_work_item_s` | ftl_sched | 工作项 / credit / 分派 / 回收 / 统计 |
 | `ftl_cache_stream_s` | ftl_ctx | 顺序检测 / 预取 / 读序列 / 观察计数 |
 | `bbt_header_s` / `bbt_state_s` | BBT | 坏块位图 / 池游标 / 异步持久化 handle |
 | `cp_wear_entry_s` | checkpoint | CP 磨损快照条目（8 B/块） |
+
+<a id="s8-c" name="s8-c"></a>
 
 ### 8.C 静默失效与证据判据清单
 
 静默失效、假通过与证据判据见 [`common/fault_capture.md`](common/fault_capture.md) 的「静默失效与证据判据清单」。本节不再在 FTL 设计文档中重复代码级例子。
 
 ---
+
+<a id="s8-d" name="s8-d"></a>
+
+### 8.D 术语速查
+
+#### 地址与映射
+
+| 术语 | 含义 |
+|---|---|
+| **LBA** | 主机逻辑地址；本项目 1 LBA = 1 CW = 512 B 用户数据 |
+| **PBA** | FTL 内部物理地址：`CH/CE/LUN + block/plane/page/CW`，L2P 的存储单位 |
+| **PAA** | NAND 命令层物理地址（芯片内）；**位序与 PBA 不同**，只在 FTL↔FC 边界转换 |
+| **L2P** | LBA → PBA 映射表；全表 4 MiB，存 NAND，SRAM 只缓存少量 region |
+| **region** | L2P 分片：1 页 = 512 条 entry；`region_id = LBA / 512` |
+| **IU** | 映射单元；本项目 IU = 1 CW（512 B） |
+| **PBA / PAA / META** | PBA = FTL 地址；PAA = 芯片地址；META = 页内每 CW 头 4 B 记录的本 CW 扇区 LBA |
+
+#### 介质与块管理
+
+| 术语 | 含义 |
+|---|---|
+| **plane / block / page / CW** | 平面 / 擦除单位（64 页）/ 读写单位（4 CW）/ ECC 码字（512 B 用户 + 校验） |
+| **Super Block（SB）** | 跨各 plane 的逻辑写入单元；各 plane 取一个物理块配对 |
+| **gblock** | 全局块号 `plane * BLOCKS_PER_PLANE + block`；BST 的唯一索引 |
+| **Open / Closed** | 正在追加写的 SB / 写满封口、等待 GC 的 SB |
+| **Free Pool** | 一个**已擦除**池；三级是水位，不是三个池 |
+| **OP / Spare** | OP = 性能缓冲预留；Spare = 坏块替换储备；两者都按 plane 各留一份 |
+| **BST** | Block State Table：每块状态、温度、有效 CW 数、擦除/读计数、ECC 健康 |
+| **BBT** | 坏块表；NAND 上持久化坏块位图 |
+| **L2P 日志区** | L2P region 页的追加日志；**固定预留** `[46,94)/plane`（96 gblock = 12 MiB，每 region 主+备两份），容量已扣；按活日志块水位压缩 |
+| **GC / victim** | 垃圾回收 / 被选中搬移的块 |
+| **WL** | 磨损均衡；动态 WL 在分配时选低擦除块，静态 WL 主动搬冷数据 |
+| **WA** | 写放大 = 实际 NAND 写入 / 主机写入 |
+
+#### 一致性与恢复
+
+| 术语 | 含义 |
+|---|---|
+| **DRAM-less** | 无外置 DRAM：L2P 全表在 NAND，SRAM 只做 region cache |
+| **write-back (写回)** | L2P cache 延迟写回；脏行由 Journal 保掉电一致性 |
+| **VWC (volatile write cache / 易失写缓存)** | 早回执：页编程完成即回执；失败由 deferred error 撤销 |
+| **Journal** | L2P 增量日志（环形块）；掉电后回放 post-checkpoint 的更新 |
+| **块元数据快照** | per-block metadata snapshot。每 gblock 一个 16-bit word（有效 CW 数 / 状态 / 温度 / 池归属），随 Checkpoint 记录落盘。主流资料称 per-block metadata / block descriptor；本仓粒度是物理 gblock、放 CP record（SPDK 的 Chunk 是 band 级、放 nvcache） |
+| **Checkpoint（CP）** | L2P 全量快照 + 块元数据快照 + 截断 Journal |
+| **目录检查点** | Metadata Directory 的全量快照，存在固定目录检查点池。主流称 checkpoint（directory checkpoint）；本仓把它做成独立 record、放固定池，与 Checkpoint(CP) job 分开 |
+| **待入账** | deferred write completion (待入账；DFTL 的 translation page miss 导致映射更新延后)：NAND 已编程、L2P/Journal 未入账的子操作留在 pending 表里每轮重试；100 ms 超时按 IO_ERROR 结算 |
+| **预测性退役** | predictive failure analysis (PFA，预测性失效分析)：ECC 趋势 / read disturb 上升 → 在数据损坏前主动搬移并退役 |
+| **program-before-map (先编程后映射)** | 先等 NAND PROGRAM 成功，再改 L2P/Journal；失败则 L2P 不动 = 自动回滚 |
+| **full metadata rebuild** | 全盘元数据重建（本仓自述；机制 = full media scan + 逐 CW 读 META 反查 L2P）：重建 Closed 列表与有效计数 |
+| **F4** | 按 Checkpoint 的 region 位图局部预载 L2P region |
+| **F10** | 搬移条目先落 Journal，再擦 victim（数据安全屏障） |
+| **Read Recovery** | 读失败恢复：单次读 + CRC 重读一次 → 标坏/搬移（本器件无 read-retry table） |
+
+#### 调度与执行
+
+| 术语 | 含义 |
+|---|---|
+| **后台策略步** | `ftl_sched` 内的 token bucket 调度：must-run 集 + 预算任务（选档 + 提交） |
+| **must-run** | 每轮无条件执行、不占配额的正确性关键任务 |
+| **op tag** | 完成服务函数选择器；`完成回调表[]` 的下标 |
+| **completion table** | 完成路由表：`command_id → ctx` + `(ch,ce,lun) → 实例` |
+| **pending / group** | 子操作追踪表 / 一条 host 请求的完成组 |
+| **owners** | 一个 pending 子操作由哪些组贡献的位掩码 |
+| **FTL_AGAIN** | 瞬态资源不足（池空 / 背压 / region 加载中），调用者稍后重试 |
+| **thrashing** | L2P cache 工作集远大于容量，miss 率持续极高 |

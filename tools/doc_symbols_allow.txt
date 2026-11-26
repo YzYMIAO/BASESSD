@@ -1,0 +1,41 @@
+# 设计文档允许出现的契约级符号（DOC-SYMBOL 白名单）
+# 评审通过一个新符号时加一行；定期清理不再使用的条目。
+
+# 核心数据结构 / 类型
+ftl_ctx_s
+ftl_storage_s
+l2p_cache_s
+l2p_cache_line_s
+l2p_owner_s
+l2p_jrn_s
+jrn_handle_s
+md_dir_cache_s
+md_entry_s
+md_ring_s
+md_reclaim_s
+md_handle_s
+cp_handle_s
+cp_wear_entry_s
+mig_handle_s
+rr_handle_s
+wb_handle_s
+bst_block_s
+super_block_s
+alc_s
+pend_ctx_s
+pend_req_s
+pend_group_s
+ftl_sched_s
+ftl_work_item_s
+bg_task_s
+bbt_header_s
+
+# 地址 / 坐标单一漏斗
+pba_make
+pba_to_paa
+pba_to_cmd
+pba_with_cw
+ftl_cw_bit
+ftl_cw_plane_mask
+ftl_gblock
+super_block_page_pba

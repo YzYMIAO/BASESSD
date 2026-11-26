@@ -414,7 +414,7 @@ flowchart TB
 | **thrashing 检测** | 命中率骤降时切 write-through，避免「淘汰→刷→再读」活锁 |
 
 > 本仓用 **CLOCK + write-back + journal**；thrashing 检测已落地（P1-4，窗口 miss 率 + 滞回），
-> 见 `ftl_design.md` §3.6。
+> 见 `ftl_design.md` §3.5。
 
 ### 5.4 GC（垃圾回收）
 
@@ -438,7 +438,7 @@ flowchart LR
 ```
 
 > 本仓 victim 已改为**多维加权**（valid / erase / temp / age，P1-1 已落地），
-> 见 `ftl_design.md` §3.13。
+> 见 `ftl_design.md` §3.12。
 
 ### 5.5 磨损均衡 (WL)
 

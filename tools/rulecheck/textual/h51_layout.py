@@ -163,31 +163,10 @@ def _check_c_main_last(items: list[Item], result: Result) -> None:
             result.violation(item.line, f"function '{item.name}' defined after main (H51)")
 
 
-def _check_c_short_functions(items: list[Item], result: Result) -> None:
-    long_seen = None
-    for item in items:
-        if item.kind != "func":
-            continue
-        if item.nbnc > 4:
-            long_seen = item
-        elif (
-            long_seen is not None
-            and is_static_function(item)
-            and item.name != "main"
-            and not prototype_is_entry(item)
-        ):
-            result.warning(
-                item.line,
-                f"short static function '{item.name}' ({item.nbnc} NBNC) appears after "
-                f"long function '{long_seen.name}' at line {long_seen.line} (H51)",
-            )
-
-
 def check_c(path: Path, items: list[Item], result: Result, source: str) -> None:
     """`.c` 检查入口：规则彼此独立；新增规则只加一个检查函数。"""
     _check_c_definition_order(items, result, source)
     _check_c_main_last(items, result)
-    _check_c_short_functions(items, result)
 
 def _check_h_pragma_once(items: list[Item], result: Result) -> None:
     pragma = next((item for item in items if item.kind == "pragma_once"), None)

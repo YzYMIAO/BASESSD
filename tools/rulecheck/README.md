@@ -7,10 +7,20 @@
 rulecheck/
   registry.py      # Rule / Finding / 运行 / 输出 / 自检
   model.py         # 共享 Token / Document / Item / 复合类型扫描
-  textual/         # 文本 / 结构规则（共享 Document / Item）
+  textual/         # C 文本 / 结构规则（共享 Document / Item）
     h41_headers.py
     h50_types.py
     h51_layout.py
+  docs/             # 文档规则（与 C 规则共用 registry）
+    model.py        # Markdown 行模型：围栏 / doc-policy 例外 / 评审标记
+    policy.py       # 文档类型 → 启用检查
+    rules/layering.py    # 平台/代码坐标/日期/尺寸/台账
+    rules/links.py       # 内部链接与锚点
+    rules/refs.py        # 规则编号 / CLAUDE.md 引用
+    rules/symbols.py     # 裸符号密度（warning）
+    rules/template.py    # ADR 字段 + 模块七段（warning）
+    rules/terms.py       # 全称术语首次双语（warning）
+    rules/glossary.py    # 术语表核心缩写覆盖（warning）
   semantic/        # 预留：clang-tidy / clang AST 规则
   manual/          # 预留：人审判据登记
 ```
@@ -59,6 +69,22 @@ RULE = Rule(
 2. 在 `textual/__init__.py` 的 `RULES` 加一项。
 3. 在规则模块内加正例 + 负例；`selftest()` 返回 `(ok, 描述)`。
 4. 不新增 CLI、不改 `registry.py`。
+
+## 加一条文档规则
+
+1. 在 `docs/rules/` 新建模块，导出 `RULE = Rule(rule_id="DOC-...", kind="doc",
+   roots=("docs",), suffixes=(".md",), check=..., selftest=...)`。
+2. 在 `docs/__init__.py` 的 `RULES` 加一项。
+3. 需要按文档类型启用时，只改 `docs/policy.py`，不在规则里写路径。
+4. 在模块内写正例 / 负例；`docs-test` 会调用。
+
+```sh
+python3 tools/check_docs.py --root . --rule DOC-LAYER
+python3 tools/check_docs.py --root . --report
+python3 tools/check_docs.py --root . --strict
+python3 tools/check_docs.py --root . --path docs/design/ftl_design.md --strict
+python3 tools/check_mermaid.py --root .   # 可选，需 mmdc
+```
 
 ## 加一条 semantic 规则
 

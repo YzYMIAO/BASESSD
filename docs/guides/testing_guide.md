@@ -483,7 +483,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 - `.ssd_code_high`：release 61,344 B / debug 57,168 B / 64 KB；debug 余量 8,368 B（2026-10-30）。
 - `.dtcm_data`：release 67,832 B / 128 KB；预留 20 KB stack。
-- `g_ftl_md` 放 SRAM4；BCH 静态表放 DTCM；**页缓冲必须在 AXI_NOCACHE，不得放 DTCM**。
+- FTL metadata Directory workspace 放 SRAM4；BCH 静态表放 DTCM；**页缓冲必须在 AXI_NOCACHE，不得放 DTCM**。
 - **不能用 H2testw 判断 ITCM 收益**（USB FS / NAND tPROG 约束）；用 CPU-bound 微基准或
   填盘后随机覆盖触发 GC 再 A/B。
 - 详细 A/B 记录见 `docs/archive/testing_guide_itcm_ab.md`。
@@ -719,7 +719,7 @@ RISK-XXX-NN | 镜像横幅（__DATE__ __TIME__）| 触发步骤 | 期望/实际 
 
 - 同一 TU 内的调用**不会**被 wrap（例如 `ftl_fc_interface.c` 内部的 mirror 变体）；
 - 通过函数指针 / 回调表调用的不 wrap；
-- 静态函数（`l2p_load_begin` / `cp_job_step` / `jrn_write_complete` 等）不 wrap
+- 静态函数（`l2p_load_begin` / `cp_job_step` / `jrn_write_handle_callback` 等）不 wrap
   ⇒ 要么保留**最小 hook**，要么改用其公开入口的 wrap（如 `ftl_op_submit` 带 ctx/phase）；
 - wrapper 只允许做「注入或调用 real」两件事；不得修改参数/状态。
 

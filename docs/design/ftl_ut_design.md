@@ -54,8 +54,7 @@
 | `pending` / group | `src/ftl/pending.c` | `pend_*`、组槽、确认停车、错误聚合 | pure / negative / media |
 | `wbuf` | `src/ftl/wbuf.c` | 页打包窗口、owners、逐 CW 读回 | pure / media / negative |
 | `ftl_op` | `src/ftl/ftl_op.c` | request 表、route、ctx 旁表 | pure / negative / media |
-| `bg_policy` | `src/ftl/bg_policy.c` | 任务表、等级选择、预算/触发 | pure / negative / media |
-| `ftl_sched` | `src/ftl/ftl_sched.c` | work item、credit、host/flush 登记、完成回收 | pure / negative / media |
+| `ftl_sched`（调度器 + 后台策略） | `src/ftl/ftl_sched.c` | work item、credit、host/flush 登记、完成回收；任务表、等级选择、预算/触发 | pure / negative / media |
 | `migrate` / `GC` | `src/ftl/migrate.c`、`gc.c` | `mig_*`、victim 选择、搬移 / 擦除 / 失败封顶 | pure / media / negative |
 | `wear_leveling` | `src/ftl/wear_leveling.c` | `wl_*`、UBI 判据、victim、目的块准备 | pure / media / negative |
 | `read_recovery` | `src/ftl/read_recovery.c` | `rr_*`、健康等级、预测退役、读失败闸门 | pure / media / negative |
@@ -397,17 +396,17 @@ entry_count`，只比页首会 off-by-one）、`jrn_resume_cross_block_erase_fai
 
 - 跨 die 路由组合受单 target 板限制（`RISK-CR-02`）。
 
-### 2.10 `bg_policy` + `ftl_sched` — 后台触发与请求调度
+### 2.10 `ftl_sched` — 请求调度与后台触发
 
 **设计要点**
 
-- 任务表长度 = `BG_POLICY_TASK_COUNT`；`level_select` 返回合法档位。
+- 任务表长度 = `FTL_BG_JOB_NUM`；`level_select` 返回合法档位。
 - pending 0→IDLE、8→NORMAL、17→BUSY；used group 保守升 BUSY。
 - 门控必须单一配置源；host busy 与后台任务不得互相饿死。
 
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
-| 任务表 / 等级 | 表长 = `BG_POLICY_TASK_COUNT`；`level_select` 合法 | `bg_engine` | — |
+| 任务表 / 等级 | 表长 = `FTL_BG_JOB_NUM`；`level_select` 合法 | `bg_engine` | — |
 | 等级边界 | pending 0→IDLE、8→NORMAL、17→BUSY；used group 升 BUSY | `bg_level_select` | — |
 | 空盘基线 | GC/WL 入口无副作用；空盘不误触发 | `gc_policy_entry` | — |
 | flush 登记 | 同 region 幂等；`flush_items` 计数；reset 清空 | `sched_flush_registry` | — |
@@ -530,7 +529,7 @@ media：`alloc_fail_bounded`、`gc_read_fail_bounded`、`gc_write_fail_bounded`�
 
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
-| 写查询 | PROGRAMMED 返回真实 PBA；CONFIRMED/FAILED 不返回 | `cache_wr_lookup` | — |
+| 写查询 | PROGRAMMED 返回真实 PBA；CONFIRMED/FAILED 不返回 | `ftl_cache_write_lookup` | — |
 | FAILC 结算 | 已确认前缀保留；失败页 IO_ERROR；`wb_aborts+1`；未确认页保留旧映射 | `cache_failc_abort`（arm=1/2/last） | — |
 | 早回执读可见 | 写后不 flush 立刻读新数据；flush+重启一致 | `cache_early_ack_read_visible` | — |
 | FAILC 撤销 | 下一 host 命令报一次 deferred error；失败页/同 region 未映射 LBA 读 IO_ERROR | `cache_failc_undo_read_error` | — |
@@ -777,7 +776,7 @@ media：`alloc_fail_bounded`、`gc_read_fail_bounded`、`gc_write_fail_bounded`�
 
 每个用例 teardown 至少检查（`ftl_ut_assert_clean`）：
 
-- `INV-PEND`：`pend_slot_get_count()==0`、`pend_group_get_count()==0`、
+- `INV-PEND`：`pend_slot_count()==0`、`pend_group_count()==0`、
   `ftl_op_req_count()==0`；
 - `INV-FC`：FC 资源 `sq/hsq/cq/command/descriptor/buffer` 全 0；
 - `INV-MD`：migrate/checkpoint/metadata/journal/wbuf/L2P 均 idle；
@@ -1062,7 +1061,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
 | `RISK-WL-04` | K | 需正常 WL/GC + 断电 + soak，属长时压测 |
-| `RISK-WL-05` | K | 性能项（`wl_should_trigger` 与 `wl_select_victim` 各做一次全表扫描） |
+| `RISK-WL-05` | K | 性能项（`wl_trigger_is_due` 与 `wl_select_victim` 各做一次全表扫描） |
 
 **FTL↔FC 接口（2）**
 

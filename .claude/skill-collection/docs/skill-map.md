@@ -21,6 +21,7 @@ skills/
 │   └── basessd-project            现有
 ├── design/                        设计
 │   ├── basessd-design-arch        现有
+│   ├── basessd-design-docs        现有
 │   └── basessd-design             现有
 ├── develop/                       开发
 │   ├── basessd-develop-ftl        现有
@@ -50,7 +51,7 @@ skills/
 | 生命周期 | 子流程 |
 |---|---|
 | 立项 | `project` |
-| 设计 | `design` + `arch` |
+| 设计 | `design` + `arch` + `docs` |
 | **开发** | **`ftl` / `fc` / `hil` / `platform`** |
 | 验证 | `verify` + `board` |
 | 维护 | `maintain` + `fault` |
@@ -62,6 +63,7 @@ skills/
 | skill | 不做什么 → 转给 |
 |---|---|
 | `basessd-design-arch` | 实现 / 审查 / 排障 → 层 skill / review / fault |
+| `basessd-design-docs` | C 代码审查 → review；架构决策 → design-arch；实现 → develop |
 | `basessd-develop-ftl` | FC/NAND → fc；平台 → platform；审查 → review |
 | `basessd-develop-fc` | FTL → ftl；平台 → platform；上板 → board |
 | `basessd-develop-hil` | FTL/FC 内部逻辑 → 对应层 |

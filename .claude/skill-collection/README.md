@@ -10,7 +10,7 @@
 .claude/skill-collection/
 ├── skills/
 │   ├── project/                 立项：project
-│   ├── design/                  设计：design + arch
+│   ├── design/                  设计：design + arch + docs
 │   ├── develop/                 开发：ftl / fc / hil / platform
 │   ├── verify/                  验证：verify + board
 │   ├── maintain/                维护：maintain + fault

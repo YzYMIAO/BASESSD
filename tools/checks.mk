@@ -1,7 +1,7 @@
 # ============================================================================
 # 工具 / H 规则检查目标（root makefile 只做总控）
 #
-# 这里只放“脚本调用”：H41/H50/H51 统一 runner、文档 / 台账 / rules / 审查
+# 这里只放“脚本调用”：H41/H50/H51/H52 统一 runner、文档 / 台账 / rules / 审查
 # 标记检查、compile-commands / tidy。编译、链接、format 留在根 makefile。
 # 加新检查 = 本文件加 target + 根 makefile 的 check 组加一行。
 # ============================================================================
@@ -81,7 +81,19 @@ layout-report:
 layout-test:
 	@$(PYTHON) "$(C_RULES_CHECK)" --root $(PROJECT_ROOT) --rule H51 --self-test
 
-# H 规则统一入口（H41 / H50 / H51）；后续新规则只加 rulecheck/textual/ 模块。
+# ============================================================================
+# H52 模块文件成对检查（首批只扫 src/ftl）
+#   - 每个模块 .c 必须有同名 .h；一个内部 .h 只对应一个 .c；
+#   - 例外必须文件头标注：header-only / implements / internal-only / multi-impl。
+# ============================================================================
+.PHONY: check-pairs check-pairs-test
+check-pairs:
+	@$(PYTHON) "$(C_RULES_CHECK)" --root $(PROJECT_ROOT) --rule H52
+
+check-pairs-test:
+	@$(PYTHON) "$(C_RULES_CHECK)" --root $(PROJECT_ROOT) --rule H52 --self-test
+
+# H 规则统一入口（H41 / H50 / H51 / H52）；后续新规则只加 rulecheck/textual/ 模块。
 .PHONY: c-rules-check c-rules-test
 c-rules-check:
 	@$(PYTHON) "$(C_RULES_CHECK)" --root $(PROJECT_ROOT) --all
@@ -109,6 +121,11 @@ docs-report:
 .PHONY: docs-test
 docs-test:
 	@$(PYTHON) $(DOCS_CHECK) --self-test
+
+# 可选：Mermaid 语法校验，依赖 mmdc（@mermaid-js/mermaid-cli）。不挂 check。
+.PHONY: docs-mermaid
+docs-mermaid:
+	@$(PYTHON) $(PROJECT_ROOT)/tools/check_mermaid.py --root $(PROJECT_ROOT)
 
 # ============================================================================
 # 开放式 / 已闭合台账一致性检查

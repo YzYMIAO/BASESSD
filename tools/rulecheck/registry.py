@@ -24,6 +24,7 @@ class Finding:
     message: str
     severity: Severity = "error"
     rule_id: str = ""
+    category: str = ""  # 文档规则用：平台 / 代码坐标 / 日期 / 尺寸 / 台账；C 规则留空
 
 
 @dataclass
