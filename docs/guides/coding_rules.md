@@ -1,7 +1,7 @@
 > 常驻一句话规则在 `.claude/rules/c-coding.md`；本文件是细则 / why / 反例，按需读。
 > 通用 15 章见 [coding_rules_generic.md](coding_rules_generic.md)。
 
-# C 编码规则细则（本项目 H1~H52）
+# C 编码规则细则（本项目 H1~H53）
 
 三层关系：
 
@@ -359,7 +359,7 @@ BCH `deg(0) = -1` 等局部算术；`third_party/`、CMSIS/HAL、munit 保持上
 
 #### 动作词表
 
-- 通用动作：`get/set/find/add/remove/push/pop/alloc/free/release/refill/close/open/rewind/reset/note/record/scan/register/eval/build/take/finish/kick/start/read/write/flush/commit/dispatch/drain/gate/select/progress/tick/stall/wait/yield/cleanup/abort/store/erase/reap/dump/prepare/request/issue/append/freeze/reserve/resume/update/plan/replay/apply/claim/install/touch/merge/invalidate/drop/lookup/decode/detach/evict/settle/park/snapshot/finalize/preload/prefetch/pump/print/collect/locate/advance/probe/copy/restore/retry/rotate/rebuild/fill/load/assemble/check/format/execute/carve/verify/report/materialize/bind/mark/next`
+- 通用动作：`get/set/find/add/remove/push/pop/alloc/free/release/refill/close/open/rewind/reset/note/record/scan/register/eval/build/take/finish/kick/start/read/write/flush/commit/dispatch/drain/gate/select/progress/tick/stall/wait/yield/cleanup/abort/store/erase/reap/dump/prepare/request/issue/append/freeze/reserve/resume/update/plan/replay/apply/claim/install/touch/merge/invalidate/drop/lookup/decode/detach/evict/settle/park/snapshot/finalize/preload/prefetch/pump/print/collect/locate/advance/probe/copy/restore/retry/rotate/rebuild/fill/load/assemble/check/format/execute/carve/solve/verify/report/materialize/bind/mark/next`
 - 入口角色（H51 收尾）：`init/service/handle/step/submit/begin/run`
 - 回调角色：`op_callback` / `handle_callback`
 - 谓词前缀：`is` / `has`
@@ -369,7 +369,8 @@ BCH `deg(0) = -1` 等局部算术；`third_party/`、CMSIS/HAL、munit 保持上
 
 **语义区分**：`take` = 读出并清位 / 租约，`pop` = FIFO；`start` = 启动 job/序列，
 `kick` = 触发一次 flush/host kick；`note` = 轻量记账，`record` = Trace/日志落盘；
-`finish` = job/group 收尾（`complete` 不再作动作词）；`eval` = 周期求值；`build` = 构造值/结构。
+`finish` = job/group 收尾（`complete` 不再作动作词）；`eval` = 周期求值；`build` = 构造值/结构；
+`solve` = 数学方程/多项式求根（保留算法语义，如 `fc_bch_solve_cubic`）。
 
 #### 值、谓词与回调
 
@@ -431,6 +432,7 @@ tag 全大写 `_S/_E/_U`，alias 全小写 `_s/_e/_u`，与 tag 不同名。
 
 统一入口为 `tools/check_c.py`（`make c-rules-check` = H41 / H50 / H51 / H52；
 `types-check` / `layout-check` / `headers-check` / `check-pairs` 暂保留为兼容目标）。
+H53 不机检（判据依赖链接图，文本检查器拿不到编译产物）。
 
 ### H51 文件内布局（.c / .h）
 
@@ -532,6 +534,63 @@ tag 全大写 `_S/_E/_U`，alias 全小写 `_s/_e/_u`，与 tag 不同名。
 **与主流的关系**
 
 本规则是**本仓自定约定**，不冒充行业标准：主流项目常见模块 `.c/.h` 配对，但也普遍存在多个 `.c` 共用一个内部头、无头 `.c`（例如 Linux 内核）。本仓用它换取 FTL 层模块边界与声明归属的可机械审计；代价是新增文件时多一次配对判断。
+
+### H53 内部函数的 static 与单测可见性（条件链接）
+
+目标是「生产代码不为测试牺牲封装」：只看 `.c` 内部调用的函数一律 `static`，但单测要直接构造内部状态 / 覆盖分支时仍能调到。两种坏做法都不接受：
+
+- 为测试保留**无条件外部链接** ⇒ 内部实现成为整层的隐式 API，改它就要怕别处调用；
+- 把函数体搬进头文件做 `static inline` ⇒ 违反 H42（有逻辑的实体该在 `.c`）。
+
+**做法：按模块定义一个「条件链接宏」**，产品档展开为 `static`，测试构建展开为空。
+
+```c
+/* src/fc/fc_data_path.h —— 宏放在文件头之后、原型之前 */
+#if defined(FC_NAND_TEST_ENABLE)
+#    define FC_DATA_PATH_STEP_LINKAGE
+#else
+#    define FC_DATA_PATH_STEP_LINKAGE static
+#endif
+
+#if defined(FC_NAND_TEST_ENABLE)
+FC_DATA_PATH_STEP_LINKAGE fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
+#endif /* 原型与定义用同一宏；产品档 .h 里不出现这个原型 */
+```
+
+```c
+/* src/fc/fc_data_path.c */
+FC_DATA_PATH_STEP_LINKAGE fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
+{
+    ...
+}
+```
+
+**判据**
+
+- **只有「单测必须直接调用」才用**。能经公共入口覆盖、且不丢介质格式语义（字段放置位置、步骤顺序）的，保持无条件 `static`；为了让测试少建一次链而开 seam 不算理由。
+- **宏名带模块前缀**（`FC_DATA_PATH_STEP_LINKAGE` / `FC_UOP_STEP_LINKAGE`），**禁用通用 `STATIC`**。通用名会与第三方头冲突：Zephyr 曾因 `STATIC` 宏与外部库同名而改为 `ZTESTABLE_STATIC`（PR #104385）。
+- **`.h` 原型与 `.c` 定义用同一宏门控**。产品档头里不出现该原型；测试构建下两处都导出。漏一处会在测试构建报错，可接受。
+- **`#if` 内只切链接属性**，不夹带行为分支。测试专用行为（hook / 计数 / 跳过硬件）走既有 `FC_NAND_TEST_ENABLE` 块，用普通 `#if`，不要塞进链接宏。
+- **seam 只进模块自己的 `src/<layer>/*.h`**，不进 `include/<layer>/` 公共契约头。公共头是库表面（H12 / S5.1），不因测试扩宽。
+- 不以 seam 代替 `--wrap`：`make tests` 已对整函数打桩的用 `-Wl,--wrap=`（见 `tests/makefile.mk`），seam 只解决「要调 static 原语」这一类。
+
+**当前实例**
+
+| 宏 | 位置 | 导出的符号 | 为什么不能走公共入口 |
+|---|---|---|---|
+| `FC_DATA_PATH_STEP_LINKAGE` | `src/fc/fc_data_path.h` | `fc_data_path_meta_write` / `crc_write` / `scramble` / `ecc_encode` / `ecc_decode` / `crc_check` | 单测要验证 META[0,4) / CRC[4,8) / USER[8,520) / ECC[520,528) 的**字段放置语义**；走 `fc_data_path_encode` 只能看到「成功」，看不出写在哪 |
+| `FC_UOP_STEP_LINKAGE` | `src/fc/fc_nand_engine.h` | `fc_uop_engine_step` | 单测要手工构造引擎状态，覆盖 `JUMP_IF_NOT_READY` 回跳守卫与 release 下溢 |
+
+**反例**
+
+- 函数只在本 TU 调用，却因为 UT 要调而保持外链 ⇒ 应 H53 seam。
+- `#define STATIC static` 这种全局宏 ⇒ 撞名 + 隐式改写所有声明。
+- `#if defined(TEST) void foo(void); #else ...` 把整个函数体复制成两份 ⇒ 链接宏只该改 `static` 这个词。
+- 把 seam 原型放进 `include/fc/fc_interface.h` ⇒ 公共契约被测试需求污染。
+
+**与主流的关系**
+
+形态出处是 Zephyr 的 `ZTESTABLE_STATIC`（`zephyr/sys/util.h`）：*"Define symbol as static unless we are building with ZTEST. Use this for private symbols which need to be accessible from tests."* 本仓按模块拆宏（一个模块一个，不共用一个全局 `STATIC`），因为 C 预处理器宏无命名空间，全局名容易和 HAL / 第三方头冲突。这是**有出处的主流形态 + 本仓命名约束**，不是纯自拟。
 
 ## 注释风格补充（S5 / S6）
 

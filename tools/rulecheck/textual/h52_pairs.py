@@ -1,11 +1,12 @@
-"""H52 模块文件成对检查（首批只扫 src/ftl）。
+"""H52 模块文件成对检查（FTL / FC / NAND 三层）。
 
 判据：
-  · 每个模块 .c 必须有同名 .h（同 basename，可在 src/ftl 或 include/ftl）；
+  · 每个模块 .c 必须有同名 .h（同 basename，可在本层 src/ 或 include/）；
+  · 子目录模块按同相对子路径配对（如 src/nand/devices/x.c ↔ include/nand/devices/x.h）；
   · 一个内部 .h 声明的符号只能由一个 .c 实现（公共 include/ 契约头豁免）；
   · 例外必须在文件头标注，机器可检：
       header-only: config | contract | inline-access   （无 .c 的头）
-      implements <header.h>                            （端口适配 .c）
+      implements <header.h>                            （端口适配 / 接口实现 .c）
       internal-only                                    （无跨 TU 导出的内部拆分 .c）
       multi-impl: <reason>                             （注册/分发表等一表多头）
 
@@ -21,8 +22,12 @@ from pathlib import Path
 from rulecheck.model import load_document
 from rulecheck.registry import Finding, Rule
 
-SCOPE = Path("src/ftl")
-PUBLIC = Path("include/ftl")
+# (本层 src 目录, 公共 include 目录)；公共 include 头允许多个 .c 实现（H52）。
+LAYERS = (
+    (Path("src/ftl"), Path("include/ftl")),
+    (Path("src/fc"), Path("include/fc")),
+    (Path("src/nand"), Path("include/nand")),
+)
 HEADER_ONLY_KINDS = {"config", "contract", "inline-access"}
 HEAD_LINES = 40
 
@@ -52,18 +57,38 @@ def _markers(path: Path) -> dict[str, str]:
     return result
 
 
-def _find_header(root: Path, name: str) -> Path | None:
-    for base in (root / SCOPE, root / PUBLIC):
-        candidate = base / name
+def _find_header(root: Path, scope: Path, public: Path, source: Path) -> Path | None:
+    """按 H52 查找顺序定位 .c 的同名头（同目录 → 本层根 → 公共根 → 同相对子路径）。"""
+    name = source.with_suffix(".h").name
+    try:
+        rel = source.relative_to(root / scope)
+    except ValueError:
+        return None
+    candidates = (
+        source.with_suffix(".h"),
+        root / scope / name,
+        root / public / name,
+        root / scope / rel.with_suffix(".h"),
+        root / public / rel.with_suffix(".h"),
+    )
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
 
 
-def _target_files(root: Path, targets: list[Path] | None) -> tuple[list[Path], list[Path]]:
-    base = root / SCOPE
-    c_files = sorted(base.glob("*.c")) if base.is_dir() else []
-    h_files = sorted(base.glob("*.h")) if base.is_dir() else []
+def _lookup_header_name(root: Path, scope: Path, public: Path, name: str) -> Path | None:
+    """按纯文件名查找头（`implements <header.h>` 标记用）。"""
+    for candidate in (root / scope / name, root / public / name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _target_files(root: Path, scope: Path, targets: list[Path] | None) -> tuple[list[Path], list[Path]]:
+    base = root / scope
+    c_files = sorted(base.rglob("*.c")) if base.is_dir() else []
+    h_files = sorted(base.rglob("*.h")) if base.is_dir() else []
     if targets is not None:
         wanted = {path.resolve() for path in targets}
         c_files = [path for path in c_files if path.resolve() in wanted]
@@ -71,13 +96,13 @@ def _target_files(root: Path, targets: list[Path] | None) -> tuple[list[Path], l
     return c_files, h_files
 
 
-def _definitions(root: Path) -> dict[str, set[Path]]:
-    """函数名 → 定义它的 .c 集合（只扫 H52 作用域）。"""
-    base = root / SCOPE
+def _definitions(root: Path, scope: Path) -> dict[str, set[Path]]:
+    """函数名 → 定义它的 .c 集合（只扫本层 src 目录）。"""
+    base = root / scope
     table: dict[str, set[Path]] = {}
     if not base.is_dir():
         return table
-    for path in sorted(base.glob("*.c")):
+    for path in sorted(base.rglob("*.c")):
         try:
             document = load_document(path)
         except (OSError, ValueError):
@@ -88,18 +113,20 @@ def _definitions(root: Path) -> dict[str, set[Path]]:
     return table
 
 
-def _check_forward(root: Path, c_files: list[Path], h_files: list[Path]) -> list[Finding]:
+def _check_forward(
+    root: Path, scope: Path, public: Path, c_files: list[Path], h_files: list[Path]
+) -> list[Finding]:
     findings: list[Finding] = []
     for path in c_files:
         markers = _markers(path)
         if "implements" in markers:
-            target = _find_header(root, Path(markers["implements"]).name)
+            target = _lookup_header_name(root, scope, public, Path(markers["implements"]).name)
             if target is None:
                 findings.append(Finding(path, 1, f"implements 指向的头不存在：{markers['implements']}"))
             continue
         if "internal_only" in markers:
             continue
-        if _find_header(root, path.with_suffix(".h").name) is None:
+        if _find_header(root, scope, public, path) is None:
             findings.append(Finding(path, 1, "模块 .c 缺少同名 .h（或补 implements / internal-only 标记）"))
     for path in h_files:
         if (path.parent / path.with_suffix(".c").name).is_file():
@@ -114,9 +141,9 @@ def _check_forward(root: Path, c_files: list[Path], h_files: list[Path]) -> list
     return findings
 
 
-def _check_reverse(root: Path, h_files: list[Path]) -> list[Finding]:
+def _check_reverse(root: Path, scope: Path, h_files: list[Path]) -> list[Finding]:
     findings: list[Finding] = []
-    definitions = _definitions(root)
+    definitions = _definitions(root, scope)
     for header in h_files:
         pair = header.parent / header.with_suffix(".c").name
         if not pair.is_file():
@@ -153,9 +180,11 @@ def _check_reverse(root: Path, h_files: list[Path]) -> list[Finding]:
 
 
 def check(root: Path, targets: list[Path] | None) -> list[Finding]:
-    c_files, h_files = _target_files(root, targets)
-    findings = _check_forward(root, c_files, h_files)
-    findings.extend(_check_reverse(root, h_files))
+    findings: list[Finding] = []
+    for scope, public in LAYERS:
+        c_files, h_files = _target_files(root, scope, targets)
+        findings.extend(_check_forward(root, scope, public, c_files, h_files))
+        findings.extend(_check_reverse(root, scope, h_files))
     return findings
 
 
@@ -231,6 +260,22 @@ def selftest() -> tuple[bool, str]:
             {"src/ftl/port.c": "/* implements missing.h */\nvoid port(void) { }\n"},
             1,
         ),
+        (
+            "subdir_pair",
+            {
+                "src/nand/devices/dev.c": "int dev_query(void) { return 0; }\n",
+                "include/nand/devices/dev.h": "int dev_query(void);\n",
+            },
+            0,
+        ),
+        (
+            "implements_public_header",
+            {
+                "src/fc/foo.c": "/* implements fc_interface.h */\nvoid foo_entry(void) { }\n",
+                "include/fc/fc_interface.h": "/* header-only: contract */\nvoid foo_entry(void);\n",
+            },
+            0,
+        ),
     ]
     failures = [message for name, files, want in cases if (message := _run_case(name, files, want))]
     if failures:
@@ -244,5 +289,5 @@ RULE = Rule(
     kind="textual",
     check=check,
     selftest=selftest,
-    roots=("src/ftl",),
+    roots=("src/ftl", "src/fc", "src/nand"),
 )

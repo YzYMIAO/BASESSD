@@ -23,6 +23,7 @@ paths:
 | H30~H31 | CERT C（健壮性） |
 | H32~H40 | 本仓自定（状态机 / 返回语义 / 守卫 / 声明 / 命名 / 注释 / 维度泛化） |
 | H41~H52 | 本仓自定（头文件路径 / 内联分层 / 强转 / 实参 / 状态码 / 结构体初始化 / 优化顺序 / 类型命名 / 文件内布局 / 模块文件成对） |
+| H53 | 本仓自定（测试 seam；形态出处 Zephyr `ZTESTABLE_STATIC`，`sys/util.h`，PR #104385） |
 
 ## 资源、错误与断言
 
@@ -150,6 +151,9 @@ paths:
 
 **H52 模块文件成对：每个模块 `.c` 必须有同名 `.h`；一个内部 `.h` 也只能对应一个 `.c`。**
 同名按 basename 判定（`src/<layer>/foo.c` ↔ `src/<layer>/foo.h` 或 `include/<layer>/foo.h`）；该 `.c` 的跨 TU 符号只在其同名 `.h` 声明。例外必须**可机检**（文件头前 40 行标记）：`header-only: config|contract|inline-access`（无 `.c` 的配置 / 类型 / inline 访问器头）、`implements <header>`（端口适配 `.c`）、`internal-only`（无跨 TU 导出的拆分 `.c`）、`multi-impl: <理由>`（注册 / 分发表等一表多头）；`main.c` 为入口例外，`include/<layer>/` 公共契约头允许多个 `.c` 实现。首批只扫 `src/ftl`；检查 `make check-pairs`，细则 `docs/guides/coding_rules.md` H52。
+
+**H53 内部函数默认 `static`；单测必须直调时用「条件链接宏」暴露，禁止为测试保留无条件外部链接。**
+产品档宏展开为 `static`、测试构建（`FC_NAND_TEST_ENABLE`）展开为空；宏名带模块前缀（`FC_DATA_PATH_STEP_LINKAGE` / `FC_UOP_STEP_LINKAGE`），禁用通用 `STATIC`（会撞第三方头）；`.h` 原型与 `.c` 定义用同一宏门控；`#if` 内只切链接属性，测试专用行为分支走既有 `FC_NAND_TEST_ENABLE` 块。能经公共入口覆盖且不丢介质格式语义的，保持无条件 `static`。形态出处 Zephyr `ZTESTABLE_STATIC`（PR #104385）；细则 `docs/guides/coding_rules.md` H53。
 
 ## 注释风格（S）
 

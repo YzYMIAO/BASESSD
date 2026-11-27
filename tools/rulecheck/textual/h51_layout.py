@@ -608,5 +608,5 @@ RULE = Rule(
     kind="textual",
     check=check,
     selftest=selftest,
-    roots=("src",),
+    roots=("src", "include/fc", "include/nand"),
 )

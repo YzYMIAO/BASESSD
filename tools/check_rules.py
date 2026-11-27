@@ -10,8 +10,8 @@
 检查项：
   1. CLAUDE.md 体积预算（硬上限 220 行 / 28,000 字节；目标 200 行 / 25 KB）；
   2. CLAUDE.md 行首定义 R1~R12 / C1~C12 / P0~P14 各恰好一次；
-  3. .claude/rules/c-coding.md 行首定义 H1~H52 / S1~S6 各恰好一次；
-  4. docs/guides/coding_rules.md 中 ### H1~H52 各恰好一次；
+  3. .claude/rules/c-coding.md 行首定义 H1~H53 / S1~S6 各恰好一次；
+  4. docs/guides/coding_rules.md 中 ### H1~H53 各恰好一次；
   5. .claude/rules/*.md 必须有 YAML paths:；
   6. skill 目录名 = frontmatter name，统一 basessd- 前缀，ASCII kebab-case，
      有 description、必需小节，< 500 行；
@@ -55,7 +55,7 @@ EXPECTED_ROOT = {
     "P": set(range(0, 15)),
 }
 EXPECTED_C_CODING = {
-    "H": set(range(1, 53)),
+    "H": set(range(1, 54)),
     "S": set(range(1, 7)),
 }
 EXPECTED_SKILLS = {
@@ -319,7 +319,7 @@ def check_all(root: Path) -> list[str]:
             for match in [SECTION_RE.match(line)]
             if match
         ]
-        missing = sorted(set(range(1, 53)) - set(found))
+        missing = sorted(set(range(1, 54)) - set(found))
         duplicates = sorted({value for value in found if found.count(value) > 1})
         if missing:
             errors.append(f"coding_rules.md: 缺少 H 小节 {missing}")
@@ -386,14 +386,14 @@ def self_test() -> int:
         return "\n".join(lines) + "\n"
 
     def c_coding_text(h_ids: set[int] | None = None) -> str:
-        h_ids = set(range(1, 53)) if h_ids is None else h_ids
+        h_ids = set(range(1, 54)) if h_ids is None else h_ids
         lines = ["---", "paths:", '  - "src/**"', "---", ""]
         lines.extend(f"**H{i} rule.**" for i in sorted(h_ids))
         lines.extend(f"**S{i} rule.**" for i in range(1, 7))
         return "\n".join(lines) + "\n"
 
     def skill_text(name: str, h_ids: set[int] | None = None) -> str:
-        h_ids = set(range(1, 53)) if h_ids is None else h_ids
+        h_ids = set(range(1, 54)) if h_ids is None else h_ids
         lines = ["---", f"name: {name}", "description: test", "---", ""]
         lines.extend(f"### H{i} rule" for i in sorted(h_ids))
         lines.extend(
@@ -576,7 +576,9 @@ def main(argv: list[str]) -> int:
         target = f"（目标 {ROOT_LINES_TARGET} 行 / {ROOT_BYTES_TARGET} B）"
     print(
         f"rules-check: OK (CLAUDE.md {lines} 行 / {size} B{target}; "
-        f"R12 C12 P15 H52 S6; {len(EXPECTED_SKILLS)} skills; "
+        f"R{len(EXPECTED_ROOT['R'])} C{len(EXPECTED_ROOT['C'])} "
+        f"P{len(EXPECTED_ROOT['P'])} H{len(EXPECTED_C_CODING['H'])} "
+        f"S{len(EXPECTED_C_CODING['S'])}; {len(EXPECTED_SKILLS)} skills; "
         f"{len(EXPECTED_RULES)} rules)"
     )
     return 0
