@@ -67,6 +67,7 @@ EXPECTED_SKILLS = {
     "basessd-design-arch",
     "basessd-design-docs",
     "basessd-verify-board",
+    "basessd-verify-board-ut",
     "basessd-develop-fc",
     "basessd-maintain-fault",
     "basessd-develop-ftl",

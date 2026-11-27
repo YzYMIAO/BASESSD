@@ -12,7 +12,7 @@
 │   ├── project/                 立项：project
 │   ├── design/                  设计：design + arch + docs
 │   ├── develop/                 开发：ftl / fc / hil / platform
-│   ├── verify/                  验证：verify + board
+│   ├── verify/                  验证：verify + board + board-ut
 │   ├── maintain/                维护：maintain + fault
 │   ├── review/                  审查：review
 │   └── release/                 发布：release

@@ -30,6 +30,7 @@ skills/
 │   └── basessd-develop-platform   现有（P0）
 ├── verify/                        验证
 │   ├── basessd-verify-board       现有
+│   ├── basessd-verify-board-ut    现有（串口 UT 分层 runner）
 │   └── basessd-verify             现有
 ├── maintain/                      维护
 │   ├── basessd-maintain-fault     现有
@@ -53,7 +54,7 @@ skills/
 | 立项 | `project` |
 | 设计 | `design` + `arch` + `docs` |
 | **开发** | **`ftl` / `fc` / `hil` / `platform`** |
-| 验证 | `verify` + `board` |
+| 验证 | `verify` + `board` + `board-ut` |
 | 维护 | `maintain` + `fault` |
 | 审查 | `review` |
 | 发布 | `release` |
@@ -68,7 +69,8 @@ skills/
 | `basessd-develop-fc` | FTL → ftl；平台 → platform；上板 → board |
 | `basessd-develop-hil` | FTL/FC 内部逻辑 → 对应层 |
 | `basessd-develop-platform` | 业务层语义 → 对应层 |
-| `basessd-verify-board` | 代码审查 → review；故障定位 → fault |
+| `basessd-verify-board` | 代码审查 → review；故障定位 → fault；分层 UT → board-ut |
+| `basessd-verify-board-ut` | 烧录/普通上板日志 → verify-board；测试设计 → verify |
 | `basessd-maintain-fault` | 静态审查 → review；计划内改动 → 层 skill |
 | `basessd-review` | 架构决策 → arch；实现 → 层 skill |
 | `basessd-project` | 实现 → design/develop；审查 → review |
