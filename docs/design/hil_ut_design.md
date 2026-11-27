@@ -7,8 +7,7 @@
 > 范围：`src/hil/`（HIL 层）。架构设计见 `docs/design/hil_design.md`（本文只写测试，不复制设计细节）；
 > FTL UT 见 `docs/design/ftl_ut_design.md`；FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
 > 关联：`docs/design/known_open_items.md` ISS-HIL-01/02/03；
-> `docs/design/known_open_items.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-04 /
-> RISK-HOST-20 / RISK-HOST-21；
+> RISK-UT-34 / RISK-USB-02 / RISK-USB-08 / RISK-USB-13 / RISK-USBC-01 / RISK-USBC-03；
 > `docs/guides/usb_msc_verify.md`（PC 主机矩阵）。
 > 分层坐标：`docs/guides/testing_guide.md` §3 的 **L3 主机接口**（HIL）。
 
@@ -607,73 +606,45 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 入口已校验，`submit_edg
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
-> §7.1 只保留「判据非显然 / 跨模块」的 HIL 风险。
+> `docs/design/known_open_items.md`；已闭合 / 不实现条目见 `docs/design/known_closed_items.md`。
+> 本表只保留 `RISK-ID → 测试项 / 用例` 映射与负例判定（M/N/K），不重复台账状态词。
 
-| RISK | 涉及测试项 | 判据 | 代表用例 |
+### 7.1 判据非显然的风险
+
+| RISK | 涉及测试项 | 判据 / 复盘点 | 代表用例 |
 |---|---|---|---|
+| `RISK-USB-02` | `usb_msc` | MSC 异步完成 / deferred / 会话切换；需主机拔线或复位 | PC 主机矩阵 |
+| `RISK-USB-08` | `usb_msc` | 写 lookahead 提前回执后的失败 CSW / BUSY 背压 | PC 主机矩阵 |
+| `RISK-USBC-01` | `usb_msc` | deferred error 以下一条命令失败近似，非标准 sense | PC 主机矩阵 |
+| `RISK-USBC-03` | `usb_msc` | USB 盘间歇报无介质；主机侧止血，固件未复现 | PC 主机矩阵 |
+| `RISK-USB-13` | `usb_msc` | 两写槽占用时 READ 统一 BUSY；BOT 单命令下实际顺序不触发 | PC 主机矩阵 |
 | `RISK-UT-34` | `ssd_controller` / `ssd_request` / `host_queue` / `hil_io` | HIL 契约剩余缺口：跨重启、多 run、USB 矩阵 | `is_complete`、`host_queue`、`write_flush_readback` |
-| `RISK-CTRL-04` | `ssd_controller` | submit 已校验 `buffer == NULL`，UT 负例已补（未运行） | `submit_edges`（含 NULL） |
-| `RISK-HOST-20` | `host_queue` / `cli` / `usb_msc` | host 前端互斥已收口为单一 gate（未上板） | `host_queue`（部分） |
-| `RISK-HOST-21` | `cli` / `usb_msc` | 没有 host 命令超时 / 中止 | 无 |
-| `RISK-USB-12` / `RISK-USB-13` | `usb_msc` | SYNCHRONIZE CACHE(16) 未支持；两写槽占用时 READ 返回 ERROR | PC 主机矩阵 |
+| `ISS-HIL-01` / `ISS-HIL-02` | HIL UT | 剩余跨重启 / 多 run / USB 矩阵、24 例逐条记录 | `submit_edges` 等 |
+| `ISS-HIL-03` | HIL UT | CH/CE/LUN>1 扩维（多 die 硬件未接） | — |
+
+> 已闭合项回归用例仍在 `/hil/contract/` / `/hil/io/` 执行：`instance_init_twice`、
+> `request_timeout_boundary`、`request_timeout_flush`、`request_timeout_tombstone`、
+> `request_timeout_trim`；状态见 `known_closed_items.md`。
 
 ### 7.2 负例判定台账（HIL / USB / CLI 层）
 
-> 本表只列**当前未闭合**的 HIL 前端风险（索引状态取自 `docs/design/known_open_items.md`）。
-> 判定口径同 `docs/guides/testing_guide.md` §12.1；HIL 层没有注入 seam，失败路径只能靠
-> 主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
-> **信息**条目只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。
+> 本表只列**当前未闭合**且仍有负例判定的 HIL 前端风险；状态见
+> `docs/design/known_open_items.md`。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
+> 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）。
+> HIL 层没有注入 seam，失败路径只能靠主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
+> `信息` 条目只在 `known_open_items.md` 维护；`已闭合` / `不实现` 条目只在
+> `known_closed_items.md` 维护，本表不重复。
 
-**CLI（6）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-CLI-01` | 待决策 | IWDG 未启用，长命令阻塞主循环的复位后果无法验证（RISK-CLI-01 同时是 IWDG 启用裁决） |
-| `RISK-CLI-02` | K | 需 CLI `format` / `bbt --erase` 与 USB 在飞并发（主机侧矩阵） |
-| `RISK-CLI-03` | K | 需连续 `wp` 重入，CLI 交互构造 |
-| `RISK-CLI-06` | K | `q`/`cp`/`jrn`/`stat`/`id`/`ecc`/`wear` 字段需人工对拍 |
-| `RISK-CLI-07` | K | 需制造读失败并抓串口输出，触发不可确定性构造 |
-| `RISK-CLI-09` | 待上板 | 断言现场 CLI 自带泵，但 FTL 内断言仍可能重入；未上板 |
-
-**Controller / host queue（3）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-CTRL-04` | 待验证 | `submit` 已校验 `buffer == NULL`（bb9f14f）；`submit_edges` 负例已补（构建通过、未运行） |
-| `RISK-HOST-20` | 待验证 | host 前端互斥已收口为单一 gate；需上板并发验证 |
-| `RISK-HOST-21` | 待后续 | 缺 host 命令超时 / 中止，需设计 |
-
-**USB MSC / 主机侧（8）**
+**USB MSC / 主机侧（4）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
 | `RISK-USB-02` | K | MSC 异步完成 / deferred / 会话切换需主机拔线或复位 |
-| `RISK-USB-07` | K | `cmd_remaining` 在 `usb_msc.c` 内，HIL 只到 controller，无法从请求对象断言 |
 | `RISK-USB-08` | K | 需主机早期回执 + 程序失败组合 |
-| `RISK-USB-12` | K | 需主机发 0x91，PC 侧验证 |
-| `RISK-USB-13` | K | 需两写槽在飞时 READ；槽状态构造未证明 |
-| `RISK-USB-14` | K | 需主机 `blkdiscard` / `fstrim` |
-| `RISK-USB-15` | 待决策 | UNMAP 未向主机广告，是否广告未定 |
-| `RISK-USBC-03` | 待定位 | USB 盘间歇报无介质；主机侧采样 / 盘符问题，需 PC 侧 |
-
-**平台 / 证据（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-PLAT-08` | 待定位 | `.noinit` 一次 HardFault，PC 落 newlib printf；故障镜像未定 |
-| `RISK-UT-34` | N | 已上板 17/17；buffer NULL 负例已补（构建通过、未运行）；剩余跨重启 / 多 run / USB 槽矩阵 / `cancel_flush` |
-
-**cache 主机面（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
 | `RISK-USBC-01` | K | deferred sense 语义需主机侧观察 |
+| `RISK-USBC-03` | — | USB 盘间歇报无介质；主机侧采样 / 盘符问题，需 PC 侧 trace |
 
-> 台账合计 **22** 条：N 1 / K 12 / 状态词 9。已闭合的平台守卫
-> `RISK-PLAT-13` / `RISK-PLAT-14` / `RISK-PLAT-06` 见 `known_closed_items.md`；
-> 信息项 `RISK-USB-09` / `RISK-USB-10` / `RISK-USB-11` / `RISK-CTRL-01` /
-> `RISK-PLAT-07` 在 `known_open_items.md` 维护。
+> 台账合计 **4** 条：N 0 / K 3 / 未判定 1。已闭合 / 不实现条目不再列入本表。
 
 ---
 

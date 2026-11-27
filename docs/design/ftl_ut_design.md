@@ -980,166 +980,76 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
-> §7.1 只保留「判据非显然 / 跨模块」的风险簇。
+> `docs/design/known_open_items.md`；已闭合 / 不实现条目见 `docs/design/known_closed_items.md`。
+> 本表只保留 `RISK-ID → 测试项 / 用例` 映射与负例判定（M/N/K），不重复台账状态词。
 
 ### 7.1 风险簇
 
-| RISK 簇 | 涉及测试项 | 判据 | 代表用例 |
+| RISK 簇 | 涉及测试项 | 判据 / 复盘点 | 代表用例 |
 |---|---|---|---|
-| `RISK-UT-06` | `bbt` / `allocator` | BBT 持久化用例会永久标坏用户块；全量跑必须接受该成本 | `bbt_persist`、`bbt_ring_reload` |
-| `RISK-ALLOC-06` / `RISK-ALLOC-09` / `RISK-MIG-03` / `RISK-ARCH-02` | `allocator` / `migrate` / GC | PBA 编解码往返；Free Pool 四本账同步；`valid_count` 搬移守恒；跨 LUN 未实现 | `pba_roundtrip`、`alloc_free_pool_invariants`、`alloc_valid_count_guard`、`gc_progress` |
-| `RISK-BIT-01` | `allocator` / wbuf / cache | CW flat 绝对编号；span/plane 掩码；`NAND_FIELD_MASK` | `pba_cw_masks`、`wbuf_density` |
-| `RISK-MD-06` / `RISK-MD-16` / `RISK-MD-17` / `RISK-BOOT-02` | `metadata` / `checkpoint` | 压缩写 abort 不回收 / 擦 victim；物理不可读 victim 的 fallback 成功路径未注入；`handle.error` 的清除语义 | `md_abort_keeps_victim`、`md_cp_read_fail_no_reclaim`、`md_status_error` |
-| `RISK-JN-03` / `RISK-L2P-10` | `journal` / `L2P` | 写失败标记置位、WAL 退让、追平后放行；有界收尾 | `md_journal_write_fail_clear`、`l2p_wal_gate`、`journal_write_fail_wal_stall` |
-| `RISK-BOOT-03` / `RISK-BOOT-04` / `RISK-BOOT-05` / `RISK-BOOT-13` / `RISK-BOOT-17` / `RISK-BOOT-22` / `RISK-BOOT-24` / `RISK-CP-03` / `RISK-BBT-02` | `PFR` / `CP` / `metadata` | CP 探针四态；FORMAT_IN_PROGRESS 恢复；启动账本守恒；CP 编码 / 定时器；真掉电点人工 | `cp_probe_clean_media`、`cp_corrupt_refuse_format`、`format_in_progress_resume`、`boot_restore_reconcile`、`md_cp_encoders`、`md_cp_init_timer`、`format_and_roundtrip` |
-| `RISK-GC-06` / `RISK-GC-14` / `RISK-PLAT-10` / `RISK-NAND-06` | `GC` / `migrate` | 触发水位、victim benefit、CW 解码、失败封顶；SysTick / TIM6 时钟源；真 NAND 失败靠板端观测 | `gc_trigger`、`gc_select_victim`、`gc_decode_cw_lba`、`gc_progress`、`mig_eval_fake_clock`、`format_and_roundtrip` |
-| `RISK-WL-04` | `wear_leveling` | UBI 判据；victim 最低擦除 used SB；有效比例阈值 | `wl_trigger_and_victim`、`wl_victim_threshold`、`wl_progress` |
-| `RISK-L2P-03` / `RISK-L2P-06` | `L2P` / `CMT` | 驻留行状态；miss / evict；跨 region；TRIM 不复活 | `l2p_resident_states`、`l2p_miss_unmapped_evict`、`cross_region_roundtrip`、`trim_no_resurrection` |
-| `RISK-CACHE-19` / `RISK-CACHE-20` / `RISK-CACHE-24` / `RISK-CACHE-27` / `RISK-CACHE-28` / `RISK-CACHE-29` | `cache_batch` | FAILC 结算、跨 block 序列、早回执可见性、flush 屏障 | `cache_failc_abort`、`cache_seq_cross_block`、`cache_early_ack_read_visible`、`cache_failc_undo_read_error`、`cache_early_ack_flush_barrier` |
-| `RISK-HOST-05` / `RISK-HOST-08` / `RISK-HOST-09` / `RISK-HOST-11` | `pending` / `journal` / `L2P` | 确认停车超时；TRIM 持久化；Journal 压力下的时序 | `pend_confirm_park_timeout`、`pend_confirm_is_parked`、`trim_no_resurrection` |
-| `RISK-WB-03` / `RISK-IF-04` / `RISK-CR-02` / `RISK-BBT-01` / `RISK-BBT-06` / `RISK-BBT-10` / `RISK-BBT-18` / `RISK-RD-01` | `wbuf` / `ftl_op` / `BBT` / `RR` | 窗口 owners / 在飞计数；route 同一实例；BBT 最新记录 / 重复完成；RR 健康单调 | `wbuf_append_read`、`op_route`、`bbt_ring_reload`、`rr_health` |
+| `RISK-MD-23` / `RISK-MD-26` | `metadata` / `PFR` | ring frontier 半编程槽；Journal 重扫读错误未纳入控制流 | `md_ring_locate`、`boot_restore_reconcile` |
+| `RISK-BOOT-04` / `RISK-BBT-03` / `RISK-BBT-14` / `RISK-BBT-22` | `PFR` / `BBT` | 两阶段格式化 / BBT save 掉电；完成态写失败标坏 | `format_in_progress_resume`、`bbt_write_fail` |
+| `RISK-CACHE-26` / `RISK-CACHE-32` / `RISK-L2P-07` | `cache_batch` / `L2P` | 1536 LBA 读回全 0；环满静默丢写；预取占 cache 行 | `cache_seq_cross_block`、`cache_pad_no_free_aborts`、`l2p_cmt_line_invalidate` |
+| `RISK-GC-02` / `RISK-MIG-07` / `RISK-WB-07` | `migrate` / `GC` / `wbuf` | 目的页写失败 / GC 读失败退役 / wbuf 半页卡死 | `gc_write_fail_bounded`、`gc_systemic_read_fuse`、`wbuf_append_read` |
+| `RISK-FC-05` / `RISK-HOST-05` / `RISK-IF-09` / `RISK-IF-12` / `RISK-IF-19` | `ftl_sched` / `pending` / `ftl_op` | teardown SQ 头残留；confirm park timeout；放弃序列 / 1s idle / mirror 长度 | `pend_confirm_park_timeout`、`op_ctx` |
+| `RISK-ALLOC-17` | `allocator` | 容量公式缺「元数据 + OP + Spare ≤ 每 plane 块数」编译期守卫 | `alloc_free_pool_invariants` |
+| `RISK-NAND-06` / `RISK-RD-01` | NAND / PFR | 运行期 BAD 标记来源未定；`CRC/MATA` 单次不可纠读 | `gc_read_unc_marks_bad` |
+| `RISK-ARCH-02` | 跨 LUN | 跨 LUN superblock 条带 / GC/WL 未实现（多 LUN 硬件未接） | — |
 
 ### 7.2 负例判定台账（FTL 层）
 
-> 本表只列**当前未闭合**的 FTL 风险（索引状态取自 `docs/design/known_open_items.md`）。
-> **M** = 有能变红的负例且上板通过；**N** = 注入点 / 触发步骤 / 断言已从源码确认、只差上板；
-> **K** = 当前不可构造（写明原因）；非负例项保留其状态词（`待定位` / `待议` / `待决策`）。
-> **信息**条目的判定与理由只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。本表不重复。
-> 组名沿用风险登记模块分组；跨层框架（注入 API、宏隔离、验收）见
-> `docs/guides/testing_guide.md` §12。
+> 本表只列**当前未闭合**且仍有负例判定的 FTL 风险；状态见
+> `docs/design/known_open_items.md`。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
+> 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）。
+> `信息` 条目只在 `known_open_items.md` 维护；`已闭合` / `不实现` 条目只在
+> `known_closed_items.md` 维护，本表不重复。
 
-**metadata（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-MD-06` | M（待定位） | 无 seam；3 代写后 reboot×4；断言 region 未降级、读回第 3 代；用例 `md_alias_full_rebuild_repro` |
-| `RISK-MD-23` | K | 需写目录检查点期间掉电（人工断电） |
-
-**GC / migrate / journal（9）**
+**metadata / BBT / PFR（6）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-GC-02` | N（待定位） | `gc_write_complete_fail_closes_cold`：行为断言通过，但已迁移页读回 0xFF，根因未定 |
-| `RISK-GC-05` | K | 性能优化项（GC bitmap），非失败场景 |
-| `RISK-GC-06` | K | 需长压测：WL 5s 节拍 / CLOSED 门控需白盒或长压测 |
-| `RISK-GC-14` | K | 需满盘 / 慢写窗口，短负例不可控 |
-| `RISK-GC-15` | K | 需写到 free<32 的长序列 |
-| `RISK-MIG-07` | M（待定位） | 同 `gc_read_unc_marks_bad`（熔断后不再成批标坏）；用例 `gc_systemic_read_fuse` |
-| `RISK-JN-10` | K | 需写 journal 期间掉电 |
-| `RISK-PERF-01` | K | 性能项（GC/WL 选块重复全表扫描），非失败场景 |
-| `RISK-PERF-02` | K | 性能项（目的页逐 plane 单条写） |
+| `RISK-MD-23` | K | 需写目录检查点期间掉电（人工断电），用 `md_ring_locate` 观察半编程槽 |
+| `RISK-MD-26` | — | `jrn_page_scan_latest` 的 `read_error` 未纳入控制流；需 metadata BAD + Journal 环页读失败注入 |
+| `RISK-BBT-03` | K | 需 format 处理中掉电；`format_in_progress_resume` 只覆盖 save 后 |
+| `RISK-BBT-14` | K | 需 format 中途掉电；`format_in_progress_resume` 覆盖 save 后 / CP marker 前 |
+| `RISK-BBT-22` | K | 完成态写失败需注入；`bbt_write_fail` 覆盖提交失败，不覆盖完成态 |
+| `RISK-BOOT-04` | K | 两阶段格式化中途掉电；`format_in_progress_resume` 只覆盖 save 后 |
 
-**BBT（5）**
+**L2P / cache（3）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-BBT-02` | N | `read_column_fail_seam`：列读 PBA 失败 seam（工厂扫描判坏路径待板） |
-| `RISK-BBT-03` | K | 需 format 处理中掉电 |
-| `RISK-BBT-04` | K | 介质格式演进项（header 无布局版本），非负例 |
-| `RISK-BBT-10` | N | kick 路径（`bbt_kick_candidates`）已上板；factory-scan / format_erase 破坏性路径未覆盖 |
-| `RISK-BBT-14` | K | 需 format 中途掉电 |
+| `RISK-CACHE-26` | — | `cache_seq_cross_block` / 随机写压测；原始 1536 LBA 读回全 0 复现未验 |
+| `RISK-CACHE-32` | K | 环满需调小环深 / 放大 chunk 注入；`cache_pad_no_free_aborts` 覆盖 pad 无 free，不覆盖环满 |
+| `RISK-L2P-07` | K | 预取资源的板端命中率 / FLUSH 延迟需观测；`l2p_cmt_line_invalidate` 只覆盖行失效 |
 
-**掉电恢复 / 启动（5）**
+**GC / migrate / wbuf（3）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-BOOT-04` | K | 两阶段格式化中途掉电（人工断电） |
-| `RISK-BOOT-17` | K | 需真空白片 |
-| `RISK-BOOT-22` | K | 需 format 中途掉电 |
-| `RISK-BOOT-25` | K | 需长压测：dangling 归因需日志采集与长序列 |
-| `RISK-MD-15` | K | 需满盘压缩与双副本搬移压力 |
+| `RISK-GC-02` | N | `gc_write_fail_bounded`：完成态写失败后 Cold SB 关闭、已迁移页可读；部分页读回 0xFF 根因未定 |
+| `RISK-MIG-07` | M | `gc_systemic_read_fuse`：熔断后不再成批标坏；L2P 悬空根因未定 |
+| `RISK-WB-07` | — | 8-LBA × 深度 2 最小复现；`wbuf_append_read` 覆盖正常 append/read |
 
-**Checkpoint（1）**
+**scheduler / interface（5）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-CP-04` | N | 扩展 `l2p_pool_starve_flush`：命令池占满时 force CP 有界返回、不无限等槽 |
+| `RISK-FC-05` | — | 出现 host I/O 变慢 / teardown ctx 残留时看 `ftl teardown leaked` 行 |
+| `RISK-HOST-05` | — | `pend_confirm_park_timeout` 已覆盖停车超时；上游三支未定 |
+| `RISK-IF-09` | K | 读中途拔线 / 主机中止，再读同 LBA 比对；当前无设备 LAST |
+| `RISK-IF-12` | K | 大顺序写 + free 低位，看 >100ms 停顿 / IO_ERROR |
+| `RISK-IF-19` | K | 静态守卫缺失；负例传 `PAGE_MAIN_SIZE + 1` |
 
-**磨损计数 / 静态 WL（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-WL-04` | K | 需正常 WL/GC + 断电 + soak，属长时压测 |
-| `RISK-WL-05` | K | 性能项（`wl_trigger_is_due` 与 `wl_select_victim` 各做一次全表扫描） |
-
-**FTL↔FC 接口（2）**
+**allocator / NAND / RD（3）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-IF-09` | K | 需主机中途拔线 / 中止（PC 侧手动） |
-| `RISK-IF-12` | K | 需满盘大顺序写 + 序列门控，属长压测 |
+| `RISK-ALLOC-17` | K | 容量静态断言缺失；负例把 Spare 调到超界，编译必须失败 |
+| `RISK-NAND-06` | — | H2testw + `map` / `rdpaa --raw` 区分映射错 / 物理页错 |
+| `RISK-RD-01` | — | 再出现 `CRC/MATA` 时抓完整日志 + 前后 STAT |
 
-**Host 提交 / 完成组 / pending（4）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-HOST-05` | 待定位 | 上游三支未定，需日志现场采集 |
-| `RISK-HOST-11` | N | 复用 `trim_no_resurrection`：Journal 压力下 TRIM 持久化 |
-| `RISK-HOST-14` | K | 需拔线 + 满盘 GC 窗口，人工触发 |
-| `RISK-HOST-22` | K | 需 free+OP 同时耗尽；无注入点 |
-
-**完成派发面（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-FC-05` | 待定位 | 依赖前序组合状态，复现条件已隔离，原因未证实 |
-
-**页打包写缓冲（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-WB-07` | 待定位 | depth2 半页卡死未定位 |
-
-**service / 后台调度器（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-BG-01` | 待定位 | 风险描述与当前实现不符（已无 `rr_last_scan` 门），需重审该条目 |
-| `RISK-BG-10` | K | token bucket / 节拍是吞吐行为，需长压测 |
-
-**模块 handle 契约（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-ARCH-02` | K | 跨 LUN 条带需多实例硬件 |
-
-**allocator（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-ALLOC-09` | K | 需 plane 不平衡的低 free 长压测 |
-
-**L2P cache（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-L2P-07` | K | 顺序读预取白占 cache 行 / 资源，可能延迟 FLUSH；需长压测（预取收益与延迟的权衡） |
-
-**cache 长流（3）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-CACHE-18` | K | VWC 窗口需掉电量化 |
-| `RISK-CACHE-26` | 待定位 | 1536 LBA 读回全 0 未定位，需压测复现 |
-| `RISK-CACHE-29` | K | 长流 + 掉电窗口未量化 |
-
-**平台定时调度器（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-PLAT-09` | K | 时基行为需板端长跑；UT 只能测伪时钟 |
-| `RISK-PLAT-12` | K | DWT→SysTick 需板端对比 |
-
-**NAND 拓扑扫描（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-TOP-03` | N | `onfi_read_fail_seam`：参数页读失败 seam（扫描拒绝启动路径待板） |
-
-> 台账合计 **43** 条：M 2 / N 6 / K 30 / 状态词 5。HIL 主机前端相关的
-> `RISK-HOST-20` / `RISK-HOST-21` 见 `docs/design/hil_ut_design.md` §7.2；
-> `RISK-UT-43` 见 `docs/design/fc_nand_ut.md` §7.2。
+> 台账合计 **20** 条：M 1 / N 1 / K 11 / 未判定 7。已闭合 / 不实现条目不再列入本表。
 
 ---
 

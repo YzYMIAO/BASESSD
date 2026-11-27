@@ -498,75 +498,54 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
 ## 7. 风险追溯（副轴）
 
 > 风险是**追溯维度**，不是本文的组织轴。状态、历史、是否闭合见
-> `docs/design/known_open_items.md`；负例判定台账（M/N/K）见 §7.2。
-> §7.1 只保留「判据非显然」的 FC-NAND 风险。
+> `docs/design/known_open_items.md`；已闭合 / 不实现条目见 `docs/design/known_closed_items.md`。
+> 本表只保留 `RISK-ID → 测试项 / 用例` 映射与负例判定（M/N/K），不重复台账状态词。
+
+### 7.1 判据非显然的风险
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
 |---|---|---|---|
-| `RISK-UT-42` | `fc_nand_engine` | 注入 `set_timing(Mode5)` 失败→回滚 Mode 0；结束前恢复 Mode 5 | `timing_rollback_on_set_timing_fail` |
-| `RISK-UT-43` | `fc_nand_engine` | Mode 0 构建下该用例断言与实现契约相反，当前未验证 | `timing_rollback_on_set_timing_fail` |
-| `RISK-DP-13` | `fc_ecc_engine` / `fc_bch_engine` | t=4 边界注入 1..4 bit 错→纠正数与数据恢复同时正确 | `dp_ecc_step` |
-| `RISK-DP-28` | `fc_crc_engine` | 注入 CRC compute 失败→`fc_crc_verify` 报错，`fi_hits` 增长 | `crc_compute_fail_seam` |
-| `RISK-TOP-03` | `onfi_1_0` | 注入参数页读失败→返回 `NAND_RESULT_OPERATION_FAILED` | `onfi_read_fail_seam` |
-| `RISK-IF-07` | `fc_nand_dispatch` | 链未结束时 HSQ 插不进来 | `chain_priority_lock` |
-| `RISK-POOL-01` | `fc_pool` | 在飞命令 release 被拒绝，`command_used` 不变 | `in_flight_release_guard` |
-| `RISK-SCH-08` | `fc.c` / `fc_interface` | multi-plane 命令的单 CW data ptr 返回 NULL | `data_ptr_single_plane_only` |
+| `RISK-DP-28` | `fc_crc_engine` | 注入 CRC compute 失败→`fc_crc_verify` 报错、`fi_hits` 增长；CRC init release 守卫待做 | `crc_compute_fail_seam` |
+| `RISK-NAND-05` | `fc_nand_engine` / NAND | 物理不可纠读页只观测；不作 UT 通过判据 | `/bench/speed/fc_nand_rw` |
+| `RISK-NAND-06` | `fc_nand_engine` / NAND | 运行期 BAD 标记来源未定；只观测 | `/bench/speed/fc_nand_rw` |
+| `RISK-RD-01` | `fc_data_path` / NAND | `CRC/MATA` 事件只观测，需复现与映射链路定位 | `/bench/speed/fc_nand_rw` |
 | `RISK-NANDP-03` | `fc_nand_engine` | Mode 5 运行期 UNC 只观测，不作 UT 通过判据 | `/bench/speed/fc_nand_rw` |
-| `RISK-DP-05` | `fc_raid_engine` | RAID 路径当前不编译、不覆盖 | —（RAID=1 专用用例） |
+| `RISK-NANDP-05` | `fc_nand_engine` | 多 target timing，需多 target 硬件 | — |
+| `RISK-NANDP-01` / `RISK-NANDP-04` | `fc_nand_dispatch` / NAND | 多 target 通路 / 初始化，多 target 硬件未接 | — |
+| `RISK-UT-43` | `fc_nand_engine` | Mode 0 构建下 timing rollback 断言与实现契约相反，测试源未同步 | `timing_rollback_on_set_timing_fail` |
 
 ### 7.2 负例判定台账（FC-NAND 层）
 
-> 本表只列**当前未闭合**的 FC-NAND / NAND 器件风险（索引状态取自
-> `docs/design/known_open_items.md`）。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
-> 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）；非负例项保留
-> 其状态词。**信息**条目只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。
-> 跨层框架（注入 API、宏隔离、验收）见 `docs/guides/testing_guide.md` §12。
+> 本表只列**当前未闭合**且仍有负例判定的 FC-NAND / NAND 风险；状态见
+> `docs/design/known_open_items.md`。**M** = 有能变红的负例且上板通过；**N** = 注入点 /
+> 触发步骤 / 断言已从源码确认、只差上板；**K** = 当前不可构造（写明原因）。
+> `信息` 条目只在 `known_open_items.md` 维护；`已闭合` / `不实现` 条目只在
+> `known_closed_items.md` 维护，本表不重复。
 
-**FC 资源池（1）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-POOL-12` | 待议 | 描述符池按单 plane 口径估算；满额双 plane 并发的上限需裁决 |
-
-**数据面（3）**
+**数据面（1）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-DP-15` | K | LDPC 未启用；切 LDPC 构建才可构造 |
-| `RISK-DP-27` | K | LDPC 未启用；解码栈超 2 KiB 栈预算 |
 | `RISK-DP-28` | N | `crc_compute_fail_seam`：注入 CRC 计算失败→`fc_crc_verify` 报错、`fi_hits` 增长（CRC init 失败的 release 守卫仍待做） |
 
-**主循环 / 调度 / CQ（2）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-SCH-03` | 待决策 | CQ 满时丢完成项；阻塞 / 拒绝二选一需裁决 |
-| `RISK-SCH-06` | K | 断言终端路径再次断言，需制造池账分叉，风险高 |
-
-**NAND 器件 / PHY（3）**
-
-| ID | 判定 | 用例 / 判定说明 |
-|---|---|---|
-| `RISK-NANDP-05` | K | 多 target timing 共享单套 HAL 句柄，需多 target 硬件 |
-| `RISK-NANDP-08` | K | timing 表部分字段无消费者；改动需板端时序回归，非负例 |
-| `RISK-NANDP-17` | K | 需启用 on-die ECC 才能构造 `tR_ECC` 超时 |
-
-**NAND / FMC 时序与板端读完整性（3）**
+**NAND 器件 / PHY / 时序（6）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
 | `RISK-NAND-05` | K | 需芯片物理坏页；当前介质无 |
-| `RISK-NAND-06` | 待定位 | 运行期 BAD 标记来源未定（Mode 5 时序 / 同页二次编程 / 边缘块），需板端复现 |
-| `RISK-RD-01` | 待定位 | 单次不可纠读的 `CRC|MATA` 事件，需复现与映射链路定位 |
+| `RISK-NAND-06` | K | 运行期 BAD 标记来源未定（Mode 5 时序 / 同页二次编程 / 边缘块），需板端复现 |
+| `RISK-RD-01` | K | 单次不可纠读的 `CRC/MATA` 事件，需复现与映射链路定位 |
+| `RISK-NANDP-05` | K | 多 target timing 共享单套 HAL 句柄，需多 target 硬件 |
+| `RISK-NANDP-01` | K | 多 target 无真实 FMC bank/CE# 切换，需多 target 硬件 |
+| `RISK-NANDP-04` | K | 多 target 板卡未逐 target 初始化，需多 target 硬件 |
 
 **UT 测试源（1）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-UT-43` | 待测试源 | Mode 0 构建下 `timing_rollback_on_set_timing_fail` 的断言与实现契约相反，测试源待同步 |
+| `RISK-UT-43` | K | Mode 0 构建下 `timing_rollback_on_set_timing_fail` 的断言与实现契约相反，测试源未同步 |
 
-> 台账合计 **13** 条：N 1 / K 7 / 状态词 5。HIL / USB / CLI 侧的负例见
-> `docs/design/hil_ut_design.md` §7.2；FTL 侧见 `docs/design/ftl_ut_design.md` §7.2。
+> 台账合计 **8** 条：N 1 / K 7 / 未判定 0。已闭合 / 不实现条目不再列入本表。
 
 ---
 
