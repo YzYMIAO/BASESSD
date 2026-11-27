@@ -51,7 +51,7 @@ typedef enum FI_FAULT_E
     FI_BBT_WRITE_FAIL,        /* BBT record 写失败（key 未用） */
     FI_MIG_READ_FAIL,         /* GC/WL victim 页读失败（key = plane） */
     FI_MIG_WRITE_FAIL,        /* GC/WL 目的页写失败（key = plane） */
-    FI_MIG_ERASE_FAIL,        /* GC/WL victim 擦除失败（key = plane） */
+    FI_MIG_ERASE_FAIL,        /* GC/WL victim 擦除失败（key = 块 PBA） */
     FI_RR_READ_FAIL,          /* Read Recovery 恢复读硬失败（key = plane） */
     FI_SEQ_GATE_STARVE,       /* 序列门控拒绝，模拟后台被饿死（key 未用） */
     FI_FC_STATUS_DATA,        /* 仅 DATA 命令的 FC 完成状态注入（key = opcode 或 FI_KEY_ANY） */

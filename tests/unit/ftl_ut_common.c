@@ -10,11 +10,13 @@
 #include "ftl_ut_common.h"
 
 #include "checkpoint.h"
-#include "cli.h" /* g_ctrl */
+#include "cli.h"
+#include "controller.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "fault_inject.h"
 #include "fc_interface.h"
 #include "fc_nand_dispatch.h"
 #include "fc_nand_engine.h"
+#include "ftl_interface.h" /* ftl_flush_begin / ftl_flush_step（quiesce 排空 CMT dirty） */
 #include "ftl_op.h"
 #include "journal.h"
 #include "metadata_job.h"
@@ -267,7 +269,8 @@ void ftl_ut_settle_background(ftl_ctx_s *ftl)
 
 void ftl_ut_quiesce(ftl_ctx_s *ftl)
 {
-    const DWORD t0 = platform_now_ms();
+    const DWORD t0           = platform_now_ms();
+    DWORD       flush_starts = 0U;
 
     ftl->flags.bg_suspend = 1U;
 
@@ -306,10 +309,36 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
 
         ftl_service_pump();
 
+        /* CMT dirty 是 RAM 状态，不是 job/队列：只等 job/队列会在上一组 host 写的
+         * 脏映射尚未写回时就返回，teardown 的 cmt_dirty==0 断言随即被上一条命令的
+         * 残留打红（全量顺序 / seed 相关）。这里复用生产 FLUSH 路径
+         * （dirty L2P + journal 落盘）把 dirty 排干。 */
+        if ((ftl->cache->stats.cmt_dirty != 0U) && (ftl->flush.active == false))
+        {
+            if (flush_starts < 8U)
+            {
+                flush_starts++;
+                ftl_flush_begin(ftl);
+            }
+            else
+            {
+                /* flush 反复完成但 CMT dirty 不退：不是正常 settle，显式失败而不是
+                 * 无限 begin/step。md/CP 的等锁不在这里处理——它们由本循环的
+                 * cp_handle/md_handle + 5 s 超时诊断负责。 */
+                munit_errorf("quiesce: dirty not cleared after %lu flush attempts (cmt_dirty=%lu)",
+                             (unsigned long)flush_starts,
+                             (unsigned long)ftl->cache->stats.cmt_dirty);
+            }
+        }
+        if (ftl->flush.active != false)
+        {
+            (void)ftl_flush_step(ftl);
+        }
+
         memset(&rs, 0, sizeof(rs));
         fc_resource_stats_get(&rs);
 
-        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.write.count == 0U) && (ftl->cache_stream.seq.write_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->sched.items != NULL) &&
+        const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.write.count == 0U) && (ftl->cache_stream.seq.write_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->cache->stats.cmt_dirty == 0U) && (ftl->flush.active == false) && (ftl->sched.items != NULL) &&
                                (ftl->sched.host_items == 0U) && (ftl->sched.flush_items == 0U) && (ftl->sched.prefetch_items == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_LOAD] == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH] == 0U);
 
         if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && jobs_idle)
@@ -317,7 +346,26 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
             return;
         }
 
-        munit_assert_uint32(platform_now_ms() - t0, <, FTL_UT_IO_TIMEOUT_MS);
+        const DWORD waited = platform_now_ms() - t0;
+
+        if (waited >= FTL_UT_IO_TIMEOUT_MS)
+        {
+            /* 不是单一 dirty 条件时，把 CP/md/命令池/目录检查点 owner 一次打全：
+             * 用于区分「CP 等镜像写完成」「md 等 CP 的目录检查点锁」等停摆。 */
+            munit_errorf("quiesce timeout %lums: cmt_dirty=%lu cp=%d/%d wait=%d md=%d op_req=%hu pool=%hu/%hu/%hu dir_ckpt busy=%d owner=%hhu",
+                         (unsigned long)waited,
+                         (unsigned long)ftl->cache->stats.cmt_dirty,
+                         (int)ftl->cp_handle->active,
+                         (int)ftl->cp_handle->phase,
+                         (int)ftl->cp_handle->waiting,
+                         (int)ftl->metadata_dir->handle.phase,
+                         (unsigned)ftl_op_req_count(),
+                         (unsigned)rs.command_used,
+                         (unsigned)rs.descriptor_used,
+                         (unsigned)rs.buffer_used,
+                         (int)ftl->metadata_dir->ckpt.busy,
+                         (unsigned)ftl->metadata_dir->ckpt.owner);
+        }
     }
 }
 

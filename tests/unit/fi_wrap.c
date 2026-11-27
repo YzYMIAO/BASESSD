@@ -237,9 +237,7 @@ ftl_status_e __wrap_ftl_sync_write_page_mirror(DWORD pba, const void *data, DWOR
 
 ftl_status_e __wrap_ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const BYTE plane = pba_to_plane(pba);
-
-    if (fi_take_at(FI_MIG_ERASE_FAIL, plane) == true)
+    if (fi_take_at(FI_MIG_ERASE_FAIL, pba) == true)
     {
         return FTL_ERROR;
     }
@@ -249,9 +247,7 @@ ftl_status_e __wrap_ftl_async_erase_block(fc_cmd_s **out_cmd, DWORD pba)
 
 ftl_status_e __wrap_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD pba)
 {
-    const BYTE plane = pba_to_plane(pba);
-
-    if (fi_take_at(FI_MIG_ERASE_FAIL, plane) == true)
+    if (fi_take_at(FI_MIG_ERASE_FAIL, pba) == true)
     {
         return FTL_ERROR;
     }
@@ -261,9 +257,7 @@ ftl_status_e __wrap_ftl_async_erase_block_multi_plane(fc_cmd_s **out_cmd, DWORD 
 
 ftl_status_e __wrap_ftl_sync_erase_block_multi_plane(DWORD pba)
 {
-    const BYTE plane = pba_to_plane(pba);
-
-    if (fi_take_at(FI_MIG_ERASE_FAIL, plane) == true)
+    if (fi_take_at(FI_MIG_ERASE_FAIL, pba) == true)
     {
         return FTL_ERROR;
     }

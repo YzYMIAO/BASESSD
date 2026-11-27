@@ -26,7 +26,8 @@
  *   （两者都开）时重复定义套件数组。
  */
 
-#include "cli.h" /* g_ctrl / ssd_controller_host_lba_max */
+#include "cli.h"
+#include "controller.h" /* g_ctrl / ssd_controller_host_lba_max */
 #include "delay.h"
 #include "fc_interface.h"
 #include "fc_nand_dispatch.h"

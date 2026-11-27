@@ -2248,7 +2248,11 @@ static MunitResult test_gc_partial_plane_erase_abort(const MunitParameter params
 
     const DWORD hits0 = fi_hits(FI_MIG_ERASE_FAIL);
 
-    fi_arm_at(FI_MIG_ERASE_FAIL, 1U, 1U); /* 只让 plane1 的擦除失败 */
+    /* 故障 key 用 victim 的 plane1 块 PBA，而不是 plane：后台 CP/journal 也可能擦
+     * plane1 的块，按 plane 武装会被它们先消费，GC 自身反而擦成功（job 不 abort）。 */
+    const DWORD pba1 = super_block_page_pba(ftl->topo, v, 1U, 0U);
+
+    fi_arm_at(FI_MIG_ERASE_FAIL, pba1, 1U); /* 只让 plane1 的擦除失败 */
 
     munit_assert_true(neg_run_gc(ftl, 200000U));
 
