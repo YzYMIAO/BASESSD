@@ -343,7 +343,7 @@ ssd> stats --clear          # 只清 counter，不动 gauge
 | `ftl.gc` | `mig_handle_s.state.counters`（`mig_counters_s`） | `reclaimed` / `moved` / `noop` / `novictim` / `nogain` / `batch_jobs` / `batch_pages` / `batch_aborts` | counter |
 | `ftl.stats` | `ftl_ctx_s.stats`（`ftl_stats_s`） | `total_writes` / `dangling_total` | `total_writes` 是**功能量**（mig 判 host 写流）⇒ 按 gauge 登记，`--clear` 不清；`dangling_total` counter |
 | `fc.pool` | `&g_fc_controller`（`fc_ctl_s` 字段） | `command_used` / `descriptor_used` / `buffer_used` / `command_high` / `descriptor_high` / `buffer_high`（`WORD`）+ `sq_used` / `hsq_used` / `cq_used` | gauge |
-| `uart` | `usart.c` 的 `g_uart_stats` | `rx_overflow` / `tx_dropped` / `tx_context_errors` / `tx_flush_timeouts` / `tx_dma_errors` / `tx_transport_errors` / `overrun_errors` / `framing_errors` / `noise_errors` / `parity_errors` | counter |
+| `uart` | `usart.c` 的 `s_usart_stats` | `rx_overflow` / `tx_dropped` / `tx_context_errors` / `tx_flush_timeouts` / `tx_dma_errors` / `tx_transport_errors` / `overrun_errors` / `framing_errors` / `noise_errors` / `parity_errors` | counter |
 
 > `fc.pool` 已裁决**入表**：SQ/HSQ/CQ 当前占用用嵌套偏移登记 ——
 > `offsetof(fc_ctl_s, sq) + offsetof(fc_sub_queue_s, count)`（HSQ/CQ 同理）。
@@ -490,7 +490,7 @@ stats fc.submit           #    还是队列满/额度满
 | 阶段 | 内容 | 落点 | 完成判据 |
 |---|---|---|---|
 | **S0 骨架** | `stats.h` / `stats.c`：类型、注册表（有界、幂等）、`print/clear/delta`、`SSD_STATS_ENABLE`；CLI `stats [prefix] [--clear] [--delta]` | `include/common/stats.h`、`src/common/stats.c`、`src/hil/cli.c` | 四关零告警；`SSD_STATS_ENABLE=0` 负例（`strings` 无名字、help 无 `stats`）；`--list` 显示 0 组；**不接任何模块** |
-| **S1 现有结构体登记** | 零新增存储：`l2p_cache_stats_s`、`l2p_prefetch_stats_s`、`mig_counters_s`、`ftl_stats_s`、`fc_ctl_s` gauge（含 SQ/HSQ/CQ）、`uart_stats_s`；FC/uart/主循环在各自 init 注册，FTL 每实例组由 `ftl_init` 组合根注册（避免测试直接 `mig_init` 时把栈地址写进注册表） | 各模块 `.c/.h` + 名字表 | 上板 `wr`/`rd` 后计数真实增长（C8）；`--clear` 只清 counter、gauge 不变；行为与改前一致 |
+| **S1 现有结构体登记** | 零新增存储：`l2p_cache_stats_s`、`l2p_prefetch_stats_s`、`mig_counters_s`、`ftl_stats_s`、`fc_ctl_s` gauge（含 SQ/HSQ/CQ）、`usart_stats_s`；FC/uart/主循环在各自 init 注册，FTL 每实例组由 `ftl_init` 组合根注册（避免测试直接 `mig_init` 时把栈地址写进注册表） | 各模块 `.c/.h` + 名字表 | 上板 `wr`/`rd` 后计数真实增长（C8）；`--clear` 只清 counter、gauge 不变；行为与改前一致 |
 | **S2 原因计数** | `fc.submit` / `fc.alloc` / `ftl.op`（gate/yield）/ `ftl.l2p` load/flush 原因 / `ftl.gc` abort 原因 / `hil`；`mig_abort_e` 重构（单独提交） | `fc_pool.c`、`fc.c`、`ftl_op.c`、`l2p_cache.c`、`migrate.c/.h`、`ftl.c`、`controller.c` | 满盘写复现时，`stats ftl.l2p` + `fc.submit` + `fc.alloc` 能区分 **gate / 队列满 / 额度满 / 无进展**；不再靠 `submit_backpressure` 猜 |
 | **S3 空转/无进展** | `fc.fill`、`fc.poll`、`sys.loop`（rounds/progress + `idle_streak_max`）、`ftl.op.drain` 计数对 | `fc.c`、`ftl.c`、`ftl_op.c` | 空闲时 `stats --delta` 显示 rounds 涨、progress 不涨、`idle_streak_max` 增长；有负载时比例合理；与 `pc` 热点交叉验证 |
 

@@ -69,7 +69,7 @@
   ULPI PHY（USB3300/3320 等），当前硬件没有路径。
 - ⚠ **PA9 是 `OTG_FS_VBUS`，但本仓已用作 USART1_TX** ⇒ 必须
   `vbus_sensing_enable = DISABLE`，不能用 VBUS sensing。
-- USB 需要 48 MHz 内核时钟；HSI48 已在 `src/platform/stm32h743/sys_port.c` 选为
+- USB 需要 48 MHz 内核时钟；HSI48 已在 `src/platform/soc/stm32h743/sys_port.c` 选为
   USB 内核时钟（`RCC_USBCLKSOURCE_HSI48`）。
 
 #### A.2.2 仓库侧
@@ -161,8 +161,9 @@ flowchart TD
 - 不在 ISR 调 `ftl_*`；不在 FTL completion callback 调 `ftl_flush` / `ftl_trim`
   （它们是同步自旋路径）。
 - `ftl_service_pump()` 每轮只调一次，且在 `usb_msc_task()` / `usb_device_task()` 之前。
-- **CLI 与 USB 共用 host busy 闸门**：同一时刻只允许一个 host 前端提交
-  `ssd_controller_submit`（`cli_host_busy()` / `usb_msc_host_busy()`）。
+- **CLI 与 USB 共用 host gate**：同一时刻只允许一个 host 前端提交
+  `ssd_controller_submit`（host queue 的 acquire / release 单一闸门，见
+  `hil_design.md` §6.1）。
 - `SYNCHRONIZE CACHE` 只在前序写完成后调用 `ftl_flush`（主循环上下文）。
 - 主循环顺序：`cli_service_poll` → `ftl_service_pump` + 逐实例 `ftl_service`
   → `usb_msc_task` → `usb_device_task` → `timer_scheduler_poll`。
@@ -188,7 +189,7 @@ flowchart TD
   应用设置的 sense 不被默认 NOT READY 覆盖，见 `known_open_items.md` RISK-USBC-01。）
   两槽都占用时写回调返回 `TUD_MSC_RET_BUSY`（数据留在端点缓冲重投）。
 - 打开中的写序列会占用一个槽直到 FTL 收尾（空闲 1 s / 下一条命令 / flush 触发 padding
-  END）⇒ `usb_msc_host_busy()`（CLI 用）在此期间为 true，CLI 命令需重试。
+  END）⇒ 该槽在此期间占用 host gate，CLI 命令报 busy 或排队。
 - READ：USB 端点缓冲 → 提交到槽 bounce → 完成 → 拷回端点缓冲 → USB IN（不需要 lookahead）。
 - 主机复位/拔出时在飞槽标记 `discard`：完成后只收尾，不回写 USB 缓冲。
 - 不支持多 LUN；支持 SCSI UNMAP（逐 range 走 controller 的异步 TRIM，全部 range
@@ -289,12 +290,12 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 | `third_party/tinyusb_vendor.mk`（新增） | 编入源文件与包含路径 |
 | `include/tusb_config.h`（新增） | TinyUSB 编译期配置（H7 / OPT_OS_NONE / MSC / 16 KB EP） |
 | `include/platform/usb.h`（新增） | `usb_device_init` / `usb_device_task` 抽象 |
-| `src/platform/stm32h743/usb_port.c`（新增） | USB2_OTG_FS 时钟/引脚/IRQ、`tusb_time_millis_api` |
-| `src/platform/stm32h743/sys_port.c` | USB kernel clock = HSI48 |
+| `src/platform/soc/stm32h743/usb_port.c`（新增） | USB2_OTG_FS 时钟/引脚/IRQ、`tusb_time_millis_api` |
+| `src/platform/soc/stm32h743/sys_port.c` | USB kernel clock = HSI48 |
 | `src/hil/usb_msc.c`（新增） | 描述符、MSC/SCSI 回调、异步请求状态机 |
-| `include/hil/usb_msc.h`（新增） | `usb_msc_init` / `usb_msc_task` / `usb_msc_host_busy` |
+| `include/hil/usb_msc.h`（新增） | `usb_msc_init` / `usb_msc_task` / `usb_msc_io_stats_print` |
 | `src/main.c` | `usb_msc_init` + `usb_device_init`；主循环 `usb_msc_task` → `usb_device_task` |
-| `src/hil/cli.c` | CLI 与 USB 共用 host busy（`cli_host_busy`） |
+| `src/hil/cli.c` | CLI 与 USB 共用 host gate（acquire / release） |
 | `docs/hardware_contract.md` | 补 USB 引脚/时钟/VBUS |
 
 ---

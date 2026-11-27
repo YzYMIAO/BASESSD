@@ -75,7 +75,7 @@ FC 层已按此原则删除多批「只有测试会走」的 `*_null` / 越界�
 - `make tests` 走 `BUILD_TYPE=debug`（`-DDEBUG`，无 `NDEBUG`），**断言在板上测试固件里是活的**：任何一条误判都会让板子停机而不是报失败。改动守卫后必须上板跑套件。
 - `release`（`-DNDEBUG`）下 `ASSERT` 被完全裁掉。若某处实际可达，表现会从"返回错误码"变成 HardFault——所以转断言的前提是"调用者已保证"，必须逐处核对调用链。
 - 每处改动在注释里保留原判据的语义（如 `/* 队列只存 fc_command_alloc() 产出的 ID */`），避免下一个人以为是误删。
-- **故障路径禁止断言**：`src/platform/fault.c` / `src/platform/stm32h743/fault_port.c` 的故障打印、`assertion.c` 自身的终端路径、`syscalls.c` 的堆守卫、`src/common/crash.c` 的崩溃记录路径——这些必须能在任何状态下继续运行。`crash.c` 的 `crash_copy(source == NULL)` 因此**保留返回式降级**（写空串），不转断言。
+- **故障路径禁止断言**：`src/platform/fault.c` / `src/platform/soc/stm32h743/fault_port.c` 的故障打印、`assertion.c` 自身的终端路径、`syscalls.c` 的堆守卫、`src/common/crash.c` 的崩溃记录路径——这些必须能在任何状态下继续运行。`crash.c` 的 `crash_copy(source == NULL)` 因此**保留返回式降级**（写空串），不转断言。
 - 本仓链接**完整 newlib**：`%llu`/`%hhu`/`%zu` 均可用；QWORD 直接用 `%llu`，DWORD 用 `%lu`。
 
 ## 六、辨析 C：校验"不可信持久化数据"不是前置条件
@@ -155,7 +155,7 @@ assertion_console_run()        ← cli.c 强符号：while (1) { cli_service_pol
 
 - 跑**正常** `cli_service_poll()`，命令表全部可用；不另起只读 shell。
 - 进入现场 CLI 前先清 CLI 行状态（`g_cli_length` / `g_cli_discarding` /
-  `g_cli_line`）：断言可能发生在 `uart_execute_command` 内部，外层还没清行；
+  `g_cli_line`）：断言可能发生在 `cli_execute_command` 内部，外层还没清行；
   残留的 CR/LF 会把同一条命令再提交一次（板端现象：`test` 断言后自动重跑整套）。
 - `wr/rd/tr/fl/wp` 的 handler **自带** `ssd_runtime_pump()` 同步等待；`format` /
   `bbt erase` / `test` 原本就自带同步泵 ⇒ 命令在 assert 循环里也能独立跑完，
@@ -163,7 +163,7 @@ assertion_console_run()        ← cli.c 强符号：while (1) { cli_service_pol
 - 断言现场循环本身不推进后台泵；泵发生在命令 handler 内。若 assert 发生在 FTL/FC
   内部，storage 命令的泵会重入刚失败的状态，可能二次断言——这是恢复语义的边界，
   需要复位/重新初始化，而不是靠 CLI 修复。
-- UART 仍走正常异步日志通路，输入走 `uart_rx_read`（USART IRQ 生产者）。
+- UART 仍走正常异步日志通路，输入走 `usart_rx_read`（USART IRQ 生产者）。
 - 断言点以下的调用栈保持不动，JTAG/SWD 仍可回溯；CLI 命令使用更低的栈空间。
 - 无 HIL CLI 的镜像使用弱默认 `for (;;) {}`。
 

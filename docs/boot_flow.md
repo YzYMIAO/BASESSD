@@ -4,7 +4,7 @@
 
 1. 复位向量取 `__initial_sp`（MSP）与 `Reset_Handler`。目标是 **Cortex-M7**（STM32H743）：
    没有 IRQ/FIQ/Abort/Undefined/SVC 模式、也没有 `VBAR`（那是 Cortex-A/R 的概念）。
-2. `Reset_Handler`（`src/platform/stm32h743/startup_stm32h743xx.s`）初始化 `.data`
+2. `Reset_Handler`（`third_party/stm32h743/startup_stm32h743xx.s`）初始化 `.data`
    （从 Flash 拷到 RAM）、清零 `.bss`，调用 `__libc_init_array`（含 `_init`）。
 3. 跳转 `main()`。中断向量表由 startup 的 `.isr_vector` 段提供；STM32H743 从片内 Flash 启动。
 
@@ -15,9 +15,10 @@
 
 严格 `if / else-if` 级联——前一步失败会整段跳过后面（详见 `docs/design/fc_nand_design.md §4.1`）。
 
-1. **Platform / 系统**：`sys_init()`（时钟树、Cache、MPU）→ `cli_init()`（CLI pattern buffer，
-   落 `.sram2_data`）→ 绑定日志 sink → 打印开机横幅 + `fault_report_boot()`（复位原因 +
-   上次崩溃记录，走 `.noinit`）→ `[SYS ]` 身份行与时钟树。
+1. **Platform / 系统**：`sys_init(BOARD_CONSOLE_BAUD)`（MPU / Cache → HAL 初始化 → 时钟树 →
+   `delay_init` → `usart_init` → `fault_init`；任一步失败即报错停机）→ 启动 TIM6 心跳 →
+   `cli_init()`（CLI pattern buffer，落 `.sram2_data`）→ 绑定日志 sink → 打印开机横幅 +
+   `fault_report_boot()`（复位原因 + 上次崩溃记录，走 `.noinit`）→ `[SYS ]` 身份行与时钟树。
 2. **FC 控制面**：`fc_init()` —— 三池（命令/描述符/缓冲）+ SQ/HSQ/CQ + 调度器 + CRC。
    内部的 `fc_nand_dispatch_init()` 是纯 memset，故 FC 可以先于 NAND 硬件初始化。
 3. **NAND 芯片**：`nand_init()` —— HAL/FMC + R/B# 轮询 + per-(ch,ce,lun) 后端 + RESET +

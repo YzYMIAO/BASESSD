@@ -6,7 +6,7 @@
 
 跑板端 UT（UART CLI `test`）时经常"进系统级错误、断函数"，但串口上**什么都没打印**。原因有两层：
 
-1. **异常处理器是空的**。`src/platform/stm32h743/stm32h7rsxx_it.c` 里 5 个 CPU 异常处理器全是裸 `while(1) {}` —— 无任何诊断输出，只能接 SWD 看寄存器。
+1. **异常处理器是空的**。早期 BSP 里 5 个 CPU 异常入口全是裸 `while(1) {}` —— 无任何诊断输出，只能接 SWD 看寄存器。
 2. **断言失败信息会丢**。断言路径打印后**不 flush 就停机**；日志走的是异步 UART TX 队列，由 DMA/中断排出，停机后队列再也不会被排空 —— 失败信息就卡在队列里，表现同样是"什么都没打印就断了"。修复后这一顺序收敛到断言设施 `assertion_terminate()` 里（`munit_errorf_ex` 经 `abort()` 重定向进入同一路径，见 `docs/design/common/munit_adapter.md` v1.2）。
 
 ## 2. 目标与范围
@@ -34,7 +34,7 @@
 CPU 异常 (NMI/Hard/Mem/Bus/Usage)
       │  naked 蹦床：按 EXC_RETURN 选 MSP/PSP + 取 EXC_RETURN
       ▼
-fault_handler_c(frame, exc_return)          [src/platform/stm32h743/fault.c]
+fault_handler_c(frame, exc_return)          [src/platform/fault.c]
       ├─ 读 SCB->CFSR/HFSR/MMFAR/BFAR/AFSR/SHCSR
       ├─ 解码为可读原因 + 打印堆栈帧 R0-R3/R12/LR/PC/xPSR
       ├─ 有界栈扫描 → 候选返回地址（poor-man's backtrace）
@@ -64,17 +64,18 @@ flowchart TD
 
 | 文件 | 角色 |
 |------|------|
-| `include/platform/stm32h743/fault.h` | `fault_kind_t`、`fault_ctx_s`、`fault_init/fault_report_boot/fault_hook` 声明 |
-| `src/platform/stm32h743/fault.c` | 5 个 naked 入口 + 蹦床 + 主处理 + 轮询控制台 + 解码 + 开机报告 |
+| `include/platform/fault.h` | `fault_kind_t`、`fault_ctx_s`、`fault_init/fault_report_boot/fault_hook` 声明 |
+| `src/platform/fault.c` | 共享层：现场整理、解码、开机报告、停机编排 |
+| `src/platform/soc/stm32h743/fault_port.c` | port 层：5 个 naked 异常入口 + 蹦床 + 轮询控制台 |
 | `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_s`、`crash_record_s` |
 | `src/common/crash.c` | `.noinit` 记录存储 + 校验和 |
 | `include/common/assertion.h` | 生产断言 `ASSERT`/`ASSUME` + 富断言集 `ASSERT_*` + 失败入口声明 |
 | `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `assertion_console_run` 现场 CLI）；固件 `abort()` 重定向 |
 | `src/hil/cli.c` | 覆盖弱钩子 `assertion_console_run()`：正常 CLI 循环，不推进 FTL/FC 后台泵 |
 | `src/fc/fc_assert_context.c` | 覆盖弱钩子 `assertion_platform_context()`，进入现场 CLI 前追加 `[RES]` FC 资源快照 |
-| `src/platform/stm32h743/linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
-| `src/platform/stm32h743/sys.c` | `sys_init()` 末尾调 `fault_init()` |
-| `src/platform/stm32h743/stm32h7rsxx_it.c` | 删除 5 个裸 `while(1)` 处理器（改由 fault.c 提供） |
+| `src/platform/boards/apollo_v2/linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
+| `src/platform/sys.c` | `sys_init()` 末尾调 `fault_init()` |
+| `third_party/stm32h743/startup_stm32h743xx.s` | 向量表把 5 个 CPU 异常指向 `fault_port.c` 的入口 |
 | `src/main.c` | `sys_init()` + sink 绑定之后调 `fault_report_boot()` |
 
 ## 5. 关键设计
@@ -143,7 +144,7 @@ FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,x
 
 ### 5.2 轮询控制台：故障时中断通路已不可信
 
-正常日志走 `uart_log_write()` → 软件 TX 环 → DMA/USART 中断。故障现场可能就死在中断/DMA 里，这条通路必须绕开：
+正常日志走 `usart_log_write()` → 软件 TX 环 → DMA/USART 中断。故障现场可能就死在中断/DMA 里，这条通路必须绕开：
 
 1. `fault_console_init()`：清 `USART1->CR1.TXEIE`、清 `USART1->CR3.DMAT`、abort `DMA1_Stream0`（有界自旋等 `EN` 清零），再按 `USART1->CR1.UE` 判断控制台是否可用。
 2. `fault_putc()`：有界自旋等 `USART1->ISR.TXE` 后写 `USART1->TDR`。

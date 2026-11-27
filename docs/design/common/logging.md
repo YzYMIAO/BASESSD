@@ -8,7 +8,7 @@
 - 业务模块只调用 `LOGE/LOGW/LOGI/LOGD` 或 `LOG_IF` 系列，**不直接操作 UART、文件描述符
   或平台寄存器**。
 - 日志门面只做「级别过滤 + 格式化 + 截断」；**传输策略属于 sink**：
-  - 固件在启动时把 sink 绑到 UART（`uart_log_write`）；
+  - 固件在启动时把 sink 绑到 UART（`usart_log_write`）；
   - 裸机早期可用 `log_set_sink()` 在平台注册前先有输出。
 
 ## 2. 数据流
@@ -17,7 +17,7 @@
 LOGx / LOG_IF
   → log_printf / log_vprintf        （级别过滤、192 B 栈缓冲、vsnprintf）
   → log_write                       （截断检测、写失败计数）
-  → sink（固件 = uart_log_write）   → 4096 B TX ring → DMA 或 TXE 中断回退
+  → sink（固件 = usart_log_write）   → 4096 B TX ring → DMA 或 TXE 中断回退
 ```
 
 所以「日志被级别过滤掉」时**不进入格式化、也不占 TX 环空间**；这是把过滤放在格式化

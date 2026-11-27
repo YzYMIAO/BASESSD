@@ -284,7 +284,7 @@ NVMe controller 负责命令语义。
 | 当前平台 | **USB MSC BOT**（CBW/CSW，SCSI-like）；HIL 自己做请求拆分/排队/完成回执 |
 | 设计取舍 | 不上 NVMe 队列，先把请求生命周期跑通；代价是无多队列/门铃 |
 | 学习点 | 请求拆分、run、完成聚合、host 回执 |
-| 细节 | `docs/design/hil_design.md`、`src/hil/request.c` |
+| 细节 | `docs/design/hil_design.md`、`src/hil/ssd_request.c` |
 
 #### 3.3.1 共同骨架：提交 / 完成 / 中断
 

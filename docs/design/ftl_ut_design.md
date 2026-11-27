@@ -798,7 +798,7 @@ allocator 用例显式断言（`alloc_free_pool_invariants` 等），**尚未**�
   随机用例可在窗口内重叠（media 用例共享同一介质，不保证全局互不重叠）。
   `preload_region_zero_and_high` 显式写 LBA 0 以测 region 0 预载，不在此窗口内。
 - 运行前必须拔掉 USB 并确认没有 host 在飞请求。⚠ `test` 命令**不**替用例检查
-  `cli_host_busy()` / `usb_msc_host_busy()`，由操作者保证；写/读期间的 host 请求会
+  host gate 状态，由操作者保证；写/读期间的 host 请求会
   与 UT 抢同一个 FTL/FC 实例。
 - 不恢复 host 数据；结束后打印提示。
 

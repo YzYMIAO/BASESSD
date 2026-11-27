@@ -5,7 +5,7 @@
 
 ## 1. 定位
 
-- CLI 是 HIL 的调试前端：消费 `uart_rx_read` / `uart_log_write`，驱动
+- CLI 是 HIL 的调试前端：消费 `usart_rx_read` / `usart_log_write`，驱动
   `ssd_controller_*` / FTL。
 - 它是**唯一直接引用 `g_ctrl`** 的调试入口（USB MSC 走自己的 host 队列）。
 - 命令处理函数返回 `void`：失败原因由 handler 自己打印，dispatcher 只做语法与
@@ -17,33 +17,33 @@
 |---|---|---|
 | `cli_init()` | `sys_init()` 之后、superloop 之前 | 预填 `g_wr_buf` 的 0x55/0xAA pattern；`.sram2_data` 是 NOLOAD，必须主动填 |
 | `cli_service_poll()` | 主循环每轮 | **绝不能在 ISR 中调用**；负责回显、组行、执行命令、轮询未决请求 |
-| `cli_host_busy()` | USB MSC 查询 | 返回「CLI host 请求在飞」或「`wp` 组在飞」；两者共用 host busy gate |
+| host gate（host queue） | CLI 提交时 acquire、完成 / 超时回收时 release | 与 USB MSC 共用；`wp` 直连 FTL 也占同一 gate（`hil_design.md` §6.1） |
 
 ## 3. 行输入与解析
 
-- 行缓冲 `USART_CLI_LINE_CAPACITY = 128 B`；超过时进入丢弃状态直到下一个 `\n`，
+- 行缓冲 `CLI_LINE_CAPACITY = 128 B`；超过时进入丢弃状态直到下一个 `\n`，
   避免截断的半行被当成完整命令执行。
-- 单条命令最多 `UART_CLI_MAX_ARGUMENTS = 24` 个 token（`test` 的 `--param` 与过滤串需要）。
-- 提示符固定 `ssd> `；DWORD 参数走 `uart_cli_parse_dword`，非法输入由 handler 报错。
+- 单条命令最多 `CLI_MAX_ARGUMENTS = 24` 个 token（`test` 的 `--param` 与过滤串需要）。
+- 提示符固定 `ssd> `；DWORD 参数走 `cli_parse_dword`，非法输入由 handler 报错。
 
 ## 4. 命令表模型
 
 ```c
-typedef struct UART_CLI_COMMAND_S {
+typedef struct CLI_COMMAND_S {
     const char *name;
     const char *syntax;   /* <required> / [optional] / 子命令 */
     const char *help;
     BYTE min_argc, max_argc;
-    BYTE flags;           /* UART_CLI_FLAG_* */
-    BYTE group;           /* UART_CLI_GROUP_* */
-    uart_cli_handler_fn_t handler;
-} uart_cli_cmd_s;
+    BYTE flags;           /* CLI_FLAG_* */
+    BYTE group;           /* CLI_GROUP_* */
+    cli_handler_fn_t handler;
+} cli_cmd_s;
 ```
 
 - **分组**只决定 `help` 的分节顺序：`system` / `host_io` / `diag` / `destructive` / `test`。
 - **行为位**（本仓自拟）：
-  - `UART_CLI_FLAG_BUSY`：提交前要求 controller 无在飞 host 请求；
-  - `UART_CLI_FLAG_DESTRUCTIVE`：破坏性命令；release（`NDEBUG`）下整行不注册。
+  - `CLI_FLAG_BUSY`：提交前要求 controller 无在飞 host 请求；
+  - `CLI_FLAG_DESTRUCTIVE`：破坏性命令；release（`NDEBUG`）下整行不注册。
 - `test` 只在 `FC_NAND_TEST_ENABLE` 构建中存在；`format`/`bbt erase` 只在非 `NDEBUG`
   构建中存在。
 
@@ -63,7 +63,7 @@ typedef struct UART_CLI_COMMAND_S {
   命令返回时请求已结束。因此断言现场 CLI 里这些命令仍能独立跑完。
 - `wr/rd` 使用 `g_wr_buf`（约 16 KiB，AXI `.bss`）；`n` 超过容量直接拒绝。
   ⚠ `rd` 会把读到的数据写回同一块缓冲，**覆盖 pattern**；需要再次 `--compare` 前先重写。
-- `wp` 组直连 `ftl_submit_write`，不占 host 队列，但计入 `cli_host_busy()`。
+- `wp` 组直连 `ftl_submit_write`，不占 host 队列，但从参数校验后到全部组完成期间占用 host gate。
 
 ## 7. 断言现场 CLI
 
@@ -87,5 +87,5 @@ typedef struct UART_CLI_COMMAND_S {
 
 - 命令行 128 B / 24 token；超长命令被整行丢弃。
 - 破坏性命令在 release 镜像中不可用（编译期不注册）。
-- CLI 与 USB MSC 共用 host busy gate；CLI 未决请求会让 USB 侧让路。
+- CLI 与 USB MSC 共用 host gate（单一闸门）；CLI 在飞期间 USB 槽保持 `WAIT_GATE` 排队。
 - ISR 中不得调用任何 CLI/日志接口。

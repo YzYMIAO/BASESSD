@@ -7,7 +7,7 @@
 > 范围：`src/hil/`（HIL 层）。架构设计见 `docs/design/hil_design.md`（本文只写测试，不复制设计细节）；
 > FTL UT 见 `docs/design/ftl_ut_design.md`；FC-NAND UT 见 `docs/design/fc_nand_ut.md`。
 > 关联：`docs/design/known_open_items.md` ISS-HIL-01/02/03；
-> `docs/design/known_open_items.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-03 / RISK-CTRL-04 /
+> `docs/design/known_open_items.md` RISK-UT-34 / RISK-CTRL-01 / RISK-CTRL-04 /
 > RISK-HOST-20 / RISK-HOST-21；
 > `docs/guides/usb_msc_verify.md`（PC 主机矩阵）。
 > 分层坐标：`docs/guides/testing_guide.md` §3 的 **L3 主机接口**（HIL）。
@@ -48,13 +48,13 @@
 | 测试项 | 源文件 | 主要接口 / 状态 | 测试层 |
 |---|---|---|---|
 | `ssd_controller` | `src/hil/controller.c`、`include/hil/controller.h` | `ssd_controller_state_transition`、`init`、`lba_range_ok`、`submit`、`is_complete`、`service`、`cancel_flush`、`host_lba_max` | contract / io |
-| `ssd_request` | `src/hil/request.c`、`include/hil/ssd_request.h` | `ssd_controller_run_end`、`ssd_request_split`、`on_sub_complete` | contract / io（间接） |
+| `ssd_request` | `src/hil/ssd_request.c`、`include/hil/ssd_request.h` | `ssd_controller_run_end`、`ssd_request_split`、`on_sub_complete` | contract / io（间接） |
 | host_queue | `src/hil/host_queue.c`、`include/hil/host_queue.h` | `ssd_host_queue_init/alloc/free`、`tag/owner/used` | contract |
 | `hil_io`（真实 I/O 路径） | `tests/unit/test_hil.c` 经 `src/hil/controller.c` → FTL → FC/NAND | READ / WRITE / FLUSH / TRIM、尾窗读写 | io |
-| `cli` | `src/hil/cli.c`、`include/hil/cli.h` | 行编辑、命令表、`cli_host_busy` | 不覆盖（手工 CLI） |
-| `usb_msc` | `src/hil/usb_msc.c`、`include/hil/usb_msc.h` | BOT class 回调、SCSI → controller、host busy gate | 不覆盖（PC 主机矩阵） |
+| `cli` | `src/hil/cli.c`、`include/hil/cli.h` | 行编辑、命令表、host gate 占用 | 不覆盖（手工 CLI） |
+| `usb_msc` | `src/hil/usb_msc.c`、`include/hil/usb_msc.h` | BOT class 回调、SCSI → controller、host gate 占用 | 不覆盖（PC 主机矩阵） |
 | `runtime` | `src/main.c`（`ssd_runtime_pump`）、`include/hil/runtime.h` | `ssd_runtime_pump` 的服务顺序 | 不覆盖（主循环间接） |
-| 跨层平台守卫 | `src/platform/stm32h743/dma_port.c` | `dma_port_uart_tx_init` 返回值语义 | contract（跨层） |
+| 跨层平台守卫 | `src/platform/soc/stm32h743/dma_port.c` | `dma_port_usart_tx_init` 返回值语义 | contract（跨层） |
 
 > 测试项按「模块 + 公共接口」切，不按函数逐个列；内部 `static` helper 由所属模块的
 > 公共接口间接覆盖。`hil_io` 是测试路径，不是生产模块，保留一行是为了把真实 I/O
@@ -66,7 +66,7 @@
 |---|---|---|---|---|
 | **HIL contract** | `/hil/contract/` | 主 boot 的 `g_ctrl` + 真 FTL/NAND；不写介质 | 状态机、init、LBA 范围、submit 分类、host queue、完成轮询 | 持久化、真实 I/O、跨实例 |
 | **HIL io** | `/hil/io/` | 真 FTL / NAND，容量尾部 8-LBA 窗口 | 经 controller 的真实 READ/WRITE/FLUSH/TRIM 闭环 | 真 POR、多 run、错误注入 |
-| **平台守卫** | `/hil/contract/` 内 | 真板 UART DMA | `dma_port_uart_tx_init` 成功路径 | 失败路径、DMA 中断时序 |
+| **平台守卫** | `/hil/contract/` 内 | 真板 UART DMA | `dma_port_usart_tx_init` 成功路径 | 失败路径、DMA 中断时序 |
 | **PC 主机矩阵** | 不在 `/hil/` | PC + USB host | BOT / SCSI / fsync / UNMAP / 热插拔 | 不是固件 UT 判据 |
 
 ```text
@@ -112,7 +112,7 @@
   致命错误预留；`FAILED` 是终态；非法转换被忽略；`state_transition(NULL, …)` 安全返回。
 - `init` 对每个 `die < DIE_MAX` 都要求槽非空，且 `slot->topo.ch/ce/lun` 必须等于
   `die_2_ch/ce/lun(die)`；缺失或拓扑不符 → `INVALID_ARGUMENT` + `FAILED`。
-  「稀疏拓扑的空洞不访问」注释与当前实现相反，登记 `RISK-CTRL-03`。
+  稀疏拓扑不实现：定稿要求全 die 非空（已闭合，`known_closed_items.md` RISK-CTRL-03）。
 - `host_lba_max` 默认 `FTL_LBA_MAX`；boot 可按实际坏块扣减。它是 host 容量口径的
   唯一 reader（`ssd_controller_host_lba_max`），未初始化时回退编译期上限。
 - LBA 范围是半开区间 `[lba, lba + count)`：`count == 0`、`lba >= max`、
@@ -136,11 +136,11 @@
 | 状态机合法 / 非法转换 | RESET→READY 被忽略；INITIALIZING→READY；READY→FAILED；FAILED→READY 被忽略 | `state_machine` | — |
 | 状态机 NULL 守卫 | NULL 不解引用、不改状态 | `state_machine` | — |
 | init 绑定全部 present die | 合法槽表 → READY；`host_lba_max = FTL_LBA_MAX` | `init_ready` | boot 扣减坏块路径未测 |
-| init 缺槽 | `route[0] = NULL` → `INVALID_ARGUMENT` + `FAILED` | `init_missing_slot` | 稀疏拓扑实现与注释冲突（RISK-CTRL-03） |
+| init 缺槽 | `route[0] = NULL` → `INVALID_ARGUMENT` + `FAILED` | `init_missing_slot` | 稀疏拓扑不实现（全 die 非空，已闭合） |
 | init 拓扑不符 | `slot.topo.ch = 0xFF` → `INVALID_ARGUMENT` + `FAILED` | `init_topo_mismatch` | 只覆盖 ch；ce/lun 未逐项构造 |
 | LBA 半开区间 | `count=0`、`lba=max`、`[max-1,2)` 拒绝；`[0,1)`、`[max-1,1)` 接受 | `lba_range_ok` | 容量 <2 LBA 时边界分支跳过 |
 | submit 非 READY / NULL | RESET/FAILED、controller=NULL、request=NULL → `INVALID_ARGUMENT` | `submit_not_ready` | — |
-| submit 参数分类 | buffer 不足、count=0、越界 LBA → `INVALID_ARGUMENT`；未知 opcode → `NOT_SUPPORTED`；均置 `complete_flag=1` | `submit_edges` | buffer NULL 未覆盖（RISK-CTRL-04） |
+| submit 参数分类 | buffer 不足、buffer NULL、count=0、越界 LBA → `INVALID_ARGUMENT`；未知 opcode → `NOT_SUPPORTED`；均置 `complete_flag=1` | `submit_edges` | — |
 | 完成轮询 | NULL → 1；flag 0 → 0；flag 1 → 1 | `is_complete` | — |
 | FLUSH 异步完成 | submit → 泵到 `complete_flag=1` → `status=OK`、`flush_req == NULL` | `flush_job` | 无失败注入 |
 | FLUSH 单飞行 | 第一条在飞时第二条 → `BUSY`、`complete_flag=1`；第一条最终 OK | `flush_busy` | — |
@@ -157,8 +157,7 @@
 - `submit_not_ready` / `submit_edges` / `lba_range_ok` / `trim_edges`：host 入口是
   不可信输入（H29），参数拒绝必须发生在分配/拆分之前；通过 guard 后的拒绝要置
   `complete_flag=1`。controller/request NULL、非 READY 属 guard 级拒绝，只返回码。
-- 已知缺口：`buffer == NULL` 且 `buffer_size` 足够时，入口只查容量不查指针；
-  会进 `ssd_request_split` 的指针算术，靠 FTL 兜底但状态分类错误（RISK-CTRL-04）。
+- `submit_edges` 已补 `buffer == NULL` 负例（`RISK-CTRL-04`）：构建通过、未运行。
 
 ### 2.2 `ssd_request` — run 拆分、`sub_remaining`、聚合回执
 
@@ -258,8 +257,8 @@
 - `trim_edges`、`flush_busy`、`trim_busy` 覆盖非法范围与单飞行拒绝；拒绝必须置
   `complete_flag=1`，避免调用者等一个不会完成的请求。
 - teardown `hil_quiesce()` 检查 FC/FTL 账本归零；超时先恢复 `bg_suspend` 再让 munit 失败。
-- 真 NAND 安全模型见 §4.5：`io` 是破坏性套件，跑前拔 USB；`test` 命令不替用例检查
-  `cli_host_busy()` / `usb_msc_host_busy()`，由操作者保证。
+- 真 NAND 安全模型见 §4.5：`io` 是破坏性套件，跑前拔 USB；`test` 命令只检查 host gate
+  是否空闲，不替用例检查 USB 主机侧状态，由操作者保证。
 
 ### 2.5 `cli` / `usb_msc` / `runtime` — 前端与主循环（不覆盖）
 
@@ -268,8 +267,8 @@
 - `usb_msc` 把 BOT 的 SCSI READ(10)/WRITE(10)/SYNCHRONIZE CACHE(10/16)/UNMAP(0x42)
   映射到 controller 的 512B LBA；回调运行在 `usb_device_task()`，提交后返回
   `TUD_MSC_RET_ASYNC`，由 `usb_msc_task()` 后续检查完成，不在回调里自旋。
-- `cli` 是 UART 调试前端：行编辑、命令表、`wr/rd/tr/fl/wp` 等；`cli_host_busy()`
-  还计入 `wp` 的诊断组（不占 host queue）。
+- `cli` 是 UART 调试前端：行编辑、命令表、`wr/rd/tr/fl/wp` 等；`wp` 的诊断组不占
+  host queue，但与 CLI pending 请求共用同一 host gate。
 - `runtime` 的唯一入口 `ssd_runtime_pump()` 固定顺序：FTL/FC → controller → USB → timer；
   主循环和 CLI 的同步等待共用它，避免命令 handler 手抄服务顺序。
 - 这三个模块都**不在 `/hil/` UT**：USB 需要 PC 主机 + TinyUSB 协议栈；CLI 本身是测试
@@ -279,7 +278,7 @@
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
 | USB BOT / SCSI 映射 | PC 枚举、READ/WRITE、fsync、UNMAP、热插拔 | PC 主机矩阵（`docs/guides/usb_msc_verify.md`） | 整个模块不在固件 UT |
-| host busy gate | 同一时刻只有一个前端提交 controller | 手工观察 | RISK-HOST-20 |
+| host gate（单一闸门） | 同一时刻只有一个前端提交 controller | 手工观察（未上板） | RISK-HOST-20 |
 | host 超时 / 中止 | 命令不悬挂；复位/拔出可恢复 | 无 | RISK-HOST-21 |
 | CLI 同步命令 | `wr/rd/tr/fl` 在命令返回前完成 | 手工 CLI | 无逐条 UT |
 | runtime 服务顺序 | controller 在 USB 之前推进；timer 补齐 credit | 间接 | 无顺序断言 |
@@ -288,15 +287,15 @@
 
 - 不在 `/hil/` 内造 mock；不能把 PC 主机矩阵的通过算成固件 UT 覆盖。
 - 破坏性 `io` 用例的前置条件由操作者保证：拔 USB、确认没有 host 在飞请求。
-- 已知缺口：`cli_host_busy` / `usb_msc_host_busy` 的互斥不是单一闸门，
-  多处手工维护（RISK-HOST-20）；host 命令没有超时/中止（RISK-HOST-21）。
+- host gate 已收口为单一 claim / release（destructive `io` 前仍需操作者确认），
+  但未上板验证（RISK-HOST-20）；host 命令没有超时/中止（RISK-HOST-21）。
 
 ### 2.6 跨层平台守卫 — `uart_dma_init_returns`
 
 **设计要点**
 
 - `uart_dma_init_returns` 在 `g_hil_contract_tests[]` 注册，但测试对象是平台层的
-  `dma_port_uart_tx_init()`：成功必须返回 `FUNC_STATUS_SUCCESS`（0），失败返回
+  `dma_port_usart_tx_init()`：成功必须返回 `FUNC_STATUS_SUCCESS`（0），失败返回
   `FUNC_STATUS_ERROR`（1）；不能混用 CMSIS `SUCCESS/ERROR` 的相反值。
 - 它只覆盖成功路径；失败路径没有注入（`RISK-PLAT-13` 明确“失败路径未注入”）。
 - 该用例同时是 `RISK-PLAT-14` 的板端证据：UART TX DMA 初始化必须幂等，运行期重入
@@ -306,7 +305,7 @@
 
 | 设计点 | 判据 | 代表用例 | 缺口 |
 |---|---|---|---|
-| DMA 初始化返回值 | `dma_port_uart_tx_init() == FUNC_STATUS_SUCCESS` | `uart_dma_init_returns` | 失败路径未注入 |
+| DMA 初始化返回值 | `dma_port_usart_tx_init() == FUNC_STATUS_SUCCESS` | `uart_dma_init_returns` | 失败路径未注入 |
 | 运行期重入幂等 | 重复 init 不中止在飞 TX DMA | 同用例（板端日志/CLI 仍可用） | 无独立重入计数判据 |
 | 模块归属 | 平台层守卫，不占 HIL 契约 | — | 测试源未迁出 `/hil/contract/` |
 
@@ -443,8 +442,8 @@
 ### 4.5 真 NAND 安全模型
 
 - 破坏性：会写容量尾部 8-LBA 窗口；不 format、不恢复 host 数据。
-- 运行前必须拔掉 USB，并确认没有 host 在飞请求；`test` 命令**不**替用例检查
-  `cli_host_busy()` / `usb_msc_host_busy()`，由操作者保证。
+- 运行前必须拔掉 USB，并确认没有 host 在飞请求；`test` 命令只检查 host gate 空闲，
+  **不**替用例检查 USB 主机侧状态，由操作者保证。
 - 跑完不要求 `format`（尾窗不是文件系统区），但正式交付前仍按 `../guides/testing_guide.md` 收尾。
 - `contract` 不写 NAND；`io` 才破坏性。不要把 `contract` 的通过当成介质已验证。
 
@@ -561,11 +560,11 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | 跨重启 | `ftl_ut_common.c` 不在 `UT=HIL` 编入（§4.6） | `RISK-UT-34` |
 | 多 die / 跨实例部分失败 | 1 CH / 1 CE / 1 LUN，`DIE_MAX=1`，`route` 恒 `ftl[0]` | `RISK-CTRL-01`、`ISS-HIL-03` |
 | 多 run 拆分 | 单 die 下退化为单 run；无 `ftl_submit` 注入 seam | `RISK-CTRL-01` |
-| buffer NULL | `ssd_controller_submit` 只查 `buffer_size`，不查 `buffer` | `RISK-CTRL-04` |
+| buffer NULL | 入口已拒绝 NULL；`submit_edges` 负例已补（未运行） | `RISK-CTRL-04` |
 | `cancel_flush` | host 复位 / 拔出路径；当前无 UT | `RISK-UT-34` |
 | USB 槽状态机 | 需要 PC 主机侧矩阵（flush 槽 / read BUSY / 0x91 / 相同写匹配 / 总线复位） | `RISK-USB-09` / `RISK-USB-10` / `RISK-USB-11` / `RISK-USB-12` / `RISK-USB-13` |
-| host 超时 / 中止 | 无固件 UT；需前端或 controller 超时机制 | `RISK-HOST-21` |
-| host 前端互斥 | 多处手工维护，不是单一闸门 | `RISK-HOST-20` |
+| host 超时 / 中止 | 超时机制已实现；故障注入 UT 未覆盖 | `RISK-HOST-21` |
+| host 前端互斥 | 单一 host gate 已实现；板端并发未验证 | `RISK-HOST-20` |
 | host 命令 / CLI 前端 | CLI 是测试执行入口；USB 需要 PC host | `ISS-HIL-02` |
 | soak / 性能 | `/bench/speed/` 与主机工具，不是 `/hil/` | — |
 | `uart_dma_init_returns` 失败路径 | 无注入 / fake UART 实例 | `RISK-PLAT-13` |
@@ -573,7 +572,7 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 | HIL L2 验收 24 例 | 需 PC 主机侧逐条记录 | `ISS-HIL-02`、`docs/guides/usb_msc_verify.md` |
 
 **2026-11-13 用户裁决**：跨重启、多 run、USB 槽等剩余缺口**留以后检验**；本轮已补的
-TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `RISK-CTRL-04`。
+TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 入口已校验，`submit_edges` 负例已补（未运行，`RISK-CTRL-04`）。
 
 ### 6.2 判据盲区
 
@@ -594,8 +593,8 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
   只由 `ASSERT` 守，未构造失败输入。
 - `flush_busy` / `trim_busy` 依赖两次 submit 之间没有 service 推进；若后台 timer/ISR
   推进 controller，在飞状态可能变化。
-- `submit_edges` 只测 `buffer_size` 不足，不测 `buffer == NULL`；后者是
-  `RISK-CTRL-04` 的已知缺口。
+- `submit_edges` 已纳入 `buffer == NULL` 负例，但本轮只验证编译链接，未在板端运行
+  （`RISK-CTRL-04`）。
 - `is_complete(NULL) == 1` 把 NULL 与「已完成」混为一谈；调用者无法区分空指针和
   真正完成，契约只保证不悬挂。
 - `uart_dma_init_returns` 只测成功返回；失败返回 `FUNC_STATUS_ERROR` 与重入中止
@@ -613,10 +612,9 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 
 | RISK | 涉及测试项 | 判据 | 代表用例 |
 |---|---|---|---|
-| `RISK-UT-34` | `ssd_controller` / `ssd_request` / `host_queue` / `hil_io` | HIL 契约剩余缺口：buffer NULL、跨重启、多 run、USB 矩阵 | `is_complete`、`host_queue`、`write_flush_readback` |
-| `RISK-CTRL-03` | `ssd_controller` | init 的稀疏拓扑注释与实现相反 | `init_missing_slot` |
-| `RISK-CTRL-04` | `ssd_controller` | submit 未校验 `buffer == NULL`，状态分类错误 | `submit_edges`（未覆盖 NULL） |
-| `RISK-HOST-20` | `host_queue` / `cli` / `usb_msc` | host 前端互斥不是单一闸门 | `host_queue`（部分） |
+| `RISK-UT-34` | `ssd_controller` / `ssd_request` / `host_queue` / `hil_io` | HIL 契约剩余缺口：跨重启、多 run、USB 矩阵 | `is_complete`、`host_queue`、`write_flush_readback` |
+| `RISK-CTRL-04` | `ssd_controller` | submit 已校验 `buffer == NULL`，UT 负例已补（未运行） | `submit_edges`（含 NULL） |
+| `RISK-HOST-20` | `host_queue` / `cli` / `usb_msc` | host 前端互斥已收口为单一 gate（未上板） | `host_queue`（部分） |
 | `RISK-HOST-21` | `cli` / `usb_msc` | 没有 host 命令超时 / 中止 | 无 |
 | `RISK-USB-12` / `RISK-USB-13` | `usb_msc` | SYNCHRONIZE CACHE(16) 未支持；两写槽占用时 READ 返回 ERROR | PC 主机矩阵 |
 
@@ -627,7 +625,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 > 主机侧矩阵或人工操作构造，因此以 **K** 和状态词为主。
 > **信息**条目只在 `known_open_items.md` 维护；**已闭合**条目只在 `known_closed_items.md` 维护。
 
-**CLI（7）**
+**CLI（6）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
@@ -636,16 +634,14 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 | `RISK-CLI-03` | K | 需连续 `wp` 重入，CLI 交互构造 |
 | `RISK-CLI-06` | K | `q`/`cp`/`jrn`/`stat`/`id`/`ecc`/`wear` 字段需人工对拍 |
 | `RISK-CLI-07` | K | 需制造读失败并抓串口输出，触发不可确定性构造 |
-| `RISK-CLI-08` | K | 需 `wp` 与 USB 并发进入 FTL（主机侧矩阵） |
 | `RISK-CLI-09` | 待上板 | 断言现场 CLI 自带泵，但 FTL 内断言仍可能重入；未上板 |
 
-**Controller / host queue（4）**
+**Controller / host queue（3）**
 
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
-| `RISK-CTRL-03` | 待决策 | 稀疏拓扑注释与实现相反，注释/实现二选一 |
-| `RISK-CTRL-04` | 待后续 | `submit` 未校验 `buffer == NULL`；先改 controller 才可构造 |
-| `RISK-HOST-20` | 待决策 | host 前端互斥需单点 claim 设计裁决 |
+| `RISK-CTRL-04` | 待验证 | `submit` 已校验 `buffer == NULL`（bb9f14f）；`submit_edges` 负例已补（构建通过、未运行） |
+| `RISK-HOST-20` | 待验证 | host 前端互斥已收口为单一 gate；需上板并发验证 |
 | `RISK-HOST-21` | 待后续 | 缺 host 命令超时 / 中止，需设计 |
 
 **USB MSC / 主机侧（8）**
@@ -666,7 +662,7 @@ TRIM 越界由 `trim_edges` 覆盖。`buffer NULL` 的设计问题单独登记 `
 | ID | 判定 | 用例 / 判定说明 |
 |---|---|---|
 | `RISK-PLAT-08` | 待定位 | `.noinit` 一次 HardFault，PC 落 newlib printf；故障镜像未定 |
-| `RISK-UT-34` | N | 已上板 17/17；剩余 buffer NULL / 跨重启 / 多 run / USB 槽矩阵 / `cancel_flush` |
+| `RISK-UT-34` | N | 已上板 17/17；buffer NULL 负例已补（构建通过、未运行）；剩余跨重启 / 多 run / USB 槽矩阵 / `cancel_flush` |
 
 **cache 主机面（1）**
 

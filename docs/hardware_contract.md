@@ -3,14 +3,14 @@
 This project targets the STM32H743 (Cortex-M7) MCU with an MT29F4G08 NAND
 device, accessed through the FMC bank 3 interface. Core SSD modules never
 access MMIO registers directly; register access lives in
-`src/platform/stm32h743`.
+`src/platform/soc/stm32h743`.
 
 **NAND 层当前例外**：FTL / Controller / Common 只经 `ssd_platform_ops_s` 访问平台；
 NAND 层仍在 `src/nand/nand_fmc.c` 直接写 FMC 窗口，并在 `src/nand/nand_board.c`
 定义 `HAL_NAND_MspInit`（板级 FMC / GPIO 接线）；器件模型
 `src/nand/devices/mt29f___g08a.c` 只调用 HAL 库的 `HAL_NAND_Init`。
 平台服务分三层落地：抽象接口 `include/platform/<svc>.h`、共享逻辑
-`src/platform/<svc>.c`、SoC 适配 `src/platform/stm32h743/*_port.c`；核心模块不再引用
+`src/platform/<svc>.c`、SoC 适配 `src/platform/soc/stm32h743/*_port.c`；核心模块不再引用
 `platform/<soc>/` 路径。分层审计与剩余收敛项见 `docs/design/platform_design.md`。
 
 ## Board documentation (Apollo V2)

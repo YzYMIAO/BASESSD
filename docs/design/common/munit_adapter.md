@@ -192,14 +192,14 @@ double   munit_rand_double(void);
 `stm32h743/usart.c` 中的 `_write()` 将 `printf` / `fprintf` 输出重定向到 UART TX 队列：
 
 ```
-printf() → _write() → uart_log_write() → TX 环形队列 → DMA/IRQ → UART 引脚
+printf() → _write() → usart_log_write() → TX 环形队列 → DMA/IRQ → UART 引脚
 ```
 
 munit 的 `MUNIT_OUTPUT_FILE`（默认 stdout）自动走此路径。
 
 ### 3.2 arg/argv 输入
 
-UART CLI 框架（`uart_cli_tokenize()` + `uart_execute_command()`）负责将串口输入切分为 args，注册 `test` 命令后直接调用 `munit_suite_main`：
+UART CLI 框架（`cli_tokenize()` + `cli_execute_command()`）负责将串口输入切分为 args，注册 `test` 命令后直接调用 `munit_suite_main`：
 
 ```
 ssd> test --seed 0x1234 /fc-nand/pure/cmd_validate_op_range

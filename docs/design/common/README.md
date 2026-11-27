@@ -6,10 +6,10 @@
 | 文档 | 内容 | 接口 / 实现 |
 |---|---|---|
 | [`assertion_guidelines.md`](assertion_guidelines.md) | `ASSERT` / `ASSUME` 判据、release 运行期拒绝、现场终端 | `include/common/assertion.h`、`src/common/assertion.c` |
-| [`fault_capture.md`](fault_capture.md) | 崩溃记录、现场 CLI、日志顺序、故障取证 | `src/common/crash.c`、`assertion.c`、`src/platform/stm32h743/fault_port.c` |
+| [`fault_capture.md`](fault_capture.md) | 崩溃记录、现场 CLI、日志顺序、故障取证 | `src/common/crash.c`、`assertion.c`、`src/platform/soc/stm32h743/fault_port.c` |
 | [`logging.md`](logging.md) | 日志门面：级别、截断、失败计数、节流/心跳、调用约束 | `include/common/log.h`、`src/common/log.c` |
 | [`cli.md`](cli.md) | UART CLI：命令表、分组/行为位、同步泵、断言现场 | `src/hil/cli.c`、`include/hil/cli.h` |
-| [`timer.md`](timer.md) | 统一时间调度器：任务表、SysTick/TIM6 分工、迁移与验证 | `include/platform/timer.h`、`src/platform/timer.c`、`src/platform/stm32h743/timer_port.c` |
+| [`timer.md`](timer.md) | 统一时间调度器：任务表、SysTick/TIM6 分工、迁移与验证 | `include/platform/timer.h`、`src/platform/timer.c`、`src/platform/soc/stm32h743/timer_port.c` |
 | [`munit_adapter.md`](munit_adapter.md) | μnit 裸机适配与 UT 入口 | `tests/framework/`、`tests/unit/ut_main.c` |
 
 ## 边界

@@ -397,7 +397,7 @@
 | debug | `make tests UT=FC` | `build/debug/bin/debug_ut.elf` | `ASSERT` 停机；13 条 release-only 负例 `MUNIT_SKIP` |
 | release | `make tests BUILD_TYPE=release UT=FC` | `build/release/bin/release_ut.elf` | `-O2 -DNDEBUG`；`ASSERT` 裁空；`ASSERT_REJECT` 返回错误码；24 条负例执行 |
 
-- `FC_NAND_TEST_ENABLE=1` 时链接 `src/platform/stm32h743/linker/stm32h743xx_flash_ut.ld`；生产镜像仍用生产链接脚本。
+- `FC_NAND_TEST_ENABLE=1` 时链接 `src/platform/boards/apollo_v2/linker/stm32h743xx_flash_ut.ld`；生产镜像仍用生产链接脚本。
 - `UT=FC` / `UT=FTL` / `UT=HIL` 共用产物名；烧写前确认最后一次构建是 `UT=FC`。
 - 串口横幅时间戳必须与构建时间一致；「烧了旧镜像」的判据是横幅。
 - ⚠ `make tests` 只证链接，不证正确（R2）；碰建链语义/位图/地址三类量必须上板。

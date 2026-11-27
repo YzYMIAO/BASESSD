@@ -89,7 +89,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
    （主机容量按实际坏块动态扣减，精确相等只在 0 坏块时成立，RISK-CAP-03）；
    任一不符立即中止。手工操作时也必须先用 `Get-Disk` 确认。
 2. **不要碰系统 NVMe**（Number 0/1）。`format` / `usb_rebuild_mbr.ps1` 都是破坏性的。
-3. 主机操作期间**不要同时敲板子 CLI**：两者共用 host busy gate，会互相让路或报 busy。
+3. 主机操作期间**不要同时敲板子 CLI**：两者共用 host gate，后到的一方排队或报 busy。
 4. 板端 CLI 的 `format`（FTL 格式化）完成后必须**断电重启**（命令会打印
    `POWER-CYCLE NOW`）；这与 Windows 侧格式化不是一回事。
 5. 写测试文件期间不要拔板子电源（掉电测试单独做，见 B.8）。
