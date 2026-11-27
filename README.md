@@ -17,7 +17,7 @@ STM32H743 + MT29F4G08（4 Gb SLC NAND）上的 **DRAM-less 软 SSD 固件原型*
 | FC-NAND | `src/fc/` + `src/nand/` | 命令/描述符/缓冲池、UOP 引擎、ECC/CRC、FMC 时序 |
 | DRAM | 无独立层 | DRAM-less：元数据常驻 AXI_RAM / SRAM2 |
 
-分层说明见 `docs/architecture.md`；行业对照与分层判据见 `docs/design/fc_nand_design.md` §26。
+分层说明见 `docs/architecture.md`；行业对照与分层判据见 `docs/design/fc_nand_design.md` §6.2。
 
 ## 硬件假设
 
@@ -190,7 +190,7 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 | `docs/architecture.md` | 分层与平台抽象 |
 | `docs/hardware_contract.md` | 硬件契约、内存布局、USB 配置 |
 | `docs/design/ftl_design.md` | FTL 主设计 |
-| `docs/design/fc_nand_design.md` | FC-NAND 主设计（§26 行业对照） |
+| `docs/design/fc_nand_design.md` | FC-NAND 主设计（§6.2 行业对照） |
 | `docs/design/hil_design.md` | 主机接口层 |
 | `docs/design/controller_target_features.md` | 存储主控 SoC 介绍（硬件/FTL 功能块 + 当前平台 + 下一平台选择） |
 | `docs/guides/wsl_debug_environment.md` | WSL / JLink / 串口调试链 |
