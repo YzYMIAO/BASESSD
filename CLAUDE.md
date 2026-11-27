@@ -50,7 +50,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 
 ### 验证与交付
 **R1 验证状态必须如实标注。** 未上板一律标「未上板」；禁止「已完成 / 已修复 / 已验证」。声称验证通过必须给证据（编译输出、板端串口）。
-**R2 编译三关 + 上板判据。** `make all` / `make release` / `make tests UT=<FC|FTL|HIL>`（涉及哪层跑对应 UT）；零新告警。`make tests` 只证链接；碰**建链语义**（链接脚本 `MEMORY` / `SECTIONS` / 地址 / 启动 / 符号）、**位图**、**地址**必须上板；**纯路径 / 文件名移动且脚本内容不变**，构建 + `make -n` 确认 `-T` 即可。测试源由用户维护：UT 编不过如实报告，不回退生产代码、不加兼容垫片。
+**R2 编译三关 + 上板判据。** `make all` / `make release` / `make tests UT=<FC|FTL|HIL>`（涉及哪层跑对应 UT）；零新告警。`make tests` 只证链接；碰**建链语义**（链接脚本 `MEMORY` / `SECTIONS` / 地址 / 启动 / 符号）、**位图**、**地址**必须上板；**纯路径 / 文件名移动且脚本内容不变**，构建 + `make -n` 确认 `-T` 即可。测试源可随生产代码同步修改（含 UT 编不过时的适配）；不得为编过 UT 回退生产代码、加兼容垫片或改变生产语义。
 **R3 提交与推送由用户决定。** `commit` / `push` 都等用户明确发话；改完只报告「未提交、未推送」。
 **R4 只跑目标平台。** stm32h743 + MT29F4G08；不用 host 模拟；测试源由用户自建。
 测试代码注释**不得写 RISK 编号**；风险映射只在台账。
@@ -145,6 +145,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 | `basessd-maintain` | 操作型 | 变更 / 回归 / 兼容性 |
 | `basessd-release` | 操作型 | 版本 / 许可 / CI / 打包 |
 | `basessd-verify-board` | 操作型 | 编译 → 烧写 → 串口 → 判定 |
+| `basessd-verify-board-ut` | 操作型 | 串口 UT 全量 / 父套件 / 单例分层复跑 |
 | `basessd-maintain-fault` | 操作型 | HardFault / 断言 / 静默失效 / 结果不对 |
 | `basessd-develop-ftl` | 约束型 | 改 `src/ftl/`、`include/ftl/` |
 | `basessd-develop-fc` | 约束型 | 改 `src/fc/`、`src/nand/` |
