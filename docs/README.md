@@ -10,13 +10,13 @@
 |---|---|
 | FTL 改动 / 新功能 | `design/ftl_design.md`（主设计，含 §3.4.10 request scheduler；完整 ADR/主流对照见 `design/controller_target_features.md` §8/§9）→ `design/revision_history/ftl_revision_history.md`（逐版本决策史）→ `design/known_open_items.md`（未闭合项：`ISS-*` 缺口 + `RISK-*` 风险） |
 | FTL 对外接口 | `include/ftl/*.h`（函数契约在头文件）+ `design/ftl_design.md` §5.1（模块契约/调用约束）；历史契约见 `archive/ftl_host_interface.md` |
-| FC-NAND 层改动 | `design/fc_nand_design.md`（主设计；§26 行业对照 = 判据）→ `design/revision_history/fc_nand_revision_history.md`（逐版本决策史 / 被否方案） |
-| **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_open_items.md` 模块 10（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.2/§17.3/§25.8 → `design/controller_target_features.md` ADR-15 |
-| FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
+| FC-NAND 层改动 | `design/fc_nand_design.md`（主设计；§6.2 行业对照 = 判据）→ `design/revision_history/fc_nand_revision_history.md`（逐版本决策史 / 被否方案） |
+| **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_open_items.md` 模块 10（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §3.12/§7.2 → `design/controller_target_features.md` ADR-15 |
+| FC 对外接口 | `design/fc_nand_design.md` §3.1（`archive/fc_api_usage.md` 为历史使用指南） |
 | 写 / 跑 UT | `design/fc_nand_ut.md` + `design/common/munit_adapter.md`；FTL UT 见 `design/ftl_ut_design.md`；HIL UT 设计/缺口见 `design/hil_ut_design.md`（状态见 `design/known_open_items.md` 模块 14）；负例与注入框架见 `guides/testing_guide.md` §12 |
 | 平台 / 移植 / 调试链 | `design/platform_design.md`（timer 见 `design/common/timer.md`）+ `guides/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 / CLI | `design/common/`：`assertion_guidelines.md`、`logging.md`、`fault_capture.md`、`cli.md` |
-| C 编码规则细则 | `guides/coding_rules.md`（H1~H51 细则）+ `guides/coding_rules_generic.md`（通用 15 章） |
+| C 编码规则细则 | `guides/coding_rules.md`（H1~H53 细则）+ `guides/coding_rules_generic.md`（通用 15 章） |
 | 写 / 审文档 | `guides/doc_authoring.md`（分层、模板、术语、引用、图表、可读性）→ `guides/mermaid_authoring.md`（GitHub 渲染约束与排障） |
 | 技能分层 / 维护 skill | `.claude/skill-collection/README.md` → `docs/skill-map.md` |
 | 设计原则 / 学习 | `design/storage_controller_design.md`（设计要点手册）；CW 布局事实见 `design/ftl_design.md` §2.1/§2.2 |

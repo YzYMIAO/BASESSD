@@ -1309,7 +1309,7 @@ host_group_subop_issue(read) 对每个 LBA：
 否则一次正常的随机读会吃掉 8 轮预算，被误判成卡死。
 
 ⚠ **判据必须是「在飞命令」，不是「我刚才想加载」**（主流判据：进展 = 已提交命令的完成，
-见 `fc_nand_design.md §26` 的队列/完成模型；请求无资源时进 allocation/retry 队列、其它工作照跑，
+见 `fc_nand_design.md §6.2` 的队列/完成模型；请求无资源时进 allocation/retry 队列、其它工作照跑，
 `docs/reference/README.md` 的 Cosmos+ `request_schedule/allocation.c` / SPDK FTL）。
 `l2p_load_start` 会因**无空闲行**或**提交被拒**而失败并返回 false，此时没有加载在飞；
 若仍宣称"在飞"，`ftl_host_group_drain` 的 stall 检测永久失效 ⇒ 组永不结束 ⇒ cache 序列永不关闭 ⇒

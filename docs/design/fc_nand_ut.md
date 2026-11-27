@@ -491,7 +491,7 @@ make clean && make tests UT=FC CFLAGS_EXTRA="-DCONFIG_NAND_TIMING_MODE=0"
   被强制交替（周期 2）；高了 = 长游程/偏置（加扰没起作用）。
 - 盲区：统计量测不出周期性。反例 `00110011…`（每段恒长 2）三条判据全过，但不是随机；
   实际加扰器输出由 LFSR 驱动，`all-0x00` 的输出就是裸 LFSR 最大长度序列。
-- 判据的理论背景见 `docs/design/fc_nand_design.md` §5.4。
+- 判据的理论背景见 `docs/design/fc_nand_design.md` §2.6。
 
 ---
 

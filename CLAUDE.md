@@ -21,7 +21,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 ⚠ 说不出出处只能标「本仓自拟」，不得写成「行业标准形态」。
 
 **诚实边界**：专有主控固件不可见 ⇒ 判断来自 NVMe 规范、公开架构资料、
-`fc_nand_design.md §26`（HIL / FTL / FCC / DRAM + 队列·门铃·完成；不讲 BIT 内部）。
+`fc_nand_design.md §6.2`（HIL / FTL / FCC / DRAM + 队列·门铃·完成；不讲 BIT 内部）。
 主流分岔（DRAM 型 vs DRAM-less）要说清对齐哪支。
 
 **主控设计考点**：分层 / 队列+门铃+完成 / 数据面轮询 / 通道并行仲裁 / ECC-LDPC / 掉电恢复。
@@ -70,7 +70,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 ## 二、判据 C —— 取舍时的裁决标准
 
 ### 设计与复用
-**C1 设计判据 = §〇。** 引**有出处的主流做法**，不是 Linux、不是本仓现状；§26 只给分层，具体机制另找出处。
+**C1 设计判据 = §〇。** 引**有出处的主流做法**，不是 Linux、不是本仓现状；§6.2 只给分层，具体机制另找出处。
 **C2 代码复用：判据是「有没有手工等价物」。** 该用没用 → 收敛调用点；helper 零调用 → 先查是否有手工内联，有则收敛。同一逻辑第 2 次出现该提炼，第 3 次必须提炼；仅为 API 完整性保留的 helper 不算重复。
 **C3 可读性难点的归因。** 先怀疑**「不变量靠外部模块手工维护」**，不是命名或文件结构。
 
@@ -123,7 +123,7 @@ STM32H743 + MT29F4G08 软 SSD 固件（FC-NAND 层 + FTL 层）。
 - 一句话规则：`.claude/rules/c-coding.md`（触碰 `src/` / `include/` / `tests/` 自动加载）。
 - 细则 / why / 反例：`docs/guides/coding_rules.md`。
 - 通用 15 章 + 不采纳理由：`docs/guides/coding_rules_generic.md`。
-- 编号 H1~H51 / S1~S6；出处映射见 `.claude/rules/c-coding.md` 顶部。
+- 编号 H1~H53 / S1~S6；出处映射见 `.claude/rules/c-coding.md` 顶部。
 - 用户问某条 H 规则时，先读 `docs/guides/coding_rules.md` 对应小节，不凭记忆答。
 
 ## 六、流程 P

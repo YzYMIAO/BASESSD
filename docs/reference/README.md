@@ -5,7 +5,7 @@
 本目录只保留**链接清单与逐份分析**：论文 PDF、网页 HTML 与 datasheet 原文摘录均不随仓库分发
 （再分发权未确认），需要原文时按表中 URL 自行获取。引用 datasheet 时给节名与 URL（R12）。
 
-判据始终是本仓 **`docs/design/fc_nand_design.md` §26 分层**（HIL / FTL / FCC(硬件) / DRAM
+判据始终是本仓 **`docs/design/fc_nand_design.md` §6.2 分层**（HIL / FTL / FCC(硬件) / DRAM
 + 队列 + 门铃 + 完成），**不是 Linux、不是通用 OS 编程**。所以下面每份资料的「价值」一栏，
 都是问同一句话：**它能不能帮我把 FC 的分层/队列/数据面做得更像真主控？**
 
@@ -37,7 +37,7 @@ docs/reference/
 
 | 来源 | 用途 |
 |---|---|
-| [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §17.2。 |
+| [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §3.12。 |
 | 同上，"Read Cache Operations" / "Two-Plane Read Cache Operations" | **31h 可跨 block（同 die）、禁止跨 die/LUN**；two-plane 31h 每个 plane 各前进一页。按 datasheet 节名引用（R12 判据出处；原文不随仓分发）。 |
 
 ### 外部规范（未本地存档）
@@ -93,7 +93,7 @@ docs/reference/
 - **是什么**：韩国高校主导的开源 **NVMe SSD 控制器平台**——真实 FPGA 板 + 一套裸机固件。
   是「拿真硬件做 SSD 固件」最正统的开源样本。
 - **对本项目的价值**：**分层形态的对照物**。它的固件里 host 接口 / FTL / NAND 三层的
-  边界怎么切、命令怎么从主机下发到 NAND，可以直接比对本仓 `fc_nand_design.md` §26 的
+  边界怎么切、命令怎么从主机下发到 NAND，可以直接比对本仓 `fc_nand_design.md` §6.2 的
   HIL/FTL/FCC 划分。**注意它是 NVMe 路径**，本项目是自研 FC 路径，接口不同、分层可借鉴。
 - ⚠ **存档质量**：官方文档站是**空壳**——抓下来的 4 个子页正文各只有 ~850 字，基本是导航
   框架，实质内容全在 **GitHub 仓库代码**里（本目录未克隆仓库）。想读实质内容得看源码，
@@ -187,11 +187,11 @@ docs/reference/
 #### C1. OpenCores ONFI NAND Controller（OpenCores 工程页）
 - **是什么**：**VHDL / LGPL 的 ONFI NAND 控制器 IP**（OpenCores 工程）；有规格文档 +
   Avalon-MM 接口，是少见的明确 **ONFI compliant** 完整开源控制器。
-- **价值**：**本仓 FCC（硬件）那一层的 RTL 对照**。§26 说 FC 要「有对应硬件寄存器表」——
+- **价值**：**本仓 FCC（硬件）那一层的 RTL 对照**。§6.2 说 FC 要「有对应硬件寄存器表」——
   这份 RTL 就是「真硬件 FCC 长什么样」的样本：命令寄存器、状态寄存器、数据 FIFO 怎么摆。
   ⚠ 注意是 **ONFI 控制器**（管时序/ECC 的物理层），不含 FTL。本仓在 STM32 上做的是
   「软 FCC」（FMC + 引擎状态机），对比硬 FCC 能看清哪些事硬件替本仓做了。
-- **怎么读**：拿它的寄存器表比对本仓 FC 对外函数——正是 §26.3 的判据动作。
+- **怎么读**：拿它的寄存器表比对本仓 FC 对外函数——正是 §6.2.3 的判据动作。
 
 <a id="ref-c2"></a>
 #### C2. NandFlashController（**未备份**，见 §三）
@@ -210,9 +210,9 @@ docs/reference/
   信号完整性问题）。NAND 组织成 **8 总线 × 8 芯片/总线 × 4 die/封装 = 512GB**，两级并行：
   **bus 并行**（独立总线并行寻址，带宽近线性）与 **chip 并行**（交错访问掩藏延迟）。用
   **Bluespec**（高层 HDL）开发。
-- **对本项目的价值**：**分层哲学的正面教材，直击 §26 的 FCC/FTL 边界**。BlueFlash 明确把
+- **对本项目的价值**：**分层哲学的正面教材，直击 §6.2 的 FCC/FTL 边界**。BlueFlash 明确把
   **总线/芯片调度、ECC 留在闪存控制器里**（= 本仓的 FCC 硬件层），把 **GC、磨损均衡上移到
-  文件系统**（= FTL 层）——**而不是做成透明 FTL**。这正是 §26「哪些进硬件、哪些归固件」这个
+  文件系统**（= FTL 层）——**而不是做成透明 FTL**。这正是 §6.2「哪些进硬件、哪些归固件」这个
   问题的一个已被真实系统选定的答案。另外它「bus 并行 vs chip 并行」的取舍（为什么选 8 总线）
   对本仓通道拓扑（`ch=1`）是很好的对照——**看它为什么敢上 8 条总线、本仓为什么只跑 1 条**。
 - **怎么读**：重点读它的**功能划分**段落（谁在控制器、谁在软件），不是读它的 PCIe 细节。
@@ -345,13 +345,13 @@ docs/reference/
 别通读。先按 [`storage_controller_design.md`](../design/storage_controller_design.md)
 的「阅读路径」定位层，再按下面三种读法取用：
 
-1. **结构对照**：Cosmos+/SoftSSD/SPDK FTL 的**分层**，比对本仓 `fc_nand_design.md` §26。
+1. **结构对照**：Cosmos+/SoftSSD/SPDK FTL 的**分层**，比对本仓 `fc_nand_design.md` §6.2。
 2. **取舍对照**：Jasmine/SPDK FTL 的 **DRAM 型 L2P**，对照本仓 **DRAM-less** 路线——
    问「它敢花这块内存，我为什么不敢」。
 3. **反例对照**：LeaFTL/SPIFTL/dhara 的**小内存 FTL**，问「哪些机制可以砍」。
 
 判据回到 [`storage_controller_design.md`](../design/storage_controller_design.md) §十一
-「设计取舍清单」与 `docs/design/fc_nand_design.md` §26 分层。**当前最大缺口是 HIL 的
+「设计取舍清单」与 `docs/design/fc_nand_design.md` §6.2 分层。**当前最大缺口是 HIL 的
 主控级并发验证**：已有 USB MSC BOT 单命令路径（`docs/design/hil_design.md`、
 `docs/guides/usb_msc_verify.md`），但尚无多队列/门铃并发的主机侧验证；E2（Zoned
 Storage）与 A1/A2（Cosmos+/Jasmine 的 host 接口）仍是补这块的主要参照。

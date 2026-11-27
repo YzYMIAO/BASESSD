@@ -617,7 +617,7 @@ FTL: 读 page(PBA)
 | 当前平台 | **ONFI 1.0 SDR，Mode 5**（timing modes 0x003F）；MT29F4G08 |
 | 设计取舍 | 受器件约束；先覆盖基础命令/时序，不做高速/多通道 |
 | 学习点 | ONFI 命令、时序模式、multi-plane、tR/tPROG/tERASE |
-| 细节 | `docs/design/fc_nand_design.md` §三、`src/nand/` |
+| 细节 | `docs/design/fc_nand_design.md` §3.10~§3.14、`src/nand/` |
 
 #### 3.7.1 引脚/信号
 
@@ -713,7 +713,7 @@ LUN 数、ECC、支持的 timing modes。本仓启动日志里的 `ONFI ...` 就
 | 当前平台 | **BCH(13,4)**、LFSR16 加扰、CRC（ISO-HDLC/MPEG-2）；无 LDPC；`CONFIG_FC_RAID=0` |
 | 设计取舍 | 器件/算力约束；先 BCH + 加扰 + CRC，LDPC/RAID 不做 |
 | 学习点 | ECC 在数据路径的位置、加扰、CRC、错误恢复 |
-| 细节 | `docs/design/fc_nand_design.md` §四、`src/fc/` |
+| 细节 | `docs/design/fc_nand_design.md` §3.7、`src/fc/` |
 
 #### 3.8.1 数据路径中的位置
 
@@ -798,7 +798,7 @@ LUN 数、ECC、支持的 timing modes。本仓启动日志里的 `ONFI ...` 就
 | 当前平台 | **PIO 逐字节 NAND 数据面**；UART 用 DMA；无 NAND DMA |
 | 设计取舍 | PIO 先走通 FMC 时序/ECC；代价是 CPU-bound、单核吞吐 |
 | 学习点 | PIO vs DMA、FMC 时序、总线/缓存一致性 |
-| 细节 | `src/nand/nand_fmc.c`、`docs/design/fc_nand_design.md` §4.7 |
+| 细节 | `src/nand/nand_fmc.c`、`docs/design/fc_nand_design.md` §3.9 |
 
 #### 3.9.1 数据路径三段
 
@@ -3659,7 +3659,7 @@ Checkpoint + Journal replay / PFR
 | 主流 | 主流主控用 Multi-Plane + 流水线；cache program 属器件特性，批次策略是**本仓自拟**，不是行业标准形态 |
 | 代价 | 需要 FAILC 状态检查；批次失败只能关闭目的 SB（不能 rewind）；GC 批次多占约 16 KiB SRAM |
 | 重估触发 | 引入 HSQ / FC chain 或跨 LUN batch；或器件 datasheet 的 FAILC 语义变化 |
-| 出处 | Micron MT29FxG08xAA datasheet Figure 74（Two-Plane Program Page Cache）与状态寄存器 FAILC 说明；op44/op48 的用法见 `fc_nand_design.md` |
+| 出处 | Micron MT29FxG08xAA datasheet Figure 74（Two-Plane Program Page Cache）与状态寄存器 FAILC 说明；op44/op48 的用法见 `fc_nand_design.md` §3.12 |
 
 > ⚠ 15h 后状态寄存器 bit1 = `FAILC` 表示**上一页** cache program 的成败；只检查 bit0
 > `FAIL` 会把中间页失败静默当成成功。op44 与末页 op48 都使用 `NAND_UOP_CHECK_FAIL_CACHE`
@@ -3691,11 +3691,11 @@ Checkpoint + Journal replay / PFR
 | 主流 | 分层上 FTL 决定读写连续性与映射，控制器执行 NAND 序列；公开项目（Cosmos+ / Jasmine / SimpleSSD）未给出 cache read/program 的源码级序列实现，**具体 chain 机制是本仓自拟**（`fc_nand_dispatch.c`），不是行业标准形态 |
 | 代价 | 链跨轮次会推迟同 LUN 另一队列的命令到链结束；每 4 条填充窗口之间 FIFO 排空，窗口边界暴露一次 tR（当前 USB FS 下可忽略） |
 | 重估触发 | USB HS / DMA 使 host 传输 > 16 KiB；RR 改走 HSQ；或需要“失败即停”（当前 D7 = 失败页报错、其余成员继续执行） |
-| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`docs/reference/README.md`）；`fc_poll_fill_queue` / `fc_poll_chain_length` 见 `fc_nand_design.md` |
+| 出处 | ONFI / MT29F4G08 Two-Plane Read Cache 45h/46h/47h、Cache Program 49h/44h/48h（`docs/reference/README.md`）；`fc_poll_fill_queue` / `fc_poll_chain_length` 见 `fc_nand_design.md` §3.5 |
 
 > 链契约：一条 chain 的成员必须同优先级、末条 `FC_CHAIN_END`、经
 > `fc_submit_batch` 原子入队；`fc_submit_batch` 在提交前拒绝违反者
-> （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`；见 `fc_nand_design.md`）。
+> （debug `ASSERT` + release 返回 `FC_STATUS_INVALID_ARGUMENT`；见 `fc_nand_design.md` §3.12）。
 >
 > ⚠ chain 路径当前仅有 UT 覆盖；首启用必须上板验证跨轮次 owner / HSQ 回推 / 失败页状态（建链类改动）。
 >

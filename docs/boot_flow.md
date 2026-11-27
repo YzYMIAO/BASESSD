@@ -13,7 +13,7 @@
 
 ## `main()` 启动顺序（`src/main.c`）
 
-严格 `if / else-if` 级联——前一步失败会整段跳过后面（详见 `docs/design/fc_nand_design.md §22`）。
+严格 `if / else-if` 级联——前一步失败会整段跳过后面（详见 `docs/design/fc_nand_design.md §4.1`）。
 
 1. **Platform / 系统**：`sys_init()`（时钟树、Cache、MPU）→ `cli_init()`（CLI pattern buffer，
    落 `.sram2_data`）→ 绑定日志 sink → 打印开机横幅 + `fault_report_boot()`（复位原因 +

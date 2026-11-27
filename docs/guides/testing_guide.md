@@ -48,7 +48,7 @@
 - ONFI：<https://www.onfi.org/specifications>
 - USB-IF：<https://www.usb.org/compliance>
 
-⚠ 本仓分层对照见 `docs/design/fc_nand_design.md` §26；它只讲 HIL/FTL/FCC/DRAM 与
+⚠ 本仓分层对照见 `docs/design/fc_nand_design.md` §6.2；它只讲 HIL/FTL/FCC/DRAM 与
 队列·门铃·完成模型，**不定义 BIT 内部细节**。
 
 ### 2.1 标准要求 vs 当前能力
@@ -824,7 +824,7 @@ BOOL  fi_take_ex(fi_fault_e f, DWORD key, DWORD *out_arg);
    生产构建整段裁剪（宏隔离）；测试侧 wrap 库与 H 类 hook 共用同一张表。
 5. 表示链：fi_fault_e → fi_slot_s.key/arg → wrap/hook 的 fi_take* →
    被注入模块的返回值/状态位 → 用例断言；测试代码不另造第二套故障编号（C9）。
-6. 判据：§12.2 的公开工具形状 + 本仓分层（`docs/design/fc_nand_design.md` §26）；
+6. 判据：§12.2 的公开工具形状 + 本仓分层（`docs/design/fc_nand_design.md` §6.2）；
    不是「本仓现状」也不是「教科书」。
 ```
 

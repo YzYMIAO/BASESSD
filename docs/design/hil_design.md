@@ -7,7 +7,7 @@
 > [`hil_ut_design.md`](hil_ut_design.md)，二者不互相复制。风险状态见
 > [`known_open_items.md`](known_open_items.md)，未实现项见 [`known_open_items.md`](known_open_items.md)。
 >
-> 行业坐标：HIL 是 [`fc_nand_design.md`](fc_nand_design.md) §26 分层中的
+> 行业坐标：HIL 是 [`fc_nand_design.md`](fc_nand_design.md) §6.2 分层中的
 > **HIL（Host Interface Layer）**；FTL 见 [`ftl_design.md`](ftl_design.md)，
 > FC-NAND 见 [`fc_nand_design.md`](fc_nand_design.md)。本文正文不承载变更史。
 
@@ -32,7 +32,7 @@
 
 ### 1.1 在 SSD 分层中的位置
 
-`fc_nand_design.md` §26 的行业分层是 **HIL / FTL / FCC / DRAM + 队列·门铃·完成**。
+`fc_nand_design.md` §6.2 的行业分层是 **HIL / FTL / FCC / DRAM + 队列·门铃·完成**。
 本仓的对应关系：
 
 | 行业部件 | 本仓实现 | 说明 |
@@ -64,7 +64,7 @@ HIL 拿到的是一条**已解析的主机请求**（地址 + 长度 + 数据缓
 - ECC、加扰、NAND 命令时序、通道仲裁；
 - 数据在 NAND 上的实际搬运。HIL 只持有主机缓冲指针。
 
-判据出处：§26.1「设备侧固件拿到的是已解析的请求；访问哪些物理单元、数据怎么搬
+判据出处：§6.2.1「设备侧固件拿到的是已解析的请求；访问哪些物理单元、数据怎么搬
 归固件」。拆分逻辑用同一句话约束。
 
 ### 1.4 两个前端
@@ -141,7 +141,7 @@ runtime pump，因此“CLI 等待”也走同一套顺序，不另抄一份。
 5. 表示链：ssd_req_opcode_e → ssd_req_s → ssd_host_entry_s → ssd_ctl_s.host_queue
         → host queue 分配/free → 提交入口 → 前端轮询。
 6. 判据：主流 NVMe 的 SQ slot / command tag / CQ entry 在本仓按 BOT 串行简化
-        （host queue 契约）；层归属按 fc_nand_design.md §26.2。
+        （host queue 契约）；层归属按 fc_nand_design.md §6.2.2。
 ```
 
 ### 3.2 `ssd_req_s` 字段所有权

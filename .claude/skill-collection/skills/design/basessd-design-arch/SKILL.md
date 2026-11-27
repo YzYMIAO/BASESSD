@@ -9,8 +9,8 @@ description: 架构与分层决策：新增或重构结构、模块拆解 / 文�
 
 ## 0. 先读
 
-- 分层：`docs/architecture.md`、`docs/design/fc_nand_design.md` §26
-  （HIL / FTL / FCC / DRAM + 队列·门铃·完成；§26.3 是「新接口比硬件寄存器表」的判据）。
+- 分层：`docs/architecture.md`、`docs/design/fc_nand_design.md` §6.2
+  （HIL / FTL / FCC / DRAM + 队列·门铃·完成；§6.2.3 是「新接口比硬件寄存器表」的判据）。
 - 主流对照：`docs/design/storage_controller_design.md`、
   `docs/reference/README.md` A1 / A4（Cosmos+ / SPDK FTL 的模块分布）。
 - 文件 / 头布局：`docs/guides/coding_rules.md` H51。
@@ -19,7 +19,7 @@ description: 架构与分层决策：新增或重构结构、模块拆解 / 文�
 
 1. **定层**：HIL / FTL / FCC / DRAM；数据面 / 控制面 / 可靠性面。
    答不出就停下补理解。
-2. **找出处**：§26 / SPDK FTL / `docs/reference/`。说不出出处标「本仓自拟」。
+2. **找出处**：§6.2 / SPDK FTL / `docs/reference/`。说不出出处标「本仓自拟」。
 3. **新接口**：比硬件 FCC 寄存器表；无对应项就上移或剔除。
 4. **场景轴**：DRAM 型 vs DRAM-less，说清对齐哪支。
 5. **过取舍清单**：`storage_controller_design.md` §十一。

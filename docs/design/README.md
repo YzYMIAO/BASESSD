@@ -11,7 +11,7 @@
 | 系统总览 | [`../architecture.md`](../architecture.md) → [`../hardware_contract.md`](../hardware_contract.md) | — | — |
 | 启动流程 / Boot policy | [`../boot_flow.md`](../boot_flow.md)、`../src/boot/`（当前未接入 main） | — | — |
 | FTL | `ftl_design.md`（含 §3.4.10 request scheduler；ADR/主流对照见 `controller_target_features.md` §8/§9） | `revision_history/ftl_revision_history.md` | `ftl_ut_design.md` |
-| FC-NAND | `fc_nand_design.md`（§26 行业对照 = 判据） | `revision_history/fc_nand_revision_history.md` | `fc_nand_ut.md` |
+| FC-NAND | `fc_nand_design.md`（§6.2 行业对照 = 判据） | `revision_history/fc_nand_revision_history.md` | `fc_nand_ut.md` |
 | HIL / USB | `hil_design.md` → `usb_msc.md` | — | `hil_ut_design.md` |
 | 平台 / 移植 | `platform_design.md` | — | — |
 | 测试通用方法 | `../guides/testing_guide.md`（§12 = 负例与注入框架） | — | — |
@@ -80,6 +80,23 @@
 | **按上电顺序**（想知道盘怎么活过来） | §1.1~1.3 → §2 → §3.14 引导恢复 → §3.9 分配器 → §3.10 BBT → §3.11 磨损 → §3.6 元数据目录 |
 | **按写路径**（想知道一次 host 写经过谁） | §1.4 总图 → §3.1 提交/组 → §3.3 wbuf → §3.9 分配 → §3.2 完成派发面 → §3.5 L2P cache → §3.7 Journal → §3.6 元数据目录 → §4.5 |
 | **按后台任务**（想知道空闲时在做什么） | §3.4 调度器 → §3.12 GC/迁移 → §3.11 WL → §3.8 Checkpoint → §3.13 读恢复 |
+
+## FC-NAND 模块阅读顺序
+
+以下 `§x.y` 均指 [`fc_nand_design.md`](fc_nand_design.md) 的章节。先读 **§0 摘要 + §1.4 模块
+全景与数据流**，建立「一条命令从 FTL 提交到 NAND 完成经过谁」的地图；然后按下面顺序读：
+
+| 顺序 | 章节 | 为什么先看它 |
+|---:|---|---|
+| 1 | **§1 / §2** | 分层坐标、模块表、三套地址与 CW 布局。地址搞混，后面每个模块都看不懂 |
+| 2 | **§3.1~§3.5** | FC 前端：公共接口、三池与 buffer 归属、命令 / 描述符、队列、调度器。提交侧全貌 |
+| 3 | **§3.6~§3.7** | 数据路径（编解码）与 dispatch 边界。看懂「哪些字段跨入硬件、哪些留在固件」 |
+| 4 | **§3.8~§3.14** | NAND 侧：UOP 引擎、硬件后端、命令表、器件模型、multi-plane、并发相位机、时序 |
+| 5 | **§4** | 六个端到端场景。初始化 → 命令生命周期 → 按 CW 子集读 → cache run → Feature 内联读 → multi-plane 批次 |
+| 6 | **§5 → §7** | 字段归属、不变量、断言判据，然后看未验证项与已知限制 |
+| 7 | **§6** | 分层对照与「硬件 FCC 寄存器表」接口判据——加接口前回来对照 |
+
+只想先看懂「一条读命令怎么走完」：读 §4.2 的走读表，再回头按 §3.5 → §3.7 → §3.8 补细节。
 
 ## 内部账本（维护者用，公开阅读可跳过）
 

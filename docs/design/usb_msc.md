@@ -252,7 +252,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 #### A.6.1 已经对齐的部分
 
-- HIL / FTL / FCC / DRAM 分层（`docs/design/fc_nand_design.md §26`）
+- HIL / FTL / FCC / DRAM 分层（`docs/design/fc_nand_design.md §6.2`）
 - 命令/完成模型（FTL op tag + completion table）
 - L2P / GC / WL / journal / checkpoint / 掉电恢复
 - DRAM-less 方向（SRAM + NAND 快照）
@@ -328,7 +328,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 ### A.11 出处
 
-- 分层：`docs/design/fc_nand_design.md §26`
+- 分层：`docs/design/fc_nand_design.md §6.2`
 - FTL / DRAM-less / 算法 / 取舍：`docs/design/storage_controller_design.md §九~§十一`
 - SPDK FTL / P2L / band metadata：<https://spdk.io/doc/ftl.html>（索引见 `docs/reference/README.md` §A4）
 - 论文清单：`docs/reference/README.md`

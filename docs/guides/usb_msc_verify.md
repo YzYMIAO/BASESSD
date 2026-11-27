@@ -394,6 +394,6 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 - 已知风险与登记：`docs/design/known_open_items.md`
   （`RISK-WB-06` / `RISK-MIG-02` / `RISK-MD-06` / `RISK-L2P-04` / `RISK-USB-01`）
 - 脚本用法：`tools/usb_verify/README.md`
-- 分层判据：`docs/design/fc_nand_design.md §26`
+- 分层判据：`docs/design/fc_nand_design.md §6.2`
 - 协议事实：USB Mass Storage Class BOT 1.0、SCSI transparent command set
   （本仓未存档原文，按协议事实引用，R12）

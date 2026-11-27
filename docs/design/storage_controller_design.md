@@ -1,6 +1,6 @@
 # 存储主控设计要点
 
-> **本文档性质**：存储主控（SSD / flash controller）**设计要点手册**——按 §26 分层组织，
+> **本文档性质**：存储主控（SSD / flash controller）**设计要点手册**——按 §6.2 分层组织，
 > 逐层给出「要决定什么 / 主流怎么做 / 场景差异 / 代价」。
 >
 > 本仓的落地设计以 [`fc_nand_design.md`](fc_nand_design.md)（FC/NAND）与
@@ -70,7 +70,7 @@
 3. **并行与调度**：单颗 NAND 慢（tR ~25μs、tPROG ~600μs），主控靠**多通道 × 多 CE × 多 LUN × 多 plane**
    的并行把带宽堆上去，并靠队列/调度保证延迟与公平。
 
-### 1.2 主机接口形态（§26.1 三种代表 + 扩展）
+### 1.2 主机接口形态（§6.2.1 三种代表 + 扩展）
 
 | 形态 | 提交 | 完成 | 描述符 | 典型场景 |
 |---|---|---|---|---|
@@ -80,7 +80,7 @@
 | **UFS** | SCSI 命令 + MCQ 队列 | 完成 + 中断 | UPIU 承载 | 移动旗舰 |
 | **ZNS / OCSSD** | 裸写指针 / zone append | 完成队列 | 极简，设备侧几乎无 FTL | 数据中心（主机托管 FTL） |
 
-**共同点**（§26.1）：设备侧固件最终拿到的都是**一条「已解析的请求」**——
+**共同点**（§6.2.1）：设备侧固件最终拿到的都是**一条「已解析的请求」**——
 目标 LBA/地址 + 数据缓冲指针 + 操作类型。「访问哪些物理单元、数据怎么搬」全是**固件**的事；
 硬件接口只负责「把请求排队、按序执行、回一个完成」。
 
@@ -103,7 +103,7 @@
 - 并发靠**状态机 + 轮询**，不是线程/锁。
 
 > ⚠ 这决定了很多「往 OS 靠」的做法在主控语境里是**反向**的（例：`request_irq`/运行期注册/`malloc`）。
-> 判据始终是 §26 的**硬件 FCC 形态**，不是 Linux 怎么写。
+> 判据始终是 §6.2 的**硬件 FCC 形态**，不是 Linux 怎么写。
 
 ---
 
@@ -202,7 +202,7 @@ channel（通道，主控的一组数据总线）
 | 电平 | NV-DDR / NV-DDR2 / NV-DDR3 | Toggle 1.0 / 2.0 / 3.0 |
 | 关系 | 二者**信号语义趋同**，现代器件多双支持 | 同上 |
 
-> **本仓是 ONFI 1.0**（见 `fc_nand_design.md` §3.3）。⚠ 注意：**ONFI 1.0 全文无 "plane" 一词**，
+> **本仓是 ONFI 1.0**（见 `fc_nand_design.md` §3.10）。⚠ 注意：**ONFI 1.0 全文无 "plane" 一词**，
 > multi-plane 是**器件侧特性**，不是 1.0 协议内容。
 
 ### 3.2 命令集（导航用，具体码以器件/规范为准）
@@ -223,7 +223,7 @@ channel（通道，主控的一组数据总线）
 | **Copy-Back** | `00h`–`35h` / `85h`–`10h` | 片上搬移（GC 优化） |
 
 > ⚠ 命令码/可用性**随规范版本与器件型号不同**——写驱动前查手上型号的 datasheet 命令表。
-> 本仓实现见 `fc_nand_design.md` §3.3（ONFI 1.0 命令表）与 `src/nand/`。
+> 本仓实现见 `fc_nand_design.md` §3.10（ONFI 1.0 命令表）与 `src/nand/`。
 
 ### 3.3 一次页读的完整序列（判据动作）
 
@@ -259,7 +259,7 @@ sequenceDiagram
 - 主控在初始化时用 `Set Features` 切到目标模式；切之前要按默认模式读参数页。
 - ⚠ 本仓现状：`CONFIG_NAND_TIMING_MODE=5`，启动全程 Mode 0，FTL boot/恢复完成后切 Mode 5
   （3.3V 专用的 Mode 5；Table 29/31 的 3.3V AC 参数对应 Mode 5。Table 32 的 1.8V 参数
-  对应 Mode 4；本板 3.3V，故不用 Mode 4）。见 `fc_nand_design.md` §19。
+  对应 Mode 4；本板 3.3V，故不用 Mode 4）。见 `fc_nand_design.md` §3.14。
 
 ### 3.6 ECC 与器件的契约
 
@@ -271,10 +271,10 @@ sequenceDiagram
 
 ## 四、FC / FCC：闪存通道控制器（主控硬件层）
 
-> §26 里 FCC 是**硬件**：通道时序、描述符链、ECC、加扰、DMA。
+> §6.2 里 FCC 是**硬件**：通道时序、描述符链、ECC、加扰、DMA。
 > 本仓用**软 FCC**（`src/fc/` + `src/nand/` 合起来 = 行业的一个硬件 FCC）。
 
-### 4.1 FCC 的职责边界（§26.3 判据）
+### 4.1 FCC 的职责边界（§6.2.3 判据）
 
 **判据**：拿 FC 的每个对外函数去比对**硬件 FCC 的寄存器表**——**有对应项则留，无则剔**。
 
@@ -292,7 +292,7 @@ sequenceDiagram
 | **无此寄存器**（描述符链是固件填的） | ~~`fc_command_configure_descriptors`~~ → **上移 FTL** |
 | **无此寄存器**（数据是固件 DMA 搬的） | ~~`fc_write_cmd_data`~~ → **上移 FTL** |
 
-> **原则**：**越靠近硬件，接口越只谈机制；策略越往上放**（§26.4）。
+> **原则**：**越靠近硬件，接口越只谈机制；策略越往上放**（§6.2.4）。
 > OCSSD/ZNS 这类「设备侧极简 FTL」方向印证同一点。
 
 ### 4.2 拓扑：并行的来源
@@ -375,7 +375,7 @@ flowchart TB
 
 ## 五、FTL 层（把裸 NAND 变成逻辑块设备）
 
-> §26 定义 FTL = **逻辑→物理映射、GC、WL、坏块管理、掉电恢复、缓冲调度**。
+> §6.2 定义 FTL = **逻辑→物理映射、GC、WL、坏块管理、掉电恢复、缓冲调度**。
 > 这是主控固件里**最复杂**的一层，也是各家差异最大的地方。
 
 ### 5.1 映射方案谱系
@@ -485,7 +485,7 @@ flowchart LR
 
 ## 六、HIL：主机接口层
 
-> §26 里 HIL = 协议解析、队列管理、doorbell 响应。**这是本仓离真主控最远的一层**
+> §6.2 里 HIL = 协议解析、队列管理、doorbell 响应。**这是本仓离真主控最远的一层**
 > （本仓是 USB MSC BOT + UART CLI 调试前端，没有 SQ/CQ、doorbell 与完成中断；见 `docs/design/hil_design.md`）。
 
 ### 6.1 协议栈全景
@@ -587,7 +587,7 @@ sequenceDiagram
 - **问题**：写/GC 洪泛时，读被无限推迟（读延迟爆炸）。
 - **做法**：给读**保留通道带宽/时间片**；写达到一定量后强制让读先行。
 - 本仓**当前没有专门的读饥饿保护**——单 LUN 平台上写/擦占住唯一 LUN，软件层没有切换余地；
-  现状与重启条件见 `fc_nand_design.md` §20。
+  现状与重启条件见 `fc_nand_design.md` §7.2。
 
 ### 7.5 队列深度与并发
 
@@ -806,7 +806,7 @@ NAND die（写入时可能再叠 on-die ECC）
 
 | 主题 | 文档 |
 |---|---|
-| 本仓分层判据（§26） | [`fc_nand_design.md`](fc_nand_design.md) §26 |
+| 本仓分层判据（§6.2） | [`fc_nand_design.md`](fc_nand_design.md) §6.2 |
 | 本仓 FC/NAND 设计 | [`fc_nand_design.md`](fc_nand_design.md) |
 | 本仓 FTL 设计 | [`ftl_design.md`](ftl_design.md)、[`revision_history/ftl_revision_history.md`](revision_history/ftl_revision_history.md) |
 | FTL 优化方向 | [`../archive/ftl_optimization_plan.md`](../archive/ftl_optimization_plan.md) |
