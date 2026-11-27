@@ -500,8 +500,8 @@ build/test-results/<YYYYMMDD-HHMMSS>_<build>_<target>/
 
 - `[USB ] latency` 只在部分轮次取到写阶段数据（写后断电会丢尾部日志）；
 - 4K 随机那组**未同步记录 banner/free**，只能当量级参考；
-- UT 已可构建：2026-11-22 release 全量 `test` 为 **318/318 通过 + 3 SKIP**
-  （seed `0x81a7c024`，697.30 s；原始日志 `docs/archive/test_logs/2026-11-22_release_ut_full.log`）；
+- UT 已可构建：2026-11-28 release 全量 `test` 为 **318/318 通过 + 3 SKIP**
+  （seed `0x073e11c9`，706.40 s；原始日志 `docs/archive/test_logs/2026-11-28_release_ut_full.log`）；
   3 SKIP 为 `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock`；
   `UT=FC` / `UT=FTL` / `UT=HIL` 均需上板运行；
 - 未做 USB-IF 认证、USB 协议分析仪、NAND ATE；

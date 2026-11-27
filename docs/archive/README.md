@@ -37,9 +37,11 @@ docs/archive/
 
 | 文件 | 内容 | 结果 |
 |---|---|---|
-| `2026-11-22_release_ut_full.log` | release 全量 UT（镜像 `built Nov 22 2026 01:04:14`） | 318/318 + 3 SKIP，seed `0x81a7c024`，697.30 s |
-| `h2testw_938_866.png` | H2testw 端到端结果（写 938 / 读 866 KB/s，415/423 MB，0 错误） | 用户提供；只作证据，不做归因 |
-| `cdm9_20261121.png` | CrystalDiskMark 9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.75 MB/s） | 用户提供；Q1T1 为有效口径 |
+| `2026-11-28_release_ut_full.log` | release 全量 UT（镜像 `built Nov 28 2026 03:31:02`；`1c8ff71` + 测试夹具修复） | 318/318 + 3 SKIP，seed `0x073e11c9`，706.40 s |
+| `h2testw_941_864_20261127.png` | H2testw 端到端结果（写 941 / 读 864 KB/s，415/423 MB，0 错误） | 2026-11-27 镜像；只作证据，不做归因 |
+| `h2testw_938_866.png` | H2testw 端到端结果（写 938 / 读 866 KB/s，415/423 MB，0 错误） | 旧基线；只作证据，不做归因 |
+| `cdm9_20261127.png` | CrystalDiskMark 9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.78 MB/s） | 2026-11-27 镜像；Q1T1 为有效口径 |
+| `cdm9_20261121.png` | CrystalDiskMark 9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.75 MB/s） | 旧基线；Q1T1 为有效口径 |
 
 ## changelog/（原 `docs/changelog/`，2026-10-15 移入）
 

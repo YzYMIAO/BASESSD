@@ -82,12 +82,14 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 
 | 项 | 值 |
 |---|---|
-| 最近一次板端验证提交 | `e1760dd`（2026-11-22，FTL 请求调度器收口 / 板端验收） |
-| UT 证据镜像 | `built Nov 22 2026 01:04:14` |
-| H2testw / CDM9 证据镜像 | `built Nov 21 2026 22:58:18` |
-| 基线之后的提交 | **未自动验证**；包括 H51 布局重构、规则框架等 |
+| 最近一次板端验证提交 | `1c8ff71` + 测试夹具修复（2026-11-27/28） |
+| UT 证据镜像 | `built Nov 28 2026 03:31:02`（`1c8ff71` + 测试夹具修复；318/318，3 SKIP） |
+| H2testw / CDM9 证据镜像 | `built Nov 27 2026 22:22:13` |
+| 基线之后的提交 | **未自动验证** |
 
-> README 中的「已验证」只对应 `e1760dd` 及其测试证据。
+> README 中的「已验证」只对应上表证据镜像；本轮覆盖 debug 产品档 H2testw / CDM9 与
+> release 全量 UT。trim、掉电恢复、多配置等未覆盖范围仍属未验证。
+> UT 镜像是 `1c8ff71` 加上同批测试夹具修复（quiesce 排空 / PBA 故障 key 等）。
 > 之后的提交即使能构建、能通过 `make check`，也不等于已上板验证；以该提交自己的测试记录为准。
 
 ## 状态
@@ -96,81 +98,82 @@ make tests UT=FTL   # UT 编译/链接；UT=FC|FTL|HIL，留空 = 全部
 |---|---|---|
 | debug / release 构建 | 已验证 | 2026-11-21，本机 arm-none-eabi-gcc，零新告警 |
 | UT 编译（FC/FTL/HIL） | 已验证 | 2026-11-21，`make tests UT=FTL` 链接通过；仅证链接 |
-| 板端 UT（release 全量） | 已验证 | 2026-11-22，318/318 通过，3 SKIP |
+| 板端 UT（release 全量） | 已验证 | 2026-11-28，318/318 通过，3 SKIP |
 | 板端 H2testw | 已验证 | 见下「最新测试结果」 |
+| 板端 CrystalDiskMark 9 | 已验证 | 见下「最新测试结果」；仅 Q1T1 有效 |
 | `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h`；功能代码完成但未上板 |
 | IWDG 看门狗 | 关闭，待上板决策 | `src/main.c`（`SSD_WATCHDOG_ENABLE=0`） |
 | read recovery `0x89` | 保留地址，空转 | `src/ftl/read_recovery.c`；本器件无读电压重试表，不处理 |
 
 > 「已验证」仅覆盖表中证据对应的范围；未列出的分支与配置均为未验证。
-> H2testw 证据对应 2026-11-21 22:58 镜像；UT 证据对应 2026-11-22 01:04 镜像。
+> H2testw / CDM9 证据对应 2026-11-27 22:22 镜像；UT 证据对应 2026-11-28 03:31 镜像。
 
 ## 最新测试结果
 
-### UT（release 全量，2026-11-22）
+### UT（release 全量，2026-11-28）
 
 | 项 | 值 |
 |---|---|
-| 代码基线 | `e1760dd` |
-| 镜像 | `built Nov 22 2026 01:04:14` |
+| 代码基线 | `1c8ff71` + 测试夹具修复 |
+| 镜像 | `built Nov 28 2026 03:31:02` |
 | 结果 | **318/318 通过，3 SKIP** |
-| seed | `0x81a7c024` |
-| 耗时 | 697.30 s |
+| seed | `0x073e11c9` |
+| 耗时 | 706.40 s |
 | 3 SKIP | `/fc-nand/lifecycle/init_sequence`、`feature_write_read`、`chain_priority_lock` |
-| 原始日志 | [`2026-11-22_release_ut_full.log`](docs/archive/test_logs/2026-11-22_release_ut_full.log) |
-| 复现 | 串口执行 `test --seed 0x81a7c024` |
+| 原始日志 | [`2026-11-28_release_ut_full.log`](docs/archive/test_logs/2026-11-28_release_ut_full.log) |
+| 复现 | 串口执行 `test --seed 0x073e11c9` |
 
 ```text
-318 of 318 (100%) tests successful, 3 (0%) test skipped. Total wall-clock: 697.30 s
+318 of 318 (100%) tests successful, 3 (0%) test skipped. Total wall-clock: 706.40 s
 ```
 
 内部 speed 用例（同一轮，0 错误）：
 
-| 用例 | 写 KB/s | 读 KB/s |
-|---|---:|---:|
-| `ftl_rw` chunk=8 / depth=4 | 3516 | 3083 |
-| `ftl_rw` chunk=16 / depth=2 | 3338 | 3033 |
-| `ftl_rw` chunk=32 / depth=1 | 2386 | 2993 |
-| `fc_nand_rw` normal | 3578 | 3298 |
-| `fc_nand_rw` cache | 4194 | 3356 |
+- `ftl_rw` chunk=8/16/32 + `fc_nand_rw` normal/cache：**5/5 通过**；
+- 本轮记录到的值：`fc_nand_rw` normal 3571/3300、cache 4187/3354；`ftl_rw` chunk=32 2607/3046
+  （chunk 8/16 的数值未完整记录）。
 
-### H2testw（USB MSC 端到端，2026-11-21）
+### H2testw（USB MSC 端到端，2026-11-27）
 
 | 代码基线 | 写 KB/s | 读 KB/s | 数据量 | 结果 |
 |---|---|---|---:|---|
-| `e1760dd` | **938** | **866** | 415/423 MB | `Test finished without errors` |
+| `1c8ff71` | **941** | **864** | 415/423 MB | `Test finished without errors` |
 
-> 镜像 `built Nov 21 2026 22:58:18`（FTL request scheduler + 双副本预留 + CP headroom）；
-> H2testw 0 错误；串口侧 `bad_status=0`、`complete_err=0`、`buf_fail=0`、`flush_fail=0`，
-> 调度计数全部闭合。截图与原始记录见下节。
+> 镜像 `built Nov 27 2026 22:22:13`（平台 / HIL / FC-NAND / FTL 重构批后首个板端回归）；
+> 与上一基线 `e1760dd`（938/866）在噪声内。串口侧 `bad_status=0`、`complete_err=0`、
+> `timeout=0`、`flush_fail=0`、`dangling_total=0`，调度与检查点计数闭合。
+> 截图与原始记录见下节。
 
-### CrystalDiskMark 9（USB MSC 端到端，2026-11-21）
+### CrystalDiskMark 9（USB MSC 端到端，2026-11-27）
 
 | 代码基线 | 项目 | 读 MB/s | 写 MB/s |
 |---|---|---:|---:|
-| `e1760dd` | SEQ1M Q1T1 | **0.84** | **0.84** |
-| `e1760dd` | RND4K Q1T1 | **0.74** | **0.75** |
-| `e1760dd` | SEQ1M Q8T1 / RND4K Q32T1 | 0.00 | 0.00 |
+| `1c8ff71` | SEQ1M Q1T1 | **0.84** | **0.84** |
+| `1c8ff71` | RND4K Q1T1 | **0.74** | **0.78** |
+| `1c8ff71` | SEQ1M Q8T1 / RND4K Q32T1 | 0.00 | 0.00 |
 
-> 镜像 `built Nov 21 2026 22:58:18`；CDM9、5 线程、128 MiB。
+> 镜像 `built Nov 27 2026 22:22:13`；CDM9、5 线程、128 MiB。
+> 与上一基线 `e1760dd` 相比无回归（RND4K 写 0.75→0.78）。
 > Q8T1 / Q32T1 为 0.00：USB MSC BOT 是**单命令串行**模型，没有多 outstanding 队列，
 > 队列深度 >1 的测试不成立；有效口径是 Q1T1。
+> CDM 后串口计数仍闭合：`complete_err=0`、`bad_status=0`、`timeout=0`、`flush_fail=0`、
+> `dangling_total=0`，GC `job_start=job_end`。
 
 ## 测试证据
 
 ### H2testw 截图
 
-![H2testw 端到端结果（938/866）](docs/archive/test_logs/h2testw_938_866.png)
+![H2testw 端到端结果（941/864，2026-11-27）](docs/archive/test_logs/h2testw_941_864_20261127.png)
 
 ### CrystalDiskMark 9 截图
 
-![CDM9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.75）](docs/archive/test_logs/cdm9_20261121.png)
+![CDM9 端到端结果（SEQ1M 0.84/0.84，RND4K 0.74/0.78，2026-11-27）](docs/archive/test_logs/cdm9_20261127.png)
 
 ### 原始记录
 
-- UT 原始日志：[`2026-11-22_release_ut_full.log`](docs/archive/test_logs/2026-11-22_release_ut_full.log)
-- H2testw 截图：[`h2testw_938_866.png`](docs/archive/test_logs/h2testw_938_866.png)
-- CDM9 截图：[`cdm9_20261121.png`](docs/archive/test_logs/cdm9_20261121.png)
+- UT 原始日志：[`2026-11-28_release_ut_full.log`](docs/archive/test_logs/2026-11-28_release_ut_full.log)
+- H2testw 截图：[`h2testw_941_864_20261127.png`](docs/archive/test_logs/h2testw_941_864_20261127.png)
+- CDM9 截图：[`cdm9_20261127.png`](docs/archive/test_logs/cdm9_20261127.png)
 - 测试方法与吞吐结论：[`docs/guides/testing_guide.md`](docs/guides/testing_guide.md)
 
 ## 已知限制
