@@ -795,8 +795,8 @@ LUN 数、ECC、支持的 timing modes。本仓启动日志里的 `ONFI ...` 就
 | 职责 | host↔device、memory↔NAND 数据搬运；描述符/SG；多队列 |
 | 消费级 | DMA |
 | 企业级 | 描述符/SG、多队列 DMA、QoS |
-| 当前平台 | **PIO 逐字节 NAND 数据面**；UART 用 DMA；无 NAND DMA |
-| 设计取舍 | PIO 先走通 FMC 时序/ECC；代价是 CPU-bound、单核吞吐 |
+| 当前平台 | **PIO 逐字节 NAND 数据面**；UART 用 DMA；未用 NAND DMA（可用 mem2mem 固定地址，未验证） |
+| 设计取舍 | PIO 先走通 FMC 时序/ECC；代价是 CPU-bound、单核吞吐；DMA 可选，需实测 NAND 数据窗口的 mem2mem 时序 |
 | 学习点 | PIO vs DMA、FMC 时序、总线/缓存一致性 |
 | 细节 | `src/nand/nand_fmc.c`、`docs/design/fc_nand_design.md` §3.9 |
 
@@ -3346,7 +3346,7 @@ Checkpoint + Journal replay / PFR
 | 项目 | 状态 | 证据 |
 |---|---|---|
 | debug / release 构建 | 已验证 | 2026-11-20，零新告警 |
-| 板端 UT（release 全量） | 已验证 | 2026-11-22，318/318，3 SKIP；seed `0x81a7c024`，697.30 s；日志 `docs/archive/test_logs/2026-11-22_release_ut_full.log` |
+| 板端 UT（release 全量） | 已验证 | 2026-11-28，318/318，3 SKIP；seed `0x073e11c9`，706.40 s；日志 `docs/archive/test_logs/2026-11-28_release_ut_full.log` |
 | 板端 H2testw | 已验证 | 2026-11-21，415/423 MB，938/866 KB/s，0 错误 |
 | `CONFIG_FC_RAID` | 关闭，未验证 | `include/fc/fc_interface.h` |
 | IWDG 看门狗 | 关闭，待上板决策 | `src/main.c` |
