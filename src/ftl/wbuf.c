@@ -316,7 +316,7 @@ static ftl_status_e wb_flush(wb_handle_s *h)
 wbuf_flush_fail:
     if (cmd != NULL)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
     }
     alc_super_open_rewind_pair(h->alloc, FTL_TEMP_HOT);
     return ret;

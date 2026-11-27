@@ -478,7 +478,7 @@ static ftl_status_e host_group_subop_issue(ftl_ctx_s *ftl, WORD gi, DWORD intern
     ftl_status_e ret = ftl_cmd_build_ppa_pair_cw(cmd, pba, cw_bitmap);
     if (ret != FTL_OK)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         return ret; /* FTL_AGAIN（池空，瞬态）/ FTL_ERROR 原样上抛 */
     }
 
@@ -488,7 +488,7 @@ static ftl_status_e host_group_subop_issue(ftl_ctx_s *ftl, WORD gi, DWORD intern
 
     if (pending == NULL)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         return FTL_AGAIN; /* pending 表满：瞬态 */
     }
 
@@ -512,7 +512,7 @@ static ftl_status_e host_group_subop_issue(ftl_ctx_s *ftl, WORD gi, DWORD intern
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
         pend_remove(&ftl->pending, cmd_id);
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         pend_group_drop_subop(&ftl->pending, gi);
         return FTL_AGAIN; /* SQ 满：瞬态 */
     }
@@ -980,7 +980,7 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
             // cache program 成员：中间页/末页/失败均由 batch 上下文结算；
             // 不走透明重试（op44 不能回读重发），也不走普通写失败分支（不按 plane 标坏）。
             ftl_cache_write_member_finish(ftl, pending, completion);
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             return;
         }
 
@@ -1027,7 +1027,7 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
 #if SSD_STATS_PERSIST_ENABLE
                     ftl_op_lifetime_note_host_io(ftl, pending, true);
 #endif
-                    (void)fc_command_release(cmd->cmd_id);
+                    fc_command_release(cmd->cmd_id);
                     return;
                 }
             }
@@ -1046,7 +1046,7 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
             else
             {
                 ftl_host_io_read_fail(ftl, pending);
-                (void)fc_command_release(cmd->cmd_id);
+                fc_command_release(cmd->cmd_id);
                 return;
             }
         }
@@ -1058,7 +1058,7 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
             // 在飞数），由新命令的完成继续推进；失败 ⇒ 走原 IO_ERROR 收尾。
             if ((pending->op != PENDING_OP_WRITE_PAGE0) && (pending->retry_count < FTL_WRITE_RETRY_MAX) && (ftl_write_retry(ftl, pending, cmd) == FTL_OK))
             {
-                (void)fc_command_release(cmd->cmd_id);
+                fc_command_release(cmd->cmd_id);
                 return;
             }
 
@@ -1076,7 +1076,7 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
         pend_remove(&ftl->pending, cmd_id);
         pend_group_subop_finish_multi(&ftl->pending, owners, sub_status);
     }
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
 }
 
 /**

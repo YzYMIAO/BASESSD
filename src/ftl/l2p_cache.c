@@ -1674,7 +1674,7 @@ static BOOL l2p_load_submit(l2p_cache_s *cache, l2p_cache_line_s *line, DWORD pb
             STATS_INC(cache->stats.load_fail_submit);
         }
 #endif
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         l2p_line_hint_clear(cache, line_idx);
         L2P_TAG(cache, line)->state = L2P_CACHE_INVALID;
         line->prefetch              = false;
@@ -2754,7 +2754,7 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
 
     if (backup_cmd == NULL)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         STATS_INC(cache->stats.flush_defer_resource);
         md_slot_release(owner->metadata_dir, primary_pba, backup_pba);
         return FTL_AGAIN;
@@ -2767,8 +2767,8 @@ SSD_CODE_FAST ftl_status_e l2p_flush_kick(l2p_cache_s *cache, int line_idx)
     if (ftl_op_submit(cmd, FTL_OP_L2P, line) != FTL_OK)
     {
         STATS_INC(cache->stats.flush_defer_submit);
-        (void)fc_command_release(cmd->cmd_id);
-        (void)fc_command_release(backup_cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
+        fc_command_release(backup_cmd->cmd_id);
         line->flush_pending_cmd     = NULL;
         line->flush_backup_deferred = false;
         L2P_TAG(cache, line)->state = L2P_CACHE_DIRTY;                 /* 回滚：行仍脏，下轮重试 */
@@ -2828,7 +2828,7 @@ void l2p_flush_resume(l2p_cache_s *cache, BYTE die)
         }
         else if (st == FTL_ERROR)
         {
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             line->flush_pending_cmd     = NULL;
             line->flush_backup_deferred = false;
             line->flush_fail            = true;
@@ -3579,7 +3579,7 @@ void ftl_l2p_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
             // 否则收尾条件（pending == NULL）永远不成立。
             if (line->flush_pending_cmd != NULL)
             {
-                (void)fc_command_release(line->flush_pending_cmd->cmd_id);
+                fc_command_release(line->flush_pending_cmd->cmd_id);
                 line->flush_pending_cmd     = NULL;
                 line->flush_backup_deferred = false;
             }
@@ -3618,7 +3618,7 @@ void ftl_l2p_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
                 }
                 else
                 {
-                    (void)fc_command_release(cmd2->cmd_id);
+                    fc_command_release(cmd2->cmd_id);
                     line->flush_pending_cmd     = NULL;
                     line->flush_backup_deferred = false;
                     line->flush_fail            = true;
@@ -3645,5 +3645,5 @@ void ftl_l2p_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
         LOGE(LOG_TAG_L2P "unexpected completion state=%d\r\n", L2P_TAG(cache, line)->state);
     }
 
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
 }

@@ -237,7 +237,7 @@ static ftl_status_e rr_read_submit(rr_handle_s *rr, DWORD pba, const ftl_page_cf
     if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, rr) != FTL_OK)
     {
         rr->waiting = false;
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return FTL_AGAIN;
     }
 
@@ -866,7 +866,7 @@ void ftl_read_recovery_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *comple
     // 且只被 take 一次。
     if ((rr == NULL) || (rr->waiting == false))
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -884,7 +884,7 @@ void ftl_read_recovery_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *comple
             break;
     }
 
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
 
     rr_job_step(rr);
 }

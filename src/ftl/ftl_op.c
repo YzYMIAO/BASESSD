@@ -842,7 +842,7 @@ void ftl_op_drain(void)
         if (req->pending == false)
         {
             LOGE(LOG_TAG_FTL "completion without request cmd=%hu status=0x%02hx — released\r\n", completion.cmd_id, completion.status);
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             continue;
         }
 
@@ -859,7 +859,7 @@ void ftl_op_drain(void)
         if (fn == NULL)
         {
             LOGE(LOG_TAG_FTL "orphan request cmd=%hu op=%hhu status=0x%02hx — released\r\n", completion.cmd_id, op_byte, completion.status);
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             continue;
         }
 

@@ -152,7 +152,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         return FTL_ERROR;
     }
 
@@ -168,7 +168,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
             // FC/NAND，迟到完成由 ftl_op_drain 的 missing-request 分支释放。
             if (submitted == false)
             {
-                (void)fc_command_release(cmd_id);
+                fc_command_release(cmd_id);
             }
             return FTL_ERROR;
         }
@@ -177,7 +177,7 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
         // 页当成功读并解析 META（重建期可能写回错误映射）。
         if (fc_cmd_status_has_error(completion.status))
         {
-            (void)fc_command_release(cmd_id);
+            fc_command_release(cmd_id);
             return FTL_ERROR;
         }
     }
@@ -186,11 +186,11 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     // 空页 = 无有效数据；页基址不一致 = META 损坏；两者都按失败返回。
     if (gc_decode_cw_lba(cmd, pba, cw_lba, NULL) != GC_DECODE_OK)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         return FTL_ERROR;
     }
 
-    (void)fc_command_release(cmd_id);
+    fc_command_release(cmd_id);
 
     return FTL_OK;
 }

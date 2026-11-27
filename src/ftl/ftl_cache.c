@@ -759,7 +759,7 @@ static SSD_CODE_FAST ftl_status_e ftl_cache_pad_submit(ftl_ctx_s *ftl)
 
     if (sub_st != FTL_OK)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return sub_st;
     }
@@ -807,7 +807,7 @@ void SSD_CODE_FAST ftl_cache_pad_op_callback(ftl_ctx_s *ftl, const fc_cmd_status
     {
         if (cmd != NULL)
         {
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
         }
         return;
     }
@@ -877,7 +877,7 @@ void SSD_CODE_FAST ftl_cache_pad_op_callback(ftl_ctx_s *ftl, const fc_cmd_status
     // 本服务函数拥有命令。
     if (cmd != NULL)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
     }
 }
 

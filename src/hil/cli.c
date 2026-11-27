@@ -1852,7 +1852,11 @@ static void cli_stats(int argc, char *argv[])
  */
 static void cli_id(int argc, char *argv[])
 {
-    const QWORD host_mib = FTL_HOST_CAPACITY_BYTES / (1024U * 1024U);
+    /* 容量给两层口径：运行时 host_lba（按实际坏块扣减，与 boot/`info`/USB 一致）
+     * 与编译期静态上限。只打静态上限会让操作者误以为可用容量更大。 */
+    const DWORD host_lba   = ssd_controller_host_lba_max(&g_ctrl);
+    const QWORD host_mib   = ((QWORD)host_lba * FTL_IU_BYTES) / (1024U * 1024U);
+    const QWORD static_mib = FTL_HOST_CAPACITY_BYTES / (1024U * 1024U);
     const char *state_name;
 
     (void)argc;
@@ -1861,7 +1865,7 @@ static void cli_id(int argc, char *argv[])
     state_name = (g_ctrl.state <= SSD_CONTROLLER_FAILED) ? g_controller_state_names[g_ctrl.state] : "?";
 
     LOGI("id geometry ch=%hu ce=%hu lun=%hu dies=%hhu plane=%hhu blk/plane=%hu pages/blk=%hu cw=%hu iu=%hu\r\n", (WORD)CH_NUM, (WORD)CE_NUM, (WORD)LUN_NUM, DIE_MAX, (WORD)PLANE_NUM, (WORD)BLOCKS_PER_PLANE, (WORD)PAGES_PER_BLOCK, (WORD)CW_NUM, (WORD)FTL_IU_BYTES);
-    LOGI("id capacity lba=%llu iu_total=%llu host_mib=%llu\r\n", FTL_LBA_MAX, FTL_IU_TOTAL, host_mib);
+    LOGI("id capacity host_lba=%lu host_mib=%llu (static lba_max=%llu / %lluMiB, iu_total=%llu)\r\n", host_lba, host_mib, (QWORD)FTL_LBA_MAX, static_mib, (QWORD)FTL_IU_TOTAL);
     LOGI("id ftl pair=%hhu blk_total=%hu group_max=%hu op_pool=%hu spare/plane=%hu cmt=%hu\r\n", (BYTE)FTL_LBA_PER_PAIR, (WORD)FTL_BLOCK_TOTAL, (WORD)FTL_GROUP_MAX, (WORD)FTL_OP_POOL_CAP, (WORD)FTL_SPARE_POOL_PER_PLANE, (WORD)L2P_CMT_SIZE);
 
     BYTE                timing_mode = 0U;

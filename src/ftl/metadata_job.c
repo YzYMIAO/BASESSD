@@ -135,7 +135,7 @@ static ftl_status_e md_command_submit(md_dir_cache_s *dir, fc_cmd_s *cmd)
     if (ftl_op_submit(cmd, FTL_OP_METADATA, dir) != FTL_OK)
     {
         j->waiting = false;
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return FTL_AGAIN;
     }
 
@@ -335,7 +335,7 @@ void md_reclaim_reset(md_dir_cache_s *dir)
  */
 static void md_reclaim_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
 {
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     if (failed)
@@ -1244,7 +1244,7 @@ static void md_cp_read_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_c
     {
         read_ok = (ftl_cmd_read_data(cmd, j->cp_buf, L2P_REGION_SIZE) == FTL_OK);
     }
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     if (read_ok)
@@ -1284,7 +1284,7 @@ static void md_cp_read_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_c
  */
 static void md_cp_write_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
 {
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     if (failed)
@@ -1328,7 +1328,7 @@ static void md_cp_write_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_
  */
 static void md_cp_reclaim_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
 {
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     if (failed)
@@ -1355,7 +1355,7 @@ static void md_cp_reclaim_handle_callback(md_dir_cache_s *dir, md_handle_s *j, f
  */
 static void md_dir_ckpt_write_handle_callback(md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
 {
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     (void)md_dir_ckpt_write_advance(&j->dir_ckpt, failed); /* 失败整条作废，页序仍前进 */
@@ -1371,7 +1371,7 @@ static void md_dir_ckpt_write_handle_callback(md_handle_s *j, fc_cmd_s *cmd, BOO
  */
 static void md_dir_ckpt_erase_handle_callback(md_dir_cache_s *dir, md_handle_s *j, fc_cmd_s *cmd, BOOL failed)
 {
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
     j->waiting = false;
 
     if (failed)
@@ -1447,7 +1447,7 @@ void ftl_metadata_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion,
             // 不该发生：一条命令对应一个提交阶段（RECLAIM / CP_READ / CP_WRITE /
             // CP_DIR_CKPT_ERASE / CP_DIR_CKPT_WRITE / CP_RECLAIM）。
             LOGE(LOG_TAG_META "md job unexpected completion phase=%d\r\n", j->phase);
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             j->waiting = false;
             md_handle_abort(dir);
             return;

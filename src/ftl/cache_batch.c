@@ -534,7 +534,7 @@ build_fail:
         }
         if (b->cmds[i] != NULL)
         {
-            (void)fc_command_release(b->cmds[i]->cmd_id);
+            fc_command_release(b->cmds[i]->cmd_id);
         }
     }
     return false;
@@ -584,7 +584,7 @@ static ftl_cache_read_result_e cache_read_submit(const cache_read_req_s *req, DW
         for (DWORD i = 0U; i < b.n_pairs; i++)
         {
             pend_remove(&req->ftl->pending, ftl_cmd_id(b.cmds[i]));
-            (void)fc_command_release(b.cmds[i]->cmd_id);
+            fc_command_release(b.cmds[i]->cmd_id);
             pend_group_drop_subop(&req->ftl->pending, req->gi);
         }
 
@@ -959,7 +959,7 @@ static void cache_write_drop(ftl_ctx_s *ftl, cache_write_build_s *b)
     {
         if (b->cmds[i] != NULL)
         {
-            (void)fc_command_release(b->cmds[i]->cmd_id);
+            fc_command_release(b->cmds[i]->cmd_id);
         }
     }
 
@@ -1452,7 +1452,7 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_s *ftl, WORD gi, DWORD lba,
             }
             for (BYTE j = 0U; j < b.n_cmd; j++)
             {
-                (void)fc_command_release(b.cmds[j]->cmd_id);
+                fc_command_release(b.cmds[j]->cmd_id);
             }
             for (BYTE j = 0U; j < b.n_alloc; j++)
             {

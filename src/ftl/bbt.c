@@ -674,7 +674,7 @@ static ftl_status_e bbt_write_submit(alc_s *alloc)
 
     if (submit_st != FTL_OK)
     {
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return submit_st; /* FTL_AGAIN 背压 / FTL_ERROR 路由 / 编程错误 */
     }
 
@@ -747,7 +747,7 @@ static void bbt_write_handle_callback(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_
 
     alloc->bbt.handle.phase   = BBT_JOB_IDLE;
     alloc->bbt.handle.waiting = false;
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
 }
 
 /* ── erase ── */
@@ -776,13 +776,13 @@ static void bbt_erase_handle_callback(alc_s *alloc, fc_cmd_s *cmd, const fc_cmd_
 
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = false;
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return;
     }
 
     // 擦成功 ⇒ 起写；提交失败由 bbt_write_kick 收敛（AGAIN 续跑 / ERROR 标坏重建）。
     bbt_write_kick(alloc);
-    (void)fc_command_release(cmd->cmd_id);
+    fc_command_release(cmd->cmd_id);
 }
 
 /* ── factory ── */
@@ -1164,7 +1164,7 @@ void bbt_handle(alc_s *alloc)
         }
         if (ftl_op_submit(cmd, FTL_OP_BBT, alloc) != FTL_OK)
         {
-            (void)fc_command_release(cmd->cmd_id);
+            fc_command_release(cmd->cmd_id);
             return;
         }
         alloc->bbt.handle.phase   = BBT_JOB_ERASE;
@@ -1280,7 +1280,7 @@ void ftl_bbt_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
     if (alloc->bbt.handle.waiting == false)
     {
         LOGE(LOG_TAG_BBT "orphan completion phase=%d — ignored\r\n", alloc->bbt.handle.phase);
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
         return;
     }
 
@@ -1298,6 +1298,6 @@ void ftl_bbt_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
         LOGE(LOG_TAG_BBT "unexpected completion phase=%d\r\n", alloc->bbt.handle.phase);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = false;
-        (void)fc_command_release(cmd->cmd_id);
+        fc_command_release(cmd->cmd_id);
     }
 }

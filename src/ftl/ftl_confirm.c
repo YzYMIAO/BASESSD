@@ -689,14 +689,14 @@ ftl_status_e ftl_write_retry(ftl_ctx_s *ftl, pend_req_s *pending, fc_cmd_s *old_
     }
     if (st != FTL_OK)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return st;
     }
 
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
-        (void)fc_command_release(cmd_id);
+        fc_command_release(cmd_id);
         alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return FTL_AGAIN;
     }
