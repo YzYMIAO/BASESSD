@@ -55,7 +55,7 @@ static l2p_jrn_s s_journal[FTL_DIE_MAX] DTCM_DATA;
 // 回放期间的异常计数（jrn_replay 起点清零，结束时各打一行）。
 //
 // ⚠ 不能逐条打印：掉电回放可能有上千条落在同一个降级 region / 写失败的条目，
-// 逐条 WRN 会写满 4 KB UART TX 环（环满时 uart_log_write 会等待）⇒ 拖慢开机，
+// 逐条 WRN 会写满 4 KB UART TX 环（环满时 usart_log_write 会等待）⇒ 拖慢开机，
 // 且日志本身失去区分力。汇总成「首个 region / 首条 LBA + 条数」即可定位。
 static DWORD s_replay_degraded_entries;
 

@@ -1908,7 +1908,7 @@ static void cp_job_step(cp_handle_s *h)
                     // 正常完成：INFO 是「Header 真的落盘」的唯一直接证据（`info` 的 cp=
                     // 只反映 HDR_PREP 过的序号，不证明写成功）。
                     // 限流 5 s：水位触发（1024 次写）可能快于 5 s，逐条打印会在
-                    // 115200 串口上刷屏（写满 4 KB TX 环后 uart_log_write 会等待）。
+                    // 115200 串口上刷屏（写满 4 KB TX 环后 usart_log_write 会等待）。
                     // 被跳过的 CP 不影响判据——最新序号看 `info` 的 cp= 或下一条 done。
                     LOGD_RATE(log_ratelimit_due(&h->rl_done), h->rl_done.suppressed, LOG_TAG_CP "done seq=%lu jrn_seq=%lu dir_ckpt=%s ms=%lu", h->hdr.seq, h->journal_seq, (h->dir.skip == true) ? "skip" : "written", log_heartbeat_age_ms(&h->hb));
                 }
