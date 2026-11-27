@@ -1,4 +1,4 @@
-"""H52 模块文件成对检查（FTL / FC / NAND 三层）。
+"""H52 模块文件成对检查（FTL / FC / NAND / PLATFORM 四层）。
 
 判据：
   · 每个模块 .c 必须有同名 .h（同 basename，可在本层 src/ 或 include/）；
@@ -27,6 +27,8 @@ LAYERS = (
     (Path("src/ftl"), Path("include/ftl")),
     (Path("src/fc"), Path("include/fc")),
     (Path("src/nand"), Path("include/nand")),
+    (Path("src/platform"), Path("include/platform")),
+    (Path("src/hil"), Path("include/hil")),
 )
 HEADER_ONLY_KINDS = {"config", "contract", "inline-access"}
 HEAD_LINES = 40
@@ -276,6 +278,35 @@ def selftest() -> tuple[bool, str]:
             },
             0,
         ),
+        (
+            "platform_port_implements",
+            {
+                "src/platform/soc/x/delay_port.c": "/* implements delay.h */\nvoid port(void) { }\n",
+                "include/platform/delay.h": "/* header-only: contract */\nvoid port(void);\n",
+            },
+            0,
+        ),
+        (
+            "hil_public_pair",
+            {
+                "src/hil/foo.c": "int foo_entry(void) { return 0; }\n",
+                "include/hil/foo.h": "/* header-only: contract */\nint foo_entry(void);\n",
+            },
+            0,
+        ),
+        (
+            "hil_missing_header",
+            {"src/hil/nohead.c": "int lone(void) { return 0; }\n"},
+            1,
+        ),
+        (
+            "platform_subdir_pair",
+            {
+                "src/platform/soc/x/dma_port.c": "const int dma_handle = 0;\n",
+                "include/platform/soc/x/dma_port.h": "/* header-only: contract */\nextern const int dma_handle;\n",
+            },
+            0,
+        ),
     ]
     failures = [message for name, files, want in cases if (message := _run_case(name, files, want))]
     if failures:
@@ -289,5 +320,5 @@ RULE = Rule(
     kind="textual",
     check=check,
     selftest=selftest,
-    roots=("src/ftl", "src/fc", "src/nand"),
+    roots=("src/ftl", "src/fc", "src/nand", "src/platform", "src/hil"),
 )

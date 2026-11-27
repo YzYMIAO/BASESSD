@@ -110,7 +110,7 @@ H48 是其落地细则。
 ### H17 DMA 缓冲区必须做缓存维护
 
 CPU→设备用 `SCB_CleanDCache_by_Addr`；设备→CPU 用 `SCB_InvalidateDCache_by_Addr`。
-地址与长度按 32 字节对齐。范本：`src/platform/stm32h743/usart_port.c`。
+地址与长度按 32 字节对齐。范本：`src/platform/soc/stm32h743/usart_port.c`。
 漏 Invalidate = **拿错数据继续跑**；该操作不免费，不要对同一缓冲区反复做。
 
 ### H18 临界区必须用可嵌套的 PRIMASK 保存 / 恢复
@@ -523,7 +523,7 @@ H53 不机检（判据依赖链接图，文本检查器拿不到编译产物）�
 
 - `make check-pairs`（或 `make c-rules-check` 全量）跑 `tools/check_c.py --rule H52`；
 - `make check-pairs-test` 跑正 / 负例自检（缺头、缺 `header-only` 标记、一头多实现、`implements` 目标缺失等）；
-- 首批扫描范围：`src/ftl`。扩到其他层时，先把该层例外标记补齐再挂进 `make check`。
+- 扫描范围：`src/ftl` / `src/fc` / `src/nand` / `src/platform` / `src/hil`；扩到新层时先把该层例外标记补齐再挂进 `make check`。
 
 **反例**
 

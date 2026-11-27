@@ -82,7 +82,7 @@ layout-test:
 	@$(PYTHON) "$(C_RULES_CHECK)" --root $(PROJECT_ROOT) --rule H51 --self-test
 
 # ============================================================================
-# H52 模块文件成对检查（首批只扫 src/ftl）
+# H52 模块文件成对检查（扫 src/ftl / src/fc / src/nand / src/platform）
 #   - 每个模块 .c 必须有同名 .h；一个内部 .h 只对应一个 .c；
 #   - 例外必须文件头标注：header-only / implements / internal-only / multi-impl。
 # ============================================================================

@@ -489,7 +489,18 @@ def is_pointer_declaration(statement: str) -> bool:
     return re.search(r"\(\s*\*", statement) is not None
 
 
+def _strip_gcc_attributes(text: str) -> str:
+    """剔除 `__attribute__((...))`：属性实参不是函数参数表。"""
+    pattern = re.compile(r"__attribute__\s*\(\(\s*[^()]*(?:\([^()]*\)[^()]*)*\)\)")
+    while True:
+        match = pattern.search(text)
+        if not match:
+            return text
+        text = text[: match.start()] + " " + text[match.end() :]
+
+
 def is_prototype(statement: str) -> bool:
+    statement = _strip_gcc_attributes(statement)
     if "(" not in statement or is_pointer_declaration(statement):
         return False
     tail = statement.rstrip()

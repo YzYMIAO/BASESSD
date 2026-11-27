@@ -418,6 +418,19 @@ def run_self_test() -> int:
     )
     cases.append(
         (
+            "attribute_var_is_not_proto",
+            """\
+            #include "a.h"
+            static BYTE buf[16] __attribute__((aligned(4)));
+            static void f(void) { }
+            """,
+            ".c",
+            0,
+            "OK",
+        )
+    )
+    cases.append(
+        (
             "var_after_func",
             """\
             #include "a.h"

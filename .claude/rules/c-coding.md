@@ -150,7 +150,7 @@ paths:
 **注册表例外：** 函数指针表 / 命令表 / 任务表 / 设备描述表若以本文件函数为初始化项，放在**被引用函数之后、主入口组之前**；也可放文件最末作为数据附录（此时 `main` 仍是最后一个函数）。不为表前置声明整批 handler 原型；表被更早函数引用时，只在 static 声明区保留一条表自身声明（如 `static const bg_task_s s_bg_policy_tasks[BG_POLICY_TASK_COUNT];`）。普通 `static const` 常量表仍放文件级变量区。
 
 **H52 模块文件成对：每个模块 `.c` 必须有同名 `.h`；一个内部 `.h` 也只能对应一个 `.c`。**
-同名按 basename 判定（`src/<layer>/foo.c` ↔ `src/<layer>/foo.h` 或 `include/<layer>/foo.h`）；该 `.c` 的跨 TU 符号只在其同名 `.h` 声明。例外必须**可机检**（文件头前 40 行标记）：`header-only: config|contract|inline-access`（无 `.c` 的配置 / 类型 / inline 访问器头）、`implements <header>`（端口适配 `.c`）、`internal-only`（无跨 TU 导出的拆分 `.c`）、`multi-impl: <理由>`（注册 / 分发表等一表多头）；`main.c` 为入口例外，`include/<layer>/` 公共契约头允许多个 `.c` 实现。首批只扫 `src/ftl`；检查 `make check-pairs`，细则 `docs/guides/coding_rules.md` H52。
+同名按 basename 判定（`src/<layer>/foo.c` ↔ `src/<layer>/foo.h` 或 `include/<layer>/foo.h`）；该 `.c` 的跨 TU 符号只在其同名 `.h` 声明。例外必须**可机检**（文件头前 40 行标记）：`header-only: config|contract|inline-access`（无 `.c` 的配置 / 类型 / inline 访问器头）、`implements <header>`（端口适配 `.c`）、`internal-only`（无跨 TU 导出的拆分 `.c`）、`multi-impl: <理由>`（注册 / 分发表等一表多头）；`main.c` 为入口例外，`include/<layer>/` 公共契约头允许多个 `.c` 实现。扫描 `src/{ftl,fc,nand,platform,hil}`；检查 `make check-pairs`，细则 `docs/guides/coding_rules.md` H52。
 
 **H53 内部函数默认 `static`；单测必须直调时用「条件链接宏」暴露，禁止为测试保留无条件外部链接。**
 产品档宏展开为 `static`、测试构建（`FC_NAND_TEST_ENABLE`）展开为空；宏名带模块前缀（`FC_DATA_PATH_STEP_LINKAGE` / `FC_UOP_STEP_LINKAGE`），禁用通用 `STATIC`（会撞第三方头）；`.h` 原型与 `.c` 定义用同一宏门控；`#if` 内只切链接属性，测试专用行为分支走既有 `FC_NAND_TEST_ENABLE` 块。能经公共入口覆盖且不丢介质格式语义的，保持无条件 `static`。形态出处 Zephyr `ZTESTABLE_STATIC`（PR #104385）；细则 `docs/guides/coding_rules.md` H53。
