@@ -497,7 +497,8 @@ static MunitResult test_hil_submit_not_ready(const MunitParameter params[], void
 
 /* submit_edges — HIL 入口非法参数分类。
  *
- * 覆盖：buffer 不足、count=0、越界 LBA → INVALID_ARGUMENT；未知 opcode → NOT_SUPPORTED。
+ * 覆盖：buffer=NULL、buffer 不足、count=0、越界 LBA → INVALID_ARGUMENT；
+ * 未知 opcode → NOT_SUPPORTED。
  * 判据：必须在分配/拆分前拒绝并置 complete_flag，避免调用者无限等待。 */
 
 static MunitResult test_hil_submit_edges(const MunitParameter params[], void *data)
@@ -510,6 +511,12 @@ static MunitResult test_hil_submit_edges(const MunitParameter params[], void *da
 
     /* buffer_size 不足：在 split 之前拒绝 */
     hil_req_init(&req, SSD_REQUEST_WRITE, 0U, HIL_IO_LBAS, buf, sizeof(s_hil_edge_buf) - 1U);
+    munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_INVALID_ARGUMENT);
+    munit_assert_uint8(req.complete_flag, ==, 1U);
+    munit_assert_int(req.completion_status, ==, SSD_STATUS_INVALID_ARGUMENT);
+
+    /* buffer=NULL：buffer_size 足够也必须拒绝（不许把 NULL 交给 FTL / 前端） */
+    hil_req_init(&req, SSD_REQUEST_WRITE, 0U, HIL_IO_LBAS, NULL, sizeof(s_hil_edge_buf));
     munit_assert_int(ssd_controller_submit(&g_ctrl, &req), ==, SSD_STATUS_INVALID_ARGUMENT);
     munit_assert_uint8(req.complete_flag, ==, 1U);
     munit_assert_int(req.completion_status, ==, SSD_STATUS_INVALID_ARGUMENT);
@@ -530,8 +537,8 @@ static MunitResult test_hil_submit_edges(const MunitParameter params[], void *da
     munit_assert_uint8(req.complete_flag, ==, 1U);
     munit_assert_int(req.completion_status, ==, SSD_STATUS_NOT_SUPPORTED);
 
-    hil_trace_detail("submit edges: short buffer/zero count/oob lba -> INVALID_ARGUMENT; opcode=0x7F -> NOT_SUPPORTED; complete_flag=1");
-    hil_trace_summary("hil submit: 4 invalid-input classes rejected at HIL entry");
+    hil_trace_detail("submit edges: null/short buffer/zero count/oob lba -> INVALID_ARGUMENT; opcode=0x7F -> NOT_SUPPORTED; complete_flag=1");
+    hil_trace_summary("hil submit: 5 invalid-input classes rejected at HIL entry");
 
     return MUNIT_OK;
 }
@@ -928,13 +935,13 @@ static MunitResult test_hil_request_timeout_trim(const MunitParameter params[], 
 
 /* ══ 子套件 /hil/contract/（契约）与 /hil/io/（真实 I/O）══ */
 
-/* hil_uart_dma_init_returns — UART TX DMA 初始化返回值语义必须正确（PLAT-13）。 */
+/* hil_uart_dma_init_returns — UART TX DMA 初始化返回值语义必须正确。 */
 static MunitResult test_hil_uart_dma_init_returns(const MunitParameter params[], void *data)
 {
     (void)params;
     (void)data;
 
-    munit_assert_int(dma_port_uart_tx_init(), ==, FUNC_STATUS_SUCCESS);
+    munit_assert_int(dma_port_usart_tx_init(), ==, FUNC_STATUS_SUCCESS);
     return MUNIT_OK;
 }
 

@@ -1,12 +1,19 @@
 #ifndef SSD_REQUEST_H
 #define SSD_REQUEST_H
 
+/*
+ * ssd_request.h — HIL 主机请求表示与 run 拆分入口。
+ *
+ * 定义 ssd_req_s（两种 host 前端共用的请求对象）与其生命周期契约；拆分策略
+ * 在 ssd_request.c：按 FTL 实例边界切连续 run，plane 配对交给 FTL。
+ * completion_status 只由 HIL 写（见下方字段说明）。
+ */
+
 #include "ftl_type.h" /* ftl_io_req_s */
 #include "ssd_types.h"
 #include "stats.h" /* SSD_STATS_ENABLE（统计专用声明/调用按档裁剪） */
 
 #include <stddef.h>
-#include <stdint.h>
 
 /* 请求级 deadline：HIL 对 host 命令的 liveness 上界。
  * 必须大于最坏正常路径（GC + NAND 超时）；超时只表示「不再等主机回执」，
@@ -105,18 +112,23 @@ static inline BOOL ssd_request_expired(DWORD start_ms, DWORD now_ms)
  *
  * @param request 请求（非空）
  */
-static inline void ssd_request_mark_timeout(ssd_req_s *request)
-{
-    if (request->timed_out != false)
-    {
-        return;
-    }
-#if SSD_STATS_ENABLE
-    ssd_request_note_timeout();
-#endif
-    request->timed_out         = true;
-    request->completion_status = SSD_STATUS_TIMEOUT;
-    request->complete_flag     = 1U;
-}
+void ssd_request_mark_timeout(ssd_req_s *request);
+
+/* 按 FTL 实例边界把 READ/WRITE 请求拆成连续 run 并提交（ssd_request.c）。
+ * controller 的 tag 在此前向声明：controller.h 依赖本头的 ssd_req_s，
+ * 本头不能再反向 include controller.h。C11 允许同型 typedef 重定义。 */
+typedef struct SSD_CONTROLLER_S ssd_ctl_s;
+
+/**
+ * @brief 按 FTL 实例边界把 host 请求拆成连续 run 并逐段提交。
+ *
+ * @param controller Controller 上下文
+ * @param request    主机请求（READ/WRITE）
+ * @return SSD_STATUS_OK               全部/部分 run 已受理
+ *         SSD_STATUS_INVALID_ARGUMENT 入参或 block_count 非法
+ *         SSD_STATUS_NOT_SUPPORTED    opcode 不是 READ/WRITE
+ *         SSD_STATUS_NO_SPACE / IO_ERROR 第一个 run 就提交失败（无在飞）
+ */
+ssd_status_e ssd_request_split(ssd_ctl_s *controller, ssd_req_s *request);
 
 #endif /* SSD_REQUEST_H */

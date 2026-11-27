@@ -13,6 +13,90 @@
 #include <string.h>
 
 /**
+ * @brief 占用计数 +1（调用者已确认 allows / 同 owner）
+ *
+ * @param queue 队列
+ * @param owner 前端
+ */
+static void ssd_host_queue_gate_take(ssd_host_queue_s *queue, ssd_host_owner_e owner)
+{
+    ASSERT(queue->gate_count < 0xFFU);
+
+    if (queue->gate_owner == SSD_HOST_OWNER_NONE)
+    {
+        queue->gate_owner = owner;
+    }
+    queue->gate_count++;
+}
+
+/**
+ * @brief 当前前端能否占用 host gate（NONE 或 owner 自己持有）。
+ *
+ * @param queue 队列
+ * @param owner 前端（USB / CLI；NONE 非法）
+ * @return true = 可占用；false = 另一前端持有
+ */
+BOOL ssd_host_queue_gate_allows(const ssd_host_queue_s *queue, ssd_host_owner_e owner)
+{
+    ASSERT(queue != NULL);
+    ASSERT((owner > SSD_HOST_OWNER_NONE) && (owner < SSD_HOST_OWNER_COUNT));
+
+    return (queue->gate_owner == SSD_HOST_OWNER_NONE) || (queue->gate_owner == owner);
+}
+
+/**
+ * @brief 是否有任一前端占用了 host gate。
+ *
+ * @param queue 队列
+ * @return true = 有主机命令在飞
+ */
+BOOL ssd_host_queue_gate_busy(const ssd_host_queue_s *queue)
+{
+    ASSERT(queue != NULL);
+
+    return (queue->gate_owner != SSD_HOST_OWNER_NONE) ? true : false;
+}
+
+/**
+ * @brief 占用 host gate（同一前端可重复占用，计数递增）。
+ *
+ * @param queue 队列
+ * @param owner 前端（USB / CLI）
+ * @return true = 已占用；false = 另一前端持有
+ */
+BOOL ssd_host_queue_gate_acquire(ssd_host_queue_s *queue, ssd_host_owner_e owner)
+{
+    if (ssd_host_queue_gate_allows(queue, owner) == false)
+    {
+        return false;
+    }
+
+    ssd_host_queue_gate_take(queue, owner);
+    return true;
+}
+
+/**
+ * @brief 释放 host gate（与 acquire 一一配对）。
+ *
+ * @param queue 队列
+ * @param owner 必须与当前 gate_owner 一致
+ */
+void ssd_host_queue_gate_release(ssd_host_queue_s *queue, ssd_host_owner_e owner)
+{
+    ASSERT(queue != NULL);
+    ASSERT(queue->gate_count > 0U);
+    /* 错主释放会静默改写 gate 会计：release 档也必须拒绝（判据 9），
+     * 因此这里用 ASSERT_REJECT_VOID 而非仅 debug 的 ASSERT。 */
+    ASSERT_REJECT_VOID(queue->gate_owner == owner, "host gate owner mismatch on release\r\n");
+
+    queue->gate_count--;
+    if (queue->gate_count == 0U)
+    {
+        queue->gate_owner = SSD_HOST_OWNER_NONE;
+    }
+}
+
+/**
  * @brief 清零整张 host queue 表。
  *
  * @param queue 队列（由 ssd_ctl_s 持有）

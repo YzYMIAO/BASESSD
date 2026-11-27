@@ -45,16 +45,6 @@ void usb_msc_init(void);
 void usb_msc_task(void);
 
 /**
- * @brief 是否有 USB 侧 host 请求尚未完成（已提交 FTL，或等待 host busy gate）。
- *
- * CLI（UART）与 USB 是两个 host 前端；同一时刻只允许一个提交 controller，
- * 避免调试命令与 PC 的文件系统操作互相插队。CLI 在提交前检查本函数。
- *
- * @return true = 任一 USB 槽非 FREE
- */
-BOOL usb_msc_host_busy(void);
-
-/**
  * @brief 打印 WRITE(10) 数据相分块直方图（诊断）。
  *
  * 只在 `stat` 命令里调用：运行期零输出。桶 = TinyUSB 每次回调的数据相长度

@@ -15,11 +15,19 @@
 #include <stddef.h>
 #include <string.h>
 
-/* 外部：request.c — 按实例边界切 run / 提交子请求 */
-ssd_status_e ssd_request_split(ssd_ctl_s *controller, ssd_req_s *request);
-
-QWORD      ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
-ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
+/* ── 默认 MBR 布局（IBM PC 分区表，512 B 逻辑扇区）──
+ * 偏移与取值来自标准 MBR 结构：分区项 0 从偏移 446 起 16 B，LBA 字段在项内
+ * +8/+12，引导签名 0x55AA 位于扇区末尾。 */
+#define SSD_MBR_SECTOR_BYTES        512U /* host 逻辑扇区 = 512 B（与 USB_MSC_BLOCK_SIZE 同一口径） */
+#define SSD_MBR_PART_ENTRY_OFFSET   446U /* 分区项 0 起始 */
+#define SSD_MBR_PART_LBA_OFFSET     454U /* 分区项 0 内：起始 LBA */
+#define SSD_MBR_PART_COUNT_OFFSET   458U /* 分区项 0 内：扇区数 */
+#define SSD_MBR_SIGNATURE_OFFSET    510U /* 引导签名低字节 */
+#define SSD_MBR_SIGNATURE_LO        0x55U
+#define SSD_MBR_SIGNATURE_HI        0xAAU
+#define SSD_MBR_PART_TYPE_FAT32_LBA 0x0CU    /* 分区类型：FAT32 LBA */
+#define SSD_MBR_FIRST_PARTITION_LBA 128U     /* 64 KiB 对齐，与 usb_verify.ps1 的布局一致 */
+#define SSD_MBR_SERVICE_SPIN_MAX    1000000U /* 同步等待上界：轮数由 NAND 最坏延迟决定 */
 
 /**
  * @brief 小端写 32 bit（MBR 字段）
@@ -60,15 +68,15 @@ static void ssd_mbr_service_step(ftl_ctx_s *ftl)
  * @param sector 512 B 扇区
  * @return true  全 0x00；false 有非零字节
  */
-static BOOL ssd_lba0_zero(const BYTE sector[512])
+static BOOL ssd_lba0_zero(const BYTE sector[SSD_MBR_SECTOR_BYTES])
 {
     DWORD zeros = 0U;
 
-    for (DWORD i = 0U; i < 512U; i++)
+    for (DWORD i = 0U; i < SSD_MBR_SECTOR_BYTES; i++)
     {
         zeros += (sector[i] == 0x00U) ? 1U : 0U;
     }
-    return zeros == 512U;
+    return zeros == SSD_MBR_SECTOR_BYTES;
 }
 
 /**
@@ -79,7 +87,7 @@ static BOOL ssd_lba0_zero(const BYTE sector[512])
  */
 static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
 {
-    const DWORD start_lba = 128U; /* 64 KiB 对齐，与 usb_verify.ps1 的标准布局一致 */
+    const DWORD start_lba = SSD_MBR_FIRST_PARTITION_LBA;
     const DWORD max       = ssd_controller_host_lba_max(controller);
 
     /* controller / READY / ftl[0] 已由唯一调用者 ensure 校验；这里只守容量前提。 */
@@ -89,23 +97,23 @@ static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
     }
 
     ftl_ctx_s *ftl = controller->ftl[0];
-    BYTE       mbr[512];
+    BYTE       mbr[SSD_MBR_SECTOR_BYTES];
 
     memset(mbr, 0, sizeof(mbr));
 
     /* 分区项 0：LBA 模式；CHS 对现代 Windows 不参与寻址。 */
-    mbr[446] = 0x00U; /* 非活动分区 */
-    mbr[447] = 0x02U; /* start CHS: head */
-    mbr[448] = 0x03U; /* start CHS: sector */
-    mbr[449] = 0x00U; /* start CHS: cylinder */
-    mbr[450] = 0x0CU; /* FAT32 LBA */
-    mbr[451] = 0xFEU; /* end CHS 占位（LBA 模式） */
-    mbr[452] = 0xFFU;
-    mbr[453] = 0xFFU;
-    mbr_put32(&mbr[454], start_lba);
-    mbr_put32(&mbr[458], max - start_lba);
-    mbr[510] = 0x55U;
-    mbr[511] = 0xAAU;
+    mbr[SSD_MBR_PART_ENTRY_OFFSET]      = 0x00U; /* 非活动分区 */
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 1U] = 0x02U; /* start CHS: head */
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 2U] = 0x03U; /* start CHS: sector */
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 3U] = 0x00U; /* start CHS: cylinder */
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 4U] = SSD_MBR_PART_TYPE_FAT32_LBA;
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 5U] = 0xFEU; /* end CHS 占位（LBA 模式） */
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 6U] = 0xFFU;
+    mbr[SSD_MBR_PART_ENTRY_OFFSET + 7U] = 0xFFU;
+    mbr_put32(&mbr[SSD_MBR_PART_LBA_OFFSET], start_lba);
+    mbr_put32(&mbr[SSD_MBR_PART_COUNT_OFFSET], max - start_lba);
+    mbr[SSD_MBR_SIGNATURE_OFFSET]      = SSD_MBR_SIGNATURE_LO;
+    mbr[SSD_MBR_SIGNATURE_OFFSET + 1U] = SSD_MBR_SIGNATURE_HI;
 
     volatile BYTE         done   = 0U;
     volatile ssd_status_e status = SSD_STATUS_IO_ERROR;
@@ -123,7 +131,7 @@ static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
         return SSD_STATUS_IO_ERROR;
     }
 
-    for (DWORD spin = 0U; (spin < 1000000U) && (done == 0U); spin++)
+    for (DWORD spin = 0U; (spin < SSD_MBR_SERVICE_SPIN_MAX) && (done == 0U); spin++)
     {
         ssd_mbr_service_step(ftl);
     }
@@ -136,7 +144,7 @@ static ssd_status_e ssd_mbr_write_default(ssd_ctl_s *controller)
     /* MBR 映射必须随 Journal/CP 落盘后才能断电；否则 L2P 回滚回 partitionless。 */
     ftl_flush_begin(ftl);
 
-    for (DWORD spin = 0U; spin < 1000000U; spin++)
+    for (DWORD spin = 0U; spin < SSD_MBR_SERVICE_SPIN_MAX; spin++)
     {
         ssd_mbr_service_step(ftl);
 
@@ -315,6 +323,44 @@ ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba)
 }
 
 /**
+ * @brief 从 lba 起、同一 FTL 实例内最长的连续 run 的结束 LBA。
+ *
+ * 用于把 host 请求按实例边界切成 run（FTL 一次提交只作用一个实例）。
+ *
+ * @param controller Controller 上下文（调用者保证非 NULL）
+ * @param lba        起点（全局 LBA）
+ * @param lba_limit  上界（开区间）
+ * @return 本 run 的结束 LBA（> lba，<= lba_limit）
+ */
+QWORD ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit)
+{
+    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
+    QWORD      end = lba + 1U;
+
+    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+    ASSERT(ftl != NULL);
+
+    while (end < lba_limit)
+    {
+        QWORD boundary;
+
+        if (ssd_controller_route(controller, end) != ftl)
+        {
+            break; /* 进入另一实例 */
+        }
+
+        boundary = (((end >> L2P_REGION_SHIFT) + 1U) << L2P_REGION_SHIFT);
+        if (boundary > lba_limit)
+        {
+            boundary = lba_limit;
+        }
+        end = boundary;
+    }
+
+    return end;
+}
+
+/**
  * @brief host 写启动许可（按 LBA 路由到 FTL 实例）
  *
  * @param controller Controller 上下文
@@ -353,7 +399,7 @@ ssd_status_e ssd_controller_ensure_default_mbr(ssd_ctl_s *controller)
     }
 
     ftl_ctx_s *ftl = controller->ftl[0];
-    BYTE       sector[512];
+    BYTE       sector[SSD_MBR_SECTOR_BYTES];
 
     memset(sector, 0, sizeof(sector));
 
@@ -374,7 +420,7 @@ ssd_status_e ssd_controller_ensure_default_mbr(ssd_ctl_s *controller)
         return SSD_STATUS_IO_ERROR;
     }
 
-    for (DWORD spin = 0U; (spin < 1000000U) && (done == 0U); spin++)
+    for (DWORD spin = 0U; (spin < SSD_MBR_SERVICE_SPIN_MAX) && (done == 0U); spin++)
     {
         ssd_mbr_service_step(ftl);
     }
@@ -385,7 +431,7 @@ ssd_status_e ssd_controller_ensure_default_mbr(ssd_ctl_s *controller)
         return SSD_STATUS_IO_ERROR;
     }
 
-    if ((sector[510] == 0x55U) && (sector[511] == 0xAAU))
+    if ((sector[SSD_MBR_SIGNATURE_OFFSET] == SSD_MBR_SIGNATURE_LO) && (sector[SSD_MBR_SIGNATURE_OFFSET + 1U] == SSD_MBR_SIGNATURE_HI))
     {
         return SSD_STATUS_OK; /* 已有 MBR / 文件系统引导扇区，不覆盖 */
     }
@@ -472,8 +518,8 @@ void ssd_controller_state_transition(ssd_ctl_s *controller, ssd_ctrl_state_e nex
 /**
  * @brief 初始化 Controller，按 compact die 号绑定 FTL 实例表。
  *
- * 只检查 present die：ftl_by_die[die] 必须非空，且实例 topo 必须与
- * die 表分解出的 (ch,ce,lun) 一致；同时清零 host queue。
+ * 前 DIE_MAX 项 ftl_by_die[die] 必须非空，且实例 topo 必须与 die 表分解出的
+ * (ch,ce,lun) 一致；同时清零 host queue。
  *
  * @param controller Controller 上下文
  * @param ftl_by_die die → 实例指针表（前 DIE_MAX 项有效）
@@ -499,10 +545,11 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
 
     ssd_host_queue_init(&controller->host_queue);
 
-    /* 稀疏拓扑 / 重复 init：先清空 die 槽，缺失项保持 NULL。 */
+    /* 重复 init 前先清空 die 槽。 */
     memset(controller->ftl, 0, sizeof(controller->ftl));
 
-    /* 逐 present die 校验并绑定 FTL 实例：稀疏拓扑允许部分 die 槽为 NULL。
+    /* 逐个 die 校验并绑定 FTL 实例：当前实现要求每个 die 槽非空（稀疏拓扑尚未
+     * 实现；firmware 侧按 DIE_MAX 遍历 flush / trim，NULL 槽会断言失败）。
      * 状态机（C1）：入口 RESET → INITIALIZING，校验结果驱动 READY/FAILED。 */
     ssd_controller_state_transition(controller, SSD_CONTROLLER_INITIALIZING);
 
@@ -519,10 +566,13 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
             return SSD_STATUS_INVALID_ARGUMENT;
         }
+
         /* die 索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
-        if ((ftl_topo_get(slot)->ch != ch) || (ftl_topo_get(slot)->ce != ce) || (ftl_topo_get(slot)->lun != lun))
+        const ftl_topo_s *topo = ftl_topo_get(slot);
+
+        if ((topo->ch != ch) || (topo->ce != ce) || (topo->lun != lun))
         {
-            LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hhu slot ch=%u ce=%u lun=%u\r\n", die, ch, ce, lun);
+            LOGE(LOG_TAG_CTRL "init failed: topo mismatch die=%hhu slot ch=%u ce=%u lun=%u expected ch=%u ce=%u lun=%u\r\n", die, topo->ch, topo->ce, topo->lun, ch, ce, lun);
             ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
             return SSD_STATUS_INVALID_ARGUMENT;
         }
@@ -537,15 +587,15 @@ ssd_status_e ssd_controller_init(ssd_ctl_s *controller, ftl_ctx_s *const *ftl_by
  * @brief 查询请求是否完成。
  *
  * @param request 请求（NULL 视为已完成）
- * @return 1 = 完成；0 = 未完成
+ * @return true = 完成；false = 未完成
  */
-BYTE ssd_controller_is_complete(const ssd_req_s *request)
+BOOL ssd_controller_is_complete(const ssd_req_s *request)
 {
     if (request == NULL)
     {
-        return 1U;
+        return true;
     }
-    return request->complete_flag;
+    return (request->complete_flag != 0U) ? true : false;
 }
 
 /**
@@ -801,8 +851,8 @@ void ssd_controller_service(ssd_ctl_s *controller)
         return;
     }
 
-    /* 请求级 deadline：FLUSH 可撤销；TRIM 没有 abort API，只解开 host 回执，
-     * 继续 step 到 FTL 自己收尾（trim_req 清空后前端才 reclaim）。 */
+    /* 请求级 deadline：FLUSH 可撤销；TRIM 没有 host 侧 cancel 接口，超时后
+     * 中止该实例的 TRIM job 并立即摘掉 trim_req（前端据此 reclaim）。 */
     const DWORD now_ms = delay_now_ms();
 
     if (controller->flush_req != NULL)

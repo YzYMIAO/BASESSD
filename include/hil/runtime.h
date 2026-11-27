@@ -2,6 +2,8 @@
 #define SSD_RUNTIME_H
 
 /*
+ * header-only: contract —— 本头无同名 .c；实现是 src/main.c 中的 ssd_runtime_pump。
+ *
  * runtime.h — 主循环后台服务的一次推进。
  *
  * 把「FTL/FC 泵 + controller + USB + timer」收敛成唯一入口，主循环和需要

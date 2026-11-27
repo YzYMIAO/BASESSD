@@ -44,10 +44,34 @@ typedef struct SSD_HOST_QUEUE_S
 {
     ssd_host_entry_s entries[SSD_HOST_QUEUE_DEPTH]; /* 固定 tag 表：下标即 tag */
     BYTE             used;                          /* 当前占用数 */
+
+    /* 跨前端在飞闸门（唯一来源）：NONE = 没有主机命令占用。
+     * 同一前端可有多条在飞（USB 两个写 chunk / CLI wp 多组），用计数；
+     * 另一前端必须等计数归零后才能占用。前端提交与释放只走
+     * ssd_host_queue_gate_acquire / _release，各 handler 不再自查对方状态。 */
+    ssd_host_owner_e gate_owner; /* 当前占用闸门的前端 */
+    BYTE             gate_count; /* 该前端的在飞占用数 */
 } ssd_host_queue_s;
 
 /**
- * @brief 清零整张 host queue 表。
+ * @brief 当前前端能否占用 host gate（NONE 或 owner 自己持有）。
+ *
+ * @param queue 队列
+ * @param owner 前端（USB / CLI；NONE 非法）
+ * @return true = 可占用；false = 另一前端持有
+ */
+BOOL ssd_host_queue_gate_allows(const ssd_host_queue_s *queue, ssd_host_owner_e owner);
+
+/**
+ * @brief 是否有任一前端占用了 host gate。
+ *
+ * @param queue 队列
+ * @return true = 有主机命令在飞（含等待提交的 USB 槽）
+ */
+BOOL ssd_host_queue_gate_busy(const ssd_host_queue_s *queue);
+
+/**
+ * @brief 清零整张 host queue 表（含 gate）。
  *
  * @param queue 队列（由 ssd_ctl_s 持有）
  */
@@ -71,5 +95,24 @@ ssd_host_entry_s *ssd_host_queue_alloc(ssd_host_queue_s *queue, ssd_host_owner_e
  * @param entry 必须是 in_use 的 entry
  */
 void ssd_host_queue_free(ssd_host_queue_s *queue, ssd_host_entry_s *entry);
+
+/**
+ * @brief 占用 host gate（同一前端可重复占用，计数递增）。
+ *
+ * 调用者必须先用 ssd_host_queue_gate_allows() 确认；抢占另一前端是逻辑错误。
+ *
+ * @param queue 队列
+ * @param owner 前端（USB / CLI）
+ * @return true = 已占用；false = 另一前端持有
+ */
+BOOL ssd_host_queue_gate_acquire(ssd_host_queue_s *queue, ssd_host_owner_e owner);
+
+/**
+ * @brief 释放 host gate（与 acquire 一一配对；计数归零后 owner 回到 NONE）。
+ *
+ * @param queue 队列
+ * @param owner 必须与当前 gate_owner 一致
+ */
+void ssd_host_queue_gate_release(ssd_host_queue_s *queue, ssd_host_owner_e owner);
 
 #endif /* SSD_HOST_QUEUE_H */

@@ -47,12 +47,39 @@ typedef struct SSD_CONTROLLER_S
     ssd_host_queue_s host_queue;
 } ssd_ctl_s;
 
+/* 唯一定义在 main.c：两个 host 前端（USB MSC / UART CLI）与 CLI 诊断命令共用。 */
+extern ssd_ctl_s g_ctrl;
+
+/**
+ * @brief 按全局 LBA 路由到对应 FTL 实例（region 粒度）。
+ *
+ * 唯一实现：controller submit 与 ssd_request_split 共用；换哈希策略只改这里。
+ *
+ * @param controller Controller 上下文（调用者保证非 NULL）
+ * @param lba        host 全局 LBA
+ * @return 路由到的 FTL 实例
+ */
+ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
+
+/**
+ * @brief 从 lba 起、同一 FTL 实例内最长的连续 run 的结束 LBA。
+ *
+ * 用于把 host 请求按实例边界切成 run（FTL 一次提交只作用一个实例）。
+ *
+ * @param controller Controller 上下文（调用者保证非 NULL）
+ * @param lba        起点（全局 LBA）
+ * @param lba_limit  上界（开区间）
+ * @return 本 run 的结束 LBA（> lba，<= lba_limit）
+ */
+QWORD ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
+
 /**
  * @brief 初始化 Controller，按 compact die 号绑定 FTL 实例表。
  *
  * 只检查 present die：对每个 die < DIE_MAX，ftl_by_die[die] 必须非空，且
  * 实例 topo 必须与 die 表分解出的 (ch,ce,lun) 一致（保证 LBA 路由与芯片
- * 定位语义一致）。稀疏拓扑的空洞不访问。
+ * 定位语义一致）。当前实现要求前 DIE_MAX 项全部非空；稀疏拓扑尚未实现
+ * （见 hil_design.md §2.1）。
  *
  * @param controller Controller 上下文
  * @param ftl_by_die die → 实例指针表（长度 FTL_DIE_MAX，前 DIE_MAX 项有效）
@@ -81,9 +108,9 @@ ssd_status_e ssd_controller_submit(ssd_ctl_s *controller, ssd_req_s *request);
  * @brief 查询请求是否完成。
  *
  * @param request 请求（NULL 视为已完成）
- * @return 1 = 完成；0 = 未完成
+ * @return true = 完成；false = 未完成
  */
-BYTE ssd_controller_is_complete(const ssd_req_s *request);
+BOOL ssd_controller_is_complete(const ssd_req_s *request);
 
 /**
  * @brief 超时后请求是否已可安全释放

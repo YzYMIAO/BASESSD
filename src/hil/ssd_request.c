@@ -63,10 +63,6 @@ static const stats_hist_name_s s_stats_hil_hist_names[] = {
 STATS_CHECK_HIST_FIELD(hil_request_stats_s, cmd_us);
 #endif /* SSD_STATS_ENABLE */
 
-/* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
-ftl_ctx_s *ssd_controller_route(const ssd_ctl_s *controller, QWORD lba);
-QWORD      ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit);
-
 /**
  * @brief 请求 opcode 的短名（日志用）
  *
@@ -306,42 +302,27 @@ void ssd_request_note_latency(ssd_req_s *request)
 #endif /* SSD_STATS_ENABLE */
 
 /**
- * @brief 从 lba 起、路由到同一 FTL 实例的最长连续 run 的结束 LBA（开区间）。
+ * @brief 标记 host 侧超时（只改可见状态；FTL 在飞资源由 reclaimable 判定）
  *
- * 路由按 region（L2P_REGION_SHIFT 个 LBA）粒度分片 ⇒ run 只可能在 region 边界处结束，
- * 逐 region 前进即可，无需逐 LBA 试探。
+ * 幂等：已标记过的请求直接返回——USB 前端在 `timed_out && !ack_sent` 时
+ * 会再次调用本函数补发回执，重复标记不得重复计数或改状态。
  *
- * @param controller Controller 上下文
- * @param lba        起点（全局 LBA）
- * @param lba_limit  上界（开区间）
- * @return 本 run 的结束 LBA（> lba，<= lba_limit）
+ * @param request 请求（非空）
  */
-QWORD ssd_controller_run_end(ssd_ctl_s *controller, QWORD lba, QWORD lba_limit)
+void ssd_request_mark_timeout(ssd_req_s *request)
 {
-    ftl_ctx_s *ftl = ssd_controller_route(controller, lba);
-    QWORD      end = lba + 1U;
+    ASSERT(request != NULL);
 
-    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
-    ASSERT(ftl != NULL);
-
-    while (end < lba_limit)
+    if (request->timed_out != false)
     {
-        QWORD boundary;
-
-        if (ssd_controller_route(controller, end) != ftl)
-        {
-            break; /* 进入另一实例 */
-        }
-
-        boundary = (((end >> L2P_REGION_SHIFT) + 1U) << L2P_REGION_SHIFT);
-        if (boundary > lba_limit)
-        {
-            boundary = lba_limit;
-        }
-        end = boundary;
+        return;
     }
-
-    return end;
+#if SSD_STATS_ENABLE
+    ssd_request_note_timeout();
+#endif
+    request->timed_out         = true;
+    request->completion_status = SSD_STATUS_TIMEOUT;
+    request->complete_flag     = 1U;
 }
 
 /**
