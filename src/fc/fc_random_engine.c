@@ -30,8 +30,12 @@
  * ③ 种子维度：企业级可能混入更多维度（Die ID 等）
  * ══════════════════════════════════════════════════════════════════ */
 
-#define FC_SIMPLE_XOR_PATTERN_LEN (64U) /* SIMPLE_XOR 分支使用；提前定义以满足 H51 */
+#if (FC_RANDOM_ALGO == FC_RANDOM_ALGO_SIMPLE_XOR)
+/* Simple XOR 分支专用：pattern 长度。条件定义；位置先于函数以满足 H51。 */
+#    define FC_SIMPLE_XOR_PATTERN_LEN (64U)
+#endif
 
+/* ── 分支：LFSR 16 ────────────────────────────────────────────────── */
 #if (FC_RANDOM_ALGO == FC_RANDOM_ALGO_LFSR)
 
 // 16 级 LFSR，多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1，周期 2¹⁶ - 1 = 65535。
@@ -227,7 +231,7 @@ static BYTE fc_lfsr_next(WORD *state)
  * @param length 数据字节数
  * @param seed   加扰种子；低 16 位作 LFSR 初态，为 0 时退化为 1
  */
-static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static void fc_random_algo_transform(BYTE *data, WORD length, DWORD seed)
 {
     // data 前置条件由调用者保证（fc_data_path_scramble 传入 CW 缓冲）
     ASSERT(data != NULL);
@@ -272,6 +276,7 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
     }
 }
 
+/* ── 分支：Simple XOR ─────────────────────────────────────────────── */
 #elif (FC_RANDOM_ALGO == FC_RANDOM_ALGO_SIMPLE_XOR)
 
 // 简单 XOR：用 seed 生成固定长度的伪随机 pattern，然后按字节异或。
@@ -285,7 +290,7 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  * @param length 数据字节数
  * @param seed   加扰种子，作为 XOR-shift 递推初值生成 pattern
  */
-static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static void fc_random_algo_transform(BYTE *data, WORD length, DWORD seed)
 {
     BYTE pattern[FC_SIMPLE_XOR_PATTERN_LEN];
     BYTE i;
@@ -310,6 +315,7 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
     }
 }
 
+/* ── 分支：XOR-shift 32 ───────────────────────────────────────────── */
 #elif (FC_RANDOM_ALGO == FC_RANDOM_ALGO_XORSHIFT)
 
 /**
@@ -319,7 +325,7 @@ static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  * @param length 数据字节数
  * @param seed   加扰种子，作为 XOR-shift 递推初值（调用者保证非零）
  */
-static void fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static void fc_random_algo_transform(BYTE *data, WORD length, DWORD seed)
 {
     WORD index;
 
@@ -382,7 +388,7 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
  */
 void fc_random_transform(BYTE *data, WORD length, DWORD seed)
 {
-    fc_random_transform_impl(data, length, seed);
+    fc_random_algo_transform(data, length, seed);
 }
 
 /**

@@ -799,7 +799,7 @@ void SSD_CODE_FAST ftl_cache_pad_op_callback(ftl_ctx_s *ftl, const fc_cmd_status
     // 本服务函数拥有命令，下面**任何**退出路径都必须释放（H1）。必须先取再判：
     // 序列已死时的早退若直接 return，会把 command / desc 链 / buffer 一起漏掉
     // （⇒ 反复触发耗尽 FC 池）。
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
 
     // 收尾页在飞期间序列被中止（盘满 abort / 失败 abort）⇒ 这条回调属于已死的序列：
     // 不能再动 allocator 的 page0/SB 记账（那会误关新块的 SB）。

@@ -1274,7 +1274,7 @@ void ftl_bbt_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
 
     // 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。
     if (alloc->bbt.handle.waiting == false)

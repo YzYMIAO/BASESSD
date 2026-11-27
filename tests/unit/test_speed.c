@@ -231,7 +231,7 @@ static void spd_fc_note_peak(fc_resource_stats_s *peak)
     fc_resource_stats_s now;
 
     memset(&now, 0, sizeof(now));
-    fc_get_resource_stats(&now);
+    fc_resource_stats_get(&now);
 
 #    define SPD_FC_MAX_FIELD(field)      \
         do                               \
@@ -261,7 +261,7 @@ static DWORD spd_fc_verify_read(const spd_fc_slot_s *slot)
 
     while ((id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        const fc_desc_s *desc = fc_descriptor_id_to_descriptor(id);
+        const fc_desc_s *desc = fc_descriptor_lookup(id);
 
         if (desc == NULL)
         {
@@ -531,7 +531,7 @@ static void spd_fc_assert_pools_empty(void)
     fc_resource_stats_s stats;
 
     memset(&stats, 0, sizeof(stats));
-    fc_get_resource_stats(&stats);
+    fc_resource_stats_get(&stats);
     munit_assert_uint32(stats.sq_used, ==, 0U);
     munit_assert_uint32(stats.hsq_used, ==, 0U);
     munit_assert_uint32(stats.cq_used, ==, 0U);
@@ -904,7 +904,7 @@ static void spd_ftl_dump(const ftl_ctx_s *ftl, const char *why)
     fc_resource_stats_s rs;
 
     memset(&rs, 0, sizeof(rs));
-    fc_get_resource_stats(&rs);
+    fc_resource_stats_get(&rs);
     ftl_ut_trace_summary("SPEED dump fc: cmd=%hu desc=%hu buf=%hu sq=%hu hsq=%hu cq=%hu armed=%hhu fatal=%d",
                          rs.command_used,
                          rs.descriptor_used,
@@ -1104,7 +1104,7 @@ static BOOL spd_ftl_wait_idle(ftl_ctx_s *ftl)
         }
 
         memset(&stats, 0, sizeof(stats));
-        fc_get_resource_stats(&stats);
+        fc_resource_stats_get(&stats);
 
         if ((stats.sq_used == 0U) && (stats.hsq_used == 0U) && (stats.cq_used == 0U) && (stats.command_used == 0U) && (stats.descriptor_used == 0U) && (stats.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (pend_slot_count(&ftl->pending) == 0U) && (pend_group_count(&ftl->pending) == 0U) && (!ftl->mig_handle->job.active) && (!ftl->mig_handle->job.waiting) && (!ftl->cp_handle->active) && (!ftl->cp_handle->waiting) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U))
         {

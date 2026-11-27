@@ -61,7 +61,7 @@
  * @param cw 528B CW buffer（META + CRC + USER + ECC parity）
  * @return true 物理上从未编程
  */
-static BOOL fc_cw_is_blank(const BYTE *cw)
+static BOOL fc_data_path_cw_is_blank(const BYTE *cw)
 {
     DWORD ones = 0U;
 
@@ -84,14 +84,14 @@ static BOOL fc_cw_is_blank(const BYTE *cw)
  * @param max_count 容量上限（CW_TOTAL_MAX）
  * @return 收集到的 CW 数量
  */
-static BYTE fc_collect_decode_buffers(const fc_cmd_s *cmd, BYTE *buffers[], BYTE max_count)
+static BYTE fc_data_path_collect_decode_buffers(const fc_cmd_s *cmd, BYTE *buffers[], BYTE max_count)
 {
     fc_desc_id_t desc_id;
     BYTE         count = 0U;
 
     for (desc_id = (fc_desc_id_t)cmd->desc_id; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (count < max_count);)
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
         // RAID 恢复要求每个 CW 都有 buffer；缺一个就无法可靠重建，整条命令判失败。
         if (desc->buffer_id == FC_BUF_ID_INVALID)
@@ -120,7 +120,7 @@ static BYTE fc_collect_decode_buffers(const fc_cmd_s *cmd, BYTE *buffers[], BYTE
  * @param cw   528B CW buffer
  * @param meta 扇区 LBA 派生的 META
  */
-void fc_data_path_meta_write(BYTE *cw, DWORD meta)
+FC_DATA_PATH_STEP_LINKAGE void fc_data_path_meta_write(BYTE *cw, DWORD meta)
 {
     ASSERT(cw != NULL);
     memcpy(cw, &meta, FC_CRC_META_SIZE);
@@ -130,7 +130,7 @@ void fc_data_path_meta_write(BYTE *cw, DWORD meta)
  *
  * @param cw 528B CW buffer（META 已写入）
  */
-void fc_data_path_crc_write(BYTE *cw)
+FC_DATA_PATH_STEP_LINKAGE void fc_data_path_crc_write(BYTE *cw)
 {
     DWORD crc;
 
@@ -148,7 +148,7 @@ void fc_data_path_crc_write(BYTE *cw)
  * @param cw   528B CW buffer
  * @param seed 由本 CW META 派生
  */
-void fc_data_path_scramble(BYTE *cw, DWORD seed)
+FC_DATA_PATH_STEP_LINKAGE void fc_data_path_scramble(BYTE *cw, DWORD seed)
 {
     ASSERT(cw != NULL);
 
@@ -164,7 +164,7 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed)
  * @param cw 528B CW buffer（已加扰）
  * @return FC_STATUS_OK / NOT_SUPPORTED / 编码错误
  */
-fc_status_e fc_data_path_ecc_encode(BYTE *cw)
+FC_DATA_PATH_STEP_LINKAGE fc_status_e fc_data_path_ecc_encode(BYTE *cw)
 {
     ASSERT(cw != NULL);
 
@@ -180,7 +180,7 @@ fc_status_e fc_data_path_ecc_encode(BYTE *cw)
  * @param ecc_bits 输出：纠正的 bit 数（可 NULL）
  * @return FC_STATUS_OK / NOT_SUPPORTED / IO_ERROR（不可纠）
  */
-fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
+FC_DATA_PATH_STEP_LINKAGE fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
 {
     ASSERT(cw != NULL);
 
@@ -193,7 +193,7 @@ fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
  * @param cw 已解扰的 CW buffer
  * @return true 一致；false 不一致
  */
-BOOL fc_data_path_crc_check(const BYTE *cw)
+FC_DATA_PATH_STEP_LINKAGE BOOL fc_data_path_crc_check(const BYTE *cw)
 {
     DWORD stored_crc;
 
@@ -215,7 +215,7 @@ BOOL fc_data_path_crc_check(const BYTE *cw)
  * @param paa          本 CW 的物理地址（取 plane/cw）
  * @return 0 通过；FC_CW_STATUS_META_ERROR 不通过
  */
-DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
+static DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
 {
     DWORD read_meta;
     DWORD expected_low;
@@ -231,7 +231,7 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
     // ⚠ 必须用 paa_to_plane/paa_to_cw 而非链走位：cw_bitmap 不满时
     // 两者不同。
     // ⚠ command_meta == FC_META_UNKNOWN 时第二项被跳过，本函数只剩这项 3 位自洽；
-    // META 的其余保护来自「种子耦合」——见 fc_nand_design.md §5.3 的 META 保护矩阵。
+    // META 的其余保护来自「种子耦合」——见 fc_nand_design.md §2.4 的 META 保护矩阵。
     expected_low = (paa_to_plane(paa) << PLANE_CW_SHIFT) | paa_to_cw(paa);
 
     if ((read_meta & PLANE_CW_MASK) != expected_low)
@@ -268,15 +268,15 @@ fc_status_e fc_data_path_encode(fc_cmd_id_t cmd_id)
     BYTE        *buffer;
     fc_status_e  result;
 
-    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_lookup 断言
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     // 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
     // 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历。
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
         // 带数据的写命令每个 desc 都必须有 buffer；INVALID 是建链失败后的半成品，
         // 不能带着它进数据路径（fc_buffer_get_base 在 release 会越界）。
@@ -337,7 +337,7 @@ fc_status_e fc_data_path_encode(fc_cmd_id_t cmd_id)
  * 链内下标由 FC 建链产生；越界、链尾、buffer 未分配一律返回 NULL，由调用方
  * 把整条 parity 任务判失败，不能带着野指针进 XOR。
  */
-static BYTE *fc_chain_buffer_at(const fc_cmd_s *cmd, BYTE index)
+static BYTE *fc_data_path_chain_buffer_at(const fc_cmd_s *cmd, BYTE index)
 {
     fc_desc_id_t desc_id = (fc_desc_id_t)cmd->desc_id;
 
@@ -347,14 +347,14 @@ static BYTE *fc_chain_buffer_at(const fc_cmd_s *cmd, BYTE index)
         {
             return NULL;
         }
-        desc_id = (fc_desc_id_t)fc_descriptor_id_to_descriptor(desc_id)->next_id;
+        desc_id = (fc_desc_id_t)fc_descriptor_lookup(desc_id)->next_id;
     }
     if ((desc_id == FC_DESC_ID_INVALID) || (desc_id >= FC_DESCRIPTOR_POOL_DEPTH))
     {
         return NULL;
     }
 
-    const fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+    const fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
     return (desc->buffer_id == FC_BUF_ID_INVALID) ? NULL : fc_buffer_get_base(desc->buffer_id);
 }
@@ -385,15 +385,15 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_id_t data_cmd_ids[]
 
     for (d = 0U; d < data_count; d++)
     {
-        data_cmds[d] = fc_command_id_to_command(data_cmd_ids[d]);
+        data_cmds[d] = fc_command_lookup(data_cmd_ids[d]);
     }
-    const fc_cmd_s *parity_cmd = fc_command_id_to_command(parity_id);
+    const fc_cmd_s *parity_cmd = fc_command_lookup(parity_id);
 
     // RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容。
     // 掩码由 **desc 链重建**（链是 CW 集合的唯一真值，不回读 FTL 的输入字段）——
     // parity 链此时已在 fc_stripe_submit ③ 挂好，故重建结果即其真实访问集合。
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd_ids[0])));
-    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(parity_id)));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_cmd_cw_bitmap_get(data_cmd_ids[0])));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_cmd_cw_bitmap_get(parity_id)));
 
     // parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
     // 故 config.cw_count+1 即**每-plane** CW 数）
@@ -410,7 +410,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_id_t data_cmd_ids[]
         BYTE *parity_buf;
         BYTE  first = 1U;
 
-        parity_buf = fc_chain_buffer_at(parity_cmd, cw);
+        parity_buf = fc_data_path_chain_buffer_at(parity_cmd, cw);
         if (parity_buf == NULL)
         {
             return FC_STATUS_INVALID_ARGUMENT;
@@ -419,7 +419,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_id_t data_cmd_ids[]
         // XOR 所有数据命令的对应 CW 数据区
         for (d = 0U; d < data_count; d++)
         {
-            BYTE *data_buf = fc_chain_buffer_at(data_cmds[d], cw);
+            BYTE *data_buf = fc_data_path_chain_buffer_at(data_cmds[d], cw);
             if (data_buf == NULL)
             {
                 return FC_STATUS_INVALID_ARGUMENT;
@@ -450,7 +450,7 @@ fc_status_e fc_data_path_generate_stripe_parity(const fc_cmd_id_t data_cmd_ids[]
         desc_id = (fc_desc_id_t)parity_cmd->desc_id;
         for (WORD steps = 0U; (desc_id != FC_DESC_ID_INVALID) && (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
         {
-            fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+            fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
             if (desc->buffer_id == FC_BUF_ID_INVALID)
             {
@@ -496,8 +496,8 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
     BYTE         all_ok = 1U;
     BYTE         cw;
 
-    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_lookup 断言
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     // 链长度即 CW 数（config.cw_count / multi_plane 不参与推导；flat 掩码下两者会分叉）
     BYTE total_desc = 0U;
@@ -507,7 +507,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
         while ((did != FC_DESC_ID_INVALID) && (did < FC_DESCRIPTOR_POOL_DEPTH) && (total_desc < CW_TOTAL_MAX))
         {
             total_desc++;
-            did = (fc_desc_id_t)fc_descriptor_id_to_descriptor(did)->next_id;
+            did = (fc_desc_id_t)fc_descriptor_lookup(did)->next_id;
         }
         // 跑满 CW_TOTAL_MAX 仍未到链尾 = 成环/链损坏；不进入后续逐 CW 处理。
         if (did != FC_DESC_ID_INVALID)
@@ -522,7 +522,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
     for (cw = 0U; cw < total_desc; cw++)
     {
         // desc 链长度 = total_desc，循环内 desc_id 始终有效
-        desc = fc_descriptor_id_to_descriptor(desc_id);
+        desc = fc_descriptor_lookup(desc_id);
 
         // 带数据的读命令每个 desc 都必须有 buffer。INVALID 是建链失败后的半成品，
         // 不能交给 fc_buffer_get_base（release 会越界）；按不可纠上报。
@@ -542,7 +542,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
 
             if (result == FC_STATUS_IO_ERROR)
             {
-                if (fc_cw_is_blank(buffer))
+                if (fc_data_path_cw_is_blank(buffer))
                 {
                     // 擦除页：全 0xFF 不是合法 BCH 码字，解码必然失败——但这是
                     // 「页从未编程」，不是读错误。置 BLANK（非错误位），让上层
@@ -595,7 +595,7 @@ fc_status_e fc_data_path_process_read(fc_cmd_id_t cmd_id)
 
     for (cw = 0U; cw < total_desc; cw++)
     {
-        desc   = fc_descriptor_id_to_descriptor(desc_id);
+        desc   = fc_descriptor_lookup(desc_id);
         buffer = fc_buffer_get_base(desc->buffer_id);
 
         if (fc_cw_status_is_empty(desc->status))
@@ -654,12 +654,12 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE error_cw_index)
     fc_desc_id_t desc_id;
     BYTE         i;
 
-    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_id_to_command 断言
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    // cmd_id 是池内句柄；范围/字段一致性由 fc_command_lookup 断言
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
     ASSERT(cmd->desc_id != FC_DESC_ID_INVALID);
 
     /* ── 收集所有 buffer 指针（索引对齐 desc 链位置） ── */
-    count = fc_collect_decode_buffers(cmd, buffers, CW_TOTAL_MAX);
+    count = fc_data_path_collect_decode_buffers(cmd, buffers, CW_TOTAL_MAX);
 
     // 收集失败（INVALID buffer/链损坏）或 index 越界时不能进 XOR。
     if ((count == 0U) || (error_cw_index >= count))
@@ -710,7 +710,7 @@ fc_status_e fc_data_path_raid_recover(fc_cmd_id_t cmd_id, BYTE error_cw_index)
     i       = 0U;
     while ((desc_id != FC_DESC_ID_INVALID) && (i < count))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         DWORD      cw_meta;
 
         memcpy(&cw_meta, buffers[i], FC_CRC_META_SIZE);

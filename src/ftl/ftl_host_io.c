@@ -225,7 +225,7 @@ static void SSD_CODE_FAST __attribute__((noinline)) host_group_stall_dump(const 
         WORD                fpmin = 0U;
 
         memset(&rs, 0, sizeof(rs));
-        (void)fc_get_resource_stats(&rs);
+        (void)fc_resource_stats_get(&rs);
 
         // per-plane 最小空闲块数（成对分配看的是最饿的那个 plane）。
         for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -950,10 +950,10 @@ void ftl_host_io_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
 {
     (void)ctx; /* host I/O 不登记request 表 */
 
-    // cmd_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
+    // cmd_id 由 NAND 从本命令回填；公共壳 fc_command_lookup 已断言
     // ID 在池内，恒返回非空指针。
     WORD      cmd_id = completion->cmd_id;
-    fc_cmd_s *cmd    = fc_command_id_to_command(cmd_id);
+    fc_cmd_s *cmd    = fc_command_lookup(cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。

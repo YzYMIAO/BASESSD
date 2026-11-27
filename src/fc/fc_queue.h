@@ -37,83 +37,44 @@ typedef struct FC_COMPLETION_QUEUE_S
 } fc_comp_queue_s;
 
 /**
- * @brief 把命令 ID 入队尾。
- *
- * @param queue 队列
- * @param cmd_id 命令 ID，须为 FC 自铸的合法句柄
- *
- * @return FC_STATUS_OK
- *         FC_STATUS_QUEUE_FULL（队列已满）
- *
- * @note cmd_id 由 fc_submit / submit_batch 的命令级校验保证非 INVALID。
+ * @brief Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。
+ * @note offset 越界返回 FC_CMD_ID_INVALID，调用方据此判链尾。
  */
-fc_status_e fc_submission_queue_push(fc_sub_queue_s *queue, fc_cmd_id_t cmd_id);
+fc_cmd_id_t fc_queue_submission_peek(const fc_sub_queue_s *queue, WORD offset);
+
+/**
+ * @brief 把命令 ID 入队尾。
+ * @note cmd_id 由 fc_submit / submit_batch 的命令级校验保证非 INVALID；只有队列满是预期结果。
+ */
+fc_status_e fc_queue_submission_push(fc_sub_queue_s *queue, fc_cmd_id_t cmd_id);
 
 /**
  * @brief 从队头弹出命令 ID。
- *
- * @param queue 队列
- * @param cmd_id 输出
- *
- * @return FC_STATUS_OK
- *         FC_STATUS_QUEUE_EMPTY（队列为空）
  */
-fc_status_e fc_submission_queue_pop(fc_sub_queue_s *queue, fc_cmd_id_t *cmd_id);
-
-/**
- * @brief Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。
- *
- * @param queue 队列
- * @param offset 相对队头的偏移
- *
- * @return 命令 ID；offset 越界返回 FC_CMD_ID_INVALID（调用方据此判链尾）。
- */
-fc_cmd_id_t fc_submission_queue_peek(const fc_sub_queue_s *queue, WORD offset);
+fc_status_e fc_queue_submission_pop(fc_sub_queue_s *queue, fc_cmd_id_t *cmd_id);
 
 /**
  * @brief 完成项入队尾（整个 fc_cmd_status_s 拷贝）。
- *
- * @param queue 队列
- * @param completion 待入队完成项
- *
- * @return FC_STATUS_OK
- *         FC_STATUS_QUEUE_FULL（队列已满）
  */
-fc_status_e fc_completion_queue_push(fc_comp_queue_s *queue, const fc_cmd_status_s *completion);
+fc_status_e fc_queue_completion_push(fc_comp_queue_s *queue, const fc_cmd_status_s *completion);
 
 /**
  * @brief 从队头弹出完成项。
- *
- * @param queue 队列
- * @param completion 输出
- *
- * @return FC_STATUS_OK
- *         FC_STATUS_QUEUE_EMPTY（队列为空）
  */
-fc_status_e fc_completion_queue_pop(fc_comp_queue_s *queue, fc_cmd_status_s *completion);
+fc_status_e fc_queue_completion_pop(fc_comp_queue_s *queue, fc_cmd_status_s *completion);
 
 /* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
 
 /**
  * @brief 初始化 SQ/HSQ 环形队列（storage 由调用方提供）。
- *
- * @param queue 队列
- * @param storage 命令 ID 数组（长度 depth）
- * @param depth 容量
- *
- * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
+ * @note 空指针 / depth=0 由 ASSERT 拦截；storage 长度须为 depth；本函数无运行期失败路径。
  */
-void fc_submission_queue_init(fc_sub_queue_s *queue, fc_cmd_id_t *storage, WORD depth);
+void fc_queue_submission_init(fc_sub_queue_s *queue, fc_cmd_id_t *storage, WORD depth);
 
 /**
  * @brief 初始化 CQ 环形队列（storage 由调用方提供）。
- *
- * @param queue 队列
- * @param storage 完成项数组
- * @param depth 容量。
- *
- * @note 空指针 / depth=0 由 ASSERT 拦截；本函数无运行期失败路径。
+ * @note 空指针 / depth=0 由 ASSERT 拦截；storage 长度须为 depth；本函数无运行期失败路径。
  */
-void fc_completion_queue_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, WORD depth);
+void fc_queue_completion_init(fc_comp_queue_s *queue, fc_cmd_status_s *storage, WORD depth);
 
 #endif /* FC_QUEUE_H */

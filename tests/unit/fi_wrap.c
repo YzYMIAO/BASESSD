@@ -397,7 +397,7 @@ BOOL __wrap_delay_time_now_us(DWORD *us)
 static void fi_fc_status_apply(fc_cmd_status_s *completion)
 {
     const fc_cmd_id_t cmd_id = completion->cmd_id;
-    const fc_cmd_s   *cmd    = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s   *cmd    = fc_command_lookup(cmd_id);
     const DWORD       key    = (cmd != NULL) ? cmd->config.operation : FI_KEY_ANY;
     DWORD             inj    = 0U;
 
@@ -481,7 +481,7 @@ fc_status_e __wrap_fc_poll_completion(fc_cmd_status_s *completion)
 
     if ((st == FC_STATUS_OK) && (completion != NULL))
     {
-        const fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+        const fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
         const DWORD     key = (cmd != NULL) ? cmd->config.operation : FI_KEY_ANY;
 
         if (fi_take_ex(FI_COMPLETION_DROP, key, NULL) == true)

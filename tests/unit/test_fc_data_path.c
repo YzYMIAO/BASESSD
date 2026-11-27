@@ -9,7 +9,7 @@
  * ── 全部用例都是 buffer 级：建链后**不提交** ──
  *   本层只验数据路径本身（编码产物、status 位、链几何），**不碰 NAND**。
  *   fc_poll_dispatch_single() 对 page write 调 fc_data_path_encode，
- *   fc_complete_from_nand()   对 page read 调 fc_data_path_process_read——
+ *   fc_nand_completion_finish()   对 page read 调 fc_data_path_process_read——
  *   所以**提交出去的命令绝不能再手工调这两个函数**（会重复编码 / 重复解扰）。
  *   本层一律走 test_cmd_build() 拿一条未提交的命令，自己驱动管线。
  *   NAND 上的端到端往返由 lifecycle 的页 helper 覆盖（test_prog_page / test_read_page）。
@@ -449,7 +449,7 @@ static BYTE l2_run_bucket(DWORD run)
  * ⚠ 循环**后**必须再补一次结算——最后一段没有后继，不补则段数恒少 1（游程编码的经典 off-by-one）。
  *
  * 随机数据每步 1/2 概率翻转 ⇒ 段数 ≈ 位数的一半（2048）、平均段长 2（几何分布 P(len=k)=2^-k）；
- * 推导与判据盲区见 fc_nand_ut.md §2.4.7，「目标 = 独立」见 fc_nand_design.md §5.4。 */
+ * 推导与判据盲区见 fc_nand_ut.md §2.4.7，「目标 = 独立」见 fc_nand_design.md §2.6。 */
 static void l2_bit01_analyze(const BYTE *data, WORD len, l2_bit01_s *st)
 {
     WORD  i;
@@ -528,7 +528,7 @@ static void l2_bit01_log(const char *tag, const l2_bit01_s *st, WORD len)
 
 /** 加扰白化：三种偏置输入 → 加扰 → 统计游程 → 解扰 → 自反。
  *
- * 理论依据（详见 fc_nand_design.md §5.4 / fc_nand_ut.md §2.4.7）：
+ * 理论依据（详见 fc_nand_design.md §2.6 / fc_nand_ut.md §2.4.7）：
  *   加扰的目标是让输出**统计独立**——P(bit=1 | 全部历史) = 1/2，**不是**「0/1 各占一半」这种
  *   无条件均衡，更**不是**「下一位尽量和当前相反」。`0101…` 满足均衡却最不随机（翻转率 100%、
  *   段数 = 4096 = 完美交替）。随机数据每步 1/2 概率翻转 ⇒ 段数 ≈ 位数的一半（≈2048）、
@@ -1435,7 +1435,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
  *  test_process_read_ecc_max — 单 CW ECC 计数与命令级聚合
  *
  *  背景：`fc_data_path_process_read` 是 `desc->ecc_bits` 的唯一生产者（ECC 解码
- *  成功后写实际纠正位数），`fc_get_cmd_ecc_max` 在 release 前把链上最大值交给
+ *  成功后写实际纠正位数），`fc_cmd_ecc_max_get` 在 release 前把链上最大值交给
  *  FTL（读重试 / 风险评估按「本次读纠了多少 bit」决策）。本用例让「恒为 0」与
  *  「真的写了」可区分（C8：跑通 != 生效）。
  *
@@ -1472,7 +1472,7 @@ static MunitResult test_process_read_ecc_max(const MunitParameter params[], void
         {
             munit_assert_uint32(test_cw_desc(cmd, i)->ecc_bits, ==, 0U);
         }
-        munit_assert_uint32(fc_get_cmd_ecc_max(cmd->cmd_id), ==, 0U);
+        munit_assert_uint32(fc_cmd_ecc_max_get(cmd->cmd_id), ==, 0U);
 
         fc_command_release(cmd->cmd_id);
     }
@@ -1493,13 +1493,13 @@ static MunitResult test_process_read_ecc_max(const MunitParameter params[], void
         munit_assert_uint32(test_cw_desc(cmd, 1U)->ecc_bits, ==, 2U);
         munit_assert_uint32(test_cw_desc(cmd, 2U)->ecc_bits, ==, 0U);
         munit_assert_uint32(test_cw_desc(cmd, 3U)->ecc_bits, ==, 0U);
-        munit_assert_uint32(fc_get_cmd_ecc_max(cmd->cmd_id), ==, 2U);
+        munit_assert_uint32(fc_cmd_ecc_max_get(cmd->cmd_id), ==, 2U);
 
         /* 纠错后 USER 回到 PAA 明文：OK 的前提是这页真的被解码并解扰过。 */
         munit_assert_uint8(test_check_paa(test_cw_user(cmd, 0U), test_cw_desc(cmd, 0U)->paa), ==, 1U);
         munit_assert_uint8(test_check_paa(test_cw_user(cmd, 1U), test_cw_desc(cmd, 1U)->paa), ==, 1U);
 
-        test_trace_summary("ecc_max 能力内: cw0=1 cw1=2 -> max=%hhu", fc_get_cmd_ecc_max(cmd->cmd_id));
+        test_trace_summary("ecc_max 能力内: cw0=1 cw1=2 -> max=%hhu", fc_cmd_ecc_max_get(cmd->cmd_id));
 
         fc_command_release(cmd->cmd_id);
     }
@@ -1525,7 +1525,7 @@ static MunitResult test_process_read_ecc_max(const MunitParameter params[], void
         munit_assert_uint32(test_cw_desc(cmd, 0U)->ecc_bits, ==, 0U);
         munit_assert_uint32(test_cw_desc(cmd, 2U)->ecc_bits, ==, 1U);
 
-        max = fc_get_cmd_ecc_max(cmd->cmd_id);
+        max = fc_cmd_ecc_max_get(cmd->cmd_id);
         munit_assert_uint8(max, ==, 1U);
 
         test_trace_summary("ecc_max 不可纠: cw0=UNC cw2=1 -> max=%hhu", max);
@@ -1542,7 +1542,7 @@ static MunitResult test_process_read_ecc_max(const MunitParameter params[], void
  * ⚠ 必须用**单 plane 段**（multi_plane=0，addr.plane=0）：掩码只覆盖 plane 0 时，
  *   multi-plane 写路径会给未覆盖的 plane 1 补一条同行回退地址、静默编一页全 0xFF。
  *   这条约束由 test_cmd_build 的「multi-plane 必须逐 plane 覆盖」断言强制；
- *   fc_build_request_data_planes 也守同一不变式（debug ASSERT + release 拒命令），
+ *   fc_request_data_planes_build 也守同一不变式（debug ASSERT + release 拒命令），
  *   生产侧同样受守卫。 */
 static MunitResult test_process_read_masked_chain(const MunitParameter params[], void *data)
 {

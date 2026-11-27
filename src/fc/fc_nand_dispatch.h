@@ -5,16 +5,14 @@
 
 #include <stdint.h>
 
-/* FC_STATUS_* / FC_CW_STATUS_* macros are needed only in the .c implementation. */
+/* FC_STATUS_* / FC_CW_STATUS_* 宏只在 .c 实现里使用。 */
 #ifndef FC_CW_STATUS_UNUSED
 #    define FC_CW_STATUS_UNUSED (0U)
 #endif
 
-/* One fixed per-LUN FIFO (depth NAND_DISPATCH_CHAIN_DEPTH) is attached to each LUN.
- * 深度定义在 nand_config.h（FTL cache batch 也按它派生批次上限）。 */
-
 /*
- * 每个 LUN 一个待处理 FIFO，深度 = NAND_DISPATCH_CHAIN_DEPTH。
+ * 每个 LUN 一个待处理 FIFO，深度 = NAND_DISPATCH_CHAIN_DEPTH（定义在 nand_config.h；
+ * FTL cache batch 也按它派生批次上限）。
  * **每槽 = 一条命令**：NAND 侧看不到「链」，一条链 = 连续 N 槽。
  * FC 用 fc_nand_dispatch_submit_chain() 把整链原子批量追加（空间不足则整体拒收），
  * poll 遍历每 LUN FIFO，先进先出，每轮每 LUN 推进一条、完成一条即回一份 completion。
@@ -22,9 +20,8 @@
  */
 
 /*
- * Self-contained request struct. FC resolves all descriptor-chain data
- * (CW mask, per-plane row PAA, buffer pointers) at submit time.
- * nand_dispatch never calls back into FC after receiving this struct.
+ * 自包含请求结构：FC 在 submit 时把 desc 链数据（CW 掩码、各 plane 行 PAA、
+ * buffer 指针）全部解析好；dispatch 收到后不再回调 FC。
  *
  * ── 唯一索引空间：flat 绝对 CW 号 ──
  * n = fc_cw_flat(plane, cw)（0 .. CW_TOTAL_MAX-1）。
@@ -35,11 +32,11 @@
  */
 typedef struct FC_NAND_DISPATCH_REQUEST_S
 {
-    WORD  cmd_id;                   /* FC command pool slot for completion correlation. */
-    BYTE  operation;                /* OP_* constant. */
-    BYTE  ch;                       /* Channel. */
-    BYTE  ce;                       /* Chip-enable. */
-    BYTE  lun;                      /* LUN. */
+    WORD  cmd_id;                   /* FC 命令池槽位号，用于完成关联。 */
+    BYTE  operation;                /* OP_* 操作码。 */
+    BYTE  ch;                       /* 通道号。 */
+    BYTE  ce;                       /* 片选号。 */
+    BYTE  lun;                      /* 逻辑单元号。 */
     DWORD cw_bitmap;                /* 选中的 CW 集合：bit n = plane*CW_NUM + cw。
                                      * 命令 plane 集合外的位恒 0；稀疏（可只选 CW1/CW3）。
                                      * **字面位图**：0 = 空集（无 desc 的退化命令，合法；
@@ -54,8 +51,8 @@ typedef struct FC_NAND_DISPATCH_REQUEST_S
                                      *   （onfi_1_0.c），plane 维从 0 起。 */
     BYTE page_type : 2;             /* LP/MP/UP/TP — LDPC decode threshold 预留。
                                      * 当前无读者；LDPC 分支未编译。 */
-    BYTE reserved : 6;              /* Reserved for future data-path bits. */
-    BYTE feature_addr;              /* Feature register addr for SET/GET_FEATURES (column).
+    BYTE reserved : 6;              /* 预留数据路径位。 */
+    BYTE feature_addr;              /* SET/GET_FEATURES 的 Feature 寄存器地址（作列地址用）。
                                      * 内联数据不走本结构：FC 把 cw_buffers[plane*CW_NUM] 指向
                                      * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
     WORD column;                    /* **显式列地址**：只有 OP_READ_COLUMN 读它（列来自命令级
@@ -86,43 +83,21 @@ typedef struct FC_NAND_DISPATCH_COMPLETION_S
  * 供完成消费者按 CW 读取；dispatch 本身不产生 ECC 计数。 */
 typedef void (*fc_nand_dispatch_sink_fn_t)(fc_nand_dispatch_comp_s *completion, void *ctx);
 
-/* 调度层 fatal 查询：当前仅 µs 时间源不可用（无法执行最短忙期等待）。
- * fc.c 每轮 poll 后查询，非零时把控制器 fatal 置位。 */
+/**
+ * @brief 调度层 fatal 查询：当前仅 µs 时间源不可用（无法执行最短忙期等待）。
+ * @note fc.c 每轮 poll 后查询，非零时把控制器 fatal 置位。
+ */
 BOOL fc_nand_dispatch_fatal(void);
 
-/*
- * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
- * requests[0..count-1] 必须在同一 ch/ce/lun。
- * 异步路径未放行（fc_nand_engine_set_armed(1) 之前）返回 INVALID_ARGUMENT。
- * LUN FIFO 剩余深度不足整链时返回 NOT_READY，无副作用。
- * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
- * 每条命令各回一份 completion（由 poll 逐条返回）。
- */
-nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count);
-
-/*
- * 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
- * 返回本轮产出的完成条数（0 = 无完成，上限 CH_NUM×CE_NUM×LUN_NUM）。
- * 不早退——公平性依赖"每个 LUN 每轮都被走到"（见 fc_nand_dispatch.c 实现要点）。
- */
-DWORD fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
-
-/*
- * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- * 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界由上层填充循环在入口保证，
- * 本函数不重复断言。
+/**
+ * @brief 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
+ * @note 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界由上层填充循环在入口保证，
+ *       本函数不重复断言。
  */
 BYTE fc_nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun);
 
 /**
  * @brief 目标 LUN FIFO 的已用槽数（只读，诊断用）。
- *
- * @param ch  通道号。
- * @param ce  片选号。
- * @param lun LUN 号。
- *
- * @return 已用槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- *
  * @note 与 `fc_nand_dispatch_lun_phase()` 合起来区分「FIFO 满（等完成）」与
  *       「FSM 卡在某个相位」——FC 侧出现「命令在 SQ 却不下发」时用。
  */
@@ -130,36 +105,47 @@ BYTE fc_nand_dispatch_lun_used(BYTE ch, BYTE ce, BYTE lun);
 
 /**
  * @brief 目标 LUN FSM 的当前相位（只读，诊断用）。
- *
- * @param ch  通道号。
- * @param ce  片选号。
- * @param lun LUN 号。
- *
- * @return LUN_PHASE_*（0=IDLE / 1=ISSUE / 2=ISSUED / 3=FETCH）。
+ * @note 返回 LUN_PHASE_*（0=IDLE / 1=ISSUE / 2=ISSUED / 3=FETCH）。
  */
 BYTE fc_nand_dispatch_lun_phase(BYTE ch, BYTE ce, BYTE lun);
 
 #if defined(FC_NAND_TEST_ENABLE)
 /**
  * @brief 测试专用：按 operation 调用 dispatch 的 completion 策略，填充 CW 状态。
- *
- * @param operation OP_* 操作码
- * @param cw_bitmap flat CW 位图
- * @param cw_status 输出：CW_TOTAL_MAX 项，调用前由本函数清 UNUSED
- *
  * @note 只验证 completion 策略表映射；不提交 NAND、不碰硬件。
  */
 void fc_nand_dispatch_test_completion(BYTE operation, DWORD cw_bitmap, BYTE cw_status[CW_TOTAL_MAX]);
 #endif
 
-/* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware.
- * Pure software reset (memset + disarm), no failure path. */
+/**
+ * @brief 原子提交整条命令链到目标 LUN FIFO（追加 count 槽）。
+ * @note requests[0..count-1] 必须在同一 ch/ce/lun；异步路径未放行
+ *       （fc_nand_engine_set_armed(1) 之前）返回 INVALID_ARGUMENT。
+ * @note LUN FIFO 剩余深度不足整链时返回 NOT_READY，无副作用；追加后链占据连续槽位、
+ *       按 FIFO 顺序执行，中间不可被后续命令插入。每条命令各回一份 completion（由 poll 逐条返回）。
+ */
+nand_result_e fc_nand_dispatch_submit_chain(const fc_nand_dispatch_req_s *requests, BYTE count);
+
+/**
+ * @brief 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
+ * @note 返回本轮产出的完成条数（0 = 无完成，上限 CH_NUM×CE_NUM×LUN_NUM）。
+ * @note 不早退——公平性依赖「每个 LUN 每轮都被走到」（见 fc_nand_dispatch.c 实现要点）。
+ */
+DWORD fc_nand_dispatch_poll(fc_nand_dispatch_sink_fn_t sink, void *ctx);
+
+/**
+ * @brief 提交一条已解析命令到其 LUN FIFO。
+ * @note 等价 count = 1 的 fc_nand_dispatch_submit_chain。
+ */
+nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
+
+/**
+ * @brief 清零固定 LUN FIFO 与页缓冲并复位软件调度状态。
+ * @note 不初始化 FMC 硬件；纯软件复位（memset + disarm），无失败路径。
+ */
 void fc_nand_dispatch_init(void);
 
 /* 异步放行闩锁本体在 fc_nand_engine.h（fc_nand_engine_set_armed / _is_armed）。
  * dispatch 只查询，不再提供自己的 set/is 入口。 */
-
-/* Submit one pre-resolved command to its LUN FIFO (count = 1). */
-nand_result_e fc_nand_dispatch_submit(const fc_nand_dispatch_req_s *request);
 
 #endif /* FC_NAND_DISPATCH_H */

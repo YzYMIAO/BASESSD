@@ -83,7 +83,7 @@ static MunitResult test_nand_start_unbound_txn(const MunitParameter params[], vo
  *
  * 覆盖：分配 1 条命令后 `command_used` +1，释放后回到基线。
  * 判据：差分严格相等；不依赖全池扫描的绝对值。
- * 备注：debug 档 `fc_get_resource_stats` 内部已做全池计数校验，本用例做外部对拍。 */
+ * 备注：debug 档 `fc_resource_stats_get` 内部已做全池计数校验，本用例做外部对拍。 */
 
 static MunitResult test_stats_consistency(const MunitParameter params[], void *data)
 {
@@ -93,20 +93,20 @@ static MunitResult test_stats_consistency(const MunitParameter params[], void *d
     fc_resource_stats_s before;
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
 
     fc_cmd_s *cmd = fc_command_alloc();
 
     munit_assert_ptr_not_null(cmd);
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
     munit_assert_uint16(after.command_used, ==, (WORD)(before.command_used + 1U));
     munit_assert_uint16(after.descriptor_used, ==, before.descriptor_used);
     munit_assert_uint16(after.buffer_used, ==, before.buffer_used);
 
     fc_command_release(cmd->cmd_id);
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
     munit_assert_uint16(after.command_used, ==, before.command_used);
 
     return MUNIT_OK;
@@ -137,7 +137,7 @@ static MunitResult test_batch_arg_guards(const MunitParameter params[], void *da
     fc_resource_stats_s base;
     fc_resource_stats_s now;
 
-    fc_get_resource_stats(&base);
+    fc_resource_stats_get(&base);
 
     ids[0] = a->cmd_id;
     ids[1] = a->cmd_id;
@@ -156,7 +156,7 @@ static MunitResult test_batch_arg_guards(const MunitParameter params[], void *da
     b->high_priority = 1U;
     munit_assert_int(fc_submit_batch(ids, 2U), ==, FC_STATUS_INVALID_ARGUMENT);
 
-    fc_get_resource_stats(&now);
+    fc_resource_stats_get(&now);
     munit_assert_uint16(now.sq_used, ==, base.sq_used);
     munit_assert_uint16(now.hsq_used, ==, base.hsq_used);
 
@@ -231,12 +231,12 @@ static MunitResult test_in_flight_release_guard(const MunitParameter params[], v
     cmd->config.operation = (BYTE)OP_RESET;
     cmd->config.chain     = FC_CHAIN_END;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
     munit_assert_int(fc_submit(cmd->cmd_id), ==, FC_STATUS_OK);
 
     fc_command_release(cmd->cmd_id); /* 在飞：必须被拒绝 */
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
     munit_assert_uint16(after.command_used, ==, before.command_used);
 
     fc_init(); /* 丢弃排队命令，恢复干净池 */
@@ -247,7 +247,7 @@ static MunitResult test_in_flight_release_guard(const MunitParameter params[], v
 
 /* data_ptr_single_plane_only — 多 plane 命令的数据指针查询必须拒绝（SCH-08）。
  *
- * 覆盖：对 multi-plane 命令调 `fc_get_cmd_data_ptr(cmd_id, cw)`。
+ * 覆盖：对 multi-plane 命令调 `fc_cmd_data_ptr_get(cmd_id, cw)`。
  * 判据：release 返回 NULL；若少了守卫，cw0 会命中 plane0 的 buffer 返回非空。
  * 备注：debug 下 ASSERT 停机 ⇒ `MUNIT_SKIP`。 */
 
@@ -269,7 +269,7 @@ static MunitResult test_data_ptr_single_plane_only(const MunitParameter params[]
     fc_cmd_s *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(TEST_PLANE_BM_ALL), 0U, &cfg);
 
     munit_assert_uint8(cmd->config.multi_plane, ==, PLANE_NUM);
-    munit_assert_ptr_null(fc_get_cmd_data_ptr(cmd->cmd_id, 0U));
+    munit_assert_ptr_null(fc_cmd_data_ptr_get(cmd->cmd_id, 0U));
 
     fc_command_release(cmd->cmd_id);
 
@@ -306,9 +306,9 @@ static MunitResult test_cw_write_plane1_only(const MunitParameter params[], void
 
     BYTE cw_seen = 0U;
 
-    for (fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id; did != FC_DESC_ID_INVALID; did = (fc_desc_id_t)fc_descriptor_id_to_descriptor(did)->next_id)
+    for (fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id; did != FC_DESC_ID_INVALID; did = (fc_desc_id_t)fc_descriptor_lookup(did)->next_id)
     {
-        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *d = fc_descriptor_lookup(did);
 
         munit_assert_uint8(paa_to_plane(d->paa), ==, 1U);
         cw_seen |= (BYTE)(1U << paa_to_cw(d->paa));
@@ -318,7 +318,7 @@ static MunitResult test_cw_write_plane1_only(const MunitParameter params[], void
 
     for (BYTE cw = 0U; cw < CW_NUM; cw++)
     {
-        munit_assert_ptr_not_null(fc_get_cmd_data_ptr(cmd->cmd_id, cw));
+        munit_assert_ptr_not_null(fc_cmd_data_ptr_get(cmd->cmd_id, cw));
     }
 
     fc_command_release(cmd->cmd_id);
@@ -328,7 +328,7 @@ static MunitResult test_cw_write_plane1_only(const MunitParameter params[], void
 
 /* nand_timing_bounds — timing 查询的越界/空指针必须拒绝（NANDP-13）。
  *
- * 覆盖：`nand_get_timing_mode` 的 mode=NULL、ch/ce 越界。
+ * 覆盖：`nand_timing_mode_get` 的 mode=NULL、ch/ce 越界。
  * 判据：release 返回 `NAND_RESULT_INVALID_ARGUMENT`；不进入器件回调。
  * 备注：debug 下 ASSERT_REJECT 停机 ⇒ `MUNIT_SKIP`。`mt29f_set_timing` 是器件内部
  *       static 回调，不在对外契约内。 */
@@ -343,9 +343,9 @@ static MunitResult test_nand_timing_bounds(const MunitParameter params[], void *
 #else
     BYTE mode = 0U;
 
-    munit_assert_int(nand_get_timing_mode(0U, 0U, NULL), ==, NAND_RESULT_INVALID_ARGUMENT);
-    munit_assert_int(nand_get_timing_mode((BYTE)CH_NUM, 0U, &mode), ==, NAND_RESULT_INVALID_ARGUMENT);
-    munit_assert_int(nand_get_timing_mode(0U, (BYTE)CE_NUM, &mode), ==, NAND_RESULT_INVALID_ARGUMENT);
+    munit_assert_int(nand_timing_mode_get(0U, 0U, NULL), ==, NAND_RESULT_INVALID_ARGUMENT);
+    munit_assert_int(nand_timing_mode_get((BYTE)CH_NUM, 0U, &mode), ==, NAND_RESULT_INVALID_ARGUMENT);
+    munit_assert_int(nand_timing_mode_get(0U, (BYTE)CE_NUM, &mode), ==, NAND_RESULT_INVALID_ARGUMENT);
 
     return MUNIT_OK;
 #endif
@@ -426,7 +426,7 @@ static MunitResult test_short_chain_read_short(const MunitParameter params[], vo
  *
  * 覆盖：OP_READ_PAGE_CACHE_SEQ/RANDOM/LAST 在 completion 策略表中的映射。
  * 判据：多 CW 失败时，选中的每个 flat CW 都是 FC_CW_STATUS_FAIL；未选中槽保持
- *       UNUSED。若映射回 completion_per_cw，只有最低位 CW 会被标记。
+ *       UNUSED。若映射回 fc_nand_dispatch_completion_per_cw，只有最低位 CW 会被标记。
  * 备注：只调用 completion 策略表（测试 seam），不提交 NAND。 */
 
 static MunitResult test_cache_read_completion_all_cws(const MunitParameter params[], void *data)
@@ -798,12 +798,12 @@ static MunitResult test_desc_cycle_release_bounded(const MunitParameter params[]
     fc_cmd_s *cmd = test_cmd_build(&addr, 0x03U, 0U, &conf);
 
     fc_desc_id_t d0 = (fc_desc_id_t)cmd->desc_id;
-    fc_desc_s   *a  = fc_descriptor_id_to_descriptor(d0);
+    fc_desc_s   *a  = fc_descriptor_lookup(d0);
 
     munit_assert_not_null(a);
 
     fc_desc_id_t d1 = (fc_desc_id_t)a->next_id;
-    fc_desc_s   *b  = fc_descriptor_id_to_descriptor(d1);
+    fc_desc_s   *b  = fc_descriptor_lookup(d1);
 
     munit_assert_not_null(b);
 
@@ -830,7 +830,7 @@ static MunitResult test_invalid_buffer_rejected(const MunitParameter params[], v
     memset(&addr, 0, sizeof(addr));
 
     fc_cmd_s  *cmd = test_cmd_build(&addr, 0x01U, 0U, &conf);
-    fc_desc_s *d   = fc_descriptor_id_to_descriptor((fc_desc_id_t)cmd->desc_id);
+    fc_desc_s *d   = fc_descriptor_lookup((fc_desc_id_t)cmd->desc_id);
 
     munit_assert_not_null(d);
 
@@ -859,13 +859,13 @@ static MunitResult test_nonactive_completion_rejected(const MunitParameter param
 #else
     fc_resource_stats_s before;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
 
-    munit_assert_int(fc_test_complete_nonactive(), ==, FC_STATUS_IO_ERROR);
+    munit_assert_int(fc_test_cmd_finish_nonactive(), ==, FC_STATUS_IO_ERROR);
 
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
     munit_assert_uint16(after.command_used, ==, before.command_used);
 
     return MUNIT_OK;

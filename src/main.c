@@ -20,7 +20,7 @@
  * 生命周期：ssd_ftl_boot_all 成功（controller 进入 READY）后，主循环由
  *          fc_service 切换到 ftl_service（后者内部会先跑 fc_service）。
  * 文件结构：日志 sink 绑定 → FTL 实例存储 → ssd_ftl_boot(_all) → main()。
- * 流程图见 docs/design/fc_nand_design.md §22（图 15）/ §23（图 18）。
+ * 流程图见 docs/design/fc_nand_design.md §4.1（初始化全流程）/ §4.2（命令生命周期）。
  * ====================================================================== */
 
 #include "cli.h"
@@ -569,7 +569,7 @@ int main(void)
 
     /* 全系统初始化顺序：fc_init → fc_nand_init → arm → platform_register →
      * ssd_ftl_boot_all → high-speed。失败语义与逐步约束见
-     * docs/design/fc_nand_design.md §22「初始化全流程」。 */
+     * docs/design/fc_nand_design.md §4.1「上电初始化」。 */
     fc_init();
 
     boot_section("nand");

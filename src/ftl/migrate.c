@@ -27,7 +27,7 @@
 #include "bbt.h"              /* bbt_mark_bad */
 #include "bst.h"              /* ftl_block_state / ftl_gblock */
 #include "delay.h"            /* delay_time_now_us（job 延迟直方图） */
-#include "fc_interface.h"     /* fc_command_release / fc_command_id_to_command */
+#include "fc_interface.h"     /* fc_command_release / fc_command_lookup */
 #include "ftl.h"              /* ftl_ctx_s（仅完成服务的路由断言） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
@@ -881,7 +881,7 @@ static void mig_read_handle_callback(mig_handle_s *m, fc_cmd_s *cmd, const fc_cm
         if (dr == GC_DECODE_OK)
         {
             const WORD gsrc = ftl_gblock(plane, m->job.victim.plane_blocks[plane]);
-            const BYTE ecc  = fc_get_cmd_ecc_max(cmd->cmd_id);
+            const BYTE ecc  = fc_cmd_ecc_max_get(cmd->cmd_id);
 
             // B4：搬移读记录 ECC 趋势 + read disturb 计数（预测性退役闭环）。
             // 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。
@@ -2937,7 +2937,7 @@ void ftl_migrate_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, 
     (void)ftl;
     mig_handle_s *m = (mig_handle_s *)ctx;
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
 
     // request 表项缺失（ctx == NULL）= 重复/迟到的完成：只 release 命令，不解引用 m。
     // 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。

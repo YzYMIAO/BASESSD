@@ -47,10 +47,17 @@ typedef struct NAND_FMC_INSTANCE_S
     nand_phy_backend_s backend;
 } nand_fmc_instance_s;
 
-/* ── PHY 后端访问器：NAND 内部使用；FC 经 nand_target_get() 取，不得直接调用 ── */
+/**
+ * @brief 取指定 target 的 PHY 后端访问器。
+ * @note NAND 内部使用；FC 只能经 nand_target_get() 间接取得，不得直接调用。
+ * @note ch/ce 越界违反前置条件，一律 ASSERT（上层板级表已在入口保证）。
+ */
 const nand_phy_backend_s *nand_phy_backend_get(BYTE ch, BYTE ce);
 
-/* ── 后端初始化：按 (ch,ce) 绑定一个 FMC 实例（由 board target 表驱动） ── */
+/**
+ * @brief 按 (ch,ce) 绑定一个 FMC 实例（由 board target 表驱动）。
+ * @note 配置按值复制进实例；后端 handler 表与 context 指向实例内持久副本。
+ */
 nand_result_e nand_fmc_init_target(BYTE ch, BYTE ce, const nand_fmc_cfg_s *config);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

@@ -18,7 +18,7 @@
 #include "cli.h" /* g_ctrl（main.c 定义） */
 #include "controller.h"
 #include "dma.h"
-#include "fc_interface.h" /* fc_get_resource_stats（teardown 排空判据） */
+#include "fc_interface.h" /* fc_resource_stats_get（teardown 排空判据） */
 #include "ftl.h"
 #include "ftl_op.h" /* ftl_op_req_count */
 #include "metadata_job.h"
@@ -195,7 +195,7 @@ static void hil_quiesce(void)
         timer_scheduler_poll();
 
         memset(&rs, 0, sizeof(rs));
-        fc_get_resource_stats(&rs);
+        fc_resource_stats_get(&rs);
 
         if ((rs.sq_used == 0U) && (rs.hsq_used == 0U) && (rs.cq_used == 0U) && (rs.command_used == 0U) && (rs.descriptor_used == 0U) && (rs.buffer_used == 0U) && (ftl_op_req_count() == 0U) && (g_ctrl.flush_req == NULL) && (g_ctrl.trim_req == NULL) && hil_ftl_idle(ftl))
         {

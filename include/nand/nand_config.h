@@ -244,22 +244,34 @@ static inline BYTE paa_to_lun(DWORD paa)
     return (paa >> PAA_LUN_SHIFT) & PAA_LUN_MASK;
 }
 
-/* 由展开地址构造 PAA（芯片内地址）。
- * ⚠ PAA 不含 CH/CE —— 片选是命令级信息，不属于芯片内地址，
- *   故本函数**忽略 addr->ch / addr->ce**。 */
+/**
+ * @brief 由展开地址构造 PAA（芯片内地址）。
+ * @param addr 展开地址；各字段须已在芯片规格范围内。
+ * @return 打包后的 PAA。
+ * @note PAA 不含 CH/CE —— 片选是命令级信息，不属于芯片内地址，
+ *       故本函数**忽略 addr->ch / addr->ce**。
+ */
 static inline DWORD paa_from_addr(const nand_addr_s *addr)
 {
     return ((DWORD)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) | ((DWORD)(addr->page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) | ((DWORD)(addr->plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) | ((DWORD)(addr->block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) | ((DWORD)(addr->lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
 }
 
-/* 展开地址的各字段是否在芯片规格范围内（nand_addr_s 版本）。
- * 打包版本见下方 paa_is_valid_paa()。 */
+/**
+ * @brief 展开地址的各字段是否在芯片规格范围内（nand_addr_s 版本）。
+ * @param addr 待检查的展开地址。
+ * @return 全部字段合法时非 0。
+ * @note 打包版本见下方 paa_is_valid_paa()。
+ */
 static inline BYTE paa_is_valid_addr(const nand_addr_s *addr)
 {
     return ((addr->page < PAGES_PER_BLOCK) && (addr->plane < PLANE_NUM) && (addr->block < BLOCKS_PER_PLANE) && (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
 }
 
-/* 芯片行地址：具体编码由器件头提供（NAND_PAA_TO_ROW）。 */
+/**
+ * @brief PAA → 芯片行地址。
+ * @param paa 芯片内物理地址。
+ * @return 行地址；具体编码由器件头提供（NAND_PAA_TO_ROW）。
+ */
 static inline DWORD paa_to_nand_row(DWORD paa)
 {
     return NAND_PAA_TO_ROW(paa);
@@ -278,26 +290,44 @@ static inline BYTE paa_to_cw(DWORD paa)
 
 /* ── PAA 便利函数 ── */
 
-/* Page 基址（CW=0，页级操作基址） */
+/**
+ * @brief Page 基址（CW=0，页级操作基址）。
+ * @param paa 芯片内物理地址。
+ * @return 清掉 CW 字段后的 PAA。
+ */
 static inline DWORD paa_page_base(DWORD paa)
 {
     return paa & ~NAND_FIELD_MASK(CW_WIDTH);
 }
 
-/* 同 page 内换 CW */
+/**
+ * @brief 同 page 内换 CW。
+ * @param paa 芯片内物理地址。
+ * @param cw  目标 CW 号（按 CW 宽度截断）。
+ * @return 仅 CW 字段被替换的 PAA。
+ */
 static inline DWORD paa_with_cw(DWORD paa, DWORD cw)
 {
     const DWORD cw_mask = NAND_FIELD_MASK(CW_WIDTH);
     return (paa & ~cw_mask) | ((cw & cw_mask) << CW_WIDTH_SHIFT);
 }
 
-/* 是否同 Page（无视 CW） */
+/**
+ * @brief 两个 PAA 是否在同一 page（无视 CW）。
+ * @param a 第一个 PAA。
+ * @param b 第二个 PAA。
+ * @return 同 page 时非 0。
+ */
 static inline BYTE paa_same_page(DWORD a, DWORD b)
 {
     return ((paa_page_base(a)) == (paa_page_base(b)));
 }
 
-/* 各字段是否在芯片规格范围内（DWORD 版本） */
+/**
+ * @brief 各字段是否在芯片规格范围内（DWORD 版本）。
+ * @param paa 打包后的 PAA。
+ * @return 全部字段合法时非 0。
+ */
 static inline BYTE paa_is_valid_paa(DWORD paa)
 {
     return ((paa_to_page(paa) < PAGES_PER_BLOCK) && (paa_to_plane(paa) < PLANE_NUM) && (paa_to_block(paa) < BLOCKS_PER_PLANE) && (paa_to_lun(paa) < LUN_NUM) && (paa_to_cw(paa) < CW_NUM));
@@ -305,21 +335,45 @@ static inline BYTE paa_is_valid_paa(DWORD paa)
 
 /* ── PAA 替换字段 ── */
 
+/**
+ * @brief 替换 PAA 的 page 字段。
+ * @param paa  芯片内物理地址。
+ * @param page 新 page 号（按 page 宽度截断）。
+ * @return 仅 page 字段被替换的 PAA。
+ */
 static inline DWORD paa_with_page(DWORD paa, DWORD page)
 {
     return ((paa & ~(PAA_PAGE_MASK << PAA_PAGE_SHIFT)) | ((page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT));
 }
 
+/**
+ * @brief 替换 PAA 的 plane 字段。
+ * @param paa   芯片内物理地址。
+ * @param plane 新 plane 号（按 plane 宽度截断）。
+ * @return 仅 plane 字段被替换的 PAA。
+ */
 static inline DWORD paa_with_plane(DWORD paa, DWORD plane)
 {
     return ((paa & ~(PAA_PLANE_MASK << PAA_PLANE_SHIFT)) | ((plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT));
 }
 
+/**
+ * @brief 替换 PAA 的 block 字段。
+ * @param paa   芯片内物理地址。
+ * @param block 新块号（按 block 宽度截断）。
+ * @return 仅 block 字段被替换的 PAA。
+ */
 static inline DWORD paa_with_block(DWORD paa, DWORD block)
 {
     return ((paa & ~(PAA_BLOCK_MASK << PAA_BLOCK_SHIFT)) | ((block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT));
 }
 
+/**
+ * @brief 替换 PAA 的 LUN 字段。
+ * @param paa 芯片内物理地址。
+ * @param lun 新 LUN 号（按 LUN 宽度截断）。
+ * @return 仅 LUN 字段被替换的 PAA。
+ */
 static inline DWORD paa_with_lun(DWORD paa, DWORD lun)
 {
     return ((paa & ~(PAA_LUN_MASK << PAA_LUN_SHIFT)) | ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT));

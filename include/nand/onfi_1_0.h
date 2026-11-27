@@ -165,7 +165,7 @@
  *   ② two-plane 命令族（本 op / OP_PROGRAM_PAGE_MULTI_PLANE / OP_READ_PAGE_MULTI_PLANE_*）
  *      要求器件内部 on-die ECC 关闭（Micron datasheet Note 4）。本项目从不写 ECC feature
  *      寄存器（0x90），内部 ECC 保持默认关闭，故可用；若日后启用 on-die ECC，多 plane 路径
- *      整体失效。Note 4 出处待逐字核对，见 fc_nand_design.md §25.8 风险 2。
+ *      整体失效。Note 4 出处待逐字核对，见 fc_nand_design.md §7.2 风险 2。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_RANDOM_DATA_READ_MULTI_PLANE (41U)

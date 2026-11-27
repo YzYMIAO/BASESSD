@@ -62,6 +62,10 @@ typedef struct FC_BCH_CONTROL_S
 
 static fc_bch_control_s s_bch;
 
+_Static_assert(sizeof(fc_bch_control_s) <= (50U * 1024U), "BCH static storage exceeds 50 KiB");
+
+/* ── GF(2^13)：域运算 ─────────────────────────────────────────────── */
+
 /**
  * @brief 有限域逆元 a^-1。
  * @param bch 引擎句柄
@@ -69,7 +73,7 @@ static fc_bch_control_s s_bch;
  * @return a^-1
  * @note 调用者必须保证 a != 0。
  */
-static inline uint16_t gf_inv(const fc_bch_control_s *bch, uint16_t a)
+static inline uint16_t fc_bch_gf_inv(const fc_bch_control_s *bch, uint16_t a)
 {
     ASSERT(a != 0U);
     return (bch->log[a] == 0U) ? 1U : bch->exp[BCH_N - bch->log[a]];
@@ -81,40 +85,10 @@ static inline uint16_t gf_inv(const fc_bch_control_s *bch, uint16_t a)
  * @param exponent 任意非负指数；入口取模到 [0, n)
  * @return 域元素 α^exponent
  */
-static inline uint16_t gf_alpha(const fc_bch_control_s *bch, uint32_t exponent)
+static inline uint16_t fc_bch_gf_alpha(const fc_bch_control_s *bch, uint32_t exponent)
 {
     return bch->exp[exponent % BCH_N];
 }
-
-/* ── 编码 ─────────────────────────────────────────────────────────── */
-
-/**
- * @brief 反转 byte 内的 bit 顺序。
- * @param value 输入 byte
- * @return bit7..bit0 反转后的 byte
- */
-static inline BYTE reverse_byte(BYTE value)
-{
-    value = (BYTE)((value & 0xF0U) >> 4U) | (BYTE)((value & 0x0FU) << 4U);
-    value = (BYTE)((value & 0xCCU) >> 2U) | (BYTE)((value & 0x33U) << 2U);
-    value = (BYTE)((value & 0xAAU) >> 1U) | (BYTE)((value & 0x55U) << 1U);
-    return value;
-}
-
-/**
- * @brief 按 swap_bits 处理输入/输出 byte。
- * @param bch 引擎句柄
- * @param value 输入 byte
- * @return swap_bits 非 0 时返回位序反转结果，否则原值
- */
-static inline BYTE input_byte(const fc_bch_control_s *bch, BYTE value)
-{
-    return (bch->swap_bits != 0U) ? reverse_byte(value) : value;
-}
-
-_Static_assert(sizeof(fc_bch_control_s) <= (50U * 1024U), "BCH static storage exceeds 50 KiB");
-
-/* ── GF(2^13) ─────────────────────────────────────────────────────── */
 
 /**
  * @brief 对数域乘法 a·b。
@@ -123,7 +97,7 @@ _Static_assert(sizeof(fc_bch_control_s) <= (50U * 1024U), "BCH static storage ex
  * @param b 操作数；0 单独处理
  * @return a·b；任一操作数为 0 时返回 0
  */
-static inline uint16_t gf_mul(const fc_bch_control_s *bch, uint16_t a, uint16_t b)
+static inline uint16_t fc_bch_gf_mul(const fc_bch_control_s *bch, uint16_t a, uint16_t b)
 {
     uint32_t sum;
 
@@ -146,7 +120,7 @@ static inline uint16_t gf_mul(const fc_bch_control_s *bch, uint16_t a, uint16_t 
  * @return a^2
  * @note 2*log < 2n，用一次条件减法代替 %n；Cortex-M 上整数取模要走软件除法。
  */
-static inline uint16_t gf_sqr(const fc_bch_control_s *bch, uint16_t a)
+static inline uint16_t fc_bch_gf_sqr(const fc_bch_control_s *bch, uint16_t a)
 {
     uint32_t exponent;
 
@@ -169,7 +143,7 @@ static inline uint16_t gf_sqr(const fc_bch_control_s *bch, uint16_t a)
  * @return 满足 r^2 = a 的唯一 r
  * @note log 为奇数时先加 n 再除 2。
  */
-static inline uint16_t gf_sqrt(const fc_bch_control_s *bch, uint16_t a)
+static inline uint16_t fc_bch_gf_sqrt(const fc_bch_control_s *bch, uint16_t a)
 {
     uint32_t exponent;
 
@@ -191,7 +165,7 @@ static inline uint16_t gf_sqrt(const fc_bch_control_s *bch, uint16_t a)
  * @param a 域元素
  * @return 0 或 1
  */
-static uint16_t gf_trace(const fc_bch_control_s *bch, uint16_t a)
+static uint16_t fc_bch_gf_trace(const fc_bch_control_s *bch, uint16_t a)
 {
     uint16_t sum = 0U;
     uint16_t v   = a;
@@ -199,7 +173,7 @@ static uint16_t gf_trace(const fc_bch_control_s *bch, uint16_t a)
     for (uint32_t i = 0U; i < BCH_M; i++)
     {
         sum ^= v;
-        v = gf_sqr(bch, v);
+        v = fc_bch_gf_sqr(bch, v);
     }
     return sum;
 }
@@ -210,7 +184,7 @@ static uint16_t gf_trace(const fc_bch_control_s *bch, uint16_t a)
  * @param a 域元素
  * @return y，满足 y^2+y=a
  */
-static uint16_t gf_half_trace(const fc_bch_control_s *bch, uint16_t a)
+static uint16_t fc_bch_gf_half_trace(const fc_bch_control_s *bch, uint16_t a)
 {
     uint16_t sum = 0U;
     uint16_t v   = a;
@@ -218,9 +192,35 @@ static uint16_t gf_half_trace(const fc_bch_control_s *bch, uint16_t a)
     for (uint32_t i = 0U; i < ((BCH_M + 1U) / 2U); i++)
     {
         sum ^= v;
-        v = gf_sqr(bch, gf_sqr(bch, v));
+        v = fc_bch_gf_sqr(bch, fc_bch_gf_sqr(bch, v));
     }
     return sum;
+}
+
+/* ── 字节位序 ─────────────────────────────────────────────────────── */
+
+/**
+ * @brief 反转 byte 内的 bit 顺序。
+ * @param value 输入 byte
+ * @return bit7..bit0 反转后的 byte
+ */
+static inline BYTE fc_bch_byte_reverse(BYTE value)
+{
+    value = (BYTE)((value & 0xF0U) >> 4U) | (BYTE)((value & 0x0FU) << 4U);
+    value = (BYTE)((value & 0xCCU) >> 2U) | (BYTE)((value & 0x33U) << 2U);
+    value = (BYTE)((value & 0xAAU) >> 1U) | (BYTE)((value & 0x55U) << 1U);
+    return value;
+}
+
+/**
+ * @brief 按 swap_bits 处理输入/输出 byte。
+ * @param bch 引擎句柄
+ * @param value 输入 byte
+ * @return swap_bits 非 0 时返回位序反转结果，否则原值
+ */
+static inline BYTE fc_bch_input_byte(const fc_bch_control_s *bch, BYTE value)
+{
+    return (bch->swap_bits != 0U) ? fc_bch_byte_reverse(value) : value;
 }
 
 /* ── 初始化：域表 + 生成多项式 ─────────────────────────────────────── */
@@ -232,7 +232,7 @@ static uint16_t gf_half_trace(const fc_bch_control_s *bch, uint16_t a)
  * @return true 成功；false 多项式次数/本原性不合格
  * @note x 必须在 n 步后回到 1，否则周期小于 n。
  */
-static BOOL build_field_tables(fc_bch_control_s *bch, uint32_t prim_poly)
+static BOOL fc_bch_field_table_build(fc_bch_control_s *bch, uint32_t prim_poly)
 {
     uint32_t x = 1U;
     uint32_t i;
@@ -269,7 +269,7 @@ static BOOL build_field_tables(fc_bch_control_s *bch, uint32_t prim_poly)
  * @return true 成功；false 度不为 m*t 或系数不是 0/1
  * @note r 遍历 1/3/5/7 的 cyclotomic coset；g(x) 的 bit51..0 存入 gen_lo。
  */
-static BOOL build_generator(fc_bch_control_s *bch)
+static BOOL fc_bch_generator_build(fc_bch_control_s *bch)
 {
     uint16_t g[BCH_ECC_BITS + 1U];
     uint16_t next[BCH_ECC_BITS + 1U];
@@ -290,7 +290,7 @@ static BOOL build_generator(fc_bch_control_s *bch)
             memset(next, 0, sizeof(next));
             for (uint32_t k = 0U; k <= deg; k++)
             {
-                next[k] ^= gf_mul(bch, g[k], a);
+                next[k] ^= fc_bch_gf_mul(bch, g[k], a);
                 next[k + 1U] ^= g[k];
             }
             deg++;
@@ -324,6 +324,8 @@ static BOOL build_generator(fc_bch_control_s *bch)
     return true;
 }
 
+/* ── 编码：查表 + 余式 ───────────────────────────────────────────── */
+
 /**
  * @brief 从任意余式状态处理一个 byte（MSB-first）。
  * @param bch 引擎句柄
@@ -332,7 +334,7 @@ static BOOL build_generator(fc_bch_control_s *bch)
  * @return 处理后的 52-bit 余式
  * @note 用于建表以及不足 4B 的尾部。
  */
-static uint64_t encode_byte_raw(const fc_bch_control_s *bch, uint64_t rem, BYTE value)
+static uint64_t fc_bch_byte_encode_raw(const fc_bch_control_s *bch, uint64_t rem, BYTE value)
 {
     for (uint32_t k = 0U; k < 8U; k++)
     {
@@ -353,7 +355,7 @@ static uint64_t encode_byte_raw(const fc_bch_control_s *bch, uint64_t rem, BYTE 
  * @param bch 引擎句柄
  * @note 表由当前生成多项式现算，不依赖第三方代码。
  */
-static void build_lookup_tables(fc_bch_control_s *bch)
+static void fc_bch_lookup_table_build(fc_bch_control_s *bch)
 {
     for (uint32_t k = 0U; k < BCH_ENC_WORD_BYTES; k++)
     {
@@ -364,7 +366,7 @@ static void build_lookup_tables(fc_bch_control_s *bch)
 
             for (uint32_t j = 0U; j < BCH_ENC_WORD_BYTES; j++)
             {
-                rem = encode_byte_raw(bch, rem, (BYTE)(word >> (((BCH_ENC_WORD_BYTES - 1U) - j) * 8U)));
+                rem = fc_bch_byte_encode_raw(bch, rem, (BYTE)(word >> (((BCH_ENC_WORD_BYTES - 1U) - j) * 8U)));
             }
             bch->enc_word[k][b] = rem;
         }
@@ -377,13 +379,13 @@ static void build_lookup_tables(fc_bch_control_s *bch)
  * @param ecc 7B parity（外部字节表示，按 swap_bits 处理）
  * @return 低 52 位为余式
  */
-static uint64_t load_remainder(const fc_bch_control_s *bch, const BYTE *ecc)
+static uint64_t fc_bch_remainder_load(const fc_bch_control_s *bch, const BYTE *ecc)
 {
     uint64_t rem = 0U;
 
     for (uint32_t i = 0U; i < BCH_ECC_BITS; i++)
     {
-        const uint32_t bit = ((uint32_t)input_byte(bch, ecc[i >> 3U]) >> (7U - (i & 7U))) & 1U;
+        const uint32_t bit = ((uint32_t)fc_bch_input_byte(bch, ecc[i >> 3U]) >> (7U - (i & 7U))) & 1U;
         rem                = (rem << 1U) | bit;
     }
     return rem;
@@ -396,7 +398,7 @@ static uint64_t load_remainder(const fc_bch_control_s *bch, const BYTE *ecc)
  * @param rem 余式（只使用 bit51..0）
  * @note bit51..0 依次写 MSB-first；第 8 字节保持原值。
  */
-static void store_remainder(const fc_bch_control_s *bch, BYTE *ecc, uint64_t rem)
+static void fc_bch_remainder_store(const fc_bch_control_s *bch, BYTE *ecc, uint64_t rem)
 {
     for (uint32_t i = 0U; i < BCH_ECC_BYTES; i++)
     {
@@ -409,7 +411,7 @@ static void store_remainder(const fc_bch_control_s *bch, BYTE *ecc, uint64_t rem
     }
     for (uint32_t i = 0U; i < BCH_ECC_BYTES; i++)
     {
-        ecc[i] = input_byte(bch, ecc[i]);
+        ecc[i] = fc_bch_input_byte(bch, ecc[i]);
     }
 }
 
@@ -423,7 +425,7 @@ static void store_remainder(const fc_bch_control_s *bch, BYTE *ecc, uint64_t rem
  * @note BCH 是线性码，错误多项式的 syndrome 等于 parity 差值的 syndrome；
  *       复杂度只看 ecc_bits，与数据长度无关。
  */
-static void compute_syndromes_diff(fc_bch_control_s *bch, const BYTE *diff, uint16_t syn[2U * BCH_T])
+static void fc_bch_syndrome_compute_diff(fc_bch_control_s *bch, const BYTE *diff, uint16_t syn[2U * BCH_T])
 {
     uint16_t odd[BCH_T];
 
@@ -434,27 +436,27 @@ static void compute_syndromes_diff(fc_bch_control_s *bch, const BYTE *diff, uint
 
         for (uint32_t i = 0U; i < BCH_ECC_BITS; i++)
         {
-            const uint32_t bit = ((uint32_t)input_byte(bch, diff[i >> 3U]) >>
+            const uint32_t bit = ((uint32_t)fc_bch_input_byte(bch, diff[i >> 3U]) >>
                                   (7U - (i & 7U))) &
                                  1U;
             if (bit != 0U)
             {
                 const uint32_t exponent = (j * (BCH_ECC_BITS - 1U - i)) % BCH_N;
 
-                sum ^= gf_alpha(bch, exponent);
+                sum ^= fc_bch_gf_alpha(bch, exponent);
             }
         }
         odd[idx] = sum;
     }
 
     syn[0] = odd[0];
-    syn[1] = gf_sqr(bch, syn[0]);
+    syn[1] = fc_bch_gf_sqr(bch, syn[0]);
     syn[2] = odd[1];
-    syn[3] = gf_sqr(bch, syn[1]);
+    syn[3] = fc_bch_gf_sqr(bch, syn[1]);
     syn[4] = odd[2];
-    syn[5] = gf_sqr(bch, syn[2]);
+    syn[5] = fc_bch_gf_sqr(bch, syn[2]);
     syn[6] = odd[3];
-    syn[7] = gf_sqr(bch, syn[3]);
+    syn[7] = fc_bch_gf_sqr(bch, syn[3]);
 }
 
 /**
@@ -464,7 +466,7 @@ static void compute_syndromes_diff(fc_bch_control_s *bch, const BYTE *diff, uint
  * @param sigma 输出 locator 系数（低次在前）
  * @return σ 的次数；次数超过 t 时返回 -1（不可纠）
  */
-static int berlekamp_massey(fc_bch_control_s *bch, const uint16_t syn[2U * BCH_T], uint16_t sigma[BCH_T + 1U])
+static int fc_bch_berlekamp_massey(fc_bch_control_s *bch, const uint16_t syn[2U * BCH_T], uint16_t sigma[BCH_T + 1U])
 {
     uint16_t C[2U * BCH_T + 1U];
     uint16_t B[2U * BCH_T + 1U];
@@ -484,7 +486,7 @@ static int berlekamp_massey(fc_bch_control_s *bch, const uint16_t syn[2U * BCH_T
 
         for (int i = 1; i <= L; i++)
         {
-            d ^= gf_mul(bch, C[i], syn[n - i - 1U]);
+            d ^= fc_bch_gf_mul(bch, C[i], syn[n - i - 1U]);
         }
 
         if (d == 0U)
@@ -495,11 +497,11 @@ static int berlekamp_massey(fc_bch_control_s *bch, const uint16_t syn[2U * BCH_T
 
         memcpy(T, C, sizeof(T));
         {
-            const uint16_t coef = gf_mul(bch, d, gf_inv(bch, b));
+            const uint16_t coef = fc_bch_gf_mul(bch, d, fc_bch_gf_inv(bch, b));
 
             for (int i = 0; i <= (int)(2U * BCH_T) - m; i++)
             {
-                C[i + m] ^= gf_mul(bch, coef, B[i]);
+                C[i + m] ^= fc_bch_gf_mul(bch, coef, B[i]);
             }
         }
 
@@ -533,7 +535,7 @@ static int berlekamp_massey(fc_bch_control_s *bch, const uint16_t syn[2U * BCH_T
  * @param count 输入/输出：已记录根数
  * @return true 根在缩短码范围内（或为重复根）；false 越界/重复计数已满
  */
-static BOOL root_to_position(const fc_bch_control_s *bch, uint16_t root, uint32_t nbits, unsigned int *errloc, uint32_t *count)
+static BOOL fc_bch_root_locate(const fc_bch_control_s *bch, uint16_t root, uint32_t nbits, unsigned int *errloc, uint32_t *count)
 {
     uint32_t exponent;
     uint32_t q;
@@ -580,7 +582,7 @@ static BOOL root_to_position(const fc_bch_control_s *bch, uint16_t root, uint32_
  * @note x^4、x^2、x 都是 GF(2)-线性映射 ⇒ 13 个基向量列构成 GF(2) 线性方程组；
  *       用列基消元同时得到特解与零空间基，零空间维数 ≤2 时最多 4 个解。
  */
-static int affine4_roots(const fc_bch_control_s *bch, uint16_t a, uint16_t b, uint16_t c, uint16_t roots[BCH_AFFINE_MAX_ROOTS])
+static int fc_bch_affine4_roots(const fc_bch_control_s *bch, uint16_t a, uint16_t b, uint16_t c, uint16_t roots[BCH_AFFINE_MAX_ROOTS])
 {
     uint16_t basis[BCH_M];
     uint16_t combo[BCH_M];
@@ -600,8 +602,8 @@ static int affine4_roots(const fc_bch_control_s *bch, uint16_t a, uint16_t b, ui
     for (uint32_t i = 0U; i < BCH_M; i++)
     {
         const uint16_t e        = (uint16_t)(1U << i);
-        const uint16_t e2       = gf_sqr(bch, e);
-        uint16_t       v        = gf_sqr(bch, e2) ^ gf_mul(bch, a, e2) ^ gf_mul(bch, b, e);
+        const uint16_t e2       = fc_bch_gf_sqr(bch, e);
+        uint16_t       v        = fc_bch_gf_sqr(bch, e2) ^ fc_bch_gf_mul(bch, a, e2) ^ fc_bch_gf_mul(bch, b, e);
         uint16_t       m        = (uint16_t)(1U << i);
         BOOL           inserted = false;
 
@@ -681,7 +683,7 @@ static int affine4_roots(const fc_bch_control_s *bch, uint16_t a, uint16_t b, ui
  * @return false 表示首项为 0；true 表示参数有效（根数可能小于 3）
  * @note σ(x)=x^3+a2x^2+b2x+c2 乘 (x+a2) 得 affine 四次式，解后去掉额外根 a2。
  */
-static BOOL solve_cubic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
+static BOOL fc_bch_solve_cubic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
 {
     uint16_t lead;
     uint16_t a2;
@@ -693,23 +695,23 @@ static BOOL solve_cubic(const fc_bch_control_s *bch, const uint16_t *sigma, uint
     {
         return false;
     }
-    lead = gf_inv(bch, sigma[3]);
-    a2   = gf_mul(bch, sigma[2], lead);
-    b2   = gf_mul(bch, sigma[1], lead);
-    c2   = gf_mul(bch, sigma[0], lead);
+    lead = fc_bch_gf_inv(bch, sigma[3]);
+    a2   = fc_bch_gf_mul(bch, sigma[2], lead);
+    b2   = fc_bch_gf_mul(bch, sigma[1], lead);
+    c2   = fc_bch_gf_mul(bch, sigma[0], lead);
 
     {
         // (x+a2)(x^3+a2x^2+b2x+c2) = x^4 + (a2^2+b2)x^2 + (a2b2+c2)x + a2c2
-        const uint16_t a = gf_sqr(bch, a2) ^ b2;
-        const uint16_t b = gf_mul(bch, a2, b2) ^ c2;
-        const uint16_t c = gf_mul(bch, a2, c2);
-        const int      n = affine4_roots(bch, a, b, c, roots);
+        const uint16_t a = fc_bch_gf_sqr(bch, a2) ^ b2;
+        const uint16_t b = fc_bch_gf_mul(bch, a2, b2) ^ c2;
+        const uint16_t c = fc_bch_gf_mul(bch, a2, c2);
+        const int      n = fc_bch_affine4_roots(bch, a, b, c, roots);
 
         for (int i = 0; i < n; i++)
         {
             if (roots[i] != a2)
             {
-                (void)root_to_position(bch, roots[i], nbits, errloc, count);
+                (void)fc_bch_root_locate(bch, roots[i], nbits, errloc, count);
             }
         }
     }
@@ -726,7 +728,7 @@ static BOOL solve_cubic(const fc_bch_control_s *bch, const uint16_t *sigma, uint
  * @return false 表示首项为 0；true 表示参数有效（根数可能小于 4）
  * @note a=0 时已是 affine 形式；否则先平移消去一次项，再用 Y=1/z 变 affine。
  */
-static BOOL solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
+static BOOL fc_bch_solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
 {
     uint16_t lead;
     uint16_t a;
@@ -739,19 +741,19 @@ static BOOL solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, ui
     {
         return false;
     }
-    lead = gf_inv(bch, sigma[4]);
-    a    = gf_mul(bch, sigma[3], lead);
-    b    = gf_mul(bch, sigma[2], lead);
-    c    = gf_mul(bch, sigma[1], lead);
-    d    = gf_mul(bch, sigma[0], lead);
+    lead = fc_bch_gf_inv(bch, sigma[4]);
+    a    = fc_bch_gf_mul(bch, sigma[3], lead);
+    b    = fc_bch_gf_mul(bch, sigma[2], lead);
+    c    = fc_bch_gf_mul(bch, sigma[1], lead);
+    d    = fc_bch_gf_mul(bch, sigma[0], lead);
 
     if (a == 0U)
     {
-        const int n = affine4_roots(bch, b, c, d, roots);
+        const int n = fc_bch_affine4_roots(bch, b, c, d, roots);
 
         for (int i = 0; i < n; i++)
         {
-            (void)root_to_position(bch, roots[i], nbits, errloc, count);
+            (void)fc_bch_root_locate(bch, roots[i], nbits, errloc, count);
         }
         return true;
     }
@@ -765,14 +767,14 @@ static BOOL solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, ui
         }
         else
         {
-            const uint16_t ca = gf_mul(bch, c, gf_inv(bch, a));
+            const uint16_t ca = fc_bch_gf_mul(bch, c, fc_bch_gf_inv(bch, a));
 
-            e = gf_sqrt(bch, ca);
+            e = fc_bch_gf_sqrt(bch, ca);
         }
         {
-            const uint16_t e2 = gf_sqr(bch, e);
-            const uint16_t bp = gf_mul(bch, a, e) ^ b;
-            const uint16_t dp = gf_sqr(bch, e2) ^ gf_mul(bch, b, e2) ^ d;
+            const uint16_t e2 = fc_bch_gf_sqr(bch, e);
+            const uint16_t bp = fc_bch_gf_mul(bch, a, e) ^ b;
+            const uint16_t dp = fc_bch_gf_sqr(bch, e2) ^ fc_bch_gf_mul(bch, b, e2) ^ d;
 
             if (dp == 0U)
             {
@@ -780,19 +782,19 @@ static BOOL solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, ui
                 return true;
             }
             {
-                const uint16_t inv_dp = gf_inv(bch, dp);
-                const uint16_t aff_a  = gf_mul(bch, bp, inv_dp);
-                const uint16_t aff_b  = gf_mul(bch, a, inv_dp);
+                const uint16_t inv_dp = fc_bch_gf_inv(bch, dp);
+                const uint16_t aff_a  = fc_bch_gf_mul(bch, bp, inv_dp);
+                const uint16_t aff_b  = fc_bch_gf_mul(bch, a, inv_dp);
                 const uint16_t aff_c  = inv_dp;
-                const int      n      = affine4_roots(bch, aff_a, aff_b, aff_c, roots);
+                const int      n      = fc_bch_affine4_roots(bch, aff_a, aff_b, aff_c, roots);
 
                 for (int i = 0; i < n; i++)
                 {
                     if (roots[i] != 0U)
                     {
-                        const uint16_t z = gf_inv(bch, roots[i]);
+                        const uint16_t z = fc_bch_gf_inv(bch, roots[i]);
 
-                        (void)root_to_position(bch, (uint16_t)(e ^ z), nbits, errloc, count);
+                        (void)fc_bch_root_locate(bch, (uint16_t)(e ^ z), nbits, errloc, count);
                     }
                 }
             }
@@ -811,7 +813,7 @@ static BOOL solve_quartic(const fc_bch_control_s *bch, const uint16_t *sigma, ui
  * @return false 表示系数非法（首项/a 为 0）；true 表示参数有效（根数可能小于 2）
  * @note σ(x)=x^2+a·x+b；a=0 时只有重根，按不可纠处理。
  */
-static BOOL solve_quadratic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
+static BOOL fc_bch_solve_quadratic(const fc_bch_control_s *bch, const uint16_t *sigma, uint32_t nbits, unsigned int *errloc, uint32_t *count)
 {
     uint16_t lead;
     uint16_t a;
@@ -825,20 +827,20 @@ static BOOL solve_quadratic(const fc_bch_control_s *bch, const uint16_t *sigma, 
     {
         return false;
     }
-    lead = gf_inv(bch, sigma[2]);
-    a    = gf_mul(bch, sigma[1], lead);
-    b    = gf_mul(bch, sigma[0], lead);
-    c    = gf_mul(bch, b, gf_inv(bch, gf_sqr(bch, a)));
+    lead = fc_bch_gf_inv(bch, sigma[2]);
+    a    = fc_bch_gf_mul(bch, sigma[1], lead);
+    b    = fc_bch_gf_mul(bch, sigma[0], lead);
+    c    = fc_bch_gf_mul(bch, b, fc_bch_gf_inv(bch, fc_bch_gf_sqr(bch, a)));
 
-    if (gf_trace(bch, c) != 0U)
+    if (fc_bch_gf_trace(bch, c) != 0U)
     {
         return true; /* 无根（不是参数错误） */
     }
-    y  = gf_half_trace(bch, c);
-    r0 = gf_mul(bch, a, y);
-    r1 = gf_mul(bch, a, (uint16_t)(y ^ 1U));
-    (void)root_to_position(bch, r0, nbits, errloc, count);
-    (void)root_to_position(bch, r1, nbits, errloc, count);
+    y  = fc_bch_gf_half_trace(bch, c);
+    r0 = fc_bch_gf_mul(bch, a, y);
+    r1 = fc_bch_gf_mul(bch, a, (uint16_t)(y ^ 1U));
+    (void)fc_bch_root_locate(bch, r0, nbits, errloc, count);
+    (void)fc_bch_root_locate(bch, r1, nbits, errloc, count);
     return true;
 }
 
@@ -852,7 +854,7 @@ static BOOL solve_quadratic(const fc_bch_control_s *bch, const uint16_t *sigma, 
  * @return 找到的根数；-1 表示参数非法
  * @note degree 1/2 用闭式；3/4 用次数专用的 affine 线性解。
  */
-static int find_roots(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 1U], int degree, uint32_t nbits, unsigned int *errloc)
+static int fc_bch_roots_find(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 1U], int degree, uint32_t nbits, unsigned int *errloc)
 {
     uint32_t count = 0U;
 
@@ -869,16 +871,16 @@ static int find_roots(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 
             return -1;
         }
         {
-            const uint16_t a = gf_mul(bch, sigma[0], gf_inv(bch, sigma[1]));
+            const uint16_t a = fc_bch_gf_mul(bch, sigma[0], fc_bch_gf_inv(bch, sigma[1]));
 
-            (void)root_to_position(bch, a, nbits, errloc, &count);
+            (void)fc_bch_root_locate(bch, a, nbits, errloc, &count);
         }
         return (int)count;
     }
 
     if (degree == 2)
     {
-        if (!solve_quadratic(bch, sigma, nbits, errloc, &count))
+        if (!fc_bch_solve_quadratic(bch, sigma, nbits, errloc, &count))
         {
             return -1;
         }
@@ -895,11 +897,11 @@ static int find_roots(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 
 
         if (degree == 3)
         {
-            valid = solve_cubic(bch, sigma, nbits, errloc, &count);
+            valid = fc_bch_solve_cubic(bch, sigma, nbits, errloc, &count);
         }
         else
         {
-            valid = solve_quartic(bch, sigma, nbits, errloc, &count);
+            valid = fc_bch_solve_quartic(bch, sigma, nbits, errloc, &count);
         }
         if (!valid)
         {
@@ -908,6 +910,8 @@ static int find_roots(const fc_bch_control_s *bch, const uint16_t sigma[BCH_T + 
     }
     return (int)count;
 }
+
+/* ── 公共入口 ─────────────────────────────────────────────────────── */
 
 /**
  * @brief 初始化 BCH 引擎（本工程固定 m=13 / t=4）。
@@ -929,14 +933,14 @@ SSD_CODE_FAST fc_bch_control_s *fc_bch_init(int m, int t, unsigned int prim_poly
     memset(&s_bch, 0, sizeof(s_bch));
     s_bch.swap_bits = swap_bits;
 
-    if ((build_field_tables(&s_bch, (prim_poly == 0U) ? BCH_PRIM_POLY : prim_poly) == false) ||
-        (build_generator(&s_bch) == false))
+    if ((fc_bch_field_table_build(&s_bch, (prim_poly == 0U) ? BCH_PRIM_POLY : prim_poly) == false) ||
+        (fc_bch_generator_build(&s_bch) == false))
     {
         memset(&s_bch, 0, sizeof(s_bch));
         return NULL;
     }
 
-    build_lookup_tables(&s_bch);
+    fc_bch_lookup_table_build(&s_bch);
     s_bch.ready = true;
     return &s_bch;
 }
@@ -972,7 +976,7 @@ SSD_CODE_FAST void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsign
 
     if (ecc != NULL)
     {
-        rem = load_remainder(bch, ecc);
+        rem = fc_bch_remainder_load(bch, ecc);
     }
 
     uint32_t i = 0U;
@@ -980,10 +984,10 @@ SSD_CODE_FAST void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsign
     // 32 bit 批处理：4 个 byte 位置的查表线性组合；每 4 byte 处理一次。
     while ((len - i) >= BCH_ENC_WORD_BYTES)
     {
-        const uint32_t word = ((uint32_t)input_byte(bch, data[i]) << 24U) |
-                              ((uint32_t)input_byte(bch, data[i + 1U]) << 16U) |
-                              ((uint32_t)input_byte(bch, data[i + 2U]) << 8U) |
-                              (uint32_t)input_byte(bch, data[i + 3U]);
+        const uint32_t word = ((uint32_t)fc_bch_input_byte(bch, data[i]) << 24U) |
+                              ((uint32_t)fc_bch_input_byte(bch, data[i + 1U]) << 16U) |
+                              ((uint32_t)fc_bch_input_byte(bch, data[i + 2U]) << 8U) |
+                              (uint32_t)fc_bch_input_byte(bch, data[i + 3U]);
         const uint32_t x = (uint32_t)(rem >> 20U) ^ word;
 
         rem = ((rem << 32U) & BCH_MASK52) ^
@@ -997,12 +1001,12 @@ SSD_CODE_FAST void fc_bch_encode(fc_bch_control_s *bch, const BYTE *data, unsign
     // 尾部不足 4 byte：最多 3 byte，逐 byte 处理。
     for (; i < len; i++)
     {
-        rem = encode_byte_raw(bch, rem, input_byte(bch, data[i]));
+        rem = fc_bch_byte_encode_raw(bch, rem, fc_bch_input_byte(bch, data[i]));
     }
 
     if (ecc != NULL)
     {
-        store_remainder(bch, ecc, rem);
+        fc_bch_remainder_store(bch, ecc, rem);
     }
 }
 
@@ -1044,7 +1048,7 @@ SSD_CODE_FAST BOOL fc_bch_decode(fc_bch_control_s *bch, const BYTE *data, unsign
         {
             diff[i] = (BYTE)(expected[i] ^ recv_ecc[i]);
         }
-        compute_syndromes_diff(bch, diff, s);
+        fc_bch_syndrome_compute_diff(bch, diff, s);
     }
 
     {
@@ -1061,7 +1065,7 @@ SSD_CODE_FAST BOOL fc_bch_decode(fc_bch_control_s *bch, const BYTE *data, unsign
         }
     }
 
-    degree = berlekamp_massey(bch, s, sigma);
+    degree = fc_bch_berlekamp_massey(bch, s, sigma);
     if (degree < 0)
     {
         *out_nerr = 0U;
@@ -1075,7 +1079,7 @@ SSD_CODE_FAST BOOL fc_bch_decode(fc_bch_control_s *bch, const BYTE *data, unsign
 
     // 根搜索：e 为多项式指数；q=nbits-1-e 再按 API 位序换算。
     {
-        const int found = find_roots(bch, sigma, degree, nbits, errloc);
+        const int found = fc_bch_roots_find(bch, sigma, degree, nbits, errloc);
 
         if ((found < 0) || (found != degree))
         {

@@ -103,7 +103,7 @@ _Static_assert(CW_TOTAL_MAX < 32U, "flat CW bitmap must fit a DWORD shift");
  *
  * 分界：**FTL 交 LBA + PAA（PBA 在 FTL 侧 `pba_to_paa()` 一次转出），
  * FC 层只认 PAA 喂 NAND**。PBA 不跨进 FC——它带 ch/ce，而 FC 的路由本就独立走
- * `cmd->ch/ce/lun`（见 fc_build_dispatch_request），两套编码并存只会制造静默算错地址的机会。
+ * `cmd->ch/ce/lun`（见 fc_dispatch_request_build），两套编码并存只会制造静默算错地址的机会。
  * ⚠ 代价：PBA 与 LBA 同构时「`desc->paa` 与 `desc->meta` 用同一个 plane_cw 公式」的便利消失——
  * PAA 的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），建链改用
  * `paa_with_plane()` / `paa_with_cw()`；`PLANE_CW_MASK` 技巧只在 LBA/PBA 空间有效。
@@ -209,7 +209,7 @@ typedef enum FC_BUFFER_OWN_E
 #define FC_CW_STATUS_CRC_ERROR  (1U << 5)
 #define FC_CW_STATUS_UNC        (1U << 6)
 /* 空页（erased page）：ECC 解码失败 **且** 整条 CW（META+CRC+USER+ECC，528B）的
- * 1 比特占比 ≥ 99%（判据与阈值推导见 fc_data_path.c 的 fc_cw_is_blank）。
+ * 1 比特占比 ≥ 99%（判据与阈值推导见 fc_data_path.c 的 fc_data_path_cw_is_blank）。
  * 擦除页不是合法 BCH 码字 ⇒ 解码必然报 UNC；若不单独识别，GC 读到半写块的空洞页
  * 就会把整块当坏块退役。**不属于 FC_CW_STATUS_ERROR_MASK**：
  * 「页从未编程」是介质的合法状态，不是读错误。
@@ -403,6 +403,64 @@ typedef struct FC_COMMAND_STATUS_S
 _Static_assert(sizeof(fc_cmd_status_s) == 8U, "fc_cmd_status_s size changed");
 _Static_assert(offsetof(fc_cmd_status_s, param) == 4U, "param offset changed");
 
+/* ── 功能特性开关 ── */
+
+/*
+ * Stripe RAID 功能使能。
+ *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_cfg_s.config.raid 固定为 NORMAL。
+ *   1 = 启用。跨 Plane RAID XOR parity generation + recovery。
+ *
+ * 当前未启用（功能代码已完成但未验证，待硬件就绪后开启）。
+ */
+#ifndef CONFIG_FC_RAID
+#    define CONFIG_FC_RAID (0U)
+#endif
+
+/* 固定资源池深度 */
+#define FC_COMMAND_POOL_DEPTH    (64U)
+#define FC_DESCRIPTOR_POOL_DEPTH (256U)
+#define FC_BUFFER_POOL_DEPTH     (128U)
+#define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
+
+/* 命令池 CRIT 预留：L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 共用。
+ * 这些操作是 host 写确认、dirty 行驱逐和掉电恢复的推进依赖，不能和 host 随机写/GC
+ * 共用 BG 额度；否则 BG 饱和时 dirty 行写不出去，形成 no evictable line。
+ * 其余后台（GC / host wbuf / prefetch）只能用到 DEPTH - CRIT。
+ * desc/buffer 同理：一次 2 KiB region/metadata 页 = 4 个 512B CW。当前在飞路径的
+ * 基线是 L2P flush 4 组（4×4=16）+ metadata mirror（8）+ journal（4）+ demand
+ * load（4）= 32 组；再留 16 组给 CP/BBT/压缩的突发。48 是本仓预留，不是行业值。 */
+#define FC_CMD_RESERVE_CRIT      (8U)
+#define FC_CMD_RESERVE_CRIT_DESC (48U)
+#define FC_CMD_RESERVE_CRIT_BUFS (48U)
+
+/* 命令分配类：决定当前池占用上限；默认 BG。 */
+typedef enum FC_CMD_CLASS_E
+{
+    FC_CMD_CLASS_BG = 0, /* host / GC / prefetch：上限 DEPTH - CRIT */
+    FC_CMD_CLASS_CRIT,   /* L2P load/flush + Journal/CP/BBT/metadata：上限 DEPTH */
+    FC_CMD_CLASS_NUM     /* 边界哨兵 */
+} fc_cmd_class_e;
+
+/*
+ * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
+ * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
+ */
+/* 规范定义在 media_layout.h（FTL/FC 共享介质契约）；FC_ 名保留给 FC 与 UT。 */
+#define FC_BUFFER_USER_OFFSET MEDIA_CW_USER_OFFSET /* USER 区域在 CW 中的偏移 */
+#define FC_BUFFER_USER_SIZE   MEDIA_CW_USER_SIZE   /* 暴露给 FTL 的用户数据大小 */
+#define FC_BUFFER_DATA_SIZE   (520U)               /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
+
+/* CW 内 META/CRC/USER 区域偏移（FTL 诊断与 FC 数据路径共用） */
+#define FC_CRC_META_SIZE   (4U)
+#define FC_CRC_FIELD_SIZE  (4U)
+#define FC_CRC_USER_SIZE   (512U)
+#define FC_CRC_USER_OFFSET (FC_CRC_META_SIZE + FC_CRC_FIELD_SIZE) /* = 8 */
+
+/* 队列深度 */
+#define FC_SQ_DEPTH  (64U)
+#define FC_HSQ_DEPTH (16U)
+#define FC_CQ_DEPTH  (64U)
+
 /* ── ④ 结构内联工具 / 校验 ── */
 
 /**
@@ -515,7 +573,7 @@ const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen);
  *     （链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
  *     ftl_cmd_build_descriptors()。本函数只确认「有数据的命令必须已有链」。
  */
-void fc_command_validate(const fc_cmd_s *cmd);
+void fc_command_check(const fc_cmd_s *cmd);
 
 /**
  * @brief 判断 flat CW 掩码在**每个 plane 上的 CW 集合是否相同**。
@@ -544,10 +602,10 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
  *                        fc_command_release
  *   ③ buffer 访问       fc_buffer_alloc / release / get_user_data /
  *                        fc_buffer_get_base / fc_buffer_get_meta
- *   ④ 数据查询          fc_get_cmd_data_ptr / fc_get_cmd_cw_bitmap /
- *                        fc_get_cmd_ecc_max / fc_get_cmd_all_cw_empty
- *   ⑤ 查询工具          fc_command_id_to_command / fc_descriptor_id_to_descriptor /
- *                        fc_get_resource_stats / fc_debug_state_get
+ *   ④ 数据查询          fc_cmd_data_ptr_get / fc_cmd_cw_bitmap_get /
+ *                        fc_cmd_ecc_max_get / fc_cmd_all_cw_empty_get
+ *   ⑤ 查询工具          fc_command_lookup / fc_descriptor_lookup /
+ *                        fc_resource_stats_get / fc_debug_state_get
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
@@ -560,64 +618,6 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask);
  * 边界：FC = 硬件 FCC 的软件替身。**不含策略**——「访问哪些 CW」由 FTL 决定，
  *   「数据搬运」由 FTL 做（fc_command_configure_descriptor + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
  */
-
-/* ── 功能特性开关 ── */
-
-/*
- * Stripe RAID 功能使能。
- *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_cfg_s.config.raid 固定为 NORMAL。
- *   1 = 启用。跨 Plane RAID XOR parity generation + recovery。
- *
- * 当前未启用（功能代码已完成但未验证，待硬件就绪后开启）。
- */
-#ifndef CONFIG_FC_RAID
-#    define CONFIG_FC_RAID (0U)
-#endif
-
-/* 固定资源池深度 */
-#define FC_COMMAND_POOL_DEPTH    (64U)
-#define FC_DESCRIPTOR_POOL_DEPTH (256U)
-#define FC_BUFFER_POOL_DEPTH     (128U)
-#define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
-
-/* 命令池 CRIT 预留：L2P demand load、L2P region 写回、Journal/CP/BBT/metadata 共用。
- * 这些操作是 host 写确认、dirty 行驱逐和掉电恢复的推进依赖，不能和 host 随机写/GC
- * 共用 BG 额度；否则 BG 饱和时 dirty 行写不出去，形成 no evictable line。
- * 其余后台（GC / host wbuf / prefetch）只能用到 DEPTH - CRIT。
- * desc/buffer 同理：一次 2 KiB region/metadata 页 = 4 个 512B CW。当前在飞路径的
- * 基线是 L2P flush 4 组（4×4=16）+ metadata mirror（8）+ journal（4）+ demand
- * load（4）= 32 组；再留 16 组给 CP/BBT/压缩的突发。48 是本仓预留，不是行业值。 */
-#define FC_CMD_RESERVE_CRIT      (8U)
-#define FC_CMD_RESERVE_CRIT_DESC (48U)
-#define FC_CMD_RESERVE_CRIT_BUFS (48U)
-
-/* 命令分配类：决定当前池占用上限；默认 BG。 */
-typedef enum FC_CMD_CLASS_E
-{
-    FC_CMD_CLASS_BG = 0, /* host / GC / prefetch：上限 DEPTH - CRIT */
-    FC_CMD_CLASS_CRIT,   /* L2P load/flush + Journal/CP/BBT/metadata：上限 DEPTH */
-    FC_CMD_CLASS_NUM     /* 边界哨兵 */
-} fc_cmd_class_e;
-
-/*
- * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
- * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
- */
-/* 规范定义在 media_layout.h（FTL/FC 共享介质契约）；FC_ 名保留给 FC 与 UT。 */
-#define FC_BUFFER_USER_OFFSET MEDIA_CW_USER_OFFSET /* USER 区域在 CW 中的偏移 */
-#define FC_BUFFER_USER_SIZE   MEDIA_CW_USER_SIZE   /* 暴露给 FTL 的用户数据大小 */
-#define FC_BUFFER_DATA_SIZE   (520U)               /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
-
-/* CW 内 META/CRC/USER 区域偏移（FTL 诊断与 FC 数据路径共用） */
-#define FC_CRC_META_SIZE   (4U)
-#define FC_CRC_FIELD_SIZE  (4U)
-#define FC_CRC_USER_SIZE   (512U)
-#define FC_CRC_USER_OFFSET (FC_CRC_META_SIZE + FC_CRC_FIELD_SIZE) /* = 8 */
-
-/* 队列深度 */
-#define FC_SQ_DEPTH  (64U)
-#define FC_HSQ_DEPTH (16U)
-#define FC_CQ_DEPTH  (64U)
 
 #ifdef __cplusplus
 extern "C"
@@ -691,7 +691,7 @@ extern "C"
      * 前置：命令处于 ALLOCATED；plane 落在本命令 plane 段内；CW 号 < CW_NUM；
      * row_paa 的 plane 位 == plane。命令 ID 越界、命令不在 ALLOCATED：
      * debug 停机，release 返回 FC_STATUS_INVALID_ARGUMENT；plane/CW/row_paa 坐标
-     * 只在 debug 检查，提交边界 fc_pool_chain_validate 兜底。配置错误绝不发到硬件。
+     * 只在 debug 检查，提交边界 fc_pool_chain_check 兜底。配置错误绝不发到硬件。
      *
      * @param cmd_id 目标命令 ID；须已 ALLOCATED。
      * @param plane   CW 所在 plane；须落在本命令的 plane 段内。
@@ -904,7 +904,7 @@ extern "C"
      * @return 该 CW 的 USER 数据指针；不在链上、该 desc 无 buffer，
      *         或命令为 multi-plane 时返回 NULL。
      */
-    BYTE *fc_get_cmd_data_ptr(fc_cmd_id_t cmd_id, BYTE cw_index);
+    BYTE *fc_cmd_data_ptr_get(fc_cmd_id_t cmd_id, BYTE cw_index);
 
     /**
      * @brief 从 desc 链重建命令的 flat CW 掩码（bit n = plane*CW_NUM + cw；无 desc 时 0）。
@@ -915,7 +915,7 @@ extern "C"
      *
      * @return flat CW 掩码；无 desc 时为 0。
      */
-    DWORD fc_get_cmd_cw_bitmap(fc_cmd_id_t cmd_id);
+    DWORD fc_cmd_cw_bitmap_get(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 命令级聚合 ECC：desc 链上所有 CW 的 ecc_bits 最大值。
@@ -925,7 +925,7 @@ extern "C"
      *
      * @return desc 链上所有 CW 的 ecc_bits 最大值；无 desc 时为 0。
      */
-    BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id);
+    BYTE fc_cmd_ecc_max_get(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 命令 desc 链上是否存在 UNC（不可纠 ECC）CW
@@ -935,7 +935,7 @@ extern "C"
      * @param cmd_id 命令 ID
      * @return true = 至少一个 CW 为 UNC
      */
-    BOOL fc_get_cmd_has_unc(fc_cmd_id_t cmd_id);
+    BOOL fc_cmd_has_unc_get(fc_cmd_id_t cmd_id);
 
     /**
      * @brief 命令读到的所有 CW 是否都是**擦除页**（desc 链上每个 CW 都是 FC_CW_STATUS_EMPTY）。
@@ -950,7 +950,7 @@ extern "C"
      *         false = 至少一个 CW 不是（含解码成功 / UNC / 读失败），
      *                 或 desc 链为空（没有 CW 就没有证据）
      */
-    BOOL fc_get_cmd_all_cw_empty(fc_cmd_id_t cmd_id);
+    BOOL fc_cmd_all_cw_empty_get(fc_cmd_id_t cmd_id);
 
     /* ═══════ ⑤ 查询工具 ═══════ */
     /**
@@ -960,7 +960,7 @@ extern "C"
      *
      * @return 命令指针（恒非空）。
      */
-    fc_cmd_s *fc_command_id_to_command(fc_cmd_id_t cmd_id);
+    fc_cmd_s *fc_command_lookup(fc_cmd_id_t cmd_id);
 
     /**
      * @brief ID→指针转换。前置条件：descriptor_id 为命令 desc 链中的池内 ID。
@@ -969,7 +969,7 @@ extern "C"
      *
      * @return 描述符指针（恒非空）。
      */
-    fc_desc_s *fc_descriptor_id_to_descriptor(fc_desc_id_t descriptor_id);
+    fc_desc_s *fc_descriptor_lookup(fc_desc_id_t descriptor_id);
 
     /* ── 诊断：队列头 / 链锁快照（只读，不改状态）──
      * 排障用：用例/运维在「FTL 回不到 idle」时打印它，看是哪个队列的头卡住、
@@ -1024,7 +1024,7 @@ extern "C"
      *
      * @param stats 统计结果出参；须非空。
      */
-    void fc_get_resource_stats(fc_resource_stats_s *stats);
+    void fc_resource_stats_get(fc_resource_stats_s *stats);
 
     /** @brief 开机横幅：打印 FC 固定资源池/队列深度、通道拓扑与数据通路配置（全编译期常量）。 */
     void fc_boot_report(void);
@@ -1037,9 +1037,9 @@ extern "C"
 /**
  * @brief 测试专用：对 ALLOCATED 命令喂完成，验证完成侧 ACTIVE 守卫（SCH-11）。
  *
- * @return fc_complete_from_nand 的返回码
+ * @return fc_nand_completion_finish 的返回码
  */
-fc_status_e fc_test_complete_nonactive(void);
+fc_status_e fc_test_cmd_finish_nonactive(void);
 
 #endif /* FC_NAND_TEST_ENABLE */
 

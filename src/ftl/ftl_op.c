@@ -644,7 +644,7 @@ void ftl_op_lifetime_note_completion(const ftl_ctx_s *ftl, const fc_cmd_s *cmd, 
 
     if (nand_operation_is_page_read(nand_op) != 0U)
     {
-        lifetime_note_read_health(inst, fc_get_cmd_ecc_max(completion->cmd_id), fc_get_cmd_has_unc(completion->cmd_id));
+        lifetime_note_read_health(inst, fc_cmd_ecc_max_get(completion->cmd_id), fc_cmd_has_unc_get(completion->cmd_id));
     }
     if ((nand_operation_is_page_write(nand_op) != 0U) && (failed != false))
     {
@@ -832,7 +832,7 @@ void ftl_op_drain(void)
     {
         STATS_INC(s_stats_ftl_op.drain_completed);
         // cmd_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。
-        fc_cmd_s *cmd = fc_command_id_to_command(completion.cmd_id);
+        fc_cmd_s *cmd = fc_command_lookup(completion.cmd_id);
 
         // 与上面同一个 id 索引 request 表（容量 = 命令池深度）。
         ftl_op_req_s *req = &g_op_req[completion.cmd_id];

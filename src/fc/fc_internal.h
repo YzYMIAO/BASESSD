@@ -4,6 +4,8 @@
 /*
  * fc_internal.h — FC 控制器/调度器共享定义（fc.c ↔ fc_pool.c）
  *
+ * header-only: contract（无 .c；fc.c / fc_pool.c 共享类型与 extern）。
+ *
  * 池私有契约在 fc_pool.h；对外 API 在 fc_interface.h。
  * 仅 FC 实现文件 include；FTL/上层不得 include。
  *

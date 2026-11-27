@@ -571,12 +571,12 @@ void ftl_host_io_write_fail(ftl_ctx_s *ftl, pend_req_s *pending, const fc_cmd_st
     // 等到 GC 擦除才暴露。
     DWORD bad_plane_mask = 0U;
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
     WORD      did = cmd->desc_id;
 
     while (did != FC_DESC_ID_INVALID)
     {
-        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *d = fc_descriptor_lookup(did);
 
         if (d == NULL)
         {

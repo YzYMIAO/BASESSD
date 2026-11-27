@@ -692,7 +692,7 @@ static MunitResult test_cp_duplicate_completion_guard(const MunitParameter param
 
     fc_resource_stats_s before;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
 
     const cp_phase_e phase0 = h->phase;
 
@@ -711,7 +711,7 @@ static MunitResult test_cp_duplicate_completion_guard(const MunitParameter param
 
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
 
     munit_assert_int(h->phase, ==, phase0);
     munit_assert_uint16(after.command_used, ==, before.command_used);
@@ -738,7 +738,7 @@ static MunitResult test_sync_timeout_late_completion(const MunitParameter params
 
     fc_resource_stats_s before;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
     memset(buf, 0, sizeof(buf));
 
     fi_arm_at(FI_COMPLETION_HOLD, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 1U);
@@ -768,7 +768,7 @@ static MunitResult test_sync_timeout_late_completion(const MunitParameter params
 
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
 
     munit_assert_uint32(fi_wrap_held_count(), ==, 0U);
     munit_assert_uint16(after.command_used, ==, before.command_used);
@@ -789,7 +789,7 @@ static MunitResult test_cache_pad_early_exit_releases(const MunitParameter param
     ftl_ctx_s          *ftl = ftl_ut_live();
     fc_resource_stats_s before;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
 
     ftl->cache_stream.seq.kind    = FTL_CACHE_SEQ_NONE;
     ftl->cache_stream.seq.closing = false;
@@ -807,7 +807,7 @@ static MunitResult test_cache_pad_early_exit_releases(const MunitParameter param
 
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
 
     munit_assert_uint16(after.command_used, ==, before.command_used);
 
@@ -981,7 +981,7 @@ static MunitResult test_l2p_invalid_dir_pba(const MunitParameter params[], void 
 
     fc_resource_stats_s before;
 
-    fc_get_resource_stats(&before);
+    fc_resource_stats_get(&before);
 
     DWORD out = 0U;
 
@@ -993,7 +993,7 @@ static MunitResult test_l2p_invalid_dir_pba(const MunitParameter params[], void 
 
     fc_resource_stats_s after;
 
-    fc_get_resource_stats(&after);
+    fc_resource_stats_get(&after);
     munit_assert_uint32(after.command_used, ==, before.command_used);
     munit_assert_uint32(after.descriptor_used, ==, before.descriptor_used);
     munit_assert_uint32(after.buffer_used, ==, before.buffer_used);

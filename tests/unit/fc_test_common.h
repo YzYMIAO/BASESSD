@@ -60,7 +60,7 @@
  *   单 plane op   ：plane_bitmap 必须**只有一位**，命令 plane 段 = [该 plane, +1)。
  *
  * 后者这条断言挡的是「multi_plane = 2 配只覆盖 plane 0 的位图」——那种组合会让
- * fc_build_request_data_planes 给未覆盖的 plane 补一条同行回退地址，写路径于是
+ * fc_request_data_planes_build 给未覆盖的 plane 补一条同行回退地址，写路径于是
  * **静默**给该 plane 编一页全 0xFF。
  *
  * cw_bitmap 是**字面位图**：置 1 的位 = 要访问的 CW，0 = 一个都不访问，没有
@@ -110,7 +110,7 @@
  * ══════════════════════════════════════════════════════════════════════
  *
  *   fc_poll_dispatch_single() 对 page write 调 fc_data_path_encode，
- *   fc_complete_from_nand()    对 page read  调 fc_data_path_process_read。
+ *   fc_nand_completion_finish()    对 page read  调 fc_data_path_process_read。
  *   ⇒ **提交出去的命令绝不能再手工调这两个函数**（会重复编码 / 重复解扰）。
  *     要单测数据路径的错误分支，另建一条命令、**不提交**，自行调用。
  *

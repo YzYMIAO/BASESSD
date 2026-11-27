@@ -37,12 +37,12 @@ _Static_assert((sizeof(s_board_targets) / sizeof(s_board_targets[0])) <= NAND_BO
 /* 0 = 空闲；非 0 = target 索引 + 1。 */
 static WORD s_bank_owner[NAND_BOARD_BANK_MAX];
 
-size_t nand_board_target_count(void)
+static size_t nand_board_target_count(void)
 {
     return sizeof(s_board_targets) / sizeof(s_board_targets[0]);
 }
 
-const nand_board_target_s *nand_board_target_at(size_t index)
+static const nand_board_target_s *nand_board_target_get(size_t index)
 {
     if (index >= nand_board_target_count())
     {
@@ -92,7 +92,7 @@ static void nand_board_build_fmc_config(nand_fmc_cfg_s *cfg)
  * @note 多 target 板卡需要在这里切换 FMC bank / CE# GPIO；当前单 bank 单 NCE，
  *       本函数只做通路校验。
  */
-nand_result_e nand_board_select_target(BYTE ch, BYTE ce)
+static nand_result_e nand_board_select_target(BYTE ch, BYTE ce)
 {
     if ((ch >= CH_NUM) || (ce >= CE_NUM))
     {
@@ -196,7 +196,7 @@ nand_result_e nand_board_init_all_targets(void)
 
     for (size_t i = 0U; i < nand_board_target_count(); i++)
     {
-        const nand_board_target_s *target = nand_board_target_at(i);
+        const nand_board_target_s *target = nand_board_target_get(i);
 
         if (target == NULL)
         {
@@ -250,7 +250,7 @@ nand_result_e nand_target_get(BYTE ch, BYTE ce, const nand_phy_backend_s **backe
  * @param mode 输出：timing mode（0 = 低速）。
  * @return OK / INVALID_ARGUMENT / NOT_READY。
  */
-nand_result_e nand_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
+nand_result_e nand_timing_mode_get(BYTE ch, BYTE ce, BYTE *mode)
 {
     ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "timing mode: mode NULL");
 

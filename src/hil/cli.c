@@ -15,7 +15,7 @@
 #include "bbt.h"
 #include "crash.h"
 #include "delay.h"        /* delay_now_ms（stat 的本次开机时间） */
-#include "fc_interface.h" /* 池/队列深度等模块常量；fc_get_resource_stats（q 的队列/三池水位） */
+#include "fc_interface.h" /* 池/队列深度等模块常量；fc_resource_stats_get（q 的队列/三池水位） */
 #include "ftl.h"
 #include "ftl_fc_interface.h" /* ftl_sync_read_page / FTL_PAGE_CFG_DATA_ANY（rdpaa 诊断）*/
 #include "ftl_op.h"           /* ftl_op_req_count（q 的同步等待在飞数） */
@@ -24,7 +24,7 @@
 #include "lifetime.h" /* 终身计数（P3）*/
 #include "log.h"
 #include "metadata.h"    /* md_pool_print（pool 诊断） */
-#include "nand_device.h" /* nand_get_timing_mode（通用器件查询） */
+#include "nand_device.h" /* nand_timing_mode_get（通用器件查询） */
 #include "pc_sample.h"   /* PC 采样环（pc 命令） */
 #include "pending.h"     /* pend_slot/group_get_count（q） */
 #include "runtime.h"     /* ssd_runtime_pump：CLI 同步等待命令自带泵 */
@@ -776,7 +776,7 @@ static void uart_cli_info(int argc, char *argv[])
 
         BYTE                timing_mode = 0U;
         char                mode_text[4];
-        const nand_result_e timing_result = nand_get_timing_mode(ch, ce, &timing_mode);
+        const nand_result_e timing_result = nand_timing_mode_get(ch, ce, &timing_mode);
 
         if (timing_result == NAND_RESULT_OK)
         {
@@ -1543,7 +1543,7 @@ static void uart_cli_pool(int argc, char *argv[])
 /**
  * @brief q — 控制器队列 / 三池 / 背压水位（只读）。
  *
- * 对应 §26 的「队列 + 门铃 + 完成」：FC 的 SQ/HSQ/CQ 与三池是硬件 FCC 的软件替身，
+ * 对应 §6.2 的「队列 + 门铃 + 完成」：FC 的 SQ/HSQ/CQ 与三池是硬件 FCC 的软件替身，
  * FTL 的 pending 组/槽、L2P 在飞与 mig 在飞是上层背压。FC 统计是单例，
  * pending/在飞数按 FTL 实例分开打印。
  *
@@ -1557,7 +1557,7 @@ static void uart_cli_q(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    fc_get_resource_stats(&rs);
+    fc_resource_stats_get(&rs);
     LOGI("fc sq=%hu/%hu hsq=%hu/%hu cq=%hu/%hu cmd=%hu/%hu desc=%hu/%hu buf=%hu/%hu hwm=%hu/%hu/%hu\r\n", rs.sq_used, (WORD)FC_SQ_DEPTH, rs.hsq_used, (WORD)FC_HSQ_DEPTH, rs.cq_used, (WORD)FC_CQ_DEPTH, rs.command_used, (WORD)FC_COMMAND_POOL_DEPTH, rs.descriptor_used, (WORD)FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, (WORD)FC_BUFFER_POOL_DEPTH, rs.command_high, rs.descriptor_high, rs.buffer_high);
 
     for (BYTE die = 0U; die < DIE_MAX; die++)
@@ -1846,7 +1846,7 @@ static void uart_cli_id(int argc, char *argv[])
 
     BYTE                timing_mode = 0U;
     char                mode_text[4];
-    const nand_result_e timing_result = nand_get_timing_mode(0U, 0U, &timing_mode);
+    const nand_result_e timing_result = nand_timing_mode_get(0U, 0U, &timing_mode);
 
     if (timing_result == NAND_RESULT_OK)
     {

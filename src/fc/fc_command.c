@@ -1,10 +1,12 @@
 /*
  * fc_command.c — FC 命令校验
  *
+ * implements fc_interface.h（命令前置校验实现）。
+ *
  * 校验：确认 command 的 operation 合法、需要数据的操作必须带 desc 链。
  *
  * 注：CQ 完成项的组装与 per-CW 状态聚合**不在本文件**——由
- * fc_complete_from_nand()（fc.c）内联完成。
+ * fc_nand_completion_finish()（fc.c）内联完成。
  */
 
 #include "assertion.h"
@@ -56,7 +58,7 @@ static const fc_status_name_s s_cmd_status_names[] = {
  * @param buflen 缓冲长度（0 时返回空串）
  * @return buf（或 buflen 为 0 时的空串）
  */
-static const char *fc_status_str_format(const fc_status_name_s *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
+static const char *fc_command_status_str_format(const fc_status_name_s *tbl, DWORD count, DWORD status, char *buf, DWORD buflen)
 {
     if ((buf == NULL) || (buflen == 0U))
     {
@@ -112,7 +114,7 @@ static const char *fc_status_str_format(const fc_status_name_s *tbl, DWORD count
  */
 const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
 {
-    return fc_status_str_format(s_cw_status_names, (DWORD)(sizeof(s_cw_status_names) / sizeof(s_cw_status_names[0])), status, buf, buflen);
+    return fc_command_status_str_format(s_cw_status_names, (DWORD)(sizeof(s_cw_status_names) / sizeof(s_cw_status_names[0])), status, buf, buflen);
 }
 
 /**
@@ -125,7 +127,7 @@ const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
  */
 const char *fc_cmd_status_str(DWORD status, char *buf, DWORD buflen)
 {
-    return fc_status_str_format(s_cmd_status_names, (DWORD)(sizeof(s_cmd_status_names) / sizeof(s_cmd_status_names[0])), status, buf, buflen);
+    return fc_command_status_str_format(s_cmd_status_names, (DWORD)(sizeof(s_cmd_status_names) / sizeof(s_cmd_status_names[0])), status, buf, buflen);
 }
 
 /**
@@ -159,7 +161,7 @@ BOOL fc_cw_bitmap_is_plane_symmetric(DWORD mask)
  *
  * @param cmd 命令
  */
-void fc_command_validate(const fc_cmd_s *cmd)
+void fc_command_check(const fc_cmd_s *cmd)
 {
     ASSERT(cmd->config.operation < OP_COUNT);
     // 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据）

@@ -5,12 +5,12 @@
  * 不依赖任何池，每个用例自带全部夹具（栈上队列 / 栈上命令）。
  *
  * 覆盖范围：
- *   Part 1  fc_command_validate  —— 合法输入放行（冒烟性质，见下）
+ *   Part 1  fc_command_check  —— 合法输入放行（冒烟性质，见下）
  *   Part 2  fc_submission_queue  —— SQ 环形 FIFO：顺序 / 回绕 / 满 / peek
  *   Part 2b fc_completion_queue  —— CQ 环形 FIFO：初始化 / 顺序 / 满
  *   Part 4  ONFI 参数页解码       —— 合成页喂纯函数，逐字段断言（手册 Table 11）
  *
- * 链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
+ * 链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_check()
  * 的 nand_operation_has_data() 宏引用；以及 fc_test_common.o 的证据打印原语
  * test_trace_*（`--log-visible info|debug` 才输出，默认零字节）。
  *
@@ -18,7 +18,7 @@
  *   - 调度器的选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）
  *     在 fc.c 的 static fc_poll_fill 里，只能经 fc_service() 触达（会推真 NAND）
  *     ⇒ 其覆盖属 data_path/lifecycle，不在本文件。
- *   - fc_command_validate 的负向守卫全部是 ASSERT；param.cw_bitmap 的读者是 FTL，
+ *   - fc_command_check 的负向守卫全部是 ASSERT；param.cw_bitmap 的读者是 FTL，
  *     FC 侧不校验 ⇒ 本文件只留正向冒烟。
  */
 
@@ -31,7 +31,7 @@
 /*************************************************************************
  *  Part 1: fc_command 测试
  *
- *  只覆盖 fc_command_validate 的**正向**面。该函数三条守卫
+ *  只覆盖 fc_command_check 的**正向**面。该函数三条守卫
  *  （command==NULL / operation>=OP_COUNT / 数据操作无 desc 链）全为 ASSERT，
  *  函数体只剩 `return FC_STATUS_OK` ⇒ 返回值的判据恒真（C7），本层用例的价值
  *  是**冒烟内层断言**：用合法输入走一遍，拦住以后有人加了过严的断言。
@@ -42,8 +42,8 @@
 
 /**
  * test_command_validate_op_range
- *   功能：确认 fc_command_validate 对全部合法 operation 放行。
- *   测什么：op 遍历 0 .. OP_COUNT-1，每个 op 走一次 fc_command_validate。
+ *   功能：确认 fc_command_check 对全部合法 operation 放行。
+ *   测什么：op 遍历 0 .. OP_COUNT-1，每个 op 走一次 fc_command_check。
  *   设计思路：返回值这一维已不可能失败（见 Part 1 头注），真实价值是冒烟——
  *         遍历**全部** op 而非抽一个，是因为「数据操作必须有 desc 链」那条断言
  *         是按 operation 分类的，抽一个样本覆盖不到分类边界。
@@ -67,7 +67,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     {
         cmd.config.operation = op;
         cmd.desc_id          = 0U;
-        fc_command_validate(&cmd);
+        fc_command_check(&cmd);
     }
 
     /* 证据（--log-visible info）：遍历范围本身就是判据——按 operation 分类的那条断言
@@ -103,10 +103,10 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     cmd.desc_id = FC_DESC_ID_INVALID;
 
     cmd.config.operation = OP_SET_FEATURES;
-    fc_command_validate(&cmd);
+    fc_command_check(&cmd);
 
     cmd.config.operation = OP_GET_FEATURES;
-    fc_command_validate(&cmd);
+    fc_command_check(&cmd);
 
     /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
     test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%hX）时仍放行——数据走 param 内联段", FC_DESC_ID_INVALID);
@@ -147,20 +147,20 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     fc_sub_queue_s q;
     fc_cmd_id_t    val;
 
-    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
+    fc_queue_submission_init(&q, storage, TEST_Q_DEPTH);
 
-    munit_assert_int(fc_submission_queue_push(&q, 0x01U), ==, FC_STATUS_OK);
-    munit_assert_int(fc_submission_queue_push(&q, 0x02U), ==, FC_STATUS_OK);
-    munit_assert_int(fc_submission_queue_push(&q, 0x03U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x01U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x02U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x03U), ==, FC_STATUS_OK);
 
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0x01U);
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0x02U);
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0x03U);
 
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
 
     /* 证据（--log-visible info）：顺序是队列最核心的契约——错了不崩、只错数据。 */
     test_trace_summary("SQ push 0x01/0x02/0x03 -> pop 顺序一致 -> 第 4 次 QUEUE_EMPTY (depth=%u)", TEST_Q_DEPTH);
@@ -192,27 +192,27 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     fc_cmd_id_t    val;
     WORD           i;
 
-    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
+    fc_queue_submission_init(&q, storage, TEST_Q_DEPTH);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
     {
-        munit_assert_int(fc_submission_queue_push(&q, (fc_cmd_id_t)(0x10U + i)), ==, FC_STATUS_OK);
+        munit_assert_int(fc_queue_submission_push(&q, (fc_cmd_id_t)(0x10U + i)), ==, FC_STATUS_OK);
     }
 
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0x10U);
 
-    munit_assert_int(fc_submission_queue_push(&q, 0xAAU), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0xAAU), ==, FC_STATUS_OK);
 
     /* head=1, tail=0 → 顺序：0x11..0x17, 0xAA */
     for (i = 0x11U; i <= 0x17U; i++)
     {
-        munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+        munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
         munit_assert_uint32(val, ==, (fc_cmd_id_t)i);
     }
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0xAAU);
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
 
     /* 证据（--log-visible info）：head=1 / tail=0 把两处回绕算术同时摆在环的两侧。 */
     test_trace_summary("SQ 回绕: head=1 tail=0 -> 0x11..0x17, 0xAA -> EMPTY (depth=%u)", TEST_Q_DEPTH);
@@ -240,19 +240,19 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     fc_sub_queue_s q;
     WORD           i;
 
-    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
+    fc_queue_submission_init(&q, storage, TEST_Q_DEPTH);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
     {
-        munit_assert_int(fc_submission_queue_push(&q, (fc_cmd_id_t)i), ==, FC_STATUS_OK);
+        munit_assert_int(fc_queue_submission_push(&q, (fc_cmd_id_t)i), ==, FC_STATUS_OK);
     }
 
-    munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_QUEUE_FULL);
+    munit_assert_int(fc_queue_submission_push(&q, 0xFFU), ==, FC_STATUS_QUEUE_FULL);
 
     /* pop 后恢复可用 */
     fc_cmd_id_t val;
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
-    munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_pop(&q, &val), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0xFFU), ==, FC_STATUS_OK);
 
     /* 证据（--log-visible info）：后半段「pop 后恢复可用」才是重点——只测前半段的话，
      * count 没回退、或满判定写成 head == tail 的实现都能蒙混过关。 */
@@ -282,16 +282,16 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
 
-    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
+    fc_queue_submission_init(&q, storage, TEST_Q_DEPTH);
 
-    munit_assert_int(fc_submission_queue_push(&q, 0x01U), ==, FC_STATUS_OK);
-    munit_assert_int(fc_submission_queue_push(&q, 0x02U), ==, FC_STATUS_OK);
-    munit_assert_int(fc_submission_queue_push(&q, 0x03U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x01U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x02U), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_submission_push(&q, 0x03U), ==, FC_STATUS_OK);
 
-    munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, 0x01U);
-    munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, 0x01U);
-    munit_assert_uint32(fc_submission_queue_peek(&q, 1U), ==, 0x02U);
-    munit_assert_uint32(fc_submission_queue_peek(&q, 2U), ==, 0x03U);
+    munit_assert_uint32(fc_queue_submission_peek(&q, 0U), ==, 0x01U);
+    munit_assert_uint32(fc_queue_submission_peek(&q, 0U), ==, 0x01U);
+    munit_assert_uint32(fc_queue_submission_peek(&q, 1U), ==, 0x02U);
+    munit_assert_uint32(fc_queue_submission_peek(&q, 2U), ==, 0x03U);
 
     /* 证据（--log-visible info）：peek(0) 连查两次结果相同 ⇒ 证明它**没有**推进 head
      * （否则调用方每探一次就吃掉一条命令）。 */
@@ -320,8 +320,8 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
     fc_cmd_id_t    storage[TEST_Q_DEPTH];
     fc_sub_queue_s q;
 
-    fc_submission_queue_init(&q, storage, TEST_Q_DEPTH);
-    munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, FC_CMD_ID_INVALID);
+    fc_queue_submission_init(&q, storage, TEST_Q_DEPTH);
+    munit_assert_uint32(fc_queue_submission_peek(&q, 0U), ==, FC_CMD_ID_INVALID);
 
     /* 证据（--log-visible info）：fc.c 链打包正是靠这个哨兵判链尾。 */
     test_trace_summary("SQ 空队列 peek(0) -> FC_CMD_ID_INVALID (0x%hX)", FC_CMD_ID_INVALID);
@@ -333,7 +333,7 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
  *  Part 2b: fc_completion_queue 测试
  *
  *  CQ 存 fc_cmd_status_s（整项拷贝），FIFO 语义与 SQ 相同，但存储类型
- *  与深度不同，故单独一组。CQ 的生产路径是 fc_complete_from_nand()（push）
+ *  与深度不同，故单独一组。CQ 的生产路径是 fc_nand_completion_finish()（push）
  *  与 fc_poll_completion_internal()（pop）。
  **************************************************************************/
 
@@ -358,7 +358,7 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     fc_cmd_status_s storage[TEST_CQ_DEPTH];
     fc_comp_queue_s q;
 
-    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
+    fc_queue_completion_init(&q, storage, TEST_CQ_DEPTH);
     munit_assert_uint32(q.depth, ==, TEST_CQ_DEPTH);
     munit_assert_uint32(q.count, ==, 0U);
 
@@ -390,22 +390,22 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     fc_cmd_status_s entry  = {0};
     fc_cmd_status_s popped = {0};
 
-    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
+    fc_queue_completion_init(&q, storage, TEST_CQ_DEPTH);
 
     entry.cmd_id = 0x01U;
     entry.status = FC_CMD_STATUS_RDY;
-    munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_completion_push(&q, &entry), ==, FC_STATUS_OK);
 
     entry.cmd_id = 0x02U;
-    munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_completion_push(&q, &entry), ==, FC_STATUS_OK);
 
-    munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_completion_pop(&q, &popped), ==, FC_STATUS_OK);
     munit_assert_uint32(popped.cmd_id, ==, 0x01U);
 
-    munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_OK);
+    munit_assert_int(fc_queue_completion_pop(&q, &popped), ==, FC_STATUS_OK);
     munit_assert_uint32(popped.cmd_id, ==, 0x02U);
 
-    munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_QUEUE_EMPTY);
+    munit_assert_int(fc_queue_completion_pop(&q, &popped), ==, FC_STATUS_QUEUE_EMPTY);
 
     /* 证据（--log-visible info）：CQ 存整项而非句柄，用两个不同 cmd_id 区分
      * ⇒ 顺序错或拷贝错立刻可见。 */
@@ -418,7 +418,7 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
  * test_cqueue_overflow
  *   功能：验证 CQ 满时的背压。
  *   测什么：填满 TEST_CQ_DEPTH 条 → 再 push 断言 QUEUE_FULL。
- *   设计思路：CQ 满在 fc_complete_from_nand() 里是 fatal（完成项一旦丢失，
+ *   设计思路：CQ 满在 fc_nand_completion_finish() 里是 fatal（完成项一旦丢失，
  *         FTL 再也等不到这条命令），所以「满了必须拒绝而不是覆盖」是硬契约。
  *         与 SQ 的 overflow 不同，这里**不**测「pop 后恢复」——CQ 的消费方是
  *         FTL 的完成处理，本用例不模拟消费节奏，只钉住满判定本身。
@@ -434,7 +434,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     fc_comp_queue_s q;
     WORD            i;
 
-    fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH);
+    fc_queue_completion_init(&q, storage, TEST_CQ_DEPTH);
 
     fc_cmd_status_s entry = {0};
     entry.status          = FC_CMD_STATUS_RDY;
@@ -442,13 +442,13 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     for (i = 0U; i < TEST_CQ_DEPTH; i++)
     {
         entry.cmd_id = (fc_cmd_id_t)i;
-        munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
+        munit_assert_int(fc_queue_completion_push(&q, &entry), ==, FC_STATUS_OK);
     }
 
     entry.cmd_id = 0xFFU;
-    munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_QUEUE_FULL);
+    munit_assert_int(fc_queue_completion_push(&q, &entry), ==, FC_STATUS_QUEUE_FULL);
 
-    /* 证据（--log-visible info）：CQ 满在 fc_complete_from_nand() 里是 fatal
+    /* 证据（--log-visible info）：CQ 满在 fc_nand_completion_finish() 里是 fatal
      * （完成项丢了 FTL 就再也等不到）⇒「满了必须拒绝而不是覆盖」是硬契约。 */
     test_trace_summary("CQ 满 %u 条 -> push QUEUE_FULL（拒绝而非覆盖队头）", TEST_CQ_DEPTH);
 

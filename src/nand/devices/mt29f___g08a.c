@@ -16,7 +16,7 @@
  * 时序来源：一张 3.3V Mode 5 AC 表（MT29 数据手册 Table 29/31）
  *   + 低速 bring-up 的 MT29F_LOW_PCC_* 常量
  *   → nand_fmc_timing_s（nand_protocol.h，29 字段，顺序耦合）
- *   → UOP handler 层（nand_fmc.c）与 PCC 换算（nand_fmc_timing_to_pcc）。
+ *   → UOP handler 层（nand_fmc.c）与 PCC 换算（mt29f_timing_to_pcc）。
  */
 
 #include "assertion.h"
@@ -118,7 +118,7 @@ static const nand_fmc_timing_s g_nand_timing_3v3_mode5 = {
  * @param mode 输出：模式号（0 = 低速）
  * @return OK / INVALID_ARGUMENT
  */
-static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
+static nand_result_e mt29f_timing_mode_get(BYTE ch, BYTE ce, BYTE *mode)
 {
     ASSERT_REJECT(mode != NULL, NAND_RESULT_INVALID_ARGUMENT, "get timing mode: mode NULL");
     ASSERT_REJECT((ch < CH_NUM) && (ce < CE_NUM), NAND_RESULT_INVALID_ARGUMENT, "get timing mode: ch/ce out of range");
@@ -152,7 +152,7 @@ static nand_result_e mt29f_get_timing_mode(BYTE ch, BYTE ce, BYTE *mode)
  * 会导致命令/地址采样失败，故使用 Table 29/31 的 3.3V Mode 5 AC
  * 参数作为基准。
  */
-static void nand_fmc_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
+static void mt29f_timing_to_pcc(const nand_fmc_timing_s *onfi, FMC_NAND_PCC_TimingTypeDef *pcc, DWORD fmc_hz)
 {
     ASSERT(fmc_hz != 0U);
 
@@ -349,7 +349,7 @@ static nand_result_e mt29f_set_timing(BYTE ch, BYTE ce, BYTE mode, DWORD fmc_hz)
         FMC_NAND_PCC_TimingTypeDef fast_pcc;
 
         memset(&fast_pcc, 0, sizeof(fast_pcc));
-        nand_fmc_timing_to_pcc(&g_nand_timing_3v3_mode5, &fast_pcc, fmc_hz);
+        mt29f_timing_to_pcc(&g_nand_timing_3v3_mode5, &fast_pcc, fmc_hz);
         common_timing    = fast_pcc;
         attribute_timing = fast_pcc;
 
@@ -393,7 +393,7 @@ static const nand_device_desc_s g_mt29f_desc = {
     .expected_id     = NAND_CHIP_ID,
     .hw_init         = mt29f_hw_init,
     .set_timing      = mt29f_set_timing,
-    .get_timing_mode = mt29f_get_timing_mode,
+    .get_timing_mode = mt29f_timing_mode_get,
 };
 
 const nand_device_desc_s *nand_device_get(void)

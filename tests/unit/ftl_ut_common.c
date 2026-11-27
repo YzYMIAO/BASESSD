@@ -307,7 +307,7 @@ void ftl_ut_quiesce(ftl_ctx_s *ftl)
         ftl_service_pump();
 
         memset(&rs, 0, sizeof(rs));
-        fc_get_resource_stats(&rs);
+        fc_resource_stats_get(&rs);
 
         const BOOL jobs_idle = (ftl->cp_handle->active == 0) && (ftl->mig_handle->job.active == 0) && md_handle_is_idle(ftl->metadata_dir) && jrn_is_idle(ftl->journal) && wb_is_idle(ftl->wbuf) && (ftl->cache_stream.seq.write.count == 0U) && (ftl->cache_stream.seq.write_inflight == 0U) && (ftl->cache->inflight.load == 0U) && (ftl->cache->inflight.flush == 0U) && (ftl->sched.items != NULL) &&
                                (ftl->sched.host_items == 0U) && (ftl->sched.flush_items == 0U) && (ftl->sched.prefetch_items == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_LOAD] == 0U) && (ftl->sched.credit[FTL_WORK_CLASS_L2P_FLUSH] == 0U);
@@ -709,7 +709,7 @@ void ftl_ut_assert_clean(ftl_ctx_s *ftl)
     munit_assert_uint16(ftl_op_req_count(), ==, 0U);
 
     memset(&rs, 0, sizeof(rs));
-    fc_get_resource_stats(&rs);
+    fc_resource_stats_get(&rs);
     munit_assert_uint32(rs.sq_used, ==, 0U);
     munit_assert_uint32(rs.hsq_used, ==, 0U);
     munit_assert_uint32(rs.cq_used, ==, 0U);

@@ -24,7 +24,7 @@
 #include "assertion.h"
 #include "bst.h"          /* ftl_block_state / ftl_block_state_name（降级现场诊断） */
 #include "delay.h"        /* delay_time_now_us（加载延迟直方图） */
-#include "fc_interface.h" /* fc_get_resource_stats（写回前的资源预检） */
+#include "fc_interface.h" /* fc_resource_stats_get（写回前的资源预检） */
 #include "ftl.h"          /* ftl_ctx_s / ftl_service_pump（同步逃生口用） */
 #include "ftl_fc_interface.h"
 #include "ftl_op.h"   /* ftl_op_submit / ftl_op_is_in_dispatch */
@@ -374,7 +374,7 @@ static BOOL l2p_fc_demand_headroom_is_sufficient(void)
 {
     fc_resource_stats_s st;
 
-    fc_get_resource_stats(&st);
+    fc_resource_stats_get(&st);
 
     return (st.command_used + 1U + FTL_FC_CP_CMD_HEADROOM <= FC_COMMAND_POOL_DEPTH) && (st.descriptor_used + CW_NUM + FTL_FC_CP_DESC_HEADROOM <= FC_DESCRIPTOR_POOL_DEPTH) && (st.buffer_used + CW_NUM + FTL_FC_CP_BUFS_HEADROOM <= FC_BUFFER_POOL_DEPTH);
 }
@@ -2567,7 +2567,7 @@ static BOOL l2p_flush_resources_is_available(void)
 {
     fc_resource_stats_s stats;
 
-    fc_get_resource_stats(&stats);
+    fc_resource_stats_get(&stats);
 
     return ((stats.command_used + L2P_REGION_COPIES + FTL_FC_CP_CMD_HEADROOM) <= FC_COMMAND_POOL_DEPTH) && (stats.descriptor_used + CW_NUM + FTL_FC_CP_DESC_HEADROOM <= FC_DESCRIPTOR_POOL_DEPTH) && (stats.buffer_used + CW_NUM + FTL_FC_CP_BUFS_HEADROOM <= FC_BUFFER_POOL_DEPTH) && (stats.sq_used < FC_SQ_DEPTH) && (stats.hsq_used < FC_HSQ_DEPTH);
 }
@@ -3436,7 +3436,7 @@ void ftl_l2p_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completion, void
 
     ASSERT(line != NULL);
 
-    fc_cmd_s *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s *cmd = fc_command_lookup(completion->cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。

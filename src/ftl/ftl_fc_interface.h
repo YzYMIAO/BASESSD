@@ -171,7 +171,7 @@ static inline BOOL ftl_fc_host_budget_ok_n(DWORD n)
 {
     fc_resource_stats_s st;
 
-    fc_get_resource_stats(&st);
+    fc_resource_stats_get(&st);
 
     const DWORD cw = n * FTL_LBA_PER_PAIR;
 
@@ -214,7 +214,7 @@ static inline WORD ftl_cmd_id(const fc_cmd_s *cmd)
  *
  * NO_DATA 操作（ERASE / RESET / LOCK 等）无数据负载；SET/GET_FEATURES 用内联
  * param.value + feature_addr。两者都不建链（desc_id 保持 INVALID）。
- * 与 fc_command_validate 的接受条件对齐：只有 has_data 且非 FEATURES 的操作
+ * 与 fc_command_check 的接受条件对齐：只有 has_data 且非 FEATURES 的操作
  * 才要求 desc_id 有效。
  *
  * @param cmd 已填好 config.operation 的命令

@@ -7,15 +7,7 @@
  *   - 命令/描述符/缓冲的分配、释放、链遍历；
  *   - 池相关的公开 API（建链、命令释放、buffer 访问、链查询）。
  *
- * 文件结构（按职责分区）：
- *   1. 静态资源 / 初始化
- *   2. 池簿记 / 状态闸门
- *   3. 分配 / 释放（含链释放）
- *   4. 建链 / 链校验
- *   5. 公开 API / 查询
- *   6. ID / 指针转换（文件末尾）
- *
- * 重点机制体：fc_pool_command_state_set / fc_pool_chain_validate /
+ * 重点机制体：fc_pool_command_state_set / fc_pool_chain_check /
  *             fc_pool_command_release / fc_command_configure_descriptor_with_buffer。
  *
  * 提交/填充/完成调度在 fc.c；池私有契约见 fc_pool.h，控制器/调度器共享定义见
@@ -377,7 +369,7 @@ static void fc_pool_chain_release_all(fc_ctl_s *controller, fc_desc_id_t head)
  * @param cmd_id 命令 ID。
  *
  * @note 只动 buffer，**不动 desc 链、不动命令槽位**——它们仍由
- * fc_command_release 回收。唯一调用者：fc_complete_from_nand 在
+ * fc_command_release 回收。唯一调用者：fc_nand_completion_finish 在
  * 「buf_own 的释放位 = FC 释放（01/11）」时当场归还（此时完成项已组装完毕，
  * 之后没有任何读者碰 buffer）。抹 INVALID 是为了让随后的链释放自然跳过，
  * 从而不双重归还；命令若没走到完成就释放，buffer 仍有效，链释放照常归还
@@ -424,7 +416,7 @@ void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_id_t cmd_id)
  * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
  *       链在提交后冻结，故校验一次即可覆盖 dispatch 阶段。
  */
-BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id)
+BOOL fc_pool_chain_check(const fc_ctl_s *controller, fc_cmd_id_t cmd_id)
 {
     ASSERT(controller != NULL);
     ASSERT(cmd_id < FC_COMMAND_POOL_DEPTH);
@@ -521,7 +513,7 @@ BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id)
      * multi-plane：带 host 数据搬运的命令由 dispatch 逐 plane 从 desc 链取行地址/数据，
      * 缺一个 plane 只能退化成 block0/page0 或全 0xFF 编程——必须在这里拒绝。
      * 无 host 数据搬运的 multi-plane 命令（multi-plane 擦除 / 纯加载）按契约**不建
-     * desc 链**（见 fc_build_dispatch_request 的对应分支），行地址由 cmd->paa 逐 plane
+     * desc 链**（见 fc_dispatch_request_build 的对应分支），行地址由 cmd->paa 逐 plane
      * 派生，没有 desc 可作覆盖判据；此处只校验下面通用链检查已覆盖的平面跨度。
      * 单 plane：链只能落在 paa_to_plane(cmd->paa) 那一个 plane，且行地址必须与
      * cmd->paa 一致（block/page/lun 三项）。
@@ -783,7 +775,7 @@ fc_status_e fc_command_configure_descriptor_with_buffer(fc_cmd_id_t cmd_id, BYTE
      * 资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，是模仿硬件的预期失败。
      * ID 越界、生命周期不对、上层 buffer 越界/归属不符：debug ASSERT；
      * release 拒绝并返回 INVALID_ARGUMENT（判据 9 闸门，避免把坏 owner/越界 ID
-     * 写进 desc）。坐标错误只在 debug 检查，提交边界 fc_pool_chain_validate 兜底。 */
+     * 写进 desc）。坐标错误只在 debug 检查，提交边界 fc_pool_chain_check 兜底。 */
     ASSERT_REJECT(cmd_id < FC_COMMAND_POOL_DEPTH, FC_STATUS_INVALID_ARGUMENT, "configure descriptor: cmd=%hu out of range", cmd_id);
     ASSERT_REJECT(g_fc_controller.command_state[cmd_id] == FC_COMMAND_STATE_ALLOCATED,
                   FC_STATUS_INVALID_ARGUMENT,
@@ -979,12 +971,12 @@ BYTE *fc_buffer_get_base(fc_buf_id_t buffer_id)
  * @param cw_index CW 号
  * @return 数据指针；未找到 / 无 buffer 返回 NULL
  */
-BYTE *fc_get_cmd_data_ptr(fc_cmd_id_t cmd_id, BYTE cw_index)
+BYTE *fc_cmd_data_ptr_get(fc_cmd_id_t cmd_id, BYTE cw_index)
 {
     fc_desc_id_t desc_id;
 
     // cmd/desc 链非空是前置条件；cw_index 不在链上仍按查询语义返回 NULL
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
     ASSERT(cmd->desc_id != FC_DESC_ID_INVALID);
 
     /* 同 fc_buffer_get_meta：cw_index 不带 plane，multi-plane 下无法唯一定位；
@@ -998,7 +990,7 @@ BYTE *fc_get_cmd_data_ptr(fc_cmd_id_t cmd_id, BYTE cw_index)
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (paa_to_cw(descriptor->paa) == cw_index)
         {
@@ -1028,7 +1020,7 @@ BYTE *fc_buffer_get_meta(fc_cmd_id_t cmd_id, BYTE cw_index)
     fc_desc_id_t did;
 
     // cmd_id 是池内句柄；未找到 CW 仍按契约返回 NULL
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     /* cw_index 不带 plane：multi-plane 命令同一 CW 号在两个 plane 各有一条 desc，
      * 本函数只能返回链序第一个匹配。release 下宁可返回 NULL，也不静默交出错 plane
@@ -1042,7 +1034,7 @@ BYTE *fc_buffer_get_meta(fc_cmd_id_t cmd_id, BYTE cw_index)
     did = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (did < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
+        fc_desc_s *d = fc_descriptor_lookup(did);
 
         if (paa_to_cw(d->paa) == cw_index)
         {
@@ -1061,21 +1053,21 @@ BYTE *fc_buffer_get_meta(fc_cmd_id_t cmd_id, BYTE cw_index)
  * @param cmd_id 命令 ID
  * @return flat 位图（bit = plane*CW_NUM + cw）
  */
-DWORD fc_get_cmd_cw_bitmap(fc_cmd_id_t cmd_id)
+DWORD fc_cmd_cw_bitmap_get(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     DWORD        mask = 0U;
 
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
         const BYTE       plane      = paa_to_plane(descriptor->paa);
         const BYTE       n          = fc_cw_flat(plane, paa_to_cw(descriptor->paa));
 
-        // 与 fc_build_request_data_planes 的同源断言一致：链上的 CW 编号必须在 flat 空间内
+        // 与 fc_request_data_planes_build 的同源断言一致：链上的 CW 编号必须在 flat 空间内
         ASSERT(n < CW_TOTAL_MAX);
         mask |= (1U << n);
         desc_id = (fc_desc_id_t)descriptor->next_id;
@@ -1091,17 +1083,17 @@ DWORD fc_get_cmd_cw_bitmap(fc_cmd_id_t cmd_id)
  * @param cmd_id 命令 ID
  * @return true 全部 CW 都是 EMPTY；false 否则
  */
-BOOL fc_get_cmd_all_cw_empty(fc_cmd_id_t cmd_id)
+BOOL fc_cmd_all_cw_empty_get(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     WORD         n = 0U;
 
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (n < CW_TOTAL_MAX))
     {
-        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (fc_cw_status_is_empty(descriptor->status) == false)
         {
@@ -1122,17 +1114,17 @@ BOOL fc_get_cmd_all_cw_empty(fc_cmd_id_t cmd_id)
  * @param cmd_id 命令 ID
  * @return 最大 ECC bit 数；空链为 0
  */
-BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id)
+BYTE fc_cmd_ecc_max_get(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
     BYTE         ecc_max = 0U;
 
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (descriptor->ecc_bits > ecc_max)
         {
@@ -1151,16 +1143,16 @@ BYTE fc_get_cmd_ecc_max(fc_cmd_id_t cmd_id)
  * @param cmd_id 命令 ID
  * @return true = 至少一个 CW 为 UNC
  */
-BOOL fc_get_cmd_has_unc(fc_cmd_id_t cmd_id)
+BOOL fc_cmd_has_unc_get(fc_cmd_id_t cmd_id)
 {
     fc_desc_id_t desc_id;
 
-    const fc_cmd_s *cmd = fc_command_id_to_command(cmd_id);
+    const fc_cmd_s *cmd = fc_command_lookup(cmd_id);
 
     desc_id = (fc_desc_id_t)cmd->desc_id;
     for (WORD steps = 0U; (desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (steps < FC_DESCRIPTOR_POOL_DEPTH); steps++)
     {
-        const fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (fc_cw_status_has_unc(descriptor->status) != false)
         {
@@ -1179,7 +1171,7 @@ BOOL fc_get_cmd_has_unc(fc_cmd_id_t cmd_id)
  * @param cmd_id 池内命令 ID
  * @return 命令指针
  */
-fc_cmd_s *fc_command_id_to_command(fc_cmd_id_t cmd_id)
+fc_cmd_s *fc_command_lookup(fc_cmd_id_t cmd_id)
 {
     // cmd_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
     // 任何调用者都不可能传入越界值——越界即不变量破坏，留现场。
@@ -1194,7 +1186,7 @@ fc_cmd_s *fc_command_id_to_command(fc_cmd_id_t cmd_id)
  * @param descriptor_id 池内描述符 ID
  * @return 描述符指针
  */
-fc_desc_s *fc_descriptor_id_to_descriptor(fc_desc_id_t descriptor_id)
+fc_desc_s *fc_descriptor_lookup(fc_desc_id_t descriptor_id)
 {
     // descriptor_id 只来自命令 desc 链（configure_descriptors 铸出），恒在池内。
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);

@@ -380,7 +380,7 @@ static BYTE verify_cw_status_erased(const fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
         munit_assert_not_null(desc);
 
@@ -550,7 +550,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     /* Step 4: READ_ONFI_SIGNATURE (90h + 地址 20h) — 与 Step 3 的 EC 路径**同名不同路**：
      * Step 3 走 ECh、有 desc 链、字节落 USER 缓冲；本步走 90h、**无 desc 链**（has_data = 0
      * ⇒ cw_bitmap = 0 走短路分支）、4 字节经控制器侧暂存 g_fc_return_staging 落 CQ 的 param。
-     * 列地址 0x20 由 NAND 侧 req_onfi_signature 硬编码（手册 Figure 27）。 */
+     * 列地址 0x20 由 NAND 侧 fc_nand_dispatch_req_onfi_signature 硬编码（手册 Figure 27）。 */
     {
         fc_cmd_s       *cmd        = test_cmd_build(&s_l3_zero_addr, 0U, 0U, L3_CFG(s_l3_cfg_read_onfi_signature, FC_CRC_ENABLE));
         fc_cmd_status_s completion = test_submit_wait(cmd);
@@ -1012,7 +1012,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *  test_fail_cw_attribution — 下发失败兜底的 per-CW 归因
  *
  *  背景：`fc_poll_fail_command` 是「请求构建 / NAND 提交失败」的唯一兜底：合成一条
- *  NOT_READY 完成项，按命令的 **flat CW 集合**写 FAIL 位，再由 `fc_complete_from_nand`
+ *  NOT_READY 完成项，按命令的 **flat CW 集合**写 FAIL 位，再由 `fc_nand_completion_finish`
  *  回填到每条 desc。兜底只写 `cw_status[0]` 时，plane1 / CW>0 的命令失败位会落空、
  *  被完成回填静默丢弃。
  *
@@ -1090,7 +1090,7 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
         completion = l3_submit_with_disarmed_engine(cmd);
 
         munit_assert_uint32(completion.status & FC_CMD_STATUS_NAND_FAIL, !=, 0U);
-        munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, cw_bitmap);
+        munit_assert_uint32(fc_cmd_cw_bitmap_get(cmd->cmd_id), ==, cw_bitmap);
         munit_assert_uint8(test_cw_count(cmd), ==, (PLANE_NUM * CW_NUM));
 
         for (BYTE i = 0U; i < test_cw_count(cmd); i++)
@@ -1117,7 +1117,7 @@ static MunitResult test_fail_cw_attribution(const MunitParameter params[], void 
         cmd        = test_cmd_build(&addr, 0U, 0U, &config);
         completion = l3_submit_with_disarmed_engine(cmd);
 
-        munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, 0U);
+        munit_assert_uint32(fc_cmd_cw_bitmap_get(cmd->cmd_id), ==, 0U);
         munit_assert_uint32(completion.status & FC_CMD_STATUS_NAND_FAIL, !=, 0U);
 
         test_trace_summary("fail_cw ②: 无 desc 擦除 status=0x%hhX -> NAND_FAIL", completion.status);
@@ -1174,7 +1174,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     test_read_block(block, TEST_PLANE_BM(plane), L3_CFG(s_l3_cfg_normal_read_page_with_data_out, FC_CRC_ENABLE), NULL);
 
     /* Step 4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
-     * ⚠ 这两个 op 都**不是** page read/write（fc_is_page_read / fc_is_page_write 都不含），
+     * ⚠ 这两个 op 都**不是** page read/write（`nand_operation_is_page_read` / `nand_operation_is_page_write` 都不含），
      *   数据路径不介入：搬的是 NAND 内部缓存，页内 META 原样跟着走。
      *   故目标页读回时，源页写入时铸的 META（源页 PBA）仍然自洽 —— 见 Step 5。
      *   这两条命令的 meta 不参与编解码（无数据路径），填源页 PBA 只为表达「搬的是这一页」。 */
@@ -2298,7 +2298,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
                             const char         *sent_tag   = (sent != 0U) ? "sub  " : "retry";
                             const char         *polled_tag = (polled != 0U) ? " +poll" : "      ";
 
-                            fc_get_resource_stats(&rs);
+                            fc_resource_stats_get(&rs);
                             test_trace_detail("p%02hu %s%s submitted=%lu drained=%lu | cmd=%hu/%u desc=%hu/%u buf=%hu/%u sq=%hu cq=%hu", page, sent_tag, polled_tag, submitted, drained, rs.command_used, FC_COMMAND_POOL_DEPTH, rs.descriptor_used, FC_DESCRIPTOR_POOL_DEPTH, rs.buffer_used, FC_BUFFER_POOL_DEPTH, rs.sq_used, rs.cq_used);
                         }
 
@@ -2324,7 +2324,7 @@ static void l3_stress_stream(BYTE operation, WORD block)
     {
         fc_resource_stats_s rs;
 
-        fc_get_resource_stats(&rs);
+        fc_resource_stats_get(&rs);
         test_trace_summary("phase done: submitted=%lu drained=%lu | cmd=%hu desc=%hu buf=%hu sq=%hu cq=%hu (应为全 0)", submitted, drained, rs.command_used, rs.descriptor_used, rs.buffer_used, rs.sq_used, rs.cq_used);
     }
 }
@@ -2360,7 +2360,7 @@ static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data
 /*************************************************************************
  *  buffer 归属位域：谁申请 / 谁释放
  *
- *  判据 = fc_get_resource_stats().buffer_used 的**增量**：建链 +1、归还回基线。
+ *  判据 = fc_resource_stats_get().buffer_used 的**增量**：建链 +1、归还回基线。
  *  载体 = OP_READ_ID 单 CW 链（单 plane、has_data=1、无需建块，同 init_sequence Step 2）。
  *  四档全覆盖：
  *    00 FC 申请 / 上层释放（默认，既有生产行为，必须逐字不变）
@@ -2376,7 +2376,7 @@ static WORD l3_buf_used(void)
 {
     fc_resource_stats_s stats;
 
-    fc_get_resource_stats(&stats);
+    fc_resource_stats_get(&stats);
     return stats.buffer_used;
 }
 
@@ -2602,7 +2602,7 @@ static MunitResult test_sparse_data_out_read(const MunitParameter params[], void
     const fc_cmd_status_s completion = test_submit_wait(cmd);
 
     munit_assert_uint32(completion.status & FC_CMD_STATUS_ERROR_MASK, ==, 0U);
-    munit_assert_uint32(fc_get_cmd_cw_bitmap(cmd->cmd_id), ==, cw_bitmap);
+    munit_assert_uint32(fc_cmd_cw_bitmap_get(cmd->cmd_id), ==, cw_bitmap);
     munit_assert_uint8(test_cw_count(cmd), ==, 2U);
 
     /* 直接验收读链：desc 必须正好是选中的 CW1/CW2，且 USER 编码该 desc 的 PAA。
@@ -2709,9 +2709,9 @@ static MunitResult test_engine_fail_all_cws(const MunitParameter params[], void 
 
     BYTE checked = 0U;
 
-    for (fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id; did != FC_DESC_ID_INVALID; did = (fc_desc_id_t)fc_descriptor_id_to_descriptor(did)->next_id)
+    for (fc_desc_id_t did = (fc_desc_id_t)cmd->desc_id; did != FC_DESC_ID_INVALID; did = (fc_desc_id_t)fc_descriptor_lookup(did)->next_id)
     {
-        const fc_desc_s *desc = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *desc = fc_descriptor_lookup(did);
 
         munit_assert_true(fc_cw_status_has_error(desc->status));
         checked++;
@@ -2864,7 +2864,7 @@ static MunitResult test_engine_fail_random_read(const MunitParameter params[], v
 /* timing_rollback_on_set_timing_fail — 高速切换时 set_timing 失败必须回滚低速（DP-24）。
  *
  * 覆盖：`FI_NAND_TIMING_FAIL` 让 `dev->set_timing(Mode5)` 失败。
- * 判据：`fc_nand_enable_high_speed()` 返回错误；rollback 后 `nand_get_timing_mode()==0`，
+ * 判据：`fc_nand_enable_high_speed()` 返回错误；rollback 后 `nand_timing_mode_get()==0`，
  *       后续 IO 仍走低速。 */
 static MunitResult test_timing_rollback_on_set_timing_fail(const MunitParameter params[], void *data)
 {
@@ -2880,7 +2880,7 @@ static MunitResult test_timing_rollback_on_set_timing_fail(const MunitParameter 
 
     BYTE mode = 0xFFU;
 
-    munit_assert_int(nand_get_timing_mode(0U, 0U, &mode), ==, NAND_RESULT_OK);
+    munit_assert_int(nand_timing_mode_get(0U, 0U, &mode), ==, NAND_RESULT_OK);
     munit_assert_uint8(mode, ==, 0U);
 
     /* 用例刻意把器件留在 Mode 0（回滚语义）。必须在返回前恢复高速度：
@@ -2889,7 +2889,7 @@ static MunitResult test_timing_rollback_on_set_timing_fail(const MunitParameter 
      * 表现为「全量末尾的 speed 比单测慢」。 */
     fi_reset();
     munit_assert_int(fc_nand_enable_high_speed(0U), ==, NAND_RESULT_OK);
-    munit_assert_int(nand_get_timing_mode(0U, 0U, &mode), ==, NAND_RESULT_OK);
+    munit_assert_int(nand_timing_mode_get(0U, 0U, &mode), ==, NAND_RESULT_OK);
     munit_assert_uint8(mode, ==, 5U);
 
     return MUNIT_OK;

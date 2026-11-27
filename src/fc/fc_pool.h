@@ -44,62 +44,41 @@ extern "C"
     } fc_buf_state_e;
 
     /**
-     * @brief 初始化三池本体、簿记数组与空闲链表（不碰队列/调度器/硬件）。
-     *
-     * @param controller FC 控制器。
+     * @brief 提交前的一次性 desc 链完整校验（归属 + 坐标 + 唯一性 + buffer +
+     *        同 plane 行一致 + multi-plane 覆盖）。
+     * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
+     * @note 不通过 = 归属不符 / 越段 / CW 重复 / buffer 未占用 / 同 plane 行地址不一致 /
+     *       数据命令 multi-plane 覆盖不全 / multi_plane 越界 / cmd->paa 的 plane 越界。
      */
-    void fc_pool_init(fc_ctl_s *controller);
+    BOOL fc_pool_chain_check(const fc_ctl_s *controller, fc_cmd_id_t cmd_id);
 
     /* 池状态 / 归属数组由 fc.c / fc_pool.c 在已验证的下标上直接读；
      * 状态写走下面的唯一 setter，不提供单字段 getter。 */
 
     /**
      * @brief 命令状态唯一 setter：只允许状态机定义的转移。
-     *
-     * @param controller FC 控制器。
-     * @param cmd_id     命令池槽位号。
-     * @param next       目标状态。
-     *
      * @note 非法转移：debug 停机；release 拒绝写入（ASSERT_REJECT_VOID），避免静默
      *       破坏状态机。本函数是状态字段的唯一写点，调用方不重复判定同一转移。
      */
     void fc_pool_command_state_set(fc_ctl_s *controller, fc_cmd_id_t cmd_id, fc_cmd_state_e next);
 
     /**
-     * @brief 提交前的一次性 desc 链完整校验（归属 + 坐标 + 唯一性 + buffer +
-     *        同 plane 行一致 + multi-plane 覆盖）。
-     *
-     * @param controller FC 控制器。
-     * @param cmd_id     命令 ID。
-     *
-     * @return true 链完整；false 归属不符 / 越段 / CW 重复 / buffer 未占用 /
-     *         同 plane 行地址不一致 / **数据命令** multi-plane 覆盖不全 /
-     *         multi_plane 越界 / cmd->paa 的 plane 越界。
-     *
-     * @note 由 fc_submit / fc_submit_batch 无条件调用（debug ASSERT + release 拒绝）。
-     */
-    BOOL fc_pool_chain_validate(const fc_ctl_s *controller, fc_cmd_id_t cmd_id);
-
-    /**
      * @brief 沿命令的 desc 链归还全部 buffer，并把各 desc 的 buffer_id 抹成 INVALID。
-     *
-     * @param controller FC 控制器。
-     * @param cmd_id     命令 ID。
-     *
      * @note 只动 buffer，不动 desc 链、不动命令槽位；幂等（已 INVALID 的跳过）。
      */
     void fc_pool_command_release_buffers(fc_ctl_s *controller, fc_cmd_id_t cmd_id);
 
     /**
      * @brief 释放命令：沿链释放 desc+buffer，命令槽位回 FREE（FREE 幂等）。
-     *
-     * @param controller FC 控制器。
-     * @param cmd_id     命令 ID。
-     *
      * @note ID 越界、或状态是 QUEUED/ACTIVE 时，release 下也拒绝，
      *       不释放任何资源（守卫在碰 desc 链/buffer 之前）。
      */
     void fc_pool_command_release(fc_ctl_s *controller, fc_cmd_id_t cmd_id);
+
+    /**
+     * @brief 初始化三池本体、簿记数组与空闲链表（不碰队列/调度器/硬件）。
+     */
+    void fc_pool_init(fc_ctl_s *controller);
 
 #ifdef __cplusplus
 }

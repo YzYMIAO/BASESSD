@@ -23,7 +23,7 @@
  *   2) 读路径：FTL 在 ECC 失败后调用 fc_data_path_raid_recover()，
  *      由本引擎完成 XOR 重建，再由数据路径做 ECC 重试与解扰。
  *
- * 设计文档：docs/design/fc_nand_design.md §5.1
+ * 设计文档：docs/design/fc_nand_design.md §3.6
  * ============================================================================
  */
 

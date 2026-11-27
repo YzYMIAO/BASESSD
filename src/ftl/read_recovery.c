@@ -86,7 +86,7 @@ static BOOL rr_desc_failure_is_crc_only(const fc_cmd_s *cmd)
 
     while (did != FC_DESC_ID_INVALID)
     {
-        const fc_desc_s *d = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *d = fc_descriptor_lookup(did);
 
         if (d == NULL)
         {
@@ -853,7 +853,7 @@ void ftl_read_recovery_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *comple
     (void)ftl;
 
     WORD      cmd_id = completion->cmd_id;
-    fc_cmd_s *cmd    = fc_command_id_to_command(cmd_id);
+    fc_cmd_s *cmd    = fc_command_lookup(cmd_id);
 
     // ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
     // ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。

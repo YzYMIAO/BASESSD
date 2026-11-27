@@ -233,7 +233,7 @@ fc_cmd_status_s test_submit_wait(fc_cmd_s *cmd)
     return completion;
 }
 
-/** 读路径收尾：FC 已在 fc_complete_from_nand 里跑过 process_read（原地解码），
+/** 读路径收尾：FC 已在 fc_nand_completion_finish 里跑过 process_read（原地解码），
  * 此刻 desc 的 USER 区是明文——逐 desc 拷回 g_source_data 槽，供调用者校验。
  * 导出供**批量**路径使用：批量读要「先捕获、再校验、最后才 release」，
  * 必须在提交-抽取循环里单独调用它（页 helper 内部收尾也走这里）。 */
@@ -244,7 +244,7 @@ void test_capture_cmd(const fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         munit_assert_not_null(desc);
 
         BYTE *slot = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
@@ -316,7 +316,7 @@ void fc_ut_assert_clean(void)
     fc_resource_stats_s rs;
 
     memset(&rs, 0, sizeof(rs));
-    fc_get_resource_stats(&rs);
+    fc_resource_stats_get(&rs);
 
     munit_assert_uint16(rs.sq_used, ==, 0U);
     munit_assert_uint16(rs.hsq_used, ==, 0U);
@@ -395,7 +395,7 @@ fc_cmd_s *test_cmd_try_build(const nand_addr_s *addr, DWORD cw_bitmap, DWORD met
     is_multi = test_is_multi_op((BYTE)config->operation);
 
     /* multi-plane 命令的位图必须**每个 plane 都被覆盖到**：未覆盖的 plane 会被
-     * fc_build_request_data_planes 补一条同行回退地址，写路径静默给该 plane 编一页
+     * fc_request_data_planes_build 补一条同行回退地址，写路径静默给该 plane 编一页
      * 全 0xFF（见 fc_test_common.h「三」）。cw_bitmap == 0 是无链命令（ERASE 等），跳过。 */
     if ((is_multi != 0U) && (cw_bitmap != 0U))
     {
@@ -471,7 +471,7 @@ fc_cmd_status_s test_erase_block(WORD block_index, BYTE plane_bitmap, const fc_c
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
     {
-        /* multi-plane 擦除按定义就擦两个 plane（fc_build_dispatch_request 的
+        /* multi-plane 擦除按定义就擦两个 plane（fc_dispatch_request_build 的
          * OP_ERASE_BLOCK_MULTI_PLANE 分支无条件填 plane_paa[0]/[1]），半掩码
          * 表达不出别的意思 ⇒ 自洽性检查。 */
         ASSERT(plane_bitmap == TEST_PLANE_BM_ALL);
@@ -485,7 +485,7 @@ fc_cmd_status_s test_erase_block(WORD block_index, BYTE plane_bitmap, const fc_c
      * 的短路分支，desc_id 保持 INVALID，不建链、不申请 buffer。meta 同理不参与
      * （无数据路径 ⇒ 无 encode / 无 Pass 4）。
      * 请求位图在 NAND 侧是**合法空集**：FC 的 ERASE 分支只填 plane_paa[]、
-     * 不伪造 CW0 位，completion_all_cws 的空集分支写 cw_status[0] 兜住成败。
+     * 不伪造 CW0 位，fc_nand_dispatch_completion_all_cws 的空集分支写 cw_status[0] 兜住成败。
      * multi_plane 由 test_cmd_build 按 operation 派生——它是「本命令跨几个 plane」的
      * 真实属性，填它不为任何读者，只为让命令的声明几何不撒谎。 */
     memset(&addr, 0, sizeof(addr));
@@ -1152,7 +1152,7 @@ void test_load_page(WORD block_index, BYTE plane_bitmap, WORD page_index, const 
     is_multi = test_is_multi_op((BYTE)config->operation);
     if (is_multi != 0U)
     {
-        /* 多 plane 加载按定义搬两个 plane（fc_build_dispatch_request 的 op 29 分支无条件填
+        /* 多 plane 加载按定义搬两个 plane（fc_dispatch_request_build 的 op 29 分支无条件填
          * plane_paa[0]/[1]），半掩码表达不出别的意思 ⇒ 自洽性检查。 */
         ASSERT(plane_bitmap == TEST_PLANE_BM_ALL);
     }
@@ -1163,7 +1163,7 @@ void test_load_page(WORD block_index, BYTE plane_bitmap, WORD page_index, const 
 
     /* **不带 desc 链**：op 33/29 在 op 表里 has_data = 0（host 侧无数据搬运）⇒ 传 cw_bitmap = 0，
      * ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。行地址由 FC 从 command->paa 填进
-     * plane_paa[]（fc_build_dispatch_request 的「无 desc 加载」分支）。meta 不参与（无数据路径）。
+     * plane_paa[]（fc_dispatch_request_build 的「无 desc 加载」分支）。meta 不参与（无数据路径）。
      * 提交后器件把目标页搬进页缓冲、**不输出到总线**——数据随后由 test_random_data_read 取回。 */
     memset(&addr, 0, sizeof(addr));
     addr.block = block_index;
@@ -1221,7 +1221,7 @@ void test_random_data_read(WORD block_index, BYTE plane_bitmap, WORD page_index,
     addr.page  = page_index;
 
     /* 整段掩码 ⇒ 单条命令由 CW 链自动遍历掩码内所有 CW（nand_dispatch.c 的 fetch 推进：
-     * 每完成一个取数 op 就推进到下一个置位）。op 8/41 都在 fc_is_page_read 里 ⇒ FC 跑
+     * 每完成一个取数 op 就推进到下一个置位）。op 8/41 都在 `nand_operation_is_page_read` 里 ⇒ FC 跑
      * process_read，USER 区回来即明文，逐 CW PAA 校验。 */
     cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), pba_from_addr(&addr), config);
 
@@ -1396,7 +1396,7 @@ void test_fill_user_paa(fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         munit_assert_not_null(desc);
 
         BYTE *slot = test_source_slot(paa_to_plane(desc->paa), paa_to_cw(desc->paa));
@@ -1418,7 +1418,7 @@ void test_memset_read_buffer(fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         munit_assert_not_null(desc);
 
         BYTE *user = fc_buffer_get_user_data(desc->buffer_id);
@@ -1509,7 +1509,7 @@ void test_verify_erased(const fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         munit_assert_not_null(desc);
 
         BYTE *buf = fc_buffer_get_user_data(desc->buffer_id);
@@ -1537,7 +1537,7 @@ BYTE test_verify_cw_status_all_success(const fc_cmd_s *cmd)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (idx < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         munit_assert_not_null(desc);
 
         if (fc_cw_status_is_success(desc->status) == 0U)
@@ -1568,7 +1568,7 @@ fc_desc_s *test_cw_desc(const fc_cmd_s *cmd, BYTE idx)
 
     for (BYTE i = 0U; (desc_id != FC_DESC_ID_INVALID) && (i < CW_TOTAL_MAX); i++)
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
         if (desc == NULL)
         {
             return NULL;
@@ -1616,7 +1616,7 @@ BYTE test_collect_chain(const fc_cmd_s *cmd, BYTE *plane_out, BYTE *cw_out)
 
     while ((desc_id != FC_DESC_ID_INVALID) && (count < CW_TOTAL_MAX))
     {
-        fc_desc_s *desc = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *desc = fc_descriptor_lookup(desc_id);
 
         munit_assert_not_null(desc);
 

@@ -1198,7 +1198,7 @@ void ftl_checkpoint_op_callback(ftl_ctx_s *ftl, const fc_cmd_status_s *completio
     // 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。
     (void)ftl;
     cp_handle_s *h   = (cp_handle_s *)ctx;
-    fc_cmd_s    *cmd = fc_command_id_to_command(completion->cmd_id);
+    fc_cmd_s    *cmd = fc_command_lookup(completion->cmd_id);
 
     // 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
     // 二者必须一致——不一致说明派发路由错了。
@@ -1600,7 +1600,7 @@ static BOOL cp_job_stall(cp_handle_s *h)
             fc_resource_stats_s rs;
             WORD                opc[FTL_OP_COUNT];
 
-            (void)fc_get_resource_stats(&rs);
+            (void)fc_resource_stats_get(&rs);
             ftl_op_req_counts(opc);
             LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%d free=%hu cmd=%hu buf=%hu\r\n", (now_ms - h->submit_deadline.at) + FTL_SUBMIT_TIMEOUT_MS, h->phase, h->alloc->free_count, rs.command_used, rs.buffer_used);
             LOGW(LOG_TAG_CP "held ops: host=%hu l2p=%hu cp=%hu md=%hu gc=%hu wl=%hu\r\n", opc[FTL_OP_HOST_IO], opc[FTL_OP_L2P], opc[FTL_OP_CHECKPOINT], opc[FTL_OP_METADATA], opc[FTL_OP_GC], opc[FTL_OP_WL]);

@@ -291,7 +291,7 @@ ftl_status_e ftl_cmd_write_data(fc_cmd_s *cmd, const void *data, DWORD length)
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (descriptor->buffer_id == FC_BUF_ID_INVALID)
         {
@@ -345,7 +345,7 @@ ftl_status_e ftl_cmd_write_data_cw(fc_cmd_s *cmd, const BYTE *page_buf, DWORD cw
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         // CW 号取 desc 自带的 cw_index；plane 必须从 desc 的 PAA 解出——
         // cw_bitmap 是 **flat 绝对编号**（bit = plane×CW_NUM + cw），
@@ -400,7 +400,7 @@ ftl_status_e ftl_cmd_read_data(fc_cmd_s *cmd, void *buffer, DWORD length)
 
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining > 0U))
     {
-        fc_desc_s *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        fc_desc_s *descriptor = fc_descriptor_lookup(desc_id);
 
         if (descriptor->buffer_id == FC_BUF_ID_INVALID)
         {
@@ -441,7 +441,7 @@ BYTE ftl_cmd_block_ecc_collect(const fc_cmd_s *cmd, ftl_cmd_block_ecc_s *out, BY
 
     while (did < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        const fc_desc_s *d   = fc_descriptor_id_to_descriptor(did);
+        const fc_desc_s *d   = fc_descriptor_lookup(did);
         const DWORD      pba = paa_to_pba(cmd->ch, cmd->ce, d->paa);
         const WORD       gb  = ftl_pba_gblock(pba);
 
@@ -1406,7 +1406,7 @@ ftl_status_e ftl_sync_read_page_raw(DWORD pba, void *buffer)
     // 会让调用者看到空洞，故必须报错。
     for (BYTE cw = 0U; cw < CW_NUM; cw++)
     {
-        const BYTE *src = fc_get_cmd_data_ptr(cmd->cmd_id, cw);
+        const BYTE *src = fc_cmd_data_ptr_get(cmd->cmd_id, cw);
 
         if (src == NULL)
         {
@@ -1600,7 +1600,7 @@ ftl_status_e ftl_page_blank_check(DWORD pba, BOOL *blank)
     }
 
     // 不看 completion.status：擦除页在 FC 里不是错误位（FC_CW_STATUS_EMPTY）。
-    *blank = fc_get_cmd_all_cw_empty(cmd->cmd_id);
+    *blank = fc_cmd_all_cw_empty_get(cmd->cmd_id);
 
     (void)fc_command_release(cmd->cmd_id);
     return FTL_OK;

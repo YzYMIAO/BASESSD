@@ -1,3 +1,18 @@
+// fc_ecc_engine.c — ECC 统一入口（BCH / QC-LDPC 按编译宏切换）+ QC-LDPC 实现
+//
+// FC_ECC_ALGO 控制编译使用 BCH 或 LDPC。
+//
+// BCH（默认）：
+// CW 布局：[META:4][CRC:4][USER:512][PARITY:8] = 528B
+// DATA = META+CRC+USER = 520B, PARITY = 8B
+// BCH(m=13, t=4)：52bit parity → 7B，8B 够用
+// 编码：520B data → 8B parity
+// 解码：520B data + 8B recv_parity → 检测/纠正
+//
+// LDPC（可选，FC_ECC_ALGO_LDPC 编译）：
+// 同上 CW 布局，但不使用 BCH 算法，而是使用 QC-LDPC 硬判决 Bit-flipping。
+// 注意：码率 0.985 下 LDPC 纠错能力约 t=1~2，低于 BCH t=4。
+// LDPC 的真正优势在低码率（r<0.9）和软判决场景。
 
 #include "fc_ecc_engine.h"
 
@@ -8,6 +23,7 @@
 
 #include <stddef.h>
 #include <string.h>
+
 // 全局 BCH / QC-LDPC 引擎实例（单例，首次使用惰性初始化）
 static fc_bch_control_s *g_bch = NULL;
 
@@ -47,47 +63,6 @@ typedef struct FC_LDPC_QC_S
 
 static fc_ldpc_qc_s *s_qc = NULL;
 
-static fc_ldpc_qc_s *fc_ldpc_qc_init(BYTE max_iter);
-static void          fc_ldpc_qc_encode(const BYTE *data_in, BYTE *data_out);
-static fc_status_e   fc_ldpc_qc_decode(fc_ldpc_qc_s *qc, BYTE *data);
-
-#endif
-
-// fc_ecc_engine.c — ECC 统一入口（BCH / QC-LDPC 按编译宏切换）+ QC-LDPC 实现
-//
-// FC_ECC_ALGO 控制编译使用 BCH 或 LDPC。
-//
-// BCH（默认）：
-// CW 布局：[META:4][CRC:4][USER:512][PARITY:8] = 528B
-// DATA = META+CRC+USER = 520B, PARITY = 8B
-// BCH(m=13, t=4)：52bit parity → 7B，8B 够用
-// 编码：520B data → 8B parity
-// 解码：520B data + 8B recv_parity → 检测/纠正
-//
-// LDPC（可选，FC_ECC_ALGO_LDPC 编译）：
-// 同上 CW 布局，但不使用 BCH 算法，而是使用 QC-LDPC 硬判决 Bit-flipping。
-// 注意：码率 0.985 下 LDPC 纠错能力约 t=1~2，低于 BCH t=4。
-// LDPC 的真正优势在低码率（r<0.9）和软判决场景。
-
-#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
-/**
- * @brief 惰性初始化 QC-LDPC 引擎（最大迭代 15）
- *
- * @return 1 = 引擎可用
- *         0 = 初始化失败
- */
-static BYTE fc_ecc_init_ldpc(void)
-{
-    if (g_qc == NULL)
-    {
-        g_qc = fc_ldpc_qc_init(15U);
-    }
-    return (g_qc != NULL) ? 1U : 0U;
-}
-#endif
-
-#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
-
 /* ── 伪随机数生成器（固定种子，保证每次编译生成相同 H） ────── */
 
 /**
@@ -96,7 +71,7 @@ static BYTE fc_ecc_init_ldpc(void)
  * @param state 随机数状态（就地更新）
  * @return 本次生成的 32 位随机值（等于更新后的 state）
  */
-static DWORD lcg_rand(DWORD *state)
+static DWORD fc_ldpc_lcg_rand(DWORD *state)
 {
     *state = *state * 1103515245U + 12345U;
     return *state;
@@ -107,7 +82,7 @@ static DWORD lcg_rand(DWORD *state)
 /**
  * @brief 构建基矩阵：数据列随机指派 3 行 + 随机移位；校验列阶梯结构
  */
-static void qc_build_base(void)
+static void fc_ldpc_qc_build_base(void)
 {
     DWORD seed = 0x20250921UL;
     DWORD r, c;
@@ -129,14 +104,14 @@ static void qc_build_base(void)
 
             for (attempt = 0; attempt < 100U; attempt++)
             {
-                row = lcg_rand(&seed) % QC_BASE_R;
+                row = fc_ldpc_lcg_rand(&seed) % QC_BASE_R;
                 if (((used_rows >> row) & 1U) == 0U)
                 {
                     break;
                 }
             }
             used_rows |= (1U << row);
-            shift            = lcg_rand(&seed) % QC_Z;
+            shift            = fc_ldpc_lcg_rand(&seed) % QC_Z;
             g_h_base[row][c] = (int8_t)shift;
         }
     }
@@ -152,7 +127,7 @@ static void qc_build_base(void)
 /**
  * @brief 从基矩阵展开链接：每个子块条目展开成 Z 个变量↔校验连接
  */
-static void qc_expand_links(void)
+static void fc_ldpc_qc_expand_links(void)
 {
     DWORD r, c, s;
     DWORD col_pos[QC_N];
@@ -381,21 +356,31 @@ static fc_ldpc_qc_s *fc_ldpc_qc_init(BYTE max_iter)
     g_qc.initialized = 1U;
     g_qc.max_iter    = (max_iter > 0U) ? max_iter : 15U;
 
-    qc_build_base();
-    qc_expand_links();
+    fc_ldpc_qc_build_base();
+    fc_ldpc_qc_expand_links();
 
     g_initialized = true;
     return &g_qc;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+ * 公共入口
+ * ═══════════════════════════════════════════════════════════════ */
+
 /**
- * @brief 释放 QC-LDPC 引擎
+ * @brief 惰性初始化 QC-LDPC 引擎（最大迭代 15）
  *
- * 查表为全局静态数组、句柄为静态单例，无动态资源可回收，本函数为空操作；
- * 保留该接口以对齐其他 ECC 引擎的 init/free 生命周期。
- *
- * @param qc 引擎句柄（未使用）
+ * @return 1 = 引擎可用
+ *         0 = 初始化失败
  */
+static BYTE fc_ecc_init_ldpc(void)
+{
+    if (g_qc == NULL)
+    {
+        g_qc = fc_ldpc_qc_init(15U);
+    }
+    return (g_qc != NULL) ? 1U : 0U;
+}
 
 #endif /* FC_ECC_ALGO_LDPC */
 
