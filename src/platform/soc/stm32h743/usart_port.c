@@ -10,6 +10,7 @@
 #include "usart_port.h"
 
 #include "dma.h"
+#include "dma_port.h" /* g_dma_handle */
 #include "usart.h"
 
 #include <stdint.h>
@@ -17,8 +18,9 @@
 
 UART_HandleTypeDef g_uart1_handle = {0};
 
-/* UART TX DMA 句柄定义在 dma.c；抽象 dma.h 只暴露裸签名，故在此本地声明。 */
-extern DMA_HandleTypeDef g_dma_handle;
+/* 由 HAL_UART_MspInit 记录时钟配置结果：MspInit 是 void 回调，失败只能经本变量
+ * 回传给 usart_port_hw_init，避免 USART1 内核时钟配置失败被静默吞掉。 */
+static BYTE s_msp_clk_failed;
 
 static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle);
 
@@ -29,18 +31,21 @@ static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle);
 static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle)
 {
     (void)dma_handle;
-    uart_tx_dma_complete_handler();
+    usart_tx_dma_complete_handler();
 }
 
 static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle)
 {
     (void)dma_handle;
-    uart_tx_dma_error_handler();
+    usart_tx_dma_error_handler();
 }
 
-BYTE usart_port_hw_init(DWORD baudrate)
+func_status_e usart_port_hw_init(DWORD baudrate, BYTE *dma_ready)
 {
-    BYTE dma_ready;
+    BYTE dma_ok;
+
+    *dma_ready       = 0U;
+    s_msp_clk_failed = 0U;
 
     g_uart1_handle.Instance                    = USART_UX;
     g_uart1_handle.Init.BaudRate               = baudrate;
@@ -53,10 +58,13 @@ BYTE usart_port_hw_init(DWORD baudrate)
     g_uart1_handle.Init.OneBitSampling         = UART_ONE_BIT_SAMPLE_DISABLE;
     g_uart1_handle.Init.ClockPrescaler         = UART_PRESCALER_DIV1;
     g_uart1_handle.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-    (void)HAL_UART_Init(&g_uart1_handle);
+    if ((HAL_UART_Init(&g_uart1_handle) != HAL_OK) || (s_msp_clk_failed != 0U))
+    {
+        return FUNC_STATUS_ERROR;
+    }
 
-    dma_ready = (uart_tx_dma_init() == FUNC_STATUS_SUCCESS) ? 1U : 0U;
-    if (dma_ready != 0U)
+    dma_ok = (dma_usart_tx_init() == FUNC_STATUS_SUCCESS) ? 1U : 0U;
+    if (dma_ok != 0U)
     {
         g_dma_handle.XferCpltCallback  = usart_tx_dma_complete_cb;
         g_dma_handle.XferErrorCallback = usart_tx_dma_error_cb;
@@ -70,7 +78,8 @@ BYTE usart_port_hw_init(DWORD baudrate)
     USART_UX->CR1 |= USART_CR1_RXNEIE_RXFNEIE | USART_CR1_PEIE;
     USART_UX->CR3 |= USART_CR3_EIE;
 
-    return dma_ready;
+    *dma_ready = dma_ok;
+    return FUNC_STATUS_SUCCESS;
 }
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
@@ -89,7 +98,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     rcc_periph_clk_init_struct.PeriphClockSelection  = RCC_PERIPHCLK_USART1;
     /* USART1/6 时钟源=PCLK2=100 MHz；UART 波特率由该内核时钟分频得到。 */
     rcc_periph_clk_init_struct.Usart16ClockSelection = RCC_USART16CLKSOURCE_PCLK2;
-    (void)HAL_RCCEx_PeriphCLKConfig(&rcc_periph_clk_init_struct);
+    s_msp_clk_failed                                 = (HAL_RCCEx_PeriphCLKConfig(&rcc_periph_clk_init_struct) != HAL_OK) ? 1U : 0U;
 
     USART_UX_CLK_ENABLE();
     USART_TX_GPIO_CLK_ENABLE();
@@ -122,7 +131,7 @@ void USART1_IRQHandler(void)
     OSIntEnter();
 #endif
 
-    /* Keep the IRQ bounded: it only drains/fills FIFOs and records errors. */
+    /* IRQ 保持有界：只抽干/填充 FIFO 并记录错误。 */
     usart_port_irq_handler();
 
 #if SYS_SUPPORT_OS
@@ -143,27 +152,27 @@ void usart_port_irq_handler(void)
      */
     if ((status & USART_ISR_PE) != 0U)
     {
-        error_kinds |= UART_RX_ERROR_PARITY;
+        error_kinds |= USART_RX_ERROR_PARITY;
         clear_flags |= USART_ICR_PECF;
     }
     if ((status & USART_ISR_FE) != 0U)
     {
-        error_kinds |= UART_RX_ERROR_FRAMING;
+        error_kinds |= USART_RX_ERROR_FRAMING;
         clear_flags |= USART_ICR_FECF;
     }
     if ((status & USART_ISR_NE) != 0U)
     {
-        error_kinds |= UART_RX_ERROR_NOISE;
+        error_kinds |= USART_RX_ERROR_NOISE;
         clear_flags |= USART_ICR_NECF;
     }
     if ((status & USART_ISR_ORE) != 0U)
     {
-        error_kinds |= UART_RX_ERROR_OVERRUN;
+        error_kinds |= USART_RX_ERROR_OVERRUN;
         clear_flags |= USART_ICR_ORECF;
     }
     if (error_kinds != 0U)
     {
-        uart_stats_count_rx_error(error_kinds);
+        usart_stats_count_rx_error(error_kinds);
     }
 
     /*
@@ -173,7 +182,7 @@ void usart_port_irq_handler(void)
     while ((USART_UX->ISR & USART_ISR_RXNE_RXFNE) != 0U)
     {
         byte = USART_UX->RDR;
-        uart_rx_ring_push(byte);
+        usart_rx_ring_push(byte);
     }
 
     if (clear_flags != 0U)
@@ -181,19 +190,19 @@ void usart_port_irq_handler(void)
         USART_UX->ICR = clear_flags;
     }
 
-    if ((uart_tx_dma_ready() == 0U) && ((USART_UX->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) && ((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U))
+    if ((usart_tx_dma_ready() == 0U) && ((USART_UX->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) && ((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U))
     {
         /*
          * TXE/TXFNF 表示 TDR 或 TX FIFO 尚有位置。连续填充可减少每个字符一次 IRQ 的开销；
          * 真正最后一位离开 TX 引脚需观察 TC，本日志路径不等待 TC。
          */
-        while (((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U) && (uart_tx_ring_pop(&byte) != 0U))
+        while (((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U) && (usart_tx_ring_pop(&byte) != 0U))
         {
             USART_UX->TDR = byte;
         }
 
         /* 软件队列为空时关闭 TXEIE，否则 TXE 始终为 1 会产生空转中断。 */
-        if (uart_tx_ring_is_empty() != 0U)
+        if (usart_tx_ring_is_empty() != 0U)
         {
             USART_UX->CR1 &= ~USART_CR1_TXEIE_TXFNFIE;
         }
@@ -204,7 +213,7 @@ void usart_port_irq_handler(void)
 
 BOOL usart_port_tx_dma_start(const BYTE *buffer, DWORD length)
 {
-    /* TX Ring is cacheable AXI SRAM; DMA must see bytes written by the CPU before it starts. */
+    /* TX 环位于可缓存 AXI SRAM；DMA 启动前必须让设备看到 CPU 写入的字节。 */
     SCB_CleanDCache_by_Addr((DWORD *)(uintptr_t)buffer, (int32_t)((length + 31U) & ~31U));
     if (HAL_DMA_Start_IT(&g_dma_handle, (uintptr_t)buffer, (DWORD)&USART_UX->TDR, length) != HAL_OK)
     {
@@ -267,7 +276,8 @@ DWORD usart_port_irq_state(void)
 
 void usart_port_irq_disable(void)
 {
-    __disable_irq();
+    /* 关中断一侧只置 PRIMASK；恢复一侧用调用方保存的旧值，保证可嵌套（H18）。 */
+    __set_PRIMASK(1U);
 }
 
 void usart_port_irq_restore(DWORD state)

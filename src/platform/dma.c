@@ -10,12 +10,12 @@
 
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
-func_status_e uart_tx_dma_init(void)
+func_status_e dma_usart_tx_init(void)
 {
-    return dma_port_uart_tx_init();
+    return dma_port_usart_tx_init();
 }
 
-void uart_tx_dma_irq_handler(void)
+void dma_usart_tx_irq_handler(void)
 {
-    dma_port_uart_tx_irq_handler();
+    dma_port_usart_tx_irq_handler();
 }

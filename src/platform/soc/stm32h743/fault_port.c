@@ -7,6 +7,8 @@
  *   ② 轮询控制台：直接操作 USART1/DMA1_Stream0 寄存器；
  *   ③ 故障/复位状态寄存器：SCB->SHCSR 使能、RCC->RSR 复位原因解码；
  *   ④ 把现场填成 fault_ctx_s 后转交共享层的 fault_report_and_halt()。
+ *
+ * implements fault.h（端口适配：本文件实现抽象头的 port 接口）。
  */
 
 #include "fault.h"
@@ -28,7 +30,7 @@
     }
 
 /* 控制台是否可用：USART 未使能时（极早期故障）只写记录、不打印。 */
-static volatile BYTE g_fault_console_ready;
+static volatile BYTE s_fault_console_ready;
 
 /* ────────────────────────────── 异常入口 ────────────────────────────── */
 
@@ -82,14 +84,14 @@ void fault_port_console_init(void)
     {
     }
 
-    g_fault_console_ready = ((FAULT_CONSOLE->CR1 & USART_CR1_UE) != 0U) ? 1U : 0U;
+    s_fault_console_ready = ((FAULT_CONSOLE->CR1 & USART_CR1_UE) != 0U) ? 1U : 0U;
 }
 
 void fault_port_putc(char character)
 {
     DWORD guard;
 
-    if (g_fault_console_ready == 0U)
+    if (s_fault_console_ready == 0U)
     {
         return;
     }
@@ -104,7 +106,7 @@ void fault_port_console_drain(void)
 {
     DWORD guard;
 
-    if (g_fault_console_ready == 0U)
+    if (s_fault_console_ready == 0U)
     {
         return;
     }

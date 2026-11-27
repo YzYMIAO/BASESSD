@@ -2,20 +2,22 @@
  * dma_port.c — stm32h743 DMA 适配层（USART1 TX）
  *
  * 只做硬件相关的事：DMA1_Stream0 句柄、HAL 配置、NVIC、IRQ 转发。
- * 共享 src/platform/dma.c 只转发 uart_tx_dma_* 到本文件。
+ * 共享 src/platform/dma.c 只转发 dma_usart_tx_* 到本文件。
  */
+
+#include "dma_port.h" /* g_dma_handle（__HAL_LINKDMA 需要） */
 
 #include "common.h"
 #include "dma.h"
-#include "sys_port.h"   /* DMA_HandleTypeDef / DMA1_Stream0 / HAL_DMA_* —— 抽象 dma.h 已不再传递 */
+#include "sys_port.h"   /* DMA1_Stream0 / HAL_DMA_* */
 #include "usart_port.h" /* g_uart1_handle（__HAL_LINKDMA 需要） */
 
 DMA_HandleTypeDef g_dma_handle;
 
 /* UART TX DMA 只初始化一次。重入 DeInit 会中止在飞传输：完成中断不再到来，
- * 共享 TX 状态机的 `active` 永远不会清零，环形缓冲写满后 uart_log_write()
+ * 共享 TX 状态机的 `active` 永远不会清零，环形缓冲写满后 usart_log_write()
  * 永久等在事件上 —— 控制台静默失效，且没有任何错误码暴露。 */
-static BYTE s_uart_tx_dma_initialized;
+static BYTE s_usart_tx_dma_initialized;
 
 /**
  * @brief 初始化 USART1 TX DMA（DMA1_Stream0）
@@ -25,9 +27,9 @@ static BYTE s_uart_tx_dma_initialized;
  * @return FUNC_STATUS_SUCCESS 已就绪（本次初始化成功或此前已成功）；
  *         FUNC_STATUS_ERROR HAL_DMA_DeInit/Init 失败。
  */
-func_status_e dma_port_uart_tx_init(void)
+func_status_e dma_port_usart_tx_init(void)
 {
-    if (s_uart_tx_dma_initialized != 0U)
+    if (s_usart_tx_dma_initialized != 0U)
     {
         return FUNC_STATUS_SUCCESS;
     }
@@ -54,11 +56,11 @@ func_status_e dma_port_uart_tx_init(void)
     __HAL_LINKDMA(&g_uart1_handle, hdmatx, g_dma_handle);
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 4U, 0U);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
-    s_uart_tx_dma_initialized = 1U;
+    s_usart_tx_dma_initialized = 1U;
     return FUNC_STATUS_SUCCESS;
 }
 
-void dma_port_uart_tx_irq_handler(void)
+void dma_port_usart_tx_irq_handler(void)
 {
     HAL_DMA_IRQHandler(&g_dma_handle);
 }
@@ -69,5 +71,5 @@ void dma_port_uart_tx_irq_handler(void)
  */
 void DMA1_Stream0_IRQHandler(void)
 {
-    uart_tx_dma_irq_handler();
+    dma_usart_tx_irq_handler();
 }

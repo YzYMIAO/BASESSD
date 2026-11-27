@@ -10,7 +10,7 @@ MODULE_SRCS += $(wildcard $(SRC_ROOT)/nand/*.c)
 MODULE_SRCS += $(NAND_DEVICE_SRC)
 MODULE_INCS += $(INC_ROOT)/nand
 MODULE_INCS += $(INC_ROOT)/nand/devices
-MODULE_INCS += $(INC_ROOT)/platform/stm32h743
+MODULE_INCS += $(INC_ROOT)/platform/soc/stm32h743
 
 # NAND 私有头（FMC / board internal）与 .c 同目录（src/nand/*.h）：只给 NAND 自己的对象。
 # `$(OBJ_DIR)/nand/%.o` 的 % 匹配 devices/…，器件驱动同样拿到这条 -I。

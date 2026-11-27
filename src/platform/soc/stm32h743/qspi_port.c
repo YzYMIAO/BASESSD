@@ -12,7 +12,7 @@
 
 #include <string.h>
 
-static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
+static QSPI_HandleTypeDef s_qspi_handle; /* QSPI句柄 */
 
 /**
  * @brief       等待状态标志
@@ -54,19 +54,19 @@ func_status_e qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
  */
 func_status_e qspi_port_init(void)
 {
-    g_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
-    g_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
+    s_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
+    s_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
                                                                              * 所以此处应该为2，QSPI频率就为200/(1+1)=100MHZ
                                                                              */
-    g_qspi_handle.Init.FifoThreshold      = 4;                              /* FIFO阈值为4个字节 */
-    g_qspi_handle.Init.SampleShifting     = QSPI_SAMPLE_SHIFTING_HALFCYCLE; /* 采样移位半个周期(DDR模式下,必须设置为0) */
-    g_qspi_handle.Init.FlashSize          = POSITION_VAL(0X2000000) - 1;    /* SPI FLASH大小，W25Q256大小为32M字节,2^25，所以取权值25-1=24 */
-    g_qspi_handle.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_3_CYCLE;      /* 片选高电平时间为3个时钟(10*3=30ns),即手册里面的tSHSL参数 */
-    g_qspi_handle.Init.ClockMode          = QSPI_CLOCK_MODE_3;              /* Mode3,空闲时CLK为高电平 */
-    g_qspi_handle.Init.FlashID            = QSPI_FLASH_ID_1;                /* 第一片flash */
-    g_qspi_handle.Init.DualFlash          = QSPI_DUALFLASH_DISABLE;         /* 禁止双闪存模式 */
+    s_qspi_handle.Init.FifoThreshold      = 4;                              /* FIFO阈值为4个字节 */
+    s_qspi_handle.Init.SampleShifting     = QSPI_SAMPLE_SHIFTING_HALFCYCLE; /* 采样移位半个周期(DDR模式下,必须设置为0) */
+    s_qspi_handle.Init.FlashSize          = POSITION_VAL(0X2000000) - 1;    /* SPI FLASH大小，W25Q256大小为32M字节,2^25，所以取权值25-1=24 */
+    s_qspi_handle.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_3_CYCLE;      /* 片选高电平时间为3个时钟(10*3=30ns),即手册里面的tSHSL参数 */
+    s_qspi_handle.Init.ClockMode          = QSPI_CLOCK_MODE_3;              /* Mode3,空闲时CLK为高电平 */
+    s_qspi_handle.Init.FlashID            = QSPI_FLASH_ID_1;                /* 第一片flash */
+    s_qspi_handle.Init.DualFlash          = QSPI_DUALFLASH_DISABLE;         /* 禁止双闪存模式 */
 
-    if (HAL_QSPI_Init(&g_qspi_handle) == HAL_OK)
+    if (HAL_QSPI_Init(&s_qspi_handle) == HAL_OK)
     {
         return FUNC_STATUS_SUCCESS; /* QSPI初始化成功 */
     }
@@ -231,7 +231,7 @@ func_status_e qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
     qspi_command_handle.DdrMode           = QSPI_DDR_MODE_DISABLE;     /* 关闭DDR模式 */
     qspi_command_handle.DdrHoldHalfCycle  = QSPI_DDR_HHC_ANALOG_DELAY;
 
-    return (HAL_QSPI_Command(&g_qspi_handle, &qspi_command_handle, 5000U) == HAL_OK) ? 0U : 1U;
+    return (HAL_QSPI_Command(&s_qspi_handle, &qspi_command_handle, 5000U) == HAL_OK) ? 0U : 1U;
 }
 
 /**
@@ -243,8 +243,8 @@ func_status_e qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
  */
 func_status_e qspi_port_receive(BYTE *buf, DWORD datalen)
 {
-    g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
-    if (HAL_QSPI_Receive(&g_qspi_handle, buf, 5000) == HAL_OK)
+    s_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
+    if (HAL_QSPI_Receive(&s_qspi_handle, buf, 5000) == HAL_OK)
     {
         return FUNC_STATUS_SUCCESS;
     }
@@ -263,8 +263,8 @@ func_status_e qspi_port_receive(BYTE *buf, DWORD datalen)
  */
 func_status_e qspi_port_transmit(BYTE *buf, DWORD datalen)
 {
-    g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
-    if (HAL_QSPI_Transmit(&g_qspi_handle, buf, 5000) == HAL_OK)
+    s_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
+    if (HAL_QSPI_Transmit(&s_qspi_handle, buf, 5000) == HAL_OK)
     {
         return FUNC_STATUS_SUCCESS;
     }

@@ -20,7 +20,7 @@
 
 #include <stddef.h>
 
-/* CRC-32/ISO-HDLC software implementation (shared by boot/FTL metadata). */
+/* CRC-32/ISO-HDLC 软件实现（boot / FTL 元数据共用）。 */
 #define CRC_ISO_TABLE_SIZE (256U)
 #define CRC_ISO_SLICES     (4U)
 #define CRC_ISO_POLY_REFL  (0xEDB88320UL)

@@ -15,21 +15,23 @@
 #include "fault.h"
 #include "usart.h"
 
-void sys_init(void)
+func_status_e sys_init(DWORD console_baud)
 {
     sys_mpu_config();
     sys_cache_enable();
     sys_port_hal_init();
     if (sys_port_clock_init() != FUNC_STATUS_SUCCESS)
     {
-        while (1)
-        {
-        }
+        return FUNC_STATUS_ERROR;
     }
     delay_init();
-    usart_init(115200U);
+    if (usart_init(console_baud) != FUNC_STATUS_SUCCESS)
+    {
+        return FUNC_STATUS_ERROR;
+    }
     /* 使能可配置故障（MemManage/BusFault/UsageFault），避免全部升级成 HardFault。 */
     fault_init();
+    return FUNC_STATUS_SUCCESS;
 }
 
 void sys_mpu_config(void)
@@ -42,12 +44,12 @@ void sys_cache_enable(void)
     sys_port_cache_enable();
 }
 
-BYTE get_icache_sta(void)
+BYTE sys_icache_enabled(void)
 {
     return sys_port_icache_enabled();
 }
 
-BYTE get_dcache_sta(void)
+BYTE sys_dcache_enabled(void)
 {
     return sys_port_dcache_enabled();
 }
@@ -60,29 +62,4 @@ DWORD sys_mpu_region_count(void)
 void sys_clock_tree_get(sys_clock_tree_s *out)
 {
     sys_port_clock_tree_get(out);
-}
-
-void sys_nvic_set_vector_table(DWORD base_address, DWORD offset)
-{
-    sys_port_set_vector_table(base_address, offset);
-}
-
-void sys_wfi_set(void)
-{
-    sys_port_wfi();
-}
-
-void sys_intx_disable(void)
-{
-    sys_port_irq_disable();
-}
-
-void sys_intx_enable(void)
-{
-    sys_port_irq_enable();
-}
-
-void sys_msr_msp(DWORD address)
-{
-    sys_port_set_msp(address);
 }

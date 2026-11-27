@@ -3,7 +3,7 @@
  *
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
- *   main() → pc_sample_init → sys_init → timer_timx_int_init → cli_init
+ *   main() → pc_sample_init → sys_init → timer_port_hw_init → cli_init
  *          → log sink 绑定 → stack_guard_init → 上电报告
  *          → fc_init → fc_nand_init → fc_boot_arm → platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
@@ -23,6 +23,7 @@
  * 流程图见 docs/design/fc_nand_design.md §4.1（初始化全流程）/ §4.2（命令生命周期）。
  * ====================================================================== */
 
+#include "board_config.h"
 #include "cli.h"
 #include "controller.h"
 #include "delay.h"
@@ -51,12 +52,6 @@
  * 验证满盘 GC / format 等路径不会触发 30 s 复位。 */
 #define SSD_WATCHDOG_ENABLE 0U
 
-/* TIM6 是 timer 调度器的 1 ms 心跳：APB1=100 MHz 且 APB1 分频=2 ⇒ 内核时钟
- * 200 MHz，arr=1000-1、psc=200-1。系统毫秒时基由 SysTick/HAL tick 提供。 */
-#define SSD_TIM6_ARR (1000U - 1U)
-
-#define SSD_TIM6_PSC (200U - 1U)
-
 /*
  * STM32H743 烧录自检入口。
  * Reset_Handler 已完成 C 运行时初始化；HAL_Init() 配置 SysTick 为 1 ms 节拍。
@@ -76,13 +71,11 @@ static const char g_boot_banner[] = "=========== BASESSD built " __DATE__ " " __
 /*
  * 当前板级自检阶段只监督 Scheduler。产品启动 Host/NAND/FTL/GC/DMA 后，应把对应
  * bit 加入 required_domains，并在每个状态机的“确认前进”位置调用 report_progress()。
- * 当前板级阶段只启用 IWDG。按典型 LSI=32 kHz 计算，/256 与 Reload=3749 的
- * 名义超时约为 30 s：T=(3749+1)*256/32000。LSI 有频偏，产品量产前应根据
- * 数据手册的频率范围验证最短/最长复位时间，而不应把它当作精确的 30 s 定时器。
+ * 当前板级阶段只启用 IWDG；超时计算与 LSI 频偏说明见 board_config.h 的 BOARD_IWDG_*。
  */
 static const storage_wdg_cfg_s g_storage_wdg_config = {
-    .iwdg_prescaler      = IWDG_PRESCALER_256,
-    .iwdg_reload         = 3749U,
+    .iwdg_prescaler      = BOARD_IWDG_PRESCALER,
+    .iwdg_reload         = BOARD_IWDG_RELOAD,
     .required_domains    = STORAGE_WDG_DOMAIN_MASK(STORAGE_WDG_DOMAIN_SCHEDULER),
     .domain_timeout_ms   = {[STORAGE_WDG_DOMAIN_SCHEDULER] = 100U},
     .enable_wwdg         = false,
@@ -153,9 +146,9 @@ SYS_LOOP_STATS_LIST(SYS_LOOP_STATS_CHECK)
 
 static void boot_section(const char *name)
 {
-    (void)uart_log_write("--- ", sizeof("--- ") - 1U);
-    (void)uart_log_write(name, strlen(name));
-    (void)uart_log_write(" ---\r\n", sizeof(" ---\r\n") - 1U);
+    (void)usart_log_write("--- ", sizeof("--- ") - 1U);
+    (void)usart_log_write(name, strlen(name));
+    (void)usart_log_write(" ---\r\n", sizeof(" ---\r\n") - 1U);
 }
 
 /* controller 分区：FC 池 / 拓扑 / 数据通路配置汇总（器件就绪后打印）。 */
@@ -199,7 +192,7 @@ static DWORD sys_stats_progress(void)
  * 可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。 */
 static void boot_report_banner(void)
 {
-    (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
+    (void)usart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
     fault_report_boot();
 
     /* 上一轮若留有 PC 采样环，提示一条；详细序列/排行由 CLI `pc` 打印。 */
@@ -220,8 +213,8 @@ static void boot_report_system(void)
 
     const DWORD cpu_mhz  = delay_port_core_clock_hz() / 1000000U;
     const DWORD hclk_mhz = delay_port_hclk_hz() / 1000000U;
-    const char *icache   = (get_icache_sta() != 0U) ? "on" : "off";
-    const char *dcache   = (get_dcache_sta() != 0U) ? "on" : "off";
+    const char *icache   = (sys_icache_enabled() != 0U) ? "on" : "off";
+    const char *dcache   = (sys_dcache_enabled() != 0U) ? "on" : "off";
     const DWORD mpu_num  = sys_mpu_region_count();
 
     LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n", cpu_mhz, hclk_mhz, icache, dcache, mpu_num);
@@ -238,16 +231,16 @@ static void boot_report_system(void)
     const DWORD pclk4_mhz = clk.pclk4_hz / 1000000U;
     const DWORD fmc_mhz   = clk.fmc_hz / 1000000U;
     const DWORD qspi_mhz  = clk.qspi_hz / 1000000U;
-    const DWORD uart_mhz  = clk.uart_hz / 1000000U;
+    const DWORD usart_mhz = clk.usart_hz / 1000000U;
 
     /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
     if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, fmc_mhz, qspi_mhz, uart_mhz);
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu usart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, fmc_mhz, qspi_mhz, usart_mhz);
     }
     else
     {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, pclk2_mhz, pclk3_mhz, pclk4_mhz, fmc_mhz, qspi_mhz, uart_mhz);
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu usart=%lu\r\n", sys_mhz, tree_hclk, pclk1_mhz, pclk2_mhz, pclk3_mhz, pclk4_mhz, fmc_mhz, qspi_mhz, usart_mhz);
     }
 }
 
@@ -550,15 +543,30 @@ int main(void)
      * 否则启动期间的采样会覆盖故障现场（pc_sample.h）。 */
     pc_sample_init();
 
-    sys_init();
+    const func_status_e sys_result = sys_init(BOARD_CONSOLE_BAUD);
+
+    if (sys_result != FUNC_STATUS_SUCCESS)
+    {
+        /* 时钟或串口初始化失败：串口可能不可用，尽力输出一句后停机。 */
+        (void)usart_log_write("sys_init failed\r\n", sizeof("sys_init failed\r\n") - 1U);
+        while (1)
+        {
+        }
+    }
 
     /* TIM6 是 timer 调度器的毫秒心跳（watchdog / FTL 周期评估），
-     * 必须在任务注册与首次 poll 之前运行；晚启动只会推迟任务的首次到期。 */
-    timer_timx_int_init(SSD_TIM6_ARR, SSD_TIM6_PSC);
+     * 必须在任务注册与首次 poll 之前运行；失败则全系统毫秒时基冻结，必须停机。 */
+    if (!timer_port_hw_init(BOARD_TIM6_ARR, BOARD_TIM6_PSC))
+    {
+        (void)usart_log_write("timer heartbeat init failed\r\n", sizeof("timer heartbeat init failed\r\n") - 1U);
+        while (1)
+        {
+        }
+    }
 
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
-    log_set_sink(uart_log_write);
-    log_set_flush_sink(uart_log_flush);
+    log_set_sink(usart_log_write);
+    log_set_flush_sink(usart_log_flush);
     log_set_level(LOG_INFO);
     /* 栈哨兵：把 [&end, 当前 SP) 整段填 pattern。必须**早**——越早，后面
      * （FTL boot / CLI test 这些深调用）用过的栈就越多地落在被守卫区内，

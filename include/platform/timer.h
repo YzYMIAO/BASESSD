@@ -15,7 +15,7 @@
  * 本头零 HAL 类型：定时器句柄、中断号与时钟使能宏一律留在 SoC 侧。
  */
 
-/* A fixed table keeps scheduling deterministic and avoids dynamic allocation in firmware.
+/* 固定表保证调度确定性，固件内不做动态分配。
  * 64 槽：平台任务 + 8 个 FTL 实例 × 若干周期评估。 */
 #define TIMER_SCHEDULER_MAX_TASKS 64U
 
@@ -85,21 +85,25 @@ static inline DWORD timer_age_ms(const timer_ms_t *start_ms)
 }
 
 /*
- * Callback context is supplied by the owner. now_ms is a snapshot taken before
- * task-table iteration, so a callback should not assume it changes while it runs.
- * Callbacks execute in main/task context and may not block for long periods.
+ * 回调上下文由任务拥有者提供。now_ms 是遍历任务表之前取的快照，
+ * 回调运行期间不要假设它变化；回调在主循环/任务上下文执行，不得长时间阻塞。
  */
 typedef void (*timer_task_callback_fn_t)(void *context, DWORD now_ms);
 
-/*
- * 按给定时基启动硬件心跳（周期中断）并开始计时。
- * 参数含义与具体定时器有关，例如「重装值 / 预分频」，由 SoC 侧解释。
+/**
+ * @brief 按给定时基启动硬件心跳（周期中断）并开始计时。
+ *
+ * 参数含义由具体定时器解释，例如「重装值 / 预分频」。
+ *
+ * @param arr 重装值（SoC 端口解释）
+ * @param psc 预分频（SoC 端口解释）
+ * @return true 心跳已启动；false 定时器初始化或启动失败。
  */
-void timer_timx_int_init(WORD arr, WORD psc);
+BOOL timer_port_hw_init(WORD arr, WORD psc);
 
 /*
  * 初始化 timer.c 内部的固定任务表。
- * 核心后台任务由 timer.c 的 g_timer_tasks 集中注册；各业务模块只实现自己的
+ * 核心后台任务由 timer.c 的 s_timer_tasks 集中注册；各业务模块只实现自己的
  * callback，main.c 只负责按顺序启动功能模块和调度器。
  */
 void timer_scheduler_init(void);
@@ -110,25 +114,24 @@ BOOL timer_scheduler_add(timer_task_callback_fn_t callback, void *context, DWORD
 /* 绝对时刻注册：first_abs_ms 早于当前时刻时按「立即到期」处理。 */
 BOOL timer_scheduler_add_at(timer_task_callback_fn_t callback, void *context, DWORD first_abs_ms, DWORD period_ms, DWORD *task_id);
 
-/* Enable/disable a registered task without losing its timing configuration. */
+/* 启用/禁用已注册任务，不丢失其时序配置。 */
 BOOL timer_scheduler_enable(DWORD task_id, BOOL enabled);
 
 /* 修改周期（下一次到期后生效）；period_ms == 0 将该任务改为一次性。 */
 BOOL timer_scheduler_set_period(DWORD task_id, DWORD period_ms);
 
-/* Remove a task and return its static slot to the table. */
+/* 移除任务，把它的槽位归还任务表。 */
 BOOL timer_scheduler_remove(DWORD task_id);
 
 /* 当前已注册任务数（含静态表）。 */
 WORD timer_scheduler_task_count(void);
 
-/* Return the hardware-heartbeat-derived monotonic millisecond time base. */
+/* 返回由硬件心跳驱动的单调毫秒时基。 */
 DWORD timer_scheduler_now_ms(void);
 
 /*
- * Execute due tasks. Call frequently from the main loop or one scheduler task.
- * Each delayed periodic task runs at most once per poll, preventing a long pause
- * from producing an unsafe callback burst.
+ * 执行到期任务。主循环或某个调度任务里频繁调用；每个周期任务每次 poll 最多
+ * 跑一次，避免长时间停顿后产生一次不安全的回调爆发。
  */
 void timer_scheduler_poll(void);
 

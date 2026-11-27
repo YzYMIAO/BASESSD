@@ -7,8 +7,8 @@
  * include/platform/usart.h 里的 usart_port_* 接口下沉到 src/platform/<soc>/usart_port.c。
  *
  * 队列模型（无锁 SPSC，靠 port 侧屏障保证可见性）：
- *   RX：USART IRQ 是唯一生产者（uart_rx_ring_push），主循环 CLI 是唯一消费者（uart_rx_read）。
- *   TX：普通固件上下文是唯一生产者（uart_log_write），USART IRQ 是唯一消费者（uart_tx_ring_pop）。
+ *   RX：USART IRQ 是唯一生产者（usart_rx_ring_push），主循环 CLI 是唯一消费者（usart_rx_read）。
+ *   TX：普通固件上下文是唯一生产者（usart_log_write），USART IRQ 是唯一消费者（usart_tx_ring_pop）。
  */
 
 #include "usart.h"
@@ -25,30 +25,30 @@
 #define WRITE_BUF_SIZE     512U
 
 /*
- * RX 环形队列：USART IRQ 是唯一生产者，uart_rx_read() 是唯一消费者。
- * IRQ 只发布 g_rx_head，主循环只推进 g_rx_tail，这是无锁 SPSC 队列成立的前提。
+ * RX 环形队列：USART IRQ 是唯一生产者，usart_rx_read() 是唯一消费者。
+ * IRQ 只发布 s_rx_head，主循环只推进 s_rx_tail，这是无锁 SPSC 队列成立的前提。
  */
-static BYTE g_rx_ring[USART_RX_RING_CAPACITY];
+static BYTE s_rx_ring[USART_RX_RING_CAPACITY];
 
-static volatile WORD g_rx_head;
+static volatile WORD s_rx_head;
 
-static volatile WORD g_rx_tail;
+static volatile WORD s_rx_tail;
 
-static volatile WORD g_tx_head;
+static volatile WORD s_tx_head;
 
-static volatile WORD g_tx_tail;
+static volatile WORD s_tx_tail;
 
-static volatile WORD g_tx_dma_length;
+static volatile WORD s_tx_dma_length;
 
-static volatile BYTE g_tx_dma_active;
+static volatile BYTE s_tx_dma_active;
 
-static BYTE g_tx_dma_ready;
+static BYTE s_tx_dma_ready;
 
-static volatile BYTE g_tx_transport_fault;
+static volatile BYTE s_tx_transport_fault;
 
-static uart_stats_s g_uart_stats;
+static usart_stats_s s_usart_stats;
 
-static BYTE g_usart_ready;
+static BYTE s_usart_ready;
 
 #if SSD_STATS_ENABLE
 #    define UART_STATS_LIST(X)                           \
@@ -64,11 +64,11 @@ static BYTE g_usart_ready;
         X(parity_errors, STATS_U32, STATS_COUNTER)
 
 #    define UART_STATS_NAME(field, width, kind) \
-        {STATS_NAME_STR(field), STATS_OFFSET(uart_stats_s, field), width, kind},
-static const stats_name_s s_stats_uart_names[] = {
+        {STATS_NAME_STR(field), STATS_OFFSET(usart_stats_s, field), width, kind},
+static const stats_name_s s_stats_usart_names[] = {
     UART_STATS_LIST(UART_STATS_NAME)};
 #    undef UART_STATS_NAME
-#    define UART_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(uart_stats_s, field, width);
+#    define UART_STATS_CHECK(field, width, kind) STATS_CHECK_FIELD(usart_stats_s, field, width);
 UART_STATS_LIST(UART_STATS_CHECK)
 #    undef UART_STATS_CHECK
 #endif /* SSD_STATS_ENABLE */
@@ -83,36 +83,34 @@ UART_STATS_LIST(UART_STATS_CHECK)
 
 /*
  * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
- * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE/DMA”的交接，防止日志丢在队列中。
+ * usart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE/DMA”的交接，防止日志丢在队列中。
  */
-/* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
-static BYTE g_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
+/* 尾部 padding 保证 DMA 段恰好在环末尾结束时，最后的 cache line 维护仍安全。 */
+static BYTE s_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
 
 /* ─────────────────────────── TX 状态机（策略在共享侧）─────────────────────────── */
 
-/* Called with IRQs masked by uart_log_write(), or from the DMA completion ISR. */
-static void uart_tx_dma_start_locked(void)
+/* 调用时中断已由 usart_log_write() 屏蔽，或来自 DMA 完成 ISR。 */
+static void usart_tx_dma_start_locked(void)
 {
-    DWORD tail;
-    DWORD length;
-
-    if ((g_tx_dma_ready == 0U) || (g_tx_dma_active != 0U) || (g_tx_tail == g_tx_head))
+    if ((s_tx_dma_ready == 0U) || (s_tx_dma_active != 0U) || (s_tx_tail == s_tx_head))
     {
         return;
     }
-    tail   = g_tx_tail;
-    length = (g_tx_head > tail) ? (g_tx_head - tail) : (USART_TX_RING_CAPACITY - tail);
 
-    g_tx_dma_length = length;
-    g_tx_dma_active = 1U;
-    if (!usart_port_tx_dma_start(&g_tx_ring[tail], length))
+    const DWORD tail   = s_tx_tail;
+    const DWORD length = (s_tx_head > tail) ? (s_tx_head - tail) : (USART_TX_RING_CAPACITY - tail);
+
+    s_tx_dma_length = length;
+    s_tx_dma_active = 1U;
+    if (!usart_port_tx_dma_start(&s_tx_ring[tail], length))
     {
-        g_tx_dma_active = 0U;
-        g_uart_stats.tx_dma_errors++;
-        g_uart_stats.tx_transport_errors++;
-        g_tx_transport_fault = 1U;
-        /* No tail movement occurred; the TXE fallback drains the retained bytes. */
-        g_tx_dma_ready       = 0U;
+        s_tx_dma_active = 0U;
+        s_usart_stats.tx_dma_errors++;
+        s_usart_stats.tx_transport_errors++;
+        s_tx_transport_fault = 1U;
+        /* tail 未推进：保留的字节由 TXE 回退路径继续发。 */
+        s_tx_dma_ready       = 0U;
         usart_port_tx_irq_enable();
         usart_port_event_signal();
         return;
@@ -121,11 +119,11 @@ static void uart_tx_dma_start_locked(void)
 
 /* ─────────────────────────── 队列原语（供 port / CLI 调用）─────────────────────────── */
 
-BYTE uart_rx_read(BYTE *byte)
+BYTE usart_rx_read(BYTE *byte)
 {
-    WORD tail = g_rx_tail;
+    WORD tail = s_rx_tail;
 
-    if (tail == g_rx_head)
+    if (tail == s_rx_head)
     {
         return 0U;
     }
@@ -134,144 +132,147 @@ BYTE uart_rx_read(BYTE *byte)
      * IRQ 必须先写 ring[head]，再更新 head；屏障防止编译器/CPU 重排这两个动作。
      * 这里的屏障与生产者中的屏障配对，确保消费者不会读到尚未写完的数据。
      */
-    *byte = g_rx_ring[tail];
+    *byte = s_rx_ring[tail];
     usart_port_memory_barrier();
-    g_rx_tail = (tail + 1U) & USART_RX_RING_MASK;
+    s_rx_tail = (tail + 1U) & USART_RX_RING_MASK;
     return 1U;
 }
 
-void uart_rx_ring_push(BYTE byte)
+void usart_rx_ring_push(BYTE byte)
 {
-    WORD head = g_rx_head;
+    WORD head = s_rx_head;
     WORD next = (head + 1U) & USART_RX_RING_MASK;
 
-    if (next == g_rx_tail)
+    if (next == s_rx_tail)
     {
-        /* Policy: preserve the oldest unprocessed CLI input and drop new data. */
-        g_uart_stats.rx_overflow++;
+        /* 策略：保留最旧的未处理 CLI 输入，丢弃新数据。 */
+        s_usart_stats.rx_overflow++;
         return;
     }
 
-    g_rx_ring[head] = byte;
+    s_rx_ring[head] = byte;
     usart_port_memory_barrier();
-    g_rx_head = next;
+    s_rx_head = next;
 }
 
-BYTE uart_tx_ring_pop(BYTE *byte)
+BYTE usart_tx_ring_pop(BYTE *byte)
 {
-    WORD tail = g_tx_tail;
+    WORD tail = s_tx_tail;
 
-    if (tail == g_tx_head)
+    if (tail == s_tx_head)
     {
         return 0U;
     }
 
     /* 先取出数据再推进 tail；推进 tail 后，该槽位才可以被生产者重新使用。 */
-    *byte = g_tx_ring[tail];
+    *byte = s_tx_ring[tail];
     usart_port_memory_barrier();
-    g_tx_tail = (tail + 1U) & USART_TX_RING_MASK;
+    s_tx_tail = (tail + 1U) & USART_TX_RING_MASK;
     usart_port_event_signal();
     return 1U;
 }
 
-BYTE uart_tx_ring_is_empty(void)
+BYTE usart_tx_ring_is_empty(void)
 {
-    return (g_tx_tail == g_tx_head) ? 1U : 0U;
+    return (s_tx_tail == s_tx_head) ? 1U : 0U;
 }
 
-BYTE uart_tx_dma_ready(void)
+BYTE usart_tx_dma_ready(void)
 {
-    return g_tx_dma_ready;
+    return s_tx_dma_ready;
 }
 
-void uart_stats_count_rx_error(DWORD kinds)
+void usart_stats_count_rx_error(DWORD kinds)
 {
-    if ((kinds & UART_RX_ERROR_PARITY) != 0U)
+    if ((kinds & USART_RX_ERROR_PARITY) != 0U)
     {
-        g_uart_stats.parity_errors++;
+        s_usart_stats.parity_errors++;
     }
-    if ((kinds & UART_RX_ERROR_FRAMING) != 0U)
+    if ((kinds & USART_RX_ERROR_FRAMING) != 0U)
     {
-        g_uart_stats.framing_errors++;
+        s_usart_stats.framing_errors++;
     }
-    if ((kinds & UART_RX_ERROR_NOISE) != 0U)
+    if ((kinds & USART_RX_ERROR_NOISE) != 0U)
     {
-        g_uart_stats.noise_errors++;
+        s_usart_stats.noise_errors++;
     }
-    if ((kinds & UART_RX_ERROR_OVERRUN) != 0U)
+    if ((kinds & USART_RX_ERROR_OVERRUN) != 0U)
     {
-        g_uart_stats.overrun_errors++;
+        s_usart_stats.overrun_errors++;
     }
 }
 
-void uart_tx_dma_complete_handler(void)
+void usart_tx_dma_complete_handler(void)
 {
-    WORD transferred;
-
     usart_port_tx_dma_detach();
-    transferred     = g_tx_dma_length;
-    g_tx_dma_length = 0U;
-    g_tx_tail       = ((g_tx_tail + transferred) & USART_TX_RING_MASK);
+
+    const WORD transferred = s_tx_dma_length;
+
+    s_tx_dma_length = 0U;
+    s_tx_tail       = ((s_tx_tail + transferred) & USART_TX_RING_MASK);
     usart_port_memory_barrier();
-    g_tx_dma_active = 0U;
+    s_tx_dma_active = 0U;
     usart_port_event_signal();
-    uart_tx_dma_start_locked();
+    usart_tx_dma_start_locked();
 }
 
-void uart_tx_dma_error_handler(void)
+void usart_tx_dma_error_handler(void)
 {
-    WORD remaining;
-    WORD transferred;
-
     usart_port_tx_dma_detach();
-    remaining = usart_port_tx_dma_remaining();
-    if (remaining > g_tx_dma_length)
+
+    WORD remaining = usart_port_tx_dma_remaining();
+
+    if (remaining > s_tx_dma_length)
     {
-        remaining = g_tx_dma_length;
+        remaining = s_tx_dma_length;
     }
-    transferred     = (g_tx_dma_length - remaining);
-    g_tx_tail       = ((g_tx_tail + transferred) & USART_TX_RING_MASK);
-    g_tx_dma_length = 0U;
-    g_tx_dma_active = 0U;
-    g_uart_stats.tx_dma_errors++;
-    g_uart_stats.tx_transport_errors++;
-    g_tx_transport_fault = 1U;
-    /* The transferred prefix has reached the UART FIFO; TXE sends only the remainder. */
-    g_tx_dma_ready       = 0U;
+    const WORD transferred = (s_tx_dma_length - remaining);
+
+    s_tx_tail       = ((s_tx_tail + transferred) & USART_TX_RING_MASK);
+    s_tx_dma_length = 0U;
+    s_tx_dma_active = 0U;
+    s_usart_stats.tx_dma_errors++;
+    s_usart_stats.tx_transport_errors++;
+    s_tx_transport_fault = 1U;
+    /* 已搬运前缀已进入 UART FIFO；TXE 只补发剩余部分。 */
+    s_tx_dma_ready       = 0U;
     usart_port_tx_irq_enable();
     usart_port_event_signal();
 }
 
 /* ─────────────────────────── 初始化 / 发送 / 计数 ─────────────────────────── */
 
-void usart_init(DWORD baudrate)
+func_status_e usart_init(DWORD baudrate)
 {
-    g_tx_dma_ready = usart_port_hw_init(baudrate);
-    g_usart_ready  = 1U;
+    BYTE dma_ready = 0U;
+
+    if (usart_port_hw_init(baudrate, &dma_ready) != FUNC_STATUS_SUCCESS)
+    {
+        return FUNC_STATUS_ERROR;
+    }
+
+    s_tx_dma_ready = dma_ready;
+    s_usart_ready  = 1U;
 #if SSD_STATS_ENABLE
-    (void)stats_register("uart", STATS_INST_NONE, &g_uart_stats, s_stats_uart_names, STATS_ENTRY_COUNT(s_stats_uart_names));
+    (void)stats_register("uart", STATS_INST_NONE, &s_usart_stats, s_stats_usart_names, STATS_ENTRY_COUNT(s_stats_usart_names));
 #endif
+    return FUNC_STATUS_SUCCESS;
 }
 
 /*
  * newlib 的 printf 最终会调用 _write()。把它接到软件 TX 队列后，现有 printf
  * 自动变成非阻塞日志。
  * ⚠ libc ABI 要求 `int _write()` 且失败返回 -1（H46 的明确例外）；项目内部的
- *   `uart_log_write()` 已改为 `DWORD` + `UART_LOG_INVALID` 哨兵，本函数只做 ABI 转换。
+ *   `usart_log_write()` 已改为 `DWORD` + `USART_LOG_INVALID` 哨兵，本函数只做 ABI 转换。
  *
  * 行尾归一化：裸机串口终端（PuTTY/minicom 等）要求 \r\n 才能正确换行。
  * printf/puts/fprintf 在 newlib 中只输出 \n，此处扫描 buffer，
  * 在裸 \n（前面不是 \r）前插入 \r，同时避免已有 \r\n 被重复加 \r。
  * 所有走 printf 的输出（LOGI/munit 测试报告等）自动受益，
- * 直接调 uart_log_write() 的不受影响。
+ * 直接调 usart_log_write() 的不受影响。
  */
 int _write(int file, char *buffer, int length)
 {
-    int          i;
-    BYTE         needs_cr;
-    int          src_i;
-    unsigned int dst_len;
-
     (void)file;
 
     if ((buffer == NULL) || (length <= 0))
@@ -280,8 +281,9 @@ int _write(int file, char *buffer, int length)
     }
 
     /* ── 快速路径：buffer 中没有裸 \n，原样发送 ── */
-    needs_cr = 0U;
-    for (i = 0; i < length; i++)
+    BYTE needs_cr = 0U;
+
+    for (int i = 0; i < length; i++)
     {
         if ((buffer[i] == '\n') && ((i == 0) || (buffer[i - 1] != '\r')))
         {
@@ -291,17 +293,17 @@ int _write(int file, char *buffer, int length)
     }
     if (needs_cr == 0U)
     {
-        const DWORD written = uart_log_write(buffer, length);
+        const DWORD written = usart_log_write(buffer, length);
 
-        return (written == UART_LOG_INVALID) ? -1 : (int)written;
+        return (written == USART_LOG_INVALID) ? -1 : (int)written;
     }
 
     /* ── 慢速路径：在裸 \n 前插入 \r ── */
-    static char converted[WRITE_BUF_SIZE];
-    BOOL        ok = true;
-    dst_len        = 0;
+    static char  converted[WRITE_BUF_SIZE];
+    unsigned int dst_len = 0U;
+    BOOL         ok      = true;
 
-    for (src_i = 0; src_i < length; src_i++)
+    for (int src_i = 0; src_i < length; src_i++)
     {
         if ((buffer[src_i] == '\n') && ((src_i == 0) || (buffer[src_i - 1] != '\r')))
         {
@@ -309,7 +311,7 @@ int _write(int file, char *buffer, int length)
             if (dst_len + 2 > WRITE_BUF_SIZE)
             {
                 /* 刷新已转换部分再继续 */
-                ok      = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
+                ok      = (usart_log_write(converted, dst_len) != USART_LOG_INVALID) && ok;
                 dst_len = 0;
             }
             converted[dst_len++] = '\r';
@@ -319,7 +321,7 @@ int _write(int file, char *buffer, int length)
         {
             if (dst_len + 1 > WRITE_BUF_SIZE)
             {
-                ok      = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
+                ok      = (usart_log_write(converted, dst_len) != USART_LOG_INVALID) && ok;
                 dst_len = 0;
             }
             converted[dst_len++] = buffer[src_i];
@@ -329,64 +331,63 @@ int _write(int file, char *buffer, int length)
     /* 刷剩余 */
     if (dst_len > 0)
     {
-        ok = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
+        ok = (usart_log_write(converted, dst_len) != USART_LOG_INVALID) && ok;
     }
 
     /* 告知上层全部发出（不重试）；libc `_write` 约定失败返回 -1。 */
     return ok ? length : -1;
-#undef WRITE_BUF_SIZE
 }
 
-DWORD uart_log_write(const char *data, DWORD length)
+DWORD usart_log_write(const char *data, DWORD length)
 {
-    DWORD written = 0U;
-
-    if ((!g_usart_ready) || (data == NULL) || (length == 0U))
+    if ((!s_usart_ready) || (data == NULL) || (length == 0U))
     {
         return 0U;
     }
 
-    /* A DMA transport error has an ambiguous byte boundary; do not claim later writes are reliable. */
-    if (g_tx_transport_fault != 0U)
+    /* DMA 传输错误使字节边界不明确；不能声称之后的写入仍可靠。 */
+    if (s_tx_transport_fault != 0U)
     {
-        return UART_LOG_INVALID;
+        return USART_LOG_INVALID;
     }
 
     if (usart_port_context_is_atomic() != 0U)
     {
-        g_uart_stats.tx_context_errors++;
-        return UART_LOG_INVALID;
+        s_usart_stats.tx_context_errors++;
+        return USART_LOG_INVALID;
     }
+
+    DWORD written = 0U;
 
     while (written < length)
     {
-        DWORD primask = usart_port_irq_state();
+        const DWORD primask = usart_port_irq_state();
 
-        if (g_tx_transport_fault != 0U)
+        if (s_tx_transport_fault != 0U)
         {
-            return UART_LOG_INVALID;
+            return USART_LOG_INVALID;
         }
 
-        /* Publish bytes and arm the consumer atomically; never wait with IRQs masked. */
+        /* 原子地发布字节并武装消费者；绝不在中断屏蔽下等待。 */
         usart_port_irq_disable();
         while (written < length)
         {
-            WORD head = g_tx_head;
-            WORD next = (head + 1U) & USART_TX_RING_MASK;
+            const WORD head = s_tx_head;
+            const WORD next = (head + 1U) & USART_TX_RING_MASK;
 
-            if (next == g_tx_tail)
+            if (next == s_tx_tail)
             {
                 break;
             }
 
-            g_tx_ring[head] = data[written++];
+            s_tx_ring[head] = data[written++];
             usart_port_memory_barrier();
-            g_tx_head = next;
+            s_tx_head = next;
         }
 
-        if (g_tx_dma_ready != 0U)
+        if (s_tx_dma_ready != 0U)
         {
-            uart_tx_dma_start_locked();
+            usart_tx_dma_start_locked();
         }
         else
         {
@@ -396,7 +397,7 @@ DWORD uart_log_write(const char *data, DWORD length)
 
         if (written < length)
         {
-            /* Consumers signal the event after every tail advance, so no release is missed. */
+            /* 消费者每次推进 tail 后都发事件，因此不会错过唤醒。 */
             usart_port_event_wait();
         }
     }
@@ -404,26 +405,23 @@ DWORD uart_log_write(const char *data, DWORD length)
     return written;
 }
 
-BOOL uart_log_flush(DWORD timeout_ms)
+BOOL usart_log_flush(DWORD timeout_ms)
 {
-    DWORD start_tick;
-
-    if ((g_usart_ready == 0U) || (usart_port_context_is_atomic() != 0U))
+    if ((s_usart_ready == 0U) || (usart_port_context_is_atomic() != 0U))
     {
         return false;
     }
 
-    start_tick = usart_port_now_ms();
+    const DWORD start_tick = usart_port_now_ms();
+
     for (;;)
     {
-        BYTE  empty;
-        BYTE  dma_active;
-        DWORD primask = usart_port_irq_state();
+        const DWORD primask = usart_port_irq_state();
 
         usart_port_irq_disable();
-        empty      = (g_tx_head == g_tx_tail) ? 1U : 0U;
-        dma_active = g_tx_dma_active;
-        if (g_tx_transport_fault != 0U)
+        const BYTE empty      = (s_tx_head == s_tx_tail) ? 1U : 0U;
+        const BYTE dma_active = s_tx_dma_active;
+        if (s_tx_transport_fault != 0U)
         {
             usart_port_irq_restore(primask);
             return false;
@@ -435,23 +433,30 @@ BOOL uart_log_flush(DWORD timeout_ms)
         }
         usart_port_irq_restore(primask);
 
-        if ((timeout_ms != UART_LOG_FLUSH_FOREVER) && ((usart_port_now_ms() - start_tick) >= timeout_ms))
+        if ((timeout_ms != USART_LOG_FLUSH_FOREVER) && ((usart_port_now_ms() - start_tick) >= timeout_ms))
         {
-            g_uart_stats.tx_flush_timeouts++;
+            s_usart_stats.tx_flush_timeouts++;
             return false;
         }
         if ((empty == 0U) || (dma_active != 0U))
         {
-            /* tail updates signal the event; TC-only completion is polled below. */
+            /* tail 推进发事件；只有 TC 的完成在这里轮询。 */
             usart_port_event_wait();
         }
     }
 }
 
-void uart_get_stats(uart_stats_s *stats)
+void usart_get_stats(usart_stats_s *stats)
 {
-    if (stats != NULL)
+    if (stats == NULL)
     {
-        *stats = g_uart_stats;
+        return;
     }
+
+    /* ISR 会并发累加计数；取整块快照必须屏蔽中断，避免读到撕裂的字段组合。 */
+    const DWORD primask = usart_port_irq_state();
+
+    usart_port_irq_disable();
+    *stats = s_usart_stats;
+    usart_port_irq_restore(primask);
 }

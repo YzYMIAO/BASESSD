@@ -13,30 +13,30 @@
 
 #include <string.h>
 
-static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
-  /* Flash: executable read-only firmware. */
+static const MPU_Region_InitTypeDef s_sys_mpu_regions[] = {
+  /* Flash：可执行只读固件。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 0U, .BaseAddress = 0x08000000U,   .Size = MPU_REGION_SIZE_2MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_PRIV_RO_URO,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* The two TCM blocks connect directly to the Cortex-M7. */
+ /* 两个 TCM 块直连 Cortex-M7。 */
   /* ITCM（0x0..0xFFFF）只放 .ssd_code_high，启动文件在 MPU 使能前就完成搬运 ⇒
   * 运行期一律只读：任何野写在这里会当场 MemManage（MMFAR=被写地址），而不是
   * 静默改掉指令、等到执行到那一条才以看似无关的故障爆发。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 1U, .BaseAddress = 0x00000000U,  .Size = MPU_REGION_SIZE_64KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_PRIV_RO_URO,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
     {.Enable = MPU_REGION_ENABLE,  .Number = 2U, .BaseAddress = 0x20000000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* AXI SRAM includes normal .data/.bss placement. */
+ /* AXI SRAM 含常规 .data/.bss 放置。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 3U, .BaseAddress = 0x24000000U, .Size = MPU_REGION_SIZE_512KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* D2 domain SRAM1, SRAM2 and SRAM3. */
+ /* D2 域 SRAM1、SRAM2、SRAM3。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 4U, .BaseAddress = 0x30000000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
     {.Enable = MPU_REGION_ENABLE,  .Number = 5U, .BaseAddress = 0x30020000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
     {.Enable = MPU_REGION_ENABLE,  .Number = 6U, .BaseAddress = 0x30040000U,  .Size = MPU_REGION_SIZE_32KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* D3 SRAM4. Backup SRAM uses the privileged default mapping. */
+ /* D3 SRAM4。备份 SRAM 使用特权默认映射。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 7U, .BaseAddress = 0x38000000U,  .Size = MPU_REGION_SIZE_64KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* Peripheral window: non-cacheable, ordered, and never executable. */
+ /* 外设窗口：不可缓存、强序、不可执行。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 8U, .BaseAddress = 0x40000000U, .Size = MPU_REGION_SIZE_512MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE,     .IsShareable = MPU_ACCESS_SHAREABLE, .IsCacheable = MPU_ACCESS_NOT_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
- /* FMC aperture stays Device/non-cacheable until the external bus is initialized. */
+ /* FMC 窗口在外部总线初始化前保持 Device / 不可缓存。 */
     {.Enable = MPU_REGION_ENABLE,  .Number = 9U, .BaseAddress = 0x60000000U,  .Size = MPU_REGION_SIZE_64MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE,     .IsShareable = MPU_ACCESS_SHAREABLE, .IsCacheable = MPU_ACCESS_NOT_CACHEABLE, .IsBufferable = MPU_ACCESS_NOT_BUFFERABLE},
- /* FMC NAND Bank3: command, address and data windows are at 0x80000000. Never cache bus cycles. */
+ /* FMC NAND Bank3：命令/地址/数据窗口位于 0x80000000，总线周期绝不缓存。 */
     {.Enable = MPU_REGION_ENABLE, .Number = 10U, .BaseAddress = 0x80000000U,  .Size = MPU_REGION_SIZE_64MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE,     .IsShareable = MPU_ACCESS_SHAREABLE, .IsCacheable = MPU_ACCESS_NOT_CACHEABLE, .IsBufferable = MPU_ACCESS_NOT_BUFFERABLE},
- /* Higher-numbered overlay for linker AXI_NOCACHE: 0x24060000..0x2407FFFF. */
+ /* 链接脚本 AXI_NOCACHE 用的高编号覆盖区：0x24060000..0x2407FFFF。 */
     {.Enable = MPU_REGION_ENABLE, .Number = 11U, .BaseAddress = 0x24060000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL1, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE,     .IsShareable = MPU_ACCESS_SHAREABLE, .IsCacheable = MPU_ACCESS_NOT_CACHEABLE, .IsBufferable = MPU_ACCESS_NOT_BUFFERABLE},
 };
 
@@ -44,9 +44,9 @@ void sys_port_mpu_config(void)
 {
     DWORD index;
     HAL_MPU_Disable();
-    for (index = 0U; index < (sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0])); ++index)
+    for (index = 0U; index < (sizeof(s_sys_mpu_regions) / sizeof(s_sys_mpu_regions[0])); ++index)
     {
-        HAL_MPU_ConfigRegion(&g_sys_mpu_regions[index]);
+        HAL_MPU_ConfigRegion(&s_sys_mpu_regions[index]);
     }
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
@@ -69,7 +69,7 @@ BYTE sys_port_dcache_enabled(void)
 
 DWORD sys_port_mpu_region_count(void)
 {
-    return (sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0]));
+    return (sizeof(s_sys_mpu_regions) / sizeof(s_sys_mpu_regions[0]));
 }
 
 /* per_ck：FMC / QSPI 的 CLKP 备选源（HSI/CSI/HSE）。 */
@@ -161,52 +161,27 @@ void sys_port_clock_tree_get(sys_clock_tree_s *out)
     switch (__HAL_RCC_GET_USART1_SOURCE())
     {
         case RCC_USART1CLKSOURCE_D2PCLK2:
-            out->uart_hz = out->pclk2_hz;
+            out->usart_hz = out->pclk2_hz;
             break;
         case RCC_USART1CLKSOURCE_PLL2:
-            out->uart_hz = pll2.PLL2_Q_Frequency;
+            out->usart_hz = pll2.PLL2_Q_Frequency;
             break;
         case RCC_USART1CLKSOURCE_PLL3:
-            out->uart_hz = pll3.PLL3_Q_Frequency;
+            out->usart_hz = pll3.PLL3_Q_Frequency;
             break;
         case RCC_USART1CLKSOURCE_HSI:
-            out->uart_hz = HSI_VALUE;
+            out->usart_hz = HSI_VALUE;
             break;
         case RCC_USART1CLKSOURCE_CSI:
-            out->uart_hz = CSI_VALUE;
+            out->usart_hz = CSI_VALUE;
             break;
         case RCC_USART1CLKSOURCE_LSE:
-            out->uart_hz = LSE_VALUE;
+            out->usart_hz = LSE_VALUE;
             break;
         default:
-            out->uart_hz = 0U;
+            out->usart_hz = 0U;
             break;
     }
-}
-
-void sys_port_set_vector_table(DWORD base_address, DWORD offset)
-{
-    SCB->VTOR = base_address | (offset & 0xFFFFFE00UL);
-}
-
-void sys_port_wfi(void)
-{
-    __WFI();
-}
-
-void sys_port_irq_disable(void)
-{
-    __disable_irq();
-}
-
-void sys_port_irq_enable(void)
-{
-    __enable_irq();
-}
-
-void sys_port_set_msp(DWORD address)
-{
-    __set_MSP(address);
 }
 
 void sys_port_hal_init(void)

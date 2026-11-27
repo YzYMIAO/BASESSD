@@ -3,31 +3,33 @@
  *
  * 只做硬件相关的事：RNG 句柄、时钟源（PLL1_Q）、HAL 初始化、就绪标志、取数。
  * 重试策略与范围映射在共享 src/platform/rng.c。
+ *
+ * implements rng.h（端口适配：本文件实现抽象头的 port 接口）。
  */
 
 #include "common.h"
 #include "rng.h"
 #include "sys_port.h"
 
-RNG_HandleTypeDef g_rng_handle; /* RNG句柄 */
+static RNG_HandleTypeDef s_rng_handle; /* RNG句柄 */
 
 void rng_port_init(void)
 {
-    g_rng_handle.Instance = RNG;
-    HAL_RNG_DeInit(&g_rng_handle);
-    HAL_RNG_Init(&g_rng_handle); /* 初始化RNG */
+    s_rng_handle.Instance = RNG;
+    HAL_RNG_DeInit(&s_rng_handle);
+    HAL_RNG_Init(&s_rng_handle); /* 初始化RNG */
 }
 
 BYTE rng_port_data_ready(void)
 {
-    return (__HAL_RNG_GET_FLAG(&g_rng_handle, RNG_FLAG_DRDY) != RESET) ? 1U : 0U;
+    return (__HAL_RNG_GET_FLAG(&s_rng_handle, RNG_FLAG_DRDY) != RESET) ? 1U : 0U;
 }
 
 DWORD rng_port_get_random(void)
 {
     DWORD randomnum;
 
-    HAL_RNG_GenerateRandomNumber(&g_rng_handle, &randomnum);
+    HAL_RNG_GenerateRandomNumber(&s_rng_handle, &randomnum);
 
     return randomnum;
 }

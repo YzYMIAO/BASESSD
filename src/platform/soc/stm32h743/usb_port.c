@@ -11,6 +11,8 @@
  *   - VBUS sensing 关闭（include/tusb_config.h）：PA9 同时是 USART1_TX。
  *   - DWC2 用 slave/PIO 模式（CFG_TUD_DWC2_DMA_ENABLE=0），不碰 D-Cache；
  *     端点 FIFO 由 CPU 搬运，缓冲仍在普通 .bss。
+ *
+ * implements usb.h（端口适配：本文件实现抽象头的 port 接口）。
  */
 
 #include "log.h"

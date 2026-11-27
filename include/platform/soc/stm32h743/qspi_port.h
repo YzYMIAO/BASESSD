@@ -4,8 +4,7 @@
 /*
  * qspi_port.h — stm32h743 QSPI port 头。
  *
- * 由原 include/platform/stm32h743/qspi.h 拆出：这里只留 QSPI 引脚/时钟宏
- * （含 HAL 类型）；函数声明与 port 接口都在抽象 include/platform/qspi.h。
+ * 只提供 QSPI 引脚 / 时钟宏（含 HAL 类型）；函数声明与 port 接口在抽象 qspi.h。
  */
 
 #include "sys_port.h"

@@ -18,8 +18,8 @@
 
 /* ── UART TX DMA（USART1；平台内部使用）── */
 
-func_status_e uart_tx_dma_init(void);
-void          uart_tx_dma_irq_handler(void);
+func_status_e dma_usart_tx_init(void);
+void          dma_usart_tx_irq_handler(void);
 
 /* port 接口：由 src/platform/<soc>/dma_port.c 实现；共享 src/platform/dma.c 只转发。 */
 
@@ -32,7 +32,7 @@ void          uart_tx_dma_irq_handler(void);
  * @return FUNC_STATUS_SUCCESS 已就绪（本次初始化成功或此前已成功）；
  *         FUNC_STATUS_ERROR 底层 DMA 控制器反初始化/初始化失败。
  */
-func_status_e dma_port_uart_tx_init(void);
-void          dma_port_uart_tx_irq_handler(void);
+func_status_e dma_port_usart_tx_init(void);
+void          dma_port_usart_tx_irq_handler(void);
 
 #endif /* PLATFORM_DMA_H */

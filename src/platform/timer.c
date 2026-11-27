@@ -49,14 +49,17 @@ typedef struct TIMER_TASK_RUNTIME_S
  * 未列出的槽位保持 callback=NULL，仍可由 timer_scheduler_add() 用于确实需要
  * 在运行中创建和撤销的临时任务。核心安全任务不使用动态槽位。
  */
-static const timer_static_task_s g_timer_task_table[] = {
+static const timer_static_task_s s_timer_task_table[] = {
   /* 仅 IWDG 时不需要 WWDG 的毫秒级窗口检查；100 ms 足以监督 30 s 名义超时。 */
     {"watchdog", 100U, 100U, storage_watchdog_task, NULL},
 };
 
+_Static_assert(TIMER_ARRAY_SIZE(s_timer_task_table) <= TIMER_SCHEDULER_MAX_TASKS,
+               "timer_static_task_table exceeds TIMER_SCHEDULER_MAX_TASKS");
+
 /* 私有运行态：前 N 项对应静态表；其余槽位保留给 timer_scheduler_add()。 */
-static timer_task_runtime_s g_timer_tasks[TIMER_SCHEDULER_MAX_TASKS];
-static volatile DWORD       g_timer_tick_ms;
+static timer_task_runtime_s s_timer_tasks[TIMER_SCHEDULER_MAX_TASKS];
+static volatile DWORD       s_timer_tick_ms;
 
 void timer_scheduler_tick(void)
 {
@@ -64,27 +67,19 @@ void timer_scheduler_tick(void)
      * 硬件心跳的唯一后果就是把毫秒计数加一。ISR 的全部调度职责到此为止——
      * 真正的到期扫描留给主循环的 timer_scheduler_poll()，避免在中断里跑回调。
      */
-    g_timer_tick_ms++;
+    s_timer_tick_ms++;
 }
 
 void timer_scheduler_init(void)
 {
-    DWORD index;
-    DWORD now_ms;
+    const DWORD now_ms = timer_scheduler_now_ms();
 
-    /* 固定表越界属于编译配置错误；此处防御性返回，避免运行时内存越界。 */
-    if (TIMER_ARRAY_SIZE(g_timer_task_table) > TIMER_SCHEDULER_MAX_TASKS)
+    memset(s_timer_tasks, 0, sizeof(s_timer_tasks));
+
+    for (DWORD index = 0U; index < TIMER_ARRAY_SIZE(s_timer_task_table); index++)
     {
-        return;
-    }
-
-    now_ms = timer_scheduler_now_ms();
-    memset(g_timer_tasks, 0, sizeof(g_timer_tasks));
-
-    for (index = 0U; index < TIMER_ARRAY_SIZE(g_timer_task_table); index++)
-    {
-        const timer_static_task_s *config  = &g_timer_task_table[index];
-        timer_task_runtime_s      *runtime = &g_timer_tasks[index];
+        const timer_static_task_s *config  = &s_timer_task_table[index];
+        timer_task_runtime_s      *runtime = &s_timer_tasks[index];
 
         runtime->callback    = config->callback;
         runtime->context     = config->context;
@@ -96,29 +91,27 @@ void timer_scheduler_init(void)
 
 BOOL timer_scheduler_add(timer_task_callback_fn_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id)
 {
-    DWORD index;
-    DWORD now_ms;
-
     if (callback == NULL)
     {
         return false;
     }
 
-    now_ms = timer_scheduler_now_ms();
+    const DWORD now_ms = timer_scheduler_now_ms();
+
     /* 固定任务的槽位不可被动态任务占用。 */
-    for (index = TIMER_ARRAY_SIZE(g_timer_task_table); index < TIMER_SCHEDULER_MAX_TASKS; index++)
+    for (DWORD index = TIMER_ARRAY_SIZE(s_timer_task_table); index < TIMER_SCHEDULER_MAX_TASKS; index++)
     {
-        if (g_timer_tasks[index].callback != NULL)
+        if (s_timer_tasks[index].callback != NULL)
         {
             continue;
         }
 
-        g_timer_tasks[index].callback    = callback;
-        g_timer_tasks[index].context     = context;
-        g_timer_tasks[index].next_due_ms = now_ms + first_delay_ms;
-        g_timer_tasks[index].period_ms   = period_ms;
-        g_timer_tasks[index].runs        = 0U;
-        g_timer_tasks[index].enabled     = 1U;
+        s_timer_tasks[index].callback    = callback;
+        s_timer_tasks[index].context     = context;
+        s_timer_tasks[index].next_due_ms = now_ms + first_delay_ms;
+        s_timer_tasks[index].period_ms   = period_ms;
+        s_timer_tasks[index].runs        = 0U;
+        s_timer_tasks[index].enabled     = 1U;
         if (task_id != NULL)
         {
             *task_id = index;
@@ -140,36 +133,36 @@ BOOL timer_scheduler_add_at(timer_task_callback_fn_t callback, void *context, DW
 
 BOOL timer_scheduler_enable(DWORD task_id, BOOL enabled)
 {
-    if (task_id >= TIMER_SCHEDULER_MAX_TASKS || g_timer_tasks[task_id].callback == NULL)
+    if (task_id >= TIMER_SCHEDULER_MAX_TASKS || s_timer_tasks[task_id].callback == NULL)
     {
         return false;
     }
 
-    g_timer_tasks[task_id].enabled = enabled ? 1U : 0U;
+    s_timer_tasks[task_id].enabled = enabled ? 1U : 0U;
     return true;
 }
 
 BOOL timer_scheduler_set_period(DWORD task_id, DWORD period_ms)
 {
-    if ((task_id >= TIMER_SCHEDULER_MAX_TASKS) || (g_timer_tasks[task_id].callback == NULL))
+    if ((task_id >= TIMER_SCHEDULER_MAX_TASKS) || (s_timer_tasks[task_id].callback == NULL))
     {
         return false;
     }
 
     /* 下一次到期后按新周期重装；当前 next_due 不变。 */
-    g_timer_tasks[task_id].period_ms = period_ms;
+    s_timer_tasks[task_id].period_ms = period_ms;
     return true;
 }
 
 BOOL timer_scheduler_remove(DWORD task_id)
 {
     /* 静态表项是产品核心配置，不能被运行时 remove() 意外删除。 */
-    if ((task_id < TIMER_ARRAY_SIZE(g_timer_task_table)) || (task_id >= TIMER_SCHEDULER_MAX_TASKS))
+    if ((task_id < TIMER_ARRAY_SIZE(s_timer_task_table)) || (task_id >= TIMER_SCHEDULER_MAX_TASKS))
     {
         return false;
     }
 
-    memset(&g_timer_tasks[task_id], 0, sizeof(g_timer_tasks[task_id]));
+    memset(&s_timer_tasks[task_id], 0, sizeof(s_timer_tasks[task_id]));
     return true;
 }
 
@@ -179,7 +172,7 @@ WORD timer_scheduler_task_count(void)
 
     for (DWORD index = 0U; index < TIMER_SCHEDULER_MAX_TASKS; index++)
     {
-        if (g_timer_tasks[index].callback != NULL)
+        if (s_timer_tasks[index].callback != NULL)
         {
             count++;
         }
@@ -190,18 +183,17 @@ WORD timer_scheduler_task_count(void)
 
 DWORD timer_scheduler_now_ms(void)
 {
-    /* A naturally aligned 32-bit Cortex-M load is atomic; caller gets a time snapshot. */
-    return g_timer_tick_ms;
+    /* 自然对齐的 32 位 Cortex-M 读取是原子的；调用方拿到某一时刻的时基快照。 */
+    return s_timer_tick_ms;
 }
 
 void timer_scheduler_poll(void)
 {
-    DWORD index;
-    DWORD now_ms = timer_scheduler_now_ms();
+    const DWORD now_ms = timer_scheduler_now_ms();
 
-    for (index = 0U; index < TIMER_SCHEDULER_MAX_TASKS; index++)
+    for (DWORD index = 0U; index < TIMER_SCHEDULER_MAX_TASKS; index++)
     {
-        timer_task_runtime_s *task = &g_timer_tasks[index];
+        timer_task_runtime_s *task = &s_timer_tasks[index];
         DWORD                 due_ms;
 
         if ((task->callback == NULL) || (task->enabled == 0U) || !timer_time_due(now_ms, task->next_due_ms))
@@ -210,8 +202,8 @@ void timer_scheduler_poll(void)
         }
 
         /*
-         * Re-arm before invoking the callback. A task may disable/remove itself,
-         * and a long callback must not accumulate an unbounded number of catch-up runs.
+         * 先重装再调用回调：任务可能在回调里禁用/移除自己，长回调也不能累积
+         * 无上限的补跑次数（本轮最多跑一次）。
          */
         due_ms = task->next_due_ms;
         if (task->period_ms == 0U)

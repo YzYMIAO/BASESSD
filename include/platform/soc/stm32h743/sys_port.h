@@ -4,9 +4,8 @@
 /*
  * sys_port.h — stm32h743 系统服务 port 伞头。
  *
- * 由原 include/platform/stm32h743/sys.h 拆出：这里只留厂商设备头与 SYS_SUPPORT_OS，
- * 以及抽象 sys.h 的转发（sys_* / sys_port_* 声明都在 include/platform/sys.h）。
- * 需要 HAL 类型的 h743 侧文件改为裸名 include 本头。
+ * 只提供厂商设备头与 SYS_SUPPORT_OS；公共 sys / sys_port 声明在抽象 sys.h。
+ * 需要 HAL 类型的 h743 侧文件以裸名 include 本头。
  */
 
 #include "stm32h7xx.h"

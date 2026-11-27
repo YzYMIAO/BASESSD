@@ -5,48 +5,50 @@
  * 持有 IWDG/WWDG 句柄、执行 HAL 调用，并把两个固定签名的 HAL 回调转回共享层。
  *
  * 句柄仅由本文件持有，禁止业务模块绕过 Supervisor 直接刷新硬件。
+ *
+ * implements watchdog.h（端口适配：本文件实现抽象头的 port 接口）。
  */
 
 #include "stm32h7xx_hal.h"
 #include "watchdog.h"
 
-static IWDG_HandleTypeDef g_storage_iwdg;
-static WWDG_HandleTypeDef g_storage_wwdg;
+static IWDG_HandleTypeDef s_storage_iwdg;
+static WWDG_HandleTypeDef s_storage_wwdg;
 
 BOOL watchdog_port_iwdg_init(DWORD prescaler, DWORD reload)
 {
-    g_storage_iwdg.Instance       = IWDG1;
-    g_storage_iwdg.Init.Prescaler = prescaler;
-    g_storage_iwdg.Init.Reload    = reload;
-    g_storage_iwdg.Init.Window    = IWDG_WINDOW_DISABLE;
-    return HAL_IWDG_Init(&g_storage_iwdg) == HAL_OK;
+    s_storage_iwdg.Instance       = IWDG1;
+    s_storage_iwdg.Init.Prescaler = prescaler;
+    s_storage_iwdg.Init.Reload    = reload;
+    s_storage_iwdg.Init.Window    = IWDG_WINDOW_DISABLE;
+    return HAL_IWDG_Init(&s_storage_iwdg) == HAL_OK;
 }
 
 BOOL watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window)
 {
-    g_storage_wwdg.Instance       = WWDG1;
-    g_storage_wwdg.Init.Prescaler = prescaler;
-    g_storage_wwdg.Init.Counter   = counter;
-    g_storage_wwdg.Init.Window    = window;
+    s_storage_wwdg.Instance       = WWDG1;
+    s_storage_wwdg.Init.Prescaler = prescaler;
+    s_storage_wwdg.Init.Counter   = counter;
+    s_storage_wwdg.Init.Window    = window;
     /* EWI 只用于诊断：回调记录故障，绝不自动 refresh，否则会掩盖主循环死锁。 */
-    g_storage_wwdg.Init.EWIMode   = WWDG_EWI_ENABLE;
-    return HAL_WWDG_Init(&g_storage_wwdg) == HAL_OK;
+    s_storage_wwdg.Init.EWIMode   = WWDG_EWI_ENABLE;
+    return HAL_WWDG_Init(&s_storage_wwdg) == HAL_OK;
 }
 
-void watchdog_port_iwdg_refresh(void)
+BOOL watchdog_port_iwdg_refresh(void)
 {
-    (void)HAL_IWDG_Refresh(&g_storage_iwdg);
+    return (HAL_IWDG_Refresh(&s_storage_iwdg) == HAL_OK);
 }
 
-void watchdog_port_wwdg_refresh(void)
+BOOL watchdog_port_wwdg_refresh(void)
 {
-    (void)HAL_WWDG_Refresh(&g_storage_wwdg);
+    return (HAL_WWDG_Refresh(&s_storage_wwdg) == HAL_OK);
 }
 
 void watchdog_port_wwdg_irq_handler(void)
 {
     /* HAL 会在此路径中清 EWI 标志并调用下方的 EarlyWakeupCallback。 */
-    HAL_WWDG_IRQHandler(&g_storage_wwdg);
+    HAL_WWDG_IRQHandler(&s_storage_wwdg);
 }
 
 /*
@@ -80,7 +82,7 @@ void HAL_WWDG_MspInit(WWDG_HandleTypeDef *hwwdg)
 void HAL_WWDG_EarlyWakeupCallback(WWDG_HandleTypeDef *hwwdg)
 {
     /* 句柄比对留在这里（共享层看不到句柄），业务判断转回共享层。 */
-    if (hwwdg == &g_storage_wwdg)
+    if (hwwdg == &s_storage_wwdg)
     {
         storage_wdg_wwdg_early_wakeup();
     }

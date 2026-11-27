@@ -1,6 +1,8 @@
 #ifndef PLATFORM_USB_H
 #define PLATFORM_USB_H
 
+#include "ssd_types.h" /* BOOL */
+
 #include <stdbool.h>
 
 /*

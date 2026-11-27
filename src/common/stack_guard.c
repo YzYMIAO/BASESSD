@@ -27,7 +27,7 @@
 /* ── 1. 链接脚本边界与常量 ── */
 
 /* 堆起点 = DTCM 空闲区底部；栈顶 = DTCM 顶。两符号都来自
- * src/platform/stm32h743/linker/stm32h743xx_flash.ld（`PROVIDE(end = .)` / `_estack = ORIGIN+LENGTH`），
+ * src/platform/boards/apollo_v2/linker/stm32h743xx_flash.ld（`PROVIDE(end = .)` / `_estack = ORIGIN+LENGTH`），
  * 与 src/platform/syscalls.c 取 &end 的方式一致。 */
 extern char end;
 

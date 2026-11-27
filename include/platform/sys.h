@@ -15,15 +15,21 @@
 
 /* ─────────────────────────── 公开系统接口 ─────────────────────────── */
 
-/* 上电初始化序列：MPU → Cache → HAL → 时钟 → delay → 串口 → 故障捕获。
- * 时钟配置失败即死循环（保持原行为）。 */
-void sys_init(void);
+/**
+ * @brief 上电初始化序列：MPU → Cache → HAL → 时钟 → delay → 串口 → 故障捕获。
+ *
+ * 任一步失败立即返回，由调用者决定停机与报告；不再在共享层内部死循环。
+ *
+ * @param console_baud 控制台波特率（板级常量由 board_config.h 提供）。
+ * @return FUNC_STATUS_SUCCESS 全部完成；FUNC_STATUS_ERROR 时钟或串口初始化失败。
+ */
+func_status_e sys_init(DWORD console_baud);
 
 void sys_mpu_config(void);
 void sys_cache_enable(void);
 
-BYTE  get_icache_sta(void);
-BYTE  get_dcache_sta(void);
+BYTE  sys_icache_enabled(void);
+BYTE  sys_dcache_enabled(void);
 DWORD sys_mpu_region_count(void);
 
 /* 时钟树快照（单位 Hz）。各字段由 SoC 侧经 HAL 实读回读；共享层只转发，
@@ -38,16 +44,10 @@ typedef struct SYS_CLOCK_TREE_S
     DWORD pclk4_hz;  /* APB4 */
     DWORD fmc_hz;    /* FMC 内核时钟 */
     DWORD qspi_hz;   /* QSPI 内核时钟 */
-    DWORD uart_hz;   /* USART1 内核时钟 */
+    DWORD usart_hz;  /* USART1 内核时钟 */
 } sys_clock_tree_s;
 
 void sys_clock_tree_get(sys_clock_tree_s *out);
-
-void sys_nvic_set_vector_table(DWORD base_address, DWORD offset);
-void sys_wfi_set(void);
-void sys_intx_disable(void);
-void sys_intx_enable(void);
-void sys_msr_msp(DWORD address);
 
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/sys_port.c 实现；共享层只通过这些函数触碰 SoC。
@@ -59,11 +59,6 @@ BYTE          sys_port_icache_enabled(void);
 BYTE          sys_port_dcache_enabled(void);
 DWORD         sys_port_mpu_region_count(void);
 void          sys_port_clock_tree_get(sys_clock_tree_s *out);
-void          sys_port_set_vector_table(DWORD base_address, DWORD offset);
-void          sys_port_wfi(void);
-void          sys_port_irq_disable(void);
-void          sys_port_irq_enable(void);
-void          sys_port_set_msp(DWORD address);
 void          sys_port_hal_init(void);
 func_status_e sys_port_clock_init(void);
 

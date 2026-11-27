@@ -17,14 +17,14 @@
  * 每个自旋轮次都写一次 IWDG 寄存器。 */
 #define STORAGE_WDG_KICK_INTERVAL_MS (10U)
 
-static storage_wdg_cfg_s g_storage_wdg_config;
+static storage_wdg_cfg_s s_storage_wdg_config;
 
-static storage_wdg_status_s g_storage_wdg_status;
+static storage_wdg_status_s s_storage_wdg_status;
 
-static storage_wdg_recovery_hook_fn_t g_storage_wdg_recovery_hook;
+static storage_wdg_recovery_hook_fn_t s_storage_wdg_recovery_hook;
 
 /* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
-static DWORD g_storage_wdg_last_wwdg_refresh_ms;
+static DWORD s_storage_wdg_last_wwdg_refresh_ms;
 
 static DWORD s_last_kick_ms;
 
@@ -47,14 +47,14 @@ static BOOL storage_wdg_all_required_domains_healthy(DWORD now_ms, wdg_domain_e 
     for (index = 0U; index < STORAGE_WDG_DOMAIN_COUNT; index++)
     {
         DWORD mask       = STORAGE_WDG_DOMAIN_MASK(index);
-        DWORD timeout_ms = g_storage_wdg_config.domain_timeout_ms[index];
+        DWORD timeout_ms = s_storage_wdg_config.domain_timeout_ms[index];
 
         /* 未列入 required_domains 的后台域不影响本次 IWDG 喂狗决定。 */
-        if ((g_storage_wdg_config.required_domains & mask) == 0U)
+        if ((s_storage_wdg_config.required_domains & mask) == 0U)
         {
             continue;
         }
-        if ((timeout_ms == 0U) || storage_wdg_elapsed(now_ms, g_storage_wdg_status.last_progress_ms[index], timeout_ms))
+        if ((timeout_ms == 0U) || storage_wdg_elapsed(now_ms, s_storage_wdg_status.last_progress_ms[index], timeout_ms))
         {
             *timed_out_domain = (wdg_domain_e)index;
             return false;
@@ -70,21 +70,21 @@ static void storage_wdg_latch_fault(wdg_domain_e domain, wdg_fault_e fault)
      * 首故障优先：后续错误不能覆盖它，便于复位后日志/备份寄存器记录根因。
      * 更重要的是，不能由后来一次“正常心跳”把故障悄悄恢复为健康。
      */
-    if (g_storage_wdg_status.fault != STORAGE_WDG_FAULT_NONE)
+    if (s_storage_wdg_status.fault != STORAGE_WDG_FAULT_NONE)
     {
         return;
     }
 
-    g_storage_wdg_status.fault        = fault;
-    g_storage_wdg_status.fault_domain = domain;
+    s_storage_wdg_status.fault        = fault;
+    s_storage_wdg_status.fault_domain = domain;
     /* 停止 IWDG 喂狗，让独立时钟在确定上限内完成最终全芯片复位。 */
-    g_storage_wdg_status.iwdg_feeding = false;
+    s_storage_wdg_status.iwdg_feeding = false;
 
-    if ((fault == STORAGE_WDG_FAULT_DOMAIN_TIMEOUT) && (g_storage_wdg_recovery_hook != NULL))
+    if ((fault == STORAGE_WDG_FAULT_DOMAIN_TIMEOUT) && (s_storage_wdg_recovery_hook != NULL))
     {
-        g_storage_wdg_status.recovery_attempts[domain]++;
+        s_storage_wdg_status.recovery_attempts[domain]++;
         /* 局部恢复仅用于隔离和采集；不会重新开始喂 IWDG。 */
-        (void)g_storage_wdg_recovery_hook(domain, fault);
+        (void)s_storage_wdg_recovery_hook(domain, fault);
     }
 }
 
@@ -104,12 +104,12 @@ BOOL storage_wdg_init(const storage_wdg_cfg_s *config)
     }
 
     /* 初始化时给每个域一次启动宽限期，避免还未启动的状态机立即超时。 */
-    memset(&g_storage_wdg_status, 0, sizeof(g_storage_wdg_status));
-    g_storage_wdg_config = *config;
+    memset(&s_storage_wdg_status, 0, sizeof(s_storage_wdg_status));
+    s_storage_wdg_config = *config;
     now_ms               = watchdog_port_now_ms();
     for (index = 0U; index < STORAGE_WDG_DOMAIN_COUNT; index++)
     {
-        g_storage_wdg_status.last_progress_ms[index] = now_ms;
+        s_storage_wdg_status.last_progress_ms[index] = now_ms;
     }
 
     if (!watchdog_port_iwdg_init(config->iwdg_prescaler, config->iwdg_reload))
@@ -117,38 +117,38 @@ BOOL storage_wdg_init(const storage_wdg_cfg_s *config)
         return false;
     }
 
-    g_storage_wdg_status.iwdg_feeding = true;
+    s_storage_wdg_status.iwdg_feeding = true;
     if (config->enable_wwdg)
     {
         if (!watchdog_port_wwdg_init(config->wwdg_prescaler, config->wwdg_counter, config->wwdg_window))
         {
-            g_storage_wdg_status.iwdg_feeding = false;
+            s_storage_wdg_status.iwdg_feeding = false;
             return false;
         }
-        g_storage_wdg_status.wwdg_enabled  = true;
-        g_storage_wdg_last_wwdg_refresh_ms = now_ms;
+        s_storage_wdg_status.wwdg_enabled  = true;
+        s_storage_wdg_last_wwdg_refresh_ms = now_ms;
     }
 
-    g_storage_wdg_status.initialized = true;
+    s_storage_wdg_status.initialized = true;
     return true;
 }
 
 void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_fn_t hook)
 {
-    g_storage_wdg_recovery_hook = hook;
+    s_storage_wdg_recovery_hook = hook;
 }
 
 void storage_wdg_report_progress(wdg_domain_e domain)
 {
-    if ((!g_storage_wdg_status.initialized) || !storage_wdg_domain_is_valid(domain))
+    if ((!s_storage_wdg_status.initialized) || !storage_wdg_domain_is_valid(domain))
     {
         return;
     }
 
     /* 故障锁存后心跳不再生效，必须走受控复位路径，不能静默恢复。 */
-    if (g_storage_wdg_status.fault == STORAGE_WDG_FAULT_NONE)
+    if (s_storage_wdg_status.fault == STORAGE_WDG_FAULT_NONE)
     {
-        g_storage_wdg_status.last_progress_ms[domain] = watchdog_port_now_ms();
+        s_storage_wdg_status.last_progress_ms[domain] = watchdog_port_now_ms();
     }
 }
 
@@ -159,7 +159,7 @@ void storage_wdg_service(void)
     DWORD        since_wwdg_refresh_ms;
 
     /* 未初始化或已锁存故障时，一律不继续喂任何看门狗。 */
-    if ((!g_storage_wdg_status.initialized) || (!g_storage_wdg_status.iwdg_feeding))
+    if ((!s_storage_wdg_status.initialized) || (!s_storage_wdg_status.iwdg_feeding))
     {
         return;
     }
@@ -171,24 +171,31 @@ void storage_wdg_service(void)
         return;
     }
 
-    if (g_storage_wdg_status.wwdg_enabled)
+    if (s_storage_wdg_status.wwdg_enabled)
     {
-        since_wwdg_refresh_ms = now_ms - g_storage_wdg_last_wwdg_refresh_ms;
-        if (since_wwdg_refresh_ms > g_storage_wdg_config.wwdg_refresh_max_ms)
+        since_wwdg_refresh_ms = now_ms - s_storage_wdg_last_wwdg_refresh_ms;
+        if (since_wwdg_refresh_ms > s_storage_wdg_config.wwdg_refresh_max_ms)
         {
             /* 超过最大窗口后绝不补喂；让 WWDG 自然复位，避免掩盖 Supervisor 被阻塞。 */
             storage_wdg_latch_fault(STORAGE_WDG_DOMAIN_SCHEDULER, STORAGE_WDG_FAULT_WWDG_WINDOW_MISSED);
             return;
         }
-        if (since_wwdg_refresh_ms >= g_storage_wdg_config.wwdg_refresh_min_ms)
+        if (since_wwdg_refresh_ms >= s_storage_wdg_config.wwdg_refresh_min_ms)
         {
-            watchdog_port_wwdg_refresh();
-            g_storage_wdg_last_wwdg_refresh_ms = now_ms;
+            if (!watchdog_port_wwdg_refresh())
+            {
+                storage_wdg_latch_fault(STORAGE_WDG_DOMAIN_SCHEDULER, STORAGE_WDG_FAULT_REFRESH_FAILED);
+                return;
+            }
+            s_storage_wdg_last_wwdg_refresh_ms = now_ms;
         }
     }
 
     /* IWDG 刷新必须位于所有健康检查及 WWDG 窗口检查之后，保证它是最终裁决结果。 */
-    watchdog_port_iwdg_refresh();
+    if (!watchdog_port_iwdg_refresh())
+    {
+        storage_wdg_latch_fault(STORAGE_WDG_DOMAIN_SCHEDULER, STORAGE_WDG_FAULT_REFRESH_FAILED);
+    }
 }
 
 void storage_wdg_kick(void)
@@ -225,14 +232,14 @@ void storage_wdg_get_status(storage_wdg_status_s *status)
 {
     if (status != NULL)
     {
-        *status = g_storage_wdg_status;
+        *status = s_storage_wdg_status;
     }
 }
 
 void storage_wdg_wwdg_irq_handler(void)
 {
     /* 具体的中断分发（清 EWI 标志）由 port 侧完成。 */
-    if (g_storage_wdg_status.wwdg_enabled)
+    if (s_storage_wdg_status.wwdg_enabled)
     {
         watchdog_port_wwdg_irq_handler();
     }
@@ -240,12 +247,12 @@ void storage_wdg_wwdg_irq_handler(void)
 
 void storage_wdg_wwdg_early_wakeup(void)
 {
-    if (!g_storage_wdg_status.wwdg_enabled)
+    if (!s_storage_wdg_status.wwdg_enabled)
     {
         return;
     }
 
-    g_storage_wdg_status.wwdg_early_warning = true;
+    s_storage_wdg_status.wwdg_early_warning = true;
     /*
      * EWI 到来说明 WWDG 已接近下溢。这里只锁存最小诊断状态，不打印日志、
      * 不做 NAND 操作、不刷新 WWDG；这些动作可能超出剩余窗口并破坏复位时序。

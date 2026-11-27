@@ -38,7 +38,8 @@ typedef enum WATCHDOG_FAULT_E
     STORAGE_WDG_FAULT_NONE = 0,           /* 当前健康，允许继续喂 IWDG。 */
     STORAGE_WDG_FAULT_DOMAIN_TIMEOUT,     /* 一个必需域在 deadline 前没有前进。 */
     STORAGE_WDG_FAULT_WWDG_WINDOW_MISSED, /* Supervisor 太晚运行，错过 WWDG 窗口。 */
-    STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP   /* WWDG 即将复位前产生了 EWI。 */
+    STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP,  /* WWDG 即将复位前产生了 EWI。 */
+    STORAGE_WDG_FAULT_REFRESH_FAILED      /* HAL 刷新 IWDG/WWDG 失败；锁存后停喂。 */
 } wdg_fault_e;
 
 /*
@@ -142,8 +143,9 @@ void storage_wdg_wwdg_early_wakeup(void);
  */
 BOOL watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
 BOOL watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
-void watchdog_port_iwdg_refresh(void);
-void watchdog_port_wwdg_refresh(void);
+/* 刷新失败必须回传：静默丢弃会让 Supervisor 误以为硬件仍在受控。 */
+BOOL watchdog_port_iwdg_refresh(void);
+BOOL watchdog_port_wwdg_refresh(void);
 void watchdog_port_wwdg_irq_handler(void);
 /* 系统单调毫秒计数（域超时用；SysTick/HAL tick）。 */
 DWORD watchdog_port_now_ms(void);

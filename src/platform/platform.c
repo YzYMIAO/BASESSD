@@ -1,12 +1,20 @@
+/*
+ * platform.c — 平台能力注册与通用时基
+ *
+ * 上层（FTL / HIL）只依赖 platform.h 的操作表，不直接包含任何平台服务头。
+ * 本文件提供默认操作集：time_us 走 delay 的 64 位微秒计数器，time_ms 走
+ * SysTick/HAL tick；日志、分配等可选操作为空时由上层走降级路径。
+ */
+
 #include "platform.h"
 
 #include "common.h"
 #include "delay.h"
 
-static const ssd_platform_ops_s *g_platform_ops;
+static const ssd_platform_ops_s *s_platform_ops;
 
 /*
- * stm32_platform_time_us - 系统单调微秒计数（SysTick + HAL tick）。
+ * platform_time_us - 系统单调微秒计数（SysTick + HAL tick）。
  *
  * 只用 ARM 核心的 SysTick：HAL tick 给毫秒，SysTick 的 VAL/LOAD 给本毫秒
  * 内的周期分辨率。delay_time_now_us64() 返回 64 位微秒，不存在 DWT 那种
@@ -20,7 +28,7 @@ static QWORD platform_time_us(void)
     return delay_time_now_us64();
 }
 
-static const ssd_platform_ops_s g_platform_ops_default = {
+static const ssd_platform_ops_s s_platform_ops_default = {
     .time_us = platform_time_us,
     .time_ms = delay_now_ms, /* SysTick/HAL tick：ARM 核心的系统毫秒时基 */
     /* log_write / memory_allocate / memory_free 暂不提供；register 只强制 time_us。 */
@@ -28,7 +36,7 @@ static const ssd_platform_ops_s g_platform_ops_default = {
 
 func_status_e platform_register(void)
 {
-    return ssd_platform_register(&g_platform_ops_default);
+    return ssd_platform_register(&s_platform_ops_default);
 }
 
 func_status_e ssd_platform_register(const ssd_platform_ops_s *ops)
@@ -38,30 +46,30 @@ func_status_e ssd_platform_register(const ssd_platform_ops_s *ops)
         return FUNC_STATUS_ERROR;
     }
 
-    g_platform_ops = ops;
+    s_platform_ops = ops;
     return FUNC_STATUS_SUCCESS;
 }
 
 const ssd_platform_ops_s *ssd_platform_get(void)
 {
-    return g_platform_ops;
+    return s_platform_ops;
 }
 
 DWORD platform_now_ms(void)
 {
-    if (g_platform_ops == NULL)
+    if (s_platform_ops == NULL)
     {
         return 0U;
     }
-    if (g_platform_ops->time_ms != NULL)
+    if (s_platform_ops->time_ms != NULL)
     {
-        return g_platform_ops->time_ms();
+        return s_platform_ops->time_ms();
     }
-    if (g_platform_ops->time_us == NULL)
+    if (s_platform_ops->time_us == NULL)
     {
         return 0U;
     }
 
     /* QWORD µs → DWORD ms 是接口边界上的有意窄化：所有消费方都用差值。 */
-    return (DWORD)(g_platform_ops->time_us() / 1000U);
+    return (DWORD)(s_platform_ops->time_us() / 1000U);
 }

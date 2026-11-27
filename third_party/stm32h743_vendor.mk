@@ -30,14 +30,10 @@ STM32H743_SRCS := \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_rcc_ex.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_rng.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_sdram.c \
-    $(STM32H743_HAL_SRC)/stm32h7xx_hal_spi.c \
-    $(STM32H743_HAL_SRC)/stm32h7xx_hal_sram.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_tim.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_tim_ex.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_uart.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_uart_ex.c \
-    $(STM32H743_HAL_SRC)/stm32h7xx_hal_usart.c \
-    $(STM32H743_HAL_SRC)/stm32h7xx_hal_usart_ex.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_wwdg.c
 
 STM32H743_S_SRCS := \

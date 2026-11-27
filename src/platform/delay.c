@@ -1,42 +1,43 @@
-#include "delay.h"
-
-#include "common.h"
-/* 本文件是**跨 target 共享**的平台源文件：不 include 任何 SoC 头，也不出现
+/*
+ * delay.c — 跨 target 共享的延时与时基服务
+ *
+ * 本文件是**跨 target 共享**的平台源文件：不 include 任何 SoC 头，也不出现
  * HAL 类型。SysTick 寄存器与时钟查询一律经 delay_port_* 下沉到
  * src/platform/<soc>/delay_port.c —— 内核头无法单独使用（它依赖设备头提供
  * IRQn_Type/__NVIC_PRIO_BITS），故共享层不能直接碰这些寄存器。
  *
  * 时基只用 ARM 核心自带的 SysTick：HAL 已把它配置为 1 ms 周期；
  * ms 计数读 HAL tick，µs 在本毫秒窗口内用 (LOAD - VAL) 插值。
- * DWT 是调试/跟踪单元，不是产品时间源，本模块不碰 DWT。 */
+ * DWT 是调试/跟踪单元，不是产品时间源，本模块不碰 DWT。
+ */
 
-static BOOL  g_delay_initialized;
-static DWORD g_systick_cycles_per_us;
+#include "delay.h"
+
+#include "common.h"
+
+static BOOL  s_delay_initialized;
+static DWORD s_systick_cycles_per_us;
 
 static delay_status_e delay_systick_us_busy(DWORD us)
 {
-    DWORD reload;
-    DWORD ticks;
-    DWORD previous;
-    DWORD current;
-    DWORD elapsed = 0U;
-
-    if (!g_delay_initialized)
+    if (!s_delay_initialized)
     {
         return DELAY_ERR_NOT_INITIALIZED;
     }
-    if ((us != 0U) && (us > (UINT32_MAX / g_systick_cycles_per_us)))
+    if ((us != 0U) && (us > (UINT32_MAX / s_systick_cycles_per_us)))
     {
         return DELAY_ERR_OUT_OF_RANGE;
     }
 
-    reload   = delay_port_systick_load();
-    ticks    = us * g_systick_cycles_per_us;
-    previous = delay_port_systick_value();
+    const DWORD reload   = delay_port_systick_load();
+    const DWORD ticks    = us * s_systick_cycles_per_us;
+    DWORD       previous = delay_port_systick_value();
+    DWORD       elapsed  = 0U;
 
     while (elapsed < ticks)
     {
-        current = delay_port_systick_value();
+        const DWORD current = delay_port_systick_value();
+
         if (current != previous)
         {
             elapsed += (current < previous) ? (previous - current) : (reload + 1U - current + previous);
@@ -83,8 +84,8 @@ void delay_init(void)
 {
     const DWORD cycles_per_ms = delay_port_systick_load() + 1U;
 
-    g_systick_cycles_per_us = cycles_per_ms / 1000U;
-    g_delay_initialized     = (g_systick_cycles_per_us != 0U);
+    s_systick_cycles_per_us = cycles_per_ms / 1000U;
+    s_delay_initialized     = (s_systick_cycles_per_us != 0U);
 }
 
 /**
@@ -95,7 +96,7 @@ void delay_init(void)
 
 BOOL delay_is_initialized(void)
 {
-    return g_delay_initialized;
+    return s_delay_initialized;
 }
 
 BOOL delay_time_now_us(DWORD *us)
@@ -103,13 +104,13 @@ BOOL delay_time_now_us(DWORD *us)
     DWORD ms;
     DWORD cycles;
 
-    if ((us == NULL) || !g_delay_initialized)
+    if ((us == NULL) || !s_delay_initialized)
     {
         return false;
     }
 
     cycles = delay_systick_read(&ms);
-    *us    = (ms * 1000U) + (cycles / g_systick_cycles_per_us);
+    *us    = (ms * 1000U) + (cycles / s_systick_cycles_per_us);
     return true;
 }
 
@@ -118,13 +119,13 @@ QWORD delay_time_now_us64(void)
     DWORD ms;
     DWORD cycles;
 
-    if (!g_delay_initialized)
+    if (!s_delay_initialized)
     {
         return 0U;
     }
 
     cycles = delay_systick_read(&ms);
-    return ((QWORD)ms * 1000U) + (cycles / g_systick_cycles_per_us);
+    return ((QWORD)ms * 1000U) + (cycles / s_systick_cycles_per_us);
 }
 
 BOOL delay_time_elapsed_us(DWORD start_us, WORD timeout_us)
@@ -160,12 +161,12 @@ DWORD delay_time_since_us(DWORD start_us)
 
 DWORD delay_max_busy_us(void)
 {
-    if (!g_delay_initialized)
+    if (!s_delay_initialized)
     {
         return 0U;
     }
 
-    return UINT32_MAX / g_systick_cycles_per_us;
+    return UINT32_MAX / s_systick_cycles_per_us;
 }
 /**
  * @brief 执行微秒级忙等待。

@@ -10,6 +10,8 @@
  *
  * 为什么不把 core_cm7.h 交给共享层直接用：该头需要设备头提供 IRQn_Type 与
  * __NVIC_PRIO_BITS，裸包含编译不过，所以寄存器访问留在本文件。
+ *
+ * implements delay.h（端口适配：本文件实现抽象头的 port 接口）。
  */
 
 #include "delay.h"

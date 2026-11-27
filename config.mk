@@ -22,8 +22,8 @@ INC_ROOT := $(PROJECT_ROOT)/include
 
 
 
-# 链接脚本是平台构建资产：目录跟随 FIRMWARE_PLATFORM，构建按 target 选择。
-LINKER_DIR ?= $(PROJECT_ROOT)/src/platform/$(FIRMWARE_PLATFORM)/linker
+# 链接脚本是板级构建资产：目录跟随 FIRMWARE_BOARD，构建按 target 选择。
+LINKER_DIR ?= $(PROJECT_ROOT)/src/platform/boards/$(FIRMWARE_BOARD)/linker
 LINKER_HOT ?= $(LINKER_DIR)/stm32h743xx_hot.ld
 
 ifeq ($(FIRMWARE_PLATFORM),stm32h743)

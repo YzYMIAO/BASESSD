@@ -12,7 +12,7 @@
  *       → _sbrk（本文件）
  *   链接顺序决定覆盖：目标文件里的 _sbrk 优先于归档成员，libnosys 版本被丢弃。
  *
- * 关键约定（DTCM 内存布局，见 src/platform/stm32h743/linker/stm32h743xx_flash.ld）：
+ * 关键约定（DTCM 内存布局，见 src/platform/boards/apollo_v2/linker/stm32h743xx_flash.ld）：
  *   DTCM  = 0x20000000 .. 0x20020000（128 KB），同时装着堆和栈，两者相向生长：
  *     堆   ：起点 end = 0x20000000（链接脚本 PROVIDE(end = .)），向**上**长；
  *     栈   ：顶   _estack = 0x20020000，向**下**长。

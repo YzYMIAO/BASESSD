@@ -438,7 +438,7 @@ BYTE       test_check_pattern(const BYTE *buffer, WORD length, BYTE pattern);
  *
  * ⚠ 消息自带换行与 `[EV] ` 前缀，**调用者不要自己加 \n**。
  * ⚠ 该 fork 关掉了 fork、无 stderr 捕获（munit.c），故用例内的输出立刻到 UART。
- * ⚠ 证据打印走**阻塞式** UART（uart_log_write 环满自旋）⇒ 开了 debug 档后
+ * ⚠ 证据打印走**阻塞式** UART（usart_log_write 环满自旋）⇒ 开了 debug 档后
  *   `[ N ms ]` 的计时含 TX 时间，不可再当性能基线。
  * ⚠ 整套跑 debug 时输出 ≈ 290 KB，链路（115200 8N1 ≈ 11.5 KB/s）被打满 ⇒ 整轮 25 s
  *   几乎全是 TX。此时**上位机日志里会出现周期性折行**（约每 4 KB 一次，实测 0/1/80 次

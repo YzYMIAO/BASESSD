@@ -18,6 +18,7 @@
 # ----------------------------------------------------------------------------
 PROJECT_ROOT := $(CURDIR)
 FIRMWARE_PLATFORM ?= stm32h743
+FIRMWARE_BOARD ?= apollo_v2
 BUILD_TYPE ?= debug
 
 # ----------------------------------------------------------------------------
@@ -192,14 +193,14 @@ release:
 # UT=FTL 为 FTL pure + media；UT=HIL 仅 HIL 板端。PAA 在烧录后由串口命令
 # nand test <PAA> 显式传入。
 tests:
-	$(MAKE) FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT)
+	$(MAKE) FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) FIRMWARE_BOARD=$(FIRMWARE_BOARD) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT)
 
 # 开卡镜像（破坏性）：FORMAT_ON_BOOT=1 ⇒ 每次启动擦全片 + 写初始元数据。
 # bin 路径与正常镜像相同（烧录配置不用改）；对象目录带 _fmt 后缀隔离。
 # 开卡后换回正常镜像（make all）。
 .PHONY: format-image
 format-image:
-	$(MAKE) all FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FORMAT_ON_BOOT=1 FORMAT_VERIFY=$(FORMAT_VERIFY)
+	$(MAKE) all FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) FIRMWARE_BOARD=$(FIRMWARE_BOARD) BUILD_TYPE=$(BUILD_TYPE) FORMAT_ON_BOOT=1 FORMAT_VERIFY=$(FORMAT_VERIFY)
 
 # ============================================================================
 # 主目标
@@ -288,6 +289,7 @@ format-check:
 info:
 	@echo "=== Build Configuration ==="
 	@echo "  FIRMWARE_PLATFORM: $(FIRMWARE_PLATFORM)"
+	@echo "  FIRMWARE_BOARD   : $(FIRMWARE_BOARD)"
 	@echo "  BUILD_TYPE       : $(BUILD_TYPE)"
 	@echo "  NAND_DEVICE      : $(NAND_DEVICE)"
 	@echo "  UT               : $(if $(UT),$(UT),ALL)"
